@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# PyCharm / IDEs
+.idea/
+.claude/
+.vscode/
+
+# Large Manuals / PDF Documents
+*.pdf
+
+# FEM Model files (LS-DYNA and OpenRadioss)
+*.k
+*.rad
+*.key
+*.dyn
+*.inc
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Project-specific ignores
+/ls-dyna_example/
+/tutorial_example/
+/Ryan_Lee_Examples/
+/implicit_hr-anlenkung/
+/demos_example/
