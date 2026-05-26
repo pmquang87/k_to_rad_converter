@@ -12,7 +12,7 @@ This tool converts LS-DYNA keyword files (`.k`) to OpenRadioss format (`.rad`).
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/k_to_rad_converter.git
+   git clone https://github.com/pmquang87/k_to_rad_converter.git
    cd k_to_rad_converter
    ```
 
