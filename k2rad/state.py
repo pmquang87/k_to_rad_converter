@@ -280,6 +280,35 @@ class ControlContact:
 
 
 @dataclass
+class DampingGlobal:
+    """LS-DYNA *DAMPING_GLOBAL: mass-proportional Rayleigh damping (C = α·M).
+
+    Maps to OpenRadioss /DAMP (starter block keyword, Reference Guide p.130).
+    """
+    valdmp: float       # α coefficient (LS-DYNA valdmp = mass-prop α)
+    lcid: int = 0       # load curve for time-varying (0 = constant)
+    # Per-DOF scale factors (LS-DYNA stx..srz; 0 = use valdmp uniformly)
+    stx: float = 0.0
+    sty: float = 0.0
+    stz: float = 0.0
+    srx: float = 0.0
+    sry: float = 0.0
+    srz: float = 0.0
+
+
+@dataclass
+class DampingPartStiffness:
+    """LS-DYNA *DAMPING_PART_STIFFNESS: stiffness-proportional damping per part.
+
+    In LS-DYNA: β_part = 2·coef/ω_max where ω_max is the highest part frequency
+    (computed internally). For OpenRadioss /DAMP we pass `coef` directly as β
+    since we can't estimate ω_max at conversion time — user may need to tune.
+    """
+    pid: int            # part ID
+    coef: float         # LS-DYNA Rayleigh stiffness damping ratio (typ. 0.01-0.10)
+
+
+@dataclass
 class ControlCpu:
     cputim: float       # max CPU time in seconds
 
@@ -479,6 +508,8 @@ class ConversionState:
         self.ctrl_implicit_sol: Optional[ControlImplicitSolution] = None
         self.ctrl_termination: Optional[ControlTermination] = None
         self.ctrl_timestep: Optional[ControlTimestep] = None
+        self.damping_global: Optional[DampingGlobal] = None
+        self.damping_part_stiffness: List[DampingPartStiffness] = []
 
         # ── Database / output ──────────────────────────────────────
         self.db_d3plot: Optional[DbD3Plot] = None
