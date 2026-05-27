@@ -530,6 +530,12 @@ def _parse_contact_header(block: Block):
     return len(block.raw) + 1, "", 0  # use position as id if no _ID
 
 
+def _read_contact_ignore(raw: List[str], offset: int) -> int:
+    """Read LS-DYNA optional Card E (Card 6): igap ignore dprfac dtstif ..."""
+    f = _card(raw, offset + 5, fixed=True, n=8, w=10)
+    return to_int(f[1]) if len(f) > 1 else 0
+
+
 def handle_contact_automatic_single_surface(block: Block, state: ConversionState) -> None:
     inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
@@ -545,8 +551,9 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     fd = to_float(f3[1]) if len(f3) > 1 else 0.0
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    ignore = _read_contact_ignore(raw, offset)
     state.contacts_single.append(
-        ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt)
+        ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore)
     )
 
 
@@ -566,8 +573,9 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     fd = to_float(f3[1]) if len(f3) > 1 else 0.0
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    ignore = _read_contact_ignore(raw, offset)
     state.contacts_surf2surf.append(
-        ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt)
+        ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore)
     )
 
 

@@ -686,24 +686,54 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             if not _make_master_surface(state, mast_surf, f"contact_{c.inter_id}_master",
                                         all_pids, lines):
                 continue
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs)
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id))
         else:
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if slav_grnod and mast_surf:
-                lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs)
+                lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+                                           _ignore_to_inacti(c.ignore, state, c.inter_id))
 
     for c in state.contacts_surf2surf:
         slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
         mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
         if slav_grnod and mast_surf:
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs)
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id))
 
     return lines
 
 
+def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int:
+    """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
+
+    LS-DYNA ignore=1 ("track but don't push apart; contact otherwise normal")
+    → Inacti=1 (deactivate stiffness on penetrating nodes only). Preserves
+    geometry — necessary when penetrating nodes belong to a rigid body, since
+    Inacti=3/6 modify coordinates and break /RBODY kinematic consistency
+    (observed on `implicit_hr-anlenkung`: Inacti=3 moved 21 cylinder rigid-body
+    nodes → engine seg-faulted during initialization). Inacti=5 absorbs the
+    penetration into a variable gap, but that silently suppresses contact for
+    those nodes (saw 7 cycles I-energy=0, K≈ext-work, free body).
+    Inacti=1 is safe for rigid bodies and only loses contact at the few
+    penetrating nodes; every other surface node engages normally.
+    ignore=2 → Inacti=2 (deactivate stiffness on elements containing
+    penetrating nodes) for the same reason.
+    """
+    if ignore == 1:
+        state.warn(f"CONTACT {inter_id}: ignore=1 mapped to /INTER/TYPE7 Inacti=1 "
+                   "(deactivate stiffness on penetrating nodes; geometry preserved).")
+        return 1
+    if ignore == 2:
+        state.warn(f"CONTACT {inter_id}: ignore=2 mapped to /INTER/TYPE7 Inacti=2 "
+                   "(deactivate stiffness on penetrating elements; geometry preserved).")
+        return 2
+    return 0
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
-                      mast_id: int, fric: float) -> List[str]:
+                      mast_id: int, fric: float, inacti: int = 0) -> List[str]:
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -716,7 +746,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
         f"                   0{_f(fric)}                   0                   0                   0",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
-        "       000                             0                   0                   0                   0",
+        f"       000{_i(inacti, 30)}                   0                   0                   0",
         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
         "         0         0                   0         2         0",
         HDR,
@@ -1333,8 +1363,16 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
     # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
     # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
+    # /IMPL/MUMPS/AUTOC enables MUMPS automatic out-of-core mode (M_OCORE=-1
+    # → sets ICNTL(22)=1 when MUMPS estimates exceed in-core budget).
+    # Undocumented in the 2022 Reference Guide; parsed in
+    # engine/source/input/freimpl.F line 533 of the OpenRadioss source.
+    # Prevents MUMPS -13 "workspace too large" failures (MUMPS defaults
+    # ICNTL(23) = INFOG(16) × 1.2; with tight contact stiffness the actual
+    # numerical fill can overshoot the 20% relaxation buffer).
     lines += ["/IMPL/PRINT/NONL/-1",
               "/IMPL/SOLVER/2", "  0 0 0 0",
+              "/IMPL/MUMPS/AUTOC",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
     if iteopt > 0 or kfail > 0:
