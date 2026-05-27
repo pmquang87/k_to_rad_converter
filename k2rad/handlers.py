@@ -24,6 +24,7 @@ from .state import (
     ControlOutput, ControlShell, ControlSolid,
     ControlImplicitGeneral, ControlImplicitSolution,
     ControlTermination, ControlTimestep,
+    DampingGlobal, DampingPartStiffness,
     DbD3Plot, DbHistory, DbExtentBinary,
 )
 
@@ -1127,6 +1128,59 @@ def handle_database_history_node(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "NODE")
 
 
+def handle_damping_global(block: Block, state: ConversionState) -> None:
+    """*DAMPING_GLOBAL: mass-proportional Rayleigh damping (LS-DYNA Manual Vol I).
+
+    Card: lcid valdmp stx sty stz srx sry srz
+    Only one *DAMPING_GLOBAL active at a time per LS-DYNA; last one wins.
+    """
+    raw = block.raw
+    offset = _title_offset(block)
+    f = _card(raw, offset, fixed=False, n=8, w=10)
+    if not f:
+        state.warn("*DAMPING_GLOBAL: no data card found — skipped")
+        return
+    lcid   = to_int(f[0]) if len(f) > 0 else 0
+    valdmp = to_float(f[1]) if len(f) > 1 else 0.0
+    stx = to_float(f[2]) if len(f) > 2 else 0.0
+    sty = to_float(f[3]) if len(f) > 3 else 0.0
+    stz = to_float(f[4]) if len(f) > 4 else 0.0
+    srx = to_float(f[5]) if len(f) > 5 else 0.0
+    sry = to_float(f[6]) if len(f) > 6 else 0.0
+    srz = to_float(f[7]) if len(f) > 7 else 0.0
+    if lcid > 0:
+        state.warn(
+            f"*DAMPING_GLOBAL: lcid={lcid} (time-varying damping) not supported; "
+            f"using constant valdmp={valdmp}"
+        )
+    state.damping_global = DampingGlobal(
+        valdmp=valdmp, lcid=lcid,
+        stx=stx, sty=sty, stz=stz, srx=srx, sry=sry, srz=srz,
+    )
+
+
+def handle_damping_part_stiffness(block: Block, state: ConversionState) -> None:
+    """*DAMPING_PART_STIFFNESS: stiffness-proportional damping per part.
+
+    Card: pid coef
+    Multiple parts allowed; each adds one entry.
+    """
+    raw = block.raw
+    offset = _title_offset(block)
+    # May have multiple data cards (one per part); read until blank/EOB
+    for i in range(offset, len(raw)):
+        line = raw[i].strip()
+        if not line or line.startswith("$"):
+            continue
+        f = _card(raw, i, fixed=False, n=2, w=10)
+        if not f or len(f) < 1:
+            continue
+        pid = to_int(f[0])
+        coef = to_float(f[1]) if len(f) > 1 else 0.0
+        if pid > 0:
+            state.damping_part_stiffness.append(DampingPartStiffness(pid=pid, coef=coef))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dispatch table
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1212,6 +1266,10 @@ HANDLERS = {
     "CONTROL_DYNAMIC_RELAXATION":             handle_skip,
     "CONTROL_MPP_DECOMPOSITION":              handle_skip,
     "CONTROL_UNITS":                          handle_skip,
+
+    # Damping
+    "DAMPING_GLOBAL":                         handle_damping_global,
+    "DAMPING_PART_STIFFNESS":                 handle_damping_part_stiffness,
 
     # Database / output
     "DATABASE_BINARY_D3PLOT":                 handle_database_binary_d3plot,

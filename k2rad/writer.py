@@ -1442,6 +1442,116 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
 # Top-level assemblers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """Emit /DAMP from *DAMPING_GLOBAL and *DAMPING_PART_STIFFNESS.
+
+    Rayleigh damping: C = α·M + β·K.
+    - α from *DAMPING_GLOBAL valdmp (mass-proportional, damps low-freq modes)
+    - β from *DAMPING_PART_STIFFNESS coef (stiffness-prop, damps high-freq waves)
+
+    OpenRadioss /DAMP (Reference Guide p.130):
+    - Format 1: single α, all DOFs
+    - Format 2: per-DOF α and β, 6 lines
+
+    Target nodes:
+    - If *DAMPING_PART_STIFFNESS specifies parts, damp those parts' nodes only
+    - Otherwise damp all deformable nodes (non-rigid-body)
+    OpenRadioss /DAMP does NOT accept grnod_ID=0 as "all nodes" — we always
+    emit an explicit /GRNOD/NODE block.
+
+    Note: LS-DYNA's per-part β semantics (β_part = 2·coef/ω_max) cannot be
+    exactly preserved without ω_max — we pass the largest coef as-is and warn
+    if multiple parts have different values.
+    """
+    if state.damping_global is None and not state.damping_part_stiffness:
+        return []
+
+    alpha = state.damping_global.valdmp if state.damping_global else 0.0
+    # Aggregate β from *DAMPING_PART_STIFFNESS — use max coef across all parts
+    beta = 0.0
+    target_pids: Set[int] = set()
+    if state.damping_part_stiffness:
+        coefs = [d.coef for d in state.damping_part_stiffness]
+        beta = max(coefs)
+        target_pids = {d.pid for d in state.damping_part_stiffness}
+        unique_pids = sorted(target_pids)
+        if len(set(coefs)) > 1:
+            state.warn(
+                f"*DAMPING_PART_STIFFNESS: multiple different coefs across parts "
+                f"{unique_pids} - using max={beta:.6G} as global beta (per-part "
+                f"damping not directly mappable to /DAMP)."
+            )
+        state.warn(
+            f"*DAMPING_PART_STIFFNESS pid(s) {unique_pids}: coef={beta:.6G} "
+            f"used as /DAMP beta directly. LS-DYNA scales by 2/omega_max"
+            f" - if waves aren't damped enough, try beta ~ 1e-7 to 1e-6."
+        )
+
+    # Resolve target node set
+    if target_pids:
+        target_nodes = sorted(
+            {n for e in state.shell_elems if e.pid in target_pids
+             for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.solid_elems if e.pid in target_pids
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+        )
+        grnod_title = f"damping_target_pids_{'_'.join(str(p) for p in sorted(target_pids))}"
+    else:
+        # No specific parts → all deformable nodes (rigid bodies excluded —
+        # they translate as a unit, damping their nodes is meaningless)
+        target_nodes = sorted(
+            {n for e in state.shell_elems
+             if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+             for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.solid_elems
+               if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+        )
+        grnod_title = "damping_target_all_deformable"
+
+    if not target_nodes:
+        state.warn("*DAMPING_*: no target deformable nodes found - /DAMP not emitted.")
+        return []
+
+    grnod_id = state.next_id()
+    damp_id = state.next_id()
+    lines = _emit_grnod_node(grnod_id, grnod_title, target_nodes)
+
+    # If only α and no β, use Format 1 (simpler, smaller deck)
+    if beta == 0.0:
+        d = state.damping_global
+        per_dof = (d.stx, d.sty, d.stz, d.srx, d.sry, d.srz)
+        if any(s != 0.0 for s in per_dof):
+            state.warn(
+                f"*DAMPING_GLOBAL: per-DOF scale factors (stx..srz) ignored; "
+                f"using uniform alpha={alpha:.6G} on all DOFs (/DAMP Format 1)."
+            )
+        lines += [
+            f"/DAMP/{damp_id}",
+            f"Rayleigh mass damping (alpha={alpha:.6G})",
+            "#               alpha   grnod_ID   skew_ID              Tstart               Tstop",
+            f"{_f(alpha)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+            HDR,
+        ]
+        return lines
+
+    # Format 2: per-DOF α + β. Use uniform (αx=αy=...=α, βx=βy=...=β).
+    title = f"Rayleigh damping (alpha={alpha:.6G}, beta={beta:.6G})"
+    lines += [
+        f"/DAMP/{damp_id}",
+        title,
+        "#               alpha                beta   grnod_ID   skew_ID              Tstart               Tstop",
+        f"{_f(alpha)}{_f(beta)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+        f"{_f(alpha)}{_f(beta)}",
+        f"{_f(alpha)}{_f(beta)}",
+        f"{_f(alpha)}{_f(beta)}",
+        f"{_f(alpha)}{_f(beta)}",
+        f"{_f(alpha)}{_f(beta)}",
+        HDR,
+    ]
+    return lines
+
+
 def build_starter(state: ConversionState) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -1469,6 +1579,7 @@ def build_starter(state: ConversionState) -> str:
         _make_inivel(state, rbody_info),
         _make_pressure_loads(state),
         _make_starter_cloads(state),
+        _make_damping(state, rigid_nodes),
         _make_starter_th(state),
         _make_skipped_comment(state),
         ["/END", HDR],
