@@ -43,4 +43,4 @@ python k2rad.py model.k --units Mg mm s
 
 ## License
 
-[Add License Type Here, e.g., MIT]
+[MIT]
