@@ -225,6 +225,39 @@ class ContactAutoSurf2Surf:
     bt: float; dt: float
 
 
+@dataclass
+class InitialVelocityNode:
+    nid: int
+    vx: float; vy: float; vz: float
+    vxr: float; vyr: float; vzr: float
+
+
+@dataclass
+class InitialVelocityRigidBody:
+    pid: int
+    vx: float; vy: float; vz: float
+    vxr: float; vyr: float; vzr: float
+
+
+@dataclass
+class MatPowerLaw:
+    """*MAT_POWER_LAW_PLASTICITY → /MAT/LAW36 with auto-generated curve."""
+    mid: int; title: str
+    rho: float; E: float; nu: float
+    k: float; n: float
+    src: float; srp: float
+    sigy: float; vp: int; epsf: float
+    funct_id: int = 0
+
+
+@dataclass
+class PressureLoad:
+    """*LOAD_SEGMENT / *LOAD_SEGMENT_ID → /PLOAD."""
+    lcid: int
+    sf: float
+    nodes: List[int]
+
+
 # ── Control blocks ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -388,6 +421,7 @@ class ConversionState:
         self.mat_plas_kin: Dict[int, MatPlasKin] = {}
         self.mat_rigid: Dict[int, MatRigid] = {}
         self.mat_null: Dict[int, MatNull] = {}
+        self.mat_power_law: Dict[int, MatPowerLaw] = {}
 
         self.curves: Dict[int, Curve] = {}
         self.coord_sys: Dict[int, CoordSys] = {}
@@ -403,6 +437,22 @@ class ConversionState:
 
         # ── Loads ──────────────────────────────────────────────────
         self.load_rigid_bodies: List[LoadRigidBody] = []
+        self.inivel_nodes: List[InitialVelocityNode] = []
+        self.inivel_rbodies: List[InitialVelocityRigidBody] = []
+        self.pressure_loads: List[PressureLoad] = []
+        # *ELEMENT_MASS additions: node_ID → total added translational mass
+        # (in input unit, typically ton). Used to set /RBODY Mass field
+        # for rigid-body master nodes (provides M contribution to K_eff in
+        # implicit analyses), or to emit /ADMAS for ordinary nodes.
+        self.added_node_masses: Dict[int, float] = {}
+        # *ELEMENT_MASS_PART additions: part_ID → (addmass, finmass).
+        # ADDMASS  = extra mass distributed across the part's nodes (or set
+        #            directly on the rigid-body master if part is rigid).
+        # FINMASS  = target total mass; if nonzero, ADDMASS = FINMASS − existing.
+        # Per LS-DYNA R16 Manual p.19-67: exactly one of ADDMASS/FINMASS is
+        # nonzero. For rigid-body parts, the resulting mass is applied to the
+        # /RBODY Mass field (no need to distribute over slave nodes).
+        self.element_mass_parts: Dict[int, Tuple[float, float]] = {}
         # Populated by build_starter after _make_rbodies: pid → grnod_id of all rbody nodes
         self.rbody_grnods: Dict[int, int] = {}
         # pid → grnod_id containing ONLY the independent node (used by /CLOAD)

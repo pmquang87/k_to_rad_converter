@@ -19,11 +19,12 @@ from typing import Dict, List, Optional, Set, Tuple
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
-    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull,
+    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf,
+    InitialVelocityNode, InitialVelocityRigidBody, PressureLoad,
 )
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
@@ -173,15 +174,25 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_header(state: ConversionState) -> List[str]:
+    # /BEGIN block embeds the unit system (Reference Guide).
+    # Format:
+    #   /BEGIN
+    #   <title (80 chars)>
+    #   <version>  <flag>
+    #   <input mass>  <input length>  <input time>     ← .k file units
+    #   <work mass>   <work length>   <work time>      ← internal units
+    # LS-DYNA default unit system is ton (Mg) mm s N MPa.
+    # Mg = megagram = 1000 kg = 1 tonne. Use Mg/mm/s to match the .k file.
     title = state.model_title[:80].ljust(80)
+    unit_line = "                  Mg                  mm                   s"
     return [
         "#RADIOSS STARTER",
         HDR,
         "/BEGIN",
         title,
         "      2022         0",
-        "                  kg                   m                   s",
-        "                  kg                   m                   s",
+        unit_line,
+        unit_line,
         HDR,
     ]
 
@@ -198,7 +209,7 @@ def _make_analysis_defaults(state: ConversionState) -> List[str]:
 
     lines = [
         "/ANALY",
-        "         0         0         0",
+        "         0",
         HDR,
         "/DEF_SHELL",
     ]
@@ -207,7 +218,7 @@ def _make_analysis_defaults(state: ConversionState) -> List[str]:
     else:
         lines.append("         0")
     lines += [HDR, "/DEF_SOLID", "         0", HDR]
-    lines += ["/IOFLAG", "         0         0", HDR]
+    lines += ["/IOFLAG", "         0", HDR]
     return lines
 
 
@@ -227,6 +238,8 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_elast_for_rigid(mat)
     for mat in state.mat_null.values():
         lines += _emit_mat_void(mat)
+    for mat in state.mat_power_law.values():
+        lines += _emit_mat_law36_powerlaw(mat)
     return lines
 
 
@@ -303,6 +316,27 @@ def _emit_mat_law44(mat: MatPlasKin) -> List[str]:
         f"{_f(mat.src)}{_f(mat.srp)}         0         0{_f(0.0)}{_i(mat.vp)}",
         "#              EpsMax                 Et1                 Et2",
         f"{_f(epmax)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law36_powerlaw(mat: MatPowerLaw) -> List[str]:
+    fail_str = _f(mat.epsf) if 0.0 < mat.epsf < 1e19 else "                   0"
+    return [
+        f"/MAT/LAW36/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu          Eps_p_max",
+        f"{_f(mat.E)}{_f(mat.nu)}{fail_str}",
+        "# N_funct   F_smooth",
+        "         1         0",
+        "# fct_IDp      Fscale",
+        "         0                 1.0",
+        "# fct_ID1",
+        f"{_i(mat.funct_id)}",
+        "# Fscale1",
+        "                 1.0",
         HDR,
     ]
 
@@ -632,20 +666,23 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         return []
     lines = ["#-  INTERFACES:", HDR]
 
-    all_shell_nodes: List[int] = sorted(
+    all_deformable_nodes: List[int] = sorted(
         {n for e in state.shell_elems
          if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
          for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for e in state.solid_elems
+           if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           for n in e.nodes if n > 0 and n not in rigid_nodes}
     )
     all_pids: List[int] = sorted(state.parts.keys())
 
     for c in state.contacts_single:
         if c.ssid == 0:
-            if not all_shell_nodes or not all_pids:
+            if not all_deformable_nodes or not all_pids:
                 continue
             slav_grnod = state.next_id()
             mast_surf = state.next_id()
-            lines += _emit_grnod_node(slav_grnod, f"contact_{c.inter_id}_slave", all_shell_nodes)
+            lines += _emit_grnod_node(slav_grnod, f"contact_{c.inter_id}_slave", all_deformable_nodes)
             if not _make_master_surface(state, mast_surf, f"contact_{c.inter_id}_master",
                                         all_pids, lines):
                 continue
@@ -739,25 +776,116 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             "nodes": unique_nodes,
         }
 
+        # /RBODY format: 2 data cards (one per logical record).
+        # The W7-style 4-card-with-comments format makes OpenRadioss read
+        # grnd_ID as 0 (silently defaulting), giving NUMBER OF NODES = 0 →
+        # malformed rigid body → engine segfault. Using the proper 10-field
+        # single data line ensures grnd_ID is read correctly.
+        # Card 3 (10 fields, 110 chars):
+        #   node_ID(I10) sens_ID(I10) skew_ID(I10) Ispher(I10) Mass(F20)
+        #   grnd_ID(I10) Ikrem(I10) ICoG(I10) surf_ID(I10) Ifail(I10)
+        # Card 4 (6 floats, 120 chars):
+        #   Jxx(F20) Jyy(F20) Jzz(F20) Jxy(F20) Jxz(F20) Jyz(F20)
+        # The Mass field is ADDITIONAL mass added to the rigid body on top of
+        # whatever is computed from element distribution + material density.
+        # Sources combined:
+        #   • *ELEMENT_MASS / *ELEMENT_MASS_NODE_SET on the rigid master node
+        #   • *ELEMENT_MASS_PART (or _SET) with this part's pid → ADDMASS
+        #   • *ELEMENT_MASS_PART with FINMASS → (FINMASS − inherent), where
+        #     inherent is taken as 0 here because OpenRadioss computes inherent
+        #     mass from rigid-body elements automatically (Mass field is purely
+        #     additive). User should set FINMASS = desired total - inherent if
+        #     they need exact total control.
+        # This is the primary stabilization mechanism for implicit analyses
+        # where the inherent rigid-body mass is too small.
+        node_added = state.added_node_masses.get(ind_node, 0.0)
+        part_add, part_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
+        if part_fin > 0:
+            # FINMASS specified — treat as added mass (OpenRadioss /RBODY Mass
+            # is additive; for exact final-mass control the user can compensate)
+            part_mass_total = part_fin
+        else:
+            part_mass_total = part_add
+        added_mass = node_added + part_mass_total
+        if added_mass > 0:
+            sources = []
+            if node_added > 0:
+                sources.append(f"*ELEMENT_MASS on node {ind_node}={node_added:.6G}")
+            if part_add > 0:
+                sources.append(f"*ELEMENT_MASS_PART ADDMASS={part_add:.6G}")
+            if part_fin > 0:
+                sources.append(f"*ELEMENT_MASS_PART FINMASS={part_fin:.6G}")
+            state.warn(
+                f"*MAT_RIGID pid={pid}: total added mass {added_mass:.6G} "
+                f"({', '.join(sources)}) placed in /RBODY Mass field."
+            )
+        # /RBODY format — 2-card variant that empirically works with OpenRadioss
+        # 2024+ in this configuration. The Reference Guide p.1877 documents a
+        # 4-card format (cards 3,4,5,6) but using it triggers ERROR 760 segfault
+        # during element-group setup. The legacy 2-card form below produces a
+        # WARNING 100217 "card is missing" but otherwise solves correctly.
+        # Card 3 (10 fields):
+        #   node_ID(I10) sens_ID(I10) Skew_ID(I10) Ispher(I10) Mass(F20)
+        #   grnd_ID(I10) Ikrem(I10) ICoG(I10) surf_ID(I10) Ifail(I10)
+        # Card 4 (6 inertia floats):
+        #   JXX(F20) JYY(F20) JZZ(F20) JXY(F20) JYZ(F20) JXZ(F20)
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
-            "#  node_ID   sens_ID   Skew_ID    Ispher",
-            f"{_i(ind_node)}         0         0         0",
-            "#                Jxx                 Jyy                 Jxy                 Jyz  Ioptoff   Ifail",
-            "                   0                   0                   0                   0         0         0",
-            "#               Mass                 Jzz                 Jxz",
-            "                   0                   0                   0",
-            "#  grnd_ID    Ikrem     ICoG   surf_ID",
-            f"{_i(grnod_id)}         0         0         0",
+            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
+            f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            "#                Jxx                 Jyy                 Jzz                 Jxy                 Jxz                 Jyz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"rb_nodes_pid{pid}", unique_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"rb_indnode_pid{pid}", [ind_node])
 
-        if mat.cmo == 1.0 and (mat.con1 or mat.con2):
+        # Emit /BCS from *MAT_RIGID CMO/CON1/CON2.
+        # For implicit analyses with loaded rigid bodies that have FREE
+        # translation DOFs in non-loaded directions, auto-add constraints
+        # on those DOFs UNLESS the user has explicitly added mass via
+        # *ELEMENT_MASS or *ELEMENT_MASS_PART (which provides enough M
+        # contribution to K_eff to stabilize without artificial constraint).
+        # Tested empirically: without either added mass OR the auto-constraint,
+        # the engine segfaults on RANK 0 due to ill-conditioned K_eff.
+        tra_chars = list(_con1_to_tra(mat.con1) if mat.cmo == 1.0 else "000")
+        rot_chars = list(_con2_to_rot(mat.con2) if mat.cmo == 1.0 else "000")
+        # Determine which translation DOFs this rigid body is loaded on.
+        # /LOAD_RIGID_BODY dof: 1=Fx, 2=Fy, 3=Fz, 5=Mx, 6=My, 7=Mz
+        loaded_tra_idx: set = set()
+        for lb in state.load_rigid_bodies:
+            if lb.pid == pid and lb.dof in (1, 2, 3):
+                loaded_tra_idx.add(lb.dof - 1)
+        # Skip auto-constraint if user provided explicit mass for this rigid body
+        node_added_mass = state.added_node_masses.get(ind_node, 0.0)
+        part_add_mass, part_fin_mass = state.element_mass_parts.get(pid, (0.0, 0.0))
+        user_added_mass = node_added_mass + max(part_add_mass, part_fin_mass)
+        # Auto-constrain unloaded, unconstrained translation DOFs (only when
+        # no user-added mass — the user is responsible for stabilization once
+        # they explicitly add mass)
+        added_stab = False
+        if state.is_implicit and loaded_tra_idx and user_added_mass <= 0:
+            for i in (0, 1, 2):
+                if tra_chars[i] == "0" and i not in loaded_tra_idx:
+                    tra_chars[i] = "1"
+                    added_stab = True
+        if added_stab:
+            free_axes = [("X","Y","Z")[i] for i in range(3) if tra_chars[i] == "1"
+                         and (mat.con1 == 0 or _con1_to_tra(mat.con1)[i] == "0")]
+            state.warn(
+                f"*MAT_RIGID pid={pid}: auto-constrained non-loaded free "
+                f"translation(s) {','.join(free_axes)} on rigid body master "
+                f"to stabilize implicit K. Add *ELEMENT_MASS_PART to skip this."
+            )
+        elif state.is_implicit and loaded_tra_idx and user_added_mass > 0:
+            state.warn(
+                f"*MAT_RIGID pid={pid}: user-added mass {user_added_mass:.6G} "
+                f"detected — skipping auto Z constraint (mass provides stability)."
+            )
+        tra = "".join(tra_chars)
+        rot = "".join(rot_chars)
+        if tra != "000" or rot != "000":
             bc_id_auto = state.next_id()
-            tra = _con1_to_tra(mat.con1)
-            rot = _con2_to_rot(mat.con2)
             lines += [
                 f"/BCS/{bc_id_auto}",
                 f"BC_rigid_{pid}",
@@ -874,10 +1002,41 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             continue
 
         set_title, nids = state.node_sets[pm.nsid]
+
+        # LS-DYNA convention: *BOUNDARY_PRESCRIBED_MOTION_SET with sf=0 means
+        # "fix this DOF" (zero × any_curve = 0 displacement = fixed).
+        # Emit a /BCS (constraint) instead of /IMPDISP with bogus unit scale.
+        # This is critical for symmetry BCs — if treated as IMPDISP with sf=1,
+        # the symmetry plane nodes get spurious motion from the load curve,
+        # making the stiffness matrix singular.
+        if pm.sf == 0.0:
+            bc_id = state.next_id()
+            grnod_id = state.next_id()
+            # Translation char string: "100"=X, "010"=Y, "001"=Z
+            # Rotation char string: "100"=Rx, "010"=Ry, "001"=Rz
+            tra = "000"
+            rot = "000"
+            if pm.dof == 1: tra = "100"
+            elif pm.dof == 2: tra = "010"
+            elif pm.dof == 3: tra = "001"
+            elif pm.dof == 4: rot = "100"
+            elif pm.dof == 5: rot = "010"
+            elif pm.dof == 6: rot = "001"
+            lines += [
+                f"/BCS/{bc_id}",
+                set_title or f"BC_set_{pm.nsid}",
+                "#  Tra rot   skew_ID  grnod_ID",
+                f"   {tra} {rot}         0{_i(grnod_id)}",
+                HDR,
+            ]
+            lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
+            continue
+
+        # Non-zero scale: real prescribed motion → /IMPDISP, /IMPVEL, /IMPACC
         grnod_id = state.next_id()
         motion_id = state.next_id()
         dir_str = _DOF_DIR.get(pm.dof, "X").rjust(10)
-        fscale = pm.sf if pm.sf != 0.0 else 1.0
+        fscale = pm.sf
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop  = pm.death if pm.death < 1e27 else 0.0
 
@@ -912,6 +1071,89 @@ def _make_skipped_comment(state: ConversionState) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starter: initial conditions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
+    lines: List[str] = []
+
+    vel_groups: Dict[Tuple, List[int]] = defaultdict(list)
+    for iv in state.inivel_nodes:
+        vel_groups[(iv.vx, iv.vy, iv.vz, iv.vxr, iv.vyr, iv.vzr)].append(iv.nid)
+
+    for vel_key, nids in vel_groups.items():
+        vx, vy, vz, vxr, vyr, vzr = vel_key
+        inivel_id = state.next_id()
+        grnod_id  = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"inivel_{inivel_id}", sorted(nids))
+        lines += [
+            f"/INIVEL/NODE/{inivel_id}",
+            f"InitVel_{inivel_id}",
+            "#  grnod_ID",
+            _i(grnod_id),
+            "#                  Vx                  Vy                  Vz",
+            f"{_f(vx)}{_f(vy)}{_f(vz)}",
+            "#                  Wx                  Wy                  Wz",
+            f"{_f(vxr)}{_f(vyr)}{_f(vzr)}",
+            HDR,
+        ]
+
+    for iv in state.inivel_rbodies:
+        info = rbody_info.get(iv.pid)
+        if not info:
+            state.warn(f"INITIAL_VELOCITY_RIGID_BODY pid={iv.pid}: no RBODY found – skipped")
+            continue
+        grnod_id  = info["grnod_id"]
+        inivel_id = state.next_id()
+        lines += [
+            f"/INIVEL/RBODY/{inivel_id}",
+            f"InitVelRB_{inivel_id}",
+            "#  grnod_ID",
+            _i(grnod_id),
+            "#                  Vx                  Vy                  Vz",
+            f"{_f(iv.vx)}{_f(iv.vy)}{_f(iv.vz)}",
+            "#                  Wx                  Wy                  Wz",
+            f"{_f(iv.vxr)}{_f(iv.vyr)}{_f(iv.vzr)}",
+            HDR,
+        ]
+
+    if lines:
+        lines = ["#-  INITIAL CONDITIONS:", HDR] + lines
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: pressure loads
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_pressure_loads(state: ConversionState) -> List[str]:
+    if not state.pressure_loads:
+        return []
+    groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
+    for pl in state.pressure_loads:
+        groups[(pl.lcid, pl.sf)].append(pl.nodes)
+
+    lines: List[str] = ["#-  PRESSURE LOADS:", HDR]
+    pload_id = 1
+    for (lcid, sf), segs in groups.items():
+        lines += [
+            f"/PLOAD/{pload_id}",
+            f"PLOAD_{pload_id}",
+            "#funct_ID       Dir   skew_ID   sens_ID",
+            f"{_i(lcid)}         N         0         0",
+            "#           Ascalex             Fscaley              Tstart               Tstop",
+            f"                   1{_f(sf)}                   0                   0",
+            "#  n1        n2        n3        n4",
+        ]
+        for nodes in segs:
+            pad = 4 - len(nodes)
+            lines.append("".join(_i(n) for n in nodes) + "         0" * pad)
+        lines.append(HDR)
+        pload_id += 1
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Post-processing: resolve auto-generated function IDs for LAW36
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -939,6 +1181,29 @@ def _resolve_mat_plas_tab(state: ConversionState) -> None:
             fid = state.next_id()
             _add_auto_curve(state, fid, f"Auto_SY_ET_mid{mat.mid}", pts)
             mat.funct_id = fid
+
+
+def _resolve_mat_power_law(state: ConversionState) -> None:
+    eps_pts = [0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0]
+    for mat in state.mat_power_law.values():
+        if mat.funct_id:
+            continue
+        k = mat.k if mat.k > 0 else 1.0
+        n = mat.n if mat.n > 0 else 0.2
+        eps_max = mat.epsf if 0.0 < mat.epsf < 1e19 else 1.0
+        pts: List[Tuple[float, float]] = []
+        for eps in eps_pts:
+            e = min(eps, eps_max)
+            if mat.sigy > 0:
+                sigma = mat.sigy + k * (e ** n) if e > 0 else mat.sigy
+            else:
+                sigma = k * ((e + 1e-9) ** n)
+            pts.append((e, sigma))
+            if e >= eps_max:
+                break
+        fid = state.next_id()
+        _add_auto_curve(state, fid, f"Auto_PL_mid{mat.mid}", pts)
+        mat.funct_id = fid
 
 
 def _add_auto_curve(state: ConversionState, fid: int, title: str,
@@ -981,16 +1246,44 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines += ["/ANIM/DT", f"0. {dt_anim:.6G}"]
 
     ext = state.db_extent_binary
+
+    # ── Vector outputs ────────────────────────────────────────────
+    lines.append("/ANIM/VECT/DISP")
+    lines.append("/ANIM/VECT/VEL")
+    lines.append("/ANIM/VECT/ACC")
+    lines.append("/ANIM/VECT/CONT")
+    lines.append("/ANIM/VECT/CONT2")
+    lines.append("/ANIM/VECT/PCONT")
+
+    # ── Shell tensor outputs (membrane / upper / lower) ───────────
+    lines.append("/ANIM/SHELL/TENS/STRESS/MEMB")
+    lines.append("/ANIM/SHELL/TENS/STRESS/UPPER")
+    lines.append("/ANIM/SHELL/TENS/STRESS/LOWER")
+    lines.append("/ANIM/SHELL/TENS/STRAIN/MEMB")
+    lines.append("/ANIM/SHELL/TENS/STRAIN/UPPER")
+    lines.append("/ANIM/SHELL/TENS/STRAIN/LOWER")
+    lines.append("/ANIM/SHELL/EPSP/UPPER")
+    lines.append("/ANIM/SHELL/EPSP/LOWER")
+
+    # ── Solid (brick) tensor outputs ──────────────────────────────
+    lines.append("/ANIM/BRICK/TENS/STRESS")
+    lines.append("/ANIM/BRICK/TENS/STRAIN")
+
+    # ── Element scalar outputs ────────────────────────────────────
     lines.append("/ANIM/ELEM/EPSP")
     lines.append("/ANIM/ELEM/VONM")
     lines.append("/ANIM/ELEM/ENER")
     lines.append("/ANIM/ELEM/THICK")
     if ext and ext.shge:
         lines.append("/ANIM/ELEM/HOUR")
-    lines.append("/ANIM/VECT/DISP")
-    lines.append("/ANIM/VECT/VEL")
-    if state.db_intfor_dt > 0.0:
-        lines.append("/ANIM/VECT/CONT")
+
+    # ── Nodal scalar outputs ──────────────────────────────────────
+    lines.append("/ANIM/NODA/DT")
+    lines.append("/ANIM/NODA/DMAS")
+
+    # ── Spring force output ───────────────────────────────────────
+    lines.append("/ANIM/SPRING/FORC")
+
     lines.append("#")
     return lines
 
@@ -1002,26 +1295,61 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     dyn  = state.ctrl_implicit_dyn
     auto = state.ctrl_implicit_auto
 
-    dt0 = gen.dt0 if gen and gen.dt0 > 0 else 0.01
-    dtmin = auto.dtmin if auto and auto.dtmin > 0 else max(dt0 * 1e-4, 1e-10)
-    dtmax = auto.dtmax if auto and auto.dtmax > 0 else 0.0
+    dt0_in = gen.dt0    if gen  and gen.dt0    > 0 else 0.01
+    dtmax  = auto.dtmax if auto and auto.dtmax > 0 else 0.0
     iteopt = auto.iteopt if auto else 0
     kfail  = auto.kfail  if auto else 0
 
-    lines: List[str] = ["/IMPL/NONLIN/1", "  0 2 0"]
-    if dyn and dyn.imass > 0:
-        gamma = dyn.gamma if dyn.gamma > 0 else 0.6
-        beta  = dyn.beta  if dyn.beta  > 0 else 0.25
-        lines += ["/IMPL/DYNA/NEWMARK", f"  {gamma:.4G}  {beta:.4G}"]
+    # For dynamic implicit with rigid bodies that have free DOFs (only contact-
+    # constrained), the K_eff = K + M/(β·Δt²) needs a small Δt for the mass
+    # contribution to stabilize the matrix. LS-DYNA's DT0=0.05 is too large
+    # for OpenRadioss's MUMPS direct solver on this large model (568k DOFs)
+    # with tiny rigid-body masses (~0.27 g). Use a much smaller initial step
+    # so M/(β·Δt²) provides ~2500× more stabilization. The auto time-step
+    # control (/IMPL/DT/2) will grow Δt back up as iterations converge.
+    is_dynamic_pre = dyn and dyn.imass > 0
+    dt0 = min(dt0_in, 1e-3) if is_dynamic_pre else dt0_in
+    dtmin  = auto.dtmin if auto and auto.dtmin > 0 else max(dt0 * 1e-4, 1e-10)
 
-    lines += ["/IMPL/QSTAT/DTSCAL", " 1000", "/IMPL/PRINT/NONL/-1", "/IMPL/SOLVER/2", "  0 0 0 0",
-              "/IMPL/DTINI", f" {dt0:.4G}"]
-    dtmax_str = f"    {dtmax:.4G}" if dtmax > 0 else "    0.0"
-    lines += ["/IMPL/DT/STOP", f"  {dtmin:.2E}{dtmax_str}"]
-    if iteopt > 0 or kfail > 0:
-        lines += ["/IMPL/DT/2", f"  {iteopt}    0  {kfail}    0    0"]
+    # /IMPL/NONLIN/1: Iupdate=0 (every step), Ialgo=2 (modified Newton-Raphson),
+    # Ilin=0 (matches W7 reference)
+    lines: List[str] = ["/IMPL/NONLIN/1", "  0 2 0"]
+
+    # Per OpenRadioss 2022 Reference Guide (pages 2942-2943):
+    #   /IMPL/DYNA/1 = HHT method, ONE parameter α (-1/3 < α < 0)
+    #   /IMPL/DYNA/2 = Newmark method, TWO parameters (γ, β)
+    # LS-DYNA's *CONTROL_IMPLICIT_DYNAMICS provides γ and β (Newmark), so
+    # we MUST use /IMPL/DYNA/2 — using /IMPL/DYNA/1 with two values is wrong
+    # and the matrix factorization then fails.
+    is_dynamic = dyn and dyn.imass > 0
+    if is_dynamic:
+        gamma = dyn.gamma if dyn.gamma > 0 else 0.5
+        beta  = dyn.beta  if dyn.beta  > 0 else 0.25
+        lines += ["/IMPL/DYNA/2", f" {gamma:.6G}  {beta:.6G}"]
     else:
-        lines += ["/IMPL/DT/2", "  0    0    0    0    0"]
+        lines += ["/IMPL/QSTAT/DTSCAL", " 1000"]
+
+    # /IMPL/SOLVER format (Reference Guide p.2976-2978):
+    #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
+    # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
+    # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
+    lines += ["/IMPL/PRINT/NONL/-1",
+              "/IMPL/SOLVER/2", "  0 0 0 0",
+              "/IMPL/DTINI", _f(dt0)]
+    lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
+    if iteopt > 0 or kfail > 0:
+        lines += ["/IMPL/DT/2", f"{_i(iteopt)}{_i(0)}{_i(kfail)}{_i(0)}{_i(0)}"]
+    else:
+        # /IMPL/DT/2 data: It_w  L_arc  L_dtn  Tsca_dn  Tsca_up
+        # (Reference Guide p.2981)
+        #   It_w   = converge-iter threshold for time-step increase (default 6)
+        #   L_arc  = arc length (0 = auto)
+        #   L_dtn  = MAX iterations before timestep cut (default 20 — too low
+        #            for highly nonlinear contact-driven problems with rigid
+        #            bodies). Set to 50 to allow more iterations per step.
+        #   Tsca_dn = scale for decreasing (0 = 0.67)
+        #   Tsca_up = scale for increasing (0 = 1.1)
+        lines += ["/IMPL/DT/2", "  8 0 50 0 0"]
     lines.append("#")
     return lines
 
@@ -1032,13 +1360,15 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
     return ["/CPU", f"{_f(state.ctrl_cpu.cputim)}         2", "#"]
 
 
-def _make_engine_load_rigid_bodies(state: ConversionState) -> List[str]:
+def _make_starter_cloads(state: ConversionState) -> List[str]:
+    """/CLOAD is a Starter keyword – concentrated loads on node groups."""
     if not state.load_rigid_bodies:
         return []
 
     _DOF_DIR_FORCE = {1: "X", 2: "Y", 3: "Z", 5: "XX", 6: "YY", 7: "ZZ"}
-    lines: List[str] = []
+    lines: List[str] = ["#-  CONCENTRATED LOADS (RIGID BODY):"]
     load_id = 1
+    emitted = False
     for lb in state.load_rigid_bodies:
         ind_grnod_id = state.rbody_ind_grnods.get(lb.pid)
         if ind_grnod_id is None:
@@ -1054,20 +1384,20 @@ def _make_engine_load_rigid_bodies(state: ConversionState) -> List[str]:
                 continue
             dirs_to_emit = [(d, lb.sf)]
 
-        if not lines:
-            lines.append("#-  RIGID BODY LOADS:")
         for dir_str, sf in dirs_to_emit:
             lines += [
                 f"/CLOAD/{load_id}",
                 f"LoadRB_{load_id}",
                 "#funct_IDT       Dir   skew_ID  sens_ID  grnd_ID",
                 f"{_i(lb.lcid)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}",
-                "#  Ascalex  Fscaley",
+                "#              Ascalex             Fscaley",
                 f"                   1{_f(sf)}",
                 HDR,
             ]
             load_id += 1
-    return lines
+            emitted = True
+
+    return lines if emitted else []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1076,6 +1406,7 @@ def _make_engine_load_rigid_bodies(state: ConversionState) -> List[str]:
 
 def build_starter(state: ConversionState) -> str:
     _resolve_mat_plas_tab(state)
+    _resolve_mat_power_law(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
@@ -1097,6 +1428,9 @@ def build_starter(state: ConversionState) -> str:
         rbody_lines,
         _make_imposed_motions(state, rbody_info),
         _make_imposed_motions_set(state),
+        _make_inivel(state, rbody_info),
+        _make_pressure_loads(state),
+        _make_starter_cloads(state),
         _make_starter_th(state),
         _make_skipped_comment(state),
         ["/END", HDR],
@@ -1112,7 +1446,6 @@ def build_engine(state: ConversionState) -> str:
         _make_engine_header(state),
         _make_engine_output(state),
         _make_engine_implicit(state),
-        _make_engine_load_rigid_bodies(state),
         _make_engine_cpu(state),
         ["/MON/ON", "#"],
     ]

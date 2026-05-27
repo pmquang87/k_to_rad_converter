@@ -18,6 +18,7 @@ from .state import (
     Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf,
+    InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
@@ -848,6 +849,226 @@ def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
         state.load_rigid_bodies.append(LoadRigidBody(pid, dof, lcid, sf, cid))
 
 
+def handle_element_mass(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_MASS: add a lumped mass at a node.
+
+    LS-DYNA format (one card per added mass):
+        eid(I8)  nid(I8)  mass(F16.0)  pid(I8)
+    Accumulates into state.added_node_masses[nid].
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        f = _card(raw, i, fixed=True, n=4, w=10)
+        if len(f) < 3:
+            continue
+        try:
+            nid  = to_int(f[1])
+            mass = to_float(f[2])
+        except (ValueError, IndexError):
+            continue
+        if nid > 0 and mass > 0:
+            state.added_node_masses[nid] = (
+                state.added_node_masses.get(nid, 0.0) + mass
+            )
+
+
+def handle_element_mass_part(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_MASS_PART: add non-structural mass to all nodes of a part.
+
+    Per LS-DYNA R16 Manual Vol I, p.19-67:
+      Card: ID  ADDMASS  FINMASS  LCID  MWD
+      - ID: part ID (or part-set ID if _SET option active)
+      - ADDMASS: extra mass distributed to part nodes by area/volume weighting
+      - FINMASS: target total mass (computes ADDMASS = FINMASS − existing mass)
+      - LCID: optional load curve to scale at t=0 (deformable only)
+      - MWD: mass-weighted distribution flag (SET only)
+
+    Accepts both LS-DYNA I10 long format AND free format (comma- or
+    whitespace-separated) for user-friendliness.
+
+    For rigid-body parts, the resulting mass goes directly into the /RBODY
+    Mass field. For deformable parts, mass is distributed to part nodes.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        # fixed=False enables free-format with fixed-width fallback
+        f = _card(raw, i, fixed=False, n=5, w=10)
+        if len(f) < 2:
+            continue
+        try:
+            pid     = to_int(f[0])
+            addmass = to_float(f[1])
+            finmass = to_float(f[2]) if len(f) > 2 else 0.0
+        except (ValueError, IndexError):
+            continue
+        if pid <= 0:
+            continue
+        if addmass > 0 and finmass > 0:
+            state.warn(
+                f"*ELEMENT_MASS_PART pid={pid}: both ADDMASS and FINMASS "
+                f"specified — using ADDMASS (LS-DYNA spec: one must be zero)."
+            )
+            finmass = 0.0
+        if addmass <= 0 and finmass <= 0:
+            continue
+        # Accumulate (multiple invocations sum per LS-DYNA spec for _SET option)
+        prev_add, prev_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
+        state.element_mass_parts[pid] = (prev_add + addmass, finmass or prev_fin)
+
+
+def handle_element_mass_part_set(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_MASS_PART_SET: same as *ELEMENT_MASS_PART but ID is a part-set ID.
+
+    Per LS-DYNA R16 Manual: when SET option is active, mass applies to every
+    part in the part-set. Multiple SET applications sum.
+
+    Accepts both LS-DYNA I10 long format AND free format.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        f = _card(raw, i, fixed=False, n=5, w=10)
+        if len(f) < 2:
+            continue
+        try:
+            psid    = to_int(f[0])
+            addmass = to_float(f[1])
+            finmass = to_float(f[2]) if len(f) > 2 else 0.0
+        except (ValueError, IndexError):
+            continue
+        if psid <= 0:
+            continue
+        part_set = state.part_sets.get(psid)
+        if not part_set:
+            state.warn(f"*ELEMENT_MASS_PART_SET psid={psid}: part set not found")
+            continue
+        _title, pids = part_set
+        if not pids:
+            continue
+        if addmass > 0 and finmass > 0:
+            state.warn(
+                f"*ELEMENT_MASS_PART_SET psid={psid}: both ADDMASS and FINMASS "
+                f"specified — using ADDMASS."
+            )
+            finmass = 0.0
+        if addmass <= 0 and finmass <= 0:
+            continue
+        # Distribute across parts: each part in the set gets the SAME addmass
+        # (per LS-DYNA semantics — ADDMASS is per-part, sums across SET calls)
+        for pid in pids:
+            prev_add, prev_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
+            state.element_mass_parts[pid] = (prev_add + addmass, finmass or prev_fin)
+
+
+def handle_element_mass_node_set(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_MASS_NODE_SET: lumped mass equally distributed over node set.
+
+    Per LS-DYNA R16 Manual Vol I, p.19-64:
+      "When the NODE_SET option is active, the mass is equally distributed
+       to all nodes in a node set."
+
+    Card format:  EID  ID(=nsid)  MASS  PID
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        f = _card(raw, i, fixed=True, n=4, w=10)
+        if len(f) < 3:
+            continue
+        try:
+            nsid = to_int(f[1])
+            total_mass = to_float(f[2])
+        except (ValueError, IndexError):
+            continue
+        if nsid <= 0 or total_mass <= 0:
+            continue
+        node_set = state.node_sets.get(nsid)
+        if not node_set:
+            state.warn(f"*ELEMENT_MASS_NODE_SET nsid={nsid}: node set not found")
+            continue
+        _title, nids = node_set
+        if not nids:
+            continue
+        # Equal distribution per LS-DYNA spec
+        per_node_mass = total_mass / len(nids)
+        for nid in nids:
+            state.added_node_masses[nid] = (
+                state.added_node_masses.get(nid, 0.0) + per_node_mass
+            )
+
+
+def handle_initial_velocity_node(block: Block, state: ConversionState) -> None:
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 4:
+            continue
+        nid = to_int(f[0])
+        vx  = to_float(f[1]); vy = to_float(f[2]); vz = to_float(f[3])
+        vxr = to_float(f[4]) if len(f) > 4 else 0.0
+        vyr = to_float(f[5]) if len(f) > 5 else 0.0
+        vzr = to_float(f[6]) if len(f) > 6 else 0.0
+        if nid > 0:
+            state.inivel_nodes.append(InitialVelocityNode(nid, vx, vy, vz, vxr, vyr, vzr))
+
+
+def handle_initial_velocity_rigid_body(block: Block, state: ConversionState) -> None:
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 4:
+            continue
+        pid = to_int(f[0])
+        vx  = to_float(f[1]); vy = to_float(f[2]); vz = to_float(f[3])
+        vxr = to_float(f[4]) if len(f) > 4 else 0.0
+        vyr = to_float(f[5]) if len(f) > 5 else 0.0
+        vzr = to_float(f[6]) if len(f) > 6 else 0.0
+        state.inivel_rbodies.append(InitialVelocityRigidBody(pid, vx, vy, vz, vxr, vyr, vzr))
+
+
+def handle_mat_power_law_plasticity(block: Block, state: ConversionState) -> None:
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    # Card1: mid rho E PR K N SRC SRP
+    f1   = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1])
+    E    = to_float(f1[2])
+    nu   = to_float(f1[3])
+    k    = to_float(f1[4]) if len(f1) > 4 else 1.0
+    n    = to_float(f1[5]) if len(f1) > 5 else 0.2
+    src  = to_float(f1[6]) if len(f1) > 6 else 0.0
+    srp  = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2: SIGY VP EPSF
+    f2   = _card(raw, offset + 1, fixed=True, n=4, w=10)
+    sigy = to_float(f2[0]) if f2        else 0.0
+    vp   = to_int(f2[1])   if len(f2) > 1 else 0
+    epsf = to_float(f2[2]) if len(f2) > 2 else 0.0
+    state.mat_power_law[mid] = MatPowerLaw(mid, title, rho, E, nu, k, n, src, srp, sigy, vp, epsf)
+
+
+def handle_load_segment(block: Block, state: ConversionState) -> None:
+    raw = block.raw
+    # _ID variant: first line is "id  title", data starts at index 1
+    data = raw[1:] if _has_id(block) else raw
+    if not data:
+        return
+    # Card: lcid sf at n1 n2 n3 n4 n5  (n5 ignored)
+    f1   = _card(data, 0, fixed=True, n=8, w=10)
+    lcid = to_int(f1[0])   if f1        else 0
+    sf   = to_float(f1[1]) if len(f1) > 1 else 1.0
+    nodes = [to_int(f1[i]) for i in range(3, min(7, len(f1)))]
+    while nodes and nodes[-1] == 0:
+        nodes.pop()
+    if len(nodes) >= 3 and lcid > 0:
+        state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
+
+
 def handle_skip(block: Block, state: ConversionState) -> None:
     state.skipped_keywords.append(block.keyword)
 
@@ -926,6 +1147,7 @@ HANDLERS = {
     "MAT_PLASTIC_KINEMATIC":                  handle_mat_plastic_kinematic,
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
+    "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
 
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
@@ -946,12 +1168,21 @@ HANDLERS = {
     "BOUNDARY_PRESCRIBED_MOTION_RIGID":       handle_boundary_prescribed_motion_rigid,
     "BOUNDARY_PRESCRIBED_MOTION_SET":         handle_boundary_prescribed_motion_set,
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
+    "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
+    "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
+
+    # Mass / inertia additions
+    "ELEMENT_MASS":                           handle_element_mass,
+    "ELEMENT_MASS_NODE_SET":                  handle_element_mass_node_set,
+    "ELEMENT_MASS_PART":                      handle_element_mass_part,
+    "ELEMENT_MASS_PART_SET":                  handle_element_mass_part_set,
 
     # Contacts
     "CONTACT_AUTOMATIC_SINGLE_SURFACE":       handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR": handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE":   handle_contact_automatic_surface_to_surface,
     "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_single_surface,
+    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
 
     # Control
     "CONTROL_IMPLICIT_GENERAL":               handle_control_implicit_general,
@@ -994,6 +1225,7 @@ HANDLERS = {
     "DATABASE_SECFORC":                       handle_database_secforc,
     "DATABASE_SLEOUT":                        handle_database_sleout,
     "DATABASE_SPCFORC":                       handle_skip,
+    "DATABASE_NCFORC":                        handle_skip,
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
@@ -1002,6 +1234,8 @@ HANDLERS = {
     "DATABASE_BINARY_RUNRSF":                 handle_skip,
     "INITIAL_STRESS_SECTION":                 handle_skip,
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
+    "LOAD_SEGMENT":                           handle_load_segment,
+    "LOAD_SEGMENT_ID":                        handle_load_segment,
     "LOAD_SEGMENT_SET":                       handle_skip,
     "MAT_ADD_EROSION":                        handle_skip,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
