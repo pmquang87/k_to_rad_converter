@@ -213,6 +213,7 @@ class ContactAutoSingle:
     fd: float           # dynamic friction
     bt: float           # birth time
     dt: float           # death time
+    ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
 
 
 @dataclass
@@ -223,6 +224,7 @@ class ContactAutoSurf2Surf:
     msid: int; mstyp: int
     fs: float; fd: float
     bt: float; dt: float
+    ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
 
 
 @dataclass
