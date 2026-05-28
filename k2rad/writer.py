@@ -687,20 +687,23 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                         all_pids, lines):
                 continue
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id))
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id))
         else:
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if slav_grnod and mast_surf:
                 lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                           _ignore_to_inacti(c.ignore, state, c.inter_id))
+                                           _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                           viss=_vdc_to_viss(c.vdc, state, c.inter_id))
 
     for c in state.contacts_surf2surf:
         slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
         mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
         if slav_grnod and mast_surf:
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id))
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id))
 
     return lines
 
@@ -732,8 +735,35 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int
     return 0
 
 
+def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
+    """Map LS-DYNA *CONTACT Card2 vdc (viscous damping, % of critical) →
+    OpenRadioss /INTER/TYPE7 VisS (fraction of critical, normal direction).
+
+    Undamped penalty contact (VisS=0) in implicit dynamic analysis is prone to
+    a chattering limit cycle: the active contact set flips every Newton
+    iteration, |r|/|r0| never drops below 1, the solver bisects the timestep
+    and kinetic energy blows up (observed on `implicit_hr-anlenkung`: with
+    addmass=1 the run is clean to NC=42 / T=187 ms, then ND=5 contact chatters
+    → K-energy 6e3 → 3e4 J while ext-work is frozen at 57 J). Carrying vdc
+    through to VisS damps the contact-normal oscillation and lets Newton
+    converge through the contact event.
+    """
+    if vdc and vdc > 0.0:
+        viss = vdc / 100.0
+        state.warn(f"CONTACT {inter_id}: vdc={vdc:g} (% critical) -> "
+                   f"/INTER/TYPE7 VisS={viss:g} (normal contact damping).")
+        return viss
+    if state.is_implicit:
+        state.warn(f"CONTACT {inter_id}: vdc=0 -> VisS=0 (no contact damping). "
+                   "Implicit dynamic penalty contact often chatters without it; "
+                   "set vdc (% of critical, e.g. 20-100) on *CONTACT Card2 if the "
+                   "solve diverges with a kinetic-energy blow-up.")
+    return 0.0
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
-                      mast_id: int, fric: float, inacti: int = 0) -> List[str]:
+                      mast_id: int, fric: float, inacti: int = 0,
+                      viss: float = 0.0, visf: float = 0.0) -> List[str]:
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -746,7 +776,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
         f"                   0{_f(fric)}                   0                   0                   0",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
-        f"       000{_i(inacti, 30)}                   0                   0                   0",
+        f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
         "         0         0                   0         2         0",
         HDR,

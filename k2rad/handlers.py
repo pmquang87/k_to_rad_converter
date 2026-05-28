@@ -552,9 +552,10 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     fd = to_float(f3[1]) if len(f3) > 1 else 0.0
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_single.append(
-        ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore)
+        ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore, vdc=vdc)
     )
 
 
@@ -574,9 +575,10 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     fd = to_float(f3[1]) if len(f3) > 1 else 0.0
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_surf2surf.append(
-        ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore)
+        ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore, vdc=vdc)
     )
 
 

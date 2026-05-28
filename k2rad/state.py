@@ -214,6 +214,7 @@ class ContactAutoSingle:
     bt: float           # birth time
     dt: float           # death time
     ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
+    vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
 
 
 @dataclass
@@ -225,6 +226,7 @@ class ContactAutoSurf2Surf:
     fs: float; fd: float
     bt: float; dt: float
     ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
+    vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
 
 
 @dataclass
