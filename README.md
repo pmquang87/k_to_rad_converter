@@ -1,5 +1,7 @@
 # LS-DYNA to OpenRadioss Converter (k2rad)
 
+[![tests](https://github.com/pmquang87/k_to_rad_converter/actions/workflows/tests.yml/badge.svg)](https://github.com/pmquang87/k_to_rad_converter/actions/workflows/tests.yml)
+
 Convert LS-DYNA keyword files (`.k`) to OpenRadioss starter/engine files
 (`*_0000.rad` and `*_0001.rad`). Targets **explicit and implicit dynamic**
 structural analyses with rigid bodies, contact, prescribed motion, and
