@@ -182,9 +182,11 @@ def _make_header(state: ConversionState) -> List[str]:
     #   <input mass>  <input length>  <input time>     ← .k file units
     #   <work mass>   <work length>   <work time>      ← internal units
     # LS-DYNA default unit system is ton (Mg) mm s N MPa.
-    # Mg = megagram = 1000 kg = 1 tonne. Use Mg/mm/s to match the .k file.
+    # Mg = megagram = 1000 kg = 1 tonne. Default is Mg/mm/s to match the .k file;
+    # callers may override via convert(units=...) / the CLI --units flag.
     title = state.model_title[:80].ljust(80)
-    unit_line = "                  Mg                  mm                   s"
+    mass, length, time = state.units
+    unit_line = f"{mass.rjust(20)}{length.rjust(20)}{time.rjust(20)}"
     return [
         "#RADIOSS STARTER",
         HDR,
@@ -1268,13 +1270,11 @@ def _resolve_mat_power_law(state: ConversionState) -> None:
 
 def _add_auto_curve(state: ConversionState, fid: int, title: str,
                     pts: List[Tuple[float, float]]) -> None:
-    class _C:
-        pass
-    c = _C()
-    c.lcid = fid; c.title = title
-    c.sfa = c.sfo = 1.0; c.offa = c.offo = 0.0
-    c.pts = pts
-    state.curves[fid] = c
+    state.curves[fid] = Curve(
+        lcid=fid, title=title,
+        sfa=1.0, sfo=1.0, offa=0.0, offo=0.0,
+        pts=pts,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

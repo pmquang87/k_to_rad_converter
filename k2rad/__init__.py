@@ -12,7 +12,6 @@ Usage::
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -34,7 +33,7 @@ class ConversionResult:
 def convert(
     input_path: str,
     output_stem: Optional[str] = None,
-    units: tuple = ("kg", "m", "s"),
+    units: tuple = ("Mg", "mm", "s"),
 ) -> ConversionResult:
     """Convert a LS-DYNA .k file to OpenRadioss Starter + Engine .rad files.
 
@@ -46,9 +45,10 @@ def convert(
         Base path for output files (without ``_0000.rad`` / ``_0001.rad``).
         Defaults to *input_path* with the extension removed.
     units : tuple of (mass, length, time)
-        Unit strings for the /BEGIN header.  Defaults to SI (kg, m, s).
-        The writer currently always emits "kg  m  s"; pass custom values
-        to override the header only (solver uses input units).
+        Unit strings written to the /BEGIN header.  Defaults to the LS-DYNA
+        ton-mm-s system ("Mg", "mm", "s").  This only labels the header — the
+        converter never rescales numeric values, so the labels should match
+        the units already used in the .k file.
 
     Returns
     -------
@@ -68,6 +68,7 @@ def convert(
 
     # 2. Dispatch each block to fill state
     state = ConversionState()
+    state.units = tuple(units)
     for block in blocks:
         dispatch(block, state)
 

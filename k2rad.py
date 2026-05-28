@@ -34,8 +34,9 @@ def main() -> int:
         "--units",
         nargs=3,
         metavar=("MASS", "LENGTH", "TIME"),
-        default=("kg", "m", "s"),
-        help="Unit system for /BEGIN header (default: kg m s)",
+        default=("Mg", "mm", "s"),
+        help="Unit labels for the /BEGIN header (default: Mg mm s). "
+             "Labels only — values are never rescaled.",
     )
     parser.add_argument(
         "--quiet",

@@ -29,7 +29,12 @@ No external dependencies — pure standard-library Python ≥ 3.9.
 python k2rad.py path/to/model.k
 python k2rad.py path/to/model.k output/stem
 python k2rad.py path/to/model.k --quiet
+python k2rad.py path/to/model.k --units Mg mm s
 ```
+
+`--units` sets the labels written to the `/BEGIN` header only — values are
+never rescaled, so the labels should match the units already used in the
+`.k` file. The default is the LS-DYNA `Mg mm s` system.
 
 Output is written as `<stem>_0000.rad` (starter) and `<stem>_0001.rad`
 (engine) next to the input file by default.
@@ -192,9 +197,18 @@ k_to_rad_converter/
 │   ├── handlers.py       # One handler per LS-DYNA keyword
 │   ├── state.py          # ConversionState data model
 │   └── writer.py         # Generates _0000.rad starter + _0001.rad engine
+├── tests/                # Standard-library unittest suite
 ├── tutorial_example/     # Sample .k files
 ├── Ryan_Lee_Examples/    # Larger test models (W2-W7)
 └── implicit_hr-anlenkung/ # Implicit dynamic regression test
+```
+
+## Testing
+
+The test suite uses only the standard library (no pytest required):
+
+```bash
+python -m unittest discover -s tests
 ```
 
 ---

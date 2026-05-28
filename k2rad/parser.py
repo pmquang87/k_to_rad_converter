@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import List
 
@@ -110,7 +111,6 @@ def parse_k_file(path: str, _depth: int = 0,
                 if os.path.isfile(inc_path):
                     blocks.extend(parse_k_file(inc_path, _depth + 1, include_path))
                 else:
-                    import sys
                     print(f"  [INCLUDE] WARNING: file not found: {inc_path}", file=sys.stderr)
 
         elif kw == "INCLUDE_PATH":
