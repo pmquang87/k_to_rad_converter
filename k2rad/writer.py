@@ -429,6 +429,22 @@ def _make_skews(state: ConversionState) -> List[str]:
 # Starter: parts + elements
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
+    """Distinct positive node IDs, preserving first-seen order.
+
+    LS-DYNA stores a 4-node tet either as 4 IDs or as an 8-slot hex with
+    nodes 5-8 collapsed onto node 4 (e.g. n1 n2 n3 n4 n4 n4 n4 n4). Either
+    way this returns the 4 distinct corners, so callers can detect tets.
+    """
+    seen: Set[int] = set()
+    out: List[int] = []
+    for n in nodes:
+        if n > 0 and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def _make_parts_and_elements(state: ConversionState) -> List[str]:
     if not state.parts:
         return []
@@ -468,18 +484,40 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                 lines.append(row)
             lines.append(HDR)
         if pid in solids_by_pid:
-            lines.append(f"/BRICK/{pid}")
+            # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an
+            # 8-node /BRICK with collapsed nodes reintroduces spurious
+            # hourglass modes (a real tet has none) -> the load energy goes
+            # into zero-stress hourglassing and the stress is garbage on
+            # tet-meshed parts (observed on implicit_hr-anlenkung: I-ENERGY
+            # ~0.8 J vs EXT-WORK ~690 J, -99.9% energy error). 5-8 unique
+            # nodes stay /BRICK (a wedge/pyramid as a degenerate hex is ok).
+            tets = []     # (eid, [n1, n2, n3, n4])
+            bricks = []   # SolidElem with >4 distinct nodes
             for e in solids_by_pid[pid]:
-                nodes = list(e.nodes)
-                if len(nodes) == 4:
-                    nodes += [nodes[-1]] * 4
-                elif len(nodes) < 8:
-                    nodes += [nodes[-1]] * (8 - len(nodes))
-                row = _i(e.eid)
-                for n in nodes[:8]:
-                    row += _i(n)
-                lines.append(row)
-            lines.append(HDR)
+                uniq = _ordered_unique_nodes(e.nodes)
+                if len(uniq) == 4:
+                    tets.append((e.eid, uniq))
+                else:
+                    bricks.append(e)
+            if tets:
+                lines.append(f"/TETRA4/{pid}")
+                for eid, nd in tets:
+                    row = _i(eid)
+                    for n in nd:
+                        row += _i(n)
+                    lines.append(row)
+                lines.append(HDR)
+            if bricks:
+                lines.append(f"/BRICK/{pid}")
+                for e in bricks:
+                    nodes = list(e.nodes)
+                    if len(nodes) < 8:
+                        nodes += [nodes[-1]] * (8 - len(nodes))
+                    row = _i(e.eid)
+                    for n in nodes[:8]:
+                        row += _i(n)
+                    lines.append(row)
+                lines.append(HDR)
         if pid in beams_by_pid:
             lines.append(f"/BEAM/{pid}")
             for e in beams_by_pid[pid]:
