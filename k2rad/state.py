@@ -436,6 +436,9 @@ class ConversionState:
         self.model_title: str = "Model"
         self.is_implicit: bool = False
         self._auto_id: int = 90001          # counter for auto-generated IDs
+        # Unit system written to the /BEGIN header (mass, length, time).
+        # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
+        self.units: Tuple[str, str, str] = ("Mg", "mm", "s")
 
         # ── Mesh ───────────────────────────────────────────────────
         self.nodes: Dict[int, NodeData] = {}
