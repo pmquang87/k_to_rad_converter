@@ -158,5 +158,77 @@ class ConvertEndToEndTests(unittest.TestCase):
         self.assertNotIn("Mg", header)
 
 
+IMPL_QSTAT_K = """\
+*KEYWORD
+*TITLE
+Implicit QSTAT test
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+shell part
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTROL_IMPLICIT_GENERAL
+         1      0.01
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class ImplicitEngineTests(unittest.TestCase):
+    """Engine /IMPL generation: QSTAT/DTSCAL + /IMPL/NONLIN defaults and
+    *CONTROL_IMPLICIT_SOLUTION overrides."""
+
+    def _engine_for(self, deck: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "impl.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return Path(convert(path).engine_path).read_text()
+
+    def test_qstat_and_nonlin_defaults(self):
+        engine = self._engine_for(IMPL_QSTAT_K)
+        # Quasi-static (no *CONTROL_IMPLICIT_DYNAMICS) -> QSTAT with strong anchoring.
+        self.assertIn("/IMPL/QSTAT/DTSCAL", engine)
+        self.assertIn(" 0.1", engine)
+        self.assertNotIn(" 1000", engine)
+        # Robust nonlinear defaults: reform every 2 iters, force, tol 1e-2.
+        self.assertIn("/IMPL/NONLIN/1", engine)
+        self.assertIn("2 2 0.01", engine)
+
+    def test_solution_overrides_nonlin(self):
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTROL_IMPLICIT_SOLUTION\n"
+            "         2         5         0     0.001     0.005\n"
+            "*CONTROL_TERMINATION",
+        )
+        engine = self._engine_for(deck)
+        # ilimit=5 -> L_A=5; ectol=0.005 (rctol unset) -> Itol=1 (energy), Toli=0.005.
+        self.assertIn("5 1 0.005", engine)
+
+    def test_imass_selects_dyna_not_qstat(self):
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTROL_IMPLICIT_DYNAMICS\n"
+            "         1       0.6      0.38\n"
+            "*CONTROL_TERMINATION",
+        )
+        engine = self._engine_for(deck)
+        self.assertIn("/IMPL/DYNA/2", engine)
+        self.assertNotIn("/IMPL/QSTAT", engine)
+
+
 if __name__ == "__main__":
     unittest.main()

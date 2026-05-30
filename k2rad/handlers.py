@@ -612,11 +612,12 @@ def handle_control_implicit_solution(block: Block, state: ConversionState) -> No
     maxref  = to_int(f[2])
     dctol   = to_float(f[3])
     ectol   = to_float(f[4])
+    rctol   = to_float(f[5]) if len(f) > 5 else 0.0
     # Card2: dnorm diverg istif nlprint nlnorm d3itctl cpchk
     f2 = _card(raw, 1, fixed=True, n=8, w=10)
     nlprint = to_int(f2[3]) if len(f2) > 3 else 0
     state.ctrl_implicit_sol = ControlImplicitSolution(
-        nsolvr, ilimit, maxref, dctol, ectol, nlprint
+        nsolvr, ilimit, maxref, dctol, ectol, nlprint, rctol
     )
 
 

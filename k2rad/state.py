@@ -387,6 +387,7 @@ class ControlImplicitSolution:
     dctol: float        # displacement convergence
     ectol: float        # energy convergence
     nlprint: int        # nonlinear print flag
+    rctol: float = 0.0  # residual/force convergence (LS-DYNA rctol; 1e10 = off)
 
 
 @dataclass
