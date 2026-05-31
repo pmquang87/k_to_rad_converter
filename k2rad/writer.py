@@ -751,27 +751,43 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
 def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int:
     """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
 
-    LS-DYNA ignore=1 ("track but don't push apart; contact otherwise normal")
-    → Inacti=1 (deactivate stiffness on penetrating nodes only). Preserves
-    geometry — necessary when penetrating nodes belong to a rigid body, since
-    Inacti=3/6 modify coordinates and break /RBODY kinematic consistency
-    (observed on `implicit_hr-anlenkung`: Inacti=3 moved 21 cylinder rigid-body
-    nodes → engine seg-faulted during initialization). Inacti=5 absorbs the
-    penetration into a variable gap, but that silently suppresses contact for
-    those nodes (saw 7 cycles I-energy=0, K≈ext-work, free body).
-    Inacti=1 is safe for rigid bodies and only loses contact at the few
-    penetrating nodes; every other surface node engages normally.
-    ignore=2 → Inacti=2 (deactivate stiffness on elements containing
-    penetrating nodes) for the same reason.
+    LS-DYNA ignore=1/2 means: *remember* the initial penetration, subtract it so
+    it produces no force at t=0, but keep the contact fully ACTIVE for any
+    subsequent (incremental) penetration. (ignore=2 = ignore=1 plus printed
+    warnings.) The faithful OpenRadioss equivalent is **Inacti=5** (variable gap:
+    the per-node gap is reduced to gap0 − P0 so the node starts just-touching
+    with zero initial force and re-engages as soon as it moves further in).
+
+    This corrects an earlier mapping to Inacti=1 (deactivate / zero the stiffness
+    of penetrating secondary nodes). On `implicit_hr-anlenkung` that mapping was
+    the load-path killer: a geometry pen-check (folder 6kN_claude-pencheck) showed
+    there are NO geometric initial penetrations — the loading pin sits in its hole
+    with ~0.105 mm clearance (≈ one shell thickness). The starter's "16 INITIAL
+    PENETRATIONS" are a variable-gap artifact: the TYPE7 gap (~0.109 mm) slightly
+    exceeds that clearance for the 16 closest pin nodes (penetration ~0.5–5 µm).
+    Inacti=1 then ZEROES exactly those 16 nodes — the closest, most load-bearing
+    nodes on the loaded (+y) face — so the rigid pin has no contact stiffness in
+    the load direction at t=0, Newton can build no Y-reaction, and the solve hits
+    an irreducible force residual with I-ENERGY ≡ 0 (every solver knob exhausted).
+
+    Inacti=5 is both correct AND safe here:
+      * It does NOT modify node coordinates, so it is safe for rigid-body
+        secondary nodes (unlike Inacti=3/6, where moving 21 rigid-body nodes
+        seg-faulted the engine during init).
+      * Because the penetrations are sub-5-µm against a ~0.109 mm gap, the
+        adjusted gap stays ~0.105 mm — i.e. the nodes keep essentially their full
+        gap and remain active. (The old worry that "Inacti=5 silently suppresses
+        contact" only applies when P0 ≈ gap0, i.e. deep penetration — not this
+        case.)
     """
-    if ignore == 1:
-        state.warn(f"CONTACT {inter_id}: ignore=1 mapped to /INTER/TYPE7 Inacti=1 "
-                   "(deactivate stiffness on penetrating nodes; geometry preserved).")
-        return 1
-    if ignore == 2:
-        state.warn(f"CONTACT {inter_id}: ignore=2 mapped to /INTER/TYPE7 Inacti=2 "
-                   "(deactivate stiffness on penetrating elements; geometry preserved).")
-        return 2
+    if ignore in (1, 2):
+        state.warn(
+            f"CONTACT {inter_id}: ignore={ignore} mapped to /INTER/TYPE7 Inacti=5 "
+            "(variable gap = gap0 - initial penetration; contact stays active, no "
+            "t=0 force spike). Matches LS-DYNA 'ignore initial penetration' intent "
+            "and keeps load-path nodes active (was Inacti=1, which deletes them)."
+        )
+        return 5
     return 0
 
 
@@ -1409,9 +1425,30 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     dt0 = min(dt0_in, 1e-3) if is_dynamic_pre else dt0_in
     dtmin  = auto.dtmin if auto and auto.dtmin > 0 else max(dt0 * 1e-4, 1e-10)
 
-    # /IMPL/NONLIN/1: Iupdate=0 (every step), Ialgo=2 (modified Newton-Raphson),
-    # Ilin=0 (matches W7 reference)
-    lines: List[str] = ["/IMPL/NONLIN/1", "  0 2 0"]
+    # /IMPL/NONLIN/N data line (Reference Guide p.2969-2970): L_A  Itol  Toli
+    #   L_A  = max iterations between stiffness-matrix reforms (0 -> 6 for the
+    #          direct/MUMPS solver; smaller = fresher tangent). Default 2 here for
+    #          robust convergence on rigid-body-contact models (the default 6 left
+    #          the tangent too stale: |r|/|r0| plateaued ~7e-3 and never dropped).
+    #   Itol = termination criterion (1=energy, 2=force, 3=displacement).
+    #   Toli = tolerance. The force default is 5e-3; we use 1e-2 (Altair's own
+    #          combined-criteria force default), which clears the ~7e-3 residual
+    #          plateau seen when a free rigid body engages contact.
+    # Overridable from LS-DYNA *CONTROL_IMPLICIT_SOLUTION: ilimit -> L_A, and
+    # rctol/ectol/dctol -> Itol(2/1/3) + Toli (whichever tolerance the user set).
+    sol = state.ctrl_implicit_sol
+    l_a, itol, toli = 2, 2, 0.01
+    if sol:
+        if sol.ilimit and sol.ilimit > 0:
+            l_a = sol.ilimit
+        if sol.rctol and 0.0 < sol.rctol < 1e9:      # force (LS-DYNA rctol)
+            itol, toli = 2, sol.rctol
+        elif sol.ectol and sol.ectol > 0.0:          # energy (LS-DYNA ectol)
+            itol, toli = 1, sol.ectol
+        elif sol.dctol and sol.dctol > 0.0:          # displacement (LS-DYNA dctol)
+            itol, toli = 3, sol.dctol
+    lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
+                        f"  {l_a} {itol} {toli:g}"]
 
     # Per OpenRadioss 2022 Reference Guide (pages 2942-2943):
     #   /IMPL/DYNA/1 = HHT method, ONE parameter α (-1/3 < α < 0)
@@ -1425,7 +1462,13 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         beta  = dyn.beta  if dyn.beta  > 0 else 0.25
         lines += ["/IMPL/DYNA/2", f" {gamma:.6G}  {beta:.6G}"]
     else:
-        lines += ["/IMPL/QSTAT/DTSCAL", " 1000"]
+        # /IMPL/QSTAT/DTSCAL: inertia-stabilization scale; stabilization grows as
+        # 1/DTSCAL^2 (Reference Guide p.2973). 0.1 (=> x100 stiffness) anchors free
+        # rigid bodies connected only by contact. For nonlinear analysis it only
+        # affects convergence speed, not the result, so a strong (small) value is
+        # safe. (The SEAT example's 1000 is too weak for free-body-via-contact:
+        # the body sloshed in its rigid mode and the solve never converged.)
+        lines += ["/IMPL/QSTAT/DTSCAL", " 0.1"]
 
     # /IMPL/SOLVER format (Reference Guide p.2976-2978):
     #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
