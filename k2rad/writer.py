@@ -1621,18 +1621,27 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
     # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
     #
-    # MUMPS out-of-core: emit /IMPL/MUMPS/OUTCORE, which forces ICNTL(22)=1 so
-    # the factors are written to disk. This is REQUIRED on large contact models
-    # like implicit_hr-anlenkung (568k DOFs). The "automatic" variant
-    # /IMPL/MUMPS/AUTOC (M_OCORE=-1) was tried repeatedly on this model and NEVER
-    # triggered out-of-core — ICNTL(22) stayed 0, the in-core workspace overflowed
-    # during the first contact-augmented factorization, and the run died with
-    # MUMPS error -13/-19 ("workspace too large") / ISTOP=-4 at t≈0, even with
-    # DTINI=1e-6. OUTCORE was validated to factor cleanly with no -13 on the same
-    # model/hardware (INFOG(26)≈460 MB/proc). So: always OUTCORE, never AUTOC.
+    # MUMPS memory mode: emit /IMPL/MUMPS/AUTOC (M_OCORE=-1), which lets MUMPS
+    # keep the factors in core when they fit and spill to disk only if needed.
+    # In-core factorization skips the out-of-core disk I/O, so AUTOC is faster
+    # than the always-on-disk /IMPL/MUMPS/OUTCORE.
+    #
+    # History: on the earlier FORCE-driven decks AUTOC died at t≈0 with MUMPS
+    # -13 ("workspace too large") / ISTOP=-4 — but that was a symptom of the
+    # singular tangent (a free rigid body reacted only by contact). The missing
+    # load path forced endless dt-bisection, and the contact fill-in during
+    # bisection overflowed the in-core workspace. Switching to DISPLACEMENT
+    # control (*BOUNDARY_PRESCRIBED_MOTION on the loading pin) removed the
+    # rigid-body mode, so the tangent is non-singular, Newton converges, and the
+    # factors comfortably fit in core. Validated on 6kN_dy=3.5mm_dz=1mm: AUTOC
+    # marched cleanly past cycle 404 while OUTCORE died at cycle 400 with MUMPS
+    # -13 — and that -13 was a transient "ERROR MEMORY ISSUE" (the engine's own
+    # words) that can strike either mode on flaky DDR4. AUTOC is faster and at
+    # least as reliable here, so it is the default; switch this line back to
+    # /IMPL/MUMPS/OUTCORE only if a model's factors genuinely do not fit in RAM.
     lines += ["/IMPL/PRINT/NONL/-1",
               "/IMPL/SOLVER/2", "  0 0 0 0",
-              "/IMPL/MUMPS/OUTCORE",
+              "/IMPL/MUMPS/AUTOC",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
     if iteopt > 0 or kfail > 0:
