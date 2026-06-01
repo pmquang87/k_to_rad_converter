@@ -139,7 +139,10 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
 
 
 def handle_element_solid(block: Block, state: ConversionState) -> None:
-    raw = block.raw
+    # Drop blank "" placeholders so format detection (which keys off raw[0]/raw[1])
+    # and the ten-node line-pairing are never thrown off by an embedded/trailing
+    # blank line. Element connectivity never uses all-defaults blank cards.
+    raw = [ln for ln in block.raw if ln.strip()]
     if not raw:
         return
 
@@ -460,6 +463,9 @@ def _handle_boundary_spc(block: Block, state: ConversionState, use_nsid: bool) -
     bc_counter = len(state.bcs_spcs) + 1
 
     while i < len(raw):
+        if not raw[i].strip():        # blank card placeholder → skip (no id-0 BC)
+            i += 1
+            continue
         # Card: nsid/nid cid dofx dofy dofz dofrx dofry dofrz
         f = _card(raw, i, fixed=True, n=8, w=10)
         nsid_or_nid = to_int(f[0])
@@ -501,6 +507,8 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
         f = _card(raw, i, fixed=True, n=8, w=10)
         if len(f) < 4:
             continue
@@ -662,6 +670,8 @@ def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) 
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
         f = _card(raw, i, fixed=True, n=8, w=10)
         if len(f) < 4:
             continue
@@ -871,6 +881,8 @@ def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
         f = _card(raw, i, fixed=True, n=8, w=10)
         if len(f) < 3:
             continue
@@ -1036,6 +1048,8 @@ def handle_initial_velocity_node(block: Block, state: ConversionState) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
         f = _card(raw, i, fixed=True, n=8, w=10)
         if len(f) < 4:
             continue
@@ -1052,6 +1066,8 @@ def handle_initial_velocity_rigid_body(block: Block, state: ConversionState) -> 
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
         f = _card(raw, i, fixed=True, n=8, w=10)
         if len(f) < 4:
             continue

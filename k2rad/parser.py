@@ -105,24 +105,28 @@ def parse_k_file(path: str, _depth: int = 0,
         if kw is None:
             return
 
+        # raw may now contain leading "" placeholders for blank data cards, so
+        # use the first non-blank entry as the filename/path argument.
+        nonblank = [r for r in raw if r.strip()]
+
         if kw in ("INCLUDE", "INCLUDE_TRANSFORM"):
-            if raw:
-                inc_path = _resolve(raw[0])
+            if nonblank:
+                inc_path = _resolve(nonblank[0])
                 if os.path.isfile(inc_path):
                     blocks.extend(parse_k_file(inc_path, _depth + 1, include_path))
                 else:
                     print(f"  [INCLUDE] WARNING: file not found: {inc_path}", file=sys.stderr)
 
         elif kw == "INCLUDE_PATH":
-            if raw:
-                candidate = raw[0].strip()
+            if nonblank:
+                candidate = nonblank[0].strip()
                 if not os.path.isabs(candidate):
                     candidate = os.path.join(base_dir, candidate)
                 include_path = candidate
 
         elif kw == "INCLUDE_PATH_RELATIVE":
-            if raw:
-                candidate = raw[0].strip()
+            if nonblank:
+                candidate = nonblank[0].strip()
                 include_path = os.path.join(base_dir, candidate)
 
         else:
@@ -134,7 +138,9 @@ def parse_k_file(path: str, _depth: int = 0,
         for raw_line in fh:
             line = raw_line.rstrip("\n\r")
 
-            if not line or line.startswith("$") or line.startswith("//"):
+            # Column-1 comment lines never carry data; skip them everywhere so
+            # they don't consume a fixed-format card slot inside a block.
+            if line.startswith("$") or line.startswith("//"):
                 continue
 
             if line.startswith("*"):
@@ -145,11 +151,18 @@ def parse_k_file(path: str, _depth: int = 0,
                 else:
                     kw, opts = "UNKNOWN", []
                 raw = []
-            else:
-                if kw is not None:
-                    stripped = _strip_inline_comment(line)
-                    if stripped:
-                        raw.append(stripped)
+            elif kw is not None:
+                # Inside a block: keep EVERY data line, including an intentionally
+                # blank card (an all-blank fixed-format card means "all defaults").
+                # Dropping blank cards shifts every following card up by one and
+                # misaligns the columns of multi-card keywords (e.g. an empty
+                # *CONTROL_IMPLICIT_SOLUTION card-1 would push card-2's value into
+                # the dctol slot). Inline $ comments are still stripped; a line
+                # that is blank (or becomes blank after stripping) is preserved as
+                # "" so it holds its card position. Handlers that build lists from
+                # raw skip these "" placeholders (see handlers.py).
+                raw.append(_strip_inline_comment(line))
+            # else: blank or data line outside any block → ignore
 
     _flush()
     return blocks
