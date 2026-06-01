@@ -17,6 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from k2rad import convert  # noqa: E402
+from k2rad.handlers import dispatch  # noqa: E402
+from k2rad.state import ConversionState  # noqa: E402
 from k2rad.parser import (  # noqa: E402
     _split_keyword,
     parse_fixed,
@@ -219,11 +221,12 @@ class ImplicitEngineTests(unittest.TestCase):
         self.assertIn("5 1 0.005", engine)
 
     def test_blank_leading_card_does_not_corrupt_tolerance(self):
-        # A *CONTROL_IMPLICIT_SOLUTION whose first (nsolvr…abstol) card is blank:
-        # the blank line is dropped in parsing, so card 2's value shifts into the
-        # dctol column and would otherwise emit Toli=2.0 (200%, useless). The
-        # converter must reject the implausible tolerance and keep the robust
-        # default instead of "2 3 2".
+        # End-to-end guard for a *CONTROL_IMPLICIT_SOLUTION whose first
+        # (nsolvr…abstol) card is blank. The parser now PRESERVES that blank card
+        # so card 2's "2" stays in the nlprint column (see
+        # BlankCardPreservationTests for the column-level check); the writer's
+        # tolerance sanity-check (reject Toli >= 1.0) remains as defense-in-depth.
+        # Either way the engine must keep the robust default, not emit "2 3 2".
         deck = IMPL_QSTAT_K.replace(
             "*CONTROL_TERMINATION",
             "*CONTROL_IMPLICIT_SOLUTION\n"
@@ -360,6 +363,110 @@ class ReactionReadoutTests(unittest.TestCase):
     def test_no_reaction_th_node_without_prescribed_motion(self):
         # TRANSDUCER_K has the rigid part but no prescribed motion → no reaction block.
         self.assertNotIn("REACX", self._starter(TRANSDUCER_K))
+
+
+# A *CONTROL_IMPLICIT_SOLUTION whose card-1 (nsolvr…abstol) is an all-blank
+# "all defaults" card written in the real-world LS-PrePost form: whitespace
+# followed by a trailing "$" comment (strips to empty, but is NOT a column-1
+# comment).  Card-2 carries nlprint=2 in its 4th fixed-width field (cols 31-40),
+# which sits in the same column as card-1's dctol.  If the blank card-1 is
+# dropped during parsing, the "2" shifts up into the dctol slot.
+IMPL_BLANKCARD_K = (
+    "*KEYWORD\n"
+    "*CONTROL_IMPLICIT_SOLUTION\n"
+    "$#  nsolvr    ilimit    maxref     dctol     ectol     rctol     lstol    abstol\n"
+    + " " * 20 + "$\n"                 # card 1: all defaults (blank + trailing comment)
+    + "$#   dnorm    diverg     istif   nlprint    nlnorm   d3itctl     cpchk\n"
+    + " " * 30 + "2\n"                 # card 2: nlprint = 2 (field 4, columns 31-40)
+    + "*CONTROL_TERMINATION\n"
+    "       1.0\n"
+    "*END\n"
+)
+
+
+# *NODE / *ELEMENT_SHELL / *ELEMENT_SOLID blocks, each with an embedded blank
+# line between data cards.  The blank lines are now preserved during parsing
+# (to keep fixed-format card positions aligned for multi-card keywords), so the
+# list-building handlers must skip them instead of emitting id-0 entries.
+EMBEDDED_BLANK_K = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2             1.0             0.0             0.0\n"
+    "\n"                               # embedded blank line
+    "       3             1.0             1.0             0.0\n"
+    "       4             0.0             1.0             0.0\n"
+    "*ELEMENT_SHELL\n"
+    "       1       1       1       2       3       4\n"
+    "\n"                               # embedded blank line
+    "       2       1       1       2       3       4\n"
+    "*ELEMENT_SOLID\n"
+    "       1       1       1       2       3       4       5       6       7       8\n"
+    "\n"                               # embedded blank line
+    "       2       1       1       2       3       4       5       6       7       8\n"
+    "*BOUNDARY_SPC_NODE\n"
+    "         5         0         1         1         1         0         0         0\n"
+    "\n"                               # trailing blank before next keyword
+    "*END\n"
+)
+
+
+class BlankCardPreservationTests(unittest.TestCase):
+    """Parser preserves intentionally blank fixed-format cards (so columns stay
+    aligned), while raw-iterating handlers skip the "" placeholders."""
+
+    def _state(self, deck: str) -> ConversionState:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "blank.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        return state
+
+    def _blocks(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "blank.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return parse_k_file(path)
+
+    # (a) Blank leading card keeps the following cards' columns aligned.
+    def test_blank_leading_card_is_preserved_in_raw(self):
+        cis = next(b for b in self._blocks(IMPL_BLANKCARD_K)
+                   if b.keyword == "CONTROL_IMPLICIT_SOLUTION")
+        # Card-1 survives as an empty placeholder; card-2 (the "2") follows it.
+        self.assertEqual(cis.raw[0], "")
+        self.assertGreaterEqual(len(cis.raw), 2)
+        self.assertTrue(cis.raw[1].rstrip().endswith("2"))
+
+    def test_blank_leading_card_yields_correct_columns(self):
+        sol = self._state(IMPL_BLANKCARD_K).ctrl_implicit_sol
+        self.assertIsNotNone(sol)
+        # The "2" stays in card-2's nlprint column and does NOT leak into dctol.
+        self.assertEqual(sol.dctol, 0.0)
+        self.assertEqual(sol.nlprint, 2)
+
+    # (b) Embedded blank lines never create spurious id-0 entries.
+    def test_embedded_blank_adds_no_spurious_node(self):
+        nodes = self._state(EMBEDDED_BLANK_K).nodes
+        self.assertNotIn(0, nodes)
+        self.assertEqual(sorted(nodes), [1, 2, 3, 4])
+
+    def test_embedded_blank_adds_no_spurious_element(self):
+        state = self._state(EMBEDDED_BLANK_K)
+        self.assertEqual(len(state.shell_elems), 2)
+        self.assertTrue(all(e.eid != 0 for e in state.shell_elems))
+        self.assertEqual(len(state.solid_elems), 2)
+        self.assertTrue(all(e.eid != 0 for e in state.solid_elems))
+
+    def test_trailing_blank_adds_no_spurious_boundary_condition(self):
+        # The blank line after the single SPC card must not become a 2nd BC
+        # (which would reference an auto-created node set holding node 0).
+        self.assertEqual(len(self._state(EMBEDDED_BLANK_K).bcs_spcs), 1)
 
 
 if __name__ == "__main__":
