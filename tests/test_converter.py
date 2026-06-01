@@ -208,6 +208,11 @@ class ImplicitEngineTests(unittest.TestCase):
         # Robust nonlinear defaults: reform every 2 iters, force, tol 1e-2.
         self.assertIn("/IMPL/NONLIN/1", engine)
         self.assertIn("2 2 0.01", engine)
+        # MUMPS in-core/auto memory mode is the default: faster than always-on-
+        # disk OUTCORE, and viable since displacement control removed the
+        # singular tangent that used to overflow the in-core workspace.
+        self.assertIn("/IMPL/MUMPS/AUTOC", engine)
+        self.assertNotIn("/IMPL/MUMPS/OUTCORE", engine)
 
     def test_solution_overrides_nonlin(self):
         deck = IMPL_QSTAT_K.replace(
