@@ -748,6 +748,136 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
     return lines
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Force transducers  (*CONTACT_FORCE_TRANSDUCER → /INTER/SUB)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _select_parent_interface(state: ConversionState) -> Optional[int]:
+    """Pick a parent /INTER for a /INTER/SUB sub-interface.
+
+    A LS-DYNA force transducer is standalone, but /INTER/SUB must reference an
+    existing parent interface. Prefer an all-parts single-surface contact (it
+    covers any surface pair); otherwise fall back to the first contact defined.
+    """
+    for c in state.contacts_single:
+        if c.ssid == 0:
+            return c.inter_id
+    if state.contacts_single:
+        return state.contacts_single[0].inter_id
+    if state.contacts_surf2surf:
+        return state.contacts_surf2surf[0].inter_id
+    return None
+
+
+def _transducer_side_pids(state: ConversionState, sid: int, styp: int) -> List[int]:
+    """Resolve a transducer SURFA/SURFB to part IDs.
+
+    LS-DYNA surf type: 2 = part-set ID, 3 = part ID, 5 = all parts.
+    """
+    if styp == 5 or sid == 0:
+        return sorted(state.parts.keys())
+    if styp == 2:
+        ps = state.part_sets.get(sid)
+        return list(ps[1]) if ps else []
+    return [sid] if sid in state.parts else []
+
+
+def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -> List[int]:
+    """All node IDs used by the given parts' elements, minus *exclude* (rigid nodes)."""
+    pidset = set(pids)
+    nodes: Set[int] = set()
+    for e in state.shell_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.solid_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.beam_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in (e.n1, e.n2) if n > 0)
+    return sorted(nodes - exclude)
+
+
+def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """Emit a /INTER/SUB sub-interface for every *CONTACT_FORCE_TRANSDUCER.
+
+    A force transducer is a measurement-only "contact": it reports the contact
+    force already acting between two surfaces (from the model's real contacts)
+    and adds NO stiffness of its own. The OpenRadioss equivalent is /INTER/SUB,
+    a sub-interface of an existing parent /INTER that outputs the force applied
+    by a secondary node group on a main surface.
+
+    The (sub_id, title) pairs are recorded on state.th_sub_ids so a /TH/INTER
+    block can be emitted to actually write the force to the time-history file.
+    """
+    if not state.force_transducers:
+        return []
+
+    parent_id = _select_parent_interface(state)
+    lines: List[str] = ["#-  FORCE TRANSDUCERS (/INTER/SUB):", HDR]
+
+    for ft in state.force_transducers:
+        title = ft.title or f"FORCE_TRANSD_{ft.inter_id}"
+        if parent_id is None:
+            state.warn(
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no existing /INTER to act "
+                "as parent; /INTER/SUB requires a parent interface -> skipped."
+            )
+            continue
+
+        pids_a = _transducer_side_pids(state, ft.surfa, ft.satyp)
+        pids_b = _transducer_side_pids(state, ft.surfb, ft.sbtyp)
+        all_pids = [p for p in (pids_a + pids_b) if p in state.parts]
+
+        # Secondary side = deformable parts' nodes (those that live in the parent's
+        # secondary node group). Main side = the remaining (rigid) parts' segments.
+        # If the split is not clean, fall back to LS-DYNA's convention that SURFA
+        # is the secondary side and SURFB the main side.
+        def_pids = [p for p in all_pids if state.parts[p].mid not in state.mat_rigid]
+        rig_pids = [p for p in all_pids if state.parts[p].mid in state.mat_rigid]
+        if def_pids and rig_pids:
+            sec_pids, main_pids = def_pids, rig_pids
+        else:
+            sec_pids = [p for p in pids_a if p in state.parts] or all_pids
+            main_pids = [p for p in pids_b if p in state.parts] or all_pids
+
+        sec_nodes = _part_node_ids(state, sec_pids, rigid_nodes)
+        if not sec_nodes:
+            state.warn(
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: secondary side has no "
+                "deformable nodes (parts may be all-rigid) -> skipped."
+            )
+            continue
+
+        grnod_id = state.next_id()
+        main_surf = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"{title}_secnd", sec_nodes)
+        if not _make_master_surface(state, main_surf, f"{title}_main",
+                                    sorted(set(main_pids)), lines):
+            state.warn(
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: could not build a main "
+                "surface from its parts -> skipped."
+            )
+            continue
+
+        # /INTER/SUB/sub_ID  →  parent inter_ID, main surface, secondary node group
+        lines += [
+            f"/INTER/SUB/{ft.inter_id}",
+            title,
+            "#  inter_ID  Main_surf  Secn_grnd",
+            f"{_i(parent_id)}{_i(main_surf)}{_i(grnod_id)}",
+            HDR,
+        ]
+        state.th_sub_ids.append((ft.inter_id, title))
+        state.warn(
+            f"CONTACT_FORCE_TRANSDUCER {ft.inter_id} -> /INTER/SUB/{ft.inter_id} "
+            f"(parent /INTER {parent_id}); force written to T01 via /TH/INTER. "
+            "Measurement-only (adds no contact stiffness)."
+        )
+
+    return lines
+
+
 def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int:
     """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
 
@@ -1441,12 +1571,28 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     if sol:
         if sol.ilimit and sol.ilimit > 0:
             l_a = sol.ilimit
-        if sol.rctol and 0.0 < sol.rctol < 1e9:      # force (LS-DYNA rctol)
+        # OpenRadioss Toli is a RELATIVE convergence tolerance, so a sane value is
+        # 0 < Toli < 1. Accept the tightest LS-DYNA tolerance the user actually set
+        # but ignore implausible values (>= 1.0): those do not come from a real
+        # "100%+ tolerance" but from a mis-aligned fixed-format card — e.g. an
+        # all-blank leading card in *CONTROL_IMPLICIT_SOLUTION collapses (blank
+        # lines are dropped during parsing), shifting the next card's columns so a
+        # stray value lands in the dctol slot. Falling back to the robust default
+        # avoids silently emitting a useless tolerance (Toli=2.0 => the solver
+        # "converges" at iteration 1 and the reaction force is meaningless).
+        if sol.rctol and 0.0 < sol.rctol < 1.0:      # force (LS-DYNA rctol)
             itol, toli = 2, sol.rctol
-        elif sol.ectol and sol.ectol > 0.0:          # energy (LS-DYNA ectol)
+        elif sol.ectol and 0.0 < sol.ectol < 1.0:    # energy (LS-DYNA ectol)
             itol, toli = 1, sol.ectol
-        elif sol.dctol and sol.dctol > 0.0:          # displacement (LS-DYNA dctol)
+        elif sol.dctol and 0.0 < sol.dctol < 1.0:    # displacement (LS-DYNA dctol)
             itol, toli = 3, sol.dctol
+        for name, val in (("rctol", sol.rctol), ("ectol", sol.ectol), ("dctol", sol.dctol)):
+            if val and val >= 1.0:
+                state.warn(
+                    f"*CONTROL_IMPLICIT_SOLUTION {name}={val:g} is >= 1.0 (not a valid "
+                    "relative tolerance); ignored. This usually means an all-blank "
+                    "leading card shifted the fixed-format columns — check the card. "
+                    f"Using robust /IMPL/NONLIN default Toli={toli:g}.")
     lines: List[str] = ["/IMPL/NONLIN/1", "# L_A Itol Toli",
                         f"  {l_a} {itol} {toli:g}"]
 
@@ -1474,16 +1620,19 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
     # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
     # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
-    # /IMPL/MUMPS/AUTOC enables MUMPS automatic out-of-core mode (M_OCORE=-1
-    # → sets ICNTL(22)=1 when MUMPS estimates exceed in-core budget).
-    # Undocumented in the 2022 Reference Guide; parsed in
-    # engine/source/input/freimpl.F line 533 of the OpenRadioss source.
-    # Prevents MUMPS -13 "workspace too large" failures (MUMPS defaults
-    # ICNTL(23) = INFOG(16) × 1.2; with tight contact stiffness the actual
-    # numerical fill can overshoot the 20% relaxation buffer).
+    #
+    # MUMPS out-of-core: emit /IMPL/MUMPS/OUTCORE, which forces ICNTL(22)=1 so
+    # the factors are written to disk. This is REQUIRED on large contact models
+    # like implicit_hr-anlenkung (568k DOFs). The "automatic" variant
+    # /IMPL/MUMPS/AUTOC (M_OCORE=-1) was tried repeatedly on this model and NEVER
+    # triggered out-of-core — ICNTL(22) stayed 0, the in-core workspace overflowed
+    # during the first contact-augmented factorization, and the run died with
+    # MUMPS error -13/-19 ("workspace too large") / ISTOP=-4 at t≈0, even with
+    # DTINI=1e-6. OUTCORE was validated to factor cleanly with no -13 on the same
+    # model/hardware (INFOG(26)≈460 MB/proc). So: always OUTCORE, never AUTOC.
     lines += ["/IMPL/PRINT/NONL/-1",
               "/IMPL/SOLVER/2", "  0 0 0 0",
-              "/IMPL/MUMPS/AUTOC",
+              "/IMPL/MUMPS/OUTCORE",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
     if iteopt > 0 or kfail > 0:
@@ -1663,6 +1812,78 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     return lines
 
 
+def _make_starter_th_inter(state: ConversionState) -> List[str]:
+    """Emit /TH/INTER so contact-interface forces reach the T01 time-history file.
+
+    Required for *CONTACT_FORCE_TRANSDUCER → /INTER/SUB: a sub-interface's force
+    is written as a channel of its parent interface, so the parent interface must
+    be requested in a /TH/INTER block. Only emitted when a transducer exists, so
+    decks without one are unchanged.
+    """
+    if not state.th_sub_ids:
+        return []
+    parent_id = _select_parent_interface(state)
+    # List the parent interface (total contact force) and each force-transducer
+    # sub-interface id — a sub-interface is written to the T01 only when its own
+    # id is requested here (listing just the parent leaves OUTPUT TO TH = 0).
+    ids: List[int] = []
+    if parent_id is not None:
+        ids.append(parent_id)
+    ids += [sid for sid, _ in state.th_sub_ids]
+    if not ids:
+        return []
+    lines = [
+        "#-  TIME HISTORY (interface / force-transducer):", HDR,
+        "/TH/INTER/1",
+        "TH_interface_forces",
+        "#     var1",
+        "DEF",
+    ]
+    lines += [_i(i) for i in ids]
+    lines.append(HDR)
+    return lines
+
+
+def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """Emit /TH/NODE writing reaction + displacement on the master node of each
+    displacement-/velocity-controlled rigid body.
+
+    Under displacement control the reaction at the imposed-motion node IS the
+    load being 'measured' (the force the structure pushes back with). For a rigid
+    body that reaction is assembled at the /RBODY master node, so REACX/Y/Z there
+    gives the applied force vs. the imposed DX/Y/Z. This complements the
+    /INTER/SUB force transducer as an independent reaction readout. Only emitted
+    when a *BOUNDARY_PRESCRIBED_MOTION_RIGID exists, so other decks are unchanged.
+    """
+    if not state.prescribed_motions:
+        return []
+    nodes: List[int] = []
+    seen: Set[int] = set()
+    for pm in state.prescribed_motions:
+        info = rbody_info.get(pm.pid)
+        if not info:
+            continue
+        nd = info["ind_node"]
+        if nd not in seen:
+            seen.add(nd)
+            nodes.append(nd)
+    if not nodes:
+        return []
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (imposed-motion reaction force on rigid-body master):", HDR,
+        f"/TH/NODE/{th_id}",
+        "TH_reaction",
+        "#  reaction (REACX/Y/Z) + displacement (DX/Y/Z) of the master node",
+        # TH variable names are read in fixed 10-char columns (not free-format),
+        # so each keyword must occupy its own field.
+        "".join(v.rjust(10) for v in ("DX", "DY", "DZ", "REACX", "REACY", "REACZ")),
+    ]
+    lines += [_i(nd) for nd in nodes]
+    lines.append(HDR)
+    return lines
+
+
 def build_starter(state: ConversionState) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -1684,6 +1905,7 @@ def build_starter(state: ConversionState) -> str:
         _make_functions(state),
         _make_extra_groups(state),
         _make_interfaces(state, rigid_nodes),
+        _make_force_transducers(state, rigid_nodes),
         rbody_lines,
         _make_imposed_motions(state, rbody_info),
         _make_imposed_motions_set(state),
@@ -1692,6 +1914,8 @@ def build_starter(state: ConversionState) -> str:
         _make_starter_cloads(state),
         _make_damping(state, rigid_nodes),
         _make_starter_th(state),
+        _make_starter_th_inter(state),
+        _make_starter_th_node_reac(state, rbody_info),
         _make_skipped_comment(state),
         ["/END", HDR],
     ]
