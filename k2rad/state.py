@@ -230,6 +230,21 @@ class ContactAutoSurf2Surf:
 
 
 @dataclass
+class ContactForceTransducer:
+    """*CONTACT_FORCE_TRANSDUCER[_PENALTY] — a measurement-only "contact" that
+    reports the contact force already acting on a surface/part from the model's
+    *real* contacts. It adds NO stiffness. Maps to OpenRadioss /INTER/SUB, a
+    sub-interface of an existing parent interface that outputs the forces applied
+    by a secondary node group on a main surface (read out via /TH/SUBS)."""
+    inter_id: int       # transducer id (used as the /INTER/SUB sub-interface id)
+    title: str
+    surfa: int          # SURFA (LS-DYNA secondary side id)
+    surfb: int          # SURFB (LS-DYNA main side id)
+    satyp: int          # SURFA type: 0=seg,2=partset,3=part,5=all
+    sbtyp: int          # SURFB type
+
+
+@dataclass
 class InitialVelocityNode:
     nid: int
     vx: float; vy: float; vz: float
@@ -498,6 +513,9 @@ class ConversionState:
         # ── Contacts ───────────────────────────────────────────────
         self.contacts_single: List[ContactAutoSingle] = []
         self.contacts_surf2surf: List[ContactAutoSurf2Surf] = []
+        self.force_transducers: List[ContactForceTransducer] = []
+        # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
+        self.th_sub_ids: List[Tuple[int, str]] = []
 
         # ── Control ────────────────────────────────────────────────
         self.ctrl_accuracy: Optional[ControlAccuracy] = None

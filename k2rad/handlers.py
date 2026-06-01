@@ -17,7 +17,7 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull,
     Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
-    ContactAutoSingle, ContactAutoSurf2Surf,
+    ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
@@ -579,6 +579,27 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore, vdc=vdc)
+    )
+
+
+def handle_contact_force_transducer(block: Block, state: ConversionState) -> None:
+    """*CONTACT_FORCE_TRANSDUCER[_PENALTY] — measurement-only contact.
+
+    Card1: surfa surfb surfatyp surfbtyp saboxid sbboxid sapr sbpr
+    Mapped (in the writer) to a /INTER/SUB sub-interface so OpenRadioss reports
+    the contact force already acting between these surfaces — it adds no stiffness.
+    """
+    inter_id, title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    surfa = to_int(f1[0]) if f1 else 0
+    surfb = to_int(f1[1]) if len(f1) > 1 else 0
+    satyp = to_int(f1[2]) if len(f1) > 2 else 0
+    sbtyp = to_int(f1[3]) if len(f1) > 3 else 0
+    state.force_transducers.append(
+        ContactForceTransducer(inter_id, title, surfa, surfb, satyp, sbtyp)
     )
 
 
@@ -1248,6 +1269,8 @@ HANDLERS = {
     "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE":   handle_contact_automatic_surface_to_surface,
     "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
+    "CONTACT_FORCE_TRANSDUCER_PENALTY":        handle_contact_force_transducer,
+    "CONTACT_FORCE_TRANSDUCER":                handle_contact_force_transducer,
 
     # Control
     "CONTROL_IMPLICIT_GENERAL":               handle_control_implicit_general,

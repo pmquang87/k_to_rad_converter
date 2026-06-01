@@ -218,6 +218,25 @@ class ImplicitEngineTests(unittest.TestCase):
         # ilimit=5 -> L_A=5; ectol=0.005 (rctol unset) -> Itol=1 (energy), Toli=0.005.
         self.assertIn("5 1 0.005", engine)
 
+    def test_blank_leading_card_does_not_corrupt_tolerance(self):
+        # A *CONTROL_IMPLICIT_SOLUTION whose first (nsolvr…abstol) card is blank:
+        # the blank line is dropped in parsing, so card 2's value shifts into the
+        # dctol column and would otherwise emit Toli=2.0 (200%, useless). The
+        # converter must reject the implausible tolerance and keep the robust
+        # default instead of "2 3 2".
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTROL_IMPLICIT_SOLUTION\n"
+            "$#  nsolvr    ilimit    maxref     dctol     ectol     rctol\n"
+            "\n"
+            "$#   dnorm    diverg     istif   nlprint\n"
+            "                              2\n"
+            "*CONTROL_TERMINATION",
+        )
+        engine = self._engine_for(deck)
+        self.assertIn("2 2 0.01", engine)
+        self.assertNotIn("2 3 2", engine)
+
     def test_imass_selects_dyna_not_qstat(self):
         deck = IMPL_QSTAT_K.replace(
             "*CONTROL_TERMINATION",
@@ -228,6 +247,119 @@ class ImplicitEngineTests(unittest.TestCase):
         engine = self._engine_for(deck)
         self.assertIn("/IMPL/DYNA/2", engine)
         self.assertNotIn("/IMPL/QSTAT", engine)
+
+
+TRANSDUCER_K = """\
+*KEYWORD
+*TITLE
+Force transducer test
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part
+         1         1         1
+*PART
+rigid pin
+         2         1         2
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SINGLE_SURFACE
+         0         0         5         0
+       0.1
+*CONTACT_FORCE_TRANSDUCER_PENALTY
+         2         1         3         3
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class ForceTransducerTests(unittest.TestCase):
+    """*CONTACT_FORCE_TRANSDUCER_PENALTY → /INTER/SUB (+ /TH/INTER output)."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_transducer_is_handled_not_skipped(self):
+        result, _ = self._convert(TRANSDUCER_K)
+        self.assertNotIn("CONTACT_FORCE_TRANSDUCER_PENALTY", result.skipped_keywords)
+
+    def test_emits_inter_sub_with_parent(self):
+        _, starter = self._convert(TRANSDUCER_K)
+        self.assertIn("/INTER/SUB/", starter)
+        # A real parent /INTER/TYPE7 must also be present for the sub to attach to.
+        self.assertIn("/INTER/TYPE7/", starter)
+
+    def test_emits_th_inter_for_force_output(self):
+        _, starter = self._convert(TRANSDUCER_K)
+        self.assertIn("/TH/INTER", starter)
+
+    def test_no_transducer_means_no_th_inter(self):
+        # The /TH/INTER block is only added when a transducer exists.
+        _, starter = self._convert(TRANSDUCER_K.replace(
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
+            ""))
+        self.assertNotIn("/INTER/SUB/", starter)
+        self.assertNotIn("/TH/INTER", starter)
+
+
+DISPCTRL_K = TRANSDUCER_K.replace(
+    "*CONTROL_TERMINATION",
+    "*DEFINE_CURVE\n"
+    "         1         0       1.0       1.0\n"
+    "                 0.0                 0.0\n"
+    "                 1.0                 1.0\n"
+    "*BOUNDARY_PRESCRIBED_MOTION_RIGID\n"
+    "         2         2         2         1       3.5\n"
+    "*CONTROL_TERMINATION",
+)
+
+
+class ReactionReadoutTests(unittest.TestCase):
+    """*BOUNDARY_PRESCRIBED_MOTION_RIGID → /IMPDISP + /TH/NODE reaction output."""
+
+    def _starter(self, deck: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return Path(convert(path).starter_path).read_text()
+
+    def test_imposed_motion_emits_impdisp(self):
+        self.assertIn("/IMPDISP/", self._starter(DISPCTRL_K))
+
+    def test_reaction_th_node_with_reac_vars(self):
+        starter = self._starter(DISPCTRL_K)
+        self.assertIn("/TH/NODE/", starter)
+        self.assertIn("REACX", starter)
+        self.assertIn("REACY", starter)
+        self.assertIn("REACZ", starter)
+
+    def test_no_reaction_th_node_without_prescribed_motion(self):
+        # TRANSDUCER_K has the rigid part but no prescribed motion → no reaction block.
+        self.assertNotIn("REACX", self._starter(TRANSDUCER_K))
 
 
 if __name__ == "__main__":
