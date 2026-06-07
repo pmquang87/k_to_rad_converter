@@ -346,6 +346,47 @@ class ForceTransducerTests(unittest.TestCase):
         self.assertNotIn("/TH/INTER", starter)
 
 
+class ImplicitContactStubTests(unittest.TestCase):
+    """A contact-free implicit model must get one inert /INTER/TYPE7 self-contact:
+    the OpenRadioss engine segfaults in implicit setup when no interface exists."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "m.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_contactfree_implicit_gets_inert_interface(self):
+        result, starter = self._convert(IMPL_QSTAT_K)
+        self.assertEqual(starter.count("/INTER/TYPE7/"), 1)
+        self.assertTrue(any("no contact interface" in w for w in result.warnings))
+
+    def test_explicit_model_gets_no_injected_contact(self):
+        # Same deck minus *CONTROL_IMPLICIT_GENERAL -> explicit -> no injection.
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
+        result, starter = self._convert(deck)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertFalse(any("no contact interface" in w for w in result.warnings))
+
+    def test_existing_contact_is_not_duplicated(self):
+        # Implicit deck that already defines contact -> exactly one interface,
+        # and no stub-injection warning.
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n"
+            "         0         0         5         0\n"
+            "       0.1\n"
+            "*CONTROL_TERMINATION",
+        )
+        result, starter = self._convert(deck)
+        self.assertEqual(starter.count("/INTER/TYPE7/"), 1)
+        self.assertFalse(any("no contact interface" in w for w in result.warnings))
+
+
 DISPCTRL_K = TRANSDUCER_K.replace(
     "*CONTROL_TERMINATION",
     "*DEFINE_CURVE\n"
@@ -597,6 +638,20 @@ class NodalRigidBodyTests(unittest.TestCase):
         result, _ = self._convert(CNRB_K)
         self.assertNotIn("CONSTRAINED_NODAL_RIGID_BODY_SPC", result.skipped_keywords)
         self.assertNotIn("DEFINE_COORDINATE_NODES", result.skipped_keywords)
+
+    def test_rbody_inertia_is_two_cards(self):
+        # OpenRadioss /RBODY needs the inertia tensor on TWO cards (Jxx Jyy Jzz,
+        # then Jxy Jyz Jxz). Emitting all six on one line makes the reader stop
+        # after Jxx Jyy Jzz and hit the next keyword where card 2 is expected ->
+        # WARNING 100217 "card is missing" + a malformed rigid body that
+        # segfaults the SPMD (np>1) setup (MESSAGE ID 44).
+        _, starter = self._convert(CNRB_K)
+        self.assertIn("Jyy                 Jzz", starter)                    # inertia card 1
+        self.assertIn("Jxy                 Jyz                 Jxz", starter)  # inertia card 2
+        self.assertNotIn("Jzz                 Jxy", starter)   # old 6-on-one-line header gone
+        # Card 4 (Ioptoff/Iexpams) must be present: Ioptoff governs the rigid
+        # body's domain decomposition for HMPP — omitting it segfaults np>1.
+        self.assertIn("Ioptoff", starter)
 
     @staticmethod
     def _rbody_master(starter: str) -> int:

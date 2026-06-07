@@ -1271,8 +1271,8 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # Card 3 (10 fields, 110 chars):
         #   node_ID(I10) sens_ID(I10) skew_ID(I10) Ispher(I10) Mass(F20)
         #   grnd_ID(I10) Ikrem(I10) ICoG(I10) surf_ID(I10) Ifail(I10)
-        # Card 4 (6 floats, 120 chars):
-        #   Jxx(F20) Jyy(F20) Jzz(F20) Jxy(F20) Jxz(F20) Jyz(F20)
+        # Cards 4-5 (3 floats each): Jxx Jyy Jzz  /  Jxy Jyz Jxz
+        #   (inertia MUST be two separate cards — see detailed note below)
         # The Mass field is ADDITIONAL mass added to the rigid body on top of
         # whatever is computed from element distribution + material density.
         # Sources combined:
@@ -1306,23 +1306,32 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 f"*MAT_RIGID pid={pid}: total added mass {added_mass:.6G} "
                 f"({', '.join(sources)}) placed in /RBODY Mass field."
             )
-        # /RBODY format — 2-card variant that empirically works with OpenRadioss
-        # 2024+ in this configuration. The Reference Guide p.1877 documents a
-        # 4-card format (cards 3,4,5,6) but using it triggers ERROR 760 segfault
-        # during element-group setup. The legacy 2-card form below produces a
-        # WARNING 100217 "card is missing" but otherwise solves correctly.
-        # Card 3 (10 fields):
-        #   node_ID(I10) sens_ID(I10) Skew_ID(I10) Ispher(I10) Mass(F20)
-        #   grnd_ID(I10) Ikrem(I10) ICoG(I10) surf_ID(I10) Ifail(I10)
-        # Card 4 (6 inertia floats):
-        #   JXX(F20) JYY(F20) JZZ(F20) JXY(F20) JYZ(F20) JXZ(F20)
+        # /RBODY format (cfg radioss2017+ card layout) — FOUR cards after title:
+        #   Card 1 (10 fields): node_ID sens_ID Skew_ID Ispher Mass
+        #                       grnd_ID Ikrem ICoG surf_ID [Ifail]
+        #   Card 2 (3 floats):  Jxx Jyy Jzz
+        #   Card 3 (3 floats):  Jxy Jyz Jxz
+        #   Card 4 (2 ints):    Ioptoff Iexpams
+        # All four cards are REQUIRED. Two failure modes if any are missing:
+        #   * inertia on one 6-value line -> reader stops after Jxx Jyy Jzz;
+        #   * omitting card 4 -> reader stops after the inertia;
+        # either way it hits the next keyword (/GRNOD/NODE) where it still
+        # expects a card -> WARNING 100217 "card is missing" + a malformed rigid
+        # body. Ioptoff is the rigid-body domain-decomposition flag for HMPP, so
+        # the malformed body segfaults the SPMD (np>1) setup (MESSAGE ID 44) even
+        # though np=1 tolerates it. Inertia is 0 (OpenRadioss computes it from the
+        # node distribution); Ioptoff=Iexpams=0 = defaults.
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
             "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
             f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
-            "#                Jxx                 Jyy                 Jzz                 Jxy                 Jxz                 Jyz",
-            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                Jxx                 Jyy                 Jzz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                Jxy                 Jyz                 Jxz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#  Ioptoff   Iexpams",
+            f"{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"rb_nodes_pid{pid}", unique_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"rb_indnode_pid{pid}", [ind_node])
@@ -1537,8 +1546,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
                 f"{added_mass:.6G} placed in /RBODY Mass field."
             )
 
-        # /RBODY — same 2-card form used by _make_rbodies (the documented 4-card
-        # form triggers ERROR 760 segfault in OpenRadioss 2024+ here). ICoG=0
+        # /RBODY — same 4-card form as _make_rbodies (Card1 + Jxx Jyy Jzz +
+        # Jxy Jyz Jxz + Ioptoff Iexpams; all four required or np>1 segfaults). ICoG=0
         # (=default 1, RefGuide p.1879) MOVES the master node to the computed
         # center of gravity, so a /CLOAD force from *LOAD_RIGID_BODY acts through
         # the CoG as a pure force with no spurious moment — matching LS-DYNA,
@@ -1548,8 +1557,12 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             cnrb.title or f"CNRB_{cnrb.pid}",
             "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
             f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
-            "#                Jxx                 Jyy                 Jzz                 Jxy                 Jxz                 Jyz",
-            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                Jxx                 Jyy                 Jzz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                Jxy                 Jyz                 Jxz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#  Ioptoff   Iexpams",
+            f"{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"cnrb_nodes_pid{cnrb.pid}", secondary_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"cnrb_indnode_pid{cnrb.pid}", [ind_node])
