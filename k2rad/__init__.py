@@ -18,8 +18,44 @@ from typing import List, Optional
 
 from .parser import parse_k_file
 from .handlers import dispatch
-from .state import ConversionState
+from .state import ConversionState, ContactAutoSingle
 from .writer import build_starter, build_engine
+
+
+def _inject_implicit_contact_stub(state: ConversionState) -> None:
+    """Work around an OpenRadioss engine crash.
+
+    The OpenRadioss implicit solver segfaults during setup (before
+    ``IMPLICIT OPTION USED`` is even printed) when the model defines **no**
+    contact interface — even though a part loaded only by boundary conditions
+    or forces is a perfectly valid implicit problem.  A model *with* at least
+    one ``/INTER`` runs fine.
+
+    So when converting an implicit model that has no contact, inject one inert
+    all-parts self-contact (``/INTER/TYPE7``).  On a model whose parts never
+    touch it transmits no load, so results are unchanged — it merely gives the
+    engine the interface its implicit setup requires.
+    """
+    if not state.is_implicit:
+        return
+    if state.contacts_single or state.contacts_surf2surf:
+        return
+    if not (state.solid_elems or state.shell_elems):
+        return  # no deformable surface to build the interface from
+    inter_id = state.next_id()
+    state.contacts_single.append(
+        ContactAutoSingle(
+            inter_id=inter_id,
+            title="auto_implicit_stabilization_self_contact",
+            ssid=0, sstyp=0, fs=0.0, fd=0.0, bt=0.0, dt=1.0e28,
+        )
+    )
+    state.warn(
+        "Implicit model has no contact interface — the OpenRadioss engine "
+        "segfaults in implicit setup without one. Injected an inert all-parts "
+        f"self-contact (/INTER/TYPE7 id {inter_id}); it carries no load unless "
+        "parts actually touch. Remove it if you define real contact."
+    )
 
 
 @dataclass
@@ -71,6 +107,10 @@ def convert(
     state.units = tuple(units)
     for block in blocks:
         dispatch(block, state)
+
+    # 2b. Implicit safety net: a contact-free implicit model segfaults the
+    #     OpenRadioss engine during setup, so give it one inert self-contact.
+    _inject_implicit_contact_stub(state)
 
     # 3. Generate output text
     starter_text = build_starter(state)
