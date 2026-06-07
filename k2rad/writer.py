@@ -53,6 +53,26 @@ def _dof_string(dx: int, dy: int, dz: int) -> str:
     return f"{dx}{dy}{dz}"
 
 
+# ── Small 3-vector helpers (for /SKEW/FIX axis construction) ──────────────────
+
+def _vsub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _vcross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _vnorm(a):
+    import math
+    m = math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+    if m == 0.0:
+        return None
+    return (a[0] / m, a[1] / m, a[2] / m)
+
+
 def _elform_to_ishell(elform: int, is_implicit: bool) -> int:
     if is_implicit:
         return 24   # QBAT – recommended for implicit
@@ -407,7 +427,7 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_skews(state: ConversionState) -> List[str]:
-    if not state.coord_sys:
+    if not state.coord_sys and not state.coord_nodes:
         return []
     lines = ["#-  SKEWS / COORDINATE SYSTEMS:", HDR]
     for cid, cs in sorted(state.coord_sys.items()):
@@ -422,7 +442,89 @@ def _make_skews(state: ConversionState) -> List[str]:
             f"{_f(cs.xp)}{_f(cs.yp)}{_f(cs.zp)}",
             HDR,
         ]
+    for cid, cn in sorted(state.coord_nodes.items()):
+        lines += _emit_skew_from_nodes(state, cn)
     return lines
+
+
+def _skew_axes_from_nodes(state: ConversionState, cn):
+    """Compute the local (X, Y, Z) orthonormal axes of a *DEFINE_COORDINATE_NODES
+    system at t=0 from node coordinates, honouring LS-DYNA's `dir` convention.
+
+    n1->n2 is the `dir` axis; n3 (with n1) fixes the next cyclic axis (toward n3).
+    Returns ((Ox,Oy,Oz), Xaxis, Yaxis) or None if a node/geometry is degenerate.
+    """
+    n1 = state.nodes.get(cn.n1)
+    n2 = state.nodes.get(cn.n2)
+    n3 = state.nodes.get(cn.n3)
+    if not (n1 and n2 and n3):
+        return None
+    origin = (n1.x, n1.y, n1.z)
+    a = _vsub((n2.x, n2.y, n2.z), origin)       # n1->n2 = the `dir` axis
+    b = _vsub((n3.x, n3.y, n3.z), origin)       # n1->n3 lies in the dir/next plane
+    e_dir = _vnorm(a)
+    nrm = _vnorm(_vcross(a, b))                  # plane normal (a x b)
+    if e_dir is None or nrm is None:
+        return None
+    inplane = _vnorm(_vcross(nrm, e_dir))        # perp to dir, in plane, toward n3
+    if inplane is None:
+        return None
+    # Cyclic assignment X->Y->Z->X: dir axis = e_dir, next (in-plane) = inplane,
+    # the one after = nrm. This reproduces /SKEW/MOV's documented axes exactly.
+    if cn.dir == "Y":
+        X, Y, Z = nrm, e_dir, inplane
+    elif cn.dir == "Z":
+        X, Y, Z = inplane, nrm, e_dir
+    else:  # "X" (default)
+        X, Y, Z = e_dir, inplane, nrm
+    return origin, X, Y
+
+
+def _emit_skew_from_nodes(state: ConversionState, cn) -> List[str]:
+    """Emit a /SKEW for a *DEFINE_COORDINATE_NODES system.
+
+    flag=1 (co-rotating) -> /SKEW/MOV with the SAME (N1, N2, N3, Dir) card, which
+    OpenRadioss recomputes every step. flag=0 (fixed) -> /SKEW/FIX with the axes
+    evaluated once from the t=0 node coordinates. If the nodes are missing/
+    degenerate, fall back to /SKEW/MOV so the skew_ID still resolves.
+    """
+    axes = _skew_axes_from_nodes(state, cn)
+    if cn.flag == 1 or axes is None:
+        if cn.flag != 1 and axes is None:
+            state.warn(
+                f"*DEFINE_COORDINATE_NODES cid={cn.cid}: nodes "
+                f"{cn.n1}/{cn.n2}/{cn.n3} missing or collinear at t=0 — emitted a "
+                "moving /SKEW/MOV instead of a fixed /SKEW/FIX."
+            )
+        else:
+            state.warn(
+                f"*DEFINE_COORDINATE_NODES cid={cn.cid}: flag=1 -> co-rotating "
+                f"/SKEW/MOV (N1={cn.n1}, N2={cn.n2}, N3={cn.n3}, Dir={cn.dir})."
+            )
+        return [
+            f"/SKEW/MOV/{cn.cid}",
+            f"SKEW_NODES_{cn.cid}",
+            "#  node_ID1  node_ID2  node_ID3       Dir",
+            f"{_i(cn.n1)}{_i(cn.n2)}{_i(cn.n3)}{cn.dir.rjust(10)}",
+            HDR,
+        ]
+    origin, X, Y = axes
+    state.warn(
+        f"*DEFINE_COORDINATE_NODES cid={cn.cid}: flag={cn.flag} -> fixed "
+        f"/SKEW/FIX with axes computed at t=0 (Dir={cn.dir}); set flag=1 in the "
+        ".k file for a co-rotating /SKEW/MOV."
+    )
+    return [
+        f"/SKEW/FIX/{cn.cid}",
+        f"SKEW_NODES_{cn.cid}",
+        "#  Ox            Oy            Oz",
+        f"{_f(origin[0])}{_f(origin[1])}{_f(origin[2])}",
+        "#  Xx            Xy            Xz",
+        f"{_f(X[0])}{_f(X[1])}{_f(X[2])}",
+        "#  Yx            Yy            Yz",
+        f"{_f(Y[0])}{_f(Y[1])}{_f(Y[2])}",
+        HDR,
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -443,6 +545,87 @@ def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
             seen.add(n)
             out.append(n)
     return out
+
+
+# Mid-edge node -> (corner A, corner B) of its edge, in the node order this
+# converter emits (verified empirically against the real mesh): node5=mid(1,2),
+# node6=mid(2,3), node7=mid(1,3), node8=mid(2,4), node9=mid(3,4), node10=mid(1,4).
+_TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 1, 3), (8, 2, 3), (9, 0, 3)]
+
+
+def _snap_tet10_midsides(state: ConversionState) -> int:
+    """Move every 10-node tet's mid-edge nodes onto the exact midpoints of their
+    corner edges (straight-edged "sub-parametric" /TETRA10).
+
+    A mid-edge node displaced from the midpoint can fold the quadratic Jacobian
+    (det J changes sign inside the element) → OpenRadioss ERROR 489 "BADLY SHAPED
+    10-NODE TETRA". Crucially this is NOT predicted by mid-edge deviation or corner
+    aspect ratio alone — it's the corner+midside interaction — so the only robust,
+    deterministic cure is to straighten the edges: a straight-edged tetra has a
+    constant-sign Jacobian for any non-degenerate corner tet, so it cannot fold.
+    Shared mid-edge nodes map to the same midpoint, so the pass is consistent;
+    curved boundary elements are flattened slightly (still quadratic interior).
+    Returns the number of distinct mid-edge nodes actually moved.
+    """
+    moved: Set[int] = set()
+    for e in state.solid_elems:
+        if len(e.nodes) != 10:
+            continue
+        cs = [state.nodes.get(e.nodes[k]) for k in range(4)]
+        if any(c is None for c in cs):
+            continue
+        for mi, a, b in _TET10_MIDEDGE:
+            mnid = e.nodes[mi]
+            m = state.nodes.get(mnid)
+            if m is None:
+                continue
+            mx = 0.5 * (cs[a].x + cs[b].x)
+            my = 0.5 * (cs[a].y + cs[b].y)
+            mz = 0.5 * (cs[a].z + cs[b].z)
+            if abs(m.x - mx) > 1e-9 or abs(m.y - my) > 1e-9 or abs(m.z - mz) > 1e-9:
+                m.x, m.y, m.z = mx, my, mz
+                moved.add(mnid)
+    return len(moved)
+
+
+def _tet10_badly_shaped(state: ConversionState, nodes: List[int]) -> bool:
+    """True if a 10-node tet's 4-corner shape is a sliver/degenerate tetra that
+    OpenRadioss rejects as /TETRA10 (ERROR 489: BADLY SHAPED 10-NODE TETRA).
+
+    Quadratic tets fail the Jacobian check when the underlying tetra is nearly
+    flat. Criterion (on the 4 corners, independent of mid-edge ordering): shortest
+    edge < 1/8 of the longest (aspect ratio > 8), OR normalized volume
+    V / mean_edge^3 < 0.02, OR non-positive volume. These sliver elements have
+    ~zero volume (negligible stiffness), so the writer drops them rather than keep
+    a deck OpenRadioss won't read.
+    """
+    import math
+    pts = []
+    for n in nodes[:4]:
+        nd = state.nodes.get(n)
+        if nd is None:
+            return False
+        pts.append((nd.x, nd.y, nd.z))
+    if len(pts) < 4:
+        return False
+    c0, c1, c2, c3 = pts
+
+    def dist(a, b):
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+    L = [dist(pts[a], pts[b]) for a in range(4) for b in range(a + 1, 4)]
+    lmin, lmax = min(L), max(L)
+    if lmin <= 0.0:
+        return True
+    if lmax / lmin > 8.0:
+        return True
+    a = (c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2])
+    b = (c2[0] - c0[0], c2[1] - c0[1], c2[2] - c0[2])
+    d = (c3[0] - c0[0], c3[1] - c0[1], c3[2] - c0[2])
+    cx = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+    vol = abs(cx[0] * d[0] + cx[1] * d[1] + cx[2] * d[2]) / 6.0
+    lmean = sum(L) / 6.0
+    return lmean > 0.0 and vol / (lmean ** 3) < 0.02
 
 
 def _make_parts_and_elements(state: ConversionState) -> List[str]:
@@ -491,14 +674,40 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
             # tet-meshed parts (observed on implicit_hr-anlenkung: I-ENERGY
             # ~0.8 J vs EXT-WORK ~690 J, -99.9% energy error). 5-8 unique
             # nodes stay /BRICK (a wedge/pyramid as a degenerate hex is ok).
+            # 10-node solids are quadratic tets -> /TETRA10 (all 10 nodes kept).
             tets = []     # (eid, [n1, n2, n3, n4])
+            tets10 = []   # SolidElem with 10 nodes (quadratic tet)
             bricks = []   # SolidElem with >4 distinct nodes
+            n_bad_t10 = 0
             for e in solids_by_pid[pid]:
+                if len(e.nodes) == 10:
+                    if _tet10_badly_shaped(state, e.nodes):
+                        # Sliver/degenerate quadratic tet — OpenRadioss rejects it
+                        # as /TETRA10 (ERROR 489). Drop it (volume ~0 → negligible);
+                        # any node left free is caught by _make_free_node_constraints.
+                        n_bad_t10 += 1
+                        continue
+                    tets10.append(e)
+                    continue
                 uniq = _ordered_unique_nodes(e.nodes)
                 if len(uniq) == 4:
                     tets.append((e.eid, uniq))
                 else:
                     bricks.append(e)
+            if n_bad_t10:
+                state.warn(
+                    f"PART {pid}: dropped {n_bad_t10} near-degenerate (sliver) 10-node "
+                    "tet(s) that OpenRadioss rejects as /TETRA10 (ERROR 489: badly "
+                    "shaped). Their volume is ~0 so the physical effect is negligible; "
+                    "clean/remesh them to retain the full element count."
+                )
+            if tets10 and (tets or bricks):
+                state.warn(
+                    f"PART {pid}: mixes 10-node tets with 4-node/brick solids. "
+                    "OpenRadioss requires /TETRA10 to use a part_ID distinct from "
+                    "/TETRA4 and /BRICK; emitted together under one /PART, which the "
+                    "starter may reject — split the part by element type if so."
+                )
             if tets:
                 lines.append(f"/TETRA4/{pid}")
                 for eid, nd in tets:
@@ -506,6 +715,14 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                     for n in nd:
                         row += _i(n)
                     lines.append(row)
+                lines.append(HDR)
+            if tets10:
+                # /TETRA10: 2 lines per element — tetra_ID, then the 10 node IDs
+                # (10 fixed-width fields). Node order matches LS-DYNA/Abaqus tet10.
+                lines.append(f"/TETRA10/{pid}")
+                for e in tets10:
+                    lines.append(_i(e.eid))
+                    lines.append("".join(_i(n) for n in e.nodes[:10]))
                 lines.append(HDR)
             if bricks:
                 lines.append(f"/BRICK/{pid}")
@@ -534,11 +751,31 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
 def _make_properties(state: ConversionState) -> List[str]:
     lines = ["#-  PROPERTIES:", HDR]
 
+    # LS-DYNA *DATABASE_EXTENT_BINARY strflg>0 requests strain-tensor output (and
+    # its tens digit selects the plastic-strain tensor — the user's strflg=11
+    # means "strain + plastic strain"). OpenRadioss only computes/stores element
+    # strains for post-processing when Istrain=1 in the property; with Istrain=0
+    # the engine's /ANIM/.../TENS/STRAIN — and, for solids, /ANIM/ELEM/EPSP — come
+    # out empty. So enable Istrain whenever the deck asks for strain output.
+    # (The plastic-strain channels /ANIM/ELEM/EPSP + /ANIM/SHELL/EPSP are always
+    # emitted in the engine, see _make_engine_output.)
+    ext = state.db_extent_binary
+    istrain = 1 if (ext and ext.strflg > 0) else 0
+
     missing_shells = set()
     missing_solids = set()
     missing_beams = set()
-    
+
     part_secids = {p.pid: p.secid if p.secid > 0 else p.pid for p in state.parts.values()}
+
+    # Sections whose parts carry 10-node tets need the quadratic Itetra10 flag set
+    # in /PROP/SOLID so /TETRA10 elements use the quadratic formulation.
+    tet10_secids: Set[int] = set()
+    for e in state.solid_elems:
+        if len(e.nodes) == 10:
+            sid = part_secids.get(e.pid)
+            if sid:
+                tet10_secids.add(sid)
 
     for e in state.shell_elems:
         secid = part_secids.get(e.pid)
@@ -571,20 +808,24 @@ def _make_properties(state: ConversionState) -> List[str]:
             "#                 hm                  hf                  hr                  dm                  dn",
             "                   0                   0                   0                   0                   0",
             "#        N   Istrain               Thick              Ashear              Ithick     Iplas",
-            f"{_i(nip)}         0{_f(sec.t1)}                   0                   0         0",
+            f"{_i(nip)}{_i(istrain)}{_f(sec.t1)}                   0                   0         0",
             HDR,
         ]
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
         isolid = _elform_to_isolid(sec.elform)
+        # /PROP/SOLID card 1 (RefGuide p.1738): Isolid Ismstr Icpre Itetra10 Inpts
+        # Itetra4 Iframe dn. Itetra10=2 = quadratic /TETRA10 (4 integration points)
+        # for parts that have 10-node tets; 0 otherwise (ignored by /TETRA4/brick).
+        itetra10 = 2 if sec.secid in tet10_secids else 0
         lines += [
             f"/PROP/SOLID/{sec.secid}",
             sec.title or f"PROP_{sec.secid}",
-            "#   Isolid    Ismstr               Icpre               Inpts    Itetra    Iframe                  dn",
-            f"{_i(isolid)}         0                   0                   0         0         0                   0",
+            "#   Isolid    Ismstr     Icpre  Itetra10     Inpts   Itetra4    Iframe        dn",
+            f"{_i(isolid)}         0         0{_i(itetra10)}         0         0         0         0",
             "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
             "                   0                   0                   0                   0                   0",
             "#             dt_min   istrain      IHKT",
-            "                   0         0         0",
+            f"                   0{_i(istrain)}         0",
             HDR,
         ]
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
@@ -1152,6 +1393,184 @@ def _con2_to_rot(con2: int) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starter: constrained nodal rigid bodies
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_cnrb_spc(state: ConversionState, cnrb) -> Tuple[str, str, int]:
+    """Map a *CONSTRAINED_NODAL_RIGID_BODY_SPC constraint card to an OpenRadioss
+    /BCS (Tra, Rot, skew_ID). Returns ("000", "000", 0) when nothing is fixed.
+
+    CMO>0: global constraints — con1 = translation code (0-7), con2 = rotation
+           code (0-7), in the global frame (skew_ID = 0).
+    CMO<0: local constraints — con1 = the local coordinate-system ID (the /SKEW),
+           con2 = a 6-digit local DOF code (Tx Ty Tz Rx Ry Rz).
+    |CMO|=2 also moves the constraint point to XSPC/YSPC/ZSPC or SPCNID; for a
+           rigid body the whole body shares each DOF, so that offset is reported
+           but not applied (the /BCS acts through the master node).
+    """
+    cmo = cnrb.cmo
+    if cmo == 0.0:
+        return "000", "000", 0
+    if cmo > 0.0:
+        tra = _con1_to_tra(cnrb.con1)
+        rot = _con2_to_rot(cnrb.con2)
+        skew = 0
+    else:
+        skew = cnrb.con1
+        code = f"{abs(cnrb.con2):06d}"[-6:]
+        tra, rot = code[0:3], code[3:6]
+        if skew and skew not in state.coord_nodes and skew not in state.coord_sys:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: local SPC "
+                f"coordinate system {skew} (CON1) not found among "
+                "*DEFINE_COORDINATE_* — /BCS skew_ID will dangle."
+            )
+    if abs(cmo) == 2.0:
+        state.warn(
+            f"*CONSTRAINED_NODAL_RIGID_BODY_SPC pid={cnrb.pid}: |CMO|=2 "
+            "(constraint at XSPC/YSPC/ZSPC or SPCNID) — the offset point is not "
+            "applied; the /BCS acts on the rigid body's master node."
+        )
+    return tra, rot, skew
+
+
+def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
+    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS for the _SPC option).
+
+    Returns (rad_lines, rigid_node_set, rbody_info_dict) in the same shape as
+    _make_rbodies so the two can be merged: the rbody_info feeds /LOAD_RIGID_BODY
+    → /CLOAD, /BOUNDARY_PRESCRIBED_MOTION_RIGID → /IMPDISP, /INITIAL_VELOCITY_
+    RIGID_BODY → /INIVEL, and the /TH/NODE reaction readout — all keyed by part ID.
+    """
+    lines: List[str] = []
+    rigid_nodes: Set[int] = set()
+    rbody_info: Dict = {}
+    if not state.cnrbs:
+        return lines, rigid_nodes, rbody_info
+
+    # Nodes that belong to at least one element. A /RBODY main node is moved to
+    # the centre of gravity (ICoG, RefGuide p.1879); if that node is attached to
+    # deformable elements the move INVERTS them, which crashes the implicit
+    # factorization on the first step. So the CNRB master must be element-free.
+    elem_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.solid_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.beam_elems:
+        elem_nodes.update((e.n1, e.n2, e.n3))
+    # Synthesize new free node IDs above the current maximum (avoids collisions).
+    _next_free = [max(state.nodes) + 1 if state.nodes else 90000001]
+
+    def _new_master_at_centroid(member_nodes: List[int]) -> int:
+        pts = [state.nodes[n] for n in member_nodes if n in state.nodes]
+        nid = _next_free[0]
+        _next_free[0] += 1
+        if pts:
+            k = len(pts)
+            state.nodes[nid] = NodeData(sum(p.x for p in pts) / k,
+                                        sum(p.y for p in pts) / k,
+                                        sum(p.z for p in pts) / k)
+        else:
+            state.nodes[nid] = NodeData(0.0, 0.0, 0.0)
+        return nid
+
+    lines.append("#-  CONSTRAINED NODAL RIGID BODIES:")
+    lines.append(HDR)
+
+    for cnrb in state.cnrbs:
+        node_set = state.node_sets.get(cnrb.nsid)
+        if not node_set:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: node set "
+                f"{cnrb.nsid} not found — /RBODY not emitted."
+            )
+            continue
+        _set_title, nids = node_set
+        unique_nodes = sorted({n for n in nids if n > 0})
+        if not unique_nodes:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: node set "
+                f"{cnrb.nsid} is empty — /RBODY not emitted."
+            )
+            continue
+
+        # Master/primary node. It MUST be element-free (see elem_nodes note): the
+        # ICoG move would otherwise invert the elements it belongs to. Reuse an
+        # explicit PNODE only when it is element-free; otherwise synthesize a free
+        # node at the set's centroid (mirrors LS-DYNA, which for PNODE=0 creates an
+        # internal node at the centre of mass). The secondary group is the node
+        # set itself — the master stays separate (not slaved to itself).
+        secondary_nodes = unique_nodes
+        if cnrb.pnode > 0 and cnrb.pnode not in elem_nodes:
+            ind_node = cnrb.pnode
+        else:
+            ind_node = _new_master_at_centroid(unique_nodes)
+            if cnrb.pnode > 0:
+                state.warn(
+                    f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: PNODE "
+                    f"{cnrb.pnode} is attached to elements; using a synthesized "
+                    "free master node at the centroid instead (a meshed master "
+                    "moved to the CoG by ICoG would invert its elements)."
+                )
+
+        grnod_id = state.next_id()
+        ind_grnod_id = state.next_id()
+        rigid_nodes.update(secondary_nodes)
+        rigid_nodes.add(ind_node)
+        rbody_info[cnrb.pid] = {
+            "ind_node": ind_node,
+            "grnod_id": grnod_id,
+            "ind_grnod_id": ind_grnod_id,
+            "nodes": secondary_nodes,
+        }
+
+        # Optional added mass on the master node / part (same sources as
+        # _make_rbodies): *ELEMENT_MASS[_NODE_SET] on the master node and
+        # *ELEMENT_MASS_PART[_SET] on this part go into the /RBODY Mass field.
+        node_added = state.added_node_masses.get(ind_node, 0.0)
+        part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
+        added_mass = node_added + (part_fin if part_fin > 0 else part_add)
+        if added_mass > 0:
+            state.warn(
+                f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: added mass "
+                f"{added_mass:.6G} placed in /RBODY Mass field."
+            )
+
+        # /RBODY — same 2-card form used by _make_rbodies (the documented 4-card
+        # form triggers ERROR 760 segfault in OpenRadioss 2024+ here). ICoG=0
+        # (=default 1, RefGuide p.1879) MOVES the master node to the computed
+        # center of gravity, so a /CLOAD force from *LOAD_RIGID_BODY acts through
+        # the CoG as a pure force with no spurious moment — matching LS-DYNA,
+        # which likewise relocates PNODE to the center of mass.
+        lines += [
+            f"/RBODY/{ind_node}",
+            cnrb.title or f"CNRB_{cnrb.pid}",
+            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
+            f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            "#                Jxx                 Jyy                 Jzz                 Jxy                 Jxz                 Jyz",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+        lines += _emit_grnod_node(grnod_id, f"cnrb_nodes_pid{cnrb.pid}", secondary_nodes)
+        lines += _emit_grnod_node(ind_grnod_id, f"cnrb_indnode_pid{cnrb.pid}", [ind_node])
+
+        # _SPC constraint → /BCS on the master node (global or local skew).
+        if cnrb.has_spc:
+            tra, rot, skew = _resolve_cnrb_spc(state, cnrb)
+            if tra != "000" or rot != "000":
+                bc_id = state.next_id()
+                lines += [
+                    f"/BCS/{bc_id}",
+                    f"BC_cnrb_{cnrb.pid}",
+                    "#  Tra rot   skew_ID  grnod_ID",
+                    f"   {tra} {rot}{_i(skew)}{_i(ind_grnod_id)}",
+                    HDR,
+                ]
+
+    return lines, rigid_nodes, rbody_info
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: imposed motions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1171,7 +1590,15 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             state.warn(f"BOUNDARY_PRESCRIBED_MOTION_RIGID pid={pm.pid}: no RBODY found; motion skipped")
             continue
 
-        grnod_id = info["grnod_id"]
+        # Impose the motion on the rigid body's PRIMARY (master) node only, NOT on
+        # every node of the rigid part. The secondary nodes are slaved by /RBODY;
+        # adding /IMPDISP on them creates "incompatible kinematic conditions"
+        # (Starter WARNING ID 312) which OpenRadioss resolves in favour of the
+        # rigid body — silently dropping the imposed motion so the part never moves
+        # (zero reaction → zero strain energy → zero stress). Driving the master
+        # node (the same node the rigid-body /BCS constrains) translates the whole
+        # body correctly.
+        grnod_id = info["ind_grnod_id"]
         dir_str = _DOF_DIR.get(pm.dof, "X").rjust(10)
         fscale = pm.sf
         tstart = pm.birth if pm.birth < 1e27 else 0.0
@@ -1237,48 +1664,79 @@ def _make_energy(state: ConversionState) -> List[str]:
 # Starter: imposed motions for node sets
 # ─────────────────────────────────────────────────────────────────────────────
 
+# LS-DYNA *BOUNDARY_PRESCRIBED_MOTION DOF → (translation, rotation) /BCS codes.
+# 1/2/3 = Tx/Ty/Tz, 5/6/7 = Rx/Ry/Rz. DOF 4 (translation along vector VID) and
+# 8 (rotation about VID) have no global X/Y/Z /BCS code and are not mapped here.
+_PM_DOF_TO_BCS = {
+    1: ("100", "000"), 2: ("010", "000"), 3: ("001", "000"),
+    5: ("000", "100"), 6: ("000", "010"), 7: ("000", "001"),
+}
+
+
+def _or_dof_codes(codes: List[str]) -> str:
+    """OR a list of 3-char DOF codes, e.g. ['100','001'] → '101'."""
+    out = ["0", "0", "0"]
+    for c in codes:
+        for i in range(3):
+            if c[i] == "1":
+                out[i] = "1"
+    return "".join(out)
+
+
 def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     lines: List[str] = []
     if not state.prescribed_motion_sets:
         return lines
 
+    # LS-DYNA convention: *BOUNDARY_PRESCRIBED_MOTION_SET with sf=0 means "fix this
+    # DOF" (zero x any_curve = 0 displacement = fixed). Emit a /BCS (constraint)
+    # instead of an /IMPDISP with a bogus unit scale — critical for symmetry BCs
+    # (treated as IMPDISP with sf=1 the plane nodes would get spurious motion and
+    # the stiffness matrix would go singular). All fixed DOFs of one node set are
+    # combined into ONE /BCS (OpenRadioss applies the union) rather than one card
+    # per DOF — fewer cards and no dependence on whether multiple /BCS stack.
+    fix_tra: Dict[int, List[str]] = defaultdict(list)
+    fix_rot: Dict[int, List[str]] = defaultdict(list)
+    fix_order: List[int] = []
+    motions: List = []
     for pm in state.prescribed_motion_sets:
         if pm.nsid not in state.node_sets:
             state.warn(f"BOUNDARY_PRESCRIBED_MOTION_SET nsid={pm.nsid}: node set not found – skipped")
             continue
-
-        set_title, nids = state.node_sets[pm.nsid]
-
-        # LS-DYNA convention: *BOUNDARY_PRESCRIBED_MOTION_SET with sf=0 means
-        # "fix this DOF" (zero × any_curve = 0 displacement = fixed).
-        # Emit a /BCS (constraint) instead of /IMPDISP with bogus unit scale.
-        # This is critical for symmetry BCs — if treated as IMPDISP with sf=1,
-        # the symmetry plane nodes get spurious motion from the load curve,
-        # making the stiffness matrix singular.
         if pm.sf == 0.0:
-            bc_id = state.next_id()
-            grnod_id = state.next_id()
-            # Translation char string: "100"=X, "010"=Y, "001"=Z
-            # Rotation char string: "100"=Rx, "010"=Ry, "001"=Rz
-            tra = "000"
-            rot = "000"
-            if pm.dof == 1: tra = "100"
-            elif pm.dof == 2: tra = "010"
-            elif pm.dof == 3: tra = "001"
-            elif pm.dof == 4: rot = "100"
-            elif pm.dof == 5: rot = "010"
-            elif pm.dof == 6: rot = "001"
-            lines += [
-                f"/BCS/{bc_id}",
-                set_title or f"BC_set_{pm.nsid}",
-                "#  Tra rot   skew_ID  grnod_ID",
-                f"   {tra} {rot}         0{_i(grnod_id)}",
-                HDR,
-            ]
-            lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
-            continue
+            mapped = _PM_DOF_TO_BCS.get(pm.dof)
+            if mapped is None:
+                state.warn(
+                    f"BOUNDARY_PRESCRIBED_MOTION_SET nsid={pm.nsid}: dof={pm.dof} is "
+                    "not a global X/Y/Z translation (1-3) or rotation (5-7) — e.g. "
+                    "4/8 act along a vector — so no zero-motion /BCS was emitted."
+                )
+                continue
+            if pm.nsid not in fix_tra:
+                fix_order.append(pm.nsid)
+            fix_tra[pm.nsid].append(mapped[0])
+            fix_rot[pm.nsid].append(mapped[1])
+        else:
+            motions.append(pm)
 
-        # Non-zero scale: real prescribed motion → /IMPDISP, /IMPVEL, /IMPACC
+    for nsid in fix_order:
+        set_title, nids = state.node_sets[nsid]
+        tra = _or_dof_codes(fix_tra[nsid])
+        rot = _or_dof_codes(fix_rot[nsid])
+        bc_id = state.next_id()
+        grnod_id = state.next_id()
+        lines += [
+            f"/BCS/{bc_id}",
+            set_title or f"BC_set_{nsid}",
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   {tra} {rot}         0{_i(grnod_id)}",
+            HDR,
+        ]
+        lines += _emit_grnod_node(grnod_id, set_title or f"SET_{nsid}", nids)
+
+    # Non-zero scale: real prescribed motion → /IMPDISP, /IMPVEL, /IMPACC
+    for pm in motions:
+        set_title, nids = state.node_sets[pm.nsid]
         grnod_id = state.next_id()
         motion_id = state.next_id()
         dir_str = _DOF_DIR.get(pm.dof, "X").rjust(10)
@@ -1621,27 +2079,33 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
     # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
     #
-    # MUMPS memory mode: emit /IMPL/MUMPS/AUTOC (M_OCORE=-1), which lets MUMPS
-    # keep the factors in core when they fit and spill to disk only if needed.
-    # In-core factorization skips the out-of-core disk I/O, so AUTOC is faster
-    # than the always-on-disk /IMPL/MUMPS/OUTCORE.
-    #
-    # History: on the earlier FORCE-driven decks AUTOC died at t≈0 with MUMPS
-    # -13 ("workspace too large") / ISTOP=-4 — but that was a symptom of the
-    # singular tangent (a free rigid body reacted only by contact). The missing
-    # load path forced endless dt-bisection, and the contact fill-in during
-    # bisection overflowed the in-core workspace. Switching to DISPLACEMENT
-    # control (*BOUNDARY_PRESCRIBED_MOTION on the loading pin) removed the
-    # rigid-body mode, so the tangent is non-singular, Newton converges, and the
-    # factors comfortably fit in core. Validated on 6kN_dy=3.5mm_dz=1mm: AUTOC
-    # marched cleanly past cycle 404 while OUTCORE died at cycle 400 with MUMPS
-    # -13 — and that -13 was a transient "ERROR MEMORY ISSUE" (the engine's own
-    # words) that can strike either mode on flaky DDR4. AUTOC is faster and at
-    # least as reliable here, so it is the default; switch this line back to
-    # /IMPL/MUMPS/OUTCORE only if a model's factors genuinely do not fit in RAM.
+    # MUMPS memory mode, chosen by model size:
+    #   /IMPL/MUMPS/AUTOC (M_OCORE=-1) keeps the factors in core; it is faster
+    #     (no disk I/O) but in this OpenRadioss build does NOT reliably spill to
+    #     disk, so it CRASHES when the factors don't fit in RAM.
+    #   /IMPL/MUMPS/OUTCORE forces out-of-core: MUMPS streams the factors to disk,
+    #     so a large factorization fits (slower, needs scratch disk space).
+    # Direct-solver fill-in for a 3D solid model grows much faster than the DOF
+    # count, so a big mesh can need tens-to-hundreds of GB in core. The ~190k-node
+    # hr-anlenkung fit in core (AUTOC, validated past cycle 404 on 6kN_dy=...),
+    # but the ~700k-node / 575k-solid elevator-linkage (~2.4M DOF) overflows it and
+    # the first factorization dies silently. So switch to OUTCORE above a node
+    # threshold. (For force-driven decks AUTOC also crashed when a singular tangent
+    # forced dt-bisection fill-in to overflow — another reason to prefer OUTCORE
+    # for the hard/large cases.) Override by hand-editing this line if the machine
+    # has enough RAM to keep a large model in core.
+    n_nodes = len(state.nodes)
+    mumps_mode = "OUTCORE" if n_nodes > 250_000 else "AUTOC"
+    if mumps_mode == "OUTCORE":
+        state.warn(
+            f"Implicit MUMPS set to OUTCORE (out-of-core): {n_nodes} nodes is a "
+            "large direct factorization that likely won't fit in RAM in-core. "
+            "Ensure ample free scratch-disk space; switch /IMPL/MUMPS/OUTCORE back "
+            "to AUTOC if the machine has enough memory to factor in core."
+        )
     lines += ["/IMPL/PRINT/NONL/-1",
               "/IMPL/SOLVER/2", "  0 0 0 0",
-              "/IMPL/MUMPS/AUTOC",
+              f"/IMPL/MUMPS/{mumps_mode}",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
     if iteopt > 0 or kfail > 0:
@@ -1893,11 +2357,82 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
     return lines
 
 
+def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """Implicit guard: fix nodes attached to no element and no rigid body.
+
+    A free node carries no stiffness, so its DOFs are zero rows in the implicit
+    tangent → a singular matrix → the MUMPS factorization fails (or floods the
+    solver with null pivots). LS-DYNA tolerates such reference nodes — e.g.
+    *DEFINE_COORDINATE_NODES nodes (we bake those into /SKEW/FIX coordinates so
+    they end up unreferenced) and lone origin markers — but OpenRadioss implicit
+    does not. Constrain them (they drive nothing, so fixing them is inert).
+
+    Nodes of a MOVING skew (/SKEW/MOV, *DEFINE_COORDINATE_NODES flag=1) are left
+    free so the frame can co-rotate. Explicit runs skip this entirely.
+    """
+    if not state.is_implicit or not state.nodes:
+        return []
+    elem_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.solid_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.beam_elems:
+        elem_nodes.update((e.n1, e.n2, e.n3))
+    keep_free: Set[int] = set()
+    for cn in state.coord_nodes.values():
+        if cn.flag == 1:
+            keep_free.update((cn.n1, cn.n2, cn.n3))
+    free = sorted(n for n in state.nodes
+                  if n > 0 and n not in elem_nodes and n not in rigid_nodes
+                  and n not in keep_free)
+    if not free:
+        return []
+    state.warn(
+        f"{len(free)} free node(s) attached to no element or rigid body were "
+        "constrained with /BCS to keep the implicit tangent non-singular (e.g. "
+        "*DEFINE_COORDINATE_NODES reference nodes baked into /SKEW/FIX, or origin "
+        "markers). They drive nothing, so the constraint is inert."
+    )
+    bc_id = state.next_id()
+    grnod_id = state.next_id()
+    lines = [
+        "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
+        f"/BCS/{bc_id}",
+        "fix_free_reference_nodes",
+        "#  Tra rot   skew_ID  grnod_ID",
+        f"   111 111         0{_i(grnod_id)}",
+        HDR,
+    ]
+    lines += _emit_grnod_node(grnod_id, "free_reference_nodes", free)
+    return lines
+
+
 def build_starter(state: ConversionState) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
 
+    # Straighten 10-node tet edges (mid-edge nodes -> edge midpoints) so no
+    # quadratic Jacobian folds (OpenRadioss ERROR 489). Must run before nodes are
+    # emitted and before CNRB centroids are computed from node coordinates.
+    n_snapped = _snap_tet10_midsides(state)
+    if n_snapped:
+        state.warn(
+            f"{n_snapped} /TETRA10 mid-edge node(s) snapped onto their edge "
+            "midpoints (straight-edged sub-parametric tets) to avoid folded "
+            "quadratic Jacobians (OpenRadioss ERROR 489: badly shaped 10-node "
+            "tetra). Curved boundary elements are flattened slightly; remesh with "
+            "better element quality to retain exact curved edges."
+        )
+
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
+    # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
+    # be visible to every rigid-body-keyed section below, so merge their info,
+    # rigid-node set, and rad lines with the *MAT_RIGID ones.
+    cnrb_lines, cnrb_rigid_nodes, cnrb_info = _make_cnrb_rbodies(state)
+    rigid_nodes = rigid_nodes | cnrb_rigid_nodes
+    rbody_info = {**rbody_info, **cnrb_info}
+    rbody_lines = rbody_lines + cnrb_lines
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
     state.rbody_ind_grnods = {pid: info["ind_grnod_id"] for pid, info in rbody_info.items()}
 
@@ -1921,6 +2456,7 @@ def build_starter(state: ConversionState) -> str:
         _make_inivel(state, rbody_info),
         _make_pressure_loads(state),
         _make_starter_cloads(state),
+        _make_free_node_constraints(state, rigid_nodes),
         _make_damping(state, rigid_nodes),
         _make_starter_th(state),
         _make_starter_th_inter(state),
