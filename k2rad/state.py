@@ -162,6 +162,64 @@ class CoordSys:
 
 
 @dataclass
+class CoordNodes:
+    """*DEFINE_COORDINATE_NODES — a local system defined by three nodes.
+
+    LS-DYNA card: cid n1 n2 n3 flag dir
+      n1     = origin node
+      n1->n2 = the local axis named by `dir` (default X)
+      n3     = together with n1 defines the in-plane (next cyclic) direction
+      flag   = 0: orientation evaluated once at t=0 (fixed);
+               1: updated every step (the system co-rotates with the nodes)
+      dir    = 'X' | 'Y' | 'Z' — which local axis the n1->n2 vector defines
+
+    OpenRadioss /SKEW/MOV uses the IDENTICAL (N1, N2, N3, Dir) convention, so
+    flag=1 maps 1:1 to a moving skew; flag=0 maps to a /SKEW/FIX whose axes are
+    computed from the node coordinates at t=0 (Reference Guide p.2217-2221).
+    """
+    cid: int
+    n1: int
+    n2: int
+    n3: int
+    flag: int = 0
+    dir: str = "X"
+
+
+@dataclass
+class ConstrainedNodalRigidBody:
+    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] — a rigid body tied from a node set.
+
+    Card 1: pid cid nsid pnode iprt drflag rrflag
+      pid    = part ID of the nodal rigid body — referenced by *LOAD_RIGID_BODY,
+               *BOUNDARY_PRESCRIBED_MOTION_RIGID, *INITIAL_VELOCITY_RIGID_BODY
+      cid    = coordinate system for the inertia/output (informational here)
+      nsid   = node-set ID; these nodes become the rigid body's secondary nodes
+      pnode  = primary/master node (0 = pick the first node of the set; the
+               master location does not change a rigid body's physics, only
+               where loads/reactions are applied/reported)
+
+    _SPC option adds a constraint card (R16 Vol I p.10-149):
+        cmo con1 con2 spcnid xspc yspc zspc
+      cmo > 0 : constraints in the GLOBAL system; con1 = translation code (0-7),
+                con2 = rotation code (0-7) — same convention as *MAT_RIGID.
+      cmo < 0 : constraints in a LOCAL system; con1 = the local coordinate-system
+                ID (a *DEFINE_COORDINATE_* cid, fixed in time), con2 = a 6-digit
+                local DOF code (Tx Ty Tz Rx Ry Rz, e.g. 010000 = local-y trans).
+    Maps to an OpenRadioss /BCS on the rigid body's master node.
+    """
+    pid: int
+    nsid: int
+    pnode: int = 0
+    cid: int = 0
+    title: str = ""
+    has_spc: bool = False
+    cmo: float = 0.0
+    con1: int = 0
+    con2: int = 0
+    spcnid: int = 0
+
+
+@dataclass
 class BcsSpc:
     bc_id: int
     nsid: int           # node set ID
@@ -477,6 +535,8 @@ class ConversionState:
 
         self.curves: Dict[int, Curve] = {}
         self.coord_sys: Dict[int, CoordSys] = {}
+        # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
+        self.coord_nodes: Dict[int, CoordNodes] = {}
 
         # ── Sets / groups ──────────────────────────────────────────
         self.node_sets: Dict[int, Tuple[str, List[int]]] = {}   # nsid → (title, [nids])
@@ -486,6 +546,10 @@ class ConversionState:
         self.bcs_spcs: List[BcsSpc] = []
         self.prescribed_motions: List[PrescribedMotionRigid] = []
         self.prescribed_motion_sets: List[PrescribedMotionSet] = []
+
+        # ── Constraints ────────────────────────────────────────────
+        # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
+        self.cnrbs: List[ConstrainedNodalRigidBody] = []
 
         # ── Loads ──────────────────────────────────────────────────
         self.load_rigid_bodies: List[LoadRigidBody] = []

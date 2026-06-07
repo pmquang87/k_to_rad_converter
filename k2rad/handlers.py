@@ -15,7 +15,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull,
-    Curve, CoordSys,
+    Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
@@ -170,9 +170,11 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
             n9  = all_nodes[8] if len(all_nodes) > 8 else 0
             n10 = all_nodes[9] if len(all_nodes) > 9 else 0
             if n9 != 0 or n10 != 0:
-                # True tet10: n1-n4 are corners, n5-n10 are mid-edge nodes.
-                # Store only the 4 corner nodes; writer will pad to 8 for /BRICK.
-                nodes = all_nodes[:4]
+                # True 10-node quadratic tetra (n1-n4 corners, n5-n10 mid-edge):
+                # keep ALL 10 nodes. The writer emits these as /TETRA10. Storing
+                # only the 4 corners would orphan every mid-edge node (no element
+                # references it) → zero-stiffness DOFs → a singular implicit matrix.
+                nodes = all_nodes[:10]
             else:
                 # Pseudo-hex8 or tet4 in ten-node format (n9=n10=0): keep n1-n8.
                 nodes = all_nodes[:8]
@@ -415,6 +417,43 @@ def handle_define_coordinate_system(block: Block, state: ConversionState) -> Non
     state.coord_sys[cid] = CoordSys(cid, xo, yo, zo, xl, yl, zl, xp, yp, zp)
 
 
+def handle_define_coordinate_nodes(block: Block, state: ConversionState) -> None:
+    """*DEFINE_COORDINATE_NODES → local system from three nodes.
+
+    LS-DYNA card (R16 Vol I p.17-67):  cid n1 n2 n3 flag dir
+      n1->n2 is the `dir` axis (default X); n3 fixes the in-plane direction;
+      flag=1 updates the system every step (moving), flag=0 (default) is fixed.
+    DIR is the only alphabetic field, so detect it wherever it lands. LS-PrePost
+    writes FLAG and DIR in adjacent columns so they collapse into a single token
+    when whitespace-split (e.g. "0X" = flag 0, dir X; "1Y" = flag 1, dir Y), so a
+    trailing X/Y/Z letter on an otherwise-numeric token is peeled off as DIR.
+    """
+    data = [line for line in block.raw if parse_free(line)]
+    if not data:
+        return
+    toks = parse_free(data[0])
+    dir_ = "X"
+    nums: List[str] = []
+    for tok in toks:
+        u = tok.strip().upper()
+        if u in ("X", "Y", "Z"):
+            dir_ = u
+        elif len(u) >= 2 and u[-1] in ("X", "Y", "Z") and u[:-1].lstrip("+-").isdigit():
+            nums.append(u[:-1])   # the FLAG value
+            dir_ = u[-1]
+        else:
+            nums.append(tok)
+    if len(nums) < 4:
+        state.warn("*DEFINE_COORDINATE_NODES: incomplete card – skipped")
+        return
+    cid  = to_int(nums[0])
+    n1   = to_int(nums[1])
+    n2   = to_int(nums[2])
+    n3   = to_int(nums[3])
+    flag = to_int(nums[4]) if len(nums) > 4 else 0
+    state.coord_nodes[cid] = CoordNodes(cid, n1, n2, n3, flag, dir_)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sets
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,6 +561,62 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
         state.prescribed_motions.append(
             PrescribedMotionRigid(pid, dof, vad, lcid, sf, death, birth)
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Constraints
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS for _SPC).
+
+    LS-DYNA R16 Vol I (p.10-146..151):
+      Card 1: PID CID NSID PNODE IPRT DRFLAG RRFLAG
+      _SPC card (only with the _SPC option):
+        CMO CON1 CON2 SPCNID XSPC YSPC ZSPC
+        CMO>0 → CON1/CON2 are global translation/rotation codes (0-7);
+        CMO<0 → CON1 is the local coordinate-system ID, CON2 a 6-digit local
+        DOF code. Card-1 CID is the rigid body's (output/release) local system.
+
+    The _INERTIA option (extra mass/inertia cards) is not parsed here; mass is
+    instead taken from *ELEMENT_MASS_* on the part/master node (see writer).
+    """
+    raw = block.raw
+    offset = _title_offset(block)          # title line for the _TITLE option
+    is_spc = block.keyword.endswith("_SPC")
+    # Card 1
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if len(f1) < 3:
+        state.warn("*CONSTRAINED_NODAL_RIGID_BODY: incomplete Card 1 – skipped")
+        return
+    pid   = to_int(f1[0])
+    cid   = to_int(f1[1])
+    nsid  = to_int(f1[2])
+    pnode = to_int(f1[3]) if len(f1) > 3 else 0
+    drflag = to_int(f1[5]) if len(f1) > 5 else 0
+    rrflag = to_int(f1[6]) if len(f1) > 6 else 0
+    if nsid == 0:                          # NSID=0 → node set ID equals PID
+        nsid = pid
+    if drflag or rrflag:
+        state.warn(
+            f"*CONSTRAINED_NODAL_RIGID_BODY pid={pid}: DRFLAG={drflag}/RRFLAG="
+            f"{rrflag} (per-node DOF releases) are not converted — the /RBODY ties "
+            "all secondary-node DOFs. Model these releases manually if required."
+        )
+    title = _read_title(block) if offset else ""
+    cnrb = ConstrainedNodalRigidBody(
+        pid=pid, nsid=nsid, pnode=pnode, cid=cid, title=title,
+    )
+    if is_spc:
+        # SPC card: CMO CON1 CON2 SPCNID XSPC YSPC ZSPC
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        if f2:
+            cnrb.has_spc = True
+            cnrb.cmo    = to_float(f2[0]) if len(f2) > 0 else 0.0
+            cnrb.con1   = to_int(f2[1])   if len(f2) > 1 else 0
+            cnrb.con2   = to_int(f2[2])   if len(f2) > 2 else 0
+            cnrb.spcnid = to_int(f2[3])   if len(f2) > 3 else 0
+    state.cnrbs.append(cnrb)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1254,7 +1349,7 @@ HANDLERS = {
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
     "DEFINE_COORDINATE_SYSTEM":               handle_define_coordinate_system,
-    "DEFINE_COORDINATE_NODES":                handle_skip,
+    "DEFINE_COORDINATE_NODES":                handle_define_coordinate_nodes,
     "DEFINE_COORDINATE_VECTOR":               handle_skip,
 
     # Sets
@@ -1272,6 +1367,10 @@ HANDLERS = {
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
+
+    # Constraints
+    "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
+    "CONSTRAINED_NODAL_RIGID_BODY_SPC":       handle_constrained_nodal_rigid_body,
 
     # Mass / inertia additions
     "ELEMENT_MASS":                           handle_element_mass,
