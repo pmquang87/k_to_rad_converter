@@ -942,6 +942,75 @@ def _resolve_contact_master(state: ConversionState, sid: int, styp: int, out_lin
     return surf_id
 
 
+def _contact_master_pids(state: ConversionState, sid: int, styp: int) -> Set[int]:
+    """Part IDs a contact MAIN side (sid/styp) resolves to (same rules as
+    _resolve_contact_master)."""
+    pids: Set[int] = set()
+    if styp == 3:
+        pids.add(sid)
+    elif styp == 2:
+        if sid in state.part_sets:
+            pids.update(state.part_sets[sid][1])
+    elif styp in (0, 1):
+        if sid in state.parts:
+            pids.add(sid)
+        elif sid in state.part_sets:
+            pids.update(state.part_sets[sid][1])
+    return pids
+
+
+def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
+    """Solid PIDs that appear on the MAIN side of some contact interface.
+
+    These are emitted as a /SURF/PART/EXT (the external surface of a solid part).
+    See _warn_implicit_solid_contact_np1 for why that matters in implicit np>1.
+    """
+    all_solid_pids = {e.pid for e in state.solid_elems}
+    if not all_solid_pids:
+        return set()
+    out: Set[int] = set()
+    for c in state.contacts_single:
+        if c.ssid == 0:
+            out |= all_solid_pids                      # all-parts self-contact
+        else:
+            out |= _contact_master_pids(state, c.ssid, c.sstyp) & all_solid_pids
+    for c in state.contacts_surf2surf:
+        out |= _contact_master_pids(state, c.msid, c.mstyp) & all_solid_pids
+    return out
+
+
+def _warn_implicit_solid_contact_np1(state: ConversionState) -> None:
+    """Warn that an implicit deck with a solid-part contact surface must be run
+    single-domain (np=1).
+
+    The OpenRadioss SPMD engine segfaults (MESSAGE ID 44 / Segmentation
+    Violation) at the FIRST implicit solve when this kind of model is run
+    multi-domain (np>1).  It was verified (elevator-linkage, MUMPS 5.5.1) that
+    the crash is in the distributed implicit solve, NOT in the contact surface:
+    the identical model crashes the same way whether the contact MAIN is the
+    solid's /SURF/PART/EXT or a /SURF/GRSHEL of an equivalent null-shell skin,
+    and it reaches CYCLE 0 (past all surface/contact setup) before dying.  np=1
+    is unaffected.  This is an upstream engine limitation we cannot rewrite the
+    deck around, so flag it loudly.
+    """
+    if not state.is_implicit:
+        return
+    solid_pids = _solid_contact_master_pids(state)
+    if not solid_pids:
+        return
+    state.warn(
+        "Implicit deck with a solid-part contact surface (parts "
+        f"{sorted(solid_pids)}): the OpenRadioss SPMD engine segfaults "
+        "(MESSAGE ID 44, Segmentation Violation) at the first implicit solve "
+        "when run multi-domain. RUN THIS DECK WITH np=1 (one MPI domain) -- the "
+        "starter and the np=1 engine are unaffected. This is an upstream "
+        "OpenRadioss engine limitation: the crash is in the distributed implicit "
+        "solve, independent of the contact-surface representation (verified with "
+        "both /SURF/PART/EXT and a /SURF/GRSHEL null-shell skin), so the "
+        "converter cannot rewrite the deck around it."
+    )
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     if not state.contacts_single and not state.contacts_surf2surf:
         return []

@@ -387,6 +387,91 @@ class ImplicitContactStubTests(unittest.TestCase):
         self.assertFalse(any("no contact interface" in w for w in result.warnings))
 
 
+# Two tets sharing one face + an all-parts self-contact: exercises a solid-part
+# contact MAIN surface (/SURF/PART/EXT).  In an IMPLICIT deck this surface makes
+# the OpenRadioss SPMD engine segfault (MESSAGE ID 44) at the first implicit
+# solve when run multi-domain (np>1) -- an upstream engine bug, independent of
+# the surface representation -- so the converter must warn the user to run np=1.
+SOLID_SELFCONTACT_K = """\
+*KEYWORD
+*TITLE
+solid self-contact
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             0.0             1.0             0.0
+       4             0.0             0.0             1.0
+       5             1.0             1.0             1.0
+*ELEMENT_SOLID
+       1       1       1       2       3       4
+       2       1       2       3       4       5
+*PART
+solid
+         1         1         1
+*SECTION_SOLID
+         1        10
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SINGLE_SURFACE
+         0         0         5         0
+       0.1
+*CONTROL_IMPLICIT_GENERAL
+         1     0.001
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class SolidContactSurfaceTests(unittest.TestCase):
+    """An implicit deck with a solid-part contact surface still emits the compact
+    /SURF/PART/EXT, but must warn that OpenRadioss SPMD (np>1) segfaults on it so
+    the user runs np=1.  (The np>1 crash is an upstream engine bug in the
+    distributed implicit solve, not the surface, so the converter cannot rewrite
+    the deck around it -- verified that a /SURF/GRSHEL null-shell skin crashes
+    identically.)"""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "s.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _np1_warning(result):
+        return [w for w in result.warnings
+                if "np=1" in w and "solid-part contact" in w]
+
+    def test_implicit_solid_contact_warns_run_np1(self):
+        result, starter = self._convert(SOLID_SELFCONTACT_K)
+        self.assertIn("/SURF/PART/EXT", starter)        # surface unchanged
+        warns = self._np1_warning(result)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("MESSAGE ID 44", warns[0])
+
+    def test_explicit_solid_contact_does_not_warn(self):
+        # Same model without *CONTROL_IMPLICIT_GENERAL -> explicit -> the np>1
+        # implicit engine bug does not apply, so no np=1 warning.
+        deck = SOLID_SELFCONTACT_K.replace(
+            "*CONTROL_IMPLICIT_GENERAL\n         1     0.001\n", "")
+        result, starter = self._convert(deck)
+        self.assertIn("/SURF/PART/EXT", starter)
+        self.assertEqual(self._np1_warning(result), [])
+
+    def test_contactfree_implicit_solid_also_warns(self):
+        # A contact-free implicit solid deck gets an injected all-parts self
+        # contact (ImplicitContactStubTests) -> that is a solid-part contact too,
+        # so it must also carry the np=1 warning.
+        deck = SOLID_SELFCONTACT_K.replace(
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n         0         0         5         0\n"
+            "       0.1\n", "")
+        result, _ = self._convert(deck)
+        self.assertEqual(len(self._np1_warning(result)), 1)
+
+
 DISPCTRL_K = TRANSDUCER_K.replace(
     "*CONTROL_TERMINATION",
     "*DEFINE_CURVE\n"
