@@ -19,7 +19,7 @@ from typing import List, Optional
 from .parser import parse_k_file
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle
-from .writer import build_starter, build_engine
+from .writer import build_starter, build_engine, _warn_implicit_solid_contact_np1
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -111,6 +111,12 @@ def convert(
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.
     _inject_implicit_contact_stub(state)
+
+    # 2c. Implicit np>1 limitation: a solid-part contact surface makes the
+    #     OpenRadioss SPMD engine segfault at the first implicit solve. The
+    #     converter cannot rewrite the deck around it (it is not a surface bug),
+    #     so warn the user to run np=1.
+    _warn_implicit_solid_contact_np1(state)
 
     # 3. Generate output text
     starter_text = build_starter(state)
