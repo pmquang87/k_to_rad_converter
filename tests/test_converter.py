@@ -209,10 +209,10 @@ class ImplicitEngineTests(unittest.TestCase):
         # Robust nonlinear defaults: reform every 2 iters, force, tol 1e-2.
         self.assertIn("/IMPL/NONLIN/1", engine)
         self.assertIn("2 2 0.01", engine)
-        # MUMPS in-core/auto memory mode is the default: faster than always-on-
-        # disk OUTCORE, and viable since displacement control removed the
-        # singular tangent that used to overflow the in-core workspace.
-        self.assertIn("/IMPL/MUMPS/AUTOC", engine)
+        # MUMPS AUTOCORE is the default memory mode: starts in-core (fast) and
+        # auto-switches to out-of-core only if the factors don't fit, superseding
+        # the obsolete in-core-only AUTOC and the always-on-disk (slow) OUTCORE.
+        self.assertIn("/IMPL/MUMPS/AUTOCORE", engine)
         self.assertNotIn("/IMPL/MUMPS/OUTCORE", engine)
 
     def test_solution_overrides_nonlin(self):
@@ -246,9 +246,11 @@ class ImplicitEngineTests(unittest.TestCase):
         self.assertIn("2 2 0.01", engine)
         self.assertNotIn("2 3 2", engine)
 
-    def test_large_model_forces_outcore_mumps(self):
-        # A direct in-core factorization of a very large 3D model overflows RAM
-        # (AUTOC crashes silently at the first factor); switch to out-of-core.
+    def test_large_model_still_uses_autocore_mumps(self):
+        # AUTOCORE manages the in-core/out-of-core decision itself, so model size
+        # no longer changes the keyword: even a very large 3D model uses
+        # /IMPL/MUMPS/AUTOCORE (not the slow always-on-disk OUTCORE). Validated on
+        # the ~834k-node elevator-linkage (np=1 -nt 12).
         from k2rad.state import ConversionState, NodeData, ControlImplicitGeneral
         from k2rad.writer import build_engine
         st = ConversionState()
@@ -256,8 +258,8 @@ class ImplicitEngineTests(unittest.TestCase):
         st.ctrl_implicit_gen = ControlImplicitGeneral(1, 0.001, 2, 1)
         st.nodes = {i: NodeData(0.0, 0.0, 0.0) for i in range(1, 250_002)}  # >250k
         engine = build_engine(st)
-        self.assertIn("/IMPL/MUMPS/OUTCORE", engine)
-        self.assertNotIn("/IMPL/MUMPS/AUTOC", engine)
+        self.assertIn("/IMPL/MUMPS/AUTOCORE", engine)
+        self.assertNotIn("/IMPL/MUMPS/OUTCORE", engine)
 
     def test_imass_selects_dyna_not_qstat(self):
         deck = IMPL_QSTAT_K.replace(

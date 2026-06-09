@@ -2161,33 +2161,21 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # N=2 is MUMPS direct solver. (N=7 Auto solver is NO LONGER SUPPORTED
     # in OpenRadioss 2024+ per MESSAGE ID 296 — it now falls back to MUMPS.)
     #
-    # MUMPS memory mode, chosen by model size:
-    #   /IMPL/MUMPS/AUTOC (M_OCORE=-1) keeps the factors in core; it is faster
-    #     (no disk I/O) but in this OpenRadioss build does NOT reliably spill to
-    #     disk, so it CRASHES when the factors don't fit in RAM.
-    #   /IMPL/MUMPS/OUTCORE forces out-of-core: MUMPS streams the factors to disk,
-    #     so a large factorization fits (slower, needs scratch disk space).
-    # Direct-solver fill-in for a 3D solid model grows much faster than the DOF
-    # count, so a big mesh can need tens-to-hundreds of GB in core. The ~190k-node
-    # hr-anlenkung fit in core (AUTOC, validated past cycle 404 on 6kN_dy=...),
-    # but the ~700k-node / 575k-solid elevator-linkage (~2.4M DOF) overflows it and
-    # the first factorization dies silently. So switch to OUTCORE above a node
-    # threshold. (For force-driven decks AUTOC also crashed when a singular tangent
-    # forced dt-bisection fill-in to overflow — another reason to prefer OUTCORE
-    # for the hard/large cases.) Override by hand-editing this line if the machine
-    # has enough RAM to keep a large model in core.
-    n_nodes = len(state.nodes)
-    mumps_mode = "OUTCORE" if n_nodes > 250_000 else "AUTOC"
-    if mumps_mode == "OUTCORE":
-        state.warn(
-            f"Implicit MUMPS set to OUTCORE (out-of-core): {n_nodes} nodes is a "
-            "large direct factorization that likely won't fit in RAM in-core. "
-            "Ensure ample free scratch-disk space; switch /IMPL/MUMPS/OUTCORE back "
-            "to AUTOC if the machine has enough memory to factor in core."
-        )
+    # MUMPS memory mode: /IMPL/MUMPS/AUTOCORE. MUMPS starts in-core (fast, no
+    # disk I/O) and automatically switches to out-of-core ONLY if the factors do
+    # not fit in available memory (Altair Radioss 2026 /IMPL/MUMPS/AUTOCORE).
+    # This supersedes the two older modes we used to choose between by mesh size:
+    #   - /IMPL/MUMPS/AUTOC is OBSOLETE (and in this build never reliably spilled
+    #     to disk, so it crashed silently when the factors overflowed RAM);
+    #   - /IMPL/MUMPS/OUTCORE forces always-on-disk streaming -- safe but slow.
+    # AUTOCORE gives in-core speed with an automatic disk fallback, so one mode
+    # covers both the ~190k-node hr-anlenkung and the ~834k-node / 2.4M-DOF
+    # elevator-linkage. Validated on the elevator (np=1 -nt 12): runs in-core and
+    # writes results, far faster than OUTCORE. Hand-edit this to
+    # /IMPL/MUMPS/OUTCORE only to force disk streaming on a RAM-starved machine.
     lines += ["/IMPL/PRINT/NONL/-1",
               "/IMPL/SOLVER/2", "  0 0 0 0",
-              f"/IMPL/MUMPS/{mumps_mode}",
+              "/IMPL/MUMPS/AUTOCORE",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
     if iteopt > 0 or kfail > 0:
