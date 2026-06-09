@@ -1222,10 +1222,15 @@ def handle_skip(block: Block, state: ConversionState) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_database_binary_d3plot(block: Block, state: ConversionState) -> None:
+    # *DATABASE_BINARY_D3PLOT card 1 fields (LS-DYNA, 10-char each):
+    #   f[0]=DT/CYCL  f[1]=LCDT/NR  f[2]=BEAM  f[3]=NPLTC  f[4]=PSETID
+    # NPLTC (number of plot states) is the 4th field, index 3 — reading f[4]
+    # picked up PSETID instead, leaving npltc=0 for NPLTC-driven decks so the
+    # writer's /ANIM/DT wrongly fell back to endtim/40 instead of endtim/npltc.
     raw = block.raw
     f = _card(raw, 0, fixed=True, n=8, w=10) if raw else []
     dt    = to_float(f[0]) if f else 0.0
-    npltc = to_int(f[4])   if len(f) > 4 else 0
+    npltc = to_int(f[3])   if len(f) > 3 else 0
     state.db_d3plot = DbD3Plot(dt, npltc)
 
 
