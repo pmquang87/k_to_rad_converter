@@ -272,6 +272,54 @@ class ImplicitEngineTests(unittest.TestCase):
         self.assertIn("/IMPL/DYNA/2", engine)
         self.assertNotIn("/IMPL/QSTAT", engine)
 
+    @staticmethod
+    def _fixpoints(engine: str):
+        """Parse the time points of the (single) /IMPL/DT/FIXPOINT card."""
+        lines = engine.splitlines()
+        idx = lines.index("/IMPL/DT/FIXPOINT")
+        vals = []
+        for ln in lines[idx + 1:]:
+            s = ln.strip()
+            if not s or s.startswith("/") or s.startswith("#"):
+                break
+            vals.extend(float(tok) for tok in s.split())
+        return sorted(vals)
+
+    def test_fixpoint_written_every_ten_percent(self):
+        # Auto /IMPL/DT/FIXPOINT makes the implicit time-step controller land
+        # exactly on every 10% of the run end (endtim=1.0 here) so a clean
+        # animation/TH state is produced at each milestone. We emit 10 points
+        # 0.1*T … 1.0*T; the engine reads them free-format and sorts ascending.
+        engine = self._engine_for(IMPL_QSTAT_K)
+        self.assertIn("/IMPL/DT/FIXPOINT", engine)
+        vals = self._fixpoints(engine)
+        self.assertEqual([round(v, 10) for v in vals],
+                         [round(0.1 * k, 10) for k in range(1, 11)])
+        # Must sit inside the implicit block (before its terminating comment),
+        # so /IMPL/DT/3 (RIKS, which would ignore it) is not in play — we use
+        # /IMPL/DT/2.
+        self.assertIn("/IMPL/DT/2", engine)
+        self.assertNotIn("/IMPL/DT/3", engine)
+
+    def test_fixpoint_scales_with_endtim(self):
+        # The points track the actual termination time, not a hard-coded 1.0:
+        # for a 10 s run the milestones are 1,2,…,10 s.
+        deck = IMPL_QSTAT_K.replace("       1.0\n*END", "      10.0\n*END")
+        vals = self._fixpoints(self._engine_for(deck))
+        self.assertEqual([round(v, 6) for v in vals],
+                         [float(k) for k in range(1, 11)])
+
+    def test_no_fixpoint_lines_exceed_radioss_line_width(self):
+        # The engine input buffer is NCHARLINE100 (100 chars). The ≤5-fields-per
+        # -line layout must never overflow it.
+        engine = self._engine_for(IMPL_QSTAT_K)
+        lines = engine.splitlines()
+        idx = lines.index("/IMPL/DT/FIXPOINT")
+        for ln in lines[idx + 1:]:
+            if ln.strip().startswith("#") or ln.strip().startswith("/"):
+                break
+            self.assertLessEqual(len(ln), 100)
+
 
 TRANSDUCER_K = """\
 *KEYWORD

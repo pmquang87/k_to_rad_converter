@@ -2191,6 +2191,26 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         #   Tsca_dn = scale for decreasing (0 = 0.67)
         #   Tsca_up = scale for increasing (0 = 1.1)
         lines += ["/IMPL/DT/2", "  8 0 50 0 0"]
+
+    # /IMPL/DT/FIXPOINT — force the implicit time-step controller to land EXACTLY
+    # on evenly spaced times (every 10% of the run end) so a clean animation /
+    # time-history state is produced at each 10% milestone instead of wherever the
+    # variable implicit step happens to fall. Without it the auto time step
+    # (/IMPL/DT/2) can stride past a requested output time, and that interval's
+    # animation is then written late, at the overshooting time. The engine reads
+    # the points free-format over as many lines as supplied, sorts them ascending
+    # and caps the list at 100 (OpenRadioss engine/source/input/freimpl.F). It is
+    # honoured by /IMPL/DT/1 and /IMPL/DT/2 (our default); only /IMPL/DT/3 (RIKS)
+    # ignores it. The default /ANIM/DT (endtim/40, see _make_engine_output) writes
+    # a frame at every 2.5%, so each 10% fixpoint coincides with an animation
+    # output time and that frame lands exactly on the milestone.
+    if state.ctrl_termination and state.ctrl_termination.endtim > 0:
+        endtim = state.ctrl_termination.endtim
+        fixpts = [endtim * k / 10.0 for k in range(1, 11)]   # 10% … 100%
+        lines.append("/IMPL/DT/FIXPOINT")
+        for i in range(0, len(fixpts), 5):                   # ≤5 fields → ≤100 cols
+            lines.append("".join(_f(t) for t in fixpts[i:i + 5]))
+
     lines.append("#")
     return lines
 
