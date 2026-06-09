@@ -1216,5 +1216,59 @@ class FreeNodeGuardTests(unittest.TestCase):
         self.assertNotIn("free_reference_nodes", self._starter(deck))
 
 
+class AnimDtFromD3plotTests(unittest.TestCase):
+    """/ANIM/DT frequency comes from *DATABASE_BINARY_D3PLOT (dt, else
+    endtim/npltc); endtim/40 is only a last-resort default when no d3plot
+    output frequency is given."""
+
+    # 10 s run; {d3plot} is replaced with a D3PLOT block (or "").
+    BASE = (
+        "*KEYWORD\n*TITLE\nanim dt test\n*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             1.0             1.0             0.0\n"
+        "       4             0.0             1.0             0.0\n"
+        "*ELEMENT_SHELL\n       1       1       1       2       3       4\n"
+        "*PART\nshell part\n         1         1         1\n"
+        "*SECTION_SHELL\n         1         2       1.0         3\n       1.0\n"
+        "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n"
+        "{d3plot}*CONTROL_TERMINATION\n      10.0\n*END\n"
+    )
+
+    def _anim_dt(self, d3plot_block: str) -> float:
+        deck = self.BASE.format(d3plot=d3plot_block)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "anim.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        engine = Path(convert(path).engine_path).read_text().splitlines()
+        i = engine.index("/ANIM/DT")
+        # "/ANIM/DT" then "0. <freq>"
+        return float(engine[i + 1].split()[1])
+
+    def test_uses_d3plot_dt(self):
+        # dt explicitly given -> use it verbatim (NOT endtim/40 = 0.25).
+        freq = self._anim_dt(
+            "*DATABASE_BINARY_D3PLOT\n"
+            "$#      dt      lcdt      beam     npltc    psetid\n"
+            "     0.005         0         0         0         0\n")
+        self.assertAlmostEqual(freq, 0.005)
+
+    def test_uses_npltc_when_dt_zero(self):
+        # dt=0 but npltc=50 over a 10 s run -> endtim/npltc = 0.2 (NOT 0.25).
+        # Regression guard for the field-index bug (npltc was read from the
+        # PSETID column, so this used to fall back to endtim/40).
+        freq = self._anim_dt(
+            "*DATABASE_BINARY_D3PLOT\n"
+            "$#      dt      lcdt      beam     npltc    psetid\n"
+            "       0.0         0         0        50         0\n")
+        self.assertAlmostEqual(freq, 0.2)
+
+    def test_falls_back_to_endtim_over_40_without_d3plot(self):
+        # No *DATABASE_BINARY_D3PLOT at all -> default endtim/40 = 0.25.
+        self.assertAlmostEqual(self._anim_dt(""), 0.25)
+
+
 if __name__ == "__main__":
     unittest.main()
