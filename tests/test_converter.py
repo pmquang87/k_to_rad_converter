@@ -1233,6 +1233,110 @@ class Tet10SliverTests(unittest.TestCase):
         self.assertTrue(any("sliver" in w for w in result.warnings))
 
 
+# Three 4-node tets under implicit: element 1 well-shaped (AR 1.4), element 2 a
+# moderate sliver (AR ~11 — warn but keep), element 3 an extreme near-duplicate-
+# node sliver (AR ~224, shortest edge 0.5% of the mean — drop). Mirrors the
+# hr-anlenkung bracket failure: implicit contact crushes extreme TET4 slivers to
+# zero volume → AUTOSPC dimension-flip dt-cut loops / element inversion. Nodes
+# 9-12 belong only to element 3, so dropping it must hand them to the free-node
+# guard (otherwise their zero-stiffness DOFs make the implicit tangent singular).
+TET4_SLIVER_K = """\
+*KEYWORD
+*TITLE
+Sliver tet4 screening
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             0.0             1.0             0.0
+       4             0.0             0.0             1.0
+       5            10.0             0.0             0.0
+       6            11.0             0.0             0.0
+       7            10.5            0.08             0.0
+       8            10.5            0.04            0.08
+       9            20.0             0.0             0.0
+      10            21.0             0.0             0.0
+      11            20.5             1.0             0.0
+      12            20.5             1.0           0.005
+*ELEMENT_SOLID
+       1       1       1       2       3       4       4       4       4       4
+       2       1       5       6       7       8       8       8       8       8
+       3       1       9      10      11      12      12      12      12      12
+*PART
+tet4 part
+         1         1         1
+*SECTION_SOLID
+         1        10
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTROL_IMPLICIT_GENERAL
+         1      0.01
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class Tet4SliverTests(unittest.TestCase):
+    """Implicit decks screen 4-node tets: extreme slivers dropped (their orphaned
+    nodes picked up by the free-node guard), moderate slivers kept but warned
+    with the element list; explicit decks are left untouched."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "sliver4.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def _tetra4_eids(self, starter: str):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/TETRA4/"))
+        eids = []
+        for ln in lines[i + 1:]:
+            if ln.startswith(("/", "#")):
+                break
+            eids.append(int(ln.split()[0]))
+        return eids
+
+    def test_implicit_drops_extreme_keeps_good_and_moderate(self):
+        result, s = self._convert(TET4_SLIVER_K)
+        eids = self._tetra4_eids(s)
+        self.assertIn(1, eids)            # well-shaped kept
+        self.assertIn(2, eids)            # moderate sliver kept (warn only)
+        self.assertNotIn(3, eids)         # extreme sliver dropped
+        warn = next(w for w in result.warnings if "extreme-sliver" in w)
+        self.assertRegex(warn, r"Dropped element\(s\): 3$")
+
+    def test_implicit_warns_moderate_sliver_with_element_list(self):
+        result, _ = self._convert(TET4_SLIVER_K)
+        warn = next(w for w in result.warnings if "4-node tet(s) kept" in w)
+        self.assertRegex(warn, r"Element\(s\): 2$")
+
+    def test_dropped_tet_nodes_constrained_by_free_node_guard(self):
+        # Nodes 9-12 are referenced only by dropped element 3 → they must land
+        # in the free-node /BCS group, which requires the screening to mutate
+        # state.solid_elems before the guard runs (not skip at write time).
+        _, s = self._convert(TET4_SLIVER_K)
+        lines = s.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.strip() == "free_reference_nodes")
+        grp = []
+        for ln in lines[i + 1:]:
+            if ln.startswith(("/", "#")):
+                break
+            grp += [int(x) for x in ln.split()]
+        self.assertEqual(grp, [9, 10, 11, 12])
+
+    def test_explicit_keeps_all_tets_and_stays_silent(self):
+        deck = TET4_SLIVER_K.replace(
+            "*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
+        result, s = self._convert(deck)
+        self.assertEqual(sorted(self._tetra4_eids(s)), [1, 2, 3])
+        self.assertFalse(any("4-node tet" in w for w in result.warnings))
+
+
 class FreeNodeGuardTests(unittest.TestCase):
     """Implicit: free nodes (no element/rigid body) are constrained to avoid a
     singular tangent; explicit leaves them untouched."""
