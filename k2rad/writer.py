@@ -588,6 +588,36 @@ def _snap_tet10_midsides(state: ConversionState) -> int:
     return len(moved)
 
 
+def _tet_corner_metrics(
+    state: ConversionState, nodes: List[int]
+) -> Optional[Tuple[float, float, float, float]]:
+    """Shape metrics of the tetrahedron spanned by the first 4 node IDs:
+    (lmin, lmax, lmean, vol) with vol = |signed volume| and lmin/lmax/lmean over
+    the 6 corner edges. Returns None if any corner node is missing.
+    """
+    import math
+    pts = []
+    for n in nodes[:4]:
+        nd = state.nodes.get(n)
+        if nd is None:
+            return None
+        pts.append((nd.x, nd.y, nd.z))
+    if len(pts) < 4:
+        return None
+    c0, c1, c2, c3 = pts
+
+    def dist(a, b):
+        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
+    L = [dist(pts[a], pts[b]) for a in range(4) for b in range(a + 1, 4)]
+    a = (c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2])
+    b = (c2[0] - c0[0], c2[1] - c0[1], c2[2] - c0[2])
+    d = (c3[0] - c0[0], c3[1] - c0[1], c3[2] - c0[2])
+    cx = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+    vol = abs(cx[0] * d[0] + cx[1] * d[1] + cx[2] * d[2]) / 6.0
+    return min(L), max(L), sum(L) / 6.0, vol
+
+
 def _tet10_badly_shaped(state: ConversionState, nodes: List[int]) -> bool:
     """True if a 10-node tet's 4-corner shape is a sliver/degenerate tetra that
     OpenRadioss rejects as /TETRA10 (ERROR 489: BADLY SHAPED 10-NODE TETRA).
@@ -599,33 +629,126 @@ def _tet10_badly_shaped(state: ConversionState, nodes: List[int]) -> bool:
     ~zero volume (negligible stiffness), so the writer drops them rather than keep
     a deck OpenRadioss won't read.
     """
-    import math
-    pts = []
-    for n in nodes[:4]:
-        nd = state.nodes.get(n)
-        if nd is None:
-            return False
-        pts.append((nd.x, nd.y, nd.z))
-    if len(pts) < 4:
+    m = _tet_corner_metrics(state, nodes)
+    if m is None:
         return False
-    c0, c1, c2, c3 = pts
-
-    def dist(a, b):
-        return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
-
-    L = [dist(pts[a], pts[b]) for a in range(4) for b in range(a + 1, 4)]
-    lmin, lmax = min(L), max(L)
+    lmin, lmax, lmean, vol = m
     if lmin <= 0.0:
         return True
     if lmax / lmin > 8.0:
         return True
-    a = (c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2])
-    b = (c2[0] - c0[0], c2[1] - c0[1], c2[2] - c0[2])
-    d = (c3[0] - c0[0], c3[1] - c0[1], c3[2] - c0[2])
-    cx = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
-    vol = abs(cx[0] * d[0] + cx[1] * d[1] + cx[2] * d[2]) / 6.0
-    lmean = sum(L) / 6.0
     return lmean > 0.0 and vol / (lmean ** 3) < 0.02
+
+
+# 4-node tet sliver thresholds. Warn at the same shape limits that already
+# condemn a /TETRA10 (aspect ratio > 8 or V/Lmean^3 < 0.02); drop only extreme
+# cases — OpenRadioss *reads* sliver /TETRA4 fine, so dropping is justified only
+# where the element is so degenerate that implicit contact crushes it to zero
+# volume (stiffness vanishes -> AUTOSPC dimension-flip dt-cut loops, or element
+# inversion polluting the energy balance).
+_TET4_WARN_AR = 8.0
+_TET4_WARN_NVOL = 0.02
+_TET4_DROP_AR = 40.0
+_TET4_DROP_NVOL = 0.001
+_TET4_DROP_LMIN_FRAC = 0.05
+
+
+def _tet4_sliver_class(state: ConversionState, nodes: List[int]) -> Optional[str]:
+    """Classify a 4-node tet's corner shape for implicit runs.
+
+    Returns "drop" for extreme slivers (aspect ratio > 40, V/Lmean^3 < 0.001,
+    shortest edge < 5% of the mean edge, or degenerate/zero volume), "warn" for
+    moderate slivers (the /TETRA10 limits: aspect ratio > 8 or V/Lmean^3 < 0.02),
+    and None for sound elements or missing nodes.
+    """
+    m = _tet_corner_metrics(state, nodes)
+    if m is None:
+        return None
+    lmin, lmax, lmean, vol = m
+    if lmin <= 0.0 or lmean <= 0.0 or vol <= 0.0:
+        return "drop"
+    nvol = vol / (lmean ** 3)
+    if (lmax / lmin > _TET4_DROP_AR or nvol < _TET4_DROP_NVOL
+            or lmin < _TET4_DROP_LMIN_FRAC * lmean):
+        return "drop"
+    if lmax / lmin > _TET4_WARN_AR or nvol < _TET4_WARN_NVOL:
+        return "warn"
+    return None
+
+
+def _fmt_eid_list(eids: List[int], limit: int = 25) -> str:
+    """Comma-separated element IDs, truncated past *limit* with a count."""
+    s = ", ".join(str(e) for e in eids[:limit])
+    if len(eids) > limit:
+        s += f", ... (+{len(eids) - limit} more)"
+    return s
+
+
+def _screen_sliver_tets(state: ConversionState) -> None:
+    """Remove sliver tets from state.solid_elems before any section is built.
+
+    Screening must mutate the element list (not just skip at write time): the
+    free-node guard (_make_free_node_constraints) decides "attached to an
+    element" from state.solid_elems, so a node referenced only by a dropped
+    sliver must look free there to get its /BCS — otherwise it carries zero
+    stiffness rows into the implicit tangent (singular matrix).
+
+    Two screens run here:
+      * 10-node tets failing _tet10_badly_shaped are dropped unconditionally —
+        OpenRadioss refuses to read them as /TETRA10 (ERROR 489).
+      * 4-node tets are screened for implicit decks only (explicit reads and
+        runs slivers, merely slowly): extreme slivers are dropped, moderate
+        ones kept but warned with their element list, since under contact
+        pressure they crush flat — stiffness vanishes and the run stalls in
+        AUTOSPC dimension-flip dt cuts or inverts and pollutes the energy.
+    """
+    bad_t10: Dict[int, int] = defaultdict(int)            # pid -> count
+    drop_t4: Dict[int, List[int]] = defaultdict(list)     # pid -> eids
+    warn_t4: Dict[int, List[int]] = defaultdict(list)     # pid -> eids
+    kept: List[SolidElem] = []
+    for e in state.solid_elems:
+        if len(e.nodes) == 10:
+            if _tet10_badly_shaped(state, e.nodes):
+                bad_t10[e.pid] += 1
+                continue
+        elif state.is_implicit:
+            uniq = _ordered_unique_nodes(e.nodes)
+            if len(uniq) == 4:
+                shape = _tet4_sliver_class(state, uniq)
+                if shape == "drop":
+                    drop_t4[e.pid].append(e.eid)
+                    continue
+                if shape == "warn":
+                    warn_t4[e.pid].append(e.eid)
+        kept.append(e)
+    state.solid_elems = kept
+
+    for pid, n in sorted(bad_t10.items()):
+        state.warn(
+            f"PART {pid}: dropped {n} near-degenerate (sliver) 10-node "
+            "tet(s) that OpenRadioss rejects as /TETRA10 (ERROR 489: badly "
+            "shaped). Their volume is ~0 so the physical effect is negligible; "
+            "clean/remesh them to retain the full element count."
+        )
+    for pid, eids in sorted(drop_t4.items()):
+        state.warn(
+            f"PART {pid}: dropped {len(eids)} extreme-sliver 4-node tet(s) "
+            f"(aspect ratio > {_TET4_DROP_AR:g}, V/Lmean^3 < {_TET4_DROP_NVOL:g}, "
+            f"or shortest edge < {_TET4_DROP_LMIN_FRAC:.0%} of the mean edge). "
+            "Under implicit contact load such slivers crush to zero volume — "
+            "their stiffness vanishes and the run stalls in AUTOSPC "
+            "dimension-flip dt cuts or inverts and pollutes the energy balance. "
+            "Their volume is ~0 so dropping them is physically negligible; any "
+            "node left unattached is constrained by the free-node guard. "
+            f"Dropped element(s): {_fmt_eid_list(eids)}"
+        )
+    for pid, eids in sorted(warn_t4.items()):
+        state.warn(
+            f"PART {pid}: {len(eids)} sliver 4-node tet(s) kept (aspect ratio "
+            f"> {_TET4_WARN_AR:g} or V/Lmean^3 < {_TET4_WARN_NVOL:g}). They may "
+            "hinder implicit convergence under load; consider remeshing. "
+            f"Element(s): {_fmt_eid_list(eids)}"
+        )
 
 
 def _make_parts_and_elements(state: ConversionState) -> List[str]:
@@ -675,18 +798,13 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
             # ~0.8 J vs EXT-WORK ~690 J, -99.9% energy error). 5-8 unique
             # nodes stay /BRICK (a wedge/pyramid as a degenerate hex is ok).
             # 10-node solids are quadratic tets -> /TETRA10 (all 10 nodes kept).
+            # Sliver screening (tet10 always, tet4 for implicit) already ran in
+            # _screen_sliver_tets, so every element here is emitted.
             tets = []     # (eid, [n1, n2, n3, n4])
             tets10 = []   # SolidElem with 10 nodes (quadratic tet)
             bricks = []   # SolidElem with >4 distinct nodes
-            n_bad_t10 = 0
             for e in solids_by_pid[pid]:
                 if len(e.nodes) == 10:
-                    if _tet10_badly_shaped(state, e.nodes):
-                        # Sliver/degenerate quadratic tet — OpenRadioss rejects it
-                        # as /TETRA10 (ERROR 489). Drop it (volume ~0 → negligible);
-                        # any node left free is caught by _make_free_node_constraints.
-                        n_bad_t10 += 1
-                        continue
                     tets10.append(e)
                     continue
                 uniq = _ordered_unique_nodes(e.nodes)
@@ -694,13 +812,6 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                     tets.append((e.eid, uniq))
                 else:
                     bricks.append(e)
-            if n_bad_t10:
-                state.warn(
-                    f"PART {pid}: dropped {n_bad_t10} near-degenerate (sliver) 10-node "
-                    "tet(s) that OpenRadioss rejects as /TETRA10 (ERROR 489: badly "
-                    "shaped). Their volume is ~0 so the physical effect is negligible; "
-                    "clean/remesh them to retain the full element count."
-                )
             if tets10 and (tets or bricks):
                 state.warn(
                     f"PART {pid}: mixes 10-node tets with 4-node/brick solids. "
@@ -2514,6 +2625,11 @@ def build_starter(state: ConversionState) -> str:
             "tetra). Curved boundary elements are flattened slightly; remesh with "
             "better element quality to retain exact curved edges."
         )
+
+    # Drop sliver tets (tet10 always — ERROR 489; extreme tet4 for implicit)
+    # BEFORE any section is built, so the free-node guard sees the post-drop
+    # connectivity and constrains any node the drops left unattached.
+    _screen_sliver_tets(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
