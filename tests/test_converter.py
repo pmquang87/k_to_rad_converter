@@ -834,6 +834,18 @@ class NodalRigidBodyTests(unittest.TestCase):
         _, starter = self._convert(CNRB_K)
         self.assertIn("/SKEW/FIX/7", starter)
         self.assertNotIn("/SKEW/MOV/7", starter)
+        # The two vector cards are the LOCAL Y and Z axes (X' = Y'×Z').
+        # Fixture frame: X=+Yg, Y=+Xg, Z=X×Y=−Zg. Writing X/Y instead would
+        # hand the reader a cyclically permuted frame.
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/SKEW/FIX/7"))
+        data = [ln for ln in lines[i + 1:i + 9]
+                if ln.strip() and not ln.startswith(("#", "/"))]
+        # data = [title, origin, Y axis, Z axis]
+        yvec = [float(x) for x in data[2].split()]
+        zvec = [float(x) for x in data[3].split()]
+        self.assertEqual(yvec, [1.0, 0.0, 0.0])     # local Y = +Xg
+        self.assertEqual(zvec, [0.0, 0.0, -1.0])    # local Z = −Zg
 
     def test_moving_skew_emitted_for_flag1(self):
         deck = CNRB_K.replace(
@@ -860,6 +872,27 @@ class NodalRigidBodyTests(unittest.TestCase):
         self.assertEqual(int(fields[0]), 1)           # funct (curve) ID
         self.assertEqual(fields[1].strip(), "Y")      # dof=2 → Y
         self.assertEqual(int(fields[2]), 7)           # skew_ID = local coord sys
+
+    def test_cload_single_card_2026_layout(self):
+        # /CLOAD data is ONE 100-col card (radioss51…2026): fct_IDT(10) Dir(10)
+        # skew_ID(10) sens_ID(10) grnd_ID(10) Itypfun(10) Ascalex(20) Fscaley(20).
+        # Regression: Ascalex/Fscaley used to go on a bogus second card, so the
+        # starter read Fscaley from blank cols of card 1 → default 1.0 (SF lost).
+        # Itypfun (cols 51-60) stays blank: /BEGIN-2022 readers warn 100214 on
+        # non-blank skipped columns; 2023+ readers default blank to 1 (= time).
+        deck = CNRB_K.replace(
+            "        10         2         1       1.0         7",
+            "        10         2         1       2.5         7")
+        _, starter = self._convert(deck)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/CLOAD/"))
+        data = lines[i + 3]                       # keyword, title, #header, data
+        self.assertEqual(len(data), 100)
+        self.assertGreater(int(data[40:50]), 0)       # grnd_ID
+        self.assertEqual(data[50:60], " " * 10)       # Itypfun blank → default 1
+        self.assertEqual(data[60:80].strip(), "1")    # Ascalex
+        self.assertEqual(data[80:100].strip(), "2.5")  # Fscaley = LS-DYNA SF
+        self.assertTrue(lines[i + 4].startswith("#"))  # no second data card
 
     def test_global_spc_uses_global_frame(self):
         # CMO=+1 → CON1/CON2 are global translation/rotation codes; skew_ID=0.
@@ -1009,6 +1042,25 @@ class StrainOutputTests(unittest.TestCase):
         # Plastic strain is written to the animation files for solids.
         self.assertIn("/ANIM/ELEM/EPSP", engine)
 
+    def test_law36_emits_strain_rate_list_card(self):
+        # With N_funct=1 the cfg expects THREE list cards: func_ID1, Fscale_1,
+        # Eps_dot_1. Regression: Eps_dot_1 was missing, so the reader ran into
+        # the next keyword ("card is missing" warning, fragile parse).
+        starter, _ = self._convert(STRAIN_SOLID_K)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/MAT/LAW36/"))
+        data = []
+        for ln in lines[i + 2:]:              # skip keyword + title
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            data.append(ln)
+        # rho, E/nu/eps, Nfunct/Fsmooth, fctIDp/Fscale, fctID1, Fscale1, Epsdot1
+        self.assertEqual(len(data), 7)
+        self.assertEqual(data[-1].strip(), "0")          # Eps_dot_1 = static
+        self.assertGreater(int(data[-3][0:10]), 0)       # fct_ID1 = yield curve
+
     def test_no_strflg_leaves_istrain_off(self):
         # Without a strain request (no *DATABASE_EXTENT_BINARY) Istrain stays 0.
         deck = STRAIN_SOLID_K.replace(
@@ -1100,8 +1152,13 @@ class TetraTenTests(unittest.TestCase):
         lines = s.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/"))
         card1 = lines[i + 3]              # /PROP/SOLID, title, '#…', DATA
-        itetra10 = int(card1[30:40])     # field 4: Itetra10
-        self.assertEqual(itetra10, 2)
+        # cfg radioss2022 card 1: Isolid Ismstr Iale Icpre Itetra10 Inpts
+        # Itetra4 Iframe Dn — Itetra10 is field 5 (cols 41-50). Regression: the
+        # writer used the 8-field PDF layout without Iale, which shifted
+        # Itetra10 into Icpre and the reader's Itetra10 defaulted to 0.
+        self.assertEqual(int(card1[40:50]), 2)           # Itetra10
+        self.assertEqual(int(card1[20:30]), 0)           # Iale
+        self.assertEqual(int(card1[30:40]), 0)           # Icpre
 
     def test_offmidpoint_midside_is_snapped_to_midpoint(self):
         # Node 5 = mid-edge of corners 1,2 = mid((0,0,0),(1,0,0)) = (0.5,0,0).
@@ -1420,6 +1477,161 @@ class AnimDtFromD3plotTests(unittest.TestCase):
     def test_falls_back_to_endtim_over_40_without_d3plot(self):
         # No *DATABASE_BINARY_D3PLOT at all -> default endtim/40 = 0.25.
         self.assertAlmostEqual(self._anim_dt(""), 0.25)
+
+
+# One quad shell part exercising the card layouts audited against the
+# hm_cfg_files FORMAT blocks (the exact reader spec of the user's OpenRadioss
+# build): LAW44 (VP column), /DAMP (explicit beta), /INIVEL/TRA+ROT,
+# /SURF/SEG + /PLOAD, and /SKEW/FIX from *DEFINE_COORDINATE_SYSTEM points.
+CARD_LAYOUT_K = """\
+*KEYWORD
+*TITLE
+Card layout regression deck
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+*PART
+plate
+         1         1         1
+*SECTION_SHELL
+         1         2
+       0.1
+*MAT_PLASTIC_KINEMATIC
+         1    7.8E-9  210000.0       0.3     350.0    1000.0       0.0
+      40.0       5.0       0.0         1
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*DEFINE_CURVE
+         1         0       1.0       1.0
+                 0.0                 0.0
+                 1.0                 1.0
+*LOAD_SEGMENT
+         1       2.5       0.0         1         2         3         4
+*INITIAL_VELOCITY_NODE
+       1       5.0       0.0       0.0       0.0       0.0       2.0
+       2       5.0       0.0       0.0       0.0       0.0       2.0
+*DAMPING_GLOBAL
+         0       0.3
+*DEFINE_COORDINATE_SYSTEM
+         9      10.0       0.0       0.0      10.0       1.0       0.0
+       9.0       0.0       0.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class CardLayoutTests(unittest.TestCase):
+    """Field-position regressions for cards the CFG audit (2026-06-10) found
+    misaligned: every assertion below slices the exact columns the OpenRadioss
+    reader (hm_cfg_files FORMAT blocks at /BEGIN 2022) reads."""
+
+    def _starter(self, deck: str = CARD_LAYOUT_K) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "layout.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _block(starter: str, prefix: str):
+        """Return (lines, index of keyword line) for the first block whose
+        keyword line starts with *prefix*."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(prefix))
+        return lines, i
+
+    @staticmethod
+    def _data_lines(lines, i):
+        """All data lines (non-comment, non-keyword) following lines[i] until
+        the next keyword."""
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    def test_law44_vp_in_cols_91_100(self):
+        # cfg card 4: C(20) P(20) ICC(10) ISMOOTH(10) F_CUT(20) blank(10) VP(10).
+        # Regression: VP used to be written at cols 81-90 (the blank), so the
+        # reader's VP (cols 91-100) silently defaulted to 0.
+        s = self._starter()
+        lines, i = self._block(s, "/MAT/LAW44/")
+        card4 = self._data_lines(lines, i)[1 + 3]   # title, rho, E/nu, a/b/n, c/p...
+        self.assertEqual(card4[0:20].strip(), "40")     # C  (SRC)
+        self.assertEqual(card4[20:40].strip(), "5")     # P  (SRP)
+        self.assertEqual(card4[80:90].strip(), "")      # blank column
+        self.assertEqual(card4[90:100].strip(), "1")    # VP
+        self.assertEqual(len(card4), 100)
+
+    def test_damp_beta_written_explicitly(self):
+        # cfg /DAMP card: Alpha(20) Beta(20) grnod(10) skew(10) Tstart(20)
+        # Tstop(20). Regression: the alpha-only path skipped Beta, so the
+        # grnod_ID digits were parsed as a huge stiffness-damping Beta.
+        s = self._starter()
+        lines, i = self._block(s, "/DAMP/")
+        card = self._data_lines(lines, i)[1]            # after title
+        self.assertEqual(card[0:20].strip(), "0.3")     # alpha = valdmp
+        self.assertEqual(card[20:40].strip(), "0")      # beta explicit 0
+        self.assertGreater(int(card[40:50]), 0)         # grnod_ID
+        self.assertEqual(int(card[50:60]), 0)           # skew_ID
+        self.assertEqual(len(card), 100)
+
+    def test_inivel_tra_and_rot_blocks(self):
+        # Valid subtypes are TRA/ROT (not NODE/RBODY) and the data is ONE card:
+        # Vx(20) Vy(20) Vz(20) Gnod_id(10) Skew_id(10).
+        s = self._starter()
+        self.assertNotIn("/INIVEL/NODE/", s)
+        lines, i = self._block(s, "/INIVEL/TRA/")
+        card = self._data_lines(lines, i)[1]
+        self.assertEqual(card[0:20].strip(), "5")       # Vx
+        self.assertGreater(int(card[60:70]), 0)         # Gnod_id
+        self.assertEqual(int(card[70:80]), 0)           # Skew_id
+        lines, i = self._block(s, "/INIVEL/ROT/")
+        card = self._data_lines(lines, i)[1]
+        self.assertEqual(card[40:60].strip(), "2")      # Wz in the Vz slot
+        self.assertGreater(int(card[60:70]), 0)
+
+    def test_load_segment_becomes_surf_seg_plus_pload(self):
+        # /PLOAD's single card references a /SURF/SEG (seg_ID n1 n2 n3 n4);
+        # scales sit at cols 61-80 / 81-100. Regression: segments used to be
+        # inlined into /PLOAD with invented Dir/Tstart fields.
+        s = self._starter()
+        lines, i = self._block(s, "/SURF/SEG/")
+        surf_id = int(lines[i].split("/")[3])
+        seg = self._data_lines(lines, i)[1]             # after title
+        self.assertEqual(
+            [int(seg[k:k + 10]) for k in range(0, 50, 10)], [1, 1, 2, 3, 4])
+        lines, i = self._block(s, "/PLOAD/")
+        card = self._data_lines(lines, i)[1]
+        self.assertEqual(int(card[0:10]), surf_id)      # surf_ID
+        self.assertEqual(int(card[10:20]), 1)           # fct_IDT
+        self.assertEqual(card[60:80].strip(), "1")      # Ascale_x
+        self.assertEqual(card[80:100].strip(), "2.5")   # Fscale_y = SF
+        self.assertEqual(len(card), 100)
+
+    def test_skew_fix_writes_local_y_and_z_vectors(self):
+        # /SKEW/FIX cards are the local Y and Z AXIS VECTORS (X' = Y'×Z'), and
+        # *DEFINE_COORDINATE_SYSTEM gives POINTS that must be origin-subtracted.
+        # Here: O=(10,0,0), L=(10,1,0) → X=(0,1,0); P=(9,0,0) → Z=X×(P−O)=(0,0,1),
+        # Y=Z×X=(−1,0,0). Regression: raw points went out as X/Y vectors, which
+        # the reader interprets as Y'/Z' → a cyclically permuted frame.
+        s = self._starter()
+        lines, i = self._block(s, "/SKEW/FIX/9")
+        cards = self._data_lines(lines, i)
+        origin = [float(x) for x in cards[1].split()]
+        yvec = [float(x) for x in cards[2].split()]
+        zvec = [float(x) for x in cards[3].split()]
+        self.assertEqual(origin, [10.0, 0.0, 0.0])
+        self.assertEqual(yvec, [-1.0, 0.0, 0.0])
+        self.assertEqual(zvec, [0.0, 0.0, 1.0])
 
 
 if __name__ == "__main__":

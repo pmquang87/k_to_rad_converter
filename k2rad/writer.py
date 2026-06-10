@@ -318,6 +318,8 @@ def _emit_mat_law36(mat: MatPlasTAB) -> List[str]:
         f"{_i(fid)}",
         "# Fscale1",
         "                 1.0",
+        "#          Eps_dot_1",
+        "                   0",
         HDR,
     ]
     return lines
@@ -334,8 +336,8 @@ def _emit_mat_law44(mat: MatPlasKin) -> List[str]:
         f"{_f(mat.E)}{_f(mat.nu)}",
         "#                  a                   b                   n               Chard              SIGmax0",
         f"{_f(mat.sigy)}{_f(mat.etan)}{_f(1.0)}{_f(mat.beta)}{_f(0.0)}",
-        "#                  c                   p     ICC  Fsmooth                Fcut    VP",
-        f"{_f(mat.src)}{_f(mat.srp)}         0         0{_f(0.0)}{_i(mat.vp)}",
+        "#                  c                   p       ICC   ISMOOTH               F_CUT                  VP",
+        f"{_f(mat.src)}{_f(mat.srp)}         0         0{_f(0.0)}          {_i(mat.vp)}",
         "#              EpsMax                 Et1                 Et2",
         f"{_f(epmax)}{_f(0.0)}{_f(0.0)}",
         HDR,
@@ -359,6 +361,8 @@ def _emit_mat_law36_powerlaw(mat: MatPowerLaw) -> List[str]:
         f"{_i(mat.funct_id)}",
         "# Fscale1",
         "                 1.0",
+        "#          Eps_dot_1",
+        "                   0",
         HDR,
     ]
 
@@ -426,22 +430,49 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 # Starter: skews
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _emit_skew_fix(skew_id: int, title: str, origin, yaxis, zaxis) -> List[str]:
+    """Emit /SKEW/FIX. The two vector cards are the LOCAL Y and Z axes — NOT X
+    and Y: per the Reference Guide (and cfg attrs globalyaxis/globalzaxis),
+    X1Y1Z1 = Y', X2Y2Z2 = Z', and the starter builds X' = Y' × Z' then
+    re-orthogonalizes Y'' = Z' × X'. Passing X/Y here would yield a cyclically
+    permuted frame (Radioss-X = intended Z) and rotate every skewed BCS/CLOAD.
+    """
+    return [
+        f"/SKEW/FIX/{skew_id}",
+        title,
+        "#                 Ox                  Oy                  Oz",
+        f"{_f(origin[0])}{_f(origin[1])}{_f(origin[2])}",
+        "#                 X1                  Y1                  Z1   (local Y axis)",
+        f"{_f(yaxis[0])}{_f(yaxis[1])}{_f(yaxis[2])}",
+        "#                 X2                  Y2                  Z2   (local Z axis)",
+        f"{_f(zaxis[0])}{_f(zaxis[1])}{_f(zaxis[2])}",
+        HDR,
+    ]
+
+
 def _make_skews(state: ConversionState) -> List[str]:
     if not state.coord_sys and not state.coord_nodes:
         return []
     lines = ["#-  SKEWS / COORDINATE SYSTEMS:", HDR]
     for cid, cs in sorted(state.coord_sys.items()):
-        lines += [
-            f"/SKEW/FIX/{cid}",
-            f"SKEW_{cid}",
-            "#  Ox            Oy            Oz",
-            f"{_f(cs.xo)}{_f(cs.yo)}{_f(cs.zo)}",
-            "#  Xx            Xy            Xz",
-            f"{_f(cs.xl)}{_f(cs.yl)}{_f(cs.zl)}",
-            "#  Yx            Yy            Yz",
-            f"{_f(cs.xp)}{_f(cs.yp)}{_f(cs.zp)}",
-            HDR,
-        ]
+        # *DEFINE_COORDINATE_SYSTEM gives POINTS: origin O, a point L on the
+        # local x-axis and a point P in the local x-y plane — convert to axis
+        # vectors before emitting (raw point coordinates are only valid vectors
+        # when the origin happens to be (0,0,0)).
+        origin = (cs.xo, cs.yo, cs.zo)
+        xv = _vnorm(_vsub((cs.xl, cs.yl, cs.zl), origin))
+        zv = None
+        if xv is not None:
+            zv = _vnorm(_vcross(xv, _vsub((cs.xp, cs.yp, cs.zp), origin)))
+        if zv is None:
+            state.warn(
+                f"*DEFINE_COORDINATE_SYSTEM cid={cid}: degenerate axis points - "
+                "global axes used for /SKEW/FIX."
+            )
+            yv, zv = (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+        else:
+            yv = _vcross(zv, xv)
+        lines += _emit_skew_fix(cid, f"SKEW_{cid}", origin, yv, zv)
     for cid, cn in sorted(state.coord_nodes.items()):
         lines += _emit_skew_from_nodes(state, cn)
     return lines
@@ -514,17 +545,7 @@ def _emit_skew_from_nodes(state: ConversionState, cn) -> List[str]:
         f"/SKEW/FIX with axes computed at t=0 (Dir={cn.dir}); set flag=1 in the "
         ".k file for a co-rotating /SKEW/MOV."
     )
-    return [
-        f"/SKEW/FIX/{cn.cid}",
-        f"SKEW_NODES_{cn.cid}",
-        "#  Ox            Oy            Oz",
-        f"{_f(origin[0])}{_f(origin[1])}{_f(origin[2])}",
-        "#  Xx            Xy            Xz",
-        f"{_f(X[0])}{_f(X[1])}{_f(X[2])}",
-        "#  Yx            Yy            Yz",
-        f"{_f(Y[0])}{_f(Y[1])}{_f(Y[2])}",
-        HDR,
-    ]
+    return _emit_skew_fix(cn.cid, f"SKEW_NODES_{cn.cid}", origin, Y, _vcross(X, Y))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -924,15 +945,18 @@ def _make_properties(state: ConversionState) -> List[str]:
         ]
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
         isolid = _elform_to_isolid(sec.elform)
-        # /PROP/SOLID card 1 (RefGuide p.1738): Isolid Ismstr Icpre Itetra10 Inpts
-        # Itetra4 Iframe dn. Itetra10=2 = quadratic /TETRA10 (4 integration points)
-        # for parts that have 10-node tets; 0 otherwise (ignored by /TETRA4/brick).
+        # /PROP/SOLID card 1 (cfg radioss2022): Isolid Ismstr Iale Icpre Itetra10
+        # Inpts Itetra4 Iframe Dn — note the Iale column at 21-30 (the 2022 PDF
+        # p.1738 omits it; writing the PDF's 8-field layout shifts Itetra10 into
+        # Icpre and silently drops it). Itetra10=2 = quadratic /TETRA10 (4
+        # integration points) for parts that have 10-node tets; 0 otherwise
+        # (ignored by /TETRA4/brick).
         itetra10 = 2 if sec.secid in tet10_secids else 0
         lines += [
             f"/PROP/SOLID/{sec.secid}",
             sec.title or f"PROP_{sec.secid}",
-            "#   Isolid    Ismstr     Icpre  Itetra10     Inpts   Itetra4    Iframe        dn",
-            f"{_i(isolid)}         0         0{_i(itetra10)}         0         0         0         0",
+            "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
+            f"{_i(isolid)}         0         0         0{_i(itetra10)}         0         0         0",
             "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
             "                   0                   0                   0                   0                   0",
             "#             dt_min   istrain      IHKT",
@@ -1486,12 +1510,13 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 f"*MAT_RIGID pid={pid}: total added mass {added_mass:.6G} "
                 f"({', '.join(sources)}) placed in /RBODY Mass field."
             )
-        # /RBODY format (cfg radioss2017+ card layout) — FOUR cards after title:
-        #   Card 1 (10 fields): node_ID sens_ID Skew_ID Ispher Mass
-        #                       grnd_ID Ikrem ICoG surf_ID [Ifail]
+        # /RBODY format (cfg radioss2021, selected for /BEGIN 2022) — FOUR cards
+        # after title:
+        #   Card 1 (9 fields):  node_ID sens_ID Skew_ID Ispher Mass(20)
+        #                       grnd_ID Ikrem ICoG surf_ID          (= 100 cols)
         #   Card 2 (3 floats):  Jxx Jyy Jzz
         #   Card 3 (3 floats):  Jxy Jyz Jxz
-        #   Card 4 (2 ints):    Ioptoff Iexpams
+        #   Card 4 (3 ints):    Ioptoff Iexpams [Ifail]
         # All four cards are REQUIRED. Two failure modes if any are missing:
         #   * inertia on one 6-value line -> reader stops after Jxx Jyy Jzz;
         #   * omitting card 4 -> reader stops after the inertia;
@@ -1500,18 +1525,18 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # body. Ioptoff is the rigid-body domain-decomposition flag for HMPP, so
         # the malformed body segfaults the SPMD (np>1) setup (MESSAGE ID 44) even
         # though np=1 tolerates it. Inertia is 0 (OpenRadioss computes it from the
-        # node distribution); Ioptoff=Iexpams=0 = defaults.
+        # node distribution); Ioptoff=Iexpams=Ifail=0 = defaults.
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
-            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID     Ifail",
-            f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+            f"{_i(ind_node)}{_i(0)}{_i(0)}{_i(0)}{_f(added_mass)}{_i(grnod_id)}{_i(0)}{_i(0)}{_i(0)}",
             "#                Jxx                 Jyy                 Jzz",
             f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
             "#                Jxy                 Jyz                 Jxz",
             f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-            "#  Ioptoff   Iexpams",
-            f"{_i(0)}{_i(0)}",
+            "#  Ioptoff   Iexpams     Ifail",
+            f"{_i(0)}{_i(0)}{_i(0)}",
         ]
         lines += _emit_grnod_node(grnod_id, f"rb_nodes_pid{pid}", unique_nodes)
         lines += _emit_grnod_node(ind_grnod_id, f"rb_indnode_pid{pid}", [ind_node])
@@ -1837,23 +1862,6 @@ def _make_starter_th(state: ConversionState) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Starter: energy control
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _make_energy(state: ConversionState) -> List[str]:
-    e = state.ctrl_energy
-    if not e: return []
-    ihge  = 1 if e.hgen   > 0 else 0
-    idamp = 1 if e.rylen  > 0 else 0
-    return [
-        "/ENERGY",
-        "#  Istor  Igrav   Iref  Iplas  Idamp Itherm   Ihge",
-        f"       1      0      0      1{_i(idamp, 7)}      0{_i(ihge, 7)}",
-        HDR,
-    ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Starter: imposed motions for node sets
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1971,7 +1979,27 @@ def _make_skipped_comment(state: ConversionState) -> List[str]:
 # Starter: initial conditions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _emit_inivel(kind: str, inivel_id: int, title: str, grnod_id: int,
+                 v: Tuple[float, float, float]) -> List[str]:
+    """One /INIVEL/TRA|ROT block — a single data card after the title:
+    Vx(20) Vy(20) Vz(20) Gnod_id(10) Skew_id(10)."""
+    return [
+        f"/INIVEL/{kind}/{inivel_id}",
+        title,
+        "#                 Vx                  Vy                  Vz   Gnod_id   Skew_id",
+        f"{_f(v[0])}{_f(v[1])}{_f(v[2])}{_i(grnod_id)}{_i(0)}",
+        HDR,
+    ]
+
+
 def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """Initial velocities → /INIVEL/TRA (+ /INIVEL/ROT for rotational DOFs).
+
+    The only valid /INIVEL subtypes are TRA/ROT (cfg inivel.cfg); rotational
+    components need their own /INIVEL/ROT block. For rigid bodies the velocity
+    goes on the MASTER node only — its 6 DOFs drive the body, and secondary-
+    node values are overridden by /RBODY kinematics anyway.
+    """
     lines: List[str] = []
 
     vel_groups: Dict[Tuple, List[int]] = defaultdict(list)
@@ -1980,39 +2008,29 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
-        grnod_id  = state.next_id()
-        lines += _emit_grnod_node(grnod_id, f"inivel_{inivel_id}", sorted(nids))
-        lines += [
-            f"/INIVEL/NODE/{inivel_id}",
-            f"InitVel_{inivel_id}",
-            "#  grnod_ID",
-            _i(grnod_id),
-            "#                  Vx                  Vy                  Vz",
-            f"{_f(vx)}{_f(vy)}{_f(vz)}",
-            "#                  Wx                  Wy                  Wz",
-            f"{_f(vxr)}{_f(vyr)}{_f(vzr)}",
-            HDR,
-        ]
+        lines += _emit_inivel("TRA", inivel_id, f"InitVel_{inivel_id}",
+                              grnod_id, (vx, vy, vz))
+        if vxr or vyr or vzr:
+            rot_id = state.next_id()
+            lines += _emit_inivel("ROT", rot_id, f"InitVelRot_{rot_id}",
+                                  grnod_id, (vxr, vyr, vzr))
 
     for iv in state.inivel_rbodies:
         info = rbody_info.get(iv.pid)
         if not info:
             state.warn(f"INITIAL_VELOCITY_RIGID_BODY pid={iv.pid}: no RBODY found – skipped")
             continue
-        grnod_id  = info["grnod_id"]
+        grnod_id = info["ind_grnod_id"]
         inivel_id = state.next_id()
-        lines += [
-            f"/INIVEL/RBODY/{inivel_id}",
-            f"InitVelRB_{inivel_id}",
-            "#  grnod_ID",
-            _i(grnod_id),
-            "#                  Vx                  Vy                  Vz",
-            f"{_f(iv.vx)}{_f(iv.vy)}{_f(iv.vz)}",
-            "#                  Wx                  Wy                  Wz",
-            f"{_f(iv.vxr)}{_f(iv.vyr)}{_f(iv.vzr)}",
-            HDR,
-        ]
+        lines += _emit_inivel("TRA", inivel_id, f"InitVelRB_{inivel_id}",
+                              grnod_id, (iv.vx, iv.vy, iv.vz))
+        if iv.vxr or iv.vyr or iv.vzr:
+            rot_id = state.next_id()
+            lines += _emit_inivel("ROT", rot_id, f"InitVelRBRot_{rot_id}",
+                                  grnod_id, (iv.vxr, iv.vyr, iv.vzr))
 
     if lines:
         lines = ["#-  INITIAL CONDITIONS:", HDR] + lines
@@ -2024,6 +2042,14 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_pressure_loads(state: ConversionState) -> List[str]:
+    """*LOAD_SEGMENT → /SURF/SEG + /PLOAD.
+
+    /PLOAD has ONE data card referencing a surface:
+      surf_ID(10) fct_IDT(10) sens_ID(10) <blank to col 60> Ascale_x(20) Fscale_y(20)
+    The segments themselves must be a /SURF/SEG entity (seg_ID n1 n2 n3 n4,
+    five 10-char fields per line; n4=0 → triangle). Pressure acts along the
+    segment normal, so LS-DYNA's segment orientation carries the direction.
+    """
     if not state.pressure_loads:
         return []
     groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
@@ -2033,19 +2059,22 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     lines: List[str] = ["#-  PRESSURE LOADS:", HDR]
     pload_id = 1
     for (lcid, sf), segs in groups.items():
+        surf_id = state.next_id()
+        lines += [
+            f"/SURF/SEG/{surf_id}",
+            f"PLOAD_{pload_id}_segments",
+            "#   seg_ID        n1        n2        n3        n4",
+        ]
+        for seg_no, nodes in enumerate(segs, start=1):
+            quad = (list(nodes) + [0, 0, 0, 0])[:4]
+            lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
         lines += [
             f"/PLOAD/{pload_id}",
             f"PLOAD_{pload_id}",
-            "#funct_ID       Dir   skew_ID   sens_ID",
-            f"{_i(lcid)}         N         0         0",
-            "#           Ascalex             Fscaley              Tstart               Tstop",
-            f"                   1{_f(sf)}                   0                   0",
-            "#  n1        n2        n3        n4",
+            "#  surf_ID  functIDT sensor_ID                                          Ascale_x            Fscale_y",
+            f"{_i(surf_id)}{_i(lcid)}         0" + " " * 30 + f"{_f(1.0)}{_f(sf)}",
+            HDR,
         ]
-        for nodes in segs:
-            pad = 4 - len(nodes)
-            lines.append("".join(_i(n) for n in nodes) + "         0" * pad)
-        lines.append(HDR)
         pload_id += 1
     return lines
 
@@ -2333,7 +2362,18 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
 
 
 def _make_starter_cloads(state: ConversionState) -> List[str]:
-    """/CLOAD is a Starter keyword – concentrated loads on node groups."""
+    """/CLOAD is a Starter keyword – concentrated loads on node groups.
+
+    Card layout (one 100-col data card after the title — same columns from
+    radioss51 through 2026; cfg radioss2023+ reads cols 51-60 as Itypfun,
+    older input versions blank-skip them):
+      fct_IDT(10) Dir(10) skew_ID(10) sens_ID(10) grnd_ID(10) Itypfun(10)
+      Ascalex(20) Fscaley(20)
+    Itypfun stays BLANK (= default 1, abscissa is time, matching
+    *LOAD_RIGID_BODY LCID semantics): /BEGIN-2022 readers flag any non-blank
+    text in skipped columns with WARNING 100214 "unsupported field exists",
+    while 2023+ readers take blank as 1 — blank is warning-free either way.
+    """
     if not state.load_rigid_bodies:
         return []
 
@@ -2360,10 +2400,9 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
             lines += [
                 f"/CLOAD/{load_id}",
                 f"LoadRB_{load_id}",
-                "#funct_IDT       Dir   skew_ID  sens_ID  grnd_ID",
-                f"{_i(lb.lcid)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}",
-                "#              Ascalex             Fscaley",
-                f"                   1{_f(sf)}",
+                "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
+                f"{_i(lb.lcid)}{dir_str.rjust(10)}{_i(lb.cid)}         0{_i(ind_grnod_id)}"
+                f"          {_f(1.0)}{_f(sf)}",
                 HDR,
             ]
             load_id += 1
@@ -2460,11 +2499,15 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
                 f"*DAMPING_GLOBAL: per-DOF scale factors (stx..srz) ignored; "
                 f"using uniform alpha={alpha:.6G} on all DOFs (/DAMP Format 1)."
             )
+        # The /DAMP card always reads Beta from cols 21-40 — there is no
+        # "alpha-only" card layout. Beta must be written explicitly as 0,
+        # otherwise the grnod_ID digits land in the Beta field and are parsed
+        # as a (huge) stiffness-damping coefficient.
         lines += [
             f"/DAMP/{damp_id}",
             f"Rayleigh mass damping (alpha={alpha:.6G})",
-            "#               alpha   grnod_ID   skew_ID              Tstart               Tstop",
-            f"{_f(alpha)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+            "#               alpha                beta   grnod_ID   skew_ID              Tstart               Tstop",
+            f"{_f(alpha)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
             HDR,
         ]
         return lines
