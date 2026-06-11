@@ -522,6 +522,115 @@ class SolidContactSurfaceTests(unittest.TestCase):
         self.assertEqual(len(self._np1_warning(result)), 1)
 
 
+# Deformable shell part 1 vs rigid shell part 2, surface-to-surface contact
+# whose Card3 carries SST/MST (optional contact thickness per side).  LS-DYNA
+# engages contact at a separation of (SST+MST)/2 — the writer carries that to
+# /INTER/TYPE7 Gapmin so per-pair gap pre-engagement survives conversion.
+GAPMIN_K = """\
+*KEYWORD
+*TITLE
+sst/mst -> gapmin
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part
+         1         1         1
+*PART
+rigid pin
+         2         1         2
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                              pin_pair
+         1         2         3         3         0         0         0         0
+       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20
+       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class ContactGapminTests(unittest.TestCase):
+    """*CONTACT Card3 SST/MST → /INTER/TYPE7 Gapmin = (SST+MST)/2.
+
+    The .k-side knob for force control through a clearance fit: one contact
+    per pair, each with SST/MST giving Gapmin just above that pair's
+    clearance (+ ignore=0 → Inacti=0) pre-engages the contact without the
+    uniform-Gapmin press-fit artifact.  Without SST/MST the card is
+    byte-identical to the pre-mapping writer output (Gapmin 0)."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "g.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_sst_mst_map_to_gapmin(self):
+        result, starter = self._convert(GAPMIN_K)
+        self.assertIn("/INTER/TYPE7/9", starter)
+        # Stfac=0  Fric=0.2  Gapmin=(0+0.22)/2=0.11  Tstart=0  Tstop=0
+        self.assertIn(
+            "                   0                 0.2                0.11"
+            "                   0                   0", starter)
+        self.assertTrue(any("Gapmin=0.11" in w for w in result.warnings))
+
+    def test_single_surface_sast_sbst_also_map(self):
+        deck = GAPMIN_K.replace(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
+            "         9                                                              pin_pair\n"
+            "         1         2         3         3         0         0         0         0\n",
+            "*CONTACT_AUTOMATIC_SINGLE_SURFACE_ID\n"
+            "        11                                                          part1_self\n"
+            "         1         0         3         0         0         0         0         0\n",
+        ).replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       1.0       1.0      0.02      0.04       1.0       1.0       1.0       1.0",
+        )
+        result, starter = self._convert(deck)
+        self.assertIn("/INTER/TYPE7/11", starter)
+        self.assertIn("                0.03", starter)   # (0.02+0.04)/2
+        self.assertTrue(any("Gapmin=0.03" in w for w in result.warnings))
+
+    def test_negative_thickness_uses_magnitude_and_warns(self):
+        deck = GAPMIN_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       1.0       1.0     -0.22       0.0       1.0       1.0       1.0       1.0",
+        )
+        result, starter = self._convert(deck)
+        self.assertIn("                0.11", starter)
+        self.assertTrue(any("negative SST/MST" in w for w in result.warnings))
+
+    def test_no_card3_keeps_gapmin_zero(self):
+        deck = GAPMIN_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0\n",
+            "")
+        result, starter = self._convert(deck)
+        # Gapmin back to 0 — byte-identical to the pre-SST/MST writer output.
+        self.assertIn(
+            "                   0                 0.2                   0"
+            "                   0                   0", starter)
+        self.assertFalse(any("Gapmin=" in w for w in result.warnings))
+
+
 DISPCTRL_K = TRANSDUCER_K.replace(
     "*CONTROL_TERMINATION",
     "*DEFINE_CURVE\n"

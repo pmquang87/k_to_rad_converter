@@ -1178,14 +1178,16 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 continue
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id))
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
         else:
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if slav_grnod and mast_surf:
                 lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                            _ignore_to_inacti(c.ignore, state, c.inter_id),
-                                           viss=_vdc_to_viss(c.vdc, state, c.inter_id))
+                                           viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                           gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
 
     for c in state.contacts_surf2surf:
         slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
@@ -1193,7 +1195,8 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         if slav_grnod and mast_surf:
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
-                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id))
+                                       viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                       gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
 
     return lines
 
@@ -1397,9 +1400,51 @@ def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
     return 0.0
 
 
+def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
+                       inter_id: int) -> float:
+    """Map LS-DYNA *CONTACT Card3 SST/MST (optional contact thickness per side)
+    → OpenRadioss /INTER/TYPE7 Gapmin.
+
+    LS-DYNA offsets each contact surface by half its contact thickness, so the
+    two sides engage at a separation of (SST + MST)/2.  TYPE7 (Igap=0,
+    constant gap) engages at gap = max(Gapmin, property-derived default), so
+    Gapmin = (SST + MST)/2 carries the .k file's per-contact engagement
+    distance through.
+
+    This is the .k-side knob for force control through a clearance fit: per
+    PAIR interfaces, each with Gapmin just above that pair's clearance
+    (+ ignore=0 → Inacti=0), pre-engage the contact so a stiffness path exists
+    at zero load.  One global Gapmin > all clearances also bootstraps, but
+    over-closes every pair by a different amount and bakes a load-independent
+    press-fit stress into the model from t=0 — on `implicit_hr-anlenkung` that
+    artifact was 20 % of the full-load strain energy at F≈0.6 N.
+
+    LS-DYNA gives negative SST/MST a side meaning (the magnitude is the
+    contact thickness; the sign suppresses thickness-projection details with
+    no TYPE7 equivalent), so magnitudes are used and a warning issued.
+    """
+    if sst < 0.0 or mst < 0.0:
+        state.warn(
+            f"CONTACT {inter_id}: negative SST/MST ({sst:g}/{mst:g}) — using "
+            "the magnitudes for the Gapmin mapping; the negative-thickness "
+            "projection semantics have no /INTER/TYPE7 equivalent."
+        )
+    gapmin = (abs(sst) + abs(mst)) / 2.0
+    if gapmin > 0.0:
+        state.warn(
+            f"CONTACT {inter_id}: SST/MST contact thickness -> /INTER/TYPE7 "
+            f"Gapmin={gapmin:g} (engagement distance (SST+MST)/2). Keep "
+            "ignore=0 (Inacti=0) if Gapmin exceeds the physical clearance — "
+            "ignore=1/2 maps to Inacti=5, which shrinks the gap back to the "
+            "clearance and cancels the pre-engagement."
+        )
+    return gapmin
+
+
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
-                      viss: float = 0.0, visf: float = 0.0) -> List[str]:
+                      viss: float = 0.0, visf: float = 0.0,
+                      gapmin: float = 0.0) -> List[str]:
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -1410,7 +1455,7 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
         "                1000                   0                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
-        f"                   0{_f(fric)}                   0                   0                   0",
+        f"                   0{_f(fric)}{_f(gapmin)}                   0                   0",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",

@@ -273,6 +273,8 @@ class ContactAutoSingle:
     dt: float           # death time
     ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
     vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
+    sst: float = 0.0    # LS-DYNA Card3 SST/SAST: contact thickness, secondary side → Gapmin
+    mst: float = 0.0    # LS-DYNA Card3 MST/SBST: contact thickness, main side → Gapmin
 
 
 @dataclass
@@ -285,6 +287,8 @@ class ContactAutoSurf2Surf:
     bt: float; dt: float
     ignore: int = 0     # LS-DYNA optional Card E: 0=push apart, 1=track, 2=accept gap
     vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
+    sst: float = 0.0    # LS-DYNA Card3 SST: contact thickness, secondary side → Gapmin
+    mst: float = 0.0    # LS-DYNA Card3 MST: contact thickness, main side → Gapmin
 
 
 @dataclass
