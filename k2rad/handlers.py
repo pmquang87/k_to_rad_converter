@@ -631,7 +631,11 @@ def _parse_contact_header(block: Block):
         inter_id = to_int(f[0]) if f else 0
         title = " ".join(f[1:]) if len(f) > 1 else ""
         return inter_id, title, 1
-    return len(block.raw) + 1, "", 0  # use position as id if no _ID
+    # No _ID header: return 0 so the caller assigns state.next_id(). (An older
+    # fallback derived the id from the block's line count — every contact of the
+    # same card shape got the same id, and multi-contact decks died with starter
+    # ERROR 117 "INTERFACE ID USED TWICE OR MORE".)
+    return 0, "", 0
 
 
 def _read_contact_ignore(raw: List[str], offset: int) -> int:
