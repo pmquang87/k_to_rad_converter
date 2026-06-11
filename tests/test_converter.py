@@ -8,6 +8,7 @@ handlers, the unit-system header, and a small end-to-end conversion.
 """
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -629,6 +630,36 @@ class ContactGapminTests(unittest.TestCase):
             "                   0                 0.2                   0"
             "                   0                   0", starter)
         self.assertFalse(any("Gapmin=" in w for w in result.warnings))
+
+    def test_multiple_contacts_without_id_get_unique_interface_ids(self):
+        # LS-PrePost usually writes *CONTACT_... WITHOUT the _ID suffix.  The
+        # old no-_ID fallback derived the interface id from the block's line
+        # count, so several contacts of the same card shape all collided on
+        # one id and the starter died with ERROR 117 "INTERFACE ID USED TWICE
+        # OR MORE" (seen on the 3-contact split-gap elevator deck).
+        deck = GAPMIN_K.replace(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
+            "         9                                                              pin_pair\n"
+            "         1         2         3         3         0         0         0         0\n"
+            "       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20\n"
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0\n",
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            "         1         2         3         3         0         0         0         0\n"
+            "       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20\n"
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0\n"
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            "         1         2         3         3         0         0         0         0\n"
+            "       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20\n"
+            "       1.0       1.0       0.0      0.28       1.0       1.0       1.0       1.0\n"
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+            "         1         1         3         3         0         0         0         0\n"
+            "       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20\n"
+            "       1.0       1.0      0.06       0.0       1.0       1.0       1.0       1.0\n",
+        )
+        _, starter = self._convert(deck)
+        ids = re.findall(r"^/INTER/TYPE7/(\d+)$", starter, flags=re.M)
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3, f"duplicate interface ids: {ids}")
 
 
 DISPCTRL_K = TRANSDUCER_K.replace(
