@@ -1153,10 +1153,13 @@ class TetraTenTests(unittest.TestCase):
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/"))
         card1 = lines[i + 3]              # /PROP/SOLID, title, '#…', DATA
         # cfg radioss2022 card 1: Isolid Ismstr Iale Icpre Itetra10 Inpts
-        # Itetra4 Iframe Dn — Itetra10 is field 5 (cols 41-50). Regression: the
-        # writer used the 8-field PDF layout without Iale, which shifted
-        # Itetra10 into Icpre and the reader's Itetra10 defaulted to 0.
-        self.assertEqual(int(card1[40:50]), 2)           # Itetra10
+        # Itetra4 Iframe Dn — Itetra10 is field 5 (cols 41-50). Regressions:
+        # (a) the writer used the 8-field PDF layout without Iale, which
+        # shifted Itetra10 into Icpre and the reader's Itetra10 defaulted;
+        # (b) the value must be 1000 (quadratic, 4 int. points), NOT 2 — the
+        # tet4-timestep variant errors out (ERROR 1216) when kinematic
+        # conditions touch tet10 nodes (e.g. the elevator's CNRB/RBODY).
+        self.assertEqual(int(card1[40:50]), 1000)        # Itetra10
         self.assertEqual(int(card1[20:30]), 0)           # Iale
         self.assertEqual(int(card1[30:40]), 0)           # Icpre
 

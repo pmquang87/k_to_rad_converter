@@ -948,10 +948,15 @@ def _make_properties(state: ConversionState) -> List[str]:
         # /PROP/SOLID card 1 (cfg radioss2022): Isolid Ismstr Iale Icpre Itetra10
         # Inpts Itetra4 Iframe Dn — note the Iale column at 21-30 (the 2022 PDF
         # p.1738 omits it; writing the PDF's 8-field layout shifts Itetra10 into
-        # Icpre and silently drops it). Itetra10=2 = quadratic /TETRA10 (4
-        # integration points) for parts that have 10-node tets; 0 otherwise
-        # (ignored by /TETRA4/brick).
-        itetra10 = 2 if sec.secid in tet10_secids else 0
+        # Icpre and silently drops it). Itetra10=1000 = quadratic /TETRA10 with
+        # 4 integration points, for parts that have 10-node tets; 0 otherwise
+        # (ignored by /TETRA4/brick). Do NOT use Itetra10=2 (same formulation
+        # plus a /TETRA4-equivalent time step): its internal mid-side-node
+        # treatment makes the starter reject any deck where kinematic
+        # conditions (/RBODY, /BCS, CNRB...) touch tet10 nodes — ERROR 1216
+        # "CONFLICT OF TETRA10&ITET=2 WITH KINEMATIC CONDITIONS" — and the
+        # time-step benefit only matters for explicit runs anyway.
+        itetra10 = 1000 if sec.secid in tet10_secids else 0
         lines += [
             f"/PROP/SOLID/{sec.secid}",
             sec.title or f"PROP_{sec.secid}",
