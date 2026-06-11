@@ -1206,11 +1206,12 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _select_parent_interface(state: ConversionState) -> Optional[int]:
-    """Pick a parent /INTER for a /INTER/SUB sub-interface.
+    """Pick a fallback parent /INTER for a /INTER/SUB sub-interface.
 
     A LS-DYNA force transducer is standalone, but /INTER/SUB must reference an
     existing parent interface. Prefer an all-parts single-surface contact (it
     covers any surface pair); otherwise fall back to the first contact defined.
+    Used only when _match_parent_interface finds no surface-compatible parent.
     """
     for c in state.contacts_single:
         if c.ssid == 0:
@@ -1219,6 +1220,64 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
         return state.contacts_single[0].inter_id
     if state.contacts_surf2surf:
         return state.contacts_surf2surf[0].inter_id
+    return None
+
+
+def _contact_slave_pids(state: ConversionState, sid: int, styp: int) -> Optional[Set[int]]:
+    """Part IDs whose nodes form a contact secondary side, or None when the side
+    is not part-resolvable (an explicit node set): None = cannot verify, treat
+    as matching anything."""
+    if styp == 4:
+        return None
+    if styp == 3:
+        return {sid} if sid in state.parts else set()
+    if styp == 2:
+        ps = state.part_sets.get(sid)
+        return set(ps[1]) if ps else set()
+    if styp in (0, 1):
+        if sid in state.parts:
+            return {sid}
+        if sid in state.part_sets:
+            return set(state.part_sets[sid][1])
+        if sid in state.node_sets:
+            return None
+    return set()
+
+
+def _match_parent_interface(state: ConversionState, main_pids: Set[int],
+                            sec_pids: Set[int]) -> Optional[int]:
+    """First /INTER whose MAIN surface covers *main_pids* and whose secondary
+    node group covers *sec_pids*.
+
+    /INTER/SUB segments and nodes must be subsets of the parent interface's
+    main surface / secondary group, or the starter dies with one ERROR 581 per
+    foreign segment ("IS NOT A MAIN SEGMENT OF INTERFACE ID=n"). With several
+    split per-pair contacts (e.g. bracket-self, bracket-pin, bracket-cyl) the
+    old "first contact defined" fallback parented every transducer on whichever
+    contact came first — only a transducer measuring that exact pair survived
+    the starter. Matching by part coverage picks the right pair regardless of
+    definition order, and supports several transducers with different parents.
+    """
+    candidates = []
+    all_pids = set(state.parts.keys())
+    for c in state.contacts_single:
+        if c.ssid == 0:
+            candidates.append((c.inter_id, all_pids, None))
+        else:
+            candidates.append((c.inter_id,
+                               _contact_master_pids(state, c.ssid, c.sstyp),
+                               _contact_slave_pids(state, c.ssid, c.sstyp)))
+    for c in state.contacts_surf2surf:
+        candidates.append((c.inter_id,
+                           _contact_master_pids(state, c.msid, c.mstyp),
+                           _contact_slave_pids(state, c.ssid, c.sstyp)))
+
+    for inter_id, mast, slav in candidates:
+        if main_pids and not (main_pids <= mast):
+            continue
+        if sec_pids and slav is not None and not (sec_pids <= slav):
+            continue
+        return inter_id
     return None
 
 
@@ -1266,17 +1325,11 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     if not state.force_transducers:
         return []
 
-    parent_id = _select_parent_interface(state)
+    fallback_parent = _select_parent_interface(state)
     lines: List[str] = ["#-  FORCE TRANSDUCERS (/INTER/SUB):", HDR]
 
     for ft in state.force_transducers:
         title = ft.title or f"FORCE_TRANSD_{ft.inter_id}"
-        if parent_id is None:
-            state.warn(
-                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no existing /INTER to act "
-                "as parent; /INTER/SUB requires a parent interface -> skipped."
-            )
-            continue
 
         pids_a = _transducer_side_pids(state, ft.surfa, ft.satyp)
         pids_b = _transducer_side_pids(state, ft.surfb, ft.sbtyp)
@@ -1293,6 +1346,23 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
         else:
             sec_pids = [p for p in pids_a if p in state.parts] or all_pids
             main_pids = [p for p in pids_b if p in state.parts] or all_pids
+
+        parent_id = _match_parent_interface(state, set(main_pids), set(sec_pids))
+        if parent_id is None and fallback_parent is not None:
+            parent_id = fallback_parent
+            state.warn(
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no contact interface "
+                f"covers its surfaces (main parts {sorted(set(main_pids))}, "
+                f"secondary parts {sorted(set(sec_pids))}); parenting /INTER/SUB "
+                f"on /INTER {fallback_parent} — the starter may reject foreign "
+                "segments (ERROR 581). Define a contact for this pair."
+            )
+        if parent_id is None:
+            state.warn(
+                f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no existing /INTER to act "
+                "as parent; /INTER/SUB requires a parent interface -> skipped."
+            )
+            continue
 
         sec_nodes = _part_node_ids(state, sec_pids, rigid_nodes)
         if not sec_nodes:
