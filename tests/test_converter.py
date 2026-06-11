@@ -662,6 +662,120 @@ class ContactGapminTests(unittest.TestCase):
         self.assertEqual(len(set(ids)), 3, f"duplicate interface ids: {ids}")
 
 
+# One deformable solid part (1) + two rigid shell parts (2=pin, 3=cyl), three
+# split per-pair contacts with the SELF-contact deliberately defined FIRST,
+# plus one force transducer per rigid pair.  /INTER/SUB segments must be
+# subsets of the parent interface's main surface, so each transducer has to
+# parent on ITS pair — the old "first contact defined" pick parented both on
+# the self-contact and the starter died with ERROR 581 per foreign segment.
+TRANSD_MATCH_K = """\
+*KEYWORD
+*TITLE
+transducer parent matching
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+      11             3.0             0.0             0.0
+      12             4.0             0.0             0.0
+      13             4.0             1.0             0.0
+      14             3.0             1.0             0.0
+*ELEMENT_SHELL
+       1       2       1       2       3       4
+       2       3       5       6       7       8
+*ELEMENT_SOLID
+       3       1      11      12      13      14       5
+*PART
+bracket
+         1         3         1
+*PART
+pin
+         2         1         2
+*PART
+cyl
+         3         1         3
+*SECTION_SHELL
+         1         2       1.0         3
+      0.05
+*SECTION_SOLID
+         3        10
+*MAT_ELASTIC
+         1   2.7e-9     70000.0      0.33
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+*MAT_RIGID
+         3   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+        11                                                          bracket_self
+         1         1         3         3         0         0         0         0
+       0.2
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                        bracket_vs_pin
+         1         2         3         3         0         0         0         0
+       0.2
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+        10                                                        bracket_vs_cyl
+         1         3         3         3         0         0         0         0
+       0.2
+*CONTACT_FORCE_TRANSDUCER_PENALTY_ID
+       101                                                             pin_force
+         2         1         3         3
+*CONTACT_FORCE_TRANSDUCER_PENALTY_ID
+       102                                                             cyl_force
+         3         1         3         3
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class TransducerParentMatchTests(unittest.TestCase):
+    """Each /INTER/SUB must parent on the interface whose main surface and
+    secondary group actually contain its segments/nodes (starter ERROR 581
+    otherwise), independent of contact definition order."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _sub_parent(starter: str, sub_id: int) -> int:
+        lines = starter.splitlines()
+        i = lines.index(f"/INTER/SUB/{sub_id}")
+        # block: keyword, title, comment, data card (parent main_surf grnod)
+        return int(lines[i + 3].split()[0])
+
+    def test_each_transducer_parents_on_its_own_pair(self):
+        _, starter = self._convert(TRANSD_MATCH_K)
+        self.assertEqual(self._sub_parent(starter, 101), 9)    # pin pair
+        self.assertEqual(self._sub_parent(starter, 102), 10)   # cyl pair
+
+    def test_unmatched_transducer_falls_back_with_warning(self):
+        # Remove the cyl pair contact: transducer 102 has no covering interface
+        # -> falls back to the first contact and warns loudly.
+        deck = TRANSD_MATCH_K.replace(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID\n"
+            "        10                                                        bracket_vs_cyl\n"
+            "         1         3         3         3         0         0         0         0\n"
+            "       0.2\n",
+            "")
+        result, starter = self._convert(deck)
+        self.assertEqual(self._sub_parent(starter, 101), 9)
+        self.assertEqual(self._sub_parent(starter, 102), 11)   # fallback: first
+        self.assertTrue(any("no contact interface covers" in w
+                            for w in result.warnings))
+
+
 DISPCTRL_K = TRANSDUCER_K.replace(
     "*CONTROL_TERMINATION",
     "*DEFINE_CURVE\n"
