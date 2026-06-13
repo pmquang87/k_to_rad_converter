@@ -275,6 +275,7 @@ class ContactAutoSingle:
     vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
     sst: float = 0.0    # LS-DYNA Card3 SST/SAST: contact thickness, secondary side → Gapmin
     mst: float = 0.0    # LS-DYNA Card3 MST/SBST: contact thickness, main side → Gapmin
+    sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
 
 
 @dataclass
@@ -289,6 +290,7 @@ class ContactAutoSurf2Surf:
     vdc: float = 0.0    # LS-DYNA Card2 viscous damping coeff (% of critical) → VisS
     sst: float = 0.0    # LS-DYNA Card3 SST: contact thickness, secondary side → Gapmin
     mst: float = 0.0    # LS-DYNA Card3 MST: contact thickness, main side → Gapmin
+    sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
 
 
 @dataclass

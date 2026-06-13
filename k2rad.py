@@ -72,7 +72,8 @@ def main() -> int:
         metavar="ID=VAL",
         help="Override /INTER/TYPE7 Gapmin (field 3) on interface ID to VAL (mm). "
              "Repeatable. Drop a pulled clearance-fit interface below its nodal "
-             "clearance so it starts with 0 initial penetrations.",
+             "clearance so it starts with 0 initial penetrations. (.k-native: set "
+             "the contact's Card-3 SST/MST so (SST+MST)/2 = the gap you want.)",
     )
     fc.add_argument(
         "--soften-stfac",
@@ -80,7 +81,9 @@ def main() -> int:
         default=None,
         metavar="STFAC",
         help="Set Stfac (penalty stiffness scale) on ALL /INTER/TYPE7 interfaces "
-             "(e.g. 0.3) as contact-chatter insurance. Default: engine auto (0).",
+             "(e.g. 0.3) as contact-chatter insurance; overrides the per-contact "
+             "Card-3 SFS mapping. Default: engine auto (0). (.k-native per contact: "
+             "set Card-3 SFS, e.g. SFS=0.3.)",
     )
     args = parser.parse_args()
 

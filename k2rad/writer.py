@@ -1173,20 +1173,50 @@ def _gapmin_override(state: ConversionState, inter_id: int, base: float,
     return base
 
 
+def _sfs_to_stfac(sfs: float, state: ConversionState, inter_id: int) -> float:
+    """Map LS-DYNA *CONTACT Card 3 SFS (slave penalty stiffness scale factor) →
+    OpenRadioss /INTER/TYPE7 Stfac.
+
+    LS-DYNA SFS default is 1.0 (0/blank also reset to 1.0) = "no scaling"; that
+    maps to Stfac=0 (OpenRadioss auto — byte-identical to the converter's prior
+    default). A deliberately non-unit SFS carries through as the interface
+    stiffness scale: SFS<1 softens the penalty (e.g. 0.3 = the validated
+    contact-chatter insurance for force control, durable lesson #10), SFS>1
+    stiffens it. The global --soften-stfac flag, when set, overrides this.
+    """
+    if sfs <= 0.0 or sfs == 1.0:
+        return 0.0
+    state.warn(
+        f"CONTACT {inter_id}: SFS={sfs:g} (Card-3 slave penalty stiffness scale) "
+        f"-> /INTER/TYPE7 Stfac={sfs:g} (SFS=1.0/0/blank would leave the engine "
+        "default Stfac=0)."
+    )
+    return sfs
+
+
+def _stfac_for(state: ConversionState, sfs: float, inter_id: int) -> float:
+    """Per-interface Stfac: the global --soften-stfac override if given, else the
+    per-contact *CONTACT Card-3 SFS mapping."""
+    if state.options.soften_stfac is not None:
+        return state.options.soften_stfac
+    return _sfs_to_stfac(sfs, state, inter_id)
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     if not state.contacts_single and not state.contacts_surf2surf:
         return []
     lines = ["#-  INTERFACES:", HDR]
 
-    # --soften-stfac: penalty stiffness scale applied to every TYPE7 (chatter
-    # insurance for force control). None → 0 → byte-identical default output.
-    stfac = state.options.soften_stfac if state.options.soften_stfac is not None else 0.0
+    # Stfac (penalty stiffness scale) is per-contact from *CONTACT Card-3 SFS
+    # (_stfac_for / _sfs_to_stfac); --soften-stfac, when given, overrides it on
+    # EVERY interface. Both leave Stfac=0 (engine auto) by default → the output
+    # is byte-identical to before when neither is in play.
     if state.options.soften_stfac is not None:
         state.warn(
-            f"--soften-stfac: Stfac={state.options.soften_stfac:g} set on all "
-            "/INTER/TYPE7 interfaces (softer penalty so threshold contact nodes "
-            "transition smoothly instead of chattering). Default (flag absent) "
-            "leaves Stfac=0 = engine auto."
+            f"--soften-stfac: Stfac={state.options.soften_stfac:g} forced on all "
+            "/INTER/TYPE7 interfaces (overrides any *CONTACT Card-3 SFS). Softer "
+            "penalty so threshold contact nodes transition smoothly instead of "
+            "chattering; flag absent leaves Stfac from SFS (default 0 = engine auto)."
         )
     # --inter-gapmin ID=VAL: per-interface Gapmin overrides, consumed as applied.
     gapmin_overrides = dict(state.options.inter_gapmin)
@@ -1217,7 +1247,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=stfac)
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
         else:
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
@@ -1228,7 +1258,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                            _ignore_to_inacti(c.ignore, state, c.inter_id),
                                            viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                           gapmin=gapmin, stfac=stfac)
+                                           gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
 
     for c in state.contacts_surf2surf:
         slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
@@ -1240,7 +1270,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=stfac)
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
 
     for iid, val in sorted(gapmin_overrides.items()):
         state.warn(

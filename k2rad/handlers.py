@@ -660,15 +660,17 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
     vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
-    # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sst/mst (optional contact
-    # thickness per side, SAST/SBST in newer manuals) → /INTER/TYPE7 Gapmin.
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sfs (slave penalty stiffness
+    # scale) → /INTER/TYPE7 Stfac; sst/mst (optional contact thickness per side,
+    # SAST/SBST in newer manuals) → /INTER/TYPE7 Gapmin.
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_single.append(
         ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore,
-                          vdc=vdc, sst=sst, mst=mst)
+                          vdc=vdc, sst=sst, mst=mst, sfs=sfs)
     )
 
 
@@ -689,14 +691,16 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     bt = to_float(f3[6]) if len(f3) > 6 else 0.0
     dt = to_float(f3[7]) if len(f3) > 7 else 1e28
     vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
-    # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sst/mst → /INTER/TYPE7 Gapmin.
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf — sfs (slave penalty stiffness
+    # scale) → /INTER/TYPE7 Stfac; sst/mst → /INTER/TYPE7 Gapmin.
     f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
-                             vdc=vdc, sst=sst, mst=mst)
+                             vdc=vdc, sst=sst, mst=mst, sfs=sfs)
     )
 
 

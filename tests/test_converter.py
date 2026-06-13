@@ -2052,7 +2052,7 @@ class ForceControlStabilizationTests(unittest.TestCase):
     def test_soften_stfac_sets_all_interfaces(self):
         result, starter = self._convert(FORCE_RB_K, soften_stfac=0.3)
         self.assertIn(_TYPE7_9_SOFTENED, starter)
-        self.assertTrue(any("Stfac=0.3 set on all /INTER/TYPE7" in w
+        self.assertTrue(any("Stfac=0.3 forced on all /INTER/TYPE7" in w
                             for w in result.warnings))
 
     def test_soften_stfac_zero_is_explicit(self):
@@ -2060,6 +2060,30 @@ class ForceControlStabilizationTests(unittest.TestCase):
         # emitted Stfac column is the same all-zero default field either way.
         _, starter = self._convert(FORCE_RB_K, soften_stfac=0.0)
         self.assertIn(_TYPE7_9_DEFAULT, starter)
+
+    # ── *CONTACT Card-3 SFS → Stfac (.k-native penalty softening) ─────────────
+    def test_kfile_sfs_maps_to_stfac(self):
+        # SFS=0.3 on the contact's Card 3 (field 1) → Stfac 0.3, no flag needed.
+        deck = FORCE_RB_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       0.3       1.0       0.0      0.22       1.0       1.0       1.0       1.0")
+        result, starter = self._convert(deck)
+        self.assertIn("                 0.3                 0.2                0.11"
+                      "                   0                   0", starter)   # Stfac 0.3, Gapmin 0.11
+        self.assertTrue(any("SFS=0.3" in w and "Stfac=0.3" in w for w in result.warnings))
+
+    def test_kfile_sfs_unity_leaves_engine_default(self):
+        # FORCE_RB_K already carries SFS=1.0 ("no scaling") → Stfac 0 → byte default.
+        _, starter = self._convert(FORCE_RB_K)
+        self.assertIn(_TYPE7_9_DEFAULT, starter)
+
+    def test_soften_stfac_option_overrides_kfile_sfs(self):
+        deck = FORCE_RB_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       0.3       1.0       0.0      0.22       1.0       1.0       1.0       1.0")
+        _, starter = self._convert(deck, soften_stfac=0.5)
+        self.assertIn("                 0.5                 0.2                0.11", starter)
+        self.assertNotIn("                 0.3                 0.2                0.11", starter)
 
     # ── all three together = the validated RB_pull recipe ─────────────────────
     def test_full_recipe_combines_all_three(self):

@@ -197,12 +197,14 @@ class ConverterGUI:
 
         ttk.Label(fc, text="Inter Gapmin overrides:").grid(row=1, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.gapmin).grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
-        ttk.Label(fc, text="ID=VAL, comma/space separated (e.g. 90002=0.03). Auto-numbered contacts start at 90001.",
+        ttk.Label(fc, text="ID=VAL, comma/space separated (e.g. 90002=0.03); auto-numbered contacts start at 90001. "
+                           ".k-native: set the contact's Card-3 SST/MST so Gapmin = (SST+MST)/2.",
                   foreground="gray").grid(row=2, column=1, columnspan=2, sticky="w", padx=6)
 
         ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
         ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
-        ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default",
+        ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default; "
+                           ".k-native per contact: Card-3 SFS (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
         # ── Action row ──────────────────────────────────────────────────────
