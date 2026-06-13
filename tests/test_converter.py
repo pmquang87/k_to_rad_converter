@@ -1891,5 +1891,275 @@ class CardLayoutTests(unittest.TestCase):
         self.assertEqual(zvec, [0.0, 0.0, 1.0])
 
 
+# Implicit force-control deck: rigid pin (part 2, nodes 5-8, master node 5)
+# pulled in Y and Z by two *LOAD_RIGID_BODY cards, held to the deformable part 1
+# only by a clearance-fit TYPE7 contact (id 9) whose Card3 SST/MST → Gapmin 0.11.
+# This is the minimal analogue of the RB_pull elevator model (open item 0b): the
+# three opt-in stabilization fixes target exactly this shape of deck.
+FORCE_RB_K = """\
+*KEYWORD
+*TITLE
+force-control grounding spring test
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part
+         1         1         1
+*PART
+rigid pin
+         2         1         2
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+*DEFINE_CURVE
+         1         0       1.0       1.0
+                 0.0                 0.0
+                 1.0                 1.0
+*CONTROL_IMPLICIT_GENERAL
+         1     0.001
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                              pin_pair
+         1         2         3         3         0         0         0         0
+       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20
+       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0
+*LOAD_RIGID_BODY
+         2         2         1   -5800.0
+*LOAD_RIGID_BODY
+         2         3         1   -1200.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+# Stfac / Fric / Gapmin / Tstart / Tstop data line of /INTER/TYPE7/9 in each
+# configuration (fixed 20-char fields).
+_TYPE7_9_DEFAULT = ("                   0                 0.2                0.11"
+                    "                   0                   0")          # Stfac 0, Gapmin 0.11
+_TYPE7_9_SOFTENED = ("                 0.3                 0.2                0.11"
+                     "                   0                   0")         # Stfac 0.3
+_TYPE7_9_GAPMIN03 = ("                   0                 0.2                0.03"
+                     "                   0                   0")         # Gapmin 0.03
+_TYPE7_9_FULL_RECIPE = ("                 0.3                 0.2                0.03"
+                        "                   0                   0")      # Stfac 0.3 + Gapmin 0.03
+# One SPR_GENE DOF K/C/A/B/D data line with the stiffness in field 1.
+_SPR_K = lambda k: (f"{str(k).rjust(20)}                   0                   0"
+                    "                   0                   0")
+
+
+class ForceControlStabilizationTests(unittest.TestCase):
+    """The three opt-in force-control fixes (--ground-springs / --inter-gapmin /
+    --soften-stfac).  Each must leave the deck byte-identical when absent and
+    reproduce the validated RB_pull manual patches when present (open item 0b)."""
+
+    def _convert(self, deck: str, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "fc.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _spring_nodes(starter: str):
+        """(node_ID1, node_ID2) of the first /SPRING element = (master, ground)."""
+        lines = starter.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("/SPRING/"):
+                fields = lines[i + 2].split()      # /SPRING, "# sprg_ID...", data
+                return int(fields[1]), int(fields[2])
+        raise AssertionError("no /SPRING block found")
+
+    # ── off by default: byte-stability ──────────────────────────────────────
+    def test_defaults_emit_no_stabilization(self):
+        result, starter = self._convert(FORCE_RB_K)
+        self.assertNotIn("/PROP/TYPE8", starter)
+        self.assertNotIn("/SPRING/", starter)
+        self.assertNotIn("GROUNDING SPRINGS", starter)
+        self.assertIn(_TYPE7_9_DEFAULT, starter)            # Stfac 0, Gapmin 0.11
+        self.assertFalse(any("--ground-springs" in w or "--soften-stfac" in w
+                             or "--inter-gapmin" in w for w in result.warnings))
+
+    def test_explicit_default_options_match_no_options(self):
+        # Passing the option defaults explicitly must be byte-identical to omitting them.
+        _, plain = self._convert(FORCE_RB_K)
+        _, defaulted = self._convert(FORCE_RB_K, ground_springs=False,
+                                     ground_spring_k=100.0, inter_gapmin={},
+                                     soften_stfac=None)
+        self.assertEqual(plain, defaulted)
+
+    # ── --ground-springs ─────────────────────────────────────────────────────
+    def test_ground_springs_inject_spr_gene_on_loaded_axes(self):
+        result, starter = self._convert(FORCE_RB_K, ground_springs=True)
+        self.assertIn("/PROP/TYPE8/", starter)
+        self.assertIn("/SPRING/", starter)
+        # K=100 on exactly the two loaded translational axes (Y, Z); X/RX/RY/RZ are 0.
+        self.assertEqual(starter.count(_SPR_K(100)), 2)
+        # The spring connects the /RBODY master node (5) to a new fixed ground node.
+        master, ground = self._spring_nodes(starter)
+        self.assertEqual(master, 5)
+        self.assertEqual(ground, 9)                          # max(node id 1..8) + 1
+        self.assertIn("   111 111         0", starter)        # ground node fully fixed
+        self.assertTrue(any("grounding spring" in w and "master node 5" in w
+                            for w in result.warnings))
+
+    def test_ground_spring_k_is_configurable(self):
+        _, starter = self._convert(FORCE_RB_K, ground_springs=True, ground_spring_k=250.0)
+        self.assertEqual(starter.count(_SPR_K(250)), 2)
+        self.assertEqual(starter.count(_SPR_K(100)), 0)
+
+    def test_single_axis_load_springs_only_that_axis(self):
+        # Drop the Z load → only Y is a loaded axis → K on one DOF only.
+        deck = FORCE_RB_K.replace("         2         3         1   -1200.0\n", "")
+        _, starter = self._convert(deck, ground_springs=True)
+        self.assertEqual(starter.count(_SPR_K(100)), 1)
+
+    def test_ground_springs_noop_without_rigid_load(self):
+        # TINY_K has no *LOAD_RIGID_BODY → nothing to ground, even with the flag.
+        _, starter = self._convert(TINY_K, ground_springs=True)
+        self.assertNotIn("/PROP/TYPE8", starter)
+        self.assertNotIn("/SPRING/", starter)
+
+    # ── --inter-gapmin ────────────────────────────────────────────────────────
+    def test_inter_gapmin_overrides_pulled_interface(self):
+        result, starter = self._convert(FORCE_RB_K, inter_gapmin={9: 0.03})
+        self.assertIn(_TYPE7_9_GAPMIN03, starter)            # 0.03, not the SST/MST 0.11
+        self.assertNotIn(_TYPE7_9_DEFAULT, starter)
+        self.assertTrue(any("Gapmin overridden 0.11 -> 0.03" in w
+                            for w in result.warnings))
+
+    def test_inter_gapmin_unknown_id_warns_and_no_op(self):
+        result, starter = self._convert(FORCE_RB_K, inter_gapmin={777: 0.03})
+        self.assertIn(_TYPE7_9_DEFAULT, starter)             # interface 9 unchanged
+        self.assertTrue(any("no /INTER/TYPE7/777 was emitted" in w
+                            for w in result.warnings))
+
+    # ── --soften-stfac ────────────────────────────────────────────────────────
+    def test_soften_stfac_sets_all_interfaces(self):
+        result, starter = self._convert(FORCE_RB_K, soften_stfac=0.3)
+        self.assertIn(_TYPE7_9_SOFTENED, starter)
+        self.assertTrue(any("Stfac=0.3 forced on all /INTER/TYPE7" in w
+                            for w in result.warnings))
+
+    def test_soften_stfac_zero_is_explicit(self):
+        # An explicit 0.0 differs from None only in that it is *requested*; the
+        # emitted Stfac column is the same all-zero default field either way.
+        _, starter = self._convert(FORCE_RB_K, soften_stfac=0.0)
+        self.assertIn(_TYPE7_9_DEFAULT, starter)
+
+    # ── *CONTACT Card-3 SFS → Stfac (.k-native penalty softening) ─────────────
+    def test_kfile_sfs_maps_to_stfac(self):
+        # SFS=0.3 on the contact's Card 3 (field 1) → Stfac 0.3, no flag needed.
+        deck = FORCE_RB_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       0.3       1.0       0.0      0.22       1.0       1.0       1.0       1.0")
+        result, starter = self._convert(deck)
+        self.assertIn("                 0.3                 0.2                0.11"
+                      "                   0                   0", starter)   # Stfac 0.3, Gapmin 0.11
+        self.assertTrue(any("SFS=0.3" in w and "Stfac=0.3" in w for w in result.warnings))
+
+    def test_kfile_sfs_unity_leaves_engine_default(self):
+        # FORCE_RB_K already carries SFS=1.0 ("no scaling") → Stfac 0 → byte default.
+        _, starter = self._convert(FORCE_RB_K)
+        self.assertIn(_TYPE7_9_DEFAULT, starter)
+
+    def test_soften_stfac_option_overrides_kfile_sfs(self):
+        deck = FORCE_RB_K.replace(
+            "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0",
+            "       0.3       1.0       0.0      0.22       1.0       1.0       1.0       1.0")
+        _, starter = self._convert(deck, soften_stfac=0.5)
+        self.assertIn("                 0.5                 0.2                0.11", starter)
+        self.assertNotIn("                 0.3                 0.2                0.11", starter)
+
+    # ── all three together = the validated RB_pull recipe ─────────────────────
+    def test_full_recipe_combines_all_three(self):
+        result, starter = self._convert(
+            FORCE_RB_K, ground_springs=True, inter_gapmin={9: 0.03}, soften_stfac=0.3)
+        self.assertIn(_TYPE7_9_FULL_RECIPE, starter)         # Stfac 0.3 + Gapmin 0.03
+        self.assertIn("/PROP/TYPE8/", starter)
+        self.assertEqual(starter.count(_SPR_K(100)), 2)
+        master, ground = self._spring_nodes(starter)
+        self.assertEqual((master, ground), (5, 9))
+
+
+class GuiInputParsingTests(unittest.TestCase):
+    """The GUI's pure field-parsing helpers (k2rad_gui). These never touch
+    tkinter, so the suite runs on a headless box (the import is guarded)."""
+
+    def setUp(self):
+        import k2rad_gui  # noqa: E402  (guarded tkinter import; safe headless)
+        self.g = k2rad_gui
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.kpath = os.path.join(self.tmp.name, "m.k")
+        with open(self.kpath, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+
+    def test_parse_inter_gapmin_pairs(self):
+        self.assertEqual(self.g.parse_inter_gapmin(""), {})
+        self.assertEqual(self.g.parse_inter_gapmin("90002=0.03"), {90002: 0.03})
+        self.assertEqual(self.g.parse_inter_gapmin("9=0.03, 10=0.05  11=0.1"),
+                         {9: 0.03, 10: 0.05, 11: 0.1})
+
+    def test_parse_inter_gapmin_rejects_malformed(self):
+        for bad in ("9", "abc=0.1", "9=x"):
+            with self.assertRaises(ValueError):
+                self.g.parse_inter_gapmin(bad)
+
+    def test_build_kwargs_blank_is_standard_conversion(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="100", inter_gapmin_text="", soften_stfac_text="")
+        self.assertEqual(kw["input_path"], self.kpath)
+        self.assertEqual(kw["units"], ("Mg", "mm", "s"))
+        self.assertFalse(kw["ground_springs"])
+        self.assertEqual(kw["inter_gapmin"], {})
+        self.assertNotIn("soften_stfac", kw)        # None → omitted → default
+        self.assertNotIn("ground_spring_k", kw)     # off → not passed
+        self.assertNotIn("output_stem", kw)
+
+    def test_build_kwargs_full_recipe(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "out/stem", ("", "cm", ""), ground_springs=True,
+            ground_spring_k_text="250", inter_gapmin_text="9=0.03", soften_stfac_text="0.3")
+        self.assertEqual(kw["units"], ("Mg", "cm", "s"))     # blanks fall back per slot
+        self.assertEqual(kw["output_stem"], "out/stem")
+        self.assertTrue(kw["ground_springs"])
+        self.assertEqual(kw["ground_spring_k"], 250.0)
+        self.assertEqual(kw["inter_gapmin"], {9: 0.03})
+        self.assertEqual(kw["soften_stfac"], 0.3)
+
+    def test_build_kwargs_missing_file_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                "", "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="")
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                os.path.join(self.tmp.name, "nope.k"), "", ("Mg", "mm", "s"),
+                ground_springs=False, ground_spring_k_text="",
+                inter_gapmin_text="", soften_stfac_text="")
+
+    def test_build_kwargs_non_numeric_stfac_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="soft")
+
+
 if __name__ == "__main__":
     unittest.main()
