@@ -527,6 +527,10 @@ class ConvertOptions:
     ground_spring_k: float = 100.0                       # N/mm per loaded axis
     inter_gapmin: Dict[int, float] = field(default_factory=dict)  # inter_id → Gapmin
     soften_stfac: Optional[float] = None                 # None = engine auto (0)
+    # Mesh transform: downgrade 10-node quadratic tets to 4-node linear tets
+    # (keep the 4 corners, drop mid-edge nodes). Stiffer/less accurate but lets a
+    # TET10-only source .k produce a TET4 run.
+    tet10_to_tet4: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
