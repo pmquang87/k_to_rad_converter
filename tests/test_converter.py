@@ -2072,5 +2072,70 @@ class ForceControlStabilizationTests(unittest.TestCase):
         self.assertEqual((master, ground), (5, 9))
 
 
+class GuiInputParsingTests(unittest.TestCase):
+    """The GUI's pure field-parsing helpers (k2rad_gui). These never touch
+    tkinter, so the suite runs on a headless box (the import is guarded)."""
+
+    def setUp(self):
+        import k2rad_gui  # noqa: E402  (guarded tkinter import; safe headless)
+        self.g = k2rad_gui
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.kpath = os.path.join(self.tmp.name, "m.k")
+        with open(self.kpath, "w") as fh:
+            fh.write("*KEYWORD\n*END\n")
+
+    def test_parse_inter_gapmin_pairs(self):
+        self.assertEqual(self.g.parse_inter_gapmin(""), {})
+        self.assertEqual(self.g.parse_inter_gapmin("90002=0.03"), {90002: 0.03})
+        self.assertEqual(self.g.parse_inter_gapmin("9=0.03, 10=0.05  11=0.1"),
+                         {9: 0.03, 10: 0.05, 11: 0.1})
+
+    def test_parse_inter_gapmin_rejects_malformed(self):
+        for bad in ("9", "abc=0.1", "9=x"):
+            with self.assertRaises(ValueError):
+                self.g.parse_inter_gapmin(bad)
+
+    def test_build_kwargs_blank_is_standard_conversion(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="100", inter_gapmin_text="", soften_stfac_text="")
+        self.assertEqual(kw["input_path"], self.kpath)
+        self.assertEqual(kw["units"], ("Mg", "mm", "s"))
+        self.assertFalse(kw["ground_springs"])
+        self.assertEqual(kw["inter_gapmin"], {})
+        self.assertNotIn("soften_stfac", kw)        # None → omitted → default
+        self.assertNotIn("ground_spring_k", kw)     # off → not passed
+        self.assertNotIn("output_stem", kw)
+
+    def test_build_kwargs_full_recipe(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "out/stem", ("", "cm", ""), ground_springs=True,
+            ground_spring_k_text="250", inter_gapmin_text="9=0.03", soften_stfac_text="0.3")
+        self.assertEqual(kw["units"], ("Mg", "cm", "s"))     # blanks fall back per slot
+        self.assertEqual(kw["output_stem"], "out/stem")
+        self.assertTrue(kw["ground_springs"])
+        self.assertEqual(kw["ground_spring_k"], 250.0)
+        self.assertEqual(kw["inter_gapmin"], {9: 0.03})
+        self.assertEqual(kw["soften_stfac"], 0.3)
+
+    def test_build_kwargs_missing_file_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                "", "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="")
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                os.path.join(self.tmp.name, "nope.k"), "", ("Mg", "mm", "s"),
+                ground_springs=False, ground_spring_k_text="",
+                inter_gapmin_text="", soften_stfac_text="")
+
+    def test_build_kwargs_non_numeric_stfac_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="soft")
+
+
 if __name__ == "__main__":
     unittest.main()
