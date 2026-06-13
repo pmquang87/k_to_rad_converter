@@ -503,6 +503,30 @@ class DbExtentBinary:
     shge: int = 0       # shell hourglass energy flag
 
 
+# ── User conversion options (CLI flags) ──────────────────────────────────────
+
+@dataclass
+class ConvertOptions:
+    """Opt-in conversion switches set from the CLI / convert() — NOT parsed from
+    the .k file. All default to off so a default conversion is byte-identical.
+
+    These productize the three proven manual deck-patches that make a
+    force-control implicit deck (a *LOAD_RIGID_BODY pulling a clearance-fit pin
+    held only by penalty contact) converge — see the writer for the physics:
+      * ground_springs/ground_spring_k → soft /PROP/TYPE8 grounding springs on
+        the loaded rigid body's free DOFs (bootstrap the singular t=0 tangent);
+      * inter_gapmin → drop a pulled interface's Gapmin below its nodal clearance
+        so it has 0 initial penetrations and engages cleanly (no contact limit
+        cycle);
+      * soften_stfac → reduce the TYPE7 penalty stiffness scale (chatter
+        insurance).
+    """
+    ground_springs: bool = False
+    ground_spring_k: float = 100.0                       # N/mm per loaded axis
+    inter_gapmin: Dict[int, float] = field(default_factory=dict)  # inter_id → Gapmin
+    soften_stfac: Optional[float] = None                 # None = engine auto (0)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ConversionState:
@@ -517,6 +541,8 @@ class ConversionState:
         # Unit system written to the /BEGIN header (mass, length, time).
         # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
         self.units: Tuple[str, str, str] = ("Mg", "mm", "s")
+        # Opt-in conversion switches (CLI flags); see ConvertOptions.
+        self.options: ConvertOptions = ConvertOptions()
 
         # ── Mesh ───────────────────────────────────────────────────
         self.nodes: Dict[int, NodeData] = {}

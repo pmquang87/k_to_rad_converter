@@ -43,7 +43,60 @@ def main() -> int:
         action="store_true",
         help="Suppress warnings and skip-summary output",
     )
+
+    # ── Force-control implicit stabilization (all opt-in; default output is
+    #    byte-identical when none are given) ──────────────────────────────────
+    fc = parser.add_argument_group(
+        "force-control implicit stabilization",
+        "Opt-in fixes for a *LOAD_RIGID_BODY pulling a clearance-fit pin held "
+        "only by penalty contact (TYPE7). With none given the deck is unchanged.",
+    )
+    fc.add_argument(
+        "--ground-springs",
+        action="store_true",
+        help="Inject soft /PROP/TYPE8 grounding springs on every force-loaded "
+             "rigid body's loaded translational DOFs (bootstraps the singular "
+             "t=0 tangent). Off by default.",
+    )
+    fc.add_argument(
+        "--ground-spring-k",
+        type=float,
+        default=100.0,
+        metavar="K",
+        help="Grounding-spring stiffness in N/mm per loaded axis (default 100).",
+    )
+    fc.add_argument(
+        "--inter-gapmin",
+        action="append",
+        default=[],
+        metavar="ID=VAL",
+        help="Override /INTER/TYPE7 Gapmin (field 3) on interface ID to VAL (mm). "
+             "Repeatable. Drop a pulled clearance-fit interface below its nodal "
+             "clearance so it starts with 0 initial penetrations.",
+    )
+    fc.add_argument(
+        "--soften-stfac",
+        type=float,
+        default=None,
+        metavar="STFAC",
+        help="Set Stfac (penalty stiffness scale) on ALL /INTER/TYPE7 interfaces "
+             "(e.g. 0.3) as contact-chatter insurance. Default: engine auto (0).",
+    )
     args = parser.parse_args()
+
+    # Parse --inter-gapmin ID=VAL pairs into {id: gapmin}.
+    inter_gapmin = {}
+    for item in args.inter_gapmin:
+        if "=" not in item:
+            print(f"ERROR: --inter-gapmin expects ID=VAL, got {item!r}", file=sys.stderr)
+            return 1
+        sid, _, sval = item.partition("=")
+        try:
+            inter_gapmin[int(sid.strip())] = float(sval.strip())
+        except ValueError:
+            print(f"ERROR: --inter-gapmin ID and VAL must be numeric: {item!r}",
+                  file=sys.stderr)
+            return 1
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -62,6 +115,10 @@ def main() -> int:
         input_path=str(input_path),
         output_stem=args.output_stem,
         units=tuple(args.units),
+        ground_springs=args.ground_springs,
+        ground_spring_k=args.ground_spring_k,
+        inter_gapmin=inter_gapmin,
+        soften_stfac=args.soften_stfac,
     )
 
     print(f"  Starter -> {result.starter_path}")

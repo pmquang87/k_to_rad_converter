@@ -1151,10 +1151,45 @@ def _warn_implicit_solid_contact_np1(state: ConversionState) -> None:
     )
 
 
+def _gapmin_override(state: ConversionState, inter_id: int, base: float,
+                     requested: Dict[int, float]) -> float:
+    """Apply a --inter-gapmin override to *base* for *inter_id*, consuming the
+    entry from *requested* (leftovers are warned about as unknown ids).
+
+    Dropping a pulled clearance-fit interface's Gapmin below its nodal clearance
+    so it starts with 0 initial penetrations is the key fix for the contact
+    limit cycle: pre-engaged nodes on the releasing side otherwise flip-flop in
+    and out of the penalty gap and the force residual never converges (open item
+    0 / durable lesson #3)."""
+    if inter_id in requested:
+        val = requested.pop(inter_id)
+        state.warn(
+            f"INTER {inter_id}: Gapmin overridden {base:g} -> {val:g} via "
+            "--inter-gapmin (drop a pulled clearance-fit interface below its "
+            "nodal clearance so it has 0 initial penetrations and engages "
+            "cleanly under load — avoids the pre-engaged-node contact limit cycle)."
+        )
+        return val
+    return base
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     if not state.contacts_single and not state.contacts_surf2surf:
         return []
     lines = ["#-  INTERFACES:", HDR]
+
+    # --soften-stfac: penalty stiffness scale applied to every TYPE7 (chatter
+    # insurance for force control). None → 0 → byte-identical default output.
+    stfac = state.options.soften_stfac if state.options.soften_stfac is not None else 0.0
+    if state.options.soften_stfac is not None:
+        state.warn(
+            f"--soften-stfac: Stfac={state.options.soften_stfac:g} set on all "
+            "/INTER/TYPE7 interfaces (softer penalty so threshold contact nodes "
+            "transition smoothly instead of chattering). Default (flag absent) "
+            "leaves Stfac=0 = engine auto."
+        )
+    # --inter-gapmin ID=VAL: per-interface Gapmin overrides, consumed as applied.
+    gapmin_overrides = dict(state.options.inter_gapmin)
 
     all_deformable_nodes: List[int] = sorted(
         {n for e in state.shell_elems
@@ -1176,27 +1211,44 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             if not _make_master_surface(state, mast_surf, f"contact_{c.inter_id}_master",
                                         all_pids, lines):
                 continue
+            gapmin = _gapmin_override(state, c.inter_id,
+                                      _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                      gapmin_overrides)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
+                                       gapmin=gapmin, stfac=stfac)
         else:
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             if slav_grnod and mast_surf:
+                gapmin = _gapmin_override(state, c.inter_id,
+                                          _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                          gapmin_overrides)
                 lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                            _ignore_to_inacti(c.ignore, state, c.inter_id),
                                            viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                           gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
+                                           gapmin=gapmin, stfac=stfac)
 
     for c in state.contacts_surf2surf:
         slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
         mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
         if slav_grnod and mast_surf:
+            gapmin = _gapmin_override(state, c.inter_id,
+                                      _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                      gapmin_overrides)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=_sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id))
+                                       gapmin=gapmin, stfac=stfac)
+
+    for iid, val in sorted(gapmin_overrides.items()):
+        state.warn(
+            f"--inter-gapmin {iid}={val:g}: no /INTER/TYPE7/{iid} was emitted "
+            "(unknown interface id) — override ignored. Use the id printed in the "
+            ".rad (auto-assigned contacts are numbered from 90001 in definition "
+            "order)."
+        )
 
     return lines
 
@@ -1514,7 +1566,7 @@ def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
-                      gapmin: float = 0.0) -> List[str]:
+                      gapmin: float = 0.0, stfac: float = 0.0) -> List[str]:
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -1525,13 +1577,151 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
         "                1000                   0                   0                   0         0",
         "#              Stfac                Fric              Gapmin              Tstart               Tstop",
-        f"                   0{_f(fric)}{_f(gapmin)}                   0                   0",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
         "         0         0                   0         2         0",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: grounding springs  (force-control bootstrap stabilization)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# *LOAD_RIGID_BODY translational DOF (1=Fx,2=Fy,3=Fz) → global axis index.
+_FORCE_DOF_AXIS = {1: 0, 2: 1, 3: 2}
+
+
+def _emit_spr_gene_dof(k: float) -> List[str]:
+    """The 3 data lines of one /PROP/TYPE8 (SPR_GENE) DOF: a linear spring with
+    only the stiffness K set (C=A=B=D=0, no function, no failure).
+
+    Layout verified against the OpenRadioss source + hm_cfg and a validated run
+    (add_grounding_springs.py): the reader forces A=1,B=0 and ±1e30 failure
+    displacements when no function is given, so only K matters here.
+    """
+    return [
+        "#                 K                   C                   A                   B                   D",
+        f"{_f(k)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#  fct_ID1         H   fct_ID2   fct_ID3   fct_ID4                      DeltaMin            DeltaMax",
+        f"{_i(0) * 5}          {_f(0.0)}{_f(0.0)}",
+        "#                 F                   E              Ascale              Hscale",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+
+
+def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """Inject soft /PROP/TYPE8 grounding springs on force-loaded rigid bodies
+    (opt-in: --ground-springs). Returns [] when off → byte-identical output.
+
+    A *LOAD_RIGID_BODY that pulls a rigid body held to ground only by
+    clearance-fit penalty contact has a singular tangent in the loaded DOFs at
+    t=0 (a rigid-body mode → MUMPS zero pivot / frozen residual; force control
+    cannot bootstrap because load≈0 → the gap never closes → no stiffness). The
+    Altair-documented fix (User Guide p.483) is a weak artificial spring on the
+    free loaded DOFs: it removes the singular mode yet stays soft enough that
+    contact carries the load once engaged (spring reaction ≈ k·u — a few % of
+    the applied force at k=100 N/mm). Displacement control sidesteps this by
+    imposing the motion; force control does not. See durable lesson #3.
+
+    One zero-length SPR_GENE spring per loaded rigid body, from its /RBODY
+    master node to a new fully-fixed ground node at the same location, with K on
+    each loaded translational axis. A soft K on a DOF that is otherwise /BCS-
+    constrained is inert, so spring-on-loaded-axes is safe and reproduces the
+    validated RB_pull result (free Y+Z carry the pull; X stays fixed).
+    """
+    if not state.options.ground_springs or not state.load_rigid_bodies:
+        return []
+
+    # Union the loaded translational axes per rigid-body part (a |F| load, dof
+    # 4, grounds all three; moments dof 5/6/7 are not sprung).
+    axes_by_pid: Dict[int, Set[int]] = defaultdict(set)
+    for lb in state.load_rigid_bodies:
+        if lb.dof == 4:
+            axes_by_pid[lb.pid] |= {0, 1, 2}
+        elif lb.dof in _FORCE_DOF_AXIS:
+            axes_by_pid[lb.pid].add(_FORCE_DOF_AXIS[lb.dof])
+
+    if not axes_by_pid:
+        return []
+
+    k = state.options.ground_spring_k
+    lines: List[str] = [
+        "#-  GROUNDING SPRINGS (force-control bootstrap stabilization):", HDR]
+    next_ground_node = (max(state.nodes) if state.nodes else 0) + 1
+    emitted = False
+
+    for pid, axes in sorted(axes_by_pid.items()):
+        info = rbody_info.get(pid)
+        if info is None:
+            state.warn(
+                f"--ground-springs: *LOAD_RIGID_BODY pid={pid} has no rigid body "
+                "(no /RBODY master node) — grounding spring skipped."
+            )
+            continue
+        master = info["ind_node"]
+        nd = state.nodes.get(master)
+        if nd is None:
+            state.warn(
+                f"--ground-springs: rigid body pid={pid} master node {master} has "
+                "no coordinates — grounding spring skipped."
+            )
+            continue
+
+        ground_node = next_ground_node
+        next_ground_node += 1
+        grnod_id = state.next_id()
+        bcs_id = state.next_id()
+        prop_id = state.next_id()
+        part_id = state.next_id()
+        elem_id = state.next_id()
+        kx = k if 0 in axes else 0.0
+        ky = k if 1 in axes else 0.0
+        kz = k if 2 in axes else 0.0
+        axis_names = ",".join(
+            n for n, on in zip("XYZ", (0 in axes, 1 in axes, 2 in axes)) if on)
+
+        lines += [
+            f"#-- master node {master}, axes {axis_names}, K={k:g} N/mm per loaded axis",
+            "/NODE",
+            f"{_i(ground_node)}{_f(nd.x)}{_f(nd.y)}{_f(nd.z)}",
+            f"/GRNOD/NODE/{grnod_id}",
+            f"spring_ground_pid{pid}",
+            f"{_i(ground_node)}",
+            f"/BCS/{bcs_id}",
+            f"fix_spring_ground_pid{pid}",
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   111 111         0{_i(grnod_id)}",
+            f"/PROP/TYPE8/{prop_id}",
+            f"soft_ground_spring_pid{pid}",
+            "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
+            f"{_f(1.0e-4)}{_f(1.0e-6)}{_i(0) * 6}",
+        ]
+        # 6 DOF blocks: X Y Z RX RY RZ — K only on the loaded translational axes.
+        lines += (_emit_spr_gene_dof(kx) + _emit_spr_gene_dof(ky) + _emit_spr_gene_dof(kz)
+                  + _emit_spr_gene_dof(0.0) + _emit_spr_gene_dof(0.0) + _emit_spr_gene_dof(0.0))
+        lines += [
+            f"/PART/{part_id}",
+            f"soft_ground_spring_part_pid{pid}",
+            f"{_i(prop_id)}{_i(0)}{_i(0)}",
+            f"/SPRING/{part_id}",
+            "# sprg_ID  node_ID1  node_ID2",
+            f"{_i(elem_id)}{_i(master)}{_i(ground_node)}",
+            HDR,
+        ]
+        emitted = True
+        state.warn(
+            f"--ground-springs: injected a /PROP/TYPE8 grounding spring (K={k:g} "
+            f"N/mm on axis/axes {axis_names}) from rigid-body pid={pid} master "
+            f"node {master} to new fixed ground node {ground_node}. Removes the "
+            "t=0 rigid-body singularity in the loaded DOFs; carries negligible "
+            "load once contact engages. Remove if this is not force control "
+            "through a clearance-fit contact."
+        )
+
+    return lines if emitted else []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2825,6 +3015,7 @@ def build_starter(state: ConversionState) -> str:
         _make_inivel(state, rbody_info),
         _make_pressure_loads(state),
         _make_starter_cloads(state),
+        _make_grounding_springs(state, rbody_info),
         _make_free_node_constraints(state, rigid_nodes),
         _make_damping(state, rigid_nodes),
         _make_starter_th(state),
