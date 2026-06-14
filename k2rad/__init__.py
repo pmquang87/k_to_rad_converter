@@ -75,6 +75,7 @@ def convert(
     ground_spring_k: float = 100.0,
     inter_gapmin: Optional[Dict[int, float]] = None,
     soften_stfac: Optional[float] = None,
+    tet10_to_tet4: bool = False,
 ) -> ConversionResult:
     """Convert a LS-DYNA .k file to OpenRadioss Starter + Engine .rad files.
 
@@ -105,8 +106,11 @@ def convert(
     soften_stfac : float, optional
         Stfac (penalty stiffness scale) set on ALL /INTER/TYPE7 interfaces
         (e.g. 0.3). None leaves the engine default (0).
+    tet10_to_tet4 : bool
+        Downgrade every 10-node quadratic tet to a 4-node linear tet (keep the
+        4 corners, drop the mid-edge nodes). Off by default.
 
-    All four are opt-in: with their defaults the output is byte-identical to a
+    All five are opt-in: with their defaults the output is byte-identical to a
     plain conversion (see :class:`~k2rad.state.ConvertOptions`).
 
     Returns
@@ -133,6 +137,7 @@ def convert(
         ground_spring_k=ground_spring_k,
         inter_gapmin=dict(inter_gapmin or {}),
         soften_stfac=soften_stfac,
+        tet10_to_tet4=tet10_to_tet4,
     )
     for block in blocks:
         dispatch(block, state)

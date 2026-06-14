@@ -2160,6 +2160,83 @@ class GuiInputParsingTests(unittest.TestCase):
                 self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
                 ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="soft")
 
+    def test_build_kwargs_passes_tet10_to_tet4(self):
+        common = dict(ground_springs=False, ground_spring_k_text="",
+                      inter_gapmin_text="", soften_stfac_text="")
+        on = self.g.build_convert_kwargs(self.kpath, "", ("Mg", "mm", "s"),
+                                         tet10_to_tet4=True, **common)
+        off = self.g.build_convert_kwargs(self.kpath, "", ("Mg", "mm", "s"), **common)
+        self.assertTrue(on["tet10_to_tet4"])
+        self.assertFalse(off["tet10_to_tet4"])
+
+
+class TetraDowngradeTests(unittest.TestCase):
+    """tet10_to_tet4 / --tet10-to-tet4: 10-node quadratic tets become /TETRA4
+    with the mid-edge nodes dropped. Off by default (byte-identical /TETRA10)."""
+
+    def _convert(self, deck: str, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _node_ids(starter: str):
+        # Node data lines carry the id right-justified in cols 0-10; the block
+        # opens with "/NODE" + a "#" column header and ends at the next keyword.
+        ids, in_node = set(), False
+        for ln in starter.splitlines():
+            if ln.startswith("/NODE"):
+                in_node = True
+                continue
+            if in_node:
+                if ln.startswith("/"):           # next keyword ends the block
+                    in_node = False
+                    continue
+                head = ln[:10].strip()           # skips "#" comments and blanks
+                if head.isdigit():
+                    ids.add(int(head))
+        return ids
+
+    def test_off_by_default_keeps_tetra10(self):
+        _, s = self._convert(TET10_K)
+        self.assertIn("/TETRA10/1", s)
+        self.assertNotIn("/TETRA4/1", s)
+        self.assertEqual(self._node_ids(s), set(range(1, 11)))   # all 10 kept
+
+    def test_downgrade_emits_tetra4_and_drops_midedge(self):
+        result, s = self._convert(TET10_K, tet10_to_tet4=True)
+        self.assertIn("/TETRA4/1", s)
+        self.assertNotIn("/TETRA10", s)
+        self.assertEqual(self._node_ids(s), {1, 2, 3, 4})        # only the 4 corners
+        self.assertTrue(any("downgraded 1 /TETRA10 to /TETRA4" in w
+                            for w in result.warnings))
+
+    def test_downgrade_turns_off_itetra10(self):
+        _, s = self._convert(TET10_K, tet10_to_tet4=True)
+        lines = s.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/"))
+        self.assertEqual(int(lines[i + 3][40:50]), 0)            # Itetra10 off
+
+    def test_midedge_node_referenced_elsewhere_is_kept(self):
+        # A *SET_NODE_LIST referencing mid-edge node 5 → node 5 must survive the
+        # drop, while an unreferenced mid-edge node (6) is removed.
+        deck = TET10_K.replace(
+            "*CONTROL_TERMINATION",
+            "*SET_NODE_LIST_TITLE\nkeep5\n         9\n         5\n*CONTROL_TERMINATION")
+        _, s = self._convert(deck, tet10_to_tet4=True)
+        ids = self._node_ids(s)
+        self.assertIn(5, ids)
+        self.assertNotIn(6, ids)
+
+    def test_no_tet10_reports_unchanged(self):
+        result, _ = self._convert(TINY_K, tet10_to_tet4=True)   # shells only
+        self.assertTrue(any("no 10-node tetrahedra found" in w
+                            for w in result.warnings))
+
 
 if __name__ == "__main__":
     unittest.main()

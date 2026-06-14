@@ -772,6 +772,76 @@ def _screen_sliver_tets(state: ConversionState) -> None:
         )
 
 
+def _referenced_node_ids(state: ConversionState) -> Set[int]:
+    """Every node id still referenced by a retained entity — elements, node sets,
+    beams, initial velocities, added masses, coordinate-node systems, pressure
+    loads, and NODE time-histories. Used to find nodes orphaned by a mesh
+    transform so they can be dropped without breaking any reference."""
+    ref: Set[int] = set()
+    for e in state.shell_elems:
+        ref.update(n for n in e.nodes if n > 0)
+    for e in state.solid_elems:
+        ref.update(n for n in e.nodes if n > 0)
+    for e in state.beam_elems:
+        ref.update(n for n in (e.n1, e.n2, e.n3) if n > 0)
+    for _title, nids in state.node_sets.values():
+        ref.update(n for n in nids if n > 0)
+    for iv in state.inivel_nodes:
+        if iv.nid > 0:
+            ref.add(iv.nid)
+    ref.update(n for n in state.added_node_masses if n > 0)
+    for cn in state.coord_nodes.values():
+        ref.update(n for n in (cn.n1, cn.n2, cn.n3) if n > 0)
+    for pl in state.pressure_loads:
+        ref.update(n for n in pl.nodes if n > 0)
+    for h in state.db_histories:
+        if h.db_type == "NODE":
+            ref.update(n for n in h.ids if n > 0)
+    return ref
+
+
+def _downgrade_tet10_to_tet4(state: ConversionState) -> None:
+    """Convert every 10-node quadratic tet to a 4-node linear tet (opt-in:
+    --tet10-to-tet4). Keeps the 4 corner nodes (the writer then emits /TETRA4),
+    drops the 6 mid-edge nodes, and removes those mid-edge nodes from /NODE when
+    nothing else references them.
+
+    A no-op when the option is off → byte-identical output. Linear tets are
+    markedly stiffer and less accurate than quadratic ones (bending / near-
+    incompressible locking), so this trades stress fidelity for a smaller, faster
+    model — handy when only a TET10 source .k is available but a TET4 run is
+    wanted. Contact surfaces (/SURF/PART/EXT) and the grounding-spring / Gapmin /
+    Stfac stabilization are unaffected. Runs before _snap_tet10_midsides and
+    _screen_sliver_tets so those prepasses operate on the linear mesh; Itetra10
+    then turns off automatically (no 10-node solids remain).
+    """
+    if not state.options.tet10_to_tet4:
+        return
+    midedge: Set[int] = set()
+    affected_pids: Set[int] = set()
+    n_down = 0
+    for e in state.solid_elems:
+        if len(e.nodes) == 10:
+            midedge.update(n for n in e.nodes[4:10] if n > 0)
+            e.nodes = e.nodes[:4]               # keep the 4 corners → /TETRA4
+            affected_pids.add(e.pid)
+            n_down += 1
+    if n_down == 0:
+        state.warn("--tet10-to-tet4: no 10-node tetrahedra found; mesh unchanged.")
+        return
+    referenced = _referenced_node_ids(state)
+    dropped = [nid for nid in midedge if nid not in referenced and nid in state.nodes]
+    for nid in dropped:
+        del state.nodes[nid]
+    state.warn(
+        f"--tet10-to-tet4: downgraded {n_down} /TETRA10 to /TETRA4 (kept the 4 "
+        f"corner nodes, dropped {len(dropped)} now-unreferenced mid-edge node(s)) "
+        f"on part(s) {sorted(affected_pids)}. Linear tets are stiffer and less "
+        "accurate than quadratic tets (bending / near-incompressible locking) — "
+        "expect coarser stress; remesh for production accuracy."
+    )
+
+
 def _make_parts_and_elements(state: ConversionState) -> List[str]:
     if not state.parts:
         return []
@@ -2995,6 +3065,10 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
 def build_starter(state: ConversionState) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
+
+    # Optional TET10 -> TET4 linear downgrade (opt-in). Runs first so the tet10
+    # snap and sliver prepasses below operate on the resulting linear mesh.
+    _downgrade_tet10_to_tet4(state)
 
     # Straighten 10-node tet edges (mid-edge nodes -> edge midpoints) so no
     # quadratic Jacobian folds (OpenRadioss ERROR 489). Must run before nodes are

@@ -43,6 +43,14 @@ def main() -> int:
         action="store_true",
         help="Suppress warnings and skip-summary output",
     )
+    parser.add_argument(
+        "--tet10-to-tet4",
+        action="store_true",
+        help="Downgrade every 10-node quadratic tet to a 4-node linear tet (keep "
+             "the 4 corners, drop the mid-edge nodes). Use when only a TET10 .k is "
+             "available but a TET4 run is wanted. Linear tets are stiffer/less "
+             "accurate — remesh for production accuracy.",
+    )
 
     # ── Force-control implicit stabilization (all opt-in; default output is
     #    byte-identical when none are given) ──────────────────────────────────
@@ -122,6 +130,7 @@ def main() -> int:
         ground_spring_k=args.ground_spring_k,
         inter_gapmin=inter_gapmin,
         soften_stfac=args.soften_stfac,
+        tet10_to_tet4=args.tet10_to_tet4,
     )
 
     print(f"  Starter -> {result.starter_path}")

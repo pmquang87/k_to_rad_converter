@@ -78,11 +78,12 @@ def parse_inter_gapmin(text: str) -> dict:
 
 def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ground_springs: bool, ground_spring_k_text: str,
-                         inter_gapmin_text: str, soften_stfac_text: str) -> dict:
+                         inter_gapmin_text: str, soften_stfac_text: str,
+                         tet10_to_tet4: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
-    units, and all stabilization options at their defaults → a byte-identical
+    units, and all stabilization/mesh options at their defaults → a byte-identical
     standard conversion.
     """
     input_path = (input_path or "").strip()
@@ -99,6 +100,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     defaults = ("Mg", "mm", "s")
     kwargs["units"] = tuple((str(units[i]).strip() or defaults[i]) for i in range(3))
+
+    kwargs["tet10_to_tet4"] = bool(tet10_to_tet4)
 
     kwargs["ground_springs"] = bool(ground_springs)
     if ground_springs:
@@ -146,6 +149,7 @@ class ConverterGUI:
         self.u_mass = tk.StringVar(value="Mg")
         self.u_len = tk.StringVar(value="mm")
         self.u_time = tk.StringVar(value="s")
+        self.tet10 = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.gapmin = tk.StringVar()
@@ -177,6 +181,11 @@ class ConverterGUI:
         ttk.Label(units, text="Units (header labels only — values are never rescaled):").pack(side="left")
         for var, w in ((self.u_mass, 6), (self.u_len, 6), (self.u_time, 6)):
             ttk.Entry(units, textvariable=var, width=w).pack(side="left", padx=3)
+
+        ttk.Checkbutton(
+            io, text="Downgrade TET10 → TET4 (linear tets — stiffer / less accurate; "
+                     "use when only a TET10 .k is available)",
+            variable=self.tet10).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -265,6 +274,7 @@ class ConverterGUI:
                 ground_spring_k_text=self.ground_k.get(),
                 inter_gapmin_text=self.gapmin.get(),
                 soften_stfac_text=self.stfac.get(),
+                tet10_to_tet4=self.tet10.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -322,13 +332,15 @@ class ConverterGUI:
 
     def _describe_options(self, kwargs: dict) -> None:
         bits = []
+        if kwargs.get("tet10_to_tet4"):
+            bits.append("TET10→TET4 downgrade")
         if kwargs.get("ground_springs"):
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")
         if kwargs.get("inter_gapmin"):
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:
             bits.append(f"soften Stfac={kwargs['soften_stfac']:g}")
-        self._append("  Options: " + (", ".join(bits) if bits else "standard (no stabilization)") + "\n")
+        self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
 
