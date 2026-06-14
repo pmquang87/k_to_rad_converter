@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from .parser import parse_k_file
 from .handlers import dispatch
@@ -64,6 +64,43 @@ class ConversionResult:
     engine_path: str
     warnings: List[str]
     skipped_keywords: List[str]
+    log_path: Optional[str] = None   # path of the auto-saved warning log (if any)
+
+
+def _write_conversion_log(output_stem: str, input_path: str,
+                          state: ConversionState) -> Optional[str]:
+    """Save the conversion's warnings + skipped keywords to ``<stem>_conversion.log``
+    so they survive for later investigation (the console scrolls them away on a
+    large deck).  Written only when there is something to record; returns the log
+    path, or ``None`` if there were no warnings/skips."""
+    if not (state.warnings or state.skipped_keywords):
+        return None
+    from datetime import datetime
+    log_path = output_stem + "_conversion.log"
+    skipped = sorted(set(state.skipped_keywords))
+    lines = [
+        "k2rad conversion log",
+        f"  generated : {datetime.now().isoformat(timespec='seconds')}",
+        f"  input     : {input_path}",
+        f"  output    : {output_stem}_0000.rad / _0001.rad",
+        f"  warnings  : {len(state.warnings)}",
+        f"  skipped   : {len(skipped)} unsupported keyword(s)",
+        "",
+    ]
+    if skipped:
+        lines.append(f"Skipped (unsupported) keywords ({len(skipped)}):")
+        lines.extend(f"  *{kw}" for kw in skipped)
+        lines.append("")
+    if state.warnings:
+        lines.append(f"Warnings ({len(state.warnings)}):")
+        lines.extend(f"  {w}" for w in state.warnings)
+        lines.append("")
+    try:
+        with open(log_path, "w", newline="\n", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+    except OSError:
+        return None
+    return log_path
 
 
 def convert(
@@ -78,6 +115,8 @@ def convert(
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
+    progress: Optional[Callable[[float, str], None]] = None,
+    write_log: bool = True,
 ) -> ConversionResult:
     """Convert a LS-DYNA .k file to OpenRadioss Starter + Engine .rad files.
 
@@ -121,9 +160,16 @@ def convert(
         Fraction of the measured clearance used as the suggested Gapmin (default
         0.8). <1 keeps the gap below the clearance (0 initial penetration);
         near 1 still engages promptly.
+    progress : callable(fraction, label), optional
+        Called with an estimated completion fraction (0.0–1.0) and a short stage
+        label as the conversion proceeds, for a progress display. The CLI prints a
+        percentage; the GUI drives a progress bar.
+    write_log : bool
+        Save the conversion's warnings + skipped keywords to ``<stem>_conversion.log``
+        for later investigation (default True). The .rad files are unaffected.
 
-    All are opt-in: with their defaults the output is byte-identical to a
-    plain conversion (see :class:`~k2rad.state.ConvertOptions`).
+    All conversion switches are opt-in: with their defaults the .rad output is
+    byte-identical to a plain conversion (see :class:`~k2rad.state.ConvertOptions`).
 
     Returns
     -------
@@ -138,8 +184,14 @@ def convert(
     starter_path = output_stem + "_0000.rad"
     engine_path  = output_stem + "_0001.rad"
 
+    def _report(frac: float, label: str) -> None:
+        if progress is not None:
+            progress(max(0.0, min(1.0, frac)), label)
+
     # 1. Parse
+    _report(0.0, "Parsing input file")
     blocks = parse_k_file(input_path)
+    _report(0.05, f"Parsed {len(blocks)} keyword block(s)")
 
     # 2. Dispatch each block to fill state
     state = ConversionState()
@@ -153,18 +205,24 @@ def convert(
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
     )
-    for block in blocks:
+    nblocks = max(1, len(blocks))
+    bstep = max(1, nblocks // 25)
+    for i, block in enumerate(blocks):
         dispatch(block, state)
+        if i % bstep == 0:
+            _report(0.05 + 0.28 * (i / nblocks), "Building model")
+    _report(0.33, "Building model")
 
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.
     _inject_implicit_contact_stub(state)
 
     # 2d. Auto-Gapmin: derive each surface-to-surface interface's Gapmin from
-    #     the measured nodal clearance between its two parts (opt-in). Runs after
-    #     the stub so a real-contact model is analyzed; merges into inter_gapmin
-    #     (explicit overrides win) so the writer's existing Gapmin path emits it.
+    #     the measured node-to-segment clearance between its two parts (opt-in).
+    #     Runs after the stub so a real-contact model is analyzed; merges into
+    #     inter_gapmin (explicit overrides win) so the writer's Gapmin path emits it.
     if state.options.auto_gapmin:
+        _report(0.34, "Analyzing contact clearances")
         from .gapmin import apply_auto_gapmin
         apply_auto_gapmin(state)
 
@@ -174,21 +232,32 @@ def convert(
     #     so warn the user to run np=1.
     _warn_implicit_solid_contact_np1(state)
 
-    # 3. Generate output text
-    starter_text = build_starter(state)
+    # 3. Generate output text (build_starter dominates wall time on a large mesh,
+    #    so it drives most of the progress bar).
+    _report(0.36, "Writing starter deck")
+    starter_text = build_starter(
+        state, progress=lambda fr, label: _report(0.36 + 0.61 * fr, label))
+    _report(0.97, "Writing engine deck")
     engine_text  = build_engine(state)
 
     # 4. Write files
+    _report(0.98, "Saving files")
     with open(starter_path, "w", newline="\n") as fh:
         fh.write(starter_text)
     with open(engine_path, "w", newline="\n") as fh:
         fh.write(engine_text)
 
+    # 5. Auto-save warnings/skips for later investigation (large decks scroll the
+    #    console). Written next to the output as <stem>_conversion.log.
+    log_path = _write_conversion_log(output_stem, input_path, state) if write_log else None
+
+    _report(1.0, "Done")
     return ConversionResult(
         starter_path=starter_path,
         engine_path=engine_path,
         warnings=list(state.warnings),
         skipped_keywords=sorted(set(state.skipped_keywords)),
+        log_path=log_path,
     )
 
 

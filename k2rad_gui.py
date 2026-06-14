@@ -12,10 +12,10 @@ Leave every option in the "force-control implicit stabilization" box blank/off
 for a standard conversion (identical to ``python k2rad.py model.k``). Fill them
 in to reproduce a force-control recipe, e.g. the RB_pull elevator deck:
     Ground springs: on,  K = 100
-    Inter Gapmin overrides: 90002=0.03
+    Auto Gapmin from mesh clearance: on,  factor = 0.8
     Soften Stfac: 0.3
 which is the GUI equivalent of
-    python k2rad.py model.k --ground-springs --inter-gapmin 90002=0.03 --soften-stfac 0.3
+    python k2rad.py model.k --ground-springs --auto-gapmin --gapmin-factor 0.8 --soften-stfac 0.3
 
 Tick "Auto Gapmin from mesh clearance" to set each contact's Gapmin from the
 measured minimum node distance between its two parts (= factor × clearance)
@@ -84,7 +84,8 @@ def parse_inter_gapmin(text: str) -> dict:
 
 def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ground_springs: bool, ground_spring_k_text: str,
-                         inter_gapmin_text: str, soften_stfac_text: str,
+                         soften_stfac_text: str,
+                         inter_gapmin_text: str = "",
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
                          gapmin_factor_text: str = "") -> dict:
@@ -172,9 +173,9 @@ class ConverterGUI:
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
         self.gapmin_factor = tk.StringVar(value="0.8")
-        self.gapmin = tk.StringVar()
         self.stfac = tk.StringVar()
         self.status = tk.StringVar(value="Ready.")
+        self.progress = tk.DoubleVar(value=0.0)
 
         pad = {"padx": 6, "pady": 4}
         main = ttk.Frame(root, padding=10)
@@ -233,20 +234,15 @@ class ConverterGUI:
         ttk.Label(ag, text="   factor:").pack(side="left")
         self._gapmin_factor_entry = ttk.Entry(ag, textvariable=self.gapmin_factor, width=6)
         self._gapmin_factor_entry.pack(side="left", padx=3)
-        ttk.Label(fc, text="Gapmin = factor × clearance (factor < 1 → 0 initial penetrations); explicit overrides below still win.",
+        ttk.Label(fc, text="Gapmin = factor × node-to-segment clearance (factor < 1 → 0 initial penetrations). "
+                           "Needs numpy+scipy; see docs/DEPENDENCIES.md.",
                   foreground="gray").grid(row=2, column=1, columnspan=2, sticky="w", padx=6)
 
-        ttk.Label(fc, text="Inter Gapmin overrides:").grid(row=3, column=0, sticky="w", **pad)
-        ttk.Entry(fc, textvariable=self.gapmin).grid(row=3, column=1, columnspan=2, sticky="ew", **pad)
-        ttk.Label(fc, text="ID=VAL, comma/space separated (e.g. 90002=0.03); auto-numbered contacts start at 90001. "
-                           ".k-native: set the contact's Card-3 SST/MST so Gapmin = (SST+MST)/2.",
-                  foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
-
-        ttk.Label(fc, text="Soften Stfac:").grid(row=5, column=0, sticky="w", **pad)
-        ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=5, column=1, sticky="w", **pad)
+        ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
         ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default; "
                            ".k-native per contact: Card-3 SFS (overridden by this field)",
-                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+                  foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
         # ── Action row ──────────────────────────────────────────────────────
         actions = ttk.Frame(main)
@@ -258,10 +254,16 @@ class ConverterGUI:
         self._open_btn.pack(side="left", padx=6)
         ttk.Label(actions, textvariable=self.status, foreground="gray").pack(side="left", padx=10)
 
+        # ── Progress bar ────────────────────────────────────────────────────
+        self._progress_bar = ttk.Progressbar(
+            main, orient="horizontal", mode="determinate",
+            maximum=100.0, variable=self.progress)
+        self._progress_bar.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
         # ── Output log ──────────────────────────────────────────────────────
-        main.rowconfigure(3, weight=1)
+        main.rowconfigure(4, weight=1)
         self._log = scrolledtext.ScrolledText(main, height=14, wrap="word", state="disabled")
-        self._log.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        self._log.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
 
         self._sync_ground_k()
         self._sync_gapmin_factor()
@@ -309,7 +311,6 @@ class ConverterGUI:
                 (self.u_mass.get(), self.u_len.get(), self.u_time.get()),
                 ground_springs=self.ground.get(),
                 ground_spring_k_text=self.ground_k.get(),
-                inter_gapmin_text=self.gapmin.get(),
                 soften_stfac_text=self.stfac.get(),
                 tet10_to_tet4=self.tet10.get(),
                 auto_gapmin=self.auto_gapmin.get(),
@@ -326,6 +327,7 @@ class ConverterGUI:
         self._describe_options(kwargs)
         self._convert_btn.config(state="disabled")
         self._open_btn.config(state="disabled")
+        self.progress.set(0.0)
         self.status.set("Converting… (large meshes can take a while)")
 
         threading.Thread(target=self._worker, args=(kwargs,), daemon=True).start()
@@ -333,41 +335,58 @@ class ConverterGUI:
 
     def _worker(self, kwargs: dict) -> None:
         try:
-            result = convert(**kwargs)
+            result = convert(
+                progress=lambda fr, lab: self._queue.put(("progress", (fr, lab))),
+                **kwargs)
             self._queue.put(("ok", result))
         except Exception:                                    # noqa: BLE001
             self._queue.put(("err", traceback.format_exc()))
 
     def _poll(self) -> None:
+        done = False
         try:
-            kind, payload = self._queue.get_nowait()
+            while True:
+                kind, payload = self._queue.get_nowait()
+                if kind == "progress":
+                    frac, label = payload
+                    self.progress.set(frac * 100.0)
+                    self.status.set(f"{int(frac * 100)}%  {label}")
+                elif kind == "err":
+                    self._append("\nConversion FAILED:\n")
+                    self._append(payload)
+                    self.status.set("Conversion failed — see the log.")
+                    self.progress.set(0.0)
+                    done = True
+                else:  # ("ok", result)
+                    self._show_result(payload)
+                    done = True
         except queue.Empty:
-            self.root.after(100, self._poll)
-            return
+            pass
 
-        if kind == "err":
-            self._append("\nConversion FAILED:\n")
-            self._append(payload)
-            self.status.set("Conversion failed — see the log.")
+        if done:
+            self._convert_btn.config(state="normal")
         else:
-            result = payload
-            self._last_out_dir = str(Path(result.starter_path).resolve().parent)
-            self._append(f"\n  Starter -> {result.starter_path}\n")
-            self._append(f"  Engine  -> {result.engine_path}\n")
-            if result.skipped_keywords:
-                self._append(f"\n  Skipped (unsupported) keywords ({len(result.skipped_keywords)}):\n")
-                for kw in result.skipped_keywords:
-                    self._append(f"    *{kw}\n")
-            if result.warnings:
-                self._append(f"\n  Warnings ({len(result.warnings)}):\n")
-                for w in result.warnings:
-                    self._append(f"    - {w}\n")
-            done = "Done (with warnings)." if (result.warnings or result.skipped_keywords) else "Done."
-            self._append(f"\n{done}\n")
-            self.status.set(done)
-            self._open_btn.config(state="normal")
+            self.root.after(100, self._poll)
 
-        self._convert_btn.config(state="normal")
+    def _show_result(self, result) -> None:
+        self._last_out_dir = str(Path(result.starter_path).resolve().parent)
+        self._append(f"\n  Starter -> {result.starter_path}\n")
+        self._append(f"  Engine  -> {result.engine_path}\n")
+        if getattr(result, "log_path", None):
+            self._append(f"  Log     -> {result.log_path}\n")
+        if result.skipped_keywords:
+            self._append(f"\n  Skipped (unsupported) keywords ({len(result.skipped_keywords)}):\n")
+            for kw in result.skipped_keywords:
+                self._append(f"    *{kw}\n")
+        if result.warnings:
+            self._append(f"\n  Warnings ({len(result.warnings)}):\n")
+            for w in result.warnings:
+                self._append(f"    - {w}\n")
+        done = "Done (with warnings)." if (result.warnings or result.skipped_keywords) else "Done."
+        self._append(f"\n{done}\n")
+        self.status.set(done)
+        self.progress.set(100.0)
+        self._open_btn.config(state="normal")
 
     def _describe_options(self, kwargs: dict) -> None:
         bits = []
