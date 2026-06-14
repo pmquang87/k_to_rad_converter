@@ -371,13 +371,18 @@ def _emit_mat_law36_powerlaw(mat: MatPowerLaw) -> List[str]:
 # Starter: nodes
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_nodes(state: ConversionState) -> List[str]:
+def _make_nodes(state: ConversionState, progress=None) -> List[str]:
     if not state.nodes:
         return []
     lines = ["#-  NODES:", HDR, "/NODE",
              "#  Node ID               X               Y               Z"]
-    for nid, nd in sorted(state.nodes.items()):
+    items = sorted(state.nodes.items())
+    total = len(items)
+    step = max(1, total // 20)
+    for idx, (nid, nd) in enumerate(items):
         lines.append(f"{_i(nid)}{_f(nd.x)}{_f(nd.y)}{_f(nd.z)}")
+        if progress is not None and idx % step == 0:
+            progress(idx / total)
     lines.append(HDR)
     return lines
 
@@ -829,8 +834,38 @@ def _downgrade_tet10_to_tet4(state: ConversionState) -> None:
     if n_down == 0:
         state.warn("--tet10-to-tet4: no 10-node tetrahedra found; mesh unchanged.")
         return
+
+    # Mid-edge nodes are now in no element. Any that a NODE SET still references
+    # must be pruned from that set, not kept: otherwise the node survives only to
+    # carry the set's condition (e.g. a symmetry SPC from *BOUNDARY_PRESCRIBED_
+    # MOTION_SET) AND, being element-less, the implicit free-node guard's /BCS —
+    # two boundary conditions on one node, which OpenRadioss rejects as WARNING
+    # 312 INCOMPATIBLE KINEMATIC CONDITIONS (seen as 6152 orphaned symmetry-plane
+    # mid-edge nodes x 3 DOFs = 18456 on the elevator TET4 downgrade). The
+    # surviving corner nodes on the same plane still carry the condition, so the
+    # SPC is unchanged for the linear mesh. Genuinely-needed references (coord-node
+    # systems, inivel, pressure, added mass, beams, node TH) keep the node — those
+    # carry no second BCS, so the free-node guard constrains them harmlessly.
+    elem_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        elem_nodes.update(n for n in e.nodes if n > 0)
+    for e in state.solid_elems:
+        elem_nodes.update(n for n in e.nodes if n > 0)
+    for e in state.beam_elems:
+        elem_nodes.update(n for n in (e.n1, e.n2, e.n3) if n > 0)
+    gone = {n for n in midedge if n not in elem_nodes}     # removed from the mesh
+
+    n_pruned = 0
+    n_sets_pruned = 0
+    for nsid, (title, nids) in list(state.node_sets.items()):
+        kept = [n for n in nids if n not in gone]
+        if len(kept) != len(nids):
+            n_pruned += len(nids) - len(kept)
+            n_sets_pruned += 1
+            state.node_sets[nsid] = (title, kept)
+
     referenced = _referenced_node_ids(state)
-    dropped = [nid for nid in midedge if nid not in referenced and nid in state.nodes]
+    dropped = [nid for nid in gone if nid not in referenced and nid in state.nodes]
     for nid in dropped:
         del state.nodes[nid]
     state.warn(
@@ -840,12 +875,31 @@ def _downgrade_tet10_to_tet4(state: ConversionState) -> None:
         "accurate than quadratic tets (bending / near-incompressible locking) — "
         "expect coarser stress; remesh for production accuracy."
     )
+    if n_pruned:
+        state.warn(
+            f"--tet10-to-tet4: removed {n_pruned} dropped mid-edge node(s) from "
+            f"{n_sets_pruned} node set(s) so their SPC/BC now applies to the "
+            "surviving corner nodes only (prevents orphan nodes carrying both a "
+            "node-set BC and the implicit free-node /BCS — OpenRadioss WARNING 312)."
+        )
 
 
-def _make_parts_and_elements(state: ConversionState) -> List[str]:
+def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
     lines = ["#-  PARTS AND ELEMENTS:", HDR]
+
+    # Progress is driven off the solid elements (the dominant count); a single
+    # part can hold every tet, so the counter ticks inside the emission loops.
+    _emitted = 0
+    _total = max(1, len(state.solid_elems))
+    _step = max(1, _total // 30)
+
+    def _tick():
+        nonlocal _emitted
+        _emitted += 1
+        if progress is not None and _emitted % _step == 0:
+            progress(_emitted / _total)
 
     shells_by_pid: Dict[int, List[ShellElem]] = defaultdict(list)
     for e in state.shell_elems:
@@ -917,6 +971,7 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                     for n in nd:
                         row += _i(n)
                     lines.append(row)
+                    _tick()
                 lines.append(HDR)
             if tets10:
                 # /TETRA10: 2 lines per element — tetra_ID, then the 10 node IDs
@@ -925,6 +980,7 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                 for e in tets10:
                     lines.append(_i(e.eid))
                     lines.append("".join(_i(n) for n in e.nodes[:10]))
+                    _tick()
                 lines.append(HDR)
             if bricks:
                 lines.append(f"/BRICK/{pid}")
@@ -936,6 +992,7 @@ def _make_parts_and_elements(state: ConversionState) -> List[str]:
                     for n in nodes[:8]:
                         row += _i(n)
                     lines.append(row)
+                    _tick()
                 lines.append(HDR)
         if pid in beams_by_pid:
             lines.append(f"/BEAM/{pid}")
@@ -3062,7 +3119,7 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     return lines
 
 
-def build_starter(state: ConversionState) -> str:
+def build_starter(state: ConversionState, progress=None) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
 
@@ -3099,38 +3156,50 @@ def build_starter(state: ConversionState) -> str:
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
     state.rbody_ind_grnods = {pid: info["ind_grnod_id"] for pid, info in rbody_info.items()}
 
-    sections = [
-        _make_header(state),
-        _make_title(state),
-        _make_analysis_defaults(state),
-        _make_materials(state),
-        _make_nodes(state),
-        _make_bcs(state, rbody_info),
-        _make_skews(state),
-        _make_parts_and_elements(state),
-        _make_properties(state),
-        _make_functions(state),
-        _make_extra_groups(state),
-        _make_interfaces(state, rigid_nodes),
-        _make_force_transducers(state, rigid_nodes),
-        rbody_lines,
-        _make_imposed_motions(state, rbody_info),
-        _make_imposed_motions_set(state),
-        _make_inivel(state, rbody_info),
-        _make_pressure_loads(state),
-        _make_starter_cloads(state),
-        _make_grounding_springs(state, rbody_info),
-        _make_free_node_constraints(state, rigid_nodes),
-        _make_damping(state, rigid_nodes),
-        _make_starter_th(state),
-        _make_starter_th_inter(state),
-        _make_starter_th_node_reac(state, rbody_info),
-        _make_skipped_comment(state),
-        ["/END", HDR],
-    ]
+    def _rep(frac: float, label: str) -> None:
+        if progress is not None:
+            progress(frac, label)
+
+    # Sections are appended in the SAME order as before; the two heavy ones
+    # (nodes, elements) report sub-progress so a large mesh shows a moving bar.
+    sections: List[List[str]] = []
+    sections.append(_make_header(state))
+    sections.append(_make_title(state))
+    sections.append(_make_analysis_defaults(state))
+    sections.append(_make_materials(state))
+    _rep(0.08, "Writing nodes")
+    sections.append(_make_nodes(
+        state, progress=lambda fr: _rep(0.08 + 0.32 * fr, "Writing nodes")))
+    sections.append(_make_bcs(state, rbody_info))
+    sections.append(_make_skews(state))
+    _rep(0.40, "Writing elements")
+    sections.append(_make_parts_and_elements(
+        state, progress=lambda fr: _rep(0.40 + 0.50 * fr, "Writing elements")))
+    _rep(0.90, "Finalizing starter deck")
+    sections.append(_make_properties(state))
+    sections.append(_make_functions(state))
+    sections.append(_make_extra_groups(state))
+    sections.append(_make_interfaces(state, rigid_nodes))
+    sections.append(_make_force_transducers(state, rigid_nodes))
+    sections.append(rbody_lines)
+    sections.append(_make_imposed_motions(state, rbody_info))
+    sections.append(_make_imposed_motions_set(state))
+    sections.append(_make_inivel(state, rbody_info))
+    sections.append(_make_pressure_loads(state))
+    sections.append(_make_starter_cloads(state))
+    sections.append(_make_grounding_springs(state, rbody_info))
+    sections.append(_make_free_node_constraints(state, rigid_nodes))
+    sections.append(_make_damping(state, rigid_nodes))
+    sections.append(_make_starter_th(state))
+    sections.append(_make_starter_th_inter(state))
+    sections.append(_make_starter_th_node_reac(state, rbody_info))
+    sections.append(_make_skipped_comment(state))
+    sections.append(["/END", HDR])
+
     lines: List[str] = []
     for sec in sections:
         lines.extend(sec)
+    _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
 
 

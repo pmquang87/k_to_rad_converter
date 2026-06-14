@@ -26,13 +26,15 @@ from k2rad.state import (  # noqa: E402
     CoordNodes,
     NodeData,
     PartData,
+    ShellElem,
     SolidElem,
 )
 from k2rad.gapmin import (  # noqa: E402
     DEFAULT_GAPMIN_FACTOR,
     apply_auto_gapmin,
-    min_distance_between_coords,
-    min_node_distance,
+    fast_proximity_available,
+    min_point_to_triangles,
+    point_triangle_distance,
     suggest_gapmins,
 )
 from k2rad.writer import _skew_axes_from_nodes  # noqa: E402
@@ -2267,16 +2269,38 @@ class TetraDowngradeTests(unittest.TestCase):
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/"))
         self.assertEqual(int(lines[i + 3][40:50]), 0)            # Itetra10 off
 
-    def test_midedge_node_referenced_elsewhere_is_kept(self):
-        # A *SET_NODE_LIST referencing mid-edge node 5 → node 5 must survive the
-        # drop, while an unreferenced mid-edge node (6) is removed.
+    def test_midedge_node_only_in_nodeset_is_pruned_and_dropped(self):
+        # A mid-edge node referenced ONLY by a *SET_NODE_LIST is removed from the
+        # mesh by the downgrade, so it is pruned from the set and dropped — NOT
+        # kept as an orphan. Keeping it (the old behaviour) made it carry both the
+        # set's BC and the implicit free-node /BCS → OpenRadioss WARNING 312
+        # INCOMPATIBLE KINEMATIC CONDITIONS (the elevator symmetry-set bug).
         deck = TET10_K.replace(
             "*CONTROL_TERMINATION",
             "*SET_NODE_LIST_TITLE\nkeep5\n         9\n         5\n*CONTROL_TERMINATION")
-        _, s = self._convert(deck, tet10_to_tet4=True)
+        result, s = self._convert(deck, tet10_to_tet4=True)
         ids = self._node_ids(s)
-        self.assertIn(5, ids)
-        self.assertNotIn(6, ids)
+        self.assertEqual(ids, {1, 2, 3, 4})          # mid-edge 5 (and 6) gone
+        self.assertTrue(any("node set" in w and "WARNING 312" in w
+                            for w in result.warnings))
+
+    def test_midedge_nodeset_pruned_but_genuine_reference_kept(self):
+        # The node-set prune must not drop a mid-edge node that a GENUINE non-set
+        # entity still needs (e.g. an added mass) — that node is kept (and the
+        # free-node guard constrains it harmlessly, with no second BC).
+        from k2rad import writer
+        st = ConversionState()
+        st.options.tet10_to_tet4 = True
+        st.nodes = {i: NodeData(float(i), 0.0, 0.0) for i in range(1, 11)}
+        st.solid_elems = [SolidElem(1, 1, list(range(1, 11)))]
+        st.node_sets = {500: ("sym", [1, 5])}        # corner 1 + mid-edge 5
+        st.added_node_masses = {7: 1.0}              # genuine ref on mid-edge 7
+        writer._downgrade_tet10_to_tet4(st)
+        self.assertEqual(st.node_sets[500][1], [1])  # mid-edge 5 pruned, corner kept
+        self.assertNotIn(5, st.nodes)                # dropped (set-only reference)
+        self.assertIn(1, st.nodes)                   # corner survives
+        self.assertIn(7, st.nodes)                   # genuine reference keeps it
+        self.assertNotIn(6, st.nodes)                # plain mid-edge dropped
 
     def test_no_tet10_reports_unchanged(self):
         result, _ = self._convert(TINY_K, tet10_to_tet4=True)   # shells only
@@ -2330,52 +2354,113 @@ rigid pin
 """
 
 
-class MinDistanceKernelTests(unittest.TestCase):
-    """The pure-Python adaptive spatial-grid minimum-distance kernel."""
+class PointTriangleTests(unittest.TestCase):
+    """The exact point-to-triangle (node-to-segment) distance kernel."""
+
+    A = (0.0, 0.0, 0.0)
+    B = (6.0, 0.0, 0.0)
+    C = (0.0, 6.0, 0.0)
+
+    def test_point_above_interior_is_perpendicular(self):
+        # Projects to (1,1,0), inside the triangle → perpendicular height 1.
+        self.assertAlmostEqual(point_triangle_distance((1, 1, 1), self.A, self.B, self.C),
+                               1.0, places=9)
+
+    def test_point_above_edge(self):
+        # (3,-4,0) projects outside in -y → nearest point (3,0,0) on edge AB.
+        self.assertAlmostEqual(point_triangle_distance((3, -4, 0), self.A, self.B, self.C),
+                               4.0, places=9)
+
+    def test_point_beyond_vertex(self):
+        # (-3,-4,0) is past vertex A → nearest point is A itself, distance 5.
+        self.assertAlmostEqual(point_triangle_distance((-3, -4, 0), self.A, self.B, self.C),
+                               5.0, places=9)
+
+    def test_node_segment_is_less_than_node_node(self):
+        # A node facing a facet's interior: distance to the facet (1.0) is smaller
+        # than the distance to any of its vertices (√3) — the over-estimate that
+        # made node-to-node useless for Gapmin.
+        import math
+        verts = [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (0.0, 4.0, 0.0)]
+        faces = [(0, 1, 2)]
+        p = (1.0, 1.0, 1.0)
+        seg = min_point_to_triangles([p], verts, faces)
+        node_node = min(math.dist(p, v) for v in verts)
+        self.assertAlmostEqual(seg, 1.0, places=9)
+        self.assertAlmostEqual(node_node, math.sqrt(3.0), places=9)
+        self.assertLess(seg, node_node)
 
     def test_empty_inputs_return_none(self):
-        self.assertIsNone(min_distance_between_coords([], [(0.0, 0.0, 0.0)]))
-        self.assertIsNone(min_distance_between_coords([(0.0, 0.0, 0.0)], []))
+        self.assertIsNone(min_point_to_triangles([], [(0.0, 0.0, 0.0)], [(0, 0, 0)]))
+        self.assertIsNone(min_point_to_triangles([(0.0, 0.0, 0.0)], [], []))
 
-    def test_simple_known_distance(self):
-        a = [(0.0, 0.0, 0.0), (5.0, 5.0, 5.0)]
-        b = [(0.5, 0.0, 0.0), (9.0, 9.0, 9.0)]
-        self.assertAlmostEqual(min_distance_between_coords(a, b), 0.5, places=9)
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
+    def test_fast_matches_bruteforce(self):
+        import numpy as np
+        from k2rad.gapmin import _min_point_to_triangles_fast
+        verts = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 2.0, 0.0),
+                 (2.0, 2.0, 0.0), (1.0, 1.0, 5.0)]
+        faces = [(0, 1, 2), (1, 3, 2)]                 # a 2x2 quad in z=0, split
+        pts = [(0.5, 0.5, 1.0), (3.0, 3.0, 3.0), (-1.0, -1.0, 0.2), (1.0, 1.0, 0.25)]
+        brute = min_point_to_triangles(pts, verts, faces)
+        fast = _min_point_to_triangles_fast(
+            np.asarray(pts, float), np.asarray(verts, float), np.asarray(faces, np.intp))
+        self.assertAlmostEqual(fast, brute, places=9)
 
-    def test_coincident_points_zero(self):
-        a = [(1.0, 2.0, 3.0)]
-        b = [(1.0, 2.0, 3.0)]
-        self.assertEqual(min_distance_between_coords(a, b), 0.0)
 
-    def test_matches_brute_force_on_random_clouds(self):
-        import math
-        import random
+class SurfaceFacetTests(unittest.TestCase):
+    """MAIN-side surface facet extraction (_surface_triangles)."""
 
-        rng = random.Random(1234)
+    def test_tet4_has_four_faces(self):
+        from k2rad.gapmin import _surface_triangles
+        st = ConversionState()
+        st.nodes = {1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),
+                    3: NodeData(0, 1, 0), 4: NodeData(0, 0, 1)}
+        st.solid_elems = [SolidElem(1, 7, [1, 2, 3, 4])]
+        st.parts = {7: PartData(7, "t", 1, 1)}
+        _verts, faces = _surface_triangles(st, {7})
+        self.assertEqual(len(faces), 4)
 
-        def cloud(n, ox):
-            return [(ox + rng.random(), rng.random(), rng.random()) for _ in range(n)]
+    def test_tet10_face_subdivides_into_four_subtriangles(self):
+        from k2rad.gapmin import _surface_triangles
+        c = [(0, 0, 0), (2, 0, 0), (0, 2, 0), (0, 0, 2)]
 
-        def brute(a, b):
-            return min(math.dist(p, q) for p in a for q in b)
+        def mid(i, j):
+            return tuple((c[i][k] + c[j][k]) / 2.0 for k in range(3))
 
-        for _ in range(5):
-            a = cloud(150, 0.0)
-            b = cloud(120, 0.6)            # overlapping x-ranges → small min distance
-            self.assertAlmostEqual(
-                min_distance_between_coords(a, b), brute(a, b), places=9)
+        coords = {1: c[0], 2: c[1], 3: c[2], 4: c[3], 5: mid(0, 1), 6: mid(1, 2),
+                  7: mid(0, 2), 8: mid(1, 3), 9: mid(2, 3), 10: mid(0, 3)}
+        st = ConversionState()
+        st.nodes = {i: NodeData(*xyz) for i, xyz in coords.items()}
+        st.solid_elems = [SolidElem(1, 7, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]
+        st.parts = {7: PartData(7, "t", 1, 1)}
+        _verts, faces = _surface_triangles(st, {7})
+        self.assertEqual(len(faces), 16)               # 4 boundary faces x 4 sub-tris
 
-    def test_far_apart_clouds_grow_cell(self):
-        # Clouds separated by far more than their own spacing exercise the
-        # adaptive cell-growth path (the first pass finds nothing in-neighborhood).
-        # Closest pair is (0.1,0,0)–(100,0,0) = 99.9.
-        a = [(0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0)]
-        b = [(100.0, 0.0, 0.0), (100.1, 0.0, 0.0)]
-        self.assertAlmostEqual(min_distance_between_coords(a, b), 99.9, places=6)
+    def test_interior_solid_faces_dropped(self):
+        from k2rad.gapmin import _surface_triangles
+        st = ConversionState()
+        st.nodes = {1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0), 3: NodeData(0, 1, 0),
+                    4: NodeData(0, 0, 1), 5: NodeData(1, 1, 1)}
+        # Two tets sharing face (2,3,4) → that face appears twice and is dropped.
+        st.solid_elems = [SolidElem(1, 7, [1, 2, 3, 4]), SolidElem(2, 7, [2, 3, 4, 5])]
+        st.parts = {7: PartData(7, "t", 1, 1)}
+        _verts, faces = _surface_triangles(st, {7})
+        self.assertEqual(len(faces), 6)                # 4+4-2 shared
+
+    def test_shell_quad_is_two_triangles(self):
+        from k2rad.gapmin import _surface_triangles
+        st = ConversionState()
+        st.nodes = {1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),
+                    3: NodeData(1, 1, 0), 4: NodeData(0, 1, 0)}
+        st.shell_elems = [ShellElem(1, 7, [1, 2, 3, 4])]
+        st.parts = {7: PartData(7, "t", 1, 1)}
+        _verts, faces = _surface_triangles(st, {7})
+        self.assertEqual(len(faces), 2)
 
 
 class SuggestGapminTests(unittest.TestCase):
-    """suggest_gapmins / min_node_distance on a directly-built state."""
+    """suggest_gapmins (node-to-segment) on a directly-built state."""
 
     def _state(self):
         st = ConversionState()
@@ -2397,20 +2482,20 @@ class SuggestGapminTests(unittest.TestCase):
                     2: PartData(2, "pin", 1, 2)}
         return st
 
-    def test_min_node_distance_between_parts(self):
-        st = self._state()
-        self.assertAlmostEqual(min_node_distance(st, [1], [2]), 0.5, places=9)
-
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
     def test_surf2surf_suggestion(self):
         st = self._state()
         st.contacts_surf2surf.append(
             ContactAutoSurf2Surf(9, "pin_pair", 1, 3, 2, 3, 0.2, 0.1, 0.0, 1e20))
         sugg, skipped = suggest_gapmins(st, factor=0.8)
         self.assertIn(9, sugg)
+        # Closest secondary node (origin) sits opposite vertex node 5 of the main
+        # tet, so node-to-segment == 0.5 here.
         self.assertAlmostEqual(sugg[9].min_distance, 0.5, places=9)
         self.assertAlmostEqual(sugg[9].suggested_gapmin, 0.4, places=9)
         self.assertEqual(skipped, {})
 
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
     def test_factor_scales_suggestion(self):
         st = self._state()
         st.contacts_surf2surf.append(
@@ -2435,6 +2520,7 @@ class SuggestGapminTests(unittest.TestCase):
         self.assertNotIn(5, sugg)
         self.assertIn(5, skipped)
 
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
     def test_apply_merges_and_respects_explicit_override(self):
         st = self._state()
         st.contacts_surf2surf.append(
@@ -2469,6 +2555,7 @@ class AutoGapminEndToEndTests(unittest.TestCase):
             "                   0                   0", starter)
         self.assertFalse(any("auto-gapmin" in w for w in result.warnings))
 
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
     def test_auto_gapmin_sets_gapmin_from_clearance(self):
         result, starter = self._convert(AUTO_GAPMIN_K, auto_gapmin=True)
         self.assertIn("/INTER/TYPE7/9", starter)
@@ -2479,6 +2566,7 @@ class AutoGapminEndToEndTests(unittest.TestCase):
         self.assertTrue(any("auto-gapmin INTER 9" in w and "0.4" in w
                             for w in result.warnings))
 
+    @unittest.skipUnless(fast_proximity_available(), "needs numpy+scipy")
     def test_factor_changes_emitted_gapmin(self):
         _, starter = self._convert(AUTO_GAPMIN_K, auto_gapmin=True, gapmin_factor=0.5)
         # Gapmin = 0.5 * 0.5 = 0.25
@@ -2487,11 +2575,104 @@ class AutoGapminEndToEndTests(unittest.TestCase):
             "                   0                   0", starter)
 
     def test_explicit_override_wins_over_auto(self):
+        # Explicit override is independent of the node-to-segment backend, so this
+        # holds with or without numpy+scipy.
         _, starter = self._convert(
             AUTO_GAPMIN_K, auto_gapmin=True, inter_gapmin={9: 0.05})
         self.assertIn(
             "                   0                 0.2                0.05"
             "                   0                   0", starter)
+
+
+class GapminBackendAbsentTests(unittest.TestCase):
+    """When numpy+scipy are absent the node-to-segment path falls back to *no*
+    suggestion (there is no node-to-node fallback) and says so clearly."""
+
+    def _state_with_contact(self):
+        st = ConversionState()
+        st.nodes = {
+            1: NodeData(0.0, 0.0, 0.0), 2: NodeData(-1.0, 0.0, 0.0),
+            3: NodeData(0.0, 1.0, 0.0), 4: NodeData(0.0, 0.0, 1.0),
+            5: NodeData(0.5, 0.0, 0.0), 6: NodeData(1.5, 0.0, 0.0),
+            7: NodeData(0.5, 1.0, 0.0), 8: NodeData(0.5, 0.0, 1.0),
+        }
+        st.solid_elems = [SolidElem(1, 1, [1, 2, 3, 4]), SolidElem(2, 2, [5, 6, 7, 8])]
+        st.parts = {1: PartData(1, "deformable", 1, 1), 2: PartData(2, "pin", 1, 2)}
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(9, "pin_pair", 1, 3, 2, 3, 0.2, 0.1, 0.0, 1e20))
+        return st
+
+    def test_suggest_skips_every_interface_without_backend(self):
+        import k2rad.gapmin as gm
+        st = self._state_with_contact()
+        saved = gm._HAVE_FAST_PROXIMITY
+        try:
+            gm._HAVE_FAST_PROXIMITY = False
+            sugg, skipped = gm.suggest_gapmins(st, 0.8)
+        finally:
+            gm._HAVE_FAST_PROXIMITY = saved
+        self.assertEqual(sugg, {})
+        self.assertIn(9, skipped)
+        self.assertIn("numpy+scipy", skipped[9])
+
+    def test_apply_auto_gapmin_warns_and_applies_nothing(self):
+        import k2rad.gapmin as gm
+        st = self._state_with_contact()
+        st.options.gapmin_factor = 0.8
+        saved = gm._HAVE_FAST_PROXIMITY
+        try:
+            gm._HAVE_FAST_PROXIMITY = False
+            gm.apply_auto_gapmin(st)
+        finally:
+            gm._HAVE_FAST_PROXIMITY = saved
+        self.assertEqual(st.options.inter_gapmin, {})           # nothing applied
+        self.assertTrue(any("numpy+scipy" in w for w in st.warnings))
+
+
+class ConversionLogTests(unittest.TestCase):
+    """convert() auto-saves warnings/skips to <stem>_conversion.log."""
+
+    def _convert(self, deck, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "m.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return convert(path, **kw)
+
+    def test_log_written_when_there_are_skips(self):
+        # TINY_K carries *SOME_UNSUPPORTED_KEYWORD → a skipped keyword.
+        result = self._convert(TINY_K)
+        self.assertIsNotNone(result.log_path)
+        self.assertTrue(os.path.isfile(result.log_path))
+        content = Path(result.log_path).read_text()
+        self.assertIn("SOME_UNSUPPORTED_KEYWORD", content)
+        self.assertIn("conversion log", content)
+
+    def test_no_log_when_disabled(self):
+        result = self._convert(TINY_K, write_log=False)
+        self.assertIsNone(result.log_path)
+
+
+class ProgressCallbackTests(unittest.TestCase):
+    """convert(progress=...) reports a non-decreasing 0.0 → 1.0 fraction."""
+
+    def test_progress_runs_monotonically_to_one(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "m.k")
+        with open(path, "w") as fh:
+            fh.write(TINY_K)
+        events = []
+        convert(path, progress=lambda fr, lab: events.append((fr, lab)))
+        self.assertTrue(events)
+        fracs = [fr for fr, _ in events]
+        self.assertTrue(all(0.0 <= f <= 1.0 for f in fracs))
+        self.assertAlmostEqual(fracs[0], 0.0, places=9)
+        self.assertAlmostEqual(fracs[-1], 1.0, places=9)
+        self.assertTrue(all(b >= a - 1e-9 for a, b in zip(fracs, fracs[1:])),
+                        f"progress not non-decreasing: {fracs}")
+        self.assertTrue(all(isinstance(lab, str) for _, lab in events))
 
 
 if __name__ == "__main__":

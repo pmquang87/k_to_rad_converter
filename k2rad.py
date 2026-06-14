@@ -14,20 +14,40 @@ import sys
 from pathlib import Path
 
 
+def _make_progress_printer():
+    """A convert() progress callback that prints an updating percentage line."""
+    def cb(frac: float, label: str) -> None:
+        pct = int(frac * 100)
+        sys.stdout.write(f"\r  [{pct:3d}%] {label:<36}")
+        sys.stdout.flush()
+        if frac >= 1.0:
+            sys.stdout.write("\n")
+    return cb
+
+
 def _print_gapmin_suggestions(input_path: str, factor: float, analyze_file) -> int:
     """Report suggested per-interface Gapmins for *input_path* (read-only)."""
-    print(f"Analyzing nodal clearances: {input_path}")
+    try:
+        from k2rad.gapmin import fast_proximity_available
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from k2rad.gapmin import fast_proximity_available
+
+    print(f"Analyzing node-to-segment contact clearances: {input_path}")
+    if not fast_proximity_available():
+        print("  NOTE: numpy + scipy are not installed, so the node-to-segment")
+        print("        clearance cannot be measured and no Gapmin can be suggested.")
+        print("        Install them:  pip install scipy   (see docs/DEPENDENCIES.md)")
     suggestions, skipped = analyze_file(input_path, factor)
     if not suggestions and not skipped:
         print("  No contact interfaces found.")
         return 0
     if suggestions:
-        print(f"\n  Suggested Gapmin (= {factor:g} × min node clearance):")
+        print(f"\n  Suggested Gapmin (= {factor:g} x node-to-segment clearance):")
         for iid in sorted(suggestions):
             s = suggestions[iid]
-            print(f"    INTER {iid} ({s.title}): {s.side_a} <-> {s.side_b}")
-            print(f"        min node clearance = {s.min_distance:g}  ->  Gapmin = {s.suggested_gapmin:g}")
-        ids = ",".join(f"{i}={suggestions[i].suggested_gapmin:g}" for i in sorted(suggestions))
+            print(f"    INTER {iid} ({s.title}): {s.side_a} -> {s.side_b}")
+            print(f"        node-to-segment clearance = {s.min_distance:g}  ->  Gapmin = {s.suggested_gapmin:g}")
         print(f"\n  Apply with:  --auto-gapmin --gapmin-factor {factor:g}")
         print(f"  Or pin explicitly:  " + " ".join(
             f"--inter-gapmin {i}={suggestions[i].suggested_gapmin:g}" for i in sorted(suggestions)))
@@ -191,10 +211,13 @@ def main() -> int:
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
+        progress=None if args.quiet else _make_progress_printer(),
     )
 
     print(f"  Starter -> {result.starter_path}")
     print(f"  Engine  -> {result.engine_path}")
+    if result.log_path:
+        print(f"  Log     -> {result.log_path}")
 
     if not args.quiet:
         if result.skipped_keywords:
