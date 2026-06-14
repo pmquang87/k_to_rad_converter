@@ -17,6 +17,12 @@ in to reproduce a force-control recipe, e.g. the RB_pull elevator deck:
 which is the GUI equivalent of
     python k2rad.py model.k --ground-springs --inter-gapmin 90002=0.03 --soften-stfac 0.3
 
+Tick "Auto Gapmin from mesh clearance" to set each contact's Gapmin from the
+measured minimum node distance between its two parts (= factor × clearance)
+instead of hand-tuning it per mesh — the fix for a deck whose contacts were
+tuned for one mesh (e.g. TET4) but re-run on a finer one (e.g. TET10). It is the
+GUI equivalent of ``--auto-gapmin --gapmin-factor 0.8``.
+
 Only the standard library is used (tkinter), matching the converter's zero
 third-party-dependency policy. The conversion runs on a background thread so a
 large mesh does not freeze the window.
@@ -79,7 +85,9 @@ def parse_inter_gapmin(text: str) -> dict:
 def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ground_springs: bool, ground_spring_k_text: str,
                          inter_gapmin_text: str, soften_stfac_text: str,
-                         tet10_to_tet4: bool = False) -> dict:
+                         tet10_to_tet4: bool = False,
+                         auto_gapmin: bool = False,
+                         gapmin_factor_text: str = "") -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -114,6 +122,16 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                     f"Ground-spring K must be a number, got {k_text!r}.")
 
     kwargs["inter_gapmin"] = parse_inter_gapmin(inter_gapmin_text)
+
+    kwargs["auto_gapmin"] = bool(auto_gapmin)
+    if auto_gapmin:
+        f_text = (gapmin_factor_text or "").strip()
+        if f_text:
+            try:
+                kwargs["gapmin_factor"] = float(f_text)
+            except ValueError:
+                raise ValueError(
+                    f"Gapmin factor must be a number, got {f_text!r}.")
 
     st = (soften_stfac_text or "").strip()
     if st:
@@ -152,6 +170,8 @@ class ConverterGUI:
         self.tet10 = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
+        self.auto_gapmin = tk.BooleanVar(value=False)
+        self.gapmin_factor = tk.StringVar(value="0.8")
         self.gapmin = tk.StringVar()
         self.stfac = tk.StringVar()
         self.status = tk.StringVar(value="Ready.")
@@ -204,17 +224,29 @@ class ConverterGUI:
         self._ground_k_entry = ttk.Entry(gr, textvariable=self.ground_k, width=8)
         self._ground_k_entry.pack(side="left", padx=3)
 
-        ttk.Label(fc, text="Inter Gapmin overrides:").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Entry(fc, textvariable=self.gapmin).grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
-        ttk.Label(fc, text="ID=VAL, comma/space separated (e.g. 90002=0.03); auto-numbered contacts start at 90001. "
-                           ".k-native: set the contact's Card-3 SST/MST so Gapmin = (SST+MST)/2.",
+        ag = ttk.Frame(fc)
+        ag.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
+        self._auto_gapmin_chk = ttk.Checkbutton(
+            ag, text="Auto Gapmin from mesh clearance (min node distance between each contact's two parts)",
+            variable=self.auto_gapmin, command=self._sync_gapmin_factor)
+        self._auto_gapmin_chk.pack(side="left")
+        ttk.Label(ag, text="   factor:").pack(side="left")
+        self._gapmin_factor_entry = ttk.Entry(ag, textvariable=self.gapmin_factor, width=6)
+        self._gapmin_factor_entry.pack(side="left", padx=3)
+        ttk.Label(fc, text="Gapmin = factor × clearance (factor < 1 → 0 initial penetrations); explicit overrides below still win.",
                   foreground="gray").grid(row=2, column=1, columnspan=2, sticky="w", padx=6)
 
-        ttk.Label(fc, text="Soften Stfac:").grid(row=3, column=0, sticky="w", **pad)
-        ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=3, column=1, sticky="w", **pad)
+        ttk.Label(fc, text="Inter Gapmin overrides:").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Entry(fc, textvariable=self.gapmin).grid(row=3, column=1, columnspan=2, sticky="ew", **pad)
+        ttk.Label(fc, text="ID=VAL, comma/space separated (e.g. 90002=0.03); auto-numbered contacts start at 90001. "
+                           ".k-native: set the contact's Card-3 SST/MST so Gapmin = (SST+MST)/2.",
+                  foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
+
+        ttk.Label(fc, text="Soften Stfac:").grid(row=5, column=0, sticky="w", **pad)
+        ttk.Entry(fc, textvariable=self.stfac, width=10).grid(row=5, column=1, sticky="w", **pad)
         ttk.Label(fc, text="penalty stiffness scale on all /INTER/TYPE7, e.g. 0.3 — blank = engine default; "
                            ".k-native per contact: Card-3 SFS (overridden by this field)",
-                  foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
+                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
 
         # ── Action row ──────────────────────────────────────────────────────
         actions = ttk.Frame(main)
@@ -232,11 +264,16 @@ class ConverterGUI:
         self._log.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
 
         self._sync_ground_k()
+        self._sync_gapmin_factor()
 
     # ── widget callbacks ─────────────────────────────────────────────────────
 
     def _sync_ground_k(self) -> None:
         self._ground_k_entry.config(state="normal" if self.ground.get() else "disabled")
+
+    def _sync_gapmin_factor(self) -> None:
+        self._gapmin_factor_entry.config(
+            state="normal" if self.auto_gapmin.get() else "disabled")
 
     def _pick_input(self) -> None:
         path = filedialog.askopenfilename(
@@ -275,6 +312,8 @@ class ConverterGUI:
                 inter_gapmin_text=self.gapmin.get(),
                 soften_stfac_text=self.stfac.get(),
                 tet10_to_tet4=self.tet10.get(),
+                auto_gapmin=self.auto_gapmin.get(),
+                gapmin_factor_text=self.gapmin_factor.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -336,6 +375,8 @@ class ConverterGUI:
             bits.append("TET10→TET4 downgrade")
         if kwargs.get("ground_springs"):
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")
+        if kwargs.get("auto_gapmin"):
+            bits.append(f"auto gapmin (factor={kwargs.get('gapmin_factor', 0.8):g})")
         if kwargs.get("inter_gapmin"):
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:

@@ -19,7 +19,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from k2rad import convert  # noqa: E402
 from k2rad.handlers import dispatch  # noqa: E402
-from k2rad.state import ConversionState, CoordNodes, NodeData  # noqa: E402
+from k2rad.state import (  # noqa: E402
+    ConversionState,
+    ContactAutoSingle,
+    ContactAutoSurf2Surf,
+    CoordNodes,
+    NodeData,
+    PartData,
+    SolidElem,
+)
+from k2rad.gapmin import (  # noqa: E402
+    DEFAULT_GAPMIN_FACTOR,
+    apply_auto_gapmin,
+    min_distance_between_coords,
+    min_node_distance,
+    suggest_gapmins,
+)
 from k2rad.writer import _skew_axes_from_nodes  # noqa: E402
 from k2rad.parser import (  # noqa: E402
     _split_keyword,
@@ -2169,6 +2184,37 @@ class GuiInputParsingTests(unittest.TestCase):
         self.assertTrue(on["tet10_to_tet4"])
         self.assertFalse(off["tet10_to_tet4"])
 
+    def test_build_kwargs_auto_gapmin_off_omits_factor(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            auto_gapmin=False, gapmin_factor_text="0.5")
+        self.assertFalse(kw["auto_gapmin"])
+        self.assertNotIn("gapmin_factor", kw)        # off → factor not passed
+
+    def test_build_kwargs_auto_gapmin_on_passes_factor(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            auto_gapmin=True, gapmin_factor_text="0.5")
+        self.assertTrue(kw["auto_gapmin"])
+        self.assertEqual(kw["gapmin_factor"], 0.5)
+
+    def test_build_kwargs_auto_gapmin_blank_factor_uses_default(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            auto_gapmin=True, gapmin_factor_text="")
+        self.assertTrue(kw["auto_gapmin"])
+        self.assertNotIn("gapmin_factor", kw)        # blank → convert() default
+
+    def test_build_kwargs_non_numeric_factor_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+                auto_gapmin=True, gapmin_factor_text="huge")
+
 
 class TetraDowngradeTests(unittest.TestCase):
     """tet10_to_tet4 / --tet10-to-tet4: 10-node quadratic tets become /TETRA4
@@ -2236,6 +2282,216 @@ class TetraDowngradeTests(unittest.TestCase):
         result, _ = self._convert(TINY_K, tet10_to_tet4=True)   # shells only
         self.assertTrue(any("no 10-node tetrahedra found" in w
                             for w in result.warnings))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-Gapmin: suggest /INTER/TYPE7 Gapmin from the minimum node-to-node
+# clearance between each surface-to-surface contact's two parts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Two solid tets in two parts, closest approach 0.5 (node 1 at origin vs node 5
+# at x=0.5).  No Card-3 SST/SBST, so the default Gapmin is 0 and --auto-gapmin
+# alone drives it.  _ID=9 makes the interface id deterministic.
+AUTO_GAPMIN_K = """\
+*KEYWORD
+*TITLE
+auto gapmin solid pair
+*NODE
+       1             0.0             0.0             0.0
+       2            -1.0             0.0             0.0
+       3             0.0             1.0             0.0
+       4             0.0             0.0             1.0
+       5             0.5             0.0             0.0
+       6             1.5             0.0             0.0
+       7             0.5             1.0             0.0
+       8             0.5             0.0             1.0
+*ELEMENT_SOLID
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part
+         1         1         1
+*PART
+rigid pin
+         2         1         2
+*SECTION_SOLID
+         1        10
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*MAT_RIGID
+         2   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                              pin_pair
+         1         2         3         3         0         0         0         0
+       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class MinDistanceKernelTests(unittest.TestCase):
+    """The pure-Python adaptive spatial-grid minimum-distance kernel."""
+
+    def test_empty_inputs_return_none(self):
+        self.assertIsNone(min_distance_between_coords([], [(0.0, 0.0, 0.0)]))
+        self.assertIsNone(min_distance_between_coords([(0.0, 0.0, 0.0)], []))
+
+    def test_simple_known_distance(self):
+        a = [(0.0, 0.0, 0.0), (5.0, 5.0, 5.0)]
+        b = [(0.5, 0.0, 0.0), (9.0, 9.0, 9.0)]
+        self.assertAlmostEqual(min_distance_between_coords(a, b), 0.5, places=9)
+
+    def test_coincident_points_zero(self):
+        a = [(1.0, 2.0, 3.0)]
+        b = [(1.0, 2.0, 3.0)]
+        self.assertEqual(min_distance_between_coords(a, b), 0.0)
+
+    def test_matches_brute_force_on_random_clouds(self):
+        import math
+        import random
+
+        rng = random.Random(1234)
+
+        def cloud(n, ox):
+            return [(ox + rng.random(), rng.random(), rng.random()) for _ in range(n)]
+
+        def brute(a, b):
+            return min(math.dist(p, q) for p in a for q in b)
+
+        for _ in range(5):
+            a = cloud(150, 0.0)
+            b = cloud(120, 0.6)            # overlapping x-ranges → small min distance
+            self.assertAlmostEqual(
+                min_distance_between_coords(a, b), brute(a, b), places=9)
+
+    def test_far_apart_clouds_grow_cell(self):
+        # Clouds separated by far more than their own spacing exercise the
+        # adaptive cell-growth path (the first pass finds nothing in-neighborhood).
+        # Closest pair is (0.1,0,0)–(100,0,0) = 99.9.
+        a = [(0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.0, 0.1, 0.0)]
+        b = [(100.0, 0.0, 0.0), (100.1, 0.0, 0.0)]
+        self.assertAlmostEqual(min_distance_between_coords(a, b), 99.9, places=6)
+
+
+class SuggestGapminTests(unittest.TestCase):
+    """suggest_gapmins / min_node_distance on a directly-built state."""
+
+    def _state(self):
+        st = ConversionState()
+        st.nodes = {
+            1: NodeData(0.0, 0.0, 0.0),
+            2: NodeData(-1.0, 0.0, 0.0),
+            3: NodeData(0.0, 1.0, 0.0),
+            4: NodeData(0.0, 0.0, 1.0),
+            5: NodeData(0.5, 0.0, 0.0),
+            6: NodeData(1.5, 0.0, 0.0),
+            7: NodeData(0.5, 1.0, 0.0),
+            8: NodeData(0.5, 0.0, 1.0),
+        }
+        st.solid_elems = [
+            SolidElem(1, 1, [1, 2, 3, 4]),
+            SolidElem(2, 2, [5, 6, 7, 8]),
+        ]
+        st.parts = {1: PartData(1, "deformable", 1, 1),
+                    2: PartData(2, "pin", 1, 2)}
+        return st
+
+    def test_min_node_distance_between_parts(self):
+        st = self._state()
+        self.assertAlmostEqual(min_node_distance(st, [1], [2]), 0.5, places=9)
+
+    def test_surf2surf_suggestion(self):
+        st = self._state()
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(9, "pin_pair", 1, 3, 2, 3, 0.2, 0.1, 0.0, 1e20))
+        sugg, skipped = suggest_gapmins(st, factor=0.8)
+        self.assertIn(9, sugg)
+        self.assertAlmostEqual(sugg[9].min_distance, 0.5, places=9)
+        self.assertAlmostEqual(sugg[9].suggested_gapmin, 0.4, places=9)
+        self.assertEqual(skipped, {})
+
+    def test_factor_scales_suggestion(self):
+        st = self._state()
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(9, "pin_pair", 1, 3, 2, 3, 0.2, 0.1, 0.0, 1e20))
+        sugg, _ = suggest_gapmins(st, factor=0.5)
+        self.assertAlmostEqual(sugg[9].suggested_gapmin, 0.25, places=9)
+
+    def test_self_contact_is_skipped(self):
+        st = self._state()
+        # same part on both sides → no two-part clearance
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(7, "self", 1, 3, 1, 3, 0.0, 0.0, 0.0, 1e20))
+        sugg, skipped = suggest_gapmins(st)
+        self.assertNotIn(7, sugg)
+        self.assertIn(7, skipped)
+
+    def test_single_surface_contact_is_skipped(self):
+        st = self._state()
+        st.contacts_single.append(
+            ContactAutoSingle(5, "selfsurf", 0, 0, 0.0, 0.0, 0.0, 1e20))
+        sugg, skipped = suggest_gapmins(st)
+        self.assertNotIn(5, sugg)
+        self.assertIn(5, skipped)
+
+    def test_apply_merges_and_respects_explicit_override(self):
+        st = self._state()
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(9, "pin_pair", 1, 3, 2, 3, 0.2, 0.1, 0.0, 1e20))
+        st.contacts_surf2surf.append(
+            ContactAutoSurf2Surf(10, "pin_pair2", 2, 3, 1, 3, 0.2, 0.1, 0.0, 1e20))
+        st.options.gapmin_factor = 0.8
+        st.options.inter_gapmin = {10: 0.01}        # explicit override on 10
+        apply_auto_gapmin(st)
+        self.assertAlmostEqual(st.options.inter_gapmin[9], 0.4, places=9)   # auto
+        self.assertEqual(st.options.inter_gapmin[10], 0.01)                 # kept
+
+
+class AutoGapminEndToEndTests(unittest.TestCase):
+    """convert(..., auto_gapmin=True) drives the emitted /INTER/TYPE7 Gapmin."""
+
+    def _convert(self, deck: str, **kw):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "ag.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **kw)
+        return result, Path(result.starter_path).read_text()
+
+    def test_default_off_keeps_gapmin_zero(self):
+        # No auto_gapmin and no Card-3 SST/SBST → Gapmin stays 0 (engine default).
+        result, starter = self._convert(AUTO_GAPMIN_K)
+        self.assertIn("/INTER/TYPE7/9", starter)
+        self.assertIn(
+            "                   0                 0.2                   0"
+            "                   0                   0", starter)
+        self.assertFalse(any("auto-gapmin" in w for w in result.warnings))
+
+    def test_auto_gapmin_sets_gapmin_from_clearance(self):
+        result, starter = self._convert(AUTO_GAPMIN_K, auto_gapmin=True)
+        self.assertIn("/INTER/TYPE7/9", starter)
+        # Stfac=0  Fric=0.2  Gapmin=0.8*0.5=0.4  Tstart=0  Tstop=0
+        self.assertIn(
+            "                   0                 0.2                 0.4"
+            "                   0                   0", starter)
+        self.assertTrue(any("auto-gapmin INTER 9" in w and "0.4" in w
+                            for w in result.warnings))
+
+    def test_factor_changes_emitted_gapmin(self):
+        _, starter = self._convert(AUTO_GAPMIN_K, auto_gapmin=True, gapmin_factor=0.5)
+        # Gapmin = 0.5 * 0.5 = 0.25
+        self.assertIn(
+            "                   0                 0.2                0.25"
+            "                   0                   0", starter)
+
+    def test_explicit_override_wins_over_auto(self):
+        _, starter = self._convert(
+            AUTO_GAPMIN_K, auto_gapmin=True, inter_gapmin={9: 0.05})
+        self.assertIn(
+            "                   0                 0.2                0.05"
+            "                   0                   0", starter)
 
 
 if __name__ == "__main__":

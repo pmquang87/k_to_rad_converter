@@ -527,6 +527,12 @@ class ConvertOptions:
     ground_spring_k: float = 100.0                       # N/mm per loaded axis
     inter_gapmin: Dict[int, float] = field(default_factory=dict)  # inter_id → Gapmin
     soften_stfac: Optional[float] = None                 # None = engine auto (0)
+    # Auto-Gapmin: derive each surface-to-surface interface's Gapmin from the
+    # minimum node-to-node clearance between its two parts (Gapmin =
+    # gapmin_factor × clearance), instead of hand-tuning Card-3 SST/SBST per
+    # mesh. Explicit inter_gapmin entries still win. See k2rad.gapmin.
+    auto_gapmin: bool = False
+    gapmin_factor: float = 0.8                            # Gapmin = factor × clearance
     # Mesh transform: downgrade 10-node quadratic tets to 4-node linear tets
     # (keep the 4 corners, drop mid-edge nodes). Stiffer/less accurate but lets a
     # TET10-only source .k produce a TET4 run.

@@ -14,6 +14,30 @@ import sys
 from pathlib import Path
 
 
+def _print_gapmin_suggestions(input_path: str, factor: float, analyze_file) -> int:
+    """Report suggested per-interface Gapmins for *input_path* (read-only)."""
+    print(f"Analyzing nodal clearances: {input_path}")
+    suggestions, skipped = analyze_file(input_path, factor)
+    if not suggestions and not skipped:
+        print("  No contact interfaces found.")
+        return 0
+    if suggestions:
+        print(f"\n  Suggested Gapmin (= {factor:g} × min node clearance):")
+        for iid in sorted(suggestions):
+            s = suggestions[iid]
+            print(f"    INTER {iid} ({s.title}): {s.side_a} <-> {s.side_b}")
+            print(f"        min node clearance = {s.min_distance:g}  ->  Gapmin = {s.suggested_gapmin:g}")
+        ids = ",".join(f"{i}={suggestions[i].suggested_gapmin:g}" for i in sorted(suggestions))
+        print(f"\n  Apply with:  --auto-gapmin --gapmin-factor {factor:g}")
+        print(f"  Or pin explicitly:  " + " ".join(
+            f"--inter-gapmin {i}={suggestions[i].suggested_gapmin:g}" for i in sorted(suggestions)))
+    if skipped:
+        print("\n  No suggestion (set manually if needed):")
+        for iid in sorted(skipped):
+            print(f"    INTER {iid}: {skipped[iid]}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="k2rad",
@@ -93,7 +117,46 @@ def main() -> int:
              "Card-3 SFS mapping. Default: engine auto (0). (.k-native per contact: "
              "set Card-3 SFS, e.g. SFS=0.3.)",
     )
+    fc.add_argument(
+        "--auto-gapmin",
+        action="store_true",
+        help="Set each surface-to-surface interface's Gapmin from the minimum "
+             "node-to-node clearance between its two parts (Gapmin = "
+             "--gapmin-factor × clearance), instead of hand-tuning Card-3 SST/SBST "
+             "per mesh. An explicit --inter-gapmin still wins. Off by default.",
+    )
+    fc.add_argument(
+        "--gapmin-factor",
+        type=float,
+        default=0.8,
+        metavar="F",
+        help="Fraction of the measured clearance used for --auto-gapmin / "
+             "--suggest-gapmin (default 0.8). <1 keeps the gap below the clearance "
+             "(0 initial penetration); lower it if an interface still pre-penetrates, "
+             "raise it toward 1.0 if a contact fails to engage.",
+    )
+    fc.add_argument(
+        "--suggest-gapmin",
+        action="store_true",
+        help="Print the suggested per-interface Gapmin (min nodal clearance between "
+             "each contact's two parts) and exit WITHOUT converting. Inspect before "
+             "applying with --auto-gapmin.",
+    )
     args = parser.parse_args()
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
+        return 1
+
+    # Read-only inspection: report suggested Gapmins and exit (no conversion).
+    if args.suggest_gapmin:
+        try:
+            from k2rad.gapmin import analyze_file
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from k2rad.gapmin import analyze_file
+        return _print_gapmin_suggestions(str(input_path), args.gapmin_factor, analyze_file)
 
     # Parse --inter-gapmin ID=VAL pairs into {id: gapmin}.
     inter_gapmin = {}
@@ -108,11 +171,6 @@ def main() -> int:
             print(f"ERROR: --inter-gapmin ID and VAL must be numeric: {item!r}",
                   file=sys.stderr)
             return 1
-
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
-        return 1
 
     # Import here so the CLI can be called without installing the package
     try:
@@ -131,6 +189,8 @@ def main() -> int:
         inter_gapmin=inter_gapmin,
         soften_stfac=args.soften_stfac,
         tet10_to_tet4=args.tet10_to_tet4,
+        auto_gapmin=args.auto_gapmin,
+        gapmin_factor=args.gapmin_factor,
     )
 
     print(f"  Starter -> {result.starter_path}")
