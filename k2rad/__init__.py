@@ -76,6 +76,8 @@ def convert(
     inter_gapmin: Optional[Dict[int, float]] = None,
     soften_stfac: Optional[float] = None,
     tet10_to_tet4: bool = False,
+    auto_gapmin: bool = False,
+    gapmin_factor: float = 0.8,
 ) -> ConversionResult:
     """Convert a LS-DYNA .k file to OpenRadioss Starter + Engine .rad files.
 
@@ -109,8 +111,18 @@ def convert(
     tet10_to_tet4 : bool
         Downgrade every 10-node quadratic tet to a 4-node linear tet (keep the
         4 corners, drop the mid-edge nodes). Off by default.
+    auto_gapmin : bool
+        Derive each surface-to-surface interface's /INTER/TYPE7 Gapmin from the
+        minimum node-to-node clearance between its two parts (Gapmin =
+        ``gapmin_factor`` × clearance) instead of hand-tuning *CONTACT Card-3
+        SST/SBST per mesh. Any explicit ``inter_gapmin`` entry still wins. Off
+        by default. See :mod:`k2rad.gapmin`.
+    gapmin_factor : float
+        Fraction of the measured clearance used as the suggested Gapmin (default
+        0.8). <1 keeps the gap below the clearance (0 initial penetration);
+        near 1 still engages promptly.
 
-    All five are opt-in: with their defaults the output is byte-identical to a
+    All are opt-in: with their defaults the output is byte-identical to a
     plain conversion (see :class:`~k2rad.state.ConvertOptions`).
 
     Returns
@@ -138,6 +150,8 @@ def convert(
         inter_gapmin=dict(inter_gapmin or {}),
         soften_stfac=soften_stfac,
         tet10_to_tet4=tet10_to_tet4,
+        auto_gapmin=auto_gapmin,
+        gapmin_factor=gapmin_factor,
     )
     for block in blocks:
         dispatch(block, state)
@@ -145,6 +159,14 @@ def convert(
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.
     _inject_implicit_contact_stub(state)
+
+    # 2d. Auto-Gapmin: derive each surface-to-surface interface's Gapmin from
+    #     the measured nodal clearance between its two parts (opt-in). Runs after
+    #     the stub so a real-contact model is analyzed; merges into inter_gapmin
+    #     (explicit overrides win) so the writer's existing Gapmin path emits it.
+    if state.options.auto_gapmin:
+        from .gapmin import apply_auto_gapmin
+        apply_auto_gapmin(state)
 
     # 2c. Implicit np>1 limitation: a solid-part contact surface makes the
     #     OpenRadioss SPMD engine segfault at the first implicit solve. The

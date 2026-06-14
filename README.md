@@ -185,6 +185,41 @@ The order of operations matters in OpenRadioss's MUMPS solver:
 Empirically, `addmass = 1 Mg` (1 tonne) on the test model is enough to
 let MUMPS factorize without artificial constraints.
 
+### Matching contact `Gapmin` to the mesh clearance (`--auto-gapmin`)
+
+For a solid `/SURF/PART/EXT` contact the converter writes `Igap=0` (constant
+gap), so the engagement gap **is** `Gapmin`. `Gapmin` must sit just *below* the
+real clearance between the two contacting parts:
+
+- `Gapmin` **>** clearance → secondary nodes start already penetrated
+  (starter `WARNING 343 INITIAL PENETRATIONS`). Under a pull the releasing-side
+  nodes flip-flop in and out of the penalty gap, the force residual sticks, and
+  the implicit solve never converges — a **contact limit cycle**.
+- `Gapmin` **≪** clearance → contact never engages under load → no load path.
+
+Because the clearance is mesh-specific, a `Gapmin` hand-tuned for one mesh fails
+when the model is re-meshed. (The elevator-linkage deck converges on a TET4 mesh
+with `Gapmin` `0.03 / 0.03 / 0.14` per interface, then stalls in a limit cycle
+when the same uniform value is re-used on a finer TET10 mesh whose measured pin
+clearances are `0.12` and `0.16`.)
+
+`--auto-gapmin` removes the guesswork: it sets each surface-to-surface
+interface's `Gapmin` to `--gapmin-factor` × the minimum node-to-node distance
+between its two parts (default factor `0.8`). Inspect first with
+`--suggest-gapmin` (read-only — prints the clearances and exits); an explicit
+`--inter-gapmin ID=VAL` always wins over the suggestion. Self-contacts and
+single-surface contacts have no two-part clearance and are reported as skipped.
+
+```bash
+python k2rad.py model.k --suggest-gapmin                  # report clearances
+python k2rad.py model.k --auto-gapmin                     # apply (factor 0.8)
+python k2rad.py model.k --auto-gapmin --gapmin-factor 0.6 # more conservative
+```
+
+Lower the factor if an interface still reports initial penetration (node-to-node
+distance over-estimates the true node-to-segment clearance); raise it toward
+`1.0` if a contact fails to engage.
+
 ---
 
 ## Project structure
@@ -198,6 +233,7 @@ k_to_rad_converter/
 │   ├── parser.py         # .k file parser (handles *INCLUDE)
 │   ├── handlers.py       # One handler per LS-DYNA keyword
 │   ├── state.py          # ConversionState data model
+│   ├── gapmin.py         # Suggest /INTER/TYPE7 Gapmin from mesh clearance
 │   └── writer.py         # Generates _0000.rad starter + _0001.rad engine
 ├── tests/                # Standard-library unittest suite
 ├── tutorial_example/     # Sample .k files
