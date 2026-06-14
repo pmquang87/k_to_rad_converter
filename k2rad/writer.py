@@ -1859,6 +1859,15 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
         # 6 DOF blocks: X Y Z RX RY RZ — K only on the loaded translational axes.
         lines += (_emit_spr_gene_dof(kx) + _emit_spr_gene_dof(ky) + _emit_spr_gene_dof(kz)
                   + _emit_spr_gene_dof(0.0) + _emit_spr_gene_dof(0.0) + _emit_spr_gene_dof(0.0))
+        # Trailing strain-rate card (Fsmooth/Fcut). FORMAT(radioss2018) — the newest
+        # SPR_GENE reader cfg ≤ /BEGIN-2022 — closes the /PROP/TYPE8 block with one
+        # more "%10d%20lg" card (ISRATE, Asrate). Omitting it makes the reader run
+        # past the property into the following /PART and raise WARNING 100217
+        # ("card is missing"). Strain-rate smoothing off (ISRATE=0) → Asrate inert.
+        lines += [
+            "#  Fsmooth                Fcut",
+            f"{_i(0)}{_f(0.0)}",
+        ]
         lines += [
             f"/PART/{part_id}",
             f"soft_ground_spring_part_pid{pid}",

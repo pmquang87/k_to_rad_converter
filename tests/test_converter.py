@@ -2001,6 +2001,21 @@ class ForceControlStabilizationTests(unittest.TestCase):
                 return int(fields[1]), int(fields[2])
         raise AssertionError("no /SPRING block found")
 
+    @staticmethod
+    def _prop_type8_block(starter: str):
+        """Lines of the first /PROP/TYPE8 block: its header through the last data
+        card (i.e. up to, but excluding, the next keyword line — the /PART)."""
+        lines = starter.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("/PROP/TYPE8/"):
+                block = [ln]
+                for nxt in lines[i + 1:]:
+                    if nxt.startswith("/"):
+                        break
+                    block.append(nxt)
+                return block
+        raise AssertionError("no /PROP/TYPE8 block found")
+
     # ── off by default: byte-stability ──────────────────────────────────────
     def test_defaults_emit_no_stabilization(self):
         result, starter = self._convert(FORCE_RB_K)
@@ -2033,6 +2048,22 @@ class ForceControlStabilizationTests(unittest.TestCase):
         self.assertIn("   111 111         0", starter)        # ground node fully fixed
         self.assertTrue(any("grounding spring" in w and "master node 5" in w
                             for w in result.warnings))
+
+    def test_ground_spring_prop_block_closes_with_strain_rate_card(self):
+        # Regression for starter WARNING 100217 ("card is missing"): the newest
+        # SPR_GENE reader cfg ≤ /BEGIN-2022, FORMAT(radioss2018), closes /PROP/TYPE8
+        # with a trailing Fsmooth/Fcut (ISRATE, Asrate) card after the 6 DOF blocks.
+        # Without it the reader overran the property into the following /PART.
+        _, starter = self._convert(FORCE_RB_K, ground_springs=True)
+        block = self._prop_type8_block(starter)
+        self.assertIn("#  Fsmooth                Fcut", block)
+        # 20 data cards = 1 (Mass/Inertia) + 6×3 (DOF) + 1 (Fsmooth/Fcut); block[0]
+        # is the header, block[1] the title, the rest comments (#) or data cards.
+        data_cards = [ln for ln in block[2:] if not ln.startswith("#")]
+        self.assertEqual(len(data_cards), 20)
+        # The block's last card — immediately before /PART — is the all-zero
+        # strain-rate card (ISRATE=0, Asrate=0): %10d then %20lg.
+        self.assertEqual(block[-1], "0".rjust(10) + "0".rjust(20))
 
     def test_ground_spring_k_is_configurable(self):
         _, starter = self._convert(FORCE_RB_K, ground_springs=True, ground_spring_k=250.0)
