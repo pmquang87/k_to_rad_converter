@@ -1607,6 +1607,24 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
             "Measurement-only (adds no contact stiffness)."
         )
 
+    # Read-out caveat (emitted once when any transducer was written). OpenRadioss
+    # stores contact interface / sub-interface forces in the T01 time-history as
+    # impulse-scaled values, NOT true forces (upstream behavior, OpenRadioss
+    # GitHub discussion #2451). A raw T01 read (or th_to_csv) therefore
+    # under-reports the contact force — about HALF on the validated implicit deck,
+    # where x2 recovered the applied load to ~1%. HyperView/HyperGraph convert it
+    # correctly on read.
+    if state.th_sub_ids:
+        state.warn(
+            "Force-transducer read-out: OpenRadioss writes contact (sub-)interface "
+            "forces to the T01 time-history as impulse-scaled values, NOT true "
+            "forces (upstream behavior — OpenRadioss GitHub discussion #2451). A "
+            "raw T01 read / th_to_csv under-reports the contact load (~half on the "
+            "validated implicit deck; x2 recovered the applied load to ~1%). Read "
+            "the T01 in HyperView/HyperGraph (auto-converts), or take the load from "
+            "the applied *LOAD_RIGID_BODY / reaction."
+        )
+
     return lines
 
 
