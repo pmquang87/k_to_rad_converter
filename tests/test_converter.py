@@ -413,6 +413,19 @@ class ForceTransducerTests(unittest.TestCase):
         self.assertNotIn("/INTER/SUB/", starter)
         self.assertNotIn("/TH/INTER", starter)
 
+    def test_impulse_scaling_caveat_when_transducer_present(self):
+        # OpenRadioss stores T01 contact forces as impulse-scaled values (~half on
+        # implicit); the log must warn so users read in HyperView or scale x2.
+        result, _ = self._convert(TRANSDUCER_K)
+        self.assertTrue(any("impulse-scaled" in w and "#2451" in w
+                            for w in result.warnings))
+
+    def test_no_impulse_caveat_without_transducer(self):
+        result, _ = self._convert(TRANSDUCER_K.replace(
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
+            ""))
+        self.assertFalse(any("impulse-scaled" in w for w in result.warnings))
+
 
 class ImplicitContactStubTests(unittest.TestCase):
     """A contact-free implicit model must get one inert /INTER/TYPE7 self-contact:
