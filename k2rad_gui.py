@@ -88,7 +88,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          inter_gapmin_text: str = "",
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
-                         gapmin_factor_text: str = "") -> dict:
+                         gapmin_factor_text: str = "",
+                         fixpoint_count_text: str = "") -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -111,6 +112,14 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
     kwargs["units"] = tuple((str(units[i]).strip() or defaults[i]) for i in range(3))
 
     kwargs["tet10_to_tet4"] = bool(tet10_to_tet4)
+
+    fp_text = (fixpoint_count_text or "").strip()
+    if fp_text:                                   # blank → convert() default (100)
+        try:
+            kwargs["fixpoint_count"] = int(fp_text)
+        except ValueError:
+            raise ValueError(
+                f"Implicit FIXPOINT count must be a whole number, got {fp_text!r}.")
 
     kwargs["ground_springs"] = bool(ground_springs)
     if ground_springs:
@@ -169,6 +178,7 @@ class ConverterGUI:
         self.u_len = tk.StringVar(value="mm")
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
+        self.fixpoint_count = tk.StringVar(value="100")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -207,6 +217,14 @@ class ConverterGUI:
             io, text="Downgrade TET10 → TET4 (linear tets — stiffer / less accurate; "
                      "use when only a TET10 .k is available)",
             variable=self.tet10).grid(row=4, column=0, columnspan=3, sticky="w", **pad)
+
+        fp = ttk.Frame(io)
+        fp.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(fp, text="Implicit FIXPOINT count:").pack(side="left")
+        ttk.Entry(fp, textvariable=self.fixpoint_count, width=6).pack(side="left", padx=3)
+        ttk.Label(fp, text="evenly spaced output milestones the implicit time step lands on "
+                           "(1–100, default 100; 0 = off; implicit decks only)",
+                  foreground="gray").pack(side="left")
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -315,6 +333,7 @@ class ConverterGUI:
                 tet10_to_tet4=self.tet10.get(),
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
+                fixpoint_count_text=self.fixpoint_count.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -392,6 +411,8 @@ class ConverterGUI:
         bits = []
         if kwargs.get("tet10_to_tet4"):
             bits.append("TET10→TET4 downgrade")
+        if kwargs.get("fixpoint_count", 100) != 100:
+            bits.append(f"fixpoint count={kwargs['fixpoint_count']}")
         if kwargs.get("ground_springs"):
             bits.append(f"ground springs (K={kwargs.get('ground_spring_k', 100.0):g})")
         if kwargs.get("auto_gapmin"):

@@ -95,6 +95,17 @@ def main() -> int:
              "available but a TET4 run is wanted. Linear tets are stiffer/less "
              "accurate — remesh for production accuracy.",
     )
+    parser.add_argument(
+        "--fixpoint-count",
+        type=int,
+        default=100,
+        metavar="N",
+        help="Number of evenly spaced /IMPL/DT/FIXPOINT output milestones the "
+             "implicit time-step controller is forced to land on (k/N x the run "
+             "end, for k = 1..N; default 100 = a point every 1 percent). Clamped "
+             "to the engine's 1..100 range; 0 disables the card. Implicit decks "
+             "only; ignored for explicit.",
+    )
 
     # ── Force-control implicit stabilization (all opt-in; default output is
     #    byte-identical when none are given) ──────────────────────────────────
@@ -211,6 +222,7 @@ def main() -> int:
         tet10_to_tet4=args.tet10_to_tet4,
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
+        fixpoint_count=args.fixpoint_count,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

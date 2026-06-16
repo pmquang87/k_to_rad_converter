@@ -115,6 +115,7 @@ def convert(
     tet10_to_tet4: bool = False,
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
+    fixpoint_count: int = 100,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -160,6 +161,13 @@ def convert(
         Fraction of the measured clearance used as the suggested Gapmin (default
         0.8). <1 keeps the gap below the clearance (0 initial penetration);
         near 1 still engages promptly.
+    fixpoint_count : int
+        Number of evenly spaced /IMPL/DT/FIXPOINT milestones the implicit
+        time-step controller is forced to land on (k/N × the run end, for
+        k = 1 … N), so an animation / time-history state is produced at each
+        instead of wherever the variable step falls. The OpenRadioss engine caps
+        the list at 100, so this is clamped to 1…100; 0 disables the card.
+        Default 100 (a point every 1% of the run). Implicit decks only.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -204,6 +212,7 @@ def convert(
         tet10_to_tet4=tet10_to_tet4,
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
+        fixpoint_count=fixpoint_count,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)

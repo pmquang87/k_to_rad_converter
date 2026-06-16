@@ -303,16 +303,26 @@ class ImplicitEngineTests(unittest.TestCase):
             vals.extend(float(tok) for tok in s.split())
         return sorted(vals)
 
-    def test_fixpoint_written_every_ten_percent(self):
+    def _engine_with_opts(self, deck: str, **opts) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "impl.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return Path(convert(path, **opts).engine_path).read_text()
+
+    def test_fixpoint_written_every_one_percent_by_default(self):
         # Auto /IMPL/DT/FIXPOINT makes the implicit time-step controller land
-        # exactly on every 10% of the run end (endtim=1.0 here) so a clean
-        # animation/TH state is produced at each milestone. We emit 10 points
-        # 0.1*T … 1.0*T; the engine reads them free-format and sorts ascending.
+        # exactly on evenly spaced fractions of the run end (endtim=1.0 here) so
+        # a clean animation/TH state is produced at each milestone. The default
+        # count is 100, so we emit 100 points 0.01*T … 1.00*T; the engine reads
+        # them free-format and sorts ascending.
         engine = self._engine_for(IMPL_QSTAT_K)
         self.assertIn("/IMPL/DT/FIXPOINT", engine)
         vals = self._fixpoints(engine)
+        self.assertEqual(len(vals), 100)
         self.assertEqual([round(v, 10) for v in vals],
-                         [round(0.1 * k, 10) for k in range(1, 11)])
+                         [round(k / 100.0, 10) for k in range(1, 101)])
         # Must sit inside the implicit block (before its terminating comment),
         # so /IMPL/DT/3 (RIKS, which would ignore it) is not in play — we use
         # /IMPL/DT/2.
@@ -321,11 +331,29 @@ class ImplicitEngineTests(unittest.TestCase):
 
     def test_fixpoint_scales_with_endtim(self):
         # The points track the actual termination time, not a hard-coded 1.0:
-        # for a 10 s run the milestones are 1,2,…,10 s.
+        # for a 10 s run the 100 default milestones are 0.1,0.2,…,10.0 s.
         deck = IMPL_QSTAT_K.replace("       1.0\n*END", "      10.0\n*END")
         vals = self._fixpoints(self._engine_for(deck))
         self.assertEqual([round(v, 6) for v in vals],
-                         [float(k) for k in range(1, 11)])
+                         [round(k / 10.0, 6) for k in range(1, 101)])
+
+    def test_fixpoint_count_configurable(self):
+        # The number of /IMPL/DT/FIXPOINT milestones follows fixpoint_count: ask
+        # for 10 and the controller lands on every 10% of the run end again.
+        vals = self._fixpoints(self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=10))
+        self.assertEqual([round(v, 10) for v in vals],
+                         [round(0.1 * k, 10) for k in range(1, 11)])
+
+    def test_fixpoint_count_clamped_to_engine_max(self):
+        # The OpenRadioss engine caps the FIXPOINT list at 100, so a larger
+        # request is clamped to 100 points rather than emitting an over-long card.
+        vals = self._fixpoints(self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=250))
+        self.assertEqual(len(vals), 100)
+
+    def test_fixpoint_count_zero_disables_card(self):
+        # 0 turns the milestone card off entirely.
+        engine = self._engine_with_opts(IMPL_QSTAT_K, fixpoint_count=0)
+        self.assertNotIn("/IMPL/DT/FIXPOINT", engine)
 
     def test_no_fixpoint_lines_exceed_radioss_line_width(self):
         # The engine input buffer is NCHARLINE100 (100 chars). The ≤5-fields-per
@@ -2216,6 +2244,27 @@ class GuiInputParsingTests(unittest.TestCase):
         off = self.g.build_convert_kwargs(self.kpath, "", ("Mg", "mm", "s"), **common)
         self.assertTrue(on["tet10_to_tet4"])
         self.assertFalse(off["tet10_to_tet4"])
+
+    def test_build_kwargs_fixpoint_count_passes_int(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            fixpoint_count_text="40")
+        self.assertEqual(kw["fixpoint_count"], 40)
+
+    def test_build_kwargs_fixpoint_count_blank_uses_default(self):
+        kw = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            fixpoint_count_text="")
+        self.assertNotIn("fixpoint_count", kw)        # blank → convert() default (100)
+
+    def test_build_kwargs_non_numeric_fixpoint_raises(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+                fixpoint_count_text="lots")
 
     def test_build_kwargs_auto_gapmin_off_omits_factor(self):
         kw = self.g.build_convert_kwargs(
