@@ -537,6 +537,14 @@ class ConvertOptions:
     # (keep the 4 corners, drop mid-edge nodes). Stiffer/less accurate but lets a
     # TET10-only source .k produce a TET4 run.
     tet10_to_tet4: bool = False
+    # /IMPL/DT/FIXPOINT: number of evenly spaced times (k/N × endtim for
+    # k = 1 … N) the implicit time-step controller is forced to land on, so a
+    # clean animation / time-history state is produced at each milestone instead
+    # of wherever the variable implicit step happens to fall. The OpenRadioss
+    # engine caps the list at 100 (engine/source/input/freimpl.F); the writer
+    # clamps to that 1…100 range and treats 0 as "off". Default 100 → a point
+    # every 1% of the run. Implicit decks only (no effect on explicit output).
+    fixpoint_count: int = 100
 
 
 # ══════════════════════════════════════════════════════════════════════════════

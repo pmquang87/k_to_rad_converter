@@ -2827,20 +2827,21 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         lines += ["/IMPL/DT/2", "  8 0 50 0 0"]
 
     # /IMPL/DT/FIXPOINT — force the implicit time-step controller to land EXACTLY
-    # on evenly spaced times (every 10% of the run end) so a clean animation /
-    # time-history state is produced at each 10% milestone instead of wherever the
-    # variable implicit step happens to fall. Without it the auto time step
-    # (/IMPL/DT/2) can stride past a requested output time, and that interval's
-    # animation is then written late, at the overshooting time. The engine reads
-    # the points free-format over as many lines as supplied, sorts them ascending
-    # and caps the list at 100 (OpenRadioss engine/source/input/freimpl.F). It is
-    # honoured by /IMPL/DT/1 and /IMPL/DT/2 (our default); only /IMPL/DT/3 (RIKS)
-    # ignores it. The default /ANIM/DT (endtim/40, see _make_engine_output) writes
-    # a frame at every 2.5%, so each 10% fixpoint coincides with an animation
-    # output time and that frame lands exactly on the milestone.
-    if state.ctrl_termination and state.ctrl_termination.endtim > 0:
+    # on evenly spaced times (k/N × the run end, for k = 1 … N) so a clean
+    # animation / time-history state is produced at each milestone instead of
+    # wherever the variable implicit step happens to fall. Without it the auto
+    # time step (/IMPL/DT/2) can stride past a requested output time, and that
+    # interval's animation is then written late, at the overshooting time. The
+    # engine reads the points free-format over as many lines as supplied, sorts
+    # them ascending and caps the list at 100 (OpenRadioss
+    # engine/source/input/freimpl.F). It is honoured by /IMPL/DT/1 and /IMPL/DT/2
+    # (our default); only /IMPL/DT/3 (RIKS) ignores it. N is
+    # options.fixpoint_count (default 100 → a point every 1% of the run); we
+    # clamp it to the engine's 1…100 range here, and 0 disables the card.
+    n_fix = min(max(int(state.options.fixpoint_count), 0), 100)
+    if n_fix > 0 and state.ctrl_termination and state.ctrl_termination.endtim > 0:
         endtim = state.ctrl_termination.endtim
-        fixpts = [endtim * k / 10.0 for k in range(1, 11)]   # 10% … 100%
+        fixpts = [endtim * k / n_fix for k in range(1, n_fix + 1)]  # 1/N … N/N
         lines.append("/IMPL/DT/FIXPOINT")
         for i in range(0, len(fixpts), 5):                   # ≤5 fields → ≤100 cols
             lines.append("".join(_f(t) for t in fixpts[i:i + 5]))
