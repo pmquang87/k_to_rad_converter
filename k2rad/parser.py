@@ -185,17 +185,45 @@ def parse_free(line: str) -> List[str]:
     return _strip_inline_comment(line).split()
 
 
+# Fortran/LS-DYNA fixed-format numbers often drop the 'E' from the exponent so
+# the value fits a 10-column field: "7.85000-9" means 7.85000E-9, "1.5+10" means
+# 1.5E+10. Match a +/- sign that directly follows a digit (the dropped-E exponent
+# sign) — a leading mantissa sign sits at index 0 and is never preceded by a digit.
+_FORTRAN_EXP = re.compile(r"(?<=\d)([+-]\d)")
+
+
 def to_float(s: str, default: float = 0.0) -> float:
-    """Safe float conversion."""
+    """Safe float conversion.
+
+    Also accepts the Fortran fixed-format exponent spellings LS-DYNA writes but
+    Python's ``float()`` rejects: an E-less exponent (``7.85000-9`` → 7.85e-9)
+    and the ``D`` double-precision marker (``7.85D-9`` → 7.85e-9). The repair is
+    a fallback tried only when the plain conversion fails, so well-formed numbers
+    are unaffected.
+    """
     try:
         return float(s)
+    except (ValueError, TypeError):
+        pass
+    if not isinstance(s, str):
+        return default
+    t = s.strip()
+    if not t:
+        return default
+    # Fortran double-precision exponent marker: 1.5D-9 → 1.5E-9
+    t = t.replace("D", "E").replace("d", "e")
+    # Restore the dropped 'E' on E-less exponents: 7.85000-9 → 7.85000E-9
+    t = _FORTRAN_EXP.sub(r"E\1", t)
+    try:
+        return float(t)
     except (ValueError, TypeError):
         return default
 
 
 def to_int(s: str, default: int = 0) -> int:
-    """Safe int-from-float-string conversion."""
+    """Safe int-from-float-string conversion (Fortran exponents allowed; see
+    :func:`to_float`)."""
     try:
         return int(float(s))
     except (ValueError, TypeError):
-        return default
+        return int(to_float(s, float(default)))
