@@ -112,6 +112,28 @@ class FieldParsingTests(unittest.TestCase):
         self.assertEqual(to_int("3.0"), 3)
         self.assertEqual(to_int("bad", default=7), 7)
 
+    def test_to_float_fortran_eless_exponent(self):
+        # LS-DYNA drops the 'E' to fit a 10-col field: "7.85000-9" == 7.85e-9.
+        self.assertAlmostEqual(to_float("7.85000-9"), 7.85e-9)
+        self.assertAlmostEqual(to_float("1.5+10"), 1.5e10)
+        self.assertAlmostEqual(to_float("-2.7-9"), -2.7e-9)
+
+    def test_to_float_fortran_d_exponent(self):
+        self.assertAlmostEqual(to_float("7.85D-9"), 7.85e-9)
+        self.assertAlmostEqual(to_float("1.5d9"), 1.5e9)
+
+    def test_to_float_normal_forms_unchanged(self):
+        # The repair is a fallback; well-formed numbers parse as before.
+        for s, v in [("210000.00", 210000.0), ("0.300", 0.3),
+                     ("1.5e-9", 1.5e-9), ("1.5E+9", 1.5e9), ("100", 100.0)]:
+            self.assertAlmostEqual(to_float(s), v)
+        self.assertEqual(to_float(""), 0.0)
+        self.assertEqual(to_float("abc"), 0.0)
+
+    def test_to_int_fortran_exponent(self):
+        # Routed through to_float, so an E-less exponent is honoured.
+        self.assertEqual(to_int("1+1"), 10)
+
 
 class ParserBlockTests(unittest.TestCase):
     def setUp(self):
@@ -163,6 +185,21 @@ class ConvertEndToEndTests(unittest.TestCase):
     def test_unsupported_keyword_reported(self):
         result = convert(self.path)
         self.assertIn("SOME_UNSUPPORTED_KEYWORD", result.skipped_keywords)
+
+    def test_eless_exponent_density_survives(self):
+        # Regression: a density written in LS-DYNA's E-less exponent form
+        # ("7.85000-9") must not be parsed as 0 — a zero density makes the
+        # OpenRadioss starter fail with ERROR 683 (density <= 0).
+        deck = TINY_K.replace("         1   7.86e-9    210000.0      0.3",
+                              "         1 7.85000-9 210000.00     0.300")
+        path = os.path.join(self.tmp.name, "eless.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, write_log=False)
+        starter = Path(result.starter_path).read_text()
+        block = starter.split("/MAT/ELAST/1", 1)[1].split("/MAT", 1)[0]
+        rho = float(block.split("RHO_I")[1].split("\n")[1])
+        self.assertAlmostEqual(rho, 7.85e-9)
 
     def test_default_units_are_ton_mm_s(self):
         result = convert(self.path)
