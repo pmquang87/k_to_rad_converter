@@ -2883,6 +2883,14 @@ class DeformableContactRecipeTests(unittest.TestCase):
         return lines[hdr + 1].split()[1]            # IBC, [Inacti], VisS, ...
 
     @staticmethod
+    def _inter_gapmin(starter, inter_id):
+        lines = starter.splitlines()
+        i = lines.index(f"/INTER/TYPE7/{inter_id}")
+        hdr = next(j for j in range(i, len(lines))
+                   if lines[j].startswith("#              Stfac"))
+        return lines[hdr + 1].split()[2]            # Stfac, Fric, [Gapmin], ...
+
+    @staticmethod
     def _impl_dt2_l_dtn(engine):
         lines = engine.splitlines()
         i = lines.index("/IMPL/DT/2")
@@ -2913,6 +2921,30 @@ class DeformableContactRecipeTests(unittest.TestCase):
         self.assertTrue(any("recipe APPLIED" in w and "[9]" in w
                             for w in result.warnings),
                         f"no 'applied' confirmation in {result.warnings}")
+
+    def test_recipe_protects_gap_from_auto_gapmin(self):
+        # The footgun that broke a real re-run: --auto-gapmin shrinks the def-def
+        # Gapmin below mesh scale and re-triggers the chatter the recipe fixes.
+        # The recipe must keep the mesh-scale SST/MST gap (auto-gapmin skipped),
+        # while an explicit --inter-gapmin still wins over both.
+        from k2rad.gapmin import fast_proximity_available
+        if not fast_proximity_available():
+            self.skipTest("auto-gapmin needs numpy+scipy")
+        # auto-gapmin ALONE shrinks it to 0.8 (= 0.8 x the 1.0 part-to-part clearance)
+        _, starter_auto, _ = self._convert(DEFDEF_K, auto_gapmin=True)
+        self.assertEqual(self._inter_gapmin(starter_auto, 9), "0.8")
+        # recipe + auto-gapmin: keep the mesh-scale SST/MST Gapmin 0.11, not 0.8
+        res, starter_rec, _ = self._convert(
+            DEFDEF_K, auto_gapmin=True, deformable_contact_recipe=True)
+        self.assertEqual(self._inter_gapmin(starter_rec, 9), "0.11")
+        self.assertEqual(self._inter_inacti(starter_rec, 9), "5")
+        self.assertTrue(any("auto-gapmin skipped" in w for w in res.warnings),
+                        f"no skip note in {res.warnings}")
+        # explicit --inter-gapmin still wins over the recipe protection
+        _, starter_pin, _ = self._convert(
+            DEFDEF_K, auto_gapmin=True, deformable_contact_recipe=True,
+            inter_gapmin={9: 0.05})
+        self.assertEqual(self._inter_gapmin(starter_pin, 9), "0.05")
 
     def test_l_dtn_not_defaulted_to_50(self):
         # No deformable-deformable contact, no recipe → L_dtn must be the engine
