@@ -173,6 +173,16 @@ def main() -> int:
              "each contact's two parts) and exit WITHOUT converting. Inspect before "
              "applying with --auto-gapmin.",
     )
+    fc.add_argument(
+        "--deformable-contact-recipe",
+        action="store_true",
+        help="Apply the validated stabilization recipe for an implicit deck with "
+             "deformable-vs-deformable contact (e.g. force control through a "
+             "clearance-fit deformable pin): /INTER/TYPE7 Inacti=5 on each "
+             "deformable-deformable interface, plus /IMPL/DT/2 L_dtn=50 and "
+             "/IMPL/QSTAT/DTSCAL=0.05. Off by default; without it the converter "
+             "only warns when such contact is detected. Implicit decks only.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -223,6 +233,7 @@ def main() -> int:
         auto_gapmin=args.auto_gapmin,
         gapmin_factor=args.gapmin_factor,
         fixpoint_count=args.fixpoint_count,
+        deformable_contact_recipe=args.deformable_contact_recipe,
         progress=None if args.quiet else _make_progress_printer(),
     )
 
