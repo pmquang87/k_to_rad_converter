@@ -1345,17 +1345,10 @@ def _warn_deformable_deformable_contact(state: ConversionState) -> None:
             "spike), /IMPL/DT/2 L_dtn=50 (iteration cap for the slow linear "
             "contact-force convergence), and /IMPL/QSTAT/DTSCAL=0.05 (anchors "
             "the force-control soft mode). Validated to run a 6 kN force-control "
-            "pull through a clearance-fit deformable pin to full load. Keep the "
-            "contact's mesh-scale Card-3 SST/MST Gapmin."
+            "pull through a clearance-fit deformable pin to full load. The "
+            "interface keeps its mesh-scale Card-3 SST/MST Gapmin — even with "
+            "--auto-gapmin on, the recipe protects it from being shrunk."
         )
-        if state.options.auto_gapmin:
-            state.warn(
-                "deformable-contact recipe + --auto-gapmin together: auto-gapmin "
-                "shrinks the deformable-deformable Gapmin below mesh scale, which "
-                "the recipe specifically avoids (the sub-mesh-scale gap is what "
-                "re-triggers the active-set chatter). Drop --auto-gapmin, or pin "
-                "these interfaces with --inter-gapmin at the mesh-scale gap."
-            )
     else:
         state.warn(
             f"Deformable-deformable contact detected on interface(s) {ids} in an "

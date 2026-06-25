@@ -659,13 +659,20 @@ def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTO
     return suggestions, skipped
 
 
-def apply_auto_gapmin(state: ConversionState) -> None:
+def apply_auto_gapmin(state: ConversionState, protect_inter_ids=()) -> None:
     """Compute suggested Gapmins and merge them into ``state.options.inter_gapmin``
     (so the existing writer Gapmin path emits them), warning per interface.
 
-    An explicit ``--inter-gapmin`` for an interface always wins over the
-    suggestion.  Called by :func:`k2rad.convert` when ``auto_gapmin`` is on.
+    Precedence (highest first): an explicit ``--inter-gapmin`` for an interface
+    always wins; then interfaces in *protect_inter_ids* are left untouched so
+    they keep their mesh-scale Card-3 SST/MST Gapmin; otherwise the auto
+    suggestion is applied.  *protect_inter_ids* carries the deformable-contact
+    recipe's deformable-deformable interfaces — their sub-mesh-scale auto value
+    would re-trigger the active-set chatter the recipe specifically fixes, so
+    auto-gapmin must not shrink them.  Called by :func:`k2rad.convert` when
+    ``auto_gapmin`` is on.
     """
+    protect = set(protect_inter_ids)
     if not _HAVE_FAST_PROXIMITY:
         state.warn(
             "--auto-gapmin: node-to-segment clearance needs numpy+scipy, which are "
@@ -685,6 +692,15 @@ def apply_auto_gapmin(state: ConversionState) -> None:
                 f"{state.options.inter_gapmin[iid]:g} (node-to-segment clearance "
                 f"{s.side_a} → {s.side_b} = {s.min_distance:g}, suggestion was "
                 f"{s.suggested_gapmin:g})."
+            )
+            continue
+        if iid in protect:
+            state.warn(
+                f"--auto-gapmin INTER {iid} ({s.title}): kept the mesh-scale Card-3 "
+                f"SST/MST Gapmin (auto-gapmin skipped here) because the deformable-"
+                f"contact recipe is on — the auto value {s.suggested_gapmin:g} is "
+                f"below mesh scale and would re-trigger the active-set chatter the "
+                f"recipe fixes. Pin it with --inter-gapmin {iid}=VAL to override."
             )
             continue
         state.options.inter_gapmin[iid] = s.suggested_gapmin

@@ -298,12 +298,13 @@ class ConverterGUI:
         main.rowconfigure(4, weight=1)
         self._log = scrolledtext.ScrolledText(main, height=14, wrap="word", state="disabled")
         self._log.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
-        # Warnings render in a larger, emphasized font (3 pt over the log's base
-        # size, bold, coloured) so they are not missed in the scroll of output.
+        # Warnings render in a larger font (3 pt over the log's base size) so
+        # they are not missed in the scroll of output, but in plain black,
+        # non-bold text.
         _base = tkfont.nametofont("TkTextFont")
         self._warn_font = tkfont.Font(family=_base.cget("family"),
-                                      size=_base.cget("size") + 3, weight="bold")
-        self._log.tag_configure("warn", font=self._warn_font, foreground="#b00020")
+                                      size=_base.cget("size") + 3, weight="normal")
+        self._log.tag_configure("warn", font=self._warn_font, foreground="black")
 
         self._sync_ground_k()
         self._sync_gapmin_factor()

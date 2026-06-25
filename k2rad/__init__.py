@@ -20,7 +20,8 @@ from .parser import parse_k_file
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
 from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
-                     _warn_deformable_deformable_contact)
+                     _warn_deformable_deformable_contact,
+                     deformable_deformable_inter_ids, _recipe_active)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -243,7 +244,13 @@ def convert(
     if state.options.auto_gapmin:
         _report(0.34, "Analyzing contact clearances")
         from .gapmin import apply_auto_gapmin
-        apply_auto_gapmin(state)
+        # When the deformable-contact recipe is active, protect its deformable-
+        # deformable interfaces from auto-gapmin: they must keep their mesh-scale
+        # Card-3 SST/MST Gapmin (the sub-mesh-scale auto value re-triggers the
+        # chatter the recipe fixes). Explicit --inter-gapmin still wins over both.
+        protect = (set(deformable_deformable_inter_ids(state))
+                   if _recipe_active(state) else set())
+        apply_auto_gapmin(state, protect_inter_ids=protect)
 
     # 2c. Implicit np>1 limitation: a solid-part contact surface makes the
     #     OpenRadioss SPMD engine segfault at the first implicit solve. The
