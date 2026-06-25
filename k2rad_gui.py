@@ -44,6 +44,7 @@ from pathlib import Path
 try:
     import tkinter as tk
     from tkinter import ttk, filedialog, scrolledtext
+    from tkinter import font as tkfont
     _HAVE_TK = True
 except ImportError:                                   # pragma: no cover
     _HAVE_TK = False
@@ -89,7 +90,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          tet10_to_tet4: bool = False,
                          auto_gapmin: bool = False,
                          gapmin_factor_text: str = "",
-                         fixpoint_count_text: str = "") -> dict:
+                         fixpoint_count_text: str = "",
+                         deformable_contact_recipe: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -150,6 +152,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
         except ValueError:
             raise ValueError(f"Soften Stfac must be a number, got {st!r}.")
 
+    kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
+
     return kwargs
 
 
@@ -184,6 +188,7 @@ class ConverterGUI:
         self.auto_gapmin = tk.BooleanVar(value=False)
         self.gapmin_factor = tk.StringVar(value="0.8")
         self.stfac = tk.StringVar()
+        self.deformable_recipe = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready.")
         self.progress = tk.DoubleVar(value=0.0)
 
@@ -262,6 +267,17 @@ class ConverterGUI:
                            ".k-native per contact: Card-3 SFS (overridden by this field)",
                   foreground="gray").grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
 
+        rc = ttk.Frame(fc)
+        rc.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Checkbutton(
+            rc, text="Deformable–deformable contact recipe (Inacti=5 + /IMPL/DT/2 L_dtn=50 "
+                     "+ /IMPL/QSTAT/DTSCAL=0.05)",
+            variable=self.deformable_recipe).pack(side="left")
+        ttk.Label(fc, text="Use when two DEFORMABLE parts contact in an implicit deck (e.g. force control "
+                           "through a clearance-fit deformable pin) and the solve chatters or stalls. "
+                           "The converter warns when it detects such contact.",
+                  foreground="gray").grid(row=6, column=1, columnspan=2, sticky="w", padx=6)
+
         # ── Action row ──────────────────────────────────────────────────────
         actions = ttk.Frame(main)
         actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -282,6 +298,12 @@ class ConverterGUI:
         main.rowconfigure(4, weight=1)
         self._log = scrolledtext.ScrolledText(main, height=14, wrap="word", state="disabled")
         self._log.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        # Warnings render in a larger, emphasized font (3 pt over the log's base
+        # size, bold, coloured) so they are not missed in the scroll of output.
+        _base = tkfont.nametofont("TkTextFont")
+        self._warn_font = tkfont.Font(family=_base.cget("family"),
+                                      size=_base.cget("size") + 3, weight="bold")
+        self._log.tag_configure("warn", font=self._warn_font, foreground="#b00020")
 
         self._sync_ground_k()
         self._sync_gapmin_factor()
@@ -334,6 +356,7 @@ class ConverterGUI:
                 auto_gapmin=self.auto_gapmin.get(),
                 gapmin_factor_text=self.gapmin_factor.get(),
                 fixpoint_count_text=self.fixpoint_count.get(),
+                deformable_contact_recipe=self.deformable_recipe.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -400,7 +423,7 @@ class ConverterGUI:
         if result.warnings:
             self._append(f"\n  Warnings ({len(result.warnings)}):\n")
             for w in result.warnings:
-                self._append(f"    - {w}\n")
+                self._append(f"    - {w}\n", tag="warn")
         done = "Done (with warnings)." if (result.warnings or result.skipped_keywords) else "Done."
         self._append(f"\n{done}\n")
         self.status.set(done)
@@ -421,6 +444,8 @@ class ConverterGUI:
             bits.append("gapmin " + ", ".join(f"{i}={v:g}" for i, v in kwargs["inter_gapmin"].items()))
         if kwargs.get("soften_stfac") is not None:
             bits.append(f"soften Stfac={kwargs['soften_stfac']:g}")
+        if kwargs.get("deformable_contact_recipe"):
+            bits.append("deformable-deformable contact recipe")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
@@ -430,9 +455,12 @@ class ConverterGUI:
         self._log.delete("1.0", "end")
         self._log.config(state="disabled")
 
-    def _append(self, text: str) -> None:
+    def _append(self, text: str, tag: "str | None" = None) -> None:
         self._log.config(state="normal")
-        self._log.insert("end", text)
+        if tag:
+            self._log.insert("end", text, tag)
+        else:
+            self._log.insert("end", text)
         self._log.see("end")
         self._log.config(state="disabled")
 

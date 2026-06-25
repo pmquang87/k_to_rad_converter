@@ -1278,6 +1278,97 @@ def _warn_implicit_solid_contact_np1(state: ConversionState) -> None:
     )
 
 
+def _side_has_deformable_part(state: ConversionState, pids: Set[int]) -> bool:
+    """True if *pids* is non-empty and contains at least one deformable part.
+    A part is rigid iff its material is a *MAT_RIGID (mid in state.mat_rigid)."""
+    return any(
+        p in state.parts and state.parts[p].mid not in state.mat_rigid
+        for p in pids
+    )
+
+
+def deformable_deformable_inter_ids(state: ConversionState) -> List[int]:
+    """Interface IDs of surface-to-surface contacts that are deformable-vs-
+    deformable: both sides resolve to deformable (non-rigid) parts and the two
+    sides are distinct parts (a genuine deformable pair — not a rigid-backed
+    contact, not pure self-contact).
+
+    These are the interfaces prone to the active-set chatter + force-control
+    soft-mode step-overshoot that stall the implicit solve, and the ones the
+    opt-in deformable-contact recipe stabilizes (Inacti=5 here, plus the global
+    /IMPL/DT/2 L_dtn=50 and /IMPL/QSTAT/DTSCAL=0.05). See
+    _warn_deformable_deformable_contact.
+    """
+    out: List[int] = []
+    for c in state.contacts_surf2surf:
+        sp = _contact_master_pids(state, c.ssid, c.sstyp)   # generic sid/styp→pids
+        mp = _contact_master_pids(state, c.msid, c.mstyp)
+        if not sp or not mp or sp == mp:
+            continue
+        if _side_has_deformable_part(state, sp) and _side_has_deformable_part(state, mp):
+            out.append(c.inter_id)
+    return out
+
+
+def _recipe_active(state: ConversionState) -> bool:
+    """True when the opt-in deformable-contact recipe should actually be emitted:
+    the flag is set, the deck is implicit, AND it really has a deformable-vs-
+    deformable interface. Off, or on a deck without such contact, the recipe is a
+    no-op (so the engine globals L_dtn/QSTAT and the per-interface Inacti are all
+    unchanged) — turning the flag on never alters an unrelated deck."""
+    return (state.options.deformable_contact_recipe
+            and state.is_implicit
+            and bool(deformable_deformable_inter_ids(state)))
+
+
+def _warn_deformable_deformable_contact(state: ConversionState) -> None:
+    """Flag implicit deformable-vs-deformable contact, and either point to the
+    opt-in stabilization recipe or confirm it was applied.
+
+    Such a contact is prone to two stalls the default deck does not survive:
+    an active-set chatter (a sub-mesh-scale Gapmin flips contact nodes in/out
+    each Newton iteration) and a force-control soft-mode step-overshoot
+    2-cycle. The converter does NOT silently apply the heavier stabilization
+    those decks need — it flags the interface(s) and points to the opt-in
+    recipe (--deformable-contact-recipe / the GUI checkbox). With the recipe on
+    it instead confirms exactly what was applied.
+    """
+    if not state.is_implicit:
+        return
+    ids = deformable_deformable_inter_ids(state)
+    if not ids:
+        return
+    if state.options.deformable_contact_recipe:
+        state.warn(
+            f"Deformable-deformable contact recipe APPLIED to interface(s) {ids}: "
+            "/INTER/TYPE7 Inacti=5 (mesh-scale engagement gap, no t=0 force "
+            "spike), /IMPL/DT/2 L_dtn=50 (iteration cap for the slow linear "
+            "contact-force convergence), and /IMPL/QSTAT/DTSCAL=0.05 (anchors "
+            "the force-control soft mode). Validated to run a 6 kN force-control "
+            "pull through a clearance-fit deformable pin to full load. Keep the "
+            "contact's mesh-scale Card-3 SST/MST Gapmin."
+        )
+        if state.options.auto_gapmin:
+            state.warn(
+                "deformable-contact recipe + --auto-gapmin together: auto-gapmin "
+                "shrinks the deformable-deformable Gapmin below mesh scale, which "
+                "the recipe specifically avoids (the sub-mesh-scale gap is what "
+                "re-triggers the active-set chatter). Drop --auto-gapmin, or pin "
+                "these interfaces with --inter-gapmin at the mesh-scale gap."
+            )
+    else:
+        state.warn(
+            f"Deformable-deformable contact detected on interface(s) {ids} in an "
+            "implicit deck. This is prone to an active-set chatter and a force-"
+            "control soft-mode step-overshoot that stall the implicit solve with "
+            "the default L_dtn=20 cap / QSTAT/DTSCAL=0.1. If the solve diverges "
+            "or stalls, re-convert with the known working recipe: "
+            "--deformable-contact-recipe (GUI: 'Deformable-deformable contact "
+            "recipe') = Inacti=5 + L_dtn=50 + QSTAT/DTSCAL=0.05 with a mesh-scale "
+            "(Card-3 SST/MST) Gapmin."
+        )
+
+
 def _gapmin_override(state: ConversionState, inter_id: int, base: float,
                      requested: Dict[int, float]) -> float:
     """Apply a --inter-gapmin override to *base* for *inter_id*, consuming the
@@ -1348,6 +1439,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
     # --inter-gapmin ID=VAL: per-interface Gapmin overrides, consumed as applied.
     gapmin_overrides = dict(state.options.inter_gapmin)
 
+    # Deformable-contact recipe (opt-in): force Inacti=5 (mesh-scale engagement
+    # gap, no t=0 force spike) on each deformable-vs-deformable interface. This is
+    # the per-interface half of the recipe; the global halves (/IMPL/DT/2 L_dtn=50
+    # and /IMPL/QSTAT/DTSCAL=0.05) are emitted in the engine deck. See
+    # _warn_deformable_deformable_contact.
+    recipe_inacti_ids: Set[int] = (
+        set(deformable_deformable_inter_ids(state)) if _recipe_active(state) else set()
+    )
+
     all_deformable_nodes: List[int] = sorted(
         {n for e in state.shell_elems
          if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
@@ -1394,8 +1494,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
+            inacti = (5 if c.inter_id in recipe_inacti_ids
+                      else _ignore_to_inacti(c.ignore, state, c.inter_id))
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                       inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
 
@@ -2716,7 +2818,6 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     dt0_in = gen.dt0    if gen  and gen.dt0    > 0 else 0.01
     dtmax  = auto.dtmax if auto and auto.dtmax > 0 else 0.0
     iteopt = auto.iteopt if auto else 0
-    kfail  = auto.kfail  if auto else 0
 
     # For dynamic implicit with rigid bodies that have free DOFs (only contact-
     # constrained), the K_eff = K + M/(β·Δt²) needs a small Δt for the mass
@@ -2788,7 +2889,15 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
         # affects convergence speed, not the result, so a strong (small) value is
         # safe. (The SEAT example's 1000 is too weak for free-body-via-contact:
         # the body sloshed in its rigid mode and the solve never converged.)
-        lines += ["/IMPL/QSTAT/DTSCAL", " 0.1"]
+        #
+        # The deformable-deformable contact recipe tightens this to 0.05 (=> x400):
+        # a compliant contact under force control adds a soft mode that 0.1 leaves
+        # a step-overshoot 2-cycle on, while 0.01 over-damps and freezes the solve;
+        # 0.05 anchors it without over-stiffening the tangent. Physics-neutral for
+        # nonlinear analysis (the stabilization vanishes at equilibrium). See
+        # _warn_deformable_deformable_contact.
+        dtscal = "0.05" if _recipe_active(state) else "0.1"
+        lines += ["/IMPL/QSTAT/DTSCAL", f" {dtscal}"]
 
     # /IMPL/SOLVER format (Reference Guide p.2976-2978):
     #   /IMPL/SOLVER/N  with data card: Iprec  It_max  Itol  Tol
@@ -2812,19 +2921,24 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
               "/IMPL/MUMPS/AUTOCORE",
               "/IMPL/DTINI", _f(dt0)]
     lines += ["/IMPL/DT/STOP", f"{_f(dtmin)}{_f(dtmax)}"]
-    if iteopt > 0 or kfail > 0:
-        lines += ["/IMPL/DT/2", f"{_i(iteopt)}{_i(0)}{_i(kfail)}{_i(0)}{_i(0)}"]
-    else:
-        # /IMPL/DT/2 data: It_w  L_arc  L_dtn  Tsca_dn  Tsca_up
-        # (Reference Guide p.2981)
-        #   It_w   = converge-iter threshold for time-step increase (default 6)
-        #   L_arc  = arc length (0 = auto)
-        #   L_dtn  = MAX iterations before timestep cut (default 20 — too low
-        #            for highly nonlinear contact-driven problems with rigid
-        #            bodies). Set to 50 to allow more iterations per step.
-        #   Tsca_dn = scale for decreasing (0 = 0.67)
-        #   Tsca_up = scale for increasing (0 = 1.1)
-        lines += ["/IMPL/DT/2", "  8 0 50 0 0"]
+    # /IMPL/DT/2 data: It_w  L_arc  L_dtn  Tsca_dn  Tsca_up
+    # (Reference Guide p.2981)
+    #   It_w   = converge-iter threshold for time-step increase (default 6).
+    #            LS-DYNA *CONTROL_IMPLICIT_AUTO ITEOPT maps here when given.
+    #   L_arc  = arc length (0 = auto)
+    #   L_dtn  = MAX iterations before a timestep cut. 0 => engine default (20).
+    #            We do NOT force a non-default value by default: a higher cap is
+    #            only needed for the slow LINEAR force-residual convergence of a
+    #            deformable-deformable penalty contact (~30 iters/step), so it
+    #            ships behind the opt-in deformable-contact recipe (L_dtn=50),
+    #            announced by _warn_deformable_deformable_contact. (LS-DYNA KFAIL
+    #            is "failed steps before abort", NOT this per-step cap, so it is
+    #            never written into this slot.)
+    #   Tsca_dn = scale for decreasing (0 = 0.67)
+    #   Tsca_up = scale for increasing (0 = 1.1)
+    it_w = iteopt if iteopt > 0 else 8
+    l_dtn = 50 if _recipe_active(state) else 0
+    lines += ["/IMPL/DT/2", f"{_i(it_w)}{_i(0)}{_i(l_dtn)}{_i(0)}{_i(0)}"]
 
     # /IMPL/DT/FIXPOINT — force the implicit time-step controller to land EXACTLY
     # on evenly spaced times (k/N × the run end, for k = 1 … N) so a clean

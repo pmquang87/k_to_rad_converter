@@ -2269,6 +2269,17 @@ class GuiInputParsingTests(unittest.TestCase):
         self.assertEqual(kw["inter_gapmin"], {9: 0.03})
         self.assertEqual(kw["soften_stfac"], 0.3)
 
+    def test_build_kwargs_deformable_contact_recipe(self):
+        off = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="")
+        self.assertFalse(off["deformable_contact_recipe"])          # default off
+        on = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+            ground_spring_k_text="", inter_gapmin_text="", soften_stfac_text="",
+            deformable_contact_recipe=True)
+        self.assertTrue(on["deformable_contact_recipe"])
+
     def test_build_kwargs_missing_file_raises(self):
         with self.assertRaises(ValueError):
             self.g.build_convert_kwargs(
@@ -2803,6 +2814,139 @@ class ProgressCallbackTests(unittest.TestCase):
         self.assertTrue(all(b >= a - 1e-9 for a, b in zip(fracs, fracs[1:])),
                         f"progress not non-decreasing: {fracs}")
         self.assertTrue(all(isinstance(lab, str) for _, lab in events))
+
+
+# A minimal IMPLICIT deck with deformable-vs-deformable surface-to-surface
+# contact: two MAT_ELASTIC shell parts, contact 9 between them (sstyp=mstyp=3).
+DEFDEF_K = """\
+*KEYWORD
+*TITLE
+deformable-deformable implicit contact
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+deformable part A
+         1         1         1
+*PART
+deformable part B
+         2         1         1
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_ID
+         9                                                              defdef
+         1         2         3         3         0         0         0         0
+       0.2       0.1     0.001       0.0      10.0         0       0.01.00000E20
+       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0
+*CONTROL_IMPLICIT_GENERAL
+         1      0.01
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class DeformableContactRecipeTests(unittest.TestCase):
+    """--deformable-contact-recipe: warn on deformable-vs-deformable contact in
+    an implicit deck, and apply the validated stabilization (per-interface
+    Inacti=5 + /IMPL/DT/2 L_dtn=50 + /IMPL/QSTAT/DTSCAL=0.05) only when opted in.
+    Also pins that L_dtn is NOT forced to 50 by default."""
+
+    def _convert(self, deck, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "dd.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return (result,
+                Path(result.starter_path).read_text(),
+                Path(result.engine_path).read_text())
+
+    @staticmethod
+    def _inter_inacti(starter, inter_id):
+        lines = starter.splitlines()
+        i = lines.index(f"/INTER/TYPE7/{inter_id}")
+        hdr = next(j for j in range(i, len(lines)) if lines[j].startswith("#      IBC"))
+        return lines[hdr + 1].split()[1]            # IBC, [Inacti], VisS, ...
+
+    @staticmethod
+    def _impl_dt2_l_dtn(engine):
+        lines = engine.splitlines()
+        i = lines.index("/IMPL/DT/2")
+        return lines[i + 1].split()[2]              # It_w  L_arc  [L_dtn] ...
+
+    @staticmethod
+    def _qstat_dtscal(engine):
+        lines = engine.splitlines()
+        i = lines.index("/IMPL/QSTAT/DTSCAL")
+        return lines[i + 1].strip()
+
+    def test_defdef_detected_warns_without_recipe(self):
+        # Default: detect + warn, but apply NOTHING (no silent stabilization).
+        result, starter, engine = self._convert(DEFDEF_K)
+        self.assertTrue(any("Deformable-deformable contact detected" in w
+                            and "--deformable-contact-recipe" in w
+                            for w in result.warnings),
+                        f"no recommendation warning in {result.warnings}")
+        self.assertEqual(self._inter_inacti(starter, 9), "0")     # Inacti untouched
+        self.assertEqual(self._impl_dt2_l_dtn(engine), "0")       # engine default cap
+        self.assertEqual(self._qstat_dtscal(engine), "0.1")       # default stabilization
+
+    def test_recipe_applies_inacti_ldtn_qstat(self):
+        result, starter, engine = self._convert(DEFDEF_K, deformable_contact_recipe=True)
+        self.assertEqual(self._inter_inacti(starter, 9), "5")     # Inacti=5
+        self.assertEqual(self._impl_dt2_l_dtn(engine), "50")      # L_dtn=50
+        self.assertEqual(self._qstat_dtscal(engine), "0.05")      # tighter QSTAT
+        self.assertTrue(any("recipe APPLIED" in w and "[9]" in w
+                            for w in result.warnings),
+                        f"no 'applied' confirmation in {result.warnings}")
+
+    def test_l_dtn_not_defaulted_to_50(self):
+        # No deformable-deformable contact, no recipe → L_dtn must be the engine
+        # default (0), NOT the old hard-coded 50.
+        _, _, engine = self._convert(IMPL_QSTAT_K)
+        self.assertEqual(self._impl_dt2_l_dtn(engine), "0")
+
+    def test_recipe_off_is_default_engine(self):
+        # Opting the recipe OFF explicitly == not passing it.
+        _, _, e_off = self._convert(DEFDEF_K, deformable_contact_recipe=False)
+        _, _, e_def = self._convert(DEFDEF_K)
+        self.assertEqual(e_off, e_def)
+
+    def test_rigid_backed_contact_not_flagged(self):
+        # part B rigid → deformable-vs-RIGID, not deformable-deformable.
+        deck = DEFDEF_K.replace(
+            "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n",
+            "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n"
+            "*MAT_RIGID\n         2   7.86e-9    210000.0      0.3\n",
+        ).replace(
+            "deformable part B\n         2         1         1",
+            "rigid part B\n         2         1         2",
+        )
+        result, starter, engine = self._convert(deck, deformable_contact_recipe=True)
+        self.assertFalse(any("Deformable-deformable contact" in w
+                             for w in result.warnings))
+        self.assertEqual(self._inter_inacti(starter, 9), "0")     # recipe leaves it alone
+        self.assertEqual(self._impl_dt2_l_dtn(engine), "0")
+
+    def test_explicit_deck_not_flagged(self):
+        deck = DEFDEF_K.replace("*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
+        result, _, _ = self._convert(deck)
+        self.assertFalse(any("Deformable-deformable contact" in w
+                             for w in result.warnings))
 
 
 if __name__ == "__main__":

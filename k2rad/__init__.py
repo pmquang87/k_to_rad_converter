@@ -19,7 +19,8 @@ from typing import Callable, Dict, List, Optional
 from .parser import parse_k_file
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
-from .writer import build_starter, build_engine, _warn_implicit_solid_contact_np1
+from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
+                     _warn_deformable_deformable_contact)
 
 
 def _inject_implicit_contact_stub(state: ConversionState) -> None:
@@ -116,6 +117,7 @@ def convert(
     auto_gapmin: bool = False,
     gapmin_factor: float = 0.8,
     fixpoint_count: int = 100,
+    deformable_contact_recipe: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -168,6 +170,13 @@ def convert(
         instead of wherever the variable step falls. The OpenRadioss engine caps
         the list at 100, so this is clamped to 1…100; 0 disables the card.
         Default 100 (a point every 1% of the run). Implicit decks only.
+    deformable_contact_recipe : bool
+        Apply the validated stabilization recipe for an implicit deck with
+        deformable-vs-deformable contact (e.g. force control through a
+        clearance-fit deformable pin): Inacti=5 on each deformable-deformable
+        /INTER/TYPE7, plus /IMPL/DT/2 L_dtn=50 and /IMPL/QSTAT/DTSCAL=0.05. Off
+        by default — without it the converter only WARNS that such contact was
+        detected and that this recipe exists. Implicit decks only.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -213,6 +222,7 @@ def convert(
         auto_gapmin=auto_gapmin,
         gapmin_factor=gapmin_factor,
         fixpoint_count=fixpoint_count,
+        deformable_contact_recipe=deformable_contact_recipe,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
@@ -240,6 +250,10 @@ def convert(
     #     converter cannot rewrite the deck around it (it is not a surface bug),
     #     so warn the user to run np=1.
     _warn_implicit_solid_contact_np1(state)
+
+    # 2e. Deformable-vs-deformable contact: warn it is chatter/overshoot-prone in
+    #     implicit, and point to (or confirm) the opt-in stabilization recipe.
+    _warn_deformable_deformable_contact(state)
 
     # 3. Generate output text (build_starter dominates wall time on a large mesh,
     #    so it drives most of the progress bar).

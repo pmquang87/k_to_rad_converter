@@ -545,6 +545,16 @@ class ConvertOptions:
     # clamps to that 1…100 range and treats 0 as "off". Default 100 → a point
     # every 1% of the run. Implicit decks only (no effect on explicit output).
     fixpoint_count: int = 100
+    # Deformable-deformable contact recipe (opt-in): the validated stabilization
+    # for an implicit deck where two DEFORMABLE parts contact (e.g. force control
+    # through a clearance-fit deformable pin). On a detected deformable-vs-
+    # deformable /INTER/TYPE7 it sets Inacti=5 (mesh-scale engagement gap, no t=0
+    # force spike); globally it sets /IMPL/DT/2 L_dtn=50 (iteration cap for the
+    # slow LINEAR contact-force convergence) and /IMPL/QSTAT/DTSCAL=0.05 (anchors
+    # the force-control soft-mode step-overshoot). Off by default — the converter
+    # only WARNS that the recipe exists when it detects such contact (see
+    # writer._warn_deformable_deformable_contact); turn this on to apply it.
+    deformable_contact_recipe: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
