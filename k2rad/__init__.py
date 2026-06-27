@@ -40,6 +40,12 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
     """
     if not state.is_implicit:
         return
+    if state.is_modal:
+        # Normal-modes (/EIG + /IMPL/LINEAR) runs are a one-shot linear
+        # eigensolve: the eigen path ignores contact entirely, and an inert
+        # interface instead trips a segfault in the implicit-eigen setup. So no
+        # stub is needed (or wanted) for modal decks.
+        return
     if state.contacts_single or state.contacts_surf2surf:
         return
     if not (state.solid_elems or state.shell_elems):

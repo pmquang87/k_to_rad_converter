@@ -22,7 +22,7 @@ from .state import (
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
-    ControlImplicitGeneral, ControlImplicitSolution,
+    ControlImplicitGeneral, ControlImplicitSolution, ControlImplicitEigenvalue,
     ControlTermination, ControlTimestep,
     DampingGlobal, DampingPartStiffness,
     DbD3Plot, DbHistory, DbExtentBinary,
@@ -872,6 +872,36 @@ def handle_control_implicit_auto(block: Block, state: ConversionState) -> None:
     state.ctrl_implicit_auto = ControlImplicitAuto(iauto, iteopt, itewin, dtmin, dtmax, kfail)
 
 
+def handle_control_implicit_eigenvalue(block: Block, state: ConversionState) -> None:
+    """*CONTROL_IMPLICIT_EIGENVALUE → /EIG normal-modes (modal) analysis.
+
+    Card-1: neig center lflag lftend rflag rhtend eigmth shfscl
+      neig   = number of eigenmodes (→ /EIG Nmod). Negative neig (shift-based
+               count) is taken as |neig|.
+      lflag/lftend, rflag/rhtend = lower/upper eigenvalue-window bounds. LS-DYNA
+               uses ±1e29 sentinels for "no bound"; only a flagged, finite,
+               positive bound is forwarded to /EIG Freqmin/Cutfreq.
+    Sets state.is_modal (engine switches to /IMPL/LINEAR) and is_implicit (modal
+    IS an implicit analysis — keeps the implicit element formulations).
+    """
+    raw = block.raw
+    if not raw:
+        return
+    f = _card(raw, 0, fixed=True, n=8, w=10)
+    neig   = to_int(f[0])   if f else 0
+    lflag  = to_int(f[2])   if len(f) > 2 else 0
+    lftend = to_float(f[3]) if len(f) > 3 else 0.0
+    rflag  = to_int(f[4])   if len(f) > 4 else 0
+    rhtend = to_float(f[5]) if len(f) > 5 else 0.0
+    freqmin = lftend if (lflag != 0 and 0.0 < lftend < 1e28) else 0.0
+    cutfreq = rhtend if (rflag != 0 and 0.0 < rhtend < 1e28) else 0.0
+    state.ctrl_implicit_eig = ControlImplicitEigenvalue(
+        neig=abs(neig), freqmin=freqmin, cutfreq=cutfreq
+    )
+    state.is_modal = True
+    state.is_implicit = True
+
+
 def handle_control_implicit_dynamics(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
@@ -1416,6 +1446,7 @@ HANDLERS = {
     "CONTROL_IMPLICIT_SOLUTION":              handle_control_implicit_solution,
     "CONTROL_IMPLICIT_AUTO":                  handle_control_implicit_auto,
     "CONTROL_IMPLICIT_DYNAMICS":              handle_control_implicit_dynamics,
+    "CONTROL_IMPLICIT_EIGENVALUE":            handle_control_implicit_eigenvalue,
     "CONTROL_TERMINATION":                    handle_control_termination,
     "CONTROL_TIMESTEP":                       handle_control_timestep,
     "CONTROL_ACCURACY":                       handle_control_accuracy,

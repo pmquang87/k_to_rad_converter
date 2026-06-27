@@ -459,6 +459,20 @@ class ControlImplicitGeneral:
 
 
 @dataclass
+class ControlImplicitEigenvalue:
+    """*CONTROL_IMPLICIT_EIGENVALUE → /EIG (normal-modes / modal analysis).
+
+    Only ``neig`` (number of eigenmodes) maps cleanly to /EIG Nmod. LS-DYNA's
+    frequency-window flags (lflag/lftend, rflag/rhtend) default to ±1e29
+    sentinels meaning "no bound", so Cutfreq/Freqmin are left 0 (engine default
+    shift, no upper cutoff) unless a finite, flagged bound is given.
+    """
+    neig: int                  # number of eigenmodes (Nmod); abs() of LS-DYNA neig
+    freqmin: float = 0.0       # lower frequency bound (/EIG Freqmin); 0 = default
+    cutfreq: float = 0.0       # upper frequency cutoff (/EIG Cutfreq); 0 = none
+
+
+@dataclass
 class ControlImplicitSolution:
     nsolvr: int         # solver (11=MUMPS,12=PARDISO)
     ilimit: int         # max stiffness reformations
@@ -567,6 +581,11 @@ class ConversionState:
         # ── Identity ───────────────────────────────────────────────
         self.model_title: str = "Model"
         self.is_implicit: bool = False
+        # *CONTROL_IMPLICIT_EIGENVALUE present → normal-modes (/EIG) analysis.
+        # Switches the engine to a one-shot /IMPL/LINEAR eigensolve and skips
+        # the inert contact stub (the eigen path ignores contact, and the stub
+        # crashes the implicit-eigen setup).
+        self.is_modal: bool = False
         self._auto_id: int = 90001          # counter for auto-generated IDs
         # Unit system written to the /BEGIN header (mass, length, time).
         # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
@@ -654,6 +673,7 @@ class ConversionState:
         self.ctrl_solid: Optional[ControlSolid] = None
         self.ctrl_implicit_gen: Optional[ControlImplicitGeneral] = None
         self.ctrl_implicit_sol: Optional[ControlImplicitSolution] = None
+        self.ctrl_implicit_eig: Optional[ControlImplicitEigenvalue] = None
         self.ctrl_termination: Optional[ControlTermination] = None
         self.ctrl_timestep: Optional[ControlTimestep] = None
         self.damping_global: Optional[DampingGlobal] = None
