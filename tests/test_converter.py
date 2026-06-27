@@ -2981,5 +2981,115 @@ class DeformableContactRecipeTests(unittest.TestCase):
                              for w in result.warnings))
 
 
+class ModalEigenvalueTests(unittest.TestCase):
+    """*CONTROL_IMPLICIT_EIGENVALUE -> /EIG normal-modes request + a one-shot
+    /IMPL/LINEAR eigensolve engine (no QSTAT/NONLIN time marching, no inert
+    contact stub)."""
+
+    MODAL_K = IMPL_QSTAT_K.replace(
+        "*CONTROL_TERMINATION",
+        "*CONTROL_IMPLICIT_EIGENVALUE\n"
+        "        10\n"
+        "*ELEMENT_MASS\n"
+        "         1         2     100.0         0\n"
+        "*CONTROL_TERMINATION",
+    )
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "modal.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return (result,
+                Path(result.starter_path).read_text(),
+                Path(result.engine_path).read_text())
+
+    def test_emits_eig_block_with_nmod_and_whole_structure(self):
+        result, starter, _ = self._convert(self.MODAL_K)
+        self.assertIn("/EIG/", starter)
+        # CONTROL_IMPLICIT_EIGENVALUE is now handled, not skipped.
+        self.assertNotIn("CONTROL_IMPLICIT_EIGENVALUE", result.skipped_keywords)
+        lines = starter.splitlines()
+        eig_idx = next(i for i, ln in enumerate(lines) if ln.startswith("/EIG/"))
+        # Card 1: whole structure (grnd_ID 0), free eigenmodes (grnd_bc 0).
+        self.assertEqual(lines[eig_idx + 3], "         0         0   000 000         0")
+        # Card 2 data: Nmod = neig = 10 in the first 10-col field, Inorm 0 next.
+        card2 = lines[eig_idx + 5]
+        self.assertEqual(card2[:10].strip(), "10")
+        self.assertEqual(card2[10:20].strip(), "0")
+
+    def test_modal_engine_is_linear_not_qstat(self):
+        _, _, engine = self._convert(self.MODAL_K)
+        self.assertIn("/IMPL/LINEAR", engine)
+        self.assertIn("/IMPL/SOLVER/2", engine)
+        self.assertIn("/IMPL/MUMPS/AUTOCORE", engine)
+        # None of the nonlinear time-marching cards belong in a modal run.
+        self.assertNotIn("/IMPL/QSTAT", engine)
+        self.assertNotIn("/IMPL/NONLIN", engine)
+        self.assertNotIn("/IMPL/DT/2", engine)
+
+    def test_modal_skips_contact_stub(self):
+        result, starter, _ = self._convert(self.MODAL_K)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertFalse(any("no contact interface" in w for w in result.warnings))
+
+    def test_neig_value_is_carried_through(self):
+        deck = self.MODAL_K.replace("        10\n", "         7\n")
+        _, starter, _ = self._convert(deck)
+        lines = starter.splitlines()
+        eig_idx = next(i for i, ln in enumerate(lines) if ln.startswith("/EIG/"))
+        self.assertEqual(lines[eig_idx + 5][:10].strip(), "7")
+
+
+class AddedMassTests(unittest.TestCase):
+    """*ELEMENT_MASS on ordinary (non-rigid) nodes -> /ADMAS/0. Previously these
+    were silently dropped: the writer folded added_node_masses only into
+    rigid-body masters, so a point mass on a plain mesh node vanished."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "m.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def _with_masses(self, mass_cards: str) -> str:
+        # 10-wide fields (eid nid mass pid) — the native width the handler reads.
+        return IMPL_QSTAT_K.replace(
+            "*CONTROL_TERMINATION",
+            "*ELEMENT_MASS\n" + mass_cards + "*CONTROL_TERMINATION",
+        )
+
+    def test_ordinary_node_mass_emits_admas(self):
+        deck = self._with_masses("         1         2     100.0         0\n")
+        result, starter = self._convert(deck)
+        self.assertIn("/ADMAS/0/", starter)
+        # The /ADMAS card carries the mass value (100) and a grnod reference.
+        m = re.search(r"/ADMAS/0/\d+\n.*\n#\s+MASS\s+grnd_ID\n\s*([\d.eE+-]+)\s+(\d+)",
+                      starter)
+        self.assertIsNotNone(m)
+        self.assertEqual(float(m.group(1)), 100.0)
+        self.assertTrue(any("/ADMAS" in w and "ordinary" in w for w in result.warnings))
+
+    def test_equal_masses_grouped_into_one_admas(self):
+        deck = self._with_masses(
+            "         1         2     100.0         0\n"
+            "         2         3     100.0         0\n")
+        _, starter = self._convert(deck)
+        # Same value -> one /ADMAS/0 over a grnod holding both nodes.
+        self.assertEqual(starter.count("/ADMAS/0/"), 1)
+
+    def test_distinct_masses_get_separate_admas(self):
+        deck = self._with_masses(
+            "         1         2     100.0         0\n"
+            "         2         3      50.0         0\n")
+        _, starter = self._convert(deck)
+        self.assertEqual(starter.count("/ADMAS/0/"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

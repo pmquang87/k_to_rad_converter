@@ -2734,6 +2734,107 @@ def _add_auto_curve(state: ConversionState, fid: int, title: str,
 # Engine file sections
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """*ELEMENT_MASS lumped masses on ORDINARY nodes → /ADMAS/0.
+
+    state.added_node_masses holds every *ELEMENT_MASS nodal mass. Masses on
+    rigid-body nodes are already accounted for via the /RBODY Mass field
+    (_make_rbodies folds the master-node mass), so /ADMAS is emitted only for
+    nodes that are NOT part of any rigid body. /ADMAS/0 adds its Mass value to
+    EACH node of the referenced /GRNOD, so nodes are grouped by identical mass
+    value (one /GRNOD + /ADMAS/0 per distinct value). Before this, ordinary-node
+    *ELEMENT_MASS was silently dropped (writer consumed added_node_masses only
+    for rigid masters) — a real mass/dynamics error on any deck with point masses.
+    """
+    masses_by_value: Dict[float, List[int]] = {}
+    skipped_rigid = 0
+    for nid, mass in state.added_node_masses.items():
+        if mass <= 0 or nid not in state.nodes:
+            continue
+        if nid in rigid_nodes:
+            skipped_rigid += 1          # folded into its /RBODY already
+            continue
+        masses_by_value.setdefault(mass, []).append(nid)
+    if not masses_by_value:
+        return []
+    lines: List[str] = [HDR, "#-  ADDED MASSES (*ELEMENT_MASS on ordinary nodes):"]
+    n_nodes = 0
+    total = 0.0
+    for mass, nids in sorted(masses_by_value.items()):
+        nids = sorted(nids)
+        n_nodes += len(nids)
+        total += mass * len(nids)
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"added_mass_{mass:g}_nodes", nids)
+        admas_id = state.next_id()
+        lines += [
+            f"/ADMAS/0/{admas_id}",
+            f"added_mass_{mass:g}",
+            "#               MASS   grnd_ID",
+            f"{_f(mass)}{_i(grnod_id)}",
+            HDR,
+        ]
+    note = (f"*ELEMENT_MASS: emitted /ADMAS/0 for {n_nodes} ordinary node(s) "
+            f"(total added mass {total:g}).")
+    if skipped_rigid:
+        note += (f" {skipped_rigid} mass(es) on rigid-body nodes were left to the "
+                 "/RBODY (master-node mass is folded into its Mass field).")
+    state.warn(note)
+    return lines
+
+
+def _make_eig(state: ConversionState) -> List[str]:
+    """*CONTROL_IMPLICIT_EIGENVALUE → /EIG (normal-modes request).
+
+    grnd_ID=0 → modes of the whole structure AS constrained by the model's /BCS;
+    grnd_bc=0 → ITYP=1 free eigenmodes (no extra interface static modes). The
+    actual eigensolve is driven by /IMPL/LINEAR in the engine. Cutfreq/Freqmin
+    stay 0 (engine default shift / no upper cutoff) unless the deck gave a finite
+    frequency window.
+    """
+    eig = state.ctrl_implicit_eig
+    if not state.is_modal or eig is None:
+        return []
+    nmod = eig.neig or 100
+    eig_id = state.next_id()
+    return [
+        HDR,
+        "#-  EIGENVALUE / MODAL REQUEST (*CONTROL_IMPLICIT_EIGENVALUE):",
+        f"/EIG/{eig_id}",
+        "modal_eigenvalue_analysis",
+        "#  grnd_ID   grnd_bc    Trarot     Ifile",
+        "         0         0   000 000         0",
+        "#     Nmod     Inorm             Cutfreq             Freqmin",
+        f"{_i(nmod)}{_i(0)}{_f(eig.cutfreq)}{_f(eig.freqmin)}",
+        "#    Nbloc      Incv     Niter      Ipri                 Tol",
+        f"{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _make_engine_modal(state: ConversionState) -> List[str]:
+    """Engine cards for a normal-modes (/EIG) run: ONE linear factorization
+    (/IMPL/LINEAR) feeding the eigensolve — no time-marching, QSTAT, or NONLIN.
+
+    NOTE: the open-source OpenRadioss engine ships the eigensolver only as a
+    no-op stub (the kernel is gated behind an undefined DNC build macro and the
+    real com/eig/*.F source is not released), so this deck must be run with
+    commercial Altair Radioss (or another solver that implements /EIG). The
+    starter validates and the cards below are correct for such an engine.
+    """
+    return [
+        "#-  MODAL (normal-modes) ENGINE",
+        "#   /EIG (starter) requests the eigenmodes; /IMPL/LINEAR does the single",
+        "#   linear factorization the shift-invert eigensolve needs. No time march.",
+        "/IMPL/LINEAR",
+        "/IMPL/PRINT/NONL/-1",
+        "/IMPL/SOLVER/2",
+        "  0 0 0 0",
+        "/IMPL/MUMPS/AUTOCORE",
+        "#",
+    ]
+
+
 def _make_engine_header(state: ConversionState) -> List[str]:
     import re as _re
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
@@ -2802,6 +2903,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
 
 
 def _make_engine_implicit(state: ConversionState) -> List[str]:
+    if state.is_modal:
+        # Normal-modes (/EIG) → one-shot linear eigensolve, not the QSTAT/NONLIN
+        # time-marching engine below.
+        return _make_engine_modal(state)
     if not state.is_implicit:
         return []
     gen  = state.ctrl_implicit_gen
@@ -3323,6 +3428,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_pressure_loads(state))
     sections.append(_make_starter_cloads(state))
     sections.append(_make_grounding_springs(state, rbody_info))
+    sections.append(_make_added_masses(state, rigid_nodes))
+    sections.append(_make_eig(state))
     sections.append(_make_free_node_constraints(state, rigid_nodes))
     sections.append(_make_damping(state, rigid_nodes))
     sections.append(_make_starter_th(state))
