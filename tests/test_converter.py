@@ -3296,6 +3296,19 @@ class ModalSolveToolTests(unittest.TestCase):
         self.assertAlmostEqual(mass[2], 100.0 + m_elem / 4)
         self.assertAlmostEqual(mass[1], m_elem / 4)
 
+    def test_n_modes_defaults_to_deck_neig(self):
+        # Without -n, the solver extracts what the LS-DYNA deck asked for
+        # (*CONTROL_IMPLICIT_EIGENVALUE neig); an explicit -n wins; a deck
+        # without the card falls back to 12.
+        modal = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTROL_IMPLICIT_EIGENVALUE\n        10\n*CONTROL_TERMINATION")
+        state = modal_solve.parse_deck(self._write(modal, "m.k"))
+        self.assertEqual(modal_solve.default_n_modes(state), 10)
+        self.assertEqual(modal_solve.default_n_modes(state, requested=7), 7)
+        plain = modal_solve.parse_deck(self._write(TINY_K, "p.k"))
+        self.assertEqual(modal_solve.default_n_modes(plain), 12)
+
     def test_mass_diagonal_places_inertia_on_rotational_dofs(self):
         import numpy as np
         # gid 4 = node 1 RX (rotational) alongside two translational DOFs.

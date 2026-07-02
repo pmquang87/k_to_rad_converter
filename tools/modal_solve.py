@@ -321,11 +321,27 @@ def nodal_masses_from_state(
     return mass, inertia
 
 
-def nodal_masses_from_k(k_path: str) -> Tuple[Dict[int, float], Dict[int, float]]:
+def parse_deck(k_path: str) -> ConversionState:
     state = ConversionState()
     for block in parse_k_file(k_path):
         dispatch(block, state)
-    return nodal_masses_from_state(state)
+    return state
+
+
+def nodal_masses_from_k(k_path: str) -> Tuple[Dict[int, float], Dict[int, float]]:
+    return nodal_masses_from_state(parse_deck(k_path))
+
+
+def default_n_modes(state: ConversionState,
+                    requested: Optional[int] = None) -> int:
+    """Number of modes to extract: an explicit -n wins, then the deck's
+    *CONTROL_IMPLICIT_EIGENVALUE neig, then 12."""
+    if requested:
+        return requested
+    eig = state.ctrl_implicit_eig
+    if eig is not None and eig.neig > 0:
+        return eig.neig
+    return 12
 
 
 def build_mass_diagonal(stiff: StiffnessMatrix,
@@ -402,8 +418,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("k_file", nargs="?", default=None,
                     help="source LS-DYNA .k file (used to rebuild the lumped "
                          "mass matrix; required for the modal solve)")
-    ap.add_argument("-n", "--n-modes", type=int, default=12, metavar="N",
-                    help="number of modes to extract (default 12)")
+    ap.add_argument("-n", "--n-modes", type=int, default=None, metavar="N",
+                    help="number of modes to extract (default: the deck's "
+                         "*CONTROL_IMPLICIT_EIGENVALUE neig, else 12)")
     ap.add_argument("-o", "--output", default=None, metavar="NPZ",
                     help="save frequencies + mode shapes to this .npz "
                          "(default: modes.npz next to the matrix file)")
@@ -457,8 +474,10 @@ def main(argv: Optional[List[str]] = None) -> int:
               "matrix:  modal_solve.py <matrix> <model.k>", file=sys.stderr)
         return 1
     print(f"Building lumped mass matrix from: {args.k_file}")
-    node_mass, node_inertia = nodal_masses_from_k(args.k_file)
+    state = parse_deck(args.k_file)
+    node_mass, node_inertia = nodal_masses_from_state(state)
     md = build_mass_diagonal(stiff, node_mass, node_inertia)
+    n_modes = default_n_modes(state, args.n_modes)
     in_k = np.unique(stiff.user_node)
     total = sum(node_mass.values())
     print(f"  total deck mass {total:.6G} "
@@ -470,8 +489,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"(e.g. {', '.join(map(str, massless[:5]))}) - check materials "
               "/ sections if unexpected.")
 
-    print(f"Solving for {args.n_modes} modes (shift-invert eigsh) ...")
-    freq, phi = solve_modes(stiff, md, args.n_modes)
+    print(f"Solving for {n_modes} modes (shift-invert eigsh) ...")
+    freq, phi = solve_modes(stiff, md, n_modes)
     print("\n  mode |  f [1/time-unit]  |  f [Hz] if deck time is ms")
     for i, fq in enumerate(freq, 1):
         print(f"  {i:4d} | {fq:17.6f} | {1000.0 * fq:12.2f}")
