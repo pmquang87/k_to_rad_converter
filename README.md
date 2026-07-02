@@ -304,8 +304,35 @@ mode shapes are saved to `modes.npz` (`freq`, `phi`, `user_node`, `dof`).
 
 **Validated** on the W14 bogie random-fatigue example (17 980 nodes, 4 shell
 parts, 4×100 kg point masses): the exported-K static solve reproduces the
-engine displacements to **0.000 %**, and the 12 eigenfrequencies
-(44.5 – 81.5 Hz) match an independent explicit impulse ring-down FFT.
+engine displacements to **0.000 %**, the first modes match an independent
+explicit impulse ring-down FFT, and the spectrum matches LS-DYNA R14 (below).
+
+### Drilling-rotation stiffness (`--drill`, LS-DYNA parity)
+
+The rotation of a shell node about the element normal (the "drilling" DOF)
+has near-zero stiffness in the exported K but finite lumped rotary inertia,
+so the raw eigenproblem grows **spurious rotation-dominated modes** — on the
+W14 bogie, 9 junk modes at 63–81 Hz that hid the real 129–290 Hz structure.
+LS-DYNA implicit suppresses exactly this ("Drilling Rotation Constraint
+Parameter 1.0" + AUTOSPC in d3hsp); `modal_solve.py` applies the same cure by
+default: `K += factor · G·t·A/n_nodes · (n̂ n̂ᵀ)` on every shell node's
+rotational block (`--drill`, default 1e-3; 0 disables).
+
+**Cross-validated against an LS-DYNA R14 run of the same deck**
+(`eigout` + `d3eigv`, `E:\openradioss_run\Ryan_Lee_Examples\W14_bogie_dyna`):
+
+| mode | LS-DYNA [Hz] | k2rad chain [Hz] | Δf | MAC |
+|---|---|---|---|---|
+| 1–3 | 44.75 / 46.67 / 59.19 | 44.55 / 46.50 / 59.14 | ≤0.5 % | 1.000 |
+| 4–8 | 128.9 … 228.3 | 128.9 … 227.3 | ≤0.5 % | 1.000 |
+| 9 | 280.88 | 280.89 (our mode 11) | 0.003 % | 0.997 |
+
+Mode-1 modal participation/effective mass also match `eigout` (Γ_Y = 20.45,
+418 kg = 91.4 %). The retained modes are insensitive to the factor over
+1e-4…3e-3, so the default needs no tuning. Our modes 9–10 are a ~274 Hz
+near-degenerate local pair that LS-DYNA's DKQ shells place elsewhere —
+at >6× the first frequency, formulation differences (QEPH vs DKQ) appear;
+solve extra modes (`-n`) if you need parity in that tail.
 
 ### Stock-engine caveats (and the 1-line patches)
 
