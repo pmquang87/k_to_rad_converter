@@ -7,6 +7,7 @@ avoid pytest and use unittest.  They cover the parser, a few keyword
 handlers, the unit-system header, and a small end-to-end conversion.
 """
 
+import math
 import os
 import re
 import sys
@@ -51,6 +52,11 @@ from k2rad.parser import (  # noqa: E402
 # recipe) lives outside the package; its scipy-dependent tests self-skip.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import modal_solve  # noqa: E402
+# the modal post-processing tools guard numpy the same way (their
+# numpy-dependent tests self-skip; the d3plot writer also needs lasso-python)
+import modal_common  # noqa: E402
+import modal_shapes_export  # noqa: E402
+import modal_random_response  # noqa: E402
 
 
 TINY_K = """\
@@ -3321,6 +3327,556 @@ class ModalSolveToolTests(unittest.TestCase):
         md = modal_solve.build_mass_diagonal(
             stiff, {1: 2.0, 3: 5.0}, {1: 0.25})
         np.testing.assert_allclose(md, [2.0, 0.25, 5.0])
+
+
+MODAL_FREQ_K = """\
+*KEYWORD
+*TITLE
+modal frequency-domain deck
+*CONTROL_IMPLICIT_EIGENVALUE
+        10         0
+*CONTROL_IMPLICIT_GENERAL
+         1       1.0
+*CONTROL_TERMINATION
+       1.0
+*DATABASE_FREQUENCY_BINARY_D3FTG
+         1         3                             0
+*DATABASE_FREQUENCY_BINARY_D3PSD
+         1         3                             0
+       0.1       2.0         5         0         0
+*DATABASE_FREQUENCY_BINARY_D3RMS
+         1         3                             0
+*LOAD_GRAVITY_PART
+         1         2         0    0.0098
+*MAT_ADD_FATIGUE
+         1         2         0       0.0       0.0       0.0         0         0
+*DEFINE_CURVE
+         1         0       1.0       2.0       0.0       0.0
+                 0.1                0.15
+                 2.0                0.08
+*DEFINE_CURVE
+         2         0       1.0       1.0       0.0       0.0
+                10.0                 0.8
+               100.0                 0.8
+    1.0000000000e+07                0.35
+    9.9999997952e+10                0.35
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+shell part
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         3
+       1.0
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         1   7.85e-6     209.0      0.29      0.56      12.0
+       0.0       0.0         0         0       0.0                 0.0
+       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0
+       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0
+*BOUNDARY_SPC_SET
+         1         0         1         1         1         1         1         1
+*SET_NODE_LIST
+         1
+         1         2
+*END
+"""
+
+
+def _convert_string_deck(deck: str):
+    """convert() a deck given as a string; returns (result, starter_text)."""
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "deck.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    result = convert(path, write_log=False)
+    with open(result.starter_path) as fh:
+        starter = fh.read()
+    tmp.cleanup()
+    return result, starter
+
+
+class GravityLoadTests(unittest.TestCase):
+    """*LOAD_GRAVITY_PART → /GRAV (non-modal) / informational note (modal).
+
+    LS-DYNA convention (and the Radioss dyna-reader's own mapping): DOF 1/2/3
+    loads the part along the NEGATIVE axis, so /GRAV carries Fscaley = -accel.
+    """
+
+    NONMODAL = TINY_K.replace(
+        "*CONTROL_TERMINATION",
+        "*LOAD_GRAVITY_PART\n"
+        "         1         3         0      9810\n"
+        "*CONTROL_TERMINATION")
+
+    def test_handler_parses_rows(self):
+        state = ConversionState()
+        for block in parse_k_file(self._write(self.NONMODAL)):
+            dispatch(block, state)
+        self.assertEqual(len(state.gravity_loads), 1)
+        g = state.gravity_loads[0]
+        self.assertEqual((g.pid, g.dof, g.lc), (1, 3, 0))
+        self.assertAlmostEqual(g.accel, 9810.0)
+
+    def _write(self, text: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "deck.k")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_nonmodal_deck_emits_grav(self):
+        result, starter = _convert_string_deck(self.NONMODAL)
+        self.assertNotIn("LOAD_GRAVITY_PART", result.skipped_keywords)
+        self.assertIn("/GRAV/", starter)
+        self.assertIn("/GRNOD/PART/", starter)
+        # constant gravity: fct_IDT = 0, Fscaley = -accel, direction Z
+        grav_data = starter.split("/GRAV/")[1].splitlines()[3]
+        self.assertIn("Z", grav_data)
+        self.assertIn("-9810", grav_data)
+
+    def test_modal_deck_notes_instead_of_grav(self):
+        result, starter = _convert_string_deck(MODAL_FREQ_K)
+        self.assertNotIn("LOAD_GRAVITY_PART", result.skipped_keywords)
+        self.assertNotIn("/GRAV/", starter)
+        self.assertTrue(any("LOAD_GRAVITY_PART" in w and "NOTE" in w
+                            for w in result.warnings))
+        self.assertIn("intentionally NOT converted", starter)
+
+
+class FreqDomainKeywordTests(unittest.TestCase):
+    """D3PSD/D3RMS/D3FTG + *MAT_ADD_FATIGUE: parsed, never bare-skipped, and
+    the conversion points at the offline post-processing chain."""
+
+    def test_cards_parse_into_state(self):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(MODAL_FREQ_K)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        self.assertEqual(set(state.db_freq_binary), {"D3PSD", "D3RMS", "D3FTG"})
+        psd = state.db_freq_binary["D3PSD"]
+        self.assertAlmostEqual(psd.fmin, 0.1)
+        self.assertAlmostEqual(psd.fmax, 2.0)
+        self.assertEqual(psd.nfreq, 5)
+        fat = state.mat_add_fatigue[1]
+        self.assertEqual((fat.lcid, fat.ltype, fat.sntype), (2, 0, 0))
+
+    def test_modal_conversion_never_bare_skips_the_five(self):
+        result, starter = _convert_string_deck(MODAL_FREQ_K)
+        for kw in ("DATABASE_FREQUENCY_BINARY_D3PSD",
+                   "DATABASE_FREQUENCY_BINARY_D3RMS",
+                   "DATABASE_FREQUENCY_BINARY_D3FTG",
+                   "MAT_ADD_FATIGUE", "LOAD_GRAVITY_PART"):
+            self.assertNotIn(kw, result.skipped_keywords)
+        self.assertTrue(any("modal_random_response.py" in w
+                            for w in result.warnings))
+        self.assertIn("FREQUENCY-DOMAIN REQUESTS", starter)
+        self.assertIn("modal_shapes_export.py", starter)
+
+
+class ModalCommonTests(unittest.TestCase):
+    """tools/modal_common.py — mesh arrays, shape scatter, unit heuristic,
+    VTK writer (numpy required; self-skips without it)."""
+
+    def setUp(self):
+        if not modal_common._HAVE_NUMPY:
+            self.skipTest("modal_common needs numpy")
+
+    def _tiny_state(self):
+        state = ConversionState()
+        for block in parse_k_file(self._write(TINY_K)):
+            dispatch(block, state)
+        return state
+
+    def _write(self, text: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "deck.k")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def _tiny_modes(self):
+        import numpy as np
+        # nodes 1 and 3 free (TX + node-3 RX), node 2/4 constrained (absent)
+        return modal_common.ModeSet(
+            freq=np.array([0.05, 0.1]),
+            phi=np.array([[1.0, 0.0], [2.0, -1.0], [9.0, 9.0]]),
+            user_node=np.array([1, 3, 3]),
+            dof=np.array([1, 1, 4]))
+
+    def test_build_mesh_orders_by_id(self):
+        import numpy as np
+        mesh = modal_common.build_mesh(self._tiny_state())
+        np.testing.assert_array_equal(mesh.node_ids, [1, 2, 3, 4])
+        self.assertEqual(mesh.shell_conn, [[0, 1, 2, 3]])
+        self.assertEqual(list(mesh.part_ids), [1])
+        self.assertEqual(mesh.n_cells, 1)
+
+    def test_shapes_scatter_and_constrained_zero(self):
+        import numpy as np
+        mesh = modal_common.build_mesh(self._tiny_state())
+        disp = modal_common.shapes_on_mesh(mesh, self._tiny_modes())
+        self.assertEqual(disp.shape, (2, 4, 3))
+        self.assertAlmostEqual(disp[0, 0, 0], 1.0)   # node 1 TX mode 1
+        self.assertAlmostEqual(disp[1, 2, 0], -1.0)  # node 3 TX mode 2
+        self.assertEqual(disp[:, 1, :].max(), 0.0)   # node 2 constrained
+        # rotations=True picks up the RX row too
+        disp6 = modal_common.shapes_on_mesh(mesh, self._tiny_modes(),
+                                            rotations=True)
+        self.assertAlmostEqual(disp6[0, 2, 3], 9.0)
+
+    def test_shapes_reject_foreign_nodes(self):
+        import numpy as np
+        mesh = modal_common.build_mesh(self._tiny_state())
+        modes = self._tiny_modes()
+        modes.user_node = np.array([1, 99, 99])      # not in the mesh
+        with self.assertRaises(ValueError):
+            modal_common.shapes_on_mesh(mesh, modes)
+
+    def test_freq_scale_from_gravity(self):
+        from k2rad.state import GravityLoadPart
+        state = self._tiny_state()
+        mesh = modal_common.build_mesh(state)
+        state.gravity_loads.append(GravityLoadPart(1, 2, 0, 0.0098))
+        scale, why = modal_common.detect_freq_scale(state, mesh)
+        self.assertEqual(scale, 1000.0)
+        state.gravity_loads[:] = [GravityLoadPart(1, 2, 0, 9810.0)]
+        scale, _ = modal_common.detect_freq_scale(state, mesh)
+        self.assertEqual(scale, 1.0)
+
+    def test_freq_scale_cli_override_wins(self):
+        state = self._tiny_state()
+        mesh = modal_common.build_mesh(state)
+        self.assertEqual(
+            modal_common.freq_scale_from_args("ms", state, mesh)[0], 1000.0)
+        self.assertEqual(
+            modal_common.freq_scale_from_args("s", state, mesh)[0], 1.0)
+
+    def test_parse_mode_list(self):
+        self.assertEqual(modal_common.parse_mode_list(None, 3), [1, 2, 3])
+        self.assertEqual(modal_common.parse_mode_list("1,3-5", 6), [1, 3, 4, 5])
+        with self.assertRaises(ValueError):
+            modal_common.parse_mode_list("7", 6)
+
+    def test_default_output_stem(self):
+        self.assertEqual(
+            Path(modal_common.default_output_stem("a/b/job_modes.npz")).name,
+            "job")
+
+    def test_write_vtk_structure(self):
+        import numpy as np
+        mesh = modal_common.build_mesh(self._tiny_state())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.vtk")
+            modal_common.write_vtk(
+                path, mesh,
+                point_vectors={"mode_shape": np.ones((4, 3))},
+                point_scalars={"mag": np.zeros(4)},
+                cell_scalars={"vm": np.array([2.5])})
+            lines = open(path).read().splitlines()
+        self.assertEqual(lines[0], "# vtk DataFile Version 3.0")
+        self.assertIn("POINTS 4 double", lines)
+        self.assertIn("CELLS 1 5", lines)
+        self.assertIn("CELL_TYPES 1", lines)
+        self.assertIn("9", lines[lines.index("CELL_TYPES 1") + 1])  # quad
+        self.assertIn("VECTORS mode_shape double", lines)
+        self.assertIn("SCALARS vm double 1", lines)
+
+
+class ModalShapesExportTests(unittest.TestCase):
+    """tools/modal_shapes_export.py — VTK always; d3plot when lasso-python is
+    installed (self-skips without numpy / lasso)."""
+
+    def setUp(self):
+        if not modal_common._HAVE_NUMPY:
+            self.skipTest("modal_shapes_export needs numpy")
+
+    def _fixture(self):
+        import numpy as np
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        k_path = os.path.join(tmp.name, "job.k")
+        with open(k_path, "w") as fh:
+            fh.write(TINY_K)
+        npz_path = os.path.join(tmp.name, "job_modes.npz")
+        np.savez(npz_path,
+                 freq=np.array([0.05, 0.08]),
+                 phi=np.array([[0.5, 0.25], [0.0, 1.0]]),
+                 user_node=np.array([1, 3]),
+                 dof=np.array([3, 3]),
+                 gids=np.array([3, 15]))
+        return tmp.name, npz_path, k_path
+
+    def test_vtk_export_names_and_warp_vector(self):
+        tmp, npz_path, k_path = self._fixture()
+        rc = modal_shapes_export.main(
+            [npz_path, k_path, "--formats", "vtk", "--time-unit", "ms"])
+        self.assertEqual(rc, 0)
+        vtk_dir = os.path.join(tmp, "job_modes_vtk")
+        names = sorted(os.listdir(vtk_dir))
+        self.assertEqual(names, ["mode_01_50.0Hz.vtk", "mode_02_80.0Hz.vtk"])
+        text = open(os.path.join(vtk_dir, names[0])).read()
+        self.assertIn("VECTORS mode_shape double", text)
+
+    def test_animate_writes_series_index(self):
+        import json
+        tmp, npz_path, k_path = self._fixture()
+        rc = modal_shapes_export.main(
+            [npz_path, k_path, "--formats", "vtk", "--time-unit", "ms",
+             "--modes", "1", "--animate", "4"])
+        self.assertEqual(rc, 0)
+        anim = os.path.join(tmp, "job_modes_vtk", "mode_01_50.0Hz_anim")
+        series = [f for f in os.listdir(anim) if f.endswith(".vtk.series")]
+        self.assertEqual(len(series), 1)
+        data = json.load(open(os.path.join(anim, series[0])))
+        self.assertEqual(len(data["files"]), 4)
+
+    def test_d3plot_roundtrip(self):
+        if not modal_shapes_export.have_lasso():
+            self.skipTest("lasso-python not installed")
+        import numpy as np
+        from lasso.dyna import D3plot, ArrayType
+        tmp, npz_path, k_path = self._fixture()
+        rc = modal_shapes_export.main(
+            [npz_path, k_path, "--formats", "d3plot", "--time-unit", "ms"])
+        self.assertEqual(rc, 0)
+        root = os.path.join(tmp, "job_modes.d3plot")
+        self.assertTrue(os.path.isfile(root))
+        self.assertTrue(os.path.isfile(root + "01"),
+                        "lasso writes the states to <name>01 - keep the family")
+        d3 = D3plot(root)
+        np.testing.assert_allclose(
+            d3.arrays[ArrayType.global_timesteps], [50.0, 80.0], rtol=1e-6)
+        shape = (d3.arrays[ArrayType.node_displacement]
+                 - d3.arrays[ArrayType.node_coordinates][None])
+        # node 1 (index 0) TZ carries phi = 0.5 in mode 1
+        self.assertAlmostEqual(shape[0, 0, 2], 0.5, places=5)
+        self.assertAlmostEqual(shape[1, 2, 2], 1.0, places=5)
+
+    def test_rewrite_does_not_append_states(self):
+        """lasso appends to an existing <name>01 (case-sensitively matched) -
+        the export must clean the family so a re-export stays valid."""
+        if not modal_shapes_export.have_lasso():
+            self.skipTest("lasso-python not installed")
+        from lasso.dyna import D3plot, ArrayType
+        tmp, npz_path, k_path = self._fixture()
+        for _ in range(2):
+            rc = modal_shapes_export.main(
+                [npz_path, k_path, "--formats", "d3plot", "--time-unit", "ms"])
+            self.assertEqual(rc, 0)
+        d3 = D3plot(os.path.join(tmp, "job_modes.d3plot"))
+        self.assertEqual(len(d3.arrays[ArrayType.global_timesteps]), 2)
+
+
+class ModalRandomResponseTests(unittest.TestCase):
+    """tools/modal_random_response.py — the physics is validated against
+    closed-form / direct-solve references (numpy required; self-skips)."""
+
+    def setUp(self):
+        if not modal_common._HAVE_NUMPY:
+            self.skipTest("modal_random_response needs numpy")
+
+    # ── modal machinery vs direct frequency-domain solve ──────────────────
+    def test_two_dof_rms_matches_direct_solve(self):
+        import numpy as np
+        M = np.diag([2.0, 1.0])
+        K = np.array([[700.0, -200.0], [-200.0, 200.0]])
+        L = np.linalg.cholesky(M)
+        Linv = np.linalg.inv(L)
+        lam, Y = np.linalg.eigh(Linv @ K @ Linv.T)
+        phi = Linv.T @ Y                      # mass-normalized
+        f_hz = np.sqrt(lam) / (2 * math.pi)
+        zeta, r = 0.03, np.array([1.0, 1.0])
+        gamma = phi.T @ M @ r
+        grid = np.linspace(0.5, 12.0, 3000)
+        sa = np.where((grid > 1.0) & (grid < 10.0), 2.5, 0.0)
+        H = modal_random_response.frf_matrix(f_hz, grid, zeta, gamma)
+        G = modal_random_response.modal_covariance(H, sa, grid)
+        rms = modal_random_response.rms_from_modal(phi.T[:, :, None], G).ravel()
+        # direct solve with the modal damping matrix
+        C = sum(2 * zeta * math.sqrt(lam[j])
+                * np.outer(M @ phi[:, j], M @ phi[:, j]) for j in range(2))
+        U = np.array([np.linalg.solve(K - w * w * M + 1j * w * C, -M @ r)
+                      for w in 2 * math.pi * grid])
+        ref = np.sqrt(modal_random_response._trapz(
+            np.abs(U) ** 2 * sa[:, None], grid, axis=0))
+        np.testing.assert_allclose(rms, ref, rtol=1e-6)
+
+    # ── shell stress recovery patch tests ─────────────────────────────────
+    # TINY_K's MAT_ELASTIC card is not 10-char aligned (its "210000.0" spills
+    # into the PR field, so nu parses as 0) — the patch tests need a real
+    # Poisson ratio, so they use their own properly aligned deck.
+    QUAD_K = TINY_K.replace(
+        "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n",
+        "*MAT_ELASTIC\n         1   7.8e-09    1000.0       0.3\n")
+
+    def _quad_model(self):
+        state = ConversionState()
+        for block in parse_k_file(self._write(self.QUAD_K)):
+            dispatch(block, state)
+        self.assertAlmostEqual(state.mat_elastic[1].nu, 0.3)
+        mesh = modal_common.build_mesh(state)
+        model = modal_random_response.build_shell_stress_model(state, mesh)
+        return state, mesh, model
+
+    def _write(self, text: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "deck.k")
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_shell_stress_uniaxial_and_bending(self):
+        import numpy as np
+        state, mesh, model = self._quad_model()
+        E, nu, t = 1000.0, 0.3, 1.0
+        D = E / (1 - nu * nu)
+        d6 = np.zeros((1, 4, 6))
+        d6[0, 1, 0] = d6[0, 2, 0] = 0.01          # u_x = 0.01x
+        sig = modal_random_response.shell_modal_stress(model, d6)[0, 0]
+        np.testing.assert_allclose(sig[0], [D * 0.01, D * 0.01 * nu, 0.0],
+                                   atol=1e-6)
+        d6 = np.zeros((1, 4, 6))
+        d6[0, 1, 4] = d6[0, 2, 4] = 0.002         # theta_y = c x -> kxx = c
+        sig = modal_random_response.shell_modal_stress(model, d6)[0, 0]
+        sx = D * (t / 2) * 0.002
+        np.testing.assert_allclose(sig[0], [sx, nu * sx, 0.0], atol=1e-9)
+        np.testing.assert_allclose(sig[1], [-sx, -nu * sx, 0.0], atol=1e-9)
+
+    def test_shell_stress_rigid_motion_is_stress_free(self):
+        import numpy as np
+        state, mesh, model = self._quad_model()
+        d6 = np.zeros((1, 4, 6))
+        rot = 0.01
+        for i in range(4):
+            x, y = mesh.coords[i, 0], mesh.coords[i, 1]
+            d6[0, i, 0] = 5.0 - rot * y
+            d6[0, i, 1] = -2.0 + rot * x
+            d6[0, i, 5] = rot
+        sig = modal_random_response.shell_modal_stress(model, d6)
+        self.assertLess(abs(sig).max(), 1e-9)
+
+    # ── S-N data ──────────────────────────────────────────────────────────
+    def _fatigue_state(self):
+        from k2rad.state import Curve, MatAddFatigue
+        state = ConversionState()
+        state.curves[2] = Curve(2, "SN", 1.0, 1.0, 0.0, 0.0,
+                                [(10.0, 0.8), (100.0, 0.8),
+                                 (1.0e7, 0.35), (1.0e11, 0.35)])
+        return state
+
+    def test_sn_curve_semilog(self):
+        import numpy as np
+        from k2rad.state import MatAddFatigue
+        state = self._fatigue_state()
+        sn = modal_random_response.sn_function(
+            state, MatAddFatigue(1, 2, 0, 0.0, 0.0, 0.0, 0, 0))
+        # plateaus resolve conservatively (smallest N)
+        self.assertAlmostEqual(float(sn.cycles(0.8)), 10.0, places=4)
+        self.assertAlmostEqual(float(sn.cycles(0.35)), 1.0e7, delta=1e3)
+        # semi-log midpoint: log10 N linear in S
+        mid = float(sn.cycles(0.575))
+        self.assertAlmostEqual(math.log10(mid), 4.0, places=2)
+        # above the curve: clamp to the strongest damage
+        self.assertAlmostEqual(float(sn.cycles(2.0)), 10.0, places=4)
+        # below the curve, snlimt=0: the life of the last point
+        self.assertAlmostEqual(float(sn.cycles(0.1)), 1.0e11, delta=1e7)
+
+    def test_sn_snlimt_infinity_and_amplitude(self):
+        import numpy as np
+        from k2rad.state import MatAddFatigue
+        state = self._fatigue_state()
+        sn2 = modal_random_response.sn_function(
+            state, MatAddFatigue(1, 2, 0, 0.0, 0.0, 0.0, 2, 0))
+        self.assertGreater(float(sn2.cycles(0.1)), 1e100)   # infinite life
+        # sntype=1: the curve S is an amplitude -> a range of 1.6 = ampl 0.8
+        sn3 = modal_random_response.sn_function(
+            state, MatAddFatigue(1, 2, 0, 0.0, 0.0, 0.0, 0, 1))
+        self.assertAlmostEqual(float(sn3.cycles(1.6)), 10.0, places=4)
+
+    def test_sn_power_law(self):
+        from k2rad.state import MatAddFatigue
+        sn = modal_random_response.sn_function(
+            ConversionState(), MatAddFatigue(1, 0, 0, 1e12, 3.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(sn.cycles(100.0)), 1e6, delta=1)
+
+    # ── damage rates ──────────────────────────────────────────────────────
+    def test_narrowband_damage_matches_analytic(self):
+        import numpy as np
+        from k2rad.state import MatAddFatigue
+        grid = np.linspace(5, 15, 3000)
+        g = 1.0 / (1 + ((grid - 10) / 0.05) ** 2)
+        m = [float(modal_random_response._trapz(grid ** k * g, grid))
+             for k in (0, 1, 2, 4)]
+        mom = np.array([[m[0], m[1], m[2], m[3]]])
+        sn = modal_random_response.sn_function(
+            ConversionState(), MatAddFatigue(1, 0, 0, 1e12, 3.0, 0.0, 0, 0))
+        d_nb = modal_random_response.damage_rates(mom, sn, "narrowband")[0]
+        # analytic Rayleigh damage: nu0 (2 sqrt(2 m0))^b Gamma(1+b/2) / a
+        d_ana = (math.sqrt(m[2] / m[0]) * (2 * math.sqrt(2 * m[0])) ** 3
+                 * math.gamma(2.5) / 1e12)
+        self.assertAlmostEqual(d_nb, d_ana, delta=0.02 * d_ana)
+        # Dirlik approaches the narrow-band answer for a narrow-band PSD
+        d_dk = modal_random_response.damage_rates(mom, sn, "dirlik")[0]
+        self.assertLess(abs(d_dk - d_nb) / d_nb, 0.2)
+
+    def test_zero_stress_means_zero_damage(self):
+        import numpy as np
+        from k2rad.state import MatAddFatigue
+        sn = modal_random_response.sn_function(
+            ConversionState(), MatAddFatigue(1, 0, 0, 1e12, 3.0, 0.0, 0, 0))
+        mom = np.zeros((3, 4))
+        np.testing.assert_array_equal(
+            modal_random_response.damage_rates(mom, sn), [0.0, 0.0, 0.0])
+
+    # ── deck-driven configuration ─────────────────────────────────────────
+    def test_curve_pick_and_direction_from_deck(self):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(MODAL_FREQ_K)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        lcid, _ = modal_random_response.pick_psd_curve(state, None)
+        self.assertEqual(lcid, 1)          # curve 2 is S-N data
+        d, _ = modal_random_response.excitation_direction(state, "auto")
+        self.assertEqual(d, 1)             # deck gravity is Y
+        d, _ = modal_random_response.excitation_direction(state, "Z")
+        self.assertEqual(d, 2)
+
+    def test_psd_interpolator_units_and_clamping(self):
+        import numpy as np
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(MODAL_FREQ_K)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        # deck units, ms deck: abscissa x1000 -> Hz, ordinate x 1000^3
+        sa, band = modal_random_response.psd_interpolator(
+            state, 1, 1000.0, "deck", 9810.0, "deck")
+        self.assertEqual(band, (100.0, 2000.0))
+        # curve pts carry sfo=2: 0.15 * 2 = 0.3 deck units at 100 Hz
+        self.assertAlmostEqual(float(sa(np.array([100.0]))[0]), 0.3e9)
+        # LS-DYNA convention: end values held constant outside the curve
+        self.assertAlmostEqual(float(sa(np.array([10.0]))[0]), 0.3e9)
+        # g2hz: ordinate x g^2, no freq_scale^3
+        sa_g, _ = modal_random_response.psd_interpolator(
+            state, 1, 1000.0, "g2hz", 9810.0, "deck")
+        self.assertAlmostEqual(float(sa_g(np.array([100.0]))[0]),
+                               0.3 * 9810.0 ** 2)
 
 
 if __name__ == "__main__":

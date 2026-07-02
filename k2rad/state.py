@@ -341,6 +341,63 @@ class PressureLoad:
     nodes: List[int]
 
 
+@dataclass
+class GravityLoadPart:
+    """*LOAD_GRAVITY_PART — gravity body load on one part → /GRAV.
+
+    LS-DYNA card: pid dof lc accel lcdr stga stgr.  DOF 1/2/3 loads the part in
+    the NEGATIVE X/Y/Z direction (all-positive inputs give a downward load); the
+    Radioss dyna-reader maps it to /GRAV the same way, so the writer emits
+    Fscaley = -accel (or -1 × curve LC when lc > 0).  Gravity is irrelevant to a
+    non-prestressed eigenproblem, so modal decks only get an informational note.
+    """
+    pid: int
+    dof: int            # 1/2/3 = load along -X/-Y/-Z
+    lc: int             # accel-vs-time curve (0 = constant ACCEL)
+    accel: float        # constant gravity acceleration magnitude (lc = 0)
+    lcdr: int = 0       # dynamic-relaxation curve (not converted)
+    stga: int = 0       # staged-construction activation stage (not converted)
+    stgr: int = 0       # staged-construction removal stage (not converted)
+
+
+@dataclass
+class MatAddFatigue:
+    """*MAT_ADD_FATIGUE — S-N fatigue data for a material.
+
+    No OpenRadioss equivalent exists; the data feeds the OFFLINE random-vibration
+    post-processor (tools/modal_random_response.py), which computes Dirlik
+    fatigue damage from the modal PSD response.  S-N definition: either a curve
+    (lcid > 0: abscissa N, ordinate S) or the power law  N·S^b = a  (lcid = 0).
+    """
+    mid: int
+    lcid: int           # S-N *DEFINE_CURVE (0 = use a/b power law)
+    ltype: int          # curve interpolation: 0 = semi-log, 1 = log-log
+    a: float            # N·S^b = a  power-law coefficient (lcid = 0)
+    b: float            # power-law exponent
+    sthres: float       # fatigue/endurance threshold stress (0 = none)
+    snlimt: int         # behaviour below the last curve point
+    sntype: int         # S meaning: 0 = stress RANGE (default), 1 = amplitude
+
+
+@dataclass
+class DbFreqBinary:
+    """*DATABASE_FREQUENCY_BINARY_D3PSD / D3RMS / D3FTG output requests.
+
+    OpenRadioss has no frequency-domain binary databases; the requests are kept
+    so the offline post-processor (tools/modal_random_response.py) can honour
+    the D3PSD output band.  fmin/fmax are in the deck's frequency unit
+    (cycles per time-unit: a kg-mm-ms deck means kHz).
+    """
+    kind: str           # "D3PSD" | "D3RMS" | "D3FTG"
+    binary: int = 1
+    psetid: int = 0
+    fmin: float = 0.0   # D3PSD only: output band lower bound
+    fmax: float = 0.0   # D3PSD only: output band upper bound
+    nfreq: int = 0      # D3PSD only: number of output frequencies
+    fspace: int = 0     # D3PSD only: 0 = linear, 1 = log, 2 = biased
+    lcfreq: int = 0     # D3PSD only: curve of explicit output frequencies
+
+
 # ── Control blocks ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -646,6 +703,8 @@ class ConversionState:
         self.inivel_nodes: List[InitialVelocityNode] = []
         self.inivel_rbodies: List[InitialVelocityRigidBody] = []
         self.pressure_loads: List[PressureLoad] = []
+        # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
+        self.gravity_loads: List[GravityLoadPart] = []
         # *ELEMENT_MASS additions: node_ID → total added translational mass
         # (in input unit, typically ton). Used to set /RBODY Mass field
         # for rigid-body master nodes (provides M contribution to K_eff in
@@ -707,6 +766,10 @@ class ConversionState:
         self.db_secforc_dt: float = 0.0
         self.db_sleout_dt: float = 0.0
         self.db_extent_binary: Optional[DbExtentBinary] = None
+        # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
+        self.db_freq_binary: Dict[str, DbFreqBinary] = {}
+        # *MAT_ADD_FATIGUE per material id → offline fatigue post-processing
+        self.mat_add_fatigue: Dict[int, MatAddFatigue] = {}
 
         # ── Skipped / warnings ─────────────────────────────────────
         self.warnings: List[str] = []

@@ -2550,6 +2550,141 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starter: gravity loads
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _emit_grnod_part(grnod_id: int, title: str, pids: List[int]) -> List[str]:
+    """/GRNOD/PART — a node group holding all nodes of the listed parts."""
+    lines = [f"/GRNOD/PART/{grnod_id}", title or f"GRNOD_{grnod_id}"]
+    row: List[str] = []
+    for p in pids:
+        row.append(str(p).rjust(10))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _make_gravity_loads(state: ConversionState) -> List[str]:
+    """*LOAD_GRAVITY_PART → /GRAV (non-modal decks).
+
+    LS-DYNA applies the load along the NEGATIVE DOF axis (an all-positive card
+    means "downward"), and Radioss' own dyna-reader maps the keyword to /GRAV
+    the same way — so Fscale_Y carries a minus sign: -accel for the constant
+    form (lc = 0, fct_IDT = 0 → constant gravity = Fscale_Y), or -1 × curve lc
+    for the time-dependent form.  Parts sharing (dof, lc, accel) are grouped
+    into one /GRAV on a /GRNOD/PART.
+
+    Modal decks emit NO /GRAV: gravity does not change a non-prestressed
+    eigenproblem, and the stiffness-export run must stay load-consistent with
+    the eigensolve.  A NOTE (not a bare "skipped") records that.
+    """
+    if not state.gravity_loads:
+        return []
+    if state.is_modal:
+        state.warn(
+            "NOTE: *LOAD_GRAVITY_PART is not emitted for a modal deck - "
+            "gravity does not affect a non-prestressed eigenproblem, so the "
+            "stiffness-export/eigen run omits /GRAV. (A non-modal conversion "
+            "maps it to /GRAV.)")
+        return [
+            "#-  *LOAD_GRAVITY_PART: intentionally NOT converted for the modal",
+            "#-  (eigenvalue) run - gravity is irrelevant to a non-prestressed",
+            "#-  eigenproblem. A non-modal conversion emits /GRAV instead.",
+            HDR,
+        ]
+    _DIR = {1: "X", 2: "Y", 3: "Z"}
+    groups: Dict[Tuple[int, int, float], List[int]] = {}
+    for g in state.gravity_loads:
+        groups.setdefault((g.dof, g.lc, g.accel), []).append(g.pid)
+        if g.lcdr:
+            state.warn(f"LOAD_GRAVITY_PART pid={g.pid}: dynamic-relaxation "
+                       f"curve LCDR={g.lcdr} has no OpenRadioss mapping - "
+                       "ignored (only the transient gravity is converted).")
+        if g.stga or g.stgr:
+            state.warn(f"LOAD_GRAVITY_PART pid={g.pid}: staged-construction "
+                       f"stages STGA/STGR={g.stga}/{g.stgr} are not supported "
+                       "- gravity is applied for the whole run.")
+    lines: List[str] = ["#-  GRAVITY LOADS (*LOAD_GRAVITY_PART):", HDR]
+    for (dof, lc, accel), pids in sorted(groups.items()):
+        if lc > 0 and lc not in state.curves:
+            state.warn(f"LOAD_GRAVITY_PART: load curve {lc} not found - "
+                       f"gravity on part(s) {pids} skipped.")
+            continue
+        grnod_id = state.next_id()
+        grav_id = state.next_id()
+        lines += _emit_grnod_part(grnod_id, f"gravity_parts_{grav_id}",
+                                  sorted(set(pids)))
+        # lc>0: curve gives |g|(t), Fscale_Y=-1 flips to the -DOF direction;
+        # lc=0: constant gravity, fct_IDT=0 and Fscale_Y = -accel.
+        fct = lc if lc > 0 else 0
+        fscale = -1.0 if lc > 0 else -accel
+        lines += [
+            f"/GRAV/{grav_id}",
+            f"Gravity_{_DIR[dof]}_parts_" + "_".join(str(p) for p in sorted(set(pids))),
+            "#  fct_IDT       Dir   skew_ID   sens_ID   grnd_ID             Ascalex             FscaleY",
+            f"{_i(fct)}{_DIR[dof].rjust(10)}{_i(0)}{_i(0)}{_i(grnod_id)}"
+            f"{_f(1.0)}{_f(fscale)}",
+            HDR,
+        ]
+    return lines if len(lines) > 2 else []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: offline frequency-domain post-processing notes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_freq_domain_notes(state: ConversionState) -> List[str]:
+    """*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG + *MAT_ADD_FATIGUE.
+
+    OpenRadioss has no frequency-domain binary databases and no S-N fatigue
+    material add-on; instead of listing these as bare "skipped" keywords, note
+    where the results come from: the offline modal post-processing chain
+    (tools/modal_solve.py → tools/modal_shapes_export.py mode shapes;
+    tools/modal_random_response.py PSD/RMS/Dirlik fatigue honouring the deck's
+    D3PSD band, PSD curve and *MAT_ADD_FATIGUE S-N data).
+    """
+    kinds = sorted(state.db_freq_binary)
+    if not kinds and not state.mat_add_fatigue:
+        return []
+    what = [f"*DATABASE_FREQUENCY_BINARY_{k}" for k in kinds]
+    if state.mat_add_fatigue:
+        mids = ", ".join(str(m) for m in sorted(state.mat_add_fatigue))
+        what.append(f"*MAT_ADD_FATIGUE (mid {mids})")
+    listing = ", ".join(what)
+    if state.is_modal:
+        state.warn(
+            f"NOTE: {listing}: no OpenRadioss equivalent - these results are "
+            "produced OFFLINE from the modal solution: run tools/"
+            "modal_solve.py (eigenmodes), then tools/modal_shapes_export.py "
+            "(mode-shape d3plot + VTK) and tools/modal_random_response.py "
+            "(response PSD / RMS / Dirlik fatigue per the deck's D3PSD band, "
+            "PSD curve and S-N data). See the README modal section.")
+    else:
+        state.warn(
+            f"NOTE: {listing}: no OpenRadioss equivalent, and the deck is not "
+            "a modal (*CONTROL_IMPLICIT_EIGENVALUE) deck - the offline "
+            "random-vibration post-processing (tools/modal_random_response.py)"
+            " needs the modal solution, so these requests produce no output "
+            "here.")
+    lines = [
+        "#-  FREQUENCY-DOMAIN REQUESTS (no OpenRadioss equivalent - handled OFFLINE):",
+    ]
+    for w in what:
+        lines.append(f"#-    {w}")
+    lines += [
+        "#-  Results come from the offline modal chain: tools/modal_solve.py ->",
+        "#-  tools/modal_shapes_export.py (mode shapes for LS-PrePost/ParaView) ->",
+        "#-  tools/modal_random_response.py (PSD / RMS / Dirlik fatigue).",
+        HDR,
+    ]
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: skipped keyword comment block
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3614,6 +3749,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_imposed_motions_set(state))
     sections.append(_make_inivel(state, rbody_info))
     sections.append(_make_pressure_loads(state))
+    sections.append(_make_gravity_loads(state))
     sections.append(_make_starter_cloads(state))
     sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))
@@ -3624,6 +3760,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_starter_th(state))
     sections.append(_make_starter_th_inter(state))
     sections.append(_make_starter_th_node_reac(state, rbody_info))
+    sections.append(_make_freq_domain_notes(state))
     sections.append(_make_skipped_comment(state))
     sections.append(["/END", HDR])
 
