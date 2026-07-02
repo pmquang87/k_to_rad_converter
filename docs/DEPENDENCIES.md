@@ -50,6 +50,26 @@ The dependency is **optional and degrades gracefully**:
 
 There is intentionally **no node-to-node fallback** (see below).
 
+## Optional: the modal post-processing tools
+
+The viewers/post-processors that run on top of `modal_solve.py`'s output:
+
+| Tool | numpy | scipy | lasso-python |
+|---|---|---|---|
+| `tools/modal_shapes_export.py` VTK export (ParaView) | ✔ | – | – |
+| `tools/modal_shapes_export.py` d3plot export (LS-PrePost) | ✔ | – | ✔ |
+| `tools/modal_random_response.py` (PSD/RMS/Dirlik fatigue) | ✔ | – | – |
+
+```
+pip install lasso-python   # only for the d3plot (LS-PrePost) mode-shape export
+```
+
+Without lasso-python the shapes exporter still writes the VTK files and prints
+a clear warning about the skipped d3plot; without numpy every tool exits with
+a `pip install numpy` message. (lasso-python 2.0.4 verified on Python 3.14 /
+Windows; `vortex_radioss` also depends on it, so an environment that already
+converts OpenRadioss animations has it.)
+
 ## Why node-to-segment, and why scipy
 
 OpenRadioss `/INTER/TYPE7` engages a secondary **node** against a main
@@ -98,3 +118,6 @@ distance reported is the one the engine actually sees.
 | Convert a deck (CLI or GUI) | Python 3.8+ only |
 | Use `--auto-gapmin` / `--suggest-gapmin` | `pip install scipy` |
 | Solve modes with `tools/modal_solve.py` | `pip install scipy` |
+| Export mode shapes as VTK (ParaView) | `pip install numpy` |
+| Export mode shapes as d3plot (LS-PrePost) | `pip install numpy lasso-python` |
+| Random-vibration PSD/RMS/fatigue post-processing | `pip install numpy` |

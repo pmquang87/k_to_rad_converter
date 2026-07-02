@@ -84,6 +84,10 @@ common LS-DYNA idiom for symmetry/fixed-DOF)
 ### Loads
 `*LOAD_RIGID_BODY` → `/CLOAD` on rigid body master node
 `*LOAD_SEGMENT`, `*LOAD_SEGMENT_ID` → `/PLOAD`
+`*LOAD_GRAVITY_PART[_SET]` → `/GRAV` on a `/GRNOD/PART` (non-modal decks;
+DOF 1/2/3 loads along −X/−Y/−Z, so `Fscale_Y = -accel`. Modal decks get an
+informational note instead — gravity does not change a non-prestressed
+eigenproblem)
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/NODE`
@@ -102,6 +106,10 @@ common LS-DYNA idiom for symmetry/fixed-DOF)
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)
+`*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG`, `*MAT_ADD_FATIGUE` → no
+OpenRadioss equivalent; honoured **offline** by
+`tools/modal_random_response.py` on top of the modal solution (see
+*Random vibration & fatigue* below) — never bare-skipped
 
 Unsupported keywords are listed in `result.skipped_keywords` and as
 comments in the generated `_0000.rad`.
@@ -342,6 +350,96 @@ contact stub, which must not be emitted there — its initial-penetration
 corrections pollute the exported K (on the W14 bogie they shifted the static
 response ~2× and the first eigenfrequency 44.5 → 24.7 Hz).
 
+### Viewing the mode shapes (LS-PrePost + ParaView)
+
+`tools/modal_shapes_export.py` turns the `modes.npz` + source `.k` into
+directly viewable files:
+
+```bash
+python tools/modal_shapes_export.py run/model_modes.npz model.k
+```
+
+- **LS-PrePost**: `model_modes.d3plot` + `model_modes.d3plot01` — a d3plot
+  family in the style of LS-DYNA's `d3eigv`: one state per mode, the state
+  *time* is the mode frequency in **Hz**, the nodal displacements are the
+  mass-normalized shape (constrained nodes zero). Open the root file and step
+  through the states; exaggerate with the displacement scale factor.
+  **Keep the two files together** — the states live in the `01` file
+  (lasso-python always splits, even with `single_file=True`). Naming the file
+  `d3eigv` does *not* work: LS-PrePost's d3eigv reader expects LS-DYNA's extra
+  eigen records and reads 0 states (verified with LS-PrePost 4.13).
+- **ParaView**: `model_modes_vtk/mode_01_44.5Hz.vtk` … — one legacy VTK per
+  mode with a point vector `mode_shape` (plus its magnitude), ready for
+  *Warp By Vector*. `--animate N` adds N sinusoidal frames per mode plus a
+  ParaView `.vtk.series` index for direct playback.
+
+Options: `--modes 1,3-5` (subset), `--scale F` (uniform factor),
+`--normalize PCT` (rescale every mode's peak to PCT % of the model size —
+useful for rotation-dominated modes, e.g. a lumped `*ELEMENT_MASS` node
+pivoting about its shell patch, whose translational amplitudes are tiny),
+`--formats d3plot,vtk`, `--time-unit auto|s|ms`.
+
+The npz frequencies are cycles per deck **time unit**; the Hz labels use
+`--time-unit` (default `auto`: guessed from the deck's gravity magnitude,
+else material wave speed + model size, and printed — a kg-mm-ms deck gives
+×1000). The d3plot writer needs `pip install lasso-python`; the VTK export
+runs on numpy alone.
+
+### Random vibration & fatigue (D3PSD / D3RMS / D3FTG, `*MAT_ADD_FATIGUE`)
+
+LS-DYNA's frequency-domain databases have **no OpenRadioss equivalent**, so
+k2rad implements them offline on top of the modal solution — classic
+modal-superposition random vibration of a base-excited structure:
+
+```bash
+python tools/modal_random_response.py run/model_modes.npz model.k \
+       [--damping 0.02] [--dir Y] [--fmin 20 --fmax 120]
+```
+
+- **Excitation**: uniform base acceleration through the SPC support, along
+  `--dir` (default: the deck's gravity direction, else Z), with the input
+  acceleration PSD from the deck's `*DEFINE_CURVE` (auto-picked: the only
+  curve not referenced as S-N data; `--psd-curve` overrides). Curve ordinate
+  is acceleration²/frequency in deck units (`--psd-unit g2hz` + `--g` for
+  g²/Hz data); outside the curve the end values are held constant (LS-DYNA
+  load-curve convention).
+- **Band**: the deck's D3PSD `fmin/fmax` (deck frequency units — cycles per
+  time unit, so a kg-mm-ms deck's `0.1–2.0` means 100–2000 Hz). The tool
+  **warns when no solved mode falls inside the band** (the LS-PrePost-authored
+  examples carry bands above their first modes) and `--fmin/--fmax` (in Hz)
+  override it.
+- **Damping**: `--damping`, default **2 % critical** (the eigen recipe carries
+  no usable damping definition).
+- **Outputs** (`<jobname>_…`): `_rms_displacement.csv` + `_rms_stress.csv`
+  (D3RMS), `_psd_node_<id>.csv` response spectra (D3PSD), `_fatigue.csv`
+  with spectral moments / damage rate / life (D3FTG),
+  `_fatigue_lsprepost.txt` (`eid life` pairs, the `calculate_fatigue_pylife`
+  fringe format, capped at 1e9), and `_random_vtk/random_response.vtk` with
+  everything as ParaView fields.
+
+The theory: participation factors `Γ_j = φ_jᵀ M r` (lumped M identical to the
+engine's), modal FRFs `H_j(f) = -Γ_j/(ω_j²-ω²+2iζω_jω)`, full modal
+superposition including all cross terms; element stresses by centroid strain
+recovery (CST/bilinear shells with ±t/2 bending surfaces, constant-strain
+tets, trilinear hexas); von Mises stress PSD via Segalman's EVMS
+`G_vm = tr(Q·S_σ)`; fatigue damage by integrating the **Dirlik** stress-range
+pdf (`--fatigue-method narrowband` for the Rayleigh pdf) against the
+`*MAT_ADD_FATIGUE` S-N data (curve semi-log/log-log per LTYPE, range or
+amplitude per SNTYPE, below-curve behaviour per SNLIMT, threshold STHRES).
+The machinery is validated in the test suite against a direct
+frequency-domain solve (2-DOF, machine precision), closed-form narrow-band
+damage, and exact stress patch tests; on the W14 bogie the resonant RMS
+displacement matches Miles' equation within ~1 %.
+
+### GUI integration
+
+The OpenRadioss GUI's modal post-step (`runopenradioss.py`,
+`modal_post_solve`) runs the whole chain automatically after a modal job:
+`modal_solve.py` → `modal_shapes_export.py` (viewable mode shapes) → and,
+when the deck carries D3PSD/D3RMS/D3FTG/`*MAT_ADD_FATIGUE` cards,
+`modal_random_response.py`. Point the GUI at the k2rad checkout with the
+`K2RAD_PATH` environment variable.
+
 ---
 
 ## Project structure
@@ -358,7 +456,10 @@ k_to_rad_converter/
 │   ├── gapmin.py         # Suggest /INTER/TYPE7 Gapmin from mesh clearance
 │   └── writer.py         # Generates _0000.rad starter + _0001.rad engine
 ├── tools/
-│   └── modal_solve.py    # Offline eigensolver for the modal K-export recipe
+│   ├── modal_solve.py    # Offline eigensolver for the modal K-export recipe
+│   ├── modal_common.py   # Shared mesh/npz/unit/VTK helpers for the tools
+│   ├── modal_shapes_export.py    # Mode shapes → LS-PrePost d3plot + ParaView VTK
+│   └── modal_random_response.py  # D3PSD/D3RMS/D3FTG + MAT_ADD_FATIGUE offline
 ├── tests/                # Standard-library unittest suite
 ├── tutorial_example/     # Sample .k files
 ├── Ryan_Lee_Examples/    # Larger test models (W2-W7)

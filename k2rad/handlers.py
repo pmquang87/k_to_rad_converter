@@ -26,6 +26,7 @@ from .state import (
     ControlTermination, ControlTimestep,
     DampingGlobal, DampingPartStiffness,
     DbD3Plot, DbHistory, DbExtentBinary,
+    GravityLoadPart, MatAddFatigue, DbFreqBinary,
 )
 
 
@@ -1262,6 +1263,96 @@ def handle_load_segment(block: Block, state: ConversionState) -> None:
         state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
 
 
+def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
+    """*LOAD_GRAVITY_PART[_SET]: one data row per part (or part set).
+
+    Card: pid dof lc accel lcdr stga stgr — DOF 1/2/3 loads along -X/-Y/-Z.
+    _SET rows reference a *SET_PART; they are expanded to the set's parts.
+    """
+    is_set = "SET" in block.options or block.keyword.endswith("_SET")
+    for i in range(len(block.raw)):
+        if not block.raw[i].strip():      # blank card placeholder → skip
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if len(f) < 2:
+            continue
+        pid   = to_int(f[0])
+        dof   = to_int(f[1])
+        lc    = to_int(f[2])   if len(f) > 2 else 0
+        accel = to_float(f[3]) if len(f) > 3 else 0.0
+        lcdr  = to_int(f[4])   if len(f) > 4 else 0
+        stga  = to_int(f[5])   if len(f) > 5 else 0
+        stgr  = to_int(f[6])   if len(f) > 6 else 0
+        if pid <= 0 or dof not in (1, 2, 3):
+            continue
+        pids = ([p for p in state.part_sets.get(pid, ("", []))[1]]
+                if is_set else [pid])
+        for p in pids:
+            state.gravity_loads.append(
+                GravityLoadPart(p, dof, lc, accel, lcdr, stga, stgr))
+
+
+def handle_mat_add_fatigue(block: Block, state: ConversionState) -> None:
+    """*MAT_ADD_FATIGUE: S-N data per material — offline post-processing only.
+
+    Card: mid lcid ltype a b sthres snlimt sntype.  No OpenRadioss equivalent;
+    tools/modal_random_response.py consumes it for Dirlik fatigue damage.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f:
+        return
+    mid = to_int(f[0])
+    if mid == 0:
+        return
+    state.mat_add_fatigue[mid] = MatAddFatigue(
+        mid=mid,
+        lcid=to_int(f[1])     if len(f) > 1 else 0,
+        ltype=to_int(f[2])    if len(f) > 2 else 0,
+        a=to_float(f[3])      if len(f) > 3 else 0.0,
+        b=to_float(f[4])      if len(f) > 4 else 0.0,
+        sthres=to_float(f[5]) if len(f) > 5 else 0.0,
+        snlimt=to_int(f[6])   if len(f) > 6 else 0,
+        sntype=to_int(f[7])   if len(f) > 7 else 0,
+    )
+
+
+def _handle_db_freq_binary(block: Block, state: ConversionState, kind: str) -> None:
+    """*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG.
+
+    Card 1: binary … psetid.  D3PSD adds Card 2: fmin fmax nfreq fspace lcfreq
+    (deck frequency units — cycles per time-unit).  Stored for the offline
+    random-vibration post-processor; OpenRadioss has no equivalent database.
+    """
+    raw = block.raw
+    f1 = _card(raw, 0, fixed=True, n=8, w=10) if raw else []
+    req = DbFreqBinary(
+        kind=kind,
+        binary=to_int(f1[0], 1) if f1 else 1,
+        psetid=to_int(f1[4])    if len(f1) > 4 else 0,
+    )
+    if kind == "D3PSD" and len(raw) > 1:
+        f2 = _card(raw, 1, fixed=True, n=8, w=10)
+        req.fmin   = to_float(f2[0]) if f2 else 0.0
+        req.fmax   = to_float(f2[1]) if len(f2) > 1 else 0.0
+        req.nfreq  = to_int(f2[2])   if len(f2) > 2 else 0
+        req.fspace = to_int(f2[3])   if len(f2) > 3 else 0
+        req.lcfreq = to_int(f2[4])   if len(f2) > 4 else 0
+    state.db_freq_binary[kind] = req
+
+
+def handle_database_frequency_binary_d3psd(block: Block, state: ConversionState) -> None:
+    _handle_db_freq_binary(block, state, "D3PSD")
+
+
+def handle_database_frequency_binary_d3rms(block: Block, state: ConversionState) -> None:
+    _handle_db_freq_binary(block, state, "D3RMS")
+
+
+def handle_database_frequency_binary_d3ftg(block: Block, state: ConversionState) -> None:
+    _handle_db_freq_binary(block, state, "D3FTG")
+
+
 def handle_skip(block: Block, state: ConversionState) -> None:
     state.skipped_keywords.append(block.keyword)
 
@@ -1494,12 +1585,18 @@ HANDLERS = {
     "DATABASE_CROSS_SECTION_PLANE":           handle_skip,
     "DATABASE_CROSS_SECTION_SET":             handle_skip,
     "DATABASE_BINARY_RUNRSF":                 handle_skip,
+    "DATABASE_FREQUENCY_BINARY_D3PSD":        handle_database_frequency_binary_d3psd,
+    "DATABASE_FREQUENCY_BINARY_D3RMS":        handle_database_frequency_binary_d3rms,
+    "DATABASE_FREQUENCY_BINARY_D3FTG":        handle_database_frequency_binary_d3ftg,
     "INITIAL_STRESS_SECTION":                 handle_skip,
+    "LOAD_GRAVITY_PART":                      handle_load_gravity_part,
+    "LOAD_GRAVITY_PART_SET":                  handle_load_gravity_part,
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
     "LOAD_SEGMENT":                           handle_load_segment,
     "LOAD_SEGMENT_ID":                        handle_load_segment,
     "LOAD_SEGMENT_SET":                       handle_skip,
     "MAT_ADD_EROSION":                        handle_skip,
+    "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
     "SET_SEGMENT":                            handle_skip,
 }
