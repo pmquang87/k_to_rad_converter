@@ -328,6 +328,101 @@ def parse_deck(k_path: str) -> ConversionState:
     return state
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Drilling-rotation stiffness (LS-DYNA implicit parity)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_DRILL_FACTOR = 1.0e-3
+
+
+def _material_E_nu(state: ConversionState) -> Dict[int, Tuple[float, float]]:
+    out: Dict[int, Tuple[float, float]] = {}
+    for mats in (state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
+                 state.mat_rigid, state.mat_null, state.mat_power_law):
+        for mid, m in mats.items():
+            out[mid] = (m.E, m.nu)
+    return out
+
+
+def drilling_stiffness(state: ConversionState, stiff: StiffnessMatrix,
+                       factor: float) -> "sp.csc_matrix":
+    """Element-level drilling-rotation stiffness, added to K for the EIGENSOLVE.
+
+    The rotation of a shell node about the element normal (the "drilling"
+    DOF) has (near-)zero physical stiffness in the exported OpenRadioss K, but
+    the lumped rotary inertia IN is finite — so the raw eigenproblem grows
+    spurious low-frequency rotation-dominated modes (W14 bogie: 9 junk modes
+    at 63–81 Hz hiding the real 129–290 Hz structure).  LS-DYNA implicit
+    suppresses exactly this with its "Drilling Rotation Constraint Parameter"
+    (d3hsp, default 1.0, plus AUTOSPC); this is the same cure on our side::
+
+        K_drill = Σ_shells Σ_nodes  factor · G·t·A/n_nodes · (n̂ n̂ᵀ)
+
+    added to each shell node's rotational 3×3 block (n̂ = element normal,
+    G = E/2(1+ν), A = element area, t = shell thickness).  Validated on the
+    W14 bogie against LS-DYNA R14 eigout/d3eigv: with factor 1e-3 modes 1–8
+    match to ≤0.5 % with MAC = 1.000 (and LS-DYNA's mode 9 appears at our
+    mode 11 with 0.003 % / MAC 0.997); the retained modes are insensitive to
+    the factor over 1e-4…3e-3, so the default needs no tuning.  ``factor=0``
+    disables the augmentation (the pre-parity behaviour).
+    """
+    if factor <= 0.0 or not state.shell_elems:
+        n = len(stiff.gids)
+        return sp.csc_matrix((n, n))
+    nodes = state.nodes
+    em = _material_E_nu(state)
+    pos = {(int(n), int(d)): k
+           for k, (n, d) in enumerate(zip(stiff.user_node, stiff.dof))}
+    rows: List[int] = []
+    cols: List[int] = []
+    vals: List[float] = []
+    for e in state.shell_elems:
+        part = state.parts.get(e.pid)
+        sec = state.sec_shells.get(part.secid) if part else None
+        E, nu = em.get(part.mid, (0.0, 0.0)) if part else (0.0, 0.0)
+        if sec is None or E <= 0.0 or sec.t1 <= 0.0:
+            continue
+        try:
+            p = [(nodes[n].x, nodes[n].y, nodes[n].z) for n in e.nodes]
+        except KeyError:
+            continue
+        if len(p) == 4:                       # quad: diagonal cross product
+            u = _vsub(p[2], p[0])
+            v = _vsub(p[3], p[1])
+        else:                                 # tri
+            u = _vsub(p[1], p[0])
+            v = _vsub(p[2], p[0])
+        nx, ny, nz = (u[1] * v[2] - u[2] * v[1],
+                      u[2] * v[0] - u[0] * v[2],
+                      u[0] * v[1] - u[1] * v[0])
+        nrm = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if nrm < 1e-30:
+            continue
+        area = 0.5 * nrm
+        n_hat = (nx / nrm, ny / nrm, nz / nrm)
+        G = 0.5 * E / (1.0 + nu)
+        kd = factor * G * sec.t1 * area / len(e.nodes)
+        for n in e.nodes:
+            rr = [pos.get((n, d)) for d in (4, 5, 6)]
+            for i in range(3):
+                if rr[i] is None:
+                    continue
+                for j in range(3):
+                    if rr[j] is None:
+                        continue
+                    v = kd * n_hat[i] * n_hat[j]
+                    if v != 0.0:
+                        rows.append(rr[i])
+                        cols.append(rr[j])
+                        vals.append(v)
+    n = len(stiff.gids)
+    return sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsc()
+
+
+def _vsub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
 def nodal_masses_from_k(k_path: str) -> Tuple[Dict[int, float], Dict[int, float]]:
     return nodal_masses_from_state(parse_deck(k_path))
 
@@ -424,6 +519,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("-o", "--output", default=None, metavar="NPZ",
                     help="save frequencies + mode shapes to this .npz "
                          "(default: modes.npz next to the matrix file)")
+    ap.add_argument("--drill", type=float, default=DEFAULT_DRILL_FACTOR,
+                    metavar="FACTOR",
+                    help="drilling-rotation stiffness factor added to shell "
+                         "nodes for the eigensolve (suppresses spurious "
+                         "rotation-dominated modes, mirroring LS-DYNA "
+                         "implicit's drilling constraint; validated default "
+                         f"{DEFAULT_DRILL_FACTOR:g}, retained modes "
+                         "insensitive over 1e-4..3e-3; 0 disables)")
     ap.add_argument("--static", nargs=3, metavar=("NODE", "DIR", "FORCE"),
                     default=None,
                     help="static validation instead of modes: apply FORCE on "
@@ -488,6 +591,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  NOTE: {massless.size} node(s) in K carry zero mass "
               f"(e.g. {', '.join(map(str, massless[:5]))}) - check materials "
               "/ sections if unexpected.")
+
+    if args.drill > 0.0:
+        kdrill = drilling_stiffness(state, stiff, args.drill)
+        if kdrill.nnz:
+            print(f"  drilling-rotation stiffness added for the eigensolve "
+                  f"(factor {args.drill:g}, {kdrill.nnz} entries) - "
+                  "suppresses spurious shell drilling modes (LS-DYNA "
+                  "implicit parity; --drill 0 disables)")
+            stiff = StiffnessMatrix(
+                n_declared=stiff.n_declared, gids=stiff.gids,
+                K=(stiff.K + kdrill).tocsc(), user_node=stiff.user_node,
+                dof=stiff.dof, low_precision=stiff.low_precision)
 
     print(f"Solving for {n_modes} modes (shift-invert eigsh) ...")
     freq, phi = solve_modes(stiff, md, n_modes)

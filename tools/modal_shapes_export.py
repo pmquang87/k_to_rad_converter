@@ -183,9 +183,23 @@ def write_modes_vtk(out_dir: str, mesh: Mesh, freq_hz: "np.ndarray",
     """One ``mode_MM_<f>Hz.vtk`` per mode (vector ``mode_shape`` ready for
     Warp By Vector).  With ``animate`` = N > 0 also writes N sinusoidal frames
     per mode + a ParaView ``.vtk.series`` index (time axis = seconds of one
-    vibration period)."""
+    vibration period).
+
+    Stale ``mode_*`` files/animation folders from a previous export are
+    removed first — a re-solve with fewer modes (e.g. the deck's neig default)
+    must not leave old higher-mode files lying around.
+    """
+    import re
+    import shutil
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    stale = re.compile(r"mode_\d+_.*Hz(\.vtk$|_anim$)")
+    for entry in out.iterdir():
+        if stale.match(entry.name):
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
     written: List[str] = []
     for k, m in enumerate(mode_numbers):
         f = freq_hz[k]

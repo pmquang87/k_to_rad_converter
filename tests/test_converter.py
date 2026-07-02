@@ -3627,6 +3627,28 @@ class ModalShapesExportTests(unittest.TestCase):
         text = open(os.path.join(vtk_dir, names[0])).read()
         self.assertIn("VECTORS mode_shape double", text)
 
+    def test_vtk_stale_mode_files_removed(self):
+        """A re-export with fewer modes must not leave old mode files around
+        (a re-solve with the deck's neig default previously left stale
+        mode_11/12 files from a 12-mode export)."""
+        tmp, npz_path, k_path = self._fixture()
+        vtk_dir = os.path.join(tmp, "job_modes_vtk")
+        os.makedirs(vtk_dir)
+        stale_file = os.path.join(vtk_dir, "mode_99_999.9Hz.vtk")
+        with open(stale_file, "w") as fh:
+            fh.write("stale")
+        stale_anim = os.path.join(vtk_dir, "mode_98_888.8Hz_anim")
+        os.makedirs(stale_anim)
+        keep = os.path.join(vtk_dir, "notes.txt")
+        with open(keep, "w") as fh:
+            fh.write("user file - not a mode export")
+        rc = modal_shapes_export.main(
+            [npz_path, k_path, "--formats", "vtk", "--time-unit", "ms"])
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(stale_file))
+        self.assertFalse(os.path.exists(stale_anim))
+        self.assertTrue(os.path.exists(keep))
+
     def test_animate_writes_series_index(self):
         import json
         tmp, npz_path, k_path = self._fixture()
@@ -3675,6 +3697,102 @@ class ModalShapesExportTests(unittest.TestCase):
             self.assertEqual(rc, 0)
         d3 = D3plot(os.path.join(tmp, "job_modes.d3plot"))
         self.assertEqual(len(d3.arrays[ArrayType.global_timesteps]), 2)
+
+
+class DrillingStiffnessTests(unittest.TestCase):
+    """modal_solve.drilling_stiffness — the LS-DYNA-parity drilling-rotation
+    augmentation (validated on the W14 bogie vs LS-DYNA R14 eigout/d3eigv:
+    factor 1e-3 gives modes 1-8 within 0.5% at MAC 1.000; without it the
+    eigensolve grows spurious 63-81 Hz rotation modes)."""
+
+    def setUp(self):
+        if not modal_solve._HAVE_SCIPY:
+            self.skipTest("modal_solve needs numpy+scipy")
+
+    # unit quad in the XY plane (normal = Z), E=1000, nu=0.3, t=0.1
+    def _state(self):
+        from k2rad.state import (NodeData, ShellElem, PartData, SectionShell,
+                                 MatElastic)
+        state = ConversionState()
+        state.nodes = {1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),
+                       3: NodeData(1, 1, 0), 4: NodeData(0, 1, 0)}
+        state.shell_elems = [ShellElem(1, 1, [1, 2, 3, 4])]
+        state.parts = {1: PartData(1, "p", 1, 1)}
+        state.sec_shells = {1: SectionShell(1, "s", 2, 3, 0.1)}
+        state.mat_elastic = {1: MatElastic(1, "m", 7.8e-9, 1000.0, 0.3)}
+        return state
+
+    def _stiff(self, gids):
+        """A StiffnessMatrix stub with identity K on the given global ids."""
+        import numpy as np
+        import scipy.sparse as sp
+        gids = np.asarray(gids, dtype=np.int64)
+        return modal_solve.StiffnessMatrix(
+            n_declared=len(gids), gids=gids,
+            K=sp.identity(len(gids), format="csc"),
+            user_node=((gids - 1) // 6 + 1).astype(np.int64),
+            dof=((gids - 1) % 6 + 1).astype(np.int64),
+            low_precision=False)
+
+    def test_block_lands_on_drilling_direction(self):
+        import numpy as np
+        # node 1 carries all 3 rotational dofs: II = 6*(1-1)+dof = 4,5,6
+        stiff = self._stiff([4, 5, 6])
+        kd = modal_solve.drilling_stiffness(self._state(), stiff, 2.0e-3)
+        # normal = Z -> only the RZ/RZ entry; kd = f*G*t*A/nn
+        G = 0.5 * 1000.0 / 1.3
+        expect = 2.0e-3 * G * 0.1 * 1.0 / 4.0
+        dense = kd.toarray()
+        self.assertAlmostEqual(dense[2, 2], expect, places=10)
+        self.assertAlmostEqual(abs(dense).sum(), expect, places=10)
+
+    def test_missing_rotational_dofs_are_skipped(self):
+        import numpy as np
+        # node 1 has only RX+RY in K (RZ constrained/absent) -> nothing added
+        stiff = self._stiff([4, 5])
+        kd = modal_solve.drilling_stiffness(self._state(), stiff, 1.0e-3)
+        self.assertEqual(kd.nnz, 0)
+
+    def test_factor_zero_disables(self):
+        stiff = self._stiff([4, 5, 6])
+        kd = modal_solve.drilling_stiffness(self._state(), stiff, 0.0)
+        self.assertEqual(kd.nnz, 0)
+
+    def test_symmetric_for_tilted_shell(self):
+        import numpy as np
+        from k2rad.state import NodeData
+        state = self._state()
+        # tilt the quad out of plane so n-hat has all 3 components
+        state.nodes[3] = NodeData(1, 1, 0.5)
+        state.nodes[4] = NodeData(0, 1, 0.3)
+        stiff = self._stiff([4, 5, 6])
+        dense = modal_solve.drilling_stiffness(state, stiff, 1e-3).toarray()
+        np.testing.assert_allclose(dense, dense.T, atol=1e-15)
+        # rank-1 n n^T block: eigvals (0, 0, kd)
+        w = np.linalg.eigvalsh(dense)
+        self.assertAlmostEqual(w[0], 0.0, places=12)
+        self.assertAlmostEqual(w[1], 0.0, places=12)
+        self.assertGreater(w[2], 0.0)
+
+    def test_spurious_drilling_mode_is_expelled(self):
+        import numpy as np
+        import scipy.sparse as sp
+        # 1 free node with soft RZ stiffness + small inertia -> junk mode;
+        # the drilling term (kd = f*G*t*A/nn ~ 9.6e-3 here) must push it far
+        # above the real (translational) mode instead of below it
+        stiff = self._stiff([1, 6])       # node 1: TX + RZ
+        K = sp.diags([100.0, 1e-6]).tocsc()
+        stiff = modal_solve.StiffnessMatrix(
+            n_declared=2, gids=stiff.gids, K=K, user_node=stiff.user_node,
+            dof=stiff.dof, low_precision=False)
+        md = np.array([1.0, 1e-6])        # mass, rotary inertia
+        f_raw, _ = modal_solve.solve_modes(stiff, md, 1)
+        kd = modal_solve.drilling_stiffness(self._state(), stiff, 1e-3)
+        stiff.K = (stiff.K + kd).tocsc()
+        f_fix, _ = modal_solve.solve_modes(stiff, md, 1)
+        f_tx = math.sqrt(100.0 / 1.0) / (2 * math.pi)
+        self.assertLess(f_raw[0], 0.2 * f_tx)          # junk mode below
+        self.assertAlmostEqual(f_fix[0], f_tx, places=6)  # real mode first
 
 
 class ModalRandomResponseTests(unittest.TestCase):
