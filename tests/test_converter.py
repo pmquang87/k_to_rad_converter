@@ -47,6 +47,11 @@ from k2rad.parser import (  # noqa: E402
     to_int,
 )
 
+# tools/modal_solve.py (offline eigensolver for the modal stiffness-export
+# recipe) lives outside the package; its scipy-dependent tests self-skip.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import modal_solve  # noqa: E402
+
 
 TINY_K = """\
 *KEYWORD
@@ -2982,9 +2987,17 @@ class DeformableContactRecipeTests(unittest.TestCase):
 
 
 class ModalEigenvalueTests(unittest.TestCase):
-    """*CONTROL_IMPLICIT_EIGENVALUE -> /EIG normal-modes request + a one-shot
-    /IMPL/LINEAR eigensolve engine (no QSTAT/NONLIN time marching, no inert
-    contact stub)."""
+    """*CONTROL_IMPLICIT_EIGENVALUE conversion.
+
+    Default: the stiffness-export recipe the open-source engine can actually
+    run — NO /EIG (the engine lacks the eigensolver kernel and segfaults on
+    NEIG>0), one /IMPL/LINEAR step with /IMPL/PRINT/STIF writing the assembled
+    K for tools/modal_solve.py, plus the inert probe rigid body the implicit
+    engine needs, and no inert contact stub (it would pollute the exported K).
+
+    Opt-in (emit_eig / --eig): the classic /EIG request + one-shot eigensolve
+    engine for commercial Altair Radioss.
+    """
 
     MODAL_K = IMPL_QSTAT_K.replace(
         "*CONTROL_TERMINATION",
@@ -2995,22 +3008,58 @@ class ModalEigenvalueTests(unittest.TestCase):
         "*CONTROL_TERMINATION",
     )
 
-    def _convert(self, deck: str):
+    def _convert(self, deck: str, **opts):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         path = os.path.join(tmp.name, "modal.k")
         with open(path, "w") as fh:
             fh.write(deck)
-        result = convert(path)
+        result = convert(path, **opts)
         return (result,
                 Path(result.starter_path).read_text(),
                 Path(result.engine_path).read_text())
 
-    def test_emits_eig_block_with_nmod_and_whole_structure(self):
+    def test_default_modal_has_no_eig_block(self):
+        # The open-source engine cannot solve /EIG, so the default modal deck
+        # must not request it (that is the commercial-only --eig path).
         result, starter, _ = self._convert(self.MODAL_K)
-        self.assertIn("/EIG/", starter)
-        # CONTROL_IMPLICIT_EIGENVALUE is now handled, not skipped.
+        self.assertNotIn("/EIG/", starter)
+        # CONTROL_IMPLICIT_EIGENVALUE is handled, not skipped.
         self.assertNotIn("CONTROL_IMPLICIT_EIGENVALUE", result.skipped_keywords)
+
+    def test_default_modal_engine_exports_stiffness(self):
+        _, _, engine = self._convert(self.MODAL_K)
+        lines = engine.splitlines()
+        self.assertIn("/IMPL/LINEAR", lines)
+        self.assertIn("/IMPL/PRINT/STIF", lines)
+        # /IMPL/PRINT/STIF data line: PRSTIFMAT_TOL PRSTIFMAT_NC PRSTIFMAT_IT.
+        self.assertEqual(lines[lines.index("/IMPL/PRINT/STIF") + 1], "0 1 0")
+        self.assertIn("/IMPL/SOLVER/2", lines)
+        self.assertIn("/IMPL/MUMPS/AUTOCORE", lines)
+        # One step covers the whole run: DTINI = endtim (1.0 here).
+        self.assertEqual(lines[lines.index("/IMPL/DTINI") + 1], "1")
+        # None of the nonlinear time-marching cards belong in a modal run.
+        self.assertNotIn("/IMPL/QSTAT", engine)
+        self.assertNotIn("/IMPL/NONLIN", engine)
+        self.assertNotIn("/IMPL/DT/2", engine)
+
+    def test_default_modal_starter_has_probe_rbody(self):
+        # The implicit engine segfaults with no rigid body in the model, and a
+        # modal deck must not get the contact stub — so the probe rigid body is
+        # REQUIRED for the exported-K run to work.
+        result, starter, _ = self._convert(self.MODAL_K)
+        self.assertIn("inert_probe_rbody", starter)
+        self.assertIn("inert_probe_fix", starter)
+        self.assertTrue(any("no rigid body" in w for w in result.warnings))
+
+    def test_modal_skips_contact_stub(self):
+        result, starter, _ = self._convert(self.MODAL_K)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertFalse(any("no contact interface" in w for w in result.warnings))
+
+    def test_emit_eig_restores_eig_block(self):
+        result, starter, engine = self._convert(self.MODAL_K, emit_eig=True)
+        self.assertIn("/EIG/", starter)
         lines = starter.splitlines()
         eig_idx = next(i for i, ln in enumerate(lines) if ln.startswith("/EIG/"))
         # Card 1: whole structure (grnd_ID 0), free eigenmodes (grnd_bc 0).
@@ -3019,28 +3068,79 @@ class ModalEigenvalueTests(unittest.TestCase):
         card2 = lines[eig_idx + 5]
         self.assertEqual(card2[:10].strip(), "10")
         self.assertEqual(card2[10:20].strip(), "0")
-
-    def test_modal_engine_is_linear_not_qstat(self):
-        _, _, engine = self._convert(self.MODAL_K)
+        # Commercial /EIG engine: one-shot eigensolve, no K export needed.
         self.assertIn("/IMPL/LINEAR", engine)
-        self.assertIn("/IMPL/SOLVER/2", engine)
-        self.assertIn("/IMPL/MUMPS/AUTOCORE", engine)
-        # None of the nonlinear time-marching cards belong in a modal run.
+        self.assertNotIn("/IMPL/PRINT/STIF", engine)
         self.assertNotIn("/IMPL/QSTAT", engine)
-        self.assertNotIn("/IMPL/NONLIN", engine)
-        self.assertNotIn("/IMPL/DT/2", engine)
-
-    def test_modal_skips_contact_stub(self):
-        result, starter, _ = self._convert(self.MODAL_K)
-        self.assertNotIn("/INTER/TYPE7/", starter)
-        self.assertFalse(any("no contact interface" in w for w in result.warnings))
 
     def test_neig_value_is_carried_through(self):
         deck = self.MODAL_K.replace("        10\n", "         7\n")
-        _, starter, _ = self._convert(deck)
+        _, starter, _ = self._convert(deck, emit_eig=True)
         lines = starter.splitlines()
         eig_idx = next(i for i, ln in enumerate(lines) if ln.startswith("/EIG/"))
         self.assertEqual(lines[eig_idx + 5][:10].strip(), "7")
+
+
+class ProbeRigidBodyTests(unittest.TestCase):
+    """Inert probe rigid body for implicit decks without any /RBODY.
+
+    The OpenRadioss implicit engine segfaults at solver init (MESSAGE ID 44)
+    when the model contains no rigid body — independent of contact. The
+    converter injects 3 far-away nodes tied into a fully fixed /RBODY (zero
+    effect on results). Validated on the W14 bogie contact-free /IMPL/LINEAR
+    static + modal stiffness-export runs.
+    """
+
+    def _convert(self, deck: str, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "probe.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return result, Path(result.starter_path).read_text()
+
+    def test_implicit_deck_without_rbody_gets_probe(self):
+        result, starter = self._convert(IMPL_QSTAT_K)
+        self.assertIn("inert_probe_rbody", starter)
+        self.assertTrue(any("MESSAGE ID 44" in w for w in result.warnings))
+        # The mesh has nodes 1-4, so the probe claims 5, 6, 7.
+        self.assertIn("/RBODY/5", starter)
+        lines = starter.splitlines()
+        # Master node fully fixed -> the body adds no equations.
+        fix_idx = lines.index("inert_probe_fix")
+        self.assertIn("111 111", lines[fix_idx + 2])
+        # Nonzero Mass and Jxx/Jyy/Jzz (zero rigid-body inertia is ERROR 274).
+        rb_idx = lines.index("/RBODY/5")
+        self.assertIn("0.001", lines[rb_idx + 3])          # Mass field
+        self.assertEqual(lines[rb_idx + 5].split(),
+                         ["0.001", "0.001", "0.001"])       # Jxx Jyy Jzz
+
+    def test_probe_and_contact_stub_coexist_for_nonmodal(self):
+        # Non-modal implicit deck without contact: the inert self-contact stub
+        # is kept (belt-and-braces) ALONGSIDE the probe rigid body.
+        result, starter = self._convert(IMPL_QSTAT_K)
+        self.assertIn("/INTER/TYPE7/", starter)
+        self.assertIn("inert_probe_rbody", starter)
+
+    def test_implicit_deck_with_rbody_gets_no_probe(self):
+        deck = IMPL_QSTAT_K.replace(
+            "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n",
+            "*MAT_ELASTIC\n         1   7.86e-9    210000.0      0.3\n"
+            "*MAT_RIGID\n         2   7.86e-9    210000.0      0.3\n"
+            "*PART\nrigid part\n         2         1         2\n"
+            "*ELEMENT_SHELL\n       2       2       1       2       3       4\n",
+        )
+        result, starter = self._convert(deck)
+        self.assertNotIn("inert_probe_rbody", starter)
+        self.assertFalse(any("MESSAGE ID 44" in w for w in result.warnings))
+
+    def test_explicit_deck_gets_no_probe(self):
+        deck = IMPL_QSTAT_K.replace(
+            "*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
+        result, starter = self._convert(deck)
+        self.assertNotIn("inert_probe_rbody", starter)
+        self.assertNotIn("/RBODY", starter)
 
 
 class AddedMassTests(unittest.TestCase):
@@ -3089,6 +3189,125 @@ class AddedMassTests(unittest.TestCase):
             "         2         3      50.0         0\n")
         _, starter = self._convert(deck)
         self.assertEqual(starter.count("/ADMAS/0/"), 2)
+
+
+class ModalSolveToolTests(unittest.TestCase):
+    """tools/modal_solve.py — the offline eigensolver for the modal
+    stiffness-export recipe: /IMPL/PRINT/STIF matrix reader, .k lumped-mass
+    builder, and the static/eigen solves (numpy+scipy; skipped without them).
+
+    Matrix-format ground truth (validated on the W14 bogie): header "N N NZ";
+    "II JJ V" lines holding ONE triangle (II >= JJ) with duplicate (II,JJ)
+    entries SUMMED, and II = 6*(USER_node_id-1)+dof, dof 1..6 = TX..RZ.
+    """
+
+    # Two nodes (user ids 1 and 3 — a gap, like real free-DOF exports), three
+    # translational DOFs + one duplicate + one off-diagonal coupling.
+    SYNTH_MATRIX = (
+        "         3         3         6\n"
+        "         1         1  0.2000000000000000E+01\n"
+        "         1         1  0.1000000000000000E+01\n"   # duplicate: sums to 3
+        "         2         1  0.5000000000000000E+00\n"   # off-diag: mirrored
+        "         2         2  0.4000000000000000E+01\n"
+        "        13        13  0.5000000000000000E+01\n"
+        "        13         1 -0.1000000000000000E+01\n"
+    )
+
+    def setUp(self):
+        if not modal_solve._HAVE_SCIPY:
+            self.skipTest("modal_solve needs numpy+scipy")
+
+    def _write(self, text: str, name: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    def test_read_stiffness_indices_and_symmetry(self):
+        import numpy as np
+        stiff = modal_solve.read_stiffness(self._write(self.SYNTH_MATRIX, "m"))
+        self.assertEqual(stiff.n_declared, 3)
+        self.assertEqual(list(stiff.gids), [1, 2, 13])
+        # II = 6*(user_node-1)+dof: 1 -> node 1 TX, 2 -> node 1 TY,
+        # 13 = 6*2+1 -> node 3 TX.
+        self.assertEqual(list(stiff.user_node), [1, 1, 3])
+        self.assertEqual(list(stiff.dof), [1, 2, 1])
+        expected = np.array([[3.0, 0.5, -1.0],     # duplicate (1,1) summed
+                             [0.5, 4.0, 0.0],      # (2,1) mirrored to (1,2)
+                             [-1.0, 0.0, 5.0]])
+        np.testing.assert_allclose(stiff.K.toarray(), expected)
+        self.assertFalse(stiff.low_precision)      # full-precision mantissas
+
+    def test_read_stiffness_detects_stock_low_precision(self):
+        # The stock engine prints FORMAT(I10,I10,E10.2): 2 significant digits.
+        text = ("         1         1         1\n"
+                "         1         1  0.21E+04\n")
+        stiff = modal_solve.read_stiffness(self._write(text, "m"))
+        self.assertTrue(stiff.low_precision)
+
+    def test_static_solve_matches_dense(self):
+        import numpy as np
+        stiff = modal_solve.read_stiffness(self._write(self.SYNTH_MATRIX, "m"))
+        u = modal_solve.solve_static(stiff, load_node=1, load_dof=1, force=2.0)
+        expected = np.linalg.solve(stiff.K.toarray(), [2.0, 0.0, 0.0])
+        np.testing.assert_allclose(u, expected)
+        # Loading a DOF that is not in the matrix (constrained) must be an error.
+        with self.assertRaises(SystemExit):
+            modal_solve.solve_static(stiff, load_node=2, load_dof=1, force=1.0)
+
+    def test_solve_modes_diagonal_oscillators(self):
+        import math
+        import numpy as np
+        # Three uncoupled unit-mass oscillators: K = diag(4, 9, 25) ->
+        # omega = 2, 3 for the two lowest modes.
+        text = ("         3         3         3\n"
+                "         1         1  0.4000000000000000E+01\n"
+                "         2         2  0.9000000000000000E+01\n"
+                "        13        13  0.2500000000000000E+02\n")
+        stiff = modal_solve.read_stiffness(self._write(text, "m"))
+        md = modal_solve.build_mass_diagonal(stiff, {1: 1.0, 3: 1.0}, {})
+        np.testing.assert_allclose(md, [1.0, 1.0, 1.0])
+        freq, phi = modal_solve.solve_modes(stiff, md, n_modes=2)
+        np.testing.assert_allclose(freq, [2.0 / (2 * math.pi),
+                                          3.0 / (2 * math.pi)])
+        self.assertEqual(phi.shape, (3, 2))
+
+    def test_lumped_mass_matches_radioss_lumping(self):
+        # TINY_K: one 1x1 mm quad shell, t=1, rho=7.86e-9 -> element mass
+        # split evenly over 4 nodes; nodal rotary inertia = the Radioss shell
+        # lumping (m/nn)*(A + t^2)/12 (verified == engine MS/IN on W14 bogie).
+        path = self._write(TINY_K, "tiny.k")
+        mass, inertia = modal_solve.nodal_masses_from_k(path)
+        m_elem = 1.0 * 1.0 * 7.86e-9                # A * t * rho
+        for nid in (1, 2, 3, 4):
+            self.assertAlmostEqual(mass[nid], m_elem / 4, places=15)
+            self.assertAlmostEqual(inertia[nid],
+                                   (m_elem / 4) * (1.0 + 1.0) / 12, places=18)
+
+    def test_element_mass_added_to_node(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*ELEMENT_MASS\n         1         2     100.0         0\n"
+            "*CONTROL_TERMINATION")
+        mass, _ = modal_solve.nodal_masses_from_k(self._write(deck, "m.k"))
+        m_elem = 7.86e-9
+        self.assertAlmostEqual(mass[2], 100.0 + m_elem / 4)
+        self.assertAlmostEqual(mass[1], m_elem / 4)
+
+    def test_mass_diagonal_places_inertia_on_rotational_dofs(self):
+        import numpy as np
+        # gid 4 = node 1 RX (rotational) alongside two translational DOFs.
+        text = ("         3         3         3\n"
+                "         1         1  0.1000000000000000E+01\n"
+                "         4         4  0.1000000000000000E+01\n"
+                "        13        13  0.1000000000000000E+01\n")
+        stiff = modal_solve.read_stiffness(self._write(text, "m"))
+        self.assertEqual(list(stiff.dof), [1, 4, 1])
+        md = modal_solve.build_mass_diagonal(
+            stiff, {1: 2.0, 3: 5.0}, {1: 0.25})
+        np.testing.assert_allclose(md, [2.0, 0.25, 5.0])
 
 
 if __name__ == "__main__":

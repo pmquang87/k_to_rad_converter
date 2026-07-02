@@ -559,6 +559,17 @@ class ConvertOptions:
     # clamps to that 1…100 range and treats 0 as "off". Default 100 → a point
     # every 1% of the run. Implicit decks only (no effect on explicit output).
     fixpoint_count: int = 100
+    # Modal (/EIG) emission for COMMERCIAL Altair Radioss (opt-in): the
+    # open-source OpenRadioss engine ships the /EIG eigensolver only as a no-op
+    # stub (the kernel is gated behind an undefined DNC build macro and the real
+    # com/eig/*.F source is not in the release), so by default a
+    # *CONTROL_IMPLICIT_EIGENVALUE deck is converted to the validated
+    # stiffness-export recipe instead: one /IMPL/LINEAR step with
+    # /IMPL/PRINT/STIF writes the assembled K to
+    # 'local_stiffness_matrix_domain0', and tools/modal_solve.py solves the
+    # eigenproblem offline (scipy). Set emit_eig to get the classic /EIG +
+    # one-shot eigensolve engine instead — runnable only on commercial Radioss.
+    emit_eig: bool = False
     # Deformable-deformable contact recipe (opt-in): the validated stabilization
     # for an implicit deck where two DEFORMABLE parts contact (e.g. force control
     # through a clearance-fit deformable pin). On a detected deformable-vs-

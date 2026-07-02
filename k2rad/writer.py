@@ -2784,7 +2784,13 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
 
 
 def _make_eig(state: ConversionState) -> List[str]:
-    """*CONTROL_IMPLICIT_EIGENVALUE → /EIG (normal-modes request).
+    """*CONTROL_IMPLICIT_EIGENVALUE → /EIG (normal-modes request) — opt-in.
+
+    Emitted only with ``--eig`` (options.emit_eig): the open-source OpenRadioss
+    engine cannot solve /EIG (the eigensolver kernel is not in the source
+    release — the engine segfaults at init the moment NEIG>0), so /EIG output is
+    reserved for commercial Altair Radioss users. The default modal conversion
+    uses the stiffness-export recipe instead (see _make_engine_modal).
 
     grnd_ID=0 → modes of the whole structure AS constrained by the model's /BCS;
     grnd_bc=0 → ITYP=1 free eigenmodes (no extra interface static modes). The
@@ -2793,7 +2799,7 @@ def _make_eig(state: ConversionState) -> List[str]:
     frequency window.
     """
     eig = state.ctrl_implicit_eig
-    if not state.is_modal or eig is None:
+    if not state.is_modal or eig is None or not state.options.emit_eig:
         return []
     nmod = eig.neig or 100
     eig_id = state.next_id()
@@ -2813,24 +2819,60 @@ def _make_eig(state: ConversionState) -> List[str]:
 
 
 def _make_engine_modal(state: ConversionState) -> List[str]:
-    """Engine cards for a normal-modes (/EIG) run: ONE linear factorization
-    (/IMPL/LINEAR) feeding the eigensolve — no time-marching, QSTAT, or NONLIN.
+    """Engine cards for a normal-modes run.
 
-    NOTE: the open-source OpenRadioss engine ships the eigensolver only as a
-    no-op stub (the kernel is gated behind an undefined DNC build macro and the
-    real com/eig/*.F source is not released), so this deck must be run with
-    commercial Altair Radioss (or another solver that implements /EIG). The
-    starter validates and the cards below are correct for such an engine.
+    Default (validated stiffness-export recipe): the open-source OpenRadioss
+    engine ships the /EIG eigensolver only as a no-op stub (the kernel is gated
+    behind an undefined DNC build macro and the real com/eig/*.F source is not
+    released), so the engine cannot compute modes itself. Instead the deck runs
+    ONE linear implicit step (/IMPL/LINEAR, /IMPL/DTINI = the run end) and the
+    undocumented /IMPL/PRINT/STIF keyword (engine freimpl.F; data line
+    ``PRSTIFMAT_TOL PRSTIFMAT_NC PRSTIFMAT_IT`` = ``0 1 0``) makes MUMPS write
+    the EXACT assembled stiffness matrix it factorizes to
+    ``local_stiffness_matrix_domain0`` (run np=1). The eigenproblem is then
+    solved offline with scipy — see tools/modal_solve.py. Validated on the W14
+    bogie: a static solve from the exported K matches the engine to 0.000%, and
+    the eigenfrequencies match an explicit impulse ring-down FFT.
+
+    With ``--eig`` (options.emit_eig): the classic one-shot /EIG eigensolve
+    engine for commercial Altair Radioss (which has the real /EIG kernel).
     """
+    if state.options.emit_eig:
+        return [
+            "#-  MODAL (normal-modes) ENGINE",
+            "#   /EIG (starter) requests the eigenmodes; /IMPL/LINEAR does the single",
+            "#   linear factorization the shift-invert eigensolve needs. No time march.",
+            "#   NOTE: only commercial Altair Radioss can solve /EIG — the open-source",
+            "#   engine segfaults at init (eigensolver kernel not in the source release).",
+            "/IMPL/LINEAR",
+            "/IMPL/PRINT/NONL/-1",
+            "/IMPL/SOLVER/2",
+            "  0 0 0 0",
+            "/IMPL/MUMPS/AUTOCORE",
+            "#",
+        ]
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     return [
-        "#-  MODAL (normal-modes) ENGINE",
-        "#   /EIG (starter) requests the eigenmodes; /IMPL/LINEAR does the single",
-        "#   linear factorization the shift-invert eigensolve needs. No time march.",
+        "#-  MODAL (normal-modes) ENGINE - stiffness-matrix export recipe",
+        "#   The open-source OpenRadioss engine cannot solve /EIG, so this deck runs",
+        "#   ONE linear implicit step and /IMPL/PRINT/STIF makes MUMPS print the",
+        "#   assembled stiffness matrix to 'local_stiffness_matrix_domain0'.",
+        "#   Run np=1, then solve the eigenproblem offline (needs numpy+scipy):",
+        "#       python tools/modal_solve.py <run_dir>/local_stiffness_matrix_domain0 <model.k>",
+        "#   Stock-engine caveats (both fixed by 1-line patches, see k2rad README):",
+        "#     * the matrix is printed with FORMAT E10.2 (2 significant digits) ->",
+        "#       ~1% stiffness rounding, ~0.5% eigenfrequency error;",
+        "#     * after '--STIFFNESS MATRIX IS PRINTED--' the np=1 run can hang in an",
+        "#       O(NZ^2) domain-merge scan - kill it; the per-domain file is complete.",
         "/IMPL/LINEAR",
         "/IMPL/PRINT/NONL/-1",
+        "/IMPL/PRINT/STIF",
+        "0 1 0",
         "/IMPL/SOLVER/2",
         "  0 0 0 0",
         "/IMPL/MUMPS/AUTOCORE",
+        "/IMPL/DTINI",
+        f"{endtim:.6G}",
         "#",
     ]
 
@@ -3118,6 +3160,76 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
     return lines if emitted else []
 
 
+def _make_modal_dummy_cload(state: ConversionState,
+                            rigid_nodes: Set[int]) -> List[str]:
+    """Dummy unit load for the modal stiffness-export run.
+
+    The implicit engine refuses to start a solve with no loading data at all
+    (MESSAGE ID 79 ``SOLVER IMPLICIT STOPPED DUE TO LOADING DATA``) — and a
+    modal deck usually has none, because its LS-DYNA loads (e.g. gravity) are
+    irrelevant to the eigenproblem and are skipped by the conversion. So give
+    the one /IMPL/LINEAR step a unit /CLOAD on a free structural node: the
+    exported stiffness matrix is load-independent, and the resulting static
+    solution doubles as the validation reference — the same load solved
+    offline (``tools/modal_solve.py --static <node> Z 1``) must reproduce the
+    engine displacements to ~0% (exact-K check; W14 bogie: 0.000%).
+    """
+    if not state.is_modal or state.options.emit_eig:
+        return []
+    if (state.load_rigid_bodies or state.pressure_loads
+            or state.prescribed_motions or state.prescribed_motion_sets):
+        return []                       # the deck already loads something
+    elem_nodes: Set[int] = set()
+    for e in state.shell_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.solid_elems:
+        elem_nodes.update(e.nodes)
+    for e in state.beam_elems:
+        elem_nodes.update((e.n1, e.n2))
+    constrained: Set[int] = set()
+    for bc in state.bcs_spcs:
+        constrained.update(state.node_sets.get(bc.nsid, ("", []))[1])
+    candidates = elem_nodes - constrained - rigid_nodes
+    if not candidates:
+        state.warn(
+            "Modal stiffness-export run has no load and no free node to put a "
+            "dummy /CLOAD on — the engine will stop with MESSAGE ID 79. Add "
+            "any load to the deck manually.")
+        return []
+    node = max(candidates)              # deterministic, away from low-id corners
+    endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
+    funct_id = state.next_id()
+    grnod_id = state.next_id()
+    cload_id = state.next_id()
+    state.warn(
+        "Modal stiffness-export run: the deck has no load, but the implicit "
+        "engine refuses to start without loading data (MESSAGE ID 79). Added "
+        f"a dummy unit /CLOAD (node {node}, dir Z). The exported stiffness "
+        "matrix is load-independent; the static solution can be cross-checked "
+        f"with: tools/modal_solve.py <matrix> --static {node} Z 1"
+    )
+    lines = [
+        "#-  DUMMY STATIC LOAD (modal stiffness-export run needs loading data):",
+        HDR,
+        f"/FUNCT/{funct_id}",
+        "const_unit_load",
+        "#                  X                   Y",
+        f"{_f(0.0)}{_f(1.0)}",
+        f"{_f(max(2.0 * endtim, 1.0))}{_f(1.0)}",
+        HDR,
+    ]
+    lines += _emit_grnod_node(grnod_id, "modal_dummy_load_node", [node])
+    lines += [
+        f"/CLOAD/{cload_id}",
+        "modal_dummy_static_load",
+        "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
+        f"{_i(funct_id)}{'Z'.rjust(10)}{_i(0)}         0{_i(grnod_id)}"
+        f"          {_f(1.0)}{_f(1.0)}",
+        HDR,
+    ]
+    return lines
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Top-level assemblers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3359,6 +3471,79 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     return lines
 
 
+def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """Implicit no-rigid-body guard: an inert, fully fixed probe rigid body.
+
+    The OpenRadioss implicit engine segfaults during solver init (MESSAGE ID 44,
+    right after the input echo, before the /IMPL option echo) when the model
+    contains NO /RBODY — for every implicit flavor (LINEAR, QSTAT/NONLIN, modal)
+    and independent of whether the model has contact. One rigid body anywhere
+    fixes it. So when an implicit deck has none, add three nodes far outside the
+    model and tie them into a minimal rigid body:
+
+      * Mass = Jxx = Jyy = Jzz = 1e-3 — nonzero because a rigid body with zero
+        inertia is starter ERROR 274 (the three probe nodes are collinear, so
+        the computed inertia alone would be singular);
+      * master /BCS 111 111 — all 6 DOFs fixed, so the body adds no equations,
+        carries no load, and has zero effect on the solution, the eigenmodes,
+        or the exported stiffness matrix.
+
+    Validated on the W14 bogie (contact-free /IMPL/LINEAR static + modal
+    stiffness export): without the probe the engine segfaults; with it the run
+    terminates normally with 0 warnings and the results are unaffected.
+    """
+    if not state.is_implicit or rbody_info or not state.nodes:
+        return []
+    xs = [nd.x for nd in state.nodes.values()]
+    ys = [nd.y for nd in state.nodes.values()]
+    zs = [nd.z for nd in state.nodes.values()]
+    diag = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs), 1.0)
+    x0 = max(xs) + 2.0 * diag           # well clear of the mesh
+    y0, z0 = max(ys), max(zs)
+    spacing = 0.1 * diag                # distinct, non-coincident node positions
+    n1 = max(state.nodes) + 1
+    slave_grnod = state.next_id()
+    master_grnod = state.next_id()
+    bcs_id = state.next_id()
+    lines = [
+        "#-  INERT PROBE RIGID BODY (implicit no-rigid-body segfault guard):",
+        HDR,
+        "/NODE",
+        "#  Node ID               X               Y               Z",
+    ]
+    for k in range(3):
+        lines.append(f"{_i(n1 + k)}{_f(x0 + k * spacing)}{_f(y0)}{_f(z0)}")
+    lines += [
+        f"/RBODY/{n1}",
+        "inert_probe_rbody",
+        "#  node_ID   sens_ID   skew_ID    Ispher                Mass   grnd_ID     Ikrem      ICoG   surf_ID",
+        f"{_i(n1)}{_i(0)}{_i(0)}{_i(0)}{_f(1e-3)}{_i(slave_grnod)}{_i(0)}{_i(0)}{_i(0)}",
+        "#                Jxx                 Jyy                 Jzz",
+        f"{_f(1e-3)}{_f(1e-3)}{_f(1e-3)}",
+        "#                Jxy                 Jyz                 Jxz",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#  Ioptoff   Iexpams     Ifail",
+        f"{_i(0)}{_i(0)}{_i(0)}",
+    ]
+    lines += _emit_grnod_node(slave_grnod, "inert_probe_slaves", [n1 + 1, n1 + 2])
+    lines += _emit_grnod_node(master_grnod, "inert_probe_master", [n1])
+    lines += [
+        f"/BCS/{bcs_id}",
+        "inert_probe_fix",
+        "#  Tra rot   skew_ID  grnod_ID",
+        f"   111 111         0{_i(master_grnod)}",
+        HDR,
+    ]
+    state.warn(
+        "Implicit deck has no rigid body — the OpenRadioss implicit engine "
+        "segfaults at solver init (MESSAGE ID 44) without one, independent of "
+        f"contact. Injected an inert probe rigid body (/RBODY {n1}, 3 far-away "
+        f"nodes {n1}-{n1 + 2}, master fully fixed): it adds no equations and has "
+        "zero effect on results. Remove it if you add a real rigid body."
+    )
+    return lines
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -3393,6 +3578,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     rigid_nodes = rigid_nodes | cnrb_rigid_nodes
     rbody_info = {**rbody_info, **cnrb_info}
     rbody_lines = rbody_lines + cnrb_lines
+    # Implicit deck without any rigid body: the engine segfaults at solver init
+    # (MESSAGE ID 44) — give it an inert fully-fixed probe rigid body.
+    rbody_lines = rbody_lines + _make_probe_rbody(state, rbody_info)
     state.rbody_grnods = {pid: info["grnod_id"] for pid, info in rbody_info.items()}
     state.rbody_ind_grnods = {pid: info["ind_grnod_id"] for pid, info in rbody_info.items()}
 
@@ -3427,6 +3615,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_inivel(state, rbody_info))
     sections.append(_make_pressure_loads(state))
     sections.append(_make_starter_cloads(state))
+    sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))
     sections.append(_make_added_masses(state, rigid_nodes))
     sections.append(_make_eig(state))

@@ -37,14 +37,25 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
     all-parts self-contact (``/INTER/TYPE7``).  On a model whose parts never
     touch it transmits no load, so results are unchanged — it merely gives the
     engine the interface its implicit setup requires.
+
+    NOTE (W14 bogie root-cause refinement): the real trigger of the no-contact
+    segfault appears to be the absence of a *rigid body*, not of contact — a
+    contact-free implicit deck runs fine once it has one /RBODY (see
+    writer._make_probe_rbody, which now injects an inert probe rigid body for
+    any implicit deck without one). The decks that established this stub all
+    had rigid bodies, so the stub is kept for non-modal decks as
+    belt-and-braces until the rbody-only fix is validated on the QSTAT/NONLIN
+    model class too.
     """
     if not state.is_implicit:
         return
     if state.is_modal:
-        # Normal-modes (/EIG + /IMPL/LINEAR) runs are a one-shot linear
-        # eigensolve: the eigen path ignores contact entirely, and an inert
-        # interface instead trips a segfault in the implicit-eigen setup. So no
-        # stub is needed (or wanted) for modal decks.
+        # Modal decks must NOT get the stub. It is not needed (the injected
+        # probe rigid body alone fixes the implicit-init segfault) and it
+        # actively pollutes the exported stiffness matrix: the interface's
+        # initial-penetration corrections add "SUPPLEMENTARY CONTACT STIFFNESS"
+        # terms that shifted the W14 bogie static response ~2x and its first
+        # eigenfrequency 44.5 -> 24.7 Hz.
         return
     if state.contacts_single or state.contacts_surf2surf:
         return
@@ -125,6 +136,7 @@ def convert(
     gapmin_factor: float = 0.8,
     fixpoint_count: int = 100,
     deformable_contact_recipe: bool = False,
+    emit_eig: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -184,6 +196,14 @@ def convert(
         /INTER/TYPE7, plus /IMPL/DT/2 L_dtn=50 and /IMPL/QSTAT/DTSCAL=0.05. Off
         by default — without it the converter only WARNS that such contact was
         detected and that this recipe exists. Implicit decks only.
+    emit_eig : bool
+        For a modal deck (*CONTROL_IMPLICIT_EIGENVALUE): emit the classic /EIG
+        request + one-shot eigensolve engine, which only COMMERCIAL Altair
+        Radioss can run (the open-source engine lacks the eigensolver kernel
+        and segfaults). Off by default: the modal deck is instead converted to
+        the validated stiffness-export recipe (/IMPL/PRINT/STIF writes the
+        assembled K; tools/modal_solve.py solves the modes offline with scipy),
+        which runs on the open-source engine.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -230,6 +250,7 @@ def convert(
         gapmin_factor=gapmin_factor,
         fixpoint_count=fixpoint_count,
         deformable_contact_recipe=deformable_contact_recipe,
+        emit_eig=emit_eig,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
