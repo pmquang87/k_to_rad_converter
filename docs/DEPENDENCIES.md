@@ -14,15 +14,17 @@ never import any third-party package. The Tkinter GUI (`k2rad_gui.py`) uses only
 `tkinter`, which ships with CPython. So a plain conversion has **no install
 step** beyond Python 3.8+.
 
-## Optional: numpy + scipy (only for auto-Gapmin)
+## Optional: numpy + scipy (auto-Gapmin and the modal eigensolver)
 
-Two features measure the **node-to-segment contact clearance** to suggest a
-per-interface `/INTER/TYPE7` `Gapmin`:
+Three features need numpy + scipy. Two measure the **node-to-segment contact
+clearance** to suggest a per-interface `/INTER/TYPE7` `Gapmin`; the third is
+the offline eigensolver of the modal stiffness-export recipe:
 
-| Feature | Flag / GUI |
+| Feature | Flag / entry point |
 |---|---|
 | Apply auto-Gapmin during conversion | `--auto-gapmin` / "Auto Gapmin from mesh clearance" checkbox |
 | Report suggested Gapmins (read-only) | `--suggest-gapmin` |
+| Solve normal modes from an `/IMPL/PRINT/STIF` export | `python tools/modal_solve.py` (sparse symmetric eigsh, shift-invert) |
 
 These need a fast point-to-mesh distance query, which requires:
 
@@ -43,6 +45,8 @@ The dependency is **optional and degrades gracefully**:
   `pip install scipy`. The `.rad` output is otherwise identical to a plain
   conversion, so nothing breaks — you simply do not get an auto-Gapmin.
 * `--suggest-gapmin` prints the same note and suggests nothing.
+* `tools/modal_solve.py` exits with a clear `pip install scipy` message.
+  (Converting a modal deck itself needs nothing — only the offline solve does.)
 
 There is intentionally **no node-to-node fallback** (see below).
 
@@ -93,3 +97,4 @@ distance reported is the one the engine actually sees.
 |---|---|
 | Convert a deck (CLI or GUI) | Python 3.8+ only |
 | Use `--auto-gapmin` / `--suggest-gapmin` | `pip install scipy` |
+| Solve modes with `tools/modal_solve.py` | `pip install scipy` |

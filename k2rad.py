@@ -107,6 +107,18 @@ def main() -> int:
              "only; ignored for explicit.",
     )
 
+    parser.add_argument(
+        "--eig",
+        action="store_true",
+        dest="emit_eig",
+        help="Modal decks (*CONTROL_IMPLICIT_EIGENVALUE): emit the classic /EIG "
+             "request + one-shot eigensolve engine for COMMERCIAL Altair Radioss. "
+             "By default the modal deck is converted to the stiffness-export "
+             "recipe instead (/IMPL/PRINT/STIF writes the assembled K matrix; "
+             "solve the modes offline with tools/modal_solve.py), because the "
+             "open-source OpenRadioss engine cannot solve /EIG.",
+    )
+
     # ── Force-control implicit stabilization (all opt-in; default output is
     #    byte-identical when none are given) ──────────────────────────────────
     fc = parser.add_argument_group(
@@ -234,6 +246,7 @@ def main() -> int:
         gapmin_factor=args.gapmin_factor,
         fixpoint_count=args.fixpoint_count,
         deformable_contact_recipe=args.deformable_contact_recipe,
+        emit_eig=args.emit_eig,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

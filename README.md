@@ -95,6 +95,8 @@ common LS-DYNA idiom for symmetry/fixed-DOF)
 
 ### Control / output
 `*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks
+`*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
+(`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
 `*CONTROL_TIMESTEP`, `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
@@ -254,6 +256,94 @@ The recipe is a no-op on a deck without deformable-deformable contact, and the
 
 ---
 
+## Modal analysis (`*CONTROL_IMPLICIT_EIGENVALUE`)
+
+The **open-source OpenRadioss engine cannot solve `/EIG`**: the eigensolver
+kernel (`engine/com/eig/*.F`) is not in the source release — only no-op stubs
+gated behind an undefined `DNC` build macro — so the engine segfaults at init
+(MESSAGE ID 44) the moment `NEIG>0`, and no build configuration can fix that.
+
+So by default k2rad converts a modal deck to the validated **stiffness-export
+recipe** the open-source engine *can* run:
+
+1. **Starter**: the converted model **without `/EIG`**, plus an inert
+   fully-fixed probe rigid body (see below) and — if the deck has no load —
+   a dummy unit `/CLOAD` (the implicit engine refuses to start with no
+   loading data, MESSAGE ID 79; the exported matrix is load-independent).
+2. **Engine**: one linear implicit step — `/IMPL/LINEAR` +
+   `/IMPL/PRINT/STIF` (data line `0 1 0`) + `/IMPL/SOLVER/2` +
+   `/IMPL/MUMPS/AUTOCORE` + `/IMPL/DTINI`. `/IMPL/PRINT/STIF` is an
+   undocumented engine keyword that makes MUMPS write the **exact assembled
+   stiffness matrix** it factorizes to `local_stiffness_matrix_domain0`
+   (run **np=1**).
+3. **Offline eigensolve**: `tools/modal_solve.py` parses the matrix, rebuilds
+   the lumped mass matrix from the source `.k` (identical to the engine's own
+   MS/IN nodal lumping, verified to machine precision), and solves the
+   generalized eigenproblem with `scipy.sparse.linalg.eigsh` (shift-invert):
+
+```bash
+python k2rad.py model.k                       # modal deck detected automatically
+<starter/engine np=1 run>                     # writes local_stiffness_matrix_domain0
+python tools/modal_solve.py run/local_stiffness_matrix_domain0 model.k -n 12
+# static validation (must match an engine /CLOAD run to ~0%):
+python tools/modal_solve.py run/local_stiffness_matrix_domain0 --static 17980 Z 1
+```
+
+Frequencies come out in cycles per deck **time unit** (kg-mm-ms deck → kHz);
+mode shapes are saved to `modes.npz` (`freq`, `phi`, `user_node`, `dof`).
+`modal_solve.py` needs `pip install scipy` (same optional stack as
+`--auto-gapmin`; see `docs/DEPENDENCIES.md`).
+
+**Validated** on the W14 bogie random-fatigue example (17 980 nodes, 4 shell
+parts, 4×100 kg point masses): the exported-K static solve reproduces the
+engine displacements to **0.000 %**, and the 12 eigenfrequencies
+(44.5 – 81.5 Hz) match an independent explicit impulse ring-down FFT.
+
+### Stock-engine caveats (and the 1-line patches)
+
+Two bugs in the stock engine's `/IMPL/PRINT/STIF` path — both worked around
+automatically, both fixed by 1-line patches in
+`engine/source/implicit/imp_mumps.F` (upstream PR candidates):
+
+- **E10.2 precision**: the matrix is printed with `FORMAT(I10,I10,E10.2)` —
+  2 significant digits, ~1 % stiffness rounding, **~0.5–1 % frequency
+  error** (`modal_solve.py` detects this and warns). Patch: change FORMAT
+  label 1003 from `E10.2` to `E24.16` (exact).
+- **np=1 post-print hang**: after `--STIFFNESS MATRIX IS PRINTED--` the
+  engine enters an O(NZ²) duplicate-merge scan meant for multi-domain runs
+  and hangs for hours on millions of entries. **Kill the process — the
+  per-domain file is already complete.** Patch: `IF (NSPMD==1) RETURN`
+  right after the per-domain file is closed.
+
+A locally patched engine with both fixes lives at
+`C:\OpenRadioss_old\source\OpenRadioss-latest-20260520\engine\cbuild_engine_win64_impi_ninja\engine_win64_impi.exe`
+(sources backed up as `*.orig_k2rad`); with it the run is exact and
+terminates normally in seconds.
+
+### `--eig`: classic /EIG output for commercial Radioss
+
+Commercial Altair Radioss ships the real eigensolver, so users with a
+commercial license can pass `--eig` (API: `emit_eig=True`) to get the classic
+output instead: a starter `/EIG` block (whole structure, free eigenmodes) and
+a one-shot `/IMPL/LINEAR` eigensolve engine. This deck **starter-validates
+with 0 errors** but the open-source engine segfaults on it.
+
+### Inert probe rigid body (all implicit decks)
+
+The OpenRadioss implicit engine **segfaults at solver init (MESSAGE ID 44)
+when the model contains no rigid body** — for every implicit flavor and
+independent of contact. Whenever an implicit deck (modal or not) has no
+`/RBODY`, the converter injects an inert probe: 3 nodes far outside the
+model tied into a `/RBODY` with `Mass=Jxx=Jyy=Jzz=1e-3` (zero rigid-body
+inertia is ERROR 274) whose master node is fully fixed (`/BCS 111 111`).
+It adds no equations and has zero effect on results, the eigenmodes, or the
+exported stiffness matrix. For modal decks it also **replaces** the inert
+contact stub, which must not be emitted there — its initial-penetration
+corrections pollute the exported K (on the W14 bogie they shifted the static
+response ~2× and the first eigenfrequency 44.5 → 24.7 Hz).
+
+---
+
 ## Project structure
 
 ```
@@ -267,6 +357,8 @@ k_to_rad_converter/
 │   ├── state.py          # ConversionState data model
 │   ├── gapmin.py         # Suggest /INTER/TYPE7 Gapmin from mesh clearance
 │   └── writer.py         # Generates _0000.rad starter + _0001.rad engine
+├── tools/
+│   └── modal_solve.py    # Offline eigensolver for the modal K-export recipe
 ├── tests/                # Standard-library unittest suite
 ├── tutorial_example/     # Sample .k files
 ├── Ryan_Lee_Examples/    # Larger test models (W2-W7)
