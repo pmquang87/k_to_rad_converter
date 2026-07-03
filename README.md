@@ -302,6 +302,11 @@ mode shapes are saved to `modes.npz` (`freq`, `phi`, `user_node`, `dof`).
 `modal_solve.py` needs `pip install scipy` (same optional stack as
 `--auto-gapmin`; see `docs/DEPENDENCIES.md`).
 
+The eigensolve runs offline in its own Python process, so the engine's
+`<stem>_0001.out` never captures the modal results. `modal_solve.py` therefore
+mirrors everything it prints to a **`modal_solve.log`** next to the matrix file
+(override with `--log PATH`, disable with `--no-log`).
+
 **Validated** on the W14 bogie random-fatigue example (17 980 nodes, 4 shell
 parts, 4×100 kg point masses): the exported-K static solve reproduces the
 engine displacements to **0.000 %**, the first modes match an independent
