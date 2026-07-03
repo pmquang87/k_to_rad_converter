@@ -76,6 +76,7 @@ see docs/DEPENDENCIES.md).  The k2rad package itself is used to parse the .k.
 from __future__ import annotations
 
 import argparse
+import datetime
 import math
 import re
 import sys
@@ -504,6 +505,27 @@ def _print_matrix_info(stiff: StiffnessMatrix) -> None:
               "1003 E10.2 -> E24.16) is exact; see the k2rad README.")
 
 
+class _Tee:
+    """Mirror every write to several streams (terminal + a log file).
+
+    Used to save the console output of a modal solve, which the OpenRadioss
+    engine's own ``*_0001.out`` never captures (the eigensolve runs offline in
+    this separate Python process).
+    """
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="modal_solve",
@@ -536,6 +558,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--sensors", nargs="+", type=int, default=None,
                     metavar="NODE", help="nodes to report in --static mode "
                                          "(default: the loaded node)")
+    ap.add_argument("--log", default=None, metavar="PATH",
+                    help="mirror everything printed to the console into this "
+                         "log file as well (the engine *_0001.out does NOT "
+                         "capture the offline modal output); default: "
+                         "modal_solve.log next to the matrix file")
+    ap.add_argument("--no-log", action="store_true",
+                    help="do not write the console log file")
     args = ap.parse_args(argv)
 
     if not _HAVE_SCIPY:
@@ -543,6 +572,37 @@ def main(argv: Optional[List[str]] = None) -> int:
               "docs/DEPENDENCIES.md)", file=sys.stderr)
         return 1
 
+    # Mirror the whole console session to a log file (the engine *_0001.out
+    # only holds the engine's own run, never this offline eigensolve).
+    old_out, old_err = sys.stdout, sys.stderr
+    log_fh = None
+    log_path = None
+    if not args.no_log:
+        log_path = args.log or str(Path(args.matrix).parent / "modal_solve.log")
+        try:
+            log_fh = open(log_path, "w", encoding="utf-8", newline="")
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cmd_args = sys.argv[1:] if argv is None else argv
+            log_fh.write(f"# modal_solve.py console log  {ts}\n"
+                         f"# args: {' '.join(cmd_args)}\n\n")
+        except OSError as exc:
+            print(f"WARNING: cannot write log file {log_path!r}: {exc}",
+                  file=sys.stderr)
+            log_fh = None
+        if log_fh is not None:
+            sys.stdout = _Tee(old_out, log_fh)
+            sys.stderr = _Tee(old_err, log_fh)
+
+    try:
+        return _run(args)
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+        if log_fh is not None:
+            log_fh.close()
+            print(f"[console log saved: {log_path}]", file=sys.stderr)
+
+
+def _run(args) -> int:
     print(f"Reading stiffness matrix: {args.matrix}")
     stiff = read_stiffness(args.matrix)
     _print_matrix_info(stiff)
