@@ -2828,9 +2828,13 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
     emitted = False
     for load in state.blast_segment_loads:
         src = state.blast_sources.get(load.bid)
+        if src is None and len(state.blast_sources) == 1:
+            # Legacy *LOAD_BLAST / a bid=0 segment card: fall back to the sole
+            # blast source (there is only one implicit charge).
+            src = next(iter(state.blast_sources.values()))
         if src is None:
-            state.warn(f"*LOAD_BLAST_SEGMENT_SET bid={load.bid}: no matching "
-                       "*LOAD_BLAST_ENHANCED — skipped.")
+            state.warn(f"*LOAD_BLAST_SEGMENT[_SET] bid={load.bid}: no matching "
+                       "*LOAD_BLAST[_ENHANCED] — skipped.")
             continue
         segset = state.segment_sets.get(load.ssid)
         if segset is None or not segset.segments:

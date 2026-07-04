@@ -4281,5 +4281,125 @@ class BlastLoadTests(unittest.TestCase):
         self.assertNotEqual(self._ground_id(starter), 0)
 
 
+# ── Legacy blast (*LOAD_BLAST / *LOAD_BLAST_SEGMENT) ─────────────────────────
+
+_LEGACY_MESH = """\
+*KEYWORD
+*TITLE
+Legacy blast test
+*CONTROL_TERMINATION
+     0.006
+*NODE
+       1       0.0       0.0       0.0
+       2       1.0       0.0       0.0
+       3       1.0       1.0       0.0
+       4       0.0       1.0       0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+target
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         2
+      0.05      0.05      0.05      0.05
+*MAT_PLASTIC_KINEMATIC
+         1    7500.02.10000E11       0.31.200000E91.10000E10       0.0
+       0.0       0.0    0.0015       0.0
+"""
+
+LEGACY_BLAST_K = _LEGACY_MESH + """\
+*LOAD_BLAST
+      50.0       2.5       0.0       5.0       0.0         2         2
+*LOAD_BLAST_SEGMENT_SET
+         7         1
+*SET_SEGMENT
+         1
+         1         2         3         4
+*END
+"""
+
+PERSEG_BLAST_K = _LEGACY_MESH + """\
+*LOAD_BLAST_ENHANCED
+         1      50.0       2.5       0.0       5.0       0.0         2         1
+       0.0       0.0       0.0       0.0         01.00000E20         0
+*LOAD_BLAST_SEGMENT
+         1         1         2         3         4
+*END
+"""
+
+
+class LegacyBlastLoadTests(unittest.TestCase):
+    """Legacy CONWEP *LOAD_BLAST + per-segment *LOAD_BLAST_SEGMENT → /LOAD/PBLAST."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kwargs)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    # ── legacy *LOAD_BLAST ───────────────────────────────────────────
+    def test_legacy_load_blast_creates_source(self):
+        state = self._state(LEGACY_BLAST_K)
+        self.assertEqual(len(state.blast_sources), 1)
+        src = next(iter(state.blast_sources.values()))
+        self.assertAlmostEqual(src.m, 50.0)
+        self.assertAlmostEqual(src.xbo, 2.5)
+        self.assertAlmostEqual(src.zbo, 5.0)
+        self.assertEqual(src.unit, 2)
+        self.assertEqual(src.blast, 2)                 # ISURF passed through
+        self.assertEqual(state.blast_unit_system, ("kg", "m", "s"))
+
+    def test_legacy_blast_segment_set_fallback_emits_pblast(self):
+        # The *LOAD_BLAST_SEGMENT_SET names bid=7, which does NOT match the
+        # legacy source's synthetic bid; the sole-source fallback still emits.
+        _r, starter = self._convert(LEGACY_BLAST_K)
+        self.assertIn("/LOAD/PBLAST/", starter)
+        self.assertIn("/SURF/SEG/", starter)
+
+    def test_legacy_blast_verify_warning(self):
+        result, _s = self._convert(LEGACY_BLAST_K)
+        self.assertTrue(any("legacy" in w.lower() and "burst" in w.lower()
+                            for w in result.warnings))
+
+    # ── per-segment *LOAD_BLAST_SEGMENT ──────────────────────────────
+    def test_per_segment_builds_segment_set(self):
+        state = self._state(PERSEG_BLAST_K)
+        self.assertEqual(len(state.blast_segment_loads), 1)
+        load = state.blast_segment_loads[0]
+        self.assertEqual(load.bid, 1)                  # matches _ENHANCED bid
+        segset = state.segment_sets[load.ssid]
+        self.assertEqual(segset.segments, [[1, 2, 3, 4]])
+
+    def test_per_segment_emits_pblast_surf(self):
+        _r, starter = self._convert(PERSEG_BLAST_K)
+        self.assertIn("/LOAD/PBLAST/", starter)
+        # the /SURF/SEG carries the inline segment nodes 1 2 3 4 (the data line
+        # right after the "#   seg_ID ..." column header)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("#   seg_ID"))
+        self.assertEqual(lines[i + 1].split()[1:5], ["1", "2", "3", "4"])
+
+    def test_per_segment_triangle_strips_zero(self):
+        deck = PERSEG_BLAST_K.replace(
+            "         1         1         2         3         4",
+            "         1         1         2         3         0")
+        state = self._state(deck)
+        load = state.blast_segment_loads[0]
+        self.assertEqual(state.segment_sets[load.ssid].segments, [[1, 2, 3]])
+
+
 if __name__ == "__main__":
     unittest.main()

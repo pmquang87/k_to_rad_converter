@@ -1444,6 +1444,83 @@ def handle_load_blast_segment_set(block: Block, state: ConversionState) -> None:
             LoadBlastSegmentSet(bid, ssid, alepid, sfnrb, scalep))
 
 
+def handle_load_blast(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST (legacy CONWEP) → a single blast source for /LOAD/PBLAST.
+
+    Card 1: wgt xbo ybo zbo tbo iunit isurf
+    Card 2: cfm cfl cft cfp nidbo death negphs   (optional)
+
+    The original *LOAD_BLAST carries no BID (there is one implicit charge), so a
+    synthetic bid is assigned and ``blast = isurf`` is stored, letting it flow
+    through the shipped /LOAD/PBLAST writer exactly like *LOAD_BLAST_ENHANCED.
+    The loaded segments come from a following *LOAD_BLAST_SEGMENT[_SET]. The
+    legacy surface/air flag numbering differs from *LOAD_BLAST_ENHANCED, so the
+    burst type is flagged for the user to verify.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        state.warn("*LOAD_BLAST: incomplete Card 1 — skipped")
+        return
+    wgt   = to_float(f[0])
+    xbo   = to_float(f[1]) if len(f) > 1 else 0.0
+    ybo   = to_float(f[2]) if len(f) > 2 else 0.0
+    zbo   = to_float(f[3]) if len(f) > 3 else 0.0
+    tbo   = to_float(f[4]) if len(f) > 4 else 0.0
+    iunit = to_int(f[5])   if len(f) > 5 else 2
+    isurf = to_int(f[6])   if len(f) > 6 else 2
+    f2     = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    death  = to_float(f2[5]) if len(f2) > 5 else 1e20
+    negphs = to_int(f2[6])   if len(f2) > 6 else 0
+    bid = state.next_id()
+    state.blast_sources[bid] = LoadBlastEnhanced(
+        bid=bid, m=wgt, xbo=xbo, ybo=ybo, zbo=zbo, tbo=tbo,
+        unit=iunit, blast=isurf, death=death, negphs=negphs)
+    us = _blast_unit_system(iunit)
+    if us is not None:
+        state.blast_unit_system = us
+    else:
+        state.warn(
+            f"*LOAD_BLAST: IUNIT={iunit} has no automatic OpenRadioss unit "
+            "mapping (only 2 kg/m/s and 4 g/cm/µs are auto-mapped); set /BEGIN "
+            "via convert(units=...) or /LOAD/PBLAST pressures will be wrong.")
+    state.warn(
+        "*LOAD_BLAST (legacy) mapped to /LOAD/PBLAST with Exp_data from ISURF="
+        f"{isurf} — the legacy surface/air-burst flag numbering differs from "
+        "*LOAD_BLAST_ENHANCED; verify the burst type (surface vs free-air).")
+
+
+def handle_load_blast_segment(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST_SEGMENT → apply a blast source to ad-hoc segments (N1..N4).
+
+    Card (one per segment): bid n1 n2 n3 n4. Unlike *LOAD_BLAST_SEGMENT_SET
+    (which names a *SET_SEGMENT), this lists the segment nodes inline. Segments
+    are grouped by bid into a synthesized segment set so the shipped /SURF/SEG +
+    /LOAD/PBLAST writer is reused. bid=0 / an unmatched bid falls back at write
+    time to the sole blast source when there is exactly one.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    by_bid: dict = {}
+    for i in range(offset, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 4:
+            continue
+        bid = to_int(f[0])
+        nodes = [to_int(f[j]) for j in range(1, 5)]
+        while len(nodes) > 3 and nodes[-1] == 0:
+            nodes.pop()
+        if len(nodes) >= 3 and all(n > 0 for n in nodes):
+            by_bid.setdefault(bid, []).append(nodes)
+    for bid, segs in by_bid.items():
+        ssid = state.next_id()
+        state.segment_sets[ssid] = SegmentSet(ssid, f"blast_seg_bid{bid}", segs)
+        state.blast_segment_loads.append(LoadBlastSegmentSet(bid, ssid))
+
+
 def handle_mat_add_fatigue(block: Block, state: ConversionState) -> None:
     """*MAT_ADD_FATIGUE: S-N data per material — offline post-processing only.
 
@@ -1753,6 +1830,8 @@ HANDLERS = {
     "LOAD_BODY_Z":                            handle_load_body,
     "LOAD_BLAST_ENHANCED":                    handle_load_blast_enhanced,
     "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,
+    "LOAD_BLAST_SEGMENT":                     handle_load_blast_segment,
+    "LOAD_BLAST":                             handle_load_blast,
     "MAT_ADD_EROSION":                        handle_skip,
     "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
