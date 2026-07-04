@@ -3783,7 +3783,7 @@ def _make_engine_header(state: ConversionState) -> List[str]:
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
-             or state.db_matsum_dt or 1e-3)
+             or state.db_matsum_dt or state.db_spcforc_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -3806,6 +3806,12 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/VECT/CONT")
     lines.append("/ANIM/VECT/CONT2")
     lines.append("/ANIM/VECT/PCONT")
+    if state.db_spcforc_dt and state.bcs_spcs:
+        # *DATABASE_SPCFORC: constraint-reaction nodal vectors (the /TH/NODE
+        # REAC* channels carry the per-node time history; see writer starter).
+        lines.append("/ANIM/VECT/FREAC")
+        if _spc_constrains_rotations(state):
+            lines.append("/ANIM/VECT/MREAC")
 
     # ── Shell tensor outputs (membrane / upper / lower) ───────────
     lines.append("/ANIM/SHELL/TENS/STRESS/MEMB")
@@ -4316,6 +4322,73 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
     return lines
 
 
+def _spc_constrains_rotations(state: ConversionState) -> bool:
+    """True when any *BOUNDARY_SPC constrains a rotational DOF — gates the
+    REACXX/YY/ZZ /TH channels and the /ANIM/VECT/MREAC moment vectors."""
+    return any(bc.dofrx or bc.dofry or bc.dofrz for bc in state.bcs_spcs)
+
+
+def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """*DATABASE_SPCFORC → /TH/NODE with REACX/Y/Z (+REACXX/YY/ZZ) on every
+    /BCS-constrained node.
+
+    LS-DYNA's spcforc file lists the SPC reaction force (and, for rotational
+    constraints, moment) per constrained node. OpenRadioss computes exactly
+    that when reaction output is requested: /TH/NODE REAC* (or /ANIM/VECT/
+    FREAC) switches the engine's constraint-reaction assembly on (engine
+    reactions.F), so REACX/Y/Z on the /BCS node groups IS the spcforc
+    content, written to the T01 at the /TFILE frequency. Rigid-body member
+    nodes are mapped to the /RBODY master node — the /BCS acts there and the
+    reaction is assembled there. The whole-model nodal-field view is added
+    engine-side as /ANIM/VECT/FREAC (+MREAC). Emitted only when the deck
+    requests *DATABASE_SPCFORC, so other decks are unchanged.
+    """
+    if not state.db_spcforc_dt:
+        return []
+    if not state.bcs_spcs:
+        state.warn(
+            "*DATABASE_SPCFORC requested but the deck has no *BOUNDARY_SPC — "
+            "no node is SPC-constrained, so there is no reaction to output "
+            "(no /TH/NODE emitted).")
+        return []
+    node_to_ind = {}
+    for pid, info in rbody_info.items():
+        for node in info["nodes"]:
+            node_to_ind[node] = info["ind_node"]
+    mapped: Set[int] = set()
+    for bc in state.bcs_spcs:
+        for n in state.node_sets.get(bc.nsid, ("", []))[1]:
+            mapped.add(node_to_ind.get(n, n))
+    nodes = sorted(mapped)
+    if not nodes:
+        state.warn(
+            "*DATABASE_SPCFORC: every *BOUNDARY_SPC node set is empty — "
+            "no /TH/NODE reaction output emitted.")
+        return []
+    if len(nodes) > 1000:
+        state.warn(
+            f"*DATABASE_SPCFORC: {len(nodes)} SPC-constrained nodes get REAC* "
+            "/TH channels (matching LS-DYNA's per-node spcforc output) — the "
+            "T01 file will be correspondingly large. Trim the /TH/NODE block "
+            "by hand if you only need a subset.")
+    th_vars = ["REACX", "REACY", "REACZ"]
+    if _spc_constrains_rotations(state):
+        th_vars += ["REACXX", "REACYY", "REACZZ"]
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_SPCFORC -> SPC reaction force per /BCS node):", HDR,
+        f"/TH/NODE/{th_id}",
+        "TH_spc_reactions",
+        "#  reaction force (REACX/Y/Z) [+ moment (REACXX/YY/ZZ)] per constrained node",
+        # TH variable names are read in fixed 10-char columns (not free-format),
+        # so each keyword must occupy its own field.
+        "".join(v.rjust(10) for v in th_vars),
+    ]
+    lines += [_i(nd) for nd in nodes]
+    lines.append(HDR)
+    return lines
+
+
 def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     """Implicit guard: fix nodes attached to no element and no rigid body.
 
@@ -4528,6 +4601,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_starter_th(state))
     sections.append(_make_starter_th_inter(state))
     sections.append(_make_starter_th_node_reac(state, rbody_info))
+    sections.append(_make_starter_th_node_spc(state, rbody_info))
     sections.append(_make_freq_domain_notes(state))
     sections.append(_make_skipped_comment(state))
     sections.append(["/END", HDR])

@@ -4806,5 +4806,119 @@ class RigidCogMasterTests(unittest.TestCase):
         self.assertNotIn("/ADMAS", starter)
 
 
+SPCFORC_K = """\
+*KEYWORD
+*TITLE
+SPC reaction output test
+*CONTROL_TERMINATION
+     0.006
+*NODE
+       1       0.0       0.0       0.0
+       2       1.0       0.0       0.0
+       3       1.0       1.0       0.0
+       4       0.0       1.0       0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+plate
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         2
+      0.05      0.05      0.05      0.05
+*MAT_PLASTIC_KINEMATIC
+         1    7500.02.10000E11       0.31.200000E91.10000E10       0.0
+       0.0       0.0    0.0015       0.0
+*SET_NODE_LIST
+         1
+         1         2
+*BOUNDARY_SPC_SET
+         1         0         1         1         1         0         0         0
+*DATABASE_SPCFORC
+2.00000E-5         0         0         1
+*END
+"""
+
+
+class DatabaseSpcforcTests(unittest.TestCase):
+    """*DATABASE_SPCFORC → /TH/NODE REACX/Y/Z on /BCS nodes + /ANIM/VECT/FREAC."""
+
+    def _convert(self, deck=SPCFORC_K, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kwargs)
+            starter = Path(result.starter_path).read_text()
+            engine = Path(result.engine_path).read_text()
+        return result, starter, engine
+
+    @staticmethod
+    def _th_block(starter):
+        """(var_line, node_lines) of the TH_spc_reactions /TH/NODE block."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.strip() == "TH_spc_reactions")
+        var_line = lines[i + 2]                    # i+1 is the comment line
+        node_lines = []
+        for ln in lines[i + 3:]:
+            if ln.startswith(("#", "/")):
+                break
+            node_lines.append(ln.strip())
+        return var_line, node_lines
+
+    def test_spcforc_parsed_and_not_skipped(self):
+        result, _s, _e = self._convert()
+        self.assertNotIn("DATABASE_SPCFORC", result.skipped_keywords)
+
+    def test_spcforc_emits_th_node_reac(self):
+        _r, starter, _e = self._convert()
+        var_line, node_lines = self._th_block(starter)
+        # fixed 10-char variable fields
+        self.assertEqual(var_line[0:10].strip(), "REACX")
+        self.assertEqual(var_line[10:20].strip(), "REACY")
+        self.assertEqual(var_line[20:30].strip(), "REACZ")
+        # translation-only SPC → no moment channels
+        self.assertNotIn("REACXX", var_line)
+        self.assertEqual(node_lines, ["1", "2"])
+
+    def test_spcforc_rotational_adds_moment_channels(self):
+        deck = SPCFORC_K.replace(
+            "         1         0         1         1         1         0         0         0",
+            "         1         0         1         1         1         1         1         1")
+        _r, starter, engine = self._convert(deck)
+        var_line, _nodes = self._th_block(starter)
+        self.assertEqual(var_line[30:40].strip(), "REACXX")
+        self.assertEqual(var_line[50:60].strip(), "REACZZ")
+        self.assertIn("/ANIM/VECT/MREAC", engine)
+
+    def test_spcforc_engine_freac_and_tfile_dt(self):
+        _r, _s, engine = self._convert()
+        self.assertIn("/ANIM/VECT/FREAC", engine)
+        # translation-only SPC → no moment reaction vectors
+        self.assertNotIn("/ANIM/VECT/MREAC", engine)
+        # the *DATABASE_SPCFORC dt reaches /TFILE (no other TH request here)
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_spcforc_without_spc_warns_and_emits_nothing(self):
+        deck = SPCFORC_K.replace("*BOUNDARY_SPC_SET\n"
+                                 "         1         0         1         1"
+                                 "         1         0         0         0\n", "")
+        result, starter, engine = self._convert(deck)
+        self.assertNotIn("TH_spc_reactions", starter)
+        self.assertNotIn("/ANIM/VECT/FREAC", engine)
+        self.assertTrue(any("*DATABASE_SPCFORC" in w and "BOUNDARY_SPC" in w
+                            for w in result.warnings))
+
+    def test_no_spcforc_keyword_leaves_output_unchanged(self):
+        deck = SPCFORC_K.replace("*DATABASE_SPCFORC\n"
+                                 "2.00000E-5         0         0         1\n", "")
+        _r, starter, engine = self._convert(deck)
+        self.assertNotIn("TH_spc_reactions", starter)
+        self.assertNotIn("REACX", starter)
+        self.assertNotIn("/ANIM/VECT/FREAC", engine)
+
+
 if __name__ == "__main__":
     unittest.main()

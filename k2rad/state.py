@@ -1029,6 +1029,8 @@ class ConversionState:
         self.db_rwforc_dt: float = 0.0
         self.db_secforc_dt: float = 0.0
         self.db_sleout_dt: float = 0.0
+        # *DATABASE_SPCFORC → /TH/NODE REAC* on the /BCS nodes + /ANIM/VECT/FREAC
+        self.db_spcforc_dt: float = 0.0
         self.db_extent_binary: Optional[DbExtentBinary] = None
         # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
         self.db_freq_binary: Dict[str, DbFreqBinary] = {}

@@ -1284,6 +1284,14 @@ def handle_database_sleout(block: Block, state: ConversionState) -> None:
     state.db_sleout_dt = _handle_db_dt(block)
 
 
+def handle_database_spcforc(block: Block, state: ConversionState) -> None:
+    """*DATABASE_SPCFORC (SPC reaction forces) → /TH/NODE with REACX/Y/Z
+    (+REACXX/YY/ZZ) on the /BCS-constrained nodes + engine /ANIM/VECT/FREAC.
+    The writer emits both; requesting either makes the OpenRadioss engine
+    compute constraint reactions (engine reactions.F, COMPTREAC)."""
+    state.db_spcforc_dt = _handle_db_dt(block)
+
+
 def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
@@ -2080,7 +2088,7 @@ HANDLERS = {
     "DATABASE_RWFORC":                        handle_database_rwforc,
     "DATABASE_SECFORC":                       handle_database_secforc,
     "DATABASE_SLEOUT":                        handle_database_sleout,
-    "DATABASE_SPCFORC":                       handle_skip,
+    "DATABASE_SPCFORC":                       handle_database_spcforc,
     "DATABASE_NCFORC":                        handle_skip,
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
