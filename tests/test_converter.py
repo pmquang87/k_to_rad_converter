@@ -2291,6 +2291,24 @@ class GuiInputParsingTests(unittest.TestCase):
             deformable_contact_recipe=True)
         self.assertTrue(on["deformable_contact_recipe"])
 
+    def test_build_kwargs_blast_ground(self):
+        common = dict(ground_springs=False, ground_spring_k_text="",
+                      inter_gapmin_text="", soften_stfac_text="")
+        default = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), **common)
+        self.assertEqual(default["blast_ground"], "auto")          # default
+        for mode in ("none", "Y", "-Z"):
+            kw = self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), blast_ground=mode, **common)
+            self.assertEqual(kw["blast_ground"], mode)
+
+    def test_build_kwargs_blast_ground_rejects_bad(self):
+        with self.assertRaises(ValueError):
+            self.g.build_convert_kwargs(
+                self.kpath, "", ("Mg", "mm", "s"), ground_springs=False,
+                ground_spring_k_text="", inter_gapmin_text="",
+                soften_stfac_text="", blast_ground="up")
+
     def test_build_kwargs_missing_file_raises(self):
         with self.assertRaises(ValueError):
             self.g.build_convert_kwargs(
@@ -3995,6 +4013,272 @@ class ModalRandomResponseTests(unittest.TestCase):
             state, 1, 1000.0, "g2hz", 9810.0, "deck")
         self.assertAlmostEqual(float(sa_g(np.array([100.0]))[0]),
                                0.3 * 9810.0 ** 2)
+
+
+# ── Blast loading (*LOAD_BLAST_ENHANCED / _SEGMENT_SET / *SET_SEGMENT) ────────
+
+BLAST_K = """\
+*KEYWORD
+*TITLE
+Blast vehicle test
+*CONTROL_TERMINATION
+     0.006
+*NODE
+       1       0.0       0.0       0.0
+       2       1.0       0.0       0.0
+       3       1.0       1.0       0.0
+       4       0.0       1.0       0.0
+       5       0.0       0.0       1.0
+       6       1.0       0.0       1.0
+       7       1.0       1.0       1.0
+       8       0.0       1.0       1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+target plate
+         1         1         1
+*PART
+ground plane
+         2         1         2
+*SECTION_SHELL
+         1         2       1.0         2
+      0.05      0.05      0.05      0.05
+*MAT_PLASTIC_KINEMATIC
+         1    7500.02.10000E11       0.31.200000E91.10000E10       0.0
+       0.0       0.0    0.0015       0.0
+*MAT_RIGID
+         2    7850.02.10000E11       0.3
+       0.0         0         0
+*DEFINE_CURVE_TITLE
+Weight
+         1         0       1.0       1.0       0.0       0.0
+                 0.0                 9.8
+                 1.0                 9.8
+*SET_SEGMENT
+         1       0.0       0.0       0.0       0.0MECH               0
+         1         2         3         4       0.0       0.0       0.0       0.0
+*LOAD_BLAST_SEGMENT_SET
+         1         1         0       0.0       1.0
+*LOAD_BLAST_ENHANCED
+         1      50.0       2.5       0.0       5.0       0.0         2         1
+       0.0       0.0       0.0       0.0         01.00000E20         0
+*LOAD_BODY_Y
+         1      -1.0         0       0.0       0.0       0.0         0
+*DATABASE_BINARY_BLSTFOR
+2.00000E-5         0         0         0         0
+*END
+"""
+
+
+class BlastLoadTests(unittest.TestCase):
+    """LS-DYNA blast keywords → OpenRadioss /LOAD/PBLAST + /SURF/SEG + /GRAV."""
+
+    def _state(self, deck=BLAST_K):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck=BLAST_K, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kwargs)
+            starter = Path(result.starter_path).read_text()
+            engine = Path(result.engine_path).read_text()
+        return result, starter, engine
+
+    @staticmethod
+    def _data_after(starter, prefix):
+        """Non-comment, non-keyword lines after the first block whose keyword
+        line starts with *prefix* (the title line is included as index 0)."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(prefix))
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    # ── handler-level ────────────────────────────────────────────────
+    def test_set_segment_parsed(self):
+        state = self._state()
+        self.assertIn(1, state.segment_sets)
+        self.assertEqual(state.segment_sets[1].segments, [[1, 2, 3, 4]])
+
+    def test_set_segment_triangle_strips_trailing_zero(self):
+        deck = BLAST_K.replace(
+            "         1         2         3         4       0.0       0.0       0.0       0.0",
+            "         1         2         3         0       0.0       0.0       0.0       0.0")
+        state = self._state(deck)
+        self.assertEqual(state.segment_sets[1].segments, [[1, 2, 3]])
+
+    def test_load_blast_enhanced_parsed(self):
+        state = self._state()
+        self.assertIn(1, state.blast_sources)
+        src = state.blast_sources[1]
+        self.assertAlmostEqual(src.m, 50.0)
+        self.assertAlmostEqual(src.xbo, 2.5)
+        self.assertAlmostEqual(src.zbo, 5.0)
+        self.assertEqual(src.unit, 2)
+        self.assertEqual(src.blast, 1)
+        # UNIT=2 → kg, m, s (the TM5-1300 blast formula is unit-dependent)
+        self.assertEqual(state.blast_unit_system, ("kg", "m", "s"))
+
+    def test_load_blast_segment_set_parsed(self):
+        state = self._state()
+        self.assertEqual(len(state.blast_segment_loads), 1)
+        load = state.blast_segment_loads[0]
+        self.assertEqual((load.bid, load.ssid), (1, 1))
+
+    # ── emission-level ───────────────────────────────────────────────
+    def test_begin_units_from_blast_flag(self):
+        # /BEGIN input+work unit lines must both read kg / m / s so the
+        # empirical blast pressures come out right.
+        _r, starter, _e = self._convert()
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/BEGIN")
+        # /BEGIN, title, version, input-units, work-units
+        self.assertEqual(lines[i + 3].split(), ["kg", "m", "s"])
+        self.assertEqual(lines[i + 4].split(), ["kg", "m", "s"])
+
+    def test_explicit_units_override_not_clobbered(self):
+        # An explicit caller units= must win over the blast-flag default.
+        _r, starter, _e = self._convert(units=("g", "cm", "micros"))
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/BEGIN")
+        self.assertEqual(lines[i + 3].split(), ["g", "cm", "micros"])
+
+    def test_pblast_card_fields(self):
+        _r, starter, _e = self._convert()
+        # the /LOAD/PBLAST surface is a /SURF/SEG carrying the segment set
+        surf = self._data_after(starter, "/SURF/SEG/")
+        self.assertEqual(surf[1].split(), ["1", "1", "2", "3", "4"])  # seg n1..n4
+        surf_id = starter.splitlines()[
+            next(k for k, ln in enumerate(starter.splitlines())
+                 if ln.startswith("/SURF/SEG/"))].rsplit("/", 1)[1]
+
+        data = self._data_after(starter, "/LOAD/PBLAST/")
+        card1, card2 = data[1], data[2]        # data[0] is the title line
+        self.assertEqual(card1[0:10].strip(), surf_id)     # surf_ID
+        self.assertEqual(card1[10:20].strip(), "2")        # Exp_data (surface burst)
+        self.assertEqual(card1[30:40].strip(), "100")      # Ndt
+        self.assertEqual(card1[40:50].strip(), "2")        # IZ
+        self.assertEqual(len(card1), 100)
+        self.assertAlmostEqual(float(card2[0:20]), 2.5)    # Xdet
+        self.assertAlmostEqual(float(card2[40:60]), 5.0)   # Zdet
+        self.assertAlmostEqual(float(card2[80:100]), 50.0)  # WTNT
+
+    def test_blast_type2_maps_to_free_air_exp_data1(self):
+        # LS-DYNA BLAST=2 (spherical free-air) → OpenRadioss Exp_data=1.
+        deck = BLAST_K.replace(
+            "         1      50.0       2.5       0.0       5.0       0.0         2         1",
+            "         1      50.0       2.5       0.0       5.0       0.0         2         2")
+        _r, starter, _e = self._convert(deck)
+        card1 = self._data_after(starter, "/LOAD/PBLAST/")[1]
+        self.assertEqual(card1[10:20].strip(), "1")        # Exp_data free-air
+
+    def test_load_body_becomes_grav(self):
+        _r, starter, _e = self._convert()
+        self.assertIn("/GRAV/", starter)
+        grav = self._data_after(starter, "/GRAV/")
+        # fct_IDT(10) Dir(10) skew(10) sens(10) grnod(10) Ascale(20) Fscale(20)
+        card = grav[1]
+        self.assertEqual(card[10:20].strip(), "Y")         # direction
+        self.assertEqual(card[0:10].strip(), "1")          # curve id
+
+    def test_blstfor_skipped_without_error(self):
+        result, _s, _e = self._convert()
+        self.assertIn("DATABASE_BINARY_BLSTFOR", result.skipped_keywords)
+
+    def test_explicit_engine_has_no_implicit(self):
+        _r, _s, engine = self._convert()
+        self.assertIn("/RUN/", engine)
+        self.assertNotIn("/IMPL", engine)
+
+    def test_exp_data_mapping_via_writer(self):
+        # Direct check of the surface-burst → Exp_data=2 / free-air → 1 map
+        # without a full convert, exercising _make_blast_loads.
+        from k2rad.writer import _make_blast_loads
+        from k2rad.state import (SegmentSet, LoadBlastEnhanced,
+                                 LoadBlastSegmentSet)
+
+        def emit(blast):
+            st = ConversionState()
+            st.segment_sets[1] = SegmentSet(1, "", [[1, 2, 3, 4]])
+            st.blast_sources[1] = LoadBlastEnhanced(
+                bid=1, m=10.0, xbo=0.0, ybo=0.0, zbo=1.0, tbo=0.0,
+                unit=2, blast=blast)
+            st.blast_segment_loads.append(LoadBlastSegmentSet(1, 1))
+            return "\n".join(_make_blast_loads(st))
+
+        def pblast_card1(text):
+            lines = text.splitlines()
+            j = next(k for k, ln in enumerate(lines)
+                     if ln.startswith("#  surf_ID"))
+            return lines[j + 1]
+
+        self.assertIn("/LOAD/PBLAST/", emit(1))
+        # surface burst → Exp_data 2, free-air → 1 (col 11-20 of card 1)
+        self.assertEqual(pblast_card1(emit(1))[10:20].strip(), "2")
+        self.assertEqual(pblast_card1(emit(2))[10:20].strip(), "1")
+
+    # ── ground plane (surface-burst reflecting plane) ────────────────
+    @staticmethod
+    def _ground_id(starter):
+        lines = starter.splitlines()
+        j = next(k for k, ln in enumerate(lines) if ln.startswith("#Ground_ID"))
+        return int(lines[j + 1].strip())
+
+    @staticmethod
+    def _plane_normal(starter):
+        """(M1 - M) of the emitted /SURF/PLANE."""
+        data = BlastLoadTests._data_after(starter, "/SURF/PLANE/")
+        m = [float(x) for x in data[1].split()]
+        m1 = [float(x) for x in data[2].split()]
+        return tuple(round(a - b, 6) for a, b in zip(m1, m))
+
+    def test_infer_up_axis(self):
+        from k2rad.writer import _infer_blast_up_axis
+        bbox = ((1.1, 4.1), (0.03, 1.96), (1.87, 8.32))
+        # charge below the target in Y → up = +Y
+        self.assertEqual(_infer_blast_up_axis((2.5, 0.0, 5.0), bbox), "Y")
+        # charge above in Y → up = -Y
+        self.assertEqual(_infer_blast_up_axis((2.5, 5.0, 5.0), bbox), "-Y")
+        # charge within the target range on every axis → no inference
+        self.assertIsNone(_infer_blast_up_axis((2.5, 1.0, 5.0), bbox))
+
+    def test_auto_ground_plane_synthesized(self):
+        # Default "auto" emits a /SURF/PLANE and points the PBLAST Ground_ID at it.
+        _r, starter, _e = self._convert()
+        self.assertIn("/SURF/PLANE/", starter)
+        surf_id = int(starter.splitlines()[
+            next(k for k, ln in enumerate(starter.splitlines())
+                 if ln.startswith("/SURF/PLANE/"))].rsplit("/", 1)[1])
+        self.assertEqual(self._ground_id(starter), surf_id)
+        # normal is an axis-aligned unit vector (M→M1)
+        nrm = self._plane_normal(starter)
+        self.assertEqual(sum(abs(c) for c in nrm), 1.0)
+
+    def test_ground_none_disables_plane(self):
+        _r, starter, _e = self._convert(blast_ground="none")
+        self.assertNotIn("/SURF/PLANE/", starter)
+        self.assertEqual(self._ground_id(starter), 0)
+
+    def test_ground_forced_axis(self):
+        _r, starter, _e = self._convert(blast_ground="Y")
+        self.assertIn("/SURF/PLANE/", starter)
+        self.assertEqual(self._plane_normal(starter), (0.0, 1.0, 0.0))
+        self.assertNotEqual(self._ground_id(starter), 0)
 
 
 if __name__ == "__main__":

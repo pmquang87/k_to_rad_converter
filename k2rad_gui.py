@@ -91,7 +91,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          auto_gapmin: bool = False,
                          gapmin_factor_text: str = "",
                          fixpoint_count_text: str = "",
-                         deformable_contact_recipe: bool = False) -> dict:
+                         deformable_contact_recipe: bool = False,
+                         blast_ground: str = "auto") -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -154,6 +155,13 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["deformable_contact_recipe"] = bool(deformable_contact_recipe)
 
+    bg = (blast_ground or "auto").strip() or "auto"
+    if bg.lower() not in {"auto", "none", "x", "y", "z", "-x", "-y", "-z"}:
+        raise ValueError(
+            "Blast ground must be one of auto / none / X / Y / Z / -X / -Y / -Z, "
+            f"got {bg!r}.")
+    kwargs["blast_ground"] = bg
+
     return kwargs
 
 
@@ -183,6 +191,7 @@ class ConverterGUI:
         self.u_time = tk.StringVar(value="s")
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="100")
+        self.blast_ground = tk.StringVar(value="auto")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -229,6 +238,16 @@ class ConverterGUI:
         ttk.Entry(fp, textvariable=self.fixpoint_count, width=6).pack(side="left", padx=3)
         ttk.Label(fp, text="evenly spaced output milestones the implicit time step lands on "
                            "(1–100, default 100; 0 = off; implicit decks only)",
+                  foreground="gray").pack(side="left")
+
+        bg = ttk.Frame(io)
+        bg.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(bg, text="Blast ground plane:").pack(side="left")
+        ttk.Combobox(bg, textvariable=self.blast_ground, width=7, state="readonly",
+                     values=["auto", "none", "X", "Y", "Z", "-X", "-Y", "-Z"]
+                     ).pack(side="left", padx=3)
+        ttk.Label(bg, text="reflecting ground for a surface-burst /LOAD/PBLAST — auto infers the "
+                           "vertical axis; none = solver default (⊥Z); X/Y/Z force it (blast decks only)",
                   foreground="gray").pack(side="left")
 
         # ── Force-control stabilization ─────────────────────────────────────
@@ -358,6 +377,7 @@ class ConverterGUI:
                 gapmin_factor_text=self.gapmin_factor.get(),
                 fixpoint_count_text=self.fixpoint_count.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
+                blast_ground=self.blast_ground.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -447,6 +467,8 @@ class ConverterGUI:
             bits.append(f"soften Stfac={kwargs['soften_stfac']:g}")
         if kwargs.get("deformable_contact_recipe"):
             bits.append("deformable-deformable contact recipe")
+        if kwargs.get("blast_ground", "auto") != "auto":
+            bits.append(f"blast ground={kwargs['blast_ground']}")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
