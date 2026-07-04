@@ -40,8 +40,8 @@ OpenRadioss FSI example `Drop_Container/fsi_drop_container_0000.rad`
 | `*INITIAL_DETONATION` | `/DFS/DETPOINT` | **added** | JWL lighting point/time |
 | `*ALE_MULTI-MATERIAL_GROUP` | `/MAT/LAW51` (MULTIMAT) submat order | **added** | AMMG order = phase order |
 | `*SECTION_SOLID` ELFORM 11/12 | `/PROP/SOLID` Iale=1 | **added** | ALE solid formulation |
-| `*CONTROL_ALE` | `/ALE/…` + engine notes | partial | advection/euler flags, warn |
-| `*INITIAL_VOLUME_FRACTION_GEOMETRY` | `/INIVOL` (+ `/SURF/PLANE`) | **added** (plane) | plane container only |
+| `*CONTROL_ALE` | `/ALE/…` + engine notes | partial (note) | advection/euler flags, warn |
+| `*INITIAL_VOLUME_FRACTION_GEOMETRY` | `/INIVOL` (+ `/SURF/PLANE`) | recognise + warn | container geometry needs a manual `/SURF` |
 | `*INITIAL_VOLUME_FRACTION` (set) | `/INIVOL` | warn/skip | needs per-element fractions |
 | `*CONSTRAINED_LAGRANGE_IN_SOLID` | `/INTER/TYPE18` | **added** | FSI penalty coupling |
 | `*BOUNDARY_NON_REFLECTING` | `/EBCS/NRF` | **added** | non-reflecting frontier |
@@ -165,9 +165,11 @@ Reader spec `MAT/mat_EOS.cfg` `FORMAT(radioss2022)` gives every EOS option's car
   convention. Sign of `S1..S3` identical.
 * **Ideal gas:** LS-DYNA `*EOS_IDEAL_GAS` is parameterised by `CV0, CP0` (heat
   capacities) and initial temperature, **not** γ. Radioss `/EOS/IDEAL-GAS` wants
-  `Gamma, P0, PSH, T0, RHO_0`. Conversion: **γ = CP0 / CV0**; `P0` from the
-  initial state if given, else left blank (Radioss derives it). This is the one
-  EOS that needs a real unit-aware conversion, so it is warned.
+  `Gamma, P0, PSH, T0, RHO_0`, and **requires P0 > 0** (starter ERROR 67
+  otherwise). Conversion: **γ = CP0 / CV0**, and the initial pressure is derived
+  from the ideal-gas law **P0 = ρ(CP0 − CV0)T0** using the carrier density (so a
+  gas at rest at temperature `T0` gets its correct static pressure). This is the
+  one EOS that needs a real unit-aware conversion, so it is warned.
 * **EOS id == MAT id** is mandatory in OpenRadioss — the `/EOS` block binds to
   the material of the same id. The converter emits them with matched ids.
 * **Carrier choice:** a bare `*MAT_NULL` (no EOS) stays `/MAT/VOID` (its existing
@@ -207,7 +209,9 @@ ALE single material) mark the property as ALE: `/PROP/SOLID` field 3
 **Iale = 1** (reader spec `PROP/prop_p14_solid.cfg` confirms
 `Isolid Ismstr Iale Icpre …`; the reference Eulerian deck uses Iale = 2). k2rad
 maps ELFORM 11/12 → Iale = 1 (ALE) and warns that a purely Eulerian
-(fixed-mesh) run wants Iale = 2.
+(fixed-mesh) run wants Iale = 2. An ALE property must also drop the
+full-integration Lagrangian **Isolid 17** (rejected, ERROR 131/608) in favour of
+`Isolid = 0` (the default → co-located ALE brick, as in the reference deck).
 
 ### B4. Detonation point — `*INITIAL_DETONATION` → `/DFS/DETPOINT`
 
@@ -366,4 +370,29 @@ C:\OpenRadioss\exec\starter_win64.exe -i <deck>_0000.rad -np 1
 
 then `<deck>_0000.out` is grepped for the `ERROR` count and the echoed values
 (charge mass, JWL A/B, EOS γ, detonation coords, phase fractions) are confirmed
-against the input. Starter-validation evidence is captured in the PR body.
+against the input.
+
+### Validation results (this work)
+
+Two synthetic decks were converted and run through the starter at `/BEGIN 2022`:
+
+* **JWL / EOS / detonation deck** — a 2-phase JWL(TNT) + air brick model with
+  all four EOS types (`/EOS/POLYNOMIAL`, `/GRUNEISEN`, `/IDEAL-GAS` on
+  `/MAT/HYD_VISC` carriers) + a `/MAT/LAW5` explosive + a `/DFS/DETPOINT`:
+  **NORMAL TERMINATION, 0 ERRORS / 0 WARNINGS.**
+* **Coupled ALE / FSI deck** — air + water `/MAT/LAW51` (MULTIMAT) on ELFORM-11
+  ALE bricks (`IALE=1` echoed), a shell structure coupled through
+  `/INTER/TYPE18` (+ `/GRBRIC/PART`), and an `/EBCS/NRF` non-reflecting frontier:
+  **0 ERRORS** (2 benign shell-integration warnings on the structure).
+
+Empirical findings folded back into the converter:
+
+1. **`/DFS/DETPOINT` has no title line** — the data card (`Xdet Ydet Zdet Tdet
+   mat_ID`, 20×4 + 10) follows the header directly (cfg `LOADS/detpoint.cfg`).
+2. **`/EOS/IDEAL-GAS` requires a positive initial pressure** — LS-DYNA gives
+   `Cv/Cp/T0`, so the converter derives `P0 = ρ(Cp−Cv)T0` (ERROR 67 otherwise).
+3. **ALE solid properties reject Isolid 17** (full-integration Lagrangian,
+   ERROR 131/608); ALE parts get `Isolid = 0` (the default, the reference
+   Drop_Container value), which resolves to the co-located ALE brick.
+4. **A JWL explosive used as a `/MAT/LAW51` submaterial needs a non-zero
+   unreacted-explosive bulk modulus** (`Bunreacted`, ERROR 99) — warned.
