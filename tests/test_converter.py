@@ -1921,6 +1921,40 @@ class CardLayoutTests(unittest.TestCase):
             out.append(ln)
         return out
 
+    def test_law44_hardening_mapping(self):
+        # b must be the PLASTIC hardening modulus H = E*ETAN/(E-ETAN), not raw
+        # ETAN (DYNA's tangent modulus of the TOTAL stress-strain curve), and
+        # DYNA BETA=0 (kinematic) must land as Chard=1 (Radioss kinematic) —
+        # the conventions run in opposite directions.
+        s = self._starter()
+        lines, i = self._block(s, "/MAT/LAW44/")
+        card3 = self._data_lines(lines, i)[1 + 2]       # title, rho, E/nu, [a/b/n/Chard]
+        self.assertAlmostEqual(float(card3[0:20]), 350.0)               # a = SIGY
+        self.assertAlmostEqual(float(card3[20:40]),
+                               210000.0 * 1000.0 / 209000.0, places=4)  # b = H
+        self.assertAlmostEqual(float(card3[60:80]), 1.0)                # Chard = 1-BETA
+
+    def test_mat_failure_becomes_fail_johnson_all_layers(self):
+        # A failure strain on the material must NOT populate LAW44 EpsMax
+        # (one-integration-point deletion) but a /FAIL/JOHNSON with D1=FS and
+        # Ifail_sh=2 (all-layers deletion), matching LS-DYNA's built-in
+        # material-erosion rule. Layout: fail_johnson.cfg FORMAT(radioss2017).
+        deck = CARD_LAYOUT_K.replace(
+            "      40.0       5.0       0.0         1",
+            "      40.0       5.0    0.0015         1")
+        s = self._starter(deck)
+        lines, i = self._block(s, "/MAT/LAW44/")
+        card5 = self._data_lines(lines, i)[1 + 4]       # [EpsMax/Et1/Et2]
+        self.assertAlmostEqual(float(card5[0:20]), 0.0)  # EpsMax stays empty
+        lines, i = self._block(s, "/FAIL/JOHNSON/1")
+        d = self._data_lines(lines, i)
+        self.assertAlmostEqual(float(d[0][0:20]), 0.0015)   # D1
+        self.assertAlmostEqual(float(d[0][20:40]), 0.0)     # D2
+        self.assertEqual(d[1][20:30].strip(), "2")          # IFAIL_SH = all layers
+        self.assertEqual(d[1][30:40].strip(), "1")          # IFAIL_SO
+        # fs=0 deck must NOT emit a /FAIL card at all
+        self.assertNotIn("/FAIL/JOHNSON/", self._starter())
+
     def test_law44_vp_in_cols_91_100(self):
         # cfg card 4: C(20) P(20) ICC(10) ISMOOTH(10) F_CUT(20) blank(10) VP(10).
         # Regression: VP used to be written at cols 81-90 (the blank), so the
@@ -3008,6 +3042,49 @@ class DeformableContactRecipeTests(unittest.TestCase):
         result, _, _ = self._convert(deck)
         self.assertFalse(any("Deformable-deformable contact" in w
                              for w in result.warnings))
+
+
+class IgnoreToInactiTests(unittest.TestCase):
+    """*CONTACT ignore=0 → /INTER/TYPE7 Inacti mapping.
+
+    LS-DYNA ignore=0 (default) MOVES initially penetrating nodes at
+    initialization — it never applies a t=0 penetration force. Mapping it to
+    Inacti=0 pre-loaded 3.4e10 mJ of elastic contact energy on the
+    W13_BlastVehicle z-ground deck (vehicle resting on the ground plane) and
+    blew kinetic energy up 5 orders of magnitude over the LS-DYNA reference.
+    ignore=0 must map to Inacti=5, EXCEPT the documented implicit
+    pre-engagement bootstrap (SST/MST-derived Gapmin > 0 on an implicit deck),
+    which needs the t=0 spring force as Newton's stiffness path."""
+
+    _convert = DeformableContactRecipeTests._convert
+    _inter_inacti = staticmethod(DeformableContactRecipeTests._inter_inacti)
+
+    # DEFDEF_K card 3 carries MST=0.22 → Gapmin 0.11 (the bootstrap trigger).
+    _CARD3_MST = "       1.0       1.0       0.0      0.22       1.0       1.0       1.0       1.0"
+    _CARD3_NOMST = "       1.0       1.0       0.0       0.0       1.0       1.0       1.0       1.0"
+
+    def test_explicit_ignore0_maps_to_inacti5(self):
+        # Explicit deck: ALWAYS Inacti=5, even with an SST/MST Gapmin (there is
+        # no Newton bootstrap to protect, only the t=0 force spike to avoid).
+        deck = DEFDEF_K.replace("*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
+        result, starter, _ = self._convert(deck)
+        self.assertEqual(self._inter_inacti(starter, 9), "5")
+        self.assertTrue(any("ignore=0 mapped to /INTER/TYPE7 Inacti=5" in w
+                            for w in result.warnings),
+                        f"no ignore=0 mapping warning in {result.warnings}")
+
+    def test_implicit_ignore0_without_gapmin_maps_to_inacti5(self):
+        deck = DEFDEF_K.replace(self._CARD3_MST, self._CARD3_NOMST)
+        result, starter, _ = self._convert(deck)
+        self.assertEqual(self._inter_inacti(starter, 9), "5")
+
+    def test_implicit_ignore0_with_gapmin_keeps_inacti0(self):
+        # The validated pre-engagement bootstrap (implicit_hr-anlenkung).
+        result, starter, _ = self._convert(DEFDEF_K)
+        self.assertEqual(self._inter_inacti(starter, 9), "0")
+        self.assertTrue(any("pre-engagement" in w and "Inacti=0 kept" in w
+                            for w in result.warnings),
+                        f"no bootstrap-kept warning in {result.warnings}")
 
 
 class ModalEigenvalueTests(unittest.TestCase):
