@@ -4254,8 +4254,39 @@ class BlastLoadTests(unittest.TestCase):
         self.assertEqual(_infer_blast_up_axis((2.5, 0.0, 5.0), bbox), "Y")
         # charge above in Y → up = -Y
         self.assertEqual(_infer_blast_up_axis((2.5, 5.0, 5.0), bbox), "-Y")
-        # charge within the target range on every axis → no inference
+        # charge within the target range on every axis → no confident inference
         self.assertIsNone(_infer_blast_up_axis((2.5, 1.0, 5.0), bbox))
+
+    def test_infer_up_axis_enclosed_fallback(self):
+        # An under-body charge sits inside the bbox on every axis; the enclosed
+        # fallback picks the axis on which the charge is nearest a bounding face.
+        from k2rad.writer import _infer_blast_up_axis_enclosed
+        bbox = ((1.1, 4.1), (0.03, 1.96), (0.3, 1.96))
+        # charge closest to the low Z face (0.5-0.3=0.2) → up = +Z
+        self.assertEqual(_infer_blast_up_axis_enclosed((2.5, 1.0, 0.5), bbox), "Z")
+        # charge closest to the high X face (4.1-4.0=0.1) → up = -X
+        self.assertEqual(_infer_blast_up_axis_enclosed((4.0, 1.0, 1.0), bbox), "-X")
+
+    def test_auto_ground_enclosed_charge_still_makes_plane(self):
+        # Charge INSIDE the target bbox on every axis (under-body case): auto must
+        # still synthesize a /SURF/PLANE via the enclosed fallback rather than
+        # fall through to OpenRadioss's degenerate perpendicular-to-Z default.
+        from k2rad.writer import _resolve_blast_ground
+        from k2rad.state import (ConversionState, NodeData, SegmentSet,
+                                 LoadBlastEnhanced)
+        st = ConversionState()
+        box = {1: (0, 0, 0), 2: (1, 0, 0), 3: (1, 1, 0), 4: (0, 1, 0),
+               5: (0, 0, 1), 6: (1, 0, 1), 7: (1, 1, 1), 8: (0, 1, 1)}
+        for nid, (x, y, z) in box.items():
+            st.nodes[nid] = NodeData(float(x), float(y), float(z))
+        st.segment_sets[1] = SegmentSet(1, "", [[1, 2, 3, 4], [5, 6, 7, 8]])
+        # charge just above the bottom face (z=0.1), inside x/y → enclosed → +Z
+        src = LoadBlastEnhanced(bid=1, m=10.0, xbo=0.5, ybo=0.5, zbo=0.1,
+                                tbo=0.0, unit=2, blast=1)
+        gid, lines = _resolve_blast_ground(st, src, st.segment_sets[1])
+        self.assertNotEqual(gid, 0)
+        self.assertTrue(any(ln.startswith("/SURF/PLANE/") for ln in lines))
+        self.assertTrue(any("GUESSED" in w for w in st.warnings))
 
     def test_auto_ground_plane_synthesized(self):
         # Default "auto" emits a /SURF/PLANE and points the PBLAST Ground_ID at it.

@@ -2856,6 +2856,35 @@ def _infer_blast_up_axis(det, bbox) -> Optional[str]:
     return best
 
 
+def _infer_blast_up_axis_enclosed(det, bbox) -> Optional[str]:
+    """Fallback up-axis when the charge sits INSIDE the target bbox on every axis.
+
+    An under-body / internal charge (the charge is surrounded by structure, e.g.
+    an under-vehicle blast) defeats the strict "charge beyond the box" test, so
+    without this the converter would fall through to OpenRadioss's degenerate
+    perpendicular-to-Z default — which flags a large fraction of segments as
+    "Rg too close to the charge" and computes a bad ground reflection. Here the
+    vertical axis is guessed as the one on which the charge is closest to a
+    bounding face (the most likely up/down direction for a near-surface burst),
+    with the normal pointing away from that nearer face (toward the target bulk).
+    Returns None only for a degenerate (zero-size) box.
+    """
+    best_axis: Optional[str] = None
+    best_gap: Optional[float] = None
+    for name, dv, lo, hi in (("X", det[0], bbox[0][0], bbox[0][1]),
+                             ("Y", det[1], bbox[1][0], bbox[1][1]),
+                             ("Z", det[2], bbox[2][0], bbox[2][1])):
+        if hi <= lo:
+            continue
+        d_lo, d_hi = dv - lo, hi - dv
+        gap = min(d_lo, d_hi)
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            # charge nearer the low face → it sits at the bottom → up = +axis
+            best_axis = name if d_lo <= d_hi else "-" + name
+    return best_axis
+
+
 def _synthesize_blast_ground(state: ConversionState, det, axis: str):
     """Build an infinite /SURF/PLANE ground through the charge, normal along
     `axis` (which faces the target). Returns (lines, surf_id).
@@ -2905,27 +2934,41 @@ def _resolve_blast_ground(state: ConversionState, src, segset):
         return 0, []
 
     axis = None
+    inferred_guess = False
     if mode.upper() in _AXIS_VEC:
         axis = mode.upper()
     elif mode.lower() == "auto" and bbox is not None:
-        axis = _infer_blast_up_axis(det, bbox)
+        axis = _infer_blast_up_axis(det, bbox)          # confident: charge beyond box
+        if axis is None:                                # enclosed charge → best guess
+            axis = _infer_blast_up_axis_enclosed(det, bbox)
+            inferred_guess = axis is not None
 
     if axis is None:
         if mode.lower() == "auto":
             state.warn(
                 f"*LOAD_BLAST_ENHANCED bid={src.bid}: could not infer the vertical "
-                "axis for the ground plane (the charge sits within the target "
-                "extent on every axis, or the target has no nodes). " + default_warn)
+                "axis for the ground plane (the target has no nodes). " + default_warn)
         else:
             state.warn(default_warn)
         return 0, []
 
     ground_lines, surf_id = _synthesize_blast_ground(state, det, axis)
-    state.warn(
-        f"*LOAD_BLAST_ENHANCED bid={src.bid}: surface burst -> Exp_data=2; "
-        f"synthesized a /SURF/PLANE reflecting ground (normal {axis}, through the "
-        "charge) as Ground_ID so all target segments load. Override with "
-        "blast_ground=<axis> or 'none' if the vertical axis differs.")
+    if inferred_guess:
+        state.warn(
+            f"*LOAD_BLAST_ENHANCED bid={src.bid}: the charge sits inside the "
+            "target's bounding box on every axis (e.g. an under-body blast), so the "
+            f"vertical axis was GUESSED as {axis} (the axis on which the charge is "
+            "closest to a bounding face) and a /SURF/PLANE reflecting ground was "
+            "synthesized. This avoids OpenRadioss's degenerate perpendicular-to-Z "
+            "default (which flags many segments 'Rg too close to the charge' and "
+            "computes a bad reflection); VERIFY the axis and override with "
+            "blast_ground=<axis> if it is wrong.")
+    else:
+        state.warn(
+            f"*LOAD_BLAST_ENHANCED bid={src.bid}: surface burst -> Exp_data=2; "
+            f"synthesized a /SURF/PLANE reflecting ground (normal {axis}, through the "
+            "charge) as Ground_ID so all target segments load. Override with "
+            "blast_ground=<axis> or 'none' if the vertical axis differs.")
     return surf_id, ground_lines
 
 

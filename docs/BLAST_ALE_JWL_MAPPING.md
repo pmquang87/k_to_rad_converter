@@ -396,3 +396,12 @@ Empirical findings folded back into the converter:
    Drop_Container value), which resolves to the co-located ALE brick.
 4. **A JWL explosive used as a `/MAT/LAW51` submaterial needs a non-zero
    unreacted-explosive bulk modulus** (`Bunreacted`, ERROR 99) — warned.
+5. **`blast_ground=auto` now handles an enclosed charge.** For an under-body /
+   internal charge the charge sits *inside* the target bounding box on every
+   axis, so the strict "charge beyond the box" inference gives up. Rather than
+   fall through to OpenRadioss's degenerate ⊥Z default — which flags a large
+   fraction of segments `Rg/W^(1/3) < 0.5` ("too close to the charge") and
+   computes a bad ground reflection — auto now guesses the vertical axis as the
+   one on which the charge is closest to a bounding face and synthesizes the
+   `/SURF/PLANE` there (warned as a guess). Verified on the W13 under-vehicle
+   deck: **11560 `Rg` warnings → 0** with the same charge and mesh.
