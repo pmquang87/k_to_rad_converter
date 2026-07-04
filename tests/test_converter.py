@@ -4281,5 +4281,414 @@ class BlastLoadTests(unittest.TestCase):
         self.assertNotEqual(self._ground_id(starter), 0)
 
 
+# ── Legacy blast (*LOAD_BLAST / *LOAD_BLAST_SEGMENT) ─────────────────────────
+
+_LEGACY_MESH = """\
+*KEYWORD
+*TITLE
+Legacy blast test
+*CONTROL_TERMINATION
+     0.006
+*NODE
+       1       0.0       0.0       0.0
+       2       1.0       0.0       0.0
+       3       1.0       1.0       0.0
+       4       0.0       1.0       0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+target
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         2
+      0.05      0.05      0.05      0.05
+*MAT_PLASTIC_KINEMATIC
+         1    7500.02.10000E11       0.31.200000E91.10000E10       0.0
+       0.0       0.0    0.0015       0.0
+"""
+
+LEGACY_BLAST_K = _LEGACY_MESH + """\
+*LOAD_BLAST
+      50.0       2.5       0.0       5.0       0.0         2         2
+*LOAD_BLAST_SEGMENT_SET
+         7         1
+*SET_SEGMENT
+         1
+         1         2         3         4
+*END
+"""
+
+PERSEG_BLAST_K = _LEGACY_MESH + """\
+*LOAD_BLAST_ENHANCED
+         1      50.0       2.5       0.0       5.0       0.0         2         1
+       0.0       0.0       0.0       0.0         01.00000E20         0
+*LOAD_BLAST_SEGMENT
+         1         1         2         3         4
+*END
+"""
+
+
+class LegacyBlastLoadTests(unittest.TestCase):
+    """Legacy CONWEP *LOAD_BLAST + per-segment *LOAD_BLAST_SEGMENT → /LOAD/PBLAST."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kwargs)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    # ── legacy *LOAD_BLAST ───────────────────────────────────────────
+    def test_legacy_load_blast_creates_source(self):
+        state = self._state(LEGACY_BLAST_K)
+        self.assertEqual(len(state.blast_sources), 1)
+        src = next(iter(state.blast_sources.values()))
+        self.assertAlmostEqual(src.m, 50.0)
+        self.assertAlmostEqual(src.xbo, 2.5)
+        self.assertAlmostEqual(src.zbo, 5.0)
+        self.assertEqual(src.unit, 2)
+        self.assertEqual(src.blast, 2)                 # ISURF passed through
+        self.assertEqual(state.blast_unit_system, ("kg", "m", "s"))
+
+    def test_legacy_blast_segment_set_fallback_emits_pblast(self):
+        # The *LOAD_BLAST_SEGMENT_SET names bid=7, which does NOT match the
+        # legacy source's synthetic bid; the sole-source fallback still emits.
+        _r, starter = self._convert(LEGACY_BLAST_K)
+        self.assertIn("/LOAD/PBLAST/", starter)
+        self.assertIn("/SURF/SEG/", starter)
+
+    def test_legacy_blast_verify_warning(self):
+        result, _s = self._convert(LEGACY_BLAST_K)
+        self.assertTrue(any("legacy" in w.lower() and "burst" in w.lower()
+                            for w in result.warnings))
+
+    # ── per-segment *LOAD_BLAST_SEGMENT ──────────────────────────────
+    def test_per_segment_builds_segment_set(self):
+        state = self._state(PERSEG_BLAST_K)
+        self.assertEqual(len(state.blast_segment_loads), 1)
+        load = state.blast_segment_loads[0]
+        self.assertEqual(load.bid, 1)                  # matches _ENHANCED bid
+        segset = state.segment_sets[load.ssid]
+        self.assertEqual(segset.segments, [[1, 2, 3, 4]])
+
+    def test_per_segment_emits_pblast_surf(self):
+        _r, starter = self._convert(PERSEG_BLAST_K)
+        self.assertIn("/LOAD/PBLAST/", starter)
+        # the /SURF/SEG carries the inline segment nodes 1 2 3 4 (the data line
+        # right after the "#   seg_ID ..." column header)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("#   seg_ID"))
+        self.assertEqual(lines[i + 1].split()[1:5], ["1", "2", "3", "4"])
+
+    def test_per_segment_triangle_strips_zero(self):
+        deck = PERSEG_BLAST_K.replace(
+            "         1         1         2         3         4",
+            "         1         1         2         3         0")
+        state = self._state(deck)
+        load = state.blast_segment_loads[0]
+        self.assertEqual(state.segment_sets[load.ssid].segments, [[1, 2, 3]])
+
+
+# ── High explosive + EOS (*MAT_HIGH_EXPLOSIVE_BURN, *EOS_*, *INITIAL_DETONATION) ─
+
+def _fix(*vals):
+    """One LS-DYNA fixed-format card: 10-char right-justified fields."""
+    return "".join(f"{v:>10}" for v in vals)
+
+
+def _cube_nodes(base, x0):
+    corners = [(x0, 0, 0), (x0 + 1, 0, 0), (x0 + 1, 1, 0), (x0, 1, 0),
+               (x0, 0, 1), (x0 + 1, 0, 1), (x0 + 1, 1, 1), (x0, 1, 1)]
+    return [f"{base + k:>8}{x:>16}{y:>16}{z:>16}"
+            for k, (x, y, z) in enumerate(corners, start=1)]
+
+
+def _explosive_eos_deck():
+    L = ["*KEYWORD", "*TITLE", "JWL EOS test", "*CONTROL_TERMINATION", "     1.0e-3",
+         "*NODE"]
+    for c in range(2):
+        L += _cube_nodes(8 * c, 2 * c)
+    L.append("*ELEMENT_SOLID")
+    for c in range(2):
+        L.append(_fix(c + 1, c + 1) + "".join(f"{8 * c + k:>10}" for k in range(1, 9)))
+    L += ["*PART", "explosive", _fix(1, 1, 1),
+          "*PART", "air", _fix(2, 1, 2),
+          "*SECTION_SOLID", _fix(1, 1),
+          "*MAT_HIGH_EXPLOSIVE_BURN", _fix(1, "1.63E-9", "6.93E+6", "2.1E+4", "0.0"),
+          "*EOS_JWL", _fix(1, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30", "7.0E+3", "1.0"),
+          "*MAT_NULL", _fix(2, "1.2E-12"),
+          "*EOS_LINEAR_POLYNOMIAL",
+          _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0"),
+          _fix("2.5E-1", "1.0"),
+          "*INITIAL_DETONATION", _fix(1, "0.5", "0.5", "0.5", "0.0"),
+          "*END"]
+    return "\n".join(L) + "\n"
+
+
+class ExplosiveEosTests(unittest.TestCase):
+    """*MAT_HIGH_EXPLOSIVE_BURN + *EOS_* → /MAT/LAW5, /MAT/LAW6 + /EOS/*,
+    *INITIAL_DETONATION → /DFS/DETPOINT."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kw)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    @staticmethod
+    def _block(starter, header):
+        """Data lines of the block whose keyword line starts with *header*."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(header))
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    # ── parse ────────────────────────────────────────────────────────
+    def test_high_explosive_and_jwl_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        self.assertIn(1, st.mat_high_explosive)
+        heb = st.mat_high_explosive[1]
+        self.assertAlmostEqual(heb.rho, 1.63e-9)
+        self.assertAlmostEqual(heb.d, 6.93e6)
+        self.assertAlmostEqual(heb.pcj, 2.1e4)
+        jwl = st.eos_jwl[1]
+        self.assertAlmostEqual(jwl.a, 3.7e5)
+        self.assertAlmostEqual(jwl.r1, 4.15)
+        self.assertAlmostEqual(jwl.omega, 0.30)
+
+    def test_eos_polynomial_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        eos = st.eos_cards[2]
+        self.assertEqual(eos.kind, "POLYNOMIAL")
+        self.assertAlmostEqual(eos.params["c4"], 0.4)
+        self.assertAlmostEqual(eos.params["e0"], 0.25)
+
+    def test_detonation_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        self.assertEqual(len(st.detonations), 1)
+        det = st.detonations[0]
+        self.assertEqual(det.pid, 1)
+        self.assertAlmostEqual(det.x, 0.5)
+
+    # ── emit ─────────────────────────────────────────────────────────
+    def test_law5_merges_material_and_jwl(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        law5 = self._block(starter, "/MAT/LAW5/1")   # [0]=title
+        self.assertAlmostEqual(float(law5[1]), 1.63e-9)          # RHO
+        abr = law5[2].split()
+        self.assertAlmostEqual(float(abr[0]), 3.7e5)             # A (from EOS_JWL)
+        self.assertAlmostEqual(float(abr[4]), 0.30)              # OMEGA
+        dcj = law5[3].split()
+        self.assertAlmostEqual(float(dcj[0]), 6.93e6)            # D (from MAT_008)
+        self.assertAlmostEqual(float(dcj[1]), 2.1e4)             # P_CJ
+
+    def test_mat_null_with_eos_becomes_hyd_visc_not_void(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        self.assertIn("/MAT/HYD_VISC/2", starter)
+        self.assertNotIn("/MAT/VOID/2", starter)
+
+    def test_bare_mat_null_stays_void(self):
+        deck = _explosive_eos_deck().replace(
+            "*EOS_LINEAR_POLYNOMIAL\n" +
+            _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0") + "\n" +
+            _fix("2.5E-1", "1.0") + "\n", "")
+        _r, starter = self._convert(deck)
+        self.assertIn("/MAT/VOID/2", starter)
+        self.assertNotIn("/MAT/HYD_VISC/2", starter)
+
+    def test_eos_block_id_equals_material_id(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        self.assertIn("/EOS/POLYNOMIAL/2", starter)    # id == carrier mat id
+
+    def test_ideal_gas_gamma_and_positive_p0(self):
+        deck = _explosive_eos_deck().replace(
+            "*INITIAL_DETONATION\n" + _fix(1, "0.5", "0.5", "0.5", "0.0") + "\n",
+            "*MAT_NULL\n" + _fix(3, "1.2E-12") + "\n"
+            "*EOS_IDEAL_GAS\n" + _fix(3, "717.6", "1004.5", "0.0", "0.0", "288.0", "1.0")
+            + "\n")
+        _r, starter = self._convert(deck)
+        gas = self._block(starter, "/EOS/IDEAL-GAS/3")   # [0]=title
+        card = gas[1].split()
+        self.assertAlmostEqual(float(card[0]), 1004.5 / 717.6, places=4)   # gamma
+        self.assertGreater(float(card[1]), 0.0)                            # P0 > 0
+
+    def test_detpoint_no_title_line_and_matid(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/DFS/DETPOINT/"))
+        # next non-comment line is the data card directly (no title line)
+        self.assertTrue(lines[i + 1].startswith("#"))
+        card = lines[i + 2].split()
+        self.assertAlmostEqual(float(card[0]), 0.5)     # Xdet
+        self.assertEqual(card[4], "1")                  # mat_ID resolved from part 1
+
+    def test_jwl_without_eos_warns(self):
+        deck = _explosive_eos_deck().replace(
+            "*EOS_JWL\n" +
+            _fix(1, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30", "7.0E+3", "1.0") + "\n",
+            "")
+        result, _s = self._convert(deck)
+        self.assertTrue(any("companion *EOS_JWL" in w for w in result.warnings))
+
+    def test_detonation_pid0_lights_all_explosives(self):
+        deck = _explosive_eos_deck().replace(
+            _fix(1, "0.5", "0.5", "0.5", "0.0"),
+            _fix(0, "0.5", "0.5", "0.5", "0.0"))
+        _r, starter = self._convert(deck)
+        self.assertEqual(starter.count("/DFS/DETPOINT/"), 1)   # one explosive
+
+
+# ── Coupled ALE / FSI (LAW51, TYPE18, EBCS/NRF, Iale) ────────────────────────
+
+def _ale_fsi_deck():
+    def i8(v): return f"{v:>8}"
+    L = ["*KEYWORD", "*TITLE", "ALE FSI test", "*CONTROL_TERMINATION", "     1.0e-3",
+         "*CONTROL_ALE", _fix(1, 1, 2, "0.0", "0.0"), "*NODE"]
+    for c in range(2):
+        L += _cube_nodes(8 * c, c)                        # two fluid cubes
+    L += [f"{17:>8}{2.0:>16}{0.0:>16}{0.0:>16}",          # structure shell nodes
+          f"{18:>8}{2.0:>16}{1.0:>16}{0.0:>16}",
+          f"{19:>8}{2.0:>16}{1.0:>16}{1.0:>16}",
+          f"{20:>8}{2.0:>16}{0.0:>16}{1.0:>16}"]
+    L.append("*ELEMENT_SOLID")
+    L.append(_fix(1, 11) + "".join(f"{k:>10}" for k in range(1, 9)))
+    L.append(_fix(2, 10) + "".join(f"{8 + k:>10}" for k in range(1, 9)))
+    L += ["*ELEMENT_SHELL", i8(3) + i8(20) + i8(17) + i8(18) + i8(19) + i8(20)]
+    L += ["*PART", "water", _fix(11, 1, 4),
+          "*PART", "air", _fix(10, 1, 2),
+          "*PART", "structure", _fix(20, 2, 3),
+          "*SECTION_SOLID", _fix(1, 11),                  # ELFORM 11 → ALE
+          "*SECTION_SHELL", _fix(2, 2, "1.0", 3), _fix("1.0", "1.0", "1.0", "1.0"),
+          "*MAT_NULL", _fix(2, "1.2E-12"),
+          "*EOS_LINEAR_POLYNOMIAL",
+          _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0"), _fix("2.5E-1", "1.0"),
+          "*MAT_NULL", _fix(4, "1.0E-9"),
+          "*EOS_GRUNEISEN", _fix(4, "1.48E+6", "1.92", "0.0", "0.0", "0.35", "0.0", "0.0"),
+          "*MAT_ELASTIC", _fix(3, "7.85E-9", "2.1E+5", "0.3"),
+          "*SET_PART_LIST", _fix(1), _fix(10, 11),
+          "*SET_PART_LIST", _fix(2), _fix(20),
+          "*SET_SEGMENT", _fix(5), _fix(13, 14, 15, 16),
+          "*ALE_MULTI-MATERIAL_GROUP", _fix(11, 1), _fix(10, 1),
+          "*CONSTRAINED_LAGRANGE_IN_SOLID",
+          _fix(2, 1, 0, 0, 1, 4, 0, 0), _fix("0.0", "0.0", "0.1"),
+          "*BOUNDARY_NON_REFLECTING", _fix(5, 0, 0),
+          "*END"]
+    return "\n".join(L) + "\n"
+
+
+class AleFsiTests(unittest.TestCase):
+    """ALE multimaterial / FSI coupling / non-reflecting boundaries."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kw)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    def test_elform11_sets_iale(self):
+        st = self._state(_ale_fsi_deck())
+        self.assertEqual(st.sec_solids[1].iale, 1)
+
+    def test_prop_solid_iale_and_isolid(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/1"))
+        card = lines[i + 3]                       # Isolid Ismstr Iale ...
+        self.assertEqual(card[0:10].strip(), "0")     # Isolid 0 (ALE-compatible)
+        self.assertEqual(card[20:30].strip(), "1")    # Iale = 1 (field 3)
+
+    def test_ale_mmg_becomes_law51(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/MAT/LAW51/", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/MAT/LAW51/"))
+        # Iform card is 12
+        iform = next(lines[k + 1] for k, ln in enumerate(lines[i:], start=i)
+                     if ln.strip().startswith("#    Iform"))
+        self.assertEqual(iform.strip(), "12")
+        # submaterials in AMMG order: water(4) then air(2)
+        j = next(k for k, ln in enumerate(lines) if ln.startswith("#    MatID"))
+        mids = []
+        for ln in lines[j + 1:]:
+            if ln.startswith(("#", "/")) or not ln.strip():
+                break
+            mids.append(ln.split()[0])
+        self.assertEqual(mids[:2], ["4", "2"])
+
+    def test_fsi_type18_and_grbric(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/INTER/TYPE18/", starter)
+        self.assertIn("/GRBRIC/PART/", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE18/"))
+        card2 = lines[i + 5]                       # title, hdr, card1, hdr, card2
+        self.assertGreater(float(card2[0:20]), 0.0)     # Stfval > 0
+        self.assertGreater(float(card2[40:60]), 0.0)    # Gap > 0
+
+    def test_boundary_non_reflecting_ebcs(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/EBCS/NRF/", starter)
+        # the NRF references a /SURF/SEG built from set-segment 5
+        self.assertIn("/SURF/SEG/", starter)
+
+    def test_control_ale_warns(self):
+        result, _s = self._convert(_ale_fsi_deck())
+        self.assertTrue(any("CONTROL_ALE" in w for w in result.warnings))
+
+    def test_volume_fraction_geometry_recognized(self):
+        deck = _ale_fsi_deck().replace(
+            "*BOUNDARY_NON_REFLECTING\n" + _fix(5, 0, 0) + "\n",
+            "*INITIAL_VOLUME_FRACTION_GEOMETRY\n" + _fix(11, 1, 2, 0) + "\n"
+            + _fix(6, 1, 2) + "\n")
+        result, _s = self._convert(deck)
+        st = self._state(deck)
+        self.assertEqual(len(st.volume_fractions), 1)
+        self.assertTrue(any("INITIAL_VOLUME_FRACTION" in w for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

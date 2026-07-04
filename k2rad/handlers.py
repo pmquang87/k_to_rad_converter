@@ -20,6 +20,9 @@ from .state import (
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
+    MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
+    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
+    BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
@@ -249,7 +252,14 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     secid  = to_int(f1[0]) if f1 else 0
     elform = to_int(f1[1]) if len(f1) > 1 else 1
-    state.sec_solids[secid] = SectionSolid(secid, title, elform)
+    # ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE single material) mark the
+    # property as ALE → /PROP/SOLID Iale=1.
+    iale = 1 if elform in (11, 12) else 0
+    if iale:
+        state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> /PROP/SOLID "
+                   "Iale=1. If the mesh is fixed (Eulerian), switch Iale to 2 "
+                   "(Euler) for a cheaper run.")
+    state.sec_solids[secid] = SectionSolid(secid, title, elform, iale)
 
 
 def handle_section_beam(block: Block, state: ConversionState) -> None:
@@ -372,6 +382,257 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     E   = to_float(f1[2]) if len(f1) > 2 else 0.0
     nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
     state.mat_null[mid] = MatNull(mid, title, rho, E, nu)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High explosive + equations of state (coupled ALE / JWL detonation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_high_explosive_burn(block: Block, state: ConversionState) -> None:
+    """*MAT_HIGH_EXPLOSIVE_BURN (MAT_008) → half of /MAT/LAW5 (JWL).
+
+    Card: mid ro d pcj beta k g sigy.  Merged at write time with the *EOS_JWL of
+    the same id (which supplies A,B,R1,R2,omega,E0) into one /MAT/LAW5.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    mid = to_int(f[0])
+    state.mat_high_explosive[mid] = MatHighExplosiveBurn(
+        mid=mid, title=title,
+        rho=to_float(f[1]) if len(f) > 1 else 0.0,
+        d=to_float(f[2])   if len(f) > 2 else 0.0,
+        pcj=to_float(f[3]) if len(f) > 3 else 0.0,
+        beta=to_float(f[4]) if len(f) > 4 else 0.0,
+    )
+
+
+def handle_eos_jwl(block: Block, state: ConversionState) -> None:
+    """*EOS_JWL (EOS_002) → the JWL parameters of /MAT/LAW5.
+
+    Card 1: eosid a b r1 r2 omeg e0 vo.  Stored by eosid; folded into the LAW5
+    of the same id (its companion *MAT_HIGH_EXPLOSIVE_BURN).
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    state.eos_jwl[eosid] = EosJwl(
+        eosid=eosid,
+        a=to_float(f[1])     if len(f) > 1 else 0.0,
+        b=to_float(f[2])     if len(f) > 2 else 0.0,
+        r1=to_float(f[3])    if len(f) > 3 else 0.0,
+        r2=to_float(f[4])    if len(f) > 4 else 0.0,
+        omega=to_float(f[5]) if len(f) > 5 else 0.0,
+        e0=to_float(f[6])    if len(f) > 6 else 0.0,
+        vo=to_float(f[7], 1.0) if len(f) > 7 else 1.0,
+    )
+
+
+def handle_eos_linear_polynomial(block: Block, state: ConversionState) -> None:
+    """*EOS_LINEAR_POLYNOMIAL (EOS_001) → /EOS/POLYNOMIAL.
+
+    Card 1: eosid c0 c1 c2 c3 c4 c5 c6
+    Card 2: e0 v0        (c6 has no Radioss term and is dropped)
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    e0 = to_float(f2[0]) if f2 else 0.0
+    v0 = to_float(f2[1], 1.0) if len(f2) > 1 else 1.0
+    if v0 not in (0.0, 1.0):
+        state.warn(f"*EOS_LINEAR_POLYNOMIAL {eosid}: V0={v0} (initial relative "
+                   "volume) has no /EOS/POLYNOMIAL field — Radioss references E0 "
+                   "to the initial volume; verify the initial state.")
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="POLYNOMIAL",
+        params={"c0": g(1), "c1": g(2), "c2": g(3), "c3": g(4),
+                "c4": g(5), "c5": g(6), "e0": e0, "psh": 0.0, "rho0": 0.0})
+
+
+def handle_eos_gruneisen(block: Block, state: ConversionState) -> None:
+    """*EOS_GRUNEISEN (EOS_004) → /EOS/GRUNEISEN.
+
+    Card 1: eosid c s1 s2 s3 gamao a e0   (LS-DYNA GAMAO -> Radioss Y0).
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="GRUNEISEN",
+        params={"c": g(1), "s1": g(2), "s2": g(3), "s3": g(4),
+                "y0": g(5), "a": g(6), "e0": g(7), "rho0": 0.0})
+
+
+def handle_eos_ideal_gas(block: Block, state: ConversionState) -> None:
+    """*EOS_IDEAL_GAS → /EOS/IDEAL-GAS.
+
+    LS-DYNA parameterises the ideal gas by specific heats (Card 1:
+    eosid cv0 cp0 c1 c2 t0 v0); Radioss wants the ratio gamma = Cp/Cv. The
+    conversion is the one genuine EOS unit-aware map, so it is warned.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    cv0 = to_float(f[1]) if len(f) > 1 else 0.0
+    cp0 = to_float(f[2]) if len(f) > 2 else 0.0
+    t0  = to_float(f[5]) if len(f) > 5 else 0.0
+    if cv0 > 0.0 and cp0 > 0.0:
+        gamma = cp0 / cv0
+    else:
+        gamma = 1.4
+        state.warn(f"*EOS_IDEAL_GAS {eosid}: Cv/Cp not both given — defaulted "
+                   "gamma=1.4 for /EOS/IDEAL-GAS; set the heat-capacity ratio "
+                   "explicitly if the gas is not diatomic.")
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="IDEAL-GAS",
+        # cv/cp/t0 are kept so the writer can compute the initial pressure
+        # P0 = rho*(cp-cv)*t0 (Radioss requires P0 > 0) once the carrier
+        # material's density is known.
+        params={"gamma": gamma, "p0": 0.0, "psh": 0.0, "t0": t0, "rho0": 0.0,
+                "cv": cv0, "cp": cp0},
+        note="gamma = Cp/Cv")
+
+
+def handle_initial_detonation(block: Block, state: ConversionState) -> None:
+    """*INITIAL_DETONATION → /DFS/DETPOINT (JWL lighting point/time).
+
+    Card: pid x y z lt.  pid = explosive part (0 = all); the writer resolves
+    part -> LAW5 material id.
+    """
+    offset = _title_offset(block)
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if not f:
+            continue
+        state.detonations.append(InitialDetonation(
+            pid=to_int(f[0]),
+            x=to_float(f[1]) if len(f) > 1 else 0.0,
+            y=to_float(f[2]) if len(f) > 2 else 0.0,
+            z=to_float(f[3]) if len(f) > 3 else 0.0,
+            lt=to_float(f[4]) if len(f) > 4 else 0.0,
+        ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Coupled ALE mechanics / fluid-structure coupling / boundaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_ale_multi_material_group(block: Block, state: ConversionState) -> None:
+    """*ALE_MULTI-MATERIAL_GROUP → the submaterial order of a /MAT/LAW51.
+
+    Each data card is `sid idtype` (idtype 0 = part-set, 1 = part). The card
+    order is the AMMG/phase index. Collected into one AleMultiMaterialGroup.
+    """
+    offset = _title_offset(block)
+    mmg = AleMultiMaterialGroup()
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if not f or f[0].strip() == "":
+            continue
+        sid = to_int(f[0])
+        idtype = to_int(f[1]) if len(f) > 1 else 1
+        if sid > 0:
+            mmg.entries.append((sid, idtype))
+    if mmg.entries:
+        state.ale_mmgs.append(mmg)
+
+
+def handle_constrained_lagrange_in_solid(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling).
+
+    Card 1: slave master sstyp mstyp nquad ctype direc mcoup
+    Card 2: start end pfac fric ...   (penalty stiffness scale, times)
+    slave = Lagrangian structure set, master = ALE fluid set.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if len(f1) < 2:
+        return
+    ctype = to_int(f1[5]) if len(f1) > 5 else 4
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    start = to_float(f2[0]) if f2 else 0.0
+    end   = to_float(f2[1]) if len(f2) > 1 else 0.0
+    pfac  = to_float(f2[2]) if len(f2) > 2 else 0.1
+    state.lagrange_in_solid.append(ConstrainedLagrangeInSolid(
+        slave=to_int(f1[0]), master=to_int(f1[1]),
+        sstyp=to_int(f1[2]) if len(f1) > 2 else 0,
+        mstyp=to_int(f1[3]) if len(f1) > 3 else 0,
+        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end))
+
+
+def handle_initial_volume_fraction_geometry(block: Block, state: ConversionState) -> None:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY → /INIVOL initial ALE fill.
+
+    Header card: fmsid fmidtyp bammg ntrace
+    Container cards: conttyp fillopt fammg ...  (geometry follows)
+    Only the ALE part (fmsid) and the fill phase/opt are captured — the geometric
+    container is emitted as a /SURF/PLANE where possible (writer), otherwise
+    warned. A first-pass, plane-container mapping.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or f1[0].strip() == "":
+        return
+    part = to_int(f1[0])
+    vf = InitialVolumeFraction(part=part)
+    # Each subsequent non-blank card starts a container: conttyp fillopt fammg
+    for i in range(offset + 1, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 3:
+            continue
+        fillopt = to_int(f[1])
+        fammg   = to_int(f[2])
+        vf.fills.append((0, fammg, fillopt))     # surf_ID resolved/synth at write
+    if vf.fills:
+        state.volume_fractions.append(vf)
+
+
+def handle_boundary_non_reflecting(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_NON_REFLECTING → /EBCS/NRF on the named segment set.
+
+    Card: nsid ad as.  nsid = the *SET_SEGMENT acting as a silent frontier.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    state.non_reflecting.append(BoundaryNonReflecting(nsid=to_int(f[0])))
+
+
+def handle_control_ale(block: Block, state: ConversionState) -> None:
+    """*CONTROL_ALE → ALE advection hints (mostly informational).
+
+    Card 1: dct nadv meth afac bfac cfac dfac efac.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f:
+        return
+    state.control_ale = ControlAle(
+        meth=to_int(f[2]) if len(f) > 2 else 1,
+        afac=to_float(f[3]) if len(f) > 3 else 0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1444,6 +1705,83 @@ def handle_load_blast_segment_set(block: Block, state: ConversionState) -> None:
             LoadBlastSegmentSet(bid, ssid, alepid, sfnrb, scalep))
 
 
+def handle_load_blast(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST (legacy CONWEP) → a single blast source for /LOAD/PBLAST.
+
+    Card 1: wgt xbo ybo zbo tbo iunit isurf
+    Card 2: cfm cfl cft cfp nidbo death negphs   (optional)
+
+    The original *LOAD_BLAST carries no BID (there is one implicit charge), so a
+    synthetic bid is assigned and ``blast = isurf`` is stored, letting it flow
+    through the shipped /LOAD/PBLAST writer exactly like *LOAD_BLAST_ENHANCED.
+    The loaded segments come from a following *LOAD_BLAST_SEGMENT[_SET]. The
+    legacy surface/air flag numbering differs from *LOAD_BLAST_ENHANCED, so the
+    burst type is flagged for the user to verify.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        state.warn("*LOAD_BLAST: incomplete Card 1 — skipped")
+        return
+    wgt   = to_float(f[0])
+    xbo   = to_float(f[1]) if len(f) > 1 else 0.0
+    ybo   = to_float(f[2]) if len(f) > 2 else 0.0
+    zbo   = to_float(f[3]) if len(f) > 3 else 0.0
+    tbo   = to_float(f[4]) if len(f) > 4 else 0.0
+    iunit = to_int(f[5])   if len(f) > 5 else 2
+    isurf = to_int(f[6])   if len(f) > 6 else 2
+    f2     = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    death  = to_float(f2[5]) if len(f2) > 5 else 1e20
+    negphs = to_int(f2[6])   if len(f2) > 6 else 0
+    bid = state.next_id()
+    state.blast_sources[bid] = LoadBlastEnhanced(
+        bid=bid, m=wgt, xbo=xbo, ybo=ybo, zbo=zbo, tbo=tbo,
+        unit=iunit, blast=isurf, death=death, negphs=negphs)
+    us = _blast_unit_system(iunit)
+    if us is not None:
+        state.blast_unit_system = us
+    else:
+        state.warn(
+            f"*LOAD_BLAST: IUNIT={iunit} has no automatic OpenRadioss unit "
+            "mapping (only 2 kg/m/s and 4 g/cm/µs are auto-mapped); set /BEGIN "
+            "via convert(units=...) or /LOAD/PBLAST pressures will be wrong.")
+    state.warn(
+        "*LOAD_BLAST (legacy) mapped to /LOAD/PBLAST with Exp_data from ISURF="
+        f"{isurf} — the legacy surface/air-burst flag numbering differs from "
+        "*LOAD_BLAST_ENHANCED; verify the burst type (surface vs free-air).")
+
+
+def handle_load_blast_segment(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST_SEGMENT → apply a blast source to ad-hoc segments (N1..N4).
+
+    Card (one per segment): bid n1 n2 n3 n4. Unlike *LOAD_BLAST_SEGMENT_SET
+    (which names a *SET_SEGMENT), this lists the segment nodes inline. Segments
+    are grouped by bid into a synthesized segment set so the shipped /SURF/SEG +
+    /LOAD/PBLAST writer is reused. bid=0 / an unmatched bid falls back at write
+    time to the sole blast source when there is exactly one.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    by_bid: dict = {}
+    for i in range(offset, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 4:
+            continue
+        bid = to_int(f[0])
+        nodes = [to_int(f[j]) for j in range(1, 5)]
+        while len(nodes) > 3 and nodes[-1] == 0:
+            nodes.pop()
+        if len(nodes) >= 3 and all(n > 0 for n in nodes):
+            by_bid.setdefault(bid, []).append(nodes)
+    for bid, segs in by_bid.items():
+        ssid = state.next_id()
+        state.segment_sets[ssid] = SegmentSet(ssid, f"blast_seg_bid{bid}", segs)
+        state.blast_segment_loads.append(LoadBlastSegmentSet(bid, ssid))
+
+
 def handle_mat_add_fatigue(block: Block, state: ConversionState) -> None:
     """*MAT_ADD_FATIGUE: S-N data per material — offline post-processing only.
 
@@ -1642,6 +1980,12 @@ HANDLERS = {
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
+    # High explosive + equations of state (coupled ALE / JWL detonation)
+    "MAT_HIGH_EXPLOSIVE_BURN":                handle_mat_high_explosive_burn,
+    "EOS_JWL":                                handle_eos_jwl,
+    "EOS_LINEAR_POLYNOMIAL":                  handle_eos_linear_polynomial,
+    "EOS_GRUNEISEN":                          handle_eos_gruneisen,
+    "EOS_IDEAL_GAS":                          handle_eos_ideal_gas,
 
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
@@ -1664,6 +2008,13 @@ HANDLERS = {
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
+    "INITIAL_DETONATION":                     handle_initial_detonation,
+    "INITIAL_VOLUME_FRACTION_GEOMETRY":       handle_initial_volume_fraction_geometry,
+    # Coupled ALE / fluid-structure coupling / boundaries
+    "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
+    "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,
+    "BOUNDARY_NON_REFLECTING":                handle_boundary_non_reflecting,
+    "CONTROL_ALE":                            handle_control_ale,
 
     # Constraints
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
@@ -1753,6 +2104,8 @@ HANDLERS = {
     "LOAD_BODY_Z":                            handle_load_body,
     "LOAD_BLAST_ENHANCED":                    handle_load_blast_enhanced,
     "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,
+    "LOAD_BLAST_SEGMENT":                     handle_load_blast_segment,
+    "LOAD_BLAST":                             handle_load_blast,
     "MAT_ADD_EROSION":                        handle_skip,
     "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,

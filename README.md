@@ -69,7 +69,10 @@ Or edit `run_converter.py` to set a hardcoded path and run
 `*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44`
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
 `*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`
-`*MAT_NULL` → void material
+`*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
+`*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
+`*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
+`*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`)
@@ -88,6 +91,25 @@ common LS-DYNA idiom for symmetry/fixed-DOF)
 DOF 1/2/3 loads along −X/−Y/−Z, so `Fscale_Y = -accel`. Modal decks get an
 informational note instead — gravity does not change a non-prestressed
 eigenproblem)
+
+### Blast & coupled ALE / high explosive
+Empirical (ConWep / TM5-1300) air blast:
+`*LOAD_BLAST_ENHANCED`, `*LOAD_BLAST` (legacy) → `/LOAD/PBLAST`
+`*LOAD_BLAST_SEGMENT_SET`, `*LOAD_BLAST_SEGMENT` (per-segment) → `/SURF/SEG` +
+`/LOAD/PBLAST` (surface bursts synthesize a `/SURF/PLANE` reflecting ground,
+`--blast-ground`); `*SET_SEGMENT` → `/SURF/SEG`; `*LOAD_BODY_{X,Y,Z}` → `/GRAV`
+
+Coupled ALE / fluid-structure (high-explosive detonation):
+`*INITIAL_DETONATION` → `/DFS/DETPOINT`
+`*ALE_MULTI-MATERIAL_GROUP` → `/MAT/LAW51` (MULTIMAT, ordered submaterials)
+`*SECTION_SOLID` ELFORM 11/12 → `/PROP/SOLID` `Iale=1` (ALE)
+`*CONSTRAINED_LAGRANGE_IN_SOLID` → `/INTER/TYPE18` (penalty FSI) + `/GRBRIC/PART`
+`*BOUNDARY_NON_REFLECTING` → `/EBCS/NRF`
+`*CONTROL_ALE` → ALE advection note; `*INITIAL_VOLUME_FRACTION_GEOMETRY` →
+`/INIVOL` (recognised; container geometry needs a manual `/SURF`)
+
+See `docs/BLAST_ALE_JWL_MAPPING.md` for the full mapping table, card formats and
+unit/sign gotchas.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/NODE`
