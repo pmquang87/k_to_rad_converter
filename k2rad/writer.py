@@ -2170,6 +2170,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     lines.append("#-  RIGID BODIES:")
     lines.append(HDR)
 
+    # --rigid-cog-master: synthesize element-free masters (new node ids above the
+    # current maximum, coordinates at the part's nodal centroid).
+    _next_free = (max(state.nodes) + 1 if state.nodes else 90000001)
+
     for pid, all_nodes in sorted(nodes_by_pid.items()):
         part = state.parts.get(pid)
         if not part: continue
@@ -2178,7 +2182,31 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         unique_nodes = sorted(set(n for n in all_nodes if n > 0))
         if not unique_nodes: continue
 
-        ind_node = unique_nodes[0]
+        if state.options.rigid_cog_master:
+            # Element-free master at the nodal centroid (the CNRB treatment):
+            # a mesh-node master is an element corner (WARNING 448/1624) and is
+            # relocated to the CoM at runtime, so its coordinates appear to
+            # change in post-processing. A synthesized master keeps every mesh
+            # node put; OpenRadioss still moves the master itself to the true
+            # CoM (ICoG default), which is harmless for a free node.
+            pts = [state.nodes[n] for n in unique_nodes if n in state.nodes]
+            ind_node = _next_free
+            _next_free += 1
+            if pts:
+                k = len(pts)
+                state.nodes[ind_node] = NodeData(sum(p.x for p in pts) / k,
+                                                 sum(p.y for p in pts) / k,
+                                                 sum(p.z for p in pts) / k)
+            else:
+                state.nodes[ind_node] = NodeData(0.0, 0.0, 0.0)
+            rigid_nodes.add(ind_node)
+            state.warn(
+                f"*MAT_RIGID pid={pid}: --rigid-cog-master synthesized "
+                f"element-free /RBODY master node {ind_node} at the part's "
+                "nodal centroid (mesh nodes keep their coordinates; loads/"
+                "readouts on the rigid body now address this node).")
+        else:
+            ind_node = unique_nodes[0]
         grnod_id = state.next_id()
         ind_grnod_id = state.next_id()
         rigid_nodes.update(unique_nodes)
@@ -2211,7 +2239,15 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         #     they need exact total control.
         # This is the primary stabilization mechanism for implicit analyses
         # where the inherent rigid-body mass is too small.
-        node_added = state.added_node_masses.get(ind_node, 0.0)
+        if state.options.rigid_cog_master:
+            # The synthesized master carries no *ELEMENT_MASS of its own, and
+            # _make_added_masses skips rigid-body nodes (their /ADMAS belongs to
+            # the /RBODY) — so fold the *ELEMENT_MASS of ALL of the part's nodes
+            # into the Mass field, not just the old master's.
+            node_added = sum(state.added_node_masses.get(n, 0.0)
+                             for n in unique_nodes)
+        else:
+            node_added = state.added_node_masses.get(ind_node, 0.0)
         part_add, part_fin = state.element_mass_parts.get(pid, (0.0, 0.0))
         if part_fin > 0:
             # FINMASS specified — treat as added mass (OpenRadioss /RBODY Mass
@@ -2223,7 +2259,9 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         if added_mass > 0:
             sources = []
             if node_added > 0:
-                sources.append(f"*ELEMENT_MASS on node {ind_node}={node_added:.6G}")
+                where = ("the part's nodes" if state.options.rigid_cog_master
+                         else f"node {ind_node}")
+                sources.append(f"*ELEMENT_MASS on {where}={node_added:.6G}")
             if part_add > 0:
                 sources.append(f"*ELEMENT_MASS_PART ADDMASS={part_add:.6G}")
             if part_fin > 0:

@@ -206,6 +206,17 @@ def main() -> int:
              "wrong-for-non-Z-up default) and only warns; X/Y/Z/-X/-Y/-Z force "
              "the ground-normal (up) axis.",
     )
+    parser.add_argument(
+        "--rigid-cog-master",
+        action="store_true",
+        help="Synthesize an element-free /RBODY master node at each *MAT_RIGID "
+             "part's nodal centroid (the treatment CNRBs always get) instead of "
+             "reusing the part's lowest-id mesh node. Clears starter WARNINGs "
+             "448/1624 and keeps mesh nodes at their source coordinates "
+             "(OpenRadioss otherwise relocates the mesh-node master to the "
+             "centre of mass at runtime). Renumbers every rigid master, so "
+             "loads/readouts address the new synthesized node.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -259,6 +270,7 @@ def main() -> int:
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,
+        rigid_cog_master=args.rigid_cog_master,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

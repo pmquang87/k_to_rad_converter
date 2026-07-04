@@ -138,6 +138,7 @@ def convert(
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
+    rigid_cog_master: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -213,6 +214,16 @@ def convert(
         plane through the charge whose normal faces the target; ``"none"`` emits
         no Ground_ID (OpenRadioss's ⊥Z default) and only warns; ``"X"``/``"Y"``/
         ``"Z"``/``"-X"``/``"-Y"``/``"-Z"`` force the ground-normal (up) axis.
+    rigid_cog_master : bool
+        Synthesize an element-free /RBODY master node at each *MAT_RIGID part's
+        nodal centroid (the treatment CNRBs always get) instead of reusing the
+        part's lowest-id mesh node. Clears starter WARNINGs 448/1624 (master
+        connected to an element / removed from the secondary set) and keeps all
+        mesh nodes at their source coordinates — otherwise OpenRadioss relocates
+        the mesh-node master to the centre of mass at runtime, so that node
+        appears to move in post-processing. Off by default because it renumbers
+        every rigid master (loads/time-history readouts then address the new
+        synthesized node, and default output is no longer byte-identical).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -261,6 +272,7 @@ def convert(
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",
+        rigid_cog_master=rigid_cog_master,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)

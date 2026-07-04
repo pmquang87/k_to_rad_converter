@@ -4737,5 +4737,74 @@ class AleFsiTests(unittest.TestCase):
         self.assertTrue(any("INITIAL_VOLUME_FRACTION" in w for w in result.warnings))
 
 
+# ── --rigid-cog-master (element-free /RBODY masters for *MAT_RIGID parts) ────
+
+class RigidCogMasterTests(unittest.TestCase):
+    """Opt-in synthesized element-free CoG masters for *MAT_RIGID parts.
+
+    Default output must be byte-identical (master = lowest-id mesh node); with
+    the flag each rigid part gets a NEW node at its nodal centroid as the
+    /RBODY master, so mesh nodes keep their source coordinates (OpenRadioss
+    relocates only the free master to the CoM) and starter WARNINGs 448/1624
+    (master connected to an element / removed from secondary set) disappear.
+    """
+
+    def _convert(self, deck: str, **opts):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **opts)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    def test_default_master_is_mesh_node(self):
+        _r, starter = self._convert(FORCE_RB_K)
+        self.assertIn("/RBODY/5", starter)          # lowest node of part 2
+
+    def test_flag_synthesizes_element_free_master(self):
+        result, starter = self._convert(FORCE_RB_K, rigid_cog_master=True)
+        self.assertIn("/RBODY/9", starter)          # new id above max mesh node 8
+        self.assertNotIn("/RBODY/5", starter)
+        self.assertTrue(any("rigid-cog-master" in w for w in result.warnings))
+        # the synthesized master is written to /NODE at the part's centroid
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/NODE"))
+        node9 = next(ln for ln in lines[i:] if ln.split()[:1] == ["9"])
+        x, y, z = (float(v) for v in node9.split()[1:4])
+        self.assertAlmostEqual((x, y, z)[0], 0.5)   # centroid of nodes 5-8
+        self.assertAlmostEqual(y, 0.5)
+        self.assertAlmostEqual(z, 1.0)
+
+    def test_flag_mesh_nodes_unchanged(self):
+        _r, starter = self._convert(FORCE_RB_K, rigid_cog_master=True)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/NODE"))
+        node5 = next(ln for ln in lines[i:] if ln.split()[:1] == ["5"])
+        self.assertEqual([float(v) for v in node5.split()[1:4]], [0.0, 0.0, 1.0])
+
+    def test_flag_load_follows_new_master(self):
+        # *LOAD_RIGID_BODY pid=2 → the /CLOAD grnod must hold the NEW master.
+        _r, starter = self._convert(FORCE_RB_K, rigid_cog_master=True)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.strip().startswith("rb_indnode_pid2"))
+        self.assertEqual(lines[i + 1].split(), ["9"])
+
+    def test_flag_folds_secondary_element_mass(self):
+        # *ELEMENT_MASS on a secondary rigid node must land in /RBODY Mass
+        # (with a synthesized master it is no longer the master node, and the
+        # ordinary-node /ADMAS path skips rigid nodes).
+        deck = FORCE_RB_K.replace(
+            "*CONTROL_TERMINATION",
+            "*ELEMENT_MASS\n         1         6     0.005\n*CONTROL_TERMINATION")
+        _r, starter = self._convert(deck, rigid_cog_master=True)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/RBODY/9"))
+        card1 = lines[i + 3]                        # node sens skew Ispher Mass...
+        self.assertAlmostEqual(float(card1[40:60]), 0.005)
+        self.assertNotIn("/ADMAS", starter)
+
+
 if __name__ == "__main__":
     unittest.main()
