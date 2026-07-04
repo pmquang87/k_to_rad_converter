@@ -4401,5 +4401,173 @@ class LegacyBlastLoadTests(unittest.TestCase):
         self.assertEqual(state.segment_sets[load.ssid].segments, [[1, 2, 3]])
 
 
+# ── High explosive + EOS (*MAT_HIGH_EXPLOSIVE_BURN, *EOS_*, *INITIAL_DETONATION) ─
+
+def _fix(*vals):
+    """One LS-DYNA fixed-format card: 10-char right-justified fields."""
+    return "".join(f"{v:>10}" for v in vals)
+
+
+def _cube_nodes(base, x0):
+    corners = [(x0, 0, 0), (x0 + 1, 0, 0), (x0 + 1, 1, 0), (x0, 1, 0),
+               (x0, 0, 1), (x0 + 1, 0, 1), (x0 + 1, 1, 1), (x0, 1, 1)]
+    return [f"{base + k:>8}{x:>16}{y:>16}{z:>16}"
+            for k, (x, y, z) in enumerate(corners, start=1)]
+
+
+def _explosive_eos_deck():
+    L = ["*KEYWORD", "*TITLE", "JWL EOS test", "*CONTROL_TERMINATION", "     1.0e-3",
+         "*NODE"]
+    for c in range(2):
+        L += _cube_nodes(8 * c, 2 * c)
+    L.append("*ELEMENT_SOLID")
+    for c in range(2):
+        L.append(_fix(c + 1, c + 1) + "".join(f"{8 * c + k:>10}" for k in range(1, 9)))
+    L += ["*PART", "explosive", _fix(1, 1, 1),
+          "*PART", "air", _fix(2, 1, 2),
+          "*SECTION_SOLID", _fix(1, 1),
+          "*MAT_HIGH_EXPLOSIVE_BURN", _fix(1, "1.63E-9", "6.93E+6", "2.1E+4", "0.0"),
+          "*EOS_JWL", _fix(1, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30", "7.0E+3", "1.0"),
+          "*MAT_NULL", _fix(2, "1.2E-12"),
+          "*EOS_LINEAR_POLYNOMIAL",
+          _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0"),
+          _fix("2.5E-1", "1.0"),
+          "*INITIAL_DETONATION", _fix(1, "0.5", "0.5", "0.5", "0.0"),
+          "*END"]
+    return "\n".join(L) + "\n"
+
+
+class ExplosiveEosTests(unittest.TestCase):
+    """*MAT_HIGH_EXPLOSIVE_BURN + *EOS_* → /MAT/LAW5, /MAT/LAW6 + /EOS/*,
+    *INITIAL_DETONATION → /DFS/DETPOINT."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kw)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    @staticmethod
+    def _block(starter, header):
+        """Data lines of the block whose keyword line starts with *header*."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(header))
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    # ── parse ────────────────────────────────────────────────────────
+    def test_high_explosive_and_jwl_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        self.assertIn(1, st.mat_high_explosive)
+        heb = st.mat_high_explosive[1]
+        self.assertAlmostEqual(heb.rho, 1.63e-9)
+        self.assertAlmostEqual(heb.d, 6.93e6)
+        self.assertAlmostEqual(heb.pcj, 2.1e4)
+        jwl = st.eos_jwl[1]
+        self.assertAlmostEqual(jwl.a, 3.7e5)
+        self.assertAlmostEqual(jwl.r1, 4.15)
+        self.assertAlmostEqual(jwl.omega, 0.30)
+
+    def test_eos_polynomial_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        eos = st.eos_cards[2]
+        self.assertEqual(eos.kind, "POLYNOMIAL")
+        self.assertAlmostEqual(eos.params["c4"], 0.4)
+        self.assertAlmostEqual(eos.params["e0"], 0.25)
+
+    def test_detonation_parsed(self):
+        st = self._state(_explosive_eos_deck())
+        self.assertEqual(len(st.detonations), 1)
+        det = st.detonations[0]
+        self.assertEqual(det.pid, 1)
+        self.assertAlmostEqual(det.x, 0.5)
+
+    # ── emit ─────────────────────────────────────────────────────────
+    def test_law5_merges_material_and_jwl(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        law5 = self._block(starter, "/MAT/LAW5/1")   # [0]=title
+        self.assertAlmostEqual(float(law5[1]), 1.63e-9)          # RHO
+        abr = law5[2].split()
+        self.assertAlmostEqual(float(abr[0]), 3.7e5)             # A (from EOS_JWL)
+        self.assertAlmostEqual(float(abr[4]), 0.30)              # OMEGA
+        dcj = law5[3].split()
+        self.assertAlmostEqual(float(dcj[0]), 6.93e6)            # D (from MAT_008)
+        self.assertAlmostEqual(float(dcj[1]), 2.1e4)             # P_CJ
+
+    def test_mat_null_with_eos_becomes_hyd_visc_not_void(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        self.assertIn("/MAT/HYD_VISC/2", starter)
+        self.assertNotIn("/MAT/VOID/2", starter)
+
+    def test_bare_mat_null_stays_void(self):
+        deck = _explosive_eos_deck().replace(
+            "*EOS_LINEAR_POLYNOMIAL\n" +
+            _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0") + "\n" +
+            _fix("2.5E-1", "1.0") + "\n", "")
+        _r, starter = self._convert(deck)
+        self.assertIn("/MAT/VOID/2", starter)
+        self.assertNotIn("/MAT/HYD_VISC/2", starter)
+
+    def test_eos_block_id_equals_material_id(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        self.assertIn("/EOS/POLYNOMIAL/2", starter)    # id == carrier mat id
+
+    def test_ideal_gas_gamma_and_positive_p0(self):
+        deck = _explosive_eos_deck().replace(
+            "*INITIAL_DETONATION\n" + _fix(1, "0.5", "0.5", "0.5", "0.0") + "\n",
+            "*MAT_NULL\n" + _fix(3, "1.2E-12") + "\n"
+            "*EOS_IDEAL_GAS\n" + _fix(3, "717.6", "1004.5", "0.0", "0.0", "288.0", "1.0")
+            + "\n")
+        _r, starter = self._convert(deck)
+        gas = self._block(starter, "/EOS/IDEAL-GAS/3")   # [0]=title
+        card = gas[1].split()
+        self.assertAlmostEqual(float(card[0]), 1004.5 / 717.6, places=4)   # gamma
+        self.assertGreater(float(card[1]), 0.0)                            # P0 > 0
+
+    def test_detpoint_no_title_line_and_matid(self):
+        _r, starter = self._convert(_explosive_eos_deck())
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/DFS/DETPOINT/"))
+        # next non-comment line is the data card directly (no title line)
+        self.assertTrue(lines[i + 1].startswith("#"))
+        card = lines[i + 2].split()
+        self.assertAlmostEqual(float(card[0]), 0.5)     # Xdet
+        self.assertEqual(card[4], "1")                  # mat_ID resolved from part 1
+
+    def test_jwl_without_eos_warns(self):
+        deck = _explosive_eos_deck().replace(
+            "*EOS_JWL\n" +
+            _fix(1, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30", "7.0E+3", "1.0") + "\n",
+            "")
+        result, _s = self._convert(deck)
+        self.assertTrue(any("companion *EOS_JWL" in w for w in result.warnings))
+
+    def test_detonation_pid0_lights_all_explosives(self):
+        deck = _explosive_eos_deck().replace(
+            _fix(1, "0.5", "0.5", "0.5", "0.0"),
+            _fix(0, "0.5", "0.5", "0.5", "0.0"))
+        _r, starter = self._convert(deck)
+        self.assertEqual(starter.count("/DFS/DETPOINT/"), 1)   # one explosive
+
+
 if __name__ == "__main__":
     unittest.main()

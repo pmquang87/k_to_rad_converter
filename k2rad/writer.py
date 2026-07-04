@@ -25,6 +25,7 @@ from .state import (
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf,
     InitialVelocityNode, InitialVelocityRigidBody, PressureLoad,
+    MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
 )
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
@@ -258,10 +259,134 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law44(mat)
     for mat in state.mat_rigid.values():
         lines += _emit_mat_elast_for_rigid(mat)
+    # A *MAT_NULL that carries a companion *EOS_* becomes a hydro /MAT/LAW6 (with
+    # that /EOS) below; a bare *MAT_NULL stays /MAT/VOID (vacuum/void ALE phase).
+    eos_mids = set(state.eos_cards) | set(state.eos_jwl)
     for mat in state.mat_null.values():
-        lines += _emit_mat_void(mat)
+        if mat.mid not in eos_mids:
+            lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat)
+    lines += _make_explosive_and_eos_materials(state)
+    return lines
+
+
+def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
+                   jwl: Optional[EosJwl]) -> List[str]:
+    """*MAT_HIGH_EXPLOSIVE_BURN (+ its *EOS_JWL) → /MAT/LAW5 (JWL).
+
+    Card layout from MAT/matl5_jwl.cfg FORMAT(radioss2019). The JWL A,B,R1,R2,ω,E0
+    come from the paired *EOS_JWL (shared id); D and P_CJ from the MAT_008 card.
+    """
+    if jwl is None:
+        state.warn(f"*MAT_HIGH_EXPLOSIVE_BURN {heb.mid}: no companion *EOS_JWL "
+                   "(same id) — /MAT/LAW5 emitted with zero JWL coefficients; add "
+                   "an *EOS_JWL or the detonation product has no pressure law.")
+        a = b = r1 = r2 = omega = e0 = 0.0
+    else:
+        a, b, r1, r2, omega, e0 = jwl.a, jwl.b, jwl.r1, jwl.r2, jwl.omega, jwl.e0
+        if jwl.vo not in (0.0, 1.0):
+            state.warn(f"*EOS_JWL {jwl.eosid}: VO={jwl.vo} (initial relative "
+                       "volume) has no /MAT/LAW5 field — Radioss references E0 to "
+                       "the initial volume; verify the initial state.")
+    return [
+        f"/MAT/LAW5/{heb.mid}",
+        heb.title or f"HE_{heb.mid}",
+        "#              RHO_I",
+        f"{_f(heb.rho)}",
+        "#                  A                   B                  R1                  R2               OMEGA",
+        f"{_f(a)}{_f(b)}{_f(r1)}{_f(r2)}{_f(omega)}",
+        "#                  D                P_CJ                  E0                Eadd   I_BFRAC      Qopt",
+        f"{_f(heb.d)}{_f(heb.pcj)}{_f(e0)}{_f(0.0)}         0         0",
+        "#                 P0                 PSH          Bunreacted",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law6_carrier(mid: int, title: str, rho: float) -> List[str]:
+    """A hydrodynamic /MAT/LAW6 (keyword /MAT/HYD_VISC) carrier for an /EOS.
+
+    Minimal form (RHO + blank kinematic-viscosity/Pmin card) exactly as the
+    official Drop_Container FSI example pairs it with a separate /EOS block of the
+    same id.
+    """
+    return [
+        f"/MAT/HYD_VISC/{mid}",
+        title or f"FLUID_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#                 Nu                Pmin",
+        f"{_f(0.0)}{_f(0.0)}",
+    ]
+
+
+def _emit_eos(eos: EosCard) -> List[str]:
+    """A standalone /EOS/<kind> block (id == its material id). Layout from
+    MAT/mat_EOS.cfg FORMAT(radioss2022)."""
+    p = eos.params
+    head = [f"/EOS/{eos.kind}/{eos.eosid}", f"EOS_{eos.kind}_{eos.eosid}"]
+    if eos.kind == "POLYNOMIAL":
+        return head + [
+            "#                 C0                  C1                  C2                  C3",
+            f"{_f(p['c0'])}{_f(p['c1'])}{_f(p['c2'])}{_f(p['c3'])}",
+            "#                 C4                  C5                  E0                P_sh               RHO_0",
+            f"{_f(p['c4'])}{_f(p['c5'])}{_f(p['e0'])}{_f(p['psh'])}{_f(p['rho0'])}",
+            HDR,
+        ]
+    if eos.kind == "GRUNEISEN":
+        return head + [
+            "#                  C                  S1                  S2                  S3",
+            f"{_f(p['c'])}{_f(p['s1'])}{_f(p['s2'])}{_f(p['s3'])}",
+            "#                 Y0                   a                  E0               RHO_0",
+            f"{_f(p['y0'])}{_f(p['a'])}{_f(p['e0'])}{_f(p['rho0'])}",
+            HDR,
+        ]
+    if eos.kind == "IDEAL-GAS":
+        return head + [
+            "#              Gamma                  P0                 PSH                  T0               RHO_0",
+            f"{_f(p['gamma'])}{_f(p['p0'])}{_f(p['psh'])}{_f(p['t0'])}{_f(p['rho0'])}",
+            HDR,
+        ]
+    return head + [HDR]
+
+
+def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
+    """/MAT/LAW5 explosives and /MAT/LAW6+/EOS fluids for the coupled ALE path."""
+    if not (state.mat_high_explosive or state.eos_cards or state.eos_jwl):
+        return []
+    lines: List[str] = []
+    # JWL high explosives: *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL → /MAT/LAW5
+    for mid, heb in sorted(state.mat_high_explosive.items()):
+        lines += _emit_mat_law5(state, heb, state.eos_jwl.get(mid))
+    for eosid in sorted(set(state.eos_jwl) - set(state.mat_high_explosive)):
+        state.warn(f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
+                   "(same id) — the JWL parameters have no material to attach to "
+                   "and were not emitted (add the explosive material).")
+    # Other fluids: carrier /MAT/LAW6 (HYD_VISC) + /EOS/<kind>
+    for eosid, eos in sorted(state.eos_cards.items()):
+        carrier = state.mat_null.get(eosid)
+        rho = carrier.rho if carrier else eos.params.get("rho0", 0.0)
+        title = carrier.title if carrier else ""
+        if not carrier and rho <= 0.0:
+            state.warn(f"*EOS_{eos.kind} {eosid}: no companion *MAT_NULL to give a "
+                       "density for the /MAT/LAW6 carrier and no reference "
+                       "density — RHO_I left 0; set the fluid density.")
+        # Radioss /EOS/IDEAL-GAS requires a POSITIVE initial pressure. LS-DYNA
+        # gives specific heats + temperature, so derive P0 = rho*(Cp-Cv)*T0.
+        if eos.kind == "IDEAL-GAS" and eos.params.get("p0", 0.0) <= 0.0:
+            cv = eos.params.get("cv", 0.0)
+            cp = eos.params.get("cp", 0.0)
+            t0 = eos.params.get("t0", 0.0)
+            if rho > 0.0 and cp > cv > 0.0 and t0 > 0.0:
+                eos.params["p0"] = rho * (cp - cv) * t0
+            else:
+                state.warn(f"*EOS_IDEAL_GAS {eosid}: could not derive a positive "
+                           "initial pressure (need density, Cv<Cp and T0) — "
+                           "/EOS/IDEAL-GAS P0 left 0, which the starter rejects; "
+                           "set P0 manually.")
+        lines += _emit_mat_law6_carrier(eosid, title, rho)
+        lines += _emit_eos(eos)
     return lines
 
 
@@ -2896,6 +3021,50 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
     return lines if emitted else []
 
 
+def _make_detonations(state: ConversionState) -> List[str]:
+    """*INITIAL_DETONATION → /DFS/DETPOINT — the JWL burn origin/time.
+
+    Each detonation lights a /MAT/LAW5 explosive: pid>0 resolves part → material,
+    pid=0 lights every explosive material. Card: Xdet Ydet Zdet Tdet mat_ID.
+    Modal decks emit nothing (a detonation is irrelevant to an eigenproblem).
+    """
+    if not state.detonations or state.is_modal:
+        return []
+    if not state.mat_high_explosive:
+        state.warn("*INITIAL_DETONATION present but no *MAT_HIGH_EXPLOSIVE_BURN "
+                   "(/MAT/LAW5) explosive to light — /DFS/DETPOINT not emitted.")
+        return []
+    lines = ["#-  DETONATION POINTS (*INITIAL_DETONATION -> /DFS/DETPOINT):", HDR]
+    emitted = False
+    for det in state.detonations:
+        if det.pid > 0:
+            part = state.parts.get(det.pid)
+            mid = part.mid if part else 0
+            if mid not in state.mat_high_explosive:
+                # LS-DYNA names a part, but tolerate a deck that names the
+                # explosive material id directly.
+                mid = det.pid if det.pid in state.mat_high_explosive else 0
+            if mid == 0:
+                state.warn(f"*INITIAL_DETONATION pid={det.pid}: not an explosive "
+                           "(/MAT/LAW5) part/material — /DFS/DETPOINT skipped.")
+                continue
+            mids = [mid]
+        else:
+            mids = sorted(state.mat_high_explosive)      # pid=0 → all explosives
+        for mid in mids:
+            did = state.next_id()
+            # /DFS/DETPOINT has NO title line — the data card follows the header
+            # directly (cfg LOADS/detpoint.cfg FORMAT(radioss140)).
+            lines += [
+                f"/DFS/DETPOINT/{did}",
+                "#               XDET                YDET                ZDET                TDET mat_IDDET",
+                f"{_f(det.x)}{_f(det.y)}{_f(det.z)}{_f(det.lt)}{_i(mid)}",
+                HDR,
+            ]
+            emitted = True
+    return lines if emitted else []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starter: offline frequency-domain post-processing notes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4015,6 +4184,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_gravity_loads(state))
     sections.append(_make_body_loads(state))
     sections.append(_make_blast_loads(state))
+    sections.append(_make_detonations(state))
     sections.append(_make_starter_cloads(state))
     sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))

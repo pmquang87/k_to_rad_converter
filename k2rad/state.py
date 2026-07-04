@@ -143,6 +143,73 @@ class MatNull:
 
 
 @dataclass
+class MatHighExplosiveBurn:
+    """*MAT_HIGH_EXPLOSIVE_BURN (MAT_008) — a programmed-burn high explosive.
+
+    Card: mid ro d pcj beta k g sigy
+      ro   = density, d = detonation velocity, pcj = Chapman-Jouguet pressure.
+    Paired (shared mid) with an *EOS_JWL that supplies the JWL A,B,R1,R2,omega,E0.
+    The two together map to one OpenRadioss /MAT/LAW5 (JWL). beta/k/g/sigy have
+    no LAW5 counterpart (LAW5 is a pure detonation-product EOS) and are dropped.
+    """
+    mid: int
+    title: str
+    rho: float
+    d: float
+    pcj: float
+    beta: float = 0.0
+
+
+@dataclass
+class EosJwl:
+    """*EOS_JWL (EOS_002) — the JWL pressure law for detonation products.
+
+    Card 1: eosid a b r1 r2 omeg e0 vo.  Folded into the /MAT/LAW5 of the same id
+    (its companion *MAT_HIGH_EXPLOSIVE_BURN); vo != 1 is warned.
+    """
+    eosid: int
+    a: float
+    b: float
+    r1: float
+    r2: float
+    omega: float
+    e0: float
+    vo: float = 1.0
+
+
+@dataclass
+class EosCard:
+    """An *EOS_* that maps to a standalone OpenRadioss /EOS/<kind> block.
+
+    ``kind`` is the Radioss keyword suffix ("POLYNOMIAL" | "GRUNEISEN" |
+    "IDEAL-GAS"); ``params`` holds the Radioss field values keyed by name (the
+    LS-DYNA->Radioss field mapping is done in the handler). ``rho0`` is the
+    reference density used as a fallback for the /MAT/LAW6 carrier when no
+    companion *MAT_NULL supplies one. The /EOS block binds to the material of the
+    SAME id (eosid == mid), an OpenRadioss requirement.
+    """
+    eosid: int
+    kind: str
+    params: Dict[str, float] = field(default_factory=dict)
+    rho0: float = 0.0
+    note: str = ""
+
+
+@dataclass
+class InitialDetonation:
+    """*INITIAL_DETONATION — a JWL lighting point/time → /DFS/DETPOINT.
+
+    Card: pid x y z lt.  ``pid`` is the explosive part (0 = all); the writer
+    resolves part -> LAW5 material id for the /DFS/DETPOINT mat_ID field.
+    """
+    pid: int
+    x: float
+    y: float
+    z: float
+    lt: float = 0.0
+
+
+@dataclass
 class Curve:
     lcid: int
     title: str
@@ -764,6 +831,12 @@ class ConversionState:
         self.mat_rigid: Dict[int, MatRigid] = {}
         self.mat_null: Dict[int, MatNull] = {}
         self.mat_power_law: Dict[int, MatPowerLaw] = {}
+        # High-explosive / EOS (coupled ALE / JWL detonation):
+        #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
+        #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
+        self.mat_high_explosive: Dict[int, MatHighExplosiveBurn] = {}
+        self.eos_jwl: Dict[int, EosJwl] = {}            # eosid → JWL params
+        self.eos_cards: Dict[int, EosCard] = {}         # eosid → /EOS/<kind>
 
         self.curves: Dict[int, Curve] = {}
         self.coord_sys: Dict[int, CoordSys] = {}
@@ -798,6 +871,8 @@ class ConversionState:
         # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
         self.blast_sources: Dict[int, LoadBlastEnhanced] = {}
         self.blast_segment_loads: List[LoadBlastSegmentSet] = []
+        # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
+        self.detonations: List[InitialDetonation] = []
         # Unit system (mass, length, time) implied by a *LOAD_BLAST_ENHANCED UNIT
         # flag. The TM5-1300 empirical blast formulas are unit-dependent, so the
         # /BEGIN unit labels must match the deck's real units for /LOAD/PBLAST to

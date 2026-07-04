@@ -20,6 +20,7 @@ from .state import (
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
+    MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
@@ -372,6 +373,151 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     E   = to_float(f1[2]) if len(f1) > 2 else 0.0
     nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
     state.mat_null[mid] = MatNull(mid, title, rho, E, nu)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# High explosive + equations of state (coupled ALE / JWL detonation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_high_explosive_burn(block: Block, state: ConversionState) -> None:
+    """*MAT_HIGH_EXPLOSIVE_BURN (MAT_008) → half of /MAT/LAW5 (JWL).
+
+    Card: mid ro d pcj beta k g sigy.  Merged at write time with the *EOS_JWL of
+    the same id (which supplies A,B,R1,R2,omega,E0) into one /MAT/LAW5.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    mid = to_int(f[0])
+    state.mat_high_explosive[mid] = MatHighExplosiveBurn(
+        mid=mid, title=title,
+        rho=to_float(f[1]) if len(f) > 1 else 0.0,
+        d=to_float(f[2])   if len(f) > 2 else 0.0,
+        pcj=to_float(f[3]) if len(f) > 3 else 0.0,
+        beta=to_float(f[4]) if len(f) > 4 else 0.0,
+    )
+
+
+def handle_eos_jwl(block: Block, state: ConversionState) -> None:
+    """*EOS_JWL (EOS_002) → the JWL parameters of /MAT/LAW5.
+
+    Card 1: eosid a b r1 r2 omeg e0 vo.  Stored by eosid; folded into the LAW5
+    of the same id (its companion *MAT_HIGH_EXPLOSIVE_BURN).
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    state.eos_jwl[eosid] = EosJwl(
+        eosid=eosid,
+        a=to_float(f[1])     if len(f) > 1 else 0.0,
+        b=to_float(f[2])     if len(f) > 2 else 0.0,
+        r1=to_float(f[3])    if len(f) > 3 else 0.0,
+        r2=to_float(f[4])    if len(f) > 4 else 0.0,
+        omega=to_float(f[5]) if len(f) > 5 else 0.0,
+        e0=to_float(f[6])    if len(f) > 6 else 0.0,
+        vo=to_float(f[7], 1.0) if len(f) > 7 else 1.0,
+    )
+
+
+def handle_eos_linear_polynomial(block: Block, state: ConversionState) -> None:
+    """*EOS_LINEAR_POLYNOMIAL (EOS_001) → /EOS/POLYNOMIAL.
+
+    Card 1: eosid c0 c1 c2 c3 c4 c5 c6
+    Card 2: e0 v0        (c6 has no Radioss term and is dropped)
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    e0 = to_float(f2[0]) if f2 else 0.0
+    v0 = to_float(f2[1], 1.0) if len(f2) > 1 else 1.0
+    if v0 not in (0.0, 1.0):
+        state.warn(f"*EOS_LINEAR_POLYNOMIAL {eosid}: V0={v0} (initial relative "
+                   "volume) has no /EOS/POLYNOMIAL field — Radioss references E0 "
+                   "to the initial volume; verify the initial state.")
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="POLYNOMIAL",
+        params={"c0": g(1), "c1": g(2), "c2": g(3), "c3": g(4),
+                "c4": g(5), "c5": g(6), "e0": e0, "psh": 0.0, "rho0": 0.0})
+
+
+def handle_eos_gruneisen(block: Block, state: ConversionState) -> None:
+    """*EOS_GRUNEISEN (EOS_004) → /EOS/GRUNEISEN.
+
+    Card 1: eosid c s1 s2 s3 gamao a e0   (LS-DYNA GAMAO -> Radioss Y0).
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="GRUNEISEN",
+        params={"c": g(1), "s1": g(2), "s2": g(3), "s3": g(4),
+                "y0": g(5), "a": g(6), "e0": g(7), "rho0": 0.0})
+
+
+def handle_eos_ideal_gas(block: Block, state: ConversionState) -> None:
+    """*EOS_IDEAL_GAS → /EOS/IDEAL-GAS.
+
+    LS-DYNA parameterises the ideal gas by specific heats (Card 1:
+    eosid cv0 cp0 c1 c2 t0 v0); Radioss wants the ratio gamma = Cp/Cv. The
+    conversion is the one genuine EOS unit-aware map, so it is warned.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    eosid = to_int(f[0])
+    cv0 = to_float(f[1]) if len(f) > 1 else 0.0
+    cp0 = to_float(f[2]) if len(f) > 2 else 0.0
+    t0  = to_float(f[5]) if len(f) > 5 else 0.0
+    if cv0 > 0.0 and cp0 > 0.0:
+        gamma = cp0 / cv0
+    else:
+        gamma = 1.4
+        state.warn(f"*EOS_IDEAL_GAS {eosid}: Cv/Cp not both given — defaulted "
+                   "gamma=1.4 for /EOS/IDEAL-GAS; set the heat-capacity ratio "
+                   "explicitly if the gas is not diatomic.")
+    state.eos_cards[eosid] = EosCard(
+        eosid=eosid, kind="IDEAL-GAS",
+        # cv/cp/t0 are kept so the writer can compute the initial pressure
+        # P0 = rho*(cp-cv)*t0 (Radioss requires P0 > 0) once the carrier
+        # material's density is known.
+        params={"gamma": gamma, "p0": 0.0, "psh": 0.0, "t0": t0, "rho0": 0.0,
+                "cv": cv0, "cp": cp0},
+        note="gamma = Cp/Cv")
+
+
+def handle_initial_detonation(block: Block, state: ConversionState) -> None:
+    """*INITIAL_DETONATION → /DFS/DETPOINT (JWL lighting point/time).
+
+    Card: pid x y z lt.  pid = explosive part (0 = all); the writer resolves
+    part -> LAW5 material id.
+    """
+    offset = _title_offset(block)
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if not f:
+            continue
+        state.detonations.append(InitialDetonation(
+            pid=to_int(f[0]),
+            x=to_float(f[1]) if len(f) > 1 else 0.0,
+            y=to_float(f[2]) if len(f) > 2 else 0.0,
+            z=to_float(f[3]) if len(f) > 3 else 0.0,
+            lt=to_float(f[4]) if len(f) > 4 else 0.0,
+        ))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1719,6 +1865,12 @@ HANDLERS = {
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
+    # High explosive + equations of state (coupled ALE / JWL detonation)
+    "MAT_HIGH_EXPLOSIVE_BURN":                handle_mat_high_explosive_burn,
+    "EOS_JWL":                                handle_eos_jwl,
+    "EOS_LINEAR_POLYNOMIAL":                  handle_eos_linear_polynomial,
+    "EOS_GRUNEISEN":                          handle_eos_gruneisen,
+    "EOS_IDEAL_GAS":                          handle_eos_ideal_gas,
 
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
@@ -1741,6 +1893,7 @@ HANDLERS = {
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
+    "INITIAL_DETONATION":                     handle_initial_detonation,
 
     # Constraints
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
