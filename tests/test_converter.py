@@ -4158,6 +4158,22 @@ class BlastLoadTests(unittest.TestCase):
         i = next(k for k, ln in enumerate(lines) if ln.strip() == "/BEGIN")
         self.assertEqual(lines[i + 3].split(), ["g", "cm", "micros"])
 
+    def test_explicit_units_mismatch_warns(self):
+        # Explicit units that DISAGREE with the deck's *LOAD_BLAST_ENHANCED UNIT
+        # flag (here UNIT=2 = kg/m/s) must trigger a loud UNIT MISMATCH warning:
+        # mislabelled /BEGIN units make /LOAD/PBLAST rescale its cm/g/µs data
+        # wrongly (e.g. an SI-metre deck labelled "mm" reads every distance
+        # 1000x too small -> 'Rg too close to the charge' on every segment).
+        result, _s, _e = self._convert(units=("Kg", "mm", "s"))
+        hits = [w for w in result.warnings if "UNIT MISMATCH" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("kg/m/s", hits[0])
+
+    def test_explicit_units_match_case_insensitive_no_warning(self):
+        # Explicit units equal to the UNIT-flag system (any case) are fine.
+        result, _s, _e = self._convert(units=("KG", "M", "S"))
+        self.assertFalse(any("UNIT MISMATCH" in w for w in result.warnings))
+
     def test_pblast_card_fields(self):
         _r, starter, _e = self._convert()
         # the /LOAD/PBLAST surface is a /SURF/SEG carrying the segment set
