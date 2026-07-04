@@ -66,8 +66,14 @@ Or edit `run_converter.py` to set a hardcoded path and run
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
 `*MAT_PIECEWISE_LINEAR_PLASTICITY` (+ `_MODIFIED_`) → `/MAT/LAW36`
-`*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44`
+`*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44` (`b` = plastic hardening modulus
+E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
+opposite directions)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
+Material failure strain (MAT_003 `FS` / MAT_024 `FAIL` / MAT_018 `EPSF`) →
+`/FAIL/JOHNSON` `D1` with `Ifail_sh=2` (delete only when ALL through-thickness
+points fail, LS-DYNA's built-in erosion rule) instead of the material `Eps_max`
+(first-point deletion, which over-eroded 5x on the W13 blast validation pair)
 `*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
@@ -118,6 +124,11 @@ unit/sign gotchas.
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`, `_GENERAL`) → `/INTER/TYPE7`
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`
+`ignore=0/1/2` → `Inacti=5` (LS-DYNA neutralizes initial penetrations at
+initialization for every ignore setting; `Inacti=0` would apply the full
+penalty force to resting-contact nodes at cycle 0). Exception: an implicit
+deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
+pre-engagement bootstrap needs the t=0 stiffness path)
 
 ### Control / output
 `*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks

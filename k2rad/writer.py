@@ -256,9 +256,9 @@ def _make_materials(state: ConversionState) -> List[str]:
     for mat in state.mat_elastic.values():
         lines += _emit_mat_elastic(mat)
     for mat in state.mat_plas_tab.values():
-        lines += _emit_mat_law36(mat)
+        lines += _emit_mat_law36(mat, state)
     for mat in state.mat_plas_kin.values():
-        lines += _emit_mat_law44(mat)
+        lines += _emit_mat_law44(mat, state)
     for mat in state.mat_rigid.values():
         lines += _emit_mat_elast_for_rigid(mat)
     # A *MAT_NULL that carries a companion *EOS_* becomes a hydro /MAT/LAW6 (with
@@ -268,7 +268,7 @@ def _make_materials(state: ConversionState) -> List[str]:
         if mat.mid not in eos_mids:
             lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
-        lines += _emit_mat_law36_powerlaw(mat)
+        lines += _emit_mat_law36_powerlaw(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
     return lines
@@ -427,17 +427,54 @@ def _emit_mat_void(mat: MatNull) -> List[str]:
     ]
 
 
-def _emit_mat_law36(mat: MatPlasTAB) -> List[str]:
+def _emit_fail_johnson_all_layers(mid: int, epsf: float,
+                                  state: ConversionState) -> List[str]:
+    """LS-DYNA built-in material failure (MAT_003 FS / MAT_024 FAIL / MAT_018
+    EPSF) deletes a shell only when the plastic-strain criterion is met at ALL
+    through-thickness integration points, so bending that plastifies one face
+    does not erode the element. The LAW36/LAW44 built-in Eps_max instead
+    deletes on the FIRST integration point that reaches it — on the W13
+    BlastVehicle z-ground pair (FS=0.0015, blast + plate ringing) that eroded
+    2413 shells where LS-DYNA eroded 428, so the OpenRadioss debris flew off
+    with ~5.7e9 mJ of kinetic energy that LS-DYNA instead dissipated as
+    plastic work (KE +29% / IE -89% at t=6 ms).
+
+    /FAIL/JOHNSON with D1=epsf and D2..D5=0 makes the damage integral
+    D = sum(d_eps_p / eps_f) reach 1 exactly at eps_p = epsf per integration
+    point — the same per-point threshold — and Ifail_sh=2 applies the
+    LS-DYNA-like ALL-points deletion rule (Ifail_so=1: solids fail on their
+    single point as in LS-DYNA ELFORM 1). Card layout audited against
+    hm_cfg_files fail_johnson.cfg FORMAT(radioss2017), the block a /BEGIN 2022
+    deck is read with: D1-D5 (5x20); EPSILON_DOT_0(20) IFAIL_SH(10)
+    IFAIL_SO(10) blank(20) DADV(20).
+    """
+    state.warn(
+        f"MAT {mid}: failure strain {epsf:g} moved from the material Eps_max "
+        "(deletes the shell at the FIRST integration point that fails) to "
+        "/FAIL/JOHNSON D1 with Ifail_sh=2 (deletes only when ALL "
+        "through-thickness points fail) to match LS-DYNA's built-in "
+        "material-failure erosion rule."
+    )
+    return [
+        f"/FAIL/JOHNSON/{mid}",
+        "#                 D1                  D2                  D3                  D4                  D5",
+        f"{_f(epsf)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#      EPSILON_DOT_0  IFAIL_SH  IFAIL_SO                                    DADV",
+        f"{_f(0.0)}         2         1                    {_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law36(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     fid = mat.funct_id
     fail = mat.fail if 0.0 < mat.fail < 1e19 else 0.0
-    fail_str = _f(fail) if fail > 0.0 else "                   0"
     lines = [
         f"/MAT/LAW36/{mat.mid}",
         mat.title or f"MAT_{mat.mid}",
         "#              RHO_I",
         f"{_f(mat.rho)}",
         "#                  E                  Nu          Eps_p_max",
-        f"{_f(mat.E)}{_f(mat.nu)}{fail_str}",
+        f"{_f(mat.E)}{_f(mat.nu)}                   0",
         "# N_funct   F_smooth",
         "         1         0",
         "# fct_IDp      Fscale",
@@ -450,12 +487,22 @@ def _emit_mat_law36(mat: MatPlasTAB) -> List[str]:
         "                   0",
         HDR,
     ]
+    if fail > 0.0:
+        lines += _emit_fail_johnson_all_layers(mat.mid, fail, state)
     return lines
 
 
-def _emit_mat_law44(mat: MatPlasKin) -> List[str]:
-    epmax = mat.fs if mat.fs > 0.0 else 0.0
-    return [
+def _emit_mat_law44(mat: MatPlasKin, state: ConversionState) -> List[str]:
+    # LS-DYNA ETAN is the tangent modulus of the bilinear TOTAL stress-strain
+    # curve; LAW44's b (with n=1) is dSigma/dEps_PLASTIC, so carry the plastic
+    # hardening modulus H = E*ETAN/(E-ETAN) through, not raw ETAN.
+    b = (mat.E * mat.etan / (mat.E - mat.etan)
+         if 0.0 < mat.etan < mat.E else mat.etan)
+    # LS-DYNA BETA runs 0=kinematic..1=isotropic; Radioss Chard runs the
+    # OPPOSITE way (0=isotropic..1=kinematic Prager-Ziegler): Chard = 1-BETA.
+    chard = min(max(1.0 - mat.beta, 0.0), 1.0)
+    epmax = mat.fs if 0.0 < mat.fs < 1e19 else 0.0
+    lines = [
         f"/MAT/LAW44/{mat.mid}",
         mat.title or f"MAT_{mat.mid}",
         "#              RHO_I",
@@ -463,24 +510,28 @@ def _emit_mat_law44(mat: MatPlasKin) -> List[str]:
         "#                  E                  Nu",
         f"{_f(mat.E)}{_f(mat.nu)}",
         "#                  a                   b                   n               Chard              SIGmax0",
-        f"{_f(mat.sigy)}{_f(mat.etan)}{_f(1.0)}{_f(mat.beta)}{_f(0.0)}",
+        f"{_f(mat.sigy)}{_f(b)}{_f(1.0)}{_f(chard)}{_f(0.0)}",
         "#                  c                   p       ICC   ISMOOTH               F_CUT                  VP",
         f"{_f(mat.src)}{_f(mat.srp)}         0         0{_f(0.0)}          {_i(mat.vp)}",
         "#              EpsMax                 Et1                 Et2",
-        f"{_f(epmax)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
+    if epmax > 0.0:
+        lines += _emit_fail_johnson_all_layers(mat.mid, epmax, state)
+    return lines
 
 
-def _emit_mat_law36_powerlaw(mat: MatPowerLaw) -> List[str]:
-    fail_str = _f(mat.epsf) if 0.0 < mat.epsf < 1e19 else "                   0"
+def _emit_mat_law36_powerlaw(mat: MatPowerLaw, state: ConversionState) -> List[str]:
+    fail = mat.epsf if 0.0 < mat.epsf < 1e19 else 0.0
+    trailer = _emit_fail_johnson_all_layers(mat.mid, fail, state) if fail > 0.0 else []
     return [
         f"/MAT/LAW36/{mat.mid}",
         mat.title or f"MAT_{mat.mid}",
         "#              RHO_I",
         f"{_f(mat.rho)}",
         "#                  E                  Nu          Eps_p_max",
-        f"{_f(mat.E)}{_f(mat.nu)}{fail_str}",
+        f"{_f(mat.E)}{_f(mat.nu)}                   0",
         "# N_funct   F_smooth",
         "         1         0",
         "# fct_IDp      Fscale",
@@ -492,7 +543,7 @@ def _emit_mat_law36_powerlaw(mat: MatPowerLaw) -> List[str]:
         "#          Eps_dot_1",
         "                   0",
         HDR,
-    ]
+    ] + trailer
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1598,7 +1649,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                       _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
         else:
@@ -1609,7 +1660,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                           _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                           gapmin_overrides)
                 lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                           _ignore_to_inacti(c.ignore, state, c.inter_id),
+                                           _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                            viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                            gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
 
@@ -1621,7 +1672,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
             inacti = (5 if c.inter_id in recipe_inacti_ids
-                      else _ignore_to_inacti(c.ignore, state, c.inter_id))
+                      else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
                                        inacti,
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
@@ -1856,15 +1907,38 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
     return lines
 
 
-def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int:
+def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
+                      gapmin: float = 0.0) -> int:
     """Map LS-DYNA *CONTACT ignore → OpenRadioss /INTER/TYPE7 Inacti.
 
-    LS-DYNA ignore=1/2 means: *remember* the initial penetration, subtract it so
-    it produces no force at t=0, but keep the contact fully ACTIVE for any
-    subsequent (incremental) penetration. (ignore=2 = ignore=1 plus printed
-    warnings.) The faithful OpenRadioss equivalent is **Inacti=5** (variable gap:
+    LS-DYNA never applies a contact force to *initial* penetrations, whatever
+    ignore is set to — ignore only selects HOW they are neutralized at
+    initialization:
+
+      * ignore=0 (default): MOVE the penetrating tracked nodes back to the
+        surface, eliminating the penetration geometrically.
+      * ignore=1/2: leave the nodes in place, *remember* the initial
+        penetration, subtract it so it produces no force at t=0, but keep the
+        contact fully ACTIVE for any subsequent (incremental) penetration.
+        (ignore=2 = ignore=1 plus printed warnings.)
+
+    The faithful OpenRadioss equivalent for both is **Inacti=5** (variable gap:
     the per-node gap is reduced to gap0 − P0 so the node starts just-touching
     with zero initial force and re-engages as soon as it moves further in).
+    Mapping ignore=0 to Inacti=0 — the pre-2026-07 behavior — instead applies
+    the FULL penalty force to every initially penetrated node at cycle 0: on
+    W13_BlastVehicle z-ground (vehicle resting on the ground plane, 250 initial
+    penetrations against a 41.7 mm starter-default gap) that pre-loaded
+    3.4e10 mJ of elastic contact energy at t=0 and blew kinetic energy up 5
+    orders of magnitude over the LS-DYNA reference before the blast wave even
+    arrived. (Inacti=3 would mimic the ignore=0 node-moving literally, but
+    moving rigid-body secondary nodes seg-faulted the engine during init —
+    see below — so the no-node-motion Inacti=5 is used for ignore=0 too.)
+
+    The ONE deliberate exception: an implicit deck that pre-engages the
+    contact via SST/MST → Gapmin (or --inter-gapmin) keeps Inacti=0, because
+    that documented bootstrap (see _sst_mst_to_gapmin) NEEDS the t=0 spring
+    force as Newton's stiffness path at zero load.
 
     This corrects an earlier mapping to Inacti=1 (deactivate / zero the stiffness
     of penetrating secondary nodes). On `implicit_hr-anlenkung` that mapping was
@@ -1896,7 +1970,23 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int) -> int
             "and keeps load-path nodes active (was Inacti=1, which deletes them)."
         )
         return 5
-    return 0
+    if state.is_implicit and gapmin > 0.0:
+        state.warn(
+            f"CONTACT {inter_id}: ignore=0 with an explicit engagement Gapmin "
+            f"({gapmin:g}) on an implicit deck -> Inacti=0 kept (pre-engagement "
+            "bootstrap: the t=0 spring force is the Newton stiffness path). "
+            "Set ignore=1 on *CONTACT if you want initial penetrations "
+            "neutralized instead."
+        )
+        return 0
+    state.warn(
+        f"CONTACT {inter_id}: ignore=0 mapped to /INTER/TYPE7 Inacti=5. LS-DYNA "
+        "removes initial penetrations at initialization (moves nodes; no t=0 "
+        "force) — Inacti=0 would instead apply the full penalty force to every "
+        "initially penetrated node at cycle 0 and can inject huge kinetic "
+        "energy into a model that merely rests in contact."
+    )
+    return 5
 
 
 def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
@@ -1958,10 +2048,12 @@ def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
     if gapmin > 0.0:
         state.warn(
             f"CONTACT {inter_id}: SST/MST contact thickness -> /INTER/TYPE7 "
-            f"Gapmin={gapmin:g} (engagement distance (SST+MST)/2). Keep "
-            "ignore=0 (Inacti=0) if Gapmin exceeds the physical clearance — "
-            "ignore=1/2 maps to Inacti=5, which shrinks the gap back to the "
-            "clearance and cancels the pre-engagement."
+            f"Gapmin={gapmin:g} (engagement distance (SST+MST)/2). On an "
+            "implicit deck, keep ignore=0 to retain Inacti=0 if Gapmin "
+            "exceeds the physical clearance (pre-engagement bootstrap) — "
+            "ignore=1/2 (and any explicit deck) maps to Inacti=5, which "
+            "shrinks the gap back to the clearance and cancels the "
+            "pre-engagement."
         )
     return gapmin
 
