@@ -47,7 +47,7 @@ OpenRadioss FSI example `Drop_Container/fsi_drop_container_0000.rad`
 | `*BOUNDARY_NON_REFLECTING` | `/EBCS/NRF` | **added** | non-reflecting frontier |
 | `*BOUNDARY_AMBIENT` / ambient AMMG | `/EBCS/INLET` (or `/EBCS/NRF`) | warn/skip | reservoir state, see §B7 |
 | `*ALE_REFERENCE_SYSTEM_*` | `/ALE/GRID/*` | skip-with-warning | mesh-motion control, no 1:1 |
-| `*DATABASE_BINARY_BLSTFOR` | — | skip (#38) | binary DB, no equivalent |
+| `*DATABASE_BINARY_BLSTFOR` | `/TH/SURF` (P, A) + `/ANIM/NODA/PEXT` + `/ANIM/VECT/FEXT` | **added** | blast pressure history + nodal fringe |
 
 `/INTER/TYPE22` (ALE/Lagrange with a cut-cell, "conservative" FSI) is the other
 candidate for `*CONSTRAINED_LAGRANGE_IN_SOLID`; TYPE18 (penalty) is chosen as
@@ -352,7 +352,13 @@ for users who need to reproduce a specific `METH`.
 * `*CONSTRAINED_LAGRANGE_IN_SOLID` advanced coupling (`CTYPE 4/5`, porous,
   erosion) — only the penalty-coupling subset maps to `/INTER/TYPE18`. Warn on
   the unsupported CTYPEs.
-* `*DATABASE_BINARY_BLSTFOR` — no equivalent binary DB (shipped skip).
+* `*DATABASE_BINARY_BLSTFOR` — no equivalent binary DB, but `/LOAD/PBLAST`
+  feeds three outputs that together carry its content (engine `pblast_1.F`):
+  `/TH/SURF` with the `P` (surface-average blast pressure) and `A` (loaded
+  area) channels on the loaded `/SURF/SEG` (T01, `/TFILE` frequency), the
+  `/ANIM/NODA/PEXT` nodal blast-pressure fringe, and the `/ANIM/VECT/FEXT`
+  external-force vectors (both at the `/ANIM/DT` frequency). Emitted since
+  the W13 output-keyword pass (previously a bare skip).
 
 ---
 

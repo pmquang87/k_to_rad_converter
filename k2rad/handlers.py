@@ -1284,6 +1284,15 @@ def handle_database_sleout(block: Block, state: ConversionState) -> None:
     state.db_sleout_dt = _handle_db_dt(block)
 
 
+def handle_database_binary_blstfor(block: Block, state: ConversionState) -> None:
+    """*DATABASE_BINARY_BLSTFOR (blast pressure database) → /TH/SURF with the
+    P (average external pressure) and A (loaded area) channels on each
+    blast-loaded surface, plus engine /ANIM/NODA/PEXT (nodal blast-pressure
+    fringe) and /ANIM/VECT/FEXT (external force vectors). /LOAD/PBLAST feeds
+    all three (engine pblast_1.F). Card 1 field 1 is DT, as for D3PLOT."""
+    state.db_blstfor_dt = _handle_db_dt(block)
+
+
 def handle_database_ncforc(block: Block, state: ConversionState) -> None:
     """*DATABASE_NCFORC (nodal contact forces) → /TH/INTER on every converted
     contact interface (T01 force resultants). The per-node view lives in the
@@ -2101,7 +2110,7 @@ HANDLERS = {
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
-    "DATABASE_BINARY_BLSTFOR":                handle_skip,
+    "DATABASE_BINARY_BLSTFOR":                handle_database_binary_blstfor,
     "DATABASE_CROSS_SECTION_PLANE":           handle_skip,
     "DATABASE_CROSS_SECTION_SET":             handle_skip,
     "DATABASE_BINARY_RUNRSF":                 handle_skip,

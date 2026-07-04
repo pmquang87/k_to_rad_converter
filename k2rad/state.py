@@ -950,6 +950,10 @@ class ConversionState:
         # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
         self.blast_sources: Dict[int, LoadBlastEnhanced] = {}
         self.blast_segment_loads: List[LoadBlastSegmentSet] = []
+        # (surf_id, title) of each blast-loaded /SURF/SEG the writer emitted —
+        # set by _make_blast_loads, consumed by the *DATABASE_BINARY_BLSTFOR
+        # /TH/SURF output (same pattern as th_sub_ids for /TH/INTER)
+        self.blast_surf_ids: List[Tuple[int, str]] = []
         # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
         self.detonations: List[InitialDetonation] = []
         # ── Coupled ALE / FSI ──────────────────────────────────────
@@ -1033,6 +1037,9 @@ class ConversionState:
         self.db_spcforc_dt: float = 0.0
         # *DATABASE_NCFORC → /TH/INTER on every converted contact interface
         self.db_ncforc_dt: float = 0.0
+        # *DATABASE_BINARY_BLSTFOR → /TH/SURF (P,A) on the blast-loaded
+        # surfaces + /ANIM/NODA/PEXT + /ANIM/VECT/FEXT
+        self.db_blstfor_dt: float = 0.0
         self.db_extent_binary: Optional[DbExtentBinary] = None
         # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
         self.db_freq_binary: Dict[str, DbFreqBinary] = {}

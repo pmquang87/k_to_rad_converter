@@ -4212,9 +4212,53 @@ class BlastLoadTests(unittest.TestCase):
         self.assertEqual(card[10:20].strip(), "Y")         # direction
         self.assertEqual(card[0:10].strip(), "1")          # curve id
 
-    def test_blstfor_skipped_without_error(self):
+    def test_blstfor_not_skipped(self):
         result, _s, _e = self._convert()
-        self.assertIn("DATABASE_BINARY_BLSTFOR", result.skipped_keywords)
+        self.assertNotIn("DATABASE_BINARY_BLSTFOR", result.skipped_keywords)
+        self.assertTrue(any("*DATABASE_BINARY_BLSTFOR" in w and "/TH/SURF" in w
+                            for w in result.warnings))
+
+    def test_blstfor_emits_th_surf_on_blast_surface(self):
+        _r, starter, _e = self._convert()
+        lines = starter.splitlines()
+        # the /TH/SURF must reference the /SURF/SEG the blast load created
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/SURF/SEG/"))
+        surf_id = int(lines[i].rsplit("/", 1)[1])
+        j = next(k for k, ln in enumerate(lines) if ln.startswith("/TH/SURF/"))
+        self.assertEqual(lines[j + 1], "TH_blast_surf")
+        var_line = lines[j + 3]                    # j+2 is the comment line
+        self.assertEqual(var_line[0:10].strip(), "P")
+        self.assertEqual(var_line[10:20].strip(), "A")
+        self.assertEqual(int(lines[j + 4].strip()), surf_id)
+
+    def test_blstfor_engine_pext_fext_and_tfile_dt(self):
+        _r, _s, engine = self._convert()
+        self.assertIn("/ANIM/NODA/PEXT", engine)
+        self.assertIn("/ANIM/VECT/FEXT", engine)
+        # the *DATABASE_BINARY_BLSTFOR dt reaches /TFILE (sole TH request)
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_no_blstfor_keyword_leaves_output_unchanged(self):
+        deck = BLAST_K.replace("*DATABASE_BINARY_BLSTFOR\n"
+                               "2.00000E-5         0         0         0"
+                               "         0\n", "")
+        _r, starter, engine = self._convert(deck)
+        self.assertNotIn("/TH/SURF", starter)
+        self.assertNotIn("/ANIM/NODA/PEXT", engine)
+        self.assertNotIn("/ANIM/VECT/FEXT", engine)
+
+    def test_blstfor_without_blast_load_warns(self):
+        deck = BLAST_K.replace(
+            "*LOAD_BLAST_SEGMENT_SET\n         1         1         0"
+            "       0.0       1.0\n", "")
+        result, starter, engine = self._convert(deck)
+        self.assertNotIn("/TH/SURF", starter)
+        self.assertNotIn("/ANIM/NODA/PEXT", engine)
+        self.assertTrue(any("*DATABASE_BINARY_BLSTFOR" in w
+                            and "no /LOAD/PBLAST" in w
+                            for w in result.warnings))
 
     def test_explicit_engine_has_no_implicit(self):
         _r, _s, engine = self._convert()

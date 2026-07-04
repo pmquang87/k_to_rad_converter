@@ -3061,6 +3061,10 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
         if surf_id is None:
             surf_id = state.next_id()
             surf_for_ssid[load.ssid] = surf_id
+            # Remember the loaded surface for the *DATABASE_BINARY_BLSTFOR
+            # /TH/SURF output (build_starter emits that block later).
+            state.blast_surf_ids.append(
+                (surf_id, segset.title or f"blast_segset_{load.ssid}"))
             lines += [
                 f"/SURF/SEG/{surf_id}",
                 (segset.title or f"blast_segset_{load.ssid}")[:100],
@@ -3784,7 +3788,7 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
              or state.db_matsum_dt or state.db_spcforc_dt
-             or state.db_ncforc_dt or 1e-3)
+             or state.db_ncforc_dt or state.db_blstfor_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -3813,6 +3817,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         lines.append("/ANIM/VECT/FREAC")
         if _spc_constrains_rotations(state):
             lines.append("/ANIM/VECT/MREAC")
+    if state.db_blstfor_dt and state.blast_segment_loads:
+        # *DATABASE_BINARY_BLSTFOR: the blast loading as external nodal force
+        # vectors (/LOAD/PBLAST accumulates into FEXT — engine pblast_1.F).
+        lines.append("/ANIM/VECT/FEXT")
 
     # ── Shell tensor outputs (membrane / upper / lower) ───────────
     lines.append("/ANIM/SHELL/TENS/STRESS/MEMB")
@@ -3839,6 +3847,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # ── Nodal scalar outputs ──────────────────────────────────────
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
+    if state.db_blstfor_dt and state.blast_segment_loads:
+        # *DATABASE_BINARY_BLSTFOR: nodal blast-pressure fringe (element
+        # /LOAD/PBLAST pressures averaged onto the loaded-surface nodes).
+        lines.append("/ANIM/NODA/PEXT")
 
     # ── Spring force output ───────────────────────────────────────
     lines.append("/ANIM/SPRING/FORC")
@@ -4348,6 +4360,52 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
     return lines
 
 
+def _make_starter_th_surf(state: ConversionState) -> List[str]:
+    """*DATABASE_BINARY_BLSTFOR → /TH/SURF (P, A) on each blast-loaded surface.
+
+    LS-DYNA's blstfor binary database records the blast pressure applied to
+    the *LOAD_BLAST_SEGMENT[_SET] segments over time. OpenRadioss has no
+    per-segment binary equivalent, but /LOAD/PBLAST feeds three outputs that
+    together carry the same information (engine pblast_1.F):
+      * /TH/SURF on the loaded /SURF/SEG — the P channel is the surface-
+        average external pressure, A the loaded area (P*A = total blast
+        force), written to the T01 at the /TFILE frequency;
+      * /ANIM/NODA/PEXT — the nodal blast-pressure fringe (the spatial
+        pressure field the blstfor file is fringed for in LS-PrePost);
+      * /ANIM/VECT/FEXT — the external (blast) nodal force vectors.
+    The two /ANIM options are added engine-side at the /ANIM/DT frequency.
+    Emitted only when the deck requests *DATABASE_BINARY_BLSTFOR, so other
+    decks are unchanged.
+    """
+    if not state.db_blstfor_dt:
+        return []
+    if not state.blast_surf_ids:
+        state.warn(
+            "*DATABASE_BINARY_BLSTFOR requested but no blast-loaded surface "
+            "was emitted (no /LOAD/PBLAST) — there is no blast pressure to "
+            "output (no /TH/SURF emitted).")
+        return []
+    state.warn(
+        "*DATABASE_BINARY_BLSTFOR: no binary blast database exists in "
+        "OpenRadioss — mapped to /TH/SURF (P = average blast pressure, "
+        "A = loaded area; T01 at the /TFILE frequency) on the /LOAD/PBLAST "
+        "surface plus /ANIM/NODA/PEXT (nodal pressure fringe) and "
+        "/ANIM/VECT/FEXT (external force vectors) at the /ANIM/DT frequency.")
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_BINARY_BLSTFOR -> blast surface pressure):", HDR,
+        f"/TH/SURF/{th_id}",
+        "TH_blast_surf",
+        # TH variable names are read in fixed 10-char columns (not free-format),
+        # so each keyword must occupy its own field.
+        "#     var1      var2",
+        "".join(v.rjust(10) for v in ("P", "A")),
+    ]
+    lines += [_i(sid) for sid, _title in state.blast_surf_ids]
+    lines.append(HDR)
+    return lines
+
+
 def _spc_constrains_rotations(state: ConversionState) -> bool:
     """True when any *BOUNDARY_SPC constrains a rotational DOF — gates the
     REACXX/YY/ZZ /TH channels and the /ANIM/VECT/MREAC moment vectors."""
@@ -4628,6 +4686,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_starter_th_inter(state))
     sections.append(_make_starter_th_node_reac(state, rbody_info))
     sections.append(_make_starter_th_node_spc(state, rbody_info))
+    sections.append(_make_starter_th_surf(state))
     sections.append(_make_freq_domain_notes(state))
     sections.append(_make_skipped_comment(state))
     sections.append(["/END", HDR])
