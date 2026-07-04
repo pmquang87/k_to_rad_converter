@@ -92,7 +92,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          gapmin_factor_text: str = "",
                          fixpoint_count_text: str = "",
                          deformable_contact_recipe: bool = False,
-                         blast_ground: str = "auto") -> dict:
+                         blast_ground: str = "auto",
+                         rigid_cog_master: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -162,6 +163,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             f"got {bg!r}.")
     kwargs["blast_ground"] = bg
 
+    kwargs["rigid_cog_master"] = bool(rigid_cog_master)
+
     return kwargs
 
 
@@ -192,6 +195,7 @@ class ConverterGUI:
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="100")
         self.blast_ground = tk.StringVar(value="auto")
+        self.rigid_cog = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -249,6 +253,13 @@ class ConverterGUI:
         ttk.Label(bg, text="reflecting ground for a surface-burst /LOAD/PBLAST — auto infers the "
                            "vertical axis; none = solver default (⊥Z); X/Y/Z force it (blast decks only)",
                   foreground="gray").pack(side="left")
+
+        ttk.Checkbutton(
+            io, text="Element-free rigid masters (*MAT_RIGID: synthesize a /RBODY "
+                     "master at the part's centroid — mesh nodes keep their "
+                     "coordinates, clears WARNINGs 448/1624; renumbers the master "
+                     "node loads/readouts address)",
+            variable=self.rigid_cog).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -378,6 +389,7 @@ class ConverterGUI:
                 fixpoint_count_text=self.fixpoint_count.get(),
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
+                rigid_cog_master=self.rigid_cog.get(),
             )
         except ValueError as exc:
             self._reset_log()

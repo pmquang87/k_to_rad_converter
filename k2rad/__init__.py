@@ -138,6 +138,7 @@ def convert(
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
+    rigid_cog_master: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -213,6 +214,16 @@ def convert(
         plane through the charge whose normal faces the target; ``"none"`` emits
         no Ground_ID (OpenRadioss's ⊥Z default) and only warns; ``"X"``/``"Y"``/
         ``"Z"``/``"-X"``/``"-Y"``/``"-Z"`` force the ground-normal (up) axis.
+    rigid_cog_master : bool
+        Synthesize an element-free /RBODY master node at each *MAT_RIGID part's
+        nodal centroid (the treatment CNRBs always get) instead of reusing the
+        part's lowest-id mesh node. Clears starter WARNINGs 448/1624 (master
+        connected to an element / removed from the secondary set) and keeps all
+        mesh nodes at their source coordinates — otherwise OpenRadioss relocates
+        the mesh-node master to the centre of mass at runtime, so that node
+        appears to move in post-processing. Off by default because it renumbers
+        every rigid master (loads/time-history readouts then address the new
+        synthesized node, and default output is no longer byte-identical).
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -261,6 +272,7 @@ def convert(
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",
+        rigid_cog_master=rigid_cog_master,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
@@ -275,13 +287,35 @@ def convert(
     #     match the deck's real units. A *LOAD_BLAST_ENHANCED UNIT flag pins the
     #     system down (handlers._blast_unit_system); adopt it when the caller
     #     left units at the default so the pressures come out right.
-    if state.blast_unit_system and tuple(units) == ("Mg", "mm", "s"):
-        state.units = tuple(state.blast_unit_system)
-        m, l, t = state.units
-        state.warn(
-            f"/BEGIN units set to {m}/{l}/{t} from the *LOAD_BLAST_ENHANCED UNIT "
-            "flag (the TM5-1300 blast formula is unit-dependent). Pass an explicit "
-            "convert(units=...) to override.")
+    if state.blast_unit_system:
+        blast_units = tuple(state.blast_unit_system)
+        if tuple(units) == ("Mg", "mm", "s"):
+            state.units = blast_units
+            m, l, t = state.units
+            state.warn(
+                f"/BEGIN units set to {m}/{l}/{t} from the *LOAD_BLAST_ENHANCED UNIT "
+                "flag (the TM5-1300 blast formula is unit-dependent). Pass an explicit "
+                "convert(units=...) to override.")
+        elif (tuple(str(u).strip().lower() for u in units)
+              != tuple(u.lower() for u in blast_units)):
+            # Explicit units win (deliberate), but a mismatch against the deck's
+            # own UNIT flag is almost always a mistake: /LOAD/PBLAST rescales its
+            # internal {cm,g,µs} data by the /BEGIN labels, so e.g. labelling an
+            # SI-metre deck "mm" makes every distance read 1000x too small — the
+            # starter then flags EVERY loaded segment "Rg/W**(1/3) < 0.5 :
+            # Horizontal Distance on Ground (Rg) is too close to the charge" and
+            # the blast pressures are wrong by unit factors.
+            eu = "/".join(str(u).strip() for u in units)
+            bu = "/".join(blast_units)
+            state.warn(
+                f"UNIT MISMATCH for the blast load: explicit units {eu} were "
+                f"passed, but the deck's *LOAD_BLAST_ENHANCED UNIT flag says the "
+                f"model is in {bu}. /LOAD/PBLAST converts its empirical TM5-1300 "
+                f"data via the /BEGIN labels, so mislabelled units make the blast "
+                f"pressures wrong by unit factors (typical symptom: the starter "
+                f"warns 'Rg too close to the charge' on every loaded segment). "
+                f"Unless the deck really is in {eu}, reconvert with units={bu} "
+                f"(or leave units at the default to adopt the UNIT flag).")
 
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.

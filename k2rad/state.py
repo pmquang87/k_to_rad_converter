@@ -856,6 +856,18 @@ class ConvertOptions:
     #   "X"/"Y"/"Z"/"-X"/"-Y"/"-Z" : force the ground-normal (up) axis.
     # Free-air bursts (Exp_data=1) need no ground and ignore this.
     blast_ground: str = "auto"
+    # Element-free CoG masters for *MAT_RIGID parts (opt-in). By default the
+    # /RBODY master is the part's lowest-id mesh node, which (a) is an element
+    # corner → starter WARNINGs 448 "MAIN NODE CONNECTED TO AN ELEMENT" + 1624
+    # "MAIN NODE REMOVED FROM SECONDARY NODE SET", and (b) gets relocated to the
+    # part's centre of mass at runtime (ICoG default) so that mesh node's
+    # coordinates appear to change in post-processing. With this flag on, each
+    # *MAT_RIGID part gets a NEW synthesized node at its nodal centroid as the
+    # /RBODY master (the same treatment CNRBs always get) — mesh nodes stay
+    # put and the warnings disappear. Off by default: it renumbers every rigid
+    # master, which breaks byte-identical output and any script that addresses
+    # loads/readouts by the old master-node id.
+    rigid_cog_master: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
