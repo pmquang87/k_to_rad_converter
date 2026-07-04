@@ -3061,6 +3061,10 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
         if surf_id is None:
             surf_id = state.next_id()
             surf_for_ssid[load.ssid] = surf_id
+            # Remember the loaded surface for the *DATABASE_BINARY_BLSTFOR
+            # /TH/SURF output (build_starter emits that block later).
+            state.blast_surf_ids.append(
+                (surf_id, segset.title or f"blast_segset_{load.ssid}"))
             lines += [
                 f"/SURF/SEG/{surf_id}",
                 (segset.title or f"blast_segset_{load.ssid}")[:100],
@@ -3783,7 +3787,8 @@ def _make_engine_header(state: ConversionState) -> List[str]:
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
-             or state.db_matsum_dt or 1e-3)
+             or state.db_matsum_dt or state.db_spcforc_dt
+             or state.db_ncforc_dt or state.db_blstfor_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -3806,6 +3811,16 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/VECT/CONT")
     lines.append("/ANIM/VECT/CONT2")
     lines.append("/ANIM/VECT/PCONT")
+    if state.db_spcforc_dt and state.bcs_spcs:
+        # *DATABASE_SPCFORC: constraint-reaction nodal vectors (the /TH/NODE
+        # REAC* channels carry the per-node time history; see writer starter).
+        lines.append("/ANIM/VECT/FREAC")
+        if _spc_constrains_rotations(state):
+            lines.append("/ANIM/VECT/MREAC")
+    if state.db_blstfor_dt and state.blast_segment_loads:
+        # *DATABASE_BINARY_BLSTFOR: the blast loading as external nodal force
+        # vectors (/LOAD/PBLAST accumulates into FEXT — engine pblast_1.F).
+        lines.append("/ANIM/VECT/FEXT")
 
     # ── Shell tensor outputs (membrane / upper / lower) ───────────
     lines.append("/ANIM/SHELL/TENS/STRESS/MEMB")
@@ -3832,6 +3847,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # ── Nodal scalar outputs ──────────────────────────────────────
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
+    if state.db_blstfor_dt and state.blast_segment_loads:
+        # *DATABASE_BINARY_BLSTFOR: nodal blast-pressure fringe (element
+        # /LOAD/PBLAST pressures averaged onto the loaded-surface nodes).
+        lines.append("/ANIM/NODA/PEXT")
 
     # ── Spring force output ───────────────────────────────────────
     lines.append("/ANIM/SPRING/FORC")
@@ -4247,21 +4266,46 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 def _make_starter_th_inter(state: ConversionState) -> List[str]:
     """Emit /TH/INTER so contact-interface forces reach the T01 time-history file.
 
-    Required for *CONTACT_FORCE_TRANSDUCER → /INTER/SUB: a sub-interface's force
-    is written as a channel of its parent interface, so the parent interface must
-    be requested in a /TH/INTER block. Only emitted when a transducer exists, so
-    decks without one are unchanged.
+    Two requesters share the block:
+      * *CONTACT_FORCE_TRANSDUCER → /INTER/SUB: a sub-interface's force is
+        written as a channel of its parent interface, so the parent interface
+        must be requested in a /TH/INTER block.
+      * *DATABASE_NCFORC (nodal contact forces): OpenRadioss has no per-node
+        contact-force time history (no /TH/NODE contact variable exists), so
+        the request maps to the per-interface force resultants of EVERY
+        converted contact interface here (T01, /TFILE frequency); the
+        nodal-resolution view is the contact-force/pressure animation vectors
+        /ANIM/VECT/CONT + /ANIM/VECT/PCONT the engine deck already carries.
+    Only emitted when a transducer or *DATABASE_NCFORC exists, so other decks
+    are unchanged.
     """
-    if not state.th_sub_ids:
+    all_inter_ids = ([c.inter_id for c in state.contacts_single]
+                     + [c.inter_id for c in state.contacts_surf2surf])
+    want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
+    if state.db_ncforc_dt and not all_inter_ids:
+        state.warn(
+            "*DATABASE_NCFORC requested but no *CONTACT was converted — "
+            "there is no interface to output (no /TH/INTER emitted).")
+    if not state.th_sub_ids and not want_ncforc:
         return []
-    parent_id = _select_parent_interface(state)
     # List the parent interface (total contact force) and each force-transducer
     # sub-interface id — a sub-interface is written to the T01 only when its own
     # id is requested here (listing just the parent leaves OUTPUT TO TH = 0).
     ids: List[int] = []
-    if parent_id is not None:
-        ids.append(parent_id)
-    ids += [sid for sid, _ in state.th_sub_ids]
+    if state.th_sub_ids:
+        parent_id = _select_parent_interface(state)
+        if parent_id is not None:
+            ids.append(parent_id)
+        ids += [sid for sid, _ in state.th_sub_ids]
+    if want_ncforc:
+        state.warn(
+            "*DATABASE_NCFORC (nodal contact forces): OpenRadioss has no "
+            "per-node contact-force time history — mapped to /TH/INTER force "
+            "resultants for every converted contact interface (T01 file, "
+            "/TFILE frequency). The per-node field is in the animation "
+            "vectors /ANIM/VECT/CONT + /ANIM/VECT/PCONT (at the /ANIM/DT "
+            "frequency), which the engine deck emits by default.")
+        ids += [i for i in all_inter_ids if i not in ids]
     if not ids:
         return []
     lines = [
@@ -4310,6 +4354,119 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
         # TH variable names are read in fixed 10-char columns (not free-format),
         # so each keyword must occupy its own field.
         "".join(v.rjust(10) for v in ("DX", "DY", "DZ", "REACX", "REACY", "REACZ")),
+    ]
+    lines += [_i(nd) for nd in nodes]
+    lines.append(HDR)
+    return lines
+
+
+def _make_starter_th_surf(state: ConversionState) -> List[str]:
+    """*DATABASE_BINARY_BLSTFOR → /TH/SURF (P, A) on each blast-loaded surface.
+
+    LS-DYNA's blstfor binary database records the blast pressure applied to
+    the *LOAD_BLAST_SEGMENT[_SET] segments over time. OpenRadioss has no
+    per-segment binary equivalent, but /LOAD/PBLAST feeds three outputs that
+    together carry the same information (engine pblast_1.F):
+      * /TH/SURF on the loaded /SURF/SEG — the P channel is the surface-
+        average external pressure, A the loaded area (P*A = total blast
+        force), written to the T01 at the /TFILE frequency;
+      * /ANIM/NODA/PEXT — the nodal blast-pressure fringe (the spatial
+        pressure field the blstfor file is fringed for in LS-PrePost);
+      * /ANIM/VECT/FEXT — the external (blast) nodal force vectors.
+    The two /ANIM options are added engine-side at the /ANIM/DT frequency.
+    Emitted only when the deck requests *DATABASE_BINARY_BLSTFOR, so other
+    decks are unchanged.
+    """
+    if not state.db_blstfor_dt:
+        return []
+    if not state.blast_surf_ids:
+        state.warn(
+            "*DATABASE_BINARY_BLSTFOR requested but no blast-loaded surface "
+            "was emitted (no /LOAD/PBLAST) — there is no blast pressure to "
+            "output (no /TH/SURF emitted).")
+        return []
+    state.warn(
+        "*DATABASE_BINARY_BLSTFOR: no binary blast database exists in "
+        "OpenRadioss — mapped to /TH/SURF (P = average blast pressure, "
+        "A = loaded area; T01 at the /TFILE frequency) on the /LOAD/PBLAST "
+        "surface plus /ANIM/NODA/PEXT (nodal pressure fringe) and "
+        "/ANIM/VECT/FEXT (external force vectors) at the /ANIM/DT frequency.")
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_BINARY_BLSTFOR -> blast surface pressure):", HDR,
+        f"/TH/SURF/{th_id}",
+        "TH_blast_surf",
+        # TH variable names are read in fixed 10-char columns (not free-format),
+        # so each keyword must occupy its own field.
+        "#     var1      var2",
+        "".join(v.rjust(10) for v in ("P", "A")),
+    ]
+    lines += [_i(sid) for sid, _title in state.blast_surf_ids]
+    lines.append(HDR)
+    return lines
+
+
+def _spc_constrains_rotations(state: ConversionState) -> bool:
+    """True when any *BOUNDARY_SPC constrains a rotational DOF — gates the
+    REACXX/YY/ZZ /TH channels and the /ANIM/VECT/MREAC moment vectors."""
+    return any(bc.dofrx or bc.dofry or bc.dofrz for bc in state.bcs_spcs)
+
+
+def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """*DATABASE_SPCFORC → /TH/NODE with REACX/Y/Z (+REACXX/YY/ZZ) on every
+    /BCS-constrained node.
+
+    LS-DYNA's spcforc file lists the SPC reaction force (and, for rotational
+    constraints, moment) per constrained node. OpenRadioss computes exactly
+    that when reaction output is requested: /TH/NODE REAC* (or /ANIM/VECT/
+    FREAC) switches the engine's constraint-reaction assembly on (engine
+    reactions.F), so REACX/Y/Z on the /BCS node groups IS the spcforc
+    content, written to the T01 at the /TFILE frequency. Rigid-body member
+    nodes are mapped to the /RBODY master node — the /BCS acts there and the
+    reaction is assembled there. The whole-model nodal-field view is added
+    engine-side as /ANIM/VECT/FREAC (+MREAC). Emitted only when the deck
+    requests *DATABASE_SPCFORC, so other decks are unchanged.
+    """
+    if not state.db_spcforc_dt:
+        return []
+    if not state.bcs_spcs:
+        state.warn(
+            "*DATABASE_SPCFORC requested but the deck has no *BOUNDARY_SPC — "
+            "no node is SPC-constrained, so there is no reaction to output "
+            "(no /TH/NODE emitted).")
+        return []
+    node_to_ind = {}
+    for pid, info in rbody_info.items():
+        for node in info["nodes"]:
+            node_to_ind[node] = info["ind_node"]
+    mapped: Set[int] = set()
+    for bc in state.bcs_spcs:
+        for n in state.node_sets.get(bc.nsid, ("", []))[1]:
+            mapped.add(node_to_ind.get(n, n))
+    nodes = sorted(mapped)
+    if not nodes:
+        state.warn(
+            "*DATABASE_SPCFORC: every *BOUNDARY_SPC node set is empty — "
+            "no /TH/NODE reaction output emitted.")
+        return []
+    if len(nodes) > 1000:
+        state.warn(
+            f"*DATABASE_SPCFORC: {len(nodes)} SPC-constrained nodes get REAC* "
+            "/TH channels (matching LS-DYNA's per-node spcforc output) — the "
+            "T01 file will be correspondingly large. Trim the /TH/NODE block "
+            "by hand if you only need a subset.")
+    th_vars = ["REACX", "REACY", "REACZ"]
+    if _spc_constrains_rotations(state):
+        th_vars += ["REACXX", "REACYY", "REACZZ"]
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_SPCFORC -> SPC reaction force per /BCS node):", HDR,
+        f"/TH/NODE/{th_id}",
+        "TH_spc_reactions",
+        "#  reaction force (REACX/Y/Z) [+ moment (REACXX/YY/ZZ)] per constrained node",
+        # TH variable names are read in fixed 10-char columns (not free-format),
+        # so each keyword must occupy its own field.
+        "".join(v.rjust(10) for v in th_vars),
     ]
     lines += [_i(nd) for nd in nodes]
     lines.append(HDR)
@@ -4528,6 +4685,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_starter_th(state))
     sections.append(_make_starter_th_inter(state))
     sections.append(_make_starter_th_node_reac(state, rbody_info))
+    sections.append(_make_starter_th_node_spc(state, rbody_info))
+    sections.append(_make_starter_th_surf(state))
     sections.append(_make_freq_domain_notes(state))
     sections.append(_make_skipped_comment(state))
     sections.append(["/END", HDR])

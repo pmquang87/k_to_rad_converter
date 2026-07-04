@@ -4212,9 +4212,53 @@ class BlastLoadTests(unittest.TestCase):
         self.assertEqual(card[10:20].strip(), "Y")         # direction
         self.assertEqual(card[0:10].strip(), "1")          # curve id
 
-    def test_blstfor_skipped_without_error(self):
+    def test_blstfor_not_skipped(self):
         result, _s, _e = self._convert()
-        self.assertIn("DATABASE_BINARY_BLSTFOR", result.skipped_keywords)
+        self.assertNotIn("DATABASE_BINARY_BLSTFOR", result.skipped_keywords)
+        self.assertTrue(any("*DATABASE_BINARY_BLSTFOR" in w and "/TH/SURF" in w
+                            for w in result.warnings))
+
+    def test_blstfor_emits_th_surf_on_blast_surface(self):
+        _r, starter, _e = self._convert()
+        lines = starter.splitlines()
+        # the /TH/SURF must reference the /SURF/SEG the blast load created
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/SURF/SEG/"))
+        surf_id = int(lines[i].rsplit("/", 1)[1])
+        j = next(k for k, ln in enumerate(lines) if ln.startswith("/TH/SURF/"))
+        self.assertEqual(lines[j + 1], "TH_blast_surf")
+        var_line = lines[j + 3]                    # j+2 is the comment line
+        self.assertEqual(var_line[0:10].strip(), "P")
+        self.assertEqual(var_line[10:20].strip(), "A")
+        self.assertEqual(int(lines[j + 4].strip()), surf_id)
+
+    def test_blstfor_engine_pext_fext_and_tfile_dt(self):
+        _r, _s, engine = self._convert()
+        self.assertIn("/ANIM/NODA/PEXT", engine)
+        self.assertIn("/ANIM/VECT/FEXT", engine)
+        # the *DATABASE_BINARY_BLSTFOR dt reaches /TFILE (sole TH request)
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_no_blstfor_keyword_leaves_output_unchanged(self):
+        deck = BLAST_K.replace("*DATABASE_BINARY_BLSTFOR\n"
+                               "2.00000E-5         0         0         0"
+                               "         0\n", "")
+        _r, starter, engine = self._convert(deck)
+        self.assertNotIn("/TH/SURF", starter)
+        self.assertNotIn("/ANIM/NODA/PEXT", engine)
+        self.assertNotIn("/ANIM/VECT/FEXT", engine)
+
+    def test_blstfor_without_blast_load_warns(self):
+        deck = BLAST_K.replace(
+            "*LOAD_BLAST_SEGMENT_SET\n         1         1         0"
+            "       0.0       1.0\n", "")
+        result, starter, engine = self._convert(deck)
+        self.assertNotIn("/TH/SURF", starter)
+        self.assertNotIn("/ANIM/NODA/PEXT", engine)
+        self.assertTrue(any("*DATABASE_BINARY_BLSTFOR" in w
+                            and "no /LOAD/PBLAST" in w
+                            for w in result.warnings))
 
     def test_explicit_engine_has_no_implicit(self):
         _r, _s, engine = self._convert()
@@ -4804,6 +4848,196 @@ class RigidCogMasterTests(unittest.TestCase):
         card1 = lines[i + 3]                        # node sens skew Ispher Mass...
         self.assertAlmostEqual(float(card1[40:60]), 0.005)
         self.assertNotIn("/ADMAS", starter)
+
+
+SPCFORC_K = """\
+*KEYWORD
+*TITLE
+SPC reaction output test
+*CONTROL_TERMINATION
+     0.006
+*NODE
+       1       0.0       0.0       0.0
+       2       1.0       0.0       0.0
+       3       1.0       1.0       0.0
+       4       0.0       1.0       0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+*PART
+plate
+         1         1         1
+*SECTION_SHELL
+         1         2       1.0         2
+      0.05      0.05      0.05      0.05
+*MAT_PLASTIC_KINEMATIC
+         1    7500.02.10000E11       0.31.200000E91.10000E10       0.0
+       0.0       0.0    0.0015       0.0
+*SET_NODE_LIST
+         1
+         1         2
+*BOUNDARY_SPC_SET
+         1         0         1         1         1         0         0         0
+*DATABASE_SPCFORC
+2.00000E-5         0         0         1
+*END
+"""
+
+
+class DatabaseSpcforcTests(unittest.TestCase):
+    """*DATABASE_SPCFORC → /TH/NODE REACX/Y/Z on /BCS nodes + /ANIM/VECT/FREAC."""
+
+    def _convert(self, deck=SPCFORC_K, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kwargs)
+            starter = Path(result.starter_path).read_text()
+            engine = Path(result.engine_path).read_text()
+        return result, starter, engine
+
+    @staticmethod
+    def _th_block(starter):
+        """(var_line, node_lines) of the TH_spc_reactions /TH/NODE block."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.strip() == "TH_spc_reactions")
+        var_line = lines[i + 2]                    # i+1 is the comment line
+        node_lines = []
+        for ln in lines[i + 3:]:
+            if ln.startswith(("#", "/")):
+                break
+            node_lines.append(ln.strip())
+        return var_line, node_lines
+
+    def test_spcforc_parsed_and_not_skipped(self):
+        result, _s, _e = self._convert()
+        self.assertNotIn("DATABASE_SPCFORC", result.skipped_keywords)
+
+    def test_spcforc_emits_th_node_reac(self):
+        _r, starter, _e = self._convert()
+        var_line, node_lines = self._th_block(starter)
+        # fixed 10-char variable fields
+        self.assertEqual(var_line[0:10].strip(), "REACX")
+        self.assertEqual(var_line[10:20].strip(), "REACY")
+        self.assertEqual(var_line[20:30].strip(), "REACZ")
+        # translation-only SPC → no moment channels
+        self.assertNotIn("REACXX", var_line)
+        self.assertEqual(node_lines, ["1", "2"])
+
+    def test_spcforc_rotational_adds_moment_channels(self):
+        deck = SPCFORC_K.replace(
+            "         1         0         1         1         1         0         0         0",
+            "         1         0         1         1         1         1         1         1")
+        _r, starter, engine = self._convert(deck)
+        var_line, _nodes = self._th_block(starter)
+        self.assertEqual(var_line[30:40].strip(), "REACXX")
+        self.assertEqual(var_line[50:60].strip(), "REACZZ")
+        self.assertIn("/ANIM/VECT/MREAC", engine)
+
+    def test_spcforc_engine_freac_and_tfile_dt(self):
+        _r, _s, engine = self._convert()
+        self.assertIn("/ANIM/VECT/FREAC", engine)
+        # translation-only SPC → no moment reaction vectors
+        self.assertNotIn("/ANIM/VECT/MREAC", engine)
+        # the *DATABASE_SPCFORC dt reaches /TFILE (no other TH request here)
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_spcforc_without_spc_warns_and_emits_nothing(self):
+        deck = SPCFORC_K.replace("*BOUNDARY_SPC_SET\n"
+                                 "         1         0         1         1"
+                                 "         1         0         0         0\n", "")
+        result, starter, engine = self._convert(deck)
+        self.assertNotIn("TH_spc_reactions", starter)
+        self.assertNotIn("/ANIM/VECT/FREAC", engine)
+        self.assertTrue(any("*DATABASE_SPCFORC" in w and "BOUNDARY_SPC" in w
+                            for w in result.warnings))
+
+    def test_no_spcforc_keyword_leaves_output_unchanged(self):
+        deck = SPCFORC_K.replace("*DATABASE_SPCFORC\n"
+                                 "2.00000E-5         0         0         1\n", "")
+        _r, starter, engine = self._convert(deck)
+        self.assertNotIn("TH_spc_reactions", starter)
+        self.assertNotIn("REACX", starter)
+        self.assertNotIn("/ANIM/VECT/FREAC", engine)
+
+
+class DatabaseNcforcTests(unittest.TestCase):
+    """*DATABASE_NCFORC → /TH/INTER on every converted contact interface."""
+
+    NCFORC_CARD = ("*DATABASE_NCFORC\n"
+                   "2.00000E-5         0         0         1\n")
+
+    def _convert(self, deck):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path)
+            starter = Path(result.starter_path).read_text()
+            engine = Path(result.engine_path).read_text()
+        return result, starter, engine
+
+    def _with_ncforc(self, base=None):
+        deck = base if base is not None else TRANSDUCER_K
+        return deck.replace("*CONTROL_TERMINATION",
+                            self.NCFORC_CARD + "*CONTROL_TERMINATION")
+
+    @staticmethod
+    def _th_inter_ids(starter):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/TH/INTER/"))
+        ids = []
+        # skip title, "#     var1" comment and the DEF variable line
+        for ln in lines[i + 4:]:
+            if ln.startswith(("#", "/")) or not ln.strip():
+                break
+            ids.append(int(ln.strip()))
+        return ids
+
+    def test_ncforc_not_skipped_and_warn_names_anim_vectors(self):
+        result, _s, _e = self._convert(self._with_ncforc())
+        self.assertNotIn("DATABASE_NCFORC", result.skipped_keywords)
+        self.assertTrue(any("*DATABASE_NCFORC" in w and "/ANIM/VECT/CONT" in w
+                            for w in result.warnings))
+
+    def test_ncforc_without_transducer_lists_contact_interface(self):
+        # Drop the transducer: /TH/INTER must still appear, listing the
+        # /INTER/TYPE7 converted from *CONTACT_AUTOMATIC_SINGLE_SURFACE.
+        base = TRANSDUCER_K.replace(
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
+            "")
+        _r, starter, _e = self._convert(self._with_ncforc(base))
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE7/"))
+        inter_id = int(lines[i].rsplit("/", 1)[1])
+        self.assertEqual(self._th_inter_ids(starter), [inter_id])
+
+    def test_ncforc_merges_into_transducer_th_inter(self):
+        # With a transducer AND NCFORC there must be exactly ONE /TH/INTER
+        # block covering parent, sub-interface and any remaining contacts.
+        _r, starter, _e = self._convert(self._with_ncforc())
+        self.assertEqual(starter.count("/TH/INTER/"), 1)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/SUB/"))
+        sub_id = int(lines[i].rsplit("/", 1)[1])
+        self.assertIn(sub_id, self._th_inter_ids(starter))
+
+    def test_ncforc_tfile_dt(self):
+        _r, _s, engine = self._convert(self._with_ncforc())
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_ncforc_without_contact_warns(self):
+        deck = SPCFORC_K.replace("*DATABASE_SPCFORC", "*DATABASE_NCFORC")
+        result, starter, _e = self._convert(deck)
+        self.assertNotIn("/TH/INTER", starter)
+        self.assertTrue(any("*DATABASE_NCFORC" in w and "no *CONTACT" in w
+                            for w in result.warnings))
 
 
 if __name__ == "__main__":
