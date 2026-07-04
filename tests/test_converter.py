@@ -3028,7 +3028,7 @@ class ModalEigenvalueTests(unittest.TestCase):
         "*CONTROL_IMPLICIT_EIGENVALUE\n"
         "        10\n"
         "*ELEMENT_MASS\n"
-        "         1         2     100.0         0\n"
+        "       1       2           100.0       0\n"
         "*CONTROL_TERMINATION",
     )
 
@@ -3182,14 +3182,14 @@ class AddedMassTests(unittest.TestCase):
         return result, Path(result.starter_path).read_text()
 
     def _with_masses(self, mass_cards: str) -> str:
-        # 10-wide fields (eid nid mass pid) — the native width the handler reads.
+        # True LS-DYNA columns: eid(I8) nid(I8) mass(F16.0) pid(I8).
         return IMPL_QSTAT_K.replace(
             "*CONTROL_TERMINATION",
             "*ELEMENT_MASS\n" + mass_cards + "*CONTROL_TERMINATION",
         )
 
     def test_ordinary_node_mass_emits_admas(self):
-        deck = self._with_masses("         1         2     100.0         0\n")
+        deck = self._with_masses("       1       2           100.0       0\n")
         result, starter = self._convert(deck)
         self.assertIn("/ADMAS/0/", starter)
         # The /ADMAS card carries the mass value (100) and a grnod reference.
@@ -3201,18 +3201,43 @@ class AddedMassTests(unittest.TestCase):
 
     def test_equal_masses_grouped_into_one_admas(self):
         deck = self._with_masses(
-            "         1         2     100.0         0\n"
-            "         2         3     100.0         0\n")
+            "       1       2           100.0       0\n"
+            "       2       3           100.0       0\n")
         _, starter = self._convert(deck)
         # Same value -> one /ADMAS/0 over a grnod holding both nodes.
         self.assertEqual(starter.count("/ADMAS/0/"), 1)
 
     def test_distinct_masses_get_separate_admas(self):
         deck = self._with_masses(
-            "         1         2     100.0         0\n"
-            "         2         3      50.0         0\n")
+            "       1       2           100.0       0\n"
+            "       2       3            50.0       0\n")
         _, starter = self._convert(deck)
         self.assertEqual(starter.count("/ADMAS/0/"), 2)
+
+    def test_f16_mass_column_not_truncated(self):
+        # Regression: mass sits right-justified in its F16 column (line chars
+        # 16-32). The old uniform 10-wide slicing read chars 20-30 and cut the
+        # last two characters off the field, so "            0.05" parsed as
+        # "0." -> 0.0 and the mass was silently dropped (integer-valued masses
+        # like 50.0 -> "50" survived by luck; the W13 blast deck rescaled to
+        # ton/mm/s lost all 356 lumped masses, 2.05 t total).
+        deck = self._with_masses(
+            "       1       2            0.05       0\n")
+        result, starter = self._convert(deck)
+        m = re.search(r"/ADMAS/0/\d+\n.*\n#\s+MASS\s+grnd_ID\n\s*([\d.eE+-]+)\s+(\d+)",
+                      starter)
+        self.assertIsNotNone(m)
+        self.assertEqual(float(m.group(1)), 0.05)
+        self.assertFalse(any("lumped mass dropped" in w for w in result.warnings))
+
+    def test_zero_parsed_mass_warns(self):
+        # A non-blank *ELEMENT_MASS row whose mass parses <= 0 must warn
+        # instead of vanishing silently.
+        deck = self._with_masses(
+            "       1       2             0.0       0\n")
+        result, starter = self._convert(deck)
+        self.assertNotIn("/ADMAS", starter)
+        self.assertTrue(any("lumped mass dropped" in w for w in result.warnings))
 
 
 class ModalSolveToolTests(unittest.TestCase):
@@ -3313,7 +3338,7 @@ class ModalSolveToolTests(unittest.TestCase):
     def test_element_mass_added_to_node(self):
         deck = TINY_K.replace(
             "*CONTROL_TERMINATION",
-            "*ELEMENT_MASS\n         1         2     100.0         0\n"
+            "*ELEMENT_MASS\n       1       2           100.0       0\n"
             "*CONTROL_TERMINATION")
         mass, _ = modal_solve.nodal_masses_from_k(self._write(deck, "m.k"))
         m_elem = 7.86e-9
@@ -4841,7 +4866,7 @@ class RigidCogMasterTests(unittest.TestCase):
         # ordinary-node /ADMAS path skips rigid nodes).
         deck = FORCE_RB_K.replace(
             "*CONTROL_TERMINATION",
-            "*ELEMENT_MASS\n         1         6     0.005\n*CONTROL_TERMINATION")
+            "*ELEMENT_MASS\n       1       6           0.005\n*CONTROL_TERMINATION")
         _r, starter = self._convert(deck, rigid_cog_master=True)
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.startswith("/RBODY/9"))

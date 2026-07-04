@@ -65,6 +65,18 @@ def _card(raw: List[str], idx: int, fixed: bool = False, n: int = 8, w: int = 10
     return tokens
 
 
+def _element_mass_card(line: str) -> List[str]:
+    """Slice an *ELEMENT_MASS-family card: eid(I8) nid/id(I8) mass(F16.0) pid(I8).
+
+    The mass column is 16 wide, so uniform 10-wide slicing must not be used
+    here: it reads line chars 20-30 and cuts the last characters off a
+    right-justified F16 mass ("            0.05" → "0." → 0.0), silently
+    zeroing every non-integer mass value.
+    """
+    return [line[0:8].strip(), line[8:16].strip(),
+            line[16:32].strip(), line[32:40].strip()]
+
+
 def _has_title(block: Block) -> bool:
     return "TITLE" in block.options or "SUBTITLE" in block.options
 
@@ -1336,18 +1348,21 @@ def handle_element_mass(block: Block, state: ConversionState) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
-        f = _card(raw, i, fixed=True, n=4, w=10)
-        if len(f) < 3:
+        if not raw[i].strip():        # blank card placeholder → skip
             continue
-        try:
-            nid  = to_int(f[1])
-            mass = to_float(f[2])
-        except (ValueError, IndexError):
-            continue
-        if nid > 0 and mass > 0:
-            state.added_node_masses[nid] = (
-                state.added_node_masses.get(nid, 0.0) + mass
+        f = _element_mass_card(raw[i])
+        eid  = to_int(f[0])
+        nid  = to_int(f[1])
+        mass = to_float(f[2])
+        if nid <= 0 or mass <= 0:
+            state.warn(
+                f"*ELEMENT_MASS card {raw[i]!r}: parsed eid={eid} nid={nid} "
+                f"mass={mass:g} — lumped mass dropped."
             )
+            continue
+        state.added_node_masses[nid] = (
+            state.added_node_masses.get(nid, 0.0) + mass
+        )
 
 
 def handle_element_mass_part(block: Block, state: ConversionState) -> None:
@@ -1451,15 +1466,16 @@ def handle_element_mass_node_set(block: Block, state: ConversionState) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
-        f = _card(raw, i, fixed=True, n=4, w=10)
-        if len(f) < 3:
+        if not raw[i].strip():        # blank card placeholder → skip
             continue
-        try:
-            nsid = to_int(f[1])
-            total_mass = to_float(f[2])
-        except (ValueError, IndexError):
-            continue
+        f = _element_mass_card(raw[i])
+        nsid = to_int(f[1])
+        total_mass = to_float(f[2])
         if nsid <= 0 or total_mass <= 0:
+            state.warn(
+                f"*ELEMENT_MASS_NODE_SET card {raw[i]!r}: parsed nsid={nsid} "
+                f"mass={total_mass:g} — lumped mass dropped."
+            )
             continue
         node_set = state.node_sets.get(nsid)
         if not node_set:
