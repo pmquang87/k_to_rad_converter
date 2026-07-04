@@ -342,6 +342,79 @@ class PressureLoad:
 
 
 @dataclass
+class SegmentSet:
+    """*SET_SEGMENT — a set of 3- or 4-node surface segments.
+
+    Each entry in ``segments`` is the corner-node list of one segment
+    (``[n1, n2, n3, n4]``; a 3-node segment drops n4). Segment orientation
+    (node order) fixes the outward normal, which a blast / pressure load uses
+    as its application side. Maps to an OpenRadioss /SURF/SEG.
+    """
+    sid: int
+    title: str
+    segments: List[List[int]] = field(default_factory=list)
+
+
+@dataclass
+class LoadBlastEnhanced:
+    """*LOAD_BLAST_ENHANCED — a ConWep / TM5-1300 empirical air-blast source.
+
+    Card 1:  bid m xbo ybo zbo tbo unit blast
+    Card 2:  cfm cfl cft cfp nidbo death negphs
+      m          = equivalent TNT charge mass (in the UNIT system's mass unit)
+      xbo/ybo/zbo= detonation-point coordinates
+      tbo        = detonation time
+      unit       = unit-system flag (2 = kg,m,s,Pa; see handlers._blast_unit_system)
+      blast      = 1 hemispherical surface burst, 2 spherical free-air burst,
+                   3 air burst with ground reflection (Mach stem)
+      death      = load-removal time
+      negphs     = 0 include the negative (suction) phase, 1 ignore it
+
+    Maps to OpenRadioss /LOAD/PBLAST: Exp_data from ``blast``, WTNT from ``m``,
+    Xdet/Ydet/Zdet from the origin, Tdet from ``tbo``, Tstop from ``death``.
+    """
+    bid: int
+    m: float
+    xbo: float
+    ybo: float
+    zbo: float
+    tbo: float
+    unit: int
+    blast: int
+    death: float = 1e20
+    negphs: int = 0
+
+
+@dataclass
+class LoadBlastSegmentSet:
+    """*LOAD_BLAST_SEGMENT_SET — applies a *LOAD_BLAST_ENHANCED source (``bid``)
+    to a *SET_SEGMENT (``ssid``); ``scalep`` scales the resulting pressure."""
+    bid: int
+    ssid: int
+    alepid: int = 0
+    sfnrb: float = 0.0
+    scalep: float = 1.0
+
+
+@dataclass
+class LoadBody:
+    """*LOAD_BODY_{X,Y,Z} — a whole-model base-acceleration (body) load.
+
+    Card: lcid sf lciddr xc yc zc cid
+      dir  = axis letter from the keyword suffix ("X" | "Y" | "Z")
+      lcid = acceleration-vs-time curve (magnitude)
+      sf   = scale factor
+    The applied acceleration field is ``sf × lcid(t)`` along ``dir``; maps to an
+    OpenRadioss /GRAV over every part. LS-DYNA's base-acceleration sign
+    convention is transcribed directly (Fscale = sf), which the writer flags for
+    the user to verify against /GRAV.
+    """
+    dir: str            # "X" | "Y" | "Z"
+    lcid: int
+    sf: float
+
+
+@dataclass
 class GravityLoadPart:
     """*LOAD_GRAVITY_PART — gravity body load on one part → /GRAV.
 
@@ -637,6 +710,18 @@ class ConvertOptions:
     # only WARNS that the recipe exists when it detects such contact (see
     # writer._warn_deformable_deformable_contact); turn this on to apply it.
     deformable_contact_recipe: bool = False
+    # Blast ground plane for a surface-burst /LOAD/PBLAST (Exp_data=2). OpenRadioss
+    # needs a reflecting ground; with no Ground_ID it assumes the plane is ⊥Z
+    # through the detonation point and drops target segments on the far side —
+    # wrong whenever the deck's vertical axis is not +Z. Values:
+    #   "auto" (default) : infer the up-axis from geometry (the axis along which
+    #                      the charge sits beyond the target) and synthesize a
+    #                      flat /SURF/SEG ground plane through the charge whose
+    #                      normal points at the target, used as Ground_ID;
+    #   "none"           : emit no Ground_ID (OpenRadioss's ⊥Z default) + warn;
+    #   "X"/"Y"/"Z"/"-X"/"-Y"/"-Z" : force the ground-normal (up) axis.
+    # Free-air bursts (Exp_data=1) need no ground and ignore this.
+    blast_ground: str = "auto"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -688,6 +773,8 @@ class ConversionState:
         # ── Sets / groups ──────────────────────────────────────────
         self.node_sets: Dict[int, Tuple[str, List[int]]] = {}   # nsid → (title, [nids])
         self.part_sets: Dict[int, Tuple[str, List[int]]] = {}   # psid → (title, [pids])
+        # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
+        self.segment_sets: Dict[int, SegmentSet] = {}           # sid → SegmentSet
 
         # ── Boundary conditions ────────────────────────────────────
         self.bcs_spcs: List[BcsSpc] = []
@@ -705,6 +792,18 @@ class ConversionState:
         self.pressure_loads: List[PressureLoad] = []
         # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
         self.gravity_loads: List[GravityLoadPart] = []
+        # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
+        self.body_loads: List[LoadBody] = []
+        # *LOAD_BLAST_ENHANCED sources keyed by bid, and the
+        # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
+        self.blast_sources: Dict[int, LoadBlastEnhanced] = {}
+        self.blast_segment_loads: List[LoadBlastSegmentSet] = []
+        # Unit system (mass, length, time) implied by a *LOAD_BLAST_ENHANCED UNIT
+        # flag. The TM5-1300 empirical blast formulas are unit-dependent, so the
+        # /BEGIN unit labels must match the deck's real units for /LOAD/PBLAST to
+        # convert correctly; convert() applies this when the caller left units at
+        # the default. None = no blast load / unknown flag.
+        self.blast_unit_system: Optional[Tuple[str, str, str]] = None
         # *ELEMENT_MASS additions: node_ID → total added translational mass
         # (in input unit, typically ton). Used to set /RBODY Mass field
         # for rigid-body master nodes (provides M contribution to K_eff in

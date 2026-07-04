@@ -137,6 +137,7 @@ def convert(
     fixpoint_count: int = 100,
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
+    blast_ground: str = "auto",
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -204,6 +205,14 @@ def convert(
         the validated stiffness-export recipe (/IMPL/PRINT/STIF writes the
         assembled K; tools/modal_solve.py solves the modes offline with scipy),
         which runs on the open-source engine.
+    blast_ground : str
+        Ground plane for a surface-burst /LOAD/PBLAST (Exp_data=2), which needs a
+        reflecting ground or OpenRadioss assumes it ⊥Z through the detonation
+        point and drops target segments on the far side. ``"auto"`` (default)
+        infers the vertical axis from geometry and synthesizes a flat ground
+        plane through the charge whose normal faces the target; ``"none"`` emits
+        no Ground_ID (OpenRadioss's ⊥Z default) and only warns; ``"X"``/``"Y"``/
+        ``"Z"``/``"-X"``/``"-Y"``/``"-Z"`` force the ground-normal (up) axis.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -251,6 +260,7 @@ def convert(
         fixpoint_count=fixpoint_count,
         deformable_contact_recipe=deformable_contact_recipe,
         emit_eig=emit_eig,
+        blast_ground=str(blast_ground).strip() or "auto",
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
@@ -259,6 +269,19 @@ def convert(
         if i % bstep == 0:
             _report(0.05 + 0.28 * (i / nblocks), "Building model")
     _report(0.33, "Building model")
+
+    # 2a. Blast decks: /LOAD/PBLAST reads the /BEGIN unit labels to convert its
+    #     internal {cm,g,µs} TM5-1300 data to model units, so those labels MUST
+    #     match the deck's real units. A *LOAD_BLAST_ENHANCED UNIT flag pins the
+    #     system down (handlers._blast_unit_system); adopt it when the caller
+    #     left units at the default so the pressures come out right.
+    if state.blast_unit_system and tuple(units) == ("Mg", "mm", "s"):
+        state.units = tuple(state.blast_unit_system)
+        m, l, t = state.units
+        state.warn(
+            f"/BEGIN units set to {m}/{l}/{t} from the *LOAD_BLAST_ENHANCED UNIT "
+            "flag (the TM5-1300 blast formula is unit-dependent). Pass an explicit "
+            "convert(units=...) to override.")
 
     # 2b. Implicit safety net: a contact-free implicit model segfaults the
     #     OpenRadioss engine during setup, so give it one inert self-contact.

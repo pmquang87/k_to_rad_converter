@@ -195,6 +195,17 @@ def main() -> int:
              "/IMPL/QSTAT/DTSCAL=0.05. Off by default; without it the converter "
              "only warns when such contact is detected. Implicit decks only.",
     )
+    parser.add_argument(
+        "--blast-ground",
+        default="auto",
+        metavar="MODE",
+        help="Ground plane for a surface-burst /LOAD/PBLAST (Exp_data=2). "
+             "'auto' (default) infers the vertical axis from geometry and "
+             "synthesizes a reflecting ground plane through the charge so all "
+             "target segments load; 'none' emits no Ground_ID (OpenRadioss's "
+             "wrong-for-non-Z-up default) and only warns; X/Y/Z/-X/-Y/-Z force "
+             "the ground-normal (up) axis.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -247,6 +258,7 @@ def main() -> int:
         fixpoint_count=args.fixpoint_count,
         deformable_contact_recipe=args.deformable_contact_recipe,
         emit_eig=args.emit_eig,
+        blast_ground=args.blast_ground,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

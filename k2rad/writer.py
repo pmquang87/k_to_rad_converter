@@ -2633,6 +2633,265 @@ def _make_gravity_loads(state: ConversionState) -> List[str]:
     return lines if len(lines) > 2 else []
 
 
+def _make_body_loads(state: ConversionState) -> List[str]:
+    """*LOAD_BODY_{X,Y,Z} → /GRAV applied to every part (whole-model body load).
+
+    The load is a base acceleration g(t) = SF × lcid(t) along the named axis.
+    LS-DYNA's base-acceleration sign convention is transcribed directly
+    (/GRAV Fscale = SF, fct = lcid) over a /GRNOD/PART of all parts; the two
+    codes can differ by a sign, so the direction is flagged for the user to
+    confirm. Modal decks emit nothing (a body load is a static preload,
+    irrelevant to a non-prestressed eigenproblem).
+    """
+    if not state.body_loads or state.is_modal:
+        return []
+    all_pids = sorted(state.parts)
+    if not all_pids:
+        return []
+    lines: List[str] = ["#-  BODY LOADS (*LOAD_BODY_* -> /GRAV):", HDR]
+    emitted = False
+    for bl in state.body_loads:
+        if bl.lcid not in state.curves:
+            state.warn(f"*LOAD_BODY_{bl.dir}: load curve {bl.lcid} not found "
+                       "— skipped.")
+            continue
+        emitted = True
+        grnod_id = state.next_id()
+        grav_id = state.next_id()
+        lines += _emit_grnod_part(grnod_id, f"body_load_allparts_{grav_id}", all_pids)
+        lines += [
+            f"/GRAV/{grav_id}",
+            f"Body_accel_{bl.dir}",
+            "#  fct_IDT       Dir   skew_ID   sens_ID   grnd_ID             Ascalex             FscaleY",
+            f"{_i(bl.lcid)}{bl.dir.rjust(10)}{_i(0)}{_i(0)}{_i(grnod_id)}"
+            f"{_f(1.0)}{_f(bl.sf)}",
+            HDR,
+        ]
+    if not emitted:
+        return []
+    state.warn(
+        "*LOAD_BODY_* mapped to /GRAV over all parts. LS-DYNA base-acceleration "
+        "and OpenRadioss /GRAV can differ by a sign — verify the body-load / "
+        "gravity direction and flip the *LOAD_BODY SF if it acts the wrong way.")
+    return lines
+
+
+_AXIS_VEC = {
+    "X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+    "Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0),
+    "Z": (0.0, 0.0, 1.0), "-Z": (0.0, 0.0, -1.0),
+}
+
+
+def _blast_target_bbox(state: ConversionState, segset):
+    """((xmin,xmax),(ymin,ymax),(zmin,zmax)) of a segment set's nodes, or None."""
+    xs: List[float] = []
+    ys: List[float] = []
+    zs: List[float] = []
+    for seg in segset.segments:
+        for nid in seg:
+            nd = state.nodes.get(nid)
+            if nd:
+                xs.append(nd.x); ys.append(nd.y); zs.append(nd.z)
+    if not xs:
+        return None
+    return ((min(xs), max(xs)), (min(ys), max(ys)), (min(zs), max(zs)))
+
+
+def _infer_blast_up_axis(det, bbox) -> Optional[str]:
+    """Signed axis the ground normal should point (charge → target).
+
+    The vertical axis is the one the charge sits most clearly *beyond* the target
+    bounding box on: charge below the box → up = +axis, above → up = -axis.
+    Returns None when the charge is within the target's range on every axis (no
+    confident inference).
+    """
+    (xmn, xmx), (ymn, ymx), (zmn, zmx) = bbox
+    best: Optional[str] = None
+    best_out = 0.0
+    for name, dv, lo, hi in (("X", det[0], xmn, xmx),
+                             ("Y", det[1], ymn, ymx),
+                             ("Z", det[2], zmn, zmx)):
+        if dv < lo:                      # charge below target → up = +axis
+            out, axis = lo - dv, name
+        elif dv > hi:                    # charge above target → up = -axis
+            out, axis = dv - hi, "-" + name
+        else:
+            continue
+        if out > best_out:
+            best_out, best = out, axis
+    return best
+
+
+def _synthesize_blast_ground(state: ConversionState, det, axis: str):
+    """Build an infinite /SURF/PLANE ground through the charge, normal along
+    `axis` (which faces the target). Returns (lines, surf_id).
+
+    /SURF/PLANE is defined by two points: M lies on the plane (the charge, so the
+    charge is on the ground), and the vector M→M1 is the normal. OpenRadioss
+    loads target segments on the +normal side, so the normal points at the
+    target. No mesh is needed — the plane is pure geometry.
+    """
+    n = _AXIS_VEC[axis]
+    m = (det[0], det[1], det[2])                 # charge lies on the ground
+    m1 = (det[0] + n[0], det[1] + n[1], det[2] + n[2])   # M→M1 = +axis = normal
+    surf_id = state.next_id()
+    lines = [
+        f"/SURF/PLANE/{surf_id}",
+        f"blast_ground_{axis}",
+        "#                 XM                  YM                  ZM",
+        _f(m[0]) + _f(m[1]) + _f(m[2]),
+        "#                XM1                 YM1                 ZM1",
+        _f(m1[0]) + _f(m1[1]) + _f(m1[2]),
+        HDR,
+    ]
+    return lines, surf_id
+
+
+def _resolve_blast_ground(state: ConversionState, src, segset):
+    """Resolve the Ground_ID for a surface-burst /LOAD/PBLAST per
+    ``options.blast_ground``.
+
+    Returns ``(ground_id, ground_lines)`` — ground_id 0 and empty lines when no
+    ground is emitted (OpenRadioss then assumes ⊥Z through the charge, which the
+    returned warning explains).
+    """
+    mode = (state.options.blast_ground or "auto").strip()
+    det = (src.xbo, src.ybo, src.zbo)
+    bbox = _blast_target_bbox(state, segset)
+
+    default_warn = (
+        f"*LOAD_BLAST_ENHANCED bid={src.bid}: surface burst -> /LOAD/PBLAST "
+        "Exp_data=2 (ground reflection) with NO Ground_ID — OpenRadioss assumes "
+        f"the ground is perpendicular to Z through the charge (Z={src.zbo:g}) and "
+        "will NOT load target segments on the far side. Set blast_ground to the "
+        "vertical axis (e.g. 'Y') or leave it 'auto' to synthesize the plane.")
+
+    if mode.lower() == "none":
+        state.warn(default_warn)
+        return 0, []
+
+    axis = None
+    if mode.upper() in _AXIS_VEC:
+        axis = mode.upper()
+    elif mode.lower() == "auto" and bbox is not None:
+        axis = _infer_blast_up_axis(det, bbox)
+
+    if axis is None:
+        if mode.lower() == "auto":
+            state.warn(
+                f"*LOAD_BLAST_ENHANCED bid={src.bid}: could not infer the vertical "
+                "axis for the ground plane (the charge sits within the target "
+                "extent on every axis, or the target has no nodes). " + default_warn)
+        else:
+            state.warn(default_warn)
+        return 0, []
+
+    ground_lines, surf_id = _synthesize_blast_ground(state, det, axis)
+    state.warn(
+        f"*LOAD_BLAST_ENHANCED bid={src.bid}: surface burst -> Exp_data=2; "
+        f"synthesized a /SURF/PLANE reflecting ground (normal {axis}, through the "
+        "charge) as Ground_ID so all target segments load. Override with "
+        "blast_ground=<axis> or 'none' if the vertical axis differs.")
+    return surf_id, ground_lines
+
+
+def _make_blast_loads(state: ConversionState) -> List[str]:
+    """*LOAD_BLAST_ENHANCED + *LOAD_BLAST_SEGMENT_SET → /SURF/SEG + /LOAD/PBLAST.
+
+    OpenRadioss /LOAD/PBLAST is the TM5-1300 (ConWep) empirical air-blast model,
+    the direct counterpart of LS-DYNA's *LOAD_BLAST_ENHANCED. The loaded segment
+    set becomes a /SURF/SEG; the blast source supplies the equivalent TNT mass
+    and the detonation point/time. The LS-DYNA `blast` type maps to Exp_data:
+      blast 1 (hemispherical surface burst) -> Exp_data 2 (ground reflection)
+      blast 2 (spherical free-air burst)    -> Exp_data 1 (free air)
+      blast 3 (air burst, Mach stem)        -> no equivalent (warn; uses 1)
+
+    The blast formula is unit-dependent; convert() has already set /BEGIN to the
+    system implied by the LOAD_BLAST_ENHANCED UNIT flag (handlers._blast_unit_system)
+    so that /LOAD/PBLAST converts its internal {cm,g,µs} data correctly. Card
+    layout follows FORMAT(radioss2022) in hm_cfg_files .../LOADS/pblast.cfg.
+    """
+    if not state.blast_segment_loads:
+        if state.blast_sources:
+            state.warn("*LOAD_BLAST_ENHANCED present but no "
+                       "*LOAD_BLAST_SEGMENT_SET applies it — no /LOAD/PBLAST "
+                       "emitted.")
+        return []
+    if state.is_modal:
+        state.warn("NOTE: blast load (*LOAD_BLAST_*) not emitted for a modal "
+                   "deck — a blast is irrelevant to a non-prestressed eigenproblem.")
+        return []
+
+    lines: List[str] = ["#-  BLAST LOADS (*LOAD_BLAST_ENHANCED -> /LOAD/PBLAST):", HDR]
+    surf_for_ssid: Dict[int, int] = {}
+    emitted = False
+    for load in state.blast_segment_loads:
+        src = state.blast_sources.get(load.bid)
+        if src is None:
+            state.warn(f"*LOAD_BLAST_SEGMENT_SET bid={load.bid}: no matching "
+                       "*LOAD_BLAST_ENHANCED — skipped.")
+            continue
+        segset = state.segment_sets.get(load.ssid)
+        if segset is None or not segset.segments:
+            state.warn(f"*LOAD_BLAST_SEGMENT_SET ssid={load.ssid}: segment set "
+                       "not found or empty — skipped.")
+            continue
+
+        # /SURF/SEG (built once per segment set, reused across blast loads)
+        surf_id = surf_for_ssid.get(load.ssid)
+        if surf_id is None:
+            surf_id = state.next_id()
+            surf_for_ssid[load.ssid] = surf_id
+            lines += [
+                f"/SURF/SEG/{surf_id}",
+                (segset.title or f"blast_segset_{load.ssid}")[:100],
+                "#   seg_ID        n1        n2        n3        n4",
+            ]
+            for seg_no, nodes in enumerate(segset.segments, start=1):
+                quad = (list(nodes) + [0, 0, 0, 0])[:4]
+                lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
+            lines.append(HDR)
+
+        ground_id = 0
+        if src.blast == 2:
+            exp_data = 1                       # spherical free-air burst
+        elif src.blast in (0, 1):
+            exp_data = 2                       # hemispherical surface / ground reflection
+            ground_id, ground_lines = _resolve_blast_ground(state, src, segset)
+            lines += ground_lines
+        else:
+            exp_data = 1
+            state.warn(f"*LOAD_BLAST_ENHANCED bid={src.bid}: BLAST={src.blast} "
+                       "(air burst / Mach stem) has no /LOAD/PBLAST equivalent "
+                       "— using Exp_data=1 (free-air spherical); verify the result.")
+        if load.scalep not in (0.0, 1.0):
+            state.warn(f"*LOAD_BLAST_SEGMENT_SET bid={load.bid}: SCALEP="
+                       f"{load.scalep} (pressure scale) has no /LOAD/PBLAST "
+                       "field — applied the unscaled charge (scaling TNT mass is "
+                       "NOT equivalent). Adjust manually if the scale matters.")
+        tstop = src.death if 0.0 < src.death < 1e19 else 1.0e20
+
+        pblast_id = state.next_id()
+        lines += [
+            f"/LOAD/PBLAST/{pblast_id}",
+            f"blast_bid{src.bid}_ssid{load.ssid}"[:100],
+            "#  surf_ID  Exp_data  I_tshift       Ndt        IZ    Imodel                                 Node_id",
+            (_i(surf_id) + _i(exp_data) + _i(1) + _i(100) + _i(2) + _i(1)
+             + " " * 30 + _i(0)),
+            "#               Xdet                Ydet                Zdet                Tdet                WTNT",
+            _f(src.xbo) + _f(src.ybo) + _f(src.zbo) + _f(src.tbo) + _f(src.m),
+            "#               Pmin               Tstop",
+            _f(0.0) + _f(tstop),
+            "#Ground_ID",
+            _i(ground_id),
+            HDR,
+        ]
+        emitted = True
+
+    return lines if emitted else []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starter: offline frequency-domain post-processing notes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3750,6 +4009,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_inivel(state, rbody_info))
     sections.append(_make_pressure_loads(state))
     sections.append(_make_gravity_loads(state))
+    sections.append(_make_body_loads(state))
+    sections.append(_make_blast_loads(state))
     sections.append(_make_starter_cloads(state))
     sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))

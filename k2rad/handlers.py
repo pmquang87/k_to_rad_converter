@@ -19,6 +19,7 @@ from .state import (
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
+    SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
@@ -1292,6 +1293,157 @@ def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
                 GravityLoadPart(p, dof, lc, accel, lcdr, stga, stgr))
 
 
+def handle_load_body(block: Block, state: ConversionState) -> None:
+    """*LOAD_BODY_{X,Y,Z} → whole-model base-acceleration body load → /GRAV.
+
+    Card: lcid sf lciddr xc yc zc cid.  The load direction is the axis letter in
+    the keyword suffix (X/Y/Z); the acceleration field is sf × lcid(t). Angular
+    (_RX/_RY/_RZ) and generic (_VECTOR/_GENERALIZED) body loads have no /GRAV
+    mapping and are skipped with a warning.
+    """
+    kw = block.keyword                       # e.g. "LOAD_BODY_Y"
+    suffix = kw.rsplit("_", 1)[-1] if "_" in kw else ""
+    if suffix not in ("X", "Y", "Z"):
+        state.warn(f"*{kw}: only translational LOAD_BODY_X/Y/Z map to /GRAV "
+                   "— skipped (rotational / generalized body loads have no "
+                   "OpenRadioss /GRAV equivalent).")
+        state.skipped_keywords.append(kw)
+        return
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f:
+        return
+    lcid = to_int(f[0])
+    sf   = to_float(f[1]) if len(f) > 1 else 1.0
+    if sf == 0.0:
+        sf = 1.0
+    if lcid <= 0:
+        state.warn(f"*{kw}: no acceleration curve (lcid={lcid}) — skipped.")
+        return
+    state.body_loads.append(LoadBody(dir=suffix, lcid=lcid, sf=sf))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Segment sets  (used as /SURF/SEG by blast / pressure loads)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_set_segment(block: Block, state: ConversionState) -> None:
+    """*SET_SEGMENT[_TITLE] → a set of 3/4-node surface segments → /SURF/SEG.
+
+    Header card:  sid da1 da2 da3 da4 solver its
+    Data cards :  n1 n2 n3 n4 a1 a2 a3 a4  (one segment per card; a* attributes
+                  ignored). Node order fixes the segment normal (n4=0 → triangle).
+    Stored on state.segment_sets for later /SURF/SEG emission.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1:
+        return
+    sid = to_int(f1[0])
+    segments: List[List[int]] = []
+    for line in raw[offset + 1:]:
+        if not line.strip():
+            continue
+        # Node columns are fixed I10 (LS-PrePost); floats a1..a4 follow.
+        f = parse_fixed(line, n=8, w=10)
+        nodes = [to_int(f[j]) for j in range(4)]
+        while len(nodes) > 3 and nodes[-1] == 0:
+            nodes.pop()
+        if len(nodes) >= 3 and all(n > 0 for n in nodes):
+            segments.append(nodes)
+    state.segment_sets[sid] = SegmentSet(sid, title, segments)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Blast loads
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _blast_unit_system(unit: int):
+    """Map a *LOAD_BLAST_ENHANCED UNIT flag to an OpenRadioss (mass, length,
+    time) label triple for /BEGIN, or None when it has no clean mapping.
+
+    UNIT table (LSTC — L. Slavik, "Blast Loading in LS-DYNA"):
+      1 = the original CONWEP *inconsistent* system ("do not use for analysis")
+      2 = kilogram, metre, second, Pascal
+      3 = "dozen slugs", inch, second, psi           (English)
+      4 = gram, centimetre, microsecond, megabar
+      5 = user-defined (CFM/CFL/CFT/CFP conversion factors)
+    The TM5-1300 empirical formula is unit-dependent, so /LOAD/PBLAST reads the
+    /BEGIN unit labels to convert its internal {cm, g, µs} data to model units —
+    those labels must therefore match the deck's real units. Only the physically
+    consistent SI-family flags get an automatic mapping.
+    """
+    return {
+        2: ("kg", "m", "s"),
+        4: ("g", "cm", "micros"),
+    }.get(unit)
+
+
+def handle_load_blast_enhanced(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST_ENHANCED → a blast source for /LOAD/PBLAST.
+
+    Card 1: bid m xbo ybo zbo tbo unit blast
+    Card 2: cfm cfl cft cfp nidbo death negphs
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if len(f1) < 2:
+        state.warn("*LOAD_BLAST_ENHANCED: incomplete Card 1 — skipped")
+        return
+    bid   = to_int(f1[0])
+    m     = to_float(f1[1])
+    xbo   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    ybo   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    zbo   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    tbo   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    unit  = to_int(f1[6])   if len(f1) > 6 else 2
+    blast = to_int(f1[7])   if len(f1) > 7 else 1
+    # Card 2: cfm cfl cft cfp nidbo death negphs
+    f2     = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    death  = to_float(f2[5]) if len(f2) > 5 else 1e20
+    negphs = to_int(f2[6])   if len(f2) > 6 else 0
+    state.blast_sources[bid] = LoadBlastEnhanced(
+        bid=bid, m=m, xbo=xbo, ybo=ybo, zbo=zbo, tbo=tbo,
+        unit=unit, blast=blast, death=death, negphs=negphs,
+    )
+    us = _blast_unit_system(unit)
+    if us is not None:
+        state.blast_unit_system = us
+    else:
+        state.warn(
+            f"*LOAD_BLAST_ENHANCED bid={bid}: UNIT={unit} has no automatic "
+            "OpenRadioss unit mapping (only UNIT=2 kg/m/s and UNIT=4 g/cm/µs "
+            "are auto-mapped). The TM5-1300 blast formula is unit-dependent, so "
+            "set /BEGIN to the deck's real mass/length/time via convert("
+            "units=...) or /LOAD/PBLAST will compute wrong pressures.")
+
+
+def handle_load_blast_segment_set(block: Block, state: ConversionState) -> None:
+    """*LOAD_BLAST_SEGMENT_SET → apply blast source `bid` to segment set `ssid`.
+
+    Card: bid ssid alepid sfnrb scalep
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 2:
+            continue
+        bid    = to_int(f[0])
+        ssid   = to_int(f[1])
+        alepid = to_int(f[2])   if len(f) > 2 else 0
+        sfnrb  = to_float(f[3]) if len(f) > 3 else 0.0
+        scalep = to_float(f[4]) if len(f) > 4 else 1.0
+        state.blast_segment_loads.append(
+            LoadBlastSegmentSet(bid, ssid, alepid, sfnrb, scalep))
+
+
 def handle_mat_add_fatigue(block: Block, state: ConversionState) -> None:
     """*MAT_ADD_FATIGUE: S-N data per material — offline post-processing only.
 
@@ -1582,6 +1734,7 @@ HANDLERS = {
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
+    "DATABASE_BINARY_BLSTFOR":                handle_skip,
     "DATABASE_CROSS_SECTION_PLANE":           handle_skip,
     "DATABASE_CROSS_SECTION_SET":             handle_skip,
     "DATABASE_BINARY_RUNRSF":                 handle_skip,
@@ -1595,10 +1748,15 @@ HANDLERS = {
     "LOAD_SEGMENT":                           handle_load_segment,
     "LOAD_SEGMENT_ID":                        handle_load_segment,
     "LOAD_SEGMENT_SET":                       handle_skip,
+    "LOAD_BODY_X":                            handle_load_body,
+    "LOAD_BODY_Y":                            handle_load_body,
+    "LOAD_BODY_Z":                            handle_load_body,
+    "LOAD_BLAST_ENHANCED":                    handle_load_blast_enhanced,
+    "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,
     "MAT_ADD_EROSION":                        handle_skip,
     "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
-    "SET_SEGMENT":                            handle_skip,
+    "SET_SEGMENT":                            handle_set_segment,
 }
 
 
