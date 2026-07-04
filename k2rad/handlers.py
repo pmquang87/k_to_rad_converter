@@ -21,6 +21,8 @@ from .state import (
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
+    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
+    BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
@@ -250,7 +252,14 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     secid  = to_int(f1[0]) if f1 else 0
     elform = to_int(f1[1]) if len(f1) > 1 else 1
-    state.sec_solids[secid] = SectionSolid(secid, title, elform)
+    # ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE single material) mark the
+    # property as ALE → /PROP/SOLID Iale=1.
+    iale = 1 if elform in (11, 12) else 0
+    if iale:
+        state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> /PROP/SOLID "
+                   "Iale=1. If the mesh is fixed (Eulerian), switch Iale to 2 "
+                   "(Euler) for a cheaper run.")
+    state.sec_solids[secid] = SectionSolid(secid, title, elform, iale)
 
 
 def handle_section_beam(block: Block, state: ConversionState) -> None:
@@ -518,6 +527,112 @@ def handle_initial_detonation(block: Block, state: ConversionState) -> None:
             z=to_float(f[3]) if len(f) > 3 else 0.0,
             lt=to_float(f[4]) if len(f) > 4 else 0.0,
         ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Coupled ALE mechanics / fluid-structure coupling / boundaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_ale_multi_material_group(block: Block, state: ConversionState) -> None:
+    """*ALE_MULTI-MATERIAL_GROUP → the submaterial order of a /MAT/LAW51.
+
+    Each data card is `sid idtype` (idtype 0 = part-set, 1 = part). The card
+    order is the AMMG/phase index. Collected into one AleMultiMaterialGroup.
+    """
+    offset = _title_offset(block)
+    mmg = AleMultiMaterialGroup()
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=8, w=10)
+        if not f or f[0].strip() == "":
+            continue
+        sid = to_int(f[0])
+        idtype = to_int(f[1]) if len(f) > 1 else 1
+        if sid > 0:
+            mmg.entries.append((sid, idtype))
+    if mmg.entries:
+        state.ale_mmgs.append(mmg)
+
+
+def handle_constrained_lagrange_in_solid(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling).
+
+    Card 1: slave master sstyp mstyp nquad ctype direc mcoup
+    Card 2: start end pfac fric ...   (penalty stiffness scale, times)
+    slave = Lagrangian structure set, master = ALE fluid set.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if len(f1) < 2:
+        return
+    ctype = to_int(f1[5]) if len(f1) > 5 else 4
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    start = to_float(f2[0]) if f2 else 0.0
+    end   = to_float(f2[1]) if len(f2) > 1 else 0.0
+    pfac  = to_float(f2[2]) if len(f2) > 2 else 0.1
+    state.lagrange_in_solid.append(ConstrainedLagrangeInSolid(
+        slave=to_int(f1[0]), master=to_int(f1[1]),
+        sstyp=to_int(f1[2]) if len(f1) > 2 else 0,
+        mstyp=to_int(f1[3]) if len(f1) > 3 else 0,
+        ctype=ctype, pfac=pfac if pfac > 0 else 0.1, start=start, end=end))
+
+
+def handle_initial_volume_fraction_geometry(block: Block, state: ConversionState) -> None:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY → /INIVOL initial ALE fill.
+
+    Header card: fmsid fmidtyp bammg ntrace
+    Container cards: conttyp fillopt fammg ...  (geometry follows)
+    Only the ALE part (fmsid) and the fill phase/opt are captured — the geometric
+    container is emitted as a /SURF/PLANE where possible (writer), otherwise
+    warned. A first-pass, plane-container mapping.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or f1[0].strip() == "":
+        return
+    part = to_int(f1[0])
+    vf = InitialVolumeFraction(part=part)
+    # Each subsequent non-blank card starts a container: conttyp fillopt fammg
+    for i in range(offset + 1, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 3:
+            continue
+        fillopt = to_int(f[1])
+        fammg   = to_int(f[2])
+        vf.fills.append((0, fammg, fillopt))     # surf_ID resolved/synth at write
+    if vf.fills:
+        state.volume_fractions.append(vf)
+
+
+def handle_boundary_non_reflecting(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_NON_REFLECTING → /EBCS/NRF on the named segment set.
+
+    Card: nsid ad as.  nsid = the *SET_SEGMENT acting as a silent frontier.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or f[0].strip() == "":
+        return
+    state.non_reflecting.append(BoundaryNonReflecting(nsid=to_int(f[0])))
+
+
+def handle_control_ale(block: Block, state: ConversionState) -> None:
+    """*CONTROL_ALE → ALE advection hints (mostly informational).
+
+    Card 1: dct nadv meth afac bfac cfac dfac efac.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f:
+        return
+    state.control_ale = ControlAle(
+        meth=to_int(f[2]) if len(f) > 2 else 1,
+        afac=to_float(f[3]) if len(f) > 3 else 0.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1894,6 +2009,12 @@ HANDLERS = {
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
     "INITIAL_DETONATION":                     handle_initial_detonation,
+    "INITIAL_VOLUME_FRACTION_GEOMETRY":       handle_initial_volume_fraction_geometry,
+    # Coupled ALE / fluid-structure coupling / boundaries
+    "ALE_MULTI-MATERIAL_GROUP":               handle_ale_multi_material_group,
+    "CONSTRAINED_LAGRANGE_IN_SOLID":          handle_constrained_lagrange_in_solid,
+    "BOUNDARY_NON_REFLECTING":                handle_boundary_non_reflecting,
+    "CONTROL_ALE":                            handle_control_ale,
 
     # Constraints
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,

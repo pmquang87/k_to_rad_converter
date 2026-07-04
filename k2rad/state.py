@@ -60,6 +60,10 @@ class SectionSolid:
     secid: int
     title: str
     elform: int
+    # ALE/Euler flag for /PROP/SOLID field 3 (Iale): 0 Lagrange, 1 ALE, 2 Euler.
+    # LS-DYNA *SECTION_SOLID ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE
+    # single material) set this to 1.
+    iale: int = 0
 
 
 @dataclass
@@ -193,6 +197,69 @@ class EosCard:
     params: Dict[str, float] = field(default_factory=dict)
     rho0: float = 0.0
     note: str = ""
+
+
+@dataclass
+class AleMultiMaterialGroup:
+    """*ALE_MULTI-MATERIAL_GROUP — the ordered list of ALE material groups.
+
+    Each entry is a (sid, idtype) reference (idtype 0 = part-set, 1 = part). The
+    order is the AMMG/phase index used by *INITIAL_VOLUME_FRACTION and the ALE
+    advection. Maps to the ordered submaterial list of one /MAT/LAW51 (MULTIMAT).
+    """
+    entries: List[Tuple[int, int]] = field(default_factory=list)
+
+
+@dataclass
+class ConstrainedLagrangeInSolid:
+    """*CONSTRAINED_LAGRANGE_IN_SOLID — fluid-structure coupling → /INTER/TYPE18.
+
+    Card 1: slave master sstyp mstyp nquad ctype direc mcoup.  slave = the
+    Lagrangian structure set, master = the ALE fluid set. Card 2 carries the
+    penalty stiffness scale (pfac) and start/end. Mapped to a penalty ALE/
+    Lagrange /INTER/TYPE18 (surf_ID = structure, grbric_ID = fluid bricks).
+    """
+    slave: int
+    master: int
+    sstyp: int = 0
+    mstyp: int = 0
+    ctype: int = 4
+    pfac: float = 0.1
+    start: float = 0.0
+    end: float = 0.0
+
+
+@dataclass
+class InitialVolumeFraction:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY — initial ALE fill → /INIVOL.
+
+    ``part`` is the ALE part being filled; ``fills`` is a list of
+    (surf_ID, ale_phase, fill_opt) container rows. Only a plane container
+    (reusing /SURF/PLANE) is supported; other container shapes are warned.
+    """
+    part: int
+    fills: List[Tuple[int, int, int]] = field(default_factory=list)
+
+
+@dataclass
+class BoundaryNonReflecting:
+    """*BOUNDARY_NON_REFLECTING — a silent far-field boundary → /EBCS/NRF.
+
+    ``nsid`` is the segment set acting as the non-reflecting frontier.
+    """
+    nsid: int
+
+
+@dataclass
+class ControlAle:
+    """*CONTROL_ALE — ALE advection/mesh controls.
+
+    Card 1: dct nadv meth afac bfac cfac dfac efac.  ``meth`` is the advection
+    method (1 donor-cell, 2 Van-Leer, 3 HIS). Only informational / advection-
+    hint mapping to /ALE options; mesh smoothing has no clean equivalent.
+    """
+    meth: int = 1
+    afac: float = 0.0
 
 
 @dataclass
@@ -873,6 +940,17 @@ class ConversionState:
         self.blast_segment_loads: List[LoadBlastSegmentSet] = []
         # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
         self.detonations: List[InitialDetonation] = []
+        # ── Coupled ALE / FSI ──────────────────────────────────────
+        # *ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT) submaterial order
+        self.ale_mmgs: List[AleMultiMaterialGroup] = []
+        # *CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling)
+        self.lagrange_in_solid: List[ConstrainedLagrangeInSolid] = []
+        # *INITIAL_VOLUME_FRACTION[_GEOMETRY] → /INIVOL (initial ALE fill)
+        self.volume_fractions: List[InitialVolumeFraction] = []
+        # *BOUNDARY_NON_REFLECTING → /EBCS/NRF (silent far-field)
+        self.non_reflecting: List[BoundaryNonReflecting] = []
+        # *CONTROL_ALE → /ALE advection hints (mostly informational)
+        self.control_ale: Optional[ControlAle] = None
         # Unit system (mass, length, time) implied by a *LOAD_BLAST_ENHANCED UNIT
         # flag. The TM5-1300 empirical blast formulas are unit-dependent, so the
         # /BEGIN unit labels must match the deck's real units for /LOAD/PBLAST to

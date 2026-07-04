@@ -4569,5 +4569,126 @@ class ExplosiveEosTests(unittest.TestCase):
         self.assertEqual(starter.count("/DFS/DETPOINT/"), 1)   # one explosive
 
 
+# ── Coupled ALE / FSI (LAW51, TYPE18, EBCS/NRF, Iale) ────────────────────────
+
+def _ale_fsi_deck():
+    def i8(v): return f"{v:>8}"
+    L = ["*KEYWORD", "*TITLE", "ALE FSI test", "*CONTROL_TERMINATION", "     1.0e-3",
+         "*CONTROL_ALE", _fix(1, 1, 2, "0.0", "0.0"), "*NODE"]
+    for c in range(2):
+        L += _cube_nodes(8 * c, c)                        # two fluid cubes
+    L += [f"{17:>8}{2.0:>16}{0.0:>16}{0.0:>16}",          # structure shell nodes
+          f"{18:>8}{2.0:>16}{1.0:>16}{0.0:>16}",
+          f"{19:>8}{2.0:>16}{1.0:>16}{1.0:>16}",
+          f"{20:>8}{2.0:>16}{0.0:>16}{1.0:>16}"]
+    L.append("*ELEMENT_SOLID")
+    L.append(_fix(1, 11) + "".join(f"{k:>10}" for k in range(1, 9)))
+    L.append(_fix(2, 10) + "".join(f"{8 + k:>10}" for k in range(1, 9)))
+    L += ["*ELEMENT_SHELL", i8(3) + i8(20) + i8(17) + i8(18) + i8(19) + i8(20)]
+    L += ["*PART", "water", _fix(11, 1, 4),
+          "*PART", "air", _fix(10, 1, 2),
+          "*PART", "structure", _fix(20, 2, 3),
+          "*SECTION_SOLID", _fix(1, 11),                  # ELFORM 11 → ALE
+          "*SECTION_SHELL", _fix(2, 2, "1.0", 3), _fix("1.0", "1.0", "1.0", "1.0"),
+          "*MAT_NULL", _fix(2, "1.2E-12"),
+          "*EOS_LINEAR_POLYNOMIAL",
+          _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0"), _fix("2.5E-1", "1.0"),
+          "*MAT_NULL", _fix(4, "1.0E-9"),
+          "*EOS_GRUNEISEN", _fix(4, "1.48E+6", "1.92", "0.0", "0.0", "0.35", "0.0", "0.0"),
+          "*MAT_ELASTIC", _fix(3, "7.85E-9", "2.1E+5", "0.3"),
+          "*SET_PART_LIST", _fix(1), _fix(10, 11),
+          "*SET_PART_LIST", _fix(2), _fix(20),
+          "*SET_SEGMENT", _fix(5), _fix(13, 14, 15, 16),
+          "*ALE_MULTI-MATERIAL_GROUP", _fix(11, 1), _fix(10, 1),
+          "*CONSTRAINED_LAGRANGE_IN_SOLID",
+          _fix(2, 1, 0, 0, 1, 4, 0, 0), _fix("0.0", "0.0", "0.1"),
+          "*BOUNDARY_NON_REFLECTING", _fix(5, 0, 0),
+          "*END"]
+    return "\n".join(L) + "\n"
+
+
+class AleFsiTests(unittest.TestCase):
+    """ALE multimaterial / FSI coupling / non-reflecting boundaries."""
+
+    def _state(self, deck):
+        state = ConversionState()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            for block in parse_k_file(path):
+                dispatch(block, state)
+        return state
+
+    def _convert(self, deck, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path, **kw)
+            starter = Path(result.starter_path).read_text()
+        return result, starter
+
+    def test_elform11_sets_iale(self):
+        st = self._state(_ale_fsi_deck())
+        self.assertEqual(st.sec_solids[1].iale, 1)
+
+    def test_prop_solid_iale_and_isolid(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/PROP/SOLID/1"))
+        card = lines[i + 3]                       # Isolid Ismstr Iale ...
+        self.assertEqual(card[0:10].strip(), "0")     # Isolid 0 (ALE-compatible)
+        self.assertEqual(card[20:30].strip(), "1")    # Iale = 1 (field 3)
+
+    def test_ale_mmg_becomes_law51(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/MAT/LAW51/", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/MAT/LAW51/"))
+        # Iform card is 12
+        iform = next(lines[k + 1] for k, ln in enumerate(lines[i:], start=i)
+                     if ln.strip().startswith("#    Iform"))
+        self.assertEqual(iform.strip(), "12")
+        # submaterials in AMMG order: water(4) then air(2)
+        j = next(k for k, ln in enumerate(lines) if ln.startswith("#    MatID"))
+        mids = []
+        for ln in lines[j + 1:]:
+            if ln.startswith(("#", "/")) or not ln.strip():
+                break
+            mids.append(ln.split()[0])
+        self.assertEqual(mids[:2], ["4", "2"])
+
+    def test_fsi_type18_and_grbric(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/INTER/TYPE18/", starter)
+        self.assertIn("/GRBRIC/PART/", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE18/"))
+        card2 = lines[i + 5]                       # title, hdr, card1, hdr, card2
+        self.assertGreater(float(card2[0:20]), 0.0)     # Stfval > 0
+        self.assertGreater(float(card2[40:60]), 0.0)    # Gap > 0
+
+    def test_boundary_non_reflecting_ebcs(self):
+        _r, starter = self._convert(_ale_fsi_deck())
+        self.assertIn("/EBCS/NRF/", starter)
+        # the NRF references a /SURF/SEG built from set-segment 5
+        self.assertIn("/SURF/SEG/", starter)
+
+    def test_control_ale_warns(self):
+        result, _s = self._convert(_ale_fsi_deck())
+        self.assertTrue(any("CONTROL_ALE" in w for w in result.warnings))
+
+    def test_volume_fraction_geometry_recognized(self):
+        deck = _ale_fsi_deck().replace(
+            "*BOUNDARY_NON_REFLECTING\n" + _fix(5, 0, 0) + "\n",
+            "*INITIAL_VOLUME_FRACTION_GEOMETRY\n" + _fix(11, 1, 2, 0) + "\n"
+            + _fix(6, 1, 2) + "\n")
+        result, _s = self._convert(deck)
+        st = self._state(deck)
+        self.assertEqual(len(st.volume_fractions), 1)
+        self.assertTrue(any("INITIAL_VOLUME_FRACTION" in w for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

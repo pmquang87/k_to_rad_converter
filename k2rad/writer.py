@@ -26,6 +26,8 @@ from .state import (
     ContactAutoSingle, ContactAutoSurf2Surf,
     InitialVelocityNode, InitialVelocityRigidBody, PressureLoad,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
+    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
+    BoundaryNonReflecting, ControlAle,
 )
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
@@ -268,6 +270,7 @@ def _make_materials(state: ConversionState) -> List[str]:
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat)
     lines += _make_explosive_and_eos_materials(state)
+    lines += _make_ale_multimaterial(state)
     return lines
 
 
@@ -1196,7 +1199,12 @@ def _make_properties(state: ConversionState) -> List[str]:
             HDR,
         ]
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
-        isolid = _elform_to_isolid(sec.elform)
+        # ALE/Euler elements need an ALE-compatible solid formulation; the
+        # full-integration Lagrangian Isolid 17 is rejected (ERROR 131/608
+        # "INCOMPATIBLE ELEMENT TYPE WITH ALE/EULER FRAMEWORK"). Isolid 0 =
+        # the default, which resolves to the co-located ALE brick (the value
+        # used by the reference Drop_Container FSI deck).
+        isolid = 0 if sec.iale else _elform_to_isolid(sec.elform)
         # /PROP/SOLID card 1 (cfg radioss2022): Isolid Ismstr Iale Icpre Itetra10
         # Inpts Itetra4 Iframe Dn — note the Iale column at 21-30 (the 2022 PDF
         # p.1738 omits it; writing the PDF's 8-field layout shifts Itetra10 into
@@ -1213,7 +1221,7 @@ def _make_properties(state: ConversionState) -> List[str]:
             f"/PROP/SOLID/{sec.secid}",
             sec.title or f"PROP_{sec.secid}",
             "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-            f"{_i(isolid)}         0         0         0{_i(itetra10)}         0         0         0",
+            f"{_i(isolid)}         0{_i(sec.iale)}         0{_i(itetra10)}         0         0         0",
             "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
             "                   0                   0                   0                   0                   0",
             "#             dt_min   istrain      IHKT",
@@ -3066,6 +3074,246 @@ def _make_detonations(state: ConversionState) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Coupled ALE / fluid-structure coupling / non-reflecting boundaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _emit_grbric_part(grbric_id: int, title: str, pids: List[int]) -> List[str]:
+    """A /GRBRIC/PART brick group (the ALE fluid side of an FSI coupling)."""
+    lines = [f"/GRBRIC/PART/{grbric_id}", title or f"GRBRIC_{grbric_id}"]
+    row: List[str] = []
+    for p in pids:
+        row.append(_i(p))
+        if len(row) == 10:
+            lines.append("".join(row)); row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_surf_seg(surf_id: int, title: str, segments) -> List[str]:
+    """A /SURF/SEG from a list of node lists (shared by blast/EBCS/FSI)."""
+    lines = [f"/SURF/SEG/{surf_id}", (title or f"surf_seg_{surf_id}")[:100],
+             "#   seg_ID        n1        n2        n3        n4"]
+    for seg_no, nodes in enumerate(segments, start=1):
+        quad = (list(nodes) + [0, 0, 0, 0])[:4]
+        lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
+    lines.append(HDR)
+    return lines
+
+
+def _part_pids(state: ConversionState, sid: int, is_part: bool) -> List[int]:
+    """Expand a part id or part-set id to a list of part ids."""
+    if is_part:
+        return [sid] if sid in state.parts else []
+    ps = state.part_sets.get(sid)
+    return list(ps[1]) if ps else []
+
+
+def _make_ale_multimaterial(state: ConversionState) -> List[str]:
+    """*ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT), Iform=12.
+
+    The AMMG order becomes the ordered submaterial list; each submaterial is the
+    material of the referenced part(s) (a /MAT/LAW6+/EOS fluid or /MAT/LAW5
+    explosive already emitted). Card layout from MAT/mat_law51.cfg
+    FORMAT(radioss2023). The single-part-consolidation of the LS-DYNA multi-part
+    ALE mesh is left to the user (warned).
+    """
+    if not state.ale_mmgs:
+        return []
+    lines: List[str] = []
+    for mmg in state.ale_mmgs:
+        submats: List[int] = []
+        for sid, idtype in mmg.entries:
+            for pid in _part_pids(state, sid, idtype == 1):
+                part = state.parts.get(pid)
+                if part and part.mid and part.mid not in submats:
+                    submats.append(part.mid)
+        if not submats:
+            state.warn("*ALE_MULTI-MATERIAL_GROUP: could not resolve any "
+                       "submaterial (no known parts/materials) — /MAT/LAW51 not "
+                       "emitted.")
+            continue
+        law_id = state.next_id()
+        lines += [
+            f"/MAT/LAW51/{law_id}",
+            f"ale_multimat_{law_id}",
+            "",                                     # Card 1 (general) — blank
+            "#    Iform",
+            "        12",
+            "#                                     NU              Nu_Vol",
+            "",                                     # NU / Nu_Vol — blank
+            "#    MatID           ALPHA_MAT",
+        ]
+        for k, mid in enumerate(submats):
+            lines.append(_i(mid) + _f(1.0 if k == 0 else 0.0))
+        lines.append(HDR)
+        expl = [m for m in submats if m in state.mat_high_explosive]
+        if expl:
+            state.warn(
+                f"*ALE_MULTI-MATERIAL_GROUP: /MAT/LAW51/{law_id} includes JWL "
+                f"explosive submaterial(s) {expl}; a LAW5 used inside a multi-"
+                "material ALE needs a non-zero unreacted-explosive bulk modulus "
+                "(Bunreacted) on its /MAT/LAW5 (ERROR 99 otherwise) — set it.")
+        state.warn(
+            f"*ALE_MULTI-MATERIAL_GROUP -> /MAT/LAW51/{law_id} listing submaterials "
+            f"{submats} (phase order). In OpenRadioss the ALE domain is ONE part "
+            f"referencing this /MAT/LAW51 with the initial fill set by /INIVOL; "
+            "consolidate the LS-DYNA per-fluid ALE parts onto one mesh that "
+            f"references material {law_id}.")
+    return lines
+
+
+def _mean_brick_edge(state: ConversionState, pids: Set[int]) -> float:
+    """Rough mean first-edge length of the solid elements of *pids* (for a
+    default FSI gap). Samples up to 200 elements."""
+    tot = 0.0
+    n = 0
+    for e in state.solid_elems:
+        if e.pid in pids and len(e.nodes) >= 2:
+            a = state.nodes.get(e.nodes[0])
+            b = state.nodes.get(e.nodes[1])
+            if a and b:
+                tot += ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
+                n += 1
+                if n >= 200:
+                    break
+    return (tot / n) if n else 0.0
+
+
+def _make_fsi_coupling(state: ConversionState) -> List[str]:
+    """*CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (penalty ALE/Lagrange FSI).
+
+    slave (Lagrangian structure) → /SURF/PART/EXT (or /SURF/SEG); master (ALE
+    fluid) → /GRBRIC/PART. Card layout from INTER/inter_type18.cfg
+    FORMAT(radioss2022). Stfval/Gap must be > 0 (a mesh-derived default Gap and a
+    unit Stfval are emitted and warned for tuning). TYPE22 (cut-cell) is the more
+    accurate alternative for demanding FSI.
+    """
+    if not state.lagrange_in_solid:
+        return []
+    lines: List[str] = []
+    for cls in state.lagrange_in_solid:
+        # structure surface
+        if cls.sstyp == 2 and cls.slave in state.segment_sets:
+            surf_id = state.next_id()
+            lines += _emit_surf_seg(surf_id, f"fsi_struct_{cls.slave}",
+                                    state.segment_sets[cls.slave].segments)
+        else:
+            spids = _part_pids(state, cls.slave, cls.sstyp == 1)
+            if not spids:
+                state.warn(f"*CONSTRAINED_LAGRANGE_IN_SOLID: slave {cls.slave} "
+                           "not a known part/part-set/segment set — /INTER/TYPE18 "
+                           "skipped.")
+                continue
+            surf_id = state.next_id()
+            lines += _emit_surf_part(surf_id, f"fsi_struct_{cls.slave}", spids)
+        # fluid brick group
+        mpids = _part_pids(state, cls.master, cls.mstyp == 1)
+        if not mpids:
+            state.warn(f"*CONSTRAINED_LAGRANGE_IN_SOLID: master (fluid) "
+                       f"{cls.master} not a known part/part-set — /INTER/TYPE18 "
+                       "skipped.")
+            continue
+        grbric_id = state.next_id()
+        lines += _emit_grbric_part(grbric_id, f"fsi_fluid_{cls.master}", mpids)
+
+        edge = _mean_brick_edge(state, set(mpids))
+        gap = 0.5 * edge if edge > 0 else 1.0
+        inter_id = state.next_id()
+        lines += [
+            f"/INTER/TYPE18/{inter_id}",
+            f"fsi_coupling_{inter_id}",
+            "#            surf_ID grbric_id                Igap               Ipres      Idel",
+            (" " * 10 + _i(surf_id) + _i(grbric_id) + " " * 10 + _i(0)
+             + " " * 10 + _i(0) + _i(0)),
+            "#             Stfval                Vref                 Gap              Tstart               Tstop",
+            _f(1.0) + _f(0.0) + _f(gap) + _f(cls.start) + _f(cls.end),
+            HDR,
+        ]
+    if lines:
+        state.warn(
+            "*CONSTRAINED_LAGRANGE_IN_SOLID -> /INTER/TYPE18 (penalty FSI): a unit "
+            "interface stiffness (Stfval=1) and a mesh-derived Gap were emitted — "
+            "tune Stfval/Gap for your coupling, or switch to /INTER/TYPE22 "
+            "(cut-cell) for demanding fluid-structure interaction.")
+    return lines
+
+
+def _make_ebcs(state: ConversionState) -> List[str]:
+    """*BOUNDARY_NON_REFLECTING → /EBCS/NRF on the named segment set.
+
+    Card layout from LOADS/ebcs_nrf.cfg FORMAT(radioss2022): a /SURF/SEG built
+    from the *SET_SEGMENT + the /EBCS/NRF referencing it (relaxation times left 0
+    = auto).
+    """
+    if not state.non_reflecting:
+        return []
+    lines: List[str] = []
+    surf_for_ssid: Dict[int, int] = {}
+    for nrf in state.non_reflecting:
+        segset = state.segment_sets.get(nrf.nsid)
+        if segset is None or not segset.segments:
+            state.warn(f"*BOUNDARY_NON_REFLECTING nsid={nrf.nsid}: segment set not "
+                       "found or empty — /EBCS/NRF skipped.")
+            continue
+        surf_id = surf_for_ssid.get(nrf.nsid)
+        if surf_id is None:
+            surf_id = state.next_id()
+            surf_for_ssid[nrf.nsid] = surf_id
+            lines += _emit_surf_seg(surf_id, segset.title or f"nrf_{nrf.nsid}",
+                                    segset.segments)
+        ebcs_id = state.next_id()
+        lines += [
+            f"/EBCS/NRF/{ebcs_id}",
+            f"non_reflecting_{nrf.nsid}",
+            "#  surf_ID",
+            _i(surf_id),
+            "#            TCAR_P             TCAR_VF",
+            _f(0.0) + _f(0.0),
+            HDR,
+        ]
+    return lines
+
+
+def _make_inivol_notes(state: ConversionState) -> List[str]:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY → /INIVOL (recognize + warn).
+
+    /INIVOL fills an ALE part with a phase up to a geometric /SURF. The LS-DYNA
+    container geometry (plane/box/sphere/cylinder) has no single infinite-/SURF
+    primitive except the plane, so a first-pass conversion recognises the fill
+    and points the user at a manual /INIVOL + /SURF (writer._synthesize_blast_
+    ground emits the /SURF/PLANE for a plane container). No card is emitted here
+    to avoid a wrongly-positioned fill boundary.
+    """
+    if not state.volume_fractions:
+        return []
+    parts = ", ".join(str(vf.part) for vf in state.volume_fractions)
+    state.warn(
+        f"*INITIAL_VOLUME_FRACTION_GEOMETRY (part(s) {parts}) -> /INIVOL: the ALE "
+        "initial fill was recognised but its geometric container needs a manual "
+        "/SURF (plane/box/sphere/cylinder). Add /INIVOL/<part>/<id> with a "
+        "/SURF (a plane container can reuse a /SURF/PLANE) and ALE_PHASE = the "
+        "AMMG phase index; see docs/BLAST_ALE_JWL_MAPPING.md §B5.")
+    return []
+
+
+def _make_control_ale_notes(state: ConversionState) -> List[str]:
+    """*CONTROL_ALE → an informational note (advection defaults are kept)."""
+    if state.control_ale is None:
+        return []
+    meth = state.control_ale.meth
+    hint = ("Van-Leer/HIS second-order advection -> add /ALE/MUSCL"
+            if meth in (2, 3) else "donor-cell advection → OpenRadioss default (upwind)")
+    state.warn(
+        f"*CONTROL_ALE (METH={meth}): OpenRadioss keeps its default ALE advection "
+        f"(stable in the reference FSI example); {hint} if you need to reproduce "
+        "the exact scheme. Mesh smoothing (*ALE_SMOOTHING / "
+        "*ALE_REFERENCE_SYSTEM_*) has no /ALE 1:1 and is not converted.")
+    return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: offline frequency-domain post-processing notes
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4185,6 +4433,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_body_loads(state))
     sections.append(_make_blast_loads(state))
     sections.append(_make_detonations(state))
+    sections.append(_make_fsi_coupling(state))
+    sections.append(_make_ebcs(state))
+    sections.append(_make_inivol_notes(state))
+    sections.append(_make_control_ale_notes(state))
     sections.append(_make_starter_cloads(state))
     sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))
