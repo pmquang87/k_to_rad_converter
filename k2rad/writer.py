@@ -3783,7 +3783,8 @@ def _make_engine_header(state: ConversionState) -> List[str]:
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
-             or state.db_matsum_dt or state.db_spcforc_dt or 1e-3)
+             or state.db_matsum_dt or state.db_spcforc_dt
+             or state.db_ncforc_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -4253,21 +4254,46 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 def _make_starter_th_inter(state: ConversionState) -> List[str]:
     """Emit /TH/INTER so contact-interface forces reach the T01 time-history file.
 
-    Required for *CONTACT_FORCE_TRANSDUCER → /INTER/SUB: a sub-interface's force
-    is written as a channel of its parent interface, so the parent interface must
-    be requested in a /TH/INTER block. Only emitted when a transducer exists, so
-    decks without one are unchanged.
+    Two requesters share the block:
+      * *CONTACT_FORCE_TRANSDUCER → /INTER/SUB: a sub-interface's force is
+        written as a channel of its parent interface, so the parent interface
+        must be requested in a /TH/INTER block.
+      * *DATABASE_NCFORC (nodal contact forces): OpenRadioss has no per-node
+        contact-force time history (no /TH/NODE contact variable exists), so
+        the request maps to the per-interface force resultants of EVERY
+        converted contact interface here (T01, /TFILE frequency); the
+        nodal-resolution view is the contact-force/pressure animation vectors
+        /ANIM/VECT/CONT + /ANIM/VECT/PCONT the engine deck already carries.
+    Only emitted when a transducer or *DATABASE_NCFORC exists, so other decks
+    are unchanged.
     """
-    if not state.th_sub_ids:
+    all_inter_ids = ([c.inter_id for c in state.contacts_single]
+                     + [c.inter_id for c in state.contacts_surf2surf])
+    want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
+    if state.db_ncforc_dt and not all_inter_ids:
+        state.warn(
+            "*DATABASE_NCFORC requested but no *CONTACT was converted — "
+            "there is no interface to output (no /TH/INTER emitted).")
+    if not state.th_sub_ids and not want_ncforc:
         return []
-    parent_id = _select_parent_interface(state)
     # List the parent interface (total contact force) and each force-transducer
     # sub-interface id — a sub-interface is written to the T01 only when its own
     # id is requested here (listing just the parent leaves OUTPUT TO TH = 0).
     ids: List[int] = []
-    if parent_id is not None:
-        ids.append(parent_id)
-    ids += [sid for sid, _ in state.th_sub_ids]
+    if state.th_sub_ids:
+        parent_id = _select_parent_interface(state)
+        if parent_id is not None:
+            ids.append(parent_id)
+        ids += [sid for sid, _ in state.th_sub_ids]
+    if want_ncforc:
+        state.warn(
+            "*DATABASE_NCFORC (nodal contact forces): OpenRadioss has no "
+            "per-node contact-force time history — mapped to /TH/INTER force "
+            "resultants for every converted contact interface (T01 file, "
+            "/TFILE frequency). The per-node field is in the animation "
+            "vectors /ANIM/VECT/CONT + /ANIM/VECT/PCONT (at the /ANIM/DT "
+            "frequency), which the engine deck emits by default.")
+        ids += [i for i in all_inter_ids if i not in ids]
     if not ids:
         return []
     lines = [

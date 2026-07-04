@@ -4920,5 +4920,81 @@ class DatabaseSpcforcTests(unittest.TestCase):
         self.assertNotIn("/ANIM/VECT/FREAC", engine)
 
 
+class DatabaseNcforcTests(unittest.TestCase):
+    """*DATABASE_NCFORC → /TH/INTER on every converted contact interface."""
+
+    NCFORC_CARD = ("*DATABASE_NCFORC\n"
+                   "2.00000E-5         0         0         1\n")
+
+    def _convert(self, deck):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.k")
+            with open(path, "w") as fh:
+                fh.write(deck)
+            result = convert(path)
+            starter = Path(result.starter_path).read_text()
+            engine = Path(result.engine_path).read_text()
+        return result, starter, engine
+
+    def _with_ncforc(self, base=None):
+        deck = base if base is not None else TRANSDUCER_K
+        return deck.replace("*CONTROL_TERMINATION",
+                            self.NCFORC_CARD + "*CONTROL_TERMINATION")
+
+    @staticmethod
+    def _th_inter_ids(starter):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/TH/INTER/"))
+        ids = []
+        # skip title, "#     var1" comment and the DEF variable line
+        for ln in lines[i + 4:]:
+            if ln.startswith(("#", "/")) or not ln.strip():
+                break
+            ids.append(int(ln.strip()))
+        return ids
+
+    def test_ncforc_not_skipped_and_warn_names_anim_vectors(self):
+        result, _s, _e = self._convert(self._with_ncforc())
+        self.assertNotIn("DATABASE_NCFORC", result.skipped_keywords)
+        self.assertTrue(any("*DATABASE_NCFORC" in w and "/ANIM/VECT/CONT" in w
+                            for w in result.warnings))
+
+    def test_ncforc_without_transducer_lists_contact_interface(self):
+        # Drop the transducer: /TH/INTER must still appear, listing the
+        # /INTER/TYPE7 converted from *CONTACT_AUTOMATIC_SINGLE_SURFACE.
+        base = TRANSDUCER_K.replace(
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
+            "")
+        _r, starter, _e = self._convert(self._with_ncforc(base))
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE7/"))
+        inter_id = int(lines[i].rsplit("/", 1)[1])
+        self.assertEqual(self._th_inter_ids(starter), [inter_id])
+
+    def test_ncforc_merges_into_transducer_th_inter(self):
+        # With a transducer AND NCFORC there must be exactly ONE /TH/INTER
+        # block covering parent, sub-interface and any remaining contacts.
+        _r, starter, _e = self._convert(self._with_ncforc())
+        self.assertEqual(starter.count("/TH/INTER/"), 1)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/SUB/"))
+        sub_id = int(lines[i].rsplit("/", 1)[1])
+        self.assertIn(sub_id, self._th_inter_ids(starter))
+
+    def test_ncforc_tfile_dt(self):
+        _r, _s, engine = self._convert(self._with_ncforc())
+        lines = engine.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/TFILE")
+        self.assertAlmostEqual(float(lines[i + 1]), 2.0e-5)
+
+    def test_ncforc_without_contact_warns(self):
+        deck = SPCFORC_K.replace("*DATABASE_SPCFORC", "*DATABASE_NCFORC")
+        result, starter, _e = self._convert(deck)
+        self.assertNotIn("/TH/INTER", starter)
+        self.assertTrue(any("*DATABASE_NCFORC" in w and "no *CONTACT" in w
+                            for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

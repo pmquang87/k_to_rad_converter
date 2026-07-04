@@ -1284,6 +1284,14 @@ def handle_database_sleout(block: Block, state: ConversionState) -> None:
     state.db_sleout_dt = _handle_db_dt(block)
 
 
+def handle_database_ncforc(block: Block, state: ConversionState) -> None:
+    """*DATABASE_NCFORC (nodal contact forces) → /TH/INTER on every converted
+    contact interface (T01 force resultants). The per-node view lives in the
+    default animation vectors /ANIM/VECT/CONT + /ANIM/VECT/PCONT; OpenRadioss
+    has no per-node contact-force time history."""
+    state.db_ncforc_dt = _handle_db_dt(block)
+
+
 def handle_database_spcforc(block: Block, state: ConversionState) -> None:
     """*DATABASE_SPCFORC (SPC reaction forces) → /TH/NODE with REACX/Y/Z
     (+REACXX/YY/ZZ) on the /BCS-constrained nodes + engine /ANIM/VECT/FREAC.
@@ -2089,7 +2097,7 @@ HANDLERS = {
     "DATABASE_SECFORC":                       handle_database_secforc,
     "DATABASE_SLEOUT":                        handle_database_sleout,
     "DATABASE_SPCFORC":                       handle_database_spcforc,
-    "DATABASE_NCFORC":                        handle_skip,
+    "DATABASE_NCFORC":                        handle_database_ncforc,
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
