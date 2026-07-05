@@ -1757,6 +1757,76 @@ class Tet4SliverTests(unittest.TestCase):
         self.assertFalse(any("4-node tet" in w for w in result.warnings))
 
 
+# A sound 8-node brick plus two zero-volume degenerates: element 2 collapsed to
+# a single point (all eight nodes identical — the elevator-linkage foxcore-rund
+# failure: such elements written as /BRICK abort the starter with ERROR 245
+# "ZERO OR NEGATIVE 3D SOLID VOLUME") and element 3 collapsed to an edge (two
+# distinct nodes). Both must be dropped and logged, never written; the sound
+# brick stays. The deck is explicit on purpose: the degenerate screen is
+# unconditional, unlike the implicit-only tet4 sliver screen.
+DEGENERATE_SOLID_K = """\
+*KEYWORD
+*TITLE
+Degenerate solid screening
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             0.0             0.0             1.0
+       6             1.0             0.0             1.0
+       7             1.0             1.0             1.0
+       8             0.0             1.0             1.0
+       9             5.0             5.0             5.0
+*ELEMENT_SOLID
+       1       1       1       2       3       4       5       6       7       8
+       2       1       9       9       9       9       9       9       9       9
+       3       1       1       2       2       2       2       2       2       2
+*PART
+brick part
+         1         1         1
+*SECTION_SOLID
+         1         1
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class DegenerateSolidTests(unittest.TestCase):
+    """Solids with fewer than 4 distinct nodes have exactly zero volume; written
+    as /BRICK the OpenRadioss starter rejects the deck (ERROR 245), so the
+    converter must drop them with a logged warning instead."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "degen.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_collapsed_solids_dropped_sound_brick_kept(self):
+        result, s = self._convert(DEGENERATE_SOLID_K)
+        lines = s.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/BRICK/"))
+        eids = []
+        for ln in lines[i + 1:]:
+            if ln.startswith(("/", "#")):
+                break
+            eids.append(int(ln.split()[0]))
+        self.assertEqual(eids, [1])       # point/edge collapses never written
+
+    def test_drop_is_logged_with_element_ids(self):
+        result, _ = self._convert(DEGENERATE_SOLID_K)
+        warn = next(w for w in result.warnings if "degenerate solid" in w)
+        self.assertIn("ERROR 245", warn)
+        self.assertRegex(warn, r"Dropped element\(s\): 2, 3$")
+
+
 class FreeNodeGuardTests(unittest.TestCase):
     """Implicit: free nodes (no element/rigid body) are constrained to avoid a
     singular tangent; explicit leaves them untouched."""

@@ -59,6 +59,14 @@ def _print_gapmin_suggestions(input_path: str, factor: float, analyze_file) -> i
 
 
 def main() -> int:
+    # Windows consoles often use cp1252, which cannot encode the arrows/units
+    # glyphs used in warning texts - degrade gracefully instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(
         prog="k2rad",
         description="Convert a LS-DYNA .k keyword file to OpenRadioss .rad format.",
