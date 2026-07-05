@@ -54,6 +54,26 @@ print(result.skipped_keywords, result.warnings)
 Or edit `run_converter.py` to set a hardcoded path and run
 `python run_converter.py`.
 
+### Docker container (converter + solver + modal chain, zero setup)
+
+The [`docker/`](docker/) directory packages the **complete workflow into one
+Linux container** — k2rad, OpenRadioss with MUMPS implicit and the
+modal-patched engine, the offline eigensolver, mode-shape exporters and the
+random-vibration/fatigue post-processing — so an LS-DYNA
+`*CONTROL_IMPLICIT_EIGENVALUE` deck runs end-to-end with nothing installed
+but Docker:
+
+```powershell
+.\or.ps1 -KFile mymodel.k -Modal      # convert -> solve -> modes -> PSD/RMS/fatigue
+docker run --rm --shm-size=2g -v "${PWD}:/data" -w /data openradioss-k2rad:20260703 modal mymodel.k
+```
+
+See [docker/COLLEAGUE_INSTRUCTIONS.md](docker/COLLEAGUE_INSTRUCTIONS.md) for
+the end-user guide (setup, outputs, troubleshooting) and
+[docker/Dockerfile](docker/Dockerfile) /
+[docker/build-and-export.ps1](docker/build-and-export.ps1) to build and
+export the image.
+
 ---
 
 ## Supported LS-DYNA keywords

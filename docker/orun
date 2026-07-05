@@ -1,0 +1,111 @@
+#!/bin/bash
+# OpenRadioss (MUMPS) + Vortex-Radioss + k2rad modal container entrypoint.
+# Run from the mounted model directory (/data).
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+OpenRadioss (MUMPS) + Vortex d3plot + k2rad modal container runner
+------------------------------------------------------------------
+Usage (as the trailing args of `docker run ... IMAGE <args>`):
+
+  modal <model.k> [n_modes]  Full modal chain on an LS-DYNA deck:
+                             k2rad convert -> starter+engine np=1 (exact
+                             stiffness export) -> offline eigensolve ->
+                             <stem>_modes.npz + d3plot/VTK mode shapes ->
+                             random-vibration PSD/RMS/fatigue post (only if
+                             the deck has *DATABASE_FREQUENCY_BINARY or
+                             *MAT_ADD_FATIGUE cards)
+  convert <model.k> [flags]  LS-DYNA -> OpenRadioss conversion only (k2rad);
+                             writes <stem>_0000.rad + <stem>_0001.rad
+  run <stem> [np] [nt]       Starter on <stem>_0000.rad, then Engine on <stem>_000N.rad
+  d3plot <stem>              Convert <stem>A001.. animation files to <stem>.d3plot
+  starter <args...>          Call starter_linux64_gf directly
+  engine  <np> <args...>     Run: mpiexec -np <np> engine_linux64_gf_ompi <args...>
+  <anything else>            Executed verbatim (e.g. `bash`)
+
+Examples:
+  docker run --rm --shm-size=2g -v "$PWD:/data" -w /data IMAGE modal mymodel.k
+  docker run --rm --shm-size=2g -v "$PWD:/data" -w /data IMAGE modal mymodel.k 20
+  docker run --rm -v "$PWD:/data" -w /data IMAGE convert mymodel.k
+  docker run --rm --shm-size=2g -v "$PWD:/data" -w /data IMAGE run mymodel 4 1
+  docker run --rm -v "$PWD:/data" -w /data IMAGE d3plot mymodel
+EOF
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  help|-h|--help)
+    usage
+    ;;
+  convert)
+    shift
+    kfile="${1:?usage: convert <model.k> [k2rad flags...]}"
+    shift
+    stem="${kfile%.*}"
+    python3 /opt/k2rad/k2rad.py "${kfile}" "$@" 2>&1 | tee "${stem}_conversion.log"
+    ;;
+  modal)
+    kfile="${2:?usage: modal <model.k> [n_modes]}"
+    nmodes="${3:-}"
+    stem="${kfile%.*}"
+    echo "=== [1/5] k2rad convert ${kfile} -> ${stem}_0000/0001.rad ==="
+    python3 /opt/k2rad/k2rad.py "${kfile}" 2>&1 | tee "${stem}_conversion.log"
+    echo "=== [2/5] STARTER ${stem}_0000.rad  (np=1 nt=2) ==="
+    starter_linux64_gf -i "${stem}_0000.rad" -np 1 -nt 2
+    echo "=== [3/5] ENGINE ${stem}_0001.rad  (np=1, exact stiffness export) ==="
+    rm -f local_stiffness_matrix_domain0
+    mpiexec -np 1 engine_linux64_gf_ompi -i "${stem}_0001.rad" -nt 2
+    if [ ! -s local_stiffness_matrix_domain0 ]; then
+      echo "ERROR: engine wrote no local_stiffness_matrix_domain0 -" \
+           "is ${kfile} a modal deck (*CONTROL_IMPLICIT_EIGENVALUE)?" >&2
+      exit 1
+    fi
+    echo "=== [4/5] Offline eigensolve -> ${stem}_modes.npz ==="
+    solve_args=(local_stiffness_matrix_domain0 "${kfile}" -o "${stem}_modes.npz")
+    if [ -n "${nmodes}" ]; then solve_args+=(-n "${nmodes}"); fi
+    python3 /opt/k2rad/tools/modal_solve.py "${solve_args[@]}"
+    echo "=== [5/5] Mode shapes -> ${stem}_modes.d3plot(+01) + ${stem}_modes_vtk/ ==="
+    python3 /opt/k2rad/tools/modal_shapes_export.py "${stem}_modes.npz" "${kfile}" ||
+      echo "WARN: modal_shapes_export.py failed (exit $?) - continuing" >&2
+    if grep -qiE '^\*(DATABASE_FREQUENCY_BINARY|MAT_ADD_FATIGUE)' "${kfile}"; then
+      echo "=== [+] Random vibration (D3PSD/D3RMS/D3FTG / MAT_ADD_FATIGUE cards found) ==="
+      python3 /opt/k2rad/tools/modal_random_response.py "${stem}_modes.npz" "${kfile}" ||
+        echo "WARN: modal_random_response.py failed (exit $?) - continuing" >&2
+    fi
+    echo "=== Done ==="
+    ;;
+  run)
+    stem="${2:?usage: run <stem> [np] [nt]}"
+    np="${3:-4}"
+    nt="${4:-1}"
+    echo "=== STARTER ${stem}_0000.rad  (np=${np} nt=${nt}) ==="
+    starter_linux64_gf -i "${stem}_0000.rad" -np "${np}" -nt "${nt}"
+    shopt -s nullglob
+    found=0
+    for eng in "${stem}"_000[1-9].rad "${stem}"_00[1-9][0-9].rad; do
+      found=1
+      echo "=== ENGINE ${eng}  (np=${np} nt=${nt}) ==="
+      mpiexec -np "${np}" engine_linux64_gf_ompi -i "${eng}" -nt "${nt}"
+    done
+    [ "${found}" -eq 0 ] && echo "WARN: no ${stem}_000N.rad engine deck found."
+    echo "=== Done ==="
+    ;;
+  d3plot)
+    stem="${2:?usage: d3plot <stem>}"
+    exec python3 /usr/local/bin/to_d3plot.py "${stem}"
+    ;;
+  starter)
+    shift
+    exec starter_linux64_gf "$@"
+    ;;
+  engine)
+    shift
+    np="${1:?usage: engine <np> <engine-args...>}"
+    shift
+    exec mpiexec -np "${np}" engine_linux64_gf_ompi "$@"
+    ;;
+  *)
+    exec "$@"
+    ;;
+esac
