@@ -898,7 +898,11 @@ def _screen_sliver_tets(state: ConversionState) -> None:
     sliver must look free there to get its /BCS — otherwise it carries zero
     stiffness rows into the implicit tangent (singular matrix).
 
-    Two screens run here:
+    Three screens run here:
+      * Solids with fewer than 4 distinct nodes (collapsed to a point, edge,
+        or triangle) are dropped unconditionally — they have exactly zero
+        volume, and written as /BRICK the starter rejects the whole deck
+        (ERROR 245: ZERO OR NEGATIVE 3D SOLID VOLUME).
       * 10-node tets failing _tet10_badly_shaped are dropped unconditionally —
         OpenRadioss refuses to read them as /TETRA10 (ERROR 489).
       * 4-node tets are screened for implicit decks only (explicit reads and
@@ -908,6 +912,7 @@ def _screen_sliver_tets(state: ConversionState) -> None:
         AUTOSPC dimension-flip dt cuts or inverts and pollutes the energy.
     """
     bad_t10: Dict[int, int] = defaultdict(int)            # pid -> count
+    null_solid: Dict[int, List[int]] = defaultdict(list)  # pid -> eids
     drop_t4: Dict[int, List[int]] = defaultdict(list)     # pid -> eids
     warn_t4: Dict[int, List[int]] = defaultdict(list)     # pid -> eids
     kept: List[SolidElem] = []
@@ -916,9 +921,12 @@ def _screen_sliver_tets(state: ConversionState) -> None:
             if _tet10_badly_shaped(state, e.nodes):
                 bad_t10[e.pid] += 1
                 continue
-        elif state.is_implicit:
+        else:
             uniq = _ordered_unique_nodes(e.nodes)
-            if len(uniq) == 4:
+            if len(uniq) < 4:
+                null_solid[e.pid].append(e.eid)
+                continue
+            if state.is_implicit and len(uniq) == 4:
                 shape = _tet4_sliver_class(state, uniq)
                 if shape == "drop":
                     drop_t4[e.pid].append(e.eid)
@@ -928,6 +936,17 @@ def _screen_sliver_tets(state: ConversionState) -> None:
         kept.append(e)
     state.solid_elems = kept
 
+    for pid, eids in sorted(null_solid.items()):
+        state.warn(
+            f"PART {pid}: dropped {len(eids)} degenerate solid(s) with fewer "
+            "than 4 distinct nodes (collapsed to a point, edge, or triangle — "
+            "exactly zero volume). Emitted as /BRICK the OpenRadioss starter "
+            "rejects the whole deck (ERROR 245: zero or negative 3D solid "
+            "volume). They carry no volume, mass, or stiffness, so dropping "
+            "them is physically negligible; on implicit decks any node left "
+            "unattached is constrained by the free-node guard. "
+            f"Dropped element(s): {_fmt_eid_list(eids)}"
+        )
     for pid, n in sorted(bad_t10.items()):
         state.warn(
             f"PART {pid}: dropped {n} near-degenerate (sliver) 10-node "
@@ -1122,7 +1141,8 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             # ~0.8 J vs EXT-WORK ~690 J, -99.9% energy error). 5-8 unique
             # nodes stay /BRICK (a wedge/pyramid as a degenerate hex is ok).
             # 10-node solids are quadratic tets -> /TETRA10 (all 10 nodes kept).
-            # Sliver screening (tet10 always, tet4 for implicit) already ran in
+            # Degenerate (<4 distinct nodes, ERROR 245) and sliver screening
+            # (tet10 always, tet4 for implicit) already ran in
             # _screen_sliver_tets, so every element here is emitted.
             tets = []     # (eid, [n1, n2, n3, n4])
             tets10 = []   # SolidElem with 10 nodes (quadratic tet)
