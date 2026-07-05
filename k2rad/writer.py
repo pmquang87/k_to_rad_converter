@@ -2102,6 +2102,207 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starter: tied interfaces  (*CONTACT_TIED_* → /INTER/TYPE2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# LS-DYNA tied variant → /INTER/TYPE2 Spotflag. NODES_/SHELL_EDGE_TO_SURFACE
+# welds get the spotweld formulation (Spotflag=1): the secondary node is joined
+# to the main segment by a rigid link of constant stiffness, so the offset
+# between a tied node and the main shell MID-PLANE (typically half the plate
+# thickness) carries force and moment without exciting hourglass modes.
+# SURFACE_TO_SURFACE is LS-DYNA's mesh-transition glue → the standard
+# formulation (Spotflag=5).
+_TIED_SPOTFLAG = {
+    "NODES_TO_SURFACE":      1,
+    "SHELL_EDGE_TO_SURFACE": 1,
+    "SURFACE_TO_SURFACE":    5,
+}
+
+# dsearch margin over the measured worst node-to-segment gap: covers the exact
+# half-thickness mid-plane offset plus mesh roundoff without reaching across to
+# an unrelated segment one element away.
+_TIED_DSEARCH_MARGIN = 1.2
+
+
+def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
+                      spotflag: int, dsearch: float) -> List[str]:
+    """/INTER/TYPE2 card (FORMAT radioss2017 — unchanged through /BEGIN 2022):
+    grnd_IDs surf_IDm Ignore Spotflag Level Isearch Idel2 <blank10> dsearch(20).
+
+    Ignore=2: secondary nodes with no main segment within dsearch are removed
+    from the tie by the starter (and printed), and a dsearch of 0 is replaced
+    by the starter's average-main-segment-size default. Isearch=2 = improved
+    closest-segment search. Idel2=0 = engine default (no deletion).
+    """
+    return [
+        f"/INTER/TYPE2/{inter_id}",
+        title or f"TIED_CONTACT_{inter_id}",
+        "#  Grnd_id   Surf_id    Ignore  Spotflag     Level   Isearch     Idel2                       dsearch",
+        f"{_i(grnod_id)}{_i(surf_id)}{_i(2)}{_i(spotflag)}{_i(0)}{_i(2)}{_i(0)}          {_f(dsearch)}",
+        HDR,
+    ]
+
+
+def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
+    """Node ids of a tied-contact slave side. SSTYP 4 = node set, 3 = part,
+    2 = part set, 0 = segment set (the nodes of its segments); 0/1 fall back to
+    part / part-set / node-set lookups like the penalty-contact resolver."""
+    nids: Set[int] = set()
+
+    def add_part_nodes(pid: int) -> None:
+        for e in state.shell_elems:
+            if e.pid == pid:
+                nids.update(e.nodes)
+        for e in state.solid_elems:
+            if e.pid == pid:
+                nids.update(e.nodes)
+
+    if styp == 4:
+        if sid in state.node_sets:
+            nids.update(state.node_sets[sid][1])
+    elif styp == 3:
+        add_part_nodes(sid)
+    elif styp == 2:
+        if sid in state.part_sets:
+            for pid in state.part_sets[sid][1]:
+                add_part_nodes(pid)
+    elif styp in (0, 1):
+        if sid in state.segment_sets:
+            for seg in state.segment_sets[sid].segments:
+                nids.update(seg)
+        elif sid in state.parts:
+            add_part_nodes(sid)
+        elif sid in state.part_sets:
+            for pid in state.part_sets[sid][1]:
+                add_part_nodes(pid)
+        elif sid in state.node_sets:
+            nids.update(state.node_sets[sid][1])
+    return sorted(n for n in nids if n > 0)
+
+
+def _tied_master_surface(state: ConversionState, c, out_lines: List[str]):
+    """Emit the main /SURF of a tied contact; returns (surf_id, verts, faces)
+    where verts/faces are the surface triangles used to measure the tied gap
+    (empty when the geometry is unknown). MSTYP 0 = *SET_SEGMENT → /SURF/SEG;
+    3 = part, 2 = part set → the part surface (0/1 fall back to parts too)."""
+    from .gapmin import _segment_triangles, _surface_triangles
+    if c.mstyp in (0, 1) and c.msid in state.segment_sets:
+        ss = state.segment_sets[c.msid]
+        if not ss.segments:
+            return 0, [], []
+        surf_id = state.next_id()
+        out_lines += _emit_surf_seg(surf_id, ss.title or f"tied_{c.inter_id}_master",
+                                    ss.segments)
+        verts, faces = _segment_triangles(state, ss.segments)
+        return surf_id, verts, faces
+    pids = sorted(_contact_master_pids(state, c.msid, c.mstyp))
+    if not pids:
+        return 0, [], []
+    surf_id = state.next_id()
+    if not _make_master_surface(state, surf_id, f"tied_{c.inter_id}_master",
+                                pids, out_lines):
+        return 0, [], []
+    verts, faces = _surface_triangles(state, pids)
+    return surf_id, verts, faces
+
+
+def _tied_dsearch(state: ConversionState, c, slave_nids: List[int],
+                  verts, faces) -> float:
+    """/INTER/TYPE2 dsearch for one tied contact: the measured WORST secondary
+    node-to-main-segment distance × a small margin, so every tied node finds
+    its segment even when the main side is a shell whose segments sit on the
+    MID-PLANE half a thickness away from the physically-touching tied nodes.
+
+    A negative LS-DYNA Card-3 SST/MST (absolute tie-criterion distance) is
+    honoured as a floor. 0 is returned when the gap cannot be measured —
+    Ignore=2 then makes the starter default dsearch to the average main
+    segment size."""
+    from .gapmin import _coords_for, _round_sig, max_node_to_triangles
+    floor = max(-c.sst if c.sst < 0.0 else 0.0,
+                -c.mst if c.mst < 0.0 else 0.0)
+    gap = max_node_to_triangles(_coords_for(state, slave_nids), verts, faces)
+    if gap is None:
+        if floor > 0.0:
+            state.warn(
+                f"TIED CONTACT {c.inter_id}: node-to-segment gap not measurable "
+                f"(missing coordinates) — dsearch={floor:g} taken from the "
+                "negative Card-3 SST/MST absolute tie distance."
+            )
+            return floor
+        state.warn(
+            f"TIED CONTACT {c.inter_id}: node-to-segment gap not measurable "
+            "(missing coordinates) — dsearch left 0, so the starter defaults it "
+            "to the average main-segment size (Ignore=2). If tied nodes sit "
+            "further than that from the main shell mid-plane, the starter "
+            "deletes them from the tie (they are printed in the starter output)."
+        )
+        return 0.0
+    dsearch = _round_sig(max(gap * _TIED_DSEARCH_MARGIN, floor), 4)
+    if dsearch > 0.0:
+        state.warn(
+            f"TIED CONTACT {c.inter_id}: worst secondary-node-to-main-segment "
+            f"distance is {gap:g} (a mid-plane offset of ~half the main shell "
+            f"thickness is expected for shell welds) -> /INTER/TYPE2 "
+            f"dsearch={dsearch:g} so every tied node finds its main segment. "
+            "Nodes beyond dsearch would be dropped from the tie by the starter "
+            "(Ignore=2)."
+        )
+    return dsearch
+
+
+def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """*CONTACT_TIED_* → /INTER/TYPE2 (+ /GRNOD secondary side, /SURF main side)."""
+    if not state.contacts_tied:
+        return []
+    lines = ["#-  TIED INTERFACES (*CONTACT_TIED_* -> /INTER/TYPE2):", HDR]
+    for c in state.contacts_tied:
+        nids = _tied_slave_nids(state, c.ssid, c.sstyp)
+        clean = [n for n in nids if n not in rigid_nodes]
+        if len(clean) < len(nids):
+            state.warn(
+                f"TIED CONTACT {c.inter_id}: {len(nids) - len(clean)} secondary "
+                "node(s) belong to a rigid body and were removed from the tie "
+                "(/INTER/TYPE2 is a kinematic condition — it cannot share a "
+                "node with /RBODY)."
+            )
+        if not clean:
+            state.warn(
+                f"TIED CONTACT {c.inter_id} (*CONTACT_TIED_{c.variant}): slave "
+                f"side ssid={c.ssid} sstyp={c.sstyp} resolved to no nodes — "
+                "interface skipped."
+            )
+            continue
+        master_lines: List[str] = []
+        surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
+        if not surf_id:
+            state.warn(
+                f"TIED CONTACT {c.inter_id} (*CONTACT_TIED_{c.variant}): master "
+                f"side msid={c.msid} mstyp={c.mstyp} resolved to no surface — "
+                "interface skipped."
+            )
+            continue
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
+        lines += master_lines
+        dsearch = _tied_dsearch(state, c, clean, verts, faces)
+        spotflag = _TIED_SPOTFLAG.get(c.variant, 1)
+        lines += _emit_inter_type2(c.inter_id, c.title, grnod_id, surf_id,
+                                   spotflag, dsearch)
+        rot_note = (
+            " Note: TYPE2 also ties the secondary nodes' ROTATIONS to the main "
+            "segment (a moment-carrying weld); the LS-DYNA keyword tied "
+            "translations only." if c.variant != "SHELL_EDGE_TO_SURFACE" else ""
+        )
+        state.warn(
+            f"*CONTACT_TIED_{c.variant}{'_OFFSET' if c.offset else ''} "
+            f"{c.inter_id} -> /INTER/TYPE2/{c.inter_id} (tied kinematic "
+            f"interface, Spotflag={spotflag}, {len(clean)} secondary nodes)."
+            + rot_note
+        )
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: grounding springs  (force-control bootstrap stabilization)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4392,7 +4593,8 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     are unchanged.
     """
     all_inter_ids = ([c.inter_id for c in state.contacts_single]
-                     + [c.inter_id for c in state.contacts_surf2surf])
+                     + [c.inter_id for c in state.contacts_surf2surf]
+                     + [c.inter_id for c in state.contacts_tied])
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:
         state.warn(
@@ -4773,6 +4975,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_functions(state))
     sections.append(_make_extra_groups(state))
     sections.append(_make_interfaces(state, rigid_nodes))
+    sections.append(_make_tied_interfaces(state, rigid_nodes))
     sections.append(_make_force_transducers(state, rigid_nodes))
     sections.append(rbody_lines)
     sections.append(_make_imposed_motions(state, rbody_info))

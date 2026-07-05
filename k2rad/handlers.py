@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import List
 
-from .parser import Block, parse_fixed, parse_free, to_float, to_int
+from .parser import (
+    Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
+)
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
@@ -17,7 +19,7 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
-    ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer,
+    ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
@@ -41,13 +43,28 @@ from .state import (
 def _elem_fields(line: str, n: int) -> List[str]:
     """Parse an element connectivity line into *n* fields.
 
-    Tries whitespace-split first; if the first token is longer than 12 characters
-    it's the LS-PrePost dense fixed-width format (8-char fields, no separators) so
-    we fall back to parse_fixed with w=8.
+    Tries whitespace-split first.  In the fixed I8 format two consecutive
+    fields glue together whenever the left one's value fills all 8 columns
+    (any id >= 10,000,000, e.g. LS-PrePost output): the split then under-counts
+    — "90000001      9190000001…" (eid pid n1…) is just two tokens.  A single
+    I8 field never exceeds 8 characters, so any longer token marks a possible
+    glue; re-slice the whole line at w=8 and prefer that result when it
+    separates more fields and every one is a plain unsigned integer.  Genuine
+    free-format lines with ids wider than 8 digits fail that check (their
+    re-slice cuts numbers mid-token, leaving fields with embedded spaces) and
+    keep the whitespace split.
     """
     f = parse_free(line)
-    if f and len(f[0]) > 12:
-        return parse_fixed(line, n=n, w=8)
+    if f and any(len(tok) > 8 for tok in f):
+        data = _strip_inline_comment(line)
+        # Slice the full line, not just n fields: a glue past field n (e.g. in
+        # a beam's optional trailing fields) must still count as fixed format,
+        # otherwise the mis-split leading tokens would be taken at face value.
+        n_all = max(n, (len(data) + 7) // 8)
+        fixed = parse_fixed(data, n=n_all, w=8)
+        nonempty = [x for x in fixed if x]
+        if len(nonempty) > len(f) and all(x.isdigit() for x in nonempty):
+            return fixed[:n]
     return f
 
 
@@ -130,7 +147,18 @@ def handle_end(block: Block, state: ConversionState) -> None:
 def handle_node(block: Block, state: ConversionState) -> None:
     for line in block.raw:
         f = parse_free(line)
-        if len(f) < 4:
+        # LS-DYNA standard *NODE is fixed I8 + 3×E16: a negative coordinate
+        # fills its 16-char field completely and glues onto the previous field
+        # ("… 0.000000000e+00-1.250000000e+00"), so a whitespace split either
+        # under-counts or leaves an over-long merged token. Re-slice the fixed
+        # columns in that case — otherwise every node with a glued negative
+        # coordinate is silently dropped (e.g. an entire plate at z < 0).
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+            nid = to_int(line[0:8])
+            if nid <= 0:
+                continue
+            state.nodes[nid] = NodeData(to_float(line[8:24]), to_float(line[24:40]),
+                                        to_float(line[40:56]))
             continue
         nid = to_int(f[0])
         state.nodes[nid] = NodeData(to_float(f[1]), to_float(f[2]), to_float(f[3]))
@@ -976,6 +1004,43 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs)
+    )
+
+
+def handle_contact_tied(block: Block, state: ConversionState) -> None:
+    """*CONTACT_TIED_{NODES,SURFACE,SHELL_EDGE}_TO_SURFACE[_OFFSET…] →
+    /INTER/TYPE2 (tied kinematic interface).
+
+    Card1: ssid msid sstyp mstyp …  (slave commonly a *SET_NODE_LIST, sstyp=4;
+           master commonly a *SET_SEGMENT, mstyp=0)
+    Card2: fs fd dc vc vdc penchk bt dt — friction is meaningless on a tie and
+           is not carried over.
+    Card3: sfs sfm sst mst — a NEGATIVE sst/mst is LS-DYNA's "absolute
+           tie-criterion distance", kept as a floor for the TYPE2 dsearch.
+    """
+    inter_id, title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid  = to_int(f1[0]) if f1 else 0
+    msid  = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+
+    kw = block.keyword                       # e.g. CONTACT_TIED_NODES_TO_SURFACE_OFFSET
+    if "SHELL_EDGE" in kw:
+        variant = "SHELL_EDGE_TO_SURFACE"
+    elif "NODES" in kw:
+        variant = "NODES_TO_SURFACE"
+    else:
+        variant = "SURFACE_TO_SURFACE"
+    state.contacts_tied.append(
+        ContactTied(inter_id, title, ssid, sstyp, msid, mstyp, variant,
+                    offset=kw.endswith("OFFSET"), sst=sst, mst=mst)
     )
 
 
@@ -2075,6 +2140,17 @@ HANDLERS = {
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
     "CONTACT_FORCE_TRANSDUCER_PENALTY":        handle_contact_force_transducer,
     "CONTACT_FORCE_TRANSDUCER":                handle_contact_force_transducer,
+    # Tied (glued) contacts → /INTER/TYPE2
+    "CONTACT_TIED_NODES_TO_SURFACE":                    handle_contact_tied,
+    "CONTACT_TIED_NODES_TO_SURFACE_OFFSET":             handle_contact_tied,
+    "CONTACT_TIED_NODES_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
+    "CONTACT_TIED_SURFACE_TO_SURFACE":                  handle_contact_tied,
+    "CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET":           handle_contact_tied,
+    "CONTACT_TIED_SURFACE_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
+    "CONTACT_TIED_SHELL_EDGE_TO_SURFACE":               handle_contact_tied,
+    "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_OFFSET":        handle_contact_tied,
+    "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_BEAM_OFFSET":   handle_contact_tied,
+    "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
 
     # Control
     "CONTROL_IMPLICIT_GENERAL":               handle_control_implicit_general,

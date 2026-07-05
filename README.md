@@ -144,6 +144,16 @@ unit/sign gotchas.
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`, `_GENERAL`) → `/INTER/TYPE7`
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`
+`*CONTACT_TIED_{NODES,SHELL_EDGE,SURFACE}_TO_SURFACE` (+ `_OFFSET` variants) →
+`/INTER/TYPE2` (tied kinematic interface): slave `*SET_NODE_LIST` (SSTYP=4) →
+`/GRNOD`, master `*SET_SEGMENT` (MSTYP=0) → `/SURF/SEG`; parts / part sets on
+either side are also resolved. `Spotflag=1` (spotweld formulation) for the
+NODES/SHELL_EDGE weld variants, `Spotflag=5` (standard) for SURFACE_TO_SURFACE.
+The TYPE2 `dsearch` is measured from the mesh — the worst slave-node-to-master-
+segment distance × 1.2 — so tied nodes offset from a shell master's MID-PLANE
+by half the plate thickness (the usual welded-shell layout) stay tied;
+`Ignore=2` makes the starter drop (and print) any node beyond it, and a
+negative Card-3 `SST`/`MST` (LS-DYNA's absolute tie distance) floors `dsearch`.
 `ignore=0/1/2` → `Inacti=5` (LS-DYNA neutralizes initial penetrations at
 initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
