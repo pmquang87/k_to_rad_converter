@@ -1,0 +1,5 @@
+*.tar
+*.md
+*.ps1
+*.log
+_smoketest/
