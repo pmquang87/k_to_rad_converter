@@ -428,6 +428,34 @@ class ContactAutoSurf2Surf:
 
 
 @dataclass
+class ContactTied:
+    """*CONTACT_TIED_* — a tied (glued) contact → OpenRadioss /INTER/TYPE2.
+
+    The tie is kinematic in both codes: each secondary (slave) node is rigidly
+    stuck to its main (master) segment at initialization. ``variant`` keeps the
+    LS-DYNA flavour so the writer can pick the /INTER/TYPE2 Spotflag:
+
+      * NODES_TO_SURFACE / SHELL_EDGE_TO_SURFACE → Spotflag=1 (spotweld
+        formulation: the node-to-projection offset is carried by a rigid link
+        with constant stiffness — the laser-weld / rivet use case).
+      * SURFACE_TO_SURFACE → Spotflag=5 (standard formulation — the
+        mesh-transition glue it is used for in LS-DYNA).
+
+    ``sst``/``mst`` are the Card-3 contact thicknesses: LS-DYNA gives a
+    NEGATIVE value the special meaning "absolute tie-criterion distance", which
+    the writer honours as a floor on the /INTER/TYPE2 dsearch.
+    """
+    inter_id: int
+    title: str
+    ssid: int; sstyp: int   # slave side: 4=node set, 3=part, 2=part set, 0=segment set
+    msid: int; mstyp: int   # master side: 0=segment set, 3=part, 2=part set
+    variant: str            # "NODES_TO_SURFACE" | "SURFACE_TO_SURFACE" | "SHELL_EDGE_TO_SURFACE"
+    offset: bool = False    # _OFFSET / _CONSTRAINED_OFFSET / _BEAM_OFFSET keyword flavour
+    sst: float = 0.0        # Card3 SST (negative = absolute tie distance)
+    mst: float = 0.0        # Card3 MST (negative = absolute tie distance)
+
+
+@dataclass
 class ContactForceTransducer:
     """*CONTACT_FORCE_TRANSDUCER[_PENALTY] — a measurement-only "contact" that
     reports the contact force already acting on a surface/part from the model's
@@ -994,6 +1022,8 @@ class ConversionState:
         # ── Contacts ───────────────────────────────────────────────
         self.contacts_single: List[ContactAutoSingle] = []
         self.contacts_surf2surf: List[ContactAutoSurf2Surf] = []
+        # *CONTACT_TIED_* → /INTER/TYPE2 (tied kinematic interface)
+        self.contacts_tied: List[ContactTied] = []
         self.force_transducers: List[ContactForceTransducer] = []
         # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
         self.th_sub_ids: List[Tuple[int, str]] = []

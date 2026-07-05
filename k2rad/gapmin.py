@@ -207,6 +207,50 @@ def min_point_to_triangles(points: Sequence[Coord], verts: Sequence[Coord],
     return None if best == float("inf") else best
 
 
+def max_node_to_triangles(points: Sequence[Coord], verts: Sequence[Coord],
+                          faces: Sequence[Tuple[int, int, int]]) -> Optional[float]:
+    """Maximum over *points* of the minimum distance to the triangle set — the
+    worst node-to-surface gap a tied interface's search distance must cover
+    (every /INTER/TYPE2 secondary node needs a main segment within dsearch).
+
+    Pure standard library so it is always available (a tied weld line is small
+    next to a whole-model contact surface). Per point, an exact distance to the
+    nearest-centroid triangle bounds the search; triangles whose centroid
+    sphere (centroid + max centroid-to-vertex radius) cannot beat that bound
+    are skipped. Returns ``None`` when either set is empty."""
+    if not points or not faces:
+        return None
+    cents: List[Coord] = []
+    rads: List[float] = []
+    for i, j, k in faces:
+        a, b, c = verts[i], verts[j], verts[k]
+        cx = (a[0] + b[0] + c[0]) / 3.0
+        cy = (a[1] + b[1] + c[1]) / 3.0
+        cz = (a[2] + b[2] + c[2]) / 3.0
+        cents.append((cx, cy, cz))
+        rads.append(max(sqrt((v[0] - cx) ** 2 + (v[1] - cy) ** 2 + (v[2] - cz) ** 2)
+                        for v in (a, b, c)))
+    worst = 0.0
+    for p in points:
+        px, py, pz = p
+        cdists = [sqrt((cx - px) ** 2 + (cy - py) ** 2 + (cz - pz) ** 2)
+                  for cx, cy, cz in cents]
+        near = min(range(len(faces)), key=cdists.__getitem__)
+        f = faces[near]
+        best = point_triangle_distance(p, verts[f[0]], verts[f[1]], verts[f[2]])
+        for idx, (i, j, k) in enumerate(faces):
+            if idx == near or cdists[idx] - rads[idx] >= best:
+                continue
+            d = point_triangle_distance(p, verts[i], verts[j], verts[k])
+            if d < best:
+                best = d
+                if best == 0.0:
+                    break
+        if best > worst:
+            worst = best
+    return worst
+
+
 # ── Vectorised kernel (numpy) — one point against many triangles ─────────────
 
 def _closest_tri_dist2(P, tris):
@@ -468,6 +512,40 @@ def _surface_triangles(state: ConversionState, pids: Iterable[int]
             verts.append((nd.x, nd.y, nd.z))
         faces_out.append((ia, ib, ic))
     return verts, faces_out
+
+
+def _segment_triangles(state: ConversionState, segments: Iterable[List[int]]
+                       ) -> Tuple[List[Coord], List[Tuple[int, int, int]]]:
+    """A *SET_SEGMENT's 3/4-node segments as linear triangles (quads split in
+    two), in the same ``(verts, faces)`` form as :func:`_surface_triangles`.
+    Segments with unknown node ids are dropped."""
+    nodes = state.nodes
+    idmap: Dict[int, int] = {}
+    verts: List[Coord] = []
+    faces: List[Tuple[int, int, int]] = []
+
+    def _vidx(nid: int) -> Optional[int]:
+        try:
+            return idmap[nid]
+        except KeyError:
+            nd = nodes.get(nid)
+            if nd is None:
+                return None
+            idx = idmap[nid] = len(verts)
+            verts.append((nd.x, nd.y, nd.z))
+            return idx
+
+    for seg in segments:
+        nn = [n for n in seg if n > 0]
+        if len(nn) < 3:
+            continue
+        idx = [_vidx(n) for n in nn[:4]]
+        if any(i is None for i in idx):
+            continue
+        faces.append((idx[0], idx[1], idx[2]))
+        if len(idx) == 4:
+            faces.append((idx[0], idx[2], idx[3]))
+    return verts, faces
 
 
 def _min_node_to_segment(state: ConversionState, secondary_node_ids: Iterable[int],

@@ -40,6 +40,7 @@ from k2rad.gapmin import (  # noqa: E402
 )
 from k2rad.writer import _skew_axes_from_nodes  # noqa: E402
 from k2rad.parser import (  # noqa: E402
+    Block,
     _split_keyword,
     parse_fixed,
     parse_free,
@@ -144,6 +145,164 @@ class FieldParsingTests(unittest.TestCase):
     def test_to_int_fortran_exponent(self):
         # Routed through to_float, so an E-less exponent is honoured.
         self.assertEqual(to_int("1+1"), 10)
+
+
+class NodeFixedFormatTests(unittest.TestCase):
+    """*NODE in the standard fixed I8+3E16 layout: a negative coordinate fills
+    its 16-char field completely and glues onto the previous field, which a
+    whitespace split mis-reads — such nodes used to be dropped silently (an
+    entire plate at z < 0 vanished from the panel-tool decks)."""
+
+    def test_glued_negative_z_is_parsed(self):
+        state = ConversionState()
+        dispatch(Block("NODE", [], [
+            " 1000001 0.000000000e+00 0.000000000e+00-1.250000000e+00",
+        ]), state)
+        nd = state.nodes[1000001]
+        self.assertEqual((nd.x, nd.y, nd.z), (0.0, 0.0, -1.25))
+
+    def test_all_coordinates_glued(self):
+        state = ConversionState()
+        dispatch(Block("NODE", [], [
+            " 1000002-1.000000000e+01-2.000000000e+01-3.000000000e+00",
+        ]), state)
+        nd = state.nodes[1000002]
+        self.assertEqual((nd.x, nd.y, nd.z), (-10.0, -20.0, -3.0))
+
+    def test_glue_with_trailing_tc_rc_fields(self):
+        # Enough whitespace tokens (>= 4) but one is an over-long merged pair —
+        # must still be recognised as fixed format.
+        state = ConversionState()
+        dispatch(Block("NODE", [], [
+            " 1000003 1.000000000e+00-1.250000000e+00 2.000000000e+00       0       0",
+        ]), state)
+        nd = state.nodes[1000003]
+        self.assertEqual((nd.x, nd.y, nd.z), (1.0, -1.25, 2.0))
+
+    def test_free_format_unchanged(self):
+        state = ConversionState()
+        dispatch(Block("NODE", [], ["5 1.0 2.0 -3.0"]), state)
+        nd = state.nodes[5]
+        self.assertEqual((nd.x, nd.y, nd.z), (1.0, 2.0, -3.0))
+
+
+class ElementDenseFixedFormatTests(unittest.TestCase):
+    """Element connectivity in the dense fixed I8 layout: an 8-digit id fills
+    its whole field and glues onto the next one, so a whitespace split
+    under-counts the fields.  Decks with ids >= 10,000,000 (e.g. LS-PrePost
+    output) used to lose every such element silently — the panel-tool
+    platen/stripe meshes at ids 90,000,001+ converted to .rad decks whose
+    rigid parts reported "no elements found"."""
+
+    @staticmethod
+    def _dense(*vals):
+        """Right-justified I8 fields, no separators (LS-PrePost dense form)."""
+        return "".join("%8d" % v for v in vals)
+
+    def test_dense_shell_quad(self):
+        # eid=90000001 pid=91 n1..n4 — whitespace-splits into just two tokens
+        # ("90000001" and the 34-char glued remainder).
+        state = ConversionState()
+        dispatch(Block("ELEMENT_SHELL", [], [
+            "90000001      9190000001900000409000004190000002",
+        ]), state)
+        self.assertEqual(len(state.shell_elems), 1)
+        el = state.shell_elems[0]
+        self.assertEqual(el.eid, 90000001)
+        self.assertEqual(el.pid, 91)
+        self.assertEqual(el.nodes, [90000001, 90000040, 90000041, 90000002])
+
+    def test_dense_solid_hex_one_line(self):
+        state = ConversionState()
+        line = self._dense(90000001, 92, 90000011, 90000012, 90000013,
+                           90000014, 90000015, 90000016, 90000017, 90000018)
+        dispatch(Block("ELEMENT_SOLID", [], [line]), state)
+        self.assertEqual(len(state.solid_elems), 1)
+        el = state.solid_elems[0]
+        self.assertEqual((el.eid, el.pid), (90000001, 92))
+        self.assertEqual(el.nodes, [90000011, 90000012, 90000013, 90000014,
+                                    90000015, 90000016, 90000017, 90000018])
+
+    def test_dense_solid_tet_one_line(self):
+        state = ConversionState()
+        line = self._dense(90000002, 92, 90000021, 90000022, 90000023, 90000024)
+        dispatch(Block("ELEMENT_SOLID", [], [line]), state)
+        self.assertEqual(len(state.solid_elems), 1)
+        el = state.solid_elems[0]
+        self.assertEqual((el.eid, el.pid), (90000002, 92))
+        self.assertEqual(el.nodes, [90000021, 90000022, 90000023, 90000024])
+
+    def test_dense_solid_two_line_tet10(self):
+        state = ConversionState()
+        dispatch(Block("ELEMENT_SOLID", [], [
+            self._dense(90000003, 93),
+            self._dense(90000031, 90000032, 90000033, 90000034, 90000035,
+                        90000036, 90000037, 90000038, 90000039, 90000040),
+        ]), state)
+        self.assertEqual(len(state.solid_elems), 1)
+        el = state.solid_elems[0]
+        self.assertEqual((el.eid, el.pid), (90000003, 93))
+        self.assertEqual(el.nodes, [90000031, 90000032, 90000033, 90000034,
+                                    90000035, 90000036, 90000037, 90000038,
+                                    90000039, 90000040])
+
+    def test_dense_solid_two_line_hex(self):
+        # Two-line format with n9=n10=0: only n1..n8 kept.
+        state = ConversionState()
+        dispatch(Block("ELEMENT_SOLID", [], [
+            self._dense(90000004, 93),
+            self._dense(90000041, 90000042, 90000043, 90000044, 90000045,
+                        90000046, 90000047, 90000048, 0, 0),
+        ]), state)
+        self.assertEqual(len(state.solid_elems), 1)
+        el = state.solid_elems[0]
+        self.assertEqual((el.eid, el.pid), (90000004, 93))
+        self.assertEqual(el.nodes, [90000041, 90000042, 90000043, 90000044,
+                                    90000045, 90000046, 90000047, 90000048])
+
+    def test_dense_beam(self):
+        state = ConversionState()
+        line = self._dense(90000005, 91, 90000051, 90000052, 90000053)
+        dispatch(Block("ELEMENT_BEAM", [], [line]), state)
+        self.assertEqual(len(state.beam_elems), 1)
+        el = state.beam_elems[0]
+        self.assertEqual((el.eid, el.pid), (90000005, 91))
+        self.assertEqual((el.n1, el.n2, el.n3), (90000051, 90000052, 90000053))
+
+    def test_dense_beam_glue_only_in_trailing_fields(self):
+        # Glue past the 5 fields the handler reads (rt1/rr1) must still flip
+        # the line to fixed slicing — otherwise the mis-split leading tokens
+        # would be consumed positionally.
+        state = ConversionState()
+        line = self._dense(1, 1, 1, 2, 0, 90000001, 90000002)
+        dispatch(Block("ELEMENT_BEAM", [], [line]), state)
+        self.assertEqual(len(state.beam_elems), 1)
+        el = state.beam_elems[0]
+        self.assertEqual((el.eid, el.pid, el.n1, el.n2, el.n3), (1, 1, 1, 2, 0))
+
+    def test_free_format_wide_ids_not_mistaken_for_dense(self):
+        # Free format allows ids wider than I8; a >8-char token alone must not
+        # trigger fixed re-slicing (which would cut these numbers mid-token).
+        state = ConversionState()
+        dispatch(Block("ELEMENT_SHELL", [], [
+            "1234567890 1 1234567891 1234567892 1234567893 1234567894",
+        ]), state)
+        self.assertEqual(len(state.shell_elems), 1)
+        el = state.shell_elems[0]
+        self.assertEqual(el.eid, 1234567890)
+        self.assertEqual(el.pid, 1)
+        self.assertEqual(el.nodes, [1234567891, 1234567892, 1234567893,
+                                    1234567894])
+
+    def test_short_id_fixed_lines_unchanged(self):
+        # Ordinary fixed I8 lines with small ids have no glue and keep the
+        # whitespace-split path.
+        state = ConversionState()
+        dispatch(Block("ELEMENT_SHELL", [], [
+            "       1       1       1       2       3       4",
+        ]), state)
+        self.assertEqual(len(state.shell_elems), 1)
+        self.assertEqual(state.shell_elems[0].nodes, [1, 2, 3, 4])
 
 
 class ParserBlockTests(unittest.TestCase):
@@ -5210,6 +5369,243 @@ class DatabaseNcforcTests(unittest.TestCase):
         self.assertNotIn("/TH/INTER", starter)
         self.assertTrue(any("*DATABASE_NCFORC" in w and "no *CONTACT" in w
                             for w in result.warnings))
+
+
+# A laser-weld miniature: face plate (PID 1, thickness 2.0, mid-plane z=0) and
+# a vertical core stripe (PID 2) whose bottom-edge nodes sit at z=1.0 — ON the
+# plate's physical surface, i.e. HALF THE PLATE THICKNESS above the plate's
+# shell mid-plane (the segment set).  The weld is a *CONTACT_TIED_NODES_TO_
+# SURFACE tying node set 111 to segment set 103, exactly like the
+# lightweight_panel_dev_tool main-deck templates — the /INTER/TYPE2 dsearch
+# must accept that 1.0 offset or the starter unties every weld node.
+TIED_WELD_K = """\
+*KEYWORD
+*TITLE
+tied laser weld
+*NODE
+       1             0.0             0.0             0.0
+       2            10.0             0.0             0.0
+       3            10.0            10.0             0.0
+       4             0.0            10.0             0.0
+       5             2.0             0.0             1.0
+       6             2.0            10.0             1.0
+       7             2.0             0.0            11.0
+       8             2.0            10.0            11.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       8       7
+*PART
+face plate
+         1         1         1
+*PART
+core stripe
+         2         2         1
+*SECTION_SHELL
+         1         2       1.0         3
+       2.0
+*SECTION_SHELL
+         2         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*SET_NODE_LIST_TITLE
+weld_bottom_nodes
+       111
+         5         6
+*SET_SEGMENT_TITLE
+plate_core_face
+       103
+         1         2         3         4
+*CONTACT_TIED_NODES_TO_SURFACE
+       111       103         4         0
+       0.0       0.0       0.0       0.0       0.0         0       0.01.0000E+28
+       1.0       1.0       0.0       0.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+# Face-to-face glue: a small patch (PID 2) hovering 1.0 above the plate's
+# mid-plane, tied part-to-part (SSTYP=3 / MSTYP=3).
+TIED_S2S_K = """\
+*KEYWORD
+*TITLE
+tied surface to surface
+*NODE
+       1             0.0             0.0             0.0
+       2            10.0             0.0             0.0
+       3            10.0            10.0             0.0
+       4             0.0            10.0             0.0
+       5             2.0             2.0             1.0
+       6             8.0             2.0             1.0
+       7             8.0             8.0             1.0
+       8             2.0             8.0             1.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       2       5       6       7       8
+*PART
+face plate
+         1         1         1
+*PART
+patch
+         2         2         1
+*SECTION_SHELL
+         1         2       1.0         3
+       2.0
+*SECTION_SHELL
+         2         2       1.0         3
+       1.0
+*MAT_ELASTIC
+         1   7.86e-9    210000.0      0.3
+*CONTACT_TIED_SURFACE_TO_SURFACE
+         2         1         3         3
+       0.0       0.0       0.0       0.0       0.0         0       0.01.0000E+28
+       1.0       1.0       0.0       0.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class TiedContactTests(unittest.TestCase):
+    """*CONTACT_TIED_* → /INTER/TYPE2 (tied kinematic interface): slave
+    *SET_NODE_LIST → /GRNOD, master *SET_SEGMENT → /SURF/SEG, and a dsearch
+    measured from the mesh so the shell mid-plane offset (half the plate
+    thickness between the tied nodes and the master segments) stays tied."""
+
+    def _convert(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "w.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _type2_card(starter: str):
+        """Parse the first /INTER/TYPE2 data card into (7 ints, dsearch)."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/INTER/TYPE2/"))
+        data = lines[i + 3]                       # keyword, title, comment, card
+        ints = [int(data[c * 10:(c + 1) * 10]) for c in range(7)]
+        dsearch = float(data[80:100])
+        return ints, dsearch
+
+    def test_tied_nodes_to_surface_is_handled_not_skipped(self):
+        result, starter = self._convert(TIED_WELD_K)
+        self.assertNotIn("CONTACT_TIED_NODES_TO_SURFACE", result.skipped_keywords)
+        self.assertIn("/INTER/TYPE2/", starter)
+        self.assertTrue(any("/INTER/TYPE2" in w for w in result.warnings))
+
+    def test_slave_node_set_becomes_grnod(self):
+        _, starter = self._convert(TIED_WELD_K)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/GRNOD/NODE/") and "tied" in lines[k + 1])
+        self.assertEqual(lines[i + 2].split(), ["5", "6"])
+
+    def test_master_segment_set_becomes_surf_seg(self):
+        _, starter = self._convert(TIED_WELD_K)
+        self.assertIn("/SURF/SEG/", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/SURF/SEG/"))
+        self.assertEqual(lines[i + 1], "plate_core_face")
+        # seg_ID n1 n2 n3 n4 — the plate quad, orientation preserved.
+        self.assertEqual(lines[i + 3].split(), ["1", "1", "2", "3", "4"])
+
+    def test_card_fields_and_referenced_ids(self):
+        _, starter = self._convert(TIED_WELD_K)
+        ints, _ = self._type2_card(starter)
+        grnod_id, surf_id, ignore, spotflag, level, isearch, idel2 = ints
+        self.assertIn(f"/GRNOD/NODE/{grnod_id}", starter)
+        self.assertIn(f"/SURF/SEG/{surf_id}", starter)
+        self.assertEqual(ignore, 2)      # drop-and-print unfound nodes
+        self.assertEqual(spotflag, 1)    # spotweld formulation (weld/rivet)
+        self.assertEqual(level, 0)
+        self.assertEqual(isearch, 2)     # improved closest-segment search
+        self.assertEqual(idel2, 0)
+
+    def test_dsearch_covers_the_midplane_offset(self):
+        # Tied nodes are 1.0 above the master segments (half the plate
+        # thickness); the emitted dsearch must accept that gap with margin.
+        result, starter = self._convert(TIED_WELD_K)
+        _, dsearch = self._type2_card(starter)
+        self.assertGreaterEqual(dsearch, 1.0)
+        self.assertLessEqual(dsearch, 2.0)          # …but not reach across the mesh
+        self.assertTrue(any("dsearch" in w for w in result.warnings))
+
+    def test_id_variant_keeps_id_and_title(self):
+        deck = TIED_WELD_K.replace(
+            "*CONTACT_TIED_NODES_TO_SURFACE\n",
+            "*CONTACT_TIED_NODES_TO_SURFACE_ID\n"
+            "         7                                                              weld_a\n")
+        _, starter = self._convert(deck)
+        self.assertIn("/INTER/TYPE2/7", starter)
+        lines = starter.splitlines()
+        i = lines.index("/INTER/TYPE2/7")
+        self.assertEqual(lines[i + 1], "weld_a")
+
+    def test_offset_variant_is_handled(self):
+        deck = TIED_WELD_K.replace("*CONTACT_TIED_NODES_TO_SURFACE\n",
+                                   "*CONTACT_TIED_NODES_TO_SURFACE_OFFSET\n")
+        result, starter = self._convert(deck)
+        self.assertNotIn("CONTACT_TIED_NODES_TO_SURFACE_OFFSET",
+                         result.skipped_keywords)
+        self.assertIn("/INTER/TYPE2/", starter)
+
+    def test_shell_edge_variant_uses_spotweld_formulation(self):
+        deck = TIED_WELD_K.replace("*CONTACT_TIED_NODES_TO_SURFACE\n",
+                                   "*CONTACT_TIED_SHELL_EDGE_TO_SURFACE\n")
+        result, starter = self._convert(deck)
+        self.assertNotIn("CONTACT_TIED_SHELL_EDGE_TO_SURFACE",
+                         result.skipped_keywords)
+        ints, _ = self._type2_card(starter)
+        self.assertEqual(ints[3], 1)     # Spotflag=1
+        # SHELL_EDGE ties rotations in LS-DYNA too — no rotation-semantics note.
+        self.assertFalse(any("ROTATIONS" in w for w in result.warnings))
+
+    def test_surface_to_surface_part_sides(self):
+        result, starter = self._convert(TIED_S2S_K)
+        self.assertNotIn("CONTACT_TIED_SURFACE_TO_SURFACE",
+                         result.skipped_keywords)
+        ints, dsearch = self._type2_card(starter)
+        self.assertEqual(ints[3], 5)     # Spotflag=5: standard mesh-transition tie
+        # Master is a shell part → /SURF/GRSHEL, and the patch hovers 1.0 above.
+        self.assertIn("/SURF/GRSHEL/", starter)
+        self.assertGreaterEqual(dsearch, 1.0)
+        self.assertLessEqual(dsearch, 2.0)
+
+    def test_negative_sst_floors_dsearch(self):
+        # LS-DYNA: a NEGATIVE Card-3 SST is an absolute tie-criterion distance.
+        deck = TIED_WELD_K.replace(
+            "       1.0       1.0       0.0       0.0\n",
+            "       1.0       1.0      -5.0       0.0\n")
+        _, starter = self._convert(deck)
+        _, dsearch = self._type2_card(starter)
+        self.assertAlmostEqual(dsearch, 5.0)
+
+    def test_implicit_tied_only_deck_gets_no_type7_stub(self):
+        # The inert all-parts self-contact stub would ENGAGE across the weld
+        # gap (tied nodes sit within the TYPE7 thickness-derived gap of their
+        # main surface), so a tied deck must not receive it.
+        deck = TIED_WELD_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n*CONTROL_TERMINATION")
+        result, starter = self._convert(deck)
+        self.assertIn("/INTER/TYPE2/", starter)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertFalse(any("no contact interface" in w for w in result.warnings))
+
+    def test_ncforc_lists_tied_interface(self):
+        # *DATABASE_NCFORC maps to /TH/INTER over every converted interface —
+        # a tied interface counts.
+        deck = TIED_WELD_K.replace("*CONTROL_TERMINATION",
+                                   "*DATABASE_NCFORC\n      0.01\n*CONTROL_TERMINATION")
+        result, starter = self._convert(deck)
+        self.assertIn("/TH/INTER", starter)
+        self.assertFalse(any("no *CONTACT" in w for w in result.warnings))
 
 
 if __name__ == "__main__":
