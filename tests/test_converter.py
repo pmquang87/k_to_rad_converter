@@ -5668,6 +5668,16 @@ class Mat187SampTests(unittest.TestCase):
         self.assertIn("       761       762       763", block)
         self.assertIn("0.4", block)  # E's Poisson and Nu_p
 
+    def test_iquad_is_quadratic(self):
+        # IFORM IQUAD ICONV — IQUAD=1 (quadratic von Mises yield surface) is
+        # Altair's recommended setting for SAMP's asymmetric yield.
+        _, starter = self._convert()
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        line = block.split("#    IFORM     IQUAD     ICONV", 1)[1].splitlines()[1]
+        iform, iquad, iconv = line.split()[:3]
+        self.assertEqual(iquad, "1")
+        self.assertEqual(iform, "0")
+
     def test_yield_curves_become_tables_not_functions(self):
         _, starter = self._convert()
         for tid in (761, 762, 763):
