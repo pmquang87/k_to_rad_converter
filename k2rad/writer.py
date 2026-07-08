@@ -20,6 +20,7 @@ from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
+    FailGissmo,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
@@ -273,6 +274,8 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law76(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
+    for fail in state.fail_gissmo.values():
+        lines += _emit_fail_tab2(fail, state)
     return lines
 
 
@@ -579,6 +582,52 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
         f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
         "#    IFORM     IQUAD     ICONV",
         f"{_i(0)}{_i(0)}{_i(mat.iconv)}",
+        HDR,
+    ]
+
+
+def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO). Layout from
+    FAIL/fail_tab2.cfg FORMAT(radioss2022). LS-DYNA's sign convention (negative =
+    curve id) is resolved into the TAB2 function slots. The referenced curves
+    (LCSDG/LCREGD/LCSRS + a curve-valued ECRIT/FADEXP) are ordinary /FUNCT ids —
+    TAB2's table fields accept a function id for the 1-D case."""
+    blank = " " * 10
+    # NUMFIP: >0 → failed integration points (solids); <0 → % thru-thickness (shells)
+    failip = int(round(fail.numfip)) if fail.numfip > 0 else 1
+    pthk   = abs(fail.numfip) if fail.numfip < 0 else 0.0
+    # ECRIT<0 → instability curve; ECRIT>0 → fixed instability strain (no direct
+    # TAB2 fixed slot — carried as the ECRIT scale, warn).
+    if fail.ecrit < 0:
+        inst_id, ecrit_scale = int(-fail.ecrit), 1.0
+    else:
+        inst_id, ecrit_scale = 0, 0.0
+        if fail.ecrit > 0:
+            state.warn(f"/FAIL/TAB2/{fail.mid}: LS-DYNA ECRIT={fail.ecrit} is a "
+                       "fixed instability strain; TAB2 expects an instability "
+                       "curve (INST_ID). Supply a curve or verify the criterion.")
+    # FADEXP<0 → fading-exponent curve; >0 → constant exponent
+    if fail.fadexp < 0:
+        fct_exp, exp = int(-fail.fadexp), 1.0
+    else:
+        fct_exp, exp = 0, (fail.fadexp if fail.fadexp else 1.0)
+    tab_el = fail.lcregd
+    ireg   = 1 if tab_el else 0
+    fct_sr = int(abs(fail.lcsrs)) if fail.lcsrs else 0
+    return [
+        f"/FAIL/TAB2/{fail.mid}",
+        "#  EPSF_ID               FCRIT              FAILIP          PTHICKFAIL",
+        f"{_i(fail.lcsdg)}{_f(1.0)}{blank}{_i(failip)}{_f(pthk)}",
+        "#                  N               DCRIT   INST_ID               ECRIT",
+        f"{_f(fail.dmgexp)}{_f(fail.dcrit)}{_i(inst_id)}{_f(ecrit_scale)}",
+        "#  FCT_EXP             EXP_REF                 EXP",
+        f"{_i(fct_exp)}{_f(0.0)}{_f(exp)}",
+        "#   TAB_EL      IREG              EL_REF             SR_REF1           FSCALE_EL",
+        f"{_i(tab_el)}{_i(ireg)}{_f(0.0)}{_f(0.0)}{_f(1.0)}",
+        "#               SHRF               BIAXF",
+        f"{_f(0.0)}{_f(0.0)}",
+        "#   FCT_SR             SR_REF2           FSCALE_SR             C_JCOOK",
+        f"{_i(fct_sr)}{blank}{_f(0.0)}{_f(1.0)}{_f(0.0)}",
         HDR,
     ]
 

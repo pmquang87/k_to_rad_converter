@@ -5689,5 +5689,76 @@ class Mat187SampTests(unittest.TestCase):
         self.assertIn("/MAT/LAW76/187", starter)
 
 
+GISSMO_K = """*KEYWORD
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         1  7.85E-9  210000.0       0.3     400.0    1000.0
+*MAT_ADD_DAMAGE_GISSMO
+         1                   0       0.0       1.0
+       900       0.0       2.0       1.0       2.0         0
+*DEFINE_CURVE
+       900
+                -1.0                 2.0
+                 0.0                 1.0
+                 1.0                 0.5
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class GissmoFailTab2Tests(unittest.TestCase):
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2."""
+
+    def _convert(self, deck: str = GISSMO_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_gissmo_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("MAT_ADD_DAMAGE_GISSMO", result.skipped_keywords)
+
+    def test_emits_fail_tab2_on_material(self):
+        _, starter = self._convert()
+        self.assertIn("/FAIL/TAB2/1", starter)
+
+    def test_core_field_mapping(self):
+        _, starter = self._convert()
+        block = starter.split("/FAIL/TAB2/1", 1)[1]
+        rows = [r for r in block.splitlines() if r and not r.startswith("#")]
+        # Row 1: EPSF_ID FCRIT (blank) FAILIP PTHK  -> LCSDG=900, FAILIP=1
+        self.assertEqual(rows[0].split()[0], "900")
+        # Row 2: N DCRIT INST_ID ECRIT -> N=DMGEXP=2, DCRIT=1
+        self.assertEqual(rows[1].split()[0], "2")
+        self.assertEqual(rows[1].split()[1], "1")
+
+    def test_lcsdg_stays_a_function(self):
+        # TAB2's EPSF_ID accepts a /FUNCT id for the 1-D case; the curve must not
+        # be forced to /TABLE (that is only for LAW76 yield curves).
+        _, starter = self._convert()
+        self.assertIn("/FUNCT/900", starter)
+        self.assertNotIn("/TABLE/1/900", starter)
+
+    def test_positive_ecrit_warns(self):
+        # A fixed (positive) ECRIT has no direct TAB2 slot -> warn.
+        deck = GISSMO_K.replace("       900       0.0       2.0",
+                                "       900       0.1       2.0")
+        result, _ = self._convert(deck)
+        self.assertTrue(any("ECRIT" in w and "TAB2" in w for w in result.warnings))
+
+    def test_negative_ecrit_becomes_inst_id(self):
+        # ECRIT<0 is an instability curve id -> INST_ID.
+        deck = GISSMO_K.replace("       900       0.0       2.0",
+                                "       900    -901.0       2.0")
+        _, starter = self._convert(deck)
+        block = starter.split("/FAIL/TAB2/1", 1)[1]
+        rows = [r for r in block.splitlines() if r and not r.startswith("#")]
+        self.assertEqual(rows[1].split()[2], "901")  # INST_ID
+
+
 if __name__ == "__main__":
     unittest.main()

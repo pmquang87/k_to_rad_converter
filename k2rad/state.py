@@ -134,6 +134,25 @@ class MatSAMP:
 
 
 @dataclass
+class FailGissmo:
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO tabulated damage model).
+
+    Fields keep LS-DYNA meaning; the writer maps them onto /FAIL/TAB2. ECRIT,
+    FADEXP and LCSRS follow the LS-DYNA sign convention (a negative value is a
+    curve/table id, a positive value a scalar).
+    """
+    mid: int
+    numfip: float       # >0 = # failed IPs (solids); <0 = % thru-thickness (shells)
+    lcsdg: int          # failure plastic strain vs triaxiality curve → EPSF_ID
+    ecrit: float        # instability: curve id if <0, fixed value if >0
+    dmgexp: float       # damage accumulation exponent → N
+    dcrit: float        # critical accumulated damage → DCRIT
+    fadexp: float       # fading exponent: curve id if <0, value if >0 → EXP/FCT_EXP
+    lcregd: int         # element-size regularization curve → TAB_EL
+    lcsrs: float        # strain-rate scaling of LCSDG (curve id if <0) → FCT_SR
+
+
+@dataclass
 class MatPlasKin:
     """*MAT_PLASTIC_KINEMATIC → /MAT/LAW44 (COWPER)."""
     mid: int
@@ -965,6 +984,7 @@ class ConversionState:
         self.mat_null: Dict[int, MatNull] = {}
         self.mat_power_law: Dict[int, MatPowerLaw] = {}
         self.mat_samp: Dict[int, MatSAMP] = {}          # *MAT_187 → /MAT/LAW76
+        self.fail_gissmo: Dict[int, FailGissmo] = {}    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
         # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
         # /FUNCT); tracked so _make_functions can exclude them.
         self.law76_table_ids: set = set()

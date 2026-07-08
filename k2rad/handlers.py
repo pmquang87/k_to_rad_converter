@@ -16,7 +16,7 @@ from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
-    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP,
+    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
@@ -1667,6 +1667,41 @@ def handle_mat_187(block: Block, state: ConversionState) -> None:
             state.law76_table_ids.add(tid)
 
 
+def handle_mat_add_damage_gissmo(block: Block, state: ConversionState) -> None:
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO). Card layout from the reader
+    cfg MATERIALBEHAVIOR/mat_add_damage_gissmo.cfg:
+      Card1: MID <blank> DTYP REFSZ NUMFIP [VOLFRAC]
+      Card2: LCSDG ECRIT DMGEXP DCRIT FADEXP LCREGD [INSTF]
+      Card3: LCSRS SHRF BIAXF ...
+    Only the fields with a /FAIL/TAB2 counterpart are captured."""
+    offset = _title_offset(block)
+    raw = block.raw
+    # Card1 (fixed 10-wide; field 1 is intentionally blank)
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0]:
+        state.warn("*MAT_ADD_DAMAGE_GISSMO: empty card – skipped")
+        return
+    mid    = to_int(f1[0])
+    numfip = to_float(f1[4]) if len(f1) > 4 and f1[4] else 1.0
+    # Card2
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    lcsdg  = to_int(f2[0])   if f2        else 0
+    ecrit  = to_float(f2[1]) if len(f2) > 1 else 0.0
+    dmgexp = to_float(f2[2]) if len(f2) > 2 else 1.0
+    dcrit  = to_float(f2[3]) if len(f2) > 3 else 0.0
+    fadexp = to_float(f2[4]) if len(f2) > 4 else 1.0
+    lcregd = to_int(f2[5])   if len(f2) > 5 else 0
+    # Card3 (optional)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    lcsrs  = to_float(f3[0]) if f3 else 0.0
+
+    state.fail_gissmo[mid] = FailGissmo(mid, numfip, lcsdg, ecrit, dmgexp,
+                                        dcrit, fadexp, lcregd, lcsrs)
+    if not lcsdg:
+        state.warn(f"*MAT_ADD_DAMAGE_GISSMO {mid}: no LCSDG failure curve — "
+                   "/FAIL/TAB2 needs EPSF_ID; damage will not accumulate.")
+
+
 def handle_load_segment(block: Block, state: ConversionState) -> None:
     raw = block.raw
     # _ID variant: first line is "id  title", data starts at index 1
@@ -2141,6 +2176,7 @@ HANDLERS = {
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
     "MAT_187":                                handle_mat_187,
     "MAT_SAMP-1":                             handle_mat_187,
+    "MAT_ADD_DAMAGE_GISSMO":                  handle_mat_add_damage_gissmo,
     # High explosive + equations of state (coupled ALE / JWL detonation)
     "MAT_HIGH_EXPLOSIVE_BURN":                handle_mat_high_explosive_burn,
     "EOS_JWL":                                handle_eos_jwl,

@@ -90,10 +90,15 @@ export the image.
 E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
+`*MAT_187` / `*MAT_SAMP-1` → `/MAT/LAW76` (SAMP-1 polymer; the tension/
+compression/shear yield curves become `/TABLE/1` cards)
 Material failure strain (MAT_003 `FS` / MAT_024 `FAIL` / MAT_018 `EPSF`) →
 `/FAIL/JOHNSON` `D1` with `Ifail_sh=2` (delete only when ALL through-thickness
 points fail, LS-DYNA's built-in erosion rule) instead of the material `Eps_max`
 (first-point deletion, which over-eroded 5x on the W13 blast validation pair)
+`*MAT_ADD_DAMAGE_GISSMO` → `/FAIL/TAB2` (GISSMO tabulated damage: `LCSDG`→
+`EPSF_ID`, `DMGEXP`→`N`, `DCRIT`, `NUMFIP`→`FAILIP`, `LCREGD`→`TAB_EL`; a
+negative `ECRIT`/`FADEXP` is resolved to the instability/fading curve)
 `*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
