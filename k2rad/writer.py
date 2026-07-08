@@ -702,6 +702,12 @@ def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
         f"{_f(0.0)}{_f(0.0)}",
         "#   FCT_SR             SR_REF2           FSCALE_SR             C_JCOOK",
         f"{_i(fct_sr)}{blank}{_f(0.0)}{_f(1.0)}{_f(0.0)}",
+        # Card 7 (FCT_DLIM / FSCALE_DLIM) is mandatory: without it the starter
+        # reads into the next block ("card is missing", WARNING 100217) and the
+        # truncated /FAIL/TAB2 loses its material link (WARNING 3050, failure
+        # ignored). No damage-limit function here, so FCT_DLIM=0.
+        "# FCT_DLIM         FSCALE_DLIM",
+        f"{_i(0)}{_f(0.0)}",
         HDR,
     ]
 
