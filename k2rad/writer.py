@@ -20,7 +20,7 @@ from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
-    FailGissmo,
+    FailGissmo, MatAddErosion,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
@@ -276,6 +276,74 @@ def _make_materials(state: ConversionState) -> List[str]:
     lines += _make_ale_multimaterial(state)
     for fail in state.fail_gissmo.values():
         lines += _emit_fail_tab2(fail, state)
+    for ero in state.mat_add_erosion.values():
+        lines += _emit_mat_add_erosion(ero, state)
+    return lines
+
+
+def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[str]:
+    """*MAT_ADD_EROSION → /FAIL. Only the strain criteria map: MXEPS (max
+    principal strain) → /FAIL/TENSSTRAIN, EFFEPS (max effective strain) →
+    /FAIL/JOHNSON. Everything else is reported and left out."""
+    lines: List[str] = []
+    if ero.idam:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: IDAM={ero.idam} (GISSMO/DIEM in "
+                   "the erosion card) is not converted — use "
+                   "*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 instead.")
+    if ero.mxeps > 0.0:
+        lines += [
+            f"/FAIL/TENSSTRAIN/{ero.mid}",
+            "#         EPSILON_T1          EPSILON_T2    FCT_ID          EPSILON_F1          EPSILON_F2     S_Flag",
+            f"{_f(ero.mxeps)}{_f(ero.mxeps)}{_i(0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+            HDR,
+        ]
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: MXEPS={ero.mxeps:g} → "
+                   "/FAIL/TENSSTRAIN (element erodes at that maximum principal "
+                   "tensile strain).")
+    if ero.effeps > 0.0:
+        lines += _emit_fail_johnson_all_layers(ero.mid, ero.effeps, state)
+    if ero.other:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: criteria "
+                   f"{', '.join(ero.other)} are not converted (only EFFEPS and "
+                   "MXEPS map to an OpenRadioss /FAIL model).")
+    if not lines and not ero.idam:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: no convertible criterion "
+                   "(EFFEPS/MXEPS) found — no /FAIL emitted.")
+    return lines
+
+
+def _make_rlinks(state: ConversionState) -> List[str]:
+    """*CONSTRAINED_NODE_SET → /RLINK: every node in the set keeps the same
+    velocity along the constrained direction(s). The set is emitted as a /GRNOD
+    by _make_extra_groups, which /RLINK references by the same id."""
+    if not state.constrained_node_sets:
+        return []
+    # The Trarot code field is the same "   TTT RRR" layout /BCS uses: a 3-digit
+    # translation code (Tx Ty Tz) then a 3-digit rotation code (Rx Ry Rz) within
+    # one 10-char field (a packed 6-digit code is mis-decoded by the reader).
+    dof_code = {1: ("100", "000"), 2: ("010", "000"), 3: ("001", "000"),
+                4: ("111", "000"), 5: ("000", "100"), 6: ("000", "010"),
+                7: ("000", "001")}
+    lines = ["#-  RIGID LINKS (*CONSTRAINED_NODE_SET):", HDR]
+    for cns in state.constrained_node_sets:
+        code = dof_code.get(cns.dof)
+        if code is None:
+            code = ("111", "000")
+            state.warn(f"*CONSTRAINED_NODE_SET nsid={cns.nsid}: DOF={cns.dof} "
+                       "unrecognized — defaulted to all three translations.")
+        tra, rot = code
+        if cns.tf < 1e19:
+            state.warn(f"*CONSTRAINED_NODE_SET nsid={cns.nsid}: failure time "
+                       f"TF={cns.tf:g} dropped (/RLINK has no failure time).")
+        title = (state.node_sets.get(cns.nsid, ("", []))[0]
+                 or f"CONSTRAINED_NODE_SET_{cns.nsid}")
+        lines += [
+            f"/RLINK/{cns.nsid}",
+            title,
+            "#   Tra rot   skew_ID  grnod_ID",
+            f"   {tra} {rot}{_i(0)}{_i(cns.nsid)}",
+            HDR,
+        ]
     return lines
 
 
@@ -5085,6 +5153,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_properties(state))
     sections.append(_make_functions(state))
     sections.append(_make_extra_groups(state))
+    sections.append(_make_rlinks(state))
     sections.append(_make_interfaces(state, rigid_nodes))
     sections.append(_make_tied_interfaces(state, rigid_nodes))
     sections.append(_make_force_transducers(state, rigid_nodes))

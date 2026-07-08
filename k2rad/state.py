@@ -153,6 +153,30 @@ class FailGissmo:
 
 
 @dataclass
+class ConstrainedNodeSet:
+    """*CONSTRAINED_NODE_SET → /RLINK (nodes share the same velocity along the
+    coded direction). DOF 1/2/3 = x/y/z translation, 4 = all translations,
+    5/6/7 = rotation about x/y/z."""
+    nsid: int
+    dof: int
+    tf: float          # failure time (LS-DYNA); /RLINK has none, so dropped
+
+
+@dataclass
+class MatAddErosion:
+    """*MAT_ADD_EROSION (non-GISSMO criteria) → an OpenRadioss /FAIL model.
+    Only the strain-based criteria map cleanly: EFFEPS → /FAIL/JOHNSON,
+    MXEPS → /FAIL/TENSSTRAIN. Other criteria and IDAM>=1 (GISSMO/DIEM embedded
+    in the erosion card) are reported but not converted."""
+    mid: int
+    effeps: float      # max effective strain at failure  → /FAIL/JOHNSON D1
+    mxeps: float       # max principal strain at failure   → /FAIL/TENSSTRAIN
+    numfip: float
+    idam: int
+    other: List[str]   # names of other active criteria (for the warning)
+
+
+@dataclass
 class MatPlasKin:
     """*MAT_PLASTIC_KINEMATIC → /MAT/LAW44 (COWPER)."""
     mid: int
@@ -985,6 +1009,8 @@ class ConversionState:
         self.mat_power_law: Dict[int, MatPowerLaw] = {}
         self.mat_samp: Dict[int, MatSAMP] = {}          # *MAT_187 → /MAT/LAW76
         self.fail_gissmo: Dict[int, FailGissmo] = {}    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
+        self.mat_add_erosion: Dict[int, MatAddErosion] = {}   # *MAT_ADD_EROSION → /FAIL
+        self.constrained_node_sets: List[ConstrainedNodeSet] = []  # *CONSTRAINED_NODE_SET → /RLINK
         # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
         # /FUNCT); tracked so _make_functions can exclude them.
         self.law76_table_ids: set = set()
