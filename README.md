@@ -103,7 +103,15 @@ negative `ECRIT`/`FADEXP` is resolved to the instability/fading curve)
 `MXEPS` (max principal strain) → `/FAIL/TENSSTRAIN`, `EFFEPS` (max effective
 strain) → `/FAIL/JOHNSON`. Other criteria and `IDAM≥1` (GISSMO/DIEM embedded in
 the erosion card) are reported but not converted (use `*MAT_ADD_DAMAGE_GISSMO`)
-`*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`
+`*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`. By default the `/RBODY` master is a
+**synthesized element-free node** at the part's nodal centroid (the treatment
+CNRBs always get): mesh nodes keep their source coordinates, the starter
+WARNINGs 448/1624 (master connected to an element / removed from the secondary
+set) disappear, and the deck is AMS-compatible (a mesh-node master trips AMS
+`ERROR 1066`). Pass `--no-rigid-cog-master` to instead reuse the part's
+lowest-id mesh node as the master (keeps that node id stable for scripts that
+address loads/readouts by it; OpenRadioss then relocates it to the CoM at
+runtime, so it appears to move in post-processing).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
@@ -196,9 +204,10 @@ mesh and swamps the dynamics (kinetic energy runs away). It solves a
 preconditioned conjugate gradient each cycle and **can diverge** (`AMS IS LIKELY
 DIVERGING`) on stiff / high-stiffness-contrast / contact-heavy models or at a
 large `|DT2MS|`/element-step ratio; if it does, drop `--ams` (back to the default
-`/DT/NODA/CST`) or lower `|DT2MS|`. Off by default. Implies `--rigid-cog-master`
-(a whole-part rigid body's master must be an element-free node or AMS aborts with
-`ERROR 1066`). Explicit decks only.
+`/DT/NODA/CST`) or lower `|DT2MS|`. Off by default. Needs element-free rigid
+masters (the default; a whole-part rigid body's master must not be an element
+node or AMS aborts with `ERROR 1066`), so `--ams` force-enables them even if you
+passed `--no-rigid-cog-master`. Explicit decks only.
 `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`

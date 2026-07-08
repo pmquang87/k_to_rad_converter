@@ -2707,10 +2707,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 state.nodes[ind_node] = NodeData(0.0, 0.0, 0.0)
             rigid_nodes.add(ind_node)
             state.warn(
-                f"*MAT_RIGID pid={pid}: --rigid-cog-master synthesized "
-                f"element-free /RBODY master node {ind_node} at the part's "
-                "nodal centroid (mesh nodes keep their coordinates; loads/"
-                "readouts on the rigid body now address this node).")
+                f"*MAT_RIGID pid={pid}: /RBODY master is a synthesized "
+                f"element-free node {ind_node} at the part's nodal centroid "
+                "(default; mesh nodes keep their coordinates and loads/readouts "
+                "on the rigid body now address this node — pass "
+                "--no-rigid-cog-master to reuse the part's lowest-id mesh node).")
         else:
             ind_node = unique_nodes[0]
         grnod_id = state.next_id()

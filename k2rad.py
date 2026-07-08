@@ -216,14 +216,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--rigid-cog-master",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Synthesize an element-free /RBODY master node at each *MAT_RIGID "
              "part's nodal centroid (the treatment CNRBs always get) instead of "
-             "reusing the part's lowest-id mesh node. Clears starter WARNINGs "
-             "448/1624 and keeps mesh nodes at their source coordinates "
-             "(OpenRadioss otherwise relocates the mesh-node master to the "
-             "centre of mass at runtime). Renumbers every rigid master, so "
-             "loads/readouts address the new synthesized node.",
+             "reusing the part's lowest-id mesh node. ON by default: clears "
+             "starter WARNINGs 448/1624, keeps mesh nodes at their source "
+             "coordinates (OpenRadioss otherwise relocates the mesh-node master "
+             "to the centre of mass at runtime), and makes the deck "
+             "AMS-compatible (a mesh-node master trips AMS ERROR 1066). Use "
+             "--no-rigid-cog-master to reuse the mesh node as master instead "
+             "(keeps the master-node id stable for scripts that address "
+             "loads/readouts by it).",
     )
     parser.add_argument(
         "--write-restart",
