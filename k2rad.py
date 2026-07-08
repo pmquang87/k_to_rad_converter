@@ -234,6 +234,19 @@ def main() -> int:
              "(The starter's <root>_0000_*.rst model-handoff file is always "
              "written and cannot be disabled.)",
     )
+    parser.add_argument(
+        "--ams",
+        action="store_true",
+        help="Advanced Mass Scaling. For a mass-scaled explicit deck "
+             "(*CONTROL_TIMESTEP DT2MS<0), emit /DT/AMS + /AMS instead of "
+             "/DT/NODA/CST. AMS holds the target time step with a coupled mass "
+             "matrix that preserves low-frequency dynamics, instead of adding "
+             "real nodal mass whose inertia can dominate a fine mesh. It solves "
+             "a PCG each cycle and CAN DIVERGE ('AMS IS LIKELY DIVERGING') on "
+             "stiff / high-contrast / contact-heavy models or at a large Tmin "
+             "ratio — if it does, drop --ams (falls back to /DT/NODA/CST) or "
+             "lower |DT2MS|. Implies --rigid-cog-master. Off by default.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -289,6 +302,7 @@ def main() -> int:
         blast_ground=args.blast_ground,
         rigid_cog_master=args.rigid_cog_master,
         write_restart=args.write_restart,
+        ams=args.ams,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

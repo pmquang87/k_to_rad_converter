@@ -5960,6 +5960,74 @@ class MassScalingTests(unittest.TestCase):
                             for w in result.warnings))
 
 
+class AdvancedMassScalingTests(unittest.TestCase):
+    """--ams: a mass-scaled explicit deck (*CONTROL_TIMESTEP DT2MS<0) gets
+    engine /DT/AMS + starter /AMS instead of /DT/NODA/CST, and element-free
+    rigid masters are forced (AMS ERROR 1066 otherwise)."""
+
+    def _convert(self, deck=DT2MS_K, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return (result,
+                Path(result.engine_path).read_text(),
+                Path(result.starter_path).read_text())
+
+    def test_ams_emits_dt_ams_not_noda_cst(self):
+        _r, engine, _s = self._convert(ams=True)
+        self.assertIn("/DT/AMS", engine)
+        self.assertNotIn("/DT/NODA/CST", engine)
+
+    def test_ams_tsca_is_067_and_tmin_is_abs_dt2ms(self):
+        # AMS uses the OpenRadioss-recommended 0.67 scale factor (the PCG needs
+        # more margin than /DT/NODA/CST's 0.9); Tmin still = |DT2MS|.
+        _r, engine, _s = self._convert(ams=True)
+        row = engine.split("/DT/AMS", 1)[1].splitlines()[1]
+        tsca, tmin = row.split()
+        self.assertEqual(float(tsca), 0.67)
+        self.assertAlmostEqual(float(tmin), 1.112e-6, places=12)
+
+    def test_ams_emits_starter_card_for_all_parts(self):
+        _r, _e, starter = self._convert(ams=True)
+        lines = starter.splitlines()
+        self.assertIn("/AMS", lines)
+        i = lines.index("/AMS")
+        self.assertEqual(lines[i + 1], "#grpart_ID")
+        self.assertEqual(lines[i + 2].strip(), "0")   # 0 = all parts
+
+    def test_default_off_still_noda_cst(self):
+        _r, engine, starter = self._convert()          # ams not passed
+        self.assertIn("/DT/NODA/CST/0", engine)
+        self.assertNotIn("/DT/AMS", engine)
+        self.assertNotIn("/AMS", starter.splitlines())
+
+    def test_ams_positive_dt2ms_emits_no_ams(self):
+        # DT2MS >= 0 is init-only / no mass scaling → neither the engine nor the
+        # starter AMS card is emitted even with --ams.
+        deck = DT2MS_K.replace("-1.1120E-6", "       0.0")
+        _r, engine, starter = self._convert(deck, ams=True)
+        self.assertNotIn("/DT/AMS", engine)
+        self.assertNotIn("/AMS", starter.splitlines())
+
+    def test_ams_warns_with_divergence_note(self):
+        result, _e, _s = self._convert(ams=True)
+        self.assertTrue(any("/DT/AMS" in w and "DIVERG" in w.upper()
+                            for w in result.warnings))
+
+    def test_ams_forces_element_free_rigid_master(self):
+        # --ams implies --rigid-cog-master, so a whole-part *MAT_RIGID body gets
+        # a synthesized element-free master (id above the max mesh node) instead
+        # of reusing a mesh node that AMS would reject.
+        result, _e, starter = self._convert(FORCE_RB_K, ams=True)
+        self.assertIn("/RBODY/9", starter)      # synthesized master (max node 8)
+        self.assertNotIn("/RBODY/5", starter)   # old mesh-node master gone
+        self.assertTrue(any("element-free /RBODY masters" in w
+                            for w in result.warnings))
+
+
 class EngineRestartTests(unittest.TestCase):
     """/RFILE/OFF is emitted by default; write_restart keeps OpenRadioss's
     default restart (.rst) writing."""

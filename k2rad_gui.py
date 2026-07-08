@@ -94,7 +94,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = False,
-                         write_restart: bool = False) -> dict:
+                         write_restart: bool = False,
+                         ams: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -168,6 +169,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["write_restart"] = bool(write_restart)
 
+    kwargs["ams"] = bool(ams)
+
     return kwargs
 
 
@@ -200,6 +203,7 @@ class ConverterGUI:
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=False)
         self.write_restart = tk.BooleanVar(value=False)
+        self.ams = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -270,6 +274,13 @@ class ConverterGUI:
                      "restart files are only needed for /RERUN or crash recovery and "
                      "are large — the starter's mandatory _0000_*.rst is unaffected)",
             variable=self.write_restart).grid(row=8, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Advanced Mass Scaling (DT2MS<0 → /DT/AMS + /AMS instead of "
+                     "/DT/NODA/CST: a coupled mass matrix preserves low-frequency "
+                     "dynamics instead of adding real mass; can diverge on stiff / "
+                     "contact-heavy models — implies element-free rigid masters)",
+            variable=self.ams).grid(row=9, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -401,6 +412,7 @@ class ConverterGUI:
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
                 write_restart=self.write_restart.get(),
+                ams=self.ams.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -496,6 +508,8 @@ class ConverterGUI:
             bits.append("element-free rigid masters")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
+        if kwargs.get("ams"):
+            bits.append("Advanced Mass Scaling (/DT/AMS)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
