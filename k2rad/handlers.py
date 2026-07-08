@@ -16,7 +16,7 @@ from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
-    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull,
+    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
@@ -1614,6 +1614,59 @@ def handle_mat_power_law_plasticity(block: Block, state: ConversionState) -> Non
     state.mat_power_law[mid] = MatPowerLaw(mid, title, rho, E, nu, k, n, src, srp, sigy, vp, epsf)
 
 
+def handle_mat_187(block: Block, state: ConversionState) -> None:
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1 polymer).
+
+    Reads the classic SAMP-1 card layout (mid ro e nu numint / tab_idt tab_idc
+    tab_ids nu_p fct_idpr / fct_id1 epfail deprpt lcid_tri lcid_lc / iconv /
+    asrate) — the same field order Radioss LAW76 uses, so the map is 1:1. The
+    three yield curves (tab_idt/c/s) must become /TABLE cards, so their ids are
+    registered in state.law76_table_ids. Free-field parsing is used because these
+    decks (often tool-generated to target LAW76) rarely honour strict columns.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+
+    def field(idx, pos, conv, default):
+        f = _card(raw, idx, fixed=False)
+        return conv(f[pos]) if len(f) > pos else default
+
+    # Card1: mid ro e nu numint
+    f1 = _card(raw, offset, fixed=False)
+    if not f1:
+        state.warn("*MAT_187: empty material card – skipped")
+        return
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    # Card2: tab_idt tab_idc tab_ids nu_p fct_idpr
+    tab_idt  = field(offset + 1, 0, to_int,   0)
+    tab_idc  = field(offset + 1, 1, to_int,   0)
+    tab_ids  = field(offset + 1, 2, to_int,   0)
+    nu_p     = field(offset + 1, 3, to_float, nu)
+    fct_idpr = field(offset + 1, 4, to_int,   0)
+    # Card3: fct_id1 epfail deprpt lcid_tri lcid_lc
+    fct_id1  = field(offset + 2, 0, to_int,   0)
+    epfail   = field(offset + 2, 1, to_float, 0.0)
+    deprpt   = field(offset + 2, 2, to_float, 0.0)
+    # Card4: iconv (single value) — parse_free directly (a lone value would be
+    # mis-slotted by the fixed-width fallback)
+    c4 = parse_free(raw[offset + 3]) if offset + 3 < len(raw) else []
+    iconv = to_int(c4[-1]) if c4 else 1
+    # Card5: asrate (single value, optional)
+    c5 = parse_free(raw[offset + 4]) if offset + 4 < len(raw) else []
+    asrate = to_float(c5[-1]) if c5 else 0.0
+
+    state.mat_samp[mid] = MatSAMP(mid, title, rho, E, nu, tab_idt, tab_idc,
+                                  tab_ids, nu_p, fct_idpr, fct_id1, epfail,
+                                  deprpt, iconv, asrate)
+    for tid in (tab_idt, tab_idc, tab_ids):
+        if tid:
+            state.law76_table_ids.add(tid)
+
+
 def handle_load_segment(block: Block, state: ConversionState) -> None:
     raw = block.raw
     # _ID variant: first line is "id  title", data starts at index 1
@@ -2086,6 +2139,8 @@ HANDLERS = {
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
+    "MAT_187":                                handle_mat_187,
+    "MAT_SAMP-1":                             handle_mat_187,
     # High explosive + equations of state (coupled ALE / JWL detonation)
     "MAT_HIGH_EXPLOSIVE_BURN":                handle_mat_high_explosive_burn,
     "EOS_JWL":                                handle_eos_jwl,

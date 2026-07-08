@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
-    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw,
+    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
@@ -269,6 +269,8 @@ def _make_materials(state: ConversionState) -> List[str]:
             lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
+    for mat in state.mat_samp.values():
+        lines += _emit_mat_law76(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
     return lines
@@ -544,6 +546,41 @@ def _emit_mat_law36_powerlaw(mat: MatPowerLaw, state: ConversionState) -> List[s
         "                   0",
         HDR,
     ] + trailer
+
+
+def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1). Field order and column
+    layout follow MAT/matl76_76.cfg FORMAT(radioss2018). The tension / compression
+    / shear yield curves are emitted separately as /TABLE/1 cards (see
+    _make_functions); here we only reference their ids. LS-DYNA has no per-table
+    ordinate scale, no XFAC and no IFORM/IQUAD in this card, so those take the
+    LAW76 defaults (1.0 / 1.0 / 0 / 0)."""
+    xfac = 1.0
+    fsmooth = 1                       # ISRATE: strain-rate smoothing on
+    fcut = mat.asrate if mat.asrate > 0.0 else 1e30
+    fscale1 = 1.0 if mat.fct_id1 else 0.0
+    gap = " " * 20
+    return [
+        f"/MAT/LAW76/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu",
+        f"{_f(mat.E)}{_f(mat.nu)}",
+        "#  TAB_IDt   TAB_IDc   TAB_IDs",
+        f"{_i(mat.tab_idt)}{_i(mat.tab_idc)}{_i(mat.tab_ids)}",
+        "#            Fscalet             Fscalec             Fscales                                    XFAC",
+        f"{_f(1.0)}{_f(1.0)}{_f(1.0)}{gap}{_f(xfac)}",
+        "#               Nu_p  fct_IDpr           Fscale_pr   Fsmooth                Fcut",
+        f"{_f(mat.nu_p)}{_i(mat.fct_idpr)}{_f(0.0)}{_i(fsmooth)}{_f(fcut)}",
+        "#        Epsilon_f_p         Epsilon_r_p",
+        f"{_f(mat.epfail)}{_f(mat.deprpt)}",
+        "#  fct_ID1                                 Fscale1",
+        f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
+        "#    IFORM     IQUAD     ICONV",
+        f"{_i(0)}{_i(0)}{_i(mat.iconv)}",
+        HDR,
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1327,13 +1364,26 @@ def _emit_prop_beam(sec: SectionBeam) -> List[str]:
 def _make_functions(state: ConversionState) -> List[str]:
     if not state.curves:
         return []
+    table_ids = getattr(state, "law76_table_ids", set())
     lines = ["#-  FUNCTIONS:", HDR]
     for lcid, curve in sorted(state.curves.items()):
-        lines += [
-            f"/FUNCT/{lcid}",
-            curve.title or f"FUNCT_{lcid}",
-            "#                  X                   Y",
-        ]
+        if lcid in table_ids:
+            # LAW76 yield curves must be /TABLE (1D). Layout from CURVE/table_1.cfg:
+            # header, title, a "#dimension" card carrying ORDER (=1 for 1D), then
+            # the X-Y pairs. Omitting the dimension card triggers starter ERROR 777.
+            lines += [
+                f"/TABLE/1/{lcid}",
+                curve.title or f"TABLE_{lcid}",
+                "#dimension",
+                f"{_i(1)}",
+                "#                  X                   Y",
+            ]
+        else:
+            lines += [
+                f"/FUNCT/{lcid}",
+                curve.title or f"FUNCT_{lcid}",
+                "#                  X                   Y",
+            ]
         for a, o in curve.pts:
             lines.append(f"{_f(a)}{_f(o)}")
         lines.append(HDR)

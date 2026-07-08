@@ -5608,5 +5608,86 @@ class TiedContactTests(unittest.TestCase):
         self.assertFalse(any("no *CONTACT" in w for w in result.warnings))
 
 
+MAT187_K = """*KEYWORD
+*MAT_187_TITLE
+Iglidur I3-PL SAMP (approx - see flags)
+$#     mid        ro                             e        nu                numint
+       187 1.0500E-9                      1800.000     0.400                     0
+$#  tab_idt   tab_idc   tab_ids                nu_p  fct_idpr
+       761       762       763               0.400         0
+$#  fct_id1    epfail    deprpt  lcid_tri   lcid_lc
+         0       0.0       0.0         0         0
+$#                                       iconv
+                                             1
+$#                          asrate
+                               0.0
+*DEFINE_CURVE
+       761         0       1.0       1.0       0.0       0.0         0
+                 0.0                35.0
+                0.08                41.0
+*DEFINE_CURVE
+       762         0       1.0       1.0       0.0       0.0         0
+                 0.0                39.0
+                0.08                46.0
+*DEFINE_CURVE
+       763         0       1.0       1.0       0.0       0.0         0
+                 0.0                20.2
+                0.08                23.7
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class Mat187SampTests(unittest.TestCase):
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 with /TABLE/1 yield curves."""
+
+    def _convert(self, deck: str = MAT187_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_mat_187_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("MAT_187", result.skipped_keywords)
+
+    def test_emits_law76(self):
+        _, starter = self._convert()
+        self.assertIn("/MAT/LAW76/187", starter)
+
+    def test_law76_field_values(self):
+        _, starter = self._convert()
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        # RHO, E, Nu, the three TAB ids, Nu_p and ICONV must all survive.
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1800\b")
+        self.assertIn("       761       762       763", block)
+        self.assertIn("0.4", block)  # E's Poisson and Nu_p
+
+    def test_yield_curves_become_tables_not_functions(self):
+        _, starter = self._convert()
+        for tid in (761, 762, 763):
+            self.assertIn(f"/TABLE/1/{tid}", starter)
+            self.assertNotIn(f"/FUNCT/{tid}", starter)
+
+    def test_table_has_dimension_card(self):
+        # /TABLE/1 requires the "#dimension" ORDER card (=1) before the points,
+        # otherwise the starter raises ERROR 777 (NDIM undefined).
+        _, starter = self._convert()
+        tbl = starter.split("/TABLE/1/761", 1)[1].splitlines()
+        # title, "#dimension", "         1", comment, first data row
+        self.assertEqual(tbl[2].strip(), "#dimension")
+        self.assertEqual(tbl[3].strip(), "1")
+
+    def test_samp1_named_variant_also_handled(self):
+        _, starter = self._convert(MAT187_K.replace("*MAT_187_TITLE",
+                                                    "*MAT_SAMP-1_TITLE"))
+        self.assertIn("/MAT/LAW76/187", starter)
+
+
 if __name__ == "__main__":
     unittest.main()
