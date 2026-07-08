@@ -5769,6 +5769,16 @@ class GissmoFailTab2Tests(unittest.TestCase):
         rows = [r for r in block.splitlines() if r and not r.startswith("#")]
         self.assertEqual(rows[1].split()[2], "901")  # INST_ID
 
+    def test_fail_tab2_block_is_complete(self):
+        # /FAIL/TAB2 has 7 mandatory data cards; a missing last card (FCT_DLIM /
+        # FSCALE_DLIM) makes the starter read into the next block (WARNING 100217)
+        # and drop the material link (WARNING 3050, failure ignored).
+        _, starter = self._convert()
+        block = starter.split("/FAIL/TAB2/1", 1)[1].split("#---", 1)[0]
+        data_rows = [r for r in block.splitlines() if r and not r.startswith("#")]
+        self.assertEqual(len(data_rows), 7)
+        self.assertIn("FCT_DLIM", block)
+
     def test_engine_requests_damage_output(self):
         # GISSMO damage reaches the d3plot only via /ANIM/ELEM/DAMG (NEIPH has no
         # effect on the OpenRadioss path). It must be added when GISSMO is present.
