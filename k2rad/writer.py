@@ -5211,11 +5211,35 @@ def _make_engine_restart(state: ConversionState) -> List[str]:
     return ["/RFILE/OFF", "#"]
 
 
+def _make_engine_timestep(state: ConversionState) -> List[str]:
+    """*CONTROL_TIMESTEP DT2MS<0 → /DT/NODA/CST (nodal-mass scaling that holds
+    the explicit time step at the target |DT2MS|). Without this OpenRadioss runs
+    at the raw smallest-element step — on a fine/TET mesh that can be ~100x below
+    the intended DT2MS, so the run is ~100x slower. Explicit runs only (implicit
+    and modal have no CFL time step to scale)."""
+    ts = state.ctrl_timestep
+    if ts is None or ts.dt2ms >= 0.0 or state.is_implicit or state.is_modal:
+        return []
+    tmin = abs(ts.dt2ms)
+    tsca = ts.tssfac if ts.tssfac and ts.tssfac > 0.0 else 0.9
+    state.warn(
+        f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/NODA/CST/0 (nodal mass "
+        f"scaling, Tmin={tmin:g}, Tsca={tsca:g}); OpenRadioss adds mass to hold "
+        "the time step at Tmin. Check the starter ADDED MASS is acceptable."
+    )
+    return [
+        "/DT/NODA/CST/0",
+        f"{_f(tsca)}{_f(tmin)}",
+        "#",
+    ]
+
+
 def build_engine(state: ConversionState) -> str:
     sections = [
         _make_engine_header(state),
         _make_engine_restart(state),
         _make_engine_output(state),
+        _make_engine_timestep(state),
         _make_engine_implicit(state),
         _make_engine_cpu(state),
         ["/MON/ON", "#"],

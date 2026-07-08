@@ -853,6 +853,9 @@ class ControlTermination:
 class ControlTimestep:
     dtinit: float
     tssfac: float
+    # DT2MS: <0 = mass scaling to hold the explicit time step at |DT2MS|
+    # (→ /DT/NODA/CST). 0 or >0 (init-only) = no mass scaling.
+    dt2ms: float = 0.0
 
 
 # ── Database / output ──────────────────────────────────────────────────────
