@@ -179,6 +179,10 @@ pre-engagement bootstrap needs the t=0 stiffness path)
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe
 (`/IMPL/PRINT/STIF` + `tools/modal_solve.py`), or `/EIG` with `--eig`
 `*CONTROL_TERMINATION` → engine `/RUN/...`
+Engine restart (`.rst`) files are **off by default** (`/RFILE/OFF` in the engine
+deck) — they are only needed for `/RERUN`/crash recovery and are large; pass
+`--write-restart` (CLI) or tick the GUI box to keep OpenRadioss's default restart
+writing. (The starter's `_0000_*.rst` model-handoff file is always written.)
 `*CONTROL_TIMESTEP`, `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`

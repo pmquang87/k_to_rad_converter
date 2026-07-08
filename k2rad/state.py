@@ -965,6 +965,11 @@ class ConvertOptions:
     # master, which breaks byte-identical output and any script that addresses
     # loads/readouts by the old master-node id.
     rigid_cog_master: bool = False
+    # Restart (.rst) files. OpenRadioss writes engine restart files by default;
+    # they are only needed for /RERUN or crash recovery and add up to a lot of
+    # disk on a large model. Off by default here → the engine deck gets
+    # /RFILE/OFF. Set True to keep OpenRadioss's default restart writing.
+    write_restart: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════

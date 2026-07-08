@@ -5199,9 +5199,22 @@ def build_starter(state: ConversionState, progress=None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _make_engine_restart(state: ConversionState) -> List[str]:
+    """/RFILE/OFF disables the engine restart (.rst) files, which are only
+    needed for /RERUN or crash recovery and are large on a big model. Emitted
+    by default (write_restart off); set write_restart to keep OpenRadioss's
+    default restart writing. (The starter's <root>_0000_*.rst is the mandatory
+    model handoff to the engine and cannot be suppressed here.)"""
+    opts = getattr(state, "options", None)
+    if opts is not None and getattr(opts, "write_restart", False):
+        return []
+    return ["/RFILE/OFF", "#"]
+
+
 def build_engine(state: ConversionState) -> str:
     sections = [
         _make_engine_header(state),
+        _make_engine_restart(state),
         _make_engine_output(state),
         _make_engine_implicit(state),
         _make_engine_cpu(state),

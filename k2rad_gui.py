@@ -93,7 +93,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          fixpoint_count_text: str = "",
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
-                         rigid_cog_master: bool = False) -> dict:
+                         rigid_cog_master: bool = False,
+                         write_restart: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -165,6 +166,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["rigid_cog_master"] = bool(rigid_cog_master)
 
+    kwargs["write_restart"] = bool(write_restart)
+
     return kwargs
 
 
@@ -196,6 +199,7 @@ class ConverterGUI:
         self.fixpoint_count = tk.StringVar(value="100")
         self.blast_ground = tk.StringVar(value="auto")
         self.rigid_cog = tk.BooleanVar(value=False)
+        self.write_restart = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -260,6 +264,12 @@ class ConverterGUI:
                      "coordinates, clears WARNINGs 448/1624; renumbers the master "
                      "node loads/readouts address)",
             variable=self.rigid_cog).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Write engine restart (.rst) files  (default off → /RFILE/OFF; "
+                     "restart files are only needed for /RERUN or crash recovery and "
+                     "are large — the starter's mandatory _0000_*.rst is unaffected)",
+            variable=self.write_restart).grid(row=8, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -390,6 +400,7 @@ class ConverterGUI:
                 deformable_contact_recipe=self.deformable_recipe.get(),
                 blast_ground=self.blast_ground.get(),
                 rigid_cog_master=self.rigid_cog.get(),
+                write_restart=self.write_restart.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -481,6 +492,10 @@ class ConverterGUI:
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":
             bits.append(f"blast ground={kwargs['blast_ground']}")
+        if kwargs.get("rigid_cog_master"):
+            bits.append("element-free rigid masters")
+        if kwargs.get("write_restart"):
+            bits.append("keep restart (.rst) files")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────

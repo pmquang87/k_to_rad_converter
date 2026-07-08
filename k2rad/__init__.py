@@ -146,6 +146,7 @@ def convert(
     emit_eig: bool = False,
     blast_ground: str = "auto",
     rigid_cog_master: bool = False,
+    write_restart: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -231,6 +232,12 @@ def convert(
         appears to move in post-processing. Off by default because it renumbers
         every rigid master (loads/time-history readouts then address the new
         synthesized node, and default output is no longer byte-identical).
+    write_restart : bool
+        Keep OpenRadioss's engine restart (.rst) files. Off by default, which
+        emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
+        only needed for ``/RERUN``/crash recovery and are large on a big model.
+        The starter's ``<stem>_0000_*.rst`` model-handoff file is always written
+        and is not affected by this flag.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -280,6 +287,7 @@ def convert(
         emit_eig=emit_eig,
         blast_ground=str(blast_ground).strip() or "auto",
         rigid_cog_master=rigid_cog_master,
+        write_restart=write_restart,
     )
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)

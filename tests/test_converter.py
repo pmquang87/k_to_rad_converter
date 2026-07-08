@@ -2554,6 +2554,16 @@ class GuiInputParsingTests(unittest.TestCase):
             deformable_contact_recipe=True)
         self.assertTrue(on["deformable_contact_recipe"])
 
+    def test_build_kwargs_write_restart(self):
+        common = dict(ground_springs=False, ground_spring_k_text="",
+                      inter_gapmin_text="", soften_stfac_text="")
+        default = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), **common)
+        self.assertFalse(default["write_restart"])                 # default off
+        on = self.g.build_convert_kwargs(
+            self.kpath, "", ("Mg", "mm", "s"), write_restart=True, **common)
+        self.assertTrue(on["write_restart"])
+
     def test_build_kwargs_blast_ground(self):
         common = dict(ground_springs=False, ground_spring_k_text="",
                       inter_gapmin_text="", soften_stfac_text="")
@@ -5890,6 +5900,35 @@ class MatAddErosionTests(unittest.TestCase):
             "         1")
         result, _ = self._convert(deck)
         self.assertTrue(any("IDAM" in w and "GISSMO" in w for w in result.warnings))
+
+
+RESTART_K = """*KEYWORD
+*MAT_ELASTIC
+         1  7.85E-9  210000.0       0.3
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class EngineRestartTests(unittest.TestCase):
+    """/RFILE/OFF is emitted by default; write_restart keeps OpenRadioss's
+    default restart (.rst) writing."""
+
+    def _engine(self, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(RESTART_K)
+        result = convert(path, **opts)
+        return Path(result.engine_path).read_text()
+
+    def test_rfile_off_is_default(self):
+        self.assertIn("/RFILE/OFF", self._engine())
+
+    def test_write_restart_keeps_restart(self):
+        self.assertNotIn("/RFILE", self._engine(write_restart=True))
 
 
 if __name__ == "__main__":
