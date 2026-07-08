@@ -5759,6 +5759,21 @@ class GissmoFailTab2Tests(unittest.TestCase):
         rows = [r for r in block.splitlines() if r and not r.startswith("#")]
         self.assertEqual(rows[1].split()[2], "901")  # INST_ID
 
+    def test_engine_requests_damage_output(self):
+        # GISSMO damage reaches the d3plot only via /ANIM/ELEM/DAMG (NEIPH has no
+        # effect on the OpenRadioss path). It must be added when GISSMO is present.
+        result, _ = self._convert()
+        engine = Path(result.engine_path).read_text()
+        self.assertIn("/ANIM/ELEM/DAMG", engine)
+
+    def test_no_damage_output_without_gissmo(self):
+        # Drop the GISSMO card entirely -> no damage channel requested.
+        deck = (GISSMO_K.split("*MAT_ADD_DAMAGE_GISSMO")[0]
+                + "*CONTROL_TERMINATION\n       1.0\n*END\n")
+        result, _ = self._convert(deck)
+        engine = Path(result.engine_path).read_text()
+        self.assertNotIn("/ANIM/ELEM/DAMG", engine)
+
 
 if __name__ == "__main__":
     unittest.main()
