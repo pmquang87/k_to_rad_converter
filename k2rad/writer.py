@@ -556,12 +556,18 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
     layout follow MAT/matl76_76.cfg FORMAT(radioss2018). The tension / compression
     / shear yield curves are emitted separately as /TABLE/1 cards (see
     _make_functions); here we only reference their ids. LS-DYNA has no per-table
-    ordinate scale, no XFAC and no IFORM/IQUAD in this card, so those take the
-    LAW76 defaults (1.0 / 1.0 / 0 / 0)."""
+    ordinate scale, no XFAC and no IFORM/IQUAD in this card, so those take
+    sensible LAW76 defaults (Fscale=XFAC=1, IFORM=0)."""
     xfac = 1.0
     fsmooth = 1                       # ISRATE: strain-rate smoothing on
     fcut = mat.asrate if mat.asrate > 0.0 else 1e30
     fscale1 = 1.0 if mat.fct_id1 else 0.0
+    # IQUAD=1 (yield surface quadratic in von Mises) is Altair's recommended
+    # setting and is what represents SAMP-1's asymmetric, pressure-dependent
+    # yield (the whole reason for separate tension/compression/shear curves);
+    # IQUAD=0 is only a coarse linear approximation. LS-DYNA *MAT_187 has no
+    # IQUAD field to map from, so we pick the recommended value.
+    iquad = 1
     gap = " " * 20
     return [
         f"/MAT/LAW76/{mat.mid}",
@@ -581,7 +587,7 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
         "#  fct_ID1                                 Fscale1",
         f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
         "#    IFORM     IQUAD     ICONV",
-        f"{_i(0)}{_i(0)}{_i(mat.iconv)}",
+        f"{_i(0)}{_i(iquad)}{_i(mat.iconv)}",
         HDR,
     ]
 
