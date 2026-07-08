@@ -225,6 +225,15 @@ def main() -> int:
              "centre of mass at runtime). Renumbers every rigid master, so "
              "loads/readouts address the new synthesized node.",
     )
+    parser.add_argument(
+        "--write-restart",
+        action="store_true",
+        help="Keep OpenRadioss's engine restart (.rst) files. By default the "
+             "engine deck gets /RFILE/OFF because the restart files are only "
+             "needed for /RERUN or crash recovery and are large on a big model. "
+             "(The starter's <root>_0000_*.rst model-handoff file is always "
+             "written and cannot be disabled.)",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -279,6 +288,7 @@ def main() -> int:
         emit_eig=args.emit_eig,
         blast_ground=args.blast_ground,
         rigid_cog_master=args.rigid_cog_master,
+        write_restart=args.write_restart,
         progress=None if args.quiet else _make_progress_printer(),
     )
 
