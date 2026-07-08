@@ -183,7 +183,11 @@ Engine restart (`.rst`) files are **off by default** (`/RFILE/OFF` in the engine
 deck) — they are only needed for `/RERUN`/crash recovery and are large; pass
 `--write-restart` (CLI) or tick the GUI box to keep OpenRadioss's default restart
 writing. (The starter's `_0000_*.rst` model-handoff file is always written.)
-`*CONTROL_TIMESTEP`, `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
+`*CONTROL_TIMESTEP` `DT2MS`<0 → engine `/DT/NODA/CST/0` (nodal mass scaling that
+holds the explicit time step at `|DT2MS|`; `Tsca` = `TSSFAC` or 0.9). Without it
+OpenRadioss runs at the raw smallest-element step — on a fine/TET mesh that can
+be ~100× below `DT2MS`, i.e. a ~100× slower run. Explicit decks only.
+`*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)

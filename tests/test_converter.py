@@ -5911,6 +5911,55 @@ RESTART_K = """*KEYWORD
 """
 
 
+DT2MS_K = """*KEYWORD
+*CONTROL_TIMESTEP
+$#  dtinit    tssfac      isdo    tslimt     dt2ms
+       0.0       0.0         0       0.0-1.1120E-6
+*MAT_ELASTIC
+         1  7.85E-9  210000.0       0.3
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class MassScalingTests(unittest.TestCase):
+    """*CONTROL_TIMESTEP DT2MS<0 → engine /DT/NODA/CST (mass scaling)."""
+
+    def _engine(self, deck=DT2MS_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.engine_path).read_text()
+
+    def test_dt2ms_emits_dt_noda_cst(self):
+        _, engine = self._engine()
+        self.assertIn("/DT/NODA/CST/0", engine)
+
+    def test_tmin_is_abs_dt2ms(self):
+        # Tmin = |DT2MS| holds the run at the LS-DYNA target; Tsca defaults to 0.9
+        # when *CONTROL_TIMESTEP TSSFAC is 0.
+        _, engine = self._engine()
+        row = engine.split("/DT/NODA/CST/0", 1)[1].splitlines()[1]
+        tsca, tmin = row.split()
+        self.assertEqual(float(tsca), 0.9)
+        self.assertAlmostEqual(float(tmin), 1.112e-6, places=12)
+
+    def test_positive_dt2ms_no_mass_scaling(self):
+        # DT2MS >= 0 is init-only / no mass scaling -> no /DT/NODA/CST.
+        deck = DT2MS_K.replace("-1.1120E-6", "       0.0")
+        _, engine = self._engine(deck)
+        self.assertNotIn("/DT/NODA/CST", engine)
+
+    def test_warns_about_mass_scaling(self):
+        result, _ = self._engine()
+        self.assertTrue(any("DT2MS" in w and "/DT/NODA/CST" in w
+                            for w in result.warnings))
+
+
 class EngineRestartTests(unittest.TestCase):
     """/RFILE/OFF is emitted by default; write_restart keeps OpenRadioss's
     default restart (.rst) writing."""

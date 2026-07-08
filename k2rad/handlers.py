@@ -1117,8 +1117,10 @@ def handle_control_timestep(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
         return
+    # Card: dtinit tssfac isdo tslimt dt2ms lctm erode ms1st
     f = _card(raw, 0, fixed=True, n=8, w=10)
-    state.ctrl_timestep = ControlTimestep(to_float(f[0]), to_float(f[1]))
+    dt2ms = to_float(f[4]) if len(f) > 4 else 0.0
+    state.ctrl_timestep = ControlTimestep(to_float(f[0]), to_float(f[1]), dt2ms)
 
 
 def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) -> None:
