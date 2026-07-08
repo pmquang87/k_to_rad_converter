@@ -5785,5 +5785,102 @@ class GissmoFailTab2Tests(unittest.TestCase):
         self.assertNotIn("/ANIM/ELEM/DAMG", engine)
 
 
+CONSTRAINT_EROSION_K = """*KEYWORD
+*MAT_ELASTIC
+         1  1.05E-9    1800.0       0.4
+*MAT_ADD_EROSION
+         1       0.0       0.0       0.0       0.0       0.0       1.0       1.0
+       0.0       0.0       0.0     0.038       0.0       0.0       0.0       0.0
+*SET_NODE_LIST_TITLE
+top face nodes
+  20000001
+         5         6         7         8
+*CONSTRAINED_NODE_SET
+  20000001         21.00000E20
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class ConstrainedNodeSetTests(unittest.TestCase):
+    """*CONSTRAINED_NODE_SET → /RLINK."""
+
+    def _convert(self, deck: str = CONSTRAINT_EROSION_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("CONSTRAINED_NODE_SET", result.skipped_keywords)
+
+    def test_emits_rlink_with_group_on_same_line(self):
+        _, starter = self._convert()
+        self.assertIn("/RLINK/20000001", starter)
+        line = starter.split("/RLINK/20000001", 1)[1].splitlines()[3]
+        # "   Tra rot   skew_ID  grnod_ID" -> code, skew, then the grnod id
+        self.assertEqual(line.split(), ["010", "000", "0", "20000001"])
+
+    def test_dof_codes(self):
+        for dof, tra in ((1, "100"), (2, "010"), (3, "001"), (4, "111")):
+            deck = CONSTRAINT_EROSION_K.replace(
+                "  20000001         21.00000E20",
+                f"  20000001         {dof}1.00000E20")
+            _, starter = self._convert(deck)
+            line = starter.split("/RLINK/20000001", 1)[1].splitlines()[3]
+            self.assertEqual(line.split()[0], tra, f"DOF={dof}")
+
+    def test_finite_failure_time_warns(self):
+        deck = CONSTRAINT_EROSION_K.replace("21.00000E20", "2       0.5")
+        result, _ = self._convert(deck)
+        self.assertTrue(any("failure time" in w and "RLINK" in w
+                            for w in result.warnings))
+
+
+class MatAddErosionTests(unittest.TestCase):
+    """*MAT_ADD_EROSION → /FAIL model."""
+
+    def _convert(self, deck: str = CONSTRAINT_EROSION_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("MAT_ADD_EROSION", result.skipped_keywords)
+
+    def test_mxeps_maps_to_tensstrain(self):
+        _, starter = self._convert()
+        self.assertIn("/FAIL/TENSSTRAIN/1", starter)
+        row = starter.split("/FAIL/TENSSTRAIN/1", 1)[1].splitlines()[2]
+        self.assertEqual(row.split()[0], "0.038")   # EPSILON_T1
+        self.assertEqual(row.split()[1], "0.038")   # EPSILON_T2
+
+    def test_effeps_maps_to_johnson(self):
+        deck = CONSTRAINT_EROSION_K.replace(
+            "         1       0.0       0.0       0.0       0.0       0.0       1.0       1.0",
+            "         1       0.0       0.0       0.0      0.05       0.0       1.0       1.0")
+        _, starter = self._convert(deck)
+        self.assertIn("/FAIL/JOHNSON/1", starter)
+
+    def test_gissmo_in_erosion_warns(self):
+        # IDAM>=1 (GISSMO embedded in *MAT_ADD_EROSION) is reported, not converted.
+        deck = CONSTRAINT_EROSION_K.replace(
+            "       0.0       0.0       0.0     0.038       0.0       0.0       0.0       0.0",
+            "       0.0       0.0       0.0     0.038       0.0       0.0       0.0       0.0\n"
+            "         1")
+        result, _ = self._convert(deck)
+        self.assertTrue(any("IDAM" in w and "GISSMO" in w for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

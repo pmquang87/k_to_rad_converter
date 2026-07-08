@@ -17,6 +17,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
+    MatAddErosion, ConstrainedNodeSet,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
@@ -1702,6 +1703,53 @@ def handle_mat_add_damage_gissmo(block: Block, state: ConversionState) -> None:
                    "/FAIL/TAB2 needs EPSF_ID; damage will not accumulate.")
 
 
+def handle_mat_add_erosion(block: Block, state: ConversionState) -> None:
+    """*MAT_ADD_EROSION → an OpenRadioss /FAIL model (strain criteria only).
+    Card layout from mat_add_erosion.cfg:
+      Card1: MID EXCL MXPRES MNEPS EFFEPS VOLEPS NUMFIP NCS
+      Card2: MNPRES SIGP1 SIGVM MXEPS EPSSH SIGTH IMPULSE FAILTM
+      Card3 (optional): IDAM ... (GISSMO/DIEM — reported, not converted)"""
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0]:
+        state.warn("*MAT_ADD_EROSION: empty card – skipped")
+        return
+    mid    = to_int(f1[0])
+    mxpres = to_float(f1[2]) if len(f1) > 2 else 0.0
+    mneps  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    effeps = to_float(f1[4]) if len(f1) > 4 else 0.0
+    voleps = to_float(f1[5]) if len(f1) > 5 else 0.0
+    numfip = to_float(f1[6]) if len(f1) > 6 else 1.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    mnpres = to_float(f2[0]) if f2        else 0.0
+    sigp1  = to_float(f2[1]) if len(f2) > 1 else 0.0
+    sigvm  = to_float(f2[2]) if len(f2) > 2 else 0.0
+    mxeps  = to_float(f2[3]) if len(f2) > 3 else 0.0
+    epssh  = to_float(f2[4]) if len(f2) > 4 else 0.0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    idam = to_int(f3[0]) if f3 and f3[0] else 0
+    other = [n for n, v in (("MXPRES", mxpres), ("MNEPS", mneps),
+                            ("VOLEPS", voleps), ("MNPRES", mnpres),
+                            ("SIGP1", sigp1), ("SIGVM", sigvm), ("EPSSH", epssh))
+             if v]
+    state.mat_add_erosion[mid] = MatAddErosion(mid, effeps, mxeps, numfip,
+                                               idam, other)
+
+
+def handle_constrained_node_set(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_NODE_SET → /RLINK. Card: NSID DOF TF."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=3, w=10)
+    if not f or not f[0]:
+        state.warn("*CONSTRAINED_NODE_SET: empty card – skipped")
+        return
+    nsid = to_int(f[0])
+    dof  = to_int(f[1])   if len(f) > 1 else 0
+    tf   = to_float(f[2]) if len(f) > 2 else 1e20
+    state.constrained_node_sets.append(ConstrainedNodeSet(nsid, dof, tf))
+
+
 def handle_load_segment(block: Block, state: ConversionState) -> None:
     raw = block.raw
     # _ID variant: first line is "id  title", data starts at index 1
@@ -2314,7 +2362,8 @@ HANDLERS = {
     "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,
     "LOAD_BLAST_SEGMENT":                     handle_load_blast_segment,
     "LOAD_BLAST":                             handle_load_blast,
-    "MAT_ADD_EROSION":                        handle_skip,
+    "MAT_ADD_EROSION":                        handle_mat_add_erosion,
+    "CONSTRAINED_NODE_SET":                   handle_constrained_node_set,
     "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
     "SET_SEGMENT":                            handle_set_segment,

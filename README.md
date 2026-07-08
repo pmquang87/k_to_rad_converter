@@ -99,6 +99,10 @@ points fail, LS-DYNA's built-in erosion rule) instead of the material `Eps_max`
 `*MAT_ADD_DAMAGE_GISSMO` → `/FAIL/TAB2` (GISSMO tabulated damage: `LCSDG`→
 `EPSF_ID`, `DMGEXP`→`N`, `DCRIT`, `NUMFIP`→`FAILIP`, `LCREGD`→`TAB_EL`; a
 negative `ECRIT`/`FADEXP` is resolved to the instability/fading curve)
+`*MAT_ADD_EROSION` → an OpenRadioss `/FAIL` model for the strain criteria:
+`MXEPS` (max principal strain) → `/FAIL/TENSSTRAIN`, `EFFEPS` (max effective
+strain) → `/FAIL/JOHNSON`. Other criteria and `IDAM≥1` (GISSMO/DIEM embedded in
+the erosion card) are reported but not converted (use `*MAT_ADD_DAMAGE_GISSMO`)
 `*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
@@ -108,6 +112,11 @@ negative `ECRIT`/`FADEXP` is resolved to the instability/fading curve)
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`)
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`
+
+### Constraints
+`*CONSTRAINED_NODE_SET` → `/RLINK` (nodes share the same velocity along the
+constrained DOF; `DOF` 1/2/3 = x/y/z translation, 4 = all translations, 5/6/7 =
+rotation. `TF` failure time has no `/RLINK` equivalent and is dropped)
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
