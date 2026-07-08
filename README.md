@@ -187,6 +187,18 @@ writing. (The starter's `_0000_*.rst` model-handoff file is always written.)
 holds the explicit time step at `|DT2MS|`; `Tsca` = `TSSFAC` or 0.9). Without it
 OpenRadioss runs at the raw smallest-element step — on a fine/TET mesh that can
 be ~100× below `DT2MS`, i.e. a ~100× slower run. Explicit decks only.
+`--ams` (CLI) / GUI checkbox swaps that nodal mass scaling for **Advanced Mass
+Scaling**: engine `/DT/AMS` (`Tsca` 0.67) + starter `/AMS` (all parts; the
+solver auto-skips rigid bodies). AMS holds `|DT2MS|` with a *coupled* mass
+matrix that preserves the low-frequency response instead of adding real nodal
+mass — useful when `/DT/NODA/CST`'s added mass dwarfs the physical mass on a fine
+mesh and swamps the dynamics (kinetic energy runs away). It solves a
+preconditioned conjugate gradient each cycle and **can diverge** (`AMS IS LIKELY
+DIVERGING`) on stiff / high-stiffness-contrast / contact-heavy models or at a
+large `|DT2MS|`/element-step ratio; if it does, drop `--ams` (back to the default
+`/DT/NODA/CST`) or lower `|DT2MS|`. Off by default. Implies `--rigid-cog-master`
+(a whole-part rigid body's master must be an element-free node or AMS aborts with
+`ERROR 1066`). Explicit decks only.
 `*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`

@@ -147,6 +147,7 @@ def convert(
     blast_ground: str = "auto",
     rigid_cog_master: bool = False,
     write_restart: bool = False,
+    ams: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -238,6 +239,18 @@ def convert(
         only needed for ``/RERUN``/crash recovery and are large on a big model.
         The starter's ``<stem>_0000_*.rst`` model-handoff file is always written
         and is not affected by this flag.
+    ams : bool
+        Advanced Mass Scaling. For a mass-scaled explicit deck (*CONTROL_TIMESTEP
+        DT2MS<0), emit ``/DT/AMS`` (engine) + ``/AMS`` (starter) instead of
+        ``/DT/NODA/CST``. AMS holds the target time step with a coupled mass
+        matrix that preserves the low-frequency response, rather than adding real
+        nodal mass (whose inertia can dominate a fine mesh). It solves a
+        preconditioned conjugate gradient each cycle and can diverge ("AMS IS
+        LIKELY DIVERGING") on stiff / high-stiffness-contrast / contact-heavy
+        models or at a large Tmin/element-dt ratio — if it does, drop this flag
+        (back to /DT/NODA/CST) or lower ``|DT2MS|``. Implies ``rigid_cog_master``
+        (a whole-part rigid body's master must be element-free or AMS errors with
+        ERROR 1066). Off by default.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -271,6 +284,13 @@ def convert(
     blocks = parse_k_file(input_path)
     _report(0.05, f"Parsed {len(blocks)} keyword block(s)")
 
+    # AMS needs element-free /RBODY masters: a whole-part *MAT_RIGID body whose
+    # master is a mesh/element node makes the AMS starter fail with ERROR 1066,
+    # so --ams implies --rigid-cog-master.
+    ams_forced_cog = bool(ams and not rigid_cog_master)
+    if ams_forced_cog:
+        rigid_cog_master = True
+
     # 2. Dispatch each block to fill state
     state = ConversionState()
     state.units = tuple(units)
@@ -288,7 +308,13 @@ def convert(
         blast_ground=str(blast_ground).strip() or "auto",
         rigid_cog_master=rigid_cog_master,
         write_restart=write_restart,
+        ams=ams,
     )
+    if ams_forced_cog:
+        state.warn(
+            "--ams enabled element-free /RBODY masters (--rigid-cog-master) so "
+            "no whole-part rigid body's master is an element node (AMS ERROR "
+            "1066); rigid masters are renumbered accordingly.")
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
     for i, block in enumerate(blocks):

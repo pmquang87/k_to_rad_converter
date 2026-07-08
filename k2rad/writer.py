@@ -248,6 +248,20 @@ def _make_analysis_defaults(state: ConversionState) -> List[str]:
     return lines
 
 
+def _make_ams(state: ConversionState) -> List[str]:
+    """Opt-in Advanced Mass Scaling starter card (--ams), paired with the engine
+    /DT/AMS (see _make_engine_timestep). grpart_ID = 0 → AMS applies to all
+    parts; the solver auto-skips rigid bodies ("NO AMS EXPANSION OVERALL THE
+    RBODY"). Only for a mass-scaled explicit deck (*CONTROL_TIMESTEP DT2MS<0);
+    implicit/modal decks have no CFL step to scale. --ams forces element-free
+    rigid masters (see convert()) so this never trips AMS ERROR 1066."""
+    ts = state.ctrl_timestep
+    if (not state.options.ams or ts is None or ts.dt2ms >= 0.0
+            or state.is_implicit or state.is_modal):
+        return []
+    return ["/AMS", "#grpart_ID", _i(0), HDR]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starter: materials
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5146,6 +5160,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_header(state))
     sections.append(_make_title(state))
     sections.append(_make_analysis_defaults(state))
+    sections.append(_make_ams(state))
     sections.append(_make_materials(state))
     _rep(0.08, "Writing nodes")
     sections.append(_make_nodes(
@@ -5221,6 +5236,25 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     if ts is None or ts.dt2ms >= 0.0 or state.is_implicit or state.is_modal:
         return []
     tmin = abs(ts.dt2ms)
+    if state.options.ams:
+        # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
+        # scale factor — the PCG needs more margin than /DT/NODA/CST's 0.9. The
+        # paired starter /AMS card is emitted by _make_ams.
+        tsca = 0.67
+        state.warn(
+            f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/AMS (Advanced Mass "
+            f"Scaling, Tmin={tmin:g}, Tsca={tsca:g}) [--ams]. AMS holds the time "
+            "step with a coupled mass matrix that preserves low-frequency dynamics "
+            "instead of adding real nodal mass. It solves a PCG each cycle and can "
+            "DIVERGE ('AMS IS LIKELY DIVERGING') on stiff / high-stiffness-contrast "
+            "/ contact-heavy models or at a large Tmin/element-dt ratio; if it "
+            "does, drop --ams (default /DT/NODA/CST) or lower |DT2MS|."
+        )
+        return [
+            "/DT/AMS",
+            f"{_f(tsca)}{_f(tmin)}",
+            "#",
+        ]
     tsca = ts.tssfac if ts.tssfac and ts.tssfac > 0.0 else 0.9
     state.warn(
         f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/NODA/CST/0 (nodal mass "

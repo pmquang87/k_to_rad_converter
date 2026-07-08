@@ -973,6 +973,20 @@ class ConvertOptions:
     # disk on a large model. Off by default here → the engine deck gets
     # /RFILE/OFF. Set True to keep OpenRadioss's default restart writing.
     write_restart: bool = False
+    # Advanced Mass Scaling (opt-in). By default a mass-scaled explicit deck
+    # (*CONTROL_TIMESTEP DT2MS<0) gets /DT/NODA/CST, which holds the time step by
+    # adding real (diagonal) nodal mass — fast, but on a fine mesh the added mass
+    # can dwarf the physical mass and corrupt the dynamics (kinetic energy runs
+    # away). With this flag the deck instead gets AMS: engine /DT/AMS + starter
+    # /AMS (grpart_ID 0 = all parts; the solver auto-skips rigid bodies), which
+    # holds the step with a COUPLED mass matrix that preserves the low-frequency
+    # response. AMS solves a preconditioned conjugate gradient each cycle and can
+    # DIVERGE ("AMS IS LIKELY DIVERGING") on stiff / high-stiffness-contrast /
+    # contact-heavy models or at a large Tmin/element-dt ratio; if it does, drop
+    # the flag (back to /DT/NODA/CST) or lower |DT2MS|. Forces element-free rigid
+    # masters (implies rigid_cog_master) so no whole-part rigid body's master is
+    # an element node (AMS ERROR 1066). Off by default.
+    ams: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
