@@ -2393,12 +2393,14 @@ class ForceControlStabilizationTests(unittest.TestCase):
         self.assertIn("/SPRING/", starter)
         # K=100 on exactly the two loaded translational axes (Y, Z); X/RX/RY/RZ are 0.
         self.assertEqual(starter.count(_SPR_K(100)), 2)
-        # The spring connects the /RBODY master node (5) to a new fixed ground node.
+        # The spring connects the /RBODY master node to a new fixed ground node.
+        # With element-free masters on by default the master is the synthesized
+        # node 9 (max mesh node 8 + 1) and the ground node follows at 10.
         master, ground = self._spring_nodes(starter)
-        self.assertEqual(master, 5)
-        self.assertEqual(ground, 9)                          # max(node id 1..8) + 1
+        self.assertEqual(master, 9)
+        self.assertEqual(ground, 10)
         self.assertIn("   111 111         0", starter)        # ground node fully fixed
-        self.assertTrue(any("grounding spring" in w and "master node 5" in w
+        self.assertTrue(any("grounding spring" in w and "master node 9" in w
                             for w in result.warnings))
 
     def test_ground_spring_prop_block_closes_with_strain_rate_card(self):
@@ -2493,7 +2495,7 @@ class ForceControlStabilizationTests(unittest.TestCase):
         self.assertIn("/PROP/TYPE8/", starter)
         self.assertEqual(starter.count(_SPR_K(100)), 2)
         master, ground = self._spring_nodes(starter)
-        self.assertEqual((master, ground), (5, 9))
+        self.assertEqual((master, ground), (9, 10))   # synth master 9, ground 10
 
 
 class GuiInputParsingTests(unittest.TestCase):
@@ -5125,13 +5127,14 @@ class AleFsiTests(unittest.TestCase):
 # ── --rigid-cog-master (element-free /RBODY masters for *MAT_RIGID parts) ────
 
 class RigidCogMasterTests(unittest.TestCase):
-    """Opt-in synthesized element-free CoG masters for *MAT_RIGID parts.
+    """Synthesized element-free CoG masters for *MAT_RIGID parts (ON by default).
 
-    Default output must be byte-identical (master = lowest-id mesh node); with
-    the flag each rigid part gets a NEW node at its nodal centroid as the
+    By default each rigid part gets a NEW node at its nodal centroid as the
     /RBODY master, so mesh nodes keep their source coordinates (OpenRadioss
     relocates only the free master to the CoM) and starter WARNINGs 448/1624
     (master connected to an element / removed from secondary set) disappear.
+    --no-rigid-cog-master (rigid_cog_master=False) opts out, reusing the part's
+    lowest-id mesh node as the master.
     """
 
     def _convert(self, deck: str, **opts):
@@ -5143,9 +5146,18 @@ class RigidCogMasterTests(unittest.TestCase):
             starter = Path(result.starter_path).read_text()
         return result, starter
 
-    def test_default_master_is_mesh_node(self):
+    def test_default_master_is_synthesized_element_free(self):
+        # ON by default: the master is the synthesized node (max mesh node 8 + 1),
+        # not the part's lowest mesh node.
         _r, starter = self._convert(FORCE_RB_K)
-        self.assertIn("/RBODY/5", starter)          # lowest node of part 2
+        self.assertIn("/RBODY/9", starter)
+        self.assertNotIn("/RBODY/5", starter)
+
+    def test_opt_out_reuses_mesh_node_master(self):
+        # --no-rigid-cog-master reuses the part's lowest-id mesh node (5).
+        _r, starter = self._convert(FORCE_RB_K, rigid_cog_master=False)
+        self.assertIn("/RBODY/5", starter)
+        self.assertNotIn("/RBODY/9", starter)
 
     def test_flag_synthesizes_element_free_master(self):
         result, starter = self._convert(FORCE_RB_K, rigid_cog_master=True)
@@ -6017,14 +6029,15 @@ class AdvancedMassScalingTests(unittest.TestCase):
         self.assertTrue(any("/DT/AMS" in w and "DIVERG" in w.upper()
                             for w in result.warnings))
 
-    def test_ams_forces_element_free_rigid_master(self):
-        # --ams implies --rigid-cog-master, so a whole-part *MAT_RIGID body gets
-        # a synthesized element-free master (id above the max mesh node) instead
-        # of reusing a mesh node that AMS would reject.
-        result, _e, starter = self._convert(FORCE_RB_K, ams=True)
-        self.assertIn("/RBODY/9", starter)      # synthesized master (max node 8)
-        self.assertNotIn("/RBODY/5", starter)   # old mesh-node master gone
-        self.assertTrue(any("element-free /RBODY masters" in w
+    def test_ams_overrides_rigid_master_opt_out(self):
+        # Element-free rigid masters are on by default; --ams REQUIRES them, so it
+        # overrides an explicit --no-rigid-cog-master (a mesh-node master would
+        # trip AMS ERROR 1066).
+        result, _e, starter = self._convert(FORCE_RB_K, ams=True,
+                                            rigid_cog_master=False)
+        self.assertIn("/RBODY/9", starter)      # synthesized despite the opt-out
+        self.assertNotIn("/RBODY/5", starter)
+        self.assertTrue(any("overriding --no-rigid-cog-master" in w
                             for w in result.warnings))
 
 

@@ -93,7 +93,7 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          fixpoint_count_text: str = "",
                          deformable_contact_recipe: bool = False,
                          blast_ground: str = "auto",
-                         rigid_cog_master: bool = False,
+                         rigid_cog_master: bool = True,
                          write_restart: bool = False,
                          ams: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
@@ -201,7 +201,7 @@ class ConverterGUI:
         self.tet10 = tk.BooleanVar(value=False)
         self.fixpoint_count = tk.StringVar(value="100")
         self.blast_ground = tk.StringVar(value="auto")
-        self.rigid_cog = tk.BooleanVar(value=False)
+        self.rigid_cog = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.ground = tk.BooleanVar(value=False)
@@ -263,10 +263,10 @@ class ConverterGUI:
                   foreground="gray").pack(side="left")
 
         ttk.Checkbutton(
-            io, text="Element-free rigid masters (*MAT_RIGID: synthesize a /RBODY "
-                     "master at the part's centroid — mesh nodes keep their "
-                     "coordinates, clears WARNINGs 448/1624; renumbers the master "
-                     "node loads/readouts address)",
+            io, text="Element-free rigid masters (default on — *MAT_RIGID: /RBODY "
+                     "master synthesized at the part's centroid; mesh nodes keep "
+                     "their coordinates, clears WARNINGs 448/1624, AMS-compatible. "
+                     "Untick to reuse the part's lowest-id mesh node as master)",
             variable=self.rigid_cog).grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Checkbutton(
@@ -504,8 +504,8 @@ class ConverterGUI:
             bits.append("deformable-deformable contact recipe")
         if kwargs.get("blast_ground", "auto") != "auto":
             bits.append(f"blast ground={kwargs['blast_ground']}")
-        if kwargs.get("rigid_cog_master"):
-            bits.append("element-free rigid masters")
+        if not kwargs.get("rigid_cog_master", True):
+            bits.append("mesh-node rigid masters (--no-rigid-cog-master)")
         if kwargs.get("write_restart"):
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):

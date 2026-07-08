@@ -956,18 +956,18 @@ class ConvertOptions:
     #   "X"/"Y"/"Z"/"-X"/"-Y"/"-Z" : force the ground-normal (up) axis.
     # Free-air bursts (Exp_data=1) need no ground and ignore this.
     blast_ground: str = "auto"
-    # Element-free CoG masters for *MAT_RIGID parts (opt-in). By default the
-    # /RBODY master is the part's lowest-id mesh node, which (a) is an element
-    # corner → starter WARNINGs 448 "MAIN NODE CONNECTED TO AN ELEMENT" + 1624
-    # "MAIN NODE REMOVED FROM SECONDARY NODE SET", and (b) gets relocated to the
-    # part's centre of mass at runtime (ICoG default) so that mesh node's
-    # coordinates appear to change in post-processing. With this flag on, each
+    # Element-free CoG masters for *MAT_RIGID parts (ON by default). Each
     # *MAT_RIGID part gets a NEW synthesized node at its nodal centroid as the
-    # /RBODY master (the same treatment CNRBs always get) — mesh nodes stay
-    # put and the warnings disappear. Off by default: it renumbers every rigid
-    # master, which breaks byte-identical output and any script that addresses
-    # loads/readouts by the old master-node id.
-    rigid_cog_master: bool = False
+    # /RBODY master (the same treatment CNRBs always get) — mesh nodes stay put
+    # and starter WARNINGs 448 "MAIN NODE CONNECTED TO AN ELEMENT" + 1624 "MAIN
+    # NODE REMOVED FROM SECONDARY NODE SET" disappear. It also makes the deck
+    # AMS-compatible (a mesh-node master trips AMS ERROR 1066). Set False
+    # (--no-rigid-cog-master) to instead reuse the part's lowest-id mesh node as
+    # the master: that node is an element corner (WARNINGs 448/1624) and
+    # OpenRadioss relocates it to the centre of mass at runtime (ICoG default),
+    # so its coordinates appear to change in post-processing — but it keeps the
+    # master-node id stable for scripts that address loads/readouts by it.
+    rigid_cog_master: bool = True
     # Restart (.rst) files. OpenRadioss writes engine restart files by default;
     # they are only needed for /RERUN or crash recovery and add up to a lot of
     # disk on a large model. Off by default here → the engine deck gets

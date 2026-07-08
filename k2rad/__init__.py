@@ -145,7 +145,7 @@ def convert(
     deformable_contact_recipe: bool = False,
     emit_eig: bool = False,
     blast_ground: str = "auto",
-    rigid_cog_master: bool = False,
+    rigid_cog_master: bool = True,
     write_restart: bool = False,
     ams: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
@@ -226,13 +226,15 @@ def convert(
     rigid_cog_master : bool
         Synthesize an element-free /RBODY master node at each *MAT_RIGID part's
         nodal centroid (the treatment CNRBs always get) instead of reusing the
-        part's lowest-id mesh node. Clears starter WARNINGs 448/1624 (master
-        connected to an element / removed from the secondary set) and keeps all
-        mesh nodes at their source coordinates — otherwise OpenRadioss relocates
-        the mesh-node master to the centre of mass at runtime, so that node
-        appears to move in post-processing. Off by default because it renumbers
-        every rigid master (loads/time-history readouts then address the new
-        synthesized node, and default output is no longer byte-identical).
+        part's lowest-id mesh node. **On by default**: it clears starter WARNINGs
+        448/1624 (master connected to an element / removed from the secondary
+        set), keeps all mesh nodes at their source coordinates (otherwise
+        OpenRadioss relocates the mesh-node master to the centre of mass at
+        runtime, so that node appears to move in post-processing), and makes the
+        deck AMS-compatible (a mesh-node master trips AMS ERROR 1066). Set False
+        (CLI ``--no-rigid-cog-master``) to reuse the mesh node as the master,
+        which keeps the master-node id stable for scripts that address
+        loads/readouts by it, at the cost of those warnings and the runtime move.
     write_restart : bool
         Keep OpenRadioss's engine restart (.rst) files. Off by default, which
         emits ``/RFILE/OFF`` in the engine deck — the engine restart files are
@@ -285,8 +287,9 @@ def convert(
     _report(0.05, f"Parsed {len(blocks)} keyword block(s)")
 
     # AMS needs element-free /RBODY masters: a whole-part *MAT_RIGID body whose
-    # master is a mesh/element node makes the AMS starter fail with ERROR 1066,
-    # so --ams implies --rigid-cog-master.
+    # master is a mesh/element node makes the AMS starter fail with ERROR 1066.
+    # Element-free masters are on by default, so this only bites when the user
+    # explicitly opted out (--no-rigid-cog-master) while asking for --ams.
     ams_forced_cog = bool(ams and not rigid_cog_master)
     if ams_forced_cog:
         rigid_cog_master = True
@@ -312,9 +315,10 @@ def convert(
     )
     if ams_forced_cog:
         state.warn(
-            "--ams enabled element-free /RBODY masters (--rigid-cog-master) so "
-            "no whole-part rigid body's master is an element node (AMS ERROR "
-            "1066); rigid masters are renumbered accordingly.")
+            "--ams requires element-free /RBODY masters, overriding "
+            "--no-rigid-cog-master: rigid masters are synthesized element-free "
+            "so no whole-part rigid body's master is an element node (AMS ERROR "
+            "1066).")
     nblocks = max(1, len(blocks))
     bstep = max(1, nblocks // 25)
     for i, block in enumerate(blocks):
