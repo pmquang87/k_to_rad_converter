@@ -5608,5 +5608,172 @@ class TiedContactTests(unittest.TestCase):
         self.assertFalse(any("no *CONTACT" in w for w in result.warnings))
 
 
+MAT187_K = """*KEYWORD
+*MAT_187_TITLE
+Iglidur I3-PL SAMP (approx - see flags)
+$#     mid        ro                             e        nu                numint
+       187 1.0500E-9                      1800.000     0.400                     0
+$#  tab_idt   tab_idc   tab_ids                nu_p  fct_idpr
+       761       762       763               0.400         0
+$#  fct_id1    epfail    deprpt  lcid_tri   lcid_lc
+         0       0.0       0.0         0         0
+$#                                       iconv
+                                             1
+$#                          asrate
+                               0.0
+*DEFINE_CURVE
+       761         0       1.0       1.0       0.0       0.0         0
+                 0.0                35.0
+                0.08                41.0
+*DEFINE_CURVE
+       762         0       1.0       1.0       0.0       0.0         0
+                 0.0                39.0
+                0.08                46.0
+*DEFINE_CURVE
+       763         0       1.0       1.0       0.0       0.0         0
+                 0.0                20.2
+                0.08                23.7
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class Mat187SampTests(unittest.TestCase):
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 with /TABLE/1 yield curves."""
+
+    def _convert(self, deck: str = MAT187_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_mat_187_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("MAT_187", result.skipped_keywords)
+
+    def test_emits_law76(self):
+        _, starter = self._convert()
+        self.assertIn("/MAT/LAW76/187", starter)
+
+    def test_law76_field_values(self):
+        _, starter = self._convert()
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        # RHO, E, Nu, the three TAB ids, Nu_p and ICONV must all survive.
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1800\b")
+        self.assertIn("       761       762       763", block)
+        self.assertIn("0.4", block)  # E's Poisson and Nu_p
+
+    def test_yield_curves_become_tables_not_functions(self):
+        _, starter = self._convert()
+        for tid in (761, 762, 763):
+            self.assertIn(f"/TABLE/1/{tid}", starter)
+            self.assertNotIn(f"/FUNCT/{tid}", starter)
+
+    def test_table_has_dimension_card(self):
+        # /TABLE/1 requires the "#dimension" ORDER card (=1) before the points,
+        # otherwise the starter raises ERROR 777 (NDIM undefined).
+        _, starter = self._convert()
+        tbl = starter.split("/TABLE/1/761", 1)[1].splitlines()
+        # title, "#dimension", "         1", comment, first data row
+        self.assertEqual(tbl[2].strip(), "#dimension")
+        self.assertEqual(tbl[3].strip(), "1")
+
+    def test_samp1_named_variant_also_handled(self):
+        _, starter = self._convert(MAT187_K.replace("*MAT_187_TITLE",
+                                                    "*MAT_SAMP-1_TITLE"))
+        self.assertIn("/MAT/LAW76/187", starter)
+
+
+GISSMO_K = """*KEYWORD
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         1  7.85E-9  210000.0       0.3     400.0    1000.0
+*MAT_ADD_DAMAGE_GISSMO
+         1                   0       0.0       1.0
+       900       0.0       2.0       1.0       2.0         0
+*DEFINE_CURVE
+       900
+                -1.0                 2.0
+                 0.0                 1.0
+                 1.0                 0.5
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class GissmoFailTab2Tests(unittest.TestCase):
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2."""
+
+    def _convert(self, deck: str = GISSMO_K):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path)
+        return result, Path(result.starter_path).read_text()
+
+    def test_gissmo_not_skipped(self):
+        result, _ = self._convert()
+        self.assertNotIn("MAT_ADD_DAMAGE_GISSMO", result.skipped_keywords)
+
+    def test_emits_fail_tab2_on_material(self):
+        _, starter = self._convert()
+        self.assertIn("/FAIL/TAB2/1", starter)
+
+    def test_core_field_mapping(self):
+        _, starter = self._convert()
+        block = starter.split("/FAIL/TAB2/1", 1)[1]
+        rows = [r for r in block.splitlines() if r and not r.startswith("#")]
+        # Row 1: EPSF_ID FCRIT (blank) FAILIP PTHK  -> LCSDG=900, FAILIP=1
+        self.assertEqual(rows[0].split()[0], "900")
+        # Row 2: N DCRIT INST_ID ECRIT -> N=DMGEXP=2, DCRIT=1
+        self.assertEqual(rows[1].split()[0], "2")
+        self.assertEqual(rows[1].split()[1], "1")
+
+    def test_lcsdg_stays_a_function(self):
+        # TAB2's EPSF_ID accepts a /FUNCT id for the 1-D case; the curve must not
+        # be forced to /TABLE (that is only for LAW76 yield curves).
+        _, starter = self._convert()
+        self.assertIn("/FUNCT/900", starter)
+        self.assertNotIn("/TABLE/1/900", starter)
+
+    def test_positive_ecrit_warns(self):
+        # A fixed (positive) ECRIT has no direct TAB2 slot -> warn.
+        deck = GISSMO_K.replace("       900       0.0       2.0",
+                                "       900       0.1       2.0")
+        result, _ = self._convert(deck)
+        self.assertTrue(any("ECRIT" in w and "TAB2" in w for w in result.warnings))
+
+    def test_negative_ecrit_becomes_inst_id(self):
+        # ECRIT<0 is an instability curve id -> INST_ID.
+        deck = GISSMO_K.replace("       900       0.0       2.0",
+                                "       900    -901.0       2.0")
+        _, starter = self._convert(deck)
+        block = starter.split("/FAIL/TAB2/1", 1)[1]
+        rows = [r for r in block.splitlines() if r and not r.startswith("#")]
+        self.assertEqual(rows[1].split()[2], "901")  # INST_ID
+
+    def test_engine_requests_damage_output(self):
+        # GISSMO damage reaches the d3plot only via /ANIM/ELEM/DAMG (NEIPH has no
+        # effect on the OpenRadioss path). It must be added when GISSMO is present.
+        result, _ = self._convert()
+        engine = Path(result.engine_path).read_text()
+        self.assertIn("/ANIM/ELEM/DAMG", engine)
+
+    def test_no_damage_output_without_gissmo(self):
+        # Drop the GISSMO card entirely -> no damage channel requested.
+        deck = (GISSMO_K.split("*MAT_ADD_DAMAGE_GISSMO")[0]
+                + "*CONTROL_TERMINATION\n       1.0\n*END\n")
+        result, _ = self._convert(deck)
+        engine = Path(result.engine_path).read_text()
+        self.assertNotIn("/ANIM/ELEM/DAMG", engine)
+
+
 if __name__ == "__main__":
     unittest.main()

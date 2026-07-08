@@ -19,7 +19,8 @@ from typing import Dict, List, Optional, Set, Tuple
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem,
-    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw,
+    MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
+    FailGissmo,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, CoordSys,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
@@ -269,8 +270,12 @@ def _make_materials(state: ConversionState) -> List[str]:
             lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
+    for mat in state.mat_samp.values():
+        lines += _emit_mat_law76(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
+    for fail in state.fail_gissmo.values():
+        lines += _emit_fail_tab2(fail, state)
     return lines
 
 
@@ -544,6 +549,87 @@ def _emit_mat_law36_powerlaw(mat: MatPowerLaw, state: ConversionState) -> List[s
         "                   0",
         HDR,
     ] + trailer
+
+
+def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1). Field order and column
+    layout follow MAT/matl76_76.cfg FORMAT(radioss2018). The tension / compression
+    / shear yield curves are emitted separately as /TABLE/1 cards (see
+    _make_functions); here we only reference their ids. LS-DYNA has no per-table
+    ordinate scale, no XFAC and no IFORM/IQUAD in this card, so those take the
+    LAW76 defaults (1.0 / 1.0 / 0 / 0)."""
+    xfac = 1.0
+    fsmooth = 1                       # ISRATE: strain-rate smoothing on
+    fcut = mat.asrate if mat.asrate > 0.0 else 1e30
+    fscale1 = 1.0 if mat.fct_id1 else 0.0
+    gap = " " * 20
+    return [
+        f"/MAT/LAW76/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu",
+        f"{_f(mat.E)}{_f(mat.nu)}",
+        "#  TAB_IDt   TAB_IDc   TAB_IDs",
+        f"{_i(mat.tab_idt)}{_i(mat.tab_idc)}{_i(mat.tab_ids)}",
+        "#            Fscalet             Fscalec             Fscales                                    XFAC",
+        f"{_f(1.0)}{_f(1.0)}{_f(1.0)}{gap}{_f(xfac)}",
+        "#               Nu_p  fct_IDpr           Fscale_pr   Fsmooth                Fcut",
+        f"{_f(mat.nu_p)}{_i(mat.fct_idpr)}{_f(0.0)}{_i(fsmooth)}{_f(fcut)}",
+        "#        Epsilon_f_p         Epsilon_r_p",
+        f"{_f(mat.epfail)}{_f(mat.deprpt)}",
+        "#  fct_ID1                                 Fscale1",
+        f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
+        "#    IFORM     IQUAD     ICONV",
+        f"{_i(0)}{_i(0)}{_i(mat.iconv)}",
+        HDR,
+    ]
+
+
+def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO). Layout from
+    FAIL/fail_tab2.cfg FORMAT(radioss2022). LS-DYNA's sign convention (negative =
+    curve id) is resolved into the TAB2 function slots. The referenced curves
+    (LCSDG/LCREGD/LCSRS + a curve-valued ECRIT/FADEXP) are ordinary /FUNCT ids —
+    TAB2's table fields accept a function id for the 1-D case."""
+    blank = " " * 10
+    # NUMFIP: >0 → failed integration points (solids); <0 → % thru-thickness (shells)
+    failip = int(round(fail.numfip)) if fail.numfip > 0 else 1
+    pthk   = abs(fail.numfip) if fail.numfip < 0 else 0.0
+    # ECRIT<0 → instability curve; ECRIT>0 → fixed instability strain (no direct
+    # TAB2 fixed slot — carried as the ECRIT scale, warn).
+    if fail.ecrit < 0:
+        inst_id, ecrit_scale = int(-fail.ecrit), 1.0
+    else:
+        inst_id, ecrit_scale = 0, 0.0
+        if fail.ecrit > 0:
+            state.warn(f"/FAIL/TAB2/{fail.mid}: LS-DYNA ECRIT={fail.ecrit} is a "
+                       "fixed instability strain; TAB2 expects an instability "
+                       "curve (INST_ID). Supply a curve or verify the criterion.")
+    # FADEXP<0 → fading-exponent curve; >0 → constant exponent
+    if fail.fadexp < 0:
+        fct_exp, exp = int(-fail.fadexp), 1.0
+    else:
+        fct_exp, exp = 0, (fail.fadexp if fail.fadexp else 1.0)
+    tab_el = fail.lcregd
+    ireg   = 1 if tab_el else 0
+    fct_sr = int(abs(fail.lcsrs)) if fail.lcsrs else 0
+    return [
+        f"/FAIL/TAB2/{fail.mid}",
+        "#  EPSF_ID               FCRIT              FAILIP          PTHICKFAIL",
+        f"{_i(fail.lcsdg)}{_f(1.0)}{blank}{_i(failip)}{_f(pthk)}",
+        "#                  N               DCRIT   INST_ID               ECRIT",
+        f"{_f(fail.dmgexp)}{_f(fail.dcrit)}{_i(inst_id)}{_f(ecrit_scale)}",
+        "#  FCT_EXP             EXP_REF                 EXP",
+        f"{_i(fct_exp)}{_f(0.0)}{_f(exp)}",
+        "#   TAB_EL      IREG              EL_REF             SR_REF1           FSCALE_EL",
+        f"{_i(tab_el)}{_i(ireg)}{_f(0.0)}{_f(0.0)}{_f(1.0)}",
+        "#               SHRF               BIAXF",
+        f"{_f(0.0)}{_f(0.0)}",
+        "#   FCT_SR             SR_REF2           FSCALE_SR             C_JCOOK",
+        f"{_i(fct_sr)}{blank}{_f(0.0)}{_f(1.0)}{_f(0.0)}",
+        HDR,
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1327,13 +1413,26 @@ def _emit_prop_beam(sec: SectionBeam) -> List[str]:
 def _make_functions(state: ConversionState) -> List[str]:
     if not state.curves:
         return []
+    table_ids = getattr(state, "law76_table_ids", set())
     lines = ["#-  FUNCTIONS:", HDR]
     for lcid, curve in sorted(state.curves.items()):
-        lines += [
-            f"/FUNCT/{lcid}",
-            curve.title or f"FUNCT_{lcid}",
-            "#                  X                   Y",
-        ]
+        if lcid in table_ids:
+            # LAW76 yield curves must be /TABLE (1D). Layout from CURVE/table_1.cfg:
+            # header, title, a "#dimension" card carrying ORDER (=1 for 1D), then
+            # the X-Y pairs. Omitting the dimension card triggers starter ERROR 777.
+            lines += [
+                f"/TABLE/1/{lcid}",
+                curve.title or f"TABLE_{lcid}",
+                "#dimension",
+                f"{_i(1)}",
+                "#                  X                   Y",
+            ]
+        else:
+            lines += [
+                f"/FUNCT/{lcid}",
+                curve.title or f"FUNCT_{lcid}",
+                "#                  X                   Y",
+            ]
         for a, o in curve.pts:
             lines.append(f"{_f(a)}{_f(o)}")
         lines.append(HDR)
@@ -4156,6 +4255,12 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/ELEM/THICK")
     if ext and ext.shge:
         lines.append("/ANIM/ELEM/HOUR")
+    # GISSMO / tabulated damage (/FAIL/TAB2) writes the damage parameter D to the
+    # anim (and hence d3plot) only when this channel is requested. This is the
+    # OpenRadioss counterpart of raising NEIPH for GISSMO in LS-DYNA — NEIPH
+    # itself has no effect on the OpenRadioss output path.
+    if state.fail_gissmo:
+        lines.append("/ANIM/ELEM/DAMG")
 
     # ── Nodal scalar outputs ──────────────────────────────────────
     lines.append("/ANIM/NODA/DT")

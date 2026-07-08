@@ -108,6 +108,51 @@ class MatPlasTAB:
 
 
 @dataclass
+class MatSAMP:
+    """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1 semi-analytical polymer).
+
+    Uses the classic SAMP-1 card layout (the one that maps 1:1 onto /MAT/LAW76):
+    Card1 mid ro e nu numint; Card2 tab_idt tab_idc tab_ids nu_p fct_idpr;
+    Card3 fct_id1 epfail deprpt lcid_tri lcid_lc; Card4 iconv; Card5 asrate.
+    The three yield tables (tension/compression/shear) become /TABLE/1 cards.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    tab_idt: int          # tension yield table   → /TABLE
+    tab_idc: int          # compression yield table
+    tab_ids: int          # shear yield table
+    nu_p: float           # plastic Poisson ratio (Nu_p)
+    fct_idpr: int         # pressure-dependence function (fct_IDpr)
+    fct_id1: int          # damage function (fct_ID1)
+    epfail: float         # plastic failure strain (EPS_f_p)
+    deprpt: float         # element deletion plastic strain (EPS_r_p)
+    iconv: int            # convexity flag (ICONV)
+    asrate: float         # strain-rate smoothing cutoff (→ Fcut)
+
+
+@dataclass
+class FailGissmo:
+    """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO tabulated damage model).
+
+    Fields keep LS-DYNA meaning; the writer maps them onto /FAIL/TAB2. ECRIT,
+    FADEXP and LCSRS follow the LS-DYNA sign convention (a negative value is a
+    curve/table id, a positive value a scalar).
+    """
+    mid: int
+    numfip: float       # >0 = # failed IPs (solids); <0 = % thru-thickness (shells)
+    lcsdg: int          # failure plastic strain vs triaxiality curve → EPSF_ID
+    ecrit: float        # instability: curve id if <0, fixed value if >0
+    dmgexp: float       # damage accumulation exponent → N
+    dcrit: float        # critical accumulated damage → DCRIT
+    fadexp: float       # fading exponent: curve id if <0, value if >0 → EXP/FCT_EXP
+    lcregd: int         # element-size regularization curve → TAB_EL
+    lcsrs: float        # strain-rate scaling of LCSDG (curve id if <0) → FCT_SR
+
+
+@dataclass
 class MatPlasKin:
     """*MAT_PLASTIC_KINEMATIC → /MAT/LAW44 (COWPER)."""
     mid: int
@@ -938,6 +983,11 @@ class ConversionState:
         self.mat_rigid: Dict[int, MatRigid] = {}
         self.mat_null: Dict[int, MatNull] = {}
         self.mat_power_law: Dict[int, MatPowerLaw] = {}
+        self.mat_samp: Dict[int, MatSAMP] = {}          # *MAT_187 → /MAT/LAW76
+        self.fail_gissmo: Dict[int, FailGissmo] = {}    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
+        # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
+        # /FUNCT); tracked so _make_functions can exclude them.
+        self.law76_table_ids: set = set()
         # High-explosive / EOS (coupled ALE / JWL detonation):
         #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
         #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
