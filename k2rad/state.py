@@ -455,6 +455,43 @@ class PrescribedMotionSet:
 
 
 @dataclass
+class LoadNode:
+    """*LOAD_NODE_POINT / *LOAD_NODE_SET — concentrated nodal force/moment
+    → /CLOAD. DOF 1/2/3 = force along x/y/z, 5/6/7 = moment about x/y/z
+    (4/8 are follower loads, which have no /CLOAD equivalent)."""
+    nsid: int           # node-set id (a _POINT card gets an auto single-node set)
+    dof: int
+    lcid: int
+    sf: float
+    cid: int            # local system (0 = global) → /CLOAD skew
+
+
+@dataclass
+class RigidWallPlanar:
+    """*RIGIDWALL_PLANAR[_ID] — an infinite fixed rigid plane → /RWALL/PLANE.
+
+    Card 1: nsid nsidex boxid offset birth death rwksf
+      nsid   = tracked ("slave") node set (0 = all nodes)
+      nsidex = excluded node set
+    Card 2: xt yt zt xh yh zh fric wvel
+      (xt,yt,zt) = tail point M on the wall; (xh,yh,zh) = head point M1 —
+      the outward normal points from tail to head, exactly /RWALL's M→M1.
+      fric: 0 = frictionless sliding, 0<fric<1 = Coulomb friction,
+      fric ≥ 1 = no sliding (LS-DYNA "stick") → Slide 0 / 2 / 1.
+    """
+    rwid: int
+    title: str
+    nsid: int
+    nsidex: int
+    xt: float; yt: float; zt: float
+    xh: float; yh: float; zh: float
+    fric: float = 0.0
+    birth: float = 0.0
+    death: float = 0.0
+    offset: float = 0.0
+
+
+@dataclass
 class LoadRigidBody:
     """*LOAD_RIGID_BODY — force/moment applied to a rigid body part."""
     pid: int            # rigid body part ID

@@ -404,11 +404,16 @@ def convert(
     _report(0.97, "Writing engine deck")
     engine_text  = build_engine(state)
 
-    # 4. Write files
+    # 4. Write files. utf-8 regardless of locale (an ASCII/C locale would
+    # UnicodeEncodeError on a non-ASCII part title); create the output
+    # directory when the stem points into one that does not exist yet.
     _report(0.98, "Saving files")
-    with open(starter_path, "w", newline="\n") as fh:
+    out_dir = Path(starter_path).parent
+    if out_dir and not out_dir.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
+    with open(starter_path, "w", newline="\n", encoding="utf-8") as fh:
         fh.write(starter_text)
-    with open(engine_path, "w", newline="\n") as fh:
+    with open(engine_path, "w", newline="\n", encoding="utf-8") as fh:
         fh.write(engine_text)
 
     # 5. Auto-save warnings/skips for later investigation (large decks scroll the

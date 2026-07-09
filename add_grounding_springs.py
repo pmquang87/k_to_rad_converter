@@ -98,6 +98,13 @@ def build_spring_block(node_id, xyz, ky, kz, *, ground_node, grnod, bcs,
     ]
     b += dof(0.0) + dof(ky) + dof(kz) + dof(0.0) + dof(0.0) + dof(0.0)  # X Y Z RX RY RZ
     b += [
+        # Closing ISRATE card — without it the SPR_GENE reader overruns into
+        # the following /PART (starter WARNING 100217 "card is missing"); same
+        # fix the integrated writer got for its /PROP/TYPE8 block.
+        "#  Fsmooth                Fcut",
+        i10(0) + f20(0.0),
+    ]
+    b += [
         f"/PART/{part}", "soft_ground_spring_part", i10(prop) + i10(0) + i10(0),
         f"/SPRING/{part}", "# sprg_ID  node_ID1  node_ID2",
         i10(elem) + i10(node_id) + i10(ground_node),

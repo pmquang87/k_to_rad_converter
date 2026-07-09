@@ -1207,6 +1207,18 @@ def handle_control_timestep(block: Block, state: ConversionState) -> None:
 
 
 def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) -> None:
+    _handle_boundary_prescribed_motion(block, state, is_node=False)
+
+
+def handle_boundary_prescribed_motion_node(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_PRESCRIBED_MOTION_NODE — same card as _SET with a node id in
+    field 1; wrapped in an auto-created single-node set and sent down the _SET
+    path (→ /IMPDISP//IMPVEL//IMPACC, or /BCS when SF=0)."""
+    _handle_boundary_prescribed_motion(block, state, is_node=True)
+
+
+def _handle_boundary_prescribed_motion(block: Block, state: ConversionState,
+                                       is_node: bool) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
@@ -1222,6 +1234,10 @@ def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) 
         sf    = _ffield(f, 4, 1.0)
         death = _ffield(f, 6, 1e28)
         birth = to_float(f[7]) if len(f) > 7 else 0.0
+        if is_node:
+            nid = nsid
+            nsid = state.next_id()
+            state.node_sets[nsid] = (f"PM_node_{nid}", [nid])
         state.prescribed_motion_sets.append(
             PrescribedMotionSet(nsid, dof, vad, lcid, sf, death, birth)
         )
@@ -2339,7 +2355,7 @@ HANDLERS = {
     "BOUNDARY_SPC":                           handle_boundary_spc_node,
     "BOUNDARY_PRESCRIBED_MOTION_RIGID":       handle_boundary_prescribed_motion_rigid,
     "BOUNDARY_PRESCRIBED_MOTION_SET":         handle_boundary_prescribed_motion_set,
-    "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
+    "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_boundary_prescribed_motion_node,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
     "INITIAL_DETONATION":                     handle_initial_detonation,

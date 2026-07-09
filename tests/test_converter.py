@@ -6351,5 +6351,50 @@ class BilinearHardeningSlopeTests(unittest.TestCase):
         self.assertNotIn("21350", starter)
 
 
+class HexaMassDecompositionTests(unittest.TestCase):
+    def test_hexa_tets_cover_full_volume(self):
+        from modal_solve import _HEXA_TETS, _tet_volume
+        cube = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+                (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+        vol = sum(_tet_volume(*(cube[i] for i in t)) for t in _HEXA_TETS)
+        self.assertAlmostEqual(vol, 1.0, places=12)
+        # every tet must be non-degenerate
+        for t in _HEXA_TETS:
+            self.assertGreater(_tet_volume(*(cube[i] for i in t)), 0.0)
+
+
+class GroundingSpringScriptTests(unittest.TestCase):
+    def test_prop_type8_block_is_closed(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from add_grounding_springs import build_spring_block
+        block = build_spring_block(
+            1, ("0.0", "0.0", "0.0"), 100.0, 100.0, ground_node=88000001,
+            grnod=88000010, bcs=88000011, prop=8001, part=8002, elem=8003)
+        prop = block.split("/PROP/TYPE8/8001")[1].split("/PART/")[0]
+        self.assertIn("Fsmooth", prop)
+        data_cards = [ln for ln in prop.splitlines()
+                      if ln.strip() and not ln.startswith(("#", "/"))]
+        # title + Mass/Inertia + 6 DOFs × 3 + closing Fsmooth/Fcut = 21
+        self.assertEqual(len(data_cards), 21)
+        self.assertRegex(data_cards[-1], r"^\s+0\s+0(\.0)?$")
+
+
+class OutputRobustnessTests(unittest.TestCase):
+    def test_output_stem_in_new_directory(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "deck.k")
+        with open(path, "w") as fh:
+            fh.write(TINY_K)
+        stem = os.path.join(tmp.name, "does", "not", "exist", "run")
+        result = convert(path, stem, write_log=False)
+        self.assertTrue(os.path.isfile(result.starter_path))
+
+    def test_non_ascii_title_written_as_utf8(self):
+        deck = TINY_K.replace("shell part", "Träger schön")
+        result, starter = _convert_string_deck(deck)
+        self.assertIn("Träger schön", starter)
+
+
 if __name__ == "__main__":
     unittest.main()
