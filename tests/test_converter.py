@@ -633,8 +633,23 @@ class ForceTransducerTests(unittest.TestCase):
     def test_emits_inter_sub_with_parent(self):
         _, starter = self._convert(TRANSDUCER_K)
         self.assertIn("/INTER/SUB/", starter)
-        # A real parent /INTER/TYPE7 must also be present for the sub to attach to.
-        self.assertIn("/INTER/TYPE7/", starter)
+        # A real parent contact interface must also be present for the sub to attach
+        # to — an explicit *CONTACT_AUTOMATIC_SINGLE_SURFACE now emits /INTER/TYPE25.
+        self.assertIn("/INTER/TYPE25/", starter)
+
+    def test_explicit_single_surface_is_type25_self_contact(self):
+        # *CONTACT_AUTOMATIC_SINGLE_SURFACE (surfa=0) in an EXPLICIT deck → native-
+        # style /INTER/TYPE25 self-impact over one all-parts /SURF/PART/EXT surface
+        # (symmetric self-contact), NOT the implicit TYPE7 node→surface — the latter
+        # is an asymmetric ~half-model contact that lets the driven part blow through
+        # in explicit dynamics. See writer._emit_inter_type25_self.
+        result, starter = self._convert(TRANSDUCER_K)
+        self.assertIn("/INTER/TYPE25/", starter)
+        self.assertNotIn("/INTER/TYPE7/", starter)
+        self.assertIn("/SURF/PART/EXT/", starter)
+        self.assertTrue(any("explicit analysis" in w and "TYPE25" in w
+                            for w in result.warnings),
+                        f"no explicit-TYPE25 warning in {result.warnings}")
 
     def test_emits_th_inter_for_force_output(self):
         _, starter = self._convert(TRANSDUCER_K)
@@ -3310,7 +3325,7 @@ class IgnoreToInactiTests(unittest.TestCase):
         deck = DEFDEF_K.replace("*CONTROL_IMPLICIT_GENERAL\n         1      0.01\n", "")
         result, starter, _ = self._convert(deck)
         self.assertEqual(self._inter_inacti(starter, 9), "5")
-        self.assertTrue(any("ignore=0 mapped to /INTER/TYPE7 Inacti=5" in w
+        self.assertTrue(any("ignore=0 mapped to Inacti=5" in w
                             for w in result.warnings),
                         f"no ignore=0 mapping warning in {result.warnings}")
 
@@ -5359,13 +5374,13 @@ class DatabaseNcforcTests(unittest.TestCase):
 
     def test_ncforc_without_transducer_lists_contact_interface(self):
         # Drop the transducer: /TH/INTER must still appear, listing the
-        # /INTER/TYPE7 converted from *CONTACT_AUTOMATIC_SINGLE_SURFACE.
+        # /INTER/TYPE25 converted from *CONTACT_AUTOMATIC_SINGLE_SURFACE (explicit).
         base = TRANSDUCER_K.replace(
             "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
             "")
         _r, starter, _e = self._convert(self._with_ncforc(base))
         lines = starter.splitlines()
-        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE7/"))
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/INTER/TYPE25/"))
         inter_id = int(lines[i].rsplit("/", 1)[1])
         self.assertEqual(self._th_inter_ids(starter), [inter_id])
 

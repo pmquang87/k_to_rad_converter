@@ -1852,6 +1852,27 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         if c.ssid == 0:
             if not all_deformable_nodes or not all_pids:
                 continue
+            if not state.is_implicit:
+                # EXPLICIT: surfa=0 self-contact → native-style /INTER/TYPE25 over ONE
+                # all-parts surface (self-impact). The TYPE7 node→surface path (below)
+                # makes only the deformable nodes secondary against a master surface —
+                # an asymmetric ~half-model contact that the native reader does NOT
+                # produce; in explicit dynamics the driven part blows through it and the
+                # model flies apart. TYPE25 self-contact reproduces the native scope and
+                # holds the load path. Kept TYPE7 only for implicit (validated recipe).
+                state.warn(
+                    f"*CONTACT_AUTOMATIC_SINGLE_SURFACE {c.inter_id}: explicit analysis "
+                    "→ /INTER/TYPE25 all-parts self-contact (matches the native "
+                    "OpenRadioss reader; TYPE7 node→surface is kept for implicit only)."
+                )
+                self_surf = state.next_id()
+                lines += _emit_surf_part(self_surf, f"contact_{c.inter_id}_self", all_pids)
+                lines += _emit_inter_type25_self(
+                    c.inter_id, c.title, self_surf, c.fs,
+                    _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0),
+                    _stfac_for(state, c.sfs, c.inter_id) or 1.0)
+                continue
+            # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_id()
             mast_surf = state.next_id()
             lines += _emit_grnod_node(slav_grnod, f"contact_{c.inter_id}_slave", all_deformable_nodes)
@@ -2177,7 +2198,7 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
     """
     if ignore in (1, 2):
         state.warn(
-            f"CONTACT {inter_id}: ignore={ignore} mapped to /INTER/TYPE7 Inacti=5 "
+            f"CONTACT {inter_id}: ignore={ignore} mapped to Inacti=5 "
             "(variable gap = gap0 - initial penetration; contact stays active, no "
             "t=0 force spike). Matches LS-DYNA 'ignore initial penetration' intent "
             "and keeps load-path nodes active (was Inacti=1, which deletes them)."
@@ -2193,7 +2214,7 @@ def _ignore_to_inacti(ignore: int, state: ConversionState, inter_id: int,
         )
         return 0
     state.warn(
-        f"CONTACT {inter_id}: ignore=0 mapped to /INTER/TYPE7 Inacti=5. LS-DYNA "
+        f"CONTACT {inter_id}: ignore=0 mapped to Inacti=5. LS-DYNA "
         "removes initial penetrations at initialization (moves nodes; no t=0 "
         "force) — Inacti=0 would instead apply the full penalty force to every "
         "initially penetrated node at cycle 0 and can inject huge kinetic "
@@ -2290,6 +2311,37 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
         "         0         0                   0         2         0",
+        HDR,
+    ]
+
+
+def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
+                            inacti: int = 5, stfac: float = 1.0) -> List[str]:
+    """*CONTACT_AUTOMATIC_SINGLE_SURFACE → /INTER/TYPE25 self-contact (explicit).
+
+    surf_id is ONE surface (surf_ID1); surf_ID2=0 → self-impact, so every segment
+    of the surface contacts every node of the same surface (symmetric). This is
+    how the native OpenRadioss reader converts ASS; the TYPE7 node-group→surface
+    k2rad emits otherwise is an asymmetric ~half-model contact whose driven part
+    blows through, flying the model apart in explicit dynamics. Params match the
+    native TYPE25 echo: Istf=4, Igap=2, Iedge=1000 (no edge), Inacti from ignore,
+    Stfac, Coulomb Fric.
+    """
+    return [
+        f"/INTER/TYPE25/{inter_id}",
+        title or f"CONTACT_{inter_id}",
+        "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2                Idel     Iedge    IPSTIF",
+        f"{_i(surf_id)}         0         4         0         2         0                   2      1000         0",
+        "# grnd_IDs                     Gap_scale          %mesh_size           Gap_max_s           Gap_max_m",
+        "         0                           1.0                   0                1e30                1e30",
+        "#              Stmin               Stmax     Igap0    Ishape          Edge_angle          STFAC_MDT",
+        "                   0                1e30      1000         0                   0                   0",
+        "#              Stfac                Fric           Tpressfit              Tstart               Tstop",
+        f"{_f(stfac)}{_f(fric)}                   0                   0                   0",
+        "#      IBC               IVIS2    Inacti                VISs    Ithick                          Pmax",
+        f"       000                   0{_i(inacti)}                0.05         0                             0",
+        "#    Ifric    Ifiltr               Xfreq             sens_ID              DTSTIF             fric_ID",
+        "         0         0                   0                   0                   0                   0",
         HDR,
     ]
 
