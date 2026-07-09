@@ -195,10 +195,13 @@ def _tet_volume(p1, p2, p3, p4) -> float:
     return abs(det) / 6.0
 
 
-# Hexa8 split into 6 tets (corner-based decomposition; exact for any hexa
-# whose faces are planar, standard approximation otherwise).
-_HEXA_TETS = ((0, 1, 3, 4), (1, 2, 3, 4), (2, 6, 3, 4),
-              (1, 5, 2, 4), (5, 6, 2, 4), (5, 4, 6, 7))
+# Hexa8 split into 6 tets fanned around the 0-6 body diagonal (exact for any
+# hexa whose faces are planar, standard approximation otherwise). NOTE: an
+# earlier corner-based table ended with tet (5,4,6,7) — the four TOP-FACE
+# corners, which are coplanar (zero volume) — so every hexa's volume/mass came
+# out 5/6 of the true value (+9.5% bias on hexa-model eigenfrequencies).
+_HEXA_TETS = ((0, 1, 2, 6), (0, 2, 3, 6), (0, 3, 7, 6),
+              (0, 7, 4, 6), (0, 4, 5, 6), (0, 5, 1, 6))
 
 
 def _material_rho(state: ConversionState) -> Dict[int, float]:

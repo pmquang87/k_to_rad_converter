@@ -20,6 +20,7 @@ from .state import (
     MatAddErosion, ConstrainedNodeSet,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
+    LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
@@ -75,12 +76,29 @@ def _card(raw: List[str], idx: int, fixed: bool = False, n: int = 8, w: int = 10
         return []
     line = raw[idx]
     if fixed:
-        return parse_fixed(line, n, w)
+        fields = parse_fixed(line, n, w)
+        # A genuinely fixed-format field never has whitespace or a comma INSIDE
+        # it — if one does (e.g. the free-format cards "1 1 1" or "1,2,3"
+        # slicing to ["1 1 1", ...] / ["1,2,3", ...]), the card is free-format
+        # written narrower than the field width, and slicing it silently
+        # corrupts every value. Fall back to a free split.
+        if any(" " in x.strip() or "," in x for x in fields):
+            tokens = parse_free(line)
+            if tokens:
+                return tokens + [""] * max(0, n - len(tokens))
+        return fields
     tokens = parse_free(line)
     # Fall back to fixed-width if whitespace-split yields too few tokens
     if len(tokens) < max(2, n // 2):
         return parse_fixed(line, n, w)
     return tokens
+
+
+def _ffield(f: List[str], i: int, default: float) -> float:
+    """Float field with an LS-DYNA non-zero default: fixed-format cards always
+    slice to n fields, so a BLANK field must fall back to *default* by content
+    (``to_float("")`` would silently turn e.g. a default SF=1.0 into 0.0)."""
+    return to_float(f[i]) if len(f) > i and f[i].strip() else default
 
 
 def _element_mass_card(line: str) -> List[str]:
@@ -172,7 +190,9 @@ def handle_node(block: Block, state: ConversionState) -> None:
 def handle_element_shell(block: Block, state: ConversionState) -> None:
     for line in block.raw:
         f = [x for x in _elem_fields(line, 10) if x]   # eid pid n1..n8
-        if len(f) < 6:
+        # 5 fields = eid pid n1 n2 n3: a triangle whose blank trailing N4
+        # column was dropped — legal fixed-format output, keep it.
+        if len(f) < 5:
             continue
         eid = to_int(f[0])
         pid = to_int(f[1])
@@ -240,7 +260,9 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
 def handle_element_beam(block: Block, state: ConversionState) -> None:
     for line in block.raw:
         f = [x for x in _elem_fields(line, 5) if x]
-        if len(f) < 5:
+        # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
+        # so 4 fields (eid pid n1 n2) is a complete card.
+        if len(f) < 4:
             continue
         eid, pid = to_int(f[0]), to_int(f[1])
         n1, n2 = to_int(f[2]), to_int(f[3])
@@ -253,18 +275,24 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_part(block: Block, state: ConversionState) -> None:
-    """*PART always has a title line as raw[0], data as raw[1]."""
+    """*PART: (title card, data card) pairs — the pair may REPEAT inside one
+    keyword block, so parse every pair, not just the first."""
     raw = block.raw
-    title = raw[0].strip() if raw else ""
     if len(raw) < 2:
+        title = raw[0].strip() if raw else ""
         state.warn(f"*PART missing data card – skipped (title='{title}')")
         return
-    # Data card: pid secid mid eosid hgid grav adpopt tmid
-    f = _card(raw, 1, fixed=True, n=8, w=10)
-    pid   = to_int(f[0])
-    secid = to_int(f[1])
-    mid   = to_int(f[2])
-    state.parts[pid] = PartData(pid, title, secid, mid)
+    for i in range(0, len(raw) - 1, 2):
+        title = raw[i].strip()
+        # Data card: pid secid mid eosid hgid grav adpopt tmid
+        f = _card(raw, i + 1, fixed=True, n=8, w=10)
+        pid   = to_int(f[0])
+        secid = to_int(f[1])
+        mid   = to_int(f[2])
+        if pid <= 0:
+            state.warn(f"*PART: data card with no part id – skipped (title='{title}')")
+            continue
+        state.parts[pid] = PartData(pid, title, secid, mid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,6 +400,54 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
     state.mat_plas_tab[mid] = mat
 
 
+def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> None:
+    """*MAT_SIMPLIFIED_JOHNSON_COOK (MAT_098) → /MAT/LAW36 with a sampled
+    hardening curve.
+
+    Card 1: mid ro e pr vp
+    Card 2: a b n c psfail sigmax sigsat epso
+    Yield stress σ(εp) = A + B·εpⁿ (capped at SIGMAX when given) is sampled
+    into an auto-generated LAW36 yield table — the card layout shares NOTHING
+    with MAT_024, so it must not go through that handler. The strain-rate
+    term (1 + C·ln ε̇*) has no LAW36 equivalent here and is dropped with a
+    warning when C is nonzero.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0])
+    rho = to_float(f1[1])
+    E   = to_float(f1[2])
+    nu  = to_float(f1[3])
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    a      = to_float(f2[0]) if f2 else 0.0
+    b      = to_float(f2[1]) if len(f2) > 1 else 0.0
+    n_exp  = to_float(f2[2]) if len(f2) > 2 else 0.0
+    c      = to_float(f2[3]) if len(f2) > 3 else 0.0
+    psfail = _ffield(f2, 4, 1e17)      # blank = no failure (LS-DYNA 1e17)
+    sigmax = to_float(f2[5]) if len(f2) > 5 else 0.0
+
+    eps_samples = [0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05,
+                   0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
+    eps_pts: List[float] = []
+    es_pts: List[float] = []
+    for e in eps_samples:
+        s = a + (b * (e ** n_exp) if b != 0.0 and e > 0.0 else 0.0)
+        if sigmax > 0.0:
+            s = min(s, sigmax)
+        eps_pts.append(e)
+        es_pts.append(s)
+    if c != 0.0:
+        state.warn(
+            f"*MAT_SIMPLIFIED_JOHNSON_COOK mid={mid}: the strain-rate term "
+            f"(1 + {c:g}·ln ε̇*) has no /MAT/LAW36 mapping here — converted "
+            "rate-independent (quasi-static hardening only).")
+    fail = psfail if psfail < 1e16 else 0.0
+    state.mat_plas_tab[mid] = MatPlasTAB(
+        mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts)
+
+
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -417,11 +493,14 @@ def handle_mat_null(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
+    # Card: mid ro pc mu terod cerod ym pr — the Young's modulus / Poisson ratio
+    # used for the (shell) contact stiffness sit in fields 7-8, NOT 3-4 (those
+    # are the pressure cutoff and viscosity).
     f1  = _card(raw, offset, fixed=True, n=8, w=10)
     mid = to_int(f1[0])
     rho = to_float(f1[1])
-    E   = to_float(f1[2]) if len(f1) > 2 else 0.0
-    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    E   = to_float(f1[6]) if len(f1) > 6 else 0.0
+    nu  = to_float(f1[7]) if len(f1) > 7 else 0.0
     state.mat_null[mid] = MatNull(mid, title, rho, E, nu)
 
 
@@ -692,11 +771,13 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
     offa = to_float(f1[4]) if len(f1) > 4 else 0.0
     offo = to_float(f1[5]) if len(f1) > 5 else 0.0
     pts: list = []
+    # LS-DYNA R16: "Abscissa value = SFA·(Defined value + OFFA)" — the offset is
+    # applied BEFORE the scale factor (same for SFO/OFFO on the ordinate).
     for line in raw[offset + 1:]:
         f = parse_free(line)
         if len(f) >= 2:
-            pts.append((to_float(f[0]) * (sfa or 1.0) + offa,
-                        to_float(f[1]) * (sfo or 1.0) + offo))
+            pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
+                        (to_float(f[1]) + offo) * (sfo or 1.0)))
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
 
 
@@ -709,9 +790,12 @@ def handle_define_coordinate_system(block: Block, state: ConversionState) -> Non
     if not data:
         return
     f1 = parse_free(data[0])
+    if not f1:
+        return
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0
     cid = to_int(f1[0])
-    xo, yo, zo = to_float(f1[1]), to_float(f1[2]), to_float(f1[3])
-    xl, yl, zl = to_float(f1[4]), to_float(f1[5]), to_float(f1[6])
+    xo, yo, zo = g1(1), g1(2), g1(3)
+    xl, yl, zl = g1(4), g1(5), g1(6)
     xp = yp = zp = 0.0
     if len(data) > 1:
         f2 = parse_free(data[1])
@@ -859,8 +943,8 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
         dof   = to_int(f[1])
         vad   = to_int(f[2])
         lcid  = to_int(f[3])
-        sf    = to_float(f[4]) if len(f) > 4 else 1.0
-        death = to_float(f[6]) if len(f) > 6 else 1e28
+        sf    = _ffield(f, 4, 1.0)
+        death = _ffield(f, 6, 1e28)
         birth = to_float(f[7]) if len(f) > 7 else 0.0
         state.prescribed_motions.append(
             PrescribedMotionRigid(pid, dof, vad, lcid, sf, death, birth)
@@ -1124,6 +1208,18 @@ def handle_control_timestep(block: Block, state: ConversionState) -> None:
 
 
 def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) -> None:
+    _handle_boundary_prescribed_motion(block, state, is_node=False)
+
+
+def handle_boundary_prescribed_motion_node(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_PRESCRIBED_MOTION_NODE — same card as _SET with a node id in
+    field 1; wrapped in an auto-created single-node set and sent down the _SET
+    path (→ /IMPDISP//IMPVEL//IMPACC, or /BCS when SF=0)."""
+    _handle_boundary_prescribed_motion(block, state, is_node=True)
+
+
+def _handle_boundary_prescribed_motion(block: Block, state: ConversionState,
+                                       is_node: bool) -> None:
     raw = block.raw
     offset = 1 if _has_id(block) else 0
     for i in range(offset, len(raw)):
@@ -1136,9 +1232,13 @@ def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) 
         dof   = to_int(f[1])
         vad   = to_int(f[2])
         lcid  = to_int(f[3])
-        sf    = to_float(f[4]) if len(f) > 4 else 1.0
-        death = to_float(f[6]) if len(f) > 6 else 1e28
+        sf    = _ffield(f, 4, 1.0)
+        death = _ffield(f, 6, 1e28)
         birth = to_float(f[7]) if len(f) > 7 else 0.0
+        if is_node:
+            nid = nsid
+            nsid = state.next_id()
+            state.node_sets[nsid] = (f"PM_node_{nid}", [nid])
         state.prescribed_motion_sets.append(
             PrescribedMotionSet(nsid, dof, vad, lcid, sf, death, birth)
         )
@@ -1401,9 +1501,133 @@ def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
         pid  = to_int(f[0])
         dof  = to_int(f[1])
         lcid = to_int(f[2])
-        sf   = to_float(f[3]) if len(f) > 3 else 1.0
+        sf   = _ffield(f, 3, 1.0)
         cid  = to_int(f[4])   if len(f) > 4 else 0
         state.load_rigid_bodies.append(LoadRigidBody(pid, dof, lcid, sf, cid))
+
+
+def handle_load_node(block: Block, state: ConversionState) -> None:
+    """*LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD (concentrated nodal load).
+
+    Card: nid/nsid dof lcid sf cid m1 m2 m3.  DOF 1/2/3 = force along global
+    x/y/z, 5/6/7 = moment about x/y/z; DOF 4/8 are follower loads with no
+    /CLOAD equivalent (warned). CID references a *DEFINE_COORDINATE_* local
+    system → /CLOAD skew.
+    """
+    is_set = block.keyword.endswith("_SET")
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 3:
+            continue
+        ref  = to_int(f[0])
+        dof  = to_int(f[1])
+        lcid = to_int(f[2])
+        sf   = _ffield(f, 3, 1.0)
+        cid  = to_int(f[4]) if len(f) > 4 else 0
+        if ref <= 0 or lcid <= 0:
+            continue
+        if dof not in (1, 2, 3, 5, 6, 7):
+            state.warn(
+                f"*LOAD_NODE_{'SET' if is_set else 'POINT'} dof={dof}: only "
+                "global forces (1-3) and moments (5-7) map to /CLOAD — "
+                "follower loads (4/8) do not; this row was skipped.")
+            continue
+        if is_set:
+            nsid = ref
+        else:
+            nsid = state.next_id()
+            state.node_sets[nsid] = (f"CLOAD_node_{ref}", [ref])
+        state.load_nodes.append(LoadNode(nsid, dof, lcid, sf, cid))
+
+
+def handle_constrained_extra_nodes(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_EXTRA_NODES_NODE/_SET — extra nodes rigidly attached to a
+    *MAT_RIGID part; merged into that part's /RBODY secondary-node group.
+
+    Card: pid nid/nsid iflag  (iflag only matters for deformable-to-rigid
+    switching, which the converter does not model).
+    """
+    is_set = block.keyword.endswith("_SET")
+    for i in range(len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=3, w=10)
+        pid = to_int(f[0])
+        ref = to_int(f[1]) if len(f) > 1 else 0
+        if pid <= 0 or ref <= 0:
+            continue
+        if is_set:
+            nids = list(state.node_sets.get(ref, ("", []))[1])
+            if not nids:
+                state.warn(
+                    f"*CONSTRAINED_EXTRA_NODES_SET pid={pid}: node set {ref} "
+                    "not found (or empty) — no extra nodes attached.")
+                continue
+        else:
+            nids = [ref]
+        state.extra_rigid_nodes.setdefault(pid, []).extend(nids)
+
+
+def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
+    """*RIGIDWALL_PLANAR[_ID] (+_FORCES) → /RWALL/PLANE.
+
+    Card 1: nsid nsidex boxid offset birth death rwksf
+    Card 2: xt yt zt xh yh zh fric wvel
+    The _MOVING/_FINITE/_ORTHO flavours change the wall's physics (extra cards
+    give it mass/velocity, a finite extent, or orthotropic friction) and are
+    dispatched to a warn-skip instead; _FORCES only appends force-output cards,
+    which /TH/RWALL replaces, so it converts like the base keyword.
+    """
+    raw = block.raw
+    offset = _title_offset(block)
+    if offset and _has_id(block):
+        rwid = to_int(parse_free(raw[0])[0]) if parse_free(raw[0]) else 0
+        title = _read_title(block)
+    else:
+        rwid, title = 0, ""
+    if rwid <= 0:
+        rwid = state.next_id()
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1:
+        state.warn("*RIGIDWALL_PLANAR: missing data card — skipped.")
+        return
+    nsid   = to_int(f1[0])
+    nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+    boxid  = to_int(f1[2]) if len(f1) > 2 else 0
+    woff   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    birth  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    death  = _ffield(f1, 5, 0.0)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if len(f2) < 6:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: missing geometry card — skipped.")
+        return
+    g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
+    fric = g(6)
+    if boxid:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BOXID has no /RWALL "
+                   "equivalent — the box limitation is ignored.")
+    if woff:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: OFFSET has no /RWALL "
+                   "equivalent — ignored.")
+    if birth > 0.0 or (0.0 < death < 1e20):
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BIRTH/DEATH have no /RWALL "
+                   "equivalent — the wall is active for the whole run.")
+    state.rigid_walls.append(RigidWallPlanar(
+        rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
+        xt=g(0), yt=g(1), zt=g(2), xh=g(3), yh=g(4), zh=g(5),
+        fric=fric, birth=birth, death=death, offset=woff))
+
+
+def handle_rigidwall_unsupported(block: Block, state: ConversionState) -> None:
+    """RIGIDWALL flavours whose extra cards change the wall's physics."""
+    state.warn(
+        f"*{block.keyword}: only the fixed infinite *RIGIDWALL_PLANAR "
+        "(+_FORCES) converts to /RWALL/PLANE — this flavour was skipped.")
+    state.skipped_keywords.append(block.keyword)
 
 
 def handle_element_mass(block: Block, state: ConversionState) -> None:
@@ -1756,17 +1980,19 @@ def handle_load_segment(block: Block, state: ConversionState) -> None:
     raw = block.raw
     # _ID variant: first line is "id  title", data starts at index 1
     data = raw[1:] if _has_id(block) else raw
-    if not data:
-        return
-    # Card: lcid sf at n1 n2 n3 n4 n5  (n5 ignored)
-    f1   = _card(data, 0, fixed=True, n=8, w=10)
-    lcid = to_int(f1[0])   if f1        else 0
-    sf   = to_float(f1[1]) if len(f1) > 1 else 1.0
-    nodes = [to_int(f1[i]) for i in range(3, min(7, len(f1)))]
-    while nodes and nodes[-1] == 0:
-        nodes.pop()
-    if len(nodes) >= 3 and lcid > 0:
-        state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
+    # One card per loaded segment; the card may REPEAT inside one keyword.
+    for i in range(len(data)):
+        if not data[i].strip():       # blank card placeholder → skip
+            continue
+        # Card: lcid sf at n1 n2 n3 n4 n5  (n5 ignored)
+        f1   = _card(data, i, fixed=True, n=8, w=10)
+        lcid = to_int(f1[0])   if f1 else 0
+        sf   = _ffield(f1, 1, 1.0)
+        nodes = [to_int(f1[j]) for j in range(3, min(7, len(f1)))]
+        while nodes and nodes[-1] == 0:
+            nodes.pop()
+        if len(nodes) >= 3 and lcid > 0:
+            state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
 
 
 def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
@@ -1852,9 +2078,11 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
     for line in raw[offset + 1:]:
         if not line.strip():
             continue
-        # Node columns are fixed I10 (LS-PrePost); floats a1..a4 follow.
-        f = parse_fixed(line, n=8, w=10)
-        nodes = [to_int(f[j]) for j in range(4)]
+        # Node columns are fixed I10 in LS-PrePost output, but free-format
+        # (space/comma) cards are equally legal — use the shared free-with-
+        # fixed-fallback parse so both survive.
+        f = _card([line], 0, fixed=True, n=8, w=10)
+        nodes = [to_int(f[j]) for j in range(min(4, len(f)))]
         while len(nodes) > 3 and nodes[-1] == 0:
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
@@ -2252,7 +2480,7 @@ HANDLERS = {
     "BOUNDARY_SPC":                           handle_boundary_spc_node,
     "BOUNDARY_PRESCRIBED_MOTION_RIGID":       handle_boundary_prescribed_motion_rigid,
     "BOUNDARY_PRESCRIBED_MOTION_SET":         handle_boundary_prescribed_motion_set,
-    "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_skip,
+    "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_boundary_prescribed_motion_node,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
     "INITIAL_DETONATION":                     handle_initial_detonation,
@@ -2266,6 +2494,16 @@ HANDLERS = {
     # Constraints
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
     "CONSTRAINED_NODAL_RIGID_BODY_SPC":       handle_constrained_nodal_rigid_body,
+    "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
+    "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
+
+    # Rigid walls
+    "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FORCES":                handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_MOVING":                handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_MOVING_FORCES":         handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_FINITE":                handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_ORTHO":                 handle_rigidwall_unsupported,
 
     # Mass / inertia additions
     "ELEMENT_MASS":                           handle_element_mass,
@@ -2357,6 +2595,8 @@ HANDLERS = {
     "LOAD_SEGMENT":                           handle_load_segment,
     "LOAD_SEGMENT_ID":                        handle_load_segment,
     "LOAD_SEGMENT_SET":                       handle_skip,
+    "LOAD_NODE_POINT":                        handle_load_node,
+    "LOAD_NODE_SET":                          handle_load_node,
     "LOAD_BODY_X":                            handle_load_body,
     "LOAD_BODY_Y":                            handle_load_body,
     "LOAD_BODY_Z":                            handle_load_body,
@@ -2367,7 +2607,7 @@ HANDLERS = {
     "MAT_ADD_EROSION":                        handle_mat_add_erosion,
     "CONSTRAINED_NODE_SET":                   handle_constrained_node_set,
     "MAT_ADD_FATIGUE":                        handle_mat_add_fatigue,
-    "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_piecewise_linear_plasticity,
+    "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_simplified_johnson_cook,
     "SET_SEGMENT":                            handle_set_segment,
 }
 
