@@ -761,20 +761,33 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
         for node in info["nodes"]:
             node_to_ind[node] = ind_node
 
+    emitted_grnods: Set[int] = set()
     for bc in state.bcs_spcs:
         nsid = bc.nsid
         raw_nids = state.node_sets.get(nsid, ("", []))[1]
-        
+
         mapped_nids = set()
         for n in raw_nids:
             if n in node_to_ind:
                 mapped_nids.add(node_to_ind[n])
             else:
                 mapped_nids.add(n)
-                
+
         if not mapped_nids:
             state.warn(f"BCS {bc.bc_id} (nsid={nsid}): all nodes mapped to empty set – skipped")
             continue
+
+        # *BOUNDARY_SPC CID: constraint acts in that local system → /BCS skew.
+        # Only reference it when a matching /SKEW is actually emitted
+        # (_make_skews writes /SKEW/<cid> for every *DEFINE_COORDINATE_*).
+        skew_id = 0
+        if bc.cid:
+            if bc.cid in state.coord_sys or bc.cid in state.coord_nodes:
+                skew_id = bc.cid
+            else:
+                state.warn(
+                    f"BCS {bc.bc_id} (nsid={nsid}): local system cid={bc.cid} "
+                    "not found — constraint applied in the GLOBAL system.")
 
         tra = _dof_string(bc.dofx, bc.dofy, bc.dofz)
         rot = _dof_string(bc.dofrx, bc.dofry, bc.dofrz)
@@ -782,9 +795,12 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
             f"/BCS/{bc.bc_id}",
             f"BC_{bc.bc_id}",
             "#  Tra rot   skew_ID  grnod_ID",
-            f"   {tra} {rot}         0{_i(nsid)}",
+            f"   {tra} {rot}{_i(skew_id)}{_i(nsid)}",
             HDR,
         ]
+        if nsid in emitted_grnods:
+            continue          # several SPC cards on one set share the /GRNOD
+        emitted_grnods.add(nsid)
         set_title = state.node_sets.get(nsid, ("", []))[0]
         lines += _emit_grnod_node(nsid, set_title or f"SET_{nsid}", sorted(mapped_nids))
     return lines
@@ -932,10 +948,14 @@ def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
     return out
 
 
-# Mid-edge node -> (corner A, corner B) of its edge, in the node order this
-# converter emits (verified empirically against the real mesh): node5=mid(1,2),
-# node6=mid(2,3), node7=mid(1,3), node8=mid(2,4), node9=mid(3,4), node10=mid(1,4).
-_TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 1, 3), (8, 2, 3), (9, 0, 3)]
+# Mid-edge node -> (corner A, corner B) of its edge, in the LS-DYNA/Abaqus/
+# Nastran 10-node tet convention (*ELEMENT_SOLID ten-node figure, R16 Vol I):
+# node5=mid(1,2), node6=mid(2,3), node7=mid(1,3),
+# node8=mid(1,4), node9=mid(2,4), node10=mid(3,4).
+# (An earlier map had nodes 8/9/10 cyclically rotated — mid(2,4)/mid(3,4)/
+# mid(1,4) — which made _snap_tet10_midsides relocate the apex mid-edge nodes
+# of every STANDARD tet10 mesh onto the wrong edges.)
+_TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 0, 3), (8, 1, 3), (9, 2, 3)]
 
 
 def _snap_tet10_midsides(state: ConversionState) -> int:
@@ -4133,6 +4153,11 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
 
 def _resolve_mat_plas_tab(state: ConversionState) -> None:
     for mat in state.mat_plas_tab.values():
+        if mat.C:
+            state.warn(
+                f"*MAT mid={mat.mid}: Cowper-Symonds strain-rate parameters "
+                f"(C={mat.C:g}, P={mat.P:g}) have no /MAT/LAW36 mapping — "
+                "converted rate-independent.")
         if mat.funct_id:
             continue
 
@@ -4150,7 +4175,12 @@ def _resolve_mat_plas_tab(state: ConversionState) -> None:
 
         else:
             sigy = mat.sigy if mat.sigy > 0 else 1.0
+            # LAW36's yield table is stress vs PLASTIC strain, while ETAN is the
+            # tangent modulus vs TOTAL strain — convert to the plastic-hardening
+            # slope H = E·ETAN/(E−ETAN) (same correction the LAW44 path applies).
             etan = mat.etan
+            if 0.0 < etan < mat.E:
+                etan = mat.E * etan / (mat.E - etan)
             pts = [(0.0, sigy), (1.0, sigy + etan)]
             fid = state.next_id()
             _add_auto_curve(state, fid, f"Auto_SY_ET_mid{mat.mid}", pts)

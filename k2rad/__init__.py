@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .parser import parse_k_file
+from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
 from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
@@ -326,6 +326,11 @@ def convert(
         if i % bstep == 0:
             _report(0.05 + 0.28 * (i / nblocks), "Building model")
     _report(0.33, "Building model")
+
+    # Parser-level warnings (missing *INCLUDE files, unapplied *INCLUDE_TRANSFORM
+    # offsets, unresolved &parameters). Collected after dispatch: handlers resolve
+    # "&name" fields lazily via to_float, which appends to this list.
+    state.warnings.extend(PARSER_WARNINGS)
 
     # 2a. Blast decks: /LOAD/PBLAST reads the /BEGIN unit labels to convert its
     #     internal {cm,g,µs} TM5-1300 data to model units, so those labels MUST

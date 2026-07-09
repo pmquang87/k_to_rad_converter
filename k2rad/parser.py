@@ -68,6 +68,101 @@ def _strip_inline_comment(line: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# *PARAMETER support
+# ─────────────────────────────────────────────────────────────────────────────
+# LS-DYNA parameters are define-before-use, so parse_k_file collects them in a
+# streaming pass (shared across *INCLUDE recursion) and to_float/to_int resolve
+# "&name" field references at conversion time. Names are case-insensitive.
+# Module-level tables: reset at the start of each top-level parse_k_file call;
+# they must SURVIVE the parse (handlers call to_float on the stored field
+# strings during dispatch, after parsing has finished).
+_PARAMS: dict = {}
+PARSER_WARNINGS: List[str] = []
+_PARAM_TYPE_CHARS = frozenset("RICric")
+
+
+def _resolve_param(token: str):
+    """Resolve a ``&name`` (or ``-&name``) field reference against _PARAMS.
+
+    Returns the parameter's value string (sign-folded), or None if *token* is
+    not a parameter reference / the name is unknown (a warning is recorded for
+    unknown names).
+    """
+    t = token.strip()
+    sign = ""
+    if t[:1] in "+-" and t[1:2] == "&":
+        sign = "-" if t[0] == "-" else ""
+        t = t[1:]
+    if not t.startswith("&"):
+        return None
+    name = t[1:].strip().lower()
+    val = _PARAMS.get(name)
+    if val is None:
+        msg = (f"*PARAMETER reference '&{name}' is undefined — "
+               "field treated as blank (0)")
+        if msg not in PARSER_WARNINGS:
+            PARSER_WARNINGS.append(msg)
+        return None
+    if sign == "-":
+        v = val.strip()
+        return v[1:] if v.startswith("-") else "-" + v
+    return val
+
+
+def _collect_parameters(kw: str, raw: List[str]) -> None:
+    """Store the name→value pairs of a *PARAMETER block in _PARAMS.
+
+    Card format (R16 Vol I): up to 4 (PRMR, VAL) pairs of 10-char fields per
+    card; PRMR's first character is the type (R real, I integer, C character).
+    Free (comma/space) format is accepted too. *PARAMETER_EXPRESSION is not
+    evaluated — a warning is recorded instead.
+    """
+    if "EXPRESSION" in kw:
+        PARSER_WARNINGS.append(
+            "*PARAMETER_EXPRESSION is not evaluated — its parameters stay "
+            "undefined; fields referencing them parse as 0")
+        return
+
+    def _is_number(tok: str) -> bool:
+        return to_float(tok, float("nan")) == to_float(tok, float("nan"))
+
+    for line in raw:
+        if not line.strip():
+            continue
+        pairs: List[tuple] = []
+        if "," not in line:
+            # Fixed format (the standard): (A10, A10) pairs — PRMR is the type
+            # char (R/I/C) followed by the name, VAL the value. Keep only pairs
+            # whose value field really is a number (guards against a free-format
+            # line that happens to slice weirdly).
+            fields = parse_fixed(line, n=8, w=10)
+            for i in range(0, 8, 2):
+                prmr, val = fields[i], fields[i + 1]
+                if prmr and val and prmr[:1] in _PARAM_TYPE_CHARS and _is_number(val):
+                    pairs.append((prmr[1:], val))
+        if not pairs:
+            # Free (comma/space) format: either "R name value ..." with the
+            # type char as its own token, or glued "Rname value ...".
+            toks = [t for t in parse_free(line) if t]
+            i = 0
+            while i < len(toks) - 1:
+                if (len(toks[i]) == 1 and toks[i] in _PARAM_TYPE_CHARS
+                        and i + 2 < len(toks) and _is_number(toks[i + 2])):
+                    pairs.append((toks[i + 1], toks[i + 2]))
+                    i += 3
+                elif (len(toks[i]) > 1 and toks[i][:1] in _PARAM_TYPE_CHARS
+                        and _is_number(toks[i + 1])):
+                    pairs.append((toks[i][1:], toks[i + 1]))
+                    i += 2
+                else:
+                    i += 1
+        for name, val in pairs:
+            name = name.strip().lower()
+            if name:
+                _PARAMS[name] = val.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main parser
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -81,6 +176,13 @@ def parse_k_file(path: str, _depth: int = 0,
     """
     if _depth > 50:
         return []
+
+    if _depth == 0:
+        # Fresh top-level parse: reset the *PARAMETER table and warning list.
+        # Both persist after the parse — handlers resolve "&name" fields via
+        # to_float/to_int during dispatch, and convert() collects the warnings.
+        _PARAMS.clear()
+        PARSER_WARNINGS.clear()
 
     base_dir = os.path.dirname(os.path.abspath(path))
     blocks: List[Block] = []
@@ -109,13 +211,40 @@ def parse_k_file(path: str, _depth: int = 0,
         # use the first non-blank entry as the filename/path argument.
         nonblank = [r for r in raw if r.strip()]
 
-        if kw in ("INCLUDE", "INCLUDE_TRANSFORM"):
-            if nonblank:
-                inc_path = _resolve(nonblank[0])
+        if kw == "INCLUDE":
+            # One filename per card; a single *INCLUDE may list several files.
+            for fname in nonblank:
+                inc_path = _resolve(fname)
                 if os.path.isfile(inc_path):
                     blocks.extend(parse_k_file(inc_path, _depth + 1, include_path))
                 else:
                     print(f"  [INCLUDE] WARNING: file not found: {inc_path}", file=sys.stderr)
+                    PARSER_WARNINGS.append(f"*INCLUDE file not found: {inc_path}")
+
+        elif kw == "INCLUDE_TRANSFORM":
+            # Card 1 is the filename; cards 2+ carry ID offsets / scale factors /
+            # TRANID, none of which are applied here. Including the file
+            # untransformed is only safe when those cards are all zero/blank,
+            # so warn loudly whenever any of them carries a nonzero value.
+            if nonblank:
+                inc_path = _resolve(nonblank[0])
+                extras = " ".join(nonblank[1:]).replace("0", "").replace(".", "")
+                if extras.strip():
+                    PARSER_WARNINGS.append(
+                        f"*INCLUDE_TRANSFORM {nonblank[0]}: ID offsets / scale "
+                        "factors / TRANID are NOT applied — the file is included "
+                        "untransformed. Verify IDs do not collide and the "
+                        "transformation is not load-bearing.")
+                if os.path.isfile(inc_path):
+                    blocks.extend(parse_k_file(inc_path, _depth + 1, include_path))
+                else:
+                    print(f"  [INCLUDE] WARNING: file not found: {inc_path}", file=sys.stderr)
+                    PARSER_WARNINGS.append(f"*INCLUDE_TRANSFORM file not found: {inc_path}")
+
+        elif kw.startswith("PARAMETER"):
+            # *PARAMETER / *PARAMETER_LOCAL / *PARAMETER_EXPRESSION — collect
+            # name→value pairs for "&name" field resolution (define-before-use).
+            _collect_parameters(kw, raw)
 
         elif kw == "INCLUDE_PATH":
             if nonblank:
@@ -181,8 +310,21 @@ def parse_fixed(line: str, n: int = 8, w: int = 10) -> List[str]:
 
 
 def parse_free(line: str) -> List[str]:
-    """Whitespace-split, stripping inline $ comments first."""
-    return _strip_inline_comment(line).split()
+    """Split a free-format card into fields, stripping inline $ comments first.
+
+    LS-DYNA free format delimits fields with commas and/or whitespace; two
+    consecutive commas hold an EMPTY field in its position (meaning "use the
+    default"), so comma-split segments are preserved even when blank, while
+    whitespace inside a segment splits further without empties.
+    """
+    data = _strip_inline_comment(line)
+    if "," not in data:
+        return data.split()
+    tokens: List[str] = []
+    for part in data.split(","):
+        sub = part.split()
+        tokens.extend(sub if sub else [""])
+    return tokens
 
 
 # Fortran/LS-DYNA fixed-format numbers often drop the 'E' from the exponent so
@@ -210,6 +352,16 @@ def to_float(s: str, default: float = 0.0) -> float:
     t = s.strip()
     if not t:
         return default
+    # *PARAMETER reference: &name (or -&name) → the parameter's value
+    if "&" in t[:2]:
+        resolved = _resolve_param(t)
+        if resolved is None:
+            return default
+        t = resolved
+        try:
+            return float(t)
+        except (ValueError, TypeError):
+            pass
     # Fortran double-precision exponent marker: 1.5D-9 → 1.5E-9
     t = t.replace("D", "E").replace("d", "e")
     # Restore the dropped 'E' on E-less exponents: 7.85000-9 → 7.85000E-9

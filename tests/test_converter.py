@@ -6076,5 +6076,280 @@ class EngineRestartTests(unittest.TestCase):
         self.assertNotIn("/RFILE", self._engine(write_restart=True))
 
 
+def _state_from_deck(deck: str) -> ConversionState:
+    """Parse+dispatch a deck given as a string; returns the filled state."""
+    tmp = tempfile.TemporaryDirectory()
+    path = os.path.join(tmp.name, "deck.k")
+    with open(path, "w") as fh:
+        fh.write(deck)
+    state = ConversionState()
+    for block in parse_k_file(path):
+        dispatch(block, state)
+    tmp.cleanup()
+    return state
+
+
+class FreeFormatParsingTests(unittest.TestCase):
+    """LS-DYNA comma-delimited free format must parse everywhere."""
+
+    def test_parse_free_commas(self):
+        self.assertEqual(parse_free("1,10.0,20.0,30.0"),
+                         ["1", "10.0", "20.0", "30.0"])
+        # consecutive commas hold an EMPTY field in position
+        self.assertEqual(parse_free("1,,3"), ["1", "", "3"])
+        # mixed comma/space delimiters
+        self.assertEqual(parse_free("10, 20 30"), ["10", "20", "30"])
+
+    def test_comma_format_nodes_and_material(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*NODE\n1,10.0,20.0,30.0\n2,1.5,2.5,3.5\n"
+            "*MAT_ELASTIC\n7,7.85e-9,210000.0,0.3\n*END\n")
+        self.assertEqual(len(state.nodes), 2)
+        self.assertAlmostEqual(state.nodes[1].y, 20.0)
+        self.assertIn(7, state.mat_elastic)
+        self.assertAlmostEqual(state.mat_elastic[7].E, 210000.0)
+        self.assertAlmostEqual(state.mat_elastic[7].nu, 0.3)
+
+    def test_free_format_part_card(self):
+        # A *PART data card written "1 1 1" must not be fixed-sliced to pid 0.
+        state = _state_from_deck(
+            "*KEYWORD\n*PART\nfree part\n1 1 1\n*END\n")
+        self.assertIn(1, state.parts)
+        self.assertEqual(state.parts[1].secid, 1)
+        self.assertEqual(state.parts[1].mid, 1)
+
+    def test_free_format_set_segment(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*SET_SEGMENT\n1\n1 2 3 4\n5 6 7 8\n*END\n")
+        self.assertEqual(state.segment_sets[1].segments,
+                         [[1, 2, 3, 4], [5, 6, 7, 8]])
+
+
+class IncludeHandlingTests(unittest.TestCase):
+    def _dir(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return tmp.name
+
+    def test_multiple_include_files(self):
+        d = self._dir()
+        with open(os.path.join(d, "a.k"), "w") as fh:
+            fh.write("*MAT_ELASTIC\n         1   7.85e-9    210000       0.3\n")
+        with open(os.path.join(d, "b.k"), "w") as fh:
+            fh.write("*MAT_ELASTIC\n         2   7.85e-9    210000       0.3\n")
+        main = os.path.join(d, "m.k")
+        with open(main, "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE\na.k\nb.k\n*END\n")
+        kws = [b.keyword for b in parse_k_file(main)]
+        self.assertEqual(kws.count("MAT_ELASTIC"), 2)
+
+    def test_include_transform_warns_when_transform_nonzero(self):
+        from k2rad.parser import PARSER_WARNINGS
+        d = self._dir()
+        with open(os.path.join(d, "c.k"), "w") as fh:
+            fh.write("*NODE\n         1             0.0             0.0             0.0\n")
+        main = os.path.join(d, "m.k")
+        with open(main, "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nc.k\n"
+                     "      1000\n*END\n")
+        blocks = parse_k_file(main)
+        self.assertIn("NODE", [b.keyword for b in blocks])
+        self.assertTrue(any("INCLUDE_TRANSFORM" in w for w in PARSER_WARNINGS))
+
+
+class ParameterSubstitutionTests(unittest.TestCase):
+    def test_fixed_format_parameters_resolve(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*PARAMETER\n"
+            + "R endtim  " + "      0.05" + "Isteps    " + "       200" + "\n"
+            + "*CONTROL_TERMINATION\n&endtim\n*END\n")
+        self.assertIsNotNone(state.ctrl_termination)
+        self.assertAlmostEqual(state.ctrl_termination.endtim, 0.05)
+
+    def test_free_format_and_negation(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*PARAMETER\nR accel, 9810.0\n"
+            "*DEFINE_CURVE\n         9\n0.0,0.0\n1.0,-&accel\n*END\n")
+        self.assertEqual(state.curves[9].pts[1], (1.0, -9810.0))
+
+    def test_unresolved_parameter_warns(self):
+        result, _ = _convert_string_deck(
+            TINY_K.replace("*CONTROL_TERMINATION\n       1.0",
+                           "*CONTROL_TERMINATION\n&nodef"))
+        self.assertTrue(any("undefined" in w and "&nodef" in w
+                            for w in result.warnings))
+
+
+class CurveOffsetScaleOrderTests(unittest.TestCase):
+    def test_offset_applied_before_scale(self):
+        # LS-DYNA: X = SFA·(x + OFFA), Y = SFO·(y + OFFO)
+        state = _state_from_deck(
+            "*KEYWORD\n*DEFINE_CURVE\n"
+            "         7         0       2.0       3.0       1.0      10.0\n"
+            "                 1.0                 1.0\n*END\n")
+        self.assertEqual(state.curves[7].pts, [(4.0, 33.0)])
+
+
+class HandlerCardLayoutTests(unittest.TestCase):
+    def test_mat_null_reads_ym_pr_columns(self):
+        # Card: mid ro pc mu terod cerod ym pr
+        state = _state_from_deck(
+            "*KEYWORD\n*MAT_NULL\n"
+            "         9    1.0e-9    -1.0e6     0.001       0.0       0.0"
+            "     2.0e3      0.30\n*END\n")
+        self.assertAlmostEqual(state.mat_null[9].E, 2000.0)
+        self.assertAlmostEqual(state.mat_null[9].nu, 0.30)
+
+    def test_multi_part_block(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*PART\npart one\n"
+            "         1         1         1\npart two\n"
+            "         2         2         2\npart three\n"
+            "         3         3         3\n*END\n")
+        self.assertEqual(sorted(state.parts), [1, 2, 3])
+        self.assertEqual(state.parts[2].title, "part two")
+
+    def test_load_segment_multiple_cards(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*LOAD_SEGMENT\n"
+            "         5       1.0       0.0         1         2         3         4\n"
+            "         5       1.0       0.0         2         5         6         3\n"
+            "*END\n")
+        self.assertEqual(len(state.pressure_loads), 2)
+        self.assertEqual(state.pressure_loads[1].nodes, [2, 5, 6, 3])
+
+    def test_blank_sf_defaults_to_one(self):
+        # SF column blank on prescribed motions / rigid-body loads = 1.0
+        state = _state_from_deck(
+            "*KEYWORD\n*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+            "         3         1         2         7\n"
+            "*BOUNDARY_PRESCRIBED_MOTION_RIGID\n"
+            "         4         1         0         8\n"
+            "*LOAD_RIGID_BODY\n"
+            "         4         3         9\n*END\n")
+        self.assertAlmostEqual(state.prescribed_motion_sets[0].sf, 1.0)
+        self.assertAlmostEqual(state.prescribed_motion_sets[0].death, 1e28)
+        self.assertAlmostEqual(state.prescribed_motions[0].sf, 1.0)
+        self.assertAlmostEqual(state.load_rigid_bodies[0].sf, 1.0)
+
+    def test_triangle_shell_and_two_node_beam_kept(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*ELEMENT_SHELL\n"
+            "       1       1       1       2       3\n"
+            "*ELEMENT_BEAM\n"
+            "      10       2     101     102\n*END\n")
+        self.assertEqual(len(state.shell_elems), 1)
+        self.assertEqual(state.shell_elems[0].nodes, [1, 2, 3])
+        self.assertEqual(len(state.beam_elems), 1)
+        self.assertEqual(state.beam_elems[0].n3, 0)
+
+    def test_define_coordinate_system_short_card(self):
+        # trailing XL/YL/ZL blank (default 0) must not crash
+        state = _state_from_deck(
+            "*KEYWORD\n*DEFINE_COORDINATE_SYSTEM\n"
+            "4 1.0 2.0 3.0\n*END\n")
+        self.assertIn(4, state.coord_sys)
+        self.assertAlmostEqual(state.coord_sys[4].zo, 3.0)
+
+    def test_simplified_johnson_cook_mapping(self):
+        state = _state_from_deck(
+            "*KEYWORD\n*MAT_SIMPLIFIED_JOHNSON_COOK\n"
+            "         3   7.85e-9    210000       0.3       1.0\n"
+            "     350.0     275.0      0.36     0.022\n*END\n")
+        mat = state.mat_plas_tab[3]
+        self.assertAlmostEqual(mat.sigy, 350.0)
+        self.assertAlmostEqual(mat.E, 210000.0)
+        # sampled hardening σ = A + B·εpⁿ
+        self.assertAlmostEqual(mat.es_pts[0], 350.0)
+        i = mat.eps_pts.index(0.1)
+        self.assertAlmostEqual(mat.es_pts[i], 350.0 + 275.0 * 0.1 ** 0.36, places=6)
+        # nonzero C → rate-term warning
+        self.assertTrue(any("SIMPLIFIED_JOHNSON_COOK" in w for w in state.warnings))
+
+
+class Tet10MidedgeMapTests(unittest.TestCase):
+    """The mid-edge map must match the LS-DYNA ten-node tet convention:
+    n5=mid(1,2) n6=mid(2,3) n7=mid(1,3) n8=mid(1,4) n9=mid(2,4) n10=mid(3,4).
+    A standard straight-edged tet10 must therefore snap ZERO nodes."""
+
+    STD_TET10 = (
+        "*KEYWORD\n*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             0.0             1.0             0.0\n"
+        "       4             0.0             0.0             1.0\n"
+        "       5             0.5             0.0             0.0\n"
+        "       6             0.5             0.5             0.0\n"
+        "       7             0.0             0.5             0.0\n"
+        "       8             0.0             0.0             0.5\n"
+        "       9             0.5             0.0             0.5\n"
+        "      10             0.0             0.5             0.5\n"
+        "*ELEMENT_SOLID\n"
+        "       1       1\n"
+        "       1       2       3       4       5       6       7       8"
+        "       9      10\n"
+        "*END\n")
+
+    def test_standard_tet10_snaps_zero_nodes(self):
+        from k2rad.writer import _snap_tet10_midsides
+        state = _state_from_deck(self.STD_TET10)
+        self.assertEqual(len(state.solid_elems), 1)
+        self.assertEqual(len(state.solid_elems[0].nodes), 10)
+        moved = _snap_tet10_midsides(state)
+        self.assertEqual(moved, 0)
+        # coordinates untouched
+        self.assertEqual((state.nodes[8].x, state.nodes[8].y, state.nodes[8].z),
+                         (0.0, 0.0, 0.5))
+        self.assertEqual((state.nodes[9].x, state.nodes[9].y, state.nodes[9].z),
+                         (0.5, 0.0, 0.5))
+
+
+class BcsSkewAndGrnodTests(unittest.TestCase):
+    DECK = TINY_K.replace(
+        "*CONTROL_TERMINATION",
+        "*DEFINE_COORDINATE_SYSTEM\n"
+        "         7       0.0       0.0       0.0       0.0       1.0       0.0\n"
+        "       0.0       0.0       1.0\n"
+        "*SET_NODE_LIST\n         5\n         1         2\n"
+        "*BOUNDARY_SPC_SET\n"
+        "         5         7         1         0         0         0         0         0\n"
+        "         5         0         0         1         0         0         0         0\n"
+        "*CONTROL_TERMINATION")
+
+    def test_bcs_carries_skew_and_grnod_emitted_once(self):
+        result, starter = _convert_string_deck(self.DECK)
+        self.assertIn("/SKEW/FIX/7", starter)
+        # first /BCS references skew 7
+        bcs1 = starter.split("/BCS/1\n")[1].splitlines()[2]
+        self.assertIn("         7", bcs1)
+        # the shared node-set /GRNOD appears exactly once
+        self.assertEqual(starter.count("/GRNOD/NODE/5\n"), 1)
+
+    def test_unknown_cid_warns_and_falls_back_to_global(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*SET_NODE_LIST\n         5\n         1         2\n"
+            "*BOUNDARY_SPC_SET\n"
+            "         5        99         1         0         0         0         0         0\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertTrue(any("cid=99" in w for w in result.warnings))
+
+
+class BilinearHardeningSlopeTests(unittest.TestCase):
+    def test_etan_converted_to_plastic_hardening_slope(self):
+        deck = TINY_K.replace("*MAT_ELASTIC", "*MAT_PIECEWISE_LINEAR_PLASTICITY")
+        deck = deck.replace(
+            "         1   7.86e-9    210000.0      0.3\n",
+            "         1   7.86e-9    210000.0      0.3     350.0   21000.0\n"
+            "       0.0       0.0         0\n")
+        result, starter = _convert_string_deck(deck)
+        self.assertIn("Auto_SY_ET_mid1", starter)
+        # H = E·ETAN/(E−ETAN) = 210000·21000/189000 = 23333.33;
+        # curve point at εp=1 is sigy + H = 23683.33 (raw ETAN would give 21350)
+        self.assertIn("23683.3", starter)
+        self.assertNotIn("21350", starter)
+
+
 if __name__ == "__main__":
     unittest.main()
