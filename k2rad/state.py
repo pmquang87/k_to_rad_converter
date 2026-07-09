@@ -1100,8 +1100,17 @@ class ConversionState:
         # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
         self.cnrbs: List[ConstrainedNodalRigidBody] = []
 
+        # *CONSTRAINED_EXTRA_NODES_NODE/_SET: pid → extra node ids merged into
+        # that rigid part's /RBODY secondary-node group
+        self.extra_rigid_nodes: Dict[int, List[int]] = {}
+
+        # *RIGIDWALL_PLANAR → /RWALL/PLANE
+        self.rigid_walls: List[RigidWallPlanar] = []
+
         # ── Loads ──────────────────────────────────────────────────
         self.load_rigid_bodies: List[LoadRigidBody] = []
+        # *LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD
+        self.load_nodes: List[LoadNode] = []
         self.inivel_nodes: List[InitialVelocityNode] = []
         self.inivel_rbodies: List[InitialVelocityRigidBody] = []
         self.pressure_loads: List[PressureLoad] = []

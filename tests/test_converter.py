@@ -6396,5 +6396,176 @@ class OutputRobustnessTests(unittest.TestCase):
         self.assertIn("Träger schön", starter)
 
 
+class PrescribedMotionNodeTests(unittest.TestCase):
+    def test_motion_node_becomes_impdisp(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*DEFINE_CURVE\n         7\n0.0,0.0\n1.0,2.0\n"
+            "*BOUNDARY_PRESCRIBED_MOTION_NODE\n"
+            "         3         1         2         7\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertNotIn("BOUNDARY_PRESCRIBED_MOTION_NODE",
+                         result.skipped_keywords)
+        self.assertIn("/IMPDISP/", starter)
+        # the auto-created single-node group holds node 3
+        grnod = starter.split("/IMPDISP/")[1].split("/GRNOD/NODE/")[1]
+        self.assertEqual(grnod.splitlines()[2].strip(), "3")
+
+    def test_motion_node_sf_zero_becomes_bcs(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*BOUNDARY_PRESCRIBED_MOTION_NODE\n"
+            "         3         1         2         7       0.0\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertIn("/BCS/", starter)
+        self.assertNotIn("/IMPDISP/", starter)
+
+
+class LoadNodeTests(unittest.TestCase):
+    def test_load_node_point_emits_cload(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*DEFINE_CURVE\n         9\n0.0,0.0\n1.0,1000.0\n"
+            "*LOAD_NODE_POINT\n"
+            "         2         3         9       2.0\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertIn("/CLOAD/", starter)
+        cload = starter.split("/CLOAD/")[1]
+        data = cload.splitlines()[3]
+        self.assertIn("         9", data)   # funct id
+        self.assertIn("Z", data)            # dof 3 = Z force
+        self.assertIn("2", data)            # scale factor
+        self.assertIn("/GRNOD/NODE/", starter)
+
+    def test_load_node_set_and_moment_dof(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*DEFINE_CURVE\n         9\n0.0,0.0\n1.0,1.0\n"
+            "*SET_NODE_LIST\n        11\n         1         2\n"
+            "*LOAD_NODE_SET\n"
+            "        11         6         9\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        cload_data = starter.split("/CLOAD/")[1].splitlines()[3]
+        self.assertIn("YY", cload_data)     # dof 6 = moment about Y
+
+    def test_follower_load_warns(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*DEFINE_CURVE\n         9\n0.0,0.0\n1.0,1.0\n"
+            "*LOAD_NODE_POINT\n"
+            "         2         4         9\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertNotIn("/CLOAD/", starter)
+        self.assertTrue(any("follower" in w for w in result.warnings))
+
+
+class ConstrainedExtraNodesTests(unittest.TestCase):
+    RIGID_K = TINY_K.replace("*MAT_ELASTIC", "*MAT_RIGID").replace(
+        "*CONTROL_TERMINATION",
+        "*NODE\n"
+        "     100             5.0             5.0             5.0\n"
+        "     101             6.0             5.0             5.0\n"
+        "*SET_NODE_LIST\n        20\n       100       101\n"
+        "*CONSTRAINED_EXTRA_NODES_SET\n"
+        "         1        20\n"
+        "*CONTROL_TERMINATION")
+
+    def test_extra_nodes_join_rbody_group(self):
+        result, starter = _convert_string_deck(self.RIGID_K)
+        self.assertIn("/RBODY/", starter)
+        grnod = starter.split("rb_nodes_pid1")[1].split("/GRNOD")[0]
+        body = starter.split("rb_nodes_pid1")[1]
+        ids = []
+        for ln in body.splitlines()[1:]:
+            if ln.startswith(("/", "#")):
+                break
+            ids.extend(int(t) for t in ln.split())
+        self.assertIn(100, ids)
+        self.assertIn(101, ids)
+
+    def test_extra_node_on_deformable_part_warns(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*CONSTRAINED_EXTRA_NODES_NODE\n"
+            "         1         4\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertTrue(any("EXTRA_NODES" in w for w in result.warnings))
+
+
+class RigidWallPlanarTests(unittest.TestCase):
+    def _deck(self, extra=""):
+        return TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*SET_NODE_LIST\n        30\n         1         2         3\n"
+            "*RIGIDWALL_PLANAR\n"
+            "        30         0         0\n"
+            "       0.0       0.0      -1.0       0.0       0.0       1.0"
+            + extra + "\n"
+            "*CONTROL_TERMINATION")
+
+    def test_basic_wall(self):
+        result, starter = _convert_string_deck(self._deck())
+        self.assertNotIn("RIGIDWALL_PLANAR", result.skipped_keywords)
+        self.assertIn("/RWALL/PLANE/", starter)
+        block = starter.split("/RWALL/PLANE/")[1]
+        data = block.splitlines()[3]
+        # node_ID=0, Slide=0 (frictionless), grnd_ID1 nonzero
+        self.assertEqual(data.split()[0], "0")
+        self.assertEqual(data.split()[1], "0")
+        self.assertNotEqual(data.split()[2], "0")
+        # geometry: M=(0,0,-1), M1=(0,0,1)
+        self.assertIn("-1", block.splitlines()[5])
+        self.assertIn("1", block.splitlines()[7])
+
+    def test_friction_wall_gets_slide2_and_fric_card(self):
+        result, starter = _convert_string_deck(self._deck("       0.3"))
+        block = starter.split("/RWALL/PLANE/")[1]
+        data = block.splitlines()[3]
+        self.assertEqual(data.split()[1], "2")
+        self.assertIn("0.3", block.splitlines()[5])
+
+    def test_stick_wall_gets_slide1(self):
+        result, starter = _convert_string_deck(self._deck("       1.0"))
+        block = starter.split("/RWALL/PLANE/")[1]
+        self.assertEqual(block.splitlines()[3].split()[1], "1")
+
+    def test_all_nodes_wall_uses_bbox_search_distance(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*RIGIDWALL_PLANAR\n"
+            "         0         0         0\n"
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        data = starter.split("/RWALL/PLANE/")[1].splitlines()[3]
+        self.assertEqual(data.split()[2], "0")     # grnd_ID1 = 0 (all nodes)
+        self.assertGreater(float(data.split()[4]), 0.0)
+
+    def test_moving_flavour_skipped_with_warning(self):
+        deck = TINY_K.replace(
+            "*CONTROL_TERMINATION",
+            "*RIGIDWALL_PLANAR_MOVING\n"
+            "         0         0         0\n"
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+            "      10.0       1.0\n"
+            "*CONTROL_TERMINATION")
+        result, starter = _convert_string_deck(deck)
+        self.assertNotIn("/RWALL", starter)
+        self.assertIn("RIGIDWALL_PLANAR_MOVING", result.skipped_keywords)
+
+    def test_rwforc_emits_th_rwall(self):
+        deck = self._deck().replace(
+            "*RIGIDWALL_PLANAR\n",
+            "*DATABASE_RWFORC\n      1e-4\n*RIGIDWALL_PLANAR\n")
+        result, starter = _convert_string_deck(deck)
+        self.assertIn("/TH/RWALL/", starter)
+
+
 if __name__ == "__main__":
     unittest.main()

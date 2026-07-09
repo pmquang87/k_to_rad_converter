@@ -20,6 +20,7 @@ from .state import (
     MatAddErosion, ConstrainedNodeSet,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
+    LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
     SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
@@ -1505,6 +1506,130 @@ def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
         state.load_rigid_bodies.append(LoadRigidBody(pid, dof, lcid, sf, cid))
 
 
+def handle_load_node(block: Block, state: ConversionState) -> None:
+    """*LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD (concentrated nodal load).
+
+    Card: nid/nsid dof lcid sf cid m1 m2 m3.  DOF 1/2/3 = force along global
+    x/y/z, 5/6/7 = moment about x/y/z; DOF 4/8 are follower loads with no
+    /CLOAD equivalent (warned). CID references a *DEFINE_COORDINATE_* local
+    system → /CLOAD skew.
+    """
+    is_set = block.keyword.endswith("_SET")
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    for i in range(offset, len(raw)):
+        if not raw[i].strip():        # blank card placeholder → skip
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if len(f) < 3:
+            continue
+        ref  = to_int(f[0])
+        dof  = to_int(f[1])
+        lcid = to_int(f[2])
+        sf   = _ffield(f, 3, 1.0)
+        cid  = to_int(f[4]) if len(f) > 4 else 0
+        if ref <= 0 or lcid <= 0:
+            continue
+        if dof not in (1, 2, 3, 5, 6, 7):
+            state.warn(
+                f"*LOAD_NODE_{'SET' if is_set else 'POINT'} dof={dof}: only "
+                "global forces (1-3) and moments (5-7) map to /CLOAD — "
+                "follower loads (4/8) do not; this row was skipped.")
+            continue
+        if is_set:
+            nsid = ref
+        else:
+            nsid = state.next_id()
+            state.node_sets[nsid] = (f"CLOAD_node_{ref}", [ref])
+        state.load_nodes.append(LoadNode(nsid, dof, lcid, sf, cid))
+
+
+def handle_constrained_extra_nodes(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_EXTRA_NODES_NODE/_SET — extra nodes rigidly attached to a
+    *MAT_RIGID part; merged into that part's /RBODY secondary-node group.
+
+    Card: pid nid/nsid iflag  (iflag only matters for deformable-to-rigid
+    switching, which the converter does not model).
+    """
+    is_set = block.keyword.endswith("_SET")
+    for i in range(len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=3, w=10)
+        pid = to_int(f[0])
+        ref = to_int(f[1]) if len(f) > 1 else 0
+        if pid <= 0 or ref <= 0:
+            continue
+        if is_set:
+            nids = list(state.node_sets.get(ref, ("", []))[1])
+            if not nids:
+                state.warn(
+                    f"*CONSTRAINED_EXTRA_NODES_SET pid={pid}: node set {ref} "
+                    "not found (or empty) — no extra nodes attached.")
+                continue
+        else:
+            nids = [ref]
+        state.extra_rigid_nodes.setdefault(pid, []).extend(nids)
+
+
+def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
+    """*RIGIDWALL_PLANAR[_ID] (+_FORCES) → /RWALL/PLANE.
+
+    Card 1: nsid nsidex boxid offset birth death rwksf
+    Card 2: xt yt zt xh yh zh fric wvel
+    The _MOVING/_FINITE/_ORTHO flavours change the wall's physics (extra cards
+    give it mass/velocity, a finite extent, or orthotropic friction) and are
+    dispatched to a warn-skip instead; _FORCES only appends force-output cards,
+    which /TH/RWALL replaces, so it converts like the base keyword.
+    """
+    raw = block.raw
+    offset = _title_offset(block)
+    if offset and _has_id(block):
+        rwid = to_int(parse_free(raw[0])[0]) if parse_free(raw[0]) else 0
+        title = _read_title(block)
+    else:
+        rwid, title = 0, ""
+    if rwid <= 0:
+        rwid = state.next_id()
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1:
+        state.warn("*RIGIDWALL_PLANAR: missing data card — skipped.")
+        return
+    nsid   = to_int(f1[0])
+    nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+    boxid  = to_int(f1[2]) if len(f1) > 2 else 0
+    woff   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    birth  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    death  = _ffield(f1, 5, 0.0)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if len(f2) < 6:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: missing geometry card — skipped.")
+        return
+    g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
+    fric = g(6)
+    if boxid:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BOXID has no /RWALL "
+                   "equivalent — the box limitation is ignored.")
+    if woff:
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: OFFSET has no /RWALL "
+                   "equivalent — ignored.")
+    if birth > 0.0 or (0.0 < death < 1e20):
+        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BIRTH/DEATH have no /RWALL "
+                   "equivalent — the wall is active for the whole run.")
+    state.rigid_walls.append(RigidWallPlanar(
+        rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
+        xt=g(0), yt=g(1), zt=g(2), xh=g(3), yh=g(4), zh=g(5),
+        fric=fric, birth=birth, death=death, offset=woff))
+
+
+def handle_rigidwall_unsupported(block: Block, state: ConversionState) -> None:
+    """RIGIDWALL flavours whose extra cards change the wall's physics."""
+    state.warn(
+        f"*{block.keyword}: only the fixed infinite *RIGIDWALL_PLANAR "
+        "(+_FORCES) converts to /RWALL/PLANE — this flavour was skipped.")
+    state.skipped_keywords.append(block.keyword)
+
+
 def handle_element_mass(block: Block, state: ConversionState) -> None:
     """*ELEMENT_MASS: add a lumped mass at a node.
 
@@ -2369,6 +2494,16 @@ HANDLERS = {
     # Constraints
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
     "CONSTRAINED_NODAL_RIGID_BODY_SPC":       handle_constrained_nodal_rigid_body,
+    "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
+    "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
+
+    # Rigid walls
+    "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FORCES":                handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_MOVING":                handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_MOVING_FORCES":         handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_FINITE":                handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_ORTHO":                 handle_rigidwall_unsupported,
 
     # Mass / inertia additions
     "ELEMENT_MASS":                           handle_element_mass,
@@ -2460,6 +2595,8 @@ HANDLERS = {
     "LOAD_SEGMENT":                           handle_load_segment,
     "LOAD_SEGMENT_ID":                        handle_load_segment,
     "LOAD_SEGMENT_SET":                       handle_skip,
+    "LOAD_NODE_POINT":                        handle_load_node,
+    "LOAD_NODE_SET":                          handle_load_node,
     "LOAD_BODY_X":                            handle_load_body,
     "LOAD_BODY_Y":                            handle_load_body,
     "LOAD_BODY_Z":                            handle_load_body,

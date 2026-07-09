@@ -90,6 +90,9 @@ export the image.
 E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
+`*MAT_SIMPLIFIED_JOHNSON_COOK` → `/MAT/LAW36` (σ = A + B·εpⁿ sampled into an
+auto-generated yield table, capped at `SIGMAX`; the `(1 + C·ln ε̇*)` rate term
+has no LAW36 mapping and is dropped with a warning)
 `*MAT_187` / `*MAT_SAMP-1` → `/MAT/LAW76` (SAMP-1 polymer; the tension/
 compression/shear yield curves become `/TABLE/1` cards)
 Material failure strain (MAT_003 `FS` / MAT_024 `FAIL` / MAT_018 `EPSF`) →
@@ -120,20 +123,32 @@ runtime, so it appears to move in post-processing).
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`)
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`
+`*PARAMETER` (fixed and free format, `R`/`I` types) — `&name` references are
+resolved wherever a field is parsed; `*PARAMETER_EXPRESSION` is not evaluated
+(warned). LS-DYNA **comma-delimited free format** is accepted on every card.
 
 ### Constraints
 `*CONSTRAINED_NODE_SET` → `/RLINK` (nodes share the same velocity along the
 constrained DOF; `DOF` 1/2/3 = x/y/z translation, 4 = all translations, 5/6/7 =
 rotation. `TF` failure time has no `/RLINK` equivalent and is dropped)
+`*CONSTRAINED_EXTRA_NODES_NODE/_SET` — the extra nodes join the rigid part's
+`/RBODY` secondary-node group (also lets an element-free `*MAT_RIGID` part form
+a rigid body)
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
-`*BOUNDARY_PRESCRIBED_MOTION_SET` → `/IMPDISP` (or `/BCS` when `sf=0`, a
-common LS-DYNA idiom for symmetry/fixed-DOF)
+`*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
+`sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
+`*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
+`FRIC` 0 → sliding, 0<f<1 → Coulomb friction, ≥1 → tied; `NSID=0` tracks all
+nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`.
+The `_MOVING`/`_FINITE`/`_ORTHO` flavours are skipped with a warning)
 
 ### Loads
 `*LOAD_RIGID_BODY` → `/CLOAD` on rigid body master node
+`*LOAD_NODE_POINT/_SET` → `/CLOAD` (forces DOF 1-3, moments DOF 5-7; the CID
+local system maps to the `/CLOAD` skew; follower loads 4/8 are warned)
 `*LOAD_SEGMENT`, `*LOAD_SEGMENT_ID` → `/PLOAD`
 `*LOAD_GRAVITY_PART[_SET]` → `/GRAV` on a `/GRNOD/PART` (non-modal decks;
 DOF 1/2/3 loads along −X/−Y/−Z, so `Fscale_Y = -accel`. Modal decks get an

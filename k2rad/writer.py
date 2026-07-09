@@ -2725,6 +2725,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     rbody_info: Dict = {}
 
     if not state.mat_rigid:
+        for pid in sorted(state.extra_rigid_nodes):
+            state.warn(
+                f"*CONSTRAINED_EXTRA_NODES pid={pid}: part is not a *MAT_RIGID "
+                "part — extra nodes not attached (deformable-part extra nodes "
+                "have no /RBODY to join).")
         return lines, rigid_nodes, rbody_info
 
     rigid_mids: Set[int] = set(state.mat_rigid.keys())
@@ -2739,6 +2744,19 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     for e in state.beam_elems:
         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
             nodes_by_pid[e.pid].extend([e.n1, e.n2])
+
+    # *CONSTRAINED_EXTRA_NODES_NODE/_SET: extra nodes rigidly attached to the
+    # part join its /RBODY secondary-node group (they also let an element-free
+    # *MAT_RIGID part form a rigid body at all).
+    for pid, extra in state.extra_rigid_nodes.items():
+        part = state.parts.get(pid)
+        if part is None or part.mid not in rigid_mids:
+            state.warn(
+                f"*CONSTRAINED_EXTRA_NODES pid={pid}: part is not a *MAT_RIGID "
+                "part — extra nodes not attached (deformable-part extra nodes "
+                "have no /RBODY to join).")
+            continue
+        nodes_by_pid[pid].extend(extra)
 
     if not nodes_by_pid:
         for mid in rigid_mids:
@@ -4377,7 +4395,8 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
              or state.db_matsum_dt or state.db_spcforc_dt
-             or state.db_ncforc_dt or state.db_blstfor_dt or 1e-3)
+             or state.db_ncforc_dt or state.db_blstfor_dt
+             or state.db_rwforc_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -4668,6 +4687,139 @@ def _make_starter_cloads(state: ConversionState) -> List[str]:
             emitted = True
 
     return lines if emitted else []
+
+
+def _make_node_cloads(state: ConversionState) -> List[str]:
+    """*LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD on the node (set)'s /GRNOD.
+
+    Same card layout as the rigid-body /CLOAD above; the CID local system maps
+    to the /CLOAD skew (the /SKEW of the same id is emitted by _make_skews),
+    falling back to global with a warning when no such system exists.
+    """
+    if not state.load_nodes:
+        return []
+
+    _DOF_DIR_FORCE = {1: "X", 2: "Y", 3: "Z", 5: "XX", 6: "YY", 7: "ZZ"}
+    lines: List[str] = ["#-  CONCENTRATED LOADS (NODES):"]
+    grnod_by_nsid: Dict[int, int] = {}
+    for ln in state.load_nodes:
+        set_title, nids = state.node_sets.get(ln.nsid, ("", []))
+        if not nids:
+            state.warn(f"LOAD_NODE nsid={ln.nsid}: node set not found – skipped")
+            continue
+        skew_id = 0
+        if ln.cid:
+            if ln.cid in state.coord_sys or ln.cid in state.coord_nodes:
+                skew_id = ln.cid
+            else:
+                state.warn(
+                    f"LOAD_NODE nsid={ln.nsid}: local system cid={ln.cid} not "
+                    "found — load applied in the GLOBAL system.")
+        grnod_id = grnod_by_nsid.get(ln.nsid)
+        emit_grnod = grnod_id is None
+        if emit_grnod:
+            grnod_id = state.next_id()
+            grnod_by_nsid[ln.nsid] = grnod_id
+        load_id = state.next_id()
+        lines += [
+            f"/CLOAD/{load_id}",
+            set_title or f"LoadNode_{load_id}",
+            "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID   Itypfun             Ascalex             Fscaley",
+            f"{_i(ln.lcid)}{_DOF_DIR_FORCE[ln.dof].rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+            f"          {_f(1.0)}{_f(ln.sf)}",
+            HDR,
+        ]
+        if emit_grnod:
+            lines += _emit_grnod_node(grnod_id, set_title or f"SET_{ln.nsid}", nids)
+    return lines if len(lines) > 1 else []
+
+
+def _make_rigid_walls(state: ConversionState) -> List[str]:
+    """*RIGIDWALL_PLANAR → /RWALL/PLANE (fixed infinite plane, node_ID = 0).
+
+    Card 1: node_ID Slide grnd_ID1 grnd_ID2 d — Slide 0 sliding / 1 tied /
+    2 Coulomb friction (extra fric card), from LS-DYNA FRIC (0 / ≥1 / 0<f<1).
+    M = LS-DYNA tail (XT,YT,ZT), M1 = head (XH,YH,ZH): both codes point the
+    outward normal from the first point to the second. A wall with NSID=0
+    tracks ALL nodes: /RWALL has no "all" group id, so grnd_ID1 stays 0 and
+    the search distance d is set to the model's bounding-box diagonal (every
+    node is within d of the wall → all nodes are secondary candidates).
+    """
+    if not state.rigid_walls:
+        return []
+    lines: List[str] = ["#-  RIGID WALLS:", HDR]
+
+    bbox_diag = 0.0
+    if state.nodes:
+        xs = [n.x for n in state.nodes.values()]
+        ys = [n.y for n in state.nodes.values()]
+        zs = [n.z for n in state.nodes.values()]
+        bbox_diag = ((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2
+                     + (max(zs) - min(zs)) ** 2) ** 0.5
+
+    th_wall_ids: List[Tuple[int, str]] = []
+    for rw in state.rigid_walls:
+        grnd1 = grnd2 = 0
+        grnod_blocks: List[str] = []
+        if rw.nsid > 0:
+            set_title, nids = state.node_sets.get(rw.nsid, ("", []))
+            if nids:
+                grnd1 = state.next_id()
+                grnod_blocks += _emit_grnod_node(
+                    grnd1, set_title or f"rwall_{rw.rwid}_nodes", nids)
+            else:
+                state.warn(
+                    f"*RIGIDWALL_PLANAR id={rw.rwid}: node set {rw.nsid} not "
+                    "found — the wall tracks ALL nodes instead.")
+        if rw.nsidex > 0:
+            set_title, nids = state.node_sets.get(rw.nsidex, ("", []))
+            if nids:
+                grnd2 = state.next_id()
+                grnod_blocks += _emit_grnod_node(
+                    grnd2, set_title or f"rwall_{rw.rwid}_excluded", nids)
+            else:
+                state.warn(
+                    f"*RIGIDWALL_PLANAR id={rw.rwid}: excluded node set "
+                    f"{rw.nsidex} not found — no nodes excluded.")
+        # d only matters when no node group is given (grnd_ID1=0 → distance
+        # search); the bbox diagonal guarantees every node qualifies.
+        d = 0.0 if grnd1 else (bbox_diag if bbox_diag > 0 else 1e10)
+
+        if rw.fric >= 1.0:
+            slide = 1          # LS-DYNA FRIC=1: stick (no sliding) → tied
+        elif rw.fric > 0.0:
+            slide = 2          # Coulomb friction
+        else:
+            slide = 0          # frictionless sliding
+
+        title = rw.title or f"RWALL_{rw.rwid}"
+        lines += [
+            f"/RWALL/PLANE/{rw.rwid}",
+            title,
+            "#  node_ID     Slide  grnd_ID1  grnd_ID2                   d",
+            f"{_i(0)}{_i(slide)}{_i(grnd1)}{_i(grnd2)}{_f(d)}",
+        ]
+        if slide == 2:
+            lines += ["#               fric", f"{_f(rw.fric)}"]
+        lines += [
+            "#                 XM                  YM                  ZM",
+            f"{_f(rw.xt)}{_f(rw.yt)}{_f(rw.zt)}",
+            "#                XM1                 YM1                 ZM1",
+            f"{_f(rw.xh)}{_f(rw.yh)}{_f(rw.zh)}",
+            HDR,
+        ]
+        lines += grnod_blocks
+        th_wall_ids.append((rw.rwid, title))
+
+    # *DATABASE_RWFORC → /TH/RWALL (wall resultant force time history)
+    if state.db_rwforc_dt > 0.0 and th_wall_ids:
+        th_id = state.next_id()
+        lines += [f"/TH/RWALL/{th_id}", "rwall_forces",
+                  "#     var1", "DEF       "]
+        for rwid, _tit in th_wall_ids:
+            lines.append(_i(rwid))
+        lines.append(HDR)
+    return lines
 
 
 def _make_modal_dummy_cload(state: ConversionState,
@@ -5275,6 +5427,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     sections.append(_make_inivol_notes(state))
     sections.append(_make_control_ale_notes(state))
     sections.append(_make_starter_cloads(state))
+    sections.append(_make_node_cloads(state))
+    sections.append(_make_rigid_walls(state))
     sections.append(_make_modal_dummy_cload(state, rigid_nodes))
     sections.append(_make_grounding_springs(state, rbody_info))
     sections.append(_make_added_masses(state, rigid_nodes))
