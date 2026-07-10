@@ -6387,9 +6387,15 @@ class OutputRobustnessTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(result.starter_path))
 
     def test_non_ascii_title_written_as_utf8(self):
-        deck = TINY_K.replace("shell part", "Träger schön")
+        # Build the non-ASCII title programmatically (chr(0xE4)=a-umlaut,
+        # chr(0xF6)=o-umlaut) so the test SOURCE stays pure ASCII. A literal
+        # non-ASCII byte in the source is decoded per the interpreter's source
+        # encoding, which is not guaranteed UTF-8 on every CI runner (Windows),
+        # and would spuriously fail this assertion regardless of the converter.
+        title = "Tr" + chr(0xE4) + "ger sch" + chr(0xF6) + "n"
+        deck = TINY_K.replace("shell part", title)
         result, starter = _convert_string_deck(deck)
-        self.assertIn("Träger schön", starter)
+        self.assertIn(title, starter)
 
 
 class PrescribedMotionNodeTests(unittest.TestCase):
