@@ -24,6 +24,7 @@ from .state import (
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, MatHighExplosiveBurn, EosJwl, EosCard,
 )
+from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
 
@@ -940,16 +941,6 @@ def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
             seen.add(n)
             out.append(n)
     return out
-
-
-# Mid-edge node -> (corner A, corner B) of its edge, in the LS-DYNA/Abaqus/
-# Nastran 10-node tet convention (*ELEMENT_SOLID ten-node figure, R16 Vol I):
-# node5=mid(1,2), node6=mid(2,3), node7=mid(1,3),
-# node8=mid(1,4), node9=mid(2,4), node10=mid(3,4).
-# (An earlier map had nodes 8/9/10 cyclically rotated — mid(2,4)/mid(3,4)/
-# mid(1,4) — which made _snap_tet10_midsides relocate the apex mid-edge nodes
-# of every STANDARD tet10 mesh onto the wrong edges.)
-_TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 0, 3), (8, 1, 3), (9, 2, 3)]
 
 
 def _snap_tet10_midsides(state: ConversionState) -> int:
@@ -5399,66 +5390,102 @@ def build_starter(state: ConversionState, progress=None) -> str:
         if progress is not None:
             progress(frac, label)
 
-    # Sections are appended in the SAME order as before; the two heavy ones
-    # (nodes, elements) report sub-progress so a large mesh shows a moving bar.
-    sections: List[List[str]] = []
-    sections.append(_make_header(state))
-    sections.append(_make_title(state))
-    sections.append(_make_analysis_defaults(state))
-    sections.append(_make_ams(state))
-    sections.append(_make_materials(state))
-    _rep(0.08, "Writing nodes")
-    sections.append(_make_nodes(
-        state, progress=lambda fr: _rep(0.08 + 0.32 * fr, "Writing nodes")))
-    sections.append(_make_bcs(state, rbody_info))
-    sections.append(_make_skews(state))
-    _rep(0.40, "Writing elements")
-    sections.append(_make_parts_and_elements(
-        state, progress=lambda fr: _rep(0.40 + 0.50 * fr, "Writing elements")))
-    _rep(0.90, "Finalizing starter deck")
-    sections.append(_make_properties(state))
-    sections.append(_make_functions(state))
-    sections.append(_make_extra_groups(state))
-    sections.append(_make_rlinks(state))
-    sections.append(_make_interfaces(state, rigid_nodes))
-    sections.append(_make_tied_interfaces(state, rigid_nodes))
-    sections.append(_make_force_transducers(state, rigid_nodes))
-    sections.append(rbody_lines)
-    sections.append(_make_imposed_motions(state, rbody_info))
-    sections.append(_make_imposed_motions_set(state))
-    sections.append(_make_inivel(state, rbody_info))
-    sections.append(_make_pressure_loads(state))
-    sections.append(_make_gravity_loads(state))
-    sections.append(_make_body_loads(state))
-    sections.append(_make_blast_loads(state))
-    sections.append(_make_detonations(state))
-    sections.append(_make_fsi_coupling(state))
-    sections.append(_make_ebcs(state))
-    sections.append(_make_inivol_notes(state))
-    sections.append(_make_control_ale_notes(state))
-    sections.append(_make_starter_cloads(state))
-    sections.append(_make_node_cloads(state))
-    sections.append(_make_rigid_walls(state))
-    sections.append(_make_modal_dummy_cload(state, rigid_nodes))
-    sections.append(_make_grounding_springs(state, rbody_info))
-    sections.append(_make_added_masses(state, rigid_nodes))
-    sections.append(_make_eig(state))
-    sections.append(_make_free_node_constraints(state, rigid_nodes))
-    sections.append(_make_damping(state, rigid_nodes))
-    sections.append(_make_starter_th(state))
-    sections.append(_make_starter_th_inter(state))
-    sections.append(_make_starter_th_node_reac(state, rbody_info))
-    sections.append(_make_starter_th_node_spc(state, rbody_info))
-    sections.append(_make_starter_th_surf(state))
-    sections.append(_make_freq_domain_notes(state))
-    sections.append(_make_skipped_comment(state))
-    sections.append(["/END", HDR])
-
+    # The starter is assembled from an ordered registry of (name, builder)
+    # entries — see _starter_section_registry(). Iterating a data-driven list
+    # (rather than a hand-maintained sequence of sections.append(...) calls)
+    # makes the section order explicit and lets a new section be inserted by
+    # adding one tuple, without editing the middle of this function. The context
+    # carries the state plus the three values threaded across sections
+    # (rbody_info, rigid_nodes, the pre-built rbody_lines) and the progress
+    # reporter. Output is byte-identical to the previous fixed sequence.
+    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep)
     lines: List[str] = []
-    for sec in sections:
-        lines.extend(sec)
+    for _name, builder in _starter_section_registry():
+        lines.extend(builder(ctx))
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
+
+
+class _StarterContext:
+    """Values threaded across the starter section builders (see
+    _starter_section_registry). ``rep(frac, label)`` forwards to the progress
+    callback."""
+    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep")
+
+    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep):
+        self.state = state
+        self.rbody_info = rbody_info
+        self.rigid_nodes = rigid_nodes
+        self.rbody_lines = rbody_lines
+        self.rep = rep
+
+
+def _progress_marker(ctx: "_StarterContext", frac: float, label: str) -> List[str]:
+    """A registry entry that only reports progress (emits no starter lines), so
+    the two heavy builders (nodes, elements) keep their coarse progress markers
+    at the same points as the original fixed sequence."""
+    ctx.rep(frac, label)
+    return []
+
+
+def _starter_section_registry():
+    """Ordered (name, builder) registry the starter is assembled from. Each
+    builder takes a _StarterContext and returns its list of .rad lines. Insert a
+    new section by adding a tuple at the right position — no need to edit
+    build_starter. Order and output match the historical fixed sequence."""
+    return [
+        ("header",            lambda c: _make_header(c.state)),
+        ("title",             lambda c: _make_title(c.state)),
+        ("analysis_defaults", lambda c: _make_analysis_defaults(c.state)),
+        ("ams",               lambda c: _make_ams(c.state)),
+        ("materials",         lambda c: _make_materials(c.state)),
+        ("_progress_nodes",   lambda c: _progress_marker(c, 0.08, "Writing nodes")),
+        ("nodes",             lambda c: _make_nodes(
+            c.state, progress=lambda fr: c.rep(0.08 + 0.32 * fr, "Writing nodes"))),
+        ("bcs",               lambda c: _make_bcs(c.state, c.rbody_info)),
+        ("skews",             lambda c: _make_skews(c.state)),
+        ("_progress_elems",   lambda c: _progress_marker(c, 0.40, "Writing elements")),
+        ("parts_elements",    lambda c: _make_parts_and_elements(
+            c.state, progress=lambda fr: c.rep(0.40 + 0.50 * fr, "Writing elements"))),
+        ("_progress_final",   lambda c: _progress_marker(c, 0.90, "Finalizing starter deck")),
+        ("properties",        lambda c: _make_properties(c.state)),
+        ("functions",         lambda c: _make_functions(c.state)),
+        ("extra_groups",      lambda c: _make_extra_groups(c.state)),
+        ("rlinks",            lambda c: _make_rlinks(c.state)),
+        ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
+        ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
+        ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
+        ("rbodies",           lambda c: c.rbody_lines),
+        ("imposed_motions",   lambda c: _make_imposed_motions(c.state, c.rbody_info)),
+        ("imposed_motions_set", lambda c: _make_imposed_motions_set(c.state)),
+        ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
+        ("pressure_loads",    lambda c: _make_pressure_loads(c.state)),
+        ("gravity_loads",     lambda c: _make_gravity_loads(c.state)),
+        ("body_loads",        lambda c: _make_body_loads(c.state)),
+        ("blast_loads",       lambda c: _make_blast_loads(c.state)),
+        ("detonations",       lambda c: _make_detonations(c.state)),
+        ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        ("ebcs",              lambda c: _make_ebcs(c.state)),
+        ("inivol_notes",      lambda c: _make_inivol_notes(c.state)),
+        ("control_ale_notes", lambda c: _make_control_ale_notes(c.state)),
+        ("starter_cloads",    lambda c: _make_starter_cloads(c.state)),
+        ("node_cloads",       lambda c: _make_node_cloads(c.state)),
+        ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
+        ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
+        ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
+        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
+        ("eig",               lambda c: _make_eig(c.state)),
+        ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
+        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
+        ("starter_th",        lambda c: _make_starter_th(c.state)),
+        ("starter_th_inter",  lambda c: _make_starter_th_inter(c.state)),
+        ("starter_th_node_reac", lambda c: _make_starter_th_node_reac(c.state, c.rbody_info)),
+        ("starter_th_node_spc",  lambda c: _make_starter_th_node_spc(c.state, c.rbody_info)),
+        ("starter_th_surf",   lambda c: _make_starter_th_surf(c.state)),
+        ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
+        ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
+        ("end",               lambda c: ["/END", HDR]),
+    ]
 
 
 def _make_engine_restart(state: ConversionState) -> List[str]:
