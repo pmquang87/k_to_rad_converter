@@ -1,2 +1,4 @@
 orun text eol=lf
+or.sh text eol=lf
+build-and-export.sh text eol=lf
 

@@ -1,0 +1,36 @@
+name: publish
+
+# Build and upload k2rad to PyPI when a GitHub Release is published.
+# This never runs on push/PR, so it cannot affect the normal CI pipeline.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Required for PyPI Trusted Publishing (OIDC) — no API token needed.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Publish to PyPI
+        # Uses PyPI Trusted Publishing (OIDC) by default — configure a trusted
+        # publisher for this repo/workflow at https://pypi.org/manage/account/publishing/
+        # (project name "k2rad", workflow "publish.yml", environment "pypi").
+        #
+        # Alternatively, drop the `id-token` permission and the `environment`
+        # above and supply an API token instead by uncommenting:
+        #   with:
+        #     password: ${{ secrets.PYPI_API_TOKEN }}
+        # (the PYPI_API_TOKEN repo secret must then be configured).
+        uses: pypa/gh-action-pypi-publish@release/v1
