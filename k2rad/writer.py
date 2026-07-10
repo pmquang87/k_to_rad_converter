@@ -21,6 +21,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
     FailGissmo, MatAddErosion,
+    MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, MatHighExplosiveBurn, EosJwl, EosCard,
 )
@@ -281,6 +282,14 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36_powerlaw(mat, state)
     for mat in state.mat_samp.values():
         lines += _emit_mat_law76(mat, state)
+    for mat in state.mat_crushable_foam.values():
+        lines += _emit_mat_law50(mat, state)
+    for mat in state.mat_low_density_foam.values():
+        lines += _emit_mat_law38(mat, state)
+    for mat in state.mat_fu_chang_foam.values():
+        lines += _emit_mat_law70(mat, state)
+    for mat in state.mat_honeycomb.values():
+        lines += _emit_mat_law28(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
     for fail in state.fail_gissmo.values():
@@ -665,6 +674,225 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
         f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
         "#    IFORM     IQUAD     ICONV",
         f"{_i(0)}{_i(iquad)}{_i(mat.iconv)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law50(mat: MatCrushableFoam, state: ConversionState) -> List[str]:
+    """*MAT_CRUSHABLE_FOAM (MAT_063) → /MAT/LAW50 (VISC_HONEY). Column layout
+    from mat_law50.cfg FORMAT(radioss90) (the block a /BEGIN 2022 deck reads):
+    RHO_I; E11 E22 E33; G12 G23 G31; asrate; then per-direction blocks
+    [Iflag/Eps_max card] + funID(5) + Fscale(5) + Eps_rate(5) for 11/22/33, an
+    Iflag2 card, then the same for 12/23/31. The single LS-DYNA yield curve LCID
+    (yield stress vs volumetric strain) drives all six direction yield functions
+    → the material stays isotropic. LAW50 has no tensile-cutoff or rate-damping
+    field, so TSC and DAMP are dropped."""
+    fid = mat.lcid
+    # Isotropic shear modulus from the given E and Poisson ratio.
+    G = mat.E / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0 else mat.E / 2.0
+    state.warn(
+        f"*MAT_CRUSHABLE_FOAM {mat.mid} → /MAT/LAW50: the single yield curve "
+        f"(LCID={fid}) is applied to all six direction yield functions "
+        "(σ11/σ22/σ33/σ12/σ23/σ31) — the crushable foam is modelled as isotropic, "
+        f"with the shear modulus taken as G=E/2(1+ν)={G:g}.")
+    if not fid:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: no yield curve (LCID=0) — "
+                   "/MAT/LAW50 has no yield function; add one or the foam has no "
+                   "crush resistance.")
+    if mat.tsc != 0.0:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: tensile stress cutoff "
+                   f"TSC={mat.tsc:g} has no /MAT/LAW50 field — dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: rate-damping coefficient "
+                   f"DAMP={mat.damp:g} has no /MAT/LAW50 field — dropped.")
+
+    def _dir(label: str, f: int) -> List[str]:
+        return [
+            f"#funID{label}-1 funID{label}-2 funID{label}-3 funID{label}-4 funID{label}-5",
+            f"{_i(f)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            f"#        Fscale_{label}-1         Fscale_{label}-2         Fscale_{label}-3         Fscale_{label}-4         Fscale_{label}-5",
+            f"{_f(1.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            f"#      Eps_rate_{label}-1       Eps_rate_{label}-2       Eps_rate_{label}-3       Eps_rate_{label}-4       Eps_rate_{label}-5",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+
+    lines = [
+        f"/MAT/LAW50/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                E11                 E22                 E33",
+        f"{_f(mat.E)}{_f(mat.E)}{_f(mat.E)}",
+        "#                G12                 G23                 G31",
+        f"{_f(G)}{_f(G)}{_f(G)}",
+        "#             asrate",
+        f"{_f(0.0)}",
+        "#   Iflag1           Eps_max11           Eps_max22           Eps_max33",
+        f"{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+    lines += _dir("11", fid) + _dir("22", fid) + _dir("33", fid)
+    lines += [
+        "#   Iflag2           Eps_max12           Eps_max23           Eps_max31",
+        f"{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+    lines += _dir("12", fid) + _dir("23", fid) + _dir("31", fid)
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_law38(mat: MatLowDensityFoam, state: ConversionState) -> List[str]:
+    """*MAT_LOW_DENSITY_FOAM (MAT_057) → /MAT/LAW38 (VISC_TAB). Column layout
+    from matl38_visc_tab.cfg FORMAT(radioss2019). E → E0; the LS-DYNA loading
+    curve LCID becomes LAW38's single loading function (N_funct=1, strain rate 0);
+    TC → CUToff (tension cutoff stress). LAW38 has no direct hysteretic-unloading
+    factor, unloading decay or shape factor, so HU / BETA / SHAPE / DAMP are
+    approximate / dropped."""
+    fid = mat.lcid
+    if not fid:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: no loading curve (LCID=0) — "
+                   "/MAT/LAW38 needs a stress-strain loading function.")
+    if mat.hu != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: hysteretic-unloading factor "
+                   f"HU={mat.hu:g} is only approximated by /MAT/LAW38 — LAW38 has "
+                   "no single hysteretic-unloading factor; the unloading follows "
+                   "the loading curve. Verify the energy dissipated on unloading.")
+    if mat.shape != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: unloading SHAPE={mat.shape:g} "
+                   "has no /MAT/LAW38 field — dropped (unloading shape approximate).")
+    if mat.beta != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: unloading decay BETA="
+                   f"{mat.beta:g} has no /MAT/LAW38 field — dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: viscous DAMP={mat.damp:g} "
+                   "has no /MAT/LAW38 field — dropped.")
+    sp10 = " " * 10
+    return [
+        f"/MAT/LAW38/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#        Init. dens.",
+        f"{_f(mat.rho)}",
+        "#                 E0                nu_t                nu_c                 R_V     Iflag     Itota",
+        f"{_f(mat.E)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}",
+        "#               beta                   H                 R_D       K_R       K_D               Theta",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        "#    K_air       N_P            Fscale_P",
+        f"{_i(0)}{_i(0)}{_f(0.0)}",
+        "#                 P0                 R_P               P_max                 Phi",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#      ful                  alpha_unload        Eps_._unload                   a                   b",
+        f"{_i(0)}{sp10}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#  N_funct                        CUToff   I_insta",
+        f"{_i(1)}{sp10}{_f(mat.tc)}{_i(0)}",
+        "#            E-final          Epsi-final              Lambda                VISC                 Tol",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "# Scale factors",
+        f"{_f(1.0)}",
+        "# Strain rates",
+        f"{_f(0.0)}",
+        "# Loading functions",
+        f"{_i(fid)}",
+        "# Unloading functions",
+        f"{_i(0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law70(mat: MatFuChangFoam, state: ConversionState) -> List[str]:
+    """*MAT_FU_CHANG_FOAM (MAT_083) → /MAT/LAW70 (FOAM_TAB). APPROXIMATE. Column
+    layout from matl70_foam_tab.cfg FORMAT(radioss2019): RHO_I; EO NU E_max
+    EPS_max Itens; F_cut Ismooth Nload Nunload Iflag Shape Hys; then one
+    (funcID, Eps_load, Fscale) card per loading curve. The LS-DYNA TBID load-curve
+    family maps onto LAW70's per-strain-rate loading functions; HU → Hys, SHAPE →
+    Shape. Fu-Chang's analytic hysteresis/damping constants have no LAW70
+    counterpart."""
+    fid = mat.tbid
+    state.warn(
+        f"*MAT_FU_CHANG_FOAM {mat.mid} → /MAT/LAW70 is APPROXIMATE: Fu-Chang's "
+        "analytic constitutive constants (D0…C5) and rate-damping have no "
+        "/MAT/LAW70 equivalent — only the tabulated stress-strain response is "
+        "carried over.")
+    state.warn(
+        f"*MAT_FU_CHANG_FOAM {mat.mid}: TBID={fid} is referenced as the single "
+        "/MAT/LAW70 loading function (strain rate 0). If TBID is a *DEFINE_TABLE "
+        "of curves at several strain rates, split it into one /FUNCT per rate and "
+        "list them as LAW70 loading functions (funcID/Eps_._load) to recover the "
+        "rate dependence.")
+    if mat.tc != 0.0:
+        state.warn(f"*MAT_FU_CHANG_FOAM {mat.mid}: tension cutoff TC={mat.tc:g} "
+                   "has no scalar /MAT/LAW70 field (LAW70 tension is a function) — "
+                   "dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_FU_CHANG_FOAM {mat.mid}: rate-damping DAMP={mat.damp:g} "
+                   "has no /MAT/LAW70 field — dropped.")
+    # Ismooth=0, Nload=1, Nunload=0, Iflag=0. Shape/Hys carry the unloading model.
+    return [
+        f"/MAT/LAW70/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                 EO                  NU               E_max             EPS_max     Itens",
+        f"{_f(mat.E)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#              F_cut   Ismooth     Nload   Nunload     Iflag               Shape                 Hys",
+        f"{_f(0.0)}{_i(0)}{_i(1)}{_i(0)}{_i(0)}{_f(mat.shape)}{_f(mat.hu)}",
+        "#funcID_id          Eps_._load          Fscale_load",
+        f"{_i(fid)}{_f(0.0)}{_f(1.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law28(mat: MatHoneycomb, state: ConversionState) -> List[str]:
+    """*MAT_HONEYCOMB (MAT_026) → /MAT/LAW28 (HONEYCOMB). Column layout from
+    matl28_honeycomb.cfg FORMAT(radioss90): RHO_I; E_11 E_22 E_33; G_12 G_23 G_31;
+    [fun_ID11 fun_ID22 fun_ID33 Iflag1 Fscale11 Fscale22 Fscale33]; Eps_max11-33;
+    [fun_ID12 fun_ID23 fun_ID31 Iflag2 Fscale12 Fscale23 Fscale31]; Eps_max12-31.
+    Uncompressed moduli EAAU/EBBU/ECCU → E_11/E_22/E_33 and GABU/GBCU/GCAU →
+    G_12/G_23/G_31 (a/b/c ↔ 11/22/33). Normal crush curves LCA/LCB/LCC →
+    fun_ID11/22/33, shear LCAB/LCBC/LCCA → fun_ID12/23/31 (LCS as the fallback for
+    any missing shear component). LAW28 has no compacted-modulus / SIGY / VF / MU /
+    BULK / strain-rate slot, so those LS-DYNA fields are dropped."""
+    lcab = mat.lcab or mat.lcs
+    lcbc = mat.lcbc or mat.lcs
+    lcca = mat.lcca or mat.lcs
+    dropped = []
+    if mat.E:
+        dropped.append(f"E={mat.E:g} (fully-compacted modulus)")
+    if mat.sigy:
+        dropped.append(f"SIGY={mat.sigy:g}")
+    if mat.vf:
+        dropped.append(f"VF={mat.vf:g}")
+    if mat.mu:
+        dropped.append(f"MU={mat.mu:g}")
+    if mat.bulk:
+        dropped.append(f"BULK={mat.bulk:g}")
+    if dropped:
+        state.warn(f"*MAT_HONEYCOMB {mat.mid} → /MAT/LAW28: "
+                   f"{', '.join(dropped)} have no /MAT/LAW28 field and are dropped "
+                   "(LAW28 reaches full compaction from the crush curves).")
+    if mat.lcsr:
+        state.warn(f"*MAT_HONEYCOMB {mat.mid}: strain-rate scaling curve "
+                   f"LCSR={mat.lcsr} has no /MAT/LAW28 field — dropped (LAW28 is "
+                   "rate independent).")
+    if mat.lcs and (not mat.lcab or not mat.lcbc or not mat.lcca):
+        state.warn(f"*MAT_HONEYCOMB {mat.mid}: transverse-shear curve LCS="
+                   f"{mat.lcs} used for the shear direction(s) with no dedicated "
+                   "LCAB/LCBC/LCCA curve.")
+    return [
+        f"/MAT/LAW28/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#               E_11                E_22                E_33",
+        f"{_f(mat.eaau)}{_f(mat.ebbu)}{_f(mat.eccu)}",
+        "#               G_12                G_23                G_31",
+        f"{_f(mat.gabu)}{_f(mat.gbcu)}{_f(mat.gcau)}",
+        "# fun_ID11  fun_ID22  fun_ID33    Iflag1            Fscale11            Fscale22            Fscale33",
+        f"{_i(mat.lca)}{_i(mat.lcb)}{_i(mat.lcc)}{_i(0)}{_f(1.0)}{_f(1.0)}{_f(1.0)}",
+        "#          Eps_max11           Eps_max22           Eps_max33",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "# fun_ID12  fun_ID23  fun_ID31    Iflag2            Fscale12            Fscale23            Fscale31",
+        f"{_i(lcab)}{_i(lcbc)}{_i(lcca)}{_i(0)}{_f(1.0)}{_f(1.0)}{_f(1.0)}",
+        "#          Eps_max12           Eps_max23           Eps_max31",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
 

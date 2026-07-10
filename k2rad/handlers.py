@@ -20,6 +20,7 @@ from .state import (
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAddErosion, ConstrainedNodeSet,
+    MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
@@ -2002,6 +2003,128 @@ def handle_mat_power_law_plasticity(block: Block, state: ConversionState) -> Non
     state.mat_power_law[mid] = MatPowerLaw(mid, title, rho, E, nu, k, n, src, srp, sigy, vp, epsf)
 
 
+def handle_mat_crushable_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_CRUSHABLE_FOAM (MAT_063) → /MAT/LAW50.
+
+    LS-DYNA card (mat_063.cfg Keyword971): MID RHO E PR LCID TSC DAMP.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    lcid = to_int(f1[4])   if len(f1) > 4 else 0
+    tsc  = to_float(f1[5]) if len(f1) > 5 else 0.0
+    damp = to_float(f1[6]) if len(f1) > 6 else 0.0
+    state.mat_crushable_foam[mid] = MatCrushableFoam(
+        mid, title, rho, E, nu, lcid, tsc, damp)
+
+
+def handle_mat_low_density_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_LOW_DENSITY_FOAM (MAT_057) → /MAT/LAW38.
+
+    LS-DYNA cards (mat_057.cfg Keyword971):
+      Card1: MID RHO E LCID TC HU BETA DAMP
+      Card2: SHAPE FAIL BVFLAG ED BETA1 KCON REF
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    lcid = to_int(f1[3])   if len(f1) > 3 else 0
+    tc   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    hu   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    beta = to_float(f1[6]) if len(f1) > 6 else 0.0
+    damp = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2 (optional): SHAPE is the first field
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    shape = to_float(f2[0]) if f2 else 0.0
+    state.mat_low_density_foam[mid] = MatLowDensityFoam(
+        mid, title, rho, E, lcid, tc, hu, beta, damp, shape)
+
+
+def handle_mat_fu_chang_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_FU_CHANG_FOAM (MAT_083) → /MAT/LAW70 (APPROXIMATE).
+
+    LS-DYNA cards (mat_083.cfg Keyword971_R11.1):
+      Card1: MID RHO E ED TC FAIL DAMP TBID
+      Card2: BVFLAG SFLAG RFLAG TFLAG PVID SRAF REF HU
+      Card3: (analytic form) C3 C4 C5 AIJ SIJ MINR MAXR SHAPE
+    TBID is the strain-rate load-curve family; HU (card2 field 8) and SHAPE
+    (card3 field 8, analytic form) map to LAW70 Hys / Shape.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    tc   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    damp = to_float(f1[6]) if len(f1) > 6 else 0.0
+    tbid = to_int(f1[7])   if len(f1) > 7 else 0
+    # Card2: HU is the 8th field (hysteretic unloading factor)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    hu = to_float(f2[7]) if len(f2) > 7 else 0.0
+    # Card3 (analytic constitutive form): SHAPE is the 8th field of the second
+    # constitutive card. Only present when the Fu-Chang analytic constants are
+    # given; guarded so the tabulated (TBID-only) form parses cleanly.
+    f3 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    shape = to_float(f3[7]) if len(f3) > 7 else 0.0
+    state.mat_fu_chang_foam[mid] = MatFuChangFoam(
+        mid, title, rho, E, tc, damp, tbid, hu, shape)
+
+
+def handle_mat_honeycomb(block: Block, state: ConversionState) -> None:
+    """*MAT_HONEYCOMB (MAT_026) → /MAT/LAW28.
+
+    LS-DYNA cards (mat_026.cfg Keyword971):
+      Card1: MID RO E PR SIGY VF MU BULK
+      Card2: LCA LCB LCC LCS LCAB LCBC LCCA LCSR
+      Card3: EAAU EBBU ECCU GABU GBCU GCAU AOPT MACF
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    sigy = to_float(f1[4]) if len(f1) > 4 else 0.0
+    vf   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    mu   = to_float(f1[6]) if len(f1) > 6 else 0.0
+    bulk = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2: the seven crush curves + strain-rate curve
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    lca  = to_int(f2[0]) if f2        else 0
+    lcb  = to_int(f2[1]) if len(f2) > 1 else 0
+    lcc  = to_int(f2[2]) if len(f2) > 2 else 0
+    lcs  = to_int(f2[3]) if len(f2) > 3 else 0
+    lcab = to_int(f2[4]) if len(f2) > 4 else 0
+    lcbc = to_int(f2[5]) if len(f2) > 5 else 0
+    lcca = to_int(f2[6]) if len(f2) > 6 else 0
+    lcsr = to_int(f2[7]) if len(f2) > 7 else 0
+    # Card3: the uncompressed moduli
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    eaau = to_float(f3[0]) if f3        else 0.0
+    ebbu = to_float(f3[1]) if len(f3) > 1 else 0.0
+    eccu = to_float(f3[2]) if len(f3) > 2 else 0.0
+    gabu = to_float(f3[3]) if len(f3) > 3 else 0.0
+    gbcu = to_float(f3[4]) if len(f3) > 4 else 0.0
+    gcau = to_float(f3[5]) if len(f3) > 5 else 0.0
+    state.mat_honeycomb[mid] = MatHoneycomb(
+        mid, title, rho, E, nu, sigy, vf, mu, bulk,
+        eaau, ebbu, eccu, gabu, gbcu, gcau,
+        lca, lcb, lcc, lcs, lcab, lcbc, lcca, lcsr)
+
+
 def handle_mat_187(block: Block, state: ConversionState) -> None:
     """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1 polymer).
 
@@ -2648,6 +2771,19 @@ HANDLERS = {
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
+    # Foam / honeycomb families
+    "MAT_CRUSHABLE_FOAM":                     handle_mat_crushable_foam,
+    "MAT_63":                                 handle_mat_crushable_foam,
+    "MAT_063":                                handle_mat_crushable_foam,
+    "MAT_LOW_DENSITY_FOAM":                   handle_mat_low_density_foam,
+    "MAT_57":                                 handle_mat_low_density_foam,
+    "MAT_057":                                handle_mat_low_density_foam,
+    "MAT_FU_CHANG_FOAM":                      handle_mat_fu_chang_foam,
+    "MAT_83":                                 handle_mat_fu_chang_foam,
+    "MAT_083":                                handle_mat_fu_chang_foam,
+    "MAT_HONEYCOMB":                          handle_mat_honeycomb,
+    "MAT_26":                                 handle_mat_honeycomb,
+    "MAT_026":                                handle_mat_honeycomb,
     "MAT_187":                                handle_mat_187,
     "MAT_SAMP-1":                             handle_mat_187,
     "MAT_ADD_DAMAGE_GISSMO":                  handle_mat_add_damage_gissmo,
