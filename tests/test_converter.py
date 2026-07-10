@@ -31,7 +31,6 @@ from k2rad.state import (  # noqa: E402
     SolidElem,
 )
 from k2rad.gapmin import (  # noqa: E402
-    DEFAULT_GAPMIN_FACTOR,
     apply_auto_gapmin,
     fast_proximity_available,
     min_point_to_triangles,
@@ -3898,7 +3897,6 @@ class ModalCommonTests(unittest.TestCase):
         self.assertEqual(mesh.n_cells, 1)
 
     def test_shapes_scatter_and_constrained_zero(self):
-        import numpy as np
         mesh = modal_common.build_mesh(self._tiny_state())
         disp = modal_common.shapes_on_mesh(mesh, self._tiny_modes())
         self.assertEqual(disp.shape, (2, 4, 3))
@@ -4111,7 +4109,6 @@ class DrillingStiffnessTests(unittest.TestCase):
             low_precision=False)
 
     def test_block_lands_on_drilling_direction(self):
-        import numpy as np
         # node 1 carries all 3 rotational dofs: II = 6*(1-1)+dof = 4,5,6
         stiff = self._stiff([4, 5, 6])
         kd = modal_solve.drilling_stiffness(self._state(), stiff, 2.0e-3)
@@ -4123,7 +4120,6 @@ class DrillingStiffnessTests(unittest.TestCase):
         self.assertAlmostEqual(abs(dense).sum(), expect, places=10)
 
     def test_missing_rotational_dofs_are_skipped(self):
-        import numpy as np
         # node 1 has only RX+RY in K (RZ constrained/absent) -> nothing added
         stiff = self._stiff([4, 5])
         kd = modal_solve.drilling_stiffness(self._state(), stiff, 1.0e-3)
@@ -4262,7 +4258,7 @@ class ModalRandomResponseTests(unittest.TestCase):
 
     # ── S-N data ──────────────────────────────────────────────────────────
     def _fatigue_state(self):
-        from k2rad.state import Curve, MatAddFatigue
+        from k2rad.state import Curve
         state = ConversionState()
         state.curves[2] = Curve(2, "SN", 1.0, 1.0, 0.0, 0.0,
                                 [(10.0, 0.8), (100.0, 0.8),
@@ -4270,7 +4266,6 @@ class ModalRandomResponseTests(unittest.TestCase):
         return state
 
     def test_sn_curve_semilog(self):
-        import numpy as np
         from k2rad.state import MatAddFatigue
         state = self._fatigue_state()
         sn = modal_random_response.sn_function(
@@ -4287,7 +4282,6 @@ class ModalRandomResponseTests(unittest.TestCase):
         self.assertAlmostEqual(float(sn.cycles(0.1)), 1.0e11, delta=1e7)
 
     def test_sn_snlimt_infinity_and_amplitude(self):
-        import numpy as np
         from k2rad.state import MatAddFatigue
         state = self._fatigue_state()
         sn2 = modal_random_response.sn_function(
@@ -6478,7 +6472,6 @@ class ConstrainedExtraNodesTests(unittest.TestCase):
     def test_extra_nodes_join_rbody_group(self):
         result, starter = _convert_string_deck(self.RIGID_K)
         self.assertIn("/RBODY/", starter)
-        grnod = starter.split("rb_nodes_pid1")[1].split("/GRNOD")[0]
         body = starter.split("rb_nodes_pid1")[1]
         ids = []
         for ln in body.splitlines()[1:]:
@@ -6565,6 +6558,103 @@ class RigidWallPlanarTests(unittest.TestCase):
             "*DATABASE_RWFORC\n      1e-4\n*RIGIDWALL_PLANAR\n")
         result, starter = _convert_string_deck(deck)
         self.assertIn("/TH/RWALL/", starter)
+
+
+class LoadSegmentSetTests(unittest.TestCase):
+    """*LOAD_SEGMENT_SET → /SURF/SEG + /PLOAD over a *SET_SEGMENT surface.
+
+    Regression: the keyword used to dispatch to handle_skip, so the pressure
+    load silently vanished from the converted deck.
+    """
+
+    # One quad shell whose face is a *SET_SEGMENT loaded by *LOAD_SEGMENT_SET.
+    DECK = (
+        "*KEYWORD\n"
+        "*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             1.0             1.0             0.0\n"
+        "       4             0.0             1.0             0.0\n"
+        "*PART\n"
+        "plate\n"
+        "         1         1         1\n"
+        "*SECTION_SHELL\n"
+        "         1         2\n"
+        "       0.1\n"
+        "*MAT_ELASTIC\n"
+        "         1    7.8E-9  210000.0       0.3\n"
+        "*ELEMENT_SHELL\n"
+        "       1       1       1       2       3       4\n"
+        "*DEFINE_CURVE\n"
+        "         7         0       1.0       1.0\n"
+        "                 0.0                 0.0\n"
+        "                 1.0                 1.0\n"
+        "*SET_SEGMENT\n"
+        "         5\n"
+        "         1         2         3         4\n"
+        "*LOAD_SEGMENT_SET\n"
+        "         5         7       2.5       0.0\n"
+        "*CONTROL_TERMINATION\n"
+        "       1.0\n"
+        "*END\n"
+    )
+
+    @staticmethod
+    def _block(starter, prefix):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(prefix))
+        return lines, i
+
+    @staticmethod
+    def _data_lines(lines, i):
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    def test_not_skipped(self):
+        result, _ = _convert_string_deck(self.DECK)
+        self.assertNotIn("LOAD_SEGMENT_SET", result.skipped_keywords)
+
+    def test_emits_surf_seg_and_pload(self):
+        _, starter = _convert_string_deck(self.DECK)
+        self.assertIn("/PLOAD/", starter)
+        lines, i = self._block(starter, "/SURF/SEG/")
+        surf_id = int(lines[i].split("/")[3])
+        seg = self._data_lines(lines, i)[1]                 # after the title line
+        self.assertEqual(
+            [int(seg[k:k + 10]) for k in range(0, 50, 10)], [1, 1, 2, 3, 4])
+        lines, i = self._block(starter, "/PLOAD/")
+        card = self._data_lines(lines, i)[1]
+        self.assertEqual(int(card[0:10]), surf_id)          # surf_ID
+        self.assertEqual(int(card[10:20]), 7)               # fct_IDT = lcid
+        self.assertEqual(card[80:100].strip(), "2.5")       # Fscale_y = sf
+
+    def test_missing_set_segment_warns_not_crashes(self):
+        deck = self.DECK.replace(
+            "*SET_SEGMENT\n"
+            "         5\n"
+            "         1         2         3         4\n", "")
+        result, starter = _convert_string_deck(deck)
+        self.assertNotIn("/PLOAD/", starter)
+        self.assertTrue(any("SET_SEGMENT 5" in w for w in result.warnings))
+
+    def test_handler_stores_load(self):
+        state = ConversionState()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "seg.k")
+        with open(path, "w") as fh:
+            fh.write(self.DECK)
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        self.assertEqual(len(state.segment_set_pressure_loads), 1)
+        ssl = state.segment_set_pressure_loads[0]
+        self.assertEqual((ssl.ssid, ssl.lcid, ssl.sf), (5, 7, 2.5))
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from k2rad.state import ConversionState, MatAddFatigue   # noqa: E402
 from modal_common import (                                # noqa: E402
-    Mesh, ModeSet, _HAVE_NUMPY, build_mesh, default_output_stem,
+    Mesh, _HAVE_NUMPY, build_mesh, default_output_stem,
     freq_scale_from_args, load_modes, parse_deck, shapes_on_mesh, write_vtk,
 )
 import modal_solve                                        # noqa: E402
@@ -390,7 +390,6 @@ def shell_modal_stress(model: ShellStressModel,
     local frame.  Triangles carry a zero-weight 4th node (index repeats node 3
     but its dN/dx is zero, so the duplicate contributes nothing).
     """
-    n_modes = disp6.shape[0]
     u = disp6[:, model.index, :3]                # (m, n, 4, 3) global
     th = disp6[:, model.index, 3:]               # (m, n, 4, 3) global rotations
     # rotate into the local frame
@@ -838,7 +837,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                  f"{rms_disp[i, 1]:.6G}", f"{rms_disp[i, 2]:.6G}",
                  f"{rms_mag[i]:.6G}") for i in range(mesh.n_nodes)))
     top = np.argsort(rms_mag)[::-1][:5]
-    print(f"\n  RMS relative displacement (deck length units) - top nodes:")
+    print("\n  RMS relative displacement (deck length units) - top nodes:")
     for i in top:
         print(f"    node {int(mesh.node_ids[i]):8d}: |u|rms = {rms_mag[i]:.5G}")
 

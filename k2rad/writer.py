@@ -22,13 +22,7 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
     FailGissmo, MatAddErosion,
     SectionShell, SectionSolid, SectionBeam,
-    PartData, Curve, CoordSys,
-    BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
-    ContactAutoSingle, ContactAutoSurf2Surf,
-    InitialVelocityNode, InitialVelocityRigidBody, PressureLoad,
-    MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
-    AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
-    BoundaryNonReflecting, ControlAle,
+    PartData, Curve, MatHighExplosiveBurn, EosJwl, EosCard,
 )
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
@@ -883,11 +877,11 @@ def _skew_axes_from_nodes(state: ConversionState, cn):
     # Cyclic assignment X->Y->Z->X: dir axis = e_dir, next (in-plane) = inplane,
     # the one after = nrm. This reproduces /SKEW/MOV's documented axes exactly.
     if cn.dir == "Y":
-        X, Y, Z = nrm, e_dir, inplane
+        X, Y, _Z = nrm, e_dir, inplane
     elif cn.dir == "Z":
-        X, Y, Z = inplane, nrm, e_dir
+        X, Y, _Z = inplane, nrm, e_dir
     else:  # "X" (default)
-        X, Y, Z = e_dir, inplane, nrm
+        X, Y, _Z = e_dir, inplane, nrm
     return origin, X, Y
 
 
@@ -1197,6 +1191,11 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
         ref.update(n for n in (cn.n1, cn.n2, cn.n3) if n > 0)
     for pl in state.pressure_loads:
         ref.update(n for n in pl.nodes if n > 0)
+    for ssl in state.segment_set_pressure_loads:
+        segset = state.segment_sets.get(ssl.ssid)
+        if segset is not None:
+            for nodes in segset.segments:
+                ref.update(n for n in nodes if n > 0)
     for h in state.db_histories:
         if h.db_type == "NODE":
             ref.update(n for n in h.ids if n > 0)
@@ -4136,11 +4135,21 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     five 10-char fields per line; n4=0 → triangle). Pressure acts along the
     segment normal, so LS-DYNA's segment orientation carries the direction.
     """
-    if not state.pressure_loads:
+    if not state.pressure_loads and not state.segment_set_pressure_loads:
         return []
     groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
     for pl in state.pressure_loads:
         groups[(pl.lcid, pl.sf)].append(pl.nodes)
+    # *LOAD_SEGMENT_SET: expand each referenced *SET_SEGMENT into per-segment
+    # cards, grouped alongside *LOAD_SEGMENT by (lcid, sf).
+    for ssl in state.segment_set_pressure_loads:
+        segset = state.segment_sets.get(ssl.ssid)
+        if segset is None:
+            state.warn(f"*LOAD_SEGMENT_SET references *SET_SEGMENT {ssl.ssid}, "
+                       "which is not defined — pressure load dropped.")
+            continue
+        for nodes in segset.segments:
+            groups[(ssl.lcid, ssl.sf)].append(list(nodes))
 
     lines: List[str] = ["#-  PRESSURE LOADS:", HDR]
     pload_id = 1
@@ -4839,6 +4848,7 @@ def _make_modal_dummy_cload(state: ConversionState,
     if not state.is_modal or state.options.emit_eig:
         return []
     if (state.load_rigid_bodies or state.pressure_loads
+            or state.segment_set_pressure_loads
             or state.prescribed_motions or state.prescribed_motion_sets):
         return []                       # the deck already loads something
     elem_nodes: Set[int] = set()
