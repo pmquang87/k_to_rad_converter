@@ -12,6 +12,8 @@ Usage::
 
 from __future__ import annotations
 
+__version__ = "0.1.0"
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -430,4 +432,4 @@ def convert(
     )
 
 
-__all__ = ["convert", "ConversionResult"]
+__all__ = ["convert", "ConversionResult", "__version__"]

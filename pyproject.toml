@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "k2rad"
+version = "0.1.0"
+description = "Convert LS-DYNA .k keyword decks to OpenRadioss starter/engine .rad files."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Minh Quang Pham" }]
+keywords = ["ls-dyna", "openradioss", "radioss", "fea", "finite-element", "crash", "converter"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+# The core converter is pure standard library — no runtime dependencies.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/pmquang87/k_to_rad_converter"
+Repository = "https://github.com/pmquang87/k_to_rad_converter"
+Issues = "https://github.com/pmquang87/k_to_rad_converter/issues"
+
+[project.optional-dependencies]
+# Offline modal eigensolve, random-vibration/fatigue, and the fast --auto-gapmin
+# node-to-segment proximity search (see docs/DEPENDENCIES.md).
+modal = ["numpy", "scipy"]
+# Mode-shape export to LS-PrePost d3plot (ParaView VTK needs only numpy).
+viz = ["numpy", "lasso-python"]
+# Everything optional, for a full local install.
+all = ["numpy", "scipy", "lasso-python"]
+# Linting / tooling for contributors.
+dev = ["ruff", "coverage"]
+
+[project.scripts]
+k2rad = "k2rad.cli:main"
+
+[tool.setuptools]
+# Root holds both the `k2rad/` package and a `k2rad.py` CLI shim plus loose
+# helper scripts (run_converter.py, k2rad_gui.py, add_grounding_springs.py).
+# Declare the package explicitly so flat-layout auto-discovery does not choke
+# on the same-named module / helper scripts.
+packages = ["k2rad"]
+py-modules = []
+
+# NOTE: keep `version` above in sync with k2rad/__init__.py::__version__.
+# A dynamic `attr = "k2rad.__version__"` cannot be used here because the repo
+# root has both a `k2rad/` package and a `k2rad.py` CLI shim; setuptools'
+# attribute reader resolves the same-named shim module and fails to import.
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+# The core is intentionally stdlib-only; keep the tools/ scripts in scope too.
+extend-exclude = [".venv", "docker"]
+
+[tool.ruff.lint]
+# Start conservative: pyflakes (F) + a subset of pycodestyle errors (E). Grow
+# the rule set over time rather than turning the repo red on day one.
+select = ["F", "E9"]
+ignore = []
+
+[tool.coverage.run]
+branch = true
+source = ["k2rad", "tools"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

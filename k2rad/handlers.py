@@ -23,7 +23,8 @@ from .state import (
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
     InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
-    SegmentSet, LoadBlastEnhanced, LoadBlastSegmentSet, LoadBody,
+    SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
+    LoadBody,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
     AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
@@ -338,7 +339,6 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     secid  = to_int(f1[0]) if f1 else 0
     elform = to_int(f1[1]) if len(f1) > 1 else 2
-    nip    = to_int(f1[2]) if len(f1) > 2 else 2
     sec = SectionBeam(secid, title, elform)
 
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
@@ -1995,6 +1995,41 @@ def handle_load_segment(block: Block, state: ConversionState) -> None:
             state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
 
 
+def handle_load_segment_set(block: Block, state: ConversionState) -> None:
+    """*LOAD_SEGMENT_SET[_ID] → /PLOAD on the referenced *SET_SEGMENT surface.
+
+    Card: ssid lcid sf at  (one card per loaded segment set; may repeat).
+      ssid = *SET_SEGMENT id (the loaded surface)
+      lcid = load curve (pressure vs time)
+      sf   = curve scale factor (default 1.0)
+      at   = arrival/activation time (no /PLOAD equivalent — dropped, warned)
+    The segments are resolved from state.segment_sets at write time, so the
+    *SET_SEGMENT may appear anywhere in the deck.
+    """
+    raw = block.raw
+    data = raw[1:] if _has_id(block) else raw
+    warned_at = False
+    for i in range(len(data)):
+        if not data[i].strip():           # blank card placeholder → skip
+            continue
+        f = _card(data, i, fixed=True, n=8, w=10)
+        if not f:
+            continue
+        ssid = to_int(f[0])
+        lcid = to_int(f[1]) if len(f) > 1 else 0
+        sf   = _ffield(f, 2, 1.0)
+        at   = to_float(f[3]) if len(f) > 3 else 0.0
+        if ssid <= 0 or lcid <= 0:
+            continue
+        if at != 0.0 and not warned_at:
+            state.warn(f"*{block.keyword}: arrival time AT={at:g} on segment set "
+                       f"{ssid} has no /PLOAD equivalent — dropped (load applies "
+                       "from t=0).")
+            warned_at = True
+        state.segment_set_pressure_loads.append(
+            SegmentSetPressureLoad(ssid, lcid, sf))
+
+
 def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
     """*LOAD_GRAVITY_PART[_SET]: one data row per part (or part set).
 
@@ -2594,7 +2629,8 @@ HANDLERS = {
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
     "LOAD_SEGMENT":                           handle_load_segment,
     "LOAD_SEGMENT_ID":                        handle_load_segment,
-    "LOAD_SEGMENT_SET":                       handle_skip,
+    "LOAD_SEGMENT_SET":                       handle_load_segment_set,
+    "LOAD_SEGMENT_SET_ID":                    handle_load_segment_set,
     "LOAD_NODE_POINT":                        handle_load_node,
     "LOAD_NODE_SET":                          handle_load_node,
     "LOAD_BODY_X":                            handle_load_body,

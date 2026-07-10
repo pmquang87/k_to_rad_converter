@@ -32,7 +32,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # k2rad lives one directory up from tools/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

@@ -8,13 +8,49 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Run test suite
-        run: python -m unittest discover -s tests -v
+      - name: Install optional scientific dependencies
+        # The core converter is pure stdlib, but the modal eigensolve,
+        # random-vibration/fatigue and fast --auto-gapmin tests need numpy/scipy
+        # (and lasso-python for the d3plot export). Without these the most
+        # numerically complex tests silently self-skip. numpy/scipy are required;
+        # lasso-python is best-effort (no wheels on some Python versions).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy "coverage[toml]"
+          python -m pip install lasso-python || echo "lasso-python unavailable on this Python; d3plot export tests will skip"
+      - name: Run test suite with coverage
+        run: |
+          coverage run -m unittest discover -s tests -v
+          coverage report
+      - name: Fail if too many tests were skipped
+        # Guard against the scientific deps silently dropping out again: with
+        # numpy+scipy installed only a handful of lasso-python-gated tests skip.
+        run: |
+          skips=$(python -m unittest discover -s tests 2>&1 | grep -oE 'skipped=[0-9]+' | grep -oE '[0-9]+' || echo 0)
+          echo "skipped tests: ${skips:-0}"
+          if [ "${skips:-0}" -gt 15 ]; then
+            echo "::error::${skips} tests skipped (>15) — scientific dependencies may be missing"
+            exit 1
+          fi
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install ruff
+      - name: Ruff lint
+        run: ruff check .

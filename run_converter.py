@@ -7,8 +7,13 @@ Or set INPUT_K below to a hardcoded path and run with no arguments.
 """
 
 import sys
+from pathlib import Path
 
-from k2rad import convert
+try:
+    from k2rad import convert
+except ImportError:                              # running from an odd CWD
+    sys.path.insert(0, str(Path(__file__).parent))
+    from k2rad import convert
 
 # ── Optional: set a default input file path here ──────────────────────────────
 INPUT_K = None       # e.g. r"implicit_hr-anlenkung/implicit_hr-anlenkung.k"

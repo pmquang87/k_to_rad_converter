@@ -610,6 +610,19 @@ class PressureLoad:
 
 
 @dataclass
+class SegmentSetPressureLoad:
+    """*LOAD_SEGMENT_SET — a pressure/traction on every segment of a *SET_SEGMENT.
+
+    ``ssid`` references a *SET_SEGMENT (``state.segment_sets``); the segments are
+    resolved at write time so the set may be defined anywhere in the deck. Each
+    segment becomes one /PLOAD entry with function ``lcid`` scaled by ``sf``.
+    """
+    ssid: int
+    lcid: int
+    sf: float
+
+
+@dataclass
 class SegmentSet:
     """*SET_SEGMENT — a set of 3- or 4-node surface segments.
 
@@ -1114,6 +1127,9 @@ class ConversionState:
         self.inivel_nodes: List[InitialVelocityNode] = []
         self.inivel_rbodies: List[InitialVelocityRigidBody] = []
         self.pressure_loads: List[PressureLoad] = []
+        # *LOAD_SEGMENT_SET rows → /PLOAD (segments resolved from segment_sets
+        # at write time so the *SET_SEGMENT may be defined later in the deck)
+        self.segment_set_pressure_loads: List[SegmentSetPressureLoad] = []
         # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
         self.gravity_loads: List[GravityLoadPart] = []
         # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
