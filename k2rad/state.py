@@ -1117,6 +1117,10 @@ class ConversionState:
         # that rigid part's /RBODY secondary-node group
         self.extra_rigid_nodes: Dict[int, List[int]] = {}
 
+        # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
+        # rigid part's nodes are folded into the master's single /RBODY
+        self.rigid_body_merges: List[Tuple[int, int]] = []
+
         # *RIGIDWALL_PLANAR → /RWALL/PLANE
         self.rigid_walls: List[RigidWallPlanar] = []
 

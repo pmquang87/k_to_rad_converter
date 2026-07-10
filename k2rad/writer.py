@@ -2748,6 +2748,15 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             continue
         nodes_by_pid[pid].extend(extra)
 
+    # *CONSTRAINED_RIGID_BODIES: fold each slave rigid part's nodes into its
+    # master so only the master emits an /RBODY. Chains (A<-B, B<-C) resolve
+    # transitively via union-find with the master as the representative.
+    merge_root = _resolve_rigid_body_merges(state, rigid_mids)
+    for slave, master in sorted(merge_root.items()):
+        moved = nodes_by_pid.pop(slave, [])
+        if moved:
+            nodes_by_pid[master].extend(moved)
+
     if not nodes_by_pid:
         for mid in rigid_mids:
             state.warn(f"*MAT_RIGID mid={mid}: no elements found; /RBODY not emitted")
@@ -2942,7 +2951,47 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 HDR,
             ]
 
+    # *CONSTRAINED_RIGID_BODIES: repoint each merged slave pid at its master's
+    # rigid-body info so a *LOAD_RIGID_BODY / *BOUNDARY_PRESCRIBED_MOTION_RIGID /
+    # *INITIAL_VELOCITY_RIGID_BODY / TH readout keyed on the slave pid resolves
+    # to the surviving master's master node.
+    for slave, master in merge_root.items():
+        if master in rbody_info:
+            rbody_info[slave] = rbody_info[master]
+
     return lines, rigid_nodes, rbody_info
+
+
+def _resolve_rigid_body_merges(state: ConversionState, rigid_mids: Set[int]) -> Dict[int, int]:
+    """*CONSTRAINED_RIGID_BODIES (PIDM, PIDS) pairs → {slave_pid: root_master_pid}.
+
+    Union-find with the master (PIDM) side as the representative, so chained
+    merges (A<-B, B<-C) all resolve to the ultimate master A. Only pairs whose
+    BOTH parts are *MAT_RIGID are honoured; others are warned and dropped. The
+    root master itself is not in the returned map (it keeps its own /RBODY)."""
+    parent: Dict[int, int] = {}
+
+    def find(p: int) -> int:
+        parent.setdefault(p, p)
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+
+    for pidm, pids in state.rigid_body_merges:
+        mp = state.parts.get(pidm)
+        sp = state.parts.get(pids)
+        if (mp is None or mp.mid not in rigid_mids
+                or sp is None or sp.mid not in rigid_mids):
+            state.warn(
+                f"*CONSTRAINED_RIGID_BODIES ({pidm},{pids}): both parts must be "
+                "*MAT_RIGID to merge into one rigid body — merge skipped.")
+            continue
+        rm, rs = find(pidm), find(pids)
+        if rm != rs:
+            # Attach the slave's root under the master's root.
+            parent[rs] = rm
+    return {p: find(p) for p in parent if find(p) != p}
 
 
 def _con1_to_tra(con1: int) -> str:
