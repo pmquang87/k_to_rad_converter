@@ -348,8 +348,10 @@ class ModalBucklingTests(unittest.TestCase):
                 [mpath, col.kpath, "--load", str(col.n_el + 1), "X", str(-P),
                  "-n", "3", "-o", out])
             self.assertEqual(rc, 0)
-            d = np.load(out)
-            p_cr = d["buckling_factors"][0] * P
+            # Close the NpzFile before the TemporaryDirectory is torn down —
+            # on Windows an open file handle blocks the temp-dir cleanup.
+            with np.load(out) as d:
+                p_cr = d["buckling_factors"][0] * P
             self.assertAlmostEqual(p_cr / col.euler_pcr(), 1.0, delta=0.01)
 
 

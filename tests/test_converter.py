@@ -3766,10 +3766,12 @@ def _convert_string_deck(deck: str):
     """convert() a deck given as a string; returns (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
-    with open(path, "w") as fh:
+    # The converter reads/writes UTF-8; be explicit so tests are byte-identical
+    # across platforms (Windows' default cp1252 would mangle non-ASCII titles).
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(deck)
     result = convert(path, write_log=False)
-    with open(result.starter_path) as fh:
+    with open(result.starter_path, encoding="utf-8") as fh:
         starter = fh.read()
     tmp.cleanup()
     return result, starter
