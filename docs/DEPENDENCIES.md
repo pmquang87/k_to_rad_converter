@@ -12,7 +12,7 @@ python k2rad.py model.k
 
 never import any third-party package. The Tkinter GUI (`k2rad_gui.py`) uses only
 `tkinter`, which ships with CPython. So a plain conversion has **no install
-step** beyond Python 3.8+.
+step** beyond Python 3.9+.
 
 ## Optional: numpy + scipy (auto-Gapmin and the modal eigensolver)
 
@@ -115,7 +115,7 @@ distance reported is the one the engine actually sees.
 
 | You want to… | Need |
 |---|---|
-| Convert a deck (CLI or GUI) | Python 3.8+ only |
+| Convert a deck (CLI or GUI) | Python 3.9+ only |
 | Use `--auto-gapmin` / `--suggest-gapmin` | `pip install scipy` |
 | Solve modes with `tools/modal_solve.py` | `pip install scipy` |
 | Export mode shapes as VTK (ParaView) | `pip install numpy` |
