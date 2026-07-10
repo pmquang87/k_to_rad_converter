@@ -283,11 +283,20 @@ def solve_buckling(K: "sp.csc_matrix", Kg: "sp.csc_matrix",
     if k < 1:
         k = 1
     # eigsh needs k < n; for tiny systems fall back to a dense generalized solve.
+    import scipy.linalg as sla
     if n <= max(2 * k + 2, 20):
-        import scipy.linalg as sla
         beta, vecs = sla.eigh(B.toarray(), K.toarray())
     else:
-        beta, vecs = spla.eigsh(B, k=k, M=K, which="LA")
+        try:
+            beta, vecs = spla.eigsh(B, k=k, M=K, which="LA")
+        except (spla.ArpackError, spla.ArpackNoConvergence):
+            # ARPACK cannot build an Arnoldi factorization when there is no
+            # positive buckling mode in the requested set — e.g. a tensile
+            # reference load, where B = -K_g has no large positive algebraic
+            # eigenvalue relative to K. The dense symmetric generalized
+            # eigensolve always resolves it (these buckling systems are small),
+            # and the good-mode filter below then correctly yields no positive λ.
+            beta, vecs = sla.eigh(B.toarray(), K.toarray())
     order = np.argsort(beta)[::-1]                     # largest β first
     beta, vecs = beta[order], vecs[:, order]
     good = beta > 1e-9 * max(abs(beta).max(), 1e-30)
