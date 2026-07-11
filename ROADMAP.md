@@ -10,7 +10,8 @@ why. For the current supported-keyword set and the shipped behaviour, see
 A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
 
 - **Architecture:** `k2rad/topology.py` extraction; the `build_starter`
-  data-driven section registry; the `ConversionState` dataclass.
+  data-driven section registry; the `ConversionState` dataclass; the
+  `k2rad/writer/` package split (byte-identical output).
 - **Tier 1:** `*CONSTRAINED_RIGID_BODIES` → merged `/RBODY`;
   `*DEFINE_CURVE_FUNCTION` → sampled `/FUNCT`.
 - **Tier 2:** foams/honeycomb `*MAT_CRUSHABLE_FOAM`/`LOW_DENSITY_FOAM`/
@@ -28,8 +29,7 @@ The remaining items below are still open.
 ## Architecture refactors
 
 The core pipeline (parse → dispatch → `ConversionState` → writer) is sound.
-The originally-listed refactors are **done** (the `writer/` package split
-lands separately) (kept below for the
+All four originally-listed refactors are now **done** (kept below for the
 rationale record): the `writer/` package split, the `ConversionState`
 dataclass, the shared `topology` module, and the `build_starter` section
 registry. Remaining architecture ideas: grouping the state's ~100 fields into

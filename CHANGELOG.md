@@ -44,6 +44,9 @@ Prior history (before this changelog was introduced) is summarized in the
 
 - `ConversionState` is now a dataclass — a typed, mypy-checkable contract
   between handlers and writer (no-arg construction unchanged).
+- The writer was split from a single 7,300-line module into the
+  `k2rad/writer/` package (10 family modules + an explicit re-export
+  `__init__`; byte-identical output, same public surface).
 - Extracted the TET10 connectivity constant into a neutral `k2rad/topology.py`
   (so the optional `gapmin` path no longer imports the whole writer), and made
   `build_starter` assemble the starter from a data-driven section registry
