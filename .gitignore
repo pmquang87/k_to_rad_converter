@@ -37,6 +37,12 @@ ENV/
 *.dyn
 *.inc
 
+# Golden-file regression fixtures (override the global *.k/*.rad ignores so the
+# checked-in test decks and their expected .rad outputs are tracked).
+!tests/fixtures/
+!tests/fixtures/**/*.k
+!tests/fixtures/**/*.rad
+
 # OS specific
 .DS_Store
 Thumbs.db

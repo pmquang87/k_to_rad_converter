@@ -12,7 +12,12 @@ ARG BASE_IMAGE=openradioss-mumps-vortex:20260520
 FROM ${BASE_IMAGE}
 
 # scipy for the offline eigensolver (numpy is already present via lasso-python).
-RUN python3 -m pip install --no-cache-dir scipy
+# Pin scipy to a version with broad manylinux wheel availability so rebuilds
+# are reproducible and don't drift with new PyPI releases. numpy stays as the
+# base-image (lasso-python) version on purpose -- 1.13.1 supports numpy
+# >=1.22.4,<2.3, so pinning it here too would risk downgrading/conflicting with
+# the base image's numpy.
+RUN python3 -m pip install --no-cache-dir 'scipy==1.13.1'
 
 # k2rad converter + modal tools. master must carry the --drill LS-DYNA-parity
 # eigensolver (PR #36); the two checks fail the build if it does not.

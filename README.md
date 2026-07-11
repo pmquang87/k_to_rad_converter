@@ -138,12 +138,21 @@ address loads/readouts by it; OpenRadioss then relocates it to the CoM at
 runtime, so it appears to move in post-processing).
 `*MAT_NULL` → `/MAT/VOID` (or a `/MAT/LAW6` hydro carrier when it has an `*EOS_*`)
 `*MAT_HIGH_EXPLOSIVE_BURN` (+ its `*EOS_JWL`) → `/MAT/LAW5` (JWL)
+Foams & honeycomb: `*MAT_CRUSHABLE_FOAM` (63) → `/MAT/LAW50`,
+`*MAT_LOW_DENSITY_FOAM` (57) → `/MAT/LAW38`, `*MAT_FU_CHANG_FOAM` (83) →
+`/MAT/LAW70`, `*MAT_HONEYCOMB` (26) → `/MAT/LAW28`. The referenced stress-strain
+`*DEFINE_CURVE`s become `/FUNCT`s; law-specific unmapped fields (foam tension
+cutoff / damping / hysteresis shape, honeycomb compaction modulus) are dropped
+with a warning, so review the converted card against the source foam
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`)
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`
+`*DEFINE_CURVE_FUNCTION` → `/FUNCT` (a pure single-variable `x`/`time` analytic
+expression is sampled into an X-Y function over `[0, termination]`; expressions
+that reference parameters, other curves, or runtime state are warned + skipped)
 `*PARAMETER` (fixed and free format, `R`/`I` types) — `&name` references are
 resolved wherever a field is parsed; `*PARAMETER_EXPRESSION` is not evaluated
 (warned). LS-DYNA **comma-delimited free format** is accepted on every card.
@@ -155,6 +164,9 @@ rotation. `TF` failure time has no `/RLINK` equivalent and is dropped)
 `*CONSTRAINED_EXTRA_NODES_NODE/_SET` — the extra nodes join the rigid part's
 `/RBODY` secondary-node group (also lets an element-free `*MAT_RIGID` part form
 a rigid body)
+`*CONSTRAINED_RIGID_BODIES` → one merged `/RBODY`: the slave rigid part's nodes
+fold into the master's secondary-node group (chains `A←B←C` resolve
+transitively), and the slave part id still resolves for loads/motions/readouts
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
@@ -203,6 +215,11 @@ unit/sign gotchas.
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`, `_GENERAL`) → `/INTER/TYPE7`
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`
+`*CONTACT_..._TIEBREAK` (`SURFACE_TO_SURFACE_TIEBREAK`, `_ONE_WAY_...`,
+`TIEBREAK_{SURFACE,NODES}_TO_SURFACE`) → `/INTER/TYPE7` for the post-failure
+contact, **with a warning that the cohesive pre-bond (NFLS/SFLS stress failure)
+has no open-source OpenRadioss equivalent and is dropped** — the parts contact
+but do not pre-bond
 `*CONTACT_TIED_{NODES,SHELL_EDGE,SURFACE}_TO_SURFACE` (+ `_OFFSET` variants) →
 `/INTER/TYPE2` (tied kinematic interface): slave `*SET_NODE_LIST` (SSTYP=4) →
 `/GRNOD`, master `*SET_SEGMENT` (MSTYP=0) → `/SURF/SEG`; parts / part sets on
@@ -313,6 +330,24 @@ See [`docs/MODAL.md`](docs/MODAL.md) for the full chain — the export recipe,
 drilling-stiffness parity (`--drill`), stock-engine caveats and 1-line patches,
 the inert probe rigid body, mode-shape viewing, random vibration & fatigue, and
 GUI integration.
+
+### Further linear analyses on the exported stiffness matrix
+
+The same offline stiffness-export chain drives two more analysis types the
+open-source engine otherwise lacks:
+
+- **Linear buckling** — `tools/modal_buckling.py` solves `K φ = λ(−K_g)φ`
+  (static pre-solve → consistent geometric stiffness → eigensolve) and reports
+  the buckling factors and `P_cr`. Beam/rod/truss elements are supported and
+  validated against the analytic Euler pin-pinned column (`P_cr = π²EI/L²`) to
+  0.001 %; shell/solid elements are counted and skipped with a warning rather
+  than reported with a wrong factor.
+- **Harmonic / frequency response (FRF)** — `tools/modal_frf.py` sweeps a
+  modal-superposition FRF for base excitation (`--dir`) or a nodal harmonic load
+  (`--load`) and writes per-node magnitude/phase spectra plus a resonance-peak
+  table (validated against the closed-form SDOF response).
+
+Both need the optional `[modal]` extra (numpy + scipy).
 
 ---
 

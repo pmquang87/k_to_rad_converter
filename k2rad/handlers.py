@@ -7,6 +7,8 @@ Each public function has signature:
 
 from __future__ import annotations
 
+import ast as _ast
+import math as _math
 from typing import List
 
 from .parser import (
@@ -18,6 +20,7 @@ from .state import (
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAddErosion, ConstrainedNodeSet,
+    MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
@@ -565,6 +568,12 @@ def handle_eos_linear_polynomial(block: Block, state: ConversionState) -> None:
         return
     eosid = to_int(f[0])
     g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    c6 = g(7)
+    if c6 != 0.0:
+        state.warn(f"*EOS_LINEAR_POLYNOMIAL {eosid}: C6={c6:g} (the C6·μ²·E "
+                   "term) has no /EOS/POLYNOMIAL equivalent — Radioss's "
+                   "polynomial energy coefficients stop at C5·μ·E — so C6 is "
+                   "dropped.")
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     e0 = to_float(f2[0]) if f2 else 0.0
     v0 = to_float(f2[1], 1.0) if len(f2) > 1 else 1.0
@@ -779,6 +788,116 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
             pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
                         (to_float(f[1]) + offo) * (sfo or 1.0)))
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
+
+
+# Whitelisted names for the *DEFINE_CURVE_FUNCTION expression sampler. Only a
+# pure single-variable arithmetic/trig expression can be sampled into a /FUNCT;
+# anything referencing parameters, other curves (LC(...)), or runtime state is
+# left to the warn-and-skip path.
+_FUNC_EXPR_FUNCS = {
+    "sin": _math.sin, "cos": _math.cos, "tan": _math.tan,
+    "asin": _math.asin, "acos": _math.acos, "atan": _math.atan,
+    "sinh": _math.sinh, "cosh": _math.cosh, "tanh": _math.tanh,
+    "exp": _math.exp, "log": _math.log, "log10": _math.log10,
+    "sqrt": _math.sqrt, "abs": abs, "min": min, "max": max, "pow": pow,
+    "atan2": _math.atan2, "floor": _math.floor, "ceil": _math.ceil,
+}
+_FUNC_EXPR_CONSTS = {"pi": _math.pi, "PI": _math.pi, "e": _math.e}
+_FUNC_EXPR_VARS = {"x", "X", "t", "T", "time", "TIME"}
+_FUNC_EXPR_OK_NODES = (
+    _ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Call, _ast.Name, _ast.Load,
+    _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.Pow, _ast.Mod, _ast.USub,
+    _ast.UAdd, _ast.Constant,
+)
+
+
+def _sample_curve_function(expr: str, tmax: float, npts: int = 101):
+    """Sample a pure single-variable expression into [(x, f(x))] points over
+    [0, tmax], or return None if the expression is not a safe single-variable
+    arithmetic/trig function (references parameters, curves, or other state)."""
+    try:
+        tree = _ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+    varname = None
+    for node in _ast.walk(tree):
+        if not isinstance(node, _FUNC_EXPR_OK_NODES):
+            return None
+        if isinstance(node, _ast.Call):
+            if not (isinstance(node.func, _ast.Name)
+                    and node.func.id in _FUNC_EXPR_FUNCS):
+                return None
+        if isinstance(node, _ast.Name):
+            nm = node.id
+            if nm in _FUNC_EXPR_FUNCS or nm in _FUNC_EXPR_CONSTS:
+                continue
+            if nm in _FUNC_EXPR_VARS:
+                if varname is not None and nm != varname:
+                    return None            # more than one distinct variable
+                varname = nm
+            else:
+                return None                # unknown identifier (param/curve/…)
+    if varname is None:
+        return None                        # constant expression — not a curve
+    code = compile(tree, "<curve_function>", "eval")
+    env = {"__builtins__": {}}
+    env.update(_FUNC_EXPR_FUNCS)
+    env.update(_FUNC_EXPR_CONSTS)
+    tmax = tmax if tmax and tmax > 0.0 else 1.0
+    pts = []
+    for i in range(npts):
+        xv = tmax * i / (npts - 1)
+        env[varname] = xv
+        try:
+            yv = float(eval(code, env))    # noqa: S307 — AST-whitelisted above
+        except (ValueError, ZeroDivisionError, OverflowError):
+            yv = 0.0
+        pts.append((xv, yv))
+    return pts
+
+
+def handle_define_curve_function(block: Block, state: ConversionState) -> None:
+    """*DEFINE_CURVE_FUNCTION → /FUNCT (sampled).
+
+    Header card: lcid sidr sfa sfo offa offo dattyp lcint (same as *DEFINE_CURVE).
+    The following card(s) hold an analytic expression string. OpenRadioss /FUNCT
+    has no analytic form, so a pure single-variable expression (of x / time) is
+    SAMPLED into an X-Y /FUNCT over [0, termination time]. Expressions that
+    reference parameters, other curves (LC(id,x)), sensors, or runtime state
+    cannot be sampled and are warned + skipped.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1:
+        return
+    lcid = to_int(f1[0])
+    sfa  = to_float(f1[2]) if len(f1) > 2 else 1.0
+    sfo  = to_float(f1[3]) if len(f1) > 3 else 1.0
+    offa = to_float(f1[4]) if len(f1) > 4 else 0.0
+    offo = to_float(f1[5]) if len(f1) > 5 else 0.0
+    expr = " ".join(line.strip() for line in raw[offset + 1:] if line.strip())
+    if not expr:
+        state.warn(f"*DEFINE_CURVE_FUNCTION lcid={lcid}: empty expression — skipped.")
+        state.skipped_keywords.append(block.keyword)
+        return
+    tmax = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
+    pts = _sample_curve_function(expr, tmax)
+    if pts is None:
+        state.warn(
+            f"*DEFINE_CURVE_FUNCTION lcid={lcid}: expression {expr!r} is not a "
+            "pure single-variable (x/time) arithmetic function — it references "
+            "parameters, other curves, or runtime state that cannot be sampled "
+            "into a /FUNCT — skipped. Replace it with an explicit *DEFINE_CURVE.")
+        state.skipped_keywords.append(block.keyword)
+        return
+    pts = [((a + offa) * (sfa or 1.0), (o + offo) * (sfo or 1.0)) for a, o in pts]
+    state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
+    state.warn(
+        f"*DEFINE_CURVE_FUNCTION lcid={lcid}: analytic expression sampled into "
+        f"a {len(pts)}-point /FUNCT over [0,{tmax:g}] — verify the range/"
+        "resolution covers the intended use.")
 
 
 def handle_define_coordinate_system(block: Block, state: ConversionState) -> None:
@@ -1090,6 +1209,26 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs)
     )
+
+
+def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
+    """*CONTACT_..._TIEBREAK (SURFACE_TO_SURFACE / ONE_WAY_...) → /INTER/TYPE7.
+
+    The base contact cards (Card1/2/3) are identical to a plain automatic
+    surface-to-surface contact, so the post-failure sliding/friction behaviour
+    converts faithfully via the /INTER/TYPE7 path. But the *tiebreak* itself —
+    the pre-failure cohesive BOND and its stress-based release (OPTION, NFLS
+    normal / SFLS shear failure stress, ERATEN/ERATES energy release) — has no
+    equivalent in an open-source OpenRadioss /INTER/TYPE7, so it is NOT
+    represented: the parts will contact but not pre-bond. Warned explicitly.
+    """
+    state.warn(
+        f"*{block.keyword}: converted to /INTER/TYPE7 (post-failure contact "
+        "only). The cohesive TIEBREAK bond (NFLS/SFLS stress failure) has no "
+        "open-source OpenRadioss equivalent and is DROPPED — the interface "
+        "contacts but does not pre-bond. Model a bonded joint with a tied "
+        "interface or a failing spring/connector if the pre-bond is required.")
+    handle_contact_automatic_surface_to_surface(block, state)
 
 
 def handle_contact_tied(block: Block, state: ConversionState) -> None:
@@ -1572,6 +1711,29 @@ def handle_constrained_extra_nodes(block: Block, state: ConversionState) -> None
         state.extra_rigid_nodes.setdefault(pid, []).extend(nids)
 
 
+def handle_constrained_rigid_bodies(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_RIGID_BODIES — merge two rigid parts into one rigid body.
+
+    Card: PIDM PIDS IFLAG  (one per merge; may repeat)
+      PIDM = master rigid part id (survives as the single /RBODY)
+      PIDS = slave rigid part id (its nodes fold into the master's rigid body)
+      IFLAG = optional (deformable<->rigid switching / inertia option; not modelled)
+    Both parts must be *MAT_RIGID. The writer (_make_rbodies) folds the slave's
+    nodes into the master's secondary-node group, resolves chains transitively,
+    and repoints the slave pid's rigid-body info at the master's master node so
+    loads/motions/readouts keyed on either pid still resolve.
+    """
+    for i in range(len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=3, w=10)
+        pidm = to_int(f[0]) if f else 0
+        pids = to_int(f[1]) if len(f) > 1 else 0
+        if pidm <= 0 or pids <= 0 or pidm == pids:
+            continue
+        state.rigid_body_merges.append((pidm, pids))
+
+
 def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
     """*RIGIDWALL_PLANAR[_ID] (+_FORCES) → /RWALL/PLANE.
 
@@ -1839,6 +2001,128 @@ def handle_mat_power_law_plasticity(block: Block, state: ConversionState) -> Non
     vp   = to_int(f2[1])   if len(f2) > 1 else 0
     epsf = to_float(f2[2]) if len(f2) > 2 else 0.0
     state.mat_power_law[mid] = MatPowerLaw(mid, title, rho, E, nu, k, n, src, srp, sigy, vp, epsf)
+
+
+def handle_mat_crushable_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_CRUSHABLE_FOAM (MAT_063) → /MAT/LAW50.
+
+    LS-DYNA card (mat_063.cfg Keyword971): MID RHO E PR LCID TSC DAMP.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    lcid = to_int(f1[4])   if len(f1) > 4 else 0
+    tsc  = to_float(f1[5]) if len(f1) > 5 else 0.0
+    damp = to_float(f1[6]) if len(f1) > 6 else 0.0
+    state.mat_crushable_foam[mid] = MatCrushableFoam(
+        mid, title, rho, E, nu, lcid, tsc, damp)
+
+
+def handle_mat_low_density_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_LOW_DENSITY_FOAM (MAT_057) → /MAT/LAW38.
+
+    LS-DYNA cards (mat_057.cfg Keyword971):
+      Card1: MID RHO E LCID TC HU BETA DAMP
+      Card2: SHAPE FAIL BVFLAG ED BETA1 KCON REF
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    lcid = to_int(f1[3])   if len(f1) > 3 else 0
+    tc   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    hu   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    beta = to_float(f1[6]) if len(f1) > 6 else 0.0
+    damp = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2 (optional): SHAPE is the first field
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    shape = to_float(f2[0]) if f2 else 0.0
+    state.mat_low_density_foam[mid] = MatLowDensityFoam(
+        mid, title, rho, E, lcid, tc, hu, beta, damp, shape)
+
+
+def handle_mat_fu_chang_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_FU_CHANG_FOAM (MAT_083) → /MAT/LAW70 (APPROXIMATE).
+
+    LS-DYNA cards (mat_083.cfg Keyword971_R11.1):
+      Card1: MID RHO E ED TC FAIL DAMP TBID
+      Card2: BVFLAG SFLAG RFLAG TFLAG PVID SRAF REF HU
+      Card3: (analytic form) C3 C4 C5 AIJ SIJ MINR MAXR SHAPE
+    TBID is the strain-rate load-curve family; HU (card2 field 8) and SHAPE
+    (card3 field 8, analytic form) map to LAW70 Hys / Shape.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    tc   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    damp = to_float(f1[6]) if len(f1) > 6 else 0.0
+    tbid = to_int(f1[7])   if len(f1) > 7 else 0
+    # Card2: HU is the 8th field (hysteretic unloading factor)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    hu = to_float(f2[7]) if len(f2) > 7 else 0.0
+    # Card3 (analytic constitutive form): SHAPE is the 8th field of the second
+    # constitutive card. Only present when the Fu-Chang analytic constants are
+    # given; guarded so the tabulated (TBID-only) form parses cleanly.
+    f3 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    shape = to_float(f3[7]) if len(f3) > 7 else 0.0
+    state.mat_fu_chang_foam[mid] = MatFuChangFoam(
+        mid, title, rho, E, tc, damp, tbid, hu, shape)
+
+
+def handle_mat_honeycomb(block: Block, state: ConversionState) -> None:
+    """*MAT_HONEYCOMB (MAT_026) → /MAT/LAW28.
+
+    LS-DYNA cards (mat_026.cfg Keyword971):
+      Card1: MID RO E PR SIGY VF MU BULK
+      Card2: LCA LCB LCC LCS LCAB LCBC LCCA LCSR
+      Card3: EAAU EBBU ECCU GABU GBCU GCAU AOPT MACF
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    sigy = to_float(f1[4]) if len(f1) > 4 else 0.0
+    vf   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    mu   = to_float(f1[6]) if len(f1) > 6 else 0.0
+    bulk = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2: the seven crush curves + strain-rate curve
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    lca  = to_int(f2[0]) if f2        else 0
+    lcb  = to_int(f2[1]) if len(f2) > 1 else 0
+    lcc  = to_int(f2[2]) if len(f2) > 2 else 0
+    lcs  = to_int(f2[3]) if len(f2) > 3 else 0
+    lcab = to_int(f2[4]) if len(f2) > 4 else 0
+    lcbc = to_int(f2[5]) if len(f2) > 5 else 0
+    lcca = to_int(f2[6]) if len(f2) > 6 else 0
+    lcsr = to_int(f2[7]) if len(f2) > 7 else 0
+    # Card3: the uncompressed moduli
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    eaau = to_float(f3[0]) if f3        else 0.0
+    ebbu = to_float(f3[1]) if len(f3) > 1 else 0.0
+    eccu = to_float(f3[2]) if len(f3) > 2 else 0.0
+    gabu = to_float(f3[3]) if len(f3) > 3 else 0.0
+    gbcu = to_float(f3[4]) if len(f3) > 4 else 0.0
+    gcau = to_float(f3[5]) if len(f3) > 5 else 0.0
+    state.mat_honeycomb[mid] = MatHoneycomb(
+        mid, title, rho, E, nu, sigy, vf, mu, bulk,
+        eaau, ebbu, eccu, gabu, gbcu, gcau,
+        lca, lcb, lcc, lcs, lcab, lcbc, lcca, lcsr)
 
 
 def handle_mat_187(block: Block, state: ConversionState) -> None:
@@ -2487,6 +2771,19 @@ HANDLERS = {
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
+    # Foam / honeycomb families
+    "MAT_CRUSHABLE_FOAM":                     handle_mat_crushable_foam,
+    "MAT_63":                                 handle_mat_crushable_foam,
+    "MAT_063":                                handle_mat_crushable_foam,
+    "MAT_LOW_DENSITY_FOAM":                   handle_mat_low_density_foam,
+    "MAT_57":                                 handle_mat_low_density_foam,
+    "MAT_057":                                handle_mat_low_density_foam,
+    "MAT_FU_CHANG_FOAM":                      handle_mat_fu_chang_foam,
+    "MAT_83":                                 handle_mat_fu_chang_foam,
+    "MAT_083":                                handle_mat_fu_chang_foam,
+    "MAT_HONEYCOMB":                          handle_mat_honeycomb,
+    "MAT_26":                                 handle_mat_honeycomb,
+    "MAT_026":                                handle_mat_honeycomb,
     "MAT_187":                                handle_mat_187,
     "MAT_SAMP-1":                             handle_mat_187,
     "MAT_ADD_DAMAGE_GISSMO":                  handle_mat_add_damage_gissmo,
@@ -2499,6 +2796,7 @@ HANDLERS = {
 
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
+    "DEFINE_CURVE_FUNCTION":                  handle_define_curve_function,
     "DEFINE_COORDINATE_SYSTEM":               handle_define_coordinate_system,
     "DEFINE_COORDINATE_NODES":                handle_define_coordinate_nodes,
     "DEFINE_COORDINATE_VECTOR":               handle_skip,
@@ -2531,6 +2829,7 @@ HANDLERS = {
     "CONSTRAINED_NODAL_RIGID_BODY_SPC":       handle_constrained_nodal_rigid_body,
     "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
     "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
+    "CONSTRAINED_RIGID_BODIES":               handle_constrained_rigid_bodies,
 
     # Rigid walls
     "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
@@ -2550,6 +2849,10 @@ HANDLERS = {
     "CONTACT_AUTOMATIC_SINGLE_SURFACE":       handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR": handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE":   handle_contact_automatic_surface_to_surface,
+    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK": handle_contact_tiebreak,
+    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK": handle_contact_tiebreak,
+    "CONTACT_TIEBREAK_SURFACE_TO_SURFACE":    handle_contact_tiebreak,
+    "CONTACT_TIEBREAK_NODES_TO_SURFACE":      handle_contact_tiebreak,
     "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
     "CONTACT_FORCE_TRANSDUCER_PENALTY":        handle_contact_force_transducer,

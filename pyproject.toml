@@ -39,7 +39,7 @@ viz = ["numpy", "lasso-python"]
 # Everything optional, for a full local install.
 all = ["numpy", "scipy", "lasso-python"]
 # Linting / tooling for contributors.
-dev = ["ruff", "coverage"]
+dev = ["ruff", "coverage", "mypy"]
 
 [project.scripts]
 k2rad = "k2rad.cli:main"
@@ -77,3 +77,15 @@ omit = ["*/tests/*"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+# Measured TOTAL is ~74% today; keep the gate a few points below so routine
+# churn does not turn CI red, while still catching a real coverage regression.
+fail_under = 68
+
+[tool.mypy]
+# Lenient, advisory baseline: this code is not fully typed yet, so run mypy as a
+# non-blocking signal (CI job is continue-on-error). Tighten once the
+# ConversionState dataclass refactor lands (see ROADMAP.md).
+python_version = "3.9"
+files = ["k2rad"]
+ignore_missing_imports = true
+warn_unused_ignores = false

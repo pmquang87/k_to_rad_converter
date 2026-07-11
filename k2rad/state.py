@@ -602,6 +602,114 @@ class MatPowerLaw:
 
 
 @dataclass
+class MatCrushableFoam:
+    """*MAT_CRUSHABLE_FOAM (MAT_063) → /MAT/LAW50 (VISC_HONEY, isotropic use).
+
+    LS-DYNA card (Keyword971 mat_063.cfg): MID RHO E PR LCID TSC DAMP. LCID is the
+    yield stress vs volumetric strain curve; the single curve drives all six
+    LAW50 direction yield functions (σ11/σ22/σ33/σ12/σ23/σ31 identical → isotropic).
+    LAW50's radioss90 FORMAT has no tensile-cutoff or rate-damping slot, so TSC and
+    DAMP are reported and dropped by the writer.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    lcid: int          # yield stress vs volumetric strain curve → all 6 fct_IDs
+    tsc: float         # tensile stress cutoff (no LAW50 slot → warned)
+    damp: float        # rate damping (no LAW50 slot → warned)
+
+
+@dataclass
+class MatLowDensityFoam:
+    """*MAT_LOW_DENSITY_FOAM (MAT_057) → /MAT/LAW38 (VISC_TAB).
+
+    LS-DYNA card (Keyword971 mat_057.cfg):
+      Card1: MID RHO E LCID TC HU BETA DAMP
+      Card2: SHAPE FAIL BVFLAG ED BETA1 KCON REF
+    E → LAW38 E0; LCID → the (single) loading function; TC → LAW38 CUToff (tension
+    cutoff stress). LAW38 has no direct hysteretic-unloading factor, unloading
+    decay or shape factor, so HU / BETA / SHAPE / DAMP are approximate/dropped and
+    warned by the writer.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    lcid: int          # nominal stress vs strain loading curve → LAW38 loading fct
+    tc: float          # tension cutoff → LAW38 CUToff
+    hu: float          # hysteretic unloading factor (approximate in LAW38)
+    beta: float        # unloading decay constant (no LAW38 slot → warned)
+    damp: float        # viscous damping (no LAW38 slot → warned)
+    shape: float       # unloading shape factor (no LAW38 slot → warned)
+
+
+@dataclass
+class MatFuChangFoam:
+    """*MAT_FU_CHANG_FOAM (MAT_083) → /MAT/LAW70 (FOAM_TAB). APPROXIMATE.
+
+    LS-DYNA card (Keyword971_R11.1 mat_083.cfg):
+      Card1: MID RHO E ED TC FAIL DAMP TBID
+      Card2: BVFLAG SFLAG RFLAG TFLAG PVID SRAF REF HU
+      Card3: (analytic form) D0 N0 N1 N2 N3 C0 C1 C2 / C3 C4 C5 AIJ SIJ MINR MAXR SHAPE
+    E → LAW70 E0; TBID → the load-curve family (a *DEFINE_TABLE of nominal
+    stress-strain curves at several strain rates) mapped onto LAW70's per-rate
+    loading functions; HU → LAW70 Hys; SHAPE → LAW70 Shape. Fu-Chang's analytic
+    hysteresis/damping constants (D0..C5, DAMP) have no LAW70 equivalent → warned.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    tc: float          # tension cutoff (no scalar LAW70 slot → warned)
+    damp: float        # rate damping (no LAW70 slot → warned)
+    tbid: int          # load-curve family (table/curve) → LAW70 loading function(s)
+    hu: float          # hysteretic unloading factor → LAW70 Hys
+    shape: float       # unloading shape factor → LAW70 Shape
+
+
+@dataclass
+class MatHoneycomb:
+    """*MAT_HONEYCOMB (MAT_026) → /MAT/LAW28 (HONEYCOMB).
+
+    LS-DYNA card (Keyword971 mat_026.cfg):
+      Card1: MID RO E PR SIGY VF MU BULK
+      Card2: LCA LCB LCC LCS LCAB LCBC LCCA LCSR
+      Card3: EAAU EBBU ECCU GABU GBCU GCAU AOPT MACF
+    Per-direction uncompressed moduli EAAU/EBBU/ECCU → LAW28 E_11/E_22/E_33 and
+    GABU/GBCU/GCAU → G_12/G_23/G_31 (a/b/c ↔ 11/22/33). Normal yield functions
+    LCA/LCB/LCC → fun_ID11/22/33; shear yield functions LCAB/LCBC/LCCA → fun_ID12/
+    23/31 (with the LCS transverse-shear curve as the fallback for any missing
+    shear component). LAW28 has no fully-compacted modulus / SIGY / VF / MU / BULK /
+    LCSR slot, so E, SIGY, VF, MU, BULK and LCSR are reported and dropped.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float           # fully-compacted Young's modulus (no LAW28 slot → warned)
+    nu: float
+    sigy: float        # compacted yield stress (no LAW28 slot → warned)
+    vf: float          # relative volume at full compaction (no LAW28 slot → warned)
+    mu: float          # viscosity coefficient (no LAW28 slot → warned)
+    bulk: float        # bulk viscosity (no LAW28 slot → warned)
+    eaau: float        # uncompressed Young's moduli
+    ebbu: float
+    eccu: float
+    gabu: float        # uncompressed shear moduli
+    gbcu: float
+    gcau: float
+    lca: int           # normal crush curves (aa/bb/cc)
+    lcb: int
+    lcc: int
+    lcs: int           # transverse shear crush curve (fallback for LCAB/BC/CA)
+    lcab: int          # shear crush curves (ab/bc/ca)
+    lcbc: int
+    lcca: int
+    lcsr: int          # strain-rate scaling curve (no LAW28 slot → warned)
+
+
+@dataclass
 class PressureLoad:
     """*LOAD_SEGMENT / *LOAD_SEGMENT_ID → /PLOAD."""
     lcid: int
@@ -1082,6 +1190,11 @@ class ConversionState:
         self.mat_samp: Dict[int, MatSAMP] = {}          # *MAT_187 → /MAT/LAW76
         self.fail_gissmo: Dict[int, FailGissmo] = {}    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
         self.mat_add_erosion: Dict[int, MatAddErosion] = {}   # *MAT_ADD_EROSION → /FAIL
+        # Foam / honeycomb material families
+        self.mat_crushable_foam: Dict[int, MatCrushableFoam] = {}   # MAT_063 → /MAT/LAW50
+        self.mat_low_density_foam: Dict[int, MatLowDensityFoam] = {}  # MAT_057 → /MAT/LAW38
+        self.mat_fu_chang_foam: Dict[int, MatFuChangFoam] = {}      # MAT_083 → /MAT/LAW70
+        self.mat_honeycomb: Dict[int, MatHoneycomb] = {}           # MAT_026 → /MAT/LAW28
         self.constrained_node_sets: List[ConstrainedNodeSet] = []  # *CONSTRAINED_NODE_SET → /RLINK
         # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
         # /FUNCT); tracked so _make_functions can exclude them.
@@ -1116,6 +1229,10 @@ class ConversionState:
         # *CONSTRAINED_EXTRA_NODES_NODE/_SET: pid → extra node ids merged into
         # that rigid part's /RBODY secondary-node group
         self.extra_rigid_nodes: Dict[int, List[int]] = {}
+
+        # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
+        # rigid part's nodes are folded into the master's single /RBODY
+        self.rigid_body_merges: List[Tuple[int, int]] = []
 
         # *RIGIDWALL_PLANAR → /RWALL/PLANE
         self.rigid_walls: List[RigidWallPlanar] = []

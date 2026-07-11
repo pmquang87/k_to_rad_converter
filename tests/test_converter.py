@@ -3766,10 +3766,12 @@ def _convert_string_deck(deck: str):
     """convert() a deck given as a string; returns (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
-    with open(path, "w") as fh:
+    # The converter reads/writes UTF-8; be explicit so tests are byte-identical
+    # across platforms (Windows' default cp1252 would mangle non-ASCII titles).
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(deck)
     result = convert(path, write_log=False)
-    with open(result.starter_path) as fh:
+    with open(result.starter_path, encoding="utf-8") as fh:
         starter = fh.read()
     tmp.cleanup()
     return result, starter
@@ -6385,9 +6387,15 @@ class OutputRobustnessTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(result.starter_path))
 
     def test_non_ascii_title_written_as_utf8(self):
-        deck = TINY_K.replace("shell part", "Träger schön")
+        # Build the non-ASCII title programmatically (chr(0xE4)=a-umlaut,
+        # chr(0xF6)=o-umlaut) so the test SOURCE stays pure ASCII. A literal
+        # non-ASCII byte in the source is decoded per the interpreter's source
+        # encoding, which is not guaranteed UTF-8 on every CI runner (Windows),
+        # and would spuriously fail this assertion regardless of the converter.
+        title = "Tr" + chr(0xE4) + "ger sch" + chr(0xF6) + "n"
+        deck = TINY_K.replace("shell part", title)
         result, starter = _convert_string_deck(deck)
-        self.assertIn("Träger schön", starter)
+        self.assertIn(title, starter)
 
 
 class PrescribedMotionNodeTests(unittest.TestCase):
@@ -6655,6 +6663,163 @@ class LoadSegmentSetTests(unittest.TestCase):
         self.assertEqual(len(state.segment_set_pressure_loads), 1)
         ssl = state.segment_set_pressure_loads[0]
         self.assertEqual((ssl.ssid, ssl.lcid, ssl.sf), (5, 7, 2.5))
+
+
+def _c10(*vals):
+    """Render fields as LS-DYNA fixed 10-wide columns."""
+    return "".join(str(v).rjust(10) for v in vals)
+
+
+def _curve(cid, y):
+    return "\n".join([
+        "*DEFINE_CURVE", _c10(cid, 0, "1.0", "1.0"),
+        "                 0.0                 0.0",
+        "                 0.5" + str(y).rjust(20),
+    ])
+
+
+FOAM_HONEYCOMB_K = "\n".join([
+    "*KEYWORD",
+    "*NODE",
+    "       1             0.0             0.0             0.0",
+    "       2             1.0             0.0             0.0",
+    "       3             1.0             1.0             0.0",
+    "       4             0.0             1.0             0.0",
+    "*ELEMENT_SHELL", "       1       1       1       2       3       4",
+    "*PART", "foam part", _c10(1, 1, 1),
+    "*SECTION_SHELL", _c10(1, 2), "       1.0",
+    # MAT_063: MID RHO E PR LCID TSC DAMP
+    "*MAT_CRUSHABLE_FOAM",
+    _c10(1, "1.0e-9", "50000.0", "0.0", 100, "1.5", "0.05"),
+    # MAT_057: card1 MID RHO E LCID TC HU BETA DAMP / card2 SHAPE FAIL ...
+    "*MAT_LOW_DENSITY_FOAM",
+    _c10(2, "3.0e-11", "2.0", 200, "0.2", "0.5", "10.0", "0.1"),
+    _c10("4.0", 0, 0, 0, 0, 0, 0),
+    # MAT_083: card1 MID RHO E ED TC FAIL DAMP TBID / card2 (HU@8) / card3 analytic (SHAPE@8)
+    "*MAT_FU_CHANG_FOAM",
+    _c10(3, "5.0e-11", "3.0", "0.0", "0.1", "0.0", "0.05", 300),
+    _c10(0, 0, 0, 0, 0, "0.0", "0.0", "0.4"),
+    _c10("0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0"),
+    _c10("0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "2.5"),
+    # MAT_026: card1 MID RO E PR SIGY VF MU BULK / card2 curves / card3 moduli
+    "*MAT_HONEYCOMB",
+    _c10(4, "2.7e-9", "70000.0", "0.0", "200.0", "0.1", "0.0", "0.0"),
+    _c10(400, 401, 402, 403, 410, 411, 412, 0),
+    _c10("500.0", "600.0", "700.0", "250.0", "260.0", "270.0", "2.0", "0"),
+    _curve(100, 50.0), _curve(200, 5.0), _curve(300, 8.0),
+    _curve(400, 100.0), _curve(401, 110.0), _curve(402, 120.0),
+    _curve(403, 50.0), _curve(410, 30.0), _curve(411, 31.0), _curve(412, 32.0),
+    "*CONTROL_TERMINATION", "       1.0", "*END", "",
+])
+
+
+class FoamHoneycombMaterialTests(unittest.TestCase):
+    """*MAT_CRUSHABLE_FOAM/LOW_DENSITY_FOAM/FU_CHANG_FOAM/HONEYCOMB → LAW50/38/70/28.
+
+    Column positions checked against the OpenRadioss cfg FORMAT blocks used for a
+    /BEGIN 2022 deck (matl28/mat_law50 radioss90, matl38/matl70 radioss2019).
+    """
+
+    def setUp(self):
+        self.result, self.starter = _convert_string_deck(FOAM_HONEYCOMB_K)
+
+    def _law(self, header):
+        """Data (non-comment) lines of the material block whose keyword line
+        starts with *header* (e.g. '/MAT/LAW50/1'), up to the next keyword."""
+        lines = self.starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith(header))
+        out = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            out.append(ln)
+        return out
+
+    def test_all_four_emitted_none_skipped(self):
+        for kw in ("MAT_CRUSHABLE_FOAM", "MAT_LOW_DENSITY_FOAM",
+                   "MAT_FU_CHANG_FOAM", "MAT_HONEYCOMB"):
+            self.assertNotIn(kw, self.result.skipped_keywords)
+        for law in ("/MAT/LAW50/1", "/MAT/LAW38/2", "/MAT/LAW70/3", "/MAT/LAW28/4"):
+            self.assertIn(law, self.starter)
+
+    def test_law50_isotropic_moduli_and_yield_functions(self):
+        d = self._law("/MAT/LAW50/1")
+        # d: title, rho, E11/E22/E33, G12/G23/G31, asrate, Iflag1, funID11 ...
+        self.assertAlmostEqual(float(d[2][0:20]), 50000.0)   # E11
+        self.assertAlmostEqual(float(d[2][20:40]), 50000.0)  # E22
+        self.assertAlmostEqual(float(d[2][40:60]), 50000.0)  # E33
+        self.assertAlmostEqual(float(d[3][0:20]), 25000.0)   # G12 = E/2(1+nu)
+        # The LCID drives every direction's first yield function: six funID header
+        # lines, all pointing at curve 100.
+        fun_lines = [ln for ln in d if ln[0:10].strip() == "100"]
+        self.assertEqual(len(fun_lines), 6)
+
+    def test_law50_drops_tsc_and_damp(self):
+        w = " ".join(self.result.warnings)
+        self.assertIn("TSC=1.5", w)
+        self.assertIn("DAMP=0.05", w)
+        self.assertIn("isotropic", w.lower())
+
+    def test_law38_e0_loading_curve_and_cutoff(self):
+        d = self._law("/MAT/LAW38/2")
+        # d: title, rho, E0-card, beta, Kair, P0, ful, Nfunct, Efinal,
+        #    Scale, StrainRate, Loading, Unloading
+        self.assertAlmostEqual(float(d[2][0:20]), 2.0)       # E0 = E
+        nfunct_card = d[7]
+        self.assertEqual(nfunct_card[0:10].strip(), "1")     # N_funct
+        self.assertAlmostEqual(float(nfunct_card[20:40]), 0.2)  # CUToff = TC
+        # loading function is the last-but-one data line, unloading the last
+        self.assertEqual(d[-2].strip(), "200")               # Loading function = LCID
+        self.assertEqual(d[-1].strip(), "0")                 # Unloading function
+
+    def test_law38_hysteresis_is_warned_approximate(self):
+        w = " ".join(self.result.warnings)
+        self.assertIn("HU=0.5", w)
+        self.assertTrue(any("LOW_DENSITY_FOAM 2" in x and "approx" in x.lower()
+                            for x in self.result.warnings))
+
+    def test_law70_maps_curve_family_and_unloading(self):
+        d = self._law("/MAT/LAW70/3")
+        # d: title, rho, EO-card, Fcut/Nload/Shape/Hys card, one loading card
+        self.assertAlmostEqual(float(d[2][0:20]), 3.0)       # EO = E
+        # F_cut(20) Ismooth(10) Nload(10) Nunload(10) Iflag(10) Shape(20) Hys(20)
+        ctrl = d[3]
+        self.assertEqual(ctrl[30:40].strip(), "1")           # Nload = 1
+        self.assertEqual(ctrl[40:50].strip(), "0")           # Nunload = 0
+        self.assertAlmostEqual(float(ctrl[60:80]), 2.5)      # Shape = SHAPE
+        self.assertAlmostEqual(float(ctrl[80:100]), 0.4)     # Hys = HU
+        self.assertEqual(d[4][0:10].strip(), "300")          # loading funcID = TBID
+
+    def test_law70_is_flagged_approximate(self):
+        self.assertTrue(any("FU_CHANG_FOAM 3" in w and "APPROXIMATE" in w
+                            for w in self.result.warnings))
+
+    def test_law28_direction_moduli_and_curves(self):
+        d = self._law("/MAT/LAW28/4")
+        # d: title, rho, E11/E22/E33, G12/G23/G31, funID11-33, Eps_max, funID12-31
+        self.assertAlmostEqual(float(d[2][0:20]), 500.0)     # E_11 = EAAU
+        self.assertAlmostEqual(float(d[2][20:40]), 600.0)    # E_22 = EBBU
+        self.assertAlmostEqual(float(d[2][40:60]), 700.0)    # E_33 = ECCU
+        self.assertAlmostEqual(float(d[3][0:20]), 250.0)     # G_12 = GABU
+        normal = d[4]
+        self.assertEqual(normal[0:10].strip(), "400")        # fun_ID11 = LCA
+        self.assertEqual(normal[10:20].strip(), "401")       # fun_ID22 = LCB
+        self.assertEqual(normal[20:30].strip(), "402")       # fun_ID33 = LCC
+        self.assertAlmostEqual(float(normal[40:60]), 1.0)    # Fscale11
+        shear = d[6]
+        self.assertEqual(shear[0:10].strip(), "410")         # fun_ID12 = LCAB
+        self.assertEqual(shear[10:20].strip(), "411")        # fun_ID23 = LCBC
+        self.assertEqual(shear[20:30].strip(), "412")        # fun_ID31 = LCCA
+
+    def test_law28_drops_compacted_fields(self):
+        self.assertTrue(any("HONEYCOMB 4" in w and "70000" in w
+                            for w in self.result.warnings))
+
+    def test_referenced_curves_become_functions(self):
+        for cid in (100, 200, 300, 400, 401, 402, 410):
+            self.assertIn(f"/FUNCT/{cid}", self.starter)
 
 
 if __name__ == "__main__":

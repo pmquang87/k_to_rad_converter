@@ -69,9 +69,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .state import ConversionState
 # The validated TET10 mid-edge map (mid_local_index, cornerA_local, cornerB_local)
-# is owned by the writer; reuse it so the contact-facet subdivision here always
-# matches the surface the writer/engine builds.
-from .writer import _TET10_MIDEDGE
+# lives in the neutral topology module; reuse it so the contact-facet subdivision
+# here always matches the surface the writer/engine builds — without importing the
+# whole writer just for this constant.
+from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 # ── Optional fast-proximity backend (numpy + scipy) ──────────────────────────
 # Kept optional so `import k2rad` and a default conversion need no third party.

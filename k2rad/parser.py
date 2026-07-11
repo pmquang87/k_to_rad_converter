@@ -263,7 +263,12 @@ def parse_k_file(path: str, _depth: int = 0,
 
         kw, opts, raw = None, [], []   # type: ignore[assignment]
 
-    with open(path, "r", errors="replace") as fh:
+    # Read the deck as UTF-8 (matching the UTF-8 the writer emits) so the
+    # conversion is byte-for-byte identical regardless of the host locale — the
+    # default encoding is cp1252 on Windows, which silently mangles any non-ASCII
+    # title/comment. errors="replace" keeps a genuinely non-UTF-8 deck from
+    # crashing the parse.
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for raw_line in fh:
             line = raw_line.rstrip("\n\r")
 

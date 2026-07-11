@@ -21,9 +21,11 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
     FailGissmo, MatAddErosion,
+    MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     SectionShell, SectionSolid, SectionBeam,
     PartData, Curve, MatHighExplosiveBurn, EosJwl, EosCard,
 )
+from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
 
@@ -280,6 +282,14 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36_powerlaw(mat, state)
     for mat in state.mat_samp.values():
         lines += _emit_mat_law76(mat, state)
+    for mat in state.mat_crushable_foam.values():
+        lines += _emit_mat_law50(mat, state)
+    for mat in state.mat_low_density_foam.values():
+        lines += _emit_mat_law38(mat, state)
+    for mat in state.mat_fu_chang_foam.values():
+        lines += _emit_mat_law70(mat, state)
+    for mat in state.mat_honeycomb.values():
+        lines += _emit_mat_law28(mat, state)
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
     for fail in state.fail_gissmo.values():
@@ -668,6 +678,225 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
     ]
 
 
+def _emit_mat_law50(mat: MatCrushableFoam, state: ConversionState) -> List[str]:
+    """*MAT_CRUSHABLE_FOAM (MAT_063) → /MAT/LAW50 (VISC_HONEY). Column layout
+    from mat_law50.cfg FORMAT(radioss90) (the block a /BEGIN 2022 deck reads):
+    RHO_I; E11 E22 E33; G12 G23 G31; asrate; then per-direction blocks
+    [Iflag/Eps_max card] + funID(5) + Fscale(5) + Eps_rate(5) for 11/22/33, an
+    Iflag2 card, then the same for 12/23/31. The single LS-DYNA yield curve LCID
+    (yield stress vs volumetric strain) drives all six direction yield functions
+    → the material stays isotropic. LAW50 has no tensile-cutoff or rate-damping
+    field, so TSC and DAMP are dropped."""
+    fid = mat.lcid
+    # Isotropic shear modulus from the given E and Poisson ratio.
+    G = mat.E / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0 else mat.E / 2.0
+    state.warn(
+        f"*MAT_CRUSHABLE_FOAM {mat.mid} → /MAT/LAW50: the single yield curve "
+        f"(LCID={fid}) is applied to all six direction yield functions "
+        "(σ11/σ22/σ33/σ12/σ23/σ31) — the crushable foam is modelled as isotropic, "
+        f"with the shear modulus taken as G=E/2(1+ν)={G:g}.")
+    if not fid:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: no yield curve (LCID=0) — "
+                   "/MAT/LAW50 has no yield function; add one or the foam has no "
+                   "crush resistance.")
+    if mat.tsc != 0.0:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: tensile stress cutoff "
+                   f"TSC={mat.tsc:g} has no /MAT/LAW50 field — dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_CRUSHABLE_FOAM {mat.mid}: rate-damping coefficient "
+                   f"DAMP={mat.damp:g} has no /MAT/LAW50 field — dropped.")
+
+    def _dir(label: str, f: int) -> List[str]:
+        return [
+            f"#funID{label}-1 funID{label}-2 funID{label}-3 funID{label}-4 funID{label}-5",
+            f"{_i(f)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            f"#        Fscale_{label}-1         Fscale_{label}-2         Fscale_{label}-3         Fscale_{label}-4         Fscale_{label}-5",
+            f"{_f(1.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            f"#      Eps_rate_{label}-1       Eps_rate_{label}-2       Eps_rate_{label}-3       Eps_rate_{label}-4       Eps_rate_{label}-5",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+
+    lines = [
+        f"/MAT/LAW50/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                E11                 E22                 E33",
+        f"{_f(mat.E)}{_f(mat.E)}{_f(mat.E)}",
+        "#                G12                 G23                 G31",
+        f"{_f(G)}{_f(G)}{_f(G)}",
+        "#             asrate",
+        f"{_f(0.0)}",
+        "#   Iflag1           Eps_max11           Eps_max22           Eps_max33",
+        f"{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+    lines += _dir("11", fid) + _dir("22", fid) + _dir("33", fid)
+    lines += [
+        "#   Iflag2           Eps_max12           Eps_max23           Eps_max31",
+        f"{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+    lines += _dir("12", fid) + _dir("23", fid) + _dir("31", fid)
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_law38(mat: MatLowDensityFoam, state: ConversionState) -> List[str]:
+    """*MAT_LOW_DENSITY_FOAM (MAT_057) → /MAT/LAW38 (VISC_TAB). Column layout
+    from matl38_visc_tab.cfg FORMAT(radioss2019). E → E0; the LS-DYNA loading
+    curve LCID becomes LAW38's single loading function (N_funct=1, strain rate 0);
+    TC → CUToff (tension cutoff stress). LAW38 has no direct hysteretic-unloading
+    factor, unloading decay or shape factor, so HU / BETA / SHAPE / DAMP are
+    approximate / dropped."""
+    fid = mat.lcid
+    if not fid:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: no loading curve (LCID=0) — "
+                   "/MAT/LAW38 needs a stress-strain loading function.")
+    if mat.hu != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: hysteretic-unloading factor "
+                   f"HU={mat.hu:g} is only approximated by /MAT/LAW38 — LAW38 has "
+                   "no single hysteretic-unloading factor; the unloading follows "
+                   "the loading curve. Verify the energy dissipated on unloading.")
+    if mat.shape != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: unloading SHAPE={mat.shape:g} "
+                   "has no /MAT/LAW38 field — dropped (unloading shape approximate).")
+    if mat.beta != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: unloading decay BETA="
+                   f"{mat.beta:g} has no /MAT/LAW38 field — dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_LOW_DENSITY_FOAM {mat.mid}: viscous DAMP={mat.damp:g} "
+                   "has no /MAT/LAW38 field — dropped.")
+    sp10 = " " * 10
+    return [
+        f"/MAT/LAW38/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#        Init. dens.",
+        f"{_f(mat.rho)}",
+        "#                 E0                nu_t                nu_c                 R_V     Iflag     Itota",
+        f"{_f(mat.E)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}",
+        "#               beta                   H                 R_D       K_R       K_D               Theta",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        "#    K_air       N_P            Fscale_P",
+        f"{_i(0)}{_i(0)}{_f(0.0)}",
+        "#                 P0                 R_P               P_max                 Phi",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#      ful                  alpha_unload        Eps_._unload                   a                   b",
+        f"{_i(0)}{sp10}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#  N_funct                        CUToff   I_insta",
+        f"{_i(1)}{sp10}{_f(mat.tc)}{_i(0)}",
+        "#            E-final          Epsi-final              Lambda                VISC                 Tol",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "# Scale factors",
+        f"{_f(1.0)}",
+        "# Strain rates",
+        f"{_f(0.0)}",
+        "# Loading functions",
+        f"{_i(fid)}",
+        "# Unloading functions",
+        f"{_i(0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law70(mat: MatFuChangFoam, state: ConversionState) -> List[str]:
+    """*MAT_FU_CHANG_FOAM (MAT_083) → /MAT/LAW70 (FOAM_TAB). APPROXIMATE. Column
+    layout from matl70_foam_tab.cfg FORMAT(radioss2019): RHO_I; EO NU E_max
+    EPS_max Itens; F_cut Ismooth Nload Nunload Iflag Shape Hys; then one
+    (funcID, Eps_load, Fscale) card per loading curve. The LS-DYNA TBID load-curve
+    family maps onto LAW70's per-strain-rate loading functions; HU → Hys, SHAPE →
+    Shape. Fu-Chang's analytic hysteresis/damping constants have no LAW70
+    counterpart."""
+    fid = mat.tbid
+    state.warn(
+        f"*MAT_FU_CHANG_FOAM {mat.mid} → /MAT/LAW70 is APPROXIMATE: Fu-Chang's "
+        "analytic constitutive constants (D0…C5) and rate-damping have no "
+        "/MAT/LAW70 equivalent — only the tabulated stress-strain response is "
+        "carried over.")
+    state.warn(
+        f"*MAT_FU_CHANG_FOAM {mat.mid}: TBID={fid} is referenced as the single "
+        "/MAT/LAW70 loading function (strain rate 0). If TBID is a *DEFINE_TABLE "
+        "of curves at several strain rates, split it into one /FUNCT per rate and "
+        "list them as LAW70 loading functions (funcID/Eps_._load) to recover the "
+        "rate dependence.")
+    if mat.tc != 0.0:
+        state.warn(f"*MAT_FU_CHANG_FOAM {mat.mid}: tension cutoff TC={mat.tc:g} "
+                   "has no scalar /MAT/LAW70 field (LAW70 tension is a function) — "
+                   "dropped.")
+    if mat.damp != 0.0:
+        state.warn(f"*MAT_FU_CHANG_FOAM {mat.mid}: rate-damping DAMP={mat.damp:g} "
+                   "has no /MAT/LAW70 field — dropped.")
+    # Ismooth=0, Nload=1, Nunload=0, Iflag=0. Shape/Hys carry the unloading model.
+    return [
+        f"/MAT/LAW70/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                 EO                  NU               E_max             EPS_max     Itens",
+        f"{_f(mat.E)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#              F_cut   Ismooth     Nload   Nunload     Iflag               Shape                 Hys",
+        f"{_f(0.0)}{_i(0)}{_i(1)}{_i(0)}{_i(0)}{_f(mat.shape)}{_f(mat.hu)}",
+        "#funcID_id          Eps_._load          Fscale_load",
+        f"{_i(fid)}{_f(0.0)}{_f(1.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law28(mat: MatHoneycomb, state: ConversionState) -> List[str]:
+    """*MAT_HONEYCOMB (MAT_026) → /MAT/LAW28 (HONEYCOMB). Column layout from
+    matl28_honeycomb.cfg FORMAT(radioss90): RHO_I; E_11 E_22 E_33; G_12 G_23 G_31;
+    [fun_ID11 fun_ID22 fun_ID33 Iflag1 Fscale11 Fscale22 Fscale33]; Eps_max11-33;
+    [fun_ID12 fun_ID23 fun_ID31 Iflag2 Fscale12 Fscale23 Fscale31]; Eps_max12-31.
+    Uncompressed moduli EAAU/EBBU/ECCU → E_11/E_22/E_33 and GABU/GBCU/GCAU →
+    G_12/G_23/G_31 (a/b/c ↔ 11/22/33). Normal crush curves LCA/LCB/LCC →
+    fun_ID11/22/33, shear LCAB/LCBC/LCCA → fun_ID12/23/31 (LCS as the fallback for
+    any missing shear component). LAW28 has no compacted-modulus / SIGY / VF / MU /
+    BULK / strain-rate slot, so those LS-DYNA fields are dropped."""
+    lcab = mat.lcab or mat.lcs
+    lcbc = mat.lcbc or mat.lcs
+    lcca = mat.lcca or mat.lcs
+    dropped = []
+    if mat.E:
+        dropped.append(f"E={mat.E:g} (fully-compacted modulus)")
+    if mat.sigy:
+        dropped.append(f"SIGY={mat.sigy:g}")
+    if mat.vf:
+        dropped.append(f"VF={mat.vf:g}")
+    if mat.mu:
+        dropped.append(f"MU={mat.mu:g}")
+    if mat.bulk:
+        dropped.append(f"BULK={mat.bulk:g}")
+    if dropped:
+        state.warn(f"*MAT_HONEYCOMB {mat.mid} → /MAT/LAW28: "
+                   f"{', '.join(dropped)} have no /MAT/LAW28 field and are dropped "
+                   "(LAW28 reaches full compaction from the crush curves).")
+    if mat.lcsr:
+        state.warn(f"*MAT_HONEYCOMB {mat.mid}: strain-rate scaling curve "
+                   f"LCSR={mat.lcsr} has no /MAT/LAW28 field — dropped (LAW28 is "
+                   "rate independent).")
+    if mat.lcs and (not mat.lcab or not mat.lcbc or not mat.lcca):
+        state.warn(f"*MAT_HONEYCOMB {mat.mid}: transverse-shear curve LCS="
+                   f"{mat.lcs} used for the shear direction(s) with no dedicated "
+                   "LCAB/LCBC/LCCA curve.")
+    return [
+        f"/MAT/LAW28/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#               E_11                E_22                E_33",
+        f"{_f(mat.eaau)}{_f(mat.ebbu)}{_f(mat.eccu)}",
+        "#               G_12                G_23                G_31",
+        f"{_f(mat.gabu)}{_f(mat.gbcu)}{_f(mat.gcau)}",
+        "# fun_ID11  fun_ID22  fun_ID33    Iflag1            Fscale11            Fscale22            Fscale33",
+        f"{_i(mat.lca)}{_i(mat.lcb)}{_i(mat.lcc)}{_i(0)}{_f(1.0)}{_f(1.0)}{_f(1.0)}",
+        "#          Eps_max11           Eps_max22           Eps_max33",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "# fun_ID12  fun_ID23  fun_ID31    Iflag2            Fscale12            Fscale23            Fscale31",
+        f"{_i(lcab)}{_i(lcbc)}{_i(lcca)}{_i(0)}{_f(1.0)}{_f(1.0)}{_f(1.0)}",
+        "#          Eps_max12           Eps_max23           Eps_max31",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
 def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
     """*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 (GISSMO). Layout from
     FAIL/fail_tab2.cfg FORMAT(radioss2022). LS-DYNA's sign convention (negative =
@@ -940,16 +1169,6 @@ def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
             seen.add(n)
             out.append(n)
     return out
-
-
-# Mid-edge node -> (corner A, corner B) of its edge, in the LS-DYNA/Abaqus/
-# Nastran 10-node tet convention (*ELEMENT_SOLID ten-node figure, R16 Vol I):
-# node5=mid(1,2), node6=mid(2,3), node7=mid(1,3),
-# node8=mid(1,4), node9=mid(2,4), node10=mid(3,4).
-# (An earlier map had nodes 8/9/10 cyclically rotated — mid(2,4)/mid(3,4)/
-# mid(1,4) — which made _snap_tet10_midsides relocate the apex mid-edge nodes
-# of every STANDARD tet10 mesh onto the wrong edges.)
-_TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 0, 3), (8, 1, 3), (9, 2, 3)]
 
 
 def _snap_tet10_midsides(state: ConversionState) -> int:
@@ -2757,6 +2976,15 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             continue
         nodes_by_pid[pid].extend(extra)
 
+    # *CONSTRAINED_RIGID_BODIES: fold each slave rigid part's nodes into its
+    # master so only the master emits an /RBODY. Chains (A<-B, B<-C) resolve
+    # transitively via union-find with the master as the representative.
+    merge_root = _resolve_rigid_body_merges(state, rigid_mids)
+    for slave, master in sorted(merge_root.items()):
+        moved = nodes_by_pid.pop(slave, [])
+        if moved:
+            nodes_by_pid[master].extend(moved)
+
     if not nodes_by_pid:
         for mid in rigid_mids:
             state.warn(f"*MAT_RIGID mid={mid}: no elements found; /RBODY not emitted")
@@ -2951,7 +3179,47 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 HDR,
             ]
 
+    # *CONSTRAINED_RIGID_BODIES: repoint each merged slave pid at its master's
+    # rigid-body info so a *LOAD_RIGID_BODY / *BOUNDARY_PRESCRIBED_MOTION_RIGID /
+    # *INITIAL_VELOCITY_RIGID_BODY / TH readout keyed on the slave pid resolves
+    # to the surviving master's master node.
+    for slave, master in merge_root.items():
+        if master in rbody_info:
+            rbody_info[slave] = rbody_info[master]
+
     return lines, rigid_nodes, rbody_info
+
+
+def _resolve_rigid_body_merges(state: ConversionState, rigid_mids: Set[int]) -> Dict[int, int]:
+    """*CONSTRAINED_RIGID_BODIES (PIDM, PIDS) pairs → {slave_pid: root_master_pid}.
+
+    Union-find with the master (PIDM) side as the representative, so chained
+    merges (A<-B, B<-C) all resolve to the ultimate master A. Only pairs whose
+    BOTH parts are *MAT_RIGID are honoured; others are warned and dropped. The
+    root master itself is not in the returned map (it keeps its own /RBODY)."""
+    parent: Dict[int, int] = {}
+
+    def find(p: int) -> int:
+        parent.setdefault(p, p)
+        while parent[p] != p:
+            parent[p] = parent[parent[p]]
+            p = parent[p]
+        return p
+
+    for pidm, pids in state.rigid_body_merges:
+        mp = state.parts.get(pidm)
+        sp = state.parts.get(pids)
+        if (mp is None or mp.mid not in rigid_mids
+                or sp is None or sp.mid not in rigid_mids):
+            state.warn(
+                f"*CONSTRAINED_RIGID_BODIES ({pidm},{pids}): both parts must be "
+                "*MAT_RIGID to merge into one rigid body — merge skipped.")
+            continue
+        rm, rs = find(pidm), find(pids)
+        if rm != rs:
+            # Attach the slave's root under the master's root.
+            parent[rs] = rm
+    return {p: find(p) for p in parent if find(p) != p}
 
 
 def _con1_to_tra(con1: int) -> str:
@@ -5399,66 +5667,102 @@ def build_starter(state: ConversionState, progress=None) -> str:
         if progress is not None:
             progress(frac, label)
 
-    # Sections are appended in the SAME order as before; the two heavy ones
-    # (nodes, elements) report sub-progress so a large mesh shows a moving bar.
-    sections: List[List[str]] = []
-    sections.append(_make_header(state))
-    sections.append(_make_title(state))
-    sections.append(_make_analysis_defaults(state))
-    sections.append(_make_ams(state))
-    sections.append(_make_materials(state))
-    _rep(0.08, "Writing nodes")
-    sections.append(_make_nodes(
-        state, progress=lambda fr: _rep(0.08 + 0.32 * fr, "Writing nodes")))
-    sections.append(_make_bcs(state, rbody_info))
-    sections.append(_make_skews(state))
-    _rep(0.40, "Writing elements")
-    sections.append(_make_parts_and_elements(
-        state, progress=lambda fr: _rep(0.40 + 0.50 * fr, "Writing elements")))
-    _rep(0.90, "Finalizing starter deck")
-    sections.append(_make_properties(state))
-    sections.append(_make_functions(state))
-    sections.append(_make_extra_groups(state))
-    sections.append(_make_rlinks(state))
-    sections.append(_make_interfaces(state, rigid_nodes))
-    sections.append(_make_tied_interfaces(state, rigid_nodes))
-    sections.append(_make_force_transducers(state, rigid_nodes))
-    sections.append(rbody_lines)
-    sections.append(_make_imposed_motions(state, rbody_info))
-    sections.append(_make_imposed_motions_set(state))
-    sections.append(_make_inivel(state, rbody_info))
-    sections.append(_make_pressure_loads(state))
-    sections.append(_make_gravity_loads(state))
-    sections.append(_make_body_loads(state))
-    sections.append(_make_blast_loads(state))
-    sections.append(_make_detonations(state))
-    sections.append(_make_fsi_coupling(state))
-    sections.append(_make_ebcs(state))
-    sections.append(_make_inivol_notes(state))
-    sections.append(_make_control_ale_notes(state))
-    sections.append(_make_starter_cloads(state))
-    sections.append(_make_node_cloads(state))
-    sections.append(_make_rigid_walls(state))
-    sections.append(_make_modal_dummy_cload(state, rigid_nodes))
-    sections.append(_make_grounding_springs(state, rbody_info))
-    sections.append(_make_added_masses(state, rigid_nodes))
-    sections.append(_make_eig(state))
-    sections.append(_make_free_node_constraints(state, rigid_nodes))
-    sections.append(_make_damping(state, rigid_nodes))
-    sections.append(_make_starter_th(state))
-    sections.append(_make_starter_th_inter(state))
-    sections.append(_make_starter_th_node_reac(state, rbody_info))
-    sections.append(_make_starter_th_node_spc(state, rbody_info))
-    sections.append(_make_starter_th_surf(state))
-    sections.append(_make_freq_domain_notes(state))
-    sections.append(_make_skipped_comment(state))
-    sections.append(["/END", HDR])
-
+    # The starter is assembled from an ordered registry of (name, builder)
+    # entries — see _starter_section_registry(). Iterating a data-driven list
+    # (rather than a hand-maintained sequence of sections.append(...) calls)
+    # makes the section order explicit and lets a new section be inserted by
+    # adding one tuple, without editing the middle of this function. The context
+    # carries the state plus the three values threaded across sections
+    # (rbody_info, rigid_nodes, the pre-built rbody_lines) and the progress
+    # reporter. Output is byte-identical to the previous fixed sequence.
+    ctx = _StarterContext(state, rbody_info, rigid_nodes, rbody_lines, _rep)
     lines: List[str] = []
-    for sec in sections:
-        lines.extend(sec)
+    for _name, builder in _starter_section_registry():
+        lines.extend(builder(ctx))
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
+
+
+class _StarterContext:
+    """Values threaded across the starter section builders (see
+    _starter_section_registry). ``rep(frac, label)`` forwards to the progress
+    callback."""
+    __slots__ = ("state", "rbody_info", "rigid_nodes", "rbody_lines", "rep")
+
+    def __init__(self, state, rbody_info, rigid_nodes, rbody_lines, rep):
+        self.state = state
+        self.rbody_info = rbody_info
+        self.rigid_nodes = rigid_nodes
+        self.rbody_lines = rbody_lines
+        self.rep = rep
+
+
+def _progress_marker(ctx: "_StarterContext", frac: float, label: str) -> List[str]:
+    """A registry entry that only reports progress (emits no starter lines), so
+    the two heavy builders (nodes, elements) keep their coarse progress markers
+    at the same points as the original fixed sequence."""
+    ctx.rep(frac, label)
+    return []
+
+
+def _starter_section_registry():
+    """Ordered (name, builder) registry the starter is assembled from. Each
+    builder takes a _StarterContext and returns its list of .rad lines. Insert a
+    new section by adding a tuple at the right position — no need to edit
+    build_starter. Order and output match the historical fixed sequence."""
+    return [
+        ("header",            lambda c: _make_header(c.state)),
+        ("title",             lambda c: _make_title(c.state)),
+        ("analysis_defaults", lambda c: _make_analysis_defaults(c.state)),
+        ("ams",               lambda c: _make_ams(c.state)),
+        ("materials",         lambda c: _make_materials(c.state)),
+        ("_progress_nodes",   lambda c: _progress_marker(c, 0.08, "Writing nodes")),
+        ("nodes",             lambda c: _make_nodes(
+            c.state, progress=lambda fr: c.rep(0.08 + 0.32 * fr, "Writing nodes"))),
+        ("bcs",               lambda c: _make_bcs(c.state, c.rbody_info)),
+        ("skews",             lambda c: _make_skews(c.state)),
+        ("_progress_elems",   lambda c: _progress_marker(c, 0.40, "Writing elements")),
+        ("parts_elements",    lambda c: _make_parts_and_elements(
+            c.state, progress=lambda fr: c.rep(0.40 + 0.50 * fr, "Writing elements"))),
+        ("_progress_final",   lambda c: _progress_marker(c, 0.90, "Finalizing starter deck")),
+        ("properties",        lambda c: _make_properties(c.state)),
+        ("functions",         lambda c: _make_functions(c.state)),
+        ("extra_groups",      lambda c: _make_extra_groups(c.state)),
+        ("rlinks",            lambda c: _make_rlinks(c.state)),
+        ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
+        ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
+        ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
+        ("rbodies",           lambda c: c.rbody_lines),
+        ("imposed_motions",   lambda c: _make_imposed_motions(c.state, c.rbody_info)),
+        ("imposed_motions_set", lambda c: _make_imposed_motions_set(c.state)),
+        ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
+        ("pressure_loads",    lambda c: _make_pressure_loads(c.state)),
+        ("gravity_loads",     lambda c: _make_gravity_loads(c.state)),
+        ("body_loads",        lambda c: _make_body_loads(c.state)),
+        ("blast_loads",       lambda c: _make_blast_loads(c.state)),
+        ("detonations",       lambda c: _make_detonations(c.state)),
+        ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
+        ("ebcs",              lambda c: _make_ebcs(c.state)),
+        ("inivol_notes",      lambda c: _make_inivol_notes(c.state)),
+        ("control_ale_notes", lambda c: _make_control_ale_notes(c.state)),
+        ("starter_cloads",    lambda c: _make_starter_cloads(c.state)),
+        ("node_cloads",       lambda c: _make_node_cloads(c.state)),
+        ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
+        ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
+        ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
+        ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
+        ("eig",               lambda c: _make_eig(c.state)),
+        ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
+        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
+        ("starter_th",        lambda c: _make_starter_th(c.state)),
+        ("starter_th_inter",  lambda c: _make_starter_th_inter(c.state)),
+        ("starter_th_node_reac", lambda c: _make_starter_th_node_reac(c.state, c.rbody_info)),
+        ("starter_th_node_spc",  lambda c: _make_starter_th_node_spc(c.state, c.rbody_info)),
+        ("starter_th_surf",   lambda c: _make_starter_th_surf(c.state)),
+        ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
+        ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
+        ("end",               lambda c: ["/END", HDR]),
+    ]
 
 
 def _make_engine_restart(state: ConversionState) -> List[str]:
