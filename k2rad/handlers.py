@@ -21,6 +21,8 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
+    DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
+    MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
     Curve, DefineTable, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
@@ -274,6 +276,36 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
         state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3))
 
 
+def handle_element_discrete(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_DISCRETE → /SPRING (2-node spring/damper connector).
+
+    Fixed card (Keyword971 ELEMENTS/discrete.cfg):
+        EID(I8) PID(I8) N1(I8) N2(I8) VID(I8) S(E16) PF(I8) OFFSET(E16)
+    Free-format lines carry the same field order. N2=0 = grounded element.
+    """
+    for line in block.raw:
+        if not line.strip():
+            continue
+        f = parse_free(line)
+        # Fixed I8 columns glue when an id fills all 8 chars — re-slice then
+        # (S is E16 wide, so only the first five I8 fields can glue).
+        if len(f) < 3 or any(len(t) > 8 for t in f[:5]):
+            data = _strip_inline_comment(line)
+            f = [data[0:8], data[8:16], data[16:24], data[24:32], data[32:40],
+                 data[40:56], data[56:64], data[64:80]]
+            f = [x.strip() for x in f]
+        eid = to_int(f[0]) if f else 0
+        pid = to_int(f[1]) if len(f) > 1 else 0
+        if eid <= 0 or pid <= 0:
+            continue
+        n1 = to_int(f[2]) if len(f) > 2 else 0
+        n2 = to_int(f[3]) if len(f) > 3 else 0
+        vid = to_int(f[4]) if len(f) > 4 else 0
+        s = _ffield(f, 5, 1.0)
+        offset = to_float(f[7]) if len(f) > 7 else 0.0
+        state.discrete_elems.append(DiscreteElem(eid, pid, n1, n2, vid, s, offset))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +379,12 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     if elform == 1:
         sec.ts1 = to_float(f2[0]) if f2 else 0.0
+    elif elform == 9:
+        # elform=9 spotweld beam: VOL INER CID CA OFFSET RRCON SRCON TRCON —
+        # card 2 carries a nugget volume and cross-section area, NOT A/Iyy/Izz.
+        sec.vol = to_float(f2[0]) if f2 else 0.0
+        sec.ca  = to_float(f2[3]) if len(f2) > 3 else 0.0
+        sec.area = sec.ca
     else:
         # elform=2 resultant: A IYY IZZ IXX
         sec.area = to_float(f2[0]) if f2 else 0.0
@@ -354,6 +392,32 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
         sec.izz  = to_float(f2[2]) if len(f2) > 2 else 0.0
         sec.ixx  = to_float(f2[3]) if len(f2) > 3 else 0.0
     state.sec_beams[secid] = sec
+
+
+def handle_section_discrete(block: Block, state: ConversionState) -> None:
+    """*SECTION_DISCRETE → /PROP/TYPE4 (SPRING) flags.
+
+    Card1 (Keyword971 PROPERTY/SectDisc.cfg): SECID DRO KD V0 CL FD
+    Card2: CDL TDL (compression/tension deflection limits, element deletion).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*SECTION_DISCRETE: empty card – skipped")
+        return
+    secid = to_int(f1[0])
+    dro = to_int(f1[1]) if len(f1) > 1 else 0
+    kd  = to_float(f1[2]) if len(f1) > 2 else 0.0
+    v0  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    cl  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    fd  = to_float(f1[5]) if len(f1) > 5 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=2, w=10)
+    cdl = to_float(f2[0]) if f2 else 0.0
+    tdl = to_float(f2[1]) if len(f2) > 1 else 0.0
+    state.sec_discrete[secid] = SectionDiscrete(secid, title, dro, kd, v0, cl,
+                                                fd, cdl, tdl)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1821,6 +1885,104 @@ def handle_constrained_rigid_bodies(block: Block, state: ConversionState) -> Non
         state.rigid_body_merges.append((pidm, pids))
 
 
+def _record_spotweld_pair(state: ConversionState, kw: str, title: str,
+                          n1: int, n2: int, nsid: int,
+                          sn: float, ss: float, n_exp: float, m_exp: float,
+                          tf: float, ep: float) -> None:
+    """Route one weld: no failure → 2-node nodal rigid body (LS-DYNA's own
+    interpretation of a spotweld without failure, reusing the validated CNRB
+    machinery); with failure → a stiff /PROP/TYPE13 spring emitted by the
+    writer with Ifail2=2 force criteria."""
+    if tf and 0.0 < tf < 1e19:
+        state.warn(f"*{kw}: failure time TF={tf:g} has no /SPRING equivalent — "
+                   "dropped (weld active for the whole run).")
+    if sn > 0.0 or ss > 0.0:
+        if ep and 0.0 < ep < 1e19:
+            state.warn(f"*{kw}: plastic failure strain EP={ep:g} dropped (the "
+                       "converted weld is elastic with a force-failure surface).")
+        state.constrained_spotwelds.append(ConstrainedSpotweld(
+            n1=n1, n2=n2, nsid=nsid, sn=sn, ss=ss, n=n_exp, m=m_exp,
+            tf=tf, ep=ep, title=title))
+        return
+    # No failure: rigidly tie the nodes (2-node nodal rigid body).
+    if nsid > 0:
+        set_id = nsid           # resolve the referenced node set at write time
+    else:
+        set_id = state.next_id()
+        state.node_sets[set_id] = (title or "CONSTRAINED_SPOTWELD", [n1, n2])
+        title = title or f"spotweld_{n1}_{n2}"
+    state.cnrbs.append(ConstrainedNodalRigidBody(
+        pid=state.next_id(), nsid=set_id, title=title))
+    state.warn(f"*{kw}: no failure force given — converted to a 2-node nodal "
+               "rigid body (/RBODY) tie, LS-DYNA's own model of an unbreakable "
+               "spotweld.")
+
+
+def handle_constrained_spotweld(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_SPOTWELD[_ID][_FILTERED_FORCE] — a node-pair weld.
+
+    Card (Keyword971_R6.1 constrained_spotweld.cfg): N1 N2 SN SS N M TF EP.
+    The _FILTERED_FORCE flavour appends one 'NF TW' card (force filtering has
+    no /SPRING equivalent — dropped with a warning).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    filtered = "FILTERED_FORCE" in block.keyword
+    step = 2 if filtered else 1
+    found = False
+    for i in range(offset, len(raw), step):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        n1 = to_int(f[0]) if f else 0
+        n2 = to_int(f[1]) if len(f) > 1 else 0
+        if n1 <= 0 or n2 <= 0:
+            continue
+        found = True
+        g = lambda j: to_float(f[j]) if len(f) > j else 0.0
+        sn, ss = g(2), g(3)
+        n_exp = _ffield(f, 4, 2.0)
+        m_exp = _ffield(f, 5, 2.0)
+        tf, ep = g(6), g(7)
+        if filtered:
+            state.warn("*CONSTRAINED_SPOTWELD_FILTERED_FORCE: the NF/TW force "
+                       "filtering card has no OpenRadioss equivalent — the "
+                       "failure forces act on the raw (unfiltered) force.")
+        _record_spotweld_pair(state, block.keyword, title, n1, n2, 0,
+                              sn, ss, n_exp, m_exp, tf, ep)
+    if not found:
+        state.warn("*CONSTRAINED_SPOTWELD: no valid node pair found — skipped.")
+
+
+def handle_constrained_generalized_weld_spot(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_GENERALIZED_WELD_SPOT — an NSID-based weld.
+
+    Card1: NSID CID; Card2 (subobj_constrained_generalized_weld_spot.cfg):
+    TFAIL EPSF SN SS N M. The welded node set is resolved at write time.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=2, w=10)
+    nsid = to_int(f1[0]) if f1 else 0
+    cid = to_int(f1[1]) if len(f1) > 1 else 0
+    if nsid <= 0:
+        state.warn("*CONSTRAINED_GENERALIZED_WELD_SPOT: no node set id — skipped.")
+        return
+    if cid:
+        state.warn(f"*CONSTRAINED_GENERALIZED_WELD_SPOT nsid={nsid}: CID (local "
+                   "output system) is ignored.")
+    f2 = _card(raw, offset + 1, fixed=True, n=6, w=10)
+    g = lambda j: to_float(f2[j]) if len(f2) > j else 0.0
+    tfail, epsf, sn, ss = g(0), g(1), g(2), g(3)
+    n_exp = _ffield(f2, 4, 2.0)
+    m_exp = _ffield(f2, 5, 2.0)
+    _record_spotweld_pair(state, block.keyword,
+                          title or f"GEN_WELD_SPOT_{nsid}",
+                          0, 0, nsid, sn, ss, n_exp, m_exp, tfail, epsf)
+
+
 def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
     """*RIGIDWALL_PLANAR[_ID] (+_FORCES/_FINITE/_MOVING combos) → /RWALL.
 
@@ -2263,6 +2425,89 @@ def handle_mat_honeycomb(block: Block, state: ConversionState) -> None:
         mid, title, rho, E, nu, sigy, vf, mu, bulk,
         eaau, ebbu, eccu, gabu, gbcu, gcau,
         lca, lcb, lcc, lcs, lcab, lcbc, lcca, lcsr)
+
+
+def handle_mat_spring_elastic(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_ELASTIC (MAT_S01): MID K → /PROP/TYPE4 stiffness K."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=2, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_SPRING_ELASTIC: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    k = to_float(f[1]) if len(f) > 1 else 0.0
+    state.mat_spring_elastic[mid] = MatSpringElastic(mid, k)
+
+
+def handle_mat_spring_nonlinear_elastic(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_NONLINEAR_ELASTIC (MAT_S04): MID LCD LCR → /PROP/TYPE4
+    fct_ID1 = LCD (force vs displacement). LCR (force scale vs rate) has no
+    /PROP/TYPE4 slot the cfg confirms, so it is dropped with a warning."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=3, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_SPRING_NONLINEAR_ELASTIC: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    lcd = to_int(f[1]) if len(f) > 1 else 0
+    lcr = to_int(f[2]) if len(f) > 2 else 0
+    state.mat_spring_nonlinear[mid] = MatSpringNonlinearElastic(mid, lcd, lcr)
+
+
+def handle_mat_damper_viscous(block: Block, state: ConversionState) -> None:
+    """*MAT_DAMPER_VISCOUS (MAT_D01): MID DC → /PROP/TYPE4 damping C."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=2, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_DAMPER_VISCOUS: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    dc = to_float(f[1]) if len(f) > 1 else 0.0
+    state.mat_damper_viscous[mid] = MatDamperViscous(mid, dc)
+
+
+def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
+    """*MAT_SPOTWELD (MAT_100) → /PROP/TYPE13 (SPR_BEAM) spring connectors.
+
+    Card1 (Keyword971 mat_100.cfg): MID RO E PR SIGY EH DT TFAIL
+    Card2: EFAIL NRR NRS NRT MRR MSS MTT NF
+    Negative SIGY / failure-force values mean 'curve id' in the DAMAGE-FAILURE
+    option; only positive scalars are converted.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SPOTWELD: empty material card – skipped")
+        return
+    mid   = to_int(f1[0])
+    rho   = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E     = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu    = to_float(f1[3]) if len(f1) > 3 else 0.0
+    sigy  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    et    = to_float(f1[5]) if len(f1) > 5 else 0.0
+    dt    = to_float(f1[6]) if len(f1) > 6 else 0.0
+    tfail = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
+    efail, nrr, nrs, nrt = g(0), g(1), g(2), g(3)
+    mrr, mss, mtt, nf = g(4), g(5), g(6), g(7)
+    if sigy < 0.0:
+        state.warn(f"*MAT_SPOTWELD mid={mid}: SIGY<0 (yield stress from a curve) "
+                   "is not supported — yield dropped (elastic weld until failure).")
+        sigy = 0.0
+    neg = [name for name, v in (("NRR", nrr), ("NRS", nrs), ("NRT", nrt),
+                                ("MRR", mrr), ("MSS", mss), ("MTT", mtt)) if v < 0.0]
+    if neg:
+        state.warn(f"*MAT_SPOTWELD mid={mid}: {', '.join(neg)} < 0 (curve-driven "
+                   "failure resultants) not supported — treated as no failure in "
+                   "those components.")
+        nrr, nrs, nrt = max(nrr, 0.0), max(nrs, 0.0), max(nrt, 0.0)
+        mrr, mss, mtt = max(mrr, 0.0), max(mss, 0.0), max(mtt, 0.0)
+    state.mat_spotweld[mid] = MatSpotweld(mid, title, rho, E, nu, sigy, et, dt,
+                                          tfail, efail, nrr, nrs, nrt,
+                                          mrr, mss, mtt, nf)
 
 
 def handle_mat_187(block: Block, state: ConversionState) -> None:
@@ -2902,6 +3147,7 @@ HANDLERS = {
     "SECTION_SHELL":                          handle_section_shell,
     "SECTION_SOLID":                          handle_section_solid,
     "SECTION_BEAM":                           handle_section_beam,
+    "SECTION_DISCRETE":                       handle_section_discrete,
 
     # Materials
     "MAT_ELASTIC":                            handle_mat_elastic,
@@ -2924,6 +3170,15 @@ HANDLERS = {
     "MAT_HONEYCOMB":                          handle_mat_honeycomb,
     "MAT_26":                                 handle_mat_honeycomb,
     "MAT_026":                                handle_mat_honeycomb,
+    # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors
+    "MAT_SPRING_ELASTIC":                     handle_mat_spring_elastic,
+    "MAT_S01":                                handle_mat_spring_elastic,
+    "MAT_SPRING_NONLINEAR_ELASTIC":           handle_mat_spring_nonlinear_elastic,
+    "MAT_S04":                                handle_mat_spring_nonlinear_elastic,
+    "MAT_DAMPER_VISCOUS":                     handle_mat_damper_viscous,
+    "MAT_D01":                                handle_mat_damper_viscous,
+    "MAT_SPOTWELD":                           handle_mat_spotweld,
+    "MAT_100":                                handle_mat_spotweld,
     "MAT_187":                                handle_mat_187,
     "MAT_SAMP-1":                             handle_mat_187,
     "MAT_ADD_DAMAGE_GISSMO":                  handle_mat_add_damage_gissmo,
@@ -2972,6 +3227,9 @@ HANDLERS = {
     "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
     "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
     "CONSTRAINED_RIGID_BODIES":               handle_constrained_rigid_bodies,
+    "CONSTRAINED_SPOTWELD":                   handle_constrained_spotweld,
+    "CONSTRAINED_SPOTWELD_FILTERED_FORCE":    handle_constrained_spotweld,
+    "CONSTRAINED_GENERALIZED_WELD_SPOT":      handle_constrained_generalized_weld_spot,
 
     # Rigid walls (LS-DYNA option order: _ORTHO _FINITE _MOVING _FORCES)
     "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
@@ -2987,6 +3245,9 @@ HANDLERS = {
     "RIGIDWALL_PLANAR_ORTHO_FINITE":          handle_rigidwall_ortho,
     "RIGIDWALL_PLANAR_ORTHO_MOVING":          handle_rigidwall_ortho,
     "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING":   handle_rigidwall_ortho,
+
+    # Discrete (spring/damper) elements
+    "ELEMENT_DISCRETE":                       handle_element_discrete,
 
     # Mass / inertia additions
     "ELEMENT_MASS":                           handle_element_mass,

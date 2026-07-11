@@ -13,6 +13,7 @@ Engine output order:
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -22,7 +23,7 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatPowerLaw, MatSAMP,
     FailGissmo, MatAddErosion,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
-    SectionShell, SectionSolid, SectionBeam,
+    SectionShell, SectionSolid, SectionBeam, SectionDiscrete,
     PartData, Curve, MatHighExplosiveBurn, EosJwl, EosCard,
 )
 from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
@@ -290,6 +291,24 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law70(mat, state)
     for mat in state.mat_honeycomb.values():
         lines += _emit_mat_law28(mat, state)
+    # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
+    # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
+    # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
+    # for the /PART reference to resolve: fall back to /MAT/ELAST and warn.
+    spotweld_pids = _spotweld_beam_pids(state)
+    for mid, sw in sorted(state.mat_spotweld.items()):
+        fallback_pids = [pid for pid, p in state.parts.items()
+                         if p.mid == mid and pid not in spotweld_pids]
+        if fallback_pids:
+            state.warn(
+                f"*MAT_SPOTWELD mid={mid}: part(s) "
+                f"{sorted(fallback_pids)} are not pure beam-element parts — "
+                "the /PROP/TYPE13 spotweld conversion only handles beam "
+                "spotwelds, so those parts keep their elements on a plain "
+                "/MAT/ELAST (MAT_100 plasticity and failure DROPPED).")
+            lines += _emit_mat_elastic(MatElastic(
+                mid, (sw.title or f"MAT_{mid}") + " (MAT_100 fallback)",
+                sw.rho, sw.E, sw.nu))
     lines += _make_explosive_and_eos_materials(state)
     lines += _make_ale_multimaterial(state)
     for fail in state.fail_gissmo.values():
@@ -1571,9 +1590,17 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     for e in state.beam_elems:
         beams_by_pid[e.pid].append(e)
 
+    # Connector parts (discrete springs/dampers, MAT_100 spotweld beam parts)
+    # are emitted by the connector sections with their own /PROP/TYPE4-13 and
+    # /SPRING elements — emitting them here would reference a DYNA section /
+    # material id that has no /PROP or /MAT counterpart.
+    connector_pids = _discrete_part_ids(state) | _spotweld_beam_pids(state)
+
     for pid, part in sorted(state.parts.items()):
+        if pid in connector_pids:
+            continue
         secid = part.secid if part.secid > 0 else pid
-        
+
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",
@@ -1695,6 +1722,18 @@ def _make_properties(state: ConversionState) -> List[str]:
             if sid:
                 tet10_secids.add(sid)
 
+    # Spotweld beam parts become /SPRING connectors (their /PROP/TYPE13 is
+    # emitted by _make_spotweld_beam_connectors); their beams must not force an
+    # auto /PROP/BEAM, and a *SECTION_BEAM used ONLY by spotweld parts is not
+    # emitted (its ELFORM-9 card has no /PROP/BEAM meaning).
+    spotweld_pids = _spotweld_beam_pids(state)
+    spotweld_only_secids: Set[int] = set()
+    if spotweld_pids:
+        other_beam_secids = {part_secids.get(e.pid) for e in state.beam_elems
+                             if e.pid not in spotweld_pids}
+        spotweld_only_secids = {part_secids[pid] for pid in spotweld_pids
+                                if pid in part_secids} - other_beam_secids
+
     for e in state.shell_elems:
         secid = part_secids.get(e.pid)
         if secid and secid not in state.sec_shells:
@@ -1704,6 +1743,8 @@ def _make_properties(state: ConversionState) -> List[str]:
         if secid and secid not in state.sec_solids:
             missing_solids.add(secid)
     for e in state.beam_elems:
+        if e.pid in spotweld_pids:
+            continue
         secid = part_secids.get(e.pid)
         if secid and secid not in state.sec_beams:
             missing_beams.add(secid)
@@ -1760,6 +1801,8 @@ def _make_properties(state: ConversionState) -> List[str]:
             HDR,
         ]
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
+        if sec.secid in spotweld_only_secids:
+            continue
         lines += _emit_prop_beam(sec)
     return lines
 
@@ -2988,6 +3031,621 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
             "load once contact engages. Remove if this is not force control "
             "through a clearance-fit contact."
         )
+
+    return lines if emitted else []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: connectors (*ELEMENT_DISCRETE springs/dampers, spotwelds)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _discrete_part_ids(state: ConversionState) -> Set[int]:
+    """Part ids handled by the discrete-spring connector path: parts referenced
+    by *ELEMENT_DISCRETE, or whose section is a *SECTION_DISCRETE, or whose
+    material is a discrete spring/damper material. These are skipped by the
+    normal /PART emission (their /PART + /PROP/TYPE4 come from
+    _make_discrete_springs; the DYNA section/material ids have no /PROP or
+    /MAT of their own)."""
+    spring_mids = (set(state.mat_spring_elastic) | set(state.mat_spring_nonlinear)
+                   | set(state.mat_damper_viscous))
+    pids = {e.pid for e in state.discrete_elems}
+    for pid, p in state.parts.items():
+        secid = p.secid if p.secid > 0 else pid
+        if secid in state.sec_discrete or p.mid in spring_mids:
+            pids.add(pid)
+    return pids
+
+
+def _spotweld_beam_pids(state: ConversionState) -> Set[int]:
+    """*MAT_SPOTWELD (MAT_100) parts whose elements are exclusively beams —
+    these become /PROP/TYPE13 (SPR_BEAM) /SPRING connectors. MAT_100 on
+    shell/solid (hexa) spotwelds is NOT converted (falls back to /MAT/ELAST)."""
+    if not state.mat_spotweld:
+        return set()
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    beam_pids = {e.pid for e in state.beam_elems}
+    return {pid for pid, p in state.parts.items()
+            if p.mid in state.mat_spotweld and pid in beam_pids
+            and pid not in shell_pids and pid not in solid_pids}
+
+
+def _emit_prop_type4(prop_id: int, title: str, mass: float, k: float, c: float,
+                     a: float, fct1: int, hflag: int,
+                     dmin: float, dmax: float) -> List[str]:
+    """/PROP/TYPE4 (SPRING). Layout: prop_p4_spring.cfg FORMAT(radioss140), the
+    newest TYPE4 reader format ≤ /BEGIN-2022. Zero-valued A/B/D and rupture
+    displacements take the reader defaults (A=1, B=0, D=1, ±1e30) — same
+    convention the validated TYPE8 grounding-spring emitter relies on."""
+    return [
+        f"/PROP/TYPE4/{prop_id}",
+        title,
+        "#               MASS                                 sens_ID    Isflag     Ileng",
+        f"{_f(mass)}{' ' * 30}{_i(0)}{_i(0)}{_i(0)}",
+        "#                  K                   C                   A                   B                   D",
+        f"{_f(k)}{_f(c)}{_f(a)}{_f(0.0)}{_f(0.0)}",
+        "# fct_ID11        H1  fct_ID21  fct_ID31  fct_ID41                      DeltaMin            DeltaMax",
+        f"{_i(fct1)}{_i(hflag)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
+        "#                 F1                  E1             AScale1             HScale1",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
+                      ifail: int, ifail2: int, dofs) -> List[str]:
+    """/PROP/TYPE13 (SPR_BEAM). Layout: prop_p13_spr_beam.cfg
+    FORMAT(radioss2018), the newest TYPE13 reader format ≤ /BEGIN-2022.
+    ``dofs`` is 6 (k, fct_id, hflag, dmin, dmax) tuples for Tx Ty Tz Rx Ry Rz.
+    With Ifail2=2 the DeltaMin/DeltaMax fields are failure FORCES (moments on
+    the rotational DOFs); zero-valued fields take the ±1e30 'no failure'
+    reader defaults."""
+    lines = [
+        f"/PROP/TYPE13/{prop_id}",
+        title,
+        "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail     Ileng    Ifail2",
+        f"{_f(mass)}{_f(inertia)}{_i(0)}{_i(0)}{_i(0)}{_i(ifail)}{_i(0)}{_i(ifail2)}",
+    ]
+    for i, (k, fct, h, dmin, dmax) in enumerate(dofs, start=1):
+        lines += [
+            f"#                 K{i}                  C{i}                  A{i}                  B{i}                  D{i}",
+            f"{_f(k)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            f"# fct_ID1{i}        H{i}  fct_ID2{i}  fct_ID3{i}  fct_ID4{i}                     DeltaMin{i}           DeltaMax{i}",
+            f"{_i(fct)}{_i(h)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
+            f"#                 F{i}                  E{i}             Ascale{i}             Hscale{i}",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+    lines += [
+        "#                 Vo                  Wo                Fcut   Fsmooth",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+    ]
+    for i in range(1, 7):
+        lines += [
+            f"#                 c{i}                  n{i}              alpha{i}               beta{i}",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+    lines.append(HDR)
+    return lines
+
+
+def _curve_slope_at_origin(curve: Curve) -> float:
+    """Slope of the curve segment spanning (or nearest to) the origin — used as
+    the /PROP/TYPE4 K (unloading / time-step stiffness) for a nonlinear
+    spring's force-displacement function."""
+    pts = sorted(curve.pts)
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        if x2 > x1 and x1 <= 0.0 <= x2:
+            return (y2 - y1) / (x2 - x1)
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        if x2 > x1:
+            return (y2 - y1) / (x2 - x1)
+    return 0.0
+
+
+def _new_ground_node(state: ConversionState, at: NodeData) -> int:
+    """Synthesize a fully-fixed ground node at *at*'s coordinates. Registered in
+    state.nodes so later id allocations (e.g. --ground-springs) cannot collide,
+    and in state.connector_ground_nodes so the implicit free-node guard skips
+    it (it is already /BCS-fixed by the caller)."""
+    nid = (max(state.nodes) + 1) if state.nodes else 90000001
+    state.nodes[nid] = NodeData(at.x, at.y, at.z)
+    state.connector_ground_nodes.add(nid)
+    return nid
+
+
+def _make_discrete_springs(state: ConversionState) -> List[str]:
+    """*ELEMENT_DISCRETE + *SECTION_DISCRETE + *MAT_SPRING_ELASTIC /
+    *MAT_SPRING_NONLINEAR_ELASTIC / *MAT_DAMPER_VISCOUS → /PROP/TYPE4 (SPRING)
+    + /PART + /SPRING. A grounded element (N2=0) gets a fixed ground node at
+    N1's coordinates + /BCS 111 111 (the _make_grounding_springs pattern); the
+    zero-length TYPE4 spring then acts as a central restoring force F=K·|d|
+    toward the anchor — TYPE4 explicitly allows zero-length springs."""
+    if not state.discrete_elems:
+        return []
+    lines: List[str] = [
+        "#-  DISCRETE SPRING/DAMPER CONNECTORS (*ELEMENT_DISCRETE -> /PROP/TYPE4 + /SPRING):",
+        HDR]
+    emitted = False
+
+    by_pid: Dict[int, List] = defaultdict(list)
+    for e in state.discrete_elems:
+        by_pid[e.pid].append(e)
+
+    for pid in sorted(by_pid):
+        elems = by_pid[pid]
+        part = state.parts.get(pid)
+        if part is None:
+            state.warn(f"*ELEMENT_DISCRETE: part {pid} is not defined — "
+                       f"{len(elems)} discrete element(s) skipped.")
+            continue
+        secid = part.secid if part.secid > 0 else pid
+        sec = state.sec_discrete.get(secid)
+        if sec is None:
+            state.warn(f"*ELEMENT_DISCRETE part {pid}: no *SECTION_DISCRETE "
+                       f"{secid} found — a default translational section is "
+                       "assumed (no failure deflection).")
+            sec = SectionDiscrete(secid, "")
+        if sec.dro == 1:
+            # A torsional spring acts about the N1-N2 axis on the ROTATIONAL
+            # DOFs; /PROP/TYPE4 is purely translational, and emitting it anyway
+            # would put the stiffness on the wrong DOFs. Warn and skip.
+            state.warn(f"*SECTION_DISCRETE {secid}: DRO=1 (torsional "
+                       f"spring/damper) has no confident /PROP/TYPE4 mapping — "
+                       f"part {pid} ({len(elems)} element(s)) NOT converted.")
+            continue
+
+        # Material → TYPE4 K / C / fct_ID1.
+        k = c = 0.0
+        fct1 = 0
+        hflag = 0
+        kind = None
+        mat_lin = state.mat_spring_elastic.get(part.mid)
+        mat_nl = state.mat_spring_nonlinear.get(part.mid)
+        mat_dmp = state.mat_damper_viscous.get(part.mid)
+        if mat_lin is not None:
+            k = mat_lin.k
+            kind = "linear spring"
+        elif mat_nl is not None:
+            curve = state.curves.get(mat_nl.lcd)
+            if curve is None or len(curve.pts) < 2:
+                state.warn(f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}: load "
+                           f"curve LCD={mat_nl.lcd} not found — part {pid} "
+                           f"({len(elems)} element(s)) NOT converted.")
+                continue
+            fct1 = mat_nl.lcd            # curve is already emitted as /FUNCT
+            hflag = 0                    # H=0: nonlinear ELASTIC (S04 semantics)
+            k = _curve_slope_at_origin(curve)
+            if k <= 0.0:
+                state.warn(f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}: LCD "
+                           f"{mat_nl.lcd} has a non-positive slope at the "
+                           "origin — TYPE4 K left 0 (engine time-step/unloading "
+                           "stiffness); verify the curve.")
+                k = 0.0
+            if mat_nl.lcr:
+                state.warn(f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}: rate "
+                           f"scale curve LCR={mat_nl.lcr} has no confident "
+                           "/PROP/TYPE4 slot — converted rate-independent.")
+            kind = "nonlinear elastic spring"
+        elif mat_dmp is not None:
+            c = mat_dmp.dc
+            kind = "viscous damper"
+        else:
+            state.warn(f"*ELEMENT_DISCRETE part {pid}: material {part.mid} is "
+                       "not a supported discrete material (S01/S04/D01) — "
+                       f"{len(elems)} element(s) NOT converted.")
+            continue
+
+        if sec.kd or sec.v0 or sec.cl:
+            state.warn(f"*SECTION_DISCRETE {secid}: KD/V0/CL (dynamic "
+                       "magnification / clearance) have no /PROP/TYPE4 "
+                       "equivalent — dropped.")
+        # Failure deflections: TDL/CDL deflection limits and the FD failure
+        # deflection map to the TYPE4 rupture displacements (element deletion
+        # in both codes). 0 = no limit (reader default ±1e30).
+        dmax = sec.tdl if 0.0 < sec.tdl < 1e19 else 0.0
+        dmin = -sec.cdl if 0.0 < sec.cdl < 1e19 else 0.0
+        if sec.fd > 0.0:
+            dmax = min(dmax, sec.fd) if dmax else sec.fd
+        elif sec.fd < 0.0:
+            dmin = max(dmin, sec.fd) if dmin else sec.fd
+
+        # Per-element force scale S becomes a cloned property per distinct S:
+        # linear K/C scale directly; a nonlinear function is scaled through the
+        # A coefficient (F = f(δ)·A when B=0).
+        groups: Dict[float, List] = defaultdict(list)
+        n_vid = 0
+        n_bad = 0
+        for e in elems:
+            if e.vid:
+                n_vid += 1
+                continue
+            if e.n1 <= 0 and e.n2 <= 0:
+                n_bad += 1
+                continue
+            if e.offset:
+                state.warn(f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} "
+                           "(initial preload offset) has no /SPRING equivalent "
+                           "— dropped.")
+            groups[e.s if e.s else 1.0].append(e)
+        if n_vid:
+            state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_vid} element(s) use a "
+                       "*DEFINE_SD_ORIENTATION vector (VID) — no confident "
+                       "/PROP/TYPE4 axis mapping, those elements were NOT "
+                       "converted (a wrong-axis spring would be worse).")
+        if n_bad:
+            state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_bad} element(s) have "
+                       "no valid nodes — skipped.")
+
+        first_group = True
+        for s in sorted(groups):
+            g_elems = groups[s]
+            prop_id = state.next_id()
+            if first_group:
+                part_id = pid          # keep the DYNA part id for traceability
+                first_group = False
+            else:
+                part_id = state.next_id()
+                state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
+                           f"scale S={s:g} were split onto auto part {part_id} "
+                           "(the per-element scale has no /SPRING field).")
+            a_coef = 0.0               # 0 → reader default 1.0
+            k_s, c_s = k, c
+            if s != 1.0:
+                if fct1:
+                    a_coef = s         # scales f(δ) (A coefficient, B=0)
+                else:
+                    k_s, c_s = k * s, c * s
+            # MASS: LS-DYNA discrete elements are massless (nodal mass comes
+            # from *ELEMENT_MASS); OpenRadioss wants a spring mass > 0 for the
+            # explicit time step. 1e-4 is the same inert token mass the
+            # validated grounding-spring emitter uses.
+            title = part.title or f"DISCRETE_{pid}"
+            lines += _emit_prop_type4(
+                prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
+                fct1, hflag, dmin, dmax)
+            lines += [
+                f"/PART/{part_id}",
+                title,
+                f"{_i(prop_id)}{_i(0)}{_i(0)}",
+                f"/SPRING/{part_id}",
+                "# sprg_ID  node_ID1  node_ID2",
+            ]
+            ground_nodes: List[int] = []
+            for e in g_elems:
+                n1, n2 = e.n1, e.n2
+                if n1 <= 0 or n2 <= 0:
+                    anchor = n1 if n1 > 0 else n2
+                    nd = state.nodes.get(anchor)
+                    if nd is None:
+                        state.warn(f"*ELEMENT_DISCRETE {e.eid}: grounded "
+                                   f"element's node {anchor} has no "
+                                   "coordinates — element skipped.")
+                        continue
+                    gnid = _new_ground_node(state, nd)
+                    ground_nodes.append(gnid)
+                    n1, n2 = anchor, gnid
+                lines.append(f"{_i(e.eid)}{_i(n1)}{_i(n2)}")
+            lines.append(HDR)
+            if ground_nodes:
+                grnod_id = state.next_id()
+                bcs_id = state.next_id()
+                lines.append("/NODE")
+                for gnid in ground_nodes:
+                    nd = state.nodes[gnid]
+                    lines.append(f"{_i(gnid)}{_f(nd.x)}{_f(nd.y)}{_f(nd.z)}")
+                lines += _emit_grnod_node(grnod_id,
+                                          f"discrete_ground_pid{pid}",
+                                          ground_nodes)
+                lines += [
+                    f"/BCS/{bcs_id}",
+                    f"fix_discrete_ground_pid{pid}",
+                    "#  Tra rot   skew_ID  grnod_ID",
+                    f"   111 111         0{_i(grnod_id)}",
+                    HDR,
+                ]
+                state.warn(f"*ELEMENT_DISCRETE part {pid}: {len(ground_nodes)} "
+                           "grounded element(s) (N2=0) tied to new fully-fixed "
+                           "ground node(s) at the attached node's coordinates "
+                           "(zero-length TYPE4 spring = central restoring "
+                           "force toward the anchor point).")
+            emitted = True
+            state.warn(f"*ELEMENT_DISCRETE part {pid} ({kind}, "
+                       f"{len(g_elems)} element(s)) -> /PROP/TYPE4/{prop_id} + "
+                       f"/SPRING on /PART/{part_id}. The spring carries a small "
+                       "artificial mass (1e-4) for the explicit time step — "
+                       "add *ELEMENT_MASS-equivalent mass if dynamics of the "
+                       "spring ends matter.")
+
+    return lines if emitted else []
+
+
+def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
+    """*MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 (SPR_BEAM) /SPRING
+    connectors.
+
+    Route note: /MAT/LAW59 (CONNECT) was evaluated and rejected — its cfg
+    (matl59_CONNECT.cfg) binds it to /PROP/TYPE43 8-node connection SOLIDS,
+    not to 2-node spring elements, so a LAW59 card here could not be attached
+    to the converted beams. The complete spotweld behaviour therefore lives in
+    the TYPE13 property: local Tx is the beam axis (Radioss and LS-DYNA share
+    that convention for a 2-node spring/beam), per-DOF elastic stiffness comes
+    from E, G=E/2(1+ν) and the *SECTION_BEAM resultants, and MAT_100 card 2
+    (NRR NRS NRT MRR MSS MTT) becomes the Ifail=1/Ifail2=2 multi-directional
+    FORCE failure surface — the same quadratic resultant criterion LS-DYNA
+    applies. SIGY/EH give a bilinear axial force function (H=1 elastic-plastic)
+    when SIGY > 0.
+    """
+    pids = sorted(_spotweld_beam_pids(state))
+    if not pids:
+        return []
+    lines: List[str] = [
+        "#-  SPOTWELD CONNECTORS (*MAT_SPOTWELD beam parts -> /PROP/TYPE13 + /SPRING):",
+        HDR]
+    emitted = False
+
+    beams_by_pid: Dict[int, List[BeamElem]] = defaultdict(list)
+    for e in state.beam_elems:
+        beams_by_pid[e.pid].append(e)
+
+    for pid in pids:
+        part = state.parts[pid]
+        mat = state.mat_spotweld[part.mid]
+        beams = beams_by_pid.get(pid, [])
+        secid = part.secid if part.secid > 0 else pid
+        sec = state.sec_beams.get(secid)
+
+        # Mean weld length from the node coordinates.
+        lens = []
+        for e in beams:
+            a, b = state.nodes.get(e.n1), state.nodes.get(e.n2)
+            if a is not None and b is not None:
+                lens.append(((a.x - b.x) ** 2 + (a.y - b.y) ** 2
+                             + (a.z - b.z) ** 2) ** 0.5)
+        L = (sum(lens) / len(lens)) if lens else 0.0
+        if L <= 1e-12:
+            state.warn(f"*MAT_SPOTWELD part {pid}: zero-length (or node-less) "
+                       "spotweld beams — /PROP/TYPE13 needs a finite length; "
+                       f"{len(beams)} weld(s) NOT converted. Tie the sheets "
+                       "with *CONSTRAINED_SPOTWELD instead.")
+            continue
+
+        # Cross-section area + inertias from the *SECTION_BEAM.
+        area = iyy = izz = ixx = 0.0
+        if sec is None:
+            state.warn(f"*MAT_SPOTWELD part {pid}: no *SECTION_BEAM {secid} — "
+                       "cannot size the weld stiffness; welds NOT converted.")
+            continue
+        if sec.elform == 1:
+            # Integrated beam: TS1 is the (outer) section dimension; assume a
+            # solid circular spotweld nugget of diameter TS1.
+            d = sec.ts1
+            area = math.pi * d * d / 4.0
+            iyy = izz = math.pi * d ** 4 / 64.0
+            ixx = 2.0 * iyy
+            if d > 0.0:
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=1) on spotweld part "
+                           f"{pid}: assumed a solid circular nugget of diameter "
+                           f"TS1={d:g} (CST/CA details are not read).")
+        elif sec.elform == 9:
+            area = sec.ca
+            if area <= 0.0 and sec.vol > 0.0:
+                area = sec.vol / L
+            iyy = izz = area * area / (4.0 * math.pi)  # solid circular nugget
+            ixx = 2.0 * iyy
+            state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                       f"{pid}: bending/torsion inertia estimated from the "
+                       "nugget area as a solid circular section.")
+        else:
+            area, iyy, izz, ixx = sec.area, sec.iyy, sec.izz, sec.ixx
+        if area <= 0.0:
+            state.warn(f"*MAT_SPOTWELD part {pid}: *SECTION_BEAM {secid} gives "
+                       "no cross-section area — welds NOT converted.")
+            continue
+        if iyy <= 0.0 or izz <= 0.0:
+            est = area * area / (4.0 * math.pi)
+            iyy = iyy if iyy > 0.0 else est
+            izz = izz if izz > 0.0 else est
+            state.warn(f"*MAT_SPOTWELD part {pid}: missing bending inertia in "
+                       f"*SECTION_BEAM {secid} — estimated as a solid circular "
+                       "section from the area.")
+        if ixx <= 0.0:
+            ixx = iyy + izz
+
+        E = mat.E
+        G = E / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0 else E / 2.0
+        k1 = E * area / L            # axial Tx
+        k23 = G * area / L           # shear Ty/Tz
+        k4 = G * ixx / L             # torsion Rx
+        k5 = E * iyy / L             # bending Ry
+        k6 = E * izz / L             # bending Rz
+
+        mass = mat.rho * area * L
+        if mass <= 0.0:
+            mass = 1.0e-4
+            state.warn(f"*MAT_SPOTWELD part {pid}: non-positive weld mass "
+                       "(RO or section) — token mass 1e-4 used.")
+        inertia = max(mass * L * L / 12.0, 1e-20)
+
+        # Failure surface (Ifail=1 multi-directional + Ifail2=2 force criteria:
+        # the combined quadratic force/moment resultant criterion, matching
+        # MAT_100's (N/NRR)²+(Ns/NRS)²+(Nt/NRT)²+(M/M..)² ≥ 1). Zero fields
+        # default to ±1e30 = that component never fails, like a blank in DYNA.
+        has_fail = any(v > 0.0 for v in (mat.nrr, mat.nrs, mat.nrt,
+                                         mat.mrr, mat.mss, mat.mtt))
+        ifail, ifail2 = (1, 2) if has_fail else (0, 0)
+
+        # Axial elastic-plastic bilinear force function from SIGY/EH.
+        fct1 = 0
+        h1 = 0
+        funct_lines: List[str] = []
+        if mat.sigy > 0.0:
+            fy = mat.sigy * area
+            dy = fy / k1
+            if mat.et > 0.0 and mat.et < E:
+                # EH is the plastic hardening modulus: tangent = E·EH/(E+EH).
+                kt = (E * mat.et / (E + mat.et)) * area / L
+            else:
+                kt = k1 * 1e-4       # near-perfectly-plastic fallback
+            dend = dy * 101.0        # 100·δy of plastic range; Radioss
+            fend = fy + kt * (dend - dy)   # extrapolates the last segment
+            fct1 = state.next_id()
+            h1 = 1                   # elastic-plastic, unloading with K1
+            funct_lines = [
+                f"/FUNCT/{fct1}",
+                f"spotweld_axial_bilinear_pid{pid}",
+                "#                  X                   Y",
+                f"{_f(-dend)}{_f(-fend)}",
+                f"{_f(-dy)}{_f(-fy)}",
+                f"{_f(0.0)}{_f(0.0)}",
+                f"{_f(dy)}{_f(fy)}",
+                f"{_f(dend)}{_f(fend)}",
+                HDR,
+            ]
+            state.warn(f"*MAT_SPOTWELD part {pid}: SIGY={mat.sigy:g}/EH="
+                       f"{mat.et:g} sampled into a bilinear axial "
+                       f"force-displacement /FUNCT/{fct1} (yield force "
+                       f"SIGY·A={fy:.6G}, H=1 elastic-plastic). Shear/bending "
+                       "DOFs stay elastic up to the failure surface.")
+
+        dofs = [
+            (k1, fct1, h1, 0.0, mat.nrr),          # Tx: tension-only failure
+            (k23, 0, 0, -mat.nrs, mat.nrs),        # Ty
+            (k23, 0, 0, -mat.nrt, mat.nrt),        # Tz
+            (k4, 0, 0, -mat.mrr, mat.mrr),         # Rx torsion
+            (k5, 0, 0, -mat.mss, mat.mss),         # Ry bending
+            (k6, 0, 0, -mat.mtt, mat.mtt),         # Rz bending
+        ]
+        prop_id = state.next_id()
+        lines += funct_lines
+        lines += _emit_prop_type13(
+            prop_id, (part.title or f"SPOTWELD_{pid}") + " (MAT_100 spotweld)",
+            mass, inertia, ifail, ifail2, dofs)
+        lines += [
+            f"/PART/{pid}",
+            part.title or f"SPOTWELD_{pid}",
+            f"{_i(prop_id)}{_i(0)}{_i(0)}",
+            f"/SPRING/{pid}",
+            "# sprg_ID  node_ID1  node_ID2  node_ID3",
+        ]
+        for e in beams:
+            lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}{_i(e.n3)}")
+        lines.append(HDR)
+        emitted = True
+
+        dropped = [name for name, v in (("DT", mat.dt), ("TFAIL", mat.tfail),
+                                        ("EFAIL", mat.efail), ("NF", mat.nf))
+                   if v and 0.0 < v < 1e19]
+        if dropped:
+            state.warn(f"*MAT_SPOTWELD part {pid}: {', '.join(dropped)} have no "
+                       "/PROP/TYPE13 slot — dropped (no weld time-step mass "
+                       "scaling / timed failure / plastic-strain failure / "
+                       "force filtering).")
+        if has_fail and abs(mat.nf) > 0.0:
+            pass  # NF already reported above
+        state.warn(
+            f"*MAT_SPOTWELD part {pid} ({len(beams)} weld beam(s)) -> "
+            f"/PROP/TYPE13/{prop_id} SPR_BEAM /SPRING connectors "
+            f"(K_axial=E·A/L={k1:.6G}, K_shear=G·A/L={k23:.6G}, failure "
+            f"forces/moments from MAT_100 card 2 via Ifail2=2). APPROXIMATE "
+            "mapping: validate against LS-DYNA on a single-weld pull and "
+            "lap-shear coupon before trusting a full-vehicle result.")
+
+    return lines if emitted else []
+
+
+def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
+    """*CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with failure
+    forces → one stiff /PROP/TYPE13 /SPRING per weld (Ifail=1/Ifail2=2:
+    DeltaMax1=SN axial tension, ±SS on the shear DOFs). The no-failure flavour
+    was already turned into a 2-node CNRB at parse time."""
+    welds = state.constrained_spotwelds
+    if not welds:
+        return []
+    lines: List[str] = [
+        "#-  CONSTRAINED SPOTWELDS WITH FAILURE (-> stiff /PROP/TYPE13 + /SPRING):",
+        HDR]
+    emitted = False
+
+    # Stiffness rationale: the weld must be rigid relative to the joined
+    # sheets. A sheet loads the weld through a patch of membrane stiffness
+    # ~E·t; with t of the order of the weld gap L, K = 10·E_ref·L is ~10x
+    # stiffer than the surroundings (a firm tie that does not wreck the
+    # explicit time step the way a huge penalty K would). E_ref is the
+    # stiffest converted structural material.
+    e_candidates = ([m.E for m in state.mat_elastic.values()]
+                    + [m.E for m in state.mat_plas_tab.values()]
+                    + [m.E for m in state.mat_plas_kin.values()]
+                    + [m.E for m in state.mat_power_law.values()])
+    e_ref = max([e for e in e_candidates if e > 0.0], default=0.0)
+    if e_ref <= 0.0:
+        e_ref = 210000.0
+        state.warn("*CONSTRAINED_SPOTWELD: no structural material found to "
+                   "scale the tie stiffness — defaulted E_ref=210000 (steel, "
+                   "N/mm² assumed); check the unit system.")
+
+    for w in welds:
+        label = w.title or (f"spotweld_{w.n1}_{w.n2}" if w.nsid == 0
+                            else f"gen_weld_spot_{w.nsid}")
+        n1, n2 = w.n1, w.n2
+        if w.nsid > 0:
+            nids = sorted({n for n in state.node_sets.get(w.nsid, ("", []))[1]
+                           if n > 0})
+            if len(nids) != 2:
+                state.warn(f"*CONSTRAINED_GENERALIZED_WELD_SPOT nsid={w.nsid}: "
+                           f"node set has {len(nids)} node(s) (need exactly 2) "
+                           "— weld NOT converted.")
+                continue
+            n1, n2 = nids
+        a, b = state.nodes.get(n1), state.nodes.get(n2)
+        if a is None or b is None:
+            state.warn(f"*CONSTRAINED_SPOTWELD {label}: node {n1 if a is None else n2} "
+                       "has no coordinates — weld NOT converted.")
+            continue
+        L = ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
+        if L <= 1e-12:
+            state.warn(f"*CONSTRAINED_SPOTWELD {label}: nodes {n1}/{n2} are "
+                       "coincident — /PROP/TYPE13 needs a finite length; weld "
+                       "NOT converted (merge the nodes or use a tied contact).")
+            continue
+        if (w.n and abs(w.n - 2.0) > 1e-9) or (w.m and abs(w.m - 2.0) > 1e-9):
+            state.warn(f"*CONSTRAINED_SPOTWELD {label}: failure exponents "
+                       f"N={w.n:g}/M={w.m:g} differ from 2 — the converted "
+                       "multi-directional criterion is quadratic (N=M=2).")
+
+        k = 10.0 * e_ref * L
+        krot = k * L * L / 12.0
+        dofs = [
+            (k, 0, 0, 0.0, w.sn),        # Tx: tension failure force SN
+            (k, 0, 0, -w.ss, w.ss),      # Ty: shear failure force SS
+            (k, 0, 0, -w.ss, w.ss),      # Tz
+            (krot, 0, 0, 0.0, 0.0),      # Rx/Ry/Rz: no moment failure in the
+            (krot, 0, 0, 0.0, 0.0),      #   DYNA criterion (defaults ±1e30)
+            (krot, 0, 0, 0.0, 0.0),
+        ]
+        prop_id = state.next_id()
+        part_id = state.next_id()
+        elem_id = state.next_id()
+        # Token mass/inertia, same rationale as the grounding springs: the tie
+        # itself is massless in LS-DYNA.
+        lines += _emit_prop_type13(prop_id, f"{label} (stiff weld tie)",
+                                   1.0e-4, 1.0e-6, 1, 2, dofs)
+        lines += [
+            f"/PART/{part_id}",
+            label,
+            f"{_i(prop_id)}{_i(0)}{_i(0)}",
+            f"/SPRING/{part_id}",
+            "# sprg_ID  node_ID1  node_ID2",
+            f"{_i(elem_id)}{_i(n1)}{_i(n2)}",
+            HDR,
+        ]
+        emitted = True
+        state.warn(
+            f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
+            f"/PROP/TYPE13/{prop_id} spring (K=10·E_ref·L={k:.6G} per "
+            f"translational DOF; failure SN={w.sn:g} axial / SS={w.ss:g} "
+            "shear via Ifail2=2 force criteria). APPROXIMATE: the pre-failure "
+            "tie is penalty-stiff, not rigid — validate the failure load on a "
+            "single-weld case.")
 
     return lines if emitted else []
 
@@ -5808,6 +6466,13 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         elem_nodes.update(e.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
+    # /SPRING connector nodes carry spring stiffness; the synthesized ground
+    # nodes are already fully /BCS-fixed by the connector section.
+    for d in state.discrete_elems:
+        elem_nodes.update((d.n1, d.n2))
+    for w in state.constrained_spotwelds:
+        elem_nodes.update((w.n1, w.n2))
+    elem_nodes.update(state.connector_ground_nodes)
     keep_free: Set[int] = set()
     for cn in state.coord_nodes.values():
         if cn.flag == 1:
@@ -6043,6 +6708,9 @@ def _starter_section_registry():
         ("node_cloads",       lambda c: _make_node_cloads(c.state)),
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
         ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
+        ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
+        ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
+        ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
         ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
         ("eig",               lambda c: _make_eig(c.state)),

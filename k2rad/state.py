@@ -39,6 +39,124 @@ class BeamElem:
 
 
 @dataclass
+class DiscreteElem:
+    """*ELEMENT_DISCRETE — a 2-node spring/damper element → /SPRING.
+
+    LS-DYNA card (Keyword971 ELEMENTS/discrete.cfg):
+        EID(I8) PID(I8) N1(I8) N2(I8) VID(I8) S(E16) PF(I8) OFFSET(E16)
+      vid    = *DEFINE_SD_ORIENTATION id (0 = act along the N1-N2 axis)
+      s      = scale factor on the element force (default 1.0)
+      offset = initial offset (preload displacement)
+    N2 = 0 means the element is attached to ground.
+    """
+    eid: int
+    pid: int
+    n1: int
+    n2: int
+    vid: int = 0
+    s: float = 1.0
+    offset: float = 0.0
+
+
+@dataclass
+class SectionDiscrete:
+    """*SECTION_DISCRETE → /PROP/TYPE4 (SPRING) flags.
+
+    Card1: SECID DRO KD V0 CL FD;  Card2: CDL TDL.
+      dro = 0 translational, 1 torsional (torsional has no /PROP/TYPE4 map)
+      kd/v0/cl = dynamic magnification factor / test velocity / clearance
+      fd  = failure deflection (positive tension, negative compression)
+      cdl/tdl = deflection limits in compression/tension (element deletion)
+    """
+    secid: int
+    title: str
+    dro: int = 0
+    kd: float = 0.0
+    v0: float = 0.0
+    cl: float = 0.0
+    fd: float = 0.0
+    cdl: float = 0.0
+    tdl: float = 0.0
+
+
+@dataclass
+class MatSpringElastic:
+    """*MAT_SPRING_ELASTIC (MAT_S01): F = K·dl → /PROP/TYPE4 K."""
+    mid: int
+    k: float
+
+
+@dataclass
+class MatSpringNonlinearElastic:
+    """*MAT_SPRING_NONLINEAR_ELASTIC (MAT_S04): F = LCD(dl), optionally scaled
+    by rate curve LCR → /PROP/TYPE4 fct_ID1 (LCR has no confident TYPE4 slot)."""
+    mid: int
+    lcd: int
+    lcr: int = 0
+
+
+@dataclass
+class MatDamperViscous:
+    """*MAT_DAMPER_VISCOUS (MAT_D01): F = DC·(dl/dt) → /PROP/TYPE4 C."""
+    mid: int
+    dc: float
+
+
+@dataclass
+class MatSpotweld:
+    """*MAT_SPOTWELD (MAT_100) on beam elements → /PROP/TYPE13 (SPR_BEAM)
+    2-node /SPRING connectors (per-DOF stiffness from E,G + the beam section,
+    Ifail=1/Ifail2=2 quadratic force/moment failure surface from card 2).
+
+    Card1: MID RO E PR SIGY EH DT TFAIL;  Card2: EFAIL NRR NRS NRT MRR MSS MTT NF.
+    /MAT/LAW59 (CONNECT) was considered and rejected: it binds to /PROP/TYPE43
+    8-node connection solids, not to 2-node spring elements.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    sigy: float
+    et: float           # EH: plastic hardening modulus
+    dt: float           # time step for mass scaling (dropped, warned)
+    tfail: float        # failure time (dropped, warned)
+    efail: float        # effective plastic strain at failure (dropped, warned)
+    nrr: float          # axial (tension) failure force  → DeltaMax1
+    nrs: float          # shear failure force (s)        → ±Delta2
+    nrt: float          # shear failure force (t)        → ±Delta3
+    mrr: float          # torsion failure moment         → ±Delta4
+    mss: float          # bending failure moment (s)     → ±Delta5
+    mtt: float          # bending failure moment (t)     → ±Delta6
+    nf: float = 0.0     # force-filter count (dropped, warned)
+
+
+@dataclass
+class ConstrainedSpotweld:
+    """A *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT WITH failure
+    forces → a stiff /PROP/TYPE13 /SPRING with Ifail2=2 force criteria.
+    (The no-failure flavour is turned into a 2-node CNRB at parse time and never
+    lands here.)  Node-pair welds set n1/n2; NSID-based welds set nsid and are
+    resolved to a pair at write time.
+
+    Card (Keyword971_R6.1 constrained_spotweld.cfg):
+        N1 N2 SN SS N M TF EP
+      sn/ss = normal/shear failure force, n/m = failure exponents,
+      tf = failure time (dropped), ep = plastic failure strain (dropped).
+    """
+    n1: int = 0
+    n2: int = 0
+    nsid: int = 0
+    sn: float = 0.0
+    ss: float = 0.0
+    n: float = 2.0
+    m: float = 2.0
+    tf: float = 0.0
+    ep: float = 0.0
+    title: str = ""
+
+
+@dataclass
 class PartData:
     pid: int
     title: str
@@ -76,6 +194,9 @@ class SectionBeam:
     izz: float = 0.0
     ixx: float = 0.0
     ts1: float = 0.0   # integrated beam thickness (elform=1)
+    # ELFORM=9 (spotweld beam) card2 is VOL INER CID CA ... — no area/inertia:
+    vol: float = 0.0   # spotweld nugget volume
+    ca: float = 0.0    # spotweld cross-sectional area
 
 
 @dataclass
@@ -1231,12 +1352,16 @@ class ConversionState:
         self.shell_elems: List[ShellElem] = []
         self.solid_elems: List[SolidElem] = []
         self.beam_elems: List[BeamElem] = []
+        # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
+        self.discrete_elems: List[DiscreteElem] = []
 
         # ── Model entities ─────────────────────────────────────────
         self.parts: Dict[int, PartData] = {}
         self.sec_shells: Dict[int, SectionShell] = {}
         self.sec_solids: Dict[int, SectionSolid] = {}
         self.sec_beams: Dict[int, SectionBeam] = {}
+        # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
+        self.sec_discrete: Dict[int, SectionDiscrete] = {}
 
         self.mat_elastic: Dict[int, MatElastic] = {}
         self.mat_plas_tab: Dict[int, MatPlasTAB] = {}
@@ -1252,6 +1377,20 @@ class ConversionState:
         self.mat_low_density_foam: Dict[int, MatLowDensityFoam] = {}  # MAT_057 → /MAT/LAW38
         self.mat_fu_chang_foam: Dict[int, MatFuChangFoam] = {}      # MAT_083 → /MAT/LAW70
         self.mat_honeycomb: Dict[int, MatHoneycomb] = {}           # MAT_026 → /MAT/LAW28
+        # Discrete-element (spring/damper) materials → /PROP/TYPE4 fields
+        self.mat_spring_elastic: Dict[int, MatSpringElastic] = {}          # MAT_S01
+        self.mat_spring_nonlinear: Dict[int, MatSpringNonlinearElastic] = {}  # MAT_S04
+        self.mat_damper_viscous: Dict[int, MatDamperViscous] = {}          # MAT_D01
+        # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
+        self.mat_spotweld: Dict[int, MatSpotweld] = {}
+        # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with
+        # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
+        # 2-node CNRBs at parse time and go through state.cnrbs instead)
+        self.constrained_spotwelds: List[ConstrainedSpotweld] = []
+        # Ground nodes synthesized by the connector writer (registered in
+        # state.nodes for id-collision safety; excluded from the implicit
+        # free-node guard because they are already fully fixed by /BCS)
+        self.connector_ground_nodes: set = set()
         self.constrained_node_sets: List[ConstrainedNodeSet] = []  # *CONSTRAINED_NODE_SET → /RLINK
         # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
         # /FUNCT); tracked so _make_functions can exclude them.
