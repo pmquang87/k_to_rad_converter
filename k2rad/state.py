@@ -105,6 +105,18 @@ class MatPlasTAB:
     es_pts: List[float] = field(default_factory=list)
     # resolved function ID (set by handlers during post-processing)
     funct_id: int = 0
+    # LS-DYNA VP viscoplastic-formulation flag → LAW36 VP (radioss2017 cfg
+    # N_funct card, cols 91-100). Only emitted when nonzero.
+    vp: int = 0
+    # Strain-rate function family → LAW36 N_funct>1: (fct_ID, Fscale, Eps_dot)
+    # triples, ascending Eps_dot. Populated by the writer post-pass from either
+    # an LCSS *DEFINE_TABLE or sampled rate curves; empty = single static curve.
+    rate_fcts: List[Tuple[int, float, float]] = field(default_factory=list)
+    # Pre-sampled hardening curves per strain rate, (eps_dot, [(eps_p, sigma)]),
+    # filled by handle_mat_simplified_johnson_cook when C != 0. The writer
+    # allocates /FUNCT ids for them and moves them into rate_fcts.
+    rate_curves: List[Tuple[float, List[Tuple[float, float]]]] = \
+        field(default_factory=list)
 
 
 @dataclass
@@ -354,6 +366,29 @@ class Curve:
     offa: float
     offo: float
     pts: List[Tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class DefineTable:
+    """*DEFINE_TABLE / *DEFINE_TABLE_2D → /TABLE/1 with Ndim=2.
+
+    Header card (Keyword971_R6.1 define_table[_2D].cfg): TBID SFA OFFA.
+    Each row pairs a 2nd-dimension abscissa VALUE (e.g. a strain rate, stored
+    already scaled: A = SFA·(VALUE+OFFA)) with a *DEFINE_CURVE id. The _2D
+    variant carries the LCID explicitly on each row; the legacy *DEFINE_TABLE
+    lists bare VALUEs whose curves are the *DEFINE_CURVE blocks immediately
+    FOLLOWING the table in the deck — those live in ``pending_values`` until
+    the writer post-pass pairs them positionally (``curve_seq`` = how many
+    curves had been parsed when the table was read).
+    """
+    tbid: int
+    title: str
+    sfa: float
+    offa: float
+    rows: List[Tuple[float, int]] = field(default_factory=list)   # (A, lcid)
+    pending_values: List[float] = field(default_factory=list)     # legacy form
+    curve_seq: int = 0      # len(state.curve_order) at parse time
+    resolved: bool = False  # rows are final (post-pass ran / _2D form)
 
 
 @dataclass
@@ -1207,6 +1242,12 @@ class ConversionState:
         self.eos_cards: Dict[int, EosCard] = {}         # eosid → /EOS/<kind>
 
         self.curves: Dict[int, Curve] = {}
+        # *DEFINE_CURVE lcids in deck parse order — used to resolve the legacy
+        # *DEFINE_TABLE form (curves follow the table positionally).
+        self.curve_order: List[int] = []
+        # *DEFINE_TABLE[_2D] → /TABLE/1 (Ndim=2), keyed by table id (shares the
+        # LS-DYNA load-curve id space with state.curves).
+        self.define_tables: Dict[int, DefineTable] = {}
         self.coord_sys: Dict[int, CoordSys] = {}
         # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
         self.coord_nodes: Dict[int, CoordNodes] = {}

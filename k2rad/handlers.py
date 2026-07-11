@@ -21,7 +21,7 @@ from .state import (
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
-    Curve, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
+    Curve, DefineTable, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
@@ -391,6 +391,7 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
     C    = to_float(f2[0]) if f2 else 0.0
     P    = to_float(f2[1]) if len(f2) > 1 else 0.0
     lcss = to_int(f2[2])   if len(f2) > 2 else 0
+    vp   = to_int(f2[4])   if len(f2) > 4 else 0
     # Card3: EPS1-EPS8
     f3   = _card(raw, offset + 2, fixed=False)
     eps_pts = [to_float(v) for v in f3]
@@ -399,21 +400,23 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
     es_pts = [to_float(v) for v in f4]
 
     mat = MatPlasTAB(mid, title, rho, E, nu, sigy, etan, fail, lcss, C, P,
-                     eps_pts, es_pts)
+                     eps_pts, es_pts, vp=vp)
     state.mat_plas_tab[mid] = mat
 
 
 def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> None:
     """*MAT_SIMPLIFIED_JOHNSON_COOK (MAT_098) → /MAT/LAW36 with a sampled
-    hardening curve.
+    hardening curve (or a family of rate-scaled curves when C != 0).
 
-    Card 1: mid ro e pr vp
+    Card 1: mid ro e pr vp epsf itype
     Card 2: a b n c psfail sigmax sigsat epso
     Yield stress σ(εp) = A + B·εpⁿ (capped at SIGMAX when given) is sampled
     into an auto-generated LAW36 yield table — the card layout shares NOTHING
-    with MAT_024, so it must not go through that handler. The strain-rate
-    term (1 + C·ln ε̇*) has no LAW36 equivalent here and is dropped with a
-    warning when C is nonzero.
+    with MAT_024, so it must not go through that handler. When C is nonzero
+    the strain-rate term (1 + C·ln(ε̇/EPSO)) is converted into a LAW36
+    rate-function family: one sampled curve per reference rate ε̇_i, each the
+    quasi-static curve scaled by max(1, 1 + C·ln(ε̇_i/EPSO)). VP (card 1)
+    carries through to the LAW36 VP flag.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -423,6 +426,7 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
     rho = to_float(f1[1])
     E   = to_float(f1[2])
     nu  = to_float(f1[3])
+    vp  = to_int(f1[4]) if len(f1) > 4 else 0
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     a      = to_float(f2[0]) if f2 else 0.0
     b      = to_float(f2[1]) if len(f2) > 1 else 0.0
@@ -430,6 +434,9 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
     c      = to_float(f2[3]) if len(f2) > 3 else 0.0
     psfail = _ffield(f2, 4, 1e17)      # blank = no failure (LS-DYNA 1e17)
     sigmax = to_float(f2[5]) if len(f2) > 5 else 0.0
+    epso   = _ffield(f2, 7, 1.0)       # reference rate; blank/0 → LS-DYNA 1.0
+    if epso <= 0.0:
+        epso = 1.0
 
     eps_samples = [0.0, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05,
                    0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0]
@@ -441,14 +448,28 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
             s = min(s, sigmax)
         eps_pts.append(e)
         es_pts.append(s)
+    rate_curves: List = []
     if c != 0.0:
+        # Reference rates: EPSO itself (scale factor exactly 1 — the JC term's
+        # ln vanishes), then decades 1/10/100/1000/10000 above EPSO. The
+        # scale factor is floored at 1 so a negative C (or a rate below EPSO,
+        # excluded anyway) can never soften below the quasi-static curve.
+        rates = [epso] + [r for r in (1.0, 10.0, 100.0, 1000.0, 10000.0)
+                          if r > epso]
+        for rate in rates:
+            fac = max(1.0, 1.0 + c * _math.log(rate / epso))
+            rate_curves.append(
+                (rate, [(e, s * fac) for e, s in zip(eps_pts, es_pts)]))
         state.warn(
-            f"*MAT_SIMPLIFIED_JOHNSON_COOK mid={mid}: the strain-rate term "
-            f"(1 + {c:g}·ln ε̇*) has no /MAT/LAW36 mapping here — converted "
-            "rate-independent (quasi-static hardening only).")
+            f"*MAT_SIMPLIFIED_JOHNSON_COOK mid={mid}: strain-rate term "
+            f"(1 + {c:g}·ln(ε̇/{epso:g})) converted to a /MAT/LAW36 "
+            f"rate-function family of {len(rates)} sampled curves at "
+            f"ε̇ = {', '.join(f'{r:g}' for r in rates)} "
+            "(scale factor floored at 1).")
     fail = psfail if psfail < 1e16 else 0.0
     state.mat_plas_tab[mid] = MatPlasTAB(
-        mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts)
+        mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts,
+        vp=vp, rate_curves=rate_curves)
 
 
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
@@ -788,6 +809,72 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
             pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
                         (to_float(f[1]) + offo) * (sfo or 1.0)))
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
+    state.curve_order.append(lcid)
+
+
+def _handle_define_table_common(block: Block, state: ConversionState,
+                                is_2d: bool) -> None:
+    """Shared parser for *DEFINE_TABLE / *DEFINE_TABLE_2D → /TABLE/1 (Ndim=2).
+
+    Header card (Keyword971_R6.1 define_table[_2D].cfg): TBID SFA OFFA — the
+    table header has NO ordinate scale/offset (SFO/OFFO exist only on
+    *DEFINE_CURVE). Rows: VALUE LCID (the _2D form, 20-char fields) or bare
+    VALUE (legacy form; the curves are the *DEFINE_CURVE blocks immediately
+    following the table, resolved positionally by the writer post-pass).
+    A = SFA·(VALUE + OFFA), the same convention as *DEFINE_CURVE abscissas.
+    """
+    kw = "*DEFINE_TABLE_2D" if is_2d else "*DEFINE_TABLE"
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    tbid = to_int(f1[0])
+    sfa  = _ffield(f1, 1, 1.0)
+    if sfa == 0.0:
+        sfa = 1.0
+    offa = to_float(f1[2]) if len(f1) > 2 else 0.0
+    rows: List = []          # (A, lcid) — explicit-LCID rows
+    pending: List = []       # bare VALUE rows (legacy positional form)
+    for line in raw[offset + 1:]:
+        f = parse_free(line)
+        if not f:
+            continue
+        val = (to_float(f[0]) + offa) * sfa
+        lcid = to_int(f[1]) if len(f) > 1 else 0
+        if lcid > 0:
+            rows.append((val, lcid))
+        else:
+            pending.append(val)
+    if rows and pending:
+        state.warn(
+            f"{kw} tbid={tbid}: mixes rows with and without an explicit LCID "
+            "— skipped (cannot pair the bare values with curves).")
+        state.skipped_keywords.append(block.keyword)
+        return
+    if is_2d and pending:
+        state.warn(
+            f"{kw} tbid={tbid}: {len(pending)} row(s) without the required "
+            "LCID field — skipped.")
+        state.skipped_keywords.append(block.keyword)
+        return
+    if not rows and not pending:
+        state.warn(f"{kw} tbid={tbid}: no data rows — skipped.")
+        state.skipped_keywords.append(block.keyword)
+        return
+    state.define_tables[tbid] = DefineTable(
+        tbid=tbid, title=title, sfa=sfa, offa=offa,
+        rows=rows, pending_values=pending,
+        curve_seq=len(state.curve_order), resolved=bool(rows))
+
+
+def handle_define_table(block: Block, state: ConversionState) -> None:
+    _handle_define_table_common(block, state, is_2d=False)
+
+
+def handle_define_table_2d(block: Block, state: ConversionState) -> None:
+    _handle_define_table_common(block, state, is_2d=True)
 
 
 # Whitelisted names for the *DEFINE_CURVE_FUNCTION expression sampler. Only a
@@ -2797,6 +2884,8 @@ HANDLERS = {
     # Definitions
     "DEFINE_CURVE":                           handle_define_curve,
     "DEFINE_CURVE_FUNCTION":                  handle_define_curve_function,
+    "DEFINE_TABLE":                           handle_define_table,
+    "DEFINE_TABLE_2D":                        handle_define_table_2d,
     "DEFINE_COORDINATE_SYSTEM":               handle_define_coordinate_system,
     "DEFINE_COORDINATE_NODES":                handle_define_coordinate_nodes,
     "DEFINE_COORDINATE_VECTOR":               handle_skip,

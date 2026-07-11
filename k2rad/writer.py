@@ -556,9 +556,51 @@ def _emit_fail_johnson_all_layers(mid: int, epsf: float,
     ]
 
 
+def _wrap_cells(cells: List[str], per_line: int = 5) -> List[str]:
+    """Join pre-formatted fixed-width cells into lines of *per_line* cells —
+    the cfg CELL_LIST wrapping (5 ids of %10d / 5 floats of %20lg per line)."""
+    return ["".join(cells[i:i + per_line])
+            for i in range(0, len(cells), per_line)]
+
+
 def _emit_mat_law36(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     fid = mat.funct_id
     fail = mat.fail if 0.0 < mat.fail < 1e19 else 0.0
+    if mat.rate_fcts:
+        # Strain-rate function family (N_funct = k). Layout audited against
+        # hm_cfg_files MAT/matl36_plas_tab.cfg FORMAT(radioss2017) — the block
+        # a /BEGIN 2022 deck is read with:
+        #   N_funct(10) F_smooth(10) C_hard(20) F_cut(20) Eps_f(20) 10x VP(10)
+        #   fct_IDp(10) Fscale(20) Fct_IDE(10) EInf(20) CE(20)
+        #   func_ID_i   CELL_LIST %10d (5 per line)
+        #   Fscale_i    CELL_LIST %20lg (5 per line)
+        #   Eps_dot_i   CELL_LIST %20lg (5 per line)
+        fam = sorted(mat.rate_fcts, key=lambda t: t[2])   # ascending Eps_dot
+        nf_card = f"{_i(len(fam))}{_i(0)}"
+        if mat.vp:
+            nf_card += " " * 70 + _i(mat.vp)              # VP at cols 91-100
+        lines = [
+            f"/MAT/LAW36/{mat.mid}",
+            mat.title or f"MAT_{mat.mid}",
+            "#              RHO_I",
+            f"{_f(mat.rho)}",
+            "#                  E                  Nu          Eps_p_max",
+            f"{_f(mat.E)}{_f(mat.nu)}                   0",
+            "#  N_funct  F_smooth              C_hard               F_cut               Eps_f                  VP",
+            nf_card,
+            "#  fct_IDp              Fscale",
+            "         0                 1.0",
+            "# func_ID1  func_ID2  func_ID3  func_ID4  func_ID5",
+            *_wrap_cells([_i(f) for f, _, _ in fam]),
+            "#           Fscale_1            Fscale_2            Fscale_3            Fscale_4            Fscale_5",
+            *_wrap_cells([_f(s) for _, s, _ in fam]),
+            "#          Eps_dot_1           Eps_dot_2           Eps_dot_3           Eps_dot_4           Eps_dot_5",
+            *_wrap_cells([_f(r) for _, _, r in fam]),
+            HDR,
+        ]
+        if fail > 0.0:
+            lines += _emit_fail_johnson_all_layers(mat.mid, fail, state)
+        return lines
     lines = [
         f"/MAT/LAW36/{mat.mid}",
         mat.title or f"MAT_{mat.mid}",
@@ -1743,7 +1785,9 @@ def _emit_prop_beam(sec: SectionBeam) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_functions(state: ConversionState) -> List[str]:
-    if not state.curves:
+    tables_2d = {tbid: t for tbid, t in state.define_tables.items()
+                 if t.resolved and t.rows}
+    if not state.curves and not tables_2d:
         return []
     table_ids = getattr(state, "law76_table_ids", set())
     lines = ["#-  FUNCTIONS:", HDR]
@@ -1767,6 +1811,22 @@ def _make_functions(state: ConversionState) -> List[str]:
             ]
         for a, o in curve.pts:
             lines.append(f"{_f(a)}{_f(o)}")
+        lines.append(HDR)
+    for tbid, tab in sorted(tables_2d.items()):
+        # *DEFINE_TABLE[_2D] → 2-D /TABLE/1. Layout from CURVE/table_1.cfg
+        # FORMAT(radioss110) (unchanged through /BEGIN 2022): header, title,
+        # "#dimension" card = 2, then one row per entry:
+        #   fct_ID(%10d) blank(10) A(%20lg) blank(40) Scale_y(%20lg).
+        # Rows were sorted ascending by A in _resolve_define_tables.
+        lines += [
+            f"/TABLE/1/{tbid}",
+            tab.title or f"TABLE_{tbid}",
+            "#dimension",
+            f"{_i(2)}",
+            "#  fct_ID1                             A                                                    Scale_y1",
+        ]
+        for a, lcid in tab.rows:
+            lines.append(f"{_i(lcid)}{' ' * 10}{_f(a)}{' ' * 40}{_f(1.0)}")
         lines.append(HDR)
     return lines
 
@@ -4446,6 +4506,60 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
 # Post-processing: resolve auto-generated function IDs for LAW36
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resolve_define_tables(state: ConversionState) -> None:
+    """Finalize *DEFINE_TABLE[_2D] entries before materials consume them.
+
+    * Legacy *DEFINE_TABLE (bare VALUE rows): LS-DYNA requires the table's
+      curves to be the *DEFINE_CURVE blocks immediately FOLLOWING it in the
+      deck, so pair value i with the i-th curve parsed after the table (capped
+      at the next legacy table's position). Too few following curves → warn +
+      skip the table (resolved stays False; a material referencing it falls
+      back to bilinear hardening with its own warning).
+    * All tables: drop rows whose LCID has no parsed *DEFINE_CURVE, then sort
+      rows ascending by the 2nd-dimension abscissa A (OpenRadioss requires a
+      monotonic entry list).
+    """
+    tables = state.define_tables
+    if not tables:
+        return
+    legacy = sorted((t for t in tables.values() if not t.resolved),
+                    key=lambda t: t.curve_seq)
+    bounds = [t.curve_seq for t in legacy[1:]] + [len(state.curve_order)]
+    for tab, bound in zip(legacy, bounds):
+        cands = state.curve_order[tab.curve_seq:bound]
+        n = len(tab.pending_values)
+        if len(cands) < n:
+            state.warn(
+                f"*DEFINE_TABLE tbid={tab.tbid}: legacy form lists {n} "
+                f"value(s) but only {len(cands)} *DEFINE_CURVE(s) follow it "
+                "in the deck — cannot pair values with curves; table skipped.")
+            continue
+        tab.rows = list(zip(tab.pending_values, cands[:n]))
+        tab.resolved = True
+        state.warn(
+            f"*DEFINE_TABLE tbid={tab.tbid}: legacy form resolved "
+            f"positionally — paired its {n} value(s) with the {n} "
+            f"*DEFINE_CURVE(s) defined immediately after it "
+            f"(lcid {', '.join(str(c) for c in cands[:n])}). Verify the "
+            "curve order in the source deck matches the value order.")
+    for tab in tables.values():
+        if not tab.resolved:
+            continue
+        good = [(a, lc) for a, lc in tab.rows if lc in state.curves]
+        bad = [lc for _, lc in tab.rows if lc not in state.curves]
+        if bad:
+            state.warn(
+                f"*DEFINE_TABLE tbid={tab.tbid}: dropped row(s) referencing "
+                f"undefined curve(s) {sorted(set(bad))}.")
+        if not good:
+            state.warn(
+                f"*DEFINE_TABLE tbid={tab.tbid}: no usable rows — skipped.")
+            tab.resolved = False
+            tab.rows = []
+            continue
+        tab.rows = sorted(good)
+
+
 def _resolve_mat_plas_tab(state: ConversionState) -> None:
     for mat in state.mat_plas_tab.values():
         if mat.C:
@@ -4453,8 +4567,36 @@ def _resolve_mat_plas_tab(state: ConversionState) -> None:
                 f"*MAT mid={mat.mid}: Cowper-Symonds strain-rate parameters "
                 f"(C={mat.C:g}, P={mat.P:g}) have no /MAT/LAW36 mapping — "
                 "converted rate-independent.")
-        if mat.funct_id:
+
+        # Pre-sampled Johnson-Cook rate curves (MAT_098, C != 0) → one auto
+        # /FUNCT per reference rate, collected as the LAW36 function family.
+        if mat.rate_curves and not mat.rate_fcts:
+            for eps_dot, pts in sorted(mat.rate_curves):
+                fid = state.next_id()
+                _add_auto_curve(
+                    state, fid, f"Auto_JC_mid{mat.mid}_rate{eps_dot:g}", pts)
+                mat.rate_fcts.append((fid, 1.0, eps_dot))
+        if mat.rate_fcts or mat.funct_id:
             continue
+
+        # LCSS pointing at a *DEFINE_TABLE (rate-dependent MAT_024): expand
+        # the table into the LAW36 rate-function family — fct_ID_i = the
+        # table's curves, Eps_dot_i = the table's strain-rate values.
+        tab = state.define_tables.get(mat.lcss) if mat.lcss > 0 else None
+        if tab is not None:
+            if tab.resolved and tab.rows:
+                mat.rate_fcts = [(lcid, 1.0, a) for a, lcid in tab.rows]
+                state.warn(
+                    f"*MAT mid={mat.mid}: LCSS={mat.lcss} is a *DEFINE_TABLE "
+                    f"— expanded into a /MAT/LAW36 rate-function family of "
+                    f"{len(tab.rows)} curves (Eps_dot = "
+                    f"{', '.join(f'{a:g}' for a, _ in tab.rows)}).")
+                continue
+            state.warn(
+                f"*MAT mid={mat.mid}: LCSS={mat.lcss} references a "
+                "*DEFINE_TABLE that could not be resolved — falling back to "
+                "SIGY/ETAN bilinear hardening.")
+            mat.lcss = 0
 
         if mat.lcss > 0:
             mat.funct_id = mat.lcss
@@ -5624,6 +5766,7 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
 
 
 def build_starter(state: ConversionState, progress=None) -> str:
+    _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
 
