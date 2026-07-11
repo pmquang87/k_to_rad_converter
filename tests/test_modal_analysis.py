@@ -10,7 +10,9 @@ Covers the two new tools under ``tools/``:
   half-power bandwidth Δf = 2ζ·f_n) and against the reused
   ``modal_random_response.frf_matrix`` kernel;
 * ``modal_buckling.py`` – linear (eigenvalue) buckling; validated against the
-  analytic Euler pin-pinned column  P_cr = π²·E·I/L².
+  analytic Euler pin-pinned column  P_cr = π²·E·I/L²  (beam K_g) and the
+  analytic simply supported square plate under uniaxial compression
+  σ_cr = 4·π²·E/(12(1−ν²))·(t/b)²  (shell consistent-membrane K_g).
 
 Both tools are gated on numpy / scipy exactly like the existing modal tools, so
 these tests self-skip when those libraries are unavailable.
@@ -161,6 +163,218 @@ class _Column:
         np.savez(path, freq=freq[:n_modes], phi=vec[:, :n_modes],
                  user_node=self.user_node, dof=self.dof, gids=self.gids)
         return freq[:n_modes]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared plate model (a simply supported square plate meshed with N×N quads)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _plate_deck(nx, ny, a, b, t, E, nu, rho=7.8e-9):
+    """A flat *ELEMENT_SHELL plate in the x-y plane with *SECTION_SHELL t."""
+    dx, dy = a / nx, b / ny
+
+    def nid(i, j):
+        return j * (nx + 1) + i + 1
+
+    out = ["*KEYWORD", "*TITLE", "square plate", "*NODE"]
+    for j in range(ny + 1):
+        for i in range(nx + 1):
+            out.append(f"{nid(i, j):8d}{i * dx:16.6f}{j * dy:16.6f}{0.0:16.6f}")
+    out.append("*ELEMENT_SHELL")
+    eid = 1
+    for j in range(ny):
+        for i in range(nx):
+            out.append(f"{eid:8d}{1:8d}{nid(i, j):8d}{nid(i + 1, j):8d}"
+                       f"{nid(i + 1, j + 1):8d}{nid(i, j + 1):8d}")
+            eid += 1
+    out += ["*PART", "plate part", f"{1:10d}{1:10d}{1:10d}",
+            "*SECTION_SHELL", f"{1:10d}{2:10d}", f"{t:10.4f}",
+            "*MAT_ELASTIC", f"{1:10d}{rho:10.3e}{E:10.1f}{nu:10.2f}",
+            "*END"]
+    return "\n".join(out) + "\n"
+
+
+def _membrane_quad_k(dx, dy, E, nu, t):
+    """Bilinear plane-stress rectangle (2×2 Gauss), DOFs [u1,v1,...,u4,v4]."""
+    import numpy as np
+    D = (E * t / (1.0 - nu * nu)) * np.array(
+        [[1.0, nu, 0.0], [nu, 1.0, 0.0], [0.0, 0.0, (1.0 - nu) / 2.0]])
+    xy = np.array([[0.0, 0.0], [dx, 0.0], [dx, dy], [0.0, dy]])
+    g = 1.0 / math.sqrt(3.0)
+    K = np.zeros((8, 8))
+    for xi in (-g, g):
+        for eta in (-g, g):
+            dN = 0.25 * np.array([[-(1 - eta), -(1 - xi)],
+                                  [(1 - eta), -(1 + xi)],
+                                  [(1 + eta), (1 + xi)],
+                                  [-(1 + eta), (1 - xi)]])
+            J = dN.T @ xy
+            detJ = np.linalg.det(J)
+            G = np.linalg.solve(J, dN.T)                # rows: d/dx, d/dy
+            B = np.zeros((3, 8))
+            for k in range(4):
+                B[0, 2 * k] = G[0, k]
+                B[1, 2 * k + 1] = G[1, k]
+                B[2, 2 * k] = G[1, k]
+                B[2, 2 * k + 1] = G[0, k]
+            K += (B.T @ D @ B) * detJ
+    return K
+
+
+def _acm_bending_k(dx, dy, E, nu, t):
+    """12-DOF non-conforming ACM/MZC rectangular plate-bending element.
+
+    DOFs per node: (w, θx=∂w/∂y, θy=−∂w/∂x) — the exported-K RX/RY sign
+    convention.  Built numerically from the 12-term polynomial basis
+    (1, x, y, x², xy, y², x³, x²y, xy², y³, x³y, xy³) with 4×4 Gauss (exact
+    for these polynomial orders).  Valid for RECTANGULAR elements only, which
+    is all the regular fixture mesh contains.
+    """
+    import numpy as np
+    D = (E * t ** 3 / (12.0 * (1.0 - nu * nu))) * np.array(
+        [[1.0, nu, 0.0], [nu, 1.0, 0.0], [0.0, 0.0, (1.0 - nu) / 2.0]])
+    ax, by = dx / 2.0, dy / 2.0
+    corners = [(-ax, -by), (ax, -by), (ax, by), (-ax, by)]
+
+    def p(x, y):
+        return np.array([1, x, y, x * x, x * y, y * y, x ** 3, x * x * y,
+                         x * y * y, y ** 3, x ** 3 * y, x * y ** 3])
+
+    def px(x, y):
+        return np.array([0, 1, 0, 2 * x, y, 0, 3 * x * x, 2 * x * y, y * y, 0,
+                         3 * x * x * y, y ** 3])
+
+    def py(x, y):
+        return np.array([0, 0, 1, 0, x, 2 * y, 0, x * x, 2 * x * y,
+                         3 * y * y, x ** 3, 3 * x * y * y])
+
+    def pxx(x, y):
+        return np.array([0, 0, 0, 2, 0, 0, 6 * x, 2 * y, 0, 0, 6 * x * y, 0])
+
+    def pyy(x, y):
+        return np.array([0, 0, 0, 0, 0, 2, 0, 0, 2 * x, 6 * y, 0, 6 * x * y])
+
+    def pxy(x, y):
+        return np.array([0, 0, 0, 0, 1, 0, 0, 2 * x, 2 * y, 0,
+                         3 * x * x, 3 * y * y])
+
+    C = np.zeros((12, 12))
+    for k, (x, y) in enumerate(corners):
+        C[3 * k] = p(x, y)
+        C[3 * k + 1] = py(x, y)                          # θx =  ∂w/∂y
+        C[3 * k + 2] = -px(x, y)                         # θy = −∂w/∂x
+    Ci = np.linalg.inv(C)
+    gp, gw = np.polynomial.legendre.leggauss(4)
+    Kc = np.zeros((12, 12))
+    for xi, wx in zip(gp, gw):
+        for eta, wy in zip(gp, gw):
+            x, y = ax * xi, by * eta
+            B = np.vstack([pxx(x, y), pyy(x, y), 2.0 * pxy(x, y)])
+            Kc += (B.T @ D @ B) * (wx * wy * ax * by)
+    return Ci.T @ Kc @ Ci
+
+
+class _Plate:
+    """Assembled elastic flat-shell K for a square plate, ready for the
+    buckling tool (the plate analogue of :class:`_Column`).
+
+    The tool needs the ELASTIC K too, so it is assembled here: bilinear
+    plane-stress membrane + the 12-DOF non-conforming ACM rectangular
+    plate-bending element (converges for the REGULAR RECTANGULAR mesh this
+    fixture generates — the only mesh it supports).  DOFs kept per node:
+    TX,TY (membrane) and TZ,RX,RY (bending); the drilling DOF RZ is absent,
+    exactly like a real exported K with AUTOSPC.
+
+    ``bc='ssss'`` applies hard simple supports (w=0 on all edges plus the
+    tangential-derivative edge rotation) and membrane supports ux=0 on x=0,
+    uy=0 on y=0 — compatible with an exact uniform uniaxial membrane field.
+    ``bc='free'`` keeps every DOF (K is then singular; only used to feed
+    rigid-body displacement fields to the K_g assembly).
+    """
+
+    def __init__(self, n=8, a=1000.0, t=10.0, E=210000.0, nu=0.3, bc="ssss"):
+        import numpy as np
+        import scipy.sparse as sp
+        self.n, self.a, self.b, self.t, self.E, self.nu = n, a, a, t, E, nu
+        dx = dy = a / n
+        self.dir = tempfile.mkdtemp()
+        self.kpath = os.path.join(self.dir, "plate.k")
+        with open(self.kpath, "w") as fh:
+            fh.write(_plate_deck(n, n, a, a, t, E, nu))
+        self.state = ConversionState()
+        for block in parse_k_file(self.kpath):
+            dispatch(block, self.state)
+        self.mesh = modal_common.build_mesh(self.state)
+
+        def nid(i, j):
+            return j * (n + 1) + i + 1
+
+        self._nid = nid
+        dofs = [(nid(i, j), d) for j in range(n + 1) for i in range(n + 1)
+                for d in (1, 2, 3, 4, 5)]
+        idx = {dd: k for k, dd in enumerate(dofs)}
+        K = np.zeros((len(dofs), len(dofs)))
+        km = _membrane_quad_k(dx, dy, E, nu, t)
+        kb = _acm_bending_k(dx, dy, E, nu, t)
+        for j in range(n):
+            for i in range(n):
+                nids = [nid(i, j), nid(i + 1, j), nid(i + 1, j + 1),
+                        nid(i, j + 1)]
+                m = [idx[(nn, d)] for nn in nids for d in (1, 2)]
+                K[np.ix_(m, m)] += km
+                bnd = [idx[(nn, d)] for nn in nids for d in (3, 4, 5)]
+                K[np.ix_(bnd, bnd)] += kb
+
+        constrained = set()
+        if bc == "ssss":
+            for j in range(n + 1):
+                constrained.add((nid(0, j), 1))          # ux = 0 on x = 0
+            for i in range(n + 1):
+                constrained.add((nid(i, 0), 2))          # uy = 0 on y = 0
+            for j in range(n + 1):
+                for i in range(n + 1):
+                    edge_x, edge_y = i in (0, n), j in (0, n)
+                    if edge_x or edge_y:
+                        constrained.add((nid(i, j), 3))  # w = 0 on all edges
+                    if edge_x:
+                        constrained.add((nid(i, j), 4))  # θx = ∂w/∂y = 0
+                    if edge_y:
+                        constrained.add((nid(i, j), 5))  # θy = −∂w/∂x = 0
+        keep = [k for k, dd in enumerate(dofs) if dd not in constrained]
+        K = K[np.ix_(keep, keep)]
+        kept = [dofs[k] for k in keep]
+        gids = np.array([6 * (nn - 1) + dd for nn, dd in kept])
+        order = np.argsort(gids)
+        gids = gids[order]
+        K = K[np.ix_(order, order)]
+        kept = [kept[i] for i in order]
+        self.kept = kept
+        self.gids = gids
+        self.pos = {dd: k for k, dd in enumerate(kept)}
+        self.user_node = np.array([nn for nn, dd in kept], dtype=np.int64)
+        self.dof = np.array([dd for nn, dd in kept], dtype=np.int64)
+        self.stiff = modal_solve.StiffnessMatrix(
+            n_declared=len(gids), gids=gids, K=sp.csc_matrix(K),
+            user_node=self.user_node, dof=self.dof, low_precision=False)
+
+    def presolve_uniaxial(self, n0=10.0):
+        """u for a uniform compressive edge load Nx = −n0 (force/length) on
+        x = a: consistent nodal forces (half shares at the edge corners), so
+        the discrete solution is the EXACT uniform field σx = −n0/t."""
+        import numpy as np
+        import scipy.sparse.linalg as spla
+        n = self.n
+        dy = self.a / n
+        f = np.zeros(len(self.gids))
+        for j in range(n + 1):
+            share = dy if 0 < j < n else dy / 2.0
+            f[self.pos[(self._nid(n, j), 1)]] -= n0 * share
+        return spla.spsolve(self.stiff.K, f)
+
+    def sigma_cr(self):
+        """Analytic SSSS uniaxial plate buckling stress, k = 4 (square, m=1)."""
+        return (4.0 * math.pi ** 2 * self.E
+                / (12.0 * (1.0 - self.nu ** 2)) * (self.t / self.b) ** 2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,6 +567,181 @@ class ModalBucklingTests(unittest.TestCase):
             with np.load(out) as d:
                 p_cr = d["buckling_factors"][0] * P
             self.assertAlmostEqual(p_cr / col.euler_pcr(), 1.0, delta=0.01)
+
+
+class PlateBucklingTests(unittest.TestCase):
+    """tools/modal_buckling.py shell membrane K_g — validated against the
+    analytic SSSS square plate σ_cr = 4·π²·E/(12(1−ν²))·(t/b)² and against a
+    closed-form single-CST check (numpy+scipy required; self-skips).
+
+    The ELASTIC K comes from the _Plate fixture's own flat-shell assembly
+    (bilinear plane-stress membrane + ACM rectangular bending, regular mesh
+    only) written into the same StiffnessMatrix container a real
+    /IMPL/PRINT/STIF export produces — the tool's stress recovery, K_g
+    assembly, and eigensolve are exercised exactly as in the _Column tests.
+    """
+
+    def setUp(self):
+        if not modal_buckling._HAVE_SCIPY:
+            self.skipTest("modal_buckling needs numpy+scipy")
+
+    def test_ssss_plate_buckling_matches_analytic_k4(self):
+        plate = _Plate(n=8)
+        n0 = 10.0                                       # reference Nx [F/L]
+        u = plate.presolve_uniaxial(n0)
+        Kg, counts, _ = modal_buckling.assemble_geometric_stiffness(
+            plate.state, plate.mesh, plate.stiff, u)
+        self.assertEqual(counts["shell_kg"], plate.n ** 2)
+        self.assertEqual(counts["shell_skipped"], 0)
+        lam, _ = modal_buckling.solve_buckling(plate.stiff.K, Kg, 3)
+        n_cr = lam[0] * n0
+        analytic = plate.sigma_cr() * plate.t           # N_cr = sigma_cr * t
+        ratio = n_cr / analytic
+        print(f"\n  SSSS 8x8 plate: N_cr = {n_cr:.4f} vs analytic k=4 "
+              f"{analytic:.4f} -> measured ratio {ratio:.4f} "
+              "(mesh convergence: 12x12 -> 1.010, 16x16 -> 1.005)")
+        # measured +2.2% at 8x8 (ACM bending vs consistent membrane K_g),
+        # quadratic convergence to the analytic value -> assert within 3%.
+        self.assertAlmostEqual(ratio, 1.0, delta=0.03)
+
+    def test_plate_kg_symmetry(self):
+        plate = _Plate(n=4)
+        u = plate.presolve_uniaxial(25.0)
+        Kg, _, _ = modal_buckling.assemble_geometric_stiffness(
+            plate.state, plate.mesh, plate.stiff, u)
+        self.assertGreater(Kg.nnz, 0)
+        d = Kg - Kg.T
+        self.assertLess(abs(d).max() if d.nnz else 0.0, 1e-9)
+
+    def test_rigid_inplane_translation_zero_kg_energy(self):
+        import numpy as np
+        plate = _Plate(n=4, bc="free")
+
+        def field(fx, fy):
+            out = np.zeros(len(plate.kept))
+            for k, (nn, d) in enumerate(plate.kept):
+                x, y = plate.state.nodes[nn].x, plate.state.nodes[nn].y
+                if d == 1:
+                    out[k] = fx(x, y)
+                elif d == 2:
+                    out[k] = fy(x, y)
+            return out
+
+        # reference: a genuinely strained pre-solve field -> nonzero K_g
+        u_strain = field(lambda x, y: -1e-3 * x + 2e-4 * y,
+                         lambda x, y: 1e-4 * x - 5e-4 * y)
+        Kgs, _, _ = modal_buckling.assemble_geometric_stiffness(
+            plate.state, plate.mesh, plate.stiff, u_strain)
+        ref = abs(Kgs).max()
+        self.assertGreater(ref, 0.0)
+
+        # (a) a rigid in-plane translation as the pre-solve displacement
+        #     recovers zero membrane force -> zero geometric stiffness
+        u_rigid = field(lambda x, y: 0.7, lambda x, y: -1.3)
+        Kg0, _, _ = modal_buckling.assemble_geometric_stiffness(
+            plate.state, plate.mesh, plate.stiff, u_rigid)
+        z = abs(Kg0).max() if Kg0.nnz else 0.0
+        self.assertLess(z, 1e-12 * ref)
+
+        # (b) under a real pre-stress, a rigid translation mode carries zero
+        #     K_g energy (shape-function gradients annihilate constants)
+        for t_vec in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
+            phi = np.array([t_vec[d - 1] if d <= 3 else 0.0
+                            for nn, d in plate.kept])
+            energy = float(phi @ (Kgs @ phi))
+            self.assertLess(abs(energy), 1e-10 * ref * float(phi @ phi))
+
+    def _cst_triangle(self, L=100.0, t=2.5, E=70000.0, nu=0.33):
+        """One right CST in the x-y plane, its StiffnessMatrix stub and props."""
+        import numpy as np
+        import scipy.sparse as sp
+        from k2rad.state import (NodeData, PartData, SectionShell, ShellElem,
+                                 MatElastic)
+        state = ConversionState()
+        state.nodes[1] = NodeData(0.0, 0.0, 0.0)
+        state.nodes[2] = NodeData(L, 0.0, 0.0)
+        state.nodes[3] = NodeData(0.0, L, 0.0)
+        state.parts[1] = PartData(1, "tri", 1, 1)
+        state.sec_shells[1] = SectionShell(1, "", 2, 3, t)
+        state.mat_elastic[1] = MatElastic(1, "", 7.8e-9, E, nu)
+        state.shell_elems.append(ShellElem(1, 1, [1, 2, 3]))
+        mesh = modal_common.build_mesh(state)
+        dofs = [(nn, d) for nn in (1, 2, 3) for d in (1, 2, 3)]
+        gids = np.array(sorted(6 * (nn - 1) + d for nn, d in dofs))
+        stiff = modal_solve.StiffnessMatrix(
+            n_declared=len(gids), gids=gids,
+            K=sp.identity(len(gids), format="csc"),
+            user_node=((gids - 1) // 6 + 1).astype(np.int64),
+            dof=((gids - 1) % 6 + 1).astype(np.int64),
+            low_precision=False)
+        return state, mesh, stiff, (L, t, E, nu)
+
+    def test_cst_triangle_kg_matches_closed_form(self):
+        import numpy as np
+        state, mesh, stiff, (L, t, E, nu) = self._cst_triangle()
+        pos = {(int(n), int(d)): k
+               for k, (n, d) in enumerate(zip(stiff.user_node, stiff.dof))}
+        eps = 1e-3                                       # ux = eps*x
+        u = np.zeros(len(stiff.gids))
+        u[pos[(2, 1)]] = eps * L
+        Kg, counts, _ = modal_buckling.assemble_geometric_stiffness(
+            state, mesh, stiff, u)
+        self.assertEqual(counts["shell_kg"], 1)
+        # closed form: N = t*D*[eps,0,0], kg_w = A * G^T [N] G on the w DOFs
+        c = E / (1.0 - nu * nu)
+        nx, ny = t * c * eps, t * c * nu * eps           # Nxy = 0
+        area = 0.5 * L * L
+        G = np.array([[-1.0, 1.0, 0.0], [-1.0, 0.0, 1.0]]) / L
+        kg_exp = area * (G.T @ np.array([[nx, 0.0], [0.0, ny]]) @ G)
+        Kgd = Kg.toarray()
+        wi = [pos[(nn, 3)] for nn in (1, 2, 3)]          # normal = +z -> TZ
+        np.testing.assert_allclose(Kgd[np.ix_(wi, wi)], kg_exp, rtol=1e-12)
+        Kgd[np.ix_(wi, wi)] = 0.0                        # nothing anywhere else
+        self.assertEqual(np.abs(Kgd).max(), 0.0)
+
+    def test_shell_kg_frame_invariance_under_rotation(self):
+        # rotating the whole model (geometry + pre-solve displacements) must
+        # leave the K_g energy of any (co-rotated) test vector unchanged.
+        import numpy as np
+        state, mesh, stiff, (L, t, E, nu) = self._cst_triangle()
+        pos = {(int(n), int(d)): k
+               for k, (n, d) in enumerate(zip(stiff.user_node, stiff.dof))}
+        rng = np.random.default_rng(42)
+        u = np.zeros(len(stiff.gids))
+        for nn in (1, 2, 3):
+            for d in (1, 2, 3):
+                u[pos[(nn, d)]] = 1e-3 * rng.standard_normal()
+        phi = rng.standard_normal(len(stiff.gids))
+        Kg, _, _ = modal_buckling.assemble_geometric_stiffness(
+            state, mesh, stiff, u)
+        e_flat = float(phi @ (Kg @ phi))
+        self.assertNotEqual(e_flat, 0.0)
+
+        cx, sx = math.cos(0.5), math.sin(0.5)
+        cy, sy = math.cos(0.4), math.sin(0.4)
+        cz, sz = math.cos(0.3), math.sin(0.3)
+        R = (np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+             @ np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+             @ np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]]))
+        state2, mesh2, stiff2, _ = self._cst_triangle()
+        from k2rad.state import NodeData
+        for nn in (1, 2, 3):
+            p = state.nodes[nn]
+            state2.nodes[nn] = NodeData(*(R @ np.array([p.x, p.y, p.z])))
+        mesh2 = modal_common.build_mesh(state2)
+
+        def rotate(vec):
+            out = np.zeros_like(vec)
+            for nn in (1, 2, 3):
+                idx = [pos[(nn, d)] for d in (1, 2, 3)]
+                out[idx] = R @ vec[idx]
+            return out
+
+        Kg2, _, _ = modal_buckling.assemble_geometric_stiffness(
+            state2, mesh2, stiff2, rotate(u))
+        phi2 = rotate(phi)
+        e_rot = float(phi2 @ (Kg2 @ phi2))
+        self.assertAlmostEqual(e_rot / e_flat, 1.0, delta=1e-9)
 
 
 if __name__ == "__main__":
