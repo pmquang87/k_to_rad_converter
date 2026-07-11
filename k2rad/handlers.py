@@ -1822,15 +1822,27 @@ def handle_constrained_rigid_bodies(block: Block, state: ConversionState) -> Non
 
 
 def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
-    """*RIGIDWALL_PLANAR[_ID] (+_FORCES) → /RWALL/PLANE.
+    """*RIGIDWALL_PLANAR[_ID] (+_FORCES/_FINITE/_MOVING combos) → /RWALL.
 
     Card 1: nsid nsidex boxid offset birth death rwksf
     Card 2: xt yt zt xh yh zh fric wvel
-    The _MOVING/_FINITE/_ORTHO flavours change the wall's physics (extra cards
-    give it mass/velocity, a finite extent, or orthotropic friction) and are
-    dispatched to a warn-skip instead; _FORCES only appends force-output cards,
-    which /TH/RWALL replaces, so it converts like the base keyword.
+    Option cards then follow in LS-DYNA's fixed keyword-name order (FINITE
+    before MOVING, matching *RIGIDWALL_PLANAR_{ORTHO}_{FINITE}_{MOVING}_
+    {FORCES}):
+      _FINITE: xhev yhev zhev lenl lenm — head of the l-edge vector (its
+        in-plane projection is the l direction) + extents along l and
+        m = n × l → /RWALL/PARAL (finite parallelogram wall).
+      _MOVING: mass v0 — wall mass and initial speed along the outward
+        normal (free-flying finite-mass wall) → the /RWALL moving form
+        (node_ID > 0 carrier node + "Mass VX0 VY0 VZ0" card).
+    _FORCES only appends force-output cards, which /TH/RWALL replaces, so it
+    needs no extra parsing. _ORTHO (orthotropic friction) has no /RWALL
+    equivalent and is warn-skipped by handle_rigidwall_ortho.
     """
+    kw = block.keyword
+    label = f"*{kw}"
+    is_finite = "_FINITE" in kw
+    is_moving = "_MOVING" in kw
     raw = block.raw
     offset = _title_offset(block)
     if offset and _has_id(block):
@@ -1842,7 +1854,7 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
         rwid = state.next_id()
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     if not f1:
-        state.warn("*RIGIDWALL_PLANAR: missing data card — skipped.")
+        state.warn(f"{label}: missing data card — skipped.")
         return
     nsid   = to_int(f1[0])
     nsidex = to_int(f1[1]) if len(f1) > 1 else 0
@@ -1852,30 +1864,71 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
     death  = _ffield(f1, 5, 0.0)
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     if len(f2) < 6:
-        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: missing geometry card — skipped.")
+        state.warn(f"{label} id={rwid}: missing geometry card — skipped.")
         return
     g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
     fric = g(6)
     if boxid:
-        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BOXID has no /RWALL "
+        state.warn(f"{label} id={rwid}: BOXID has no /RWALL "
                    "equivalent — the box limitation is ignored.")
     if woff:
-        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: OFFSET has no /RWALL "
+        state.warn(f"{label} id={rwid}: OFFSET has no /RWALL "
                    "equivalent — ignored.")
     if birth > 0.0 or (0.0 < death < 1e20):
-        state.warn(f"*RIGIDWALL_PLANAR id={rwid}: BIRTH/DEATH have no /RWALL "
+        state.warn(f"{label} id={rwid}: BIRTH/DEATH have no /RWALL "
                    "equivalent — the wall is active for the whole run.")
+
+    # Optional cards, in LS-DYNA's fixed order: FINITE, then MOVING.
+    idx = offset + 2
+    xhev = yhev = zhev = lenl = lenm = 0.0
+    if is_finite:
+        ff = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
+        if len(ff) >= 5:
+            xhev, yhev, zhev = to_float(ff[0]), to_float(ff[1]), to_float(ff[2])
+            lenl, lenm = to_float(ff[3]), to_float(ff[4])
+        else:
+            state.warn(f"{label} id={rwid}: missing FINITE card — the wall "
+                       "is emitted as an infinite plane.")
+            is_finite = False
+    mass = v0 = 0.0
+    if is_moving:
+        fm = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
+        if fm:
+            mass = to_float(fm[0])
+            v0 = to_float(fm[1]) if len(fm) > 1 else 0.0
+        if mass <= 0.0:
+            state.warn(f"{label} id={rwid}: MOVING wall mass is missing or "
+                       "non-positive — the wall is emitted as a fixed wall.")
+            is_moving = False
+            mass = v0 = 0.0
+        elif fric > 0.0:
+            state.warn(
+                f"{label} id={rwid}: LS-DYNA constrains a MOVING wall to "
+                "translate along its normal; the OpenRadioss moving /RWALL "
+                "is carried by a free node, which frictionless contact only "
+                "loads along the normal — but with FRIC>0 tangential contact "
+                "forces may also drift the wall laterally.")
+
     state.rigid_walls.append(RigidWallPlanar(
         rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
         xt=g(0), yt=g(1), zt=g(2), xh=g(3), yh=g(4), zh=g(5),
-        fric=fric, birth=birth, death=death, offset=woff))
+        fric=fric, birth=birth, death=death, offset=woff,
+        moving=is_moving, mass=mass, v0=v0,
+        finite=is_finite, xhev=xhev, yhev=yhev, zhev=zhev,
+        lenl=lenl, lenm=lenm))
 
 
-def handle_rigidwall_unsupported(block: Block, state: ConversionState) -> None:
-    """RIGIDWALL flavours whose extra cards change the wall's physics."""
+def handle_rigidwall_ortho(block: Block, state: ConversionState) -> None:
+    """*RIGIDWALL_PLANAR_ORTHO*: orthotropic (direction-dependent) friction.
+
+    /RWALL supports only a single isotropic Coulomb coefficient, so the ORTHO
+    wall physics cannot be represented — warn-skip with the specific reason.
+    """
     state.warn(
-        f"*{block.keyword}: only the fixed infinite *RIGIDWALL_PLANAR "
-        "(+_FORCES) converts to /RWALL/PLANE — this flavour was skipped.")
+        f"*{block.keyword}: orthotropic friction (ORTHO) has no /RWALL "
+        "equivalent — this rigid wall was skipped.")
     state.skipped_keywords.append(block.keyword)
 
 
@@ -2920,13 +2973,20 @@ HANDLERS = {
     "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
     "CONSTRAINED_RIGID_BODIES":               handle_constrained_rigid_bodies,
 
-    # Rigid walls
+    # Rigid walls (LS-DYNA option order: _ORTHO _FINITE _MOVING _FORCES)
     "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
     "RIGIDWALL_PLANAR_FORCES":                handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_MOVING":                handle_rigidwall_unsupported,
-    "RIGIDWALL_PLANAR_MOVING_FORCES":         handle_rigidwall_unsupported,
-    "RIGIDWALL_PLANAR_FINITE":                handle_rigidwall_unsupported,
-    "RIGIDWALL_PLANAR_ORTHO":                 handle_rigidwall_unsupported,
+    "RIGIDWALL_PLANAR_MOVING":                handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_MOVING_FORCES":         handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FINITE":                handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FINITE_FORCES":         handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FINITE_MOVING":         handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_FINITE_MOVING_FORCES":  handle_rigidwall_planar,
+    "RIGIDWALL_PLANAR_ORTHO":                 handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_FORCES":          handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_FINITE":          handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_MOVING":          handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING":   handle_rigidwall_ortho,
 
     # Mass / inertia additions
     "ELEMENT_MASS":                           handle_element_mass,

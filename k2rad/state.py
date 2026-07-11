@@ -503,7 +503,7 @@ class LoadNode:
 
 @dataclass
 class RigidWallPlanar:
-    """*RIGIDWALL_PLANAR[_ID] — an infinite fixed rigid plane → /RWALL/PLANE.
+    """*RIGIDWALL_PLANAR[_ID] (+_MOVING/_FINITE combos) → /RWALL/PLANE|PARAL.
 
     Card 1: nsid nsidex boxid offset birth death rwksf
       nsid   = tracked ("slave") node set (0 = all nodes)
@@ -513,6 +513,18 @@ class RigidWallPlanar:
       the outward normal points from tail to head, exactly /RWALL's M→M1.
       fric: 0 = frictionless sliding, 0<fric<1 = Coulomb friction,
       fric ≥ 1 = no sliding (LS-DYNA "stick") → Slide 0 / 2 / 1.
+
+    _FINITE extra card: xhev yhev zhev lenl lenm — (xhev,yhev,zhev) is the
+    head of the edge vector whose in-plane projection gives the l-edge
+    direction; lenl/lenm are the wall extents along l and m = n × l. Mapped
+    to /RWALL/PARAL corner points M1 = M + lenl·l̂ and M2 = M + lenm·m̂
+    (the /RWALL/PARAL normal is (M1−M)×(M2−M), which equals the wall normal).
+
+    _MOVING extra card: mass v0 — total wall mass and initial speed along
+    the outward normal (a free-flying finite-mass wall). Mapped to the
+    /RWALL moving form: node_ID = a synthesized carrier node at the tail
+    point (node_id, assigned by the writer prepass) and the cfg's
+    "Mass VX0 VY0 VZ0" card in place of the "XM YM ZM" card.
     """
     rwid: int
     title: str
@@ -524,6 +536,16 @@ class RigidWallPlanar:
     birth: float = 0.0
     death: float = 0.0
     offset: float = 0.0
+    # _MOVING option
+    moving: bool = False
+    mass: float = 0.0
+    v0: float = 0.0
+    node_id: int = 0            # synthesized carrier node (writer prepass)
+    # _FINITE option
+    finite: bool = False
+    xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
+    lenl: float = 0.0
+    lenm: float = 0.0
 
 
 @dataclass

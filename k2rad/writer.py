@@ -5153,6 +5153,81 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
     return lines if len(lines) > 1 else []
 
 
+def _synthesize_rwall_moving_nodes(state: ConversionState) -> None:
+    """Give each *RIGIDWALL_PLANAR_MOVING wall its /RWALL carrier node.
+
+    The OpenRadioss moving /RWALL form (cfg RWALL/plane.cfg + paral.cfg,
+    FORMAT radioss51; starter hm_read_rwall_plane.F) takes node_ID > 0: the
+    node's coordinates become the wall base point M, and the wall card's own
+    "Mass VX0 VY0 VZ0" line adds the wall mass to that node and sets its
+    initial velocity (MS(MSR) += Mass; V(:,MSR) = VX0..) — so no /ADMAS or
+    /INIVEL is needed. Synthesize a free node at the LS-DYNA tail point
+    (XT,YT,ZT), like the rigid-cog master synthesis in _make_rbodies (new ids
+    above the current maximum). Must run before the /NODE section is built.
+    """
+    movers = [rw for rw in state.rigid_walls if rw.moving and rw.node_id == 0]
+    if not movers:
+        return
+    next_free = (max(state.nodes) + 1) if state.nodes else 90000001
+    for rw in movers:
+        rw.node_id = next_free
+        next_free += 1
+        state.nodes[rw.node_id] = NodeData(rw.xt, rw.yt, rw.zt)
+        state.warn(
+            f"*RIGIDWALL_PLANAR_MOVING id={rw.rwid}: wall carried by "
+            f"synthesized free node {rw.node_id} at the wall tail point; the "
+            "/RWALL card's Mass/V0 fields give that node the wall mass and "
+            "the initial velocity V0 along the wall normal.")
+
+
+def _rwall_finite_corners(rw, state: ConversionState):
+    """Corner points M1/M2 of the /RWALL/PARAL form for a _FINITE wall.
+
+    LS-DYNA: the l-edge direction is the in-plane projection of
+    (HEV − tail); the m-edge is m = n × l; the wall spans lenl and lenm from
+    the tail corner. /RWALL/PARAL takes the two opposite in-plane corner
+    POINTS M1 = M + lenl·l̂ and M2 = M + lenm·m̂ (cfg RWALL/paral.cfg); the
+    starter derives the outward normal as (M1−M)×(M2−M) =
+    lenl·lenm·(l̂×m̂) = lenl·lenm·n̂ (hm_read_rwall_paral.F), so the normal
+    orientation is preserved. Returns (M1, M2) or None when the wall cannot
+    be expressed as a finite parallelogram (→ infinite-plane fallback, with
+    a warning naming the reason).
+    """
+    label = f"*RIGIDWALL_PLANAR_FINITE id={rw.rwid}"
+    n = _vnorm((rw.xh - rw.xt, rw.yh - rw.yt, rw.zh - rw.zt))
+    if n is None:
+        state.warn(f"{label}: degenerate wall normal (head == tail) — "
+                   "emitted as an infinite plane.")
+        return None
+    if rw.lenl <= 0.0 or rw.lenm <= 0.0:
+        # DYNA convention: a zero LENL/LENM means infinite extent in that
+        # direction. /RWALL/PARAL is strictly finite (no semi-infinite
+        # form), so fall back to the infinite plane.
+        state.warn(
+            f"{label}: LENL/LENM = 0 means an infinite extent in that "
+            "direction in LS-DYNA; /RWALL/PARAL cannot express a "
+            "semi-infinite wall — emitted as an infinite plane.")
+        return None
+    v = (rw.xhev - rw.xt, rw.yhev - rw.yt, rw.zhev - rw.zt)
+    dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2]
+    proj = (v[0] - dot * n[0], v[1] - dot * n[1], v[2] - dot * n[2])
+    vmag = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
+    pmag = (proj[0] ** 2 + proj[1] ** 2 + proj[2] ** 2) ** 0.5
+    if pmag <= 1e-10 * max(1.0, vmag):
+        state.warn(
+            f"{label}: the edge-vector head (XHEV,YHEV,ZHEV) projects onto "
+            "the wall normal (no in-plane l direction) — emitted as an "
+            "infinite plane.")
+        return None
+    lu = (proj[0] / pmag, proj[1] / pmag, proj[2] / pmag)
+    mu = _vcross(n, lu)          # unit: n ⊥ l, both unit vectors
+    m1 = (rw.xt + rw.lenl * lu[0], rw.yt + rw.lenl * lu[1],
+          rw.zt + rw.lenl * lu[2])
+    m2 = (rw.xt + rw.lenm * mu[0], rw.yt + rw.lenm * mu[1],
+          rw.zt + rw.lenm * mu[2])
+    return m1, m2
+
+
 def _make_rigid_walls(state: ConversionState) -> List[str]:
     """*RIGIDWALL_PLANAR → /RWALL/PLANE (fixed infinite plane, node_ID = 0).
 
@@ -5163,6 +5238,14 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
     tracks ALL nodes: /RWALL has no "all" group id, so grnd_ID1 stays 0 and
     the search distance d is set to the model's bounding-box diagonal (every
     node is within d of the wall → all nodes are secondary candidates).
+
+    _MOVING walls emit the /RWALL moving form and _FINITE walls the
+    /RWALL/PARAL form, both in the exact cfg FORMAT radioss51 card layout
+    (RWALL/plane.cfg + paral.cfg): card 1 "node_ID Slide grnd_ID1 grnd_ID2",
+    card 2 "D_search fric Diameter ffac ifq" (20/20/20/20/10 columns), then
+    "Mass VX0 VY0 VZ0" (moving, node_ID > 0) or "XM YM ZM" (fixed), then
+    "XM1 YM1 ZM1" (+ "XM2 YM2 ZM2" for PARAL). The moving wall's initial
+    velocity is V0 along the outward unit normal (LS-DYNA's V0 convention).
     """
     if not state.rigid_walls:
         return []
@@ -5212,21 +5295,83 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
             slide = 0          # frictionless sliding
 
         title = rw.title or f"RWALL_{rw.rwid}"
-        lines += [
-            f"/RWALL/PLANE/{rw.rwid}",
-            title,
-            "#  node_ID     Slide  grnd_ID1  grnd_ID2                   d",
-            f"{_i(0)}{_i(slide)}{_i(grnd1)}{_i(grnd2)}{_f(d)}",
-        ]
-        if slide == 2:
-            lines += ["#               fric", f"{_f(rw.fric)}"]
-        lines += [
-            "#                 XM                  YM                  ZM",
-            f"{_f(rw.xt)}{_f(rw.yt)}{_f(rw.zt)}",
-            "#                XM1                 YM1                 ZM1",
-            f"{_f(rw.xh)}{_f(rw.yh)}{_f(rw.zh)}",
-            HDR,
-        ]
+        paral = _rwall_finite_corners(rw, state) if rw.finite else None
+        if not rw.moving and paral is None:
+            # Fixed infinite plane — historical emission, kept byte-identical
+            # (golden fixtures). _FINITE walls that fall back to an infinite
+            # plane land here too.
+            lines += [
+                f"/RWALL/PLANE/{rw.rwid}",
+                title,
+                "#  node_ID     Slide  grnd_ID1  grnd_ID2                   d",
+                f"{_i(0)}{_i(slide)}{_i(grnd1)}{_i(grnd2)}{_f(d)}",
+            ]
+            if slide == 2:
+                lines += ["#               fric", f"{_f(rw.fric)}"]
+            lines += [
+                "#                 XM                  YM                  ZM",
+                f"{_f(rw.xt)}{_f(rw.yt)}{_f(rw.zt)}",
+                "#                XM1                 YM1                 ZM1",
+                f"{_f(rw.xh)}{_f(rw.yh)}{_f(rw.zh)}",
+                HDR,
+            ]
+        else:
+            # Moving and/or finite wall — exact cfg FORMAT(radioss51) layout
+            # (hm_cfg_files RWALL/plane.cfg, paral.cfg; see docstring).
+            form = "PARAL" if paral is not None else "PLANE"
+            lines += [
+                f"/RWALL/{form}/{rw.rwid}",
+                title,
+                "#  node_ID     Slide  grnd_ID1  grnd_ID2",
+                f"{_i(rw.node_id if rw.moving else 0)}{_i(slide)}"
+                f"{_i(grnd1)}{_i(grnd2)}",
+                "#           D_search                fric            Diameter"
+                "                ffac       ifq",
+                f"{_f(d)}{_f(rw.fric if slide == 2 else 0.0)}{_f(0.0)}"
+                f"{_f(0.0)}{_i(0)}",
+            ]
+            if rw.moving:
+                # Wall mass + initial velocity: LS-DYNA's V0 acts along the
+                # outward normal n̂ = (head − tail)/|head − tail|; the wall
+                # then translates under contact forces (free-flying wall).
+                nrm = _vnorm((rw.xh - rw.xt, rw.yh - rw.yt, rw.zh - rw.zt))
+                if nrm is None:
+                    state.warn(
+                        f"*RIGIDWALL_PLANAR_MOVING id={rw.rwid}: degenerate "
+                        "wall normal (head == tail) — initial velocity V0 "
+                        "dropped (wall starts at rest).")
+                    vx = vy = vz = 0.0
+                else:
+                    vx, vy, vz = (rw.v0 * nrm[0], rw.v0 * nrm[1],
+                                  rw.v0 * nrm[2])
+                lines += [
+                    "#               Mass                VX_0             "
+                    "   VY_0                VZ_0",
+                    f"{_f(rw.mass)}{_f(vx)}{_f(vy)}{_f(vz)}",
+                ]
+            else:
+                lines += [
+                    "#                 XM                  YM              "
+                    "    ZM",
+                    f"{_f(rw.xt)}{_f(rw.yt)}{_f(rw.zt)}",
+                ]
+            if paral is not None:
+                m1, m2 = paral
+                lines += [
+                    "#                XM1                 YM1               "
+                    "  ZM1",
+                    f"{_f(m1[0])}{_f(m1[1])}{_f(m1[2])}",
+                    "#                XM2                 YM2               "
+                    "  ZM2",
+                    f"{_f(m2[0])}{_f(m2[1])}{_f(m2[2])}",
+                ]
+            else:
+                lines += [
+                    "#                XM1                 YM1               "
+                    "  ZM1",
+                    f"{_f(rw.xh)}{_f(rw.yh)}{_f(rw.zh)}",
+                ]
+            lines.append(HDR)
         lines += grnod_blocks
         th_wall_ids.append((rw.rwid, title))
 
@@ -5667,6 +5812,8 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     for cn in state.coord_nodes.values():
         if cn.flag == 1:
             keep_free.update((cn.n1, cn.n2, cn.n3))
+    # Moving rigid-wall carrier nodes must stay free to translate the wall.
+    keep_free.update(rw.node_id for rw in state.rigid_walls if rw.node_id > 0)
     free = sorted(n for n in state.nodes
                   if n > 0 and n not in elem_nodes and n not in rigid_nodes
                   and n not in keep_free)
@@ -5791,6 +5938,10 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # BEFORE any section is built, so the free-node guard sees the post-drop
     # connectivity and constrains any node the drops left unattached.
     _screen_sliver_tets(state)
+
+    # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
+    # section is built (the /RWALL cards themselves are emitted later).
+    _synthesize_rwall_moving_nodes(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
