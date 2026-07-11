@@ -6548,7 +6548,10 @@ class RigidWallPlanarTests(unittest.TestCase):
         self.assertEqual(data.split()[2], "0")     # grnd_ID1 = 0 (all nodes)
         self.assertGreater(float(data.split()[4]), 0.0)
 
-    def test_moving_flavour_skipped_with_warning(self):
+    def test_moving_flavour_now_converts(self):
+        # _MOVING used to warn-skip; it now converts to a moving /RWALL/PLANE
+        # (carrier node with Mass + V0 along the wall normal). The detailed
+        # field assertions live in tests/test_rwall_variants.py.
         deck = TINY_K.replace(
             "*CONTROL_TERMINATION",
             "*RIGIDWALL_PLANAR_MOVING\n"
@@ -6557,8 +6560,8 @@ class RigidWallPlanarTests(unittest.TestCase):
             "      10.0       1.0\n"
             "*CONTROL_TERMINATION")
         result, starter = _convert_string_deck(deck)
-        self.assertNotIn("/RWALL", starter)
-        self.assertIn("RIGIDWALL_PLANAR_MOVING", result.skipped_keywords)
+        self.assertIn("/RWALL/PLANE/", starter)
+        self.assertNotIn("RIGIDWALL_PLANAR_MOVING", result.skipped_keywords)
 
     def test_rwforc_emits_th_rwall(self):
         deck = self._deck().replace(

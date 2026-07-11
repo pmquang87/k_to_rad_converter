@@ -39,6 +39,124 @@ class BeamElem:
 
 
 @dataclass
+class DiscreteElem:
+    """*ELEMENT_DISCRETE — a 2-node spring/damper element → /SPRING.
+
+    LS-DYNA card (Keyword971 ELEMENTS/discrete.cfg):
+        EID(I8) PID(I8) N1(I8) N2(I8) VID(I8) S(E16) PF(I8) OFFSET(E16)
+      vid    = *DEFINE_SD_ORIENTATION id (0 = act along the N1-N2 axis)
+      s      = scale factor on the element force (default 1.0)
+      offset = initial offset (preload displacement)
+    N2 = 0 means the element is attached to ground.
+    """
+    eid: int
+    pid: int
+    n1: int
+    n2: int
+    vid: int = 0
+    s: float = 1.0
+    offset: float = 0.0
+
+
+@dataclass
+class SectionDiscrete:
+    """*SECTION_DISCRETE → /PROP/TYPE4 (SPRING) flags.
+
+    Card1: SECID DRO KD V0 CL FD;  Card2: CDL TDL.
+      dro = 0 translational, 1 torsional (torsional has no /PROP/TYPE4 map)
+      kd/v0/cl = dynamic magnification factor / test velocity / clearance
+      fd  = failure deflection (positive tension, negative compression)
+      cdl/tdl = deflection limits in compression/tension (element deletion)
+    """
+    secid: int
+    title: str
+    dro: int = 0
+    kd: float = 0.0
+    v0: float = 0.0
+    cl: float = 0.0
+    fd: float = 0.0
+    cdl: float = 0.0
+    tdl: float = 0.0
+
+
+@dataclass
+class MatSpringElastic:
+    """*MAT_SPRING_ELASTIC (MAT_S01): F = K·dl → /PROP/TYPE4 K."""
+    mid: int
+    k: float
+
+
+@dataclass
+class MatSpringNonlinearElastic:
+    """*MAT_SPRING_NONLINEAR_ELASTIC (MAT_S04): F = LCD(dl), optionally scaled
+    by rate curve LCR → /PROP/TYPE4 fct_ID1 (LCR has no confident TYPE4 slot)."""
+    mid: int
+    lcd: int
+    lcr: int = 0
+
+
+@dataclass
+class MatDamperViscous:
+    """*MAT_DAMPER_VISCOUS (MAT_D01): F = DC·(dl/dt) → /PROP/TYPE4 C."""
+    mid: int
+    dc: float
+
+
+@dataclass
+class MatSpotweld:
+    """*MAT_SPOTWELD (MAT_100) on beam elements → /PROP/TYPE13 (SPR_BEAM)
+    2-node /SPRING connectors (per-DOF stiffness from E,G + the beam section,
+    Ifail=1/Ifail2=2 quadratic force/moment failure surface from card 2).
+
+    Card1: MID RO E PR SIGY EH DT TFAIL;  Card2: EFAIL NRR NRS NRT MRR MSS MTT NF.
+    /MAT/LAW59 (CONNECT) was considered and rejected: it binds to /PROP/TYPE43
+    8-node connection solids, not to 2-node spring elements.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    sigy: float
+    et: float           # EH: plastic hardening modulus
+    dt: float           # time step for mass scaling (dropped, warned)
+    tfail: float        # failure time (dropped, warned)
+    efail: float        # effective plastic strain at failure (dropped, warned)
+    nrr: float          # axial (tension) failure force  → DeltaMax1
+    nrs: float          # shear failure force (s)        → ±Delta2
+    nrt: float          # shear failure force (t)        → ±Delta3
+    mrr: float          # torsion failure moment         → ±Delta4
+    mss: float          # bending failure moment (s)     → ±Delta5
+    mtt: float          # bending failure moment (t)     → ±Delta6
+    nf: float = 0.0     # force-filter count (dropped, warned)
+
+
+@dataclass
+class ConstrainedSpotweld:
+    """A *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT WITH failure
+    forces → a stiff /PROP/TYPE13 /SPRING with Ifail2=2 force criteria.
+    (The no-failure flavour is turned into a 2-node CNRB at parse time and never
+    lands here.)  Node-pair welds set n1/n2; NSID-based welds set nsid and are
+    resolved to a pair at write time.
+
+    Card (Keyword971_R6.1 constrained_spotweld.cfg):
+        N1 N2 SN SS N M TF EP
+      sn/ss = normal/shear failure force, n/m = failure exponents,
+      tf = failure time (dropped), ep = plastic failure strain (dropped).
+    """
+    n1: int = 0
+    n2: int = 0
+    nsid: int = 0
+    sn: float = 0.0
+    ss: float = 0.0
+    n: float = 2.0
+    m: float = 2.0
+    tf: float = 0.0
+    ep: float = 0.0
+    title: str = ""
+
+
+@dataclass
 class PartData:
     pid: int
     title: str
@@ -76,6 +194,9 @@ class SectionBeam:
     izz: float = 0.0
     ixx: float = 0.0
     ts1: float = 0.0   # integrated beam thickness (elform=1)
+    # ELFORM=9 (spotweld beam) card2 is VOL INER CID CA ... — no area/inertia:
+    vol: float = 0.0   # spotweld nugget volume
+    ca: float = 0.0    # spotweld cross-sectional area
 
 
 @dataclass
@@ -105,6 +226,18 @@ class MatPlasTAB:
     es_pts: List[float] = field(default_factory=list)
     # resolved function ID (set by handlers during post-processing)
     funct_id: int = 0
+    # LS-DYNA VP viscoplastic-formulation flag → LAW36 VP (radioss2017 cfg
+    # N_funct card, cols 91-100). Only emitted when nonzero.
+    vp: int = 0
+    # Strain-rate function family → LAW36 N_funct>1: (fct_ID, Fscale, Eps_dot)
+    # triples, ascending Eps_dot. Populated by the writer post-pass from either
+    # an LCSS *DEFINE_TABLE or sampled rate curves; empty = single static curve.
+    rate_fcts: List[Tuple[int, float, float]] = field(default_factory=list)
+    # Pre-sampled hardening curves per strain rate, (eps_dot, [(eps_p, sigma)]),
+    # filled by handle_mat_simplified_johnson_cook when C != 0. The writer
+    # allocates /FUNCT ids for them and moves them into rate_fcts.
+    rate_curves: List[Tuple[float, List[Tuple[float, float]]]] = \
+        field(default_factory=list)
 
 
 @dataclass
@@ -346,6 +479,74 @@ class InitialDetonation:
 
 
 @dataclass
+class InitialStressShell:
+    """*INITIAL_STRESS_SHELL (one element's record) → /INISHE/STRS_F[/GLOB].
+
+    ``layers`` holds one tuple per through-thickness integration point:
+    (t, sxx, syy, szz, sxy, syz, szx, eps) — t is the normalized [-1,1]
+    thickness coordinate, the stress components are in the system selected by
+    ``iloc`` (LS-DYNA default 0 = GLOBAL cartesian; 1 = element-local).
+    NPLANE in-plane points have already been averaged per layer by the handler
+    (warned there). ``nthick`` is kept for the writer's /PROP/SHELL-N
+    consistency check (the OpenRadioss starter ERRORs on a mismatch, so the
+    writer warns + skips mismatched elements instead of emitting a bad card).
+    """
+    eid: int
+    nplane: int
+    nthick: int
+    iloc: int
+    layers: List[Tuple[float, float, float, float, float, float, float, float]] \
+        = field(default_factory=list)
+
+
+@dataclass
+class InitialStressSolid:
+    """*INITIAL_STRESS_SOLID (one element's record) → /INIBRI/STRS_FGLO.
+
+    ``points`` holds one tuple per integration point:
+    (sxx, syy, szz, sxy, syz, szx, eps) in the GLOBAL cartesian system
+    (LS-DYNA defines *INITIAL_STRESS_SOLID components globally, hence the
+    global /INIBRI flavour). ``nint`` is the LS-DYNA integration point count;
+    the writer adapts it to the point count of the emitted /PROP/SOLID
+    formulation (replicate 1→8, average n→1, warn + skip otherwise).
+    """
+    eid: int
+    nint: int
+    points: List[Tuple[float, float, float, float, float, float, float]] \
+        = field(default_factory=list)
+
+
+@dataclass
+class CrossSection:
+    """*DATABASE_CROSS_SECTION_PLANE/_SET → /SECT (+ /TH/SECTIO).
+
+    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid =
+    *SET_SOLID / *SET_BEAM / *SET_SHELL element sets → the /SECT grbric/grbeam/
+    grshel groups (direct mapping).
+
+    kind "PLANE": an infinite cutting plane through tail (xct,yct,zct) with
+    normal towards head (xch,ych,zch), optionally limited to a circle of
+    ``radius`` around the tail point and to the parts of part-set ``psid``
+    (0 = all). The writer resolves the cut geometrically: elements whose nodes
+    straddle the plane are the section elements, and their nodes on the TAIL
+    side of the plane form the node group (the standard /SECT construction).
+    """
+    csid: int           # user id from the _ID variant (0 = auto-assign)
+    title: str
+    kind: str           # "PLANE" | "SET"
+    # _SET fields
+    nsid: int = 0
+    hsid: int = 0       # solid element set
+    bsid: int = 0       # beam element set
+    ssid: int = 0       # shell element set
+    # _PLANE fields
+    psid: int = 0       # part set restriction (0 = all parts)
+    xct: float = 0.0; yct: float = 0.0; zct: float = 0.0
+    xch: float = 0.0; ych: float = 0.0; zch: float = 0.0
+    radius: float = 0.0
+
+
+@dataclass
 class Curve:
     lcid: int
     title: str
@@ -354,6 +555,29 @@ class Curve:
     offa: float
     offo: float
     pts: List[Tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class DefineTable:
+    """*DEFINE_TABLE / *DEFINE_TABLE_2D → /TABLE/1 with Ndim=2.
+
+    Header card (Keyword971_R6.1 define_table[_2D].cfg): TBID SFA OFFA.
+    Each row pairs a 2nd-dimension abscissa VALUE (e.g. a strain rate, stored
+    already scaled: A = SFA·(VALUE+OFFA)) with a *DEFINE_CURVE id. The _2D
+    variant carries the LCID explicitly on each row; the legacy *DEFINE_TABLE
+    lists bare VALUEs whose curves are the *DEFINE_CURVE blocks immediately
+    FOLLOWING the table in the deck — those live in ``pending_values`` until
+    the writer post-pass pairs them positionally (``curve_seq`` = how many
+    curves had been parsed when the table was read).
+    """
+    tbid: int
+    title: str
+    sfa: float
+    offa: float
+    rows: List[Tuple[float, int]] = field(default_factory=list)   # (A, lcid)
+    pending_values: List[float] = field(default_factory=list)     # legacy form
+    curve_seq: int = 0      # len(state.curve_order) at parse time
+    resolved: bool = False  # rows are final (post-pass ran / _2D form)
 
 
 @dataclass
@@ -468,7 +692,7 @@ class LoadNode:
 
 @dataclass
 class RigidWallPlanar:
-    """*RIGIDWALL_PLANAR[_ID] — an infinite fixed rigid plane → /RWALL/PLANE.
+    """*RIGIDWALL_PLANAR[_ID] (+_MOVING/_FINITE combos) → /RWALL/PLANE|PARAL.
 
     Card 1: nsid nsidex boxid offset birth death rwksf
       nsid   = tracked ("slave") node set (0 = all nodes)
@@ -478,6 +702,18 @@ class RigidWallPlanar:
       the outward normal points from tail to head, exactly /RWALL's M→M1.
       fric: 0 = frictionless sliding, 0<fric<1 = Coulomb friction,
       fric ≥ 1 = no sliding (LS-DYNA "stick") → Slide 0 / 2 / 1.
+
+    _FINITE extra card: xhev yhev zhev lenl lenm — (xhev,yhev,zhev) is the
+    head of the edge vector whose in-plane projection gives the l-edge
+    direction; lenl/lenm are the wall extents along l and m = n × l. Mapped
+    to /RWALL/PARAL corner points M1 = M + lenl·l̂ and M2 = M + lenm·m̂
+    (the /RWALL/PARAL normal is (M1−M)×(M2−M), which equals the wall normal).
+
+    _MOVING extra card: mass v0 — total wall mass and initial speed along
+    the outward normal (a free-flying finite-mass wall). Mapped to the
+    /RWALL moving form: node_ID = a synthesized carrier node at the tail
+    point (node_id, assigned by the writer prepass) and the cfg's
+    "Mass VX0 VY0 VZ0" card in place of the "XM YM ZM" card.
     """
     rwid: int
     title: str
@@ -489,6 +725,16 @@ class RigidWallPlanar:
     birth: float = 0.0
     death: float = 0.0
     offset: float = 0.0
+    # _MOVING option
+    moving: bool = False
+    mass: float = 0.0
+    v0: float = 0.0
+    node_id: int = 0            # synthesized carrier node (writer prepass)
+    # _FINITE option
+    finite: bool = False
+    xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
+    lenl: float = 0.0
+    lenm: float = 0.0
 
 
 @dataclass
@@ -1149,213 +1395,260 @@ class ConvertOptions:
 
 # ══════════════════════════════════════════════════════════════════════════════
 
+@dataclass
 class ConversionState:
     """Holds all data parsed from the .k file.  Written by handlers,
-    read by the writer to produce .rad output."""
+    read by the writer to produce .rad output.
 
-    def __init__(self):
-        # ── Identity ───────────────────────────────────────────────
-        self.model_title: str = "Model"
-        self.is_implicit: bool = False
-        # *CONTROL_IMPLICIT_EIGENVALUE present → normal-modes (/EIG) analysis.
-        # Switches the engine to a one-shot /IMPL/LINEAR eigensolve and skips
-        # the inert contact stub (the eigen path ignores contact, and the stub
-        # crashes the implicit-eigen setup).
-        self.is_modal: bool = False
-        self._auto_id: int = 90001          # counter for auto-generated IDs
-        # Unit system written to the /BEGIN header (mass, length, time).
-        # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
-        self.units: Tuple[str, str, str] = ("Mg", "mm", "s")
-        # Opt-in conversion switches (CLI flags); see ConvertOptions.
-        self.options: ConvertOptions = ConvertOptions()
+    A dataclass so the field set is a typed, documented contract between the
+    handlers and the writer (typo-safe access, free repr, mypy-checkable).
+    Every field has a default, so ``ConversionState()`` stays a no-arg
+    constructor; mutable collections use ``field(default_factory=...)``.
+    """
 
-        # ── Mesh ───────────────────────────────────────────────────
-        self.nodes: Dict[int, NodeData] = {}
-        self.shell_elems: List[ShellElem] = []
-        self.solid_elems: List[SolidElem] = []
-        self.beam_elems: List[BeamElem] = []
+    # ── Identity ───────────────────────────────────────────────
+    model_title: str = "Model"
+    is_implicit: bool = False
+    # *CONTROL_IMPLICIT_EIGENVALUE present → normal-modes (/EIG) analysis.
+    # Switches the engine to a one-shot /IMPL/LINEAR eigensolve and skips
+    # the inert contact stub (the eigen path ignores contact, and the stub
+    # crashes the implicit-eigen setup).
+    is_modal: bool = False
+    _auto_id: int = 90001               # counter for auto-generated IDs
+    # Unit system written to the /BEGIN header (mass, length, time).
+    # Defaults to the LS-DYNA ton-mm-s system; overridable via convert().
+    units: Tuple[str, str, str] = ("Mg", "mm", "s")
+    # Opt-in conversion switches (CLI flags); see ConvertOptions.
+    options: ConvertOptions = field(default_factory=ConvertOptions)
 
-        # ── Model entities ─────────────────────────────────────────
-        self.parts: Dict[int, PartData] = {}
-        self.sec_shells: Dict[int, SectionShell] = {}
-        self.sec_solids: Dict[int, SectionSolid] = {}
-        self.sec_beams: Dict[int, SectionBeam] = {}
+    # ── Mesh ───────────────────────────────────────────────────
+    nodes: Dict[int, NodeData] = field(default_factory=dict)
+    shell_elems: List[ShellElem] = field(default_factory=list)
+    solid_elems: List[SolidElem] = field(default_factory=list)
+    beam_elems: List[BeamElem] = field(default_factory=list)
+    # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
+    discrete_elems: List[DiscreteElem] = field(default_factory=list)
 
-        self.mat_elastic: Dict[int, MatElastic] = {}
-        self.mat_plas_tab: Dict[int, MatPlasTAB] = {}
-        self.mat_plas_kin: Dict[int, MatPlasKin] = {}
-        self.mat_rigid: Dict[int, MatRigid] = {}
-        self.mat_null: Dict[int, MatNull] = {}
-        self.mat_power_law: Dict[int, MatPowerLaw] = {}
-        self.mat_samp: Dict[int, MatSAMP] = {}          # *MAT_187 → /MAT/LAW76
-        self.fail_gissmo: Dict[int, FailGissmo] = {}    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
-        self.mat_add_erosion: Dict[int, MatAddErosion] = {}   # *MAT_ADD_EROSION → /FAIL
-        # Foam / honeycomb material families
-        self.mat_crushable_foam: Dict[int, MatCrushableFoam] = {}   # MAT_063 → /MAT/LAW50
-        self.mat_low_density_foam: Dict[int, MatLowDensityFoam] = {}  # MAT_057 → /MAT/LAW38
-        self.mat_fu_chang_foam: Dict[int, MatFuChangFoam] = {}      # MAT_083 → /MAT/LAW70
-        self.mat_honeycomb: Dict[int, MatHoneycomb] = {}           # MAT_026 → /MAT/LAW28
-        self.constrained_node_sets: List[ConstrainedNodeSet] = []  # *CONSTRAINED_NODE_SET → /RLINK
-        # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
-        # /FUNCT); tracked so _make_functions can exclude them.
-        self.law76_table_ids: set = set()
-        # High-explosive / EOS (coupled ALE / JWL detonation):
-        #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
-        #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
-        self.mat_high_explosive: Dict[int, MatHighExplosiveBurn] = {}
-        self.eos_jwl: Dict[int, EosJwl] = {}            # eosid → JWL params
-        self.eos_cards: Dict[int, EosCard] = {}         # eosid → /EOS/<kind>
+    # ── Model entities ─────────────────────────────────────────
+    parts: Dict[int, PartData] = field(default_factory=dict)
+    sec_shells: Dict[int, SectionShell] = field(default_factory=dict)
+    sec_solids: Dict[int, SectionSolid] = field(default_factory=dict)
+    sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
+    # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
+    sec_discrete: Dict[int, SectionDiscrete] = field(default_factory=dict)
 
-        self.curves: Dict[int, Curve] = {}
-        self.coord_sys: Dict[int, CoordSys] = {}
-        # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
-        self.coord_nodes: Dict[int, CoordNodes] = {}
+    mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
+    mat_plas_tab: Dict[int, MatPlasTAB] = field(default_factory=dict)
+    mat_plas_kin: Dict[int, MatPlasKin] = field(default_factory=dict)
+    mat_rigid: Dict[int, MatRigid] = field(default_factory=dict)
+    mat_null: Dict[int, MatNull] = field(default_factory=dict)
+    mat_power_law: Dict[int, MatPowerLaw] = field(default_factory=dict)
+    mat_samp: Dict[int, MatSAMP] = field(default_factory=dict)          # *MAT_187 → /MAT/LAW76
+    fail_gissmo: Dict[int, FailGissmo] = field(default_factory=dict)    # *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2
+    mat_add_erosion: Dict[int, MatAddErosion] = field(default_factory=dict)   # *MAT_ADD_EROSION → /FAIL
+    # Foam / honeycomb material families
+    mat_crushable_foam: Dict[int, MatCrushableFoam] = field(default_factory=dict)     # MAT_063 → /MAT/LAW50
+    mat_low_density_foam: Dict[int, MatLowDensityFoam] = field(default_factory=dict)  # MAT_057 → /MAT/LAW38
+    mat_fu_chang_foam: Dict[int, MatFuChangFoam] = field(default_factory=dict)        # MAT_083 → /MAT/LAW70
+    mat_honeycomb: Dict[int, MatHoneycomb] = field(default_factory=dict)              # MAT_026 → /MAT/LAW28
+    # Discrete-element (spring/damper) materials → /PROP/TYPE4 fields
+    mat_spring_elastic: Dict[int, MatSpringElastic] = field(default_factory=dict)             # MAT_S01
+    mat_spring_nonlinear: Dict[int, MatSpringNonlinearElastic] = field(default_factory=dict)  # MAT_S04
+    mat_damper_viscous: Dict[int, MatDamperViscous] = field(default_factory=dict)             # MAT_D01
+    # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
+    mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
+    # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with
+    # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
+    # 2-node CNRBs at parse time and go through state.cnrbs instead)
+    constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
+    # Ground nodes synthesized by the connector writer (registered in
+    # state.nodes for id-collision safety; excluded from the implicit
+    # free-node guard because they are already fully fixed by /BCS)
+    connector_ground_nodes: set = field(default_factory=set)
+    constrained_node_sets: List[ConstrainedNodeSet] = field(default_factory=list)  # *CONSTRAINED_NODE_SET → /RLINK
+    # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
+    # /FUNCT); tracked so _make_functions can exclude them.
+    law76_table_ids: set = field(default_factory=set)
+    # High-explosive / EOS (coupled ALE / JWL detonation):
+    #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
+    #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
+    mat_high_explosive: Dict[int, MatHighExplosiveBurn] = field(default_factory=dict)
+    eos_jwl: Dict[int, EosJwl] = field(default_factory=dict)      # eosid → JWL params
+    eos_cards: Dict[int, EosCard] = field(default_factory=dict)   # eosid → /EOS/<kind>
 
-        # ── Sets / groups ──────────────────────────────────────────
-        self.node_sets: Dict[int, Tuple[str, List[int]]] = {}   # nsid → (title, [nids])
-        self.part_sets: Dict[int, Tuple[str, List[int]]] = {}   # psid → (title, [pids])
-        # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
-        self.segment_sets: Dict[int, SegmentSet] = {}           # sid → SegmentSet
+    curves: Dict[int, Curve] = field(default_factory=dict)
+    # *DEFINE_CURVE lcids in deck parse order — used to resolve the legacy
+    # *DEFINE_TABLE form (curves follow the table positionally).
+    curve_order: List[int] = field(default_factory=list)
+    # *DEFINE_TABLE[_2D] → /TABLE/1 (Ndim=2), keyed by table id (shares the
+    # LS-DYNA load-curve id space with state.curves).
+    define_tables: Dict[int, DefineTable] = field(default_factory=dict)
+    coord_sys: Dict[int, CoordSys] = field(default_factory=dict)
+    # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
+    coord_nodes: Dict[int, CoordNodes] = field(default_factory=dict)
 
-        # ── Boundary conditions ────────────────────────────────────
-        self.bcs_spcs: List[BcsSpc] = []
-        self.prescribed_motions: List[PrescribedMotionRigid] = []
-        self.prescribed_motion_sets: List[PrescribedMotionSet] = []
+    # ── Sets / groups ──────────────────────────────────────────
+    node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
+    part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
+    # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
+    segment_sets: Dict[int, SegmentSet] = field(default_factory=dict)           # sid → SegmentSet
+    # *SET_SHELL/_SOLID/_BEAM element sets: sid → (title, [eids]).
+    # Referenced by *DATABASE_CROSS_SECTION_SET (→ the /SECT element groups).
+    shell_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    solid_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    beam_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
 
-        # ── Constraints ────────────────────────────────────────────
-        # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
-        self.cnrbs: List[ConstrainedNodalRigidBody] = []
+    # ── Boundary conditions ────────────────────────────────────
+    bcs_spcs: List[BcsSpc] = field(default_factory=list)
+    prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
+    prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
 
-        # *CONSTRAINED_EXTRA_NODES_NODE/_SET: pid → extra node ids merged into
-        # that rigid part's /RBODY secondary-node group
-        self.extra_rigid_nodes: Dict[int, List[int]] = {}
+    # ── Constraints ────────────────────────────────────────────
+    # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
+    cnrbs: List[ConstrainedNodalRigidBody] = field(default_factory=list)
 
-        # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
-        # rigid part's nodes are folded into the master's single /RBODY
-        self.rigid_body_merges: List[Tuple[int, int]] = []
+    # *CONSTRAINED_EXTRA_NODES_NODE/_SET: pid → extra node ids merged into
+    # that rigid part's /RBODY secondary-node group
+    extra_rigid_nodes: Dict[int, List[int]] = field(default_factory=dict)
 
-        # *RIGIDWALL_PLANAR → /RWALL/PLANE
-        self.rigid_walls: List[RigidWallPlanar] = []
+    # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
+    # rigid part's nodes are folded into the master's single /RBODY
+    rigid_body_merges: List[Tuple[int, int]] = field(default_factory=list)
 
-        # ── Loads ──────────────────────────────────────────────────
-        self.load_rigid_bodies: List[LoadRigidBody] = []
-        # *LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD
-        self.load_nodes: List[LoadNode] = []
-        self.inivel_nodes: List[InitialVelocityNode] = []
-        self.inivel_rbodies: List[InitialVelocityRigidBody] = []
-        self.pressure_loads: List[PressureLoad] = []
-        # *LOAD_SEGMENT_SET rows → /PLOAD (segments resolved from segment_sets
-        # at write time so the *SET_SEGMENT may be defined later in the deck)
-        self.segment_set_pressure_loads: List[SegmentSetPressureLoad] = []
-        # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
-        self.gravity_loads: List[GravityLoadPart] = []
-        # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
-        self.body_loads: List[LoadBody] = []
-        # *LOAD_BLAST_ENHANCED sources keyed by bid, and the
-        # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
-        self.blast_sources: Dict[int, LoadBlastEnhanced] = {}
-        self.blast_segment_loads: List[LoadBlastSegmentSet] = []
-        # (surf_id, title) of each blast-loaded /SURF/SEG the writer emitted —
-        # set by _make_blast_loads, consumed by the *DATABASE_BINARY_BLSTFOR
-        # /TH/SURF output (same pattern as th_sub_ids for /TH/INTER)
-        self.blast_surf_ids: List[Tuple[int, str]] = []
-        # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
-        self.detonations: List[InitialDetonation] = []
-        # ── Coupled ALE / FSI ──────────────────────────────────────
-        # *ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT) submaterial order
-        self.ale_mmgs: List[AleMultiMaterialGroup] = []
-        # *CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling)
-        self.lagrange_in_solid: List[ConstrainedLagrangeInSolid] = []
-        # *INITIAL_VOLUME_FRACTION[_GEOMETRY] → /INIVOL (initial ALE fill)
-        self.volume_fractions: List[InitialVolumeFraction] = []
-        # *BOUNDARY_NON_REFLECTING → /EBCS/NRF (silent far-field)
-        self.non_reflecting: List[BoundaryNonReflecting] = []
-        # *CONTROL_ALE → /ALE advection hints (mostly informational)
-        self.control_ale: Optional[ControlAle] = None
-        # Unit system (mass, length, time) implied by a *LOAD_BLAST_ENHANCED UNIT
-        # flag. The TM5-1300 empirical blast formulas are unit-dependent, so the
-        # /BEGIN unit labels must match the deck's real units for /LOAD/PBLAST to
-        # convert correctly; convert() applies this when the caller left units at
-        # the default. None = no blast load / unknown flag.
-        self.blast_unit_system: Optional[Tuple[str, str, str]] = None
-        # *ELEMENT_MASS additions: node_ID → total added translational mass
-        # (in input unit, typically ton). Used to set /RBODY Mass field
-        # for rigid-body master nodes (provides M contribution to K_eff in
-        # implicit analyses), or to emit /ADMAS for ordinary nodes.
-        self.added_node_masses: Dict[int, float] = {}
-        # *ELEMENT_MASS_PART additions: part_ID → (addmass, finmass).
-        # ADDMASS  = extra mass distributed across the part's nodes (or set
-        #            directly on the rigid-body master if part is rigid).
-        # FINMASS  = target total mass; if nonzero, ADDMASS = FINMASS − existing.
-        # Per LS-DYNA R16 Manual p.19-67: exactly one of ADDMASS/FINMASS is
-        # nonzero. For rigid-body parts, the resulting mass is applied to the
-        # /RBODY Mass field (no need to distribute over slave nodes).
-        self.element_mass_parts: Dict[int, Tuple[float, float]] = {}
-        # Populated by build_starter after _make_rbodies: pid → grnod_id of all rbody nodes
-        self.rbody_grnods: Dict[int, int] = {}
-        # pid → grnod_id containing ONLY the independent node (used by /CLOAD)
-        self.rbody_ind_grnods: Dict[int, int] = {}
+    # *RIGIDWALL_PLANAR → /RWALL/PLANE
+    rigid_walls: List[RigidWallPlanar] = field(default_factory=list)
 
-        # ── Contacts ───────────────────────────────────────────────
-        self.contacts_single: List[ContactAutoSingle] = []
-        self.contacts_surf2surf: List[ContactAutoSurf2Surf] = []
-        # *CONTACT_TIED_* → /INTER/TYPE2 (tied kinematic interface)
-        self.contacts_tied: List[ContactTied] = []
-        self.force_transducers: List[ContactForceTransducer] = []
-        # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
-        self.th_sub_ids: List[Tuple[int, str]] = []
+    # ── Loads ──────────────────────────────────────────────────
+    load_rigid_bodies: List[LoadRigidBody] = field(default_factory=list)
+    # *LOAD_NODE_POINT / *LOAD_NODE_SET → /CLOAD
+    load_nodes: List[LoadNode] = field(default_factory=list)
+    inivel_nodes: List[InitialVelocityNode] = field(default_factory=list)
+    inivel_rbodies: List[InitialVelocityRigidBody] = field(default_factory=list)
+    pressure_loads: List[PressureLoad] = field(default_factory=list)
+    # *LOAD_SEGMENT_SET rows → /PLOAD (segments resolved from segment_sets
+    # at write time so the *SET_SEGMENT may be defined later in the deck)
+    segment_set_pressure_loads: List[SegmentSetPressureLoad] = field(default_factory=list)
+    # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
+    gravity_loads: List[GravityLoadPart] = field(default_factory=list)
+    # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
+    body_loads: List[LoadBody] = field(default_factory=list)
+    # *LOAD_BLAST_ENHANCED sources keyed by bid, and the
+    # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
+    blast_sources: Dict[int, LoadBlastEnhanced] = field(default_factory=dict)
+    blast_segment_loads: List[LoadBlastSegmentSet] = field(default_factory=list)
+    # (surf_id, title) of each blast-loaded /SURF/SEG the writer emitted —
+    # set by _make_blast_loads, consumed by the *DATABASE_BINARY_BLSTFOR
+    # /TH/SURF output (same pattern as th_sub_ids for /TH/INTER)
+    blast_surf_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # *INITIAL_DETONATION → /DFS/DETPOINT (JWL burn origin for LAW5 explosives)
+    detonations: List[InitialDetonation] = field(default_factory=list)
+    # ── Coupled ALE / FSI ──────────────────────────────────────
+    # *ALE_MULTI-MATERIAL_GROUP → /MAT/LAW51 (MULTIMAT) submaterial order
+    ale_mmgs: List[AleMultiMaterialGroup] = field(default_factory=list)
+    # *CONSTRAINED_LAGRANGE_IN_SOLID → /INTER/TYPE18 (fluid-structure coupling)
+    lagrange_in_solid: List[ConstrainedLagrangeInSolid] = field(default_factory=list)
+    # *INITIAL_VOLUME_FRACTION[_GEOMETRY] → /INIVOL (initial ALE fill)
+    volume_fractions: List[InitialVolumeFraction] = field(default_factory=list)
+    # *BOUNDARY_NON_REFLECTING → /EBCS/NRF (silent far-field)
+    non_reflecting: List[BoundaryNonReflecting] = field(default_factory=list)
+    # *CONTROL_ALE → /ALE advection hints (mostly informational)
+    control_ale: Optional[ControlAle] = None
+    # Unit system (mass, length, time) implied by a *LOAD_BLAST_ENHANCED UNIT
+    # flag. The TM5-1300 empirical blast formulas are unit-dependent, so the
+    # /BEGIN unit labels must match the deck's real units for /LOAD/PBLAST to
+    # convert correctly; convert() applies this when the caller left units at
+    # the default. None = no blast load / unknown flag.
+    blast_unit_system: Optional[Tuple[str, str, str]] = None
+    # *ELEMENT_MASS additions: node_ID → total added translational mass
+    # (in input unit, typically ton). Used to set /RBODY Mass field
+    # for rigid-body master nodes (provides M contribution to K_eff in
+    # implicit analyses), or to emit /ADMAS for ordinary nodes.
+    added_node_masses: Dict[int, float] = field(default_factory=dict)
+    # *ELEMENT_MASS_PART additions: part_ID → (addmass, finmass).
+    # ADDMASS  = extra mass distributed across the part's nodes (or set
+    #            directly on the rigid-body master if part is rigid).
+    # FINMASS  = target total mass; if nonzero, ADDMASS = FINMASS − existing.
+    # Per LS-DYNA R16 Manual p.19-67: exactly one of ADDMASS/FINMASS is
+    # nonzero. For rigid-body parts, the resulting mass is applied to the
+    # /RBODY Mass field (no need to distribute over slave nodes).
+    element_mass_parts: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    # Populated by build_starter after _make_rbodies: pid → grnod_id of all rbody nodes
+    rbody_grnods: Dict[int, int] = field(default_factory=dict)
+    # pid → grnod_id containing ONLY the independent node (used by /CLOAD)
+    rbody_ind_grnods: Dict[int, int] = field(default_factory=dict)
 
-        # ── Control ────────────────────────────────────────────────
-        self.ctrl_accuracy: Optional[ControlAccuracy] = None
-        self.ctrl_contact: Optional[ControlContact] = None
-        self.ctrl_cpu: Optional[ControlCpu] = None
-        self.ctrl_energy: Optional[ControlEnergy] = None
-        self.ctrl_hourglass: Optional[ControlHourglass] = None
-        self.ctrl_implicit_auto: Optional[ControlImplicitAuto] = None
-        self.ctrl_implicit_dyn: Optional[ControlImplicitDynamics] = None
-        self.ctrl_output: Optional[ControlOutput] = None
-        self.ctrl_shell: Optional[ControlShell] = None
-        self.ctrl_solid: Optional[ControlSolid] = None
-        self.ctrl_implicit_gen: Optional[ControlImplicitGeneral] = None
-        self.ctrl_implicit_sol: Optional[ControlImplicitSolution] = None
-        self.ctrl_implicit_eig: Optional[ControlImplicitEigenvalue] = None
-        self.ctrl_termination: Optional[ControlTermination] = None
-        self.ctrl_timestep: Optional[ControlTimestep] = None
-        self.damping_global: Optional[DampingGlobal] = None
-        self.damping_part_stiffness: List[DampingPartStiffness] = []
+    # ── Contacts ───────────────────────────────────────────────
+    contacts_single: List[ContactAutoSingle] = field(default_factory=list)
+    contacts_surf2surf: List[ContactAutoSurf2Surf] = field(default_factory=list)
+    # *CONTACT_TIED_* → /INTER/TYPE2 (tied kinematic interface)
+    contacts_tied: List[ContactTied] = field(default_factory=list)
+    force_transducers: List[ContactForceTransducer] = field(default_factory=list)
+    # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
+    th_sub_ids: List[Tuple[int, str]] = field(default_factory=list)
 
-        # ── Database / output ──────────────────────────────────────
-        self.db_d3plot: Optional[DbD3Plot] = None
-        self.db_elout_dt: float = 0.0
-        self.db_glstat_dt: float = 0.0
-        self.db_histories: List[DbHistory] = []
-        self.db_abstat_dt: float = 0.0
-        self.db_d3thdt_dt: float = 0.0
-        self.db_intfor_dt: float = 0.0
-        self.db_deforc_dt: float = 0.0
-        self.db_jntforc_dt: float = 0.0
-        self.db_matsum_dt: float = 0.0
-        self.db_nodout_dt: float = 0.0
-        self.db_rcforc_dt: float = 0.0
-        self.db_rwforc_dt: float = 0.0
-        self.db_secforc_dt: float = 0.0
-        self.db_sleout_dt: float = 0.0
-        # *DATABASE_SPCFORC → /TH/NODE REAC* on the /BCS nodes + /ANIM/VECT/FREAC
-        self.db_spcforc_dt: float = 0.0
-        # *DATABASE_NCFORC → /TH/INTER on every converted contact interface
-        self.db_ncforc_dt: float = 0.0
-        # *DATABASE_BINARY_BLSTFOR → /TH/SURF (P,A) on the blast-loaded
-        # surfaces + /ANIM/NODA/PEXT + /ANIM/VECT/FEXT
-        self.db_blstfor_dt: float = 0.0
-        self.db_extent_binary: Optional[DbExtentBinary] = None
-        # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
-        self.db_freq_binary: Dict[str, DbFreqBinary] = {}
-        # *MAT_ADD_FATIGUE per material id → offline fatigue post-processing
-        self.mat_add_fatigue: Dict[int, MatAddFatigue] = {}
+    # ── Control ────────────────────────────────────────────────
+    ctrl_accuracy: Optional[ControlAccuracy] = None
+    ctrl_contact: Optional[ControlContact] = None
+    ctrl_cpu: Optional[ControlCpu] = None
+    ctrl_energy: Optional[ControlEnergy] = None
+    ctrl_hourglass: Optional[ControlHourglass] = None
+    ctrl_implicit_auto: Optional[ControlImplicitAuto] = None
+    ctrl_implicit_dyn: Optional[ControlImplicitDynamics] = None
+    ctrl_output: Optional[ControlOutput] = None
+    ctrl_shell: Optional[ControlShell] = None
+    ctrl_solid: Optional[ControlSolid] = None
+    ctrl_implicit_gen: Optional[ControlImplicitGeneral] = None
+    ctrl_implicit_sol: Optional[ControlImplicitSolution] = None
+    ctrl_implicit_eig: Optional[ControlImplicitEigenvalue] = None
+    ctrl_termination: Optional[ControlTermination] = None
+    ctrl_timestep: Optional[ControlTimestep] = None
+    damping_global: Optional[DampingGlobal] = None
+    damping_part_stiffness: List[DampingPartStiffness] = field(default_factory=list)
 
-        # ── Skipped / warnings ─────────────────────────────────────
-        self.warnings: List[str] = []
-        self.skipped_keywords: List[str] = []
+    # ── Database / output ──────────────────────────────────────
+    db_d3plot: Optional[DbD3Plot] = None
+    db_elout_dt: float = 0.0
+    db_glstat_dt: float = 0.0
+    db_histories: List[DbHistory] = field(default_factory=list)
+    db_abstat_dt: float = 0.0
+    db_d3thdt_dt: float = 0.0
+    db_intfor_dt: float = 0.0
+    db_deforc_dt: float = 0.0
+    db_jntforc_dt: float = 0.0
+    db_matsum_dt: float = 0.0
+    db_nodout_dt: float = 0.0
+    db_rcforc_dt: float = 0.0
+    db_rwforc_dt: float = 0.0
+    db_secforc_dt: float = 0.0
+    db_sleout_dt: float = 0.0
+    # *DATABASE_SPCFORC → /TH/NODE REAC* on the /BCS nodes + /ANIM/VECT/FREAC
+    db_spcforc_dt: float = 0.0
+    # *DATABASE_NCFORC → /TH/INTER on every converted contact interface
+    db_ncforc_dt: float = 0.0
+    # *DATABASE_BINARY_BLSTFOR → /TH/SURF (P,A) on the blast-loaded
+    # surfaces + /ANIM/NODA/PEXT + /ANIM/VECT/FEXT
+    db_blstfor_dt: float = 0.0
+    db_extent_binary: Optional[DbExtentBinary] = None
+    # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
+    db_freq_binary: Dict[str, DbFreqBinary] = field(default_factory=dict)
+
+    # ── Initial state / cross sections ─────────────────────────
+    # *INITIAL_STRESS_SHELL → /INISHE/STRS_F[/GLOB]
+    ini_stress_shells: List[InitialStressShell] = field(default_factory=list)
+    # *INITIAL_STRESS_SOLID → /INIBRI/STRS_FGLO
+    ini_stress_solids: List[InitialStressSolid] = field(default_factory=list)
+    # *DATABASE_CROSS_SECTION_PLANE/_SET → /SECT
+    cross_sections: List[CrossSection] = field(default_factory=list)
+    # (sect_id, title) of each emitted /SECT — set by the writer's
+    # _make_cross_sections, consumed by _make_starter_th_sectio (the
+    # *DATABASE_SECFORC → /TH/SECTIO pairing; same pattern as blast_surf_ids)
+    sect_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # *MAT_ADD_FATIGUE per material id → offline fatigue post-processing
+    mat_add_fatigue: Dict[int, MatAddFatigue] = field(default_factory=dict)
+
+    # ── Skipped / warnings ─────────────────────────────────────
+    warnings: List[str] = field(default_factory=list)
+    skipped_keywords: List[str] = field(default_factory=list)
 
     def next_id(self) -> int:
         """Return next auto-generated entity ID."""
