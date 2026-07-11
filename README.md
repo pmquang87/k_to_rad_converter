@@ -103,6 +103,11 @@ export the image.
 `*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
 `*PART`, `*SECTION_SHELL`, `*SECTION_SOLID`, `*SECTION_BEAM`
+`*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
+`*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
+(SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
++ `/BCS`; `*DEFINE_SD_ORIENTATION`-oriented and `DRO=1` torsional elements are
+warned + skipped rather than emitted on a wrong axis)
 
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
@@ -112,8 +117,18 @@ E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
 `*MAT_SIMPLIFIED_JOHNSON_COOK` → `/MAT/LAW36` (σ = A + B·εpⁿ sampled into an
-auto-generated yield table, capped at `SIGMAX`; the `(1 + C·ln ε̇*)` rate term
-has no LAW36 mapping and is dropped with a warning)
+auto-generated yield table, capped at `SIGMAX`; a nonzero `C` converts the
+`(1 + C·ln ε̇*)` rate term as a sampled multi-rate curve family on LAW36's
+`N_funct`/`Eps_dot_i` block instead of being dropped)
+`*MAT_024` with `LCSS` pointing at a `*DEFINE_TABLE` expands into the same
+LAW36 rate-curve family (one function per table strain rate)
+`*MAT_SPOTWELD` (100) on beam weld parts → `/PROP/TYPE13` (SPR_BEAM) `/SPRING`
+connectors — stiffnesses from the beam section, `NRR/NRS/NRT/MRR/MSS/MTT` →
+the TYPE13 force/moment failure criteria, `SIGY/EH` → a bilinear axial
+force-displacement function. (Deliberately not `/MAT/LAW59`, which binds to
+`/PROP/TYPE43` connection *solids*, not springs.) Validate on a single-weld
+pull / lap-shear coupon; non-beam MAT_100 parts fall back to elastic with a
+loud warning
 `*MAT_187` / `*MAT_SAMP-1` → `/MAT/LAW76` (SAMP-1 polymer; the tension/
 compression/shear yield curves become `/TABLE/1` cards)
 Material failure strain (MAT_003 `FS` / MAT_024 `FAIL` / MAT_018 `EPSF`) →
@@ -148,8 +163,14 @@ with a warning, so review the converted card against the source foam
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 
 ### Sets & coordinate systems
-`*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`)
+`*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
+`*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`
+`*DEFINE_TABLE_2D` → `/TABLE/1` (Ndim=2, rows sorted by the rate/parameter
+value); legacy `*DEFINE_TABLE` resolves explicit-LCID rows directly and
+bare-VALUE rows positionally (value *i* pairs with the *i*-th `*DEFINE_CURVE`
+parsed after the table — LS-DYNA's "curves follow" rule; unpairable tables
+warn + skip)
 `*DEFINE_CURVE_FUNCTION` → `/FUNCT` (a pure single-variable `x`/`time` analytic
 expression is sampled into an X-Y function over `[0, termination]`; expressions
 that reference parameters, other curves, or runtime state are warned + skipped)
@@ -167,6 +188,11 @@ a rigid body)
 `*CONSTRAINED_RIGID_BODIES` → one merged `/RBODY`: the slave rigid part's nodes
 fold into the master's secondary-node group (chains `A←B←C` resolve
 transitively), and the slave part id still resolves for loads/motions/readouts
+`*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` — without
+failure forces the node pair becomes a 2-node nodal rigid body (the validated
+CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
+`/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
+exponents are warned)
 
 ### Boundary conditions / motion
 `*BOUNDARY_SPC` (+ `_NODE`/`_SET`) → `/BCS`
@@ -175,8 +201,14 @@ transitively), and the slave part id still resolves for loads/motions/readouts
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
 `*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
 `FRIC` 0 → sliding, 0<f<1 → Coulomb friction, ≥1 → tied; `NSID=0` tracks all
-nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`.
-The `_MOVING`/`_FINITE`/`_ORTHO` flavours are skipped with a warning)
+nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`)
+`*RIGIDWALL_PLANAR_MOVING` (+`_FORCES`) → moving `/RWALL/PLANE`: a synthesized
+free carrier node holds the wall `MASS` and `V0` along the wall normal —
+exactly the starter reader's moving-wall semantics, no extra cards needed
+`*RIGIDWALL_PLANAR_FINITE` (+`_MOVING`) → `/RWALL/PARAL` with the corner
+points computed from `XHEV`/`LENL`/`LENM` (a zero length means semi-infinite
+in LS-DYNA and falls back to the infinite plane with a warning);
+`_ORTHO` (orthotropic friction) still warn-skips — no `/RWALL` equivalent
 
 ### Loads
 `*LOAD_RIGID_BODY` → `/CLOAD` on rigid body master node
@@ -211,6 +243,14 @@ unit/sign gotchas.
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/NODE`
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/RBODY`
+`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` (ILOC=0, LS-DYNA's global
+default — lossless incl. σzz, plastic strain and the through-thickness
+position) or the local `/INISHE/STRS_F` for ILOC=1 (σzz/T warned + dropped).
+The layer count must match the part's `/PROP/SHELL` integration points or the
+element is warned + skipped (the starter enforces it); `NPLANE>1` in-plane
+points are averaged per layer with a warning
+`*INITIAL_STRESS_SOLID` → `/INIBRI/STRS_FGLO` (NINT 1→8 replicates exactly;
+other counts average with a warning)
 
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`, `_GENERAL`) → `/INTER/TYPE7`
@@ -266,6 +306,12 @@ passed `--no-rigid-cog-master`. Explicit decks only.
 `*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
 `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)
+`*DATABASE_CROSS_SECTION_SET[_ID]` → `/SECT` (node set + `*SET_SHELL`/`_SOLID`/
+`_BEAM` element groups); `*DATABASE_CROSS_SECTION_PLANE[_ID]` → `/SECT` via a
+geometric resolver (elements whose nodes straddle the cutting plane,
+part-restricted and radius-filtered; a finite `LENL`/`LENM` parallelogram is
+approximated as the infinite plane with a warning); `*DATABASE_SECFORC` →
+`/TH/SECTIO` on every section
 `*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG`, `*MAT_ADD_FATIGUE` → no
 OpenRadioss equivalent; honoured **offline** by
 `tools/modal_random_response.py` on top of the modal solution (see
@@ -338,10 +384,13 @@ open-source engine otherwise lacks:
 
 - **Linear buckling** — `tools/modal_buckling.py` solves `K φ = λ(−K_g)φ`
   (static pre-solve → consistent geometric stiffness → eigensolve) and reports
-  the buckling factors and `P_cr`. Beam/rod/truss elements are supported and
-  validated against the analytic Euler pin-pinned column (`P_cr = π²EI/L²`) to
-  0.001 %; shell/solid elements are counted and skipped with a warning rather
-  than reported with a wrong factor.
+  the buckling factors and `P_cr`. Beam/rod/truss elements are validated
+  against the analytic Euler pin-pinned column (`P_cr = π²EI/L²`) to 0.001 %;
+  shells are supported at the classical consistent-membrane level (membrane
+  resultants → plate-buckling `K_g` on the out-of-plane DOFs), validated
+  against the analytic simply supported square plate (`k = 4`) to 2.2 % on an
+  8×8 mesh with quadratic convergence. Solid elements are counted and skipped
+  with a warning rather than reported with a wrong factor.
 - **Harmonic / frequency response (FRF)** — `tools/modal_frf.py` sweeps a
   modal-superposition FRF for base excitation (`--dir`) or a nodal harmonic load
   (`--load`) and writes per-node magnitude/phase spectra plus a resonance-peak

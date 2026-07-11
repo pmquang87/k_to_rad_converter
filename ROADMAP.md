@@ -10,8 +10,7 @@ why. For the current supported-keyword set and the shipped behaviour, see
 A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
 
 - **Architecture:** `k2rad/topology.py` extraction; the `build_starter`
-  data-driven section registry. *(The `writer.py` split into a package and the
-  `ConversionState` dataclass refactor remain — see below.)*
+  data-driven section registry; the `ConversionState` dataclass.
 - **Tier 1:** `*CONSTRAINED_RIGID_BODIES` → merged `/RBODY`;
   `*DEFINE_CURVE_FUNCTION` → sampled `/FUNCT`.
 - **Tier 2:** foams/honeycomb `*MAT_CRUSHABLE_FOAM`/`LOW_DENSITY_FOAM`/
@@ -28,8 +27,14 @@ The remaining items below are still open.
 
 ## Architecture refactors
 
-The core pipeline (parse → dispatch → `ConversionState` → writer) is sound; the
-following would pay down accumulated structural debt without changing behaviour.
+The core pipeline (parse → dispatch → `ConversionState` → writer) is sound.
+The originally-listed refactors are **done** (the `writer/` package split
+lands separately) (kept below for the
+rationale record): the `writer/` package split, the `ConversionState`
+dataclass, the shared `topology` module, and the `build_starter` section
+registry. Remaining architecture ideas: grouping the state's ~100 fields into
+sub-dataclasses (mesh/loads/contacts/control) and burning down the ~38
+advisory mypy findings so the CI job can become blocking.
 
 - **Split `writer.py` into a `writer/` package by section.** At ~5.5 k lines it
   is by far the largest module and mixes every card format. Break it into
@@ -61,14 +66,17 @@ tiers are dedicated milestones.
 
 ### Tier 1 — high frequency, low effort (reuse existing infra)
 
-- `*DEFINE_TABLE` / `*DEFINE_TABLE_2D` → `/TABLE/1` *(remaining)* — the 1-D
+- `*DEFINE_TABLE` / `*DEFINE_TABLE_2D` → `/TABLE/1` — **done** (Ndim=2 per
+  table_1.cfg; legacy tables resolve positionally; MAT_024 LCSS-tables expand
+  into the LAW36 rate family). Original note: — the 1-D
   `/TABLE/1` path already exists; the 2-D function-reference layout
   (`Ndim=2`, `fct_ID`/`A` rows) needs its exact column widths pinned against the
   `CURVE/table_1.cfg` before it can be emitted with confidence.
 - `*DEFINE_CURVE_FUNCTION` → `/FUNCT` — **done** (sampled).
 - `*CONSTRAINED_RIGID_BODIES` → merged `/RBODY` — **done**.
-- `*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD` → `/INTER/TYPE2`
-  `Spotflag` *(remaining)* — needs a `/SURF` synthesized from the weld node's
+- `*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` — **done**
+  (no-failure -> 2-node CNRB; with failure -> /PROP/TYPE13 connector). Original
+  note: — needs a `/SURF` synthesized from the weld node's
   parent shells; for a *failing* weld the spring-connector path (below) is the
   faithful target.
 
@@ -77,18 +85,22 @@ shipped, so the marginal cost is small.
 
 ### Tier 2 — crash essentials
 
-- `*MAT_SPOTWELD` (100) → LAW59 + spring-beam *(remaining)* — needs new
+- `*MAT_SPOTWELD` (100) — **done** as /PROP/TYPE13 (SPR_BEAM) connectors; the
+  cfg shows LAW59 binds to /PROP/TYPE43 connection solids, so the spring route
+  is correct. Validate on a single-weld coupon. Original note: — needs new
   `/MAT/LAW59` + `/PROP/TYPE13` machinery and single-weld pull/shear validation.
-- `*ELEMENT_DISCRETE` + `*MAT_SPRING_*` / `*MAT_DAMPER_*` → `/PROP/TYPE4`
-  *(remaining)* — reuses the grounding-spring `/SPRING` template, but the
+- `*ELEMENT_DISCRETE` + `*MAT_SPRING_*` / `*MAT_DAMPER_*` -> /PROP/TYPE4 —
+  **done** (S01/S04/D01; grounded springs; oriented/torsional warn+skip).
+  Original note: — reuses the grounding-spring `/SPRING` template, but the
   `/PROP/TYPE4` card layout and the orientation/torsional (`VID`, `DRO=1`) cases
   need pinning before shipping.
 - Foams: `MAT_63` → LAW50, `MAT_57` → LAW38, `MAT_83` → LAW70,
   `MAT_26` → LAW28 — **done**.
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
-- `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` → `/INISHE` / `/INIBRI`
-  *(remaining)* — the per-integration-point `/INISTATE` blocks are verbose and
+- `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE / /INIBRI —
+  **done** (GLOB/local flavours, layer-count checks per the starter readers).
+  Original note: — the per-integration-point `/INISTATE` blocks are verbose and
   version-specific; the layer-count-must-match-property constraint and stress
   component/frame order need cfg validation.
 
@@ -101,7 +113,8 @@ covering them unlocks a large class of real models.
   `TYPE17`.
 - `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints).
 - `*AIRBAG_*` → `/MONVOL`.
-- `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO`.
+- `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO` — **done** (_SET direct;
+  _PLANE via a geometric straddle resolver; SECFORC → /TH/SECTIO).
 - Seatbelts.
 
 *Rationale:* each is a self-contained subsystem with its own card family and
@@ -113,8 +126,9 @@ The modal stiffness-export chain (`/IMPL/PRINT/STIF` → offline solve) is a
 validated foundation for further linear analyses:
 
 - **Linear buckling** (`Kφ = λ K_g φ`) — **done** for beam/rod/truss elements
-  (`tools/modal_buckling.py`, Euler-validated to 0.001 %). Extending a correct
-  geometric stiffness to shells/solids (from recovered element stresses) remains.
+  (`tools/modal_buckling.py`, Euler-validated to 0.001 %). Shells are now also
+  **done** (consistent-membrane K_g, SSSS-plate-validated to 2.2 % at 8x8);
+  a rigorous solid-element K_g remains open.
 - **Harmonic / FRF output** — **done** (`tools/modal_frf.py`).
 - **Thermal** *(remaining)* — a separate Radioss `/HEAT` / `/THERM_STRESS`
   solver path; larger, lower priority unless coupled thermo-mechanical decks are
@@ -127,14 +141,14 @@ solver path, so risk is contained.
 
 Cases that convert today but drop or approximate detail worth recovering:
 
-- **Simplified Johnson-Cook rate term** — the `(1 + C·ln ε̇*)` term is dropped;
-  needs a `/TABLE`-based rate representation.
+- **Simplified Johnson-Cook rate term** — **done**: converts as a sampled
+  LAW36 multi-rate curve family (see CHANGELOG).
 - **`*MAT_PLASTIC_KINEMATIC` Cowper-Symonds rate params** — already emitted
   correctly (`SRC`→`c`, `SRP`→`p` on the LAW44 rate card); listed here only for
   the record.
-- **`*RIGIDWALL_MOVING` / `_FINITE`** *(remaining)* — currently skipped with a
-  warning; `/RWALL/PLANE` supports a moving wall (mass + velocity) and finite
-  extents, so these are recoverable.
+- **`*RIGIDWALL_MOVING` / `_FINITE`** — **done** (moving /RWALL/PLANE with a
+  synthesized carrier node; /RWALL/PARAL from XHEV/LENL/LENM). _ORTHO remains
+  warn-skipped (no /RWALL equivalent).
 - **CNRB per-node DOF releases** *(remaining)* — nodal rigid bodies are tied in
   all DOFs; the per-node `DRFLAG`/`RRFLAG` release codes are not honoured
   (Radioss `/RBODY` has no direct partial-release construct).
