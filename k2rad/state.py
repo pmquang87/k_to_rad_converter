@@ -479,6 +479,74 @@ class InitialDetonation:
 
 
 @dataclass
+class InitialStressShell:
+    """*INITIAL_STRESS_SHELL (one element's record) → /INISHE/STRS_F[/GLOB].
+
+    ``layers`` holds one tuple per through-thickness integration point:
+    (t, sxx, syy, szz, sxy, syz, szx, eps) — t is the normalized [-1,1]
+    thickness coordinate, the stress components are in the system selected by
+    ``iloc`` (LS-DYNA default 0 = GLOBAL cartesian; 1 = element-local).
+    NPLANE in-plane points have already been averaged per layer by the handler
+    (warned there). ``nthick`` is kept for the writer's /PROP/SHELL-N
+    consistency check (the OpenRadioss starter ERRORs on a mismatch, so the
+    writer warns + skips mismatched elements instead of emitting a bad card).
+    """
+    eid: int
+    nplane: int
+    nthick: int
+    iloc: int
+    layers: List[Tuple[float, float, float, float, float, float, float, float]] \
+        = field(default_factory=list)
+
+
+@dataclass
+class InitialStressSolid:
+    """*INITIAL_STRESS_SOLID (one element's record) → /INIBRI/STRS_FGLO.
+
+    ``points`` holds one tuple per integration point:
+    (sxx, syy, szz, sxy, syz, szx, eps) in the GLOBAL cartesian system
+    (LS-DYNA defines *INITIAL_STRESS_SOLID components globally, hence the
+    global /INIBRI flavour). ``nint`` is the LS-DYNA integration point count;
+    the writer adapts it to the point count of the emitted /PROP/SOLID
+    formulation (replicate 1→8, average n→1, warn + skip otherwise).
+    """
+    eid: int
+    nint: int
+    points: List[Tuple[float, float, float, float, float, float, float]] \
+        = field(default_factory=list)
+
+
+@dataclass
+class CrossSection:
+    """*DATABASE_CROSS_SECTION_PLANE/_SET → /SECT (+ /TH/SECTIO).
+
+    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid =
+    *SET_SOLID / *SET_BEAM / *SET_SHELL element sets → the /SECT grbric/grbeam/
+    grshel groups (direct mapping).
+
+    kind "PLANE": an infinite cutting plane through tail (xct,yct,zct) with
+    normal towards head (xch,ych,zch), optionally limited to a circle of
+    ``radius`` around the tail point and to the parts of part-set ``psid``
+    (0 = all). The writer resolves the cut geometrically: elements whose nodes
+    straddle the plane are the section elements, and their nodes on the TAIL
+    side of the plane form the node group (the standard /SECT construction).
+    """
+    csid: int           # user id from the _ID variant (0 = auto-assign)
+    title: str
+    kind: str           # "PLANE" | "SET"
+    # _SET fields
+    nsid: int = 0
+    hsid: int = 0       # solid element set
+    bsid: int = 0       # beam element set
+    ssid: int = 0       # shell element set
+    # _PLANE fields
+    psid: int = 0       # part set restriction (0 = all parts)
+    xct: float = 0.0; yct: float = 0.0; zct: float = 0.0
+    xch: float = 0.0; ych: float = 0.0; zch: float = 0.0
+    radius: float = 0.0
+
+
+@dataclass
 class Curve:
     lcid: int
     title: str
@@ -1418,6 +1486,11 @@ class ConversionState:
         self.part_sets: Dict[int, Tuple[str, List[int]]] = {}   # psid → (title, [pids])
         # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
         self.segment_sets: Dict[int, SegmentSet] = {}           # sid → SegmentSet
+        # *SET_SHELL/_SOLID/_BEAM element sets: sid → (title, [eids]).
+        # Referenced by *DATABASE_CROSS_SECTION_SET (→ the /SECT element groups).
+        self.shell_sets: Dict[int, Tuple[str, List[int]]] = {}
+        self.solid_sets: Dict[int, Tuple[str, List[int]]] = {}
+        self.beam_sets: Dict[int, Tuple[str, List[int]]] = {}
 
         # ── Boundary conditions ────────────────────────────────────
         self.bcs_spcs: List[BcsSpc] = []
@@ -1552,6 +1625,18 @@ class ConversionState:
         self.db_extent_binary: Optional[DbExtentBinary] = None
         # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
         self.db_freq_binary: Dict[str, DbFreqBinary] = {}
+
+        # ── Initial state / cross sections ─────────────────────────
+        # *INITIAL_STRESS_SHELL → /INISHE/STRS_F[/GLOB]
+        self.ini_stress_shells: List[InitialStressShell] = []
+        # *INITIAL_STRESS_SOLID → /INIBRI/STRS_FGLO
+        self.ini_stress_solids: List[InitialStressSolid] = []
+        # *DATABASE_CROSS_SECTION_PLANE/_SET → /SECT
+        self.cross_sections: List[CrossSection] = []
+        # (sect_id, title) of each emitted /SECT — set by the writer's
+        # _make_cross_sections, consumed by _make_starter_th_sectio (the
+        # *DATABASE_SECFORC → /TH/SECTIO pairing; same pattern as blast_surf_ids)
+        self.sect_ids: List[Tuple[int, str]] = []
         # *MAT_ADD_FATIGUE per material id → offline fatigue post-processing
         self.mat_add_fatigue: Dict[int, MatAddFatigue] = {}
 

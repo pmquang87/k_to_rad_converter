@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast as _ast
 import math as _math
-from typing import List
+from typing import List, Tuple
 
 from .parser import (
     Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
@@ -41,6 +41,7 @@ from .state import (
     DampingGlobal, DampingPartStiffness,
     DbD3Plot, DbHistory, DbExtentBinary,
     GravityLoadPart, MatAddFatigue, DbFreqBinary,
+    InitialStressShell, InitialStressSolid, CrossSection,
 )
 
 
@@ -1132,6 +1133,38 @@ def handle_set_node_list(block: Block, state: ConversionState) -> None:
     state.node_sets[nsid] = (title, nids)
 
 
+def _handle_set_elem_list(block: Block, state: ConversionState, target: dict) -> None:
+    """Shared parser for *SET_SHELL/_SOLID/_BEAM[_LIST]: header card ``sid da1..``
+    then element ids 8 per card. Stored as sid → (title, [eids]); referenced by
+    *DATABASE_CROSS_SECTION_SET (the /SECT element groups)."""
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    eids: List[int] = []
+    for line in raw[offset + 1:]:
+        for tok in parse_free(line):
+            v = to_int(tok)
+            if v > 0:
+                eids.append(v)
+    target[sid] = (title, eids)
+
+
+def handle_set_shell_list(block: Block, state: ConversionState) -> None:
+    _handle_set_elem_list(block, state, state.shell_sets)
+
+
+def handle_set_solid_list(block: Block, state: ConversionState) -> None:
+    _handle_set_elem_list(block, state, state.solid_sets)
+
+
+def handle_set_beam_list(block: Block, state: ConversionState) -> None:
+    _handle_set_elem_list(block, state, state.beam_sets)
+
+
 def handle_set_part_list(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -1777,6 +1810,317 @@ def handle_database_spcforc(block: Block, state: ConversionState) -> None:
     The writer emits both; requesting either makes the OpenRadioss engine
     compute constraint reactions (engine reactions.F, COMPTREAC)."""
     state.db_spcforc_dt = _handle_db_dt(block)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Initial stresses (*INITIAL_STRESS_SHELL / _SOLID) and cross sections
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _fixed_float_card(raw: List[str], idx: int, n: int, w: int) -> List[float]:
+    """Read one fixed-format card of *n* float fields of width *w* (with the
+    usual free-format fallback via _card)."""
+    f = _card(raw, idx, fixed=True, n=n, w=w)
+    vals = [to_float(x) for x in f[:n]]
+    vals += [0.0] * (n - len(vals))
+    return vals
+
+
+def _avg_tuples(pts: list) -> tuple:
+    n = len(pts)
+    return tuple(sum(p[k] for p in pts) / n for k in range(len(pts[0])))
+
+
+def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
+    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB (or /INISHE/STRS_F).
+
+    Card 1 (Keyword971 initial_stress_shell_subobj.cfg):
+        EID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV [ILOC]
+    then NPLANE×NTHICK stress cards:
+        small (LARGE=0): T SIGXX SIGYY SIGZZ SIGXY SIGYZ SIGZX EPS   (8×10)
+        large (LARGE=1): T..SIGXY / SIGYZ SIGZX EPS                  (5+3×16)
+    each followed by the NHISV history cards (8/card small, 5/card large) and
+    NTENSR tensor cards (6/card small, 5/card large); NTHINT×NTHHSV thermal
+    history cards close the element record (large format).
+
+    The stress components are GLOBAL cartesian by default (ILOC=0) → the
+    /INISHE/STRS_F/GLOB flavour, which carries the full tensor (incl. σzz), the
+    plastic strain eps_p AND the thickness position pos_nip 1:1. ILOC=1 (local)
+    → the local /INISHE/STRS_F flavour (σzz and T have no slot there; the
+    writer warns). NHISV/NTENSR/thermal data have no /INISHE slot → dropped
+    with one aggregated warning per block. NPLANE>1 in-plane points are
+    averaged per through-thickness layer (the /INISHE per-layer format is
+    replicated across the shell's in-plane Gauss points by the writer).
+    """
+    raw = block.raw
+    i = 0
+    n_hisv_dropped = 0
+    n_tensr_dropped = 0
+    n_thermal_dropped = 0
+    n_plane_averaged = 0
+    n_read = 0
+    while i < len(raw):
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=9, w=10)
+        eid = to_int(f[0])
+        if eid <= 0:
+            i += 1
+            continue
+        nplane = max(1, to_int(f[1]))
+        nthick = max(1, to_int(f[2]))
+        nhisv  = to_int(f[3]) if len(f) > 3 else 0
+        ntensr = to_int(f[4]) if len(f) > 4 else 0
+        large  = to_int(f[5]) if len(f) > 5 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        iloc   = to_int(f[8]) if len(f) > 8 else 0
+        i += 1
+
+        pts = []
+        truncated = False
+        for _ in range(nplane * nthick):
+            if i >= len(raw):
+                truncated = True
+                break
+            if large:
+                a = _fixed_float_card(raw, i, 5, 16)
+                b = _fixed_float_card(raw, i + 1, 3, 16) if i + 1 < len(raw) else [0.0] * 3
+                i += 2
+                pts.append(tuple(a + b))
+            else:
+                pts.append(tuple(_fixed_float_card(raw, i, 8, 10)))
+                i += 1
+            if nhisv > 0:
+                i += _ceil_div(nhisv, 5 if large else 8)
+            if ntensr > 0:
+                i += _ceil_div(ntensr, 5 if large else 6)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+            n_thermal_dropped += 1
+        if truncated:
+            state.warn(f"*INITIAL_STRESS_SHELL eid={eid}: block ends before all "
+                       f"{nplane * nthick} integration-point cards — element skipped.")
+            break
+        if nhisv > 0:
+            n_hisv_dropped += 1
+        if ntensr > 0:
+            n_tensr_dropped += 1
+
+        # Collapse the NPLANE in-plane points into per-layer averages. Points
+        # of one layer share the same T coordinate, so group by T (robust to
+        # either loop order); fall back to consecutive-NPLANE chunking when the
+        # distinct-T count does not match NTHICK (e.g. all-zero T columns).
+        if nplane == 1:
+            layers = pts
+        else:
+            n_plane_averaged += 1
+            order: List[float] = []
+            groups: dict = {}
+            for p in pts:
+                groups.setdefault(p[0], []).append(p)
+                if len(groups[p[0]]) == 1:
+                    order.append(p[0])
+            if len(order) == nthick:
+                layers = [_avg_tuples(groups[t]) for t in order]
+            else:
+                layers = [_avg_tuples(pts[k * nplane:(k + 1) * nplane])
+                          for k in range(nthick)]
+        state.ini_stress_shells.append(
+            InitialStressShell(eid=eid, nplane=nplane, nthick=nthick,
+                               iloc=iloc, layers=layers))
+        n_read += 1
+
+    if n_hisv_dropped:
+        state.warn(f"*INITIAL_STRESS_SHELL: NHISV material history variables on "
+                   f"{n_hisv_dropped} element(s) have no /INISHE slot — dropped "
+                   "(plastic strain EPS itself IS mapped via eps_p).")
+    if n_tensr_dropped:
+        state.warn(f"*INITIAL_STRESS_SHELL: NTENSR tensor data on "
+                   f"{n_tensr_dropped} element(s) has no /INISHE slot — dropped.")
+    if n_thermal_dropped:
+        state.warn(f"*INITIAL_STRESS_SHELL: thermal history (NTHINT/NTHHSV) on "
+                   f"{n_thermal_dropped} element(s) has no /INISHE slot — dropped.")
+    if n_plane_averaged:
+        state.warn(f"*INITIAL_STRESS_SHELL: NPLANE>1 in-plane integration points "
+                   f"on {n_plane_averaged} element(s) were AVERAGED per "
+                   "through-thickness layer (the layer value is replicated "
+                   "across the /INISHE in-plane Gauss points).")
+
+
+def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
+    """*INITIAL_STRESS_SOLID → /INIBRI/STRS_FGLO.
+
+    Card 1 (Keyword971_R13.0 initial_stress_solid_subobj.cfg):
+        EID NINT NHISV LARGE IVEFLG IALEGP NTHINT NTHHSV
+    then NINT stress cards:
+        small (LARGE=0): SIGXX SIGYY SIGZZ SIGXY SIGYZ SIGZX EPS  (7×10)
+        large (LARGE=1): SIGXX..SIGYZ / SIGZX EPS HISV1-3         (5+5×16)
+    NHISV(+IVEFLG) history values follow each stress card (8/card small; the
+    first 3 ride the large card 2, then 5/card). LS-DYNA defines the solid
+    stress components in the GLOBAL system → the global /INIBRI/STRS_FGLO
+    flavour is emitted. History/thermal variables are dropped with one
+    aggregated warning; EPS maps to /INIBRI's Epsilon_p.
+    """
+    raw = block.raw
+    i = 0
+    n_hisv_dropped = 0
+    n_thermal_dropped = 0
+    while i < len(raw):
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        eid = to_int(f[0])
+        if eid <= 0:
+            i += 1
+            continue
+        nint   = max(1, to_int(f[1]))
+        nhisv  = to_int(f[2]) if len(f) > 2 else 0
+        large  = to_int(f[3]) if len(f) > 3 else 0
+        iveflg = to_int(f[4]) if len(f) > 4 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        i += 1
+        nh = nhisv + iveflg   # IVEFLG appends extra value(s) to the history list
+
+        pts = []
+        truncated = False
+        for _ in range(nint):
+            if i >= len(raw):
+                truncated = True
+                break
+            if large:
+                a = _fixed_float_card(raw, i, 5, 16)
+                b = _fixed_float_card(raw, i + 1, 2, 16) if i + 1 < len(raw) else [0.0] * 2
+                i += 2
+                pts.append(tuple(a + b))
+                if nh > 3:                    # 3 history values ride card 2
+                    i += _ceil_div(nh - 3, 5)
+            else:
+                pts.append(tuple(_fixed_float_card(raw, i, 7, 10)))
+                i += 1
+                if nh > 0:
+                    i += _ceil_div(nh, 8)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+            n_thermal_dropped += 1
+        if truncated:
+            state.warn(f"*INITIAL_STRESS_SOLID eid={eid}: block ends before all "
+                       f"{nint} integration-point cards — element skipped.")
+            break
+        if nh > 0:
+            n_hisv_dropped += 1
+        state.ini_stress_solids.append(
+            InitialStressSolid(eid=eid, nint=nint, points=pts))
+
+    if n_hisv_dropped:
+        state.warn(f"*INITIAL_STRESS_SOLID: NHISV/IVEFLG history values on "
+                   f"{n_hisv_dropped} element(s) have no /INIBRI slot — dropped "
+                   "(plastic strain EPS itself IS mapped via Epsilon_p).")
+    if n_thermal_dropped:
+        state.warn(f"*INITIAL_STRESS_SOLID: thermal history (NTHINT/NTHHSV) on "
+                   f"{n_thermal_dropped} element(s) has no /INIBRI slot — dropped.")
+
+
+def _id_heading_card(line: str) -> Tuple[int, str]:
+    """Parse a *DATABASE_..._ID header card: fixed '%10d%-70s' (the heading
+    starts at column 11 and may glue onto the id), with a free-format
+    fallback for 'id  title' decks."""
+    head = line[:10].strip()
+    if head and head.lstrip("+-").isdigit():
+        return to_int(head), line[10:].strip()
+    toks = parse_free(line)
+    if not toks:
+        return 0, ""
+    return to_int(toks[0]), " ".join(toks[1:])
+
+
+def handle_database_cross_section_plane(block: Block, state: ConversionState) -> None:
+    """*DATABASE_CROSS_SECTION_PLANE[_ID] → /SECT (resolved geometrically).
+
+    Card (Keyword971_R6.1 database_cross_section.cfg):
+        PSID XCT YCT ZCT XCH YCH ZCH RADIUS
+        [XHEV YHEV ZHEV LENL LENM ID ITYPE]
+    The infinite plane through (XCT,YCT,ZCT) with normal towards (XCH,YCH,ZCH)
+    is stored; the writer finds the cut elements/nodes. A finite parallelogram
+    (LENL/LENM) cannot be carried into /SECT — approximated by the infinite
+    plane (within RADIUS when given) with a warning.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    csid = 0
+    title = ""
+    if offset and raw:
+        csid, title = _id_heading_card(raw[0])
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or all(not x.strip() for x in f1):
+        state.warn("*DATABASE_CROSS_SECTION_PLANE: missing data card — skipped.")
+        return
+    g = lambda k: to_float(f1[k]) if len(f1) > k else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        lenl = to_float(f2[3]) if len(f2) > 3 else 0.0
+        lenm = to_float(f2[4]) if len(f2) > 4 else 0.0
+        loc_id = to_int(f2[5]) if len(f2) > 5 else 0
+        if lenl or lenm:
+            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
+                       "finite parallelogram extent (LENL/LENM) cannot be carried "
+                       "into /SECT — treated as an infinite plane"
+                       + (" limited to RADIUS" if g(7) > 0 else "") + ".")
+        if loc_id:
+            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
+                       "local coordinate system ID for output has no /SECT "
+                       "mapping here — forces are reported in the section frame "
+                       "built from three section nodes.")
+    state.cross_sections.append(CrossSection(
+        csid=csid, title=title, kind="PLANE",
+        psid=to_int(f1[0]),
+        xct=g(1), yct=g(2), zct=g(3),
+        xch=g(4), ych=g(5), zch=g(6),
+        radius=g(7)))
+
+
+def handle_database_cross_section_set(block: Block, state: ConversionState) -> None:
+    """*DATABASE_CROSS_SECTION_SET[_ID] → /SECT (direct set mapping).
+
+    Card: NSID HSID BSID SSID TSID DSID ID ITYPE — node set → the /SECT node
+    group, solid/beam/shell element sets → its grbric/grbeam/grshel groups.
+    Thick-shell (TSID) and discrete (DSID) sets have no converter-side element
+    type — warned and dropped.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    csid = 0
+    title = ""
+    if offset and raw:
+        csid, title = _id_heading_card(raw[0])
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or all(not x.strip() for x in f1):
+        state.warn("*DATABASE_CROSS_SECTION_SET: missing data card — skipped.")
+        return
+    tsid = to_int(f1[4]) if len(f1) > 4 else 0
+    dsid = to_int(f1[5]) if len(f1) > 5 else 0
+    loc_id = to_int(f1[6]) if len(f1) > 6 else 0
+    if tsid or dsid:
+        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
+                   "TSID (thick shell) / DSID (discrete) element sets are not "
+                   "converted — dropped from the /SECT.")
+    if loc_id:
+        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
+                   "local coordinate system ID for output has no /SECT mapping "
+                   "here — forces are reported in the section frame built from "
+                   "three section nodes.")
+    state.cross_sections.append(CrossSection(
+        csid=csid, title=title, kind="SET",
+        nsid=to_int(f1[0]),
+        hsid=to_int(f1[1]) if len(f1) > 1 else 0,
+        bsid=to_int(f1[2]) if len(f1) > 2 else 0,
+        ssid=to_int(f1[3]) if len(f1) > 3 else 0))
 
 
 def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
@@ -3203,6 +3547,12 @@ HANDLERS = {
     "SET_NODE":                               handle_set_node_list,
     "SET_PART_LIST":                          handle_set_part_list,
     "SET_PART":                               handle_set_part_list,
+    "SET_SHELL_LIST":                         handle_set_shell_list,
+    "SET_SHELL":                              handle_set_shell_list,
+    "SET_SOLID_LIST":                         handle_set_solid_list,
+    "SET_SOLID":                              handle_set_solid_list,
+    "SET_BEAM_LIST":                          handle_set_beam_list,
+    "SET_BEAM":                               handle_set_beam_list,
 
     # Boundary conditions
     "BOUNDARY_SPC_SET":                       handle_boundary_spc_set,
@@ -3330,13 +3680,17 @@ HANDLERS = {
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
     "DATABASE_BINARY_BLSTFOR":                handle_database_binary_blstfor,
-    "DATABASE_CROSS_SECTION_PLANE":           handle_skip,
-    "DATABASE_CROSS_SECTION_SET":             handle_skip,
+    "DATABASE_CROSS_SECTION_PLANE":           handle_database_cross_section_plane,
+    "DATABASE_CROSS_SECTION_SET":             handle_database_cross_section_set,
     "DATABASE_BINARY_RUNRSF":                 handle_skip,
     "DATABASE_FREQUENCY_BINARY_D3PSD":        handle_database_frequency_binary_d3psd,
     "DATABASE_FREQUENCY_BINARY_D3RMS":        handle_database_frequency_binary_d3rms,
     "DATABASE_FREQUENCY_BINARY_D3FTG":        handle_database_frequency_binary_d3ftg,
+    # INITIAL_STRESS_SECTION prescribes a section FORCE (a different beast from
+    # the per-IP stress fields below) — kept warn+skipped.
     "INITIAL_STRESS_SECTION":                 handle_skip,
+    "INITIAL_STRESS_SHELL":                   handle_initial_stress_shell,
+    "INITIAL_STRESS_SOLID":                   handle_initial_stress_solid,
     "LOAD_GRAVITY_PART":                      handle_load_gravity_part,
     "LOAD_GRAVITY_PART_SET":                  handle_load_gravity_part,
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
