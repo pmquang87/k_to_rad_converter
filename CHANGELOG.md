@@ -39,6 +39,20 @@ Prior history (before this changelog was introduced) is summarized in the
     (+`_MOVING`) → `/RWALL/PARAL` from `XHEV`/`LENL`/`LENM`.
 - **Buckling** — shells now supported (consistent-membrane geometric
   stiffness), validated against the analytic SSSS plate (k = 4) to 2.2 %.
+- **Materials**
+  - `*MAT_ANISOTROPIC_VISCOPLASTIC` (103) → `/MAT/LAW128` (HILL_VISC_PLAST),
+    the near 1:1 Radioss counterpart: Voce `QR/CR` + kinematic `QX/CX`
+    hardening and the Hill surface (shell Lankford `R00/R45/R90` or brick
+    `F/G/H/L/M/N`) carry over verbatim; the iso/kin split becomes `CHARD`
+    (`1−ALPHA` for the `FLAG=1` fit, else the kinematic fraction) and the
+    additive `VK·ε̇^VM` overstress is matched to LAW128's Cowper-Symonds
+    `EPSP0/CP` at initial yield (a rate-table `LCSS` is used directly). Because
+    every Radioss Hill law is orthotropic-only, each converted part is
+    repointed at a synthesized `/PROP/TYPE9` (shell) or `/PROP/TYPE6` (solid)
+    with the material reference direction defaulted to global-X (set the real
+    build/anisotropy axis on the `/PROP`). Verified reading in the OpenRadioss
+    starter (0 errors); LAW128 is a 2026-format law, so the `/BEGIN 2022` deck
+    draws one cosmetic `WARNING 100211` but parses correctly.
 
 ### Changed
 

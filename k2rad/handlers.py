@@ -19,6 +19,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
+    MatAnisoViscoplastic,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
@@ -535,6 +536,66 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
     state.mat_plas_tab[mid] = MatPlasTAB(
         mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts,
         vp=vp, rate_curves=rate_curves)
+
+
+def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) -> None:
+    """*MAT_ANISOTROPIC_VISCOPLASTIC (MAT_103) → /MAT/LAW128 (HILL_VISC_PLAST).
+
+    LAW128 is the near 1:1 OpenRadioss counterpart of MAT_103: it carries the
+    same two-term Voce isotropic hardening (QR/CR), two-term kinematic
+    back-stress (QX/CX), a Cowper-Symonds rate term, and the Hill'48 surface from
+    either the shell Lankford ratios R00/R45/R90 or the brick coefficients
+    F/G/H/L/M/N. The full parameter set is stored on ``state.mat_aniso_visco``;
+    the writer (_emit_mat_law128) does the field mapping and warns about the two
+    approximations (VK/VM additive overstress → Cowper-Symonds; the iso/kin split
+    CHARD). Because every Radioss Hill law is orthotropic-only, the writer also
+    synthesizes a companion orthotropic property (/PROP/TYPE9 shell / TYPE6
+    solid) for each part that uses this material — see
+    writer.mesh._assign_ortho_props.
+
+    Card layout (LS-DYNA hm_cfg_files mat_103.cfg):
+      Card1: MID RHO E PR SIGY FLAG LCSS ALPHA
+      Card2: QR1 CR1 QR2 CR2 QX1 CX1 QX2 CX2
+      Card3: VK VM R00_F R45_G R90_H L M N
+      Card4: AOPT FAIL NUMINT MACF   (axis cards 5-6 are not needed for LAW128)
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    # Card1: MID RHO E PR SIGY FLAG LCSS ALPHA
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1])
+    E    = to_float(f1[2])
+    nu   = to_float(f1[3])
+    sigy = to_float(f1[4]) if len(f1) > 4 else 0.0
+    flag = to_int(f1[5])   if len(f1) > 5 else 0
+    lcss = to_int(f1[6])   if len(f1) > 6 else 0
+    alpha = to_float(f1[7]) if len(f1) > 7 else 0.0
+    # Card2: QR1 CR1 QR2 CR2 QX1 CX1 QX2 CX2
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
+    qr1, cr1, qr2, cr2 = g2(0), g2(1), g2(2), g2(3)
+    qx1, cx1, qx2, cx2 = g2(4), g2(5), g2(6), g2(7)
+    # Card3: VK VM R00_F R45_G R90_H L M N
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    g3 = lambda i: to_float(f3[i]) if len(f3) > i else 0.0
+    vk, vm = g3(0), g3(1)
+    r00, r45, r90 = g3(2), g3(3), g3(4)
+    hl, hm, hn = g3(5), g3(6), g3(7)          # brick Hill L, M, N
+    # Card4: AOPT FAIL NUMINT MACF
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    aopt   = to_float(f4[0]) if len(f4) > 0 else 0.0
+    fail   = to_float(f4[1]) if len(f4) > 1 else 0.0
+    numint = to_float(f4[2]) if len(f4) > 2 else 0.0
+
+    state.mat_aniso_visco[mid] = MatAnisoViscoplastic(
+        mid=mid, title=title, rho=rho, E=E, nu=nu, sigy=sigy,
+        flag=flag, lcss=lcss, alpha=alpha,
+        qr1=qr1, cr1=cr1, qr2=qr2, cr2=cr2,
+        qx1=qx1, cx1=cx1, qx2=qx2, cx2=cx2,
+        vk=vk, vm=vm, r00=r00, r45=r45, r90=r90, hl=hl, hm=hm, hn=hn,
+        fail=fail, numint=numint, aopt=aopt)
 
 
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
@@ -3498,6 +3559,10 @@ HANDLERS = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY":        handle_mat_piecewise_linear_plasticity,
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": handle_mat_piecewise_linear_plasticity,
     "MAT_PLASTIC_KINEMATIC":                  handle_mat_plastic_kinematic,
+    # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction;
+    # Hill anisotropy + kinematic hardening dropped/folded — see the handler)
+    "MAT_ANISOTROPIC_VISCOPLASTIC":           handle_mat_anisotropic_viscoplastic,
+    "MAT_103":                                handle_mat_anisotropic_viscoplastic,
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,

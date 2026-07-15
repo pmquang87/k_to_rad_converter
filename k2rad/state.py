@@ -327,6 +327,55 @@ class MatPlasKin:
 
 
 @dataclass
+class MatAnisoViscoplastic:
+    """*MAT_ANISOTROPIC_VISCOPLASTIC (MAT_103) → /MAT/LAW128 (HILL_VISC_PLAST).
+
+    Hill-anisotropic elasto-viscoplastic metal model — LAW128 is the near 1:1
+    OpenRadioss counterpart (same QR/CR Voce + QX/CX kinematic parameters, a
+    Cowper-Symonds rate term, and the Hill surface from R00/R45/R90 or
+    F/G/H/L/M/N). Uniaxial flow stress (LS-DYNA Manual Vol II, *MAT_103):
+
+        σ(εp, ε̇p) = SIGY + Σ_i QRi·(1 − e^(−CRi·εp))     # isotropic (Voce)
+                         + Σ_i QXi·(1 − e^(−CXi·εp))      # kinematic back-stress
+                         + VK·ε̇p^VM                        # viscous overstress
+
+    Card-3 slots ``r00/r45/r90`` double as the Hill F/G/H for brick elements
+    (MAT_103's own shell-Lankford / brick-Hill duality); ``hl/hm/hn`` are the
+    brick Hill L/M/N. LAW128 is orthotropic-only, so a converted part also needs
+    an orthotropic property (/PROP/TYPE9 shell, /PROP/TYPE6 solid) — see
+    ``ConversionState.ortho_prop_ids``.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    sigy: float
+    flag: int            # 0 = analytic params; 1 = fit QR/CR to LCSS; 2 = use LCSS
+    lcss: int            # yield curve / strain-rate table id (FLAG 1/2)
+    alpha: float         # iso/kin split for the FLAG=1 fit (1=iso, 0=kin)
+    qr1: float           # isotropic (Voce) hardening
+    cr1: float
+    qr2: float
+    cr2: float
+    qx1: float           # kinematic back-stress hardening
+    cx1: float
+    qx2: float
+    cx2: float
+    vk: float            # viscous overstress coefficient (σ_v = VK·ε̇^VM)
+    vm: float            # viscous overstress exponent
+    r00: float           # shell Lankford R00/R45/R90 (or brick Hill F/G/H)
+    r45: float
+    r90: float
+    hl: float            # brick Hill L/M/N (unused for shells)
+    hm: float
+    hn: float
+    fail: float = 0.0    # failure plastic strain (0 = none)
+    numint: float = 0.0  # failed integration points before element deletion
+    aopt: float = 0.0    # material-axis option (reference-direction hint)
+
+
+@dataclass
 class MatRigid:
     """*MAT_RIGID → /MAT/ELAST + /RBODY (deferred)."""
     mid: int
@@ -1436,10 +1485,18 @@ class ConversionState:
     sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
     # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
     sec_discrete: Dict[int, SectionDiscrete] = field(default_factory=dict)
+    # part_id → synthesized orthotropic property id for a *MAT_ANISOTROPIC_
+    # VISCOPLASTIC (LAW128) part. LAW128 is orthotropic-only, so such a part
+    # cannot use the isotropic /PROP/SHELL|SOLID — the writer emits a dedicated
+    # /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) and points the /PART at it.
+    ortho_prop_ids: Dict[int, int] = field(default_factory=dict)
 
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
     mat_plas_tab: Dict[int, MatPlasTAB] = field(default_factory=dict)
     mat_plas_kin: Dict[int, MatPlasKin] = field(default_factory=dict)
+    # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW128 (HILL_VISC_PLAST) +
+    # a synthesized orthotropic property (see ortho_prop_ids)
+    mat_aniso_visco: Dict[int, MatAnisoViscoplastic] = field(default_factory=dict)
     mat_rigid: Dict[int, MatRigid] = field(default_factory=dict)
     mat_null: Dict[int, MatNull] = field(default_factory=dict)
     mat_power_law: Dict[int, MatPowerLaw] = field(default_factory=dict)

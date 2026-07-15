@@ -13,6 +13,7 @@ from .materials import (
     _resolve_mat_power_law,
 )
 from .mesh import (
+    _assign_ortho_props,
     _downgrade_tet10_to_tet4,
     _make_extra_groups,
     _make_nodes,
@@ -432,6 +433,11 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # BEFORE any section is built, so the free-node guard sees the post-drop
     # connectivity and constrains any node the drops left unattached.
     _screen_sliver_tets(state)
+
+    # Assign a synthesized orthotropic /PROP id to each LAW128 (MAT_103) part
+    # (LAW128 is orthotropic-only). Must run before parts (which repoint the
+    # /PART at it) and properties (which emit it) are built.
+    _assign_ortho_props(state)
 
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).

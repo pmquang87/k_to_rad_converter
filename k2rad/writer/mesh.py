@@ -51,6 +51,10 @@ __all__ = [
     "_make_parts_and_elements",
     "_make_properties",
     "_emit_prop_beam",
+    "_assign_ortho_props",
+    "_emit_prop_type9",
+    "_emit_prop_type6",
+    "_emit_ortho_props",
     "_make_extra_groups",
     "_TET10_MIDEDGE",
 ]
@@ -558,11 +562,14 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         if pid in connector_pids:
             continue
         secid = part.secid if part.secid > 0 else pid
+        # A *MAT_ANISOTROPIC_VISCOPLASTIC (LAW128) part is repointed at its
+        # synthesized orthotropic /PROP/TYPE9|TYPE6 (LAW128 is orthotropic-only).
+        prop_ref = state.ortho_prop_ids.get(pid, secid)
 
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",
-            f"{_i(secid)}{_i(part.mid)}         0",
+            f"{_i(prop_ref)}{_i(part.mid)}         0",
             HDR,
         ]
         if pid in shells_by_pid:
@@ -671,6 +678,18 @@ def _make_properties(state: ConversionState) -> List[str]:
 
     part_secids = {p.pid: p.secid if p.secid > 0 else p.pid for p in state.parts.values()}
 
+    # Sections whose EVERY part is a LAW128 (MAT_103) part now reference the
+    # synthesized orthotropic /PROP instead — skip the isotropic prop that would
+    # otherwise be emitted unused for such a section (a mixed section keeps it).
+    ortho_only_secids: Set[int] = set()
+    if state.ortho_prop_ids:
+        parts_by_secid: Dict[int, List[int]] = defaultdict(list)
+        for pid, sid in part_secids.items():
+            parts_by_secid[sid].append(pid)
+        ortho_only_secids = {
+            sid for sid, pids in parts_by_secid.items()
+            if pids and all(p in state.ortho_prop_ids for p in pids)}
+
     # Sections whose parts carry 10-node tets need the quadratic Itetra10 flag set
     # in /PROP/SOLID so /TETRA10 elements use the quadratic formulation.
     tet10_secids: Set[int] = set()
@@ -715,6 +734,8 @@ def _make_properties(state: ConversionState) -> List[str]:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
 
     for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):
+        if sec.secid in ortho_only_secids:
+            continue
         ishell = _elform_to_ishell(sec.elform, state.is_implicit)
         nip = max(2, sec.nip)
         lines += [
@@ -729,6 +750,8 @@ def _make_properties(state: ConversionState) -> List[str]:
             HDR,
         ]
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
+        if sec.secid in ortho_only_secids:
+            continue
         # ALE/Euler elements need an ALE-compatible solid formulation; the
         # full-integration Lagrangian Isolid 17 is rejected (ERROR 131/608
         # "INCOMPATIBLE ELEMENT TYPE WITH ALE/EULER FRAMEWORK"). Isolid 0 =
@@ -762,6 +785,138 @@ def _make_properties(state: ConversionState) -> List[str]:
         if sec.secid in spotweld_only_secids:
             continue
         lines += _emit_prop_beam(sec)
+    # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
+    # above has already populated any missing section this reads).
+    lines += _emit_ortho_props(state, istrain)
+    return lines
+
+
+def _assign_ortho_props(state: ConversionState) -> None:
+    """*MAT_ANISOTROPIC_VISCOPLASTIC → /MAT/LAW128 is orthotropic-only, so a part
+    using it cannot sit on the isotropic /PROP/SHELL|SOLID (starter ERROR 3047).
+    Allocate a dedicated orthotropic property id per such part; the /PART is
+    repointed at it in _make_parts_and_elements and the property is emitted by
+    _emit_ortho_props. Runs as a build_starter prepass, before parts/properties.
+    """
+    if not state.mat_aniso_visco:
+        return
+    mat_mids = set(state.mat_aniso_visco)
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    for pid, part in sorted(state.parts.items()):
+        if part.mid not in mat_mids or pid in state.ortho_prop_ids:
+            continue
+        if pid not in shell_pids and pid not in solid_pids:
+            state.warn(
+                f"*MAT_ANISOTROPIC_VISCOPLASTIC on part {pid}: no shell or solid "
+                "elements found — /MAT/LAW128 needs an orthotropic shell/solid "
+                "property. The part keeps its default property, which the starter "
+                "will reject as incompatible; check the mesh.")
+            continue
+        state.ortho_prop_ids[pid] = state.next_id()
+    if state.ortho_prop_ids:
+        state.warn(
+            "*MAT_ANISOTROPIC_VISCOPLASTIC → /MAT/LAW128 requires an orthotropic "
+            f"property: synthesized /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) for "
+            f"part(s) {sorted(state.ortho_prop_ids)} with the material reference "
+            "direction defaulted to GLOBAL X (Vx=1,0,0; Phi=0). MAT_103's AOPT "
+            "axis definition is NOT mapped — set the correct orthotropy/build axis "
+            "(Vx/Vy/Vz + Phi on the /PROP) for your material, e.g. the print "
+            "build direction for an SLS part.")
+
+
+def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
+                     is_implicit: bool, istrain: int, state: ConversionState,
+                     refvec=(1.0, 0.0, 0.0), phi: float = 0.0) -> List[str]:
+    """Orthotropic shell property /PROP/TYPE9 (SH_ORTH) — the isotropic
+    /PROP/SHELL fields plus a material reference direction (Vx/Vy/Vz + Phi).
+    Column layout from PROP/prop_p9_sh_orth.cfg FORMAT(radioss2022)."""
+    ishell = _elform_to_ishell(sec.elform, is_implicit)
+    nip = max(2, sec.nip)
+    if sec.t1 <= 0.0:
+        state.warn(
+            f"/PROP/TYPE9/{prop_id}: shell thickness is {sec.t1:g} (<=0), which "
+            "the starter rejects (THICK must be > 0). Set the *SECTION_SHELL "
+            "thickness for the LAW128 shell part.")
+    vx, vy, vz = refvec
+    b20 = " " * 20
+    return [
+        f"/PROP/TYPE9/{prop_id}",
+        title,
+        "#   Ishell    Ismstr     Ish3n    Idrill                            P_Thick_Fail",
+        f"{_i(ishell)}{_i(0)}{_i(0)}{_i(0)}{b20}{_f(0.0)}",
+        "#                 Hm                  Hf                  Hr                  Dm                  Dn",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#        N   ISTRAIN               Thick              Ashear     Iskew    ITHICK     IPLAS",
+        f"{_i(nip)}{_i(istrain)}{_f(sec.t1)}{_f(0.0)}{_i(0)}{_i(0)}{_i(0)}",
+        "#                 Vx                  Vy                  Vz                 Phi                  Ip",
+        f"{_f(vx)}{_f(vy)}{_f(vz)}{_f(phi)}{' ' * 10}{_i(0)}",
+        HDR,
+    ]
+
+
+def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
+                     itetra10: int, istrain: int,
+                     refvec=(1.0, 0.0, 0.0), ip: int = 11,
+                     phi: float = 0.0) -> List[str]:
+    """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH) — the isotropic
+    /PROP/SOLID formulation plus a reference vector projected onto the element
+    r-s plane (Ip=11). Column layout from PROP/prop_p6_sol_orth.cfg
+    FORMAT(radioss2022)."""
+    isolid = _elform_to_isolid(sec.elform) if sec else 0
+    vx, vy, vz = refvec
+    b10 = " " * 10
+    lines = [
+        f"/PROP/TYPE6/{prop_id}",
+        title,
+        "#   Isolid    Ismstr               Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
+        f"{_i(isolid)}{_i(0)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        "#                 qa                  qb                   h",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",
+        f"{_f(vx)}{_f(vy)}{_f(vz)}{_i(0)}{_i(ip)}{_i(0)}",
+        "#                Phi                 Px                  Py                  Pz",
+        f"{_f(phi)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+    # Card 5 has Ihkt only for the physically-stabilized ISOLID 24 (and the
+    # /DEF_SOLID-default 0); other formulations read just deltaT_min + Istrain.
+    if isolid in (0, 24):
+        lines += ["#         deltaT_min   Istrain      Ihkt",
+                  f"{_f(0.0)}{_i(istrain)}{_i(0)}"]
+    else:
+        lines += ["#         deltaT_min   Istrain",
+                  f"{_f(0.0)}{_i(istrain)}"]
+    lines.append(HDR)
+    return lines
+
+
+def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
+    """Emit the /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) for each LAW128 part
+    assigned an orthotropic property id by _assign_ortho_props."""
+    if not state.ortho_prop_ids:
+        return []
+    shell_pids = {e.pid for e in state.shell_elems}
+    tet10_by_pid: Dict[int, bool] = defaultdict(bool)
+    solid_pids: Set[int] = set()
+    for e in state.solid_elems:
+        solid_pids.add(e.pid)
+        if len(e.nodes) == 10:
+            tet10_by_pid[e.pid] = True
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    lines: List[str] = []
+    for pid, prop_id in sorted(state.ortho_prop_ids.items()):
+        part = state.parts.get(pid)
+        secid = part_secids.get(pid, pid)
+        title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
+        if pid in shell_pids:
+            sec = state.sec_shells.get(secid) or SectionShell(secid, "", 2, 3, 0.0)
+            lines += _emit_prop_type9(prop_id, title, sec, state.is_implicit,
+                                      istrain, state)
+        elif pid in solid_pids:
+            sec = state.sec_solids.get(secid)
+            itetra10 = 1000 if tet10_by_pid.get(pid) else 0
+            lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain)
     return lines
 
 
