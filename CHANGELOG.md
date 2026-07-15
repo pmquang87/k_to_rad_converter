@@ -54,6 +54,11 @@ Prior history (before this changelog was introduced) is summarized in the
     + `Phi`), else falls back to global-X with a warning. Verified reading in the OpenRadioss
     starter (0 errors); LAW128 is a 2026-format law, so the `/BEGIN 2022` deck
     draws one cosmetic `WARNING 100211` but parses correctly.
+  - MAT_103 shift guard: fixed-format decks that OMIT the mandatory (but
+    `FLAG≥1`-ignored) card-2 `QR/CR/QX/CX` line shift every following card up by
+    one, silently leaking the Hill `F/G/H/L/M/N` into the hardening slots. The
+    handler now detects the fingerprint (`FLAG=1/2` + nonzero `QR/CR/QX/CX` +
+    all-zero `L/M/N`) and warns to insert the blank card-2 line.
 
 ### Changed
 

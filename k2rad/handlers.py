@@ -600,6 +600,30 @@ def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) ->
     v1, v2, v3 = g6(0), g6(1), g6(2)
     beta = g6(6)
 
+    # Shift guard. MAT_103 is fixed-format positional: card 2 (QR/CR/QX/CX) is
+    # MANDATORY as a physical line even though FLAG=1/2 makes its VALUES ignored
+    # (the yield then comes from LCSS). A deck that OMITS the blank card-2 line —
+    # a common hand-editing error when FLAG>=1 — shifts every following card up
+    # by one, so the Hill card (VK VM F G H L M N) is read as card 2 and its
+    # F/G/H/L/M/N leak into the hardening slots. The fingerprint: FLAG=1/2 with
+    # nonzero QR/CR/QX/CX AND all-zero L/M/N (the true L/M/N shifted out onto the
+    # AOPT card, which has no slots 6-8). Warn loudly — a silent shift produces a
+    # wrong material with no error.
+    if (flag in (1, 2)
+            and any(v != 0.0 for v in (qr1, cr1, qr2, cr2, qx1, cx1, qx2, cx2))
+            and hl == 0.0 and hm == 0.0 and hn == 0.0):
+        state.warn(
+            f"*MAT_ANISOTROPIC_VISCOPLASTIC mid={mid}: FLAG={flag} drives the "
+            f"yield from LCSS={lcss}, so the card-2 hardening line (QR/CR/QX/CX) "
+            "is ignored and should be blank — but NONZERO values were read there "
+            "while the Hill L/M/N came out zero. This is the signature of a "
+            "MISSING card-2 line (a common fixed-format error when FLAG>=1): every "
+            "card then shifts up one and the Hill F/G/H/L/M/N leak into the "
+            "QR/CR/QX/CX slots, silently corrupting the material. Insert a blank "
+            "card-2 line (eight zeros) between the card-1 line and the "
+            "'vk vm f g h l m n' line, then re-convert. If the QR/CR/QX/CX values "
+            "are intentional, note they are IGNORED under FLAG=1/2.")
+
     state.mat_aniso_visco[mid] = MatAnisoViscoplastic(
         mid=mid, title=title, rho=rho, E=E, nu=nu, sigy=sigy,
         flag=flag, lcss=lcss, alpha=alpha,

@@ -346,5 +346,37 @@ class Law128ViscosityTests(unittest.TestCase):
         self.assertTrue(any("Cowper-Symonds" in w for w in result.warnings))
 
 
+class Law128ShiftGuardTests(unittest.TestCase):
+    """A MAT_103 card that omits the mandatory card-2 (QR/CR/QX/CX) line shifts
+    every following card and leaks the Hill coefficients into the hardening
+    slots — the guard must catch that and stay quiet on a well-formed card."""
+
+    # card-2 line OMITTED (as in the real getriebekette.k) → shifted parse
+    SHIFTED = (
+        "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+        + _c(103, "1.0500E-9", 1800.0, 0.4, 0.0, 2, 103, 0.0) + "\n"
+        + _c(0.0, 0.0, 0.35434, 0.64566, 0.64566, 1.5, 1.5, 1.5) + "\n"   # really card 3
+        + _c(2.0, 0.0, 0, 1) + "\n"
+        + _c(0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+    )
+    # well-formed: blank card 2 present, Hill on card 3
+    OK = (
+        "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+        + _c(103, "1.0500E-9", 1800.0, 0.4, 0.0, 2, 103, 0.0) + "\n"
+        + _c(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"               # card 2 (blank)
+        + _c(0.0, 0.0, 0.35434, 0.64566, 0.64566, 1.5, 1.5, 1.5) + "\n"   # card 3
+        + _c(2.0, 0.0, 0, 1) + "\n"
+        + _c(0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+    )
+
+    def test_guard_fires_on_missing_card2(self):
+        result, _ = _convert(SOLID_DECK.format(MAT=self.SHIFTED))
+        self.assertTrue(any("MISSING card-2" in w for w in result.warnings))
+
+    def test_guard_silent_on_wellformed_card(self):
+        result, _ = _convert(SOLID_DECK.format(MAT=self.OK))
+        self.assertFalse(any("MISSING card-2" in w for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()
