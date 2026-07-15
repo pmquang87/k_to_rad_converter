@@ -372,7 +372,22 @@ class MatAnisoViscoplastic:
     hn: float
     fail: float = 0.0    # failure plastic strain (0 = none)
     numint: float = 0.0  # failed integration points before element deletion
-    aopt: float = 0.0    # material-axis option (reference-direction hint)
+    # Material-axis option + the axis-definition cards (5-6). AOPT selects which
+    # of these is meaningful; the writer maps them onto the /PROP reference
+    # direction (Vx/Vy/Vz + Phi): AOPT=2 → the global vector a, AOPT=3 → vector v
+    # rotated by BETA. AOPT=0 (element nodes) / 1 / 4 (point / cylindrical) have
+    # no single global vector and fall back to the default axis + a warning.
+    aopt: float = 0.0
+    a1: float = 0.0      # AOPT=2 global material-1 (a) vector
+    a2: float = 0.0
+    a3: float = 0.0
+    v1: float = 0.0      # AOPT=3/4 reference vector v
+    v2: float = 0.0
+    v3: float = 0.0
+    xp: float = 0.0      # AOPT=1/4 reference point P
+    yp: float = 0.0
+    zp: float = 0.0
+    beta: float = 0.0    # AOPT=3 rotation angle (degrees)
 
 
 @dataclass

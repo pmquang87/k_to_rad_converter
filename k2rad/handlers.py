@@ -588,6 +588,17 @@ def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) ->
     aopt   = to_float(f4[0]) if len(f4) > 0 else 0.0
     fail   = to_float(f4[1]) if len(f4) > 1 else 0.0
     numint = to_float(f4[2]) if len(f4) > 2 else 0.0
+    # Card5: XP YP ZP A1 A2 A3   Card6: V1 V2 V3 D1 D2 D3 BETA. Each field sits in
+    # a fixed slot (blank where the current AOPT does not use it), so read every
+    # slot unconditionally — the meaningful ones are non-blank for that AOPT.
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+    g5 = lambda i: to_float(f5[i]) if len(f5) > i else 0.0
+    xp, yp, zp = g5(0), g5(1), g5(2)
+    a1, a2, a3 = g5(3), g5(4), g5(5)
+    f6 = _card(raw, offset + 5, fixed=True, n=8, w=10)
+    g6 = lambda i: to_float(f6[i]) if len(f6) > i else 0.0
+    v1, v2, v3 = g6(0), g6(1), g6(2)
+    beta = g6(6)
 
     state.mat_aniso_visco[mid] = MatAnisoViscoplastic(
         mid=mid, title=title, rho=rho, E=E, nu=nu, sigy=sigy,
@@ -595,7 +606,8 @@ def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) ->
         qr1=qr1, cr1=cr1, qr2=qr2, cr2=cr2,
         qx1=qx1, cx1=cx1, qx2=qx2, cx2=cx2,
         vk=vk, vm=vm, r00=r00, r45=r45, r90=r90, hl=hl, hm=hm, hn=hn,
-        fail=fail, numint=numint, aopt=aopt)
+        fail=fail, numint=numint, aopt=aopt,
+        a1=a1, a2=a2, a3=a3, v1=v1, v2=v2, v3=v3, xp=xp, yp=yp, zp=zp, beta=beta)
 
 
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:

@@ -52,6 +52,7 @@ __all__ = [
     "_make_properties",
     "_emit_prop_beam",
     "_assign_ortho_props",
+    "_law128_ref_axis",
     "_emit_prop_type9",
     "_emit_prop_type6",
     "_emit_ortho_props",
@@ -818,11 +819,10 @@ def _assign_ortho_props(state: ConversionState) -> None:
         state.warn(
             "*MAT_ANISOTROPIC_VISCOPLASTIC → /MAT/LAW128 requires an orthotropic "
             f"property: synthesized /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) for "
-            f"part(s) {sorted(state.ortho_prop_ids)} with the material reference "
-            "direction defaulted to GLOBAL X (Vx=1,0,0; Phi=0). MAT_103's AOPT "
-            "axis definition is NOT mapped — set the correct orthotropy/build axis "
-            "(Vx/Vy/Vz + Phi on the /PROP) for your material, e.g. the print "
-            "build direction for an SLS part.")
+            f"part(s) {sorted(state.ortho_prop_ids)}. The orthotropy reference "
+            "direction is auto-mapped from the material AOPT where it is a global "
+            "vector (AOPT=2/3); other AOPT modes fall back to global X — see the "
+            "per-part notes below.")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -890,9 +890,32 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     return lines
 
 
+def _law128_ref_axis(mat) -> Tuple[Optional[Tuple[float, float, float]],
+                                   float, Optional[str]]:
+    """Map a *MAT_ANISOTROPIC_VISCOPLASTIC AOPT axis definition to a Radioss
+    orthotropy reference direction. Returns ``(vec, phi, note)`` where ``vec`` is
+    the material-1 direction for the /PROP Vx/Vy/Vz (``None`` → fall back to the
+    default axis), ``phi`` the extra in-plane rotation, and ``note`` a short
+    description for the warning. Only the two AOPT modes that reduce to a single
+    global vector are mapped: AOPT=2 (the global a-vector) and AOPT=3 (vector v
+    rotated by BETA). AOPT=0 (element nodes), 1 (point/radial) and 4 (cylindrical)
+    have no single global direction and return ``None``.
+    """
+    aopt = int(round(mat.aopt)) if abs(mat.aopt - round(mat.aopt)) < 1e-6 else -1
+    if aopt == 2 and any((mat.a1, mat.a2, mat.a3)):
+        return (mat.a1, mat.a2, mat.a3), 0.0, \
+            f"AOPT=2 global a-vector ({mat.a1:g}, {mat.a2:g}, {mat.a3:g})"
+    if aopt == 3 and any((mat.v1, mat.v2, mat.v3)):
+        return (mat.v1, mat.v2, mat.v3), mat.beta, \
+            (f"AOPT=3 vector v ({mat.v1:g}, {mat.v2:g}, {mat.v3:g})"
+             + (f" rotated by BETA={mat.beta:g}deg" if mat.beta else ""))
+    return None, 0.0, None
+
+
 def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
     """Emit the /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) for each LAW128 part
-    assigned an orthotropic property id by _assign_ortho_props."""
+    assigned an orthotropic property id by _assign_ortho_props, with the material
+    reference direction auto-mapped from the MAT_103 AOPT axis where possible."""
     if not state.ortho_prop_ids:
         return []
     shell_pids = {e.pid for e in state.shell_elems}
@@ -908,14 +931,33 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
     for pid, prop_id in sorted(state.ortho_prop_ids.items()):
         secid = part_secids.get(pid, pid)
         title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
+        part = state.parts.get(pid)
+        mat = state.mat_aniso_visco.get(part.mid) if part else None
+        vec, phi, note = _law128_ref_axis(mat) if mat else (None, 0.0, None)
+        if vec is not None:
+            refvec = vec
+            state.warn(
+                f"/PROP for LAW128 part {pid}: orthotropy reference direction "
+                f"auto-mapped from the material {note} → Vx/Vy/Vz="
+                f"({vec[0]:g}, {vec[1]:g}, {vec[2]:g})"
+                + (f", Phi={phi:g}" if phi else "") + ".")
+        else:
+            refvec, phi = (1.0, 0.0, 0.0), 0.0
+            reason = (f"AOPT={mat.aopt:g}" if mat else "the material")
+            state.warn(
+                f"/PROP for LAW128 part {pid}: {reason} axis definition has no "
+                "single global vector (element-node, point-radial or cylindrical "
+                "system) — reference direction defaulted to GLOBAL X (Vx=1,0,0). "
+                "Set Vx/Vy/Vz + Phi on the /PROP to your orthotropy/build axis.")
         if pid in shell_pids:
             sec = state.sec_shells.get(secid) or SectionShell(secid, "", 2, 3, 0.0)
             lines += _emit_prop_type9(prop_id, title, sec, state.is_implicit,
-                                      istrain, state)
+                                      istrain, state, refvec=refvec, phi=phi)
         elif pid in solid_pids:
             sec = state.sec_solids.get(secid)
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
-            lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain)
+            lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain,
+                                      refvec=refvec, phi=phi)
     return lines
 
 

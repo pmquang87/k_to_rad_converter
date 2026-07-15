@@ -48,9 +48,10 @@ Prior history (before this changelog was introduced) is summarized in the
     additive `VK·ε̇^VM` overstress is matched to LAW128's Cowper-Symonds
     `EPSP0/CP` at initial yield (a rate-table `LCSS` is used directly). Because
     every Radioss Hill law is orthotropic-only, each converted part is
-    repointed at a synthesized `/PROP/TYPE9` (shell) or `/PROP/TYPE6` (solid)
-    with the material reference direction defaulted to global-X (set the real
-    build/anisotropy axis on the `/PROP`). Verified reading in the OpenRadioss
+    repointed at a synthesized `/PROP/TYPE9` (shell) or `/PROP/TYPE6` (solid);
+    the orthotropy reference direction is auto-mapped from MAT_103's `AOPT`
+    when it is a global vector (`AOPT=2` → `Vx/Vy/Vz`, `AOPT=3` → `Vx/Vy/Vz`
+    + `Phi`), else falls back to global-X with a warning. Verified reading in the OpenRadioss
     starter (0 errors); LAW128 is a 2026-format law, so the `/BEGIN 2022` deck
     draws one cosmetic `WARNING 100211` but parses correctly.
 
