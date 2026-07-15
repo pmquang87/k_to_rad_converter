@@ -268,6 +268,63 @@ class Law128FlagAlphaTests(unittest.TestCase):
         self.assertIn("/FUNCT/500", starter)
 
 
+def _c(*vals):
+    """Format LS-DYNA fixed 10-column fields (blank = '')."""
+    return "".join(f"{v:>10}" for v in vals)
+
+
+class Law128AxisMappingTests(unittest.TestCase):
+    """MAT_103 AOPT axis definition → /PROP orthotropy reference direction."""
+
+    HEAD = (
+        "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+        + _c(1, "1.05E-9", 1800.0, 0.4, 35.0, 0.0, 0.0, 1.0) + "\n"
+        + _c(10.0, 50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+        + _c(0.0, 0.0, 1.35, 1.0, 0.75, 0.0, 0.0, 0.0) + "\n"
+    )
+
+    def _type6_vx_card(self, starter):
+        d = _block_lines(starter, "/PART/1")
+        prop_ref = int(d[1][0:10])
+        p = _block_lines(starter, f"/PROP/TYPE6/{prop_ref}")
+        # p: [title, Isolid, qa/qb/h, Vx/Vy/Vz/skew/Ip/Iorth, Phi/Px/Py/Pz, card5]
+        return p[3], p[4]
+
+    def test_aopt2_global_vector_maps_to_vxyz(self):
+        mat = (self.HEAD
+               + _c(2.0, 0.0, 0.0, 0.0) + "\n"                 # card4: AOPT=2
+               + _c("", "", "", 0.0, 0.0, 1.0) + "\n"          # card5: a = (0,0,1)
+               + _c("", "", "", 1.0, 0.0, 0.0) + "\n")         # card6: d
+        result, starter = _convert(SOLID_DECK.format(MAT=mat))
+        vx_card, _ = self._type6_vx_card(starter)
+        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
+        self.assertEqual(vxyz, [0.0, 0.0, 1.0])                # build direction z
+        self.assertTrue(any("auto-mapped" in w and "AOPT=2" in w
+                            for w in result.warnings))
+
+    def test_aopt3_vector_and_beta(self):
+        mat = (self.HEAD
+               + _c(3.0, 0.0, 0.0, 0.0) + "\n"                 # card4: AOPT=3
+               + _c("", "", "", 0.0, 0.0, 0.0) + "\n"          # card5 (unused)
+               + _c(0.0, 1.0, 0.0, "", "", "", 30.0) + "\n")   # card6: v=(0,1,0) BETA=30
+        result, starter = _convert(SOLID_DECK.format(MAT=mat))
+        vx_card, phi_card = self._type6_vx_card(starter)
+        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
+        self.assertEqual(vxyz, [0.0, 1.0, 0.0])
+        self.assertAlmostEqual(float(phi_card[0:20]), 30.0)    # Phi = BETA
+        self.assertTrue(any("AOPT=3" in w and "auto-mapped" in w
+                            for w in result.warnings))
+
+    def test_aopt0_falls_back_to_global_x(self):
+        mat = (self.HEAD
+               + _c(0.0, 0.0, 0.0, 0.0) + "\n")                # card4: AOPT=0 (nodes)
+        result, starter = _convert(SOLID_DECK.format(MAT=mat))
+        vx_card, _ = self._type6_vx_card(starter)
+        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
+        self.assertEqual(vxyz, [1.0, 0.0, 0.0])                # default
+        self.assertTrue(any("defaulted to GLOBAL X" in w for w in result.warnings))
+
+
 class Law128ViscosityTests(unittest.TestCase):
     """VK/VM additive overstress → Cowper-Symonds EPSP0/CP matched at yield."""
 

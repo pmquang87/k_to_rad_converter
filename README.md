@@ -125,9 +125,13 @@ Cowper-Symonds factor at the initial yield (`CP=1/VM`, `EPSP0=(SIGY/VK)^(1/VM)`)
 — a rate-dependent `LCSS` table is used directly instead. Every Radioss Hill law
 is **orthotropic-only**, so each converted part is repointed from the isotropic
 `/PROP/SHELL|SOLID` onto a synthesized `/PROP/TYPE9` (shell) or `/PROP/TYPE6`
-(solid); the material reference direction defaults to global-X (`Vx=1,0,0`,
-`Phi=0`) — **set the real orthotropy/build axis on the `/PROP`** (MAT_103 `AOPT`
-is not mapped). LAW128 is a 2026-format law: the deck stays at `/BEGIN 2022` and
+(solid). The orthotropy reference direction is **auto-mapped from MAT_103's
+`AOPT`** when it is a global vector — `AOPT=2` (the global a-vector) → `Vx/Vy/Vz`,
+`AOPT=3` (vector v + `BETA`) → `Vx/Vy/Vz` + `Phi` — which covers a straight
+build/fibre axis (e.g. the SLS print direction). The element-local (`AOPT=0`),
+point-radial (`AOPT=1`) and cylindrical (`AOPT=4`) systems have no single global
+vector and fall back to global-X with a warning (set `Vx/Vy/Vz`+`Phi` on the
+`/PROP` manually). LAW128 is a 2026-format law: the deck stays at `/BEGIN 2022` and
 LAW128 reads correctly but draws one cosmetic starter `WARNING 100211`
 ("unsupported option in format < 2026"). (A prior isotropic reduction to
 `/MAT/LAW36` — dropping the Hill anisotropy — is available if LAW128 proves
