@@ -115,6 +115,23 @@ warned + skipped rather than emitted on a wrong axis)
 `*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44` (`b` = plastic hardening modulus
 E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)
+`*MAT_ANISOTROPIC_VISCOPLASTIC` (103) → `/MAT/LAW128` (HILL_VISC_PLAST) — the
+near 1:1 Radioss counterpart. The Voce (`QR/CR`) + kinematic (`QX/CX`)
+hardening and the Hill surface (shell Lankford `R00/R45/R90` or brick
+`F/G/H/L/M/N`) carry over verbatim; the iso/kin split becomes `CHARD` (`1−ALPHA`
+for the `FLAG=1` fit, else the kinematic fraction `QX/(QR+QX)`); and MAT_103's
+*additive* viscous overstress `VK·ε̇^VM` is matched to LAW128's *multiplicative*
+Cowper-Symonds factor at the initial yield (`CP=1/VM`, `EPSP0=(SIGY/VK)^(1/VM)`)
+— a rate-dependent `LCSS` table is used directly instead. Every Radioss Hill law
+is **orthotropic-only**, so each converted part is repointed from the isotropic
+`/PROP/SHELL|SOLID` onto a synthesized `/PROP/TYPE9` (shell) or `/PROP/TYPE6`
+(solid); the material reference direction defaults to global-X (`Vx=1,0,0`,
+`Phi=0`) — **set the real orthotropy/build axis on the `/PROP`** (MAT_103 `AOPT`
+is not mapped). LAW128 is a 2026-format law: the deck stays at `/BEGIN 2022` and
+LAW128 reads correctly but draws one cosmetic starter `WARNING 100211`
+("unsupported option in format < 2026"). (A prior isotropic reduction to
+`/MAT/LAW36` — dropping the Hill anisotropy — is available if LAW128 proves
+unsuitable for a given model.)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
 `*MAT_SIMPLIFIED_JOHNSON_COOK` → `/MAT/LAW36` (σ = A + B·εpⁿ sampled into an
 auto-generated yield table, capped at `SIGMAX`; a nonzero `C` converts the

@@ -8,6 +8,7 @@ from ..state import (
     MatElastic,
     MatPlasTAB,
     MatPlasKin,
+    MatAnisoViscoplastic,
     MatRigid,
     MatNull,
     MatPowerLaw,
@@ -40,6 +41,7 @@ __all__ = [
     "_wrap_cells",
     "_emit_mat_law36",
     "_emit_mat_law44",
+    "_emit_mat_law128",
     "_emit_mat_law36_powerlaw",
     "_emit_mat_law76",
     "_emit_mat_law50",
@@ -67,6 +69,8 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36(mat, state)
     for mat in state.mat_plas_kin.values():
         lines += _emit_mat_law44(mat, state)
+    for mat in state.mat_aniso_visco.values():
+        lines += _emit_mat_law128(mat, state)
     for mat in state.mat_rigid.values():
         lines += _emit_mat_elast_for_rigid(mat)
     # A *MAT_NULL that carries a companion *EOS_* becomes a hydro /MAT/LAW6 (with
@@ -432,6 +436,123 @@ def _emit_mat_law44(mat: MatPlasKin, state: ConversionState) -> List[str]:
     ]
     if epmax > 0.0:
         lines += _emit_fail_johnson_all_layers(mat.mid, epmax, state)
+    return lines
+
+
+def _emit_mat_law128(mat: MatAnisoViscoplastic, state: ConversionState) -> List[str]:
+    """*MAT_ANISOTROPIC_VISCOPLASTIC (MAT_103) → /MAT/LAW128 (HILL_VISC_PLAST).
+
+    Column layout from MAT/Law128_hill_visc_plast.cfg FORMAT(radioss2026).
+    LAW128 mirrors MAT_103 almost 1:1, so E/nu/SIGY and the Voce (QR/CR) and
+    kinematic (QX/CX) parameters carry over verbatim. Three fields need mapping:
+
+      * CHARD (iso/kin split, 0=iso .. 1=kin): from the FLAG=1 fit split
+        (CHARD = 1 − ALPHA) or, when explicit kinematic terms are given, the
+        kinematic fraction QX/(QR+QX). LAW128 applies CHARD to the *combined*
+        hardening, so it reproduces MAT_103's iso/kin magnitudes but blends the
+        per-term saturation rates — verify the cyclic response.
+      * The viscous overstress σ_v = VK·ε̇^VM (additive in MAT_103) is
+        approximated by LAW128's *multiplicative* Cowper-Symonds factor
+        1 + (ε̇/EPSP0)^(1/CP) matched at the initial yield: CP = 1/VM,
+        EPSP0 = (SIGY/VK)^(1/VM). A tabulated LCSS carries the rate dependence
+        directly (tab_ID) and then VK/VM are ignored.
+      * The Hill surface: MAT_103 gives shell Lankford R00/R45/R90 OR brick
+        F/G/H/L/M/N in the same card-3 slots. In Lankford mode LAW128 computes
+        F/G/H/N from R00/R45/R90 but leaves L, M untouched, so the writer
+        supplies the von Mises L=M=N=1.5 to keep transverse shear non-degenerate
+        on solids. In brick mode (L/M/N given) R00=R45=R90=0 tells LAW128 to use
+        F/G/H/L/M/N directly.
+
+    LAW128 is orthotropic-only; the companion /PROP/TYPE9|TYPE6 is emitted by
+    writer.mesh (see _assign_ortho_props).
+    """
+    # iso/kin split → CHARD
+    if mat.flag == 1 and mat.lcss > 0:
+        chard = min(max(1.0 - mat.alpha, 0.0), 1.0)
+    elif abs(mat.qx1) + abs(mat.qx2) > 0.0:
+        kin = abs(mat.qx1) + abs(mat.qx2)
+        iso = abs(mat.qr1) + abs(mat.qr2)
+        chard = min(max(kin / (iso + kin), 0.0), 1.0) if (iso + kin) > 0.0 else 0.0
+        state.warn(
+            f"*MAT_ANISOTROPIC_VISCOPLASTIC {mat.mid} → /MAT/LAW128: kinematic "
+            f"hardening present (QX1={mat.qx1:g}, QX2={mat.qx2:g}); the iso/kin "
+            f"split CHARD was set to {chard:.3g} (kinematic fraction of the total "
+            "hardening). LAW128 applies CHARD to the combined QR+QX hardening, so "
+            "the iso/kin magnitudes match MAT_103 but the per-term saturation "
+            "rates are blended — check the cyclic/Bauschinger response.")
+    else:
+        chard = 0.0
+
+    # viscous overstress VK·ε̇^VM → Cowper-Symonds EPSP0/CP (unless a rate table
+    # LCSS is given, which LAW128 uses directly)
+    tab_id = mat.lcss if (mat.flag in (1, 2) and mat.lcss > 0) else 0
+    epsp0, cp = 0.0, 0.0
+    if tab_id == 0 and mat.vk > 0.0 and mat.vm > 0.0 and mat.sigy > 0.0:
+        cp = 1.0 / mat.vm
+        epsp0 = (mat.sigy / mat.vk) ** (1.0 / mat.vm)
+        state.warn(
+            f"*MAT_ANISOTROPIC_VISCOPLASTIC {mat.mid} → /MAT/LAW128: MAT_103's "
+            f"additive viscous overstress VK·ε̇^VM (VK={mat.vk:g}, VM={mat.vm:g}) "
+            f"was matched at the initial yield by LAW128's Cowper-Symonds factor "
+            f"CP={cp:.4g}, EPSP0={epsp0:.4g}. The forms differ (additive vs "
+            "multiplicative), so the overstress diverges from MAT_103 at large "
+            "plastic strain — verify, or supply LCSS as a strain-rate table.")
+    elif tab_id == 0 and mat.vk != 0.0:
+        state.warn(
+            f"*MAT_ANISOTROPIC_VISCOPLASTIC {mat.mid} → /MAT/LAW128: the viscous "
+            f"overstress (VK={mat.vk:g}, VM={mat.vm:g}) could not be mapped to a "
+            "Cowper-Symonds factor (needs VK>0, VM>0, SIGY>0) — rate dependence "
+            "DROPPED. Provide a strain-rate LCSS table instead.")
+
+    # Hill surface: shell Lankford vs brick F/G/H/L/M/N
+    brick_mode = any(v != 0.0 for v in (mat.hl, mat.hm, mat.hn))
+    if brick_mode:
+        r00 = r45 = r90 = 0.0                      # 0 → LAW128 uses F/G/H/L/M/N
+        ff, gg, hh = mat.r00, mat.r45, mat.r90
+        ll = mat.hl or 1.5
+        mm = mat.hm or 1.5
+        nn = mat.hn or 1.5
+    else:
+        r00 = mat.r00 or 1.0
+        r45 = mat.r45 or 1.0
+        r90 = mat.r90 or 1.0
+        ff = gg = hh = 0.0                          # computed from Lankford
+        ll = mm = nn = 1.5                          # von Mises transverse shear
+
+    gap = " " * 10
+    lines = [
+        f"/MAT/LAW128/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              Rho_i",
+        f"{_f(mat.rho)}",
+        "#                  E                  NU                SIGY               CHARD",
+        f"{_f(mat.E)}{_f(mat.nu)}{_f(mat.sigy)}{_f(chard)}",
+        "#   tab_ID                        Fscale              Xscale",
+        f"{_i(tab_id)}{gap}{_f(1.0)}{_f(1.0)}",
+        "#                QR1                 CR1                 QR2                 CR2",
+        f"{_f(mat.qr1)}{_f(mat.cr1)}{_f(mat.qr2)}{_f(mat.cr2)}",
+        "#                QX1                 CX1                 QX2                 CX2",
+        f"{_f(mat.qx1)}{_f(mat.cx1)}{_f(mat.qx2)}{_f(mat.cx2)}",
+        "#             EPSP0                  CP",
+        f"{_f(epsp0)}{_f(cp)}",
+        "#                R00                 R45                 R90",
+        f"{_f(r00)}{_f(r45)}{_f(r90)}",
+        "#                  F                   G                   H",
+        f"{_f(ff)}{_f(gg)}{_f(hh)}",
+        "#                  L                   M                   N",
+        f"{_f(ll)}{_f(mm)}{_f(nn)}",
+        HDR,
+    ]
+    fail = mat.fail if 0.0 < mat.fail < 1e19 else 0.0
+    if fail > 0.0:
+        lines += _emit_fail_johnson_all_layers(mat.mid, fail, state)
+        if mat.numint > 0.0:
+            state.warn(
+                f"*MAT_ANISOTROPIC_VISCOPLASTIC {mat.mid}: NUMINT={mat.numint:g} "
+                "(failed integration points before element deletion) is "
+                "approximated by /FAIL/JOHNSON Ifail_sh=2 (delete when ALL "
+                "through-thickness points fail); the exact IP-count threshold is "
+                "not reproduced.")
     return lines
 
 
