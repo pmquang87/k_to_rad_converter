@@ -906,7 +906,6 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
                    for pid, p in state.parts.items()}
     lines: List[str] = []
     for pid, prop_id in sorted(state.ortho_prop_ids.items()):
-        part = state.parts.get(pid)
         secid = part_secids.get(pid, pid)
         title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
         if pid in shell_pids:
