@@ -5644,16 +5644,16 @@ class TiedContactTests(unittest.TestCase):
 MAT187_K = """*KEYWORD
 *MAT_187_TITLE
 Iglidur I3-PL SAMP (approx - see flags)
-$#     mid        ro                             e        nu                numint
-       187 1.0500E-9                      1800.000     0.400                     0
-$#  tab_idt   tab_idc   tab_ids                nu_p  fct_idpr
-       761       762       763               0.400         0
-$#  fct_id1    epfail    deprpt  lcid_tri   lcid_lc
+$#     mid        ro      bulk      gmod      emod       nue    rbcfac    numint
+       187 1.0500E-9       0.0       0.0    1800.0       0.4       0.0         0
+$#  lcid-t    lcid-c    lcid-s    lcid-b      nuep    lcid-p         -    incdam
+       761       762       763         0       0.4         0                   0
+$#  lcid_d    epfail    deprpt  lcid-tri   lcid_lc
          0       0.0       0.0         0         0
-$#                                       iconv
-                                             1
-$#                          asrate
-                               0.0
+$#   miter      mips         -   incfail     iconv      asaf         -      nhsv
+         0         0                   0         1         0                   0
+$#  lcemod      beta      filt
+         0       0.0       0.0
 *DEFINE_CURVE
        761         0       1.0       1.0       0.0       0.0         0
                  0.0                35.0
@@ -5730,6 +5730,180 @@ class Mat187SampTests(unittest.TestCase):
         _, starter = self._convert(MAT187_K.replace("*MAT_187_TITLE",
                                                     "*MAT_SAMP-1_TITLE"))
         self.assertIn("/MAT/LAW76/187", starter)
+
+    CARD1 = ("       187 1.0500E-9       0.0       0.0    1800.0"
+             "       0.4       0.0         0")
+    CARD2 = ("       761       762       763         0       0.4"
+             "         0                   0")
+    CARD3 = "         0       0.0       0.0         0         0"
+    CARD4 = ("         0         0                   0         1"
+             "         0                   0")
+
+    def _mutated(self, *pairs):
+        # guard against silent no-op replaces: a fixture tweak that stops the
+        # old-string matching would otherwise leave the base deck in place and
+        # let the mutation test pass vacuously
+        deck = MAT187_K
+        for old, new in pairs:
+            self.assertIn(old, deck)
+            deck = deck.replace(old, new)
+        return deck
+
+    def test_fused_mid_ro_parses_fixed_width(self):
+        # Real-world card where RO fills its whole 10-char field and fuses
+        # with MID ("1871.05000E-9") — a free split shifted every value and
+        # emitted /MAT/LAW76/0 with zero density (starter ERROR 683).
+        fused = ("       1871.05000E-9       0.0       0.0    1800.0"
+                 "       0.4       0.0         0")
+        _, starter = self._convert(self._mutated((self.CARD1, fused)))
+        self.assertIn("/MAT/LAW76/187", starter)
+        self.assertNotIn("/MAT/LAW76/0", starter)
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1800\b")
+
+    def test_e_nu_derived_from_bulk_gmod_when_emod_blank(self):
+        # E = 9KG/(3K+G) = 9·1500·643/5143 ≈ 1687.8; ν = (3K−2G)/(6K+2G) ≈ 0.3125
+        kg = ("       187 1.0500E-9    1500.0     643.0       0.0"
+              "       0.0       0.0         0")
+        # NUEP 0.4 > derived ν 0.3125 keeps the Remark-6 min() out of the way
+        result, starter = self._convert(self._mutated((self.CARD1, kg)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        self.assertRegex(block, r"1687\.8")
+        self.assertRegex(block, r"0\.31246")
+        self.assertTrue(any("derived E" in w for w in result.warnings))
+
+    def test_comma_free_format_official_card(self):
+        card1 = "187,1.05e-9,0,0,1800.0,0.4,0,0"
+        _, starter = self._convert(self._mutated((self.CARD1, card1)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1800\b")
+
+    def test_wide_spaced_free_format_straddling_slices(self):
+        # Free-format tokens that straddle the 10-char slice boundaries
+        # ("1.0500E-9" → slices "1.0500" + "E-9") pass _card's internal-
+        # whitespace check; the numeric-junk check must force a free split —
+        # otherwise rho comes out 1e9× too big with zero warnings.
+        card1 = "     187      1.0500E-9       1500.0    643.0"
+        result, starter = self._convert(self._mutated((self.CARD1, card1)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1687\.8")
+
+    def test_tab_delimited_free_format_card(self):
+        card1 = "187\t1.05e-9\t0\t0\t1800.0\t0.4\t0\t0"
+        _, starter = self._convert(self._mutated((self.CARD1, card1)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        self.assertIn("1.050000E-09", block)
+        self.assertRegex(block, r"1800\b")
+
+    def test_zero_density_warns_error_683(self):
+        blank_ro = ("       187                 0.0       0.0    1800.0"
+                    "       0.4       0.0         0")
+        result, _ = self._convert(self._mutated((self.CARD1, blank_ro)))
+        self.assertTrue(any("683" in w for w in result.warnings))
+
+    def test_zero_modulus_warns(self):
+        no_e = ("       187 1.0500E-9       0.0       0.0       0.0"
+                "       0.0       0.0         0")
+        result, _ = self._convert(self._mutated((self.CARD1, no_e)))
+        self.assertTrue(any("elastic modulus" in w for w in result.warnings))
+
+    def test_legacy_condensed_card_gets_breadcrumb(self):
+        # The pre-2026-07 handler assumed a condensed "mid ro e nu numint"
+        # layout. Such a card read as the official layout lands E in BULK and
+        # ν in GMOD, so the derived ν comes out ≈0.5 — the warning must point
+        # at the legacy layout as the likely cause.
+        condensed = ("       187 1.0500E-9    1800.0       0.4         0")
+        result, _ = self._convert(self._mutated((self.CARD1, condensed)))
+        self.assertTrue(any("legacy condensed" in w for w in result.warnings))
+
+    def test_nuep_blank_reads_as_zero_and_lowers_elastic_nu(self):
+        # LS-DYNA reads a blank NUEP as 0.0 (strongly dilatant flow), and per
+        # MAT_187 Remark 6 the effective elastic ν becomes min(NUE, NUEP)=0.
+        blank_nuep = ("       761       762       763         0          "
+                      "         0                   0")
+        result, starter = self._convert(self._mutated((self.CARD2, blank_nuep)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        nu_line = block.split("#                  E", 1)[1].splitlines()[1]
+        self.assertEqual(nu_line.split()[1], "0")
+        nu_p_line = block.split("#               Nu_p", 1)[1].splitlines()[1]
+        self.assertEqual(nu_p_line.split()[0], "0")
+        self.assertTrue(any("NUEP blank" in w for w in result.warnings))
+
+    def test_remark6_lowers_elastic_nu_to_nuep(self):
+        lower = self.CARD2.replace("       0.4", "       0.3")
+        result, starter = self._convert(self._mutated((self.CARD2, lower)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        nu_line = block.split("#                  E", 1)[1].splitlines()[1]
+        self.assertEqual(nu_line.split()[1], "0.3")
+        self.assertTrue(any("Remark 6" in w for w in result.warnings))
+
+    def test_deprpt_increment_becomes_absolute_rupture_strain(self):
+        # DYNA: rupture at EPFAIL+DEPRPT; LAW76 Epsilon_r_p is absolute.
+        card3 = "         0       0.6      0.05         0         0"
+        _, starter = self._convert(self._mutated((self.CARD3, card3)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        eps = block.split("#        Epsilon_f_p", 1)[1].splitlines()[1].split()
+        self.assertEqual([float(x) for x in eps], [0.6, 0.65])
+
+    def test_epfail_without_deprpt_ruptures_just_past_epfail(self):
+        # DYNA with DEPRPT blank ruptures AT EPFAIL; Epsilon_r_p must sit just
+        # above Epsilon_f_p (a raw 0 would let the starter default EPSR=2*EPSF,
+        # a fade zone the DYNA model does not have).
+        card3 = "         0       0.6       0.0         0         0"
+        _, starter = self._convert(self._mutated((self.CARD3, card3)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        eps = block.split("#        Epsilon_f_p", 1)[1].splitlines()[1].split()
+        f, r = (float(x) for x in eps)
+        self.assertEqual(f, 0.6)
+        self.assertGreater(r, f)
+        self.assertLess(r, f * 1.01)
+
+    def test_lcid_d_with_epfail_warns_mutual_exclusivity(self):
+        card3 = "       764       0.6      0.05         0         0"
+        result, _ = self._convert(self._mutated((self.CARD3, card3)))
+        self.assertTrue(any("mutually exclusive" in w for w in result.warnings))
+
+    def test_negative_epfail_curve_convention_dropped(self):
+        # EPFAIL<0 references an EPFAIL-vs-strain-rate curve in LS-DYNA; a
+        # literal negative Epsilon_f_p would give negative damage (stress
+        # amplification) in the LAW76 engine.
+        card3 = "         0    -101.0       0.0         0         0"
+        result, starter = self._convert(self._mutated((self.CARD3, card3)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        eps = block.split("#        Epsilon_f_p", 1)[1].splitlines()[1].split()
+        self.assertEqual([float(x) for x in eps], [0.0, 0.0])
+        self.assertTrue(any("negative" in w.lower() for w in result.warnings))
+
+    def test_incfail_minus_one_disables_erosion(self):
+        card3 = "         0       0.6      0.05         0         0"
+        card4 = ("         0         0                  -1         1"
+                 "         0                   0")
+        result, starter = self._convert(
+            self._mutated((self.CARD3, card3), (self.CARD4, card4)))
+        block = starter.split("/MAT/LAW76/187", 1)[1]
+        eps = block.split("#        Epsilon_f_p", 1)[1].splitlines()[1].split()
+        self.assertEqual([float(x) for x in eps], [0.0, 0.0])
+        self.assertTrue(any("INCFAIL" in w for w in result.warnings))
+
+    def test_incdam_and_rbcfac_warn_unmapped(self):
+        card1 = self.CARD1.replace("       0.0         0",
+                                   "       1.5         0")   # RBCFAC=1.5
+        card2 = self.CARD2.replace("                   0",
+                                   "                   1")   # INCDAM=1
+        result, _ = self._convert(
+            self._mutated((self.CARD1, card1), (self.CARD2, card2)))
+        warnings = " ".join(result.warnings)
+        self.assertIn("RBCFAC", warnings)
+        self.assertIn("INCDAM", warnings)
+
+    def test_unmapped_nonzero_fields_warn(self):
+        with_lcid_b = ("       761       762       763       764       0.4"
+                       "         0                   0")
+        result, _ = self._convert(self._mutated((self.CARD2, with_lcid_b)))
+        self.assertTrue(any("LCID-B" in w for w in result.warnings))
 
 
 GISSMO_K = """*KEYWORD

@@ -2951,54 +2951,184 @@ def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
                                           mrr, mss, mtt, nf)
 
 
+def _num_ok(s: str) -> bool:
+    """True if *s* parses as a number (Fortran exponent spellings included)."""
+    v = to_float(s, default=float("nan"))
+    return v == v
+
+
+def _samp_card(raw: List[str], idx: int) -> List[str]:
+    """Fixed-width card read hardened against free-format lines that slice
+    cleanly: a wide-spaced free card can straddle the 10-char boundaries
+    ("1.0500E-9" → slices "1.0500" + "E-9") without tripping _card's
+    internal-whitespace fallback, silently corrupting every value (a 1e9×
+    density error that passes every downstream guard). Non-numeric junk in a
+    slice is the tell — retry a free split when every free token is numeric.
+    Also rescues tab-delimited cards (_card's fallback tests literal spaces)."""
+    f = _card(raw, idx, fixed=True)
+    if f and any(x and not _num_ok(x) for x in f):
+        tokens = parse_free(raw[idx]) if idx < len(raw) else []
+        if tokens and all(t == "" or _num_ok(t) for t in tokens):
+            return tokens + [""] * max(0, 8 - len(tokens))
+    return f
+
+
 def handle_mat_187(block: Block, state: ConversionState) -> None:
     """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1 polymer).
 
-    Reads the classic SAMP-1 card layout (mid ro e nu numint / tab_idt tab_idc
-    tab_ids nu_p fct_idpr / fct_id1 epfail deprpt lcid_tri lcid_lc / iconv /
-    asrate) — the same field order Radioss LAW76 uses, so the map is 1:1. The
-    three yield curves (tab_idt/c/s) must become /TABLE cards, so their ids are
-    registered in state.law76_table_ids. Free-field parsing is used because these
-    decks (often tool-generated to target LAW76) rarely honour strict columns.
+    Official manual card layout (what LS-PrePost exports):
+      Card1: MID RO BULK GMOD EMOD NUE RBCFAC NUMINT
+      Card2: LCID-T LCID-C LCID-S LCID-B NUEP LCID-P - INCDAM
+      Card3: LCID-D EPFAIL DEPRPT LCID-TRI LCID-LC
+      Card4: MITER MIPS - INCFAIL ICONV ASAF - NHSV
+      Card5: LCEMOD BETA FILT
+    LAW76 wants E/ν directly: EMOD/NUE when given, else derived from BULK+GMOD
+    (E = 9KG/(3K+G), ν = (3K−2G)/(6K+2G)); MAT_187 Remark 6 then lowers the
+    effective elastic ν to min(NUE, NUEP). Cards are parsed fixed-width because
+    RO regularly fills its whole 10-char field and fuses with MID
+    ("1871.05000E-9") — a free split shifts every value and emits
+    /MAT/LAW76/0 with zero density (starter ERROR 683). LCID-D is SAMP's damage
+    -vs-plastic-strain curve = LAW76 fct_ID1; LCID-P is its plastic-Poisson
+    -ratio-vs-plastic-strain curve = LAW76 fct_IDpr (both stay /FUNCT).
+    DEPRPT is the plastic-strain INCREMENT from failure to rupture, while
+    LAW76's Epsilon_r_p is ABSOLUTE — the sum is emitted. The three yield
+    curves (LCID-T/C/S) must become /TABLE cards, so their ids are registered
+    in state.law76_table_ids.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
 
-    def field(idx, pos, conv, default):
-        f = _card(raw, idx, fixed=False)
-        return conv(f[pos]) if len(f) > pos else default
-
-    # Card1: mid ro e nu numint
-    f1 = _card(raw, offset, fixed=False)
-    if not f1:
+    # Card1: MID RO BULK GMOD EMOD NUE RBCFAC NUMINT
+    f1 = _samp_card(raw, offset)
+    if not f1 or not f1[0]:
         state.warn("*MAT_187: empty material card – skipped")
         return
-    mid = to_int(f1[0])
-    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
-    E   = to_float(f1[2]) if len(f1) > 2 else 0.0
-    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
-    # Card2: tab_idt tab_idc tab_ids nu_p fct_idpr
-    tab_idt  = field(offset + 1, 0, to_int,   0)
-    tab_idc  = field(offset + 1, 1, to_int,   0)
-    tab_ids  = field(offset + 1, 2, to_int,   0)
-    nu_p     = field(offset + 1, 3, to_float, nu)
-    fct_idpr = field(offset + 1, 4, to_int,   0)
-    # Card3: fct_id1 epfail deprpt lcid_tri lcid_lc
-    fct_id1  = field(offset + 2, 0, to_int,   0)
-    epfail   = field(offset + 2, 1, to_float, 0.0)
-    deprpt   = field(offset + 2, 2, to_float, 0.0)
-    # Card4: iconv (single value) — parse_free directly (a lone value would be
-    # mis-slotted by the fixed-width fallback)
-    c4 = parse_free(raw[offset + 3]) if offset + 3 < len(raw) else []
-    iconv = to_int(c4[-1]) if c4 else 1
-    # Card5: asrate (single value, optional)
-    c5 = parse_free(raw[offset + 4]) if offset + 4 < len(raw) else []
-    asrate = to_float(c5[-1]) if c5 else 0.0
+    mid    = to_int(f1[0])
+    rho    = to_float(f1[1]) if len(f1) > 1 else 0.0
+    bulk   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    gmod   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    emod   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    nue    = to_float(f1[5]) if len(f1) > 5 else 0.0
+    rbcfac = to_float(f1[6]) if len(f1) > 6 else 0.0
+    if mid <= 0:
+        state.warn(f"*MAT_187 '{title}': MID parsed as {mid} — unreadable "
+                   "(shifted or fused fields?); material skipped. A /MAT id "
+                   "of 0 would fail the starter (ERROR 683).")
+        return
+    # Card2: LCID-T LCID-C LCID-S LCID-B NUEP LCID-P - INCDAM
+    f2 = _samp_card(raw, offset + 1)
+    tab_idt = to_int(f2[0]) if f2 else 0
+    tab_idc = to_int(f2[1]) if len(f2) > 1 else 0
+    tab_ids = to_int(f2[2]) if len(f2) > 2 else 0
+    lcid_b  = to_int(f2[3]) if len(f2) > 3 else 0
+    if len(f2) > 4 and f2[4]:
+        nu_p = to_float(f2[4])
+    else:
+        # DYNA reads a blank NUEP as 0.0 = strongly dilatant plastic flow
+        # (there is no documented default); substituting anything else would
+        # silently change the volumetric plastic response.
+        nu_p = 0.0
+        state.warn(f"*MAT_187 {mid}: NUEP blank — LS-DYNA treats it as 0.0 "
+                   "(strongly dilatant plastic flow); Nu_p=0 emitted. Set "
+                   "NUEP explicitly if that is not intended.")
+    fct_idpr = to_int(f2[5]) if len(f2) > 5 else 0
+    incdam   = to_int(f2[7]) if len(f2) > 7 else 0
+    # Card3: LCID-D EPFAIL DEPRPT LCID-TRI LCID-LC
+    f3 = _samp_card(raw, offset + 2)
+    fct_id1  = to_int(f3[0])   if f3 else 0
+    epfail   = to_float(f3[1]) if len(f3) > 1 else 0.0
+    deprpt   = to_float(f3[2]) if len(f3) > 2 else 0.0
+    lcid_tri = to_int(f3[3])   if len(f3) > 3 else 0
+    lcid_lc  = to_int(f3[4])   if len(f3) > 4 else 0
+    # Negative LCID-D/EPFAIL/DEPRPT are LS-DYNA curve-reference/ASSR
+    # conventions (EPFAIL vs strain rate, DEPRPT vs triaxiality, ASSR
+    # recalibration). None is representable in LAW76, and a literal negative
+    # Epsilon would make the engine's DMG=(PLA-EPSF)/(EPSR-EPSF) negative —
+    # post-failure stress AMPLIFICATION instead of fade-out.
+    if fct_id1 < 0 or epfail < 0.0 or deprpt < 0.0:
+        state.warn(f"*MAT_187 {mid}: negative LCID-D/EPFAIL/DEPRPT are "
+                   "LS-DYNA curve/ASSR conventions with no /MAT/LAW76 "
+                   "counterpart — dropped (no damage/failure from these "
+                   "fields).")
+        fct_id1 = max(fct_id1, 0)
+        epfail  = max(epfail, 0.0)
+        deprpt  = max(deprpt, 0.0)
+    # Card4: MITER MIPS - INCFAIL ICONV ASAF - NHSV (solver numerics; only
+    # ICONV has a LAW76 counterpart — blank keeps LAW76's convexity default 1)
+    f4 = _samp_card(raw, offset + 3)
+    incfail = to_int(f4[3]) if len(f4) > 3 else 0
+    iconv   = to_int(f4[4]) if len(f4) > 4 and f4[4] else 1
+    if incfail == -1 and (epfail > 0.0 or deprpt > 0.0):
+        state.warn(f"*MAT_187 {mid}: INCFAIL=-1 deactivates the failure "
+                   "model in LS-DYNA — EPFAIL/DEPRPT dropped so the converted "
+                   "material does not erode either.")
+        epfail, deprpt = 0.0, 0.0
+    # Card5: LCEMOD BETA FILT — damage-coupled unloading modulus and strain-
+    # rate filtering; no LAW76 counterpart (Fsmooth/Fcut keep their defaults)
+    f5 = _samp_card(raw, offset + 4)
+    lcemod = to_int(f5[0])   if f5 else 0
+    beta   = to_float(f5[1]) if len(f5) > 1 else 0.0
+    filt   = to_float(f5[2]) if len(f5) > 2 else 0.0
+
+    # Elastic constants: EMOD/NUE when given, else derived from BULK+GMOD.
+    if emod > 0.0:
+        E, nu = emod, nue
+    elif bulk > 0.0 and gmod > 0.0:
+        E  = 9.0 * bulk * gmod / (3.0 * bulk + gmod)
+        nu = (3.0 * bulk - 2.0 * gmod) / (6.0 * bulk + 2.0 * gmod)
+        note = (" — ν≈0.5 is suspicious: a legacy condensed 'mid ro e nu' "
+                "card read as the official layout lands E in BULK and ν in "
+                "GMOD; check the card" if nu >= 0.49 else "")
+        state.warn(f"*MAT_187 {mid}: EMOD blank — derived E={E:.6g} "
+                   f"nu={nu:.6g} from BULK/GMOD for /MAT/LAW76{note}.")
+    else:
+        E, nu = 0.0, 0.0
+        state.warn(f"*MAT_187 {mid}: no usable elastic modulus (EMOD and "
+                   "BULK/GMOD all blank or 0) — /MAT/LAW76 gets E=0, a "
+                   "zero-stiffness material the starter accepts silently.")
+    # MAT_187 Remark 6: the effective elastic Poisson ratio is min(NUE, NUEP)
+    # (not applied when a NUEP-vs-strain curve overrides the constant).
+    if fct_idpr == 0 and nu_p < nu:
+        state.warn(f"*MAT_187 {mid}: effective elastic nu lowered to "
+                   f"min(NUE, NUEP)={nu_p:g} per LS-DYNA MAT_187 Remark 6.")
+        nu = nu_p
+    if rho <= 0.0:
+        state.warn(f"*MAT_187 {mid}: density {rho:g} ≤ 0 — the starter will "
+                   "reject this material (ERROR 683: DENSITY IS LESS THAN OR "
+                   "EQUAL TO ZERO). Check the card for shifted/fused fields.")
+    # DYNA's DEPRPT is the INCREMENT from failure to rupture; LAW76's
+    # Epsilon_r_p is ABSOLUTE (engine: DMG=(PLA-EPSF)/(EPSR-EPSF), delete at
+    # PLA>=EPSR) — emitting DEPRPT raw would put EPSR below EPSF. With DEPRPT
+    # blank DYNA ruptures AT EPFAIL, so use a hair above it to keep the DMG
+    # denominator finite.
+    if epfail > 0.0:
+        eps_rupt = epfail + deprpt if deprpt > 0.0 else epfail * 1.001
+    else:
+        eps_rupt = 0.0
+    if fct_id1 and epfail > 0.0:
+        state.warn(f"*MAT_187 {mid}: LAW76 uses the damage function and "
+                   "Epsilon_f_p/Epsilon_r_p mutually exclusively (the "
+                   "function wins; erosion only when damage reaches 1), while "
+                   "LS-DYNA combines LCID-D with erosion at EPFAIL+DEPRPT — "
+                   "check the damage curve reaches 1 or the part never "
+                   "erodes.")
+
+    unmapped = [name for name, val in (("RBCFAC", rbcfac),
+                                       ("INCDAM", incdam),
+                                       ("LCID-B", lcid_b),
+                                       ("LCID-TRI", lcid_tri),
+                                       ("LCID-LC", lcid_lc),
+                                       ("INCFAIL", max(incfail, 0)),
+                                       ("LCEMOD", lcemod),
+                                       ("BETA", beta), ("FILT", filt)) if val]
+    if unmapped:
+        state.warn(f"*MAT_187 {mid}: no /MAT/LAW76 counterpart for non-zero "
+                   f"field(s) {', '.join(unmapped)} — ignored.")
 
     state.mat_samp[mid] = MatSAMP(mid, title, rho, E, nu, tab_idt, tab_idc,
                                   tab_ids, nu_p, fct_idpr, fct_id1, epfail,
-                                  deprpt, iconv, asrate)
+                                  eps_rupt, iconv, 0.0)
     for tid in (tab_idt, tab_idc, tab_ids):
         if tid:
             state.law76_table_ids.add(tid)
