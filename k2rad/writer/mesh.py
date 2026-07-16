@@ -858,13 +858,18 @@ def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
 def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      itetra10: int, istrain: int,
                      refvec=(1.0, 0.0, 0.0), ip: int = 11,
-                     phi: float = 0.0) -> List[str]:
-    """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH) — the isotropic
-    /PROP/SOLID formulation plus a reference vector projected onto the element
-    r-s plane (Ip=11). Column layout from PROP/prop_p6_sol_orth.cfg
-    FORMAT(radioss2022)."""
+                     phi: float = 0.0, skew_id: int = 0) -> List[str]:
+    """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
+    orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
+    skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
+    EVERY element, exactly). Without a skew, Ip=11 projects the reference
+    vector onto each element's local r-s plane — element-topology-dependent on
+    free tet meshes, so only used as a fallback. Column layout from
+    PROP/prop_p6_sol_orth.cfg FORMAT(radioss2022)."""
     isolid = _elform_to_isolid(sec.elform) if sec else 0
-    vx, vy, vz = refvec
+    vx, vy, vz = (0.0, 0.0, 0.0) if skew_id else refvec
+    if skew_id:
+        ip, phi = 0, 0.0
     b10 = " " * 10
     lines = [
         f"/PROP/TYPE6/{prop_id}",
@@ -874,7 +879,7 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
         "#                 qa                  qb                   h",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",
-        f"{_f(vx)}{_f(vy)}{_f(vz)}{_i(0)}{_i(ip)}{_i(0)}",
+        f"{_f(vx)}{_f(vy)}{_f(vz)}{_i(skew_id)}{_i(ip)}{_i(0)}",
         "#                Phi                 Px                  Py                  Pz",
         f"{_f(phi)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
     ]
@@ -888,6 +893,29 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                   f"{_f(0.0)}{_i(istrain)}"]
     lines.append(HDR)
     return lines
+
+
+def _ortho_skew_axes(vec, phi_deg: float = 0.0):
+    """Build the /SKEW/FIX (Y', Z') vector cards for a skew whose X' is *vec*.
+
+    The starter reconstructs X' = Y' x Z', so any orthonormal (Y', Z') pair
+    perpendicular to vec works; phi_deg spins that transverse pair about X'
+    (LS-DYNA AOPT=3 BETA — direction 1 itself is unchanged). Returns
+    (yaxis, zaxis), or None for a null vector."""
+    import math
+    x = _vnorm(vec)
+    if x is None:
+        return None
+    # helper axis least aligned with X' → a well-conditioned cross product
+    helpers = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    e = min(helpers, key=lambda h: abs(h[0]*x[0] + h[1]*x[1] + h[2]*x[2]))
+    y = _vnorm(_vcross(e, x))
+    z = _vcross(x, y)                       # unit by construction
+    if phi_deg:
+        c, s = math.cos(math.radians(phi_deg)), math.sin(math.radians(phi_deg))
+        y, z = (tuple(c*y[i] + s*z[i] for i in range(3)),
+                tuple(c*z[i] - s*y[i] for i in range(3)))
+    return y, z
 
 
 def _law128_ref_axis(mat) -> Tuple[Optional[Tuple[float, float, float]],
@@ -928,36 +956,68 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
     lines: List[str] = []
+    skew_ids_used = set(state.coord_sys) | set(state.coord_nodes)
     for pid, prop_id in sorted(state.ortho_prop_ids.items()):
         secid = part_secids.get(pid, pid)
         title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
         part = state.parts.get(pid)
         mat = state.mat_aniso_visco.get(part.mid) if part else None
         vec, phi, note = _law128_ref_axis(mat) if mat else (None, 0.0, None)
-        if vec is not None:
-            refvec = vec
-            state.warn(
-                f"/PROP for LAW128 part {pid}: orthotropy reference direction "
-                f"auto-mapped from the material {note} → Vx/Vy/Vz="
-                f"({vec[0]:g}, {vec[1]:g}, {vec[2]:g})"
-                + (f", Phi={phi:g}" if phi else "") + ".")
-        else:
-            refvec, phi = (1.0, 0.0, 0.0), 0.0
-            reason = (f"AOPT={mat.aopt:g}" if mat else "the material")
-            state.warn(
-                f"/PROP for LAW128 part {pid}: {reason} axis definition has no "
-                "single global vector (element-node, point-radial or cylindrical "
-                "system) — reference direction defaulted to GLOBAL X (Vx=1,0,0). "
-                "Set Vx/Vy/Vz + Phi on the /PROP to your orthotropy/build axis.")
+        mapped = vec is not None
+        if not mapped:
+            vec, phi = (1.0, 0.0, 0.0), 0.0
         if pid in shell_pids:
+            if mapped:
+                state.warn(
+                    f"/PROP for LAW128 part {pid}: orthotropy reference "
+                    f"direction auto-mapped from the material {note} → "
+                    f"Vx/Vy/Vz=({vec[0]:g}, {vec[1]:g}, {vec[2]:g})"
+                    + (f", Phi={phi:g}" if phi else "") + ".")
+            else:
+                reason = (f"AOPT={mat.aopt:g}" if mat else "the material")
+                state.warn(
+                    f"/PROP for LAW128 part {pid}: {reason} axis definition "
+                    "has no single global vector (element-node, point-radial "
+                    "or cylindrical system) — reference direction defaulted "
+                    "to GLOBAL X (Vx=1,0,0). Set Vx/Vy/Vz + Phi on the /PROP "
+                    "to your orthotropy/build axis.")
             sec = state.sec_shells.get(secid) or SectionShell(secid, "", 2, 3, 0.0)
             lines += _emit_prop_type9(prop_id, title, sec, state.is_implicit,
-                                      istrain, state, refvec=refvec, phi=phi)
+                                      istrain, state, refvec=vec, phi=phi)
         elif pid in solid_pids:
+            # Solids get the orthotropy frame from a dedicated /SKEW/FIX
+            # (Ip=0 + skew_ID → starter's direct-skew branch): material dir 1
+            # = skew X' for EVERY element. The vector-projection alternative
+            # (Ip=11) tilts dir 1 into each element's local r-s plane — on a
+            # free tet mesh that scatters the direction element-by-element
+            # (and elements whose plane is exactly normal to the vector fall
+            # back to a mesh edge: starter WARNING 811).
+            axes = _ortho_skew_axes(vec, phi)
+            skew_id = prop_id
+            while skew_id in skew_ids_used:
+                skew_id += 1
+            skew_ids_used.add(skew_id)
+            if mapped:
+                state.warn(
+                    f"/PROP for LAW128 part {pid}: orthotropy axes taken from "
+                    f"the material {note} via /SKEW/FIX {skew_id} (X'="
+                    f"({vec[0]:g}, {vec[1]:g}, {vec[2]:g}) exactly, for every "
+                    "element" + (f"; BETA={phi:g}deg spins the transverse "
+                                 "2/3 axes about X'" if phi else "") + ").")
+            else:
+                reason = (f"AOPT={mat.aopt:g}" if mat else "the material")
+                state.warn(
+                    f"/PROP for LAW128 part {pid}: {reason} axis definition "
+                    "has no single global vector (element-node, point-radial "
+                    "or cylindrical system) — orthotropy defaulted to GLOBAL "
+                    f"X via /SKEW/FIX {skew_id}. Edit that skew's axes to set "
+                    "your orthotropy/build direction.")
+            lines += _emit_skew_fix(skew_id, f"LAW128_ORTHO_SKEW_{skew_id}",
+                                    (0.0, 0.0, 0.0), axes[0], axes[1])
             sec = state.sec_solids.get(secid)
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
             lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain,
-                                      refvec=refvec, phi=phi)
+                                      skew_id=skew_id)
     return lines
 
 
