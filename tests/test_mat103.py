@@ -274,7 +274,14 @@ def _c(*vals):
 
 
 class Law128AxisMappingTests(unittest.TestCase):
-    """MAT_103 AOPT axis definition → /PROP orthotropy reference direction."""
+    """MAT_103 AOPT axis definition → solid orthotropy via a direct /SKEW/FIX.
+
+    The skew path (Ip=0 + skew_ID → starter's Ip<0 branch) makes material
+    direction 1 = skew X' for EVERY element. The previous Vx/Vy/Vz + Ip=11
+    emission projected the vector onto each element's local r-s plane, which
+    scatters the direction on free tet meshes (and raised starter WARNING 811
+    whenever an element plane was exactly normal to the vector).
+    """
 
     HEAD = (
         "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
@@ -283,23 +290,43 @@ class Law128AxisMappingTests(unittest.TestCase):
         + _c(0.0, 0.0, 1.35, 1.0, 0.75, 0.0, 0.0, 0.0) + "\n"
     )
 
-    def _type6_vx_card(self, starter):
+    def _type6_cards(self, starter):
         d = _block_lines(starter, "/PART/1")
         prop_ref = int(d[1][0:10])
         p = _block_lines(starter, f"/PROP/TYPE6/{prop_ref}")
         # p: [title, Isolid, qa/qb/h, Vx/Vy/Vz/skew/Ip/Iorth, Phi/Px/Py/Pz, card5]
         return p[3], p[4]
 
-    def test_aopt2_global_vector_maps_to_vxyz(self):
+    def _skew_axes(self, starter, skew_id):
+        s = _block_lines(starter, f"/SKEW/FIX/{skew_id}")
+        # s: [title, origin, yaxis-card, zaxis-card]
+        y = [float(s[2][i:i + 20]) for i in range(0, 60, 20)]
+        z = [float(s[3][i:i + 20]) for i in range(0, 60, 20)]
+        xprime = (y[1] * z[2] - y[2] * z[1],
+                  y[2] * z[0] - y[0] * z[2],
+                  y[0] * z[1] - y[1] * z[0])
+        return xprime, y, z
+
+    def _assert_skewed(self, vx_card, starter, expect_xprime):
+        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
+        self.assertEqual(vxyz, [0.0, 0.0, 0.0])       # vector unused with skew
+        skew_id = int(vx_card[60:70])
+        self.assertGreater(skew_id, 0)
+        self.assertEqual(int(vx_card[70:80]), 0)      # Ip=0 → direct skew branch
+        xprime, y, z = self._skew_axes(starter, skew_id)
+        for got, want in zip(xprime, expect_xprime):
+            self.assertAlmostEqual(got, want, places=9)
+        return y, z
+
+    def test_aopt2_global_vector_becomes_skew_xprime(self):
         mat = (self.HEAD
                + _c(2.0, 0.0, 0.0, 0.0) + "\n"                 # card4: AOPT=2
                + _c("", "", "", 0.0, 0.0, 1.0) + "\n"          # card5: a = (0,0,1)
                + _c("", "", "", 1.0, 0.0, 0.0) + "\n")         # card6: d
         result, starter = _convert(SOLID_DECK.format(MAT=mat))
-        vx_card, _ = self._type6_vx_card(starter)
-        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
-        self.assertEqual(vxyz, [0.0, 0.0, 1.0])                # build direction z
-        self.assertTrue(any("auto-mapped" in w and "AOPT=2" in w
+        vx_card, _ = self._type6_cards(starter)
+        self._assert_skewed(vx_card, starter, (0.0, 0.0, 1.0))  # build dir z
+        self.assertTrue(any("AOPT=2" in w and "/SKEW/FIX" in w
                             for w in result.warnings))
 
     def test_aopt3_vector_and_beta(self):
@@ -308,21 +335,33 @@ class Law128AxisMappingTests(unittest.TestCase):
                + _c("", "", "", 0.0, 0.0, 0.0) + "\n"          # card5 (unused)
                + _c(0.0, 1.0, 0.0, "", "", "", 30.0) + "\n")   # card6: v=(0,1,0) BETA=30
         result, starter = _convert(SOLID_DECK.format(MAT=mat))
-        vx_card, phi_card = self._type6_vx_card(starter)
-        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
-        self.assertEqual(vxyz, [0.0, 1.0, 0.0])
-        self.assertAlmostEqual(float(phi_card[0:20]), 30.0)    # Phi = BETA
-        self.assertTrue(any("AOPT=3" in w and "auto-mapped" in w
+        vx_card, phi_card = self._type6_cards(starter)
+        # dir 1 = v exactly; BETA spins only the transverse 2/3 axes about X'
+        y, _ = self._assert_skewed(vx_card, starter, (0.0, 1.0, 0.0))
+        import math
+        self.assertAlmostEqual(y[0], math.sin(math.radians(30.0)), places=9)
+        self.assertAlmostEqual(y[2], math.cos(math.radians(30.0)), places=9)
+        self.assertAlmostEqual(float(phi_card[0:20]), 0.0)     # baked into skew
+        self.assertTrue(any("AOPT=3" in w and "/SKEW/FIX" in w
                             for w in result.warnings))
 
     def test_aopt0_falls_back_to_global_x(self):
         mat = (self.HEAD
                + _c(0.0, 0.0, 0.0, 0.0) + "\n")                # card4: AOPT=0 (nodes)
         result, starter = _convert(SOLID_DECK.format(MAT=mat))
-        vx_card, _ = self._type6_vx_card(starter)
-        vxyz = [float(vx_card[i:i + 20]) for i in range(0, 60, 20)]
-        self.assertEqual(vxyz, [1.0, 0.0, 0.0])                # default
+        vx_card, _ = self._type6_cards(starter)
+        self._assert_skewed(vx_card, starter, (1.0, 0.0, 0.0))  # default
         self.assertTrue(any("defaulted to GLOBAL X" in w for w in result.warnings))
+
+    def test_shell_keeps_vector_projection(self):
+        # Shells stay on the TYPE9 Vx/Vy/Vz path (in-plane projection is the
+        # correct shell semantic); no skew is synthesized.
+        mat = (self.HEAD
+               + _c(2.0, 0.0, 0.0, 0.0) + "\n"
+               + _c("", "", "", 0.0, 0.0, 1.0) + "\n"
+               + _c("", "", "", 1.0, 0.0, 0.0) + "\n")
+        _, starter = _convert(SHELL_DECK.format(MAT=mat))
+        self.assertNotIn("LAW128_ORTHO_SKEW", starter)
 
 
 class Law128ViscosityTests(unittest.TestCase):
