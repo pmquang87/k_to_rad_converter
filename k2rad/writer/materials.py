@@ -597,6 +597,14 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
     # IQUAD=0 is only a coarse linear approximation. LS-DYNA *MAT_187 has no
     # IQUAD field to map from, so we pick the recommended value.
     iquad = 1
+    # LAW76 looks the Nu_p function up at the UNSIGNED plastic strain, so the
+    # compression half of a signed LS-DYNA LCID-P curve is never evaluated.
+    pr_curve = state.curves.get(mat.fct_idpr) if mat.fct_idpr else None
+    if pr_curve is not None and any(x < 0.0 for x, _ in pr_curve.pts):
+        state.warn(f"/MAT/LAW76/{mat.mid}: fct_IDpr curve {mat.fct_idpr} has "
+                   "negative-abscissa (compression) points — LAW76 evaluates "
+                   "Nu_p at |plastic strain|, so compressive flow uses the "
+                   "tension branch of the curve.")
     gap = " " * 20
     return [
         f"/MAT/LAW76/{mat.mid}",
@@ -612,7 +620,7 @@ def _emit_mat_law76(mat: MatSAMP, state: ConversionState) -> List[str]:
         "#               Nu_p  fct_IDpr           Fscale_pr   Fsmooth                Fcut",
         f"{_f(mat.nu_p)}{_i(mat.fct_idpr)}{_f(0.0)}{_i(fsmooth)}{_f(fcut)}",
         "#        Epsilon_f_p         Epsilon_r_p",
-        f"{_f(mat.epfail)}{_f(mat.deprpt)}",
+        f"{_f(mat.epfail)}{_f(mat.eps_rupt)}",
         "#  fct_ID1                                 Fscale1",
         f"{_i(mat.fct_id1)}{gap}{_f(fscale1)}",
         "#    IFORM     IQUAD     ICONV",

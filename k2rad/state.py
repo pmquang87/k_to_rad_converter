@@ -244,9 +244,11 @@ class MatPlasTAB:
 class MatSAMP:
     """*MAT_187 / *MAT_SAMP-1 → /MAT/LAW76 (SAMP-1 semi-analytical polymer).
 
-    Uses the classic SAMP-1 card layout (the one that maps 1:1 onto /MAT/LAW76):
-    Card1 mid ro e nu numint; Card2 tab_idt tab_idc tab_ids nu_p fct_idpr;
-    Card3 fct_id1 epfail deprpt lcid_tri lcid_lc; Card4 iconv; Card5 asrate.
+    Fields are already resolved to their LAW76 meaning by the handler, which
+    reads the official manual card layout (MID RO BULK GMOD EMOD NUE RBCFAC
+    NUMINT / LCID-T LCID-C LCID-S LCID-B NUEP LCID-P - INCDAM / LCID-D EPFAIL
+    DEPRPT LCID-TRI LCID-LC / MITER MIPS - INCFAIL ICONV ASAF - NHSV /
+    LCEMOD BETA FILT): E/ν come from EMOD/NUE or are derived from BULK+GMOD.
     The three yield tables (tension/compression/shear) become /TABLE/1 cards.
     """
     mid: int
@@ -254,16 +256,16 @@ class MatSAMP:
     rho: float
     E: float
     nu: float
-    tab_idt: int          # tension yield table   → /TABLE
-    tab_idc: int          # compression yield table
-    tab_ids: int          # shear yield table
-    nu_p: float           # plastic Poisson ratio (Nu_p)
-    fct_idpr: int         # pressure-dependence function (fct_IDpr)
-    fct_id1: int          # damage function (fct_ID1)
+    tab_idt: int          # tension yield table   → /TABLE  (LCID-T)
+    tab_idc: int          # compression yield table         (LCID-C)
+    tab_ids: int          # shear yield table               (LCID-S)
+    nu_p: float           # plastic Poisson ratio (Nu_p ← NUEP, blank → 0.0)
+    fct_idpr: int         # plastic-ν vs plastic-strain function (fct_IDpr ← LCID-P)
+    fct_id1: int          # damage vs plastic-strain function (fct_ID1 ← LCID-D)
     epfail: float         # plastic failure strain (EPS_f_p)
-    deprpt: float         # element deletion plastic strain (EPS_r_p)
+    eps_rupt: float       # ABSOLUTE rupture plastic strain (EPFAIL+DEPRPT → EPS_r_p)
     iconv: int            # convexity flag (ICONV)
-    asrate: float         # strain-rate smoothing cutoff (→ Fcut)
+    asrate: float         # strain-rate smoothing cutoff (→ Fcut; no SAMP source, 0)
 
 
 @dataclass
