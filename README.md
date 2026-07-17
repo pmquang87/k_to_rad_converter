@@ -161,10 +161,29 @@ points fail, LS-DYNA's built-in erosion rule) instead of the material `Eps_max`
 `*MAT_ADD_DAMAGE_GISSMO` → `/FAIL/TAB2` (GISSMO tabulated damage: `LCSDG`→
 `EPSF_ID`, `DMGEXP`→`N`, `DCRIT`, `NUMFIP`→`FAILIP`, `LCREGD`→`TAB_EL`; a
 negative `ECRIT`/`FADEXP` is resolved to the instability/fading curve)
-`*MAT_ADD_EROSION` → an OpenRadioss `/FAIL` model for the strain criteria:
-`MXEPS` (max principal strain) → `/FAIL/TENSSTRAIN`, `EFFEPS` (max effective
-strain) → `/FAIL/JOHNSON`. Other criteria and `IDAM≥1` (GISSMO/DIEM embedded in
-the erosion card) are reported but not converted (use `*MAT_ADD_DAMAGE_GISSMO`)
+`*MAT_ADD_EROSION` → `/FAIL/GENE1`, the card that carries the whole card-1/
+card-2 scalar-criteria set: `MXPRES`→`Pmax`, `MNPRES`→`Pmin`, `SIGP1`→
+`SigP1_max`, `SIGVM`→`Sig_max` (or `fct_IDsm` for the `<0` load-curve form),
+`MXEPS`→`Eps_max` (or `fct_IDps`), `MNEPS`→`Eps_min`, `EFFEPS`→`Eps_eff`,
+`VOLEPS`→`Eps_vol`, `EPSSH`→`Eps_s`, `SIGTH`→`Sigr`, `IMPULSE`→`K`, `FAILTM`→
+`Time_max`, `NCS`→`NCS`, `NUMFIP`→`Pthickfail`. Signs follow the GENE1 reader
+(it forces `Pmin=-|·|`, `Pmax=+|·|`, `Eps_min=-|·|`) and `0` = inactive on both
+sides; a non-zero `EXCL` is applied (fields equal to it are made inactive) and
+warned. `NUMFIP` maps to the engine's negative-`Pthickfail` broken-IP-ratio form
+(`-|NUMFIP|/100` for the percent form, `-NUMFIP/NPTT` for a count using the
+`*SECTION_SHELL` `NIP`, `-1e-6` = first-IP for the default). `IDAM≥1` (GISSMO/
+DIEM embedded in the erosion card) still warns — the scalar criteria convert
+regardless; for the damage model use `*MAT_ADD_DAMAGE_GISSMO`
+`*MAT_123` / `*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY` → the MAT_024 base
+plasticity (`/MAT/LAW36`, `FAIL`→`/FAIL/JOHNSON`) **plus** its three extra
+failure inputs: `EPSTHIN`→`/FAIL/TAB1` `P_THICKFAIL` (thinning failure,
+`Ifail_sh=2`; the mandatory strain table is an inert `10.0` plateau so `FAIL`
+is not double-counted), `EPSMAJ`→`/FAIL/FLD` (a flat forming-limit curve at
+`|EPSMAJ|`), and `NUMINT` (failed-integration-point count) approximated by the
+`/FAIL/JOHNSON` `Ifail_sh=2` all-points rule with a warning
+`*MAT_PIECEWISE_LINEAR_PLASTICITY_LOG_INTERPOLATION`(`_2D`) → the MAT_024 path
+with `/MAT/LAW36` `F_smooth=2` (logarithmic rather than linear interpolation
+between the strain-rate yield curves)
 `*MAT_RIGID` → `/MAT/LAW1` + `/RBODY`. By default the `/RBODY` master is a
 **synthesized element-free node** at the part's nodal centroid (the treatment
 CNRBs always get): mesh nodes keep their source coordinates, the starter

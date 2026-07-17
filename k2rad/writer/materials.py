@@ -118,35 +118,149 @@ def _make_materials(state: ConversionState) -> List[str]:
     return lines
 
 
+def _shell_nptt_for_mid(state: ConversionState, mid: int) -> Optional[int]:
+    """Through-thickness integration-point count for a material, via any shell
+    part that uses it (*PART SECID → *SECTION_SHELL NIP). Needed to turn a
+    NUMFIP integration-point *count* into the GENE1 Pthickfail *ratio*."""
+    for part in state.parts.values():
+        if part.mid != mid:
+            continue
+        sec = state.sec_shells.get(part.secid)
+        if sec is not None and sec.nip > 0:
+            return sec.nip
+    return None
+
+
+def _numfip_to_pthickfail(numfip: float, nptt: Optional[int]):
+    """LS-DYNA NUMFIP → GENE1 Pthickfail. GENE1 keeps the sign verbatim; the
+    engine (fail_setoff_c.F) reads Pthk<0 as 'delete when the broken-IP ratio
+    count/NPTT >= |Pthk|', which reproduces NUMFIP exactly for the percent form
+    and, given NPTT, for the count forms. Returns (pthk, needs_nptt)."""
+    if -100.0 <= numfip < 0.0:            # |NUMFIP| percent of IPs (shells)
+        return -abs(numfip) / 100.0, False
+    if numfip < -100.0:                   # (|NUMFIP|-100) IPs (shells)
+        count = abs(numfip) - 100.0
+        if nptt:
+            return -min(count / nptt, 1.0), False
+        return 0.0, True
+    if numfip > 1.0:                      # NUMFIP IPs
+        if nptt:
+            return -min(numfip / nptt, 1.0), False
+        return 0.0, True
+    # NUMFIP = 1 (default) or any 0 < NUMFIP <= 1 → erode on the first failed IP
+    return -1.0e-6, False
+
+
 def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[str]:
-    """*MAT_ADD_EROSION → /FAIL. Only the strain criteria map: MXEPS (max
-    principal strain) → /FAIL/TENSSTRAIN, EFFEPS (max effective strain) →
-    /FAIL/JOHNSON. Everything else is reported and left out."""
-    lines: List[str] = []
+    """*MAT_ADD_EROSION → /FAIL/GENE1 (the card that subsumes the full card-1/
+    card-2 scalar-criteria set; layout audited against hm_cfg_files
+    FAIL/fail_gene1.cfg FORMAT(radioss2022), the block a /BEGIN 2022 deck reads
+    with — note this block has NO trailing FAILIP on card 6, unlike 2025+):
+
+      C1 Pmin Pmax SigP1_max Time_max dtmin
+      C2 fct_IDsm _ Eps_dot_sm Sig_max Sigr K
+      C3 fct_IDps _ Eps_dot_ps Eps_max Eps_eff Eps_vol
+      C4 Eps_min Eps_s fct_IDg12 fct_IDg13 fct_IDe1c
+      C5 tab_IDfld Itab Eps_dot_fld Nstep Ismooth Istrain _ Thinning
+      C6 Volfrac Pthickfail NCS _ Temp_max
+      C7 fct_IDel _ Fscale_el El_ref
+
+    Signs follow the GENE1 reader (hm_read_fail_gene1.F): it forces Pmin=-ABS,
+    Pmax=+ABS, Eps_min=-ABS and maps 0→±INFINITY (a criterion is active iff its
+    field /= 0). SIGVM/MXEPS keep the LS-DYNA <0-means-load-curve convention →
+    the fct_IDsm/fct_IDps function slots with a 1.0 ordinate scale."""
     if ero.idam:
         state.warn(f"*MAT_ADD_EROSION {ero.mid}: IDAM={ero.idam} (GISSMO/DIEM in "
-                   "the erosion card) is not converted — use "
-                   "*MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2 instead.")
-    if ero.mxeps > 0.0:
-        lines += [
-            f"/FAIL/TENSSTRAIN/{ero.mid}",
-            "#         EPSILON_T1          EPSILON_T2    FCT_ID          EPSILON_F1          EPSILON_F2     S_Flag",
-            f"{_f(ero.mxeps)}{_f(ero.mxeps)}{_i(0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
-            HDR,
-        ]
-        state.warn(f"*MAT_ADD_EROSION {ero.mid}: MXEPS={ero.mxeps:g} → "
-                   "/FAIL/TENSSTRAIN (element erodes at that maximum principal "
-                   "tensile strain).")
-    if ero.effeps > 0.0:
-        lines += _emit_fail_johnson_all_layers(ero.mid, ero.effeps, state)
-    if ero.other:
-        state.warn(f"*MAT_ADD_EROSION {ero.mid}: criteria "
-                   f"{', '.join(ero.other)} are not converted (only EFFEPS and "
-                   "MXEPS map to an OpenRadioss /FAIL model).")
-    if not lines and not ero.idam:
-        state.warn(f"*MAT_ADD_EROSION {ero.mid}: no convertible criterion "
-                   "(EFFEPS/MXEPS) found — no /FAIL emitted.")
+                   "the erosion card) is not converted — the card-1/card-2 "
+                   "scalar criteria still map to /FAIL/GENE1; for the damage "
+                   "model use *MAT_ADD_DAMAGE_GISSMO → /FAIL/TAB2.")
+
+    active = any((ero.mxpres, ero.mneps, ero.effeps, ero.voleps, ero.mnpres,
+                  ero.sigp1, ero.sigvm, ero.mxeps, ero.epssh, ero.sigth,
+                  ero.impulse, ero.failtm))
+    if not active:
+        if not ero.idam:
+            state.warn(f"*MAT_ADD_EROSION {ero.mid}: no active scalar criterion "
+                       "(MXPRES/MNPRES/SIGP1/SIGVM/MXEPS/MNEPS/EFFEPS/VOLEPS/"
+                       "EPSSH/SIGTH/IMPULSE/FAILTM) — no /FAIL/GENE1 emitted.")
+        return []
+
+    if ero.excl != 0.0:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: EXCL={ero.excl:g} is non-default "
+                   "— fields equal to it were treated as inactive (GENE1 uses "
+                   "0 = inactive). Verify no genuine 0.0 threshold was intended.")
+
+    # Card 1 — pressures / time. The reader re-signs these, but emit the final
+    # sign for a human-readable deck.
+    pmin = -abs(ero.mnpres) if ero.mnpres else 0.0
+    pmax = abs(ero.mxpres) if ero.mxpres else 0.0
+    tmax = 0.0
+    if ero.failtm > 0.0:
+        tmax = ero.failtm
+    elif ero.failtm < 0.0:
+        tmax = abs(ero.failtm)
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: FAILTM={ero.failtm:g} < 0 "
+                   "(inactive during dynamic relaxation in LS-DYNA); GENE1 has "
+                   "no such flag — mapped as an always-active failure time "
+                   f"{abs(ero.failtm):g}.")
+    if ero.sigp1 < 0.0:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: SIGP1={ero.sigp1:g} < 0 (a "
+                   "load-curve form) has no GENE1 SigP1_max function slot — "
+                   "passed through as a scalar; verify the criterion.")
+
+    # Card 2 — SIGVM: scalar Sig_max (>0) or fct_IDsm (<0 = |SIGVM| curve id).
+    if ero.sigvm < 0.0:
+        fct_idsm, sig_max = int(-ero.sigvm), 1.0
+        _warn_missing_curve(state, ero.mid, fct_idsm, "SIGVM")
+    else:
+        fct_idsm, sig_max = 0, ero.sigvm
+    # Card 3 — MXEPS: scalar Eps_max (>0) or fct_IDps (<0 = |MXEPS| curve id).
+    if ero.mxeps < 0.0:
+        fct_idps, eps_max = int(-ero.mxeps), 1.0
+        _warn_missing_curve(state, ero.mid, fct_idps, "MXEPS")
+    else:
+        fct_idps, eps_max = 0, ero.mxeps
+    eps_eff = abs(ero.effeps) if ero.effeps else 0.0
+    eps_min = -abs(ero.mneps) if ero.mneps else 0.0
+
+    # Card 6 — NUMFIP → Pthickfail; NCS.
+    pthk, needs_nptt = _numfip_to_pthickfail(
+        ero.numfip, _shell_nptt_for_mid(state, ero.mid))
+    if needs_nptt:
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: NUMFIP={ero.numfip:g} is an "
+                   "integration-point count but no *SECTION_SHELL NIP was found "
+                   "for the material — Pthickfail left at the default (delete "
+                   "near full thickness). Verify the shell integration scheme.")
+    ncs = max(1, int(round(ero.ncs)))
+    blank = " " * 10
+
+    lines = [
+        f"/FAIL/GENE1/{ero.mid}",
+        "#               Pmin                Pmax           SigP1_max            Time_max               dtmin",
+        f"{_f(pmin)}{_f(pmax)}{_f(ero.sigp1)}{_f(tmax)}{_f(0.0)}",
+        "# fct_IDsm                    Eps_dot_sm             Sig_max                Sigr                   K",
+        f"{_i(fct_idsm)}{blank}{_f(0.0)}{_f(sig_max)}{_f(ero.sigth)}{_f(ero.impulse)}",
+        "# fct_IDps                    Eps_dot_ps             Eps_max             Eps_eff             Eps_vol",
+        f"{_i(fct_idps)}{blank}{_f(0.0)}{_f(eps_max)}{_f(eps_eff)}{_f(ero.voleps)}",
+        "#            Eps_min               Eps_s fct_IDg12 fct_IDg13 fct_IDe1c",
+        f"{_f(eps_min)}{_f(ero.epssh)}{_i(0)}{_i(0)}{_i(0)}",
+        "#tab_IDfld      Itab         Eps_dot_fld     Nstep   Ismooth   Istrain                      Thinning",
+        f"{_i(0)}{_i(0)}{_f(0.0)}{_i(0)}{_i(0)}{_i(0)}{blank}{_f(0.0)}",
+        "#            Volfrac          Pthickfail       NCS                      Temp_max",
+        f"{_f(0.0)}{_f(pthk)}{_i(ncs)}{blank}{_f(0.0)}",
+        "# fct_IDel                     Fscale_el              El_ref",
+        f"{_i(0)}{blank}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
     return lines
+
+
+def _warn_missing_curve(state: ConversionState, mid: int, fid: int,
+                        field: str) -> None:
+    if fid and fid not in state.curves:
+        state.warn(f"*MAT_ADD_EROSION {mid}: {field} references load curve "
+                   f"{fid} (negative-value form) that is not in the model — the "
+                   "/FAIL/GENE1 function reference will dangle.")
 
 
 def _emit_mat_law5(state: ConversionState, heb: MatHighExplosiveBurn,
@@ -360,7 +474,12 @@ def _emit_mat_law36(mat: MatPlasTAB, state: ConversionState) -> List[str]:
         #   Fscale_i    CELL_LIST %20lg (5 per line)
         #   Eps_dot_i   CELL_LIST %20lg (5 per line)
         fam = sorted(mat.rate_fcts, key=lambda t: t[2])   # ascending Eps_dot
-        nf_card = f"{_i(len(fam))}{_i(0)}"
+        # F_smooth = 2 → logarithmic strain-rate interpolation between the yield
+        # curves (the *MAT_..._LOG_INTERPOLATION option); 0 → linear (default).
+        # Only meaningful with >1 rate curve — the LAW36 reader forces it to 0
+        # for a single static curve anyway.
+        f_smooth = 2 if mat.log_interp else 0
+        nf_card = f"{_i(len(fam))}{_i(f_smooth)}"
         if mat.vp:
             nf_card += " " * 70 + _i(mat.vp)              # VP at cols 91-100
         lines = [
@@ -384,6 +503,7 @@ def _emit_mat_law36(mat: MatPlasTAB, state: ConversionState) -> List[str]:
         ]
         if fail > 0.0:
             lines += _emit_fail_johnson_all_layers(mat.mid, fail, state)
+        lines += _emit_mat123_extra_fail(mat, state)
         return lines
     lines = [
         f"/MAT/LAW36/{mat.mid}",
@@ -406,7 +526,103 @@ def _emit_mat_law36(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     ]
     if fail > 0.0:
         lines += _emit_fail_johnson_all_layers(mat.mid, fail, state)
+    lines += _emit_mat123_extra_fail(mat, state)
     return lines
+
+
+def _emit_mat123_extra_fail(mat: MatPlasTAB, state: ConversionState) -> List[str]:
+    """*MAT_123 (*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY) failure inputs that
+    ride alongside the base LAW36 material — the LAW36 card itself is emitted
+    unchanged and FAIL still becomes /FAIL/JOHNSON. Only the three MAT_123-only
+    card-2 extras act here (they stay 0 for plain MAT_024, so this is a no-op for
+    MAT_024): EPSTHIN → /FAIL/TAB1 P_THICKFAIL, EPSMAJ → /FAIL/FLD, NUMINT →
+    the failed-integration-point deletion convention. Mirrors dyna2rad
+    p_ConvertMatL123 (convertmats.cxx:6169-6246)."""
+    lines: List[str] = []
+    if mat.epsthin > 0.0:
+        lines += _emit_mat123_tab1(mat, state)
+    elif mat.epsthin < 0.0:
+        state.warn(f"*MAT_123 {mat.mid}: EPSTHIN={mat.epsthin:g} < 0 (averaged "
+                   "thinning from element thickness change) is not represented "
+                   "by /FAIL/TAB1 P_THICKFAIL — thinning failure dropped.")
+    if mat.epsmaj != 0.0:
+        lines += _emit_mat123_fld(mat, state)
+    if mat.numint != 0.0:
+        # NUMINT counts the integration points that must fail before the shell is
+        # deleted (0 = ALL). The base FAIL → /FAIL/JOHNSON already uses Ifail_sh=2
+        # (delete when ALL through-thickness points fail); the exact IP count is
+        # not reproduced (same limitation as MAT_103's NUMINT).
+        state.warn(f"*MAT_123 {mat.mid}: NUMINT={mat.numint:g} (integration "
+                   "points that must fail before element deletion) is "
+                   "approximated by the /FAIL/JOHNSON Ifail_sh=2 all-points "
+                   "rule; the exact IP-count threshold is not reproduced.")
+    if mat.lcsr:
+        state.warn(f"*MAT_123 {mat.mid}: LCSR={mat.lcsr} (strain-rate scaling "
+                   "curve) has no /MAT/LAW36 counterpart — ignored (LS-DYNA also "
+                   "ignores LCSR when LCSS is a table).")
+    return lines
+
+
+def _emit_mat123_tab1(mat: MatPlasTAB, state: ConversionState) -> List[str]:
+    """*MAT_123 EPSTHIN → /FAIL/TAB1 P_THICKFAIL. Layout from hm_cfg_files
+    FAIL/fail_tab1.cfg FORMAT(radioss2021) — the block a /BEGIN 2022 deck reads
+    with (TAB1 is not redefined after 2021). Card 1 and 5 carry literal space
+    runs: C1 is Ifail_sh(10) Ifail_so(10) [20 sp] P_thickfail(20) P_thinfail(20)
+    [10 sp] Ixfem(10); C5 is fct_IDt(10) FscaleT(20) [30 sp] Shear_limit(20)
+    Biax_limit(20).
+
+    table1_ID is mandatory (else starter ERROR 2068) and is a failure-strain-vs-
+    triaxiality table. FAIL already lives on the base /FAIL/JOHNSON, so the table
+    here is a flat 'never reached' plateau (eps_f = 10.0, dyna2rad's FAIL==0
+    sentinel) across the usual triaxiality bracket [-0.3, 0, +0.3]: the card
+    exists purely to carry P_THICKFAIL, avoiding a second plastic-strain
+    criterion. Ifail_sh=2 makes the reader honour P_thickfail=EPSTHIN
+    (hm_read_fail_tab1.F: P_THICK>0 .and. IFAIL_SH>1 → PTHKF=P_THICK)."""
+    fid = state.next_id()
+    _add_auto_curve(state, fid, f"Auto_MAT123_thinfail_mid{mat.mid}",
+                    [(-0.3, 10.0), (0.0, 10.0), (0.3, 10.0)])
+    sp20, sp10, sp30 = " " * 20, " " * 10, " " * 30
+    state.warn(f"*MAT_123 {mat.mid}: EPSTHIN={mat.epsthin:g} → /FAIL/TAB1 "
+               "P_THICKFAIL (thinning/thickness failure, Ifail_sh=2); FAIL stays "
+               "on /FAIL/JOHNSON so the TAB1 strain table is an inert plateau.")
+    return [
+        f"/FAIL/TAB1/{mat.mid}",
+        "# IFAIL_SH  IFAIL_SO                             P_THICKFAIL          P_thinfail               Ixfem",
+        f"{_i(2)}{_i(0)}{sp20}{_f(mat.epsthin)}{_f(0.0)}{sp10}{_i(0)}",
+        "#              Dcrit                   D                   N                Dadv   fct_IDD",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#TABLE1_ID             Xscale1             Xscale2 TABLE2_ID             Xscale3             Xscale4",
+        f"{_i(fid)}{_f(0.0)}{_f(0.0)}{_i(0)}{_f(0.0)}{_f(0.0)}",
+        "# fct_IDEL           Fscale_EL              EI_REF          INST_START             FAD_EXP    CH_I_F",
+        f"{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#  fct_IDT             FscaleT                              Shear_limit             Biax_limit",
+        f"{_i(0)}{_f(0.0)}{sp30}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat123_fld(mat: MatPlasTAB, state: ConversionState) -> List[str]:
+    """*MAT_123 EPSMAJ → /FAIL/FLD. Layout from hm_cfg_files FAIL/fail_fld.cfg
+    FORMAT(radioss2019) — the block a /BEGIN 2022 deck reads with: fct_ID(10)
+    Ifail_sh(10) I_marg(10) fct_IDadv(10) Rani(20) Dadv(20) Istrain(10) Ixfem(10).
+
+    fct_ID is mandatory (else starter ERROR 2001) — the forming-limit curve. LS-
+    DYNA's EPSMAJ is a single triaxiality/minor-strain-independent major-strain
+    threshold, so the FLD is a flat line at |EPSMAJ| over the [-0.3, 0, +0.3]
+    minor-strain bracket (mirrors dyna2rad). I_marg=1 so no marginal card;
+    Istrain=0 (true strain), matching dyna2rad."""
+    epsmaj = abs(mat.epsmaj)
+    fid = state.next_id()
+    _add_auto_curve(state, fid, f"Auto_MAT123_FLD_mid{mat.mid}",
+                    [(-0.3, epsmaj), (0.0, epsmaj), (0.3, epsmaj)])
+    state.warn(f"*MAT_123 {mat.mid}: EPSMAJ={mat.epsmaj:g} → /FAIL/FLD "
+               f"(forming-limit failure, flat major-strain limit {epsmaj:g}).")
+    return [
+        f"/FAIL/FLD/{mat.mid}",
+        "#   FCT_ID  IFAIL_SH    I_MARG FCT_IDADV                RANI                DADV   ISTRAIN     IXFEM",
+        f"{_i(fid)}{_i(2)}{_i(1)}{_i(0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}",
+        HDR,
+    ]
 
 
 def _emit_mat_law44(mat: MatPlasKin, state: ConversionState) -> List[str]:

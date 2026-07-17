@@ -6075,19 +6075,26 @@ class MatAddErosionTests(unittest.TestCase):
         result, _ = self._convert()
         self.assertNotIn("MAT_ADD_EROSION", result.skipped_keywords)
 
-    def test_mxeps_maps_to_tensstrain(self):
+    def test_mxeps_maps_to_gene1_eps_max(self):
+        # MXEPS (max principal strain) now maps to /FAIL/GENE1 Eps_max (card 3,
+        # cols 41-60), consolidated with every other scalar criterion, rather
+        # than to a standalone /FAIL/TENSSTRAIN.
         _, starter = self._convert()
-        self.assertIn("/FAIL/TENSSTRAIN/1", starter)
-        row = starter.split("/FAIL/TENSSTRAIN/1", 1)[1].splitlines()[2]
-        self.assertEqual(row.split()[0], "0.038")   # EPSILON_T1
-        self.assertEqual(row.split()[1], "0.038")   # EPSILON_T2
+        self.assertIn("/FAIL/GENE1/1", starter)
+        self.assertNotIn("/FAIL/TENSSTRAIN/1", starter)
+        card3 = starter.split("/FAIL/GENE1/1", 1)[1].splitlines()[6]
+        self.assertEqual(card3[40:60].strip(), "0.038")   # Eps_max
 
-    def test_effeps_maps_to_johnson(self):
+    def test_effeps_maps_to_gene1_eps_eff(self):
+        # EFFEPS (max effective strain) now maps to /FAIL/GENE1 Eps_eff (card 3,
+        # cols 61-80), not a standalone /FAIL/JOHNSON.
         deck = CONSTRAINT_EROSION_K.replace(
             "         1       0.0       0.0       0.0       0.0       0.0       1.0       1.0",
             "         1       0.0       0.0       0.0      0.05       0.0       1.0       1.0")
         _, starter = self._convert(deck)
-        self.assertIn("/FAIL/JOHNSON/1", starter)
+        self.assertIn("/FAIL/GENE1/1", starter)
+        card3 = starter.split("/FAIL/GENE1/1", 1)[1].splitlines()[6]
+        self.assertEqual(card3[60:80].strip(), "0.05")   # Eps_eff
 
     def test_gissmo_in_erosion_warns(self):
         # IDAM>=1 (GISSMO embedded in *MAT_ADD_EROSION) is reported, not converted.

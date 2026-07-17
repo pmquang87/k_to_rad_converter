@@ -444,6 +444,14 @@ def handle_mat_elastic(block: Block, state: ConversionState) -> None:
     state.mat_elastic[mid] = MatElastic(mid, title, rho, E, nu)
 
 
+def _is_mat123(block: Block) -> bool:
+    """*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY (MAT_123) vs plain MAT_024.
+    _split_keyword has already stripped _TITLE/_ID, so a bare keyword compare
+    is enough to know whether card-2 slots 6/7/8 carry EPSTHIN/EPSMAJ/NUMINT."""
+    return block.keyword in ("MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY",
+                             "MAT_123")
+
+
 def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -457,7 +465,7 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
     sigy = to_float(f1[4])
     etan = to_float(f1[5])
     fail = to_float(f1[6]) if len(f1) > 6 else 0.0
-    # Card2: C P LCSS LCSR VP
+    # Card2: C P LCSS LCSR VP  (+ EPSTHIN EPSMAJ NUMINT for MAT_123)
     f2   = _card(raw, offset + 1, fixed=True, n=8, w=10)
     C    = to_float(f2[0]) if f2 else 0.0
     P    = to_float(f2[1]) if len(f2) > 1 else 0.0
@@ -472,6 +480,17 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
 
     mat = MatPlasTAB(mid, title, rho, E, nu, sigy, etan, fail, lcss, C, P,
                      eps_pts, es_pts, vp=vp)
+    # *MAT_123 carries three extra failure inputs in card-2 slots 6/7/8 (EPSTHIN
+    # EPSMAJ NUMINT) that plain MAT_024 leaves blank; only read them for 123 so
+    # a MAT_024 whose slots happen to be non-blank is not mis-parsed.
+    if _is_mat123(block):
+        mat.lcsr    = to_int(f2[3])   if len(f2) > 3 else 0
+        mat.epsthin = to_float(f2[5]) if len(f2) > 5 else 0.0
+        mat.epsmaj  = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.numint  = to_float(f2[7]) if len(f2) > 7 else 0.0
+    # _LOG_INTERPOLATION (a MAT_024 keyword option; combines with _2D) selects
+    # logarithmic strain-rate interpolation → LAW36 F_smooth=2 in the writer.
+    mat.log_interp = "LOG_INTERPOLATION" in block.keyword
     state.mat_plas_tab[mid] = mat
 
 
@@ -3425,11 +3444,16 @@ def handle_mat_add_damage_gissmo(block: Block, state: ConversionState) -> None:
 
 
 def handle_mat_add_erosion(block: Block, state: ConversionState) -> None:
-    """*MAT_ADD_EROSION → an OpenRadioss /FAIL model (strain criteria only).
+    """*MAT_ADD_EROSION → an OpenRadioss /FAIL/GENE1 model.
     Card layout from mat_add_erosion.cfg:
       Card1: MID EXCL MXPRES MNEPS EFFEPS VOLEPS NUMFIP NCS
       Card2: MNPRES SIGP1 SIGVM MXEPS EPSSH SIGTH IMPULSE FAILTM
-      Card3 (optional): IDAM ... (GISSMO/DIEM — reported, not converted)"""
+      Card3 (optional): IDAM ... (GISSMO/DIEM — reported, not converted)
+
+    EXCL (default 0) is LS-DYNA's exclusion number: any card-1/card-2 field whose
+    value equals EXCL is inactive. GENE1 uses the same 0→inactive convention, so
+    with EXCL=0 (the common case) the values pass straight through; a non-zero
+    EXCL is applied here (excluded fields zeroed) so the two conventions align."""
     offset = _title_offset(block)
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
@@ -3437,25 +3461,38 @@ def handle_mat_add_erosion(block: Block, state: ConversionState) -> None:
         state.warn("*MAT_ADD_EROSION: empty card – skipped")
         return
     mid    = to_int(f1[0])
+    excl   = to_float(f1[1]) if len(f1) > 1 else 0.0
     mxpres = to_float(f1[2]) if len(f1) > 2 else 0.0
     mneps  = to_float(f1[3]) if len(f1) > 3 else 0.0
     effeps = to_float(f1[4]) if len(f1) > 4 else 0.0
     voleps = to_float(f1[5]) if len(f1) > 5 else 0.0
     numfip = to_float(f1[6]) if len(f1) > 6 else 1.0
+    ncs    = to_float(f1[7]) if len(f1) > 7 else 1.0
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
-    mnpres = to_float(f2[0]) if f2        else 0.0
-    sigp1  = to_float(f2[1]) if len(f2) > 1 else 0.0
-    sigvm  = to_float(f2[2]) if len(f2) > 2 else 0.0
-    mxeps  = to_float(f2[3]) if len(f2) > 3 else 0.0
-    epssh  = to_float(f2[4]) if len(f2) > 4 else 0.0
+    mnpres  = to_float(f2[0]) if f2         else 0.0
+    sigp1   = to_float(f2[1]) if len(f2) > 1 else 0.0
+    sigvm   = to_float(f2[2]) if len(f2) > 2 else 0.0
+    mxeps   = to_float(f2[3]) if len(f2) > 3 else 0.0
+    epssh   = to_float(f2[4]) if len(f2) > 4 else 0.0
+    sigth   = to_float(f2[5]) if len(f2) > 5 else 0.0
+    impulse = to_float(f2[6]) if len(f2) > 6 else 0.0
+    failtm  = to_float(f2[7]) if len(f2) > 7 else 0.0
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     idam = to_int(f3[0]) if f3 and f3[0] else 0
-    other = [n for n, v in (("MXPRES", mxpres), ("MNEPS", mneps),
-                            ("VOLEPS", voleps), ("MNPRES", mnpres),
-                            ("SIGP1", sigp1), ("SIGVM", sigvm), ("EPSSH", epssh))
-             if v]
-    state.mat_add_erosion[mid] = MatAddErosion(mid, effeps, mxeps, numfip,
-                                               idam, other)
+
+    # Apply the EXCL exclusion: a field == a non-zero EXCL is inactive → 0
+    # (which GENE1 also reads as inactive). Leave the special four (MXPRES/MNEPS/
+    # EFFEPS/VOLEPS) and everything else untouched when EXCL is the 0 default.
+    def _ex(v: float) -> float:
+        return 0.0 if (excl != 0.0 and v == excl) else v
+
+    state.mat_add_erosion[mid] = MatAddErosion(
+        mid=mid, excl=excl,
+        mxpres=_ex(mxpres), mneps=_ex(mneps), effeps=_ex(effeps),
+        voleps=_ex(voleps), numfip=numfip, ncs=ncs,
+        mnpres=_ex(mnpres), sigp1=_ex(sigp1), sigvm=_ex(sigvm),
+        mxeps=_ex(mxeps), epssh=_ex(epssh), sigth=_ex(sigth),
+        impulse=_ex(impulse), failtm=_ex(failtm), idam=idam)
 
 
 def handle_constrained_node_set(block: Block, state: ConversionState) -> None:
@@ -3979,7 +4016,16 @@ HANDLERS = {
     # Materials
     "MAT_ELASTIC":                            handle_mat_elastic,
     "MAT_PIECEWISE_LINEAR_PLASTICITY":        handle_mat_piecewise_linear_plasticity,
+    "MAT_024":                                handle_mat_piecewise_linear_plasticity,
+    "MAT_24":                                 handle_mat_piecewise_linear_plasticity,
+    # _LOG_INTERPOLATION and _2D are MAT_024 keyword options (combinable, any
+    # order) that change only the strain-rate-table semantics → same handler,
+    # F_smooth=2 for the log form. _split_keyword keeps these suffixes intact.
+    "MAT_PIECEWISE_LINEAR_PLASTICITY_LOG_INTERPOLATION":    handle_mat_piecewise_linear_plasticity,
+    "MAT_PIECEWISE_LINEAR_PLASTICITY_LOG_INTERPOLATION_2D": handle_mat_piecewise_linear_plasticity,
+    "MAT_PIECEWISE_LINEAR_PLASTICITY_2D":     handle_mat_piecewise_linear_plasticity,
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": handle_mat_piecewise_linear_plasticity,
+    "MAT_123":                                handle_mat_piecewise_linear_plasticity,
     "MAT_PLASTIC_KINEMATIC":                  handle_mat_plastic_kinematic,
     # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction;
     # Hill anisotropy + kinematic hardening dropped/folded — see the handler)

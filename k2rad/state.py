@@ -241,6 +241,16 @@ class MatPlasTAB:
     # allocates /FUNCT ids for them and moves them into rate_fcts.
     rate_curves: List[Tuple[float, List[Tuple[float, float]]]] = \
         field(default_factory=list)
+    # *MAT_123 (*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY) card-2 extras. Stay
+    # 0 for plain MAT_024, so the writer's /FAIL/TAB1+/FAIL/FLD trailers only
+    # fire for MAT_123 and the base LAW36 emission is unchanged.
+    epsthin: float = 0.0   # thinning strain at failure  → /FAIL/TAB1 P_THICKFAIL
+    epsmaj: float = 0.0    # major in-plane strain at failure → /FAIL/FLD curve
+    numint: float = 0.0    # IPs that must fail before deletion (0 = ALL)
+    lcsr: int = 0          # LCSR strain-rate curve (no LAW36 slot; reported)
+    # _LOG_INTERPOLATION keyword option → LAW36 F_smooth=2 (logarithmic rather
+    # than linear interpolation between the strain-rate yield curves).
+    log_interp: bool = False
 
 
 @dataclass
@@ -302,16 +312,36 @@ class ConstrainedNodeSet:
 
 @dataclass
 class MatAddErosion:
-    """*MAT_ADD_EROSION (non-GISSMO criteria) → an OpenRadioss /FAIL model.
-    Only the strain-based criteria map cleanly: EFFEPS → /FAIL/JOHNSON,
-    MXEPS → /FAIL/TENSSTRAIN. Other criteria and IDAM>=1 (GISSMO/DIEM embedded
-    in the erosion card) are reported but not converted."""
+    """*MAT_ADD_EROSION → an OpenRadioss /FAIL/GENE1 model.
+
+    The whole card-1/card-2 scalar-criteria set maps onto /FAIL/GENE1 (which
+    subsumes what earlier went to /FAIL/TENSSTRAIN + /FAIL/JOHNSON): MXPRES→Pmax,
+    MNPRES→Pmin, SIGP1→SigP1_max, SIGVM→Sig_max/fct_IDsm, MXEPS→Eps_max/fct_IDps,
+    EFFEPS→Eps_eff, MNEPS→Eps_min, VOLEPS→Eps_vol, EPSSH→Eps_s, SIGTH→Sigr,
+    IMPULSE→K, FAILTM→Time_max, NUMFIP→Pthickfail, NCS→NCS. Values are stored
+    post-EXCL (a field equal to a non-zero EXCL has already been zeroed = made
+    inactive, matching GENE1's own 0→±INFINITY inactive sentinel). IDAM≥1
+    (GISSMO/DIEM embedded in the erosion card) is reported, not converted."""
     mid: int
-    effeps: float      # max effective strain at failure  → /FAIL/JOHNSON D1
-    mxeps: float       # max principal strain at failure   → /FAIL/TENSSTRAIN
-    numfip: float
-    idam: int
-    other: List[str]   # names of other active criteria (for the warning)
+    # Card 1
+    excl: float        # exclusion number (kept only for the writer's warning)
+    mxpres: float      # max pressure          → Pmax   (+ABS)
+    mneps: float       # min principal strain  → Eps_min (-ABS)
+    effeps: float      # max effective strain  → Eps_eff (ABS)
+    voleps: float      # max volumetric strain → Eps_vol
+    numfip: float      # failed-IP rule        → Pthickfail
+    ncs: float         # conditions to delete  → NCS
+    # Card 2
+    mnpres: float      # min pressure          → Pmin   (-ABS)
+    sigp1: float       # max principal stress  → SigP1_max
+    sigvm: float       # max eq. stress        → Sig_max (>0) / fct_IDsm (<0=curve)
+    mxeps: float       # max principal strain  → Eps_max (>0) / fct_IDps (<0=curve)
+    epssh: float       # tensorial shear strain→ Eps_s
+    sigth: float       # Tuler-Butcher stress  → Sigr
+    impulse: float     # Tuler-Butcher integral→ K
+    failtm: float      # failure time          → Time_max
+    # Card 3
+    idam: int          # >=1 GISSMO / <0 DIEM embedded damage model (not converted)
 
 
 @dataclass
