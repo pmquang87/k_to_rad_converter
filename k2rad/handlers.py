@@ -2761,8 +2761,9 @@ def handle_initial_velocity_generation(block: Block, state: ConversionState) -> 
     Card 1: ID STYP OMEGA VX VY VZ IVATN ICID
     Card 2: XC YC ZC NX NY NZ PHASE IRIGID
     When NX == -999 the axis is node-defined: the NY/NZ columns hold node ids
-    (origin = node1, direction = node2 − node1). IVATN/PHASE/IRIGID and a
-    nonzero ICID are lossy and warned in the writer.
+    (origin = node1, direction = node2 − node1). A nonzero ICID rotates the
+    velocity/axis to global in the writer; IVATN/PHASE/IRIGID are lossy and
+    warned there.
     """
     raw = block.raw
     offset = 1 if _has_id(block) else 0
@@ -2782,7 +2783,7 @@ def handle_initial_velocity_generation(block: Block, state: ConversionState) -> 
     nx = to_float(f2[3]) if len(f2) > 3 else 0.0
     ny = nz = 0.0
     node1 = node2 = 0
-    if nx < -900.0:      # NX == -999.0 sentinel → node-defined axis
+    if -999.5 < nx < -998.5:   # NX == -999.0 sentinel → node-defined axis
         node1 = to_int(f2[4]) if len(f2) > 4 else 0
         node2 = to_int(f2[5]) if len(f2) > 5 else 0
     else:

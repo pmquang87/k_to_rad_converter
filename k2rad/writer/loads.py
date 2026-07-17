@@ -1213,6 +1213,44 @@ def _vdot(a, b) -> float:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
+def _icid_basis(state: ConversionState, cid: int):
+    """Global-frame orthonormal basis (ex, ey, ez) of the converted /SKEW whose id
+    is *cid* — the local axes of the *DEFINE_COORDINATE_* system, built exactly as
+    _make_skews emits them. Returns None when cid has no converted skew (the
+    velocity/axis then stay global). Pre-rotating with this basis reproduces what
+    Radioss would do if the components carried a Skew_id (as the plain
+    *INITIAL_VELOCITY path does)."""
+    cs = state.coord_sys.get(cid)
+    if cs is not None:
+        origin = (cs.xo, cs.yo, cs.zo)
+        ex = _vnorm(_vsub((cs.xl, cs.yl, cs.zl), origin))
+        if ex is None:
+            return None
+        ez = _vnorm(_vcross(ex, _vsub((cs.xp, cs.yp, cs.zp), origin)))
+        if ez is None:
+            return None
+        return ex, _vcross(ez, ex), ez
+    cn = state.coord_nodes.get(cid)
+    if cn is not None:
+        from .mesh import _skew_axes_from_nodes
+        axes = _skew_axes_from_nodes(state, cn)
+        if axes is None:
+            return None
+        _origin, xax, yax = axes
+        return xax, yax, _vcross(xax, yax)
+    return None
+
+
+def _local_to_global(basis, v):
+    """Express a vector whose components *v* are given in the local *basis*
+    (columns ex, ey, ez, in global coords) back in global coords:
+    g = v0·ex + v1·ey + v2·ez."""
+    ex, ey, ez = basis
+    return (v[0] * ex[0] + v[1] * ey[0] + v[2] * ez[0],
+            v[0] * ex[1] + v[1] * ey[1] + v[2] * ez[1],
+            v[0] * ex[2] + v[1] * ey[2] + v[2] * ez[2])
+
+
 def _emit_frame_fix(frame_id: int, title: str, origin, yaxis, zaxis) -> List[str]:
     """Emit /FRAME/FIX — same card layout and Y'/Z' rule as /SKEW/FIX: the two
     vector cards are the LOCAL Y' and Z' axes (globalyaxis / globalzaxis). The
@@ -1348,6 +1386,9 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
         for e in state.beam_elems:
             if e.pid == pid:
                 nids.update((e.n1, e.n2))
+        for e in state.discrete_elems:      # *ELEMENT_DISCRETE (springs); n2=0=ground
+            if e.pid == pid:
+                nids.update((e.n1, e.n2))
 
     if g.styp == 0 or g.sid == 0:
         return sorted(state.nodes.keys())            # whole model
@@ -1377,12 +1418,19 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
     The rotation axis (through (XC,YC,ZC) along (NX,NY,NZ), or node-defined when
     NX=-999) becomes the frame's local Z; OMEGA → VR about it; the translational
     (VX,VY,VZ) is projected onto the frame's local axes so Radioss re-expands it
-    to the correct global velocity. STYP selects the node group. PHASE, IVATN,
-    IRIGID and a nonzero ICID are lossy and warned.
+    to the correct global velocity. A nonzero ICID rotates VX/VY/VZ and the
+    vector axis from that local system to global (there is no Skew_id field on
+    /INIVEL/AXIS, so it is baked in here). STYP selects the node group. PHASE,
+    IVATN and IRIGID are lossy and warned.
     """
     if not state.inivel_generations:
         return []
     refX, refY, refZ = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    # /FRAME and /SKEW share ONE id namespace in the starter (UDOUBLE over the
+    # combined table), and converted /SKEW ids preserve the LS-DYNA coord cid
+    # verbatim — so a synthesized frame id must never land on one, or the starter
+    # aborts with ERROR 79 DUPLICATE ID.
+    reserved_skew = set(state.coord_sys) | set(state.coord_nodes)
     lines: List[str] = []
     for g in state.inivel_generations:
         if g.phase:
@@ -1397,13 +1445,25 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
             state.warn(
                 f"*INITIAL_VELOCITY_GENERATION IRIGID={g.irigid}: rigid-body "
                 "overwrite flag not modelled")
+        # ICID: VX/VY/VZ and the (vector) rotation axis are given in this local
+        # system. Resolve its global basis and pre-rotate them, mirroring the
+        # plain *INITIAL_VELOCITY path (which attaches a Skew_id and lets Radioss
+        # rotate) — /INIVEL/AXIS has no skew field, so the rotation is baked here.
+        icid_basis = None
         if g.icid:
-            state.warn(
-                f"*INITIAL_VELOCITY_GENERATION ICID={g.icid}: local system for "
-                "VX/VY/VZ not applied - treated as global")
+            icid_basis = _icid_basis(state, g.icid)
+            if icid_basis is None:
+                state.warn(
+                    f"*INITIAL_VELOCITY_GENERATION ICID={g.icid}: no converted "
+                    "/SKEW with that id - VX/VY/VZ and the rotation axis applied "
+                    "in the GLOBAL frame")
+            else:
+                state.warn(
+                    f"*INITIAL_VELOCITY_GENERATION ICID={g.icid}: VX/VY/VZ and the "
+                    f"vector rotation axis rotated from /SKEW/{g.icid} to global")
 
         # ── origin + raw rotation axis vector ───────────────────────────────
-        if g.nx < -900.0:                              # node-defined axis
+        if -999.5 < g.nx < -998.5:                     # NX=-999 → node-defined axis
             n1 = state.nodes.get(g.node1)
             n2 = state.nodes.get(g.node2)
             if n1 is None or n2 is None:
@@ -1412,10 +1472,12 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
                     "missing - rotation axis undefined, OMEGA dropped")
                 origin, N = (g.xc, g.yc, g.zc), (0.0, 0.0, 0.0)
             else:
-                origin = (n1.x, n1.y, n1.z)
+                origin = (n1.x, n1.y, n1.z)      # nodes are global; ICID N/A here
                 N = _vsub((n2.x, n2.y, n2.z), origin)
         else:
             origin, N = (g.xc, g.yc, g.zc), (g.nx, g.ny, g.nz)
+            if icid_basis is not None:
+                N = _local_to_global(icid_basis, N)
 
         # ── build the local frame triad (local Z = rotation axis) ───────────
         nhat = _vnorm(N)
@@ -1436,7 +1498,9 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
             fx = _vnorm(_vcross(fy, fz)) or refX
 
         # ── translational velocity, expressed in the frame's local axes ─────
-        gV = (g.vx, g.vy, g.vz)          # ICID treated as global (warned above)
+        gV = (g.vx, g.vy, g.vz)
+        if icid_basis is not None:       # rotate ICID-local components to global
+            gV = _local_to_global(icid_basis, gV)
         vxt = _vdot(fx, gV)              # local X = FrameVect3
         vyt = _vdot(fy, gV)              # local Y = FrameVect1
         vzt = _vdot(fz, gV)             # local Z = FrameVect2
@@ -1454,6 +1518,8 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
 
         # ── emit /FRAME/FIX then /INIVEL/AXIS ───────────────────────────────
         frame_id = state.next_id()
+        while frame_id in reserved_skew:   # never collide with a converted /SKEW
+            frame_id = state.next_id()
         lines += _emit_frame_fix(frame_id, f"FRAME_INIVEL_GEN_{frame_id}",
                                  origin, fy, fz)
         grnod_id = state.next_id()

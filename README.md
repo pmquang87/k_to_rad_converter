@@ -273,8 +273,10 @@ per-exempt-node velocities are warned + dropped
 `*INITIAL_VELOCITY_GENERATION` → `/INIVEL/AXIS` + a generated `/FRAME/FIX`
 (rotation axis through `(XC,YC,ZC)` along `(NX,NY,NZ)`, or node-defined when
 `NX=-999`); `OMEGA`→`VR` about the axis and translational `VX/VY/VZ` projected
-into the frame; `STYP` all/part-set/part/node-set scoping (`PHASE`, `IVATN`,
-`IRIGID` and a nonzero `ICID` warned + dropped; `_GENERATION_START_TIME` skipped)
+into the frame; a nonzero `ICID` rotates `VX/VY/VZ` and the vector axis from that
+local system to global (else warned + global); `STYP` all/part-set/part/node-set
+scoping (`*ELEMENT_DISCRETE` springs included in the part scan; `PHASE`, `IVATN`,
+`IRIGID` warned + dropped; `_GENERATION_START_TIME` skipped)
 `*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` (ILOC=0, LS-DYNA's global
 default — lossless incl. σzz, plastic strain and the through-thickness
 position) or the local `/INISHE/STRS_F` for ILOC=1 (σzz/T warned + dropped).

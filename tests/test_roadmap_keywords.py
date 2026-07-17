@@ -11,7 +11,10 @@ import unittest
 from k2rad import convert
 from k2rad.parser import parse_k_file
 from k2rad.handlers import dispatch, _sample_curve_function
-from k2rad.state import ConversionState
+from k2rad.state import (
+    ConversionState, PartData, DiscreteElem, InitialVelocityGeneration,
+)
+from k2rad.writer.loads import _inivel_gen_group_nodes
 
 
 def _convert(deck: str):
@@ -289,6 +292,13 @@ def _group_ids(starter: str, inivel_prefix: str, gnod_index: int):
     return sorted(ids)
 
 
+def _all_header_ids(starter: str, prefix: str):
+    """Trailing ids of every header line starting with *prefix* (e.g. every
+    '/INIVEL/AXIS/<id>' or '/FRAME/FIX/<id>')."""
+    return [int(ln.strip().rsplit("/", 1)[1])
+            for ln in starter.splitlines() if ln.startswith(prefix)]
+
+
 class InitialVelocitySetFormTests(unittest.TestCase):
     def _deck(self, card1: str, card2: str) -> str:
         return IV_MESH + "*INITIAL_VELOCITY\n" + card1 + "\n" + card2 + "\n" + IV_TAIL
@@ -379,6 +389,22 @@ class InitialVelocitySetFormTests(unittest.TestCase):
         deck = self._deck(_card10(9, 0, 0, 0, 0), _card10(5.0, 0.0, 0.0))
         st = _dispatch(deck)
         self.assertNotIn("INITIAL_VELOCITY", st.skipped_keywords)
+
+    def test_two_base_blocks_distinct_ids(self):
+        # Two *INITIAL_VELOCITY blocks in one deck must get unique /INIVEL ids
+        # and their own /GRNOD groups (no shared state between blocks).
+        deck = (IV_MESH
+                + "*INITIAL_VELOCITY\n" + _card10(9, 0, 0, 0, 0) + "\n"
+                + _card10(5.0, 0.0, 0.0) + "\n"
+                + "*INITIAL_VELOCITY\n" + _card10(10, 0, 0, 0, 0) + "\n"
+                + _card10(0.0, 6.0, 0.0) + "\n" + IV_TAIL)
+        _, s = _convert(deck)
+        tra_ids = _all_header_ids(s, "/INIVEL/TRA/")
+        self.assertEqual(len(tra_ids), 2)
+        self.assertEqual(len(set(tra_ids)), 2)          # distinct
+        # each block keeps its own node scope: set 9 = {1,2,3,4}, set 10 = {3,4}
+        self.assertEqual(sorted(_all_header_ids(s, "/GRNOD/NODE/")),
+                         sorted(set(_all_header_ids(s, "/GRNOD/NODE/"))))
 
 
 class InitialVelocityGenerationTests(unittest.TestCase):
@@ -474,6 +500,102 @@ class InitialVelocityGenerationTests(unittest.TestCase):
         st = _dispatch(deck)
         g = st.inivel_generations[0]
         self.assertEqual((g.node1, g.node2), (1, 5))
+
+    def test_styp_part_set_scope(self):
+        # STYP=1 (part SET): set 20 = {part 1} → all of part 1's nodes {1..8}.
+        setpart = "*SET_PART_LIST\n" + "        20\n" + "         1\n"
+        deck = (IV_MESH + setpart + "*INITIAL_VELOCITY_GENERATION\n"
+                + _card10(20, 1, 0.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + _card10(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0) + "\n" + IV_TAIL)
+        _, s = _convert(deck)
+        self.assertEqual(_group_ids(s, "/INIVEL/AXIS/", 2), [1, 2, 3, 4, 5, 6, 7, 8])
+
+    def test_icid_rotates_velocity_and_axis(self):
+        # ICID=3 is a system with local X = global Y (a 90° spin about Z), so the
+        # local VX=100 must re-express to GLOBAL (0,100,0): the /INIVEL/AXIS card
+        # (projected onto the global-Z frame) must read Vyt=100, not Vxt=100.
+        coord = ("*DEFINE_COORDINATE_SYSTEM\n"
+                 + _card10(3, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) + "\n"
+                 + _card10(-1.0, 0.0, 0.0) + "\n")
+        deck = (IV_MESH + coord + "*INITIAL_VELOCITY_GENERATION\n"
+                + _card10(1, 2, 5.0, 100.0, 0.0, 0.0, 0, 3) + "\n"
+                + _card10(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0) + "\n" + IV_TAIL)
+        res, s = _convert(deck)
+        frame = _block(s, _hdr(s, "/FRAME/FIX/"))
+        self.assertEqual(_floats(frame[3]), [0.0, 0.0, 1.0])       # axis stays global Z
+        axis = _block(s, _hdr(s, "/INIVEL/AXIS/"))
+        self.assertEqual(_floats(axis[2]), [0.0, 100.0, 0.0, 5.0])  # rotated: Vyt=100
+        self.assertTrue(any("/SKEW/3" in w and "rotated" in w for w in res.warnings))
+
+    def test_icid_generation_no_skew_stays_global(self):
+        # ICID with no converted /SKEW → warn + components used verbatim (global).
+        deck = self._deck(_card10(1, 2, 5.0, 100.0, 0.0, 0.0, 0, 7),
+                          _card10(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0))
+        res, s = _convert(deck)
+        self.assertTrue(any("ICID=7" in w and "GLOBAL" in w.upper()
+                            for w in res.warnings))
+        axis = _block(s, _hdr(s, "/INIVEL/AXIS/"))
+        self.assertEqual(_floats(axis[2]), [100.0, 0.0, 0.0, 5.0])  # unrotated
+
+    def test_zero_axis_with_omega_warns(self):
+        # NX=NY=NZ=0 but OMEGA≠0 → axis undefined; OMEGA dropped, VR=0, translation
+        # still applied.
+        deck = self._deck(_card10(1, 2, 5.0, 3.0, 0.0, 0.0, 0, 0),
+                          _card10(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0))
+        res, s = _convert(deck)
+        self.assertTrue(any("no rotation axis" in w for w in res.warnings))
+        axis = _block(s, _hdr(s, "/INIVEL/AXIS/"))
+        self.assertEqual(_floats(axis[2])[3], 0.0)                 # VR = 0
+
+    def test_node_axis_missing_node_warns(self):
+        # Node-defined axis whose second node is absent → axis undefined + warn.
+        deck = self._deck(_card10(0, 0, 0.0, 2.0, 0.0, 0.0, 0, 0),
+                          _card10(0.0, 0.0, 0.0, -999.0, 1, 999, 0, 0))
+        res, _ = _convert(deck)
+        self.assertTrue(any("axis node" in w and "missing" in w
+                            for w in res.warnings))
+
+    def test_discrete_element_part_nodes(self):
+        # STYP=2 on a part made of *ELEMENT_DISCRETE: the spring's nodes must be
+        # collected (regression for the shell/solid/beam-only scan).
+        st = ConversionState()
+        st.parts = {2: PartData(2, "spring", 0, 0)}
+        st.discrete_elems = [DiscreteElem(1, 2, 5, 6)]
+        g = InitialVelocityGeneration(
+            sid=2, styp=2, omega=0.0, vx=0.0, vy=0.0, vz=0.0, ivatn=0, icid=0,
+            xc=0.0, yc=0.0, zc=0.0, nx=0.0, ny=0.0, nz=1.0, node1=0, node2=0,
+            phase=0, irigid=0)
+        self.assertEqual(_inivel_gen_group_nodes(st, g), [5, 6])
+
+    def test_two_generations_distinct_ids(self):
+        # Two generation blocks → two distinct frames and two distinct axis cards.
+        g1 = ("*INITIAL_VELOCITY_GENERATION\n"
+              + _card10(1, 2, 5.0, 10.0, 0.0, 0.0, 0, 0) + "\n"
+              + _card10(1.0, 2.0, 3.0, 0.0, 0.0, 1.0, 0, 0) + "\n")
+        g2 = ("*INITIAL_VELOCITY_GENERATION\n"
+              + _card10(10, 3, 0.0, 0.0, 7.0, 0.0, 0, 0) + "\n"
+              + _card10(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0, 0) + "\n")
+        _, s = _convert(IV_MESH + g1 + g2 + IV_TAIL)
+        frames = _all_header_ids(s, "/FRAME/FIX/")
+        axes = _all_header_ids(s, "/INIVEL/AXIS/")
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(len(set(frames)), 2)
+        self.assertEqual(len(set(axes)), 2)
+
+    def test_frame_id_avoids_skew_collision(self):
+        # A *DEFINE_COORDINATE_SYSTEM with cid in the auto-id range (90001) must
+        # not collide with a synthesized /FRAME id (shared /SKEW+/FRAME namespace →
+        # starter ERROR 79). The frame must take some other id.
+        coord = ("*DEFINE_COORDINATE_SYSTEM\n"
+                 + _card10(90001, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                 + _card10(0.0, 1.0, 0.0) + "\n")
+        deck = (IV_MESH + coord + "*INITIAL_VELOCITY_GENERATION\n"
+                + _card10(1, 2, 0.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + _card10(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0) + "\n" + IV_TAIL)
+        _, s = _convert(deck)
+        self.assertIn("/SKEW/FIX/90001", s)
+        self.assertNotIn("/FRAME/FIX/90001", s)      # frame dodged the skew id
+        self.assertTrue(_all_header_ids(s, "/FRAME/FIX/"))  # a frame was emitted
 
     def test_generation_start_time_stays_skipped(self):
         deck = (IV_MESH + "*INITIAL_VELOCITY_GENERATION_START_TIME\n"
