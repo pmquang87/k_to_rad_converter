@@ -1955,9 +1955,16 @@ class Tet10OrderingTests(unittest.TestCase):
     def test_no_tet10_is_noop(self):
         from k2rad.writer import _normalize_tet10_ordering
         state = ConversionState()
-        state.nodes = {i: NodeData(float(i), 0.0, 0.0) for i in range(1, 6)}
-        state.solid_elems = [SolidElem(1, 1, [1, 2, 3, 4])]        # tet4
-        state.shell_elems = [ShellElem(2, 1, [1, 2, 3, 4])]
+        state.nodes = {i: NodeData(float(i), 0.0, 0.0) for i in range(1, 9)}
+        # tet4 (4), penta6 (6) and hex8 (8) all lack the 10-node signature, so the
+        # apex permutation must never touch them — an 8/6-node solid in a mixed
+        # deck stays byte-identical (the permutation only ever filters len==10).
+        state.solid_elems = [
+            SolidElem(1, 1, [1, 2, 3, 4]),                    # tet4
+            SolidElem(2, 1, [1, 2, 3, 4, 5, 6]),              # penta6
+            SolidElem(3, 1, [1, 2, 3, 4, 5, 6, 7, 8]),        # hex8
+        ]
+        state.shell_elems = [ShellElem(4, 1, [1, 2, 3, 4])]
         before = [list(e.nodes) for e in state.solid_elems]
         self.assertEqual(_normalize_tet10_ordering(state), 0)
         self.assertEqual([list(e.nodes) for e in state.solid_elems], before)
@@ -1979,6 +1986,107 @@ class Tet10OrderingTests(unittest.TestCase):
         self.assertTrue(
             any("ambiguous" in w and "LS-DYNA" in w for w in state.warnings),
             f"expected a loud ambiguity warning in {state.warnings}")
+
+    # ── helper: build a disjoint, shifted tet10 in a chosen apex convention ───
+    @staticmethod
+    def _apex_tet(base, x0, order):
+        """A single well-shaped tet10 (node ids base..base+9, translated by *x0*)
+        whose apex midsides are laid out in ``"dyna"`` or ``"radioss"`` order.
+        Returns ({nid: NodeData}, SolidElem)."""
+        c = {0: (0.0, 0.0, 0.0), 1: (1.0, 0.0, 0.0),
+             2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
+
+        def mid(a, b):
+            return NodeData((c[a][0] + c[b][0]) / 2 + x0,
+                            (c[a][1] + c[b][1]) / 2,
+                            (c[a][2] + c[b][2]) / 2)
+
+        nodes = {base + k: NodeData(c[k][0] + x0, c[k][1], c[k][2]) for k in c}
+        nodes[base + 4] = mid(0, 1)          # base midsides (agree)
+        nodes[base + 5] = mid(1, 2)
+        nodes[base + 6] = mid(0, 2)
+        if order == "dyna":                  # apex slots 8/9/10 = mid(2,4)/(3,4)/(1,4)
+            nodes[base + 7] = mid(1, 3)
+            nodes[base + 8] = mid(2, 3)
+            nodes[base + 9] = mid(0, 3)
+        else:                                # radioss = mid(1,4)/(2,4)/(3,4)
+            nodes[base + 7] = mid(0, 3)
+            nodes[base + 8] = mid(1, 3)
+            nodes[base + 9] = mid(2, 3)
+        return nodes, SolidElem(base, 1, [base + k for k in range(10)])
+
+    # ── 9. majority vote: a stray unclassifiable element cannot flip a Radioss
+    #      mesh into a wrongful permutation (all-or-nothing → majority) ─────────
+    def test_radioss_majority_survives_stray_ambiguous(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        na, ea = self._apex_tet(1, 0.0, "radioss")
+        nb, eb = self._apex_tet(11, 10.0, "radioss")
+        state.nodes = {**na, **nb}
+        # A single coordinate-less (ambiguous) sliver element ids 21..30.
+        for i, xyz in zip(range(21, 25),
+                          [(0, 0, 5), (1, 0, 5), (0, 1, 5), (0, 0, 6)]):
+            state.nodes[i] = NodeData(*xyz)                # corners only; apex absent
+        ec = SolidElem(21, 1, list(range(21, 31)))
+        state.solid_elems = [ea, eb, ec]
+        before = [list(e.nodes) for e in state.solid_elems]
+        n = _normalize_tet10_ordering(state)
+        self.assertEqual(n, 0, "one ambiguous element wrongly flipped a Radioss mesh")
+        self.assertEqual([list(e.nodes) for e in state.solid_elems], before)
+        self.assertTrue(
+            any("majority" in w and "NO permutation" in w for w in state.warnings),
+            f"expected a Radioss-majority no-op note in {state.warnings}")
+
+    # ── 10. majority vote the other way: dyna-majority permutes ALL + warns ───
+    def test_dyna_majority_permutes_all_with_mixed_warning(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        na, ea = self._apex_tet(1, 0.0, "dyna")
+        nb, eb = self._apex_tet(11, 10.0, "dyna")
+        nc, ec = self._apex_tet(21, 20.0, "radioss")       # the minority
+        state.nodes = {**na, **nb, **nc}
+        state.solid_elems = [ea, eb, ec]
+        n = _normalize_tet10_ordering(state)
+        self.assertEqual(n, 3)                              # 2 dyna > 1 radioss → all
+        self.assertEqual(ea.nodes, [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])
+        self.assertEqual(eb.nodes, [11, 12, 13, 14, 15, 16, 17, 20, 18, 19])
+        self.assertEqual(ec.nodes, [21, 22, 23, 24, 25, 26, 27, 30, 28, 29])
+        self.assertTrue(
+            any("not uniform" in w for w in state.warnings),
+            f"expected a mixed-order warning in {state.warnings}")
+
+    # ── 11. off-edge apex midside → ambiguous (distance guard, not None) ──────
+    def test_off_edge_apex_classifies_ambiguous(self):
+        from k2rad.topology import classify_tet10_apex_order
+        corners = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        # First apex node sits ~half an edge off every apex-edge midpoint.
+        off = [(0.5, 0.5, 0.5), (0.0, 0.5, 0.5), (0.0, 0.0, 0.5)]
+        self.assertEqual(classify_tet10_apex_order(corners, off), "ambiguous")
+
+    # ── 12. genuinely inconsistent shared midside trips the disagree verifier ─
+    def test_inconsistent_shared_midside_trips_verifier(self):
+        from k2rad.writer.mesh import _warn_tet10_order_inconsistent
+        state = ConversionState()
+        # Two tets both name node 100 as their slot-5 base midside (mid of corners
+        # 1&2), but their corner geometry implies DIFFERENT midpoints for it — an
+        # inconsistency no single apex permutation can repair; the straight-edge
+        # snap would collapse node 100, so the verifier must flag it.
+        state.nodes = {
+            1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),        # tet A → mid (0.5,0,0)
+            3: NodeData(0, 1, 0), 4: NodeData(0, 0, 1),
+            11: NodeData(0, 0, 0), 12: NodeData(10, 0, 0),     # tet B → mid (5,0,0)
+            13: NodeData(0, 1, 0), 14: NodeData(0, 0, 1),
+            100: NodeData(0.5, 0, 0),                          # the shared midside
+        }
+        for i in range(201, 211):                              # distinct dummy midsides
+            state.nodes[i] = NodeData(float(i), 0.0, 0.0)
+        eA = SolidElem(1, 1, [1, 2, 3, 4, 100, 201, 202, 203, 204, 205])
+        eB = SolidElem(2, 1, [11, 12, 13, 14, 100, 206, 207, 208, 209, 210])
+        disagree = _warn_tet10_order_inconsistent(state, [eA, eB])
+        self.assertGreaterEqual(disagree, 1)
+        self.assertTrue(
+            any("verifier" in w and "conflicting" in w for w in state.warnings),
+            f"expected a shared-midside inconsistency warning in {state.warnings}")
 
 
 # A model with a free reference node (node 99, in no element) under implicit.
@@ -3177,6 +3285,70 @@ class SurfaceFacetTests(unittest.TestCase):
         st.parts = {7: PartData(7, "t", 1, 1)}
         _verts, faces = _surface_triangles(st, {7})
         self.assertEqual(len(faces), 2)
+
+
+class SuggestGapminNormalizesTet10Tests(unittest.TestCase):
+    """--suggest-gapmin (gapmin.analyze_file) must normalize LS-DYNA tet10 apex
+    midsides to Radioss order BEFORE measuring, so the clearance/Gapmin it prints
+    matches the surface the engine builds and the value --auto-gapmin bakes into
+    the converted deck. Regression: the read-only path was left on the un-permuted
+    DYNA connectivity and reported a geometrically wrong surface."""
+
+    def _write(self, deck):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t10.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return path
+
+    def test_analyze_file_invokes_normalization(self):
+        # Wiring lock: analyze_file must run the same _normalize_tet10_ordering pass
+        # convert()/--auto-gapmin runs. It imports the symbol lazily from
+        # writer.mesh, so patch it there.
+        import k2rad.writer.mesh as _wm
+        from k2rad.gapmin import analyze_file
+        calls = []
+        orig = _wm._normalize_tet10_ordering
+
+        def spy(state):
+            calls.append(state)
+            return orig(state)
+
+        _wm._normalize_tet10_ordering = spy
+        self.addCleanup(setattr, _wm, "_normalize_tet10_ordering", orig)
+        analyze_file(self._write(TET10_DYNA_K))
+        self.assertEqual(len(calls), 1,
+                         "analyze_file did not normalize tet10 ordering before measuring")
+
+    def test_suggest_surface_matches_true_geometry_only_after_normalize(self):
+        # Geometric consequence: TET10_DYNA_K and the Radioss-ordered TET10_K are the
+        # SAME physical tet (identical corner + midside coordinates, different
+        # connectivity order). After normalization the suggest-path surface facets
+        # (compared by GEOMETRY, not node id) match the true Radioss surface; on the
+        # un-normalized DYNA connectivity they do NOT (apex midsides face off-edge).
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.gapmin import _surface_triangles
+        from k2rad.writer.mesh import _normalize_tet10_ordering
+
+        def surface(deck, normalize):
+            st = ConversionState()
+            for blk in parse_k_file(self._write(deck)):
+                dispatch(blk, st)
+            if normalize:
+                _normalize_tet10_ordering(st)
+            verts, faces = _surface_triangles(st, {1})
+            return {frozenset(tuple(round(c, 6) for c in verts[v]) for v in tri)
+                    for tri in faces}
+
+        true_surface = surface(TET10_K, normalize=True)       # already Radioss
+        norm_dyna = surface(TET10_DYNA_K, normalize=True)     # the fixed suggest path
+        raw_dyna = surface(TET10_DYNA_K, normalize=False)     # the pre-fix behaviour
+        self.assertEqual(norm_dyna, true_surface,
+                         "normalized DYNA suggest-surface must equal the true surface")
+        self.assertNotEqual(raw_dyna, true_surface,
+                            "un-normalized DYNA suggest-surface should be wrong (the bug)")
 
 
 class SuggestGapminTests(unittest.TestCase):

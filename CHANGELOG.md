@@ -275,13 +275,20 @@ Prior history (before this changelog was introduced) is summarized in the
     sub-volume).
 
   The source order is detected geometrically per element (nearest apex-edge
-  midpoint); an already-Radioss/Abaqus (C3D10) deck is left untouched, while
+  midpoint); the whole mesh then takes one convention chosen by **majority** of
+  the classified elements, so a stray sliver/degenerate element that fails to
+  classify can no longer flip a clearly-Radioss/Abaqus (C3D10) deck into a
+  wrongful permutation (an already-Radioss deck stays untouched). Ties and
   ambiguous / mixed / coordinate-less meshes default to the LS-DYNA→Radioss
   permutation **with a loud warning** (matching every real LS-DYNA deck and
-  Altair's hm_reader) plus a shared-midside consistency verifier. The neutral
-  `topology.TET10_MIDEDGE` remains the single Radioss-order source of truth for
-  the snap pass, gapmin faceting, and emit; `--tet10-to-tet4` keeps the (never
-  permuted) corner nodes and is unaffected.
+  Altair's hm_reader) plus a shared-midside consistency verifier. The read-only
+  `--suggest-gapmin` inspection path (`gapmin.analyze_file`) now runs the same
+  normalization before measuring, so the clearance/Gapmin it prints matches the
+  surface the engine builds and the value `--auto-gapmin` bakes into the deck.
+  The neutral `topology.TET10_MIDEDGE` remains the single Radioss-order source of
+  truth for the snap pass, gapmin faceting, and emit; `--tet10-to-tet4` keeps the
+  (never permuted) corner nodes and is unaffected (its /TETRA10-repair warnings
+  are suppressed, since it emits no /TETRA10).
 - `*LOAD_SEGMENT_SET` pressure loads were silently dropped; now converted to
   `/PLOAD`.
 - `*EOS_LINEAR_POLYNOMIAL` now warns when the `C6·μ²·E` term is nonzero (it has

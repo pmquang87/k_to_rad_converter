@@ -541,13 +541,16 @@ def _normalize_tet10_ordering(state: ConversionState) -> int:
 
     Detection is geometric and per element (nearest apex-edge midpoint, from the
     tet10_order_sweep.py diagnosis). The whole mesh is then normalized to one
-    convention:
+    convention chosen by **majority** of the classified elements:
 
-    * unanimous Radioss/Abaqus order → no-op (a native C3D10 deck stays untouched);
+    * majority Radioss/Abaqus order → no-op (a native C3D10 deck stays untouched,
+      even if a stray sliver/degenerate element fails to classify);
     * otherwise → permute every element's apex slots via ``TET10_DYNA_TO_RADIOSS``
       (LS-DYNA→Radioss). Mixed / ambiguous / coordinate-less meshes take the
       LS-DYNA default **with a loud warning** — every real ``*ELEMENT_SOLID`` deck
       is LS-DYNA-ordered and Altair's hm_reader permutes on import the same way.
+      A majority-vote (not all-or-nothing) means a few unclassifiable elements
+      cannot flip a clearly-ordered mesh into a wrongful permutation.
 
     Idempotent via ``state.tet10_normalized`` (the permutation is a 3-cycle, so a
     blind re-run would corrupt the connectivity). Returns the number of
@@ -573,37 +576,65 @@ def _normalize_tet10_ordering(state: ConversionState) -> int:
         else:
             n_ambiguous += 1
 
-    # Unanimous Radioss/Abaqus order → already correct, do not touch it.
-    if n_radioss > 0 and n_dyna == 0 and n_ambiguous == 0:
-        state.warn(
-            f"{n_radioss} /TETRA10 element(s): detected Radioss/Abaqus (C3D10) "
-            "apex midside order already; no permutation applied."
-        )
+    # On a --tet10-to-tet4 run the midsides are about to be discarded and only the
+    # order-invariant corners survive, so the apex permutation is a geometric no-op
+    # for the emitted deck — suppress the (otherwise misleading) /TETRA10-repair
+    # warnings. The pass itself still runs so the upstream --auto-gapmin faceting
+    # sees Radioss order.
+    quiet = state.options.tet10_to_tet4
+
+    # Decide ONE convention for the whole mesh by MAJORITY of the classified
+    # (non-ambiguous) elements. A single uniform ordering is mandatory: the snap
+    # pass mutates SHARED midside nodes in place, so mixing per-element orderings on
+    # a shared node would itself collapse it. Majority (not all-or-nothing) means a
+    # handful of sliver/ambiguous/stray-ordered elements cannot flip a clearly-
+    # Radioss mesh into a wrongful permutation (or vice-versa) — a single degenerate
+    # tet on an Abaqus-exported deck no longer corrupts every correct element. Ties
+    # and the all-ambiguous / coordinate-less case default to the LS-DYNA permutation
+    # (every real *ELEMENT_SOLID deck is LS-DYNA-ordered and Altair's hm_reader
+    # permutes unconditionally on import).
+    if n_radioss > n_dyna:
+        # Majority Radioss/Abaqus (C3D10) order → already correct, do not permute.
+        if not quiet:
+            if n_dyna or n_ambiguous:
+                state.warn(
+                    f"/TETRA10 apex midside order: {n_radioss} element(s) read as "
+                    f"Radioss/Abaqus (C3D10) order (majority), {n_dyna} as LS-DYNA, "
+                    f"{n_ambiguous} ambiguous/coordinate-less. Treating the mesh as "
+                    "Radioss-ordered and applying NO permutation. If some elements "
+                    "are genuinely LS-DYNA-ordered, verify their /TETRA10 volume."
+                )
+            else:
+                state.warn(
+                    f"{n_radioss} /TETRA10 element(s): detected Radioss/Abaqus "
+                    "(C3D10) apex midside order already; no permutation applied."
+                )
         return 0
 
     for e in tet10s:
         e.nodes = [e.nodes[p] for p in _TET10_DYNA_TO_RADIOSS] + list(e.nodes[10:])
     n = len(tet10s)
 
-    if n_ambiguous or (n_dyna and n_radioss):
-        state.warn(
-            f"/TETRA10 apex midside order is not uniform: {n_dyna} element(s) read "
-            f"as LS-DYNA order, {n_radioss} as Radioss, {n_ambiguous} "
-            "ambiguous/coordinate-less. Defaulting ALL to the LS-DYNA→Radioss apex "
-            "permutation (mid(2,4)/mid(3,4)/mid(1,4) → mid(1,4)/mid(2,4)/mid(3,4)) "
-            "— this matches every real *ELEMENT_SOLID deck and Altair hm_reader. If "
-            "this deck is genuinely Abaqus/Radioss-ordered, apex nodes 8/9/10 are "
-            "now wrong; verify the /TETRA10 volume."
-        )
-    else:
-        state.warn(
-            f"{n} /TETRA10 element(s): detected LS-DYNA *ELEMENT_SOLID apex midside "
-            "order; permuted apex nodes 8/9/10 to Radioss /TETRA10 order "
-            "(mid(1,4)/mid(2,4)/mid(3,4)) so the snap/gapmin/emit passes and the "
-            "engine agree (fixes ERROR 558 storm + silent ~−30% /TETRA10 volume)."
-        )
-
-    _warn_tet10_order_inconsistent(state, tet10s)
+    if not quiet:
+        if n_ambiguous or n_radioss:
+            state.warn(
+                f"/TETRA10 apex midside order is not uniform: {n_dyna} element(s) "
+                f"read as LS-DYNA order, {n_radioss} as Radioss, {n_ambiguous} "
+                "ambiguous/coordinate-less. Defaulting ALL to the LS-DYNA→Radioss "
+                "apex permutation (mid(2,4)/mid(3,4)/mid(1,4) → mid(1,4)/mid(2,4)/"
+                "mid(3,4)) — this matches every real *ELEMENT_SOLID deck and Altair "
+                "hm_reader. If this deck is genuinely Abaqus/Radioss-ordered, apex "
+                "nodes 8/9/10 are now wrong; verify the /TETRA10 volume."
+            )
+        else:
+            state.warn(
+                f"{n} /TETRA10 element(s): detected LS-DYNA *ELEMENT_SOLID apex "
+                "midside order; permuted apex nodes 8/9/10 to Radioss /TETRA10 "
+                "order (mid(1,4)/mid(2,4)/mid(3,4)) so the snap/gapmin/emit passes "
+                "and the engine agree (fixes ERROR 558 storm + silent ~−30% "
+                "/TETRA10 volume)."
+            )
+        _warn_tet10_order_inconsistent(state, tet10s)
     return n
 
 

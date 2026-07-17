@@ -816,6 +816,15 @@ def analyze_file(input_path: str, factor: float = DEFAULT_GAPMIN_FACTOR
     state = ConversionState()
     for block in blocks:
         dispatch(block, state)
+    # Normalize LS-DYNA *ELEMENT_SOLID tet10 apex midsides to Radioss /TETRA10
+    # order BEFORE measuring, exactly as the convert()/--auto-gapmin path does
+    # (k2rad/__init__.py). suggest_gapmins → _surface_triangles reads the midside
+    # slots through the Radioss mid-edge map, so an un-normalized LS-DYNA deck would
+    # face the tet10 boundary off the wrong edges and report a clearance/Gapmin that
+    # disagrees with the value --auto-gapmin bakes into the actual deck. Lazy import
+    # avoids an import cycle (writer.mesh loads only topology/state).
+    from .writer.mesh import _normalize_tet10_ordering
+    _normalize_tet10_ordering(state)
     return suggest_gapmins(state, factor)
 
 

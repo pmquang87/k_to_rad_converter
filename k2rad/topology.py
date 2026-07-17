@@ -20,7 +20,7 @@ from typing import List, Optional, Sequence, Tuple
 # engine's own s10mass3.F / dim_s10edg.F integration tables expect.
 #
 # LS-DYNA *ELEMENT_SOLID differs on the three APEX midsides only:
-#   LS-DYNA node8=mid(2,4), node9=mid(3,4), node10=mid(1,4)  (see TET10_MIDEDGE_DYNA).
+#   LS-DYNA node8=mid(2,4), node9=mid(3,4), node10=mid(1,4).
 # A LS-DYNA deck's connectivity is permuted to this Radioss order by
 # writer.mesh._normalize_tet10_ordering (via TET10_DYNA_TO_RADIOSS) BEFORE any of
 # those consumers run, so they only ever see Radioss-ordered midsides.
@@ -33,13 +33,11 @@ TET10_MIDEDGE = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 0, 3), (8, 1, 3), (9, 2, 3
 # Convenience: {frozenset(cornerA, cornerB): mid-node index} for edge lookups.
 TET10_EDGEMID = {frozenset((a, b)): m for (m, a, b) in TET10_MIDEDGE}
 
-# The LS-DYNA *ELEMENT_SOLID ten-node mid-edge map (same 0-based form). Base
-# midsides 5/6/7 agree with Radioss; the three apex midsides 8/9/10 differ:
-#   node8=mid(2,4), node9=mid(3,4), node10=mid(1,4).
-# Kept for geometric detection/verification only — the emitted deck always uses
-# TET10_MIDEDGE (Radioss) after normalization.
-TET10_MIDEDGE_DYNA = [(4, 0, 1), (5, 1, 2), (6, 0, 2), (7, 1, 3), (8, 2, 3), (9, 0, 3)]
-
+# (The LS-DYNA apex order — node8=mid(2,4), node9=mid(3,4), node10=mid(1,4) — is
+# documented above; it is never materialized as a map because detection is purely
+# geometric via classify_tet10_apex_order and the permutation below is the only
+# action ever applied.)
+#
 # Permutation that maps an LS-DYNA-ordered 10-node connectivity to Radioss order,
 # as new = [nodes[p] for p in TET10_DYNA_TO_RADIOSS]. Corners 1-4 and base
 # midsides 5/6/7 are identity; the three apex slots cycle:
