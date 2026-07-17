@@ -11,6 +11,28 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Element formulation / hourglass**
+  - `*HOURGLASS` (new handler) + the `*PART` `HGID` field + a now-honored
+    `*CONTROL_HOURGLASS` → **per-part hourglass control** on `/PROP/SOLID`
+    (and `/PROP/SHELL`), following the `dyna2rad`
+    `ConvertProp::ConvertEntities` mapping. Solid `IHQ` → `Isolid`
+    (`1/2/3`→`1`, `4/5`→`5`, `6/7`→`24`) and `QM`/`QH` → the hourglass
+    coefficient `h`; the map is gated to non-tetra, non-ALE sections, and
+    `IHQ 0/8/9/10` keep the section's ELFORM `Isolid` (warned — no faithful
+    Radioss formulation). A part's `*HOURGLASS` **overrides** the global
+    `*CONTROL_HOURGLASS`; `HGID=0`, or a dangling reference (warned loudly),
+    falls back to it. Since k2rad `/PROP`s are per-`*SECTION`, a part whose
+    effective hourglass differs from its section's base is split into a
+    dedicated `/PROP` (the same split mechanism as the LAW128 orthotropy
+    props — the shared section prop is retained for the section's other
+    parts, suppressed only when every part on it was split). Shells carry the
+    coefficient into `Hm/Hf/Hr` (clamped to the Radioss `0.05` limit) but keep
+    the ELFORM-selected `Ishell` `12` (QBAT) / `24` (QEPH), for which the
+    coefficient is physically inert (warned; no `IHQ`→`Ishell` map is
+    invented). Previously `*CONTROL_HOURGLASS` was parsed then silently
+    dropped and every `/PROP` hourglass field was hard-zeroed to the Radioss
+    defaults. Starter- and engine-validated (0 errors: `Isolid 5` accepted
+    with `h` active, `Isolid 24` from the global card).
 - **Connectors**
   - `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
     `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`

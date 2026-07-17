@@ -37,7 +37,7 @@ from .state import (
     AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
-    ControlHourglass, ControlImplicitAuto, ControlImplicitDynamics,
+    ControlHourglass, HourglassDef, ControlImplicitAuto, ControlImplicitDynamics,
     ControlOutput, ControlShell, ControlSolid,
     ControlImplicitGeneral, ControlImplicitSolution, ControlImplicitEigenvalue,
     ControlTermination, ControlTimestep,
@@ -329,10 +329,13 @@ def handle_part(block: Block, state: ConversionState) -> None:
         pid   = to_int(f[0])
         secid = to_int(f[1])
         mid   = to_int(f[2])
+        # HGID (field 5, cols 41-50) → the *HOURGLASS card overriding
+        # *CONTROL_HOURGLASS for this part (0 = global card / defaults).
+        hgid  = to_int(f[4]) if len(f) > 4 else 0
         if pid <= 0:
             state.warn(f"*PART: data card with no part id – skipped (title='{title}')")
             continue
-        state.parts[pid] = PartData(pid, title, secid, mid)
+        state.parts[pid] = PartData(pid, title, secid, mid, hgid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1880,6 +1883,27 @@ def handle_control_hourglass(block: Block, state: ConversionState) -> None:
     ihq = to_int(f[0])   if f else 1
     qh  = to_float(f[1]) if len(f) > 1 else 0.1
     state.ctrl_hourglass = ControlHourglass(ihq, qh)
+
+
+def handle_hourglass(block: Block, state: ConversionState) -> None:
+    """*HOURGLASS: HGID IHQ QM [IBQ Q1 Q2 QB|VDC QW]. Only HGID/IHQ/QM are
+    consumed (dyna2rad reads exactly these; the bulk-viscosity and shell
+    coefficients are dropped). QM defaults to 0.10 when blank; IHQ to 0 (the
+    cfg default — the unmapped formulations 0/8/9/10 keep the section's
+    ELFORM-derived Isolid, warned at property-emit time)."""
+    raw = block.raw
+    if not raw:
+        return
+    f = _card(raw, 0, fixed=True, n=8, w=10)
+    hgid = to_int(f[0]) if f else 0
+    if hgid <= 0:
+        state.warn("*HOURGLASS: card with no HGID – skipped")
+        return
+    ihq = to_int(f[1]) if len(f) > 1 else 0
+    # A genuinely blank QM field means "LS-DYNA default 0.10"; an explicit 0.0
+    # is kept as 0.0 (Radioss then applies its own h default for Isolid 1/2).
+    qm = to_float(f[2]) if (len(f) > 2 and f[2].strip()) else 0.10
+    state.hourglass_defs[hgid] = HourglassDef(hgid, ihq, qm)
 
 
 def handle_control_implicit_auto(block: Block, state: ConversionState) -> None:
@@ -3944,6 +3968,7 @@ HANDLERS = {
     "ELEMENT_SOLID":                          handle_element_solid,
     "ELEMENT_BEAM":                           handle_element_beam,
     "PART":                                   handle_part,
+    "HOURGLASS":                              handle_hourglass,
 
     # Sections
     "SECTION_SHELL":                          handle_section_shell,

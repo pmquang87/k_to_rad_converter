@@ -360,9 +360,23 @@ large `|DT2MS|`/element-step ratio; if it does, drop `--ams` (back to the defaul
 masters (the default; a whole-part rigid body's master must not be an element
 node or AMS aborts with `ERROR 1066`), so `--ams` force-enables them even if you
 passed `--no-rigid-cog-master`. Explicit decks only.
-`*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_HOURGLASS`,
-`*CONTROL_OUTPUT`, `*CONTROL_SHELL`, `*CONTROL_SOLID`, `*CONTROL_ENERGY`,
-`*CONTROL_CPU`
+`*HOURGLASS` + `*PART` HGID / `*CONTROL_HOURGLASS` → **per-part hourglass
+control** on the `/PROP` (the `dyna2rad` mapping). For solids the LS-DYNA `IHQ`
+selects the Radioss `Isolid` (`1/2/3`→`1`, `4/5`→`5`, `6/7`→`24`) and `QM`/`QH`
+becomes the hourglass coefficient `h`; tetra/ALE sections are left untouched, and
+`IHQ 0/8/9/10` keep the section's ELFORM `Isolid` (warned — no faithful Radioss
+formulation). A `*HOURGLASS` referenced by a part **overrides** the global
+`*CONTROL_HOURGLASS`; `HGID=0`, or a dangling id (warned loudly), falls back to
+it. Because k2rad `/PROP`s are per-`*SECTION`, a part whose effective hourglass
+differs from its section's base is split into its own dedicated `/PROP` (the
+shared section prop is kept for the section's other parts and dropped only when
+every part on it was split). Shells carry the coefficient into `Hm/Hf/Hr`
+(clamped to the Radioss `0.05` limit), but k2rad's ELFORM-selected `Ishell`
+`12` (QBAT) / `24` (QEPH) make those coefficients physically inert (warned).
+_Note: `*CONTROL_HOURGLASS` was previously parsed and dropped; it is now honored,
+so a deck with one may see its solid `Isolid` change off the ELFORM default._
+`*CONTROL_ACCURACY`, `*CONTROL_CONTACT`, `*CONTROL_OUTPUT`, `*CONTROL_SHELL`,
+`*CONTROL_SOLID`, `*CONTROL_ENERGY`, `*CONTROL_CPU`
 `*DATABASE_*` (binary output, time-history channels)
 `*DATABASE_CROSS_SECTION_SET[_ID]` → `/SECT` (node set + `*SET_SHELL`/`_SOLID`/
 `_BEAM` element groups); `*DATABASE_CROSS_SECTION_PLANE[_ID]` → `/SECT` via a

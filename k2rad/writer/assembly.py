@@ -14,6 +14,7 @@ from .materials import (
 )
 from .mesh import (
     _assign_ortho_props,
+    _assign_hourglass_props,
     _downgrade_tet10_to_tet4,
     _make_extra_groups,
     _make_nodes,
@@ -441,6 +442,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # (LAW128 is orthotropic-only). Must run before parts (which repoint the
     # /PART at it) and properties (which emit it) are built.
     _assign_ortho_props(state)
+
+    # Per-part hourglass control (*HOURGLASS + *PART HGID / *CONTROL_HOURGLASS):
+    # allocate a dedicated /PROP id for each part whose effective hourglass
+    # differs from its section base. Runs AFTER ortho (it skips ortho parts) and
+    # before parts (repoint) and properties (emit).
+    _assign_hourglass_props(state)
 
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).
