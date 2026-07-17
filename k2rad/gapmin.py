@@ -69,9 +69,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .state import ConversionState
 # The validated TET10 mid-edge map (mid_local_index, cornerA_local, cornerB_local)
-# lives in the neutral topology module; reuse it so the contact-facet subdivision
-# here always matches the surface the writer/engine builds — without importing the
-# whole writer just for this constant.
+# in the **Radioss /TETRA10 order** (n8=mid(1,4), n9=mid(2,4), n10=mid(3,4)) lives
+# in the neutral topology module; reuse it so the contact-facet subdivision here
+# always matches the surface the writer/engine builds — without importing the
+# whole writer just for this constant. The connectivity fed here is already
+# normalized to that order by writer.mesh._normalize_tet10_ordering (an LS-DYNA
+# *ELEMENT_SOLID deck orders the apex midsides differently), so a corner->slot
+# lookup lands on the geometrically-correct midside node.
 from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 # ── Optional fast-proximity backend (numpy + scipy) ──────────────────────────

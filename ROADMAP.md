@@ -47,12 +47,14 @@ advisory mypy findings so the CI job can become blocking.
   it to a dataclass and group related fields into sub-dataclasses (mesh,
   entities, loads, contacts, control, output). *Rationale:* typo-safe field
   access, free `repr`/defaults, and a documented shape for contributors.
-- **Move writer-private symbols into a shared topology module.**
-  `writer._TET10_MIDEDGE` is already reached into by `__init__.py` and
-  `gapmin.py`; promote it (and related connectivity/faceting helpers) into a
-  neutral `k2rad/topology.py`. *Rationale:* removes the cross-module reach into
-  writer internals and gives the optional `gapmin` path a dependency that does
-  not drag in the whole writer.
+- **Move writer-private symbols into a shared topology module.** *(done)*
+  `topology.TET10_MIDEDGE` (the Radioss `/TETRA10` mid-edge map) plus the
+  midside-ordering detection/permutation helpers (`TET10_DYNA_TO_RADIOSS`,
+  `TET10_MIDEDGE_DYNA`, `classify_tet10_apex_order`) now live in the neutral
+  `k2rad/topology.py`; the writer and `gapmin.py` import from there instead of
+  reaching into `writer._TET10_MIDEDGE`. *Rationale:* removes the cross-module
+  reach into writer internals and gives the optional `gapmin` path a dependency
+  that does not drag in the whole writer.
 - **Add a `build_starter` section registry.** The starter is assembled by a long
   fixed sequence of `_make_*` calls. Replace it with a data-driven ordered
   registry of `(name, builder)` entries. *Rationale:* makes the section order

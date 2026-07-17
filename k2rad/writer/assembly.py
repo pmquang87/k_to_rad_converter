@@ -21,6 +21,7 @@ from .mesh import (
     _make_parts_and_elements,
     _make_properties,
     _make_skews,
+    _normalize_tet10_ordering,
     _screen_sliver_tets,
     _snap_tet10_midsides,
     _synthesize_vector_skews,
@@ -417,6 +418,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
+
+    # Normalize 10-node tet connectivity to Radioss /TETRA10 midside order (the
+    # LS-DYNA *ELEMENT_SOLID apex nodes 8/9/10 differ). MUST run before every other
+    # tet10 pass (downgrade/snap/emit) and before the gapmin faceting, all of which
+    # read the midside slots through the Radioss map. Idempotent: if --auto-gapmin
+    # already ran it in convert(), this is a guarded no-op. Fixes the ERROR 558 snap
+    # collapse and the silent ~-30% /TETRA10 volume.
+    _normalize_tet10_ordering(state)
 
     # Optional TET10 -> TET4 linear downgrade (opt-in). Runs first so the tet10
     # snap and sliver prepasses below operate on the resulting linear mesh.

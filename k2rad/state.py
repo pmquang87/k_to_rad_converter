@@ -1660,6 +1660,11 @@ class ConversionState:
     beam_elems: List[BeamElem] = field(default_factory=list)
     # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
     discrete_elems: List[DiscreteElem] = field(default_factory=list)
+    # Idempotency guard for _normalize_tet10_ordering: the LS-DYNA→Radioss apex
+    # permutation is a 3-cycle (not self-inverse), so a blind re-run corrupts the
+    # connectivity. Set True the first time the pass runs (it may be invoked both
+    # before --auto-gapmin analysis and inside build_starter).
+    tet10_normalized: bool = False
 
     # ── Model entities ─────────────────────────────────────────
     parts: Dict[int, PartData] = field(default_factory=dict)

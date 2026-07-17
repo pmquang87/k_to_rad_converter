@@ -380,6 +380,13 @@ def convert(
     if state.options.auto_gapmin:
         _report(0.34, "Analyzing contact clearances")
         from .gapmin import apply_auto_gapmin
+        # --auto-gapmin measures clearance off the TET10 contact facets, which are
+        # built through the Radioss mid-edge map. Normalize the /TETRA10 apex
+        # midside ordering (LS-DYNA→Radioss) first so the analyzed surface matches
+        # what the engine builds; build_starter's own normalize pass is then a
+        # guarded no-op (state.tet10_normalized).
+        from .writer import _normalize_tet10_ordering
+        _normalize_tet10_ordering(state)
         # When the deformable-contact recipe is active, protect its deformable-
         # deformable interfaces from auto-gapmin: they must keep their mesh-scale
         # Card-3 SST/MST Gapmin (the sub-mesh-scale auto value re-triggers the
