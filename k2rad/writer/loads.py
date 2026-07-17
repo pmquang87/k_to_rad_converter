@@ -1322,6 +1322,16 @@ def _icid_basis(state: ConversionState, cid: int):
             return None
         _origin, xax, yax = axes
         return xax, yax, _vcross(xax, yax)
+    cv = state.coord_vectors.get(cid)
+    if cv is not None:
+        # Same basis _emit_coord_vector_skew builds: ex = X̂, ez = X × V, ey = ez × ex.
+        ex = _vnorm((cv.xx, cv.yx, cv.zx))
+        if ex is None:
+            return None
+        ez = _vnorm(_vcross((cv.xx, cv.yx, cv.zx), (cv.xv, cv.yv, cv.zv)))
+        if ez is None:
+            return None
+        return ex, _vcross(ez, ex), ez
     return None
 
 
@@ -1531,7 +1541,8 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
                 "node group as-is")
         skew_id = 0
         if iv.icid:
-            if iv.icid in state.coord_sys or iv.icid in state.coord_nodes:
+            if (iv.icid in state.coord_sys or iv.icid in state.coord_nodes
+                    or iv.icid in state.coord_vectors):
                 skew_id = iv.icid
                 state.warn(
                     f"*INITIAL_VELOCITY ICID={iv.icid}: velocity components read "
@@ -2069,7 +2080,10 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
                 elif box_nids is not None:          # resolved but empty
                     state.warn(
                         f"*RIGIDWALL_PLANAR id={rw.rwid}: *DEFINE_BOX {rw.boxid} "
-                        "contains no nodes — the wall tracks ALL nodes.")
+                        "encloses no mesh node — no slave nodes, so the wall is "
+                        "inactive (LS-DYNA tracks nothing); the wall was skipped "
+                        "rather than falling back to tracking ALL nodes.")
+                    continue
         if rw.nsidex > 0:
             set_title, nids = state.node_sets.get(rw.nsidex, ("", []))
             if nids:

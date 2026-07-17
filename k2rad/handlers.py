@@ -1711,6 +1711,21 @@ def handle_contact_force_transducer(block: Block, state: ConversionState) -> Non
     surfb = to_int(f1[1]) if len(f1) > 1 else 0
     satyp = to_int(f1[2]) if len(f1) > 2 else 0
     sbtyp = to_int(f1[3]) if len(f1) > 3 else 0
+    # SABOXID/SBBOXID (fields 5/6) restrict the measured region to a *DEFINE_BOX.
+    # dyna2rad DOES honour the box here (uniquely among contacts, via a Boolean
+    # /SET/GENERAL → /INTER/SUB), but k2rad's node-level box membership does not
+    # map onto a contact surface, so the box is dropped — warned loudly so the
+    # reported force scope is not silently the full surface.
+    saboxid = to_int(f1[4]) if len(f1) > 4 else 0
+    sbboxid = to_int(f1[5]) if len(f1) > 5 else 0
+    if saboxid or sbboxid:
+        state.warn(
+            f"*CONTACT_FORCE_TRANSDUCER id={inter_id}: SABOXID/SBBOXID box-"
+            f"restricted measurement scope (sabox={saboxid}, sbbox={sbboxid}) is "
+            "NOT converted — the /INTER/SUB reports the force over the FULL "
+            "surface intersection, not the box-restricted region. dyna2rad maps "
+            "this box (Boolean /SET/GENERAL); restrict the referenced *SET/*SURF "
+            "manually if the box scope is load-bearing.")
     state.force_transducers.append(
         ContactForceTransducer(inter_id, title, surfa, surfb, satyp, sbtyp)
     )

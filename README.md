@@ -203,10 +203,12 @@ namespace)
 `/BOX` entity is emitted): every box consumer intersects its node group with the
 box's contained nodes at conversion time (a `_LOCAL` box tests each node in the
 box's own frame). Consumed by `*INITIAL_VELOCITY` `BOXID` and `*RIGIDWALL_*`
-`BOXID` (box-only scopes the tracked `/GRNOD`; `NSID`+`BOXID` drops the box and
-`NSID` wins, matching dyna2rad). Contact `SBOXID`/`MBOXID` do **not** map cleanly
-onto a contact surface here, so they are dropped with a loud warning (dyna2rad
-only maps them for `*CONTACT_FORCE_TRANSDUCER_PENALTY`); the
+`BOXID` (box-only scopes the tracked `/GRNOD`; a box that encloses no node = no
+slave nodes = inactive wall, so it is skipped rather than tracking ALL nodes;
+`NSID`+`BOXID` drops the box and `NSID` wins, matching dyna2rad). Contact
+`SBOXID`/`MBOXID` — including on `*CONTACT_FORCE_TRANSDUCER_PENALTY`, the one
+contact dyna2rad maps them for — do **not** map cleanly onto a contact surface
+here, so they are dropped with a loud warning; the
 `_ADAPTIVE`/`_COARSEN`/`_DRAWBEAD`/`_SPH` box variants are skipped
 `*DEFINE_TABLE_2D` → `/TABLE/1` (Ndim=2, rows sorted by the rate/parameter
 value); legacy `*DEFINE_TABLE` resolves explicit-LCID rows directly and

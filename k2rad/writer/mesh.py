@@ -342,6 +342,27 @@ def _synthesize_vector_skews(state: ConversionState) -> None:
                 "OpenRadioss skew equivalent — unhandled by dyna2rad too, so an "
                 "*ELEMENT_DISCRETE referencing this VID is NOT converted.")
 
+    # Surface dead output: *DEFINE_VECTOR has no k2rad consumer yet, and a
+    # *DEFINE_SD_ORIENTATION that no *ELEMENT_DISCRETE references is unused too.
+    # An unused /SKEW is harmless, but the moving (_NODES / IOP=2) forms also
+    # injected a free helper node above — flag both so that extra node is not a
+    # silent surprise (it would otherwise appear unexplained in the free-node
+    # /BCS guard for implicit decks).
+    referenced_sd = {e.vid for e in state.discrete_elems if e.vid}
+    unref_vec = sorted(state.vector_skew_ids)             # no consumer exists
+    unref_sd = sorted(v for v in state.sdorient_skew_ids
+                      if v not in referenced_sd)
+    if unref_vec or unref_sd:
+        injected = ([v for v in unref_vec if state.define_vectors[v].is_nodes]
+                    + [v for v in unref_sd if state.sd_orientations[v].iop == 2])
+        msg = (f"Unreferenced /SKEW output — *DEFINE_VECTOR {unref_vec or '[]'} "
+               f"and *DEFINE_SD_ORIENTATION {unref_sd or '[]'} each emit a /SKEW "
+               "no converted keyword uses")
+        if injected:
+            msg += (f"; the moving forms {injected} also injected a free helper "
+                    "node each (needed by /SKEW/MOV — harmless but unused)")
+        state.warn(msg + ".")
+
 
 def _emit_coord_vector_skew(state: ConversionState, cv) -> List[str]:
     """*DEFINE_COORDINATE_VECTOR → /SKEW/FIX at the origin. local X' = (XX,YX,ZX);

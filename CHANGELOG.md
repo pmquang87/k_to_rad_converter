@@ -45,11 +45,13 @@ Prior history (before this changelog was introduced) is summarized in the
     the box's contained nodes at conversion time, mirroring the `NSIDEX`
     set-difference; a `_LOCAL` box tests each node in the box's own frame
     (origin + X̂/in-plane vectors). Wired into `*INITIAL_VELOCITY` `BOXID` and
-    `*RIGIDWALL_*` `BOXID` (box-only scopes the tracked `/GRNOD`; `NSID`+`BOXID`
-    drops the box, `NSID` wins — matching dyna2rad). Contact `SBOXID`/`MBOXID`
+    `*RIGIDWALL_*` `BOXID` (box-only scopes the tracked `/GRNOD`; a box enclosing
+    no node = no slave nodes = inactive wall, so it is skipped rather than
+    tracking ALL nodes; `NSID`+`BOXID` drops the box, `NSID` wins — matching
+    dyna2rad). Contact `SBOXID`/`MBOXID` — including on
+    `*CONTACT_FORCE_TRANSDUCER_PENALTY`, the one contact dyna2rad maps them for —
     do not map onto a contact surface here, so they are dropped with a loud
-    warning (dyna2rad only maps them for `*CONTACT_FORCE_TRANSDUCER_PENALTY`);
-    `_ADAPTIVE`/`_COARSEN`/`_DRAWBEAD`/`_SPH` box variants are skipped.
+    warning; `_ADAPTIVE`/`_COARSEN`/`_DRAWBEAD`/`_SPH` box variants are skipped.
     Starter-validated (0 errors; the four new skews, the box-scoped `/GRNOD`s
     and the oriented `/PROP/TYPE8` with `skew_ID` all read cleanly).
 - **Tables & strain rates**

@@ -14,7 +14,9 @@ from k2rad.handlers import dispatch, _sample_curve_function
 from k2rad.state import (
     ConversionState, PartData, DiscreteElem, InitialVelocityGeneration,
 )
-from k2rad.writer.loads import _inivel_gen_group_nodes, _box_global_corners
+from k2rad.writer.loads import (
+    _inivel_gen_group_nodes, _box_global_corners, _resolve_box_nodes,
+)
 
 
 def _convert(deck: str):
@@ -373,6 +375,22 @@ class InitialVelocitySetFormTests(unittest.TestCase):
         self.assertEqual(int(card[4]), 3)   # Skew_id = ICID (skew exists)
         self.assertTrue(any("/SKEW/3" in w for w in res.warnings))
 
+    def test_icid_with_coordinate_vector_sets_skew(self):
+        # ICID referencing a *DEFINE_COORDINATE_VECTOR (which emits /SKEW/FIX/cid)
+        # must resolve to that skew, not fall through to the GLOBAL frame with a
+        # false "no converted /SKEW" warning.
+        coord = ("*DEFINE_COORDINATE_VECTOR\n"
+                 + _card10(3, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0) + "\n")
+        deck = (IV_MESH + coord + "*INITIAL_VELOCITY\n"
+                + _card10(9, 0, 0, 0, 3) + "\n" + _card10(5.0, 0.0, 0.0) + "\n" + IV_TAIL)
+        res, s = _convert(deck)
+        card = _block(s, _hdr(s, "/INIVEL/TRA/"))[1].split()
+        self.assertEqual(int(card[4]), 3)          # Skew_id = ICID (coord-vector skew)
+        self.assertIn("/SKEW/FIX/3", s)            # the coord-vector skew was emitted
+        self.assertTrue(any("/SKEW/3" in w for w in res.warnings))
+        # the false "no converted /SKEW … GLOBAL frame" warning must NOT fire
+        self.assertFalse(any("no converted /SKEW" in w for w in res.warnings))
+
     def test_zero_velocity_is_noop(self):
         deck = self._deck(_card10(9, 0, 0, 0, 0), _card10(0.0, 0.0, 0.0))
         _, s = _convert(deck)
@@ -526,6 +544,22 @@ class InitialVelocityGenerationTests(unittest.TestCase):
         res, s = _convert(deck)
         frame = _block(s, _hdr(s, "/FRAME/FIX/"))
         self.assertEqual(_floats(frame[3]), [0.0, 0.0, 1.0])       # axis stays global Z
+        axis = _block(s, _hdr(s, "/INIVEL/AXIS/"))
+        self.assertEqual(_floats(axis[2]), [0.0, 100.0, 0.0, 5.0])  # rotated: Vyt=100
+        self.assertTrue(any("/SKEW/3" in w and "rotated" in w for w in res.warnings))
+
+    def test_icid_generation_coordinate_vector_rotates(self):
+        # ICID=3 is a *DEFINE_COORDINATE_VECTOR whose local X = global Y and local
+        # Z = global Z. VX=100 (local) must re-express to GLOBAL (0,100,0): the
+        # /INIVEL/AXIS card (projected onto the global-Z frame) reads Vyt=100.
+        coord = ("*DEFINE_COORDINATE_VECTOR\n"
+                 + _card10(3, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0) + "\n")
+        deck = (IV_MESH + coord + "*INITIAL_VELOCITY_GENERATION\n"
+                + _card10(1, 2, 5.0, 100.0, 0.0, 0.0, 0, 3) + "\n"
+                + _card10(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0, 0) + "\n" + IV_TAIL)
+        res, s = _convert(deck)
+        frame = _block(s, _hdr(s, "/FRAME/FIX/"))
+        self.assertEqual(_floats(frame[3]), [0.0, 0.0, 1.0])        # axis stays global Z
         axis = _block(s, _hdr(s, "/INIVEL/AXIS/"))
         self.assertEqual(_floats(axis[2]), [0.0, 100.0, 0.0, 5.0])  # rotated: Vyt=100
         self.assertTrue(any("/SKEW/3" in w and "rotated" in w for w in res.warnings))
@@ -697,6 +731,36 @@ class DefineBoxTests(unittest.TestCase):
         _, s = _convert(deck)
         self.assertNotIn("/INIVEL/TRA/", s)     # empty group → nothing emitted
 
+    def test_two_boxes_selected_independently(self):
+        # Two boxes in one deck resolve to disjoint node sets, each on its own id.
+        box7 = "*DEFINE_BOX\n" + _card10(7, -0.5, 0.5, -0.5, 1.5, -0.5, 0.5) + "\n"
+        box8 = "*DEFINE_BOX\n" + _card10(8, 1.5, 3.5, -0.5, 1.5, -0.5, 0.5) + "\n"
+        st = _dispatch(IV_MESH + box7 + box8 + IV_TAIL)
+        self.assertEqual(sorted(_resolve_box_nodes(st, 7, "b7")), [1, 4])
+        self.assertEqual(sorted(_resolve_box_nodes(st, 8, "b8")), [5, 6, 7, 8])
+
+    def test_node_on_box_face_is_inclusive(self):
+        # Node 2 at (1,0,0) lies exactly on the x=1.0 max face → inclusive → in.
+        onface = "*DEFINE_BOX\n" + _card10(7, 0.25, 1.0, -0.5, 0.5, -0.5, 0.5) + "\n"
+        st = _dispatch(IV_MESH + onface + IV_TAIL)
+        self.assertEqual(sorted(_resolve_box_nodes(st, 7, "face")), [2])
+
+    def test_degenerate_local_box_falls_back_to_full_group(self):
+        # _LOCAL box with X ∥ V (both +Y) → degenerate frame → _resolve_box_nodes
+        # returns None → the consumer applies to the FULL node group + warns.
+        bad = ("*DEFINE_BOX_LOCAL\n"
+               + _card10(7, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0) + "\n"
+               + _card10(0.0, 1.0, 0.0, 0.0, 1.0, 0.0) + "\n"    # X=(0,1,0) ∥ V=(0,1,0)
+               + _card10(0.0, 0.0, 0.0) + "\n")
+        deck = (IV_MESH + bad + "*INITIAL_VELOCITY\n"
+                + _card10(9, 0, 7, 0, 0) + "\n" + _card10(5.0, 0.0, 0.0)
+                + "\n" + IV_TAIL)
+        res, s = _convert(deck)
+        self.assertIsNone(_resolve_box_nodes(_dispatch(IV_MESH + bad + IV_TAIL),
+                                             7, "b7"))
+        self.assertEqual(_group_ids(s, "/INIVEL/TRA/", 3), [1, 2, 3, 4])  # full set 9
+        self.assertTrue(any("degenerate local" in w for w in res.warnings))
+
 
 class RigidWallBoxTests(unittest.TestCase):
     BOX = ("*DEFINE_BOX\n"
@@ -720,6 +784,16 @@ class RigidWallBoxTests(unittest.TestCase):
         self.assertEqual(_rwall_grnod_ids(s), [1, 2, 3, 4])
         self.assertTrue(any("BOXID dropped" in w for w in res.warnings))
 
+    def test_empty_boxid_wall_is_inactive_and_skipped(self):
+        # A box-only wall whose *DEFINE_BOX encloses no node = no slave nodes =
+        # inactive wall (LS-DYNA). It must be skipped, NOT fall back to tracking
+        # ALL nodes (grnd_ID1=0 distance search over the whole model).
+        far = "*DEFINE_BOX\n" + _card10(7, 100.0, 101.0, 100.0, 101.0, 100.0, 101.0) + "\n"
+        res, s = _convert(IV_MESH + far + self.WALL_BOX + IV_TAIL)
+        self.assertNotIn("/RWALL/", s)          # inactive wall not emitted
+        self.assertTrue(any("inactive" in w and "*DEFINE_BOX 7" in w
+                            for w in res.warnings))
+
 
 class ContactBoxWarnTests(unittest.TestCase):
     def test_sboxid_warns_loudly(self):
@@ -729,6 +803,15 @@ class ContactBoxWarnTests(unittest.TestCase):
         res, _ = _convert(IV_MESH + contact + IV_TAIL)
         self.assertTrue(any("SBOXID/MBOXID" in w and "NOT converted" in w
                             for w in res.warnings))
+
+    def test_force_transducer_box_warns_loudly(self):
+        # The ONE contact where dyna2rad DOES honour the box; k2rad cannot map it
+        # onto a surface, so it must warn loudly rather than drop it silently.
+        contact = ("*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
+                   + _card10(0, 0, 0, 0, 7) + "\n")     # saboxid = field 5 = 7
+        st = _dispatch(IV_MESH + contact + IV_TAIL)
+        self.assertTrue(any("SABOXID/SBBOXID" in w and "NOT converted" in w
+                            for w in st.warnings))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -808,6 +891,30 @@ class DefineVectorTests(unittest.TestCase):
         dv = st.define_vectors[6]
         self.assertTrue(dv.is_nodes)
         self.assertEqual((dv.nodet, dv.nodeh), (1, 5))
+
+    def test_coord_cid_and_vector_vid_id_collision(self):
+        # A *DEFINE_COORDINATE_SYSTEM cid=5 and a *DEFINE_VECTOR vid=5 share id 5
+        # across two disjoint LS-DYNA id spaces. /SKEW and /FRAME share ONE starter
+        # namespace, so the coord keeps /SKEW/FIX/5 and the vector's skew must dodge
+        # to a fresh reserved id (>=90001) — never a duplicate /SKEW/FIX/5.
+        coord = ("*DEFINE_COORDINATE_SYSTEM\n"
+                 + _card10(5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                 + _card10(0.0, 1.0, 0.0) + "\n")
+        vec = "*DEFINE_VECTOR\n" + _card10(5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) + "\n"
+        _, s = _convert(IV_MESH + coord + vec + IV_TAIL)
+        skew_ids = _all_header_ids(s, "/SKEW/FIX/")
+        self.assertEqual(skew_ids.count(5), 1)            # coord keeps id 5, no dup
+        self.assertTrue(any(i >= 90001 for i in skew_ids))  # vector dodged the collision
+
+    def test_unreferenced_vector_skew_warns_about_dead_output(self):
+        # *DEFINE_VECTOR_NODES has no k2rad consumer; the injected /SKEW/MOV helper
+        # node must be surfaced so it is not a silent surprise.
+        deck = (IV_MESH + "*DEFINE_VECTOR_NODES\n"
+                + _card10(6, 1, 5) + "\n" + IV_TAIL)
+        res, _ = _convert(deck)
+        self.assertTrue(any("Unreferenced /SKEW" in w
+                            and "injected a free helper node" in w
+                            for w in res.warnings))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -899,6 +1006,40 @@ class SdOrientationTests(unittest.TestCase):
         self.assertNotIn("/SPRING/", s)
         self.assertTrue(any("DEFINE_SD_ORIENTATION" in w and "NOT converted" in w
                             for w in res.warnings))
+
+    def test_mixed_axial_and_oriented_springs_on_one_part(self):
+        # One part carrying an axial (VID=0 → /PROP/TYPE4) and an oriented
+        # (VID=4 → /PROP/TYPE8) discrete element. Both must convert, and the two
+        # groups must land on distinct part ids (shared _alloc_part_id sequencing
+        # across the TYPE4 and TYPE8 loops — no id collision, nothing dropped).
+        deck = (
+            "*KEYWORD\n"
+            "*NODE\n"
+            "       1             0.0             0.0             0.0\n"
+            "       2             1.0             0.0             0.0\n"
+            "       3             2.0             0.0             0.0\n"
+            "*PART\n"
+            "springs\n"
+            "         1         1         1\n"
+            "*SECTION_DISCRETE\n"
+            "         1         0\n"
+            "*MAT_SPRING_ELASTIC\n"
+            "         1     250.0\n"
+            "*DEFINE_SD_ORIENTATION\n" + _card10(4, 0, 0.0, 1.0, 0.0) + "\n"
+            + "*ELEMENT_DISCRETE\n"
+            "       1       1       1       2       0\n"   # axial (VID=0)
+            "       2       1       2       3       4\n"   # oriented (VID=4)
+            "*CONTROL_TERMINATION\n"
+            "       1.0\n"
+            "*END\n"
+        )
+        _, s = _convert(deck)
+        self.assertIn("/PROP/TYPE4/", s)                 # axial spring
+        self.assertIn("/PROP/TYPE8/", s)                 # oriented spring
+        self.assertIn("/SKEW/FIX/", s)                   # the orientation skew
+        self.assertEqual(s.count("/SPRING/"), 2)         # both springs, none dropped
+        spring_ids = _all_header_ids(s, "/SPRING/")
+        self.assertEqual(len(set(spring_ids)), 2)        # distinct part ids, no collision
 
 
 if __name__ == "__main__":
