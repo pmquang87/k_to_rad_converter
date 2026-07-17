@@ -83,9 +83,24 @@ def _elform_to_ishell(elform: int, is_implicit: bool) -> int:
 
 
 def _elform_to_isolid(elform: int) -> int:
-    # 17 = 8-node full integration (iso-parametric) — correct for structural solids in implicit.
-    # 14 = tet4 (Kessler).  2 = HEPH.
-    return {0: 17, 1: 17, 2: 2, 10: 14, 13: 14, 16: 17, -1: 17}.get(elform, 17)
+    # Radioss /PROP/SOLID Isolid (cfg prop_p14_solid):
+    #   17 = 8-node full (2x2x2) integration — k2rad's structural-hex default;
+    #        no hourglass modes, chosen for implicit accuracy.
+    #   14 = tet4 (Kessler).  24 = HEPH (reduced integration, *physically*
+    #        stabilized). NB: Isolid=2 is the Hallquist 1-IP viscous-hourglass
+    #        hex (under-integrated, hourglass-prone) — it is NOT HEPH and is
+    #        intentionally never emitted here.
+    # LS-DYNA ELFORM 2 is the FULLY-INTEGRATED selective-reduced (S/R) hex, so
+    # it maps to the full-integration Isolid 17 — matching its fully-integrated
+    # semantics, keeping every hex ELFORM {0,1,2,16,-1} → 17, and staying
+    # consistent with the *HOURGLASS gate (ELFORM 2 = no hourglass modes, so it
+    # is excluded from IHQ→Isolid remapping in mesh.py). The previous 2→2
+    # mapping put a fully-integrated LS-DYNA element onto an under-integrated
+    # Radioss element: a single-hex uniaxial-pull validation hourglassed to a
+    # ~99.9% energy-error blow-up (IE 0.14→178 while external work stayed ~2.5),
+    # spuriously spiking sigma1 and deleting the element ~8x early; ELFORM 1→17
+    # ran clean.
+    return {0: 17, 1: 17, 2: 17, 10: 14, 13: 14, 16: 17, -1: 17}.get(elform, 17)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

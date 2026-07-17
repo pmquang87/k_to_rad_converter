@@ -1136,7 +1136,8 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
     # cohesive formulations; k2rad, however, numbers its *default structural
     # hex* Isolid 17 (full integration, chosen for implicit accuracy). Porting
     # the literal {14,17,18} exclusion would gate out every k2rad solid (its
-    # only Isolids are 17/14/2) and make the whole feature a no-op. So the gate
+    # only ELFORM-derived Isolids are 17 and 14) and make the whole feature a
+    # no-op. So the gate
     # is adapted to the same *intent* — skip ALE, full-integration, tetra, and
     # cohesive, where hourglass control is meaningless — while allowing the
     # structural hex (17) to be remapped to the under-integrated 1/5/24 the IHQ

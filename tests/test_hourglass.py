@@ -246,6 +246,52 @@ class SolidMappingTests(unittest.TestCase):
         self.assertEqual(_part_prop_ref(starter, 1), 1)
 
 
+# ── 2b. ELFORM → base /PROP/SOLID Isolid (the ELFORM 2 fix) ───────────────────
+
+class ElformIsolidBaseMappingTests(unittest.TestCase):
+    """LS-DYNA ELFORM → base /PROP/SOLID Isolid, independent of hourglass.
+
+    Regression guard: ELFORM 2 is the fully-integrated S/R hex and must map to
+    the full-integration Isolid 17 — NOT the under-integrated, hourglass-prone
+    Isolid 2 (which blew a single hex up to a ~99.9% energy error in a uniaxial
+    pull). The hourglass gate already treats ELFORM 2 as "no hourglass modes",
+    so the mapping and the gate must stay consistent."""
+
+    def test_elform2_maps_to_full_integration_isolid_17(self):
+        from k2rad.writer.common import _elform_to_isolid
+        self.assertEqual(_elform_to_isolid(2), 17)
+
+    def test_every_hex_elform_maps_to_17(self):
+        from k2rad.writer.common import _elform_to_isolid
+        for elform in (0, 1, 2, 16, -1):
+            self.assertEqual(_elform_to_isolid(elform), 17, f"ELFORM {elform}")
+
+    def test_isolid_2_never_a_target(self):
+        # The under-integrated Hallquist Isolid 2 must not be produced for any
+        # ELFORM (it hourglasses; HEPH is 24, full integration is 17).
+        from k2rad.writer.common import _elform_to_isolid
+        for elform in (-1, 0, 1, 2, 10, 13, 16, 99):
+            self.assertNotEqual(_elform_to_isolid(elform), 2, f"ELFORM {elform}")
+
+    def test_elform2_prop_solid_emits_isolid_17(self):
+        # End-to-end: a plain ELFORM-2 brick emits /PROP/SOLID Isolid 17.
+        _, starter = _convert(_solid_deck(hgid1=0, hg_cards="", elform=2))
+        self.assertEqual(_part_prop_ref(starter, 1), 1)   # no split
+        isolid, h = _solid_isolid_h(starter, "/PROP/SOLID/1")
+        self.assertEqual(isolid, 17)
+        self.assertAlmostEqual(h, 0.0)
+
+    def test_elform2_hourglass_card_gated_out(self):
+        # A fully-integrated hex has no hourglass modes, so the *HOURGLASS gate
+        # (elform ∈ {2,13}) excludes ELFORM 2: even with a per-part *HOURGLASS
+        # the section is NOT IHQ-remapped and NOT split — Isolid stays 17.
+        _, starter = _convert(_solid_deck(
+            hgid1=4, hg_cards=_hgcard(4, 6, 0.03) + "\n", elform=2))  # IHQ6→24 if applied
+        self.assertEqual(_part_prop_ref(starter, 1), 1)   # no split
+        isolid, _h = _solid_isolid_h(starter, "/PROP/SOLID/1")
+        self.assertEqual(isolid, 17)                      # gate kept ELFORM Isolid
+
+
 # ── 3. HGID override vs *CONTROL_HOURGLASS fallback (mixed solid + shell) ─────
 
 class ControlFallbackTests(unittest.TestCase):
