@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import List, Optional, Set, Tuple
 from ..state import ConversionState
+from .mesh import _effective_solid_isolid
 from .common import (
     HDR,
     _elform_to_ishell,
-    _elform_to_isolid,
     _emit_grnod_node,
     _emit_grshel,
     _emit_id_group,
@@ -191,7 +191,14 @@ def _make_inibri(state: ConversionState) -> List[str]:
         if e is None or sec is None:
             missing.append(iss.eid)
             continue
-        isolid_prop = 0 if sec.iale else _elform_to_isolid(sec.elform)
+        # The EFFECTIVE Isolid the part's /PROP/SOLID emits — not the raw ELFORM
+        # one — so Nb_integr matches the property's integration order after
+        # per-part hourglass control remaps a full-integration hex (17) to an
+        # under-integrated 1/5/24. Using the ELFORM Isolid here would declare
+        # Nb_integr=8 against a 1-point /PROP and the starter would reject it
+        # (MSGID 695). For a hex this collapses NINT>1 data onto 1 point (warned
+        # via `averaged` below), which is correct once the formulation is 1-point.
+        isolid_prop = _effective_solid_isolid(state, e.pid, sec)
         uniq = _ordered_unique_nodes(e.nodes)
         if len(e.nodes) == 10:
             isolnod, isolid, expected = 10, 1, 4

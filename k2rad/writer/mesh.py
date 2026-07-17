@@ -898,9 +898,10 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
 # Semantics follow dyna2rad ConvertProp::ConvertEntities (solids only there):
 #   h ← QM (or the global *CONTROL_HOURGLASS QH); Isolid ← f(IHQ) with
 #   IHQ 1/2/3 → 1, 4/5 → 5, 6/7 → 24; 0/8/9/10 unmapped (section Isolid kept).
-#   The map is gated to /PROP/SOLID with ELFORM ∉ {2,13} (not tetra) and a
-#   section Isolid ∉ {14,17,18} (not ALE/cohesive). A *HOURGLASS on a *PART
-#   overrides the global card; HGID=0 (or a dangling id) falls back to it.
+#   The map is gated to /PROP/SOLID with ELFORM ∉ {2,13} (2 = fully-integrated
+#   S/R hex — no hourglass modes; 13 = tetra) and a section Isolid ∉ {14,17,18}
+#   (not ALE/cohesive). A *HOURGLASS on a *PART overrides the global card;
+#   HGID=0 (or a dangling id) falls back to it.
 #
 # k2rad props are per-SECTION, so — unlike dyna2rad, which mutates the shared
 # /PROP in place and lets the last part win — a per-part hourglass difference
@@ -911,6 +912,21 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
 # IHQ→Ishell map is invented (dyna2rad maps no shell formulation either).
 
 _SHELL_HG_MAX = 0.05   # Radioss /PROP/SHELL Hm/Hf/Hr upper bound (cfg CHECK)
+
+
+def _auto_section_solid(secid: int) -> SectionSolid:
+    """The default *SECTION_SOLID k2rad synthesizes when a *PART's SECID has no
+    *SECTION_SOLID card. Kept in sync with the auto-create in _make_properties so
+    the hourglass prepass (which runs BEFORE that auto-create) resolves a part on
+    an undefined section to the SAME formulation the property emit will use —
+    ELFORM 1, the under-integrated structural hex."""
+    return SectionSolid(secid, f"AutoPropSolid_{secid}", 1)
+
+
+def _auto_section_shell(secid: int) -> SectionShell:
+    """The default *SECTION_SHELL k2rad synthesizes for a sectionless shell
+    *PART (in sync with _make_properties): ELFORM 2, NIP 3, zero thickness."""
+    return SectionShell(secid, f"AutoPropShell_{secid}", 2, 3, 0.0)
 
 
 def _ihq_to_isolid(ihq: int) -> Optional[int]:
@@ -930,8 +946,9 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
     """Effective (h, isolid_override) for a solid section, combining the global
     *CONTROL_HOURGLASS base with an optional *HOURGLASS override *hg*. Returns
     (None, None) when the (k2rad-adapted) solid gate excludes the section — ALE,
-    tetra (ELFORM 2/13), or a tet4/cohesive Isolid (14/18) — or no hourglass
-    source applies. h is the coefficient verbatim (no IHQ dependence);
+    a fully-integrated S/R hex (ELFORM 2) or tetra (ELFORM 13), or a tet4/
+    cohesive Isolid (14/18) — or no hourglass source applies. h is the
+    coefficient verbatim (no IHQ dependence);
     isolid_override None keeps the ELFORM Isolid — the 'mixed result' when the
     IHQ is unmapped but the base card mapped one. See the gate note below for
     why k2rad's structural-hex Isolid 17 is (unlike dyna2rad) NOT excluded."""
@@ -943,10 +960,12 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
     # hex* Isolid 17 (full integration, chosen for implicit accuracy). Porting
     # the literal {14,17,18} exclusion would gate out every k2rad solid (its
     # only Isolids are 17/14/2) and make the whole feature a no-op. So the gate
-    # is adapted to the same *intent* — skip ALE, tetra, and cohesive, where
-    # hourglass control is meaningless — while allowing the structural hex (17)
-    # to be remapped to the under-integrated 1/5/24 the IHQ dictates (necessary
-    # anyway: Isolid 17 is full-integration and ignores the h coefficient).
+    # is adapted to the same *intent* — skip ALE, full-integration, tetra, and
+    # cohesive, where hourglass control is meaningless — while allowing the
+    # structural hex (17) to be remapped to the under-integrated 1/5/24 the IHQ
+    # dictates (necessary anyway: Isolid 17 is full-integration and ignores h).
+    # ELFORM 2 = fully-integrated S/R hex (no hourglass modes); 13 = tetra
+    # (LS-DYNA tets are ELFORM 10/13, not 2 — 2 is a hex).
     if sec.iale or sec.elform in (2, 13):
         return (None, None)
     if _elform_to_isolid(sec.elform) in (14, 18):
@@ -983,6 +1002,24 @@ def _shell_hg_values(state: ConversionState, sec: Optional[SectionShell],
     if coeff is None:
         return (None, None)
     return (min(max(coeff, 0.0), _SHELL_HG_MAX), None)
+
+
+def _effective_solid_isolid(state: ConversionState, pid: int,
+                            sec: Optional[SectionSolid]) -> int:
+    """The Isolid the /PROP/SOLID that *part pid* references actually emits, once
+    per-part hourglass control has had its say: the per-part split's Isolid, else
+    the global *CONTROL_HOURGLASS remap on the shared prop, else (no hourglass)
+    the section's ELFORM Isolid. The /INIBRI writer needs this — not the raw
+    ELFORM Isolid — so its Nb_integr matches the property's integration order
+    once IHQ remaps a full-integration hex to an under-integrated 1/5/24 (a
+    stale Nb_integr is rejected by the starter, MSGID 695)."""
+    base = 0 if (sec and sec.iale) else \
+        (_elform_to_isolid(sec.elform) if sec else 17)
+    if pid in state.hourglass_prop_ids:
+        iso_over = state.hourglass_prop_vals.get(pid, (None, None))[1]
+        return iso_over if iso_over is not None else base
+    _, iso = _solid_hg_values(state, sec, None)
+    return iso if iso is not None else base
 
 
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
@@ -1106,9 +1143,9 @@ def _make_properties(state: ConversionState) -> List[str]:
             missing_beams.add(secid)
 
     for ms in missing_shells:
-        state.sec_shells[ms] = SectionShell(ms, f"AutoPropShell_{ms}", 2, 3, 0.0)
+        state.sec_shells[ms] = _auto_section_shell(ms)
     for ms in missing_solids:
-        state.sec_solids[ms] = SectionSolid(ms, f"AutoPropSolid_{ms}", 1)
+        state.sec_solids[ms] = _auto_section_solid(ms)
     for ms in missing_beams:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
 
@@ -1220,6 +1257,11 @@ def _assign_hourglass_props(state: ConversionState) -> None:
     warned_ihq: Set[int] = set()
     shell_inert_warned = False
     ctrl_isolid_warned = False
+    # Sibling parts that share a SECID AND resolve to the same effective
+    # hourglass get ONE shared split /PROP, not a byte-identical copy each:
+    # (is_solid, secid, eff) → prop_id.
+    prop_by_key: Dict[Tuple[bool, int, Tuple[Optional[float], Optional[int]]],
+                      int] = {}
     for pid, part in sorted(state.parts.items()):
         # A LAW128 part already owns a dedicated ortho /PROP; the hourglass
         # overlay does not also split it (its TYPE6/TYPE9 keeps its defaults).
@@ -1228,7 +1270,11 @@ def _assign_hourglass_props(state: ConversionState) -> None:
         is_solid = pid in solid_pids
         is_shell = pid in shell_pids and not is_solid
         if not (is_solid or is_shell):
-            continue    # beams / discrete / tshell — dyna2rad maps none
+            # beams / discrete / tshell: no k2rad hourglass /PROP path. (dyna2rad
+            # additionally maps *HOURGLASS onto /PROP/SPH, but k2rad has no
+            # *SECTION_SPH → /PROP/SPH path, so SPH is out of scope here — not
+            # "dyna2rad maps none".)
+            continue
         secid = part_secids[pid]
         # Resolve the part's *HOURGLASS (HGID). A dangling / undefined id is a
         # LOUD warn + fallback to the global card (dyna2rad is silent here; the
@@ -1243,7 +1289,12 @@ def _assign_hourglass_props(state: ConversionState) -> None:
                     "*CONTROL_HOURGLASS (or the Radioss property defaults). "
                     "Check the *HOURGLASS id.")
         if is_solid:
-            sec = state.sec_solids.get(secid)
+            # A *PART on an undefined SECID gets an auto-created *SECTION_SOLID
+            # in _make_properties (which runs AFTER this prepass). Resolve to the
+            # SAME default here so the split decision reflects the formulation the
+            # property will actually carry — otherwise a per-part *HOURGLASS on a
+            # sectionless part would be silently dropped (sec=None → no remap).
+            sec = state.sec_solids.get(secid) or _auto_section_solid(secid)
             eff = _solid_hg_values(state, sec, hg)
             base = _solid_hg_values(state, sec, None)
             # The global *CONTROL_HOURGLASS was previously inert; now honored, it
@@ -1276,7 +1327,7 @@ def _assign_hourglass_props(state: ConversionState) -> None:
                         "ELFORM-derived Isolid is kept; the hourglass coefficient "
                         f"h={eff[0]:g} is still applied. Verify the formulation.")
         else:
-            sec = state.sec_shells.get(secid)
+            sec = state.sec_shells.get(secid) or _auto_section_shell(secid)
             eff = _shell_hg_values(state, sec, hg)
             base = _shell_hg_values(state, sec, None)
             if eff[0] is not None and not shell_inert_warned:
@@ -1290,7 +1341,12 @@ def _assign_hourglass_props(state: ConversionState) -> None:
                     "is carried for fidelity; switch to an under-integrated "
                     "Ishell 1-4 to activate it.")
         if eff != base:
-            state.hourglass_prop_ids[pid] = state.next_id()
+            key = (is_solid, secid, eff)
+            prop_id = prop_by_key.get(key)
+            if prop_id is None:
+                prop_id = state.next_id()
+                prop_by_key[key] = prop_id
+            state.hourglass_prop_ids[pid] = prop_id
             state.hourglass_prop_vals[pid] = eff
     if state.hourglass_prop_ids:
         state.warn(
@@ -1513,11 +1569,22 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
     for e in state.solid_elems:
         if len(e.nodes) == 10:
             tet10_by_pid[e.pid] = True
+    # A split /PROP may be shared by several sibling parts (same SECID + same
+    # effective hourglass); emit it ONCE, listing all its parts in the title.
+    pids_by_prop: Dict[int, List[int]] = defaultdict(list)
+    for pid, prop_id in state.hourglass_prop_ids.items():
+        pids_by_prop[prop_id].append(pid)
     lines: List[str] = []
+    emitted: Set[int] = set()
     for pid, prop_id in sorted(state.hourglass_prop_ids.items()):
+        if prop_id in emitted:
+            continue
+        emitted.add(prop_id)
         secid = part_secids.get(pid, pid)
         coeff, iso_over = state.hourglass_prop_vals.get(pid, (None, None))
-        title = f"HG_PROP_{prop_id} (part {pid})"
+        siblings = sorted(pids_by_prop[prop_id])
+        title = (f"HG_PROP_{prop_id} (part{'s' if len(siblings) > 1 else ''} "
+                 f"{','.join(map(str, siblings))})")
         # solid-first, matching _assign_hourglass_props' family selection.
         if pid in solid_pids:
             sec = state.sec_solids.get(secid)

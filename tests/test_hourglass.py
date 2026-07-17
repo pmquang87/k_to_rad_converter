@@ -23,13 +23,13 @@ from k2rad.handlers import dispatch
 from k2rad.state import ConversionState
 
 
-def _convert(deck: str):
+def _convert(deck: str, **opts):
     """convert() a deck string; return (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **opts)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -421,6 +421,236 @@ class NoHourglassRegressionTests(unittest.TestCase):
     def test_no_split_props(self):
         _, starter = _convert(_solid_deck(hgid1=0, hg_cards=""))
         self.assertEqual(starter.count("/PROP/SOLID/"), 1)
+
+
+# ── 8. Cross-feature: *INITIAL_STRESS_SOLID → /INIBRI Nb_integr must track the
+#      hourglass-remapped /PROP/SOLID Isolid (else starter MSGID 695). ─────────
+
+# One brick + *INITIAL_STRESS_SOLID (NINT=1, one stress point).
+_ISS = ("*INITIAL_STRESS_SOLID\n"
+        "         1         1\n"
+        "     100.0     200.0     300.0      10.0      20.0      30.0       0.0\n")
+
+
+def _iss_deck(hgid=0, hg_cards="", control=""):
+    """One brick (part 1, ELFORM-1 section 1) with an initial solid stress."""
+    return (
+        "*KEYWORD\n" + _NODES +
+        "*ELEMENT_SOLID\n"
+        "       1       1       1       2       3       4       5       6       7       8\n"
+        "*PART\nsolid1\n" + _pcard(1, 1, 1, hgid) + "\n"
+        "*SECTION_SOLID\n         1         1\n"
+        + hg_cards + _MAT + _ISS + control +
+        "*CONTROL_TERMINATION\n       1.0\n*END\n"
+    )
+
+
+def _inibri_nbint_isolid(starter: str):
+    """(Nb_integr, Isolid) from the first /INIBRI/STRS_FGLO data card (cols
+    11-20 and 31-40)."""
+    card = _block_lines(starter, "/INIBRI/STRS_FGLO")[0]
+    return int(card[10:20]), int(card[30:40])
+
+
+# Under-integrated Isolid (1 IP) vs full-integration (8 IP) — the /INIBRI
+# Nb_integr the starter demands for each.
+_NBINT_FOR_ISOLID = {1: 1, 5: 1, 24: 1, 12: 8, 17: 8, 18: 8}
+
+
+class InitialStressHourglassTests(unittest.TestCase):
+    """The /INIBRI Nb_integr/Isolid the writer emits must match the *effective*
+    /PROP/SOLID Isolid once hourglass control remaps it — the regression the
+    previously-dropped *CONTROL_HOURGLASS masked."""
+
+    def _prop_and_inibri(self, deck):
+        _, starter = _convert(deck)
+        ref = _part_prop_ref(starter, 1)
+        prop_isolid, _ = _solid_isolid_h(starter, f"/PROP/SOLID/{ref}")
+        nbint, ini_isolid = _inibri_nbint_isolid(starter)
+        return prop_isolid, ini_isolid, nbint
+
+    def test_inibri_matches_control_remapped_isolid(self):
+        # *CONTROL_HOURGLASS IHQ1 → /PROP Isolid 1 (1 IP); /INIBRI must be
+        # Nb_integr 1, Isolid 1 (was Nb_integr 8/Isolid 17 → MSGID 695).
+        prop_isolid, ini_isolid, nbint = self._prop_and_inibri(
+            _iss_deck(control="*CONTROL_HOURGLASS\n         1       0.1\n"))
+        self.assertEqual(prop_isolid, 1)
+        self.assertEqual(ini_isolid, 1)
+        self.assertEqual(nbint, _NBINT_FOR_ISOLID[prop_isolid])
+
+    def test_inibri_matches_perpart_hgid_isolid(self):
+        # *PART HGID → *HOURGLASS IHQ4 → split /PROP Isolid 5 (1 IP).
+        prop_isolid, ini_isolid, nbint = self._prop_and_inibri(
+            _iss_deck(hgid=7, hg_cards=_hgcard(7, 4, 0.08) + "\n"))
+        self.assertEqual(prop_isolid, 5)
+        self.assertEqual(ini_isolid, 5)
+        self.assertEqual(nbint, _NBINT_FOR_ISOLID[prop_isolid])
+
+    def test_inibri_unchanged_without_hourglass(self):
+        # No hourglass source → /PROP keeps Isolid 17 (8 IP); /INIBRI stays
+        # Nb_integr 8 (guards the fix against regressing the plain path).
+        prop_isolid, ini_isolid, nbint = self._prop_and_inibri(_iss_deck())
+        self.assertEqual(prop_isolid, 17)
+        self.assertEqual(ini_isolid, 17)
+        self.assertEqual(nbint, 8)
+
+
+# ── 9. Cross-feature: per-part *HOURGLASS on an auto-created (undefined)
+#      *SECTION_SOLID must still apply (the prepass resolves the default). ─────
+
+class AutoCreatedSectionTests(unittest.TestCase):
+    def _deck(self, hgid, hg_cards, control=""):
+        # part 1 references SECID 1 but the deck defines NO *SECTION_SOLID for it.
+        return (
+            "*KEYWORD\n" + _NODES +
+            "*ELEMENT_SOLID\n"
+            "       1       1       1       2       3       4       5       6       7       8\n"
+            "*PART\nhex\n" + _pcard(1, 1, 1, hgid) + "\n"
+            + hg_cards + _MAT + control +
+            "*CONTROL_TERMINATION\n       1.0\n*END\n")
+
+    def test_perpart_hourglass_applied_on_undefined_section(self):
+        # HGID 7 → IHQ4 QM0.08; the auto-created ELFORM-1 section must still be
+        # remapped to Isolid 5 / h 0.08 (was silently dropped → Isolid 17/h 0).
+        result, starter = _convert(
+            self._deck(7, _hgcard(7, 4, 0.08) + "\n"))
+        ref = _part_prop_ref(starter, 1)
+        self.assertNotEqual(ref, 1)                       # split out
+        isolid, h = _solid_isolid_h(starter, f"/PROP/SOLID/{ref}")
+        self.assertEqual(isolid, 5)
+        self.assertAlmostEqual(h, 0.08)
+        self.assertTrue(any("split" in w.lower() for w in result.warnings))
+
+    def test_control_applied_on_undefined_section(self):
+        # Global *CONTROL_HOURGLASS also reaches the auto-created section.
+        _, starter = _convert(self._deck(
+            0, "", control="*CONTROL_HOURGLASS\n         6      0.12\n"))
+        isolid, h = _solid_isolid_h(starter, "/PROP/SOLID/1")
+        self.assertEqual(isolid, 24)                      # IHQ6 → 24
+        self.assertAlmostEqual(h, 0.12)
+
+
+# ── 10. Prop-split dedup: sibling parts sharing SECID *and* effective hourglass
+#       get ONE shared /PROP, not a byte-identical copy each. ──────────────────
+
+class SharedSectionDedupTests(unittest.TestCase):
+    def setUp(self):
+        # Two bricks, same section 1, same HGID 4 (IHQ6 → Isolid 24, h 0.03).
+        deck = _two_solid_deck(
+            hgid1=4, hgid2=4, hg_cards=_hgcard(4, 6, 0.03) + "\n")
+        self.result, self.starter = _convert(deck)
+
+    def test_both_parts_share_one_split_prop(self):
+        r1 = _part_prop_ref(self.starter, 1)
+        r2 = _part_prop_ref(self.starter, 2)
+        self.assertEqual(r1, r2)                          # deduplicated
+        self.assertNotEqual(r1, 1)                        # and it is the split
+
+    def test_only_one_prop_emitted(self):
+        # Shared section prop suppressed (all split) + ONE dedup split prop.
+        self.assertEqual(self.starter.count("/PROP/SOLID/"), 1)
+
+    def test_shared_prop_carries_settings(self):
+        ref = _part_prop_ref(self.starter, 1)
+        isolid, h = _solid_isolid_h(self.starter, f"/PROP/SOLID/{ref}")
+        self.assertEqual(isolid, 24)
+        self.assertAlmostEqual(h, 0.03)
+
+    def test_distinct_hgid_still_splits_separately(self):
+        # Contrast: different resolved hourglass → distinct props (no over-dedup).
+        _, starter = _convert(_two_solid_deck(
+            hgid1=4, hgid2=5,
+            hg_cards=(_hgcard(4, 6, 0.03) + "\n" + _hgcard(5, 4, 0.08) + "\n")))
+        self.assertNotEqual(_part_prop_ref(starter, 1),
+                            _part_prop_ref(starter, 2))
+
+
+# ── 11. Cross-feature: LAW128 (ortho) + hourglass split on one section — the
+#       shared section prop is suppressed only when EVERY part is split. ───────
+
+_MAT_LAW128 = (
+    "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+    "        10   1.05E-9    1800.0       0.4      35.0       0.0       0.0       1.0\n"
+    "      10.0      50.0       5.0     300.0       0.0       0.0       0.0       0.0\n"
+    "       0.0       0.0      1.35       1.0      0.75       0.0       0.0       0.0\n"
+    "       0.0       0.1\n"
+)
+
+
+def _law128_hg_deck(part2_hgid, hg_cards):
+    """part1 = LAW128 ortho (mid 10), part2 = elastic (mid 1) with optional
+    HGID, both solids on the SAME section 1."""
+    return (
+        "*KEYWORD\n" + _NODES +
+        "*ELEMENT_SOLID\n"
+        "       1       1       1       2       3       4       5       6       7       8\n"
+        "       2       2       1       2       3       4       5       6       7       8\n"
+        "*PART\nlaw128\n" + _pcard(1, 1, 10, 0) + "\n"
+        "*PART\nelastic\n" + _pcard(2, 1, 1, part2_hgid) + "\n"
+        "*SECTION_SOLID\n         1         1\n"
+        + hg_cards + _MAT + _MAT_LAW128 +
+        "*CONTROL_TERMINATION\n       1.0\n*END\n"
+    )
+
+
+class Law128HourglassSuppressionTests(unittest.TestCase):
+    def test_all_parts_split_suppresses_shared_prop(self):
+        # part1 ortho-split + part2 hourglass-split → no shared /PROP/SOLID/1.
+        _, starter = _convert(_law128_hg_deck(
+            part2_hgid=4, hg_cards=_hgcard(4, 6, 0.03) + "\n"))
+        self.assertNotIn("/PROP/SOLID/1\n", starter)
+        self.assertNotEqual(_part_prop_ref(starter, 1), 1)   # ortho prop
+        self.assertNotEqual(_part_prop_ref(starter, 2), 1)   # hourglass prop
+        self.assertNotEqual(_part_prop_ref(starter, 1),
+                            _part_prop_ref(starter, 2))
+
+    def test_plain_sibling_keeps_shared_prop(self):
+        # part1 ortho-split, part2 plain (no HGID) → shared /PROP/SOLID/1 kept.
+        _, starter = _convert(_law128_hg_deck(part2_hgid=0, hg_cards=""))
+        self.assertIn("/PROP/SOLID/1\n", starter)
+        self.assertEqual(_part_prop_ref(starter, 2), 1)      # plain part
+        self.assertNotEqual(_part_prop_ref(starter, 1), 1)   # ortho part
+
+
+# ── 12. Cross-feature: --tet10-to-tet4 downgrade + *HOURGLASS — the downgraded
+#       tets stay gated (Isolid 14), so no remap and no split. ────────────────
+
+_TET10_HG_DECK = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2             1.0             0.0             0.0\n"
+    "       3             0.0             1.0             0.0\n"
+    "       4             0.0             0.0             1.0\n"
+    "       5             0.5             0.0             0.0\n"
+    "       6             0.5             0.5             0.0\n"
+    "       7             0.0             0.5             0.0\n"
+    "       8             0.0             0.0             0.5\n"
+    "       9             0.5             0.0             0.5\n"
+    "      10             0.0             0.5             0.5\n"
+    "*ELEMENT_SOLID\n"
+    "       1       1\n"
+    "       1       2       3       4       5       6       7       8       9      10\n"
+    "*PART\ntet10\n" + _pcard(1, 1, 1, 7) + "\n"
+    "*SECTION_SOLID\n         1        10\n"
+    + _hgcard(7, 4, 0.08) + "\n" + _MAT +
+    "*CONTROL_TERMINATION\n       1.0\n*END\n"
+)
+
+
+class Tet10DowngradeHourglassTests(unittest.TestCase):
+    def test_downgraded_tet_not_remapped_or_split(self):
+        result, starter = _convert(_TET10_HG_DECK, tet10_to_tet4=True)
+        self.assertIn("/TETRA4", starter)                 # downgrade happened
+        self.assertEqual(_part_prop_ref(starter, 1), 1)   # section prop, no split
+        self.assertNotIn("HG_PROP", starter)              # no dedicated hg prop
+
+    def test_tet10_kept_not_remapped_or_split(self):
+        # Same gate without the downgrade (raw /TETRA10).
+        _, starter = _convert(_TET10_HG_DECK)
+        self.assertIn("/TETRA10", starter)
+        self.assertEqual(_part_prop_ref(starter, 1), 1)
+        self.assertNotIn("HG_PROP", starter)
 
 
 if __name__ == "__main__":
