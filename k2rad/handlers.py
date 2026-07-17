@@ -24,7 +24,8 @@ from .state import (
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
-    Curve, DefineTable, CoordSys, CoordNodes, ConstrainedNodalRigidBody,
+    Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
+    SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
@@ -1211,6 +1212,124 @@ def handle_define_coordinate_nodes(block: Block, state: ConversionState) -> None
     state.coord_nodes[cid] = CoordNodes(cid, n1, n2, n3, flag, dir_)
 
 
+def handle_define_coordinate_vector(block: Block, state: ConversionState) -> None:
+    """*DEFINE_COORDINATE_VECTOR → /SKEW/FIX (id = CID).
+
+    Card (R16 Vol I p.17-74): CID XX YX ZX XV YV ZV NID
+      (XX,YX,ZX) = a vector on the local x-axis; (XV,YV,ZV) = a vector in the
+      local x-y plane; the starter forms z = X × V, y = z × X. NID (field 8) is
+      an optional co-rotation node — dyna2rad ignores it (emits a fixed skew),
+      so it is stored and warned in the writer.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*DEFINE_COORDINATE_VECTOR: empty card — skipped")
+        return
+    g = lambda i: to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
+    cid = to_int(f1[0])
+    xx, yx, zx = g(1), g(2), g(3)
+    xv, yv, zv = g(4), g(5), g(6)
+    nid = to_int(f1[7]) if len(f1) > 7 else 0
+    state.coord_vectors[cid] = CoordVector(cid, xx, yx, zx, xv, yv, zv, nid, title)
+
+
+def handle_define_vector(block: Block, state: ConversionState) -> None:
+    """*DEFINE_VECTOR (value form) → /SKEW/FIX, *DEFINE_VECTOR_NODES → /SKEW/MOV.
+
+    Value form card: VID XT YT ZT XH YH ZH CID (tail → head).
+    _NODES card:     VID NODET NODEH (tail node → head node).
+    The writer builds a skew whose local X' follows the tail→head direction.
+    """
+    is_nodes = "_NODES" in block.keyword
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{block.keyword}: empty card — skipped")
+        return
+    vid = to_int(f1[0])
+    if is_nodes:
+        nodet = to_int(f1[1]) if len(f1) > 1 else 0
+        nodeh = to_int(f1[2]) if len(f1) > 2 else 0
+        state.define_vectors[vid] = DefineVector(
+            vid, title, is_nodes=True, nodet=nodet, nodeh=nodeh)
+    else:
+        g = lambda i: to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
+        xt, yt, zt = g(1), g(2), g(3)
+        xh, yh, zh = g(4), g(5), g(6)
+        cid = to_int(f1[7]) if len(f1) > 7 else 0
+        state.define_vectors[vid] = DefineVector(
+            vid, title, is_nodes=False, xt=xt, yt=yt, zt=zt,
+            xh=xh, yh=yh, zh=zh, cid=cid)
+
+
+def handle_define_sd_orientation(block: Block, state: ConversionState) -> None:
+    """*DEFINE_SD_ORIENTATION → the orientation /SKEW of an oriented
+    *ELEMENT_DISCRETE (its VID).
+
+    Card (R16 Vol I p.17-372): VID IOP XT YT ZT NID1 NID2
+      IOP=0: fixed direction (XT,YT,ZT) → /SKEW/FIX
+      IOP=2: along NID1→NID2 (co-rotating) → /SKEW/MOV
+      IOP=1/3: the spring's own node axis projected ⟂ to the vector/node pair —
+        no OpenRadioss skew equivalent (unhandled by dyna2rad too), warned in
+        the writer.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*DEFINE_SD_ORIENTATION: empty card — skipped")
+        return
+    vid = to_int(f1[0])
+    iop = to_int(f1[1]) if len(f1) > 1 else -1
+    xt = to_float(f1[2]) if len(f1) > 2 and f1[2].strip() else 0.0
+    yt = to_float(f1[3]) if len(f1) > 3 and f1[3].strip() else 0.0
+    zt = to_float(f1[4]) if len(f1) > 4 and f1[4].strip() else 0.0
+    nid1 = to_int(f1[5]) if len(f1) > 5 else 0
+    nid2 = to_int(f1[6]) if len(f1) > 6 else 0
+    state.sd_orientations[vid] = SdOrientation(
+        vid, iop, xt, yt, zt, nid1, nid2, title)
+
+
+def handle_define_box(block: Block, state: ConversionState) -> None:
+    """*DEFINE_BOX / *DEFINE_BOX_LOCAL → numeric node-membership scoping.
+
+    Card 1 (both): BOXID XMN XMX YMN YMX ZMN ZMX.
+    _LOCAL extra cards: (XX YX ZX XV YV ZV) local-x and in-plane vectors, then
+    (CX CY CZ) the local-system origin — the extents on Card 1 are then in that
+    local frame. (The _ADAPTIVE/_COARSEN/_DRAWBEAD/_SPH variants have their own
+    normalized keywords and fall through to skipped_keywords, matching
+    dyna2rad's silent drop.)
+    """
+    is_local = "_LOCAL" in block.keyword
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{block.keyword}: empty card — skipped")
+        return
+    g = lambda f, i: to_float(f[i]) if len(f) > i and f[i].strip() else 0.0
+    box_id = to_int(f1[0])
+    box = DefineBox(box_id, title,
+                    xmn=g(f1, 1), xmx=g(f1, 2),
+                    ymn=g(f1, 3), ymx=g(f1, 4),
+                    zmn=g(f1, 5), zmx=g(f1, 6),
+                    local=is_local)
+    if is_local:
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+        box.xx, box.yx, box.zx = g(f2, 0), g(f2, 1), g(f2, 2)
+        box.xv, box.yv, box.zv = g(f2, 3), g(f2, 4), g(f2, 5)
+        box.cx, box.cy, box.cz = g(f3, 0), g(f3, 1), g(f3, 2)
+    state.boxes[box_id] = box
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sets
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1433,6 +1552,30 @@ def _read_contact_ignore(raw: List[str], offset: int) -> int:
     return to_int(f[1]) if len(f) > 1 else 0
 
 
+def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
+                      f1: List[str]) -> None:
+    """Warn (loudly) when a contact Card 1 carries SBOXID/MBOXID (fields 5/6).
+
+    dyna2rad only maps box-restricted contact scoping for
+    *CONTACT_FORCE_TRANSDUCER_PENALTY (via a Boolean-intersection /SET/GENERAL
+    → /INTER/SUB); the general TYPE7/TYPE25 contact converters ignore it. k2rad
+    resolves box membership only at the node level (initial velocities, rigid
+    walls), which does not map cleanly onto a contact's slave/master *surface*,
+    so the box is dropped and the contact uses the full surface — flagged here
+    so the user can restrict the *SET manually if the scoping is load-bearing.
+    """
+    sboxid = to_int(f1[4]) if len(f1) > 4 else 0
+    mboxid = to_int(f1[5]) if len(f1) > 5 else 0
+    if sboxid or mboxid:
+        state.warn(
+            f"*{keyword} id={inter_id}: SBOXID/MBOXID box-restricted contact "
+            f"scoping (sbox={sboxid}, mbox={mboxid}) is NOT converted — the "
+            "contact uses the full slave/master surface. dyna2rad only maps box "
+            "scoping for *CONTACT_FORCE_TRANSDUCER_PENALTY, and a box does not "
+            "map cleanly onto a contact surface here; restrict the referenced "
+            "*SET manually if the box scoping matters.")
+
+
 def handle_contact_automatic_single_surface(block: Block, state: ConversionState) -> None:
     inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
@@ -1442,6 +1585,7 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
     # Card2: fs fd dc vc vdc penchk bt dt  (immediately after Card1)
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -1473,6 +1617,7 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
     # Card2: fs fd dc vc vdc penchk bt dt
     f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     fs = to_float(f3[0]) if f3 else 0.0
@@ -2472,9 +2617,6 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
         return
     g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
     fric = g(6)
-    if boxid:
-        state.warn(f"{label} id={rwid}: BOXID has no /RWALL "
-                   "equivalent — the box limitation is ignored.")
     if woff:
         state.warn(f"{label} id={rwid}: OFFSET has no /RWALL "
                    "equivalent — ignored.")
@@ -2519,6 +2661,7 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
         rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
         xt=g(0), yt=g(1), zt=g(2), xh=g(3), yh=g(4), zh=g(5),
         fric=fric, birth=birth, death=death, offset=woff,
+        boxid=boxid,
         moving=is_moving, mass=mass, v0=v0,
         finite=is_finite, xhev=xhev, yhev=yhev, zhev=zhev,
         lenl=lenl, lenm=lenm))
@@ -3844,7 +3987,12 @@ HANDLERS = {
     "DEFINE_TABLE_2D":                        handle_define_table_2d,
     "DEFINE_COORDINATE_SYSTEM":               handle_define_coordinate_system,
     "DEFINE_COORDINATE_NODES":                handle_define_coordinate_nodes,
-    "DEFINE_COORDINATE_VECTOR":               handle_skip,
+    "DEFINE_COORDINATE_VECTOR":               handle_define_coordinate_vector,
+    "DEFINE_VECTOR":                          handle_define_vector,
+    "DEFINE_VECTOR_NODES":                    handle_define_vector,
+    "DEFINE_SD_ORIENTATION":                  handle_define_sd_orientation,
+    "DEFINE_BOX":                             handle_define_box,
+    "DEFINE_BOX_LOCAL":                       handle_define_box,
 
     # Sets
     "SET_NODE_LIST":                          handle_set_node_list,

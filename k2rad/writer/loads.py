@@ -16,12 +16,19 @@ __all__ = [
     "_make_bcs",
     "_FORCE_DOF_AXIS",
     "_emit_spr_gene_dof",
+    "_emit_spr_gene_dof_kc",
     "_make_grounding_springs",
     "_emit_prop_type4",
     "_emit_prop_type13",
     "_curve_slope_at_origin",
     "_new_ground_node",
+    "_emit_spring_part",
     "_make_discrete_springs",
+    "_box_basis",
+    "_box_global_corners",
+    "_box_contains",
+    "_box_node_ids",
+    "_resolve_box_nodes",
     "_make_spotweld_beam_connectors",
     "_make_constrained_spotweld_springs",
     "_DOF_DIR",
@@ -154,6 +161,24 @@ def _make_bcs(state: ConversionState, rbody_info: Dict) -> List[str]:
 _FORCE_DOF_AXIS = {1: 0, 2: 1, 3: 2}
 
 
+def _emit_spr_gene_dof_kc(k: float, c: float = 0.0, a: float = 0.0,
+                          fct: int = 0, h: int = 0,
+                          dmin: float = 0.0, dmax: float = 0.0) -> List[str]:
+    """The 3 data lines of one /PROP/TYPE8 (SPR_GENE) DOF, with stiffness K,
+    viscous C, scale A, an optional force function fct (+ hardening flag H) and
+    the rupture displacements DeltaMin/DeltaMax. Zero-valued A/B/D and rupture
+    fields take the reader defaults (A=1, B=0, ±1e30) — the same convention the
+    validated grounding-spring emitter relies on."""
+    return [
+        "#                 K                   C                   A                   B                   D",
+        f"{_f(k)}{_f(c)}{_f(a)}{_f(0.0)}{_f(0.0)}",
+        "#  fct_ID1         H   fct_ID2   fct_ID3   fct_ID4                      DeltaMin            DeltaMax",
+        f"{_i(fct)}{_i(h)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
+        "#                 F                   E              Ascale              Hscale",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+    ]
+
+
 def _emit_spr_gene_dof(k: float) -> List[str]:
     """The 3 data lines of one /PROP/TYPE8 (SPR_GENE) DOF: a linear spring with
     only the stiffness K set (C=A=B=D=0, no function, no failure).
@@ -162,14 +187,7 @@ def _emit_spr_gene_dof(k: float) -> List[str]:
     (add_grounding_springs.py): the reader forces A=1,B=0 and ±1e30 failure
     displacements when no function is given, so only K matters here.
     """
-    return [
-        "#                 K                   C                   A                   B                   D",
-        f"{_f(k)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-        "#  fct_ID1         H   fct_ID2   fct_ID3   fct_ID4                      DeltaMin            DeltaMax",
-        f"{_i(0) * 5}          {_f(0.0)}{_f(0.0)}",
-        "#                 F                   E              Ascale              Hscale",
-        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-    ]
+    return _emit_spr_gene_dof_kc(k)
 
 
 def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[str]:
@@ -376,6 +394,60 @@ def _new_ground_node(state: ConversionState, at: NodeData) -> int:
     return nid
 
 
+def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
+                      title: str, g_elems, pid: int,
+                      spring_kind_label: str = "TYPE4") -> List[str]:
+    """Emit /PART + /SPRING for a group of discrete elements on *prop_id*,
+    synthesizing a fixed ground node (+ /BCS 111 111) for each grounded element
+    (N2=0). Shared by the axial /PROP/TYPE4 and the oriented /PROP/TYPE8 paths."""
+    lines = [
+        f"/PART/{part_id}",
+        title,
+        f"{_i(prop_id)}{_i(0)}{_i(0)}",
+        f"/SPRING/{part_id}",
+        "# sprg_ID  node_ID1  node_ID2",
+    ]
+    ground_nodes: List[int] = []
+    for e in g_elems:
+        n1, n2 = e.n1, e.n2
+        if n1 <= 0 or n2 <= 0:
+            anchor = n1 if n1 > 0 else n2
+            nd = state.nodes.get(anchor)
+            if nd is None:
+                state.warn(f"*ELEMENT_DISCRETE {e.eid}: grounded "
+                           f"element's node {anchor} has no "
+                           "coordinates — element skipped.")
+                continue
+            gnid = _new_ground_node(state, nd)
+            ground_nodes.append(gnid)
+            n1, n2 = anchor, gnid
+        lines.append(f"{_i(e.eid)}{_i(n1)}{_i(n2)}")
+    lines.append(HDR)
+    if ground_nodes:
+        grnod_id = state.next_id()
+        bcs_id = state.next_id()
+        lines.append("/NODE")
+        for gnid in ground_nodes:
+            nd = state.nodes[gnid]
+            lines.append(f"{_i(gnid)}{_f(nd.x)}{_f(nd.y)}{_f(nd.z)}")
+        lines += _emit_grnod_node(grnod_id,
+                                  f"discrete_ground_pid{pid}",
+                                  ground_nodes)
+        lines += [
+            f"/BCS/{bcs_id}",
+            f"fix_discrete_ground_pid{pid}",
+            "#  Tra rot   skew_ID  grnod_ID",
+            f"   111 111         0{_i(grnod_id)}",
+            HDR,
+        ]
+        state.warn(f"*ELEMENT_DISCRETE part {pid}: {len(ground_nodes)} "
+                   "grounded element(s) (N2=0) tied to new fully-fixed "
+                   "ground node(s) at the attached node's coordinates "
+                   f"(zero-length {spring_kind_label} spring = central "
+                   "restoring force toward the anchor point).")
+    return lines
+
+
 def _make_discrete_springs(state: ConversionState) -> List[str]:
     """*ELEMENT_DISCRETE + *SECTION_DISCRETE + *MAT_SPRING_ELASTIC /
     *MAT_SPRING_NONLINEAR_ELASTIC / *MAT_DAMPER_VISCOUS → /PROP/TYPE4 (SPRING)
@@ -474,16 +546,27 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
 
         # Per-element force scale S becomes a cloned property per distinct S:
         # linear K/C scale directly; a nonlinear function is scaled through the
-        # A coefficient (F = f(δ)·A when B=0).
+        # A coefficient (F = f(δ)·A when B=0). Elements oriented by a
+        # *DEFINE_SD_ORIENTATION (VID) that resolved to a /SKEW are grouped by
+        # (vid, S) onto an oriented /PROP/TYPE8; everything else is axial
+        # /PROP/TYPE4.
         groups: Dict[float, List] = defaultdict(list)
+        ori_groups: Dict[Tuple[int, float], List] = defaultdict(list)
         n_vid = 0
         n_bad = 0
         for e in elems:
-            if e.vid:
-                n_vid += 1
-                continue
             if e.n1 <= 0 and e.n2 <= 0:
                 n_bad += 1
+                continue
+            if e.vid:
+                if state.sdorient_skew_ids.get(e.vid) is None:
+                    n_vid += 1
+                    continue
+                if e.offset:
+                    state.warn(f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} "
+                               "(initial preload offset) has no /SPRING "
+                               "equivalent — dropped.")
+                ori_groups[(e.vid, e.s if e.s else 1.0)].append(e)
                 continue
             if e.offset:
                 state.warn(f"*ELEMENT_DISCRETE {e.eid}: OFFSET={e.offset:g} "
@@ -491,86 +574,52 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                            "— dropped.")
             groups[e.s if e.s else 1.0].append(e)
         if n_vid:
-            state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_vid} element(s) use a "
-                       "*DEFINE_SD_ORIENTATION vector (VID) — no confident "
-                       "/PROP/TYPE4 axis mapping, those elements were NOT "
-                       "converted (a wrong-axis spring would be worse).")
+            state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_vid} element(s) "
+                       "reference a *DEFINE_SD_ORIENTATION VID that is undefined "
+                       "or uses IOP=1/3 (an unsupported spring-axis projection) "
+                       "— those elements were NOT converted.")
         if n_bad:
             state.warn(f"*ELEMENT_DISCRETE part {pid}: {n_bad} element(s) have "
                        "no valid nodes — skipped.")
 
-        first_group = True
-        for s in sorted(groups):
-            g_elems = groups[s]
-            prop_id = state.next_id()
-            if first_group:
-                part_id = pid          # keep the DYNA part id for traceability
-                first_group = False
-            else:
-                part_id = state.next_id()
-                state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
-                           f"scale S={s:g} were split onto auto part {part_id} "
-                           "(the per-element scale has no /SPRING field).")
-            a_coef = 0.0               # 0 → reader default 1.0
+        # MASS: LS-DYNA discrete elements are massless (nodal mass comes from
+        # *ELEMENT_MASS); OpenRadioss wants a spring mass > 0 for the explicit
+        # time step. 1e-4 is the same inert token mass the validated
+        # grounding-spring emitter uses.
+        title = part.title or f"DISCRETE_{pid}"
+        part_id_used = [False]
+
+        def _alloc_part_id():
+            if not part_id_used[0]:
+                part_id_used[0] = True
+                return pid          # keep the DYNA part id for traceability
+            return state.next_id()
+
+        def _scaled(s):
+            a_coef = 0.0            # 0 → reader default 1.0
             k_s, c_s = k, c
             if s != 1.0:
                 if fct1:
-                    a_coef = s         # scales f(δ) (A coefficient, B=0)
+                    a_coef = s      # scales f(δ) (A coefficient, B=0)
                 else:
                     k_s, c_s = k * s, c * s
-            # MASS: LS-DYNA discrete elements are massless (nodal mass comes
-            # from *ELEMENT_MASS); OpenRadioss wants a spring mass > 0 for the
-            # explicit time step. 1e-4 is the same inert token mass the
-            # validated grounding-spring emitter uses.
-            title = part.title or f"DISCRETE_{pid}"
+            return k_s, c_s, a_coef
+
+        # ── translational (axial) springs → /PROP/TYPE4 ────────────────────
+        for s in sorted(groups):
+            g_elems = groups[s]
+            prop_id = state.next_id()
+            part_id = _alloc_part_id()
+            if part_id != pid:
+                state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
+                           f"scale S={s:g} were split onto auto part {part_id} "
+                           "(the per-element scale has no /SPRING field).")
+            k_s, c_s, a_coef = _scaled(s)
             lines += _emit_prop_type4(
                 prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
                 fct1, hflag, dmin, dmax)
-            lines += [
-                f"/PART/{part_id}",
-                title,
-                f"{_i(prop_id)}{_i(0)}{_i(0)}",
-                f"/SPRING/{part_id}",
-                "# sprg_ID  node_ID1  node_ID2",
-            ]
-            ground_nodes: List[int] = []
-            for e in g_elems:
-                n1, n2 = e.n1, e.n2
-                if n1 <= 0 or n2 <= 0:
-                    anchor = n1 if n1 > 0 else n2
-                    nd = state.nodes.get(anchor)
-                    if nd is None:
-                        state.warn(f"*ELEMENT_DISCRETE {e.eid}: grounded "
-                                   f"element's node {anchor} has no "
-                                   "coordinates — element skipped.")
-                        continue
-                    gnid = _new_ground_node(state, nd)
-                    ground_nodes.append(gnid)
-                    n1, n2 = anchor, gnid
-                lines.append(f"{_i(e.eid)}{_i(n1)}{_i(n2)}")
-            lines.append(HDR)
-            if ground_nodes:
-                grnod_id = state.next_id()
-                bcs_id = state.next_id()
-                lines.append("/NODE")
-                for gnid in ground_nodes:
-                    nd = state.nodes[gnid]
-                    lines.append(f"{_i(gnid)}{_f(nd.x)}{_f(nd.y)}{_f(nd.z)}")
-                lines += _emit_grnod_node(grnod_id,
-                                          f"discrete_ground_pid{pid}",
-                                          ground_nodes)
-                lines += [
-                    f"/BCS/{bcs_id}",
-                    f"fix_discrete_ground_pid{pid}",
-                    "#  Tra rot   skew_ID  grnod_ID",
-                    f"   111 111         0{_i(grnod_id)}",
-                    HDR,
-                ]
-                state.warn(f"*ELEMENT_DISCRETE part {pid}: {len(ground_nodes)} "
-                           "grounded element(s) (N2=0) tied to new fully-fixed "
-                           "ground node(s) at the attached node's coordinates "
-                           "(zero-length TYPE4 spring = central restoring "
-                           "force toward the anchor point).")
+            lines += _emit_spring_part(state, part_id, prop_id, title,
+                                       g_elems, pid)
             emitted = True
             state.warn(f"*ELEMENT_DISCRETE part {pid} ({kind}, "
                        f"{len(g_elems)} element(s)) -> /PROP/TYPE4/{prop_id} + "
@@ -578,6 +627,41 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                        "artificial mass (1e-4) for the explicit time step — "
                        "add *ELEMENT_MASS-equivalent mass if dynamics of the "
                        "spring ends matter.")
+
+        # ── oriented springs → /PROP/TYPE8 (SPR_GENE) on the VID's /SKEW ────
+        # Only TYPE8 carries a skew_ID, so an oriented discrete element becomes a
+        # SPR_GENE whose local DOF 1 (Tx) acts along the skew's local X (= the
+        # *DEFINE_SD_ORIENTATION axis); DOFs 2-6 stay inert.
+        for (vid, s) in sorted(ori_groups):
+            g_elems = ori_groups[(vid, s)]
+            skew_id = state.sdorient_skew_ids[vid]
+            prop_id = state.next_id()
+            part_id = _alloc_part_id()
+            k_s, c_s, a_coef = _scaled(s)
+            lines += [
+                f"/PROP/TYPE8/{prop_id}",
+                f"{title} ({kind}, oriented VID {vid})",
+                "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
+                f"{_f(1.0e-4)}{_f(1.0e-6)}{_i(skew_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+            ]
+            lines += _emit_spr_gene_dof_kc(k_s, c_s, a_coef, fct1, hflag,
+                                           dmin, dmax)
+            for _ in range(5):
+                lines += _emit_spr_gene_dof_kc(0.0)
+            lines += [
+                "#  Fsmooth                Fcut",
+                f"{_i(0)}{_f(0.0)}",
+            ]
+            lines += _emit_spring_part(state, part_id, prop_id, title,
+                                       g_elems, pid, spring_kind_label="TYPE8")
+            emitted = True
+            state.warn(
+                f"*ELEMENT_DISCRETE part {pid} ({kind}, {len(g_elems)} "
+                f"element(s)) oriented by *DEFINE_SD_ORIENTATION VID={vid} -> "
+                f"/PROP/TYPE8/{prop_id} (SPR_GENE) + /SPRING on /PART/{part_id} "
+                f"with skew_ID={skew_id}; stiffness on local DOF 1 (translation "
+                "along the orientation axis). Carries a small artificial mass "
+                "(1e-4) for the explicit time step.")
 
     return lines if emitted else []
 
@@ -1251,6 +1335,105 @@ def _local_to_global(basis, v):
             v[0] * ex[2] + v[1] * ey[2] + v[2] * ez[2])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *DEFINE_BOX membership (numeric node scoping — no /BOX entity emitted)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _box_basis(box):
+    """Orthonormal (origin, ex, ey, ez) of a _LOCAL box's frame, built exactly
+    as dyna2rad does (convertboxes.cxx): ex = X̂, ez = normalize(X × V), ey =
+    ez × ex. Returns None when the X vector is zero or X∥V (a degenerate frame
+    with no interior)."""
+    ex = _vnorm((box.xx, box.yx, box.zx))
+    if ex is None:
+        return None
+    ez = _vnorm(_vcross((box.xx, box.yx, box.zx), (box.xv, box.yv, box.zv)))
+    if ez is None:
+        return None
+    ey = _vcross(ez, ex)                          # unit (ez ⟂ ex, both unit)
+    return (box.cx, box.cy, box.cz), ex, ey, ez
+
+
+def _box_global_corners(box):
+    """Global diagonal corner points (P1, P2) of a box. Plain: the global
+    min/max corners. _LOCAL: the local min/max extents baked through the box
+    frame (P1 = origin + xmn·ex + ymn·ey + zmn·ez), matching dyna2rad's
+    rotateVector corner bake. Returns None for a degenerate _LOCAL frame."""
+    lo = (min(box.xmn, box.xmx), min(box.ymn, box.ymx), min(box.zmn, box.zmx))
+    hi = (max(box.xmn, box.xmx), max(box.ymn, box.ymx), max(box.zmn, box.zmx))
+    if not box.local:
+        return lo, hi
+    basis = _box_basis(box)
+    if basis is None:
+        return None
+    origin, ex, ey, ez = basis
+    p1 = _local_to_global((ex, ey, ez), lo)
+    p2 = _local_to_global((ex, ey, ez), hi)
+    p1 = (p1[0] + origin[0], p1[1] + origin[1], p1[2] + origin[2])
+    p2 = (p2[0] + origin[0], p2[1] + origin[1], p2[2] + origin[2])
+    return p1, p2
+
+
+def _box_contains(box, x: float, y: float, z: float) -> bool:
+    """True if the global point (x,y,z) lies in the box. A _LOCAL box tests the
+    point's coordinates in the box frame; a plain box tests global coordinates
+    against its axis-aligned extents (min/max taken per axis, so P1/P2 may be
+    given in either diagonal order)."""
+    lox, hix = min(box.xmn, box.xmx), max(box.xmn, box.xmx)
+    loy, hiy = min(box.ymn, box.ymx), max(box.ymn, box.ymx)
+    loz, hiz = min(box.zmn, box.zmx), max(box.zmn, box.zmx)
+    if box.local:
+        basis = _box_basis(box)
+        if basis is None:
+            return False
+        origin, ex, ey, ez = basis
+        d = (x - origin[0], y - origin[1], z - origin[2])
+        u, v, w = _vdot(d, ex), _vdot(d, ey), _vdot(d, ez)
+    else:
+        u, v, w = x, y, z
+    return lox <= u <= hix and loy <= v <= hiy and loz <= w <= hiz
+
+
+def _box_node_ids(state: ConversionState, box) -> Set[int]:
+    """Set of node ids whose coordinates fall inside *box* (O(nodes) scan — the
+    same cost class as the existing NSIDEX set-difference; there is no spatial
+    index in the codebase). The _LOCAL frame is computed once."""
+    lox, hix = min(box.xmn, box.xmx), max(box.xmn, box.xmx)
+    loy, hiy = min(box.ymn, box.ymx), max(box.ymn, box.ymx)
+    loz, hiz = min(box.zmn, box.zmx), max(box.zmn, box.zmx)
+    if box.local:
+        basis = _box_basis(box)
+        if basis is None:
+            return set()
+        origin, ex, ey, ez = basis
+        out: Set[int] = set()
+        for nid, nd in state.nodes.items():
+            d = (nd.x - origin[0], nd.y - origin[1], nd.z - origin[2])
+            u, v, w = _vdot(d, ex), _vdot(d, ey), _vdot(d, ez)
+            if lox <= u <= hix and loy <= v <= hiy and loz <= w <= hiz:
+                out.add(nid)
+        return out
+    return {nid for nid, nd in state.nodes.items()
+            if lox <= nd.x <= hix and loy <= nd.y <= hiy and loz <= nd.z <= hiz}
+
+
+def _resolve_box_nodes(state: ConversionState, box_id: int, label: str):
+    """Node ids inside *DEFINE_BOX ``box_id`` (a set), or None (with a warning)
+    when the box is undefined or has a degenerate local frame — the caller then
+    applies the load/wall to the full node group instead."""
+    box = state.boxes.get(box_id)
+    if box is None:
+        state.warn(f"{label}: no *DEFINE_BOX {box_id} in the deck — box scoping "
+                   "ignored (applied to the full node group).")
+        return None
+    if box.local and _box_basis(box) is None:
+        state.warn(f"{label}: *DEFINE_BOX_LOCAL {box_id} has a degenerate local "
+                   "frame (zero or parallel defining vectors) — box scoping "
+                   "ignored.")
+        return None
+    return _box_node_ids(state, box)
+
+
 def _emit_frame_fix(frame_id: int, title: str, origin, yaxis, zaxis) -> List[str]:
     """Emit /FRAME/FIX — same card layout and Y'/Z' rule as /SKEW/FIX: the two
     vector cards are the LOCAL Y' and Z' axes (globalyaxis / globalzaxis). The
@@ -1324,17 +1507,23 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
                     "resolvable - applied WITHOUT exclusion")
             else:
                 base -= set(ex[1])
+        # ── BOXID: intersect the group with the *DEFINE_BOX contained nodes ──
+        if iv.boxid:
+            box_nids = _resolve_box_nodes(
+                state, iv.boxid, f"*INITIAL_VELOCITY BOXID={iv.boxid}")
+            if box_nids is not None:
+                before = len([n for n in base if n > 0])
+                base &= box_nids
+                state.warn(
+                    f"*INITIAL_VELOCITY BOXID={iv.boxid}: velocity scoped to the "
+                    f"{len([n for n in base if n > 0])} node(s) inside "
+                    f"*DEFINE_BOX {iv.boxid} (of {before} in the base group).")
         nids = sorted(n for n in base if n > 0)
         if not nids:
             state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
             continue
 
         # ── lossy fields (warn + continue) ──────────────────────────────────
-        if iv.boxid:
-            state.warn(
-                f"*INITIAL_VELOCITY BOXID={iv.boxid}: *DEFINE_BOX support pending "
-                "- converted WITHOUT box scoping (velocity applied to the whole "
-                "node group)")
         if iv.irigid:
             state.warn(
                 f"*INITIAL_VELOCITY IRIGID={iv.irigid}: rigid-body velocity "
@@ -1429,8 +1618,10 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
     # /FRAME and /SKEW share ONE id namespace in the starter (UDOUBLE over the
     # combined table), and converted /SKEW ids preserve the LS-DYNA coord cid
     # verbatim — so a synthesized frame id must never land on one, or the starter
-    # aborts with ERROR 79 DUPLICATE ID.
-    reserved_skew = set(state.coord_sys) | set(state.coord_nodes)
+    # aborts with ERROR 79 DUPLICATE ID. all_skew_ids() covers every converted
+    # skew: coordinate systems/nodes/vectors and the *DEFINE_VECTOR /
+    # *DEFINE_SD_ORIENTATION skews the prepass assigned.
+    reserved_skew = state.all_skew_ids()
     lines: List[str] = []
     for g in state.inivel_generations:
         if g.phase:
@@ -1853,6 +2044,32 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
                 state.warn(
                     f"*RIGIDWALL_PLANAR id={rw.rwid}: node set {rw.nsid} not "
                     "found — the wall tracks ALL nodes instead.")
+        # BOXID scopes the tracked node group. dyna2rad drops the box when NSID
+        # is also given (NSID wins); a box-only wall becomes a /GRNOD of the
+        # in-box nodes (the same role the NSID set plays above).
+        if rw.boxid:
+            if grnd1:
+                state.warn(
+                    f"*RIGIDWALL_PLANAR id={rw.rwid}: both NSID and BOXID given "
+                    "— BOXID dropped, the NSID node set scopes the wall "
+                    "(matching dyna2rad).")
+            else:
+                box_nids = _resolve_box_nodes(
+                    state, rw.boxid,
+                    f"*RIGIDWALL_PLANAR id={rw.rwid} BOXID={rw.boxid}")
+                if box_nids:
+                    box_nids = sorted(box_nids)
+                    grnd1 = state.next_id()
+                    grnod_blocks += _emit_grnod_node(
+                        grnd1, f"rwall_{rw.rwid}_box{rw.boxid}", box_nids)
+                    state.warn(
+                        f"*RIGIDWALL_PLANAR id={rw.rwid}: tracked nodes scoped "
+                        f"to the {len(box_nids)} node(s) inside *DEFINE_BOX "
+                        f"{rw.boxid}.")
+                elif box_nids is not None:          # resolved but empty
+                    state.warn(
+                        f"*RIGIDWALL_PLANAR id={rw.rwid}: *DEFINE_BOX {rw.boxid} "
+                        "contains no nodes — the wall tracks ALL nodes.")
         if rw.nsidex > 0:
             set_title, nids = state.node_sets.get(rw.nsidex, ("", []))
             if nids:

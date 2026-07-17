@@ -21,6 +21,37 @@ Prior history (before this changelog was introduced) is summarized in the
     cfg shows binds to `/PROP/TYPE43` connection solids).
   - `*CONSTRAINED_SPOTWELD` / `*CONSTRAINED_GENERALIZED_WELD_SPOT` → 2-node
     CNRB (no failure) or a TYPE13 connector carrying `SN`/`SS` (with failure).
+- **Geometry utility cards**
+  - `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (was `handle_skip`): local
+    Z = X×V, local Y = Z×X, id = the LS-DYNA CID; an R16 co-rotation `NID` is
+    warned + dropped (dyna2rad treats the card as fixed).
+  - `*DEFINE_VECTOR` → `/SKEW/FIX`, `*DEFINE_VECTOR_NODES` → `/SKEW/MOV` — a
+    skew whose local X′ follows the tail→head direction (the `_NODES` moving
+    form synthesizes the third node it needs). The vector `VID` is mapped to a
+    converted `/SKEW` id that dodges every coordinate-system id (a build-starter
+    prepass reserves them, since `/SKEW`+`/FRAME` share one starter namespace —
+    `all_skew_ids()` now also guards the `*INITIAL_VELOCITY_GENERATION` `/FRAME`
+    ids and the LAW128 orthotropy skews).
+  - `*DEFINE_SD_ORIENTATION` → the orientation `/SKEW` of an oriented
+    `*ELEMENT_DISCRETE` (`IOP=0` → `/SKEW/FIX` aligned with the vector, `IOP=2`
+    → `/SKEW/MOV` from the node pair; `IOP=1/3` unhandled, as in dyna2rad). An
+    `*ELEMENT_DISCRETE` with a resolvable `VID` now converts to an oriented
+    `/PROP/TYPE8` (SPR_GENE) — stiffness on local DOF 1 along the skew axis —
+    instead of being skipped; only TYPE8 carries a `skew_ID`. `DRO=1` torsional
+    sections and unresolvable `VID`s stay warned + skipped.
+  - `*DEFINE_BOX` / `*DEFINE_BOX_LOCAL` → **numeric node-membership scoping**
+    (no `/BOX` entity emitted — `/BOX/RECTA` has no reader cfg and dangling
+    geometry risks a starter abort). Consumers intersect their node group with
+    the box's contained nodes at conversion time, mirroring the `NSIDEX`
+    set-difference; a `_LOCAL` box tests each node in the box's own frame
+    (origin + X̂/in-plane vectors). Wired into `*INITIAL_VELOCITY` `BOXID` and
+    `*RIGIDWALL_*` `BOXID` (box-only scopes the tracked `/GRNOD`; `NSID`+`BOXID`
+    drops the box, `NSID` wins — matching dyna2rad). Contact `SBOXID`/`MBOXID`
+    do not map onto a contact surface here, so they are dropped with a loud
+    warning (dyna2rad only maps them for `*CONTACT_FORCE_TRANSDUCER_PENALTY`);
+    `_ADAPTIVE`/`_COARSEN`/`_DRAWBEAD`/`_SPH` box variants are skipped.
+    Starter-validated (0 errors; the four new skews, the box-scoped `/GRNOD`s
+    and the oriented `/PROP/TYPE8` with `skew_ID` all read cleanly).
 - **Tables & strain rates**
   - `*DEFINE_TABLE_2D` (and resolvable legacy `*DEFINE_TABLE`) → `/TABLE/1`
     with `Ndim=2`; `*MAT_024` `LCSS`-tables and `*MAT_SIMPLIFIED_JOHNSON_COOK`'s
@@ -38,8 +69,9 @@ Prior history (before this changelog was introduced) is summarized in the
     the rotational DOFs). `NSID` scopes the node group (blank/0 = whole model);
     `NSIDEX` is removed by set difference at conversion time; `ICID` maps to the
     matching `/SKEW` from a converted `*DEFINE_COORDINATE_*` (else global with a
-    warning). `BOXID` (`*DEFINE_BOX` pending), a rigid-overwrite `IRIGID`, and
-    the Card-3 per-exempt-node velocities are warned + dropped.
+    warning). `BOXID` is now intersected against the `*DEFINE_BOX` contained
+    nodes (see **Geometry utility cards**); a rigid-overwrite `IRIGID` and the
+    Card-3 per-exempt-node velocities are warned + dropped.
   - `*INITIAL_VELOCITY_GENERATION` → `/INIVEL/AXIS` + a companion `/FRAME/FIX`.
     The rotation axis (through `(XC,YC,ZC)` along `(NX,NY,NZ)`, or node-defined
     when `NX=-999`) becomes the frame's local Z; `OMEGA`→`VR`; the translational

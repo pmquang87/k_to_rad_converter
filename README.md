@@ -106,8 +106,10 @@ export the image.
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
-+ `/BCS`; `*DEFINE_SD_ORIENTATION`-oriented and `DRO=1` torsional elements are
-warned + skipped rather than emitted on a wrong axis)
++ `/BCS`). An element oriented by a `*DEFINE_SD_ORIENTATION` (`VID`) becomes an
+oriented `/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation's
+`/SKEW` axis (only TYPE8 carries a `skew_ID`); a `DRO=1` torsional section and an
+unresolvable `VID` (`IOP=1/3`, which dyna2rad lacks too) stay warned + skipped
 
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
@@ -186,7 +188,26 @@ with a warning, so review the converted card against the source foam
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
 `*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
-`*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`
+`*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
+`*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
+LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)
+`*DEFINE_VECTOR` → `/SKEW/FIX`, `*DEFINE_VECTOR_NODES` → `/SKEW/MOV` — a skew
+whose local X′ follows the tail→head direction (the `_NODES` moving form gets a
+synthesized third node; the vector `VID` maps to a converted `/SKEW` id that
+dodges every coordinate-system id, since `/SKEW`+`/FRAME` share one starter
+namespace)
+`*DEFINE_SD_ORIENTATION` → the orientation `/SKEW` of an oriented
+`*ELEMENT_DISCRETE` (`IOP=0` → `/SKEW/FIX` aligned with the vector, `IOP=2` →
+`/SKEW/MOV` from the node pair; `IOP=1/3` unhandled — as in dyna2rad)
+`*DEFINE_BOX` / `*DEFINE_BOX_LOCAL` → **numeric node-membership scoping** (no
+`/BOX` entity is emitted): every box consumer intersects its node group with the
+box's contained nodes at conversion time (a `_LOCAL` box tests each node in the
+box's own frame). Consumed by `*INITIAL_VELOCITY` `BOXID` and `*RIGIDWALL_*`
+`BOXID` (box-only scopes the tracked `/GRNOD`; `NSID`+`BOXID` drops the box and
+`NSID` wins, matching dyna2rad). Contact `SBOXID`/`MBOXID` do **not** map cleanly
+onto a contact surface here, so they are dropped with a loud warning (dyna2rad
+only maps them for `*CONTACT_FORCE_TRANSDUCER_PENALTY`); the
+`_ADAPTIVE`/`_COARSEN`/`_DRAWBEAD`/`_SPH` box variants are skipped
 `*DEFINE_TABLE_2D` → `/TABLE/1` (Ndim=2, rows sorted by the rate/parameter
 value); legacy `*DEFINE_TABLE` resolves explicit-LCID rows directly and
 bare-VALUE rows positionally (value *i* pairs with the *i*-th `*DEFINE_CURVE`
@@ -266,10 +287,11 @@ unit/sign gotchas.
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/RBODY`
 `*INITIAL_VELOCITY` (base set form) → `/INIVEL/TRA` (+ `/INIVEL/ROT` for
 rotational DOFs); `NSID`/`NSIDEX` node-set scoping (whole model when `NSID` is
-omitted or 0), `NSIDEX` removed by set difference, `ICID` mapped to the matching
-`/SKEW` from a converted `*DEFINE_COORDINATE_*` (else global) — `BOXID`
-(`*DEFINE_BOX` support pending), a rigid-overwrite `IRIGID`, and the Card-3
-per-exempt-node velocities are warned + dropped
+omitted or 0), `NSIDEX` removed by set difference, `BOXID` intersected against
+the `*DEFINE_BOX` contained nodes (numeric membership at conversion time), `ICID`
+mapped to the matching `/SKEW` from a converted `*DEFINE_COORDINATE_*` (else
+global) — a rigid-overwrite `IRIGID` and the Card-3 per-exempt-node velocities
+are warned + dropped
 `*INITIAL_VELOCITY_GENERATION` → `/INIVEL/AXIS` + a generated `/FRAME/FIX`
 (rotation axis through `(XC,YC,ZC)` along `(NX,NY,NZ)`, or node-defined when
 `NX=-999`); `OMEGA`→`VR` about the axis and translational `VX/VY/VZ` projected
