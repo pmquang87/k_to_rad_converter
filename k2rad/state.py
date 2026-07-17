@@ -903,6 +903,33 @@ class InitialVelocityRigidBody:
 
 
 @dataclass
+class InitialVelocity:
+    """*INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT).
+
+    Raw ids only; the writer resolves nsid/nsidex against state.node_sets and
+    icid against the converted /SKEW ids (set difference for NSIDEX)."""
+    nsid: int; nsidex: int; boxid: int; irigid: int; icid: int
+    vx: float; vy: float; vz: float
+    vxr: float; vyr: float; vzr: float
+
+
+@dataclass
+class InitialVelocityGeneration:
+    """*INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + companion /FRAME/FIX.
+
+    sid/styp select the scoped group (0=all, 1=part set, 2=part, 3=node set).
+    When nx == -999 the axis is node-defined: node1/node2 give origin/direction
+    and nx/ny/nz are ignored."""
+    sid: int; styp: int; omega: float
+    vx: float; vy: float; vz: float
+    ivatn: int; icid: int
+    xc: float; yc: float; zc: float
+    nx: float; ny: float; nz: float
+    node1: int; node2: int
+    phase: int; irigid: int
+
+
+@dataclass
 class MatPowerLaw:
     """*MAT_POWER_LAW_PLASTICITY → /MAT/LAW36 with auto-generated curve."""
     mid: int; title: str
@@ -1598,6 +1625,10 @@ class ConversionState:
     load_nodes: List[LoadNode] = field(default_factory=list)
     inivel_nodes: List[InitialVelocityNode] = field(default_factory=list)
     inivel_rbodies: List[InitialVelocityRigidBody] = field(default_factory=list)
+    # *INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT)
+    inivel_general: List[InitialVelocity] = field(default_factory=list)
+    # *INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + /FRAME/FIX
+    inivel_generations: List[InitialVelocityGeneration] = field(default_factory=list)
     pressure_loads: List[PressureLoad] = field(default_factory=list)
     # *LOAD_SEGMENT_SET rows → /PLOAD (segments resolved from segment_sets
     # at write time so the *SET_SEGMENT may be defined later in the deck)

@@ -33,6 +33,26 @@ Prior history (before this changelog was introduced) is summarized in the
   - `*DATABASE_CROSS_SECTION_SET/_PLANE` → `/SECT` (plane form via a
     geometric straddle resolver) + `*DATABASE_SECFORC` → `/TH/SECTIO`;
     `*SET_SHELL`/`_SOLID`/`_BEAM` element sets.
+- **Initial velocities**
+  - `*INITIAL_VELOCITY` (base set form) → `/INIVEL/TRA` (+ `/INIVEL/ROT` for
+    the rotational DOFs). `NSID` scopes the node group (blank/0 = whole model);
+    `NSIDEX` is removed by set difference at conversion time; `ICID` maps to the
+    matching `/SKEW` from a converted `*DEFINE_COORDINATE_*` (else global with a
+    warning). `BOXID` (`*DEFINE_BOX` pending), a rigid-overwrite `IRIGID`, and
+    the Card-3 per-exempt-node velocities are warned + dropped.
+  - `*INITIAL_VELOCITY_GENERATION` → `/INIVEL/AXIS` + a companion `/FRAME/FIX`.
+    The rotation axis (through `(XC,YC,ZC)` along `(NX,NY,NZ)`, or node-defined
+    when `NX=-999`) becomes the frame's local Z; `OMEGA`→`VR`; the translational
+    `VX/VY/VZ` is projected onto the frame's local axes so Radioss re-expands it
+    to the correct global velocity. A nonzero `ICID` rotates `VX/VY/VZ` and the
+    vector rotation axis from that local system to global (mirroring the base
+    form's `/SKEW` reference), warned + global when the id has no converted
+    `/SKEW`. `STYP` 0/1/2/3 (all / part set / part / node set) scopes the group
+    — part scans now include `*ELEMENT_DISCRETE` springs; synthesized `/FRAME`
+    ids skip any converted `/SKEW`/coordinate id (shared starter namespace);
+    `PHASE`, `IVATN`, `IRIGID` are warned + dropped, and
+    `*INITIAL_VELOCITY_GENERATION_START_TIME` stays skipped. Starter- and
+    engine-validated (0 errors; cycle-0 KE matches the analytic value).
 - **Rigid walls**
   - `*RIGIDWALL_PLANAR_MOVING` (+`_FORCES`) → moving `/RWALL/PLANE` (carrier
     node with mass + V0 along the normal); `*RIGIDWALL_PLANAR_FINITE`
