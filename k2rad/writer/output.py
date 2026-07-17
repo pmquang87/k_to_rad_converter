@@ -237,6 +237,7 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     """
     all_inter_ids = ([c.inter_id for c in state.contacts_single]
                      + [c.inter_id for c in state.contacts_surf2surf]
+                     + [c.inter_id for c in state.contacts_general]
                      + [c.inter_id for c in state.contacts_tied])
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:

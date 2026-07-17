@@ -59,7 +59,7 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # terms that shifted the W14 bogie static response ~2x and its first
         # eigenfrequency 44.5 -> 24.7 Hz.
         return
-    if state.contacts_single or state.contacts_surf2surf:
+    if state.contacts_single or state.contacts_surf2surf or state.contacts_general:
         return
     if state.contacts_tied:
         # A tied deck already gets an /INTER (TYPE2). More importantly, the

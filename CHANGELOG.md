@@ -137,7 +137,25 @@ Prior history (before this changelog was introduced) is summarized in the
       `_sst_mst_to_gapmin`), Inacti (`IGNORE` via `_ignore_to_inacti`), VisS
       (`VDC`) and Stfac (`SFS`) route through the same plumbing as TYPE7/TYPE25.
       `--inter-gapmin`/`--auto-gapmin` deliberately do **not** reach the
-      SOFT-routed interfaces (a separate `state.contacts_general` list).
+      SOFT-routed interfaces (a separate `state.contacts_general` list). That
+      list is threaded into the three sites that treat single/surf2surf/tied as
+      *all* contacts: the implicit contact-free stabilization stub is suppressed
+      when a general contact exists (no spurious all-parts self-contact), and
+      `*DATABASE_NCFORC` → `/TH/INTER` plus the `*CONTACT_FORCE_TRANSDUCER`
+      parent fallback both include general interfaces.
+    - The `SOFT=-7` route emits **`Istf=2`, `Igap=2`** (matching `dyna2rad`'s
+      routed-TYPE7 map cc:52 + the `SOFT<1` rule cc:626), not the plain
+      single-surface emitter defaults (`Istf=4`, `Igap=0`), so all three routed
+      types share `dyna2rad`'s stiffness/gap model. Deliberate, documented
+      deviations from `dyna2rad` (all consistent with k2rad's validated TYPE7
+      family and harmless when scale factors are unit/blank and `FS==FD`): the
+      engagement gap is `(|SST|+|MST|)/2` rather than the scale-weighted
+      `fabs(SST·SFST+MST·SFMT)/2`; `Inacti=5` (validated — node-moving
+      `Inacti=6` seg-faults rigid-body secondary nodes) rather than a fixed 6;
+      scalar `Fric=FS`/`Ifric=0` rather than `FD·FSF`+decay/`Ifric=2` on the
+      -7/-19 routes. `SOFT=-7`/`-19` sides resolve part/part-set only (a
+      `*SET_SEGMENT`/`*SET_NODE` side is skipped with a warning; use `-11` or
+      restrict to parts).
   - `*CONTACT_TIED_SURFACE_TO_SURFACE` (+ `_OFFSET`/`_CONSTRAINED_OFFSET`) now
     applies the `dyna2rad` **negative-offset discriminator** (`convertcontacts.cxx`
     cc:220) `(SFST*SST + SFMT*MST)/2 < 0` → **`/INTER/TYPE10`** (penalty tie,

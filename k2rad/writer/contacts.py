@@ -454,6 +454,14 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
         return state.contacts_single[0].inter_id
     if state.contacts_surf2surf:
         return state.contacts_surf2surf[0].inter_id
+    # A SOFT-routed general contact is also a real interface a transducer can
+    # parent on (before the SOFT-routing split, AUTOMATIC_GENERAL lived in
+    # contacts_single and was picked up here). /INTER/SUB needs a surface-based
+    # parent, so offer only the surface routes (-7 → TYPE7, -19 → TYPE19); a
+    # -11 edge/line interface cannot host an /INTER/SUB.
+    for c in state.contacts_general:
+        if c.soft in (-7, -19):
+            return c.inter_id
     return None
 
 
@@ -808,12 +816,18 @@ def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
 def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
-                      gapmin: float = 0.0, stfac: float = 0.0) -> List[str]:
+                      gapmin: float = 0.0, stfac: float = 0.0,
+                      istf: int = 4, igap: int = 0) -> List[str]:
+    # istf/igap default to the ordinary single-surface/surf2surf values (Istf=4
+    # minimum stiffness, Igap=0 constant gap) so those validated paths stay
+    # byte-identical. The SOFT=-7 AUTOMATIC_GENERAL route overrides them to
+    # Istf=2, Igap=2 to match dyna2rad's routed TYPE7 (convertcontacts.cxx map
+    # cc:52 Igap=2, and cc:626 Istf=2 for SOFT<1).
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "#  Slav_id   Mast_id      Istf      Ithe      Igap                Ibag      Idel     Icurv      Iadm",
-        f"{_i(slav_id)}{_i(mast_id)}         4         0         0                   0         2         0         0",
+        f"{_i(slav_id)}{_i(mast_id)}{_i(istf)}         0{_i(igap)}                   0         2         0         0",
         "#          Fscalegap             GAP_MAX             Fpenmax",
         "                   0                   0                   0",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap",
@@ -921,8 +935,14 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
 
 
 def _segment_set_edges(segments) -> List:
-    """Boundary edges (unordered-unique) of a list of 3/4-node segments: each
-    segment's consecutive node pairs (with wrap) become one /LINE/SEG edge."""
+    """All unique edges of a list of 3/4-node segments: each segment's
+    consecutive node pairs (with wrap) become one /LINE/SEG edge, de-duplicated
+    across segments by unordered node pair.
+
+    This keeps interior/shared edges — an edge between two adjacent segments is
+    kept once (not dropped as a free-boundary extraction would) — which is the
+    right behaviour for AUTOMATIC_GENERAL edge contact, whose /INTER/TYPE11 acts
+    on every shell edge, not only the free perimeter. (NB: not boundary-only.)"""
     seen: Set = set()
     edges: List = []
     for seg in segments:
@@ -979,6 +999,27 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
     and scalar Fric from FS — the same plumbing as the TYPE7/TYPE25 path.
     (``--inter-gapmin`` / ``--auto-gapmin`` do NOT reach these sentinel-routed
     interfaces; their engagement gap is the Card-3 SST/MST only.)
+
+    Deliberate deviations from dyna2rad, all consistent with k2rad's existing
+    (solver-validated) TYPE7 path and harmless for the common self-contact deck:
+      * Gapmin = (|SST|+|MST|)/2 (``_sst_mst_to_gapmin``), NOT dyna2rad's
+        scale-weighted fabs(SST*SFST + MST*SFMT)/2. These coincide whenever the
+        Card-3 scale factors are blank/unit and SST/MST share a sign (the usual
+        case); they differ only for non-unit SFST/SFMT or mixed-sign thicknesses.
+      * Inacti via ``_ignore_to_inacti`` (=5 explicit) rather than dyna2rad's
+        fixed 6 — Inacti=5 is the validated k2rad convention (node-moving
+        Inacti=3/6 seg-faulted the engine on rigid-body secondary nodes).
+      * Scalar Coulomb Fric = FS with Ifric=0 (as the whole k2rad TYPE7 family),
+        not dyna2rad's FD*FSF + C5/C6 decay + Ifric=2 for the -7/-19 routes;
+        identical when FS==FD.
+    Only the SOFT=-7 route's Istf=2 / Igap=2 are matched to dyna2rad exactly
+    (see ``_emit_inter_type7``), since those were a plain emitter-default gap.
+
+    Side geometry for the -7 (both sides) and -19 (both sides) routes resolves
+    through the part/part-set resolvers, so a *SET_SEGMENT or *SET_NODE side is
+    dropped with a warning (only the -11 route synthesizes a /LINE from a
+    segment set). Restrict those contacts to parts, or use -11, if a set side is
+    load-bearing.
     """
     if not state.contacts_general:
         return []
@@ -1006,11 +1047,12 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "geometry -> interface skipped.")
                 continue
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, c.fs,
-                                       inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+                                       inacti, viss=viss, gapmin=gapmin, stfac=stfac,
+                                       istf=2, igap=2)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
                 f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
-                "contact, dyna2rad sentinel routing).")
+                "contact, dyna2rad sentinel routing; Istf=2, Igap=2).")
         elif c.soft == -19:
             surf_s = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
             surf_m = surf_s if self_contact else _resolve_contact_master(
@@ -1126,7 +1168,7 @@ def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
       C2  STFAC(1-20) <blank 21-40> GAP(41-60) Tstart(61-80) Tstop(81-100)
       C3  <blank 1-20> ITIED(21-30) INACTI(31-40) VIS_S(41-60) <blank 61-80> BUMULT(81-100)
     """
-    blank10, blank20 = " " * 10, " " * 20
+    blank20 = " " * 20
     return [
         f"/INTER/TYPE10/{inter_id}",
         title or f"TIED_CONTACT_{inter_id}",

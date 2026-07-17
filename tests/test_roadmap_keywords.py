@@ -1345,5 +1345,161 @@ class TiedNegativeGapRoutingTests(unittest.TestCase):
         self.assertNotIn("/INTER/TYPE10/", s)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTOMATIC_GENERAL — card fidelity + the contacts_general threading regressions
+#   (moving SOFT-routed general contacts into their own state list must not make
+#    the "all converted contacts" sites blind to them)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# *CONTROL_IMPLICIT_GENERAL makes the deck implicit, which is what arms the
+# contact-free stabilization stub (_inject_implicit_contact_stub).
+_GEN_IMPLICIT_TAIL = (
+    "*CONTROL_IMPLICIT_GENERAL\n         1       0.1\n"
+    "*CONTROL_TERMINATION\n       1.0\n*END\n"
+)
+
+
+def _card_after_header(starter: str, header_prefix: str, min_int_fields: int):
+    """First data row (all-integer, >= min_int_fields cols) after the header line
+    that starts with *header_prefix* — for fixed-column card assertions."""
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith(header_prefix):
+            for j in range(i + 1, i + 8):
+                parts = lines[j].split()
+                if (len(parts) >= min_int_fields
+                        and all(p.lstrip("-").isdigit() for p in parts[:min_int_fields])):
+                    return parts
+    return None
+
+
+class AutomaticGeneralFidelityAndThreadingTests(unittest.TestCase):
+    """dyna2rad-fidelity of the routed cards + the three sites that must include
+    ``state.contacts_general`` alongside single/surf2surf/tied."""
+
+    # --- SOFT=-7 routed TYPE7 must match dyna2rad's Istf=2 / Igap=2 (cc:52,626),
+    #     not the plain single-surface emitter defaults (Istf=4, Igap=0). ------
+    def test_soft_minus7_emits_istf2_igap2(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-7, ssid=1, sstyp=3) + _GEN_TAIL)
+        parts = _card_after_header(s, "/INTER/TYPE7/50", 5)
+        self.assertIsNotNone(parts, "no /INTER/TYPE7/50 card1 found")
+        # slav_id  mast_id  Istf  Ithe  Igap  ...  Idel ...
+        self.assertEqual(parts[2], "2", "Istf must be 2 (dyna2rad SOFT<1)")
+        self.assertEqual(parts[4], "2", "Igap must be 2 (dyna2rad TYPE7 map)")
+        self.assertEqual(parts[6], "2", "Idel must be 2")
+
+    def test_single_surface_type7_still_istf4_igap0(self):
+        # No-regression: the ordinary single-surface TYPE7 (implicit) keeps the
+        # validated Istf=4 / Igap=0 emitter defaults.
+        _, s = _convert(_GEN_MESH + _general_contact(0, ssid=1, sstyp=3)
+                        + "*CONTROL_IMPLICIT_GENERAL\n         1       0.1\n" + _GEN_TAIL)
+        parts = _card_after_header(s, "/INTER/TYPE7/50", 5)
+        self.assertIsNotNone(parts)
+        self.assertEqual(parts[2], "4")
+        self.assertEqual(parts[4], "0")
+
+    # --- SOFT=-19 routed TYPE19 references two /SURF ids and self-mirrors. -----
+    def test_soft_minus19_references_two_surfaces_self_mirror(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-19, ssid=1, sstyp=3) + _GEN_TAIL)
+        parts = _card_after_header(s, "/INTER/TYPE19/50", 2)
+        self.assertIsNotNone(parts, "no /INTER/TYPE19/50 card1 found")
+        surf_ids, surf_idm = int(parts[0]), int(parts[1])
+        surf_headers = _all_header_ids(s, "/SURF/")
+        self.assertIn(surf_ids, surf_headers)
+        self.assertIn(surf_idm, surf_headers)
+        # msid was 0 → self-mirror → the same surface on both sides.
+        self.assertEqual(surf_ids, surf_idm)
+
+    def test_soft_minus19_two_surface_non_self(self):
+        # Distinct slave/master parts → two DIFFERENT /SURF ids (not the mirror).
+        deck = (_GEN_MESH
+                + "*ELEMENT_SHELL\n       2       2       2       3       4       1\n"
+                + "*PART\nplate2\n         2         1         1\n"
+                + "*CONTACT_AUTOMATIC_GENERAL_ID\n"
+                  "        50                                                          gen\n"
+                  "         1         2         3         3         0         0         0         0\n"
+                  "       0.1       0.1       0.0       0.0       0.0         0       0.01.0000E+28\n"
+                  "       1.0       1.0       0.0       0.0       1.0       1.0       1.0       1.0\n"
+                  "       -19\n"
+                + _GEN_TAIL)
+        _, s = _convert(deck)
+        parts = _card_after_header(s, "/INTER/TYPE19/50", 2)
+        self.assertIsNotNone(parts)
+        self.assertNotEqual(int(parts[0]), int(parts[1]))
+
+    # --- unresolved geometry on each route → clean warn+skip (no crash, no card).
+    def test_soft_minus11_empty_segment_set_skips_cleanly(self):
+        deck = (_GEN_MESH
+                + "*SET_SEGMENT_TITLE\nempty\n       200\n"
+                + "*CONTACT_AUTOMATIC_GENERAL_ID\n"
+                  "        50                                                          gen\n"
+                  "       200         0         0         0         0         0         0         0\n"
+                  "       0.1       0.1       0.0       0.0       0.0         0       0.01.0000E+28\n"
+                  "       1.0       1.0       0.0       0.0       1.0       1.0       1.0       1.0\n"
+                  "       -11\n"
+                + _GEN_TAIL)
+        res, s = _convert(deck)
+        self.assertNotIn("/INTER/TYPE11/50", s)
+        self.assertTrue(any("no edge/line geometry" in w for w in res.warnings))
+
+    def test_soft_minus19_node_set_side_skips_cleanly(self):
+        # A node-set (sstyp=4) side does not resolve to a /SURF on the -19 route.
+        deck = (_GEN_MESH
+                + "*SET_NODE_LIST_TITLE\nnodes\n       300\n         1         2\n"
+                + "*CONTACT_AUTOMATIC_GENERAL_ID\n"
+                  "        50                                                          gen\n"
+                  "       300         0         4         0         0         0         0         0\n"
+                  "       0.1       0.1       0.0       0.0       0.0         0       0.01.0000E+28\n"
+                  "       1.0       1.0       0.0       0.0       1.0       1.0       1.0       1.0\n"
+                  "       -19\n"
+                + _GEN_TAIL)
+        res, s = _convert(deck)
+        self.assertNotIn("/INTER/TYPE19/50", s)
+        self.assertTrue(any("no surface" in w for w in res.warnings))
+
+    # --- REGRESSION: the implicit stabilization stub must NOT fire on a deck
+    #     whose only contact is a SOFT-routed general contact. -----------------
+    def test_implicit_general_only_no_stabilization_stub(self):
+        res, s = _convert(_GEN_MESH + _general_contact(-11) + _GEN_IMPLICIT_TAIL)
+        self.assertIn("/INTER/TYPE11/50", s)
+        self.assertNotIn("auto_implicit_stabilization_self_contact", s)
+        self.assertNotIn("/INTER/TYPE7/", s)   # no spurious all-parts self-contact
+        self.assertFalse(any("no contact interface" in w for w in res.warnings))
+
+    def test_implicit_no_contact_still_gets_stub(self):
+        # Control: a truly contact-free implicit deck DOES still get the stub.
+        res, s = _convert(_GEN_MESH + _GEN_IMPLICIT_TAIL)
+        self.assertIn("auto_implicit_stabilization_self_contact", s)
+
+    # --- REGRESSION: *DATABASE_NCFORC must map a general interface to /TH/INTER
+    #     and must NOT raise the false "no *CONTACT was converted" warning. -----
+    def test_ncforc_includes_general_interface(self):
+        deck = _GEN_MESH + _general_contact(-11) + "*DATABASE_NCFORC\n       1.0\n" + _GEN_TAIL
+        res, s = _convert(deck)
+        self.assertIn("/TH/INTER/", s)
+        th_block = _block(s, _hdr(s, "/TH/INTER/"))
+        listed = {int(x) for ln in th_block for x in ln.split() if x.isdigit()}
+        self.assertIn(50, listed)              # the general interface id
+        self.assertFalse(any("no *CONTACT was converted" in w for w in res.warnings))
+
+    # --- the force-transducer parent fallback now sees contacts_general. -------
+    def test_force_transducer_parent_falls_back_to_general(self):
+        from k2rad.writer.contacts import _select_parent_interface
+        from k2rad.state import ContactAutoGeneral
+        st = ConversionState()
+        st.contacts_general.append(
+            ContactAutoGeneral(inter_id=77, title="g", ssid=1, sstyp=3,
+                               msid=1, mstyp=3, soft=-7, fs=0.0, fd=0.0,
+                               bt=0.0, dt=1e28))
+        self.assertEqual(_select_parent_interface(st), 77)
+        # a -11 (edge/line) interface cannot host an /INTER/SUB → no fallback.
+        st2 = ConversionState()
+        st2.contacts_general.append(
+            ContactAutoGeneral(inter_id=88, title="g", ssid=1, sstyp=3,
+                               msid=1, mstyp=3, soft=-11, fs=0.0, fd=0.0,
+                               bt=0.0, dt=1e28))
+        self.assertIsNone(_select_parent_interface(st2))
+
+
 if __name__ == "__main__":
     unittest.main()
