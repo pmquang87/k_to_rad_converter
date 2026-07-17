@@ -796,8 +796,12 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             continue
         secid = part.secid if part.secid > 0 else pid
         # A *MAT_ANISOTROPIC_VISCOPLASTIC (LAW128) part is repointed at its
-        # synthesized orthotropic /PROP/TYPE9|TYPE6 (LAW128 is orthotropic-only).
-        prop_ref = state.ortho_prop_ids.get(pid, secid)
+        # synthesized orthotropic /PROP/TYPE9|TYPE6 (LAW128 is orthotropic-only);
+        # a part whose per-part hourglass differs from its section is repointed
+        # at its dedicated hourglass /PROP. The two are mutually exclusive (the
+        # hourglass prepass skips ortho parts), so ortho wins where both exist.
+        prop_ref = (state.ortho_prop_ids.get(pid)
+                    or state.hourglass_prop_ids.get(pid, secid))
 
         lines += [
             f"/PART/{pid}",
@@ -888,6 +892,182 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-part hourglass control (*HOURGLASS + *PART HGID → per-part /PROP)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Semantics follow dyna2rad ConvertProp::ConvertEntities (solids only there):
+#   h ← QM (or the global *CONTROL_HOURGLASS QH); Isolid ← f(IHQ) with
+#   IHQ 1/2/3 → 1, 4/5 → 5, 6/7 → 24; 0/8/9/10 unmapped (section Isolid kept).
+#   The map is gated to /PROP/SOLID with ELFORM ∉ {2,13} (2 = fully-integrated
+#   S/R hex — no hourglass modes; 13 = tetra) and a section Isolid ∉ {14,17,18}
+#   (not ALE/cohesive). A *HOURGLASS on a *PART overrides the global card;
+#   HGID=0 (or a dangling id) falls back to it.
+#
+# k2rad props are per-SECTION, so — unlike dyna2rad, which mutates the shared
+# /PROP in place and lets the last part win — a per-part hourglass difference
+# forces a dedicated /PROP split (the same mechanism as the LAW128 ortho props),
+# keeping every part's setting. Shells carry the coefficient into Hm/Hf/Hr
+# (clamped to the Radioss shell max 0.05); k2rad selects Ishell from ELFORM
+# (12/24), for which Hm/Hf/Hr are physically inert (warned once), so no
+# IHQ→Ishell map is invented (dyna2rad maps no shell formulation either).
+
+_SHELL_HG_MAX = 0.05   # Radioss /PROP/SHELL Hm/Hf/Hr upper bound (cfg CHECK)
+
+
+def _auto_section_solid(secid: int) -> SectionSolid:
+    """The default *SECTION_SOLID k2rad synthesizes when a *PART's SECID has no
+    *SECTION_SOLID card. Kept in sync with the auto-create in _make_properties so
+    the hourglass prepass (which runs BEFORE that auto-create) resolves a part on
+    an undefined section to the SAME formulation the property emit will use —
+    ELFORM 1, the under-integrated structural hex."""
+    return SectionSolid(secid, f"AutoPropSolid_{secid}", 1)
+
+
+def _auto_section_shell(secid: int) -> SectionShell:
+    """The default *SECTION_SHELL k2rad synthesizes for a sectionless shell
+    *PART (in sync with _make_properties): ELFORM 2, NIP 3, zero thickness."""
+    return SectionShell(secid, f"AutoPropShell_{secid}", 2, 3, 0.0)
+
+
+def _ihq_to_isolid(ihq: int) -> Optional[int]:
+    """LS-DYNA solid IHQ → Radioss Isolid (dyna2rad table). None = unmapped
+    (IHQ 0/8/9/10): the section's ELFORM-derived Isolid is kept."""
+    if ihq in (1, 2, 3):
+        return 1
+    if ihq in (4, 5):
+        return 5
+    if ihq in (6, 7):
+        return 24
+    return None
+
+
+def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
+                     hg) -> Tuple[Optional[float], Optional[int]]:
+    """Effective (h, isolid_override) for a solid section, combining the global
+    *CONTROL_HOURGLASS base with an optional *HOURGLASS override *hg*. Returns
+    (None, None) when the (k2rad-adapted) solid gate excludes the section — ALE,
+    a fully-integrated S/R hex (ELFORM 2) or tetra (ELFORM 13), or a tet4/
+    cohesive Isolid (14/18) — or no hourglass source applies. h is the
+    coefficient verbatim (no IHQ dependence);
+    isolid_override None keeps the ELFORM Isolid — the 'mixed result' when the
+    IHQ is unmapped but the base card mapped one. See the gate note below for
+    why k2rad's structural-hex Isolid 17 is (unlike dyna2rad) NOT excluded."""
+    if sec is None:
+        return (None, None)
+    # dyna2rad gates the solid map to /PROP/TYPE14 with elform ∉ {2,13} and
+    # Radioss Isolid ∉ {14,17,18}. That Isolid set is dyna2rad's fluid/ALE/
+    # cohesive formulations; k2rad, however, numbers its *default structural
+    # hex* Isolid 17 (full integration, chosen for implicit accuracy). Porting
+    # the literal {14,17,18} exclusion would gate out every k2rad solid (its
+    # only Isolids are 17/14/2) and make the whole feature a no-op. So the gate
+    # is adapted to the same *intent* — skip ALE, full-integration, tetra, and
+    # cohesive, where hourglass control is meaningless — while allowing the
+    # structural hex (17) to be remapped to the under-integrated 1/5/24 the IHQ
+    # dictates (necessary anyway: Isolid 17 is full-integration and ignores h).
+    # ELFORM 2 = fully-integrated S/R hex (no hourglass modes); 13 = tetra
+    # (LS-DYNA tets are ELFORM 10/13, not 2 — 2 is a hex).
+    if sec.iale or sec.elform in (2, 13):
+        return (None, None)
+    if _elform_to_isolid(sec.elform) in (14, 18):
+        return (None, None)     # tet4 (Kessler=14) / cohesive (18): no HG modes
+    h: Optional[float] = None
+    iso: Optional[int] = None
+    if state.ctrl_hourglass is not None:
+        h = state.ctrl_hourglass.qh
+        m = _ihq_to_isolid(state.ctrl_hourglass.ihq)
+        if m is not None:
+            iso = m
+    if hg is not None:
+        h = hg.qm
+        m = _ihq_to_isolid(hg.ihq)
+        if m is not None:
+            iso = m
+    return (h, iso)
+
+
+def _shell_hg_values(state: ConversionState, sec: Optional[SectionShell],
+                     hg) -> Tuple[Optional[float], Optional[int]]:
+    """Effective (hm, ishell_override) for a shell section. The LS-DYNA
+    hourglass coefficient (QM, or the global QH) goes into Hm/Hf/Hr clamped to
+    _SHELL_HG_MAX; Ishell stays ELFORM-derived (ishell_override always None —
+    dyna2rad maps no shell formulation and the ELFORM selection must not
+    regress). Returns (None, None) when no hourglass source applies."""
+    if sec is None:
+        return (None, None)
+    coeff: Optional[float] = None
+    if state.ctrl_hourglass is not None:
+        coeff = state.ctrl_hourglass.qh
+    if hg is not None:
+        coeff = hg.qm
+    if coeff is None:
+        return (None, None)
+    return (min(max(coeff, 0.0), _SHELL_HG_MAX), None)
+
+
+def _effective_solid_isolid(state: ConversionState, pid: int,
+                            sec: Optional[SectionSolid]) -> int:
+    """The Isolid the /PROP/SOLID that *part pid* references actually emits, once
+    per-part hourglass control has had its say: the per-part split's Isolid, else
+    the global *CONTROL_HOURGLASS remap on the shared prop, else (no hourglass)
+    the section's ELFORM Isolid. The /INIBRI writer needs this — not the raw
+    ELFORM Isolid — so its Nb_integr matches the property's integration order
+    once IHQ remaps a full-integration hex to an under-integrated 1/5/24 (a
+    stale Nb_integr is rejected by the starter, MSGID 695)."""
+    base = 0 if (sec and sec.iale) else \
+        (_elform_to_isolid(sec.elform) if sec else 17)
+    if pid in state.hourglass_prop_ids:
+        iso_over = state.hourglass_prop_vals.get(pid, (None, None))[1]
+        return iso_over if iso_over is not None else base
+    _, iso = _solid_hg_values(state, sec, None)
+    return iso if iso is not None else base
+
+
+def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
+                     itetra10: int, istrain: int,
+                     hcoef: Optional[float] = None) -> List[str]:
+    """/PROP/SOLID (TYPE14), byte-identical to the historical inline block.
+    *hcoef* None → card-2 field 3 (h) stays 0 (Radioss default 1.1/0.05/0.10
+    for qa/qb/h); otherwise the hourglass coefficient. Shared by the
+    per-section and per-part paths so the 100-column layout cannot drift."""
+    h_field = _f(hcoef if hcoef is not None else 0.0)
+    return [
+        f"/PROP/SOLID/{prop_id}",
+        title,
+        "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
+        f"{_i(isolid)}         0{_i(iale)}         0{_i(itetra10)}         0         0         0",
+        "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
+        f"{_f(0.0)}{_f(0.0)}{h_field}{_f(0.0)}{_f(0.0)}",
+        "#             dt_min   istrain      IHKT",
+        f"                   0{_i(istrain)}         0",
+        HDR,
+    ]
+
+
+def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
+                     istrain: int, thick: float,
+                     hcoef: Optional[float] = None) -> List[str]:
+    """/PROP/SHELL (TYPE1), byte-identical to the historical inline block.
+    *hcoef* None → Hm/Hf/Hr stay 0 (Radioss default 0.01); otherwise the
+    (clamped) hourglass coefficient is written into all three membrane/bending/
+    rotation slots. Shared by the per-section and per-part paths."""
+    if hcoef is not None:
+        hg_card = f"{_f(hcoef)}{_f(hcoef)}{_f(hcoef)}{_f(0.0)}{_f(0.0)}"
+    else:
+        hg_card = f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}"
+    return [
+        f"/PROP/SHELL/{prop_id}",
+        title,
+        "#   Ishell    Ismstr     Ish3n    Idrill",
+        f"{_i(ishell)}         0         0         0",
+        "#                 hm                  hf                  hr                  dm                  dn",
+        hg_card,
+        "#        N   Istrain               Thick              Ashear              Ithick     Iplas",
+        f"{_i(nip)}{_i(istrain)}{_f(thick)}                   0                   0         0",
+        HDR,
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starter: properties
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -911,17 +1091,20 @@ def _make_properties(state: ConversionState) -> List[str]:
 
     part_secids = {p.pid: p.secid if p.secid > 0 else p.pid for p in state.parts.values()}
 
-    # Sections whose EVERY part is a LAW128 (MAT_103) part now reference the
-    # synthesized orthotropic /PROP instead — skip the isotropic prop that would
-    # otherwise be emitted unused for such a section (a mixed section keeps it).
+    # Sections whose EVERY part is served by a dedicated per-part /PROP — a
+    # LAW128 (MAT_103) orthotropic prop or a per-part hourglass prop — reference
+    # that instead, so the shared isotropic section prop would be emitted unused.
+    # Skip it in that case (a section with even one plain part keeps it, and the
+    # split parts additionally get their own props). Mirrors the ortho split.
+    split_pids = set(state.ortho_prop_ids) | set(state.hourglass_prop_ids)
     ortho_only_secids: Set[int] = set()
-    if state.ortho_prop_ids:
+    if split_pids:
         parts_by_secid: Dict[int, List[int]] = defaultdict(list)
         for pid, sid in part_secids.items():
             parts_by_secid[sid].append(pid)
         ortho_only_secids = {
             sid for sid, pids in parts_by_secid.items()
-            if pids and all(p in state.ortho_prop_ids for p in pids)}
+            if pids and all(p in split_pids for p in pids)}
 
     # Sections whose parts carry 10-node tets need the quadratic Itetra10 flag set
     # in /PROP/SOLID so /TETRA10 elements use the quadratic formulation.
@@ -960,9 +1143,9 @@ def _make_properties(state: ConversionState) -> List[str]:
             missing_beams.add(secid)
 
     for ms in missing_shells:
-        state.sec_shells[ms] = SectionShell(ms, f"AutoPropShell_{ms}", 2, 3, 0.0)
+        state.sec_shells[ms] = _auto_section_shell(ms)
     for ms in missing_solids:
-        state.sec_solids[ms] = SectionSolid(ms, f"AutoPropSolid_{ms}", 1)
+        state.sec_solids[ms] = _auto_section_solid(ms)
     for ms in missing_beams:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
 
@@ -971,17 +1154,11 @@ def _make_properties(state: ConversionState) -> List[str]:
             continue
         ishell = _elform_to_ishell(sec.elform, state.is_implicit)
         nip = max(2, sec.nip)
-        lines += [
-            f"/PROP/SHELL/{sec.secid}",
-            sec.title or f"PROP_{sec.secid}",
-            "#   Ishell    Ismstr     Ish3n    Idrill",
-            f"{_i(ishell)}         0         0         0",
-            "#                 hm                  hf                  hr                  dm                  dn",
-            "                   0                   0                   0                   0                   0",
-            "#        N   Istrain               Thick              Ashear              Ithick     Iplas",
-            f"{_i(nip)}{_i(istrain)}{_f(sec.t1)}                   0                   0         0",
-            HDR,
-        ]
+        # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
+        # (its base); parts with a different *HOURGLASS are split out below.
+        hm, _ = _shell_hg_values(state, sec, None)
+        lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
+                                  ishell, nip, istrain, sec.t1, hcoef=hm)
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
             continue
@@ -1003,17 +1180,15 @@ def _make_properties(state: ConversionState) -> List[str]:
         # "CONFLICT OF TETRA10&ITET=2 WITH KINEMATIC CONDITIONS" — and the
         # time-step benefit only matters for explicit runs anyway.
         itetra10 = 1000 if sec.secid in tet10_secids else 0
-        lines += [
-            f"/PROP/SOLID/{sec.secid}",
-            sec.title or f"PROP_{sec.secid}",
-            "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-            f"{_i(isolid)}         0{_i(sec.iale)}         0{_i(itetra10)}         0         0         0",
-            "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
-            "                   0                   0                   0                   0                   0",
-            "#             dt_min   istrain      IHKT",
-            f"                   0{_i(istrain)}         0",
-            HDR,
-        ]
+        # Shared section prop carries the global *CONTROL_HOURGLASS (its base):
+        # h from QH and Isolid from IHQ (1/5/24). Parts with a *HOURGLASS that
+        # resolves differently are split into their own /PROP below. The gate
+        # (tetra / ALE / cohesive) returns (None, None) → prop unchanged.
+        h, iso = _solid_hg_values(state, sec, None)
+        if iso is not None:
+            isolid = iso
+        lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
+                                  isolid, sec.iale, itetra10, istrain, hcoef=h)
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
@@ -1021,6 +1196,9 @@ def _make_properties(state: ConversionState) -> List[str]:
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
     lines += _emit_ortho_props(state, istrain)
+    # Per-part hourglass properties (*HOURGLASS / per-part *CONTROL_HOURGLASS
+    # override), each a copy of its section prop with part-specific h/Isolid.
+    lines += _emit_hourglass_props(state, istrain)
     return lines
 
 
@@ -1055,6 +1233,128 @@ def _assign_ortho_props(state: ConversionState) -> None:
             "direction is auto-mapped from the material AOPT where it is a global "
             "vector (AOPT=2/3); other AOPT modes fall back to global X — see the "
             "per-part notes below.")
+
+
+def _assign_hourglass_props(state: ConversionState) -> None:
+    """Per-part hourglass overlay (*HOURGLASS via *PART HGID, or the global
+    *CONTROL_HOURGLASS). k2rad /PROPs are per-SECTION, so a part whose effective
+    hourglass differs from its section's base (the global card) needs its own
+    /PROP — allocate an id here and record the resolved (h, Isolid) for
+    _emit_hourglass_props; the /PART is repointed in _make_parts_and_elements.
+    Runs as a build_starter prepass, before parts/properties, after ortho.
+    Semantics follow dyna2rad — see the comment block above _make_properties.
+    """
+    if not state.hourglass_defs and state.ctrl_hourglass is None \
+            and not any(p.hgid > 0 for p in state.parts.values()):
+        # No *HOURGLASS, no *CONTROL_HOURGLASS, and no part references an HGID →
+        # nothing to do, behaviour unchanged. (A part carrying an HGID with no
+        # matching *HOURGLASS card still enters, to warn about the dangling id.)
+        return
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    solid_pids = {e.pid for e in state.solid_elems}
+    shell_pids = {e.pid for e in state.shell_elems}
+    warned_ihq: Set[int] = set()
+    shell_inert_warned = False
+    ctrl_isolid_warned = False
+    # Sibling parts that share a SECID AND resolve to the same effective
+    # hourglass get ONE shared split /PROP, not a byte-identical copy each:
+    # (is_solid, secid, eff) → prop_id.
+    prop_by_key: Dict[Tuple[bool, int, Tuple[Optional[float], Optional[int]]],
+                      int] = {}
+    for pid, part in sorted(state.parts.items()):
+        # A LAW128 part already owns a dedicated ortho /PROP; the hourglass
+        # overlay does not also split it (its TYPE6/TYPE9 keeps its defaults).
+        if pid in state.ortho_prop_ids:
+            continue
+        is_solid = pid in solid_pids
+        is_shell = pid in shell_pids and not is_solid
+        if not (is_solid or is_shell):
+            # beams / discrete / tshell: no k2rad hourglass /PROP path. (dyna2rad
+            # additionally maps *HOURGLASS onto /PROP/SPH, but k2rad has no
+            # *SECTION_SPH → /PROP/SPH path, so SPH is out of scope here — not
+            # "dyna2rad maps none".)
+            continue
+        secid = part_secids[pid]
+        # Resolve the part's *HOURGLASS (HGID). A dangling / undefined id is a
+        # LOUD warn + fallback to the global card (dyna2rad is silent here; the
+        # task requires the warning).
+        hg = None
+        if part.hgid > 0:
+            hg = state.hourglass_defs.get(part.hgid)
+            if hg is None:
+                state.warn(
+                    f"*PART {pid}: HGID={part.hgid} references a *HOURGLASS card "
+                    "not defined in the deck — falling back to the global "
+                    "*CONTROL_HOURGLASS (or the Radioss property defaults). "
+                    "Check the *HOURGLASS id.")
+        if is_solid:
+            # A *PART on an undefined SECID gets an auto-created *SECTION_SOLID
+            # in _make_properties (which runs AFTER this prepass). Resolve to the
+            # SAME default here so the split decision reflects the formulation the
+            # property will actually carry — otherwise a per-part *HOURGLASS on a
+            # sectionless part would be silently dropped (sec=None → no remap).
+            sec = state.sec_solids.get(secid) or _auto_section_solid(secid)
+            eff = _solid_hg_values(state, sec, hg)
+            base = _solid_hg_values(state, sec, None)
+            # The global *CONTROL_HOURGLASS was previously inert; now honored, it
+            # can remap the shared solid /PROP Isolid off its ELFORM default.
+            # Note it once for the parts that inherit the global card (no HGID).
+            if hg is None and state.ctrl_hourglass is not None \
+                    and base[1] is not None and not ctrl_isolid_warned \
+                    and sec is not None and base[1] != _elform_to_isolid(sec.elform):
+                ctrl_isolid_warned = True
+                state.warn(
+                    f"*CONTROL_HOURGLASS IHQ={state.ctrl_hourglass.ihq} is now "
+                    "honored (was previously dropped): the shared /PROP/SOLID "
+                    f"Isolid is remapped {_elform_to_isolid(sec.elform)}→"
+                    f"{base[1]} (h={base[0]:g}) for parts without a *PART HGID. "
+                    "Set HGID or *HOURGLASS per part to override.")
+            # Unsupported IHQ (0/8/9/10): h is applied but Isolid is unmapped —
+            # warn once per distinct IHQ (dyna2rad silently keeps the Isolid).
+            if eff[0] is not None:
+                gov = (hg.ihq if hg is not None
+                       else state.ctrl_hourglass.ihq
+                       if state.ctrl_hourglass is not None else None)
+                if gov is not None and _ihq_to_isolid(gov) is None \
+                        and gov not in warned_ihq:
+                    warned_ihq.add(gov)
+                    src = (f"*HOURGLASS {hg.hgid}" if hg is not None
+                           else "*CONTROL_HOURGLASS")
+                    state.warn(
+                        f"{src}: IHQ={gov} has no faithful Radioss solid Isolid "
+                        "mapping (only IHQ 1-7 → Isolid 1/5/24). The section's "
+                        "ELFORM-derived Isolid is kept; the hourglass coefficient "
+                        f"h={eff[0]:g} is still applied. Verify the formulation.")
+        else:
+            sec = state.sec_shells.get(secid) or _auto_section_shell(secid)
+            eff = _shell_hg_values(state, sec, hg)
+            base = _shell_hg_values(state, sec, None)
+            if eff[0] is not None and not shell_inert_warned:
+                shell_inert_warned = True
+                state.warn(
+                    "Shell hourglass coefficient (*HOURGLASS/*CONTROL_HOURGLASS) "
+                    "written to /PROP/SHELL Hm/Hf/Hr (clamped to "
+                    f"{_SHELL_HG_MAX:g}), but k2rad selects Ishell 12 (QBAT) / 24 "
+                    "(QEPH) from ELFORM, for which Hm/Hf/Hr are physically inert "
+                    "(full integration / physical stabilization). The coefficient "
+                    "is carried for fidelity; switch to an under-integrated "
+                    "Ishell 1-4 to activate it.")
+        if eff != base:
+            key = (is_solid, secid, eff)
+            prop_id = prop_by_key.get(key)
+            if prop_id is None:
+                prop_id = state.next_id()
+                prop_by_key[key] = prop_id
+            state.hourglass_prop_ids[pid] = prop_id
+            state.hourglass_prop_vals[pid] = eff
+    if state.hourglass_prop_ids:
+        state.warn(
+            "Per-part hourglass control split the shared section /PROP for "
+            f"part(s) {sorted(state.hourglass_prop_ids)} into dedicated /PROP "
+            "copies (their *HOURGLASS/HGID resolves differently from the "
+            "section's global *CONTROL_HOURGLASS base) — h/Isolid follow the "
+            "*HOURGLASS card.")
 
 
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
@@ -1250,6 +1550,60 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
             lines += _emit_prop_type6(prop_id, title, sec, itetra10, istrain,
                                       skew_id=skew_id)
+    return lines
+
+
+def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
+    """Emit the dedicated per-part /PROP/SOLID or /PROP/SHELL for each part that
+    _assign_hourglass_props split out — a copy of its section prop (same
+    geometry fields: Iale/Itetra10/nip/thick) stamped with the resolved
+    part-specific hourglass h/Isolid (solid) or Hm/Hf/Hr (shell). Isolid/Ishell
+    otherwise stay ELFORM-derived, re-computed here from the part's section."""
+    if not state.hourglass_prop_ids:
+        return []
+    part_secids = {pid: (p.secid if p.secid > 0 else pid)
+                   for pid, p in state.parts.items()}
+    solid_pids = {e.pid for e in state.solid_elems}
+    shell_pids = {e.pid for e in state.shell_elems}
+    tet10_by_pid: Dict[int, bool] = defaultdict(bool)
+    for e in state.solid_elems:
+        if len(e.nodes) == 10:
+            tet10_by_pid[e.pid] = True
+    # A split /PROP may be shared by several sibling parts (same SECID + same
+    # effective hourglass); emit it ONCE, listing all its parts in the title.
+    pids_by_prop: Dict[int, List[int]] = defaultdict(list)
+    for pid, prop_id in state.hourglass_prop_ids.items():
+        pids_by_prop[prop_id].append(pid)
+    lines: List[str] = []
+    emitted: Set[int] = set()
+    for pid, prop_id in sorted(state.hourglass_prop_ids.items()):
+        if prop_id in emitted:
+            continue
+        emitted.add(prop_id)
+        secid = part_secids.get(pid, pid)
+        coeff, iso_over = state.hourglass_prop_vals.get(pid, (None, None))
+        siblings = sorted(pids_by_prop[prop_id])
+        title = (f"HG_PROP_{prop_id} (part{'s' if len(siblings) > 1 else ''} "
+                 f"{','.join(map(str, siblings))})")
+        # solid-first, matching _assign_hourglass_props' family selection.
+        if pid in solid_pids:
+            sec = state.sec_solids.get(secid)
+            isolid = (0 if (sec and sec.iale)
+                      else (_elform_to_isolid(sec.elform) if sec else 17))
+            if iso_over is not None:
+                isolid = iso_over
+            iale = sec.iale if sec else 0
+            itetra10 = 1000 if tet10_by_pid.get(pid) else 0
+            lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
+                                      istrain, hcoef=coeff)
+        elif pid in shell_pids:
+            sec = state.sec_shells.get(secid)
+            ishell = (_elform_to_ishell(sec.elform, state.is_implicit) if sec
+                      else _elform_to_ishell(2, state.is_implicit))
+            nip = max(2, sec.nip) if sec else 2
+            thick = sec.t1 if sec else 0.0
+            lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,
+                                      thick, hcoef=coeff)
     return lines
 
 

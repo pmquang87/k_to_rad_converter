@@ -162,6 +162,9 @@ class PartData:
     title: str
     secid: int
     mid: int
+    # *PART field 5 (HGID) → the *HOURGLASS card that overrides
+    # *CONTROL_HOURGLASS for this part. 0 = use the global card / defaults.
+    hgid: int = 0
 
 
 @dataclass
@@ -1361,6 +1364,18 @@ class ControlHourglass:
 
 
 @dataclass
+class HourglassDef:
+    """A *HOURGLASS card, referenced per-part via the *PART HGID field. Only the
+    two fields dyna2rad consumes are stored: IHQ (formulation → Radioss Isolid)
+    and QM (the hourglass coefficient → /PROP h). The bulk-viscosity and shell
+    coefficients IBQ/Q1/Q2/QB/VDC/QW are parsed-then-dropped, exactly as
+    dyna2rad does (they have no k2rad /PROP mapping)."""
+    hgid: int
+    ihq: int
+    qm: float
+
+
+@dataclass
 class ControlImplicitAuto:
     iauto: int          # auto timestep flag (0=off,1=on)
     iteopt: int         # optimal iterations per step
@@ -1628,6 +1643,20 @@ class ConversionState:
     # cannot use the isotropic /PROP/SHELL|SOLID — the writer emits a dedicated
     # /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) and points the /PART at it.
     ortho_prop_ids: Dict[int, int] = field(default_factory=dict)
+
+    # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
+    # HourglassDef; consumed by the per-part hourglass /PROP overlay.
+    hourglass_defs: Dict[int, "HourglassDef"] = field(default_factory=dict)
+    # part_id → dedicated per-part /PROP id when the part's effective hourglass
+    # (from its *HOURGLASS or the global *CONTROL_HOURGLASS) differs from its
+    # section's base. Props are per-SECTION, so a per-part hourglass difference
+    # forces a /PROP split — same mechanism as ortho_prop_ids above.
+    hourglass_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # part_id → the resolved (h/hm coefficient, Isolid/Ishell override) that the
+    # split /PROP emits. Isolid/Ishell override is None → keep the section's
+    # ELFORM-derived formulation. Populated by _assign_hourglass_props.
+    hourglass_prop_vals: Dict[int, Tuple[Optional[float], Optional[int]]] = \
+        field(default_factory=dict)
 
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
     mat_plas_tab: Dict[int, MatPlasTAB] = field(default_factory=dict)
