@@ -14,7 +14,11 @@ from ..state import (
     SectionSolid,
     SectionBeam,
 )
-from ..topology import TET10_MIDEDGE as _TET10_MIDEDGE
+from ..topology import (
+    TET10_MIDEDGE as _TET10_MIDEDGE,
+    TET10_DYNA_TO_RADIOSS as _TET10_DYNA_TO_RADIOSS,
+    classify_tet10_apex_order as _classify_tet10_apex_order,
+)
 from .common import (
     HDR,
     _discrete_part_ids,
@@ -43,6 +47,7 @@ __all__ = [
     "_emit_coord_vector_skew",
     "_emit_define_vector_skew",
     "_emit_sd_orientation_skew",
+    "_normalize_tet10_ordering",
     "_snap_tet10_midsides",
     "_tet_corner_metrics",
     "_tet10_badly_shaped",
@@ -465,6 +470,174 @@ def _snap_tet10_midsides(state: ConversionState) -> int:
     return len(moved)
 
 
+def _tet10_coord(state: ConversionState, nid: int) -> Optional[Tuple[float, float, float]]:
+    nd = state.nodes.get(nid)
+    if nd is None:
+        return None
+    return (nd.x, nd.y, nd.z)
+
+
+def _warn_tet10_order_inconsistent(state: ConversionState, tet10s) -> int:
+    """Cross-element consistency check (reuses the snap_consistency.py logic):
+    under the Radioss mid-edge map every element sharing a midside node must imply
+    the SAME edge midpoint. After normalization a residual disagreement means the
+    mesh is genuinely non-uniform (mixed LS-DYNA/Radioss connectivity) — the single
+    apex permutation cannot fix that, and the straight-edge snap would collapse the
+    shared node (ERROR 558). Warn loudly. Scale-invariant: the spread is compared
+    to the element's largest corner-edge length. Returns the disagreement count.
+    """
+    import math
+    targets: Dict[int, List[Tuple[Tuple[float, float, float], float]]] = defaultdict(list)
+    for e in tet10s:
+        cs = [_tet10_coord(state, e.nodes[k]) for k in range(4)]
+        if any(c is None for c in cs):
+            continue
+        scale = max(
+            math.sqrt((cs[a][0] - cs[b][0]) ** 2 + (cs[a][1] - cs[b][1]) ** 2
+                      + (cs[a][2] - cs[b][2]) ** 2)
+            for a in range(4) for b in range(a + 1, 4)
+        ) or 1.0
+        for mi, a, b in _TET10_MIDEDGE:
+            m = _tet10_coord(state, e.nodes[mi])
+            if m is None:
+                continue
+            mid = tuple((cs[a][k] + cs[b][k]) / 2.0 for k in range(3))
+            targets[e.nodes[mi]].append((mid, scale))
+    disagree = 0
+    for _nid, items in targets.items():
+        if len(items) < 2:
+            continue
+        pts = [p for p, _ in items]
+        scale = min(s for _, s in items) or 1.0
+        spread = max(
+            max(abs(p[k] - q[k]) for k in range(3)) for p in pts for q in pts)
+        if spread > 1e-3 * scale:
+            disagree += 1
+    if disagree:
+        state.warn(
+            f"/TETRA10 midside-order verifier: {disagree} shared midside node(s) "
+            "still get conflicting edge-midpoint targets under the Radioss map "
+            "after normalization — the mesh is not uniformly ordered (mixed "
+            "LS-DYNA/Radioss connectivity). The straight-edge snap will collapse "
+            "these onto one point (risk of ERROR 558 MAIN SEGMENT CROSSED / NULL "
+            "AREA); re-mesh or supply a single consistent element ordering."
+        )
+    return disagree
+
+
+def _normalize_tet10_ordering(state: ConversionState) -> int:
+    """Normalize every 10-node tet's connectivity to the **Radioss /TETRA10**
+    midside convention (apex nodes 8/9/10 = mid(1,4)/mid(2,4)/mid(3,4)) BEFORE any
+    writer pass reads the midside slots.
+
+    LS-DYNA ``*ELEMENT_SOLID`` and Radioss ``/TETRA10`` agree on corners 1-4 and
+    the base midsides 5/6/7 but disagree on the three apex midsides: LS-DYNA orders
+    them mid(2,4)/mid(3,4)/mid(1,4), Radioss mid(1,4)/mid(2,4)/mid(3,4). Feeding a
+    LS-DYNA deck's connectivity verbatim into ``/TETRA10`` — or through the Radioss
+    mid-edge map in the snap / gapmin passes — puts the wrong node in each apex
+    slot, which (1) collapses shared midside nodes in the snap pass onto one point
+    → null-area contact segments (ERROR 558), and (2) gives every ``/TETRA10`` a
+    ~−30% element volume/mass. Both die once the connectivity is Radioss-ordered.
+
+    Detection is geometric and per element (nearest apex-edge midpoint, from the
+    tet10_order_sweep.py diagnosis). The whole mesh is then normalized to one
+    convention chosen by **majority** of the classified elements:
+
+    * majority Radioss/Abaqus order → no-op (a native C3D10 deck stays untouched,
+      even if a stray sliver/degenerate element fails to classify);
+    * otherwise → permute every element's apex slots via ``TET10_DYNA_TO_RADIOSS``
+      (LS-DYNA→Radioss). Mixed / ambiguous / coordinate-less meshes take the
+      LS-DYNA default **with a loud warning** — every real ``*ELEMENT_SOLID`` deck
+      is LS-DYNA-ordered and Altair's hm_reader permutes on import the same way.
+      A majority-vote (not all-or-nothing) means a few unclassifiable elements
+      cannot flip a clearly-ordered mesh into a wrongful permutation.
+
+    Idempotent via ``state.tet10_normalized`` (the permutation is a 3-cycle, so a
+    blind re-run would corrupt the connectivity). Returns the number of
+    ``/TETRA10`` elements permuted.
+    """
+    if state.tet10_normalized:
+        return 0
+    state.tet10_normalized = True
+
+    tet10s = [e for e in state.solid_elems if len(e.nodes) == 10]
+    if not tet10s:
+        return 0
+
+    n_dyna = n_radioss = n_ambiguous = 0
+    for e in tet10s:
+        corners = [_tet10_coord(state, e.nodes[k]) for k in range(4)]
+        apex = [_tet10_coord(state, e.nodes[k]) for k in (7, 8, 9)]
+        cls = _classify_tet10_apex_order(corners, apex)
+        if cls == "dyna":
+            n_dyna += 1
+        elif cls == "radioss":
+            n_radioss += 1
+        else:
+            n_ambiguous += 1
+
+    # On a --tet10-to-tet4 run the midsides are about to be discarded and only the
+    # order-invariant corners survive, so the apex permutation is a geometric no-op
+    # for the emitted deck — suppress the (otherwise misleading) /TETRA10-repair
+    # warnings. The pass itself still runs so the upstream --auto-gapmin faceting
+    # sees Radioss order.
+    quiet = state.options.tet10_to_tet4
+
+    # Decide ONE convention for the whole mesh by MAJORITY of the classified
+    # (non-ambiguous) elements. A single uniform ordering is mandatory: the snap
+    # pass mutates SHARED midside nodes in place, so mixing per-element orderings on
+    # a shared node would itself collapse it. Majority (not all-or-nothing) means a
+    # handful of sliver/ambiguous/stray-ordered elements cannot flip a clearly-
+    # Radioss mesh into a wrongful permutation (or vice-versa) — a single degenerate
+    # tet on an Abaqus-exported deck no longer corrupts every correct element. Ties
+    # and the all-ambiguous / coordinate-less case default to the LS-DYNA permutation
+    # (every real *ELEMENT_SOLID deck is LS-DYNA-ordered and Altair's hm_reader
+    # permutes unconditionally on import).
+    if n_radioss > n_dyna:
+        # Majority Radioss/Abaqus (C3D10) order → already correct, do not permute.
+        if not quiet:
+            if n_dyna or n_ambiguous:
+                state.warn(
+                    f"/TETRA10 apex midside order: {n_radioss} element(s) read as "
+                    f"Radioss/Abaqus (C3D10) order (majority), {n_dyna} as LS-DYNA, "
+                    f"{n_ambiguous} ambiguous/coordinate-less. Treating the mesh as "
+                    "Radioss-ordered and applying NO permutation. If some elements "
+                    "are genuinely LS-DYNA-ordered, verify their /TETRA10 volume."
+                )
+            else:
+                state.warn(
+                    f"{n_radioss} /TETRA10 element(s): detected Radioss/Abaqus "
+                    "(C3D10) apex midside order already; no permutation applied."
+                )
+        return 0
+
+    for e in tet10s:
+        e.nodes = [e.nodes[p] for p in _TET10_DYNA_TO_RADIOSS] + list(e.nodes[10:])
+    n = len(tet10s)
+
+    if not quiet:
+        if n_ambiguous or n_radioss:
+            state.warn(
+                f"/TETRA10 apex midside order is not uniform: {n_dyna} element(s) "
+                f"read as LS-DYNA order, {n_radioss} as Radioss, {n_ambiguous} "
+                "ambiguous/coordinate-less. Defaulting ALL to the LS-DYNA→Radioss "
+                "apex permutation (mid(2,4)/mid(3,4)/mid(1,4) → mid(1,4)/mid(2,4)/"
+                "mid(3,4)) — this matches every real *ELEMENT_SOLID deck and Altair "
+                "hm_reader. If this deck is genuinely Abaqus/Radioss-ordered, apex "
+                "nodes 8/9/10 are now wrong; verify the /TETRA10 volume."
+            )
+        else:
+            state.warn(
+                f"{n} /TETRA10 element(s): detected LS-DYNA *ELEMENT_SOLID apex "
+                "midside order; permuted apex nodes 8/9/10 to Radioss /TETRA10 "
+                "order (mid(1,4)/mid(2,4)/mid(3,4)) so the snap/gapmin/emit passes "
+                "and the engine agree (fixes ERROR 558 storm + silent ~−30% "
+                "/TETRA10 volume)."
+            )
+        _warn_tet10_order_inconsistent(state, tet10s)
+    return n
+
+
 def _tet_corner_metrics(
     state: ConversionState, nodes: List[int]
 ) -> Optional[Tuple[float, float, float, float]]:
@@ -863,7 +1036,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 lines.append(HDR)
             if tets10:
                 # /TETRA10: 2 lines per element — tetra_ID, then the 10 node IDs
-                # (10 fixed-width fields). Node order matches LS-DYNA/Abaqus tet10.
+                # (10 fixed-width fields). Connectivity is in Radioss /TETRA10 order
+                # here: any LS-DYNA *ELEMENT_SOLID input was permuted to it by
+                # _normalize_tet10_ordering (apex nodes 8/9/10 → mid(1,4)/mid(2,4)/
+                # mid(3,4)), so emit verbatim. Emitting LS-DYNA order 1:1 was the
+                # silent −30%-volume bug (LS-DYNA and Abaqus do NOT share this map).
                 lines.append(f"/TETRA10/{pid}")
                 for e in tets10:
                     lines.append(_i(e.eid))

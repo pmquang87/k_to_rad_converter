@@ -1604,10 +1604,15 @@ class StrainOutputTests(unittest.TestCase):
         self.assertEqual(self._solid_istrain(starter), 0)
 
 
-# A single 10-node quadratic tet (LS-DYNA *ELEMENT_SOLID 10-node form: eid/pid on
+# A single 10-node quadratic tet in the two-line *ELEMENT_SOLID form (eid/pid on
 # card 1, the 10 node IDs on card 2). Must become /TETRA10 keeping ALL 10 nodes —
 # dropping the 6 mid-edge nodes would orphan them (zero-stiffness DOFs → singular
 # implicit matrix), the bug that crashed the elevator-linkage run.
+# NOTE: the midside geometry here is in **Abaqus/Radioss C3D10 order** (node8=
+# mid(1,4), node9=mid(2,4), node10=mid(3,4)) — NOT LS-DYNA apex order. It is the
+# "already-Radioss, must-not-permute" case for _normalize_tet10_ordering, which
+# detects it geometrically and leaves the connectivity untouched (emitted 1..10).
+# See TET10_DYNA_K below for the LS-DYNA-ordered counterpart that IS permuted.
 TET10_K = """\
 *KEYWORD
 *TITLE
@@ -1718,6 +1723,370 @@ class TetraTenTests(unittest.TestCase):
                 self.assertAlmostEqual(float(ln[50:70]), 0.0, places=6)
                 return
         self.fail("node 5 not found in /NODE block")
+
+
+# ── TET10 midside-ordering normalization ─────────────────────────────────────
+# LS-DYNA *ELEMENT_SOLID and Radioss /TETRA10 agree on corners 1-4 and the base
+# midsides 5/6/7 but disagree on the three APEX midsides 8/9/10:
+#            slot8      slot9      slot10
+#   LS-DYNA: mid(2,4)   mid(3,4)   mid(1,4)
+#   Radioss: mid(1,4)   mid(2,4)   mid(3,4)
+# The converter must permute LS-DYNA order → Radioss order before emit, else the
+# snap pass collapses shared midsides (ERROR 558) and /TETRA10 volume drops ~30%.
+
+def _t10_node(nid, x, y, z):
+    """One *NODE card (I8 id + whitespace coords; parse_free reads it)."""
+    return f"{nid:>8}{x:>16}{y:>16}{z:>16}"
+
+
+def _t10_elem(eid, pid, nodes):
+    """One two-line ten-node *ELEMENT_SOLID card (eid/pid, then 10 node IDs)."""
+    return f"{eid:>8}{pid:>8}\n" + "".join(f"{n:>8}" for n in nodes)
+
+
+def _t10_deck(title, node_lines, elem_lines):
+    return (
+        "*KEYWORD\n*TITLE\n" + title + "\n*NODE\n"
+        + "\n".join(node_lines) + "\n*ELEMENT_SOLID\n"
+        + "\n".join(elem_lines) + "\n"
+        "*PART\ntet10 part\n         1         1         1\n"
+        "*SECTION_SOLID\n         1        10\n"
+        "*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+        "         1   2.7e-9   72000.0       0.3     200.0\n"
+        "*CONTROL_TERMINATION\n       1.0\n*END\n"
+    )
+
+
+# A single LS-DYNA-ordered unit tet: same corners as TET10_K, but the three apex
+# midsides carry LS-DYNA coordinates (node8=mid(2,4), node9=mid(3,4),
+# node10=mid(1,4)). _normalize_tet10_ordering must permute it to Radioss order so
+# the emitted /TETRA10 line reads 1 2 3 4 5 6 7 10 8 9.
+TET10_DYNA_K = _t10_deck(
+    "Quadratic tet10 (LS-DYNA apex order)",
+    [
+        _t10_node(1, 0.0, 0.0, 0.0),
+        _t10_node(2, 1.0, 0.0, 0.0),
+        _t10_node(3, 0.0, 1.0, 0.0),
+        _t10_node(4, 0.0, 0.0, 1.0),
+        _t10_node(5, 0.5, 0.0, 0.0),    # mid(1,2)  (agrees)
+        _t10_node(6, 0.5, 0.5, 0.0),    # mid(2,3)  (agrees)
+        _t10_node(7, 0.0, 0.5, 0.0),    # mid(1,3)  (agrees)
+        _t10_node(8, 0.5, 0.0, 0.5),    # mid(2,4)  LS-DYNA n8
+        _t10_node(9, 0.0, 0.5, 0.5),    # mid(3,4)  LS-DYNA n9
+        _t10_node(10, 0.0, 0.0, 0.5),   # mid(1,4)  LS-DYNA n10
+    ],
+    [_t10_elem(1, 1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])],
+)
+
+
+# Two LS-DYNA-ordered tets sharing the corner face {2,3,4} (and thus its three
+# midside nodes 6/7/8). Under the wrong (unpermuted) map, the two elements imply
+# different snap targets for the shared apex midsides → last-write-wins collapses
+# distinct nodes (the ERROR 558 storm). Correctly normalized, the shared nodes
+# resolve to one consistent midpoint each.
+#   Tet A corners 1,2,3,4 ; Tet B corners 5,2,3,4 (apex 5 on the far side).
+TET10_TWO_TET_SHARED_K = _t10_deck(
+    "Two shared-face tet10 (LS-DYNA apex order)",
+    [
+        _t10_node(1, 0.0, 0.0, 0.0),    # tet A apex
+        _t10_node(2, 1.0, 0.0, 0.0),
+        _t10_node(3, 0.0, 1.0, 0.0),
+        _t10_node(4, 0.0, 0.0, 1.0),
+        _t10_node(5, 1.0, 1.0, 1.0),    # tet B apex
+        _t10_node(6, 0.5, 0.5, 0.0),    # mid(2,3)  shared
+        _t10_node(7, 0.5, 0.0, 0.5),    # mid(2,4)  shared
+        _t10_node(8, 0.0, 0.5, 0.5),    # mid(3,4)  shared
+        _t10_node(9, 0.5, 0.0, 0.0),    # mid(1,2)  tet A
+        _t10_node(10, 0.0, 0.5, 0.0),   # mid(1,3)  tet A
+        _t10_node(11, 0.0, 0.0, 0.5),   # mid(1,4)  tet A
+        _t10_node(12, 1.0, 0.5, 0.5),   # mid(5,2)  tet B
+        _t10_node(13, 0.5, 1.0, 0.5),   # mid(5,3)  tet B
+        _t10_node(14, 0.5, 0.5, 1.0),   # mid(5,4)  tet B
+    ],
+    [
+        # DYNA order: n5=mid(1,2),n6=mid(2,3),n7=mid(1,3),n8=mid(2,4),n9=mid(3,4),n10=mid(1,4)
+        _t10_elem(1, 1, [1, 2, 3, 4, 9, 6, 10, 7, 8, 11]),
+        _t10_elem(2, 1, [5, 2, 3, 4, 12, 6, 13, 7, 8, 14]),
+    ],
+)
+
+
+class Tet10OrderingTests(unittest.TestCase):
+    """LS-DYNA→Radioss /TETRA10 apex midside-ordering normalization."""
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _convert_deck(self, deck, **opts):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t10.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        result = convert(path, **opts)
+        return result, Path(result.starter_path).read_text()
+
+    @staticmethod
+    def _tetra10_line(starter):
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip().startswith("/TETRA10/"))
+        # eid line at i+1, node-id line at i+2
+        return [int(x) for x in lines[i + 2].split()]
+
+    @staticmethod
+    def _node_coords(starter):
+        # /NODE is followed by a "#  Node ID  X  Y  Z" comment header, so skip
+        # "#" lines rather than treating them as the block terminator; the block
+        # ends at the next "/" keyword.
+        coords = {}
+        in_node = False
+        for ln in starter.splitlines():
+            if ln.startswith("/NODE"):
+                in_node = True
+                continue
+            if in_node:
+                if ln.startswith("/"):
+                    break
+                if not ln.strip() or ln.startswith("#"):
+                    continue
+                coords[int(ln[:10])] = (
+                    float(ln[10:30]), float(ln[30:50]), float(ln[50:70]))
+        return coords
+
+    @staticmethod
+    def _tet_volume(p0, p1, p2, p3):
+        a = [p1[k] - p0[k] for k in range(3)]
+        b = [p2[k] - p0[k] for k in range(3)]
+        c = [p3[k] - p0[k] for k in range(3)]
+        cx = (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+              a[0] * b[1] - a[1] * b[0])
+        return abs(cx[0] * c[0] + cx[1] * c[1] + cx[2] * c[2]) / 6.0
+
+    # ── 1. pure detector + permutation ───────────────────────────────────────
+    def test_classify_and_permutation_index(self):
+        from k2rad.topology import (
+            classify_tet10_apex_order, TET10_DYNA_TO_RADIOSS)
+        corners = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        dyna_apex = [(0.5, 0, 0.5), (0, 0.5, 0.5), (0, 0, 0.5)]   # mid(2,4)/(3,4)/(1,4)
+        rad_apex = [(0, 0, 0.5), (0.5, 0, 0.5), (0, 0.5, 0.5)]    # mid(1,4)/(2,4)/(3,4)
+        self.assertEqual(classify_tet10_apex_order(corners, dyna_apex), "dyna")
+        self.assertEqual(classify_tet10_apex_order(corners, rad_apex), "radioss")
+        self.assertEqual(classify_tet10_apex_order(corners, [None, None, None]),
+                         "ambiguous")
+        self.assertEqual(TET10_DYNA_TO_RADIOSS, (0, 1, 2, 3, 4, 5, 6, 9, 7, 8))
+        dyna_conn = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        self.assertEqual([dyna_conn[p] for p in TET10_DYNA_TO_RADIOSS],
+                         [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])
+
+    # ── 2. cross-element consistency (BUG 1 / ERROR 558) ─────────────────────
+    def test_shared_midsides_not_collapsed(self):
+        _result, starter = self._convert_deck(TET10_TWO_TET_SHARED_K)
+        coords = self._node_coords(starter)
+        # The three shared midside nodes must land on their true edge midpoints…
+        for nid, want in ((6, (0.5, 0.5, 0.0)), (7, (0.5, 0.0, 0.5)),
+                          (8, (0.0, 0.5, 0.5))):
+            got = coords[nid]
+            for k in range(3):
+                self.assertAlmostEqual(got[k], want[k], places=6,
+                                       msg=f"node {nid} coord {k}")
+        # …and no two of the 14 nodes may collapse onto one point.
+        rounded = [tuple(round(v, 6) for v in c) for c in coords.values()]
+        self.assertEqual(len(rounded), len(set(rounded)),
+                         "distinct nodes collapsed onto one coordinate")
+
+    # ── 3. permuted /TETRA10 emit (BUG 2 / silent −30% volume) ───────────────
+    def test_tetra10_emit_is_permuted_to_radioss(self):
+        _result, starter = self._convert_deck(TET10_DYNA_K)
+        conn = self._tetra10_line(starter)
+        # LS-DYNA input 1..10 → Radioss order 1 2 3 4 5 6 7 10 8 9. Emitting the
+        # LS-DYNA order verbatim was the silent −30%-volume bug.
+        self.assertEqual(conn, [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])
+        coords = self._node_coords(starter)
+        # Each Radioss apex slot now carries the geometrically-correct midside.
+        for slot, want in ((7, (0.0, 0.0, 0.5)),    # n8 = mid(1,4)
+                           (8, (0.5, 0.0, 0.5)),     # n9 = mid(2,4)
+                           (9, (0.0, 0.5, 0.5))):    # n10 = mid(3,4)
+            got = coords[conn[slot]]
+            for k in range(3):
+                self.assertAlmostEqual(got[k], want[k], places=6)
+        # Corner-tet volume is the analytic 1/6 (not 0.7×1/6), corners intact.
+        vol = self._tet_volume(*[coords[conn[k]] for k in range(4)])
+        self.assertAlmostEqual(vol, 1.0 / 6.0, places=6)
+
+    # ── 4. --tet10-to-tet4 keeps the (unchanged) corners ─────────────────────
+    def test_tet10_to_tet4_unaffected_by_normalization(self):
+        _result, starter = self._convert_deck(TET10_DYNA_K, tet10_to_tet4=True)
+        self.assertNotIn("/TETRA10", starter)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip().startswith("/TETRA4/"))
+        corners = [int(x) for x in lines[i + 1].split()][1:]   # drop eid
+        self.assertEqual(corners, [1, 2, 3, 4])                # corners never moved
+        coords = self._node_coords(starter)
+        vol = self._tet_volume(*[coords[c] for c in corners])
+        self.assertAlmostEqual(vol, 1.0 / 6.0, places=6)
+
+    # ── 5. already-Radioss deck is left untouched ────────────────────────────
+    def test_radioss_ordered_deck_not_permuted(self):
+        result, starter = self._convert_deck(TET10_K)
+        self.assertEqual(self._tetra10_line(starter), list(range(1, 11)))
+        self.assertTrue(
+            any("Radioss/Abaqus" in w and "no permutation" in w
+                for w in result.warnings),
+            f"expected a 'detected Radioss order' note in {result.warnings}")
+
+    # ── 6. idempotency guard (3-cycle must not double-apply) ─────────────────
+    def test_normalization_is_idempotent(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        state.nodes = {
+            1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0), 3: NodeData(0, 1, 0),
+            4: NodeData(0, 0, 1), 5: NodeData(0.5, 0, 0), 6: NodeData(0.5, 0.5, 0),
+            7: NodeData(0, 0.5, 0), 8: NodeData(0.5, 0, 0.5),
+            9: NodeData(0, 0.5, 0.5), 10: NodeData(0, 0, 0.5),
+        }
+        state.solid_elems = [SolidElem(1, 1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]
+        n1 = _normalize_tet10_ordering(state)
+        conn1 = list(state.solid_elems[0].nodes)
+        n2 = _normalize_tet10_ordering(state)          # guarded → no-op
+        conn2 = list(state.solid_elems[0].nodes)
+        self.assertEqual((n1, n2), (1, 0))
+        self.assertEqual(conn1, [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])
+        self.assertEqual(conn2, conn1)                 # not double-permuted
+
+    # ── 7. no-op / no mutation on a non-tet10 mesh ───────────────────────────
+    def test_no_tet10_is_noop(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        state.nodes = {i: NodeData(float(i), 0.0, 0.0) for i in range(1, 9)}
+        # tet4 (4), penta6 (6) and hex8 (8) all lack the 10-node signature, so the
+        # apex permutation must never touch them — an 8/6-node solid in a mixed
+        # deck stays byte-identical (the permutation only ever filters len==10).
+        state.solid_elems = [
+            SolidElem(1, 1, [1, 2, 3, 4]),                    # tet4
+            SolidElem(2, 1, [1, 2, 3, 4, 5, 6]),              # penta6
+            SolidElem(3, 1, [1, 2, 3, 4, 5, 6, 7, 8]),        # hex8
+        ]
+        state.shell_elems = [ShellElem(4, 1, [1, 2, 3, 4])]
+        before = [list(e.nodes) for e in state.solid_elems]
+        self.assertEqual(_normalize_tet10_ordering(state), 0)
+        self.assertEqual([list(e.nodes) for e in state.solid_elems], before)
+
+    # ── 8. ambiguous / coordinate-less tet10 → DYNA default + loud warn ──────
+    def test_ambiguous_defaults_to_dyna_with_warning(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        # Corners defined, apex midside coords absent → classify == "ambiguous".
+        state.nodes = {
+            1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),
+            3: NodeData(0, 1, 0), 4: NodeData(0, 0, 1),
+        }
+        state.solid_elems = [SolidElem(1, 1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]
+        n = _normalize_tet10_ordering(state)
+        self.assertEqual(n, 1)
+        self.assertEqual(state.solid_elems[0].nodes,
+                         [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])   # DYNA-default permute
+        self.assertTrue(
+            any("ambiguous" in w and "LS-DYNA" in w for w in state.warnings),
+            f"expected a loud ambiguity warning in {state.warnings}")
+
+    # ── helper: build a disjoint, shifted tet10 in a chosen apex convention ───
+    @staticmethod
+    def _apex_tet(base, x0, order):
+        """A single well-shaped tet10 (node ids base..base+9, translated by *x0*)
+        whose apex midsides are laid out in ``"dyna"`` or ``"radioss"`` order.
+        Returns ({nid: NodeData}, SolidElem)."""
+        c = {0: (0.0, 0.0, 0.0), 1: (1.0, 0.0, 0.0),
+             2: (0.0, 1.0, 0.0), 3: (0.0, 0.0, 1.0)}
+
+        def mid(a, b):
+            return NodeData((c[a][0] + c[b][0]) / 2 + x0,
+                            (c[a][1] + c[b][1]) / 2,
+                            (c[a][2] + c[b][2]) / 2)
+
+        nodes = {base + k: NodeData(c[k][0] + x0, c[k][1], c[k][2]) for k in c}
+        nodes[base + 4] = mid(0, 1)          # base midsides (agree)
+        nodes[base + 5] = mid(1, 2)
+        nodes[base + 6] = mid(0, 2)
+        if order == "dyna":                  # apex slots 8/9/10 = mid(2,4)/(3,4)/(1,4)
+            nodes[base + 7] = mid(1, 3)
+            nodes[base + 8] = mid(2, 3)
+            nodes[base + 9] = mid(0, 3)
+        else:                                # radioss = mid(1,4)/(2,4)/(3,4)
+            nodes[base + 7] = mid(0, 3)
+            nodes[base + 8] = mid(1, 3)
+            nodes[base + 9] = mid(2, 3)
+        return nodes, SolidElem(base, 1, [base + k for k in range(10)])
+
+    # ── 9. majority vote: a stray unclassifiable element cannot flip a Radioss
+    #      mesh into a wrongful permutation (all-or-nothing → majority) ─────────
+    def test_radioss_majority_survives_stray_ambiguous(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        na, ea = self._apex_tet(1, 0.0, "radioss")
+        nb, eb = self._apex_tet(11, 10.0, "radioss")
+        state.nodes = {**na, **nb}
+        # A single coordinate-less (ambiguous) sliver element ids 21..30.
+        for i, xyz in zip(range(21, 25),
+                          [(0, 0, 5), (1, 0, 5), (0, 1, 5), (0, 0, 6)]):
+            state.nodes[i] = NodeData(*xyz)                # corners only; apex absent
+        ec = SolidElem(21, 1, list(range(21, 31)))
+        state.solid_elems = [ea, eb, ec]
+        before = [list(e.nodes) for e in state.solid_elems]
+        n = _normalize_tet10_ordering(state)
+        self.assertEqual(n, 0, "one ambiguous element wrongly flipped a Radioss mesh")
+        self.assertEqual([list(e.nodes) for e in state.solid_elems], before)
+        self.assertTrue(
+            any("majority" in w and "NO permutation" in w for w in state.warnings),
+            f"expected a Radioss-majority no-op note in {state.warnings}")
+
+    # ── 10. majority vote the other way: dyna-majority permutes ALL + warns ───
+    def test_dyna_majority_permutes_all_with_mixed_warning(self):
+        from k2rad.writer import _normalize_tet10_ordering
+        state = ConversionState()
+        na, ea = self._apex_tet(1, 0.0, "dyna")
+        nb, eb = self._apex_tet(11, 10.0, "dyna")
+        nc, ec = self._apex_tet(21, 20.0, "radioss")       # the minority
+        state.nodes = {**na, **nb, **nc}
+        state.solid_elems = [ea, eb, ec]
+        n = _normalize_tet10_ordering(state)
+        self.assertEqual(n, 3)                              # 2 dyna > 1 radioss → all
+        self.assertEqual(ea.nodes, [1, 2, 3, 4, 5, 6, 7, 10, 8, 9])
+        self.assertEqual(eb.nodes, [11, 12, 13, 14, 15, 16, 17, 20, 18, 19])
+        self.assertEqual(ec.nodes, [21, 22, 23, 24, 25, 26, 27, 30, 28, 29])
+        self.assertTrue(
+            any("not uniform" in w for w in state.warnings),
+            f"expected a mixed-order warning in {state.warnings}")
+
+    # ── 11. off-edge apex midside → ambiguous (distance guard, not None) ──────
+    def test_off_edge_apex_classifies_ambiguous(self):
+        from k2rad.topology import classify_tet10_apex_order
+        corners = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+        # First apex node sits ~half an edge off every apex-edge midpoint.
+        off = [(0.5, 0.5, 0.5), (0.0, 0.5, 0.5), (0.0, 0.0, 0.5)]
+        self.assertEqual(classify_tet10_apex_order(corners, off), "ambiguous")
+
+    # ── 12. genuinely inconsistent shared midside trips the disagree verifier ─
+    def test_inconsistent_shared_midside_trips_verifier(self):
+        from k2rad.writer.mesh import _warn_tet10_order_inconsistent
+        state = ConversionState()
+        # Two tets both name node 100 as their slot-5 base midside (mid of corners
+        # 1&2), but their corner geometry implies DIFFERENT midpoints for it — an
+        # inconsistency no single apex permutation can repair; the straight-edge
+        # snap would collapse node 100, so the verifier must flag it.
+        state.nodes = {
+            1: NodeData(0, 0, 0), 2: NodeData(1, 0, 0),        # tet A → mid (0.5,0,0)
+            3: NodeData(0, 1, 0), 4: NodeData(0, 0, 1),
+            11: NodeData(0, 0, 0), 12: NodeData(10, 0, 0),     # tet B → mid (5,0,0)
+            13: NodeData(0, 1, 0), 14: NodeData(0, 0, 1),
+            100: NodeData(0.5, 0, 0),                          # the shared midside
+        }
+        for i in range(201, 211):                              # distinct dummy midsides
+            state.nodes[i] = NodeData(float(i), 0.0, 0.0)
+        eA = SolidElem(1, 1, [1, 2, 3, 4, 100, 201, 202, 203, 204, 205])
+        eB = SolidElem(2, 1, [11, 12, 13, 14, 100, 206, 207, 208, 209, 210])
+        disagree = _warn_tet10_order_inconsistent(state, [eA, eB])
+        self.assertGreaterEqual(disagree, 1)
+        self.assertTrue(
+            any("verifier" in w and "conflicting" in w for w in state.warnings),
+            f"expected a shared-midside inconsistency warning in {state.warnings}")
 
 
 # A model with a free reference node (node 99, in no element) under implicit.
@@ -2916,6 +3285,70 @@ class SurfaceFacetTests(unittest.TestCase):
         st.parts = {7: PartData(7, "t", 1, 1)}
         _verts, faces = _surface_triangles(st, {7})
         self.assertEqual(len(faces), 2)
+
+
+class SuggestGapminNormalizesTet10Tests(unittest.TestCase):
+    """--suggest-gapmin (gapmin.analyze_file) must normalize LS-DYNA tet10 apex
+    midsides to Radioss order BEFORE measuring, so the clearance/Gapmin it prints
+    matches the surface the engine builds and the value --auto-gapmin bakes into
+    the converted deck. Regression: the read-only path was left on the un-permuted
+    DYNA connectivity and reported a geometrically wrong surface."""
+
+    def _write(self, deck):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "t10.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return path
+
+    def test_analyze_file_invokes_normalization(self):
+        # Wiring lock: analyze_file must run the same _normalize_tet10_ordering pass
+        # convert()/--auto-gapmin runs. It imports the symbol lazily from
+        # writer.mesh, so patch it there.
+        import k2rad.writer.mesh as _wm
+        from k2rad.gapmin import analyze_file
+        calls = []
+        orig = _wm._normalize_tet10_ordering
+
+        def spy(state):
+            calls.append(state)
+            return orig(state)
+
+        _wm._normalize_tet10_ordering = spy
+        self.addCleanup(setattr, _wm, "_normalize_tet10_ordering", orig)
+        analyze_file(self._write(TET10_DYNA_K))
+        self.assertEqual(len(calls), 1,
+                         "analyze_file did not normalize tet10 ordering before measuring")
+
+    def test_suggest_surface_matches_true_geometry_only_after_normalize(self):
+        # Geometric consequence: TET10_DYNA_K and the Radioss-ordered TET10_K are the
+        # SAME physical tet (identical corner + midside coordinates, different
+        # connectivity order). After normalization the suggest-path surface facets
+        # (compared by GEOMETRY, not node id) match the true Radioss surface; on the
+        # un-normalized DYNA connectivity they do NOT (apex midsides face off-edge).
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.gapmin import _surface_triangles
+        from k2rad.writer.mesh import _normalize_tet10_ordering
+
+        def surface(deck, normalize):
+            st = ConversionState()
+            for blk in parse_k_file(self._write(deck)):
+                dispatch(blk, st)
+            if normalize:
+                _normalize_tet10_ordering(st)
+            verts, faces = _surface_triangles(st, {1})
+            return {frozenset(tuple(round(c, 6) for c in verts[v]) for v in tri)
+                    for tri in faces}
+
+        true_surface = surface(TET10_K, normalize=True)       # already Radioss
+        norm_dyna = surface(TET10_DYNA_K, normalize=True)     # the fixed suggest path
+        raw_dyna = surface(TET10_DYNA_K, normalize=False)     # the pre-fix behaviour
+        self.assertEqual(norm_dyna, true_surface,
+                         "normalized DYNA suggest-surface must equal the true surface")
+        self.assertNotEqual(raw_dyna, true_surface,
+                            "un-normalized DYNA suggest-surface should be wrong (the bug)")
 
 
 class SuggestGapminTests(unittest.TestCase):

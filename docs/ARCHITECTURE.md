@@ -141,8 +141,9 @@ CLI/GUI surface to the user.
 The writer reads state (never mutates the physics) and returns deck text.
 
 `build_starter(state, progress=None)` first runs a few mesh pre-passes
-(`_resolve_mat_*`, optional TET10→TET4 downgrade, `_snap_tet10_midsides`,
-`_screen_sliver_tets`), builds the rigid bodies (`_make_rbodies` +
+(`_resolve_mat_*`, `_normalize_tet10_ordering`, optional TET10→TET4 downgrade,
+`_snap_tet10_midsides`, `_screen_sliver_tets`), builds the rigid bodies
+(`_make_rbodies` +
 `_make_cnrb_rbodies` + `_make_probe_rbody`), then assembles the deck by
 **appending an ordered list of section blocks**, one per `_make_*` builder:
 `_make_header`, `_make_materials`, `_make_nodes`, `_make_parts_and_elements`,
@@ -152,6 +153,21 @@ Each builder returns a `list[str]` of `.rad` lines; the builders are called in a
 fixed sequence and concatenated. (This ordered call sequence is effectively a
 hand-maintained section registry — see `ROADMAP.md` for the proposal to make it
 a data-driven one.)
+
+`_normalize_tet10_ordering` is the **first** tet10 pre-pass: it rewrites every
+10-node tet's connectivity into the Radioss `/TETRA10` midside convention
+(`topology.TET10_MIDEDGE`: n8=mid(1,4), n9=mid(2,4), n10=mid(3,4)) before any
+other pass reads the midside slots. LS-DYNA `*ELEMENT_SOLID` orders the three
+apex midsides differently (n8=mid(2,4), n9=mid(3,4), n10=mid(1,4)); the pass
+detects the source order geometrically (nearest apex-edge midpoint, per element)
+and permutes LS-DYNA→Radioss via `topology.TET10_DYNA_TO_RADIOSS`, defaulting to
+that permutation with a loud warning on ambiguous/mixed/coordinate-less meshes
+(every real LS-DYNA deck is DYNA-ordered; Altair hm_reader permutes on import the
+same way). It is idempotent (`state.tet10_normalized`; the permutation is a
+3-cycle) and also runs before the `--auto-gapmin` clearance analysis so that
+analysis sees the same surface the engine builds. Without it, the downstream
+snap pass collapsed shared midside nodes (ERROR 558) and the verbatim `/TETRA10`
+emit dropped ~30% of every quadratic tet's volume.
 
 `build_engine(state)` is the analogous, much smaller assembly of engine
 sections: `_make_engine_header`, `_make_engine_restart`, `_make_engine_output`,
@@ -171,8 +187,10 @@ walled off so a default conversion never imports them:
   point-triangle kernel to suggest each `/INTER/TYPE7` `Gapmin`. It is imported
   lazily inside `convert()` **only when `options.auto_gapmin` is set**, and
   reports a clear `pip install scipy` message (applying no Gapmin) when the
-  packages are absent. It reuses the writer's validated `writer._TET10_MIDEDGE`
-  map so its faceting matches what the engine builds for a `/TETRA10` surface.
+  packages are absent. It reuses the neutral `topology.TET10_MIDEDGE` map (the
+  Radioss `/TETRA10` order) so its faceting matches what the engine builds for a
+  `/TETRA10` surface; `_normalize_tet10_ordering` runs first (in `convert()` when
+  `--auto-gapmin` is set) so the analyzed connectivity is already Radioss-ordered.
 - **`tools/modal_*.py`** (offline modal chain): these are standalone scripts,
   **not part of the `k2rad` package** and never imported by `convert()`. They
   sit *downstream* of the converter — they run on the engine's

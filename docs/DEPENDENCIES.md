@@ -108,8 +108,12 @@ by a spatial tree. The backend choice:
 For a `/TETRA10` part the engine builds each external face as **4 linear
 sub-triangles** through the mid-edge nodes (this is what `/SURF/SEG`/`/SURF/PART`
 needs to avoid `ERROR 611`). The clearance measurement matches that exactly,
-reusing the writer's validated mid-edge map (`writer._TET10_MIDEDGE`), so the
-distance reported is the one the engine actually sees.
+reusing the neutral mid-edge map (`topology.TET10_MIDEDGE`, the **Radioss
+`/TETRA10` order** n8=mid(1,4)/n9=mid(2,4)/n10=mid(3,4)), so the distance reported
+is the one the engine actually sees. The input midside ordering is normalized to
+that Radioss order by `_normalize_tet10_ordering` upstream (an LS-DYNA
+`*ELEMENT_SOLID` deck orders the apex midsides differently), so the faceting reads
+the correct node in each slot regardless of the source solver.
 
 ## Summary
 

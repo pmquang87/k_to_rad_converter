@@ -69,9 +69,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .state import ConversionState
 # The validated TET10 mid-edge map (mid_local_index, cornerA_local, cornerB_local)
-# lives in the neutral topology module; reuse it so the contact-facet subdivision
-# here always matches the surface the writer/engine builds — without importing the
-# whole writer just for this constant.
+# in the **Radioss /TETRA10 order** (n8=mid(1,4), n9=mid(2,4), n10=mid(3,4)) lives
+# in the neutral topology module; reuse it so the contact-facet subdivision here
+# always matches the surface the writer/engine builds — without importing the
+# whole writer just for this constant. The connectivity fed here is already
+# normalized to that order by writer.mesh._normalize_tet10_ordering (an LS-DYNA
+# *ELEMENT_SOLID deck orders the apex midsides differently), so a corner->slot
+# lookup lands on the geometrically-correct midside node.
 from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 # ── Optional fast-proximity backend (numpy + scipy) ──────────────────────────
@@ -812,6 +816,15 @@ def analyze_file(input_path: str, factor: float = DEFAULT_GAPMIN_FACTOR
     state = ConversionState()
     for block in blocks:
         dispatch(block, state)
+    # Normalize LS-DYNA *ELEMENT_SOLID tet10 apex midsides to Radioss /TETRA10
+    # order BEFORE measuring, exactly as the convert()/--auto-gapmin path does
+    # (k2rad/__init__.py). suggest_gapmins → _surface_triangles reads the midside
+    # slots through the Radioss mid-edge map, so an un-normalized LS-DYNA deck would
+    # face the tet10 boundary off the wrong edges and report a clearance/Gapmin that
+    # disagrees with the value --auto-gapmin bakes into the actual deck. Lazy import
+    # avoids an import cycle (writer.mesh loads only topology/state).
+    from .writer.mesh import _normalize_tet10_ordering
+    _normalize_tet10_ordering(state)
     return suggest_gapmins(state, factor)
 
 
