@@ -6,7 +6,10 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
 from ..state import ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve
-from .common import HDR, _dof_string, _emit_grnod_node, _f, _i, _spotweld_beam_pids, _vcross, _vnorm
+from .common import (
+    HDR, _dof_string, _emit_grnod_node, _f, _i, _spotweld_beam_pids,
+    _vcross, _vnorm, _vsub,
+)
 
 __all__ = [
     "_make_rlinks",
@@ -31,6 +34,10 @@ __all__ = [
     "_make_body_loads",
     "_emit_inivel",
     "_make_inivel",
+    "_emit_frame_fix",
+    "_emit_inivel_axis",
+    "_make_initial_velocity",
+    "_make_initial_velocity_generation",
     "_make_pressure_loads",
     "_make_added_masses",
     "_make_starter_cloads",
@@ -1145,14 +1152,14 @@ def _make_body_loads(state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _emit_inivel(kind: str, inivel_id: int, title: str, grnod_id: int,
-                 v: Tuple[float, float, float]) -> List[str]:
+                 v: Tuple[float, float, float], skew_id: int = 0) -> List[str]:
     """One /INIVEL/TRA|ROT block — a single data card after the title:
     Vx(20) Vy(20) Vz(20) Gnod_id(10) Skew_id(10)."""
     return [
         f"/INIVEL/{kind}/{inivel_id}",
         title,
         "#                 Vx                  Vy                  Vz   Gnod_id   Skew_id",
-        f"{_f(v[0])}{_f(v[1])}{_f(v[2])}{_i(grnod_id)}{_i(0)}",
+        f"{_f(v[0])}{_f(v[1])}{_f(v[2])}{_i(grnod_id)}{_i(skew_id)}",
         HDR,
     ]
 
@@ -1199,6 +1206,264 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     if lines:
         lines = ["#-  INITIAL CONDITIONS:", HDR] + lines
+    return lines
+
+
+def _vdot(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _emit_frame_fix(frame_id: int, title: str, origin, yaxis, zaxis) -> List[str]:
+    """Emit /FRAME/FIX — same card layout and Y'/Z' rule as /SKEW/FIX: the two
+    vector cards are the LOCAL Y' and Z' axes (globalyaxis / globalzaxis). The
+    starter rebuilds X' = Y' x Z' then re-orthogonalises Y'' = Z' x X', so the
+    Z' card (card 3) is the exactly-preserved local Z; the Y' card only needs to
+    be non-parallel to Z'."""
+    return [
+        f"/FRAME/FIX/{frame_id}",
+        title,
+        "#                 Ox                  Oy                  Oz",
+        f"{_f(origin[0])}{_f(origin[1])}{_f(origin[2])}",
+        "#                 X1                  Y1                  Z1   (local Y axis)",
+        f"{_f(yaxis[0])}{_f(yaxis[1])}{_f(yaxis[2])}",
+        "#                 X2                  Y2                  Z2   (local Z axis)",
+        f"{_f(zaxis[0])}{_f(zaxis[1])}{_f(zaxis[2])}",
+        HDR,
+    ]
+
+
+def _emit_inivel_axis(inivel_id: int, title: str, frame_id: int, grnod_id: int,
+                      v: Tuple[float, float, float], vr: float,
+                      dir_axis: str = "Z") -> List[str]:
+    """One /INIVEL/AXIS block: card A = DIR(10s) FRAME_id(10) GRNOD_id(10);
+    card B = Vxt(20) Vyt(20) Vzt(20) VR(20). Vxt/Vyt/Vzt are the translational
+    velocity expressed in the FRAME's local axes; VR is the angular velocity
+    about the DIR axis (here the frame's local Z)."""
+    return [
+        f"/INIVEL/AXIS/{inivel_id}",
+        title,
+        "#      DIR  FRAME_id  GRNOD_id",
+        f"{dir_axis.rjust(10)}{_i(frame_id)}{_i(grnod_id)}",
+        "#                Vxt                 Vyt                 Vzt                  VR",
+        f"{_f(v[0])}{_f(v[1])}{_f(v[2])}{_f(vr)}",
+        HDR,
+    ]
+
+
+def _make_initial_velocity(state: ConversionState) -> List[str]:
+    """*INITIAL_VELOCITY (base set form) → /INIVEL/TRA (+ /INIVEL/ROT).
+
+    NSID scopes the node group (blank/0 = whole model); NSIDEX is subtracted by
+    set difference (writer phase = every *SET_NODE is resolvable). BOXID and a
+    rigid-overwrite IRIGID are warned + dropped; ICID maps to the matching
+    /SKEW when *DEFINE_COORDINATE_* produced one, else falls back to global.
+    """
+    if not state.inivel_general:
+        return []
+    lines: List[str] = []
+    for iv in state.inivel_general:
+        has_tra = bool(iv.vx or iv.vy or iv.vz)
+        has_rot = bool(iv.vxr or iv.vyr or iv.vzr)
+        if not has_tra and not has_rot:
+            continue   # zero velocity → no-op card
+
+        # ── resolve the node group ──────────────────────────────────────────
+        if iv.nsid:
+            ns = state.node_sets.get(iv.nsid)
+            if ns is None:
+                state.warn(
+                    f"*INITIAL_VELOCITY NSID={iv.nsid}: node set not found "
+                    "(unsupported *SET_NODE variant?) - skipped")
+                continue
+            base = set(ns[1])
+        else:
+            base = set(state.nodes.keys())         # whole model
+        if iv.nsidex:
+            ex = state.node_sets.get(iv.nsidex)
+            if ex is None:
+                state.warn(
+                    f"*INITIAL_VELOCITY NSIDEX={iv.nsidex}: exclusion set not "
+                    "resolvable - applied WITHOUT exclusion")
+            else:
+                base -= set(ex[1])
+        nids = sorted(n for n in base if n > 0)
+        if not nids:
+            state.warn("*INITIAL_VELOCITY: resolved node group is empty - skipped")
+            continue
+
+        # ── lossy fields (warn + continue) ──────────────────────────────────
+        if iv.boxid:
+            state.warn(
+                f"*INITIAL_VELOCITY BOXID={iv.boxid}: *DEFINE_BOX support pending "
+                "- converted WITHOUT box scoping (velocity applied to the whole "
+                "node group)")
+        if iv.irigid:
+            state.warn(
+                f"*INITIAL_VELOCITY IRIGID={iv.irigid}: rigid-body velocity "
+                "overwrite bookkeeping not modelled - velocity applied to the "
+                "node group as-is")
+        skew_id = 0
+        if iv.icid:
+            if iv.icid in state.coord_sys or iv.icid in state.coord_nodes:
+                skew_id = iv.icid
+                state.warn(
+                    f"*INITIAL_VELOCITY ICID={iv.icid}: velocity components read "
+                    f"in /SKEW/{iv.icid} (components not rotated to global, "
+                    "matching LS-DYNA)")
+            else:
+                state.warn(
+                    f"*INITIAL_VELOCITY ICID={iv.icid}: no converted /SKEW with "
+                    "that id - velocity applied in the GLOBAL frame")
+
+        # ── emit ────────────────────────────────────────────────────────────
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"inivel_grp_{grnod_id}", nids)
+        if has_tra:
+            tid = state.next_id()
+            lines += _emit_inivel("TRA", tid, f"InitVel_{tid}", grnod_id,
+                                  (iv.vx, iv.vy, iv.vz), skew_id)
+        if has_rot:
+            rid = state.next_id()
+            lines += _emit_inivel("ROT", rid, f"InitVelRot_{rid}", grnod_id,
+                                  (iv.vxr, iv.vyr, iv.vzr), skew_id)
+
+    if lines:
+        lines = ["#-  INITIAL VELOCITY (set form):", HDR] + lines
+    return lines
+
+
+def _inivel_gen_group_nodes(state: ConversionState, g):
+    """Resolve the *INITIAL_VELOCITY_GENERATION STYP scope to sorted node ids.
+    Returns None when the STYP target id cannot be resolved (caller falls back
+    to the whole model with a warning)."""
+    nids: Set[int] = set()
+
+    def add_part_nodes(pid: int):
+        for e in state.shell_elems:
+            if e.pid == pid:
+                nids.update(e.nodes)
+        for e in state.solid_elems:
+            if e.pid == pid:
+                nids.update(e.nodes)
+        for e in state.beam_elems:
+            if e.pid == pid:
+                nids.update((e.n1, e.n2))
+
+    if g.styp == 0 or g.sid == 0:
+        return sorted(state.nodes.keys())            # whole model
+    if g.styp == 1:                                  # part set
+        ps = state.part_sets.get(g.sid)
+        if ps is None:
+            return None
+        for pid in ps[1]:
+            add_part_nodes(pid)
+    elif g.styp == 2:                                # single part
+        if g.sid not in state.parts:
+            return None
+        add_part_nodes(g.sid)
+    elif g.styp == 3:                                # node set
+        ns = state.node_sets.get(g.sid)
+        if ns is None:
+            return None
+        nids.update(ns[1])
+    else:
+        return None
+    return sorted(n for n in nids if n > 0)
+
+
+def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
+    """*INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + a companion /FRAME/FIX.
+
+    The rotation axis (through (XC,YC,ZC) along (NX,NY,NZ), or node-defined when
+    NX=-999) becomes the frame's local Z; OMEGA → VR about it; the translational
+    (VX,VY,VZ) is projected onto the frame's local axes so Radioss re-expands it
+    to the correct global velocity. STYP selects the node group. PHASE, IVATN,
+    IRIGID and a nonzero ICID are lossy and warned.
+    """
+    if not state.inivel_generations:
+        return []
+    refX, refY, refZ = (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)
+    lines: List[str] = []
+    for g in state.inivel_generations:
+        if g.phase:
+            state.warn(
+                f"*INITIAL_VELOCITY_GENERATION PHASE={g.phase}: dynamic-relaxation "
+                "phase flag not modelled - velocity applied at t=0")
+        if g.ivatn:
+            state.warn(
+                f"*INITIAL_VELOCITY_GENERATION IVATN={g.ivatn}: attached "
+                "secondary-node scoping dropped")
+        if g.irigid:
+            state.warn(
+                f"*INITIAL_VELOCITY_GENERATION IRIGID={g.irigid}: rigid-body "
+                "overwrite flag not modelled")
+        if g.icid:
+            state.warn(
+                f"*INITIAL_VELOCITY_GENERATION ICID={g.icid}: local system for "
+                "VX/VY/VZ not applied - treated as global")
+
+        # ── origin + raw rotation axis vector ───────────────────────────────
+        if g.nx < -900.0:                              # node-defined axis
+            n1 = state.nodes.get(g.node1)
+            n2 = state.nodes.get(g.node2)
+            if n1 is None or n2 is None:
+                state.warn(
+                    f"*INITIAL_VELOCITY_GENERATION: axis node {g.node1}/{g.node2} "
+                    "missing - rotation axis undefined, OMEGA dropped")
+                origin, N = (g.xc, g.yc, g.zc), (0.0, 0.0, 0.0)
+            else:
+                origin = (n1.x, n1.y, n1.z)
+                N = _vsub((n2.x, n2.y, n2.z), origin)
+        else:
+            origin, N = (g.xc, g.yc, g.zc), (g.nx, g.ny, g.nz)
+
+        # ── build the local frame triad (local Z = rotation axis) ───────────
+        nhat = _vnorm(N)
+        vr = g.omega
+        if nhat is None:
+            if g.omega:
+                state.warn(
+                    "*INITIAL_VELOCITY_GENERATION: no rotation axis "
+                    "(NX=NY=NZ=0 or degenerate nodes) - OMEGA dropped, "
+                    "translation only")
+            vr = 0.0
+            fz = refZ
+            fy = _vnorm(_vcross(refZ, refX)) or refY
+            fx = _vnorm(_vcross(fy, fz)) or refX
+        else:
+            fz = nhat
+            fy = _vnorm(_vcross(nhat, refX)) or _vnorm(_vcross(nhat, refZ)) or refY
+            fx = _vnorm(_vcross(fy, fz)) or refX
+
+        # ── translational velocity, expressed in the frame's local axes ─────
+        gV = (g.vx, g.vy, g.vz)          # ICID treated as global (warned above)
+        vxt = _vdot(fx, gV)              # local X = FrameVect3
+        vyt = _vdot(fy, gV)              # local Y = FrameVect1
+        vzt = _vdot(fz, gV)             # local Z = FrameVect2
+
+        # ── node group (STYP) ──────────────────────────────────────────────
+        nids = _inivel_gen_group_nodes(state, g)
+        if nids is None:
+            state.warn(
+                f"*INITIAL_VELOCITY_GENERATION STYP={g.styp} id={g.sid}: scope "
+                "target not found - applied to the whole model")
+            nids = sorted(state.nodes.keys())
+        if not nids:
+            state.warn("*INITIAL_VELOCITY_GENERATION: node group empty - skipped")
+            continue
+
+        # ── emit /FRAME/FIX then /INIVEL/AXIS ───────────────────────────────
+        frame_id = state.next_id()
+        lines += _emit_frame_fix(frame_id, f"FRAME_INIVEL_GEN_{frame_id}",
+                                 origin, fy, fz)
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
+        inivel_id = state.next_id()
+        lines += _emit_inivel_axis(inivel_id, f"InitVelGen_{inivel_id}",
+                                   frame_id, grnod_id, (vxt, vyt, vzt), vr)
+
+    if lines:
+        lines = ["#-  INITIAL VELOCITY GENERATION:", HDR] + lines
     return lines
 
 

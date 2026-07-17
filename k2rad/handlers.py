@@ -28,7 +28,8 @@ from .state import (
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
-    InitialVelocityNode, InitialVelocityRigidBody, MatPowerLaw, PressureLoad,
+    InitialVelocityNode, InitialVelocityRigidBody,
+    InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
     LoadBody,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
@@ -2724,6 +2725,77 @@ def handle_initial_velocity_rigid_body(block: Block, state: ConversionState) -> 
         state.inivel_rbodies.append(InitialVelocityRigidBody(pid, vx, vy, vz, vxr, vyr, vzr))
 
 
+def handle_initial_velocity(block: Block, state: ConversionState) -> None:
+    """*INITIAL_VELOCITY (base set form).
+
+    Card 1: NSID NSIDEX BOXID IRIGID ICID   Card 2: VX VY VZ VXR VYR VZR
+    (Card 3 = per-exempt-node velocities when NSIDEX>0 — read but discarded;
+    NSIDEX is treated as pure exclusion, matching the native reader.) A blank
+    Card 1 leaves every field 0 → whole-model velocity. Lossy fields (BOXID,
+    IRIGID, unresolved ICID) are warned in the writer, where the sets and the
+    converted /SKEW ids are all resolvable regardless of deck order.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    nsid   = to_int(f1[0]) if len(f1) > 0 else 0
+    nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+    boxid  = to_int(f1[2]) if len(f1) > 2 else 0
+    irigid = to_int(f1[3]) if len(f1) > 3 else 0
+    icid   = to_int(f1[4]) if len(f1) > 4 else 0
+    vx  = to_float(f2[0]) if len(f2) > 0 else 0.0
+    vy  = to_float(f2[1]) if len(f2) > 1 else 0.0
+    vz  = to_float(f2[2]) if len(f2) > 2 else 0.0
+    vxr = to_float(f2[3]) if len(f2) > 3 else 0.0
+    vyr = to_float(f2[4]) if len(f2) > 4 else 0.0
+    vzr = to_float(f2[5]) if len(f2) > 5 else 0.0
+    state.inivel_general.append(
+        InitialVelocity(nsid, nsidex, boxid, irigid, icid,
+                        vx, vy, vz, vxr, vyr, vzr))
+
+
+def handle_initial_velocity_generation(block: Block, state: ConversionState) -> None:
+    """*INITIAL_VELOCITY_GENERATION → /INIVEL/AXIS + companion /FRAME/FIX.
+
+    Card 1: ID STYP OMEGA VX VY VZ IVATN ICID
+    Card 2: XC YC ZC NX NY NZ PHASE IRIGID
+    When NX == -999 the axis is node-defined: the NY/NZ columns hold node ids
+    (origin = node1, direction = node2 − node1). IVATN/PHASE/IRIGID and a
+    nonzero ICID are lossy and warned in the writer.
+    """
+    raw = block.raw
+    offset = 1 if _has_id(block) else 0
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    sid   = to_int(f1[0]) if len(f1) > 0 else 0
+    styp  = to_int(f1[1]) if len(f1) > 1 else 0
+    omega = to_float(f1[2]) if len(f1) > 2 else 0.0
+    vx    = to_float(f1[3]) if len(f1) > 3 else 0.0
+    vy    = to_float(f1[4]) if len(f1) > 4 else 0.0
+    vz    = to_float(f1[5]) if len(f1) > 5 else 0.0
+    ivatn = to_int(f1[6]) if len(f1) > 6 else 0
+    icid  = to_int(f1[7]) if len(f1) > 7 else 0
+    xc = to_float(f2[0]) if len(f2) > 0 else 0.0
+    yc = to_float(f2[1]) if len(f2) > 1 else 0.0
+    zc = to_float(f2[2]) if len(f2) > 2 else 0.0
+    nx = to_float(f2[3]) if len(f2) > 3 else 0.0
+    ny = nz = 0.0
+    node1 = node2 = 0
+    if nx < -900.0:      # NX == -999.0 sentinel → node-defined axis
+        node1 = to_int(f2[4]) if len(f2) > 4 else 0
+        node2 = to_int(f2[5]) if len(f2) > 5 else 0
+    else:
+        ny = to_float(f2[4]) if len(f2) > 4 else 0.0
+        nz = to_float(f2[5]) if len(f2) > 5 else 0.0
+    phase  = to_int(f2[6]) if len(f2) > 6 else 0
+    irigid = to_int(f2[7]) if len(f2) > 7 else 0
+    state.inivel_generations.append(
+        InitialVelocityGeneration(sid, styp, omega, vx, vy, vz, ivatn, icid,
+                                  xc, yc, zc, nx, ny, nz, node1, node2,
+                                  phase, irigid))
+
+
 def handle_mat_power_law_plasticity(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -3792,8 +3864,10 @@ HANDLERS = {
     "BOUNDARY_PRESCRIBED_MOTION_RIGID":       handle_boundary_prescribed_motion_rigid,
     "BOUNDARY_PRESCRIBED_MOTION_SET":         handle_boundary_prescribed_motion_set,
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_boundary_prescribed_motion_node,
+    "INITIAL_VELOCITY":                       handle_initial_velocity,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
     "INITIAL_VELOCITY_RIGID_BODY":            handle_initial_velocity_rigid_body,
+    "INITIAL_VELOCITY_GENERATION":            handle_initial_velocity_generation,
     "INITIAL_DETONATION":                     handle_initial_detonation,
     "INITIAL_VOLUME_FRACTION_GEOMETRY":       handle_initial_volume_fraction_geometry,
     # Coupled ALE / fluid-structure coupling / boundaries

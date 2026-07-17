@@ -264,6 +264,17 @@ unit/sign gotchas.
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/NODE`
 `*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/RBODY`
+`*INITIAL_VELOCITY` (base set form) → `/INIVEL/TRA` (+ `/INIVEL/ROT` for
+rotational DOFs); `NSID`/`NSIDEX` node-set scoping (whole model when `NSID` is
+omitted or 0), `NSIDEX` removed by set difference, `ICID` mapped to the matching
+`/SKEW` from a converted `*DEFINE_COORDINATE_*` (else global) — `BOXID`
+(`*DEFINE_BOX` support pending), a rigid-overwrite `IRIGID`, and the Card-3
+per-exempt-node velocities are warned + dropped
+`*INITIAL_VELOCITY_GENERATION` → `/INIVEL/AXIS` + a generated `/FRAME/FIX`
+(rotation axis through `(XC,YC,ZC)` along `(NX,NY,NZ)`, or node-defined when
+`NX=-999`); `OMEGA`→`VR` about the axis and translational `VX/VY/VZ` projected
+into the frame; `STYP` all/part-set/part/node-set scoping (`PHASE`, `IVATN`,
+`IRIGID` and a nonzero `ICID` warned + dropped; `_GENERATION_START_TIME` skipped)
 `*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` (ILOC=0, LS-DYNA's global
 default — lossless incl. σzz, plastic strain and the through-thickness
 position) or the local `/INISHE/STRS_F` for ILOC=1 (σzz/T warned + dropped).
