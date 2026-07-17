@@ -1042,5 +1042,308 @@ class SdOrientationTests(unittest.TestCase):
         self.assertEqual(len(set(spring_ids)), 2)        # distinct part ids, no collision
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONTACT_AUTOMATIC_GENERAL — dyna2rad SOFT-sentinel routing
+#   (SOFT -7 → TYPE7, -11 → TYPE11 edge, -19 → TYPE19, else → single-surface)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Minimal single-shell deck; a contact block is spliced in before *CONTROL.
+_GEN_MESH = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2            10.0             0.0             0.0\n"
+    "       3            10.0            10.0             0.0\n"
+    "       4             0.0            10.0             0.0\n"
+    "*ELEMENT_SHELL\n"
+    "       1       1       1       2       3       4\n"
+    "*PART\n"
+    "plate\n"
+    "         1         1         1\n"
+    "*SECTION_SHELL\n"
+    "         1         2       1.0         3\n"
+    "       2.0\n"
+    "*MAT_ELASTIC\n"
+    "         1   7.86e-9    210000.0      0.3\n"
+)
+_GEN_TAIL = "*CONTROL_TERMINATION\n       1.0\n*END\n"
+
+
+def _general_contact(soft, ssid=1, sstyp=3, fs=0.1, sst=0.0, mst=0.0):
+    """A *CONTACT_AUTOMATIC_GENERAL_ID block (id 50). ``soft`` None → no Card A."""
+    soft_card = f"{soft:>10}\n" if soft is not None else ""
+    return (
+        "*CONTACT_AUTOMATIC_GENERAL_ID\n"
+        "        50                                                          gen\n"
+        f"{ssid:>10}{0:>10}{sstyp:>10}{0:>10}         0         0         0         0\n"
+        f"{fs:>10}{fs:>10}       0.0       0.0       0.0         0       0.01.0000E+28\n"
+        f"       1.0       1.0{sst:>10}{mst:>10}       1.0       1.0       1.0       1.0\n"
+        + soft_card
+    )
+
+
+def _inter_card1_floats(starter: str, type_prefix: str):
+    """First data card (after the title) of the first /INTER/<type> block."""
+    hdr = _hdr(starter, type_prefix)
+    body = _block(starter, hdr)          # [title, card1, card2, …]
+    return body[0], _floats(body[1])     # (title, card1 numeric fields)
+
+
+def _num_row(line: str):
+    """Parse a line into floats, or [] if any field is non-numeric (e.g. the
+    interface title line, which _block includes as a data row)."""
+    try:
+        return [float(x) for x in line.split()]
+    except ValueError:
+        return []
+
+
+class AutomaticGeneralSoftRoutingTests(unittest.TestCase):
+    """SOFT-sentinel routing of *CONTACT_AUTOMATIC_GENERAL."""
+
+    def test_general_is_handled_not_skipped(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        state = _dispatch(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        self.assertNotIn("CONTACT_AUTOMATIC_GENERAL", state.skipped_keywords)
+
+    def test_soft_minus7_routes_to_type7(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-7) + _GEN_TAIL)
+        self.assertIn("/INTER/TYPE7/50", s)
+        self.assertNotIn("/INTER/TYPE11/", s)
+        self.assertNotIn("/INTER/TYPE19/", s)
+
+    def test_soft_minus11_routes_to_type11(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        self.assertIn("/INTER/TYPE11/50", s)
+        self.assertNotIn("/INTER/TYPE7/50", s)
+
+    def test_soft_minus19_routes_to_type19(self):
+        _, s = _convert(_GEN_MESH + _general_contact(-19) + _GEN_TAIL)
+        self.assertIn("/INTER/TYPE19/50", s)
+        self.assertNotIn("/INTER/TYPE11/", s)
+
+    def test_soft_minus11_synthesizes_and_references_a_line(self):
+        # THE key TYPE11 capability: a /LINE group is synthesized and the
+        # interface's line_IDs field references it.
+        _, s = _convert(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        self.assertIn("/LINE/", s)                       # a line entity exists
+        _, card1 = _inter_card1_floats(s, "/INTER/TYPE11/")
+        line_ids = int(card1[0])
+        self.assertIn(line_ids, _all_header_ids(s, "/LINE/"))   # referenced by the interface
+
+    def test_soft_minus11_part_side_uses_line_surf_over_a_surface(self):
+        # A part-resolved side builds a /SURF and wraps it in /LINE/SURF so the
+        # starter derives the edges (no hand-enumerated node pairs).
+        _, s = _convert(_GEN_MESH + _general_contact(-11, ssid=1, sstyp=3) + _GEN_TAIL)
+        self.assertIn("/LINE/SURF/", s)
+        self.assertIn("/SURF/GRSHEL/", s)               # the surface the line derives edges from
+
+    def test_soft_minus11_self_contact_sets_line_idm_zero(self):
+        # msid==0 → self edge-impact; line_IDm must be 0 (starter reads it as
+        # self-contact of line_IDs).
+        _, s = _convert(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        _, card1 = _inter_card1_floats(s, "/INTER/TYPE11/")
+        self.assertEqual(int(card1[1]), 0)              # line_IDm == 0
+
+    def test_soft_minus11_segment_set_emits_line_seg_edges(self):
+        # A *SET_SEGMENT slave (sstyp=0) is turned into an explicit /LINE/SEG
+        # whose rows are the segment's consecutive node-pair edges.
+        deck = (
+            _GEN_MESH
+            + "*SET_SEGMENT_TITLE\ngenseg\n       200\n"
+              "         1         2         3         4\n"
+            + "*CONTACT_AUTOMATIC_GENERAL_ID\n"
+              "        50                                                          gen\n"
+              "       200         0         0         0         0         0         0         0\n"
+              "       0.1       0.1       0.0       0.0       0.0         0       0.01.0000E+28\n"
+              "       1.0       1.0       0.0       0.0       1.0       1.0       1.0       1.0\n"
+              "       -11\n"
+            + _GEN_TAIL
+        )
+        _, s = _convert(deck)
+        self.assertIn("/LINE/SEG/", s)
+        self.assertIn("/INTER/TYPE11/50", s)
+        # The quad [1,2,3,4] → 4 boundary edges (1-2, 2-3, 3-4, 4-1).
+        seg_block = _block(s, _hdr(s, "/LINE/SEG/"))
+        edge_rows = [ln for ln in seg_block if len(ln.split()) == 3 and ln.split()[0].isdigit()
+                     and ln.strip()[0] != "g"]          # skip the title line
+        # each row is "seg_ID n1 n2"; the four unordered pairs must all appear
+        pairs = {tuple(sorted(int(x) for x in r.split()[1:3])) for r in edge_rows}
+        self.assertEqual(pairs, {(1, 2), (2, 3), (3, 4), (1, 4)})
+
+    def test_soft_minus11_friction_passes_through(self):
+        # Card2 FS → scalar Coulomb Fric on the TYPE11 Stfac/Fric/GAPmin card.
+        _, s = _convert(_GEN_MESH + _general_contact(-11, fs=0.1) + _GEN_TAIL)
+        body = _block(s, _hdr(s, "/INTER/TYPE11/"))
+        # find the Stfac/Fric/GAPmin/Tstart/Tstop card (five floats, Fric second)
+        card = next(r for ln in body if len(r := _num_row(ln)) == 5)
+        self.assertEqual(card[1], 0.1)                  # Fric == FS
+
+    def test_soft_minus11_sst_mst_map_to_gapmin(self):
+        # Card3 SST/MST → TYPE11 GAPmin = (|SST|+|MST|)/2.
+        res, s = _convert(_GEN_MESH + _general_contact(-11, sst=0.02, mst=0.04) + _GEN_TAIL)
+        body = _block(s, _hdr(s, "/INTER/TYPE11/"))
+        card = next(r for ln in body if len(r := _num_row(ln)) == 5)
+        self.assertEqual(card[2], 0.03)                 # GAPmin third field
+        self.assertTrue(any("Gapmin=0.03" in w and "TYPE11" in w for w in res.warnings))
+
+    def test_default_soft_delegates_to_single_surface(self):
+        # SOFT absent / 0 / 2 → the ordinary single-surface path (a specific-part
+        # self contact resolves to /INTER/TYPE7), and NOT the general list.
+        for soft in (None, 0, 2):
+            res, s = _convert(_GEN_MESH + _general_contact(soft) + _GEN_TAIL)
+            self.assertIn("/INTER/TYPE7/50", s, f"soft={soft}")
+            self.assertNotIn("/INTER/TYPE11/", s)
+            self.assertNotIn("/INTER/TYPE19/", s)
+            self.assertNotIn("/LINE/", s)
+            st = _dispatch(_GEN_MESH + _general_contact(soft) + _GEN_TAIL)
+            self.assertEqual(st.contacts_general, [])           # not sentinel-routed
+            self.assertEqual(len(st.contacts_single), 1)        # single-surface record
+
+    def test_sentinel_recorded_in_contacts_general(self):
+        st = _dispatch(_GEN_MESH + _general_contact(-11) + _GEN_TAIL)
+        self.assertEqual(len(st.contacts_general), 1)
+        c = st.contacts_general[0]
+        self.assertEqual(c.soft, -11)
+        self.assertEqual(c.ssid, 1)
+        # self-mirror applied: msid == ssid when the card's MSID was 0
+        self.assertEqual(c.msid, 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONTACT_TIED_SURFACE_TO_SURFACE — negative-gap discriminator → TYPE10/TYPE2
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TIED_MESH = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2            10.0             0.0             0.0\n"
+    "       3            10.0            10.0             0.0\n"
+    "       4             0.0            10.0             0.0\n"
+    "       5             2.0             0.0             1.0\n"
+    "       6             2.0            10.0             1.0\n"
+    "       7             2.0             0.0            11.0\n"
+    "       8             2.0            10.0            11.0\n"
+    "*ELEMENT_SHELL\n"
+    "       1       1       1       2       3       4\n"
+    "       2       2       5       6       8       7\n"
+    "*PART\n"
+    "plate\n"
+    "         1         1         1\n"
+    "*PART\n"
+    "stripe\n"
+    "         2         1         1\n"
+    "*SECTION_SHELL\n"
+    "         1         2       1.0         3\n"
+    "       2.0\n"
+    "*MAT_ELASTIC\n"
+    "         1   7.86e-9    210000.0      0.3\n"
+    "*SET_NODE_LIST_TITLE\n"
+    "weld_nodes\n"
+    "       111\n"
+    "         5         6\n"
+    "*SET_SEGMENT_TITLE\n"
+    "seg_master\n"
+    "       103\n"
+    "         1         2         3         4\n"
+)
+_TIED_TAIL = "*CONTROL_TERMINATION\n       1.0\n*END\n"
+
+
+def _tied_contact(sfs=1.0, sfm=1.0, sst=0.0, mst=0.0, sfst=0.0, sfmt=0.0,
+                  kw="SURFACE_TO_SURFACE"):
+    """A *CONTACT_TIED_<kw>_ID block (id 60): node-set slave, segment master."""
+    return (
+        f"*CONTACT_TIED_{kw}_ID\n"
+        "        60                                                          tied\n"
+        "       111       103         4         0\n"
+        "       0.0       0.0       0.0       0.0       0.0         0       0.01.0000E+28\n"
+        f"{sfs:>10}{sfm:>10}{sst:>10}{mst:>10}{sfst:>10}{sfmt:>10}\n"
+    )
+
+
+class TiedNegativeGapRoutingTests(unittest.TestCase):
+    """(SFST*SST + SFMT*MST)/2 < 0 → /INTER/TYPE10 (penalty), else /INTER/TYPE2."""
+
+    def test_negative_discriminator_emits_type10(self):
+        res, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE10/60", s)
+        self.assertNotIn("/INTER/TYPE2/", s)
+        self.assertTrue(any("penalty tie" in w and "TYPE10" in w for w in res.warnings))
+
+    def test_nonnegative_discriminator_stays_type2(self):
+        _, s = _convert(_TIED_MESH + _tied_contact(sst=0.5, sfst=1.0) + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+    def test_discriminator_boundary_zero_is_type2(self):
+        # (1*-0.5 + 1*0.5)/2 == 0 → NOT < 0 → kinematic TYPE2.
+        _, s = _convert(_TIED_MESH
+                        + _tied_contact(sst=-0.5, mst=0.5, sfst=1.0, sfmt=1.0)
+                        + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+    def test_blank_sfst_stays_type2_even_with_negative_sst(self):
+        # The reimplementation trap: a blank SFST/SFMT (0) → dSearch 0 → TYPE2,
+        # regardless of a negative SST. TYPE10 needs BOTH a nonzero SFST/SFMT and
+        # a negative SST/MST.
+        _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=0.0) + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+    def test_type10_entities_are_grnod_and_surf(self):
+        _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        _, card1 = _inter_card1_floats(s, "/INTER/TYPE10/")
+        grnod_id, surf_id = int(card1[0]), int(card1[1])
+        self.assertIn(f"/GRNOD/NODE/{grnod_id}", s)
+        self.assertIn(surf_id, _all_header_ids(s, "/SURF/"))
+        self.assertEqual(int(card1[2]), 1)             # Idel == 1
+
+    def test_type10_gap_from_sst_mst(self):
+        # GAP = (|SST| + |MST|)/2 = (0.5 + 0)/2 = 0.25 on the STFAC/…/GAP card.
+        _, s = _convert(_TIED_MESH + _tied_contact(sst=-0.5, sfst=1.0) + _TIED_TAIL)
+        body = _block(s, _hdr(s, "/INTER/TYPE10/"))
+        gap_card = next(r for ln in body
+                        if len(r := _num_row(ln)) == 4 and 0.25 in r)
+        self.assertEqual(gap_card, [0.0, 0.25, 0.0, 0.0])   # STFAC GAP Tstart Tstop
+
+    def test_offset_variant_also_discriminates_to_type10(self):
+        # _OFFSET / _CONSTRAINED_OFFSET share the branch — routed only by sign.
+        _, s = _convert(_TIED_MESH
+                        + _tied_contact(sst=-0.5, sfst=1.0, kw="SURFACE_TO_SURFACE_OFFSET")
+                        + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE10/60", s)
+
+    def test_nodes_to_surface_never_type10(self):
+        # The discriminator is a SURFACE_TO_SURFACE construct; a NODES_TO_SURFACE
+        # tie stays kinematic TYPE2 even with a negative SST.
+        deck = (_TIED_MESH
+                + _tied_contact(sst=-0.5, sfst=1.0, kw="NODES_TO_SURFACE")
+                + _TIED_TAIL)
+        _, s = _convert(deck)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+    def test_sst_mst_sfst_sfmt_are_parsed(self):
+        st = _dispatch(_TIED_MESH
+                       + _tied_contact(sfs=1.0, sfm=1.0, sst=-0.5, mst=-0.25,
+                                       sfst=2.0, sfmt=3.0)
+                       + _TIED_TAIL)
+        self.assertEqual(len(st.contacts_tied), 1)
+        c = st.contacts_tied[0]
+        self.assertEqual((c.sst, c.mst), (-0.5, -0.25))
+        self.assertEqual((c.sfst, c.sfmt), (2.0, 3.0))
+        self.assertEqual((c.sfs, c.sfm), (1.0, 1.0))
+
+    def test_plain_tied_no_thickness_still_type2(self):
+        # No SST/MST/SFST/SFMT at all → kinematic TYPE2 (no regression on the
+        # ordinary tied weld).
+        _, s = _convert(_TIED_MESH + _tied_contact() + _TIED_TAIL)
+        self.assertIn("/INTER/TYPE2/60", s)
+        self.assertNotIn("/INTER/TYPE10/", s)
+
+
 if __name__ == "__main__":
     unittest.main()

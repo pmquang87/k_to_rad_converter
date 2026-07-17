@@ -100,6 +100,12 @@ shipped, so the marginal cost is small.
   `MAT_26` → LAW28 — **done**.
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
+- `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11
+  edge-to-edge with synthesized `/LINE/SEG`|`/LINE/SURF`, `-19`→TYPE19; default →
+  single-surface) — **done** (dyna2rad `convertcontacts.cxx` cc:133-164).
+- `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` negative-offset discriminator
+  `(SFST*SST + SFMT*MST)/2 < 0` → `/INTER/TYPE10` penalty tie (else TYPE2) —
+  **done** (dyna2rad cc:220).
 - `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE / /INIBRI —
   **done** (GLOB/local flavours, layer-count checks per the starter readers).
   Original note: — the per-integration-point `/INISTATE` blocks are verbose and

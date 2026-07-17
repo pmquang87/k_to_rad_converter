@@ -27,6 +27,8 @@ __all__ = [
     "_discrete_part_ids",
     "_spotweld_beam_pids",
     "_emit_surf_seg",
+    "_emit_line_seg",
+    "_emit_line_surf",
 ]
 
 
@@ -293,5 +295,44 @@ def _emit_surf_seg(surf_id: int, title: str, segments) -> List[str]:
     for seg_no, nodes in enumerate(segments, start=1):
         quad = (list(nodes) + [0, 0, 0, 0])[:4]
         lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_line_seg(line_id: int, title: str, edges) -> List[str]:
+    """A /LINE/SEG line group from a list of 2-node edges [(n1, n2), …].
+
+    The 2-node analogue of _emit_surf_seg: each row is ``seg_ID n1 n2``. The
+    starter (`hm_read_lines.F`) identifies the segment purely by (N1, N2) and
+    treats col-1 seg_ID as a discarded positional index, so it is emitted as a
+    running 1..N counter. Consumed by /INTER/TYPE11 line_IDs / line_IDm.
+    """
+    lines = [f"/LINE/SEG/{line_id}", (title or f"line_seg_{line_id}")[:100],
+             "#   seg_ID        n1        n2"]
+    for seg_no, (n1, n2) in enumerate(edges, start=1):
+        lines.append(_i(seg_no) + _i(n1) + _i(n2))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_line_surf(line_id: int, title: str, surf_ids: List[int]) -> List[str]:
+    """A /LINE/SURF line group referencing one or more /SURF ids.
+
+    The starter derives every segment edge of the referenced surface(s) into
+    line segments (`hm_read_lines.F` IT5/LINEDGE path), so this is the
+    node-pair-free way to build the edge set of an already-emitted /SURF (the
+    /INTER/TYPE11 edge contact of a shell/solid part). Consumed by
+    /INTER/TYPE11 line_IDs / line_IDm.
+    """
+    lines = [f"/LINE/SURF/{line_id}", (title or f"line_surf_{line_id}")[:100],
+             "#  surf_ID"]
+    row: List[str] = []
+    for s in surf_ids:
+        row.append(_i(s))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
     lines.append(HDR)
     return lines

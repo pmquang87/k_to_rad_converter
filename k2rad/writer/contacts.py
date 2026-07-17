@@ -7,6 +7,8 @@ from ..state import ConversionState, PartData
 from .common import (
     HDR,
     _emit_grnod_node,
+    _emit_line_seg,
+    _emit_line_surf,
     _emit_surf_part,
     _emit_surf_seg,
     _f,
@@ -39,9 +41,16 @@ __all__ = [
     "_sst_mst_to_gapmin",
     "_emit_inter_type7",
     "_emit_inter_type25_self",
+    "_emit_inter_type11",
+    "_emit_inter_type19",
+    "_segment_set_edges",
+    "_general_line_group",
+    "_make_general_interfaces",
     "_TIED_SPOTFLAG",
     "_TIED_DSEARCH_MARGIN",
     "_emit_inter_type2",
+    "_tied_interface_type",
+    "_emit_inter_type10",
     "_tied_slave_nids",
     "_tied_master_surface",
     "_tied_dsearch",
@@ -753,9 +762,10 @@ def _vdc_to_viss(vdc: float, state: ConversionState, inter_id: int) -> float:
 
 
 def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
-                       inter_id: int) -> float:
+                       inter_id: int, target: str = "TYPE7") -> float:
     """Map LS-DYNA *CONTACT Card3 SST/MST (optional contact thickness per side)
-    → OpenRadioss /INTER/TYPE7 Gapmin.
+    → OpenRadioss /INTER/<target> Gapmin (``target`` names the interface in the
+    log; the mapping is identical for TYPE7/TYPE10/TYPE11/TYPE19).
 
     LS-DYNA offsets each contact surface by half its contact thickness, so the
     two sides engage at a separation of (SST + MST)/2.  TYPE7 (Igap=0,
@@ -784,7 +794,7 @@ def _sst_mst_to_gapmin(sst: float, mst: float, state: ConversionState,
     gapmin = (abs(sst) + abs(mst)) / 2.0
     if gapmin > 0.0:
         state.warn(
-            f"CONTACT {inter_id}: SST/MST contact thickness -> /INTER/TYPE7 "
+            f"CONTACT {inter_id}: SST/MST contact thickness -> /INTER/{target} "
             f"Gapmin={gapmin:g} (engagement distance (SST+MST)/2). On an "
             "implicit deck, keep ignore=0 to retain Inacti=0 if Gapmin "
             "exceeds the physical clearance (pre-engagement bootstrap) — "
@@ -850,7 +860,200 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Starter: tied interfaces  (*CONTACT_TIED_* → /INTER/TYPE2)
+# Starter: *CONTACT_AUTOMATIC_GENERAL SOFT-sentinel interfaces
+#   SOFT -7 → /INTER/TYPE7 · -11 → /INTER/TYPE11 (edge) · -19 → /INTER/TYPE19
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
+                       fric: float, inacti: int = 6, viss: float = 0.0,
+                       visf: float = 0.0, gapmin: float = 0.0,
+                       stfac: float = 0.0) -> List[str]:
+    """/INTER/TYPE11 edge-to-edge (line) contact (FORMAT radioss2020).
+
+    ``line_ids``/``line_idm`` are /LINE group ids (NOT /SURF or /GRNOD). A
+    ``line_idm`` of 0 makes the interface self edge-impact of ``line_ids``.
+    Matches dyna2rad's routed TYPE11 (Idel=2, Igap=0, Istf=2, Fric=FS).
+    """
+    return [
+        f"/INTER/TYPE11/{inter_id}",
+        title or f"CONTACT_{inter_id}",
+        "# line_IDs  line_IDm      Istf      Ithe      Igap                            Idel",
+        f"{_i(line_ids)}{_i(line_idm)}         2         0         0                             2",
+        "#              Stmin               Stmax          %mesh_size               dtmin     Iform   sens_ID",
+        "                   0                   0                   0                   0         0         0",
+        "#              Stfac                Fric              GAPmin              Tstart               Tstop",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
+        "#      IBC                        Inacti                VIS_S               VIS_F              Bumult",
+        f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
+        HDR,
+    ]
+
+
+def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
+                       fric: float, inacti: int = 6, viss: float = 0.0,
+                       visf: float = 0.0, gapmin: float = 0.0,
+                       stfac: float = 0.0) -> List[str]:
+    """/INTER/TYPE19 combined surface + edge contact (FORMAT radioss2021).
+
+    Both entities are /SURF ids; the starter auto-generates the child TYPE7
+    (node→segment) and TYPE11 (edge-to-edge) from the two surfaces' edges — the
+    low-effort route to edge contact (no hand-built /LINE). ``surf_idm`` may
+    equal ``surf_ids`` for self-contact. Iedge=2 = all segment edges.
+    Matches dyna2rad's routed TYPE19 (Idel=1, Igap=0, Istf=2).
+    """
+    return [
+        f"/INTER/TYPE19/{inter_id}",
+        title or f"CONTACT_{inter_id}",
+        "# surf_IDs  surf_IDm      Istf      Ithe      Igap     Iedge      Ibag      Idel     Icurv",
+        f"{_i(surf_ids)}{_i(surf_idm)}         2         0         0         2         0         1         0",
+        "#          Fscalegap             GAP_MAX",
+        "                   0                   0",
+        "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap  Irem_i2",
+        "                   0                   0                   0                   0         0         0",
+        "#              Stfac                Fric              Gapmin              Tstart               Tstop",
+        f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
+        "#      IBC                        Inacti                VISs                VISf              Bumult",
+        f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
+        "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
+        "         0         0                   0         2         0",
+        HDR,
+    ]
+
+
+def _segment_set_edges(segments) -> List:
+    """Boundary edges (unordered-unique) of a list of 3/4-node segments: each
+    segment's consecutive node pairs (with wrap) become one /LINE/SEG edge."""
+    seen: Set = set()
+    edges: List = []
+    for seg in segments:
+        nodes = [n for n in seg if n and n > 0]
+        k = len(nodes)
+        for i in range(k):
+            a, b = nodes[i], nodes[(i + 1) % k]
+            if a == b:
+                continue
+            key = (a, b) if a < b else (b, a)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append((a, b))
+    return edges
+
+
+def _general_line_group(state: ConversionState, sid: int, styp: int,
+                        tag: str, out_lines: List[str]) -> int:
+    """Build a /LINE group for one side of an edge (TYPE11) contact.
+
+    A segment set (styp 0/1 → *SET_SEGMENT) is emitted as an explicit
+    /LINE/SEG from its segment edges. Parts / part sets are emitted as a /SURF
+    (via _make_master_surface, the same surface the TYPE7/25 path builds) wrapped
+    in a /LINE/SURF, letting the starter derive the surface's segment edges.
+    Returns the /LINE id, or 0 when no geometry resolves.
+    """
+    if styp in (0, 1) and sid in state.segment_sets:
+        ss = state.segment_sets[sid]
+        edges = _segment_set_edges(ss.segments)
+        if not edges:
+            return 0
+        line_id = state.next_id()
+        out_lines += _emit_line_seg(line_id, ss.title or tag, edges)
+        return line_id
+    pids = sorted(_contact_master_pids(state, sid, styp))
+    if not pids:
+        return 0
+    surf_id = state.next_id()
+    if not _make_master_surface(state, surf_id, f"{tag}_surf", pids, out_lines):
+        return 0
+    line_id = state.next_id()
+    out_lines += _emit_line_surf(line_id, tag, [surf_id])
+    return line_id
+
+
+def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+    """*CONTACT_AUTOMATIC_GENERAL with a SOFT sentinel → /INTER/TYPE7|11|19.
+
+    Only the sentinel-routed contacts (SOFT -7/-11/-19) live in
+    ``state.contacts_general``; ordinary AUTOMATIC_GENERAL uses the single-
+    surface path. Gapmin comes from the Card-3 SST/MST (``_sst_mst_to_gapmin``),
+    Inacti from IGNORE (``_ignore_to_inacti``), VisS from VDC, Stfac from SFS,
+    and scalar Fric from FS — the same plumbing as the TYPE7/TYPE25 path.
+    (``--inter-gapmin`` / ``--auto-gapmin`` do NOT reach these sentinel-routed
+    interfaces; their engagement gap is the Card-3 SST/MST only.)
+    """
+    if not state.contacts_general:
+        return []
+    lines = ["#-  GENERAL EDGE/SOFT INTERFACES (*CONTACT_AUTOMATIC_GENERAL SOFT):", HDR]
+    for c in state.contacts_general:
+        self_contact = (c.ssid, c.sstyp) == (c.msid, c.mstyp)
+        if c.soft == -11:
+            tname = "TYPE11"
+        elif c.soft == -19:
+            tname = "TYPE19"
+        else:
+            tname = "TYPE7"
+        gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id, target=tname)
+        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
+        viss = _vdc_to_viss(c.vdc, state, c.inter_id)
+        stfac = _stfac_for(state, c.sfs, c.inter_id)
+
+        if c.soft == -7:
+            slav = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
+            mast = _resolve_contact_master(state, c.msid, c.mstyp, lines)
+            if not slav or not mast:
+                state.warn(
+                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-7 -> TYPE7): "
+                    f"ssid={c.ssid}/msid={c.msid} resolved to no slave/master "
+                    "geometry -> interface skipped.")
+                continue
+            lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, c.fs,
+                                       inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+            state.warn(
+                f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
+                f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
+                "contact, dyna2rad sentinel routing).")
+        elif c.soft == -19:
+            surf_s = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
+            surf_m = surf_s if self_contact else _resolve_contact_master(
+                state, c.msid, c.mstyp, lines)
+            if not surf_s or not surf_m:
+                state.warn(
+                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-19 -> TYPE19): "
+                    f"ssid={c.ssid}/msid={c.msid} resolved to no surface -> "
+                    "interface skipped.")
+                continue
+            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, c.fs,
+                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+            state.warn(
+                f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-19 -> "
+                f"/INTER/TYPE19 (surface+edge {'self-' if self_contact else ''}"
+                "contact; the starter derives the edge lines from the two "
+                "/SURF, dyna2rad sentinel routing).")
+        else:  # c.soft == -11
+            line_s = _general_line_group(state, c.ssid, c.sstyp,
+                                         f"general_{c.inter_id}_s", lines)
+            line_m = 0 if self_contact else _general_line_group(
+                state, c.msid, c.mstyp, f"general_{c.inter_id}_m", lines)
+            if not line_s:
+                state.warn(
+                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-11 -> TYPE11): "
+                    f"ssid={c.ssid} resolved to no edge/line geometry -> "
+                    "interface skipped.")
+                continue
+            lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, c.fs,
+                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+            state.warn(
+                f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-11 -> "
+                f"/INTER/TYPE11 edge-to-edge {'self-' if self_contact else ''}"
+                "contact. k2rad synthesizes the /LINE group(s) the interface "
+                "needs (a /LINE/SEG from a *SET_SEGMENT's edges, else a "
+                "/LINE/SURF over the part surface so the starter derives the "
+                "edges) — dyna2rad instead forwards the raw set and lets the "
+                "starter build the edges.")
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: tied interfaces  (*CONTACT_TIED_* → /INTER/TYPE2 | /INTER/TYPE10)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # LS-DYNA tied variant → /INTER/TYPE2 Spotflag. NODES_/SHELL_EDGE_TO_SURFACE
@@ -887,6 +1090,52 @@ def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
         title or f"TIED_CONTACT_{inter_id}",
         "#  Grnd_id   Surf_id    Ignore  Spotflag     Level   Isearch     Idel2                       dsearch",
         f"{_i(grnod_id)}{_i(surf_id)}{_i(2)}{_i(spotflag)}{_i(0)}{_i(2)}{_i(0)}          {_f(dsearch)}",
+        HDR,
+    ]
+
+
+def _tied_interface_type(c) -> str:
+    """dyna2rad discriminator (convertcontacts.cxx cc:220) for a
+    *CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET…]: (SFST*SST + SFMT*MST)/2 < 0 →
+    the penalty tie /INTER/TYPE10, otherwise the kinematic tie /INTER/TYPE2.
+
+    The discriminator uses the RAW Card-3 SFST/SFMT (no zero→1 defaulting), so a
+    blank SFST/SFMT (0) always yields dSearch=0 ≥ 0 → TYPE2 regardless of
+    SST/MST — TYPE10 needs a nonzero SFST/SFMT together with a negative SST/MST
+    (LS-DYNA's "maintain the physical offset" flag). NODES_/SHELL_EDGE tied
+    variants are always kinematic TYPE2 (the discriminator is a
+    SURFACE_TO_SURFACE construct)."""
+    if c.variant != "SURFACE_TO_SURFACE":
+        return "TYPE2"
+    dsearch = (c.sfst * c.sst + c.sfmt * c.mst) / 2.0
+    return "TYPE10" if dsearch < 0.0 else "TYPE2"
+
+
+def _emit_inter_type10(inter_id: int, title: str, grnod_id: int, surf_id: int,
+                       gap: float) -> List[str]:
+    """/INTER/TYPE10 penalty tied contact (FORMAT radioss120).
+
+    grnod_id (secondary /GRNOD) + surf_id (main /SURF), same entities as TYPE2.
+    Unlike the kinematic TYPE2, TYPE10 bonds by a penalty spring over a GAP, so
+    its secondary nodes may coexist with /RBODY. Matches dyna2rad's routed
+    TYPE10 (Idel=1, STFAC=0 engine-auto, GAP from SST/MST, ITIED=0, INACTI=0,
+    VIS_S=0, BUMULT=0). No Fric field exists on TYPE10 (a tie does not slide).
+
+    Card columns (FORMAT radioss120):
+      C1  grnod_id(1-10) surf_id(11-20) <blank 21-70> Idel(71-80)
+      C2  STFAC(1-20) <blank 21-40> GAP(41-60) Tstart(61-80) Tstop(81-100)
+      C3  <blank 1-20> ITIED(21-30) INACTI(31-40) VIS_S(41-60) <blank 61-80> BUMULT(81-100)
+    """
+    blank10, blank20 = " " * 10, " " * 20
+    return [
+        f"/INTER/TYPE10/{inter_id}",
+        title or f"TIED_CONTACT_{inter_id}",
+        "#  grnod_id   surf_id                                                        Idel",
+        f"{_i(grnod_id)}{_i(surf_id)}{_i(1, 60)}",
+        "#              STFAC                                     GAP              Tstart               Tstop",
+        f"{_f(0.0)}{blank20}{_f(gap)}{_f(0.0)}{_f(0.0)}",
+        "#                              ITIED    INACTI               VIS_S                              BUMULT",
+        f"{blank20}{_i(0)}{_i(0)}{_f(0.0)}{blank20}{_f(0.0)}",
         HDR,
     ]
 
@@ -999,20 +1248,32 @@ def _tied_dsearch(state: ConversionState, c, slave_nids: List[int],
 
 
 def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
-    """*CONTACT_TIED_* → /INTER/TYPE2 (+ /GRNOD secondary side, /SURF main side)."""
+    """*CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie).
+
+    The dyna2rad discriminator (SFST*SST + SFMT*MST)/2 < 0 picks the penalty tie
+    /INTER/TYPE10 (physical offset kept, secondary nodes may coexist with
+    /RBODY); otherwise the kinematic /INTER/TYPE2 (secondary nodes projected onto
+    the main segment). Both take a /GRNOD secondary side + /SURF main side.
+    """
     if not state.contacts_tied:
         return []
-    lines = ["#-  TIED INTERFACES (*CONTACT_TIED_* -> /INTER/TYPE2):", HDR]
+    lines = ["#-  TIED INTERFACES (*CONTACT_TIED_* -> /INTER/TYPE2 | /INTER/TYPE10):", HDR]
     for c in state.contacts_tied:
+        itype = _tied_interface_type(c)
         nids = _tied_slave_nids(state, c.ssid, c.sstyp)
-        clean = [n for n in nids if n not in rigid_nodes]
-        if len(clean) < len(nids):
-            state.warn(
-                f"TIED CONTACT {c.inter_id}: {len(nids) - len(clean)} secondary "
-                "node(s) belong to a rigid body and were removed from the tie "
-                "(/INTER/TYPE2 is a kinematic condition — it cannot share a "
-                "node with /RBODY)."
-            )
+        if itype == "TYPE10":
+            # Penalty tie: rigid-body secondary nodes are permitted (the bond is
+            # a spring, not a kinematic constraint), so they are kept.
+            clean = list(nids)
+        else:
+            clean = [n for n in nids if n not in rigid_nodes]
+            if len(clean) < len(nids):
+                state.warn(
+                    f"TIED CONTACT {c.inter_id}: {len(nids) - len(clean)} secondary "
+                    "node(s) belong to a rigid body and were removed from the tie "
+                    "(/INTER/TYPE2 is a kinematic condition — it cannot share a "
+                    "node with /RBODY)."
+                )
         if not clean:
             state.warn(
                 f"TIED CONTACT {c.inter_id} (*CONTACT_TIED_{c.variant}): slave "
@@ -1032,6 +1293,18 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
         grnod_id = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
         lines += master_lines
+        if itype == "TYPE10":
+            gap = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id, target="TYPE10")
+            lines += _emit_inter_type10(c.inter_id, c.title, grnod_id, surf_id, gap)
+            state.warn(
+                f"*CONTACT_TIED_SURFACE_TO_SURFACE{'_OFFSET' if c.offset else ''} "
+                f"{c.inter_id} -> /INTER/TYPE10/{c.inter_id} (penalty tie: "
+                f"(SFST*SST + SFMT*MST)/2 = {(c.sfst * c.sst + c.sfmt * c.mst) / 2.0:g} "
+                f"< 0, LS-DYNA's negative offset). GAP={gap:g}, {len(clean)} "
+                "secondary nodes. Unlike TYPE2 this bonds by penalty (rigid-body "
+                "secondary nodes allowed) and does not tie rotations."
+            )
+            continue
         dsearch = _tied_dsearch(state, c, clean, verts, faces)
         spotflag = _TIED_SPOTFLAG.get(c.variant, 1)
         lines += _emit_inter_type2(c.inter_id, c.title, grnod_id, surf_id,
