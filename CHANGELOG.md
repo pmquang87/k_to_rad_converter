@@ -11,6 +11,84 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Failure criteria**
+  - `*MAT_ADD_EROSION` now converts its **full card-1/card-2 scalar-criteria
+    set to a single `/FAIL/GENE1`** (layout audited against `hm_cfg_files`
+    `FAIL/fail_gene1.cfg` `FORMAT(radioss2022)` — the block a `/BEGIN 2022`
+    deck reads with, which has **no** trailing `FAILIP` on card 6, unlike
+    2025+), following the `dyna2rad` `p_ConvertMatAddErosion`
+    (`convertmats.cxx:6817`) `IDAM==0` mapping: `MXPRES`→`Pmax`, `MNPRES`→
+    `Pmin`, `SIGP1`→`SigP1_max`, `SIGVM`→`Sig_max`/`fct_IDsm`, `MXEPS`→
+    `Eps_max`/`fct_IDps`, `MNEPS`→`Eps_min`, `EFFEPS`→`Eps_eff`, `VOLEPS`→
+    `Eps_vol`, `EPSSH`→`Eps_s`, `SIGTH`→`Sigr`, `IMPULSE`→`K`, `FAILTM`→
+    `Time_max`, `NCS`→`NCS`, `NUMFIP`→`Pthickfail`.
+    - **Migration**: `MXEPS` and `EFFEPS` moved out of the old standalone
+      `/FAIL/TENSSTRAIN` + `/FAIL/JOHNSON` into GENE1 `Eps_max`/`Eps_eff`
+      (consolidated, as `dyna2rad` does). This is also *more* faithful: the old
+      `EFFEPS`→`/FAIL/JOHNSON` borrowed the material-failure `Ifail_sh=2`
+      all-points rule, but `*MAT_ADD_EROSION` erosion is governed by `NUMFIP`
+      (default `1` = first failed IP), which GENE1 expresses through
+      `Pthickfail`.
+    - **Signs / sentinels**: the GENE1 reader (`hm_read_fail_gene1.F`) forces
+      `Pmin=-ABS`, `Pmax=+ABS`, `Eps_min=-ABS` and treats `0` as inactive
+      (`0`→`±INFINITY`), a structural match to LS-DYNA's `EXCL=0` convention —
+      so the common case passes straight through. A **non-zero `EXCL`** is now
+      applied (fields equal to it are zeroed = made inactive) and warned,
+      rather than `dyna2rad`'s silent pass-through (`EXCL` is a documented
+      dead read there, `convertmats.cxx:6862`). `FAILTM<0` maps as `|FAILTM|`
+      with a warning (the dynamic-relaxation-inactive nuance has no GENE1
+      flag); `SIGVM<0`/`MXEPS<0` become the `fct_IDsm`/`fct_IDps` load-curve
+      slots with a `1.0` ordinate scale.
+    - **`NUMFIP`→`Pthickfail`** uses the engine's negative-`Pthickfail`
+      broken-IP-ratio form (`fail_setoff_c.F`: `Pthk<0` → delete when
+      `count/NPTT >= |Pthk|`), which is exact for the percent form
+      (`-|NUMFIP|/100`) and, resolving `NPTT` from the material's
+      `*SECTION_SHELL` `NIP`, for the count forms; the `NUMFIP=1` default is
+      the first-IP `-1e-6`. This is preferred over `dyna2rad`'s positive
+      thickness-fraction algebra, whose documented bugs (shell `Volfrac`
+      write, `abs(NUMFIP-100)`, cross-iteration `Pthickfail` leak) it sidesteps.
+    - `IDAM≥1` (GISSMO/DIEM embedded in the erosion card) still warns, but the
+      scalar criteria now convert regardless (they are independent of the
+      damage model); the standalone `*MAT_ADD_DAMAGE_GISSMO`→`/FAIL/TAB2` path
+      is untouched. Validated with a full OpenRadioss starter run (0 errors;
+      the one WARNING 3029 is the benign `/PROP`-vs-`/FAIL` `Pthickfail` sign
+      reconciliation the engine handles automatically).
+  - `*MAT_123` (`*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY`) **stops dropping
+    `EPSTHIN`/`EPSMAJ`/`NUMINT`** (per `dyna2rad` `p_ConvertMatL123`,
+    `convertmats.cxx:6169`). The base plasticity conversion is unchanged
+    (`/MAT/LAW36`, `FAIL`→`/FAIL/JOHNSON`, `Eps_p_max` hard-zeroed); the three
+    card-2 extras are added as trailers, discriminated from plain MAT_024 by
+    the keyword so a MAT_024 whose slots happen to be non-blank is not
+    mis-parsed:
+    - `EPSTHIN`→`/FAIL/TAB1` `P_THICKFAIL` (layout from
+      `FAIL/fail_tab1.cfg` `FORMAT(radioss2021)`, `Ifail_sh=2`). The mandatory
+      `table1_ID` strain-vs-triaxiality table is a flat inert `10.0` plateau
+      across `[-0.3, 0, +0.3]` (`dyna2rad`'s `FAIL==0`→`10.0` sentinel) so the
+      card carries only the thinning criterion and does not double-count `FAIL`
+      (which stays on `/FAIL/JOHNSON`). Fidelity note: because `FAIL` rides on
+      `/FAIL/JOHNSON`, no IP fails *via* the inert TAB1 table, so its
+      `P_THICKFAIL` never actually triggers — EPSTHIN thinning erosion is a
+      carrier only, not reproduced (the same limitation as `dyna2rad`, whose
+      inert plateau this mirrors). `EPSTHIN<0` is dropped with a warning.
+    - `EPSMAJ`→`/FAIL/FLD` (layout from `FAIL/fail_fld.cfg`
+      `FORMAT(radioss2019)`, `Ifail_sh=2`, `I_marg=1`), a flat forming-limit
+      curve at `|EPSMAJ|`.
+    - `NUMINT` (integration points that must fail before deletion) is
+      approximated by the `Ifail_sh=2` all-points rule on whichever `/FAIL`
+      card(s) the material emits (`/FAIL/JOHNSON`/`/FAIL/TAB1`/`/FAIL/FLD`),
+      warned when non-zero (`NUMINT=0` = ALL points is exactly that rule, so
+      silent) — the same limitation as MAT_103's `NUMINT`.
+    - A new `/ANIM/ELEM/DAMG` engine channel is emitted when TAB1/FLD damage
+      models are present (as for GISSMO's `/FAIL/TAB2`).
+  - `*MAT_PIECEWISE_LINEAR_PLASTICITY_LOG_INTERPOLATION` and `…_2D` (and
+    `…_LOG_INTERPOLATION_2D`) now **dispatch onto the MAT_024 path** (they were
+    silently skipped) and set `/MAT/LAW36` `F_smooth=2` — logarithmic rather
+    than linear interpolation between the strain-rate yield curves (`dyna2rad`
+    branches on `keyWordLog.find("LOG_INTERPOLATION")`). The LAW36 reader forces
+    `F_smooth=0` for a single static curve, so this only takes effect with a
+    rate-curve family; plain MAT_024 keeps `F_smooth=0` (unchanged). Also added
+    the missing numeric `MAT_024`/`MAT_24`/`MAT_123` alias keys (such decks were
+    silently skipped, dangling the `/PART`).
 - **Element formulation / hourglass**
   - `*HOURGLASS` (new handler) + the `*PART` `HGID` field + a now-honored
     `*CONTROL_HOURGLASS` → **per-part hourglass control** on `/PROP/SOLID`

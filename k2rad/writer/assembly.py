@@ -223,11 +223,13 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/ELEM/THICK")
     if ext and ext.shge:
         lines.append("/ANIM/ELEM/HOUR")
-    # GISSMO / tabulated damage (/FAIL/TAB2) writes the damage parameter D to the
-    # anim (and hence d3plot) only when this channel is requested. This is the
-    # OpenRadioss counterpart of raising NEIPH for GISSMO in LS-DYNA — NEIPH
-    # itself has no effect on the OpenRadioss output path.
-    if state.fail_gissmo:
+    # Tabulated damage models (/FAIL/TAB2 GISSMO, /FAIL/TAB1 + /FAIL/FLD from
+    # *MAT_123 EPSTHIN/EPSMAJ) write the damage parameter D to the anim (and
+    # hence d3plot) only when this channel is requested. This is the OpenRadioss
+    # counterpart of raising NEIPH for GISSMO in LS-DYNA — NEIPH itself has no
+    # effect on the OpenRadioss output path.
+    if state.fail_gissmo or any(m.epsthin > 0.0 or m.epsmaj != 0.0
+                                for m in state.mat_plas_tab.values()):
         lines.append("/ANIM/ELEM/DAMG")
 
     # ── Nodal scalar outputs ──────────────────────────────────────
