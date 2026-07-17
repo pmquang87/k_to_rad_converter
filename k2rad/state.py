@@ -679,6 +679,96 @@ class CoordNodes:
 
 
 @dataclass
+class CoordVector:
+    """*DEFINE_COORDINATE_VECTOR → /SKEW/FIX at the global origin.
+
+    (xx,yx,zx) = a vector on the local x-axis; (xv,yv,zv) = a vector in the
+    local x-y plane. The starter forms local Z = X × V, local Y = Z × X. The
+    /SKEW id is the LS-DYNA CID (coordinate-system id space). ``nid`` is the R16
+    co-rotation node (field 8); dyna2rad ignores it and emits a fixed skew, so
+    a nonzero nid is warned and dropped.
+    """
+    cid: int
+    xx: float; yx: float; zx: float
+    xv: float; yv: float; zv: float
+    nid: int = 0
+    title: str = ""
+
+
+@dataclass
+class DefineVector:
+    """*DEFINE_VECTOR (value form) → /SKEW/FIX, or *DEFINE_VECTOR_NODES →
+    /SKEW/MOV.
+
+    Value form (is_nodes=False): tail (xt,yt,zt) → head (xh,yh,zh), optional
+    ``cid``. Nodes form (is_nodes=True): tail node ``nodet`` → head node
+    ``nodeh``. Either way the /SKEW's local X' follows the tail→head direction.
+    ``skew_id`` and ``n3`` (a synthesized third node for the moving /SKEW/MOV of
+    the _NODES form) are filled in by the _synthesize_vector_skews writer
+    prepass. The VID lives in the LS-DYNA vector-id space; the writer maps it to
+    a converted /SKEW id via state.vector_skew_ids.
+    """
+    vid: int
+    title: str = ""
+    is_nodes: bool = False
+    xt: float = 0.0; yt: float = 0.0; zt: float = 0.0
+    xh: float = 0.0; yh: float = 0.0; zh: float = 0.0
+    cid: int = 0
+    nodet: int = 0
+    nodeh: int = 0
+    skew_id: int = 0
+    n3: int = 0
+
+
+@dataclass
+class SdOrientation:
+    """*DEFINE_SD_ORIENTATION → a /SKEW referenced by an oriented
+    *ELEMENT_DISCRETE (its VID).
+
+    IOP=0: fixed direction (xt,yt,zt) → /SKEW/FIX (local X' aligned with that
+    vector). IOP=2: moving, along nid1→nid2 → /SKEW/MOV. IOP=1/3 (the spring's
+    own node axis projected ⟂ to a vector/node pair) have no OpenRadioss skew
+    equivalent and are unhandled — exactly as in dyna2rad. ``skew_id`` and
+    ``n3`` (synthesized third node for the IOP=2 /SKEW/MOV) are filled in by the
+    writer prepass; the writer maps the VID to its skew via
+    state.sdorient_skew_ids.
+    """
+    vid: int
+    iop: int
+    xt: float = 0.0; yt: float = 0.0; zt: float = 0.0
+    nid1: int = 0
+    nid2: int = 0
+    title: str = ""
+    skew_id: int = 0
+    n3: int = 0
+
+
+@dataclass
+class DefineBox:
+    """*DEFINE_BOX / *DEFINE_BOX_LOCAL → numeric node-membership scoping.
+
+    Extents (xmn,xmx,ymn,ymx,zmn,zmx) span the box between two diagonal corners.
+    Plain box: the extents are global, axis-aligned. _LOCAL box: the extents are
+    in the box's local frame, whose origin is (cx,cy,cz) and whose axes come
+    from the local-X vector (xx,yx,zx) and an in-plane vector (xv,yv,zv) — the
+    same construction as *DEFINE_COORDINATE_VECTOR (local Z = X × V, local Y =
+    Z × X). Box membership is resolved against the node coordinates at
+    conversion time (no /BOX entity is emitted): every consumer intersects its
+    node group with the box's contained nodes, mirroring the NSIDEX set-
+    difference the initial-velocity path already uses.
+    """
+    box_id: int
+    title: str = ""
+    xmn: float = 0.0; xmx: float = 0.0
+    ymn: float = 0.0; ymx: float = 0.0
+    zmn: float = 0.0; zmx: float = 0.0
+    local: bool = False
+    cx: float = 0.0; cy: float = 0.0; cz: float = 0.0
+    xx: float = 0.0; yx: float = 0.0; zx: float = 0.0
+    xv: float = 0.0; yv: float = 0.0; zv: float = 0.0
+
+
+@dataclass
 class ConstrainedNodalRigidBody:
     """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] — a rigid body tied from a node set.
 
@@ -791,6 +881,10 @@ class RigidWallPlanar:
     birth: float = 0.0
     death: float = 0.0
     offset: float = 0.0
+    # *DEFINE_BOX id scoping the tracked ("slave") node group. Resolved to a
+    # /GRNOD of the in-box nodes by the writer; dropped (with a warning) when
+    # NSID is also given, matching dyna2rad (NSID wins).
+    boxid: int = 0
     # _MOVING option
     moving: bool = False
     mass: float = 0.0
@@ -1587,6 +1681,20 @@ class ConversionState:
     coord_sys: Dict[int, CoordSys] = field(default_factory=dict)
     # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
     coord_nodes: Dict[int, CoordNodes] = field(default_factory=dict)
+    # *DEFINE_COORDINATE_VECTOR → /SKEW/FIX (cid → record; skew id = cid)
+    coord_vectors: Dict[int, CoordVector] = field(default_factory=dict)
+    # *DEFINE_VECTOR / *DEFINE_VECTOR_NODES → /SKEW (vid → record). The writer
+    # prepass assigns each a /SKEW id (recorded in vector_skew_ids) that avoids
+    # every converted-coordinate id (shared /SKEW+/FRAME starter namespace).
+    define_vectors: Dict[int, DefineVector] = field(default_factory=dict)
+    # *DEFINE_SD_ORIENTATION → /SKEW (vid → record); the IOP 0/2 skews are the
+    # orientation frame for a *ELEMENT_DISCRETE VID, recorded in sdorient_skew_ids
+    sd_orientations: Dict[int, SdOrientation] = field(default_factory=dict)
+    # LS-DYNA vector VID → converted /SKEW id (define_vectors / sd_orientations)
+    vector_skew_ids: Dict[int, int] = field(default_factory=dict)
+    sdorient_skew_ids: Dict[int, int] = field(default_factory=dict)
+    # *DEFINE_BOX[_LOCAL] → numeric node-membership scoping (box_id → record)
+    boxes: Dict[int, DefineBox] = field(default_factory=dict)
 
     # ── Sets / groups ──────────────────────────────────────────
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
@@ -1760,6 +1868,18 @@ class ConversionState:
         v = self._auto_id
         self._auto_id += 1
         return v
+
+    def all_skew_ids(self) -> set:
+        """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/
+        _VECTOR (id = cid) and the *DEFINE_VECTOR[_NODES]/_SD_ORIENTATION skews
+        assigned by the writer prepass. /SKEW and /FRAME share ONE starter id
+        namespace (UDOUBLE over the combined table), so any synthesized /FRAME
+        (or box-local skew) id must avoid this set or the starter aborts with
+        ERROR 79 DUPLICATE ID."""
+        return (set(self.coord_sys) | set(self.coord_nodes)
+                | set(self.coord_vectors)
+                | set(self.vector_skew_ids.values())
+                | set(self.sdorient_skew_ids.values()))
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)

@@ -22,6 +22,7 @@ from .mesh import (
     _make_skews,
     _screen_sliver_tets,
     _snap_tet10_midsides,
+    _synthesize_vector_skews,
 )
 from .contacts import (
     _make_force_transducers,
@@ -444,6 +445,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).
     _synthesize_rwall_moving_nodes(state)
+
+    # Assign a /SKEW id to every *DEFINE_VECTOR[_NODES] / *DEFINE_SD_ORIENTATION
+    # and synthesize the third node each moving /SKEW/MOV needs — before the
+    # /NODE section (so the nodes are emitted) and before /FRAME allocation (so
+    # the ids are reserved in the shared /SKEW+/FRAME namespace).
+    _synthesize_vector_skews(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must

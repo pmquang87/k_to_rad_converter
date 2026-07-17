@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState,
+    NodeData,
     ShellElem,
     SolidElem,
     BeamElem,
@@ -33,9 +34,15 @@ from .common import (
 __all__ = [
     "_make_nodes",
     "_emit_skew_fix",
+    "_emit_skew_mov",
     "_make_skews",
     "_skew_axes_from_nodes",
     "_emit_skew_from_nodes",
+    "_mov_third_pos",
+    "_synthesize_vector_skews",
+    "_emit_coord_vector_skew",
+    "_emit_define_vector_skew",
+    "_emit_sd_orientation_skew",
     "_snap_tet10_midsides",
     "_tet_corner_metrics",
     "_tet10_badly_shaped",
@@ -105,8 +112,22 @@ def _emit_skew_fix(skew_id: int, title: str, origin, yaxis, zaxis) -> List[str]:
     ]
 
 
+def _emit_skew_mov(skew_id: int, title: str, n1: int, n2: int, n3: int,
+                   dir_: str = "X") -> List[str]:
+    """Emit /SKEW/MOV (cfg radioss2019): N1=origin, N1→N2 = the Dir axis, N3
+    fixes the plane. The frame is recomputed by the starter every step."""
+    return [
+        f"/SKEW/MOV/{skew_id}",
+        title,
+        "#  node_ID1  node_ID2  node_ID3       Dir",
+        f"{_i(n1)}{_i(n2)}{_i(n3)}{dir_.rjust(10)}",
+        HDR,
+    ]
+
+
 def _make_skews(state: ConversionState) -> List[str]:
-    if not state.coord_sys and not state.coord_nodes:
+    if not (state.coord_sys or state.coord_nodes or state.coord_vectors
+            or state.define_vectors or state.sd_orientations):
         return []
     lines = ["#-  SKEWS / COORDINATE SYSTEMS:", HDR]
     for cid, cs in sorted(state.coord_sys.items()):
@@ -130,6 +151,14 @@ def _make_skews(state: ConversionState) -> List[str]:
         lines += _emit_skew_fix(cid, f"SKEW_{cid}", origin, yv, zv)
     for cid, cn in sorted(state.coord_nodes.items()):
         lines += _emit_skew_from_nodes(state, cn)
+    for cid, cv in sorted(state.coord_vectors.items()):
+        lines += _emit_coord_vector_skew(state, cv)
+    for vid, dv in sorted(state.define_vectors.items()):
+        if dv.skew_id:
+            lines += _emit_define_vector_skew(state, dv)
+    for vid, so in sorted(state.sd_orientations.items()):
+        if so.skew_id:
+            lines += _emit_sd_orientation_skew(state, so)
     return lines
 
 
@@ -201,6 +230,204 @@ def _emit_skew_from_nodes(state: ConversionState, cn) -> List[str]:
         ".k file for a co-rotating /SKEW/MOV."
     )
     return _emit_skew_fix(cn.cid, f"SKEW_NODES_{cn.cid}", origin, Y, _vcross(X, Y))
+
+
+def _mov_third_pos(p1, axis):
+    """A point offset from *p1* by a unit global axis NOT parallel to *axis* —
+    the synthesized third node that fixes a moving skew's plane (its exact
+    transverse orientation is irrelevant for a 1-D vector/orientation frame; all
+    that matters is that it is not collinear with N1→N2)."""
+    helpers = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    e = min(helpers, key=lambda h: abs(h[0] * axis[0] + h[1] * axis[1]
+                                       + h[2] * axis[2]))
+    return (p1[0] + e[0], p1[1] + e[1], p1[2] + e[2])
+
+
+def _synthesize_vector_skews(state: ConversionState) -> None:
+    """build_starter prepass: assign a /SKEW id to every *DEFINE_VECTOR[_NODES]
+    and *DEFINE_SD_ORIENTATION, and synthesize the third node each moving
+    /SKEW/MOV needs. Runs before the /NODE section so synthesized nodes are
+    emitted, and before /FRAME allocation so the ids are reserved.
+
+    *DEFINE_COORDINATE_VECTOR keeps its CID as the /SKEW id (coordinate-system id
+    space, already unique among *DEFINE_COORDINATE_*). *DEFINE_VECTOR /
+    *DEFINE_SD_ORIENTATION VIDs live in a separate LS-DYNA id space that can
+    collide with a CID, so each prefers its own VID but falls back to a fresh
+    reserved id (state.next_id) on a collision — all recorded in
+    state.vector_skew_ids / state.sdorient_skew_ids so a consumer (and the /FRAME
+    id guard) can find them.
+    """
+    if not (state.define_vectors or state.sd_orientations):
+        return
+    reserved = state.all_skew_ids()          # coord_sys/_nodes/_vectors ids
+    next_node = (max(state.nodes) + 1) if state.nodes else 90000001
+
+    def alloc_skew(pref: int) -> int:
+        if 0 < pref <= 90000 and pref not in reserved:
+            sid = pref
+        else:
+            sid = state.next_id()
+            while sid in reserved:
+                sid = state.next_id()
+        reserved.add(sid)
+        return sid
+
+    for vid in sorted(state.define_vectors):
+        dv = state.define_vectors[vid]
+        if dv.is_nodes:
+            n1 = state.nodes.get(dv.nodet)
+            n2 = state.nodes.get(dv.nodeh)
+            if n1 is None or n2 is None:
+                state.warn(
+                    f"*DEFINE_VECTOR_NODES vid={vid}: tail/head node "
+                    f"{dv.nodet}/{dv.nodeh} missing — no /SKEW emitted.")
+                continue
+            axis = _vnorm(_vsub((n2.x, n2.y, n2.z), (n1.x, n1.y, n1.z)))
+            if axis is None:
+                state.warn(
+                    f"*DEFINE_VECTOR_NODES vid={vid}: tail and head node "
+                    "coincide — no /SKEW emitted.")
+                continue
+            dv.skew_id = alloc_skew(vid)
+            pos3 = _mov_third_pos((n1.x, n1.y, n1.z), axis)
+            dv.n3 = next_node
+            next_node += 1
+            state.nodes[dv.n3] = NodeData(*pos3)
+            state.vector_skew_ids[vid] = dv.skew_id
+        else:
+            if _vnorm(_vsub((dv.xh, dv.yh, dv.zh),
+                            (dv.xt, dv.yt, dv.zt))) is None:
+                state.warn(
+                    f"*DEFINE_VECTOR vid={vid}: tail and head coincide — no "
+                    "/SKEW emitted.")
+                continue
+            dv.skew_id = alloc_skew(vid)
+            state.vector_skew_ids[vid] = dv.skew_id
+
+    for vid in sorted(state.sd_orientations):
+        so = state.sd_orientations[vid]
+        if so.iop == 0:
+            if _vnorm((so.xt, so.yt, so.zt)) is None:
+                state.warn(
+                    f"*DEFINE_SD_ORIENTATION vid={vid}: IOP=0 orientation vector "
+                    "is zero — no /SKEW emitted.")
+                continue
+            so.skew_id = alloc_skew(vid)
+            state.sdorient_skew_ids[vid] = so.skew_id
+        elif so.iop == 2:
+            n1 = state.nodes.get(so.nid1)
+            n2 = state.nodes.get(so.nid2)
+            if n1 is None or n2 is None:
+                state.warn(
+                    f"*DEFINE_SD_ORIENTATION vid={vid}: IOP=2 node "
+                    f"{so.nid1}/{so.nid2} missing — no /SKEW; oriented springs "
+                    "on this VID stay unconverted.")
+                continue
+            axis = _vnorm(_vsub((n2.x, n2.y, n2.z), (n1.x, n1.y, n1.z)))
+            if axis is None:
+                state.warn(
+                    f"*DEFINE_SD_ORIENTATION vid={vid}: IOP=2 nodes coincide — "
+                    "no /SKEW emitted.")
+                continue
+            so.skew_id = alloc_skew(vid)
+            pos3 = _mov_third_pos((n1.x, n1.y, n1.z), axis)
+            so.n3 = next_node
+            next_node += 1
+            state.nodes[so.n3] = NodeData(*pos3)
+            state.sdorient_skew_ids[vid] = so.skew_id
+        else:                                   # IOP = 1 or 3 (or unset)
+            state.warn(
+                f"*DEFINE_SD_ORIENTATION vid={vid}: IOP={so.iop} (spring-node "
+                "axis projected perpendicular to a vector / node pair) has no "
+                "OpenRadioss skew equivalent — unhandled by dyna2rad too, so an "
+                "*ELEMENT_DISCRETE referencing this VID is NOT converted.")
+
+    # Surface dead output: *DEFINE_VECTOR has no k2rad consumer yet, and a
+    # *DEFINE_SD_ORIENTATION that no *ELEMENT_DISCRETE references is unused too.
+    # An unused /SKEW is harmless, but the moving (_NODES / IOP=2) forms also
+    # injected a free helper node above — flag both so that extra node is not a
+    # silent surprise (it would otherwise appear unexplained in the free-node
+    # /BCS guard for implicit decks).
+    referenced_sd = {e.vid for e in state.discrete_elems if e.vid}
+    unref_vec = sorted(state.vector_skew_ids)             # no consumer exists
+    unref_sd = sorted(v for v in state.sdorient_skew_ids
+                      if v not in referenced_sd)
+    if unref_vec or unref_sd:
+        injected = ([v for v in unref_vec if state.define_vectors[v].is_nodes]
+                    + [v for v in unref_sd if state.sd_orientations[v].iop == 2])
+        msg = (f"Unreferenced /SKEW output — *DEFINE_VECTOR {unref_vec or '[]'} "
+               f"and *DEFINE_SD_ORIENTATION {unref_sd or '[]'} each emit a /SKEW "
+               "no converted keyword uses")
+        if injected:
+            msg += (f"; the moving forms {injected} also injected a free helper "
+                    "node each (needed by /SKEW/MOV — harmless but unused)")
+        state.warn(msg + ".")
+
+
+def _emit_coord_vector_skew(state: ConversionState, cv) -> List[str]:
+    """*DEFINE_COORDINATE_VECTOR → /SKEW/FIX at the origin. local X' = (XX,YX,ZX);
+    local Z' = X × V; local Y' = Z × X. The card carries Y'/Z' (X' is rebuilt by
+    the starter). The vectors are normalized here (k2rad's skew convention;
+    Radioss re-orthonormalizes internally either way)."""
+    ex = _vnorm((cv.xx, cv.yx, cv.zx))
+    if ex is None:
+        state.warn(f"*DEFINE_COORDINATE_VECTOR cid={cv.cid}: local-X vector is "
+                   "zero — /SKEW/FIX defaults to the global axes.")
+        return _emit_skew_fix(cv.cid, cv.title or f"SKEW_VEC_{cv.cid}",
+                              (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    ez = _vnorm(_vcross((cv.xx, cv.yx, cv.zx), (cv.xv, cv.yv, cv.zv)))
+    if ez is None:
+        state.warn(f"*DEFINE_COORDINATE_VECTOR cid={cv.cid}: the in-plane vector "
+                   "V is parallel to X (or zero) — a transverse axis was chosen "
+                   "arbitrarily; the local X axis is preserved.")
+        axes = _ortho_skew_axes((cv.xx, cv.yx, cv.zx))
+        return _emit_skew_fix(cv.cid, cv.title or f"SKEW_VEC_{cv.cid}",
+                              (0.0, 0.0, 0.0), axes[0], axes[1])
+    if cv.nid:
+        state.warn(f"*DEFINE_COORDINATE_VECTOR cid={cv.cid}: co-rotation node "
+                   f"NID={cv.nid} dropped — emitted a fixed /SKEW/FIX (dyna2rad "
+                   "also treats this card as fixed).")
+    ey = _vcross(ez, ex)
+    return _emit_skew_fix(cv.cid, cv.title or f"SKEW_VEC_{cv.cid}",
+                          (0.0, 0.0, 0.0), ey, ez)
+
+
+def _emit_define_vector_skew(state: ConversionState, dv) -> List[str]:
+    """*DEFINE_VECTOR → /SKEW/FIX, *DEFINE_VECTOR_NODES → /SKEW/MOV. Local X'
+    follows the tail→head direction (the correct LS-DYNA convention, and the same
+    sense both the _NODES and value forms use here — dyna2rad's value form builds
+    tail−head, the reverse, which is a documented dyna2rad quirk we deliberately
+    do not reproduce)."""
+    title = dv.title or f"SKEW_VEC_{dv.vid}"
+    if dv.is_nodes:
+        return _emit_skew_mov(dv.skew_id, title, dv.nodet, dv.nodeh, dv.n3, "X")
+    origin = (dv.xt, dv.yt, dv.zt)
+    if dv.cid:
+        state.warn(
+            f"*DEFINE_VECTOR vid={dv.vid}: CID={dv.cid} (components expressed in "
+            "a local system) is treated as global — the tail/head are used "
+            "verbatim; re-express them in the global frame if that is wrong.")
+    axes = _ortho_skew_axes(_vsub((dv.xh, dv.yh, dv.zh), origin))
+    if axes is None:                            # guarded in the prepass, belt-and-braces
+        return _emit_skew_fix(dv.skew_id, title, origin, (0.0, 1.0, 0.0),
+                              (0.0, 0.0, 1.0))
+    return _emit_skew_fix(dv.skew_id, title, origin, axes[0], axes[1])
+
+
+def _emit_sd_orientation_skew(state: ConversionState, so) -> List[str]:
+    """*DEFINE_SD_ORIENTATION → /SKEW/FIX (IOP=0) or /SKEW/MOV (IOP=2). For
+    IOP=0 the skew's local X' is aligned with the orientation vector (XT,YT,ZT) —
+    an improvement on dyna2rad, whose fixed helper axis tilts X' by the
+    orientation's component along global X. For IOP=2 the local X' follows
+    node1→node2 (correct LS-DYNA sense)."""
+    title = so.title or f"SKEW_SD_{so.vid}"
+    if so.iop == 2:
+        return _emit_skew_mov(so.skew_id, title, so.nid1, so.nid2, so.n3, "X")
+    axes = _ortho_skew_axes((so.xt, so.yt, so.zt))
+    if axes is None:                            # guarded in the prepass
+        return _emit_skew_fix(so.skew_id, title, (0.0, 0.0, 0.0),
+                              (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    return _emit_skew_fix(so.skew_id, title, (0.0, 0.0, 0.0), axes[0], axes[1])
 
 
 def _snap_tet10_midsides(state: ConversionState) -> int:
@@ -432,6 +659,11 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
     ref.update(n for n in state.added_node_masses if n > 0)
     for cn in state.coord_nodes.values():
         ref.update(n for n in (cn.n1, cn.n2, cn.n3) if n > 0)
+    for dv in state.define_vectors.values():
+        if dv.is_nodes:
+            ref.update(n for n in (dv.nodet, dv.nodeh) if n > 0)
+    for so in state.sd_orientations.values():
+        ref.update(n for n in (so.nid1, so.nid2) if n > 0)
     for pl in state.pressure_loads:
         ref.update(n for n in pl.nodes if n > 0)
     for ssl in state.segment_set_pressure_loads:
@@ -956,7 +1188,7 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
     lines: List[str] = []
-    skew_ids_used = set(state.coord_sys) | set(state.coord_nodes)
+    skew_ids_used = state.all_skew_ids()
     for pid, prop_id in sorted(state.ortho_prop_ids.items()):
         secid = part_secids.get(pid, pid)
         title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
