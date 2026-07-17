@@ -1928,6 +1928,16 @@ class ConversionState:
         self._auto_id += 1
         return v
 
+    def next_curve_id(self) -> int:
+        """A next_id() guaranteed free in the /FUNCT (curve) namespace, so a
+        synthesized curve can never silently clobber a user *DEFINE_CURVE whose
+        LCID happens to be >= the auto-id base (90001). A no-op vs next_id() in
+        the common case (no user curve that high), so it does not shift ids."""
+        fid = self.next_id()
+        while fid in self.curves:
+            fid = self.next_id()
+        return fid
+
     def all_skew_ids(self) -> set:
         """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/
         _VECTOR (id = cid) and the *DEFINE_VECTOR[_NODES]/_SD_ORIENTATION skews

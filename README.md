@@ -176,11 +176,14 @@ DIEM embedded in the erosion card) still warns — the scalar criteria convert
 regardless; for the damage model use `*MAT_ADD_DAMAGE_GISSMO`
 `*MAT_123` / `*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY` → the MAT_024 base
 plasticity (`/MAT/LAW36`, `FAIL`→`/FAIL/JOHNSON`) **plus** its three extra
-failure inputs: `EPSTHIN`→`/FAIL/TAB1` `P_THICKFAIL` (thinning failure,
-`Ifail_sh=2`; the mandatory strain table is an inert `10.0` plateau so `FAIL`
-is not double-counted), `EPSMAJ`→`/FAIL/FLD` (a flat forming-limit curve at
-`|EPSMAJ|`), and `NUMINT` (failed-integration-point count) approximated by the
-`/FAIL/JOHNSON` `Ifail_sh=2` all-points rule with a warning
+failure inputs: `EPSTHIN`→`/FAIL/TAB1` `P_THICKFAIL` (`Ifail_sh=2`; the
+mandatory strain table is an inert `10.0` plateau so `FAIL` is not double-
+counted — but because `FAIL` rides on `/FAIL/JOHNSON`, no IP fails via TAB1 and
+`P_THICKFAIL` never fires, so EPSTHIN thinning erosion is a carrier only, not
+reproduced, matching `dyna2rad`), `EPSMAJ`→`/FAIL/FLD` (a flat forming-limit
+curve at `|EPSMAJ|`), and `NUMINT` (failed-integration-point count) approximated
+by the `Ifail_sh=2` all-points rule on whichever `/FAIL` card(s) the material
+emits, with a warning
 `*MAT_PIECEWISE_LINEAR_PLASTICITY_LOG_INTERPOLATION`(`_2D`) → the MAT_024 path
 with `/MAT/LAW36` `F_smooth=2` (logarithmic rather than linear interpolation
 between the strain-rate yield curves)

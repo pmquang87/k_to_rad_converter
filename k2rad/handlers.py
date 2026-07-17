@@ -3449,6 +3449,9 @@ def handle_mat_add_erosion(block: Block, state: ConversionState) -> None:
       Card1: MID EXCL MXPRES MNEPS EFFEPS VOLEPS NUMFIP NCS
       Card2: MNPRES SIGP1 SIGVM MXEPS EPSSH SIGTH IMPULSE FAILTM
       Card3 (optional): IDAM ... (GISSMO/DIEM — reported, not converted)
+      Card4/5 (optional): MXTMP DTMIN VOLFRAC MXPRES(solid) ... — only present
+        alongside an IDAM card, which is not converted, so these are not parsed
+        (MXTMP→Temp_max, DTMIN→dtmin would map if IDAM support were added).
 
     EXCL (default 0) is LS-DYNA's exclusion number: any card-1/card-2 field whose
     value equals EXCL is inactive. GENE1 uses the same 0→inactive convention, so
@@ -3486,6 +3489,11 @@ def handle_mat_add_erosion(block: Block, state: ConversionState) -> None:
     def _ex(v: float) -> float:
         return 0.0 if (excl != 0.0 and v == excl) else v
 
+    if mid in state.mat_add_erosion:
+        state.warn(f"*MAT_ADD_EROSION: a second card for MID {mid} overwrites "
+                   "the first — OpenRadioss keeps only one /FAIL/GENE1 per "
+                   "material, so the earlier card's criteria are dropped. Merge "
+                   "the criteria into a single *MAT_ADD_EROSION card.")
     state.mat_add_erosion[mid] = MatAddErosion(
         mid=mid, excl=excl,
         mxpres=_ex(mxpres), mneps=_ex(mneps), effeps=_ex(effeps),

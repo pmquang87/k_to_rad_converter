@@ -529,5 +529,127 @@ class HandlerParseTests(unittest.TestCase):
         self.assertTrue(logk.log_interp)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Coexistence, duplicate erosion, SIGP1<0 drop, NUMINT wording, auto-curve guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mat024_erosion_deck(fail="0.2", card1=None, card2=None):
+    """A plastic *MAT_PIECEWISE_LINEAR_PLASTICITY (FAIL>0) that ALSO carries a
+    *MAT_ADD_EROSION on the same mid — the two-different-/FAIL-cards-on-one-mat
+    path (/FAIL/JOHNSON from the material + /FAIL/GENE1 from erosion)."""
+    if card1 is None:
+        card1 = _row("1", "0.0", "0.0", "0.0", "0.0", "0.0", "1.0", "1.0")
+    if card2 is None:
+        card2 = _row("0.0", "250.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0")
+    return "\n".join([
+        "*KEYWORD",
+        "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+        _row("1", "7.85E-9", "210000.0", "0.3", "300.0", "1000.0", fail, "0.0"),
+        _row("0.0", "0.0", "0", "0", "0.0"),
+        "*MAT_ADD_EROSION",
+        card1,
+        card2,
+        "*CONTROL_TERMINATION",
+        _row("1.0"),
+        "*END",
+        "",
+    ])
+
+
+class Gene1CoexistenceTests(unittest.TestCase):
+    def test_johnson_and_gene1_coexist_on_one_mat(self):
+        # FAIL>0 → /FAIL/JOHNSON from the material; SIGP1 active → /FAIL/GENE1
+        # from erosion. Both must appear on mid 1 (legal in OpenRadioss).
+        _, starter = _convert(_mat024_erosion_deck(fail="0.2"))
+        self.assertIn("/MAT/LAW36/1", starter)
+        self.assertIn("/FAIL/JOHNSON/1", starter)
+        self.assertIn("/FAIL/GENE1/1", starter)
+
+    def test_gene1_still_emitted_when_material_has_no_fail(self):
+        _, starter = _convert(_mat024_erosion_deck(fail="0.0"))
+        self.assertNotIn("/FAIL/JOHNSON/1", starter)
+        self.assertIn("/FAIL/GENE1/1", starter)
+
+
+class Gene1DuplicateErosionTests(unittest.TestCase):
+    def _dup_deck(self):
+        return "\n".join([
+            "*KEYWORD",
+            "*MAT_ELASTIC",
+            _row("1", "1.05E-9", "1800.0", "0.4"),
+            "*MAT_ADD_EROSION",                       # first: MXPRES=500
+            _row("1", "0.0", "500.0", "0.0", "0.0", "0.0", "1.0", "1.0"),
+            _row("0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0"),
+            "*MAT_ADD_EROSION",                       # second: SIGP1=250
+            _row("1", "0.0", "0.0", "0.0", "0.0", "0.0", "1.0", "1.0"),
+            _row("0.0", "250.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0"),
+            "*CONTROL_TERMINATION",
+            _row("1.0"),
+            "*END",
+            "",
+        ])
+
+    def test_duplicate_erosion_warns(self):
+        result, _ = _convert(self._dup_deck())
+        self.assertTrue(any("MID 1" in w and "overwrites" in w
+                            for w in result.warnings))
+
+    def test_duplicate_erosion_last_card_wins(self):
+        _, starter = _convert(self._dup_deck())
+        c = _gene1_cards(starter)
+        self.assertEqual(float(c["c1"][40:60]), 250.0)   # SigP1 from 2nd card
+        self.assertEqual(c["c1"][20:40].strip(), "0")    # Pmax (MXPRES) from 1st gone
+        self.assertEqual(starter.count("/FAIL/GENE1/1"), 1)  # only one card
+
+
+class Gene1Sigp1NegativeTests(unittest.TestCase):
+    def test_sigp1_negative_dropped_not_spurious_threshold(self):
+        # SIGP1<0 = load-curve form. SIGVM keeps GENE1 active; SigP1_max must be
+        # left inactive (0), NOT emitted as a negative spurious threshold.
+        card1 = _row("1", "0.0", "0.0", "0.0", "0.0", "0.0", "1.0", "1.0")
+        card2 = _row("0.0", "-5.0", "400.0", "0.0", "0.0", "0.0", "0.0", "0.0")
+        result, starter = _convert(_erosion_deck(card1, card2))
+        c = _gene1_cards(starter)
+        self.assertEqual(c["c1"][40:60].strip(), "0")     # SigP1_max dropped
+        self.assertTrue(any("SIGP1" in w and "DROPPED" in w
+                            for w in result.warnings))
+
+
+class Mat123NumintWordingTests(unittest.TestCase):
+    def test_numint_names_tab1_when_no_johnson(self):
+        # FAIL=0, EPSTHIN>0 → /FAIL/TAB1 (no JOHNSON). Warning must name TAB1.
+        result, _ = _convert(_mat123_deck(
+            _row("0.0", "0.0", "0", "0", "0.0", "0.1", "0.0", "3.0")))
+        w = next(x for x in result.warnings if "NUMINT" in x)
+        self.assertIn("/FAIL/TAB1", w)
+        self.assertNotIn("/FAIL/JOHNSON", w)
+
+    def test_numint_dropped_when_no_fail_card(self):
+        # FAIL=0, EPSTHIN=0, EPSMAJ=0, NUMINT=3 → no /FAIL card at all.
+        result, starter = _convert(_mat123_deck(
+            _row("0.0", "0.0", "0", "0", "0.0", "0.0", "0.0", "3.0")))
+        self.assertNotIn("/FAIL/JOHNSON/1", starter)
+        self.assertNotIn("/FAIL/TAB1/1", starter)
+        self.assertNotIn("/FAIL/FLD/1", starter)
+        w = next(x for x in result.warnings if "NUMINT" in x)
+        self.assertIn("no /FAIL card", w)
+
+
+class AutoCurveIdCollisionTests(unittest.TestCase):
+    def test_next_curve_id_skips_existing_user_curve(self):
+        from k2rad.state import Curve
+        st = ConversionState()
+        st.curves[90001] = Curve(lcid=90001, title="user", sfa=1.0, sfo=1.0,
+                                 offa=0.0, offo=0.0, pts=[(0.0, 1.0)])
+        fid = st.next_curve_id()
+        self.assertNotEqual(fid, 90001)       # did not hand back the occupied id
+        self.assertNotIn(fid, st.curves)      # and it is genuinely free
+
+    def test_next_curve_id_is_noop_without_collision(self):
+        # No user curve at the base → next_curve_id equals next_id, so it does
+        # not shift auto-ids in the common case.
+        self.assertEqual(ConversionState().next_curve_id(), 90001)
+
+
 if __name__ == "__main__":
     unittest.main()

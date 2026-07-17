@@ -65,13 +65,18 @@ Prior history (before this changelog was introduced) is summarized in the
       `table1_ID` strain-vs-triaxiality table is a flat inert `10.0` plateau
       across `[-0.3, 0, +0.3]` (`dyna2rad`'s `FAIL==0`→`10.0` sentinel) so the
       card carries only the thinning criterion and does not double-count `FAIL`
-      (which stays on `/FAIL/JOHNSON`). `EPSTHIN<0` is dropped with a warning.
+      (which stays on `/FAIL/JOHNSON`). Fidelity note: because `FAIL` rides on
+      `/FAIL/JOHNSON`, no IP fails *via* the inert TAB1 table, so its
+      `P_THICKFAIL` never actually triggers — EPSTHIN thinning erosion is a
+      carrier only, not reproduced (the same limitation as `dyna2rad`, whose
+      inert plateau this mirrors). `EPSTHIN<0` is dropped with a warning.
     - `EPSMAJ`→`/FAIL/FLD` (layout from `FAIL/fail_fld.cfg`
       `FORMAT(radioss2019)`, `Ifail_sh=2`, `I_marg=1`), a flat forming-limit
       curve at `|EPSMAJ|`.
     - `NUMINT` (integration points that must fail before deletion) is
-      approximated by the `/FAIL/JOHNSON` `Ifail_sh=2` all-points rule with a
-      warning when non-zero (`NUMINT=0` = ALL points is exactly that rule, so
+      approximated by the `Ifail_sh=2` all-points rule on whichever `/FAIL`
+      card(s) the material emits (`/FAIL/JOHNSON`/`/FAIL/TAB1`/`/FAIL/FLD`),
+      warned when non-zero (`NUMINT=0` = ALL points is exactly that rule, so
       silent) — the same limitation as MAT_103's `NUMINT`.
     - A new `/ANIM/ELEM/DAMG` engine channel is emitted when TAB1/FLD damage
       models are present (as for GISSMO's `/FAIL/TAB2`).

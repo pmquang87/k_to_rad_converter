@@ -203,10 +203,19 @@ def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[st
                    "(inactive during dynamic relaxation in LS-DYNA); GENE1 has "
                    "no such flag — mapped as an always-active failure time "
                    f"{abs(ero.failtm):g}.")
+    # SIGP1 < 0 is the LS-DYNA load-curve form (|SIGP1| = a max-principal-stress-
+    # vs-strain-rate curve id). GENE1's SigP1_max has no function slot, and its
+    # reader would read a negative value as a fixed |value| threshold restricted
+    # to positive triaxialities — turning a curve id into a spurious, usually
+    # tiny, stress threshold that erodes the element immediately. So drop it
+    # (leave SigP1_max inactive) rather than emit that garbage threshold.
+    sigp1_out = ero.sigp1 if ero.sigp1 >= 0.0 else 0.0
     if ero.sigp1 < 0.0:
-        state.warn(f"*MAT_ADD_EROSION {ero.mid}: SIGP1={ero.sigp1:g} < 0 (a "
-                   "load-curve form) has no GENE1 SigP1_max function slot — "
-                   "passed through as a scalar; verify the criterion.")
+        state.warn(f"*MAT_ADD_EROSION {ero.mid}: SIGP1={ero.sigp1:g} < 0 is the "
+                   "LS-DYNA load-curve form (|SIGP1| is a stress-vs-strain-rate "
+                   "curve id); GENE1 has no SigP1_max function slot, so the "
+                   "criterion is DROPPED (left inactive) rather than emitted as "
+                   "a spurious fixed stress threshold.")
 
     # Card 2 — SIGVM: scalar Sig_max (>0) or fct_IDsm (<0 = |SIGVM| curve id).
     if ero.sigvm < 0.0:
@@ -237,7 +246,7 @@ def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[st
     lines = [
         f"/FAIL/GENE1/{ero.mid}",
         "#               Pmin                Pmax           SigP1_max            Time_max               dtmin",
-        f"{_f(pmin)}{_f(pmax)}{_f(ero.sigp1)}{_f(tmax)}{_f(0.0)}",
+        f"{_f(pmin)}{_f(pmax)}{_f(sigp1_out)}{_f(tmax)}{_f(0.0)}",
         "# fct_IDsm                    Eps_dot_sm             Sig_max                Sigr                   K",
         f"{_i(fct_idsm)}{blank}{_f(0.0)}{_f(sig_max)}{_f(ero.sigth)}{_f(ero.impulse)}",
         "# fct_IDps                    Eps_dot_ps             Eps_max             Eps_eff             Eps_vol",
@@ -549,13 +558,26 @@ def _emit_mat123_extra_fail(mat: MatPlasTAB, state: ConversionState) -> List[str
         lines += _emit_mat123_fld(mat, state)
     if mat.numint != 0.0:
         # NUMINT counts the integration points that must fail before the shell is
-        # deleted (0 = ALL). The base FAIL → /FAIL/JOHNSON already uses Ifail_sh=2
-        # (delete when ALL through-thickness points fail); the exact IP count is
-        # not reproduced (same limitation as MAT_103's NUMINT).
-        state.warn(f"*MAT_123 {mat.mid}: NUMINT={mat.numint:g} (integration "
-                   "points that must fail before element deletion) is "
-                   "approximated by the /FAIL/JOHNSON Ifail_sh=2 all-points "
-                   "rule; the exact IP-count threshold is not reproduced.")
+        # deleted (0 = ALL). Radioss reproduces the ALL-points rule (Ifail_sh=2)
+        # on whichever /FAIL card(s) this material actually emits, not an exact IP
+        # count (same limitation as MAT_103's NUMINT). Which cards those are
+        # depends on FAIL/EPSTHIN/EPSMAJ, so name them rather than assume JOHNSON.
+        emitted = [name for cond, name in (
+            (0.0 < mat.fail < 1e19, "/FAIL/JOHNSON"),
+            (mat.epsthin > 0.0,     "/FAIL/TAB1"),
+            (mat.epsmaj != 0.0,     "/FAIL/FLD"))
+            if cond]
+        if emitted:
+            state.warn(f"*MAT_123 {mat.mid}: NUMINT={mat.numint:g} (integration "
+                       "points that must fail before element deletion) is "
+                       "approximated by the Ifail_sh=2 all-points rule on "
+                       f"{', '.join(emitted)}; the exact IP-count threshold is "
+                       "not reproduced.")
+        else:
+            state.warn(f"*MAT_123 {mat.mid}: NUMINT={mat.numint:g} is set but the "
+                       "material emits no /FAIL card (FAIL=0, EPSTHIN=0, "
+                       "EPSMAJ=0) — there is no failure criterion for it to "
+                       "modify, so NUMINT is dropped.")
     if mat.lcsr:
         state.warn(f"*MAT_123 {mat.mid}: LCSR={mat.lcsr} (strain-rate scaling "
                    "curve) has no /MAT/LAW36 counterpart — ignored (LS-DYNA also "
@@ -577,14 +599,24 @@ def _emit_mat123_tab1(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     sentinel) across the usual triaxiality bracket [-0.3, 0, +0.3]: the card
     exists purely to carry P_THICKFAIL, avoiding a second plastic-strain
     criterion. Ifail_sh=2 makes the reader honour P_thickfail=EPSTHIN
-    (hm_read_fail_tab1.F: P_THICK>0 .and. IFAIL_SH>1 → PTHKF=P_THICK)."""
-    fid = state.next_id()
+    (hm_read_fail_tab1.F: P_THICK>0 .and. IFAIL_SH>1 → PTHKF=P_THICK).
+
+    Fidelity note: P_THICKFAIL deletes the shell once a fraction of its own IPs
+    have failed, but with the inert plateau table no IP ever fails *via TAB1*
+    (the base FAIL/JOHNSON tracks IP failure on its own card, not TAB1's), so
+    P_THICKFAIL never actually triggers. EPSTHIN thinning erosion is therefore
+    NOT reproduced by this carrier card — matching dyna2rad p_ConvertMatL123,
+    which emits the same inert plateau. The card is kept for reference/round-trip
+    parity and to document the dropped criterion, not for a live effect."""
+    fid = state.next_curve_id()
     _add_auto_curve(state, fid, f"Auto_MAT123_thinfail_mid{mat.mid}",
                     [(-0.3, 10.0), (0.0, 10.0), (0.3, 10.0)])
     sp20, sp10, sp30 = " " * 20, " " * 10, " " * 30
-    state.warn(f"*MAT_123 {mat.mid}: EPSTHIN={mat.epsthin:g} → /FAIL/TAB1 "
-               "P_THICKFAIL (thinning/thickness failure, Ifail_sh=2); FAIL stays "
-               "on /FAIL/JOHNSON so the TAB1 strain table is an inert plateau.")
+    state.warn(f"*MAT_123 {mat.mid}: EPSTHIN={mat.epsthin:g} is carried into a "
+               "/FAIL/TAB1 P_THICKFAIL (Ifail_sh=2), but its strain table is an "
+               "inert plateau (FAIL stays on /FAIL/JOHNSON to avoid double-"
+               "counting), so no IP fails via TAB1 and P_THICKFAIL never fires — "
+               "EPSTHIN thinning erosion is NOT reproduced (matches dyna2rad).")
     return [
         f"/FAIL/TAB1/{mat.mid}",
         "# IFAIL_SH  IFAIL_SO                             P_THICKFAIL          P_thinfail               Ixfem",
@@ -612,7 +644,7 @@ def _emit_mat123_fld(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     minor-strain bracket (mirrors dyna2rad). I_marg=1 so no marginal card;
     Istrain=0 (true strain), matching dyna2rad."""
     epsmaj = abs(mat.epsmaj)
-    fid = state.next_id()
+    fid = state.next_curve_id()
     _add_auto_curve(state, fid, f"Auto_MAT123_FLD_mid{mat.mid}",
                     [(-0.3, epsmaj), (0.0, epsmaj), (0.3, epsmaj)])
     state.warn(f"*MAT_123 {mat.mid}: EPSMAJ={mat.epsmaj:g} → /FAIL/FLD "
