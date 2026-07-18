@@ -983,17 +983,69 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             HDR,
         ]
         if pid in shells_by_pid:
-            lines.append(f"/SHELL/{pid}")
+            # Split quads from triangles. LS-DYNA writes a triangular shell either
+            # as 3 IDs (blank N4) or as a 4-slot quad with the last corner repeated
+            # (n1 n2 n3 n3) — a "collapsed quad". Both must become /SH3N, not a
+            # 4-node /SHELL, because Radioss sizes the two element types with
+            # DIFFERENT critical-time-step rules: /SH3N uses the triangle form
+            # (L = 2A/L_max, matching LS-DYNA's beta=1 rule) while /SHELL uses the
+            # quad length. Passing a collapsed quad through as /SHELL therefore
+            # halves dt for the whole model off a single degenerate element — on
+            # the W13 blast deck 370 collapsed quads (of 38,218) held dt at
+            # 8.361e-7 s where the triangle rule gives 1.6919e-6 s, doubling
+            # runtime. A collapsed 4-node shell is also not numerically identical
+            # to a C0 triangle, so this is a fidelity fix as well as a cost one.
+            quads = []
+            tris = []                 # (eid, [n1, n2, n3])
+            n_bowtie = 0
             for e in shells_by_pid[pid]:
-                row = _i(e.eid)
-                for n in e.nodes:
-                    row += _i(n)
-                pad = 4 - len(e.nodes)
-                if pad > 0:
-                    row += "         0" * pad
-                row += "         0"
-                lines.append(row)
-            lines.append(HDR)
+                uniq = _ordered_unique_nodes(e.nodes)
+                if len(uniq) >= 4:
+                    quads.append(e)
+                elif len(uniq) == 3:
+                    if len(e.nodes) == 4 and not any(
+                            e.nodes[i] == e.nodes[(i + 1) % 4] for i in range(4)):
+                        # Repeated corner is NOT adjacent (e.g. n1 n2 n1 n3): a
+                        # zero-area "bowtie", not an ordinary collapse. Emitting
+                        # the 3 distinct corners invents area the original element
+                        # did not have, so say so rather than fix it silently.
+                        n_bowtie += 1
+                    tris.append((e.eid, uniq))
+                else:
+                    # < 3 distinct corners: zero area, no valid element (Radioss
+                    # would reject it). Mirrors the degenerate-solid screening.
+                    state.warn(
+                        f"PART {pid}: shell {e.eid} has only {len(uniq)} distinct "
+                        f"node(s) {uniq} — zero area, dropped (it cannot be a "
+                        "/SHELL or a /SH3N).")
+            if n_bowtie:
+                state.warn(
+                    f"PART {pid}: {n_bowtie} shell(s) repeat a corner in "
+                    "NON-adjacent slots (n1 n2 n1 n3) — a zero-area bowtie rather "
+                    "than a normal triangle collapse. Emitted as /SH3N on the 3 "
+                    "distinct corners, which gives them real area; check these "
+                    "elements in the source mesh.")
+            if quads:
+                lines.append(f"/SHELL/{pid}")
+                for e in quads:
+                    row = _i(e.eid)
+                    for n in e.nodes:
+                        row += _i(n)
+                    pad = 4 - len(e.nodes)
+                    if pad > 0:
+                        row += "         0" * pad
+                    row += "         0"
+                    lines.append(row)
+                lines.append(HDR)
+            if tris:
+                # /SH3N shares the part's /PROP/SHELL (its Ish3n field selects the
+                # triangle formulation), so quads and triangles coexist under one
+                # /PART — unlike /TETRA10, which needs a part of its own.
+                lines.append(f"/SH3N/{pid}")
+                for eid, nd in tris:
+                    lines.append(_i(eid) + _i(nd[0]) + _i(nd[1]) + _i(nd[2])
+                                 + "         0")
+                lines.append(HDR)
         if pid in solids_by_pid:
             # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an
             # 8-node /BRICK with collapsed nodes reintroduces spurious
