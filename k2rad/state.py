@@ -167,7 +167,8 @@ class PartData:
     hgid: int = 0
     # *PART field 4 (EOSID) → the *EOS_* card bound to this part's material.
     # 0 = none. Drives the *MAT_JOHNSON_COOK LAW2-vs-LAW4 routing (dyna2rad's
-    # law choice is triggered solely by a nonzero part EOSID).
+    # law choice is triggered solely by a nonzero part EOSID) and the
+    # *MAT_NULL /MAT/LAW6-carrier pairing for an EOS of a different id.
     eosid: int = 0
 
 

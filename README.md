@@ -143,8 +143,11 @@ unsuitable for a given model.)
 `A/B/N/C/EPS0` flow stress and `M/TM/TR` thermal softening (`rhoC_p` = `RO·CP`
 — LS-DYNA's CP is per *mass*, Radioss's per *volume*; blank `EPS0` takes the
 LS-DYNA default 1.0 rather than dyna2rad's 0, which trips starter ERROR 298;
-`E` falls back to `2G(1+ν)`). When the `*PART` attaches an `*EOS_*` (`EOSID`,
-or an `*EOS_*` sharing the material id), the material reroutes to the
+`E` falls back to `2G(1+ν)`). When the `*PART` attaches an `*EOS_*` (`EOSID`;
+or — warned — an `*EOS_*` sharing the material id that no part in the deck
+binds, k2rad's pairing convention; a part-bound same-id EOS belongs to that
+binding and the material stays LAW2, exactly like dyna2rad), the material
+reroutes to the
 hydrodynamic `/MAT/LAW4` (HYD_JCOOK) + the `/EOS` rebound to the material id —
 dyna2rad's law-choice rule — with `PC`→`Pmin` (forced negative) and `TR`→`T0`
 (initial temperature; deliberately NOT dyna2rad's `TR`→`Tmax` quirk, which

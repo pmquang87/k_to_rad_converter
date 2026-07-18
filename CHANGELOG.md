@@ -20,14 +20,28 @@ Prior history (before this changelog was introduced) is summarized in the
     map 1:1, `rhoC_p = RO·CP` (per-mass → per-volume), `E ← 2G(1+ν)` when only
     `G` is given. Blank `EPS0` takes the LS-DYNA default 1.0 instead of
     dyna2rad's raw 0 (starter ERROR 298 whenever `C>0`).
-  - EOS routing per dyna2rad's law choice: a `*PART` `EOSID` (or a shared-id
-    `*EOS_*`) reroutes the material to `/MAT/LAW4` (HYD_JCOOK, new emitter,
-    `matl4_hyd_jcook.cfg FORMAT(radioss2018)`) + the `/EOS` block rebound to
+  - EOS routing per dyna2rad's law choice: a `*PART` `EOSID` (or — warned —
+    a shared-id `*EOS_*` that no part in the deck binds via EOSID; a
+    part-bound same-id EOS belongs to that binding and the material stays
+    LAW2, exactly like dyna2rad, and a shared-id `*EOS_JWL` never reroutes)
+    sends the material to `/MAT/LAW4` (HYD_JCOOK, new emitter,
+    `matl4_hyd_jcook.cfg` from the **radioss2020** config directory, the one
+    a `/BEGIN 2022` deck resolves to — T0 joined the RHOCP heat card in the
+    radioss2019 config; the radioss2018 directory's copy has no T0 column) +
+    the `/EOS` block rebound to
     the material id (reusing the `_emit_eos` machinery; the standalone
     LAW6-carrier fluid pass skips consumed EOS ids). `PC`→`Pmin` (forced
     negative); `TR`→`T0`, NOT dyna2rad's physically wrong `TR`→`Tmax`.
     An unresolvable/unsupported attached EOS still routes to LAW4 (dyna2rad
-    behaviour) but warns.
+    behaviour) but warns; parts sharing the material WITHOUT an EOSID are
+    dragged onto the LAW4 and warned (dyna2rad duplicates a multi-part
+    material and keeps PLAS_JOHNS for the EOS-less parts).
+  - The LAW6-carrier fluid pass now also honours a `*PART` `EOSID` that
+    binds an `*EOS_*` to a `*MAT_NULL` of a *different* id: that null (not a
+    synthetic orphan) becomes the `/MAT/LAW6` carrier and the `/EOS` is
+    re-emitted under the null's mid, warned — previously only the shared-id
+    pairing was recognised and such an EOS produced a same-id orphan carrier
+    that could collide with another material's id.
   - Failure: `D1-D5` → `/FAIL/JOHNSON` via the extended shared trailer
     (`D3 = −|D3|` sign-convention flip, `EPSILON_DOT_0 = EPS0` — deliberately
     not dyna2rad's 0 — `EROD≠0` → `Ifail_so=2`); `DTF>0` → `/FAIL/GENE1`

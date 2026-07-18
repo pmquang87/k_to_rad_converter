@@ -82,9 +82,12 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_elast_for_rigid(mat)
     # A *MAT_NULL that carries a companion *EOS_* becomes a hydro /MAT/LAW6 (with
     # that /EOS) below; a bare *MAT_NULL stays /MAT/VOID (vacuum/void ALE phase).
+    # "Carries" = shares the EOS id (the legacy pairing convention) OR is bound
+    # to a supported *EOS_* by a *PART EOSID field.
     eos_mids = set(state.eos_cards) | set(state.eos_jwl)
+    eos_bound_nulls = set(_null_part_eos_bindings(state))
     for mat in state.mat_null.values():
-        if mat.mid not in eos_mids:
+        if mat.mid not in eos_mids and mat.mid not in eos_bound_nulls:
             lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
@@ -359,6 +362,43 @@ def _emit_eos(eos: EosCard) -> List[str]:
     return head + [HDR]
 
 
+def _null_part_eos_bindings(state: ConversionState) -> dict:
+    """*MAT_NULL mid → the *EOS_* id(s) a *PART binds to it via its EOSID
+    field (LS-DYNA's actual EOS attachment), in pid order.
+
+    Only nulls that do NOT already own a same-id *EOS_* count — for those the
+    legacy shared-id pairing wins — and only supported *EOS_* kinds
+    (state.eos_cards) qualify. Same-id bindings (p.eosid == p.mid) are the
+    shared-id convention itself and are excluded here."""
+    out: dict = {}
+    for p in sorted(state.parts.values(), key=lambda q: q.pid):
+        if (p.mid in state.mat_null and p.mid not in state.eos_cards
+                and p.eosid and p.eosid != p.mid
+                and p.eosid in state.eos_cards):
+            ids = out.setdefault(p.mid, [])
+            if p.eosid not in ids:
+                ids.append(p.eosid)
+    return out
+
+
+def _derive_ideal_gas_p0(state: ConversionState, eos: EosCard,
+                         rho: float) -> None:
+    """Radioss /EOS/IDEAL-GAS requires a POSITIVE initial pressure. LS-DYNA
+    gives specific heats + temperature, so derive P0 = rho*(Cp-Cv)*T0."""
+    if eos.kind != "IDEAL-GAS" or eos.params.get("p0", 0.0) > 0.0:
+        return
+    cv = eos.params.get("cv", 0.0)
+    cp = eos.params.get("cp", 0.0)
+    t0 = eos.params.get("t0", 0.0)
+    if rho > 0.0 and cp > cv > 0.0 and t0 > 0.0:
+        eos.params["p0"] = rho * (cp - cv) * t0
+    else:
+        state.warn(f"*EOS_IDEAL_GAS {eos.eosid}: could not derive a positive "
+                   "initial pressure (need density, Cv<Cp and T0) — "
+                   "/EOS/IDEAL-GAS P0 left 0, which the starter rejects; "
+                   "set P0 manually.")
+
+
 def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     """/MAT/LAW5 explosives and /MAT/LAW6+/EOS fluids for the coupled ALE path."""
     if not (state.mat_high_explosive or state.eos_cards or state.eos_jwl):
@@ -375,32 +415,51 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         state.warn(f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
                    "(same id) — the JWL parameters have no material to attach to "
                    "and were not emitted (add the explosive material).")
-    # Other fluids: carrier /MAT/LAW6 (HYD_VISC) + /EOS/<kind>
+    # Other fluids: carrier /MAT/LAW6 (HYD_VISC) + /EOS/<kind>. A carrier is
+    # the same-id *MAT_NULL (the legacy shared-id pairing) and/or any *MAT_NULL
+    # a *PART binds to this EOS via its EOSID field — the /EOS is then
+    # re-emitted under that null's mid, because Radioss binds an /EOS to the
+    # /MAT of the SAME id.
+    null_bindings = _null_part_eos_bindings(state)
+    for mid, ids in sorted(null_bindings.items()):
+        if len(ids) > 1:
+            state.warn(f"*MAT_NULL {mid}: parts bind different EOS ids "
+                       f"{ids} to this material — Radioss binds one /EOS per "
+                       f"material id, so only EOS {ids[0]} is used; duplicate "
+                       "the material per part to keep distinct equations of "
+                       "state.")
     for eosid, eos in sorted(state.eos_cards.items()):
-        if eosid in jc_consumed and eosid not in state.mat_null:
+        null_mids = [eosid] if eosid in state.mat_null else []
+        null_mids += sorted(m for m, ids in null_bindings.items()
+                            if ids[0] == eosid)
+        if not null_mids:
+            if eosid in jc_consumed:
+                continue
+            rho = eos.params.get("rho0", 0.0)
+            if rho <= 0.0:
+                state.warn(f"*EOS_{eos.kind} {eosid}: no companion *MAT_NULL "
+                           "to give a density for the /MAT/LAW6 carrier and "
+                           "no reference density — RHO_I left 0; set the "
+                           "fluid density.")
+            _derive_ideal_gas_p0(state, eos, rho)
+            lines += _emit_mat_law6_carrier(eosid, "", rho)
+            lines += _emit_eos(eos)
             continue
-        carrier = state.mat_null.get(eosid)
-        rho = carrier.rho if carrier else eos.params.get("rho0", 0.0)
-        title = carrier.title if carrier else ""
-        if not carrier and rho <= 0.0:
-            state.warn(f"*EOS_{eos.kind} {eosid}: no companion *MAT_NULL to give a "
-                       "density for the /MAT/LAW6 carrier and no reference "
-                       "density — RHO_I left 0; set the fluid density.")
-        # Radioss /EOS/IDEAL-GAS requires a POSITIVE initial pressure. LS-DYNA
-        # gives specific heats + temperature, so derive P0 = rho*(Cp-Cv)*T0.
-        if eos.kind == "IDEAL-GAS" and eos.params.get("p0", 0.0) <= 0.0:
-            cv = eos.params.get("cv", 0.0)
-            cp = eos.params.get("cp", 0.0)
-            t0 = eos.params.get("t0", 0.0)
-            if rho > 0.0 and cp > cv > 0.0 and t0 > 0.0:
-                eos.params["p0"] = rho * (cp - cv) * t0
+        _derive_ideal_gas_p0(state, eos, state.mat_null[null_mids[0]].rho)
+        for mid in null_mids:
+            carrier = state.mat_null[mid]
+            lines += _emit_mat_law6_carrier(mid, carrier.title, carrier.rho)
+            if mid == eosid:
+                lines += _emit_eos(eos)
             else:
-                state.warn(f"*EOS_IDEAL_GAS {eosid}: could not derive a positive "
-                           "initial pressure (need density, Cv<Cp and T0) — "
-                           "/EOS/IDEAL-GAS P0 left 0, which the starter rejects; "
-                           "set P0 manually.")
-        lines += _emit_mat_law6_carrier(eosid, title, rho)
-        lines += _emit_eos(eos)
+                state.warn(
+                    f"*EOS_{eos.kind} {eosid}: bound to *MAT_NULL {mid} via "
+                    f"a *PART EOSID — emitted as /EOS/{eos.kind}/{mid} on "
+                    "the /MAT/LAW6 carrier of that id (Radioss binds an "
+                    "/EOS to the material of the SAME id).")
+                lines += _emit_eos(EosCard(eosid=mid, kind=eos.kind,
+                                           params=eos.params, rho0=eos.rho0,
+                                           note=eos.note))
     return lines
 
 
@@ -494,8 +553,12 @@ def _resolve_mat_johnson_cook(state: ConversionState) -> None:
     alone — ANY attached EOS routes MAT_015 to LAW4, even one whose type cannot
     be converted (the EOS is then dropped, here with a warning instead of
     silently). k2rad additionally honours its own shared-id convention
-    (eosid == mid, the *MAT_NULL + *EOS_* pairing rule) as a fallback when no
-    part carries an EOSID.
+    (eosid == mid, the *MAT_NULL + *EOS_* pairing rule) as a warned fallback,
+    but ONLY for an *EOS_* that no *PART in the deck binds via its EOSID —
+    a part-bound EOS belongs to THAT binding, and in LS-DYNA a material with
+    no part EOSID has no EOS at all, so the material stays LAW2 exactly like
+    dyna2rad. A shared-id *EOS_JWL never triggers the fallback (JWL pairs
+    only with *MAT_HIGH_EXPLOSIVE_BURN as /MAT/LAW5).
 
     DTF handling follows dyna2rad exactly: on the plain (LAW2) path DTF>0
     emits ONLY a /FAIL/GENE1 with dtmin=DTF and discards D1-D5; the EOS (LAW4)
@@ -517,9 +580,31 @@ def _resolve_mat_johnson_cook(state: ConversionState) -> None:
                     "one /EOS per material id, so only EOS "
                     f"{part_eosids[0]} is used; duplicate the material per "
                     "part to keep distinct equations of state.")
-        elif mat.mid in state.eos_cards or mat.mid in state.eos_jwl:
+            noeos_pids = sorted(p.pid for p in state.parts.values()
+                                if p.mid == mat.mid and not p.eosid)
+            if noeos_pids:
+                state.warn(
+                    f"*MAT_JOHNSON_COOK mid={mat.mid}: part(s) {noeos_pids} "
+                    "reference this material WITHOUT an EOSID while an "
+                    "EOS-attached part routes it to the hydrodynamic "
+                    "/MAT/LAW4 — Radioss has one law per material id, so "
+                    "those parts get the LAW4 + /EOS too (dyna2rad "
+                    "duplicates a multi-part material and keeps "
+                    "/MAT/PLAS_JOHNS for the EOS-less parts); duplicate the "
+                    "material in the deck to keep a plain LAW2 there.")
+        elif (mat.mid in state.eos_cards
+              and not any(p.eosid == mat.mid for p in state.parts.values())):
             mat.use_law4 = True
             mat.eos_id = mat.mid
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: no *PART attaches an EOS, "
+                f"but *EOS_{state.eos_cards[mat.mid].kind} {mat.mid} shares "
+                "the material id and is bound to no other part — rerouted to "
+                "/MAT/LAW4 + /EOS by k2rad's shared-id pairing convention. "
+                "In LS-DYNA an *EOS_* binds only through the *PART EOSID "
+                "field (an unreferenced EOS is inert, and dyna2rad would "
+                "keep /MAT/PLAS_JOHNS) — set the part EOSID, or renumber "
+                "the EOS, if this pairing is unintended.")
 
         if mat.dtf <= 0.0:
             continue
@@ -649,8 +734,12 @@ def _emit_mat_law4_hyd_jcook(mat: MatJohnsonCook,
     """/MAT/LAW4 (HYD_JCOOK) + the bound /EOS/<kind> of the SAME id — the
     faithful target for *MAT_JOHNSON_COOK on parts that attach an *EOS_*.
 
-    Layout audited against hm_cfg_files MAT/matl4_hyd_jcook.cfg
-    FORMAT(radioss2018) — the block a /BEGIN 2022 deck is read with:
+    Layout audited against hm_cfg_files MAT/matl4_hyd_jcook.cfg from the
+    radioss2020 config directory — the newest one a /BEGIN 2022 deck resolves
+    to. NOTE: T0 joined the RHOCP heat card in the radioss2019 config revision
+    (the radioss2018 directory's copy ends at RHOCP), so audit against
+    radioss2019+ even though the block inside is still labelled
+    FORMAT(radioss2018); the starter echo confirms T0 is read from cols 61-80:
       RHO_I(20) / E(20) nu(20) / A(20) B(20) n(20) epsmax(20) sigmax(20) /
       Pmin(20) / C(20) EPS_DOT_0(20) M(20) Tmelt(20) Tmax(20) /
       RHOCP(20) blank(40) T0(20)

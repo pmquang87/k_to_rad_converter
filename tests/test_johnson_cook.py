@@ -4,9 +4,13 @@
     the thermal (m/TM/TR, rhoC_p = RO·CP) and rate (c/EPS0) cards, blank-field
     defaults (EPS0→1.0, E←2G(1+ν)), and the dropped-field warnings (PC on
     LAW2, VP, SPALL, C2, EFMIN).
-  * EOS routing: a *PART EOSID (or a shared-id *EOS_*) reroutes MAT_015 to
-    /MAT/LAW4 (HYD_JCOOK) + the /EOS rebound to the material id (dyna2rad's
-    law choice), with PC→Pmin and TR→T0 (NOT dyna2rad's TR→Tmax quirk).
+  * EOS routing: a *PART EOSID (or — warned — a shared-id *EOS_* no part in
+    the deck binds) reroutes MAT_015 to /MAT/LAW4 (HYD_JCOOK) + the /EOS
+    rebound to the material id (dyna2rad's law choice), with PC→Pmin and
+    TR→T0 (NOT dyna2rad's TR→Tmax quirk). EOS ownership: a same-id *EOS_*
+    bound to ANOTHER material via a part EOSID is never hijacked (the JC mat
+    stays LAW2 and the EOS pairs with its *MAT_NULL under the null's mid);
+    a stray same-id *EOS_JWL never reroutes.
   * Failure: D1-D5 → /FAIL/JOHNSON (D3 forced negative, EPSILON_DOT_0 = EPS0,
     EROD→Ifail_so); DTF>0 → /FAIL/GENE1 dtmin, suppressing D1-D5 (LAW2 path
     only — the EOS path ignores DTF, both per dyna2rad).
@@ -139,6 +143,39 @@ MAT99_FULL = (
     "         1 7.85E-9  210000.0       0.3       0.0       0.8         9\n"
     "     350.0     275.0      0.36     0.022      0.25     500.0\n"
 )
+
+JWL_1 = (
+    "*EOS_JWL\n"
+    "         1     371.2      3.23      4.15      0.95       0.3       7.0"
+    "       1.0\n"
+)
+
+
+def _solid_deck_multi(parts, mat: str) -> str:
+    """A one-hex-per-part solid deck: parts = [(pid, mid, eosid), ...] with
+    eosid 0 meaning a blank *PART EOSID field."""
+    nodes = (
+        "*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             1.0             1.0             0.0\n"
+        "       4             0.0             1.0             0.0\n"
+        "       5             0.0             0.0             1.0\n"
+        "       6             1.0             0.0             1.0\n"
+        "       7             1.0             1.0             1.0\n"
+        "       8             0.0             1.0             1.0\n"
+    )
+    elems = "*ELEMENT_SOLID\n" + "".join(
+        f"{eid:>8}{pid:>8}       1       2       3       4       5       6"
+        "       7       8\n"
+        for eid, (pid, _, _) in enumerate(parts, 1))
+    cards = "".join(
+        f"*PART\np{pid}\n{pid:>10}         1{mid:>10}"
+        + (f"{eosid:>10}" if eosid else "") + "\n"
+        for pid, mid, eosid in parts)
+    return ("*KEYWORD\n" + nodes + elems + cards
+            + "*SECTION_SOLID\n         1         1\n" + mat
+            + "*CONTROL_TERMINATION\n       1.0\n*END\n")
 
 
 # /MAT/LAW2 block line indices (index 0 is the title line).
@@ -322,13 +359,17 @@ class Mat015Law4Tests(unittest.TestCase):
                             for w in result.warnings))
 
     def test_shared_id_eos_also_routes_law4(self):
-        # No *PART EOSID; the *EOS_* shares the material id (k2rad convention).
+        # No *PART EOSID anywhere; the *EOS_* shares the material id (k2rad's
+        # pairing convention) — routed to LAW4 WITH a warning (in LS-DYNA an
+        # unreferenced EOS is inert and dyna2rad would keep PLAS_JOHNS).
         eos1 = GRUNEISEN_7.replace("         7", "         1", 1)
         deck = SOLID_DECK.format(MAT=MAT15_FULL + eos1, EOSID="")
-        _, starter = _convert(deck)
+        result, starter = _convert(deck)
         self.assertIn("/MAT/LAW4/1", starter)
         self.assertIn("/EOS/GRUNEISEN/1", starter)
         self.assertNotIn("/MAT/HYD_VISC/1", starter)
+        self.assertTrue(any("shared-id pairing convention" in w
+                            for w in result.warnings))
 
     def test_missing_eos_card_still_routes_law4_with_warning(self):
         # dyna2rad routes on the *PART EOSID alone, even when the EOS card is
@@ -338,6 +379,136 @@ class Mat015Law4Tests(unittest.TestCase):
         self.assertIn("/MAT/LAW4/1", starter)
         self.assertTrue(any("EOSID 5" in w and "WITHOUT an /EOS" in w
                             for w in result.warnings))
+
+
+class Mat015EosOwnershipTests(unittest.TestCase):
+    """The shared-id LAW4 fallback must not hijack an *EOS_* owned elsewhere
+    (dyna2rad routes SOLELY on the *PART EOSID)."""
+
+    def test_same_id_eos_bound_to_other_material_stays_law2(self):
+        # JC mid=1 with no part EOSID; *EOS_GRUNEISEN 1 legitimately bound to
+        # the *MAT_NULL mid=2 fluid via part 2's EOSID. The JC material must
+        # stay /MAT/LAW2 (dyna2rad: PLAS_JOHNS) and the EOS must pair with
+        # the null — re-emitted under the null's mid, not hijacked.
+        eos1 = GRUNEISEN_7.replace("         7", "         1", 1)
+        mat = MAT15_FULL + "*MAT_NULL\n         2   1.0E-9\n" + eos1
+        deck = _solid_deck_multi([(1, 1, 0), (2, 2, 1)], mat)
+        result, starter = _convert(deck)
+        self.assertIn("/MAT/LAW2/1", starter)
+        self.assertNotIn("/MAT/LAW4/1", starter)
+        self.assertIn("/MAT/HYD_VISC/2", starter)      # the null is the carrier
+        self.assertIn("/EOS/GRUNEISEN/2", starter)     # rebound to the null mid
+        self.assertNotIn("/EOS/GRUNEISEN/1", starter)
+        self.assertNotIn("/MAT/HYD_VISC/1", starter)   # no same-id orphan
+        self.assertNotIn("/MAT/VOID/2", starter)       # not double-emitted
+        self.assertTrue(any("bound to *MAT_NULL 2" in w
+                            for w in result.warnings))
+
+    def test_stray_same_id_jwl_stays_law2(self):
+        # A same-id *EOS_JWL with no part binding and no explosive pair is
+        # inert in LS-DYNA — the JC material must stay LAW2 (previously it
+        # became a LAW4 with NO /EOS = undefined volumetric response).
+        deck = SOLID_DECK.format(MAT=MAT15_FULL + JWL_1, EOSID="")
+        result, starter = _convert(deck)
+        self.assertIn("/MAT/LAW2/1", starter)
+        self.assertNotIn("/MAT/LAW4/1", starter)
+        self.assertTrue(any("no companion *MAT_HIGH_EXPLOSIVE_BURN" in w
+                            for w in result.warnings))
+
+    def test_jwl_attached_via_part_eosid_routes_law4_without_eos(self):
+        # dyna2rad routes on the part EOSID alone, whatever the EOS type: a
+        # part-bound JWL still means LAW4, but JWL cannot ride on it — warned,
+        # and the orphan-JWL warning must NOT also fire (it was consumed).
+        jwl9 = JWL_1.replace("         1", "         9", 1)
+        deck = SOLID_DECK.format(MAT=MAT15_FULL + jwl9, EOSID="         9")
+        result, starter = _convert(deck)
+        self.assertIn("/MAT/LAW4/1", starter)
+        self.assertNotIn("/EOS/", starter)
+        self.assertTrue(any("cannot bind to /MAT/LAW4" in w
+                            for w in result.warnings))
+        self.assertFalse(any("no companion *MAT_HIGH_EXPLOSIVE_BURN" in w
+                             for w in result.warnings))
+
+    def test_parts_without_eosid_dragged_onto_law4_warn(self):
+        # One mid shared by an EOS-attached part and a plain part: single
+        # LAW4 for both (Radioss: one law per mat id) — warned; dyna2rad
+        # would duplicate the material and keep PLAS_JOHNS for part 2.
+        deck = _solid_deck_multi([(1, 1, 7), (2, 1, 0)],
+                                 MAT15_FULL + GRUNEISEN_7)
+        result, starter = _convert(deck)
+        self.assertIn("/MAT/LAW4/1", starter)
+        self.assertNotIn("/MAT/LAW2/1", starter)
+        self.assertTrue(any("part(s) [2]" in w and "WITHOUT an EOSID" in w
+                            for w in result.warnings))
+
+
+class Mat015MultiMaterialTests(unittest.TestCase):
+    """Several Johnson-Cook materials in ONE deck: distinct /MAT, /FAIL and
+    auto-/FUNCT ids (guards the per-material id-allocation paths)."""
+
+    MAT2_PLAIN = (
+        "*MAT_JOHNSON_COOK\n"
+        "         2 7.85E-9       0.0  210000.0       0.3\n"
+        "     300.0     200.0       0.3     0.011\n"
+        "       0.0       0.0       0.0       0.0      0.12\n"
+    )
+
+    def test_law4_law2_and_mat099_coexist(self):
+        mat99_3 = MAT99_FULL.replace("         1", "         3", 1)
+        mats = MAT15_FULL + GRUNEISEN_7 + self.MAT2_PLAIN + mat99_3
+        deck = _solid_deck_multi([(1, 1, 7), (2, 2, 0), (3, 3, 0)], mats)
+        _, starter = _convert(deck)
+        self.assertIn("/MAT/LAW4/1", starter)
+        self.assertIn("/EOS/GRUNEISEN/1", starter)
+        self.assertIn("/FAIL/JOHNSON/1", starter)
+        self.assertIn("/MAT/LAW2/2", starter)
+        self.assertIn("/FAIL/JOHNSON/2", starter)
+        self.assertIn("/MAT/LAW2/3", starter)
+        self.assertIn("/FAIL/FLD/3", starter)
+        self.assertNotIn("/MAT/HYD_VISC/7", starter)   # EOS consumed, no orphan
+
+    def test_two_mat099_get_distinct_fld_curves(self):
+        mat99_3 = MAT99_FULL.replace("         1", "         3", 1)
+        mat99_4 = MAT99_FULL.replace("         1", "         4", 1)
+        deck = _solid_deck_multi([(1, 3, 0), (2, 4, 0)], mat99_3 + mat99_4)
+        _, starter = _convert(deck)
+        fid3 = int(_block_lines(starter, "/FAIL/FLD/3")[1][0:10])
+        fid4 = int(_block_lines(starter, "/FAIL/FLD/4")[1][0:10])
+        self.assertNotEqual(fid3, fid4)
+        self.assertIn(f"/FUNCT/{fid3}", starter)
+        self.assertIn(f"/FUNCT/{fid4}", starter)
+
+
+class Mat015DropWarningTests(unittest.TestCase):
+    """Every dropped MAT_015 field warns: VP/RATEOP, SPALL, IT, C2, NUMINT."""
+
+    MAT = (
+        "*MAT_JOHNSON_COOK\n"
+        "         1 7.85E-9       0.0  210000.0       0.3       0.0         1"
+        "       2.0\n"
+        "     350.0     275.0      0.36     0.022\n"
+        "       0.0       0.0       1.0       1.0\n"
+        "       0.0       5.0       0.0       0.0       2.0\n"
+    )
+
+    def setUp(self):
+        self.result, self.starter = _convert(SHELL_DECK.format(MAT=self.MAT))
+
+    def test_vp_warned_with_rateop(self):
+        self.assertTrue(any("VP=1" in w and "RATEOP=2" in w
+                            for w in self.result.warnings))
+
+    def test_spall_warned(self):
+        self.assertTrue(any("SPALL=1" in w for w in self.result.warnings))
+
+    def test_it_warned(self):
+        self.assertTrue(any("IT=1" in w for w in self.result.warnings))
+
+    def test_c2_warned(self):
+        self.assertTrue(any("C2/P=5" in w for w in self.result.warnings))
+
+    def test_numint_warned(self):
+        self.assertTrue(any("NUMINT=2" in w for w in self.result.warnings))
 
 
 class Mat015DtfTests(unittest.TestCase):
