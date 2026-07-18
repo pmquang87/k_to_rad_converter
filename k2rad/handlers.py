@@ -3416,6 +3416,9 @@ def handle_mat_blatz_ko(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     f1 = _card(block.raw, offset, fixed=True, n=4, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_BLATZ-KO_RUBBER: empty material card — skipped")
+        return
     mid = to_int(f1[0])
     rho = to_float(f1[1]) if len(f1) > 1 else 0.0
     g   = to_float(f1[2]) if len(f1) > 2 else 0.0
@@ -3440,6 +3443,9 @@ def handle_mat_mooney_rivlin(block: Block, state: ConversionState) -> None:
     title = _read_title(block) if offset else ""
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_MOONEY-RIVLIN_RUBBER: empty material card — skipped")
+        return
     mid = to_int(f1[0])
     rho = to_float(f1[1]) if len(f1) > 1 else 0.0
     pr  = to_float(f1[2]) if len(f1) > 2 else 0.0
@@ -3489,6 +3495,9 @@ def handle_mat_ogden_rubber(block: Block, state: ConversionState) -> None:
     title = _read_title(block) if offset else ""
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_OGDEN_RUBBER: empty material card — skipped")
+        return
     mid  = to_int(f1[0])
     rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
     pr   = to_float(f1[2]) if len(f1) > 2 else 0.0
@@ -3546,6 +3555,9 @@ def handle_mat_hyperelastic_rubber(block: Block, state: ConversionState) -> None
     title = _read_title(block) if offset else ""
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_HYPERELASTIC_RUBBER: empty material card — skipped")
+        return
     mid  = to_int(f1[0])
     rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
     pr   = to_float(f1[2]) if len(f1) > 2 else 0.0

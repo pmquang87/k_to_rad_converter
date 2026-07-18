@@ -768,5 +768,173 @@ class NoRegressionTests(unittest.TestCase):
         self.assertNotIn("/EOS/", starter)
 
 
+class ValidationFixTests(unittest.TestCase):
+    """Fixes from the branch validation review: the /XREF multi-instance
+    merge (one /XREF per component is the spec form; the current starter
+    merely tolerates duplicate ids by unioning them per node), DATA=-1 =
+    the accepted automatic fit (hm_read_mat69.F), the A+B=0 wording,
+    empty-material-card guards, and the LAW95 shared-section Ismstr=10 drag
+    warnings (native promotion is per element group)."""
+
+    # Two disjoint hexes on the SAME *SECTION_SOLID: part 1 rides {MAT},
+    # part 2 is plain elastic.
+    TWO_PART_DECK = (
+        "*KEYWORD\n"
+        "*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             1.0             1.0             0.0\n"
+        "       4             0.0             1.0             0.0\n"
+        "       5             0.0             0.0             1.0\n"
+        "       6             1.0             0.0             1.0\n"
+        "       7             1.0             1.0             1.0\n"
+        "       8             0.0             1.0             1.0\n"
+        "       9             3.0             0.0             0.0\n"
+        "      10             4.0             0.0             0.0\n"
+        "      11             4.0             1.0             0.0\n"
+        "      12             3.0             1.0             0.0\n"
+        "      13             3.0             0.0             1.0\n"
+        "      14             4.0             0.0             1.0\n"
+        "      15             4.0             1.0             1.0\n"
+        "      16             3.0             1.0             1.0\n"
+        "*ELEMENT_SOLID\n"
+        "       1       1       1       2       3       4       5       6       7       8\n"
+        "       2       2       9      10      11      12      13      14      15      16\n"
+        "*PART\nrubber\n" + _row(1, 1, 1, 0, "{HGID}") + "\n"
+        "*PART\nsteel\n" + _row(2, 1, 2, 0, "{HGID}") + "\n"
+        "*SECTION_SOLID\n"
+        "         1         1\n"
+        "{MAT}"
+        "*MAT_ELASTIC\n" + _row(2, "7.85E-9", 210000.0, 0.3) + "\n"
+        "{EXTRA}"
+        "*CONTROL_TERMINATION\n"
+        "       1.0\n"
+        "*END\n"
+    )
+
+    def test_multi_block_ref_geometry_merges_into_one_xref(self):
+        # One part's reference coordinates split across two keyword
+        # instances must produce ONE canonical /XREF/1 holding the union of
+        # both node tables (starter-verified: NUMBER OF NODES = 8, NORMAL
+        # TERMINATION, identical reference state to the duplicate-id form
+        # the reader happens to tolerate).
+        geom_a = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+            "       1             0.0             0.0             0.0\n"
+            "       2             1.1             0.0             0.0\n"
+            "       3             1.1             1.1             0.0\n"
+            "       4             0.0             1.1             0.0\n")
+        geom_b = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+            "       5             0.0             0.0             1.1\n"
+            "       6             1.1             0.0             1.1\n"
+            "       7             1.1             1.1             1.1\n"
+            "       8             0.0             1.1             1.1\n")
+        _, starter = _convert(SOLID_DECK.format(MAT=BLATZ_KO + geom_a + geom_b))
+        self.assertEqual(
+            sum(1 for ln in starter.splitlines() if ln == "/XREF/1"), 1)
+        raw = _raw_block(starter, "/XREF/1")
+        rows = [ln for ln in raw
+                if ln.strip() and not ln.startswith(("#", "/", "X"))]
+        self.assertEqual([int(r[0:10]) for r in rows[1:]], list(range(1, 9)))
+        self.assertEqual(_floats(rows[5][10:], 3), [0.0, 0.0, 1.1])  # node 5
+
+    def test_multi_block_overlap_later_instance_wins(self):
+        geom_a = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+            "       1             0.0             0.0             0.0\n"
+            "       2             1.1             0.0             0.0\n")
+        geom_b = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+            "       2             9.0             9.0             9.0\n")
+        _, starter = _convert(SOLID_DECK.format(MAT=BLATZ_KO + geom_a + geom_b))
+        raw = _raw_block(starter, "/XREF/1")
+        rows = [ln for ln in raw
+                if ln.strip() and not ln.startswith(("#", "/", "X"))]
+        by_nid = {int(r[0:10]): _floats(r[10:], 3) for r in rows[1:]}
+        self.assertEqual(by_nid[2], [9.0, 9.0, 9.0])                 # LS-DYNA
+        self.assertEqual(by_nid[1], [0.0, 0.0, 0.0])                 # last wins
+
+    def test_multi_block_ramp_conflict_takes_max_with_warning(self):
+        geom_a = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP\n"
+            + _row(25) + "\n"
+            "       1             0.0             0.0             0.0\n")
+        geom_b = (
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP\n"
+            + _row(100) + "\n"
+            "       5             0.0             0.0             1.1\n")
+        result, starter = _convert(
+            SOLID_DECK.format(MAT=BLATZ_KO + geom_a + geom_b))
+        raw = _raw_block(starter, "/XREF/1")
+        self.assertEqual(int(raw[3][0:10]), 100)                     # max Nitrs
+        self.assertTrue(any("NDTRRG" in w and "100" in w
+                            for w in result.warnings))
+
+    def test_data_minus_one_automatic_fit_not_warned(self):
+        # hm_read_mat69.F accepts LAWID -1 (automatic fitting; blank 0
+        # defaults to -1) — no false ERROR-882 warning.
+        mat = OGDEN_FIT.replace(_row(10.0, 5.0, 2.0, 77, 1.0),
+                                _row(10.0, 5.0, 2.0, 77, -1.0))
+        result, starter = _convert(SOLID_DECK.format(MAT=mat))
+        self.assertEqual(int(_block_lines(starter, "/MAT/LAW69/1")[2][0:10]), -1)
+        self.assertFalse([w for w in result.warnings if "882" in w])
+
+    def test_a_plus_b_zero_message_names_constants(self):
+        # A = -B (nonzero constants, mu_p = 2(A+B) = 0): the curve is
+        # skipped like the A=B=0 case, but the message must not claim
+        # "A=B=0" — the mu pairs are nonzero and still emitted.
+        mat = ("*MAT_MOONEY-RIVLIN_RUBBER\n"
+               + _row(1, "1.1E-9", 0.495, 1.0, -1.0) + "\n")
+        result, starter = _convert(SOLID_DECK.format(MAT=mat))
+        d = _block_lines(starter, "/MAT/LAW42/1")
+        self.assertEqual(int(d[2][50:60]), 0)                        # no curve
+        self.assertEqual(_floats(d[3], 2), [2.0, 2.0])               # 2A, -2B
+        self.assertTrue(any("A+B=0" in w and "A=1" in w and "B=-1" in w
+                            for w in result.warnings))
+        self.assertFalse([w for w in result.warnings if "A=B=0" in w])
+
+    def test_empty_material_card_skipped_with_warning(self):
+        # A material keyword with no data card must warn-and-skip, not
+        # crash the conversion with an IndexError.
+        for kw, container in (
+                ("*MAT_BLATZ-KO_RUBBER", "mat_blatz_ko"),
+                ("*MAT_MOONEY-RIVLIN_RUBBER", "mat_mooney_rivlin"),
+                ("*MAT_OGDEN_RUBBER", "mat_ogden"),
+                ("*MAT_HYPERELASTIC_RUBBER", "mat_hyper_rubber")):
+            state = _dispatch(SOLID_DECK.format(MAT=kw + "\n"))
+            self.assertEqual(getattr(state, container), {}, kw)
+            self.assertTrue(any("empty material card" in w
+                                for w in state.warnings), kw)
+
+    def test_law95_shared_section_drag_warned(self):
+        # Part 2 (elastic) shares *SECTION_SOLID 1 with the LAW95 part —
+        # the shared /PROP/SOLID switches to Ismstr=10 for both, while the
+        # native starter would promote only the LAW95 element group: warned.
+        deck = self.TWO_PART_DECK.replace("{HGID}", "0").format(
+            MAT=HYPER_DIRECT, EXTRA="")
+        result, starter = _convert(deck)
+        self.assertEqual(int(_block_lines(starter, "/PROP/SOLID/1")[1][10:20]),
+                         10)
+        self.assertTrue(any("LAW95" in w and "[2]" in w
+                            and "*SECTION_SOLID" in w
+                            for w in result.warnings))
+        # ... and a lone LAW95 part must NOT warn.
+        result1, _ = _convert(SOLID_DECK.format(MAT=HYPER_DIRECT))
+        self.assertFalse([w for w in result1.warnings
+                          if "share a *SECTION_SOLID" in w])
+
+    def test_law95_hourglass_split_prop_drag_warned(self):
+        # Both parts carry the same *HOURGLASS override, so they share one
+        # split /PROP — the LAW95 part promotes it to Ismstr=10 and drags
+        # the elastic sibling: warned on the overlay path too.
+        deck = self.TWO_PART_DECK.replace("{HGID}", "7").format(
+            MAT=HYPER_DIRECT,
+            EXTRA="*HOURGLASS\n" + _row(7, 4, 0.08) + "\n")
+        result, starter = _convert(deck)
+        self.assertTrue(any("hourglass-split /PROP/SOLID" in w and "[2]" in w
+                            for w in result.warnings))
+
+
 if __name__ == "__main__":
     unittest.main()

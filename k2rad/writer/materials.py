@@ -1671,7 +1671,18 @@ def _mat027_bulk_points(a: float, b: float, pr: float) -> List[Tuple[float, floa
     The j^0 terms are dyna2rad's C++ INTEGER divisions pow(j,(-1/3)) and
     pow(j,(1/3)) — both exponents evaluate to 0, so the intended cube-root
     terms are the constant 1.0. Reproduced as-built (the shipped converter's
-    output is the validation reference), not "fixed" to the textbook form."""
+    output is the validation reference), not "fixed" to the textbook form.
+
+    Engine semantics (sigeps42.F): the funIDbulk ordinate is a DIMENSIONLESS
+    multiplier on the Nu-derived bulk modulus — K_eff(J) = RBULK *
+    Fscale_bulk * f(J) (Fscale_bulk blank → 1.0, exactly what dyna2rad
+    leaves), NOT a pressure. The as-built curve evaluates to f(1) ≈ 1.0, so
+    the Nu-implied bulk stiffness is preserved at J ≈ 1 and f stays positive
+    over the whole 0.01..5 grid; the integer-division quirk only warps the
+    away-from-1 tangent-bulk profile vs. the intended cube-root shape. It
+    also bypasses the no-curve branch's anti-buckling P_FAC floor — one of
+    the free-explicit near-incompressible caveats documented in the
+    CHANGELOG."""
     mu_p = (2.0 * a * 2.0 + -2.0 * b * -2.0) / 2.0
     k = (2.0 * mu_p * (1.0 + pr)) / (3.0 * (1.0 - 2.0 * pr))
     d = (a * (5.0 * pr - 2.0) + b * (11.0 * pr - 5.0)) / (2.0 * (1.0 - 2.0 * pr))
@@ -1698,13 +1709,13 @@ def _resolve_law69_curve(state: ConversionState, kw: str, mat) -> None:
     (its /MOVE_FUNCT shift term misses the extra factor when the original
     curve carries OFFA/OFFO). Also flags an out-of-range DATA: dyna2rad
     writes LAW_ID = int(DATA) blindly, but the starter only accepts 1
-    (Ogden) / 2 (Mooney-Rivlin) / blank 0 → -1 automatic fit — anything
-    else is starter ERROR 882."""
-    if int(mat.data) not in (0, 1, 2):
+    (Ogden) / 2 (Mooney-Rivlin) / -1 automatic fit (blank 0 defaults to -1,
+    hm_read_mat69.F) — anything else is starter ERROR 882."""
+    if int(mat.data) not in (-1, 0, 1, 2):
         state.warn(
             f"{kw} mid={mat.mid}: DATA={mat.data:g} is not a valid "
             "experimental-data type (1=uniaxial/Ogden fit, 2=Mooney-Rivlin; "
-            "blank = automatic) — /MAT/LAW69 LAW_ID="
+            "-1 or blank = automatic) — /MAT/LAW69 LAW_ID="
             f"{int(mat.data)} is written like dyna2rad does, and the starter "
             "will reject it (ERROR 882); fix the *MAT card.")
     lcid = mat.lcid1
@@ -1793,11 +1804,19 @@ def _resolve_mat_hyper_rubber(state: ConversionState) -> None:
                 "emit NaN points) and Nu=0.5 will trip the starter's "
                 "incompressibility limit; use PR=0.495-0.4999.")
         elif mat.a + mat.b == 0.0:
-            state.warn(
-                f"{kw} mid={mat.mid}: A=B=0 gives a zero shear-modulus sum — "
-                "no funIDbulk curve (dyna2rad would emit NaN/inf points) and "
-                "the all-zero mu pairs are starter ERROR 828; give A/B or an "
-                "LCID test curve.")
+            if mat.a == 0.0 and mat.b == 0.0:
+                state.warn(
+                    f"{kw} mid={mat.mid}: A=B=0 gives a zero shear-modulus "
+                    "sum — no funIDbulk curve (dyna2rad would emit NaN/inf "
+                    "points) and the all-zero mu pairs are starter ERROR "
+                    "828; give A/B or an LCID test curve.")
+            else:
+                state.warn(
+                    f"{kw} mid={mat.mid}: A+B=0 (A={mat.a:g}, B={mat.b:g}) "
+                    "gives a zero shear-modulus sum mu_p=2(A+B) — no "
+                    "funIDbulk curve (its bulk modulus K=0 makes dyna2rad "
+                    "emit inf points); the ±2-power mu pairs are still "
+                    "emitted verbatim; check the constants.")
         else:
             fid = state.next_curve_id()
             _add_auto_curve(state, fid, f"Auto_MAT027_fbulk_mid{mat.mid}",

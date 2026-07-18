@@ -59,12 +59,17 @@ Prior history (before this changelog was introduced) is summarized in the
     non-finite `D1`; Bergstrom-Boyce network-B terms all 0 (creep off — the
     starter defaults the zero `C/M/KSI/TAU_REF` to their valid values). Solid
     sections serving a LAW95 part are emitted with `Ismstr=10`: the starter
-    force-promotes the whole property anyway ("ISMSTR IS CHANGED TO 10 SINCE
-    LAW 95 IS ONLY COMPATIBLE WITH ISMSTR=10", WARNING 1200), so pre-setting
-    it yields the identical formulation with a warning-clean deck. An
-    out-of-range `DATA` on the `N>0` paths (LAW_ID outside the starter's
-    -1/1/2) is emitted like dyna2rad writes it but flagged (starter
-    ERROR 882).
+    force-promotes any LAW95 element group at another Ismstr anyway ("ISMSTR
+    IS CHANGED TO 10 SINCE LAW 95 IS ONLY COMPATIBLE WITH ISMSTR=10",
+    WARNING 1200, `sgrtails.F`), so pre-setting it yields the identical
+    LAW95 formulation with a warning-clean deck; because the native
+    promotion is per element group, a non-LAW95 sibling part sharing that
+    section is dragged to total strain along with it — warned (mirroring the
+    `/XREF` shared-section warning), in both the shared-section and the
+    hourglass-overlay split-property paths. An out-of-range `DATA` on the
+    `N>0` paths (LAW_ID outside the starter's -1/1/2; blank 0 defaults to
+    the -1 automatic fit) is emitted like dyna2rad writes it but flagged
+    (starter ERROR 882).
   - New `/VISC/PRONY` machinery (`mat_VISC_PRONY.cfg FORMAT(radioss2021)` —
     **no title line**, 10-space literal gap on the `M` card, 4-field
     `G_i Beta_i Ki Beta_ki` rows): emitted under the material's own id from
@@ -83,6 +88,14 @@ Prior history (before this changelog was introduced) is summarized in the
     emission is unconditional like dyna2rad's (the material `REF` flags only
     drive coverage warnings: `REF=1` without usable reference geometry warns;
     dyna2rad's MAT_007 nodeless `/XREF` stub is deliberately not replicated).
+    Multiple `*INITIAL_FOAM_REFERENCE_GEOMETRY` keyword instances covering
+    one part are MERGED into that part's single `/XREF` (later instances win
+    per node id; conflicting `_RAMP` `NDTRRG` values resolve to the largest,
+    warned) — dyna2rad's per-instance emission writes duplicate
+    `/XREF/<pid>` ids there, which the current starter happens to union
+    benignly (`hm_read_xref.F` tags nodes per option; starter-verified
+    identical reference state), but one `/XREF` per component is the
+    spec-sanctioned canonical form.
     Parts the starter would hard-reject are warn-skipped instead of emitted
     (solid `/XREF` law whitelist 1/35/38/42/70/88/90 — ERROR 2014 — and the
     8/4-node solid restriction — ERROR 2013), and the kept parts' solid
@@ -98,6 +111,20 @@ Prior history (before this changelog was introduced) is summarized in the
     are `MU4/MU6` / `C20/C30` float constants a static spec would corrupt);
     the foam-reference node table in the `*NODE` I8/E16 format (the `_RAMP`
     `NDTRRG` header card is never rewritten).
+  - Solver-validation notes (single-element, Mg-mm-s): under prescribed
+    isochoric uniaxial deformation the converted LAW42 (Mooney-Rivlin,
+    Ogden, Blatz-Ko deviatoric) and LAW95 stresses match the analytic
+    incompressible stress-stretch curves to 0.00% at λ = 1.20/1.35/1.50,
+    and LAW95 cross-checks LAW42 to machine precision. Caveat for FREE
+    near-incompressible explicit runs (K/G ≈ 100 at PR ≈ 0.495, undamped):
+    single elements exhibit the classic volumetric ringing / volume-growth
+    artifacts of explicit dynamics (the LAW42 `funIDbulk` ordinate is a
+    dimensionless multiplier on the Nu-derived bulk — `sigeps42.F`
+    `K_eff = RBULK·Fscale·f(J)`, `f(1) ≈ 1.0` as-built, so the Nu-implied
+    bulk is active; the curve is NOT a softness bug, but it does bypass the
+    no-curve branch's anti-buckling `P_FAC` floor). Real models should ramp
+    loads, add damping/bulk viscosity, or run implicit quasi-static —
+    solver behavior, not a conversion deviation.
 
 - **Johnson-Cook metals** (`*MAT_JOHNSON_COOK` / MAT_015 and
   `*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE` / MAT_099, incl. the

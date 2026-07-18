@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from ..state import ConversionState
 from .mesh import _effective_solid_isolid
 from .common import (
@@ -375,10 +375,22 @@ def _make_xref(state: ConversionState) -> List[str]:
 
     Follows dyna2rad ConvertInitialFoamReferenceGeometry (CCV:542-653):
     conversion is unconditional (the material REF flags never gate it — they
-    only drive the coverage warnings in _resolve_mat_hyper_rubber), one block
-    per (keyword instance x intersecting part), node list ascending, block
-    named "XREF_PART_<pid>", Nitrs = the _RAMP NDTRRG when > 0 (else 0 →
-    starter default). Card layout audited against hm_cfg_files
+    only drive the coverage warnings in _resolve_mat_hyper_rubber), node list
+    ascending, block named "XREF_PART_<pid>", Nitrs = the _RAMP NDTRRG when
+    > 0 (else 0 → starter default). Unlike dyna2rad's per-keyword-instance
+    emission, ALL *INITIAL_FOAM_REFERENCE_GEOMETRY blocks are merged into
+    exactly ONE /XREF per part (later instances win per node id, LS-DYNA
+    last-definition order). A part whose reference coordinates are split
+    across several keyword instances would otherwise emit duplicate /XREF
+    ids — the current starter happens to tolerate that (hm_read_xref.F tags
+    nodes per option and only overwrites tagged ones, so duplicate-id blocks
+    union to the same reference state, starter-verified), but the Radioss
+    spec defines one /XREF per component and the merged block is the
+    canonical form (single echo, no reliance on the reader's duplicate-id
+    tolerance). Conflicting _RAMP NDTRRG values feeding one part resolve to
+    the largest, warned (the starter itself keeps a global
+    NITRS = MAX(all options, floor 100) — the per-part max feeds it
+    identically). Card layout audited against hm_cfg_files
     INITIAL_GEOMETRY/xref.cfg FORMAT(radioss90), the block a /BEGIN 2022 deck
     is read with — the header id is the PART (component) id, NOT a material:
       /XREF/<part_ID> / title(100) / Nitrs(10) /
@@ -388,23 +400,37 @@ def _make_xref(state: ConversionState) -> List[str]:
         return []
     pnodes = _part_node_sets(state)
     lines: List[str] = ["#-  REFERENCE GEOMETRY (/XREF):", HDR]
-    for ref in state.foam_ref_geoms:
-        ref_nids = set(ref.nodes)
-        for pid in sorted(state.xref_part_ids):
-            common = sorted(pnodes.get(pid, set()) & ref_nids)
+    for pid in sorted(state.xref_part_ids):
+        part_nids = pnodes.get(pid, set())
+        merged: Dict[int, Tuple[float, float, float]] = {}
+        nitrs_vals: List[int] = []
+        for ref in state.foam_ref_geoms:
+            common = part_nids & set(ref.nodes)
             if not common:
                 continue
-            lines += [
-                f"/XREF/{pid}",
-                f"XREF_PART_{pid}",
-                "#    Nitrs",
-                f"{_i(ref.ndtrrg if ref.ndtrrg > 0 else 0)}",
-                "#  node_ID                   X                   Y                   Z",
-            ]
             for nid in common:
-                x, y, z = ref.nodes[nid]
-                lines.append(f"{_i(nid)}{_f(x)}{_f(y)}{_f(z)}")
-            lines.append(HDR)
+                merged[nid] = ref.nodes[nid]
+            if ref.ndtrrg > 0:
+                nitrs_vals.append(ref.ndtrrg)
+        if not merged:
+            continue
+        if len(set(nitrs_vals)) > 1:
+            state.warn(
+                f"*INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP: part {pid} is covered "
+                f"by keyword instances with different NDTRRG values "
+                f"{sorted(set(nitrs_vals))} — the merged /XREF/{pid} can carry "
+                f"only one Nitrs; using the largest ({max(nitrs_vals)}).")
+        lines += [
+            f"/XREF/{pid}",
+            f"XREF_PART_{pid}",
+            "#    Nitrs",
+            f"{_i(max(nitrs_vals) if nitrs_vals else 0)}",
+            "#  node_ID                   X                   Y                   Z",
+        ]
+        for nid in sorted(merged):
+            x, y, z = merged[nid]
+            lines.append(f"{_i(nid)}{_f(x)}{_f(y)}{_f(z)}")
+        lines.append(HDR)
     return lines
 
 

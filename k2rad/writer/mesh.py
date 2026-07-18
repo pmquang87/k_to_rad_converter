@@ -1321,16 +1321,34 @@ def _make_properties(state: ConversionState) -> List[str]:
                 "(total-strain formulation). Give the /XREF parts their own "
                 "*SECTION_SOLID to keep the others at the default.")
     # ... and so are sections serving a /MAT/LAW95 (MAT_077_H N=0) part: the
-    # starter force-promotes the whole property anyway ("ISMSTR IS CHANGED TO
-    # 10 SINCE LAW 95 IS ONLY COMPATIBLE WITH ISMSTR=10", WARNING 1200, at
-    # property scope — shared sections included). Pre-setting it emits the
-    # identical formulation with a warning-clean deck.
+    # starter force-promotes any LAW95 element group at another Ismstr anyway
+    # ("ISMSTR IS CHANGED TO 10 SINCE LAW 95 IS ONLY COMPATIBLE WITH
+    # ISMSTR=10", WARNING 1200, sgrtails.F). Pre-setting it on the property
+    # emits the identical LAW95 formulation with a warning-clean deck — but
+    # the native promotion is per ELEMENT GROUP, so a non-LAW95 sibling on a
+    # shared section would natively keep its default while the pre-set prop
+    # switches it to total strain too: warned, mirroring the /XREF drag.
     law95_pids = {pid for pid, part in state.parts.items()
                   if part.mid in state.mat_hyper_rubber
                   and state.mat_hyper_rubber[part.mid].n == 0}
-    ismstr10_secids: Set[int] = xref_secids | {
+    law95_secids: Set[int] = {
         part_secids[pid] for pid in law95_pids
         if pid in solid_elem_pids and pid in part_secids}
+    if law95_secids:
+        dragged95 = sorted(pid for pid, sid in part_secids.items()
+                           if sid in law95_secids and pid in solid_elem_pids
+                           and pid not in law95_pids
+                           and pid not in xref_solid_pids)
+        if dragged95:
+            state.warn(
+                "/MAT/LAW95 (*MAT_HYPERELASTIC_RUBBER N=0): solid part(s) "
+                f"{dragged95} share a *SECTION_SOLID with a LAW95 part, so "
+                "their shared /PROP/SOLID also switches to Ismstr=10 "
+                "(total-strain formulation); the native starter promotes "
+                "only the LAW95 element groups (WARNING 1200) and would "
+                "leave these parts at the default. Give the LAW95 parts "
+                "their own *SECTION_SOLID to keep the others unchanged.")
+    ismstr10_secids: Set[int] = xref_secids | law95_secids
 
     # Spotweld beam parts become /SPRING connectors (their /PROP/TYPE13 is
     # emitted by _make_spotweld_beam_connectors); their beams must not force an
@@ -1815,15 +1833,28 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
             # A /XREF or /MAT/LAW95 part split out by the hourglass overlay
             # keeps the Ismstr=10 its formulation requires (starter ERROR 2013
-            # for /XREF; the starter force-promotes LAW95 props with WARNING
-            # 1200 anyway). The split prop may be shared by siblings — any
-            # such sibling promotes it (mirrors the shared-section path).
-            ismstr = 10 if any(
-                p in state.xref_part_ids
+            # for /XREF; the starter force-promotes LAW95 element groups with
+            # WARNING 1200 anyway). The split prop may be shared by siblings —
+            # any such sibling promotes it, and siblings that are neither
+            # /XREF nor LAW95 are dragged along: warned, mirroring the
+            # shared-section path (natively they would keep their default).
+            promoters = [
+                p for p in siblings
+                if p in state.xref_part_ids
                 or (state.parts.get(p) is not None
                     and state.parts[p].mid in state.mat_hyper_rubber
-                    and state.mat_hyper_rubber[state.parts[p].mid].n == 0)
-                for p in siblings) else 0
+                    and state.mat_hyper_rubber[state.parts[p].mid].n == 0)]
+            ismstr = 10 if promoters else 0
+            dragged = sorted(p for p in siblings if p not in promoters)
+            if promoters and dragged:
+                state.warn(
+                    f"hourglass-split /PROP/SOLID {prop_id}: part(s) {dragged} "
+                    f"share it with /XREF or /MAT/LAW95 part(s) "
+                    f"{sorted(promoters)}, so they also switch to Ismstr=10 "
+                    "(total-strain formulation) — natively they would keep "
+                    "the default. Give the /XREF or LAW95 parts their own "
+                    "*SECTION_SOLID or *HOURGLASS to keep the others "
+                    "unchanged.")
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:
