@@ -4976,10 +4976,25 @@ class BlastLoadTests(unittest.TestCase):
         self.assertEqual(card1[10:20].strip(), "2")        # Exp_data (surface burst)
         self.assertEqual(card1[30:40].strip(), "100")      # Ndt
         self.assertEqual(card1[40:50].strip(), "2")        # IZ
+        self.assertEqual(card1[50:60].strip(), "2")        # Imodel (see below)
         self.assertEqual(len(card1), 100)
         self.assertAlmostEqual(float(card2[0:20]), 2.5)    # Xdet
         self.assertAlmostEqual(float(card2[40:60]), 5.0)   # Zdet
         self.assertAlmostEqual(float(card2[80:100]), 50.0)  # WTNT
+
+    def test_blast_uses_impulse_matched_friedlander_imodel2(self):
+        """/LOAD/PBLAST must use Imodel=2, not the b=1.0 classical Friedlander.
+
+        Imodel=2 (the Radioss default) solves the decay coefficient b so the pulse
+        reproduces the tabulated Kingery-Bulmash IMPULSE, which is what LS-DYNA's
+        *LOAD_BLAST_ENHANCED does. Imodel=1 pins b=1.0, leaving peak pressure and
+        positive-phase duration right but the delivered impulse wrong — and wrong
+        non-uniformly with standoff. Impulse is what drives panel response, so a
+        regression here silently changes every blast result.
+        """
+        _r, starter, _e = self._convert()
+        card1 = self._data_after(starter, "/LOAD/PBLAST/")[1]
+        self.assertEqual(card1[50:60].strip(), "2")
 
     def test_blast_type2_maps_to_free_air_exp_data1(self):
         # LS-DYNA BLAST=2 (spherical free-air) → OpenRadioss Exp_data=1.

@@ -278,7 +278,17 @@ def _make_blast_loads(state: ConversionState) -> List[str]:
             f"/LOAD/PBLAST/{pblast_id}",
             f"blast_bid{src.bid}_ssid{load.ssid}"[:100],
             "#  surf_ID  Exp_data  I_tshift       Ndt        IZ    Imodel                                 Node_id",
-            (_i(surf_id) + _i(exp_data) + _i(1) + _i(100) + _i(2) + _i(1)
+            # Imodel=2 (the Radioss default, hm_read_pblast.F blank→2) solves the
+            # Friedlander decay coefficient b so the pulse reproduces the TABULATED
+            # Kingery-Bulmash impulse — which is what LS-DYNA's *LOAD_BLAST_ENHANCED
+            # does (both trace to Randers-Pehrson & Bannister 1997). Imodel=1 pins
+            # b=1.0 (pblast_mod.F90 forces decay_inci=decay_refl=1.0 for Imodel/=2):
+            # peak pressure and positive-phase duration stay correct, but since
+            # I = P*t0*(b-1+exp(-b))/b^2 the delivered IMPULSE is wrong, and wrong
+            # non-uniformly — under-delivering close to the charge and over-
+            # delivering in the far field. Impulse is what sets the structural
+            # response of a blast-loaded panel, so this must not be hard-coded to 1.
+            (_i(surf_id) + _i(exp_data) + _i(1) + _i(100) + _i(2) + _i(2)
              + " " * 30 + _i(0)),
             "#               Xdet                Ydet                Zdet                Tdet                WTNT",
             _f(src.xbo) + _f(src.ybo) + _f(src.zbo) + _f(src.tbo) + _f(src.m),
