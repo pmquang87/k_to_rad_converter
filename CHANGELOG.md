@@ -111,6 +111,63 @@ Prior history (before this changelog was introduced) is summarized in the
     dropped and every `/PROP` hourglass field was hard-zeroed to the Radioss
     defaults. Starter- and engine-validated (0 errors: `Isolid 5` accepted
     with `h` active, `Isolid 24` from the global card).
+- **Contact interfaces**
+  - `*CONTACT_AUTOMATIC_GENERAL` now honours the `dyna2rad` **`SOFT`-sentinel
+    routing** (`convertcontacts.cxx` cc:133-164) instead of the old blunt
+    single-surface alias: `SOFT=-7` → `/INTER/TYPE7`, `SOFT=-11` →
+    `/INTER/TYPE11` **edge-to-edge (line) contact**, `SOFT=-19` →
+    `/INTER/TYPE19` (surface+edge); any ordinary `SOFT` (0/1/2/blank, or no
+    optional Card A) keeps the validated single-surface routing byte-for-byte
+    (`/INTER/TYPE25` explicit self-contact or `/INTER/TYPE7` implicit).
+    - **New `/LINE` emission** (greenfield — k2rad emitted no edge/line entity
+      before). The `SOFT=-11` path **synthesizes the `/LINE` group(s)** the
+      `/INTER/TYPE11` `line_IDs`/`line_IDm` fields require (`/SETS/LINE`, per
+      `hm_cfg_files` `INTER/inter_type11.cfg` `FORMAT(radioss2020)` +
+      `hm_read_inter_type11.F`): a **`/LINE/SEG`** (2-node edges, layout audited
+      against `SETS/line.cfg` `FORMAT(radioss51)`) built from a `*SET_SEGMENT`'s
+      consecutive-node-pair edges, otherwise a **`/LINE/SURF`** over the part
+      surface so the starter derives the edges. `line_IDm=0` = self edge-impact.
+      (`dyna2rad` forwards the raw `/SET/GENERAL` into `line_IDs` and defers edge
+      derivation to the starter; k2rad has no `/SET/GENERAL` contact path and
+      TYPE11 requires genuine `/LINE` groups, so it builds them — the faithful
+      option (b) the `dyna2rad` source itself names.) `SOFT=-19` needs no
+      `/LINE`: it hands two `/SURF` to the starter, which auto-generates the
+      child TYPE7+TYPE11.
+    - Friction (`FS` → scalar Coulomb `Fric`), Gapmin (Card-3 `SST`/`MST` via
+      `_sst_mst_to_gapmin`), Inacti (`IGNORE` via `_ignore_to_inacti`), VisS
+      (`VDC`) and Stfac (`SFS`) route through the same plumbing as TYPE7/TYPE25.
+      `--inter-gapmin`/`--auto-gapmin` deliberately do **not** reach the
+      SOFT-routed interfaces (a separate `state.contacts_general` list). That
+      list is threaded into the three sites that treat single/surf2surf/tied as
+      *all* contacts: the implicit contact-free stabilization stub is suppressed
+      when a general contact exists (no spurious all-parts self-contact), and
+      `*DATABASE_NCFORC` → `/TH/INTER` plus the `*CONTACT_FORCE_TRANSDUCER`
+      parent fallback both include general interfaces.
+    - The `SOFT=-7` route emits **`Istf=2`, `Igap=2`** (matching `dyna2rad`'s
+      routed-TYPE7 map cc:52 + the `SOFT<1` rule cc:626), not the plain
+      single-surface emitter defaults (`Istf=4`, `Igap=0`), so all three routed
+      types share `dyna2rad`'s stiffness/gap model. Deliberate, documented
+      deviations from `dyna2rad` (all consistent with k2rad's validated TYPE7
+      family and harmless when scale factors are unit/blank and `FS==FD`): the
+      engagement gap is `(|SST|+|MST|)/2` rather than the scale-weighted
+      `fabs(SST·SFST+MST·SFMT)/2`; `Inacti=5` (validated — node-moving
+      `Inacti=6` seg-faults rigid-body secondary nodes) rather than a fixed 6;
+      scalar `Fric=FS`/`Ifric=0` rather than `FD·FSF`+decay/`Ifric=2` on the
+      -7/-19 routes. `SOFT=-7`/`-19` sides resolve part/part-set only (a
+      `*SET_SEGMENT`/`*SET_NODE` side is skipped with a warning; use `-11` or
+      restrict to parts).
+  - `*CONTACT_TIED_SURFACE_TO_SURFACE` (+ `_OFFSET`/`_CONSTRAINED_OFFSET`) now
+    applies the `dyna2rad` **negative-offset discriminator** (`convertcontacts.cxx`
+    cc:220) `(SFST*SST + SFMT*MST)/2 < 0` → **`/INTER/TYPE10`** (penalty tie,
+    `FORMAT(radioss120)`) instead of the always-`/INTER/TYPE2`; `≥ 0` keeps the
+    kinematic TYPE2. The discriminator uses the **raw** Card-3 `SFST`/`SFMT`
+    (no zero→1 defaulting — a blank scale factor always stays TYPE2), so TYPE10
+    needs a nonzero `SFST`/`SFMT` together with a negative `SST`/`MST`. TYPE10
+    bonds by a penalty spring over `GAP=(|SST|+|MST|)/2`, so (unlike the
+    kinematic TYPE2) its secondary nodes may coexist with `/RBODY` and its
+    rotations are not tied. Card-3 `SST`/`MST`/`SFST`/`SFMT`/`SFS`/`SFM` are now
+    parsed (previously only `SST`/`MST` were kept). NODES/SHELL_EDGE tied
+    variants stay kinematic TYPE2 (the discriminator is a SURFACE construct).
 - **Connectors**
   - `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
     `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`

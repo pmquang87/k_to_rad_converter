@@ -333,7 +333,19 @@ points are averaged per layer with a warning
 other counts average with a warning)
 
 ### Contact
-`*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`, `_GENERAL`) → `/INTER/TYPE7`
+`*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`) → `/INTER/TYPE25` self-contact
+(explicit) or `/INTER/TYPE7` node→surface (implicit)
+`*CONTACT_AUTOMATIC_GENERAL` → routed by the optional-Card-A `SOFT` field, matching
+dyna2rad's sentinel convention: `SOFT=-7` → `/INTER/TYPE7`, `SOFT=-11` →
+`/INTER/TYPE11` **edge-to-edge (line) contact**, `SOFT=-19` → `/INTER/TYPE19`
+(surface+edge); any ordinary `SOFT` (0/1/2/blank) falls back to the single-surface
+routing above. For `SOFT=-11` k2rad **synthesizes the `/LINE` group(s)** the
+interface needs — a `/LINE/SEG` (2-node edges) from a `*SET_SEGMENT`'s segment
+edges, otherwise a `/LINE/SURF` over the part surface so the starter derives the
+edges — and references them from the interface (`line_IDm=0` = self edge-impact).
+`SOFT=-19` hands two `/SURF` to the starter, which auto-generates the child
+TYPE7+TYPE11 (no hand-built `/LINE`). (`--inter-gapmin`/`--auto-gapmin` do not
+reach these SOFT-routed interfaces; their engagement gap is the Card-3 `SST`/`MST`.)
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`
 `*CONTACT_..._TIEBREAK` (`SURFACE_TO_SURFACE_TIEBREAK`, `_ONE_WAY_...`,
 `TIEBREAK_{SURFACE,NODES}_TO_SURFACE`) → `/INTER/TYPE7` for the post-failure
@@ -341,10 +353,15 @@ contact, **with a warning that the cohesive pre-bond (NFLS/SFLS stress failure)
 has no open-source OpenRadioss equivalent and is dropped** — the parts contact
 but do not pre-bond
 `*CONTACT_TIED_{NODES,SHELL_EDGE,SURFACE}_TO_SURFACE` (+ `_OFFSET` variants) →
-`/INTER/TYPE2` (tied kinematic interface): slave `*SET_NODE_LIST` (SSTYP=4) →
+`/INTER/TYPE2` (tied **kinematic** interface): slave `*SET_NODE_LIST` (SSTYP=4) →
 `/GRNOD`, master `*SET_SEGMENT` (MSTYP=0) → `/SURF/SEG`; parts / part sets on
 either side are also resolved. `Spotflag=1` (spotweld formulation) for the
 NODES/SHELL_EDGE weld variants, `Spotflag=5` (standard) for SURFACE_TO_SURFACE.
+A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` with a **negative offset** —
+dyna2rad's discriminator `(SFST*SST + SFMT*MST)/2 < 0` (raw Card-3 scale factors,
+no zero→1 defaulting, so a blank `SFST`/`SFMT` always stays TYPE2) — instead
+becomes `/INTER/TYPE10` (**penalty** tie: bonds by a spring over `GAP=(|SST|+|MST|)/2`,
+so its secondary nodes may coexist with `/RBODY` and rotations are not tied).
 The TYPE2 `dsearch` is measured from the mesh — the worst slave-node-to-master-
 segment distance × 1.2 — so tied nodes offset from a shell master's MID-PLANE
 by half the plate thickness (the usual welded-shell layout) stay tied;

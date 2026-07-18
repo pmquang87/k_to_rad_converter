@@ -973,6 +973,38 @@ class ContactAutoSurf2Surf:
 
 
 @dataclass
+class ContactAutoGeneral:
+    """*CONTACT_AUTOMATIC_GENERAL whose LS-DYNA optional-Card-A ``SOFT`` field
+    carries a dyna2rad sentinel (-7 / -11 / -19) that routes it to a specific
+    OpenRadioss interface, instead of the ordinary single-surface self-contact.
+
+    dyna2rad (``convertcontacts.cxx`` cc:133-164) reads ``LSDYNA_SOFT`` and:
+      * SOFT == -7  → /INTER/TYPE7  (node-group → surface penalty self-contact)
+      * SOFT == -11 → /INTER/TYPE11 (edge-to-edge / line contact)
+      * SOFT == -19 → /INTER/TYPE19 (combined surface + edge contact)
+      * anything else (0/1/2/…) → the default (handled by ``ContactAutoSingle``
+        → /INTER/TYPE25 explicit or /INTER/TYPE7 implicit, unchanged).
+
+    Only the three sentinel-routed cases land here; the default case is appended
+    to ``contacts_single`` so the validated single-surface path is byte-for-byte
+    unchanged. When ``msid`` is 0 the contact is self-contact and the writer
+    mirrors ``ssid`` onto the main side (dyna2rad cc:139-163).
+    """
+    inter_id: int
+    title: str
+    ssid: int; sstyp: int
+    msid: int; mstyp: int
+    soft: int               # -7 → TYPE7, -11 → TYPE11, -19 → TYPE19
+    fs: float; fd: float    # static / dynamic friction (fs → scalar Fric)
+    bt: float; dt: float    # birth / death time
+    ignore: int = 0         # optional Card E IGNORE → Inacti (via _ignore_to_inacti)
+    vdc: float = 0.0        # Card2 viscous damping (% critical) → VisS
+    sst: float = 0.0        # Card3 SST contact thickness, secondary → Gapmin
+    mst: float = 0.0        # Card3 MST contact thickness, main → Gapmin
+    sfs: float = 0.0        # Card3 SFS slave penalty stiffness scale → Stfac
+
+
+@dataclass
 class ContactTied:
     """*CONTACT_TIED_* — a tied (glued) contact → OpenRadioss /INTER/TYPE2.
 
@@ -989,6 +1021,15 @@ class ContactTied:
     ``sst``/``mst`` are the Card-3 contact thicknesses: LS-DYNA gives a
     NEGATIVE value the special meaning "absolute tie-criterion distance", which
     the writer honours as a floor on the /INTER/TYPE2 dsearch.
+
+    ``sfst``/``sfmt`` (Card-3 scale factors on SST/MST) drive the dyna2rad
+    kinematic-vs-penalty discriminator (``convertcontacts.cxx`` cc:220):
+    ``(SFST*SST + SFMT*MST)/2 < 0`` → penalty tie /INTER/TYPE10, otherwise the
+    kinematic tie /INTER/TYPE2. A negative SST/MST with a nonzero SFST/SFMT is
+    LS-DYNA's "maintain the physical offset" flag, which dyna2rad maps to the
+    penalty TYPE10 (physical gap kept) rather than TYPE2 (secondary nodes
+    projected onto the main segment). ``sfs``/``sfm`` (Card-3 penalty stiffness
+    scales) size the TYPE10 GAP.
     """
     inter_id: int
     title: str
@@ -998,6 +1039,10 @@ class ContactTied:
     offset: bool = False    # _OFFSET / _CONSTRAINED_OFFSET / _BEAM_OFFSET keyword flavour
     sst: float = 0.0        # Card3 SST (negative = absolute tie distance)
     mst: float = 0.0        # Card3 MST (negative = absolute tie distance)
+    sfs: float = 0.0        # Card3 SFS (secondary penalty stiffness scale)
+    sfm: float = 0.0        # Card3 SFM (main penalty stiffness scale)
+    sfst: float = 0.0       # Card3 SFST (scale on SST) — TYPE10 discriminator term
+    sfmt: float = 0.0       # Card3 SFMT (scale on MST) — TYPE10 discriminator term
 
 
 @dataclass
@@ -1857,7 +1902,9 @@ class ConversionState:
     # ── Contacts ───────────────────────────────────────────────
     contacts_single: List[ContactAutoSingle] = field(default_factory=list)
     contacts_surf2surf: List[ContactAutoSurf2Surf] = field(default_factory=list)
-    # *CONTACT_TIED_* → /INTER/TYPE2 (tied kinematic interface)
+    # *CONTACT_AUTOMATIC_GENERAL with a SOFT sentinel → /INTER/TYPE7|11|19
+    contacts_general: List[ContactAutoGeneral] = field(default_factory=list)
+    # *CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie)
     contacts_tied: List[ContactTied] = field(default_factory=list)
     force_transducers: List[ContactForceTransducer] = field(default_factory=list)
     # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS

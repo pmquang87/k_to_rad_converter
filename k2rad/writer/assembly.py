@@ -28,6 +28,7 @@ from .mesh import (
 )
 from .contacts import (
     _make_force_transducers,
+    _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
     _recipe_active,
@@ -551,6 +552,7 @@ def _starter_section_registry():
         ("extra_groups",      lambda c: _make_extra_groups(c.state)),
         ("rlinks",            lambda c: _make_rlinks(c.state)),
         ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
+        ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
         ("rbodies",           lambda c: c.rbody_lines),

@@ -28,7 +28,8 @@ from .state import (
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
-    ContactAutoSingle, ContactAutoSurf2Surf, ContactForceTransducer, ContactTied,
+    ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
+    ContactForceTransducer, ContactTied,
     InitialVelocityNode, InitialVelocityRigidBody,
     InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
@@ -1574,6 +1575,20 @@ def _read_contact_ignore(raw: List[str], offset: int) -> int:
     return to_int(f[1]) if len(f) > 1 else 0
 
 
+def _read_contact_soft(raw: List[str], offset: int) -> int:
+    """Read LS-DYNA optional Card A field 1 = SOFT (soft-constraint formulation).
+
+    Card A sits immediately after Card 3 (offset+3), consistent with
+    _read_contact_ignore's assumption that Cards A/B/C are all present (it reads
+    IGNORE from Card C at offset+5). dyna2rad routes *CONTACT_AUTOMATIC_GENERAL
+    on this field: SOFT -7/-11/-19 are hand-entered sentinels selecting
+    /INTER/TYPE7/TYPE11/TYPE19; any ordinary value (0/1/2/blank, or Card A
+    absent) leaves SOFT=0 → the default single-surface routing.
+    """
+    f = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    return to_int(f[0]) if f and f[0].strip() else 0
+
+
 def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
                       f1: List[str]) -> None:
     """Warn (loudly) when a contact Card 1 carries SBOXID/MBOXID (fields 5/6).
@@ -1626,6 +1641,64 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     state.contacts_single.append(
         ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore,
                           vdc=vdc, sst=sst, mst=mst, sfs=sfs)
+    )
+
+
+def handle_contact_automatic_general(block: Block, state: ConversionState) -> None:
+    """*CONTACT_AUTOMATIC_GENERAL — dyna2rad SOFT-sentinel routing.
+
+    The optional-Card-A SOFT field selects the OpenRadioss interface
+    (``convertcontacts.cxx`` cc:133-164):
+
+      * SOFT == -7  → /INTER/TYPE7  (penalty node→surface self-contact)
+      * SOFT == -11 → /INTER/TYPE11 (edge-to-edge / line self-contact)
+      * SOFT == -19 → /INTER/TYPE19 (combined surface + edge self-contact)
+      * any other value (0/1/2/blank, or Card A absent) → the ordinary
+        single-surface path (unchanged: /INTER/TYPE25 explicit, /INTER/TYPE7
+        implicit). These -7/-11/-19 values are a dyna2rad-only sentinel
+        convention (nothing in LS-DYNA writes them) — the user hand-enters SOFT
+        to request the edge/line interface, exactly as dyna2rad expects.
+
+    For a sentinel-routed contact with MSID==0 the interface is self-contact and
+    the writer mirrors SSID onto the main side (dyna2rad cc:139-163).
+    """
+    inter_id, title, offset = _parse_contact_header(block)
+    raw = block.raw
+    soft = _read_contact_soft(raw, offset)
+    if soft not in (-7, -11, -19):
+        # Ordinary AUTOMATIC_GENERAL → the validated single-surface routing,
+        # byte-for-byte unchanged (no regression on the default case).
+        handle_contact_automatic_single_surface(block, state)
+        return
+
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    # Card1: ssid msid sstyp mstyp sboxid mboxid spr mpr
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid  = to_int(f1[0]) if f1 else 0
+    msid  = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
+    # Card2: fs fd dc vc vdc penchk bt dt
+    f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs = to_float(f3[0]) if f3 else 0.0
+    fd = to_float(f3[1]) if len(f3) > 1 else 0.0
+    bt = to_float(f3[6]) if len(f3) > 6 else 0.0
+    dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf
+    f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f4[0]) if f4 else 0.0
+    sst = to_float(f4[2]) if len(f4) > 2 else 0.0
+    mst = to_float(f4[3]) if len(f4) > 3 else 0.0
+    ignore = _read_contact_ignore(raw, offset)
+    # Self-contact mirror: MSID==0 → main side = secondary side (dyna2rad cc:139-163).
+    if msid == 0:
+        msid, mstyp = ssid, sstyp
+    state.contacts_general.append(
+        ContactAutoGeneral(inter_id, title, ssid, sstyp, msid, mstyp, soft,
+                           fs, fd, bt, dt, ignore, vdc=vdc, sst=sst, mst=mst, sfs=sfs)
     )
 
 
@@ -1688,8 +1761,11 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
            master commonly a *SET_SEGMENT, mstyp=0)
     Card2: fs fd dc vc vdc penchk bt dt — friction is meaningless on a tie and
            is not carried over.
-    Card3: sfs sfm sst mst — a NEGATIVE sst/mst is LS-DYNA's "absolute
-           tie-criterion distance", kept as a floor for the TYPE2 dsearch.
+    Card3: sfs sfm sst mst sfst sfmt — a NEGATIVE sst/mst is LS-DYNA's "absolute
+           tie-criterion distance", kept as a floor for the TYPE2 dsearch. The
+           dyna2rad discriminator (SFST*SST + SFMT*MST)/2 < 0 routes the contact
+           to the penalty tie /INTER/TYPE10 instead of the kinematic /INTER/TYPE2
+           (decided in the writer); sfs/sfm size the TYPE10 GAP.
     """
     inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
@@ -1700,9 +1776,14 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
-    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
-    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    sfs  = to_float(f3[0]) if len(f3) > 0 else 0.0
+    sfm  = to_float(f3[1]) if len(f3) > 1 else 0.0
+    sst  = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst  = to_float(f3[3]) if len(f3) > 3 else 0.0
+    sfst = to_float(f3[4]) if len(f3) > 4 else 0.0
+    sfmt = to_float(f3[5]) if len(f3) > 5 else 0.0
 
     kw = block.keyword                       # e.g. CONTACT_TIED_NODES_TO_SURFACE_OFFSET
     if "SHELL_EDGE" in kw:
@@ -1713,7 +1794,8 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
         variant = "SURFACE_TO_SURFACE"
     state.contacts_tied.append(
         ContactTied(inter_id, title, ssid, sstyp, msid, mstyp, variant,
-                    offset=kw.endswith("OFFSET"), sst=sst, mst=mst)
+                    offset=kw.endswith("OFFSET"), sst=sst, mst=mst,
+                    sfs=sfs, sfm=sfm, sfst=sfst, sfmt=sfmt)
     )
 
 
@@ -4161,7 +4243,7 @@ HANDLERS = {
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK": handle_contact_tiebreak,
     "CONTACT_TIEBREAK_SURFACE_TO_SURFACE":    handle_contact_tiebreak,
     "CONTACT_TIEBREAK_NODES_TO_SURFACE":      handle_contact_tiebreak,
-    "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_single_surface,
+    "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_general,
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
     "CONTACT_FORCE_TRANSDUCER_PENALTY":        handle_contact_force_transducer,
     "CONTACT_FORCE_TRANSDUCER":                handle_contact_force_transducer,
