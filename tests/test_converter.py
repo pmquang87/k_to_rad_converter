@@ -1644,6 +1644,125 @@ tet10 part
 """
 
 
+SH3N_K = """\
+*KEYWORD
+*TITLE
+Mixed quad / collapsed-quad / 3-node shell part
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+       5             2.0             0.0             0.0
+       6             2.0             1.0             0.0
+       7             3.0             0.5             0.0
+*ELEMENT_SHELL
+       1       1       1       2       3       4
+       2       1       2       5       6       3
+       3       1       5       7       6       6
+       4       1       6       7       3
+*PART
+mixed shell part
+         1         1         1
+*SECTION_SHELL
+         1         2
+       1.0       1.0       1.0       1.0
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         1   7.8e-9  210000.0       0.3     300.0
+*CONTROL_TERMINATION
+       1.0
+*END
+"""
+
+
+class Sh3nCollapsedQuadTests(unittest.TestCase):
+    """Triangular shells → /SH3N, never a 4-node /SHELL with a repeated corner.
+
+    LS-DYNA writes a triangle either as 3 IDs (blank N4) or as a quad with the
+    last corner repeated (n1 n2 n3 n3). Radioss sizes /SH3N with the triangle
+    critical-time-step rule and /SHELL with the quad rule, so passing a collapsed
+    quad through as /SHELL halves dt for the whole model off one degenerate
+    element (W13: 370 of 38,218 held dt at 8.361e-7 s instead of 1.6919e-6 s).
+    """
+
+    def _starter(self, deck: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "sh3n.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return Path(convert(path).starter_path).read_text()
+
+    def _block(self, starter: str, header: str):
+        """Element id/connectivity rows under *header* (e.g. '/SH3N/1')."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == header)
+        rows = []
+        for ln in lines[i + 1:]:
+            if ln.startswith(("/", "#")):
+                break
+            if ln.strip():
+                rows.append([int(x) for x in ln.split()])
+        return rows
+
+    def test_emits_both_blocks_for_a_mixed_part(self):
+        s = self._starter(SH3N_K)
+        self.assertIn("/SHELL/1", s)
+        self.assertIn("/SH3N/1", s)
+
+    def test_collapsed_quad_becomes_a_three_node_sh3n(self):
+        # eid 3 is "5 7 6 6" — a quad with the last corner repeated.
+        s = self._starter(SH3N_K)
+        tri = {r[0]: r[1:4] for r in self._block(s, "/SH3N/1")}
+        self.assertIn(3, tri)
+        self.assertEqual(tri[3], [5, 7, 6])      # winding preserved, dup dropped
+
+    def test_blank_n4_triangle_becomes_sh3n(self):
+        # eid 4 is "6 7 3" — a triangle whose trailing N4 column was blank.
+        s = self._starter(SH3N_K)
+        tri = {r[0]: r[1:4] for r in self._block(s, "/SH3N/1")}
+        self.assertIn(4, tri)
+        self.assertEqual(tri[4], [6, 7, 3])
+
+    def test_real_quads_stay_in_shell(self):
+        s = self._starter(SH3N_K)
+        quad_ids = {r[0] for r in self._block(s, "/SHELL/1")}
+        self.assertEqual(quad_ids, {1, 2})
+        self.assertNotIn(3, quad_ids)            # the collapsed quad moved out
+
+    def test_no_elements_are_lost(self):
+        s = self._starter(SH3N_K)
+        ids = ({r[0] for r in self._block(s, "/SHELL/1")}
+               | {r[0] for r in self._block(s, "/SH3N/1")})
+        self.assertEqual(ids, {1, 2, 3, 4})
+
+    def test_sh3n_rows_carry_no_fourth_node(self):
+        # A /SH3N row is eid n1 n2 n3 + the trailing 0 field — emitting a 4th
+        # connectivity node here would be read as garbage.
+        s = self._starter(SH3N_K)
+        for row in self._block(s, "/SH3N/1"):
+            self.assertEqual(len(row), 5)
+            self.assertEqual(row[4], 0)
+
+    def test_zero_area_shell_is_dropped_with_a_warning(self):
+        deck = SH3N_K.replace(
+            "       3       1       5       7       6       6",
+            "       3       1       5       7       7       7")   # 2 distinct nodes
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "degen.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        res = convert(path)
+        starter = Path(res.starter_path).read_text()
+        ids = ({r[0] for r in self._block(starter, "/SHELL/1")}
+               | {r[0] for r in self._block(starter, "/SH3N/1")})
+        self.assertNotIn(3, ids)
+        self.assertTrue(any("distinct node" in w and "zero area" in w
+                            for w in res.warnings),
+                        f"expected a zero-area warning, got: {res.warnings}")
+
+
 class TetraTenTests(unittest.TestCase):
     """10-node quadratic tets → /TETRA10 (all nodes kept, no orphans, Itetra10)."""
 
