@@ -253,13 +253,17 @@ includes, so no `//SUBMODEL` is emitted): the id offsets
 are added to every id the included file defines **and** references (per-keyword
 field map covering the supported keyword families; an included keyword outside
 the map warns loudly), and the `TRANID` `*DEFINE_TRANSFORMATION` moves the
-included `*NODE` coordinates. Nested `*INCLUDE_TRANSFORM`s accumulate offsets
-additively and compose transforms innermost-first (the dyna2rad `//SUBMODEL` /
-starter `LECSUBMOD` semantics). `FCTMAS`/`FCTTIM`/`FCTLEN`/`FCTTEM` unit
-factors are **not** applied (use kunit to convert the include first — warned),
-and literal geometry inside other keywords of a transformed include
-(coordinate-system origins, boxes, rigid-wall points; direction vectors under
-rotation) is warned per keyword.
+included `*NODE` coordinates **and `*RIGIDWALL_PLANAR*` wall geometry** (base +
+head points, `_FINITE` edge head — the starter's `SUBROTPOINT` submodel replay).
+TRANID binds against **post-offset** definition ids (dyna2rad's
+offset-then-resolve order; a nested include card's TRANID shifts with the
+enclosing files' cumulative `IDDOFF`). Nested `*INCLUDE_TRANSFORM`s accumulate
+offsets additively and compose transforms innermost-first (the dyna2rad
+`//SUBMODEL` / starter `LECSUBMOD` semantics). `FCTMAS`/`FCTTIM`/`FCTLEN`/
+`FCTTEM` unit factors are **not** applied (use kunit to convert the include
+first — warned), and literal geometry inside other keywords of a transformed
+include (coordinate-system origins, boxes; direction vectors under rotation;
+literal rotation-axis points under any transform) is warned per keyword.
 `*DEFINE_TRANSFORMATION` → composed row-by-row (top-to-bottom, each row acting
 on the previous result, matching `/TRANSFORM` starter math): `TRANSL`,
 `ROTATE` (direction form and two-`POINT` form, degrees, right-hand rule),
@@ -588,10 +592,11 @@ python -m unittest discover -s tests
   file). `*INCLUDE_TRANSFORM` applies its id offsets and TRANID transform
   numerically at parse time; unit factors (`FCTMAS`/`FCTTIM`/`FCTLEN`/
   `FCTTEM`) are **not** applied (convert the include with kunit first —
-  warned loudly), and the TRANID transform moves `*NODE` coordinates only
-  (literal geometry inside other keywords of the include — coordinate-system
-  origins, box extents, rigid-wall points, velocity vectors under rotation —
-  is warned per keyword).
+  warned loudly), and the TRANID transform moves `*NODE` coordinates and
+  `*RIGIDWALL_PLANAR*` wall geometry only (literal geometry inside other
+  keywords of the include — coordinate-system origins, box extents,
+  velocity vectors under rotation, literal rotation-axis points under any
+  transform — is warned per keyword).
 
 ---
 
