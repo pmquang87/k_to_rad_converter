@@ -29,6 +29,7 @@ __all__ = [
     "_emit_surf_seg",
     "_emit_line_seg",
     "_emit_line_surf",
+    "_part_node_sets",
 ]
 
 
@@ -251,6 +252,26 @@ def _fmt_eid_list(eids: List[int], limit: int = 25) -> str:
     if len(eids) > limit:
         s += f", ... (+{len(eids) - limit} more)"
     return s
+
+
+def _part_node_sets(state: ConversionState) -> dict:
+    """{pid: set-of-node-ids} over the structural element containers (solids,
+    shells, beam end nodes) — the per-part node inventory the /XREF reference
+    geometry intersects with (dyna2rad GetNodesOfParts equivalent)."""
+    pnodes: dict = {}
+    for e in state.solid_elems:
+        s = pnodes.setdefault(e.pid, set())
+        s.update(n for n in e.nodes if n > 0)
+    for e in state.shell_elems:
+        s = pnodes.setdefault(e.pid, set())
+        s.update(n for n in e.nodes if n > 0)
+    for e in state.beam_elems:
+        s = pnodes.setdefault(e.pid, set())
+        if e.n1 > 0:
+            s.add(e.n1)
+        if e.n2 > 0:
+            s.add(e.n2)
+    return pnodes
 
 
 # ─────────────────────────────────────────────────────────────────────────────

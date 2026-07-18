@@ -1277,6 +1277,130 @@ class MatHoneycomb:
 
 
 @dataclass
+class MatBlatzKo:
+    """*MAT_BLATZ-KO_RUBBER (MAT_007) → /MAT/LAW42 fixed form (dyna2rad case 7:
+    Mu_1 = G, alpha_1 = 2, Nu = 0.463 — the Blatz-Ko Poisson value LS-DYNA
+    hard-codes)."""
+    mid: int
+    title: str
+    rho: float
+    g: float             # shear modulus → LAW42 Mu_1
+    ref: float = 0.0     # 1.0 = initialize from reference geometry (→ /XREF)
+
+
+@dataclass
+class MatMooneyRivlin:
+    """*MAT_MOONEY-RIVLIN_RUBBER (MAT_027) → /MAT/LAW42 (A/B constants) or
+    /MAT/LAW69 LAW_ID=2 (LCID least-squares path, fitted by the starter).
+
+    LS-DYNA card (Keyword971 mat_027.cfg):
+      Card1: MID RHO PR A B REF
+      Card2: SGL SW ST LCID   (uniaxial test data: force vs Δgauge-length)
+    """
+    mid: int
+    title: str
+    rho: float
+    pr: float            # Poisson's ratio → Nu VERBATIM (no abs, per dyna2rad)
+    a: float             # = C10 → Mu_1 = 2A (alpha_1 = 2)
+    b: float             # = C01 → Mu_2 = -2B (alpha_2 = -2)
+    ref: float = 0.0
+    sgl: float = 0.0     # specimen gauge length (never read by dyna2rad)
+    sw: float = 0.0      # specimen width
+    st: float = 0.0      # specimen thickness
+    lcid: int = 0        # test curve: present+parsed → LAW69, else LAW42
+    # writer-resolved routing (see _resolve_mat_hyper_rubber)
+    use_law69: bool = False
+    funidbulk: int = 0   # auto /FUNCT id of the 500-point bulk-scale curve
+
+
+@dataclass
+class MatOgdenRubber:
+    """*MAT_OGDEN_RUBBER (MAT_077_O) → /MAT/LAW42 (N=0: direct mu/alpha pairs)
+    or /MAT/LAW69 (N>0: the starter fits the pairs from the LCID1 test curve).
+
+    LS-DYNA card (Keyword971 mat_077_O.cfg):
+      Card1: MID RO PR N NV G SIGF REF
+      N=0 → Card2: MU1..MU8 / Card3: ALPHA1..ALPHA8
+      N>0 → Card2: SGL SW ST LCID1 DATA LCID2 BSTART TRAMP
+      then free list: GI BETAI (one Prony term per card, until block end)
+    """
+    mid: int
+    title: str
+    rho: float
+    pr: float                    # → Nu = |PR| (PR<0 = Mullins flag, warned)
+    n: int                       # Ogden fit order; 0 = constants given
+    nv: int = 0                  # LS-DYNA Prony fit order (informational)
+    g: float = 0.0               # freq-independent damping shear modulus
+    sigf: float = 0.0            # freq-independent damping limit stress
+    ref: float = 0.0
+    mu: List[float] = field(default_factory=list)      # MU1..MU8 (N=0)
+    alpha: List[float] = field(default_factory=list)   # ALPHA1..ALPHA8 (N=0)
+    sgl: float = 0.0
+    sw: float = 0.0
+    st: float = 0.0
+    lcid1: int = 0               # engineering test curve (N>0)
+    data: float = 0.0            # 1=Ogden / 2=Mooney fit → LAW69 LAW_ID
+    lcid2: int = 0               # relaxation curve (dropped, warned)
+    bstart: float = 0.0
+    tramp: float = 0.0
+    gi: List[float] = field(default_factory=list)      # Prony shear moduli
+    betai: List[float] = field(default_factory=list)   # Prony decay constants
+    # writer-resolved LAW69 curve id (after the 1/SGL / 1/(SW*ST) duplicate)
+    fct_id1: int = 0
+
+
+@dataclass
+class MatHyperelasticRubber:
+    """*MAT_HYPERELASTIC_RUBBER (MAT_077_H) → /MAT/LAW95 (N=0: C10..C30
+    polynomial) or /MAT/LAW69 (N>0), + /VISC/PRONY from the Gi/BETAi terms.
+
+    LS-DYNA card (Keyword971 mat_077_H.cfg):
+      Card1: MID RHO PR N NV G SIGF REF
+      N=0 → Card2: C10 C01 C11 C20 C02 C30
+      N>0 → Card2: SGL SW ST LCID1 DATA LCID2 BSTART TRAMP
+      then free list: Gi BETAi Gj SIGFj (one term per card, until block end)
+    """
+    mid: int
+    title: str
+    rho: float
+    pr: float
+    n: int
+    nv: int = 0
+    g: float = 0.0               # header damping terms — never read by dyna2rad
+    sigf: float = 0.0
+    ref: float = 0.0
+    c10: float = 0.0
+    c01: float = 0.0
+    c11: float = 0.0
+    c20: float = 0.0
+    c02: float = 0.0
+    c30: float = 0.0
+    sgl: float = 0.0
+    sw: float = 0.0
+    st: float = 0.0
+    lcid1: int = 0
+    data: float = 0.0
+    lcid2: int = 0
+    bstart: float = 0.0
+    tramp: float = 0.0
+    gi: List[float] = field(default_factory=list)      # → /VISC/PRONY G_i
+    betai: List[float] = field(default_factory=list)   # → /VISC/PRONY Beta_i
+    gj: List[float] = field(default_factory=list)      # damping columns (dropped)
+    sigfj: List[float] = field(default_factory=list)
+    fct_id1: int = 0             # writer-resolved LAW69 curve id
+    d1: float = 0.0              # writer-resolved LAW95 compressibility |2/K|
+
+
+@dataclass
+class FoamRefGeometry:
+    """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per part whose nodes
+    intersect the keyword's node table (dyna2rad ConvertInitialFoamReferenceGeometry;
+    conversion is unconditional — the material REF flags are never consulted)."""
+    ndtrrg: int = 0                        # _RAMP ramp steps → Nitrs (only if >0)
+    nodes: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
+
+
+@dataclass
 class PressureLoad:
     """*LOAD_SEGMENT / *LOAD_SEGMENT_ID → /PLOAD."""
     lcid: int
@@ -1815,6 +1939,22 @@ class ConversionState:
     mat_low_density_foam: Dict[int, MatLowDensityFoam] = field(default_factory=dict)  # MAT_057 → /MAT/LAW38
     mat_fu_chang_foam: Dict[int, MatFuChangFoam] = field(default_factory=dict)        # MAT_083 → /MAT/LAW70
     mat_honeycomb: Dict[int, MatHoneycomb] = field(default_factory=dict)              # MAT_026 → /MAT/LAW28
+    # Hyperelastic rubber batch (dyna2rad targets):
+    #   MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or LAW69; MAT_077_O → LAW42
+    #   (embedded Prony) or LAW69; MAT_077_H → LAW95 (+/VISC/PRONY) or LAW69
+    mat_blatz_ko: Dict[int, MatBlatzKo] = field(default_factory=dict)
+    mat_mooney_rivlin: Dict[int, MatMooneyRivlin] = field(default_factory=dict)
+    mat_ogden: Dict[int, MatOgdenRubber] = field(default_factory=dict)
+    mat_hyper_rubber: Dict[int, MatHyperelasticRubber] = field(default_factory=dict)
+    # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
+    # instance, in deck order) → /XREF per intersecting part
+    foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
+    # Parts that actually receive a /XREF (writer prepass _resolve_xref_parts:
+    # intersection with the reference tables, gated by the starter's solid
+    # /XREF law whitelist and the 8/4-node solid restriction). Solid sections
+    # serving these parts are emitted with Ismstr=10 (starter ERROR 2013
+    # otherwise: /XREF rejects fully-integrated solids at small strain).
+    xref_part_ids: set = field(default_factory=set)
     # Discrete-element (spring/damper) materials → /PROP/TYPE4 fields
     mat_spring_elastic: Dict[int, MatSpringElastic] = field(default_factory=dict)             # MAT_S01
     mat_spring_nonlinear: Dict[int, MatSpringNonlinearElastic] = field(default_factory=dict)  # MAT_S04

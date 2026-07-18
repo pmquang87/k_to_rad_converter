@@ -713,6 +713,51 @@ def _off_inivel_generation(b: Block, offsets: Dict[str, int], warn) -> None:
                 b.raw[start + 1] = new
 
 
+def _off_mat_077(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_OGDEN_RUBBER / *MAT_HYPERELASTIC_RUBBER (077_O/077_H): MID →
+    IDMOFF; card 2 is conditional on card-1 N — it carries the LCID1/LCID2
+    curve ids (fields 4/6) only when N>0. With N=0 the same card positions
+    hold MU4/MU6 (077_O) or C20/C30 (077_H) float constants, which a static
+    curve-field spec would corrupt."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    f = _fields(b.raw[toff])
+    n = int(to_float(f[3], 0.0)) if len(f) > 3 and str(f[3]).strip() else 0
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    i2 = toff + 1
+    if n > 0 and i2 < len(b.raw) and b.raw[i2].strip():
+        new = _rewrite_line(b.raw[i2], [(3, "f"), (5, "f")], offsets)
+        if new is not None:
+            b.raw[i2] = new
+
+
+def _off_foam_ref_geometry(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]: node ids in the *NODE-format
+    table → IDNOFF. The _RAMP variant's first card is NDTRRG (a step count,
+    not an id) and must not be rewritten."""
+    nodeoff = offsets.get("n", 0)
+    if not nodeoff:
+        return
+    start = 0
+    if b.keyword.endswith("_RAMP"):
+        for k, line in enumerate(b.raw):
+            if line.strip():
+                start = k + 1
+                break
+    for k in range(start, len(b.raw)):
+        line = b.raw[k]
+        if not line.strip():
+            continue
+        parsed = _parse_node_line(line)
+        if parsed is None:
+            continue
+        nid, toks, tail = parsed
+        b.raw[k] = _emit_node_line(nid + nodeoff, toks, tail)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The declarative offset map
 # ─────────────────────────────────────────────────────────────────────────────
@@ -817,6 +862,29 @@ _OFFSET_SPECS: Dict[str, object] = {
                                 1: [(i, "f") for i in range(8)]}},
     "MAT_26": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
     "MAT_026": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
+    # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve
+    # (blank in the constants path → no-op). MAT_077_O/_H card 2 is CONDITIONAL:
+    # LCID1/LCID2 only exist when N>0 (with N=0 the same card holds MU4/MU6 or
+    # C20/C30 float constants), so a plain static spec would corrupt them —
+    # handled by the _off_mat_077 callable.
+    "MAT_BLATZ-KO_RUBBER": _mat(),
+    "MAT_BLATZ_KO_RUBBER": _mat(),
+    "MAT_007": _mat(),
+    "MAT_7": _mat(),
+    "MAT_MOONEY-RIVLIN_RUBBER": _mat({1: [(3, "f")]}),
+    "MAT_MOONEY_RIVLIN_RUBBER": _mat({1: [(3, "f")]}),
+    "MAT_027": _mat({1: [(3, "f")]}),
+    "MAT_27": _mat({1: [(3, "f")]}),
+    "MAT_OGDEN_RUBBER": _off_mat_077,
+    "MAT_077_O": _off_mat_077,
+    "MAT_77_O": _off_mat_077,
+    "MAT_HYPERELASTIC_RUBBER": _off_mat_077,
+    "MAT_077_H": _off_mat_077,
+    "MAT_77_H": _off_mat_077,
+    # Node table in the *NODE I8/E16 format → IDNOFF (base variant has no
+    # header card; _RAMP prepends the NDTRRG card, which carries no ids).
+    "INITIAL_FOAM_REFERENCE_GEOMETRY": _off_foam_ref_geometry,
+    "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP": _off_foam_ref_geometry,
     "MAT_SPRING_ELASTIC": _mat(),
     "MAT_S01": _mat(),
     "MAT_SPRING_NONLINEAR_ELASTIC": {"cards": {0: [(0, "m"), (1, "f"),
@@ -982,6 +1050,9 @@ _POINT_BEARING = frozenset({
     "DEFINE_BOX_LOCAL", "INITIAL_DETONATION", "LOAD_BLAST_ENHANCED",
     "LOAD_BLAST", "DATABASE_CROSS_SECTION_PLANE", "DEFINE_TRANSFORMATION",
     "INITIAL_VOLUME_FRACTION_GEOMETRY",
+    # Stress-free reference coordinates (→ /XREF): literal geometry that the
+    # include affine does not rewrite (only the node IDS are offset).
+    "INITIAL_FOAM_REFERENCE_GEOMETRY", "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP",
 })
 #: Direction/tensor-bearing keywords: valid under pure translation, wrong
 #: under rotation/mirror/scale — warned only when the linear part is not I.

@@ -22,6 +22,8 @@ from .state import (
     MatAnisoViscoplastic, MatJohnsonCook,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
+    MatBlatzKo, MatMooneyRivlin, MatOgdenRubber, MatHyperelasticRubber,
+    FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
@@ -3396,6 +3398,239 @@ def handle_mat_honeycomb(block: Block, state: ConversionState) -> None:
         lca, lcb, lcc, lcs, lcab, lcbc, lcca, lcsr)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hyperelastic rubber batch (MAT_007 / MAT_027 / MAT_077_O / MAT_077_H)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_blatz_ko(block: Block, state: ConversionState) -> None:
+    """*MAT_BLATZ-KO_RUBBER (MAT_007) → /MAT/LAW42 fixed form.
+
+    Card 1: MID RHO G REF (mat_007.cfg). dyna2rad case 7 maps Mu_1 = G,
+    alpha_1 = 2, Nu = 0.463 (the Poisson value the LS-DYNA Blatz-Ko
+    implementation hard-codes). REF=1 relies on *INITIAL_FOAM_REFERENCE_GEOMETRY
+    for the actual /XREF node table — dyna2rad additionally emits a nodeless
+    /XREF stub (Nitrs=100, no coordinates), which is deliberately NOT
+    replicated: without the keyword there are no reference coordinates to
+    initialize from (warned in the writer resolve pass instead).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f1 = _card(block.raw, offset, fixed=True, n=4, w=10)
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    g   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    ref = to_float(f1[3]) if len(f1) > 3 else 0.0
+    state.mat_blatz_ko[mid] = MatBlatzKo(mid, title, rho, g, ref)
+
+
+def handle_mat_mooney_rivlin(block: Block, state: ConversionState) -> None:
+    """*MAT_MOONEY-RIVLIN_RUBBER (MAT_027) → /MAT/LAW42 or /MAT/LAW69.
+
+    Cards (mat_027.cfg): MID RHO PR A B REF / SGL SW ST LCID.
+    dyna2rad p_ConvertMatL27 routes on the LCID handle: no parsed curve →
+    LAW42 with the Ogden equivalents Mu_1 = 2A, Mu_2 = -2B, alpha_1 = 2,
+    alpha_2 = -2, Nu = PR VERBATIM (no abs/clamp; 0 → the starter's 0.495)
+    plus a 500-point funIDbulk curve; parsed curve → LAW69 LAW_ID=2 with the
+    curve id unmodified (the starter runs the Mooney-Rivlin fit). SGL/SW/ST
+    and REF are never read by dyna2rad in either branch (warned here when they
+    would matter). Routing + curve synthesis happen in the writer resolve pass
+    (_resolve_mat_hyper_rubber), which needs the parsed *DEFINE_CURVEs.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    pr  = to_float(f1[2]) if len(f1) > 2 else 0.0
+    a   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    b   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    ref = to_float(f1[5]) if len(f1) > 5 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=4, w=10)
+    sgl  = to_float(f2[0]) if f2 else 0.0
+    sw   = to_float(f2[1]) if len(f2) > 1 else 0.0
+    st   = to_float(f2[2]) if len(f2) > 2 else 0.0
+    lcid = to_int(f2[3]) if len(f2) > 3 else 0
+    state.mat_mooney_rivlin[mid] = MatMooneyRivlin(
+        mid=mid, title=title, rho=rho, pr=pr, a=a, b=b, ref=ref,
+        sgl=sgl, sw=sw, st=st, lcid=lcid)
+
+
+def _prony_rows(raw: List[str], start: int, ncols: int) -> List[List[float]]:
+    """The free viscoelastic-constant card list at the tail of a *MAT_077_O/_H
+    block (FREE_CARD_LIST in the cfg: one term per card until the block ends).
+    Returns one [col0..col(ncols-1)] float row per non-blank card."""
+    rows: List[List[float]] = []
+    for idx in range(start, len(raw)):
+        if not raw[idx].strip():
+            continue
+        f = _card(raw, idx, fixed=True, n=ncols, w=10)
+        vals = [to_float(f[i]) if len(f) > i else 0.0 for i in range(ncols)]
+        if any(v != 0.0 for v in vals):
+            rows.append(vals)
+    return rows
+
+
+def handle_mat_ogden_rubber(block: Block, state: ConversionState) -> None:
+    """*MAT_OGDEN_RUBBER (MAT_077_O) → /MAT/LAW42 (N=0) or /MAT/LAW69 (N>0).
+
+    Cards (mat_077_O.cfg): MID RO PR N NV G SIGF REF; N=0 → MU1..MU8 /
+    ALPHA1..ALPHA8; N>0 → SGL SW ST LCID1 DATA LCID2 BSTART TRAMP; then the
+    free GI/BETAI Prony list. dyna2rad p_ConvertMatL77: N=0 keeps the pairs
+    1:1 (Nu = |PR|, Mullins PR<0 warned) with the BETAI>0 Prony terms embedded
+    on the LAW42 card (Tau_i = 1/BETAI, Gamma_i = GI, I_form=2); N>0 →
+    LAW69 with LAW_ID = int(DATA), N_PAIR = N and the LCID1 curve rescaled by
+    1/SGL (abscissa) and 1/(SW*ST) (ordinate) into a *_Duplicate function.
+    NV/LCID2/BSTART/TRAMP are never read (warned); G>0 & SIGF>0 would become
+    /VISC/PLAS, whose card only exists from the radioss2025 input format on —
+    unreadable in the /BEGIN 2022 decks k2rad emits, so it is warn-dropped.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    pr   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    n    = int(to_float(f1[3])) if len(f1) > 3 else 0
+    nv   = int(to_float(f1[4])) if len(f1) > 4 else 0
+    g    = to_float(f1[5]) if len(f1) > 5 else 0.0
+    sigf = to_float(f1[6]) if len(f1) > 6 else 0.0
+    ref  = to_float(f1[7]) if len(f1) > 7 else 0.0
+    mat = MatOgdenRubber(mid=mid, title=title, rho=rho, pr=pr, n=n, nv=nv,
+                         g=g, sigf=sigf, ref=ref)
+    if n < 0:
+        state.warn(f"*MAT_OGDEN_RUBBER mid={mid}: N={n} is not a valid fit "
+                   "order — treated as N=0 (direct mu/alpha constants); "
+                   "dyna2rad would silently convert nothing.")
+        mat.n = n = 0
+    if n == 0:
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+        mat.mu    = [to_float(f2[i]) if len(f2) > i else 0.0 for i in range(8)]
+        mat.alpha = [to_float(f3[i]) if len(f3) > i else 0.0 for i in range(8)]
+        prony_start = offset + 3
+    else:
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        mat.sgl    = to_float(f2[0]) if f2 else 0.0
+        mat.sw     = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.st     = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.lcid1  = to_int(f2[3]) if len(f2) > 3 else 0
+        mat.data   = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.lcid2  = to_int(f2[5]) if len(f2) > 5 else 0
+        mat.bstart = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.tramp  = to_float(f2[7]) if len(f2) > 7 else 0.0
+        prony_start = offset + 2
+    for gi, betai in _prony_rows(raw, prony_start, 2):
+        mat.gi.append(gi)
+        mat.betai.append(betai)
+    state.mat_ogden[mid] = mat
+
+
+def handle_mat_hyperelastic_rubber(block: Block, state: ConversionState) -> None:
+    """*MAT_HYPERELASTIC_RUBBER (MAT_077_H) → /MAT/LAW95 (N=0) or /MAT/LAW69
+    (N>0), + /VISC/PRONY from the Gi/BETAi list (both branches).
+
+    Cards (mat_077_H.cfg): MID RHO PR N NV G SIGF REF; N=0 → C10 C01 C11 C20
+    C02 C30; N>0 → SGL SW ST LCID1 DATA LCID2 BSTART TRAMP; then the free
+    Gi/BETAi/Gj/SIGFj list. dyna2rad p_ConvertMatL77H: N=0 copies the
+    polynomial coefficients 1:1 into LAW95 and encodes the compressibility as
+    D1 = |2/K| with K = 2G(1+PR)/3/(1-2PR), G = 2(C10+C01) (PR<0 → Mullins
+    warning, D1 left 0 → starter defaults nu to 0.495); N>0 is byte-for-byte
+    the 077_O LAW69 branch. The Gi/BETAi terms go to a /VISC/PRONY of the
+    material's id (Beta_i used directly — NO 1/BETA inversion here, and no
+    BETAI>0 filtering, both unlike the 077_O embedded-Prony path). The header
+    G/SIGF and the per-term Gj/SIGFj damping columns are never read (warned).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    pr   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    n    = int(to_float(f1[3])) if len(f1) > 3 else 0
+    nv   = int(to_float(f1[4])) if len(f1) > 4 else 0
+    g    = to_float(f1[5]) if len(f1) > 5 else 0.0
+    sigf = to_float(f1[6]) if len(f1) > 6 else 0.0
+    ref  = to_float(f1[7]) if len(f1) > 7 else 0.0
+    mat = MatHyperelasticRubber(mid=mid, title=title, rho=rho, pr=pr, n=n,
+                                nv=nv, g=g, sigf=sigf, ref=ref)
+    if n < 0:
+        state.warn(f"*MAT_HYPERELASTIC_RUBBER mid={mid}: N={n} is not a valid "
+                   "fit order — treated as N=0 (direct C10..C30 constants); "
+                   "dyna2rad would silently convert nothing.")
+        mat.n = n = 0
+    if n == 0:
+        f2 = _card(raw, offset + 1, fixed=True, n=6, w=10)
+        mat.c10 = to_float(f2[0]) if f2 else 0.0
+        mat.c01 = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.c11 = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.c20 = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.c02 = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.c30 = to_float(f2[5]) if len(f2) > 5 else 0.0
+        prony_start = offset + 2
+    else:
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        mat.sgl    = to_float(f2[0]) if f2 else 0.0
+        mat.sw     = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.st     = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.lcid1  = to_int(f2[3]) if len(f2) > 3 else 0
+        mat.data   = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.lcid2  = to_int(f2[5]) if len(f2) > 5 else 0
+        mat.bstart = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.tramp  = to_float(f2[7]) if len(f2) > 7 else 0.0
+        prony_start = offset + 2
+    for gi, betai, gj, sigfj in _prony_rows(raw, prony_start, 4):
+        mat.gi.append(gi)
+        mat.betai.append(betai)
+        mat.gj.append(gj)
+        mat.sigfj.append(sigfj)
+    state.mat_hyper_rubber[mid] = mat
+
+
+def handle_initial_foam_reference_geometry(block: Block,
+                                           state: ConversionState) -> None:
+    """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → /XREF per intersecting part.
+
+    Node table rows are *NODE-format (NID I8, X/Y/Z E16 —
+    initial_foam_reference_geometry.cfg); the _RAMP variant prepends one card
+    with NDTRRG (ramp steps → /XREF Nitrs when > 0). Stored per keyword
+    instance; the /XREF blocks themselves are built by writer.inistate
+    _make_xref (dyna2rad converts the keyword unconditionally — the material
+    REF flags never gate it).
+    """
+    ref = FoamRefGeometry()
+    raw = block.raw
+    start = 0
+    if block.keyword.endswith("_RAMP"):
+        for idx, line in enumerate(raw):
+            if line.strip():
+                f = _card(raw, idx, fixed=True, n=1, w=10)
+                ref.ndtrrg = to_int(f[0]) if f else 0
+                start = idx + 1
+                break
+    for line in raw[start:]:
+        f = parse_free(line)
+        # Same glued-negative-coordinate hazard as *NODE: re-slice fixed
+        # columns when the whitespace split under-counts or merges fields.
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+            nid = to_int(line[0:8])
+            if nid <= 0:
+                continue
+            ref.nodes[nid] = (to_float(line[8:24]), to_float(line[24:40]),
+                              to_float(line[40:56]))
+            continue
+        nid = to_int(f[0])
+        if nid > 0:
+            ref.nodes[nid] = (to_float(f[1]), to_float(f[2]), to_float(f[3]))
+    if ref.nodes:
+        state.foam_ref_geoms.append(ref)
+    else:
+        state.warn("*INITIAL_FOAM_REFERENCE_GEOMETRY: no node rows parsed — "
+                   "no /XREF emitted for this block.")
+
+
 def handle_mat_spring_elastic(block: Block, state: ConversionState) -> None:
     """*MAT_SPRING_ELASTIC (MAT_S01): MID K → /PROP/TYPE4 stiffness K."""
     offset = _title_offset(block)
@@ -4336,6 +4571,26 @@ HANDLERS = {
     "MAT_HONEYCOMB":                          handle_mat_honeycomb,
     "MAT_26":                                 handle_mat_honeycomb,
     "MAT_026":                                handle_mat_honeycomb,
+    # Hyperelastic rubber batch: MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or
+    # LAW69 (LCID); MAT_077_O → LAW42 (embedded Prony) or LAW69; MAT_077_H →
+    # LAW95 + /VISC/PRONY or LAW69. Underscore spellings of the hyphenated
+    # names are accepted too (hand-edited decks).
+    "MAT_BLATZ-KO_RUBBER":                    handle_mat_blatz_ko,
+    "MAT_BLATZ_KO_RUBBER":                    handle_mat_blatz_ko,
+    "MAT_007":                                handle_mat_blatz_ko,
+    "MAT_7":                                  handle_mat_blatz_ko,
+    "MAT_MOONEY-RIVLIN_RUBBER":               handle_mat_mooney_rivlin,
+    "MAT_MOONEY_RIVLIN_RUBBER":               handle_mat_mooney_rivlin,
+    "MAT_027":                                handle_mat_mooney_rivlin,
+    "MAT_27":                                 handle_mat_mooney_rivlin,
+    "MAT_OGDEN_RUBBER":                       handle_mat_ogden_rubber,
+    "MAT_077_O":                              handle_mat_ogden_rubber,
+    "MAT_77_O":                               handle_mat_ogden_rubber,
+    "MAT_HYPERELASTIC_RUBBER":                handle_mat_hyperelastic_rubber,
+    "MAT_077_H":                              handle_mat_hyperelastic_rubber,
+    "MAT_77_H":                               handle_mat_hyperelastic_rubber,
+    "INITIAL_FOAM_REFERENCE_GEOMETRY":        handle_initial_foam_reference_geometry,
+    "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP":   handle_initial_foam_reference_geometry,
     # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors
     "MAT_SPRING_ELASTIC":                     handle_mat_spring_elastic,
     "MAT_S01":                                handle_mat_spring_elastic,

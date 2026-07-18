@@ -20,12 +20,16 @@ from ..state import (
     MatLowDensityFoam,
     MatFuChangFoam,
     MatHoneycomb,
+    MatBlatzKo,
+    MatMooneyRivlin,
+    MatOgdenRubber,
+    MatHyperelasticRubber,
     Curve,
     MatHighExplosiveBurn,
     EosJwl,
     EosCard,
 )
-from .common import HDR, _f, _i, _spotweld_beam_pids
+from .common import HDR, _f, _i, _part_node_sets, _spotweld_beam_pids
 from .blast_ale import _make_ale_multimaterial
 
 __all__ = [
@@ -53,6 +57,12 @@ __all__ = [
     "_emit_mat_law38",
     "_emit_mat_law70",
     "_emit_mat_law28",
+    "_emit_mat_law42_blatz_ko",
+    "_emit_mat_mooney_rivlin",
+    "_emit_mat_ogden_rubber",
+    "_emit_mat_hyper_rubber",
+    "_emit_visc_prony",
+    "_resolve_mat_hyper_rubber",
     "_emit_fail_tab2",
     "_make_functions",
     "_resolve_define_tables",
@@ -101,6 +111,15 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law70(mat, state)
     for mat in state.mat_honeycomb.values():
         lines += _emit_mat_law28(mat, state)
+    # Hyperelastic rubber batch (routing resolved by _resolve_mat_hyper_rubber)
+    for mat in state.mat_blatz_ko.values():
+        lines += _emit_mat_law42_blatz_ko(mat)
+    for mat in state.mat_mooney_rivlin.values():
+        lines += _emit_mat_mooney_rivlin(mat)
+    for mat in state.mat_ogden.values():
+        lines += _emit_mat_ogden_rubber(mat)
+    for mat in state.mat_hyper_rubber.values():
+        lines += _emit_mat_hyper_rubber(mat)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -1448,6 +1467,488 @@ def _emit_mat_law28(mat: MatHoneycomb, state: ConversionState) -> List[str]:
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hyperelastic rubber batch: MAT_007 / MAT_027 / MAT_077_O / MAT_077_H
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _law42_lines(mid: int, title: str, rho: float, nu: float, sigma_cut: float,
+                 funidbulk: int, fscale_bulk: float, iform: int,
+                 mus: List[float], alphas: List[float],
+                 gammas: List[float], taus: List[float]) -> List[str]:
+    """/MAT/LAW42 (OGDEN) card block. Layout audited against hm_cfg_files
+    MAT/matl42_Ogden.cfg FORMAT(radioss140) — the block a /BEGIN 2022 deck is
+    read with:
+      RHO_I(20) /
+      Nu(20) sigma_cut(20) Jstrain(10) funIDbulk(10) Fscale_bulk(20) M(10) I_form(10) /
+      Mu_1..Mu_5(5x20) / BLANK / alpha_1..alpha_5(5x20) / BLANK /
+      [M>0: Gamma CELL_LIST(5x20/line) / Tau CELL_LIST]
+    Two traps: card 2 cols 41-50 are a phantom Jstrain %10d the reader consumes
+    but never uses (funIDbulk lives at cols 51-60, NOT 41-50), and the two
+    BLANK cards are mandatory (they are the future Mu_6-10/alpha_6-10 slots of
+    the radioss2025 layout — omitting them desyncs the reader). Blank(0)
+    fields keep the starter defaults: Nu 0→0.495, sigma_cut ≤0→1e20,
+    Fscale_bulk 0→1.0, I_form 0→1 (hm_read_mat42.F:147-160)."""
+    m = len(gammas)
+    lines = [
+        f"/MAT/LAW42/{mid}",
+        title or f"MAT_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#                 Nu           sigma_cut           funIDbulk         Fscale_bulk         M    I_form",
+        f"{_f(nu)}{_f(sigma_cut)}{' ' * 10}{_i(funidbulk)}{_f(fscale_bulk)}{_i(m)}{_i(iform)}",
+        "#               Mu_1                Mu_2                Mu_3                Mu_4                Mu_5",
+        "".join(_f(v) for v in (mus + [0.0] * 5)[:5]),
+        "# blank card",
+        "",
+        "#            alpha_1             alpha_2             alpha_3             alpha_4             alpha_5",
+        "".join(_f(v) for v in (alphas + [0.0] * 5)[:5]),
+        "# blank card",
+        "",
+    ]
+    if m > 0:
+        lines.append("# Shear modulus")
+        lines += _wrap_cells([_f(v) for v in gammas])
+        lines.append("# Time relaxation")
+        lines += _wrap_cells([_f(v) for v in taus])
+    lines.append(HDR)
+    return lines
+
+
+def _law69_lines(mid: int, title: str, rho: float, law_id: int, nu: float,
+                 n_pair: int, fct_id1: int) -> List[str]:
+    """/MAT/LAW69 (least-squares-fitted Ogden/Mooney-Rivlin) card block.
+    Layout audited against hm_cfg_files MAT/matl69_69.cfg FORMAT(radioss120)
+    (the block a /BEGIN 2022 deck is read with):
+      RHO_I(20) / LAW_ID(10) FCT_ID(10) NU(20) FSCALE(20) N_PAIR(10) ICHECK(10) /
+      FCT_ID1(10)
+    FCT_ID at cols 11-20 is the BULK-scaling function (unused, 0); the test
+    curve goes on the separate FCT_ID1 card. FSCALE/ICHECK/N_PAIR are written
+    0 like dyna2rad — the starter defaults them to 1.0 / -3 / 2, and LAW_ID 0
+    becomes -1 (automatic fit); LAW_ID outside {-1,1,2} is starter ERROR 882,
+    a missing FCT_ID1 curve ERROR 894 (hm_read_mat69.F:134-160)."""
+    return [
+        f"/MAT/LAW69/{mid}",
+        title or f"MAT_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#   LAW_ID    FCT_ID                  NU              FSCALE    N_PAIR    ICHECK",
+        f"{_i(law_id)}{_i(0)}{_f(nu)}{_f(0.0)}{_i(n_pair)}{_i(0)}",
+        "#  FCT_ID1",
+        f"{_i(fct_id1)}",
+        HDR,
+    ]
+
+
+def _emit_visc_prony(mid: int, gis: List[float], betais: List[float]) -> List[str]:
+    """/VISC/PRONY bound to the /MAT of the SAME id (Radioss pairs them by
+    unit id — no separate id namespace). Layout audited against hm_cfg_files
+    MAT/mat_VISC_PRONY.cfg FORMAT(radioss2021), the block a /BEGIN 2022 deck
+    is read with — NOTE: no title line after the header, and the M card has a
+    10-space literal gap before K_v:
+      M(10) gap(10) K_v(20) Itab(10) Ishape(10) / M x [G_i Beta_i Ki Beta_ki](4x20)
+    dyna2rad (MAT_077_H both branches) writes K_v=0, Itab/Ishape 0, the LS-DYNA
+    Gi/BETAi pairs verbatim (Beta_i is the decay constant directly — no 1/BETA
+    inversion) and zero bulk terms."""
+    lines = [
+        f"/VISC/PRONY/{mid}",
+        "#        M                           K_v      Itab    Ishape",
+        f"{_i(len(gis))}{' ' * 10}{_f(0.0)}{_i(0)}{_i(0)}",
+        "#                G_i              Beta_i                  Ki             Beta_ki",
+    ]
+    for g, b in zip(gis, betais):
+        lines.append(f"{_f(g)}{_f(b)}{_f(0.0)}{_f(0.0)}")
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_law42_blatz_ko(mat: MatBlatzKo) -> List[str]:
+    """*MAT_BLATZ-KO_RUBBER (MAT_007) → /MAT/LAW42 fixed form — dyna2rad
+    case 7 verbatim: Mu_1 = G, alpha_1 = 2, Nu = 0.463 (the Poisson value the
+    LS-DYNA Blatz-Ko implementation hard-codes), everything else at starter
+    defaults (no bulk function, I_form 0→1)."""
+    return _law42_lines(mat.mid, mat.title, mat.rho, nu=0.463, sigma_cut=0.0,
+                        funidbulk=0, fscale_bulk=0.0, iform=0,
+                        mus=[mat.g], alphas=[2.0], gammas=[], taus=[])
+
+
+def _emit_mat_mooney_rivlin(mat: MatMooneyRivlin) -> List[str]:
+    """*MAT_MOONEY-RIVLIN_RUBBER (MAT_027) → /MAT/LAW42 (constants branch) or
+    /MAT/LAW69 LAW_ID=2 (curve branch) — routing and the funIDbulk curve were
+    resolved by _resolve_mat_hyper_rubber. Constants branch (dyna2rad
+    p_ConvertMatL27): Mu_1 = 2A, Mu_2 = -2B, alpha_1 = 2, alpha_2 = -2 (the
+    C10/C01 → Ogden equivalences), Nu = PR verbatim (blank → 0 → starter
+    0.495); curve branch: the LCID id goes onto FCT_ID1 unmodified — the
+    starter runs the Mooney-Rivlin fit itself."""
+    if mat.use_law69:
+        return _law69_lines(mat.mid, mat.title, mat.rho, law_id=2, nu=mat.pr,
+                            n_pair=0, fct_id1=mat.lcid)
+    return _law42_lines(mat.mid, mat.title, mat.rho, nu=mat.pr, sigma_cut=0.0,
+                        funidbulk=mat.funidbulk, fscale_bulk=0.0, iform=0,
+                        mus=[2.0 * mat.a, -2.0 * mat.b], alphas=[2.0, -2.0],
+                        gammas=[], taus=[])
+
+
+def _ogden_kept_prony(mat: MatOgdenRubber):
+    """The BETAI>0 terms dyna2rad keeps for the embedded LAW42 Prony arrays:
+    Gamma_i = GI, Tau_i = 1/BETAI (CM:4590-4603; BETAI<=0 terms dropped)."""
+    kept = [(g, b) for g, b in zip(mat.gi, mat.betai) if b > 0.0]
+    return [g for g, _ in kept], [1.0 / b for _, b in kept]
+
+
+def _emit_mat_ogden_rubber(mat: MatOgdenRubber) -> List[str]:
+    """*MAT_OGDEN_RUBBER (MAT_077_O) → /MAT/LAW42 (N=0) or /MAT/LAW69 (N>0).
+
+    N=0 (dyna2rad p_ConvertMatL77): mu/alpha pairs 1:1 (pairs 6-8 have no slot
+    in the radioss140 5-pair layout — warned in the resolver), Nu = |PR|,
+    I_form = 2 ("modified strain energy density" — dyna2rad sets it
+    explicitly), and the BETAI>0 viscous terms embedded as Gamma_i = GI,
+    Tau_i = 1/BETAI. N>0: LAW69 with LAW_ID = int(DATA) (0 → starter
+    automatic fit, 1 = Ogden, 2 = Mooney-Rivlin), N_PAIR = N and the
+    resolver's rescaled FCT_ID1."""
+    if mat.n > 0:
+        return _law69_lines(mat.mid, mat.title, mat.rho, law_id=int(mat.data),
+                            nu=abs(mat.pr), n_pair=mat.n, fct_id1=mat.fct_id1)
+    gammas, taus = _ogden_kept_prony(mat)
+    return _law42_lines(mat.mid, mat.title, mat.rho, nu=abs(mat.pr),
+                        sigma_cut=0.0, funidbulk=0, fscale_bulk=0.0, iform=2,
+                        mus=list(mat.mu[:5]), alphas=list(mat.alpha[:5]),
+                        gammas=gammas, taus=taus)
+
+
+def _emit_mat_hyper_rubber(mat: MatHyperelasticRubber) -> List[str]:
+    """*MAT_HYPERELASTIC_RUBBER (MAT_077_H) → /MAT/LAW95 (N=0) or /MAT/LAW69
+    (N>0), + a /VISC/PRONY trailer of the same id when Gi terms exist (both
+    branches — dyna2rad CM:9699-9738).
+
+    LAW95 layout audited against hm_cfg_files MAT/LAW95.cfg
+    FORMAT(radioss2020), the block a /BEGIN 2022 deck is read with (NO NU or
+    IFORM fields at this format revision — compressibility rides on D1 alone):
+      Rho_I(20) / C10 C01 C20 C11 C02 (5x20 — NOTE C20 before C11, the
+      Radioss order, NOT the LS-DYNA card order) / C30 C21 C12 C03 Sb /
+      D1 D2 D3 (3x20) / A C M KSI TAU_REF (5x20)
+    D1 = |2/K| with K = 2G(1+PR)/3/(1-2PR), G = 2(C10+C01) was computed by the
+    resolver (d1 field); every Bergstrom-Boyce network-B term stays 0 like
+    dyna2rad writes it (A=0 disables creep, and the starter defaults the zero
+    C/M/KSI/TAU_REF to their valid values -0.7/1/0.01/unit,
+    hm_read_mat95.F:170-202 — starter-validated, 0 errors). The starter also
+    force-promotes LAW95 properties to Ismstr=10 (WARNING 1200) — k2rad
+    pre-sets that on the serving solid sections (writer.mesh) so the deck is
+    warning-clean with the identical formulation."""
+    if mat.n > 0:
+        lines = _law69_lines(mat.mid, mat.title, mat.rho, law_id=int(mat.data),
+                             nu=abs(mat.pr), n_pair=mat.n, fct_id1=mat.fct_id1)
+    else:
+        lines = [
+            f"/MAT/LAW95/{mat.mid}",
+            mat.title or f"MAT_{mat.mid}",
+            "#              Rho_I",
+            f"{_f(mat.rho)}",
+            "#                C10                 C01                 C20                 C11                 C02",
+            f"{_f(mat.c10)}{_f(mat.c01)}{_f(mat.c20)}{_f(mat.c11)}{_f(mat.c02)}",
+            "#                C30                 C21                 C12                 C03                  Sb",
+            f"{_f(mat.c30)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            "#                 D1                  D2                  D3",
+            f"{_f(mat.d1)}{_f(0.0)}{_f(0.0)}",
+            "#                  A                   C                   M                 KSI             TAU_REF",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+            HDR,
+        ]
+    if mat.gi:
+        lines += _emit_visc_prony(mat.mid, mat.gi, mat.betai)
+    return lines
+
+
+def _mat027_bulk_points(a: float, b: float, pr: float) -> List[Tuple[float, float]]:
+    """The 500-point MAT_027 funIDbulk curve, reproducing dyna2rad
+    p_ConvertMatL27 (CM:1845-1863) bit-for-bit:
+      mu_p = 2(A+B);  K = 2·mu_p·(1+PR)/(3(1-2PR))
+      D = (A(5PR-2) + B(11PR-5))/(2(1-2PR))            [the LS-DYNA MAT_027 D]
+      j = 0.01, 500 steps of +=0.01 (accumulated — j never lands exactly on
+      1.0, which keeps the 0/0 point finite via float round-off)
+      fbulk = (2A(j^0 - j^-5) + 4B(j^0 - j^-5) + 4D·j(j²-1)) / (K(j-1))
+    The j^0 terms are dyna2rad's C++ INTEGER divisions pow(j,(-1/3)) and
+    pow(j,(1/3)) — both exponents evaluate to 0, so the intended cube-root
+    terms are the constant 1.0. Reproduced as-built (the shipped converter's
+    output is the validation reference), not "fixed" to the textbook form."""
+    mu_p = (2.0 * a * 2.0 + -2.0 * b * -2.0) / 2.0
+    k = (2.0 * mu_p * (1.0 + pr)) / (3.0 * (1.0 - 2.0 * pr))
+    d = (a * (5.0 * pr - 2.0) + b * (11.0 * pr - 5.0)) / (2.0 * (1.0 - 2.0 * pr))
+    pts: List[Tuple[float, float]] = []
+    j = 0.01
+    for _ in range(500):
+        jm5 = pow(j, -5)
+        fbulk = (2.0 * a * (1.0 - jm5) + 4.0 * b * (1.0 - jm5)
+                 + 4.0 * d * j * (pow(j, 2) - 1.0)) / (k * (j - 1.0))
+        pts.append((j, fbulk))
+        j = j + 0.01
+    return pts
+
+
+def _resolve_law69_curve(state: ConversionState, kw: str, mat) -> None:
+    """Shared MAT_077_O/_H N>0 curve resolve (dyna2rad CM:4643-4687 =
+    CM:9649-9693): LCID1 rescaled to engineering stress-strain with
+    SFA = 1/SGL, SFO = 1/(SW*ST) (blank SGL/SW → 1; dyna2rad leaves ST
+    UNGUARDED and would emit an infinite ordinate scale — k2rad treats blank
+    ST as 1.0 instead, warned when it matters). A non-unit scale produces a
+    "<name>_Duplicate" auto-/FUNCT with the scale applied to the (already
+    SFA/SFO/OFFA/OFFO-resolved) points; k2rad applies the extra scale to the
+    offset points, which also sidesteps dyna2rad's unscaled-shift quirk
+    (its /MOVE_FUNCT shift term misses the extra factor when the original
+    curve carries OFFA/OFFO). Also flags an out-of-range DATA: dyna2rad
+    writes LAW_ID = int(DATA) blindly, but the starter only accepts 1
+    (Ogden) / 2 (Mooney-Rivlin) / blank 0 → -1 automatic fit — anything
+    else is starter ERROR 882."""
+    if int(mat.data) not in (0, 1, 2):
+        state.warn(
+            f"{kw} mid={mat.mid}: DATA={mat.data:g} is not a valid "
+            "experimental-data type (1=uniaxial/Ogden fit, 2=Mooney-Rivlin; "
+            "blank = automatic) — /MAT/LAW69 LAW_ID="
+            f"{int(mat.data)} is written like dyna2rad does, and the starter "
+            "will reject it (ERROR 882); fix the *MAT card.")
+    lcid = mat.lcid1
+    if lcid <= 0 or lcid not in state.curves:
+        if lcid > 0:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID1={lcid} has no parsed *DEFINE_CURVE "
+                "— /MAT/LAW69 is emitted with FCT_ID1=0, which the starter "
+                "rejects (ERROR 894); add the test curve to the deck.")
+        else:
+            state.warn(
+                f"{kw} mid={mat.mid}: N={mat.n} selects the curve-fit input "
+                "but no LCID1 test curve is given — /MAT/LAW69 is emitted "
+                "with FCT_ID1=0 (starter ERROR 894).")
+        mat.fct_id1 = 0
+        return
+    sgl = mat.sgl if mat.sgl != 0.0 else 1.0
+    sw = mat.sw if mat.sw != 0.0 else 1.0
+    st = mat.st
+    if st == 0.0:
+        if mat.sgl != 0.0 or mat.sw != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: ST is blank while SGL={mat.sgl:g}/"
+                f"SW={mat.sw:g} are set — ST treated as 1.0 (dyna2rad leaves "
+                "1/(SW*ST) unguarded and would write an infinite ordinate "
+                "scale); check the specimen dimensions.")
+        st = 1.0
+    sfa = 1.0 / sgl
+    sfo = 1.0 / (sw * st)
+    if sfa == 1.0 and sfo == 1.0:
+        mat.fct_id1 = lcid
+        return
+    curve = state.curves[lcid]
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, (curve.title or f"FUNCT_{lcid}") + "_Duplicate",
+                    [(x * sfa, y * sfo) for x, y in curve.pts])
+    mat.fct_id1 = fid
+    state.warn(
+        f"{kw} mid={mat.mid}: test curve LCID1={lcid} normalized to "
+        f"engineering stress-strain as /FUNCT {fid} (abscissa x{sfa:g} = "
+        f"1/SGL, ordinate x{sfo:g} = 1/(SW*ST)) — dyna2rad's specimen "
+        "normalization; the original curve is kept unchanged.")
+
+
+def _warn_mullins(state: ConversionState, kw: str, mid: int, pr: float) -> None:
+    """dyna2rad warning 28 ("the Mullins effect is not take into account"):
+    PR<0 flags the LS-DYNA Mullins/frequency variants; only |PR| survives."""
+    state.warn(
+        f"{kw} mid={mid}: PR={pr:g} < 0 (Mullins-effect input flag) — the "
+        "Mullins effect is not taken into account; |PR| is used as the "
+        "Poisson's ratio (dyna2rad warning 28).")
+
+
+def _resolve_mat_hyper_rubber(state: ConversionState) -> None:
+    """Routing + curve synthesis + drop-warnings for the hyperelastic rubber
+    batch, before _make_materials emits. Follows dyna2rad's decision logic:
+      MAT_027: parsed LCID curve → LAW69 LAW_ID=2, else LAW42 + the 500-point
+               funIDbulk curve; MAT_077_O/_H N>0: the LAW69 FCT_ID1 rescale.
+    Every field dyna2rad drops silently is warned here instead (SGL/SW/ST on
+    MAT_027, NV/LCID2/BSTART/TRAMP, the 077_O N>0 GI/BETAI loss, 077_H
+    G/SIGF/Gj/SIGFj, LAW42 mu/alpha pairs 6-8 at /BEGIN 2022)."""
+    for mat in state.mat_mooney_rivlin.values():
+        kw = "*MAT_MOONEY-RIVLIN_RUBBER"
+        if mat.lcid > 0 and mat.lcid not in state.curves:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID={mat.lcid} has no parsed "
+                "*DEFINE_CURVE — falling back to the A/B-constants /MAT/LAW42 "
+                "branch (dyna2rad routes on the curve handle the same way).")
+        mat.use_law69 = mat.lcid > 0 and mat.lcid in state.curves
+        if mat.use_law69:
+            nontrivial = [f"{n}={v:g}" for n, v in
+                          (("SGL", mat.sgl), ("SW", mat.sw), ("ST", mat.st))
+                          if v not in (0.0, 1.0)]
+            if nontrivial:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {', '.join(nontrivial)} are IGNORED "
+                    "— dyna2rad passes LCID to /MAT/LAW69 unscaled (unlike "
+                    "MAT_077), so the curve must already be engineering "
+                    "stress vs strain; rescale it if it is specimen "
+                    "force vs elongation.")
+            continue
+        if 1.0 - 2.0 * mat.pr == 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PR=0.5 makes the bulk modulus K "
+                "infinite — the funIDbulk curve is skipped (dyna2rad would "
+                "emit NaN points) and Nu=0.5 will trip the starter's "
+                "incompressibility limit; use PR=0.495-0.4999.")
+        elif mat.a + mat.b == 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: A=B=0 gives a zero shear-modulus sum — "
+                "no funIDbulk curve (dyna2rad would emit NaN/inf points) and "
+                "the all-zero mu pairs are starter ERROR 828; give A/B or an "
+                "LCID test curve.")
+        else:
+            fid = state.next_curve_id()
+            _add_auto_curve(state, fid, f"Auto_MAT027_fbulk_mid{mat.mid}",
+                            _mat027_bulk_points(mat.a, mat.b, mat.pr))
+            mat.funidbulk = fid
+
+    for mat in state.mat_ogden.values():
+        kw = "*MAT_OGDEN_RUBBER"
+        if mat.pr < 0.0:
+            _warn_mullins(state, kw, mat.mid, mat.pr)
+        if mat.n > 0:
+            _resolve_law69_curve(state, kw, mat)
+            if mat.gi:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {len(mat.gi)} viscoelastic GI/BETAI "
+                    "term(s) are DROPPED on the N>0 (curve-fit → /MAT/LAW69) "
+                    "path — dyna2rad only embeds them in the N=0 LAW42 form; "
+                    "the converted material is rate-independent.")
+        else:
+            extra = [f"MU{i + 1}={mat.mu[i]:g}/ALPHA{i + 1}={mat.alpha[i]:g}"
+                     for i in range(5, 8)
+                     if mat.mu[i] != 0.0 or mat.alpha[i] != 0.0]
+            if extra:
+                state.warn(
+                    f"{kw} mid={mat.mid}: Ogden pairs 6-8 ({', '.join(extra)}) "
+                    "are DROPPED — the radioss140-format /MAT/LAW42 card a "
+                    "/BEGIN 2022 deck reads has 5 mu/alpha slots (10 need "
+                    "/BEGIN 2025); refit with <= 5 pairs to keep the response.")
+            dropped = [(g, b) for g, b in zip(mat.gi, mat.betai) if b <= 0.0]
+            if dropped:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {len(dropped)} viscoelastic term(s) "
+                    "with BETAI <= 0 dropped from the LAW42 Prony arrays "
+                    "(Tau_i = 1/BETAI is undefined; dyna2rad drops them "
+                    "silently).")
+        if mat.g > 0.0 and mat.sigf > 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: G={mat.g:g}/SIGF={mat.sigf:g} "
+                "(frequency-independent damping) DROPPED — dyna2rad's "
+                "/VISC/PLAS target only exists from the radioss2025 input "
+                "format on and cannot be read in the /BEGIN 2022 decks k2rad "
+                "emits.")
+        if mat.lcid2 or mat.bstart or mat.tramp:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID2={mat.lcid2}/BSTART={mat.bstart:g}/"
+                f"TRAMP={mat.tramp:g} (relaxation-curve viscoelastic fit) "
+                "have no dyna2rad mapping — dropped.")
+
+    for mat in state.mat_hyper_rubber.values():
+        kw = "*MAT_HYPERELASTIC_RUBBER"
+        if mat.n > 0:
+            if mat.pr < 0.0:
+                _warn_mullins(state, kw, mat.mid, mat.pr)
+            _resolve_law69_curve(state, kw, mat)
+        else:
+            _resolve_law95_d1(state, kw, mat)
+        if mat.g or mat.sigf:
+            state.warn(
+                f"{kw} mid={mat.mid}: header G={mat.g:g}/SIGF={mat.sigf:g} "
+                "(frequency-independent damping) are never read by dyna2rad "
+                "for MAT_077_H — dropped.")
+        if any(mat.gj) or any(mat.sigfj):
+            state.warn(
+                f"{kw} mid={mat.mid}: per-term Gj/SIGFj damping columns are "
+                "never read by dyna2rad — dropped (only Gi/BETAi go to "
+                "/VISC/PRONY).")
+        if mat.lcid2 or mat.bstart or mat.tramp:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID2={mat.lcid2}/BSTART={mat.bstart:g}/"
+                f"TRAMP={mat.tramp:g} (relaxation-curve viscoelastic fit) "
+                "have no dyna2rad mapping — dropped.")
+
+    _warn_rubber_ref(state)
+
+
+def _resolve_law95_d1(state: ConversionState, kw: str,
+                      mat: MatHyperelasticRubber) -> None:
+    """MAT_077_H N=0 compressibility → LAW95 D1 (dyna2rad CM:9580-9601).
+    PR<0: Mullins warning, D1 stays 0 (starter defaults nu to 0.495).
+    PR>=0: D1 = |2/K|, K = 2G(1+PR)/3/(1-2PR), G = 2(C10+C01). PR=0.5 with
+    G>0 gives K=inf → D1=0 (the C++ limit, matched exactly). Guarded
+    deviations from dyna2rad's C++: G<=0 (K<=0 → D1 would be inf/NaN on the
+    card) and the PR=0.5, G=0 corner both leave D1=0 with a warning instead
+    of writing a non-finite number. PR blank (0) is dyna2rad's exact
+    behavior K = 2G/3, i.e. nu = 0 — warned, because a zero-Poisson rubber is
+    almost never intended."""
+    if mat.pr < 0.0:
+        _warn_mullins(state, kw, mat.mid, mat.pr)
+        mat.d1 = 0.0
+        return
+    g2 = 2.0 * (mat.c01 + mat.c10)
+    if g2 <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: C10+C01 = {(mat.c10 + mat.c01):g} <= 0 — "
+            "the D1 = 2/K compressibility term is undefined (dyna2rad would "
+            "write a non-finite D1); D1 left 0, so the starter uses the "
+            "incompressible default nu=0.495.")
+        mat.d1 = 0.0
+        return
+    denom = 1.0 - 2.0 * mat.pr
+    if denom == 0.0:
+        mat.d1 = 0.0     # K = inf → D1 = 2/inf = 0: exact C++ limit for G>0
+        return
+    k = 2.0 * g2 * (1.0 + mat.pr) / 3.0 / denom
+    mat.d1 = abs(2.0 / k)
+    if mat.pr == 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: PR is blank/0 — dyna2rad's exact behavior "
+            f"encodes K = 2G/3 (D1={mat.d1:g}), i.e. a Poisson's ratio of 0, "
+            "NOT the incompressible 0.495; set PR (e.g. 0.495) if the rubber "
+            "is meant to be incompressible.")
+
+
+def _warn_rubber_ref(state: ConversionState) -> None:
+    """REF flags vs *INITIAL_FOAM_REFERENCE_GEOMETRY coverage. dyna2rad
+    converts the keyword unconditionally and never reads the REF flags (except
+    MAT_007, where REF=1 makes a nodeless /XREF stub — not replicated: with no
+    reference coordinates it initializes nothing). k2rad emits the real /XREF
+    blocks from the keyword (writer.inistate._make_xref) and warns when a
+    REF=1 material has no reference-geometry coverage to initialize from."""
+    flagged = [(kw, m) for kw, mats in (
+        ("*MAT_BLATZ-KO_RUBBER", state.mat_blatz_ko),
+        ("*MAT_MOONEY-RIVLIN_RUBBER", state.mat_mooney_rivlin),
+        ("*MAT_OGDEN_RUBBER", state.mat_ogden),
+        ("*MAT_HYPERELASTIC_RUBBER", state.mat_hyper_rubber),
+    ) for m in mats.values() if m.ref != 0.0]
+    if not flagged:
+        return
+    if not state.foam_ref_geoms:
+        for kw, m in flagged:
+            state.warn(
+                f"{kw} mid={m.mid}: REF={m.ref:g} requests stress-free "
+                "reference-geometry initialization but the deck has no "
+                "*INITIAL_FOAM_REFERENCE_GEOMETRY — no /XREF emitted; the "
+                "run starts unstressed at the modeled coordinates.")
+        return
+    ref_nids = set()
+    for ref in state.foam_ref_geoms:
+        ref_nids |= set(ref.nodes)
+    pnodes = _part_node_sets(state)
+    for kw, m in flagged:
+        mid_nodes = set()
+        for pid, part in state.parts.items():
+            if part.mid == m.mid:
+                mid_nodes |= pnodes.get(pid, set())
+        if mid_nodes and not (mid_nodes & ref_nids):
+            state.warn(
+                f"{kw} mid={m.mid}: REF={m.ref:g} but the "
+                "*INITIAL_FOAM_REFERENCE_GEOMETRY node table covers no node "
+                "of this material's part(s) — no /XREF reaches it; the run "
+                "starts unstressed at the modeled coordinates.")
 
 
 def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:

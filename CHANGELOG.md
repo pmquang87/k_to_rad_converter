@@ -11,6 +11,94 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Hyperelastic rubber batch** (`*MAT_BLATZ-KO_RUBBER` / MAT_007,
+  `*MAT_MOONEY-RIVLIN_RUBBER` / MAT_027, `*MAT_OGDEN_RUBBER` / MAT_077_O,
+  `*MAT_HYPERELASTIC_RUBBER` / MAT_077_H, incl. the underscore spellings of
+  the hyphenated names, the numeric aliases and `_TITLE` forms, plus
+  `*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]`) — the roadmap P1 batch, law
+  choices and constants per dyna2rad (`p_ConvertMatL27`/`L77`/`L77H`, case 7,
+  `ConvertInitialFoamReferenceGeometry`); starter-validated: all seven
+  single-material decks (Blatz-Ko, Mooney constants + curve, Ogden direct +
+  fit, 077_H polynomial, Blatz-Ko + `/XREF`) pass the OpenRadioss starter
+  with 0 errors / 0 warnings and the expected field echoes (`Nu=0.463`,
+  `IFORM=2`, `1/D1=K`, uninverted Prony `BETA`, `XREF_PART_<pid>`):
+  - New `/MAT/LAW42` emitter (audited against `matl42_Ogden.cfg
+    FORMAT(radioss140)`, the block a `/BEGIN 2022` deck reads): the two
+    mandatory blank cards after the `Mu` and `alpha` rows, and `funIDbulk` at
+    cols 51-60 — cols 41-50 are a phantom `Jstrain` `%10d` the reader consumes
+    but never uses. MAT_007 → the fixed form `Mu_1=G`, `alpha_1=2`,
+    `Nu=0.463`; MAT_027 (no `LCID`) → `Mu_1=2A`, `Mu_2=−2B`, `alpha=±2`,
+    `Nu=PR` verbatim + dyna2rad's 500-point `funIDbulk` bulk-scale curve
+    reproduced **as-built** (its `pow(j,(-1/3))`/`pow(j,(1/3))` are C++
+    integer divisions → `j^0`; same accumulated `j += 0.01` grid, so the
+    `j≈1` point stays finite) — the shipped converter's output is the
+    validation reference; degenerate `PR=0.5` / `A=B=0` skip the curve with a
+    warning instead of emitting NaN/inf points (starter ERROR 828 named);
+    MAT_077_O `N=0` → pairs 1:1 with `Nu=|PR|` (Mullins `PR<0` warned —
+    dyna2rad warning 28), `I_form=2`, and the `BETAI>0` viscous terms
+    embedded as `Gamma_i=GI` / `Tau_i=1/BETAI` (`BETAI<=0` terms and Ogden
+    pairs 6-8 — the radioss140 card has 5 slots — warn-dropped).
+  - New `/MAT/LAW69` emitter (`matl69_69.cfg FORMAT(radioss120)`): MAT_027
+    with a parsed `LCID` → `LAW_ID=2`, curve id unmodified (the starter runs
+    the Mooney-Rivlin fit; dyna2rad applies **no** `SGL/SW/ST` scaling on
+    this path — warned when they are non-trivial; a dangling `LCID` falls
+    back to the LAW42 branch exactly like dyna2rad's invalid-handle routing);
+    MAT_077_O/_H `N>0` → `LAW_ID=int(DATA)` (0 → starter automatic fit),
+    `N_PAIR=N`, and `LCID1` rescaled to engineering stress-strain by
+    `SFA=1/SGL`, `SFO=1/(SW*ST)` into a `<name>_Duplicate` auto-`/FUNCT`
+    (blank `ST` is treated as 1.0 with a warning — dyna2rad leaves `1/(SW*ST)`
+    unguarded and writes an infinite scale; the extra scale is applied to the
+    already-offset points, sidestepping dyna2rad's unscaled-shift quirk).
+  - New `/MAT/LAW95` emitter (`LAW95.cfg FORMAT(radioss2020)` — no NU/IFORM
+    fields at this revision): MAT_077_H `N=0` → `C10..C30` 1:1 in the Radioss
+    column order (`C10 C01 C20 C11 C02` — C20 before C11, unlike the LS-DYNA
+    card), incompressibility as `D1=|2/K|` with `K=2G(1+PR)/3/(1−2PR)`,
+    `G=2(C10+C01)`; `PR<0` → Mullins warning and `D1=0` (starter defaults
+    ν=0.495); blank `PR` reproduces dyna2rad's exact `K=2G/3` (ν=0) with a
+    warning; `C10+C01<=0` leaves `D1=0` warned instead of dyna2rad's
+    non-finite `D1`; Bergstrom-Boyce network-B terms all 0 (creep off — the
+    starter defaults the zero `C/M/KSI/TAU_REF` to their valid values). Solid
+    sections serving a LAW95 part are emitted with `Ismstr=10`: the starter
+    force-promotes the whole property anyway ("ISMSTR IS CHANGED TO 10 SINCE
+    LAW 95 IS ONLY COMPATIBLE WITH ISMSTR=10", WARNING 1200), so pre-setting
+    it yields the identical formulation with a warning-clean deck. An
+    out-of-range `DATA` on the `N>0` paths (LAW_ID outside the starter's
+    -1/1/2) is emitted like dyna2rad writes it but flagged (starter
+    ERROR 882).
+  - New `/VISC/PRONY` machinery (`mat_VISC_PRONY.cfg FORMAT(radioss2021)` —
+    **no title line**, 10-space literal gap on the `M` card, 4-field
+    `G_i Beta_i Ki Beta_ki` rows): emitted under the material's own id from
+    the MAT_077_H `Gi/BETAi` list on BOTH branches, `Beta_i` used directly
+    (no `1/BETA` inversion — that belongs to the 077_O embedded form only).
+    MAT_077_O's `G>0 & SIGF>0` frequency-independent damping is warn-dropped:
+    dyna2rad's `/VISC/PLAS` target only exists from the radioss2025 input
+    format and cannot be read in the `/BEGIN 2022` decks k2rad emits.
+    `NV`/`LCID2`/`BSTART`/`TRAMP` (relaxation-curve fit), the 077_O `N>0`
+    `GI/BETAI` loss, and 077_H's never-read header `G`/`SIGF` and per-term
+    `Gj/SIGFj` columns are all warn-dropped (dyna2rad drops them silently).
+  - New `/XREF` reference-geometry machinery
+    (`xref.cfg FORMAT(radioss90)`): `*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]`
+    → one `/XREF/<part_id>` (`XREF_PART_<pid>`, `NDTRRG`→`Nitrs`) per
+    intersecting part with the stress-free node coordinates, ascending —
+    emission is unconditional like dyna2rad's (the material `REF` flags only
+    drive coverage warnings: `REF=1` without usable reference geometry warns;
+    dyna2rad's MAT_007 nodeless `/XREF` stub is deliberately not replicated).
+    Parts the starter would hard-reject are warn-skipped instead of emitted
+    (solid `/XREF` law whitelist 1/35/38/42/70/88/90 — ERROR 2014 — and the
+    8/4-node solid restriction — ERROR 2013), and the kept parts' solid
+    sections are emitted with `Ismstr=10` (`_emit_prop_solid` gained a
+    defaulted `ismstr` parameter; the starter rejects `/XREF` on k2rad's
+    fully-integrated `Isolid=17` at small strain, ERROR 2013 — a shared
+    section dragging non-`/XREF` parts along is warned). The include-affine
+    pass lists the keyword as point-bearing (coordinates are not transformed,
+    only node ids are offset — warned under a transforming include).
+  - All new keywords + aliases registered in the `*INCLUDE_TRANSFORM` offset
+    map: MAT_027 card-2 `LCID`; MAT_077_O/_H via a conditional rewriter
+    (card 2 carries `LCID1`/`LCID2` only when `N>0` — with `N=0` those columns
+    are `MU4/MU6` / `C20/C30` float constants a static spec would corrupt);
+    the foam-reference node table in the `*NODE` I8/E16 format (the `_RAMP`
+    `NDTRRG` header card is never rewritten).
+
 - **Johnson-Cook metals** (`*MAT_JOHNSON_COOK` / MAT_015 and
   `*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE` / MAT_099, incl. the
   numeric aliases and `_TITLE` forms; MAT_098 also gains its `MAT_098`/`MAT_98`
