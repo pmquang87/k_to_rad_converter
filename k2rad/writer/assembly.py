@@ -9,6 +9,7 @@ from .materials import (
     _make_functions,
     _make_materials,
     _resolve_define_tables,
+    _resolve_mat_hyper_rubber,
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
@@ -67,7 +68,9 @@ from .blast_ale import (
     _make_fsi_coupling,
     _make_inivol_notes,
 )
-from .inistate import _make_cross_sections, _make_initial_stresses, _make_starter_th_sectio
+from .inistate import (_make_cross_sections, _make_initial_stresses,
+                       _make_starter_th_sectio, _make_xref,
+                       _resolve_xref_parts)
 from .output import (
     _make_ams,
     _make_analysis_defaults,
@@ -426,6 +429,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Johnson-Cook LAW2/LAW4 routing (needs the *PART EOSID bindings) + the
     # DTF → /FAIL/GENE1 dtmin injection — before _make_materials emits.
     _resolve_mat_johnson_cook(state)
+    # Hyperelastic rubber routing (MAT_027 LAW42-vs-LAW69 needs the parsed
+    # *DEFINE_CURVEs; the MAT_077 LAW69 paths synthesize rescaled duplicate
+    # curves; the MAT_027 LAW42 branch synthesizes its 500-point funIDbulk
+    # curve) + the
+    # dropped-field and REF-coverage warnings — before _make_materials emits
+    # and before _resolve_xref_parts (which needs the LAW42/LAW69 routing).
+    _resolve_mat_hyper_rubber(state)
 
     # Normalize 10-node tet connectivity to Radioss /TETRA10 midside order (the
     # LS-DYNA *ELEMENT_SOLID apex nodes 8/9/10 differ). MUST run before every other
@@ -456,6 +466,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # BEFORE any section is built, so the free-node guard sees the post-drop
     # connectivity and constrains any node the drops left unattached.
     _screen_sliver_tets(state)
+
+    # Decide which parts get a /XREF (reference-geometry) block. AFTER the
+    # tet10 passes (the 8/4-node-solid gate must see the final connectivity)
+    # and BEFORE properties (their sections switch to Ismstr=10). Needs the
+    # rubber routing from _resolve_mat_hyper_rubber above (LAW42-vs-LAW69
+    # decides the starter's solid-/XREF law whitelist).
+    _resolve_xref_parts(state)
 
     # Assign a synthesized orthotropic /PROP id to each LAW128 (MAT_103) part
     # (LAW128 is orthotropic-only). Must run before parts (which repoint the
@@ -587,6 +604,7 @@ def _starter_section_registry():
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
         ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
+        ("xref",              lambda c: _make_xref(c.state)),
         ("initial_stresses",  lambda c: _make_initial_stresses(c.state)),
         ("cross_sections",    lambda c: _make_cross_sections(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),

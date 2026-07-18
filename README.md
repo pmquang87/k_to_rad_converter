@@ -231,6 +231,38 @@ Foams & honeycomb: `*MAT_CRUSHABLE_FOAM` (63) → `/MAT/LAW50`,
 `*DEFINE_CURVE`s become `/FUNCT`s; law-specific unmapped fields (foam tension
 cutoff / damping / hysteresis shape, honeycomb compaction modulus) are dropped
 with a warning, so review the converted card against the source foam
+Hyperelastic rubbers (dyna2rad's law choices, constants followed exactly):
+`*MAT_BLATZ-KO_RUBBER` (007) → `/MAT/LAW42` fixed form (`Mu_1=G`, `alpha_1=2`,
+`Nu=0.463`); `*MAT_MOONEY-RIVLIN_RUBBER` (027) → `/MAT/LAW42` with `Mu_1=2A`,
+`Mu_2=−2B`, `alpha=±2`, `Nu=PR` verbatim and dyna2rad's 500-point `funIDbulk`
+bulk-scale curve (reproduced as-built, including its C++ integer-division
+`j^0` terms — the shipped converter is the validation reference), or, when
+`LCID` names a parsed test curve, `/MAT/LAW69` `LAW_ID=2` with the curve id
+unmodified (the starter runs the Mooney-Rivlin fit; `SGL/SW/ST` are NOT
+applied on this path, warned); `*MAT_OGDEN_RUBBER` (077_O) `N=0` →
+`/MAT/LAW42` (`mu_i/alpha_i` 1:1 — pairs 6-8 warn-dropped, the `/BEGIN 2022`
+radioss140 card has 5 slots; `Nu=|PR|` with the Mullins `PR<0` warning;
+`I_form=2`; `BETAI>0` terms embedded as `Gamma_i=GI`, `Tau_i=1/BETAI`) or
+`N>0` → `/MAT/LAW69` (`LAW_ID=int(DATA)`, `N_PAIR=N`, `LCID1` rescaled to
+engineering stress-strain by `1/SGL`, `1/(SW*ST)` into a `_Duplicate`
+function; the `GI/BETAI` terms are dropped-with-warning on this path, and
+`G`/`SIGF` damping too — dyna2rad's `/VISC/PLAS` only exists from the
+radioss2025 input format); `*MAT_HYPERELASTIC_RUBBER` (077_H) `N=0` →
+`/MAT/LAW95` (`C10..C30` 1:1 in the Radioss column order, incompressibility as
+`D1=|2/K|`, `K=2G(1+PR)/3/(1−2PR)`, `G=2(C10+C01)`; blank `PR` reproduces
+dyna2rad's `K=2G/3`, i.e. ν=0 — warned; its solid sections are emitted with
+`Ismstr=10`, which the starter would force anyway — WARNING 1200) or `N>0` →
+`/MAT/LAW69`; its
+`Gi/BETAi` list becomes `/VISC/PRONY` of the material id on BOTH branches
+(`Beta_i` used directly, no inversion). `*INITIAL_FOAM_REFERENCE_GEOMETRY`
+(`_RAMP`) → one `/XREF` per intersecting part with the stress-free reference
+coordinates (`NDTRRG`→`Nitrs`); emission follows dyna2rad (unconditional, the
+material `REF` flags only drive coverage warnings), but parts the starter
+would reject are warn-skipped instead (solid `/XREF` accepts laws
+1/35/38/42/70/88/90 only — ERROR 2014 — and 8/4-node solids — ERROR 2013),
+and the kept parts' solid sections switch to `Ismstr=10` (starter ERROR 2013
+otherwise on the fully-integrated `Isolid=17`); `REF=1` without usable
+reference geometry is warned
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 

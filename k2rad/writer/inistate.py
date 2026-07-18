@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from ..state import ConversionState
 from .mesh import _effective_solid_isolid
 from .common import (
@@ -15,6 +15,7 @@ from .common import (
     _fmt_eid_list,
     _i,
     _ordered_unique_nodes,
+    _part_node_sets,
     _vcross,
     _vnorm,
     _vsub,
@@ -26,6 +27,8 @@ __all__ = [
     "_make_inishe",
     "_make_inibri",
     "_make_initial_stresses",
+    "_make_xref",
+    "_resolve_xref_parts",
     "_sect_frame_nodes",
     "_plane_cut",
     "_make_cross_sections",
@@ -268,6 +271,167 @@ def _make_inibri(state: ConversionState) -> List[str]:
 
 def _make_initial_stresses(state: ConversionState) -> List[str]:
     return _make_inishe(state) + _make_inibri(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: reference geometry (*INITIAL_FOAM_REFERENCE_GEOMETRY → /XREF)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Radioss law numbers the starter accepts for a SOLID-part /XREF
+# (hm_read_xref.F:222-226, else ERROR 2014). Shell parts skip the check.
+_XREF_SOLID_LAWS = frozenset({1, 35, 38, 42, 70, 88, 90})
+
+
+def _xref_target_law(state: ConversionState, mid: int):
+    """The Radioss law number *mid* converts to, for the /XREF solid-law gate
+    (only the laws k2rad emits need mapping; None = some other/unknown law)."""
+    if mid in state.mat_elastic:
+        return 1
+    if mid in state.mat_low_density_foam:
+        return 38
+    if mid in state.mat_fu_chang_foam:
+        return 70
+    if mid in state.mat_blatz_ko:
+        return 42
+    m = state.mat_mooney_rivlin.get(mid)
+    if m is not None:
+        return 69 if m.use_law69 else 42
+    m = state.mat_ogden.get(mid)
+    if m is not None:
+        return 69 if m.n > 0 else 42
+    m = state.mat_hyper_rubber.get(mid)
+    if m is not None:
+        return 69 if m.n > 0 else 95
+    return None
+
+
+def _resolve_xref_parts(state: ConversionState) -> None:
+    """Decide which parts receive a /XREF block (state.xref_part_ids) —
+    build_starter prepass, after the tet10 downgrade/screening (connectivity
+    final) and before properties (solid sections serving these parts switch
+    to Ismstr=10, see _make_properties).
+
+    dyna2rad emits a /XREF for EVERY part intersecting the reference-geometry
+    node table; the OpenRadioss starter then hard-rejects most of them:
+    solid parts need a law in 1/35/38/42/70/88/90 (ERROR 2014), 8/4-node
+    elements and a 1-integration-point or Ismstr>=10 formulation (ERROR 2013).
+    k2rad instead skips the un-runnable combinations with a loud warning
+    (deliberate deviation — the converted deck must pass the starter) and
+    fixes the formulation side by emitting Ismstr=10 for the kept parts."""
+    state.xref_part_ids = set()
+    if not state.foam_ref_geoms:
+        return
+    ref_nids = set()
+    for ref in state.foam_ref_geoms:
+        ref_nids |= set(ref.nodes)
+    pnodes = _part_node_sets(state)
+    solid_pids = {e.pid for e in state.solid_elems}
+    shell_pids = {e.pid for e in state.shell_elems}
+    tet10_pids = {e.pid for e in state.solid_elems if len(e.nodes) == 10}
+    any_hit = False
+    for pid, part in sorted(state.parts.items()):
+        if not (pnodes.get(pid, set()) & ref_nids):
+            continue
+        any_hit = True
+        if pid in solid_pids:
+            if pid in tet10_pids:
+                state.warn(
+                    f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} has 10-node "
+                    "tets — the starter only accepts /XREF on 8/4-node solids "
+                    "(ERROR 2013); /XREF skipped for this part, it starts "
+                    "unstressed (or convert with --tet10-to-tet4).")
+                continue
+            law = _xref_target_law(state, part.mid)
+            if law not in _XREF_SOLID_LAWS:
+                state.warn(
+                    f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} (mid "
+                    f"{part.mid}) converts to "
+                    f"{'/MAT/LAW%d' % law if law else 'a law'} outside the "
+                    "starter's solid-/XREF whitelist (LAW 1/35/38/42/70/88/90, "
+                    "else ERROR 2014) — /XREF skipped for this part, it "
+                    "starts unstressed at the modeled coordinates. (dyna2rad "
+                    "emits it and the starter then rejects the deck.)")
+                continue
+            state.xref_part_ids.add(pid)
+        elif pid in shell_pids:
+            # Shell /XREF passes the starter without law/formulation checks.
+            state.xref_part_ids.add(pid)
+        else:
+            state.warn(
+                f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} has no solid/"
+                "shell elements — a reference geometry is meaningless for it; "
+                "/XREF skipped.")
+    if not any_hit:
+        state.warn(
+            "*INITIAL_FOAM_REFERENCE_GEOMETRY: its node table intersects no "
+            "part's element nodes — no /XREF emitted (check node ids).")
+
+
+def _make_xref(state: ConversionState) -> List[str]:
+    """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per kept part
+    (state.xref_part_ids, see _resolve_xref_parts) holding the part's
+    stress-free reference coordinates (the hyperelastic-rubber REF=1
+    mechanism).
+
+    Follows dyna2rad ConvertInitialFoamReferenceGeometry (CCV:542-653):
+    conversion is unconditional (the material REF flags never gate it — they
+    only drive the coverage warnings in _resolve_mat_hyper_rubber), node list
+    ascending, block named "XREF_PART_<pid>", Nitrs = the _RAMP NDTRRG when
+    > 0 (else 0 → starter default). Unlike dyna2rad's per-keyword-instance
+    emission, ALL *INITIAL_FOAM_REFERENCE_GEOMETRY blocks are merged into
+    exactly ONE /XREF per part (later instances win per node id, LS-DYNA
+    last-definition order). A part whose reference coordinates are split
+    across several keyword instances would otherwise emit duplicate /XREF
+    ids — the current starter happens to tolerate that (hm_read_xref.F tags
+    nodes per option and only overwrites tagged ones, so duplicate-id blocks
+    union to the same reference state, starter-verified), but the Radioss
+    spec defines one /XREF per component and the merged block is the
+    canonical form (single echo, no reliance on the reader's duplicate-id
+    tolerance). Conflicting _RAMP NDTRRG values feeding one part resolve to
+    the largest, warned (the starter itself keeps a global
+    NITRS = MAX(all options, floor 100) — the per-part max feeds it
+    identically). Card layout audited against hm_cfg_files
+    INITIAL_GEOMETRY/xref.cfg FORMAT(radioss90), the block a /BEGIN 2022 deck
+    is read with — the header id is the PART (component) id, NOT a material:
+      /XREF/<part_ID> / title(100) / Nitrs(10) /
+      rows: node_ID(10) X(20) Y(20) Z(20)
+    """
+    if not state.foam_ref_geoms or not state.xref_part_ids:
+        return []
+    pnodes = _part_node_sets(state)
+    lines: List[str] = ["#-  REFERENCE GEOMETRY (/XREF):", HDR]
+    for pid in sorted(state.xref_part_ids):
+        part_nids = pnodes.get(pid, set())
+        merged: Dict[int, Tuple[float, float, float]] = {}
+        nitrs_vals: List[int] = []
+        for ref in state.foam_ref_geoms:
+            common = part_nids & set(ref.nodes)
+            if not common:
+                continue
+            for nid in common:
+                merged[nid] = ref.nodes[nid]
+            if ref.ndtrrg > 0:
+                nitrs_vals.append(ref.ndtrrg)
+        if not merged:
+            continue
+        if len(set(nitrs_vals)) > 1:
+            state.warn(
+                f"*INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP: part {pid} is covered "
+                f"by keyword instances with different NDTRRG values "
+                f"{sorted(set(nitrs_vals))} — the merged /XREF/{pid} can carry "
+                f"only one Nitrs; using the largest ({max(nitrs_vals)}).")
+        lines += [
+            f"/XREF/{pid}",
+            f"XREF_PART_{pid}",
+            "#    Nitrs",
+            f"{_i(max(nitrs_vals) if nitrs_vals else 0)}",
+            "#  node_ID                   X                   Y                   Z",
+        ]
+        for nid in sorted(merged):
+            x, y, z = merged[nid]
+            lines.append(f"{_i(nid)}{_f(x)}{_f(y)}{_f(z)}")
+        lines.append(HDR)
+    return lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────

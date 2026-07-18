@@ -1202,17 +1202,22 @@ def _effective_solid_isolid(state: ConversionState, pid: int,
 
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
                      itetra10: int, istrain: int,
-                     hcoef: Optional[float] = None) -> List[str]:
+                     hcoef: Optional[float] = None,
+                     ismstr: int = 0) -> List[str]:
     """/PROP/SOLID (TYPE14), byte-identical to the historical inline block.
     *hcoef* None → card-2 field 3 (h) stays 0 (Radioss default 1.1/0.05/0.10
-    for qa/qb/h); otherwise the hourglass coefficient. Shared by the
-    per-section and per-part paths so the 100-column layout cannot drift."""
+    for qa/qb/h); otherwise the hourglass coefficient. *ismstr* 0 (default,
+    unchanged output) leaves the strain formulation to the starter; 10 =
+    total-strain large deformation — required by /XREF reference-geometry
+    parts (starter ERROR 2013 rejects /XREF on a fully-integrated solid at
+    small strain). Shared by the per-section and per-part paths so the
+    100-column layout cannot drift."""
     h_field = _f(hcoef if hcoef is not None else 0.0)
     return [
         f"/PROP/SOLID/{prop_id}",
         title,
         "#   Isolid    Ismstr      Iale     Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}         0{_i(iale)}         0{_i(itetra10)}         0         0         0",
+        f"{_i(isolid)}{_i(ismstr)}{_i(iale)}         0{_i(itetra10)}         0         0         0",
         "#                q_a                 q_b                   h            LAMBDA_V                MU_V",
         f"{_f(0.0)}{_f(0.0)}{h_field}{_f(0.0)}{_f(0.0)}",
         "#             dt_min   istrain      IHKT",
@@ -1293,6 +1298,58 @@ def _make_properties(state: ConversionState) -> List[str]:
             if sid:
                 tet10_secids.add(sid)
 
+    # Solid sections serving a /XREF reference-geometry part are emitted with
+    # Ismstr=10 (total strain): the starter rejects /XREF on a fully-integrated
+    # solid at small strain (ERROR 2013 — it requires 1 integration point OR
+    # Ismstr>=10, and k2rad's ELFORM-derived Isolid is the 8-point 17). Warn
+    # when the section is shared with non-/XREF parts, whose formulation
+    # changes along.
+    solid_elem_pids = {e.pid for e in state.solid_elems}
+    xref_solid_pids = {pid for pid in state.xref_part_ids
+                       if pid in solid_elem_pids}
+    xref_secids: Set[int] = {part_secids[pid] for pid in xref_solid_pids
+                             if pid in part_secids}
+    if xref_secids:
+        dragged = sorted(pid for pid, sid in part_secids.items()
+                         if sid in xref_secids and pid in solid_elem_pids
+                         and pid not in xref_solid_pids)
+        if dragged:
+            state.warn(
+                "/XREF reference geometry: solid part(s) "
+                f"{dragged} share a *SECTION_SOLID with a /XREF part, so "
+                "their shared /PROP/SOLID also switches to Ismstr=10 "
+                "(total-strain formulation). Give the /XREF parts their own "
+                "*SECTION_SOLID to keep the others at the default.")
+    # ... and so are sections serving a /MAT/LAW95 (MAT_077_H N=0) part: the
+    # starter force-promotes any LAW95 element group at another Ismstr anyway
+    # ("ISMSTR IS CHANGED TO 10 SINCE LAW 95 IS ONLY COMPATIBLE WITH
+    # ISMSTR=10", WARNING 1200, sgrtails.F). Pre-setting it on the property
+    # emits the identical LAW95 formulation with a warning-clean deck — but
+    # the native promotion is per ELEMENT GROUP, so a non-LAW95 sibling on a
+    # shared section would natively keep its default while the pre-set prop
+    # switches it to total strain too: warned, mirroring the /XREF drag.
+    law95_pids = {pid for pid, part in state.parts.items()
+                  if part.mid in state.mat_hyper_rubber
+                  and state.mat_hyper_rubber[part.mid].n == 0}
+    law95_secids: Set[int] = {
+        part_secids[pid] for pid in law95_pids
+        if pid in solid_elem_pids and pid in part_secids}
+    if law95_secids:
+        dragged95 = sorted(pid for pid, sid in part_secids.items()
+                           if sid in law95_secids and pid in solid_elem_pids
+                           and pid not in law95_pids
+                           and pid not in xref_solid_pids)
+        if dragged95:
+            state.warn(
+                "/MAT/LAW95 (*MAT_HYPERELASTIC_RUBBER N=0): solid part(s) "
+                f"{dragged95} share a *SECTION_SOLID with a LAW95 part, so "
+                "their shared /PROP/SOLID also switches to Ismstr=10 "
+                "(total-strain formulation); the native starter promotes "
+                "only the LAW95 element groups (WARNING 1200) and would "
+                "leave these parts at the default. Give the LAW95 parts "
+                "their own *SECTION_SOLID to keep the others unchanged.")
+    ismstr10_secids: Set[int] = xref_secids | law95_secids
+
     # Spotweld beam parts become /SPRING connectors (their /PROP/TYPE13 is
     # emitted by _make_spotweld_beam_connectors); their beams must not force an
     # auto /PROP/BEAM, and a *SECTION_BEAM used ONLY by spotweld parts is not
@@ -1366,7 +1423,9 @@ def _make_properties(state: ConversionState) -> List[str]:
         if iso is not None:
             isolid = iso
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
-                                  isolid, sec.iale, itetra10, istrain, hcoef=h)
+                                  isolid, sec.iale, itetra10, istrain, hcoef=h,
+                                  ismstr=10 if sec.secid in ismstr10_secids
+                                  else 0)
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
@@ -1772,8 +1831,32 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                 isolid = iso_over
             iale = sec.iale if sec else 0
             itetra10 = 1000 if tet10_by_pid.get(pid) else 0
+            # A /XREF or /MAT/LAW95 part split out by the hourglass overlay
+            # keeps the Ismstr=10 its formulation requires (starter ERROR 2013
+            # for /XREF; the starter force-promotes LAW95 element groups with
+            # WARNING 1200 anyway). The split prop may be shared by siblings —
+            # any such sibling promotes it, and siblings that are neither
+            # /XREF nor LAW95 are dragged along: warned, mirroring the
+            # shared-section path (natively they would keep their default).
+            promoters = [
+                p for p in siblings
+                if p in state.xref_part_ids
+                or (state.parts.get(p) is not None
+                    and state.parts[p].mid in state.mat_hyper_rubber
+                    and state.mat_hyper_rubber[state.parts[p].mid].n == 0)]
+            ismstr = 10 if promoters else 0
+            dragged = sorted(p for p in siblings if p not in promoters)
+            if promoters and dragged:
+                state.warn(
+                    f"hourglass-split /PROP/SOLID {prop_id}: part(s) {dragged} "
+                    f"share it with /XREF or /MAT/LAW95 part(s) "
+                    f"{sorted(promoters)}, so they also switch to Ismstr=10 "
+                    "(total-strain formulation) — natively they would keep "
+                    "the default. Give the /XREF or LAW95 parts their own "
+                    "*SECTION_SOLID or *HOURGLASS to keep the others "
+                    "unchanged.")
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
-                                      istrain, hcoef=coeff)
+                                      istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)
             ishell = (_elform_to_ishell(sec.elform, state.is_implicit) if sec
