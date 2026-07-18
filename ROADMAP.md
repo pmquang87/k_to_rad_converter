@@ -98,6 +98,11 @@ shipped, so the marginal cost is small.
   need pinning before shipping.
 - Foams: `MAT_63` → LAW50, `MAT_57` → LAW38, `MAT_83` → LAW70,
   `MAT_26` → LAW28 — **done**.
+- Johnson-Cook metals (P1): `*MAT_JOHNSON_COOK` (15) → `/MAT/LAW2`
+  (PLAS_JOHNS) or, when the part attaches an `*EOS_*`, `/MAT/LAW4`
+  (HYD_JCOOK) + `/EOS`; `D1-D5` → `/FAIL/JOHNSON`, `DTF` → `/FAIL/GENE1`
+  `dtmin`; `*MAT_099` → `/MAT/LAW2` + flat `/FAIL/FLD` — **done**
+  (dyna2rad-faithful law choice and failure priority; see CHANGELOG).
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

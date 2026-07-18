@@ -11,6 +11,56 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Johnson-Cook metals** (`*MAT_JOHNSON_COOK` / MAT_015 and
+  `*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE` / MAT_099, incl. the
+  numeric aliases and `_TITLE` forms; MAT_098 also gains its `MAT_098`/`MAT_98`
+  aliases) — the roadmap P1 batch:
+  - MAT_015 → `/MAT/LAW2` (PLAS_JOHNS, new emitter audited against
+    `matl2_plas_johns.cfg FORMAT(radioss140)`): `A/B/N/C/EPS0` and `M/TM/TR`
+    map 1:1, `rhoC_p = RO·CP` (per-mass → per-volume), `E ← 2G(1+ν)` when only
+    `G` is given. Blank `EPS0` takes the LS-DYNA default 1.0 instead of
+    dyna2rad's raw 0 (starter ERROR 298 whenever `C>0`).
+  - EOS routing per dyna2rad's law choice: a `*PART` `EOSID` (or — warned —
+    a shared-id `*EOS_*` that no part in the deck binds via EOSID; a
+    part-bound same-id EOS belongs to that binding and the material stays
+    LAW2, exactly like dyna2rad, and a shared-id `*EOS_JWL` never reroutes)
+    sends the material to `/MAT/LAW4` (HYD_JCOOK, new emitter,
+    `matl4_hyd_jcook.cfg` from the **radioss2020** config directory, the one
+    a `/BEGIN 2022` deck resolves to — T0 joined the RHOCP heat card in the
+    radioss2019 config; the radioss2018 directory's copy has no T0 column) +
+    the `/EOS` block rebound to
+    the material id (reusing the `_emit_eos` machinery; the standalone
+    LAW6-carrier fluid pass skips consumed EOS ids). `PC`→`Pmin` (forced
+    negative); `TR`→`T0`, NOT dyna2rad's physically wrong `TR`→`Tmax`.
+    An unresolvable/unsupported attached EOS still routes to LAW4 (dyna2rad
+    behaviour) but warns; parts sharing the material WITHOUT an EOSID are
+    dragged onto the LAW4 and warned (dyna2rad duplicates a multi-part
+    material and keeps PLAS_JOHNS for the EOS-less parts).
+  - The LAW6-carrier fluid pass now also honours a `*PART` `EOSID` that
+    binds an `*EOS_*` to a `*MAT_NULL` of a *different* id: that null (not a
+    synthetic orphan) becomes the `/MAT/LAW6` carrier and the `/EOS` is
+    re-emitted under the null's mid, warned — previously only the shared-id
+    pairing was recognised and such an EOS produced a same-id orphan carrier
+    that could collide with another material's id.
+  - Failure: `D1-D5` → `/FAIL/JOHNSON` via the extended shared trailer
+    (`D3 = −|D3|` sign-convention flip, `EPSILON_DOT_0 = EPS0` — deliberately
+    not dyna2rad's 0 — `EROD≠0` → `Ifail_so=2`); `DTF>0` → `/FAIL/GENE1`
+    `dtmin` (new GENE1 slot, ridden on the `*MAT_ADD_EROSION` machinery and
+    merged when both cards exist), suppressing `D1-D5` on the shell path and
+    ignored on the EOS path — dyna2rad's exact priority rules, warned.
+    `EFMIN` has no `EPSF_MIN` slot in the radioss2017 `/FAIL/JOHNSON` format
+    and is dropped with a warning, as are `VP=1`/`RATEOP`, `SPALL`, `IT`,
+    `C2` and `NUMINT`. `/ANIM/ELEM/DAMG` is requested when JC damage or the
+    MAT_099 FLD is active.
+  - MAT_099 → `/MAT/LAW2` + flat `/FAIL/FLD` at `PSFAIL + A/E` (dyna2rad's
+    2-point curve, Ifail_sh=2): `EPPFR`→`EPS_p_max`,
+    `min(SIGSAT,SIGMAX)`→`SIG_max0` (blanks take the LS-DYNA 1e28 defaults so
+    `min()` cannot discard the one real cap), `Fsmooth=1`; `LCDM` orthotropic
+    damage warned (isotropic reduction).
+  - `*PART` field 4 (`EOSID`) is now parsed (`PartData.eosid`); all new
+    keyword aliases registered in the `*INCLUDE_TRANSFORM` offset map
+    (MAT_099's `LCDM` in the curve namespace).
+
 - **Assembly transforms** (`*INCLUDE_TRANSFORM` / `*DEFINE_TRANSFORMATION` /
   `*NODE_TRANSFORM`) — the roadmap's P0 silent-wrong-geometry item. Since
   k2rad inlines includes, the faithful file-to-file mapping is **numeric

@@ -19,7 +19,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
-    MatAnisoViscoplastic,
+    MatAnisoViscoplastic, MatJohnsonCook,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
@@ -330,13 +330,16 @@ def handle_part(block: Block, state: ConversionState) -> None:
         pid   = to_int(f[0])
         secid = to_int(f[1])
         mid   = to_int(f[2])
+        # EOSID (field 4, cols 31-40) → the *EOS_* bound to this part's material
+        # (routes *MAT_JOHNSON_COOK to /MAT/LAW4 + /EOS).
+        eosid = to_int(f[3]) if len(f) > 3 else 0
         # HGID (field 5, cols 41-50) → the *HOURGLASS card overriding
         # *CONTROL_HOURGLASS for this part (0 = global card / defaults).
         hgid  = to_int(f[4]) if len(f) > 4 else 0
         if pid <= 0:
             state.warn(f"*PART: data card with no part id – skipped (title='{title}')")
             continue
-        state.parts[pid] = PartData(pid, title, secid, mid, hgid)
+        state.parts[pid] = PartData(pid, title, secid, mid, hgid, eosid)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -561,6 +564,175 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
     state.mat_plas_tab[mid] = MatPlasTAB(
         mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts,
         vp=vp, rate_curves=rate_curves)
+
+
+def handle_mat_johnson_cook(block: Block, state: ConversionState) -> None:
+    """*MAT_JOHNSON_COOK (MAT_015) → /MAT/LAW2 (PLAS_JOHNS), or /MAT/LAW4
+    (HYD_JCOOK) + a bound /EOS when the part attaches an equation of state.
+
+    R16 card layout:
+      Card 1: mid ro g e pr dtf vp rateop
+      Card 2: a b n c m tm tr eps0
+      Card 3: cp pc spall it d1 d2 d3 d4
+      Card 4: d5 c2/p erod efmin numint   (R7 decks: d5 c2 <blank> efmin)
+
+    The a/b/n/c/EPS0 flow-stress and m/TM/TR thermal terms map 1:1 onto LAW2
+    (dyna2rad's attribMap); E falls back to 2G(1+ν) when only G is given, and
+    CP (per MASS in LS-DYNA) is premultiplied by RHO because Radioss rhoC_p is
+    per VOLUME. Blank EPS0 takes the LS-DYNA default 1.0 (dyna2rad copies the
+    0 and trips starter ERROR 298 whenever C>0 — deliberately not replicated).
+    The LAW2/LAW4 routing and the failure cards (DTF → /FAIL/GENE1 dtmin,
+    D1-D5 → /FAIL/JOHNSON) are resolved in the writer, which needs the *PART
+    EOSID binding (writer.materials._resolve_mat_johnson_cook).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    g   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    e   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    nu  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    dtf = to_float(f1[5]) if len(f1) > 5 else 0.0
+    vp  = to_int(f1[6]) if len(f1) > 6 else 0
+    rateop = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    a     = to_float(f2[0]) if f2 else 0.0
+    b     = to_float(f2[1]) if len(f2) > 1 else 0.0
+    n_exp = to_float(f2[2]) if len(f2) > 2 else 0.0
+    c     = to_float(f2[3]) if len(f2) > 3 else 0.0
+    m_exp = to_float(f2[4]) if len(f2) > 4 else 0.0
+    tm    = to_float(f2[5]) if len(f2) > 5 else 0.0
+    tr    = to_float(f2[6]) if len(f2) > 6 else 0.0
+    epso  = _ffield(f2, 7, 1.0)     # blank → LS-DYNA default 1.0 (unit: 1/time)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    cp    = to_float(f3[0]) if f3 else 0.0
+    pc    = to_float(f3[1]) if len(f3) > 1 else 0.0
+    spall = _ffield(f3, 2, 2.0)     # blank → LS-DYNA default spall model 2
+    it    = to_float(f3[3]) if len(f3) > 3 else 0.0
+    d1    = to_float(f3[4]) if len(f3) > 4 else 0.0
+    d2    = to_float(f3[5]) if len(f3) > 5 else 0.0
+    d3    = to_float(f3[6]) if len(f3) > 6 else 0.0
+    d4    = to_float(f3[7]) if len(f3) > 7 else 0.0
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    d5     = to_float(f4[0]) if f4 else 0.0
+    c2     = to_float(f4[1]) if len(f4) > 1 else 0.0
+    erod   = to_float(f4[2]) if len(f4) > 2 else 0.0
+    efmin  = to_float(f4[3]) if len(f4) > 3 else 0.0
+    numint = to_float(f4[4]) if len(f4) > 4 else 0.0
+
+    if e == 0.0 and g != 0.0:
+        e = 2.0 * g * (1.0 + nu)    # dyna2rad's shear-modulus fallback
+    if epso <= 0.0:
+        epso = 1.0
+        if c != 0.0:
+            state.warn(f"*MAT_JOHNSON_COOK mid={mid}: EPS0 <= 0 with a nonzero "
+                       "rate coefficient C — reset to the LS-DYNA default 1.0 "
+                       "(in the deck's time unit) so the rate term stays "
+                       "defined (OpenRadioss rejects EPS_DOT_0=0, ERROR 298).")
+    if vp:
+        # RATEOP only acts when VP=1 (LS-DYNA ignores it for VP=0), so it is
+        # named in this warning rather than warned on its own.
+        state.warn(f"*MAT_JOHNSON_COOK mid={mid}: VP={vp:g} (viscoplastic rate "
+                   "formulation"
+                   + (f", RATEOP={rateop:g}" if rateop else "")
+                   + ") has no slot in the radioss140-format /MAT/LAW2 card a "
+                   "/BEGIN 2022 deck reads — the total-strain-rate formulation "
+                   "applies.")
+    if spall not in (0.0, 2.0):
+        state.warn(f"*MAT_JOHNSON_COOK mid={mid}: SPALL={spall:g} (non-default "
+                   "spall model) has no LAW2/LAW4 equivalent — dropped; only "
+                   "the PC pressure cutoff carries over (LAW4 Pmin).")
+    if it:
+        state.warn(f"*MAT_JOHNSON_COOK mid={mid}: IT={it:g} (plastic-strain "
+                   "iteration accuracy flag) has no Radioss equivalent — "
+                   "dropped (integration accuracy is solver-controlled).")
+    if c2:
+        state.warn(f"*MAT_JOHNSON_COOK mid={mid}: C2/P={c2:g} (second rate "
+                   "parameter of the RATEOP forms) has no LAW2/LAW4 slot — "
+                   "dropped; the classic log-linear JC rate term (C, EPS0) is "
+                   "emitted.")
+    if numint:
+        state.warn(f"*MAT_JOHNSON_COOK mid={mid}: NUMINT={numint:g} "
+                   "(integration points that must fail before deletion) is "
+                   "approximated by the /FAIL/JOHNSON Ifail_sh=2 all-points "
+                   "rule; the exact IP-count threshold is not reproduced.")
+    state.mat_johnson_cook[mid] = MatJohnsonCook(
+        mid=mid, title=title, rho=rho, e=e, nu=nu,
+        a=a, b=b, n=n_exp, c=c, epso=epso,
+        m=m_exp, tmelt=tm, tref=tr, rhocp=rho * cp, pc=pc,
+        dtf=dtf, d1=d1, d2=d2, d3=d3, d4=d4, d5=d5,
+        efmin=efmin, erod=erod)
+
+
+def handle_mat_simplified_johnson_cook_ortho(block: Block,
+                                             state: ConversionState) -> None:
+    """*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE (MAT_099) →
+    /MAT/LAW2 (PLAS_JOHNS) + an optional flat /FAIL/FLD (dyna2rad
+    p_ConvertMatL99).
+
+    R16 card layout:
+      Card 1: mid ro e pr vp eppfr lcdm numint
+      Card 2: a b n c psfail sigmax sigsat eps0
+
+    The isotropic reduction follows dyna2rad: a/b/n/c → LAW2,
+    EPPFR → EPS_p_max (deletion strain), SIG_max0 = min(SIGSAT, SIGMAX),
+    Fsmooth=1, and PSFAIL>0 → a /FAIL/FLD whose flat limit curve sits at
+    PSFAIL + A/E over minor strain -1..1. Deliberate deviations from dyna2rad:
+    blank/zero EPS0 takes the LS-DYNA default 1.0 (not the 1e-20 rescue, which
+    amplifies the ln(ε̇/ε̇₀) rate term ~46x), and SIGMAX/SIGSAT blanks take
+    their LS-DYNA 1e28 defaults so min() cannot discard the one real cap
+    (both-blank still means no cap). The LCDM orthotropic damage curve has no
+    isotropic-LAW2 counterpart and is dropped with a warning.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    e   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    vp  = to_int(f1[4]) if len(f1) > 4 else 0
+    eppfr  = to_float(f1[5]) if len(f1) > 5 else 0.0
+    lcdm   = to_int(f1[6]) if len(f1) > 6 else 0
+    numint = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    a      = to_float(f2[0]) if f2 else 0.0
+    b      = to_float(f2[1]) if len(f2) > 1 else 0.0
+    n_exp  = to_float(f2[2]) if len(f2) > 2 else 0.0
+    c      = to_float(f2[3]) if len(f2) > 3 else 0.0
+    psfail = to_float(f2[4]) if len(f2) > 4 else 0.0
+    sigmax = _ffield(f2, 5, 1e28)   # blank → LS-DYNA default (no cap)
+    sigsat = _ffield(f2, 6, 1e28)
+    epso   = _ffield(f2, 7, 1.0)
+    if epso <= 0.0:
+        epso = 1.0                  # LS-DYNA default; see docstring
+    sig_max0 = min(sigsat, sigmax)
+    if sig_max0 >= 1e19:
+        sig_max0 = 0.0              # no cap → LAW2 blank (starter 1e30)
+    eps_p_max = eppfr if 0.0 < eppfr < 1e15 else 0.0
+    if vp:
+        state.warn(f"*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE mid={mid}: "
+                   f"VP={vp:g} has no slot in the radioss140-format /MAT/LAW2 "
+                   "card — the total-strain-rate formulation applies.")
+    if lcdm:
+        state.warn(f"*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE mid={mid}: "
+                   f"LCDM={lcdm} (nonlinear orthotropic damage curve) has no "
+                   "isotropic /MAT/LAW2 counterpart — the material converts as "
+                   "isotropic Johnson-Cook (dyna2rad drops it too); the damage "
+                   "evolution is NOT reproduced.")
+    if numint:
+        state.warn(f"*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE mid={mid}: "
+                   f"NUMINT={numint:g} is approximated by the /FAIL/FLD "
+                   "Ifail_sh=2 all-points rule; the exact IP-count threshold "
+                   "is not reproduced.")
+    state.mat_johnson_cook[mid] = MatJohnsonCook(
+        mid=mid, title=title, rho=rho, e=e, nu=nu,
+        a=a, b=b, n=n_exp, c=c, epso=epso,
+        eps_p_max=eps_p_max, sig_max0=sig_max0, fsmooth=1,
+        ortho=True, psfail=psfail if 0.0 < psfail < 1e16 else 0.0)
 
 
 def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) -> None:
@@ -4131,6 +4303,19 @@ HANDLERS = {
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": handle_mat_piecewise_linear_plasticity,
     "MAT_123":                                handle_mat_piecewise_linear_plasticity,
     "MAT_PLASTIC_KINEMATIC":                  handle_mat_plastic_kinematic,
+    # Johnson-Cook family: MAT_015 → /MAT/LAW2 (or /MAT/LAW4 + /EOS when the
+    # part attaches an EOS); MAT_099 → /MAT/LAW2 + /FAIL/FLD; MAT_098 keeps its
+    # sampled /MAT/LAW36 path (registered further down with the numeric aliases
+    # added here).
+    "MAT_JOHNSON_COOK":                       handle_mat_johnson_cook,
+    "MAT_015":                                handle_mat_johnson_cook,
+    "MAT_15":                                 handle_mat_johnson_cook,
+    "MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE":
+        handle_mat_simplified_johnson_cook_ortho,
+    "MAT_099":                                handle_mat_simplified_johnson_cook_ortho,
+    "MAT_99":                                 handle_mat_simplified_johnson_cook_ortho,
+    "MAT_098":                                handle_mat_simplified_johnson_cook,
+    "MAT_98":                                 handle_mat_simplified_johnson_cook,
     # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction;
     # Hill anisotropy + kinematic hardening dropped/folded — see the handler)
     "MAT_ANISOTROPIC_VISCOPLASTIC":           handle_mat_anisotropic_viscoplastic,
