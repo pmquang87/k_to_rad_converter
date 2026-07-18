@@ -9,6 +9,7 @@ from .materials import (
     _make_functions,
     _make_materials,
     _resolve_define_tables,
+    _resolve_mat_johnson_cook,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
 )
@@ -231,7 +232,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # counterpart of raising NEIPH for GISSMO in LS-DYNA — NEIPH itself has no
     # effect on the OpenRadioss output path.
     if state.fail_gissmo or any(m.epsthin > 0.0 or m.epsmaj != 0.0
-                                for m in state.mat_plas_tab.values()):
+                                for m in state.mat_plas_tab.values()) \
+            or any(m.d1 or m.d2 or m.d3 or m.d4 or m.d5
+                   or (m.ortho and m.psfail > 0.0)
+                   for m in state.mat_johnson_cook.values()):
         lines.append("/ANIM/ELEM/DAMG")
 
     # ── Nodal scalar outputs ──────────────────────────────────────
@@ -419,6 +423,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
+    # Johnson-Cook LAW2/LAW4 routing (needs the *PART EOSID bindings) + the
+    # DTF → /FAIL/GENE1 dtmin injection — before _make_materials emits.
+    _resolve_mat_johnson_cook(state)
 
     # Normalize 10-node tet connectivity to Radioss /TETRA10 midside order (the
     # LS-DYNA *ELEMENT_SOLID apex nodes 8/9/10 differ). MUST run before every other

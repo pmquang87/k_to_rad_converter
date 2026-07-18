@@ -139,10 +139,34 @@ LAW128 reads correctly but draws one cosmetic starter `WARNING 100211`
 `/MAT/LAW36` — dropping the Hill anisotropy — is available if LAW128 proves
 unsuitable for a given model.)
 `*MAT_POWER_LAW_PLASTICITY` → `/MAT/LAW36` (auto-generated curve)
+`*MAT_JOHNSON_COOK` (015) → `/MAT/LAW2` (PLAS_JOHNS) with the native
+`A/B/N/C/EPS0` flow stress and `M/TM/TR` thermal softening (`rhoC_p` = `RO·CP`
+— LS-DYNA's CP is per *mass*, Radioss's per *volume*; blank `EPS0` takes the
+LS-DYNA default 1.0 rather than dyna2rad's 0, which trips starter ERROR 298;
+`E` falls back to `2G(1+ν)`). When the `*PART` attaches an `*EOS_*` (`EOSID`,
+or an `*EOS_*` sharing the material id), the material reroutes to the
+hydrodynamic `/MAT/LAW4` (HYD_JCOOK) + the `/EOS` rebound to the material id —
+dyna2rad's law-choice rule — with `PC`→`Pmin` (forced negative) and `TR`→`T0`
+(initial temperature; deliberately NOT dyna2rad's `TR`→`Tmax` quirk, which
+would disable thermal softening above room temperature). Failure: `D1-D5` →
+`/FAIL/JOHNSON` (`D3` forced negative — the σ* triaxiality conventions run in
+opposite signs; `EPSILON_DOT_0` = `EPS0` so the `D4` rate term keeps the
+material's reference rate, unlike dyna2rad's 0; `EROD≠0`→`Ifail_so=2`);
+`DTF>0` → `/FAIL/GENE1` `dtmin`, which *suppresses* `D1-D5` on the shell path
+and is ignored on the EOS path (both dyna2rad rules, warned). `PC` on the
+LAW2 path, `EFMIN` (no `EPSF_MIN` slot in the radioss2017 `/FAIL/JOHNSON`),
+`VP=1`/`RATEOP`, `SPALL`, `IT`, `C2` and `NUMINT` are dropped with warnings
 `*MAT_SIMPLIFIED_JOHNSON_COOK` → `/MAT/LAW36` (σ = A + B·εpⁿ sampled into an
 auto-generated yield table, capped at `SIGMAX`; a nonzero `C` converts the
 `(1 + C·ln ε̇*)` rate term as a sampled multi-rate curve family on LAW36's
 `N_funct`/`Eps_dot_i` block instead of being dropped)
+`*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE` (099) → `/MAT/LAW2` with the
+native `a/b/n/c` (dyna2rad's isotropic reduction): `EPPFR`→`EPS_p_max`,
+`min(SIGSAT, SIGMAX)`→`SIG_max0` (blanks take their LS-DYNA 1e28 defaults so
+one blank cannot discard the other's real cap), `Fsmooth=1`, and `PSFAIL>0` →
+a flat `/FAIL/FLD` limit curve at `PSFAIL + A/E` over minor strain −1..1
+(dyna2rad's exact 2-point construction). The `LCDM` orthotropic damage curve
+has no isotropic counterpart — dropped loudly, damage evolution not reproduced
 `*MAT_024` with `LCSS` pointing at a `*DEFINE_TABLE` expands into the same
 LAW36 rate-curve family (one function per table strain rate)
 `*MAT_SPOTWELD` (100) on beam weld parts → `/PROP/TYPE13` (SPR_BEAM) `/SPRING`

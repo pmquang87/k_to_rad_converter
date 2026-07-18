@@ -8,6 +8,7 @@ from ..state import (
     MatElastic,
     MatPlasTAB,
     MatPlasKin,
+    MatJohnsonCook,
     MatAnisoViscoplastic,
     MatRigid,
     MatNull,
@@ -40,6 +41,10 @@ __all__ = [
     "_emit_fail_johnson_all_layers",
     "_wrap_cells",
     "_emit_mat_law36",
+    "_emit_mat_johnson_cook",
+    "_emit_mat_law2_plas_johns",
+    "_emit_mat_law4_hyd_jcook",
+    "_resolve_mat_johnson_cook",
     "_emit_mat_law44",
     "_emit_mat_law128",
     "_emit_mat_law36_powerlaw",
@@ -69,6 +74,8 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36(mat, state)
     for mat in state.mat_plas_kin.values():
         lines += _emit_mat_law44(mat, state)
+    for mat in state.mat_johnson_cook.values():
+        lines += _emit_mat_johnson_cook(mat, state)
     for mat in state.mat_aniso_visco.values():
         lines += _emit_mat_law128(mat, state)
     for mat in state.mat_rigid.values():
@@ -177,7 +184,7 @@ def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[st
 
     active = any((ero.mxpres, ero.mneps, ero.effeps, ero.voleps, ero.mnpres,
                   ero.sigp1, ero.sigvm, ero.mxeps, ero.epssh, ero.sigth,
-                  ero.impulse, ero.failtm))
+                  ero.impulse, ero.failtm, ero.dtmin))
     if not active:
         if not ero.idam:
             state.warn(f"*MAT_ADD_EROSION {ero.mid}: no active scalar criterion "
@@ -246,7 +253,7 @@ def _emit_mat_add_erosion(ero: MatAddErosion, state: ConversionState) -> List[st
     lines = [
         f"/FAIL/GENE1/{ero.mid}",
         "#               Pmin                Pmax           SigP1_max            Time_max               dtmin",
-        f"{_f(pmin)}{_f(pmax)}{_f(sigp1_out)}{_f(tmax)}{_f(0.0)}",
+        f"{_f(pmin)}{_f(pmax)}{_f(sigp1_out)}{_f(tmax)}{_f(ero.dtmin)}",
         "# fct_IDsm                    Eps_dot_sm             Sig_max                Sigr                   K",
         f"{_i(fct_idsm)}{blank}{_f(0.0)}{_f(sig_max)}{_f(ero.sigth)}{_f(ero.impulse)}",
         "# fct_IDps                    Eps_dot_ps             Eps_max             Eps_eff             Eps_vol",
@@ -357,15 +364,21 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     if not (state.mat_high_explosive or state.eos_cards or state.eos_jwl):
         return []
     lines: List[str] = []
+    # An *EOS_* consumed by a *MAT_JOHNSON_COOK /MAT/LAW4 route is emitted
+    # there (rebound to the mat id) — not as a standalone LAW6-carrier fluid.
+    jc_consumed = _jc_consumed_eos_ids(state)
     # JWL high explosives: *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL → /MAT/LAW5
     for mid, heb in sorted(state.mat_high_explosive.items()):
         lines += _emit_mat_law5(state, heb, state.eos_jwl.get(mid))
-    for eosid in sorted(set(state.eos_jwl) - set(state.mat_high_explosive)):
+    for eosid in sorted(set(state.eos_jwl) - set(state.mat_high_explosive)
+                        - jc_consumed):
         state.warn(f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
                    "(same id) — the JWL parameters have no material to attach to "
                    "and were not emitted (add the explosive material).")
     # Other fluids: carrier /MAT/LAW6 (HYD_VISC) + /EOS/<kind>
     for eosid, eos in sorted(state.eos_cards.items()):
+        if eosid in jc_consumed and eosid not in state.mat_null:
+            continue
         carrier = state.mat_null.get(eosid)
         rho = carrier.rho if carrier else eos.params.get("rho0", 0.0)
         title = carrier.title if carrier else ""
@@ -426,7 +439,11 @@ def _emit_mat_void(mat: MatNull) -> List[str]:
 
 
 def _emit_fail_johnson_all_layers(mid: int, epsf: float,
-                                  state: ConversionState) -> List[str]:
+                                  state: ConversionState, *,
+                                  d2: float = 0.0, d3: float = 0.0,
+                                  d4: float = 0.0, d5: float = 0.0,
+                                  eps_dot_0: float = 0.0, ifail_so: int = 1,
+                                  warn: bool = True) -> List[str]:
     """LS-DYNA built-in material failure (MAT_003 FS / MAT_024 FAIL / MAT_018
     EPSF) deletes a shell only when the plastic-strain criterion is met at ALL
     through-thickness integration points, so bending that plastifies one face
@@ -445,20 +462,268 @@ def _emit_fail_johnson_all_layers(mid: int, epsf: float,
     hm_cfg_files fail_johnson.cfg FORMAT(radioss2017), the block a /BEGIN 2022
     deck is read with: D1-D5 (5x20); EPSILON_DOT_0(20) IFAIL_SH(10)
     IFAIL_SO(10) blank(20) DADV(20).
+
+    The keyword arguments carry the genuine *MAT_JOHNSON_COOK D1-D5 damage law
+    (epsf is then D1, ``warn=False`` because nothing is moved or approximated);
+    they default to the historical single-criterion output, byte-identical for
+    the FS/FAIL/EPSF callers.
     """
-    state.warn(
-        f"MAT {mid}: failure strain {epsf:g} moved from the material Eps_max "
-        "(deletes the shell at the FIRST integration point that fails) to "
-        "/FAIL/JOHNSON D1 with Ifail_sh=2 (deletes only when ALL "
-        "through-thickness points fail) to match LS-DYNA's built-in "
-        "material-failure erosion rule."
-    )
+    if warn:
+        state.warn(
+            f"MAT {mid}: failure strain {epsf:g} moved from the material Eps_max "
+            "(deletes the shell at the FIRST integration point that fails) to "
+            "/FAIL/JOHNSON D1 with Ifail_sh=2 (deletes only when ALL "
+            "through-thickness points fail) to match LS-DYNA's built-in "
+            "material-failure erosion rule."
+        )
     return [
         f"/FAIL/JOHNSON/{mid}",
         "#                 D1                  D2                  D3                  D4                  D5",
-        f"{_f(epsf)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(epsf)}{_f(d2)}{_f(d3)}{_f(d4)}{_f(d5)}",
         "#      EPSILON_DOT_0  IFAIL_SH  IFAIL_SO                                    DADV",
-        f"{_f(0.0)}         2         1                    {_f(0.0)}",
+        f"{_f(eps_dot_0)}         2{_i(ifail_so)}                    {_f(0.0)}",
+        HDR,
+    ]
+
+
+def _resolve_mat_johnson_cook(state: ConversionState) -> None:
+    """Route each *MAT_JOHNSON_COOK to /MAT/LAW2 or /MAT/LAW4 and fold DTF>0
+    into a /FAIL/GENE1 dtmin.
+
+    dyna2rad's law choice (convertmats.cxx:323-332) triggers on the *PART EOSID
+    alone — ANY attached EOS routes MAT_015 to LAW4, even one whose type cannot
+    be converted (the EOS is then dropped, here with a warning instead of
+    silently). k2rad additionally honours its own shared-id convention
+    (eosid == mid, the *MAT_NULL + *EOS_* pairing rule) as a fallback when no
+    part carries an EOSID.
+
+    DTF handling follows dyna2rad exactly: on the plain (LAW2) path DTF>0
+    emits ONLY a /FAIL/GENE1 with dtmin=DTF and discards D1-D5; the EOS (LAW4)
+    path has no DTF branch, so DTF is ignored there and D1-D5 still apply.
+    The GENE1 rides on state.mat_add_erosion so the one-GENE1-per-material
+    rule and the existing emitter are shared with *MAT_ADD_EROSION."""
+    for mat in state.mat_johnson_cook.values():
+        if mat.ortho:
+            continue    # MAT_099: always LAW2 (+/FAIL/FLD); no EOS/DTF fields
+        part_eosids = sorted({p.eosid for p in state.parts.values()
+                              if p.mid == mat.mid and p.eosid})
+        if part_eosids:
+            mat.use_law4 = True
+            mat.eos_id = part_eosids[0]
+            if len(part_eosids) > 1:
+                state.warn(
+                    f"*MAT_JOHNSON_COOK mid={mat.mid}: parts bind different "
+                    f"EOS ids {part_eosids} to this material — Radioss binds "
+                    "one /EOS per material id, so only EOS "
+                    f"{part_eosids[0]} is used; duplicate the material per "
+                    "part to keep distinct equations of state.")
+        elif mat.mid in state.eos_cards or mat.mid in state.eos_jwl:
+            mat.use_law4 = True
+            mat.eos_id = mat.mid
+
+        if mat.dtf <= 0.0:
+            continue
+        if mat.use_law4:
+            # dyna2rad's EOS path has no DTF branch (solids have no
+            # minimum-timestep shell deletion) — D1-D5 still apply.
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: DTF={mat.dtf:g} is ignored "
+                "on the EOS (/MAT/LAW4) path — LS-DYNA's timestep criterion "
+                "applies to shells only, and dyna2rad drops it here too; "
+                "D1-D5 (if set) still convert to /FAIL/JOHNSON.")
+            continue
+        if any((mat.d1, mat.d2, mat.d3, mat.d4, mat.d5)):
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: DTF={mat.dtf:g} > 0 takes "
+                "priority over D1-D5 (dyna2rad rule): only /FAIL/GENE1 "
+                "dtmin is emitted and the Johnson-Cook damage parameters are "
+                "DISCARDED. Clear DTF to keep the D1-D5 damage law.")
+        ero = state.mat_add_erosion.get(mat.mid)
+        if ero is None:
+            state.mat_add_erosion[mat.mid] = MatAddErosion(
+                mid=mat.mid, excl=0.0, mxpres=0.0, mneps=0.0, effeps=0.0,
+                voleps=0.0, numfip=1.0, ncs=1.0, mnpres=0.0, sigp1=0.0,
+                sigvm=0.0, mxeps=0.0, epssh=0.0, sigth=0.0, impulse=0.0,
+                failtm=0.0, idam=0, dtmin=mat.dtf)
+        elif ero.dtmin == 0.0:
+            ero.dtmin = mat.dtf
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: DTF={mat.dtf:g} merged "
+                "into this material's existing /FAIL/GENE1 (*MAT_ADD_EROSION) "
+                "as dtmin — OpenRadioss keeps one GENE1 per material.")
+        elif ero.dtmin != mat.dtf:
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: DTF={mat.dtf:g} conflicts "
+                f"with the dtmin={ero.dtmin:g} already on this material's "
+                "/FAIL/GENE1 — the existing value is kept.")
+
+
+def _jc_consumed_eos_ids(state: ConversionState) -> set:
+    """*EOS_* ids bound to a *MAT_JOHNSON_COOK /MAT/LAW4 (they are emitted with
+    the LAW4, rebound to the mat id — not as standalone LAW6-carrier fluids)."""
+    return {m.eos_id for m in state.mat_johnson_cook.values()
+            if m.use_law4 and m.eos_id}
+
+
+def _emit_mat_johnson_cook(mat: MatJohnsonCook,
+                           state: ConversionState) -> List[str]:
+    """Route one Johnson-Cook material: /MAT/LAW2 (PLAS_JOHNS), or /MAT/LAW4
+    (HYD_JCOOK) + its bound /EOS when _resolve_mat_johnson_cook attached one,
+    plus the failure trailer (/FAIL/JOHNSON from D1-D5, or /FAIL/FLD from
+    MAT_099 PSFAIL; a DTF /FAIL/GENE1 is injected via state.mat_add_erosion)."""
+    if mat.use_law4:
+        lines = _emit_mat_law4_hyd_jcook(mat, state)
+    else:
+        lines = _emit_mat_law2_plas_johns(mat, state)
+
+    if mat.ortho:
+        if mat.psfail > 0.0:
+            lines += _emit_mat099_fld(mat, state)
+        return lines
+
+    d_any = any((mat.d1, mat.d2, mat.d3, mat.d4, mat.d5))
+    dtf_active = mat.dtf > 0.0 and not mat.use_law4   # → /FAIL/GENE1 dtmin
+    if d_any and not dtf_active:
+        # Native JC damage: D1-D5 verbatim except D3, which is forced negative
+        # (LS-DYNA sigma* = p/sigma_eff is compression-positive, Radioss
+        # sigma* = sigma_m/sigma_VM is tension-positive — dyna2rad's -abs(D3)).
+        # EPSILON_DOT_0 = EPS0 so the D4 rate term keeps the material's
+        # reference rate (dyna2rad leaves it 0 — a documented trap: the D4
+        # term would fall to the starter default rate instead of EPS0).
+        # EROD != 0 (LS-DYNA "no erosion") → Ifail_so=2 (deviatoric stress
+        # vanishes per IP, solid kept); EROD=0 → Ifail_so=1 (delete solid).
+        lines += _emit_fail_johnson_all_layers(
+            mat.mid, mat.d1, state,
+            d2=mat.d2, d3=-abs(mat.d3), d4=mat.d4, d5=mat.d5,
+            eps_dot_0=mat.epso,
+            ifail_so=2 if mat.erod != 0.0 else 1,
+            warn=False)
+        if mat.efmin:
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: EFMIN={mat.efmin:g} (lower "
+                "bound on the fracture strain) has no EPSF_MIN slot in the "
+                "radioss2017-format /FAIL/JOHNSON card a /BEGIN 2022 deck "
+                "reads — dropped; the unclamped Johnson-Cook failure strain "
+                "applies.")
+    return lines
+
+
+def _emit_mat_law2_plas_johns(mat: MatJohnsonCook,
+                              state: ConversionState) -> List[str]:
+    """/MAT/LAW2 (PLAS_JOHNS) — classic a,b,n Johnson-Cook input (Iflag=0).
+
+    Layout audited against hm_cfg_files MAT/matl2_plas_johns.cfg
+    FORMAT(radioss140) — the block a /BEGIN 2022 deck is read with (the
+    flagVP column only exists from FORMAT(radioss2023) on):
+      RHO_I(20) / E(20) Nu(20) Iflag(10) /
+      a(20) b(20) n(20) EPS_p_max(20) SIG_max0(20) /
+      c(20) EPS_DOT_0(20) ICC(10) Fsmooth(10) F_cut(20) Chard(20) /
+      m(20) T_melt(20) rhoC_p(20) T_r(20)
+    Blank(0) fields keep the starter defaults: n→1, EPS_p_max/SIG_max0→1e30,
+    ICC→1, T_melt→1e20 (softening off), T_r→300, m→1."""
+    if mat.pc != 0.0:
+        state.warn(
+            f"*MAT_JOHNSON_COOK mid={mat.mid}: PC={mat.pc:g} (pressure cutoff) "
+            "has no slot on /MAT/LAW2 — dropped. It only maps to the "
+            "hydrodynamic /MAT/LAW4 Pmin, which needs an *EOS_* attached to "
+            "the part.")
+    return [
+        f"/MAT/LAW2/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu     Iflag",
+        f"{_f(mat.e)}{_f(mat.nu)}{_i(0)}",
+        "#                  a                   b                   n           EPS_p_max            SIG_max0",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(mat.eps_p_max)}{_f(mat.sig_max0)}",
+        "#                  c           EPS_DOT_0       ICC   Fsmooth               F_cut               Chard",
+        f"{_f(mat.c)}{_f(mat.epso)}{_i(0)}{_i(mat.fsmooth)}{_f(0.0)}{_f(0.0)}",
+        "#                  m              T_melt              rhoC_p                 T_r",
+        f"{_f(mat.m)}{_f(mat.tmelt)}{_f(mat.rhocp)}{_f(mat.tref)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law4_hyd_jcook(mat: MatJohnsonCook,
+                             state: ConversionState) -> List[str]:
+    """/MAT/LAW4 (HYD_JCOOK) + the bound /EOS/<kind> of the SAME id — the
+    faithful target for *MAT_JOHNSON_COOK on parts that attach an *EOS_*.
+
+    Layout audited against hm_cfg_files MAT/matl4_hyd_jcook.cfg
+    FORMAT(radioss2018) — the block a /BEGIN 2022 deck is read with:
+      RHO_I(20) / E(20) nu(20) / A(20) B(20) n(20) epsmax(20) sigmax(20) /
+      Pmin(20) / C(20) EPS_DOT_0(20) M(20) Tmelt(20) Tmax(20) /
+      RHOCP(20) blank(40) T0(20)
+    PC → Pmin (forced negative, the tensile-cutoff sign both solvers use).
+    TR → T0 (initial/room temperature; the starter defaults T0 to 300 when 0).
+    dyna2rad instead writes TR into Tmax ("temperature above which m=1") —
+    physically wrong (room temperature would disable thermal hardening), so
+    that quirk is deliberately not replicated; Tmax stays 0 → 1e20."""
+    lines = [
+        f"/MAT/LAW4/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu",
+        f"{_f(mat.e)}{_f(mat.nu)}",
+        "#                  A                   B                   n              epsmax              sigmax",
+        f"{_f(mat.a)}{_f(mat.b)}{_f(mat.n)}{_f(0.0)}{_f(0.0)}",
+        "#               Pmin",
+        f"{_f(-abs(mat.pc) if mat.pc != 0.0 else 0.0)}",
+        "#                  C           EPS_DOT_0                   M               Tmelt                Tmax",
+        f"{_f(mat.c)}{_f(mat.epso)}{_f(mat.m)}{_f(mat.tmelt)}{_f(0.0)}",
+        "#              RHOCP" + " " * 58 + "T0",
+        f"{_f(mat.rhocp)}" + " " * 40 + f"{_f(mat.tref)}",
+        HDR,
+    ]
+    eos = state.eos_cards.get(mat.eos_id)
+    if eos is not None:
+        if eos.eosid != mat.mid:
+            state.warn(
+                f"*MAT_JOHNSON_COOK mid={mat.mid}: the *PART-bound "
+                f"*EOS_{eos.kind} {eos.eosid} is emitted as "
+                f"/EOS/{eos.kind}/{mat.mid} — Radioss binds an /EOS to the "
+                "material of the SAME id.")
+        lines += _emit_eos(EosCard(eosid=mat.mid, kind=eos.kind,
+                                   params=eos.params, rho0=eos.rho0,
+                                   note=eos.note))
+    elif mat.eos_id in state.eos_jwl:
+        state.warn(
+            f"*MAT_JOHNSON_COOK mid={mat.mid}: the attached *EOS_JWL "
+            f"{mat.eos_id} cannot bind to /MAT/LAW4 (JWL converts only as the "
+            "/MAT/LAW5 explosive pair) — the material is emitted as LAW4 "
+            "WITHOUT an /EOS, so its volumetric response is undefined; attach "
+            "an *EOS_LINEAR_POLYNOMIAL or *EOS_GRUNEISEN instead.")
+    else:
+        state.warn(
+            f"*MAT_JOHNSON_COOK mid={mat.mid}: the *PART references EOSID "
+            f"{mat.eos_id} but no supported *EOS_* card with that id was "
+            "parsed — the material is emitted as /MAT/LAW4 WITHOUT an /EOS "
+            "(dyna2rad routes on the EOSID alone and drops the EOS the same "
+            "way), so its volumetric response is undefined.")
+    return lines
+
+
+def _emit_mat099_fld(mat: MatJohnsonCook, state: ConversionState) -> List[str]:
+    """*MAT_099 PSFAIL → /FAIL/FLD (dyna2rad p_ConvertMatL99). The mandatory
+    forming-limit function is a flat major-strain limit at PSFAIL + A/E (the
+    plastic failure strain plus the elastic strain at yield) over minor strain
+    -1..1 — dyna2rad's exact 2-point curve. Card layout from hm_cfg_files
+    FAIL/fail_fld.cfg FORMAT(radioss2019) (same block the MAT_123 FLD uses);
+    Ifail_sh=2, I_marg=1 (no marginal card), Istrain=0, Ixfem=0."""
+    limit = mat.psfail + (mat.a / mat.e if mat.e > 0.0 else 0.0)
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_MAT099_FLD_mid{mat.mid}",
+                    [(-1.0, limit), (1.0, limit)])
+    state.warn(
+        f"*MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE mid={mat.mid}: "
+        f"PSFAIL={mat.psfail:g} → /FAIL/FLD with a flat major-strain limit "
+        f"{limit:g} (= PSFAIL + A/E); the orthotropic damage evolution itself "
+        "is not reproduced.")
+    return [
+        f"/FAIL/FLD/{mat.mid}",
+        "#   FCT_ID  IFAIL_SH    I_MARG FCT_IDADV                RANI                DADV   ISTRAIN     IXFEM",
+        f"{_i(fid)}{_i(2)}{_i(1)}{_i(0)}{_f(0.0)}{_f(0.0)}{_i(0)}{_i(0)}",
         HDR,
     ]
 

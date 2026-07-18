@@ -165,6 +165,10 @@ class PartData:
     # *PART field 5 (HGID) → the *HOURGLASS card that overrides
     # *CONTROL_HOURGLASS for this part. 0 = use the global card / defaults.
     hgid: int = 0
+    # *PART field 4 (EOSID) → the *EOS_* card bound to this part's material.
+    # 0 = none. Drives the *MAT_JOHNSON_COOK LAW2-vs-LAW4 routing (dyna2rad's
+    # law choice is triggered solely by a nonzero part EOSID).
+    eosid: int = 0
 
 
 @dataclass
@@ -342,6 +346,57 @@ class MatAddErosion:
     failtm: float      # failure time          → Time_max
     # Card 3
     idam: int          # >=1 GISSMO / <0 DIEM embedded damage model (not converted)
+    # Not an *MAT_ADD_EROSION field: *MAT_JOHNSON_COOK DTF>0 (minimum shell
+    # timestep deletion) is folded into this material's /FAIL/GENE1 dtmin slot
+    # by the writer resolve pass (dyna2rad routes DTF to GENE1 the same way).
+    dtmin: float = 0.0
+
+
+@dataclass
+class MatJohnsonCook:
+    """*MAT_JOHNSON_COOK (MAT_015) / *MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_
+    DAMAGE (MAT_099) → /MAT/LAW2 (PLAS_JOHNS), or /MAT/LAW4 (HYD_JCOOK) + a
+    bound /EOS when the part attaches an equation of state (MAT_015 only —
+    dyna2rad's law-choice rule).
+
+    Fields are stored with their LAW2/LAW4 meaning (the handler resolves the
+    LS-DYNA card: E falls back to 2G(1+ν), CP is premultiplied by RHO into the
+    per-volume rhocp, blank EPS0 takes the LS-DYNA default 1.0). Failure inputs
+    (DTF / D1-D5 / EFMIN / EROD, MAT_099 PSFAIL) ride along; the writer routes
+    them to /FAIL/GENE1 (dtmin), /FAIL/JOHNSON or /FAIL/FLD."""
+    mid: int
+    title: str
+    rho: float
+    e: float            # resolved Young's modulus (E, or 2G(1+nu) when E blank)
+    nu: float
+    a: float            # JC yield A → a
+    b: float            # JC hardening B → b
+    n: float            # JC exponent N → n (blank → 0; starter default 1)
+    c: float            # JC rate coefficient C → c
+    epso: float         # EPS0 reference strain rate → EPS_DOT_0 (blank → 1.0)
+    m: float = 0.0      # thermal-softening exponent M (blank → 0; starter 1)
+    tmelt: float = 0.0  # TM melt temperature (blank → 0; starter 1e20 = off)
+    tref: float = 0.0   # TR room temperature → LAW2 T_r / LAW4 T0
+    rhocp: float = 0.0  # RHO*CP: LS-DYNA CP is per MASS, Radioss per VOLUME
+    pc: float = 0.0     # PC pressure cutoff → LAW4 Pmin (LAW2 has no slot: warned)
+    # MAT_099 extras (stay 0 for MAT_015, so the LAW2 card is unchanged)
+    eps_p_max: float = 0.0   # MAT_099 EPPFR deletion strain → EPS_p_max
+    sig_max0: float = 0.0    # MAT_099 min(SIGSAT, SIGMAX) → SIG_max0
+    fsmooth: int = 0         # MAT_099 → 1 (dyna2rad sets rate smoothing)
+    ortho: bool = False      # True = MAT_099 (always LAW2 + optional /FAIL/FLD)
+    psfail: float = 0.0      # MAT_099 principal failure strain → /FAIL/FLD
+    # MAT_015 failure card inputs
+    dtf: float = 0.0    # timestep deletion → /FAIL/GENE1 dtmin (suppresses D1-D5)
+    d1: float = 0.0     # JC damage D1..D5 → /FAIL/JOHNSON (D3 emitted as -|D3|)
+    d2: float = 0.0
+    d3: float = 0.0
+    d4: float = 0.0
+    d5: float = 0.0
+    efmin: float = 0.0  # EFMIN: no EPSF_MIN slot in the radioss2017 /FAIL/JOHNSON
+    erod: float = 0.0   # EROD != 0 (no erosion) → Ifail_so=2, else 1
+    # Writer-resolved routing (set by _resolve_mat_johnson_cook)
+    use_law4: bool = False   # True → /MAT/LAW4 + /EOS bound by the mat id
+    eos_id: int = 0          # source *EOS_* id consumed by the LAW4 route
 
 
 @dataclass
@@ -1741,6 +1796,10 @@ class ConversionState:
     mat_elastic: Dict[int, MatElastic] = field(default_factory=dict)
     mat_plas_tab: Dict[int, MatPlasTAB] = field(default_factory=dict)
     mat_plas_kin: Dict[int, MatPlasKin] = field(default_factory=dict)
+    # *MAT_JOHNSON_COOK (015) / *MAT_SIMPLIFIED_JOHNSON_COOK_ORTHOTROPIC_DAMAGE
+    # (099) → /MAT/LAW2 (PLAS_JOHNS), or /MAT/LAW4 + /EOS when an EOS is
+    # attached (015 only; see writer _resolve_mat_johnson_cook)
+    mat_johnson_cook: Dict[int, MatJohnsonCook] = field(default_factory=dict)
     # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW128 (HILL_VISC_PLAST) +
     # a synthesized orthotropic property (see ortho_prop_ids)
     mat_aniso_visco: Dict[int, MatAnisoViscoplastic] = field(default_factory=dict)
