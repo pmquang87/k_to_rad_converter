@@ -8,6 +8,9 @@ Produces a list of Block objects; each Block holds:
 
 *INCLUDE directives are resolved relative to the directory of the including
 file and the blocks from the included file are merged inline.
+*INCLUDE_TRANSFORM additionally applies its id offsets and TRANID transform
+numerically to the included blocks (see k2rad.assembly) in a deferred
+resolution pass at the end of the top-level parse.
 """
 
 from __future__ import annotations
@@ -174,15 +177,21 @@ def parse_k_file(path: str, _depth: int = 0,
     the current *INCLUDE_PATH prefix when one is active), then merged inline.
     *_depth* guards against circular includes (limit: 50 levels).
     """
+    # Imported lazily to avoid a module-level import cycle (assembly uses the
+    # parser's field helpers; by the first parse call this module is complete).
+    from . import assembly as _assembly
+
     if _depth > 50:
         return []
 
     if _depth == 0:
-        # Fresh top-level parse: reset the *PARAMETER table and warning list.
-        # Both persist after the parse — handlers resolve "&name" fields via
+        # Fresh top-level parse: reset the *PARAMETER table, the warning list
+        # and the pending *INCLUDE_TRANSFORM registrations. The first two
+        # persist after the parse — handlers resolve "&name" fields via
         # to_float/to_int during dispatch, and convert() collects the warnings.
         _PARAMS.clear()
         PARSER_WARNINGS.clear()
+        _assembly.reset()
 
     base_dir = os.path.dirname(os.path.abspath(path))
     blocks: List[Block] = []
@@ -222,21 +231,22 @@ def parse_k_file(path: str, _depth: int = 0,
                     PARSER_WARNINGS.append(f"*INCLUDE file not found: {inc_path}")
 
         elif kw == "INCLUDE_TRANSFORM":
-            # Card 1 is the filename; cards 2+ carry ID offsets / scale factors /
-            # TRANID, none of which are applied here. Including the file
-            # untransformed is only safe when those cards are all zero/blank,
-            # so warn loudly whenever any of them carries a nonzero value.
+            # Card 1 = filename; card 2 = IDNOFF..IDDOFF; card 3 = IDROFF /
+            # PREFIX / SUFFIX; card 4 = FCTMAS FCTTIM FCTLEN FCTTEM INCOUT1
+            # [FCTCHG]; card 5 = TRANID. The cards are read POSITIONALLY from
+            # raw (blank placeholders intact) by assembly.register_...; the id
+            # offsets and the TRANID transform are applied numerically to the
+            # captured sub-blocks in the deferred resolution pass at the end
+            # of the top-level parse (assembly.finalize) — the referenced
+            # *DEFINE_TRANSFORMATION may appear before OR after this keyword,
+            # even in a different include.
             if nonblank:
-                inc_path = _resolve(nonblank[0])
-                extras = " ".join(nonblank[1:]).replace("0", "").replace(".", "")
-                if extras.strip():
-                    PARSER_WARNINGS.append(
-                        f"*INCLUDE_TRANSFORM {nonblank[0]}: ID offsets / scale "
-                        "factors / TRANID are NOT applied — the file is included "
-                        "untransformed. Verify IDs do not collide and the "
-                        "transformation is not load-bearing.")
+                fname = nonblank[0]
+                inc_path = _resolve(fname)
                 if os.path.isfile(inc_path):
-                    blocks.extend(parse_k_file(inc_path, _depth + 1, include_path))
+                    sub = parse_k_file(inc_path, _depth + 1, include_path)
+                    _assembly.register_include_transform(fname, raw, sub, blocks)
+                    blocks.extend(sub)
                 else:
                     print(f"  [INCLUDE] WARNING: file not found: {inc_path}", file=sys.stderr)
                     PARSER_WARNINGS.append(f"*INCLUDE_TRANSFORM file not found: {inc_path}")
@@ -299,6 +309,12 @@ def parse_k_file(path: str, _depth: int = 0,
             # else: blank or data line outside any block → ignore
 
     _flush()
+    if _depth == 0:
+        # Deferred assembly-transform resolution: apply *INCLUDE_TRANSFORM id
+        # offsets + TRANID transforms and *NODE_TRANSFORM node-set transforms
+        # by mutating Block.raw in place (handlers re-parse raw during
+        # dispatch, so the whole pipeline downstream sees final ids/coords).
+        _assembly.finalize(blocks)
     return blocks
 
 
