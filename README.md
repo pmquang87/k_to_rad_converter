@@ -244,6 +244,32 @@ that reference parameters, other curves, or runtime state are warned + skipped)
 resolved wherever a field is parsed; `*PARAMETER_EXPRESSION` is not evaluated
 (warned). LS-DYNA **comma-delimited free format** is accepted on every card.
 
+### Assembly / includes
+`*INCLUDE` and `*INCLUDE_PATH[_RELATIVE]` — included files are parsed and
+merged inline.
+`*INCLUDE_TRANSFORM` → applied **numerically at parse time** (k2rad inlines
+includes, so no `//SUBMODEL` is emitted): the id offsets
+(`IDNOFF`/`IDEOFF`/`IDPOFF`/`IDMOFF`/`IDSOFF`/`IDFOFF`/`IDDOFF`/`IDROFF`)
+are added to every id the included file defines **and** references (per-keyword
+field map covering the supported keyword families; an included keyword outside
+the map warns loudly), and the `TRANID` `*DEFINE_TRANSFORMATION` moves the
+included `*NODE` coordinates. Nested `*INCLUDE_TRANSFORM`s accumulate offsets
+additively and compose transforms innermost-first (the dyna2rad `//SUBMODEL` /
+starter `LECSUBMOD` semantics). `FCTMAS`/`FCTTIM`/`FCTLEN`/`FCTTEM` unit
+factors are **not** applied (use kunit to convert the include first — warned),
+and literal geometry inside other keywords of a transformed include
+(coordinate-system origins, boxes, rigid-wall points; direction vectors under
+rotation) is warned per keyword.
+`*DEFINE_TRANSFORMATION` → composed row-by-row (top-to-bottom, each row acting
+on the previous result, matching `/TRANSFORM` starter math): `TRANSL`,
+`ROTATE` (direction form and two-`POINT` form, degrees, right-hand rule),
+`SCALE` (0 → 1), `MIRROR` (A7 coordinate-system mirroring warned),
+`POINT`+`POS6P`, `POS6N`, `TRANSL2ND`, `ROTATE3NA` (pivot node honoured),
+`MATRIX` (R16 cards 3-4). Unknown verbs warn loudly and are skipped.
+`*NODE_TRANSFORM` → the `TRSID` transform applied to the `NSID`
+`*SET_NODE_LIST` nodes after all include transforms (LS-DYNA `IMMED=0`
+semantics; `IMMED=1` is treated as deferred with a warning).
+
 ### Constraints
 `*CONSTRAINED_NODE_SET` → `/RLINK` (nodes share the same velocity along the
 constrained DOF; `DOF` 1/2/3 = x/y/z translation, 4 = all translations, 5/6/7 =
@@ -519,7 +545,10 @@ k_to_rad_converter/
 ├── run_converter.py      # Script-style entry with hardcoded path
 ├── k2rad/
 │   ├── __init__.py       # convert() function and ConversionResult
-│   ├── parser.py         # .k file parser (handles *INCLUDE)
+│   ├── parser.py         # .k file parser (handles *INCLUDE / *INCLUDE_TRANSFORM)
+│   ├── assembly.py       # *INCLUDE_TRANSFORM id offsets + *DEFINE_TRANSFORMATION /
+│   │                     #   *NODE_TRANSFORM applied numerically at parse time
+│   ├── transform.py      # Pure affine math for the transform rows
 │   ├── handlers.py       # One handler per LS-DYNA keyword
 │   ├── state.py          # ConversionState data model
 │   ├── gapmin.py         # Suggest /INTER/TYPE7 Gapmin from mesh clearance
@@ -556,7 +585,13 @@ python -m unittest discover -s tests
   (MESSAGE ID 296). Use `/IMPL/SOLVER/2` (MUMPS direct) for SPMD, falls
   back to `/IMPL/SOLVER/1` (PCG) for memory-constrained large models.
 - `*INCLUDE` is supported (file path resolved relative to the parent .k
-  file).
+  file). `*INCLUDE_TRANSFORM` applies its id offsets and TRANID transform
+  numerically at parse time; unit factors (`FCTMAS`/`FCTTIM`/`FCTLEN`/
+  `FCTTEM`) are **not** applied (convert the include with kunit first —
+  warned loudly), and the TRANID transform moves `*NODE` coordinates only
+  (literal geometry inside other keywords of the include — coordinate-system
+  origins, box extents, rigid-wall points, velocity vectors under rotation —
+  is warned per keyword).
 
 ---
 

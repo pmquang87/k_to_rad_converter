@@ -3972,6 +3972,20 @@ def handle_database_frequency_binary_d3ftg(block: Block, state: ConversionState)
     _handle_db_freq_binary(block, state, "D3FTG")
 
 
+def handle_define_transformation(block: Block, state: ConversionState) -> None:
+    """*DEFINE_TRANSFORMATION is consumed at parse time (k2rad.assembly): its
+    option rows are composed into the affine transform that is applied
+    numerically to *INCLUDE_TRANSFORM / *NODE_TRANSFORM geometry before
+    dispatch. Nothing to convert here — the handler exists so the keyword is
+    not reported as skipped."""
+
+
+def handle_node_transform(block: Block, state: ConversionState) -> None:
+    """*NODE_TRANSFORM is applied numerically at parse time (k2rad.assembly):
+    the referenced node set's coordinates are already transformed when this
+    block reaches dispatch."""
+
+
 def handle_skip(block: Block, state: ConversionState) -> None:
     state.skipped_keywords.append(block.keyword)
 
@@ -4169,6 +4183,10 @@ HANDLERS = {
     "DEFINE_SD_ORIENTATION":                  handle_define_sd_orientation,
     "DEFINE_BOX":                             handle_define_box,
     "DEFINE_BOX_LOCAL":                       handle_define_box,
+    # Assembly transforms — consumed at parse time (k2rad.assembly); the
+    # no-op handlers keep them out of skipped_keywords.
+    "DEFINE_TRANSFORMATION":                  handle_define_transformation,
+    "NODE_TRANSFORM":                         handle_node_transform,
 
     # Sets
     "SET_NODE_LIST":                          handle_set_node_list,

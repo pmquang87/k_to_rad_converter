@@ -58,9 +58,16 @@ is a dataclass with:
 
 `*INCLUDE` directives are resolved relative to the including file and the
 included blocks are merged inline, so downstream stages see one flat block
-stream. Parse-time problems (missing includes, unresolved `&parameters`) are
-collected in the module-level `PARSER_WARNINGS` list, which `convert()` folds
-into the result *after* dispatch (handlers resolve `&name` fields lazily).
+stream. `*INCLUDE_TRANSFORM` registers a pending entry (holding references to
+the included Block objects) and, at the end of the top-level parse,
+`k2rad/assembly.py` applies the id offsets and the TRANID
+`*DEFINE_TRANSFORMATION` (affine math in `k2rad/transform.py`) plus any
+`*NODE_TRANSFORM` by mutating `Block.raw` in place — deferred because the
+TRANID may be defined after the include, and invisible downstream because
+nothing after `dispatch` reads `raw`. Parse-time problems (missing includes,
+unresolved `&parameters`, unsupported transform content) are collected in the
+module-level `PARSER_WARNINGS` list, which `convert()` folds into the result
+*after* dispatch (handlers resolve `&name` fields lazily).
 
 ### 2. Dispatch — `k2rad/handlers.py`
 
@@ -209,6 +216,8 @@ rationale for the scipy-cKDTree backend choice.
 | File | Role |
 |---|---|
 | `k2rad/parser.py` | `.k` → `list[Block]`; `*INCLUDE` inlining; `PARSER_WARNINGS` |
+| `k2rad/assembly.py` | `*INCLUDE_TRANSFORM` id offsets + `*DEFINE_TRANSFORMATION` / `*NODE_TRANSFORM` applied to `Block.raw` at parse time |
+| `k2rad/transform.py` | pure affine math (Rodrigues rotation, mirror, POS6 frames, row composition) |
 | `k2rad/handlers.py` | `HANDLERS` registry + `dispatch()`; one `handle_*` per keyword |
 | `k2rad/state.py` | `ConversionState`, per-keyword dataclasses, `ConvertOptions` |
 | `k2rad/writer.py` | `build_starter` / `build_engine` + all `_make_*` section builders |

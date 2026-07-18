@@ -11,6 +11,72 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Assembly transforms** (`*INCLUDE_TRANSFORM` / `*DEFINE_TRANSFORMATION` /
+  `*NODE_TRANSFORM`) — the roadmap's P0 silent-wrong-geometry item. Since
+  k2rad inlines includes, the faithful file-to-file mapping is **numeric
+  application at parse time** (new `k2rad/assembly.py` + pure-math
+  `k2rad/transform.py`) rather than emitting `//SUBMODEL`:
+  - `*INCLUDE_TRANSFORM` id offsets (`IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF
+    IDFOFF IDDOFF` + `IDROFF`) are added to every id the included file
+    defines **and** references, keeping them consistent — driven by a
+    per-keyword field map covering the HANDLERS families (mesh, sets,
+    sections, materials incl. their curve/table reference fields, curves,
+    `*DEFINE` entities, contacts with SSTYP/MSTYP-dependent namespaces,
+    BCs/loads/velocities, constraints, rigid walls, database requests).
+    Bucket assignment follows the R16 manual / OpenRadioss reader DRAWABLES
+    (`IDPOFF` also covers CNRB pids, rigidwall and cross-section ids;
+    sections/hourglass/contact ids fall to `IDROFF`; only ids > 0 are
+    offset, matching `hcioi_utils.cpp`). An included keyword *outside* the
+    map warns loudly instead of silently keeping colliding ids.
+  - The `TRANID` `*DEFINE_TRANSFORMATION` is composed row-by-row
+    (top-to-bottom, each row acting on the previous result — the
+    `LECTRANS`/`LECSUBMOD` sequential in-place semantics) into one affine
+    map applied to the included `*NODE` coordinates: `TRANSL`, `ROTATE`
+    (direction form and the two-`POINT` alt form detected by the cfg's
+    A4-A7-all-zero preread; degrees, Rodrigues/right-hand rule, center =
+    rotation point), `SCALE` (zero factors → 1, about the global origin),
+    `MIRROR` (plane point + normal point; A7 coordinate-system mirroring
+    warned, matching dyna2rad's dead read), `POINT`+`POS6P` (frames per
+    `3points_to_frame.F`, `x' = X4 + QQ·PPᵀ·(x−X1)`), `POS6N`, `TRANSL2ND`
+    (A3=0 → full node1→node2 distance per the R16 manual, avoiding
+    dyna2rad's zero-translation defect), `ROTATE3NA` (axis node1→node2
+    **through node3** per the manual; the starter ignores node3), and the
+    R16 `MATRIX` cards-3/4 form (`(x,y,z,1)·M` row-vector convention).
+    Node-referenced rows resolve parse-time coordinates; a referenced node
+    that is itself moved by the transform is pre-transformed through the
+    rows composed so far (the `RTRANSPOS` intent, implemented without its
+    documented TRA/SYM/SCA collapse defects). `POINT` coordinates are the
+    literal card values (dyna2rad behaviour). Unknown verbs warn + skip.
+  - Deferred TRANID resolution: the `*DEFINE_TRANSFORMATION` may appear
+    before or after the `*INCLUDE_TRANSFORM`, in the parent or another
+    include (binding happens pre-offset, parent scope first, at the end of
+    the top-level parse). Nested `*INCLUDE_TRANSFORM`s accumulate offsets
+    additively and compose geometric transforms innermost-first (the
+    `LECSUBMOD` level walk) — falling naturally out of registration order.
+  - `*NODE_TRANSFORM` (TRSID, NSID[, IMMED]) applies the transform to the
+    `*SET_NODE_LIST` nodes **after** all include transforms (`lectur.F`
+    order), reading current coordinates like `LECTRANS`; `IMMED=1` is
+    treated as deferred with a warning.
+  - Everything mutates `Block.raw` before dispatch, so handlers/state/
+    writer see final ids/coordinates unchanged; decks without these
+    keywords are byte-identical (golden fixtures untouched).
+  - **Deliberately warned, not applied**: `FCTMAS`/`FCTTIM`/`FCTLEN`/
+    `FCTTEM`/`FCTCHG` unit factors (a consistent rescale must touch every
+    dimensioned value — kunit's domain; partially scaling only coordinates
+    would silently corrupt the physics), `PREFIX`/`SUFFIX` title
+    decoration, `IMMED=1`, missing TRANID, unmapped-keyword id offsets,
+    and literal geometry in non-`*NODE` keywords of a transformed include
+    (coordinate-system origins, boxes, rigid-wall points, detonation/charge
+    points always; direction/tensor carriers like `*INITIAL_VELOCITY` or
+    `*INITIAL_STRESS_*` only when the transform actually rotates/mirrors/
+    scales — a pure translation leaves them valid).
+  - Tests: `tests/test_include_transform.py` (25 cases — exact TRANSL/
+    ROTATE-vs-hand-Rodrigues/SCALE/MIRROR/two-point-ROTATE/POS6P/TRANSL2ND
+    coordinates, composition order, offset consistency across
+    elements/parts/sets/curves/BCs/contacts/discrete+mass elements,
+    ten-node solids, nested includes, `*NODE_TRANSFORM` ordering, warning
+    paths, and an end-to-end starter `/NODE` roundtrip).
+
 - **Failure criteria**
   - `*MAT_ADD_EROSION` now converts its **full card-1/card-2 scalar-criteria
     set to a single `/FAIL/GENE1`** (layout audited against `hm_cfg_files`

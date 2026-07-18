@@ -6753,7 +6753,11 @@ class IncludeHandlingTests(unittest.TestCase):
         kws = [b.keyword for b in parse_k_file(main)]
         self.assertEqual(kws.count("MAT_ELASTIC"), 2)
 
-    def test_include_transform_warns_when_transform_nonzero(self):
+    def test_include_transform_offsets_now_applied(self):
+        # The IDNOFF on card 2 is applied numerically at parse time
+        # (k2rad.assembly), so the historic "NOT applied" warning is gone and
+        # the node id carries the offset. (Full coverage lives in
+        # tests/test_include_transform.py.)
         from k2rad.parser import PARSER_WARNINGS
         d = self._dir()
         with open(os.path.join(d, "c.k"), "w") as fh:
@@ -6763,8 +6767,10 @@ class IncludeHandlingTests(unittest.TestCase):
             fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nc.k\n"
                      "      1000\n*END\n")
         blocks = parse_k_file(main)
-        self.assertIn("NODE", [b.keyword for b in blocks])
-        self.assertTrue(any("INCLUDE_TRANSFORM" in w for w in PARSER_WARNINGS))
+        node_blocks = [b for b in blocks if b.keyword == "NODE"]
+        self.assertTrue(node_blocks)
+        self.assertIn("1001", node_blocks[0].raw[0])
+        self.assertFalse(any("NOT applied" in w for w in PARSER_WARNINGS))
 
 
 class ParameterSubstitutionTests(unittest.TestCase):
