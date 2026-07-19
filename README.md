@@ -435,7 +435,21 @@ edges — and references them from the interface (`line_IDm=0` = self edge-impac
 `SOFT=-19` hands two `/SURF` to the starter, which auto-generates the child
 TYPE7+TYPE11 (no hand-built `/LINE`). (`--inter-gapmin`/`--auto-gapmin` do not
 reach these SOFT-routed interfaces; their engagement gap is the Card-3 `SST`/`MST`.)
-`*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`
+`*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`.
+The SSID side becomes the secondary `/GRNOD` and the MSID side the main
+`/SURF`, so **the deformable part belongs on the SSID side**: `/INTER/TYPE7`
+is an asymmetric node-to-surface contact, and rigid-body nodes cannot form a
+secondary node group. A contact whose SSID side is entirely rigid (a loading
+platen or impactor put on the secondary side) therefore has no interface to
+emit; k2rad **warns, names the interface, states the physical consequence and
+the side-swap remedy, and reports the loss under "Recognized but not
+emitted"** rather than dropping it silently. It deliberately does *not* swap
+the sides for you — that would convert a model you did not write. The same
+reporting covers a main side that resolves to no surface, an all-parts
+self-contact with no deformable nodes, the `SOFT`-routed
+`*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`. A *partially*
+rigid secondary side keeps its interface and warns about the nodes removed
+from it.
 `*CONTACT_..._TIEBREAK` (`SURFACE_TO_SURFACE_TIEBREAK`, `_ONE_WAY_...`,
 `TIEBREAK_{SURFACE,NODES}_TO_SURFACE`) → `/INTER/TYPE7` for the post-failure
 contact, **with a warning that the cohesive pre-bond (NFLS/SFLS stress failure)
@@ -555,7 +569,11 @@ not yet emitted), `*DATABASE_NODOUT` / `*DATABASE_ELOUT` (k2rad writes the
 per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names) and
 `*DATABASE_GLSTAT` (no card needed — OpenRadioss writes the global energy
 balance automatically). In every case the `dt` is still honoured as the
-`/TFILE` frequency.
+`/TFILE` frequency. The same channel carries any `*CONTACT` that produced
+no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no
+`/INTER/SUB`), with the lost interface ids named — a missing contact
+changes the physics, not just the instrumentation, so it can never be
+invisible in the log.
 
 ---
 

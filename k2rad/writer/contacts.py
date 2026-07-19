@@ -29,6 +29,10 @@ __all__ = [
     "_gapmin_override",
     "_sfs_to_stfac",
     "_stfac_for",
+    "_describe_empty_secondary",
+    "_warn_partial_rigid_secondary",
+    "_drop_interface",
+    "_note_dropped_interfaces",
     "_make_interfaces",
     "_select_parent_interface",
     "_contact_slave_pids",
@@ -62,7 +66,19 @@ __all__ = [
 # Starter: interfaces
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _resolve_contact_slave(state: ConversionState, sid: int, styp: int, rigid_nodes: Set[int], out_lines: List[str]) -> int:
+def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
+                           rigid_nodes: Set[int], out_lines: List[str],
+                           diag: Optional[Dict[str, int]] = None) -> int:
+    """Emit the /GRNOD for a contact SECONDARY side; 0 when nothing is left.
+
+    ``diag``, when given, is filled with ``raw`` (nodes the side resolved to
+    before filtering), ``rigid_removed`` (how many of those were dropped for
+    belonging to a rigid body) and ``clean`` (what actually reached the
+    /GRNOD). A caller that gets 0 back needs that breakdown to tell the user
+    WHY: "ssid names nothing" and "ssid is a rigid platen" are different
+    mistakes with different remedies, and returning a bare 0 for both is how
+    this drop stayed invisible. See _describe_empty_secondary.
+    """
     nids = set()
     def add_part_nodes(pid: int):
         for e in state.shell_elems:
@@ -88,7 +104,12 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int, rigid_no
         elif sid in state.node_sets:
             nids.update(state.node_sets[sid][1])
 
-    clean_nids = [n for n in sorted(nids) if n > 0 and n not in rigid_nodes]
+    raw_nids = [n for n in sorted(nids) if n > 0]
+    clean_nids = [n for n in raw_nids if n not in rigid_nodes]
+    if diag is not None:
+        diag["raw"] = len(raw_nids)
+        diag["rigid_removed"] = len(raw_nids) - len(clean_nids)
+        diag["clean"] = len(clean_nids)
     if not clean_nids:
         return 0
     grnod_id = state.next_id()
@@ -178,7 +199,7 @@ def _warn_implicit_solid_contact_np1(state: ConversionState) -> None:
         "Implicit deck with a solid-part contact surface (parts "
         f"{sorted(solid_pids)}): the OpenRadioss SPMD engine segfaults "
         "(MESSAGE ID 44, Segmentation Violation) at the first implicit solve "
-        "when run multi-domain. RUN THIS DECK WITH np=1 (one MPI domain) -- the "
+        "when run multi-domain. RUN THIS DECK WITH np=1 (one MPI domain) — the "
         "starter and the np=1 engine are unaffected. This is an upstream "
         "OpenRadioss engine limitation: the crash is in the distributed implicit "
         "solve, independent of the contact-surface representation (verified with "
@@ -322,6 +343,115 @@ def _stfac_for(state: ConversionState, sfs: float, inter_id: int) -> float:
     return _sfs_to_stfac(sfs, state, inter_id)
 
 
+# -----------------------------------------------------------------------------
+# Never drop an interface silently
+#
+# A /INTER that is not emitted changes the PHYSICS of the converted model: the
+# two surfaces stop interacting, the load path disappears, and the run does not
+# fail — it produces a plausible-looking answer that is wrong. That is strictly
+# worse than a missing output card, so every path in this module that declines
+# to emit an interface must (a) warn with an actionable message and (b) register
+# the loss in the conversion log's accounting via note_recognized_not_emitted(),
+# so "skipped : 0 unsupported keyword(s)" can no longer coexist with a missing
+# /INTER. The helpers below are that single choke point.
+# -----------------------------------------------------------------------------
+
+#: What a dropped interface costs the user; appended to every drop message.
+_DROP_CONSEQUENCE = (
+    "PHYSICAL CONSEQUENCE: these two surfaces will NOT interact in the "
+    "converted model — they pass through each other, the load path is "
+    "missing, and the run does not fail: the reaction force simply stays flat "
+    "(or appears only once the parts overlap by their full thickness) while "
+    "internal and contact energy climb."
+)
+
+#: Why an all-rigid secondary side is a side-order mistake, not a modelling one.
+_RIGID_SECONDARY_REMEDY = (
+    "REMEDY: swap the sides — put the DEFORMABLE part on the SECONDARY (SSID) "
+    "side and the rigid part on the MAIN (MSID) side. /INTER/TYPE7 is an "
+    "asymmetric node-to-surface contact, so the deformable side is the one "
+    "that must supply the tracked nodes. k2rad deliberately does NOT swap them "
+    "for you: that would silently convert a model different from the one you "
+    "wrote."
+)
+
+
+def _describe_empty_secondary(diag: Dict[str, int], sid: int, styp: int) -> str:
+    """One clause explaining why a contact SECONDARY side produced no nodes."""
+    raw = diag.get("raw", 0)
+    removed = diag.get("rigid_removed", 0)
+    if raw == 0:
+        return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
+                "no nodes at all — it names no part, part set or node set that "
+                "carries shell/solid elements in this deck")
+    if removed == raw:
+        return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
+                f"{raw} node(s) and ALL {raw} of them belong to a rigid body (a "
+                "*MAT_RIGID part or a *CONSTRAINED_*_RIGID_BODY), leaving an "
+                "empty secondary node group — a rigid loading platen or "
+                "impactor placed on the secondary side is the usual cause")
+    return (f"the SECONDARY (SSID) side ssid={sid} sstyp={styp} resolved to "
+            f"{raw} node(s), of which {removed} were rigid-body nodes, leaving "
+            "an empty secondary node group")
+
+
+def _warn_partial_rigid_secondary(state: ConversionState, keyword: str,
+                                  inter_id: int, diag: Dict[str, int],
+                                  sid: int) -> None:
+    """Flag a secondary side that KEPT its interface but lost some nodes.
+
+    The same filter that empties an all-rigid side quietly thins a mixed one.
+    The interface is still emitted (so this warns rather than dropping), but the
+    share of the contact those rigid nodes carried is gone from the converted
+    model and the user is entitled to know."""
+    removed = diag.get("rigid_removed", 0)
+    if removed <= 0 or removed == diag.get("raw", 0):
+        return
+    state.warn(
+        f"*{keyword or 'CONTACT'} {inter_id}: {removed} of the "
+        f"{diag.get('raw', 0)} node(s) on the SECONDARY side (ssid={sid}) "
+        "belong to a rigid body and were removed from the secondary node "
+        f"group; the interface is emitted with the remaining "
+        f"{diag.get('clean', 0)} node(s). Those rigid nodes carry no contact in "
+        "the converted model — if that part of the surface is load-bearing, "
+        "make it the MAIN (MSID) side of its own contact instead."
+    )
+
+
+def _drop_interface(state: ConversionState, dropped: Dict[str, List[int]],
+                    keyword: str, inter_id: int, cause: str,
+                    remedy: str) -> None:
+    """Record an interface k2rad refused to emit: loud warning + accounting.
+
+    ``dropped`` accumulates ``{keyword: [inter_id, ...]}`` for
+    _note_dropped_interfaces, which turns it into the conversion log's
+    "Recognized but not emitted" entry. Never drop an interface without going
+    through here."""
+    kw = keyword or "CONTACT"
+    state.warn(
+        f"*{kw} {inter_id}: {cause}, so NO /INTER was emitted for this "
+        f"contact. {_DROP_CONSEQUENCE} {remedy}"
+    )
+    dropped.setdefault(kw, []).append(inter_id)
+
+
+def _note_dropped_interfaces(state: ConversionState,
+                             dropped: Dict[str, List[int]]) -> None:
+    """Fold the dropped interfaces into the conversion log's accounting.
+
+    One entry per *CONTACT spelling (note_recognized_not_emitted deduplicates on
+    the keyword), naming every interface id that was lost, so the log's summary
+    counts the loss instead of reporting a clean conversion."""
+    for kw, ids in sorted(dropped.items()):
+        state.note_recognized_not_emitted(
+            kw,
+            f"{len(ids)} contact(s) produced no /INTER (interface id(s) "
+            f"{sorted(ids)}): a contact side resolved to no usable geometry, so "
+            "those surfaces do not interact in the converted model. See the "
+            "per-interface warnings for the cause and the remedy."
+        )
+
+
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     if not state.contacts_single and not state.contacts_surf2surf:
         return []
@@ -340,6 +470,11 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         )
     # --inter-gapmin ID=VAL: per-interface Gapmin overrides, consumed as applied.
     gapmin_overrides = dict(state.options.inter_gapmin)
+
+    # Interfaces this pass could not emit, {keyword: [inter_id, ...]}. Filled
+    # only through _drop_interface (which also warns) and folded into the
+    # conversion log's accounting by _note_dropped_interfaces at the end.
+    dropped: Dict[str, List[int]] = {}
 
     # Deformable-contact recipe (opt-in): force Inacti=5 (mesh-scale engagement
     # gap, no t=0 force spike) on each deformable-vs-deformable interface. This is
@@ -363,6 +498,17 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
     for c in state.contacts_single:
         if c.ssid == 0:
             if not all_deformable_nodes or not all_pids:
+                _drop_interface(
+                    state, dropped, c.keyword, c.inter_id,
+                    "it is an all-parts self-contact (SSID=0) but the deck has "
+                    + ("no parts at all" if not all_pids else
+                       "no deformable nodes left for the secondary side (every "
+                       "shell/solid node belongs to a rigid body)"),
+                    "REMEDY: a self-contact needs at least one deformable part "
+                    "to supply the tracked nodes. If the model really is "
+                    "all-rigid, replace the self-contact with an explicit "
+                    "surface-to-surface contact between the rigid parts, or "
+                    "give the impacted part a deformable material.")
                 continue
             if not state.is_implicit:
                 # EXPLICIT: surfa=0 self-contact → native-style /INTER/TYPE25 over ONE
@@ -390,6 +536,15 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             lines += _emit_grnod_node(slav_grnod, f"contact_{c.inter_id}_slave", all_deformable_nodes)
             if not _make_master_surface(state, mast_surf, f"contact_{c.inter_id}_master",
                                         all_pids, lines):
+                _drop_interface(
+                    state, dropped, c.keyword, c.inter_id,
+                    "it is an all-parts self-contact (SSID=0) but no contact "
+                    f"surface could be built from the deck's {len(all_pids)} "
+                    "part(s) — none of them carries shell or solid elements a "
+                    "/SURF can be made from",
+                    "REMEDY: check that the parts this contact is meant to "
+                    "cover actually have *ELEMENT_SHELL / *ELEMENT_SOLID "
+                    "elements in the deck.")
                 continue
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
@@ -399,30 +554,72 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
         else:
-            slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
+            diag: Dict[str, int] = {}
+            slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
+                                                lines, diag=diag)
             mast_surf = _resolve_contact_master(state, c.ssid, c.sstyp, lines)
-            if slav_grnod and mast_surf:
-                gapmin = _gapmin_override(state, c.inter_id,
-                                          _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
-                                          gapmin_overrides)
-                lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                           _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
-                                           viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                           gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
-
-    for c in state.contacts_surf2surf:
-        slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
-        mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
-        if slav_grnod and mast_surf:
+            if not slav_grnod:
+                _drop_interface(state, dropped, c.keyword, c.inter_id,
+                                _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                                _RIGID_SECONDARY_REMEDY
+                                if diag.get("raw") else
+                                "REMEDY: check that SSID names a part, part set "
+                                "or node set that exists in this deck and "
+                                "carries elements.")
+                continue
+            if not mast_surf:
+                _drop_interface(
+                    state, dropped, c.keyword, c.inter_id,
+                    f"the MAIN side sid={c.ssid} styp={c.sstyp} resolved to no "
+                    "contact surface (it names no part or part set carrying "
+                    "shell/solid elements)",
+                    "REMEDY: point the contact at a part or part set that "
+                    "exists in this deck; a *SET_NODE or *SET_SEGMENT cannot "
+                    "supply the main surface of this interface.")
+                continue
+            _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
-            inacti = (5 if c.inter_id in recipe_inacti_ids
-                      else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
             lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
-                                       inacti,
+                                       _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
                                        gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+
+    for c in state.contacts_surf2surf:
+        diag = {}
+        slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
+                                            lines, diag=diag)
+        mast_surf = _resolve_contact_master(state, c.msid, c.mstyp, lines)
+        if not slav_grnod:
+            _drop_interface(state, dropped, c.keyword, c.inter_id,
+                            _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                            _RIGID_SECONDARY_REMEDY
+                            if diag.get("raw") else
+                            "REMEDY: check that SSID names a part, part set or "
+                            "node set that exists in this deck and carries "
+                            "elements.")
+            continue
+        if not mast_surf:
+            _drop_interface(
+                state, dropped, c.keyword, c.inter_id,
+                f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} resolved "
+                "to no contact surface (it names no part or part set carrying "
+                "shell/solid elements)",
+                "REMEDY: point MSID at a part or part set that exists in this "
+                "deck; a *SET_NODE or *SET_SEGMENT cannot supply the main "
+                "surface of a /INTER/TYPE7.")
+            continue
+        _warn_partial_rigid_secondary(state, c.keyword, c.inter_id, diag, c.ssid)
+        gapmin = _gapmin_override(state, c.inter_id,
+                                  _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
+                                  gapmin_overrides)
+        inacti = (5 if c.inter_id in recipe_inacti_ids
+                  else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
+        lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+                                   inacti,
+                                   viss=_vdc_to_viss(c.vdc, state, c.inter_id),
+                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
 
     for iid, val in sorted(gapmin_overrides.items()):
         state.warn(
@@ -432,6 +629,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             "order)."
         )
 
+    _note_dropped_interfaces(state, dropped)
     return lines
 
 
@@ -569,6 +767,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
 
     fallback_parent = _select_parent_interface(state)
     lines: List[str] = ["#-  FORCE TRANSDUCERS (/INTER/SUB):", HDR]
+    skipped_ft: List[int] = []
 
     for ft in state.force_transducers:
         title = ft.title or f"FORCE_TRANSD_{ft.inter_id}"
@@ -604,6 +803,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
                 f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: no existing /INTER to act "
                 "as parent; /INTER/SUB requires a parent interface -> skipped."
             )
+            skipped_ft.append(ft.inter_id)
             continue
 
         sec_nodes = _part_node_ids(state, sec_pids, rigid_nodes)
@@ -612,6 +812,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
                 f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: secondary side has no "
                 "deformable nodes (parts may be all-rigid) -> skipped."
             )
+            skipped_ft.append(ft.inter_id)
             continue
 
         grnod_id = state.next_id()
@@ -623,6 +824,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
                 f"CONTACT_FORCE_TRANSDUCER {ft.inter_id}: could not build a main "
                 "surface from its parts -> skipped."
             )
+            skipped_ft.append(ft.inter_id)
             continue
 
         # /INTER/SUB/sub_ID  →  parent inter_ID, main surface, secondary node group
@@ -658,6 +860,13 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
             "the applied *LOAD_RIGID_BODY / reaction."
         )
 
+    if skipped_ft:
+        state.note_recognized_not_emitted(
+            "CONTACT_FORCE_TRANSDUCER",
+            f"{len(skipped_ft)} transducer(s) produced no /INTER/SUB (id(s) "
+            f"{sorted(skipped_ft)}): no usable parent interface, secondary "
+            "node group or main surface. The requested contact-force channel "
+            "is missing from the T01 — see the per-transducer warnings.")
     return lines
 
 
@@ -1024,6 +1233,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
     if not state.contacts_general:
         return []
     lines = ["#-  GENERAL EDGE/SOFT INTERFACES (*CONTACT_AUTOMATIC_GENERAL SOFT):", HDR]
+    dropped: Dict[str, List[int]] = {}
     for c in state.contacts_general:
         self_contact = (c.ssid, c.sstyp) == (c.msid, c.mstyp)
         if c.soft == -11:
@@ -1041,10 +1251,14 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             slav = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
             mast = _resolve_contact_master(state, c.msid, c.mstyp, lines)
             if not slav or not mast:
-                state.warn(
-                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-7 -> TYPE7): "
-                    f"ssid={c.ssid}/msid={c.msid} resolved to no slave/master "
-                    "geometry -> interface skipped.")
+                _drop_interface(
+                    state, dropped, "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
+                    f"(SOFT=-7 -> TYPE7) ssid={c.ssid}/msid={c.msid} resolved "
+                    "to no secondary node group / main surface",
+                    "REMEDY: restrict the contact to parts or part sets that "
+                    "exist in this deck (a *SET_SEGMENT or *SET_NODE side does "
+                    "not resolve on the -7 route), or use SOFT=-11 for an edge "
+                    "contact built from a segment set.")
                 continue
             lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, c.fs,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
@@ -1058,10 +1272,14 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             surf_m = surf_s if self_contact else _resolve_contact_master(
                 state, c.msid, c.mstyp, lines)
             if not surf_s or not surf_m:
-                state.warn(
-                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-19 -> TYPE19): "
-                    f"ssid={c.ssid}/msid={c.msid} resolved to no surface -> "
-                    "interface skipped.")
+                _drop_interface(
+                    state, dropped, "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
+                    f"(SOFT=-19 -> TYPE19) ssid={c.ssid}/msid={c.msid} "
+                    "resolved to no surface",
+                    "REMEDY: restrict the contact to parts or part sets that "
+                    "exist in this deck (a *SET_SEGMENT or *SET_NODE side does "
+                    "not resolve on the -19 route), or use SOFT=-11 for an "
+                    "edge contact built from a segment set.")
                 continue
             lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, c.fs,
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac)
@@ -1076,10 +1294,13 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             line_m = 0 if self_contact else _general_line_group(
                 state, c.msid, c.mstyp, f"general_{c.inter_id}_m", lines)
             if not line_s:
-                state.warn(
-                    f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id} (SOFT=-11 -> TYPE11): "
-                    f"ssid={c.ssid} resolved to no edge/line geometry -> "
-                    "interface skipped.")
+                _drop_interface(
+                    state, dropped, "CONTACT_AUTOMATIC_GENERAL", c.inter_id,
+                    f"(SOFT=-11 -> TYPE11) ssid={c.ssid} resolved to no "
+                    "edge/line geometry",
+                    "REMEDY: point SSID at a *SET_SEGMENT that has segments, "
+                    "or at a part / part set carrying shell or solid "
+                    "elements.")
                 continue
             lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, c.fs,
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac)
@@ -1091,6 +1312,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                 "/LINE/SURF over the part surface so the starter derives the "
                 "edges) — dyna2rad instead forwards the raw set and lets the "
                 "starter build the edges.")
+    _note_dropped_interfaces(state, dropped)
     return lines
 
 
@@ -1300,6 +1522,7 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
     if not state.contacts_tied:
         return []
     lines = ["#-  TIED INTERFACES (*CONTACT_TIED_* -> /INTER/TYPE2 | /INTER/TYPE10):", HDR]
+    dropped: Dict[str, List[int]] = {}
     for c in state.contacts_tied:
         itype = _tied_interface_type(c)
         nids = _tied_slave_nids(state, c.ssid, c.sstyp)
@@ -1317,20 +1540,32 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                     "node with /RBODY)."
                 )
         if not clean:
-            state.warn(
-                f"TIED CONTACT {c.inter_id} (*CONTACT_TIED_{c.variant}): slave "
-                f"side ssid={c.ssid} sstyp={c.sstyp} resolved to no nodes — "
-                "interface skipped."
-            )
+            all_rigid = bool(nids)
+            _drop_interface(
+                state, dropped, f"CONTACT_TIED_{c.variant}", c.inter_id,
+                (f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
+                 f"resolved to {len(nids)} node(s) and ALL of them belong to a "
+                 "rigid body, leaving an empty secondary node group "
+                 "(/INTER/TYPE2 is a kinematic tie: it cannot share a node "
+                 "with a /RBODY)" if all_rigid else
+                 f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
+                 "resolved to no nodes at all"),
+                ("REMEDY: swap the sides so the DEFORMABLE part supplies the "
+                 "tied nodes, or give the tie a negative Card-3 SST/MST so it "
+                 "routes to the penalty tie /INTER/TYPE10, which does accept "
+                 "rigid-body secondary nodes." if all_rigid else
+                 "REMEDY: check that SSID names a part, part set, node set or "
+                 "segment set that exists in this deck and carries nodes."))
             continue
         master_lines: List[str] = []
         surf_id, verts, faces = _tied_master_surface(state, c, master_lines)
         if not surf_id:
-            state.warn(
-                f"TIED CONTACT {c.inter_id} (*CONTACT_TIED_{c.variant}): master "
-                f"side msid={c.msid} mstyp={c.mstyp} resolved to no surface — "
-                "interface skipped."
-            )
+            _drop_interface(
+                state, dropped, f"CONTACT_TIED_{c.variant}", c.inter_id,
+                f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} resolved "
+                "to no contact surface",
+                "REMEDY: point MSID at a part, part set or *SET_SEGMENT that "
+                "exists in this deck and carries shell/solid elements.")
             continue
         grnod_id = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
@@ -1362,4 +1597,5 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
             f"interface, Spotflag={spotflag}, {len(clean)} secondary nodes)."
             + rot_note
         )
+    _note_dropped_interfaces(state, dropped)
     return lines
