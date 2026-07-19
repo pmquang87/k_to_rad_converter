@@ -573,6 +573,43 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **`*CONTROL_TIMESTEP` `TSSFAC` was silently dropped whenever `DT2MS` >= 0.**
+  `TSSFAC` only ever reached the engine deck as the `Tsca` field of the
+  `/DT/NODA/CST/0` (or `/DT/AMS`) card that `DT2MS` < 0 emits
+  (`k2rad/writer/assembly.py:637-676`). With `DT2MS` = 0 or > 0 — no mass
+  scaling requested, which is the common case — that branch returns early and
+  **no `/DT` card of any kind was written**, so the user's requested time-step
+  safety factor vanished without a warning and OpenRadioss silently ran at its
+  own default `Tsca`. Reproduced on a minimal deck with `TSSFAC=0.8, DT2MS=0`:
+  the whole engine file contained no `/DT` line. `TSSFAC` is LS-DYNA's scale
+  factor on the computed critical time step (`dt = TSSFAC * dt_critical`) and
+  `Tsca` on the plain OpenRadioss `/DT` card is the identical quantity, so the
+  mapping is one-to-one and is now emitted as such:
+
+      /DT
+                       0.8                   0
+
+  Deliberate boundaries, so the fix stays a faithful mapping and nothing else:
+  - `Tmin` = 0 (no lower bound). `/DT`'s `Tmin` is a run-**stop** threshold, and
+    LS-DYNA's counterpart `TSLIMT` is a field `handle_control_timestep`
+    (`k2rad/handlers.py:2059-2066`) does not parse — it reads only `dtinit`,
+    `tssfac`, `dt2ms`. Inventing a floor would stop runs, or delete elements,
+    that the user never asked to stop or delete. **No `/DT/.../DEL` deletion
+    floor is added here**; that is a separate design decision.
+  - `TSSFAC` = 0 emits nothing. That is LS-DYNA's "use my default" (0.9), which
+    is also OpenRadioss's `/DT` default, so there is nothing to carry across.
+  - Implicit and modal decks are excluded, as before (no CFL step to scale).
+  - **A deck with no `*CONTROL_TIMESTEP` converts byte-for-byte as before** —
+    still no time-step card at all. Pinned by a test, along with the unchanged
+    `DT2MS` < 0 → `/DT/NODA/CST/0` and `--ams` → `/DT/AMS` paths.
+
+  Note for anyone re-reading the older audit that prompted this: `DT2MS` < 0
+  **already worked**, and still does. Verified on `DT2MS=-1.0E-6, TSSFAC=0.8`
+  → `/DT/NODA/CST/0` with `Tsca` 0.8, `Tmin` 1.0E-06, plus its warning. The
+  deck that motivated the audit simply had `DT2MS=0`, which is exactly the hole
+  fixed above. No golden fixture uses `*CONTROL_TIMESTEP`, so no golden moves.
+  Regression tests: `tests/test_control_timestep.py` (10 tests).
+
 - **TET10 midside ordering (two bugs, both on LS-DYNA-ordered `*ELEMENT_SOLID`
   ten-node meshes).** LS-DYNA and Radioss `/TETRA10` agree on corners 1-4 and the
   base midsides 5/6/7 but order the three **apex** midsides differently
