@@ -520,6 +520,15 @@ geometric resolver (elements whose nodes straddle the cutting plane,
 part-restricted and radius-filtered; a finite `LENL`/`LENM` parallelogram is
 approximated as the infinite plane with a warning); `*DATABASE_SECFORC` →
 `/TH/SECTIO` on every section
+`*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
+rotational DOF is constrained) on every SPC-constrained node, plus engine
+`/ANIM/VECT/FREAC`. **Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
+`*CONSTRAINED_NODAL_RIGID_BODY_SPC` option (whose `/BCS` acts on the rigid
+body's master node, so that node is the reaction node)
+`*DATABASE_NCFORC`, `*DATABASE_RCFORC` → `/TH/INTER` force resultants over
+every converted contact interface (OpenRadioss has no per-node contact-force
+time history; for `NCFORC` the nodal-resolution view is the
+`/ANIM/VECT/CONT` + `/PCONT` vectors)
 `*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG`, `*MAT_ADD_FATIGUE` → no
 OpenRadioss equivalent; honoured **offline** by
 `tools/modal_random_response.py` on top of the modal solution (see
@@ -528,6 +537,18 @@ bare-skipped
 
 Unsupported keywords are listed in `result.skipped_keywords` and as
 comments in the generated `_0000.rad`.
+
+A keyword can also be *recognized* — it has a handler, so it is **not**
+counted as skipped — and still produce no card. Those are listed separately in
+`result.recognized_not_emitted` as `(keyword, reason)` pairs, and printed by
+the CLI and the conversion log under **"Recognized but not emitted"**, so
+`skipped: 0 unsupported keyword(s)` cannot be read as "everything was
+converted". Currently: `*DATABASE_MATSUM` (per-part energy needs `/TH/PART`,
+not yet emitted), `*DATABASE_NODOUT` / `*DATABASE_ELOUT` (k2rad writes the
+per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names) and
+`*DATABASE_GLSTAT` (no card needed — OpenRadioss writes the global energy
+balance automatically). In every case the `dt` is still honoured as the
+`/TFILE` frequency.
 
 ---
 

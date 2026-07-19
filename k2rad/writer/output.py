@@ -232,19 +232,27 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
         converted contact interface here (T01, /TFILE frequency); the
         nodal-resolution view is the contact-force/pressure animation vectors
         /ANIM/VECT/CONT + /ANIM/VECT/PCONT the engine deck already carries.
-    Only emitted when a transducer or *DATABASE_NCFORC exists, so other decks
-    are unchanged.
+      * *DATABASE_RCFORC (contact resultant forces): the direct equivalent of
+        a /TH/INTER channel — LS-DYNA's rcforc is the per-contact force
+        resultant, so every converted interface is listed here too.
+    Only emitted when a transducer, *DATABASE_NCFORC or *DATABASE_RCFORC
+    exists, so other decks are unchanged.
     """
     all_inter_ids = ([c.inter_id for c in state.contacts_single]
                      + [c.inter_id for c in state.contacts_surf2surf]
                      + [c.inter_id for c in state.contacts_general]
                      + [c.inter_id for c in state.contacts_tied])
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
+    want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:
         state.warn(
             "*DATABASE_NCFORC requested but no *CONTACT was converted — "
             "there is no interface to output (no /TH/INTER emitted).")
-    if not state.th_sub_ids and not want_ncforc:
+    if state.db_rcforc_dt and not all_inter_ids:
+        state.warn(
+            "*DATABASE_RCFORC requested but no *CONTACT was converted — "
+            "there is no interface to output (no /TH/INTER emitted).")
+    if not state.th_sub_ids and not want_ncforc and not want_rcforc:
         return []
     # List the parent interface (total contact force) and each force-transducer
     # sub-interface id — a sub-interface is written to the T01 only when its own
@@ -263,6 +271,14 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
             "/TFILE frequency). The per-node field is in the animation "
             "vectors /ANIM/VECT/CONT + /ANIM/VECT/PCONT (at the /ANIM/DT "
             "frequency), which the engine deck emits by default.")
+        ids += [i for i in all_inter_ids if i not in ids]
+    if want_rcforc:
+        state.warn(
+            "*DATABASE_RCFORC (contact interface resultant forces): mapped to "
+            "/TH/INTER force resultants for every converted contact interface "
+            "(T01 file, /TFILE frequency). This is the direct equivalent — "
+            "LS-DYNA's rcforc reports the master/slave force resultant per "
+            "contact, which is what an OpenRadioss /TH/INTER channel carries.")
         ids += [i for i in all_inter_ids if i not in ids]
     if not ids:
         return []
@@ -365,9 +381,15 @@ def _make_starter_th_surf(state: ConversionState) -> List[str]:
 
 
 def _spc_constrains_rotations(state: ConversionState) -> bool:
-    """True when any *BOUNDARY_SPC constrains a rotational DOF — gates the
-    REACXX/YY/ZZ /TH channels and the /ANIM/VECT/MREAC moment vectors."""
-    return any(bc.dofrx or bc.dofry or bc.dofrz for bc in state.bcs_spcs)
+    """True when any SPC constrains a rotational DOF — gates the REACXX/YY/ZZ
+    /TH channels and the /ANIM/VECT/MREAC moment vectors.
+
+    Both /BCS sources count: *BOUNDARY_SPC_* (state.bcs_spcs) and the
+    *CONSTRAINED_NODAL_RIGID_BODY_SPC option (state.cnrb_spc_bcs), whose
+    rotational mask is the emitted "111"-style rot field."""
+    if any(bc.dofrx or bc.dofry or bc.dofrz for bc in state.bcs_spcs):
+        return True
+    return any(bc.rot != "000" for bc in state.cnrb_spc_bcs)
 
 
 def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[str]:
@@ -387,11 +409,11 @@ def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[
     """
     if not state.db_spcforc_dt:
         return []
-    if not state.bcs_spcs:
+    if not state.bcs_spcs and not state.cnrb_spc_bcs:
         state.warn(
-            "*DATABASE_SPCFORC requested but the deck has no *BOUNDARY_SPC — "
-            "no node is SPC-constrained, so there is no reaction to output "
-            "(no /TH/NODE emitted).")
+            "*DATABASE_SPCFORC requested but the deck SPC-constrains no node "
+            "(no *BOUNDARY_SPC_* and no *CONSTRAINED_NODAL_RIGID_BODY_SPC) — "
+            "there is no reaction to output (no /TH/NODE emitted).")
         return []
     node_to_ind = {}
     for pid, info in rbody_info.items():
@@ -401,6 +423,11 @@ def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[
     for bc in state.bcs_spcs:
         for n in state.node_sets.get(bc.nsid, ("", []))[1]:
             mapped.add(node_to_ind.get(n, n))
+    # *CONSTRAINED_NODAL_RIGID_BODY_SPC: the /BCS acts directly on the /RBODY
+    # master node, which is where the engine assembles the reaction — so the
+    # master node IS the spcforc node, no set expansion needed.
+    for cbc in state.cnrb_spc_bcs:
+        mapped.add(cbc.ind_node)
     nodes = sorted(mapped)
     if not nodes:
         state.warn(

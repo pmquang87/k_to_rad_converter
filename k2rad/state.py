@@ -901,6 +901,24 @@ class BcsSpc:
 
 
 @dataclass
+class CnrbSpcBc:
+    """A /BCS emitted by the *CONSTRAINED_NODAL_RIGID_BODY_SPC path.
+
+    *BOUNDARY_SPC_* records land in ``bcs_spcs`` and are turned into /BCS by
+    ``_make_bcs``. The CNRB ``_SPC`` option is a *second, independent* source of
+    /BCS: ``_make_cnrb_rbodies`` writes those cards inline on the rigid body's
+    master node, so they must NOT go into ``bcs_spcs`` (that would emit the card
+    twice). They are recorded here instead, so the reaction-output consumers —
+    /TH/NODE REAC* and /ANIM/VECT/FREAC for *DATABASE_SPCFORC — can see that the
+    deck really does SPC-constrain nodes.
+    """
+    bc_id: int
+    ind_node: int       # /RBODY master node the /BCS acts on
+    tra: str            # "111"-style translational mask, as emitted
+    rot: str            # "111"-style rotational mask, as emitted
+
+
+@dataclass
 class PrescribedMotionRigid:
     pid: int            # rigid part ID
     dof: int            # 1=X,2=Y,3=Z,5=RX,6=RY,7=RZ
@@ -2018,6 +2036,9 @@ class ConversionState:
 
     # ── Boundary conditions ────────────────────────────────────
     bcs_spcs: List[BcsSpc] = field(default_factory=list)
+    # /BCS written by the CNRB _SPC path (see CnrbSpcBc). Rebuilt from scratch
+    # on every _make_cnrb_rbodies call, so re-running the writer is idempotent.
+    cnrb_spc_bcs: List[CnrbSpcBc] = field(default_factory=list)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
 
@@ -2173,6 +2194,22 @@ class ConversionState:
     # ── Skipped / warnings ─────────────────────────────────────
     warnings: List[str] = field(default_factory=list)
     skipped_keywords: List[str] = field(default_factory=list)
+    # Keywords the parser RECOGNIZED (they have a handler, so they never reach
+    # skipped_keywords) but which produce no card in either output deck. Without
+    # this channel a handler that stores a dt and returns is indistinguishable,
+    # in the log, from a handler that converts something — and "skipped: 0
+    # unsupported keyword(s)" silently reads as "everything was converted".
+    # Record with note_recognized_not_emitted(); reported by the conversion log.
+    recognized_not_emitted: List[Tuple[str, str]] = field(default_factory=list)
+
+    def note_recognized_not_emitted(self, keyword: str, reason: str) -> None:
+        """Record *keyword* as parsed-but-not-converted, with the reason why.
+
+        Deduplicated on the keyword, so a deck repeating a card does not repeat
+        the log line."""
+        if any(kw == keyword for kw, _ in self.recognized_not_emitted):
+            return
+        self.recognized_not_emitted.append((keyword, reason))
 
     def next_id(self) -> int:
         """Return next auto-generated entity ID."""

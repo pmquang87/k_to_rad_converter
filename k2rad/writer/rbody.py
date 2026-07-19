@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
-from ..state import ConversionState, NodeData, PartData
+from ..state import CnrbSpcBc, ConversionState, NodeData, PartData
 from .common import HDR, _emit_grnod_node, _f, _i
 
 __all__ = [
@@ -369,6 +369,9 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
     lines: List[str] = []
     rigid_nodes: Set[int] = set()
     rbody_info: Dict = {}
+    # Rebuilt from scratch each call: the /BCS records below mirror the cards
+    # this function emits, so a second call must not double them up.
+    state.cnrb_spc_bcs = []
     if not state.cnrbs:
         return lines, rigid_nodes, rbody_info
 
@@ -494,6 +497,12 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
                     f"   {tra} {rot}{_i(skew)}{_i(ind_grnod_id)}",
                     HDR,
                 ]
+                # Register the constraint so *DATABASE_SPCFORC can see it. This
+                # is a SECOND source of /BCS besides *BOUNDARY_SPC_* — the card
+                # above is written inline here, so it must not go into
+                # state.bcs_spcs (_make_bcs would emit it a second time). The
+                # reaction consumers read both lists; see CnrbSpcBc.
+                state.cnrb_spc_bcs.append(CnrbSpcBc(bc_id, ind_node, tra, rot))
 
     return lines, rigid_nodes, rbody_info
 

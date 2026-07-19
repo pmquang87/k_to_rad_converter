@@ -14,9 +14,9 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
@@ -93,6 +93,9 @@ class ConversionResult:
     warnings: List[str]
     skipped_keywords: List[str]
     log_path: Optional[str] = None   # path of the auto-saved warning log (if any)
+    # (keyword, reason) for keywords that were recognized — they have a handler,
+    # so they are NOT in skipped_keywords — but produced no card in either deck.
+    recognized_not_emitted: List[Tuple[str, str]] = field(default_factory=list)
 
 
 def _write_conversion_log(output_stem: str, input_path: str,
@@ -101,11 +104,13 @@ def _write_conversion_log(output_stem: str, input_path: str,
     so they survive for later investigation (the console scrolls them away on a
     large deck).  Written only when there is something to record; returns the log
     path, or ``None`` if there were no warnings/skips."""
-    if not (state.warnings or state.skipped_keywords):
+    if not (state.warnings or state.skipped_keywords
+            or state.recognized_not_emitted):
         return None
     from datetime import datetime
     log_path = output_stem + "_conversion.log"
     skipped = sorted(set(state.skipped_keywords))
+    not_emitted = sorted(state.recognized_not_emitted)
     lines = [
         "k2rad conversion log",
         f"  generated : {datetime.now().isoformat(timespec='seconds')}",
@@ -113,11 +118,23 @@ def _write_conversion_log(output_stem: str, input_path: str,
         f"  output    : {output_stem}_0000.rad / _0001.rad",
         f"  warnings  : {len(state.warnings)}",
         f"  skipped   : {len(skipped)} unsupported keyword(s)",
+        f"  not emitted: {len(not_emitted)} recognized keyword(s) that "
+        "produced no card",
         "",
     ]
     if skipped:
         lines.append(f"Skipped (unsupported) keywords ({len(skipped)}):")
         lines.extend(f"  *{kw}" for kw in skipped)
+        lines.append("")
+    if not_emitted:
+        # These have a handler, so they never reach skipped_keywords — without
+        # this section "skipped: 0" would read as "everything was converted".
+        lines.append(
+            f"Recognized but not emitted ({len(not_emitted)}) — the keyword was "
+            "parsed and did NOT count as skipped, but no card was written for "
+            "it:")
+        for kw, reason in not_emitted:
+            lines.append(f"  *{kw}: {reason}")
         lines.append("")
     if state.warnings:
         lines.append(f"Warnings ({len(state.warnings)}):")
@@ -435,6 +452,7 @@ def convert(
         engine_path=engine_path,
         warnings=list(state.warnings),
         skipped_keywords=sorted(set(state.skipped_keywords)),
+        recognized_not_emitted=sorted(state.recognized_not_emitted),
         log_path=log_path,
     )
 

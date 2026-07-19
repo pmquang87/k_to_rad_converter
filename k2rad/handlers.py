@@ -2322,10 +2322,24 @@ def handle_database_jntforc(block: Block, state: ConversionState) -> None:
 
 def handle_database_matsum(block: Block, state: ConversionState) -> None:
     state.db_matsum_dt = _handle_db_dt(block)
+    if state.db_matsum_dt:
+        state.note_recognized_not_emitted(
+            "DATABASE_MATSUM",
+            "per-part energy/mass time history needs /TH/PART, which k2rad "
+            "does not emit yet. The dt is honoured as the /TFILE frequency, "
+            "but no per-part channel is written — global energy is still in "
+            "the .out/T01, and per-part energy is unavailable.")
 
 
 def handle_database_nodout(block: Block, state: ConversionState) -> None:
     state.db_nodout_dt = _handle_db_dt(block)
+    if state.db_nodout_dt:
+        state.note_recognized_not_emitted(
+            "DATABASE_NODOUT",
+            "no /TH/NODE block is emitted for it — k2rad writes /TH/NODE only "
+            "for nodes a *DATABASE_HISTORY_NODE[_SET] names (or a reaction "
+            "request). The dt is honoured as the /TFILE frequency. Add "
+            "*DATABASE_HISTORY_NODE to choose the nodes to record.")
 
 
 def handle_database_rcforc(block: Block, state: ConversionState) -> None:
@@ -4430,12 +4444,26 @@ def handle_database_elout(block: Block, state: ConversionState) -> None:
     raw = block.raw
     f = _card(raw, 0, fixed=True, n=4, w=10) if raw else []
     state.db_elout_dt = to_float(f[0]) if f else 0.0
+    if state.db_elout_dt:
+        state.note_recognized_not_emitted(
+            "DATABASE_ELOUT",
+            "no per-element /TH block is emitted for it — k2rad writes "
+            "/TH/SHEL, /TH/BRIC and /TH/BEAM only for elements a "
+            "*DATABASE_HISTORY_{SHELL,SOLID,BEAM} names. The dt is honoured as "
+            "the /TFILE frequency. Add *DATABASE_HISTORY_* to pick elements.")
 
 
 def handle_database_glstat(block: Block, state: ConversionState) -> None:
     raw = block.raw
     f = _card(raw, 0, fixed=True, n=4, w=10) if raw else []
     state.db_glstat_dt = to_float(f[0]) if f else 0.0
+    if state.db_glstat_dt:
+        state.note_recognized_not_emitted(
+            "DATABASE_GLSTAT",
+            "no dedicated card exists or is needed — OpenRadioss writes the "
+            "global energy/statistics balance to the .out and T01 files "
+            "automatically. The dt is honoured as the /TFILE frequency, so "
+            "the data IS produced; it just is not driven by a converted card.")
 
 
 def _handle_db_history(block: Block, state: ConversionState, db_type: str) -> None:
