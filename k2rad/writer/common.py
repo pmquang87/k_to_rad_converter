@@ -17,12 +17,14 @@ __all__ = [
     "_elform_to_isolid",
     "_emit_grnod_node",
     "_emit_grshel",
+    "_emit_grsh3n",
     "_emit_id_group",
     "_emit_surf_part",
     "_emit_surf_grshel",
     "_emit_surf_surf",
     "_make_master_surface",
     "_ordered_unique_nodes",
+    "_split_shell_eids_by_topology",
     "_fmt_eid_list",
     "_discrete_part_ids",
     "_spotweld_beam_pids",
@@ -126,6 +128,26 @@ def _emit_grnod_node(grnod_id: int, title: str, nids: List[int]) -> List[str]:
 
 def _emit_grshel(grshel_id: int, title: str, eids: List[int]) -> List[str]:
     lines = [f"/GRSHEL/SHEL/{grshel_id}", title or f"GRSHEL_{grshel_id}"]
+    row: List[str] = []
+    for e in eids:
+        row.append(str(e).rjust(10))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_grsh3n(grsh3n_id: int, title: str, eids: List[int]) -> List[str]:
+    """3-node shell group, the /SH3N counterpart of /GRSHEL/SHEL.
+
+    A /GRSHEL/SHEL group may only list 4-node /SHELL ids; a /SH3N id put in one
+    is not resolved (the group silently comes up short), which is why callers
+    must split a mixed shell id list with _split_shell_eids_by_topology first.
+    """
+    lines = [f"/GRSH3N/SH3N/{grsh3n_id}", title or f"GRSH3N_{grsh3n_id}"]
     row: List[str] = []
     for e in eids:
         row.append(str(e).rjust(10))
@@ -244,6 +266,40 @@ def _ordered_unique_nodes(nodes: List[int]) -> List[int]:
             seen.add(n)
             out.append(n)
     return out
+
+
+def _split_shell_eids_by_topology(state: ConversionState,
+                                  eids: List[int]) -> tuple:
+    """Split shell element IDs into (quad_eids, tri_eids).
+
+    Since d1ade12 a *ELEMENT_SHELL with only 3 distinct corners — written
+    either as 3 IDs or as a collapsed quad (n1 n2 n3 n3) — is emitted as
+    /SH3N, not as a 4-node /SHELL. Every writer that puts shell IDs into a
+    group therefore has to make the same split, because /GRSHEL/SHEL and
+    /TH/SHEL resolve only 4-node /SHELL IDs and /GRSH3N/SH3N and /TH/SH3N
+    resolve only /SH3N IDs. This applies the identical test _make_parts uses
+    (len(_ordered_unique_nodes(...))) so the two can never drift apart.
+
+    Shells with fewer than 3 distinct corners are dropped by _make_parts (zero
+    area, no element is emitted at all), so they are dropped here too — there
+    is nothing left for a group to reference. IDs that name no known shell are
+    left in the quad list, preserving the pre-existing pass-through behaviour
+    rather than silently discarding a caller's ID.
+    """
+    by_eid = {e.eid: e for e in state.shell_elems}
+    quads: List[int] = []
+    tris: List[int] = []
+    for eid in eids:
+        e = by_eid.get(eid)
+        if e is None:
+            quads.append(eid)
+            continue
+        n_distinct = len(_ordered_unique_nodes(e.nodes))
+        if n_distinct >= 4:
+            quads.append(eid)
+        elif n_distinct == 3:
+            tris.append(eid)
+    return quads, tris
 
 
 def _fmt_eid_list(eids: List[int], limit: int = 25) -> str:

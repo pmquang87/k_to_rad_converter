@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Set
 from ..state import ConversionState
-from .common import HDR, _f, _i
+from .common import HDR, _f, _i, _split_shell_eids_by_topology
 from .contacts import _select_parent_interface
 
 __all__ = [
@@ -98,21 +98,42 @@ def _make_ams(state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_starter_th(state: ConversionState) -> List[str]:
+    """*DATABASE_HISTORY_* → /TH/<type>.
+
+    A *DATABASE_HISTORY_SHELL request has to be split by element topology:
+    since d1ade12 a 3-corner shell is emitted as /SH3N, and /TH/SHEL resolves
+    only 4-node /SHELL ids, so a triangle named there is silently absent from
+    the T01 instead of being recorded. Those ids go to /TH/SH3N.
+    """
     if not state.db_histories:
         return []
     lines = ["#-  TIME HISTORY OUTPUTS:", HDR]
     counter = 1
     type_map = {"SHELL": "SHEL", "SOLID": "BRIC", "NODE": "NODE"}
-    for dbh in state.db_histories:
-        rad_type = type_map.get(dbh.db_type, dbh.db_type)
-        lines += [
-            f"/TH/{rad_type}/{counter}",
-            f"TH_{rad_type}_{counter}",
+
+    def _emit_block(rad_type: str, ids: List[int], n: int) -> List[str]:
+        block = [
+            f"/TH/{rad_type}/{n}",
+            f"TH_{rad_type}_{n}",
             "#     var1      var2",
             "DEF       ",
         ]
-        for eid in dbh.ids:
-            lines.append(_i(eid))
+        for eid in ids:
+            block.append(_i(eid))
+        return block
+
+    for dbh in state.db_histories:
+        rad_type = type_map.get(dbh.db_type, dbh.db_type)
+        if dbh.db_type == "SHELL":
+            quad_ids, tri_ids = _split_shell_eids_by_topology(state, dbh.ids)
+            if quad_ids:
+                lines += _emit_block("SHEL", quad_ids, counter)
+                counter += 1
+            if tri_ids:
+                lines += _emit_block("SH3N", tri_ids, counter)
+                counter += 1
+            continue
+        lines += _emit_block(rad_type, dbh.ids, counter)
         counter += 1
     lines.append(HDR)
     return lines
