@@ -174,7 +174,8 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
              or state.db_matsum_dt or state.db_spcforc_dt
-             or state.db_ncforc_dt or state.db_blstfor_dt
+             or state.db_ncforc_dt or state.db_rcforc_dt
+             or state.db_blstfor_dt
              or state.db_rwforc_dt or state.db_secforc_dt or 1e-3)
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
@@ -198,7 +199,7 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/VECT/CONT")
     lines.append("/ANIM/VECT/CONT2")
     lines.append("/ANIM/VECT/PCONT")
-    if state.db_spcforc_dt and state.bcs_spcs:
+    if state.db_spcforc_dt and (state.bcs_spcs or state.cnrb_spc_bcs):
         # *DATABASE_SPCFORC: constraint-reaction nodal vectors (the /TH/NODE
         # REAC* channels carry the per-node time history; see writer starter).
         lines.append("/ANIM/VECT/FREAC")

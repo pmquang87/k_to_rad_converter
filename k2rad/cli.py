@@ -319,12 +319,19 @@ def main(argv=None) -> int:
             for kw in result.skipped_keywords:
                 print(f"    *{kw}")
 
+        if result.recognized_not_emitted:
+            print(f"\n  Recognized but not emitted "
+                  f"({len(result.recognized_not_emitted)}) — parsed, not "
+                  f"counted as skipped, but no card was written:")
+            for kw, reason in result.recognized_not_emitted:
+                print(f"    *{kw}: {reason}")
+
         if result.warnings:
             print(f"\n  Warnings ({len(result.warnings)}):")
             for w in result.warnings:
                 print(f"    {w}")
 
-    if result.warnings or result.skipped_keywords:
+    if result.warnings or result.skipped_keywords or result.recognized_not_emitted:
         print("\nConversion complete (with warnings). Review output before running.")
     else:
         print("\nConversion complete.")

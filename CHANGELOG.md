@@ -573,6 +573,68 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **Requested time-history outputs that were accepted and then silently
+  dropped.** Three defects with one shape: the converter takes a `*DATABASE_*`
+  card the user wrote to request an output, emits nothing for it, and reports
+  success. Reproduced against a 2-shell deck (`*CONSTRAINED_NODAL_RIGID_BODY_SPC`
+  + `*DATABASE_SPCFORC` + `*DATABASE_RCFORC` + `*DATABASE_MATSUM`), whose
+  starter previously contained a `/BCS` and no `/TH` block whatsoever while the
+  log read `skipped : 0 unsupported keyword(s)`.
+  - **`*CONSTRAINED_NODAL_RIGID_BODY_SPC` + `*DATABASE_SPCFORC` produced no
+    reaction history, and the warning explaining why was false.** The CNRB
+    `_SPC` option is a *second, independent* source of `/BCS`: `writer/rbody.py`
+    writes that card inline on the rigid body's master node, whereas
+    `state.bcs_spcs` is populated only from `*BOUNDARY_SPC_*`
+    (`handlers.py:1636`). Both reaction consumers — the `/TH/NODE` `REAC*`
+    emitter (`writer/output.py`) and the engine `/ANIM/VECT/FREAC` gate
+    (`writer/assembly.py`) — tested `state.bcs_spcs` alone, so a deck whose only
+    constraint came from the `_SPC` option got no reaction output *and* was told
+    *"the deck has no `*BOUNDARY_SPC` — no node is SPC-constrained"* — six lines
+    after the converter itself emitted the `/BCS`. A user reading that goes
+    hunting for a constraint that is not missing. The CNRB `_SPC` constraint is
+    now recorded in a new `state.cnrb_spc_bcs` (a `CnrbSpcBc` per emitted card,
+    carrying the master node and the `tra`/`rot` masks as written), which both
+    consumers read alongside `bcs_spcs`; the warning now names both sources and
+    fires only when the deck really does SPC-constrain nothing. The constraint
+    is deliberately **not** routed through `state.bcs_spcs`, because `_make_bcs`
+    would then emit a duplicate `/BCS` for the same constraint — a regression
+    test pins the card count at 1. **The emitted `/BCS` text is byte-identical**;
+    the starter diff on the reproduction deck is purely additive
+    (`/TH/NODE/90004` `REACX/Y/Z/XX/YY/ZZ` on master node 7, matching what the
+    equivalent plain-CNRB + `*BOUNDARY_SPC_SET` control deck already produced),
+    plus `/ANIM/VECT/FREAC` + `/MREAC` in the engine.
+  - **`*DATABASE_RCFORC` was a complete no-op.** `state.db_rcforc_dt` was stored
+    (`handlers.py:2332`) and referenced nowhere else in the package. It is now
+    (a) part of the `/TFILE` frequency chain in `writer/assembly.py`, which
+    already carried `nodout, elout, glstat, matsum, spcforc, ncforc, blstfor,
+    rwforc, secforc` — a deck whose only output request was `rcforc` silently
+    fell back to the 1e-3 default — and (b) mapped to `/TH/INTER` over every
+    converted contact interface, which is the direct equivalent: LS-DYNA's
+    `rcforc` is the per-contact force resultant, exactly what an OpenRadioss
+    `/TH/INTER` channel carries. This reuses the emitter `*DATABASE_NCFORC`
+    already drives (`writer/output.py`). A `*DATABASE_RCFORC` with no converted
+    `*CONTACT` now warns instead of failing silently.
+- **`skipped : 0 unsupported keyword(s)` no longer implies "everything was
+  converted".** Only keywords with *no* registered handler reach
+  `state.skipped_keywords`, so *"has a handler"* was standing in for *"is
+  supported"* — and a handler that stores a `dt` and returns is indistinguishable
+  from one that converts something. `*DATABASE_MATSUM` (`handlers.py:4771`) has a
+  handler and emitted nothing, yet never appeared in any tally. New
+  `state.recognized_not_emitted` channel (`note_recognized_not_emitted()`),
+  reported in the conversion log and the CLI as *"Recognized but not emitted"*,
+  with a per-keyword reason: `*DATABASE_MATSUM` (needs `/TH/PART`, which k2rad
+  does not emit — per-part energy remains unavailable), `*DATABASE_NODOUT` /
+  `*DATABASE_ELOUT` (k2rad writes `/TH/NODE` and `/TH/SHEL|BRIC|BEAM` only for
+  entities a `*DATABASE_HISTORY_*` names), and `*DATABASE_GLSTAT` (no card is
+  needed — OpenRadioss writes the global energy balance to the `.out`/T01
+  automatically, so the data *is* produced). These are reported *in addition to*,
+  not reclassified out of, `skipped_keywords`, and a `dt` of 0 — which disables
+  the output in LS-DYNA — is not reported, since nothing was requested. Note
+  that the earlier audit blamed `_NO_ID_KEYWORDS` (`writer/assembly.py`) for
+  this; that list belongs to the deck-assembly / id-collision module and also
+  contains `DATABASE_SPCFORC` and `DATABASE_NCFORC`, which *are* implemented —
+  patching it would have been the wrong file.
+
 - **`*CONTROL_TIMESTEP` `TSSFAC` was silently dropped whenever `DT2MS` >= 0.**
   `TSSFAC` only ever reached the engine deck as the `Tsca` field of the
   `/DT/NODA/CST/0` (or `/DT/AMS`) card that `DT2MS` < 0 emits
