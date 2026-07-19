@@ -99,6 +99,7 @@ __all__ = [
     "_starter_section_registry",
     "_make_engine_restart",
     "_make_engine_timestep",
+    "_make_engine_timestep_scale",
     "build_engine",
 ]
 
@@ -634,15 +635,56 @@ def _make_engine_restart(state: ConversionState) -> List[str]:
     return ["/RFILE/OFF", "#"]
 
 
+def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
+    """*CONTROL_TIMESTEP with DT2MS >= 0 (no mass scaling): TSSFAC is still a
+    real instruction and must not be dropped.
+
+    TSSFAC is LS-DYNA's scale factor on the computed critical time step
+    (dt = TSSFAC * dt_critical). OpenRadioss spells exactly the same quantity
+    Tsca on the plain /DT engine card, so the mapping is one-to-one:
+
+        /DT
+        Tsca  Tmin
+
+    Tmin is emitted as 0.0 = no lower bound. Tmin on /DT is a run-STOP
+    threshold, and LS-DYNA's equivalent (TSLIMT) is a different field that this
+    handler does not parse; inventing one would stop runs the user never asked
+    to stop. Tsca is the only thing being carried across.
+
+    Only emitted when TSSFAC > 0. TSSFAC = 0 is LS-DYNA's "use my default"
+    (0.9), which is also OpenRadioss's /DT default, so there is nothing to
+    carry and the deck is left exactly as it converted before.
+    """
+    tsca = ts.tssfac
+    if not tsca or tsca <= 0.0:
+        return []
+    state.warn(
+        f"*CONTROL_TIMESTEP TSSFAC={tsca:g} (DT2MS={ts.dt2ms:g}, no mass "
+        f"scaling) -> /DT Tsca={tsca:g}. The time-step safety factor is "
+        "carried over; Tmin=0 (no lower bound) because LS-DYNA TSLIMT is not "
+        "converted, so the engine will not stop or delete on a small step."
+    )
+    return [
+        "/DT",
+        f"{_f(tsca)}{_f(0.0)}",
+        "#",
+    ]
+
+
 def _make_engine_timestep(state: ConversionState) -> List[str]:
     """*CONTROL_TIMESTEP DT2MS<0 → /DT/NODA/CST (nodal-mass scaling that holds
     the explicit time step at the target |DT2MS|). Without this OpenRadioss runs
     at the raw smallest-element step — on a fine/TET mesh that can be ~100x below
     the intended DT2MS, so the run is ~100x slower. Explicit runs only (implicit
-    and modal have no CFL time step to scale)."""
+    and modal have no CFL time step to scale).
+
+    DT2MS >= 0 means no mass scaling, but TSSFAC still applies and is handled by
+    _make_engine_timestep_scale below — it used to be dropped on the floor."""
     ts = state.ctrl_timestep
-    if ts is None or ts.dt2ms >= 0.0 or state.is_implicit or state.is_modal:
+    if ts is None or state.is_implicit or state.is_modal:
         return []
+    if ts.dt2ms >= 0.0:
+        return _make_engine_timestep_scale(state, ts)
     tmin = abs(ts.dt2ms)
     if state.options.ams:
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS

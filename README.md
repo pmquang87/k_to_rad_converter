@@ -475,6 +475,14 @@ writing. (The starter's `_0000_*.rst` model-handoff file is always written.)
 holds the explicit time step at `|DT2MS|`; `Tsca` = `TSSFAC` or 0.9). Without it
 OpenRadioss runs at the raw smallest-element step — on a fine/TET mesh that can
 be ~100× below `DT2MS`, i.e. a ~100× slower run. Explicit decks only.
+`*CONTROL_TIMESTEP` `TSSFAC` with `DT2MS`>=0 (no mass scaling) → engine `/DT`
+(`Tsca` = `TSSFAC`, `Tmin` = 0). `TSSFAC` is LS-DYNA's scale factor on the
+computed critical step and `Tsca` is the identical quantity in OpenRadioss, so
+the safety factor is carried across rather than dropped. `Tmin` is 0 (no lower
+bound) deliberately — `/DT`'s `Tmin` is a run-*stop* threshold and LS-DYNA's
+`TSLIMT` is not converted, so nothing stops or deletes on a small step.
+`TSSFAC`=0 emits nothing (LS-DYNA's default 0.9 is also the `/DT` default).
+Explicit decks only.
 `--ams` (CLI) / GUI checkbox swaps that nodal mass scaling for **Advanced Mass
 Scaling**: engine `/DT/AMS` (`Tsca` 0.67) + starter `/AMS` (all parts; the
 solver auto-skips rigid bodies). AMS holds `|DT2MS|` with a *coupled* mass
