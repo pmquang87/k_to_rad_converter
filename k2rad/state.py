@@ -1029,6 +1029,12 @@ class ContactAutoSingle:
     sst: float = 0.0    # LS-DYNA Card3 SST/SAST: contact thickness, secondary side → Gapmin
     mst: float = 0.0    # LS-DYNA Card3 MST/SBST: contact thickness, main side → Gapmin
     sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
+    # Source *CONTACT spelling, kept verbatim so the writer can name the exact
+    # keyword when it has to report an interface it could not emit (the
+    # conversion log's "Recognized but not emitted" tally). "" = synthesized by
+    # k2rad itself (the implicit-stabilization self-contact), which has no
+    # originating keyword to report.
+    keyword: str = ""
 
 
 @dataclass
@@ -1044,6 +1050,7 @@ class ContactAutoSurf2Surf:
     sst: float = 0.0    # LS-DYNA Card3 SST: contact thickness, secondary side → Gapmin
     mst: float = 0.0    # LS-DYNA Card3 MST: contact thickness, main side → Gapmin
     sfs: float = 0.0    # LS-DYNA Card3 SFS: slave penalty stiffness scale → Stfac (1.0/0/blank = default)
+    keyword: str = ""   # source *CONTACT spelling — see ContactAutoSingle.keyword
 
 
 @dataclass

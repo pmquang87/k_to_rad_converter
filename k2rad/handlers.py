@@ -1814,7 +1814,8 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_single.append(
         ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore,
-                          vdc=vdc, sst=sst, mst=mst, sfs=sfs)
+                          vdc=vdc, sst=sst, mst=mst, sfs=sfs,
+                          keyword=block.keyword)
     )
 
 
@@ -1903,7 +1904,8 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     ignore = _read_contact_ignore(raw, offset)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
-                             vdc=vdc, sst=sst, mst=mst, sfs=sfs)
+                             vdc=vdc, sst=sst, mst=mst, sfs=sfs,
+                             keyword=block.keyword)
     )
 
 

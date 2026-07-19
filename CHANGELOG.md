@@ -573,6 +573,94 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **A `*CONTACT` whose secondary side is a rigid part was deleted from the
+  model without a word.** `k2rad/writer/contacts.py:91-93`
+  (`_resolve_contact_slave`) filters rigid-body nodes out of the secondary node
+  group and returns `0` when nothing is left; `contacts.py:404` and
+  `contacts.py:416` then guarded the emission with a bare
+  `if slav_grnod and mast_surf:` — **no `else`, no `state.warn()`, no tally
+  entry**. A contact whose SSID side is entirely rigid therefore vanished:
+  no `/INTER`, no warning, and a conversion log still reading
+  `skipped : 0 unsupported keyword(s)`.
+
+  This is the same family as the three defects in PR #80 (a card is accepted,
+  produces nothing, and success is reported) but strictly worse, because a
+  missing `/INTER` changes the **physics** rather than the instrumentation.
+  Found on a unit-cell crush model that put a rigid loading platen on the
+  contact secondary side (`*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE`, Card 1
+  `92 1 3 3` — SSID=92 the platen, MSID=1 the face plate): 5 `*CONTACT`
+  keywords in, 3 `/INTER` out, both platen contacts gone. The run did not
+  fail — the platen simply never touched the model. Force appeared only once
+  the platen mid-surface reached the plate mid-surface (7.25 mm of dead
+  travel), the reaction was then bit-identical across 30+ output states while
+  internal energy climbed from 0.66 to 8682 mJ, contact energy exceeded
+  external work, and the implicit solve diverged and died at 27-41 % of
+  stroke. The k2rad log meanwhile reported only `skipped: DATABASE_RBDOUT`.
+
+  **Behaviour chosen: warn and drop, never silently.** k2rad does *not* emit
+  the interface with the sides swapped. LS-DYNA's SSID/MSID order is part of
+  the model the user wrote — `/INTER/TYPE7` is an asymmetric node-to-surface
+  contact, so swapping it changes which nodes are tracked, which surface
+  supplies the segments, and therefore the contact forces. Silently rewriting
+  that is the same class of defect as silently deleting it, in the opposite
+  direction. So the interface is still not emitted, but the drop is now loud
+  and counted:
+  - **An actionable warning** naming the `*CONTACT` spelling and interface id,
+    which side was emptied and by what (`ssid=`/`sstyp=`, how many nodes
+    resolved, that all of them are rigid-body nodes), the **physical
+    consequence** in plain words ("these two surfaces will NOT interact … the
+    run does not fail: the reaction force simply stays flat … while internal
+    and contact energy climb"), and the **concrete remedy** (put the
+    deformable part on the SSID side, the rigid part on MSID) together with an
+    explicit statement that k2rad will not do that rewrite for the user.
+  - **Accounting**, through the `state.recognized_not_emitted` channel PR #80
+    introduced for `*DATABASE_*`: one entry per `*CONTACT` spelling naming
+    every lost interface id, so the log's summary now carries
+    `not emitted: 1 recognized keyword(s) that produced no card` alongside
+    `skipped : 0 unsupported keyword(s)`. `skipped: 0` can no longer coexist
+    with a missing `/INTER`.
+
+  **The pattern was fixed, not the one line.** Every path in
+  `writer/contacts.py` that declines to emit an interface now routes through a
+  single choke point (`_drop_interface` + `_note_dropped_interfaces`), which
+  warns *and* registers the loss:
+  - `_make_interfaces`, four previously **silent** sites: the surface-to-surface
+    secondary side (the reported defect), the same shape on
+    `contacts_single` with an explicit SSID, its **main** side resolving to no
+    `/SURF`, the all-parts self-contact (`SSID=0`) with no deformable nodes or
+    no parts, and the implicit self-contact whose `_make_master_surface` fails.
+  - `_make_general_interfaces` (`SOFT=-7/-11/-19`) and `_make_tied_interfaces`
+    already warned but were **never counted**; they now share the choke point,
+    keeping the substrings the existing tests pin. The tied message gained the
+    variant-specific remedy: a negative Card-3 `SST`/`MST` routes the tie to the
+    penalty `/INTER/TYPE10`, which *does* accept rigid-body secondary nodes.
+  - `_make_force_transducers`'s three skips are counted too (as
+    `*CONTACT_FORCE_TRANSDUCER`), with instrumentation wording rather than the
+    physics one — an `/INTER/SUB` adds no stiffness.
+  - A **partially** rigid secondary side was the same silent edit in miniature:
+    the filter quietly thinned the `/GRNOD` and the interface was emitted
+    anyway. The emitted cards are deliberately unchanged, but the removal is
+    now warned (`_warn_partial_rigid_secondary`).
+
+  Mechanically, `_resolve_contact_slave` gained an optional `diag` out-dict
+  (`raw` / `rigid_removed` / `clean`) so a caller that gets `0` back can tell
+  *"SSID names nothing"* from *"SSID is a rigid platen"* — different mistakes
+  with different remedies, and returning a bare `0` for both is exactly how the
+  drop stayed invisible. `ContactAutoSingle` / `ContactAutoSurf2Surf` gained a
+  `keyword` field (default `""`, set from `block.keyword` in `handlers.py`) so
+  the tally names the user's actual `*CONTACT` spelling instead of a guess.
+
+  **No emitted card changes.** The starter/engine output is byte-identical for
+  every deck that already converted: the only new code paths are warnings and
+  tally entries, and the drop conditions themselves are untouched. Verified —
+  all 6 golden fixtures pass unchanged and none of the five decks in
+  `tests/fixtures/` moved (`tests/fixtures/rigid_contact.k` already writes the
+  deformable part as SSID and the rigid part as MSID, which is why no golden
+  ever exercised this path). New `tests/test_contact_silent_drop.py`
+  (11 cases); against the pre-fix writers 8 of them fail (5 failures,
+  3 errors) and all 11 pass after. Full suite 993 tests, OK;
+  `python -m ruff check .` clean.
+
 - **3-node shells silently missing from `/SECT` cross-sections and `/TH`
   time histories.** Follow-on exposure from the `/SH3N` work in d1ade12
   (PR #76): once a 3-corner `*ELEMENT_SHELL` became a real `/SH3N` element
