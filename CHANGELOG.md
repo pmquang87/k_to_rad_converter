@@ -573,6 +573,53 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **`/TH/INTER` carried a hard-coded group id of `1`, colliding with
+  `/TH/NODE/1` and killing the starter outright.** The `/TH` group id
+  namespace is **global across `/TH` types**, not per type. Six independent
+  builders emit `/TH` blocks and they did not share an allocator:
+  `k2rad/writer/output.py:100` (`_make_starter_th`) numbers its blocks
+  `1..N` from a local counter (`output.py:111`), while
+  `_make_starter_th_node_reac` (`output.py:343`), `_make_starter_th_surf`
+  (`output.py:389`), `_make_starter_th_node_spc` (`output.py:467`),
+  `writer/inistate.py:699` (`/TH/SECTIO`) and `writer/loads.py:2191`
+  (`/TH/RWALL`) all draw from `state.next_id()` (the 90001+ auto-id band).
+  `_make_starter_th_inter` did neither — `output.py:308` emitted the literal
+  `"/TH/INTER/1"`.
+
+  So any deck requesting **both** a `*DATABASE_HISTORY_*` and a
+  `*DATABASE_RCFORC` / `*DATABASE_NCFORC` / `*CONTACT_FORCE_TRANSDUCER` got
+  `/TH/NODE/1` **and** `/TH/INTER/1`, and the OpenRadioss starter refused the
+  whole model:
+
+  ```
+  ERROR ID :     79
+  ** ERROR: DUPLICATE ID
+  DESCRIPTION :
+     IN TH GROUP DEFINITION
+     ID=1 is DUPLICATED
+   .. ERROR ==> NO RESTART FILE
+  ```
+
+  No restart file means the engine cannot run at all — yet `convert()`
+  returned success with `0` skipped keywords and no warning, so the failure
+  surfaced only as an unexplained solver error. The collision became
+  reachable with PR #80, which made `*DATABASE_RCFORC` emit `/TH/INTER` for
+  the first time; found on the fox-core RVE crush deck
+  (`*DATABASE_HISTORY_NODE` for the monitor nodes plus `*DATABASE_RCFORC` for
+  the platen contact force).
+
+  `/TH/INTER` now draws from `state.next_id()` like every other `/TH`
+  emitter. Because the *shape* of the bug is that a builder can be added
+  without knowing about the other five, `build_starter` also gained
+  `_warn_duplicate_th_group_ids` (`k2rad/writer/assembly.py`), which scans
+  the **emitted deck** for repeated `/TH/<type>/<id>` headers and warns,
+  naming the colliding blocks — a class fix rather than a point fix, so a
+  seventh builder cannot reintroduce this silently. Ids are matched on whole
+  lines: `/TH/INTER/1` is a prefix of `/TH/INTER/10`, so a substring test
+  would pass on the unfixed code. Regression coverage in
+  `tests/test_th_group_ids.py` (7 tests: the collision deck, the allocated-id
+  band, and the guard driven directly, including the prefix case).
+
 - **A `*CONTACT` whose secondary side is a rigid part was deleted from the
   model without a word.** `k2rad/writer/contacts.py:91-93`
   (`_resolve_contact_slave`) filters rigid-body nodes out of the secondary node
