@@ -9,12 +9,14 @@ from .common import (
     HDR,
     _elform_to_ishell,
     _emit_grnod_node,
+    _emit_grsh3n,
     _emit_grshel,
     _emit_id_group,
     _f,
     _fmt_eid_list,
     _i,
     _ordered_unique_nodes,
+    _split_shell_eids_by_topology,
     _part_node_sets,
     _vcross,
     _vnorm,
@@ -565,8 +567,11 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         grbric_ID <blank> grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID
         Niter <blank> Iframe
     ISAVE=0 (no section file), no moving frame, Iframe=0 (local skew origin).
-    All shells this converter emits are 4-node /SHELL (triangles are degenerate
-    quads), so shell sets go into grshel_ID; grtria stays 0.
+    A cut shell set is split by topology: 4-node /SHELL ids go into a
+    /GRSHEL/SHEL referenced by grshel_ID, 3-node /SH3N ids go into a
+    /GRSH3N/SH3N referenced by grtria_ID. Both are needed since d1ade12 made
+    triangles real /SH3N elements — a /SH3N id listed in grshel_ID's group is
+    not resolved, so those triangles contribute no force to the section.
     """
     if not state.cross_sections:
         return []
@@ -646,10 +651,14 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         title = cs.title or f"SECT_{sect_id}"
         grnod_id = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"{title}_nodes", nids)
-        grshel_id = grbric_id = grbeam_id = 0
-        if shell_eids:
+        grshel_id = grbric_id = grbeam_id = grtria_id = 0
+        quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
+        if quad_eids:
             grshel_id = state.next_id()
-            lines += _emit_grshel(grshel_id, f"{title}_shells", shell_eids)
+            lines += _emit_grshel(grshel_id, f"{title}_shells", quad_eids)
+        if tri_eids:
+            grtria_id = state.next_id()
+            lines += _emit_grsh3n(grtria_id, f"{title}_sh3n", tri_eids)
         if solid_eids:
             grbric_id = state.next_id()
             lines += _emit_id_group("GRBRIC/BRIC", grbric_id, f"{title}_bricks",
@@ -667,7 +676,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             f"SECT_{sect_id}",
             "#grbric_ID           grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID     Niter              Iframe",
             f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(0)}{_i(grbeam_id)}"
-            f"{_i(0)}{_i(0)}{_i(0)}{' ' * 10}{_i(0)}",
+            f"{_i(0)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(0)}",
             HDR,
         ]
         state.sect_ids.append((sect_id, title))

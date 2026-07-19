@@ -573,6 +573,57 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **3-node shells silently missing from `/SECT` cross-sections and `/TH`
+  time histories.** Follow-on exposure from the `/SH3N` work in d1ade12
+  (PR #76): once a 3-corner `*ELEMENT_SHELL` became a real `/SH3N` element
+  instead of a collapsed 4-node `/SHELL`, every writer that puts shell
+  element IDs into a *group* had to start splitting that list by topology.
+  Two did not, and both failed silently — a `/SH3N` ID placed in a 4-node
+  container is simply not resolved, so the group comes up short with no
+  starter error and no k2rad warning:
+  - `k2rad/writer/inistate.py:651-663` (`_make_cross_sections`) put the whole
+    cut shell set into a `/GRSHEL/SHEL` referenced by `grshel_ID`, and passed
+    a hard-coded `0` for `grtria_ID`. Every triangle a
+    `*DATABASE_CROSS_SECTION_PLANE`/`_SET` cut therefore contributed **no
+    force** to the section, quietly under-reporting SECFORC. The cut set is
+    now split: quads into `/GRSHEL/SHEL` (`grshel_ID`), triangles into a new
+    `/GRSH3N/SH3N` wired to `grtria_ID` (`_emit_grsh3n`, `writer/common.py`).
+    The docstring at `inistate.py:568-570`, which asserted "All shells this
+    converter emits are 4-node `/SHELL` (triangles are degenerate quads), so
+    shell sets go into `grshel_ID`; `grtria` stays 0", had been false since
+    d1ade12 and is corrected.
+  - `k2rad/writer/output.py:105` (`_make_starter_th`) mapped
+    `*DATABASE_HISTORY_SHELL` → `/TH/SHEL` unconditionally; `/TH/SHEL`
+    records only 4-node `/SHELL`, so a named triangle never reached the T01.
+    Shell history requests are now split, triangles going to `/TH/SH3N`. An
+    all-quad or all-triangle request still emits exactly one block — no empty
+    `/TH` block (a reader error) is produced.
+
+  Both sites share one helper, `_split_shell_eids_by_topology`
+  (`writer/common.py`), which derives topology from `state.shell_elems` using
+  the *identical* test `_make_parts` uses to choose `/SHELL` vs `/SH3N`
+  (`len(_ordered_unique_nodes(e.nodes))`: `>=4` quad, `==3` triangle, `<3`
+  dropped as zero-area), rather than re-deciding from the raw node count — so
+  the group split and the element emission cannot drift apart. This covers
+  both LS-DYNA spellings of a triangle (3 IDs with a blank N4, and the
+  collapsed quad `n1 n2 n3 n3`). IDs naming no known shell are left in the
+  quad list, preserving the previous pass-through behaviour rather than
+  silently discarding a caller's ID.
+
+  Verified on a 2-quad + 1-triangle plate (element 3 written as the collapsed
+  quad `3 6 7 7`) cut by a `*DATABASE_CROSS_SECTION_PLANE` at x=15 and named
+  together with both quads in a `*DATABASE_HISTORY_SHELL`. Before: element 3
+  appeared in `/GRSHEL/SHEL/90003` alongside quad 2 with `grtria_ID = 0`, and
+  in `/TH/SHEL/1` alongside elements 1 and 2. After: `/GRSHEL/SHEL/90003` =
+  `[2]`, `/GRSH3N/SH3N/90004` = `[3]`, `/SECT/90001` carries
+  `grshel_ID = 90003, grtria_ID = 90004`, and the history splits into
+  `/TH/SHEL/1` = `[1, 2]` + `/TH/SH3N/2` = `[3]`. New regression tests in
+  `tests/test_sh3n_groups.py` (13 cases) pin all of this; 6 of them fail
+  against the pre-fix writers. No golden fixture moves — none of the five
+  decks in `tests/fixtures/` contains a shell with fewer than 4 distinct
+  corners, so no golden exercised this path (which is why the regression went
+  unnoticed).
+
 - **Requested time-history outputs that were accepted and then silently
   dropped.** Three defects with one shape: the converter takes a `*DATABASE_*`
   card the user wrote to request an output, emits nothing for it, and reports
