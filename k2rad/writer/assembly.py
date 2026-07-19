@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import Dict, List
 from ..state import ConversionState
 from .common import HDR, _f, _i
 from .materials import (
@@ -527,8 +528,46 @@ def build_starter(state: ConversionState, progress=None) -> str:
     lines: List[str] = []
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
+    _warn_duplicate_th_group_ids(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
+
+
+# /TH group ids are unique across the WHOLE time-history namespace, not per
+# /TH type. Six independent builders emit /TH blocks (five in writer/output.py,
+# plus inistate /TH/SECTIO and loads /TH/RWALL) and they do not share one
+# allocator: _make_starter_th numbers its blocks 1..N off a local counter while
+# the rest draw from state.next_id(). Nothing tied the two together, so
+# /TH/INTER's hard-coded id 1 collided with the first _make_starter_th block
+# and the starter refused the deck outright:
+#
+#   ERROR ID : 79 / ** ERROR: DUPLICATE ID
+#   IN TH GROUP DEFINITION / ID=1 is DUPLICATED
+#   .. ERROR ==> NO RESTART FILE
+#
+# The id is now allocated, but the shape of the bug is the interesting part: a
+# builder can be added without knowing about the others. This scans what was
+# actually emitted, so the next collision is a converter warning naming the
+# blocks rather than an unexplained starter error with no restart file.
+_TH_GROUP_RE = re.compile(r"^/TH/([A-Z0-9_]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_th_group_ids(state: ConversionState,
+                                 lines: List[str]) -> None:
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _TH_GROUP_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for tid, types in sorted(seen.items()):
+        if len(types) > 1:
+            state.warn(
+                f"TIME HISTORY: group id {tid} is emitted by more than one "
+                f"/TH block (" + ", ".join(f"/TH/{t}/{tid}" for t in types)
+                + "). The /TH id namespace is global across types, so the "
+                "OpenRadioss starter will reject this deck with ERROR 79 "
+                "(DUPLICATE ID, IN TH GROUP DEFINITION) and write no restart "
+                "file. This is a k2rad bug — please report the deck.")
 
 
 class _StarterContext:

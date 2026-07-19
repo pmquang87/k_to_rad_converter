@@ -303,9 +303,22 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
         ids += [i for i in all_inter_ids if i not in ids]
     if not ids:
         return []
+    # The TH group id namespace is GLOBAL across /TH types, not per type: the
+    # starter rejects a deck carrying both /TH/NODE/1 and /TH/INTER/1 with
+    # "ERROR ID : 79 / DUPLICATE ID / IN TH GROUP DEFINITION / ID=1 is
+    # DUPLICATED" and writes NO RESTART FILE, so the engine cannot run at all.
+    # This id used to be the literal 1, which collides with the first block
+    # _make_starter_th numbers off its own 1..N counter (:111) — so any deck
+    # asking for both a *DATABASE_HISTORY_* and a *DATABASE_RCFORC /
+    # *DATABASE_NCFORC / *CONTACT_FORCE_TRANSDUCER died at the starter while
+    # the conversion itself reported success. Every other /TH emitter already
+    # draws from next_id() (_make_starter_th_node_reac, _make_starter_th_surf,
+    # _make_starter_th_node_spc below; inistate._make_starter_th_sectio;
+    # the /TH/RWALL in loads) — this was the one hard-coded id.
+    th_id = state.next_id()
     lines = [
         "#-  TIME HISTORY (interface / force-transducer):", HDR,
-        "/TH/INTER/1",
+        f"/TH/INTER/{th_id}",
         "TH_interface_forces",
         "#     var1",
         "DEF",
