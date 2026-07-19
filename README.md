@@ -518,8 +518,15 @@ so a deck with one may see its solid `Isolid` change off the ELFORM default._
 `_BEAM` element groups); `*DATABASE_CROSS_SECTION_PLANE[_ID]` → `/SECT` via a
 geometric resolver (elements whose nodes straddle the cutting plane,
 part-restricted and radius-filtered; a finite `LENL`/`LENM` parallelogram is
-approximated as the infinite plane with a warning); `*DATABASE_SECFORC` →
-`/TH/SECTIO` on every section
+approximated as the infinite plane with a warning). The cut shell set is split
+by topology: 4-node shells into a `/GRSHEL/SHEL` on `grshel_ID`, 3-node shells
+into a `/GRSH3N/SH3N` on `grtria_ID` — a `/SH3N` ID is not resolved by a 4-node
+group, so without the split a cut triangle contributes no force to the section.
+`*DATABASE_SECFORC` → `/TH/SECTIO` on every section
+`*DATABASE_HISTORY_SHELL` → `/TH/SHEL`, and `/TH/SH3N` for any named element
+the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
+shells, so a triangle listed there is absent from the T01);
+`*DATABASE_HISTORY_SOLID` → `/TH/BRIC`; `*DATABASE_HISTORY_NODE` → `/TH/NODE`
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
 `/ANIM/VECT/FREAC`. **Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
