@@ -23,6 +23,8 @@ from .common import (
     HDR,
     _discrete_part_ids,
     _elform_to_ishell,
+    _ELFORM_ALWAYS_QEPH,
+    ISHELL_QEPH,
     _elform_to_isolid,
     _emit_grnod_node,
     _f,
@@ -1436,10 +1438,12 @@ def _make_properties(state: ConversionState) -> List[str]:
     for ms in missing_beams:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
 
+    _warn_shell_formulation_choice(state)
     for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
             continue
-        ishell = _elform_to_ishell(sec.elform, state.is_implicit)
+        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
+                                  state.options.shell_default_ishell)
         nip = max(2, sec.nip)
         # Shared section prop carries the global *CONTROL_HOURGLASS coefficient
         # (its base); parts with a different *HOURGLASS are split out below.
@@ -1646,13 +1650,56 @@ def _assign_hourglass_props(state: ConversionState) -> None:
             "*HOURGLASS card.")
 
 
+def _warn_shell_formulation_choice(state: ConversionState) -> None:
+    """Say which Ishell the unmapped shell ELFORMs got, and that it is a choice.
+
+    The original defect reported in issue #77 was not only that ELFORM=2 maps
+    to a fully-integrated Ishell — it was that it did so with **no warning of
+    any kind**, so a formulation-class change was invisible in the log. That
+    stays true whichever way the option is set, so this fires either way. It
+    is the difference between a default and a silent default.
+
+    Implicit decks are exempt: they return Ishell=24 regardless of the option,
+    which predates it and is not a choice the user is making here.
+    """
+    if state.is_implicit or not state.sec_shells:
+        return
+    unmapped = sorted({s.elform for s in state.sec_shells.values()
+                       if s.elform not in _ELFORM_ALWAYS_QEPH})
+    if not unmapped:
+        return
+    ishell = state.options.shell_default_ishell
+    if ishell == ISHELL_QEPH:
+        state.warn(
+            f"*SECTION_SHELL ELFORM {unmapped} -> /PROP/SHELL Ishell=24 "
+            "(QEPH, reduced integration with physical stabilisation), because "
+            "shell_formulation='qeph' was requested. This is NOT the default: "
+            "the default 'qbat' emits Ishell=12 and is what every earlier "
+            "conversion of this deck produced, so results WILL differ from "
+            "them. QEPH is the closer match to ELFORM=2 Belytschko-Tsay and "
+            "erodes more faithfully under /FAIL/JOHNSON Ifail_sh=2 (2 failure "
+            "events to delete an element, not 8).")
+    else:
+        state.warn(
+            f"*SECTION_SHELL ELFORM {unmapped} -> /PROP/SHELL Ishell=12 "
+            "(QBAT, FULLY integrated, 4 in-plane points) — the default. Note "
+            "LS-DYNA ELFORM=2 (Belytschko-Tsay) is UNDER-integrated, so this "
+            "changes the element's integration class: with /FAIL/JOHNSON "
+            "Ifail_sh=2 it takes 4 Gauss x 2 through-thickness = 8 failure "
+            "events to delete an element instead of 2, measured at up to "
+            "~1.7x under-erosion. Pass shell_formulation='qeph' (CLI "
+            "--shell-formulation qeph) for Ishell=24, which is the closer "
+            "match — it changes results, which is why it is not the default.")
+
+
 def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
                      is_implicit: bool, istrain: int, state: ConversionState,
                      refvec=(1.0, 0.0, 0.0), phi: float = 0.0) -> List[str]:
     """Orthotropic shell property /PROP/TYPE9 (SH_ORTH) — the isotropic
     /PROP/SHELL fields plus a material reference direction (Vx/Vy/Vz + Phi).
     Column layout from PROP/prop_p9_sh_orth.cfg FORMAT(radioss2022)."""
-    ishell = _elform_to_ishell(sec.elform, is_implicit)
+    ishell = _elform_to_ishell(sec.elform, is_implicit,
+                               state.options.shell_default_ishell)
     nip = max(2, sec.nip)
     if sec.t1 <= 0.0:
         state.warn(
@@ -1911,8 +1958,10 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:
             sec = state.sec_shells.get(secid)
-            ishell = (_elform_to_ishell(sec.elform, state.is_implicit) if sec
-                      else _elform_to_ishell(2, state.is_implicit))
+            ishell = (_elform_to_ishell(sec.elform, state.is_implicit,
+                                        state.options.shell_default_ishell) if sec
+                      else _elform_to_ishell(2, state.is_implicit,
+                                             state.options.shell_default_ishell))
             nip = max(2, sec.nip) if sec else 2
             thick = sec.t1 if sec else 0.0
             lines += _emit_prop_shell(prop_id, title, ishell, nip, istrain,

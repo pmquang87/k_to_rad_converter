@@ -95,7 +95,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          blast_ground: str = "auto",
                          rigid_cog_master: bool = True,
                          write_restart: bool = False,
-                         ams: bool = False) -> dict:
+                         ams: bool = False,
+                         shell_formulation: str = "qbat") -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -171,6 +172,12 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["ams"] = bool(ams)
 
+    if shell_formulation not in ("qbat", "qeph"):
+        raise ValueError(
+            "Shell formulation must be 'qbat' or 'qeph', not "
+            f"{shell_formulation!r}.")
+    kwargs["shell_formulation"] = shell_formulation
+
     return kwargs
 
 
@@ -204,6 +211,8 @@ class ConverterGUI:
         self.rigid_cog = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
+        # 'qbat' = today's behaviour; see the radio buttons below.
+        self.shell_formulation = tk.StringVar(value="qbat")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -281,6 +290,30 @@ class ConverterGUI:
                      "dynamics instead of adding real mass; can diverge on stiff / "
                      "contact-heavy models — implies element-free rigid masters)",
             variable=self.ams).grid(row=9, column=0, columnspan=3, sticky="w", **pad)
+
+        # ── Shell formulation (issue #77) ───────────────────────────────────
+        # A radio PAIR rather than a checkbox: neither value is "the fix", and
+        # a checkbox labelled "use QEPH" would imply QBAT is simply wrong. The
+        # default is spelled out as the existing behaviour so nobody switches
+        # without realising they are changing every shell result they have.
+        sf = ttk.LabelFrame(
+            io, text="Shell formulation for LS-DYNA ELFORMs with no exact "
+                     "Radioss counterpart (ELFORM=2 Belytschko-Tsay above all)",
+            padding=6)
+        sf.grid(row=10, column=0, columnspan=3, sticky="ew", **pad)
+        ttk.Radiobutton(
+            sf, text="Ishell=12 QBAT — fully integrated (DEFAULT; what every "
+                     "previous conversion produced)",
+            value="qbat", variable=self.shell_formulation,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            sf, text="Ishell=24 QEPH — reduced integration, physically "
+                     "stabilised. Closer to ELFORM=2, and erodes faithfully "
+                     "under Ifail_sh=2 (QBAT needs 8 failure events to delete "
+                     "an element instead of 2, under-eroding up to ~1.7x). "
+                     "CHANGES RESULTS on every shell deck.",
+            value="qeph", variable=self.shell_formulation,
+        ).grid(row=1, column=0, sticky="w")
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -413,6 +446,7 @@ class ConverterGUI:
                 rigid_cog_master=self.rigid_cog.get(),
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
+                shell_formulation=self.shell_formulation.get(),
             )
         except ValueError as exc:
             self._reset_log()

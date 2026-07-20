@@ -245,6 +245,24 @@ def build_parser() -> argparse.ArgumentParser:
              "ratio — if it does, drop --ams (falls back to /DT/NODA/CST) or "
              "lower |DT2MS|. Implies --rigid-cog-master. Off by default.",
     )
+    parser.add_argument(
+        "--shell-formulation",
+        choices=("qbat", "qeph"),
+        default="qbat",
+        help="Which /PROP/SHELL Ishell an LS-DYNA shell ELFORM with no exact "
+             "Radioss counterpart maps to — above all ELFORM=2 "
+             "(Belytschko-Tsay), the most common one. 'qbat' (default) emits "
+             "Ishell=12, fully integrated, and is what every previous "
+             "conversion produced. 'qeph' emits Ishell=24, reduced "
+             "integration with physical stabilisation: closer to ELFORM=2's "
+             "integration class, drops the starter's injected dn=1e-3 "
+             "numerical damping, and erodes faithfully under /FAIL/JOHNSON "
+             "Ifail_sh=2 (2 failure events to delete an element, not 8 — "
+             "Ishell=12 under-erodes by up to ~1.7x). CHOOSING 'qeph' CHANGES "
+             "RESULTS on every shell deck, which is why it is not the "
+             "default. Under-integrated Ishell 1-4 is not offered: it would "
+             "break /INISHE initial-stress transfer (npg 4 -> 1).",
+    )
     return parser
 
 
@@ -305,6 +323,7 @@ def main(argv=None) -> int:
         rigid_cog_master=args.rigid_cog_master,
         write_restart=args.write_restart,
         ams=args.ams,
+        shell_formulation=args.shell_formulation,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

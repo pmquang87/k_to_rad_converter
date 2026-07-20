@@ -11,6 +11,50 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`*SECTION_SHELL` `ELFORM` → `/PROP/SHELL` `Ishell` is now a user CHOICE
+  (`--shell-formulation {qbat,qeph}` / GUI radio pair /
+  `convert(shell_formulation=...)`), and it is no longer silent.** Closes #77.
+
+  `ELFORM=2` (Belytschko-Tsay — the most common shell formulation in LS-DYNA
+  decks) fell through `_elform_to_ishell` (`writer/common.py:84`) to
+  `Ishell=12` (QBAT, **fully** integrated) **with no warning of any kind**.
+  LS-DYNA `ELFORM=2` is **under**-integrated, so the element's integration
+  class changed underneath the user. Under `/FAIL/JOHNSON Ifail_sh=2` that
+  costs erosion: `fail_setoff_npg_c.F` wants 4 Gauss × 2 through-thickness =
+  **8 failure events** to delete an element against the 2 the original deck
+  implies — measured at up to **~1.7× under-erosion** on a 38k-shell blast
+  model (19,512 `FAILURE (JC)` messages, 1,524 elements failed fully
+  through-thickness at ≥1 Gauss point, **875 actually deleted**).
+
+  QEPH is **not** simply made the default, because it changes results on every
+  existing shell deck. So `qbat` (`Ishell=12`) stays the default and every
+  golden is unchanged without the flag; `qeph` (`Ishell=24`, reduced
+  integration with *physical* stabilisation) is the closer match to
+  Belytschko-Tsay and additionally drops the `dn=1.0e-3` numerical damping the
+  starter injects for `Ishell=12` (`hm_read_prop01.F:279`).
+
+  Blast radius of choosing `qeph`, asserted by the suite rather than merely
+  documented (`tests/test_shell_formulation_option.py`): **4 `/PROP/SHELL`
+  props across 3 fixtures** — `tied_weld` 2, `shell_explicit` 1,
+  `rigid_contact` 1, `implicit_qstat` 0 (implicit already returned 24, and the
+  option deliberately does not disturb it).
+
+  The option governs the **fallback only**: `ELFORM` −16/9/20/21/26 stay QEPH
+  either way, their Radioss counterpart being unambiguous. Under-integrated
+  `Ishell=1..4` is deliberately not offered — it would activate the `Hm/Hf/Hr`
+  hourglass path that `writer/mesh.py`'s own inert-hourglass warning documents
+  as unused, and `writer/inistate.py:94` sets `npg = 4 if ishell in (12, 24)
+  else 1`, so 1..4 would silently change `/INISHE` and corrupt
+  `*INITIAL_STRESS_SHELL` transfer. Both offered values leave `npg` at 4.
+
+  Crucially the mapping is now **reported either way**
+  (`_warn_shell_formulation_choice`, `writer/mesh.py`): the default names the
+  Ishell it chose, states the under-erosion consequence and points at the
+  alternative; `qeph` states that results will differ from earlier conversions.
+  *A default and a silent default are different things, and the second was the
+  actual defect.* Follows PR #70, which made the analogous ELFORM→`Isolid`
+  correction for solids.
+
 - **Hyperelastic rubber batch** (`*MAT_BLATZ-KO_RUBBER` / MAT_007,
   `*MAT_MOONEY-RIVLIN_RUBBER` / MAT_027, `*MAT_OGDEN_RUBBER` / MAT_077_O,
   `*MAT_HYPERELASTIC_RUBBER` / MAT_077_H, incl. the underscore spellings of

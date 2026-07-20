@@ -1874,6 +1874,21 @@ class ConvertOptions:
     # an element node (AMS ERROR 1066). Off by default.
     ams: bool = False
 
+    # Which /PROP/SHELL Ishell an LS-DYNA shell ELFORM with no exact Radioss
+    # counterpart maps to — "qbat" (12, fully integrated; what every
+    # conversion to date produced) or "qeph" (24, reduced + physically
+    # stabilised, far closer to ELFORM=2 Belytschko-Tsay). Defaults to "qbat"
+    # so no existing deck changes underfoot. See
+    # writer/common._elform_to_ishell for why this is a choice at all and why
+    # under-integrated Ishell 1..4 is deliberately not offered.
+    shell_formulation: str = "qbat"
+
+    @property
+    def shell_default_ishell(self) -> int:
+        """The Ishell an unmapped ELFORM resolves to, per the user's choice."""
+        from .writer.common import ISHELL_QBAT, SHELL_FORMULATIONS
+        return SHELL_FORMULATIONS.get(self.shell_formulation, ISHELL_QBAT)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 
