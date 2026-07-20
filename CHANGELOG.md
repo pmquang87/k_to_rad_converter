@@ -573,6 +573,51 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **The `*DATABASE_*` family disagreed with itself about how wide its own DT
+  field is, and both readings failed SILENTLY.** `*DATABASE_ELOUT`
+  (`handlers.py:4520`), `*DATABASE_GLSTAT` (`handlers.py:4533`) and
+  `*DATABASE_BINARY_D3PLOT` (`handlers.py:4507`) sliced strict fixed-width
+  `w=10` via `_card(..., fixed=True)`, while the other fourteen handlers went
+  through `_handle_db_dt` (`handlers.py:2278`), which split free-format first.
+  Handed the same card these return different numbers, and neither is right
+  on its own:
+
+  | card line | fixed `w=10` | free | correct |
+  |---|---|---|---|
+  | `1.000000E-05` | **0.0** | 1e-05 | 1e-05 |
+  | `     1.0E-05` | **0.0** | 1e-05 | 1e-05 |
+  | `   1.0E-05` | 1e-05 | 1e-05 | 1e-05 |
+  | `1.0E-05,0,0` | **0.0** | 1e-05 | 1e-05 |
+  | `          1.0E-05` | 0.0 | **1e-05** | 0.0 |
+
+  `1.000000E-05` is simply how a 1e-5 is normally written and it is **12
+  characters**, so fixed slicing truncated it to `'1.000000E-'` and
+  `to_float` (`parser.py:358`) defaulted the wreckage to `0.0` — which is
+  indistinguishable from "this output was never requested". The requested
+  output was then never written, and nothing said so. The last row is the
+  opposite trap and the reason "just use free format everywhere" is not the
+  fix: DT is genuinely blank there (output driven by `LCDT` in field 2) and a
+  free split returns field 2's value as though it were DT. On
+  `*DATABASE_BINARY_D3PLOT` the same truncation set the animation interval to
+  0, so the writer fell back to `endtim/40` instead of the interval the deck
+  asked for.
+
+  Now ONE rule for the family, in `_db_fields` (`handlers.py:2296`): a comma
+  means free format outright; otherwise read fixed columns and fall back to a
+  free split **only** when field 1 is non-empty and does not parse as a
+  number — the signature of a line that is not actually column-aligned. A
+  blank field 1 stays `0.0`, because that is what the deck says.
+  `*DATABASE_BINARY_D3PLOT` now takes DT **and** `NPLTC` from that one
+  reading, so two fields of the same card can no longer disagree about where
+  its columns are. And `_numeric_or_none` (`handlers.py:2281`) lets
+  "unreadable" be told from "the number 0", so an unparseable DT is now
+  WARNED about with the offending token and the card line rather than
+  defaulted to zero in silence. Same root pattern as #80: a handler that
+  stores a value and returns is indistinguishable from one that converted
+  something. Regression tests in `tests/test_database_dt_field_width.py`,
+  including one that asserts every DT site reads a given line **identically**
+  — each of the two old policies fails it, in its own direction.
+
 - **`/TH/INTER` carried a hard-coded group id of `1`, colliding with
   `/TH/NODE/1` and killing the starter outright.** The `/TH` group id
   namespace is **global across `/TH` types**, not per type. Six independent
