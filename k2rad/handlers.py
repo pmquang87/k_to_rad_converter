@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast as _ast
 import math as _math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from .parser import (
     Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
@@ -2275,31 +2275,119 @@ def handle_control_solid(block: Block, state: ConversionState) -> None:
     state.ctrl_solid = ControlSolid(esort, fmatrix, niptets)
 
 
-def _handle_db_dt(block: Block) -> float:
-    """Parse DT from the first field of a DATABASE_* card."""
+_DT_PARSE_SENTINEL = -1.2345678e-300
+
+
+def _numeric_or_none(tok: str) -> Optional[float]:
+    """``to_float`` that can tell "not a number" from "the number 0".
+
+    ``to_float`` folds both onto its default, which is exactly what let an
+    unreadable DT field become a silent 0.0 — indistinguishable from "this
+    output was never requested".
+    """
+    if tok is None or not str(tok).strip():
+        return None
+    v = to_float(tok, default=_DT_PARSE_SENTINEL)
+    return None if v == _DT_PARSE_SENTINEL else v
+
+
+def _db_fields(line: str, n: int = 4) -> List[str]:
+    """Field list for a ``*DATABASE_*`` card line, under the family's ONE rule.
+
+    Shared by every ``*DATABASE_*`` handler so that DT and its neighbours
+    (``NPLTC`` on ``*DATABASE_BINARY_D3PLOT``, for one) are always read out of
+    the SAME reading of the line. Reading DT free-format and NPLTC fixed-width
+    off one card is how two fields of the same line end up disagreeing about
+    where the line's columns are.
+
+    See :func:`_handle_db_dt` for why the rule is what it is.
+    """
+    if "," in line:                       # LS-DYNA: a comma means free format
+        return parse_free(line)
+    fields = parse_fixed(line, n=n, w=10)
+    head = fields[0] if fields else ""
+    if head.strip() and _numeric_or_none(head) is None:
+        # not column-aligned after all — e.g. an 11+ column first field
+        free = parse_free(line)
+        if free and _numeric_or_none(free[0]) is not None:
+            return free
+    return fields
+
+
+def _handle_db_dt(block: Block, state: "ConversionState | None" = None,
+                  keyword: str = "*DATABASE_*") -> float:
+    """Parse DT from the first field of a ``*DATABASE_*`` card.
+
+    ONE policy for the whole family. The family used to disagree with itself:
+    most handlers split free-format first, while ``*DATABASE_ELOUT``,
+    ``*DATABASE_GLSTAT`` and ``*DATABASE_BINARY_D3PLOT`` sliced strict
+    fixed-width ``w=10``. On the same deck the two readings return different
+    numbers, and both failure modes are SILENT — the output is requested in
+    the .k and then never written, or written at the wrong frequency.
+
+    Neither reading is right on its own, which is why this is a rule and not a
+    choice between them::
+
+        line                    fixed w=10      free      correct
+        '1.000000E-05'               0.0       1e-05      1e-05   <- 12 chars
+        '     1.0E-05'               0.0       1e-05      1e-05   <- straddles
+        '   1.0E-05'                1e-05      1e-05      1e-05
+        '1.0E-05,0,0'                0.0       1e-05      1e-05
+        '          1.0E-05'          0.0       1e-05        0.0   <- DT blank
+
+    ``1.000000E-05`` is simply how 1e-5 is normally written and it does not
+    fit a 10-column field, so fixed slicing truncates it to ``'1.000000E-'``
+    and ``to_float`` defaults that to 0.0. The last row is the opposite trap:
+    DT is genuinely BLANK there (output driven by LCDT in field 2), and a
+    free-format split cheerfully returns field 2's value as if it were DT.
+
+    So: a comma means free format outright; otherwise read fixed columns and
+    fall back to a free split ONLY when field 1 is non-empty but does not
+    parse as a number — the signature of a line that is not really
+    column-aligned. A blank field 1 stays 0.0, because that is what the deck
+    says.
+
+    Anything still unreadable is WARNED about rather than quietly defaulted,
+    so a requested output can no longer vanish without trace.
+    """
     raw = block.raw
     if not raw:
         return 0.0
-    f = parse_free(raw[0])
-    if not f:
-        f = parse_fixed(raw[0], n=4, w=10)
-    return to_float(f[0]) if f else 0.0
+    line = raw[0]
+    fields = _db_fields(line)
+    if not fields:
+        return 0.0
+    tok = fields[0]
+    if not str(tok).strip():              # DT genuinely omitted
+        return 0.0
+    val = _numeric_or_none(tok)
+    if val is None:
+        if state is not None:
+            state.warn(
+                f"{keyword}: could not read the output interval DT from "
+                f"{tok!r} (card line {line!r}). It is NOT being silently "
+                "defaulted to 0.0 — the failure is reported so the missing "
+                "output is visible; fix the field or the output will not be "
+                "written at the interval the deck asks for."
+            )
+        return 0.0
+    return val
 
 
 def handle_database_abstat(block: Block, state: ConversionState) -> None:
-    state.db_abstat_dt = _handle_db_dt(block)
+    state.db_abstat_dt = _handle_db_dt(block, state, "*DATABASE_ABSTAT")
 
 
 def handle_database_binary_d3thdt(block: Block, state: ConversionState) -> None:
-    state.db_d3thdt_dt = _handle_db_dt(block)
+    state.db_d3thdt_dt = _handle_db_dt(block, state, "*DATABASE_BINARY_D3THDT")
 
 
 def handle_database_binary_intfor(block: Block, state: ConversionState) -> None:
-    state.db_intfor_dt = _handle_db_dt(block)
+    state.db_intfor_dt = _handle_db_dt(block, state, "*DATABASE_BINARY_INTFOR")
 
 
 def handle_database_deforc(block: Block, state: ConversionState) -> None:
-    state.db_deforc_dt = _handle_db_dt(block)
+    state.db_deforc_dt = _handle_db_dt(block, state, "*DATABASE_DEFORC")
 
 
 def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
@@ -2319,11 +2407,11 @@ def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
 
 
 def handle_database_jntforc(block: Block, state: ConversionState) -> None:
-    state.db_jntforc_dt = _handle_db_dt(block)
+    state.db_jntforc_dt = _handle_db_dt(block, state, "*DATABASE_JNTFORC")
 
 
 def handle_database_matsum(block: Block, state: ConversionState) -> None:
-    state.db_matsum_dt = _handle_db_dt(block)
+    state.db_matsum_dt = _handle_db_dt(block, state, "*DATABASE_MATSUM")
     if state.db_matsum_dt:
         state.note_recognized_not_emitted(
             "DATABASE_MATSUM",
@@ -2334,7 +2422,7 @@ def handle_database_matsum(block: Block, state: ConversionState) -> None:
 
 
 def handle_database_nodout(block: Block, state: ConversionState) -> None:
-    state.db_nodout_dt = _handle_db_dt(block)
+    state.db_nodout_dt = _handle_db_dt(block, state, "*DATABASE_NODOUT")
     if state.db_nodout_dt:
         state.note_recognized_not_emitted(
             "DATABASE_NODOUT",
@@ -2345,19 +2433,19 @@ def handle_database_nodout(block: Block, state: ConversionState) -> None:
 
 
 def handle_database_rcforc(block: Block, state: ConversionState) -> None:
-    state.db_rcforc_dt = _handle_db_dt(block)
+    state.db_rcforc_dt = _handle_db_dt(block, state, "*DATABASE_RCFORC")
 
 
 def handle_database_rwforc(block: Block, state: ConversionState) -> None:
-    state.db_rwforc_dt = _handle_db_dt(block)
+    state.db_rwforc_dt = _handle_db_dt(block, state, "*DATABASE_RWFORC")
 
 
 def handle_database_secforc(block: Block, state: ConversionState) -> None:
-    state.db_secforc_dt = _handle_db_dt(block)
+    state.db_secforc_dt = _handle_db_dt(block, state, "*DATABASE_SECFORC")
 
 
 def handle_database_sleout(block: Block, state: ConversionState) -> None:
-    state.db_sleout_dt = _handle_db_dt(block)
+    state.db_sleout_dt = _handle_db_dt(block, state, "*DATABASE_SLEOUT")
 
 
 def handle_database_binary_blstfor(block: Block, state: ConversionState) -> None:
@@ -2366,7 +2454,8 @@ def handle_database_binary_blstfor(block: Block, state: ConversionState) -> None
     blast-loaded surface, plus engine /ANIM/NODA/PEXT (nodal blast-pressure
     fringe) and /ANIM/VECT/FEXT (external force vectors). /LOAD/PBLAST feeds
     all three (engine pblast_1.F). Card 1 field 1 is DT, as for D3PLOT."""
-    state.db_blstfor_dt = _handle_db_dt(block)
+    state.db_blstfor_dt = _handle_db_dt(
+        block, state, "*DATABASE_BINARY_BLSTFOR")
 
 
 def handle_database_ncforc(block: Block, state: ConversionState) -> None:
@@ -2374,7 +2463,7 @@ def handle_database_ncforc(block: Block, state: ConversionState) -> None:
     contact interface (T01 force resultants). The per-node view lives in the
     default animation vectors /ANIM/VECT/CONT + /ANIM/VECT/PCONT; OpenRadioss
     has no per-node contact-force time history."""
-    state.db_ncforc_dt = _handle_db_dt(block)
+    state.db_ncforc_dt = _handle_db_dt(block, state, "*DATABASE_NCFORC")
 
 
 def handle_database_spcforc(block: Block, state: ConversionState) -> None:
@@ -2382,7 +2471,7 @@ def handle_database_spcforc(block: Block, state: ConversionState) -> None:
     (+REACXX/YY/ZZ) on the /BCS-constrained nodes + engine /ANIM/VECT/FREAC.
     The writer emits both; requesting either makes the OpenRadioss engine
     compute constraint reactions (engine reactions.F, COMPTREAC)."""
-    state.db_spcforc_dt = _handle_db_dt(block)
+    state.db_spcforc_dt = _handle_db_dt(block, state, "*DATABASE_SPCFORC")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4435,17 +4524,20 @@ def handle_database_binary_d3plot(block: Block, state: ConversionState) -> None:
     # NPLTC (number of plot states) is the 4th field, index 3 — reading f[4]
     # picked up PSETID instead, leaving npltc=0 for NPLTC-driven decks so the
     # writer's /ANIM/DT wrongly fell back to endtim/40 instead of endtim/npltc.
+    # DT and NPLTC are read from ONE reading of the line (_db_fields), on the
+    # same rule as every other *DATABASE_* card. Slicing this card strict
+    # fixed-width silently zeroed any DT wider than 10 columns — and
+    # '1.000000E-05' is 12 — which set the animation interval to 0, i.e. the
+    # writer fell back to endtim/40 instead of the interval the deck asked for.
     raw = block.raw
-    f = _card(raw, 0, fixed=True, n=8, w=10) if raw else []
-    dt    = to_float(f[0]) if f else 0.0
+    f = _db_fields(raw[0], n=8) if raw else []
+    dt    = _handle_db_dt(block, state, "*DATABASE_BINARY_D3PLOT")
     npltc = to_int(f[3])   if len(f) > 3 else 0
     state.db_d3plot = DbD3Plot(dt, npltc)
 
 
 def handle_database_elout(block: Block, state: ConversionState) -> None:
-    raw = block.raw
-    f = _card(raw, 0, fixed=True, n=4, w=10) if raw else []
-    state.db_elout_dt = to_float(f[0]) if f else 0.0
+    state.db_elout_dt = _handle_db_dt(block, state, "*DATABASE_ELOUT")
     if state.db_elout_dt:
         state.note_recognized_not_emitted(
             "DATABASE_ELOUT",
@@ -4456,9 +4548,7 @@ def handle_database_elout(block: Block, state: ConversionState) -> None:
 
 
 def handle_database_glstat(block: Block, state: ConversionState) -> None:
-    raw = block.raw
-    f = _card(raw, 0, fixed=True, n=4, w=10) if raw else []
-    state.db_glstat_dt = to_float(f[0]) if f else 0.0
+    state.db_glstat_dt = _handle_db_dt(block, state, "*DATABASE_GLSTAT")
     if state.db_glstat_dt:
         state.note_recognized_not_emitted(
             "DATABASE_GLSTAT",
