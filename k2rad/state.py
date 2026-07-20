@@ -1742,6 +1742,15 @@ class ControlTimestep:
     # DT2MS: <0 = mass scaling to hold the explicit time step at |DT2MS|
     # (→ /DT/NODA/CST). 0 or >0 (init-only) = no mass scaling.
     dt2ms: float = 0.0
+    # TSLIMT (card field 3): the shell time-step floor. In LS-DYNA this is the
+    # step at which a shell is stiffness-reduced or, with ERODE=1, DELETED.
+    # Carried to /DT/<elem>/DEL Tmin.
+    tslimt: float = 0.0
+    # ERODE (card field 6): 1 = delete elements whose step falls below the
+    # floor, rather than merely limiting it. This is the user's explicit
+    # consent to LOSE ELEMENTS, which is why k2rad emits no deletion floor
+    # without it (or without the explicit --dt-del opt-in).
+    erode: int = 0
 
 
 # ── Database / output ──────────────────────────────────────────────────────
@@ -1888,6 +1897,11 @@ class ConvertOptions:
         """The Ishell an unmapped ELFORM resolves to, per the user's choice."""
         from .writer.common import ISHELL_QBAT, SHELL_FORMULATIONS
         return SHELL_FORMULATIONS.get(self.shell_formulation, ISHELL_QBAT)
+    # /DT/<elem>/DEL Tmin [s]: delete an element whose time step reaches
+    # this. None = only what *CONTROL_TIMESTEP ERODE=1 + TSLIMT asks for.
+    # Opt-in because the card DELETES ELEMENTS; see
+    # writer/assembly._make_engine_dt_deletion.
+    dt_del: "float | None" = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

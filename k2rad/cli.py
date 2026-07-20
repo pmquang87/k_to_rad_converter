@@ -263,6 +263,26 @@ def build_parser() -> argparse.ArgumentParser:
              "default. Under-integrated Ishell 1-4 is not offered: it would "
              "break /INISHE initial-stress transfer (npg 4 -> 1).",
     )
+    parser.add_argument(
+        "--dt-del",
+        type=float,
+        default=None,
+        metavar="TMIN",
+        help="Emit /DT/{SHELL,SH_3N,BRICK}/DEL with this Tmin (seconds): "
+             "OpenRadioss DELETES any element whose time step reaches it. "
+             "Opt-in, and off unless given — the card removes mass and "
+             "stiffness the LS-DYNA original may have kept. Without it a "
+             "deletion floor is emitted only when the deck asks, i.e. "
+             "*CONTROL_TIMESTEP ERODE=1 with TSLIMT>0. Use it as an escape "
+             "hatch for a long run where one degrading element drags the "
+             "global step toward zero. Pick the value as a DELETION "
+             "threshold, not a mass-scaling target: ~0.9x the initial step "
+             "deletes elements that merely stretched ~10%%, ~0.4-0.5x "
+             "reserves it for near-total element collapse. Coexists with "
+             "/DT/NODA/CST (the deletion test uses the element's geometric "
+             "step and runs before the NODADT return), but interacts with "
+             "--ams, which is warned about.",
+    )
     return parser
 
 
@@ -324,6 +344,7 @@ def main(argv=None) -> int:
         write_restart=args.write_restart,
         ams=args.ams,
         shell_formulation=args.shell_formulation,
+        dt_del=args.dt_del,
         progress=None if args.quiet else _make_progress_printer(),
     )
 
