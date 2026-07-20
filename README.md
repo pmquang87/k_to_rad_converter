@@ -510,6 +510,28 @@ large `|DT2MS|`/element-step ratio; if it does, drop `--ams` (back to the defaul
 masters (the default; a whole-part rigid body's master must not be an element
 node or AMS aborts with `ERROR 1066`), so `--ams` force-enables them even if you
 passed `--no-rigid-cog-master`. Explicit decks only.
+`*SECTION_SHELL` `ELFORM` → `/PROP/SHELL` `Ishell`. `ELFORM` −16/9/20/21/26 map
+to `Ishell=24` (QEPH) unambiguously; **everything else — `ELFORM=2`
+(Belytschko-Tsay) above all, the most common shell formulation in LS-DYNA
+decks — has no exact counterpart**, and which one it gets is a choice:
+`--shell-formulation {qbat,qeph}` (CLI) / a GUI radio pair /
+`convert(shell_formulation=...)`.
+`qbat` (**default**) emits `Ishell=12`, *fully* integrated — what every previous
+conversion produced, so no existing deck moves. But `ELFORM=2` is
+*under*-integrated, so this changes the element's integration class, and under
+`/FAIL/JOHNSON Ifail_sh=2` it takes 4 Gauss × 2 through-thickness = **8 failure
+events to delete an element instead of 2**, measured at up to **~1.7×
+under-erosion** on a 38k-shell blast model.
+`qeph` emits `Ishell=24` — reduced integration with *physical* stabilisation,
+much closer to Belytschko-Tsay, and it drops the `dn=1e-3` numerical damping the
+starter injects for `Ishell=12`. It is not the default because it **changes
+results on every shell deck** (4 `/PROP/SHELL` props across 3 of this repo's
+golden fixtures flip 12→24). Either way the mapping is now **stated in the
+conversion log** — the original defect was that it happened silently.
+Under-integrated `Ishell=1..4` is deliberately not offered: it would activate
+the `Hm/Hf/Hr` hourglass path this repo documents as inert and set
+`inistate.py`'s `npg` 4→1, corrupting `*INITIAL_STRESS_SHELL` transfer. Implicit
+decks are always `Ishell=24` regardless of the option.
 `*HOURGLASS` + `*PART` HGID / `*CONTROL_HOURGLASS` → **per-part hourglass
 control** on the `/PROP` (the `dyna2rad` mapping). For solids the LS-DYNA `IHQ`
 selects the Radioss `Isolid` (`1/2/3`→`1`, `4/5`→`5`, `6/7`→`24`) and `QM`/`QH`

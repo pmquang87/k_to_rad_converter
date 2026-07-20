@@ -92,7 +92,8 @@ def _make_inishe(state: ConversionState) -> List[str]:
         if iss.nthick != n_eff:
             mismatched.append(iss.eid)
             continue
-        ishell = _elform_to_ishell(sec.elform, state.is_implicit)
+        ishell = _elform_to_ishell(sec.elform, state.is_implicit,
+                                  state.options.shell_default_ishell)
         npg = 4 if ishell in (12, 24) else 1
         (glob_entries if iss.iloc == 0 else loc_entries).append((iss, npg))
     if missing:

@@ -21,6 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .parser import parse_k_file, PARSER_WARNINGS
 from .handlers import dispatch
 from .state import ConversionState, ContactAutoSingle, ConvertOptions
+from .writer.common import SHELL_FORMULATIONS
 from .writer import (build_starter, build_engine, _warn_implicit_solid_contact_np1,
                      _warn_deformable_deformable_contact,
                      deformable_deformable_inter_ids, _recipe_active)
@@ -167,6 +168,7 @@ def convert(
     rigid_cog_master: bool = True,
     write_restart: bool = False,
     ams: bool = False,
+    shell_formulation: str = "qbat",
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -331,7 +333,17 @@ def convert(
         rigid_cog_master=rigid_cog_master,
         write_restart=write_restart,
         ams=ams,
+        shell_formulation=shell_formulation,
     )
+    if shell_formulation not in SHELL_FORMULATIONS:
+        raise ValueError(
+            f"shell_formulation must be one of "
+            f"{sorted(SHELL_FORMULATIONS)}, not {shell_formulation!r}. "
+            "'qbat' -> /PROP/SHELL Ishell=12 (fully integrated, the default "
+            "and what every previous conversion produced); 'qeph' -> Ishell=24 "
+            "(reduced integration, physically stabilised, closer to LS-DYNA "
+            "ELFORM=2 Belytschko-Tsay). Choosing 'qeph' CHANGES RESULTS on "
+            "every shell deck.")
     if ams_forced_cog:
         state.warn(
             "--ams requires element-free /RBODY masters, overriding "

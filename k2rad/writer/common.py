@@ -81,10 +81,62 @@ def _vnorm(a):
     return (a[0] / m, a[1] / m, a[2] / m)
 
 
-def _elform_to_ishell(elform: int, is_implicit: bool) -> int:
+# /PROP/SHELL Ishell values k2rad emits.
+ISHELL_QBAT = 12    # fully integrated (4 in-plane points), Batoz
+ISHELL_QEPH = 24    # reduced integration, PHYSICALLY stabilised (Q4 + EPH)
+
+#: name -> Ishell, for the user-facing ``shell_formulation`` option.
+SHELL_FORMULATIONS = {"qbat": ISHELL_QBAT, "qeph": ISHELL_QEPH}
+
+# LS-DYNA shell ELFORMs k2rad maps to QEPH regardless of the option: already
+# reduced-integration / co-rotational forms whose Radioss counterpart is
+# unambiguous. Everything else — ELFORM=2 (Belytschko-Tsay) above all, the
+# most common shell formulation in LS-DYNA decks — has no exact counterpart
+# and falls through to the user's choice.
+_ELFORM_ALWAYS_QEPH = {-16, 9, 20, 21, 26}
+
+
+def _elform_to_ishell(elform: int, is_implicit: bool,
+                      default_ishell: int = ISHELL_QBAT) -> int:
+    """LS-DYNA ``*SECTION_SHELL`` ELFORM -> Radioss ``/PROP/SHELL`` Ishell.
+
+    ``default_ishell`` is what an ELFORM with no exact Radioss counterpart
+    maps to. It is a USER CHOICE (``convert(shell_formulation=...)``) rather
+    than a constant, because the two candidates are not interchangeable and
+    neither is universally right:
+
+    * **12, QBAT** — the default, and what every existing conversion has
+      produced. FULLY integrated, 4 in-plane points. ELFORM=2 is
+      UNDER-integrated (1 point), so this changes the element's integration
+      class. With ``/FAIL/JOHNSON Ifail_sh=2`` that costs erosion:
+      ``fail_setoff_npg_c.F`` then wants 4 Gauss x 2 through-thickness = 8
+      failure events to delete an element, against the 2 the original deck
+      implies — measured at up to ~1.7x under-erosion on a 38k-shell blast
+      model.
+    * **24, QEPH** — reduced integration, PHYSICALLY stabilised. Much closer
+      to Belytschko-Tsay in integration class and cost, and it drops the
+      ``dn=1.0e-3`` numerical damping the starter injects for Ishell=12
+      (``hm_read_prop01.F:279``).
+
+    QEPH is NOT simply made the default because it changes results on every
+    existing shell deck — 4 ``/PROP/SHELL`` props across 3 of this repo's own
+    golden fixtures flip 12 -> 24. That is a physics change, so the user asks
+    for it explicitly.
+
+    Under-integrated ``Ishell=1..4`` is deliberately not offered. It would
+    activate the Hm/Hf/Hr hourglass path that this repo's own inert-hourglass
+    warning documents as unused, and ``inistate.py`` sets ``npg = 4 if ishell
+    in (12, 24) else 1``, so 1..4 would silently change ``/INISHE`` and
+    corrupt ``*INITIAL_STRESS_SHELL`` transfer. Both 12 and 24 leave that
+    untouched.
+
+    Implicit always returns 24 regardless of the option — reduced integration
+    with physical stabilisation is what Radioss recommends there, and that
+    predates this option.
+    """
     if is_implicit:
-        return 24   # QBAT – recommended for implicit
-    return 24 if elform in {-16, 9, 20, 21, 26} else 12
+        return ISHELL_QEPH
+    return ISHELL_QEPH if elform in _ELFORM_ALWAYS_QEPH else default_ishell
 
 
 def _elform_to_isolid(elform: int) -> int:
