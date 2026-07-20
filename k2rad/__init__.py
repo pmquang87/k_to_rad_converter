@@ -169,6 +169,7 @@ def convert(
     write_restart: bool = False,
     ams: bool = False,
     shell_formulation: str = "qbat",
+    dt_del: Optional[float] = None,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -334,6 +335,7 @@ def convert(
         write_restart=write_restart,
         ams=ams,
         shell_formulation=shell_formulation,
+        dt_del=dt_del,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(

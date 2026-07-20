@@ -2063,9 +2063,16 @@ def handle_control_timestep(block: Block, state: ConversionState) -> None:
     if not raw:
         return
     # Card: dtinit tssfac isdo tslimt dt2ms lctm erode ms1st
+    #        f[0]   f[1]   f[2] f[3]   f[4]  f[5] f[6]  f[7]
+    # TSLIMT (3) and ERODE (6) used to be sliced into f and then dropped on
+    # the floor: a user who wrote ERODE=1 got a converted deck with no
+    # deletion behaviour and no warning that the request had gone missing.
     f = _card(raw, 0, fixed=True, n=8, w=10)
     dt2ms = to_float(f[4]) if len(f) > 4 else 0.0
-    state.ctrl_timestep = ControlTimestep(to_float(f[0]), to_float(f[1]), dt2ms)
+    tslimt = to_float(f[3]) if len(f) > 3 else 0.0
+    erode = to_int(f[6]) if len(f) > 6 else 0
+    state.ctrl_timestep = ControlTimestep(to_float(f[0]), to_float(f[1]),
+                                          dt2ms, tslimt, erode)
 
 
 def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) -> None:

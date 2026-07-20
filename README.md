@@ -532,6 +532,21 @@ Under-integrated `Ishell=1..4` is deliberately not offered: it would activate
 the `Hm/Hf/Hr` hourglass path this repo documents as inert and set
 `inistate.py`'s `npg` 4→1, corrupting `*INITIAL_STRESS_SHELL` transfer. Implicit
 decks are always `Ishell=24` regardless of the option.
+`*CONTROL_TIMESTEP` `TSLIMT`/`ERODE` → **`/DT/{SHELL,SH_3N,BRICK}/DEL`**, a
+time-step *deletion* floor: OpenRadioss deletes any element whose step reaches
+`Tmin`. Emitted **only on explicit consent**, because the card removes mass and
+stiffness the LS-DYNA original may have kept — either the deck asks (`ERODE=1`
+**and** `TSLIMT>0`) or the user does (`--dt-del <seconds>` / GUI entry /
+`convert(dt_del=...)`). A half-request (`ERODE` without `TSLIMT`, or the
+reverse) emits nothing and is *reported*; it used to be dropped silently.
+It coexists with `/DT/NODA/CST`: the deletion test runs on the element's own
+geometric step (length/sound speed, no mass term) and executes before the
+`NODADT` early return (`cdt3.F:146` vs `:200`), so nodal mass scaling does not
+make the floor unreachable. Under `--ams` the step *is* mass-based
+(`cdt3.F:105-109`) and the interaction is warned about instead. Choose `Tmin`
+as a **deletion** threshold, not a mass-scaling target: ~0.9× the initial step
+deletes elements that merely stretched ~10%, ~0.4–0.5× reserves it for
+near-total element collapse.
 `*HOURGLASS` + `*PART` HGID / `*CONTROL_HOURGLASS` → **per-part hourglass
 control** on the `/PROP` (the `dyna2rad` mapping). For solids the LS-DYNA `IHQ`
 selects the Radioss `Isolid` (`1/2/3`→`1`, `4/5`→`5`, `6/7`→`24`) and `QM`/`QH`

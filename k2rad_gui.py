@@ -96,7 +96,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          rigid_cog_master: bool = True,
                          write_restart: bool = False,
                          ams: bool = False,
-                         shell_formulation: str = "qbat") -> dict:
+                         shell_formulation: str = "qbat",
+                         dt_del: str = "") -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -178,6 +179,22 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
             f"{shell_formulation!r}.")
     kwargs["shell_formulation"] = shell_formulation
 
+    # /DT/<elem>/DEL Tmin. Blank = off; the card DELETES elements, so an
+    # unparseable value must be an error, never a silently-ignored blank.
+    dt_del = (dt_del or "").strip()
+    if dt_del:
+        try:
+            v = float(dt_del)
+        except ValueError:
+            raise ValueError(
+                f"Time-step deletion floor must be a number in seconds, not "
+                f"{dt_del!r}.")
+        if v <= 0.0:
+            raise ValueError(
+                "Time-step deletion floor must be > 0 seconds (leave blank to "
+                "emit no /DT/.../DEL card).")
+        kwargs["dt_del"] = v
+
     return kwargs
 
 
@@ -213,6 +230,7 @@ class ConverterGUI:
         self.ams = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
+        self.dt_del = tk.StringVar(value="")
         self.ground = tk.BooleanVar(value=False)
         self.ground_k = tk.StringVar(value="100")
         self.auto_gapmin = tk.BooleanVar(value=False)
@@ -314,6 +332,28 @@ class ConverterGUI:
                      "CHANGES RESULTS on every shell deck.",
             value="qeph", variable=self.shell_formulation,
         ).grid(row=1, column=0, sticky="w")
+
+        # ── Time-step deletion floor (issue #78) ────────────────────────────
+        # An entry box, not a checkbox: there is no safe default value to tick
+        # into existence. The card DELETES elements, so the user names the
+        # threshold or gets nothing.
+        ttk.Label(
+            io, text="Time-step deletion floor Tmin [s] (blank = off):"
+        ).grid(row=11, column=0, sticky="w", **pad)
+        ttk.Entry(io, textvariable=self.dt_del, width=14).grid(
+            row=11, column=1, sticky="w", **pad)
+        ttk.Label(
+            io, wraplength=760, foreground="#804000",
+            text="Emits /DT/{SHELL,SH_3N,BRICK}/DEL — OpenRadioss DELETES any "
+                 "element whose time step reaches Tmin, removing mass and "
+                 "stiffness the LS-DYNA original may have kept. Leave blank "
+                 "unless a run is stalling on one degrading element; a deck "
+                 "that asks for deletion itself (*CONTROL_TIMESTEP ERODE=1 "
+                 "with TSLIMT>0) is converted without this. Choose it as a "
+                 "DELETION threshold, not a mass-scaling target: ~0.9x the "
+                 "initial step deletes elements that merely stretched ~10%, "
+                 "~0.4-0.5x reserves it for near-total element collapse."
+        ).grid(row=12, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Force-control stabilization ─────────────────────────────────────
         fc = ttk.LabelFrame(
@@ -447,6 +487,7 @@ class ConverterGUI:
                 write_restart=self.write_restart.get(),
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
+                dt_del=self.dt_del.get(),
             )
         except ValueError as exc:
             self._reset_log()

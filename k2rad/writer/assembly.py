@@ -100,6 +100,7 @@ __all__ = [
     "_starter_section_registry",
     "_make_engine_restart",
     "_make_engine_timestep",
+    "_make_engine_dt_deletion",
     "_make_engine_timestep_scale",
     "build_engine",
 ]
@@ -711,6 +712,107 @@ def _make_engine_timestep_scale(state: ConversionState, ts) -> List[str]:
     ]
 
 
+# /DT/<elem>/DEL blocks k2rad can emit, in the order they are written. SH_3N is
+# a separate family from SHELL in Radioss, so a deck whose ESORT generates
+# triangles needs both or the triangles have no floor at all.
+_DT_DEL_KINDS = ("SHELL", "SH_3N", "BRICK")
+
+
+def _make_engine_dt_deletion(state: ConversionState) -> List[str]:
+    """``/DT/<elem>/DEL`` — delete an element whose time step reaches Tmin.
+
+    **This card deletes elements, so k2rad never emits it uninvited.** Two
+    routes in, both explicit:
+
+    * the DECK asks: ``*CONTROL_TIMESTEP`` ``ERODE=1`` with ``TSLIMT>0``.
+      ERODE is precisely LS-DYNA's "delete elements that fall below the floor",
+      so carrying it across is faithful rather than inventive. Both fields used
+      to be sliced off the card and dropped silently;
+    * the USER asks: ``--dt-del <seconds>`` (``convert(dt_del=...)``) — the
+      escape hatch for a long run where one degrading element drags the global
+      step toward zero and the job never finishes. It has no LS-DYNA
+      counterpart, so it is opt-in and never derived automatically.
+
+    ORDERING AGAINST MASS SCALING, which issue #78 flagged as the crux and
+    feared would leave one of the two cards as dead configuration. Verified in
+    ``engine/source/elements/shell/coque/cdt3.F`` (OpenRadioss 2026-05-20):
+
+    * the element step is ``DT = DTFAC1(3)*ALDT/SSP`` (``cdt3.F:111-115``) —
+      characteristic length over sound speed, **no mass term** — so nodal mass
+      scaling cannot lift an element back off the deletion threshold;
+    * the ``IDTMIN(3)==2`` deletion block (``cdt3.F:146``) executes **before**
+      the ``IF (NODADT/=0...) RETURN`` at ``cdt3.F:200``.
+
+    So ``/DT/NODA/CST`` and ``/DT/<elem>/DEL`` do NOT fight, and the deletion
+    floor stays reachable with nodal scaling active. They are still not fully
+    independent, and this is the case the earlier analysis missed: under
+    **AMS** (``IDTMINS==2``) the step comes from ``SQRT(MAS/STI)`` instead
+    (``cdt3.F:105-109``), which IS mass-based, and ``cdt3.F:200`` also returns
+    early for AMS. A deletion floor under ``--ams`` is therefore warned about
+    rather than assumed to work.
+
+    Tmin here is a DELETION threshold, not a mass-scaling target, and the two
+    want very different values. A floor at ~0.9x the initial step deletes
+    elements that have merely stretched ~10%, which shreds a crushable
+    structure; deletion belongs at near-total collapse of an element's
+    characteristic length (~0.4-0.5x the initial step). k2rad does not invent
+    the value — it carries TSLIMT, or the number the user passed.
+    """
+    ts = state.ctrl_timestep
+    if state.is_implicit or state.is_modal:
+        return []
+    explicit = state.options.dt_del
+    tmin = None
+    source = ""
+    if explicit is not None and explicit > 0.0:
+        tmin = float(explicit)
+        source = f"--dt-del {tmin:g}"
+    elif ts is not None and int(ts.erode) == 1 and ts.tslimt > 0.0:
+        tmin = float(ts.tslimt)
+        source = f"*CONTROL_TIMESTEP ERODE=1 TSLIMT={ts.tslimt:g}"
+
+    if tmin is None:
+        # Nothing to emit — but SAY so when the deck asked for something and
+        # only half of it is usable, instead of dropping it on the floor.
+        if ts is not None and (int(ts.erode) == 1 or ts.tslimt > 0.0):
+            state.note_recognized_not_emitted(
+                "CONTROL_TIMESTEP",
+                f"ERODE={int(ts.erode)} / TSLIMT={ts.tslimt:g} asks for element "
+                "deletion below a time-step floor, but a floor needs BOTH "
+                "ERODE=1 and TSLIMT>0, so no /DT/<elem>/DEL was emitted. Set "
+                "both, or pass --dt-del <seconds> to choose the floor "
+                "explicitly.")
+        return []
+
+    tsca = ts.tssfac if (ts and ts.tssfac and ts.tssfac > 0.0) else 0.9
+    warn = (f"{source} -> /DT/{{SHELL,SH_3N,BRICK}}/DEL (Tsca={tsca:g}, "
+            f"Tmin={tmin:g}): OpenRadioss will DELETE any element whose time "
+            "step reaches Tmin, and prints each deletion to the .out and "
+            "stdout. This removes mass and stiffness the LS-DYNA original may "
+            "have kept — check the deletion count before trusting the result.")
+    if ts is not None and ts.dt2ms < 0.0:
+        if state.options.ams:
+            warn += (
+                " NOTE --ams: under AMS the element step is computed from "
+                "SQRT(mass/stiffness) (cdt3.F:105-109), not length/sound "
+                "speed, and cdt3.F:200 returns early for AMS — so this floor "
+                "may behave differently from the non-AMS case, or not fire at "
+                "all. Verify against the deletion messages.")
+        else:
+            warn += (
+                f" It coexists with /DT/NODA/CST (Tmin={abs(ts.dt2ms):g}): the "
+                "deletion test runs on the element's own GEOMETRIC step "
+                "(length/sound speed, no mass term) and executes BEFORE the "
+                "NODADT early return (cdt3.F:146 vs :200), so nodal mass "
+                "scaling does NOT make this floor unreachable.")
+    state.warn(warn)
+
+    out: List[str] = []
+    for kind in _DT_DEL_KINDS:
+        out += [f"/DT/{kind}/DEL", f"{_f(tsca)}{_f(tmin)}", "#"]
+    return out
+
+
 def _make_engine_timestep(state: ConversionState) -> List[str]:
     """*CONTROL_TIMESTEP DT2MS<0 → /DT/NODA/CST (nodal-mass scaling that holds
     the explicit time step at the target |DT2MS|). Without this OpenRadioss runs
@@ -764,6 +866,7 @@ def build_engine(state: ConversionState) -> str:
         _make_engine_restart(state),
         _make_engine_output(state),
         _make_engine_timestep(state),
+        _make_engine_dt_deletion(state),
         _make_engine_implicit(state),
         _make_engine_cpu(state),
         ["/MON/ON", "#"],

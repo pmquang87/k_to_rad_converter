@@ -54,6 +54,57 @@ Prior history (before this changelog was introduced) is summarized in the
   *A default and a silent default are different things, and the second was the
   actual defect.* Follows PR #70, which made the analogous ELFORM→`Isolid`
   correction for solids.
+- **`/DT/{SHELL,SH_3N,BRICK}/DEL` time-step deletion floor, on explicit consent
+  only — and `*CONTROL_TIMESTEP` `TSLIMT`/`ERODE` stop being silently dropped.**
+  Closes #78.
+
+  There was no `/DT/.../DEL` emitter anywhere in the package, and fields 3
+  (`TSLIMT`) and 6 (`ERODE`) were sliced off the card in
+  `handle_control_timestep` (`handlers.py:2061`) and thrown away — `ERODE=1`,
+  which is LS-DYNA for *delete elements whose step falls below the floor*,
+  produced a converted deck with no such behaviour and no warning that the
+  request had gone missing.
+
+  The card **deletes elements**, so a floor k2rad invented would silently cost
+  the model mass and stiffness the LS-DYNA original kept. There are therefore
+  exactly two ways to get one, both explicit:
+
+  - the **deck** asks — `ERODE=1` **and** `TSLIMT>0` (`TSLIMT` alone is a step
+    limit, not permission to delete; `ERODE` alone has no threshold, and both
+    half-requests are now reported via `recognized_not_emitted` rather than
+    dropped);
+  - the **user** asks — `--dt-del <seconds>` / GUI entry box /
+    `convert(dt_del=...)`, the escape hatch for a long run where one degrading
+    element drags the global step toward zero. No LS-DYNA counterpart, so it is
+    never derived automatically.
+
+  All three element families are emitted: `SH_3N` is a separate family from
+  `SHELL` in Radioss, so a deck whose `ESORT` generates triangles would
+  otherwise leave them with no floor at all.
+
+  **Ordering against mass scaling**, which #78 called the crux and feared would
+  leave one card as dead configuration. Verified in
+  `engine/source/elements/shell/coque/cdt3.F` (OpenRadioss 2026-05-20):
+
+  - the element step is `DT = DTFAC1(3)*ALDT/SSP` (`cdt3.F:111-115`) —
+    characteristic length over sound speed, **no mass term** — so nodal mass
+    scaling cannot lift an element back off the threshold;
+  - the `IDTMIN(3)==2` deletion block (`cdt3.F:146`) executes **before** the
+    `IF (NODADT/=0...) RETURN` at `cdt3.F:200`.
+
+  So `/DT/NODA/CST` and `/DT/.../DEL` do **not** fight, and the log says so.
+  They are not fully independent though, and this is the case the original
+  analysis missed: under **AMS** (`IDTMINS==2`) the step comes from
+  `SQRT(MAS/STI)` instead (`cdt3.F:105-109`), which *is* mass-based, and
+  `cdt3.F:200` also returns early for AMS — so a floor under `--ams` is warned
+  about rather than assumed to work.
+
+  `Tmin` here is a **deletion** threshold, not a mass-scaling target, and the
+  two want very different values: ~0.9x the initial step deletes elements that
+  merely stretched ~10%, which shreds a crushable structure; deletion belongs
+  at ~0.4-0.5x, i.e. near-total collapse of an element's characteristic length.
+  k2rad carries `TSLIMT` or the user's number and never invents one. Tests in
+  `tests/test_dt_deletion_floor.py`.
 
 - **Hyperelastic rubber batch** (`*MAT_BLATZ-KO_RUBBER` / MAT_007,
   `*MAT_MOONEY-RIVLIN_RUBBER` / MAT_027, `*MAT_OGDEN_RUBBER` / MAT_077_O,
