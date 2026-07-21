@@ -6122,10 +6122,42 @@ class TiedContactTests(unittest.TestCase):
         self.assertIn(f"/GRNOD/NODE/{grnod_id}", starter)
         self.assertIn(f"/SURF/SEG/{surf_id}", starter)
         self.assertEqual(ignore, 2)      # drop-and-print unfound nodes
-        self.assertEqual(spotflag, 1)    # spotweld formulation (weld/rivet)
+        self.assertEqual(spotflag, 28)   # spotweld formulation + auto-penalty
         self.assertEqual(level, 0)
         self.assertEqual(isearch, 2)     # improved closest-segment search
         self.assertEqual(idel2, 0)
+
+    def test_penalty_spotflag_emits_its_extra_card(self):
+        """Spotflag 25-28 read one more card than the kinematic ones.
+
+        hm_read_inter_type02.F "Optional Card2 : ILEV = 25,26,27,28" pulls
+        Stfac/Visc/Istf off it. Omitting the card would leave the starter
+        reading the NEXT keyword line as interface data.
+        """
+        _, starter = self._convert(TIED_WELD_K)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.startswith("/INTER/TYPE2/"))
+        self.assertIn("Stfac", lines[i + 4])
+        self.assertIn("Visc", lines[i + 4])
+        card2 = lines[i + 5]
+        self.assertAlmostEqual(float(card2[0:20]), 1.0)      # Stfac
+        self.assertAlmostEqual(float(card2[20:40]), 0.05)    # Visc (crit. damping)
+        self.assertEqual(int(card2[60:70]), 2)               # Istf
+
+    def test_tie_sharing_nodes_with_its_own_main_surface_stays_legal(self):
+        """A purely kinematic Spotflag is ERROR 556 on a conformal tie.
+
+        chktyp2.F tags a TYPE2's secondary nodes only when Spotflag is NOT
+        25/26/27/28, and every MAIN node carrying that tag raises the hard
+        ERROR 556 "MAIN NODE ID=n IS ALSO SECONDARY NODE OF ANOTHER INTERFACE
+        TYPE2". Two conformally meshed parts tied together share nodes on their
+        common boundary, so those nodes land in both the secondary /GRNOD and
+        the main /SURF — which is exactly the deck below.
+        """
+        _, starter = self._convert(TIED_S2S_K)
+        ints, _ = self._type2_card(starter)
+        self.assertIn(ints[3], (25, 26, 27, 28))
 
     def test_dsearch_covers_the_midplane_offset(self):
         # Tied nodes are 1.0 above the master segments (half the plate
@@ -6162,7 +6194,7 @@ class TiedContactTests(unittest.TestCase):
         self.assertNotIn("CONTACT_TIED_SHELL_EDGE_TO_SURFACE",
                          result.skipped_keywords)
         ints, _ = self._type2_card(starter)
-        self.assertEqual(ints[3], 1)     # Spotflag=1
+        self.assertEqual(ints[3], 28)    # Spotflag=28 = spotweld + auto-penalty
         # SHELL_EDGE ties rotations in LS-DYNA too — no rotation-semantics note.
         self.assertFalse(any("ROTATIONS" in w for w in result.warnings))
 
@@ -6171,11 +6203,24 @@ class TiedContactTests(unittest.TestCase):
         self.assertNotIn("CONTACT_TIED_SURFACE_TO_SURFACE",
                          result.skipped_keywords)
         ints, dsearch = self._type2_card(starter)
-        self.assertEqual(ints[3], 5)     # Spotflag=5: standard mesh-transition tie
+        self.assertEqual(ints[3], 27)    # Spotflag=27: standard tie + auto-penalty
         # Master is a shell part → /SURF/GRSHEL, and the patch hovers 1.0 above.
         self.assertIn("/SURF/GRSHEL/", starter)
-        self.assertGreaterEqual(dsearch, 1.0)
-        self.assertLessEqual(dsearch, 2.0)
+        # A whole-PART secondary side is the part's entire node cloud, not a tie
+        # surface, so the worst-node measurement is skipped: dsearch=0 hands the
+        # decision to the starter's average-main-segment default (Ignore=2).
+        self.assertEqual(dsearch, 0.0)
+        self.assertTrue(any("whole part/part set" in w for w in result.warnings))
+
+    def test_part_side_dsearch_still_honours_negative_sst(self):
+        """A negative Card-3 SST is an EXPLICIT absolute tie distance from the
+        deck, so it survives the part-side "leave dsearch to the starter" rule."""
+        deck = TIED_S2S_K.replace(
+            "       1.0       1.0       0.0       0.0\n",
+            "       1.0       1.0      -3.0       0.0\n")
+        _, starter = self._convert(deck)
+        _, dsearch = self._type2_card(starter)
+        self.assertAlmostEqual(dsearch, 3.0)
 
     def test_negative_sst_floors_dsearch(self):
         # LS-DYNA: a NEGATIVE Card-3 SST is an absolute tie-criterion distance.
