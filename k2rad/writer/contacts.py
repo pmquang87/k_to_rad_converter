@@ -1321,17 +1321,42 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
 # ─────────────────────────────────────────────────────────────────────────────
 
 # LS-DYNA tied variant → /INTER/TYPE2 Spotflag. NODES_/SHELL_EDGE_TO_SURFACE
-# welds get the spotweld formulation (Spotflag=1): the secondary node is joined
-# to the main segment by a rigid link of constant stiffness, so the offset
-# between a tied node and the main shell MID-PLANE (typically half the plate
-# thickness) carries force and moment without exciting hourglass modes.
-# SURFACE_TO_SURFACE is LS-DYNA's mesh-transition glue → the standard
-# formulation (Spotflag=5).
+# welds get the spotweld formulation: the secondary node is joined to the main
+# segment by a rigid link of constant stiffness, so the offset between a tied
+# node and the main shell MID-PLANE (typically half the plate thickness) carries
+# force and moment without exciting hourglass modes. SURFACE_TO_SURFACE is
+# LS-DYNA's mesh-transition glue → the standard formulation.
+#
+# Both are emitted as the AUTO-PENALTY variant of that formulation (28 = "like
+# Spotflag=1", 27 = "like Spotflag=5", each with an automatic switch to a
+# penalty tie on the individual nodes where a kinematic condition is
+# incompatible) rather than the purely kinematic 1/5. A purely kinematic TYPE2
+# ELIMINATES its secondary nodes' DOFs, and the starter refuses that as soon as
+# such a node is also needed elsewhere:
+#
+#   * chktyp2.F only tags a TYPE2's secondary nodes when Spotflag is NOT one of
+#     25/26/27/28, and every MAIN node carrying that tag raises the hard
+#     ERROR 556 "MAIN NODE ID=n IS ALSO SECONDARY NODE OF ANOTHER INTERFACE
+#     TYPE2". Two CONFORMALLY meshed parts tied to each other share nodes along
+#     their common boundary, so those shared nodes sit in both the secondary
+#     /GRNOD and the main /SURF — reproduced on the Kurbel deck as 62 x
+#     ERROR 556 (3061 of the 4540 tied nodes are shared) with Spotflag=5, and
+#     zero errors with 27.
+#   * itagsl2.F implements the fallback for 27/28 only: a secondary node that
+#     collides with an /RBE2, /RBE3 or a TETRA10 mid-side condition is switched
+#     to the penalty tie (WARNING 1179) instead of failing the run.
+#
+# This is also what the reference converter does — dyna2rad defaults every
+# routed /INTER/TYPE2 to Spotflag=28 (convertcontacts.cxx:49), which is why the
+# same deck read natively by OpenRadioss starts clean.
 _TIED_SPOTFLAG = {
-    "NODES_TO_SURFACE":      1,
-    "SHELL_EDGE_TO_SURFACE": 1,
-    "SURFACE_TO_SURFACE":    5,
+    "NODES_TO_SURFACE":      28,
+    "SHELL_EDGE_TO_SURFACE": 28,
+    "SURFACE_TO_SURFACE":    27,
 }
+
+#: Spotflag values that take the extra penalty Card 2 (Stfac/Visc/Istf).
+_TIED_PENALTY_SPOTFLAGS = (25, 26, 27, 28)
 
 # dsearch margin over the measured worst node-to-segment gap: covers the exact
 # half-thickness mid-plane offset plus mesh roundoff without reaching across to
@@ -1348,14 +1373,28 @@ def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
     from the tie by the starter (and printed), and a dsearch of 0 is replaced
     by the starter's average-main-segment-size default. Isearch=2 = improved
     closest-segment search. Idel2=0 = engine default (no deletion).
+
+    Spotflag 25/26/27/28 (the penalty and auto-penalty formulations — see
+    _TIED_SPOTFLAG) read one EXTRA card that the purely kinematic ones do not:
+    Stfac(1-20) Visc(21-40) <blank 41-60> Istf(61-70) (hm_read_inter_type02.F
+    "Optional Card2 : ILEV = 25,26,27,28"). The values written are the starter's
+    own defaults for a blank card (Stfac 0->1, Visc 0->0.05, Istf 0->2) and
+    match the native reader's echo, so the penalty branch of the tie is scaled
+    exactly as dyna2rad scales it.
     """
-    return [
+    lines = [
         f"/INTER/TYPE2/{inter_id}",
         title or f"TIED_CONTACT_{inter_id}",
         "#  Grnd_id   Surf_id    Ignore  Spotflag     Level   Isearch     Idel2                       dsearch",
         f"{_i(grnod_id)}{_i(surf_id)}{_i(2)}{_i(spotflag)}{_i(0)}{_i(2)}{_i(0)}          {_f(dsearch)}",
-        HDR,
     ]
+    if spotflag in _TIED_PENALTY_SPOTFLAGS:
+        lines += [
+            "#              Stfac                Visc                          Istf",
+            f"{_f(1.0)}{_f(0.05)}                    {_i(2)}",
+        ]
+    lines.append(HDR)
+    return lines
 
 
 def _tied_interface_type(c) -> str:
@@ -1467,6 +1506,21 @@ def _tied_master_surface(state: ConversionState, c, out_lines: List[str]):
     return surf_id, verts, faces
 
 
+def _tied_slave_is_part_side(state: ConversionState, sid: int, styp: int) -> bool:
+    """True when a tied contact's SECONDARY side names a whole PART / PART SET
+    (rather than a node set or a segment set). Mirrors _tied_slave_nids."""
+    if styp == 4:
+        return False
+    if styp == 3:
+        return True
+    if styp == 2:
+        return sid in state.part_sets
+    if styp in (0, 1):
+        return (sid not in state.segment_sets
+                and (sid in state.parts or sid in state.part_sets))
+    return False
+
+
 def _tied_dsearch(state: ConversionState, c, slave_nids: List[int],
                   verts, faces) -> float:
     """/INTER/TYPE2 dsearch for one tied contact: the measured WORST secondary
@@ -1474,13 +1528,45 @@ def _tied_dsearch(state: ConversionState, c, slave_nids: List[int],
     its segment even when the main side is a shell whose segments sit on the
     MID-PLANE half a thickness away from the physically-touching tied nodes.
 
+    That worst-case measurement is only meaningful when the secondary side is
+    the TIE SURFACE itself — a *SET_NODE_LIST weld line or a *SET_SEGMENT. When
+    the side names a whole PART (or part set) the secondary group is the part's
+    ENTIRE node cloud, so the "worst" node is the one on the far side of the
+    part and the measurement returns a part DIAMETER, not a surface offset. On
+    the Kurbel deck that produced dsearch=33.98 mm against a genuine tie gap
+    below 0.03 mm, tying 3846 of 4540 nodes where the native reader ties 81 —
+    the whole volume welded to the mating surface. For those sides dsearch is
+    therefore left 0 and the starter's own average-main-segment default is used
+    (what dyna2rad emits unconditionally).
+
     A negative LS-DYNA Card-3 SST/MST (absolute tie-criterion distance) is
-    honoured as a floor. 0 is returned when the gap cannot be measured —
-    Ignore=2 then makes the starter default dsearch to the average main
-    segment size."""
+    honoured as a floor in every case — it is an explicit request from the deck.
+    0 is returned when the gap cannot be measured — Ignore=2 then makes the
+    starter default dsearch to the average main segment size."""
     from ..gapmin import _coords_for, _round_sig, max_node_to_triangles
     floor = max(-c.sst if c.sst < 0.0 else 0.0,
                 -c.mst if c.mst < 0.0 else 0.0)
+    if _tied_slave_is_part_side(state, c.ssid, c.sstyp):
+        if floor > 0.0:
+            state.warn(
+                f"TIED CONTACT {c.inter_id}: SECONDARY side ssid={c.ssid} "
+                f"sstyp={c.sstyp} is a whole part/part set -> dsearch={floor:g} "
+                "from the negative Card-3 SST/MST absolute tie distance (the "
+                "measured worst-node distance is not used for a part side: it "
+                "would return the part's diameter, not the tie gap)."
+            )
+            return floor
+        state.warn(
+            f"TIED CONTACT {c.inter_id}: SECONDARY side ssid={c.ssid} "
+            f"sstyp={c.sstyp} is a whole part/part set, so its node group is "
+            "the part's entire node cloud, not a tie surface -> dsearch left 0 "
+            "and the starter uses its average-main-segment default (Ignore=2), "
+            "matching the native OpenRadioss reader. Nodes beyond it are "
+            "dropped from the tie and printed in the starter output. Give the "
+            "tie a *SET_NODE_LIST/*SET_SEGMENT secondary side, or a negative "
+            "Card-3 SST/MST, if you need an explicit tie distance."
+        )
+        return 0.0
     gap = max_node_to_triangles(_coords_for(state, slave_nids), verts, faces)
     if gap is None:
         if floor > 0.0:
@@ -1593,9 +1679,14 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
         )
         state.warn(
             f"*CONTACT_TIED_{c.variant}{'_OFFSET' if c.offset else ''} "
-            f"{c.inter_id} -> /INTER/TYPE2/{c.inter_id} (tied kinematic "
-            f"interface, Spotflag={spotflag}, {len(clean)} secondary nodes)."
-            + rot_note
+            f"{c.inter_id} -> /INTER/TYPE2/{c.inter_id} (tied interface, "
+            f"Spotflag={spotflag}, {len(clean)} secondary nodes). Spotflag "
+            f"{spotflag} is the kinematic tie with an AUTOMATIC SWITCH TO A "
+            "PENALTY tie on any secondary node whose kinematic condition is "
+            "incompatible — a purely kinematic Spotflag (1/5) makes the starter "
+            "fail with ERROR 556 as soon as a tied node is also needed by "
+            "another interface, which happens whenever the two tied parts are "
+            "conformally meshed and share nodes." + rot_note
         )
     _note_dropped_interfaces(state, dropped)
     return lines

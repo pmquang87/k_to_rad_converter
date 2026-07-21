@@ -668,6 +668,81 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **A `*CONTACT_TIED_*` between two CONFORMALLY meshed parts killed the starter
+  with a storm of `ERROR 556`, and the same deck read natively started clean.**
+  Reported from the field: a deck combining `*CONTACT_AUTOMATIC_SINGLE_SURFACE`
+  and `*CONTACT_TIED_SURFACE_TO_SURFACE_OFFSET_ID` on part sides fails as soon
+  as a part is used by both. Reproduced verbatim on that deck — **62 ×
+  `ERROR 556 ** ERROR IN INTERFACE TYPE2 / MAIN NODE ID=n IS ALSO SECONDARY
+  NODE OF ANOTHER INTERFACE TYPE2`**, `ERROR TERMINATION` — against **0 errors**
+  for the identical `.k` read through OpenRadioss's own dyna2rad.
+
+  The `/SURF/PART/EXT` both keywords share is a red herring: a part may appear
+  in any number of surfaces. The cause is the **Spotflag**. The two tied parts
+  are conformally meshed and **share 3061 nodes** along their common boundary,
+  so 3061 of the tie's 4540 secondary nodes are also nodes of its own main
+  surface — and `starter/source/interfaces/interf1/chktyp2.F:79` reads
+
+  ```fortran
+  IF (ILEV /=25 .and. ILEV/=26 .and. ILEV/=27 .and. ILEV/=28) TAGHIER(J) = 1
+  ```
+
+  A TYPE2's secondary nodes are tagged — and can therefore raise `ERROR 556` —
+  **only when Spotflag is not one of 25/26/27/28**, i.e. only for the purely
+  kinematic formulations, which eliminate their secondary nodes' DOFs outright.
+  `_TIED_SPOTFLAG` emitted exactly those: `5` for `SURFACE_TO_SURFACE`, `1` for
+  `NODES_`/`SHELL_EDGE_TO_SURFACE`. dyna2rad defaults every routed `/INTER/TYPE2`
+  to `Spotflag=28` (`reader/.../convertcontacts.cxx:49`), which is the whole
+  reason the native read survives.
+
+  Each formulation is now emitted as its **auto-penalty** counterpart — per the
+  Radioss docs, `27` is *"kinematic formulation similar to Spotflag=5 with an
+  automatic switch to penalty formulation when incompatible kinematic conditions
+  occur"* and `28` is the same for `Spotflag=1`:
+
+  | tied variant | before | after |
+  |---|---|---|
+  | `SURFACE_TO_SURFACE` | 5 | **27** |
+  | `NODES_TO_SURFACE`, `SHELL_EDGE_TO_SURFACE` | 1 | **28** |
+
+  This keeps k2rad's deliberate per-variant formulation choice (a blanket 28
+  would silently turn the mesh-transition glue into a spotweld) and adds only
+  the fallback: `itagsl2.F:238` demotes an individual conflicting node to a
+  penalty tie (`WARNING 1179`) instead of failing the run.
+
+  Spotflag 25–28 also read **one extra card** that was not being written —
+  `Stfac(1-20) Visc(21-40) <blank> Istf(61-70)`, the
+  `"Optional Card2 : ILEV = 25,26,27,28"` of `hm_read_inter_type02.F:296`.
+  Without it the starter consumes the following keyword line as interface data.
+  The values emitted (`1.0 / 0.05 / 2`) are the starter's own blank-card
+  defaults and match the native reader's echo exactly.
+
+  Result on the reported deck: **62 errors → 0 errors**, `TERMINATION WITH
+  WARNING`, restart files written.
+
+- **A tied contact whose SECONDARY side is a whole PART welded ~47× more of the
+  model than the source deck asks for.** `_tied_dsearch` sizes the TYPE2 search
+  distance from the **worst** secondary-node-to-main-segment distance × 1.2.
+  That is correct for the case it was built for — a `*SET_NODE_LIST` weld line
+  sitting half a shell thickness off the main mid-plane — but when the side
+  names a part, the secondary group is the part's **entire node cloud** and the
+  "worst" node is the one on the far side of the part. The measurement then
+  returns a part *diameter*, not a surface offset:
+
+  | | dsearch | secondary nodes actually tied |
+  |---|---|---|
+  | native (dyna2rad) | 0 → starter auto, 1.9e-3 … 2.2e-2 mm | **81** of 4540 |
+  | k2rad (before) | **33.98 mm** | **3846** of 4540 |
+
+  The run does not fail — it silently glues most of one part's volume to the
+  mating surface. For a part / part-set secondary side dsearch is now left `0`,
+  handing the decision to the starter's average-main-segment default (what
+  dyna2rad emits unconditionally); the measured worst-node dsearch is kept for
+  node-set and segment-set sides, the weld geometry it was validated on. A
+  negative Card-3 `SST`/`MST` still overrides both — it is an explicit tie
+  distance from the deck. The converted deck now deletes **4459** secondary
+  nodes, byte-for-byte the native reader's count.
+
 - **The `*DATABASE_*` family disagreed with itself about how wide its own DT
   field is, and both readings failed SILENTLY.** `*DATABASE_ELOUT`
   (`handlers.py:4520`), `*DATABASE_GLSTAT` (`handlers.py:4533`) and
