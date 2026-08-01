@@ -37,15 +37,37 @@ Prior history (before this changelog was introduced) is summarized in the
   only kind that assigns the node directions to y/z rather than x/y). The skew is
   written as local **Y′ then Z′** per `skew_fix.cfg` — the starter rebuilds
   X′ = Y′×Z′ — and it is a *fallback*: the node branches are tested first and the
-  `Skew_ID1` branch last, so writing it changes nothing in the normal case and
-  suppresses ERROR 936 when the node list is short.
+  `Skew_ID1` branch last, so writing it changes nothing in the normal case.
+
+  A frame is **never** derived from just `N1`→`N2`. `GET_SKEW45` reads
+  `Skew_ID1` only when the spring has exactly two nodes coincident to within
+  `EM10` (`rini45.F:643`); above that the node branches win and the skew is
+  ignored — and for `Type` 1/8 a non-zero `Skew_ID1` is actively harmful,
+  because the clean global-frame branch (`rini45.F:439`) is gated on
+  `IDSK1 == 0`, so writing one demotes the joint's axes to whatever mesh offset
+  separates the two nodes. When a 2-node joint *is* coincident and a stiffness
+  card names a `CIDA`, that converted `/SKEW` is used (and said so); when it is
+  not, the `CIDA` is withheld and the mismatch is warned. `ERROR 936` is
+  predicted off the starter's own `NNOD2` (`rini45.F:421-425`, bumped 2 → 3 for
+  a non-coincident pair), not off the raw node count, so the prediction is exact
+  in both directions. A `CYLINDRICAL` joint written with `N3 = 0` — the
+  documented way to join a free node to a rigid body (R16 Vol I p.10-62) —
+  falls back to `N4`, which is the same point by design, instead of emitting a
+  2-node spring the starter rejects.
 
   `Kn = 0` (blocking stiffness derived from the time step) and `Cr` blank
-  (starter default 0.05, `hm_read_prop45.F:155`). `RPS → ScF`, 0.01 when not
-  positive — dyna2rad's rule, and the only defensible one, but the two are *not*
-  the same quantity: LS-DYNA's `RPS` is a dimensionless relative penalty
-  multiplier while `ScF` is a length²-dimensioned floor inside
-  `KR = Kn·MAX(ScF, LEN2)` (`rini45.F:283`). Every non-unit `RPS` now says so.
+  (starter default 0.05, `hm_read_prop45.F:155`). With `Kn = 0`, `ScF` **is**
+  LS-DYNA's `RPS`: the engine applies it as `KX = ScF·KX ; KR = ScF·KR`
+  (`joint_block_stiffness.F:220-221`, on the branch chosen by
+  `FLAG = NINT(Kn) == 0`; GEO slot 10 = `Kn`, 11 = `ScF`,
+  `hm_read_prop45.F:1087-1088`). The length² reading `Kn·MAX(ScF, LEN2)` belongs
+  to the `Kn > 0` path only, so the mapping is exact and is not warned about.
+  `RPS ≤ 0` therefore becomes **1.0** — LS-DYNA's own default, and a blank
+  fixed-format column is indistinguishable from `0.0` — not dyna2rad's 0.01,
+  which would divide the blocking stiffness by 100 and leave every joint a
+  hundred times sloppier than the deck asks for. (The starter agrees: `ScF = 0`
+  with `Kn = 0` is replaced by 1.0, `hm_read_prop45.F:163-169`.) A negative
+  `RPS` (a load-curve id) is dropped loudly and falls back to the same 1.0.
 
   **dyna2rad defects deliberately not replicated** (all from its own source):
   * *One shared `/PROP/TYPE45` per joint KIND* for the whole model
@@ -99,20 +121,45 @@ Prior history (before this changelog was introduced) is summarized in the
   Channel→DOF mapping: for a single-free-axis joint (`Type` 2/3/6) the `CIDA`
   axis within |cos| > 0.99 of the joint axis selects which of φ/θ/ψ (or x/y/z)
   drives the free DOF — exact, and the manual's own worked example (R16 p.977) is
-  φ about local x of `CIDA`. For multi-DOF joints (1/4/5) φ→`Rx`, θ→`Ry`, ψ→`Rz`
-  is an **approximation** — LS-DYNA's are z-y-z Euler angles, not Radioss local
-  rotations — and is warned about. A channel carrying data for a DOF the `Type`
-  does not have is dropped loudly. Where dyna2rad's unmatched-axis branch is
-  literally `/* // post warning /error */` (`joints.cxx:442`, 722, 1146, 1428),
-  k2rad falls back to channel 0 and says so.
+  φ about local x of `CIDA`. The match keeps its **sign**: an anti-parallel
+  `CIDA` makes a positive LS-DYNA rotation a negative Radioss one, so the
+  asymmetric stop pair is mirrored (swapped and negated) rather than copied
+  through — otherwise a −5°/+60° limit lets the joint travel 60° in the
+  direction LS-DYNA caps at 5°. Referenced curves cannot be mirrored in place
+  and that is said explicitly. For multi-DOF joints (1/4/5) φ→`Rx`, θ→`Ry`,
+  ψ→`Rz` is an **approximation** — LS-DYNA's are z-y-z Euler angles, not Radioss
+  local rotations — and is warned about. A channel carrying data for a DOF the
+  `Type` does not have is dropped loudly. Where dyna2rad's unmatched-axis branch
+  is literally `/* // post warning /error */` (`joints.cxx:442`, 722, 1146,
+  1428), k2rad falls back to channel 0 and says so.
+
+  One `_GENERALIZED` **and** one `_TRANSLATIONAL` card can share a joint: a
+  cylindrical (`Tx`, `Rx`) or planar (`Ty`, `Tz`, `Rx`) `Type` carries both
+  families and LS-DYNA writes them on separate cards, so they fill disjoint
+  blocks and both are kept (a second card of the *same* option is what
+  conflicts). `RPS` on the stiffness card overrides the joint card's only for
+  `_TRANSLATIONAL` — "It only applies for keyword options TRANSLATIONAL and
+  CYLINDRICAL", R16 Vol I p.10-91. `FS`/`FD` (card 2c.3 fields 7-8) are static /
+  dynamic friction *coefficients*; `/PROP/TYPE45` knows only absolute
+  force/moment limits, so they are dropped with a warning instead of silently.
 
   Checks dyna2rad does not make, each turning an opaque starter abort into a
   converter warning that names the joint: joint nodes belonging to **no `/RBODY`**
   (an LS-DYNA joint acts between two *rigid* bodies; k2rad refuses to attach them
   silently, since that changes the model's inertia and constrained set), a
-  **degenerate axis** (ERROR 935), a **node list shorter than the `Type` requires**
-  with no frame to stand in for it (ERROR 936), and a **stop with zero elastic
-  stiffness**, which `/PROP/TYPE45` simply violates.
+  **degenerate axis** (ERROR 934/935/1009 — the universal branch reproduces
+  `rini45.F:610`'s own `|z·y| / (|y×z| + |y|)` test verbatim, which is *not* a
+  cosine and whose rejection angle depends on the model's length unit), a
+  **node list shorter than the `Type` requires** with no frame to stand in for it
+  (ERROR 936), a **stop with zero elastic stiffness**, which `/PROP/TYPE45`
+  simply violates, a **`JID` carried by more than one joint** (silently
+  last-wins otherwise), and an **all-rigid deck**: rigid-body elements are
+  excluded from the time step, so a mechanism with no deformable element leaves
+  the engine nothing to compute one from and `Kn = 0` asks it for exactly that —
+  `joint_block_stiffness.F:92-99` aborts at cycle 0 with `ERROR NO TARGET TIME
+  STEP DT= 1000000.00 / STIFFNESS CAN NOT BE COMPUTED` while the starter stays
+  clean. All five joint validation decks needed one constrained deformable hex
+  purely to pace the step.
 
   Plumbing: `/SKEW` ids come from a `build_starter` prepass (`_resolve_joints`)
   so they are reserved before `/FRAME` allocation — the two share ONE starter id
@@ -121,7 +168,15 @@ Prior history (before this changelog was introduced) is summarized in the
   which would otherwise `/BCS 111 111` a joint node attached to no element and
   weld the joint solid. `/PART` ids come from a new `state.next_part_id()`
   (guarded against `state.parts`, mirroring `next_curve_id`), because `next_id()`
-  starts at 90001 and a deck numbering a real `*PART` there would collide.
+  starts at 90001 and a deck numbering a real `*PART` there would collide. The
+  `/PROP` namespace had the same hole and now has the same guard,
+  `state.next_prop_id()` — `/PROP/SHELL`, `/PROP/SOLID` and `/PROP/BEAM` are
+  emitted under the `*SECTION_*` SECID verbatim, so a SECID at or above 90001
+  collided with the joint's synthesized `/PROP/TYPE45`; the other synthesized
+  properties (`TYPE4`/`TYPE8`/`TYPE13` in `writer/loads.py`) draw from it too.
+  Both allocators are unit-tested directly, because a converted deck usually
+  walks the auto counter past the seeded id before the allocation happens and a
+  broken guard would still ship green.
   `mat_ID = 0` on the synthesized `/PART` is correct and needs no `/MAT`:
   `hm_read_part.F:215-236` excludes `IGTYP 45` from the ERROR 179 list and
   substitutes an internal spring material. `*INCLUDE_TRANSFORM` offset maps cover
@@ -134,12 +189,22 @@ Prior history (before this changelog was introduced) is summarized in the
   — and now emits `/TH/SPRING` over the joint springs, with the group id drawn
   from `state.next_id()` per PR #83.
 
-  58 new tests in `tests/test_joints.py` (1051 → 1109): the `Type` integer and
+  The `_ID` heading is read from columns 1-10 only when it looks fixed-format:
+  a comma now disqualifies it as well as a space, because the free-format
+  heading `77,hinge` fits inside those ten columns, has no space, and
+  `to_int("77,hinge")` is 0 — which silently unbound every stiffness card
+  pointing at that `JID`.
+
+  96 new tests in `tests/test_joints.py` (1051 → 1147): the `Type` integer and
   `/SPRING` node list for every kind, numeric `/SKEW` axis asserts (including
   orthonormality and right-handedness on an oblique 3-4-12 axis), exact column
   positions on every `/PROP/TYPE45` card, RPS/DAMP mapping, curve wiring,
-  `_ID`/`_TITLE` dispatch, id uniqueness across a 7-joint deck, the degenerate
-  and short-node-list warnings, and the golden fixtures re-asserted byte-for-byte.
+  `_ID`/`_TITLE` dispatch (fixed and comma-delimited), id uniqueness across a
+  7-joint deck, a swept `SECID` 90001..90030 `/PROP` collision check, the
+  `_GENERALIZED` + `_TRANSLATIONAL` merge in both card orders, the anti-parallel
+  `CIDA` stop mirror, the 2-node frame policy, the scale-dependent universal
+  colinearity test, the degenerate / short-node-list / duplicate-`JID` /
+  time-step-pacing warnings, and the golden fixtures re-asserted byte-for-byte.
 - **`*SECTION_SHELL` `ELFORM` → `/PROP/SHELL` `Ishell` is now a user CHOICE
   (`--shell-formulation {qbat,qeph}` / GUI radio pair /
   `convert(shell_formulation=...)`), and it is no longer silent.** Closes #77.

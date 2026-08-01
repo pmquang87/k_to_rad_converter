@@ -245,6 +245,20 @@ class ConstrainedJoint:
     has_local: bool = False     # _LOCAL: RAID/LST output frame (dropped, warned)
     has_failure: bool = False   # _FAILURE: CID/TFAIL/COUPL + N**/M** (dropped)
 
+    def uses_n4_as_axis(self) -> bool:
+        """True when N3 is blank and N4 stands in for it as the axis node.
+
+        ``*CONSTRAINED_JOINT_CYLINDRICAL`` with N3 = 0 is a DOCUMENTED
+        configuration — R16 Vol I p.10-62: "For cylindrical joints, by setting
+        node 3 to zero, it is possible to use a cylindrical joint to join a node
+        that is not on a rigid body (node 1) to a rigid body (nodes 2 and 4)."
+        Since the nodal pair (3, 4) coincides in the initial configuration for
+        every kind except UNIVERSAL, N4 gives exactly the axis N3 would have,
+        and using it turns a guaranteed starter ERROR 936 (2-node spring on a
+        Type that needs 3) into the intended joint."""
+        return (JOINT_SPRING_SLOTS.get(self.kind, (1, 2)) == (1, 2, 3)
+                and self.n3 <= 0 < self.n4)
+
     def spring_nodes(self) -> List[int]:
         """The /SPRING node list for this joint kind, gaps compacted away.
 
@@ -252,6 +266,8 @@ class ConstrainedJoint:
         so a hole would silently shift NN(3)/NN(4) — the list must be written
         contiguously (card-format spec §2, trap 2)."""
         slots = JOINT_SPRING_SLOTS.get(self.kind, (1, 2))
+        if self.uses_n4_as_axis():
+            slots = (1, 2, 4)
         vals = (0, self.n1, self.n2, self.n3, self.n4, self.n5, self.n6)
         return [vals[s] for s in slots if vals[s] > 0]
 
@@ -287,6 +303,12 @@ class JointStiffness:
     fm: Tuple[float, float, float] = (0.0, 0.0, 0.0)    # friction limit (<0 = curve)
     nstop: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # negative stop
     pstop: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # positive stop
+    # TRANSLATIONAL card 2c.3 fields 7-8: static / dynamic friction COEFFICIENTS
+    # (dimensionless). /PROP/TYPE45 expresses friction only as an absolute
+    # force/moment limit, so these cannot be carried across — warned, not
+    # silently dropped.
+    fs: float = 0.0
+    fd: float = 0.0
 
 
 @dataclass
@@ -2419,6 +2441,25 @@ class ConversionState:
         while pid in self.parts:
             pid = self.next_id()
         return pid
+
+    def next_prop_id(self) -> int:
+        """A next_id() guaranteed free in the /PROP namespace, so a synthesized
+        property (the joint /PROP/TYPE45, the spring /PROP/TYPE4 / TYPE8 /
+        TYPE13) can never collide with a converted *SECTION_*: /PROP/SHELL,
+        /PROP/SOLID and /PROP/BEAM are all emitted under the SECID verbatim, so
+        a SECID at or above the auto-id base (90001) lands on the same id. Same
+        guard shape as next_curve_id / next_part_id, and a no-op vs next_id()
+        in the common case (no user section that high), so it does not shift
+        ids on any ordinary deck.
+
+        The ids of the synthesized ortho / hourglass properties come from
+        next_id() themselves and are therefore unique by construction; only the
+        SECID-keyed properties can clash."""
+        prop_id = self.next_id()
+        while (prop_id in self.sec_shells or prop_id in self.sec_solids
+               or prop_id in self.sec_beams):
+            prop_id = self.next_id()
+        return prop_id
 
     def all_skew_ids(self) -> set:
         """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/

@@ -354,16 +354,22 @@ exponents are warned)
 `_UNIVERSAL` / `_TRANSLATIONAL` / `_LOCKING` (+ `_ID`, `_TITLE`, `_LOCAL`,
 `_FAILURE`) → one `/PROP/TYPE45` (KJOINT2) + `/PART` + 2..4-node `/SPRING` **per
 joint**, plus a `/SKEW/FIX` carrying the joint frame computed from the joint's
-own node geometry. `Type` = 1/2/3/4/6/5/8 in that order (`LOCKING` is 8, Fixed —
-not 7, Oldham). `N1`/`N2` go to spring slots 1-2 and `N3` to slot 3, which is
+own node geometry (only for a 3+-node spring — with two nodes the starter never
+reads `Skew_ID1` unless they are coincident, and writing one there would demote
+a spherical/locking joint's global frame to the `N1`→`N2` mesh offset).
+`Type` = 1/2/3/4/5/6/8 in that order (`LOCKING` is 8, Fixed — not 7, Oldham).
+`N1`/`N2` go to spring slots 1-2 and `N3` to slot 3, which is
 what builds the local axis; `UNIVERSAL` forwards `N4` and `LOCKING` forwards
-`N5` into slot 4. `RPS` → `ScF` (0.01 when not positive), `Kn`=0 so the starter
+`N5` into slot 4. A cylindrical joint written with `N3`=0 (the documented way to
+join a free node to a rigid body) falls back to `N4` for the axis. `RPS` → `ScF`
+(1.0 — LS-DYNA's own default — when not positive), `Kn`=0 so the starter
 derives the blocking stiffness from the time step, `Cr` blank → its 0.05 default.
 Dropped with a warning: `DAMP` (a relative scale with no absolute-`Cr` equivalent),
 `_LOCAL` `RAID`/`LST` (an output frame only), `_FAILURE` (joints never fail),
 and `TRANSLATIONAL` `N5`/`N6` (roll about the sliding axis; kinematically inert).
-A joint node on no `/RBODY`, a degenerate axis (starter `ERROR 935`) and a node
-list shorter than the `Type` requires (`ERROR 936`) are each warned about by name.
+A joint node on no `/RBODY`, a degenerate axis (starter `ERROR 934`/`935`/`1009`),
+a node list shorter than the `Type` requires (`ERROR 936`) and an all-rigid deck
+with nothing to pace the engine time step are each warned about by name.
 `*DATABASE_JNTFORC` → `/TH/SPRING` over the joint springs.
 
 `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` / `_TRANSLATIONAL` → the matched
@@ -373,11 +379,18 @@ negative, `fct_fm*`/`fct_ff*`). `NSA*`/`PSA*` stop angles are converted
 degrees→radians and sign-forced (`SA-`≤0, `SA+`≥0 — otherwise starter
 `ERROR 943`/`944`); `NSD*`/`PSD*` stop displacements go to `SD*` unconverted.
 The card binds by `JID`, or by node membership in `PIDA`/`PIDB` (including their
-`*CONSTRAINED_EXTRA_NODES`). For a single-free-axis joint the `CIDA` axis
-aligned with the joint axis selects which of φ/θ/ψ drives `Rx`; for multi-DOF
+`*CONSTRAINED_EXTRA_NODES`). One `_GENERALIZED` **and** one `_TRANSLATIONAL`
+card can share a joint — on a cylindrical (`Tx`,`Rx`) or planar (`Ty`,`Tz`,`Rx`)
+joint they fill disjoint DOF blocks and both are kept. For a single-free-axis
+joint the `CIDA` axis aligned with the joint axis selects which of φ/θ/ψ drives
+`Rx`, and an anti-parallel one mirrors the stop pair (the curves are not
+mirrored — that is warned); for multi-DOF
 joints the φ→`Rx`, θ→`Ry`, ψ→`Rz` mapping is an approximation (LS-DYNA's are
-z-y-z Euler angles) and says so. A channel the `Type` has no free DOF for is
-dropped with a warning. `_FLEXION-TORSION` and `_CYLINDRICAL` have no field map
+z-y-z Euler angles) and says so. A channel the `Type` has no free DOF for, and
+the `FS`/`FD` friction coefficients (`/PROP/TYPE45` knows only absolute
+force/moment limits), are dropped with a warning. `RPS` on the stiffness card is
+honoured only for `_TRANSLATIONAL`, per the manual. `_FLEXION-TORSION` and
+`_CYLINDRICAL` have no field map
 and are reported as recognized-but-not-emitted (the joint itself still converts).
 
 ### Boundary conditions / motion

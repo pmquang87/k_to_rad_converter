@@ -2943,10 +2943,15 @@ def handle_constrained_joint(block: Block, state: ConversionState) -> None:
     jid, title = 0, _read_title(block, f"CONSTRAINED_JOINT_{kind}")
     if _has_id(block) and block.raw:
         head = block.raw[0][:10].strip()
-        if head and " " not in head:
+        if head and " " not in head and "," not in head:
             # Canonical "%10d%-70s": take the HEADING columns verbatim rather
             # than the shared free-split, which glues "        77hinge" into one
             # token and eats the first word of the title.
+            #
+            # A comma disqualifies the fixed reading even without a space: the
+            # free-format heading "77,hinge" fits inside the first 10 columns,
+            # and to_int("77,hinge") is 0 — which silently unbinds every
+            # *CONSTRAINED_JOINT_STIFFNESS JID pointing at this joint.
             jid = to_int(head)
             title = block.raw[0][10:].strip() or title
         else:
@@ -3043,6 +3048,8 @@ def handle_constrained_joint_stiffness(block: Block,
         fm=_f3(c3, 1, 3, 5),
         nstop=_f3(c4, 0, 2, 4),
         pstop=_f3(c4, 1, 3, 5),
+        fs=to_float(c4[6]) if len(c4) > 6 else 0.0,
+        fd=to_float(c4[7]) if len(c4) > 7 else 0.0,
     ))
 
 

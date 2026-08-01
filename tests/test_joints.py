@@ -12,6 +12,7 @@ tests/test_connectors.py and tests/test_roadmap_keywords.py).
 
 import math
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -143,9 +144,18 @@ def _deck(joints: str, extra: str = "", bodies: str = BODIES) -> str:
             + "*CONTROL_TERMINATION\n" + _row(1.0) + "\n*END\n")
 
 
-def _joint(kind: str, *nodes, rps="", damp="", opts="") -> str:
+def _joint(kind: str, *nodes, rps="", damp="", opts="", jid=0,
+           title="") -> str:
+    """One *CONSTRAINED_JOINT_<kind> card. A non-zero *jid* adds the _ID option
+    and its heading line, which is what a *CONSTRAINED_JOINT_STIFFNESS JID
+    points at."""
     vals = list(nodes) + [""] * (6 - len(nodes)) + [rps, damp]
-    return f"*CONSTRAINED_JOINT_{kind}{opts}\n" + _row(*vals) + "\n"
+    head = ""
+    if jid:
+        if "_ID" not in opts:
+            opts += "_ID"
+        head = f"{jid:>10}{title}\n"
+    return f"*CONSTRAINED_JOINT_{kind}{opts}\n" + head + _row(*vals) + "\n"
 
 
 # ── Per-kind /PROP/TYPE45 Type integer and /SPRING node selection ────────────
@@ -355,22 +365,52 @@ class TestPenaltyAndDamping(unittest.TestCase):
         self.assertEqual(float(c[30:50]), 1.0)
         self.assertFalse([w for w in res.warnings if "ScF" in w])
 
-    def test_positive_rps_is_carried_into_scf_and_warned(self):
+    def test_positive_rps_is_carried_into_scf_without_a_warning(self):
+        """With Kn = 0 the engine applies ScF as a plain multiplier on the
+        stiffness it computes (KX = ScF*KX, joint_block_stiffness.F:220), which
+        is exactly LS-DYNA's dimensionless RPS — so the mapping is EXACT and
+        must not be warned about."""
         res, starter = _convert(
             _deck(_joint("REVOLUTE", 1, 2, 3, 4, rps=2.5)))
         c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[0]
         self.assertEqual(float(c[30:50]), 2.5)
-        self.assertTrue([w for w in res.warnings
-                         if "RPS=2.5 was carried into" in w])
+        self.assertFalse([w for w in res.warnings if "RPS" in w])
 
-    def test_non_positive_rps_falls_back_to_hundredth(self):
+    def test_zero_rps_gives_the_lsdyna_default_scf_one(self):
+        """LS-DYNA's fixed-format reader cannot tell a blank RPS column from an
+        explicit 0.0, and its default is 1.0. Writing 0.01 (dyna2rad's fallback)
+        would make the joint 100x softer than the deck asks for."""
+        res, starter = _convert(
+            _deck(_joint("REVOLUTE", 1, 2, 3, 4, rps=0.0)))
+        c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[0]
+        self.assertEqual(float(c[30:50]), 1.0)
+        self.assertFalse([w for w in res.warnings if "RPS" in w])
+
+    def test_negative_rps_drops_the_curve_and_uses_scf_one(self):
         """RPS < 0 means -RPS is a load-curve id for the penalty scale, which
-        /PROP/TYPE45 cannot express. dyna2rad's fallback is ScF = 0.01."""
+        /PROP/TYPE45 cannot express: the curve is dropped loudly and ScF falls
+        back to LS-DYNA's own default of 1.0, not to 0.01."""
         res, starter = _convert(
             _deck(_joint("REVOLUTE", 1, 2, 3, 4, rps=-7)))
         c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[0]
-        self.assertEqual(float(c[30:50]), 0.01)
+        self.assertEqual(float(c[30:50]), 1.0)
         self.assertTrue([w for w in res.warnings if "load-curve id" in w])
+
+    def test_stiffness_card_rps_is_honoured_only_for_translational(self):
+        """R16 Vol I p.10-91: RPS on *CONSTRAINED_JOINT_STIFFNESS "only applies
+        for keyword options TRANSLATIONAL and CYLINDRICAL"."""
+        _, starter = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, rps=2.5, jid=77, title="hinge"),
+            extra=COORD_X + CURVES + _stiff_gen(jid=77, rps=7.0)))
+        c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[0]
+        self.assertEqual(float(c[30:50]), 2.5)     # the JOINT card's RPS wins
+
+        _, starter = _convert(_deck(
+            _joint("TRANSLATIONAL", 1, 2, 3, 4, rps=2.5, jid=78,
+                   title="slider"),
+            extra=COORD_X + CURVES + _stiff_trans(jid=78, rps=7.0)))
+        c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[0]
+        self.assertEqual(float(c[30:50]), 7.0)     # the STIFFNESS card's RPS
 
     def test_non_default_damp_is_dropped_loudly(self):
         res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4, damp=0.5)))
@@ -380,6 +420,20 @@ class TestPenaltyAndDamping(unittest.TestCase):
     def test_default_damp_is_silent(self):
         res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4, damp=1.0)))
         self.assertFalse([w for w in res.warnings if "DAMP" in w])
+
+    def test_zero_damp_is_the_lsdyna_default_and_stays_silent(self):
+        """R16 Vol I p.10-64: "EQ.0.0: Default is set to 1.0". A deck written
+        with explicit zeros must not collect a spurious drop warning."""
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4, damp=0.0)))
+        self.assertFalse([w for w in res.warnings if "DAMP" in w])
+
+    def test_tiny_damp_means_no_damping_and_says_cr_cannot_express_it(self):
+        """0 < DAMP <= 0.01 is LS-DYNA's "no damping"; Radioss replaces a zero
+        Cr with 0.05, so the converted joint keeps 5% critical damping."""
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4, damp=0.005)))
+        hits = [w for w in res.warnings if "NO joint damping" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("0.05", hits[0])
 
 
 # ── *CONSTRAINED_JOINT_STIFFNESS ─────────────────────────────────────────────
@@ -407,6 +461,19 @@ def _stiff_gen(jid=0, pida=0, pidb=0, cida=1, cidb=1,
             + _row(*lcid, *dlcid) + "\n"
             + _row(es[0], fm[0], es[1], fm[1], es[2], fm[2]) + "\n"
             + _row(nsa[0], psa[0], nsa[1], psa[1], nsa[2], psa[2]) + "\n")
+
+
+def _stiff_trans(jid=0, pida=1, pidb=2, cida=1, cidb=1, rps="",
+                 es=(0.0, 0.0, 0.0), ff=(0.0, 0.0, 0.0),
+                 lcid=(0, 0, 0), dlcid=(0, 0, 0),
+                 nsd=(0.0, 0.0, 0.0), psd=(0.0, 0.0, 0.0),
+                 fs="", fd="") -> str:
+    return ("*CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL\n"
+            + _row(2, pida, pidb, cida, cidb, jid, rps) + "\n"
+            + _row(*lcid, *dlcid) + "\n"
+            + _row(es[0], ff[0], es[1], ff[1], es[2], ff[2]) + "\n"
+            + _row(nsd[0], psd[0], nsd[1], psd[1], nsd[2], psd[2], fs, fd)
+            + "\n")
 
 
 class TestGeneralizedStiffness(unittest.TestCase):
@@ -566,20 +633,10 @@ class TestTranslationalStiffness(unittest.TestCase):
     Type 3/6 — rotational fields that Type 6 does not even export, so the whole
     card is silently lost (spec §7 defects 5 and 6)."""
 
-    @staticmethod
-    def _stiff_trans(es=(0.0, 0.0, 0.0), ff=(0.0, 0.0, 0.0),
-                     lcid=(0, 0, 0), dlcid=(0, 0, 0),
-                     nsd=(0.0, 0.0, 0.0), psd=(0.0, 0.0, 0.0)) -> str:
-        return ("*CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL\n"
-                + _row(2, 1, 2, 1, 1, 0) + "\n"
-                + _row(*lcid, *dlcid) + "\n"
-                + _row(es[0], ff[0], es[1], ff[1], es[2], ff[2]) + "\n"
-                + _row(nsd[0], psd[0], nsd[1], psd[1], nsd[2], psd[2]) + "\n")
-
     def test_translational_data_lands_in_the_translational_dof(self):
         deck = _deck(_joint("TRANSLATIONAL", 1, 2, 3, 4, 5, 6),
                      extra=COORD_X + CURVES
-                     + self._stiff_trans(lcid=(900, 0, 0), dlcid=(901, 0, 0),
+                     + _stiff_trans(lcid=(900, 0, 0), dlcid=(901, 0, 0),
                                          es=(800.0, 0, 0), ff=(12.0, 0, 0),
                                          nsd=(2.0, 0, 0), psd=(3.0, 0, 0)))
         _, starter = _convert(deck)
@@ -596,7 +653,7 @@ class TestTranslationalStiffness(unittest.TestCase):
         equivalent branch does for GENERALIZED) would shrink them 57-fold."""
         deck = _deck(_joint("TRANSLATIONAL", 1, 2, 3, 4, 5, 6),
                      extra=COORD_X + CURVES
-                     + self._stiff_trans(es=(800.0, 0, 0), nsd=(2.0, 0, 0),
+                     + _stiff_trans(es=(800.0, 0, 0), nsd=(2.0, 0, 0),
                                          psd=(3.0, 0, 0)))
         _, starter = _convert(deck)
         a = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[1]
@@ -609,7 +666,7 @@ class TestTranslationalStiffness(unittest.TestCase):
         with global Z the Z channel is the one that matters."""
         state = _dispatch(_deck(
             _joint("CYLINDRICAL", 1, 2, 3, 4),
-            extra=self._stiff_trans(nsd=(1.0, 2.0, 3.0),
+            extra=_stiff_trans(nsd=(1.0, 2.0, 3.0),
                                     psd=(4.0, 5.0, 6.0))))
         st = state.joint_stiffnesses[0]
         self.assertEqual(st.nstop, (1.0, 2.0, 3.0))
@@ -618,7 +675,7 @@ class TestTranslationalStiffness(unittest.TestCase):
     def test_cylindrical_gets_both_tx_and_rx_blocks(self):
         deck = _deck(_joint("CYLINDRICAL", 1, 2, 3, 4),
                      extra=COORD_X + CURVES
-                     + self._stiff_trans(lcid=(900, 0, 0), es=(800.0, 0, 0)))
+                     + _stiff_trans(lcid=(900, 0, 0), es=(800.0, 0, 0)))
         _, starter = _convert(deck)
         c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])
         self.assertEqual(int(c[0][0:10]), 3)
@@ -863,6 +920,416 @@ class TestJointForceOutput(unittest.TestCase):
     def test_no_th_spring_without_the_request(self):
         _, starter = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4)))
         self.assertNotIn("/TH/SPRING/", starter)
+
+
+DEFORMABLE = (
+    "*NODE\n"
+    + "".join(f"{nid:>8}{x:>16}{y:>16}{z:>16}\n" for nid, x, y, z in (
+        (31, 0.0, -5.0, 0.0), (32, 1.0, -5.0, 0.0),
+        (33, 1.0, -4.0, 0.0), (34, 0.0, -4.0, 0.0)))
+    + "*PART\nweb\n" + _row(3, 3, 3) + "\n"
+    + "*SECTION_SHELL\n" + _row(3, 2) + "\n" + _row(1.0) + "\n"
+    + "*MAT_ELASTIC\n" + _row(3, "7.85E-9", 210000.0, 0.3) + "\n"
+    + "*ELEMENT_SHELL\n"
+    + "       3       3      31      32      33      34\n"
+)
+
+
+def _bodies_with_secid(secid: int) -> str:
+    """BODIES, but with the shared *SECTION_SHELL renumbered to *secid*.
+    /PROP/SHELL is emitted under the SECID verbatim, so a SECID in the auto-id
+    range is what collides with a synthesized property id."""
+    return (
+        "*PART\nbody A\n" + _row(1, secid, 1) + "\n"
+        "*PART\nbody B\n" + _row(2, secid, 1) + "\n"
+        "*SECTION_SHELL\n" + _row(secid, 2) + "\n" + _row(1.0) + "\n"
+        "*MAT_RIGID\n" + _row(1, "7.85E-9", 210000.0, 0.3) + "\n"
+        "*ELEMENT_SHELL\n"
+        "       1       1      11      12      13      14\n"
+        "       2       2      21      22      23      24\n"
+        "*CONSTRAINED_EXTRA_NODES_NODE\n"
+        + "".join(_row(p, n) + "\n" for p, n in
+                 ((1, 1), (1, 3), (1, 5), (2, 2), (2, 4), (2, 6), (2, 7)))
+    )
+
+
+_PROP_RE = re.compile(r"^/PROP/[A-Z0-9_]+/(\d+)\s*$")
+
+
+def _all_prop_ids(starter: str):
+    return [int(m.group(1)) for m in
+            (_PROP_RE.match(ln) for ln in starter.splitlines()) if m]
+
+
+class TestIdAllocators(unittest.TestCase):
+    """The guarded allocators, tested DIRECTLY. Exercising them only through a
+    converted deck is not enough: the auto counter has usually walked past the
+    seeded id by the time the /PART or /PROP is drawn, so the collision loop
+    never runs and a broken guard still ships a green suite."""
+
+    def test_next_part_id_steps_over_a_real_part(self):
+        state = ConversionState()
+        base = state.next_id()
+        state._auto_id = base
+        state.parts = {base: object(), base + 1: object()}
+        self.assertEqual(state.next_part_id(), base + 2)
+
+    def test_next_prop_id_steps_over_a_real_section(self):
+        for attr in ("sec_shells", "sec_solids", "sec_beams"):
+            with self.subTest(section=attr):
+                state = ConversionState()
+                base = state.next_id()
+                state._auto_id = base
+                setattr(state, attr, {base: object(), base + 1: object()})
+                self.assertEqual(state.next_prop_id(), base + 2)
+
+    def test_next_prop_id_is_a_plain_next_id_without_a_clash(self):
+        state = ConversionState()
+        base = state.next_id()
+        state._auto_id = base
+        self.assertEqual(state.next_prop_id(), base)
+
+
+class TestSynthesizedPropertyIdCollision(unittest.TestCase):
+    """/PROP/SHELL, /PROP/SOLID and /PROP/BEAM carry the *SECTION_* SECID
+    verbatim, so a SECID at or above the auto-id base (90001) lands on the same
+    id as the joint's synthesized /PROP/TYPE45."""
+
+    def test_no_duplicate_prop_id_for_any_secid_in_the_auto_range(self):
+        for secid in range(90001, 90013):
+            with self.subTest(secid=secid):
+                _, starter = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4),
+                                            bodies=_bodies_with_secid(secid)))
+                ids = _all_prop_ids(starter)
+                self.assertEqual(len(ids), len(set(ids)))
+                self.assertIn(secid, ids)      # the real property survives
+
+    def test_six_joints_and_a_swept_secid_stay_unique(self):
+        joints = "".join(_joint("REVOLUTE", 1, 2, 3, 4) for _ in range(6))
+        for secid in range(90001, 90031):
+            with self.subTest(secid=secid):
+                _, starter = _convert(_deck(joints,
+                                            bodies=_bodies_with_secid(secid)))
+                ids = _all_prop_ids(starter)
+                self.assertEqual(len(ids), len(set(ids)))
+
+
+class TestStiffnessCardMerge(unittest.TestCase):
+    """A cylindrical (Tx, Rx) or planar (Ty, Tz, Rx) joint is canonically
+    written with a _GENERALIZED card for the rotation AND a _TRANSLATIONAL card
+    for the translation. They fill disjoint DOF blocks, so both must survive."""
+
+    DECK = _deck(
+        _joint("CYLINDRICAL", 1, 2, 3, 4, jid=88, title="sleeve"),
+        extra=COORD_X + CURVES
+        + _stiff_gen(jid=88, lcid=(0, 0, 0), dlcid=(0, 0, 0),
+                     es=(1000.0, 0, 0), fm=(50.0, 0, 0),
+                     nsa=(5.0, 0, 0), psa=(30.0, 0, 0))
+        + _stiff_trans(jid=88, es=(7000.0, 0, 0), ff=(250.0, 0, 0),
+                       nsd=(2.0, 0, 0), psd=(3.0, 0, 0)))
+
+    def test_both_dof_families_are_filled(self):
+        res, starter = _convert(self.DECK)
+        c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])
+        self.assertEqual(int(c[0][0:10]), 3)            # Type 3
+        self.assertEqual(len(c), 1 + 2 * 3)             # Tx block then Rx block
+        # Tx (from _TRANSLATIONAL): stops unconverted, Kftx/FFx present.
+        self.assertEqual(float(c[1][30:50]), -2.0)      # SDx-
+        self.assertEqual(float(c[1][50:70]), 3.0)       # SDx+
+        self.assertEqual(float(c[3][0:20]), 7000.0)     # Kftx <- ESX
+        self.assertEqual(float(c[3][20:40]), 250.0)     # FFx  <- FFX
+        # Rx (from _GENERALIZED): stops in radians, Kfrx/FMx present.
+        self.assertAlmostEqual(float(c[4][30:50]), -5.0 * math.pi / 180.0, places=9)
+        self.assertAlmostEqual(float(c[4][50:70]), 30.0 * math.pi / 180.0, places=9)
+        self.assertEqual(float(c[6][0:20]), 1000.0)     # Kfrx <- ESPH
+        self.assertEqual(float(c[6][20:40]), 50.0)      # FMx  <- FMPH
+        self.assertFalse([w for w in res.warnings
+                          if "only the first" in w])
+
+    def test_card_order_does_not_change_the_result(self):
+        flipped = _deck(
+            _joint("CYLINDRICAL", 1, 2, 3, 4, jid=88, title="sleeve"),
+            extra=COORD_X + CURVES
+            + _stiff_trans(jid=88, es=(7000.0, 0, 0), ff=(250.0, 0, 0),
+                           nsd=(2.0, 0, 0), psd=(3.0, 0, 0))
+            + _stiff_gen(jid=88, lcid=(0, 0, 0), dlcid=(0, 0, 0),
+                         es=(1000.0, 0, 0), fm=(50.0, 0, 0),
+                         nsa=(5.0, 0, 0), psa=(30.0, 0, 0)))
+        _, a = _convert(self.DECK)
+        _, b = _convert(flipped)
+        self.assertEqual(_cards(_blocks(a, "/PROP/TYPE45/")[0]),
+                         _cards(_blocks(b, "/PROP/TYPE45/")[0]))
+
+    def test_two_cards_of_the_same_option_still_conflict(self):
+        deck = _deck(
+            _joint("CYLINDRICAL", 1, 2, 3, 4, jid=88),
+            extra=COORD_X + CURVES
+            + _stiff_gen(jid=88, es=(1000.0, 0, 0))
+            + _stiff_gen(jid=88, es=(2000.0, 0, 0)))
+        res, starter = _convert(deck)
+        hits = [w for w in res.warnings if "SAME option" in w]
+        self.assertEqual(len(hits), 1)
+        c = _cards(_blocks(starter, "/PROP/TYPE45/")[0])
+        self.assertEqual(float(c[6][0:20]), 1000.0)     # the FIRST card wins
+
+
+class TestAntiParallelCida(unittest.TestCase):
+    """A CIDA axis pointing OPPOSITE to the joint axis makes a positive LS-DYNA
+    rotation a NEGATIVE Radioss one, so the asymmetric stop pair must be
+    mirrored — otherwise the joint travels 30 deg where LS-DYNA limits it to 5."""
+
+    COORD_NEG_X = ("*DEFINE_COORDINATE_SYSTEM\n"
+                   + _row(7, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0) + "\n"
+                   + _row(0.0, 1.0, 0.0) + "\n")
+
+    def _stops(self, coord, cid, **kw):
+        _, starter = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, jid=77),
+            extra=coord + CURVES + _stiff_gen(jid=77, cida=cid, cidb=cid,
+                                              nsa=(5.0, 0, 0),
+                                              psa=(30.0, 0, 0), **kw)))
+        a = _cards(_blocks(starter, "/PROP/TYPE45/")[0])[1]
+        return float(a[30:50]), float(a[50:70])
+
+    def test_parallel_cida_keeps_the_stop_pair(self):
+        lo, hi = self._stops(COORD_X, 1, lcid=(0, 0, 0), dlcid=(0, 0, 0))
+        self.assertAlmostEqual(lo, -5.0 * math.pi / 180.0, places=9)
+        self.assertAlmostEqual(hi, 30.0 * math.pi / 180.0, places=9)
+
+    def test_anti_parallel_cida_mirrors_the_stop_pair(self):
+        lo, hi = self._stops(self.COORD_NEG_X, 7,
+                             lcid=(0, 0, 0), dlcid=(0, 0, 0))
+        self.assertAlmostEqual(lo, -30.0 * math.pi / 180.0, places=9)
+        self.assertAlmostEqual(hi, 5.0 * math.pi / 180.0, places=9)
+
+    def test_anti_parallel_cida_with_a_curve_warns_it_was_not_mirrored(self):
+        res, _ = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, jid=77),
+            extra=self.COORD_NEG_X + CURVES
+            + _stiff_gen(jid=77, cida=7, cidb=7, lcid=(900, 0, 0),
+                         nsa=(5.0, 0, 0), psa=(30.0, 0, 0))))
+        hits = [w for w in res.warnings if "points OPPOSITE" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("curve", hits[0])
+
+    def test_no_mirror_warning_when_no_curve_is_referenced(self):
+        res, _ = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, jid=77),
+            extra=self.COORD_NEG_X + CURVES
+            + _stiff_gen(jid=77, cida=7, cidb=7, lcid=(0, 0, 0),
+                         dlcid=(0, 0, 0), fm=(0.0, 0, 0),
+                         nsa=(5.0, 0, 0), psa=(30.0, 0, 0))))
+        self.assertFalse([w for w in res.warnings if "points OPPOSITE" in w])
+
+
+class TestTwoNodeSpringFrame(unittest.TestCase):
+    """GET_SKEW45 only READS Skew_ID1 for a 2-node spring whose nodes are
+    coincident (rini45.F:643). Above that tolerance the node branches win — and
+    for a Type 1 / Type 8 joint a non-zero Skew_ID1 pushes the starter OFF its
+    clean global-frame branch (line 439, gated on IDSK1 == 0) and onto the
+    N1->N2 mesh offset. So a 2-node frame is never derived from the nodes."""
+
+    OFFSET_NODE = ("*NODE\n" + f"{8:>8}{0.0:>16}{0.0:>16}{0.001:>16}\n"
+                   + "*CONSTRAINED_EXTRA_NODES_NODE\n" + _row(2, 8) + "\n")
+
+    def _skew1(self, starter):
+        return int(_cards(_blocks(starter, "/PROP/TYPE45/")[0])[0][80:90])
+
+    def test_coincident_spherical_with_cida_uses_the_cida_skew(self):
+        res, starter = _convert(_deck(
+            _joint("SPHERICAL", 1, 2, jid=55),
+            extra=COORD_X + CURVES + _stiff_gen(jid=55)))
+        self.assertEqual(self._skew1(starter), 1)       # COORD_X's cid
+        self.assertTrue([w for w in res.warnings
+                         if "no joint frame is derivable" in w])
+
+    def test_offset_spherical_never_gets_a_noise_skew(self):
+        res, starter = _convert(_deck(
+            _joint("SPHERICAL", 1, 8, jid=55),
+            extra=self.OFFSET_NODE + COORD_X + CURVES + _stiff_gen(jid=55)))
+        self.assertEqual(self._skew1(starter), 0)
+        self.assertNotIn("SKEW_JOINT_", starter)
+        hits = [w for w in res.warnings if "IGNORES Skew_ID1" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("0.001", hits[0])
+
+    def test_offset_spherical_without_a_stiffness_card_is_silent(self):
+        res, starter = _convert(_deck(_joint("SPHERICAL", 1, 8),
+                                      extra=self.OFFSET_NODE))
+        self.assertEqual(self._skew1(starter), 0)
+        self.assertFalse([w for w in res.warnings if "Skew_ID1" in w])
+
+    def test_three_node_joint_still_writes_its_derived_skew(self):
+        _, starter = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4)))
+        self.assertIn("SKEW_JOINT_", starter)
+        self.assertNotEqual(self._skew1(starter), 0)
+
+
+class TestStarterErrorPredicates(unittest.TestCase):
+    """The ERROR 936 / degenerate-axis diagnostics must fire on exactly the
+    starter's own conditions — NNOD2 (rini45.F:421-425), not the raw node
+    count."""
+
+    OFFSET_NODE = ("*NODE\n" + f"{9:>8}{0.5:>16}{0.0:>16}{0.0:>16}\n"
+                   + "*CONSTRAINED_EXTRA_NODES_NODE\n" + _row(2, 9) + "\n")
+
+    def test_coincident_two_node_revolute_predicts_error_936(self):
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2)))
+        self.assertTrue([w for w in res.warnings if "ERROR 936" in w])
+
+    def test_offset_two_node_revolute_predicts_the_noise_axis_not_936(self):
+        """NNOD2 is bumped 2 -> 3 when N1 and N2 are apart, so the starter does
+        NOT raise ERROR 936 — it silently uses the N1->N2 offset as the axis."""
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 9),
+                                extra=self.OFFSET_NODE))
+        self.assertFalse([w for w in res.warnings if "ERROR 936" in w])
+        self.assertTrue([w for w in res.warnings
+                         if "substitutes the N1->N2 direction" in w])
+
+    def test_locking_with_four_colinear_nodes_is_warned(self):
+        """Type 8 carries a 4-node spring (N1, N2, N3, N5). The starter's
+        NNOD>=4 branch runs its own ERROR 934/1009 checks regardless of
+        Skew_ID1, so suppressing the diagnostic for Type 8 hid a hard abort."""
+        res, _ = _convert(_deck(_joint("LOCKING", 1, 2, 3, 4, 4, 6)))
+        hits = [w for w in res.warnings if "axis is degenerate" in w]
+        self.assertEqual(len(hits), 1)
+
+    def test_universal_colinearity_uses_the_starters_own_scaled_test(self):
+        """rini45.F:610 divides by (|y x z| + |y|), a SUM — so its rejection
+        angle depends on how long the offsets are. The same 8 deg between the
+        cross-axle directions is rejected at 10 mm and accepted at 0.1 mm; a
+        plain |cos| >= 0.98 test would reject both."""
+        from k2rad.writer.joints import _joint_frame
+        c8, s8 = math.cos(math.radians(8.0)), math.sin(math.radians(8.0))
+        for scale, expect_frame in ((10.0, False), (0.1, True)):
+            with self.subTest(scale=scale):
+                nodes = "*NODE\n" + "".join(
+                    f"{nid:>8}{x:>16.8f}{y:>16.8f}{z:>16.8f}\n"
+                    for nid, x, y, z in (
+                        (1, 0.0, 0.0, 0.0), (2, 0.0, 0.0, 0.0),
+                        (3, 0.0, scale, 0.0),
+                        (4, 0.0, scale * c8, scale * s8)))
+                state = _dispatch("*KEYWORD\n" + nodes + "*END\n")
+                got = _joint_frame(state, 5, [1, 2, 3, 4])
+                self.assertEqual(got is not None, expect_frame)
+
+
+class TestCylindricalWithoutN3(unittest.TestCase):
+    """R16 Vol I p.10-62: "For cylindrical joints, by setting node 3 to zero, it
+    is possible to use a cylindrical joint to join a node that is not on a rigid
+    body (node 1) to a rigid body (nodes 2 and 4)." N3 == N4 by design, so N4
+    is the axis node N3 would have been."""
+
+    def test_n4_stands_in_for_a_blank_n3(self):
+        res, starter = _convert(_deck(_joint("CYLINDRICAL", 1, 2, "", 4)))
+        spring = _blocks(starter, "/SPRING/")[0][-1]
+        self.assertEqual([int(spring[i:i + 10]) for i in (10, 20, 30)],
+                         [1, 2, 4])
+        self.assertFalse([w for w in res.warnings if "ERROR 936" in w])
+        self.assertTrue([w for w in res.warnings
+                         if "N3 is blank, so N4=4" in w])
+
+    def test_both_missing_still_predicts_error_936(self):
+        res, _ = _convert(_deck(_joint("CYLINDRICAL", 1, 2)))
+        self.assertTrue([w for w in res.warnings if "ERROR 936" in w])
+
+    def test_a_given_n3_is_not_overridden(self):
+        _, starter = _convert(_deck(_joint("CYLINDRICAL", 1, 2, 3, 4)))
+        spring = _blocks(starter, "/SPRING/")[0][-1]
+        self.assertEqual(int(spring[30:40]), 3)
+
+
+class TestDroppedTranslationalFriction(unittest.TestCase):
+    def test_fs_and_fd_are_warned_not_silently_dropped(self):
+        res, _ = _convert(_deck(
+            _joint("TRANSLATIONAL", 1, 2, 3, 4, jid=78),
+            extra=COORD_X + CURVES
+            + _stiff_trans(jid=78, es=(800.0, 0, 0), nsd=(2.0, 0, 0),
+                           psd=(3.0, 0, 0), fs=0.3, fd=0.25)))
+        hits = [w for w in res.warnings if "FS=0.3/FD=0.25" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("COEFFICIENTS", hits[0])
+
+    def test_the_fields_are_parsed_off_card_2c3(self):
+        state = _dispatch(_deck(
+            _joint("TRANSLATIONAL", 1, 2, 3, 4),
+            extra=_stiff_trans(fs=0.3, fd=0.25)))
+        st = state.joint_stiffnesses[0]
+        self.assertEqual((st.fs, st.fd), (0.3, 0.25))
+
+    def test_no_warning_without_friction_coefficients(self):
+        res, _ = _convert(_deck(
+            _joint("TRANSLATIONAL", 1, 2, 3, 4, jid=78),
+            extra=COORD_X + CURVES + _stiff_trans(jid=78, es=(800.0, 0, 0))))
+        self.assertFalse([w for w in res.warnings if "FS=" in w])
+
+
+class TestFreeFormatIdHeading(unittest.TestCase):
+    """A comma-delimited _ID heading whose id+title fits inside the first ten
+    columns has no space, so a space-only test takes the fixed branch and
+    to_int("77,hinge") silently yields JID = 0."""
+
+    def test_comma_heading_still_yields_the_jid(self):
+        state = _dispatch(_deck(
+            "*CONSTRAINED_JOINT_REVOLUTE_ID\n77,hinge\n"
+            + _row(1, 2, 3, 4, "", "", "", "") + "\n"))
+        j = state.constrained_joints[0]
+        self.assertEqual((j.jid, j.title), (77, "hinge"))
+
+    def test_the_stiffness_card_binds_through_it(self):
+        res, starter = _convert(_deck(
+            "*CONSTRAINED_JOINT_REVOLUTE_ID\n77,hinge\n"
+            + _row(1, 2, 3, 4, "", "", "", "") + "\n",
+            extra=COORD_X + CURVES + _stiff_gen(jid=77)))
+        self.assertFalse([w for w in res.warnings if "matches no" in w])
+        self.assertEqual(len(_cards(_blocks(starter, "/PROP/TYPE45/")[0])), 4)
+
+    def test_the_canonical_fixed_heading_still_works(self):
+        state = _dispatch(_deck(
+            "*CONSTRAINED_JOINT_REVOLUTE_ID\n" + f"{77:>10}" + "hinge\n"
+            + _row(1, 2, 3, 4, "", "", "", "") + "\n"))
+        self.assertEqual(state.constrained_joints[0].jid, 77)
+
+
+class TestDuplicateJid(unittest.TestCase):
+    def test_a_jid_on_two_joints_is_warned(self):
+        res, _ = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, jid=77, title="a")
+            + _joint("SPHERICAL", 1, 2, jid=77, title="b"),
+            extra=COORD_X + CURVES + _stiff_gen(jid=77)))
+        hits = [w for w in res.warnings if "is carried by 2 joints" in w]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("CONSTRAINED_JOINT_REVOLUTE", hits[0])
+        self.assertIn("CONSTRAINED_JOINT_SPHERICAL", hits[0])
+
+    def test_unique_jids_are_silent(self):
+        res, _ = _convert(_deck(
+            _joint("REVOLUTE", 1, 2, 3, 4, jid=77)
+            + _joint("SPHERICAL", 1, 2, jid=78)))
+        self.assertFalse([w for w in res.warnings if "carried by" in w])
+
+
+class TestEngineTimeStepPacing(unittest.TestCase):
+    """An all-rigid mechanism gives the ENGINE nothing to compute a time step
+    from, and Kn = 0 asks it for exactly that: joint_block_stiffness.F:92-99
+    aborts at cycle 0. The STARTER is clean, so only a converter warning can
+    surface it before the run."""
+
+    def test_all_rigid_joint_deck_is_warned(self):
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4)))
+        hits = [w for w in res.warnings if "NO TARGET TIME STEP" in w]
+        self.assertEqual(len(hits), 1)
+
+    def test_one_deformable_part_silences_it(self):
+        res, _ = _convert(_deck(_joint("REVOLUTE", 1, 2, 3, 4),
+                                extra=DEFORMABLE))
+        self.assertFalse([w for w in res.warnings
+                          if "NO TARGET TIME STEP" in w])
+
+    def test_a_joint_free_deck_is_never_warned(self):
+        res, _ = _convert(_deck(""))
+        self.assertFalse([w for w in res.warnings
+                          if "NO TARGET TIME STEP" in w])
 
 
 class TestJointFreeDecksAreUnchanged(unittest.TestCase):

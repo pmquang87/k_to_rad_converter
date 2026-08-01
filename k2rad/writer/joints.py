@@ -24,11 +24,15 @@ __all__ = [
     "_transverse_axes",
     "_joint_frame",
     "_coord_axes",
+    "_node_gap",
+    "_skew_is_honoured",
+    "_starter_nnod2",
     "_resolve_joints",
     "_emit_type45_dof",
     "_emit_prop_type45",
     "_match_joint_stiffness",
     "_stiffness_dof_map",
+    "_axis_driven",
     "_make_joints",
 ]
 
@@ -44,12 +48,23 @@ DEG2RAD = math.pi / 180.0
 _AXIS_MATCH_COS = 0.99
 
 #: |cos(x, y)| at or above which GET_SKEW45 rejects the two frame-defining
-#: vectors as colinear (rini45.F:556, 611 -> ERROR 1009).
+#: vectors as colinear (rini45.F:556 -> ERROR 1009). The UNIVERSAL branch
+#: (rini45.F:610) compares the same 0.98 against a DIFFERENT, scale-dependent
+#: quantity -- see _joint_frame.
 _COLINEAR_COS = 0.98
+
+#: The starter's own degeneracy tolerance, EM10 in rini45.F: |N1-N2| at or
+#: below it counts as "coincident" (line 423-425), and an axis, a frame vector
+#: or the N2-N3 span at or below it is ERROR 934 / 935.
+_EM10 = 1e-10
 
 
 def _dot(a, b) -> float:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _mag(a) -> float:
+    return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
 
 
 class JointDof:
@@ -121,9 +136,9 @@ def _joint_frame(state: ConversionState, jtype: int, nodes: List[int]):
       >=4, Type != 5     x = N3 - N1, ybar = N4 - N1, z = x X ybar, y = z X x
       >=4, Type == 5     y = N3 - N1, z = N4 - N1, x = y X z   (universal)
 
-    Returns None when a node is missing, the axis is degenerate, or the two
-    frame-defining vectors are colinear (the starter's own ERROR 934/935/1009
-    conditions).
+    Returns None exactly when the starter's own ERROR 934 / 935 / 1009
+    conditions would fire (or a node is missing), so "no frame" is also the
+    prediction "this joint aborts the starter".
     """
     pts = []
     for nid in nodes:
@@ -136,24 +151,46 @@ def _joint_frame(state: ConversionState, jtype: int, nodes: List[int]):
     origin = pts[0]
 
     if len(pts) >= 4:
-        a = _vnorm(_vsub(pts[2], pts[0]))
-        b = _vnorm(_vsub(pts[3], pts[0]))
-        if a is None or b is None:
-            return None
-        if abs(_dot(a, b)) >= _COLINEAR_COS:
+        va = _vsub(pts[2], pts[0])
+        vb = _vsub(pts[3], pts[0])
+        pp2, pp3 = _mag(va), _mag(vb)
+        # ERROR 934 also fires on a zero span between the two frame nodes
+        # (PP4, rini45.F:577-586 / 633-642).
+        if min(pp2, pp3, _mag(_vsub(pts[3], pts[2]))) <= _EM10:
             return None
         if jtype == 5:
-            # Universal: the two cross-axle directions ARE local y and z.
-            y, z0 = a, b
-            x = _vnorm(_vcross(y, z0))
-            if x is None:
+            # Universal: the two cross-axle directions ARE local y and z, and
+            # the starter's orthogonality test (rini45.F:610) is
+            #     SCAL = |z.y| / (|y x z| + |y|)
+            # -- a SUM in the denominator, not a product, so it is not a cosine
+            # at all and its rejection angle depends on the model's length
+            # unit. Reproduce it verbatim rather than approximating it with a
+            # cosine: for mm-scale offsets it rejects far more than |cos|>=0.98
+            # does, for sub-unit offsets far less.
+            cross = _vcross(va, vb)
+            pp1 = _mag(cross)
+            if pp1 <= _EM10:
                 return None
+            if abs(_dot(vb, va)) / (pp1 + pp2) >= _COLINEAR_COS:
+                return None
+            y = _vnorm(va)
+            x = _vnorm(cross)
+            if y is None or x is None:
+                return None
+            # The starter re-orthogonalizes z = x ^ y above SCAL 1e-4
+            # (WARNING 940); doing it unconditionally gives the same frame.
             z = _vnorm(_vcross(x, y))
             if z is None:
                 return None
             return origin, x, y, z
-        x = a
-        z = _vnorm(_vcross(x, b))
+        # General 4-node branch: SCAL IS the true cosine here (divided by
+        # PP1*PP2, rini45.F:555).
+        if abs(_dot(va, vb)) / (pp2 * pp3) >= _COLINEAR_COS:
+            return None
+        x = _vnorm(va)
+        if x is None:
+            return None
+        z = _vnorm(_vcross(x, vb))
         if z is None:
             return None
         y = _vnorm(_vcross(z, x))
@@ -162,13 +199,57 @@ def _joint_frame(state: ConversionState, jtype: int, nodes: List[int]):
         return origin, x, y, z
 
     tip = pts[2] if len(pts) >= 3 else pts[1]
-    x = _vnorm(_vsub(tip, pts[0]))
+    raw = _vsub(tip, pts[0])
+    # ERROR 935 (NODE 1 AND NODE 3 ARE COINCIDENT) is PP1 <= EM10, not == 0.
+    if _mag(raw) <= _EM10:
+        return None
+    x = _vnorm(raw)
     if x is None:
         return None
     yz = _transverse_axes(x)
     if yz is None:
         return None
     return origin, x, yz[0], yz[1]
+
+
+def _node_gap(state: ConversionState, nodes: List[int]) -> Optional[float]:
+    """|N2 - N1| over the first two /SPRING nodes, or None if either is
+    missing."""
+    if len(nodes) < 2:
+        return None
+    a = state.nodes.get(nodes[0])
+    b = state.nodes.get(nodes[1])
+    if a is None or b is None:
+        return None
+    return _mag(_vsub((b.x, b.y, b.z), (a.x, a.y, a.z)))
+
+
+def _skew_is_honoured(state: ConversionState, nodes: List[int]) -> bool:
+    """Whether GET_SKEW45 will actually READ Skew_ID1 for this spring.
+
+    rini45.F:427-658 tests the node branches FIRST and only falls through to
+    ``ELSEIF (IDSK1 > 0)`` (line 643) for a spring with exactly TWO nodes that
+    are coincident to within EM10. Every other shape rebuilds the frame from
+    the nodes and ignores the skew entirely — and for a Type 1 / Type 8 joint
+    writing one is worse than useless: the clean global-frame branch (line 439)
+    is guarded by ``IDSK1 == 0``, so a non-zero Skew_ID1 pushes a NON-coincident
+    node pair onto line 455, which makes the joint's local x the (meaningless)
+    N1->N2 mesh offset. That is why k2rad never derives a skew from two nodes.
+    """
+    gap = _node_gap(state, nodes)
+    return len(nodes) == 2 and gap is not None and gap <= _EM10
+
+
+def _starter_nnod2(state: ConversionState, nodes: List[int]) -> int:
+    """The starter's NNOD2 (rini45.F:421-425): the /SPRING node count, bumped
+    2 -> 3 when the first two nodes are NOT coincident, because the axis they
+    span then stands in for the missing third node. ``NNOD2 < NNOD_REQ`` with
+    Skew_ID1 = 0 is ERROR 936 — and only then."""
+    if len(nodes) == 2:
+        gap = _node_gap(state, nodes)
+        if gap is not None and gap > _EM10:
+            return 3
+    return len(nodes)
 
 
 def _coord_axes(state: ConversionState, cid: int):
@@ -241,7 +322,10 @@ def _resolve_joints(state: ConversionState) -> None:
                                              for n in nodes):
             continue
         state.joint_spring_nodes.update(nodes)
-        if len(nodes) < 2:
+        # A frame derived from just N1->N2 is never written: the starter either
+        # ignores Skew_ID1 outright or (Type 1/8) is pushed off its global-frame
+        # branch onto that mesh-noise axis. See _skew_is_honoured.
+        if len(nodes) < 3:
             continue
         jtype = JOINT_TYPE45.get(jnt.kind, 0)
         if _joint_frame(state, jtype, nodes) is None:
@@ -329,8 +413,35 @@ def _emit_prop_type45(prop_id: int, title: str, jtype: int, scf: float,
 # *CONSTRAINED_JOINT_STIFFNESS -> DOF blocks
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _joint_index_by_jid(state: ConversionState) -> Dict[int, int]:
+    """{JID -> joint index}, warning about a JID carried by more than one
+    joint. LS-DYNA requires the id to be unique ("This must be a unique
+    number", R16 Vol I p.10-63), but nothing enforces it across merged
+    *INCLUDEs — and a silent last-wins would land a whole stiffness definition
+    on the wrong joint."""
+    by_jid: Dict[int, int] = {}
+    dups: Dict[int, List[int]] = {}
+    for i, j in enumerate(state.constrained_joints):
+        if not j.jid:
+            continue
+        if j.jid in by_jid:
+            dups.setdefault(j.jid, [by_jid[j.jid]]).append(i)
+        by_jid[j.jid] = i
+    for jid, idxs in sorted(dups.items()):
+        kinds = ", ".join(
+            f"#{i + 1} (*CONSTRAINED_JOINT_{state.constrained_joints[i].kind})"
+            for i in idxs)
+        state.warn(
+            f"*CONSTRAINED_JOINT_*_ID: JID={jid} is carried by {len(idxs)} "
+            f"joints — {kinds}. Joint ids must be unique; a "
+            "*CONSTRAINED_JOINT_STIFFNESS card naming this JID binds to the "
+            "LAST of them, and the others stay purely kinematic. Renumber the "
+            "duplicate joint(s).")
+    return by_jid
+
+
 def _match_joint_stiffness(state: ConversionState
-                           ) -> Dict[int, JointStiffness]:
+                           ) -> Dict[int, List[JointStiffness]]:
     """Attach every *CONSTRAINED_JOINT_STIFFNESS card to a joint index.
 
     JID given  -> the joint with that _ID id.
@@ -339,11 +450,17 @@ def _match_joint_stiffness(state: ConversionState
                   any lies in PIDB's. Part nodes are the element nodes plus the
                   *CONSTRAINED_EXTRA_NODES attached to that part — a joint node
                   on a rigid body usually arrives that way.
+
+    A joint may collect ONE card per option: _GENERALIZED fills the rotational
+    DOF blocks and _TRANSLATIONAL the translational ones, and a cylindrical
+    (Type 3 = Tx, Rx) or planar (Type 4 = Ty, Tz, Rx) joint is canonically
+    written with both. They target disjoint blocks, so both are kept; a SECOND
+    card of the SAME option is what conflicts.
     """
-    matched: Dict[int, JointStiffness] = {}
+    by_jid = _joint_index_by_jid(state)
     if not state.joint_stiffnesses:
-        return matched
-    by_jid = {j.jid: i for i, j in enumerate(state.constrained_joints) if j.jid}
+        return {}
+    matched: Dict[int, Dict[str, JointStiffness]] = {}
 
     pnodes: Dict[int, set] = {p: set(v) for p, v in
                               _part_node_sets(state).items()}
@@ -386,15 +503,23 @@ def _match_joint_stiffness(state: ConversionState
                     f"PIDB={st.pidb}, so the card is ambiguous — it was applied "
                     "to ALL of them. Add a JID to bind it to one joint.")
         for idx in targets:
-            if idx in matched:
+            slot = matched.setdefault(idx, {})
+            if st.option in slot:
                 state.warn(
                     f"*CONSTRAINED_JOINT_STIFFNESS_{st.option} JSID={st.jsid}: "
-                    "a second stiffness card targets the same joint; only the "
-                    f"first (JSID={matched[idx].jsid}) is converted. One "
-                    "/PROP/TYPE45 holds one set of DOF blocks.")
+                    "a second card of the SAME option targets this joint; only "
+                    f"the first (JSID={slot[st.option].jsid}) is converted — "
+                    f"the two would fill the same /PROP/TYPE45 DOF blocks. (A "
+                    "_GENERALIZED and a _TRANSLATIONAL card CAN coexist on one "
+                    "joint; they fill different blocks.)")
                 continue
-            matched[idx] = st
-    return matched
+            slot[st.option] = st
+    # GENERALIZED first so the rotational blocks are built before the
+    # translational ones — the order is immaterial (the DOF names are disjoint)
+    # but must be deterministic.
+    return {idx: [slot[o] for o in ("GENERALIZED", "TRANSLATIONAL")
+                  if o in slot]
+            for idx, slot in matched.items()}
 
 
 def _stiffness_dof_map(jtype: int, option: str, axis_index: int
@@ -427,16 +552,37 @@ def _stiffness_dof_map(jtype: int, option: str, axis_index: int
     return {n: i for n, i in (("Tx", 0), ("Ty", 1), ("Tz", 2)) if n in dofs}
 
 
+def _axis_driven(jtype: int, option: str) -> bool:
+    """True when _stiffness_dof_map routes ONE stiffness channel onto the
+    joint's single free axis. Only then is the SIGN of the LS-DYNA channel
+    relative to the Radioss local axis known, so only then can an anti-parallel
+    CIDA be corrected for."""
+    dofs = JOINT_TYPE45_DOFS.get(jtype, ())
+    if option == "GENERALIZED":
+        return jtype in (2, 3) and "Rx" in dofs
+    return jtype in (3, 6) and "Tx" in dofs
+
+
 def _build_dofs(state: ConversionState, ref: str, jtype: int,
-                st: JointStiffness, axis_index: int) -> Dict[str, JointDof]:
+                st: JointStiffness, axis_index: int,
+                axis_sign: float = 1.0) -> Dict[str, JointDof]:
     """Fill the Type's DOF blocks from one stiffness card, warning about every
-    channel that carries data the Type has no DOF for."""
+    channel that carries data the Type has no DOF for.
+
+    *axis_sign* is the sign of the matched CIDA axis along the Radioss local
+    axis. When it is negative the LS-DYNA channel runs the OTHER WAY, so a
+    positive LS-DYNA rotation/translation is a negative Radioss one and the
+    asymmetric stop pair has to be mirrored (swapped and negated) — otherwise
+    a -5/+60 deg limit is emitted as -5/+60 about the opposite axis, i.e. the
+    joint travels 60 deg in the direction LS-DYNA limits to 5.
+    """
     rot = st.option == "GENERALIZED"
     chan_names = ("phi", "theta", "psi") if rot else ("x", "y", "z")
     # The LS-DYNA elastic-stop-stiffness field name of each channel, so a
     # warning names the column the user has to edit.
     es_names = ("ESPH", "EST", "ESPS") if rot else ("ESX", "ESY", "ESZ")
     used = _stiffness_dof_map(jtype, st.option, axis_index)
+    flip = axis_sign < 0.0 and _axis_driven(jtype, st.option)
     out: Dict[str, JointDof] = {}
 
     for name, ch in sorted(used.items()):
@@ -457,10 +603,24 @@ def _build_dofs(state: ConversionState, ref: str, jtype: int,
         else:
             d.flim = fm
         # Stops: sign-forced regardless of how the .k wrote them. SA-/SD- > 0
-        # is starter ERROR 943 and SA+/SD+ < 0 is ERROR 944.
+        # is starter ERROR 943 and SA+/SD+ < 0 is ERROR 944. On an
+        # anti-parallel CIDA the pair is also MIRRORED — the LS-DYNA positive
+        # direction is the Radioss negative one.
         scale = DEG2RAD if rot else 1.0
-        d.smin = -abs(st.nstop[ch]) * scale
-        d.smax = abs(st.pstop[ch]) * scale
+        lo, hi = (st.pstop[ch], st.nstop[ch]) if flip \
+            else (st.nstop[ch], st.pstop[ch])
+        d.smin = -abs(lo) * scale
+        d.smax = abs(hi) * scale
+        if flip and (d.fct_k or d.fct_c or fm < 0.0):
+            state.warn(
+                f"*CONSTRAINED_JOINT_STIFFNESS_{st.option} JSID={st.jsid} "
+                f"({ref}, {chan_names[ch]} -> {name}): CIDA's axis points "
+                "OPPOSITE to the joint's local axis, so a positive LS-DYNA "
+                f"{'rotation' if rot else 'translation'} is a NEGATIVE Radioss "
+                "one. The stop pair was mirrored automatically, but the "
+                "referenced curve(s) were not — /FUNCT abscissae (and their "
+                "ordinates) still run the LS-DYNA way. Mirror the curve, or "
+                "reverse CIDA, if it is not odd-symmetric.")
         if (d.smin or d.smax) and d.kf == 0.0:
             state.warn(
                 f"*CONSTRAINED_JOINT_STIFFNESS_{st.option} JSID={st.jsid} "
@@ -498,6 +658,16 @@ def _build_dofs(state: ConversionState, ref: str, jtype: int,
             f"(free DOFs: {free or 'none, every DOF is blocked'}), so that "
             "channel is DROPPED. LS-DYNA is describing a DOF the joint "
             "kinematics do not have.")
+
+    if st.fs or st.fd:
+        state.warn(
+            f"*CONSTRAINED_JOINT_STIFFNESS_{st.option} JSID={st.jsid} ({ref}): "
+            f"FS={st.fs:g}/FD={st.fd:g} (static / dynamic friction "
+            "COEFFICIENTS, card 2c.3 fields 7-8) were DROPPED. /PROP/TYPE45 "
+            "expresses joint friction only as an ABSOLUTE force/moment limit "
+            "(FFx/FMx, or fct_ff/fct_fm), never as a coefficient of the joint "
+            "reaction, so the value cannot be carried across. Convert it by "
+            "hand into an FF*/FM* limit (or a curve) if the friction matters.")
     return out
 
 
@@ -505,7 +675,8 @@ def _build_dofs(state: ConversionState, ref: str, jtype: int,
 # Section builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_joints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+def _make_joints(state: ConversionState, rigid_nodes: Set[int],
+                 rigid_pids: Optional[Set[int]] = None) -> List[str]:
     """*CONSTRAINED_JOINT_<KIND> -> /PROP/TYPE45 + /PART + /SPRING (+ /SKEW/FIX).
 
     One property PER JOINT, not one per joint KIND. dyna2rad shares a single
@@ -546,53 +717,94 @@ def _make_joints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
                 "joint NOT converted.")
             continue
 
-        st = stiff.get(idx)
+        st_list = stiff.get(idx, [])
         frame = _joint_frame(state, jtype, nodes)
+        # A frame is only WRITTEN for a 3+-node spring. With two nodes the
+        # starter never reads Skew_ID1 unless they are coincident, and for a
+        # Type 1/8 joint writing one actively demotes the clean global frame to
+        # the N1->N2 mesh offset (rini45.F:439 is gated on IDSK1 == 0).
         skew_id = state.joint_skew_ids.get(idx, 0)
-        if frame is None:
+        if frame is None or len(nodes) < 3:
             skew_id = 0
+        emit_skew = skew_id != 0
+        joint_x = frame[1] if frame is not None else None
 
-        # Frame fallback and diagnostics. GET_SKEW45 needs NNOD_REQ nodes; below
-        # that, and with Skew_ID1 = 0, the starter aborts with ERROR 936.
         need = JOINT_NNOD_REQ.get(jtype, 2)
-        if skew_id == 0 and st is not None and st.cida:
-            # No node geometry to build a frame from (a spherical joint's N1/N2
-            # are coincident by design), but the stiffness card names the frame
-            # its angles are measured in — which is exactly what Rx/Ry/Rz should
-            # be about. Reuse the converted /SKEW/FIX/<cid> directly.
-            if _coord_axes(state, st.cida) is not None:
-                skew_id = st.cida
+        nnod2 = _starter_nnod2(state, nodes)
+        cida = next((s.cida for s in st_list if s.cida), 0)
+
+        if jnt.uses_n4_as_axis():
+            state.warn(
+                f"{tag}: N3 is blank, so N4={jnt.n4} was used as the axis node "
+                "of the 3-node /SPRING. For a CYLINDRICAL joint that is the "
+                "documented way to join a FREE node N1 to the rigid body "
+                "(N2, N4) (R16 Vol I p.10-62); the nodal pair (3, 4) coincides "
+                "by design, so N1->N4 is the axis N3 would have given. Without "
+                "it the joint would be a 2-node spring, which the starter "
+                "rejects as too short for this Type.")
+
+        if skew_id == 0 and cida and _coord_axes(state, cida) is not None:
+            if _skew_is_honoured(state, nodes):
+                # No node geometry to build a frame from (a spherical joint's
+                # N1/N2 are coincident by design) — and coincident is exactly
+                # the case where GET_SKEW45 falls through to Skew_ID1. The
+                # stiffness card names the frame its angles are measured in,
+                # which is what Rx/Ry/Rz should be about, so reuse the
+                # converted /SKEW/FIX/<cid> directly.
+                skew_id = cida
+                joint_x = _coord_axes(state, cida)[0]
                 state.warn(
                     f"{tag}: no joint frame is derivable from the node geometry, "
-                    f"so Skew_ID1 = the converted /SKEW of CIDA={st.cida} — the "
+                    f"so Skew_ID1 = the converted /SKEW of CIDA={cida} — the "
                     "coordinate system the LS-DYNA stiffness angles are measured "
                     "in. Verify that this is the intended joint frame.")
-        if skew_id == 0 and len(nodes) < need:
+            elif len(nodes) == 2:
+                gap = _node_gap(state, nodes) or 0.0
+                state.warn(
+                    f"{tag}: nodes {nodes[0]} and {nodes[1]} are {gap:g} apart "
+                    "instead of coincident, so GET_SKEW45 builds the joint frame "
+                    "from that N1->N2 offset and IGNORES Skew_ID1 entirely "
+                    "(rini45.F:455 wins over the Skew_ID1 branch). "
+                    f"CIDA={cida} was therefore NOT written, and the stop "
+                    "angles/curves act about the mesh-offset direction, not "
+                    "about CIDA's axes. Move the two joint nodes onto each "
+                    "other.")
+
+        if skew_id == 0 and nnod2 < need:
             state.warn(
                 f"{tag}: /PROP/TYPE45 Type {jtype} needs {need} spring nodes and "
                 f"the card supplies {len(nodes)} (N3/N4/N5 missing or zero), and "
                 "no local frame could be built to stand in for them. The "
                 "OpenRadioss starter will reject this joint with ERROR 936 "
                 "(SPRING ID / KJOINT TYPE). Fill in the missing node(s).")
-        elif skew_id == 0 and jtype not in (1, 8):
+        elif skew_id == 0 and len(nodes) < need:
+            state.warn(
+                f"{tag}: /PROP/TYPE45 Type {jtype} needs {need} spring nodes and "
+                f"the card supplies {len(nodes)}. The starter does not abort — "
+                "it substitutes the N1->N2 direction for the missing axis node "
+                "(rini45.F:455) — but N1 and N2 are meant to COINCIDE, so that "
+                "direction is whatever mesh offset happens to separate them. "
+                "Give the joint its N3 (or, for a cylindrical joint, its N4).")
+        elif skew_id == 0 and len(nodes) >= 3 and frame is None:
             state.warn(
                 f"{tag}: the joint axis is degenerate — spring nodes {nodes} are "
                 "coincident or colinear, so no local frame could be computed. "
-                "The starter will fall back to its own construction and may "
-                "abort with ERROR 935 (NODE 1 AND NODE 3 ARE COINCIDENT) or "
+                "The starter builds the frame from the same nodes and will "
+                "abort with ERROR 934 or ERROR 935 (coincident nodes) or "
                 "ERROR 1009 (colinear frame vectors).")
 
-        # Which Euler / translation channel of the stiffness card drives the
-        # single free axis of a revolute / cylindrical / translational joint.
-        axis_index = 0
-        if st is not None and jtype in (2, 3, 6):
-            axis_index = _axis_channel(state, tag, st, frame)
-
-        dofs = None
-        if st is not None:
-            dofs = _build_dofs(state, ref, jtype, st, axis_index)
-            if all(d.is_empty() for d in dofs.values()):
-                dofs = None
+        dofs: Optional[Dict[str, JointDof]] = None
+        for st in st_list:
+            # Which Euler / translation channel of the stiffness card drives the
+            # single free axis of a revolute / cylindrical / translational joint,
+            # and whether that CIDA axis runs WITH or AGAINST the joint's own.
+            axis_index, axis_sign = 0, 1.0
+            if jtype in (2, 3, 6):
+                axis_index, axis_sign = _axis_channel(state, tag, st, joint_x)
+            built = _build_dofs(state, ref, jtype, st, axis_index, axis_sign)
+            # _GENERALIZED fills only rotational DOFs and _TRANSLATIONAL only
+            # translational ones, so the two never overwrite each other.
+            dofs = built if dofs is None else {**dofs, **built}
             if st.option == "GENERALIZED" and jtype in (1, 4, 5):
                 state.warn(
                     f"*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED JSID={st.jsid} "
@@ -612,14 +824,16 @@ def _make_joints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
                     "0.98 of the joint axis are starter ERROR 3076). The joint "
                     "therefore starts at zero — shift the stop values and curve "
                     "abscissae if the initial offset matters.")
+        if dofs is not None and all(d.is_empty() for d in dofs.values()):
+            dofs = None
 
-        scf = _scale_factor(state, tag, jnt, st)
-        prop_id = state.next_id()
+        scf = _scale_factor(state, tag, jnt, st_list)
+        prop_id = state.next_prop_id()
         part_id = state.next_part_id()
         elem_id = state.next_id()
         label = jnt.title or f"CONSTRAINED_JOINT_{jnt.kind}"
 
-        if skew_id and frame is not None:
+        if emit_skew and frame is not None:
             origin, _x, y, z = frame
             lines.append(f"#-- {tag}: local frame from nodes {nodes}")
             lines += _emit_skew_fix(skew_id, f"SKEW_JOINT_{skew_id}",
@@ -641,21 +855,62 @@ def _make_joints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
         _warn_dropped_options(state, tag, jnt)
         _warn_rigid_attachment(state, tag, nodes, rigid_nodes)
 
+    if emitted:
+        _warn_no_pacing_element(state, rigid_pids or set())
     lines += _make_joint_th(state, th_elems)
     return lines if emitted else []
 
 
+def _warn_no_pacing_element(state: ConversionState,
+                            rigid_pids: Set[int]) -> None:
+    """An ALL-RIGID mechanism — the normal shape of an LS-DYNA joint model —
+    gives the OpenRadioss ENGINE nothing to compute a time step from, and
+    /PROP/TYPE45's Kn = 0 asks it for exactly that.
+
+    joint_block_stiffness.F:92-99 aborts at cycle 0 when the target time step is
+    still the 1e6 default and no /DT/.../CST target was given::
+
+        ERROR NO TARGET TIME STEP DT=   1000000.00000000
+        STIFFNESS CAN NOT BE COMPUTED
+
+    Rigid-body elements are excluded from the time step, so a deck whose only
+    elements are inside /RBODYs never gets one. The starter is clean, so this
+    only shows up minutes later at engine time — hence the warning. Reproduced
+    on all five joint validation decks; each needed one constrained deformable
+    element purely to pace the step.
+    """
+    elem_pids = set(_part_node_sets(state))
+    if elem_pids - rigid_pids:
+        return
+    if any(e.pid not in rigid_pids for e in state.discrete_elems):
+        return
+    state.warn(
+        "JOINTS: every element in this deck belongs to a rigid part, so the "
+        "OpenRadioss ENGINE has nothing to compute a time step from — rigid "
+        "bodies are excluded from it. /PROP/TYPE45 is written with Kn = 0 "
+        "(derive the joint's blocking stiffness FROM the time step), so the "
+        "engine aborts at cycle 0 with 'ERROR NO TARGET TIME STEP "
+        "DT= 1000000.00 / STIFFNESS CAN NOT BE COMPUTED'. The starter itself "
+        "is clean, so this only surfaces at run time. Fix it by adding one "
+        "deformable element (a single constrained hex is enough), or an engine "
+        "/DT/NODA/CST with an explicit target, or a non-zero Kn on the joint "
+        "properties. LS-DYNA runs the same deck without one.")
+
+
 def _axis_channel(state: ConversionState, tag: str, st: JointStiffness,
-                  frame) -> int:
-    """Which CIDA axis (0/1/2) the joint axis is aligned with — i.e. which of
-    phi/theta/psi (or x/y/z) drives the joint's single free DOF.
+                  joint_x):
+    """``(channel, sign)`` — which CIDA axis (0/1/2) the joint axis is aligned
+    with, i.e. which of phi/theta/psi (or x/y/z) drives the joint's single free
+    DOF, and whether that axis runs WITH (+1) or AGAINST (-1) the Radioss local
+    axis. An anti-parallel axis makes a positive LS-DYNA rotation a negative
+    Radioss one, so the caller has to mirror the asymmetric stop pair.
 
     Falls back to channel 0 with a loud warning when CIDA is unusable or no axis
     comes within |cos| > 0.99. dyna2rad leaves that branch's warning commented
     out and writes nothing, which silently loses the whole stiffness definition.
     """
-    if frame is None:
-        return 0
+    if joint_x is None:
+        return 0, 1.0
     axes = _coord_axes(state, st.cida)
     if axes is None:
         state.warn(
@@ -664,56 +919,76 @@ def _axis_channel(state: ConversionState, tag: str, st: JointStiffness,
             "*DEFINE_COORDINATE_SYSTEM/_NODES/_VECTOR. The first channel "
             f"({'phi' if st.option == 'GENERALIZED' else 'x'}) was assumed to "
             "be the joint axis — verify it.")
-        return 0
-    jx = frame[1]
+        return 0, 1.0
     for i, a in enumerate(axes):
-        if abs(_dot(a, jx)) > _AXIS_MATCH_COS:
-            return i
+        c = _dot(a, joint_x)
+        if abs(c) > _AXIS_MATCH_COS:
+            return i, (1.0 if c > 0.0 else -1.0)
     state.warn(
         f"{tag}: no axis of CIDA={st.cida} lies within {_AXIS_MATCH_COS} of the "
-        f"joint axis {tuple(round(v, 6) for v in jx)}, so which of "
+        f"joint axis {tuple(round(v, 6) for v in joint_x)}, so which of "
         f"{'phi/theta/psi' if st.option == 'GENERALIZED' else 'x/y/z'} drives "
         "the free DOF is ambiguous. The first channel was used — check that the "
         "LS-DYNA coordinate system really is the joint's frame.")
-    return 0
+    return 0, 1.0
 
 
 def _scale_factor(state: ConversionState, tag: str, jnt: ConstrainedJoint,
-                  st: Optional[JointStiffness]) -> float:
-    """LS-DYNA RPS -> /PROP/TYPE45 ScF, dyna2rad's rule: RPS when positive, else
-    0.01 (joints.cxx:1614-1617 and the six identical branches).
+                  st_list: List[JointStiffness]) -> float:
+    """LS-DYNA RPS -> /PROP/TYPE45 ScF.
 
-    These are NOT the same quantity. LS-DYNA's RPS is a dimensionless relative
-    penalty-stiffness multiplier; Radioss's ScF is a length^2-dimensioned floor
-    inside ``KR = Kn * MAX(ScF, LEN2)`` (rini45.F:283) where LEN2 is the squared
-    joint length in the joint frame. Carrying the number across is what dyna2rad
-    does and is the only defensible mapping, but a tuned RPS does not transfer.
+    With ``Kn = 0`` — which k2rad always writes — ScF IS LS-DYNA's RPS: a
+    dimensionless multiplier on the solver-computed blocking stiffness. The
+    engine applies it as ``KX = ScF*KX ; KR = ScF*KR``
+    (joint_block_stiffness.F:220-221), on the branch selected by
+    ``FLAG = NINT(Kn) == 0`` with GEO slot 10 = Kn and 11 = ScF
+    (hm_read_prop45.F:1087-1088). The length-squared reading
+    ``Kn * MAX(ScF, L^2)`` belongs to the Kn > 0 path only, so the mapping here
+    is exact and needs no warning.
+
+    RPS <= 0 therefore becomes 1.0, NOT dyna2rad's 0.01: LS-DYNA's own default
+    is 1.0 (R16 Vol I p.10-64) and its fixed-format reader cannot tell a blank
+    column from an explicit 0.0, while 0.01 would divide the blocking stiffness
+    by 100 and leave every joint a hundred times sloppier than the deck asks
+    for. The starter agrees — ScF = 0 with Kn = 0 is replaced by 1.0
+    (hm_read_prop45.F:163-169).
+
+    Only a _TRANSLATIONAL stiffness card's RPS overrides the joint card's: on
+    _GENERALIZED the column is documented as ignored ("It only applies for
+    keyword options TRANSLATIONAL and CYLINDRICAL", R16 Vol I p.10-91).
     """
     rps = jnt.rps
-    if st is not None and st.rps > 0.0:
-        rps = st.rps
+    for st in st_list:
+        if st.option == "TRANSLATIONAL" and st.rps > 0.0:
+            rps = st.rps
     if rps > 0.0:
-        if rps != 1.0:
-            state.warn(
-                f"{tag}: RPS={rps:g} was carried into /PROP/TYPE45 ScF. RPS is a "
-                "dimensionless relative penalty multiplier in LS-DYNA; ScF is a "
-                "length-squared floor in Kn*MAX(ScF, L^2) with Kn auto-computed "
-                "from the time step. The number transfers, the meaning does not "
-                "— check the joint's constraint violation in the run.")
         return rps
-    state.warn(
-        f"{tag}: RPS={jnt.rps:g} is not positive. A negative RPS means -RPS is a "
-        "load-curve id for the penalty scale (spherical/revolute/cylindrical "
-        "only), which /PROP/TYPE45 cannot express — ScF was set to 0.01, "
-        "dyna2rad's fallback, so the blocking stiffness comes purely from the "
-        "time step.")
-    return 0.01
+    if rps < 0.0:
+        state.warn(
+            f"{tag}: RPS={rps:g} is negative, which in LS-DYNA means -RPS is a "
+            "load-curve id giving a TIME-DEPENDENT penalty scale "
+            "(spherical/revolute/cylindrical only). /PROP/TYPE45's ScF is a "
+            "constant, so the curve is DROPPED and ScF was set to LS-DYNA's "
+            "default 1.0 — the blocking stiffness is the solver's own, "
+            "unscaled.")
+    return 1.0
 
 
 def _warn_dropped_options(state: ConversionState, tag: str,
                           jnt: ConstrainedJoint) -> None:
     """Everything on the LS-DYNA card that /PROP/TYPE45 has no home for."""
-    if jnt.damp != 1.0:
+    # DAMP <= 0 is LS-DYNA's OWN default ("EQ.0.0: Default is set to 1.0",
+    # R16 Vol I p.10-64) and a fixed-format blank column reads as 0.0, so a
+    # deck written with explicit zeros must not be warned about.
+    if 0.0 < jnt.damp <= 0.01:
+        state.warn(
+            f"{tag}: DAMP={jnt.damp:g} asks for NO joint damping (LS-DYNA reads "
+            "0 < DAMP <= 0.01 that way), but /PROP/TYPE45 cannot express zero: "
+            "a blank or zero Cr is replaced by the starter's 0.05 "
+            "(hm_read_prop45.F:155). The converted joint therefore keeps 5% "
+            "critical damping — expect slightly more energy dissipation at the "
+            "joint than LS-DYNA.")
+    elif jnt.damp > 0.01 and jnt.damp != 1.0:
         state.warn(
             f"{tag}: DAMP={jnt.damp:g} was DROPPED. LS-DYNA's DAMP scales an "
             "internally computed joint damping; Radioss's Cr is an absolute "
