@@ -132,7 +132,11 @@ covering them unlocks a large class of real models.
 
 - Composites: `MAT_54` / `MAT_55` + multi-ply `/PROP/TYPE10` / `TYPE11` /
   `TYPE17`.
-- `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints).
+- `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints) → `/PROP/TYPE45`
+  (KJOINT2) + `/SPRING` + a node-derived `/SKEW/FIX`, plus
+  `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED`/`_TRANSLATIONAL` DOF blocks —
+  **done** (dyna2rad-faithful type integers and axis conventions, with its
+  documented field-map defects corrected; see CHANGELOG).
 - `*AIRBAG_*` → `/MONVOL`.
 - `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO` — **done** (_SET direct;
   _PLANE via a geometric straddle resolver; SECFORC → /TH/SECTIO).

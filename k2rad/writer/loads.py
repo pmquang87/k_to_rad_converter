@@ -252,7 +252,7 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
         next_ground_node += 1
         grnod_id = state.next_id()
         bcs_id = state.next_id()
-        prop_id = state.next_id()
+        prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
         kx = k if 0 in axes else 0.0
@@ -608,7 +608,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         # ── translational (axial) springs → /PROP/TYPE4 ────────────────────
         for s in sorted(groups):
             g_elems = groups[s]
-            prop_id = state.next_id()
+            prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
             if part_id != pid:
                 state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
@@ -635,7 +635,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         for (vid, s) in sorted(ori_groups):
             g_elems = ori_groups[(vid, s)]
             skew_id = state.sdorient_skew_ids[vid]
-            prop_id = state.next_id()
+            prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
             k_s, c_s, a_coef = _scaled(s)
             lines += [
@@ -822,7 +822,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             (k5, 0, 0, -mat.mss, mat.mss),         # Ry bending
             (k6, 0, 0, -mat.mtt, mat.mtt),         # Rz bending
         ]
-        prop_id = state.next_id()
+        prop_id = state.next_prop_id()
         lines += funct_lines
         lines += _emit_prop_type13(
             prop_id, (part.title or f"SPOTWELD_{pid}") + " (MAT_100 spotweld)",
@@ -929,7 +929,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             (krot, 0, 0, 0.0, 0.0),      #   DYNA criterion (defaults ±1e30)
             (krot, 0, 0, 0.0, 0.0),
         ]
-        prop_id = state.next_id()
+        prop_id = state.next_prop_id()
         part_id = state.next_id()
         elem_id = state.next_id()
         # Token mass/inertia, same rationale as the grounding springs: the tie
@@ -2414,6 +2414,10 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         elem_nodes.update((d.n1, d.n2))
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
+    # *CONSTRAINED_JOINT nodes carry the /PROP/TYPE45 joint spring; fixing them
+    # here would weld the joint solid. Registered by the _resolve_joints prepass
+    # so this does not depend on the joint section having run yet.
+    elem_nodes.update(state.joint_spring_nodes)
     elem_nodes.update(state.connector_ground_nodes)
     keep_free: Set[int] = set()
     for cn in state.coord_nodes.values():

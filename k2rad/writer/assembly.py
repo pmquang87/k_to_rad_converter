@@ -37,6 +37,7 @@ from .contacts import (
     _recipe_active,
 )
 from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
+from .joints import _make_joints, _resolve_joints
 from .loads import (
     _make_added_masses,
     _make_bcs,
@@ -499,6 +500,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # the ids are reserved in the shared /SKEW+/FRAME namespace).
     _synthesize_vector_skews(state)
 
+    # Reserve a /SKEW id for each *CONSTRAINED_JOINT frame and register the
+    # joint /SPRING nodes. After the vector skews (which prefer their own VID
+    # and should get first pick of the low ids) and before /FRAME allocation,
+    # which shares the /SKEW id namespace. Registering the spring nodes here
+    # rather than in _make_joints keeps the implicit free-node guard correct
+    # regardless of section order.
+    _resolve_joints(state)
+
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must
     # be visible to every rigid-body-keyed section below, so merge their info,
@@ -644,6 +653,8 @@ def _starter_section_registry():
         ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
+        ("joints",            lambda c: _make_joints(c.state, c.rigid_nodes,
+                                                     set(c.rbody_info))),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
         ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
         ("xref",              lambda c: _make_xref(c.state)),

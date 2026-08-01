@@ -26,6 +26,7 @@ from .state import (
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
+    ConstrainedJoint, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
@@ -2898,6 +2899,160 @@ def handle_constrained_rigid_bodies(block: Block, state: ConversionState) -> Non
         state.rigid_body_merges.append((pidm, pids))
 
 
+# ── *CONSTRAINED_JOINT ───────────────────────────────────────────────────────
+
+#: Option suffixes LS-DYNA allows on a *CONSTRAINED_JOINT_<KIND> keyword after
+#: parser._split_keyword has already stripped _ID/_TITLE/_SUBTITLE.
+_JOINT_OPTIONS = frozenset({"LOCAL", "FAILURE"})
+
+
+def handle_constrained_joint(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_JOINT_SPHERICAL / _REVOLUTE / _CYLINDRICAL / _PLANAR /
+    _UNIVERSAL / _TRANSLATIONAL / _LOCKING (+ _LOCAL / _FAILURE / _ID / _TITLE)
+    → a /PROP/TYPE45 (KJOINT2) joint spring built by the writer.
+
+    Card 1: ``N1 N2 N3 N4 N5 N6 RPS DAMP`` — eight 10-wide fields. RPS and DAMP
+    both default to 1.0 in LS-DYNA, so a BLANK field must not read as 0.0
+    (_ffield). The optional _LOCAL (RAID/LST) and _FAILURE (CID/TFAIL/COUPL +
+    N**/M**) cards follow card 1 and are only flagged here — see the writer for
+    why neither maps onto /PROP/TYPE45.
+
+    Dispatch is exact-match, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR (and the
+    other motor/gear/pulley/screw joints) can never reach this handler and be
+    misread as a plain TRANSLATIONAL — the substring test dyna2rad uses
+    (keyWord.find("TRANS")) does exactly that. The kind is re-checked below
+    anyway so a future registration cannot re-open the hole.
+    """
+    rest = block.keyword[len("CONSTRAINED_JOINT_"):]
+    parts = rest.split("_")
+    kind = parts[0]
+    opts = parts[1:]
+    if kind not in JOINT_TYPE45 or any(o not in _JOINT_OPTIONS for o in opts):
+        state.warn(
+            f"*{block.keyword}: not one of the seven joint kinds k2rad converts "
+            f"({', '.join(sorted(JOINT_TYPE45))}) — no /PROP/TYPE45 emitted. "
+            "The motor / gears / rack-and-pinion / pulley / screw / "
+            "constant-velocity joints have no OpenRadioss counterpart.")
+        return
+
+    off = _title_offset(block)
+    if off >= len(block.raw):
+        return
+    # _ID heading card is "%10d%-70s": the JID is what *CONSTRAINED_JOINT_
+    # STIFFNESS's JID field points at, so a joint without _ID is unreferenceable.
+    jid, title = 0, _read_title(block, f"CONSTRAINED_JOINT_{kind}")
+    if _has_id(block) and block.raw:
+        head = block.raw[0][:10].strip()
+        if head and " " not in head and "," not in head:
+            # Canonical "%10d%-70s": take the HEADING columns verbatim rather
+            # than the shared free-split, which glues "        77hinge" into one
+            # token and eats the first word of the title.
+            #
+            # A comma disqualifies the fixed reading even without a space: the
+            # free-format heading "77,hinge" fits inside the first 10 columns,
+            # and to_int("77,hinge") is 0 — which silently unbinds every
+            # *CONSTRAINED_JOINT_STIFFNESS JID pointing at this joint.
+            jid = to_int(head)
+            title = block.raw[0][10:].strip() or title
+        else:
+            toks = parse_free(block.raw[0])
+            jid = to_int(toks[0]) if toks else 0     # free "77, my joint"
+    f = _card(block.raw, off, fixed=True, n=8, w=10)
+    jnt = ConstrainedJoint(
+        kind=kind,
+        keyword=block.keyword,
+        jid=jid,
+        title=title,
+        n1=to_int(f[0]) if len(f) > 0 else 0,
+        n2=to_int(f[1]) if len(f) > 1 else 0,
+        n3=to_int(f[2]) if len(f) > 2 else 0,
+        n4=to_int(f[3]) if len(f) > 3 else 0,
+        n5=to_int(f[4]) if len(f) > 4 else 0,
+        n6=to_int(f[5]) if len(f) > 5 else 0,
+        rps=_ffield(f, 6, 1.0),
+        damp=_ffield(f, 7, 1.0),
+        has_local="LOCAL" in opts,
+        has_failure="FAILURE" in opts,
+    )
+    state.constrained_joints.append(jnt)
+
+
+def handle_constrained_joint_stiffness(block: Block,
+                                       state: ConversionState) -> None:
+    """*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
+    blocks of the matched joint's /PROP/TYPE45.
+
+    Card 1 : JSID PIDA PIDB CIDA CIDB JID [RPS]
+    Card 2 : LCIDPH LCIDT LCIDPS DLCIDPH DLCIDT DLCIDPS   (GENERALIZED)
+             LCIDX  LCIDY LCIDZ  DLCIDX  DLCIDY DLCIDZ    (TRANSLATIONAL)
+    Card 3 : ESPH FMPH EST FMT ESPS FMPS   /   ESX FFX ESY FFY ESZ FFZ
+    Card 4 : NSAPH PSAPH NSAT PSAT NSAPS PSAPS  (DEGREES)
+             NSDX  PSDX  NSDY PSDY NSDZ  PSDZ   (displacements) [+ FS FD]
+
+    CIDB defaults to CIDA when blank (LS-DYNA R16 p.965). The FS/FD static /
+    dynamic friction coefficients on TRANSLATIONAL card 4 fields 7-8 are a later
+    addition to the card and are parsed as optional.
+
+    The two unregistered options (_FLEXION-TORSION, _CYLINDRICAL) route here too
+    so they surface as an explicit not-emitted note rather than a bare
+    "unsupported keyword" — dyna2rad's reader profile does not even parse them
+    (data_hierarchy.cfg:4414-4417 comments _FLEXION-TORSION out).
+    """
+    option = block.keyword[len("CONSTRAINED_JOINT_STIFFNESS_"):]
+    if option not in ("GENERALIZED", "TRANSLATIONAL"):
+        state.note_recognized_not_emitted(
+            block.keyword,
+            f"*CONSTRAINED_JOINT_STIFFNESS_{option} has no /PROP/TYPE45 field "
+            "map. FLEXION-TORSION is a spherical-joint cone/torsion pair and "
+            "CYLINDRICAL mixes a radial curve with axial ones; neither lines up "
+            "with the Rx/Ry/Rz + Tx/Ty/Tz DOF blocks. dyna2rad does not register "
+            "either keyword. The joint itself still converts — only its "
+            "stiffness/damping/stop data is dropped.")
+        state.warn(
+            f"*{block.keyword}: joint stiffness NOT converted (no /PROP/TYPE45 "
+            "field map for this option; the joint is still emitted as a "
+            "kinematic joint with solver-computed blocking stiffness).")
+        return
+
+    off = _title_offset(block)
+    c1 = _card(block.raw, off, fixed=True, n=8, w=10)
+    c2 = _card(block.raw, off + 1, fixed=True, n=8, w=10)
+    c3 = _card(block.raw, off + 2, fixed=True, n=8, w=10)
+    c4 = _card(block.raw, off + 3, fixed=True, n=8, w=10)
+    if not c1:
+        return
+
+    def _i3(f: List[str], a: int, b: int, c: int) -> Tuple[int, int, int]:
+        g = (lambda i: to_int(f[i]) if len(f) > i else 0)
+        return (g(a), g(b), g(c))
+
+    def _f3(f: List[str], a: int, b: int, c: int) -> Tuple[float, float, float]:
+        g = (lambda i: to_float(f[i]) if len(f) > i else 0.0)
+        return (g(a), g(b), g(c))
+
+    cida = to_int(c1[3]) if len(c1) > 3 else 0
+    cidb = to_int(c1[4]) if len(c1) > 4 else 0
+    state.joint_stiffnesses.append(JointStiffness(
+        option=option,
+        jsid=to_int(c1[0]),
+        pida=to_int(c1[1]) if len(c1) > 1 else 0,
+        pidb=to_int(c1[2]) if len(c1) > 2 else 0,
+        cida=cida,
+        cidb=cidb or cida,          # blank CIDB defaults to CIDA
+        jid=to_int(c1[5]) if len(c1) > 5 else 0,
+        rps=to_float(c1[6]) if len(c1) > 6 else 0.0,
+        title=_read_title(block, f"CONSTRAINED_JOINT_STIFFNESS_{to_int(c1[0])}"),
+        lcid=_i3(c2, 0, 1, 2),
+        dlcid=_i3(c2, 3, 4, 5),
+        es=_f3(c3, 0, 2, 4),
+        fm=_f3(c3, 1, 3, 5),
+        nstop=_f3(c4, 0, 2, 4),
+        pstop=_f3(c4, 1, 3, 5),
+        fs=to_float(c4[6]) if len(c4) > 6 else 0.0,
+        fd=to_float(c4[7]) if len(c4) > 7 else 0.0,
+    ))
+
+
 def _record_spotweld_pair(state: ConversionState, kw: str, title: str,
                           n1: int, n2: int, nsid: int,
                           sn: float, ss: float, n_exp: float, m_exp: float,
@@ -4807,6 +4962,46 @@ HANDLERS = {
     "CONSTRAINED_SPOTWELD":                   handle_constrained_spotweld,
     "CONSTRAINED_SPOTWELD_FILTERED_FORCE":    handle_constrained_spotweld,
     "CONSTRAINED_GENERALIZED_WELD_SPOT":      handle_constrained_generalized_weld_spot,
+
+    # Joints. _ID/_TITLE come free via parser._split_keyword; _LOCAL and
+    # _FAILURE stay in the base name and need their own literal keys (the same
+    # rule *DEFINE_BOX_LOCAL follows). Registering exact keywords is also the
+    # guard against dyna2rad's substring misclassification: the motor / gears /
+    # rack-and-pinion / pulley / screw / constant-velocity joints are absent
+    # here, so *CONSTRAINED_JOINT_TRANSLATIONAL_MOTOR cannot be read as a plain
+    # TRANSLATIONAL joint — it lands in skipped_keywords instead.
+    "CONSTRAINED_JOINT_SPHERICAL":                 handle_constrained_joint,
+    "CONSTRAINED_JOINT_SPHERICAL_LOCAL":           handle_constrained_joint,
+    "CONSTRAINED_JOINT_SPHERICAL_FAILURE":         handle_constrained_joint,
+    "CONSTRAINED_JOINT_SPHERICAL_LOCAL_FAILURE":   handle_constrained_joint,
+    "CONSTRAINED_JOINT_REVOLUTE":                  handle_constrained_joint,
+    "CONSTRAINED_JOINT_REVOLUTE_LOCAL":            handle_constrained_joint,
+    "CONSTRAINED_JOINT_REVOLUTE_FAILURE":          handle_constrained_joint,
+    "CONSTRAINED_JOINT_REVOLUTE_LOCAL_FAILURE":    handle_constrained_joint,
+    "CONSTRAINED_JOINT_CYLINDRICAL":               handle_constrained_joint,
+    "CONSTRAINED_JOINT_CYLINDRICAL_LOCAL":         handle_constrained_joint,
+    "CONSTRAINED_JOINT_CYLINDRICAL_FAILURE":       handle_constrained_joint,
+    "CONSTRAINED_JOINT_CYLINDRICAL_LOCAL_FAILURE": handle_constrained_joint,
+    "CONSTRAINED_JOINT_PLANAR":                    handle_constrained_joint,
+    "CONSTRAINED_JOINT_PLANAR_LOCAL":              handle_constrained_joint,
+    "CONSTRAINED_JOINT_PLANAR_FAILURE":            handle_constrained_joint,
+    "CONSTRAINED_JOINT_PLANAR_LOCAL_FAILURE":      handle_constrained_joint,
+    "CONSTRAINED_JOINT_UNIVERSAL":                 handle_constrained_joint,
+    "CONSTRAINED_JOINT_UNIVERSAL_LOCAL":           handle_constrained_joint,
+    "CONSTRAINED_JOINT_UNIVERSAL_FAILURE":         handle_constrained_joint,
+    "CONSTRAINED_JOINT_UNIVERSAL_LOCAL_FAILURE":   handle_constrained_joint,
+    "CONSTRAINED_JOINT_TRANSLATIONAL":                 handle_constrained_joint,
+    "CONSTRAINED_JOINT_TRANSLATIONAL_LOCAL":           handle_constrained_joint,
+    "CONSTRAINED_JOINT_TRANSLATIONAL_FAILURE":         handle_constrained_joint,
+    "CONSTRAINED_JOINT_TRANSLATIONAL_LOCAL_FAILURE":   handle_constrained_joint,
+    "CONSTRAINED_JOINT_LOCKING":                   handle_constrained_joint,
+    "CONSTRAINED_JOINT_LOCKING_LOCAL":             handle_constrained_joint,
+    "CONSTRAINED_JOINT_LOCKING_FAILURE":           handle_constrained_joint,
+    "CONSTRAINED_JOINT_LOCKING_LOCAL_FAILURE":     handle_constrained_joint,
+    "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED":     handle_constrained_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL":   handle_constrained_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_FLEXION-TORSION": handle_constrained_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_CYLINDRICAL":     handle_constrained_joint_stiffness,
 
     # Rigid walls (LS-DYNA option order: _ORTHO _FINITE _MOVING _FORCES)
     "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
