@@ -514,6 +514,20 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # rigid-node set, and rad lines with the *MAT_RIGID ones.
     cnrb_lines, cnrb_rigid_nodes, cnrb_info = _make_cnrb_rbodies(state)
     rigid_nodes = rigid_nodes | cnrb_rigid_nodes
+    # The two dicts are keyed by DIFFERENT id namespaces — *MAT_RIGID records by
+    # PART id, CNRB records by the CNRB's own PID — so a CNRB whose PID happens
+    # to equal a rigid part's id silently replaces that part's record here, and
+    # every rbody_info consumer below (gravity groups, /BCS, /INIVEL, /TH) then
+    # addresses the wrong main node. LS-DYNA requires a CNRB's PID to be a new,
+    # unused part id, so this is invalid input — but it must not be silent.
+    for _dup in sorted(set(rbody_info) & set(cnrb_info)):
+        state.warn(
+            f"*CONSTRAINED_NODAL_RIGID_BODY PID {_dup} collides with the id of "
+            "a *MAT_RIGID part that k2rad also turned into an /RBODY. The CNRB "
+            "record wins, so cards keyed on that part id (gravity groups, "
+            "/BCS, /INIVEL, /TH) address the CNRB's main node and the rigid "
+            "PART's own main node is not reached - give the CNRB an unused "
+            "part id.")
     rbody_info = {**rbody_info, **cnrb_info}
     rbody_lines = rbody_lines + cnrb_lines
     # Implicit deck without any rigid body: the engine segfaults at solver init

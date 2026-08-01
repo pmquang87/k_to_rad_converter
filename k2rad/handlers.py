@@ -4342,12 +4342,18 @@ def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
     """*LOAD_GRAVITY_PART[_SET]: one data row per part (or part set).
 
     Card: pid dof lc accel lcdr stga stgr — DOF 1/2/3 names the X/Y/Z axis.
-    The R16/R17 manual defines ACCEL only as "Acceleration (will be multiplied
-    by factor from curve)" (p.33-57) and fixes NO sign for it anywhere in the
-    keyword's section, so the direction convention is taken from the Radioss
-    dyna-reader, which negates it exactly like *LOAD_BODY
-    (``convertloads.cxx:859``: ``Fscale_Y = -lsdACCEL``): a positive ACCEL
-    loads the part along -X/-Y/-Z.
+    The load is ACCEL × factor(t): LC is the "Load curve defining factor as a
+    function of time", ACCEL is the "Acceleration (will be multiplied by factor
+    from curve)", and "a constant factor of 1.0 is assumed if LC is not
+    specified" (p.33-57 + Remark 1a) — so ACCEL is never dropped, whether or
+    not a curve is given.
+
+    The R16/R17 manual fixes NO sign for ACCEL anywhere in the keyword's
+    section, so the direction convention is taken from the Radioss dyna-reader,
+    which negates it exactly like *LOAD_BODY (``convertloads.cxx:859``:
+    ``Fscale_Y = -lsdACCEL``; that file is not part of this repo, so the
+    citation cannot be checked from here): a positive ACCEL loads the part
+    along -X/-Y/-Z.
     _SET rows reference a *SET_PART; they are expanded to the set's parts.
     """
     is_set = "SET" in block.options or block.keyword.endswith("_SET")
@@ -4385,7 +4391,12 @@ def handle_load_body(block: Block, state: ConversionState) -> None:
     direction." The writer therefore emits ``Fscale_Y = -sf``.
 
     Scope is the whole model unless a *LOAD_BODY_PARTS card names a part set
-    (p.33-25) — see handle_load_body_parts. Angular (_RX/_RY/_RZ) and generic
+    (p.33-25) — see handle_load_body_parts.
+
+    CID is a local system the acceleration is expressed in ("The accelerations
+    (LCID) are with respect to CID", p.33-27) and maps to the /GRAV skew_ID;
+    LCIDDR is the dynamic-relaxation curve and has no /GRAV equivalent (warned,
+    like LCDR on *LOAD_GRAVITY_PART). Angular (_RX/_RY/_RZ) and generic
     (_VECTOR/_GENERALIZED) body loads have no /GRAV mapping and are skipped
     with a warning.
     """
@@ -4402,14 +4413,20 @@ def handle_load_body(block: Block, state: ConversionState) -> None:
     f = _card(raw, offset, fixed=True, n=8, w=10)
     if not f:
         return
-    lcid = to_int(f[0])
-    sf   = to_float(f[1]) if len(f) > 1 else 1.0
+    lcid   = to_int(f[0])
+    sf     = to_float(f[1]) if len(f) > 1 else 1.0
+    lciddr = to_int(f[2]) if len(f) > 2 else 0
+    cid    = to_int(f[6]) if len(f) > 6 else 0
     if sf == 0.0:
         sf = 1.0
     if lcid <= 0:
         state.warn(f"*{kw}: no acceleration curve (lcid={lcid}) — skipped.")
         return
-    state.body_loads.append(LoadBody(dir=suffix, lcid=lcid, sf=sf))
+    if lciddr:
+        state.warn(f"*{kw}: dynamic-relaxation curve LCIDDR={lciddr} has no "
+                   "OpenRadioss mapping - ignored (only the transient body "
+                   "load is converted).")
+    state.body_loads.append(LoadBody(dir=suffix, lcid=lcid, sf=sf, cid=cid))
 
 
 def handle_load_body_parts(block: Block, state: ConversionState) -> None:

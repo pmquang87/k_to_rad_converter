@@ -125,6 +125,9 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             "grnod_id": grnod_id,
             "ind_grnod_id": ind_grnod_id,
             "nodes": unique_nodes,
+            # a whole *MAT_RIGID PART: consumers keyed on the part id (the
+            # /GRAV group builder) may swap the part out for its main node
+            "kind": "part",
         }
 
         # /RBODY format: 2 data cards (one per logical record).
@@ -450,6 +453,9 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             "grnod_id": grnod_id,
             "ind_grnod_id": ind_grnod_id,
             "nodes": secondary_nodes,
+            # a *CONSTRAINED_NODAL_RIGID_BODY over nodes of DEFORMABLE parts:
+            # keyed by the CNRB's own pid, never a whole rigid part
+            "kind": "cnrb",
         }
 
         # Optional added mass on the master node / part (same sources as

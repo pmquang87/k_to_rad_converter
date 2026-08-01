@@ -983,14 +983,98 @@ Prior history (before this changelog was introduced) is summarized in the
   the unit-system factor (`1.0`) — i.e. "no gravity" used to become *unit*
   gravity.
 
-  A deck whose gravity scope holds no rigid body emits **byte-identical**
-  `/GRNOD` cards with the same ids drawn in the same order (verified by
-  diffing a full conversion against `master`: the only lines that move are the
-  `/GRAV` column layout and the `*LOAD_BODY` sign). All five goldens are
-  unchanged — they carry no gravity. New coverage in `tests/test_gravity.py`
-  (28 tests): sign on both paths, column-exact card asserts including the
-  11-character regression, `/RBODY` main routing for `*MAT_RIGID`, CNRB,
-  merged bodies and `--no-rigid-cog-master`, and `*LOAD_BODY_PARTS` scoping.
+  A deck whose gravity scope holds no rigid body emits **the same `/GRNOD`
+  cards, with the same ids, titles and order** as before (verified by diffing a
+  full conversion against `master`). The `/GRAV` card itself changes on *every*
+  gravity deck — the column layout, plus the `*LOAD_BODY` sign — so "no rigid
+  body" does not mean "no re-conversion needed". All five goldens are
+  unchanged; they carry no gravity at all.
+
+  **Review round — four more defects in the same card**, three of them older
+  than this branch and one introduced by it:
+
+  * **The `/GRNOD` id allocator had no namespace guard, and this branch drew
+    enough extra ids to make that fatal.** k2rad re-emits every user
+    `*SET_NODE` under its own SID (`/GRNOD/NODE/<nsid>` on the SPC path,
+    `_make_extra_groups` for the rest), while the synthesized groups came from
+    the unguarded `state.next_id()` — so a deck with a `*SET_NODE` id at or
+    above the auto-id base (90001) hands the starter two `/GRNOD` cards with
+    the same id and it aborts the **whole deck**: `ERROR ID : 79 ** ERROR:
+    DUPLICATE ID / IN NODE GROUP DEFINITION`. The union and mains groups added
+    here are 1-2 extra draws per `/GRAV`, which pushed the counter into ids
+    that used to be safe: a 3-part deck with `*SET_NODE_LIST 90006` converted
+    and ran on `master`, and stopped running on this branch. The gravity groups
+    now draw from a new `state.next_grnod_id()` (the guard shape of
+    `next_curve_id` / `next_part_id` / `next_prop_id`, a no-op on an ordinary
+    deck so no id moves). *The other synthesized `/GRNOD` ids — contacts,
+    `/INIVEL`, the `/RBODY` groups — still use `next_id()` and carry the same
+    latent hazard; out of scope here.*
+  * **`*LOAD_GRAVITY_PART` with a load curve silently dropped `ACCEL`.**
+    `fscale = -1.0 if lc > 0 else -accel` — but the manual defines `LC` as the
+    "Load curve defining **factor** as a function of time" and `ACCEL` as the
+    "Acceleration (will be multiplied by factor from curve)", with Remark 1a
+    adding "a constant factor of 1.0 is assumed if LC is not specified"
+    (p.33-57). The load is `ACCEL × factor(t)`. Measured: `ACCEL = 9810` on a
+    0→1 ramp emitted `Fscale_Y = -1`, a **factor-9810 under-load** on exactly
+    the staged-construction ramp the keyword exists for. Now `Fscale_Y =
+    -ACCEL` with `fct_IDT = LC` in both forms; a *blank* `ACCEL` beside a curve
+    (its own default is 0) is taken as 1.0 — the curve carries the
+    acceleration — and the substitution is warned rather than assumed.
+  * **`CID` and `LCIDDR` were read off the `*LOAD_BODY` card and thrown away.**
+    `CID` is a local system the acceleration is expressed in ("The
+    accelerations (LCID) are with respect to CID", p.33-27); a rotated body
+    load converted to a **global-axis** `/GRAV` with no warning at all. It now
+    becomes the `/GRAV` `skew_ID`, which the engine honours
+    (`gravit.F:150-162`: for `ISK > 1` it adds `SKEW(3·N2-2 … 3·N2, ISK)·AA`
+    instead of the global axis) — and an unresolvable `CID` falls back to
+    global *loudly*, because a `/GRAV` naming a skew that is not emitted is
+    `MSGID=137`, a starter **error**. `LCIDDR` (the dynamic-relaxation curve)
+    is now warned about, the way `LCDR` on `*LOAD_GRAVITY_PART` always was.
+  * **A `*LOAD_BODY_PARTS` scope that nothing consumed left no trace in the
+    log** — it has a handler, so it never reached `skipped_keywords` either.
+    Now reported through `recognized_not_emitted`.
+
+  Two honesty fixes, no behaviour change: a **scoped** load that covers only
+  *part* of a rigid cluster (a CNRB reaching outside the scope, or a
+  `*CONSTRAINED_RIGID_BODIES` merge with an unscoped partner) now warns that
+  the whole cluster is accelerated at `g` where LS-DYNA gives
+  `g·m_scoped/m_cluster` — the converted load is an upper bound, and that
+  asymmetry against the "a rigid part outside the scope is not pulled in" rule
+  is now stated deliberately rather than left looking like an oversight. And a
+  `*CONSTRAINED_NODAL_RIGID_BODY` whose `PID` collides with a `*MAT_RIGID`
+  part id is reported: `rbody_info` merges two id namespaces, so the CNRB
+  record silently replaced the part's.
+
+  Also here: every `*LOAD_BODY_*` card in a deck now shares **one** group set
+  (the scope is deck-global by construction) instead of re-emitting an
+  identical `/GRNOD` triple per card, and the `{pid: nodes}` inventory is built
+  once per conversion instead of once per gravity group.
+
+  New coverage in `tests/test_gravity.py` (43 tests): sign on both paths,
+  column-exact card asserts including the 11-character regression, `ACCEL ×
+  curve`, `/RBODY` main routing for `*MAT_RIGID`, CNRB, merged bodies and
+  `--no-rigid-cog-master`, `*LOAD_BODY_PARTS` scoping, `CID`/`LCIDDR`,
+  the `/GRNOD` id-collision guard (and that it does not shift ids without a
+  colliding set), shared groups across three body loads, and the partial-scope
+  and PID-collision warnings.
+
+  *Provenance:* every LS-DYNA manual quote and every OpenRadioss
+  starter/engine/cfg citation above was verified against the files on disk. The
+  `convertloads.cxx` line citations are to Altair's dyna2rad source, which is
+  **not** part of this repository — but the behaviour they assert was confirmed
+  the way that actually matters, by reading the same `.k` files straight into
+  `starter_win64.exe` (which goes through dyna2rad) and comparing its own
+  `GRAVITY LOADS` echo against k2rad's:
+
+  | card | dyna2rad, native `.k` | k2rad |
+  |---|---|---|
+  | `*LOAD_BODY_Y SF=+9810` | `SCALE_Y = -9810` | `SCALE_Y = -9810` |
+  | `*LOAD_BODY_Y SF=-9810` | `SCALE_Y = +9810` | `SCALE_Y = +9810` |
+  | `*LOAD_GRAVITY_PART 1 2 1 9810` on a `*MAT_RIGID` part | `SCALE_Y = -9810`, curve 1, group = `{213}` | identical |
+
+  The last row is the whole PR in one line: the sign, `ACCEL` surviving
+  alongside the curve, and the rigid part represented by its main node alone —
+  all three matching Altair's own reader exactly.
 
 - **A `*CONTACT_TIED_*` between two CONFORMALLY meshed parts killed the starter
   with a storm of `ERROR 556`, and the same deck read natively started clean.**

@@ -4,14 +4,20 @@
   *LOAD_BODY_{X,Y,Z}         -> /GRAV  (Fscale_Y = -SF)
   *LOAD_BODY_PARTS           -> the part-set scope of the above
 
-Two things decide whether a converted gravity deck is right, and neither is
+Three things decide whether a converted gravity deck is right, and none is
 visible by eye in the .rad:
 
 * the SIGN. A base acceleration accelerates the coordinate system, so the
   inertial load on the model is of opposite sign — LS-DYNA Manual Vol I R16
   p.33-27/33-28, whose own *LOAD_BODY_Z example is annotated "Note: Positive
   body load acts in the negative direction." The Radioss dyna-reader negates
-  both keywords (``convertloads.cxx:247`` and ``:859``).
+  both keywords (``convertloads.cxx:247`` and ``:859``). That file is not part
+  of this repo, but reading the same ``.k`` straight into ``starter_win64.exe``
+  reproduces it: ``SF = +9810`` echoes ``SCALE_Y = -9810`` and ``SF = -9810``
+  echoes ``SCALE_Y = +9810``.
+* the MAGNITUDE. *LOAD_GRAVITY_PART's load is ACCEL x factor(t): LC "defines
+  factor as a function of time" and ACCEL "will be multiplied by factor from
+  curve" (p.33-57), so a curve does not replace ACCEL.
 * the /GRNOD. /GRAV adds an ACCELERATION to every node in its group
   (``gravit.F:147``), and ``resol.F`` runs GRAVIT (6884) after RBYFOR (5502)
   has already summed the rigid secondaries into the main node, and before
@@ -258,12 +264,29 @@ class GravitySignTests(unittest.TestCase):
         self.assertEqual(card[10:20].strip(), "Z")
         self.assertEqual(card[80:100].strip(), "-9810")
 
-    def test_gravity_part_curve_form_carries_minus_one(self):
-        deck = HEAD + CURVE + _gravity_part(1, lc=1, accel="       0.0") + END
+    def test_gravity_part_curve_form_keeps_accel(self):
+        """The load is ACCEL x factor(t), not one or the other: LC "defines
+        factor as a function of time" and ACCEL "will be multiplied by factor
+        from curve" (Manual p.33-57). Writing Fscale_Y = -1 whenever LC > 0
+        dropped ACCEL entirely — a factor-9810 under-load on exactly the ramped
+        staged-construction decks the keyword exists for."""
+        deck = HEAD + CURVE + _gravity_part(1, lc=1) + END
         _r, starter = _convert(deck)
+        card = _grav_cards(starter)[0][1]
+        self.assertEqual(card[0:10].strip(), "1")           # fct_IDT = LC
+        self.assertEqual(card[80:100].strip(), "-9810")     # ... x ACCEL
+
+    def test_gravity_part_blank_accel_with_a_curve_takes_the_curve(self):
+        """ACCEL's own default is 0, so a blank ACCEL beside a curve means the
+        curve carries the acceleration. The literal reading (0 x factor) would
+        be no load at all, so substitute 1.0 — and say so."""
+        deck = HEAD + CURVE + _gravity_part(1, lc=1, accel="       0.0") + END
+        result, starter = _convert(deck)
         card = _grav_cards(starter)[0][1]
         self.assertEqual(card[0:10].strip(), "1")
         self.assertEqual(card[80:100].strip(), "-1")
+        self.assertTrue(any("taken as ACCEL = 1.0" in w
+                            for w in result.warnings))
 
     def test_card_is_100_columns_with_ascale_at_61_80(self):
         deck = HEAD + _gravity_part(1) + END
@@ -289,6 +312,57 @@ class GravitySignTests(unittest.TestCase):
         result, starter = _convert(deck)
         self.assertNotIn("/GRAV/", starter)
         self.assertTrue(any("ACCEL = 0" in w for w in result.warnings))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The rest of the *LOAD_BODY card: CID and LCIDDR
+# ─────────────────────────────────────────────────────────────────────────────
+
+COORD = ("*DEFINE_COORDINATE_SYSTEM\n"
+         "         7       0.0       0.0       0.0       0.0       0.0       1.0\n"
+         "       1.0       0.0       0.0\n")
+
+
+class LoadBodyRestOfCardTests(unittest.TestCase):
+    """*LOAD_BODY's card is ``LCID SF LCIDDR XC YC ZC CID``. Only LCID and SF
+    used to be read; CID and LCIDDR were dropped without a word."""
+
+    def _body_with(self, lciddr=0, cid=0):
+        return ("*LOAD_BODY_Y\n"
+                f"{1:>10}{'1.0':>10}{lciddr:>10}{'0.0':>10}{'0.0':>10}"
+                f"{'0.0':>10}{cid:>10}\n")
+
+    def test_cid_becomes_the_grav_skew(self):
+        """"The accelerations (LCID) are with respect to CID" (p.33-27). The
+        engine honours /GRAV skew_ID: for ISK > 1 gravit.F:150-162 adds
+        SKEW(3*N2-2..3*N2, ISK) * AA instead of the global axis."""
+        deck = HEAD + CURVE + COORD + self._body_with(cid=7) + END
+        _r, starter = _convert(deck)
+        card = _grav_cards(starter)[0][1]
+        self.assertEqual(card[20:30].strip(), "7")
+        self.assertIn("/SKEW/FIX/7", starter)
+
+    def test_unknown_cid_stays_global_and_warns(self):
+        """A /GRAV naming a skew id that is not emitted is MSGID=137, a starter
+        ERROR — so an unresolvable CID must fall back to the global axis."""
+        deck = HEAD + CURVE + self._body_with(cid=7) + END
+        result, starter = _convert(deck)
+        card = _grav_cards(starter)[0][1]
+        self.assertEqual(card[20:30].strip(), "0")
+        self.assertTrue(any("CID=7 not found" in w for w in result.warnings))
+
+    def test_no_cid_keeps_the_skew_column_zero(self):
+        deck = HEAD + CURVE + _load_body() + END
+        _r, starter = _convert(deck)
+        self.assertEqual(_grav_cards(starter)[0][1][20:30].strip(), "0")
+
+    def test_lciddr_is_warned_like_the_gravity_path(self):
+        """*LOAD_GRAVITY_PART's LCDR has always been warned about; LCIDDR is
+        the same field on the other keyword and was silent."""
+        deck = HEAD + CURVE + self._body_with(lciddr=1) + END
+        result, _s = _convert(deck)
+        self.assertTrue(any("LCIDDR=1" in w and "dynamic-relaxation" in w
+                            for w in result.warnings))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -421,10 +495,12 @@ class GravityRigidBodyTests(unittest.TestCase):
 
 
 class GravityNoRigidBodyTests(unittest.TestCase):
-    """A deck with no rigid body must emit exactly the cards it always has:
-    one /GRNOD/PART per /GRAV, no extra groups, and the same two ids drawn in
-    the same order. (The five golden fixtures carry no gravity at all, so this
-    is what pins the "no rigid body -> byte-identical" claim.)"""
+    """A deck with no rigid body must emit the same /GRNOD cards it always has:
+    one /GRNOD/PART per /GRAV, no extra groups, the same titles, and the same
+    two ids drawn in the same order. The /GRAV card itself DOES change on every
+    gravity deck (the cfg's 10-column gap, and the *LOAD_BODY sign) — this
+    class pins the group half of that claim. (The five golden fixtures carry no
+    gravity at all, so nothing else pins it.)"""
 
     NO_RIGID = HEAD.replace(
         "*MAT_RIGID\n         2    7850.02.10000E11       0.3\n"
@@ -518,6 +594,136 @@ class LoadBodyPartsTests(unittest.TestCase):
         self.assertEqual(parts, {3})
         self.assertTrue(any("replaces the earlier PSID 77" in w
                             for w in result.warnings))
+
+    def test_unconsumed_card_is_logged_not_silent(self):
+        """A *LOAD_BODY_PARTS with no *LOAD_BODY_* to scope emits nothing. It
+        has a handler, so it never reaches skipped_keywords either — without
+        the recognized-but-not-emitted channel the log says nothing at all."""
+        deck = HEAD + PSET + "*LOAD_BODY_PARTS\n        77\n" + END
+        result, starter = _convert(deck)
+        self.assertNotIn("/GRAV/", starter)
+        self.assertIn("LOAD_BODY_PARTS",
+                      [kw for kw, _r in result.recognized_not_emitted])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /GRNOD id namespace
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GravityGrnodIdTests(unittest.TestCase):
+    """The synthesized gravity groups share the /GRNOD id namespace with the
+    user's own *SET_NODE groups, which k2rad re-emits verbatim under their SID
+    (_make_extra_groups, and /GRNOD/NODE/<nsid> on the SPC path). A duplicate
+    /GRNOD id is not cosmetic: the starter aborts the whole deck with
+    ``ERROR ID : 79 ** ERROR: DUPLICATE ID / IN NODE GROUP DEFINITION``."""
+
+    # 90005 and 90006 are exactly the ids the mains group and the union draw on
+    # a rigid-body gravity deck, so an unguarded allocator collides on both
+    COLLIDING = ("*SET_NODE_LIST\n     90005\n         1         2\n"
+                 "*SET_NODE_LIST\n     90006\n         3         4\n")
+
+    def _ids(self, starter):
+        return [int(m.group(2)) for m in
+                (_GRNOD_RE.match(ln) for ln in starter.splitlines()) if m]
+
+    def test_no_duplicate_ids_with_a_user_set_in_the_auto_range(self):
+        deck = HEAD + CURVE + self.COLLIDING + _load_body() + END
+        _r, starter = _convert(deck)
+        ids = self._ids(starter)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertIn(90005, ids)                          # the user's own
+        self.assertIn(90006, ids)
+
+    def test_gravity_part_path_is_guarded_too(self):
+        deck = (HEAD + self.COLLIDING + _gravity_part(1) + _gravity_part(2)
+                + END)
+        _r, starter = _convert(deck)
+        ids = self._ids(starter)
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_guard_is_a_no_op_without_a_colliding_set(self):
+        """The guard must not shift ids on an ordinary deck."""
+        deck = HEAD + CURVE + _load_body() + END
+        _r, starter = _convert(deck)
+        grav_id, card = _grav_cards(starter)[0]
+        gid = int(card[40:50])
+        groups = _grnods(starter)
+        self.assertEqual(groups[gid][0], "GRNOD")
+        part_gid, mains_gid = groups[gid][1]
+        self.assertEqual(part_gid + 1, grav_id)            # unchanged order
+        self.assertEqual(grav_id + 1, mains_gid)
+        self.assertEqual(mains_gid + 1, gid)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared scope, and the honesty warnings
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GravityScopeWarningTests(unittest.TestCase):
+
+    def test_three_body_loads_share_one_group_set(self):
+        """The *LOAD_BODY_PARTS scope is deck-global, so all three axes take
+        the same nodes. Rebuilding the groups per card emitted three identical
+        /GRNOD/PART + /GRNOD/NODE + /GRNOD/GRNOD triples."""
+        deck = (HEAD + CURVE + _load_body("X") + _load_body("Y")
+                + _load_body("Z") + END)
+        _r, starter = _convert(deck)
+        cards = _grav_cards(starter)
+        self.assertEqual(len(cards), 3)
+        gids = {int(c[40:50]) for _id, c in cards}
+        self.assertEqual(len(gids), 1)
+        self.assertEqual(starter.count("/GRNOD/GRNOD/"), 1)
+        self.assertEqual([c[10:20].strip() for _id, c in cards],
+                         ["X", "Y", "Z"])
+
+    def test_partial_cluster_scope_warns_about_the_upper_bound(self):
+        """A rigid body has ONE main node and ONE mass, so it cannot be loaded
+        fractionally. A *CONSTRAINED_RIGID_BODIES merge whose partner is out of
+        scope therefore accelerates whole at g, where LS-DYNA gives
+        g*m_scoped/m_cluster — an upper bound the user has to know about."""
+        deck = (HEAD + SECOND_RIGID
+                + "*CONSTRAINED_RIGID_BODIES\n         2         4\n"
+                + _gravity_part(4) + END)
+        result, _s = _convert(deck)
+        self.assertTrue(any("only PART of the rigid body" in w
+                            for w in result.warnings))
+
+    def test_cnrb_reaching_outside_the_scope_warns(self):
+        deck = (HEAD
+                + "*SET_NODE_LIST\n        51\n"
+                  "         3         4         9        10\n"
+                  "*CONSTRAINED_NODAL_RIGID_BODY\n       901         0        51\n"
+                + _gravity_part(3) + END)
+        result, _s = _convert(deck)
+        self.assertTrue(any("only PART of the rigid body" in w
+                            for w in result.warnings))
+
+    def test_fully_scoped_cluster_does_not_warn(self):
+        deck = (HEAD + SECOND_RIGID
+                + "*CONSTRAINED_RIGID_BODIES\n         2         4\n"
+                + _gravity_part(2) + _gravity_part(4) + END)
+        result, _s = _convert(deck)
+        self.assertFalse(any("only PART of the rigid body" in w
+                             for w in result.warnings))
+
+    def test_whole_model_body_load_never_warns_about_partial_scope(self):
+        deck = HEAD + CNRB + CURVE + _load_body() + END
+        result, _s = _convert(deck)
+        self.assertFalse(any("only PART of the rigid body" in w
+                             for w in result.warnings))
+
+    def test_cnrb_pid_colliding_with_a_rigid_part_is_reported(self):
+        """rbody_info merges two id namespaces — *MAT_RIGID records keyed by
+        PART id, CNRB records by the CNRB's own PID — so a colliding PID
+        silently replaces the part's record. Invalid LS-DYNA input, but it must
+        not be silent."""
+        deck = (HEAD
+                + "*SET_NODE_LIST\n        52\n"
+                  "         9        10        11        12\n"
+                  "*CONSTRAINED_NODAL_RIGID_BODY\n         2         0        52\n"
+                + CURVE + _load_body() + END)
+        result, _s = _convert(deck)
+        self.assertTrue(any("PID 2 collides" in w for w in result.warnings))
 
 
 if __name__ == "__main__":

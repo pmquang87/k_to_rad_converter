@@ -1154,26 +1154,35 @@ _GRAV_COMMENT = ("#funct_IDT       DIR   skew_ID sensor_ID  grnod_ID"
 
 
 def _emit_grav_card(grav_id: int, title: str, fct: int, direction: str,
-                    grnod_id: int, fscale: float) -> List[str]:
+                    grnod_id: int, fscale: float,
+                    skew_id: int = 0) -> List[str]:
     """One /GRAV card in the column layout grav.cfg specifies (see above).
 
     ``Ascale_x`` is always 1.0: the starter stores ``GRAV(2,K) = ONE/FCX``
     (hm_read_grav.F:236) and the engine evaluates the curve at ``t * FCX``, so
     it is a divisor on the time abscissa, not an ordinate scale.
+
+    ``skew_id`` names the local system the DIR axis is taken in: the starter
+    resolves it to an internal index (hm_read_grav.F:177-186 — a MISSING skew
+    id is MSGID=137, a starter ERROR, so only ever pass an id that is really
+    emitted) and the engine then adds the acceleration along that skew's row
+    for DIR instead of the global axis (gravit.F:150-162,
+    ``A(1..3,N) += SKEW(3*N2-2..3*N2, ISK) * AA``). 0 = global.
     """
     return [
         f"/GRAV/{grav_id}",
         title,
         _GRAV_COMMENT,
-        f"{_i(fct)}{direction.rjust(10)}{_i(0)}{_i(0)}{_i(grnod_id)}"
+        f"{_i(fct)}{direction.rjust(10)}{_i(skew_id)}{_i(0)}{_i(grnod_id)}"
         f"{_GRAV_GAP}{_f(1.0)}{_f(fscale)}",
         HDR,
     ]
 
 
 def _rbody_mains_in_scope(state: ConversionState, rbody_info: Dict,
-                          pids: List[int],
-                          whole_model: bool) -> Tuple[Set[int], List[int]]:
+                          pids: List[int], whole_model: bool,
+                          pnodes: Optional[Dict] = None,
+                          keyword: str = "") -> Tuple[Set[int], List[int]]:
     """Which parts of a /GRAV scope are rigid, and which /RBODY main nodes the
     /GRAV must therefore load.  Returns ``(rigid_part_pids, main_node_ids)``.
 
@@ -1210,21 +1219,38 @@ def _rbody_mains_in_scope(state: ConversionState, rbody_info: Dict,
     parts in ``rbody_part_modif.F90``/``rpart_grav_check`` — which never fires
     on a k2rad deck, because that check is gated on ``npby(21,·) /= 0``, true
     only for rigid bodies auto-generated from a /PART, and k2rad emits explicit
-    /RBODY cards). Load is not doubled: the CNRB main carries exactly the
-    summed mass of the secondaries whose own contribution is discarded.
+    /RBODY cards). The body accelerates correctly and exactly once: the CNRB
+    main carries the summed mass of the secondaries whose own contribution is
+    discarded. **Energy bookkeeping is the one thing this costs.** The
+    secondaries stay in the /GRNOD/PART (they belong to deformable parts that
+    must keep their own gravity), so ``gravit.F:148`` accumulates
+    ``Σ m_secondary·g·v·dt`` for them *and* the same mass again through the
+    main — a CNRB in scope inflates the reported EXT WORK by its own mass
+    contribution without moving a single node differently. That is exactly the
+    term swapping rigid PARTS out avoids, and it cannot be avoided here.
 
-    A rigid part OUTSIDE the scope is deliberately NOT pulled in even when it
-    shares nodes with a scoped deformable part: its main would then take the
-    whole body's mass at ``g`` where LS-DYNA loads only the shared fraction.
+    **A deliberate asymmetry, in scoped loads.** A rigid part OUTSIDE the scope
+    is NOT pulled in even when it shares nodes with a scoped deformable part:
+    its main would then take the whole body's mass at ``g`` where LS-DYNA loads
+    only the shared fraction. A rigid CLUSTER that straddles the scope is the
+    opposite — a CNRB whose secondaries reach outside, or a
+    *CONSTRAINED_RIGID_BODIES merge whose partner part is unscoped — because
+    there is no way to load *part* of one rigid body: the cluster has a single
+    main node and a single mass. Those get the main anyway (case (b) is also
+    what the starter's own ``rpart_grav_check`` does), so the whole cluster
+    accelerates at ``g`` where LS-DYNA would give ``g·m_scoped/m_cluster``. The
+    load is then an upper bound and the caller warns about it.
     """
     if not rbody_info:
         return set(), []
-    rigid_mids = set(state.mat_rigid)
-    # rbody_info is keyed by part id for *MAT_RIGID bodies and by the CNRB's
-    # own pid for *CONSTRAINED_NODAL_RIGID_BODY; only the former is a whole
-    # rigid PART that may be swapped out of a /GRNOD/PART.
-    part_keyed = {p for p in rbody_info
-                  if p in state.parts and state.parts[p].mid in rigid_mids}
+    # Records are tagged by their builder: "part" = a whole *MAT_RIGID PART
+    # (the only kind that may be swapped out of a /GRNOD/PART), "cnrb" = a
+    # *CONSTRAINED_NODAL_RIGID_BODY over nodes of deformable parts. Reading the
+    # tag rather than re-deriving it from state.parts[p].mid also survives the
+    # rbody_info/cnrb_info merge in assembly.py, which is keyed by two id
+    # namespaces at once.
+    part_keyed = {p for p, info in rbody_info.items()
+                  if info.get("kind", "part") == "part"}
     rigid_part_pids = {p for p in pids if p in part_keyed}
     # *CONSTRAINED_RIGID_BODIES slaves are aliased onto their master's record,
     # so several pids can share one ind_node — dedupe on the node, not the pid.
@@ -1233,8 +1259,18 @@ def _rbody_mains_in_scope(state: ConversionState, rbody_info: Dict,
     if whole_model:
         mains.update(info["ind_node"] for info in others)
         return rigid_part_pids, sorted(mains)
+    # Scoped load: report every rigid cluster the scope only partly covers, so
+    # the user knows those bodies get g on their FULL mass (see the docstring).
+    partial: Set[int] = set()
+    cluster: Dict[int, Set[int]] = defaultdict(set)
+    for p in part_keyed:
+        cluster[rbody_info[p]["ind_node"]].add(p)
+    for main in mains:
+        if not cluster[main] <= rigid_part_pids:
+            partial.add(main)
     if others:
-        pnodes = _part_node_sets(state)
+        if pnodes is None:
+            pnodes = _part_node_sets(state)
         scope_nodes: Set[int] = set()
         for p in pids:
             if p not in rigid_part_pids:
@@ -1243,6 +1279,22 @@ def _rbody_mains_in_scope(state: ConversionState, rbody_info: Dict,
             for info in others:
                 if scope_nodes.intersection(info["nodes"]):
                     mains.add(info["ind_node"])
+                    if not set(info["nodes"]) <= scope_nodes:
+                        partial.add(info["ind_node"])
+    if partial:
+        shown = ", ".join(str(n) for n in sorted(partial)[:8])
+        if len(partial) > 8:
+            shown += ", ..."
+        state.warn(
+            f"{keyword or '*LOAD_*'} -> /GRAV on part(s) {sorted(pids)}: the "
+            f"scope covers only PART of the rigid body/bodies whose main "
+            f"node(s) are {shown} (a *CONSTRAINED_NODAL_RIGID_BODY reaching "
+            "outside the scope, or a *CONSTRAINED_RIGID_BODIES merge with an "
+            "unscoped partner). A rigid body has one main node and one mass, "
+            "so it cannot be loaded fractionally: the WHOLE cluster is "
+            "accelerated at g, where LS-DYNA applies g*m_scoped/m_cluster. The "
+            "converted load is an UPPER BOUND on those bodies - scope the load "
+            "to the whole cluster if that is not what you want.")
     return rigid_part_pids, sorted(mains)
 
 
@@ -1263,20 +1315,26 @@ def _grav_groups(state: ConversionState, part_pids: List[int],
     Id allocation order is deliberate: the part group and the /GRAV itself keep
     the ids they have always drawn, and the two extra groups are allocated
     afterwards and only when they exist. A load whose scope holds no rigid body
-    therefore emits byte-identical cards to the pre-fix converter.
+    therefore emits the same /GRNOD cards, with the same ids, as the pre-fix
+    converter (the /GRAV card itself changes — see _emit_grav_card).
+
+    The group ids come from ``next_grnod_id()``, not ``next_id()``: k2rad
+    re-emits user *SET_NODE groups under their own SID, so a deck with a
+    *SET_NODE id at or above the auto-id base would otherwise hand the starter
+    two /GRNOD cards with the same id (ERROR 79, no restart file).
     """
-    grnod_id = state.next_id() if part_pids else 0
+    grnod_id = state.next_grnod_id() if part_pids else 0
     grav_id = state.next_id()
     lines: List[str] = []
     if part_pids:
         lines += _emit_grnod_part(grnod_id, f"{stem}_{part_kind}_{grav_id}",
                                   part_pids)
     if main_nodes:
-        mains_id = state.next_id()
+        mains_id = state.next_grnod_id()
         lines += _emit_grnod_node(mains_id, f"{stem}_rbody_mains_{grav_id}",
                                   main_nodes)
         if part_pids:
-            union_id = state.next_id()
+            union_id = state.next_grnod_id()
             lines += _emit_grnod_grnod(union_id, f"{stem}_group_{grav_id}",
                                        [grnod_id, mains_id])
             grnod_id = union_id
@@ -1307,16 +1365,37 @@ def _make_gravity_loads(state: ConversionState,
                         rbody_info: Optional[Dict] = None) -> List[str]:
     """*LOAD_GRAVITY_PART → /GRAV (non-modal decks).
 
-    Sign: the R16/R17 manual states NO sign for *LOAD_GRAVITY_PART's ACCEL
-    (p.33-57 defines it only as "Acceleration (will be multiplied by factor
-    from curve)"), so the convention is taken from the only authority that
-    fixes one — Radioss' own dyna-reader, which negates it exactly like
-    *LOAD_BODY (``convertloads.cxx:859``: ``Fscale_Y = -lsdACCEL``). So
-    Fscale_Y carries a minus sign: -accel for the constant form (lc = 0,
-    fct_IDT = 0 → constant gravity = Fscale_Y), or -1 × curve lc for the
-    time-dependent form.  Parts sharing (dof, lc, accel) are grouped into one
-    /GRAV; rigid parts in that group are replaced by their /RBODY main node
-    (see _rbody_mains_in_scope).
+    Magnitude: the load is ACCEL × factor(t), NOT one or the other. Manual Vol
+    I R16 p.33-57 defines LC as the "Load curve defining factor as a function
+    of time" and ACCEL as the "Acceleration (will be multiplied by factor from
+    curve)", and Remark 1a adds "A constant factor of 1.0 is assumed if LC is
+    not specified". So Fscale_Y = ACCEL in BOTH forms, and fct_IDT = LC only
+    picks up the factor curve. (k2rad <= PR #88 wrote Fscale_Y = -1 whenever
+    LC > 0, dropping ACCEL entirely — a factor-|ACCEL| under-load on exactly
+    the ramped staged-construction decks this keyword exists for.) ACCEL is
+    itself optional (its default is 0); a blank ACCEL with a curve means the
+    curve carries the whole acceleration, so a factor of 1.0 is substituted
+    and the substitution warned about.
+
+    Sign: the R16/R17 manual states NO sign for ACCEL — p.33-57 defines it
+    only as an acceleration, and no remark in that keyword's section fixes a
+    direction — so the convention is taken from the only authority that does
+    fix one, Radioss' own dyna-reader (``convertloads.cxx:859``:
+    ``Fscale_Y = -lsdACCEL``). That source file is not part of this repo, but
+    the behaviour is reproducible here: feeding the same ``.k`` straight to
+    ``starter_win64.exe`` (which reads LS-DYNA through dyna2rad) prints
+
+        SKEW  DIRECTION  LOAD CURVE  SENSOR    SCALE_X        SCALE_Y
+           0     Y            1        0    1.000000000  -9810.000000000
+        213
+
+    for ``*LOAD_GRAVITY_PART 1 2 1 9810`` on a *MAT_RIGID part — the same
+    ``Fscale_Y = -ACCEL``, the same curve, and the same main-node-only group
+    this function emits.
+
+    Parts sharing (dof, lc, accel) are grouped into one /GRAV; rigid parts in
+    that group are replaced by their /RBODY main node (see
+    _rbody_mains_in_scope).
 
     Modal decks emit NO /GRAV: gravity does not change a non-prestressed
     eigenproblem, and the stiffness-export run must stay load-consistent with
@@ -1351,13 +1430,16 @@ def _make_gravity_loads(state: ConversionState,
                        "- gravity is applied for the whole run.")
     lines: List[str] = ["#-  GRAVITY LOADS (*LOAD_GRAVITY_PART):", HDR]
     added_mains: Set[int] = set()
+    # Built once: _rbody_mains_in_scope needs the {pid: nodes} inventory for
+    # every scoped group, and rebuilding it walks every solid/shell/beam.
+    pnodes = _part_node_sets(state) if rbody_info else {}
     for (dof, lc, accel), pids in sorted(groups.items()):
         if lc > 0 and lc not in state.curves:
             state.warn(f"LOAD_GRAVITY_PART: load curve {lc} not found - "
                        f"gravity on part(s) {pids} skipped.")
             continue
         pids = sorted(set(pids))
-        if lc == 0 and accel == 0.0:
+        if accel == 0.0 and lc == 0:
             # Fscale_Y = 0 does NOT mean "no gravity": hm_read_grav.F:190 does
             # IF (FCY == ZERO) FCY = FAC_FCY, silently turning it into the unit
             # -system dimension factor (1.0 in a consistent system). A zero
@@ -1367,8 +1449,9 @@ def _make_gravity_loads(state: ConversionState,
                        "with Fscale_Y = 0 would be read back as 1.0 by the "
                        "starter, hm_read_grav.F:190).")
             continue
-        rigid_pids, mains = _rbody_mains_in_scope(state, rbody_info, pids,
-                                                  whole_model=False)
+        rigid_pids, mains = _rbody_mains_in_scope(
+            state, rbody_info, pids, whole_model=False, pnodes=pnodes,
+            keyword="*LOAD_GRAVITY_PART")
         added_mains.update(mains)
         part_pids = [p for p in pids if p not in rigid_pids]
         if not part_pids and not mains:
@@ -1376,14 +1459,22 @@ def _make_gravity_loads(state: ConversionState,
         glines, grnod_id, grav_id = _grav_groups(state, part_pids, mains,
                                                  "gravity")
         lines += glines
-        # lc>0: curve gives |g|(t), Fscale_Y=-1 flips to the -DOF direction;
-        # lc=0: constant gravity, fct_IDT=0 and Fscale_Y = -accel.
+        # The load is ACCEL x factor(t) (manual p.33-57), so Fscale_Y = -ACCEL
+        # in both forms and fct_IDT only selects the factor curve. ACCEL's own
+        # default is 0, so a blank ACCEL alongside a curve means the curve is
+        # the acceleration: substitute the factor 1.0 rather than emit a load
+        # of literally zero.
         fct = lc if lc > 0 else 0
-        fscale = -1.0 if lc > 0 else -accel
+        if accel == 0.0:
+            state.warn(f"LOAD_GRAVITY_PART part(s) {pids}: ACCEL is 0/blank "
+                       f"with load curve {lc} - taken as ACCEL = 1.0, i.e. "
+                       "curve LC carries the whole acceleration (the literal "
+                       "reading, ACCEL x factor, would be zero load).")
+            accel = 1.0
         lines += _emit_grav_card(
             grav_id,
             f"Gravity_{_DIR[dof]}_parts_" + "_".join(str(p) for p in pids),
-            fct, _DIR[dof], grnod_id, fscale)
+            fct, _DIR[dof], grnod_id, -accel)
     _warn_rbody_mains_added(state, "*LOAD_GRAVITY_PART", added_mains)
     return lines if len(lines) > 2 else []
 
@@ -1400,12 +1491,22 @@ def _make_body_loads(state: ConversionState,
     on a constant +1.0 curve, commented "Add gravity such that it acts in the
     negative Z-direction" — is annotated "Note: Positive body load acts in the
     negative direction." So Fscale_Y = -SF, which is also what the Radioss
-    dyna-reader emits (``convertloads.cxx:247``: ``Fscale_Y = -lsdSF``) and
-    what the *LOAD_GRAVITY_PART path here has always done.
+    dyna-reader emits (``convertloads.cxx:247``: ``Fscale_Y = -lsdSF``). That
+    source file is not part of this repo, but the behaviour is reproducible
+    here: read the same ``.k`` straight into ``starter_win64.exe`` and its
+    GRAVITY LOADS echo gives ``SCALE_Y = -9810`` for ``SF = +9810`` and
+    ``SCALE_Y = +9810`` for ``SF = -9810`` — an unconditional negation. The
+    manual's *LOAD_BODY_VECTOR example is a third, independent confirmation:
+    it specifies ``-1.0, -1.0, -1.0`` to obtain a body force in the POSITIVE
+    (1,1,1) direction (p.33-29).
 
     Scope is the whole model unless a *LOAD_BODY_PARTS card names a part set
     (manual p.33-25; only one such card is permitted per deck, so the last one
-    wins — the same single-int, last-wins rule as ``convertloads.cxx:169-182``).
+    wins). Every *LOAD_BODY_* card in the deck shares that one scope, so the
+    /GRNOD group is built once and all the /GRAV cards reference it.
+
+    CID names a local system the acceleration is given in ("The accelerations
+    (LCID) are with respect to CID", p.33-27) and becomes the /GRAV skew_ID.
     Rigid parts in scope are represented by their /RBODY main node; see
     _rbody_mains_in_scope.
 
@@ -1413,6 +1514,15 @@ def _make_body_loads(state: ConversionState,
     non-prestressed eigenproblem).
     """
     if not state.body_loads or state.is_modal:
+        if state.body_load_psid and not state.is_modal:
+            # Parsed, stored, and then nothing consumed it: without this the
+            # conversion log says nothing at all about the card (it has a
+            # handler, so it never reaches skipped_keywords either).
+            state.note_recognized_not_emitted(
+                "LOAD_BODY_PARTS",
+                f"part set {state.body_load_psid} scopes the *LOAD_BODY_* "
+                "cards, but the deck has no *LOAD_BODY_{X,Y,Z} card for it to "
+                "scope - nothing emitted.")
         return []
     rbody_info = rbody_info or {}
     whole_model = True
@@ -1435,23 +1545,41 @@ def _make_body_loads(state: ConversionState,
     if not all_pids:
         return []
     rigid_pids, mains = _rbody_mains_in_scope(state, rbody_info, all_pids,
-                                              whole_model=whole_model)
+                                              whole_model=whole_model,
+                                              keyword="*LOAD_BODY_*")
     part_pids = [p for p in all_pids if p not in rigid_pids]
     if not part_pids and not mains:
         return []
     lines: List[str] = ["#-  BODY LOADS (*LOAD_BODY_* -> /GRAV):", HDR]
     emitted = False
+    grnod_id: Optional[int] = None
     for bl in state.body_loads:
         if bl.lcid not in state.curves:
             state.warn(f"*LOAD_BODY_{bl.dir}: load curve {bl.lcid} not found "
                        "— skipped.")
             continue
         emitted = True
-        glines, grnod_id, grav_id = _grav_groups(state, part_pids, mains,
-                                                 "body_load", part_kind)
-        lines += glines
+        if grnod_id is None:
+            # The scope is deck-global, so one group set serves every
+            # *LOAD_BODY_* card. Building it here rather than before the loop
+            # keeps the first card's ids exactly where they always were.
+            glines, grnod_id, grav_id = _grav_groups(state, part_pids, mains,
+                                                     "body_load", part_kind)
+            lines += glines
+        else:
+            grav_id = state.next_id()
+        skew_id = 0
+        if bl.cid:
+            if (bl.cid in state.coord_sys or bl.cid in state.coord_nodes
+                    or bl.cid in state.coord_vectors):
+                skew_id = bl.cid
+            else:
+                state.warn(
+                    f"*LOAD_BODY_{bl.dir}: local system CID={bl.cid} not found "
+                    "— the base acceleration is applied along the GLOBAL "
+                    f"{bl.dir} axis.")
         lines += _emit_grav_card(grav_id, f"Body_accel_{bl.dir}", bl.lcid,
-                                 bl.dir, grnod_id, -bl.sf)
+                                 bl.dir, grnod_id, -bl.sf, skew_id)
     if not emitted:
         return []
     state.warn(
