@@ -156,6 +156,139 @@ class ConstrainedSpotweld:
     title: str = ""
 
 
+#: LS-DYNA *CONSTRAINED_JOINT_<KIND> → the /PROP/TYPE45 ``Type`` integer.
+#: Verified against prop_p45_kjoint2.cfg lines 261-272 (1 Spherical, 2 Revolute,
+#: 3 Cylindrical, 4 Planar, 5 Universal, 6 Translational, 7 Oldham, 8 Fixed,
+#: 9 Free) and against dyna2rad's own dispatch (convertconstrainedjoints.cxx
+#: 1613/1640/1666/1692/1718/1744/1770). LOCKING → 8 (rigid), NOT 7 (Oldham):
+#: Oldham is a planar joint without rotation and has no LS-DYNA counterpart.
+JOINT_TYPE45 = {
+    "SPHERICAL": 1,
+    "REVOLUTE": 2,
+    "CYLINDRICAL": 3,
+    "PLANAR": 4,
+    "UNIVERSAL": 5,
+    "TRANSLATIONAL": 6,
+    "LOCKING": 8,
+}
+
+#: Which LS-DYNA card-1 node slots become the /SPRING node list, per joint kind
+#: (1-based LS-DYNA slot numbers). The solver builds the joint frame from these
+#: (rini45.F GET_SKEW45), so the order is load-bearing:
+#:   3 nodes  → local x = spring node 3 − node 1
+#:   4 nodes, Type≠5 → x = n3−n1, ȳ = n4−n1
+#:   4 nodes, Type=5 → y = n3−n1, z = n4−n1, x = y×z
+#: LOCKING forwards N5 (body A's second auxiliary node) into slot 4 — N4/N6
+#: (body B) are dropped, exactly as dyna2rad does (joints.cxx 1630-1631).
+JOINT_SPRING_SLOTS = {
+    "SPHERICAL": (1, 2),
+    "REVOLUTE": (1, 2, 3),
+    "CYLINDRICAL": (1, 2, 3),
+    "PLANAR": (1, 2, 3),
+    "UNIVERSAL": (1, 2, 3, 4),
+    "TRANSLATIONAL": (1, 2, 3),
+    "LOCKING": (1, 2, 3, 5),
+}
+
+#: Minimum node count the starter requires per /PROP/TYPE45 Type — rini45.F:391
+#: ``NNOD_REQ = [2, 3, 3, 3, 4, 3, 3, 2, 4]`` for Types 1..9. Falling below it
+#: with Skew_ID1 = 0 is starter ERROR 936.
+JOINT_NNOD_REQ = {1: 2, 2: 3, 3: 3, 4: 3, 5: 4, 6: 3, 7: 3, 8: 2, 9: 4}
+
+#: Free DOFs per /PROP/TYPE45 Type, in the exact order the reader expects the
+#: 3-card DOF blocks (prop_p45_kjoint2.cfg FORMAT(radioss2019) lines 925-1224 /
+#: hm_read_prop45.F LEC_DOF_JNT call order). The blocks are all-or-nothing: a
+#: partial set is starter ERROR 973 (ONLY %d DOF DEFINED %d REQUIRED).
+JOINT_TYPE45_DOFS = {
+    1: ("Rx", "Ry", "Rz"),
+    2: ("Rx",),
+    3: ("Tx", "Rx"),
+    4: ("Ty", "Tz", "Rx"),
+    5: ("Ry", "Rz"),
+    6: ("Tx",),
+    7: ("Ty", "Tz"),
+    8: (),
+    9: ("Tx", "Ty", "Tz", "Rx", "Ry", "Rz"),
+}
+
+
+@dataclass
+class ConstrainedJoint:
+    """*CONSTRAINED_JOINT_<KIND>[_LOCAL][_FAILURE][_ID|_TITLE] → one synthesized
+    /PART + /PROP/TYPE45 (KJOINT2) + one 2..4-node /SPRING per joint.
+
+    Card 1 (all fields 10 wide): ``N1 N2 N3 N4 N5 N6 RPS DAMP``.
+    N1/N3/N5 belong to rigid body A, N2/N4/N6 to body B; the pairs (1,2), (3,4),
+    (5,6) are coincident by design — except UNIVERSAL, where (3,4) are not and
+    lines (1,3) ⟂ (2,4). Coincidence is never checked or enforced (dyna2rad does
+    not either: there is no GetPosition() comparison anywhere on that path).
+
+    /PROP/TYPE13 (SPR_BEAM) was considered and rejected: it is a 6-DOF penalty
+    spring with no kinematic DOF selector and no joint frame, so a revolute
+    joint would need a stiff/soft split per DOF that still would not track the
+    axis as the bodies rotate. /PROP/TYPE45 IS the joint property — it blocks
+    the constrained DOFs with a solver-computed stiffness (Kn=0 → auto from the
+    time step) and leaves exactly the joint's free DOFs.
+    """
+    kind: str                   # SPHERICAL | REVOLUTE | ... (option suffixes stripped)
+    keyword: str = ""           # the full LS-DYNA keyword, for messages
+    jid: int = 0                # _ID / _TITLE id; 0 when the card carries none
+    title: str = ""
+    n1: int = 0
+    n2: int = 0
+    n3: int = 0
+    n4: int = 0
+    n5: int = 0
+    n6: int = 0
+    rps: float = 1.0            # relative penalty stiffness → /PROP/TYPE45 ScF
+    damp: float = 1.0           # damping scale (no Radioss counterpart, warned)
+    has_local: bool = False     # _LOCAL: RAID/LST output frame (dropped, warned)
+    has_failure: bool = False   # _FAILURE: CID/TFAIL/COUPL + N**/M** (dropped)
+
+    def spring_nodes(self) -> List[int]:
+        """The /SPRING node list for this joint kind, gaps compacted away.
+
+        GET_SKEW45 compacts non-zero IXR/IXR_KJ slots before building the frame,
+        so a hole would silently shift NN(3)/NN(4) — the list must be written
+        contiguously (card-format spec §2, trap 2)."""
+        slots = JOINT_SPRING_SLOTS.get(self.kind, (1, 2))
+        vals = (0, self.n1, self.n2, self.n3, self.n4, self.n5, self.n6)
+        return [vals[s] for s in slots if vals[s] > 0]
+
+
+@dataclass
+class JointStiffness:
+    """*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
+    stiffness / damping / friction / stop blocks of a joint's /PROP/TYPE45.
+
+    Card 1: ``JSID PIDA PIDB CIDA CIDB JID [RPS]`` (RPS is a later addition —
+    the bundled Keyword971 cfg writes only six fields, so it is optional).
+    The three option cards carry one triple per channel:
+      GENERALIZED   φ/θ/ψ  — LCIDPH/LCIDT/LCIDPS, DLCID*, ESPH/EST/ESPS,
+                             FMPH/FMT/FMPS, NSA*/PSA* stop ANGLES in DEGREES
+      TRANSLATIONAL x/y/z  — LCIDX/Y/Z, DLCID*, ESX/ESY/ESZ, FFX/FFY/FFZ,
+                             NSD*/PSD* stop DISPLACEMENTS
+    A negative FM*/FF* means ``-FM*`` is a curve id for the yield moment/force;
+    in Radioss that is the separate fct_fm*/fct_ff* field.
+    """
+    option: str                 # GENERALIZED | TRANSLATIONAL
+    jsid: int = 0
+    pida: int = 0
+    pidb: int = 0
+    cida: int = 0
+    cidb: int = 0
+    jid: int = 0
+    rps: float = 0.0
+    title: str = ""
+    # Per-channel triples, index 0/1/2 = φ,θ,ψ (GENERALIZED) or x,y,z (TRANS).
+    lcid: Tuple[int, int, int] = (0, 0, 0)      # stiffness curve
+    dlcid: Tuple[int, int, int] = (0, 0, 0)     # damping curve
+    es: Tuple[float, float, float] = (0.0, 0.0, 0.0)    # elastic stop stiffness
+    fm: Tuple[float, float, float] = (0.0, 0.0, 0.0)    # friction limit (<0 = curve)
+    nstop: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # negative stop
+    pstop: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # positive stop
+
+
 @dataclass
 class PartData:
     pid: int
@@ -2019,6 +2152,20 @@ class ConversionState:
     # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
     constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
+    # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
+    # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
+    constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
+    # *CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL → the DOF
+    # stiffness/damping/friction/stop blocks of the matched joint's /PROP/TYPE45
+    joint_stiffnesses: List[JointStiffness] = field(default_factory=list)
+    # Joint index (position in constrained_joints) → the /SKEW id carrying its
+    # local frame. Filled by the writer prepass _resolve_joints so the ids are
+    # reserved in the shared /SKEW+/FRAME namespace before /FRAME allocation.
+    joint_skew_ids: Dict[int, int] = field(default_factory=dict)
+    # Every node a converted joint /SPRING touches — the implicit free-node
+    # guard must see these (they carry joint stiffness, so /BCS-fixing them
+    # would weld the joint solid).
+    joint_spring_nodes: set = field(default_factory=set)
     # Ground nodes synthesized by the connector writer (registered in
     # state.nodes for id-collision safety; excluded from the implicit
     # free-node guard because they are already fully fixed by /BCS)
@@ -2263,6 +2410,16 @@ class ConversionState:
             fid = self.next_id()
         return fid
 
+    def next_part_id(self) -> int:
+        """A next_id() guaranteed free in the /PART namespace, so a synthesized
+        connector /PART can never collide with a converted *PART whose PID
+        happens to be at or above the auto-id base (90001). Same guard shape as
+        next_curve_id, and a no-op vs next_id() in the common case."""
+        pid = self.next_id()
+        while pid in self.parts:
+            pid = self.next_id()
+        return pid
+
     def all_skew_ids(self) -> set:
         """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/
         _VECTOR (id = cid) and the *DEFINE_VECTOR[_NODES]/_SD_ORIENTATION skews
@@ -2273,7 +2430,8 @@ class ConversionState:
         return (set(self.coord_sys) | set(self.coord_nodes)
                 | set(self.coord_vectors)
                 | set(self.vector_skew_ids.values())
-                | set(self.sdorient_skew_ids.values()))
+                | set(self.sdorient_skew_ids.values())
+                | set(self.joint_skew_ids.values()))
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)

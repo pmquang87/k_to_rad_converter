@@ -713,6 +713,46 @@ def _off_inivel_generation(b: Block, offsets: Dict[str, int], warn) -> None:
                 b.raw[start + 1] = new
 
 
+def _off_joint_stiffness(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED / _TRANSLATIONAL.
+
+    Card 1  JSID PIDA PIDB CIDA CIDB JID [RPS]  — parts, coordinate systems and
+            the joint id it points at.
+    Card 2  six load-curve ids.
+    Card 3  ES/FM pairs — NOT rewritten. The ES fields are float stiffnesses, so
+            a static ("f") field map would run to_int over ESPH=1000.0 and turn
+            it into 1000+IDFOFF, silently changing the physics. The FM/FF fields
+            are ids only when NEGATIVE (-FM is the yield-moment curve id), an
+            encoding _rewrite_line deliberately leaves alone. A negative one is
+            therefore warned about rather than guessed at.
+    Card 4  stop angles / displacements: pure floats, never offset.
+    """
+    toff = _title_offset(b)
+    if toff and "ID" in b.options and b.raw:
+        new = _rewrite_id_header(b.raw[0], offsets.get("r", 0))
+        if new is not None:
+            b.raw[0] = new
+    for ci, mods in ((0, [(0, "r"), (1, "p"), (2, "p"), (3, "d"), (4, "d"),
+                          (5, "r")]),
+                     (1, [(i, "f") for i in range(6)])):
+        idx = toff + ci
+        if idx < len(b.raw) and b.raw[idx].strip():
+            new = _rewrite_line(b.raw[idx], mods, offsets)
+            if new is not None:
+                b.raw[idx] = new
+    idx = toff + 2
+    if offsets.get("f", 0) and idx < len(b.raw) and b.raw[idx].strip():
+        f = _fields(b.raw[idx])
+        neg = [f[i] for i in (1, 3, 5)
+               if len(f) > i and to_float(f[i], 0.0) < 0.0]
+        if neg:
+            warn(f"*INCLUDE_TRANSFORM: *{b.keyword} has a negative FM/FF field "
+                 f"({', '.join(neg)}), which LS-DYNA reads as a load-curve id, "
+                 "but IDFOFF is NOT applied to it (the field is a float "
+                 "elsewhere on the same card). Check that the curve id still "
+                 "resolves in the transformed include.")
+
+
 def _off_mat_077(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_OGDEN_RUBBER / *MAT_HYPERELASTIC_RUBBER (077_O/077_H): MID →
     IDMOFF; card 2 is conditional on card-1 N — it carries the LCID1/LCID2
@@ -949,6 +989,20 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONSTRAINED_GENERALIZED_WELD_SPOT": {"cards": {0: [(0, "s"), (1, "d")]}},
     "CONSTRAINED_NODE_SET": {"cards": {0: [(0, "s")]}},
     "CONSTRAINED_LAGRANGE_IN_SOLID": _off_constrained_lagrange_in_solid,
+    # Joints. Card 1 is N1..N6 + RPS/DAMP for every kind and every option
+    # combination (the _LOCAL and _FAILURE cards follow it), so one spec covers
+    # all 28 registered keywords. The _ID heading's JID goes to IDROFF, the same
+    # bucket *CONSTRAINED_JOINT_STIFFNESS's JID field uses, so the reference
+    # between them survives the include.
+    **{f"CONSTRAINED_JOINT_{_k}{_o}":
+       {"cards": {0: [(_i, "n") for _i in range(6)]}, "idhdr": "r"}
+       for _k in ("SPHERICAL", "REVOLUTE", "CYLINDRICAL", "PLANAR",
+                  "UNIVERSAL", "TRANSLATIONAL", "LOCKING")
+       for _o in ("", "_LOCAL", "_FAILURE", "_LOCAL_FAILURE")},
+    "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED": _off_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_TRANSLATIONAL": _off_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_FLEXION-TORSION": _off_joint_stiffness,
+    "CONSTRAINED_JOINT_STIFFNESS_CYLINDRICAL": _off_joint_stiffness,
 
     # Rigid walls (id → IDPOFF per the R16 manual bucket list)
     "RIGIDWALL_PLANAR": {"cards": {0: [(0, "s"), (1, "s"), (2, "d")]},

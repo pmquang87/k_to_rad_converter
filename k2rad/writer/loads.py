@@ -2414,6 +2414,10 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         elem_nodes.update((d.n1, d.n2))
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
+    # *CONSTRAINED_JOINT nodes carry the /PROP/TYPE45 joint spring; fixing them
+    # here would weld the joint solid. Registered by the _resolve_joints prepass
+    # so this does not depend on the joint section having run yet.
+    elem_nodes.update(state.joint_spring_nodes)
     elem_nodes.update(state.connector_ground_nodes)
     keep_free: Set[int] = set()
     for cn in state.coord_nodes.values():
