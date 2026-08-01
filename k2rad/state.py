@@ -1664,10 +1664,12 @@ class LoadBody:
       dir  = axis letter from the keyword suffix ("X" | "Y" | "Z")
       lcid = acceleration-vs-time curve (magnitude)
       sf   = scale factor
-    The applied acceleration field is ``sf × lcid(t)`` along ``dir``; maps to an
-    OpenRadioss /GRAV over every part. LS-DYNA's base-acceleration sign
-    convention is transcribed directly (Fscale = sf), which the writer flags for
-    the user to verify against /GRAV.
+    The applied acceleration field is ``sf × lcid(t)`` along the NEGATIVE
+    ``dir`` axis — a base acceleration accelerates the coordinate system, so the
+    inertial load on the model has the opposite sign (Manual Vol I R16
+    p.33-27/33-28, "Note: Positive body load acts in the negative direction").
+    Maps to an OpenRadioss /GRAV with ``Fscale_Y = -sf``, over every part unless
+    a *LOAD_BODY_PARTS card scopes it to a part set.
     """
     dir: str            # "X" | "Y" | "Z"
     lcid: int
@@ -1678,9 +1680,10 @@ class LoadBody:
 class GravityLoadPart:
     """*LOAD_GRAVITY_PART — gravity body load on one part → /GRAV.
 
-    LS-DYNA card: pid dof lc accel lcdr stga stgr.  DOF 1/2/3 loads the part in
-    the NEGATIVE X/Y/Z direction (all-positive inputs give a downward load); the
-    Radioss dyna-reader maps it to /GRAV the same way, so the writer emits
+    LS-DYNA card: pid dof lc accel lcdr stga stgr.  DOF 1/2/3 loads the part
+    along X/Y/Z; the R16/R17 manual (p.33-57) fixes NO sign for ACCEL, so the
+    convention is taken from the Radioss dyna-reader, which negates it exactly
+    like *LOAD_BODY (``convertloads.cxx:859``) — the writer emits
     Fscaley = -accel (or -1 × curve LC when lc > 0).  Gravity is irrelevant to a
     non-prestressed eigenproblem, so modal decks only get an informational note.
     """
@@ -2280,6 +2283,11 @@ class ConversionState:
     gravity_loads: List[GravityLoadPart] = field(default_factory=list)
     # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
     body_loads: List[LoadBody] = field(default_factory=list)
+    # *LOAD_BODY_PARTS PSID — restricts EVERY *LOAD_BODY_* row to that part set
+    # (Manual Vol I R16 p.33-25: the data applies to the complete problem
+    # "unless a part subset is specified via the *LOAD_BODY_PARTS keyword", and
+    # "Only one *LOAD_BODY_PARTS card is permitted per deck"). 0 = whole model.
+    body_load_psid: int = 0
     # *LOAD_BLAST_ENHANCED sources keyed by bid, and the
     # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
     blast_sources: Dict[int, LoadBlastEnhanced] = field(default_factory=dict)

@@ -638,8 +638,14 @@ def _starter_section_registry():
         ("initial_velocity_generation",
                               lambda c: _make_initial_velocity_generation(c.state)),
         ("pressure_loads",    lambda c: _make_pressure_loads(c.state)),
-        ("gravity_loads",     lambda c: _make_gravity_loads(c.state)),
-        ("body_loads",        lambda c: _make_body_loads(c.state)),
+        # Both gravity paths need rbody_info: a /GRAV whose group holds only
+        # rigid secondary nodes moves nothing (the engine overwrites their
+        # acceleration from the main node), so the /RBODY main nodes have to be
+        # in the group. See _rbody_mains_in_scope.
+        ("gravity_loads",     lambda c: _make_gravity_loads(c.state,
+                                                            c.rbody_info)),
+        ("body_loads",        lambda c: _make_body_loads(c.state,
+                                                         c.rbody_info)),
         ("blast_loads",       lambda c: _make_blast_loads(c.state)),
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
