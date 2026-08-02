@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import ConversionState
-from .mesh import _effective_solid_isolid
+from .mesh import _effective_solid_isolid, _target_mat_law
 from .common import (
     HDR,
     _elform_to_ishell,
@@ -282,30 +282,15 @@ def _make_initial_stresses(state: ConversionState) -> List[str]:
 
 # Radioss law numbers the starter accepts for a SOLID-part /XREF
 # (hm_read_xref.F:222-226, else ERROR 2014). Shell parts skip the check.
+#
+# The mid → law resolution is NOT done here: ``mesh.py::_target_mat_law`` is the
+# single map of what k2rad really emits per material container, and this gate
+# reads it. It used to have a private 7-family copy, which returned None — "some
+# other law" — for the two families that convert to /MAT/ELAST by a route other
+# than ``*MAT_ELASTIC``: ``*MAT_RIGID`` and the ``*MAT_SPOTWELD`` fallback. Both
+# are LAW1, LAW1 is on the whitelist above, so both were dropped under a warning
+# that claimed a law violation that does not exist.
 _XREF_SOLID_LAWS = frozenset({1, 35, 38, 42, 70, 88, 90})
-
-
-def _xref_target_law(state: ConversionState, mid: int):
-    """The Radioss law number *mid* converts to, for the /XREF solid-law gate
-    (only the laws k2rad emits need mapping; None = some other/unknown law)."""
-    if mid in state.mat_elastic:
-        return 1
-    if mid in state.mat_low_density_foam:
-        return 38
-    if mid in state.mat_fu_chang_foam:
-        return 70
-    if mid in state.mat_blatz_ko:
-        return 42
-    m = state.mat_mooney_rivlin.get(mid)
-    if m is not None:
-        return 69 if m.use_law69 else 42
-    m = state.mat_ogden.get(mid)
-    if m is not None:
-        return 69 if m.n > 0 else 42
-    m = state.mat_hyper_rubber.get(mid)
-    if m is not None:
-        return 69 if m.n > 0 else 95
-    return None
 
 
 def _resolve_xref_parts(state: ConversionState) -> None:
@@ -320,7 +305,18 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     elements and a 1-integration-point or Ismstr>=10 formulation (ERROR 2013).
     k2rad instead skips the un-runnable combinations with a loud warning
     (deliberate deviation — the converted deck must pass the starter) and
-    fixes the formulation side by emitting Ismstr=10 for the kept parts."""
+    fixes the formulation side by emitting Ismstr=10 for the kept parts.
+
+    One skip is NOT a starter rule but a physics one: a ``*MAT_RIGID`` part.
+    It converts to an /RBODY, so every node it owns is kinematically slaved to
+    the rigid master and the part has no strain state a stress-free reference
+    geometry could define. The starter takes the block quite happily — its
+    /MAT/ELAST is LAW1, on the whitelist, and a rigid brick carrying a /XREF
+    measures 0 ERROR(S) 0 WARNING(S) on ``starter_win64`` — it just does
+    nothing, while on the solid side it drags the part's *SECTION_SOLID to
+    Ismstr=10 (and, through the shared-section rule in ``_emit_prop_solid``,
+    any deformable part sharing that section with it). Skipped for both solid
+    and shell rigid parts, so the rule is one rule with one reason."""
     state.xref_part_ids = set()
     if not state.foam_ref_geoms:
         return
@@ -336,6 +332,22 @@ def _resolve_xref_parts(state: ConversionState) -> None:
         if not (pnodes.get(pid, set()) & ref_nids):
             continue
         any_hit = True
+        if part.mid in state.mat_rigid:
+            state.warn(
+                f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} (mid "
+                f"{part.mid}) is a *MAT_RIGID part — it converts to an /RBODY, "
+                "so all of its nodes are kinematically slaved to the rigid "
+                "master and it has no strain state for a stress-free "
+                "reference geometry to define; /XREF skipped. This is NOT a "
+                "starter rejection: the part's /MAT/ELAST is LAW1, which IS "
+                "on the solid-/XREF whitelist, and a rigid brick carrying the "
+                "block measures 0 ERROR(S) 0 WARNING(S). It is skipped "
+                "because it would change no physics while forcing the part's "
+                "*SECTION_SOLID to Ismstr=10 — which any deformable part "
+                "sharing that section is dragged along into. If the reference "
+                "geometry was meant for a deformable part, check the node "
+                "table: it currently reaches a rigid one.")
+            continue
         if pid in solid_pids:
             if pid in tet10_pids:
                 state.warn(
@@ -344,16 +356,18 @@ def _resolve_xref_parts(state: ConversionState) -> None:
                     "(ERROR 2013); /XREF skipped for this part, it starts "
                     "unstressed (or convert with --tet10-to-tet4).")
                 continue
-            law = _xref_target_law(state, part.mid)
+            law = _target_mat_law(state, part.mid)
             if law not in _XREF_SOLID_LAWS:
                 state.warn(
                     f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} (mid "
                     f"{part.mid}) converts to "
-                    f"{'/MAT/LAW%d' % law if law else 'a law'} outside the "
-                    "starter's solid-/XREF whitelist (LAW 1/35/38/42/70/88/90, "
-                    "else ERROR 2014) — /XREF skipped for this part, it "
-                    "starts unstressed at the modeled coordinates. (dyna2rad "
-                    "emits it and the starter then rejects the deck.)")
+                    + (f"/MAT/LAW{law}, which is" if law is not None
+                       else "no /MAT at all, so it is")
+                    + " outside the starter's solid-/XREF whitelist "
+                      "(LAW 1/35/38/42/70/88/90, else ERROR 2014) — /XREF "
+                      "skipped for this part, it starts unstressed at the "
+                      "modeled coordinates. (dyna2rad emits it and the "
+                      "starter then rejects the deck.)")
                 continue
             state.xref_part_ids.add(pid)
         elif pid in shell_pids:

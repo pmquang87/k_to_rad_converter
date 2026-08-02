@@ -1545,6 +1545,90 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **A `*INITIAL_FOAM_REFERENCE_GEOMETRY` was dropped on `*MAT_RIGID` and
+  `*MAT_SPOTWELD` parts under a warning that named a law violation that does not
+  exist.** `inistate.py` resolved each part's law through its own private
+  7-family table for the starter's solid-`/XREF` whitelist (1/35/38/42/70/88/90,
+  `hm_read_xref.F:222-226`, else ERROR 2014). The table returned `None` — read as
+  "some other law" — for the two families that reach `/MAT/ELAST` by a route
+  other than `*MAT_ELASTIC`: `*MAT_RIGID`, and the `*MAT_SPOTWELD` fallback a
+  MAT_100 part gets when it is not a pure-beam connector. **Both are LAW1 and
+  LAW1 is on that whitelist**, so both lost their stress-free reference geometry
+  and were told the wrong reason for it.
+
+  The table is gone. The gate now reads `mesh.py::_target_mat_law`, the complete
+  mid → law routing added with the `/PROP/BEAM` material check below, so there
+  is ONE such map in the codebase; the off-whitelist message gained the actual law
+  number as a side effect (`/MAT/LAW36, which is outside …` instead of `a law
+  outside …`), and distinguishes it from a material that gets no `/MAT` at all.
+  The two families are then decided on their own merits, both measured on
+  `starter_win64` (nt=6), one hexa on a `*SECTION_SOLID` with a 4-node reference
+  geometry:
+
+  - **`*MAT_SPOTWELD` fallback → the `/XREF` is emitted.** It is an ordinary
+    deformable part with a real unstressed configuration. Converted deck:
+    `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)`. The section is promoted to
+    `Ismstr=10` with it, as for any other kept `/XREF` part (ERROR 2013
+    otherwise). The pure-beam MAT_100 connector is untouched — it has no `/MAT`
+    at all and no solid elements, so it never reaches the gate.
+  - **`*MAT_RIGID` → still no `/XREF`, for the right reason.** The part converts
+    to an `/RBODY`, every node it owns is kinematically slaved to the rigid
+    master, and it has no strain state a reference geometry could define. This
+    is *not* a starter rejection — force-emitting the block on a rigid brick
+    also measures `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)` — it is inert,
+    while dragging the part's `*SECTION_SOLID` from `Ismstr 0` to `10`
+    (measured), which the shared-section rule then propagates to any deformable
+    part using that section. The warning now says that instead. Applied before
+    the solid/shell split, so a rigid *shell* part — which the shell branch,
+    having no law gate, used to hand an equally meaningless `/XREF` — follows
+    the same rule.
+
+- **The element-free composite warning claimed the starter accepts a part that
+  it ERROR-TERMINATES on.** The check guarded on "no shell or solid elements",
+  which is also true of a part holding only BEAM elements, and then promised
+  "the starter ACCEPTS that: its material/property compatibility check runs per
+  ELEMENT GROUP … and a part with no elements contributes none". A beam-only
+  part contributes a group. Measured on `starter_win64` (nt=6), two
+  `*ELEMENT_BEAM` on one `*SECTION_BEAM` ELFORM=2, part material
+  `*MAT_ORTHOTROPIC_ELASTIC` (`/MAT/LAW93`) — `1 ERROR(S)`,
+  `ERROR TERMINATION`:
+
+  ```
+  ERROR ID :   3046
+  ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+  DESCRIPTION :
+     THE FOLLOWING MATERIAL LAW/ELEMENT TYPE COMBINATIONS ARE NOT SUPPORTED:
+     ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 2 OF TYPE 93
+  ```
+
+  3046 and not 3047: every composite law k2rad emits (LAW93/127/43/27) leaves
+  `PROP_BEAM` at the 0 default from `ini_mat_elem.F:89`, which fails the
+  MATERIAL/ELEMENT test in `check_mat_elem_prop_compatibility.F` before any
+  property is examined — so no property this prepass could synthesize would
+  change the outcome, and the warning gives deck-level advice (a beam-capable
+  material, or re-mesh as shells) rather than a mesh hint. The `/PROP/BEAM`
+  material-compatibility check added in the previous release reports the same
+  ERROR 3046 from the property side; the two now agree instead of contradicting
+  each other. A `*PART_COMPOSITE` on a beam part whose own material is fine
+  reports only the dropped layup, mirroring the solid branch.
+
+  **The genuinely element-free case is unchanged** — its softened mesh-check
+  wording is correct and re-measured: the same deck without the beams is
+  `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)`.
+
+- **Stale comment**: the `HANDLERS` table said
+  `*MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction)`. The
+  shipped conversion has been `/MAT/LAW128` (HILL_VISC_PLAST) since the LAW128
+  work landed — Hill surface, Voce hardening and the viscous term all carried
+  over. Comment only; no behaviour change.
+
+- **All three are diagnostics and routing only, no card-format change.** All
+  five goldens are byte-identical and the 72-deck local example corpus
+  re-converts to the same starter+engine SHA256 as on `master`. 22 new tests
+  (1581 → 1603) in a new `tests/test_xref_material_routing.py` plus
+  `tests/test_composites.py`; the `/XREF` block the spotweld fallback now keeps
+  is asserted column-exact.
+
 - **A beam part whose material is not one of five Radioss laws converted to a
   deck that ERROR-TERMINATES the starter, and k2rad said nothing at all.**
   `_make_properties` writes a `/PROP/BEAM` (IGTYP 3) for every `*SECTION_BEAM`

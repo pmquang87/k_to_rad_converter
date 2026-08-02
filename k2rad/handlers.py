@@ -5941,8 +5941,12 @@ HANDLERS = {
     "MAT_99":                                 handle_mat_simplified_johnson_cook_ortho,
     "MAT_098":                                handle_mat_simplified_johnson_cook,
     "MAT_98":                                 handle_mat_simplified_johnson_cook,
-    # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction;
-    # Hill anisotropy + kinematic hardening dropped/folded — see the handler)
+    # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW128 (HILL_VISC_PLAST), the
+    # near 1:1 counterpart: Hill surface, Voce hardening and the viscous term
+    # all carried over. (It is NOT the LAW36 isotropic reduction an older
+    # comment here claimed — that was replaced by LAW128 in PRs #60-#64.)
+    # Kinematic hardening folds into the isotropic Voce fit and the overstress
+    # becomes multiplicative — both warned, see the handler.
     "MAT_ANISOTROPIC_VISCOPLASTIC":           handle_mat_anisotropic_viscoplastic,
     "MAT_103":                                handle_mat_anisotropic_viscoplastic,
 

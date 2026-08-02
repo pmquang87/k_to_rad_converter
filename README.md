@@ -326,9 +326,16 @@ dyna2rad's `K=2G/3`, i.e. ν=0 — warned; its solid sections are emitted with
 coordinates (`NDTRRG`→`Nitrs`); emission follows dyna2rad (unconditional, the
 material `REF` flags only drive coverage warnings), but parts the starter
 would reject are warn-skipped instead (solid `/XREF` accepts laws
-1/35/38/42/70/88/90 only — ERROR 2014 — and 8/4-node solids — ERROR 2013),
+1/35/38/42/70/88/90 only — ERROR 2014 — and 8/4-node solids — ERROR 2013;
+the law comes from the shared `_target_mat_law` routing, so a `*MAT_RIGID` or
+`*MAT_SPOTWELD` part reaching `/MAT/ELAST` counts as LAW1 like any other),
 and the kept parts' solid sections switch to `Ismstr=10` (starter ERROR 2013
-otherwise on the fully-integrated `Isolid=17`); `REF=1` without usable
+otherwise on the fully-integrated `Isolid=17`). One skip is a PHYSICS rule and
+not a starter one: a `*MAT_RIGID` part converts to an `/RBODY`, so its nodes
+are kinematically slaved and it has no strain state to define — the starter
+takes the block (measured `0 ERROR(S) 0 WARNING(S)`) but it is inert, and
+emitting it would drag the part's `*SECTION_SOLID`, and any deformable part
+sharing it, to `Ismstr=10`. `REF=1` without usable
 reference geometry is warned
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
