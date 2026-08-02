@@ -37,6 +37,7 @@ from .composites import (
     _fold_element_beta,
     _make_composite_materials,
     _resolve_composites,
+    _resolve_icomp_sections,
 )
 from .contacts import (
     _make_force_transducers,
@@ -582,6 +583,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # _resolve_composites also before _make_functions, which emits the curves.
     _resolve_composites(state)
     _assign_composite_props(state)
+    # Then report every *SECTION_SHELL ICOMP=1 layup whose angles cannot reach a
+    # Radioss property — needs the composite_prop_ids the line above allocated.
+    _resolve_icomp_sections(state)
 
     # Assign a synthesized orthotropic /PROP id to each LAW128 (MAT_103) part
     # (LAW128 is orthotropic-only). Must run before parts (which repoint the
