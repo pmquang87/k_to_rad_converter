@@ -161,6 +161,17 @@ went with it. It fires on an `*INCLUDE` that did not resolve, a `PID` typo, a
 deck assembled from a subset of its parts, and on any `*PART` variant the parser
 does not yet recognize.
 
+The reverse case — a `*PART` with **no elements at all** — keeps its `/PART`
+and is given a placeholder `/PROP/SHELL`. An empty part is idiomatic
+(`*INTEGRATION_SHELL`'s `PID_i` "may reference a part with no elements",
+Vol I R17 p.29-17, purely to carry a layer material; an element-free
+`*MAT_RIGID` part with `*CONSTRAINED_EXTRA_NODES` forms a real `/RBODY`), and
+its id stays addressable by `*SET_PART` members, `/GRNOD/PART` gravity scopes
+and subsets. Without a property the starter rejects the deck outright
+(ERROR 178, `PROPERTY ID=<pid> DOES NOT EXIST`); the placeholder has no
+elements to act on, so it changes no physics. The parts are named in a warning,
+since an empty part is as often missing mesh as it is a deliberate carrier.
+
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
 `*MAT_PIECEWISE_LINEAR_PLASTICITY` (+ `_MODIFIED_`) → `/MAT/LAW36`
