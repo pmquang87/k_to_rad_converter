@@ -11,8 +11,11 @@ from .materials import (
     _make_functions,
     _make_materials,
     _resolve_define_tables,
+    _resolve_mat_gurson,
     _resolve_mat_hyper_rubber,
+    _resolve_mat_iso_elas_plas,
     _resolve_mat_johnson_cook,
+    _resolve_mat_plas_comp_tens,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
 )
@@ -526,6 +529,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # dropped-field and REF-coverage warnings — before _make_materials emits
     # and before _resolve_xref_parts (which needs the LAW42/LAW69 routing).
     _resolve_mat_hyper_rubber(state)
+    # Metal plasticity batch 2. MAT_012's E/nu come from G/BULK; MAT_120's
+    # hardening input may synthesize a /FUNCT (so before _make_functions) and
+    # registers table ids; MAT_124 only reports dropped fields. All three run
+    # before _make_materials and before _resolve_xref_parts, which reads
+    # _target_mat_law and therefore needs the containers already routed.
+    _resolve_mat_iso_elas_plas(state)
+    _resolve_mat_gurson(state)
+    _resolve_mat_plas_comp_tens(state)
 
     # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
     # its connectivity by CONTENT, which cannot distinguish an all-integer

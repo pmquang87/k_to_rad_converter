@@ -11,6 +11,237 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Metal plasticity batch 2** (`*MAT_PLASTICITY_WITH_DAMAGE` / `*MAT_081` /
+  `*MAT_082` + `_ORTHO` / `_ORTHO_RCDC` / `_ORTHO_RCDC1980` / `_STOCHASTIC` /
+  `*MAT_082_RCDC` / `*MAT_082_RCDC1980`; `*MAT_DAMAGE_2` / `*MAT_105`;
+  `*MAT_STRAIN_RATE_DEPENDENT_PLASTICITY` / `*MAT_019` / `*MAT_19`;
+  `*MAT_PLASTICITY_COMPRESSION_TENSION` / `*MAT_124`; `*MAT_GURSON` /
+  `*MAT_120` + `_JC` / `_RCDC` / `_BFRAC`; `*MAT_ISOTROPIC_ELASTIC_PLASTIC` /
+  `*MAT_012` / `*MAT_12`; `*MAT_HILL_3R` / `*MAT_122`; each `+ _TITLE`) — the
+  roadmap P1 batch:
+
+  - **`*MAT_081/082` → `/MAT/LAW36` + `/FAIL/TAB1`.** The elasto-plastic half is
+    card-for-card `*MAT_024`, so the record rides `state.mat_plas_tab` (new
+    `MatPlasTAB.family` discriminator) and reuses the whole
+    LCSS-table / LCSS-curve / EPS-ES / bilinear resolution ladder. Only two
+    fields differ in MEANING at their column — card 1 field 7 is `EPPF` where
+    MAT_024 has `FAIL`, and `VP` sits one slot further right — which is exactly
+    why it cannot share the MAT_024 handler. Layout from
+    `FAIL/fail_tab1.cfg FORMAT(radioss2021)`. `EPPFR` becomes the mandatory
+    `TABLE1_ID` failure-strain plateau and `EPPF` the `TABLE2_ID` instability
+    plateau, flat over triaxiality −1…+1; leaving card 2 blank makes the
+    reader's `Dcrit=1`/`n=1` defaults reproduce LS-DYNA's linear
+    `ω = (εp−EPPF)/(EPPFR−EPPF)` (Vol II R17 p.2-606) exactly. Unlike the
+    MAT_123 carrier card this TAB1 is LIVE — MAT_081 has no `FAIL` field, so
+    nothing is double-counted. **`FAD_EXP = 1`** turns the softening half of
+    that law on: `hm_read_fail_tab1.F:153-157` zeroes `ECRIT` as soon as a
+    TABLE2 is given, so `:170-174` leaves `DMG_FLAG = 0` for a blank exponent,
+    and `fail_tab_c.F:441-455` gates the whole necking block — the only reader
+    of `EPSF_N`, i.e. of `EPPF` — on that flag. With `FAD_EXP = 1` and `D = 0`
+    it yields `DMG_SCALE = 1 − (εp−EPPF)/(EPPFR−EPPF)`, LS-DYNA's own `1−ω`,
+    which `mulawc.F90:2656/2724` multiplies into the layer stress; measured
+    within **0.07 %** of `(1−ω)·σy` on a live shell run. SHELLS only —
+    `fail_tab_s.F` reads `TABLE1` alone and has no `DMG_SCALE` path, so on
+    solids the instability table is inert (the rupture strain is exact on
+    both, and the solid time-history is byte-identical with and without the
+    exponent). `NUMINT` → a POSITIVE `P_thickfail`, divided by the shell's
+    `NIP`: `hm_read_fail_tab1.F:181-187` honours the value only on the
+    `> 0 .and. IFAIL_SH > 1` branch and silently substitutes "all thickness
+    must fail" for a negative one, so the reader's failed-IP-FRACTION form
+    (which `fail_setoff_c.F:139-146` does implement, and `/FAIL/GENE1` does
+    pass through) never survives TAB1 — the count is carried as the equivalent
+    broken-THICKNESS fraction instead, exact for a uniformly weighted stack and
+    off by the integration weights for a Gauss one. `Ifail_sh=2` is what makes
+    the reader honour it at all. A blank
+    `EPPF`/`EPPFR` is written as `1e14` (LS-DYNA's 1e12/1e14 "no failure"
+    defaults, which a blank cell reads as 0); both blank ⇒ no `/FAIL` card.
+    **`LCDM` is deliberately not transferred** — LS-DYNA's LCDM is ω(εp) while
+    TAB1's `fct_IDd` is a function of the current damage D returning a
+    damage-RATE multiplier, a different independent variable, so a direct
+    transfer would silently change the softening law. `LCSR` is expanded into
+    the LAW36 rate-function family (the one static function repeated per curve
+    point with that point's ordinate as `Fscale` — dyna2rad's branch B without
+    its SFA/SFO double-scaling, since k2rad's curve reader has already applied
+    them), and is ignored when LCSS is a table exactly as LS-DYNA ignores it.
+    **dyna2rad has no `*MAT_082` (or any option-suffix) entry in
+    `dynaMatLawKeywordMap`**, so every one of those spellings falls to the
+    `default:` branch whose error message is commented out — the keyword is
+    dropped with no message at all and the `/PART` gets `mat_ID = 0`. Here the
+    base material converts and only the directional damage / Wilkins Rc-Dc card
+    / per-element stochastic scatter are named as not reproduced.
+  - **`*MAT_105` → `/MAT/LAW36` + `/FAIL/LEMAITRE` (+ `/FAIL/JOHNSON`).** Cards
+    1/2 are MAT_024's (no `VP` column — MAT_105 is always fully viscoplastic),
+    with the EPS/ES pair one card lower because of the Lemaitre card 3, which
+    is an exact triple: `EPSD`→`EPS_D`, `S`→`S_D`, `DC`→`DC`. Layout from
+    `FAIL/fail_lemaitre.cfg FORMAT(radioss2026)` — the card exists ONLY in that
+    directory, which is the "keyword only in a newer dir" case: the reader
+    warns `WARNING 100211` and then parses the newer FORMAT block in full and
+    correctly (verified live, 0 ERROR(S)). A blank `DC` is written as LS-DYNA's
+    documented 0.5 rather than left 0, which the reader would clamp to 1.0 — a
+    materially different law. `FAIL` still becomes `/FAIL/JOHNSON` with
+    `Ifail_sh=2`, so both criteria coexist as in LS-DYNA.
+  - **`*MAT_019` → `/MAT/LAW121` (PLAS_RATE).** Layout from
+    `MAT/matl121_plasrate.cfg FORMAT(radioss2022)`. A genuine 1:1 target:
+    LAW121's kernel (`mat121c_newton.F:194`) is literally MAT_019's
+    `σy = σ0(ε̇) + E·Et/(E−Et)·εp`, so `ETAN` goes into `TANG` verbatim and
+    Radioss does the `Ep` conversion itself; no curve is resampled. `RDEF` maps
+    onto `Ifail` value-for-value including 0. Two divergences from dyna2rad
+    (`p_ConvertMatL19`), both places where it leaves a 0 that means something
+    else: card 5's `TANG` is the curve's ORDINATE SCALE once `Fct_TANG != 0`
+    (so 1.0, not 0, which would zero the hardening), and the `Xscale_*`/
+    `Yscale_*` factors are written as an explicit 1.0 whenever their function
+    slot is used rather than relying on a blank default the reader documents
+    for `SIG0` only. A missing `LC1` names starter `ERROR 2060`; `VP=1` with
+    `LC2` names `WARNING 2061`, where the reader silently forces `Ivisc` to 0.
+  - **`*MAT_124` → `/MAT/LAW66`** (+ `/VISC/PRONY`, + a failure card). Layout
+    from `MAT/mat_law66.cfg FORMAT(radioss2022)` (the revision that adds
+    `EC`/`RPCT` to card 3). Two deliberate divergences from dyna2rad, both
+    traced to the manual and then confirmed by the starter's own echo:
+    **`P_c`/`P_t` carry `PC`/`PT`** — "compressive/tensile mean stress at which
+    the yield stress follows LCIDC/LCIDT" (Vol II R17 p.2-876), which the
+    starter echoes as `COMPRESSION MEAN STRESS` / `TRACTION MEAN STRESS`, and
+    `RPCT` is stated as a fraction of that same pair on both sides;
+    dyna2rad writes `PCUTC`/`PCUTT` there (gated on `PCUTF`, and its `P_t` gate
+    tests `PCUTT` instead — `convertmats.cxx:10105`) and drops `PC`/`PT`
+    entirely, moving the yield-curve blend band onto unrelated numbers. And
+    **`Epsilon_0` carries `C`**: LS-DYNA's factor is `1 + (ε̇/C)^(1/P)`, so C is
+    the reference rate and P the exponent — dyna2rad maps `c ← P` correctly but
+    never writes `Epsilon_0`, so the reference rate is lost to the reader's
+    substituted 1.0. `LCSRC`/`LCSRT` promote to `Iyld_rate=3`, whose card has
+    no `VP` column (reported rather than lost silently). **Every function slot
+    of a pair is filled**, because `hm_read_mat66.F:269-278` loops
+    `IFUNC(1..MFUNC)` — 2 for the yield pair, 4 once `Iyld_rate=3` adds the
+    rate pair — and raises `MSGID=126 MSGERROR` "WRONG REFERENCE TO FUNCTION
+    ID=0" on any zero, i.e. a half-filled pair is an ERROR TERMINATION rather
+    than a degraded run, while LS-DYNA accepts half of either. A lone
+    `LCIDC`/`LCIDT` is MIRRORED into the empty slot (p.2-877 remark 1 requires
+    both curves, so such a deck is already degenerate and mirroring is the only
+    reading that keeps the stated branch); a lone `LCSRC`/`LCSRT` — each
+    documented independently Optional, p.2-875 — gets a synthesized FLAT
+    unit-scale `/FUNCT` on the other side, which reproduces LS-DYNA's "no rate
+    effect there" exactly because LAW66 applies `IFUNC(3)`/`IFUNC(4)` as
+    multiplicative yield factors (`sigeps66.F:481-487`). `LCFAIL` →
+    `/FAIL/TENSSTRAIN` under LS-DYNA's own four activation conditions
+    (p.2-878); outside them the curve is dropped and `FAIL` applies, where
+    dyna2rad's `else if (lcfailId > 0)` swallows both and emits no failure at
+    all. `FAIL>0` → `/FAIL/JOHNSON` with k2rad's `Ifail_sh=2` all-points rule
+    (dyna2rad writes 1 here, the outlier among its own MAT_024/081/105 paths).
+  - **`*MAT_120` → `/MAT/LAW52` (GURSON).** Layout from
+    `MAT/matl52_gurson.cfg FORMAT(radioss130)`. `alpha_3` (q3) is written as
+    `Q1²` because the LAW52 reader does NOT default it (verified) and 0 is a
+    different flow surface. Four fixes over dyna2rad, all confirmed against the
+    manual's own wording: **`ATYP=1` is converted** by sampling
+    `σY = SIGY·((εp + SIGY/E)/(SIGY/E))^(1/N)` (p.2-828) onto an 11-point
+    `/TABLE/1`, where dyna2rad's branch is a bare `// no conversion available`
+    that leaves LAW52 with `n = 0`; **`FF0` survives** — the
+    `(L1..L4, FF1..FF4)` mean is applied only when that table is actually given
+    ("FF0 is only used if no curve is given by (L1,FF1)-(L4,FF4) and LCFF = 0"),
+    where dyna2rad averages `/4` unconditionally and so zeroes `FF0` in the
+    common case; **`LCF0` reaches `Fi`**, where dyna2rad looks up the attribute
+    `"L1"` (a FLOAT) and the handle never resolves; and the `f0 ≤ fc ≤ fF`
+    ordering is checked with starter `ERROR 1745` named. A `LCSS` curve is
+    re-emitted as a 1-D `/TABLE/1` because that slot reads a table, not a
+    function — the `state.law76_table_ids` set was generalized to
+    `state.table_1d_ids` for it; an `LCSS` naming a `*DEFINE_TABLE` that could
+    not be resolved falls back to the `ATYP` ladder instead of writing a
+    `Tab_ID` with no `/TABLE` behind it (starter `ERROR 779`), the same guard
+    the MAT_024 path already had. All four element-length inputs (`LCFF`,
+    `LCF0`, `LCFC`, `LCFN`) collapse the same way, to the MEAN of their
+    ordinates, and LCFF's precedence over the `(L, FF)` table is tracked with a
+    flag rather than by comparing the result against `FF0`. `_JC` adds a
+    companion `/FAIL/JOHNSON` from its card-5 `D1-D4` with **`D3` VERBATIM**:
+    this keyword's `σH/σM` is the *mean hydrostatic stress* ratio, which the
+    manual uses tension-positive throughout (GISSMO p.2-76; `*MAT_252`
+    p.2-1694 "σm = I1/3 … as in Johnson and Cook [1985]"; `*MAT_124` remark 1
+    "a positive mean stress (meaning a negative pressure) is indicative of
+    tension"), matching Radioss's `P = (σxx+σyy)/3` over `σVM`
+    (`fail_johnson_c.F:113-117`) — only `*MAT_JOHNSON_COOK`'s `σ* = p/σeff`
+    uses LS-DYNA's compression-positive PRESSURE and needs the flip. `LCJC > 0`
+    suppresses the card entirely, because LS-DYNA then ignores `D1`–`D3`
+    (p.2-838) and the replacement triaxiality curve has no `/FAIL/JOHNSON`
+    slot, so building one from card-5 leftovers would erode on a criterion the
+    source deck never evaluates. `_RCDC`/`_BFRAC` convert cards 1-4 and
+    leave cards 5 AND 6 UNREAD rather than striding an unmodelled card 5 and
+    silently inventing an LCSS/LCFF/LCF0 set. dyna2rad drops all three variants
+    silently.
+  - **`*MAT_012` → `/MAT/LAW2` (PLAS_JOHNS)**, `E = 9KG/(3K+G)` and
+    `ν = (3K−2G)/(2(3K+G))` derived in a prepass — dyna2rad evaluates the same
+    two expressions through exprtk with no zero guard
+    (`convertutilsbase.cxx:140-276`), so a card missing `G` or `BULK` writes
+    `NaN` into the `/MAT`; both degenerate cases are reported here instead.
+    `a = SIGY`, `b = ETAN` **verbatim**, `n = 1`: the manual calls MAT_012's
+    ETAN the "Plastic hardening modulus" (Vol II R17 p.2-206), i.e. dσ/dεₚ,
+    which is exactly LAW2's `b` with `n = 1` — it must NOT get the
+    `E·ETAN/(E−ETAN)` rescale that `*MAT_003`'s identically-named *tangent*
+    modulus needs. The LAW2 card body was extracted into a shared
+    `_law2_plas_johns_lines` helper so the `*MAT_JOHNSON_COOK` output stays
+    byte-identical.
+  - **`*MAT_122` → `/MAT/LAW43` (HR=1/3) or `/MAT/LAW32` (HR=2)**, on the same
+    `/PROP/TYPE9` split the MAT_037 path uses (LAW32 declares
+    `SHELL_ORTHOTROPIC` only — `hm_read_mat32.F:247-252` — exactly like LAW43,
+    so a solid part is warn-refused too). Three independent Lankford values go
+    into their own slots, unlike MAT_037's collapsed r-bar. For `HR=1`,
+    **`P1` is the TANGENT modulus and `P2` the YIELD STRESS** (p.2-852) — the
+    opposite of dyna2rad's `{(0, P1), (1, P1+P2)}` curve — and because the LAW43
+    curve is stress vs PLASTIC strain, `P1` gets the `E·P1/(E−P1)` rescale that
+    MAT_037's already-plastic `ETAN` correctly does not. `HR=2` routes to
+    `/MAT/LAW32` (`matl32_hill.cfg FORMAT(radioss140)`), whose analytic Swift
+    law `σ = A·(EPSILON_0 + εp)ⁿ` reproduces `k·(E0+εp)ⁿ` exactly; dyna2rad has
+    no `HR=2` branch at all, leaving `NUM_CURVES = 0` and starter `ERROR 366`.
+    `AOPT=2`'s a-vector and `BETA` reach the `/PROP/TYPE9` `Vx/Vy/Vz` + `Phi`
+    columns (dyna2rad reads none of MAT_122's axis block); the other AOPT modes
+    have no TYPE9 column and are named — including `AOPT=0`, the card's default
+    and what a blank field means, which gets its own message because "material
+    axes determined by element nodes 1, 2 and 4" (p.2-853) is a real rule being
+    dropped, and on a Hill sheet law the rolling direction is the point.
+  - Wiring: `_target_mat_law` (`writer/mesh.py`) gains a branch per new family,
+    including the `use_law32` split, so the beam-compat check and the `/XREF`
+    law gate both see them. The beam whitelists need NO change and the comment
+    now records why, read from the 2026-05-20 starter tree: LAW52
+    (`hm_read_mat52.F:238-241`), LAW66 (`mat66:326-329`), LAW121
+    (`mat121:277-285`) and LAW32 (`mat32:247-252`) all leave `PROP_BEAM` at its
+    0 default, so the existing "no beam keyword at all — starter ERROR 3046"
+    message is already correct for them; LAW2 is `BEAM_ALL` and already
+    whitelisted, so a `*MAT_012` beam part converts and runs. `all_mat_ids()`
+    gains the five new containers (the `next_mat_id()` guard against starter
+    `ERROR 79`), and every keyword is registered in
+    `k2rad/assembly.py::_OFFSET_SPECS` with its curve-reference fields.
+
+  **Validated on a live starter run.** A nine-part deck — one shell part per
+  keyword, every material referenced — converts and reads with
+  **`0 ERROR(S)`, `1 WARNING(S)`** on `starter_win64` at `/BEGIN 2022`, that one
+  being the documented cosmetic `WARNING 100211` for `/FAIL/LEMAITRE`. The
+  starter's echo was read back field by field and matches the asserted columns
+  (LAW52's q3/void fractions/`Tab_ID`, LAW66's mean stresses and `1/c`, LAW121's
+  `IFAIL`/`IVISC`/scale factors, TAB1's strain+necking tables and
+  `PTHICKFAIL`, LEMAITRE's `EPSD/S/DC`). A second probe deck covering the
+  half-filled LAW66 pairs (lone `LCIDC`, lone `LCIDT`, lone `LCSRC`, lone
+  `LCSRT`) and the `*MAT_GURSON_JC` `LCJC` case also reads **`0 ERROR(S)`,
+  `0 WARNING(S)`**, with the echo confirming the mirrored yield functions and
+  the synthesized unit-rate curves in `fnYrt_IDc`/`fnYrt_IDt`.
+
+  **Validated end-to-end on the engine.** Ten single-element decks (1 mm cube /
+  1 mm quad, 1/8-symmetry minimal-constraint anchoring, prescribed velocity,
+  `IE = EXT-WORK` to 4 digits with `KE/IE ≈ 1e-8` so the response is the
+  material's): all NORMAL TERMINATION. MAT_124 discriminates tension from
+  compression (200.50 vs 300.50 MPa flow, +0.002 %/−0.001 % vs the curves);
+  MAT_081 deletes at `εp = 0.19999` against `EPPFR = 0.200` (−0.005 %) and, on
+  the shell path, fades the stress to within **0.07 %** of `(1−ω)·σy` at every
+  point between `EPPF` and `EPPFR`; MAT_019 hits both rate plateaus exactly
+  (200.000 and 300.000 MPa at ~1/s and ~100/s); MAT_012 reproduces
+  `E = 211764.71` to −0.001 % with `b = ETAN` verbatim; MAT_122 returns a
+  Lankford ratio of `R = 1.9844` against the stated `R = 2.0` (−0.78 %; von
+  Mises would give 1.0) with yield onset at `P2`; MAT_120's Gurson uniaxial
+  initial yield lands at 297.488 MPa against the 297.466 the `q1/q2/q3/f0` set
+  solves for (+0.008 %); MAT_105 deletes at `εp = 0.12497` against the 0.12500
+  the Lemaitre triple predicts (−0.024 %).
+
+  **81 new tests in a new `tests/test_metal_plasticity_2.py`** (1703 → 1784,
+  159 → 231 subtests). No flag, and a deck without these cards is byte-identical
+  (all five goldens unchanged, asserted again inside the batch's own test
+  module, and all 72 `.k`/`.key`/`.dyn` decks in the repo re-convert to the same
+  SHA256 as on `master`).
+
 - **`*INTEGRATION_BEAM` user cross-section rules: a beam's section is now
   integrated cell by cell instead of being emitted as a zero-stiffness
   resultant.** Nothing in `k2rad/` parsed the keyword, and `handle_section_beam`

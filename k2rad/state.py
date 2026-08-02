@@ -686,6 +686,210 @@ class MatPlasTAB:
     # _LOG_INTERPOLATION keyword option → LAW36 F_smooth=2 (logarithmic rather
     # than linear interpolation between the strain-rate yield curves).
     log_interp: bool = False
+    # Which LS-DYNA keyword family filled this record. The base LAW36 card is
+    # identical for all of them — only the FAILURE trailer and the LCSR
+    # handling differ, so the writer dispatches on this instead of sniffing
+    # fields. "024" also covers *MAT_POWER_LAW-style callers that leave every
+    # extra field at 0, so nothing about the MAT_024/098/123 output moves.
+    family: str = "024"    # "024" | "123" | "098" | "081" | "082" | "105"
+    # *MAT_PLASTICITY_WITH_DAMAGE (081/082) card fields. EPPF/EPPFR are the
+    # softening-onset and rupture plastic strains → the /FAIL/TAB1 TABLE2/TABLE1
+    # pair; LCDM (nonlinear damage curve) and TDEL have no Radioss slot.
+    eppf: float = 0.0
+    eppfr: float = 0.0
+    lcdm: int = 0
+    tdel: float = 0.0
+    # True for *MAT_082 / the _ORTHO option: the damage evolution is directional.
+    # LAW36 + /FAIL/TAB1 is isotropic, so the base material still converts and
+    # only the directionality is reported as dropped.
+    ortho_damage: bool = False
+    # *MAT_DAMAGE_2 (105) card 3 — the Lemaitre continuum-damage constants,
+    # a 1:1 /FAIL/LEMAITRE triple (EPSD → EPS_D, S → S_D, DC → DC).
+    epsd: float = 0.0
+    damage_s: float = 0.0
+    dc: float = 0.0
+
+
+@dataclass
+class MatPlasCompTens:
+    """*MAT_PLASTICITY_COMPRESSION_TENSION (124) → /MAT/LAW66.
+
+    Separate yield curves in tension and compression (``lcidt``/``lcidc``)
+    blended over the mean-stress band ``PT``..``PC``, Cowper-Symonds or
+    per-branch rate-scaling curves, an optional 6-term Prony viscoelastic
+    branch and a plastic-strain / rate-curve failure criterion.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    E: float = 0.0
+    nu: float = 0.0
+    c: float = 0.0        # Cowper-Symonds C → LAW66 Epsilon_0 (reference rate)
+    p: float = 0.0        # Cowper-Symonds P → LAW66 c (the 1/p exponent)
+    fail: float = 0.0     # >0 plastic strain to failure, <0 user subroutine
+    tdel: float = 0.0
+    lcidc: int = 0        # compression yield curve → funct_IDc
+    lcidt: int = 0        # tension yield curve     → funct_IDt
+    lcsrc: int = 0        # compression rate-scaling curve → fnYrt_IDc
+    lcsrt: int = 0        # tension rate-scaling curve     → fnYrt_IDt
+    srflag: float = 0.0   # 0 total / 1 deviatoric / 2 plastic rate → VP
+    lcfail: int = 0       # failure plastic strain vs strain rate
+    ec: float = 0.0       # Young's modulus in compression → EC
+    rpct: float = 0.0     # E→EC blend fraction of PT/PC   → RPCT
+    pc: float = 0.0       # compressive mean stress of LCIDC → P_c
+    pt: float = 0.0       # tensile mean stress of LCIDT     → P_t
+    pcutc: float = 0.0    # pressure cut-offs (3D stress update only) — no slot
+    pcutt: float = 0.0
+    pcutf: float = 0.0
+    srfilt: float = 0.0   # strain-rate EMA filter — no slot
+    k: float = 0.0        # viscoelastic bulk modulus → /VISC/PRONY K_v
+    gi: List[float] = field(default_factory=list)
+    betai: List[float] = field(default_factory=list)
+
+
+@dataclass
+class MatStrainRatePlas:
+    """*MAT_STRAIN_RATE_DEPENDENT_PLASTICITY (019) → /MAT/LAW121 (PLAS_RATE).
+
+    A 1:1 target: LAW121's engine kernel is literally LS-DYNA MAT_019's
+    ``sigma_y = sigma_0(eps_dot) + E*Et/(E-Et) * eps_p``, so every curve slot
+    transfers without resampling.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    E: float = 0.0
+    nu: float = 0.0
+    vp: int = 0           # 0 scale yield stress / 1 viscoplastic → Ivisc
+    lc1: int = 0          # yield strength vs strain rate  → Fct_SIG0
+    etan: float = 0.0     # tangent modulus Et             → TANG
+    lc2: int = 0          # Young's modulus vs strain rate → Fct_YOUN
+    lc3: int = 0          # tangent modulus vs strain rate → Fct_TANG
+    lc4: int = 0          # failure stress vs strain rate  → Fct_FAIL
+    tdel: float = 0.0     # min timestep element deletion  → DTMIN
+    rdef: int = 0         # failure-curve redefinition     → Ifail (value-for-value)
+
+
+@dataclass
+class MatGurson:
+    """*MAT_GURSON (120, + the _JC / _RCDC / _BFRAC variants) → /MAT/LAW52.
+
+    The porosity set (f0/fc/fN/fF, the nucleation pair eps_N/s_N and the flow
+    parameters q1/q2) maps one-for-one; the hardening comes from ATYP (ideal /
+    power law / linear / 8-point curve) or from LCSS, which wins over all of
+    them.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    E: float = 0.0
+    nu: float = 0.0
+    sigy: float = 0.0     # → LAW52 A
+    n: float = 0.0        # power-law exponent (ATYP=1 only)
+    q1: float = 0.0       # → alpha_1
+    q2: float = 0.0       # → alpha_2
+    fc: float = 0.0       # critical void volume fraction → Fc
+    f0: float = 0.0       # initial void volume fraction  → Fi
+    en: float = 0.0       # mean nucleation strain        → EpsN (<0 = curve id)
+    sn: float = 0.0       # nucleation std deviation      → SN   (<0 = curve id)
+    fn: float = 0.0       # nucleating void fraction      → FN
+    etan: float = 0.0     # linear-hardening tangent modulus (ATYP=2 only)
+    atyp: int = 0         # 0 ideal / 1 power law / 2 linear / 3 8-point curve
+    ff0: float = 0.0      # failure void volume fraction  → FF
+    eps_pts: List[float] = field(default_factory=list)   # EPS1..EPS8
+    es_pts: List[float] = field(default_factory=list)    # ES1..ES8
+    lengths: List[float] = field(default_factory=list)   # L1..L4
+    ffs: List[float] = field(default_factory=list)       # FF1..FF4
+    lcss: int = 0         # yield curve / table → Tab_ID (wins over ATYP)
+    lcff: int = 0         # fF vs element length
+    numint: float = 0.0   # failed IPs before deletion — no LAW52 slot
+    lcf0: int = 0         # f0 vs element length
+    lcfc: int = 0         # fc vs element length
+    lcfn: int = 0         # fN vs element length
+    vgtyp: float = 0.0    # void-growth type — no LAW52 slot
+    dexp: float = 0.0     # damage history-variable exponent — no LAW52 slot
+    # "" = *MAT_GURSON; "JC" / "RCDC" / "BFRAC" = the option variants, whose
+    # card 5 is NOT the (L1..L4, FF1..FF4) element-length table.
+    variant: str = ""
+    jc_d: List[float] = field(default_factory=list)   # _JC card 5 D1..D4
+    jc_lcdam: int = 0
+    jc_lcjc: int = 0
+    jc_l1: float = 0.0
+    jc_l2: float = 0.0
+    # writer-resolved (see _resolve_mat_gurson)
+    tab_id: int = 0       # → LAW52 Tab_ID
+    iyield: int = 0       # → LAW52 Iyield (1 when Tab_ID is used)
+    hard_b: float = 0.0   # → LAW52 B
+    hard_n: float = 0.0   # → LAW52 N
+    ff: float = 0.0       # → LAW52 FF, after the LCFF / (L,FF) / FF0 ladder
+
+
+@dataclass
+class MatIsoElasPlas:
+    """*MAT_ISOTROPIC_ELASTIC_PLASTIC (012) → /MAT/LAW2 (PLAS_JOHNS).
+
+    The one LS-DYNA plasticity card written in SHEAR + BULK modulus rather than
+    E/nu, so the writer derives ``E = 9KG/(3K+G)`` and ``nu = (3K-2G)/(2(3K+G))``
+    before anything else. ``etan`` is documented as the PLASTIC hardening
+    modulus (Vol II R17 p.2-206), so it lands on LAW2's ``b`` verbatim.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    g: float = 0.0        # shear modulus
+    sigy: float = 0.0     # → LAW2 a
+    etan: float = 0.0     # plastic hardening modulus → LAW2 b
+    bulk: float = 0.0     # bulk modulus K
+    # writer-resolved
+    E: float = 0.0
+    nu: float = 0.0
+
+
+@dataclass
+class MatHill3R:
+    """*MAT_HILL_3R (122) → /MAT/LAW43 (HILL_TAB) or /MAT/LAW32 (HILL).
+
+    Hill 1948 planar anisotropy with THREE independent Lankford values. The
+    hardening rule picks the target law: HR=1/3 are tabular (LAW43), HR=2 is
+    the analytic Swift power law, for which /MAT/LAW32's
+    ``sigma = A*(eps_0 + eps_p)^n`` is an exact match.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    E: float = 0.0
+    nu: float = 0.0
+    hr: float = 1.0       # 1 linear / 2 exponential / 3 load curve
+    p1: float = 0.0       # HR=1 tangent modulus; HR=2 k (strength coefficient)
+    p2: float = 0.0       # HR=1 yield stress;    HR=2 n (exponent)
+    r00: float = 0.0
+    r45: float = 0.0
+    r90: float = 0.0
+    lcid: int = 0         # HR=3 hardening curve
+    e0: float = 0.0       # HR=2 eps_0 offset
+    # Material-axis card set (AOPT / A1-A3 / V1-V3 D1-D3 BETA), read by
+    # _emit_hill_3r_prop, which hand-rolls the mapping onto /PROP/TYPE9's
+    # single Vx/Vy/Vz + Phi rather than going through _composite_ref_axis (that
+    # mapper serves the LAW93/LAW127 layup path and its /PROP/TYPE11-TYPE51
+    # cards, which this material never reaches).
+    aopt: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    # V1-V3 only gate the "something was stated that has no home" warning:
+    # AOPT=3 rotates within the element plane, which TYPE9 cannot express.
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    # D1-D3 are parsed for completeness and intentionally UNUSED: they belong
+    # to the AOPT modes (the in-plane second vector) that have no TYPE9 column.
+    d1: float = 0.0
+    d2: float = 0.0
+    d3: float = 0.0
+    beta: float = 0.0
+    # writer-resolved
+    hard_func_id: int = 0   # LAW43 func_IDi (HR=1 synthesized, HR=3 = LCID)
+    use_law32: bool = False # HR=2 → the analytic /MAT/LAW32 instead
 
 
 @dataclass
@@ -2750,6 +2954,19 @@ class ConversionState:
     mat_mooney_rivlin: Dict[int, MatMooneyRivlin] = field(default_factory=dict)
     mat_ogden: Dict[int, MatOgdenRubber] = field(default_factory=dict)
     mat_hyper_rubber: Dict[int, MatHyperelasticRubber] = field(default_factory=dict)
+    # Metal plasticity batch 2 (dyna2rad targets):
+    #   MAT_012 → /MAT/LAW2 (PLAS_JOHNS), G/K derived to E/nu
+    #   MAT_019 → /MAT/LAW121 (PLAS_RATE)
+    #   MAT_120 → /MAT/LAW52 (GURSON) [+ /FAIL/JOHNSON for the _JC damage set]
+    #   MAT_122 → /MAT/LAW43 (HILL_TAB) or /MAT/LAW32 (HILL, HR=2)
+    #   MAT_124 → /MAT/LAW66 [+ /VISC/PRONY] [+ /FAIL/JOHNSON or /FAIL/TENSSTRAIN]
+    # (MAT_081/082 and MAT_105 ride the MAT_024 container mat_plas_tab, which
+    #  carries their extra damage fields — see MatPlasTAB.family.)
+    mat_iso_elas_plas: Dict[int, MatIsoElasPlas] = field(default_factory=dict)
+    mat_strain_rate_plas: Dict[int, MatStrainRatePlas] = field(default_factory=dict)
+    mat_gurson: Dict[int, MatGurson] = field(default_factory=dict)
+    mat_hill_3r: Dict[int, MatHill3R] = field(default_factory=dict)
+    mat_plas_comp_tens: Dict[int, MatPlasCompTens] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -2788,9 +3005,11 @@ class ConversionState:
     # free-node guard because they are already fully fixed by /BCS)
     connector_ground_nodes: set = field(default_factory=set)
     constrained_node_sets: List[ConstrainedNodeSet] = field(default_factory=list)  # *CONSTRAINED_NODE_SET → /RLINK
-    # curve ids referenced as LAW76 yield tables — emitted as /TABLE/1 (not
-    # /FUNCT); tracked so _make_functions can exclude them.
-    law76_table_ids: set = field(default_factory=set)
+    # Curve ids a law consumes through a *table* slot rather than a function
+    # slot — emitted as a 1-D /TABLE/1 (with its mandatory "#dimension" card)
+    # instead of a /FUNCT, so _make_functions can route them. Populated by the
+    # LAW76 (*MAT_187) yield tables and the LAW52 (*MAT_120) Tab_ID.
+    table_1d_ids: set = field(default_factory=set)
     # High-explosive / EOS (coupled ALE / JWL detonation):
     #   *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL (shared id) → /MAT/LAW5
     #   *MAT_NULL carrier + *EOS_* (shared id)          → /MAT/LAW6 + /EOS/*
@@ -3089,7 +3308,10 @@ class ConversionState:
                   self.mat_mooney_rivlin, self.mat_ogden, self.mat_hyper_rubber,
                   self.mat_high_explosive, self.mat_spotweld,
                   self.mat_orthotropic, self.mat_enhanced_composite,
-                  self.mat_transverse_aniso, self.mat_laminated_glass):
+                  self.mat_transverse_aniso, self.mat_laminated_glass,
+                  self.mat_iso_elas_plas, self.mat_strain_rate_plas,
+                  self.mat_gurson, self.mat_hill_3r,
+                  self.mat_plas_comp_tens):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

@@ -2458,6 +2458,25 @@ _TYPE3_BEAM_LAWS = frozenset({0, 1, 2, 13, 44})
 # a PROP_BEAM=0 law and therefore under a different error id (see the warning).
 _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 
+# Classification of the laws the metal-plasticity-2 batch adds, read from the
+# same INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. NONE of them
+# is beam-capable, so neither set above changes and the existing
+# "no beam keyword at all — starter ERROR 3046" message is already the right
+# one for all four:
+#   LAW52  hm_read_mat52.F:238-241   HOOK, SHELL_ISOTROPIC, SOLID_ISOTROPIC
+#   LAW66  hm_read_mat66.F:326-329   ELASTO_PLASTIC, SHELL_ISOTROPIC,
+#                                    SOLID_ISOTROPIC, SPH
+#   LAW121 hm_read_mat121.F:277-285  ELASTO_PLASTIC, INCREMENTAL,
+#                                    LARGE_STRAIN, HOOK, SOLID_ISOTROPIC,
+#                                    SHELL_ISOTROPIC, SPH
+#   LAW32  hm_read_mat32.F:247-252   ELASTO_PLASTIC, HILL, ORTHOTROPIC,
+#                                    SHELL_ORTHOTROPIC  — no solid class
+#                                    either, so *MAT_122 rides the same
+#                                    /PROP/TYPE9 split and solid-part refusal
+#                                    as LAW43 (writer/composites.py).
+# LAW2 (*MAT_012's target) is BEAM_ALL in all three of its readers and is
+# already in _TYPE3_BEAM_LAWS, so a *MAT_012 beam part converts and runs.
+
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     """The Radioss law number k2rad will actually EMIT for LS-DYNA material
@@ -2542,6 +2561,16 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     m = state.mat_hyper_rubber.get(mid)
     if m is not None:
         return 69 if m.n > 0 else 95               # *MAT_077_H
+    # Metal plasticity batch 2. Placed to mirror _make_materials, which emits
+    # these four after the hyperelastic loop and before the /MAT/LAW5.
+    if mid in state.mat_iso_elas_plas:
+        return 2                                   # *MAT_012 → PLAS_JOHNS
+    if mid in state.mat_strain_rate_plas:
+        return 121                                 # *MAT_019 → PLAS_RATE
+    if mid in state.mat_gurson:
+        return 52                                  # *MAT_120 → GURSON
+    if mid in state.mat_plas_comp_tens:
+        return 66                                  # *MAT_124
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:
@@ -2550,6 +2579,15 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 127                                 # *MAT_054/055
     if mid in state.mat_transverse_aniso:
         return 43                                  # *MAT_037 → HILL_TAB
+    m = state.mat_hill_3r.get(mid)
+    if m is not None:
+        # *MAT_122: HR=2 (exponential hardening) takes the analytic /MAT/LAW32
+        # instead of the tabular LAW43 — set by _resolve_hill_3r, which runs
+        # inside _resolve_composites, i.e. AFTER _resolve_xref_parts. That
+        # caller therefore always sees 43 here; harmless, because neither 32
+        # nor 43 is in the solid-/XREF law whitelist, so the part is
+        # warn-skipped either way.
+        return 32 if m.use_law32 else 43
     if mid in state.mat_laminated_glass:
         return 27                                  # *MAT_032 → PLAS_BRIT pair
     if mid in state.mat_spotweld:
