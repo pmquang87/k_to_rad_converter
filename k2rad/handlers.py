@@ -980,18 +980,30 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
     secid  = to_int(f1[0]) if f1 else 0
     elform = to_int(f1[1]) if len(f1) > 1 else 2
     sec = SectionBeam(secid, title, elform)
+    # Card 1 field 5 = CST, the cross-section type (0 rectangular, 1 tubular,
+    # 2 arbitrary). It is a FLOAT column in LS-DYNA — decks write "1.0", not
+    # "1" — and to_int() goes through float() so both spellings land on 1.
+    sec.cst = to_int(f1[4]) if len(f1) > 4 else 0
 
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     if elform == 1:
         sec.ts1 = to_float(f2[0]) if f2 else 0.0
     elif elform == 9:
-        # elform=9 spotweld beam: VOL INER CID CA OFFSET RRCON SRCON TRCON —
-        # card 2 carries a nugget volume and cross-section area, NOT A/Iyy/Izz.
-        sec.vol = to_float(f2[0]) if f2 else 0.0
-        sec.ca  = to_float(f2[3]) if len(f2) > 3 else 0.0
-        sec.area = sec.ca
+        # Spot weld beam, card 2i (Manual Vol I R17 p.41-22):
+        #   TS1  TS2  TT1  TT2  PRINT  -  ITOFF  -
+        # TS1/TS2 = outer diameter at node n1/n2, TT1/TT2 = inner diameter
+        # (CST=1, tubular). NOT "VOL INER CID CA ..." — that is card 2f, the
+        # ELFORM=6 discrete beam. PRINT (field 5) only steers swforc output.
+        sec.ts1 = to_float(f2[0]) if f2 else 0.0
+        sec.ts2 = to_float(f2[1]) if len(f2) > 1 else 0.0
+        sec.tt1 = to_float(f2[2]) if len(f2) > 2 else 0.0
+        sec.tt2 = to_float(f2[3]) if len(f2) > 3 else 0.0
+        sec.itoff = to_int(f2[6]) if len(f2) > 6 else 0
     else:
-        # elform=2 resultant: A IYY IZZ IXX
+        # elform=2/3/12/13 resultant, card 2c: A ISS ITT J SAS IST ITORM SAT.
+        # ISS/ITT/J are LS-DYNA's names for the two bending inertias and the
+        # torsional constant — stored as iyy/izz/ixx, which are the Radioss
+        # /PROP/BEAM column names for the same three quantities.
         sec.area = to_float(f2[0]) if f2 else 0.0
         sec.iyy  = to_float(f2[1]) if len(f2) > 1 else 0.0
         sec.izz  = to_float(f2[2]) if len(f2) > 2 else 0.0
