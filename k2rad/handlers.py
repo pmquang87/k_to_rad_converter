@@ -18,6 +18,7 @@ from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     PartData, SectionShell, SectionSolid, SectionBeam,
+    IntegrationShell, IntegrationPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
     MatOrthotropicElastic, MatEnhancedCompositeDamage,
@@ -716,24 +717,157 @@ def handle_part(block: Block, state: ConversionState) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_section_shell(block: Block, state: ConversionState) -> None:
-    offset = _title_offset(block)
-    title = _read_title(block) if offset else ""
+    """*SECTION_SHELL (+ _TITLE/_ID) — every card SET under the header.
+
+    "Card Sets.  For each shell section, of a type matching the keyword's
+    options, include one set of data cards.  This input ends at the next keyword
+    ("*") card." (Manual Vol I R17 p.41-62). Under the _TITLE option "an
+    addition line is read for each section in 80a format" (p.41-1), so the title
+    line repeats PER SET, not once for the block.
+
+    A set spans ``1 (title) + 2 (cards 1-2) + ceil(NIP/8) (card 3, ICOMP=1
+    only)`` lines, every term read from that set's OWN fields, so the cursor is
+    advanced by what each set actually consumed rather than by a fixed stride.
+    Reading only the first set — which is what this handler used to do — dropped
+    every later section silently, and a *PART pointing at one of them fell
+    through to ``_auto_section_shell``'s ZERO-thickness placeholder, which the
+    starter rejects.
+    """
+    per_set_title = _title_offset(block)
     raw = block.raw
-    # Card 1: secid elform shrf nip propt qr/irid icomp setyp
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
-    # Card 2: t1 t2 t3 t4 nloc marea idof edgset
-    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
-    secid  = to_int(f1[0])
-    elform = to_int(f1[1]) if f1[1] else 2
-    nip    = to_int(f1[3]) if len(f1) > 3 else 3
-    t1     = to_float(f2[0]) if f2 else 0.0
-    sec = SectionShell(secid, title, elform, nip, t1)
-    # ICOMP (field 7) = 1 → a layered composite section: card 3 carries one
-    # material angle B_i per through-thickness integration point.
-    if len(f1) > 6 and to_int(f1[6]) == 1:
-        sec.icomp = 1
-        sec.betas = _read_icomp_angles(raw, offset + 2, nip, secid, state)
-    state.sec_shells[secid] = sec
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        # Blank placeholder lines between sets carry no card (the parser keeps
+        # them so fixed-format card indices stay aligned).
+        if not raw[idx].strip():
+            idx += 1
+            continue
+        title = _read_title(block) if (per_set_title and n_sets == 0) else ""
+        if per_set_title:
+            if n_sets:
+                title = raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        # Card 1: secid elform shrf nip propt qr/irid icomp setyp
+        f1 = _card(raw, idx, fixed=True, n=8, w=10)
+        # Card 2: t1 t2 t3 t4 nloc marea idof edgset
+        f2 = _card(raw, idx + 1, fixed=True, n=8, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            if n_sets:
+                state.warn(
+                    f"*SECTION_SHELL: after {n_sets} complete card set(s) the "
+                    f"next card ('{raw[idx][:40].strip()}') carries no positive "
+                    "SECID, so the multi-set walk STOPPED there and the "
+                    "remaining lines of the block are unread. That happens when "
+                    "a set holds cards k2rad does not model (the ELFORM 101-105 "
+                    "user-shell cards 5/5.1/5.2, or an EFG/THERMAL/XFEM/MISC "
+                    "option card) — split those sections into their own "
+                    "*SECTION_SHELL blocks so none is lost.")
+            break
+        elform = to_int(f1[1]) if f1[1] else 2
+        nip = to_int(f1[3]) if len(f1) > 3 else 3
+        if nip < 0:
+            # LS-DYNA's NIP is a COUNT; only field 6 (QR/IRID) uses a negative
+            # value as a rule reference. A negative NIP used to clamp silently
+            # to 2 AND mis-trim the ICOMP angle block to 2 of the deck's angles
+            # with no warning at all, so a [0/45/-45/90] layup became [0, 45].
+            state.warn(
+                f"*SECTION_SHELL {secid}: NIP={nip} is negative. NIP is an "
+                "integration-point COUNT — it is the QR/IRID field (card 1 "
+                f"field 6, cols 51-60) that takes a negative value to reference "
+                f"an *INTEGRATION_SHELL rule. |NIP| = {abs(nip)} is used; if the "
+                "deck meant a user rule, move the negative value to field 6.")
+            nip = abs(nip)
+        t1 = to_float(f2[0]) if f2 else 0.0
+        sec = SectionShell(secid, title, elform, nip, t1)
+        # QR/IRID (field 6, cols 51-60): a NEGATIVE value makes |QR| the id of a
+        # user *INTEGRATION_SHELL rule (Manual Vol I R17 p.29-1). A positive or
+        # zero value is the built-in quadrature rule and carries no reference.
+        qr_irid = to_float(f1[5]) if len(f1) > 5 else 0.0
+        if qr_irid < 0.0:
+            sec.irid = int(abs(qr_irid))
+        idx += 2
+        # ICOMP (field 7) = 1 → a layered composite section: card 3 carries one
+        # material angle B_i per through-thickness integration point.
+        if len(f1) > 6 and to_int(f1[6]) == 1:
+            sec.icomp = 1
+            sec.betas = _read_icomp_angles(raw, idx, nip, secid, state)
+            idx += ((nip if nip > 0 else 2) + 7) // 8
+        state.sec_shells[secid] = sec
+        n_sets += 1
+
+
+def handle_integration_shell(block: Block, state: ConversionState) -> None:
+    """*INTEGRATION_SHELL — user through-thickness integration rules.
+
+    Card 1  ``IRID NIP ESOP FAILOPT``                       (4 x I10)
+    Card 2  ``S WF PID``, ONE point per card, NIP cards,    (F10 F10 I10)
+            present only when ``ESOP == 0`` and ``NIP > 0``
+            (``CARD_LIST(NIP)`` under ``if(ESOP == 0 && NIP > 0)``,
+            INTEGRATION_RULES/integration_shell.cfg:79-86).
+
+    The keyword has no documented "Card Sets" summary, but the general LS-DYNA
+    block rule (a block ends at the next ``*``) still lets a deck stack several
+    rules under one header, so the reader loops. That is strictly more
+    permissive than a single-rule reader and cannot break a single-rule deck.
+
+    ``S`` is NOT range-checked here: the CFG's ``CHECK(COMMON){ S >= -1; S <= 1; }``
+    is a GUI constraint that the importer does not enforce, and an out-of-range
+    S is reported by the writer (which is where the consequence lives) rather
+    than being clipped away at parse time.
+    """
+    raw = block.raw
+    idx = 0
+    while idx < len(raw):
+        if not raw[idx].strip():
+            idx += 1
+            continue
+        f1 = _card(raw, idx, fixed=True, n=4, w=10)
+        irid = to_int(f1[0]) if f1 else 0
+        if irid <= 0:
+            state.warn(
+                "*INTEGRATION_SHELL: a card set with no positive IRID "
+                f"('{raw[idx][:40].strip()}') cannot be referenced by any "
+                "*SECTION_SHELL QR/IRID field — the rule and every card after "
+                "it in this block are SKIPPED.")
+            return
+        rule = IntegrationShell(
+            irid,
+            nip=to_int(f1[1]) if len(f1) > 1 else 0,
+            esop=to_int(f1[2]) if len(f1) > 2 else 0,
+            failopt=to_int(f1[3]) if len(f1) > 3 else 0)
+        idx += 1
+        if rule.esop == 0 and rule.nip > 0:
+            for _ in range(rule.nip):
+                # Blank placeholders hold a card position but carry no point.
+                while idx < len(raw) and not raw[idx].strip():
+                    idx += 1
+                if idx >= len(raw):
+                    break
+                p = _card(raw, idx, fixed=True, n=3, w=10)
+                rule.points.append(IntegrationPoint(
+                    s=to_float(p[0]) if p else 0.0,
+                    wf=to_float(p[1]) if len(p) > 1 else 0.0,
+                    pid=to_int(p[2]) if len(p) > 2 else 0))
+                idx += 1
+            if len(rule.points) < rule.nip:
+                state.warn(
+                    f"*INTEGRATION_SHELL {rule.irid}: ESOP=0 with NIP="
+                    f"{rule.nip} needs {rule.nip} S/WF/PID card(s) but only "
+                    f"{len(rule.points)} follow(s) card 1. The rule is used "
+                    f"with its {len(rule.points)} defined point(s) — the shell "
+                    "loses the remaining layer(s), so its through-thickness "
+                    "stiffness and its layer materials are BOTH wrong until the "
+                    "missing cards are supplied.")
+        if rule.irid in state.integration_shells:
+            state.warn(
+                f"*INTEGRATION_SHELL {rule.irid} is defined more than once — "
+                "the LAST definition wins, as in LS-DYNA. Delete the duplicate "
+                "if the two rules differ.")
+        state.integration_shells[rule.irid] = rule
 
 
 def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
@@ -5717,6 +5851,12 @@ HANDLERS = {
     "SECTION_SOLID":                          handle_section_solid,
     "SECTION_BEAM":                           handle_section_beam,
     "SECTION_DISCRETE":                       handle_section_discrete,
+
+    # Integration rules. *INTEGRATION_SHELL takes no LS-DYNA option suffix, so a
+    # single exact key is enough — no grammar loop and no prefix entry.
+    # (*INTEGRATION_BEAM is the obvious sibling: *SECTION_BEAM's QR/IRID field
+    # has the identical EQ.-n semantics, but it has no k2rad path yet.)
+    "INTEGRATION_SHELL":                      handle_integration_shell,
 
     # Materials
     "MAT_ELASTIC":                            handle_mat_elastic,

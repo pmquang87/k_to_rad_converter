@@ -11,6 +11,127 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`*INTEGRATION_SHELL` user integration rules: a shell's per-layer
+  thicknesses and materials now come from the deck instead of an even split.**
+  Nothing in `k2rad/` parsed the keyword — it landed in `skipped_keywords` — and
+  `handle_section_shell` never read card-1 field 6, so the reference was lost
+  twice over. A laminated windshield, a foam-core sandwich, any deck whose layer
+  thicknesses live in a rule, converted to N identical layers with no warning
+  that the stack had been flattened. 60 new tests in a new
+  `tests/test_integration_shell.py` (1413 → 1473); no flag, and a deck without
+  these cards is byte-identical (all five goldens unchanged).
+
+  **The link is card-1 field 6 (`QR/IRID`, cols 51–60), not `NIP`.** "Quadrature
+  rules in the `*SECTION_SHELL` and `*SECTION_BEAM` cards need to be specified as
+  a negative number. The absolute value of the negative number refers to user
+  defined integration rule number" (Vol I R17 p.29-1); dyna2rad encodes the same
+  cell as `SCALAR_OR_OBJECT(Sect_Option, LSD_QR, LSD_IRID)` (`SectShll.cfg:699`)
+  and picks the object branch on the sign alone (`meci_data_reader.cpp:6847`). A
+  negative `NIP` is a different thing — a mis-keyed count — and now gets its own
+  warning instead of silently clamping to 2 *and* mis-trimming the `ICOMP` angle
+  block to the first two angles without tripping that block's own truncation
+  check. Card 1 is `IRID NIP ESOP FAILOPT`; `ESOP = 0` adds one `S WF PID` card
+  per point (`CARD_LIST(NIP)` — one triple per card, not eight to a card like the
+  `ICOMP` angles); several rules may stack under one header.
+
+  Each point becomes a layer: `t_i = WF_i / ΣWF · T1`, material from
+  `PID_i → *PART → MID` with a blank field inheriting the element's own part
+  material. The **rule's `NIP` wins** over the section's (dyna2rad reads it off
+  the rule and never off the section, `convertprops.cxx:1890-1892`) and is pushed
+  onto the section, so it also corrects the shared `/PROP/SHELL` point count,
+  `/INISHE`'s layer count and the `NUMFIP` count-to-ratio conversion. `ESOP = 1`
+  is NIP *equal* layers on one material — exactly a plain `/PROP/SHELL` with N
+  points — so no property is split. `ICOMP = 1` and a rule **compose**: LS-DYNA
+  gives each integration point one `B_i` and the rule gives that same point its
+  `S`/`WF`/`PID`, so angle, thickness and material all survive, and the ICOMP
+  even-split warning is retired on that path (kept verbatim where no rule
+  exists). The same applies to `*MAT_LAMINATED_GLASS`, the material that
+  *requires* a rule in LS-DYNA: `PID_i` wins over `F_i` where it resolves, and
+  the glass/polymer pick otherwise, exactly as `convertprops.cxx:2017-2050` does.
+
+  **The `S → Zi` mapping is a deliberate divergence from dyna2rad, measured.**
+  `S_i` is a quadrature *sampling* coordinate in [−1, +1]; a Radioss layer `Zi`
+  is the physical *middle of a slab*. dyna2rad writes `Zi = S_i·T1/2` with
+  `Ipos = 1` (`:2015`), and the starter then takes the shell thickness from the
+  layer **envelope** (`stackgroup.F`: `THICKT = max(Zi+t/2) − min(Zi−t/2)`),
+  which for a canonical rule reaching `S = ±1` pushes half of each outer layer
+  outside the shell and leaves the rest not tiling. k2rad stacks by cumulative
+  `WF` (`Ipos = 0`) instead:
+
+  | deck | `T1` | rule | k2rad `THICKT` | dyna2rad `THICKT` |
+  |---|---|---|---|---|
+  | windshield | 2.0 | `S = −1, −0.3, 0.3, 1`; `WF = .4 .1 .1 .4` | **2.000** | 2.800 (1.40×) |
+  | sandwich | 2.0 | `S = −1, 0, 1`; `WF = .25 .5 .25` | **2.000** | 2.500 (1.25×) |
+  | carbon | 1.2 | `S = −1, 0, 1`; `WF = 1 2 1` | **1.200** | 1.500 (1.25×) |
+
+  The k2rad column is the starter's own `SHELL THICKNESS` echo, not a
+  calculation; the dyna2rad column is `stackgroup.F`'s envelope formula evaluated
+  on the same rule (it reproduces every row of an independent 7-deck dyna2rad
+  readback: 2.0→2.2, 4.0→5.0, 2.0→2.5, 2.0→0.667). The starter also echoes the
+  auto-computed positions — layer 1 at −0.6 spanning [−1.0, −0.2], layer 2 at
+  −0.1 spanning [−0.2, 0.0] — i.e. contiguous and gap-free. A rule whose `S`
+  column runs top-down or out of order is re-ordered bottom-up first, carrying
+  each layer's `ICOMP` angle with it (LS-DYNA leaves that ordering arbitrary,
+  Figure 29-25, but an `Ipos = 0` stack is built in list order from the bottom
+  face).
+
+  **The target property is chosen by what the starter accepts.** `/PROP/TYPE11`
+  is a *single-law* property: `hm_read_prop11.F:505-563` takes only Radioss laws
+  15, 25, 27 and ≥ 29 on layer 1 (ERROR 30) and requires every other layer to
+  repeat it (ERROR 334). A layup therefore stays on TYPE11 only when it is
+  law-uniform by construction — every layer on the part's own `*MAT_002`/
+  `*MAT_054` material, or on the `*MAT_032` glass/polymer pair (two LAW27 cards)
+  — and otherwise goes to `/PROP/TYPE51` + one `/PROP/TYPE19` per layer, which
+  carries its materials on per-ply objects and has no whitelist. That is also
+  dyna2rad's own target for this keyword. One case has no Radioss home at all:
+  `hm_read_part.F:289` bans LAW1 from every layered or orthotropic shell property
+  (IGTYP 9/10/11/16/17/51/52, ERROR 658) because it is integrated globally and
+  carries no through-thickness state, so a rule on a `*MAT_ELASTIC` part is
+  warn-dropped rather than emitted onto a deck the starter would reject.
+
+  Warn-dropped or warn-reported by name, every one counted: a dangling `IRID`
+  (dyna2rad falls through in silence); `NIP ≤ 0`; `ESOP ∉ {0,1}` (dyna2rad's bare
+  `switch` has no default branch and emits a property declaring NIP plies with
+  *no* ply objects); `ΣWF = 0` (dyna2rad divides by it unguarded → `inf`/`nan`);
+  a short `S`/`WF`/`PID` block or a short `F` array (dyna2rad indexes both to NIP
+  with no bounds check); `|S| > 1`; `FAILOPT` (TYPE11 carries one global
+  `P_Thick_Fail`, not a per-layer failure policy — dyna2rad never reads the
+  field); a `PID_i` naming no `*PART` (dyna2rad silently inherits); a layer
+  material with no converted `/MAT`; more than 100 layers; a solid part; a
+  `*PART_COMPOSITE` on the same part (which wins); the MAT_037/MAT_103
+  `/PROP/TYPE9` route; and a rule nobody references (recorded in the conversion
+  log's *recognized but not emitted* channel rather than vanishing from the
+  accounting). An element-free `PID_i` material-carrier part — the idiom Vol I
+  R17 p.29-17 explicitly allows — is reported too, because k2rad emits a `/PART`
+  for it and a `/PART` with no property is starter ERROR 178.
+
+  dyna2rad's own verdict on the keyword survives as dead code: message
+  `/MESSAGE/200024`, *"IRID<0 is not supported"*, commented out at
+  `convertprops.cxx:657-658`.
+
+  Starter-validated: a three-band panel — a `*MAT_032` windshield on a
+  0.8/0.2/0.2/0.8 rule, an isotropic sandwich whose middle layer takes its
+  material from a `PID_i` carrier part, and a `*MAT_002` layup with `ICOMP = 1`
+  angles `0/45/−45` on a `WF = 1/2/1` rule, all three rules stacked under one
+  `*INTEGRATION_SHELL` header — runs through `starter_win64.exe` with **0 errors,
+  0 warnings**, and its echo reproduces every layer: thickness, position, angle
+  and material number, with `SHELL THICKNESS` equal to `T1` on all three.
+
+- **Rider: `*SECTION_SHELL` reads every card SET under one header.** "Card Sets.
+  For each shell section, of a type matching the keyword's options, include one
+  set of data cards. This input ends at the next keyword ("\*") card"
+  (Vol I R17 p.41-62), and under `_TITLE` "an addition line is read for each
+  section" (p.41-1). The handler read exactly two card indices, so every section
+  after the first in a multi-set block was dropped silently — and a `*PART`
+  pointing at one of them fell through to `_auto_section_shell`'s **zero-
+  thickness** placeholder, which the starter rejects. The cursor now advances by
+  what each set actually consumed (`1 title + 2 cards + ceil(NIP/8)` angle cards
+  when `ICOMP = 1`), and a set whose cards k2rad does not model — the ELFORM
+  101–105 user-shell block — stops the walk with a warning naming how many sets
+  were read, rather than mis-parsing the remainder as sections. Scoped to
+  `*SECTION_SHELL`: `handle_section_solid` / `_beam` / `_discrete` have the same
+  first-set-only shape and are left for their own change.
+
 - **`*SECTION_SHELL` `ICOMP = 1` becomes a real layered property: the card-3
   `B1..B8` per-layer material angles now reach the `/PROP/TYPE11` layup.**
   `handle_section_shell` read only `SECID`/`ELFORM`/`NIP`/`T1`; the `ICOMP` flag

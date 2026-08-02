@@ -918,6 +918,16 @@ _OFFSET_SPECS: Dict[str, object] = {
 
     # Sections
     "SECTION_SHELL": {"cards": {0: [(0, "r")]}},
+    # *INTEGRATION_SHELL: IRID shares the *SECTION id space (IDROFF, bucket
+    # "r"), and each S/WF/PID point card's third field is a *PART reference.
+    # NOTE the reverse link — *SECTION_SHELL card-1 field 6 carries the rule id
+    # NEGATED (QR/IRID) — is NOT offset: _rewrite_line's declarative path adds
+    # the offset to the value as written, which on a negative cell would move it
+    # towards zero instead of away. A transformed include that references a user
+    # integration rule therefore needs the section's field 6 fixed by hand; the
+    # same signed-value hazard the negative-FM/FF *CONTACT fields carry.
+    "INTEGRATION_SHELL": {"cards": {0: [(0, "r")]},
+                          "data": (1, [(2, "p")])},
     "SECTION_SOLID": {"cards": {0: [(0, "r")]}},
     "SECTION_BEAM": {"cards": {0: [(0, "r")]}},
     "SECTION_DISCRETE": {"cards": {0: [(0, "r")]}},
