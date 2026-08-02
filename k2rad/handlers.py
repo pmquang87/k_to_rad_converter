@@ -3258,7 +3258,13 @@ def handle_database_spcforc(block: Block, state: ConversionState) -> None:
     """*DATABASE_SPCFORC (SPC reaction forces) → /TH/NODE with REACX/Y/Z
     (+REACXX/YY/ZZ) on the /BCS-constrained nodes + engine /ANIM/VECT/FREAC.
     The writer emits both; requesting either makes the OpenRadioss engine
-    compute constraint reactions (engine reactions.F, COMPTREAC)."""
+    compute constraint reactions (engine reactions.F, COMPTREAC).
+
+    The two carry different quantities: /ANIM/VECT/FREAC is the instantaneous
+    reaction force, while the /TH/NODE REAC* channels are the time-accumulated
+    reaction impulse (m*a*dt summed over the run) — the writer warns about it
+    and writer/output.py:_make_starter_th_node_spc has the engine source
+    lines."""
     state.db_spcforc_dt = _handle_db_dt(block, state, "*DATABASE_SPCFORC")
 
 
