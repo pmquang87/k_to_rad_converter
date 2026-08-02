@@ -240,6 +240,58 @@ def _make_eig(state: ConversionState) -> List[str]:
     ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# /TH/NODE REAC* is an accumulated impulse — shared warning text
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Two independent conversion paths emit REACX/Y/Z channels and both have to
+# say that those channels are integrated, not instantaneous:
+#   * *DATABASE_SPCFORC          → _make_starter_th_node_spc  (the SPC reaction
+#                                  readout that stands in for LS-DYNA's spcforc)
+#   * *BOUNDARY_PRESCRIBED_MOTION_RIGID
+#                                → _make_starter_th_node_reac (the imposed-motion
+#                                  reaction readout, TH_reaction)
+# Sources for the claim (verified, PR #93): engine/source/output/
+# reaction_forces_th.F:60-62 accumulates ``FTHREAC = FTHREAC + IFLAG*MS*A*DT12``,
+# the only ``FTHREAC = ZERO`` in the engine is engine/source/engine/resol.F:1901
+# which runs BEFORE the explicit iteration-loop head at :2612 (back edge
+# ``GOTO 100`` at :9294), and engine/source/output/th/thnod.F:178-208 writes the
+# accumulator out undivided.
+_REAC_IMPULSE_PHYSICS = (
+    "the OpenRadioss REAC* channels are a time-ACCUMULATED reaction impulse "
+    "(force x time), not an instantaneous force — the engine adds m*a*dt every "
+    "cycle (reaction_forces_th.F:60-62) and zeroes the accumulator only once, "
+    "before the iteration loop (resol.F:1901, loop head :2612)."
+)
+# Shown instead of the full derivation when this deck already carried it, so a
+# deck that triggers BOTH paths does not repeat three identical sentences.
+_REAC_IMPULSE_BACKREF = (
+    "the REAC* channels are a time-ACCUMULATED reaction impulse (force x time), "
+    "not an instantaneous force — same reaction_forces_th.F accumulation as the "
+    "other REAC* warning on this deck."
+)
+
+
+def _warn_reac_impulse(state: ConversionState, lead: str, action: str) -> None:
+    """Warn that a just-emitted REAC* block carries an impulse, not a force.
+
+    ``lead`` names the conversion path, ``action`` is what the user must
+    actually do with the column — that sentence differs between the two callers
+    (compare against an LS-DYNA spcforc file vs. build a force-vs-displacement
+    curve) and is therefore ALWAYS emitted in full. Only the shared
+    engine-source derivation is deduplicated: the first caller on a deck writes
+    it out, a second caller gets a back-reference to it. Both variants still
+    contain the words "impulse", "d(REAC)/dt" and "reaction_forces_th.F", so a
+    grep-style check on either warning behaves the same whichever fired first.
+    """
+    if state.reac_impulse_warned:
+        physics = _REAC_IMPULSE_BACKREF
+    else:
+        physics = _REAC_IMPULSE_PHYSICS
+        state.reac_impulse_warned = True
+    state.warn(f"{lead}: {physics} {action}")
+
+
 def _make_starter_th_inter(state: ConversionState) -> List[str]:
     """Emit /TH/INTER so contact-interface forces reach the T01 time-history file.
 
@@ -253,11 +305,36 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
         converted contact interface here (T01, /TFILE frequency); the
         nodal-resolution view is the contact-force/pressure animation vectors
         /ANIM/VECT/CONT + /ANIM/VECT/PCONT the engine deck already carries.
-      * *DATABASE_RCFORC (contact resultant forces): the direct equivalent of
+      * *DATABASE_RCFORC (contact resultant forces): the closest equivalent of
         a /TH/INTER channel — LS-DYNA's rcforc is the per-contact force
         resultant, so every converted interface is listed here too.
     Only emitted when a transducer, *DATABASE_NCFORC or *DATABASE_RCFORC
     exists, so other decks are unchanged.
+
+    **The DEF channels FNX/Y/Z and FTX/Y/Z are a time-ACCUMULATED contact
+    IMPULSE, not a force** — the same defect class as /TH/NODE REAC*
+    (_make_starter_th_node_spc below), and it is why an rcforc comparison needs
+    differentiating first. The engine says so itself:
+    engine/source/interfaces/int07/i7for3.F:1443 heads the block
+    ``SAUVEGARDE DE L'IMPULSION NORMALE`` ("save the normal impulse") and
+    :1459-1476 accumulates ``IMPX = F*DT12`` into FSAV(1..3), with the
+    tangential half at :3055-3079; /INTER/SUB channels take the same path
+    (:1559-1561). engine/source/output/th/thkin.F:56 copies FSAV into the T01
+    buffer with no division by time.
+
+    Nothing resets it on the rank that writes: hist2.F:616-622 zeroes FSAV only
+    ``IF (ISPMD/=0)`` — i.e. on the non-master ranks after their contribution
+    has been summed into the master — and sortie_main.F:1945, under its own
+    heading ``TRAITEMENT SUR FSAV NON CUMULE`` ("handling of the NON-cumulated
+    FSAV"), resets only the monvol block, FSAV(26) (contact elastic energy) and
+    FSAV(29) (CAREA). The force columns are absent from that list precisely
+    because they ARE cumulated. So on np=1 the channel is integral(F dt) since
+    t=0 and carries force x time units.
+
+    The instantaneous force is d(FNX)/dt — tools/th_to_csv.py writes that
+    column. This supersedes the older "multiply by 2" folklore recorded on the
+    force-transducer path (writer/contacts.py): the factor between the raw
+    channel and the force is the elapsed accumulation time, not a constant.
     """
     all_inter_ids = ([c.inter_id for c in state.contacts_single]
                      + [c.inter_id for c in state.contacts_surf2surf]
@@ -296,13 +373,29 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     if want_rcforc:
         state.warn(
             "*DATABASE_RCFORC (contact interface resultant forces): mapped to "
-            "/TH/INTER force resultants for every converted contact interface "
-            "(T01 file, /TFILE frequency). This is the direct equivalent — "
-            "LS-DYNA's rcforc reports the master/slave force resultant per "
-            "contact, which is what an OpenRadioss /TH/INTER channel carries.")
+            "/TH/INTER resultants for every converted contact interface "
+            "(T01 file, /TFILE frequency). LS-DYNA's rcforc reports the "
+            "master/slave force resultant per contact; the /TH/INTER channel "
+            "is the same quantity integrated over time — see the impulse "
+            "warning below.")
         ids += [i for i in all_inter_ids if i not in ids]
     if not ids:
         return []
+    # The units differ from LS-DYNA's, so say so on every deck that gets the
+    # block. Same failure mode as the /TH/NODE REAC* channels: plotting the raw
+    # column against an rcforc curve compares an impulse with a force, and
+    # nothing anywhere reports an error.
+    state.warn(
+        "/TH/INTER FNX/Y/Z + FTX/Y/Z (contact interface forces): these "
+        "channels are a time-ACCUMULATED contact IMPULSE (force x time), not "
+        "an instantaneous force — the engine adds F*dt every cycle "
+        "(i7for3.F:1459-1476, under its own comment 'SAUVEGARDE DE "
+        "L'IMPULSION NORMALE') and never resets the accumulator on the rank "
+        "that writes the T01 (hist2.F:616-622 zeroes FSAV only for ISPMD/=0; "
+        "sortie_main.F:1945 resets only monvol, FSAV(26) and FSAV(29)). "
+        "Differentiate with respect to time (F = d(FNX)/dt, e.g. "
+        "numpy.gradient, or tools/th_to_csv.py which writes the differentiated "
+        "column) before comparing against an LS-DYNA rcforc/ncforc file.")
     # The TH group id namespace is GLOBAL across /TH types, not per type: the
     # starter rejects a deck carrying both /TH/NODE/1 and /TH/INTER/1 with
     # "ERROR ID : 79 / DUPLICATE ID / IN TH GROUP DEFINITION / ID=1 is
@@ -320,6 +413,8 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
         "#-  TIME HISTORY (interface / force-transducer):", HDR,
         f"/TH/INTER/{th_id}",
         "TH_interface_forces",
+        "#  DEF = FNX/Y/Z + FTX/Y/Z: contact IMPULSE (force x time), not force",
+        "#  FSAV accumulates F*dt every cycle: contact force = d(FNX)/dt",
         "#     var1",
         "DEF",
     ]
@@ -346,7 +441,11 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
     F(t) = d(REAC)/dt; the DX/Y/Z channels alongside it are ordinary
     displacements and need no such treatment. So a force-vs-displacement curve
     has to be built from numpy.gradient(reac, t) against DX, not from REAC
-    against DX.
+    against DX. This path raises its own warning (_warn_reac_impulse): the
+    *DATABASE_SPCFORC one does not cover it — a deck can have imposed motion
+    and no *DATABASE_SPCFORC at all, and this block is the one that puts a
+    reaction channel and a displacement channel side by side, which is the
+    shape that invites the wrong plot.
     """
     if not state.prescribed_motions:
         return []
@@ -362,6 +461,22 @@ def _make_starter_th_node_reac(state: ConversionState, rbody_info: Dict) -> List
             nodes.append(nd)
     if not nodes:
         return []
+    # This block pairs REACX/Y/Z with DX/Y/Z on the same node, which is exactly
+    # the shape of a force-vs-displacement extraction — and exactly the plot
+    # that silently goes wrong if REAC is used raw. The deck comment says so,
+    # but a comment inside a .rad file is only read by someone who opens the
+    # .rad file; the conversion log is what the engineer actually reads.
+    _warn_reac_impulse(
+        state,
+        "*BOUNDARY_PRESCRIBED_MOTION_RIGID -> /TH/NODE TH_reaction "
+        "(REACX/Y/Z next to DX/Y/Z on the rigid-body master node)",
+        "Build the force-vs-displacement curve from numpy.gradient(reac, t) "
+        "(F = d(REAC)/dt) against DX/Y/Z, not from REAC against DX/Y/Z — "
+        "tools/th_to_csv.py writes that differentiated column for you. The raw "
+        "channel rises monotonically under a steady load, so an untreated "
+        "REAC-vs-DX curve has a meaningless slope and a meaningless enclosed "
+        "area (it is not the work done). The DX/Y/Z channels alongside it are "
+        "ordinary displacements and need no such treatment.")
     th_id = state.next_id()
     lines = [
         "#-  TIME HISTORY (imposed-motion reaction impulse on rigid-body master):", HDR,
@@ -385,15 +500,40 @@ def _make_starter_th_surf(state: ConversionState) -> List[str]:
     the *LOAD_BLAST_SEGMENT[_SET] segments over time. OpenRadioss has no
     per-segment binary equivalent, but /LOAD/PBLAST feeds three outputs that
     together carry the same information (engine pblast_1.F):
-      * /TH/SURF on the loaded /SURF/SEG — the P channel is the surface-
-        average external pressure, A the loaded area (P*A = total blast
-        force), written to the T01 at the /TFILE frequency;
+      * /TH/SURF on the loaded /SURF/SEG — P is the blast pressure and A the
+        loaded area, written to the T01 at the /TFILE frequency (but read the
+        caveat below before doing arithmetic with them);
       * /ANIM/NODA/PEXT — the nodal blast-pressure fringe (the spatial
         pressure field the blstfor file is fringed for in LS-PrePost);
       * /ANIM/VECT/FEXT — the external (blast) nodal force vectors.
     The two /ANIM options are added engine-side at the /ANIM/DT frequency.
     Emitted only when the deck requests *DATABASE_BINARY_BLSTFOR, so other
     decks are unchanged.
+
+    **P and A are per-/TFILE-interval aggregates, and P*A is NOT the blast
+    force.** Both are accumulated per cycle and reset at every TH write, so
+    neither is a snapshot:
+
+      * pblast_1.F:418-419 (and :468-469 / :506-507 for the other two blast
+        models) adds ``AREA*P`` into channel 4 and ``AREA`` into channel 5 on
+        every cycle — these are ``th_surf%channels``, which resol.F:3447 passes
+        as the ``FSAVSURF`` dummy argument, so the two names are one array;
+      * hist2.F:688 then divides channel 4 by channel 5 right before the write
+        ("The pressure in an average pressure");
+      * sortie_main.F:1976-1982 zeroes channels 1-5 after every TH write.
+
+    So **P** is the area-weighted MEAN pressure over the /TFILE interval — not
+    the instantaneous value, and a peak that falls between two TH writes is
+    averaged away. **A** is the loaded area multiplied by the NUMBER OF CYCLES
+    in the interval, so it only equals the loaded area when the T01 is written
+    every cycle; ``P*A`` is inflated by that same cycle count. Use /TFILE close
+    to the timestep if the peak matters, and take the total blast force from
+    /ANIM/VECT/FEXT rather than from P*A.
+
+    Because these are interval aggregates rather than a running integral,
+    differentiating them (the fix for the REAC* and /TH/INTER channels) is
+    meaningless — tools/th_to_csv.py deliberately leaves /TH/SURF alone and
+    prints this caveat instead.
     """
     if not state.db_blstfor_dt:
         return []
@@ -405,15 +545,27 @@ def _make_starter_th_surf(state: ConversionState) -> List[str]:
         return []
     state.warn(
         "*DATABASE_BINARY_BLSTFOR: no binary blast database exists in "
-        "OpenRadioss — mapped to /TH/SURF (P = average blast pressure, "
-        "A = loaded area; T01 at the /TFILE frequency) on the /LOAD/PBLAST "
-        "surface plus /ANIM/NODA/PEXT (nodal pressure fringe) and "
-        "/ANIM/VECT/FEXT (external force vectors) at the /ANIM/DT frequency.")
+        "OpenRadioss — mapped to /TH/SURF (P, A; T01 at the /TFILE frequency) "
+        "on the /LOAD/PBLAST surface plus /ANIM/NODA/PEXT (nodal pressure "
+        "fringe) and /ANIM/VECT/FEXT (external force vectors) at the /ANIM/DT "
+        "frequency.")
+    state.warn(
+        "/TH/SURF P and A are per-/TFILE-interval AGGREGATES, not snapshots: "
+        "the engine adds AREA*P and AREA every cycle (pblast_1.F:418-419), "
+        "divides P by A just before writing (hist2.F:688) and zeroes both "
+        "after every TH write (sortie_main.F:1976-1982). So P is the MEAN "
+        "pressure over the output interval — a peak falling between two writes "
+        "is averaged away — and A is the loaded area times the NUMBER OF "
+        "CYCLES in that interval, so P*A is NOT the blast force. Put /TFILE "
+        "near the timestep if the peak matters, and take the total blast force "
+        "from /ANIM/VECT/FEXT.")
     th_id = state.next_id()
     lines = [
         "#-  TIME HISTORY (*DATABASE_BINARY_BLSTFOR -> blast surface pressure):", HDR,
         f"/TH/SURF/{th_id}",
         "TH_blast_surf",
+        "#  P = MEAN pressure over the /TFILE interval; A = loaded area x cycles",
+        "#  both are reset at every TH write: P*A is NOT the blast force",
         # TH variable names are read in fixed 10-char columns (not free-format),
         # so each keyword must occupy its own field.
         "#     var1      var2",
@@ -469,6 +621,23 @@ def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[
     under a steady load and carries force x time units (N*s in SI, mN*ms in the
     ton/mm/s system).
 
+    reaction_forces_th.F is not the only accumulation site, and the /BCS one
+    matters most here because these channels sit on /BCS nodes. The SPC path
+    engine/source/output/th/bcs1th.F (called from thbcs.F) does the same thing
+    for the constrained DOFs:
+
+        FTHREAC(1..3,NODREAC(L)) += FTHREAC0(1..3) * MS(L) * DT12   (:143-148)
+        FTHREAC(4..6,NODREAC(L)) += FTHREAC0(4..6) * IN(L) * DT12   (:150-155)
+
+    so REACXX/YY/ZZ are ANGULAR impulses (moment x time, nodal inertia IN in
+    place of the mass), not moments. The /ANIM counterpart in the same file
+    accumulates the identical algebra with NO dt factor —
+    ``FANREAC(1..6,L) += FANREAC0(1..6) * MS(L)/IN(L)`` (bcs1th.F:281-287) —
+    which is the /BCS-path twin of the reactions.F:328 contrast below. On the
+    IMPLICIT path the integration is trapezoidal rather than rectangular,
+    ``FTHREAC -= (A + A_prev)*DT3/2`` (bcs1th_imp.F:46-56), but it is still an
+    integral over time: no solver path writes an instantaneous /TH reaction.
+
     **How to read it:** the spcforc-equivalent force is the time derivative of
     the plotted channel, F(t) = d(REAC)/dt — ``numpy.gradient(reac, t)`` on the
     T01 column, or a least-squares slope over a window where the reaction is
@@ -515,16 +684,14 @@ def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[
     # The units differ from LS-DYNA's, so say so on every converted deck: an
     # engineer who plots the T01 REAC* column against an spcforc curve gets a
     # monotonically rising line instead of a force, with no error anywhere.
-    state.warn(
-        "*DATABASE_SPCFORC -> /TH/NODE REACX/Y/Z: the OpenRadioss REAC* "
-        "channels are a time-ACCUMULATED reaction impulse (force x time), not "
-        "an instantaneous force — the engine adds m*a*dt every cycle "
-        "(reaction_forces_th.F) and zeroes the accumulator only once, before "
-        "the iteration loop (resol.F:1901, loop head :2612). Differentiate the "
-        "T01 columns with respect to time (F = d(REAC)/dt, e.g. "
-        "numpy.gradient(reac, t)) before comparing them against an LS-DYNA "
-        "spcforc file. The instantaneous force is available as the nodal field "
-        "/ANIM/VECT/FREAC, which is also emitted.")
+    _warn_reac_impulse(
+        state,
+        "*DATABASE_SPCFORC -> /TH/NODE REACX/Y/Z",
+        "Differentiate the T01 columns with respect to time "
+        "(F = d(REAC)/dt, e.g. numpy.gradient(reac, t), or tools/th_to_csv.py "
+        "which writes the differentiated column for you) before comparing them "
+        "against an LS-DYNA spcforc file. The instantaneous force is available "
+        "as the nodal field /ANIM/VECT/FREAC, which is also emitted.")
     if len(nodes) > 1000:
         state.warn(
             f"*DATABASE_SPCFORC: {len(nodes)} SPC-constrained nodes get REAC* "

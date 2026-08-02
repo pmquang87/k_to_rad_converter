@@ -354,11 +354,22 @@ for users who need to reproduce a specific `METH`.
   the unsupported CTYPEs.
 * `*DATABASE_BINARY_BLSTFOR` — no equivalent binary DB, but `/LOAD/PBLAST`
   feeds three outputs that together carry its content (engine `pblast_1.F`):
-  `/TH/SURF` with the `P` (surface-average blast pressure) and `A` (loaded
-  area) channels on the loaded `/SURF/SEG` (T01, `/TFILE` frequency), the
-  `/ANIM/NODA/PEXT` nodal blast-pressure fringe, and the `/ANIM/VECT/FEXT`
-  external-force vectors (both at the `/ANIM/DT` frequency). Emitted since
-  the W13 output-keyword pass (previously a bare skip).
+  `/TH/SURF` with the `P` and `A` channels on the loaded `/SURF/SEG` (T01,
+  `/TFILE` frequency), the `/ANIM/NODA/PEXT` nodal blast-pressure fringe, and
+  the `/ANIM/VECT/FEXT` external-force vectors (both at the `/ANIM/DT`
+  frequency). Emitted since the W13 output-keyword pass (previously a bare
+  skip).
+
+  **`P` and `A` are per-`/TFILE`-interval aggregates, and `P*A` is not the
+  blast force.** `pblast_1.F:418-419` adds `AREA*P` into channel 4 and `AREA`
+  into channel 5 **every cycle**, `hist2.F:688` divides channel 4 by channel 5
+  immediately before the write ("The pressure in an average pressure"), and
+  `sortie_main.F:1976-1982` zeroes channels 1-5 after every TH write. So `P`
+  is the area-weighted **mean** pressure over the output interval — a peak
+  falling between two writes is averaged away — and `A` is the loaded area
+  times the **number of cycles** in that interval. Put `/TFILE` near the
+  timestep if the peak matters, and take the total blast force from
+  `/ANIM/VECT/FEXT`. The converter warns about this on every converted deck.
 
 ---
 

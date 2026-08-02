@@ -410,5 +410,71 @@ class SecforcTests(unittest.TestCase):
         self.assertNotIn("/TH/SECTIO/", starter)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# /TH/SECTIO DEF is a time-accumulated impulse, not the section resultant
+#
+# engine/source/tools/sect/section_c.F:459-467 (shells; section_s.F:565-572 for
+# solids) accumulates FSAV(k) += DT12*FST(k) for the six force components and
+# the three moments; engine/source/output/th/thkin.F:56 copies FSAV into the
+# T01 buffer undivided, and nothing resets it on the rank that writes
+# (hist2.F:616-622 zeroes FSAV only for ISPMD/=0; sortie_main.F:1945, under the
+# heading "TRAITEMENT SUR FSAV NON CUMULE", resets only the monvol block,
+# FSAV(26) and FSAV(29)). LS-DYNA's secforc is the instantaneous resultant, so
+# the two are not interchangeable without differentiating.
+# ═════════════════════════════════════════════════════════════════════════════
+
+class SectioImpulseSemanticsTests(unittest.TestCase):
+    @staticmethod
+    def _with_sections():
+        return _convert(SHELL_STRIP.replace(
+            "{EXTRA}", CROSS_SET + "*DATABASE_SECFORC\n      0.01\n"))
+
+    @staticmethod
+    def _comment_block(starter: str, title: str) -> str:
+        """The run of '#' comment lines directly under a /TH block title."""
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == title)
+        out = []
+        j = i + 1
+        while lines[j].startswith("#"):
+            out.append(lines[j])
+            j += 1
+        return "\n".join(out)
+
+    def test_secforc_warns_that_the_channels_are_an_impulse(self):
+        result, _starter, _engine = self._with_sections()
+        hits = [w for w in result.warnings if "/TH/SECTIO FNX" in w]
+        self.assertTrue(hits, result.warnings)
+        w = " ".join(hits)
+        self.assertIn("ACCUMULATED", w)
+        self.assertIn("d(FNX)/dt", w)
+        self.assertIn("section_c.F", w)
+        # the moments are integrated too, and the warning must say so
+        self.assertIn("angular impulse", w)
+
+    def test_secforc_impulse_note_in_emitted_comment(self):
+        _r, starter, _e = self._with_sections()
+        block = self._comment_block(starter, "TH_SECTIONS")
+        self.assertIn("IMPULSE (force x time), not force", block)
+        self.assertIn("section force = d(FNX)/dt", block)
+
+    def test_secforc_comment_does_not_disturb_the_card(self):
+        """The starter reads the variable line and the id list by position."""
+        _r, starter, _e = self._with_sections()
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "TH_SECTIONS")
+        j = i + 1
+        while lines[j].startswith("#"):
+            j += 1
+        self.assertEqual(lines[j].strip(), "DEF")
+        self.assertTrue(lines[j + 1].strip().isdigit())
+
+    def test_no_impulse_warning_when_no_section_is_emitted(self):
+        deck = SHELL_STRIP.replace("{EXTRA}", "*DATABASE_SECFORC\n      0.01\n")
+        result, starter, _e = _convert(deck)
+        self.assertNotIn("/TH/SECTIO/", starter)
+        self.assertFalse([w for w in result.warnings if "/TH/SECTIO FNX" in w])
+
+
 if __name__ == "__main__":
     unittest.main()
