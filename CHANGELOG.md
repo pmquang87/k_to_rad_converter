@@ -1802,6 +1802,110 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **Every `ELFORM = 9` spot weld converted with a nugget area that was not an
+  area. `*SECTION_BEAM` card 2 was read as the wrong card, and the six spot weld
+  decks in `Ryan_Lee_Examples/` all change.**
+
+  `handle_section_beam`'s ELFORM = 9 branch was commented
+  `VOL INER CID CA OFFSET RRCON SRCON TRCON` and stored field 1 as a nugget
+  *volume* and field 4 as a cross-section *area*. That is **card 2f**, and card
+  2f is for `ELFORM = 6`, the discrete beam. The spot weld beam has its own
+  card: "Spot Weld Card (type 9). Include this card when ELFORM equals 9 —
+  `TS1 TS2 TT1 TT2 PRINT - ITOFF -`" (Vol I R17 p.41-22), where `TS1`/`TS2` are
+  the "outer diameter (CST = 1.0) in 푠-direction at node 푛1 / 푛2" and
+  `TT1`/`TT2` the matching **inner** diameters (p.41-22/23). dyna2rad's cfg
+  agrees field for field —
+  `CARD("%10lg%10lg%10lg%10lg%10lg", LSD_THIC1s, LSD_THIC2s, LSD_THIC1t, LSD_THIC2t, LSD_TPRINT)`
+  under `else if (LSD_ELFORM == 9)` (`Keyword971/PROPERTY/SectBeam.cfg:464-470`).
+
+  So the "area" was `TT2`, which is **0.0 on all six decks**, and the writer's
+  fallback then divided the "volume" — really `TS1`, a diameter — by the weld
+  length:
+
+  ```python
+  area = sec.ca                     # = TT2 = 0.0
+  if area <= 0.0 and sec.vol > 0.0:
+      area = sec.vol / L            # = diameter / length: dimensionless
+  ```
+
+  A length over a length. In an SI (m) deck that lands near **1**, so
+  `W16_spotweld_E1.k` sized its 3 mm welds at **A = 1.5 m²** instead of
+  7.07e-06 m² — 212 000× too stiff, `K_axial` 1.575E+14 instead of 7.42E+08,
+  and a weld *mass* of 23.55 kg apiece. The `*MAT_SPOTWELD` yield force
+  `SIGY·A` came out at 5.25E+08 N for a 3 mm nugget, i.e. the weld could never
+  reach yield and behaved as a rigid link. In a mm deck the same expression
+  lands near 1 mm² and reads as *under*-stiff instead
+  (`W16_SW_door_*.k`: 0.44–1.23 mm² against the true π mm²). Worst of all it
+  scaled with `L`: identical welds off one `*SECTION_BEAM` got **different**
+  stiffnesses depending on how far apart the sheets happened to be.
+
+  Card 2i is now parsed into honestly named fields — `SectionBeam.ts1/ts2/tt1/
+  tt2`, plus `cst` (card 1 field 5) and `itoff` (card 2i field 7); the
+  `vol`/`ca` slots that only ever held mis-parsed diameters are gone. The
+  nugget is sized as the circular section the diameters describe,
+
+  ```
+  d_o = mean(TS1, TS2)      d_i = mean(TT1, TT2)
+  A   = π (d_o² − d_i²) / 4     I = π (d_o⁴ − d_i⁴) / 64     J = 2I
+  ```
+
+  which is dyna2rad's `ConvertToPropType13` verbatim (`convertprops.cxx`:
+  `meanTS = (lsdTS1 + lsdTS2) / 2.0`, `area = piVal * (pow(meanTS, 2) -
+  pow(meanTT, 2)) / 4.0`) and, at `TT = 0`, is exactly the `π d²/4` the
+  neighbouring `ELFORM = 1` branch already used — the two spot weld
+  formulations finally agree. The **mean** is the right reduction because
+  `TS1`/`TS2` are the diameters at the two *ends* of one beam and a
+  `/PROP/TYPE13` spring is prismatic; a blank end column is treated as an
+  omission (the populated diameter is used for both ends, with a warning)
+  rather than a nugget tapering to a point, because averaging the blank in
+  would quarter the area for no stated reason.
+
+  Warnings now report the resolved geometry (`outer d=…, inner d=… -> A=…`) and
+  flag the three things this mapping does not honour: `CST ≠ 1` (a rectangular
+  or user-rule section still becomes a round nugget — dyna2rad makes the same
+  assumption), `TT ≥ TS` (sized solid instead), and `ITOFF = 1` (torsion-free
+  welds keep their elastic `Rx` stiffness).
+
+  **The starter never complained — before or after.** `W16_spotweld_E1.k`
+  converts to `0 ERROR(S)`, `6 WARNING(S)` both ways; the bug was invisible to
+  every check the deck passes. What the starter *does* print is the giveaway:
+
+  ```
+                              master                    fixed
+  SPRING MASS         23.55000000000        1.1097676050000E-04
+  TOTAL MASS          95.23557817859             1.036022085632
+  ```
+
+  95.2356 − 1.0360 = 94.1996 = 4 × 23.5499: the four spot welds were carrying
+  **94.2 kg of spurious mass on a 1.04 kg model**, a 92× error, and it rode
+  through the starter silently.
+
+  The engine settles it. The fixed deck runs the full 0.1 s to
+  **`NORMAL TERMINATION`** in 721 395 cycles (42:38, np=1/nt=6), time step held
+  at `1.386E-07 s` throughout, `MAS.ERR 0.000`, `MASS ADDED 0.000`. The master
+  conversion is dt-limited to `5.816E-10 s` — 238× lower, `SPRIN` element 1
+  governing in both — and after 38 285 cycles had reached `t = 2.226E-05 s` of
+  the 100 ms event, i.e. 0.02 %. It would need ~1.7e8 cycles to finish and was
+  stopped; a `/TH/SPRING` probe on it produced **zero** samples because it never
+  reached the first output interval. So there is no before/after weld-force
+  curve to show: the old conversion was not merely wrong, it was
+  computationally infeasible.
+
+  Scope: of the 83 `.k`/`.key`/`.dyn` decks on this machine exactly six carry an
+  `ELFORM = 9` `*SECTION_BEAM`, and a before/after SHA256 sweep over every deck
+  reachable from the repo changes those six and nothing else. All five goldens
+  are byte-identical. 10 new tests in `tests/test_connectors.py`
+  (1563 → 1573 at this branch's base; 1587 → 1597 once the concurrent PRs are
+  merged in).
+
+  Two things this deck shows that are **not** this bug, recorded so they are not
+  rediscovered: `*CONTACT_SPOTWELD` is still `SKIPPED`, so the weld beams'
+  nodes (2059–2066 here) reach the starter attached to nothing but each other —
+  weld force is 0.000 N before *and* after, and the mass/stiffness numbers above
+  are what actually verifies this fix. And all four springs draw starter
+  `WARNING ID 327`, "BAD SPRING FRAME DEFINITION (PARALLEL AXIS)", identically
+  on master and here.
+
 - **A `*INITIAL_FOAM_REFERENCE_GEOMETRY` was dropped on `*MAT_RIGID` and
   `*MAT_SPOTWELD` parts under a warning that named a law violation that does not
   exist.** `inistate.py` resolved each part's law through its own private

@@ -1301,13 +1301,15 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
                 sec.nsloc = to_float(f2[4]) if len(f2) > 4 else 0.0
                 sec.ntloc = to_float(f2[5]) if len(f2) > 5 else 0.0
             if kind == "2i":
-                # ELFORM 9 spotweld: k2rad's /PROP/TYPE13 connector path reads
-                # the nugget volume and area off these two columns. Kept
-                # verbatim rather than re-derived, so the spotweld conversion is
-                # untouched by this card-dialect rewrite.
-                sec.vol = to_float(f2[0]) if f2 else 0.0
-                sec.ca = to_float(f2[3]) if len(f2) > 3 else 0.0
-                sec.area = sec.ca
+                # ELFORM 9 spot weld, card 2i (Manual Vol I R17 p.41-22):
+                # TS1 TS2 TT1 TT2 PRINT - ITOFF -. TS/TT (parsed above via the
+                # shared thickness branch) are the outer/inner nugget diameters
+                # at each node; the /PROP/TYPE13 connector path derives the
+                # cross-section from them (pi*(do^2-di^2)/4 at the mean of the
+                # end diameters). There is no VOL and no CA on this card — that
+                # is card 2f, the ELFORM=6 discrete beam. PRINT (field 5) only
+                # steers swforc output.
+                sec.itoff = to_int(f2[6]) if len(f2) > 6 else 0
         elif kind == "2c":
             # ELFORM 2/12/13 resultant: A ISS ITT J
             sec.area = to_float(f2[0]) if f2 else 0.0

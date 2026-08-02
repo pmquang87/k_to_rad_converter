@@ -814,6 +814,20 @@ def _make_plotel_elements(state: ConversionState) -> List[str]:
     return lines
 
 
+def _mean_diameter(d1: float, d2: float) -> float:
+    """Mean of a spot weld nugget's node-1 / node-2 diameters (card 2i).
+
+    A tapered weld is reduced to one prismatic spring at the mean diameter,
+    matching dyna2rad's ``meanTS = (TS1+TS2)/2``. A blank/zero column on one
+    end is an omission rather than a nugget that tapers to a point, so the
+    populated value is used for both ends — averaging the blank in would
+    silently quarter the weld area.
+    """
+    if d1 > 0.0 and d2 > 0.0:
+        return (d1 + d2) / 2.0
+    return max(d1, d2, 0.0)
+
+
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
     """*MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 (SPR_BEAM) /SPRING
     connectors.
@@ -880,16 +894,58 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             if d > 0.0:
                 state.warn(f"*SECTION_BEAM {secid} (ELFORM=1) on spotweld part "
                            f"{pid}: assumed a solid circular nugget of diameter "
-                           f"TS1={d:g} (CST/CA details are not read).")
+                           f"TS1={d:g} (card 2a's TS2/TT1/TT2 and CST are not "
+                           "read on this path).")
         elif sec.elform == 9:
-            area = sec.ca
-            if area <= 0.0 and sec.vol > 0.0:
-                area = sec.vol / L
-            iyy = izz = area * area / (4.0 * math.pi)  # solid circular nugget
+            # Spot weld beam, *SECTION_BEAM card 2i: TS1/TS2 are the nugget
+            # OUTER diameter at node 1/2 and TT1/TT2 the INNER diameter — the
+            # card carries diameters, never a volume or an area. A tapered
+            # weld (TS1 != TS2) collapses to ONE prismatic /PROP/TYPE13 spring,
+            # so the section is taken at the MEAN diameter; that is also what
+            # dyna2rad does (convertprops.cxx ConvertToPropType13:
+            #   meanTS = (TS1+TS2)/2, meanTT = (TT1+TT2)/2,
+            #   area   = pi*(meanTS^2 - meanTT^2)/4).
+            # With TT = 0 this is the solid circle pi*d^2/4 of the ELFORM=1
+            # branch above, so both spot weld formulations agree.
+            do = _mean_diameter(sec.ts1, sec.ts2)
+            di = _mean_diameter(sec.tt1, sec.tt2)
+            if di >= do > 0.0:
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                           f"{pid}: inner diameter TT ({di:g}) is not smaller "
+                           f"than the outer diameter TS ({do:g}) — the nugget "
+                           "was sized as SOLID (TT ignored).")
+                di = 0.0
+            area = math.pi * (do * do - di * di) / 4.0
+            # Solid/annular circular nugget: I = pi(do^4-di^4)/64 about either
+            # bending axis, polar J = 2I = pi(do^4-di^4)/32.
+            iyy = izz = math.pi * (do ** 4 - di ** 4) / 64.0
             ixx = 2.0 * iyy
-            state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
-                       f"{pid}: bending/torsion inertia estimated from the "
-                       "nugget area as a solid circular section.")
+            if do > 0.0:
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                           f"{pid}: nugget sized from card 2i as a circular "
+                           f"section, outer d={do:g}"
+                           + (f", inner d={di:g}" if di > 0.0 else "")
+                           + f" -> A={area:g} (mean of TS1={sec.ts1:g}/"
+                           f"TS2={sec.ts2:g}); bending/torsion inertia follow "
+                           "from the same section.")
+            if (sec.ts1 > 0.0) != (sec.ts2 > 0.0):
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                           f"{pid}: only one of TS1/TS2 is populated "
+                           f"(TS1={sec.ts1:g}, TS2={sec.ts2:g}) — the weld was "
+                           f"sized prismatic at d={do:g} instead of tapering "
+                           "to a point. Fill in both columns if the nugget "
+                           "really is conical.")
+            if sec.cst != 1 and do > 0.0:
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                           f"{pid}: CST={sec.cst} (not tubular) — TS/TT are "
+                           "then RECTANGULAR thicknesses, but the weld was "
+                           "still sized as a circular nugget of diameter "
+                           f"{do:g} (same assumption dyna2rad makes). Check "
+                           "the weld stiffness if the nugget is not round.")
+            if sec.itoff == 1:
+                state.warn(f"*SECTION_BEAM {secid} (ELFORM=9 spotweld) on part "
+                           f"{pid}: ITOFF=1 (torsion free) is NOT applied — "
+                           "the /PROP/TYPE13 keeps its elastic Rx stiffness.")
         else:
             area, iyy, izz, ixx = sec.area, sec.iyy, sec.izz, sec.ixx
         if area <= 0.0:

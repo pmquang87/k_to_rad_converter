@@ -11,6 +11,7 @@ Kept in a separate module from tests/test_converter.py (same policy as
 tests/test_roadmap_keywords.py).
 """
 
+import math
 import os
 import tempfile
 import unittest
@@ -324,6 +325,176 @@ class SpotweldBeamTests(unittest.TestCase):
         self.assertIn("(MAT_100 fallback)", starter)
         self.assertNotIn("/PROP/TYPE13/", starter)
         self.assertTrue(any("DROPPED" in w for w in result.warnings))
+
+
+# ── ELFORM=9 spot weld beam: *SECTION_BEAM card 2i ───────────────────────────
+#
+# Card 1:  SECID  ELFORM  SHRF  QR/IRID  CST  SCOOR  NSM      (CST=1 tubular)
+# Card 2i: TS1    TS2     TT1   TT2      PRINT  -  ITOFF  -
+#
+# Geometry of the deck below: nodes 1/2 are 2.0 apart, so the weld length
+# L = 2.0.  MAT_100: RO = 7.8e-9, E = 210000, PR = 0.3 -> G = 80769.230769.
+
+E9_HEAD = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "       1             0.0             0.0             0.0\n"
+    "       2             0.0             0.0             2.0\n"
+    "*PART\n"
+    "weld\n"
+    "         5         3         9\n"
+    "*SECTION_BEAM\n"
+    "         3         9       1.0       2.0       1.0\n"
+)
+E9_TAIL = (
+    "*MAT_SPOTWELD\n"
+    "         9    7.8E-9  210000.0       0.3       0.0\n"
+    "       0.0    5000.0    3000.0    3000.0   40000.0   20000.0   20000.0\n"
+    "*ELEMENT_BEAM\n"
+    "       1       5       1       2\n"
+    "*CONTROL_TERMINATION\n"
+    "       1.0\n"
+    "*END\n"
+)
+
+
+def _e9_deck(card2: str, card1: str = None) -> str:
+    """ELFORM=9 spotweld deck with *card2* as card 2i (SIGY=0, so no bilinear
+    /FUNCT perturbs the column layout)."""
+    head = E9_HEAD if card1 is None else (
+        E9_HEAD.replace("         3         9       1.0       2.0       1.0\n",
+                        card1))
+    return head + card2 + E9_TAIL
+
+
+class SpotweldElform9SectionTests(unittest.TestCase):
+    """*SECTION_BEAM card 2i is TS1 TS2 TT1 TT2 PRINT - ITOFF - (Manual Vol I
+    R17 p.41-22) — diameters, NOT the ELFORM=6 discrete-beam 'VOL INER CID CA'
+    card that k2rad used to read here."""
+
+    # ── parse ────────────────────────────────────────────────────────────────
+    def test_card2i_fields_land_in_named_diameter_slots(self):
+        state = _dispatch(_e9_deck(
+            "       4.0       6.0       1.0       2.0       1.0"
+            "                 1.0\n"))
+        sec = state.sec_beams[3]
+        self.assertEqual(sec.elform, 9)
+        self.assertEqual(sec.ts1, 4.0)      # outer diameter at node 1
+        self.assertEqual(sec.ts2, 6.0)      # outer diameter at node 2
+        self.assertEqual(sec.tt1, 1.0)      # inner diameter at node 1
+        self.assertEqual(sec.tt2, 2.0)      # inner diameter at node 2
+        self.assertEqual(sec.cst, 1)        # card 1 field 5
+        self.assertEqual(sec.itoff, 1)      # card 2i field 7
+        # PRINT (field 5) is an output flag and must NOT become geometry.
+        self.assertEqual(sec.area, 0.0)     # card 2i carries no area at all
+
+    # ── area / stiffness ─────────────────────────────────────────────────────
+    def test_uniform_nugget_area_is_solid_circle_of_ts(self):
+        # TS1 = TS2 = 4.0, TT = 0  ->  d = 4.0
+        #   A   = pi*4^2/4  = 12.566370614359172
+        #   Iyy = pi*4^4/64 = 12.566370614359172,  Ixx = 2*Iyy
+        #   Mass    = RO*A*L        = 7.8e-9 * A * 2   = 1.960354E-07
+        #   Inertia = Mass*L^2/12                      = 6.534513E-08
+        #   K1 = E*A/L, K2/K3 = G*A/L (G = E/2.6), K4 = G*Ixx/L,
+        #   K5/K6 = E*Iyy/L.
+        _, starter = _convert(_e9_deck(
+            "       4.0       4.0       0.0       0.0       0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[3][0:20].strip(), "1.960354E-07")   # Mass
+        self.assertEqual(blk[3][20:40].strip(), "6.534513E-08")  # Inertia
+        self.assertEqual(blk[5][0:20].strip(), "1319468.915")    # K1
+        self.assertEqual(blk[11][0:20].strip(), "507488.044")    # K2
+        self.assertEqual(blk[17][0:20].strip(), "507488.044")    # K3
+        self.assertEqual(blk[23][0:20].strip(), "1014976.088")   # K4
+        self.assertEqual(blk[29][0:20].strip(), "1319468.915")   # K5
+        self.assertEqual(blk[35][0:20].strip(), "1319468.915")   # K6
+
+    def test_tapered_nugget_uses_the_mean_of_ts1_and_ts2(self):
+        # TS1 = 4.0, TS2 = 6.0 -> mean d = 5.0 (dyna2rad meanTS), so
+        #   A  = pi*25/4 = 19.634954084936208 -> K1 = 210000*A/2
+        _, starter = _convert(_e9_deck(
+            "       4.0       6.0       0.0       0.0       0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[3][0:20].strip(), "3.063053E-07")   # Mass
+        self.assertEqual(blk[5][0:20].strip(), "2061670.179")    # K1
+        # Not TS1 alone (1319468.915) and not TS2 alone (2967805.058).
+        self.assertNotEqual(blk[5][0:20].strip(), "1319468.915")
+        self.assertNotEqual(blk[5][0:20].strip(), "2967805.058")
+
+    def test_hollow_nugget_subtracts_the_tt_inner_diameter(self):
+        # TS = 6.0, TT = 4.0 -> annulus, A = pi*(36-16)/4 = 15.707963267948966
+        #                       Iyy = pi*(6^4-4^4)/64 = 51.050880620834135
+        _, starter = _convert(_e9_deck(
+            "       6.0       6.0       4.0       4.0       0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[5][0:20].strip(), "1649336.143")    # K1
+        self.assertEqual(blk[29][0:20].strip(), "5360342.465")   # K5 = E*Iyy/L
+        # A solid d=6 nugget would be K1 = 2967805.058 — the bore must count.
+        self.assertNotEqual(blk[5][0:20].strip(), "2967805.058")
+
+    def test_blank_ts2_is_prismatic_not_a_cone_and_warns(self):
+        # Only TS1 filled: averaging the blank in would quarter the area.
+        result, starter = _convert(_e9_deck(
+            "       4.0                                     0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[5][0:20].strip(), "1319468.915")    # as d = 4.0
+        self.assertTrue(any("only one of TS1/TS2" in w
+                            for w in result.warnings))
+
+    def test_inner_diameter_not_smaller_than_outer_warns_and_goes_solid(self):
+        result, starter = _convert(_e9_deck(
+            "       4.0       4.0       9.0       9.0       0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[5][0:20].strip(), "1319468.915")    # solid d = 4
+        self.assertTrue(any("not smaller than the outer diameter" in w
+                            for w in result.warnings))
+
+    def test_non_tubular_cst_still_circular_but_warns(self):
+        result, _ = _convert(_e9_deck(
+            "       4.0       4.0       0.0       0.0       0.0\n",
+            card1="         3         9       1.0       2.0       0.0\n"))
+        self.assertTrue(any("CST=0 (not tubular)" in w
+                            for w in result.warnings))
+
+    def test_itoff_is_reported_as_not_applied(self):
+        result, _ = _convert(_e9_deck(
+            "       4.0       4.0       0.0       0.0       0.0"
+            "                 1.0\n"))
+        self.assertTrue(any("ITOFF=1" in w for w in result.warnings))
+
+    # ── the regression itself ────────────────────────────────────────────────
+    def test_area_is_not_the_old_diameter_over_length(self):
+        """Before the fix the area was TT2 (0 on every real deck) and then the
+        card-1 column read as a 'volume' divided by the weld length — i.e.
+        TS1/L, which is a length/length ratio, not an area. On this deck that
+        was 4.0/2.0 = 2.0 instead of 4*pi."""
+        _, starter = _convert(_e9_deck(
+            "       4.0       4.0       0.0       0.0       0.0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        k1 = float(blk[5][0:20])
+        self.assertAlmostEqual(k1 / (210000.0 / 2.0), 4.0 * math.pi, places=6)
+        self.assertNotAlmostEqual(k1 / (210000.0 / 2.0), 2.0, places=6)
+        # And the area must not depend on the weld LENGTH any more: doubling
+        # the beam length halves K1 = E*A/L exactly, instead of quartering it
+        # the way an A = TS1/L area did. Mass = RO*A*L doubles.
+        long_deck = _e9_deck(
+            "       4.0       4.0       0.0       0.0       0.0\n").replace(
+            "       2             0.0             0.0             2.0\n",
+            "       2             0.0             0.0             4.0\n")
+        _, starter2 = _convert(long_deck)
+        blk2 = _block_lines(starter2, "/PROP/TYPE13/")
+        self.assertEqual(blk2[5][0:20].strip(), "659734.4573")   # K1 halved
+        self.assertEqual(blk2[3][0:20].strip(), "3.920708E-07")  # Mass doubled
+
+    def test_elform2_resultant_section_is_untouched(self):
+        """Guard the neighbouring branch: an ELFORM=2 *SECTION_BEAM still takes
+        A/IYY/IZZ/IXX straight off card 2c (the values SPOTWELD_DECK uses)."""
+        state = _dispatch(SPOTWELD_DECK)
+        sec = state.sec_beams[3]
+        self.assertEqual((sec.area, sec.iyy, sec.izz, sec.ixx),
+                         (4.0, 1.2, 1.2, 2.4))
+        self.assertEqual((sec.ts1, sec.ts2, sec.tt1, sec.tt2),
+                         (0.0, 0.0, 0.0, 0.0))
 
 
 # ── CONSTRAINED_SPOTWELD ─────────────────────────────────────────────────────

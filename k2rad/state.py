@@ -501,9 +501,6 @@ class SectionBeam:
     izz: float = 0.0
     ixx: float = 0.0
     ts1: float = 0.0   # integrated beam thickness (elform=1)
-    # ELFORM=9 (spotweld beam) card2 is VOL INER CID CA ... — no area/inertia:
-    vol: float = 0.0   # spotweld nugget volume
-    ca: float = 0.0    # spotweld cross-sectional area
     # *SECTION_BEAM card 2a/2e/2h (ELFORM 0/1/4/5/7/8/9/11) — the cross-section
     # thicknesses at node 1 and node 2, in the beam's local s and t directions
     # (Manual Vol I R17 p.41-11). ``ts1``/``ts2`` are the s-direction thickness
@@ -511,9 +508,19 @@ class SectionBeam:
     # PRISMATIC section of an integrated beam is ts1 x tt1 — NOT ts1 x ts2,
     # which is dyna2rad's L1<-TS1 / L2<-TS2 map (convertprops.cxx:1274-1275)
     # and reads a taper as a depth.
+    #
+    # On ELFORM=9 (spot weld) the same four cells are card 2i, Manual Vol I R17
+    # p.41-22/23: TS1 TS2 TT1 TT2 PRINT - ITOFF -, where TS is the beam
+    # thickness (CST=0/2) or OUTER diameter (CST=1) and TT the thickness or
+    # INNER diameter at node n1 / n2. There is no volume and no area on that
+    # card — VOL/INER/CID/CA is card 2f, which belongs to the ELFORM=6
+    # DISCRETE beam.
     ts2: float = 0.0
     tt1: float = 0.0
     tt2: float = 0.0
+    # Card 2i field 7 (ELFORM=9 only): 1 = torsional stiffness of the spot
+    # weld is zero.
+    itoff: int = 0
     # Card 2a fields 5/6: where the beam's reference axis (the node line) sits
     # inside the +/-1 s-t square. Both default to 0 = the section centre.
     nsloc: float = 0.0
