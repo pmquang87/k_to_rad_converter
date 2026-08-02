@@ -637,21 +637,39 @@ class RuleDrivenLayupTests(unittest.TestCase):
         idiomatic way to declare a layer material. k2rad emits a /PART for every
         *PART record, and a /PART whose property does not exist is starter
         ERROR 178 — the element-free-*PART placeholder covers exactly that, and
-        this keyword is what makes the idiom common, so pin it here too."""
+        this keyword is what makes the idiom common, so pin it here too.
+
+        NO hand-added *SECTION_SHELL on the carrier: the placeholder is the only
+        thing that can give /PART/88 a property. Starter-verified — this deck
+        converts and runs `0 ERROR(S) 0 WARNING(S)` on starter_win64, identical
+        to the control deck where the carrier IS given a *SECTION_SHELL by
+        hand, which is why the pass no longer tells the user to add one."""
         carrier = "*PART\ncore\n" + _row(88, 0, 4) + "\n"
         rule = _rule(points=((-1.0, 0.25, 0), (0.0, 0.5, 88), (1.0, 0.25, 0)))
         result, starter = _convert(_deck(rule=rule, extra=carrier + FOAM))
-        emitted = {ln.rsplit("/", 1)[1] for ln in starter.splitlines()
+        emitted = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
                    if ln.startswith("/PROP/")}
         parts = starter.splitlines()
         for i, ln in enumerate(parts):
             if ln.startswith("/PART/"):
-                self.assertIn(_i10(parts[i + 2], 0), {int(p) for p in emitted},
-                              ln)
+                self.assertIn(_i10(parts[i + 2], 0), emitted, ln)
+        # the carrier's own property is the placeholder /PROP/SHELL, on its
+        # DEFAULTED secid (LS-DYNA lets SECID default to the PID)
+        self.assertIn(88, emitted)
+        self.assertEqual(len(_blocks(starter, "/PROP/SHELL/88")), 1)
+        self.assertEqual(_i10(parts[parts.index("/PART/88") + 2], 0), 88)
         # the layer still takes the carrier's material
         self.assertEqual([m for _, _, m in _layup(starter)], [3, 4, 3])
         # ...and the ERROR-178 claim is NOT repeated by this keyword's own pass
         self.assertFalse(_warned(result, "material carrier part(s) 88"))
+        self.assertFalse(_warned(result, "Give the carrier part a "
+                                         "*SECTION_SHELL"))
+        # the synthesized /PROP is still EXPLAINED once, by the generic
+        # element-free-*PART report that names the pid — no separate INFO note
+        # is added here, so the log stays one message per empty part
+        explains = [w for w in result.warnings if "*PART record(s) 88" in w
+                    and "PLACEHOLDER" in w and "material carrier" in w]
+        self.assertEqual(len(explains), 1, result.warnings)
 
     def test_icomp_angles_and_rule_thicknesses_compose(self):
         """ICOMP=1 gives every integration point an angle and the rule gives
