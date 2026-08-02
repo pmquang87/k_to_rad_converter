@@ -1224,6 +1224,54 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **`*DATABASE_SPCFORC`: the `/TH/NODE` `REAC*` channel was documented as a
+  reaction *force*. It is a time-accumulated reaction *impulse*.** Docs,
+  emitted deck comments and a new warning only — the mapping was already
+  correct (right channel, right nodes) and no emitted card changes.
+
+  The engine never divides by time and never resets the accumulator:
+
+  ```fortran
+  ! engine/source/output/reaction_forces_th.F:60-62
+  FTHREAC(k,NODREAC(N)) = FTHREAC(k,NODREAC(N)) + IFLAG * MS(N)*A(k,N)*DT12
+
+  ! engine/source/engine/resol.F
+  1901   FTHREAC = ZERO      ! the ONLY zeroing in the engine ...
+  2612   100 CONTINUE        ! ... and it is BEFORE the iteration loop head
+  7304   IFLAG = -1 ; CALL REACTION_FORCES_TH(...)   ! before kinematic conds
+  7386   IFLAG = +1 ; CALL REACTION_FORCES_TH(...)   ! after  -> += m(A-A~)*dt
+  9294   GOTO 100            ! back edge: no reset in between
+
+  ! engine/source/output/th/thnod.F:178-208
+  WA(IJK) = FTHREAC(1,NODREAC(I))            ! written straight out, as-is
+  ```
+
+  So `REAC*` sums `m*a*dt` monotonically for the whole run and carries
+  force x time units, while LS-DYNA's `spcforc` column is an instantaneous
+  force. Plotting one against the other compares an impulse with a force, with
+  no error or warning anywhere. Measured on a settled column+block deck of
+  total weight **3.850425 N**: `REACY` ramps linearly (0.0735 N*s at t = 0.03
+  to 1.1178 N*s at t = 0.30) and the least-squares slope over t >= 0.15 is
+  **3.8504181 N — -0.0002% off the analytic weight**. The fix is therefore to
+  say so, everywhere, and to tell the reader that `F(t) = d(REAC)/dt`.
+
+  The companion `/ANIM/VECT/FREAC` the same code path emits is *not* affected —
+  `reactions.F:328` finalizes `FREAC = MS*A - FREAC` each cycle with no `DT12`
+  and no accumulation, so that field really is the instantaneous force. `FREAC`
+  and `FTHREAC` are separate arrays with deliberately different semantics; only
+  the `/TH` one is integrated. The same correction applies to the
+  `*BOUNDARY_PRESCRIBED_MOTION_RIGID` reaction readout
+  (`_make_starter_th_node_reac`), whose `REACX/Y/Z` sits next to plain `DX/Y/Z`
+  displacement channels — a force-vs-displacement curve has to be built from
+  `numpy.gradient(reac, t)`, not from `REAC` directly.
+
+  Pre-existing since PR #41. Changed: the two `writer/output.py` docstrings and
+  their emitted `#` comment lines (each block now also carries a one-line
+  `REAC* accumulates m*a*dt ... = d(REAC*)/dt` reminder in the `.rad` itself),
+  the `handlers.py` handler docstring, the `writer/assembly.py` `/ANIM/VECT/
+  FREAC` comment, the README `*DATABASE_*` table, and a new `state.warn` that
+  fires on every converted `*DATABASE_SPCFORC` deck.
+
 - **An element whose `PID` no `*PART` defines used to vanish from the converted
   deck without a single word — no warning, no skip line, nothing.** The writer
   emits elements from *inside* the `for pid, part in sorted(state.parts.items())`

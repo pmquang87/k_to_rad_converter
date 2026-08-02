@@ -827,7 +827,17 @@ shells, so a triangle listed there is absent from the T01);
 `*DATABASE_HISTORY_SOLID` → `/TH/BRIC`; `*DATABASE_HISTORY_NODE` → `/TH/NODE`
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
-`/ANIM/VECT/FREAC`. **Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
+`/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction
+*impulse*, not a force** — the engine adds `m*a*dt` to it every cycle
+(`reaction_forces_th.F`) and zeroes the accumulator only once, *before* the
+iteration loop (`resol.F:1901`, loop head `:2612`), so it rises monotonically
+under a steady load and carries force x time units. The spcforc-equivalent
+force is its time derivative, `F = d(REAC)/dt` (`numpy.gradient(reac, t)` on
+the T01 column, or a least-squares slope over a steady window — validated to
+-0.0002% against a known weight). The converter warns about this on every
+converted deck. The companion `/ANIM/VECT/FREAC` field *is* the instantaneous
+force (`reactions.F:328`, no `dt` factor, overwritten each cycle).
+**Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` option (whose `/BCS` acts on the rigid
 body's master node, so that node is the reaction node)
 `*DATABASE_NCFORC`, `*DATABASE_RCFORC` → `/TH/INTER` force resultants over
