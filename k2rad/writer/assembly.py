@@ -209,8 +209,11 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/VECT/CONT2")
     lines.append("/ANIM/VECT/PCONT")
     if state.db_spcforc_dt and (state.bcs_spcs or state.cnrb_spc_bcs):
-        # *DATABASE_SPCFORC: constraint-reaction nodal vectors (the /TH/NODE
-        # REAC* channels carry the per-node time history; see writer starter).
+        # *DATABASE_SPCFORC: constraint-reaction nodal vectors. This is the
+        # instantaneous reaction FORCE (reactions.F:328 finalizes
+        # FREAC = MS*A - FREAC each cycle, no dt factor); the /TH/NODE REAC*
+        # channels carry the per-node time history but as an accumulated
+        # IMPULSE (see writer/output.py:_make_starter_th_node_spc).
         lines.append("/ANIM/VECT/FREAC")
         if _spc_constrains_rotations(state):
             lines.append("/ANIM/VECT/MREAC")

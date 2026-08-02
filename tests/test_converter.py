@@ -86,6 +86,24 @@ shell part
 """
 
 
+def _th_comment_lines(starter, th_title):
+    """The run of "#" comment lines between a /TH block's title line and its
+    variable line, joined with newlines.
+
+    Scoped to that one block (it stops at the first non-comment line), so an
+    assertion on the text cannot be satisfied by an unrelated comment further
+    down the deck.
+    """
+    lines = starter.splitlines()
+    i = next(k for k, ln in enumerate(lines) if ln.strip() == th_title)
+    out = []
+    for ln in lines[i + 1:]:
+        if not ln.startswith("#"):
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
 class SplitKeywordTests(unittest.TestCase):
     def test_plain_keyword(self):
         self.assertEqual(_split_keyword("CONTROL_IMPLICIT_GENERAL"),
@@ -1123,6 +1141,17 @@ class ReactionReadoutTests(unittest.TestCase):
     def test_no_reaction_th_node_without_prescribed_motion(self):
         # TRANSDUCER_K has the rigid part but no prescribed motion → no reaction block.
         self.assertNotIn("REACX", self._starter(TRANSDUCER_K))
+
+    def test_reaction_block_says_reac_is_an_impulse(self):
+        # /TH/NODE REAC* accumulates m*a*dt (reaction_forces_th.F:60) and is
+        # never reset inside the cycle loop (resol.F:1901 vs. loop head :2612),
+        # so a force-vs-displacement curve needs d(REAC)/dt, not REAC.
+        starter = self._starter(DISPCTRL_K)
+        block = _th_comment_lines(starter, "TH_reaction")
+        self.assertIn("reaction IMPULSE (REACX/Y/Z)", block)
+        self.assertIn("REAC* accumulates m*a*dt over the run: "
+                      "reaction force = d(REAC*)/dt", block)
+        self.assertNotIn("reaction (REACX/Y/Z) + displacement", starter)
 
 
 # A *CONTROL_IMPLICIT_SOLUTION whose card-1 (nsolvr…abstol) is an all-blank
@@ -5849,9 +5878,14 @@ class DatabaseSpcforcTests(unittest.TestCase):
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines)
                  if ln.strip() == "TH_spc_reactions")
-        var_line = lines[i + 2]                    # i+1 is the comment line
+        # the title is followed by one or more "#" comment lines, then the
+        # fixed-column variable line
+        j = i + 1
+        while lines[j].startswith("#"):
+            j += 1
+        var_line = lines[j]
         node_lines = []
-        for ln in lines[i + 3:]:
+        for ln in lines[j + 1:]:
             if ln.startswith(("#", "/")):
                 break
             node_lines.append(ln.strip())
@@ -5909,6 +5943,55 @@ class DatabaseSpcforcTests(unittest.TestCase):
         self.assertNotIn("TH_spc_reactions", starter)
         self.assertNotIn("REACX", starter)
         self.assertNotIn("/ANIM/VECT/FREAC", engine)
+
+    # ---- REAC* is an accumulated impulse, not a force -------------------
+    # engine/source/output/reaction_forces_th.F:60 sums
+    #   FTHREAC(k,n) = FTHREAC(k,n) + IFLAG*MS(n)*A(k,n)*DT12
+    # and the only "FTHREAC = ZERO" (resol.F:1901) runs BEFORE the iteration
+    # loop head (:2612, back edge :9294), so it is never reset per cycle;
+    # thnod.F:178-208 writes it out undivided. A deck converted without saying
+    # so invites plotting an impulse against an LS-DYNA spcforc force.
+
+    def test_spcforc_warns_that_reac_is_an_accumulated_impulse(self):
+        result, _s, _e = self._convert()
+        hits = [w for w in result.warnings
+                if "*DATABASE_SPCFORC" in w and "REAC" in w]
+        self.assertTrue(hits, "converting *DATABASE_SPCFORC must warn about "
+                              f"the REAC* units; warnings were {result.warnings}")
+        w = " ".join(hits)
+        self.assertIn("impulse", w.lower())
+        # tells the user what to actually do with the column
+        self.assertIn("d(REAC)/dt", w)
+        self.assertIn("reaction_forces_th.F", w)
+
+    def test_spcforc_impulse_note_in_emitted_comment(self):
+        _r, starter, _e = self._convert()
+        block = _th_comment_lines(starter, "TH_spc_reactions")
+        self.assertIn("reaction IMPULSE (REACX/Y/Z)", block)
+        self.assertIn("[+ angular impulse (REACXX/YY/ZZ)]", block)
+        self.assertIn("REAC* accumulates m*a*dt over the run: "
+                      "spcforc force = d(REAC*)/dt", block)
+        # the stale claim must not survive anywhere in the deck
+        self.assertNotIn("reaction force (REACX/Y/Z)", starter)
+
+    def test_spcforc_comment_lines_do_not_disturb_the_card(self):
+        """The extra comment must not shift the fixed-column variable line or
+        the node list — the starter reads those by position."""
+        _r, starter, _e = self._convert()
+        var_line, node_lines = self._th_block(starter)
+        self.assertEqual(var_line[0:10].strip(), "REACX")
+        self.assertEqual(node_lines, ["1", "2"])
+        # every inserted line is a comment, so the starter skips it
+        i = starter.index("TH_spc_reactions")
+        between = starter[i:starter.index(var_line, i)].splitlines()[1:]
+        self.assertTrue(between)
+        self.assertTrue(all(ln.startswith("#") for ln in between), between)
+
+    def test_no_spcforc_no_impulse_warning(self):
+        deck = SPCFORC_K.replace("*DATABASE_SPCFORC\n"
+                                 "2.00000E-5         0         0         1\n", "")
+        result, _s, _e = self._convert(deck)
+        self.assertFalse([w for w in result.warnings if "d(REAC)/dt" in w])
 
 
 class DatabaseNcforcTests(unittest.TestCase):
