@@ -504,6 +504,130 @@ class SectionBeam:
     # ELFORM=9 (spotweld beam) card2 is VOL INER CID CA ... — no area/inertia:
     vol: float = 0.0   # spotweld nugget volume
     ca: float = 0.0    # spotweld cross-sectional area
+    # *SECTION_BEAM card 2a/2e/2h (ELFORM 0/1/4/5/7/8/9/11) — the cross-section
+    # thicknesses at node 1 and node 2, in the beam's local s and t directions
+    # (Manual Vol I R17 p.41-11). ``ts1``/``ts2`` are the s-direction thickness
+    # at node 1 / node 2 and ``tt1``/``tt2`` the t-direction pair, so the
+    # PRISMATIC section of an integrated beam is ts1 x tt1 — NOT ts1 x ts2,
+    # which is dyna2rad's L1<-TS1 / L2<-TS2 map (convertprops.cxx:1274-1275)
+    # and reads a taper as a depth.
+    ts2: float = 0.0
+    tt1: float = 0.0
+    tt2: float = 0.0
+    # Card 2a fields 5/6: where the beam's reference axis (the node line) sits
+    # inside the +/-1 s-t square. Both default to 0 = the section centre.
+    nsloc: float = 0.0
+    ntloc: float = 0.0
+    # *SECTION_BEAM card 1 field 4 (cols 31-40), the shared QR/IRID cell — the
+    # exact analogue of *SECTION_SHELL's field 6 (see SectionShell.irid). The
+    # field is a FLOAT and its SIGN is the selector: >= 0.0 is a built-in
+    # quadrature rule QR, < 0.0 makes |QR| the id of a user *INTEGRATION_BEAM
+    # rule — "EQ.-n: |n| is the number of the user defined rule" (Vol I R17
+    # p.41-4). 0 = no rule.
+    #
+    # ``qr`` keeps the built-in rule ONLY on the scalar branch: once QR is
+    # negative the quadrature field is dead (dyna2rad's SCALAR_OR_OBJECT cell
+    # force-zeroes the scalar on the object branch, meci_data_reader.cpp:7003),
+    # so a converter that read it without checking the sign would see "QR = 0"
+    # and silently pick the 2-point rectangular rule.
+    irid: int = 0
+    qr: float = 0.0
+    # Card 1 field 5 (cols 41-50): cross-section type, 0 = rectangular,
+    # 1 = tubular, 2 = arbitrary (defined by the *INTEGRATION_BEAM rule).
+    cst: int = 0
+
+
+@dataclass
+class IntegrationBeamPoint:
+    """One *INTEGRATION_BEAM quadrature card: S T WF PID (Vol I R17 p.29-2).
+
+    ``s``/``t`` the NORMALIZED cross-section coordinates of the integration
+            point, -1 .. +1 in each direction, measured in the beam's local s-t
+            frame from the reference axis. They are quadrature SAMPLING
+            coordinates, not sub-area corners, so the +/-1 square they span is
+            the ``TS1`` x ``TT1`` rectangle of *SECTION_BEAM card 2a.
+    ``wf``  weighting factor, i.e. the area fraction ``Ar_i = A_i / A`` this
+            point accounts for (p.29-3). LS-DYNA's convention is that the WF
+            sum to 1, but nothing enforces it, so k2rad normalizes by the sum
+            exactly as dyna2rad's shell rule does (convertprops.cxx:1993-1996).
+    ``pid`` optional *PART id whose material this cell uses; 0/blank = the
+            *ELEMENT_BEAM's own part. /PROP/TYPE18 has ONE material for the
+            whole section (prop_p18_int_beam.cfg has no per-point mat column),
+            so a non-zero PID is warn-dropped.
+    """
+    s: float = 0.0
+    t: float = 0.0
+    wf: float = 0.0
+    pid: int = 0
+
+
+@dataclass
+class IntegrationBeam:
+    """*INTEGRATION_BEAM — a user cross-section integration rule, bound from a
+    *SECTION_BEAM whose card-1 field 4 (QR/IRID) is negative.
+
+    Card 1 is ``IRID NIP RA ICST K``. The two blocks that may follow are
+    ADDITIVE, not exclusive: the reader takes one ``D1 D2 D3 D4 SREF TREF D5
+    D6`` dimension card whenever ``ICST > 0`` and ``NIP`` ``S T WF PID`` cards
+    whenever ``NIP != 0``, exactly as the manual's two independent card
+    headings say (Vol I R17 p.29-2/3). The HyperMesh CFG gates the quadrature
+    list on ``if(LSD_ICST == 0 && LSD_NIP > 0)`` and is WRONG about it — a rule
+    with ICST>0 and NIP=2 that only supplies one trailing line makes the real
+    reader swallow the next rule's header as the missing point card.
+
+    ``ra`` relative area, ``A / (TS1 * TT1)``. Default 0.0, which makes every
+    derived sub-area zero; there is no "1.0 means unscaled" default in the
+    card, so a rule that omits it is reported rather than silently scaled.
+
+    ``icst`` 0 = arbitrary (the point cards define the section), 1..22 = one of
+    LS-DYNA's standard shapes, whose ``D1..D6`` ride on the dimension card.
+
+    ``k`` integration refinement parameter (>= 0), meaningful for ICST > 0.
+
+    ``sref``/``tref`` reference-axis offsets that OVERRIDE *SECTION_BEAM's
+    NSLOC/NTLOC "even if SREF = 0" (p.29-2). Radioss has no equivalent column
+    on /PROP/TYPE18, so a non-zero value is warn-dropped.
+
+    dyna2rad converts NONE of this: the keyword is commented out of the R14.1
+    data hierarchy (data_hierarchy.cfg:4244-4253) so the native reader drops the
+    card silently, and the *SECTION_BEAM branch that would consume a rule is an
+    empty stub awaiting "RD-6730" (convertprops.cxx:1343-1347). Everything here
+    is net-new capability, not parity.
+    """
+    irid: int
+    nip: int = 0
+    ra: float = 0.0
+    icst: int = 0
+    k: int = 0
+    # D1..D6 of the ICST > 0 dimension card, in card order. NOTE the card reads
+    # D1 D2 D3 D4 SREF TREF D5 D6 — SREF/TREF sit BETWEEN D4 and D5.
+    dims: List[float] = field(default_factory=list)
+    sref: float = 0.0
+    tref: float = 0.0
+    points: List[IntegrationBeamPoint] = field(default_factory=list)
+
+
+@dataclass
+class IntBeamProp:
+    """The resolved /PROP/TYPE18 payload for one *SECTION_BEAM + rule pair,
+    produced by ``writer.beams._resolve_integration_beams`` and consumed by
+    ``_emit_prop_int_beam``. Keyed by SECID: an integration rule hangs off the
+    SECTION in LS-DYNA, so every *PART on that section gets the same integrated
+    beam and no per-part /PROP split is needed.
+
+    ``isect`` 0 = the user point cloud in ``points``; >= 10 = one of Radioss's
+    predefined shapes, whose sizes are in ``l1``/``l2`` and whose point cloud
+    the starter generates itself.
+    """
+    secid: int
+    isect: int = 0
+    nitrs: int = 0
+    l1: float = 0.0
+    l2: float = 0.0
+    # (Y_IP, Z_IP, AREA_IP) per integration point, in ABSOLUTE local
+    # coordinates and absolute area — Radioss does not take LS-DYNA's
+    # normalized S/T or fractional WF.
+    points: List[Tuple[float, float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -2530,6 +2654,16 @@ class ConversionState:
     integration_shells: Dict[int, IntegrationShell] = field(default_factory=dict)
     sec_solids: Dict[int, SectionSolid] = field(default_factory=dict)
     sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
+    # *INTEGRATION_BEAM user cross-section integration rules, keyed by IRID.
+    # Bound from a *SECTION_BEAM whose card-1 field 4 (QR/IRID) is negative;
+    # the rule then OWNS the quadrature (the section's own QR field is dead)
+    # and its point cloud or standard shape becomes a /PROP/TYPE18.
+    integration_beams: Dict[int, IntegrationBeam] = field(default_factory=dict)
+    # secid → the resolved /PROP/TYPE18 payload for a *SECTION_BEAM that binds a
+    # usable rule AND whose parts carry a TYPE18-compatible material. Filled by
+    # the _resolve_integration_beams prepass; a section absent from this dict
+    # keeps the ordinary /PROP/BEAM (TYPE3) path.
+    int_beam_props: Dict[int, IntBeamProp] = field(default_factory=dict)
     # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
     sec_discrete: Dict[int, SectionDiscrete] = field(default_factory=dict)
     # part_id → synthesized orthotropic property id for a *MAT_ANISOTROPIC_

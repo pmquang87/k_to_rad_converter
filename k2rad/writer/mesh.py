@@ -19,6 +19,7 @@ from ..topology import (
     TET10_DYNA_TO_RADIOSS as _TET10_DYNA_TO_RADIOSS,
     classify_tet10_apex_order as _classify_tet10_apex_order,
 )
+from .beams import _constants_from_thicknesses, _emit_prop_int_beam
 from .common import (
     HDR,
     _discrete_part_ids,
@@ -1856,6 +1857,61 @@ def _make_properties(state: ConversionState) -> List[str]:
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
+        # A section that bound a usable *INTEGRATION_BEAM rule becomes the
+        # INTEGRATED beam property instead of the resultant one; the rule hangs
+        # off the SECTION in LS-DYNA, so every part on it switches together.
+        # This `continue` sits ABOVE the type3_secids bookkeeping on purpose:
+        # a section promoted to /PROP/TYPE18 must stay out of the TYPE3
+        # material check, which is exactly the seam that check was built to
+        # survive (it collects rather than re-derives, see
+        # _warn_beam_type3_material).
+        int_prop = state.int_beam_props.get(sec.secid)
+        if int_prop is not None:
+            lines += _emit_prop_int_beam(sec, int_prop)
+            continue
+        if not (sec.area or sec.iyy or sec.izz or sec.ixx):
+            # ELFORM 0/1/4/5/11 state the section as card-2 THICKNESSES and
+            # carry no resultants at all, so leaving the four constants at zero
+            # is not a soft beam — it is a deck the starter refuses outright
+            # (ERROR 314/315/316/317). The thicknesses fully determine a
+            # prismatic section, so derive it and say so, rather than emitting
+            # a property that cannot start.
+            derived = _constants_from_thicknesses(sec.cst, sec.ts1, sec.tt1)
+            if derived is not None:
+                sec.area, sec.iyy, sec.izz, sec.ixx = derived
+                state.warn(
+                    f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} states "
+                    "the cross-section as card-2 THICKNESSES, which /PROP/BEAM "
+                    "(TYPE3) has no column for, so k2rad DERIVES the four "
+                    "resultants from them: "
+                    + (f"CST=1 tubular, outer diameter TS1={sec.ts1:g} and "
+                       f"inner TT1={sec.tt1:g}" if sec.cst == 1 else
+                       f"a solid TS1 x TT1 = {sec.ts1:g} x {sec.tt1:g} "
+                       "rectangle")
+                    + f" gives Area={sec.area:g}, Iyy={sec.iyy:g}, "
+                    f"Izz={sec.izz:g}, Ixx={sec.ixx:g} (Ixx is the POLAR "
+                    "moment, equal to the torsion constant only for a round "
+                    "section). Any node-2 taper is dropped and the beam is "
+                    "elastic through the section. State it as an "
+                    "*INTEGRATION_BEAM rule on a negative QR/IRID to keep "
+                    "through-section plasticity, or numerically on an "
+                    "ELFORM=2 section to control J.")
+            else:
+                state.warn(
+                    (f"*SECTION_BEAM {sec.secid} is referenced by a beam *PART "
+                     "but the deck never defines it, so a PLACEHOLDER"
+                     if sec.secid in missing_beams else
+                     f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} carries "
+                     "no cross-section area or inertia that k2rad can read, so "
+                     "its")
+                    + " /PROP/BEAM is written with Area=Iyy=Izz=Ixx=0, which "
+                    "the starter REFUSES: hm_read_prop03.F:151-182 raises "
+                    "ERROR 314 (AREA), 315 (IYY), 316 (IZZ) and 317 (IXX) on "
+                    "every non-positive value, so the deck will not start. "
+                    "State the section numerically (ELFORM=2 with A/ISS/ITT/J) "
+                    "or, for a geometrically integrated beam, add an "
+                    "*INTEGRATION_BEAM rule and reference it from a negative "
+                    "QR/IRID on card 1 field 4.")
         type3_secids.add(sec.secid)
         lines += _emit_prop_beam(sec)
     _warn_beam_type3_material(state, part_secids, spotweld_pids, type3_secids)

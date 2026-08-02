@@ -19,6 +19,7 @@ from .state import (
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     PartData, SectionShell, SectionSolid, SectionBeam,
     IntegrationShell, IntegrationPoint,
+    IntegrationBeam, IntegrationBeamPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
     MatOrthotropicElastic, MatEnhancedCompositeDamage,
@@ -926,6 +927,119 @@ def handle_integration_shell(block: Block, state: ConversionState) -> None:
         state.integration_shells[rule.irid] = rule
 
 
+def handle_integration_beam(block: Block, state: ConversionState) -> None:
+    """*INTEGRATION_BEAM — user cross-section integration rules.
+
+    Card 1        ``IRID NIP RA ICST K``               (I10 I10 F10 I10 I10)
+    Card 2 (ICST>0, exactly ONE card)
+                  ``D1 D2 D3 D4 SREF TREF D5 D6``      (8 x F10)
+    Card 3 (NIP != 0, NIP cards, one point each)
+                  ``S T WF PID``                       (F10 F10 F10 I10)
+
+    The two blocks are ADDITIVE, not exclusive. The manual prints them under two
+    independent headings ("Additional card for ICST > 0" / "Include NIP
+    additional cards below for NIP != 0", Vol I R17 p.29-2/3) and the reader
+    honours both: a rule with ``ICST=5, NIP=2`` consumes 1 + 2 lines, and one
+    that supplies only 1 of them swallows the NEXT rule's header as the missing
+    point card. Only the HyperMesh CFG gates the list on ``ICST == 0``. When
+    ICST > 0 the point data is IGNORED (LS-PrePost re-exports the dimension card
+    alone) but the lines are still consumed, so they are read and reported
+    rather than skipped.
+
+    Like *INTEGRATION_SHELL the keyword has no documented "Card Sets" summary,
+    but a deck may stack several rules under one header (verified: two rules
+    under one ``*INTEGRATION_BEAM`` round-trip as two), so the reader loops. It
+    has NO ``_TITLE`` variant — the p.41-1 "_TITLE may be appended to all the
+    *SECTION keywords" sentence covers *SECTION_* only.
+
+    Field ranges are NOT enforced here: the CFG's ``CHECK`` block (``K >= 0``,
+    ``-1 <= SREF <= 1``, ``-1 <= TREF <= 1``) is a GUI constraint the importer
+    does not apply, and the consequence of an out-of-range value lives in the
+    writer, which reports it there.
+    """
+    raw = block.raw
+    idx = 0
+    while idx < len(raw):
+        if not raw[idx].strip():
+            idx += 1
+            continue
+        f1 = _card(raw, idx, fixed=True, n=5, w=10)
+        irid = to_int(f1[0]) if f1 else 0
+        if irid <= 0:
+            state.warn(
+                "*INTEGRATION_BEAM: a card set with no positive IRID "
+                f"('{raw[idx][:40].strip()}') cannot be referenced by any "
+                "*SECTION_BEAM QR/IRID field — the rule and every card after "
+                "it in this block are SKIPPED.")
+            return
+        rule = IntegrationBeam(
+            irid,
+            nip=to_int(f1[1]) if len(f1) > 1 else 0,
+            ra=to_float(f1[2]) if len(f1) > 2 else 0.0,
+            icst=to_int(f1[3]) if len(f1) > 3 else 0,
+            k=to_int(f1[4]) if len(f1) > 4 else 0)
+        idx += 1
+        if rule.icst > 0:
+            # D1 D2 D3 D4 SREF TREF D5 D6 — SREF/TREF sit BETWEEN D4 and D5, so
+            # D5/D6 are fields 7/8 and NOT fields 5/6.
+            d = _card(raw, idx, fixed=True, n=8, w=10)
+            if not d:
+                state.warn(
+                    f"*INTEGRATION_BEAM {rule.irid}: ICST={rule.icst} needs a "
+                    "D1..D6/SREF/TREF dimension card but the block ends first, "
+                    "so the walk STOPPED here and any later rule in this block "
+                    "is UNREAD.")
+                return
+            rule.dims = [to_float(d[i]) if len(d) > i else 0.0
+                         for i in (0, 1, 2, 3, 6, 7)]
+            rule.sref = to_float(d[4]) if len(d) > 4 else 0.0
+            rule.tref = to_float(d[5]) if len(d) > 5 else 0.0
+            idx += 1
+        if rule.nip < 0:
+            state.warn(
+                f"*INTEGRATION_BEAM {rule.irid}: NIP={rule.nip} is negative. "
+                "NIP is an integration-point COUNT — it is *SECTION_BEAM's "
+                "QR/IRID field (card 1 field 4, cols 31-40) that takes a "
+                "negative value to reference a rule. No S/T/WF/PID card is "
+                "read for this rule, so if point cards do follow they are "
+                "mis-read as the next rule's card 1.")
+        for _ in range(max(rule.nip, 0)):
+            # Blank placeholders hold a card position but carry no point.
+            while idx < len(raw) and not raw[idx].strip():
+                idx += 1
+            if idx >= len(raw):
+                break
+            p = _card(raw, idx, fixed=True, n=4, w=10)
+            rule.points.append(IntegrationBeamPoint(
+                s=to_float(p[0]) if p else 0.0,
+                t=to_float(p[1]) if len(p) > 1 else 0.0,
+                wf=to_float(p[2]) if len(p) > 2 else 0.0,
+                pid=to_int(p[3]) if len(p) > 3 else 0))
+            idx += 1
+        if 0 < len(rule.points) < rule.nip:
+            state.warn(
+                f"*INTEGRATION_BEAM {rule.irid}: NIP={rule.nip} needs "
+                f"{rule.nip} S/T/WF/PID card(s) but only {len(rule.points)} "
+                f"follow(s). The rule is used with its {len(rule.points)} "
+                "defined point(s), so the section loses the remaining cell(s) "
+                "and both its area and its bending inertia come out too small "
+                "until the missing cards are supplied.")
+        if rule.icst > 0 and rule.points:
+            state.warn(
+                f"*INTEGRATION_BEAM {rule.irid}: ICST={rule.icst} selects a "
+                f"STANDARD cross-section, so the {len(rule.points)} S/T/WF/PID "
+                "card(s) that follow are read to keep the card count right but "
+                "their data is IGNORED — the manual asks for NIP and RA to be "
+                "zero whenever ICST is non-zero, and LS-DYNA drops the points "
+                "the same way. Delete them, or set ICST=0 to use them.")
+        if rule.irid in state.integration_beams:
+            state.warn(
+                f"*INTEGRATION_BEAM {rule.irid} is defined more than once — "
+                "the LAST definition wins, as in LS-DYNA. Delete the duplicate "
+                "if the two rules differ.")
+        state.integration_beams[rule.irid] = rule
+
+
 def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
                        state: ConversionState) -> List[float]:
     """*SECTION_SHELL / *SECTION_TSHELL card 3 (ICOMP=1): the B_i material
@@ -955,74 +1069,394 @@ def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
     return (vals + [0.0] * n)[:n]
 
 
+# *SECTION_SOLID keyword options that add card sets of their own (Manual Vol I
+# R17 p.41-88). Like the shell option cards none of them reaches this handler
+# today (the dispatcher is exact-key and only "SECTION_SOLID" is registered), but
+# the walk accounts for them so registering one later cannot silently make every
+# following set mis-stride.
+_SECTION_SOLID_OPTION_CARDS = {"EFG": 2, "SPG": 2, "MISC": 1}
+
+# ELFORM values that add the user-defined-solid cards 3 / 4 / 5 (p.41-90):
+# "EQ.101..105: user defined solid".
+_USER_SOLID_ELFORMS = frozenset({101, 102, 103, 104, 105})
+
+
+def _section_set_stop(keyword: str, n_sets: int, line: str) -> str:
+    """The message every card-set walk uses when it cannot stride past a set."""
+    return (
+        f"{keyword}: "
+        + (f"after {n_sets} complete card set(s) the next card"
+           if n_sets else "the first card of the block")
+        + f" ('{line[:40].strip()}') carries no positive SECID, so the walk "
+        "STOPPED there and the remaining lines of the block are UNREAD — any "
+        "*PART pointing at a section defined below it falls back to an "
+        "auto-generated placeholder. Split the sets k2rad cannot stride over "
+        f"into their own {keyword} blocks.")
+
+
+def _dup_secid(keyword: str, secid: int, seen, state: ConversionState) -> None:
+    """Report a SECID defined twice under the same *SECTION_* keyword.
+
+    Scoped to *seen* (that keyword's own dict) rather than to the whole
+    *SECTION id space on purpose: cross-keyword reuse is a different defect
+    with a different consequence (two /PROP cards of the same id) and would
+    fire on decks this walk is not otherwise changing.
+    """
+    if secid in seen:
+        state.warn(
+            f"{keyword} {secid} is defined more than once — the LAST "
+            "definition wins, as in LS-DYNA, so the earlier section's fields "
+            "are discarded and every *PART on that SECID silently takes this "
+            "one's. Delete the duplicate if the two sections differ.")
+
+
 def handle_section_solid(block: Block, state: ConversionState) -> None:
-    offset = _title_offset(block)
-    title = _read_title(block) if offset else ""
+    """*SECTION_SOLID (+ _EFG/_SPG/_MISC/_TITLE) — every card SET under the
+    header.
+
+    "Card Sets.  For each unique solid section, include one set of data cards.
+    ...  This input ends at the following keyword ("*") card." (Vol I R17
+    p.41-88). Under _TITLE one 80a line is read per SECTION (p.41-1), so the
+    title card repeats per set.
+
+    A set spans ``1 (title) + 1 (card 1) + <option cards> + 1 + NIP +
+    ceil(LMC/8) (cards 3/4/5, ELFORM 101-105)`` lines. Reading only the first
+    set — which is what this handler used to do — dropped every later section
+    silently, and a *PART pointing at one of them fell through to
+    ``_auto_section_solid``'s placeholder.
+
+    The _EFG/_SPG "optional" second option card is consumed UNCONDITIONALLY:
+    it is not positionally detectable, and LS-PrePost eats it whether or not it
+    is there (a multi-set _EFG block that omits it reads the next set's card 1
+    as the optional card and produces a garbage section). Neither spelling is
+    dispatched today, so this only matters if one is registered later.
+    """
+    per_set_title = _title_offset(block)
+    opt_cards = sum(n for o, n in _SECTION_SOLID_OPTION_CARDS.items()
+                    if block.keyword.endswith("_" + o)
+                    or ("_" + o + "_") in block.keyword)
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
-    secid  = to_int(f1[0]) if f1 else 0
-    elform = to_int(f1[1]) if len(f1) > 1 else 1
-    # ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE single material) mark the
-    # property as ALE → /PROP/SOLID Iale=1.
-    iale = 1 if elform in (11, 12) else 0
-    if iale:
-        state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> /PROP/SOLID "
-                   "Iale=1. If the mesh is fixed (Eulerian), switch Iale to 2 "
-                   "(Euler) for a cheaper run.")
-    state.sec_solids[secid] = SectionSolid(secid, title, elform, iale)
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        # Trailing blank padding is not a card set. Anything else — including a
+        # blank line that IS this set's 80a title card — is walked, not skipped.
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=8, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            state.warn(_section_set_stop("*SECTION_SOLID", n_sets, raw[idx]))
+            break
+        elform = to_int(f1[1]) if len(f1) > 1 else 1
+        # ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE single material)
+        # mark the property as ALE → /PROP/SOLID Iale=1.
+        iale = 1 if elform in (11, 12) else 0
+        if iale:
+            state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> "
+                       "/PROP/SOLID Iale=1. If the mesh is fixed (Eulerian), "
+                       "switch Iale to 2 (Euler) for a cheaper run.")
+        idx += 1 + opt_cards
+        # Cards 3 / 4 / 5, ELFORM 101-105 only. Nothing on them is modelled, but
+        # the CURSOR has to clear them: card 3 begins with NIP, a positive
+        # integer, so the "no positive SECID" stop above never trips on it and
+        # the next set would otherwise be read out of the middle of this one.
+        if elform in _USER_SOLID_ELFORMS:
+            f3 = _card(raw, idx, fixed=True, n=8, w=10)
+            state.warn(
+                f"*SECTION_SOLID {secid}: ELFORM={elform} is a USER-DEFINED "
+                "solid (*USER_INTERFACE routine), which has no Radioss "
+                "counterpart — the section is converted as an ordinary "
+                "/PROP/SOLID and the user routine's own integration points, "
+                "extra DOFs and LMC constants (cards 3/4/5) are DROPPED.")
+            if not f3:
+                state.warn(
+                    f"*SECTION_SOLID {secid}: ELFORM={elform} needs card 3 "
+                    "(NIP NXDOF IHGF ITAJ LMC NHSV XNOD) but the block ends "
+                    "first, so the walk STOPPED here.")
+                break
+            nip = to_int(f3[0]) if f3 else 0
+            lmc = to_int(f3[4]) if len(f3) > 4 else 0
+            idx += 1 + max(nip, 0) + (max(lmc, 0) + 7) // 8
+        _dup_secid("*SECTION_SOLID", secid, state.sec_solids, state)
+        state.sec_solids[secid] = SectionSolid(secid, title, elform, iale)
+        n_sets += 1
+
+
+# *SECTION_BEAM card 2 (Manual Vol I R17 pp.41-4..41-14). WHICH card 2 a set
+# takes is decided by ELFORM and, for ELFORM 2/3/12, by a look-ahead on that
+# card's own first 10 columns — "the first 7 characters of the card spell out
+# 'SECTION'" selects the NAMED standard-section dialect over the numeric one
+# (the CFG does it literally: CARD_PREREAD("%10s", SectType) then
+# ASSIGN(ifSect, _FIND(SectType, "SECTION"), IMPORT), sect_beam.cfg:611-612).
+_BEAM_CARD2 = {
+    "2a": "TS1 TS2 TT1 TT2 NSLOC NTLOC ITORM",
+    "2b": "STYPE D1..D6 ITORM",
+    "2c": "A ISS ITT J SAS IST ITORM SAT",
+    "2d": "A RAMPT STRESS",
+    "2e": "TS1 TS2 TT1 TT2",
+    "2f": "VOL INER CID CA OFFSET RRCON SRCON TRCON",
+    "2h": "TS1 TS2",
+    "2i": "TS1 TS2 TT1 TT2 PRINT - ITOFF",
+    "2j": "PR IOVPR IPRSTR",
+}
+
+
+def _beam_card2_kind(elform: int, first_field: str) -> str:
+    """Which *SECTION_BEAM card-2 dialect this set takes, "" if ELFORM has none.
+
+    ELFORM 0 is the CFG's accepted alias of 1 (``if(LSD_ELFORM == 0 || 1 ||
+    11)``, sect_beam.cfg:625). ELFORM 10 is not defined by the manual, so it
+    returns "" and the caller stops the walk rather than guessing a stride.
+    """
+    named = first_field.strip().upper().startswith("SECTION")
+    if elform in (0, 1, 11):
+        return "2a"
+    if elform in (2, 3, 12) and named:
+        return "2b"
+    if elform in (2, 12, 13):
+        return "2c"
+    if elform == 3:
+        return "2d"
+    if elform in (4, 5):
+        return "2e"
+    if elform == 6:
+        return "2f"
+    if elform in (7, 8):
+        return "2h"
+    if elform == 9:
+        return "2i"
+    if elform == 14:
+        return "2j"
+    return ""
 
 
 def handle_section_beam(block: Block, state: ConversionState) -> None:
-    offset = _title_offset(block)
-    title = _read_title(block) if offset else ""
-    raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
-    secid  = to_int(f1[0]) if f1 else 0
-    elform = to_int(f1[1]) if len(f1) > 1 else 2
-    sec = SectionBeam(secid, title, elform)
+    """*SECTION_BEAM (+ _TITLE) — every card SET under the header.
 
-    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
-    if elform == 1:
-        sec.ts1 = to_float(f2[0]) if f2 else 0.0
-    elif elform == 9:
-        # elform=9 spotweld beam: VOL INER CID CA OFFSET RRCON SRCON TRCON —
-        # card 2 carries a nugget volume and cross-section area, NOT A/Iyy/Izz.
-        sec.vol = to_float(f2[0]) if f2 else 0.0
-        sec.ca  = to_float(f2[3]) if len(f2) > 3 else 0.0
-        sec.area = sec.ca
-    else:
-        # elform=2 resultant: A IYY IZZ IXX
-        sec.area = to_float(f2[0]) if f2 else 0.0
-        sec.iyy  = to_float(f2[1]) if len(f2) > 1 else 0.0
-        sec.izz  = to_float(f2[2]) if len(f2) > 2 else 0.0
-        sec.ixx  = to_float(f2[3]) if len(f2) > 3 else 0.0
-    state.sec_beams[secid] = sec
+    "Card Sets.  For each BEAM section in the model, add one set of Cards 1 and
+    2 (maybe additionally Card 3 for ELFORM = 12) cards.  This input ends at the
+    next keyword ("*") card." (Vol I R17 p.41-3). Under _TITLE one 80a line is
+    read per SECTION, so the title card repeats per set.
+
+    A set spans ``1 (title) + 1 (card 1) + 1 (card 2a..2j) + 1 (OPTCARD, only
+    ELFORM 2 on the named-section card 2b when the next line starts with
+    OPTCARD) + 1 (card 2c.1, only ELFORM 12 whose card 2 was the NUMERIC 2c)``
+    lines. The two riders are what makes a fixed stride impossible: an ELFORM 12
+    set with a ``SECTION_09`` card 2 takes NO card 2c.1 — "Include this card if
+    ELFORM equals 12 and the preceding card is Card 2c" is exact, and the reader
+    honours it.
+
+    Card 1 is ``SECID ELFORM SHRF QR/IRID CST SCOOR NSM NAUPD``; field 4 is the
+    QR/IRID cell whose negative value binds an *INTEGRATION_BEAM rule.
+    """
+    per_set_title = _title_offset(block)
+    raw = block.raw
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=8, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            state.warn(_section_set_stop("*SECTION_BEAM", n_sets, raw[idx]))
+            break
+        elform = to_int(f1[1]) if len(f1) > 1 else 2
+        sec = SectionBeam(secid, title, elform)
+        # QR/IRID (field 4, cols 31-40): the field is a FLOAT and a NEGATIVE
+        # value makes |QR| the id of a user *INTEGRATION_BEAM rule (p.41-4).
+        # Both "-77" and "-77.0" occur in real decks. On that branch the
+        # quadrature scalar is DEAD — leaving sec.qr at its 0.0 default rather
+        # than storing the negative value is what stops a later reader from
+        # seeing "QR = 0" and silently picking the 2-point rectangular rule.
+        qr_irid = to_float(f1[3]) if len(f1) > 3 else 0.0
+        if qr_irid < 0.0:
+            sec.irid = int(abs(qr_irid))
+        else:
+            sec.qr = qr_irid
+        sec.cst = to_int(f1[4]) if len(f1) > 4 else 0
+        f2 = _card(raw, idx + 1, fixed=True, n=8, w=10)
+        kind = _beam_card2_kind(elform, f2[0] if f2 else "")
+        if kind in ("2a", "2e", "2h", "2i"):
+            # TS1 TS2 [TT1 TT2] — thicknesses, NOT section constants.
+            sec.ts1 = to_float(f2[0]) if f2 else 0.0
+            sec.ts2 = to_float(f2[1]) if len(f2) > 1 else 0.0
+            if kind != "2h":
+                sec.tt1 = to_float(f2[2]) if len(f2) > 2 else 0.0
+                sec.tt2 = to_float(f2[3]) if len(f2) > 3 else 0.0
+            if kind == "2a":
+                sec.nsloc = to_float(f2[4]) if len(f2) > 4 else 0.0
+                sec.ntloc = to_float(f2[5]) if len(f2) > 5 else 0.0
+            if kind == "2i":
+                # ELFORM 9 spotweld: k2rad's /PROP/TYPE13 connector path reads
+                # the nugget volume and area off these two columns. Kept
+                # verbatim rather than re-derived, so the spotweld conversion is
+                # untouched by this card-dialect rewrite.
+                sec.vol = to_float(f2[0]) if f2 else 0.0
+                sec.ca = to_float(f2[3]) if len(f2) > 3 else 0.0
+                sec.area = sec.ca
+        elif kind == "2c":
+            # ELFORM 2/12/13 resultant: A ISS ITT J
+            sec.area = to_float(f2[0]) if f2 else 0.0
+            sec.iyy = to_float(f2[1]) if len(f2) > 1 else 0.0
+            sec.izz = to_float(f2[2]) if len(f2) > 2 else 0.0
+            sec.ixx = to_float(f2[3]) if len(f2) > 3 else 0.0
+        elif kind == "2d":
+            # ELFORM 3 truss: A RAMPT STRESS. Only the AREA has a /PROP meaning
+            # — reading fields 2/3 as Iyy/Izz (which this handler used to do,
+            # via the catch-all resultant branch) put a ramp TIME and an initial
+            # STRESS into two bending inertias.
+            sec.area = to_float(f2[0]) if f2 else 0.0
+            state.warn(
+                f"*SECTION_BEAM {secid}: ELFORM=3 is a TRUSS (axial force "
+                "only). Its AREA is carried to /PROP/BEAM but RAMPT (the "
+                "pre-tension ramp time) and STRESS (the initial axial stress) "
+                "are DROPPED — Radioss's /PROP/TYPE2 (TRUSS) has no k2rad path "
+                "yet, so the element keeps full bending stiffness with "
+                "Iyy=Izz=Ixx=0. Restate a pre-tensioned truss as an initial "
+                "condition if it carries load.")
+        elif kind == "2b":
+            state.warn(
+                f"*SECTION_BEAM {secid}: card 2 is the NAMED standard section "
+                f"'{(f2[0] if f2 else '').strip()}', whose D1..D6 dimensions "
+                "k2rad has no path for — the section's Area/Iyy/Izz/Ixx stay "
+                "ZERO and the beam carries no stiffness. State the section "
+                "numerically (ELFORM=2 with A/ISS/ITT/J) or, for an integrated "
+                "beam, as an *INTEGRATION_BEAM rule referenced from a negative "
+                "QR/IRID.")
+        elif kind == "2f":
+            state.warn(
+                f"*SECTION_BEAM {secid}: ELFORM=6 card 2 is "
+                f"'{_BEAM_CARD2[kind]}', which carries no cross-section area or "
+                "inertia at all, so /PROP/BEAM is written with "
+                "Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
+                "314-317). ELFORM 6 is a DISCRETE beam — model it as "
+                "*ELEMENT_DISCRETE + *SECTION_DISCRETE, which k2rad converts "
+                "to a /SPRING.")
+        elif kind == "2j":
+            # ELFORM 14 is the ELBOW integrated tubular beam: "A user-defined
+            # integration rule with a tubular cross section (9) must be used"
+            # (Vol I R17 p.41-11). It is not a shear panel and it is not
+            # un-integrated — it is the one formulation that MANDATES a rule.
+            state.warn(
+                f"*SECTION_BEAM {secid}: ELFORM=14 is the ELBOW integrated "
+                "tubular beam, which Radioss has no counterpart for. Its card "
+                f"2 is '{_BEAM_CARD2[kind]}' and states no cross-section at "
+                "all — the section comes from the *INTEGRATION_BEAM rule that "
+                "this formulation REQUIRES (a tubular one, ICST=9, referenced "
+                "from a negative QR/IRID) — so /PROP/BEAM is written with "
+                "Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
+                "314-317). Model the bend as ordinary integrated beams "
+                "(ELFORM 1) if the pipe-ovalization response is not what the "
+                "deck is about.")
+        elif not kind:
+            state.warn(
+                f"*SECTION_BEAM {secid}: ELFORM={elform} is not a defined beam "
+                "formulation (the manual lists 1-9 and 11-14), so k2rad cannot "
+                "tell how many cards this set spans. The section is registered "
+                "with no card-2 data and the walk STOPPED here — the remaining "
+                "lines of the block are UNREAD.")
+        idx += 2
+        # Card 2b.1: only ELFORM 2, only after a NAMED card 2b, and only when
+        # the line really is one (its field 1 is the literal string OPTCARD).
+        if kind == "2b" and elform == 2:
+            nxt = _card(raw, idx, fixed=True, n=2, w=10)
+            if nxt and nxt[0].strip().upper().startswith("OPTCARD"):
+                idx += 1
+        # Card 2c.1: only ELFORM 12, and only when card 2 was the NUMERIC 2c.
+        elif kind == "2c" and elform == 12:
+            idx += 1
+        _dup_secid("*SECTION_BEAM", secid, state.sec_beams, state)
+        state.sec_beams[secid] = sec
+        n_sets += 1
+        if not kind:
+            break
 
 
 def handle_section_discrete(block: Block, state: ConversionState) -> None:
-    """*SECTION_DISCRETE → /PROP/TYPE4 (SPRING) flags.
+    """*SECTION_DISCRETE (+ _TITLE) → /PROP/TYPE4 (SPRING) flags — every card
+    SET under the header.
 
-    Card1 (Keyword971 PROPERTY/SectDisc.cfg): SECID DRO KD V0 CL FD
-    Card2: CDL TDL (compression/tension deflection limits, element deletion).
+    "Card Sets.  For each DISCRETE section include a pair of Cards 1 and 2.
+    This input ends at the next keyword ("*") card." (Vol I R17 p.41-32). The
+    pair is unconditional — the manual's own example shows a section with a
+    blank card 2 — so the stride is a fixed ``1 (title) + 2``.
+
+    Card 1: ``SECID DRO KD V0 CL FD``
+    Card 2: ``CDL TDL`` (compression/tension deflection limits → deletion).
+
+    Card 2 is read as CDL then TDL per the manual, its example and the
+    LS-PrePost echo; ``Keyword971_R6.1/PROPERTY/sect_disc.cfg:127`` binds them
+    the other way round and is wrong.
     """
-    offset = _title_offset(block)
-    title = _read_title(block) if offset else ""
+    per_set_title = _title_offset(block)
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=6, w=10)
-    if not f1 or not f1[0].strip():
-        state.warn("*SECTION_DISCRETE: empty card – skipped")
-        return
-    secid = to_int(f1[0])
-    dro = to_int(f1[1]) if len(f1) > 1 else 0
-    kd  = to_float(f1[2]) if len(f1) > 2 else 0.0
-    v0  = to_float(f1[3]) if len(f1) > 3 else 0.0
-    cl  = to_float(f1[4]) if len(f1) > 4 else 0.0
-    fd  = to_float(f1[5]) if len(f1) > 5 else 0.0
-    f2 = _card(raw, offset + 1, fixed=True, n=2, w=10)
-    cdl = to_float(f2[0]) if f2 else 0.0
-    tdl = to_float(f2[1]) if len(f2) > 1 else 0.0
-    state.sec_discrete[secid] = SectionDiscrete(secid, title, dro, kd, v0, cl,
-                                                fd, cdl, tdl)
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=6, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            if not n_sets:
+                state.warn("*SECTION_DISCRETE: empty card - skipped")
+            else:
+                state.warn(_section_set_stop("*SECTION_DISCRETE", n_sets,
+                                             raw[idx]))
+            break
+        dro = to_int(f1[1]) if len(f1) > 1 else 0
+        kd  = to_float(f1[2]) if len(f1) > 2 else 0.0
+        v0  = to_float(f1[3]) if len(f1) > 3 else 0.0
+        cl  = to_float(f1[4]) if len(f1) > 4 else 0.0
+        fd  = to_float(f1[5]) if len(f1) > 5 else 0.0
+        # A missing card 2 at the very END of the block is tolerated (LS-PrePost
+        # defaults CDL/TDL to 0 there); anywhere else _card returns the next
+        # set's card 1, which the stride below then skips as this set's card 2.
+        # That silently swallows a whole section, so say it happened: a line in
+        # the card-2 slot whose first field is a positive integer AND which is
+        # followed by more of the block is a card 1 wearing a card 2's clothes.
+        f2 = _card(raw, idx + 1, fixed=True, n=2, w=10)
+        if (f2 and to_int(f2[0]) > 0
+                and any(line.strip() for line in raw[idx + 2:])):
+            state.warn(
+                f"*SECTION_DISCRETE {secid}: the line read as its card 2 "
+                f"(CDL TDL) is '{raw[idx + 1].strip()}', whose first field is "
+                "the positive integer "
+                f"{to_int(f2[0])} — that looks like the NEXT set's card 1, so "
+                "this set is probably missing its card 2. The pair is "
+                "UNCONDITIONAL (Vol I R17 p.41-32: 'For each DISCRETE section "
+                "include a pair of Cards 1 and 2'), so k2rad strides two lines "
+                "regardless: the section that line belongs to is LOST and "
+                "every set after it in this block is read one line out of "
+                "phase, which usually ends the walk early. Add the blank card "
+                "2 the manual's own example shows.")
+        cdl = to_float(f2[0]) if f2 else 0.0
+        tdl = to_float(f2[1]) if len(f2) > 1 else 0.0
+        idx += 2
+        _dup_secid("*SECTION_DISCRETE", secid, state.sec_discrete, state)
+        state.sec_discrete[secid] = SectionDiscrete(secid, title, dro, kd, v0,
+                                                    cl, fd, cdl, tdl)
+        n_sets += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5908,11 +6342,12 @@ HANDLERS = {
     "SECTION_BEAM":                           handle_section_beam,
     "SECTION_DISCRETE":                       handle_section_discrete,
 
-    # Integration rules. *INTEGRATION_SHELL takes no LS-DYNA option suffix, so a
-    # single exact key is enough — no grammar loop and no prefix entry.
-    # (*INTEGRATION_BEAM is the obvious sibling: *SECTION_BEAM's QR/IRID field
-    # has the identical EQ.-n semantics, but it has no k2rad path yet.)
+    # Integration rules. Neither keyword takes an LS-DYNA option suffix (they
+    # have no _TITLE variant either), so a single exact key is enough for each —
+    # no grammar loop and no prefix entry. *SECTION_BEAM's QR/IRID field carries
+    # the identical EQ.-n semantics as *SECTION_SHELL's.
     "INTEGRATION_SHELL":                      handle_integration_shell,
+    "INTEGRATION_BEAM":                       handle_integration_beam,
 
     # Materials
     "MAT_ELASTIC":                            handle_mat_elastic,

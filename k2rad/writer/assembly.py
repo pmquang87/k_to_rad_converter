@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 from ..state import ConversionState
+from .beams import _resolve_integration_beams
 from .common import HDR, _f, _i
 from .materials import (
     _make_functions,
@@ -595,6 +596,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Then report every *SECTION_SHELL ICOMP=1 layup whose angles cannot reach a
     # Radioss property — needs the composite_prop_ids the line above allocated.
     _resolve_icomp_sections(state)
+
+    # Bind every *SECTION_BEAM QR/IRID reference to its *INTEGRATION_BEAM rule
+    # and decide, per section, between the integrated /PROP/TYPE18 and the
+    # resultant /PROP/BEAM. AFTER _screen_provisional_elements (state.beam_elems
+    # must be final: a phantom element would otherwise claim a section) and
+    # AFTER _resolve_mat_johnson_cook (its LAW2-vs-LAW4 routing decides the
+    # TYPE18 material gate); before the parts and the properties are emitted.
+    _resolve_integration_beams(state)
 
     # Assign a synthesized orthotropic /PROP id to each LAW128 (MAT_103) part
     # (LAW128 is orthotropic-only). Must run before parts (which repoint the

@@ -18,6 +18,8 @@ below is re-exported so ``k2rad.writer`` keeps the old flat namespace):
   composites – orthotropic/composite laws (LAW93/127/43/27 pair), the per-ply
                *PART_COMPOSITE layup (TYPE51+TYPE19) and the AOPT axis mapping
   mesh       – nodes, skews, parts+elements, TET10 handling, properties
+  beams      – *INTEGRATION_BEAM cross-section rules → /PROP/TYPE18 (INT_BEAM),
+               and the derived-section-constant fallback onto /PROP/BEAM
   contacts   – /INTER TYPE7/TYPE25/TYPE2, force transducers, contact warnings
   rbody      – /RBODY, constrained nodal rigid bodies, merges, probe body
   loads      – BCS, cloads, pressure, gravity, imposed motions, inivel,
@@ -221,6 +223,10 @@ from .composites import (
     _emit_prop_type19,
     _composite_ref_axis,
     _composite_material_mids,
+)
+from .beams import (
+    _resolve_integration_beams,
+    _emit_prop_int_beam,
 )
 from .joints import (
     DEG2RAD,
@@ -473,6 +479,8 @@ __all__ = [
     "_resolve_composites",
     "_assign_composite_props",
     "_resolve_integration_shells",
+    "_resolve_integration_beams",
+    "_emit_prop_int_beam",
     "_resolve_icomp_sections",
     "_make_composite_materials",
     "_emit_composite_props",
