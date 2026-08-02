@@ -105,6 +105,29 @@ export the image.
 `*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
 `_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`,
 `*SECTION_SOLID`, `*SECTION_BEAM`
+`*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
+`_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
+element's own `Thick` field (arithmetic mean over the 3 or 4 corners; only
+*populated* cells count, so a partly-filled card is not quartered) and `BETA`
+becomes its `Phi` field in degrees — both are real `/SHELL` // `SH3N` columns,
+not a property or a skew, and `Thick=0` still falls back to `/PROP/SHELL`.
+`MCID` (a coordinate-system id, **not** an angle), the `_OFFSET` mid-surface
+offset and the `_DOF` scalar nodes have no Radioss element field and are
+dropped with a counted warning. **Any other `*ELEMENT_SHELL_<option>` — known
+or not, including `_COMPOSITE` and `_SHL4_TO_SHL8` — still keeps every element**
+(the one exception is `_NURBS_PATCH`, an isogeometric patch rather than a mesh:
+its card holds polynomial orders where an element card holds node ids, so it is
+skipped whole and warned about)
+`*ELEMENT_BEAM_ORIENTATION` → a synthesized `/NODE` at `pos(N1) + (VX,VY,VZ)`
+wired into the beam's `node_ID3` (raw vector, unnormalized; one node shared per
+distinct `N1`+vector). A zero vector creates nothing and leaves the starter's
+own `INFO 2093` default (`N3 := N2`); a vector parallel to the beam axis is
+warned about. `*ELEMENT_BEAM_OFFSET` end offsets are dropped with a counted
+warning; any other `*ELEMENT_BEAM_<option>` keeps its elements
+`*ELEMENT_PLOTEL` → an inert 2-node `/SPRING` on a synthesized `/PART` +
+`/PROP/TYPE4` id 10000000 (the id LS-DYNA assigns PLOTELs) with `K=0`, `C=0`,
+`MASS=1.1e-15`: no stiffness, no nodal stiffness, and a spring time step of
+~0.5 s so it never governs
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node

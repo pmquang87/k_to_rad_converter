@@ -27,6 +27,7 @@ from .mesh import (
     _normalize_tet10_ordering,
     _screen_sliver_tets,
     _snap_tet10_midsides,
+    _synthesize_beam_orientation_nodes,
     _synthesize_vector_skews,
 )
 from .composites import (
@@ -61,6 +62,7 @@ from .loads import (
     _make_initial_velocity_generation,
     _make_modal_dummy_cload,
     _make_node_cloads,
+    _make_plotel_elements,
     _make_pressure_loads,
     _make_rigid_walls,
     _make_rlinks,
@@ -504,6 +506,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # before parts (repoint) and properties (emit).
     _assign_hourglass_props(state)
 
+    # *ELEMENT_BEAM_ORIENTATION: turn each VX/VY/VZ into a real third node at
+    # N1 + V. Before the /NODE section (so the nodes are emitted) and before the
+    # other node-synthesizing prepasses, which allocate off max(state.nodes)+1
+    # and therefore have to see these ids already registered.
+    _synthesize_beam_orientation_nodes(state)
+
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).
     _synthesize_rwall_moving_nodes(state)
@@ -690,6 +698,7 @@ def _starter_section_registry():
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
         ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
         ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
+        ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
         ("joints",            lambda c: _make_joints(c.state, c.rigid_nodes,

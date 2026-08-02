@@ -24,6 +24,9 @@ __all__ = [
     "_new_ground_node",
     "_emit_spring_part",
     "_make_discrete_springs",
+    "PLOTEL_ID",
+    "PLOTEL_MASS",
+    "_make_plotel_elements",
     "_box_basis",
     "_box_global_corners",
     "_box_contains",
@@ -667,6 +670,107 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 "(1e-4) for the explicit time step.")
 
     return lines if emitted else []
+
+
+# *ELEMENT_PLOTEL part / property id. LS-DYNA Vol I R17, *ELEMENT_PLOTEL
+# Remark 1: "Part ID, 10000000, is assigned to PLOTEL elements." The card has no
+# PID column at all, so the converter has to fabricate the part; dyna2rad picks
+# the same id (convertelements.cxx:242-262).
+PLOTEL_ID = 10000000
+# /PROP/TYPE4 MASS. hm_read_prop04.F:136-142 rejects MASS <= 1e-15 outright:
+#   IF(GEO(1)<=EM15) ... ANCMSG(MSGID=229) -> "** ERROR IN SPRING PROPERTY (MASS)"
+# so this is the smallest legal value with a margin, and it is exactly what
+# dyna2rad writes (1.1*pow(10.0,-15)). k2rad's /BEGIN gives the input and work
+# unit systems the same values, so the comparison is against the same number the
+# card carries.
+PLOTEL_MASS = 1.1e-15
+
+
+def _make_plotel_elements(state: ConversionState) -> List[str]:
+    """*ELEMENT_PLOTEL → inert /SPRING + one /PART + one /PROP/TYPE4.
+
+    PLOTEL is a pure visualization line: it must add NO stiffness, NO mass and
+    must not govern the time step. /PROP/TYPE4 with K=0, C=0 does all three:
+
+      * NODAL stiffness — r1len3.F:81-105 initialises STI(1,I)=STI(2,I)=ZERO and
+        only overwrites them when XK/=0 or XC/=0, so a K=C=0 spring contributes
+        exactly zero to the nodal time step of the parts it is drawn on.
+      * ELEMENT time step — r1len3.F:139, DT = XM/MAX(EM15, SQRT(XC²+XM·XK)+XC).
+        With K=C=0 the denominator floors at the EM15 clamp instead of going to
+        zero, giving DT = M/1e-15 ~ 1.1 s: some six orders of magnitude above a
+        structural shell step, so it never governs. (The MASS>1e-15 hard error
+        is what keeps M out of the DT=0 branch at r1len3.F:143.)
+      * Mass — 1.1e-15 per element, split over its two nodes.
+
+    Everything else stays at the /PROP/TYPE4 reader defaults (no functions, no
+    rupture limits), matching dyna2rad, which sets MASS and nothing else.
+    """
+    if not state.plotel_elems:
+        return []
+
+    # Prefer the LS-DYNA id, but never collide: /PART and /PROP ids are checked
+    # against what the deck already occupies (k2rad emits /PROP/SHELL|SOLID|BEAM
+    # under the SECID verbatim), because a duplicate is starter ERROR 79.
+    part_id = (PLOTEL_ID if PLOTEL_ID not in state.parts
+               else state.next_part_id())
+    prop_id = PLOTEL_ID
+    if (PLOTEL_ID in state.sec_shells or PLOTEL_ID in state.sec_solids
+            or PLOTEL_ID in state.sec_beams):
+        prop_id = state.next_prop_id()
+
+    lines: List[str] = [
+        "#-  PLOTEL VISUALIZATION ELEMENTS (*ELEMENT_PLOTEL -> inert /SPRING):",
+        HDR,
+    ]
+    lines += _emit_prop_type4(prop_id, "PLOTEL", PLOTEL_MASS, 0.0, 0.0, 0.0,
+                              0, 0, 0.0, 0.0)
+    lines += [
+        f"/PART/{part_id}",
+        "PLOTEL",
+        # mat_ID is left 0: /PROP/TYPE4 needs no material, and dyna2rad never
+        # sets one on the PLOTEL part either.
+        f"{_i(prop_id)}{_i(0)}{_i(0)}",
+        f"/SPRING/{part_id}",
+        "# sprg_ID  node_ID1  node_ID2",
+    ]
+    missing: List[int] = []
+    kept = 0
+    for e in state.plotel_elems:
+        if e.n1 not in state.nodes or e.n2 not in state.nodes:
+            missing.append(e.eid)
+            continue
+        lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}")
+        kept += 1
+    lines.append(HDR)
+
+    if missing:
+        state.warn(
+            f"*ELEMENT_PLOTEL: {len(missing)} element(s) reference a node with "
+            f"no *NODE record (first: EID {missing[0]}) — dropped, because a "
+            "/SPRING on an undefined node is starter ERROR 78 (USR2SYS). Only "
+            "the visualization line is lost.")
+    state.warn(
+        f"*ELEMENT_PLOTEL: {kept} visualization element(s) converted to inert "
+        f"/SPRING on the synthesized /PART/{part_id} + /PROP/TYPE4/{prop_id} "
+        f"(K=0, C=0, MASS={PLOTEL_MASS:g} per element). They add no stiffness "
+        "and do not govern the time step, but they DO appear in the animation "
+        "and in the part list — delete the *ELEMENT_PLOTEL cards if you want "
+        "them out of the model entirely.")
+
+    # /SPRING ids share one starter namespace across every spring emitter, and
+    # LS-DYNA does not force a PLOTEL EID to differ from an *ELEMENT_DISCRETE
+    # one. A clash is ERROR 79 (DUPLICATE ID) with no restart file, so say so
+    # rather than let the starter be the first to mention it.
+    clash = ({e.eid for e in state.plotel_elems}
+             & {d.eid for d in state.discrete_elems})
+    if clash:
+        state.warn(
+            f"*ELEMENT_PLOTEL: {len(clash)} element id(s) are also used by an "
+            f"*ELEMENT_DISCRETE (first: {sorted(clash)[0]}). Both convert to "
+            "/SPRING, which is ONE id namespace in the starter, so the deck "
+            "will be rejected with ERROR 79 (DUPLICATE ID, IN SPRING ELEMENT "
+            "DEFINITION). Renumber one of the two families in the .k file.")
+    return lines
 
 
 def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
@@ -2775,8 +2879,18 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # nodes are already fully /BCS-fixed by the connector section.
     for d in state.discrete_elems:
         elem_nodes.update((d.n1, d.n2))
+    for p in state.plotel_elems:
+        elem_nodes.update((p.n1, p.n2))
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
+    # A beam's THIRD node is a geometric reference only — the starter tags it
+    # CHECK_USED, not CHECK_BEAM (hm_read_beam.F:179-181), and the engine takes
+    # the local frame from the stored co-rotational triad, not from that node's
+    # current position (pevec3.F reads E2 from RLOC). So a SYNTHESIZED
+    # orientation node, which by construction no other element touches, carries
+    # no stiffness at all: leaving it out of the constraint set would put six
+    # zero rows per node into the implicit tangent. Fixing it is inert.
+    elem_nodes -= state.beam_orient_nodes
     # *CONSTRAINED_JOINT nodes carry the /PROP/TYPE45 joint spring; fixing them
     # here would weld the joint solid. Registered by the _resolve_joints prepass
     # so this does not depend on the joint section having run yet.

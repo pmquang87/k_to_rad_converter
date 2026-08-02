@@ -16,7 +16,7 @@ from .parser import (
 )
 from .state import (
     ConversionState,
-    NodeData, ShellElem, SolidElem, BeamElem,
+    NodeData, ShellElem, SolidElem, BeamElem, PlotelElem,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
@@ -204,21 +204,255 @@ def handle_node(block: Block, state: ConversionState) -> None:
 # Elements
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── *ELEMENT_SHELL / *ELEMENT_BEAM option grammar ────────────────────────────
+#
+# LS-DYNA Vol I R17: *ELEMENT_SHELL_{THICKNESS}_{BETA|MCID}_{OFFSET}_{DOF}.
+# The BASE connectivity card is always 10 x I8 (EID PID N1..N8); the suffix only
+# decides which EXTRA cards follow it, per element:
+#   card 2  THIC1..THIC4 + (BETA|MCID)  5 x F16  present for THICKNESS, BETA and
+#                                                MCID alike — ONE shared card;
+#                                                the option name says which
+#                                                datum is meant, not which
+#                                                columns exist
+#   card 3  THIC5..THIC8                4 x F16  THICKNESS only, and only when
+#                                                the mid-side nodes N5..N8 are
+#                                                defined
+#   card 4  OFFSET                      1 x F16  OFFSET only
+#   card 5  blank(16) + NS1..NS4        4 x I8   DOF only
+#
+# *ELEMENT_BEAM_{OFFSET}_{ORIENTATION} adds, in that order, WX1..WZ2 (6 x F10)
+# and VX VY VZ (3 x F10) — note the beam's extra cards are 10 chars wide while
+# its base card is 8, and the shell's extra cards are 16.
+#
+# WHY THIS MATTERS: dyna2rad's CFG keyword table is an exact-match lookup
+# (reader/source/cfgio/MODEL_IO/mv_solver_input_infos.cpp:497, myUserNameExactMatch)
+# listing only ELEMENT_SHELL, ELEMENT_SHELL_THICKNESS, ELEMENT_SHELL_BETA and
+# ELEMENT_BEAM_ORIENTATION. Every other spelling — _MCID, _OFFSET, _DOF,
+# _COMPOSITE, and EVERY combined form — is an unmatched header, so the whole
+# block is skipped and THE MESH IS LOST, not merely the extra data. k2rad keeps
+# the mesh for every spelling, known or unknown (see dispatch()).
+_SHELL_SUFFIX_TOKENS = frozenset({"THICKNESS", "BETA", "MCID", "OFFSET", "DOF"})
+_BEAM_SUFFIX_TOKENS = frozenset({"ORIENTATION", "OFFSET"})
+
+#: Option tokens whose block is not a list of finite elements at all, so the
+#: "keep whatever parses as connectivity" fallback must NOT run on it.
+#: *ELEMENT_SHELL_NURBS_PATCH card 1 is NPEID PID NPR PR NPS PS — six positive
+#: integers that pass every connectivity test while meaning polynomial orders
+#: and control-point counts, not nodes. Inventing an element from it would turn
+#: a keyword k2rad merely skipped into starter ERROR 78 (undefined node).
+_ELEM_NOT_A_MESH_TOKENS = frozenset({"NURBS", "PATCH"})
+
+
+def _elem_options(keyword: str, base: str, known: frozenset):
+    """Split ``*ELEMENT_<base><suffix>`` into (known option set, unknown tokens)."""
+    tokens = [t for t in keyword[len(base):].split("_") if t]
+    return ({t for t in tokens if t in known},
+            [t for t in tokens if t not in known])
+
+
+def _elem_block_is_not_a_mesh(block: Block, state: ConversionState,
+                              unknown: List[str]) -> bool:
+    """Route an isogeometric-patch block to skipped_keywords, as before."""
+    if not any(t in _ELEM_NOT_A_MESH_TOKENS for t in unknown):
+        return False
+    state.skipped_keywords.append(block.keyword)
+    state.warn(
+        f"*{block.keyword} is an ISOGEOMETRIC patch definition, not a finite "
+        "element mesh — its card holds polynomial orders and control-point "
+        "counts where an element card holds node ids. OpenRadioss has no /IGA "
+        "counterpart k2rad can target, so the block is skipped whole. The "
+        "geometry it describes is NOT in the converted deck.")
+    return True
+
+
+def _parse_shell_base(line: str):
+    """One *ELEMENT_SHELL connectivity card → (eid, pid, nodes, midside) or None.
+
+    ``nodes`` is the 3 or 4 corner ids with trailing zeros stripped (a triangle
+    may be written either as 3 ids with a blank N4 or as a collapsed quad);
+    ``midside`` is the N5..N8 slots, which Radioss's 4-node /SHELL cannot carry.
+    """
+    f = [x for x in _elem_fields(line, 10) if x]   # eid pid n1..n8
+    # 5 fields = eid pid n1 n2 n3: a triangle whose blank trailing N4
+    # column was dropped — legal fixed-format output, keep it.
+    if len(f) < 5:
+        return None
+    eid = to_int(f[0])
+    pid = to_int(f[1])
+    nodes = [to_int(f[i]) for i in range(2, min(6, len(f)))]
+    while len(nodes) < 4:
+        nodes.append(0)
+    while len(nodes) > 3 and nodes[-1] == 0:
+        nodes.pop()
+    midside = [to_int(f[i]) for i in range(6, min(10, len(f)))]
+    return eid, pid, nodes, midside
+
+
+def _is_connectivity_card(line: str, n_min: int) -> bool:
+    """True when *line* can only be an element connectivity card.
+
+    Used on the UNKNOWN-suffix path, where the number and layout of the extra
+    cards is by definition not known: every field of a connectivity card is a
+    plain unsigned integer and the id/node slots are non-zero, which no float
+    card (thicknesses, offsets, ply thickness/angle pairs) can imitate. Taking
+    only these keeps the whole mesh without inventing elements out of the data
+    cards k2rad could not interpret.
+    """
+    f = [x for x in _elem_fields(line, 10) if x]
+    if len(f) < n_min:
+        return False
+    return all(t.isdigit() and int(t) > 0 for t in f[:n_min])
+
+
 def handle_element_shell(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_SHELL and EVERY _THICKNESS/_BETA/_MCID/_OFFSET/_DOF spelling.
+
+    Per-node thicknesses land on the element's own ``Thick`` field and BETA on
+    its ``Phi`` field (both are real /SHELL // SH3N columns — no property split,
+    no skew); MCID, OFFSET and DOF have no /SHELL destination and are dropped
+    with a counted warning. An unrecognized suffix still keeps every element.
+    """
+    opts, unknown = _elem_options(block.keyword, "ELEMENT_SHELL",
+                                  _SHELL_SUFFIX_TOKENS)
+    raw = block.raw
+    n_mcid = n_offset = n_dof = n_midside = n_partial = 0
+    n_unparsed = 0
+    seen_eids: set = set()
+
+    if unknown and _elem_block_is_not_a_mesh(block, state, unknown):
+        return
+
+    if unknown:
+        # Unrecognized option: the extra cards' layout is unknown, so consume
+        # nothing positionally and keep every line that can only be a base
+        # connectivity card. The mesh survives; the option's data does not.
+        n_kept = 0
+        for line in raw:
+            if not _is_connectivity_card(line, 5):
+                if line.strip():
+                    n_unparsed += 1
+                continue
+            parsed = _parse_shell_base(line)
+            if parsed is None:
+                continue
+            eid, pid, nodes, midside = parsed
+            if eid in seen_eids:
+                # A repeated id inside one block is a data card that happens to
+                # be all-integer, not a second element.
+                n_unparsed += 1
+                continue
+            seen_eids.add(eid)
+            if any(midside):
+                n_midside += 1
+            state.shell_elems.append(ShellElem(eid, pid, nodes))
+            n_kept += 1
+        state.warn(
+            f"*{block.keyword}: option '_{'_'.join(unknown)}' is not implemented "
+            f"— {n_kept} element(s) were kept as plain /SHELL // SH3N "
+            f"connectivity and {n_unparsed} further card(s) in the block were "
+            "NOT interpreted (their data is dropped). The MESH is preserved; "
+            "check the element count against the source deck, and supply the "
+            "option's data another way if the model depends on it. (dyna2rad "
+            "drops this whole block, elements included.)")
+    else:
+        want_thic = bool(opts & {"THICKNESS", "BETA", "MCID"})
+        i = 0
+        while i < len(raw):
+            parsed = _parse_shell_base(raw[i])
+            if parsed is None:
+                i += 1
+                continue
+            eid, pid, nodes, midside = parsed
+            i += 1
+            thick_nodes: List[Optional[float]] = []
+            beta = 0.0
+            if want_thic and i < len(raw):
+                f = _card(raw, i, fixed=True, n=5, w=16)
+                i += 1
+                thick_nodes = [to_float(f[k]) if len(f) > k and f[k].strip()
+                               else None for k in range(4)]
+                fifth = f[4] if len(f) > 4 else ""
+                if "MCID" in opts:
+                    if fifth.strip() and to_int(fifth) != 0:
+                        n_mcid += 1
+                elif fifth.strip():
+                    beta = to_float(fifth)
+                n_pop = sum(1 for t in thick_nodes if t is not None)
+                if 0 < n_pop < len(nodes):
+                    n_partial += 1
+            if "THICKNESS" in opts and any(midside) and i < len(raw):
+                i += 1                       # THIC5..THIC8, no /SHELL home
+            if "OFFSET" in opts and i < len(raw):
+                f = _card(raw, i, fixed=True, n=1, w=16)
+                i += 1
+                if f and f[0].strip() and to_float(f[0]) != 0.0:
+                    n_offset += 1
+            if "DOF" in opts and i < len(raw):
+                # blank(16) then NS1..NS4 as I8 — read past the blank field.
+                f = parse_fixed(raw[i][16:], n=4, w=8)
+                i += 1
+                if any(to_int(x) for x in f):
+                    n_dof += 1
+            if any(midside):
+                n_midside += 1
+            state.shell_elems.append(
+                ShellElem(eid, pid, nodes, thick_nodes, beta))
+
+    if n_mcid:
+        state.warn(
+            f"*{block.keyword}: {n_mcid} element(s) carry a material "
+            "coordinate-system id MCID — DROPPED. MCID names a "
+            "*DEFINE_COORDINATE_SYSTEM, it is not the BETA angle, and Radioss "
+            "/SHELL has no per-element material system: writing the id into the "
+            "element's Phi column would silently rotate the material axes by "
+            "<cid> DEGREES. If the layup orientation matters, give the part an "
+            "orthotropic property (/PROP/TYPE9 or TYPE51) whose reference "
+            "direction carries the same system.")
+    if n_offset:
+        state.warn(
+            f"*{block.keyword}: {n_offset} element(s) carry a non-zero "
+            "*ELEMENT_SHELL_OFFSET mid-surface offset — DROPPED. Radioss "
+            "/SHELL has no per-element offset field, so every shell sits on the "
+            "surface its nodes define; a model that relied on the offset to "
+            "close a gap now has that gap (contact clearance, section modulus). "
+            "Move the nodes, or split the parts, to model the offset.")
+    if n_dof:
+        state.warn(
+            f"*{block.keyword}: {n_dof} element(s) carry *ELEMENT_SHELL_DOF "
+            "scalar-node references NS1..NS4 — DROPPED (Radioss has no scalar "
+            "nodal degrees of freedom). The shells themselves are unaffected.")
+    if n_midside:
+        state.warn(
+            f"*{block.keyword}: {n_midside} element(s) define mid-side nodes "
+            "N5..N8. Radioss /SHELL is 4-node only, so each is emitted as the "
+            "LINEAR quad on N1..N4 and the mid-side nodes are dropped — the "
+            "element loses its quadratic edges (coarser bending response, and "
+            "the dropped nodes become unreferenced). Re-mesh with linear shells "
+            "if this matters.")
+    if n_partial:
+        state.warn(
+            f"*{block.keyword}: {n_partial} element(s) fill only SOME of the "
+            "THIC1..THIC4 cells. The element thickness is the mean of the "
+            "POPULATED cells only — dyna2rad divides by the node count instead, "
+            "which turns THIC1=2.0 with three blank cells into 0.5 mm rather "
+            "than 2.0. Fill every cell to remove the ambiguity.")
+
+
+def handle_element_plotel(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_PLOTEL → an inert /SPRING (see writer/loads.py).
+
+    Card (Vol I R17): EID(I8) N1(I8) N2(I8). There is NO PID column — LS-DYNA
+    assigns part id 10000000 implicitly, so the converter has to fabricate the
+    part (and the property) itself.
+    """
     for line in block.raw:
-        f = [x for x in _elem_fields(line, 10) if x]   # eid pid n1..n8
-        # 5 fields = eid pid n1 n2 n3: a triangle whose blank trailing N4
-        # column was dropped — legal fixed-format output, keep it.
-        if len(f) < 5:
+        f = [x for x in _elem_fields(line, 3) if x]
+        if len(f) < 3:
             continue
-        eid = to_int(f[0])
-        pid = to_int(f[1])
-        nodes = [to_int(f[i]) for i in range(2, min(6, len(f)))]
-        while len(nodes) < 4:
-            nodes.append(0)
-        while len(nodes) > 3 and nodes[-1] == 0:
-            nodes.pop()
-        state.shell_elems.append(ShellElem(eid, pid, nodes))
+        eid, n1, n2 = to_int(f[0]), to_int(f[1]), to_int(f[2])
+        if eid <= 0 or n1 <= 0 or n2 <= 0:
+            continue
+        state.plotel_elems.append(PlotelElem(eid, n1, n2))
 
 
 def handle_element_solid(block: Block, state: ConversionState) -> None:
@@ -274,17 +508,109 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
             state.solid_elems.append(SolidElem(eid, pid, nodes))
 
 
+def _parse_beam_base(line: str):
+    """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3) or None."""
+    f = [x for x in _elem_fields(line, 5) if x]
+    # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
+    # so 4 fields (eid pid n1 n2) is a complete card.
+    if len(f) < 4:
+        return None
+    eid, pid = to_int(f[0]), to_int(f[1])
+    n1, n2 = to_int(f[2]), to_int(f[3])
+    n3 = to_int(f[4]) if len(f) > 4 else 0
+    return eid, pid, n1, n2, n3
+
+
 def handle_element_beam(block: Block, state: ConversionState) -> None:
-    for line in block.raw:
-        f = [x for x in _elem_fields(line, 5) if x]
-        # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
-        # so 4 fields (eid pid n1 n2) is a complete card.
-        if len(f) < 4:
+    """*ELEMENT_BEAM and its _ORIENTATION / _OFFSET spellings.
+
+    _ORIENTATION's VX/VY/VZ is stored on the element; the writer prepass
+    _synthesize_beam_orientation_nodes turns it into a real third node at
+    ``pos(N1) + V`` (the dyna2rad mapping). _OFFSET has no /BEAM destination and
+    is dropped with a counted warning; an unrecognized suffix still keeps every
+    element.
+    """
+    opts, unknown = _elem_options(block.keyword, "ELEMENT_BEAM",
+                                  _BEAM_SUFFIX_TOKENS)
+    raw = block.raw
+    n_offset = 0
+    n_zerovec = 0
+
+    if unknown and _elem_block_is_not_a_mesh(block, state, unknown):
+        return
+
+    if unknown:
+        n_kept = n_unparsed = 0
+        seen_eids: set = set()
+        for line in raw:
+            if not _is_connectivity_card(line, 4):
+                if line.strip():
+                    n_unparsed += 1
+                continue
+            parsed = _parse_beam_base(line)
+            if parsed is None:
+                continue
+            eid, pid, n1, n2, n3 = parsed
+            if eid in seen_eids:
+                n_unparsed += 1
+                continue
+            seen_eids.add(eid)
+            state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3))
+            n_kept += 1
+        state.warn(
+            f"*{block.keyword}: option '_{'_'.join(unknown)}' is not implemented "
+            f"— {n_kept} element(s) were kept as plain /BEAM connectivity and "
+            f"{n_unparsed} further card(s) in the block were NOT interpreted "
+            "(their data is dropped). The MESH is preserved; check the element "
+            "count against the source deck. (dyna2rad drops this whole block, "
+            "elements included.)")
+        return
+
+    i = 0
+    while i < len(raw):
+        parsed = _parse_beam_base(raw[i])
+        if parsed is None:
+            i += 1
             continue
-        eid, pid = to_int(f[0]), to_int(f[1])
-        n1, n2 = to_int(f[2]), to_int(f[3])
-        n3 = to_int(f[4]) if len(f) > 4 else 0
-        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3))
+        eid, pid, n1, n2, n3 = parsed
+        i += 1
+        vx = vy = vz = 0.0
+        # Card order follows the manual's card numbering: _OFFSET (card 7)
+        # before _ORIENTATION (card 8).
+        if "OFFSET" in opts and i < len(raw):
+            f = _card(raw, i, fixed=True, n=6, w=10)
+            i += 1
+            if any(to_float(x) for x in f):
+                n_offset += 1
+        if "ORIENTATION" in opts and i < len(raw):
+            # 3 x F10 — NOT the F16 the shell's optional card uses.
+            f = _card(raw, i, fixed=True, n=3, w=10)
+            i += 1
+            vx, vy, vz = (to_float(f[0]) if len(f) > 0 else 0.0,
+                          to_float(f[1]) if len(f) > 1 else 0.0,
+                          to_float(f[2]) if len(f) > 2 else 0.0)
+            if vx == 0.0 and vy == 0.0 and vz == 0.0:
+                n_zerovec += 1
+        state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3, vx, vy, vz))
+
+    if n_offset:
+        state.warn(
+            f"*{block.keyword}: {n_offset} element(s) carry non-zero "
+            "*ELEMENT_BEAM_OFFSET end offsets WX1..WZ2 — DROPPED. Radioss "
+            "/BEAM has no per-element end-offset field, so each beam runs "
+            "straight between its two nodes; a model that used the offsets to "
+            "represent an eccentric connection now has that eccentricity (and "
+            "its bending moment) missing. Add rigid links or move the nodes if "
+            "the eccentricity matters.")
+    if n_zerovec:
+        state.warn(
+            f"*{block.keyword}: {n_zerovec} element(s) give a ZERO orientation "
+            "vector (VX=VY=VZ=0), so no third node can be synthesized. The "
+            "beams keep the N3 written on their base card — normally 0, in "
+            "which case the OpenRadioss starter reports INFO 2093 and falls "
+            "back to N3:=N2, a degenerate local frame whose Iyy/Izz axes are "
+            "solver-chosen. Give the elements a real orientation vector (this "
+            "is dyna2rad's behaviour too, silently).")
 
 
 def handle_element_discrete(block: Block, state: ConversionState) -> None:
@@ -5287,9 +5613,16 @@ HANDLERS = {
 
     # Mesh
     "NODE":                                   handle_node,
+    # *ELEMENT_SHELL / *ELEMENT_BEAM: every legal option spelling is registered
+    # from the grammar just below this dict, and dispatch() additionally routes
+    # any UNLISTED *ELEMENT_SHELL*/_BEAM*/PLOTEL* spelling to the same handler,
+    # so no suffix can ever take a block's elements with it.
     "ELEMENT_SHELL":                          handle_element_shell,
     "ELEMENT_SOLID":                          handle_element_solid,
     "ELEMENT_BEAM":                           handle_element_beam,
+    # *ELEMENT_PLOTEL is a visualization-only line element with no PID column
+    # → an inert /SPRING on a synthesized PLOTEL /PART + /PROP/TYPE4.
+    "ELEMENT_PLOTEL":                         handle_element_plotel,
     "PART":                                   handle_part,
     # *PART_COMPOSITE carries its own per-ply layup instead of a *SECTION
     # reference → /PROP/TYPE51 + one /PROP/TYPE19 per ply. Every OPTION1/2/3
@@ -5678,9 +6011,49 @@ for _o1 in ("", "_TSHELL", "_IGA_SHELL"):
 del _o1, _o2, _o3
 
 
+# *ELEMENT_SHELL_{THICKNESS}_{BETA|MCID}_{OFFSET}_{DOF} (Vol I R17): 24 legal
+# spellings, and *ELEMENT_BEAM_{OFFSET}_{ORIENTATION}: 4. Generating the grammar
+# beats hand-enumerating it — and unlike *PART_COMPOSITE (twelve spellings, all
+# of them enumerable) the element families also have options k2rad does not
+# model at all (_COMPOSITE, _SHL4_TO_SHL8, _SCALAR, ...), so the prefix fallback
+# in dispatch() below is what actually guarantees no mesh is lost.
+for _o1 in ("", "_THICKNESS"):
+    for _o2 in ("", "_BETA", "_MCID"):
+        for _o3 in ("", "_OFFSET"):
+            for _o4 in ("", "_DOF"):
+                HANDLERS[f"ELEMENT_SHELL{_o1}{_o2}{_o3}{_o4}"] = handle_element_shell
+for _o1 in ("", "_OFFSET"):
+    for _o2 in ("", "_ORIENTATION"):
+        HANDLERS[f"ELEMENT_BEAM{_o1}{_o2}"] = handle_element_beam
+del _o1, _o2, _o3, _o4
+
+
+#: Keyword PREFIX → handler, tried when the exact-match lookup misses. Only the
+#: element families whose handler can keep the connectivity of an option it does
+#: not understand are listed (see the UNKNOWN-suffix branch in each handler).
+#:
+#: Without this, an unlisted spelling would land in skipped_keywords, and for
+#: elements that is not a soft failure: _make_parts_and_elements emits elements
+#: inside the state.parts loop, so a *ELEMENT_SHELL_MCID block leaves its /PART
+#: in the deck with NO /SHELL block under it — the elements are gone, the part
+#: is silently empty, and result.warnings says nothing. That is exactly what
+#: dyna2rad does (its CFG table matches USER_NAMES exactly), and it is the
+#: single biggest parity win in this family.
+_ELEMENT_PREFIX_HANDLERS = (
+    ("ELEMENT_SHELL", handle_element_shell),
+    ("ELEMENT_BEAM", handle_element_beam),
+    ("ELEMENT_PLOTEL", handle_element_plotel),
+)
+
+
 def dispatch(block: Block, state: ConversionState) -> None:
     """Look up and call the handler for *block.keyword*."""
     handler = HANDLERS.get(block.keyword)
+    if handler is None:
+        for _prefix, _handler in _ELEMENT_PREFIX_HANDLERS:
+            if block.keyword.startswith(_prefix):
+                handler = _handler
+                break
     if handler is not None:
         handler(block, state)
     else:

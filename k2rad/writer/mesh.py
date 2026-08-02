@@ -62,6 +62,9 @@ __all__ = [
     "_screen_sliver_tets",
     "_referenced_node_ids",
     "_downgrade_tet10_to_tet4",
+    "_synthesize_beam_orientation_nodes",
+    "_shell_element_thickness",
+    "_shell_optional_fields",
     "_make_parts_and_elements",
     "_make_properties",
     "_emit_prop_beam",
@@ -931,6 +934,133 @@ def _downgrade_tet10_to_tet4(state: ConversionState) -> None:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *ELEMENT_BEAM_ORIENTATION → synthesized third node
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _synthesize_beam_orientation_nodes(state: ConversionState) -> None:
+    """VX/VY/VZ → a real /NODE at ``pos(N1) + V``, wired into the beam's N3.
+
+    The LS-DYNA manual defines the orientation vector as relative to N1 and says
+    it "points to a virtual third node", so the node is placed at N1 + V with the
+    vector taken RAW — unnormalized, exactly as dyna2rad does
+    (convertelements.cxx:220-232). Normalizing would move the node and is not
+    what either code means; the direction is all Radioss keeps
+    (hm_read_beam.F:158-161 stores V/|V|).
+
+    Two things dyna2rad gets wrong and this does not:
+      * it writes ``elemNodes[2] = <new id>`` BEFORE ``elemNodes.resize(3)``, and
+        since a beam whose N3 column is blank arrives with only 2 nodes, the
+        resize value-initializes slot 2 back to 0 — so the node is created but
+        ``node_ID3`` is emitted as 0 for exactly the elements _ORIENTATION is
+        meant for. Here the id is simply assigned to the element.
+      * it creates one brand-new node per element even when many beams share an
+        N1 and a vector. Here identical (N1, V) pairs share one node — same
+        geometry, fewer orphan nodes.
+
+    Runs as a build_starter prepass so the new nodes exist before the /NODE
+    section is emitted.
+    """
+    if not any(e.vx or e.vy or e.vz for e in state.beam_elems):
+        return
+    cache: Dict[Tuple[int, float, float, float], int] = {}
+    n_missing = 0
+    n_collinear = 0
+    for e in state.beam_elems:
+        if e.vx == 0.0 and e.vy == 0.0 and e.vz == 0.0:
+            continue
+        base = state.nodes.get(e.n1)
+        if base is None:
+            n_missing += 1
+            continue
+        key = (e.n1, e.vx, e.vy, e.vz)
+        nid = cache.get(key)
+        if nid is None:
+            nid = state.next_node_id()
+            state.nodes[nid] = NodeData(base.x + e.vx, base.y + e.vy,
+                                        base.z + e.vz)
+            state.beam_orient_nodes.add(nid)
+            cache[key] = nid
+        e.n3 = nid
+        other = state.nodes.get(e.n2)
+        if other is not None:
+            axis = (other.x - base.x, other.y - base.y, other.z - base.z)
+            vec = (e.vx, e.vy, e.vz)
+            cr = _vcross(axis, vec)
+            la = (axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2) ** 0.5
+            lv = (vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2) ** 0.5
+            lc = (cr[0] ** 2 + cr[1] ** 2 + cr[2] ** 2) ** 0.5
+            if la > 0.0 and lv > 0.0 and lc <= 1e-6 * la * lv:
+                n_collinear += 1
+    if cache:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {len(cache)} third node(s) synthesized "
+            f"at N1 + (VX,VY,VZ) for {sum(1 for e in state.beam_elems if e.vx or e.vy or e.vz)} "
+            "beam(s), and written into the /BEAM node_ID3 column. They are pure "
+            "geometric reference nodes (the starter tags them CHECK_USED, not "
+            "CHECK_BEAM): no mass, no stiffness, no effect on the time step. "
+            "Node ids come from the guarded allocator, above every id in the "
+            "deck.")
+    if n_missing:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {n_missing} element(s) reference an N1 "
+            "with no *NODE record, so no third node could be placed. Those "
+            "beams keep the N3 from their base card (normally 0 → starter INFO "
+            "2093, N3:=N2, a degenerate local frame).")
+    if n_collinear:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {n_collinear} element(s) give an "
+            "orientation vector PARALLEL to their own N1-N2 axis. The "
+            "synthesized third node is then collinear with the beam and cannot "
+            "define a local Y-Z frame — the section's Iyy/Izz (or the "
+            "/PROP/TYPE18 integration points) end up on arbitrary axes. Check "
+            "these vectors; dyna2rad does not test for this at all.")
+
+
+def _shell_element_thickness(e: ShellElem, n_count: int) -> float:
+    """Element thickness from the *ELEMENT_SHELL_THICKNESS nodal values.
+
+    Arithmetic mean over the first *n_count* nodal cells (3 for a triangle /
+    collapsed quad, 4 for a quad — the same count dyna2rad uses, and correct for
+    a collapsed quad because THIC4 duplicates THIC3 under LS-DYNA's convention).
+
+    DELIBERATE DIVERGENCE from dyna2rad: only POPULATED cells enter the mean.
+    dyna2rad's reader cannot tell a blank cell from an explicit 0.0 and always
+    divides by the node count (convertelements.cxx:290-301), so a quad written
+    with THIC1=2.0 and three blank cells converts to 0.5 — a quarter of the real
+    thickness, i.e. a quarter of the mass and a sixty-fourth of the bending
+    stiffness. An explicit 0.0 still counts as populated (the user wrote it).
+    All-blank / all-zero → 0.0, which is the card's "use the /PROP thickness"
+    value (cinmas.F:324-329; ERROR 495 if the property is zero too).
+    """
+    vals = [t for t in e.thick_nodes[:n_count] if t is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _shell_optional_fields(e: ShellElem, n_count: int) -> str:
+    """The trailing ``Phi`` + ``Thick`` columns of a /SHELL or /SH3N card.
+
+    Both cards carry them at the SAME absolute columns — Phi 61-80, Thick
+    81-100 — and both default to 0 when absent, so the fields are emitted only
+    when there is something to say. That keeps a deck without the _THICKNESS /
+    _BETA variants byte-identical to what k2rad produced before.
+
+    (The shipped ``radioss41/ELEM/shell3n.cfg`` CARD string writes the blank gap
+    as ``%30s``, which would put Phi at 71-90 and Thick at 91-110. It disagrees
+    with the COMMENT line in the same file, and the STARTER follows the comment:
+    a probe deck with /IOFLAG IPRI=5 read a value ending in column 90 back as
+    THICKNESS, not as the angle, and discarded everything past column 100. So
+    the cfg CARD string is wrong and /SH3N uses the /SHELL columns.)
+
+    Phi is in DEGREES on the card — hm_read_shell.F:170 multiplies by PI/180.
+    """
+    phi = e.beta
+    thick = _shell_element_thickness(e, n_count)
+    if phi == 0.0 and thick == 0.0:
+        return ""
+    return _f(phi) + _f(thick)
+
+
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
@@ -1004,7 +1134,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             # runtime. A collapsed 4-node shell is also not numerically identical
             # to a C0 triangle, so this is a fidelity fix as well as a cost one.
             quads = []
-            tris = []                 # (eid, [n1, n2, n3])
+            tris = []                 # (ShellElem, [n1, n2, n3])
             n_bowtie = 0
             for e in shells_by_pid[pid]:
                 uniq = _ordered_unique_nodes(e.nodes)
@@ -1018,7 +1148,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                         # the 3 distinct corners invents area the original element
                         # did not have, so say so rather than fix it silently.
                         n_bowtie += 1
-                    tris.append((e.eid, uniq))
+                    tris.append((e, uniq))
                 else:
                     # < 3 distinct corners: zero area, no valid element (Radioss
                     # would reject it). Mirrors the degenerate-solid screening.
@@ -1042,7 +1172,8 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     pad = 4 - len(e.nodes)
                     if pad > 0:
                         row += "         0" * pad
-                    row += "         0"
+                    row += "         0"          # blank field, cols 51-60
+                    row += _shell_optional_fields(e, 4)
                     lines.append(row)
                 lines.append(HDR)
             if tris:
@@ -1050,9 +1181,15 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 # triangle formulation), so quads and triangles coexist under one
                 # /PART — unlike /TETRA10, which needs a part of its own.
                 lines.append(f"/SH3N/{pid}")
-                for eid, nd in tris:
-                    lines.append(_i(eid) + _i(nd[0]) + _i(nd[1]) + _i(nd[2])
-                                 + "         0")
+                for e, nd in tris:
+                    row = (_i(e.eid) + _i(nd[0]) + _i(nd[1]) + _i(nd[2])
+                           + "         0")
+                    tail = _shell_optional_fields(e, 3)
+                    if tail:
+                        # The 0 above sits in the 41-60 blank field; pad it out
+                        # to column 60 so Phi/Thick land at 61-80 / 81-100.
+                        row += " " * 10 + tail
+                    lines.append(row)
                 lines.append(HDR)
         if pid in solids_by_pid:
             # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an
