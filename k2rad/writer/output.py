@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, List, Set
 from ..state import ConversionState
-from .common import HDR, _f, _i, _split_shell_eids_by_topology
+from .common import (
+    HDR, _f, _i, _split_shell_eids_by_topology, _spotweld_beam_pids,
+)
 from .contacts import _select_parent_interface
 
 __all__ = [
@@ -21,6 +23,8 @@ __all__ = [
     "_make_starter_th_surf",
     "_spc_constrains_rotations",
     "_make_starter_th_node_spc",
+    "_spotweld_solid_pids",
+    "_make_starter_th_swforc",
 ]
 
 
@@ -339,7 +343,8 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     all_inter_ids = ([c.inter_id for c in state.contacts_single]
                      + [c.inter_id for c in state.contacts_surf2surf]
                      + [c.inter_id for c in state.contacts_general]
-                     + [c.inter_id for c in state.contacts_tied])
+                     + [c.inter_id for c in state.contacts_tied]
+                     + [c.inter_id for c in state.contacts_spotweld])
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:
@@ -714,4 +719,119 @@ def _make_starter_th_node_spc(state: ConversionState, rbody_info: Dict) -> List[
     ]
     lines += [_i(nd) for nd in nodes]
     lines.append(HDR)
+    return lines
+
+
+def _spotweld_solid_pids(state: ConversionState) -> Set[int]:
+    """*MAT_SPOTWELD (MAT_100) parts that carry SOLID elements — the hex/nugget
+    welds. Complement of _spotweld_beam_pids, which claims the beam-only MAT_100
+    parts for the /PROP/TYPE13 spring path; a MAT_100 solid part falls back to
+    /MAT/ELAST and its weld behaviour comes from a /CLUSTER instead."""
+    if not state.mat_spotweld:
+        return set()
+    solid_pids = {e.pid for e in state.solid_elems}
+    return {pid for pid, p in state.parts.items()
+            if p.mid in state.mat_spotweld and pid in solid_pids}
+
+
+def _make_starter_th_swforc(state: ConversionState) -> List[str]:
+    """*DATABASE_SWFORC → /TH/SPRING (beam welds) + /TH/BRIC (solid welds).
+
+    swforc is LS-DYNA's spot-weld force database. dyna2rad answers it with two
+    blocks, both keyed on parts whose material is a *MAT_SPOTWELD
+    (dyna2rad.cxx:613-695 — "SWFORC" appears TWICE in ``dbCardList``):
+
+      * i=3: *ELEMENT_DISCRETE / *ELEMENT_BEAM  → /TH/SPRING
+      * i=4: *ELEMENT_SOLID                     → /TH/BRIC
+
+    k2rad's MAT_100 beam welds are /SPRING elements that keep their LS-DYNA
+    *ELEMENT_BEAM ids VERBATIM (writer/loads.py _make_spotweld_beam_connectors
+    writes ``sprg_ID = e.eid`` under a ``/SPRING/<original PID>``), so the ids
+    listed here are exactly the ones the deck used and a channel maps 1:1 onto
+    an LS-DYNA swforc row. Solid weld ids are likewise verbatim.
+
+    The third block, /TH/CLUSTER over the *DEFINE_HEX_SPOTWELD_ASSEMBLY welds,
+    is emitted next to the clusters themselves (writer/loads.py
+    _make_hex_spotweld_clusters), the way dyna2rad emits it from its hex-weld
+    converter rather than from the database card.
+
+    Variables: ``DEF FAIL`` for the springs. ``DEF`` alone is what dyna2rad
+    asks for, and hm_read_thgrou.F:1518-1520 expands it to indices 1-14 + 65 =
+    OFF FX FY FZ MX MY MZ LX LY LZ RX RY RZ IE LENGTH — index 66, ``FAIL``, is
+    NOT in the group. On a weld that is the one channel the user came for (it
+    is *the* thing swforc reports), so it is requested explicitly. /TH/BRIC has
+    no FAIL variable at all, so it takes ``DEF``.
+
+    Element ids go ONE PER LINE for both types: /TH/SPRING and /TH/BRIC are
+    read by hm_read_thgrne.F (``elem_ID`` cols 1-10, optional name in 21-100),
+    not by the ten-per-line hm_read_thgrki.F that /TH/CLUSTER uses.
+    """
+    if not state.db_swforc_dt:
+        return []
+    weld_pids = _spotweld_beam_pids(state)
+    spring_eids = sorted(b.eid for b in state.beam_elems if b.pid in weld_pids)
+    solid_pids = _spotweld_solid_pids(state)
+    # EVERY solid on a MAT_100 part, with no topology screening. /TH/BRIC is
+    # read over the whole solid array (hm_read_thgrou.F ITYP=1, NUMELS), so a
+    # /TETRA4 or /TETRA10 id resolves there exactly like a /BRICK — verified on
+    # a live starter run, 0 ERROR(S) with a TET4 in the list. (The /CLUSTER path
+    # DOES screen tets, for a different reason: it reads the hex node ordering
+    # to build the weld frame. Screening them here would silently drop a
+    # requested channel.) A weld already covered by a /CLUSTER is still listed:
+    # /TH/BRIC reports stress and internal energy, which the cluster's force
+    # resultants do not.
+    brick_eids = sorted(e.eid for e in state.solid_elems if e.pid in solid_pids)
+    if not spring_eids and not brick_eids:
+        if not state.cluster_ids:
+            state.warn(
+                "*DATABASE_SWFORC requested but this deck defines no spot weld "
+                "k2rad can output: no *MAT_SPOTWELD (MAT_100) beam or solid "
+                "part and no *DEFINE_HEX_SPOTWELD_ASSEMBLY. No /TH block is "
+                "emitted (a /TH group listing nothing is a starter error). The "
+                "dt is still honoured as the /TFILE frequency. If the welds in "
+                "this deck are *CONSTRAINED_SPOTWELD ties, their springs are "
+                "synthesized with generated ids and are not covered here — "
+                "request them with *DATABASE_HISTORY_* instead.")
+        return []
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_SWFORC -> spot-weld forces, "
+        f"dt={state.db_swforc_dt:g}):", HDR,
+    ]
+    if spring_eids:
+        th_id = state.next_id()
+        lines += [
+            f"/TH/SPRING/{th_id}",
+            f"TH_SPOTWELD_SPRINGS_{th_id}",
+            "#     var1      var2",
+            "DEF       FAIL      ",
+        ]
+        lines += [_i(e) for e in spring_eids]
+        lines.append(HDR)
+        state.warn(
+            f"*DATABASE_SWFORC -> /TH/SPRING/{th_id} over {len(spring_eids)} "
+            "*MAT_SPOTWELD beam weld(s), listed by their ORIGINAL LS-DYNA "
+            "element id (the /PROP/TYPE13 connectors keep it), so a T01 "
+            "channel maps 1:1 onto an swforc row. Variables DEF + FAIL: FAIL "
+            "is the weld rupture flag and is NOT part of DEF "
+            "(hm_read_thgrou.F:1519). Unlike the /TH/INTER and /TH/NODE REAC* "
+            "channels these are INSTANTANEOUS forces (thres.F writes GBUF%FOR "
+            "and GBUF%MOM with no dt) — no differentiation needed.")
+    if brick_eids:
+        th_id = state.next_id()
+        lines += [
+            f"/TH/BRIC/{th_id}",
+            f"TH_SPOTWELD_SOLIDS_{th_id}",
+            "#     var1      var2",
+            "DEF       ",
+        ]
+        lines += [_i(e) for e in brick_eids]
+        lines.append(HDR)
+        state.warn(
+            f"*DATABASE_SWFORC -> /TH/BRIC/{th_id} over {len(brick_eids)} "
+            "*MAT_SPOTWELD solid weld element(s) (dyna2rad's second SWFORC "
+            "pass, dyna2rad.cxx:685-689). DEF gives OFF/SX..SXZ/IE/DENS/PLAS/"
+            "TEMP — element STRESS, not the weld force resultant LS-DYNA's "
+            "swforc prints. The resultant needs a /CLUSTER: add a "
+            "*DEFINE_HEX_SPOTWELD_ASSEMBLY over the nugget and k2rad emits "
+            "/CLUSTER/BRICK + /TH/CLUSTER with FX..MZ and FS/FN/MS/MN.")
     return lines

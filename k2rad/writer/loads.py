@@ -7,8 +7,9 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve
 from .common import (
-    HDR, _dof_string, _emit_grnod_grnod, _emit_grnod_node, _f, _i,
-    _part_node_sets, _spotweld_beam_pids, _vcross, _vnorm, _vsub,
+    HDR, _dof_string, _emit_grnod_grnod, _emit_grnod_node, _emit_id_group, _f,
+    _fmt_eid_list, _i, _part_node_sets, _spotweld_beam_pids, _vcross, _vnorm,
+    _vsub,
 )
 
 __all__ = [
@@ -36,6 +37,14 @@ __all__ = [
     "_resolve_box_nodes",
     "_make_spotweld_beam_connectors",
     "_make_constrained_spotweld_springs",
+    "_CLUSTER_IFAIL",
+    "_CLUSTER_A",
+    "_CLUSTER_B",
+    "_cluster_brick_eids",
+    "_cluster_failure_limits",
+    "_emit_cluster_brick",
+    "_emit_th_cluster",
+    "_make_hex_spotweld_clusters",
     "_DOF_DIR",
     "_make_imposed_motions",
     "_PM_DOF_TO_BCS",
@@ -1159,6 +1168,282 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             "single-weld case.")
 
     return lines if emitted else []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: hex spot welds  (*DEFINE_HEX_SPOTWELD_ASSEMBLY → /CLUSTER/BRICK)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# /CLUSTER Ifail: 3 = multi-directional (the general power-law interaction).
+# dyna2rad hardcodes the same value (convertdefinehexspotweldassembly.cxx:70).
+_CLUSTER_IFAIL = 3
+
+# /CLUSTER failure-surface coefficients a1..a4 and exponents b1..b4. The engine
+# forms (clusterf.F:386-390, the IFAIL==3 branch)
+#
+#   DMG = a1*(FN/Fn_fail1)^b1 + a2*(FT/Fs_fail)^b2
+#       + a3*(MR/Mt_fail)^b3  + a4*(MB/Mb_fail)^b4      -> fails at DMG > 1
+#
+# and *MAT_SPOTWELD's own criterion (LS-DYNA Vol I R16, MAT_100) is
+#
+#   (Nrr/NRR)^2 + (Nrs/NRS)^2 + (Nrt/NRT)^2
+# + (Mrr/MRR)^2 + (Mss/MSS)^2 + (Mtt/MTT)^2  >= 1
+#
+# i.e. QUADRATIC in every term. With the shear/bending pairs already reduced to
+# their resultants (Fs_fail = sqrt(NRS^2+NRT^2), Mb_fail = sqrt(MSS^2+MTT^2) —
+# which is what the engine compares against, FT = sqrt(Fx^2+Fy^2) at
+# clusterf.F:365), b = 2 reproduces LS-DYNA exactly and b = 1 does not.
+#
+# dyna2rad writes b1..b4 = 1.0 (convertdefinehexspotweldassembly.cxx:76-79),
+# making the interaction LINEAR: a weld loaded equally in tension and shear at
+# 40% of each limit reaches DMG = 0.8 there and fails, where LS-DYNA gets
+# 0.4^2 + 0.4^2 = 0.32 and does not. k2rad emits the quadratic form and says so.
+_CLUSTER_A = 1.0
+_CLUSTER_B = 2.0
+
+
+def _cluster_brick_eids(state: ConversionState, eids: List[int]):
+    """Split an assembly's element ids into (bricks, tets, unknown).
+
+    Applies the identical distinct-node test _make_parts_and_elements uses to
+    route a solid to /TETRA4 (4 distinct corners) or /TETRA10 (10 nodes) rather
+    than /BRICK, so the two cannot drift apart.
+
+    A tetrahedron is NOT rejected by the starter here — measured: a /GRBRIC/BRIC
+    listing a TET4 id resolves, and the cluster reports it in its element count
+    with 0 ERROR(S). It is screened out because the result is silently wrong.
+    hm_read_cluster.F:201-205 takes the weld's two joined faces from IXS(2:5)
+    and IXS(6:9) — the hex's bottom and top faces — and on a collapsed tet
+    (n1 n2 n3 n4 n4 n4 n4 n4) the "top face" is one repeated node, so the local
+    frame the starter builds from the two face centroids, and with it the
+    FN/FT/MR/MB split the whole failure surface is evaluated on, is meaningless.
+    The Radioss Reference Guide says the same in prose (/CLUSTER comment 2:
+    8-node hexa only) and notes it is not code-enforced.
+    """
+    by_eid = {e.eid: e for e in state.solid_elems}
+    bricks: List[int] = []
+    tets: List[int] = []
+    unknown: List[int] = []
+    for eid in eids:
+        e = by_eid.get(eid)
+        if e is None:
+            unknown.append(eid)
+        elif len(e.nodes) == 10 or len(set(n for n in e.nodes if n > 0)) == 4:
+            tets.append(eid)
+        else:
+            bricks.append(eid)
+    return bricks, tets, unknown
+
+
+def _cluster_failure_limits(state: ConversionState, eids: List[int]):
+    """(Fn_fail1, Fs_fail, Mt_fail, Mb_fail, mat_id) for one weld assembly.
+
+    The limits come from the *MAT_SPOTWELD of the PART the assembly's FIRST
+    element belongs to — dyna2rad does the same walk (element -> PID -> MID,
+    convertdefinehexspotweldassembly.cxx:98-113). LS-DYNA forbids an assembly
+    element from sharing a MID with anything outside an assembly
+    (Vol I R16 p.17-301), so one lookup describes the whole nugget.
+
+    The two resultants are reduced the way the engine compares them
+    (clusterf.F:365,367): Fs_fail = sqrt(NRS^2 + NRT^2) against
+    FT = sqrt(Fx^2 + Fy^2), Mb_fail = sqrt(MSS^2 + MTT^2) against
+    MB = sqrt(Mx^2 + My^2). Returns mat_id 0 when no MAT_100 is reachable.
+    """
+    by_eid = {e.eid: e for e in state.solid_elems}
+    for eid in eids:
+        e = by_eid.get(eid)
+        if e is None:
+            continue
+        part = state.parts.get(e.pid)
+        if part is None:
+            continue
+        m = state.mat_spotweld.get(part.mid)
+        if m is None:
+            continue
+        return (m.nrr,
+                math.sqrt(m.nrs * m.nrs + m.nrt * m.nrt),
+                m.mrr,
+                math.sqrt(m.mss * m.mss + m.mtt * m.mtt),
+                part.mid)
+    return 0.0, 0.0, 0.0, 0.0, 0
+
+
+def _emit_cluster_brick(cluster_id: int, title: str, group_id: int,
+                        fn_fail: float, fs_fail: float,
+                        mt_fail: float, mb_fail: float) -> List[str]:
+    """/CLUSTER/BRICK card (FORMAT radioss140 — the only one that exists).
+
+      C1  group_ID(1-10) skew_ID(11-20) Ifail(21-30)
+      C2  Fn_fail1(1-20)  a1(21-40)  b1(41-60)
+      C3  Fs_fail(1-20)   a2(21-40)  b2(41-60)
+      C4  Mt_fail(1-20)   a3(21-40)  b3(41-60)
+      C5  Mb_fail(1-20)   a4(21-40)  b4(41-60)
+
+    All five data cards are UNCONDITIONAL — the CFG puts no `if` around cards
+    2-5, so they must be written even for Ifail=0 or the starter reads the next
+    keyword's line as a failure limit.
+
+    skew_ID=0 lets the starter build the weld's local frame from the cluster's
+    own bottom-face -> top-face normal (hm_read_cluster.F:104 `IF (IFAIL > 0
+    .and. ISKN == 0)`), which is the correct frame for a through-thickness weld
+    and is what dyna2rad emits. A zero limit auto-promotes to INFINITY when
+    Ifail > 0 (:293-296), so an unknown resultant disables that term rather
+    than failing the weld instantly.
+
+    There is deliberately no Kn/Kt on this card: a /CLUSTER adds no stiffness
+    of its own — it is a force/moment monitor around real brick elements, and
+    the weld stiffness comes from their own material.
+    """
+    return [
+        f"/CLUSTER/BRICK/{cluster_id}",
+        (title or f"HEX_SPOTWELD_{cluster_id}")[:100],
+        "# group_ID   skew_ID     Ifail",
+        f"{_i(group_id)}{_i(0)}{_i(_CLUSTER_IFAIL)}",
+        "#           Fn_fail1                  a1                  b1",
+        f"{_f(fn_fail)}{_f(_CLUSTER_A)}{_f(_CLUSTER_B)}",
+        "#            Fs_fail                  a2                  b2",
+        f"{_f(fs_fail)}{_f(_CLUSTER_A)}{_f(_CLUSTER_B)}",
+        "#            Mt_fail                  a3                  b3",
+        f"{_f(mt_fail)}{_f(_CLUSTER_A)}{_f(_CLUSTER_B)}",
+        "#            Mb_fail                  a4                  b4",
+        f"{_f(mb_fail)}{_f(_CLUSTER_A)}{_f(_CLUSTER_B)}",
+        HDR,
+    ]
+
+
+def _emit_th_cluster(th_id: int, cluster_ids: List[int]) -> List[str]:
+    """/TH/CLUSTER over every emitted weld cluster.
+
+    Variable names are read from the STARTER's table, not the CFG's GUI list:
+    hm_read_thgrou.F:1249-1252 `DATA VARCLUS` is FX FY FZ MX MY MZ FS FN MS MN
+    FAIL, and the two group names (:1763-1766) expand to
+
+      DEF  -> FX FY FZ MX MY MZ FAIL   (global frame + damage)
+      FLOC -> FS FN MS MN              (LOCAL shear/normal force, bending/torsion)
+
+    dyna2rad asks for DEF alone (convertdefinehexspotweldassembly.cxx:321), so
+    the local weld resultants — the quantities a weld report is actually about,
+    and the ones swforc prints in LS-DYNA — never reach the T01. Both groups
+    are requested here. (The CFG's dropdown offers FT/MB/MT; the starter does
+    not know those names and answers ERROR 260.)
+
+    Object ids are cluster ids, TEN PER LINE — /TH/CLUSTER goes through
+    hm_read_thgrki.F, not the one-id-per-line hm_read_thgrne.F that /TH/SPRING
+    and /TH/BRIC use. A leading 0 in that list would mean "all clusters"
+    (WARNING 3083), so the rows are never padded.
+    """
+    lines = [
+        f"/TH/CLUSTER/{th_id}",
+        f"TH_CLUSTERS_{th_id}",
+        "#     var1      var2",
+        "DEF       FLOC      ",
+    ]
+    row: List[str] = []
+    for cid in cluster_ids:
+        row.append(_i(cid))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _make_hex_spotweld_clusters(state: ConversionState) -> List[str]:
+    """*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /GRBRIC/BRIC + /CLUSTER/BRICK
+    (+ one /TH/CLUSTER when *DATABASE_SWFORC asks for weld forces).
+
+    One assembly becomes one cluster: LS-DYNA caps an assembly at 16 hexes and
+    /CLUSTER caps a group at 500 (hm_read_cluster.F:86, ERROR 1055), so the 1:1
+    map is always inside both limits.
+
+    The cluster is a monitor, not a joint — the hexes keep whatever material
+    the deck gave them, and the cluster deletes all of them at once when its
+    failure surface is reached. dyna2rad emits the element group as a
+    /SET/GENERAL with a SOLID clause; k2rad emits the classic /GRBRIC/BRIC,
+    which the starter fills with the same GRTYPE=1 that hm_read_cluster.F:180
+    demands.
+    """
+    if not state.hex_spotweld_assemblies:
+        return []
+    lines: List[str] = []
+    cluster_ids: List[int] = []
+    for a in state.hex_spotweld_assemblies:
+        bricks, tets, unknown = _cluster_brick_eids(state, a.eids)
+        if unknown:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id}: element id(s) "
+                f"{_fmt_eid_list(unknown)} name no *ELEMENT_SOLID in this deck "
+                "and were left out of the /CLUSTER/BRICK group.")
+        if tets:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id}: element id(s) "
+                f"{_fmt_eid_list(tets)} are tetrahedra and were left OUT of the "
+                "/CLUSTER/BRICK group. The starter would accept them without "
+                "complaint, which is the problem: a cluster takes the weld's "
+                "two joined faces from the hex node ordering "
+                "(hm_read_cluster.F:201-205), so a tet contributes a degenerate "
+                "top face and corrupts the local frame — and with it the "
+                "normal/shear/torsion/bending split the whole failure surface "
+                "is evaluated on — for the ENTIRE weld. A hex spot weld must be "
+                "meshed with 8-node hexahedra (Radioss Reference Guide, "
+                "/CLUSTER comment 2). The remaining bricks are still clustered; "
+                "the tets stay in the model as ordinary solids.")
+        if not bricks:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id}: none of its "
+                f"{len(a.eids)} element id(s) resolved to an 8-node /BRICK, so "
+                "NO /CLUSTER/BRICK was emitted. PHYSICAL CONSEQUENCE: this "
+                "weld has no failure criterion in the converted model — its "
+                "elements behave as ordinary solids and never delete, so the "
+                "joint holds for the whole run. REMEDY: check the element ids "
+                "on the card and that the nugget is hex-meshed.")
+            continue
+        if len(bricks) > 500:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id}: {len(bricks)} "
+                "elements exceed the starter's 500-per-cluster limit "
+                "(hm_read_cluster.F:86, ERROR 1055) — the deck will be "
+                "rejected. Split the assembly.")
+        grbric_id = state.next_id()
+        lines += _emit_id_group("GRBRIC/BRIC", grbric_id,
+                                f"hex_spotweld_{a.sw_id}_bricks", bricks)
+        fn, fs, mt, mb, mid = _cluster_failure_limits(state, bricks)
+        lines += _emit_cluster_brick(a.sw_id, a.title or f"HEX_SPOTWELD_{a.sw_id}",
+                                     grbric_id, fn, fs, mt, mb)
+        cluster_ids.append(a.sw_id)
+        state.cluster_ids.append((a.sw_id, a.title))
+        if mid:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id} -> "
+                f"/CLUSTER/BRICK/{a.sw_id} over {len(bricks)} brick(s), "
+                f"failure limits from *MAT_SPOTWELD {mid}: Fn_fail1=NRR="
+                f"{fn:g}, Fs_fail=sqrt(NRS^2+NRT^2)={fs:g}, Mt_fail=MRR="
+                f"{mt:g}, Mb_fail=sqrt(MSS^2+MTT^2)={mb:g}, with a1..a4=1 and "
+                f"b1..b4={_CLUSTER_B:g}. The QUADRATIC exponents reproduce "
+                "MAT_100's own interaction; dyna2rad writes b=1 there, which "
+                "fails a combined-load weld early. A zero limit is promoted to "
+                "INFINITY by the starter (that term is then inactive).")
+        else:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id} -> "
+                f"/CLUSTER/BRICK/{a.sw_id} over {len(bricks)} brick(s) with NO "
+                "failure limits: no *MAT_SPOTWELD (MAT_100) is reachable from "
+                "the parts of its elements. Every limit is 0, which the "
+                "starter promotes to INFINITY — the weld monitors force and "
+                "moment but NEVER fails. Give the nugget part a *MAT_SPOTWELD "
+                "if the joint is meant to break.")
+    if not lines:
+        return []
+    head = ["#-  HEX SPOT WELDS (*DEFINE_HEX_SPOTWELD_ASSEMBLY -> /CLUSTER/BRICK):",
+            HDR]
+    if cluster_ids and state.db_swforc_dt:
+        lines += [
+            f"#-- *DATABASE_SWFORC -> hex weld cluster forces (dt={state.db_swforc_dt:g})"
+        ]
+        lines += _emit_th_cluster(state.next_id(), cluster_ids)
+    return head + lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────

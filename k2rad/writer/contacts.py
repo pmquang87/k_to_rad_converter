@@ -14,6 +14,7 @@ from .common import (
     _f,
     _i,
     _make_master_surface,
+    _part_node_sets,
 )
 
 __all__ = [
@@ -59,6 +60,12 @@ __all__ = [
     "_tied_master_surface",
     "_tied_dsearch",
     "_make_tied_interfaces",
+    "_SPOTWELD_SPOTFLAG",
+    "_SPOTWELD_IDEL2",
+    "_SPOTWELD_DSEARCH_FRACTION",
+    "_spotweld_dsearch",
+    "_spotweld_slave_nids",
+    "_make_spotweld_interfaces",
 ]
 
 
@@ -1381,14 +1388,20 @@ _TIED_DSEARCH_MARGIN = 1.2
 
 
 def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
-                      spotflag: int, dsearch: float) -> List[str]:
+                      spotflag: int, dsearch: float, idel2: int = 0) -> List[str]:
     """/INTER/TYPE2 card (FORMAT radioss2017 — unchanged through /BEGIN 2022):
     grnd_IDs surf_IDm Ignore Spotflag Level Isearch Idel2 <blank10> dsearch(20).
 
     Ignore=2: secondary nodes with no main segment within dsearch are removed
     from the tie by the starter (and printed), and a dsearch of 0 is replaced
     by the starter's average-main-segment-size default. Isearch=2 = improved
-    closest-segment search. Idel2=0 = engine default (no deletion).
+    closest-segment search. Idel2=0 = engine default (no deletion); the
+    *CONTACT_SPOTWELD path passes idel2=1 (dyna2rad's spotweld default,
+    convertcontacts.cxx:49) so the tie dies with the sheet segment it welds.
+
+    Cols 71-80 are left BLANK on purpose. FORMAT(radioss2025) puts a second
+    secondary-surface id (surf_IDs) there; the 2022 format has no such field,
+    and a blank reads as 0 in both — the one value that is safe either way.
 
     Spotflag 25/26/27/28 (the penalty and auto-penalty formulations — see
     _TIED_SPOTFLAG) read one EXTRA card that the purely kinematic ones do not:
@@ -1402,7 +1415,7 @@ def _emit_inter_type2(inter_id: int, title: str, grnod_id: int, surf_id: int,
         f"/INTER/TYPE2/{inter_id}",
         title or f"TIED_CONTACT_{inter_id}",
         "#  Grnd_id   Surf_id    Ignore  Spotflag     Level   Isearch     Idel2                       dsearch",
-        f"{_i(grnod_id)}{_i(surf_id)}{_i(2)}{_i(spotflag)}{_i(0)}{_i(2)}{_i(0)}          {_f(dsearch)}",
+        f"{_i(grnod_id)}{_i(surf_id)}{_i(2)}{_i(spotflag)}{_i(0)}{_i(2)}{_i(idel2)}          {_f(dsearch)}",
     ]
     if spotflag in _TIED_PENALTY_SPOTFLAGS:
         lines += [
@@ -1496,28 +1509,38 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
     return sorted(n for n in nids if n > 0)
 
 
-def _tied_master_surface(state: ConversionState, c, out_lines: List[str]):
+def _tied_master_surface(state: ConversionState, c, out_lines: List[str],
+                         tag: str = "tied", measure: bool = True):
     """Emit the main /SURF of a tied contact; returns (surf_id, verts, faces)
     where verts/faces are the surface triangles used to measure the tied gap
     (empty when the geometry is unknown). MSTYP 0 = *SET_SEGMENT → /SURF/SEG;
-    3 = part, 2 = part set → the part surface (0/1 fall back to parts too)."""
+    3 = part, 2 = part set → the part surface (0/1 fall back to parts too).
+
+    ``measure=False`` skips the triangle extraction — the *CONTACT_SPOTWELD
+    path takes its dsearch from the card, never from a measured distance, and
+    tessellating every sheet of a car body to throw the result away is the
+    expensive half of this function."""
     from ..gapmin import _segment_triangles, _surface_triangles
     if c.mstyp in (0, 1) and c.msid in state.segment_sets:
         ss = state.segment_sets[c.msid]
         if not ss.segments:
             return 0, [], []
         surf_id = state.next_id()
-        out_lines += _emit_surf_seg(surf_id, ss.title or f"tied_{c.inter_id}_master",
+        out_lines += _emit_surf_seg(surf_id, ss.title or f"{tag}_{c.inter_id}_master",
                                     ss.segments)
+        if not measure:
+            return surf_id, [], []
         verts, faces = _segment_triangles(state, ss.segments)
         return surf_id, verts, faces
     pids = sorted(_contact_master_pids(state, c.msid, c.mstyp))
     if not pids:
         return 0, [], []
     surf_id = state.next_id()
-    if not _make_master_surface(state, surf_id, f"tied_{c.inter_id}_master",
+    if not _make_master_surface(state, surf_id, f"{tag}_{c.inter_id}_master",
                                 pids, out_lines):
         return 0, [], []
+    if not measure:
+        return surf_id, [], []
     verts, faces = _surface_triangles(state, pids)
     return surf_id, verts, faces
 
@@ -1704,5 +1727,210 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
             "another interface, which happens whenever the two tied parts are "
             "conformally meshed and share nodes." + rot_note
         )
+    _note_dropped_interfaces(state, dropped)
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: spot-weld contacts  (*CONTACT_SPOTWELD → /INTER/TYPE2 Spotflag=28)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# /INTER/TYPE2 Spotflag for a *CONTACT_SPOTWELD. 28 is the AUTO-PENALTY
+# spotweld formulation and it is what dyna2rad emits for every routed TYPE2
+# (convertcontacts.cxx:49 interTypeVsMapDefaultVals["TYPE2"] =
+# {Ignore 2, Idel2 1, Spotflag 28}; the SPOTWELD keyword reaches that table
+# through the routing branch at :183-189).
+#
+# The kinematic spotflags (0/1/5) are NOT an option here, and not as a matter
+# of taste: chktyp2.F:82 tags a TYPE2's secondary nodes only when Spotflag is
+# outside {25,26,27,28}, and any MAIN node carrying that tag is hard ERROR 556
+# "MAIN NODE ID=n IS ALSO SECONDARY NODE OF ANOTHER INTERFACE TYPE2". A weld
+# part meshed conformally with the sheets it joins puts the same node in both
+# the secondary /GRNOD and the main /SURF, so a kinematic spotflag fails the
+# starter on exactly the decks this keyword exists for. itagsl2.F:225-245
+# supplies the other half: for 27/28 ONLY, a secondary node that collides with
+# a rigid body, an /RBE2/RBE3 or another tie is switched to a penalty tie
+# (WARNING 1179) instead of failing.
+_SPOTWELD_SPOTFLAG = 28
+
+# Idel2=1 — the tie is deleted together with the main segment it is welded to.
+# dyna2rad's spotweld default (convertcontacts.cxx:49); it survives the
+# starter's whitelist because 28 is in it (hm_read_inter_type02.F:269). The
+# *CONTACT_TIED_* path deliberately keeps Idel2=0: a mesh-transition glue
+# should not vanish, but a weld to an eroded sheet has nothing left to hold.
+_SPOTWELD_IDEL2 = 1
+
+# Fraction of (SST + MST) used as the tie search distance when the card
+# supplies both. Same formula dyna2rad applies to the sibling tied contacts
+# (convertcontacts.cxx:205, dSearch = 0.6*(lsdSST + lsdMST)) and the same
+# expression the starter forms internally when dsearch is left 0
+# (i2cor3.F:198, GAPV = MAX(0.05*DD, 0.6*(THKSECND + THKMAIN))).
+_SPOTWELD_DSEARCH_FRACTION = 0.6
+
+
+def _spotweld_dsearch(c) -> float:
+    """/INTER/TYPE2 dsearch for one *CONTACT_SPOTWELD, from the card alone.
+
+    dyna2rad leaves this at 0.0 for *CONTACT_SPOTWELD (convertcontacts.cxx:61,
+    :318) — the 0.6*(SST+MST) branch at :205 is entered only for
+    TIED_NODES_TO_SURFACE / TIEBREAK_NODES, so a spotweld's SST/MST are read
+    and then dropped. That is a gap, not a decision: the starter's own default
+    for dsearch=0 (i2cor3.F:198) contains the very same 0.6*(t_s + t_m) term,
+    so feeding it the deck's thicknesses can only agree better with LS-DYNA
+    than ignoring them. Both thicknesses must be positive, exactly as
+    dyna2rad's own branch requires.
+
+    A NEGATIVE Card-3 SST/MST is LS-DYNA's "absolute tie-criterion distance"
+    (Vol I R16: a negative SAST/SBST is allowed for the tied family and means a
+    separation distance, not a thickness). It is an explicit instruction from
+    the deck, so it wins over the computed value.
+
+    0 means "let the starter pick" — with Ignore=2 that is its
+    average-main-segment default, which is what the native reader always gets.
+    """
+    floor = max(-c.sst if c.sst < 0.0 else 0.0,
+                -c.mst if c.mst < 0.0 else 0.0)
+    if floor > 0.0:
+        return floor
+    if c.sst > 0.0 and c.mst > 0.0:
+        return _SPOTWELD_DSEARCH_FRACTION * (c.sst + c.mst)
+    return 0.0
+
+
+def _spotweld_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
+    """Node ids of a *CONTACT_SPOTWELD secondary (weld) side.
+
+    SSTYP 0 = segment set, 1 = shell element set, 2 = part set, 3 = part id,
+    4 = node set (LS-DYNA Vol I R16, SURFATYP). 0/1 fall back to part /
+    part-set / node-set lookups the way the other contact resolvers do, so a
+    deck that mislabels its set type still converts.
+
+    Unlike _tied_slave_nids this counts BEAM end nodes as part nodes, and that
+    difference is what makes the keyword work at all: a spot weld's secondary
+    side is the WELD, and a weld part is *ELEMENT_BEAM nuggets (SSID=3
+    SSTYP=3 on every W16/W17 deck in the corpus). Resolving it over shells and
+    solids only returns an empty group, and the interface is then dropped for
+    "no nodes at all" — leaving the welds attached to nothing.
+    """
+    part_nodes = _part_node_sets(state)
+    nids: Set[int] = set()
+
+    def add_part(pid: int) -> None:
+        nids.update(part_nodes.get(pid, ()))
+
+    def add_part_set(psid: int) -> None:
+        for pid in state.part_sets.get(psid, ("", []))[1]:
+            add_part(pid)
+
+    if styp == 4:
+        if sid in state.node_sets:
+            nids.update(state.node_sets[sid][1])
+    elif styp == 3:
+        add_part(sid)
+    elif styp == 2:
+        if sid in state.part_sets:
+            add_part_set(sid)
+    elif styp == 1 and sid in state.shell_sets:
+        by_eid = {e.eid: e for e in state.shell_elems}
+        for eid in state.shell_sets[sid][1]:
+            e = by_eid.get(eid)
+            if e is not None:
+                nids.update(n for n in e.nodes if n > 0)
+    elif styp in (0, 1):
+        if sid in state.segment_sets:
+            for seg in state.segment_sets[sid].segments:
+                nids.update(seg)
+        elif sid in state.parts:
+            add_part(sid)
+        elif sid in state.part_sets:
+            add_part_set(sid)
+        elif sid in state.node_sets:
+            nids.update(state.node_sets[sid][1])
+    return sorted(n for n in nids if n > 0)
+
+
+def _make_spotweld_interfaces(state: ConversionState,
+                              rigid_nodes: Set[int]) -> List[str]:
+    """*CONTACT_SPOTWELD[...] → /INTER/TYPE2 (Ignore=2, Spotflag=28, Idel2=1).
+
+    LS-DYNA's spotweld contact is what attaches the weld elements to the sheets
+    they join. Skipping it is not a soft loss: on W16_spotweld_E1 the four
+    MAT_100 weld beams share ZERO nodes with the 2058-node sheet mesh, so
+    without this interface they float free and the weld force stays 0.000 N for
+    the whole run.
+
+    Same two entities as the tied path — a secondary /GRNOD of weld nodes and a
+    main /SURF of sheet surface — but the secondary side is resolved over beams
+    as well (see _spotweld_slave_nids) and Idel2 is 1 rather than 0.
+    """
+    if not state.contacts_spotweld:
+        return []
+    lines = ["#-  SPOT-WELD CONTACTS (*CONTACT_SPOTWELD -> /INTER/TYPE2 Spotflag=28):",
+             HDR]
+    dropped: Dict[str, List[int]] = {}
+    for c in state.contacts_spotweld:
+        kw = "CONTACT_SPOTWELD" + (f"_{c.variant}" if c.variant else "")
+        nids = _spotweld_slave_nids(state, c.ssid, c.sstyp)
+        clean = [n for n in nids if n not in rigid_nodes]
+        if len(clean) < len(nids):
+            state.warn(
+                f"*{kw} {c.inter_id}: {len(nids) - len(clean)} secondary weld "
+                "node(s) belong to a rigid body and were removed from the tie "
+                "(/INTER/TYPE2 is a kinematic condition — it cannot share a "
+                "node with /RBODY). Those welds carry no force in the "
+                "converted model.")
+        if not clean:
+            _drop_interface(
+                state, dropped, kw, c.inter_id,
+                (f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
+                 f"resolved to {len(nids)} node(s) and ALL of them belong to a "
+                 "rigid body, leaving an empty weld node group"
+                 if nids else
+                 f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
+                 "resolved to no nodes at all"),
+                ("REMEDY: the SECONDARY side of a spot-weld contact must be "
+                 "the WELD (its beam/solid nugget part, or a node set of weld "
+                 "nodes), and it may not be rigid. Check that SSID names a "
+                 "deformable part, part set, node set or segment set that "
+                 "exists in this deck."))
+            continue
+        master_lines: List[str] = []
+        surf_id, _verts, _faces = _tied_master_surface(
+            state, c, master_lines, tag="spotweld", measure=False)
+        if not surf_id:
+            _drop_interface(
+                state, dropped, kw, c.inter_id,
+                f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} resolved "
+                "to no contact surface",
+                "REMEDY: point MSID at the part, part set or *SET_SEGMENT of "
+                "the SHEETS being welded — it must exist in this deck and "
+                "carry shell/solid elements.")
+            continue
+        grnod_id = state.next_id()
+        lines += _emit_grnod_node(grnod_id, f"spotweld_{c.inter_id}_slave", clean)
+        lines += master_lines
+        dsearch = _spotweld_dsearch(c)
+        lines += _emit_inter_type2(c.inter_id,
+                                   c.title or f"SPOTWELD_CONTACT_{c.inter_id}",
+                                   grnod_id, surf_id,
+                                   _SPOTWELD_SPOTFLAG, dsearch,
+                                   idel2=_SPOTWELD_IDEL2)
+        where = (f"dsearch={dsearch:g} from the Card-3 SST/MST"
+                 if dsearch > 0.0 else
+                 "dsearch=0, so the starter uses its own average-main-segment "
+                 "default (what the native reader always gets: dyna2rad drops "
+                 "SST/MST for this keyword)")
+        state.warn(
+            f"*{kw} {c.inter_id} -> /INTER/TYPE2/{c.inter_id} (spot-weld tie, "
+            f"Spotflag={_SPOTWELD_SPOTFLAG}, Ignore=2, Idel2={_SPOTWELD_IDEL2}, "
+            f"{len(clean)} weld node(s) tied to the msid={c.msid} surface, "
+            f"{where}). Spotflag 28 is the auto-penalty spotweld formulation: "
+            "a purely kinematic one (0/1/5) makes the starter fail with "
+            "ERROR 556 as soon as the weld shares a node with the sheet it is "
+            "welded to. Ignore=2 means a weld node that finds NO main segment "
+            "within dsearch is silently DROPPED from the tie by the starter "
+            "(WARNING 1071, i2tid3.F:116) instead of failing the run — read "
+            "the starter output and confirm that count is 0, because a weld "
+            "that quietly vanishes carries no load.")
     _note_dropped_interfaces(state, dropped)
     return lines

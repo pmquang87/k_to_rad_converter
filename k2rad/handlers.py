@@ -38,7 +38,7 @@ from .state import (
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
-    ContactForceTransducer, ContactTied,
+    ContactForceTransducer, ContactTied, ContactSpotweld, HexSpotweldAssembly,
     InitialVelocityNode, InitialVelocityRigidBody,
     InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
@@ -3786,6 +3786,190 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
     )
 
 
+#: *CONTACT_SPOTWELD keyword flavour → what the LS-DYNA option does that
+#: /INTER/TYPE2 cannot, said plainly. dyna2rad parses the same flag into
+#: ``ContactOption`` (contact_spotweld.cfg:842-852) and then never reads it, so
+#: all five spellings convert byte-identically there — silently. These are the
+#: texts that make the loss visible instead.
+_SPOTWELD_VARIANT_LOSS = {
+    "WITH_TORSION": (
+        "the _WITH_TORSION flavour makes the LS-DYNA tie transmit TORSION about "
+        "the weld axis with its own failure moment; /INTER/TYPE2 has no "
+        "torsional-release field, so the tie carries the full moment and the "
+        "torsional failure is NOT modelled by the interface"),
+    "BEAM_OFFSET": (
+        "the _BEAM_OFFSET flavour keeps the weld beam PHYSICALLY offset from the "
+        "sheet mid-surface and ties it with a penalty beam; /INTER/TYPE2 "
+        "projects the secondary node onto its main segment instead, so the "
+        "offset lever arm is not preserved"),
+    "CONSTRAINED_OFFSET": (
+        "the _CONSTRAINED_OFFSET flavour keeps the weld offset with a "
+        "CONSTRAINT equation rather than a penalty; /INTER/TYPE2 projects the "
+        "secondary node onto its main segment, so the offset lever arm is not "
+        "preserved"),
+}
+
+
+def _spotweld_card_offset(raw: List[str], offset: int, mpp: bool) -> int:
+    """First index of the *CONTACT_SPOTWELD mandatory Card 1.
+
+    ``_MPP`` inserts its own card BEFORE Card 1 (contact_spotweld.cfg: IGNORE
+    BCKT LCBCKT NS2TRK INITITR PARMAX <blank> CPARM8), optionally followed by a
+    second MPP card recognised by a literal ``&`` in COLUMN 1
+    (``CARD_PREREAD("%-1s")``). Miss either and every field of the real card is
+    read one line too early — SSID would come back as the MPP IGNORE flag.
+    """
+    if not mpp:
+        return offset
+    idx = offset + 1
+    if idx < len(raw) and raw[idx][:1] == "&":
+        idx += 1
+    return idx
+
+
+def handle_contact_spotweld(block: Block, state: ConversionState) -> None:
+    """*CONTACT_SPOTWELD[_WITH_TORSION|_BEAM_OFFSET|_CONSTRAINED_OFFSET]
+    [_PENALTY][_MPP][_ID] → /INTER/TYPE2 (Spotflag=28, Ignore=2, Idel2=1).
+
+    Card1: ssid msid sstyp mstyp sboxid mboxid spr mpr — SSID names the WELD
+           side (commonly SSTYP=3, the MAT_100 beam part), MSID the sheets
+           being joined (commonly MSTYP=2, a *SET_PART_LIST).
+    Card2: fs fd dc vc vdc penchk bt dt — friction and birth/death are
+           meaningless on a tie and have no /INTER/TYPE2 field; dropped exactly
+           as dyna2rad drops them (they are not even read on its TYPE2 path,
+           convertcontacts.cxx:319 ``continue`` precedes the read at :321).
+    Card3: sfs sfm sst mst sfst sfmt fsf vsf — SST/MST are the only Card-3
+           fields with a TYPE2 home: they size the tie search distance
+           (see _spotweld_dsearch in the writer).
+    """
+    kw = block.keyword
+    variant = ""
+    for flavour in ("WITH_TORSION", "BEAM_OFFSET", "CONSTRAINED_OFFSET"):
+        if flavour in kw:
+            variant = flavour
+            break
+    penalty = kw.endswith("_PENALTY") or "_PENALTY_" in kw
+    mpp = kw.endswith("_MPP") or "_MPP_" in kw
+
+    inter_id, title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    raw = block.raw
+    c1 = _spotweld_card_offset(raw, offset, mpp)
+    f1 = _card(raw, c1, fixed=True, n=8, w=10)
+    ssid  = to_int(f1[0]) if f1 else 0
+    msid  = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, kw, inter_id, f1)
+    # Card3: sfs sfm sst mst sfst sfmt fsf vsf
+    f3 = _card(raw, c1 + 2, fixed=True, n=8, w=10)
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+
+    if variant:
+        state.warn(
+            f"*CONTACT_SPOTWELD_{variant} {inter_id} -> /INTER/TYPE2 with the "
+            f"PLAIN spotweld tie: {_SPOTWELD_VARIANT_LOSS[variant]}. dyna2rad "
+            "converts all five *CONTACT_SPOTWELD spellings to the same card "
+            "and reports nothing (contact_spotweld.cfg parses ContactOption "
+            "2/3/4 and dyna2rad never reads it). REMEDY: if the dropped "
+            "behaviour is load-bearing, model the weld explicitly with a "
+            "/PROP/TYPE13 spring (its Ifail2 failure surface does carry "
+            "torsion) instead of relying on the tie.")
+    if mpp:
+        state.warn(
+            f"*CONTACT_SPOTWELD {inter_id}: the _MPP card (BCKT/LCBCKT/NS2TRK/"
+            "INITITR/PARMAX/CPARM8 bucket-sort and tracking controls) is read "
+            "past but NOT converted — it tunes LS-DYNA's MPP decomposition, "
+            "which has no OpenRadioss counterpart (the starter builds its own "
+            "domain decomposition). The tie itself is unaffected.")
+    state.contacts_spotweld.append(
+        ContactSpotweld(inter_id, title, ssid, sstyp, msid, mstyp, variant,
+                        penalty=penalty, mpp=mpp, sst=sst, mst=mst)
+    )
+
+
+def handle_define_hex_spotweld_assembly(block: Block, state: ConversionState) -> None:
+    """*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N][_TITLE] → /CLUSTER/BRICK.
+
+    Card 1: ID_SW (the weld id, on its OWN card — not on the keyword line).
+    Card 2: EID1..EID8, 10-char fields.
+    Card 3: EID9..EID16 — read only when the ``_N`` suffix says N > 8.
+
+    The ``_N`` suffix is the TOTAL number of solid elements in the assembly
+    (LS-DYNA Vol I R16 p.17-300), 1..16, not a card count; the bare keyword
+    free-reads the list. ``_TITLE`` is an Altair CFG extension (the LSTC manual
+    documents only <BLANK> and N) — parsed if present, never emitted.
+    """
+    raw = block.raw
+    if not raw:
+        return
+    idx = 0
+    title = ""
+    if _has_title(block) or _has_id(block):
+        title = raw[0].strip()
+        idx = 1
+    if idx >= len(raw):
+        return
+    id_card = _card(raw, idx, fixed=True, n=1, w=10)
+    sw_id = to_int(id_card[0]) if id_card else 0
+    # The _N suffix caps the list; without it every remaining card is read.
+    suffix = block.keyword[len("DEFINE_HEX_SPOTWELD_ASSEMBLY"):].lstrip("_")
+    declared = int(suffix) if suffix.isdigit() else 0
+    eids: List[int] = []
+    for row in raw[idx + 1:]:
+        for tok in parse_fixed(row, 8, 10):
+            v = to_int(tok)
+            if v > 0:
+                eids.append(v)
+        if declared and len(eids) >= declared:
+            break
+    if declared:
+        if len(eids) > declared:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY_{declared} id={sw_id}: the "
+                f"cards carry {len(eids)} element ids but the _N suffix "
+                f"declares {declared} — only the first {declared} are used "
+                "(LS-DYNA reads exactly N).")
+            eids = eids[:declared]
+        elif len(eids) < declared:
+            state.warn(
+                f"*DEFINE_HEX_SPOTWELD_ASSEMBLY_{declared} id={sw_id}: the _N "
+                f"suffix declares {declared} element(s) but only {len(eids)} "
+                "id(s) are on the cards — the weld cluster is built from the "
+                "ids that are actually there.")
+    if len(eids) > 16:
+        state.warn(
+            f"*DEFINE_HEX_SPOTWELD_ASSEMBLY id={sw_id}: {len(eids)} element "
+            "ids were read, but LS-DYNA caps an assembly at 16 hexes "
+            "(definehexspotweld.cfg CHECK idsmax < 17). All of them are kept "
+            "in the /CLUSTER (its own limit is 500) — check the deck if that "
+            "is not what you meant.")
+    if not eids:
+        state.warn(
+            f"*DEFINE_HEX_SPOTWELD_ASSEMBLY id={sw_id}: no solid element ids "
+            "on the card — no /CLUSTER/BRICK is emitted for this weld, and "
+            "the hexes it names (if any) behave as ordinary solids with no "
+            "weld failure.")
+        return
+    state.hex_spotweld_assemblies.append(HexSpotweldAssembly(sw_id, title, eids))
+
+
+def handle_database_swforc(block: Block, state: ConversionState) -> None:
+    """*DATABASE_SWFORC → /TH/SPRING (MAT_100 beam welds) + /TH/BRIC (MAT_100
+    solid welds) + /TH/CLUSTER (*DEFINE_HEX_SPOTWELD_ASSEMBLY welds).
+
+    LS-DYNA's swforc is the spot-weld force database. dyna2rad splits the same
+    request in two (dyna2rad.cxx:613-695: ``SWFORC`` appears TWICE in
+    ``dbCardList``, i=3 filtering *ELEMENT_DISCRETE/*ELEMENT_BEAM on a MAT_100
+    part to /TH/SPRING, i=4 filtering *ELEMENT_SOLID to /TH/BRIC); the
+    /TH/CLUSTER half comes from the hex-assembly converter
+    (convertdefinehexspotweldassembly.cxx:315). k2rad emits all three.
+    """
+    state.db_swforc_dt = _handle_db_dt(block, state, "*DATABASE_SWFORC")
+
+
 def handle_contact_force_transducer(block: Block, state: ConversionState) -> None:
     """*CONTACT_FORCE_TRANSDUCER[_PENALTY] — measurement-only contact.
 
@@ -7041,6 +7225,8 @@ HANDLERS = {
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_OFFSET":        handle_contact_tied,
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_BEAM_OFFSET":   handle_contact_tied,
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
+    # Spot welds → /INTER/TYPE2 Spotflag=28 (the *_SPOTWELD_* spellings are
+    # generated below — see _SPOTWELD_CONTACT_KEYWORDS)
 
     # Control
     "CONTROL_IMPLICIT_GENERAL":               handle_control_implicit_general,
@@ -7088,6 +7274,7 @@ HANDLERS = {
     "DATABASE_SECFORC":                       handle_database_secforc,
     "DATABASE_SLEOUT":                        handle_database_sleout,
     "DATABASE_SPCFORC":                       handle_database_spcforc,
+    "DATABASE_SWFORC":                        handle_database_swforc,
     "DATABASE_NCFORC":                        handle_database_ncforc,
     "DATABASE_RBDOUT":                        handle_skip,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
@@ -7159,6 +7346,34 @@ for _o1 in ("", "_OFFSET"):
     for _o2 in ("", "_ORIENTATION"):
         HANDLERS[f"ELEMENT_BEAM{_o1}{_o2}"] = handle_element_beam
 del _o1, _o2, _o3, _o4
+
+
+# *CONTACT_SPOTWELD{_WITH_TORSION|_BEAM_OFFSET|_CONSTRAINED_OFFSET}{_PENALTY}
+# {_MPP}{_ID} — the suffixes appear in that fixed order (contact_spotweld.cfg
+# HEADER("*CONTACT_SPOTWELD%40s") + the _FIND() tests at :827-856; _ID and
+# _TITLE are stripped by the parser, so they need no key). Sixteen spellings.
+#
+# Hand-listing the five USER_NAMES the CFG advertises would leave a
+# *CONTACT_SPOTWELD_MPP in skipped_keywords, and a skipped spotweld contact is
+# the whole point of this batch: the weld elements then reach the solver joined
+# to nothing and carry zero force. Generating the grammar makes that
+# impossible, and the handler warns on every flavour it cannot honour.
+_SPOTWELD_CONTACT_KEYWORDS = [
+    f"CONTACT_SPOTWELD{_o1}{_o2}{_o3}"
+    for _o1 in ("", "_WITH_TORSION", "_BEAM_OFFSET", "_CONSTRAINED_OFFSET")
+    for _o2 in ("", "_PENALTY")
+    for _o3 in ("", "_MPP")
+]
+for _kw in _SPOTWELD_CONTACT_KEYWORDS:
+    HANDLERS[_kw] = handle_contact_spotweld
+del _kw
+
+# *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N}, N = 1..16 (definehexspotweld.cfg
+# APPEND_OPTIONS + CHECK idsmax<17). The bare keyword free-reads the list.
+HANDLERS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = handle_define_hex_spotweld_assembly
+for _n in range(1, 17):
+    HANDLERS[f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{_n}"] = handle_define_hex_spotweld_assembly
+del _n
 
 
 #: Keyword PREFIX → handler, tried when the exact-match lookup misses. Only the

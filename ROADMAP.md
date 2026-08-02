@@ -122,6 +122,15 @@ shipped, so the marginal cost is small.
   `/FAIL/LEMAITRE`, `*MAT_122` → `/MAT/LAW43` or `/MAT/LAW32` — **done**
   (starter-validated, 0 ERROR(S); several dyna2rad defects fixed rather than
   reproduced — see CHANGELOG).
+- Spotweld joining (P1): `*CONTACT_SPOTWELD` (+ `_WITH_TORSION` /
+  `_BEAM_OFFSET` / `_CONSTRAINED_OFFSET` / `_PENALTY` / `_MPP`) →
+  `/INTER/TYPE2` Spotflag=28 with `Ignore=2` and `Idel2=1`;
+  `*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N]` → `/GRBRIC/BRIC` + `/CLUSTER/BRICK`;
+  `*DATABASE_SWFORC` → `/TH/SPRING` + `/TH/BRIC` + `/TH/CLUSTER` — **done**
+  (starter-validated, 0 ERROR(S); the secondary side is resolved over BEAM nodes
+  so the `SSTYP=3` weld part actually resolves, and the `/CLUSTER` exponents are
+  quadratic where dyna2rad's are linear — see CHANGELOG). Original note: — the
+  W16/W17 sheets are node-disjoint without it, so the weld force is 0.
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

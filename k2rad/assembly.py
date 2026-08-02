@@ -43,6 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+from .handlers import _SPOTWELD_CONTACT_KEYWORDS
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -1531,6 +1532,16 @@ for _kw in (
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET",
 ):
     _OFFSET_SPECS[_kw] = _off_contact
+
+# *CONTACT_SPOTWELD{...} shares that Card-1 layout too — but only when the _MPP
+# card is absent, because _MPP pushes Card 1 down by one (or two) lines and
+# _off_contact rewrites b.raw[start] blind. The spellings are taken from the
+# handler's own generated grammar so the two lists cannot drift apart; the _MPP
+# ones are deliberately left out and fall to the unmapped warn rather than
+# silently offsetting the MPP bucket parameters as if they were SSID/MSID.
+for _kw in _SPOTWELD_CONTACT_KEYWORDS:
+    if "_MPP" not in _kw:
+        _OFFSET_SPECS[_kw] = _off_contact
 
 #: Keywords that genuinely carry no offsetable ids — silently left alone.
 _NO_ID_KEYWORDS = frozenset({
