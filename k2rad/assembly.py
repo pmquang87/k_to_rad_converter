@@ -164,22 +164,39 @@ def register_include_transform(filename: str, raw: List[str],
 # Line rewriting
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _split_card(line: str, w: int):
+    """Split one card into fields, remembering how to reassemble it.
+
+    Returns ``(fields, comma, ws_free)``. Shared by every card rewriter below so
+    they can never disagree about a card's format."""
+    if "," in line:
+        return parse_free(line), True, False
+    n_all = max(8, (len(line) + w - 1) // w)
+    fields = parse_fixed(line, n_all, w)
+    if any(" " in x.strip() for x in fields):
+        return line.split(), False, True
+    return fields, False, False
+
+
+def _join_card(fields: List[str], comma: bool, ws_free: bool, w: int) -> str:
+    """Reassemble a card split by :func:`_split_card`, in its own format."""
+    fields = [x.strip() for x in fields]
+    while fields and fields[-1] == "":
+        fields.pop()
+    if comma or any(len(x) > w for x in fields):
+        return ",".join(fields)
+    if ws_free:
+        return " ".join(fields)
+    return "".join(f"{x:>{w}}" for x in fields).rstrip()
+
+
 def _rewrite_line(line: str, mods: List[Tuple[int, str]],
                   offsets: Dict[str, int], w: int = 10) -> Optional[str]:
     """Offset the id fields listed in *mods* on one card. Returns the new
     line, or None when nothing changed. Only ids > 0 are touched (0/blank is
     a none/ground/self sentinel everywhere; negative values are special
     encodings the OpenRadioss reader does not offset either)."""
-    comma = "," in line
-    ws_free = False
-    if comma:
-        fields = parse_free(line)
-    else:
-        n_all = max(8, (len(line) + w - 1) // w)
-        fields = parse_fixed(line, n_all, w)
-        if any(" " in x.strip() for x in fields):
-            ws_free = True
-            fields = line.split()
+    fields, comma, ws_free = _split_card(line, w)
     changed = False
     targets: List[Tuple[int, str]] = []
     for i, b in mods:
@@ -198,14 +215,35 @@ def _rewrite_line(line: str, mods: List[Tuple[int, str]],
             changed = True
     if not changed:
         return None
-    fields = [x.strip() for x in fields]
-    while fields and fields[-1] == "":
-        fields.pop()
-    if comma or any(len(x) > w for x in fields):
-        return ",".join(fields)
-    if ws_free:
-        return " ".join(fields)
-    return "".join(f"{x:>{w}}" for x in fields).rstrip()
+    return _join_card(fields, comma, ws_free, w)
+
+
+def _rewrite_neg_ref(line: str, i: int, off: int,
+                     w: int = 10) -> Optional[str]:
+    """Offset a NEGATIVE back-reference cell in place, keeping its sign.
+
+    :func:`_rewrite_line` deliberately touches only values > 0 — everywhere else
+    in LS-DYNA a negative id cell is a flag encoding, and adding an offset to it
+    would move it towards zero. ``*SECTION_SHELL`` card-1 field 6 is the one
+    exception this converter meets: ``QR/IRID``'s SIGN is the selector and its
+    MAGNITUDE is an ``*INTEGRATION_SHELL`` id, so under ``*INCLUDE_TRANSFORM``
+    it has to move with ``IDROFF`` like every other rule reference — otherwise
+    the rule's own IRID is offset, the section's reference to it is not, and the
+    pair dangles into a silent even-thickness split.
+    """
+    if not off:
+        return None
+    fields, comma, ws_free = _split_card(line, w)
+    if i >= len(fields):
+        return None
+    tok = fields[i].strip() if fields[i] else ""
+    if not tok:
+        return None
+    v = to_float(tok)
+    if v >= 0.0:
+        return None
+    fields[i] = str(-(int(abs(v)) + off))
+    return _join_card(fields, comma, ws_free, w)
 
 
 def _rewrite_id_header(line: str, off: int) -> Optional[str]:
@@ -660,6 +698,89 @@ def _off_cnrb_spc(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[i2] = new
 
 
+# *SECTION_SHELL / *INTEGRATION_SHELL card-set walks. Both keywords let a deck
+# stack several SETS under one header, and a declarative spec can only address
+# one set: the flat form offset the FIRST section's SECID and then treated every
+# later line as data. That leaves set 2's SECID behind (so a *PART in the same
+# include dangles into a zero-thickness placeholder) and, on the rule keyword,
+# offsets a stacked rule's ESOP column with IDPOFF as if card 1 were a point
+# card — which the reader then reports as "ESOP=<offset> is neither 0 nor 1".
+# Both walks mirror handlers.py's own, the way _SHELL_OPT_TOKENS above mirrors
+# the element-option grammar, rather than importing it.
+_SECTION_SHELL_OPTION_CARDS = ("EFG", "THERMAL", "XFEM", "MISC")
+_USER_SHELL_ELFORMS = frozenset({101, 102, 103, 104, 105})
+
+
+def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_SHELL card set: SECID (IDROFF) plus the card-1 field-6
+    QR/IRID back-reference to an *INTEGRATION_SHELL rule, which is NEGATED and
+    so needs the sign-preserving rewriter."""
+    per_set_title = _title_offset(b)
+    opt_card = any(b.keyword.endswith("_" + o)
+                   for o in _SECTION_SHELL_OPTION_CARDS)
+    raw = b.raw
+    idx = 0
+    roff = offsets.get("r", 0)
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:                       # one 80a title card per set
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)      # SECID
+        if new is not None:
+            raw[idx] = new
+        new = _rewrite_neg_ref(raw[idx], 5, roff)               # -QR/IRID
+        if new is not None:
+            raw[idx] = new
+        nip = abs(_geti(f1, 3))
+        idx += 2
+        if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
+            idx += ((nip if nip > 0 else 2) + 7) // 8
+        if opt_card:                            # card 4a-4d
+            idx += 1
+        if _geti(f1, 1) in _USER_SHELL_ELFORMS:  # cards 5 / 5.1 / 5.2
+            f5 = _fields(raw[idx], 8, 10) if idx < len(raw) else []
+            if not f5:
+                break
+            idx += 1 + max(_geti(f5, 0), 0) + (max(_geti(f5, 5), 0) + 7) // 8
+
+
+def _off_integration_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *INTEGRATION_SHELL rule under the header: card 1's IRID shares the
+    *SECTION id space (IDROFF), and only a real S/WF/PID point card carries a
+    *PART reference (IDPOFF) in field 3."""
+    raw = b.raw
+    idx = 0
+    while idx < len(raw):
+        if not raw[idx].strip():
+            idx += 1
+            continue
+        f1 = _fields(raw[idx], 4, 10)
+        if _geti(f1, 0) <= 0:
+            return
+        nip, esop = _geti(f1, 1), _geti(f1, 2)
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)
+        if new is not None:
+            raw[idx] = new
+        idx += 1
+        if esop != 0 or nip <= 0:               # ESOP=1: no point cards at all
+            continue
+        for _ in range(nip):
+            while idx < len(raw) and not raw[idx].strip():
+                idx += 1
+            if idx >= len(raw):
+                return
+            new = _rewrite_line(raw[idx], [(2, "p")], offsets)
+            if new is not None:
+                raw[idx] = new
+            idx += 1
+
+
 def _off_mat_rigid(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_RIGID: mid → IDMOFF; card-2 CON1 is a *DEFINE_COORDINATE_* system
     id (IDDOFF namespace) when CMO<0 (local constraint frame)."""
@@ -916,8 +1037,16 @@ _OFFSET_SPECS: Dict[str, object] = {
     "PART": _off_part,
     "HOURGLASS": {"cards": {0: [(0, "r")]}},
 
-    # Sections
-    "SECTION_SHELL": {"cards": {0: [(0, "r")]}},
+    # Sections. *SECTION_SHELL and *INTEGRATION_SHELL are card-SET keywords —
+    # a walker, not a declarative spec, because a declarative one addresses only
+    # the first set (see the note above _off_section_shell). The walker also
+    # carries the NEGATED card-1 field-6 QR/IRID back-reference across with
+    # IDROFF, which the declarative form could not: _rewrite_line only touches
+    # positive cells, so the rule id moved and the reference to it did not.
+    "SECTION_SHELL": _off_section_shell,
+    # *INTEGRATION_SHELL: IRID shares the *SECTION id space (IDROFF, bucket
+    # "r"), and each S/WF/PID point card's third field is a *PART reference.
+    "INTEGRATION_SHELL": _off_integration_shell,
     "SECTION_SOLID": {"cards": {0: [(0, "r")]}},
     "SECTION_BEAM": {"cards": {0: [(0, "r")]}},
     "SECTION_DISCRETE": {"cards": {0: [(0, "r")]}},

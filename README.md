@@ -104,8 +104,14 @@ export the image.
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
 `*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
 `_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`
-(+ `_TITLE`; `ICOMP = 1` reads the card-3 `B1..B8` per-layer material angles —
-see **Composites**), `*SECTION_SOLID`, `*SECTION_BEAM`
+(+ `_TITLE`; every card SET under one header, not just the first, striding over
+the `ICOMP` angle cards, the keyword-option card and the ELFORM 101–105
+user-shell cards 5/5.1/5.2; `ICOMP = 1` reads the card-3 `B1..B8` per-layer
+material angles, and a negative card-1 field 6 `QR/IRID` binds an
+`*INTEGRATION_SHELL` rule — see **Composites**),
+`*INTEGRATION_SHELL` (user through-thickness integration rules: per-layer
+thickness `WF_i`, material `PID_i`, `ESOP = 0/1` — see **Composites**),
+`*SECTION_SOLID`, `*SECTION_BEAM`
 `*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
 `_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
 element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with
@@ -415,9 +421,10 @@ so `EFG` becomes a brittle-damage ramp (`EPS_t = EFG`, `EPS_m = EFG+0.05`,
 `EPS_f = EFG+0.1`) and the polymer keeps the never-damage defaults. `ETG`/`ETP`
 go straight into the LAW27 `b` (with `n = 1`, `b` **is** `dSigma/dEps_plastic`)
 — the manual names both fields "Plastic hardening modulus" (Vol II R17
-p.2-314/315), so no tangent-modulus rescale applies. Layer thicknesses are the section
-thickness split evenly — LS-DYNA takes them from the `*INTEGRATION_SHELL` rule
-the material requires, which k2rad does not read, and says so.
+p.2-314/315), so no tangent-modulus rescale applies. Layer thicknesses come from
+the `*INTEGRATION_SHELL` rule the material requires, so a real 0.8/0.2/0.2/0.8
+windshield converts as written; a deck that references no rule still gets the
+even split, and still says so.
 
 `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`, and the optional
 `OPTCARD`) → `/PROP/TYPE51` (stack) + one `/PROP/TYPE19` (PLY) per layer,
@@ -465,9 +472,12 @@ reads `LSD_ICOMP` only as a `*MAT_FABRIC` `NIP`-normalization switch
 `*SECTION_TSHELL` composite path and nowhere else (`:4528-4540`).
 
 `ICOMP = 1` carries **angles only** — there is no per-layer thickness or
-material field anywhere on the keyword — so the section thickness stays split
-evenly and the warning names where unequal plies would have to come from
-(`*PART_COMPOSITE`, or an `*INTEGRATION_SHELL` rule, which k2rad does not read).
+material field anywhere on the keyword — so on its own the section thickness
+stays split evenly and the warning names where unequal plies would have to come
+from (`*PART_COMPOSITE`, or an `*INTEGRATION_SHELL` rule). The two keywords
+**compose** when both are present: LS-DYNA gives each integration point one
+`B_i` and the rule gives that same point its `S`/`WF`/`PID`, so the emitted layup
+carries the angle *and* the real thickness *and* the per-layer material.
 The routes that *cannot* carry an angle each say so by name rather than dropping
 it silently: `*PART_COMPOSITE` on the same part **wins** (it replaces the
 `*PART`/`*SECTION_SHELL` pair outright in LS-DYNA, carrying its own `ELFORM`/
@@ -476,6 +486,83 @@ it silently: `*PART_COMPOSITE` on the same part **wins** (it replaces the
 no material direction to rotate; an isotropic law keeps a plain `/PROP/SHELL`.
 An all-zero angle block is silent — it degrades to exactly the section it would
 have been anyway.
+
+`*INTEGRATION_SHELL` → the **real** per-layer thicknesses and materials of a
+layered shell. The rule is bound from `*SECTION_SHELL` **card-1 field 6**
+(`QR/IRID`, cols 51–60) when that field is *negative*: "Quadrature rules in the
+`*SECTION_SHELL` and `*SECTION_BEAM` cards need to be specified as a negative
+number. The absolute value of the negative number refers to user defined
+integration rule number" (Vol I R17 p.29-1). It is **not** the `NIP` field — a
+negative `NIP` is a mis-keyed count and gets its own warning. Card 1 is
+`IRID NIP ESOP FAILOPT`; with `ESOP = 0` one `S WF PID` card follows per
+integration point (`CARD_LIST(NIP)`, one triple per card — *not* packed eight to
+a card like the `ICOMP` angles). Several rules may be stacked under one header.
+
+Each point becomes one layer: `t_i = WF_i / ΣWF · T1` (the sum-normalization is
+real, not an assumption that LS-DYNA's "the weights should sum to 1" convention
+was honoured), and the layer's material is `PID_i → *PART → MID`, falling back
+to the element's own part material when the field is blank. The **rule's `NIP`
+wins** over the section's and is pushed onto the section, so it also drives the
+shared `/PROP/SHELL` point count, `/INISHE`'s layer count and the `NUMFIP`
+count-to-ratio conversion — clamped at 10 on the way there, which is what a
+`/PROP/SHELL`'s `N` column takes (ERROR 788). The layered property the rule
+drives counts its plies off the rule directly and is capped at 100 instead, so
+that clamp never costs a laminate layer. `ESOP = 1` is NIP *equal* layers on one
+material — identical to a plain `/PROP/SHELL` with N points, so no property is
+split.
+
+**Layer positions are the cumulative-`WF` stack (`Ipos = 0`), not `S_i`** — a
+deliberate divergence from dyna2rad. `S_i` is a quadrature *sampling* coordinate
+in [−1, +1]; a Radioss layer `Zi` is the physical *middle of a slab*. dyna2rad
+writes `Zi = S_i·T1/2` with `Ipos = 1` (`convertprops.cxx:2015`), and the starter
+then derives the shell thickness from the layer **envelope**
+(`stackgroup.F`: `THICKT = max(Zi+t/2) − min(Zi−t/2)`), which for a canonical
+rule reaching `S = ±1` pushes half of each outer layer outside the shell and
+leaves gaps between the rest. On the validation windshield below that inflates a
+2.0 mm laminate to 2.8 mm; auto-stacking reproduces 2.0 mm exactly and tiles
+without gaps, which the starter's own echo confirms (layer 1 at −0.6 spanning
+[−1.0, −0.2], layer 2 at −0.1 spanning [−0.2, 0.0]). The trade has two halves and
+the conversion warning states both: the emitted stack reproduces `T1` and every
+`t_i` exactly, but it integrates at the layer **centres**, not at the rule's own
+sampling stations `S_i·T1/2` — so a rule whose outermost `S` is ±1 no longer
+samples the outer fibre, and `Σ t_i·z_i²` (hence the bending response) shifts
+with it. A rule whose `S` column runs top-down or out of order is **re-ordered
+bottom-up** first, carrying each layer's `ICOMP` angle with it — LS-DYNA leaves
+that ordering arbitrary (Figure 29-25) but an `Ipos = 0` stack is built in list
+order from the bottom face.
+
+The target property is chosen by what the **starter** accepts, not by preference.
+`/PROP/TYPE11` is a *single-law* property: `hm_read_prop11.F` takes only Radioss
+laws 15, 25, 27 and ≥ 29 on layer 1 (ERROR 30) and requires every other layer to
+repeat that law (ERROR 334). So a layup stays on TYPE11 only when it is law-
+uniform by construction — every layer on the part's own `*MAT_002`/`*MAT_054`
+material, or on the `*MAT_032` glass/polymer pair (two LAW27 cards) — and
+otherwise goes to `/PROP/TYPE51` + one `/PROP/TYPE19` per layer, which carries
+its materials on per-ply objects and has no whitelist. That is dyna2rad's own
+target for this keyword. One case has **no** Radioss home at all: Radioss bans
+LAW1 from every layered or orthotropic shell property (IGTYP 9/10/11/16/17/51/52,
+`hm_read_part.F:289`, ERROR 658) because it is integrated globally and carries no
+through-thickness state, so a rule on a `*MAT_ELASTIC` part is warn-dropped
+rather than emitted onto a deck the starter would reject.
+
+Warn-dropped or warn-reported, each by name: a dangling `IRID` (dyna2rad falls
+through in silence); `NIP ≤ 0`; `ESOP ∉ {0,1}` (dyna2rad's bare `switch` has no
+default and emits a property declaring NIP plies with *no* ply objects);
+`ΣWF = 0` (dyna2rad divides by it unguarded and writes `inf`/`nan`); a short
+`S`/`WF`/`PID` block; `|S| > 1`; `FAILOPT` (TYPE11 carries one global
+`P_Thick_Fail`, not a per-layer failure policy — dyna2rad never reads the field);
+a `PID_i` naming no `*PART`; a layer material with no converted `/MAT`; more than
+100 points; a solid part, a `*PART_COMPOSITE` on the same part (which *wins*), a
+MAT_037/MAT_103 `/PROP/TYPE9` route; and a rule nobody references (recorded in
+the conversion log's *recognized but not emitted* channel). An element-free
+`PID_i` material-carrier part — the idiom the manual explicitly allows — works
+as written: the element-free-`*PART` placeholder gives it a `/PROP/SHELL`, so
+its `/PART` resolves instead of hitting starter ERROR 178.
+
+The reference converter still carries its own verdict on this keyword as dead
+code — message `/MESSAGE/200024`, *"IRID<0 is not supported"*, commented out at
+`convertprops.cxx:657-658`, so a user rule that dyna2rad cannot place is neither
+converted nor reported.
 
 **AOPT material axes** are mapped for MAT_002 and MAT_054/055 on both the
 layered shell and the stack: `AOPT=0` → `Ip=20` (Radioss's element-connectivity

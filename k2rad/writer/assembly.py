@@ -38,6 +38,7 @@ from .composites import (
     _make_composite_materials,
     _resolve_composites,
     _resolve_icomp_sections,
+    _resolve_integration_shells,
 )
 from .contacts import (
     _make_force_transducers,
@@ -583,6 +584,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # _resolve_composites also before _make_functions, which emits the curves.
     _resolve_composites(state)
     _assign_composite_props(state)
+    # Bind every *SECTION_SHELL QR/IRID reference to its *INTEGRATION_SHELL
+    # rule, let the rule's NIP win over the section's, and claim a /PROP for the
+    # parts that pass did not (an ordinary isotropic material with a rule).
+    # AFTER _resolve_composites (a rule on a *MAT_032 part needs the synthesized
+    # glass id) and AFTER _assign_composite_props (it only ADDS claims); before
+    # _resolve_icomp_sections, whose "angles are DROPPED" ladder must not fire
+    # for a part the rule now routes to a layered /PROP/TYPE11.
+    _resolve_integration_shells(state)
     # Then report every *SECTION_SHELL ICOMP=1 layup whose angles cannot reach a
     # Radioss property — needs the composite_prop_ids the line above allocated.
     _resolve_icomp_sections(state)

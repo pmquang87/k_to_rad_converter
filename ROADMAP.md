@@ -139,15 +139,25 @@ covering them unlocks a large class of real models.
   and `MAT_037` on `/PROP/TYPE9`. Includes the full AOPT → `/SKEW/FIX` +
   `Ip`/`Vx-Vy-Vz` axis mapping and the fix for `*PART_COMPOSITE`'s silent
   whole-mesh loss (see CHANGELOG).
-  Still open in this family: `*SECTION_SHELL ICOMP=1` (the per-layer B_i/MID_i
-  cards are not read, so such a section silently degrades to a single-layer
-  isotropic property), `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
-  `*INTEGRATION_SHELL` user integration rules (which is where `MAT_032` layer
-  thicknesses really live), the per-element ply override of
-  `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the element-variant
-  batch below — but the ply cards themselves are not read; no converter
-  implements this, dyna2rad included), and
-  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`.
+  `*SECTION_SHELL ICOMP=1` (the card-3 `B1..B8` per-layer material angles) and
+  `*INTEGRATION_SHELL` user integration rules (the per-layer `WF_i` thicknesses
+  and `PID_i` materials, which is where `MAT_032`'s layer thicknesses really
+  live) are **done** as well — both starter-validated, and they compose on one
+  section. `*SECTION_SHELL` also reads every card set under one header now.
+  Still open in this family: `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
+  `*INTEGRATION_BEAM` (the `*SECTION_BEAM` `QR/IRID` field has the identical
+  `EQ.-n` semantics; only the shell side is implemented), a rule on a
+  `*MAT_ELASTIC` part (Radioss bans LAW1 from every layered shell property, so
+  this needs the material re-stated rather than converter work), the per-element
+  ply override of `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the
+  element-variant batch below — but the ply cards themselves are not read; no
+  converter implements this, dyna2rad included),
+  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`, the first-set-only
+  reader still in `handle_section_solid` / `_beam` / `_discrete`, and the
+  ELFORM 101–105 user-defined shell itself — its cards 5/5.1/5.2 are now strided
+  over so the sections around them parse, but the user routine's own integration
+  points, extra DOFs and `LMC` constants have no Radioss counterpart and are
+  dropped with a warning.
 - Element variants (P1): `*ELEMENT_SHELL_THICKNESS`/`_BETA`/`_MCID`/`_OFFSET`/
   `_DOF` (+ every combination) → the per-element `/SHELL` // `SH3N` `Phi` and
   `Thick` columns; `*ELEMENT_BEAM_ORIENTATION` → a synthesized third node at

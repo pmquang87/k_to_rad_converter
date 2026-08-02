@@ -421,6 +421,63 @@ class SectionShell:
     # direction, so they add to it rather than replacing it — the same
     # convention *PART_COMPOSITE's per-ply B_i uses.
     betas: List[float] = field(default_factory=list)
+    # *SECTION_SHELL card 1 field 6 (cols 51-60), the shared QR/IRID cell. The
+    # field is a FLOAT and its SIGN is the selector: >= 0.0 is the built-in
+    # quadrature rule QR (0 = Gauss/Lobatto, 1 = trapezoidal), < 0.0 makes |QR|
+    # the id of a user *INTEGRATION_SHELL rule — "Quadrature rules in the
+    # *SECTION_SHELL and *SECTION_BEAM cards need to be specified as a negative
+    # number.  The absolute value of the negative number refers to user defined
+    # integration rule number" (Manual Vol I R17 p.29-1). 0 = no rule.
+    #
+    # NOTE this is field 6, NOT the NIP field 4: dyna2rad encodes the same cell
+    # as SCALAR_OR_OBJECT(Sect_Option, LSD_QR, LSD_IRID) (SectShll.cfg:699) and
+    # picks the object branch on the sign alone (meci_data_reader.cpp:6847).
+    irid: int = 0
+
+
+@dataclass
+class IntegrationPoint:
+    """One *INTEGRATION_SHELL card-2 point: S WF PID (Vol I R17 p.29-16).
+
+    ``s``   through-thickness coordinate, -1 (bottom) .. +1 (top), 0 = the
+            mid-surface. A quadrature SAMPLING coordinate, not a slab edge.
+    ``wf``  weighting factor, i.e. the thickness fraction Delta_t_i / t this
+            point accounts for (p.29-17). LS-DYNA's convention is that the WF
+            sum to 1, but nothing enforces it, so k2rad normalizes by the sum
+            exactly as dyna2rad does (convertprops.cxx:1993-1996).
+    ``pid`` optional *PART id supplying this layer's MATERIAL (and density)
+            only; 0/blank = the element's own part material. The referenced
+            part's own section, thickness and orientation are NOT consulted.
+    """
+    s: float = 0.0
+    wf: float = 0.0
+    pid: int = 0
+
+
+@dataclass
+class IntegrationShell:
+    """*INTEGRATION_SHELL — a user through-thickness integration rule, bound
+    from a *SECTION_SHELL whose card-1 field 6 (QR/IRID) is negative.
+
+    Card 1 is ``IRID NIP ESOP FAILOPT``; card 2 repeats ``S WF PID`` NIP times
+    and exists only when ``ESOP == 0`` (Vol I R17 p.29-16, and the CFG guard
+    ``if(ESOP == 0 && NIP > 0)`` in INTEGRATION_RULES/integration_shell.cfg).
+
+    ``nip`` defaults to 0 — the CFG's ``DEFAULTS(COMMON){ NIP = 0; }`` and NOT
+    *SECTION_SHELL's 2.0; the manual prints no Default row for this card at all.
+    A rule with NIP = 0 defines nothing and is warn-dropped.
+
+    ``esop`` = 1 means NIP layers of EQUAL thickness with no point cards.
+
+    ``failopt`` has no Radioss counterpart (TYPE11 carries one global
+    P_Thick_Fail, not a per-layer failure policy) and is warn-dropped; dyna2rad
+    never reads the field at all.
+    """
+    irid: int
+    nip: int = 0
+    esop: int = 0
+    failopt: int = 0
+    points: List[IntegrationPoint] = field(default_factory=list)
 
 
 @dataclass
@@ -2464,6 +2521,12 @@ class ConversionState:
     # ── Model entities ─────────────────────────────────────────
     parts: Dict[int, PartData] = field(default_factory=dict)
     sec_shells: Dict[int, SectionShell] = field(default_factory=dict)
+    # *INTEGRATION_SHELL user integration rules, keyed by IRID. Bound from a
+    # *SECTION_SHELL whose card-1 QR/IRID field is negative; the rule's NIP then
+    # WINS over the section's (dyna2rad reads NIP off the rule and never off the
+    # section, convertprops.cxx:1890-1892), and its per-point WF/PID become the
+    # layer thicknesses and materials of a layered /PROP/TYPE11.
+    integration_shells: Dict[int, IntegrationShell] = field(default_factory=dict)
     sec_solids: Dict[int, SectionSolid] = field(default_factory=dict)
     sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
     # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
