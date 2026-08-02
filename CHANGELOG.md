@@ -1545,6 +1545,68 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **A `*MAT_NULL` whose only equation of state was an `*EOS_JWL` vanished from
+  the deck entirely — no `/MAT` card of that id at all, and every `/PART` on it
+  dangling with starter ERROR 179.**
+
+  ```
+  ERROR ID :    179
+  ** ERROR IN PART DEFINITION (MATERIAL)
+     -- PART ID: 1
+     MATERIAL ID=2 DOES NOT EXIST
+  ```
+
+  Two routing sets disagreed. `_make_materials` suppressed `/MAT/VOID` for any
+  `*MAT_NULL` whose id appeared in `state.eos_cards` **or** `state.eos_jwl`, on
+  the assumption that an EOS-carrying material would be emitted for it further
+  down. But `*EOS_JWL` is stored *only* in `state.eos_jwl` (`handle_eos_jwl`),
+  and the `/MAT/LAW6` (`HYD_VISC`) carrier loop in
+  `_make_explosive_and_eos_materials` walks `state.eos_cards` alone. So a deck
+  with `*MAT_NULL` id N + `*EOS_JWL` id N and no `*MAT_HIGH_EXPLOSIVE_BURN` of
+  that id fell through every branch: no `/MAT/VOID` (suppressed), no
+  `/MAT/LAW5` (the id is not in `state.mat_high_explosive`), no carrier (the id
+  is not in `state.eos_cards`). The only sign was an `*EOS_JWL` warning about
+  the missing explosive, which never mentioned that the `*MAT_NULL` had gone
+  with it.
+
+  **The null now falls back to `/MAT/VOID` and the warning says so.** The
+  suppression set is narrowed to `set(eos_cards) | (set(eos_jwl) &
+  set(mat_high_explosive))` in a new shared `_void_null_mids()` helper, so a
+  JWL id only claims a null when the explosive that carries it actually exists.
+  `*MAT_NULL` + `*EOS_JWL` **cannot** be converted faithfully: OpenRadioss has
+  no standalone `/EOS/JWL` — JWL exists only inside `/MAT/LAW5`
+  (`mat_EOS.cfg` lists GRUNEISEN, POLYNOMIAL, PUFF, SESAME, TILLOTSON,
+  MURNAGHAN, OSBORNE, LSZK, NOBLE-ABEL, STIFF-GAS, IDEAL-GAS, LINEAR,
+  COMPACTION, NASG, TABULATED, and no JWL; the keyword is reachable only as
+  LAW5/LAW97 in `data_hierarchy.cfg`). Emitting a `/MAT/LAW5` from the null
+  instead was rejected: LAW5 needs the detonation velocity `D` and `P_CJ` that
+  only `*MAT_HIGH_EXPLOSIVE_BURN` carries, and a LAW5 with `D = 0` never burns
+  — a silent zero-pressure explosive is worse than an obvious void. So the
+  material stays `/MAT/VOID` (the same fallback a bare `*MAT_NULL` already
+  takes, starter-clean on a Lagrangian `/BRICK`: 0 errors), and the warning now
+  names what was emitted, what was lost, and what to add:
+
+  ```
+  *EOS_JWL 2: no companion *MAT_HIGH_EXPLOSIVE_BURN (same id) — OpenRadioss
+  carries JWL only inside the /MAT/LAW5 explosive, so the JWL parameters were
+  NOT emitted and the same-id *MAT_NULL fell back to /MAT/VOID/2: that part now
+  has NEITHER strength NOR pressure (the detonation-product expansion is lost,
+  so it applies no load to its surroundings). Add a *MAT_HIGH_EXPLOSIVE_BURN of
+  id 2 (density, detonation velocity D, P_CJ) to get the /MAT/LAW5 JWL
+  explosive.
+  ```
+
+  Every other route through the block is untouched and verified byte-identical
+  against `master`: the intended `*MAT_HIGH_EXPLOSIVE_BURN` + `*EOS_JWL` pair
+  still merges into one `/MAT/LAW5`, a `*MAT_NULL` with a same-id
+  `*EOS_LINEAR_POLYNOMIAL` still becomes `/MAT/LAW6` + `/EOS/POLYNOMIAL`, a
+  `*PART`-`EOSID`-bound null still wins over a same-id JWL, an `*EOS_JWL` with
+  no material of its id at all keeps its original wording, and a bare
+  `*MAT_NULL` still stays `/MAT/VOID` (all five goldens plus real blast, bogie
+  and gear-train decks re-convert to the same SHA256). 6 new tests in
+  `tests/test_converter.py` (1563 → 1569); the repro deck now converts and
+  runs the starter with 0 errors.
+
 - **An element-free `*PART` produced a `/PART` pointing at a property that was
   never emitted — starter ERROR 178, and the whole conversion dead on a part
   carrying no mesh.**

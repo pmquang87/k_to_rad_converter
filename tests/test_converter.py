@@ -5707,6 +5707,98 @@ class ExplosiveEosTests(unittest.TestCase):
         self.assertIn("/MAT/VOID/2", starter)
         self.assertNotIn("/MAT/HYD_VISC/2", starter)
 
+    # ── *MAT_NULL + *EOS_JWL with no explosive (routing hole) ────────
+    #
+    # OpenRadioss has no standalone /EOS/JWL — JWL lives only inside the
+    # /MAT/LAW5 explosive.  A *MAT_NULL whose only EOS is a same-id *EOS_JWL
+    # therefore has nothing to be carried by: it used to be suppressed from
+    # /MAT/VOID *and* never picked up by the /MAT/LAW6 carrier loop (which
+    # only walks state.eos_cards), so the deck came out with NO /MAT card of
+    # that id at all and the starter rejected it with ERROR 179
+    # ("MATERIAL ID=n DOES NOT EXIST").  It now falls back to /MAT/VOID and
+    # the *EOS_JWL warning says the JWL is not bound.
+
+    @staticmethod
+    def _null_jwl_no_explosive_deck():
+        """*MAT_NULL 2 whose ONLY equation of state is an *EOS_JWL of the same
+        id — no *MAT_HIGH_EXPLOSIVE_BURN 2 to make it a /MAT/LAW5."""
+        return _explosive_eos_deck().replace(
+            "*EOS_LINEAR_POLYNOMIAL\n"
+            + _fix(2, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0") + "\n"
+            + _fix("2.5E-1", "1.0") + "\n",
+            "*EOS_JWL\n"
+            + _fix(2, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30", "7.0E+3",
+                   "1.0") + "\n")
+
+    @staticmethod
+    def _dangling_part_mats(starter):
+        """Material ids referenced by a /PART that have no /MAT block (the
+        starter ERROR 179 condition)."""
+        lines = starter.splitlines()
+        emitted = {ln.rsplit("/", 1)[-1] for ln in lines
+                   if ln.startswith("/MAT/")}
+        referenced = set()
+        for k, ln in enumerate(lines):
+            if ln.startswith("/PART/"):
+                card = lines[k + 2].split()          # title, then prop mat sub
+                referenced.add(card[1])
+        return sorted(referenced - emitted - {"0"})
+
+    def test_mat_null_with_jwl_but_no_explosive_stays_void(self):
+        _r, starter = self._convert(self._null_jwl_no_explosive_deck())
+        self.assertIn("/MAT/VOID/2", starter)
+        self.assertNotIn("/MAT/HYD_VISC/2", starter)
+        self.assertNotIn("/EOS/", starter)   # JWL has no standalone /EOS block
+
+    def test_mat_null_with_jwl_but_no_explosive_leaves_no_dangling_part(self):
+        _r, starter = self._convert(self._null_jwl_no_explosive_deck())
+        self.assertEqual(self._dangling_part_mats(starter), [])
+
+    def test_jwl_no_explosive_warning_names_the_void_fallback(self):
+        result, _s = self._convert(self._null_jwl_no_explosive_deck())
+        w = next(x for x in result.warnings if "*EOS_JWL 2" in x)
+        self.assertIn("/MAT/VOID/2", w)                 # what was emitted
+        self.assertIn("*MAT_HIGH_EXPLOSIVE_BURN", w)    # what to add
+        self.assertIn("NOT emitted", w)                 # the JWL is unbound
+
+    def test_jwl_without_null_keeps_the_plain_no_companion_warning(self):
+        """An *EOS_JWL with no material of its id at all is not a void
+        fallback — that warning must stay as it was."""
+        deck = _explosive_eos_deck().replace(
+            "*INITIAL_DETONATION",
+            "*EOS_JWL\n" + _fix(9, "3.7E+5", "3.2E+3", "4.15", "0.95", "0.30",
+                                "7.0E+3", "1.0") + "\n*INITIAL_DETONATION")
+        result, starter = self._convert(deck)
+        w = next(x for x in result.warnings if "*EOS_JWL 9" in x)
+        self.assertIn("no material to attach to", w)
+        self.assertNotIn("/MAT/VOID", w)
+        self.assertNotIn("/MAT/VOID/9", starter)
+
+    def test_law5_pairing_not_disturbed_by_the_void_fallback(self):
+        """The intended pairing (*MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL of one
+        id) still becomes a single /MAT/LAW5 — no void, no warning."""
+        result, starter = self._convert(_explosive_eos_deck())
+        self.assertIn("/MAT/LAW5/1", starter)
+        self.assertNotIn("/MAT/VOID/1", starter)
+        self.assertFalse([w for w in result.warnings if "*EOS_JWL 1" in w])
+        self.assertEqual(self._dangling_part_mats(starter), [])
+
+    def test_part_bound_eos_still_wins_over_a_same_id_jwl(self):
+        """*MAT_NULL 2 with a same-id *EOS_JWL AND a *PART-bound polynomial
+        EOS 7 stays a /MAT/LAW6 carrier — the void fallback must not steal a
+        null that a real (supported) EOS binds to."""
+        deck = self._null_jwl_no_explosive_deck().replace(
+            "*PART\nair\n" + _fix(2, 1, 2),
+            "*PART\nair\n" + _fix(2, 1, 2, 7)).replace(
+            "*INITIAL_DETONATION",
+            "*EOS_LINEAR_POLYNOMIAL\n"
+            + _fix(7, "0.0", "0.0", "0.0", "0.0", "0.4", "0.4", "0.0") + "\n"
+            + _fix("2.5E-1", "1.0") + "\n*INITIAL_DETONATION")
+        _r, starter = self._convert(deck)
+        self.assertIn("/MAT/HYD_VISC/2", starter)
+        self.assertIn("/EOS/POLYNOMIAL/2", starter)
+        self.assertNotIn("/MAT/VOID/2", starter)
+
     def test_eos_block_id_equals_material_id(self):
         _r, starter = self._convert(_explosive_eos_deck())
         self.assertIn("/EOS/POLYNOMIAL/2", starter)    # id == carrier mat id
