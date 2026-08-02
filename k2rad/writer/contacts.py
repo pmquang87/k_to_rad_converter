@@ -842,22 +842,38 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
             "Measurement-only (adds no contact stiffness)."
         )
 
-    # Read-out caveat (emitted once when any transducer was written). OpenRadioss
-    # stores contact interface / sub-interface forces in the T01 time-history as
-    # impulse-scaled values, NOT true forces (upstream behavior, OpenRadioss
-    # GitHub discussion #2451). A raw T01 read (or th_to_csv) therefore
-    # under-reports the contact force — about HALF on the validated implicit deck,
-    # where x2 recovered the applied load to ~1%. HyperView/HyperGraph convert it
-    # correctly on read.
+    # Read-out caveat (emitted once when any transducer was written).
+    #
+    # The T01 contact channels are a time INTEGRAL of the force, not the force:
+    # engine/source/interfaces/int07/i7for3.F:1443 heads the block "SAUVEGARDE
+    # DE L'IMPULSION NORMALE" and :1459-1476 accumulates IMPX = F*DT12 into
+    # FSAV(1..3) (tangential at :3055-3079, /INTER/SUB at :1559-1561);
+    # engine/source/output/th/thkin.F:56 writes FSAV out undivided, and nothing
+    # resets it on the writing rank (hist2.F:616-622 zeroes FSAV only for
+    # ISPMD/=0; sortie_main.F:1945 resets only monvol, FSAV(26), FSAV(29)).
+    #
+    # This corrects the earlier wording here, which was right that the channel
+    # is "impulse-scaled" but wrong that a CONSTANT recovers the force. There
+    # is no universal factor: the ratio between the raw channel and the force
+    # is the elapsed accumulation time, which grows as the run goes on. The
+    # "x2 recovered the applied load to ~1%" observation was one deck at one
+    # instant, not a conversion rule. The dimensionally correct recovery is
+    # d(FNX)/dt across T01 samples — tools/th_to_csv.py writes that column.
     if state.th_sub_ids:
         state.warn(
-            "Force-transducer read-out: OpenRadioss writes contact (sub-)interface "
-            "forces to the T01 time-history as impulse-scaled values, NOT true "
-            "forces (upstream behavior — OpenRadioss GitHub discussion #2451). A "
-            "raw T01 read / th_to_csv under-reports the contact load (~half on the "
-            "validated implicit deck; x2 recovered the applied load to ~1%). Read "
-            "the T01 in HyperView/HyperGraph (auto-converts), or take the load from "
-            "the applied *LOAD_RIGID_BODY / reaction."
+            "Force-transducer read-out: OpenRadioss writes contact "
+            "(sub-)interface forces to the T01 as a time-ACCUMULATED IMPULSE "
+            "(force x time), not as a force — the engine adds F*dt every cycle "
+            "(i7for3.F:1459-1476, comment 'SAUVEGARDE DE L'IMPULSION NORMALE') "
+            "and never resets it on the writing rank. Recover the force by "
+            "differentiating with respect to time (F = d(FNX)/dt, e.g. "
+            "numpy.gradient, or tools/th_to_csv.py which writes the "
+            "differentiated column); there is NO constant correction factor — "
+            "the ratio is the elapsed accumulation time and grows with the "
+            "run, so an earlier 'multiply by about 2' rule of thumb only held "
+            "at one instant of one deck. HyperView/HyperGraph convert on read; "
+            "the applied *LOAD_RIGID_BODY / reaction remains a good "
+            "cross-check."
         )
 
     if skipped_ft:

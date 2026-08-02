@@ -167,6 +167,17 @@ went with it. It fires on an `*INCLUDE` that did not resolve, a `PID` typo, a
 deck assembled from a subset of its parts, and on any `*PART` variant the parser
 does not yet recognize.
 
+The reverse case — a `*PART` with **no elements at all** — keeps its `/PART`
+and is given a placeholder `/PROP/SHELL`. An empty part is idiomatic
+(`*INTEGRATION_SHELL`'s `PID_i` "may reference a part with no elements",
+Vol I R17 p.29-17, purely to carry a layer material; an element-free
+`*MAT_RIGID` part with `*CONSTRAINED_EXTRA_NODES` forms a real `/RBODY`), and
+its id stays addressable by `*SET_PART` members, `/GRNOD/PART` gravity scopes
+and subsets. Without a property the starter rejects the deck outright
+(ERROR 178, `PROPERTY ID=<pid> DOES NOT EXIST`); the placeholder has no
+elements to act on, so it changes no physics. The parts are named in a warning,
+since an empty part is as often missing mesh as it is a deliberate carrier.
+
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
 `*MAT_PIECEWISE_LINEAR_PLASTICITY` (+ `_MODIFIED_`) → `/MAT/LAW36`
@@ -544,9 +555,9 @@ a `PID_i` naming no `*PART`; a layer material with no converted `/MAT`; more tha
 100 points; a solid part, a `*PART_COMPOSITE` on the same part (which *wins*), a
 MAT_037/MAT_103 `/PROP/TYPE9` route; and a rule nobody references (recorded in
 the conversion log's *recognized but not emitted* channel). An element-free
-`PID_i` material-carrier part — the idiom the manual explicitly allows — is
-reported too, because k2rad still emits a `/PART` for it and a `/PART` with no
-property is starter ERROR 178.
+`PID_i` material-carrier part — the idiom the manual explicitly allows — works
+as written: the element-free-`*PART` placeholder gives it a `/PROP/SHELL`, so
+its `/PART` resolves instead of hitting starter ERROR 178.
 
 The reference converter still carries its own verdict on this keyword as dead
 code — message `/MESSAGE/200024`, *"IRID<0 is not supported"*, commented out at
@@ -673,7 +684,10 @@ and `TRANSLATIONAL` `N5`/`N6` (roll about the sliding axis; kinematically inert)
 A joint node on no `/RBODY`, a degenerate axis (starter `ERROR 934`/`935`/`1009`),
 a node list shorter than the `Type` requires (`ERROR 936`) and an all-rigid deck
 with nothing to pace the engine time step are each warned about by name.
-`*DATABASE_JNTFORC` → `/TH/SPRING` over the joint springs.
+`*DATABASE_JNTFORC` → `/TH/SPRING` over the joint springs. Unlike the
+`/TH/INTER` / `/TH/SECTIO` / `/TH/RWALL` force channels, these really are
+instantaneous forces and moments: `thres.F:355-361` writes `GBUF%FOR` and
+`GBUF%MOM` straight out, with no `dt` factor and no accumulator.
 
 `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` / `_TRANSLATIONAL` → the matched
 joint's per-DOF stiffness / damping / friction / stop blocks (`LCID*`→`fct_K*`,
@@ -703,7 +717,11 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
 `*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
 `FRIC` 0 → sliding, 0<f<1 → Coulomb friction, ≥1 → tied; `NSID=0` tracks all
-nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`)
+nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`,
+whose `FNX/Y/Z` + `FTX/Y/Z` are a time-accumulated **impulse** — `rgwal0.F:504-509`
+sums the per-cycle nodal impulses, while the engine's `/DT12`-divided true wall
+force goes only to `/ANIM` and the sensors (`rgwal0.F:496-500`), so rwforc
+parity needs `d(FNX)/dt`)
 `*RIGIDWALL_PLANAR_MOVING` (+`_FORCES`) → moving `/RWALL/PLANE`: a synthesized
 free carrier node holds the wall `MASS` and `V0` along the wall normal —
 exactly the starter reader's moving-wall semantics, no extra cards needed
@@ -942,7 +960,12 @@ approximated as the infinite plane with a warning). The cut shell set is split
 by topology: 4-node shells into a `/GRSHEL/SHEL` on `grshel_ID`, 3-node shells
 into a `/GRSH3N/SH3N` on `grtria_ID` — a `/SH3N` ID is not resolved by a 4-node
 group, so without the split a cut triangle contributes no force to the section.
-`*DATABASE_SECFORC` → `/TH/SECTIO` on every section
+`*DATABASE_SECFORC` → `/TH/SECTIO` on every section. **The `FNX/Y/Z`,
+`FTX/Y/Z` and `M1/M2/M3` channels are time-accumulated impulses and angular
+impulses, not the instantaneous section resultants secforc reports** —
+`section_c.F:459-467` (shells) and `section_s.F:565-572` (solids) accumulate
+`DT12*FST`, and the same never-reset `FSAV` story as `/TH/INTER` applies. Use
+`d(FNX)/dt`
 `*DATABASE_HISTORY_SHELL` → `/TH/SHEL`, and `/TH/SH3N` for any named element
 the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
 shells, so a triangle listed there is absent from the T01);
@@ -951,21 +974,34 @@ shells, so a triangle listed there is absent from the T01);
 rotational DOF is constrained) on every SPC-constrained node, plus engine
 `/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction
 *impulse*, not a force** — the engine adds `m*a*dt` to it every cycle
-(`reaction_forces_th.F`) and zeroes the accumulator only once, *before* the
+(`reaction_forces_th.F:62`, and `bcs1th.F:143-155` on the `/BCS` path itself,
+where the rotational channels use the nodal inertia `IN`, so `REACXX/YY/ZZ` are
+*angular* impulses) and zeroes the accumulator only once, *before* the
 iteration loop (`resol.F:1901`, loop head `:2612`), so it rises monotonically
 under a steady load and carries force x time units. The spcforc-equivalent
-force is its time derivative, `F = d(REAC)/dt` (`numpy.gradient(reac, t)` on
-the T01 column, or a least-squares slope over a steady window — validated to
--0.0002% against a known weight). The converter warns about this on every
-converted deck. The companion `/ANIM/VECT/FREAC` field *is* the instantaneous
-force (`reactions.F:328`, no `dt` factor, overwritten each cycle).
+force is its time derivative, `F = d(REAC)/dt` (`tools/th_to_csv.py` writes
+that column; or `numpy.gradient(reac, t)` on the T01 column, or a
+least-squares slope over a steady window — validated to -0.0002% against a
+known weight). The converter warns about this on every converted deck. The
+companion `/ANIM/VECT/FREAC` field *is* the instantaneous force
+(`reactions.F:328`, and `bcs1th.F:281-287` runs the identical algebra with no
+`dt` factor). The implicit path integrates trapezoidally instead of
+rectangularly (`bcs1th_imp.F:46-56`) but is still an integral — no solver path
+writes an instantaneous `/TH` reaction.
 **Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` option (whose `/BCS` acts on the rigid
 body's master node, so that node is the reaction node)
-`*DATABASE_NCFORC`, `*DATABASE_RCFORC` → `/TH/INTER` force resultants over
+`*DATABASE_NCFORC`, `*DATABASE_RCFORC` → `/TH/INTER` resultants over
 every converted contact interface (OpenRadioss has no per-node contact-force
 time history; for `NCFORC` the nodal-resolution view is the
-`/ANIM/VECT/CONT` + `/PCONT` vectors)
+`/ANIM/VECT/CONT` + `/PCONT` vectors). **The `FNX/Y/Z` + `FTX/Y/Z` channels
+are a time-accumulated contact *impulse*, not a force** — `i7for3.F:1459-1476`
+adds `F*dt` every cycle under the engine's own comment `SAUVEGARDE DE
+L'IMPULSION NORMALE`, `thkin.F:56` writes it out undivided, and nothing resets
+it on the rank that writes the T01 (`hist2.F:616-622` zeroes `FSAV` only for
+`ISPMD/=0`; `sortie_main.F:1945`, headed "TRAITEMENT SUR FSAV NON CUMULE",
+resets only the monvol block, `FSAV(26)` and `FSAV(29)`). The rcforc-equivalent
+force is `d(FNX)/dt`; `tools/th_to_csv.py` writes that column
 `*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG`, `*MAT_ADD_FATIGUE` → no
 OpenRadioss equivalent; honoured **offline** by
 `tools/modal_random_response.py` on top of the modal solution (see
@@ -990,6 +1026,56 @@ no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no
 `/INTER/SUB`), with the lost interface ids named — a missing contact
 changes the physics, not just the instrumentation, so it can never be
 invisible in the log.
+
+### Reading the T01: which channels are integrated
+
+Several OpenRadioss `/TH` channels are written as a running **time integral**
+rather than as the instantaneous quantity their name suggests. Nothing in the
+engine, the starter or any post-processor flags this: the column simply climbs,
+and an engineer comparing it against the LS-DYNA file it stands in for is
+comparing an impulse against a force.
+
+Every `/TH` variable k2rad emits, audited against the engine source at
+`C:/OpenRadioss/source`:
+
+| `/TH` block | channels | what the T01 actually holds | engine evidence |
+|---|---|---|---|
+| `/TH/NODE` | `REACX/Y/Z`, `REACXX/YY/ZZ` | **accumulated impulse** (force·time; the `XX/YY/ZZ` are moment·time) | `reaction_forces_th.F:62`, `bcs1th.F:143-155` add `m·a·dt` / `I·ar·dt`; only reset `resol.F:1901`, before loop head `:2612`; written raw `thnod.F:176-178` |
+| `/TH/NODE` | `DX/DY/DZ`, `VX/VY/VZ` (`DEF`) | instantaneous | `thnod.F:124-135` |
+| `/TH/INTER`, `/INTER/SUB` | `FNX/Y/Z`, `FTX/Y/Z` (`DEF`) | **accumulated impulse** | `i7for3.F:1459-1476` (`+F*DT12`, comment `SAUVEGARDE DE L'IMPULSION NORMALE`), `:3055-3079`, `:1559-1561`; copied raw `thkin.F:56`; `FSAV` zeroed only for `ISPMD/=0` (`hist2.F:616-622`), `sortie_main.F:1945` resets only monvol / `FSAV(26)` / `FSAV(29)` |
+| `/TH/SECTIO` | `FNX/Y/Z`, `FTX/Y/Z`, `M1/M2/M3` (`DEF`) | **accumulated impulse + angular impulse** | `section_c.F:459-467`, `section_s.F:565-572` (`+DT12*FST`) |
+| `/TH/RWALL` | `FNX/Y/Z`, `FTX/Y/Z` (`DEF`) | **accumulated impulse** | `rgwal0.F:504-509`; the `÷DT12` true force goes only to `FOPT` (/ANIM) and the sensors, `:496-500` |
+| `/TH/SURF` | `P`, `A` | **per-`/TFILE`-interval aggregate** — `P` is the interval mean, `A` is the loaded area × cycle count, so `P*A` is not a force | `pblast_1.F:418-419` accumulate; `hist2.F:688` divides `P` by `A`; `sortie_main.F:1976-1982` resets both every write |
+| `/TH/SPRING` | `FX..MZ`, `LX..RZ` (`DEF`) | instantaneous | `thres.F:355-361` writes `GBUF%FOR` / `GBUF%MOM` directly |
+| `/TH/SHEL`, `/TH/SH3N` | `F1/F2/F12`, `M1/M2/M12`, `OFF` (`DEF`) | instantaneous element state | `thcoq.F:305-315` |
+| `/TH/BRIC` | `OFF`, `SX..SXZ`, `DENS`, `TEMP` (`DEF`) | instantaneous element state | `thsol.F:329-336` |
+| all types | `IE`, `KE`, `PLAS`, energies | cumulative by nature (an energy, not a rate) — no correction needed | — |
+
+The instantaneous quantity is the time derivative of the accumulated column.
+`tools/th_to_csv.py` extracts a T01 to CSV and writes that derivative as a
+sibling column next to every accumulated channel:
+
+```bash
+python tools/th_to_csv.py runT01              # writes run_th_<TYPE>_<id>.csv
+python tools/th_to_csv.py runT01 --list       # inventory only, writes nothing
+```
+
+```
+time,      3_REACY,   3_REACY_ddt
+0.030000,  0.073500,  3.850418        # N*s        # N
+```
+
+The `_ddt` columns are on by default (`--no-derivative` opts out) and are
+purely additive — every original column keeps its name and order. The suffix
+is deliberately unit-neutral, because `d/dt` of `REACX` is a force while
+`d/dt` of `REACXX` or of a `/TH/SECTIO` `M1` is a moment. `/TH/SURF` is left
+alone with a printed warning: an interval aggregate is not a running integral,
+so differentiating it would mean nothing.
+
+The tool is **standard library only** — no numpy needed. Its T01 reader was
+validated cell-by-cell against Altair's own `th_to_csv` binary on four real
+T01 files (1.29 million values), with no disagreement beyond the reference
+CSV's print rounding.
 
 ---
 
@@ -1087,6 +1173,7 @@ k_to_rad_converter/
 │   ├── gapmin.py         # Suggest /INTER/TYPE7 Gapmin from mesh clearance
 │   └── writer.py         # Generates _0000.rad starter + _0001.rad engine
 ├── tools/
+│   ├── th_to_csv.py      # T01 → CSV, with d/dt columns for the accumulated channels
 │   ├── modal_solve.py    # Offline eigensolver for the modal K-export recipe
 │   ├── modal_common.py   # Shared mesh/npz/unit/VTK helpers for the tools
 │   ├── modal_shapes_export.py    # Mode shapes → LS-PrePost d3plot + ParaView VTK

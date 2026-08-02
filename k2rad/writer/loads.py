@@ -2694,10 +2694,34 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
         lines += grnod_blocks
         th_wall_ids.append((rw.rwid, title))
 
-    # *DATABASE_RWFORC → /TH/RWALL (wall resultant force time history)
+    # *DATABASE_RWFORC → /TH/RWALL (wall resultant IMPULSE time history).
+    #
+    # DEF expands to FNX/Y/Z + FTX/Y/Z (starter hm_read_thgrou.F IVARRWG), and
+    # those are a time-ACCUMULATED impulse, not the instantaneous wall force
+    # LS-DYNA's rwforc reports. engine/source/constraints/general/rwall/
+    # rgwal0.F:504-509 does FSAV(1..6) = FSAV(1..6) + FXN..FZT, where FXN..FZT
+    # are the summed nodal IMPULSES for the cycle — the engine divides them by
+    # DT12 one line earlier to get the true force (:496-500, DIVDT12 = 1/DT12)
+    # but routes that only to FOPT (/ANIM) and the sensor buffer FBSAV6
+    # (:485-493), never to /TH. thkin.F:56 then copies FSAV out undivided, and
+    # nothing resets it on the writing rank (hist2.F:616-622 zeroes FSAV only
+    # for ISPMD/=0). Exactly the FTHREAC-vs-FREAC split of the /TH/NODE REAC*
+    # channels, one array further along the same FSAV block.
     if state.db_rwforc_dt > 0.0 and th_wall_ids:
+        state.warn(
+            "*DATABASE_RWFORC -> /TH/RWALL FNX/Y/Z + FTX/Y/Z: these channels "
+            "are a time-ACCUMULATED impulse (force x time), not the "
+            "instantaneous wall force rwforc reports — the engine accumulates "
+            "the per-cycle nodal impulse sums (rgwal0.F:504-509) and sends the "
+            "divided-by-dt force only to /ANIM and the sensors "
+            "(rgwal0.F:496-500). Differentiate with respect to time "
+            "(F = d(FNX)/dt, e.g. numpy.gradient, or tools/th_to_csv.py which "
+            "writes the differentiated column) before comparing against an "
+            "LS-DYNA rwforc file.")
         th_id = state.next_id()
         lines += [f"/TH/RWALL/{th_id}", "rwall_forces",
+                  "#  DEF = FNX/Y/Z + FTX/Y/Z: IMPULSE (force x time), not force",
+                  "#  FSAV accumulates F*dt every cycle: wall force = d(FNX)/dt",
                   "#     var1", "DEF       "]
         for rwid, _tit in th_wall_ids:
             lines.append(_i(rwid))

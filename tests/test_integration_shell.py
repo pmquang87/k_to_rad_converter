@@ -165,9 +165,10 @@ FOAM = ("*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
 ELASTIC = "*MAT_ELASTIC\n" + _row(5, 7.85e-9, 210000.0, 0.3) + "\n"
 # A part used purely as an *INTEGRATION_SHELL PID_i handle: "PID: Optional part
 # ID ... The material and density are taken from this part" (Vol I R17 p.29-17).
-# It holds no elements; it is given a *SECTION_SHELL so its element-free /PART
-# still resolves a property (starter ERROR 178 otherwise - see
-# test_elementless_carrier_part_is_warned).
+# It holds no elements. The *SECTION_SHELL is not required - the element-free
+# *PART placeholder resolves a sectionless one too (see
+# test_elementless_carrier_part_still_resolves_a_property) - it is kept so these
+# decks exercise the ordinary, fully-specified carrier.
 CORE_PART = ("*PART\ncore\n" + _row(88, 88, 4) + "\n"
              + "*SECTION_SHELL\n" + _row(88, 2, 1.0, 3) + "\n"
              + _row(1.0, 1.0, 1.0, 1.0) + "\n")
@@ -631,15 +632,26 @@ class RuleDrivenLayupTests(unittest.TestCase):
                                         "state"))
         self.assertFalse(_warned(result, "*MAT_PLASTIC_KINEMATIC"))
 
-    def test_elementless_carrier_part_is_warned(self):
-        """"It may reference a part with no elements" is the idiomatic way to
-        declare a layer material, but k2rad emits a /PART for every *PART and a
-        /PART with no property is starter ERROR 178."""
+    def test_elementless_carrier_part_still_resolves_a_property(self):
+        """"It may reference a part with no elements" (Vol I R17 p.29-17) is the
+        idiomatic way to declare a layer material. k2rad emits a /PART for every
+        *PART record, and a /PART whose property does not exist is starter
+        ERROR 178 — the element-free-*PART placeholder covers exactly that, and
+        this keyword is what makes the idiom common, so pin it here too."""
         carrier = "*PART\ncore\n" + _row(88, 0, 4) + "\n"
         rule = _rule(points=((-1.0, 0.25, 0), (0.0, 0.5, 88), (1.0, 0.25, 0)))
-        result, _ = _convert(_deck(rule=rule, extra=carrier + FOAM))
-        self.assertTrue(_warned(result, "material carrier part(s) 88",
-                                "ERROR 178"))
+        result, starter = _convert(_deck(rule=rule, extra=carrier + FOAM))
+        emitted = {ln.rsplit("/", 1)[1] for ln in starter.splitlines()
+                   if ln.startswith("/PROP/")}
+        parts = starter.splitlines()
+        for i, ln in enumerate(parts):
+            if ln.startswith("/PART/"):
+                self.assertIn(_i10(parts[i + 2], 0), {int(p) for p in emitted},
+                              ln)
+        # the layer still takes the carrier's material
+        self.assertEqual([m for _, _, m in _layup(starter)], [3, 4, 3])
+        # ...and the ERROR-178 claim is NOT repeated by this keyword's own pass
+        self.assertFalse(_warned(result, "material carrier part(s) 88"))
 
     def test_icomp_angles_and_rule_thicknesses_compose(self):
         """ICOMP=1 gives every integration point an angle and the rule gives

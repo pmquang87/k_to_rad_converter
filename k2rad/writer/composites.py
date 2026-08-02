@@ -865,31 +865,15 @@ def _resolve_integration_shells(state: ConversionState) -> None:
                 "locations.")
             sec.nip = n_shell
 
-    # ── PID_i material-carrier parts ────────────────────────────────────────
-    # "It may reference a part with no elements" (Vol I R17 p.29-17) is the
-    # idiomatic way to declare a layer material, but k2rad emits a /PART for
-    # EVERY *PART record and a part with neither elements nor a *SECTION gets no
-    # property of its own — starter ERROR 178 PROPERTY ID=<pid> DOES NOT EXIST.
-    # (Pre-existing for any elementless *PART; the rule keyword just makes the
-    # idiom common, so it is reported here where the user can act on it.)
-    meshed = ({e.pid for e in state.shell_elems} | {e.pid for e in state.solid_elems}
-              | {e.pid for e in state.beam_elems})
-    carriers = sorted({
-        p.pid for r in referenced
-        for p in state.integration_shells[r].points
-        if p.pid > 0 and p.pid in state.parts and p.pid not in meshed
-        and state.parts[p.pid].secid <= 0
-        and p.pid not in state.sec_shells and p.pid not in state.sec_solids})
-    if carriers:
-        state.warn(
-            "*INTEGRATION_SHELL PID_i material carrier part(s) "
-            + ", ".join(str(q) for q in carriers)
-            + " hold no elements and reference no *SECTION. Their MATERIAL is "
-            "carried into the layer as LS-DYNA intends, but k2rad still emits a "
-            "/PART for each, and a /PART with no property is starter ERROR 178 "
-            "(PROPERTY ID DOES NOT EXIST). Give the carrier part a *SECTION_SHELL "
-            "(any thickness — it has no elements to apply it to) or delete the "
-            "*PART and put the material id on a meshed part.")
+    # NOTE the element-free `PID_i` material-carrier part — "It may reference a
+    # part with no elements" (Vol I R17 p.29-17), the idiomatic way to declare a
+    # layer material — needs nothing from this pass. It used to: k2rad emitted a
+    # /PART for every *PART record and one with neither elements nor a *SECTION
+    # got no property, which is starter ERROR 178 PROPERTY ID DOES NOT EXIST. The
+    # element-free-*PART fix gives every such part a placeholder /PROP/SHELL and
+    # reports it by name (`_element_free_part_ids` in writer/mesh.py, which cites
+    # this very idiom), so warning again here would only repeat it — and repeat
+    # the now-false claim that the deck still hits ERROR 178.
 
     # ── Rules nobody references ─────────────────────────────────────────────
     orphans = sorted(set(state.integration_shells) - referenced)

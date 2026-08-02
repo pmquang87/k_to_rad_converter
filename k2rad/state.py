@@ -2863,6 +2863,12 @@ class ConversionState:
 
     # ── Skipped / warnings ─────────────────────────────────────
     warnings: List[str] = field(default_factory=list)
+    # True once the "/TH/NODE REAC* is an accumulated impulse, not a force"
+    # derivation has been written into a warning on this deck. Two conversion
+    # paths emit REAC* channels (*DATABASE_SPCFORC and
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID); the second one to fire back-references
+    # the first instead of repeating it. See writer/output.py:_warn_reac_impulse.
+    reac_impulse_warned: bool = False
     skipped_keywords: List[str] = field(default_factory=list)
     # Keywords the parser RECOGNIZED (they have a handler, so they never reach
     # skipped_keywords) but which produce no card in either output deck. Without

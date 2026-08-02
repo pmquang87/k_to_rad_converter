@@ -1433,6 +1433,66 @@ def _auto_section_shell(secid: int) -> SectionShell:
     return SectionShell(secid, f"AutoPropShell_{secid}", 2, 3, 0.0)
 
 
+def _element_free_part_ids(state: ConversionState,
+                           part_secids: Dict[int, int]) -> Set[int]:
+    """*PART ids that own no elements AND whose property id nothing emits.
+
+    ``_make_properties`` derives its missing-section set from the ELEMENTS that
+    name a secid, so an element-free *PART is never reached: nothing creates a
+    section for it, nothing emits a /PROP — yet ``_make_parts_and_elements``
+    still writes its /PART card pointing at that id. The starter rejects the
+    result outright, ERROR 178 "PROPERTY ID=<x> DOES NOT EXIST", and the whole
+    conversion is dead on a part that carries no mesh.
+
+    The part is NOT simply dropped instead, for two reasons:
+
+    * A part id is addressable independently of its mesh. ``*SET_PART`` members
+      reach the deck as ``/GRNOD/PART`` (gravity), ``/SURF/PART``, ``/GRBRIC/
+      PART`` and subset ids, and none of those are filtered against the parts
+      that were actually emitted — dropping the /PART downgrades ERROR 178 to
+      starter WARNING 194, "REFERENCE TO NONEXISTENT PART ID=<x>" (measured on
+      a *LOAD_BODY_PARTS deck), which is quieter but still a broken deck.
+    * An element-free part is idiomatic, not a mistake: ``*INTEGRATION_SHELL``'s
+      PID_i "may reference a part with no elements" (Vol I R17 p.29-17) purely
+      to carry a layer MATERIAL. Deleting it would delete the material binding
+      the user wrote the part for.
+
+    dyna2rad is deliberately NOT followed here: it emits the /PART with
+    ``prop_ID = 0`` (convertprops.cxx:110-150 — SECID 0 leaves ``radPropEdit``
+    invalid and the else-branch writes entity id 0), which its own starter then
+    rejects with the SAME ERROR 178, just reporting "PROPERTY ID=0"
+    (hm_read_part.F:203-210 — note MID 0 gets a fictitious-material fallback a
+    few lines down, PID 0 gets none). The native reader is broken on this deck,
+    so there is nothing to match.
+
+    So the part keeps its id, its title, its material and its subset, and gets
+    the same placeholder property a sectionless MESHED shell part already gets.
+    A property with no elements on it costs nothing: the starter's ELEM/PROP/MAT
+    compatibility checks run per element group, and this one has none.
+    """
+    meshed = ({e.pid for e in state.shell_elems}
+              | {e.pid for e in state.solid_elems}
+              | {e.pid for e in state.beam_elems}
+              | {e.pid for e in state.discrete_elems})
+    # Parts the normal /PART emission skips: their /PART *and* /PROP come from
+    # the connector writers, so they never carry a section-derived prop_ref.
+    # (_discrete_part_ids already claims an element-free part whose SECID is a
+    # *SECTION_DISCRETE or whose MID is a spring/damper material.)
+    connectors = _discrete_part_ids(state) | _spotweld_beam_pids(state)
+    # A part repointed at a synthesized composite / orthotropic / per-part
+    # hourglass property does not reference its section id at all.
+    split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
+             | set(state.hourglass_prop_ids))
+    # Any section id already defined resolves on its own — including one shared
+    # with a meshed sibling part, and including the auto-created sections the
+    # caller has just filled in.
+    defined = (set(state.sec_shells) | set(state.sec_solids)
+               | set(state.sec_beams) | set(state.sec_discrete))
+    return {pid for pid in state.parts
+            if pid not in meshed and pid not in connectors and pid not in split
+            and pid in part_secids and part_secids[pid] not in defined}
+
+
 def _ihq_to_isolid(ihq: int) -> Optional[int]:
     """LS-DYNA solid IHQ → Radioss Isolid (dyna2rad table). None = unmapped
     (IHQ 0/8/9/10): the section's ELFORM-derived Isolid is kept."""
@@ -1712,6 +1772,31 @@ def _make_properties(state: ConversionState) -> List[str]:
         state.sec_solids[ms] = _auto_section_solid(ms)
     for ms in missing_beams:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
+
+    # A *PART with NO elements is invisible to every loop above (they all walk
+    # the elements), but it still gets a /PART card — pointing at a property id
+    # nothing emits. That is starter ERROR 178. Give it the same placeholder
+    # shell property, and say so: an empty part is usually either an
+    # *INTEGRATION_SHELL material carrier or a leftover the user meant to
+    # delete, and both are worth naming. Runs AFTER the three loops above so a
+    # section they just auto-created counts as defined.
+    free_pids = sorted(_element_free_part_ids(state, part_secids))
+    if free_pids:
+        for pid in free_pids:
+            secid = part_secids[pid]
+            state.sec_shells[secid] = _auto_section_shell(secid)
+        state.warn(
+            "*PART record(s) " + ", ".join(str(p) for p in free_pids)
+            + " hold no elements and reference no *SECTION. Each keeps its "
+            "/PART (id, title, material and subset stay addressable — a "
+            "*SET_PART member, a /GRNOD/PART gravity scope or an "
+            "*INTEGRATION_SHELL PID_i material carrier all reference a part by "
+            "id, with or without mesh) and is given a PLACEHOLDER "
+            "/PROP/SHELL, because a /PART whose property does not exist is "
+            "starter ERROR 178 and kills the whole run. The placeholder has no "
+            "elements to act on, so it changes no physics. If the part was not "
+            "meant to be empty, its elements are missing — check for an "
+            "*INCLUDE that did not resolve or a PID typo.")
 
     _warn_shell_formulation_choice(state)
     for sec in sorted(state.sec_shells.values(), key=lambda s: s.secid):

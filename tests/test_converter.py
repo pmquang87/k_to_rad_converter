@@ -680,18 +680,27 @@ class ForceTransducerTests(unittest.TestCase):
         self.assertNotIn("/INTER/SUB/", starter)
         self.assertNotIn("/TH/INTER", starter)
 
-    def test_impulse_scaling_caveat_when_transducer_present(self):
-        # OpenRadioss stores T01 contact forces as impulse-scaled values (~half on
-        # implicit); the log must warn so users read in HyperView or scale x2.
+    def test_impulse_caveat_when_transducer_present(self):
+        # OpenRadioss writes T01 contact forces as a time-accumulated impulse
+        # (i7for3.F:1459-1476 adds F*DT12; nothing resets it on the writing
+        # rank), so the log must say to differentiate. It must NOT offer a
+        # constant correction factor: the ratio to the true force is the
+        # elapsed accumulation time and grows with the run.
         result, _ = self._convert(TRANSDUCER_K)
-        self.assertTrue(any("impulse-scaled" in w and "#2451" in w
-                            for w in result.warnings))
+        hits = [w for w in result.warnings if "Force-transducer read-out" in w]
+        self.assertTrue(hits, result.warnings)
+        w = " ".join(hits)
+        self.assertIn("ACCUMULATED", w)
+        self.assertIn("d(FNX)/dt", w)
+        self.assertIn("i7for3.F", w)
+        self.assertIn("NO constant correction factor", w)
 
     def test_no_impulse_caveat_without_transducer(self):
         result, _ = self._convert(TRANSDUCER_K.replace(
             "*CONTACT_FORCE_TRANSDUCER_PENALTY\n         2         1         3         3\n",
             ""))
-        self.assertFalse(any("impulse-scaled" in w for w in result.warnings))
+        self.assertFalse(any("Force-transducer read-out" in w
+                             for w in result.warnings))
 
 
 class ImplicitContactStubTests(unittest.TestCase):
@@ -1152,6 +1161,82 @@ class ReactionReadoutTests(unittest.TestCase):
         self.assertIn("REAC* accumulates m*a*dt over the run: "
                       "reaction force = d(REAC*)/dt", block)
         self.assertNotIn("reaction (REACX/Y/Z) + displacement", starter)
+
+    # ---- the imposed-motion readout gets its own impulse warning ----------
+    # The deck comment on the block is only seen by someone who opens the
+    # .rad file. This block is the one that puts REACX/Y/Z next to DX/Y/Z, so
+    # it is the one that invites a force-vs-displacement plot built on the raw
+    # (integrated) channel — it warns even when the deck has no
+    # *DATABASE_SPCFORC and therefore never reaches the spcforc warning.
+
+    def _result(self, deck: str):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        return convert(path)
+
+    @staticmethod
+    def _reac_warnings(result):
+        return [w for w in result.warnings
+                if "REAC" in w and "impulse" in w.lower()]
+
+    def test_prescribed_motion_warns_that_reac_is_an_accumulated_impulse(self):
+        result = self._result(DISPCTRL_K)
+        hits = [w for w in self._reac_warnings(result)
+                if "*BOUNDARY_PRESCRIBED_MOTION_RIGID" in w]
+        self.assertTrue(hits, "the imposed-motion reaction readout must warn "
+                              "that REAC* is accumulated; warnings were "
+                              f"{result.warnings}")
+        w = " ".join(hits)
+        self.assertIn("TH_reaction", w)
+        # the actionable recipe, not just the diagnosis
+        self.assertIn("numpy.gradient(reac, t)", w)
+        self.assertIn("d(REAC)/dt", w)
+        self.assertIn("reaction_forces_th.F", w)
+
+    def test_no_reac_impulse_warning_without_prescribed_motion(self):
+        # TRANSDUCER_K has the rigid part but no imposed motion and no
+        # *DATABASE_SPCFORC → no REAC* block, so no REAC* caveat.
+        result = self._result(TRANSDUCER_K)
+        self.assertEqual(self._reac_warnings(result), [])
+
+    def test_both_reac_paths_warn_but_the_derivation_appears_once(self):
+        """A deck with imposed motion AND *DATABASE_SPCFORC emits two REAC*
+        blocks, so both paths warn — but the shared engine-source derivation is
+        written out once and back-referenced the second time."""
+        deck = DISPCTRL_K.replace(
+            "*CONTROL_TERMINATION",
+            "*SET_NODE_LIST\n"
+            "         1\n"
+            "         1         2\n"
+            "*BOUNDARY_SPC_SET\n"
+            "         1         0         1         1         1         0"
+            "         0         0\n"
+            "*DATABASE_SPCFORC\n"
+            "2.00000E-5         0         0         1\n"
+            "*CONTROL_TERMINATION",
+        )
+        result = self._result(deck)
+        hits = self._reac_warnings(result)
+        self.assertEqual(len(hits), 2, hits)
+        # one per path, each naming its own keyword
+        self.assertEqual(
+            sum("*BOUNDARY_PRESCRIBED_MOTION_RIGID" in w for w in hits), 1)
+        self.assertEqual(sum("*DATABASE_SPCFORC" in w for w in hits), 1)
+        # the derivation (the m*a*dt sentence with the resol.F line numbers) is
+        # spelled out exactly once; the other warning points back at it
+        spelled_out = [w for w in hits if "resol.F:1901" in w]
+        self.assertEqual(len(spelled_out), 1, hits)
+        backref = [w for w in hits if "resol.F:1901" not in w]
+        self.assertEqual(len(backref), 1, hits)
+        self.assertIn("same reaction_forces_th.F accumulation", backref[0])
+        # deduplicating the physics must NOT drop either path's own recipe
+        for w in hits:
+            self.assertIn("d(REAC)/dt", w)
+            self.assertIn("reaction_forces_th.F", w)
+            self.assertIn("impulse", w.lower())
 
 
 # A *CONTROL_IMPLICIT_SOLUTION whose card-1 (nsolvr…abstol) is an all-blank
@@ -5192,10 +5277,48 @@ class BlastLoadTests(unittest.TestCase):
         surf_id = int(lines[i].rsplit("/", 1)[1])
         j = next(k for k, ln in enumerate(lines) if ln.startswith("/TH/SURF/"))
         self.assertEqual(lines[j + 1], "TH_blast_surf")
-        var_line = lines[j + 3]                    # j+2 is the comment line
+        # the title is followed by a run of "#" comment lines, then the
+        # fixed-column variable line — scan rather than hard-index, so adding
+        # another caveat comment cannot silently break this
+        v = j + 2
+        while lines[v].startswith("#"):
+            v += 1
+        var_line = lines[v]
         self.assertEqual(var_line[0:10].strip(), "P")
         self.assertEqual(var_line[10:20].strip(), "A")
-        self.assertEqual(int(lines[j + 4].strip()), surf_id)
+        self.assertEqual(int(lines[v + 1].strip()), surf_id)
+
+    # ---- /TH/SURF P and A are per-/TFILE-interval aggregates -------------
+    # pblast_1.F:418-419 adds AREA*P and AREA every cycle into
+    # th_surf%channels (= the FSAVSURF dummy, resol.F:3447), hist2.F:688
+    # divides P by A right before the write, and sortie_main.F:1976-1982
+    # zeroes channels 1-5 after every write. So P is an interval MEAN and A is
+    # the loaded area times the cycle count — P*A is not the blast force.
+
+    def test_blstfor_warns_that_p_and_a_are_interval_aggregates(self):
+        result, _s, _e = self._convert()
+        hits = [w for w in result.warnings if "/TH/SURF P and A" in w]
+        self.assertTrue(hits, result.warnings)
+        w = " ".join(hits)
+        self.assertIn("AGGREGATES", w)
+        self.assertIn("P*A is NOT the blast force", w)
+        self.assertIn("pblast_1.F", w)
+        self.assertIn("sortie_main.F", w)
+
+    def test_blstfor_aggregate_note_in_emitted_comment(self):
+        _r, starter, _e = self._convert()
+        block = _th_comment_lines(starter, "TH_blast_surf")
+        self.assertIn("MEAN pressure over the /TFILE interval", block)
+        self.assertIn("P*A is NOT the blast force", block)
+
+    def test_the_deck_never_equates_p_times_a_with_the_blast_force(self):
+        _r, starter, _e = self._convert()
+        # every mention of P*A in the emitted deck must be a denial, not a claim
+        for line in starter.splitlines():
+            if "P*A" in line:
+                self.assertIn("NOT the blast force", line, line)
+        self.assertNotIn("P*A = total blast force", starter)
+        self.assertNotIn("P*A = blast force", starter)
 
     def test_blstfor_engine_pext_fext_and_tfile_dt(self):
         _r, _s, engine = self._convert()
@@ -6021,8 +6144,13 @@ class DatabaseNcforcTests(unittest.TestCase):
         i = next(k for k, ln in enumerate(lines)
                  if ln.startswith("/TH/INTER/"))
         ids = []
-        # skip title, "#     var1" comment and the DEF variable line
-        for ln in lines[i + 4:]:
+        # skip the title, the run of "#" comment lines and the DEF variable
+        # line — scan instead of hard-indexing so an added caveat comment does
+        # not turn this into a silent empty list
+        j = i + 2
+        while lines[j].startswith("#"):
+            j += 1
+        for ln in lines[j + 1:]:
             if ln.startswith(("#", "/")) or not ln.strip():
                 break
             ids.append(int(ln.strip()))
@@ -6068,6 +6196,49 @@ class DatabaseNcforcTests(unittest.TestCase):
         self.assertNotIn("/TH/INTER", starter)
         self.assertTrue(any("*DATABASE_NCFORC" in w and "no *CONTACT" in w
                             for w in result.warnings))
+
+    # ---- /TH/INTER DEF is an accumulated impulse, not a force -------------
+    # engine/source/interfaces/int07/i7for3.F:1443 heads the block
+    # "SAUVEGARDE DE L'IMPULSION NORMALE" and :1459-1476 adds F*DT12 into
+    # FSAV(1..3); thkin.F:56 copies FSAV out undivided; nothing resets it on
+    # the writing rank (hist2.F:616-622 zeroes FSAV only for ISPMD/=0,
+    # sortie_main.F:1945 resets only monvol / FSAV(26) / FSAV(29)).
+
+    def test_th_inter_warns_that_the_channels_are_an_impulse(self):
+        result, _s, _e = self._convert(self._with_ncforc())
+        hits = [w for w in result.warnings if "/TH/INTER FNX" in w]
+        self.assertTrue(hits, result.warnings)
+        w = " ".join(hits)
+        self.assertIn("ACCUMULATED", w)
+        self.assertIn("d(FNX)/dt", w)
+        self.assertIn("i7for3.F", w)
+        self.assertIn("hist2.F", w)
+
+    def test_th_inter_impulse_note_in_emitted_comment(self):
+        _r, starter, _e = self._convert(self._with_ncforc())
+        block = _th_comment_lines(starter, "TH_interface_forces")
+        self.assertIn("contact IMPULSE (force x time), not force", block)
+        self.assertIn("FSAV accumulates F*dt every cycle: "
+                      "contact force = d(FNX)/dt", block)
+
+    def test_th_inter_comment_does_not_disturb_the_card(self):
+        """The added comments must not shift the DEF line or the id list."""
+        _r, starter, _e = self._convert(self._with_ncforc())
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines)
+                 if ln.strip() == "TH_interface_forces")
+        j = i + 1
+        while lines[j].startswith("#"):
+            j += 1
+        self.assertEqual(lines[j].strip(), "DEF")
+        self.assertTrue(self._th_inter_ids(starter))
+
+    def test_no_impulse_warning_without_a_th_inter_block(self):
+        result, starter, _e = self._convert(TRANSDUCER_K.replace(
+            "*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
+            "         2         1         3         3\n", ""))
+        self.assertNotIn("/TH/INTER", starter)
+        self.assertFalse([w for w in result.warnings if "/TH/INTER FNX" in w])
 
 
 # A laser-weld miniature: face plate (PID 1, thickness 2.0, mid-plane z=0) and
@@ -7467,6 +7638,48 @@ class RigidWallPlanarTests(unittest.TestCase):
             "*DATABASE_RWFORC\n      1e-4\n*RIGIDWALL_PLANAR\n")
         result, starter = _convert_string_deck(deck)
         self.assertIn("/TH/RWALL/", starter)
+
+    # ---- /TH/RWALL DEF is an accumulated impulse, not a force ------------
+    # rgwal0.F:504-509 accumulates FSAV(1..6) += FXN..FZT, the summed per-cycle
+    # nodal IMPULSES; the engine divides by DT12 to get the true wall force one
+    # line earlier (:496-500) but routes that only to FOPT (/ANIM) and the
+    # sensor buffer, never to /TH.
+
+    def _rwforc(self):
+        deck = self._deck().replace(
+            "*RIGIDWALL_PLANAR\n",
+            "*DATABASE_RWFORC\n      1e-4\n*RIGIDWALL_PLANAR\n")
+        return _convert_string_deck(deck)
+
+    def test_rwforc_warns_that_the_channels_are_an_impulse(self):
+        result, _starter = self._rwforc()
+        hits = [w for w in result.warnings if "*DATABASE_RWFORC" in w
+                and "/TH/RWALL" in w]
+        self.assertTrue(hits, result.warnings)
+        w = " ".join(hits)
+        self.assertIn("ACCUMULATED", w)
+        self.assertIn("d(FNX)/dt", w)
+        self.assertIn("rgwal0.F", w)
+
+    def test_rwforc_impulse_note_in_emitted_comment(self):
+        _result, starter = self._rwforc()
+        block = _th_comment_lines(starter, "rwall_forces")
+        self.assertIn("IMPULSE (force x time), not force", block)
+        self.assertIn("wall force = d(FNX)/dt", block)
+
+    def test_rwforc_comment_does_not_disturb_the_card(self):
+        _result, starter = self._rwforc()
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "rwall_forces")
+        j = i + 1
+        while lines[j].startswith("#"):
+            j += 1
+        self.assertEqual(lines[j].strip(), "DEF")
+
+    def test_no_rwall_impulse_warning_without_rwforc(self):
+        result, starter = _convert_string_deck(self._deck())
+        self.assertNotIn("/TH/RWALL/", starter)
+        self.assertFalse([w for w in result.warnings if "/TH/RWALL" in w])
 
 
 class LoadSegmentSetTests(unittest.TestCase):
