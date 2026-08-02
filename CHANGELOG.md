@@ -11,6 +11,61 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`tools/th_to_csv.py` — T01 to CSV, with the time-derivative column the
+  accumulated `/TH` channels actually need.** Standard library only (no numpy),
+  so it runs anywhere the converter does.
+
+  Several OpenRadioss `/TH` channels are a running time integral, not the
+  instantaneous quantity their name suggests (see the sweep under *Fixed*
+  below). The tool writes a differentiated sibling column next to each one:
+
+  ```
+  time,      3_REACY,   3_REACY_ddt
+  0.030000,  0.073500,  3.850418          # N*s        # N
+  ```
+
+  The `_ddt` suffix is unit-neutral on purpose: `d/dt` of `REACX` is a force,
+  of `REACXX` or of a `/TH/SECTIO` `M1` a moment, so no single word fits every
+  column it is applied to.
+
+  **On by default** (`--no-derivative` opts out), following the
+  `--no-rigid-cog-master` precedent. The raw column is the trap; a flag you
+  have to know to set is exactly the knowledge the user is missing. The
+  addition is non-destructive — every original column keeps its name and
+  relative order, so a consumer selecting columns by name is unaffected.
+  `/TH/SURF` is deliberately excluded and warned about instead: `P` and `A` are
+  per-`/TFILE`-interval aggregates rather than a running integral, so
+  differentiating them would be meaningless.
+
+  **The T01 reader is validated, not assumed.** It parses the engine's default
+  IEEE-binary `/TH` format directly — records framed by big-endian 4-byte
+  length markers (`wrtdes.F`), big-endian `int32`/`float32` payloads
+  (`ieee.cpp`; the engine narrows `my_real` to `REAL*4`, so there is no
+  double-precision T01), the `hist1.F` header sequence and the `hist2.F`
+  per-state sequence, plus the gzip-wrapped `/TH` format variants. Diffed
+  cell-by-cell against Altair's own `th_to_csv_win64.exe` on four real T01
+  files — **1.29 million values, 29 to 10 000 states, node / part / interface
+  groups — with zero disagreement beyond the reference CSV's 7-significant-digit
+  print rounding** (max relative deviation 5e-7, exactly half an ulp of `%e`).
+  Group and variable *names* are decoded from the starter's own code tables,
+  which the reference converter does not do (it labels everything `var N`).
+
+  27 new tests build **synthetic T01 files in the test itself** rather than
+  checking in a binary fixture, so the format assumption stays reviewable: a
+  linear ramp must differentiate back to its exact slope, the sibling must sit
+  next to its source without moving any original column, an instantaneous-only
+  group must gain no columns, a truncated final state must be dropped rather
+  than guessed, and a non-T01 file must be rejected loudly. The derivative
+  kernel (`numpy.gradient`'s scheme, reimplemented in the standard library)
+  was cross-checked against numpy itself over 200 random non-uniformly spaced
+  cases: max relative deviation **4e-14**.
+
+  One bug was caught during development by the non-uniform-spacing test and is
+  worth recording: the first interior-difference implementation had the forward
+  and backward steps swapped. That is invisible to every evenly spaced test —
+  the two formulas coincide when `h` is constant — and T01 output times are not
+  always evenly spaced. The test that pins it is kept.
+
 - **`*SECTION_SHELL` `ICOMP = 1` becomes a real layered property: the card-3
   `B1..B8` per-layer material angles now reach the `/PROP/TYPE11` layup.**
   `handle_section_shell` read only `SECID`/`ELFORM`/`NIP`/`T1`; the `ICOMP` flag
@@ -1292,6 +1347,119 @@ Prior history (before this changelog was introduced) is summarized in the
     PyPI publish workflow; Docker bash launchers (`or.sh`, `build-and-export.sh`).
 
 ### Fixed
+
+- **The `/TH` channel sweep: `REAC*` was not the only integrated channel.
+  `/TH/INTER`, `/TH/SECTIO` and `/TH/RWALL` forces are accumulated impulses
+  too, and `/TH/SURF` `P`/`A` are per-interval aggregates.** Docs, emitted deck
+  comments and four new warnings — every mapping was already correct, and **no
+  emitted card changes**.
+
+  A previous entry corrected `/TH/NODE` `REAC*` and explicitly left the rest of
+  the `/TH` surface unaudited. This is that audit: every `/TH` variable the
+  converter emits, classified against the engine source and cited.
+
+  | `/TH` block | channels | verdict | engine evidence |
+  |---|---|---|---|
+  | `/TH/NODE` | `REACX/Y/Z`, `REACXX/YY/ZZ` | **accumulated impulse** | `reaction_forces_th.F:62`; **also `bcs1th.F:143-155`** on the `/BCS` path (`*MS*DT12`, and `*IN*DT12` for the rotations); only reset `resol.F:1901`, before loop head `:2612`; written raw `thnod.F:176-178` |
+  | `/TH/NODE` | `DX/DY/DZ`, `VX/VY/VZ` | instantaneous | `thnod.F:124-135` |
+  | `/TH/INTER`, `/INTER/SUB` | `FNX/Y/Z`, `FTX/Y/Z` | **accumulated impulse** | `i7for3.F:1459-1476` (`+F*DT12`), `:3055-3079`, `:1559-1561`; raw copy `thkin.F:56` |
+  | `/TH/SECTIO` | `FNX/Y/Z`, `FTX/Y/Z`, `M1/M2/M3` | **accumulated impulse + angular impulse** | `section_c.F:459-467`, `section_s.F:565-572` (`+DT12*FST`) |
+  | `/TH/RWALL` | `FNX/Y/Z`, `FTX/Y/Z` | **accumulated impulse** | `rgwal0.F:504-509` |
+  | `/TH/SURF` | `P`, `A` | **per-`/TFILE`-interval aggregate** | `pblast_1.F:418-419`, `hist2.F:688`, `sortie_main.F:1976-1982` |
+  | `/TH/SPRING` | `FX..MZ`, `LX..RZ` | instantaneous | `thres.F:355-361` |
+  | `/TH/SHEL`, `/TH/SH3N` | `F1/F2/F12`, `M1/M2/M12` | instantaneous | `thcoq.F:305-315` |
+  | `/TH/BRIC` | `OFF`, `SX..SXZ`, `DENS`, `TEMP` | instantaneous | `thsol.F:329-336` |
+  | all | `IE`, `KE`, `PLAS` | cumulative by nature | — |
+
+  **The `FSAV` family.** `/TH/INTER`, `/TH/SECTIO` and `/TH/RWALL` all read one
+  shared engine array, and it is cumulative by design. The engine says so in
+  its own comments: `i7for3.F:1443` heads the contact block
+  `SAUVEGARDE DE L'IMPULSION NORMALE` ("save the normal impulse"), and
+  `sortie_main.F:1945` heads the reset block `TRAITEMENT SUR FSAV NON CUMULE`
+  ("handling of the NON-cumulated `FSAV`") — a heading that only makes sense
+  because the rest of `FSAV` *is* cumulated. That reset touches only the monvol
+  block, `FSAV(26)` (contact elastic energy) and `FSAV(29)` (`CAREA`). The one
+  other zeroing, `hist2.F:616-622`, is guarded by `IF (ISPMD/=0)` — it clears
+  the *non-master* ranks after their contribution has been summed in, so on
+  `np=1` nothing is ever reset. `thkin.F:56` then copies `FSAV` into the T01
+  buffer with no division by time.
+
+  `/TH/RWALL` is the sharpest case, because the engine computes the quantity
+  the user wants and then does not write it: `rgwal0.F:496-500` forms
+  `DIVDT12 = 1/DT12` and `RWL(17..19) = (FXN+FXT)*DIVDT12` — the true wall
+  force — but routes it only to `FOPT` (`/ANIM`) and the sensor buffer
+  `FBSAV6`, while `:504-509` accumulates the undivided impulses into `FSAV`.
+  That is the same `FREAC`-vs-`FTHREAC` split as the reaction channels, one
+  array further along.
+
+  **Confirmed on real data.** On a converted `getriebekette` deck the T01
+  `/TH/INTER` `FNY` channel climbs monotonically from 0 to 38.7 over the run
+  while its derivative is a physically sensible contact force ramping 17 to
+  62 N — an instantaneous force channel would oscillate about a value, not
+  climb by 38 units.
+
+  **`/TH/SURF` is a different failure, not the same one.** `P` and `A` are
+  neither instantaneous nor a running integral. `pblast_1.F:418-419` adds
+  `AREA*P` into channel 4 and `AREA` into channel 5 every cycle (into
+  `th_surf%channels`, which `resol.F:3447` passes as the `FSAVSURF` dummy — the
+  two names are one array), `hist2.F:688` divides channel 4 by channel 5 just
+  before the write, and `sortie_main.F:1976-1982` zeroes channels 1-5 after
+  every write. So **`P` is the area-weighted mean pressure over the `/TFILE`
+  interval** — a blast peak falling between two writes is averaged away — and
+  **`A` is the loaded area times the number of cycles in that interval**. The
+  old claim that `P*A` is the total blast force was wrong by exactly that cycle
+  count. Differentiating an interval aggregate would be meaningless, so
+  `tools/th_to_csv.py` leaves `/TH/SURF` alone and prints the caveat instead.
+
+  **A superseded rule of thumb.** `writer/contacts.py` told users the T01
+  contact force was "impulse-scaled" and that "x2 recovered the applied load to
+  ~1%". The first half was right; the second was a coincidence of one deck at
+  one instant. There is no constant factor — the ratio between the raw channel
+  and the force is the elapsed accumulation time, which grows with the run. The
+  warning now says to differentiate, and says explicitly that no constant
+  correction exists.
+
+  **A second reaction-path accumulation site**, not cited before: the `/BCS`
+  path `bcs1th.F:143-155` accumulates `MS*DT12` for the translations and
+  `IN*DT12` for the rotations, so `REACXX/YY/ZZ` are *angular* impulses
+  (moment × time). The `/ANIM` twin in the same file, `bcs1th.F:281-287`, runs
+  the identical algebra with **no** `dt` factor. On the implicit path the
+  integration is trapezoidal rather than rectangular (`bcs1th_imp.F:46-56`) but
+  is still an integral: **no solver path writes an instantaneous `/TH`
+  reaction.**
+
+  New: four `state.warn`s (`/TH/INTER`, `/TH/SECTIO`, `/TH/RWALL`, `/TH/SURF`),
+  impulse notes in each emitted `/TH` block, corrected docstrings in
+  `writer/output.py`, `writer/inistate.py`, `writer/loads.py`,
+  `writer/contacts.py`, a corrected `README.md` (with the full sweep table
+  under *Reading the T01*) and `docs/BLAST_ALE_JWL_MAPPING.md`. Three existing
+  tests that hard-indexed a fixed line offset under a `/TH` title now scan past
+  the comment run instead, and the force-transducer test asserts the corrected
+  claim.
+
+- **`*BOUNDARY_PRESCRIBED_MOTION_RIGID`: the imposed-motion reaction readout
+  now warns that `REAC*` is an accumulated impulse.** Previously only
+  `*DATABASE_SPCFORC` warned, on the reasoning that it is the one with a named
+  LS-DYNA file to compare against. But the `TH_reaction` block is the one that
+  puts `REACX/Y/Z` directly next to `DX/Y/Z` on the same node — the exact shape
+  of a force-vs-displacement extraction, and the plot that silently goes wrong
+  — and a deck can have imposed motion with no `*DATABASE_SPCFORC` anywhere, so
+  it never reached the other warning. The deck comment already said so, but a
+  comment inside a `.rad` file is only read by someone who opens the `.rad`
+  file; the conversion log is what gets read.
+
+  The new warning gives the recipe, not just the diagnosis: build the curve
+  from `numpy.gradient(reac, t)` against `DX/Y/Z`, because the raw channel
+  rises monotonically and an untreated `REAC`-vs-`DX` curve has both a
+  meaningless slope and a meaningless enclosed area (it is not the work done).
+
+  A deck that triggers **both** paths would otherwise carry the same
+  three-sentence derivation twice, so `_warn_reac_impulse` emits the shared
+  engine-source explanation once and back-references it the second time. Each
+  path always keeps its own actionable sentence — that is the part that
+  actually differs — and both variants still contain "impulse", `d(REAC)/dt`
+  and `reaction_forces_th.F`, so a grep-style check behaves identically
+  whichever fired first.
 
 - **The orphan-element guard now runs AFTER the provisional-element screen in
   `build_starter`.** A screened-out phantom — an all-integer option card from an

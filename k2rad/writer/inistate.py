@@ -689,7 +689,23 @@ def _make_starter_th_sectio(state: ConversionState) -> List[str]:
     """*DATABASE_SECFORC → /TH/SECTIO on every emitted /SECT (the secforc file's
     section force/moment resultants, written to the T01 at the /TFILE
     frequency). Emitted whenever sections exist, even without a *DATABASE_SECFORC
-    request — harmless and the only way to read the sections back."""
+    request — harmless and the only way to read the sections back.
+
+    **The DEF channels are time-ACCUMULATED impulses, not the instantaneous
+    section resultants.** engine/source/tools/sect/section_c.F:459-467 (shells;
+    section_s.F:565-572 for solids) accumulates ``FSAV(k) = FSAV(k) +
+    DT12*FST(k)`` for k = 1..9 — the six force components and the three
+    moments — and engine/source/output/th/thkin.F:56 copies FSAV into the T01
+    buffer undivided. Nothing resets it on the writing rank: hist2.F:616-622
+    zeroes FSAV only for ISPMD/=0, and sortie_main.F:1945 ("TRAITEMENT SUR FSAV
+    NON CUMULE") resets only the monvol block, FSAV(26) and FSAV(29).
+
+    So FNX/Y/Z and FTX/Y/Z carry force x time and M1/M2/M3 moment x time, and
+    the channel rises steadily under a steady load. This is NOT LS-DYNA's
+    secforc, which reports the instantaneous resultant: the equivalent is
+    d(FNX)/dt (tools/th_to_csv.py writes that column). Same defect class as the
+    /TH/NODE REAC* and /TH/INTER channels — one shared FSAV convention, three
+    keywords affected."""
     if not state.sect_ids:
         return []
     if not state.db_secforc_dt:
@@ -697,11 +713,23 @@ def _make_starter_th_sectio(state: ConversionState) -> List[str]:
                    "/TH/SECTIO emitted anyway so the /SECT forces are recorded "
                    "(T01, /TFILE frequency); add *DATABASE_SECFORC to control "
                    "the output interval.")
+    state.warn(
+        "/TH/SECTIO FNX/Y/Z, FTX/Y/Z, M1/M2/M3: these channels are a "
+        "time-ACCUMULATED impulse (force x time) and angular impulse "
+        "(moment x time), not the instantaneous section resultants LS-DYNA's "
+        "secforc reports — the engine adds DT12*FST every cycle "
+        "(section_c.F:459-467, section_s.F:565-572) and never resets the "
+        "accumulator on the rank that writes the T01 (hist2.F:616-622 zeroes "
+        "FSAV only for ISPMD/=0). Differentiate with respect to time "
+        "(F = d(FNX)/dt, e.g. numpy.gradient, or tools/th_to_csv.py which "
+        "writes the differentiated column) before comparing against secforc.")
     th_id = state.next_id()
     lines = [
-        "#-  TIME HISTORY (*DATABASE_SECFORC -> section forces):", HDR,
+        "#-  TIME HISTORY (*DATABASE_SECFORC -> section force impulses):", HDR,
         f"/TH/SECTIO/{th_id}",
         "TH_SECTIONS",
+        "#  DEF = FNX/Y/Z, FTX/Y/Z, M1/M2/M3: IMPULSE (force x time), not force",
+        "#  FSAV accumulates F*dt every cycle: section force = d(FNX)/dt",
         "#     var1",
         "DEF       ",
     ]
