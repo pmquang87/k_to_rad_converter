@@ -384,6 +384,68 @@ def _resolve_composites(state: ConversionState) -> None:
 # Prepass: per-part /PROP allocation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _warn_composite_beam_part(state: ConversionState, pid: int, mid: int,
+                              own_mat_is_composite: bool,
+                              is_composite_part: bool) -> None:
+    """A part whose only elements are BEAMS, reached by the composite prepass.
+
+    Split out of the element-free branch because the two are opposites. An
+    element-free part is starter-clean (the compatibility loop runs per element
+    GROUP and it contributes none, measured 0 ERROR(S) 0 WARNING(S)); a
+    beam-only part contributes a group, and the ortho/composite laws are
+    rejected on it. Measured on ``starter_win64`` (nt=6) — two ``*ELEMENT_BEAM``
+    on one ``*SECTION_BEAM`` ELFORM=2, part material ``*MAT_ORTHOTROPIC_ELASTIC``
+    (/MAT/LAW93) — ``1 ERROR(S)``, ``ERROR TERMINATION``::
+
+        ERROR ID :   3046
+        ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+        DESCRIPTION :
+           THE FOLLOWING MATERIAL LAW/ELEMENT TYPE COMBINATIONS ARE NOT
+           SUPPORTED:
+           ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 2 OF
+           TYPE 93
+
+    3046 and not 3047: every composite law k2rad emits (LAW93/127/43/27) leaves
+    ``PROP_BEAM`` at the 0 default from ``ini_mat_elem.F:89``, which fails the
+    MATERIAL/ELEMENT test in ``check_mat_elem_prop_compatibility.F`` before any
+    property is examined — so no property this prepass could synthesize would
+    change the outcome, and the fix is necessarily a deck change.
+
+    When the part's OWN material is not composite and only a ``*PART_COMPOSITE``
+    brought it here, nothing is rejected: the layup is simply dropped, the same
+    way the solid branch drops it, and this reports only that.
+    """
+    if not own_mat_is_composite:
+        state.warn(
+            f"*PART_COMPOSITE {pid} holds BEAM elements — the per-ply "
+            "/PROP/TYPE51 layup is a SHELL property. The layup is DROPPED and "
+            "the part keeps its beam property and its own *PART material; a "
+            "beam has no through-thickness stack for the plies to describe.")
+        return
+    state.warn(
+        f"Composite part {pid} holds BEAM elements and no shell or solid ones, "
+        "so no orthotropic property is synthesized"
+        + (" and its *PART_COMPOSITE layup is DROPPED"
+           if is_composite_part else "")
+        + f". This one does NOT pass the starter: mid {mid} converts to an "
+        "orthotropic/composite law, and the material/element compatibility "
+        "check REJECTS every one of them on a beam — measured on "
+        "starter_win64, a two-element beam part on *MAT_ORTHOTROPIC_ELASTIC "
+        "(mid 2, /MAT/LAW93) gives 1 ERROR(S) and ERROR TERMINATION, verbatim "
+        "'ERROR ID : 3046 / ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY / "
+        "ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 2 OF "
+        "TYPE 93'. The "
+        "composite laws (LAW93/127/43/27) leave PROP_BEAM at its 0 default "
+        "(ini_mat_elem.F:89), which fails the ELEMENT test in "
+        "check_mat_elem_prop_compatibility.F before any property is looked "
+        "at, so no synthesized property could rescue it — the DECK has to "
+        "change: give the beam part a beam-capable material (*MAT_ELASTIC → "
+        "/MAT/LAW1, *MAT_PLASTIC_KINEMATIC → /MAT/LAW44, *MAT_JOHNSON_COOK → "
+        "/MAT/LAW2), or re-mesh it as shells if the orthotropy is the point. "
+        "(The /PROP/BEAM material-compatibility warning names the same "
+        "ERROR 3046 from the property side.)")
+
+
 def _assign_composite_props(state: ConversionState) -> None:
     """build_starter prepass: give every composite/orthotropic part its own
     property id.
@@ -399,6 +461,7 @@ def _assign_composite_props(state: ConversionState) -> None:
     _resolve_part_composite_fallbacks(state)
     shell_pids = {e.pid for e in state.shell_elems}
     solid_pids = {e.pid for e in state.solid_elems}
+    beam_pids = {e.pid for e in state.beam_elems}
     shell_only_laws = {}
     for mid in state.mat_transverse_aniso:
         shell_only_laws[mid] = ("*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC",
@@ -412,6 +475,14 @@ def _assign_composite_props(state: ConversionState) -> None:
         pc = state.part_composites.get(pid)
         is_composite_part = pc is not None and _layup_is_convertible(pc)
         if not is_composite_part and part.mid not in comp_mids:
+            continue
+        if pid in beam_pids and pid not in shell_pids \
+                and pid not in solid_pids:
+            # NOT the element-free case below, even though "no shell or solid
+            # elements" is true of it as well: this part HAS a mesh, and the
+            # starter hard-fails on it. See _warn_composite_beam_part.
+            _warn_composite_beam_part(state, pid, part.mid,
+                                      part.mid in comp_mids, is_composite_part)
             continue
         if pid not in shell_pids and pid not in solid_pids:
             # A MESH sanity check, NOT a hard-failure prediction. This used to

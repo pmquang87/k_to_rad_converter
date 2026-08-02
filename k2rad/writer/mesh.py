@@ -2420,11 +2420,13 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     conditions mirror ``_make_materials`` and ``_make_composite_materials``
     exactly.
 
-    Wider than ``inistate.py::_xref_target_law``, which maps only 7 of the
-    families and returns ``None`` for the rest — including ``mat_rigid`` and the
-    ``mat_spotweld`` fallback, both of which really are LAW1 and really are on
-    that whitelist. Unifying the two is a follow-up, deliberately not done here:
-    it would change which parts get a ``/XREF`` and belongs in its own change.
+    The ONE mid → law map in the codebase: ``inistate.py::_resolve_xref_parts``
+    reads it for the starter's solid-/XREF law whitelist too. It used to keep a
+    private 7-family copy that returned ``None`` for ``mat_rigid`` and the
+    ``mat_spotweld`` fallback, both really LAW1 and really on that whitelist, so
+    both lost their ``/XREF`` under a warning about a law violation that did not
+    exist. Anything added here therefore reaches both callers — check the /XREF
+    gate when adding a family that lands on LAW 1/35/38/42/70/88/90.
 
     Not mapped, because no ``*PART`` can name it: the ``/MAT/LAW6`` carrier a
     bare ``*EOS_*`` with no companion ``*MAT_NULL`` gets under the EOSID, and
