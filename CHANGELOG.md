@@ -1545,6 +1545,84 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **A beam part whose material is not one of five Radioss laws converted to a
+  deck that ERROR-TERMINATES the starter, and k2rad said nothing at all.**
+  `_make_properties` writes a `/PROP/BEAM` (IGTYP 3) for every `*SECTION_BEAM`
+  without ever looking at the material, and the classic beam property accepts
+  only `PROP_BEAM` 1 or 3 — `/MAT/LAW0`, `LAW1`, `LAW2`, `LAW13`, `LAW44`.
+  `*MAT_PIECEWISE_LINEAR_PLASTICITY`, by some distance the most common LS-DYNA
+  beam material, routes to `/MAT/LAW36`, so the single likeliest beam deck there
+  is was converted straight into an unrunnable one, silently.
+
+  ```
+  ERROR ID :   3047
+  ** ERROR IN MATERIAL/PROPERTY COMPATIBILITY
+     PROPERTY ID 2  OF TYPE 3  IS NOT COMPATIBLE WITH MATERIAL ID 1  OF TYPE 36
+  ERROR ID :    745
+  ** ERROR IN MATERIAL-PROPERTY COMPATIBILITY
+     ON ELEMENT ID=11, PID TYPE 2 IS NOT COMPATIBLE WITH
+     MATERIAL LAW 36
+  ```
+
+  **The whitelist is transcribed from the starter, not from the manual.**
+  The gate is on the MATERIAL: each law declares a class through
+  `INIT_MAT_KEYWORD` — 1 `BEAM_CLASSIC` (TYPE3 only), 2 `BEAM_INTEGRATED`
+  (TYPE18 only), 3 `BEAM_ALL` (`init_mat_keyword.F:251-258`) — and IGTYP 3
+  demands 1 or 3 (`check_mat_elem_prop_compatibility.F:379-381`). Grepping every
+  `INIT_MAT_KEYWORD` call under `starter/source/materials/` returns 10 call
+  sites, all unconditional, and that is the complete list: LAW1 is BEAM_CLASSIC
+  (`hm_read_mat01.F:148`); LAW0 (`mat00:133`), LAW2 in all three of its readers
+  (`_jc:381`, `_zerilli:342`, `_predef:392`), LAW13 (`mat13:128`) and LAW44
+  (`mat44:319`) are BEAM_ALL; LAW34 (`mat34:162`), LAW36 (`mat36:360`) and LAW71
+  (`mat71:251`) are BEAM_INTEGRATED. Every other law keeps the `PROP_BEAM = 0`
+  default from `ini_mat_elem.F:89`.
+
+  **The two error ids are not interchangeable, and the split is structural.** A
+  law at `PROP_BEAM == 0` fails the ELEMENT test first (`IF
+  (MAT_PARAM(IMAT)%PROP_BEAM == 0) COMPAT_ELEM = .FALSE.`, same file
+  lines 153-155 / 342-343) and reports **3046** — material-vs-element, the
+  property never enters it. Only a law that *is* beam material of the wrong
+  class, i.e. BEAM_INTEGRATED LAW34/36/71, passes that and fails the property
+  test as **3047**, joined by the legacy hard-coded pair check in
+  `initia.F:2806-2817` firing **ERROR 745** once per beam element. The warning
+  names whichever id the user will actually read. Measured on `starter_win64`
+  (nt=6), one `*SECTION_BEAM` ELFORM=2 and two `*ELEMENT_BEAM` per deck,
+  everything else held constant:
+
+  | beam material | law | starter |
+  |---|---|---|
+  | `*MAT_ELASTIC` | 1 | NORMAL TERMINATION, 0 ERROR(S) 0 WARNING(S) |
+  | `*MAT_JOHNSON_COOK` | 2 | 0 ERROR(S) (only unrelated warnings) |
+  | `*MAT_PLASTIC_KINEMATIC` | 44 | NORMAL TERMINATION, 0 ERROR(S) 0 WARNING(S) |
+  | `*MAT_PIECEWISE_LINEAR_PLASTICITY` | 36 | 3 ERROR(S): 3047 + one 745 per element |
+  | `*MAT_BLATZ-KO_RUBBER` | 42 | 1 ERROR(S): 3046 |
+
+  The check resolves the law through the new `_target_mat_law`, which follows
+  **k2rad's own routing** rather than the LS-DYNA material number — `*MAT_024`
+  and `*MAT_POWER_LAW_PLASTICITY` are different keywords on the same LAW36,
+  `*MAT_JOHNSON_COOK` is LAW2 or LAW4 depending on an attached `*EOS_*`,
+  `*MAT_NULL` is `/MAT/VOID` alone but the `/MAT/LAW6` carrier with one, and
+  each rubber keyword picks its law off a curve or order field. It is the first
+  mid → law map in the codebase that covers every material container;
+  `inistate.py::_xref_target_law` covers 7 of them and is left alone here.
+
+  **Warn-only, deliberately — no auto-promotion to `/PROP/TYPE18`.** A promotion
+  is not information-preserving: `*SECTION_BEAM` ELFORM=2 states four
+  independent resultants (A, Iss, Itt, J) while `/PROP/TYPE18` integrates a
+  point cloud whose `Ixx` the starter *defines* as `Iyy + Izz`
+  (`hm_read_prop18.F:289-301`) — the polar moment, equal to the torsion constant
+  only for a circular section — so promoting means inventing a cross-section and
+  overwriting the deck's J. It would also rescue only a subset: TYPE18 takes
+  LAW34/36/71, but a beam on LAW38/42/50/70/76/95/127/128 has no beam property
+  in Radioss at either type and still needs a different material. A warning that
+  names the remedy covers every case; a promotion covers a third of them.
+
+  Diagnostics only: no emitted card changes. The `/PROP/BEAM` of a rejected
+  LAW36 deck is line-for-line the one a starter-clean LAW44 deck gets, the five
+  goldens are byte-identical, and the `*MAT_024` repro deck re-converts to the
+  same SHA256 as on `master` — with 0 warnings there and 1 here. 18 new tests in
+  a new `tests/test_beam_mat_prop_compat.py` (1563 → 1581, 125 → 143 subtests).
+
 - **An element-free `*PART` produced a `/PART` pointing at a property that was
   never emitted — starter ERROR 178, and the whole conversion dead on a part
   carrying no mesh.**
