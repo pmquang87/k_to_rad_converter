@@ -11,6 +11,263 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`*INTEGRATION_BEAM` user cross-section rules: a beam's section is now
+  integrated cell by cell instead of being emitted as a zero-stiffness
+  resultant.** Nothing in `k2rad/` parsed the keyword, and `handle_section_beam`
+  never read card-1 field 4, so the reference was lost twice over — a deck whose
+  beam section lives in a rule (an I-beam frame, a tube, a tapered spar) got a
+  `/PROP/BEAM` with `Area = Iyy = Izz = Ixx = 0` and no warning that its beams
+  had no stiffness at all. 75 new tests in a new `tests/test_integration_beam.py`
+  plus 9 in `tests/test_include_transform.py`; no flag.
+
+  **What is byte-identical, precisely.** Every `.k`/`.key`/`.dyn` deck in the
+  repo re-converts to the same SHA256 as on `master`, and all five goldens are
+  unchanged — but that corpus cannot detect the whole change, because all six
+  repo decks carrying a `*SECTION_BEAM` use `ELFORM = 9`, the one dialect kept
+  verbatim. The `*SECTION_BEAM` card-2 dialect rewrite below *does* change output
+  for `ELFORM 0/3/4/5/6/7/8/11/14` and blank, none of which are new cards: those
+  used to read a thickness (or a ramp time, or an A10 string) as `A/ISS/ITT/J`
+  and now read their real card. See "Three latent card-2 mis-reads" further
+  down for what each becomes.
+
+  **This is net-new capability, not parity — dyna2rad converts none of it.**
+  There are two independent stops on the Altair side. `INTEGRATION_BEAM` is
+  commented out of the R14.1 data hierarchy (`data_hierarchy.cfg:4244-4253`), so
+  `HWCFGReader::readHeader` bails with no descriptor, no pre-object and no
+  message (the error text is real but `displayMessage` is compiled out in both
+  `mec_msg_manager.cpp:51-63` and `meci_read_context.cpp:111-123`) — the card is
+  silently dropped. And the `*SECTION_BEAM` branch that would consume a rule is
+  an explicit empty stub, *"NOT YET SUPPORTED (waits for RD-6730 to be solved)"*
+  (`convertprops.cxx:1343-1347`), which still emits a `/PROP/TYPE18` with
+  `ISFLAG` and `NITRS` never set. A grep for every `*INTEGRATION_BEAM` attribute
+  name across the whole `dyna2rad` tree returns zero hits.
+
+  **The link is card-1 field 4 (`QR/IRID`, cols 31–40) and it is a FLOAT.**
+  `EQ.-n`: `|n|` is the rule id (Vol I R17 p.41-4) — the exact analogue of
+  `*SECTION_SHELL`'s field 6, and `-77`, `-77.0` and `-7.700E+01` all occur in
+  real decks. On the object branch the quadrature scalar is **dead**: dyna2rad's
+  own `SCALAR_OR_OBJECT` cell force-zeroes it
+  (`meci_data_reader.cpp:6990-7003`), so a converter that read `QR` without
+  checking the sign would see `QR = 0` and stack the 2-point rectangular rule on
+  top of the user rule it was already given. k2rad stores the two separately.
+
+  **The rule's two card blocks are ADDITIVE, not exclusive.** Card 1 is
+  `IRID NIP RA ICST K`; the reader takes the `D1 D2 D3 D4 SREF TREF D5 D6`
+  dimension card whenever `ICST > 0` **and** `NIP` `S T WF PID` cards whenever
+  `NIP ≠ 0`, exactly as the manual's two independent headings say. The HyperMesh
+  CFG gates the point list on `if(LSD_ICST == 0 && LSD_NIP > 0)` and is wrong —
+  verified with LS-PrePost 4.13, where a `ICST=5, NIP=2` rule followed by one
+  card too few swallows the next rule's header as the missing point card and
+  loses that rule entirely. Per-rule stride is therefore
+  `1 + [ICST>0] + [NIP≠0]·NIP`, several rules may stack under one header, and
+  there is no `_TITLE` variant. Note `SREF`/`TREF` sit *between* `D4` and `D5`,
+  so `D5`/`D6` are fields 7 and 8.
+
+  **`ICST = 0` → `/PROP/TYPE18` `Isect = 0` with one `Yi Zi AREA` card per
+  cell.** `S`/`T` are normalized quadrature coordinates in [−1, +1] and `WF` is
+  the area fraction `A_i/A`, while Radioss wants absolute coordinates and an
+  absolute area (`prop_p18_int_beam.cfg:29-31`). The ±1 square is
+  `*SECTION_BEAM` card 2a's `TS1 × TT1` rectangle and the gross area is
+  `RA·TS1·TT1`, so `Y_i = (S_i − NSLOC)·TS1/2`, `Z_i = (T_i − NTLOC)·TT1/2`,
+  `A_i = WF_i/ΣWF · RA·TS1·TT1`.
+
+  `NSLOC`/`NTLOC` (card 2a fields 5/6) are the "location of the reference
+  surface" — the beam's *node line* — inside the same ±1 square: `1.0` = the side
+  at `s = 1`, `0.0` = centre, `−1.0` = the side at `s = −1` (p.41-13/41-14).
+  `/PROP/TYPE18`'s `Yi/Zi` are measured from the nodes, so subtracting them is
+  what puts the section where LS-DYNA has it. A beam hung off a shell surface
+  with `NSLOC = 1` would otherwise be silently re-centred on its own nodes,
+  deleting exactly the eccentricity that couples axial force to bending. The
+  rule's `SREF`/`TREF` override them "even if `SREF = 0`" (p.29-3) but live on
+  the `ICST > 0` dimension card, which never reaches this path, so the two
+  cannot collide.
+
+  The `ΣWF` normalization mirrors dyna2rad's *shell* rule
+  (`convertprops.cxx:1991-1996`) and is a no-op on a well-formed deck; LS-DYNA
+  applies `WF` literally, so weights that do not add up to 1 now get the applied
+  scale factor quoted rather than silently changing the section area.
+  **`TS1`/`TT1`, not `TS1`/`TS2`** — those are the s-direction thickness at
+  node 1 and node 2, so dyna2rad's `L1←TS1, L2←TS2` map (`:1274-1275`) reads a
+  taper as a depth and turns a prismatic rectangle into a square. A real
+  `TS2`/`TT2` taper is reported (`/PROP/TYPE18` is prismatic), and **`CST = 1` is
+  refused rather than mis-read**: it redefines `TS1`/`TT1` as the outer and inner
+  *diameter* (p.41-13), so denormalizing the rule's ±1 square onto them would
+  emit `TS1·TT1` of area where the annulus really has `π/4·(TS1²−TT1²)` — 2.8×
+  too stiff axially on a 20/16 tube, with nothing said. `Iref = 1` with
+  `Y0 = Z0 = 0` keeps the reference axis on the node line where LS-DYNA puts it;
+  `Iref = 0` makes the starter recompute the centre as the area-weighted
+  barycentre and shift every point by it (`hm_read_prop18.F:267-279`), silently
+  relocating the neutral axis of a deliberately eccentric section.
+
+  **`ICST = 1..22` → `Isect = ICST + 9`.** The map is exact and 1:1 with a
+  constant offset of 9 against the starter's own shape table
+  (`defbeam_sect_new.F90`, whose `case` blocks name each shape and set `nb_dim`
+  / `intr_max`), and the dimension counts agree with LS-DYNA's *own*
+  `SECTION_nn` card-2b field counts on all 22 rows. `L1..Ln ← D1..Dn`; `K`
+  becomes `NITRS` clamped to that shape's `intr_max` (ERROR 3060 above it). Only
+  the shapes needing **≤ 2** dimensions are emitted — ICST 8 (circular, `L1` =
+  radius, `area = pi*l(1)**2`), 9 (tubular) and 11 (solid box):
+
+  | `/BEGIN` | CFG resolved | `L3..L6` | `Isect=10, L1..L4` |
+  |---|---|---|---|
+  | 2022 (what k2rad writes) | `radioss120` | absent | `WARNING 100213` + `ERROR 3059` |
+  | 2026 | `radioss2024` | present | reads cleanly, 27 points |
+
+  Both rows are the real starter on two decks differing only in `/BEGIN`. The
+  CFG search runs *downward* from the requested version
+  (`cfg_kernel.cpp:266`, `vers.substr(found)`), so `radioss2024`'s six-dimension
+  form is invisible at 2022 and the first hit declares `L1`/`L2` only. Shapes
+  needing more are reported with both ways out named (restate as an `ICST=0`
+  rule, which has no version gate, or as `A/ISS/ITT/J` on an `ELFORM=2`
+  section) rather than emitted onto a deck the starter refuses.
+
+  **The material gate runs before the property type is chosen, not after.**
+  `PROP_BEAM` is a per-law flag (`init_mat_keyword.F:250-258`): LAW0/2/13/44 are
+  `BEAM_ALL`, LAW34/36/71 are `BEAM_INTEGRATED`, and **LAW1 (`/MAT/ELAST`) is
+  `BEAM_CLASSIC`, i.e. TYPE3 only** — `check_mat_elem_prop_compatibility.F:239-241`
+  rejects it on TYPE18 with ERROR 3047 followed by ERROR 745, which kills the
+  run. Such a section stays on `/PROP/BEAM` and the rule is condensed into
+  `Iyy = Σ(A_i²/12 + A_i·z_i²)`, `Izz = Σ(A_i²/12 + A_i·y_i²)`,
+  `Ixx = Iyy + Izz`.
+
+  **`Iyy` is the `z`-based sum, and the ENGINE is what pins that** — the
+  starter's listing block is not usable as the spec here. `hm_read_prop18.F:295`
+  accumulates `TIYY_I` from `RYI` (the *y* coordinate) and prints it under the
+  heading `IYY`, but it never stores `TIYY_I` into `GEO` and nothing downstream
+  reads it. What the solver actually does: `/PROP/BEAM` develops
+  `MOM(2) = KYY·E·GEO(2)` with `GEO(2) = IYY` (`m1lawp.F:108`,
+  `hm_read_prop03.F:114`), while `/PROP/TYPE18` develops
+  `MOM(2) = Σ(A_i·σ_i·z_i) = E·KYY·Σ(A_i·z_i²)` in the same slot
+  (`mulaw_ib.F:139` `DEPSXX = EXX − YPT·KZZ + ZPT·KYY`, then
+  `main_beam18.F:253`). Equating them gives `Iyy = Σ(A_i·z_i²)`. Two independent
+  cross-checks inside this repo agree with the engine and not with the listing:
+  the ICST=11 closed form `Iyy = D1·D2³/12` (with `D1` along `y`,
+  `defbeam_sect_new.F90` case(20) `dy1 = l(1)*fac`), and `*SECTION_BEAM`
+  ELFORM 2's `Iyy ← ISS`, LS-DYNA's "area moment of inertia about the local
+  *s*-axis" = `∫t² dA` = `∫z² dA` (p.41-15). Tests pin the convention on a
+  deliberately asymmetric section, on the two-cell degenerate case where one
+  axis collapses to the self term, and by requiring the point route and the
+  shape route to agree on the same rectangle.
+
+  The `A_i²/12` self term models each cell as a square patch — the starter's own
+  choice, exact only for square cells (a 4×4 grid of 0.5 × 2.0 cells wants
+  `0.5·2³/12 = 0.333` each and gets `1/12`), but a rule states no cell *shape*,
+  only a position and an area, so nothing better is recoverable. `Ixx` as the
+  polar moment is the same approximation dyna2rad makes when `J = 0`
+  (`convertprops.cxx:1400-1402`). ICST 8/9/11 fall back through their closed
+  forms. The whitelist is deliberate: an unrecognized material keeps today's
+  `/PROP/BEAM` rather than being promoted into a starter error. The gate is per
+  *section*, so one incompatible part moves every part on it — the warning names
+  the ones dragged along, since a `BEAM_INTEGRATED` law among them is itself an
+  ERROR 3047 that the `/PROP/BEAM` material gate then reports in turn.
+
+  Rule support covers **ELFORM 0, 1, 4, 5 and 11**; dyna2rad reaches a
+  rule-aware path for 1 and 4 only and drops 5 and 11 entirely (no switch case,
+  no `default:`, so the part ends up with `prop_ID = 0`). `ELFORM = 14` gets its
+  own message and an accurate one: it is the **elbow** element and the one
+  formulation that *mandates* a user rule — "A user-defined integration rule
+  with a tubular cross section (9) must be used" (p.41-11) — so the rule is
+  understood and it is Radioss that has no elbow to put it on. Warn-dropped or
+  warn-reported by name, every one: a dangling `IRID`; a rule on an `ELFORM`
+  that integrates no cross-section; a section no `*ELEMENT_BEAM` uses; a
+  spotweld-only section; a missing `TS1`/`TT1`; a tubular `CST = 1`; a
+  `TS2`/`TT2` taper; `RA ≤ 0` (its card default is 0.0, which would
+  make every cell zero-area — starter ERROR 314 — so 1.0 is substituted and said
+  so); `ΣWF = 0`; a `ΣWF ≠ 1` (renormalized, scale factor quoted); a
+  non-positive cell area; more than 100 cells (ERROR 977); a
+  short `S/T/WF/PID` block (with the `NIP`-vs-point-count guard Altair's shell
+  code lacks — `convertprops.cxx:1991-2016` loops to `NIP` over both lists with
+  no size check); point cards under an `ICST > 0` rule (consumed, data ignored,
+  as LS-DYNA does); a per-cell `PID_i` (`/PROP/TYPE18` has one material for the
+  whole section); `SREF`/`TREF`; an unsupported `ICST`; a missing dimension; a
+  duplicate `IRID`; and a rule nobody references (recorded in the *recognized but
+  not emitted* channel rather than vanishing from the accounting).
+
+  Starter-validated: three cantilevers whose `*SECTION_BEAM` card sets are
+  stacked under ONE header, binding three rules stacked under one
+  `*INTEGRATION_BEAM` header — an `ICST = 0` six-cell cloud on a 20 × 30
+  section, an `ICST = 8` circle of radius 8 with `K = 1`, and an `ICST = 11`
+  18 × 26 box with `K = 2` — runs through `starter_win64.exe` with **0 errors,
+  0 warnings**, and its echo reproduces every number:
+
+  | prop | `SECTION TYPE` | points | `BEAM AREA` | expected |
+  |---|---|---|---|---|
+  | 5 | 0 | 6 (as written) | 600.000 | `RA·TS1·TT1 = 1.0·20·30` |
+  | 6 | 17 | 64 (starter-generated) | 201.0619298297 | `π·8²` |
+  | 7 | 20 | 25 (starter-generated) | 468.000 | `18·26` |
+
+  Every one of property 5's six cells comes back at the hand-computed
+  `(S·TS1/2, T·TT1/2, WF·A)` — `(±10, ±15, 120)` and `(0, ±7.5, 60)` — which
+  also confirms `L1` is the circle's RADIUS and not its diameter.
+
+- **Rider: `*SECTION_BEAM`, `*SECTION_SOLID` and `*SECTION_DISCRETE` read every
+  card SET under one header.** All three handlers read one fixed card index and
+  returned, so every section after the first in a multi-set block was dropped
+  silently — and a `*PART` pointing at one of them fell through to an
+  auto-generated placeholder property. Same defect and same fix shape as
+  `*SECTION_SHELL` got in the release above; `*SECTION_BEAM` is the harder one
+  because its card 2 is ELFORM-dependent *in its very existence*:
+
+  ```
+  *SECTION_BEAM      : T? + 1 + 1 + [OPTCARD] + [card 2c.1]
+  *SECTION_SOLID     : T? + 1 + [option cards] + [1 + NIP + ceil(LMC/8)]
+  *SECTION_DISCRETE  : T? + 2                                   (fixed)
+  ```
+
+  The card-2 dialect is picked per set from `ELFORM` **and** a look-ahead on
+  that card's own first 10 columns — "the first 7 characters of the card spell
+  out SECTION" selects the named standard-section form, which the CFG does
+  literally with `CARD_PREREAD("%10s", SectType)` + `_FIND(SectType,"SECTION")`
+  (`sect_beam.cfg:611-612`). Both riders hang off it: `OPTCARD` only for
+  `ELFORM = 2` on a named card 2b when the next line really starts with
+  `OPTCARD`, and card 2c.1 only for `ELFORM = 12` whose card 2 was the
+  **numeric** 2c — "Include this card if ELFORM equals 12 and the preceding card
+  is Card 2c" is exact, and an `ELFORM = 12` + `SECTION_09` set takes no 2c.1 at
+  all (verified against LS-PrePost on a 7-set block containing both spellings).
+  `ELFORM = 10` is not a defined formulation, so the walk stops there loudly
+  rather than guessing a stride. Under `_TITLE` the 80a card is consumed
+  **unconditionally per set** — eating it once shifts every later set up a line
+  and registers a phantom section that overwrites a real one. Each keyword now
+  reports a duplicate `SECID`.
+
+  Three latent card-2 mis-reads fall out of the dialect table, all of them the
+  old catch-all "fields 1-4 are `A/ISS/ITT/J`" branch firing on a card that says
+  something else: `ELFORM = 3` (truss) put `RAMPT`, a ramp *time*, and `STRESS`,
+  an initial *stress*, into two bending inertias; a named `SECTION_nn` card put
+  the A10 string itself into `Area` (0.0) and `D1..D3` into `Iyy/Izz/Ixx`; and
+  `ELFORM = 0/4/5/11` put a *thickness* into `Area`. Each is now read into the
+  right field or reported as unconvertible. `ELFORM = 9` keeps the exact fields
+  k2rad's `/PROP/TYPE13` spotweld-connector path already read, so no nugget
+  moves.
+
+  Reading them right must not make a runnable-if-wrong deck unrunnable, so
+  `ELFORM 0/1/4/5/11` — whose card 2 is thicknesses and carries no resultants at
+  all — now **derive** the prismatic section from `TS1`/`TT1` instead of landing
+  on an all-zero `/PROP/BEAM`. An all-zero one is not a soft beam: the starter
+  refuses it outright, `hm_read_prop03.F:151-182` raising ERROR 314 (`AREA`),
+  315 (`IYY`), 316 (`IZZ`) and 317 (`IXX`) on each non-positive value. `CST = 0`
+  gives the solid `TS1 × TT1` rectangle, `CST = 1` the annulus its outer/inner
+  *diameters* describe, and the substitution is reported. Where no section can
+  be derived at all — `ELFORM 6`, `14`, `7`/`8` (no t-extent), a named
+  `SECTION_nn`, an undefined section — the message now names those four ERROR
+  ids instead of saying the beam merely has no stiffness.
+
+  `*INCLUDE_TRANSFORM` gets four new walkers to match (`_off_section_beam`,
+  `_off_section_solid`, `_off_section_discrete`, `_off_integration_beam`),
+  replacing three declarative specs that offset only the first set's `SECID`.
+  `*SECTION_BEAM`'s `QR/IRID` is the **second** negated back-reference this
+  converter meets and reuses `_rewrite_neg_ref` unchanged; on the rule, the
+  `*PART` reference is field **4** of a point card, not field 3 as on the shell
+  rule, and the `ICST > 0` dimension card has to be strided over or the next
+  rule's card 1 is read out of the middle of this one. Both riders and the
+  ELFORM 101-105 user-solid stride are covered through a transform as well, each
+  followed by a set with a distinct `SECID` so a one-line de-sync cannot pass.
+
+  `*SECTION_DISCRETE` also reports the one malformed shape it has always
+  tolerated silently: a set that omits its card 2 mid-block makes the walk read
+  the *next* set's card 1 as `CDL`/`TDL` and stride over it, losing that section
+  and putting every set after it one line out of phase.
+
 - **`*INTEGRATION_SHELL` user integration rules: a shell's per-layer
   thicknesses and materials now come from the deck instead of an even split.**
   Nothing in `k2rad/` parsed the keyword — it landed in `skipped_keywords` — and
@@ -1648,6 +1905,90 @@ Prior history (before this changelog was introduced) is summarized in the
   are what actually verifies this fix. And all four springs draw starter
   `WARNING ID 327`, "BAD SPRING FRAME DEFINITION (PARALLEL AXIS)", identically
   on master and here.
+
+- **A `*INITIAL_FOAM_REFERENCE_GEOMETRY` was dropped on `*MAT_RIGID` and
+  `*MAT_SPOTWELD` parts under a warning that named a law violation that does not
+  exist.** `inistate.py` resolved each part's law through its own private
+  7-family table for the starter's solid-`/XREF` whitelist (1/35/38/42/70/88/90,
+  `hm_read_xref.F:222-226`, else ERROR 2014). The table returned `None` — read as
+  "some other law" — for the two families that reach `/MAT/ELAST` by a route
+  other than `*MAT_ELASTIC`: `*MAT_RIGID`, and the `*MAT_SPOTWELD` fallback a
+  MAT_100 part gets when it is not a pure-beam connector. **Both are LAW1 and
+  LAW1 is on that whitelist**, so both lost their stress-free reference geometry
+  and were told the wrong reason for it.
+
+  The table is gone. The gate now reads `mesh.py::_target_mat_law`, the complete
+  mid → law routing added with the `/PROP/BEAM` material check below, so there
+  is ONE such map in the codebase; the off-whitelist message gained the actual law
+  number as a side effect (`/MAT/LAW36, which is outside …` instead of `a law
+  outside …`), and distinguishes it from a material that gets no `/MAT` at all.
+  The two families are then decided on their own merits, both measured on
+  `starter_win64` (nt=6), one hexa on a `*SECTION_SOLID` with a 4-node reference
+  geometry:
+
+  - **`*MAT_SPOTWELD` fallback → the `/XREF` is emitted.** It is an ordinary
+    deformable part with a real unstressed configuration. Converted deck:
+    `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)`. The section is promoted to
+    `Ismstr=10` with it, as for any other kept `/XREF` part (ERROR 2013
+    otherwise). The pure-beam MAT_100 connector is untouched — it has no `/MAT`
+    at all and no solid elements, so it never reaches the gate.
+  - **`*MAT_RIGID` → still no `/XREF`, for the right reason.** The part converts
+    to an `/RBODY`, every node it owns is kinematically slaved to the rigid
+    master, and it has no strain state a reference geometry could define. This
+    is *not* a starter rejection — force-emitting the block on a rigid brick
+    also measures `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)` — it is inert,
+    while dragging the part's `*SECTION_SOLID` from `Ismstr 0` to `10`
+    (measured), which the shared-section rule then propagates to any deformable
+    part using that section. The warning now says that instead. Applied before
+    the solid/shell split, so a rigid *shell* part — which the shell branch,
+    having no law gate, used to hand an equally meaningless `/XREF` — follows
+    the same rule.
+
+- **The element-free composite warning claimed the starter accepts a part that
+  it ERROR-TERMINATES on.** The check guarded on "no shell or solid elements",
+  which is also true of a part holding only BEAM elements, and then promised
+  "the starter ACCEPTS that: its material/property compatibility check runs per
+  ELEMENT GROUP … and a part with no elements contributes none". A beam-only
+  part contributes a group. Measured on `starter_win64` (nt=6), two
+  `*ELEMENT_BEAM` on one `*SECTION_BEAM` ELFORM=2, part material
+  `*MAT_ORTHOTROPIC_ELASTIC` (`/MAT/LAW93`) — `1 ERROR(S)`,
+  `ERROR TERMINATION`:
+
+  ```
+  ERROR ID :   3046
+  ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+  DESCRIPTION :
+     THE FOLLOWING MATERIAL LAW/ELEMENT TYPE COMBINATIONS ARE NOT SUPPORTED:
+     ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 2 OF TYPE 93
+  ```
+
+  3046 and not 3047: every composite law k2rad emits (LAW93/127/43/27) leaves
+  `PROP_BEAM` at the 0 default from `ini_mat_elem.F:89`, which fails the
+  MATERIAL/ELEMENT test in `check_mat_elem_prop_compatibility.F` before any
+  property is examined — so no property this prepass could synthesize would
+  change the outcome, and the warning gives deck-level advice (a beam-capable
+  material, or re-mesh as shells) rather than a mesh hint. The `/PROP/BEAM`
+  material-compatibility check added in the previous release reports the same
+  ERROR 3046 from the property side; the two now agree instead of contradicting
+  each other. A `*PART_COMPOSITE` on a beam part whose own material is fine
+  reports only the dropped layup, mirroring the solid branch.
+
+  **The genuinely element-free case is unchanged** — its softened mesh-check
+  wording is correct and re-measured: the same deck without the beams is
+  `NORMAL TERMINATION`, `0 ERROR(S) 0 WARNING(S)`.
+
+- **Stale comment**: the `HANDLERS` table said
+  `*MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW36 (isotropic reduction)`. The
+  shipped conversion has been `/MAT/LAW128` (HILL_VISC_PLAST) since the LAW128
+  work landed — Hill surface, Voce hardening and the viscous term all carried
+  over. Comment only; no behaviour change.
+
+- **All three are diagnostics and routing only, no card-format change.** All
+  five goldens are byte-identical and the 72-deck local example corpus
+  re-converts to the same starter+engine SHA256 as on `master`. 22 new tests
+  (1581 → 1603) in a new `tests/test_xref_material_routing.py` plus
+  `tests/test_composites.py`; the `/XREF` block the spotweld fallback now keeps
+  is asserted column-exact.
 
 - **A `*MAT_NULL` whose only equation of state was an `*EOS_JWL` vanished from
   the deck entirely — no `/MAT` card of that id at all, and every `/PART` on it

@@ -144,16 +144,29 @@ covering them unlocks a large class of real models.
   and `PID_i` materials, which is where `MAT_032`'s layer thicknesses really
   live) are **done** as well — both starter-validated, and they compose on one
   section. `*SECTION_SHELL` also reads every card set under one header now.
+  `*INTEGRATION_BEAM` → `/PROP/TYPE18` is **done** too (both branches: the
+  `ICST = 0` `S/T/WF` cell cloud becomes explicit `Yi/Zi/AREA` integration
+  points, `ICST = 1..22` maps onto Radioss's own predefined shapes at
+  `Isect = ICST + 9`, and a section whose material cannot take TYPE18 keeps
+  `/PROP/BEAM` with the constants derived from the rule) — net-new capability,
+  since dyna2rad neither parses the keyword nor implements the linkage. All four
+  `*SECTION_*` keywords now read every card set under one header.
   Still open in this family: `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
-  `*INTEGRATION_BEAM` (the `*SECTION_BEAM` `QR/IRID` field has the identical
-  `EQ.-n` semantics; only the shell side is implemented), a rule on a
-  `*MAT_ELASTIC` part (Radioss bans LAW1 from every layered shell property, so
-  this needs the material re-stated rather than converter work), the per-element
+  the `*INTEGRATION_BEAM` standard shapes needing three or more dimensions
+  (`Isect ≥ 10` with `L3..L6` needs `/BEGIN ≥ 2024`, and k2rad writes 2022 —
+  either bump the version declaration for the whole deck or expand the shape to
+  explicit integration points, which means writing the 19 shape geometries
+  k2rad currently defers to the starter), a beam rule's per-cell `PID_i`
+  (`/PROP/TYPE18` has a single material column), a rule on a
+  `*MAT_ELASTIC` part (Radioss bans LAW1 from every layered shell property and
+  from `/PROP/TYPE18`, so this needs the material re-stated rather than
+  converter work), `*SECTION_BEAM ELFORM = 3` → `/PROP/TYPE2` (TRUSS) with
+  `*ELEMENT_BEAM` routed to `/TRUSS`, the named `SECTION_nn` standard section on
+  `*SECTION_BEAM` card 2b (reported, not converted), the per-element
   ply override of `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the
   element-variant batch below — but the ply cards themselves are not read; no
   converter implements this, dyna2rad included),
-  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`, the first-set-only
-  reader still in `handle_section_solid` / `_beam` / `_discrete`, and the
+  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`, and the
   ELFORM 101–105 user-defined shell itself — its cards 5/5.1/5.2 are now strided
   over so the sections around them parse, but the user routine's own integration
   points, extra DOFs and `LMC` constants have no Radioss counterpart and are

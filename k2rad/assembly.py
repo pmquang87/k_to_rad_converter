@@ -781,6 +781,168 @@ def _off_integration_shell(b: Block, offsets: Dict[str, int], warn) -> None:
             idx += 1
 
 
+# *SECTION_SOLID / *SECTION_BEAM / *SECTION_DISCRETE / *INTEGRATION_BEAM card-set
+# walks. Same reason as the shell pair above: every one of these keywords lets a
+# deck stack several SETS under one header, and the flat declarative form offset
+# only the FIRST set's SECID — leaving every later section behind, so a *PART in
+# the same include dangled onto an auto-generated placeholder property. The beam
+# keyword additionally carries the NEGATED card-1 field-4 QR/IRID back-reference,
+# which _rewrite_line cannot touch. All four mirror handlers.py's own walks
+# rather than importing them.
+_SECTION_SOLID_OPTION_CARDS = {"EFG": 2, "SPG": 2, "MISC": 1}
+_USER_SOLID_ELFORMS = frozenset({101, 102, 103, 104, 105})
+
+
+def _beam_card2_kind(elform: int, first_field: str) -> str:
+    """Which *SECTION_BEAM card-2 dialect a set takes (mirrors
+    handlers._beam_card2_kind); "" when ELFORM defines none."""
+    named = str(first_field).strip().upper().startswith("SECTION")
+    if elform in (0, 1, 11):
+        return "2a"
+    if elform in (2, 3, 12) and named:
+        return "2b"
+    if elform in (2, 12, 13):
+        return "2c"
+    if elform == 3:
+        return "2d"
+    if elform in (4, 5):
+        return "2e"
+    if elform == 6:
+        return "2f"
+    if elform in (7, 8):
+        return "2h"
+    if elform == 9:
+        return "2i"
+    if elform == 14:
+        return "2j"
+    return ""
+
+
+def _off_section_solid(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_SOLID card set: SECID (IDROFF). The option cards and the
+    ELFORM 101-105 cards carry no id but must still be strided over."""
+    per_set_title = _title_offset(b)
+    opt_cards = sum(n for o, n in _SECTION_SOLID_OPTION_CARDS.items()
+                    if b.keyword.endswith("_" + o)
+                    or ("_" + o + "_") in b.keyword)
+    raw = b.raw
+    idx = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:                       # one 80a title card per set
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)
+        if new is not None:
+            raw[idx] = new
+        idx += 1 + opt_cards
+        if _geti(f1, 1) in _USER_SOLID_ELFORMS:  # cards 3 / 4 / 5
+            f3 = _fields(raw[idx], 8, 10) if idx < len(raw) else []
+            if not f3:
+                break
+            idx += 1 + max(_geti(f3, 0), 0) + (max(_geti(f3, 4), 0) + 7) // 8
+
+
+def _off_section_beam(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_BEAM card set: SECID (IDROFF) plus the card-1 field-4
+    QR/IRID back-reference to an *INTEGRATION_BEAM rule, which is NEGATED and so
+    needs the sign-preserving rewriter."""
+    per_set_title = _title_offset(b)
+    raw = b.raw
+    idx = 0
+    roff = offsets.get("r", 0)
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)      # SECID
+        if new is not None:
+            raw[idx] = new
+        new = _rewrite_neg_ref(raw[idx], 3, roff)               # -QR/IRID
+        if new is not None:
+            raw[idx] = new
+        elform = _geti(f1, 1)
+        f2 = _fields(raw[idx + 1], 8, 10) if idx + 1 < len(raw) else []
+        kind = _beam_card2_kind(elform, f2[0] if f2 else "")
+        idx += 2
+        if kind == "2b" and elform == 2:        # card 2b.1 OPTCARD
+            nxt = _fields(raw[idx], 2, 10) if idx < len(raw) else []
+            if nxt and str(nxt[0]).strip().upper().startswith("OPTCARD"):
+                idx += 1
+        elif kind == "2c" and elform == 12:     # card 2c.1
+            idx += 1
+        elif not kind:                          # unknown stride — stop
+            break
+
+
+def _off_section_discrete(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_DISCRETE card set: SECID (IDROFF). The stride is a fixed
+    pair of cards per set (Vol I R17 p.41-32)."""
+    per_set_title = _title_offset(b)
+    raw = b.raw
+    idx = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 6, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)
+        if new is not None:
+            raw[idx] = new
+        idx += 2
+
+
+def _off_integration_beam(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *INTEGRATION_BEAM rule under the header: card 1's IRID shares the
+    *SECTION id space (IDROFF), the ICST>0 dimension card carries no id at all,
+    and only a real S/T/WF/PID point card carries a *PART reference (IDPOFF) —
+    in field 4, not field 3 as on the shell rule."""
+    raw = b.raw
+    idx = 0
+    while idx < len(raw):
+        if not raw[idx].strip():
+            idx += 1
+            continue
+        f1 = _fields(raw[idx], 5, 10)
+        if _geti(f1, 0) <= 0:
+            return
+        nip, icst = _geti(f1, 1), _geti(f1, 3)
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)
+        if new is not None:
+            raw[idx] = new
+        idx += 1
+        if icst > 0:                    # D1 D2 D3 D4 SREF TREF D5 D6
+            idx += 1
+        # The two blocks are ADDITIVE: NIP point cards follow whether or not a
+        # dimension card did. Skipping them when ICST>0 would read the next
+        # rule's card 1 out of the middle of this one.
+        for _ in range(max(nip, 0)):
+            while idx < len(raw) and not raw[idx].strip():
+                idx += 1
+            if idx >= len(raw):
+                return
+            new = _rewrite_line(raw[idx], [(3, "p")], offsets)
+            if new is not None:
+                raw[idx] = new
+            idx += 1
+
+
 def _off_mat_rigid(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_RIGID: mid → IDMOFF; card-2 CON1 is a *DEFINE_COORDINATE_* system
     id (IDDOFF namespace) when CMO<0 (local constraint frame)."""
@@ -1047,9 +1209,16 @@ _OFFSET_SPECS: Dict[str, object] = {
     # *INTEGRATION_SHELL: IRID shares the *SECTION id space (IDROFF, bucket
     # "r"), and each S/WF/PID point card's third field is a *PART reference.
     "INTEGRATION_SHELL": _off_integration_shell,
-    "SECTION_SOLID": {"cards": {0: [(0, "r")]}},
-    "SECTION_BEAM": {"cards": {0: [(0, "r")]}},
-    "SECTION_DISCRETE": {"cards": {0: [(0, "r")]}},
+    # The other three *SECTION_* keywords are card-SET keywords too — same
+    # walker-not-spec reasoning (see the note above _off_section_solid), and
+    # *SECTION_BEAM carries the second NEGATED back-reference this converter
+    # meets: card-1 field 4, QR/IRID.
+    "SECTION_SOLID": _off_section_solid,
+    "SECTION_BEAM": _off_section_beam,
+    "SECTION_DISCRETE": _off_section_discrete,
+    # *INTEGRATION_BEAM: IRID shares the *SECTION id space (IDROFF, bucket "r"),
+    # and each S/T/WF/PID point card's FOURTH field is a *PART reference.
+    "INTEGRATION_BEAM": _off_integration_beam,
 
     # Sets
     "SET_NODE_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "n")])},

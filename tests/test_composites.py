@@ -1464,6 +1464,141 @@ def _meshless_ortho_deck(empty=None):
             + _mat002() + END)
 
 
+def _beam_ortho_deck(mid=2, layup=""):
+    """The same *MAT_024 plate as _meshless_ortho_deck, but part 9 holds two
+    BEAM elements on a *SECTION_BEAM ELFORM=2 instead of nothing at all.
+
+    Nodes 5/6/7 are outside the plate quad (5 is the beam orientation node), so
+    the beams add a group of their own without touching the shell.
+    """
+    nodes = ("*NODE\n"
+             + "".join(f"{n:>8}{x:>16}{y:>16}{z:>16}\n" for n, x, y, z in (
+                 (1, 0.0, 0.0, 0.0), (2, 10.0, 0.0, 0.0),
+                 (3, 10.0, 10.0, 0.0), (4, 0.0, 10.0, 0.0),
+                 (5, 0.0, 0.0, 10.0), (6, 20.0, 0.0, 0.0),
+                 (7, 30.0, 0.0, 0.0))))
+    return ("*KEYWORD\n" + nodes + SHELL
+            + "*PART\nplate\n" + _row(7, 7, 3) + "\n" + SECTION
+            + "*PART\northo beams\n" + _row(9, 9, mid) + "\n"
+            + "*SECTION_BEAM\n" + _row(9, 2) + "\n"
+            + _row(100.0, 833.0, 833.0, 1400.0) + "\n"
+            + "*ELEMENT_BEAM\n"
+            + _row(11, 9, 2, 6, 5) + "\n" + _row(12, 9, 6, 7, 5) + "\n"
+            + layup
+            + "*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+            + _row(3, 7.85e-9, 210000.0, 0.3, 300.0) + "\n"
+            + _mat002() + END)
+
+
+class BeamOnlyCompositePartTests(unittest.TestCase):
+    """A part whose only elements are BEAMS is the OPPOSITE of an element-free
+    part, and the composite prepass used to lump the two together.
+
+    An element-free part contributes no element group, so the starter's
+    material/property compatibility loop never tests it — measured 0 ERROR(S)
+    0 WARNING(S). A beam-only part contributes a group, and every composite law
+    k2rad emits leaves PROP_BEAM at its 0 default (``ini_mat_elem.F:89``), which
+    fails the MATERIAL/ELEMENT test in ``check_mat_elem_prop_compatibility.F``.
+    ``_beam_ortho_deck()`` converted and run on ``starter_win64`` (nt=6) gives
+    ``1 ERROR(S)``, ``ERROR TERMINATION``, verbatim::
+
+        ERROR ID :   3046
+        ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+        DESCRIPTION :
+           THE FOLLOWING MATERIAL LAW/ELEMENT TYPE COMBINATIONS ARE NOT
+           SUPPORTED:
+           ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 2
+           OF TYPE 93
+
+    while the element-free ``_meshless_ortho_deck()`` on the same materials is
+    ``0 ERROR(S) 0 WARNING(S) NORMAL TERMINATION``. So the two need different
+    messages: a mesh hint for one, a hard-failure report for the other.
+    """
+
+    def _hit(self, result):
+        hits = [w for w in result.warnings if w.startswith("Composite part 9")]
+        self.assertEqual(len(hits), 1, result.warnings)
+        return hits[0]
+
+    def test_it_reports_a_starter_failure_not_an_acceptance(self):
+        result, _ = _convert(_beam_ortho_deck())
+        w = self._hit(result)
+        self.assertIn("BEAM elements", w)
+        self.assertIn("does NOT pass the starter", w)
+        self.assertIn("3046", w)
+        # the element-free message's acceptance promise must NOT be here
+        self.assertNotIn("the starter ACCEPTS that", w)
+        self.assertNotIn("MESH check", w)
+
+    def test_it_names_the_error_id_and_the_reason_it_is_3046_not_3047(self):
+        result, _ = _convert(_beam_ortho_deck())
+        w = self._hit(result)
+        self.assertIn("MATERIAL/ELEMENT COMPATIBILITY", w)
+        self.assertIn("PROP_BEAM", w)
+        self.assertIn("ini_mat_elem.F:89", w)
+        self.assertNotIn("3047", w)
+
+    def test_it_gives_deck_level_advice(self):
+        """No property k2rad can synthesize fixes a failed ELEMENT test, so the
+        advice has to be a deck change."""
+        result, _ = _convert(_beam_ortho_deck())
+        w = self._hit(result)
+        self.assertIn("*MAT_PLASTIC_KINEMATIC", w)
+        self.assertIn("/MAT/LAW44", w)
+        self.assertIn("re-mesh", w)
+
+    def test_no_orthotropic_property_is_synthesized_for_it(self):
+        result, starter = _convert(_beam_ortho_deck())
+        self.assertEqual(_blocks(starter, "/PROP/TYPE11"), [])
+        # the /PART still resolves a property — its own /PROP/BEAM
+        self.assertEqual(_i10(_cards(_block(starter, "/PART/9"))[0], 0), 9)
+        self.assertEqual(len(_blocks(starter, "/PROP/BEAM/9")), 1)
+
+    def test_the_prop_beam_check_reports_the_same_error_from_its_side(self):
+        """PR #100's /PROP/BEAM material check already names ERROR 3046 for this
+        deck. The two warnings are complementary, not contradictory — that was
+        the whole defect."""
+        result, _ = _convert(_beam_ortho_deck())
+        beam = [w for w in result.warnings
+                if "/PROP/BEAM (TYPE3) material compatibility" in w]
+        self.assertEqual(len(beam), 1, result.warnings)
+        self.assertIn("/MAT/LAW93", beam[0])
+        self.assertIn("ERROR 3046", beam[0])
+
+    def test_a_layup_on_a_composite_beam_part_is_reported_as_dropped(self):
+        result, starter = _convert(_beam_ortho_deck(layup=_part_composite(pid=9)))
+        w = self._hit(result)
+        self.assertIn("*PART_COMPOSITE layup is DROPPED", w)
+        self.assertIn("3046", w)
+        self.assertEqual(_blocks(starter, "/PROP/TYPE51"), [])
+
+    def test_a_layup_on_an_ORDINARY_beam_part_drops_without_a_failure_claim(self):
+        """*PART_COMPOSITE alone, on a part whose own material is fine for a
+        beam: the layup is dropped (a beam has no ply stack) but nothing is
+        rejected, so the message must not predict an error."""
+        deck = _beam_ortho_deck(mid=3, layup=_part_composite(pid=9))
+        result, starter = _convert(deck)
+        hits = [w for w in result.warnings if "*PART_COMPOSITE 9" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("BEAM elements", hits[0])
+        self.assertIn("DROPPED", hits[0])
+        self.assertNotIn("3046", hits[0])
+        self.assertEqual(_blocks(starter, "/PROP/TYPE51"), [])
+        # mid 3 is *MAT_024 -> LAW36, which the /PROP/BEAM check still flags
+        self.assertTrue(any("/MAT/LAW36" in w for w in result.warnings))
+
+    def test_the_element_free_case_is_untouched(self):
+        """Same materials, no beams: the softened PR #99 wording stays exactly
+        as it was, because that case really is starter-clean."""
+        result, _ = _convert(_meshless_ortho_deck())
+        hits = [w for w in result.warnings if "no shell or solid elements" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("the starter ACCEPTS that", hits[0])
+        self.assertIn("MESH check", hits[0])
+        self.assertNotIn("3046", hits[0])
+        self.assertNotIn("3047", hits[0])
+
+
 class CompositeRoutingTests(unittest.TestCase):
 
     def test_shared_section_keeps_its_prop_when_one_part_is_plain(self):
@@ -1559,6 +1694,15 @@ class CompositeRoutingTests(unittest.TestCase):
         """No *PART_COMPOSITE, nothing to drop — the clause must not appear."""
         result, _ = _convert(_meshless_ortho_deck())
         self.assertNotIn("DROPPED", self._meshless_warning(result))
+
+    def test_a_beam_only_part_is_not_reported_as_element_free(self):
+        """The element-free branch used to swallow beam-only parts too: "no
+        shell or solid elements" is true of them, and the message then promised
+        the starter ACCEPTS the result. Measured false — see
+        BeamOnlyCompositePartTests."""
+        result, _ = _convert(_beam_ortho_deck())
+        hits = [w for w in result.warnings if "no shell or solid elements" in w]
+        self.assertEqual(hits, [], result.warnings)
 
     def test_the_meshed_part_keeps_the_real_error_3047_warning(self):
         """Only the element-free branch was softened. A part that HOLDS shells

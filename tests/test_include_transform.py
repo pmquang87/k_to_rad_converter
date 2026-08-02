@@ -1100,6 +1100,182 @@ class IntegrationShellOffsetTests(_AssemblyBase):
                           if "does NOT define" in w and "IRID" in w])
 
 
+class IntegrationBeamOffsetTests(_AssemblyBase):
+    """*INTEGRATION_BEAM and the three remaining *SECTION_* keywords are all
+    card-SET keywords, and the beam section carries the SECOND negated
+    back-reference this converter meets (card 1 field 4, QR/IRID)."""
+
+    CHILD = "\n".join([
+        "*KEYWORD",
+        "*NODE",
+        _nline(1, 0.0, 0.0, 0.0), _nline(2, 10.0, 0.0, 0.0),
+        _nline(3, 0.0, 1.0, 0.0),
+        "*ELEMENT_BEAM",
+        "".join(f"{v:>8}" for v in (1, 7, 1, 2, 3)),
+        "*PART", "child beam", _row(7, 5, 9),
+        "*PART", "cell material carrier", _row(8, 0, 9),
+        # two SETS under one *SECTION_BEAM header, the first binding a rule
+        "*SECTION_BEAM",
+        _row(5, 1, 1.0, -77, 2), _row(4.0, 4.0, 6.0, 6.0),
+        _row(6, 2, 1.0, 2.0, 0), _row(24.0, 108.0, 228.0, 336.0),
+        # two RULES under one *INTEGRATION_BEAM header, the first ICST=0 with
+        # per-cell PIDs, the second ICST>0 (its dimension card must be strided
+        # over or the walk reads it as rule 3's card 1)
+        "*INTEGRATION_BEAM",
+        _row(77, 2, 1.0, 0, 0),
+        _row(-1.0, 0.0, 0.5, 8), _row(1.0, 0.0, 0.5, 0),
+        _row(78, 0, 0.0, 8, 1),
+        _row(3.0),
+        # *SECTION_SOLID and *SECTION_DISCRETE, two sets each
+        "*SECTION_SOLID", _row(11, 1), _row(12, 16),
+        "*SECTION_DISCRETE",
+        _row(21, 0, 0.0, 0.0, 0.0, 0.0), _row(0.0, 0.0),
+        _row(22, 0, 5.0, 0.0, 0.0, 0.0), _row(1.5, 2.5),
+        # LAW36 is BEAM_INTEGRATED, so the rule can actually reach a
+        # /PROP/TYPE18 in the end-to-end check below.
+        "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+        _row(9, "7.85E-9", 210000.0, 0.3, 300.0),
+        "*END",
+    ]) + "\n"
+
+    def _main(self, d, tail=()):
+        self._write(d, "child.k", self.CHILD)
+        return self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k",
+            # card 2 IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF,
+            # card 3 IDROFF (the *SECTION / *INTEGRATION_* id space)
+            _row(100, 200, 10, 20, 30, 40, 0),
+            _row(60),
+            "", "",
+        ] + list(tail) + ["*END"]) + "\n")
+
+    def _offset_state(self):
+        return self._state(self._main(self._dir()))
+
+    def test_every_stacked_rule_gets_its_irid_offset(self):
+        """Rule 2's card 1 used to be unreachable: the flat spec offset only
+        the first rule, and a walk that ignored the ICST>0 dimension card would
+        read THAT as rule 2's card 1."""
+        st = self._offset_state()
+        self.assertEqual(sorted(st.integration_beams), [137, 138])
+        self.assertEqual(st.integration_beams[138].icst, 8)
+        self.assertEqual(st.integration_beams[138].dims[0], 3.0)
+        self.assertEqual(st.integration_beams[138].k, 1)
+
+    def test_point_card_pids_are_offset_but_card_one_fields_are_not(self):
+        """The *PART reference is field 4 on the beam rule, not field 3 as on
+        the shell rule — offsetting field 3 would move the WF instead."""
+        st = self._offset_state()
+        rule = st.integration_beams[137]
+        self.assertEqual([(p.s, p.t, p.wf, p.pid) for p in rule.points],
+                         [(-1.0, 0.0, 0.5, 18), (1.0, 0.0, 0.5, 0)])
+        self.assertEqual((rule.nip, rule.ra, rule.icst), (2, 1.0, 0))
+
+    def test_the_negated_qr_irid_back_reference_follows_idroff(self):
+        st = self._offset_state()
+        self.assertEqual(st.sec_beams[65].irid, 137)
+        self.assertEqual(st.sec_beams[66].irid, 0)
+        self.assertEqual(st.sec_beams[66].qr, 2.0)
+
+    def test_every_section_card_set_gets_its_secid_offset(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_beams), [65, 66])
+        self.assertEqual(sorted(st.sec_solids), [71, 72])
+        self.assertEqual(sorted(st.sec_discrete), [81, 82])
+        self.assertEqual(st.sec_beams[66].area, 24.0)
+        self.assertEqual(st.sec_solids[72].elform, 16)
+        self.assertEqual(st.sec_discrete[82].kd, 5.0)
+        self.assertEqual(st.parts[17].secid, 65)
+
+    def test_a_transformed_rule_still_drives_the_integrated_beam(self):
+        """End to end: the offset section and rule still resolve as a pair, so
+        the integrated cross-section survives the include transform."""
+        main = self._main(self._dir(), ["*CONTROL_TERMINATION", _row(0.001)])
+        result = convert(main, write_log=False)
+        with open(result.starter_path) as fh:
+            starter = fh.read()
+        self.assertIn("/PROP/TYPE18/65", starter)
+        self.assertFalse([w for w in result.warnings
+                          if "does NOT define" in w and "QR/IRID" in w],
+                         result.warnings)
+
+
+class SectionRiderStrideOffsetTests(_AssemblyBase):
+    """The card-2 RIDERS are the strides most likely to de-sync a whole
+    include, because getting one wrong shifts every later card set by a line
+    and the ids silently land on the wrong sections. The plain 2a/2c sets are
+    covered above; these are the three riders that are not.
+
+    Each *SECTION_BEAM set below is followed by a set whose SECID is a distinct
+    number, so a stride that is one line out cannot accidentally still pass.
+    """
+
+    CHILD = "\n".join([
+        "*KEYWORD",
+        # ── *SECTION_BEAM, five sets exercising every rider ──
+        "*SECTION_BEAM",
+        # ELFORM 2 + a NAMED card 2b + the OPTCARD rider (card 2b.1)
+        _row(1, 2, 1.0, 2.0, 0), "SECTION_11" + _row(4.0, 6.0),
+        "OPTCARD" + _row(1.0, 0.0),
+        # ELFORM 2 + a NAMED card 2b and NO OPTCARD: the look-ahead must not
+        # eat the next set's card 1
+        _row(2, 2, 1.0, 2.0, 0), "SECTION_08" + _row(3.0),
+        # ELFORM 12 + the NUMERIC card 2c, which DOES take card 2c.1
+        _row(3, 12, 1.0, 2.0, 0), _row(24.0, 108.0, 228.0, 336.0),
+        _row(0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0),
+        # ELFORM 12 + a NAMED card 2b, which does NOT take card 2c.1
+        _row(4, 12, 1.0, 2.0, 0), "SECTION_11" + _row(2.0, 8.0),
+        # plain 2a to close the block
+        _row(5, 1, 1.0, 0.0, 0), _row(4.0, 4.0, 6.0, 6.0),
+        # ── *SECTION_SOLID with the ELFORM 101-105 user cards ──
+        "*SECTION_SOLID",
+        _row(11, 1),
+        # ELFORM 101: card 3 is NIP NXDOF IHGF ITAJ LMC NHSV, then NIP
+        # cards, then ceil(LMC/8) cards
+        _row(12, 101), _row(2, 0, 0, 0, 3, 0),
+        _row(0.0), _row(0.0), _row(1.0, 2.0, 3.0),
+        _row(13, 16),
+        "*END",
+    ]) + "\n"
+
+    def _offset_state(self):
+        d = self._dir()
+        self._write(d, "child.k", self.CHILD)
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD", "*INCLUDE_TRANSFORM", "child.k",
+            _row(100, 200, 10, 20, 30, 40, 0), _row(60), "", "", "*END",
+        ]) + "\n")
+        return self._state(main)
+
+    def test_the_optcard_rider_does_not_de_sync_the_beam_walk(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_beams), [61, 62, 63, 64, 65])
+
+    def test_each_beam_set_keeps_its_own_elform_through_the_transform(self):
+        """A one-line stride error shows up here first: the ELFORMs would
+        march along by one set."""
+        st = self._offset_state()
+        self.assertEqual([st.sec_beams[s].elform for s in range(61, 66)],
+                         [2, 2, 12, 12, 1])
+
+    def test_the_elform_twelve_riders_are_told_apart(self):
+        """Card 2c.1 follows the NUMERIC card 2 only. Set 63 takes it, set 64
+        (named card 2b) does not — and set 64's own card 2 must still be read,
+        which the plain 2a set that follows would expose."""
+        st = self._offset_state()
+        self.assertEqual(st.sec_beams[63].area, 24.0)
+        self.assertEqual((st.sec_beams[65].ts1, st.sec_beams[65].tt1),
+                         (4.0, 6.0))
+
+    def test_the_user_solid_cards_are_strided_over_under_a_transform(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_solids), [71, 72, 73])
+        self.assertEqual(st.sec_solids[72].elform, 101)
+        self.assertEqual(st.sec_solids[73].elform, 16)
+
+
 class CoordinatePrecisionTests(_AssemblyBase):
     def test_offset_only_rewrite_preserves_coordinate_text(self):
         d = self._dir()
