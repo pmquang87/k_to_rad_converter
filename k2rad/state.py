@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -868,7 +868,11 @@ class PartComposite:
     pid: int
     title: str = ""
     elform: int = 0
-    shrf: float = 1.0    # → /PROP/TYPE51 Ashear
+    # LS-DYNA's own SHRF default is 1.0, but a BLANK field is recorded as 0.0
+    # ("not given") so the writer can fall back to Radioss's 5/6 instead of
+    # silently making the part 20% stiffer in transverse shear than the same
+    # deck converted by dyna2rad, which never touches Ashear on this path.
+    shrf: float = 0.0    # → /PROP/TYPE51 Ashear, only when explicitly given
     nloc: float = 0.0    # 1 = top, 0 = mid, -1 = bottom → Ipos 3 / 0 / 4
     marea: float = 0.0   # non-structural mass per area
     hgid: int = 0
@@ -2491,6 +2495,13 @@ class ConversionState:
     # LS-DYNA vector VID → converted /SKEW id (define_vectors / sd_orientations)
     vector_skew_ids: Dict[int, int] = field(default_factory=dict)
     sdorient_skew_ids: Dict[int, int] = field(default_factory=dict)
+    # /SKEW ids minted by the WRITERS for synthesized orthotropy frames (the
+    # LAW128 solid skews in writer/mesh.py, the AOPT=2 composite skews in
+    # writer/composites.py). Both emitters run in the same build_starter pass
+    # and both allocate by bumping off all_skew_ids(), so the reservation has
+    # to be shared or the second one can land on an id the first already took
+    # (starter ERROR 79 DUPLICATE ID).
+    synth_skew_ids: Set[int] = field(default_factory=set)
     # *DEFINE_BOX[_LOCAL] → numeric node-membership scoping (box_id → record)
     boxes: Dict[int, DefineBox] = field(default_factory=dict)
 
@@ -2776,7 +2787,18 @@ class ConversionState:
                 | set(self.coord_vectors)
                 | set(self.vector_skew_ids.values())
                 | set(self.sdorient_skew_ids.values())
-                | set(self.joint_skew_ids.values()))
+                | set(self.joint_skew_ids.values())
+                | set(self.synth_skew_ids))
+
+    def reserve_skew_id(self, preferred: int) -> int:
+        """Claim a free /SKEW id at or above *preferred* and record it, so a
+        later synthesized skew (from any writer module) cannot reuse it."""
+        used = self.all_skew_ids()
+        skew_id = preferred
+        while skew_id in used:
+            skew_id += 1
+        self.synth_skew_ids.add(skew_id)
+        return skew_id
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)

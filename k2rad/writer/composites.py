@@ -73,6 +73,10 @@ _LAW93_ELASTIC_SIGY = 1.0e30
 _ASHEAR_DEFAULT = 0.833333
 # TYPE11 layer count clamp — dyna2rad clamps *SECTION_SHELL NIP the same way.
 _MAX_SHELL_LAYERS = 10
+# *MAT_054/055 TFAIL: the boundary between LS-DYNA's ABSOLUTE minimum-time-step
+# form (0 < TFAIL <= 0.1) and its RATIO form (TFAIL > 0.1), Manual Vol II R17
+# p.2-441. Only the absolute form has a Radioss counterpart (/FAIL/GENE1 dtmin).
+_TFAIL_ABSOLUTE_MAX = 0.1
 
 
 def _composite_material_mids(state: ConversionState) -> Set[int]:
@@ -92,12 +96,19 @@ class _RefAxis:
     Vx-Vy-Vz-skew_ID-Ipos-Ip card; ``lines`` carries a synthesized ``/SKEW/FIX``
     when one was built. ``mapped`` is False when the AOPT mode has no Radioss
     counterpart and the caller fell back to the element frame.
+
+    ``pt`` is the reference POINT of the two point-based solid modes (Ip=21,
+    Ip=24). It is deliberately a separate field from ``vec``: on /PROP/TYPE6
+    the point lives in the card-4 Px/Py/Pz columns and the vector in the
+    card-3 Vx/Vy/Vz columns, and Ip=24 needs BOTH at once
+    (``hm_read_prop06.F:500``).
     """
 
     def __init__(self, ip=20, vec=(1.0, 0.0, 0.0), skew_id=0, phi=0.0,
-                 note="", mapped=True, lines=None):
+                 note="", mapped=True, lines=None, pt=(0.0, 0.0, 0.0)):
         self.ip = ip
         self.vec = vec
+        self.pt = pt
         self.skew_id = skew_id
         self.phi = phi
         self.note = note
@@ -123,7 +134,7 @@ def _axis_triad(a, d):
     return y, z
 
 
-def _composite_ref_axis(mat, state: ConversionState, skew_ids_used: Set[int],
+def _composite_ref_axis(mat, state: ConversionState,
                         label: str, prop_id: int, for_solid: bool = False):
     """Map a material's LS-DYNA AOPT axis definition to a Radioss /PROP
     reference system, following dyna2rad's ``/PROP/SH_SANDW`` branch
@@ -137,13 +148,19 @@ def _composite_ref_axis(mat, state: ConversionState, skew_ids_used: Set[int],
                 plus the BETA rotation. This is LS-DYNA's own AOPT=0 semantic
                 (axes from element nodes 1,2,4), so it is an exact match.
     1           point P: LS-DYNA defines it for SOLIDS only. On a solid it maps
-                to ``Ip=21`` (first direction from the point Pj); on a shell it
+                to ``Ip=21`` (first direction from the point Pj), written to the
+                /PROP/TYPE6 card-4 ``Px/Py/Pz`` columns — NOT ``Vx/Vy/Vz``,
+                which the starter's Ip=21 branch never looks at; on a shell it
                 has no counterpart → warn + element frame.
     2           vectors ``a`` (+ ``d``) → a synthesized ``/SKEW/FIX`` whose X' is
                 ``a``, referenced with ``Ip=22`` (skew 1st axis + angle φ).
-    3           vector ``v`` → ``Ip=23`` (V + angle φ), ``Vx/Vy/Vz = v``.
-    4           ``v`` + point P (cylindrical): on a solid ``Ip=24`` carries both;
-                on a shell there is no single global direction → warn.
+    3           vector ``v`` → ``Ip=23`` (V + angle φ), ``Vx/Vy/Vz = v``. Note
+                that in BOTH codes direction 1 is the CROSS PRODUCT of ``v``
+                with the element normal, so ``v`` is transverse to the fibre —
+                the mapping is 1:1 but the vector is not the fibre direction.
+    4           ``v`` + point P (cylindrical): on a solid ``Ip=24`` carries both
+                (V on card 3, P on card 4); on a shell there is no single global
+                direction → warn.
     < 0         ``|AOPT|`` is a ``*DEFINE_COORDINATE_*`` CID, which k2rad already
                 emits as ``/SKEW`` under that same id → ``Ip=0`` + ``skew_ID``.
     ==========  ================================================================
@@ -202,10 +219,7 @@ def _composite_ref_axis(mat, state: ConversionState, skew_ids_used: Set[int],
     if aopt == 2 and any(a):
         axes = _axis_triad(a, d) or _ortho_skew_axes(a, 0.0)
         if axes is not None:
-            skew_id = prop_id
-            while skew_id in skew_ids_used:
-                skew_id += 1
-            skew_ids_used.add(skew_id)
+            skew_id = state.reserve_skew_id(prop_id)
             note = (f"AOPT=2 global vector a=({a[0]:g}, {a[1]:g}, {a[2]:g})"
                     + (f" with d=({d[0]:g}, {d[1]:g}, {d[2]:g})" if any(d) else "")
                     + f" → /SKEW/FIX {skew_id} (X'=a), Ip=22"
@@ -218,16 +232,24 @@ def _composite_ref_axis(mat, state: ConversionState, skew_ids_used: Set[int],
     if aopt == 3 and any(v):
         return _RefAxis(ip=23, vec=v, phi=beta,
                         note=(f"AOPT=3 vector v=({v[0]:g}, {v[1]:g}, {v[2]:g}) → "
-                              "Ip=23 (V projected into the shell plane)"
+                              "Ip=23, i.e. material direction 1 = v CROSSED "
+                              "with the element normal — v itself is transverse "
+                              "to the fibre, not along it (LS-DYNA Vol II R17 "
+                              "p.2-385 'the cross product of the vector v with "
+                              "the element normal'; Radioss corthini.F CASE(23) "
+                              "computes n x v, the same axis)"
                               + (f" + Phi={beta:g}deg" if beta else "")))
     if aopt == 1 and for_solid and any(p):
-        return _RefAxis(ip=21, vec=p, phi=beta,
+        return _RefAxis(ip=21, vec=(0.0, 0.0, 0.0), pt=p, phi=beta,
                         note=(f"AOPT=1 point P=({p[0]:g}, {p[1]:g}, {p[2]:g}) → "
-                              "/PROP/TYPE6 Ip=21 (direction 1 from the point)"))
+                              "/PROP/TYPE6 Ip=21 with P on the card-4 Px/Py/Pz "
+                              "columns (direction 1 = element centre → P)"))
     if aopt == 4 and for_solid and any(v):
-        return _RefAxis(ip=24, vec=v, phi=beta,
-                        note=("AOPT=4 cylindrical (v + point P) → /PROP/TYPE6 "
-                              "Ip=24"))
+        return _RefAxis(ip=24, vec=v, pt=p, phi=beta,
+                        note=(f"AOPT=4 cylindrical: axis v=({v[0]:g}, {v[1]:g}, "
+                              f"{v[2]:g}) through P=({p[0]:g}, {p[1]:g}, "
+                              f"{p[2]:g}) → /PROP/TYPE6 Ip=24, which carries "
+                              "BOTH (V on card 3, P on card 4)"))
 
     reason = (f"AOPT={aopt_raw:g}" if aopt is not None
               else f"AOPT={aopt_raw!r} (not an integer)")
@@ -290,18 +312,19 @@ def _resolve_composites(state: ConversionState) -> None:
             continue
         # LAW43 has no SIGY/ETAN slot — synthesize the bilinear hardening curve.
         #
-        # LS-DYNA ETAN is the tangent modulus of the bilinear TOTAL stress-strain
-        # curve, while the LAW43 card-6 function is stress vs PLASTIC strain, so
-        # the slope must be the plastic hardening modulus H = E·ETAN/(E−ETAN) —
-        # the identical conversion k2rad already applies for *MAT_PLASTIC_KINEMATIC
-        # → LAW44 `b`. dyna2rad instead writes {(0, SIGY), (1, SIGY + |ETAN|)},
-        # i.e. the RAW tangent modulus, which under-states hardening whenever ETAN
-        # is an appreciable fraction of E. This is a DELIBERATE divergence.
+        # MAT_037's ETAN is ALREADY the plastic hardening modulus, which is
+        # exactly what the LAW43 card-6 function (stress vs PLASTIC strain)
+        # wants, so it is copied verbatim. The manual is explicit that this
+        # field is NOT the same quantity as *MAT_003's: Vol II R17 p.2-398 says
+        # MAT_037 ETAN = "Plastic hardening modulus", against p.2-172 MAT_003
+        # ETAN = "Tangent modulus, see Figure M3-1". Only the latter needs the
+        # H = E*ETAN/(E-ETAN) conversion k2rad applies on the LAW44 path.
         #
-        # (dyna2rad also never actually binds this curve: a missing pair of braces
-        # at convertmats.cxx:3100-3102 overwrites func_IDi[0] with HLCID = 0 in
-        # both branches, leaving NUM_CURVES=1 pointing at function 0 → starter
-        # ANCMSG 366. The curve is bound properly here.)
+        # (dyna2rad writes {(0, SIGY), (1, SIGY + |ETAN|)} here, which is the
+        # same value — but it never actually BINDS the curve: a missing pair of
+        # braces at convertmats.cxx:3100-3102 overwrites func_IDi[0] with
+        # HLCID = 0 in both branches, leaving NUM_CURVES=1 pointing at function
+        # 0 → starter ANCMSG 366. The curve is bound properly here.)
         if mat.sigy <= 0.0:
             state.warn(
                 f"*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC {mat.mid}: "
@@ -310,10 +333,18 @@ def _resolve_composites(state: ConversionState) -> None:
                 "rejects a material with no yield function (ERROR 366). Supply "
                 "SIGY (+ETAN) or a HLCID curve.")
             continue
-        if 0.0 < mat.etan < mat.E:
-            h = mat.E * mat.etan / (mat.E - mat.etan)
-        else:
-            h = max(mat.etan, 0.0)
+        # ETAN < 0 is LS-DYNA's flag for including the through-thickness normal
+        # stresses (it needs *LOAD_SURFACE_STRESS); the hardening modulus is the
+        # magnitude, exactly as R < 0 selects a scheme with |R| as the ratio.
+        h = abs(mat.etan)
+        if mat.etan < 0.0:
+            state.warn(
+                f"*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC {mat.mid}: "
+                f"ETAN={mat.etan:g} is negative, which in LS-DYNA REQUESTS that "
+                "contact/pressure normal stresses be included (and requires "
+                "*LOAD_SURFACE_STRESS) rather than meaning a negative modulus. "
+                "/MAT/LAW43 has no such option — the flag is DROPPED and "
+                f"|ETAN|={h:g} is used as the plastic hardening modulus.")
         fid = state.next_curve_id()
         _add_auto_curve(state, fid, f"Auto_MAT037_hardening_mid{mat.mid}",
                         [(0.0, mat.sigy), (1.0, mat.sigy + h)])
@@ -323,9 +354,11 @@ def _resolve_composites(state: ConversionState) -> None:
             f"so the bilinear SIGY={mat.sigy:g}/ETAN={mat.etan:g} hardening was "
             f"synthesized as /FUNCT/{fid} = [(0, {mat.sigy:g}), "
             f"(1, {mat.sigy + h:g})] — /MAT/LAW43 (HILL_TAB) is TABULAR-ONLY and "
-            "has no SIGY/ETAN slot. The slope is the PLASTIC hardening modulus "
-            f"H = E*ETAN/(E-ETAN) = {h:g} (the LAW43 curve is stress vs plastic "
-            "strain), not the raw total-curve tangent ETAN that dyna2rad writes.")
+            "has no SIGY/ETAN slot. The curve is stress vs PLASTIC strain and "
+            "MAT_037's ETAN is already the PLASTIC hardening modulus (Manual "
+            "Vol II R17 p.2-398), so the slope is ETAN verbatim — this field is "
+            "NOT the total-curve tangent modulus that *MAT_PLASTIC_KINEMATIC "
+            "spells with the same name and that needs the E*ET/(E-ET) rescale.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,7 +391,7 @@ def _assign_composite_props(state: ConversionState) -> None:
         if pid in state.composite_prop_ids:
             continue
         pc = state.part_composites.get(pid)
-        is_composite_part = pc is not None and _layup_is_convertible(pc, state)
+        is_composite_part = pc is not None and _layup_is_convertible(pc)
         if not is_composite_part and part.mid not in comp_mids:
             continue
         if pid not in shell_pids and pid not in solid_pids:
@@ -388,6 +421,7 @@ def _assign_composite_props(state: ConversionState) -> None:
                 continue
         state.composite_prop_ids[pid] = state.next_prop_id()
 
+
 def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
     """Warn-and-fallback for every *PART_COMPOSITE whose layup cannot become a
     /PROP/TYPE51 — an unsupported OPTION1 variant, or a layup with no usable ply.
@@ -400,7 +434,7 @@ def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
     physically usable shell rather than a broken one.
     """
     for pid, pc in sorted(state.part_composites.items()):
-        if _layup_is_convertible(pc, state):
+        if _layup_is_convertible(pc):
             continue
         total = _layup_thickness(pc)
         secid = pid
@@ -445,7 +479,7 @@ def _valid_plies(pc: PartComposite):
     return [p for p in pc.plies if p.mid > 0 and p.thick > 0.0]
 
 
-def _layup_is_convertible(pc: PartComposite, state: ConversionState) -> bool:
+def _layup_is_convertible(pc: PartComposite) -> bool:
     return not pc.variant and bool(_valid_plies(pc))
 
 
@@ -705,19 +739,39 @@ def _emit_mat_law127(mat: MatEnhancedCompositeDamage,
                 "references a *DEFINE_CURVE that is NOT in the deck — the "
                 "/MAT/LAW127 function id will dangle at the starter. Add the "
                 "curve or clear the field.")
-    # TFAIL as a TIME-STEP criterion (0 < TFAIL < 1) additionally becomes a
-    # /FAIL/GENE1 dtmin, matching dyna2rad (convertmats.cxx:3205-3219).
-    if 0.0 < mat.tfail < 1.0:
+    # TFAIL is LS-DYNA's element-deletion time-step criterion, and WHICH form it
+    # selects turns on 0.1, not on 1.0 (Manual Vol II R17 p.2-441 verbatim):
+    #
+    #   LE 0.0            no deletion by time step
+    #   GT 0.0 and LE 0.1 ABSOLUTE — delete when the element's dt < TFAIL
+    #   GT 0.1            RATIO    — delete when dt / dt_original < TFAIL
+    #
+    # /FAIL/GENE1's dtmin is ABSOLUTE (engine fail_gene1_c.F:398
+    # `IF (GBUF_DT(I)*DTFAC1(1) <= DTMIN)`), so ONLY the first form converts.
+    # dyna2rad gates its companion card on 0 < TFAIL < 1 (convertmats.cxx:
+    # 3205-3219), which re-reads every ratio in (0.1, 1) as an absolute dt: in a
+    # Mg/mm/s deck (dt ~ 1e-7) a TFAIL of 0.5 would then delete every element of
+    # the part on cycle 1. That is a defect, so the band here is the manual's.
+    if 0.0 < mat.tfail <= _TFAIL_ABSOLUTE_MAX:
         lines += _emit_fail_gene1_dtmin(mat.mid, mat.tfail, state)
-    elif mat.tfail > 1.0:
+    elif mat.tfail > _TFAIL_ABSOLUTE_MAX:
         state.warn(
-            f"*MAT_ENHANCED_COMPOSITE_DAMAGE {mat.mid}: TFAIL={mat.tfail:g} > 1 "
-            "is LS-DYNA's RATIO form (delete the element when its time step "
-            "falls below TFAIL x the original). It is written to the "
-            "/MAT/LAW127 TFAIL column, but no /FAIL/GENE1 dtmin companion is "
-            "added — Radioss's dtmin is an ABSOLUTE time step, so the ratio "
-            "cannot be expressed without knowing the initial dt. dyna2rad "
-            "restricts its companion card to 0 < TFAIL < 1 for the same reason.")
+            f"*MAT_ENHANCED_COMPOSITE_DAMAGE {mat.mid}: TFAIL={mat.tfail:g} is "
+            f"> {_TFAIL_ABSOLUTE_MAX:g}, which selects LS-DYNA's RATIO form of "
+            "the time-step deletion criterion (delete the element when its time "
+            "step falls below TFAIL x its ORIGINAL time step). Radioss has no "
+            "counterpart — /FAIL/GENE1's dtmin is an ABSOLUTE time step and "
+            "there is no dt/dt0 criterion — so the whole criterion is DROPPED: "
+            "no element of this material will be deleted on time step, and the "
+            "SOFT/SOFT2/SOFTG crashfront softening (which LS-DYNA activates "
+            "only when TFAIL > 0) is inactive with it. The /MAT/LAW127 card "
+            "keeps a TFAIL column for layout fidelity, but the starter never "
+            "reads it (hm_read_mat127.F90 fetches no TFAIL field), so the value "
+            "does NOT survive there either. Restate the criterion as an "
+            f"absolute minimum time step (0 < TFAIL <= {_TFAIL_ABSOLUTE_MAX:g}, "
+            "in the deck's time unit) if the deletion matters. (dyna2rad "
+            "converts this range as if it were an absolute dt, which deletes "
+            "the part immediately on any deck whose dt is below the ratio.)")
     return lines
 
 
@@ -729,10 +783,12 @@ def _emit_fail_gene1_dtmin(mid: int, dtmin: float,
     Layout from ``FAIL/fail_gene1.cfg FORMAT(radioss2022)``."""
     b10 = " " * 10
     state.warn(
-        f"*MAT_ENHANCED_COMPOSITE_DAMAGE {mid}: TFAIL={dtmin:g} (0<TFAIL<1) is "
-        "LS-DYNA's ABSOLUTE minimum-time-step deletion criterion → a companion "
-        f"/FAIL/GENE1/{mid} with dtmin={dtmin:g}, matching dyna2rad. (The value "
-        "is also kept in the /MAT/LAW127 TFAIL column.)")
+        f"*MAT_ENHANCED_COMPOSITE_DAMAGE {mid}: TFAIL={dtmin:g} (0 < TFAIL <= "
+        f"{_TFAIL_ABSOLUTE_MAX:g}) is LS-DYNA's ABSOLUTE minimum-time-step "
+        f"deletion criterion → a companion /FAIL/GENE1/{mid} with "
+        f"dtmin={dtmin:g}. That /FAIL card is what applies the criterion: the "
+        "/MAT/LAW127 TFAIL column is written for card-layout fidelity but the "
+        "starter never reads it (hm_read_mat127.F90 fetches no TFAIL field).")
     return [
         f"/FAIL/GENE1/{mid}",
         "#               Pmin                Pmax           SigP1_max            Time_max               dtmin",
@@ -887,26 +943,14 @@ def _emit_mat_law27_pair(mat: MatLaminatedGlass,
     deletion) — LS-DYNA gives only the single failure strain EFG, so the
     softening band is a converter-chosen ramp, not deck data.
 
-    LS-DYNA ETG/ETP are tangent moduli of the bilinear TOTAL stress-strain
-    curve; LAW27's ``b`` (with n=1) is dSigma/dEps_PLASTIC, so the plastic
-    hardening modulus ``H = E·ETAN/(E−ETAN)`` is carried through — the same
-    conversion k2rad applies for *MAT_PLASTIC_KINEMATIC → LAW44. dyna2rad copies
-    the raw tangent modulus instead; this is a DELIBERATE divergence.
+    LS-DYNA ETG/ETP are already PLASTIC hardening moduli — Manual Vol II R17
+    p.2-314/2-315 names them "Plastic hardening modulus for glass" and "...for
+    polymer" — which is exactly what LAW27's ``b`` is with ``n = 1``
+    (``dSigma/dEps_plastic``), so both are copied verbatim. Only the fields the
+    manual calls a TANGENT modulus (e.g. *MAT_PLASTIC_KINEMATIC's ETAN) need the
+    ``H = E·ET/(E−ET)`` rescale k2rad applies on that path.
     """
     b20 = " " * 20
-
-    def _plastic_modulus(e, etan, phase):
-        if 0.0 < etan < e:
-            h = e * etan / (e - etan)
-            if abs(h - etan) > 0.01 * max(abs(etan), 1e-30):
-                state.warn(
-                    f"*MAT_LAMINATED_GLASS {mat.mid} ({phase}): the LS-DYNA "
-                    f"tangent modulus ET={etan:g} is the slope of the TOTAL "
-                    f"stress-strain curve, while /MAT/PLAS_BRIT b is the "
-                    f"PLASTIC hardening modulus — carried through as "
-                    f"H = E*ET/(E-ET) = {h:g}. (dyna2rad copies ET raw.)")
-            return h
-        return max(etan, 0.0)
 
     def _law27(mid, name, rho, e, nu, sigy, b, eps_t, eps_m, eps_f):
         return [
@@ -937,12 +981,10 @@ def _emit_mat_law27_pair(mat: MatLaminatedGlass,
             "phase gets NO brittle failure (the LAW27 defaults, 1e30). Set EFG "
             "for the glass plies to crack.")
     lines = _law27(mat.glass_mid, f"{base} - Glass"[:100], mat.rho,
-                   mat.eg, mat.prg, mat.syg,
-                   _plastic_modulus(mat.eg, mat.etg, "glass"),
+                   mat.eg, mat.prg, mat.syg, max(mat.etg, 0.0),
                    efg, eps_m, eps_f)
     lines += _law27(mat.mid, f"{base} - polymer"[:100], mat.rho,
-                    mat.ep, mat.prp, mat.syp,
-                    _plastic_modulus(mat.ep, mat.etp, "polymer"),
+                    mat.ep, mat.prp, mat.syp, max(mat.etp, 0.0),
                     1.0e30, 1.1e30, 1.2e30)
     if mat.efg > 0.0:
         state.warn(
@@ -977,7 +1019,6 @@ def _emit_composite_props(state: ConversionState,
     solid_pids = {e.pid for e in state.solid_elems}
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
-    skew_ids_used = state.all_skew_ids()
     lines: List[str] = ["#-  COMPOSITE PROPERTIES:", HDR]
     for pid, prop_id in sorted(state.composite_prop_ids.items()):
         part = state.parts.get(pid)
@@ -986,9 +1027,8 @@ def _emit_composite_props(state: ConversionState,
         pc = state.part_composites.get(pid)
         sec = (state.sec_shells.get(part_secids.get(pid, pid))
                or _auto_section_shell(part_secids.get(pid, pid)))
-        if pc is not None and _layup_is_convertible(pc, state):
-            lines += _emit_part_composite_prop(state, pc, prop_id, skew_ids_used,
-                                               istrain)
+        if pc is not None and _layup_is_convertible(pc):
+            lines += _emit_part_composite_prop(state, pc, prop_id, istrain)
             continue
         mid = part.mid
         label = f"/PROP for composite part {pid}"
@@ -998,7 +1038,6 @@ def _emit_composite_props(state: ConversionState,
         elif mid in state.mat_transverse_aniso:
             # MAT_037 → /MAT/LAW43 is a Hill sheet-plasticity law: dyna2rad puts
             # it on /PROP/TYPE9 (SH_ORTH), the single-material orthotropic shell.
-            mat = state.mat_transverse_aniso[mid]
             state.warn(
                 f"{label}: *MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC → "
                 "/MAT/LAW43 is orthotropic-class, so the part is repointed at a "
@@ -1016,7 +1055,7 @@ def _emit_composite_props(state: ConversionState,
             if mat is None:
                 continue
             is_solid = pid in solid_pids and pid not in shell_pids
-            axis = _composite_ref_axis(mat, state, skew_ids_used, label, prop_id,
+            axis = _composite_ref_axis(mat, state, label, prop_id,
                                        for_solid=is_solid)
             law = ("/MAT/LAW93" if mid in state.mat_orthotropic
                    else "/MAT/LAW127")
@@ -1058,7 +1097,7 @@ def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,
     return _emit_prop_type6(prop_id, f"COMPOSITE_SOLID_PROP_{prop_id} "
                             f"(part {pid})", sec, 1000 if tet10 else 0, istrain,
                             refvec=axis.vec, ip=ip, phi=axis.phi,
-                            skew_id=axis.skew_id)
+                            skew_id=axis.skew_id, refpoint=axis.pt)
 
 
 def _shell_layer_count(sec: SectionShell, state: ConversionState,
@@ -1189,14 +1228,16 @@ def _emit_prop_type11(prop_id: int, title: str, sec: SectionShell,
 
 
 def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
-                              prop_id: int, skew_ids_used: Set[int],
-                              istrain: int) -> List[str]:
+                              prop_id: int, istrain: int) -> List[str]:
     """*PART_COMPOSITE → /PROP/TYPE51 (stack) + one /PROP/TYPE19 (PLY) per ply,
     following dyna2rad's ``p_ConvertPartComposites``.
 
-    ``Ishell`` is 12 (QBAT) for the fully-integrated ELFORMs -16 / 9 and 24
-    (QEPH) otherwise; ``NLOC`` maps onto ``Ipos`` (0 = mid-surface, -1 = bottom
-    → Ipos 4, +1 = top → Ipos 3).
+    ``Ishell`` comes from ``_elform_to_ishell`` — the SAME mapping (and the same
+    ``convert(shell_formulation=...)`` / ``--shell-formulation`` user option)
+    every other k2rad shell property honours, so one LS-DYNA ELFORM cannot
+    produce two different Radioss formulations depending on whether the part
+    happened to use *SECTION_SHELL or *PART_COMPOSITE. ``NLOC`` maps onto
+    ``Ipos`` (0 = mid-surface, -1 = bottom → Ipos 4, +1 = top → Ipos 3).
 
     The orthotropy system comes from the FIRST ORTHOTROPIC ply material, which is
     what LS-DYNA specifies (*PART_COMPOSITE Remark 1: "the orthotropic material
@@ -1210,12 +1251,18 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
     """
     plies = _valid_plies(pc)
     dropped = len(pc.plies) - len(plies)
-    ishell = 12 if pc.elform in (-16, 9) else 24
+    ishell = _elform_to_ishell(pc.elform, state.is_implicit,
+                               state.options.shell_default_ishell)
     ipos, z0 = 0, 0.0
     if pc.nloc <= -1.0:
         ipos = 4                     # bottom of the layup = element mid-surface
     elif pc.nloc >= 1.0:
         ipos = 3                     # top of the layup = element mid-surface
+    # SHRF is carried only when the deck actually gave it (the handler records a
+    # blank field as 0.0). Defaulting a blank to LS-DYNA's own 1.0 would make
+    # the part 20% stiffer in transverse shear than Radioss's 5/6 default, which
+    # is what dyna2rad leaves in place and what every other k2rad shell property
+    # writes — a silent divergence driven by a default rather than deck data.
     ashear = pc.shrf if 0.0 < pc.shrf <= 1.0 else _ASHEAR_DEFAULT
     total_t = sum(p.thick for p in plies)
 
@@ -1226,8 +1273,8 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
                or state.mat_enhanced_composite.get(ply.mid))
         if mat is not None:
             axis = _composite_ref_axis(
-                mat, state, skew_ids_used,
-                f"/PROP/TYPE51 for *PART_COMPOSITE {pc.pid}", prop_id)
+                mat, state, f"/PROP/TYPE51 for *PART_COMPOSITE {pc.pid}",
+                prop_id)
             if axis.mapped:
                 state.warn(
                     f"*PART_COMPOSITE {pc.pid}: the layup orthotropy system is "
@@ -1271,8 +1318,11 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
             "ply mid-surface)")
     if pc.marea:
         notes.append(
-            f"MAREA={pc.marea:g} (non-structural mass per unit area) is DROPPED "
-            "— add it as a /ADMAS on the part if the mass matters")
+            f"MAREA={pc.marea:g} (non-structural mass per unit area) is DROPPED, "
+            "so the part comes out LIGHTER than the LS-DYNA original — which "
+            "changes both its inertia and its nodal time step. dyna2rad DOES "
+            "convert this field (to an /ADMAS type 2 over a /SET/GENERAL of the "
+            "part); add an equivalent /ADMAS by hand if the added mass matters")
     if pc.optt:
         notes.append(
             f"the _CONTACT OPTT={pc.optt:g} contact thickness is DROPPED "
@@ -1286,12 +1336,21 @@ def _emit_part_composite_prop(state: ConversionState, pc: PartComposite,
         "part is repointed at it and its *SECTION-derived property is no longer "
         "used."
         + ("" if not notes else " Dropped: " + "; ".join(notes) + "."))
-    for ply in plies:
-        if ply.mid not in state.parts and not _mid_is_known(state, ply.mid):
+    # The check is against the MATERIAL namespace only. Testing `ply.mid` against
+    # state.parts as well (PIDs) silently suppressed the warning whenever any
+    # *PART happened to carry the ply material's number — two unrelated LS-DYNA
+    # id spaces. Ryan_Lee_Examples/W6_SETUP_SandwichImpact.k is exactly that
+    # shape: plies with MID=1 (*MAT_COMPOSITE_DAMAGE, not converted) and a
+    # *PART with PID=1, so the dangling reference went out unreported.
+    for mid in sorted({p.mid for p in plies}):
+        if not _mid_is_known(state, mid):
             state.warn(
-                f"*PART_COMPOSITE {pc.pid}: ply material {ply.mid} is not "
-                "defined by any *MAT card in the deck — the /PROP/TYPE19 "
-                "mat_ID will dangle at the starter.")
+                f"*PART_COMPOSITE {pc.pid}: ply material {mid} is NOT emitted "
+                "as a /MAT by this conversion — either the deck defines no "
+                "*MAT with that id, or its law is one k2rad does not convert. "
+                f"The /PROP/TYPE19 mat_ID={mid} will dangle and the starter "
+                "will reject the property; supply a supported material for "
+                "that ply.")
     return lines
 
 

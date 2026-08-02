@@ -12,8 +12,16 @@ Kept in a separate module from tests/test_converter.py (same policy as
 tests/test_joints.py, tests/test_connectors.py and tests/test_roadmap_keywords.py).
 
 Assertions are COLUMN-EXACT against the emitted cards, and every physics
-constant (the Poisson rescales, the plastic hardening modulus, the skew triad)
-is recomputed by hand in the test rather than copied from the implementation.
+constant (the Poisson rescales, the skew triad) is recomputed by hand in the
+test rather than copied from the implementation.
+
+Where a conversion turns on what an LS-DYNA field MEANS rather than on
+arithmetic - tangent vs plastic modulus, minor vs major Poisson ratio, absolute
+vs ratio TFAIL - the assertion pins the value the MANUAL's definition implies,
+with the citation in the test docstring. Re-deriving the implementation's own
+formula from the deck inputs verifies the arithmetic but not that the formula
+belongs there, which is exactly how the E*ETAN/(E-ETAN) misreading survived a
+green suite.
 """
 
 import math
@@ -433,8 +441,8 @@ class Law127Tests(unittest.TestCase):
         self.assertAlmostEqual(_f20(cards[11], 4), 0.0)       # RATIO (no PFL)
         self.assertAlmostEqual(_f20(cards[13], 3), 0.9)       # TSMD default
 
-    def test_tfail_in_unit_window_adds_fail_gene1_dtmin(self):
-        """0 < TFAIL < 1 is LS-DYNA's ABSOLUTE dt criterion -> /FAIL/GENE1
+    def test_tfail_absolute_window_adds_fail_gene1_dtmin(self):
+        """0 < TFAIL <= 0.1 is LS-DYNA's ABSOLUTE dt criterion -> /FAIL/GENE1
         dtmin, bound by the shared id (Radioss pairs /FAIL to /MAT by id)."""
         result, starter, _ = self._law127(tfail=0.001)
         blk = _block(starter, "/FAIL/GENE1/54")
@@ -442,13 +450,44 @@ class Law127Tests(unittest.TestCase):
         self.assertAlmostEqual(_col_f(card1, 81, 100), 0.001)   # dtmin
         self.assertTrue(any("dtmin=0.001" in w for w in result.warnings))
 
-    def test_tfail_ratio_form_gets_no_companion(self):
-        """TFAIL > 1 is a RATIO of the original dt, which Radioss's ABSOLUTE
-        dtmin cannot express — no /FAIL/GENE1, and a warning saying why."""
+    def test_tfail_band_switches_at_one_tenth_not_at_one(self):
+        """LS-DYNA Vol II R17 p.2-441, verbatim:
+
+            GT.0.0.and.LE.0.1: Element is deleted when its time step is
+                               smaller than the given value.
+            GT.0.1:            Element is deleted when the quotient of the
+                               actual time step and the original time step
+                               drops below the given value.
+
+        So the boundary is 0.1. dyna2rad gates its companion on 0 < TFAIL < 1
+        (convertmats.cxx:3205-3219), which re-reads every RATIO in (0.1, 1) as
+        an ABSOLUTE minimum time step - and /FAIL/GENE1's dtmin really is
+        absolute (engine fail_gene1_c.F:398). In a Mg/mm/s deck (dt ~ 1e-7) a
+        TFAIL of 0.5 emitted as dtmin=0.5 deletes every element of the part on
+        cycle 1, silently. Nothing in (0.1, 1] may produce a /FAIL card.
+        """
+        for tfail in (0.1, 0.05):
+            _, starter, _ = self._law127(tfail=tfail)
+            self.assertEqual(len(_blocks(starter, "/FAIL/GENE1")), 1,
+                             f"TFAIL={tfail} is the ABSOLUTE form")
+        for tfail in (0.5, 0.9, 1.0, 1.5):
+            result, starter, _ = self._law127(tfail=tfail)
+            self.assertEqual(_blocks(starter, "/FAIL/GENE1"), [],
+                             f"TFAIL={tfail} is the RATIO form")
+            self.assertTrue(any("RATIO form" in w for w in result.warnings),
+                            f"TFAIL={tfail}: {result.warnings}")
+
+    def test_tfail_ratio_form_is_reported_as_dropped_not_carried(self):
+        """The LAW127 card keeps a TFAIL column, but hm_read_mat127.F90 never
+        fetches that field - so the criterion survives NOWHERE and the warning
+        must not tell the reader otherwise."""
         result, starter, blk = self._law127(tfail=1.5)
         self.assertEqual(_blocks(starter, "/FAIL/GENE1"), [])
-        self.assertAlmostEqual(_f20(_cards(blk)[12], 1), 1.5)   # still on-card
-        self.assertTrue(any("RATIO form" in w for w in result.warnings))
+        self.assertAlmostEqual(_f20(_cards(blk)[12], 1), 1.5)   # layout only
+        msg = [w for w in result.warnings if "RATIO form" in w]
+        self.assertEqual(len(msg), 1, result.warnings)
+        self.assertIn("DROPPED", msg[0])
+        self.assertIn("never reads it", msg[0])
 
     def test_tfail_zero_gets_no_companion(self):
         _, starter, _ = self._law127(tfail=0.0)
@@ -537,23 +576,51 @@ class Law43Tests(unittest.TestCase):
         self.assertAlmostEqual(_f20(_cards(blk)[3], 0), 2.5)
         self.assertTrue(any("stabilized" in w.lower() for w in result.warnings))
 
-    def test_synthesized_hardening_curve_uses_plastic_modulus(self):
-        """LAW43 has no SIGY/ETAN slot, so HLCID=0 needs a bilinear /FUNCT. Its
-        slope must be the PLASTIC modulus H = E*ETAN/(E-ETAN) because the LAW43
-        curve is stress vs PLASTIC strain (dyna2rad writes the raw ETAN)."""
+    def test_synthesized_hardening_curve_slope_is_etan_verbatim(self):
+        """LAW43 has no SIGY/ETAN slot, so HLCID=0 needs a bilinear /FUNCT of
+        stress vs PLASTIC strain. MAT_037's ETAN is ALREADY the plastic
+        hardening modulus - LS-DYNA Vol II R17 p.2-398 "ETAN: Plastic hardening
+        modulus", against p.2-172 where *MAT_PLASTIC_KINEMATIC calls its
+        same-named field "Tangent modulus, see Figure M3-1" - so the slope is
+        ETAN itself, NOT the E*ETAN/(E-ETAN) rescale the tangent-modulus
+        reading would need.
+
+        The assert is the manual's value (1000) pinned as a literal; deriving
+        either formula from E and ETAN here would only re-check arithmetic.
+        """
         result, starter, blk = self._law43(sigy=300.0, etan=1000.0, hlcid=0)
         fid = _i10(_cards(blk)[5], 0)
         self.assertGreater(fid, 0)
-        h = 210000.0 * 1000.0 / (210000.0 - 1000.0)     # = 1004.7846...
-        self.assertAlmostEqual(h, 1004.784688995215, places=6)
         curve = _cards(_block(starter, f"/FUNCT/{fid}"))
         self.assertEqual(len(curve), 2)
         self.assertAlmostEqual(_f20(curve[0], 0), 0.0)
         self.assertAlmostEqual(_f20(curve[0], 1), 300.0)
         self.assertAlmostEqual(_f20(curve[1], 0), 1.0)
-        self.assertAlmostEqual(_f20(curve[1], 1), 300.0 + h, places=3)
-        # ...and NOT dyna2rad's SIGY + |ETAN| = 1300
-        self.assertNotAlmostEqual(_f20(curve[1], 1), 1300.0, places=1)
+        self.assertAlmostEqual(_f20(curve[1], 1), 1300.0, places=6)
+        # ...and NOT SIGY + E*ETAN/(E-ETAN) = 1304.784688995215
+        self.assertNotAlmostEqual(_f20(curve[1], 1), 1304.784688995215,
+                                  places=2)
+
+    def test_high_hardening_separates_the_two_etan_conventions(self):
+        """At ETAN = E/10 the two readings are 11% apart, so this is the case
+        that discriminates: the plastic-modulus reading (correct) gives
+        SIGY + 21000, the tangent-modulus one would give SIGY + 23333."""
+        _, starter, blk = self._law43(sigy=300.0, etan=21000.0, hlcid=0)
+        fid = _i10(_cards(blk)[5], 0)
+        curve = _cards(_block(starter, f"/FUNCT/{fid}"))
+        self.assertAlmostEqual(_f20(curve[1], 1), 21300.0, places=4)
+        self.assertNotAlmostEqual(_f20(curve[1], 1), 23633.33, places=0)
+
+    def test_negative_etan_is_the_normal_stress_flag_not_a_modulus(self):
+        """ETAN < 0 is LS-DYNA's include-contact/pressure-normal-stresses flag
+        (Vol II R17 p.2-398), not a negative modulus: |ETAN| is the hardening
+        modulus. Clamping it to 0 would make the sheet perfectly plastic."""
+        result, starter, blk = self._law43(sigy=300.0, etan=-1000.0, hlcid=0)
+        fid = _i10(_cards(blk)[5], 0)
+        curve = _cards(_block(starter, f"/FUNCT/{fid}"))
+        self.assertAlmostEqual(_f20(curve[1], 1), 1300.0, places=6)
+        self.assertTrue(any("ETAN=-1000" in w and "DROPPED" in w
+                            for w in result.warnings), result.warnings)
 
     def test_hlcid_curve_is_bound_directly(self):
         """dyna2rad's missing braces (convertmats.cxx:3100-3102) overwrite
@@ -654,6 +721,9 @@ class LaminatedGlassTests(unittest.TestCase):
         self.assertAlmostEqual(_f20(c[1], 0), 70000.0)       # E  <- EG
         self.assertAlmostEqual(_f20(c[1], 1), 0.23)          # NU <- PRG
         self.assertAlmostEqual(_f20(c[2], 0), 100.0)         # a  <- SYG
+        # b <- ETG verbatim (Vol II R17 p.2-314 "Plastic hardening modulus for
+        # glass"); this deck's ETG is 0, i.e. perfectly plastic glass.
+        self.assertAlmostEqual(_f20(c[2], 1), 0.0)           # b  <- ETG
         self.assertAlmostEqual(_f20(c[2], 2), 1.0)           # n  = 1
         # EFG -> the brittle-damage ramp EFG / EFG+0.05 / EFG+0.1
         self.assertAlmostEqual(_f20(c[4], 0), 0.01)          # EPS_t1
@@ -670,8 +740,12 @@ class LaminatedGlassTests(unittest.TestCase):
         self.assertAlmostEqual(_f20(c[1], 0), 3000.0)        # E  <- EP
         self.assertAlmostEqual(_f20(c[1], 1), 0.40)          # NU <- PRP
         self.assertAlmostEqual(_f20(c[2], 0), 20.0)          # a  <- SYP
-        # b = plastic modulus H = EP*ETP/(EP-ETP) = 3000*10/2990
-        self.assertAlmostEqual(_f20(c[2], 1), 3000.0 * 10.0 / 2990.0, places=6)
+        # b <- ETP VERBATIM. LS-DYNA Vol II R17 p.2-315 defines ETP as the
+        # "Plastic hardening modulus for polymer", which is exactly what LAW27's
+        # b is at n=1 (dSigma/dEps_plastic) - no tangent-modulus rescale.
+        self.assertAlmostEqual(_f20(c[2], 1), 10.0, places=6)
+        self.assertNotAlmostEqual(_f20(c[2], 1), 3000.0 * 10.0 / 2990.0,
+                                  places=4)
         self.assertAlmostEqual(_f20(c[4], 0), 1.0e30)        # EPS_t1
         self.assertAlmostEqual(_f20(c[4], 3), 1.2e30)        # EPS_f1
 
@@ -809,13 +883,36 @@ class PartCompositeTests(unittest.TestCase):
         self.assertEqual(len(_blocks(starter, "/SHELL/7")), 1)
         self.assertIn("/PART/7", starter)
 
-    def test_ishell_from_elform(self):
-        """ELFORM -16 / 9 are the fully-integrated forms -> Ishell 12 (QBAT);
-        everything else -> 24 (QEPH)."""
-        for elform, ishell in ((2, 24), (16, 24), (-16, 12), (9, 12)):
+    def test_ishell_uses_the_shared_elform_mapping(self):
+        """Ishell goes through _elform_to_ishell, the SAME mapping every other
+        k2rad shell property uses - so one LS-DYNA ELFORM cannot produce two
+        different Radioss formulations depending on whether the part used
+        *SECTION_SHELL or *PART_COMPOSITE. (dyna2rad hard-wires 12 for ELFORM
+        -16/9 and 24 for everything else, which inverts k2rad's default.)"""
+        from k2rad.writer.common import _elform_to_ishell
+        for elform in (2, 16, -16, 9, 20):
             _, starter = self._pc(elform=elform)
             card1 = _cards(_block(starter, "/PROP/TYPE51/"))[0]
-            self.assertEqual(_i10(card1, 0), ishell, f"ELFORM={elform}")
+            self.assertEqual(_i10(card1, 0), _elform_to_ishell(elform, False),
+                             f"ELFORM={elform}")
+
+    def test_shell_formulation_option_reaches_part_composite(self):
+        """--shell-formulation must move the layup too; it used to reach only
+        *SECTION_SHELL-derived properties, so the ELFORM warning gave advice
+        that had no effect on *PART_COMPOSITE parts."""
+        deck = ("*KEYWORD\n" + NODES + SHELL + _part_composite(elform=2)
+                + _mat002() + END)
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        for formulation, ishell in (("qbat", 12), ("qeph", 24)):
+            res = convert(path, write_log=False, shell_formulation=formulation)
+            with open(res.starter_path) as fh:
+                starter = fh.read()
+            card1 = _cards(_block(starter, "/PROP/TYPE51/"))[0]
+            self.assertEqual(_i10(card1, 0), ishell, formulation)
+        tmp.cleanup()
 
     def test_nloc_maps_to_ipos(self):
         """NLOC 0 = mid-surface (Ipos 0), -1 = bottom (Ipos 4), +1 = top (3)."""
@@ -829,6 +926,21 @@ class PartCompositeTests(unittest.TestCase):
             _, starter = self._pc(shrf=shrf)
             card3 = _cards(_block(starter, "/PROP/TYPE51/"))[2]
             self.assertAlmostEqual(_col_f(card3, 21, 40), ashear, places=6)
+
+    def test_blank_shrf_keeps_the_radioss_default_not_ls_dynas(self):
+        """LS-DYNA's own SHRF default is 1.0 (Vol I R17 p.37-21) and Radioss's
+        Ashear default is 5/6, so defaulting a BLANK field to 1.0 makes the
+        part 20% stiffer in transverse shear than the same deck through
+        dyna2rad (which never sets Ashear) and than every other k2rad shell
+        property - off a DEFAULT, not off deck data. A blank must fall
+        through; an explicit SHRF is still carried (test above)."""
+        pc = ("*PART_COMPOSITE\nlayup\n"
+              + _row(7, 2) + "\n"                    # SHRF column left BLANK
+              + _row(2, 0.4, 0.0, 0, 2, 0.4, 90.0, 0) + "\n")
+        _, starter = _convert("*KEYWORD\n" + NODES + SHELL + pc
+                              + _mat002(mid=2) + END)
+        card3 = _cards(_block(starter, "/PROP/TYPE51/"))[2]
+        self.assertAlmostEqual(_col_f(card3, 21, 40), 0.833333, places=6)
 
     def test_missing_ply_padding_is_skipped_without_dropping_the_last(self):
         """THICK=0 with MID=-1 is LS-DYNA's alignment padding. dyna2rad shrinks
@@ -899,6 +1011,22 @@ class PartCompositeTests(unittest.TestCase):
         prop = _block(starter, "/PROP/SHELL/7")
         self.assertAlmostEqual(_col_f(_cards(prop)[2], 21, 40), 1.2)
 
+    def test_padding_only_layup_does_not_put_a_negative_mid_on_the_part(self):
+        """LS-DYNA's "missing ply" padding is MID = -1 with THICK = 0. The
+        mesh-preserving fallback *PART must take its mat_ID from the first REAL
+        ply (mirroring the writer's _valid_plies filter), or it references a
+        material id that cannot exist and the starter rejects the /PART -
+        defeating the point of preserving the mesh."""
+        result, starter = self._pc(plies=((-1, 0.0, 0.0),))
+        mid = _i10(_cards(_block(starter, "/PART/7"))[0], 1)
+        self.assertGreaterEqual(mid, 0, "a negative mat_ID references nothing")
+        self.assertTrue(any("no material" in w for w in result.warnings),
+                        result.warnings)
+
+    def test_leading_padding_ply_does_not_become_the_part_material(self):
+        _, starter = self._pc(plies=((-1, 0.0, 0.0), (2, 0.4, 0.0)))
+        self.assertEqual(_i10(_cards(_block(starter, "/PART/7"))[0], 1), 2)
+
     def test_no_valid_plies_keeps_the_mesh(self):
         iso = "*MAT_ELASTIC\n" + _row(2, 7.85e-9, 210000.0, 0.3) + "\n"
         result, starter = self._pc(plies=((-1, 0.0, 0.0),), mat=iso)
@@ -906,6 +1034,34 @@ class PartCompositeTests(unittest.TestCase):
         self.assertEqual(len(_blocks(starter, "/SHELL/7")), 1)
         self.assertTrue(any("no valid plies" in w for w in result.warnings),
                         result.warnings)
+
+    def test_every_option_spelling_is_registered(self):
+        """*PART_COMPOSITE_{OPTION1}_{OPTION2}_{OPTION3} with OPTION1 in
+        {<blank>, TSHELL, IGA_SHELL}, OPTION2 in {<blank>, LONG} and OPTION3 in
+        {<blank>, CONTACT} - TWELVE legal spellings (LS-DYNA Vol I R17 p.37-18).
+
+        dispatch() is an exact dict lookup with no *PART_COMPOSITE prefix
+        fallback, and a miss does NOT merely skip the keyword:
+        _make_parts_and_elements emits elements inside the state.parts loop, so
+        the part and every element on it vanish with no warning. Two spellings
+        (_IGA_SHELL_CONTACT, _IGA_SHELL_LONG_CONTACT) were missing."""
+        from k2rad.handlers import HANDLERS
+        for o1 in ("", "_TSHELL", "_IGA_SHELL"):
+            for o2 in ("", "_LONG"):
+                for o3 in ("", "_CONTACT"):
+                    self.assertIn(f"PART_COMPOSITE{o1}{o2}{o3}", HANDLERS)
+
+    def test_every_option_spelling_keeps_the_mesh(self):
+        """End to end: whichever spelling is used, the /PART and its /SHELL
+        must both come out."""
+        for o1 in ("", "_TSHELL", "_IGA_SHELL"):
+            for o2 in ("", "_LONG"):
+                for o3 in ("", "_CONTACT"):
+                    kw = f"*PART_COMPOSITE{o1}{o2}{o3}"
+                    _, starter = self._pc(kw=kw, contact=bool(o3),
+                                          long_form=bool(o2))
+                    self.assertEqual(len(_blocks(starter, "/PART/7")), 1, kw)
+                    self.assertTrue(_blocks(starter, "/SHELL/"), kw)
 
     def test_title_option_and_plain_keyword_both_dispatch(self):
         for kw in ("*PART_COMPOSITE", "*PART_COMPOSITE_TITLE"):
@@ -925,6 +1081,35 @@ class PartCompositeTests(unittest.TestCase):
         result, _ = self._pc(plies=((2, 0.3, 0.0), (4242, 0.4, 0.0)))
         self.assertTrue(any("ply material 4242" in w for w in result.warnings),
                         result.warnings)
+
+    def test_dangling_ply_warning_ignores_the_part_id_namespace(self):
+        """The guard is against the MATERIAL id space only. Also testing the
+        ply MID against state.parts (which is keyed by PID) suppressed the
+        warning whenever any *PART happened to carry the ply material's number
+        - two unrelated LS-DYNA id spaces.
+
+        Ryan_Lee_Examples/W6_SETUP_SandwichImpact.k is exactly this shape: its
+        *PART_COMPOSITE plies are MID=1 (*MAT_COMPOSITE_DAMAGE, a law k2rad
+        does not convert, so no /MAT is emitted) and the deck also has a *PART
+        with PID=1. The result is a /PROP/TYPE19 with mat_ID=1 that the starter
+        rejects, and the dedicated warning never fired."""
+        extra_part = ("*PART\nan unrelated part that happens to be numbered 4242\n"
+                      + _row(4242, 7, 2) + "\n")
+        deck = ("*KEYWORD\n" + NODES + SHELL
+                + _part_composite(plies=((2, 0.3, 0.0), (4242, 0.4, 0.0)))
+                + extra_part + SECTION + _mat002() + END)
+        result, starter = _convert(deck)
+        self.assertTrue(any("ply material 4242" in w for w in result.warnings),
+                        result.warnings)
+        # the dangling id really is on the emitted ply property
+        plies = [b for b in _blocks(starter, "/PROP/TYPE19/")]
+        self.assertIn(4242, [_i10(_cards(b)[0], 0) for b in plies])
+
+    def test_repeated_dangling_ply_material_warns_once(self):
+        result, _ = self._pc(plies=((4242, 0.3, 0.0), (4242, 0.4, 0.0),
+                                    (4242, 0.5, 0.0)))
+        hits = [w for w in result.warnings if "ply material 4242" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
 
     def test_ply_prop_ids_are_unique_and_distinct_from_the_stack(self):
         _, starter = self._pc()
@@ -1119,6 +1304,144 @@ class CompositeAoptTests(unittest.TestCase):
         card3 = _cards(_block(starter, "/PROP/TYPE6/"))[2]
         self.assertGreater(_col_i(card3, 61, 70), 0)       # skew_ID
         self.assertEqual(_col_i(card3, 71, 80), 0)         # Ip = 0 (use skew)
+
+    def _solid_prop(self, **kw):
+        deck = ("*KEYWORD\n" + SOLID_NODES + BRICK
+                + "*PART\nbrick\n" + _row(7, 7, 2) + "\n" + SECTION_SOLID
+                + _mat002(**kw) + END)
+        result, starter = _convert(deck)
+        return result, starter, _cards(_block(starter, "/PROP/TYPE6/"))
+
+    def test_aopt1_point_lands_in_the_px_py_pz_columns(self):
+        """Ip=21 is a reference POINT and the starter reads it from Px/Py/Pz
+        ONLY: hm_read_prop06.F:202-204 fetches 'Px'/'Py'/'Pz' into GEO(33..35)
+        and :496 echoes WRITE(IOUT,2002) IP,PX,PY,PZ. Routing the point through
+        the Vx/Vy/Vz reference-VECTOR columns leaves Px/Py/Pz at zero, i.e. the
+        orthotropy is built about the global ORIGIN for every element - silently
+        wrong fibre directions, no error. (This is dyna2rad defect #3,
+        convertprops.cxx:3744-3746.)"""
+        deck = ("*KEYWORD\n" + SOLID_NODES + BRICK
+                + "*PART\nbrick\n" + _row(7, 7, 2) + "\n" + SECTION_SOLID
+                + "*MAT_ORTHOTROPIC_ELASTIC\n"
+                + _row(2, 1.55e-9, 150000.0, 10000.0, 10000.0,
+                       0.02, 0.02, 0.4) + "\n"
+                + _row(5000.0, 3000.0, 4000.0, 1.0) + "\n"      # AOPT = 1
+                + _row(11.0, 22.0, 33.0) + "\n"                 # XP / YP / ZP
+                + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + END)
+        result, starter = _convert(deck)
+        cards = _cards(_block(starter, "/PROP/TYPE6/"))
+        self.assertEqual(_col_i(cards[2], 71, 80), 21)                # Ip
+        # card 4: Phi | Px | Py | Pz
+        self.assertAlmostEqual(_col_f(cards[3], 21, 40), 11.0)
+        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 22.0)
+        self.assertAlmostEqual(_col_f(cards[3], 61, 80), 33.0)
+        # ...and the point must NOT have been written to the vector columns
+        for col in ((1, 20), (21, 40), (41, 60)):
+            self.assertAlmostEqual(_col_f(cards[2], *col), 0.0)
+
+    def test_aopt4_cylindrical_writes_both_the_axis_and_the_point(self):
+        """Ip=24 needs BOTH: hm_read_prop06.F:500
+        WRITE(IOUT,2004) IP,PX,PY,PZ,VX,VY,VZ. Dropping the point puts the
+        cylindrical axis through the global origin - strictly LESS faithful
+        than dyna2rad, whose axisOptFlag==5 branch (convertprops.cxx:3836-3843)
+        writes both."""
+        deck = ("*KEYWORD\n" + SOLID_NODES + BRICK
+                + "*PART\nbrick\n" + _row(7, 7, 2) + "\n" + SECTION_SOLID
+                + "*MAT_ORTHOTROPIC_ELASTIC\n"
+                + _row(2, 1.55e-9, 150000.0, 10000.0, 10000.0,
+                       0.02, 0.02, 0.4) + "\n"
+                + _row(5000.0, 3000.0, 4000.0, 4.0) + "\n"      # AOPT = 4
+                + _row(11.0, 22.0, 33.0) + "\n"                 # XP / YP / ZP
+                + _row(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) + "\n"   # V
+                + END)
+        _, starter = _convert(deck)
+        cards = _cards(_block(starter, "/PROP/TYPE6/"))
+        self.assertEqual(_col_i(cards[2], 71, 80), 24)                # Ip
+        self.assertAlmostEqual(_col_f(cards[2], 1, 20), 0.0)          # Vx
+        self.assertAlmostEqual(_col_f(cards[2], 21, 40), 0.0)         # Vy
+        self.assertAlmostEqual(_col_f(cards[2], 41, 60), 1.0)         # Vz
+        self.assertAlmostEqual(_col_f(cards[3], 21, 40), 11.0)        # Px
+        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 22.0)        # Py
+        self.assertAlmostEqual(_col_f(cards[3], 61, 80), 33.0)        # Pz
+
+    def test_aopt3_note_describes_the_cross_product(self):
+        """AOPT=3's mapping is right but its description was 90 degrees out.
+        LS-DYNA Vol II R17 p.2-385 defines AOPT=3 as a line in the element
+        plane given by the CROSS PRODUCT of v with the element normal, and
+        Radioss corthini.F CASE(23) computes n x v - the same axis. So v is
+        TRANSVERSE to the fibre, not along it (solver-confirmed: v=(0,1,0)
+        left the fibre along X)."""
+        result, _, _ = self._prop(aopt=3.0, v=(0.0, 1.0, 0.0))
+        note = [w for w in result.warnings if "AOPT=3" in w]
+        self.assertTrue(note, result.warnings)
+        self.assertIn("CROSS", note[0].upper())
+        self.assertNotIn("projected into the shell plane", note[0])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Synthesized /SKEW id reservation (shared with the LAW128 orthotropic props)
+# ═════════════════════════════════════════════════════════════════════════════
+
+MAT103 = (
+    "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+    "         3   1.05E-9    1800.0       0.4      35.0       0.0       0.0       1.0\n"
+    "      10.0      50.0       5.0     300.0       0.0       0.0       0.0       0.0\n"
+    "       0.0       0.0      1.35       1.0      0.75       0.0       0.0       0.0\n"
+    "       0.0       0.1\n"
+)
+
+
+class SynthesizedSkewIdTests(unittest.TestCase):
+    """Two writer modules mint /SKEW/FIX ids for synthesized orthotropy frames -
+    writer/mesh.py for LAW128 solid parts and writer/composites.py for AOPT=2
+    composite parts. Both run in the same build_starter pass and both allocate
+    by bumping off all_skew_ids(), so the reservation has to live on the STATE:
+    with a local set each, the second emitter cannot see what the first took.
+
+    /SKEW and /FRAME share ONE starter id namespace, so a clash is a hard
+    ERROR 79 DUPLICATE ID, not a warning.
+    """
+
+    def _deck(self, cid=None):
+        parts = ("*PART\ncomposite shell\n" + _row(7, 7, 2) + "\n"
+                 + "*PART\nlaw128 brick\n" + _row(8, 8, 3) + "\n")
+        sects = SECTION + "*SECTION_SOLID\n" + _row(8, 1) + "\n"
+        coord = ""
+        if cid is not None:
+            coord = ("*DEFINE_COORDINATE_SYSTEM\n"
+                     + _row(cid, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"
+                     + _row(0.0, 1.0, 0.0) + "\n")
+        brick = ("*ELEMENT_SOLID\n" + _row(1, 8) + "\n"
+                 + _row(1, 2, 3, 4, 5, 6, 7, 8) + "\n")
+        return ("*KEYWORD\n" + SOLID_NODES
+                + "*ELEMENT_SHELL\n" + _row(1, 7, 1, 2, 3, 4) + "\n"
+                + brick + parts + sects + coord
+                + _mat002(aopt=2.0, a=(1.0, 0.0, 0.0), d=(0.0, 1.0, 0.0),
+                          title=False)
+                + MAT103 + END)
+
+    def test_composite_and_law128_skews_never_collide(self):
+        """The failing shape is a *DEFINE_COORDINATE sitting on the COMPOSITE
+        property's id: the LAW128 solid emitter runs first (inside
+        _make_properties) and takes 90002 unbumped, then the composite emitter
+        finds its own base 90001 occupied by the CID and bumps onto 90002.
+        Before the shared reservation this emitted /SKEW/FIX/90002 twice."""
+        for cid in (None, 90001, 90002, 90003, 90004):
+            _, starter = _convert(self._deck(cid))
+            ids = [b[0] for b in _blocks(starter, "/SKEW/")]
+            self.assertEqual(len(ids), len(set(ids)),
+                             f"CID={cid}: duplicate /SKEW id in {ids}")
+
+    def test_both_property_types_reference_a_skew_that_exists(self):
+        _, starter = _convert(self._deck(90001))
+        emitted = {int(b[0].rsplit("/", 1)[1])
+                   for b in _blocks(starter, "/SKEW/")}
+        t6 = _col_i(_cards(_block(starter, "/PROP/TYPE6/"))[2], 61, 70)
+        t11 = _col_i(_cards(_block(starter, "/PROP/TYPE11/"))[3], 61, 70)
+        self.assertIn(t6, emitted)
+        self.assertIn(t11, emitted)
+        self.assertNotEqual(t6, t11)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

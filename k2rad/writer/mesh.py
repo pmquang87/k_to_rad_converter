@@ -1738,16 +1738,26 @@ def _emit_prop_type9(prop_id: int, title: str, sec: SectionShell,
 def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      itetra10: int, istrain: int,
                      refvec=(1.0, 0.0, 0.0), ip: int = 11,
-                     phi: float = 0.0, skew_id: int = 0) -> List[str]:
+                     phi: float = 0.0, skew_id: int = 0,
+                     refpoint=(0.0, 0.0, 0.0)) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
     EVERY element, exactly). Without a skew, Ip=11 projects the reference
     vector onto each element's local r-s plane — element-topology-dependent on
     free tet meshes, so only used as a fallback. Column layout from
-    PROP/prop_p6_sol_orth.cfg FORMAT(radioss2022)."""
+    PROP/prop_p6_sol_orth.cfg FORMAT(radioss2022).
+
+    *refpoint* is the card-4 Px/Py/Pz reference POINT, which is a different
+    field from the Vx/Vy/Vz reference VECTOR and the only place the starter
+    looks for the two point-based modes: ``hm_read_prop06.F`` reads
+    ``'Px'/'Py'/'Pz'`` into ``GEO(33..35)`` and echoes them for ``Ip=21``
+    (point alone, :496) and ``Ip=24`` (cylindrical, point AND vector, :500).
+    Routing a point through *refvec* puts it in the wrong columns and the
+    orthotropy is silently built about the global origin instead."""
     isolid = _elform_to_isolid(sec.elform) if sec else 0
     vx, vy, vz = (0.0, 0.0, 0.0) if skew_id else refvec
+    px, py, pz = (0.0, 0.0, 0.0) if skew_id else refpoint
     if skew_id:
         ip, phi = 0, 0.0
     b10 = " " * 10
@@ -1761,7 +1771,7 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
         "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",
         f"{_f(vx)}{_f(vy)}{_f(vz)}{_i(skew_id)}{_i(ip)}{_i(0)}",
         "#                Phi                 Px                  Py                  Pz",
-        f"{_f(phi)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(phi)}{_f(px)}{_f(py)}{_f(pz)}",
     ]
     # Card 5 has Ihkt only for the physically-stabilized ISOLID 24 (and the
     # /DEF_SOLID-default 0); other formulations read just deltaT_min + Istrain.
@@ -1836,7 +1846,6 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
     part_secids = {pid: (p.secid if p.secid > 0 else pid)
                    for pid, p in state.parts.items()}
     lines: List[str] = []
-    skew_ids_used = state.all_skew_ids()
     for pid, prop_id in sorted(state.ortho_prop_ids.items()):
         secid = part_secids.get(pid, pid)
         title = f"LAW128_ORTHO_PROP_{prop_id} (part {pid})"
@@ -1873,10 +1882,10 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
             # (and elements whose plane is exactly normal to the vector fall
             # back to a mesh edge: starter WARNING 811).
             axes = _ortho_skew_axes(vec, phi)
-            skew_id = prop_id
-            while skew_id in skew_ids_used:
-                skew_id += 1
-            skew_ids_used.add(skew_id)
+            # Reserved on the STATE, not a local set: writer/composites.py
+            # mints its AOPT=2 skews the same way in the same pass, and an id
+            # only one of them knows about is an ERROR 79 waiting to happen.
+            skew_id = state.reserve_skew_id(prop_id)
             if mapped:
                 state.warn(
                     f"/PROP for LAW128 part {pid}: orthotropy axes taken from "

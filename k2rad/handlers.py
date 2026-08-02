@@ -1183,7 +1183,9 @@ def handle_part_composite(block: Block, state: ConversionState) -> None:
     elif "IGA_SHELL" in kw or "IGA" in kw:
         variant = "IGA_SHELL"
     elform = to_int(fd[1]) if len(fd) > 1 and fd[1].strip() else 0
-    shrf = to_float(fd[2]) if len(fd) > 2 and fd[2].strip() else 1.0
+    # A BLANK SHRF is recorded as 0.0 = "not given" rather than as LS-DYNA's
+    # own 1.0 default, so the writer can leave Radioss's 5/6 Ashear in place.
+    shrf = to_float(fd[2]) if len(fd) > 2 and fd[2].strip() else 0.0
     nloc = to_float(fd[3]) if len(fd) > 3 and fd[3].strip() and variant != "TSHELL" else 0.0
     marea = to_float(fd[4]) if len(fd) > 4 and fd[4].strip() and variant == "" else 0.0
     hgid = to_int(fd[5]) if len(fd) > 5 and fd[5].strip() else 0
@@ -1229,9 +1231,24 @@ def handle_part_composite(block: Block, state: ConversionState) -> None:
     # ALWAYS register the *PART itself (SECID 0 → the writer auto-creates a
     # *SECTION_SHELL under the part id if the layup cannot be converted), so the
     # part's elements are emitted whatever happens to the property.
+    #
+    # The fallback mat_ID must come from the first REAL ply, mirroring the
+    # writer's _valid_plies filter: LS-DYNA's "missing ply" padding is
+    # MID = -1 with THICK = 0, and a layup that leads with it would otherwise
+    # put a negative material id on the /PART, which references no material and
+    # is rejected by the starter — defeating the whole point of the
+    # mesh-preserving fallback.
     if pid not in state.parts:
-        state.parts[pid] = PartData(pid, title, 0, plies[0].mid if plies else 0,
-                                    hgid, 0)
+        fallback_mid = next((p.mid for p in plies if p.mid > 0 and p.thick > 0.0),
+                            0)
+        if plies and fallback_mid == 0:
+            state.warn(
+                f"*PART_COMPOSITE {pid}: every layer is 'missing ply' padding "
+                "(MID <= 0 or zero thickness), so the fallback *PART carries no "
+                "material. The part and its elements are still emitted, but the "
+                "starter will reject the /PART until a real ply material is "
+                "given.")
+        state.parts[pid] = PartData(pid, title, 0, fallback_mid, hgid, 0)
 
 
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
@@ -5214,19 +5231,10 @@ HANDLERS = {
     # reference → /PROP/TYPE51 + one /PROP/TYPE19 per ply. Every OPTION1/2/3
     # spelling needs its own key (dispatch is an exact dict lookup and only
     # _ID/_TITLE/_SUBTITLE are stripped); the handler reads block.keyword to
-    # pick the card layout. _TSHELL / _IGA_SHELL are registered too so the
-    # *PART record still lands and the part keeps its mesh (the property then
-    # falls back to a plain shell — see the handler).
-    "PART_COMPOSITE":                         handle_part_composite,
-    "PART_COMPOSITE_LONG":                    handle_part_composite,
-    "PART_COMPOSITE_CONTACT":                 handle_part_composite,
-    "PART_COMPOSITE_LONG_CONTACT":            handle_part_composite,
-    "PART_COMPOSITE_TSHELL":                  handle_part_composite,
-    "PART_COMPOSITE_TSHELL_CONTACT":          handle_part_composite,
-    "PART_COMPOSITE_TSHELL_LONG":             handle_part_composite,
-    "PART_COMPOSITE_TSHELL_LONG_CONTACT":     handle_part_composite,
-    "PART_COMPOSITE_IGA_SHELL":               handle_part_composite,
-    "PART_COMPOSITE_IGA_SHELL_LONG":          handle_part_composite,
+    # pick the card layout. All twelve are registered from the option grammar
+    # just below this dict — including _TSHELL / _IGA_SHELL, so the *PART
+    # record still lands and the part keeps its mesh (the property then falls
+    # back to a plain shell — see the handler).
     "HOURGLASS":                              handle_hourglass,
 
     # Sections
@@ -5588,6 +5596,21 @@ HANDLERS = {
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_simplified_johnson_cook,
     "SET_SEGMENT":                            handle_set_segment,
 }
+
+
+# *PART_COMPOSITE_{OPTION1}_{OPTION2}_{OPTION3} — OPTION1 in {<blank>, TSHELL,
+# IGA_SHELL}, OPTION2 in {<blank>, LONG}, OPTION3 in {<blank>, CONTACT}
+# (LS-DYNA Vol I R17 p.37-18): TWELVE legal spellings. dispatch() is an exact
+# dict lookup with no *PART_COMPOSITE prefix fallback, and a *PART_COMPOSITE
+# that misses it does not merely get skipped — _make_parts_and_elements emits
+# elements inside the state.parts loop, so the part AND every element on it
+# vanish with no warning. Generating the grammar keeps that from depending on
+# someone hand-enumerating all twelve.
+for _o1 in ("", "_TSHELL", "_IGA_SHELL"):
+    for _o2 in ("", "_LONG"):
+        for _o3 in ("", "_CONTACT"):
+            HANDLERS[f"PART_COMPOSITE{_o1}{_o2}{_o3}"] = handle_part_composite
+del _o1, _o2, _o3
 
 
 def dispatch(block: Block, state: ConversionState) -> None:

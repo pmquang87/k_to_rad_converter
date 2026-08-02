@@ -305,11 +305,13 @@ YCFAC/EFS/EPSF/EPSR/TSMD/NCYRED/2WAY/TI` and the five strain-rate curves are 1:1
 **Poisson is copied RAW here** — `hm_read_mat127.F90:127-129` reads `PRBA→nu21`,
 `PRCA→nu31`, `PRCB→nu32` and performs the reciprocity step itself, so applying
 the LAW93 rescale would double-apply it (the two never share a helper). `PFL`
-becomes LAW127's element-deletion `RATIO = |PFL|`, and a `TFAIL` in the
-half-open window `0 < TFAIL < 1` (LS-DYNA's *absolute* dt criterion)
-additionally emits a `/FAIL/GENE1` of the same id carrying `dtmin`; the
-`TFAIL > 1` *ratio* form cannot be expressed by Radioss's absolute `dtmin` and
-is warned. `CRIT = 55` (Tsai-Wu) has no LAW127 switch — the law is Chang-Chang
+becomes LAW127's element-deletion `RATIO = |PFL|`, and a `TFAIL` in
+`0 < TFAIL <= 0.1` — LS-DYNA's *absolute* minimum-dt criterion; the band
+switches at **0.1**, not 1 (Vol II R17 p.2-441) — additionally emits a
+`/FAIL/GENE1` of the same id carrying `dtmin`. `TFAIL > 0.1` is the *ratio*
+`dt/dt₀` form, which Radioss's absolute `dtmin` cannot express, so it is
+warn-dropped; it does not survive in the LAW127 `TFAIL` column either, because
+`hm_read_mat127.F90` never fetches that field. `CRIT = 55` (Tsai-Wu) has no LAW127 switch — the law is Chang-Chang
 only — and is warned loudly rather than dropped silently as dyna2rad does
 (whose MAT_054 and MAT_055 output is byte-identical); `/MAT/LAW25` (COMPSH)
 `Iform=0` is the Tsai-Wu law if that criterion is essential. `SOFT`/`SOFT2`/
@@ -325,10 +327,14 @@ trade-off LAW128 already ships under (**verified against `starter_win64.exe`:
 fills all three slots: `r00 = r45 = r90 = |R|` (`R < 0` requests a stabilized
 scheme, not a negative ratio), with `C_hard = 0` and `Iyield0 = 0`. LAW43 is
 **tabular-only** — no `SIGY`/`ETAN` slot — so `HLCID = 0` synthesizes a bilinear
-`/FUNCT` `[(0, SIGY), (1, SIGY + H)]`. Its slope is the **plastic** hardening
-modulus `H = E·ETAN/(E−ETAN)`, because the LAW43 curve is stress vs *plastic*
-strain; dyna2rad writes the raw total-curve tangent `ETAN` there instead, and
-then never binds the curve at all (a missing pair of braces at
+`/FUNCT` `[(0, SIGY), (1, SIGY + ETAN)]`. The slope is `ETAN` **verbatim**: the
+LAW43 curve is stress vs *plastic* strain and MAT_037's `ETAN` is already the
+plastic hardening modulus (Vol II R17 p.2-398, against p.2-172 where
+`*MAT_PLASTIC_KINEMATIC` calls its same-named field a *tangent* modulus — only
+that one needs the `H = E·ETAN/(E−ETAN)` rescale). A negative `ETAN` is
+LS-DYNA's include-normal-stresses flag, so the magnitude is used and the flag
+warn-dropped. dyna2rad writes the same slope but then never binds the curve at
+all (a missing pair of braces at
 `convertmats.cxx:3100-3102` overwrites `func_IDi[0]` with `HLCID = 0` in both
 branches → starter ANCMSG 366). `IDSCALE → FUNCT_IDE` and the `_ECHANGE`
 Young's-modulus evolution `EA/COE → EINF/CE`. An `ICFLD` forming-limit curve
@@ -348,15 +354,20 @@ inverts the test *and* mutates the `/PART` mat_ID inside the layer loop, so ever
 layer after the first polymer one also becomes polymer. Only the glass can fail,
 so `EFG` becomes a brittle-damage ramp (`EPS_t = EFG`, `EPS_m = EFG+0.05`,
 `EPS_f = EFG+0.1`) and the polymer keeps the never-damage defaults. `ETG`/`ETP`
-are carried through as the plastic modulus `H = E·ET/(E−ET)`, consistent with
-the `*MAT_PLASTIC_KINEMATIC` → LAW44 rule. Layer thicknesses are the section
+go straight into the LAW27 `b` (with `n = 1`, `b` **is** `dSigma/dEps_plastic`)
+— the manual names both fields "Plastic hardening modulus" (Vol II R17
+p.2-314/315), so no tangent-modulus rescale applies. Layer thicknesses are the section
 thickness split evenly — LS-DYNA takes them from the `*INTEGRATION_SHELL` rule
 the material requires, which k2rad does not read, and says so.
 
 `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`, and the optional
 `OPTCARD`) → `/PROP/TYPE51` (stack) + one `/PROP/TYPE19` (PLY) per layer,
-replacing the section-derived property for that part. `ELFORM` −16/9 → `Ishell`
-12 (QBAT), else 24; `NLOC` 0/−1/+1 → `Ipos` 0/4/3; `SHRF` → `Ashear`; each ply's
+replacing the section-derived property for that part. `ELFORM` → `Ishell` through
+the same `_elform_to_ishell` mapping (and the same `--shell-formulation` option)
+every other shell property uses; `NLOC` 0/−1/+1 → `Ipos` 0/4/3; an explicitly
+given `SHRF` → `Ashear` (a blank field keeps Radioss's 5/6 rather than
+LS-DYNA's 1.0 default, which would silently stiffen transverse shear by 20%
+against both dyna2rad and every other k2rad shell); each ply's
 `B_i` rides on its own `delta_phi`. **Each ply takes two lines** on the TYPE51
 card — the ply card plus a mandatory blank — because the importer counts free
 cards and divides by two. Layers with `MID ≤ 0` or zero thickness are LS-DYNA's
