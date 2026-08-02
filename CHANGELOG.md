@@ -1348,6 +1348,63 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **An element-free `*PART` produced a `/PART` pointing at a property that was
+  never emitted — starter ERROR 178, and the whole conversion dead on a part
+  carrying no mesh.**
+
+  ```
+  ERROR ID :    178
+  ** ERROR IN PART DEFINITION (PROPERTY)
+     -- PART ID: 88
+     PROPERTY ID=88 DOES NOT EXIST
+  ```
+
+  k2rad emits a `/PART` for every `*PART` record and points it at the part's
+  SECID when no composite / orthotropic / per-part-hourglass property has
+  claimed it. The placeholder sections that back that last case were derived
+  from the **elements** naming a secid (`missing_shells` / `missing_solids` /
+  `missing_beams` are built from `shell_elems` / `solid_elems` / `beam_elems`),
+  so a `*PART` with no elements and no `*SECTION` was reached by none of them.
+  Two cards, one meshed part and one empty one, were enough to reproduce it.
+
+  An element-free part is **idiomatic, not a mistake**: `*INTEGRATION_SHELL`'s
+  `PID_i` "may reference a part with no elements" (Vol I R17 p.29-17) purely to
+  carry a layer material, and an element-free `*MAT_RIGID` part with
+  `*CONSTRAINED_EXTRA_NODES` forms a working `/RBODY` from borrowed nodes. So
+  the part now **keeps** its id, title, material and subset, and is given the
+  same placeholder `/PROP/SHELL` a sectionless *meshed* shell part already got
+  (`_auto_section_shell`: ELFORM 2 → `Ishell` 12, `N` 3, zero thickness). It
+  has no elements to act on, so it changes no physics — the starter's
+  ELEM/PROP/MAT compatibility checks run per element group and this property
+  has none. A warning names the parts, because an empty part is usually either
+  a material carrier or mesh the user did not realise was missing.
+
+  **Dropping the `/PART` instead was rejected on measurement, not taste.**
+  Nothing in k2rad filters set / group / surface members against the parts that
+  were actually emitted: `writer/contacts.py` builds an all-parts
+  `/SURF/PART/EXT` straight from `state.parts.keys()`, and `writer/loads.py`
+  does the same for a `/GRNOD/PART` gravity scope. Hand-stripping `/PART/88`
+  from a converted `*LOAD_BODY_PARTS` deck traded ERROR 178 for starter
+  **WARNING 194, "REFERENCE TO NONEXISTENT PART ID=88"** — quieter, still a
+  broken deck, and the part's material binding gone with it.
+
+  **dyna2rad is deliberately not followed here, because it is broken the same
+  way.** The native reader writes the `/PART` with `prop_ID = 0`
+  (`convertprops.cxx:110-150` — a SECID of 0 leaves `radPropEdit` invalid and
+  the else-branch stores entity id 0), and its own starter then raises the
+  *same* ERROR 178, just reporting `PROPERTY ID=0`
+  (`hm_read_part.F:203-210`; note `MID = 0` gets a fictitious-material fallback
+  a few lines further down, `PID = 0` gets none). There was no correct native
+  behaviour to match.
+
+  Validated against the real starter, `0 ERROR(S)` on all three where master
+  gives ERROR 178: the bare repro deck, the same deck with the empty part
+  inside a `*SET_PART` reaching `/GRNOD/PART` (which also confirms no WARNING
+  194 — the reference resolves), and an element-free `*MAT_RIGID` carrier whose
+  `/RBODY` still forms. 18 new tests plus a deck-wide invariant — every
+  `/PART`'s property column must name a `/PROP` the deck emits — and the five
+  golden fixtures stay byte-identical.
+
 - **The `/TH` channel sweep: `REAC*` was not the only integrated channel.
   `/TH/INTER`, `/TH/SECTIO` and `/TH/RWALL` forces are accumulated impulses
   too, and `/TH/SURF` `P`/`A` are per-interval aggregates.** Docs, emitted deck
