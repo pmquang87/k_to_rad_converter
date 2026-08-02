@@ -294,5 +294,62 @@ class OrphanMessageShapeTests(unittest.TestCase):
         self.assertIn("PID 42 (1 shell, 1 solid, 1 beam)", state.warnings[0])
 
 
+class ProvisionalPhantomOrderingTests(unittest.TestCase):
+    """The guard runs AFTER the provisional-element screen in build_starter.
+
+    An *ELEMENT_SHELL block with an UNMODELLED option keeps candidate
+    connectivity by CONTENT, so an all-integer option card imitates an element
+    on node ids (and a PID) the deck never defines. The screen drops it — and
+    the orphan guard must not count it first: a screened-out phantom is an
+    option card, not lost mesh. convert() screens before build_starter anyway;
+    this pins the ordering for the direct-writer callers build_starter supports
+    (the follow-up recorded in PR #92's body for the PR #91 merge).
+    """
+
+    PHANTOM_BLOCK = (
+        "*ELEMENT_SHELL_COMPOSITE\n"
+        "       2       1       1       2       3       4\n"
+        "     999     999     999     999     999     999\n"
+    )
+
+    def _dispatch(self, deck):
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        return state
+
+    def test_screened_phantom_is_not_counted_as_mesh_loss(self):
+        # Direct build_starter, WITHOUT convert()'s own screen call: the
+        # phantom candidate (eid 999, pid 999, undefined nodes) must be
+        # screened before the guard looks, so PID 999 never appears.
+        from k2rad.writer import build_starter
+        state = self._dispatch(HEAD + self.PHANTOM_BLOCK + END)
+        build_starter(state)
+        hits = [w for w in state.warnings if MARKER in w]
+        self.assertEqual([], hits)
+        # The real provisional element on part 1 survived the screen.
+        self.assertTrue(any(e.eid == 2 for e in state.shell_elems))
+        self.assertFalse(any(e.eid == 999 for e in state.shell_elems))
+
+    def test_real_orphans_still_warn_alongside_a_screened_phantom(self):
+        # A genuine orphan (real nodes, missing *PART) must still be reported —
+        # and the screened phantom's PID 999 must not ride along.
+        from k2rad.writer import build_starter
+        state = self._dispatch(
+            HEAD + self.PHANTOM_BLOCK + ORPHAN_SHELLS + END)
+        build_starter(state)
+        hits = [w for w in state.warnings if MARKER in w]
+        self.assertEqual(1, len(hits))
+        self.assertIn("PID 77 (2 shell)", hits[0])
+        self.assertNotIn("PID 999", hits[0])
+
+
 if __name__ == "__main__":
     unittest.main()
