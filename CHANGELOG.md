@@ -1448,6 +1448,48 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Changed
 
+- **The composite writer no longer predicts starter ERROR 3047 for an
+  element-free part.** Diagnostics only — no emitted card changes, all five
+  goldens byte-identical.
+
+  `_assign_composite_props` used to tell the user that a part carrying an
+  orthotropic or composite material but no elements "keeps its default
+  property, which the starter rejects as incompatible with an orthotropic
+  material (ERROR 3047) — check the mesh". That hard-failure prediction is
+  false. `check_mat_elem_prop_compatibility.F` runs `DO NG = 1,NGROUP` over
+  **element groups** and only then over each group's layers, so a part with no
+  elements contributes no group and is never tested. Measured on
+  `starter_win64` (nt=6): a meshed `*MAT_024` plate plus an element-free
+  `*PART` on `*MAT_002` — `/MAT/LAW93`, `PROP_SHELL = 2` — resolving to the
+  element-free-`*PART` placeholder `/PROP/SHELL` (IGTYP 1) gives
+  `0 ERROR(S) 0 WARNING(S)`, `NORMAL TERMINATION`, the empty part echoed as
+  "ISOTROPIC SHELL PROPERTY SET NUMBER 9" and "Part id,name: 9 ortho carrier,
+  Mat type: 93 Elm type: N/A". Same at 0/0 with a `*PART_COMPOSITE` layup on
+  the empty part, and when the empty part is also an `*INTEGRATION_SHELL`
+  `PID_i` carrier.
+
+  The message is now a **mesh sanity check**: an orthotropic or composite
+  material is normally written for a meshed part, so an empty one is usually a
+  PID typo or an `*INCLUDE` that did not resolve — and a deliberately
+  element-free part, such as an `*INTEGRATION_SHELL` `PID_i` material carrier,
+  is idiomatic and needs no fix. It also now names the `*PART_COMPOSITE` layup
+  as dropped where there is one. The genuine ERROR-3047 warning on *meshed*
+  composite parts, which really would hard-fail on the isotropic
+  `/PROP/SHELL`, is unchanged.
+
+- **The `*INTEGRATION_SHELL` `PID_i` material-carrier warning is gone** (it was
+  dropped in the merge of the element-free-`*PART` fix; recorded here for the
+  release notes). It told the user to give an element-free carrier part a
+  `*SECTION_SHELL` by hand or delete the `*PART`, on the grounds that the deck
+  would otherwise hit starter ERROR 178. Since element-free parts get a
+  placeholder property automatically, there is nothing to repair and the
+  ERROR 178 no longer happens. Verified on `starter_win64`: a rule whose
+  `PID_i` names a part with no elements **and no `*SECTION`** converts and runs
+  `0 ERROR(S) 0 WARNING(S)`, identical to the control deck where the carrier is
+  given a `*SECTION_SHELL` by hand. The synthesized `/PROP` is still explained
+  once, by the generic element-free-`*PART` report that names the pid — one
+  message per empty part, not two.
+
 - **⚠ BEHAVIOUR CHANGE — every gravity deck converts differently now.** Two
   independent corrections land together in the `/GRAV` emitter (details and
   solver evidence under *Fixed*, below):

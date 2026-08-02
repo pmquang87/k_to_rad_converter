@@ -179,6 +179,63 @@ element-free rigid carrier
         88         3
 """
 
+# An element-free part on an ORTHOTROPIC material. The composite prepass
+# declines to synthesize an orthotropic property for it (there is no element to
+# put one on) and used to predict starter ERROR 3047 for the pairing that
+# leaves behind; it does not happen — the MAT/PROP class check runs per element
+# GROUP and this part contributes none. So the placeholder has to cover it, and
+# the resulting deck is starter-clean.
+ORTHO_FREE_PART = """\
+*PART
+orthotropic carrier, no elements
+        88         0        12
+*MAT_ORTHOTROPIC_ELASTIC
+        12  1.55E-9  150000.0   10000.0   10000.0      0.02      0.02       0.4
+    5000.0    3000.0    4000.0       0.0
+       0.0       0.0       0.0       0.0       0.0       0.0         0
+       0.0       0.0       0.0       0.0       0.0       0.0       0.0
+"""
+
+# The *INTEGRATION_SHELL PID_i material carrier with NO hand-added
+# *SECTION_SHELL — the idiom of Vol I R17 p.29-17, and the exact case that
+# keyword's own pass used to ask the user to repair by hand. Its own head: the
+# meshed part needs *MAT_024 (LAW1 is banned from every layered shell property,
+# hm_read_part.F:289 ERROR 658) and its section needs QR/IRID = -2 in card-1
+# field 6, cols 51-60.
+RULE_CARRIER_DECK = """\
+*KEYWORD
+*TITLE
+*INTEGRATION_SHELL PID_i carrier, no hand-added section
+*CONTROL_TERMINATION
+      0.01
+*NODE
+       1             0.0             0.0             0.0
+       2             1.0             0.0             0.0
+       3             1.0             1.0             0.0
+       4             0.0             1.0             0.0
+*ELEMENT_SHELL
+       1       7       1       2       3       4
+*PART
+real plate
+         7         7         3
+*SECTION_SHELL
+         7         2       1.0         3         0        -2
+       2.0       2.0       2.0       2.0
+*INTEGRATION_SHELL
+         2         3         0         0
+      -1.0      0.25         0
+       0.0       0.5        88
+       1.0      0.25         0
+*PART
+material carrier, no elements
+        88         0         4
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         3  7.85E-9  210000.0       0.3     300.0
+*MAT_PIECEWISE_LINEAR_PLASTICITY
+         4  1.0E-10       3.0      0.45       0.5
+*END
+"""
+
 END = "*END\n"
 
 
@@ -342,6 +399,48 @@ class ReferencedElementFreePartTests(unittest.TestCase):
         self.assertIn(88, _prop_ids(starter))
 
 
+class CarrierIdiomsResolveWithoutAHandEditTests(unittest.TestCase):
+    """The two element-free shapes the composite writer used to send the user
+    away to fix by hand. Both are covered by the placeholder, and both are
+    starter-clean as converted — no *SECTION_SHELL to add, no mesh to supply.
+
+    Starter-verified on starter_win64 (nt=6). RULE_CARRIER_DECK: `0 ERROR(S)
+    0 WARNING(S)`, `NORMAL TERMINATION`, reading identically to a control deck
+    where the carrier IS given a *SECTION_SHELL by hand. HEAD + ORTHO_FREE_PART:
+    `0 ERROR(S)`, and its one warning (1084, LAW1 with N > 1) is on the MESHED
+    part 7 / property 7 and appears unchanged with part 88 removed — the empty
+    part itself is echoed as "ISOTROPIC SHELL PROPERTY SET NUMBER 88" and
+    "Part id,name: 88 orthotropic carrier, Mat type: 93 Elm type: N/A", the
+    PROP_SHELL=2 law on IGTYP 1 with no complaint. No ERROR 3047 anywhere.
+    """
+
+    def test_integration_shell_carrier_resolves_without_a_hand_added_section(self):
+        result, starter = _convert(RULE_CARRIER_DECK)
+        self.assertIn("/PART/88", starter)
+        self.assertIn("/PROP/SHELL/88", starter)
+        self.assertEqual(88, _part_prop_refs(starter)[88])
+        # the carrier is still doing its job: its material reaches the layup
+        self.assertIn("/PROP/TYPE51/", starter)
+        # exactly one message about it, and it explains the synthesized /PROP
+        self.assertEqual(1, len(_free_warnings(result)), result.warnings)
+        self.assertIn("PLACEHOLDER", _free_warnings(result)[0])
+        # ...and nothing tells the user to hand-add a section any more
+        self.assertFalse([w for w in result.warnings
+                          if "Give the carrier part a *SECTION_SHELL" in w],
+                         result.warnings)
+
+    def test_orthotropic_element_free_part_resolves_and_is_not_called_fatal(self):
+        result, starter = _convert(HEAD + ORTHO_FREE_PART + END)
+        self.assertIn("/PROP/SHELL/88", starter)
+        self.assertEqual(88, _part_prop_refs(starter)[88])
+        self.assertIn("/MAT/LAW93/12", starter)
+        # the composite pass reports the empty mesh but predicts no failure
+        composite = [w for w in result.warnings
+                     if "no shell or solid elements" in w]
+        self.assertEqual(1, len(composite), result.warnings)
+        self.assertNotIn("3047", composite[0])
+
+
 class NoPlaceholderWhenTheReferenceAlreadyResolvesTests(unittest.TestCase):
     """The placeholder is a last resort — anything that already emits a /PROP
     for the part's id must suppress it, or the deck gains a duplicate."""
@@ -417,6 +516,8 @@ class PartPropertyResolutionInvariantTests(unittest.TestCase):
         "own section": HEAD + FREE_PART_OWN_SECTION + END,
         "solid section": HEAD + FREE_PART_SOLID_SECTION + END,
         "discrete carrier": HEAD + FREE_PART_DISCRETE + END,
+        "orthotropic carrier": HEAD + ORTHO_FREE_PART + END,
+        "*INTEGRATION_SHELL PID_i carrier": RULE_CARRIER_DECK,
         "all parts meshed": HEAD + END,
     }
 
