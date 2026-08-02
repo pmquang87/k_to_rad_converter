@@ -11,6 +11,75 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`*SECTION_SHELL` `ICOMP = 1` becomes a real layered property: the card-3
+  `B1..B8` per-layer material angles now reach the `/PROP/TYPE11` layup.**
+  `handle_section_shell` read only `SECID`/`ELFORM`/`NIP`/`T1`; the `ICOMP` flag
+  was named in a comment and never read, and neither were the angle cards it
+  brings. A composite section therefore degraded to a single-angle laminate with
+  no warning of any kind. 21 new tests (1293 → 1314); no flag, and a deck with
+  `ICOMP = 0` is byte-identical (goldens unchanged).
+
+  The flag declares a layered orthotropic/anisotropic section — "A material
+  angle in degrees is defined for each through-thickness integration point.
+  Thus, each layer has one integration point" (Manual Vol I R17 p.41-67) — with
+  the angles on the card-3 `B1..B8` block, eight values per card over
+  `ceil(NIP/8)` cards (p.41-70). Each `B_i` goes **verbatim** into that layer's
+  `Phi_i` (no sign flip: LS-DYNA's `β_i` and Radioss's `Phi_i` are both measured
+  counter-clockwise about the shell normal from the material reference
+  direction) and is **added** to the material's own `AOPT`/`BETA` rotation —
+  the same composition `*PART_COMPOSITE`'s per-ply `B_i` already used. The
+  existing `_emit_prop_type11` emitter is reused unchanged; only the layer list
+  it is handed changes.
+
+  **The silent-degradation magnitude, measured.** Three single-element membrane
+  pulls (same MAT_002 carbon UD, same 1.2 mm total thickness, `σ_y = 0`,
+  `γ_xy = 0`) run through the OpenRadioss engine to `NORMAL TERMINATION`, with
+  the effective `E_x` recovered from the internal energy and compared against
+  classical lamination theory computed independently in the check script:
+
+  | layup | `E_x` CLT | `E_x` solver | diff |
+  |---|---|---|---|
+  | `[0/0/0/0]` | 150000.0 | 149940.0 | −0.04% |
+  | `[0/45/−45/90]` | 57401.6 | 57384.4 | −0.03% |
+  | `[90/90/90/90]` | 10000.0 | 10009.0 | +0.09% |
+
+  Ratios agree to 0.13%. Before this change the `[0/45/−45/90]` deck converted
+  to the first row — **2.61× too stiff along the pull axis**, and with the
+  laminate's shear coupling gone.
+
+  **dyna2rad has no thin-shell `ICOMP` path at all.** Its
+  `p_ConvertSectionShell` (`convertprops.cxx:641-765`) dispatches purely on the
+  *material* keyword and reads `LSD_ICOMP` only as a `*MAT_FABRIC`
+  `NIP`-normalization switch (`:1704-1713`, `:3346-3351`); the per-layer `LSD_B`
+  array is read on its `*SECTION_TSHELL` composite path and nowhere else
+  (`ConvertSecTShellsRelatedMatComposite`, `:4528-4540`, where it also splits
+  the thickness `1/NIP` per layer and repeats the part material — the same two
+  conventions used here).
+
+  `ICOMP = 1` carries **angles only** — the keyword has no per-layer thickness
+  or material field — so the section thickness is still split evenly, and the
+  warning names where unequal plies would have to come from. Every route that
+  *cannot* carry an angle is reported by name instead of dropping it silently:
+  a `*PART_COMPOSITE` on the same part **wins** (in LS-DYNA it replaces the
+  `*PART`/`*SECTION_SHELL` pair outright — its own card carries `ELFORM`/`SHRF`
+  and no `SECID`); MAT_037 and MAT_103 land on a single-direction
+  `/PROP/TYPE9`; `*MAT_LAMINATED_GLASS` becomes two *isotropic* LAW27 phases
+  with no material direction to rotate; a part on an isotropic law keeps a plain
+  `/PROP/SHELL`; a solid part on a shell section has no counterpart at all. An
+  all-zero angle block stays silent — it degrades to exactly the section it
+  would have been anyway. A blank `NIP` still reads one angle card (LS-DYNA's
+  default is 2.0), `NIP > 10` clamps the angles with the layers, and a truncated
+  angle block is zero-padded **and warned**, because a half-read `[0/45/−45/90]`
+  is a different laminate rather than a slightly wrong one.
+
+  Starter-validated: a two-part panel (`ICOMP = 1` with `NIP = 4` angles
+  `0/45/−45/90` on one `*MAT_ORTHOTROPIC_ELASTIC`, and `NIP = 6` angles
+  `0/90/45/−45/30/−30` on a second material with `AOPT = 3`/`BETA = 15`) runs
+  through `starter_win64.exe` with **0 errors, 0 warnings**, and its echo
+  reproduces every layer — angle, thickness, position and material number —
+  including the `+15°` `BETA` composition on the second part
+  (`15/105/60/−30/45/−15`).
+
 - **Composites: `*MAT_ORTHOTROPIC_ELASTIC` (002) → `/MAT/LAW93`,
   `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054/055) → `/MAT/LAW127`,
   `*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037) → `/MAT/LAW43`,

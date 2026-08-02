@@ -207,6 +207,7 @@ from .loads import (
 from .composites import (
     _resolve_composites,
     _assign_composite_props,
+    _resolve_icomp_sections,
     _make_composite_materials,
     _emit_composite_props,
     _emit_mat_law93,
@@ -468,6 +469,7 @@ __all__ = [
     "_make_joints",
     "_resolve_composites",
     "_assign_composite_props",
+    "_resolve_icomp_sections",
     "_make_composite_materials",
     "_emit_composite_props",
     "_emit_mat_law93",

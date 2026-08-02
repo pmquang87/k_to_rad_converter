@@ -334,6 +334,19 @@ class SectionShell:
     elform: int
     nip: int
     t1: float
+    # *SECTION_SHELL card 1 field 7 (cols 61-70). ICOMP=1 declares a LAYERED
+    # orthotropic/anisotropic composite section: "A material angle in degrees is
+    # defined for each through-thickness integration point. Thus, each layer has
+    # one integration point" (Manual Vol I R17 p.41-67). The angles ride on the
+    # card-3 angle cards below.
+    icomp: int = 0
+    # The B_i material angles in DEGREES, bottom layer first, one per
+    # through-thickness integration point — *SECTION_SHELL card 3, eight values
+    # per card, ceil(NIP/8) cards (Manual Vol I R17 p.41-70). Empty unless
+    # ICOMP=1. They are measured FROM the material's own AOPT/BETA reference
+    # direction, so they add to it rather than replacing it — the same
+    # convention *PART_COMPOSITE's per-ply B_i uses.
+    betas: List[float] = field(default_factory=list)
 
 
 @dataclass

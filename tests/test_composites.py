@@ -1520,6 +1520,255 @@ class CompositeRoutingTests(unittest.TestCase):
                                total, places=9)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# *SECTION_SHELL ICOMP = 1 -> the per-layer angles of a /PROP/TYPE11 layup
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _section_icomp(secid=7, elform=2, nip=4, t=1.2, betas=(0.0, 45.0, -45.0,
+                                                           90.0),
+                   icomp=1, n_cards=None, title=False):
+    """*SECTION_SHELL with the ICOMP flag in card-1 field 7 and the B_i angle
+    cards (8 per card, ceil(NIP/8) of them) after card 2."""
+    kw = (f"*SECTION_SHELL_TITLE\nlayup {secid}\n" if title
+          else "*SECTION_SHELL\n")
+    out = (kw + _row(secid, elform, 1.0, nip, 0.0, 0.0, icomp) + "\n"
+           + _row(t, t, t, t) + "\n")
+    if n_cards is None:
+        n_cards = ((nip if nip > 0 else 2) + 7) // 8
+    vals = list(betas)
+    for k in range(n_cards):
+        chunk = vals[k * 8:(k + 1) * 8]
+        if not chunk:
+            break
+        out += _row(*chunk) + "\n"
+    return out
+
+
+def _icomp_deck(mat=None, secid=7, pid=7, mid=2, **kw):
+    return ("*KEYWORD\n" + NODES + SHELL
+            + "*PART\np\n" + _row(pid, secid, mid) + "\n"
+            + _section_icomp(secid=secid, **kw)
+            + (mat if mat is not None else _mat002()) + END)
+
+
+class SectionShellIcompTests(unittest.TestCase):
+    """*SECTION_SHELL ICOMP=1: "A material angle in degrees is defined for each
+    through-thickness integration point.  Thus, each layer has one integration
+    point" (Manual Vol I R17 p.41-67), with the angles on the card-3 B1..B8
+    block (p.41-70).
+
+    Before this batch the flag was named in a comment and never read, so a
+    [0/45/-45/90] laminate silently converted to four 0-degree layers - a
+    UNIDIRECTIONAL panel, not the deck's. dyna2rad does the same: its
+    p_ConvertSectionShell (convertprops.cxx:641-765) dispatches on the MATERIAL
+    keyword only and reads LSD_ICOMP purely as a *MAT_FABRIC NIP switch
+    (:1704-1713, :3346-3351); the per-layer LSD_B array is read on its
+    *SECTION_TSHELL composite path alone (:4528-4540).
+    """
+
+    # ── parsing ──────────────────────────────────────────────────────────────
+
+    def test_icomp_flag_and_angles_are_parsed(self):
+        state = _dispatch("*KEYWORD\n" + _section_icomp() + "*END\n")
+        sec = state.sec_shells[7]
+        self.assertEqual(sec.icomp, 1)
+        self.assertEqual(sec.betas, [0.0, 45.0, -45.0, 90.0])
+
+    def test_icomp_zero_reads_no_angles(self):
+        """ICOMP=0 must leave the section exactly as it was before: no angle
+        cards are consumed even if the deck happens to have more lines."""
+        state = _dispatch("*KEYWORD\n" + _section_icomp(icomp=0) + "*END\n")
+        sec = state.sec_shells[7]
+        self.assertEqual(sec.icomp, 0)
+        self.assertEqual(sec.betas, [])
+
+    def test_angles_span_two_cards_when_nip_exceeds_eight(self):
+        """ceil(NIP/8) cards, 8 values each - a 10-layer layup needs 2."""
+        betas = (0.0, 90.0, 45.0, -45.0, 30.0, -30.0, 60.0, -60.0, 15.0, -15.0)
+        state = _dispatch("*KEYWORD\n"
+                          + _section_icomp(nip=10, betas=betas) + "*END\n")
+        self.assertEqual(state.sec_shells[7].betas, list(betas))
+
+    def test_blank_nip_still_reads_one_angle_card(self):
+        """*SECTION_SHELL NIP defaults to 2.0, so ceil(2/8) = 1 card follows."""
+        deck = ("*KEYWORD\n*SECTION_SHELL\n"
+                + _row(7, 2, 1.0, "", 0.0, 0.0, 1) + "\n"
+                + _row(1.2) + "\n" + _row(20.0, -20.0) + "\n*END\n")
+        state = _dispatch(deck)
+        self.assertEqual(state.sec_shells[7].betas, [20.0, -20.0])
+
+    def test_title_variant_offsets_the_angle_cards(self):
+        state = _dispatch("*KEYWORD\n" + _section_icomp(title=True) + "*END\n")
+        self.assertEqual(state.sec_shells[7].betas, [0.0, 45.0, -45.0, 90.0])
+
+    # ── the emitted /PROP/TYPE11 layer cards ─────────────────────────────────
+
+    def _layers(self, **kw):
+        result, starter = _convert(_icomp_deck(**kw))
+        return result, starter, _cards(_block(starter, "/PROP/TYPE11/"))[4:]
+
+    def test_layer_cards_are_column_exact(self):
+        """Layer line = Phi(1-20) Thick(21-40) Z(41-60) mat_ID(61-70)
+        F_weight(81-100). Four layers of T1/NIP = 1.2/4 = 0.3, all on the
+        part's own MID 2, angles in deck order bottom -> top."""
+        _, _, layers = self._layers()
+        self.assertEqual(len(layers), 4)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers],
+                         [0.0, 45.0, -45.0, 90.0])
+        for ln in layers:
+            self.assertAlmostEqual(_col_f(ln, 21, 40), 0.3)
+            self.assertAlmostEqual(_col_f(ln, 41, 60), 0.0)
+            self.assertEqual(_col_i(ln, 61, 70), 2)
+            self.assertAlmostEqual(_col_f(ln, 81, 100), 0.0)
+
+    def test_icomp_zero_keeps_every_layer_at_zero_degrees(self):
+        """The pre-existing behaviour, unchanged: an ordinary section is NIP
+        identical copies."""
+        _, _, layers = self._layers(icomp=0)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers], [0.0] * 4)
+
+    def test_angles_add_to_the_material_beta(self):
+        """LS-DYNA B_i is measured FROM the AOPT/BETA material direction, so the
+        two compose (the same rule *PART_COMPOSITE's per-ply B_i follows).
+        AOPT=0 + BETA=30 with [0, 45, -45, 90] -> [30, 75, -15, 120]."""
+        _, _, layers = self._layers(mat=_mat002(beta=30.0))
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers],
+                         [30.0, 75.0, -15.0, 120.0])
+
+    def test_negative_angle_keeps_its_sign(self):
+        """No sign flip: both codes measure the angle counter-clockwise about
+        the shell normal, so -45 stays -45 (dyna2rad copies LSD_B verbatim on
+        its TSHELL path, convertprops.cxx:4528-4540)."""
+        _, _, layers = self._layers(betas=(-45.0, -45.0, -45.0, -45.0))
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers], [-45.0] * 4)
+
+    def test_mat054_layup_also_carries_the_angles(self):
+        """MAT_054 -> /MAT/LAW127 rides the same TYPE11 path (dyna2rad leaves it
+        on /PROP/TYPE1, which hard-fails ERROR 3047)."""
+        _, _, layers = self._layers(mat=_mat054(mid=54), mid=54)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers],
+                         [0.0, 45.0, -45.0, 90.0])
+
+    def test_nip_over_ten_clamps_angles_with_the_layers(self):
+        """The property carries 10 layers max, so only the first 10 angles
+        survive - and the clamp warning says so."""
+        betas = tuple(float(10 * k) for k in range(12))
+        result, _, layers = self._layers(nip=12, betas=betas)
+        self.assertEqual(len(layers), 10)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers],
+                         [10.0 * k for k in range(10)])
+        self.assertTrue(any("CLAMPED to 10" in w and "ICOMP=1 layer angle" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_layer_thickness_stays_the_even_split(self):
+        """*SECTION_SHELL ICOMP=1 carries ANGLES only - card 3 is B1..B8 and
+        there is no per-layer thickness field anywhere on the keyword - so the
+        section thickness is still split evenly, and the warning says where the
+        real ply thicknesses would have to come from."""
+        result, _, layers = self._layers(nip=4, t=2.0)
+        for ln in layers:
+            self.assertAlmostEqual(_col_f(ln, 21, 40), 0.5)
+        self.assertTrue(any("split EVENLY" in w and "*INTEGRATION_SHELL" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_carried_angles_are_reported(self):
+        result, _, _ = self._layers()
+        self.assertTrue(any("ICOMP=1" in w and "[0, 45, -45, 90] deg" in w
+                            for w in result.warnings), result.warnings)
+
+    # ── short / missing angle block ──────────────────────────────────────────
+
+    def test_truncated_angle_block_is_warned_and_padded(self):
+        """A NIP=10 layup whose second angle card is missing must not silently
+        become a [.. 0 0] laminate."""
+        betas = (0.0, 90.0, 45.0, -45.0, 30.0, -30.0, 60.0, -60.0, 15.0, -15.0)
+        result, _, layers = self._layers(nip=10, betas=betas, n_cards=1)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers],
+                         list(betas[:8]) + [0.0, 0.0])
+        self.assertTrue(any("needs 2 angle card(s)" in w and "only 1" in w
+                            for w in result.warnings), result.warnings)
+
+    # ── precedence and the routes that cannot carry an angle ─────────────────
+
+    def test_part_composite_wins_over_an_icomp_section(self):
+        """*PART_COMPOSITE replaces the *PART/*SECTION_SHELL pair outright in
+        LS-DYNA (its own card carries ELFORM/SHRF and no SECID), so the layup's
+        per-ply B_i is what is emitted and the section's ICOMP angles are
+        ignored. Pinned here because BOTH cards can legally sit in one deck."""
+        deck = ("*KEYWORD\n" + NODES + SHELL
+                + _part_composite(plies=((2, 0.3, 0.0), (2, 0.4, 60.0)))
+                + _section_icomp() + _mat002() + END)
+        result, starter = _convert(deck)
+        self.assertEqual(_blocks(starter, "/PROP/TYPE11"), [])
+        # /PROP/TYPE19 line = mat_ID(1-10) t(11-30) delta_phi(31-50).
+        plies = _blocks(starter, "/PROP/TYPE19/")
+        self.assertEqual([_col_f(_cards(b)[0], 11, 30) for b in plies],
+                         [0.3, 0.4])
+        self.assertEqual([_col_f(_cards(b)[0], 31, 50) for b in plies],
+                         [0.0, 60.0])
+        self.assertTrue(any("*PART_COMPOSITE WINS" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_isotropic_material_drops_the_angles_with_a_warning(self):
+        """LS-DYNA applies ICOMP to its orthotropic/anisotropic laws only; a
+        part on *MAT_ELASTIC keeps an isotropic /PROP/SHELL, where a material
+        angle has no meaning."""
+        mat = "*MAT_ELASTIC\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+        result, starter = _convert(_icomp_deck(mat=mat, mid=3))
+        self.assertEqual(_blocks(starter, "/PROP/TYPE11"), [])
+        self.assertEqual(len(_blocks(starter, "/PROP/SHELL/7")), 1)
+        self.assertTrue(any("ICOMP=1 angles [0, 45, -45, 90] deg are DROPPED"
+                            in w and "not converted" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_missing_layer_material_is_warned(self):
+        """The *PART points at a MID with no *MAT card at all: no property can
+        carry the layup, and the drop must be reported rather than silent."""
+        result, _ = _convert("*KEYWORD\n" + NODES + SHELL
+                             + "*PART\np\n" + _row(7, 7, 4242) + "\n"
+                             + _section_icomp() + END)
+        self.assertTrue(any("ICOMP=1 angles" in w and "DROPPED" in w
+                            and "material 4242" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_laminated_glass_drops_the_angles(self):
+        """*MAT_032 becomes two ISOTROPIC /MAT/PLAS_BRIT phases - there is no
+        material direction for an angle to rotate."""
+        result, starter = _convert(_icomp_deck(mat=_mat032(), mid=32))
+        layers = _cards(_block(starter, "/PROP/TYPE11/"))[4:]
+        self.assertEqual([_col_f(ln, 1, 20) for ln in layers], [0.0] * 4)
+        self.assertTrue(any("PLAS_BRIT" in w and "ISOTROPIC" in w
+                            and "DROPPED" in w for w in result.warnings),
+                        result.warnings)
+
+    def test_mat037_type9_route_drops_the_angles(self):
+        """/MAT/LAW43 lands on /PROP/TYPE9 (SH_ORTH), a single-direction
+        orthotropic shell with no per-layer angle column."""
+        result, starter = _convert(_icomp_deck(mat=_mat037(), mid=37))
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE9")), 1)
+        self.assertTrue(any("/PROP/TYPE9" in w and "DROPPED" in w
+                            and "SINGLE-direction" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_all_zero_angles_raise_no_drop_warning(self):
+        """An all-zero ICOMP block degrades to exactly the section it would
+        have been anyway, so the drop report would be pure noise."""
+        mat = "*MAT_ELASTIC\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+        result, _ = _convert(_icomp_deck(mat=mat, mid=3,
+                                         betas=(0.0, 0.0, 0.0, 0.0)))
+        self.assertEqual([w for w in result.warnings if "ICOMP" in w], [])
+
+    def test_solid_part_on_an_icomp_shell_section_is_warned(self):
+        deck = ("*KEYWORD\n" + SOLID_NODES + BRICK
+                + "*PART\np\n" + _row(7, 7, 3) + "\n"
+                + _section_icomp() + SECTION_SOLID
+                + "*MAT_ELASTIC\n" + _row(3, 7.85e-9, 210000.0, 0.3) + "\n"
+                + END)
+        result, _ = _convert(deck)
+        self.assertTrue(any("ICOMP=1 angles" in w and "SOLID elements" in w
+                            for w in result.warnings), result.warnings)
+
+
 class CompositeRegressionTests(unittest.TestCase):
     """The batch adds no flag and no behaviour on a deck without composites."""
 

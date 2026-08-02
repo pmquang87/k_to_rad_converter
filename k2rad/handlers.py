@@ -364,7 +364,42 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
     elform = to_int(f1[1]) if f1[1] else 2
     nip    = to_int(f1[3]) if len(f1) > 3 else 3
     t1     = to_float(f2[0]) if f2 else 0.0
-    state.sec_shells[secid] = SectionShell(secid, title, elform, nip, t1)
+    sec = SectionShell(secid, title, elform, nip, t1)
+    # ICOMP (field 7) = 1 → a layered composite section: card 3 carries one
+    # material angle B_i per through-thickness integration point.
+    if len(f1) > 6 and to_int(f1[6]) == 1:
+        sec.icomp = 1
+        sec.betas = _read_icomp_angles(raw, offset + 2, nip, secid, state)
+    state.sec_shells[secid] = sec
+
+
+def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
+                       state: ConversionState) -> List[float]:
+    """*SECTION_SHELL / *SECTION_TSHELL card 3 (ICOMP=1): the B_i material
+    angles, eight per card over ``ceil(NIP/8)`` cards (Manual Vol I R17
+    p.41-70). Returns exactly NIP values, bottom layer first.
+
+    A blank NIP defaults to LS-DYNA's 2.0, so an ICOMP section that omits it
+    still reads its one angle card rather than none.
+    """
+    n = nip if nip > 0 else 2
+    n_cards = (n + 7) // 8
+    vals: List[float] = []
+    read = 0
+    for k in range(n_cards):
+        row = _card(raw, idx + k, fixed=True, n=8, w=10)
+        if not row:
+            break
+        vals += [to_float(x) for x in row]
+        read += 1
+    if read < n_cards:
+        state.warn(
+            f"*SECTION_SHELL {secid}: ICOMP=1 with NIP={nip} needs {n_cards} "
+            f"angle card(s) (8 values each) but only {read} follow(s) card 2 — "
+            "the missing layer angles default to 0 degrees. Check the deck: a "
+            "truncated angle block silently turns a balanced layup into a "
+            "unidirectional one.")
+    return (vals + [0.0] * n)[:n]
 
 
 def handle_section_solid(block: Block, state: ConversionState) -> None:

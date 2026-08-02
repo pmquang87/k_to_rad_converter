@@ -103,8 +103,9 @@ export the image.
 `*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
 `*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
-`_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`,
-`*SECTION_SOLID`, `*SECTION_BEAM`
+`_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`
+(+ `_TITLE`; `ICOMP = 1` reads the card-3 `B1..B8` per-layer material angles —
+see **Composites**), `*SECTION_SOLID`, `*SECTION_BEAM`
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
@@ -383,6 +384,40 @@ a plain shell property carrying the summed layup thickness — the part and all
 its elements are always emitted.** (Before this batch `*PART_COMPOSITE` had no
 handler at all, so the whole *part record* vanished and took its entire mesh with
 it, silently.)
+
+`*SECTION_SHELL` **`ICOMP = 1`** → the per-layer material angles of the
+`/PROP/TYPE11` layup. The flag declares a layered orthotropic/anisotropic
+section — "A material angle in degrees is defined for each through-thickness
+integration point. Thus, each layer has one integration point" (Vol I R17
+p.41-67) — and the angles ride on the card-3 `B1..B8` block, eight values per
+card over `ceil(NIP/8)` cards (p.41-70). Each `B_i` goes verbatim into that
+layer's `Phi_i` (no sign flip: both codes measure counter-clockwise about the
+shell normal) and is **added** to the material's own `AOPT`/`BETA` reference
+rotation, the same composition `*PART_COMPOSITE`'s per-ply `B_i` uses. A blank
+`NIP` still reads one card (LS-DYNA's default is 2.0); `NIP > 10` clamps the
+layers *and* the angles; a truncated angle block is padded with zeros and
+warned, because a half-read `[0/45/-45/90]` is a different laminate, not a
+slightly wrong one. **Before this, a composite section silently degraded to a
+unidirectional one** — four 0° layers instead of `[0/45/-45/90]` is 2.6× the
+axial membrane stiffness (measured, see below). **dyna2rad drops these angles
+entirely on a thin shell:** its `p_ConvertSectionShell`
+(`convertprops.cxx:641-765`) dispatches on the *material* keyword alone and
+reads `LSD_ICOMP` only as a `*MAT_FABRIC` `NIP`-normalization switch
+(`:1704-1713`, `:3346-3351`); the per-layer `LSD_B` array is read on its
+`*SECTION_TSHELL` composite path and nowhere else (`:4528-4540`).
+
+`ICOMP = 1` carries **angles only** — there is no per-layer thickness or
+material field anywhere on the keyword — so the section thickness stays split
+evenly and the warning names where unequal plies would have to come from
+(`*PART_COMPOSITE`, or an `*INTEGRATION_SHELL` rule, which k2rad does not read).
+The routes that *cannot* carry an angle each say so by name rather than dropping
+it silently: `*PART_COMPOSITE` on the same part **wins** (it replaces the
+`*PART`/`*SECTION_SHELL` pair outright in LS-DYNA, carrying its own `ELFORM`/
+`SHRF` and no `SECID`); MAT_037/MAT_103 land on a single-direction
+`/PROP/TYPE9`; `*MAT_LAMINATED_GLASS` becomes two *isotropic* LAW27 phases with
+no material direction to rotate; an isotropic law keeps a plain `/PROP/SHELL`.
+An all-zero angle block is silent — it degrades to exactly the section it would
+have been anyway.
 
 **AOPT material axes** are mapped for MAT_002 and MAT_054/055 on both the
 layered shell and the stack: `AOPT=0` → `Ip=20` (Radioss's element-connectivity

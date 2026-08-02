@@ -53,6 +53,7 @@ from .mesh import (
 __all__ = [
     "_resolve_composites",
     "_assign_composite_props",
+    "_resolve_icomp_sections",
     "_make_composite_materials",
     "_emit_composite_props",
     "_emit_mat_law93",
@@ -420,6 +421,92 @@ def _assign_composite_props(state: ConversionState) -> None:
                     "re-mesh as shells or pick a solid-capable law.")
                 continue
         state.composite_prop_ids[pid] = state.next_prop_id()
+
+
+def _resolve_icomp_sections(state: ConversionState) -> None:
+    """build_starter prepass: report every ``*SECTION_SHELL ICOMP=1`` layup whose
+    angles CANNOT reach a Radioss property, and pin the ``*PART_COMPOSITE``
+    precedence rule.
+
+    Runs AFTER ``_assign_composite_props``, whose ``composite_prop_ids`` decide
+    which parts get the layered /PROP/TYPE11 that can carry them. The angles are
+    carried when — and only when — the part is a SHELL part on
+    ``*MAT_ORTHOTROPIC_ELASTIC`` (LAW93) or ``*MAT_ENHANCED_COMPOSITE_DAMAGE``
+    (LAW127); every other route ends on a single-layer or isotropic property with
+    no per-layer angle column at all. Silence there would be the exact fidelity
+    loss this pass exists to report, so each case says which property it landed
+    on and what to do instead.
+
+    Only a layup with a NONZERO angle is reported: an all-zero ICOMP block is
+    informationally identical to the plain section it degrades to.
+    """
+    if not any(s.icomp == 1 for s in state.sec_shells.values()):
+        return
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    for pid, part in sorted(state.parts.items()):
+        secid = part.secid if part.secid > 0 else pid
+        sec = state.sec_shells.get(secid)
+        if sec is None or sec.icomp != 1 or not any(sec.betas):
+            continue
+        shown = ", ".join(f"{b:g}" for b in sec.betas)
+        pc = state.part_composites.get(pid)
+        if pc is not None and _layup_is_convertible(pc):
+            state.warn(
+                f"Part {pid} has BOTH a *PART_COMPOSITE layup and a "
+                f"*SECTION_SHELL {secid} with ICOMP=1 (angles [{shown}] deg). "
+                "*PART_COMPOSITE WINS — it replaces the *PART/*SECTION_SHELL "
+                "pair outright in LS-DYNA (its own card carries ELFORM/SHRF and "
+                "no SECID), so the per-ply MID/THICK/B_i of the layup are what "
+                "the /PROP/TYPE51 emits and the section's ICOMP angles are "
+                "IGNORED. Delete one of the two if that is not what the deck "
+                "meant.")
+            continue
+        if pid in solid_pids and pid not in shell_pids:
+            state.warn(
+                f"*SECTION_SHELL {secid} on part {pid}: ICOMP=1 angles "
+                f"[{shown}] deg are DROPPED — the part holds SOLID elements, "
+                "and a shell section's layer angles have no /PROP/SOLID "
+                "counterpart. Model a thick-shell composite as *SECTION_TSHELL "
+                "(no k2rad path yet) or as stacked shells.")
+            continue
+        if part.mid in state.mat_orthotropic or part.mid in state.mat_enhanced_composite:
+            continue                      # carried by _emit_single_material_type11
+        if part.mid in state.mat_laminated_glass:
+            state.warn(
+                f"*SECTION_SHELL {secid} on part {pid}: ICOMP=1 angles "
+                f"[{shown}] deg are DROPPED — *MAT_LAMINATED_GLASS becomes a "
+                "pair of /MAT/PLAS_BRIT (LAW27) phases, which are ISOTROPIC and "
+                "have no material direction for an angle to rotate. (LS-DYNA "
+                "lists no such combination either: ICOMP applies to the "
+                "orthotropic/anisotropic laws, and 032 is not among them.)")
+            continue
+        if part.mid in state.mat_transverse_aniso:
+            state.warn(
+                f"*SECTION_SHELL {secid} on part {pid}: ICOMP=1 angles "
+                f"[{shown}] deg are DROPPED — "
+                "*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC converts to "
+                "/MAT/LAW43 on a /PROP/TYPE9 (SH_ORTH), a SINGLE-direction "
+                "orthotropic shell with no per-layer angle column. Restate the "
+                "layup as *PART_COMPOSITE if the per-layer angles matter.")
+            continue
+        if part.mid in state.mat_aniso_visco:
+            state.warn(
+                f"*SECTION_SHELL {secid} on part {pid}: ICOMP=1 angles "
+                f"[{shown}] deg are DROPPED — *MAT_ANISOTROPIC_VISCOPLASTIC "
+                "converts to /MAT/LAW128 on a /PROP/TYPE9 (SH_ORTH), a "
+                "SINGLE-direction orthotropic shell with no per-layer angle "
+                "column. Restate the layup as *PART_COMPOSITE if the per-layer "
+                "angles matter.")
+            continue
+        state.warn(
+            f"*SECTION_SHELL {secid} on part {pid}: ICOMP=1 angles [{shown}] "
+            f"deg are DROPPED — the part's material {part.mid} is not converted "
+            "to an orthotropic or composite Radioss law, so the property stays "
+            "an isotropic /PROP/SHELL on which a material angle has no meaning. "
+            "LS-DYNA applies ICOMP only to its orthotropic/anisotropic laws "
+            "(Manual Vol I R17 p.41-67); check that the *PART points at the "
+            "material the layup was meant for.")
 
 
 def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
@@ -1109,9 +1196,38 @@ def _shell_layer_count(sec: SectionShell, state: ConversionState,
             f"/PROP/TYPE11 for part {pid}: *SECTION_SHELL NIP={nip} exceeds the "
             f"{_MAX_SHELL_LAYERS} layers a layered Radioss shell property "
             f"carries — CLAMPED to {_MAX_SHELL_LAYERS}. Through-thickness "
-            "resolution is reduced (matches dyna2rad's own clamp).")
+            "resolution is reduced (matches dyna2rad's own clamp)."
+            + ("" if sec.icomp != 1 else
+               " Only the first "
+               f"{_MAX_SHELL_LAYERS} ICOMP=1 layer angle(s) survive with it."))
         nip = _MAX_SHELL_LAYERS
     return nip
+
+
+def _icomp_layer_angles(sec: SectionShell, nip: int,
+                        state: ConversionState) -> List[float]:
+    """The per-layer material angle each /PROP/TYPE11 layer carries.
+
+    ``0.0`` for every layer of an ordinary (ICOMP=0) section — the layup is then
+    just NIP identical copies of the section — and the deck's own ``B_i`` for an
+    ICOMP=1 one. The value is used VERBATIM, no sign flip: both codes measure the
+    angle counter-clockwise about the shell normal from the material's reference
+    direction (LS-DYNA Vol I R17 p.41-70 "β_i, material angle at the ith
+    integration point"; Radioss ``prop_p11_sh_sandw.cfg`` ``Phi_i`` "angle
+    between direction 1 and the projection of the reference vector"). It is then
+    ADDED to the material's own AOPT/BETA rotation by ``_emit_prop_type11``,
+    which is the same composition ``*PART_COMPOSITE``'s per-ply ``B_i`` uses.
+
+    dyna2rad reads ``LSD_B`` verbatim into ``Phi`` on its *SECTION_TSHELL
+    composite path (``convertprops.cxx:4528-4540``) and nowhere else — its thin
+    shell ``p_ConvertSectionShell`` (``convertprops.cxx:641-765``) dispatches
+    purely on the MATERIAL keyword and reads ``LSD_ICOMP`` only as a *MAT_FABRIC
+    NIP-normalization switch (``:1704-1713``, ``:3346-3351``), so an ICOMP=1
+    thin-shell layup loses every angle there.
+    """
+    if sec.icomp != 1:
+        return [0.0] * nip
+    return (list(sec.betas) + [0.0] * nip)[:nip]
 
 
 def _emit_single_material_type11(state: ConversionState, prop_id: int, pid: int,
@@ -1123,6 +1239,12 @@ def _emit_single_material_type11(state: ConversionState, prop_id: int, pid: int,
     through to /PROP/TYPE1, which the starter then rejects (ERROR 3047) because
     /MAT/LAW127 registers PROP_SHELL=2 (orthotropic) and IGTYP 1 accepts only
     classes 1 and 5. Both laws are routed to TYPE11 here.
+
+    With ``ICOMP = 1`` the layers are no longer identical: each takes its own
+    ``B_i`` material angle off the section's card-3 angle block, which is the
+    whole point of the flag — a [0/45/-45/90] layup emitted as four 0-degree
+    layers is a UNIDIRECTIONAL laminate with several times the axial and a
+    fraction of the shear stiffness of the deck's.
     """
     nip = _shell_layer_count(sec, state, pid)
     thick = sec.t1
@@ -1131,7 +1253,8 @@ def _emit_single_material_type11(state: ConversionState, prop_id: int, pid: int,
             f"/PROP/TYPE11/{prop_id} (part {pid}): shell thickness is "
             f"{thick:g} (<=0), which the starter rejects. Set the "
             "*SECTION_SHELL thickness for this composite part.")
-    layers = [(0.0, thick / nip, mid) for _ in range(nip)]
+    angles = _icomp_layer_angles(sec, nip, state)
+    layers = [(angles[i], thick / nip, mid) for i in range(nip)]
     state.warn(
         f"/PROP for composite part {pid}: {law} is orthotropic-class, so the "
         f"part is repointed at a synthesized /PROP/TYPE11 (SH_SANDW) {prop_id} "
@@ -1139,6 +1262,19 @@ def _emit_single_material_type11(state: ConversionState, prop_id: int, pid: int,
         "/PROP/SHELL is rejected by the starter (ERROR 3047)."
         + ("" if law != "/MAT/LAW127" else
            " (dyna2rad leaves MAT_054/055 on /PROP/TYPE1, which hard-fails.)"))
+    if sec.icomp == 1:
+        state.warn(
+            f"*SECTION_SHELL {sec.secid} on part {pid}: ICOMP=1 → the "
+            f"/PROP/TYPE11/{prop_id} layers carry the deck's own B_i material "
+            "angles ["
+            + ", ".join(f"{a:g}" for a in angles)
+            + "] deg, bottom layer first, each added to the material's "
+            f"AOPT/BETA reference direction (Phi={axis.phi:g} deg). The "
+            f"section thickness {thick:g} is still split EVENLY over the "
+            f"{nip} layers — *SECTION_SHELL ICOMP=1 carries angles ONLY (card "
+            "3 is B1..B8), so unequal ply thicknesses need an "
+            "*INTEGRATION_SHELL rule (not read by k2rad) or *PART_COMPOSITE. "
+            "dyna2rad drops these angles entirely on a thin shell.")
     return _emit_prop_type11(prop_id, f"COMPOSITE_PROP_{prop_id} (part {pid})",
                              sec, state, layers, thick, axis, istrain)
 
