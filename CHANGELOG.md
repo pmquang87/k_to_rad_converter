@@ -1040,6 +1040,44 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **An element whose `PID` no `*PART` defines used to vanish from the converted
+  deck without a single word — no warning, no skip line, nothing.** The writer
+  emits elements from *inside* the `for pid, part in sorted(state.parts.items())`
+  loop of `_make_parts_and_elements` (and the spring/damper connectors the same
+  way, from the per-part loops in `writer/loads.py`), so such an element is never
+  *reached*: the loop does not visit that id, the element is not written, and
+  nothing downstream notices — the starter only ever sees what was written.
+
+  This is the quietest failure mode the converter has. The produced `.rad` is
+  valid, the starter accepts it, the engine runs it to NORMAL TERMINATION — and
+  it is simply not the model the user drew: lighter, softer, and missing whatever
+  contact surface those elements carried. It is exactly what happened to every
+  `*PART_COMPOSITE` part before that keyword got a handler (see *Added*, above),
+  and the same silence covered every other route to a missing `PID`: an
+  `*INCLUDE` that did not resolve, an id typo, a deck assembled from a subset of
+  its parts, a `*PART` variant the parser does not recognize yet.
+
+  A read-only prepass now runs **first** in `build_starter`, before any pass
+  edits the element stores (the TET10 downgrade and the sliver screening both
+  delete solids and announce their own drops), and reports what the `.k` file
+  actually contained:
+
+  ```
+  MESH LOSS: 5 element(s) reference 3 part id(s) that no *PART card defines,
+  and are NOT in the converted deck — PID 77 (2 shell); PID 88 (1 solid, 1
+  beam); PID 99 (1 discrete). ...
+  ```
+
+  All four element stores are scanned — `shell_elems`, `solid_elems`,
+  `beam_elems`, `discrete_elems`. `*ELEMENT_DISCRETE` was the only one that
+  already had a guard of its own (`_make_discrete_springs` warns per part); it is
+  scanned anyway, so this stays the one place that answers *"did the conversion
+  drop any of my mesh?"* even if that emitter is short-circuited or reordered.
+  The enumerated part ids are capped at 12 (a missing `*INCLUDE` can orphan
+  hundreds; the totals stay exact), and the guard changes no output — every
+  golden is byte-identical, asserted again inside
+  `tests/test_orphan_elements.py`. 13 new tests (1293 -> 1306).
+
 - **Gravity on a rigid body did nothing at all: a free `*MAT_RIGID` block under
   `*LOAD_BODY_Y` never moved — 526 cycles, every displacement 0, KE = 0.** And
   the same emitter had the `*LOAD_BODY` sign inverted and a `/GRAV` card ten
