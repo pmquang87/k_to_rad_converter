@@ -1638,7 +1638,156 @@ Prior history (before this changelog was introduced) is summarized in the
   `ELFORM = 9` `*SECTION_BEAM`, and a before/after SHA256 sweep over every deck
   reachable from the repo changes those six and nothing else. All five goldens
   are byte-identical. 10 new tests in `tests/test_connectors.py`
-  (1563 → 1573).
+  (1563 → 1573 at this branch's base; 1587 → 1597 once the concurrent PRs are
+  merged in).
+
+  Two things this deck shows that are **not** this bug, recorded so they are not
+  rediscovered: `*CONTACT_SPOTWELD` is still `SKIPPED`, so the weld beams'
+  nodes (2059–2066 here) reach the starter attached to nothing but each other —
+  weld force is 0.000 N before *and* after, and the mass/stiffness numbers above
+  are what actually verifies this fix. And all four springs draw starter
+  `WARNING ID 327`, "BAD SPRING FRAME DEFINITION (PARALLEL AXIS)", identically
+  on master and here.
+
+- **A `*MAT_NULL` whose only equation of state was an `*EOS_JWL` vanished from
+  the deck entirely — no `/MAT` card of that id at all, and every `/PART` on it
+  dangling with starter ERROR 179.**
+
+  ```
+  ERROR ID :    179
+  ** ERROR IN PART DEFINITION (MATERIAL)
+     -- PART ID: 1
+     MATERIAL ID=2 DOES NOT EXIST
+  ```
+
+  Two routing sets disagreed. `_make_materials` suppressed `/MAT/VOID` for any
+  `*MAT_NULL` whose id appeared in `state.eos_cards` **or** `state.eos_jwl`, on
+  the assumption that an EOS-carrying material would be emitted for it further
+  down. But `*EOS_JWL` is stored *only* in `state.eos_jwl` (`handle_eos_jwl`),
+  and the `/MAT/LAW6` (`HYD_VISC`) carrier loop in
+  `_make_explosive_and_eos_materials` walks `state.eos_cards` alone. So a deck
+  with `*MAT_NULL` id N + `*EOS_JWL` id N and no `*MAT_HIGH_EXPLOSIVE_BURN` of
+  that id fell through every branch: no `/MAT/VOID` (suppressed), no
+  `/MAT/LAW5` (the id is not in `state.mat_high_explosive`), no carrier (the id
+  is not in `state.eos_cards`). The only sign was an `*EOS_JWL` warning about
+  the missing explosive, which never mentioned that the `*MAT_NULL` had gone
+  with it.
+
+  **The null now falls back to `/MAT/VOID` and the warning says so.** The
+  suppression set is narrowed to `set(eos_cards) | (set(eos_jwl) &
+  set(mat_high_explosive))` in a new shared `_void_null_mids()` helper, so a
+  JWL id only claims a null when the explosive that carries it actually exists.
+  `*MAT_NULL` + `*EOS_JWL` **cannot** be converted faithfully: OpenRadioss has
+  no standalone `/EOS/JWL` — JWL exists only inside `/MAT/LAW5`
+  (`mat_EOS.cfg` lists GRUNEISEN, POLYNOMIAL, PUFF, SESAME, TILLOTSON,
+  MURNAGHAN, OSBORNE, LSZK, NOBLE-ABEL, STIFF-GAS, IDEAL-GAS, LINEAR,
+  COMPACTION, NASG, TABULATED, and no JWL; the keyword is reachable only as
+  LAW5/LAW97 in `data_hierarchy.cfg`). Emitting a `/MAT/LAW5` from the null
+  instead was rejected: LAW5 needs the detonation velocity `D` and `P_CJ` that
+  only `*MAT_HIGH_EXPLOSIVE_BURN` carries, and a LAW5 with `D = 0` never burns
+  — a silent zero-pressure explosive is worse than an obvious void. So the
+  material stays `/MAT/VOID` (the same fallback a bare `*MAT_NULL` already
+  takes, starter-clean on a Lagrangian `/BRICK`: 0 errors), and the warning now
+  names what was emitted, what was lost, and what to add:
+
+  ```
+  *EOS_JWL 2: no companion *MAT_HIGH_EXPLOSIVE_BURN (same id) — OpenRadioss
+  carries JWL only inside the /MAT/LAW5 explosive, so the JWL parameters were
+  NOT emitted and the same-id *MAT_NULL fell back to /MAT/VOID/2: that part now
+  has NEITHER strength NOR pressure (the detonation-product expansion is lost,
+  so it applies no load to its surroundings). Add a *MAT_HIGH_EXPLOSIVE_BURN of
+  id 2 (density, detonation velocity D, P_CJ) to get the /MAT/LAW5 JWL
+  explosive.
+  ```
+
+  Every other route through the block is untouched and verified byte-identical
+  against `master`: the intended `*MAT_HIGH_EXPLOSIVE_BURN` + `*EOS_JWL` pair
+  still merges into one `/MAT/LAW5`, a `*MAT_NULL` with a same-id
+  `*EOS_LINEAR_POLYNOMIAL` still becomes `/MAT/LAW6` + `/EOS/POLYNOMIAL`, a
+  `*PART`-`EOSID`-bound null still wins over a same-id JWL, an `*EOS_JWL` with
+  no material of its id at all keeps its original wording, and a bare
+  `*MAT_NULL` still stays `/MAT/VOID` (all five goldens plus real blast, bogie
+  and gear-train decks re-convert to the same SHA256). 6 new tests in
+  `tests/test_converter.py` (1563 → 1569); the repro deck now converts and
+  runs the starter with 0 errors.
+
+- **A beam part whose material is not one of five Radioss laws converted to a
+  deck that ERROR-TERMINATES the starter, and k2rad said nothing at all.**
+  `_make_properties` writes a `/PROP/BEAM` (IGTYP 3) for every `*SECTION_BEAM`
+  without ever looking at the material, and the classic beam property accepts
+  only `PROP_BEAM` 1 or 3 — `/MAT/LAW0`, `LAW1`, `LAW2`, `LAW13`, `LAW44`.
+  `*MAT_PIECEWISE_LINEAR_PLASTICITY`, by some distance the most common LS-DYNA
+  beam material, routes to `/MAT/LAW36`, so the single likeliest beam deck there
+  is was converted straight into an unrunnable one, silently.
+
+  ```
+  ERROR ID :   3047
+  ** ERROR IN MATERIAL/PROPERTY COMPATIBILITY
+     PROPERTY ID 2  OF TYPE 3  IS NOT COMPATIBLE WITH MATERIAL ID 1  OF TYPE 36
+  ERROR ID :    745
+  ** ERROR IN MATERIAL-PROPERTY COMPATIBILITY
+     ON ELEMENT ID=11, PID TYPE 2 IS NOT COMPATIBLE WITH
+     MATERIAL LAW 36
+  ```
+
+  **The whitelist is transcribed from the starter, not from the manual.**
+  The gate is on the MATERIAL: each law declares a class through
+  `INIT_MAT_KEYWORD` — 1 `BEAM_CLASSIC` (TYPE3 only), 2 `BEAM_INTEGRATED`
+  (TYPE18 only), 3 `BEAM_ALL` (`init_mat_keyword.F:251-258`) — and IGTYP 3
+  demands 1 or 3 (`check_mat_elem_prop_compatibility.F:379-381`). Grepping every
+  `INIT_MAT_KEYWORD` call under `starter/source/materials/` returns 10 call
+  sites, all unconditional, and that is the complete list: LAW1 is BEAM_CLASSIC
+  (`hm_read_mat01.F:148`); LAW0 (`mat00:133`), LAW2 in all three of its readers
+  (`_jc:381`, `_zerilli:342`, `_predef:392`), LAW13 (`mat13:128`) and LAW44
+  (`mat44:319`) are BEAM_ALL; LAW34 (`mat34:162`), LAW36 (`mat36:360`) and LAW71
+  (`mat71:251`) are BEAM_INTEGRATED. Every other law keeps the `PROP_BEAM = 0`
+  default from `ini_mat_elem.F:89`.
+
+  **The two error ids are not interchangeable, and the split is structural.** A
+  law at `PROP_BEAM == 0` fails the ELEMENT test first (`IF
+  (MAT_PARAM(IMAT)%PROP_BEAM == 0) COMPAT_ELEM = .FALSE.`, same file
+  lines 153-155 / 342-343) and reports **3046** — material-vs-element, the
+  property never enters it. Only a law that *is* beam material of the wrong
+  class, i.e. BEAM_INTEGRATED LAW34/36/71, passes that and fails the property
+  test as **3047**, joined by the legacy hard-coded pair check in
+  `initia.F:2806-2817` firing **ERROR 745** once per beam element. The warning
+  names whichever id the user will actually read. Measured on `starter_win64`
+  (nt=6), one `*SECTION_BEAM` ELFORM=2 and two `*ELEMENT_BEAM` per deck,
+  everything else held constant:
+
+  | beam material | law | starter |
+  |---|---|---|
+  | `*MAT_ELASTIC` | 1 | NORMAL TERMINATION, 0 ERROR(S) 0 WARNING(S) |
+  | `*MAT_JOHNSON_COOK` | 2 | 0 ERROR(S) (only unrelated warnings) |
+  | `*MAT_PLASTIC_KINEMATIC` | 44 | NORMAL TERMINATION, 0 ERROR(S) 0 WARNING(S) |
+  | `*MAT_PIECEWISE_LINEAR_PLASTICITY` | 36 | 3 ERROR(S): 3047 + one 745 per element |
+  | `*MAT_BLATZ-KO_RUBBER` | 42 | 1 ERROR(S): 3046 |
+
+  The check resolves the law through the new `_target_mat_law`, which follows
+  **k2rad's own routing** rather than the LS-DYNA material number — `*MAT_024`
+  and `*MAT_POWER_LAW_PLASTICITY` are different keywords on the same LAW36,
+  `*MAT_JOHNSON_COOK` is LAW2 or LAW4 depending on an attached `*EOS_*`,
+  `*MAT_NULL` is `/MAT/VOID` alone but the `/MAT/LAW6` carrier with one, and
+  each rubber keyword picks its law off a curve or order field. It is the first
+  mid → law map in the codebase that covers every material container;
+  `inistate.py::_xref_target_law` covers 7 of them and is left alone here.
+
+  **Warn-only, deliberately — no auto-promotion to `/PROP/TYPE18`.** A promotion
+  is not information-preserving: `*SECTION_BEAM` ELFORM=2 states four
+  independent resultants (A, Iss, Itt, J) while `/PROP/TYPE18` integrates a
+  point cloud whose `Ixx` the starter *defines* as `Iyy + Izz`
+  (`hm_read_prop18.F:289-301`) — the polar moment, equal to the torsion constant
+  only for a circular section — so promoting means inventing a cross-section and
+  overwriting the deck's J. It would also rescue only a subset: TYPE18 takes
+  LAW34/36/71, but a beam on LAW38/42/50/70/76/95/127/128 has no beam property
+  in Radioss at either type and still needs a different material. A warning that
+  names the remedy covers every case; a promotion covers a third of them.
+
+  Diagnostics only: no emitted card changes. The `/PROP/BEAM` of a rejected
+  LAW36 deck is line-for-line the one a starter-clean LAW44 deck gets, the five
+  goldens are byte-identical, and the `*MAT_024` repro deck re-converts to the
+  same SHA256 as on `master` — with 0 warnings there and 1 here. 18 new tests in
+  a new `tests/test_beam_mat_prop_compat.py` (1563 → 1581, 125 → 143 subtests).
 
 - **An element-free `*PART` produced a `/PART` pointing at a property that was
   never emitted — starter ERROR 178, and the whole conversion dead on a part
