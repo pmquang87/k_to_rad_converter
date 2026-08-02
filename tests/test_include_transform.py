@@ -1202,6 +1202,80 @@ class IntegrationBeamOffsetTests(_AssemblyBase):
                          result.warnings)
 
 
+class SectionRiderStrideOffsetTests(_AssemblyBase):
+    """The card-2 RIDERS are the strides most likely to de-sync a whole
+    include, because getting one wrong shifts every later card set by a line
+    and the ids silently land on the wrong sections. The plain 2a/2c sets are
+    covered above; these are the three riders that are not.
+
+    Each *SECTION_BEAM set below is followed by a set whose SECID is a distinct
+    number, so a stride that is one line out cannot accidentally still pass.
+    """
+
+    CHILD = "\n".join([
+        "*KEYWORD",
+        # ── *SECTION_BEAM, five sets exercising every rider ──
+        "*SECTION_BEAM",
+        # ELFORM 2 + a NAMED card 2b + the OPTCARD rider (card 2b.1)
+        _row(1, 2, 1.0, 2.0, 0), "SECTION_11" + _row(4.0, 6.0),
+        "OPTCARD" + _row(1.0, 0.0),
+        # ELFORM 2 + a NAMED card 2b and NO OPTCARD: the look-ahead must not
+        # eat the next set's card 1
+        _row(2, 2, 1.0, 2.0, 0), "SECTION_08" + _row(3.0),
+        # ELFORM 12 + the NUMERIC card 2c, which DOES take card 2c.1
+        _row(3, 12, 1.0, 2.0, 0), _row(24.0, 108.0, 228.0, 336.0),
+        _row(0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0),
+        # ELFORM 12 + a NAMED card 2b, which does NOT take card 2c.1
+        _row(4, 12, 1.0, 2.0, 0), "SECTION_11" + _row(2.0, 8.0),
+        # plain 2a to close the block
+        _row(5, 1, 1.0, 0.0, 0), _row(4.0, 4.0, 6.0, 6.0),
+        # ── *SECTION_SOLID with the ELFORM 101-105 user cards ──
+        "*SECTION_SOLID",
+        _row(11, 1),
+        # ELFORM 101: card 3 is NIP NXDOF IHGF ITAJ LMC NHSV, then NIP
+        # cards, then ceil(LMC/8) cards
+        _row(12, 101), _row(2, 0, 0, 0, 3, 0),
+        _row(0.0), _row(0.0), _row(1.0, 2.0, 3.0),
+        _row(13, 16),
+        "*END",
+    ]) + "\n"
+
+    def _offset_state(self):
+        d = self._dir()
+        self._write(d, "child.k", self.CHILD)
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD", "*INCLUDE_TRANSFORM", "child.k",
+            _row(100, 200, 10, 20, 30, 40, 0), _row(60), "", "", "*END",
+        ]) + "\n")
+        return self._state(main)
+
+    def test_the_optcard_rider_does_not_de_sync_the_beam_walk(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_beams), [61, 62, 63, 64, 65])
+
+    def test_each_beam_set_keeps_its_own_elform_through_the_transform(self):
+        """A one-line stride error shows up here first: the ELFORMs would
+        march along by one set."""
+        st = self._offset_state()
+        self.assertEqual([st.sec_beams[s].elform for s in range(61, 66)],
+                         [2, 2, 12, 12, 1])
+
+    def test_the_elform_twelve_riders_are_told_apart(self):
+        """Card 2c.1 follows the NUMERIC card 2 only. Set 63 takes it, set 64
+        (named card 2b) does not — and set 64's own card 2 must still be read,
+        which the plain 2a set that follows would expose."""
+        st = self._offset_state()
+        self.assertEqual(st.sec_beams[63].area, 24.0)
+        self.assertEqual((st.sec_beams[65].ts1, st.sec_beams[65].tt1),
+                         (4.0, 6.0))
+
+    def test_the_user_solid_cards_are_strided_over_under_a_transform(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_solids), [71, 72, 73])
+        self.assertEqual(st.sec_solids[72].elform, 101)
+        self.assertEqual(st.sec_solids[73].elform, 16)
+
+
 class CoordinatePrecisionTests(_AssemblyBase):
     def test_offset_only_rewrite_preserves_coordinate_text(self):
         d = self._dir()

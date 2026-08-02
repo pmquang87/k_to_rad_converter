@@ -378,6 +378,77 @@ class ArbitraryRuleTests(unittest.TestCase):
         # Both cells are on the +s side; nothing recentres them.
         self.assertEqual([y for y, _, _ in p["points"]], [1.0, 2.0])
 
+    def test_nsloc_and_ntloc_move_the_node_line_off_the_section_centre(self):
+        """Card 2a fields 5/6 give the "location of the reference surface" -
+        the beam's NODE LINE - inside the same +/-1 square: EQ.1.0 side at
+        s=1.0, EQ.0.0 centre, EQ.-1.0 side at s=-1.0 (Vol I R17 p.41-13/14).
+        /PROP/TYPE18's Yi/Zi are measured from the nodes, so the cells shift by
+        -NSLOC/-NTLOC. This is how a beam hangs off a shell surface; ignoring
+        it re-centres the whole section on the nodes and deletes exactly the
+        eccentricity that couples axial force to bending."""
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 1, 1.0, -77, 0),
+                         _row(4.0, 4.0, 6.0, 6.0, 1.0, -1.0)])
+        result, starter = _convert(_deck(sec, RULE_4CELL))
+        # y = (S-1)*4/2 spans [-4, 0]; z = (T+1)*6/2 spans [0, 6].
+        self.assertEqual(_p18(starter)["points"],
+                         [(-4.0, 0.0, 6.0), (0.0, 0.0, 6.0),
+                          (0.0, 6.0, 6.0), (-4.0, 6.0, 6.0)])
+        self.assertEqual(result.warnings, [])
+
+    def test_a_centred_reference_surface_is_the_unshifted_section(self):
+        """NSLOC = NTLOC = 0 is the card default and must stay a no-op."""
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 1, 1.0, -77, 0),
+                         _row(4.0, 4.0, 6.0, 6.0, 0.0, 0.0)])
+        _, starter = _convert(_deck(sec, RULE_4CELL))
+        self.assertEqual(_p18(starter)["points"],
+                         [(-2.0, -3.0, 6.0), (2.0, -3.0, 6.0),
+                          (2.0, 3.0, 6.0), (-2.0, 3.0, 6.0)])
+
+    def test_a_tubular_cst_is_refused_instead_of_read_as_a_rectangle(self):
+        """CST=1 redefines card 2 as TS1 = OUTER and TT1 = INNER DIAMETER
+        (Vol I R17 p.41-13), so the +/-1 square is not a TS1 x TT1 rectangle at
+        all. Denormalizing the rule onto one would emit TS1*TT1 = 320 of area
+        where the annulus really has pi/4*(20^2-16^2) = 113.1 - 2.8x too stiff
+        axially, silently. The rule is dropped and CST=1 is named."""
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 1, 1.0, -77, 1),
+                         _row(20.0, 20.0, 16.0, 16.0)])
+        result, starter = _convert(_deck(sec, RULE_4CELL))
+        self.assertNotIn("/PROP/TYPE18/", starter)
+        self.assertTrue(_warned(result, "CST) is 1 = TUBULAR",
+                                "INNER DIAMETER"))
+
+    def test_a_taper_is_reported_because_type18_is_prismatic(self):
+        """TS2/TT2 are the node-2 thicknesses. /PROP/TYPE18 has no taper
+        column, so the node-1 section is emitted for the whole element - which
+        is fine, but going silent about a beam that really halves in section
+        is not."""
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 1, 1.0, -77, 0),
+                         _row(4.0, 2.0, 6.0, 3.0)])
+        result, starter = _convert(_deck(sec, RULE_4CELL))
+        # Still the node-1 box: 4 x 6, quartered.
+        self.assertEqual(sum(a for _, _, a in _p18(starter)["points"]), 24.0)
+        self.assertTrue(_warned(result, "the section is TAPERED",
+                                "NODE-1 section is emitted"))
+
+    def test_weights_that_do_not_add_up_are_renormalized_out_loud(self):
+        """WF is the area FRACTION A_i/A and LS-DYNA applies it LITERALLY, so
+        weights summing to 0.2 mean a section carrying a fifth of its gross
+        area. k2rad renormalizes (as dyna2rad's shell rule does) - a defensible
+        choice, but a 5x change in area, mass and axial stiffness has to be
+        said out loud."""
+        rule = "\n".join(["*INTEGRATION_BEAM", _row(77, 2, 1.0, 0, 0),
+                          _row(-1.0, 0.0, 0.1, 0), _row(1.0, 0.0, 0.1, 0)])
+        result, starter = _convert(_deck(SEC_RULE, rule))
+        self.assertEqual([a for _, _, a in _p18(starter)["points"]],
+                         [12.0, 12.0])
+        self.assertTrue(_warned(result, "weighting factors sum to 0.2",
+                                "every cell is scaled by 5"))
+
+    def test_weights_that_do_add_up_say_nothing(self):
+        _, _ = _convert(_deck(SEC_RULE, RULE_4CELL))
+        result, _ = _convert(_deck(SEC_RULE, RULE_4CELL))
+        self.assertEqual(result.warnings, [])
+
     def test_ra_scales_the_gross_area_of_every_cell(self):
         """RA is the RELATIVE area A/(TS1*TT1) (p.29-2), so a section that
         fills 60% of its bounding box carries 0.6*4*6 = 14.4 in total."""
@@ -539,20 +610,69 @@ class MaterialGateTests(unittest.TestCase):
     def test_a_law1_beam_keeps_type3_with_constants_derived_from_the_rule(self):
         """/MAT/ELAST is BEAM_CLASSIC, which check_mat_elem_prop_compatibility.F
         :239-241 rejects on /PROP/TYPE18 (ERROR 3047 + ERROR 745). The section
-        stays on /PROP/BEAM and the rule is condensed into the four constants
-        with the starter's OWN summary formula (hm_read_prop18.F:289-301):
-        Iyy = sum(A_i^2/12 + A_i*y_i^2), Izz likewise in z, Ixx = Iyy + Izz."""
+        stays on /PROP/BEAM and the rule is condensed into the four constants.
+
+        Iyy IS THE Z-BASED SUM. The engine pins it: /PROP/BEAM develops
+        MOM(2) = KYY*E*Iyy (m1lawp.F:108) and /PROP/TYPE18 develops
+        MOM(2) = E*KYY*sum(A_i*z_i^2) (mulaw_ib.F:139 + main_beam18.F:253) in
+        the same slot, so Iyy = sum(A_i*z_i^2) and Izz = sum(A_i*y_i^2). The
+        starter's LISTING labels these the other way round
+        (hm_read_prop18.F:295, TIYY_I from RYI) but never stores TIYY_I, so it
+        is a print bug and not the semantics. The cells here are 2 units out in
+        y and 3 in z precisely so a swap cannot pass.
+        """
         result, starter = _convert(_deck(SEC_RULE, RULE_4CELL, mat=MAT_ELAST))
         self.assertNotIn("/PROP/TYPE18/", starter)
         # four cells of area 6 at (+/-2, +/-3):
         #   A   = 4*6                                   = 24
-        #   Iyy = 4*(6^2/12 + 6*2^2) = 4*(3 + 24)       = 108
-        #   Izz = 4*(6^2/12 + 6*3^2) = 4*(3 + 54)       = 228
-        #   Ixx = 108 + 228                             = 336
-        self.assertEqual(_p3(starter), (24.0, 108.0, 228.0, 336.0))
+        #   Iyy = 4*(6^2/12 + 6*3^2) = 4*(3 + 54)       = 228   <- z, the far axis
+        #   Izz = 4*(6^2/12 + 6*2^2) = 4*(3 + 24)       = 108   <- y, the near axis
+        #   Ixx = 228 + 108                             = 336
+        self.assertEqual(_p3(starter), (24.0, 228.0, 108.0, 336.0))
         self.assertTrue(_warned(result, "ERROR 3047",
                                 "stays on /PROP/BEAM (TYPE3) with the "
                                 "Area/Iyy/Izz/Ixx DERIVED"))
+
+    def test_the_derived_iyy_is_the_far_axis_when_the_cells_are_a_line(self):
+        """The sharpest form of the same convention check: two cells on the
+        z-axis only. Everything is at y = 0, so Izz collapses to the self term
+        while Iyy carries the whole spread. A swapped pair would report the
+        stiff axis as the soft one and vice versa, a factor of 10 here."""
+        rule = "\n".join(["*INTEGRATION_BEAM", _row(77, 2, 1.0, 0, 0),
+                          _row(0.0, -1.0, 0.5, 0), _row(0.0, 1.0, 0.5, 0)])
+        # TS1 = 4 -> y in [-2, 2]; TT1 = 6 -> the two cells sit at z = -+3.
+        # Each cell is half of RA*TS1*TT1 = 24, i.e. area 12.
+        #   Iyy = 2*(12^2/12 + 12*3^2) = 2*(12 + 108) = 240
+        #   Izz = 2*(12^2/12 + 12*0^2) = 2*12         = 24
+        _, starter = _convert(_deck(SEC_RULE, rule, mat=MAT_ELAST))
+        self.assertEqual(_p3(starter), (24.0, 240.0, 24.0, 264.0))
+
+    def test_the_shape_fallback_agrees_with_the_point_fallback(self):
+        """The two derivation routes must not contradict each other on the same
+        rectangle. ICST=11 D1=4 (along y) x D2=6 (along z) has the closed form
+        Iyy = D1*D2^3/12 = 72 and Izz = D2*D1^3/12 = 32; tiling the identical
+        box with a fine grid of cells has to land on the same pair."""
+        rule = "\n".join(["*INTEGRATION_BEAM", _row(77, 0, 0.0, 11, 0),
+                          _row(4.0, 6.0)])
+        _, starter = _convert(_deck(SEC_RULE, rule, mat=MAT_ELAST))
+        a, iyy, izz, ixx = _p3(starter)
+        self.assertEqual((a, iyy, izz, ixx), (24.0, 72.0, 32.0, 104.0))
+        # …and the same box as an explicit 20x20 point cloud, which goes
+        # through _constants_from_points instead. The self term makes it
+        # converge from below, so compare to a few tenths of a percent.
+        n = 20
+        cells = [_row(-1.0 + (2 * i + 1) / n, -1.0 + (2 * j + 1) / n,
+                      1.0 / (n * n), 0)
+                 for i in range(n) for j in range(n)]
+        pts = "\n".join(["*INTEGRATION_BEAM", _row(78, n * n, 1.0, 0, 0)]
+                        + cells)
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 1, 1.0, -78, 0),
+                         _row(4.0, 4.0, 6.0, 6.0)])
+        _, starter = _convert(_deck(sec, pts, mat=MAT_ELAST))
+        a2, iyy2, izz2, _ = _p3(starter)
+        self.assertAlmostEqual(a2, 24.0, places=6)
+        self.assertAlmostEqual(iyy2 / iyy, 1.0, places=3)
+        self.assertAlmostEqual(izz2 / izz, 1.0, places=3)
 
     def test_a_law1_beam_on_a_standard_section_derives_the_circle(self):
         """dyna2rad's own SECTION_08 closed form (convertprops.cxx:1372-1375):
@@ -601,7 +721,22 @@ class RuleSkipPathTests(unittest.TestCase):
                                  _row(5, elform, 1.0, -77, 2), CARD2_4x6])
                 result, starter = _convert(_deck(sec, RULE_4CELL))
                 self.assertNotIn("/PROP/TYPE18/", starter)
-                self.assertTrue(_warned(result, "is not an integrated beam"))
+                self.assertTrue(
+                    _warned(result, "does not integrate a cross-section"))
+
+    def test_elform_fourteen_is_the_elbow_not_a_shear_panel(self):
+        """ELFORM 14 is the one formulation that MANDATES a user rule: "Elbow
+        integrated tubular beam element.  A user-defined integration rule with
+        a tubular cross section (9) must be used" (Vol I R17 p.41-11). Radioss
+        has no elbow, so the rule still falls back — but reporting it as "not
+        an integrated beam" (or as a shear panel) is the opposite of true."""
+        sec = "\n".join(["*SECTION_BEAM", _row(5, 14, 1.0, -77, 2),
+                         _row(0.0, 0.0, 0.0)])
+        result, starter = _convert(_deck(sec, RULE_4CELL))
+        self.assertNotIn("/PROP/TYPE18/", starter)
+        self.assertTrue(_warned(result, "ELFORM=14 is the ELBOW"))
+        self.assertFalse(_warned(result, "shear-panel"))
+        self.assertFalse(_warned(result, "does not integrate a cross-section"))
 
     def test_a_rule_on_a_section_no_beam_uses_is_reported(self):
         deck = "\n".join(["*KEYWORD", NODES, MAT_PLAS, SEC_RULE, RULE_4CELL,
@@ -737,15 +872,89 @@ class SectionBeamMultiSetTests(unittest.TestCase):
                          (12.5, 0, 0, 0))
         self.assertTrue(any("ELFORM=3 is a TRUSS" in w for w in st.warnings))
 
-    def test_the_spotweld_card_mapping_is_untouched(self):
-        """ELFORM 9 keeps the exact fields k2rad's /PROP/TYPE13 connector path
-        already read, so this card-dialect rewrite cannot move a nugget."""
+    def test_the_spotweld_nugget_is_untouched_by_the_dialect_rewrite(self):
+        """ELFORM 9 keeps whatever k2rad's /PROP/TYPE13 connector path already
+        derived, so this card-dialect rewrite cannot move a nugget.
+
+        The assertion is deliberately on the EMITTED property, not on which
+        SectionBeam attribute each column lands in: card 2i really is
+        "TS1 TS2 TT1 TT2 PRINT - ITOFF" (Vol I R17 p.41-10), so the `vol`/`ca`
+        NAMES on this path are wrong and a separate fix is expected to
+        re-derive the nugget area from them. Pinning the names here would
+        freeze that bug in place; pinning the /PROP lets the fix land.
+        """
+        deck = "\n".join([
+            "*KEYWORD", NODES,
+            "*ELEMENT_BEAM", "".join(f"{v:>8}" for v in (1, 7, 1, 2, 3)),
+            "*PART", "sw", _row(7, 2, 9),
+            "*MAT_SPOTWELD", _row(9, "7.85E-9", 210000.0, 0.3),
+            "*SECTION_BEAM", _row(2, 9, 1.0, 2.0, 1),
+            _row(0.003, 0.003, 0.0, 0.0, 0.0), "*END", ""])
+        before = _convert(deck)[1]
+        self.assertIn("/PROP/TYPE13/", before)
+        # …and the parse still reaches every card-2 column, whatever it is
+        # named: a rewrite that lost a field would show up as a zero here.
         st = _dispatch("*KEYWORD\n*SECTION_BEAM\n"
                        + _row(2, 9, 1.0, 2.0, 1) + "\n"
-                       + _row(0.003, 0.003, 0.0, 0.0, 0.0) + "\n*END\n")
+                       + _row(0.003, 0.004, 0.005, 0.006, 0.0) + "\n*END\n")
         sec = st.sec_beams[2]
-        self.assertEqual((sec.vol, sec.ca, sec.area), (0.003, 0.0, 0.0))
-        self.assertEqual((sec.ts1, sec.ts2), (0.003, 0.003))
+        self.assertEqual((sec.ts1, sec.ts2, sec.tt1, sec.tt2),
+                         (0.003, 0.004, 0.005, 0.006))
+
+
+class ThicknessOnlySectionTests(unittest.TestCase):
+    """ELFORM 0/1/4/5/11 state the cross-section as card-2 THICKNESSES and
+    carry no A/Iyy/Izz/Ixx at all. Before the card-2 dialect table these fell
+    through a catch-all that read a thickness as an area; reading them
+    correctly must not leave the /PROP/BEAM all-zero, because that is not a
+    soft beam but a REFUSED deck (hm_read_prop03.F:151-182 raises ERROR
+    314/315/316/317 on each non-positive value)."""
+
+    @staticmethod
+    def _sec(elform, cst, *card2):
+        return "\n".join(["*SECTION_BEAM", _row(5, elform, 1.0, 0.0, cst),
+                          _row(*card2)])
+
+    def test_every_thickness_elform_derives_the_rectangle(self):
+        for elform in (0, 1, 4, 5, 11):
+            with self.subTest(elform=elform):
+                sec = self._sec(elform, 0, 4.0, 4.0, 6.0, 6.0)
+                result, starter = _convert(_deck(sec, "", mat=MAT_ELAST))
+                # TS1 = 4 along y, TT1 = 6 along z:
+                #   A = 24, Iyy = 4*6^3/12 = 72, Izz = 6*4^3/12 = 32
+                self.assertEqual(_p3(starter), (24.0, 72.0, 32.0, 104.0))
+                self.assertTrue(_warned(result, "k2rad DERIVES the four "
+                                                "resultants"))
+
+    def test_a_tubular_section_derives_the_annulus_from_the_diameters(self):
+        """CST=1 makes TS1 the OUTER and TT1 the INNER DIAMETER (p.41-13) -
+        radii would be 4x out on the area and 16x on the inertia."""
+        import math
+        sec = self._sec(1, 1, 20.0, 20.0, 16.0, 16.0)
+        result, starter = _convert(_deck(sec, "", mat=MAT_ELAST))
+        a, iyy, izz, ixx = _p3(starter)
+        self.assertAlmostEqual(a, math.pi / 4.0 * (400.0 - 256.0), places=5)
+        self.assertAlmostEqual(iyy, math.pi * (10.0 ** 4 - 8.0 ** 4) / 4.0,
+                               places=3)
+        self.assertAlmostEqual(izz, iyy, places=9)
+        self.assertAlmostEqual(ixx, 2.0 * iyy, places=3)
+        self.assertTrue(_warned(result, "CST=1 tubular, outer diameter"))
+
+    def test_the_resultant_section_is_left_alone(self):
+        """ELFORM 2 states its own A/ISS/ITT/J and must not be touched, nor
+        gain a message."""
+        sec = self._sec(2, 0, 24.0, 108.0, 228.0, 336.0)
+        result, starter = _convert(_deck(sec, "", mat=MAT_ELAST))
+        self.assertEqual(_p3(starter), (24.0, 108.0, 228.0, 336.0))
+        self.assertEqual(result.warnings, [])
+
+    def test_a_section_with_no_t_dimension_still_reports_the_refusal(self):
+        """ELFORM 7/8 (2D shells) carry TS1/TS2 only - there is no t-extent to
+        build a section from, so the honest answer is still the named ERROR."""
+        sec = self._sec(7, 0, 4.0, 4.0)
+        result, starter = _convert(_deck(sec, "", mat=MAT_ELAST))
+        self.assertEqual(_p3(starter), (0.0, 0.0, 0.0, 0.0))
+        self.assertTrue(_warned(result, "the starter REFUSES", "ERROR 314"))
 
 
 class SectionSolidMultiSetTests(unittest.TestCase):
@@ -828,6 +1037,34 @@ class SectionDiscreteMultiSetTests(unittest.TestCase):
                        + _row(3.0, 4.0) + "\n*END\n")
         self.assertEqual(sorted(st.sec_discrete), [1, 2])
         self.assertEqual(st.sec_discrete[2].kd, 5.0)
+
+    def test_a_set_that_omits_card_two_mid_block_is_reported(self):
+        """The pair is unconditional, so a set that drops its card 2 makes the
+        walk read the NEXT set's card 1 as CDL/TDL and stride over it. That
+        section is lost and everything after it is one line out of phase - here
+        the very next read lands on a CDL/TDL line, whose SECID of 0 ends the
+        block, so sections 2 AND 3 vanish. Tolerating the malformed deck is
+        fine; losing two thirds of it in silence is not."""
+        st = _dispatch("*KEYWORD\n*SECTION_DISCRETE\n"
+                       + _row(1, 0, 1.0, 0.0, 0.0, 0.0) + "\n"
+                       + _row(2, 0, 2.0, 0.0, 0.0, 0.0) + "\n"
+                       + _row(0.0, 0.0) + "\n"
+                       + _row(3, 0, 3.0, 0.0, 0.0, 0.0) + "\n"
+                       + _row(0.0, 0.0) + "\n*END\n")
+        self.assertEqual(sorted(st.sec_discrete), [1])
+        self.assertTrue(any("probably missing its card 2" in w
+                            for w in st.warnings), st.warnings)
+
+    def test_a_trailing_set_without_card_two_stays_silent(self):
+        """The LAST set may legitimately omit card 2 (LS-PrePost defaults
+        CDL/TDL to 0 there), so the new check must not fire on it."""
+        st = _dispatch("*KEYWORD\n*SECTION_DISCRETE\n"
+                       + _row(1, 0, 1.0, 0.0, 0.0, 0.0) + "\n"
+                       + _row(0.0, 0.0) + "\n"
+                       + _row(2, 0, 2.0, 0.0, 0.0, 0.0) + "\n*END\n")
+        self.assertEqual(sorted(st.sec_discrete), [1, 2])
+        self.assertFalse(any("probably missing its card 2" in w
+                             for w in st.warnings), st.warnings)
 
     def test_the_title_card_repeats_per_set(self):
         st = _dispatch("*KEYWORD\n*SECTION_DISCRETE_TITLE\nspring a\n"

@@ -17,11 +17,18 @@ Prior history (before this changelog was introduced) is summarized in the
   never read card-1 field 4, so the reference was lost twice over — a deck whose
   beam section lives in a rule (an I-beam frame, a tube, a tapered spar) got a
   `/PROP/BEAM` with `Area = Iyy = Izz = Ixx = 0` and no warning that its beams
-  had no stiffness at all. 60 new tests in a new `tests/test_integration_beam.py`
-  plus 5 in `tests/test_include_transform.py` (1557 → 1622); no flag, and a deck
-  without these cards is byte-identical (all five goldens unchanged, and every
-  `.k`/`.key`/`.dyn` deck in the repo re-converts to the same SHA256 as on
-  `master`).
+  had no stiffness at all. 75 new tests in a new `tests/test_integration_beam.py`
+  plus 9 in `tests/test_include_transform.py`; no flag.
+
+  **What is byte-identical, precisely.** Every `.k`/`.key`/`.dyn` deck in the
+  repo re-converts to the same SHA256 as on `master`, and all five goldens are
+  unchanged — but that corpus cannot detect the whole change, because all six
+  repo decks carrying a `*SECTION_BEAM` use `ELFORM = 9`, the one dialect kept
+  verbatim. The `*SECTION_BEAM` card-2 dialect rewrite below *does* change output
+  for `ELFORM 0/3/4/5/6/7/8/11/14` and blank, none of which are new cards: those
+  used to read a thickness (or a ramp time, or an A10 string) as `A/ISS/ITT/J`
+  and now read their real card. See "Three latent card-2 mis-reads" further
+  down for what each becomes.
 
   **This is net-new capability, not parity — dyna2rad converts none of it.**
   There are two independent stops on the Altair side. `INTEGRATION_BEAM` is
@@ -61,12 +68,32 @@ Prior history (before this changelog was introduced) is summarized in the
   the area fraction `A_i/A`, while Radioss wants absolute coordinates and an
   absolute area (`prop_p18_int_beam.cfg:29-31`). The ±1 square is
   `*SECTION_BEAM` card 2a's `TS1 × TT1` rectangle and the gross area is
-  `RA·TS1·TT1`, so `Y_i = S_i·TS1/2`, `Z_i = T_i·TT1/2`,
-  `A_i = WF_i/ΣWF · RA·TS1·TT1`. The `ΣWF` normalization mirrors dyna2rad's
-  *shell* rule (`convertprops.cxx:1991-1996`) and is a no-op on a well-formed
-  deck. **`TS1`/`TT1`, not `TS1`/`TS2`** — those are the s-direction thickness at
+  `RA·TS1·TT1`, so `Y_i = (S_i − NSLOC)·TS1/2`, `Z_i = (T_i − NTLOC)·TT1/2`,
+  `A_i = WF_i/ΣWF · RA·TS1·TT1`.
+
+  `NSLOC`/`NTLOC` (card 2a fields 5/6) are the "location of the reference
+  surface" — the beam's *node line* — inside the same ±1 square: `1.0` = the side
+  at `s = 1`, `0.0` = centre, `−1.0` = the side at `s = −1` (p.41-13/41-14).
+  `/PROP/TYPE18`'s `Yi/Zi` are measured from the nodes, so subtracting them is
+  what puts the section where LS-DYNA has it. A beam hung off a shell surface
+  with `NSLOC = 1` would otherwise be silently re-centred on its own nodes,
+  deleting exactly the eccentricity that couples axial force to bending. The
+  rule's `SREF`/`TREF` override them "even if `SREF = 0`" (p.29-3) but live on
+  the `ICST > 0` dimension card, which never reaches this path, so the two
+  cannot collide.
+
+  The `ΣWF` normalization mirrors dyna2rad's *shell* rule
+  (`convertprops.cxx:1991-1996`) and is a no-op on a well-formed deck; LS-DYNA
+  applies `WF` literally, so weights that do not add up to 1 now get the applied
+  scale factor quoted rather than silently changing the section area.
+  **`TS1`/`TT1`, not `TS1`/`TS2`** — those are the s-direction thickness at
   node 1 and node 2, so dyna2rad's `L1←TS1, L2←TS2` map (`:1274-1275`) reads a
-  taper as a depth and turns a prismatic rectangle into a square. `Iref = 1` with
+  taper as a depth and turns a prismatic rectangle into a square. A real
+  `TS2`/`TT2` taper is reported (`/PROP/TYPE18` is prismatic), and **`CST = 1` is
+  refused rather than mis-read**: it redefines `TS1`/`TT1` as the outer and inner
+  *diameter* (p.41-13), so denormalizing the rule's ±1 square onto them would
+  emit `TS1·TT1` of area where the annulus really has `π/4·(TS1²−TT1²)` — 2.8×
+  too stiff axially on a 20/16 tube, with nothing said. `Iref = 1` with
   `Y0 = Z0 = 0` keeps the reference axis on the node line where LS-DYNA puts it;
   `Iref = 0` makes the starter recompute the centre as the area-weighted
   barycentre and shift every point by it (`hm_read_prop18.F:267-279`), silently
@@ -99,24 +126,55 @@ Prior history (before this changelog was introduced) is summarized in the
   `BEAM_ALL`, LAW34/36/71 are `BEAM_INTEGRATED`, and **LAW1 (`/MAT/ELAST`) is
   `BEAM_CLASSIC`, i.e. TYPE3 only** — `check_mat_elem_prop_compatibility.F:239-241`
   rejects it on TYPE18 with ERROR 3047 followed by ERROR 745, which kills the
-  run. Such a section stays on `/PROP/BEAM` and the rule is condensed into the
-  four constants with the starter's **own** summary formula
-  (`hm_read_prop18.F:289-301`): `Iyy = Σ(A_i²/12 + A_i·y_i²)`, `Izz` likewise in
-  `z`, `Ixx = Iyy + Izz` — the fallback carries exactly the numbers the starter
-  would have printed for the integrated beam it could not become. `Ixx` as the
+  run. Such a section stays on `/PROP/BEAM` and the rule is condensed into
+  `Iyy = Σ(A_i²/12 + A_i·z_i²)`, `Izz = Σ(A_i²/12 + A_i·y_i²)`,
+  `Ixx = Iyy + Izz`.
+
+  **`Iyy` is the `z`-based sum, and the ENGINE is what pins that** — the
+  starter's listing block is not usable as the spec here. `hm_read_prop18.F:295`
+  accumulates `TIYY_I` from `RYI` (the *y* coordinate) and prints it under the
+  heading `IYY`, but it never stores `TIYY_I` into `GEO` and nothing downstream
+  reads it. What the solver actually does: `/PROP/BEAM` develops
+  `MOM(2) = KYY·E·GEO(2)` with `GEO(2) = IYY` (`m1lawp.F:108`,
+  `hm_read_prop03.F:114`), while `/PROP/TYPE18` develops
+  `MOM(2) = Σ(A_i·σ_i·z_i) = E·KYY·Σ(A_i·z_i²)` in the same slot
+  (`mulaw_ib.F:139` `DEPSXX = EXX − YPT·KZZ + ZPT·KYY`, then
+  `main_beam18.F:253`). Equating them gives `Iyy = Σ(A_i·z_i²)`. Two independent
+  cross-checks inside this repo agree with the engine and not with the listing:
+  the ICST=11 closed form `Iyy = D1·D2³/12` (with `D1` along `y`,
+  `defbeam_sect_new.F90` case(20) `dy1 = l(1)*fac`), and `*SECTION_BEAM`
+  ELFORM 2's `Iyy ← ISS`, LS-DYNA's "area moment of inertia about the local
+  *s*-axis" = `∫t² dA` = `∫z² dA` (p.41-15). Tests pin the convention on a
+  deliberately asymmetric section, on the two-cell degenerate case where one
+  axis collapses to the self term, and by requiring the point route and the
+  shape route to agree on the same rectangle.
+
+  The `A_i²/12` self term models each cell as a square patch — the starter's own
+  choice, exact only for square cells (a 4×4 grid of 0.5 × 2.0 cells wants
+  `0.5·2³/12 = 0.333` each and gets `1/12`), but a rule states no cell *shape*,
+  only a position and an area, so nothing better is recoverable. `Ixx` as the
   polar moment is the same approximation dyna2rad makes when `J = 0`
   (`convertprops.cxx:1400-1402`). ICST 8/9/11 fall back through their closed
   forms. The whitelist is deliberate: an unrecognized material keeps today's
-  `/PROP/BEAM` rather than being promoted into a starter error.
+  `/PROP/BEAM` rather than being promoted into a starter error. The gate is per
+  *section*, so one incompatible part moves every part on it — the warning names
+  the ones dragged along, since a `BEAM_INTEGRATED` law among them is itself an
+  ERROR 3047 that the `/PROP/BEAM` material gate then reports in turn.
 
   Rule support covers **ELFORM 0, 1, 4, 5 and 11**; dyna2rad reaches a
   rule-aware path for 1 and 4 only and drops 5 and 11 entirely (no switch case,
-  no `default:`, so the part ends up with `prop_ID = 0`). Warn-dropped or
-  warn-reported by name, every one: a dangling `IRID`; a rule on a
-  non-integrated `ELFORM`; a section no `*ELEMENT_BEAM` uses; a spotweld-only
-  section; a missing `TS1`/`TT1`; `RA ≤ 0` (its card default is 0.0, which would
+  no `default:`, so the part ends up with `prop_ID = 0`). `ELFORM = 14` gets its
+  own message and an accurate one: it is the **elbow** element and the one
+  formulation that *mandates* a user rule — "A user-defined integration rule
+  with a tubular cross section (9) must be used" (p.41-11) — so the rule is
+  understood and it is Radioss that has no elbow to put it on. Warn-dropped or
+  warn-reported by name, every one: a dangling `IRID`; a rule on an `ELFORM`
+  that integrates no cross-section; a section no `*ELEMENT_BEAM` uses; a
+  spotweld-only section; a missing `TS1`/`TT1`; a tubular `CST = 1`; a
+  `TS2`/`TT2` taper; `RA ≤ 0` (its card default is 0.0, which would
   make every cell zero-area — starter ERROR 314 — so 1.0 is substituted and said
-  so); `ΣWF = 0`; a non-positive cell area; more than 100 cells (ERROR 977); a
+  so); `ΣWF = 0`; a `ΣWF ≠ 1` (renormalized, scale factor quoted); a
+  non-positive cell area; more than 100 cells (ERROR 977); a
   short `S/T/WF/PID` block (with the `NIP`-vs-point-count guard Altair's shell
   code lacks — `convertprops.cxx:1991-2016` loops to `NIP` over both lists with
   no size check); point cards under an `ICST > 0` rule (consumed, data ignored,
@@ -178,10 +236,21 @@ Prior history (before this changelog was introduced) is summarized in the
   an initial *stress*, into two bending inertias; a named `SECTION_nn` card put
   the A10 string itself into `Area` (0.0) and `D1..D3` into `Iyy/Izz/Ixx`; and
   `ELFORM = 0/4/5/11` put a *thickness* into `Area`. Each is now read into the
-  right field or reported as unconvertible, and any `/PROP/BEAM` that still
-  comes out with `Area = Iyy = Izz = Ixx = 0` says so — that beam has no
-  stiffness and no mass of its own. `ELFORM = 9` keeps the exact fields k2rad's
-  `/PROP/TYPE13` spotweld-connector path already read, so no nugget moves.
+  right field or reported as unconvertible. `ELFORM = 9` keeps the exact fields
+  k2rad's `/PROP/TYPE13` spotweld-connector path already read, so no nugget
+  moves.
+
+  Reading them right must not make a runnable-if-wrong deck unrunnable, so
+  `ELFORM 0/1/4/5/11` — whose card 2 is thicknesses and carries no resultants at
+  all — now **derive** the prismatic section from `TS1`/`TT1` instead of landing
+  on an all-zero `/PROP/BEAM`. An all-zero one is not a soft beam: the starter
+  refuses it outright, `hm_read_prop03.F:151-182` raising ERROR 314 (`AREA`),
+  315 (`IYY`), 316 (`IZZ`) and 317 (`IXX`) on each non-positive value. `CST = 0`
+  gives the solid `TS1 × TT1` rectangle, `CST = 1` the annulus its outer/inner
+  *diameters* describe, and the substitution is reported. Where no section can
+  be derived at all — `ELFORM 6`, `14`, `7`/`8` (no t-extent), a named
+  `SECTION_nn`, an undefined section — the message now names those four ERROR
+  ids instead of saying the beam merely has no stiffness.
 
   `*INCLUDE_TRANSFORM` gets four new walkers to match (`_off_section_beam`,
   `_off_section_solid`, `_off_section_discrete`, `_off_integration_beam`),
@@ -190,7 +259,14 @@ Prior history (before this changelog was introduced) is summarized in the
   converter meets and reuses `_rewrite_neg_ref` unchanged; on the rule, the
   `*PART` reference is field **4** of a point card, not field 3 as on the shell
   rule, and the `ICST > 0` dimension card has to be strided over or the next
-  rule's card 1 is read out of the middle of this one.
+  rule's card 1 is read out of the middle of this one. Both riders and the
+  ELFORM 101-105 user-solid stride are covered through a transform as well, each
+  followed by a set with a distinct `SECID` so a one-line de-sync cannot pass.
+
+  `*SECTION_DISCRETE` also reports the one malformed shape it has always
+  tolerated silently: a set that omits its card 2 mid-block makes the walk read
+  the *next* set's card 1 as `CDL`/`TDL` and stride over it, losing that section
+  and putting every set after it one line out of phase.
 
 - **`*INTEGRATION_SHELL` user integration rules: a shell's per-layer
   thicknesses and materials now come from the deck instead of an even split.**

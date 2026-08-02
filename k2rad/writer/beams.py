@@ -44,6 +44,7 @@ from .common import HDR, _f, _i, _spotweld_beam_pids
 __all__ = [
     "_resolve_integration_beams",
     "_emit_prop_int_beam",
+    "_constants_from_thicknesses",
 ]
 
 
@@ -155,16 +156,39 @@ def _type18_material(state: ConversionState, mid: int) -> bool:
 def _constants_from_points(points: List[Tuple[float, float, float]]):
     """(Area, Iyy, Izz, Ixx) of a cross-section given as (y, z, area) cells.
 
-    The formula is the starter's OWN, verbatim from ``hm_read_prop18.F:289-301``
-    where it summarizes a /PROP/TYPE18 for the listing file::
+    ``Iyy`` IS THE Z-BASED SUM. Radioss's /PROP/BEAM Iyy is the second moment
+    ABOUT the local y-axis, i.e. ``INT z^2 dA`` — the standard sense — and the
+    ENGINE is the ground truth for it, not the starter's listing::
 
-        INI = A_i^2 / 12          ! each cell as a square patch of area A_i
-        Iyy = SUM(INI + A_i*y_i^2)
-        Izz = SUM(INI + A_i*z_i^2)
-        Ixx = Iyy + Izz
+        TYPE3   m1lawp.F:108        MOM(2) = KYY * YM * B1,  B1 = GEO(2) = Iyy
+        TYPE18  mulaw_ib.F:139      DEPSXX = EXX - YPT*KZZ + ZPT*KYY
+                main_beam18.F:253   MOM(2) = SUM(DFXX*ZPT)
 
-    so a section that has to fall back to /PROP/BEAM carries exactly the numbers
-    the starter would have printed for the integrated beam it could not become.
+    A curvature KYY on an integrated beam therefore develops
+    ``MOM(2) = E*KYY*SUM(A_i*z_i^2)``, and on the resultant beam it develops
+    ``MOM(2) = E*KYY*Iyy``. Equating the same moment slot pins
+    ``Iyy = SUM(A_i*z_i^2)`` and ``Izz = SUM(A_i*y_i^2)``.
+
+    DO NOT "FIX" THIS BACK. The starter's own listing block
+    (``hm_read_prop18.F:289-301``) prints ``TIYY_I = SUM(INI + ARI*RYI*RYI)``,
+    i.e. it labels the Y-based sum "Iyy". That label is inverted relative to the
+    field it shares a name with, and it is print-only — ``TIYY_I`` is never
+    stored into GEO and never reaches the engine. Two further in-repo
+    cross-checks agree with the engine and not with the listing:
+    ``_constants_from_shape``'s ICST=11 box returns ``iyy = D1*D2^3/12`` with D1
+    along y (``defbeam_sect_new.F90`` case(20): ``dy1 = l(1)*fac``), and
+    ``handle_section_beam``'s ELFORM=2 branch maps ``iyy <- ISS``, LS-DYNA's
+    "area moment of inertia about local s-axis" = ``INT t^2 dA`` = ``INT z^2 dA``
+    (Vol I R17 p.41-15).
+
+    ``INI = A_i^2/12`` is the starter's per-cell self-inertia, which models each
+    cell as a SQUARE patch of area A_i. That is exact only for square cells — a
+    4x4 grid of 0.5 x 2.0 cells on a 2 x 8 box wants 0.5*2^3/12 = 0.333 each and
+    gets 1/12 — but a rule states no cell SHAPE, only a position and an area, so
+    no better term is recoverable. It is kept because it is the same term the
+    starter prints, and dropping it would be further from the continuum section,
+    not closer.
+
     ``Ixx = Iyy + Izz`` is the POLAR moment, which equals the torsion constant
     only for a circular section — the same approximation dyna2rad makes when
     *SECTION_BEAM leaves ``J`` at zero (``convertprops.cxx:1400-1402``).
@@ -173,8 +197,8 @@ def _constants_from_points(points: List[Tuple[float, float, float]]):
     for y, z, a in points:
         ini = a * a / 12.0
         area += a
-        iyy += ini + a * y * y
-        izz += ini + a * z * z
+        iyy += ini + a * z * z
+        izz += ini + a * y * y
     return area, iyy, izz, iyy + izz
 
 
@@ -185,8 +209,19 @@ def _constants_from_shape(icst: int, dims: List[float]):
     ICST 8 (circular) and 11 (solid box) are the two dyna2rad hard-codes on its
     *SECTION_BEAM standard-section path (``convertprops.cxx:1372-1375`` and
     ``:1390-1393``); ICST 9 (tubular) is the same circle minus its bore, with
-    ``D1``/``D2`` as outer/inner radius exactly as Radioss's own Isect 18 reads
-    them (``area = pi*(l(1)**2-l(2)**2)``, ``defbeam_sect_new.F90:380``).
+    ``D1``/``D2`` as outer/inner RADIUS exactly as Radioss's own Isect 18 reads
+    them (``area = pi*(l(1)**2-l(2)**2)``, ``defbeam_sect_new.F90:380``). Note
+    that these are radii — *SECTION_BEAM's own CST=1 tubular spelling uses
+    DIAMETERS on TS1/TT1 instead (see ``_constants_from_thicknesses``), so the
+    two must not be conflated.
+
+    For the box, D1 runs along local y and D2 along local z: the starter builds
+    its point cloud with ``dy1 = l(1)*fac`` / ``dz1 = l(2)*fac``
+    (``defbeam_sect_new.F90`` case(20)). ``iyy = D1*D2^3/12`` is therefore
+    ``INT z^2 dA``, which is what the engine's Iyy slot means — see the
+    convention proof in ``_constants_from_points``. The asymmetric box is
+    pinned by a test precisely because the circle and tube are symmetric and
+    would hide a swap.
     """
     d = list(dims) + [0.0] * 6
     if icst == 8:                                        # solid circle, r = D1
@@ -198,11 +233,43 @@ def _constants_from_shape(icst: int, dims: List[float]):
         i = math.pi * (ro ** 4 - ri ** 4) / 4.0
         return math.pi * (ro * ro - ri * ri), i, i, 2.0 * i
     if icst == 11:                                       # solid box D1 x D2
-        b, h = d[0], d[1]
-        iyy = b * h ** 3 / 12.0
-        izz = h * b ** 3 / 12.0
+        b, h = d[0], d[1]                                # b along y, h along z
+        iyy = b * h ** 3 / 12.0                          # = INT z^2 dA
+        izz = h * b ** 3 / 12.0                          # = INT y^2 dA
         return b * h, iyy, izz, iyy + izz
     return None
+
+
+def _constants_from_thicknesses(cst: int, ts: float, tt: float):
+    """(Area, Iyy, Izz, Ixx) of a *SECTION_BEAM stated only as card-2
+    thicknesses (ELFORM 0/1/4/5/11, cards 2a and 2e), or None.
+
+    These formulations carry no A/Iyy/Izz/Ixx at all — their card 2 is
+    ``TS1 TS2 TT1 TT2 ...`` — so without this the /PROP/BEAM they fall back to
+    is written all-zero, which is not a soft beam but a REFUSED deck:
+    ``hm_read_prop03.F:151-182`` raises ERROR 314/315/316/317 on each
+    non-positive value. The section shape is fully determined by CST
+    (Vol I R17 p.41-12/41-13):
+
+      CST 0 / 2   rectangular, TS1 x TT1, TS1 along local s -> y
+      CST 1       tubular, TS1 the OUTER and TT1 the INNER **diameter**
+
+    Node-1 values only: /PROP/BEAM is prismatic and TS2/TT2 taper has nowhere
+    to go (the caller warns when they differ).
+    """
+    if ts <= 0.0:
+        return None
+    if cst == 1:                                  # tube, ro=TS1/2, ri=TT1/2
+        ro, ri = ts / 2.0, max(tt, 0.0) / 2.0
+        if ri >= ro:
+            return None
+        i = math.pi * (ro ** 4 - ri ** 4) / 4.0
+        return math.pi * (ro * ro - ri * ri), i, i, 2.0 * i
+    if tt <= 0.0:
+        return None
+    iyy = ts * tt ** 3 / 12.0                     # = INT z^2 dA
+    izz = tt * ts ** 3 / 12.0                     # = INT y^2 dA
+    return ts * tt, iyy, izz, iyy + izz
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,14 +324,34 @@ def _resolve_integration_beams(state: ConversionState) -> None:
                 "the dangling reference.")
             continue
         referenced.add(rule.irid)
+        if sec.elform == 14:
+            # ELFORM 14 is the one formulation that MANDATES a rule: "Elbow
+            # integrated tubular beam element. A user-defined integration rule
+            # with a tubular cross section (9) must be used" (Vol I R17
+            # p.41-11). The rule is understood perfectly well here; what is
+            # missing is the element.
+            state.warn(
+                f"{label}: *INTEGRATION_BEAM {rule.irid} is DROPPED because "
+                "ELFORM=14 is the ELBOW element, which Radioss has no "
+                "counterpart for — not because the rule is wrong. ELFORM 14 is "
+                "in fact the one formulation that REQUIRES a user rule, and a "
+                "tubular one (ICST=9) at that. Its card 2 is 'PR IOVPR IPRSTR' "
+                "and carries no section at all, so the /PROP/BEAM left behind "
+                "has Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
+                "314-317). Model the elbow as ordinary integrated beams "
+                "(ELFORM 1) over the bend if the pipe-ovalization response is "
+                "not what the deck is about.")
+            continue
         if sec.elform not in _INTEGRATED_ELFORMS:
             state.warn(
-                f"{label}: ELFORM={sec.elform} is not an integrated beam, so "
-                f"*INTEGRATION_BEAM {rule.irid} is DROPPED — a user "
-                "cross-section rule only has meaning for the formulations that "
-                "integrate one (ELFORM 1, 4, 5 and 11; ELFORM 0 is an alias of "
-                "1). The section keeps its own card-2 data. Change ELFORM if "
-                "the rule is meant to define the section.")
+                f"{label}: ELFORM={sec.elform} does not integrate a "
+                f"cross-section, so *INTEGRATION_BEAM {rule.irid} is DROPPED — "
+                "a user cross-section rule has meaning only for the "
+                "formulations that integrate one, and of those Radioss can "
+                "carry ELFORM 1, 4, 5 and 11 (ELFORM 0 is an alias of 1; "
+                "ELFORM 14 integrates one too but is the elbow element and is "
+                "reported separately). The section keeps its own card-2 data. "
+                "Change ELFORM if the rule is meant to define the section.")
             continue
         if rule.sref or rule.tref:
             state.warn(
@@ -306,9 +393,24 @@ def _resolve_integration_beams(state: ConversionState) -> None:
         if bad:
             derived = (_constants_from_points(points) if isect == 0
                        else _constants_from_shape(rule.icst, rule.dims))
+            # Belt and braces: unreachable today, because _predefined_geometry
+            # has already rejected every shape needing more than two
+            # dimensions and ICST 8/9/11 — the whole nb_dim <= 2 set — are
+            # exactly the three _constants_from_shape covers. It stays so that
+            # widening _MAX_PREDEFINED_DIMS cannot silently start emitting
+            # zero-stiffness properties.
             got_constants = derived is not None
             if got_constants:
                 sec.area, sec.iyy, sec.izz, sec.ixx = derived
+            # The gate is per SECTION, so ONE incompatible part moves every
+            # part on it. Parts whose own law would have taken the integrated
+            # property are named, because they are the ones that lose
+            # through-section plasticity to a neighbour's material choice —
+            # and, once on /PROP/BEAM, a BEAM_INTEGRATED law (LAW34/36/71)
+            # among them is itself an ERROR 3047, which the TYPE3 material
+            # gate in writer/mesh.py then reports by name.
+            ok = sorted(p for p in pids if p not in spotweld_pids
+                        and p not in bad)
             state.warn(
                 f"{label}: *INTEGRATION_BEAM {rule.irid} cannot become a "
                 f"/PROP/TYPE18 — part(s) {bad} carry a material whose Radioss "
@@ -322,6 +424,11 @@ def _resolve_integration_beams(state: ConversionState) -> None:
                    if got_constants else
                    "and the rule's geometry is LOST, because no closed-form "
                    "section constant exists for this shape. ")
+                + (f"The gate is per SECTION, so part(s) {ok} are moved with "
+                   "them even though their own law would have taken the "
+                   "integrated beam — and if any of those is LAW34/36/71 the "
+                   "/PROP/BEAM it lands on rejects it in turn. Put them on "
+                   "their own *SECTION_BEAM to keep the rule. " if ok else "")
                 + "Give the beam parts an elasto-plastic law "
                 "(*MAT_PIECEWISE_LINEAR_PLASTICITY -> LAW36, or "
                 "*MAT_PLASTIC_KINEMATIC -> LAW44) to keep the integrated beam.")
@@ -360,12 +467,26 @@ def _arbitrary_geometry(state: ConversionState, sec: SectionBeam,
     (prop_p18_int_beam.cfg:29-31). The +/-1 square is *SECTION_BEAM card 2a's
     ``TS1`` x ``TT1`` rectangle and the gross area is ``RA * TS1 * TT1``, so::
 
-        Y_i = S_i * TS1/2      Z_i = T_i * TT1/2      A_i = WF_i/SUM(WF) * A
+        Y_i = (S_i - NSLOC) * TS1/2    Z_i = (T_i - NTLOC) * TT1/2
+        A_i = WF_i/SUM(WF) * A
+
+    ``NSLOC``/``NTLOC`` (card 2a fields 5/6) are what put the section where
+    LS-DYNA puts it. They give the "location of the reference surface" — the
+    beam's node line — inside the same +/-1 square: ``EQ.1.0: Side at s = 1.0``,
+    ``EQ.0.0: Center``, ``EQ.-1.0: Side at s = -1.0`` (Vol I R17 p.41-13/41-14).
+    Subtracting them re-expresses each cell RELATIVE TO THE NODES, which is the
+    frame /PROP/TYPE18's Yi/Zi are measured in. A beam hung off a shell surface
+    with NSLOC=1 would otherwise be silently re-centred on its nodes, losing
+    exactly the eccentricity that couples axial force to bending. The rule's
+    own SREF/TREF override NSLOC/NTLOC "even if SREF = 0" (p.29-3) but exist
+    only on the ICST > 0 dimension card, which never reaches this function, so
+    the two cannot collide here.
 
     Normalizing by ``SUM(WF)`` is a no-op on the usual deck (the WFs sum to 1)
     and is what dyna2rad's shell rule does with the same field
     (convertprops.cxx:1991-1996); it keeps the total area equal to ``A`` when a
-    deck's weights do not add up.
+    deck's weights do not add up. LS-DYNA itself applies WF literally, so the
+    rescale is reported whenever it actually moves the area.
     """
     if not rule.points:
         state.warn(
@@ -380,6 +501,25 @@ def _arbitrary_geometry(state: ConversionState, sec: SectionBeam,
             "weighting factors sum to 0, so no cell area can be derived. WF is "
             "the area FRACTION A_i/A of each cell and must be positive.")
         return None
+    if sec.cst == 1:
+        # CST=1 makes TS1/TT1 an OUTER and an INNER DIAMETER, not an s- and a
+        # t-extent (Vol I R17 p.41-13). The +/-1 square the rule's S/T live in
+        # is then not a TS1 x TT1 rectangle at all, and denormalizing them as
+        # one would state an annulus as a solid box — pi/4*(TS1^2-TT1^2) of
+        # real area emitted as TS1*TT1, with no diagnostic. LS-DYNA's own
+        # spelling for "the rule IS the section" is CST=2 (Arbitrary).
+        state.warn(
+            f"{label}: *INTEGRATION_BEAM {rule.irid} is DROPPED — card 1 field "
+            "5 (CST) is 1 = TUBULAR, which redefines card 2 as TS1 = the OUTER "
+            f"and TT1 = the INNER DIAMETER ({sec.ts1:g} and {sec.tt1:g} here), "
+            "not the s- and t-direction thicknesses. The rule's S/T are "
+            "normalized to a RECTANGLE and k2rad will not place them on an "
+            "annulus, because doing so silently would emit TS1 x TT1 of area "
+            "where the section really has pi/4*(TS1^2 - TT1^2). Set CST=2 "
+            "(Arbitrary, the value the manual pairs with a user rule) and "
+            "state TS1/TT1 as the bounding-box thicknesses, or drop the rule "
+            "and let the tubular section stand on its own card 2.")
+        return None
     ts, tt = sec.ts1, sec.tt1
     if ts <= 0.0 or tt <= 0.0:
         state.warn(
@@ -389,6 +529,15 @@ def _arbitrary_geometry(state: ConversionState, sec: SectionBeam,
             f"TS1={ts:g} and TT1={tt:g}. Fill the s-direction and t-direction "
             "thickness at node 1 (card 2 fields 1 and 3).")
         return None
+    if (sec.ts2 and sec.ts2 != ts) or (sec.tt2 and sec.tt2 != tt):
+        state.warn(
+            f"{label}: the section is TAPERED (TS1={ts:g} TS2={sec.ts2:g}, "
+            f"TT1={tt:g} TT2={sec.tt2:g}) but /PROP/TYPE18 has no taper column "
+            "— its Yi/Zi/AREA cloud is one prismatic cross-section for the "
+            "whole element. The NODE-1 section is emitted and the node-2 end "
+            "is DROPPED, so the beam is stiffer and heavier than the deck says "
+            "wherever it narrows. Split the beam into several *PARTs with "
+            "stepped sections if the taper carries load.")
     ra = rule.ra
     if ra <= 0.0:
         state.warn(
@@ -402,8 +551,22 @@ def _arbitrary_geometry(state: ConversionState, sec: SectionBeam,
             "box.")
         ra = 1.0
     area = ra * ts * tt
-    pts = [(p.s * ts / 2.0, p.t * tt / 2.0, p.wf / sum_wf * area)
-           for p in rule.points]
+    if abs(sum_wf - 1.0) > 1.0e-6:
+        state.warn(
+            f"*INTEGRATION_BEAM {rule.irid} (referenced by {label}): its "
+            f"weighting factors sum to {sum_wf:g}, not 1. WF is the area "
+            "FRACTION A_i/A (Vol I R17 p.29-3) and LS-DYNA applies it "
+            f"LITERALLY, so this section really carries {sum_wf:g} x its gross "
+            "area. k2rad RENORMALIZES by the sum — the same thing dyna2rad's "
+            "shell rule does with the same field (convertprops.cxx:1991-1996) "
+            f"— so every cell is scaled by {1.0 / sum_wf:g} and the emitted "
+            f"section area is the full RA*TS1*TT1 = {area:g}. Make the weights "
+            "add up to 1, or fold the shortfall into RA, if the deck meant the "
+            "smaller area.")
+    # NSLOC/NTLOC move the NODE LINE inside the +/-1 square, so the cells are
+    # offset the other way to land in the nodes' frame (see the docstring).
+    pts = [((p.s - sec.nsloc) * ts / 2.0, (p.t - sec.ntloc) * tt / 2.0,
+            p.wf / sum_wf * area) for p in rule.points]
     bad_area = [i + 1 for i, (_, _, a) in enumerate(pts) if a <= 0.0]
     if bad_area:
         state.warn(

@@ -1337,15 +1337,31 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
                 "numerically (ELFORM=2 with A/ISS/ITT/J) or, for an integrated "
                 "beam, as an *INTEGRATION_BEAM rule referenced from a negative "
                 "QR/IRID.")
-        elif kind in ("2f", "2j"):
+        elif kind == "2f":
             state.warn(
-                f"*SECTION_BEAM {secid}: ELFORM={elform} card 2 is "
+                f"*SECTION_BEAM {secid}: ELFORM=6 card 2 is "
                 f"'{_BEAM_CARD2[kind]}', which carries no cross-section area or "
                 "inertia at all, so /PROP/BEAM is written with "
-                "Area=Iyy=Izz=Ixx=0. ELFORM 6 is a DISCRETE beam (model it as "
-                "*ELEMENT_DISCRETE + *SECTION_DISCRETE, which k2rad converts to "
-                "a /SPRING) and ELFORM 14 is a shear-panel beam with no Radioss "
-                "counterpart.")
+                "Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
+                "314-317). ELFORM 6 is a DISCRETE beam — model it as "
+                "*ELEMENT_DISCRETE + *SECTION_DISCRETE, which k2rad converts "
+                "to a /SPRING.")
+        elif kind == "2j":
+            # ELFORM 14 is the ELBOW integrated tubular beam: "A user-defined
+            # integration rule with a tubular cross section (9) must be used"
+            # (Vol I R17 p.41-11). It is not a shear panel and it is not
+            # un-integrated — it is the one formulation that MANDATES a rule.
+            state.warn(
+                f"*SECTION_BEAM {secid}: ELFORM=14 is the ELBOW integrated "
+                "tubular beam, which Radioss has no counterpart for. Its card "
+                f"2 is '{_BEAM_CARD2[kind]}' and states no cross-section at "
+                "all — the section comes from the *INTEGRATION_BEAM rule that "
+                "this formulation REQUIRES (a tubular one, ICST=9, referenced "
+                "from a negative QR/IRID) — so /PROP/BEAM is written with "
+                "Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
+                "314-317). Model the bend as ordinary integrated beams "
+                "(ELFORM 1) if the pipe-ovalization response is not what the "
+                "deck is about.")
         elif not kind:
             state.warn(
                 f"*SECTION_BEAM {secid}: ELFORM={elform} is not a defined beam "
@@ -1416,7 +1432,24 @@ def handle_section_discrete(block: Block, state: ConversionState) -> None:
         # A missing card 2 at the very END of the block is tolerated (LS-PrePost
         # defaults CDL/TDL to 0 there); anywhere else _card returns the next
         # set's card 1, which the stride below then skips as this set's card 2.
+        # That silently swallows a whole section, so say it happened: a line in
+        # the card-2 slot whose first field is a positive integer AND which is
+        # followed by more of the block is a card 1 wearing a card 2's clothes.
         f2 = _card(raw, idx + 1, fixed=True, n=2, w=10)
+        if (f2 and to_int(f2[0]) > 0
+                and any(line.strip() for line in raw[idx + 2:])):
+            state.warn(
+                f"*SECTION_DISCRETE {secid}: the line read as its card 2 "
+                f"(CDL TDL) is '{raw[idx + 1].strip()}', whose first field is "
+                "the positive integer "
+                f"{to_int(f2[0])} — that looks like the NEXT set's card 1, so "
+                "this set is probably missing its card 2. The pair is "
+                "UNCONDITIONAL (Vol I R17 p.41-32: 'For each DISCRETE section "
+                "include a pair of Cards 1 and 2'), so k2rad strides two lines "
+                "regardless: the section that line belongs to is LOST and "
+                "every set after it in this block is read one line out of "
+                "phase, which usually ends the walk early. Add the blank card "
+                "2 the manual's own example shows.")
         cdl = to_float(f2[0]) if f2 else 0.0
         tdl = to_float(f2[1]) if len(f2) > 1 else 0.0
         idx += 2
