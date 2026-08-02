@@ -16,6 +16,7 @@ __all__ = [
     "_elform_to_ishell",
     "_elform_to_isolid",
     "_emit_grnod_node",
+    "_emit_grnod_grnod",
     "_emit_grshel",
     "_emit_grsh3n",
     "_emit_id_group",
@@ -169,6 +170,33 @@ def _emit_grnod_node(grnod_id: int, title: str, nids: List[int]) -> List[str]:
     row: List[str] = []
     for n in nids:
         row.append(str(n).rjust(10))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_grnod_grnod(grnod_id: int, title: str, gids: List[int]) -> List[str]:
+    """/GRNOD/GRNOD — the de-duplicating UNION of other node groups.
+
+    A group-of-groups: ``hm_lecgrn.F:232-236`` classifies ``GRNOD`` with
+    ``GRPGRP=2`` and leaves ``SORTED=0``, and ``hm_grogronod.F:179-219`` resolves
+    the members by group id alone (no restriction on the member's own sub-type),
+    tags each node once in a scratch buffer, then materialises the survivors in
+    node order — so a /GRNOD/PART and a /GRNOD/NODE can be unioned in one card
+    and a node listed by both appears once. (``GRNODNS`` sets ``SORTED=1`` and
+    concatenates *with* duplicates — not what a union wants.)
+
+    A member id that does not exist is only ``MSGID=174``, a starter WARNING, so
+    callers must make sure every id is real.
+    """
+    lines = [f"/GRNOD/GRNOD/{grnod_id}", title or f"GRNOD_{grnod_id}"]
+    row: List[str] = []
+    for g in gids:
+        row.append(str(g).rjust(10))
         if len(row) == 10:
             lines.append("".join(row))
             row = []
