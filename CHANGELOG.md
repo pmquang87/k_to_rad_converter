@@ -1224,6 +1224,15 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **The orphan-element guard now runs AFTER the provisional-element screen in
+  `build_starter`.** A screened-out phantom — an all-integer option card from an
+  unmodelled `*ELEMENT_SHELL/_BEAM` suffix that imitated connectivity on node
+  ids the deck never defines — is an option card, not lost mesh, and must not
+  draw a `MESH LOSS` line. `convert()` already screened before `build_starter`
+  (so the CLI path never showed the false alarm); this pins the ordering for
+  the direct-writer callers `build_starter` supports, as recorded in PR #92's
+  merge-order note. Two new tests fail on the old ordering.
+
 - **An element whose `PID` no `*PART` defines used to vanish from the converted
   deck without a single word — no warning, no skip line, nothing.** The writer
   emits elements from *inside* the `for pid, part in sorted(state.parts.items())`

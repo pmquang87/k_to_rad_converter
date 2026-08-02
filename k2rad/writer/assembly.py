@@ -507,12 +507,6 @@ def _warn_orphan_elements(state: ConversionState) -> None:
 
 
 def build_starter(state: ConversionState, progress=None) -> str:
-    # FIRST, on the parsed deck: report elements orphaned by a missing *PART
-    # before any prepass edits the element stores (the tet10 downgrade and the
-    # sliver screening below both delete/rewrite solids, and they announce their
-    # own drops), so the counts describe what the .k file actually contained.
-    _warn_orphan_elements(state)
-
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -533,6 +527,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # table FIRST, before any pass reads the element lists, so a phantom never
     # reaches a contact group, a /PART or the free-node guard.
     _screen_provisional_elements(state)
+
+    # Report elements orphaned by a missing *PART. AFTER the provisional screen
+    # (a screened-out phantom is an option card, not lost mesh — counting it
+    # here would be a false alarm) but before the tet10 downgrade and the
+    # sliver screening rewrite solid_elems (those announce their own drops), so
+    # the counts describe the real elements the .k file contained.
+    _warn_orphan_elements(state)
 
     # Normalize 10-node tet connectivity to Radioss /TETRA10 midside order (the
     # LS-DYNA *ELEMENT_SOLID apex nodes 8/9/10 differ). MUST run before every other
