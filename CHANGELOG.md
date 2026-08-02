@@ -985,6 +985,22 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Changed
 
+- **⚠ BEHAVIOUR CHANGE — every gravity deck converts differently now.** Two
+  independent corrections land together in the `/GRAV` emitter (details and
+  solver evidence under *Fixed*, below):
+  1. **every deck with a rigid body** (`*MAT_RIGID` or
+     `*CONSTRAINED_NODAL_RIGID_BODY`) **plus `*LOAD_GRAVITY_PART` or
+     `*LOAD_BODY_*`** gets a different `/GRNOD` — the rigid body used to
+     receive **no gravity at all** and now receives the correct load. This
+     includes the W13 blast decks (their `*LOAD_BODY_Y` covers a `*MAT_RIGID`
+     ground part);
+  2. **every `*LOAD_BODY_{X,Y,Z}` deck may change sign** — `Fscale_Y` is now
+     `-SF` instead of `+SF`. A deck that was hand-tuned by flipping `SF` to
+     make the old conversion fall the right way will now fall **upward**;
+     restore the `SF` its LS-DYNA deck actually carries.
+
+  Re-run any archived gravity conversion; do not compare new results against
+  old `.rad` files without re-converting the `.k`.
 - `ConversionState` is now a dataclass — a typed, mypy-checkable contract
   between handlers and writer (no-arg construction unchanged).
 - The writer was split from a single 7,300-line module into the
@@ -1023,6 +1039,204 @@ Prior history (before this changelog was introduced) is summarized in the
     PyPI publish workflow; Docker bash launchers (`or.sh`, `build-and-export.sh`).
 
 ### Fixed
+
+- **Gravity on a rigid body did nothing at all: a free `*MAT_RIGID` block under
+  `*LOAD_BODY_Y` never moved — 526 cycles, every displacement 0, KE = 0.** And
+  the same emitter had the `*LOAD_BODY` sign inverted and a `/GRAV` card ten
+  columns too short. Three defects, one card.
+
+  **1. The load never reached the rigid body.** `/GRAV` adds an *acceleration*
+  to every node of its group, and it does so at a point in the cycle where a
+  rigid secondary node can no longer pass anything on:
+
+  ```fortran
+  ! engine/source/loads/general/grav/gravit.F:147
+  A(N2,N1)=A(N2,N1)+AA                     ! no mass factor: AA is an accel.
+
+  ! engine/source/engine/resol.F  — one cycle, in order
+  5502   CALL RBYFOR(...)   ! secondary forces summed INTO the rbody main node
+  6690   CALL ACCELE(...)   ! A <- A / M
+  6884   CALL GRAVIT(...)   ! A(dir,n) += Fscale_Y*f(t)   <-- 1382 lines too late
+  7572   CALL RBYVIT(...)   ! -> rgbodv.F
+
+  ! engine/source/constraints/general/rbody/rgbodv.F:109-155
+  A(1,N)= AM1 + (...)                      ! "=", not "+=": the secondary's
+  A(2,N)= AM2 + (...)                      !  acceleration is OVERWRITTEN
+  A(3,N)= AM3 + (...)                      !  from the main node AM1..AM3
+  ```
+
+  So gravity deposited on a rigid secondary node is never summed into the main
+  (`RBYFOR` already ran) and is then discarded (`RGBODV` assigns over it). Net
+  effect on motion: exactly zero. With `--rigid-cog-master` — the default since
+  PR #54 — the `/RBODY` main is a *synthesized element-free node* at the part
+  centroid, so a `/GRNOD/PART` can never contain it and the body is left with
+  nothing. Measured on a free rigid block: as converted it sat still for the
+  whole run; with the main node in the group it free-falls exactly, **DY
+  4.727803E-01 mm against the analytic 4.727802E-01**.
+
+  A part that k2rad turned into an `/RBODY` is now **swapped out** of the
+  `/GRNOD/PART` and replaced by its main node — what the Radioss dyna-reader
+  itself does (`convertloads.cxx:887-902`, via `storeRbodyPIDVsMasterNode`).
+  The main carries the summed mass of the whole body (`inirby.F:187-243, 837`),
+  so one main node at `g` is the exact load; keeping the secondaries as well
+  would change no displacement but would inflate `WFEXT` by
+  `Σ m_secondary·g·v·dt` (`gravit.F:148`), because the starter does **not**
+  zero secondary masses. A `*CONSTRAINED_NODAL_RIGID_BODY` is different — its
+  secondaries are ordinary nodes of *deformable* parts, so the part stays and
+  the CNRB main is added on top. The two groups are combined with a
+  `/GRNOD/GRNOD` union, which the starter resolves by group id and
+  de-duplicates in node order (`hm_lecgrn.F:232-236`, `hm_grogronod.F:179-219`).
+
+  Altair's own starter performs precisely this union — `rpart_grav_check` in
+  `starter/source/constraints/general/rbody/rbody_part_modif.F90` appends the
+  main node to any `/GRAV` group holding one of its secondaries — but it is
+  gated on `npby(21,i) /= 0`, true only for rigid bodies auto-generated from a
+  `/PART` with a rigid material. k2rad emits explicit `/RBODY` cards, so it
+  never fires on a k2rad deck and k2rad has to do it itself.
+
+  **2. `*LOAD_BODY_{X,Y,Z}` had the sign inverted.** The manual is explicit:
+  a base acceleration accelerates the coordinate system, so the inertial loads
+  on the model are of opposite sign (Vol I R16 p.33-27), and the manual's own
+  `*LOAD_BODY_Z` gravity example — `SF = 0.00981` on a constant `+1.0` curve,
+  commented as acting in the negative Z-direction — is annotated *"Positive
+  body load acts in the negative direction."* (p.33-28). `Fscale_Y = -SF` now,
+  matching `convertloads.cxx:247` and this converter's own
+  `*LOAD_GRAVITY_PART` path, which has always negated. The old warning telling
+  the user to check the direction and flip `SF` themselves is gone.
+
+  **3. The `/GRAV` data card was ten columns short, and it silently ate the
+  sign.** `grav.cfg`'s `FORMAT(radioss51)` card is
+  `%10d%10s%10d%10d%10d          %20lg%20lg` — ten literal blanks between
+  `grnod_ID` and `Ascale_x`, giving a 100-character line with `Ascale_x` at
+  61-80 and `Fscale_Y` at 81-100 (cross-checked against Altair's own
+  `RD-E-1602` `SEAT_0000.rad:10907-10910`). k2rad packed the fields with no
+  gap, so `Fscale_Y` sat at 71-90. That read back correctly only while the
+  rendered number was ≤ 10 characters; at 11 the field boundary cut through it.
+  Measured with `starter_win64.exe`:
+
+  | `Fscale_Y` written | starter echo `SCALE_Y` | verdict |
+  |---|---|---|
+  | `-9810` | `-9810.000000000` | ok (5 chars) |
+  | `-0.00980665` | `9.8066500000000E-03` | **sign lost — gravity up** |
+  | `-9.810000E-06` | `0.8100000000000` | **sign lost + 8×10⁴ magnitude error** |
+
+  i.e. every mm/ms deck and every `%.6E` value. Signed `Fscale_Y` is now the
+  norm on both paths, so this was not optional.
+
+  End-to-end on one deck (3 parts, part 2 `*MAT_RIGID`, a CNRB on part 3's
+  nodes, `*LOAD_GRAVITY_PART` ACCEL `0.00980665` on all three), read back from
+  the starter's own `GRAVITY LOADS` echo:
+
+  | | before | after |
+  |---|---|---|
+  | `SCALE_Y` | `9.8066500000000E-03` (up) | `-9.8066500000000E-03` (down) |
+  | resolved node list | `1 … 12` | `1 2 3 4 9 10 11 12 13 14` |
+  | rigid block (nodes 5-8) | in the group, load discarded | main node **13** loaded |
+  | CNRB (nodes 9-12) | no load on the body | main node **14** loaded |
+  | starter result | — | 0 errors |
+
+  Also in the same emitter: `*LOAD_BODY_PARTS` now has a handler — its `PSID`
+  becomes the part-set scope of every `*LOAD_BODY_*` in the deck (one card per
+  deck, last one wins, Vol I R16 p.33-25 and `convertloads.cxx:167-182`);
+  previously it fell through to `skipped_keywords` and a deck that scoped
+  gravity to one part set silently got **whole-model** gravity. And
+  `*LOAD_GRAVITY_PART` with `ACCEL = 0` and no curve now emits nothing instead
+  of a `Fscale_Y = 0` card, because `hm_read_grav.F:190` reads a zero back as
+  the unit-system factor (`1.0`) — i.e. "no gravity" used to become *unit*
+  gravity.
+
+  A deck whose gravity scope holds no rigid body emits **the same `/GRNOD`
+  cards, with the same ids, titles and order** as before (verified by diffing a
+  full conversion against `master`). The `/GRAV` card itself changes on *every*
+  gravity deck — the column layout, plus the `*LOAD_BODY` sign — so "no rigid
+  body" does not mean "no re-conversion needed". All five goldens are
+  unchanged; they carry no gravity at all.
+
+  **Review round — four more defects in the same card**, three of them older
+  than this branch and one introduced by it:
+
+  * **The `/GRNOD` id allocator had no namespace guard, and this branch drew
+    enough extra ids to make that fatal.** k2rad re-emits every user
+    `*SET_NODE` under its own SID (`/GRNOD/NODE/<nsid>` on the SPC path,
+    `_make_extra_groups` for the rest), while the synthesized groups came from
+    the unguarded `state.next_id()` — so a deck with a `*SET_NODE` id at or
+    above the auto-id base (90001) hands the starter two `/GRNOD` cards with
+    the same id and it aborts the **whole deck**: `ERROR ID : 79 ** ERROR:
+    DUPLICATE ID / IN NODE GROUP DEFINITION`. The union and mains groups added
+    here are 1-2 extra draws per `/GRAV`, which pushed the counter into ids
+    that used to be safe: a 3-part deck with `*SET_NODE_LIST 90006` converted
+    and ran on `master`, and stopped running on this branch. The gravity groups
+    now draw from a new `state.next_grnod_id()` (the guard shape of
+    `next_curve_id` / `next_part_id` / `next_prop_id`, a no-op on an ordinary
+    deck so no id moves). *The other synthesized `/GRNOD` ids — contacts,
+    `/INIVEL`, the `/RBODY` groups — still use `next_id()` and carry the same
+    latent hazard; out of scope here.*
+  * **`*LOAD_GRAVITY_PART` with a load curve silently dropped `ACCEL`.**
+    `fscale = -1.0 if lc > 0 else -accel` — but the manual defines `LC` as the
+    "Load curve defining **factor** as a function of time" and `ACCEL` as the
+    "Acceleration (will be multiplied by factor from curve)", with Remark 1a
+    adding "a constant factor of 1.0 is assumed if LC is not specified"
+    (p.33-57). The load is `ACCEL × factor(t)`. Measured: `ACCEL = 9810` on a
+    0→1 ramp emitted `Fscale_Y = -1`, a **factor-9810 under-load** on exactly
+    the staged-construction ramp the keyword exists for. Now `Fscale_Y =
+    -ACCEL` with `fct_IDT = LC` in both forms; a *blank* `ACCEL` beside a curve
+    (its own default is 0) is taken as 1.0 — the curve carries the
+    acceleration — and the substitution is warned rather than assumed.
+  * **`CID` and `LCIDDR` were read off the `*LOAD_BODY` card and thrown away.**
+    `CID` is a local system the acceleration is expressed in ("The
+    accelerations (LCID) are with respect to CID", p.33-27); a rotated body
+    load converted to a **global-axis** `/GRAV` with no warning at all. It now
+    becomes the `/GRAV` `skew_ID`, which the engine honours
+    (`gravit.F:150-162`: for `ISK > 1` it adds `SKEW(3·N2-2 … 3·N2, ISK)·AA`
+    instead of the global axis) — and an unresolvable `CID` falls back to
+    global *loudly*, because a `/GRAV` naming a skew that is not emitted is
+    `MSGID=137`, a starter **error**. `LCIDDR` (the dynamic-relaxation curve)
+    is now warned about, the way `LCDR` on `*LOAD_GRAVITY_PART` always was.
+  * **A `*LOAD_BODY_PARTS` scope that nothing consumed left no trace in the
+    log** — it has a handler, so it never reached `skipped_keywords` either.
+    Now reported through `recognized_not_emitted`.
+
+  Two honesty fixes, no behaviour change: a **scoped** load that covers only
+  *part* of a rigid cluster (a CNRB reaching outside the scope, or a
+  `*CONSTRAINED_RIGID_BODIES` merge with an unscoped partner) now warns that
+  the whole cluster is accelerated at `g` where LS-DYNA gives
+  `g·m_scoped/m_cluster` — the converted load is an upper bound, and that
+  asymmetry against the "a rigid part outside the scope is not pulled in" rule
+  is now stated deliberately rather than left looking like an oversight. And a
+  `*CONSTRAINED_NODAL_RIGID_BODY` whose `PID` collides with a `*MAT_RIGID`
+  part id is reported: `rbody_info` merges two id namespaces, so the CNRB
+  record silently replaced the part's.
+
+  Also here: every `*LOAD_BODY_*` card in a deck now shares **one** group set
+  (the scope is deck-global by construction) instead of re-emitting an
+  identical `/GRNOD` triple per card, and the `{pid: nodes}` inventory is built
+  once per conversion instead of once per gravity group.
+
+  New coverage in `tests/test_gravity.py` (43 tests): sign on both paths,
+  column-exact card asserts including the 11-character regression, `ACCEL ×
+  curve`, `/RBODY` main routing for `*MAT_RIGID`, CNRB, merged bodies and
+  `--no-rigid-cog-master`, `*LOAD_BODY_PARTS` scoping, `CID`/`LCIDDR`,
+  the `/GRNOD` id-collision guard (and that it does not shift ids without a
+  colliding set), shared groups across three body loads, and the partial-scope
+  and PID-collision warnings.
+
+  *Provenance:* every LS-DYNA manual quote and every OpenRadioss
+  starter/engine/cfg citation above was verified against the files on disk. The
+  `convertloads.cxx` line citations are to Altair's dyna2rad source, which is
+  **not** part of this repository — but the behaviour they assert was confirmed
+  the way that actually matters, by reading the same `.k` files straight into
+  `starter_win64.exe` (which goes through dyna2rad) and comparing its own
+  `GRAVITY LOADS` echo against k2rad's:
+
+  | card | dyna2rad, native `.k` | k2rad |
+  |---|---|---|
+  | `*LOAD_BODY_Y SF=+9810` | `SCALE_Y = -9810` | `SCALE_Y = -9810` |
+  | `*LOAD_BODY_Y SF=-9810` | `SCALE_Y = +9810` | `SCALE_Y = +9810` |
+  | `*LOAD_GRAVITY_PART 1 2 1 9810` on a `*MAT_RIGID` part | `SCALE_Y = -9810`, curve 1, group = `{213}` | identical |
+
+  The last row is the whole PR in one line: the sign, `ACCEL` surviving
+  alongside the curve, and the rigid part represented by its main node alone —
+  all three matching Altair's own reader exactly.
 
 - **A `*CONTACT_TIED_*` between two CONFORMALLY meshed parts killed the starter
   with a storm of `ERROR 556`, and the same deck read natively started clean.**

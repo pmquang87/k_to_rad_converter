@@ -4332,8 +4332,11 @@ def _convert_string_deck(deck: str):
 class GravityLoadTests(unittest.TestCase):
     """*LOAD_GRAVITY_PART → /GRAV (non-modal) / informational note (modal).
 
-    LS-DYNA convention (and the Radioss dyna-reader's own mapping): DOF 1/2/3
-    loads the part along the NEGATIVE axis, so /GRAV carries Fscaley = -accel.
+    The R16/R17 manual fixes NO sign for ACCEL, so the convention comes from
+    the Radioss dyna-reader, which negates it (``convertloads.cxx:859``): DOF
+    1/2/3 loads the part along the NEGATIVE axis and /GRAV carries
+    Fscaley = -accel. Sign, column layout, and the /RBODY-main-node routing are
+    covered in depth in tests/test_gravity.py.
     """
 
     NONMODAL = TINY_K.replace(
@@ -4364,10 +4367,17 @@ class GravityLoadTests(unittest.TestCase):
         self.assertNotIn("LOAD_GRAVITY_PART", result.skipped_keywords)
         self.assertIn("/GRAV/", starter)
         self.assertIn("/GRNOD/PART/", starter)
-        # constant gravity: fct_IDT = 0, Fscaley = -accel, direction Z
+        # constant gravity: fct_IDT = 0, Fscaley = -accel, direction Z.
+        # Asserted by COLUMN, not by substring: the /GRAV data line is 100
+        # fixed-width characters (grav.cfg puts ten literal blanks between
+        # grnod_ID and Ascale_x), and a value longer than 10 characters used to
+        # straddle the Ascale_x/Fscale_Y boundary and lose its sign.
         grav_data = starter.split("/GRAV/")[1].splitlines()[3]
-        self.assertIn("Z", grav_data)
-        self.assertIn("-9810", grav_data)
+        self.assertEqual(len(grav_data), 100)
+        self.assertEqual(grav_data[0:10].strip(), "0")
+        self.assertEqual(grav_data[10:20].strip(), "Z")
+        self.assertEqual(grav_data[60:80].strip(), "1")       # Ascale_x
+        self.assertEqual(grav_data[80:100].strip(), "-9810")  # Fscale_Y
 
     def test_modal_deck_notes_instead_of_grav(self):
         result, starter = _convert_string_deck(MODAL_FREQ_K)
@@ -5128,10 +5138,16 @@ class BlastLoadTests(unittest.TestCase):
         _r, starter, _e = self._convert()
         self.assertIn("/GRAV/", starter)
         grav = self._data_after(starter, "/GRAV/")
-        # fct_IDT(10) Dir(10) skew(10) sens(10) grnod(10) Ascale(20) Fscale(20)
+        # funct_IDT(10) DIR(10) skew(10) sensor(10) grnod(10) + 10 blank
+        # columns + Ascale_x(20) Fscale_Y(20) — grav.cfg's own layout.
         card = grav[1]
         self.assertEqual(card[10:20].strip(), "Y")         # direction
         self.assertEqual(card[0:10].strip(), "1")          # curve id
+        # BLAST_K's *LOAD_BODY_Y carries SF = -1.0, and Fscale_Y = -SF: a
+        # POSITIVE LS-DYNA body load acts along the NEGATIVE axis (Manual Vol I
+        # R16 p.33-28, "Positive body load acts in the negative direction").
+        # k2rad <= PR #88 transcribed SF unnegated and wrote -1 here.
+        self.assertEqual(card[80:100].strip(), "1")
 
     def test_blstfor_not_skipped(self):
         result, _s, _e = self._convert()

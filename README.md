@@ -550,9 +550,30 @@ local system maps to the `/CLOAD` skew; follower loads 4/8 are warned)
 `*LOAD_SEGMENT`, `*LOAD_SEGMENT_ID` → `/PLOAD`
 `*LOAD_SEGMENT_SET` → `/PLOAD` (pressure on a `*SET_SEGMENT` surface)
 `*LOAD_GRAVITY_PART[_SET]` → `/GRAV` on a `/GRNOD/PART` (non-modal decks;
-DOF 1/2/3 loads along −X/−Y/−Z, so `Fscale_Y = -accel`. Modal decks get an
-informational note instead — gravity does not change a non-prestressed
-eigenproblem)
+the load is `ACCEL × factor(t)` — `LC` supplies the factor curve and never
+replaces `ACCEL` (Manual p.33-57) — and DOF 1/2/3 loads along −X/−Y/−Z, so
+`Fscale_Y = -accel` with `fct_IDT = LC`. Modal decks get an informational note
+instead — gravity does not change a non-prestressed eigenproblem)
+`*LOAD_BODY_{X,Y,Z}` → `/GRAV` (base acceleration; a POSITIVE card acts along
+the NEGATIVE axis — Manual Vol I R16 p.33-28, "Positive body load acts in the
+negative direction" — so `Fscale_Y = -SF`, matching the Radioss dyna-reader
+and the `*LOAD_GRAVITY_PART` path. `CID` becomes the `/GRAV` `skew_ID`;
+`LCIDDR` has no equivalent and is warned)
+`*LOAD_BODY_PARTS` → the `PSID` part set becomes the `/GRNOD/PART` scope of
+every `*LOAD_BODY_*` in the deck (one card per deck, last one wins; all the
+`/GRAV` cards share that one group)
+Both gravity paths route around rigid bodies: a `/GRAV` whose group holds only
+rigid *secondary* nodes moves nothing, because the engine overwrites their
+acceleration from the `/RBODY` main node after `GRAVIT` has run
+(`rgbodv.F`). A rigid part in scope is therefore represented by its `/RBODY`
+main node instead of its mesh nodes, and a `*CONSTRAINED_NODAL_RIGID_BODY`
+whose secondaries are inside the scope gets its main node added — the groups
+are combined with a `/GRNOD/GRNOD` union. A deck with no rigid body in the
+load's scope emits the same `/GRNOD` cards with the same ids; only the `/GRAV`
+column layout and the `*LOAD_BODY` sign change. A **scoped** load that covers
+only part of a rigid cluster is warned about: a rigid body has one main node
+and one mass, so it cannot be loaded fractionally and the whole cluster gets
+`g` (an upper bound)
 
 ### Blast & coupled ALE / high explosive
 Empirical (ConWep / TM5-1300) air blast:
@@ -560,6 +581,7 @@ Empirical (ConWep / TM5-1300) air blast:
 `*LOAD_BLAST_SEGMENT_SET`, `*LOAD_BLAST_SEGMENT` (per-segment) → `/SURF/SEG` +
 `/LOAD/PBLAST` (surface bursts synthesize a `/SURF/PLANE` reflecting ground,
 `--blast-ground`); `*SET_SEGMENT` → `/SURF/SEG`; `*LOAD_BODY_{X,Y,Z}` → `/GRAV`
+(see **Loads** above for the body-load sign convention)
 
 Coupled ALE / fluid-structure (high-explosive detonation):
 `*INITIAL_DETONATION` → `/DFS/DETPOINT`

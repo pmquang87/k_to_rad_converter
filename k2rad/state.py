@@ -1913,25 +1913,34 @@ class LoadBody:
       dir  = axis letter from the keyword suffix ("X" | "Y" | "Z")
       lcid = acceleration-vs-time curve (magnitude)
       sf   = scale factor
-    The applied acceleration field is ``sf × lcid(t)`` along ``dir``; maps to an
-    OpenRadioss /GRAV over every part. LS-DYNA's base-acceleration sign
-    convention is transcribed directly (Fscale = sf), which the writer flags for
-    the user to verify against /GRAV.
+      cid  = local system the acceleration is given in (0 = global)
+    The applied acceleration field is ``sf × lcid(t)`` along the NEGATIVE
+    ``dir`` axis — a base acceleration accelerates the coordinate system, so the
+    inertial load on the model has the opposite sign (Manual Vol I R16
+    p.33-27/33-28, "Note: Positive body load acts in the negative direction").
+    Maps to an OpenRadioss /GRAV with ``Fscale_Y = -sf`` and ``skew_ID = cid``,
+    over every part unless a *LOAD_BODY_PARTS card scopes it to a part set.
     """
     dir: str            # "X" | "Y" | "Z"
     lcid: int
     sf: float
+    cid: int = 0        # *DEFINE_COORDINATE_* id → /GRAV skew_ID (0 = global)
 
 
 @dataclass
 class GravityLoadPart:
     """*LOAD_GRAVITY_PART — gravity body load on one part → /GRAV.
 
-    LS-DYNA card: pid dof lc accel lcdr stga stgr.  DOF 1/2/3 loads the part in
-    the NEGATIVE X/Y/Z direction (all-positive inputs give a downward load); the
-    Radioss dyna-reader maps it to /GRAV the same way, so the writer emits
-    Fscaley = -accel (or -1 × curve LC when lc > 0).  Gravity is irrelevant to a
-    non-prestressed eigenproblem, so modal decks only get an informational note.
+    LS-DYNA card: pid dof lc accel lcdr stga stgr.  DOF 1/2/3 loads the part
+    along X/Y/Z.  The load is ACCEL × factor(t): LC "defines factor as a
+    function of time", ACCEL "will be multiplied by factor from curve", and
+    "a constant factor of 1.0 is assumed if LC is not specified" (Manual Vol I
+    R16 p.33-57 + Remark 1a).  The R16/R17 manual fixes NO sign for ACCEL, so
+    the direction convention is taken from the Radioss dyna-reader, which
+    negates it exactly like *LOAD_BODY (``convertloads.cxx:859``; that file is
+    not part of this repo) — the writer emits Fscaley = -accel with fct_IDT =
+    LC.  Gravity is irrelevant to a non-prestressed eigenproblem, so modal
+    decks only get an informational note.
     """
     pid: int
     dof: int            # 1/2/3 = load along -X/-Y/-Z
@@ -2557,6 +2566,11 @@ class ConversionState:
     gravity_loads: List[GravityLoadPart] = field(default_factory=list)
     # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
     body_loads: List[LoadBody] = field(default_factory=list)
+    # *LOAD_BODY_PARTS PSID — restricts EVERY *LOAD_BODY_* row to that part set
+    # (Manual Vol I R16 p.33-25: the data applies to the complete problem
+    # "unless a part subset is specified via the *LOAD_BODY_PARTS keyword", and
+    # "Only one *LOAD_BODY_PARTS card is permitted per deck"). 0 = whole model.
+    body_load_psid: int = 0
     # *LOAD_BLAST_ENHANCED sources keyed by bid, and the
     # *LOAD_BLAST_SEGMENT_SET rows that apply them → /LOAD/PBLAST + /SURF/SEG
     blast_sources: Dict[int, LoadBlastEnhanced] = field(default_factory=dict)
@@ -2775,6 +2789,30 @@ class ConversionState:
         while mid in used:
             mid = self.next_id()
         return mid
+
+    def next_grnod_id(self) -> int:
+        """A next_id() guaranteed free in the /GRNOD namespace.
+
+        k2rad re-emits every user *SET_NODE under its own SID: the SPC path
+        writes /GRNOD/NODE/<nsid> and _make_extra_groups re-emits the sets no
+        other card consumed, both verbatim. A *SET_NODE whose SID happens to sit
+        at or above the auto-id base (90001) therefore lands on the same id as
+        a synthesized group, and the starter aborts with
+        ``ERROR ID : 79  ** ERROR: DUPLICATE ID / IN NODE GROUP DEFINITION``
+        (MSGID=79 over the merged /GRNOD table) — the whole deck stops
+        converting into a runnable model, not just the one group.
+
+        Same guard shape as next_curve_id / next_part_id / next_prop_id, and a
+        no-op vs next_id() in the common case (no user node set that high), so
+        it does not shift ids on any ordinary deck.
+
+        NOTE: only the gravity groups draw from this yet. The other synthesized
+        /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...) still use
+        next_id() and carry the same latent hazard."""
+        gid = self.next_id()
+        while gid in self.node_sets:
+            gid = self.next_id()
+        return gid
 
     def all_skew_ids(self) -> set:
         """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/
