@@ -106,6 +106,45 @@ export the image.
 `_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`
 (+ `_TITLE`; `ICOMP = 1` reads the card-3 `B1..B8` per-layer material angles —
 see **Composites**), `*SECTION_SOLID`, `*SECTION_BEAM`
+`*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
+`_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
+element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with
+the part's `*SECTION_SHELL` thickness substituted for every ZERO or blank cell,
+which is LS-DYNA's own per-value rule (Vol I R17 Remark 1; blank and `0.` are
+the same input there). An all-zero card leaves `Thick=0`, the documented "use
+the `/PROP/SHELL` thickness" value. `BETA` becomes the element's `Phi` field in
+degrees — but **OpenRadioss reads that column only for `IGTYP` 17/51/52**
+(`corthini.F:202-217`, `:429-435` take the layer angle from the property alone),
+so on a part k2rad routes to `/PROP/TYPE9`/`TYPE10`/`TYPE11`/`TYPE16` a uniform
+`BETA` is FOLDED into that property's reference angle instead (and a
+per-element *variation*, which one property cannot express, is warned about).
+On a `*PART_COMPOSITE` part (`/PROP/TYPE51`) the element angle is honoured by
+the solver and is left where it is.
+`MCID` (a coordinate-system id, **not** an angle), the `_OFFSET` mid-surface
+offset and the `_DOF` scalar nodes have no Radioss element field and are
+dropped with a counted warning. **Any other `*ELEMENT_SHELL_<option>` — known
+or not, including `_COMPOSITE` and `_SHL4_TO_SHL8` — still keeps every element**
+whose node ids the deck actually defines (an all-integer option card can imitate
+connectivity, so the candidates are re-checked against the node table before
+they are emitted, and the dropped count is reported). The one whole-block
+exception is `_NURBS_PATCH`, an isogeometric patch rather than a mesh: its card
+holds polynomial orders where an element card holds node ids, so it is skipped
+and warned about
+`*ELEMENT_BEAM_ORIENTATION` → a synthesized `/NODE` at `pos(N1) + (VX,VY,VZ)`
+wired into the beam's `node_ID3` (raw vector, unnormalized; one node shared per
+distinct `N1`+vector; the vector is rotated with a `*INCLUDE_TRANSFORM` TRANID).
+A zero vector creates nothing and leaves the starter's own `INFO 2093` default
+(`N3 := N2`); a vector parallel to the beam axis is warned about.
+`*ELEMENT_BEAM_OFFSET` end offsets are dropped with a counted warning; any
+other `*ELEMENT_BEAM_<option>` keeps its elements
+`*ELEMENT_PLOTEL` → an inert 2-node `/SPRING` on a synthesized `/PART` +
+`/PROP/TYPE4` id 10000000 (the id LS-DYNA assigns PLOTELs) with `K=0`, `C=0`,
+`MASS=1.1e-15`: no stiffness, no nodal stiffness, and a spring time step the
+starter prints as 0.55 s, so it never governs. The `1.1e-15` per element does
+reach the starter's TOTAL MASS echo in its 11th significant digit; every part
+mass, the time step and the result history are unchanged. Because the spring
+carries no stiffness, a node attached to nothing else still counts as FREE for
+the implicit singularity guard
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
@@ -113,6 +152,14 @@ see **Composites**), `*SECTION_SOLID`, `*SECTION_BEAM`
 oriented `/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation's
 `/SKEW` axis (only TYPE8 carries a `skew_ID`); a `DRO=1` torsional section and an
 unresolvable `VID` (`IOP=1/3`, which dyna2rad lacks too) stay warned + skipped
+
+Elements are emitted **per `*PART`**, so an element whose `PID` no `*PART`
+defines cannot be written at all. Rather than let that mesh disappear quietly,
+the conversion opens with an orphan-element guard: one `MESH LOSS` warning
+naming every missing part id and how many shells / solids / beams / discretes
+went with it. It fires on an `*INCLUDE` that did not resolve, a `PID` typo, a
+deck assembled from a subset of its parts, and on any `*PART` variant the parser
+does not yet recognize.
 
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
@@ -815,7 +862,17 @@ shells, so a triangle listed there is absent from the T01);
 `*DATABASE_HISTORY_SOLID` → `/TH/BRIC`; `*DATABASE_HISTORY_NODE` → `/TH/NODE`
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
-`/ANIM/VECT/FREAC`. **Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
+`/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction
+*impulse*, not a force** — the engine adds `m*a*dt` to it every cycle
+(`reaction_forces_th.F`) and zeroes the accumulator only once, *before* the
+iteration loop (`resol.F:1901`, loop head `:2612`), so it rises monotonically
+under a steady load and carries force x time units. The spcforc-equivalent
+force is its time derivative, `F = d(REAC)/dt` (`numpy.gradient(reac, t)` on
+the T01 column, or a least-squares slope over a steady window — validated to
+-0.0002% against a known weight). The converter warns about this on every
+converted deck. The companion `/ANIM/VECT/FREAC` field *is* the instantaneous
+force (`reactions.F:328`, no `dt` factor, overwritten each cycle).
+**Both** `/BCS` sources count: `*BOUNDARY_SPC_*` and the
 `*CONSTRAINED_NODAL_RIGID_BODY_SPC` option (whose `/BCS` acts on the rigid
 body's master node, so that node is the reaction node)
 `*DATABASE_NCFORC`, `*DATABASE_RCFORC` → `/TH/INTER` force resultants over

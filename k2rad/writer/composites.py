@@ -30,7 +30,8 @@ the starter.
 
 from __future__ import annotations
 
-from typing import List, Optional, Set
+from collections import defaultdict
+from typing import Dict, List, Optional, Set
 
 from ..state import (
     ConversionState,
@@ -54,6 +55,7 @@ __all__ = [
     "_resolve_composites",
     "_assign_composite_props",
     "_resolve_icomp_sections",
+    "_fold_element_beta",
     "_make_composite_materials",
     "_emit_composite_props",
     "_emit_mat_law93",
@@ -1086,6 +1088,95 @@ def _emit_mat_law27_pair(mat: MatLaminatedGlass,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Prepass: *ELEMENT_SHELL_BETA on an orthotropic part
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fold_element_beta(state: ConversionState) -> None:
+    """Move a per-element BETA onto the property, because the solver reads it
+    only there.
+
+    k2rad writes BETA into the /SHELL // SH3N ``Phi`` column, the starter reads
+    it back correctly (verified: 90 deg echoes as 1.570796326795 rad under
+    ``/IOFLAG`` IPRI=5) — **and then throws it away** on every property class
+    except three. ``starter/source/elements/shell/coque/corthini.F`` builds the
+    layer angle from the PROPERTY alone::
+
+        IF (IGTYP == 1)                RETURN                        (:110)
+        IF (IGTYP == 9)   PHI1(1,I) = GEO(10,PID)                    (:202)
+        ELSEIF (IGTYP == 10/11)  PHI1(J,I) = GEO(IPANG+J,PID)        (:206-217)
+        ELSEIF (IGTYP == 16)     PHI1(J,I) = GEO(IPANG+J,PID)        (:429-435)
+
+    and only IGTYP 17/51/52 do ``PHI1(J,I) = ANGLE(I) + …``. Measured on a
+    *MAT_002 plate with E1/E2 = 100 pulled along global X: per-element BETA=90
+    on a /PROP/TYPE11 part gives 103094.25 MPa, byte-identical to its BETA=0
+    twin (ratio 1.000000) where Q22 = 25789.81 was required — the 90 deg fibre
+    rotation did nothing at all. The same 90 deg on a *PART_COMPOSITE part
+    (/PROP/TYPE51) DOES work (ratio 0.250084), and so does the angle when it
+    reaches the TYPE11 layer Phi column instead (25773.52, dev -0.063%).
+
+    So: when every shell of such a part carries the SAME angle, fold it into the
+    property's own reference angle and zero the element field, which reproduces
+    the LS-DYNA physics exactly. When the angles differ element by element there
+    is no single property angle to write — one property serves the whole part —
+    and the only honest outcome is a loud warning.
+
+    Runs as a build_starter prepass after ``_assign_composite_props`` /
+    ``_assign_ortho_props`` (it needs to know which parts get a synthesized
+    orthotropic property) and before the elements and properties are emitted.
+    """
+    betas: Dict[int, Set[float]] = defaultdict(set)
+    for e in state.shell_elems:
+        betas[e.pid].add(e.beta)
+    for pid, vals in sorted(betas.items()):
+        if vals == {0.0}:
+            continue
+        # /PROP/TYPE51 (*PART_COMPOSITE): corthini DOES add ANGLE(I) there, so
+        # the per-element column is live and must be left exactly as written.
+        pc = state.part_composites.get(pid)
+        if pid in state.composite_prop_ids and pc is not None \
+                and _layup_is_convertible(pc):
+            continue
+        prop_id = (state.composite_prop_ids.get(pid)
+                   or state.ortho_prop_ids.get(pid))
+        angles = ", ".join(f"{v:g}" for v in sorted(vals))
+        if prop_id is None:
+            state.warn(
+                f"*ELEMENT_SHELL_BETA on part {pid}: the part sits on an "
+                "ISOTROPIC /PROP/SHELL (IGTYP 1), and corthini.F:110 returns "
+                "before any material angle is read there — the angle(s) "
+                f"{angles} deg have no effect. BETA only means something for an "
+                "orthotropic or composite material; give the part one (then "
+                "k2rad folds the angle into its property) or drop the option.")
+            continue
+        if len(vals) > 1:
+            state.warn(
+                f"*ELEMENT_SHELL_BETA on part {pid}: the elements carry "
+                f"DIFFERENT angles ({angles} deg) and OpenRadioss ignores the "
+                "per-element /SHELL Phi column on this property class "
+                "(corthini.F:202-217/429-435 take the layer angle from the "
+                "property for IGTYP 9/10/11/16; only IGTYP 17/51/52 add it). "
+                "One /PROP serves the whole part, so a per-element variation "
+                "CANNOT be represented — the fibres run along the property's "
+                "own reference direction for every element. Split the part per "
+                "angle, or model it as a *PART_COMPOSITE (→ /PROP/TYPE51, where "
+                "the element angle IS honoured).")
+            continue
+        fold = next(iter(vals))
+        state.part_beta_fold[pid] = fold
+        for e in state.shell_elems:
+            if e.pid == pid:
+                e.beta = 0.0
+        state.warn(
+            f"*ELEMENT_SHELL_BETA on part {pid}: all elements share BETA="
+            f"{fold:g} deg, which was FOLDED into the synthesized orthotropic "
+            f"/PROP {prop_id} (added to its reference angle) instead of being "
+            "left in the /SHELL Phi column. OpenRadioss reads that column only "
+            "for IGTYP 17/51/52 (corthini.F:202-217/429-435), so the element "
+            "field would have been silently ignored; the folded property angle "
+            "reproduces the LS-DYNA fibre direction.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Properties
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1119,9 +1210,14 @@ def _emit_composite_props(state: ConversionState,
             continue
         mid = part.mid
         label = f"/PROP for composite part {pid}"
+        # A uniform *ELEMENT_SHELL_BETA folded here by _fold_element_beta: the
+        # starter ignores the per-element Phi column on IGTYP 9/10/11/16, so the
+        # angle has to ride on the property's own reference angle.
+        beta_fold = state.part_beta_fold.get(pid, 0.0)
         if mid in state.mat_laminated_glass:
             lines += _emit_laminated_glass_prop(
-                state, state.mat_laminated_glass[mid], pid, prop_id, sec, istrain)
+                state, state.mat_laminated_glass[mid], pid, prop_id, sec,
+                istrain, beta_fold)
         elif mid in state.mat_transverse_aniso:
             # MAT_037 → /MAT/LAW43 is a Hill sheet-plasticity law: dyna2rad puts
             # it on /PROP/TYPE9 (SH_ORTH), the single-material orthotropic shell.
@@ -1135,7 +1231,7 @@ def _emit_composite_props(state: ConversionState,
                 "direction matters.")
             lines += _emit_prop_type9(prop_id, f"LAW43_ORTHO_PROP_{prop_id} "
                                       f"(part {pid})", sec, state.is_implicit,
-                                      istrain, state)
+                                      istrain, state, phi=beta_fold)
         else:
             mat = (state.mat_orthotropic.get(mid)
                    or state.mat_enhanced_composite.get(mid))
@@ -1144,6 +1240,7 @@ def _emit_composite_props(state: ConversionState,
             is_solid = pid in solid_pids and pid not in shell_pids
             axis = _composite_ref_axis(mat, state, label, prop_id,
                                        for_solid=is_solid)
+            axis.phi += beta_fold
             law = ("/MAT/LAW93" if mid in state.mat_orthotropic
                    else "/MAT/LAW127")
             if axis.mapped:
@@ -1281,7 +1378,7 @@ def _emit_single_material_type11(state: ConversionState, prop_id: int, pid: int,
 
 def _emit_laminated_glass_prop(state: ConversionState, glass: MatLaminatedGlass,
                                pid: int, prop_id: int, sec: SectionShell,
-                               istrain: int) -> List[str]:
+                               istrain: int, beta_fold: float = 0.0) -> List[str]:
     """*MAT_LAMINATED_GLASS → the layered /PROP/TYPE11 that binds the synthesized
     glass and polymer materials to the integration points.
 
@@ -1321,7 +1418,8 @@ def _emit_laminated_glass_prop(state: ConversionState, glass: MatLaminatedGlass,
         "*INTEGRATION_SHELL rule the material requires, which k2rad does not "
         "read, so an unequal glass/interlayer stack needs the layer thicknesses "
         "edited by hand.")
-    axis = _RefAxis(ip=20, note="isotropic LAW27 phases (no material axes)")
+    axis = _RefAxis(ip=20, phi=beta_fold,
+                    note="isotropic LAW27 phases (no material axes)")
     return _emit_prop_type11(prop_id, f"LAMINATED_GLASS_PROP_{prop_id} "
                              f"(part {pid})", sec, state, layers, thick, axis,
                              istrain)

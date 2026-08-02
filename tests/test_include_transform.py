@@ -579,9 +579,8 @@ class AssemblyWarningTests(_AssemblyBase):
             "*KEYWORD",
             "*NODE",
             _nline(1, 0.0, 0.0, 0.0),
-            "*ELEMENT_SHELL_THICKNESS",       # not in the offset map
-            "".join(f"{v:>8}" for v in (1, 1, 1, 1, 1, 1)),
-            _row(1.0, 1.0, 1.0, 1.0),
+            "*CONSTRAINED_INTERPOLATION",     # not in the offset map
+            _row(1, 1, 123456),
             "*END",
         ]) + "\n")
         main = self._write(d, "main.k", "\n".join([
@@ -591,7 +590,7 @@ class AssemblyWarningTests(_AssemblyBase):
             "*END",
         ]) + "\n")
         self._state(main)
-        self.assertTrue(any("ELEMENT_SHELL_THICKNESS" in w
+        self.assertTrue(any("CONSTRAINED_INTERPOLATION" in w
                             and "NOT applied" in w for w in PARSER_WARNINGS))
 
     def test_coordinate_bearing_keyword_warns_under_transform(self):

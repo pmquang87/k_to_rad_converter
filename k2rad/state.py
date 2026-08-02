@@ -17,9 +17,34 @@ class NodeData:
 
 @dataclass
 class ShellElem:
+    """*ELEMENT_SHELL (+ the _THICKNESS / _BETA / _MCID / _OFFSET / … variants).
+
+    ``thick_nodes`` holds the optional card's nodal thicknesses THIC1..THIC4 in
+    SLOT order (slot i = the id in ``nodes[i]``), empty when the element carried
+    no thickness card at all. A blank cell is stored as ``0.0`` because that is
+    what LS-DYNA does with it — Vol I R17 *ELEMENT_SHELL Card 2 gives THIC1..4
+    the default ``0.``, and Remark 1 then reads "default values in place of ZERO
+    shell thicknesses are taken from the cross-section property definition of
+    the PID". So blank and an explicit 0.0 are the SAME input, and the fallback
+    is per VALUE, not per element (writer/mesh.py _shell_element_thickness).
+
+    ``beta`` is the *ELEMENT_SHELL_BETA / _THICKNESS material angle in DEGREES →
+    the /SHELL / /SH3N ``Phi`` column (the solver converts to radians itself,
+    hm_read_shell.F:170). NOTE that OpenRadioss only READS that column for
+    IGTYP 17/51/52; on an IGTYP 9/10/11/16 part the angle has to be folded into
+    the property instead — see writer/composites.py _fold_element_beta.
+    """
     eid: int
     pid: int
     nodes: List[int]   # 3 or 4 node IDs (trailing zeros stripped)
+    thick_nodes: List[float] = field(default_factory=list)
+    beta: float = 0.0
+    #: True for an element recovered from an *ELEMENT_SHELL/_BEAM block whose
+    #: option suffix k2rad does not model, where the connectivity was
+    #: identified by CONTENT rather than by position. Such a candidate is
+    #: re-checked against the node table before it is emitted
+    #: (writer/mesh.py _screen_provisional_elements).
+    provisional: bool = False
 
 
 @dataclass
@@ -31,11 +56,60 @@ class SolidElem:
 
 @dataclass
 class BeamElem:
+    """*ELEMENT_BEAM (+ _ORIENTATION).
+
+    ``vx/vy/vz`` is the *ELEMENT_BEAM_ORIENTATION vector, expressed relative to
+    N1 ("the orientation vector points to a virtual third node", Vol I R17).
+    The writer prepass _synthesize_beam_orientation_nodes turns a non-zero
+    vector into a real /NODE at ``pos(N1) + V`` and puts its id in ``n3``.
+    """
     eid: int
     pid: int
     n1: int
     n2: int
     n3: int            # orientation node
+    vx: float = 0.0
+    vy: float = 0.0
+    vz: float = 0.0
+    #: See ShellElem.provisional.
+    provisional: bool = False
+
+
+@dataclass
+class ProvisionalElemBlock:
+    """Bookkeeping for one *ELEMENT_SHELL/_BEAM block with an UNMODELLED option.
+
+    The option's card layout is by definition unknown there, so the handler
+    cannot step over the extra cards positionally: it keeps every line that can
+    only be a connectivity card (all fields plain positive integers) and marks
+    the elements ``provisional``. That content test is necessary but NOT
+    sufficient — an option card made of integers (an *ELEMENT_BEAM_THICKNESS
+    section written as ``10 10 10 10``, an *ELEMENT_SHELL_COMPOSITE ply card
+    ``mid thick beta tmid …``) passes it and would become an element on node ids
+    that do not exist, which is starter ERROR 78 / 222 and a HARD failure where
+    the old behaviour was a silent skip. ``_screen_provisional_elements`` runs
+    after parsing (so *NODE may follow *ELEMENT, and includes are merged) and
+    drops the candidates the node table does not back.
+    """
+    keyword: str
+    kind: str                       # "shell" | "beam"
+    option: str                     # the unmodelled suffix, e.g. "_COMPOSITE"
+    eids: List[int] = field(default_factory=list)
+    n_unparsed: int = 0
+
+
+@dataclass
+class PlotelElem:
+    """*ELEMENT_PLOTEL — a 2-node VISUALIZATION-ONLY line element.
+
+    Card (Vol I R17): EID(I8) N1(I8) N2(I8); there is NO PID field — LS-DYNA
+    assigns part id 10000000 implicitly. Converted to an inert /SPRING on a
+    dedicated /PART + /PROP/TYPE4 with K=C=0 (no stiffness, no mass, no time
+    step) — see writer/loads.py _make_plotel_elements.
+    """
+    eid: int
+    n1: int
+    n2: int
 
 
 @dataclass
@@ -2365,6 +2439,22 @@ class ConversionState:
     beam_elems: List[BeamElem] = field(default_factory=list)
     # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
     discrete_elems: List[DiscreteElem] = field(default_factory=list)
+    # *ELEMENT_PLOTEL → an inert /SPRING on a synthesized PLOTEL /PART+/PROP
+    plotel_elems: List[PlotelElem] = field(default_factory=list)
+    # /NODE ids synthesized for *ELEMENT_BEAM_ORIENTATION third nodes. Radioss
+    # tags a beam's third node CHECK_USED, not CHECK_BEAM (hm_read_beam.F:181):
+    # it is a pure geometric reference that carries NO beam stiffness, so on an
+    # implicit deck one of these is a zero row in the tangent exactly like an
+    # unattached node — the free-node guard uses this set to see through the
+    # /BEAM connectivity and fix them.
+    beam_orient_nodes: Set[int] = field(default_factory=set)
+    # One record per *ELEMENT_SHELL/_BEAM block with an option k2rad does not
+    # model — see ProvisionalElemBlock and _screen_provisional_elements.
+    provisional_elem_blocks: List[ProvisionalElemBlock] = field(
+        default_factory=list)
+    # Node ids handed out by next_node_id() but not yet written into
+    # self.nodes — see that method.
+    _reserved_node_ids: Set[int] = field(default_factory=set)
     # Idempotency guard for _normalize_tet10_ordering: the LS-DYNA→Radioss apex
     # permutation is a 3-cycle (not self-inverse), so a blind re-run corrupts the
     # connectivity. Set True the first time the pass runs (it may be invoked both
@@ -2393,6 +2483,14 @@ class ConversionState:
     # *PART_COMPOSITE parts, keyed by PID — the per-ply layup that replaces the
     # section-derived property (→ /PROP/TYPE51 + one /PROP/TYPE19 per ply).
     part_composites: Dict[int, PartComposite] = field(default_factory=dict)
+    # part_id → *ELEMENT_SHELL_BETA angle (degrees) FOLDED into the part's
+    # synthesized orthotropic property, because the OpenRadioss starter reads
+    # the per-element /SHELL Phi column only for IGTYP 17/51/52 and takes the
+    # layer angle from the PROPERTY alone for IGTYP 9/10/11/16 (starter/source/
+    # elements/shell/coque/corthini.F:202-217, :429-435). Filled by the
+    # _fold_element_beta prepass, which also zeroes the elements' own beta so
+    # the deck states the angle exactly once.
+    part_beta_fold: Dict[int, float] = field(default_factory=dict)
 
     # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
     # HourglassDef; consumed by the per-part hourglass /PROP overlay.
@@ -2826,6 +2924,31 @@ class ConversionState:
         while gid in self.node_sets:
             gid = self.next_id()
         return gid
+
+    def next_node_id(self) -> int:
+        """Reserve and return a /NODE id guaranteed free in the NODE namespace.
+
+        Every other node-synthesis site (the /RBODY CoG masters, the /SKEW/MOV
+        third nodes, the connector ground nodes, the moving-rigid-wall carriers)
+        open-codes ``max(self.nodes) + 1``. That is safe only because each of
+        them writes the new id into ``self.nodes`` BEFORE the next site computes
+        its own maximum — an undocumented, unenforced invariant. A site that
+        allocates a batch of ids first and registers them afterwards hands the
+        same id out twice, and because ``self.nodes`` is a dict the second write
+        silently REPLACES the first node: no starter error, just a node teleported
+        to another node's coordinates (a folded element, or a rigid body whose
+        centre of gravity moved).
+
+        This allocator closes that hole by also skipping ids it has already
+        handed out, so a caller may allocate first and register later. Ids start
+        one above the current maximum (90000001 on an empty model, the same base
+        the open-coded sites use), so it is a no-op vs the existing convention on
+        any ordinary deck and does not shift ids."""
+        nid = (max(self.nodes) + 1) if self.nodes else 90000001
+        while nid in self.nodes or nid in self._reserved_node_ids:
+            nid += 1
+        self._reserved_node_ids.add(nid)
+        return nid
 
     def all_skew_ids(self) -> set:
         """Every /SKEW id the deck emits — from *DEFINE_COORDINATE_SYSTEM/_NODES/
