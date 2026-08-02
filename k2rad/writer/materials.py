@@ -92,12 +92,9 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_elast_for_rigid(mat)
     # A *MAT_NULL that carries a companion *EOS_* becomes a hydro /MAT/LAW6 (with
     # that /EOS) below; a bare *MAT_NULL stays /MAT/VOID (vacuum/void ALE phase).
-    # "Carries" = shares the EOS id (the legacy pairing convention) OR is bound
-    # to a supported *EOS_* by a *PART EOSID field.
-    eos_mids = set(state.eos_cards) | set(state.eos_jwl)
-    eos_bound_nulls = set(_null_part_eos_bindings(state))
+    void_mids = _void_null_mids(state)
     for mat in state.mat_null.values():
-        if mat.mid not in eos_mids and mat.mid not in eos_bound_nulls:
+        if mat.mid in void_mids:
             lines += _emit_mat_void(mat)
     for mat in state.mat_power_law.values():
         lines += _emit_mat_law36_powerlaw(mat, state)
@@ -400,6 +397,27 @@ def _null_part_eos_bindings(state: ConversionState) -> dict:
     return out
 
 
+def _void_null_mids(state: ConversionState) -> set:
+    """*MAT_NULL mids that stay a plain /MAT/VOID — no /EOS attaches to them.
+
+    A *MAT_NULL is instead carried by an EOS-bearing material when it
+      * shares its id with a supported *EOS_* (the legacy pairing convention)
+        → /MAT/LAW6 (HYD_VISC) + /EOS/<kind>, or
+      * is bound to one by a *PART EOSID field (_null_part_eos_bindings), or
+      * shares its id with a *MAT_HIGH_EXPLOSIVE_BURN **and** an *EOS_JWL
+        → /MAT/LAW5 (the JWL pair; a null of that id would collide with it).
+
+    An *EOS_JWL alone does NOT carry the null: OpenRadioss has no standalone
+    /EOS/JWL (JWL exists only inside /MAT/LAW5), so with no explosive of that
+    id nothing would be emitted and every /PART on the null would dangle
+    (starter ERROR 179, "MATERIAL ID=n DOES NOT EXIST"). The null falls back
+    to /MAT/VOID and _make_explosive_and_eos_materials says so."""
+    carried = set(state.eos_cards)
+    carried |= set(state.eos_jwl) & set(state.mat_high_explosive)
+    carried |= set(_null_part_eos_bindings(state))
+    return {mid for mid in state.mat_null if mid not in carried}
+
+
 def _derive_ideal_gas_p0(state: ConversionState, eos: EosCard,
                          rho: float) -> None:
     """Radioss /EOS/IDEAL-GAS requires a POSITIVE initial pressure. LS-DYNA
@@ -429,11 +447,26 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     # JWL high explosives: *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL → /MAT/LAW5
     for mid, heb in sorted(state.mat_high_explosive.items()):
         lines += _emit_mat_law5(state, heb, state.eos_jwl.get(mid))
-    for eosid in sorted(set(state.eos_jwl) - set(state.mat_high_explosive)
-                        - jc_consumed):
-        state.warn(f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
-                   "(same id) — the JWL parameters have no material to attach to "
-                   "and were not emitted (add the explosive material).")
+    void_mids = _void_null_mids(state)
+    for eosid in sorted(set(state.eos_jwl) - set(state.mat_high_explosive)):
+        if eosid in void_mids:
+            # *MAT_NULL + *EOS_JWL with no explosive: the null keeps its /MAT
+            # card (as /MAT/VOID) so the /PART resolves, but the JWL pressure
+            # law is gone — OpenRadioss carries JWL only inside /MAT/LAW5.
+            state.warn(
+                f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
+                "(same id) — OpenRadioss carries JWL only inside the "
+                "/MAT/LAW5 explosive, so the JWL parameters were NOT emitted "
+                f"and the same-id *MAT_NULL fell back to /MAT/VOID/{eosid}: "
+                "that part now has NEITHER strength NOR pressure (the "
+                "detonation-product expansion is lost, so it applies no load "
+                "to its surroundings). Add a *MAT_HIGH_EXPLOSIVE_BURN of id "
+                f"{eosid} (density, detonation velocity D, P_CJ) to get the "
+                "/MAT/LAW5 JWL explosive.")
+        elif eosid not in jc_consumed:
+            state.warn(f"*EOS_JWL {eosid}: no companion *MAT_HIGH_EXPLOSIVE_BURN "
+                       "(same id) — the JWL parameters have no material to attach to "
+                       "and were not emitted (add the explosive material).")
     # Other fluids: carrier /MAT/LAW6 (HYD_VISC) + /EOS/<kind>. A carrier is
     # the same-id *MAT_NULL (the legacy shared-id pairing) and/or any *MAT_NULL
     # a *PART binds to this EOS via its EOSID field — the /EOS is then
