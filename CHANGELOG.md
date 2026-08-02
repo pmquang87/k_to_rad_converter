@@ -11,6 +11,190 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Element variants: `*ELEMENT_SHELL_THICKNESS` / `_BETA` / `_MCID` /
+  `_OFFSET` / `_DOF` (and every combination) → the `/SHELL` // `SH3N` per-element
+  `Phi` and `Thick` columns, `*ELEMENT_BEAM_ORIENTATION` → a synthesized third
+  node, and `*ELEMENT_PLOTEL` → an inert `/SPRING`.** No flag: a deck without
+  these cards is byte-identical (all five goldens unchanged). 79 new tests
+  (1293 -> 1372).
+
+  **The headline is not the thickness — it is that a `*ELEMENT_SHELL_THICKNESS`
+  block used to lose the ELEMENTS.** `dispatch()` is an exact dict lookup, and
+  `_make_parts_and_elements` emits elements *inside* the `state.parts` loop, so
+  the block landed in `skipped_keywords`, the `/PART` was written with **no
+  `/SHELL` block under it**, and `result.warnings` said nothing. The same held
+  for `_BETA`, `_MCID`, `_OFFSET`, `_DOF`, `_COMPOSITE`, `_SHL4_TO_SHL8` and
+  every `*ELEMENT_BEAM_*` spelling. Now the 24 legal `*ELEMENT_SHELL` and 4
+  `*ELEMENT_BEAM` option spellings are registered from the grammar, and
+  `dispatch()` additionally falls back on the family PREFIX, so an *unknown*
+  option keeps every element it can identify as connectivity and says loudly
+  what it could not interpret.
+
+  That identification is in TWO halves, and the content half alone is not
+  enough. Content: every field of a connectivity card is a plain positive
+  integer, plus a per-block unique-EID rule. **Sufficiency:
+  `_screen_provisional_elements` then re-checks each candidate against the node
+  table** (after all parsing, so `*NODE` may follow `*ELEMENT` and `*INCLUDE`s
+  are merged) and drops the ones whose nodes the deck does not define, whose
+  /BEAM has `N1 == N2`, or whose /SHELL has fewer than 3 distinct corners. An
+  option card whose values happen to be integers otherwise becomes an element:
+  a `*ELEMENT_BEAM_THICKNESS` 10x10 square section written `10 10 10 10`, or an
+  `*ELEMENT_SHELL_COMPOSITE` ply card `mid thick beta tmid …` whose leading MID
+  is not an EID already seen. That is strictly worse than the old silent skip —
+  measured on `starter_win64`, the section-card deck produced `3 x ERROR ID 78`
+  (UNDEFINED NODE NUMBER, `NODE ID=10 DOES NOT EXIST`) + `ERROR ID 222` (`BEAM
+  ID=10 IS INCONSISTENT: N1=N2`), `4 ERROR(S)`, `ERROR TERMINATION`, while the
+  converter reported "3 element(s) were kept" for a 2-beam block. With the
+  screen the same deck converts to exactly 2 beams and runs 0 errors / NORMAL
+  TERMINATION, and the warning names the kept count AND the dropped one.
+  `_NURBS_PATCH` stays a whole-block skip regardless: its card *is* six positive
+  integers (NPEID PID NPR PR NPS PS) meaning polynomial orders and
+  control-point counts, so there is no mesh in it to keep.
+  `k2rad/assembly.py`'s `*INCLUDE_TRANSFORM` offset
+  table got the same grammar and the same prefix fallback (an unmapped element
+  keyword would otherwise keep its original node ids while the nodes around it
+  were renumbered — dangling connectivity, not just a missing warning).
+
+  Card layouts: the base connectivity card is 10 x I8, the shared optional card
+  is **5 x F16** (`THIC1..THIC4` + `BETA`|`MCID`, present for `_THICKNESS`,
+  `_BETA` and `_MCID` alike — `Keyword971/ELEMENTS/shell.cfg:193`), `_OFFSET`
+  adds one more F16 and `_DOF` a `%16s%8d%8d%8d%8d` card; `THIC5..THIC8` appears
+  only when the mid-side nodes N5..N8 are defined. `*ELEMENT_BEAM_ORIENTATION`'s
+  card is **3 x F10**, not F16 (`beam.cfg`, `if_ORIENTATION==1`) — the beam
+  family mixes 8-, 10- and 16-char fields across its own cards.
+
+  **`/SH3N`'s optional columns are 61-80 / 81-100, the same as `/SHELL`'s — the
+  shipped cfg is wrong.** `radioss41/ELEM/shell3n.cfg` writes the blank gap as
+  `%30s` (Phi at 71-90, Thick at 91-110) while the `COMMENT()` line in the same
+  file says 61-80 / 81-100. The starter follows the comment: an `/IOFLAG` IPRI=5
+  probe read a value ending in column 90 back as the THICKNESS and discarded
+  everything past column 100. One code path therefore serves both cards.
+  `Phi` is in DEGREES on the card (`hm_read_shell.F:170` multiplies by PI/180)
+  and `Thick = 0` is the documented "use the `/PROP/SHELL` thickness" value
+  (`cinmas.F:324-329`), which is why the two fields are emitted only when there
+  is something to say. The nodal thickness cells are keyed on the CARD SLOT, and
+  a collapsed quad may repeat a corner in ANY slot (`n1 n1 n2 n3` survives with
+  slots 0, 2, 3), so the mean is taken over the surviving corners' slots rather
+  than over the first three cells.
+
+  **`Thick` resolves a zero cell against the `*SECTION_SHELL` thickness, per
+  VALUE.** Vol I R17 *ELEMENT_SHELL Card 2 defaults `THIC1..THIC4` to `0.` — so
+  a blank cell and an explicit `0.0` are the SAME input — and Remark 1 reads
+  "Default values in place of zero shell thicknesses are taken from the
+  cross-section property definition of the PID". With `T=1.5`, `THIC1=4.0` plus
+  three empty cells is therefore `(4+1.5+1.5+1.5)/4 = 2.125`. Both other
+  readings are wrong and wrong differently: dyna2rad divides the written values
+  by the node count (`convertelements.cxx:290-301`) and gets 1.0, and averaging
+  only the non-empty cells gets 4.0 — the latter also makes two LS-DYNA-identical
+  elements differ by 4x depending on which spelling of "zero" was used. When the
+  part has no usable section thickness (k2rad's auto-section is 0.0) the
+  non-zero cells are averaged on their own.
+
+  **`BETA` on an orthotropic part is folded into the PROPERTY, because that is
+  the only place the solver reads it.** k2rad writes the angle to the `/SHELL`
+  `Phi` column and the starter reads it back correctly (90° echoes as
+  1.570796326795 rad under `/IOFLAG` IPRI=5) — and then discards it.
+  `starter/source/elements/shell/coque/corthini.F` builds the layer angle from
+  the property alone for IGTYP 1 (`:110`, an early RETURN), 9 (`:202`), 10/11
+  (`:206-217`) and 16 (`:429-435`); only IGTYP 17/51/52 do
+  `PHI1(J,I) = ANGLE(I) + …`. Measured on a *MAT_002 plate with E1/E2 = 100
+  pulled along global X: per-element `BETA=90` on the `/PROP/TYPE11` part gave
+  **103094.25 MPa, byte-identical to its `BETA=0` twin (ratio 1.000000)**, where
+  `Q22 = 25789.81` was required — the 90° fibre rotation did nothing at all. So
+  when every shell of such a part shares one angle it is now added to the
+  property's own reference angle (`/PROP/TYPE9` `GEO(10)` / the `/PROP/TYPE11`
+  layer `Phi`) and the element column is cleared; re-measured, that deck reads
+  **25773.52 MPa, ratio 0.250000 exactly (dev -0.063% vs Q22)**. A per-element
+  *variation* cannot be represented at all — one `/PROP` serves the part — and is
+  warned about loudly instead. `*PART_COMPOSITE` (`/PROP/TYPE51`) is untouched:
+  `ANGLE(I)` IS added there, measured at ratio 0.250084.
+
+  `*ELEMENT_PLOTEL` has no PID column at all — LS-DYNA assigns part id 10000000
+  implicitly (Vol I R17, Remark 1) — so the converter fabricates a `/PART` and a
+  `/PROP/TYPE4`, both at that id, both guarded against a deck that already uses
+  it. `MASS = 1.1e-15` is the smallest legal value: `hm_read_prop04.F:136-142`
+  rejects `MASS <= 1e-15` with ERROR 229. `K = C = 0` is what makes it inert in
+  both senses — `r1len3.F:81-105` leaves `STI` at zero unless `XK` or `XC` is
+  non-zero (no nodal-stiffness contribution to the parts it is drawn on), and
+  `r1len3.F:139`'s `DT = XM/MAX(EM15, SQRT(XC²+XM·XK)+XC)` floors at the EM15
+  clamp instead of dividing by zero, giving ~1.1 s raw, which the starter's
+  damping-limit term (`rinit3.F`, `DTC = HALF*XM/MAX(EM15,XCM)`) halves: the
+  element table prints **0.55 s** against 1.7e-6 s for the shells in the same
+  model. Because `K = C = 0` really does mean no stiffness, a node touched only
+  by a PLOTEL is still FREE for the implicit singularity guard — it is not in
+  the guard's element-node set, the same way a synthesized beam-orientation node
+  is subtracted from it. (The `1.1e-15` per element does move the starter's
+  TOTAL MASS echo, `1.2560000000000E-05` → `1.2560000003300E-05` Mg for three
+  PLOTELs: a 2.6e-10 relative change with every part mass, the time step and the
+  result history bit-identical.)
+
+  `*ELEMENT_DISCRETE`, MAT_100 spotweld beams and `*ELEMENT_PLOTEL` all become
+  `/SPRING` under their SOURCE-deck ids, which LS-DYNA keeps in three separate
+  namespaces and Radioss in one; every pairwise overlap is now reported up front
+  rather than surfacing as starter ERROR 79 (DUPLICATE ID) with no restart file.
+
+  Validated end to end: `starter_win64.exe` on a deck carrying all three
+  families reports **0 errors**, echoes ANGLE 0.5235987755983 rad (= 30°) /
+  THICKNESS 2.5 for the quad and 0.2617993877991 rad (= 15°) / 1.0 for the
+  `/SH3N`, reads the MCID variant's angle back as 0.0, gives the PLOTEL springs
+  a 0.55 s time step, and lands a total mass of 1.4130000002200E-05 Mg — the
+  hand calculation to the last digit, including the 2.2e-15 the two PLOTELs add.
+  The engine runs it to NORMAL TERMINATION in 9082 cycles.
+
+  New `state.next_node_id()`, in the `next_curve_id` / `next_part_id` /
+  `next_prop_id` family. Every existing node-synthesis site open-codes
+  `max(state.nodes) + 1`, which is safe only because each registers its id
+  before the next site computes its own maximum — an undocumented, unenforced
+  invariant. A site that allocates a batch and registers afterwards hands the
+  same id out twice, and since `state.nodes` is a dict the second write silently
+  *replaces* a node rather than erroring. The new allocator also skips ids it
+  has already handed out; it starts from the same base, so it shifts nothing.
+
+  **Deliberate divergences from dyna2rad, each a defect it has rather than a
+  convention it holds:**
+  * dyna2rad recognizes only `*ELEMENT_SHELL`, `_THICKNESS`, `_BETA` and
+    `*ELEMENT_BEAM_ORIENTATION`. Its CFG keyword table matches USER_NAMES
+    exactly (`mv_solver_input_infos.cpp:494-499`, `myUserNameExactMatch`), so
+    every other spelling — including all the combined ones — is an unmatched
+    header and the whole block is skipped with an error whose text is even the
+    wrong message (`msg_arrays.cfg` index 1 instead of 2). k2rad keeps the mesh
+    for all of them.
+  * The thickness mean substitutes the `*SECTION_SHELL` value for every zero
+    cell, which is LS-DYNA's documented rule. dyna2rad's reader cannot
+    distinguish a blank cell from an explicit `0.0` and always divides by the
+    node count (`convertelements.cxx:290-301`), so `THIC1=2.0` with three blank
+    cells converts to 0.5 — a quarter of the thickness, a quarter of the mass
+    and a sixty-fourth of the bending stiffness.
+  * `_BETA` keeps its thicknesses. dyna2rad reads the shared card and then tests
+    `elemKeyWord.find("THICK")`, which fails under `_BETA`, forcing `Thick = 0`
+    and discarding values it had already parsed.
+  * `MCID` is never written into the `Phi` column. It shares columns 65-80 with
+    `BETA` but names a `*DEFINE_COORDINATE_SYSTEM`; treating it as degrees would
+    silently rotate the material axes by `<cid>` degrees.
+  * The synthesized third node is actually wired into the beam.
+    `convertelements.cxx:229-232` executes `elemNodes[2] = <new id>` *before*
+    `elemNodes.resize(3)`, and a beam whose N3 column is blank — the normal
+    `_ORIENTATION` case — arrives with only two nodes, so the resize
+    value-initializes slot 2 back to 0. dyna2rad therefore creates the node and
+    emits `node_ID3` as 0 for exactly the elements the option exists for.
+  * One node per distinct (N1, vector) pair instead of one per element, and a
+    warning when the vector is parallel to the beam's own N1-N2 axis (a
+    collinear third node cannot define the local Y-Z frame; dyna2rad does not
+    check).
+  * The orientation VECTOR is rotated by a `*INCLUDE_TRANSFORM` TRANID, not only
+    the ids. Under a 30° `ROTATE` the nodes move but an untransformed vector
+    leaves the local Y-Z frame behind (verified: the third node landed at
+    `(0.866, 1.5, 0)` instead of `(0.366, 1.366, 0)`) and at 90° it can become
+    collinear with the rotated beam axis. Under an option suffix k2rad does not
+    model the vector card's POSITION is unknown, so those blocks fall back to
+    the existing "carries literal geometry that was NOT transformed" warning.
+  * The `*ELEMENT_BEAM` base card is read by COLUMN when a fixed I8 reading is
+    consistent with the whitespace split. The manual says N3 "should be left
+    undefined" under `_ORIENTATION`, so a card that also sets the trailing
+    `LOCAL` flag splits to five tokens and the flag is read as the orientation
+    node — a silently wrong local frame, or an id that does not exist. Free
+    format and sloppily aligned cards keep the whitespace reading.
+
 - **Composites: `*MAT_ORTHOTROPIC_ELASTIC` (002) → `/MAT/LAW93`,
   `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054/055) → `/MAT/LAW127`,
   `*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037) → `/MAT/LAW43`,

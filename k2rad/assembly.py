@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
-                        is_identity, linear_is_identity)
+                        is_identity, linear_is_identity, mat_apply)
 
 Vec3 = Tuple[float, float, float]
 
@@ -352,6 +352,85 @@ def _off_part(b: Block, offsets: Dict[str, int], warn) -> None:
         new = _rewrite_line(b.raw[i + 1], mods, offsets)
         if new is not None:
             b.raw[i + 1] = new
+
+
+# *ELEMENT_SHELL / *ELEMENT_BEAM option grammar — mirrors handlers.py
+# (_SHELL_SUFFIX_TOKENS / _BEAM_SUFFIX_TOKENS) without importing it, the same
+# way _title_offset mirrors handlers._title_offset.
+_SHELL_OPT_TOKENS = frozenset({"THICKNESS", "BETA", "MCID", "OFFSET", "DOF"})
+_BEAM_OPT_TOKENS = frozenset({"ORIENTATION", "OFFSET"})
+
+
+def _elem_opts(keyword: str, base: str, known: frozenset):
+    tokens = [t for t in keyword[len(base):].split("_") if t]
+    return ({t for t in tokens if t in known},
+            [t for t in tokens if t not in known])
+
+
+def _is_elem_conn_card(line: str, n_min: int) -> bool:
+    """Content test for a connectivity card (see handlers._is_connectivity_card):
+    every field is a plain positive integer. Used only on the UNKNOWN-suffix
+    path, where the number of optional cards per element cannot be known."""
+    f = [x for x in _fields(line, 10, 8) if x]
+    if len(f) < n_min:
+        return False
+    return all(t.isdigit() and int(t) > 0 for t in f[:n_min])
+
+
+def _off_element_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *ELEMENT_SHELL spelling. Only the BASE card carries ids; the
+    optional cards (THIC1..4+BETA/MCID, THIC5..8, OFFSET, NS1..NS4) must be
+    stepped over — a generic w=8 reslice would cut their F16 floats in half and
+    a blind id offset would corrupt them. The card count per element follows the
+    option grammar exactly, so an integer-valued thickness card is skipped by
+    POSITION, not by guessing at its content."""
+    opts, unknown = _elem_opts(b.keyword, "ELEMENT_SHELL", _SHELL_OPT_TOKENS)
+    if unknown:
+        for k, line in enumerate(b.raw):
+            if _is_elem_conn_card(line, 5):
+                new = _rewrite_line(line, _ELEM_SHELL_MODS, offsets, w=8)
+                if new is not None:
+                    b.raw[k] = new
+        return
+    want_thic = bool(opts & {"THICKNESS", "BETA", "MCID"})
+    i = 0
+    while i < len(b.raw):
+        f = [x for x in _fields(b.raw[i], 10, 8) if x]
+        if len(f) < 5:
+            i += 1
+            continue
+        midside = any(_geti(f, j) for j in range(6, min(10, len(f))))
+        new = _rewrite_line(b.raw[i], _ELEM_SHELL_MODS, offsets, w=8)
+        if new is not None:
+            b.raw[i] = new
+        i += 1 + int(want_thic) \
+            + int("THICKNESS" in opts and midside) \
+            + int("OFFSET" in opts) + int("DOF" in opts)
+
+
+def _off_element_beam(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *ELEMENT_BEAM spelling — same shape as _off_element_shell. The
+    _OFFSET (WX1..WZ2) and _ORIENTATION (VX VY VZ) cards hold no ids."""
+    mods = [(0, "e"), (1, "p"), (2, "n"), (3, "n"), (4, "n")]
+    opts, unknown = _elem_opts(b.keyword, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)
+    if unknown:
+        for k, line in enumerate(b.raw):
+            if _is_elem_conn_card(line, 4):
+                new = _rewrite_line(line, mods, offsets, w=8)
+                if new is not None:
+                    b.raw[k] = new
+        return
+    step = 1 + int("OFFSET" in opts) + int("ORIENTATION" in opts)
+    i = 0
+    while i < len(b.raw):
+        f = [x for x in _fields(b.raw[i], 10, 8) if x]
+        if len(f) < 4:
+            i += 1
+            continue
+        new = _rewrite_line(b.raw[i], mods, offsets, w=8)
+        if new is not None:
+            b.raw[i] = new
+        i += step
 
 
 def _off_element_solid(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -820,10 +899,15 @@ _ELEM_SHELL_MODS = [(0, "e"), (1, "p")] + [(i, "n") for i in range(2, 10)]
 _OFFSET_SPECS: Dict[str, object] = {
     # Mesh
     "NODE": _off_node,
-    "ELEMENT_SHELL": {"data": (0, _ELEM_SHELL_MODS), "w": 8},
+    # The _THICKNESS/_BETA/_MCID/_OFFSET/_DOF and _ORIENTATION spellings are
+    # registered from the same grammar handlers.py uses, just below this dict;
+    # _apply_offsets additionally falls back on the family prefix, so an
+    # unlisted spelling is offset rather than warned about.
+    "ELEMENT_SHELL": _off_element_shell,
     "ELEMENT_SOLID": _off_element_solid,
-    "ELEMENT_BEAM": {"data": (0, [(0, "e"), (1, "p"), (2, "n"), (3, "n"),
-                                  (4, "n")]), "w": 8},
+    "ELEMENT_BEAM": _off_element_beam,
+    # *ELEMENT_PLOTEL: EID N1 N2 (I8) — no PID column.
+    "ELEMENT_PLOTEL": {"data": (0, [(0, "e"), (1, "n"), (2, "n")]), "w": 8},
     "ELEMENT_DISCRETE": _off_element_discrete,
     "ELEMENT_MASS": _off_element_mass,
     "ELEMENT_MASS_NODE_SET": _off_element_mass_node_set,
@@ -1046,6 +1130,31 @@ _OFFSET_SPECS: Dict[str, object] = {
     "CONTROL_TIMESTEP": {"cards": {0: [(5, "f")]}},
 }
 
+# *ELEMENT_SHELL_{THICKNESS}_{BETA|MCID}_{OFFSET}_{DOF} and
+# *ELEMENT_BEAM_{OFFSET}_{ORIENTATION} — the same generated grammar handlers.py
+# registers, so the two tables cannot drift apart.
+for _o1 in ("", "_THICKNESS"):
+    for _o2 in ("", "_BETA", "_MCID"):
+        for _o3 in ("", "_OFFSET"):
+            for _o4 in ("", "_DOF"):
+                _OFFSET_SPECS[f"ELEMENT_SHELL{_o1}{_o2}{_o3}{_o4}"] = \
+                    _off_element_shell
+for _o1 in ("", "_OFFSET"):
+    for _o2 in ("", "_ORIENTATION"):
+        _OFFSET_SPECS[f"ELEMENT_BEAM{_o1}{_o2}"] = _off_element_beam
+del _o1, _o2, _o3, _o4
+
+#: Family prefix → rewriter for the *ELEMENT_ spellings the table does not list
+#: (mirrors handlers._ELEMENT_PREFIX_HANDLERS). Without it every unrecognized
+#: *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its original
+#: node/part ids while the rest of the include was offset — dangling
+#: connectivity, which is worse than the warning it would have produced.
+_ELEMENT_PREFIX_SPECS = (
+    ("ELEMENT_SHELL", _off_element_shell),
+    ("ELEMENT_BEAM", _off_element_beam),
+    ("ELEMENT_PLOTEL", _OFFSET_SPECS["ELEMENT_PLOTEL"]),
+)
+
 # All *RIGIDWALL_PLANAR variants share Card 1 (nsid nsidex boxid ...).
 for _kw in ("RIGIDWALL_PLANAR_FORCES", "RIGIDWALL_PLANAR_MOVING",
             "RIGIDWALL_PLANAR_MOVING_FORCES", "RIGIDWALL_PLANAR_FINITE",
@@ -1158,6 +1267,11 @@ def _apply_offsets(p: PendingInclude, warn) -> None:
     for b in p.sub_blocks:
         kw = b.keyword
         spec = _OFFSET_SPECS.get(kw)
+        if spec is None:
+            for _prefix, _spec in _ELEMENT_PREFIX_SPECS:
+                if kw.startswith(_prefix):
+                    spec = _spec
+                    break
         if spec is None:
             if (kw in _NO_ID_KEYWORDS or kw.startswith("PARAMETER")
                     or kw in unmapped):
@@ -1276,6 +1390,81 @@ def _rewrite_point_fields(line: str, aff: Affine,
     return "".join(f"{t:>10}" for t in toks).rstrip()
 
 
+def _rewrite_direction_fields(line: str, aff: Affine, n: int) -> Optional[str]:
+    """Apply only the LINEAR part of *aff* to the leading (0,1,2) triplet of a
+    fixed-width card, keeping every other field verbatim.
+
+    A DIRECTION has no origin, so the translation must not be applied — the
+    *ELEMENT_BEAM_ORIENTATION vector is "relative to node N1" and the third node
+    it defines is placed at ``pos(N1) + V``, which already carries the include's
+    translation through N1. Returns None when the card is too short."""
+    toks = [t.strip() for t in _fields(line, n, 10)]
+    while toks and toks[-1] == "":
+        toks.pop()
+    if not toks:
+        return None
+    while len(toks) < 3:
+        toks.append("0.0")           # a blank VY/VZ column is 0.0, not absent
+    v = mat_apply(aff[0], (to_float(toks[0]), to_float(toks[1]),
+                           to_float(toks[2])))
+    for j in range(3):
+        toks[j] = _fmt_coord(v[j])
+    if "," in line or any(len(t) > 10 for t in toks):
+        return ",".join(toks)
+    return "".join(f"{t:>10}" for t in toks).rstrip()
+
+
+def _transform_beam_orientation(p: PendingInclude, aff: Affine, warn) -> None:
+    """Rotate the *ELEMENT_BEAM_ORIENTATION vectors with their include.
+
+    VX/VY/VZ is literal GEOMETRY, not an id: under a rotating or mirroring
+    TRANID the nodes move but an untouched vector leaves the beam's local Y-Z
+    frame behind, so Iyy/Izz act on the wrong axes — and at 90 deg the vector
+    can end up collinear with the rotated beam axis, which is a degenerate frame
+    (starter WARNING 3051, N3 := N2). Nothing else in the deck records the
+    error, so this is silent-wrong-answer territory rather than a missing
+    warning; applying the affine's linear part is the fix, and it composes for
+    nested includes the same way the *NODE rewrite does (the outer entry re-reads
+    the lines the inner one already rewrote).
+
+    The cards are located by stepping the same option grammar
+    ``_off_element_beam`` uses — the vector card is card 8, after the optional
+    _OFFSET card 7 — so an integer-valued vector is never mistaken for a base
+    card. Under an unmodelled suffix the step is unknown, so those blocks fall
+    back to the coordinate-bearing warning in ``_warn_coordinate_bearing``.
+    """
+    if linear_is_identity(aff):
+        return
+    for b in p.sub_blocks:
+        kw = b.keyword
+        if not (kw.startswith("ELEMENT_BEAM") and "ORIENTATION" in kw):
+            continue
+        opts, unknown = _elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)
+        if unknown:
+            continue                     # warned by _warn_coordinate_bearing
+        vec_off = 1 + int("OFFSET" in opts)
+        i = 0
+        n_short = 0
+        while i < len(b.raw):
+            f = [x for x in _fields(b.raw[i], 10, 8) if x]
+            if len(f) < 4:
+                i += 1
+                continue
+            vi = i + vec_off
+            # A blank card is the zero vector: no third node, nothing to rotate.
+            if vi < len(b.raw) and b.raw[vi].strip():
+                new = _rewrite_direction_fields(b.raw[vi], aff, 8)
+                if new is None:
+                    n_short += 1
+                else:
+                    b.raw[vi] = new
+            i = vi + 1
+        if n_short:
+            warn(f"*INCLUDE_TRANSFORM {p.filename}: {n_short} *{kw} orientation "
+                 "card(s) are too short to hold VX/VY/VZ — those vectors were "
+                 "NOT rotated with the include; check the beams' local axes.")
+
+
 def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
     """Move *RIGIDWALL_PLANAR* literal wall geometry with the include, the way
     the OpenRadioss starter replays a submodel transform on both wall points
@@ -1335,6 +1524,17 @@ def _carries_literal_axis_point(b: Block) -> bool:
     return False
 
 
+def _is_untransformed_beam_orientation(b: Block) -> bool:
+    """True for an *ELEMENT_BEAM*ORIENTATION block ``_transform_beam_orientation``
+    could NOT rotate — i.e. one whose option suffix is not in the grammar, so the
+    per-element card count (and with it the position of the vector card) is
+    unknown. The modelled spellings ARE rotated and must not be warned about."""
+    kw = b.keyword
+    if not (kw.startswith("ELEMENT_BEAM") and "ORIENTATION" in kw):
+        return False
+    return bool(_elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)[1])
+
+
 def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
     seen: Set[str] = set()
     rotates = not linear_is_identity(aff)
@@ -1343,7 +1543,8 @@ def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
         if kw in seen:
             continue
         if kw in _POINT_BEARING or (kw in _DIRECTION_BEARING and (
-                rotates or _carries_literal_axis_point(b))):
+                rotates or _carries_literal_axis_point(b))) \
+                or (rotates and _is_untransformed_beam_orientation(b)):
             seen.add(kw)
             warn(f"*INCLUDE_TRANSFORM {p.filename}: the TRANID transform is "
                  "applied to *NODE coordinates and *RIGIDWALL_PLANAR geometry "
@@ -1510,6 +1711,7 @@ def finalize(blocks: List[Block]) -> None:
             continue
         _rewrite_node_blocks(p.sub_blocks, aff=aff)
         _transform_rigidwalls(p, aff, warn)
+        _transform_beam_orientation(p, aff, warn)
         _warn_coordinate_bearing(p, aff, warn)
 
     # 5. *NODE_TRANSFORM acts on already-transformed geometry, deck order

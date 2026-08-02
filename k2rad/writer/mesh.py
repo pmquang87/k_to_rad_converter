@@ -62,6 +62,11 @@ __all__ = [
     "_screen_sliver_tets",
     "_referenced_node_ids",
     "_downgrade_tet10_to_tet4",
+    "_screen_provisional_elements",
+    "_synthesize_beam_orientation_nodes",
+    "_unique_node_slots",
+    "_shell_element_thickness",
+    "_shell_optional_fields",
     "_make_parts_and_elements",
     "_make_properties",
     "_emit_prop_beam",
@@ -931,6 +936,255 @@ def _downgrade_tet10_to_tet4(state: ConversionState) -> None:
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Unmodelled *ELEMENT_ option suffixes: validate what the content test kept
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _screen_provisional_elements(state: ConversionState) -> None:
+    """Drop the phantom "elements" an unmodelled *ELEMENT_ option card produced.
+
+    An *ELEMENT_SHELL/_BEAM block whose suffix k2rad does not model has, by
+    definition, an unknown card layout, so the handler cannot step over the
+    extra cards by POSITION — it keeps every line that could be connectivity
+    (all fields plain positive integers, no repeated EID in the block) and marks
+    the result provisional. That content test cannot be made exact:
+
+      * ``*ELEMENT_BEAM_THICKNESS`` on a 10x10 square section writes
+        ``10 10 10 10`` — four positive integers, indistinguishable from
+        ``eid pid n1 n2``;
+      * an ``*ELEMENT_SHELL_COMPOSITE`` ply card ``mid thick beta tmid …`` does
+        the same whenever its thicknesses/angles are written as whole numbers
+        and its leading MID is not an EID already seen in the block.
+
+    Inventing an element from such a card is strictly worse than the old silent
+    skip: the starter rejects the deck outright with ERROR 78 (UNDEFINED NODE
+    NUMBER) and ERROR 222 (BEAM ID … IS INCONSISTENT: N1=N2), so the converter
+    would be reporting a preserved element while producing a deck that will not
+    start. This pass is the sufficiency half of the test — it runs after ALL
+    parsing (so *NODE may follow *ELEMENT, and *INCLUDEs are merged) and keeps a
+    provisional element only when the node table actually backs it:
+
+      * every node id it names exists in ``state.nodes``;
+      * a /BEAM has N1 != N2 (the ERROR 222 case), and a third node, if given,
+        exists too — a bogus N3 is zeroed rather than costing the element,
+        because the starter's INFO 2093 fallback (N3 := N2) is recoverable;
+      * a /SHELL has at least 3 DISTINCT corners (fewer is zero area).
+
+    The per-block warning is emitted here, not in the handler, so the "kept"
+    count the user is told to reconcile against the source deck is the count
+    that actually reaches the deck.
+    """
+    if not state.provisional_elem_blocks:
+        return
+    nodes = state.nodes
+    dropped: Set[int] = set()
+    shells = {e.eid: e for e in state.shell_elems if e.provisional}
+    beams = {e.eid: e for e in state.beam_elems if e.provisional}
+    for eid, e in shells.items():
+        if not all(n in nodes for n in e.nodes) \
+                or len(_ordered_unique_nodes(e.nodes)) < 3:
+            dropped.add(eid)
+    for eid, e in beams.items():
+        if e.n1 not in nodes or e.n2 not in nodes or e.n1 == e.n2:
+            dropped.add(eid)
+        elif e.n3 and e.n3 not in nodes:
+            e.n3 = 0
+    if dropped:
+        state.shell_elems = [e for e in state.shell_elems
+                             if not (e.provisional and e.eid in dropped)]
+        state.beam_elems = [e for e in state.beam_elems
+                            if not (e.provisional and e.eid in dropped)]
+    for rec in state.provisional_elem_blocks:
+        n_dropped = sum(1 for eid in rec.eids if eid in dropped)
+        n_kept = len(rec.eids) - n_dropped
+        family = "/SHELL // SH3N" if rec.kind == "shell" else "/BEAM"
+        state.warn(
+            f"*{rec.keyword}: option '{rec.option}' is not implemented — "
+            f"{n_kept} element(s) were kept as plain {family} connectivity and "
+            f"{rec.n_unparsed + n_dropped} card(s) in the block were NOT "
+            "interpreted (their data is dropped)"
+            + (f", of which {n_dropped} looked like connectivity but named "
+               "node ids the deck does not define, so they were option data "
+               "rather than elements" if n_dropped else "")
+            + ". The MESH is preserved; check the element count against the "
+            "source deck, and supply the option's data another way if the "
+            "model depends on it. (dyna2rad drops this whole block, elements "
+            "included.)")
+    state.provisional_elem_blocks = []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *ELEMENT_BEAM_ORIENTATION → synthesized third node
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _synthesize_beam_orientation_nodes(state: ConversionState) -> None:
+    """VX/VY/VZ → a real /NODE at ``pos(N1) + V``, wired into the beam's N3.
+
+    The LS-DYNA manual defines the orientation vector as relative to N1 and says
+    it "points to a virtual third node", so the node is placed at N1 + V with the
+    vector taken RAW — unnormalized, exactly as dyna2rad does
+    (convertelements.cxx:220-232). Normalizing would move the node and is not
+    what either code means; the direction is all Radioss keeps
+    (hm_read_beam.F:158-161 stores V/|V|).
+
+    Two things dyna2rad gets wrong and this does not:
+      * it writes ``elemNodes[2] = <new id>`` BEFORE ``elemNodes.resize(3)``, and
+        since a beam whose N3 column is blank arrives with only 2 nodes, the
+        resize value-initializes slot 2 back to 0 — so the node is created but
+        ``node_ID3`` is emitted as 0 for exactly the elements _ORIENTATION is
+        meant for. Here the id is simply assigned to the element.
+      * it creates one brand-new node per element even when many beams share an
+        N1 and a vector. Here identical (N1, V) pairs share one node — same
+        geometry, fewer orphan nodes.
+
+    Runs as a build_starter prepass so the new nodes exist before the /NODE
+    section is emitted.
+    """
+    if not any(e.vx or e.vy or e.vz for e in state.beam_elems):
+        return
+    cache: Dict[Tuple[int, float, float, float], int] = {}
+    n_missing = 0
+    n_collinear = 0
+    for e in state.beam_elems:
+        if e.vx == 0.0 and e.vy == 0.0 and e.vz == 0.0:
+            continue
+        base = state.nodes.get(e.n1)
+        if base is None:
+            n_missing += 1
+            continue
+        key = (e.n1, e.vx, e.vy, e.vz)
+        nid = cache.get(key)
+        if nid is None:
+            nid = state.next_node_id()
+            state.nodes[nid] = NodeData(base.x + e.vx, base.y + e.vy,
+                                        base.z + e.vz)
+            state.beam_orient_nodes.add(nid)
+            cache[key] = nid
+        e.n3 = nid
+        other = state.nodes.get(e.n2)
+        if other is not None:
+            axis = (other.x - base.x, other.y - base.y, other.z - base.z)
+            vec = (e.vx, e.vy, e.vz)
+            cr = _vcross(axis, vec)
+            la = (axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2) ** 0.5
+            lv = (vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2) ** 0.5
+            lc = (cr[0] ** 2 + cr[1] ** 2 + cr[2] ** 2) ** 0.5
+            if la > 0.0 and lv > 0.0 and lc <= 1e-6 * la * lv:
+                n_collinear += 1
+    if cache:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {len(cache)} third node(s) synthesized "
+            f"at N1 + (VX,VY,VZ) for {sum(1 for e in state.beam_elems if e.vx or e.vy or e.vz)} "
+            "beam(s), and written into the /BEAM node_ID3 column. They are pure "
+            "geometric reference nodes (the starter tags them CHECK_USED, not "
+            "CHECK_BEAM): no mass, no stiffness, no effect on the time step. "
+            "Node ids come from the guarded allocator, above every id in the "
+            "deck.")
+    if n_missing:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {n_missing} element(s) reference an N1 "
+            "with no *NODE record, so no third node could be placed. Those "
+            "beams keep the N3 from their base card (normally 0 → starter INFO "
+            "2093, N3:=N2, a degenerate local frame).")
+    if n_collinear:
+        state.warn(
+            f"*ELEMENT_BEAM_ORIENTATION: {n_collinear} element(s) give an "
+            "orientation vector PARALLEL to their own N1-N2 axis. The "
+            "synthesized third node is then collinear with the beam and cannot "
+            "define a local Y-Z frame — the section's Iyy/Izz (or the "
+            "/PROP/TYPE18 integration points) end up on arbitrary axes. Check "
+            "these vectors; dyna2rad does not test for this at all.")
+
+
+def _unique_node_slots(nodes: List[int]) -> List[int]:
+    """SLOT index of each first-seen distinct positive node id.
+
+    ``_ordered_unique_nodes`` returns the surviving ids; this returns where they
+    sat on the *ELEMENT_SHELL card, which is what the per-node THIC1..THIC4
+    cells are keyed on. The two are only the same list of positions for a
+    TRAILING collapse (n1 n2 n3 n3): ``_ordered_unique_nodes`` accepts a repeat
+    in ANY slot, so ``n1 n1 n2 n3`` survives with slots 0, 2, 3 and averaging
+    THIC1..THIC3 would read a thickness cell belonging to a corner that is not
+    in the element.
+    """
+    seen: Set[int] = set()
+    out: List[int] = []
+    for i, n in enumerate(nodes):
+        if n > 0 and n not in seen:
+            seen.add(n)
+            out.append(i)
+    return out
+
+
+def _shell_element_thickness(e: ShellElem, slots: List[int],
+                            sec_t: float) -> float:
+    """Element thickness from the *ELEMENT_SHELL_THICKNESS nodal values.
+
+    Arithmetic mean of THIC over the element's surviving corners (*slots* are
+    their positions on the card — see ``_unique_node_slots``), with the
+    *SECTION_SHELL thickness substituted for every cell that is zero.
+
+    That substitution is LS-DYNA's own rule, and it is per VALUE, not per
+    element: Vol I R17 *ELEMENT_SHELL Card 2 defaults THIC1..THIC4 to ``0.``
+    (so a blank cell and an explicit ``0.0`` are the same input), and Remark 1
+    reads "Default values in place of zero shell thicknesses are taken from the
+    cross-section property definition of the PID". A quad with THIC1=4.0 and
+    three empty cells on a T=1.5 section is therefore (4.0+1.5+1.5+1.5)/4 =
+    2.125 mm, not 4.0 and not 1.0.
+
+    Both other readings are wrong in a way that scales mass linearly and bending
+    stiffness cubically: dyna2rad divides the written values by the node count
+    (``convertelements.cxx:290-301``) and gets 1.0; averaging only the non-empty
+    cells gets 4.0 and additionally makes the blank and the explicit-zero
+    spellings of one LS-DYNA element differ by 4x.
+
+    Every cell zero → 0.0, which is the card's own "use the /PROP thickness"
+    value (``cinmas.F:324-329``; ERROR 495 if the property is zero too), so the
+    element field is left off entirely. *sec_t* <= 0 means the part has no
+    usable *SECTION_SHELL thickness to substitute (k2rad's auto-section is
+    0.0) — the non-zero cells are then averaged on their own, which is the best
+    available answer and matches what the /PROP would have supplied anyway.
+    """
+    if not e.thick_nodes:
+        return 0.0
+    vals = [e.thick_nodes[s] if s < len(e.thick_nodes) else 0.0 for s in slots]
+    if not any(vals):
+        return 0.0
+    if sec_t > 0.0:
+        vals = [v if v else sec_t for v in vals]
+    else:
+        vals = [v for v in vals if v]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _shell_optional_fields(e: ShellElem, slots: List[int], sec_t: float) -> str:
+    """The trailing ``Phi`` + ``Thick`` columns of a /SHELL or /SH3N card.
+
+    Both cards carry them at the SAME absolute columns — Phi 61-80, Thick
+    81-100 — and both default to 0 when absent, so the fields are emitted only
+    when there is something to say. That keeps a deck without the _THICKNESS /
+    _BETA variants byte-identical to what k2rad produced before.
+
+    (The shipped ``radioss41/ELEM/shell3n.cfg`` CARD string writes the blank gap
+    as ``%30s``, which would put Phi at 71-90 and Thick at 91-110. It disagrees
+    with the COMMENT line in the same file, and the STARTER follows the comment:
+    a probe deck with /IOFLAG IPRI=5 read a value ending in column 90 back as
+    THICKNESS, not as the angle, and discarded everything past column 100. So
+    the cfg CARD string is wrong and /SH3N uses the /SHELL columns.)
+
+    Phi is in DEGREES on the card — hm_read_shell.F:170 multiplies by PI/180.
+    Note that the starter only READS it for IGTYP 17/51/52; on the orthotropic
+    single-property classes the angle has to reach the /PROP instead, which is
+    what ``writer/composites.py::_fold_element_beta`` arranges (it zeroes
+    ``e.beta`` once it has, so the deck never states the angle twice).
+    """
+    phi = e.beta
+    thick = _shell_element_thickness(e, slots, sec_t)
+    if phi == 0.0 and thick == 0.0:
+        return ""
+    return _f(phi) + _f(thick)
+
+
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
@@ -1003,11 +1257,17 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             # 8.361e-7 s where the triangle rule gives 1.6919e-6 s, doubling
             # runtime. A collapsed 4-node shell is also not numerically identical
             # to a C0 triangle, so this is a fidelity fix as well as a cost one.
+            # The *ELEMENT_SHELL_THICKNESS cells are keyed on the CARD SLOT, so
+            # a collapsed quad carries its surviving corners' slot indices to
+            # the thickness mean, not the first three cells.
+            sec_t = state.sec_shells[secid].t1 if secid in state.sec_shells \
+                else 0.0
             quads = []
-            tris = []                 # (eid, [n1, n2, n3])
+            tris = []                 # (ShellElem, [n1, n2, n3], [slot, ...])
             n_bowtie = 0
             for e in shells_by_pid[pid]:
-                uniq = _ordered_unique_nodes(e.nodes)
+                slots = _unique_node_slots(e.nodes)
+                uniq = [e.nodes[s] for s in slots]
                 if len(uniq) >= 4:
                     quads.append(e)
                 elif len(uniq) == 3:
@@ -1018,7 +1278,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                         # the 3 distinct corners invents area the original element
                         # did not have, so say so rather than fix it silently.
                         n_bowtie += 1
-                    tris.append((e.eid, uniq))
+                    tris.append((e, uniq, slots))
                 else:
                     # < 3 distinct corners: zero area, no valid element (Radioss
                     # would reject it). Mirrors the degenerate-solid screening.
@@ -1042,7 +1302,8 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     pad = 4 - len(e.nodes)
                     if pad > 0:
                         row += "         0" * pad
-                    row += "         0"
+                    row += "         0"          # blank field, cols 51-60
+                    row += _shell_optional_fields(e, [0, 1, 2, 3], sec_t)
                     lines.append(row)
                 lines.append(HDR)
             if tris:
@@ -1050,9 +1311,15 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 # triangle formulation), so quads and triangles coexist under one
                 # /PART — unlike /TETRA10, which needs a part of its own.
                 lines.append(f"/SH3N/{pid}")
-                for eid, nd in tris:
-                    lines.append(_i(eid) + _i(nd[0]) + _i(nd[1]) + _i(nd[2])
-                                 + "         0")
+                for e, nd, slots in tris:
+                    row = (_i(e.eid) + _i(nd[0]) + _i(nd[1]) + _i(nd[2])
+                           + "         0")
+                    tail = _shell_optional_fields(e, slots, sec_t)
+                    if tail:
+                        # The 0 above sits in the 41-60 blank field; pad it out
+                        # to column 60 so Phi/Thick land at 61-80 / 81-100.
+                        row += " " * 10 + tail
+                    lines.append(row)
                 lines.append(HDR)
         if pid in solids_by_pid:
             # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an
@@ -1855,6 +2122,10 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
         mapped = vec is not None
         if not mapped:
             vec, phi = (1.0, 0.0, 0.0), 0.0
+        # A uniform *ELEMENT_SHELL_BETA folded here by _fold_element_beta: the
+        # starter takes an IGTYP 9 layer angle from GEO(10,PID) alone and never
+        # adds the element's own Phi column (corthini.F:202).
+        phi += state.part_beta_fold.get(pid, 0.0)
         if pid in shell_pids:
             if mapped:
                 state.warn(

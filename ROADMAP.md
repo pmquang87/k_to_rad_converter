@@ -143,8 +143,25 @@ covering them unlocks a large class of real models.
   cards are not read, so such a section silently degrades to a single-layer
   isotropic property), `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
   `*INTEGRATION_SHELL` user integration rules (which is where `MAT_032` layer
-  thicknesses really live), `*ELEMENT_SHELL_COMPOSITE`/`_BETA`, and
+  thicknesses really live), the per-element ply override of
+  `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the element-variant
+  batch below — but the ply cards themselves are not read; no converter
+  implements this, dyna2rad included), and
   `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`.
+- Element variants (P1): `*ELEMENT_SHELL_THICKNESS`/`_BETA`/`_MCID`/`_OFFSET`/
+  `_DOF` (+ every combination) → the per-element `/SHELL` // `SH3N` `Phi` and
+  `Thick` columns; `*ELEMENT_BEAM_ORIENTATION` → a synthesized third node at
+  `pos(N1) + V`; `*ELEMENT_PLOTEL` → an inert `/SPRING` on a dedicated
+  `/PART` + `/PROP/TYPE4` — **done** (starter- and engine-validated; see
+  CHANGELOG). The real defect this closed was silent MESH LOSS: elements are
+  emitted inside the `state.parts` loop, so any unregistered `*ELEMENT_<family>`
+  spelling left the `/PART` in the deck with no element block under it and no
+  warning. Dispatch now falls back on the family prefix, so this cannot recur
+  for an option nobody has implemented yet.
+  Still open in this family: `*ELEMENT_SHELL_COMPOSITE[_LONG]` ply data (above),
+  `*ELEMENT_BEAM_{THICKNESS,SECTION,SCALAR,PID,WARPAGE}` extra cards (parsed as
+  "keep the mesh, warn about the rest"), `*ELEMENT_BEAM_OFFSET` eccentricities
+  (would need synthesized rigid links), and `*ELEMENT_SEATBELT*`.
 - `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints) → `/PROP/TYPE45`
   (KJOINT2) + `/SPRING` + a node-derived `/SKEW/FIX`, plus
   `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED`/`_TRANSLATIONAL` DOF blocks —
