@@ -20,6 +20,9 @@ from .state import (
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
+    MatOrthotropicElastic, MatEnhancedCompositeDamage,
+    MatTransverselyAnisotropic, MatLaminatedGlass,
+    CompositePly, PartComposite,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     MatBlatzKo, MatMooneyRivlin, MatOgdenRubber, MatHyperelasticRubber,
@@ -832,6 +835,420 @@ def handle_mat_anisotropic_viscoplastic(block: Block, state: ConversionState) ->
         vk=vk, vm=vm, r00=r00, r45=r45, r90=r90, hl=hl, hm=hm, hn=hn,
         fail=fail, numint=numint, aopt=aopt,
         a1=a1, a2=a2, a3=a3, v1=v1, v2=v2, v3=v3, xp=xp, yp=yp, zp=zp, beta=beta)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Composites
+# ─────────────────────────────────────────────────────────────────────────────
+# All four composite/orthotropic material families share the LS-DYNA material-
+# axis cards, and follow the MAT_103 convention established above: each AOPT
+# slot sits at a FIXED position and is blank where the active AOPT does not use
+# it, so the handler reads every slot unconditionally and ALL AOPT branching
+# lives in the writer (writer/composites.py::_composite_ref_axis).
+
+def _read_axis_cards(raw: List[str], i_point: int, i_vect: int):
+    """Read the two shared material-axis cards of MAT_002 / MAT_054.
+
+    ``i_point`` is the index of the ``XP YP ZP A1 A2 A3 [MACF/MANGLE] [IHIS]``
+    card and ``i_vect`` that of the ``V1 V2 V3 D1 D2 D3 [BETA] [REF]`` card.
+    Returns ``(xp, yp, zp, a1, a2, a3, f7, v1, v2, v3, d1, d2, d3, beta)`` where
+    ``f7`` is field 7 of the point card (MACF for MAT_002, MANGLE for MAT_054).
+    """
+    fp = _card(raw, i_point, fixed=True, n=8, w=10)
+    gp = lambda i: to_float(fp[i]) if len(fp) > i else 0.0     # noqa: E731
+    fv = _card(raw, i_vect, fixed=True, n=8, w=10)
+    gv = lambda i: to_float(fv[i]) if len(fv) > i else 0.0     # noqa: E731
+    return (gp(0), gp(1), gp(2), gp(3), gp(4), gp(5), gp(6),
+            gv(0), gv(1), gv(2), gv(3), gv(4), gv(5), gv(6))
+
+
+def handle_mat_orthotropic_elastic(block: Block, state: ConversionState) -> None:
+    """*MAT_ORTHOTROPIC_ELASTIC (MAT_002) → /MAT/LAW93 (ORTH_HILL).
+
+    Card layout (LS-DYNA Manual Vol II R16 p.2-155, ORTHO variant):
+      Card1a.1: MID RO EA EB EC PRBA PRCA PRCB
+      Card1a.2: GAB GBC GCA AOPT G SIGF
+      Card2:    XP YP ZP A1 A2 A3 MACF IHIS
+      Card3:    V1 V2 V3 D1 D2 D3 BETA REF
+
+    The Poisson conversion (``NU12 = PRBA·EA/EB``) and the GBC/GCA→G23/G13 swap
+    are done in the writer; this handler only stores the raw LS-DYNA fields.
+    ``G``/``SIGF`` (fields 5-6 of card 1a.2) and ``REF`` are read by the cfg but
+    have no LAW93 counterpart — dropped, as in dyna2rad.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    (xp, yp, zp, a1, a2, a3, macf,
+     v1, v2, v3, d1, d2, d3, beta) = _read_axis_cards(raw, offset + 2, offset + 3)
+    state.mat_orthotropic[mid] = MatOrthotropicElastic(
+        mid=mid, title=title, rho=g1(1),
+        ea=g1(2), eb=g1(3), ec=g1(4),
+        prba=g1(5), prca=g1(6), prcb=g1(7),
+        gab=g2(0), gbc=g2(1), gca=g2(2), aopt=g2(3),
+        xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3,
+        v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3,
+        beta=beta, macf=int(macf))
+
+
+def handle_mat_anisotropic_elastic(block: Block, state: ConversionState) -> None:
+    """*MAT_ANISOTROPIC_ELASTIC / *MAT_002_ANIS — recognized, NOT converted.
+
+    The ANISOTROPIC dialect replaces cards 1a.1/1a.2 with the 21 constants of
+    the full 6×6 constitutive matrix (C11…C66) and leaves EA…GCA empty:
+
+      Card1b.1: MID RO C11 C12 C22 C13 C23 C33
+      Card1b.2: C14 C24 C34 C44 C15 C25 C35 C45
+      Card1b.3: C55 C16 C26 C36 C46 C56 C66 AOPT
+
+    /MAT/LAW93 has slots for nine ENGINEERING constants only (E11…NU23) — there
+    is no home for the 12 anisotropic coupling terms. dyna2rad's ``p_ConvertMatL2``
+    never checks the dialect and emits a /MAT/LAW93 with ALL MODULI ZERO, with no
+    warning (a silently massless, stiffness-free material). k2rad refuses to
+    write that: the material is skipped with a loud warning instead, so the
+    failure is impossible to miss rather than impossible to see.
+
+    Inverting C to engineering constants is deliberately NOT attempted — it is
+    only well-defined when every coupling term vanishes (i.e. the material is
+    really orthotropic), and guessing the Voigt shear-index convention would
+    risk a silently wrong material, which is exactly the failure mode being
+    avoided here. Rewrite such a material as *MAT_ORTHOTROPIC_ELASTIC.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 else 0
+    pids = sorted(p.pid for p in state.parts.values() if p.mid == mid)
+    state.warn(
+        f"*MAT_ANISOTROPIC_ELASTIC (MAT_002 ANIS dialect) mid={mid}: the full "
+        "6x6 constitutive matrix (C11...C66) has NO /MAT/LAW93 counterpart — "
+        "LAW93 carries nine engineering constants (E11/E22/E33, G12/G13/G23, "
+        "NU12/NU13/NU23) and cannot hold the 12 anisotropic coupling terms. "
+        "The material is NOT emitted. (dyna2rad converts this dialect to a "
+        "/MAT/LAW93 with all moduli ZERO and no warning — a silently "
+        "stiffness-free material; k2rad refuses to write that.) Re-state the "
+        "material as *MAT_ORTHOTROPIC_ELASTIC with EA/EB/EC, GAB/GBC/GCA and "
+        "PRBA/PRCA/PRCB to convert it"
+        + (f"; part(s) {pids} reference it and will have no /MAT."
+           if pids else "."))
+    state.note_recognized_not_emitted(
+        block.keyword,
+        "MAT_002 ANISOTROPIC dialect: the 6x6 C-matrix has no /MAT/LAW93 "
+        "counterpart (see the warning); no /MAT emitted")
+
+
+def handle_mat_enhanced_composite_damage(block: Block, state: ConversionState) -> None:
+    """*MAT_ENHANCED_COMPOSITE_DAMAGE (MAT_054 / MAT_055) → /MAT/LAW127.
+
+    Card layout (LS-DYNA Manual Vol II R16; card order cross-checked against
+    ``hm_cfg_files/.../M054_55.cfg FORMAT(Keyword971_R14.1)``):
+      Card1: MID RO EA EB EC PRBA PRCA PRCB
+      Card2: GAB GBC GCA (KF) AOPT 2WAY TI
+      Card3: XP YP ZP A1 A2 A3 MANGLE
+      Card4: V1 V2 V3 D1 D2 D3 [DFAILM DFAILS]
+      Card5: TFAIL ALPH SOFT FBRT [YCFAC DFAILT DFAILC EFS]
+      Card6: XC XT YC YT SC CRIT BETA
+      Card7: PFL EPSF EPSR TSMD SOFT2                        (optional)
+      Card8: SLIMT1 SLIMC1 SLIMT2 SLIMC2 SLIMS NCYRED SOFTG  (only if 7)
+      Card9: LCXC LCXT LCYC LCYT LCSC DT                     (only if 7 and 8)
+
+    Two parsing rules the manual states only circularly:
+
+    * **Card 4 is always exactly one physical line.** The manual says "include
+      card 4a if DFAILT != 0", but DFAILT lives on card 5 — so cols 1-60 are read
+      unconditionally and cols 61-80 are read as DFAILM/DFAILS and discarded when
+      DFAILT <= 0 (which is what the cfg's CARD_PREREAD on card 5 decides for the
+      export side).
+    * **Cards 7/8/9 are strictly cascading FREE_CARDs**: 8 is only read if 7 was,
+      9 only if 7 and 8 were. Presence is positional, so it is taken from the
+      block's line count.
+
+    MAT_055 shares the layout; its card 5 simply leaves fields 5-8 blank and it
+    carries no cards 7/8/9, so reading every slot unconditionally is correct for
+    both spellings. The 54-vs-55 criterion itself lives in CRIT (card 6 field 6),
+    which overrides the keyword spelling.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    kw = block.keyword
+    is55 = ("055" in kw) or kw.endswith("_55") or ("_55_" in kw)
+
+    def cf(idx, i, default=0.0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_float(f[i]) if len(f) > i and f[i].strip() else default
+
+    def ci(idx, i, default=0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_int(f[i]) if len(f) > i and f[i].strip() else default
+
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 else 0
+    # Cards 3/4 = the shared axis pair (field 7 of card 3 is MANGLE here).
+    (xp, yp, zp, a1, a2, a3, mangle,
+     v1, v2, v3, d1, d2, d3, _b) = _read_axis_cards(raw, offset + 2, offset + 3)
+    dfailt = cf(4, 5)
+    # Card-4 cols 61-80 only carry DFAILM/DFAILS when DFAILT > 0 (see docstring).
+    dfailm = cf(3, 6) if dfailt > 0.0 else 0.0
+    dfails = cf(3, 7) if dfailt > 0.0 else 0.0
+
+    # Cascading optional cards: count the DATA lines this block actually has.
+    ncards = 0
+    for k in range(len(raw) - offset):
+        if raw[offset + k].strip():
+            ncards = k + 1
+    has7 = ncards >= 7
+    has8 = has7 and ncards >= 8
+    has9 = has8 and ncards >= 9
+
+    mat = MatEnhancedCompositeDamage(
+        mid=mid, title=title, rho=cf(0, 1),
+        ea=cf(0, 2), eb=cf(0, 3), ec=cf(0, 4),
+        prba=cf(0, 5), prca=cf(0, 6), prcb=cf(0, 7),
+        gab=cf(1, 0), gbc=cf(1, 1), gca=cf(1, 2), kf=cf(1, 3),
+        aopt=cf(1, 4), two_way=cf(1, 5), ti=cf(1, 6),
+        xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3, mangle=mangle,
+        v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3,
+        dfailm=dfailm, dfails=dfails,
+        tfail=cf(4, 0), alph=cf(4, 1), soft=cf(4, 2, 1.0), fbrt=cf(4, 3),
+        ycfac=cf(4, 4, 2.0), dfailt=dfailt, dfailc=cf(4, 6), efs=cf(4, 7),
+        xc=cf(5, 0), xt=cf(5, 1), yc=cf(5, 2), yt=cf(5, 3), sc=cf(5, 4),
+        crit=cf(5, 5), beta=cf(5, 6),
+        pfl=cf(6, 0) if has7 else 0.0,
+        epsf=cf(6, 1) if has7 else 0.0,
+        epsr=cf(6, 2) if has7 else 0.0,
+        tsmd=cf(6, 3, 0.9) if has7 else 0.9,
+        soft2=cf(6, 4, 1.0) if has7 else 1.0,
+        slimt1=cf(7, 0, 1.0) if has8 else 1.0,
+        slimc1=cf(7, 1, 1.0) if has8 else 1.0,
+        slimt2=cf(7, 2, 1.0) if has8 else 1.0,
+        slimc2=cf(7, 3, 1.0) if has8 else 1.0,
+        slims=cf(7, 4, 1.0) if has8 else 1.0,
+        ncyred=cf(7, 5) if has8 else 0.0,
+        softg=cf(7, 6, 1.0) if has8 else 1.0,
+        lcxc=ci(8, 0) if has9 else 0,
+        lcxt=ci(8, 1) if has9 else 0,
+        lcyc=ci(8, 2) if has9 else 0,
+        lcyt=ci(8, 3) if has9 else 0,
+        lcsc=ci(8, 4) if has9 else 0,
+        dt=cf(8, 5) if has9 else 0.0,
+        keyword_is_55=is55)
+    if ncards > 9:
+        state.warn(
+            f"*MAT_ENHANCED_COMPOSITE_DAMAGE mid={mid}: {ncards} data cards were "
+            "read where the keyword defines at most 9 — the extra line(s) are "
+            "IGNORED. This is the fingerprint of a fixed-format card shift (a "
+            "missing or duplicated blank card), which silently moves every "
+            "following field into the wrong slot; check the card order against "
+            "MID/RO/EA.. | GAB/GBC/GCA/KF/AOPT.. | XP.. | V1.. | TFAIL.. | "
+            "XC/XT/YC/YT/SC/CRIT/BETA | PFL.. | SLIMT1.. | LCXC..")
+    state.mat_enhanced_composite[mid] = mat
+
+
+def handle_mat_transversely_anisotropic(block: Block, state: ConversionState) -> None:
+    """*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC (MAT_037) → /MAT/LAW43.
+
+    Card layout:
+      Card1: MID RO E PR SIGY ETAN R HLCID
+      Card2: IDSCALE EA COE ICFLD _ STRAINLT      (option-dependent slots)
+
+    Card 2 exists in three option-specific shapes (_ECHANGE fills fields 1-3,
+    _NLP_FAILURE fields 4 and 6, _NLP2 field 4, _ECHANGE_NLP_FAILURE all of
+    them), each field at a FIXED column — so every slot is read unconditionally,
+    the same convention as the MAT_103/MAT_002 axis cards.
+
+    ``R < 0`` selects a stabilized algorithm, not a negative ratio: the writer
+    takes |R|.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    kw = block.keyword
+    if "ECHANGE" in kw and "NLP" in kw:
+        opt = 5
+    elif "NLP2" in kw:
+        opt = 4
+    elif "NLP_FAILURE" in kw:
+        opt = 3
+    elif "ECHANGE" in kw:
+        opt = 2
+    else:
+        opt = 1
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    state.mat_transverse_aniso[mid] = MatTransverselyAnisotropic(
+        mid=mid, title=title, rho=g1(1), E=g1(2), nu=g1(3),
+        sigy=g1(4), etan=g1(5), r=g1(6),
+        hlcid=to_int(f1[7]) if len(f1) > 7 else 0,
+        idscale=to_int(f2[0]) if len(f2) > 0 and f2[0].strip() else 0,
+        ea=g2(1), coe=g2(2),
+        icfld=to_int(f2[3]) if len(f2) > 3 and f2[3].strip() else 0,
+        strainlt=g2(5), echange_option=opt)
+
+
+def handle_mat_laminated_glass(block: Block, state: ConversionState) -> None:
+    """*MAT_LAMINATED_GLASS (MAT_032) → a /MAT/PLAS_BRIT (LAW27) glass+polymer pair.
+
+    Card layout:
+      Card1: MID RO EG PRG SYG ETG EFG EP
+      Card2: PRP SYP ETP
+      Card3+: F1..F8, repeating up to 4 lines (max 32 integration points)
+
+    ``F_i = 0.0`` marks integration point *i* as GLASS, ``1.0`` as POLYMER
+    (LS-DYNA Manual Vol II, *MAT_032). The F array runs to the end of the block.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    fvals: List[float] = []
+    for idx in range(offset + 2, len(raw)):
+        if not raw[idx].strip():
+            continue
+        fc = _card(raw, idx, fixed=True, n=8, w=10)
+        for tok in fc:
+            if tok.strip():
+                fvals.append(to_float(tok))
+    state.mat_laminated_glass[mid] = MatLaminatedGlass(
+        mid=mid, title=title, rho=g1(1),
+        eg=g1(2), prg=g1(3), syg=g1(4), etg=g1(5), efg=g1(6), ep=g1(7),
+        prp=g2(0), syp=g2(1), etp=g2(2), f=fvals[:32])
+
+
+def handle_part_composite(block: Block, state: ConversionState) -> None:
+    """*PART_COMPOSITE (+ _TITLE / _LONG / _CONTACT / _TSHELL / _IGA_SHELL).
+
+    A *PART that carries its own per-ply layup instead of a *SECTION reference →
+    /PROP/TYPE51 (stack) + one /PROP/TYPE19 (PLY) per layer.
+
+    Card layout:
+      Card1: HEADING (the whole line)                       — ALWAYS present
+      Card2: "OPTCARD" IRPL                                 — only if cols 1-7
+             spell OPTCARD
+      Card3a: PID ELFORM SHRF NLOC MAREA HGID ADPOPT THSHEL  (thin shell)
+      Card3b: PID ELFORM SHRF _ _ HGID _ TSHEAR              (_TSHELL)
+      Card3c: PID ELFORM SHRF NLOC _ IRL                     (_IGA_SHELL)
+      Card4: FS FD DC VC OPTT SFT SSF                        — only _CONTACT
+      Card5a: MID1 THICK1 B1 TMID1 MID2 THICK2 B2 TMID2      (2 layers/line)
+      Card5b: MID1 THICK1 B1 TMID1 PLYID1 SHRFAC1            (_LONG, 1/line)
+
+    A *PART record is ALWAYS registered, for every variant — including ones the
+    property converter cannot handle. k2rad emits elements inside the
+    ``state.parts`` loop, so a part with no PartData silently takes its whole
+    mesh with it; an unsupported layup must degrade to a plain shell property,
+    never to a lost part.
+
+    Field 4 of card 5a is TMID (thermal material id), NOT MID2: the pairing is
+    ``(MID, THICK, B, TMID) | (MID, THICK, B, TMID)``. The sibling keyword
+    *ELEMENT_SHELL_COMPOSITE uses the same 8-column line with fields 4 and 8
+    blank, so the two line parsers must not be shared blindly.
+    """
+    raw = block.raw
+    kw = block.keyword
+    if not raw:
+        state.warn("*PART_COMPOSITE: empty block – skipped")
+        return
+    # Card 1 is the heading card in EVERY variant (the _TITLE option adds no
+    # second line — *PART_COMPOSITE always heads its data with a title card).
+    title = raw[0].strip()
+    idx = 1
+    irpl = 0
+    if idx < len(raw) and raw[idx][:7].upper() == "OPTCARD":
+        fo = _card(raw, idx, fixed=True, n=8, w=10)
+        irpl = to_int(fo[1]) if len(fo) > 1 else 0
+        idx += 1
+    fd = _card(raw, idx, fixed=True, n=8, w=10)
+    if not fd or not fd[0].strip():
+        state.warn(f"*PART_COMPOSITE '{title}': no data card (PID) – skipped")
+        return
+    pid = to_int(fd[0])
+    if pid <= 0:
+        state.warn(f"*PART_COMPOSITE '{title}': data card with no part id – skipped")
+        return
+    variant = ""
+    if "TSHELL" in kw:
+        variant = "TSHELL"
+    elif "IGA_SHELL" in kw or "IGA" in kw:
+        variant = "IGA_SHELL"
+    elform = to_int(fd[1]) if len(fd) > 1 and fd[1].strip() else 0
+    # A BLANK SHRF is recorded as 0.0 = "not given" rather than as LS-DYNA's
+    # own 1.0 default, so the writer can leave Radioss's 5/6 Ashear in place.
+    shrf = to_float(fd[2]) if len(fd) > 2 and fd[2].strip() else 0.0
+    nloc = to_float(fd[3]) if len(fd) > 3 and fd[3].strip() and variant != "TSHELL" else 0.0
+    marea = to_float(fd[4]) if len(fd) > 4 and fd[4].strip() and variant == "" else 0.0
+    hgid = to_int(fd[5]) if len(fd) > 5 and fd[5].strip() else 0
+    adpopt = to_int(fd[6]) if len(fd) > 6 and fd[6].strip() and variant == "" else 0
+    thshel = to_int(fd[7]) if len(fd) > 7 and fd[7].strip() and variant == "" else 0
+    idx += 1
+    optt = 0.0
+    if "CONTACT" in kw:
+        fc = _card(raw, idx, fixed=True, n=8, w=10)
+        optt = to_float(fc[4]) if len(fc) > 4 and fc[4].strip() else 0.0
+        idx += 1
+    long_form = "LONG" in kw
+    plies: List[CompositePly] = []
+    for j in range(idx, len(raw)):
+        line = raw[j]
+        if not line.strip():
+            continue
+        fl = _card(raw, j, fixed=True, n=8, w=10)
+        if long_form:
+            groups = [(0, 1, 2, 3)]
+        else:
+            groups = [(0, 1, 2, 3), (4, 5, 6, 7)]
+        for gi, (im, it, ib, ix) in enumerate(groups):
+            if len(fl) <= im or not fl[im].strip():
+                continue
+            lmid = to_int(fl[im])
+            lthk = to_float(fl[it]) if len(fl) > it else 0.0
+            lbet = to_float(fl[ib]) if len(fl) > ib else 0.0
+            if long_form:
+                plies.append(CompositePly(
+                    mid=lmid, thick=lthk, beta=lbet,
+                    tmid=to_int(fl[ix]) if len(fl) > ix else 0,
+                    plyid=to_int(fl[4]) if len(fl) > 4 and fl[4].strip() else 0,
+                    shrfac=to_float(fl[5]) if len(fl) > 5 else 0.0))
+            else:
+                plies.append(CompositePly(
+                    mid=lmid, thick=lthk, beta=lbet,
+                    tmid=to_int(fl[ix]) if len(fl) > ix else 0))
+    state.part_composites[pid] = PartComposite(
+        pid=pid, title=title, elform=elform, shrf=shrf, nloc=nloc, marea=marea,
+        hgid=hgid, adpopt=adpopt, thshel=thshel, plies=plies, variant=variant,
+        long_form=long_form, irpl=irpl, optt=optt)
+    # ALWAYS register the *PART itself (SECID 0 → the writer auto-creates a
+    # *SECTION_SHELL under the part id if the layup cannot be converted), so the
+    # part's elements are emitted whatever happens to the property.
+    #
+    # The fallback mat_ID must come from the first REAL ply, mirroring the
+    # writer's _valid_plies filter: LS-DYNA's "missing ply" padding is
+    # MID = -1 with THICK = 0, and a layup that leads with it would otherwise
+    # put a negative material id on the /PART, which references no material and
+    # is rejected by the starter — defeating the whole point of the
+    # mesh-preserving fallback.
+    if pid not in state.parts:
+        fallback_mid = next((p.mid for p in plies if p.mid > 0 and p.thick > 0.0),
+                            0)
+        if plies and fallback_mid == 0:
+            state.warn(
+                f"*PART_COMPOSITE {pid}: every layer is 'missing ply' padding "
+                "(MID <= 0 or zero thickness), so the fallback *PART carries no "
+                "material. The part and its elements are still emitted, but the "
+                "starter will reject the /PART until a real ply material is "
+                "given.")
+        state.parts[pid] = PartData(pid, title, 0, fallback_mid, hgid, 0)
 
 
 def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
@@ -4874,6 +5291,14 @@ HANDLERS = {
     "ELEMENT_SOLID":                          handle_element_solid,
     "ELEMENT_BEAM":                           handle_element_beam,
     "PART":                                   handle_part,
+    # *PART_COMPOSITE carries its own per-ply layup instead of a *SECTION
+    # reference → /PROP/TYPE51 + one /PROP/TYPE19 per ply. Every OPTION1/2/3
+    # spelling needs its own key (dispatch is an exact dict lookup and only
+    # _ID/_TITLE/_SUBTITLE are stripped); the handler reads block.keyword to
+    # pick the card layout. All twelve are registered from the option grammar
+    # just below this dict — including _TSHELL / _IGA_SHELL, so the *PART
+    # record still lands and the part keeps its mesh (the property then falls
+    # back to a plain shell — see the handler).
     "HOURGLASS":                              handle_hourglass,
 
     # Sections
@@ -4913,6 +5338,42 @@ HANDLERS = {
     # Hill anisotropy + kinematic hardening dropped/folded — see the handler)
     "MAT_ANISOTROPIC_VISCOPLASTIC":           handle_mat_anisotropic_viscoplastic,
     "MAT_103":                                handle_mat_anisotropic_viscoplastic,
+
+    # ── Composites ──────────────────────────────────────────────────────────
+    # MAT_002 ORTHO dialect → /MAT/LAW93. The ANIS dialect is a DIFFERENT card
+    # layout (the 6x6 C-matrix) with no LAW93 home — its own handler, which
+    # warns and emits nothing rather than dyna2rad's silent zero-modulus law.
+    "MAT_ORTHOTROPIC_ELASTIC":                handle_mat_orthotropic_elastic,
+    "MAT_002":                                handle_mat_orthotropic_elastic,
+    "MAT_2":                                  handle_mat_orthotropic_elastic,
+    "MAT_ANISOTROPIC_ELASTIC":                handle_mat_anisotropic_elastic,
+    "MAT_002_ANIS":                           handle_mat_anisotropic_elastic,
+    "MAT_2_ANIS":                             handle_mat_anisotropic_elastic,
+    # MAT_054/055 → /MAT/LAW127 (+ /FAIL/GENE1 when TFAIL is a dt criterion).
+    # CRIT on card 6 selects Chang-Chang (54) vs Tsai-Wu (55) independently of
+    # the keyword spelling, so both spellings share one handler.
+    "MAT_ENHANCED_COMPOSITE_DAMAGE":          handle_mat_enhanced_composite_damage,
+    "MAT_054":                                handle_mat_enhanced_composite_damage,
+    "MAT_54":                                 handle_mat_enhanced_composite_damage,
+    "MAT_055":                                handle_mat_enhanced_composite_damage,
+    "MAT_55":                                 handle_mat_enhanced_composite_damage,
+    # MAT_037 (+ the _ECHANGE / _NLP_FAILURE / _NLP2 option variants) → LAW43
+    "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC":
+        handle_mat_transversely_anisotropic,
+    "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC_ECHANGE":
+        handle_mat_transversely_anisotropic,
+    "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC_NLP_FAILURE":
+        handle_mat_transversely_anisotropic,
+    "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC_NLP2":
+        handle_mat_transversely_anisotropic,
+    "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC_ECHANGE_NLP_FAILURE":
+        handle_mat_transversely_anisotropic,
+    "MAT_037":                                handle_mat_transversely_anisotropic,
+    "MAT_37":                                 handle_mat_transversely_anisotropic,
+    # MAT_032 → a synthesized /MAT/PLAS_BRIT (LAW27) glass + polymer PAIR
+    "MAT_LAMINATED_GLASS":                    handle_mat_laminated_glass,
+    "MAT_032":                                handle_mat_laminated_glass,
+    "MAT_32":                                 handle_mat_laminated_glass,
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,
@@ -5200,6 +5661,21 @@ HANDLERS = {
     "MAT_SIMPLIFIED_JOHNSON_COOK":            handle_mat_simplified_johnson_cook,
     "SET_SEGMENT":                            handle_set_segment,
 }
+
+
+# *PART_COMPOSITE_{OPTION1}_{OPTION2}_{OPTION3} — OPTION1 in {<blank>, TSHELL,
+# IGA_SHELL}, OPTION2 in {<blank>, LONG}, OPTION3 in {<blank>, CONTACT}
+# (LS-DYNA Vol I R17 p.37-18): TWELVE legal spellings. dispatch() is an exact
+# dict lookup with no *PART_COMPOSITE prefix fallback, and a *PART_COMPOSITE
+# that misses it does not merely get skipped — _make_parts_and_elements emits
+# elements inside the state.parts loop, so the part AND every element on it
+# vanish with no warning. Generating the grammar keeps that from depending on
+# someone hand-enumerating all twelve.
+for _o1 in ("", "_TSHELL", "_IGA_SHELL"):
+    for _o2 in ("", "_LONG"):
+        for _o3 in ("", "_CONTACT"):
+            HANDLERS[f"PART_COMPOSITE{_o1}{_o2}{_o3}"] = handle_part_composite
+del _o1, _o2, _o3
 
 
 def dispatch(block: Block, state: ConversionState) -> None:

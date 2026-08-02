@@ -102,7 +102,9 @@ export the image.
 ### Mesh & geometry
 `*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
-`*PART`, `*SECTION_SHELL`, `*SECTION_SOLID`, `*SECTION_BEAM`
+`*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
+`_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`,
+`*SECTION_SOLID`, `*SECTION_BEAM`
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
@@ -265,6 +267,138 @@ otherwise on the fully-integrated `Isolid=17`); `REF=1` without usable
 reference geometry is warned
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
+
+### Composites
+
+Every law in this family is **orthotropic- or composite-class** in the starter
+(`PROP_SHELL = 2`), and `/PROP/SHELL` (IGTYP 1) accepts only classes 1 and 5 — so
+each converted part is repointed from its section's isotropic property onto a
+synthesized orthotropic one, the same `/PROP`-split mechanism the LAW128 path
+uses. Without that the starter hard-fails with **ERROR 3047**, which is what
+dyna2rad's own MAT_054/055 route does.
+
+`*MAT_ORTHOTROPIC_ELASTIC` (002, + `_TITLE`) → `/MAT/LAW93` (ORTH_HILL) on a
+`/PROP/TYPE11` (SH_SANDW) shell or `/PROP/TYPE6` (SOL_ORTH) solid. **The Poisson
+conversion is the one real numeric trap**: LS-DYNA states its compliance matrix
+with `−ν_ba/E_b` in the (1,2) slot and calls `PRBA` the *minor* ratio, while
+Radioss states it with `−NU12/E11` (`hm_read_mat93.F:203`) and derives
+`NU21 = NU12·E22/E11`. Reciprocity therefore gives `NU12 = PRBA·EA/EB`,
+`NU13 = PRCA·EA/EC`, `NU23 = PRCB·EB/EC` — a naive 1:1 copy is wrong by `EA/EB`,
+which for a typical UD ply is an order of magnitude. Note the shear swap
+(`GBC → G23`, `GCA → G13`) and that this is the **opposite** of LAW127 below.
+MAT_002 is purely elastic while LAW93 is Hill plasticity, so `sigma_y = 1e30` and
+all `R** = 1.0` keep the yield surface unreachable. Zero `EB`/`EC` take the
+starter's own fallbacks instead of dyna2rad's unguarded `inf/NaN`, and an
+unstable `NUij·NUji ≥ 1` pair is warned before the starter's ERROR 3068/307.
+
+`*MAT_ANISOTROPIC_ELASTIC` / `*MAT_002_ANIS` (the 6×6 C-matrix dialect) is
+recognized but **deliberately not emitted**: `/MAT/LAW93` carries nine
+engineering constants and has no home for the 12 anisotropic coupling terms.
+dyna2rad converts this dialect to a LAW93 with **all moduli zero and no
+warning** — a silently stiffness-free material; k2rad warns loudly, names the
+referencing parts, and reports it under *recognized but not emitted*.
+
+`*MAT_ENHANCED_COMPOSITE_DAMAGE` (054 / 055, + numeric aliases) → `/MAT/LAW127`
+(ENHANCED_COMPOSITE) on a `/PROP/TYPE11`. The strengths (`XT/XC/YT/YC/SC`), the
+`SLIM*` stress-limit factors, the `DFAIL*` strains-to-failure, `ALPH/BETA/FBRT/
+YCFAC/EFS/EPSF/EPSR/TSMD/NCYRED/2WAY/TI` and the five strain-rate curves are 1:1.
+**Poisson is copied RAW here** — `hm_read_mat127.F90:127-129` reads `PRBA→nu21`,
+`PRCA→nu31`, `PRCB→nu32` and performs the reciprocity step itself, so applying
+the LAW93 rescale would double-apply it (the two never share a helper). `PFL`
+becomes LAW127's element-deletion `RATIO = |PFL|`, and a `TFAIL` in
+`0 < TFAIL <= 0.1` — LS-DYNA's *absolute* minimum-dt criterion; the band
+switches at **0.1**, not 1 (Vol II R17 p.2-441) — additionally emits a
+`/FAIL/GENE1` of the same id carrying `dtmin`. `TFAIL > 0.1` is the *ratio*
+`dt/dt₀` form, which Radioss's absolute `dtmin` cannot express, so it is
+warn-dropped; it does not survive in the LAW127 `TFAIL` column either, because
+`hm_read_mat127.F90` never fetches that field. `CRIT = 55` (Tsai-Wu) has no LAW127 switch — the law is Chang-Chang
+only — and is warned loudly rather than dropped silently as dyna2rad does
+(whose MAT_054 and MAT_055 output is byte-identical); `/MAT/LAW25` (COMPSH)
+`Iform=0` is the Tsai-Wu law if that criterion is essential. `SOFT`/`SOFT2`/
+`SOFTG` (crashfront softening), `KF` and `DT` have no columns and are warned.
+LAW127 is a 2026-format law: the deck stays at `/BEGIN 2022`, every field reads
+correctly, and the only cost is one cosmetic starter `WARNING 100211` — the same
+trade-off LAW128 already ships under (**verified against `starter_win64.exe`:
+0 errors, and the echo reproduces every modulus, ratio and strength exactly**).
+
+`*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037, + `_ECHANGE` /
+`_NLP_FAILURE` / `_NLP2` / `_ECHANGE_NLP_FAILURE`) → `/MAT/LAW43` (HILL_TAB) on a
+`/PROP/TYPE9`. MAT_037 is transversely isotropic, so the single Lankford r-bar
+fills all three slots: `r00 = r45 = r90 = |R|` (`R < 0` requests a stabilized
+scheme, not a negative ratio), with `C_hard = 0` and `Iyield0 = 0`. LAW43 is
+**tabular-only** — no `SIGY`/`ETAN` slot — so `HLCID = 0` synthesizes a bilinear
+`/FUNCT` `[(0, SIGY), (1, SIGY + ETAN)]`. The slope is `ETAN` **verbatim**: the
+LAW43 curve is stress vs *plastic* strain and MAT_037's `ETAN` is already the
+plastic hardening modulus (Vol II R17 p.2-398, against p.2-172 where
+`*MAT_PLASTIC_KINEMATIC` calls its same-named field a *tangent* modulus — only
+that one needs the `H = E·ETAN/(E−ETAN)` rescale). A negative `ETAN` is
+LS-DYNA's include-normal-stresses flag, so the magnitude is used and the flag
+warn-dropped. dyna2rad writes the same slope but then never binds the curve at
+all (a missing pair of braces at
+`convertmats.cxx:3100-3102` overwrites `func_IDi[0]` with `HLCID = 0` in both
+branches → starter ANCMSG 366). `IDSCALE → FUNCT_IDE` and the `_ECHANGE`
+Young's-modulus evolution `EA/COE → EINF/CE`. An `ICFLD` forming-limit curve
+becomes a `/FAIL/FLD` of the same id with `Ifail_sh = 2` and `Istrain` from the
+option (3/5 → 2, 4 → 1); `STRAINLT` would map to the FLD `ALPHA` field, which
+does not exist in the `FORMAT(radioss2019)` block a `/BEGIN 2022` deck reads, and
+is warn-dropped.
+
+`*MAT_LAMINATED_GLASS` (032, + `_TITLE`) → a synthesized **`/MAT/PLAS_BRIT`
+(LAW27) pair** — a brittle glass and a ductile polymer interlayer — bound per
+integration point by a layered `/PROP/TYPE11`. Following dyna2rad the polymer
+inherits the LS-DYNA MID (so existing references resolve) and the glass takes a
+fresh id from the new `next_mat_id()` guard. The `F_i` array selects the phase
+per layer with **LS-DYNA's polarity** (`F_i = 0` → glass, `≠ 0` → polymer):
+dyna2rad has two contradictory implementations of this and its SH_SANDW one both
+inverts the test *and* mutates the `/PART` mat_ID inside the layer loop, so every
+layer after the first polymer one also becomes polymer. Only the glass can fail,
+so `EFG` becomes a brittle-damage ramp (`EPS_t = EFG`, `EPS_m = EFG+0.05`,
+`EPS_f = EFG+0.1`) and the polymer keeps the never-damage defaults. `ETG`/`ETP`
+go straight into the LAW27 `b` (with `n = 1`, `b` **is** `dSigma/dEps_plastic`)
+— the manual names both fields "Plastic hardening modulus" (Vol II R17
+p.2-314/315), so no tangent-modulus rescale applies. Layer thicknesses are the section
+thickness split evenly — LS-DYNA takes them from the `*INTEGRATION_SHELL` rule
+the material requires, which k2rad does not read, and says so.
+
+`*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`, and the optional
+`OPTCARD`) → `/PROP/TYPE51` (stack) + one `/PROP/TYPE19` (PLY) per layer,
+replacing the section-derived property for that part. `ELFORM` → `Ishell` through
+the same `_elform_to_ishell` mapping (and the same `--shell-formulation` option)
+every other shell property uses; `NLOC` 0/−1/+1 → `Ipos` 0/4/3; an explicitly
+given `SHRF` → `Ashear` (a blank field keeps Radioss's 5/6 rather than
+LS-DYNA's 1.0 default, which would silently stiffen transverse shear by 20%
+against both dyna2rad and every other k2rad shell); each ply's
+`B_i` rides on its own `delta_phi`. **Each ply takes two lines** on the TYPE51
+card — the ply card plus a mandatory blank — because the importer counts free
+cards and divides by two. Layers with `MID ≤ 0` or zero thickness are LS-DYNA's
+*missing ply* padding and are filtered by identity, not by count: dyna2rad
+shrinks `NIP` but still walks the leading indices, so a hole in the middle
+silently drops the **last** ply there. The layup's orthotropy system comes from
+the **first orthotropic ply material**, which is what LS-DYNA specifies (Remark 1
+— later plies' AOPT/BETA are ignored); dyna2rad reads ply 0 unconditionally and
+loses the axes when ply 0 happens to be isotropic. `MAREA`, the `OPTCARD` `IRPL`
+integration rule, `_CONTACT`'s `OPTT`, `TMID`, `ADPOPT` and `THSHEL` are
+warn-dropped. **`_TSHELL` / `_IGA_SHELL` and an empty layup warn and fall back to
+a plain shell property carrying the summed layup thickness — the part and all
+its elements are always emitted.** (Before this batch `*PART_COMPOSITE` had no
+handler at all, so the whole *part record* vanished and took its entire mesh with
+it, silently.)
+
+**AOPT material axes** are mapped for MAT_002 and MAT_054/055 on both the
+layered shell and the stack: `AOPT=0` → `Ip=20` (Radioss's element-connectivity
+N1→N2 frame, which is exactly LS-DYNA's element-node convention — an exact
+match, not a fallback); `AOPT=2` → a synthesized `/SKEW/FIX` whose `X' = a` and,
+when `d` is given, whose `Z' = a×d`, referenced with `Ip=22`; `AOPT=3` → `Ip=23`
+with `Vx/Vy/Vz = v`; `AOPT < 0` → `Ip=0` + the `*DEFINE_COORDINATE` system's own
+`/SKEW` id. On solids `AOPT=1` → `Ip=21` (point) and `AOPT=4` → `Ip=24`
+(cylindrical) as well. Every remaining combination — `AOPT=1`/`4` on a shell, a
+null `a` or `v`, an undefined coordinate id — falls back to the element frame
+with a loud warning naming the mode. The rotation angle (MAT_002 `BETA`,
+MAT_054 `MANGLE`) is applied whenever nonzero; dyna2rad never reads `MANGLE` at
+all, applies `BETA` only when `> 0` (silently losing a legal negative rotation),
+and its `AOPT < 0` handler on TYPE51 is dead code, so a `*DEFINE_COORDINATE`
+system is lost there entirely. Synthesized skew ids are reserved against the
+shared `/SKEW`+`/FRAME` namespace (starter ERROR 79 otherwise).
 
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),

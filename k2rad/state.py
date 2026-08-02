@@ -5,7 +5,7 @@ k2rad.state  –  ConversionState: all data collected from the .k file.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -634,6 +634,255 @@ class MatAnisoViscoplastic:
     yp: float = 0.0
     zp: float = 0.0
     beta: float = 0.0    # AOPT=3 rotation angle (degrees)
+
+
+# ── Composites ───────────────────────────────────────────────────────────────
+# The four composite/orthotropic material families and the *PART_COMPOSITE
+# per-ply layup. Every one of these laws is orthotropic- or composite-class in
+# the starter (PROP_SHELL=2), so a converted part can never sit on the isotropic
+# /PROP/SHELL (ERROR 3047) — each gets a synthesized orthotropic property, see
+# ``ConversionState.composite_prop_ids``.
+#
+# AOPT convention (shared by MAT_002 and MAT_054/055, and identical to the
+# MAT_103 one above): the axis cards carry fixed slots that are blank where the
+# active AOPT does not use them, so the handler reads EVERY slot unconditionally
+# and all AOPT interpretation lives in the writer.
+
+@dataclass
+class MatOrthotropicElastic:
+    """*MAT_ORTHOTROPIC_ELASTIC (MAT_002) → /MAT/LAW93 (ORTH_HILL).
+
+    Linear orthotropic elasticity. LAW93 is an orthotropic *Hill-plasticity* law,
+    so the elastic-only MAT_002 is emitted with ``sigma_y = 1e30`` (yield never
+    reached) and all Hill r-ratios at 1.0 — matching dyna2rad's
+    ``p_ConvertMatL2``, which writes only the moduli and lets the cfg defaults
+    supply the rest.
+
+    POISSON CONVENTION — the one real numeric trap. LS-DYNA ``PRBA`` is ν_ba
+    (Manual Vol II R16 p.2-157: "PRBA is the minor Poisson's ratio if EA > EB"),
+    while Radioss ``NU12`` is the MAJOR ratio tied to E11 (``hm_read_mat93.F``
+    computes ``NU21 = NU12*E22/E11``). Reciprocity ν_ab/E_a = ν_ba/E_b therefore
+    makes the conversion ``NU12 = PRBA·EA/EB`` — NOT a 1:1 copy. Note this is the
+    OPPOSITE of LAW127 (*MAT_054), which takes PRBA verbatim; the two must never
+    share a conversion helper.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    ea: float = 0.0
+    eb: float = 0.0
+    ec: float = 0.0
+    prba: float = 0.0    # ν_ba  → LAW93 NU12 = PRBA·EA/EB
+    prca: float = 0.0    # ν_ca  → LAW93 NU13 = PRCA·EA/EC
+    prcb: float = 0.0    # ν_cb  → LAW93 NU23 = PRCB·EB/EC
+    gab: float = 0.0     # → G12
+    gbc: float = 0.0     # → G23   (note the GBC/GCA swap vs the card order)
+    gca: float = 0.0     # → G13
+    # Material-axis option + every axis slot (see the module note above).
+    aopt: float = 0.0
+    xp: float = 0.0      # AOPT=1/4 reference point P
+    yp: float = 0.0
+    zp: float = 0.0
+    a1: float = 0.0      # AOPT=2 global material-1 vector a
+    a2: float = 0.0
+    a3: float = 0.0
+    v1: float = 0.0      # AOPT=3/4 reference vector v
+    v2: float = 0.0
+    v3: float = 0.0
+    d1: float = 0.0      # AOPT=2 in-plane vector d
+    d2: float = 0.0
+    d3: float = 0.0
+    beta: float = 0.0    # rotation about the shell normal / material axis (deg)
+    macf: int = 0        # axis-swap flag — no Radioss counterpart, warn-dropped
+
+
+@dataclass
+class MatEnhancedCompositeDamage:
+    """*MAT_ENHANCED_COMPOSITE_DAMAGE (MAT_054 / MAT_055) → /MAT/LAW127.
+
+    LAW127 (/MAT/ENHANCED_COMPOSITE) is a direct MAT_054 clone: the strengths
+    (XT/XC/YT/YC/SC), the SLIM* stress-limit factors, the DFAIL* strains-to-
+    failure and the rate curves all have 1:1 slots.
+
+    POISSON CONVENTION: LAW127 takes the LS-DYNA MINOR ratios VERBATIM
+    (``hm_read_mat127.F90`` reads PRBA→nu21, PRCB→nu32, PRCA→nu31 and derives
+    ``nu12 = nu21*e1/e2`` itself). Do NOT apply the LAW93 ``E·ν/E`` rescale here
+    — it would double-apply.
+
+    LAW127 is Chang-Chang only: ``CRIT=55`` (Tsai-Wu) has no switch and is
+    warn-dropped, as are SOFT/SOFT2/SOFTG, KF and DT (no columns exist).
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    ea: float = 0.0
+    eb: float = 0.0
+    ec: float = 0.0
+    prba: float = 0.0    # → LAW127 Nu21 (RAW — no rescale)
+    prca: float = 0.0    # → LAW127 Nu31 (RAW)
+    prcb: float = 0.0    # → LAW127 Nu32 (RAW)
+    gab: float = 0.0     # → G12
+    gbc: float = 0.0     # → G23
+    gca: float = 0.0     # → G13
+    kf: float = 0.0      # bulk modulus of failed material — no LAW127 slot
+    aopt: float = 0.0
+    two_way: float = 0.0
+    ti: float = 0.0
+    xp: float = 0.0
+    yp: float = 0.0
+    zp: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    mangle: float = 0.0  # material-angle offset — dyna2rad never reads it
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    d1: float = 0.0
+    d2: float = 0.0
+    d3: float = 0.0
+    dfailm: float = 0.0  # matrix strain to failure
+    dfails: float = 0.0  # shear strain to failure
+    tfail: float = 0.0   # time-step failure criterion
+    alph: float = 0.0    # shear-nonlinearity weighting
+    soft: float = 0.0    # crashfront softening — no LAW127 slot
+    fbrt: float = 0.0
+    ycfac: float = 2.0
+    dfailt: float = 0.0  # fiber tensile strain to failure
+    dfailc: float = 0.0  # fiber compressive strain to failure (negative)
+    efs: float = 0.0     # effective failure strain
+    xc: float = 0.0
+    xt: float = 0.0
+    yc: float = 0.0
+    yt: float = 0.0
+    sc: float = 0.0
+    crit: float = 0.0    # 54 = Chang-Chang, 55 = Tsai-Wu (LAW127 = 54 only)
+    beta: float = 0.0
+    pfl: float = 0.0     # % layers that must fail → LAW127 RATIO = |PFL|
+    epsf: float = 0.0
+    epsr: float = 0.0
+    tsmd: float = 0.9
+    soft2: float = 0.0   # no LAW127 slot
+    slimt1: float = 1.0
+    slimc1: float = 1.0
+    slimt2: float = 1.0
+    slimc2: float = 1.0
+    slims: float = 1.0   # → SLIMSC
+    ncyred: float = 0.0
+    softg: float = 0.0   # no LAW127 slot
+    lcxc: int = 0        # strain-rate curves → LAW127 LCXC/LCXT/LCYC/LCYT/LCSC
+    lcxt: int = 0
+    lcyc: int = 0
+    lcyt: int = 0
+    lcsc: int = 0
+    dt: float = 0.0      # strain-rate averaging window — no LAW127 slot
+    # True when the deck spelled the keyword *MAT_055 / *MAT_LAMINATED_...
+    # (the Tsai-Wu default); CRIT on card 6 still overrides it.
+    keyword_is_55: bool = False
+
+
+@dataclass
+class MatTransverselyAnisotropic:
+    """*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC (MAT_037) → /MAT/LAW43.
+
+    Transversely-isotropic sheet plasticity driven by a single Lankford r-bar.
+    LAW43 (/MAT/HILL_TAB) is TABULAR-only — there is no SIGY/ETAN slot — so a
+    deck with ``HLCID = 0`` needs a synthesized bilinear hardening /FUNCT
+    (``hard_func_id``, allocated by the writer prepass).
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    E: float = 0.0
+    nu: float = 0.0
+    sigy: float = 0.0
+    etan: float = 0.0
+    r: float = 0.0       # Lankford r-bar → r00 = r45 = r90 = |R|
+    hlcid: int = 0       # hardening curve (σ vs plastic strain)
+    idscale: int = 0     # → LAW43 FUNCT_IDE
+    ea: float = 0.0      # _ECHANGE saturated Young's modulus → EINF
+    coe: float = 0.0     # _ECHANGE decay coefficient → CE
+    icfld: int = 0       # _NLP_FAILURE forming-limit curve → /FAIL/FLD fct_ID
+    strainlt: float = 0.0
+    # 1 = plain, 2 = _ECHANGE, 3 = _NLP_FAILURE, 4 = _NLP2,
+    # 5 = _ECHANGE_NLP_FAILURE (the cfg's ECHANGE_OPTION enum)
+    echange_option: int = 1
+    # writer-resolved: the synthesized bilinear hardening curve id (HLCID = 0)
+    hard_func_id: int = 0
+
+
+@dataclass
+class MatLaminatedGlass:
+    """*MAT_LAMINATED_GLASS (MAT_032) → a /MAT/PLAS_BRIT (LAW27) PAIR.
+
+    MAT_032 is a single LS-DYNA card describing TWO phases — brittle glass and a
+    ductile polymer interlayer — with a per-integration-point ``F_i`` array
+    selecting which phase each layer is. Radioss has no such law, so the
+    converter synthesizes two /MAT/LAW27 materials and a layered /PROP/TYPE11
+    whose per-layer ``m_i`` picks between them (dyna2rad's
+    ``p_ConvertMatL32`` + ``ConvertSecShellsRelatedMatLaminate``).
+
+    ID convention, matching dyna2rad: the POLYMER inherits the LS-DYNA MID (so
+    every existing reference resolves) and the GLASS gets a fresh synthesized id
+    (``glass_mid``), which is also what the converted /PART points at.
+    """
+    mid: int             # = the polymer /MAT id
+    title: str = ""
+    rho: float = 0.0
+    eg: float = 0.0      # glass Young's modulus
+    prg: float = 0.0
+    syg: float = 0.0     # glass yield
+    etg: float = 0.0     # glass tangent modulus
+    efg: float = 0.0     # glass failure strain (only the glass can fail)
+    ep: float = 0.0      # polymer Young's modulus
+    prp: float = 0.0
+    syp: float = 0.0
+    etp: float = 0.0
+    # F_i, one per integration point: 0.0 = glass, 1.0 = polymer (LS-DYNA)
+    f: List[float] = field(default_factory=list)
+    # writer-resolved: the synthesized glass /MAT id
+    glass_mid: int = 0
+
+
+@dataclass
+class CompositePly:
+    """One layer of a *PART_COMPOSITE layup (card 5a/5b), bottom → top."""
+    mid: int             # layer material id
+    thick: float         # layer thickness
+    beta: float          # layer material angle (deg) → Radioss Phi_i/delta_phi
+    tmid: int = 0        # thermal material id — no Radioss counterpart
+    plyid: int = 0       # _LONG only
+    shrfac: float = 0.0  # _LONG only
+
+
+@dataclass
+class PartComposite:
+    """*PART_COMPOSITE (+ _TITLE / _LONG / _CONTACT / _TSHELL / _IGA_SHELL).
+
+    A *PART that carries its own per-ply layup instead of pointing at a
+    *SECTION_SHELL — converted to /PROP/TYPE51 (stack) plus one /PROP/TYPE19
+    (PLY) per layer. ``variant`` is "" for the thin-shell (supported) form;
+    TSHELL / IGA_SHELL warn and fall back to a plain shell property so the
+    part's MESH is never lost.
+    """
+    pid: int
+    title: str = ""
+    elform: int = 0
+    # LS-DYNA's own SHRF default is 1.0, but a BLANK field is recorded as 0.0
+    # ("not given") so the writer can fall back to Radioss's 5/6 instead of
+    # silently making the part 20% stiffer in transverse shear than the same
+    # deck converted by dyna2rad, which never touches Ashear on this path.
+    shrf: float = 0.0    # → /PROP/TYPE51 Ashear, only when explicitly given
+    nloc: float = 0.0    # 1 = top, 0 = mid, -1 = bottom → Ipos 3 / 0 / 4
+    marea: float = 0.0   # non-structural mass per area
+    hgid: int = 0
+    adpopt: int = 0
+    thshel: int = 0
+    plies: List[CompositePly] = field(default_factory=list)
+    variant: str = ""    # "", "TSHELL", "IGA_SHELL"
+    long_form: bool = False
+    irpl: int = 0        # optional OPTCARD: 103 = 3-point Simpson per layer
+    optt: float = 0.0    # _CONTACT contact thickness
 
 
 @dataclass
@@ -2121,6 +2370,16 @@ class ConversionState:
     # cannot use the isotropic /PROP/SHELL|SOLID — the writer emits a dedicated
     # /PROP/TYPE9 (shell) or /PROP/TYPE6 (solid) and points the /PART at it.
     ortho_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # part_id → synthesized COMPOSITE property id. Same split mechanism as
+    # ortho_prop_ids (the /PART is repointed in _make_parts_and_elements and the
+    # section's shared /PROP/SHELL is suppressed when every part left it), for
+    # the four orthotropic/composite material families and *PART_COMPOSITE.
+    # Claimed FIRST: _assign_ortho_props and _assign_hourglass_props both skip a
+    # part that already has a composite property.
+    composite_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # *PART_COMPOSITE parts, keyed by PID — the per-ply layup that replaces the
+    # section-derived property (→ /PROP/TYPE51 + one /PROP/TYPE19 per ply).
+    part_composites: Dict[int, PartComposite] = field(default_factory=dict)
 
     # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
     # HourglassDef; consumed by the per-part hourglass /PROP overlay.
@@ -2146,6 +2405,17 @@ class ConversionState:
     # *MAT_ANISOTROPIC_VISCOPLASTIC (103) → /MAT/LAW128 (HILL_VISC_PLAST) +
     # a synthesized orthotropic property (see ortho_prop_ids)
     mat_aniso_visco: Dict[int, MatAnisoViscoplastic] = field(default_factory=dict)
+    # Composite / orthotropic material families:
+    #   MAT_002     → /MAT/LAW93  (ORTH_HILL, elastic-only: sigma_y = 1e30)
+    #   MAT_054/055 → /MAT/LAW127 (ENHANCED_COMPOSITE) [+ /FAIL/GENE1 on TFAIL]
+    #   MAT_037     → /MAT/LAW43  (HILL_TAB) [+ /FAIL/FLD on ICFLD]
+    #   MAT_032     → a /MAT/PLAS_BRIT (LAW27) glass+polymer PAIR
+    mat_orthotropic: Dict[int, MatOrthotropicElastic] = field(default_factory=dict)
+    mat_enhanced_composite: Dict[int, MatEnhancedCompositeDamage] = \
+        field(default_factory=dict)
+    mat_transverse_aniso: Dict[int, MatTransverselyAnisotropic] = \
+        field(default_factory=dict)
+    mat_laminated_glass: Dict[int, MatLaminatedGlass] = field(default_factory=dict)
     mat_rigid: Dict[int, MatRigid] = field(default_factory=dict)
     mat_null: Dict[int, MatNull] = field(default_factory=dict)
     mat_power_law: Dict[int, MatPowerLaw] = field(default_factory=dict)
@@ -2234,6 +2504,13 @@ class ConversionState:
     # LS-DYNA vector VID → converted /SKEW id (define_vectors / sd_orientations)
     vector_skew_ids: Dict[int, int] = field(default_factory=dict)
     sdorient_skew_ids: Dict[int, int] = field(default_factory=dict)
+    # /SKEW ids minted by the WRITERS for synthesized orthotropy frames (the
+    # LAW128 solid skews in writer/mesh.py, the AOPT=2 composite skews in
+    # writer/composites.py). Both emitters run in the same build_starter pass
+    # and both allocate by bumping off all_skew_ids(), so the reservation has
+    # to be shared or the second one can land on an id the first already took
+    # (starter ERROR 79 DUPLICATE ID).
+    synth_skew_ids: Set[int] = field(default_factory=set)
     # *DEFINE_BOX[_LOCAL] → numeric node-membership scoping (box_id → record)
     boxes: Dict[int, DefineBox] = field(default_factory=dict)
 
@@ -2475,6 +2752,44 @@ class ConversionState:
             prop_id = self.next_id()
         return prop_id
 
+    def all_mat_ids(self) -> set:
+        """Every /MAT id the deck emits under a USER id. Every k2rad material
+        emitter writes ``/MAT/<law>/<mid>`` with the LS-DYNA MID verbatim, so
+        this is exactly the union of the per-family material dicts (plus the
+        *MAT_032 glass companions, which are synthesized but already reserved).
+        """
+        ids = set()
+        for d in (self.mat_elastic, self.mat_plas_tab, self.mat_plas_kin,
+                  self.mat_johnson_cook, self.mat_aniso_visco, self.mat_rigid,
+                  self.mat_null, self.mat_power_law, self.mat_samp,
+                  self.mat_crushable_foam, self.mat_low_density_foam,
+                  self.mat_fu_chang_foam, self.mat_honeycomb, self.mat_blatz_ko,
+                  self.mat_mooney_rivlin, self.mat_ogden, self.mat_hyper_rubber,
+                  self.mat_high_explosive, self.mat_spotweld,
+                  self.mat_orthotropic, self.mat_enhanced_composite,
+                  self.mat_transverse_aniso, self.mat_laminated_glass):
+            ids |= set(d)
+        ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
+                if g.glass_mid}
+        return ids
+
+    def next_mat_id(self) -> int:
+        """A next_id() guaranteed free in the /MAT namespace, so a SYNTHESIZED
+        material (the *MAT_032 glass companion, the ALE /MAT/LAW51) can never
+        collide with a converted *MAT whose MID happens to be at or above the
+        auto-id base (90001). Same guard shape as next_curve_id / next_part_id /
+        next_prop_id, and a no-op vs next_id() in the common case (no user
+        material that high), so it does not shift ids on any ordinary deck.
+
+        k2rad emits every /MAT under the LS-DYNA MID verbatim (there is no
+        material-duplication remap as in dyna2rad), so a clash here is a starter
+        ERROR 79 DUPLICATE ID."""
+        used = self.all_mat_ids()
+        mid = self.next_id()
+        while mid in used:
+            mid = self.next_id()
+        return mid
+
     def next_grnod_id(self) -> int:
         """A next_id() guaranteed free in the /GRNOD namespace.
 
@@ -2510,7 +2825,18 @@ class ConversionState:
                 | set(self.coord_vectors)
                 | set(self.vector_skew_ids.values())
                 | set(self.sdorient_skew_ids.values())
-                | set(self.joint_skew_ids.values()))
+                | set(self.joint_skew_ids.values())
+                | set(self.synth_skew_ids))
+
+    def reserve_skew_id(self, preferred: int) -> int:
+        """Claim a free /SKEW id at or above *preferred* and record it, so a
+        later synthesized skew (from any writer module) cannot reuse it."""
+        used = self.all_skew_ids()
+        skew_id = preferred
+        while skew_id in used:
+            skew_id += 1
+        self.synth_skew_ids.add(skew_id)
+        return skew_id
 
     def warn(self, msg: str) -> None:
         self.warnings.append(msg)

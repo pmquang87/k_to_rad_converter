@@ -11,6 +11,168 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Composites: `*MAT_ORTHOTROPIC_ELASTIC` (002) → `/MAT/LAW93`,
+  `*MAT_ENHANCED_COMPOSITE_DAMAGE` (054/055) → `/MAT/LAW127`,
+  `*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037) → `/MAT/LAW43`,
+  `*MAT_LAMINATED_GLASS` (032) → a `/MAT/PLAS_BRIT` (LAW27) pair, and
+  `*PART_COMPOSITE` → `/PROP/TYPE51` + one `/PROP/TYPE19` per ply.** No flag: a
+  deck without composite cards is byte-identical (all five goldens unchanged,
+  asserted again inside `tests/test_composites.py`). New writer module
+  `k2rad/writer/composites.py`; 103 new tests (1147 -> 1250).
+
+  Every one of these laws registers as orthotropic- or composite-class in the
+  starter (`PROP_SHELL = 2`, `init_mat_keyword.F:212-249`) and `/PROP/SHELL`
+  (IGTYP 1) accepts only classes 1 and 5
+  (`check_mat_elem_prop_compatibility.F:173-176`), so **a converted part can
+  never stay on its section's isotropic property** — each is repointed onto a
+  synthesized orthotropic one via a new `state.composite_prop_ids` split, the
+  same mechanism the LAW128 (MAT_103) path uses. This is a real dyna2rad
+  defect, not just a design choice: its `p_ConvertSectionShell`
+  (`convertprops.cxx:734-765`) matches neither MAT_054/055 nor
+  `*MAT_ANISOTROPIC_ELASTIC`, so both fall through to `/PROP/TYPE1` and
+  hard-fail the starter with ANCMSG 3047.
+
+  **`*PART_COMPOSITE` had no handler at all before this batch, and the failure
+  mode was mesh loss, not a skip.** `_make_parts_and_elements` emits elements
+  *inside* the `state.parts` loop, so a part with no `PartData` is never
+  reached — the entire part and every element on it vanished from the deck with
+  no warning of any kind. The handler now always registers the `*PART`, for
+  every OPTION1/2/3 spelling including the ones whose layup cannot be
+  converted.
+
+  Card layouts are from the `hm_cfg_files` revision a `/BEGIN 2022` deck
+  actually reads: `MAT/matl93_ORTH_HILL.cfg FORMAT(radioss2021)`,
+  `MAT/matl43_HILL_TAB.cfg FORMAT(radioss2021)`,
+  `MAT/matl27_plas_brit.cfg FORMAT(radioss2019)`,
+  `MAT/matl127_enhanced_composite.cfg`,
+  `PROP/prop_p11_sh_sandw.cfg FORMAT(radioss2022)`,
+  `PROP/prop_p51.cfg FORMAT(radioss2022)`,
+  `PLY/prop_ply.cfg FORMAT(radioss2017)`,
+  `FAIL/fail_fld.cfg FORMAT(radioss2019)` and
+  `FAIL/fail_gene1.cfg FORMAT(radioss2022)`.
+
+  **The Poisson conventions are the one real numeric trap, and the two target
+  laws disagree with each other.** LS-DYNA states its compliance matrix with
+  `−ν_ba/E_b` in the (1,2) slot (Manual Vol II R16 p.2-156) and calls `PRBA` the
+  *minor* ratio; Radioss LAW93 states it with `−NU12/E11` and derives
+  `NU21 = NU12·E22/E11` (`hm_read_mat93.F:192,203`), so `NU12` is the *major*
+  ratio and reciprocity forces `NU12 = PRBA·EA/EB`, `NU13 = PRCA·EA/EC`,
+  `NU23 = PRCB·EB/EC` — a 1:1 copy is wrong by `EA/EB`, an order of magnitude
+  for a typical UD ply. LAW127 is the opposite: `hm_read_mat127.F90:127-129`
+  reads `PRBA→nu21`, `PRCA→nu31`, `PRCB→nu32` and does the reciprocity step
+  itself (`:186-198`), so those are copied **raw** and applying the LAW93
+  rescale would double-apply it. The two paths deliberately share no helper.
+  Also note LAW93's shear swap, `GBC→G23` and `GCA→G13`.
+
+  **LAW127 at `/BEGIN 2022`.** `matl127_enhanced_composite.cfg` exists only in
+  the `radioss2026` cfg folder, so on paper the downward-only cfg search path
+  puts it out of reach. Empirically it is not: `starter_win64.exe` reads a
+  `/BEGIN 2022` deck containing `/MAT/LAW127` with **0 errors** and echoes
+  E1/E2/E3, G12/G13/G23, nu21/nu31/nu32, XT/XC/YT/YC/SC and every SLIM* factor
+  at their exact input values, at the cost of one cosmetic `WARNING 100211`
+  ("Unsupported option /MAT/LAW127 in format < 2025"). That is the identical
+  trade-off `/MAT/LAW128` already ships under, so LAW127 is used rather than
+  degrading MAT_054 to `/MAT/LAW25`. Both the full composite deck and a
+  variants/fallback deck were run through the starter to 0 errors.
+
+  Deliberate divergences from dyna2rad, each a defect it has rather than a
+  convention it holds:
+
+  * `*MAT_ANISOTROPIC_ELASTIC` (the 002 6×6 C-matrix dialect) is **not
+    emitted**. `p_ConvertMatL2` never checks the dialect, so it writes a
+    `/MAT/LAW93` with **all moduli zero and no warning** — a silently
+    stiffness-free material. LAW93 has nine engineering-constant slots and no
+    home for the 12 coupling terms; inverting `C` is only well-defined when they
+    all vanish, and guessing the Voigt shear-index convention would risk exactly
+    the silently-wrong material being avoided. k2rad warns loudly, names the
+    referencing parts and reports it under *recognized but not emitted*.
+  * The MAT_037 hardening curve is actually **bound**. dyna2rad emits the same
+    `{(0, SIGY), (1, SIGY + |ETAN|)}` slope, but never binds it: missing braces
+    at `convertmats.cxx:3100-3102` put line 3102 outside the `if/else`,
+    overwriting `func_IDi[0]` with `HLCID` (= 0) in both branches and leaving
+    `NUM_CURVES = 1` pointing at function 0 → starter ANCMSG 366
+    (`hm_read_mat43.F:158-164`).
+  * **The `TFAIL` band.** LS-DYNA switches criterion at **0.1**, not at 1
+    (Vol II R17 p.2-441): `0 < TFAIL ≤ 0.1` is an *absolute* minimum time step,
+    `TFAIL > 0.1` is the *ratio* `dt/dt₀`. dyna2rad gates its `/FAIL/GENE1`
+    companion on `0 < TFAIL < 1` (`convertmats.cxx:3205-3219`), so every ratio
+    in `(0.1, 1)` is re-emitted as an absolute `dtmin` — and `/FAIL/GENE1`'s
+    `dtmin` really is absolute (`fail_gene1_c.F:398`
+    `IF (GBUF_DT(I)*DTFAC1(1) <= DTMIN)`), so in a Mg/mm/s deck (`dt ≈ 1e-7`) a
+    `TFAIL` of 0.5 deletes **every element of the part on cycle 1**, silently.
+    The band here is the manual's; the ratio form is warn-dropped, because it
+    has no Radioss counterpart *and* does not survive in the LAW127 `TFAIL`
+    column either — `hm_read_mat127.F90` never fetches that field.
+  * The MAT_032 `F_i` polarity. LS-DYNA: `F_i = 0` → glass, `1.0` → polymer.
+    `ConvertSecShellsRelatedMatLaminate` (`convertprops.cxx:1620-1641`) inverts
+    it **and** rewrites the `/PART`'s `mat_ID` inside the layer loop, so every
+    layer after the first polymer one also gets the polymer; its own
+    `*INTEGRATION_SHELL` path (`:2024-2050`) has the correct polarity. The
+    correct one is used.
+  * `*PART_COMPOSITE` missing-ply filtering. A layer with `THICK = 0` and
+    `MID = -1` is LS-DYNA's alignment padding. dyna2rad reduces `lsdNip` to the
+    valid *count* but its emission loop still walks indices `0 … nipOk-1`, so a
+    hole in the middle silently drops the **last** ply
+    (`convertprops.cxx:3588-3680`). Filtering is by identity here.
+  * `*PART_COMPOSITE` material axes. dyna2rad reads ply 0's material
+    unconditionally; LS-DYNA specifies the **first orthotropic** integration
+    point (Remark 1 — later plies' AOPT/BETA are ignored), so an isotropic ply 0
+    would lose the axes. Its `AOPT < 0` branch (`convertprops.cxx:3630-3634`) is
+    also dead code — `axisOptFlag` is never negative after the cfg's enum remap
+    — so a `*DEFINE_COORDINATE` system is lost entirely on TYPE51; here it binds
+    to that system's own `/SKEW` id with `Ip = 0`.
+  * `MANGLE` (MAT_054's material-angle offset, card 3 field 7 — distinct from
+    card 6's `BETA`, which is the shear-term weighting) is never read anywhere
+    in dyna2rad; it is carried onto the property rotation. `BETA` is applied
+    whenever nonzero rather than only when `> 0`, which silently drops a legal
+    negative rotation.
+  * `EA*PRBA/EB` and friends are evaluated by dyna2rad through exprtk with **no
+    zero guard** (`convertmats.cxx:643-645`), yielding `inf`/`NaN`; zero `EB`/`EC`
+    take the starter's own `E22←E11`, `E33←E22` fallbacks here, and an unstable
+    `NUij·NUji ≥ 1` pair is warned before the starter's ERROR 3068 / ERROR 307.
+
+  Faithfully replicated dyna2rad behaviour: the MAT_032 id convention (polymer
+  keeps the LS-DYNA MID, glass takes a synthesized id, the `/PART` points at the
+  glass) and its `EFG` / `EFG+0.05` / `EFG+0.1` damage ramp; `RATIO = |PFL|`;
+  the `/FAIL/GENE1` `dtmin` companion itself (`hm_read_fail_gene1.F:146`), on
+  the manual's `TFAIL` band rather than dyna2rad's; `/FAIL/FLD` with
+  `Ifail_sh = 2` and `Istrain` 2/1 from the `ECHANGE_OPTION` enum;
+  `NLOC`→`Ipos` 0/4/3 and `Ithick = 1`; and the `NIP > 10` layer clamp.
+  `*PART_COMPOSITE`'s `Ishell` deliberately does **not** follow dyna2rad's
+  hard-wired 12/24 split on `ELFORM` −16/9: it goes through the same
+  `_elform_to_ishell` mapping — and therefore the same `--shell-formulation`
+  option — as every other k2rad shell property, so one LS-DYNA `ELFORM` cannot
+  produce two different Radioss formulations depending on whether the part used
+  `*SECTION_SHELL` or `*PART_COMPOSITE`. Likewise a **blank** `SHRF` keeps
+  Radioss's 5/6 `Ashear` (dyna2rad never sets the field) instead of LS-DYNA's
+  own 1.0 default, which would stiffen transverse shear by 20% off a default
+  rather than off deck data; an explicitly given `SHRF` is still carried.
+
+  Warn-dropped with the physics consequence named, not silently as dyna2rad
+  does: MAT_054's `SOFT`/`SOFT2`/`SOFTG` (crashfront softening — a crush front
+  propagates less readily than in LS-DYNA), `KF`, `DT` and `CRIT = 55` (LAW127
+  is Chang-Chang only; the cfg declares `LSD_CRIT` but no `CARD()` ever writes
+  it, so dyna2rad's MAT_054 and MAT_055 output is byte-identical);
+  `TFAIL > 0.1`'s ratio form (Radioss `dtmin` is absolute, and LAW127's `TFAIL`
+  column is never read by the starter, so it survives nowhere); MAT_037's
+  negative-`ETAN` include-normal-stresses flag (the magnitude is kept as the
+  hardening modulus); MAT_002's `MACF` axis
+  swap, `G`, `SIGF` and `REF`; MAT_037's `STRAINLT` (the `/FAIL/FLD` `ALPHA`
+  column does not exist in the FORMAT(radioss2019) block a `/BEGIN 2022` deck
+  reads); and `*PART_COMPOSITE`'s `OPTCARD` `IRPL`, `_CONTACT` `OPTT`, `TMID`,
+  `ADPOPT` and `THSHEL`. `*PART_COMPOSITE`'s `MAREA` is warn-dropped too, but
+  the warning says so explicitly: dyna2rad *does* convert it (to an `/ADMAS`
+  type 2 over a `/SET/GENERAL` of the part), so a layup with non-structural mass
+  comes out lighter here than through dyna2rad, changing inertia and the nodal
+  time step.
+
+  Supporting changes: `ConversionState.next_mat_id()` + `all_mat_ids()` (the
+  `/MAT` namespace guard the MAT_032 glass companion needs — k2rad emits every
+  `/MAT` under the LS-DYNA MID verbatim, so a synthesized id colliding with a
+  user MID at or above the auto-id base is starter ERROR 79); the ALE
+  `/MAT/LAW51` in `blast_ale.py` now uses that guard instead of a bare
+  `next_id()`, fixing the same latent hazard.
+
 - **`*CONSTRAINED_JOINT_*` → `/PROP/TYPE45` (KJOINT2) + `/SPRING` + a
   node-derived `/SKEW/FIX`, with `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED` /
   `_TRANSLATIONAL` filling the per-DOF blocks.** All seven kinematic joint kinds

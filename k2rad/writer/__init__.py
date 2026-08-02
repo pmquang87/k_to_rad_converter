@@ -15,6 +15,8 @@ below is re-exported so ``k2rad.writer`` keeps the old flat namespace):
 
   common     – field formatting (_f/_i), group/surface emitters, vector math
   materials  – /MAT laws, EOS, failure cards, /FUNCT curves, table resolution
+  composites – orthotropic/composite laws (LAW93/127/43/27 pair), the per-ply
+               *PART_COMPOSITE layup (TYPE51+TYPE19) and the AOPT axis mapping
   mesh       – nodes, skews, parts+elements, TET10 handling, properties
   contacts   – /INTER TYPE7/TYPE25/TYPE2, force transducers, contact warnings
   rbody      – /RBODY, constrained nodal rigid bodies, merges, probe body
@@ -201,6 +203,21 @@ from .loads import (
     _make_modal_dummy_cload,
     _make_damping,
     _make_free_node_constraints,
+)
+from .composites import (
+    _resolve_composites,
+    _assign_composite_props,
+    _make_composite_materials,
+    _emit_composite_props,
+    _emit_mat_law93,
+    _emit_mat_law127,
+    _emit_mat_law43,
+    _emit_mat_law27_pair,
+    _emit_prop_type11,
+    _emit_prop_type51,
+    _emit_prop_type19,
+    _composite_ref_axis,
+    _composite_material_mids,
 )
 from .joints import (
     DEG2RAD,
@@ -449,6 +466,19 @@ __all__ = [
     "_match_joint_stiffness",
     "_stiffness_dof_map",
     "_make_joints",
+    "_resolve_composites",
+    "_assign_composite_props",
+    "_make_composite_materials",
+    "_emit_composite_props",
+    "_emit_mat_law93",
+    "_emit_mat_law127",
+    "_emit_mat_law43",
+    "_emit_mat_law27_pair",
+    "_emit_prop_type11",
+    "_emit_prop_type51",
+    "_emit_prop_type19",
+    "_composite_ref_axis",
+    "_composite_material_mids",
     "_AXIS_VEC",
     "_blast_target_bbox",
     "_infer_blast_up_axis",
