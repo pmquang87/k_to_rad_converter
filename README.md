@@ -152,6 +152,14 @@ oriented `/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation'
 `/SKEW` axis (only TYPE8 carries a `skew_ID`); a `DRO=1` torsional section and an
 unresolvable `VID` (`IOP=1/3`, which dyna2rad lacks too) stay warned + skipped
 
+Elements are emitted **per `*PART`**, so an element whose `PID` no `*PART`
+defines cannot be written at all. Rather than let that mesh disappear quietly,
+the conversion opens with an orphan-element guard: one `MESH LOSS` warning
+naming every missing part id and how many shells / solids / beams / discretes
+went with it. It fires on an `*INCLUDE` that did not resolve, a `PID` typo, a
+deck assembled from a subset of its parts, and on any `*PART` variant the parser
+does not yet recognize.
+
 ### Materials
 `*MAT_ELASTIC` → `/MAT/LAW1`
 `*MAT_PIECEWISE_LINEAR_PLASTICITY` (+ `_MODIFIED_`) → `/MAT/LAW36`

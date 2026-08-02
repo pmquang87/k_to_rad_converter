@@ -438,7 +438,81 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
     return ["/CPU", f"{_f(state.ctrl_cpu.cputim)}         2", "#"]
 
 
+# Orphan-element guard
+#
+# Every structural element is emitted from INSIDE the
+# ``for pid, part in sorted(state.parts.items())`` loop of
+# ``writer/mesh.py::_make_parts_and_elements`` (and, for the spring/damper
+# connectors, from the per-part loops in ``writer/loads.py``). An element whose
+# PID has no ``PartData`` is therefore never REACHED: it is not skipped with a
+# message, not counted as unsupported — the loop simply never visits that id and
+# the element does not appear in the .rad at all. Nothing downstream notices
+# either, because the starter only ever sees the elements that were written.
+#
+# That is the exact failure mode `*PART_COMPOSITE` had before it got a handler:
+# an entire part's mesh disappeared and the converted deck ran happily without
+# it, just lighter and softer than the model the user drew. The same silence
+# covers every other way a PID can go missing — a `*PART` block inside an
+# `*INCLUDE` that did not resolve, an id typo, a deck assembled from a subset of
+# its parts, a `*PART` variant k2rad does not parse yet.
+#
+# So: one loud, aggregated warning naming the missing PIDs and how many elements
+# of each type were lost with them. `*ELEMENT_DISCRETE` is scanned as well even
+# though `_make_discrete_springs` warns per part on its own — this stays the one
+# place that answers "did the conversion drop any of my mesh?", and it keeps
+# answering it if that emitter is ever short-circuited or reordered.
+_ORPHAN_ELEM_KINDS = ("shell", "solid", "beam", "discrete")
+
+# Cap on the PIDs spelled out in the message: a deck missing a whole *INCLUDE
+# can orphan hundreds of parts, and one unreadable 10-kB warning line helps
+# nobody. The total count is always exact.
+_ORPHAN_PIDS_SHOWN = 12
+
+
+def _warn_orphan_elements(state: ConversionState) -> None:
+    """Warn about parsed elements whose PID has no ``*PART`` (see above)."""
+    orphans: Dict[int, Dict[str, int]] = {}
+    for kind, elems in (("shell", state.shell_elems),
+                        ("solid", state.solid_elems),
+                        ("beam", state.beam_elems),
+                        ("discrete", state.discrete_elems)):
+        for e in elems:
+            if e.pid in state.parts:
+                continue
+            per_kind = orphans.setdefault(e.pid, {})
+            per_kind[kind] = per_kind.get(kind, 0) + 1
+    if not orphans:
+        return
+
+    n_elems = sum(sum(per_kind.values()) for per_kind in orphans.values())
+    shown = sorted(orphans)[:_ORPHAN_PIDS_SHOWN]
+    detail = "; ".join(
+        "PID {} ({})".format(
+            pid,
+            ", ".join(f"{orphans[pid][k]} {k}"
+                      for k in _ORPHAN_ELEM_KINDS if k in orphans[pid]))
+        for pid in shown)
+    if len(orphans) > len(shown):
+        detail += f"; and {len(orphans) - len(shown)} more part id(s)"
+
+    state.warn(
+        f"MESH LOSS: {n_elems} element(s) reference {len(orphans)} part id(s) "
+        f"that no *PART card defines, and are NOT in the converted deck — "
+        f"{detail}. k2rad emits elements per /PART, so an element whose PID has "
+        "no *PART has nowhere to go and is dropped silently: the .rad runs, but "
+        "that mesh is missing from it (less stiffness, less mass, no contact "
+        "surface). Check for an *INCLUDE that did not resolve or a *PART id "
+        "typo, add the missing *PART (with its *SECTION_* and *MAT_*), or "
+        "delete the elements.")
+
+
 def build_starter(state: ConversionState, progress=None) -> str:
+    # FIRST, on the parsed deck: report elements orphaned by a missing *PART
+    # before any prepass edits the element stores (the tet10 downgrade and the
+    # sliver screening below both delete/rewrite solids, and they announce their
+    # own drops), so the counts describe what the .k file actually contained.
+    _warn_orphan_elements(state)
+
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
