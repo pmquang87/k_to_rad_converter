@@ -28,6 +28,7 @@ from .state import (
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     MatBlatzKo, MatMooneyRivlin, MatOgdenRubber, MatHyperelasticRubber,
+    MatIsoElasPlas, MatStrainRatePlas, MatGurson, MatHill3R, MatPlasCompTens,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
@@ -1525,7 +1526,375 @@ def handle_mat_piecewise_linear_plasticity(block: Block, state: ConversionState)
     # _LOG_INTERPOLATION (a MAT_024 keyword option; combines with _2D) selects
     # logarithmic strain-rate interpolation → LAW36 F_smooth=2 in the writer.
     mat.log_interp = "LOG_INTERPOLATION" in block.keyword
+    mat.family = "123" if _is_mat123(block) else "024"
     state.mat_plas_tab[mid] = mat
+
+
+# *MAT_PLASTICITY_WITH_DAMAGE keyword options (Vol II R17 p.2-601). ORTHO turns
+# 081 into 082 (directional damage); RCDC / RCDC1980 add the Wilkins card 5;
+# STOCHASTIC scatters the failure strain via *DEFINE_STOCHASTIC_VARIATION.
+_MAT081_RCDC_OPTIONS = ("ORTHO_RCDC1980", "ORTHO_RCDC", "RCDC1980", "RCDC")
+
+
+def handle_mat_plasticity_with_damage(block: Block, state: ConversionState) -> None:
+    """*MAT_PLASTICITY_WITH_DAMAGE / *MAT_081 / *MAT_082 (+ _ORTHO, _RCDC,
+    _RCDC1980, _STOCHASTIC) → the MAT_024 /MAT/LAW36 path + /FAIL/TAB1.
+
+    Card layout (Vol II R17 pp.2-602/603):
+      Card1: MID RO E PR SIGY ETAN EPPF TDEL
+      Card2: C P LCSS LCSR EPPFR VP LCDM NUMINT
+      Card3: EPS1-EPS8
+      Card4: ES1-ES8
+      Card5: ALPHA BETA GAMMA D0 B LAMBDA DS L   — _RCDC/_RCDC1980 ONLY
+
+    The elasto-plastic half is card-for-card *MAT_024 apart from the two
+    damage strains, so the record rides ``state.mat_plas_tab`` and reuses the
+    whole LCSS/table/EPS-ES/bilinear resolution ladder. Only the card-1 field 7
+    and card-2 field 6 differ in MEANING from MAT_024 (EPPF where MAT_024 has
+    FAIL, VP one slot further right), which is exactly why this cannot share
+    the MAT_024 handler.
+
+    ``fail`` is deliberately left 0: MAT_081 has no FAIL field, and its
+    plastic-strain failure is the EPPF/EPPFR pair on /FAIL/TAB1 instead of a
+    /FAIL/JOHNSON, so a single criterion is never counted twice.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    kw = block.keyword
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    f3 = _card(raw, offset + 2, fixed=False)
+    f4 = _card(raw, offset + 3, fixed=False)
+
+    # *MAT_082 spells the ORTHO option in the number; the named keyword spells
+    # it as a suffix. RCDC/RCDC1980 imply ORTHO too (they are 082 variants).
+    ortho = ("ORTHO" in kw or "RCDC" in kw
+             or kw.startswith("MAT_082") or kw.startswith("MAT_82"))
+    mat = MatPlasTAB(
+        mid, title, rho=g1(1), E=g1(2), nu=g1(3), sigy=g1(4), etan=g1(5),
+        fail=0.0, lcss=to_int(f2[2]) if len(f2) > 2 else 0,
+        C=g2(0), P=g2(1),
+        eps_pts=[to_float(v) for v in f3], es_pts=[to_float(v) for v in f4])
+    mat.eppf = g1(6)
+    mat.tdel = g1(7)
+    mat.lcsr = to_int(f2[3]) if len(f2) > 3 else 0
+    mat.eppfr = g2(4)
+    mat.vp = int(g2(5))
+    mat.lcdm = to_int(f2[6]) if len(f2) > 6 else 0
+    mat.numint = g2(7)
+    mat.ortho_damage = ortho
+    mat.family = "082" if ortho else "081"
+    state.mat_plas_tab[mid] = mat
+
+    if ortho:
+        state.warn(
+            f"*MAT_082 {mid}: the _ORTHO option makes the damage evolution "
+            "DIRECTIONAL (damage tracked separately in the two in-plane "
+            "principal directions, element deleted when either reaches the "
+            "rupture strain). /MAT/LAW36 + /FAIL/TAB1 is ISOTROPIC, so the "
+            "base plasticity and the EPPF/EPPFR damage strains convert but "
+            "the directionality does NOT — expect somewhat later failure "
+            "under non-proportional loading. (dyna2rad drops *MAT_082 "
+            "entirely and silently, leaving the part with no material.)")
+    if any(opt in kw for opt in _MAT081_RCDC_OPTIONS):
+        state.warn(
+            f"*MAT_082 {mid}: the _RCDC/_RCDC1980 option adds the Wilkins "
+            "Rc-Dc damage card (ALPHA BETA GAMMA D0 B LAMBDA DS L), which has "
+            "no OpenRadioss counterpart — that card is NOT read and the "
+            "material converts with the plain EPPF/EPPFR damage of the base "
+            "law. Use *MAT_ADD_DAMAGE_GISSMO (→ /FAIL/TAB2) if a "
+            "triaxiality-driven damage law is the point.")
+    if "STOCHASTIC" in kw:
+        state.warn(
+            f"*MAT_081 {mid}: the _STOCHASTIC option scatters the failure "
+            "strain per element via *DEFINE_STOCHASTIC_VARIATION. Radioss has "
+            "no per-element material scatter, so every element gets the same "
+            "EPPF/EPPFR — the deterministic mean behaviour.")
+
+
+def handle_mat_damage_2(block: Block, state: ConversionState) -> None:
+    """*MAT_DAMAGE_2 / *MAT_105 → /MAT/LAW36 + /FAIL/LEMAITRE (+ /FAIL/JOHNSON).
+
+    Card layout (Vol II R17 pp.2-752/753):
+      Card1: MID RO E PR SIGY ETAN FAIL TDEL
+      Card2: C P LCSS LCSR
+      Card3: EPSD S DC
+      Card4: EPS1-EPS8
+      Card5: ES1-ES8
+
+    Cards 1/2 are *MAT_024's (MAT_105 has no VP column — the formulation is
+    always fully viscoplastic), so the record rides ``state.mat_plas_tab``;
+    the EPS/ES pair sits one card lower because of the Lemaitre card 3.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    g3 = lambda i: to_float(f3[i]) if len(f3) > i else 0.0     # noqa: E731
+    f4 = _card(raw, offset + 3, fixed=False)
+    f5 = _card(raw, offset + 4, fixed=False)
+    mat = MatPlasTAB(
+        mid, title, rho=g1(1), E=g1(2), nu=g1(3), sigy=g1(4), etan=g1(5),
+        fail=g1(6), lcss=to_int(f2[2]) if len(f2) > 2 else 0,
+        C=g2(0), P=g2(1),
+        eps_pts=[to_float(v) for v in f4], es_pts=[to_float(v) for v in f5])
+    mat.tdel = g1(7)
+    mat.lcsr = to_int(f2[3]) if len(f2) > 3 else 0
+    mat.epsd = g3(0)
+    mat.damage_s = g3(1)
+    mat.dc = g3(2)
+    mat.family = "105"
+    state.mat_plas_tab[mid] = mat
+
+
+def handle_mat_strain_rate_dependent_plasticity(block: Block,
+                                                state: ConversionState) -> None:
+    """*MAT_STRAIN_RATE_DEPENDENT_PLASTICITY / *MAT_019 → /MAT/LAW121.
+
+    Card layout (Vol II R17 pp.2-238/239):
+      Card1: MID RO E PR VP
+      Card2: LC1 ETAN LC2 LC3 LC4 TDEL RDEF
+
+    A pure 1:1 pass-through — no curve is sampled or synthesized. LAW121's
+    kernel is literally MAT_019's law: ``sigma_y = sigma_0(eps_dot) +
+    E*Et/(E-Et)*eps_p`` with Et clamped to 0.99E (mat121c_newton.F), so ETAN
+    goes into the TANG slot verbatim and Radioss does the Ep conversion itself.
+
+    Every curve field is typed F in the manual but only ever holds an integer
+    id, so they are read through ``to_int``.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    gi2 = lambda i: to_int(f2[i]) if len(f2) > i else 0        # noqa: E731
+    state.mat_strain_rate_plas[mid] = MatStrainRatePlas(
+        mid=mid, title=title, rho=g1(1), E=g1(2), nu=g1(3), vp=int(g1(4)),
+        lc1=gi2(0),
+        etan=to_float(f2[1]) if len(f2) > 1 else 0.0,
+        lc2=gi2(2), lc3=gi2(3), lc4=gi2(4),
+        tdel=to_float(f2[5]) if len(f2) > 5 else 0.0,
+        rdef=gi2(6))
+
+
+def handle_mat_plasticity_compression_tension(block: Block,
+                                              state: ConversionState) -> None:
+    """*MAT_PLASTICITY_COMPRESSION_TENSION / *MAT_124 → /MAT/LAW66.
+
+    Card layout (Vol II R17 pp.2-873..2-877):
+      Card1: MID RO E PR C P FAIL TDEL
+      Card2: LCIDC LCIDT LCSRC LCSRT SRFLAG LCFAIL EC RPCT
+      Card3: PC PT PCUTC PCUTT PCUTF - - SRFILT
+      Card4: K                                   — always present (may be blank)
+      Card5: Gi BETAi                            — up to 6, to the next "*" card
+
+    Card 4 is REQUIRED even when blank ("Card 4. This card is required."), so
+    the Prony pairs always start at card 5; reading them from the first
+    non-blank line after card 3 would swallow a blank K card's successor.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    gi2 = lambda i: to_int(f2[i]) if len(f2) > i else 0        # noqa: E731
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    g3 = lambda i: to_float(f3[i]) if len(f3) > i else 0.0     # noqa: E731
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    gis: List[float] = []
+    betais: List[float] = []
+    for idx in range(offset + 4, len(raw)):
+        if not raw[idx].strip():
+            continue
+        fc = _card(raw, idx, fixed=True, n=8, w=10)
+        if not fc or not fc[0].strip():
+            continue
+        gis.append(to_float(fc[0]))
+        betais.append(to_float(fc[1]) if len(fc) > 1 else 0.0)
+        if len(gis) >= 6:
+            break
+    state.mat_plas_comp_tens[mid] = MatPlasCompTens(
+        mid=mid, title=title, rho=g1(1), E=g1(2), nu=g1(3),
+        c=g1(4), p=g1(5), fail=g1(6), tdel=g1(7),
+        lcidc=gi2(0), lcidt=gi2(1), lcsrc=gi2(2), lcsrt=gi2(3),
+        srflag=g2(4), lcfail=gi2(5), ec=g2(6), rpct=g2(7),
+        pc=g3(0), pt=g3(1), pcutc=g3(2), pcutt=g3(3), pcutf=g3(4),
+        srfilt=g3(7),
+        k=to_float(f4[0]) if f4 and f4[0].strip() else 0.0,
+        gi=gis, betai=betais)
+
+
+def handle_mat_gurson(block: Block, state: ConversionState) -> None:
+    """*MAT_GURSON / *MAT_120 (+ _JC / _RCDC / _BFRAC) → /MAT/LAW52.
+
+    Card layout (Vol II R17 pp.2-826..2-830):
+      Card1: MID RO E PR SIGY N Q1 Q2
+      Card2: FC F0 EN SN FN ETAN ATYP FF0
+      Card3: EPS1-EPS8
+      Card4: ES1-ES8
+      Card5: L1 L2 L3 L4 FF1 FF2 FF3 FF4
+      Card6: LCSS LCFF NUMINT LCF0 LCFC LCFN VGTYP DEXP
+
+    The *_JC* variant replaces card 5 with ``LCDAM L1 L2 D1 D2 D3 D4 LCJC`` and
+    keeps card 6 (Vol II R17 pp.2-837+); its D1-D4 are Johnson-Cook damage
+    parameters and become a /FAIL/JOHNSON alongside the Gurson law.
+
+    *_RCDC* / *_BFRAC* replace card 5 with a layout this converter does not
+    model. Their card 6 is NOT read rather than read at a guessed stride: a
+    mis-strided card 6 would silently produce a wrong LCSS/LCFF/LCF0 set, which
+    is far worse than a named drop.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    kw = block.keyword
+    if "_JC" in kw:
+        variant = "JC"
+    elif "_RCDC" in kw:
+        variant = "RCDC"
+    elif "_BFRAC" in kw:
+        variant = "BFRAC"
+    else:
+        variant = ""
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+    g5 = lambda i: to_float(f5[i]) if len(f5) > i else 0.0     # noqa: E731
+    mat = MatGurson(
+        mid=mid, title=title, rho=g1(1), E=g1(2), nu=g1(3), sigy=g1(4),
+        n=g1(5), q1=g1(6), q2=g1(7),
+        fc=g2(0), f0=g2(1), en=g2(2), sn=g2(3), fn=g2(4), etan=g2(5),
+        atyp=int(g2(6)), ff0=g2(7),
+        eps_pts=[to_float(v) for v in f3], es_pts=[to_float(v) for v in f4],
+        variant=variant)
+    if variant == "":
+        mat.lengths = [g5(i) for i in range(4)]
+        mat.ffs = [g5(i) for i in range(4, 8)]
+    elif variant == "JC":
+        mat.jc_lcdam = to_int(f5[0]) if f5 else 0
+        mat.jc_l1, mat.jc_l2 = g5(1), g5(2)
+        mat.jc_d = [g5(i) for i in range(3, 7)]
+        mat.jc_lcjc = to_int(f5[7]) if len(f5) > 7 else 0
+    if variant in ("", "JC"):
+        f6 = _card(raw, offset + 5, fixed=True, n=8, w=10)
+        gi6 = lambda i: to_int(f6[i]) if len(f6) > i else 0    # noqa: E731
+        g6 = lambda i: to_float(f6[i]) if len(f6) > i else 0.0  # noqa: E731
+        mat.lcss, mat.lcff = gi6(0), gi6(1)
+        mat.numint = g6(2)
+        mat.lcf0, mat.lcfc, mat.lcfn = gi6(3), gi6(4), gi6(5)
+        mat.vgtyp, mat.dexp = g6(6), g6(7)
+    state.mat_gurson[mid] = mat
+
+    if variant == "JC":
+        state.warn(
+            f"*MAT_GURSON_JC {mid}: the _JC variant adds a Johnson-Cook "
+            "failure strain on top of the Gurson porosity. The Gurson law "
+            "converts to /MAT/LAW52 and D1-D4 become a companion "
+            f"/FAIL/JOHNSON/{mid}, but LS-DYNA applies the two criteria "
+            "TOGETHER inside one material while Radioss evaluates the /FAIL "
+            "card independently of the LAW52 f_F coalescence — the coupling "
+            "(LCDAM element-length scaling and the L1/L2 triaxiality bounds) "
+            "is NOT reproduced. (dyna2rad drops the whole keyword silently: "
+            "*MAT_GURSON_JC is not in its material map.)")
+    elif variant in ("RCDC", "BFRAC"):
+        state.warn(
+            f"*MAT_GURSON_{variant} {mid}: this variant's card 5 is not the "
+            "(L1..L4, FF1..FF4) element-length table of the base keyword and "
+            "k2rad does not model it, so cards 5 AND 6 are left UNREAD — LCSS, "
+            "LCFF, NUMINT, LCF0, LCFC, LCFN, VGTYP and DEXP are all DROPPED "
+            "and the material converts as the plain Gurson law of cards 1-4 "
+            "(hardening from ATYP, failure void fraction from FF0). Reading "
+            "card 6 at a guessed stride would silently invent those ids. "
+            "Restate the material as plain *MAT_GURSON if those fields "
+            "matter. (dyna2rad drops the whole keyword silently.)")
+
+
+def handle_mat_isotropic_elastic_plastic(block: Block,
+                                         state: ConversionState) -> None:
+    """*MAT_ISOTROPIC_ELASTIC_PLASTIC / *MAT_012 → /MAT/LAW2 (PLAS_JOHNS).
+
+    Card layout (Vol II R17 p.2-206), ONE card only:
+      Card1: MID RO G SIGY ETAN BULK
+
+    The only LS-DYNA plasticity card stated in SHEAR + BULK modulus; E and nu
+    are derived in the writer prepass. ETAN is the manual's "Plastic hardening
+    modulus" (p.2-206), i.e. dSIGMA/dEPS_PLASTIC — NOT the total-curve tangent
+    modulus *MAT_003 spells with the same name — so it needs no E*ET/(E-ET)
+    rescale on the way to LAW2's ``b``.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    state.mat_iso_elas_plas[mid] = MatIsoElasPlas(
+        mid=mid, title=title, rho=g1(1), g=g1(2), sigy=g1(3), etan=g1(4),
+        bulk=g1(5))
+
+
+def handle_mat_hill_3r(block: Block, state: ConversionState) -> None:
+    """*MAT_HILL_3R / *MAT_122 → /MAT/LAW43 (HILL_TAB) or /MAT/LAW32 (HILL).
+
+    Card layout (Vol II R17 pp.2-851..2-854), FIVE required cards:
+      Card1: MID RO E PR HR P1 P2
+      Card2: R00 R45 R90 LCID E0
+      Card3: AOPT
+      Card4: (3 blank) A1 A2 A3
+      Card5: V1 V2 V3 D1 D2 D3 BETA
+
+    HR selects the hardening rule and therefore the target law: 1 (linear) and
+    3 (load curve) are tabular → LAW43; 2 (exponential, sigma = k*(E0+eps_p)^n)
+    is analytic and matches /MAT/LAW32's Swift form exactly, so it is routed
+    there instead of being dropped.
+
+    Note P1/P2 for HR=1: P1 is the TANGENT modulus and P2 the YIELD STRESS
+    (p.2-852) — the opposite of dyna2rad's ``{(0, P1), (1, P1+P2)}`` curve.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    g1 = lambda i: to_float(f1[i]) if len(f1) > i else 0.0     # noqa: E731
+    mid = to_int(f1[0]) if f1 else 0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g2 = lambda i: to_float(f2[i]) if len(f2) > i else 0.0     # noqa: E731
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    g4 = lambda i: to_float(f4[i]) if len(f4) > i else 0.0     # noqa: E731
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+    g5 = lambda i: to_float(f5[i]) if len(f5) > i else 0.0     # noqa: E731
+    # HR blank defaults to 1.0 (linear) — to_float("") would make it 0 and pick
+    # no hardening rule at all.
+    state.mat_hill_3r[mid] = MatHill3R(
+        mid=mid, title=title, rho=g1(1), E=g1(2), nu=g1(3),
+        hr=_ffield(f1, 4, 1.0) or 1.0, p1=g1(5), p2=g1(6),
+        r00=g2(0), r45=g2(1), r90=g2(2),
+        lcid=to_int(f2[3]) if len(f2) > 3 else 0, e0=g2(4),
+        aopt=to_float(f3[0]) if f3 else 0.0,
+        a1=g4(3), a2=g4(4), a3=g4(5),
+        v1=g5(0), v2=g5(1), v3=g5(2),
+        d1=g5(3), d2=g5(4), d3=g5(5), beta=g5(6))
 
 
 def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> None:
@@ -1593,7 +1962,7 @@ def handle_mat_simplified_johnson_cook(block: Block, state: ConversionState) -> 
     fail = psfail if psfail < 1e16 else 0.0
     state.mat_plas_tab[mid] = MatPlasTAB(
         mid, title, rho, E, nu, a, 0.0, fail, 0, 0.0, 0.0, eps_pts, es_pts,
-        vp=vp, rate_curves=rate_curves)
+        vp=vp, rate_curves=rate_curves, family="098")
 
 
 def handle_mat_johnson_cook(block: Block, state: ConversionState) -> None:
@@ -5482,7 +5851,7 @@ def handle_mat_187(block: Block, state: ConversionState) -> None:
     DEPRPT is the plastic-strain INCREMENT from failure to rupture, while
     LAW76's Epsilon_r_p is ABSOLUTE — the sum is emitted. The three yield
     curves (LCID-T/C/S) must become /TABLE cards, so their ids are registered
-    in state.law76_table_ids.
+    in state.table_1d_ids.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -5620,7 +5989,7 @@ def handle_mat_187(block: Block, state: ConversionState) -> None:
                                   eps_rupt, iconv, 0.0)
     for tid in (tab_idt, tab_idc, tab_ids):
         if tid:
-            state.law76_table_ids.add(tid)
+            state.table_1d_ids.add(tid)
 
 
 def handle_mat_add_damage_gissmo(block: Block, state: ConversionState) -> None:
@@ -6365,6 +6734,55 @@ HANDLERS = {
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": handle_mat_piecewise_linear_plasticity,
     "MAT_123":                                handle_mat_piecewise_linear_plasticity,
     "MAT_PLASTIC_KINEMATIC":                  handle_mat_plastic_kinematic,
+    # ── Metal plasticity batch 2 ───────────────────────────────────────────
+    # MAT_081/082 (+ _ORTHO / _RCDC / _RCDC1980 / _STOCHASTIC) ride the MAT_024
+    # /MAT/LAW36 machinery and add /FAIL/TAB1 from EPPF/EPPFR. Every option
+    # spelling gets its own key: the dispatcher is an exact dict match after
+    # only _ID/_TITLE/_SUBTITLE are stripped.
+    "MAT_PLASTICITY_WITH_DAMAGE":             handle_mat_plasticity_with_damage,
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO":       handle_mat_plasticity_with_damage,
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO_RCDC":  handle_mat_plasticity_with_damage,
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO_RCDC1980":
+        handle_mat_plasticity_with_damage,
+    "MAT_PLASTICITY_WITH_DAMAGE_STOCHASTIC":  handle_mat_plasticity_with_damage,
+    "MAT_081":                                handle_mat_plasticity_with_damage,
+    "MAT_81":                                 handle_mat_plasticity_with_damage,
+    "MAT_081_STOCHASTIC":                     handle_mat_plasticity_with_damage,
+    "MAT_082":                                handle_mat_plasticity_with_damage,
+    "MAT_82":                                 handle_mat_plasticity_with_damage,
+    "MAT_082_RCDC":                           handle_mat_plasticity_with_damage,
+    "MAT_082_RCDC1980":                       handle_mat_plasticity_with_damage,
+    # MAT_105 → the same LAW36 path + /FAIL/LEMAITRE from its card-3 triple
+    "MAT_DAMAGE_2":                           handle_mat_damage_2,
+    "MAT_105":                                handle_mat_damage_2,
+    # MAT_019 → /MAT/LAW121 (PLAS_RATE), a 1:1 curve-for-curve target
+    "MAT_STRAIN_RATE_DEPENDENT_PLASTICITY":
+        handle_mat_strain_rate_dependent_plasticity,
+    "MAT_019":                                handle_mat_strain_rate_dependent_plasticity,
+    "MAT_19":                                 handle_mat_strain_rate_dependent_plasticity,
+    # MAT_124 → /MAT/LAW66 (+ /VISC/PRONY, + a failure card). The _EOS variant
+    # is a different keyword (LS-DYNA 155) with a different card set and is
+    # deliberately NOT registered.
+    "MAT_PLASTICITY_COMPRESSION_TENSION":
+        handle_mat_plasticity_compression_tension,
+    "MAT_124":                                handle_mat_plasticity_compression_tension,
+    # MAT_120 → /MAT/LAW52 (GURSON); the _JC variant adds /FAIL/JOHNSON
+    "MAT_GURSON":                             handle_mat_gurson,
+    "MAT_120":                                handle_mat_gurson,
+    "MAT_GURSON_JC":                          handle_mat_gurson,
+    "MAT_120_JC":                             handle_mat_gurson,
+    "MAT_GURSON_RCDC":                        handle_mat_gurson,
+    "MAT_120_RCDC":                           handle_mat_gurson,
+    "MAT_GURSON_BFRAC":                       handle_mat_gurson,
+    "MAT_120_BFRAC":                          handle_mat_gurson,
+    # MAT_012 → /MAT/LAW2, with G/K derived to E/nu in the writer prepass
+    "MAT_ISOTROPIC_ELASTIC_PLASTIC":          handle_mat_isotropic_elastic_plastic,
+    "MAT_012":                                handle_mat_isotropic_elastic_plastic,
+    "MAT_12":                                 handle_mat_isotropic_elastic_plastic,
+    # MAT_122 → /MAT/LAW43 (HR=1/3) or /MAT/LAW32 (HR=2). *MAT_122_3D and
+    # *MAT_122_TABULATED are separate keywords with different card sets.
+    "MAT_HILL_3R":                            handle_mat_hill_3r,
+    "MAT_122":                                handle_mat_hill_3r,
     # Johnson-Cook family: MAT_015 → /MAT/LAW2 (or /MAT/LAW4 + /EOS when the
     # part attaches an EOS); MAT_099 → /MAT/LAW2 + /FAIL/FLD; MAT_098 keeps its
     # sampled /MAT/LAW36 path (registered further down with the numeric aliases

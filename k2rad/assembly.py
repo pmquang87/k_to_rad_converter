@@ -1266,6 +1266,54 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": _mat({1: [(2, "f"), (3, "f")]}),
     "MAT_123": _mat({1: [(2, "f"), (3, "f")]}),
     "MAT_PLASTIC_KINEMATIC": _mat(),
+    # Metal plasticity batch 2. MAT_081/082 card 2 carries LCSS/LCSR (fields
+    # 3/4) and LCDM (field 7); MAT_105 card 2 carries LCSS/LCSR only; MAT_019
+    # card 2 is LC1 ETAN LC2 LC3 LC4 (fields 1/3/4/5); MAT_124 card 2 is
+    # LCIDC LCIDT LCSRC LCSRT _ LCFAIL; MAT_120 card 6 is LCSS LCFF _ LCF0
+    # LCFC LCFN; MAT_122 card 2 field 4 is LCID.
+    "MAT_PLASTICITY_WITH_DAMAGE": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO_RCDC":
+        _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_PLASTICITY_WITH_DAMAGE_ORTHO_RCDC1980":
+        _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_PLASTICITY_WITH_DAMAGE_STOCHASTIC":
+        _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_081": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_81": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_081_STOCHASTIC": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_082": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_82": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_082_RCDC": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_082_RCDC1980": _mat({1: [(2, "f"), (3, "f"), (6, "f")]}),
+    "MAT_DAMAGE_2": _mat({1: [(2, "f"), (3, "f")]}),
+    "MAT_105": _mat({1: [(2, "f"), (3, "f")]}),
+    "MAT_STRAIN_RATE_DEPENDENT_PLASTICITY":
+        _mat({1: [(0, "f"), (2, "f"), (3, "f"), (4, "f")]}),
+    "MAT_019": _mat({1: [(0, "f"), (2, "f"), (3, "f"), (4, "f")]}),
+    "MAT_19": _mat({1: [(0, "f"), (2, "f"), (3, "f"), (4, "f")]}),
+    "MAT_PLASTICITY_COMPRESSION_TENSION":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (5, "f")]}),
+    "MAT_124": _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (5, "f")]}),
+    "MAT_GURSON": _mat({5: [(0, "f"), (1, "f"), (3, "f"), (4, "f"), (5, "f")]}),
+    "MAT_120": _mat({5: [(0, "f"), (1, "f"), (3, "f"), (4, "f"), (5, "f")]}),
+    # The _JC card 5 holds LCDAM (field 1) and LCJC (field 8); card 6 is the
+    # base one. _RCDC / _BFRAC card 5 is not modelled — MID only, so their
+    # curve ids are left alone rather than offset at a guessed position.
+    "MAT_GURSON_JC": _mat({4: [(0, "f"), (7, "f")],
+                           5: [(0, "f"), (1, "f"), (3, "f"), (4, "f"),
+                               (5, "f")]}),
+    "MAT_120_JC": _mat({4: [(0, "f"), (7, "f")],
+                        5: [(0, "f"), (1, "f"), (3, "f"), (4, "f"), (5, "f")]}),
+    "MAT_GURSON_RCDC": _mat(),
+    "MAT_120_RCDC": _mat(),
+    "MAT_GURSON_BFRAC": _mat(),
+    "MAT_120_BFRAC": _mat(),
+    "MAT_ISOTROPIC_ELASTIC_PLASTIC": _mat(),
+    "MAT_012": _mat(),
+    "MAT_12": _mat(),
+    "MAT_HILL_3R": _mat({1: [(3, "f")]}),
+    "MAT_122": _mat({1: [(3, "f")]}),
     "MAT_ANISOTROPIC_VISCOPLASTIC": {"cards": {0: [(0, "m"), (6, "f")]}},
     "MAT_103": {"cards": {0: [(0, "m"), (6, "f")]}},
     "MAT_RIGID": _off_mat_rigid,

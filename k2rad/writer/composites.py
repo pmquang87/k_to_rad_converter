@@ -46,6 +46,7 @@ from ..state import (
     MatEnhancedCompositeDamage,
     MatTransverselyAnisotropic,
     MatLaminatedGlass,
+    MatHill3R,
     PartComposite,
     SectionShell,
 )
@@ -69,6 +70,10 @@ __all__ = [
     "_emit_mat_law93",
     "_emit_mat_law127",
     "_emit_mat_law43",
+    "_law43_lines",
+    "_emit_mat_hill_3r",
+    "_emit_mat_law32_hill",
+    "_resolve_hill_3r",
     "_emit_mat_law27_pair",
     "_emit_prop_type11",
     "_emit_prop_type51",
@@ -101,7 +106,8 @@ _TFAIL_ABSOLUTE_MAX = 0.1
 def _composite_material_mids(state: ConversionState) -> Set[int]:
     """Every MID handled by this module (used by the /PROP-split prepasses)."""
     return (set(state.mat_orthotropic) | set(state.mat_enhanced_composite)
-            | set(state.mat_transverse_aniso) | set(state.mat_laminated_glass))
+            | set(state.mat_transverse_aniso) | set(state.mat_laminated_glass)
+            | set(state.mat_hill_3r))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,6 +385,79 @@ def _resolve_composites(state: ConversionState) -> None:
             "NOT the total-curve tangent modulus that *MAT_PLASTIC_KINEMATIC "
             "spells with the same name and that needs the E*ET/(E-ET) rescale.")
 
+    _resolve_hill_3r(state)
+
+
+def _resolve_hill_3r(state: ConversionState) -> None:
+    """*MAT_HILL_3R (122): pick the target law from HR and give the tabular
+    branches their hardening /FUNCT.
+
+      HR = 1  linear      → LAW43 with a synthesized bilinear curve
+      HR = 2  exponential → LAW32 (analytic Swift form, no curve needed)
+      HR = 3  load curve  → LAW43 with LCID
+
+    P1/P2 for HR=1 are ``tangent modulus`` and ``yield stress`` IN THAT ORDER
+    (Vol II R17 p.2-852) — dyna2rad builds ``{(0, P1), (1, P1+P2)}``, i.e. it
+    reads P1 as the yield stress and P2 as the modulus, which swaps the two.
+    P1 is the TOTAL-curve tangent modulus (the manual's own word for HR=1), so
+    the plastic slope on a stress-vs-PLASTIC-strain curve is
+    ``H = E*P1/(E-P1)`` — the same rescale /MAT/LAW44 applies to *MAT_003's
+    ETAN, and deliberately NOT the verbatim copy the MAT_037 path uses (whose
+    ETAN the manual calls the plastic hardening modulus, p.2-398).
+    """
+    for mat in state.mat_hill_3r.values():
+        hr = int(round(mat.hr)) if mat.hr else 1
+        if hr == 2:
+            mat.use_law32 = True
+            continue
+        if hr == 3:
+            if mat.lcid <= 0:
+                state.warn(
+                    f"*MAT_HILL_3R {mat.mid}: HR=3 selects the load-curve "
+                    "hardening rule but LCID is 0 — /MAT/LAW43 is tabular-only "
+                    "and the starter rejects a material with no yield function "
+                    "(ERROR 366). Add the curve, or use HR=1 with P1/P2.")
+            elif mat.lcid not in state.curves:
+                # func_IDi is a FUNCTION slot, so a *DEFINE_TABLE id is not a
+                # valid target either — checking state.curves only keeps the
+                # diagnostic alive for that case.
+                state.warn(
+                    f"*MAT_HILL_3R {mat.mid}: HR=3 LCID={mat.lcid} references "
+                    "a *DEFINE_CURVE that is NOT in the deck — the /MAT/LAW43 "
+                    "func_IDi will dangle (starter ERROR 366).")
+            mat.hard_func_id = mat.lcid
+            continue
+        if hr != 1:
+            state.warn(
+                f"*MAT_HILL_3R {mat.mid}: HR={mat.hr:g} is not one of the "
+                "three documented hardening rules (1 linear / 2 exponential / "
+                "3 load curve) — treated as HR=1 (linear) with P1/P2.")
+        # HR = 1: sigma_Y = P2 + H*eps_p, sampled at eps_p = 0 and 1 and left
+        # to the reader's linear extrapolation.
+        if mat.p2 <= 0.0:
+            state.warn(
+                f"*MAT_HILL_3R {mat.mid}: HR=1 (linear hardening) with "
+                f"P2={mat.p2:g} — P2 IS the yield stress on this card "
+                "(Vol II R17 p.2-852) and it must be positive. No hardening "
+                "curve can be synthesized, and /MAT/LAW43 rejects a material "
+                "with no yield function (ERROR 366).")
+            continue
+        h = mat.p1
+        if 0.0 < h < mat.E:
+            h = mat.E * h / (mat.E - h)
+        fid = state.next_curve_id()
+        _add_auto_curve(state, fid, f"Auto_MAT122_hardening_mid{mat.mid}",
+                        [(0.0, mat.p2), (1.0, mat.p2 + h)])
+        mat.hard_func_id = fid
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid}: HR=1, so the linear hardening was "
+            f"synthesized as /FUNCT/{fid} = [(0, {mat.p2:g}), "
+            f"(1, {mat.p2 + h:g})] — /MAT/LAW43 (HILL_TAB) is TABULAR-ONLY. "
+            f"P1={mat.p1:g} is the TANGENT modulus and P2={mat.p2:g} the YIELD "
+            "STRESS (Vol II R17 p.2-852, the opposite of dyna2rad's reading), "
+            "and the curve is stress vs PLASTIC strain, so the slope is the "
+            f"plastic modulus E*P1/(E-P1) = {h:g}.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Prepass: per-part /PROP allocation
@@ -466,6 +545,10 @@ def _assign_composite_props(state: ConversionState) -> None:
     for mid in state.mat_transverse_aniso:
         shell_only_laws[mid] = ("*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC",
                                 "/MAT/LAW43")
+    for mid, hill in state.mat_hill_3r.items():
+        # LAW32 declares SHELL_ORTHOTROPIC only, exactly like LAW43.
+        shell_only_laws[mid] = ("*MAT_HILL_3R",
+                                "/MAT/LAW32" if hill.use_law32 else "/MAT/LAW43")
     for mid in state.mat_laminated_glass:
         shell_only_laws[mid] = ("*MAT_LAMINATED_GLASS", "/MAT/PLAS_BRIT (LAW27)")
 
@@ -1246,6 +1329,8 @@ def _make_composite_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law127(mat, state)
     for mat in sorted(state.mat_transverse_aniso.values(), key=lambda m: m.mid):
         lines += _emit_mat_law43(mat, state)
+    for mat in sorted(state.mat_hill_3r.values(), key=lambda m: m.mid):
+        lines += _emit_mat_hill_3r(mat, state)
     for mat in sorted(state.mat_laminated_glass.values(), key=lambda m: m.mid):
         lines += _emit_mat_law27_pair(mat, state)
     if lines:
@@ -1559,6 +1644,142 @@ def _emit_fail_gene1_dtmin(mid: int, dtmin: float,
     ]
 
 
+def _law43_lines(mid: int, title: str, rho: float, e: float, nu: float,
+                 funct_ide: int, einf: float, ce: float,
+                 r00: float, r45: float, r90: float,
+                 curves: List, c_hard: float = 0.0,
+                 iyield0: int = 0) -> List[str]:
+    """The /MAT/LAW43 (HILL_TAB) card body, shared by every keyword that lands
+    on it (*MAT_037, *MAT_122).
+
+    Column layout from ``MAT/matl43_HILL_TAB.cfg FORMAT(radioss2021)``:
+      RHO_I(20) / E(20) NU(20) /
+      FUNCT_IDE(10) blank(10) EINF(20) CE(20) /
+      r00(20) r45(20) r90(20) C_hard(20) Iyield0(10) /
+      EPSP_max(20) EPS_t(20) EPS_m(20) Fcut(20) Fsmooth(10) /
+      FREE_CARD_LIST: func_IDi(10) blank(10) Fscale_i(20) EPS_dot_i(20)
+
+    *curves* is the card-6 rate family as (func_ID, Fscale, EPS_dot) triples —
+    one entry for a rate-independent material. The reader hard-fails with
+    ERROR 366 if the list is empty, so the caller must supply at least one."""
+    b10 = " " * 10
+    lines = [
+        f"/MAT/LAW43/{mid}",
+        title or f"MAT_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#                  E                  NU",
+        f"{_f(e)}{_f(nu)}",
+        "#FUNCT_IDE                          EINF                  CE",
+        f"{_i(funct_ide)}{b10}{_f(einf)}{_f(ce)}",
+        "#                r00                 r45                 r90              C_hard   Iyield0",
+        f"{_f(r00)}{_f(r45)}{_f(r90)}{_f(c_hard)}{_i(iyield0)}",
+        "#           EPSP_max               EPS_t               EPS_m                Fcut   Fsmooth",
+        f"{_f(1.0e30)}{_f(1.0e30)}{_f(2.0e30)}{_f(0.0)}{_i(0)}",
+        "# func_IDi                      Fscale_i           EPS_dot_i",
+    ]
+    for fid, fscale, eps_dot in sorted(curves, key=lambda t: t[2]):
+        lines.append(f"{_i(fid)}{b10}{_f(fscale)}{_f(eps_dot)}")
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_law32_hill(mat: MatHill3R, state: ConversionState) -> List[str]:
+    """*MAT_HILL_3R (122) with HR=2 → /MAT/LAW32 (HILL), the analytic twin.
+
+    LS-DYNA's exponential hardening rule is ``sigma_Y = k*(E0 + eps_p)^n`` with
+    ``k = P1``, ``n = P2`` and ``E0`` from card 2 — which is exactly the Swift
+    law /MAT/LAW32 states as ``sigma = A*(EPSILON_0 + eps_p)^n``. Routing HR=2
+    here keeps it EXACT instead of sampling it onto a LAW43 table (dyna2rad
+    emits nothing at all for HR=2: its ``if HR==1 / else if HR==3`` has no
+    third branch, so the material silently gets NUM_CURVES=0 and hard-fails
+    the starter with ERROR 366).
+
+    Column layout from ``MAT/matl32_hill.cfg FORMAT(radioss140)``:
+      RHO_I(20) / E(20) NU(20) /
+      A(20) EPSILON_0(20) n(20) EPS_max(20) SIGMA_max(20) /
+      EPS_DOT_0(20) m(20) /
+      r00(20) r45(20) r90(20) blank(20) Iyield0(10)
+    Blank(0) fields keep the reader's defaults: A→INFINITY, n→1.0,
+    EPS_max/SIGMA_max→INFINITY, each r→1.0 (von Mises).
+    """
+    r00, r45, r90 = _hill_3r_values(mat, state, "/MAT/LAW32")
+    if mat.p1 <= 0.0 or mat.p2 <= 0.0:
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid}: HR=2 (exponential hardening) needs "
+            f"P1 = k > 0 and P2 = n > 0, but P1={mat.p1:g}, P2={mat.p2:g}. "
+            "/MAT/LAW32 reads A=0 as INFINITY and n=0 as 1.0, so the yield "
+            "surface will not be the deck's — state both.")
+    state.warn(
+        f"*MAT_HILL_3R {mat.mid}: HR=2 (exponential) → /MAT/LAW32 (HILL) "
+        f"rather than /MAT/LAW43, because LAW32's analytic Swift law "
+        f"sigma = A*(eps_0 + eps_p)^n reproduces k*(E0 + eps_p)^n EXACTLY "
+        f"(A={mat.p1:g}, eps_0={mat.e0:g}, n={mat.p2:g}) — a tabulated LAW43 "
+        "would only sample it.")
+    return [
+        f"/MAT/LAW32/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  NU",
+        f"{_f(mat.E)}{_f(mat.nu)}",
+        "#                  A           EPSILON_0                   n             EPS_max           SIGMA_max",
+        f"{_f(mat.p1)}{_f(mat.e0)}{_f(mat.p2)}{_f(0.0)}{_f(0.0)}",
+        "#          EPS_DOT_0                   m",
+        f"{_f(0.0)}{_f(0.0)}",
+        "#                r00                 r45                 r90                           Iyield0",
+        f"{_f(r00)}{_f(r45)}{_f(r90)}{_f(0.0)}{_i(0)}",
+        HDR,
+    ]
+
+
+def _hill_3r_values(mat: MatHill3R, state: ConversionState, law: str):
+    """The three Lankford values, with the reader's silent 0 → 1.0 fallback
+    reported. MAT_122's R00/R45/R90 are independent, unlike MAT_037's single
+    r-bar which the LAW43 path copies into all three slots."""
+    vals = []
+    blank = []
+    for name, v in (("R00", mat.r00), ("R45", mat.r45), ("R90", mat.r90)):
+        if v <= 0.0:
+            blank.append(name)
+            vals.append(1.0)
+        else:
+            vals.append(v)
+    if blank:
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid}: {', '.join(blank)} is 0 or negative, and "
+            f"the {law} reader silently replaces a zero r-value with 1.0 — "
+            "that direction becomes plain VON MISES with no planar anisotropy. "
+            "State all three Lankford parameters if the sheet anisotropy is "
+            "the point.")
+    return vals[0], vals[1], vals[2]
+
+
+def _emit_mat_hill_3r(mat: MatHill3R, state: ConversionState) -> List[str]:
+    """*MAT_HILL_3R (122) → /MAT/LAW43 (HILL_TAB), or /MAT/LAW32 for HR=2.
+
+    The hardening curve (HR=1 synthesized bilinear, HR=3 the deck's LCID) is
+    resolved by ``_resolve_composites``; ``C_hard = 0`` because MAT_122 has no
+    isotropic/kinematic split and ``Iyield0 = 0`` because its yield stress is
+    the r-value average form, not a direction-1 value.
+    """
+    if mat.use_law32:
+        return _emit_mat_law32_hill(mat, state)
+    r00, r45, r90 = _hill_3r_values(mat, state, "/MAT/LAW43")
+    if mat.nu >= 0.5 or mat.nu < 0.0:
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid}: PR={mat.nu:g} is outside the "
+            "/MAT/LAW43 range 0 <= NU < 0.5 and the starter will reject it.")
+    if mat.e0 and int(round(mat.hr)) != 2:
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid}: E0={mat.e0:g} is the strain offset of "
+            f"the EXPONENTIAL hardening rule, but HR={mat.hr:g} — LS-DYNA "
+            "ignores it there too, so it is DROPPED.")
+    return _law43_lines(mat.mid, mat.title, mat.rho, mat.E, mat.nu,
+                        0, 0.0, 0.0, r00, r45, r90,
+                        [(mat.hard_func_id, 1.0, 0.0)])
+
+
 def _emit_mat_law43(mat: MatTransverselyAnisotropic,
                     state: ConversionState) -> List[str]:
     """*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC (037) → /MAT/LAW43.
@@ -1578,7 +1799,6 @@ def _emit_mat_law43(mat: MatTransverselyAnisotropic,
     ``IDSCALE`` → ``FUNCT_IDE``; the ``_ECHANGE`` Young's-modulus evolution
     ``EA``/``COE`` → ``EINF``/``CE``.
     """
-    b10 = " " * 10
     r = abs(mat.r)
     if r == 0.0:
         # hm_read_mat43.F:166-168 replaces a zero r-value with 1.0 (von Mises).
@@ -1606,23 +1826,9 @@ def _emit_mat_law43(mat: MatTransverselyAnisotropic,
             f"*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC {mat.mid}: PR="
             f"{mat.nu:g} is outside the /MAT/LAW43 range 0 <= NU < 0.5 and the "
             "starter will reject it.")
-    lines = [
-        f"/MAT/LAW43/{mat.mid}",
-        mat.title or f"MAT_{mat.mid}",
-        "#              RHO_I",
-        f"{_f(mat.rho)}",
-        "#                  E                  NU",
-        f"{_f(mat.E)}{_f(mat.nu)}",
-        "#FUNCT_IDE                          EINF                  CE",
-        f"{_i(mat.idscale)}{b10}{_f(mat.ea)}{_f(mat.coe)}",
-        "#                r00                 r45                 r90              C_hard   Iyield0",
-        f"{_f(r)}{_f(r)}{_f(r)}{_f(0.0)}{_i(0)}",
-        "#           EPSP_max               EPS_t               EPS_m                Fcut   Fsmooth",
-        f"{_f(1.0e30)}{_f(1.0e30)}{_f(2.0e30)}{_f(0.0)}{_i(0)}",
-        "# func_IDi                      Fscale_i           EPS_dot_i",
-        f"{_i(mat.hard_func_id)}{b10}{_f(1.0)}{_f(0.0)}",
-        HDR,
-    ]
+    lines = _law43_lines(mat.mid, mat.title, mat.rho, mat.E, mat.nu,
+                         mat.idscale, mat.ea, mat.coe, r, r, r,
+                         [(mat.hard_func_id, 1.0, 0.0)])
     if mat.ea or mat.coe:
         state.warn(
             f"*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC {mat.mid}: the "
@@ -1893,6 +2099,9 @@ def _emit_composite_props(state: ConversionState,
             lines += _emit_prop_type9(prop_id, f"LAW43_ORTHO_PROP_{prop_id} "
                                       f"(part {pid})", sec, state.is_implicit,
                                       istrain, state, phi=beta_fold)
+        elif mid in state.mat_hill_3r:
+            lines += _emit_hill_3r_prop(state, state.mat_hill_3r[mid], pid,
+                                        prop_id, sec, istrain, beta_fold)
         else:
             mat = (state.mat_orthotropic.get(mid)
                    or state.mat_enhanced_composite.get(mid))
@@ -1925,6 +2134,68 @@ def _emit_composite_props(state: ConversionState,
                 lines += _emit_single_material_type11(
                     state, prop_id, pid, mid, sec, axis, istrain, law)
     return lines
+
+
+def _emit_hill_3r_prop(state: ConversionState, mat: MatHill3R, pid: int,
+                       prop_id: int, sec: SectionShell, istrain: int,
+                       beta_fold: float) -> List[str]:
+    """The /PROP/TYPE9 (SH_ORTH) a *MAT_HILL_3R part is repointed at, carrying
+    the material-axis definition of its AOPT card set.
+
+    Unlike MAT_037, MAT_122 HAS an AOPT block (cards 3-5), but Radioss keeps
+    the orthotropy direction on the PROPERTY, not the material — so it lands
+    here. /PROP/TYPE9's reference system is a single Vx/Vy/Vz vector plus the
+    Phi rotation (card 4), which covers AOPT=2 exactly; the other modes have
+    no TYPE9 column and fall back to the default global X with a warning.
+    dyna2rad reads none of this block at all.
+    """
+    law = "/MAT/LAW32" if mat.use_law32 else "/MAT/LAW43"
+    aopt = (int(round(mat.aopt))
+            if abs(mat.aopt - round(mat.aopt)) < 1e-9 else None)
+    refvec = (1.0, 0.0, 0.0)
+    axis_note = ("AOPT=2 is not set, so the reference direction is the default "
+                 "global X")
+    if aopt == 2 and any((mat.a1, mat.a2, mat.a3)):
+        refvec = (mat.a1, mat.a2, mat.a3)
+        axis_note = (f"AOPT=2 vector a=({mat.a1:g}, {mat.a2:g}, {mat.a3:g}) "
+                     "→ the /PROP/TYPE9 Vx/Vy/Vz reference direction")
+    elif aopt in (None, 0) and not any((mat.v1, mat.v2, mat.v3)):
+        # AOPT=0 is the card's DEFAULT and what a blank field means, so it
+        # gets its own message: the generic "AOPT=2 is not set" clause does
+        # not say that a real, stated material-axis rule was dropped, and on a
+        # Hill sheet law the rolling direction is the whole point.
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid} on part {pid}: AOPT=0 takes the material "
+            "axes from the ELEMENT's own nodes 1, 2 and 4 (as "
+            "*DEFINE_COORDINATE_NODES would), then rotates them about the "
+            "shell normal by BETA (Vol II R17 p.2-853). /PROP/TYPE9 carries "
+            "one global Vx/Vy/Vz reference vector for the whole property and "
+            "has no per-element node rule, so that is DROPPED and the r00 "
+            "rolling direction falls back to global X (BETA is then applied "
+            "relative to global X, not to the element frame). If the mesh was "
+            "built so that element edge 1-2 IS the rolling direction, set "
+            f"Vx/Vy/Vz on /PROP/TYPE9/{prop_id} to match, or restate the axes "
+            "as AOPT=2.")
+    else:
+        state.warn(
+            f"*MAT_HILL_3R {mat.mid} on part {pid}: AOPT={mat.aopt:g} has no "
+            "/PROP/TYPE9 counterpart — only AOPT=2 with a stated vector a "
+            "maps onto the property's single Vx/Vy/Vz reference direction. "
+            "AOPT=3 (v CROSSED with the element normal) and a negative AOPT "
+            "(the |AOPT| *DEFINE_COORDINATE_* system) are DROPPED and the "
+            "rolling direction falls back to global X. Set Vx/Vy/Vz on "
+            f"/PROP/TYPE9/{prop_id} by hand, or restate the material axes as "
+            "AOPT=2 with A1/A2/A3.")
+    phi = mat.beta + beta_fold
+    state.warn(
+        f"/PROP for part {pid}: *MAT_HILL_3R → {law} is orthotropic-class, so "
+        f"the part is repointed at a synthesized /PROP/TYPE9 (SH_ORTH) "
+        f"{prop_id} instead of the isotropic section property (starter "
+        f"ERROR 3047 otherwise). {axis_note}"
+        + (f", rotated by BETA={mat.beta:g} deg" if mat.beta else "") + ".")
+    return _emit_prop_type9(prop_id, f"HILL_3R_ORTHO_PROP_{prop_id} "
+                            f"(part {pid})", sec, state.is_implicit,
+                            istrain, state, refvec=refvec, phi=phi)
 
 
 def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,

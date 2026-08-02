@@ -111,6 +111,17 @@ shipped, so the marginal cost is small.
   `/MAT/LAW69`; `*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]` → `/XREF` with the
   starter's law/formulation gates handled (Ismstr=10 on /XREF solid sections)
   — **done** (dyna2rad-faithful constants; starter-validated; see CHANGELOG).
+- Metal plasticity batch 2 (P1): `*MAT_PLASTICITY_WITH_DAMAGE` (81/82) → the
+  MAT_024 `/MAT/LAW36` path + `/FAIL/TAB1` (EPPFR/EPPF as the failure and
+  instability tables, NUMINT as a negative `P_thickfail`);
+  `*MAT_PLASTICITY_COMPRESSION_TENSION` (124) → `/MAT/LAW66` (+ `/VISC/PRONY`,
+  + `/FAIL/JOHNSON` or `/FAIL/TENSSTRAIN`); `*MAT_STRAIN_RATE_DEPENDENT_-`
+  `PLASTICITY` (19) → `/MAT/LAW121` (PLAS_RATE, a 1:1 curve target);
+  `*MAT_GURSON` (120, + `_JC`) → `/MAT/LAW52`; and the riders
+  `*MAT_012` → `/MAT/PLAS_JOHNS` (G/K → E/ν), `*MAT_105` → `/MAT/LAW36` +
+  `/FAIL/LEMAITRE`, `*MAT_122` → `/MAT/LAW43` or `/MAT/LAW32` — **done**
+  (starter-validated, 0 ERROR(S); several dyna2rad defects fixed rather than
+  reproduced — see CHANGELOG).
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11
