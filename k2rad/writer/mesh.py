@@ -19,6 +19,7 @@ from ..topology import (
     TET10_DYNA_TO_RADIOSS as _TET10_DYNA_TO_RADIOSS,
     classify_tet10_apex_order as _classify_tet10_apex_order,
 )
+from .beams import _emit_prop_int_beam
 from .common import (
     HDR,
     _discrete_part_ids,
@@ -1845,6 +1846,25 @@ def _make_properties(state: ConversionState) -> List[str]:
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
+        # A section that bound a usable *INTEGRATION_BEAM rule becomes the
+        # INTEGRATED beam property instead of the resultant one; the rule hangs
+        # off the SECTION in LS-DYNA, so every part on it switches together.
+        int_prop = state.int_beam_props.get(sec.secid)
+        if int_prop is not None:
+            lines += _emit_prop_int_beam(sec, int_prop)
+            continue
+        if not (sec.area or sec.iyy or sec.izz or sec.ixx):
+            state.warn(
+                (f"*SECTION_BEAM {sec.secid} is referenced by a beam *PART but "
+                 "the deck never defines it, so a PLACEHOLDER"
+                 if sec.secid in missing_beams else
+                 f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} carries no "
+                 "cross-section area or inertia that k2rad can read, so its")
+                + " /PROP/BEAM is written with Area=Iyy=Izz=Ixx=0 — the beams "
+                "on it have NO stiffness and no mass of their own. State the "
+                "section numerically (ELFORM=2 with A/ISS/ITT/J) or, for a "
+                "geometrically integrated beam, add an *INTEGRATION_BEAM rule "
+                "and reference it from a negative QR/IRID on card 1 field 4.")
         lines += _emit_prop_beam(sec)
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
