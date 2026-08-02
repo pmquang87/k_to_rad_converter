@@ -16,7 +16,7 @@ from .parser import (
 )
 from .state import (
     ConversionState,
-    NodeData, ShellElem, SolidElem, BeamElem, PlotelElem,
+    NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     PartData, SectionShell, SectionSolid, SectionBeam,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
@@ -289,14 +289,22 @@ def _parse_shell_base(line: str):
 
 
 def _is_connectivity_card(line: str, n_min: int) -> bool:
-    """True when *line* can only be an element connectivity card.
+    """True when *line* CAN be an element connectivity card.
 
     Used on the UNKNOWN-suffix path, where the number and layout of the extra
     cards is by definition not known: every field of a connectivity card is a
     plain unsigned integer and the id/node slots are non-zero, which no float
-    card (thicknesses, offsets, ply thickness/angle pairs) can imitate. Taking
-    only these keeps the whole mesh without inventing elements out of the data
-    cards k2rad could not interpret.
+    card (thicknesses, offsets, ply thickness/angle pairs) can imitate.
+
+    This test is NECESSARY BUT NOT SUFFICIENT and must never be the last word.
+    An option card whose values happen to be integers passes it — an
+    *ELEMENT_BEAM_THICKNESS section written ``10 10 10 10``, an
+    *ELEMENT_SHELL_COMPOSITE ply card ``mid thick beta tmid …`` — and an element
+    invented from one sits on node ids that do not exist: starter ERROR 78
+    (UNDEFINED NODE) / ERROR 222 (N1=N2), a HARD failure where the old behaviour
+    was a silent skip. Everything this accepts is therefore marked
+    ``provisional`` and re-checked against the node table by
+    ``writer/mesh.py::_screen_provisional_elements`` before it is emitted.
     """
     f = [x for x in _elem_fields(line, 10) if x]
     if len(f) < n_min:
@@ -315,8 +323,7 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
     opts, unknown = _elem_options(block.keyword, "ELEMENT_SHELL",
                                   _SHELL_SUFFIX_TOKENS)
     raw = block.raw
-    n_mcid = n_offset = n_dof = n_midside = n_partial = 0
-    n_unparsed = 0
+    n_mcid = n_offset = n_dof = n_midside = 0
     seen_eids: set = set()
 
     if unknown and _elem_block_is_not_a_mesh(block, state, unknown):
@@ -326,11 +333,17 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
         # Unrecognized option: the extra cards' layout is unknown, so consume
         # nothing positionally and keep every line that can only be a base
         # connectivity card. The mesh survives; the option's data does not.
-        n_kept = 0
+        # Everything taken here is PROVISIONAL — the content test cannot tell an
+        # all-integer option card from a real element, so the candidates are
+        # screened against the node table before they reach the deck
+        # (_screen_provisional_elements), which is also where this block's
+        # summary warning is emitted with the surviving count.
+        rec = ProvisionalElemBlock(block.keyword, "shell",
+                                   "_" + "_".join(unknown))
         for line in raw:
             if not _is_connectivity_card(line, 5):
                 if line.strip():
-                    n_unparsed += 1
+                    rec.n_unparsed += 1
                 continue
             parsed = _parse_shell_base(line)
             if parsed is None:
@@ -339,21 +352,15 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
             if eid in seen_eids:
                 # A repeated id inside one block is a data card that happens to
                 # be all-integer, not a second element.
-                n_unparsed += 1
+                rec.n_unparsed += 1
                 continue
             seen_eids.add(eid)
             if any(midside):
                 n_midside += 1
-            state.shell_elems.append(ShellElem(eid, pid, nodes))
-            n_kept += 1
-        state.warn(
-            f"*{block.keyword}: option '_{'_'.join(unknown)}' is not implemented "
-            f"— {n_kept} element(s) were kept as plain /SHELL // SH3N "
-            f"connectivity and {n_unparsed} further card(s) in the block were "
-            "NOT interpreted (their data is dropped). The MESH is preserved; "
-            "check the element count against the source deck, and supply the "
-            "option's data another way if the model depends on it. (dyna2rad "
-            "drops this whole block, elements included.)")
+            state.shell_elems.append(
+                ShellElem(eid, pid, nodes, provisional=True))
+            rec.eids.append(eid)
+        state.provisional_elem_blocks.append(rec)
     else:
         want_thic = bool(opts & {"THICKNESS", "BETA", "MCID"})
         i = 0
@@ -364,22 +371,23 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
                 continue
             eid, pid, nodes, midside = parsed
             i += 1
-            thick_nodes: List[Optional[float]] = []
+            thick_nodes: List[float] = []
             beta = 0.0
             if want_thic and i < len(raw):
                 f = _card(raw, i, fixed=True, n=5, w=16)
                 i += 1
-                thick_nodes = [to_float(f[k]) if len(f) > k and f[k].strip()
-                               else None for k in range(4)]
+                # A BLANK THIC cell is not "unspecified" — Card 2 gives it the
+                # default 0., and Remark 1 makes 0. mean "take the *SECTION_
+                # SHELL thickness for THIS node". So blank and 0.0 collapse to
+                # the same stored value and the writer resolves both.
+                thick_nodes = [to_float(f[k]) if len(f) > k else 0.0
+                               for k in range(4)]
                 fifth = f[4] if len(f) > 4 else ""
                 if "MCID" in opts:
                     if fifth.strip() and to_int(fifth) != 0:
                         n_mcid += 1
                 elif fifth.strip():
                     beta = to_float(fifth)
-                n_pop = sum(1 for t in thick_nodes if t is not None)
-                if 0 < n_pop < len(nodes):
-                    n_partial += 1
             if "THICKNESS" in opts and any(midside) and i < len(raw):
                 i += 1                       # THIC5..THIC8, no /SHELL home
             if "OFFSET" in opts and i < len(raw):
@@ -388,8 +396,15 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
                 if f and f[0].strip() and to_float(f[0]) != 0.0:
                     n_offset += 1
             if "DOF" in opts and i < len(raw):
-                # blank(16) then NS1..NS4 as I8 — read past the blank field.
-                f = parse_fixed(raw[i][16:], n=4, w=8)
+                # Card 5 is 10 x I8 with NS1..NS4 in fields 3-6 (the first two
+                # columns are blank — Altair's shell.cfg writes it %16s + 4xI8).
+                # Read it through _card so a comma/space-delimited spelling is
+                # split free-format instead of being sliced at column 16, where
+                # the scalar nodes would vanish and never be reported. The
+                # values have no Radioss destination, so ANY non-zero field is
+                # enough to raise the "dropped" warning — no field alignment to
+                # get wrong.
+                f = _card(raw, i, fixed=True, n=6, w=8)
                 i += 1
                 if any(to_int(x) for x in f):
                     n_dof += 1
@@ -429,13 +444,6 @@ def handle_element_shell(block: Block, state: ConversionState) -> None:
             "element loses its quadratic edges (coarser bending response, and "
             "the dropped nodes become unreferenced). Re-mesh with linear shells "
             "if this matters.")
-    if n_partial:
-        state.warn(
-            f"*{block.keyword}: {n_partial} element(s) fill only SOME of the "
-            "THIC1..THIC4 cells. The element thickness is the mean of the "
-            "POPULATED cells only — dyna2rad divides by the node count instead, "
-            "which turns THIC1=2.0 with three blank cells into 0.5 mm rather "
-            "than 2.0. Fill every cell to remove the ambiguity.")
 
 
 def handle_element_plotel(block: Block, state: ConversionState) -> None:
@@ -508,12 +516,41 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
             state.solid_elems.append(SolidElem(eid, pid, nodes))
 
 
+def _positional_elem_fields(line: str, n: int):
+    """*ELEMENT_ card fields by COLUMN when a fixed I8 reading is consistent.
+
+    ``_elem_fields`` drops empty fields, which is right for connectivity (a
+    blank N4 is simply absent) but wrong for a card with INTERIOR blanks. The
+    *ELEMENT_BEAM base card is exactly that shape: EID PID N1 N2 N3 RT1 RR1 RT2
+    RR2 LOCAL, and the manual says that under _ORIENTATION "the field N3 should
+    be left undefined" — so a beam that also sets LOCAL leaves fields 5-9 blank
+    and the whitespace split reads the LOCAL flag as N3 (a silently wrong local
+    frame, or an id that does not exist).
+
+    The fixed slice is used only when it is CONSISTENT with the whitespace
+    split — same values, same order — AND the four mandatory leading columns are
+    filled. That is exactly the fixed-format-with-interior-gaps case. A genuine
+    free-format line ("1,2,3,4,5") slices into fields with embedded separators
+    and fails the comparison; a sloppily aligned one ("       1        2 …",
+    where a value straddles a column boundary) fails the leading-column test.
+    Both keep the whitespace reading, so no card that parsed before stops
+    parsing now.
+    """
+    free = [x for x in _elem_fields(line, n) if x]
+    if len(free) < 4:
+        return free
+    fixed = parse_fixed(_strip_inline_comment(line), n=n, w=8)
+    if all(fixed[k] for k in range(4)) and [x for x in fixed if x] == free:
+        return fixed
+    return free
+
+
 def _parse_beam_base(line: str):
     """One *ELEMENT_BEAM connectivity card → (eid, pid, n1, n2, n3) or None."""
-    f = [x for x in _elem_fields(line, 5) if x]
+    f = _positional_elem_fields(line, 10)
     # The orientation node N3 is optional (truss/ELFORM-3 beams omit it),
     # so 4 fields (eid pid n1 n2) is a complete card.
-    if len(f) < 4:
+    if len(f) < 4 or not f[3]:
         return None
     eid, pid = to_int(f[0]), to_int(f[1])
     n1, n2 = to_int(f[2]), to_int(f[3])
@@ -540,30 +577,28 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
         return
 
     if unknown:
-        n_kept = n_unparsed = 0
+        # See handle_element_shell: kept by CONTENT, marked provisional, and
+        # screened against the node table before it reaches the deck.
+        rec = ProvisionalElemBlock(block.keyword, "beam",
+                                   "_" + "_".join(unknown))
         seen_eids: set = set()
         for line in raw:
             if not _is_connectivity_card(line, 4):
                 if line.strip():
-                    n_unparsed += 1
+                    rec.n_unparsed += 1
                 continue
             parsed = _parse_beam_base(line)
             if parsed is None:
                 continue
             eid, pid, n1, n2, n3 = parsed
             if eid in seen_eids:
-                n_unparsed += 1
+                rec.n_unparsed += 1
                 continue
             seen_eids.add(eid)
-            state.beam_elems.append(BeamElem(eid, pid, n1, n2, n3))
-            n_kept += 1
-        state.warn(
-            f"*{block.keyword}: option '_{'_'.join(unknown)}' is not implemented "
-            f"— {n_kept} element(s) were kept as plain /BEAM connectivity and "
-            f"{n_unparsed} further card(s) in the block were NOT interpreted "
-            "(their data is dropped). The MESH is preserved; check the element "
-            "count against the source deck. (dyna2rad drops this whole block, "
-            "elements included.)")
+            state.beam_elems.append(
+                BeamElem(eid, pid, n1, n2, n3, provisional=True))
+            rec.eids.append(eid)
+        state.provisional_elem_blocks.append(rec)
         return
 
     i = 0
@@ -606,11 +641,13 @@ def handle_element_beam(block: Block, state: ConversionState) -> None:
         state.warn(
             f"*{block.keyword}: {n_zerovec} element(s) give a ZERO orientation "
             "vector (VX=VY=VZ=0), so no third node can be synthesized. The "
-            "beams keep the N3 written on their base card — normally 0, in "
-            "which case the OpenRadioss starter reports INFO 2093 and falls "
-            "back to N3:=N2, a degenerate local frame whose Iyy/Izz axes are "
-            "solver-chosen. Give the elements a real orientation vector (this "
-            "is dyna2rad's behaviour too, silently).")
+            "beams keep whatever N3 their base card carries; the manual says "
+            "that column should be left undefined under _ORIENTATION, and when "
+            "it is, the OpenRadioss starter reports INFO 2093 and falls back to "
+            "N3:=N2 — a degenerate local frame whose Iyy/Izz axes are "
+            "solver-chosen. CHECK the emitted /BEAM node_ID3 column for these "
+            "elements, then give them a real orientation vector (dyna2rad has "
+            "the same behaviour, silently).")
 
 
 def handle_element_discrete(block: Block, state: ConversionState) -> None:

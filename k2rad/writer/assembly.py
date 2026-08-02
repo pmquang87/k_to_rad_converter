@@ -25,6 +25,7 @@ from .mesh import (
     _make_properties,
     _make_skews,
     _normalize_tet10_ordering,
+    _screen_provisional_elements,
     _screen_sliver_tets,
     _snap_tet10_midsides,
     _synthesize_beam_orientation_nodes,
@@ -33,6 +34,7 @@ from .mesh import (
 from .composites import (
     _assign_composite_props,
     _emit_composite_props,
+    _fold_element_beta,
     _make_composite_materials,
     _resolve_composites,
 )
@@ -69,6 +71,7 @@ from .loads import (
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
     _synthesize_rwall_moving_nodes,
+    _warn_spring_eid_collisions,
 )
 from .blast_ale import (
     _make_blast_loads,
@@ -450,6 +453,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # and before _resolve_xref_parts (which needs the LAW42/LAW69 routing).
     _resolve_mat_hyper_rubber(state)
 
+    # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
+    # its connectivity by CONTENT, which cannot distinguish an all-integer
+    # option card from a real element. Screen those candidates against the node
+    # table FIRST, before any pass reads the element lists, so a phantom never
+    # reaches a contact group, a /PART or the free-node guard.
+    _screen_provisional_elements(state)
+
     # Normalize 10-node tet connectivity to Radioss /TETRA10 midside order (the
     # LS-DYNA *ELEMENT_SOLID apex nodes 8/9/10 differ). MUST run before every other
     # tet10 pass (downgrade/snap/emit) and before the gapmin faceting, all of which
@@ -500,6 +510,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # /PART at it) and properties (which emit it) are built.
     _assign_ortho_props(state)
 
+    # *ELEMENT_SHELL_BETA: the starter reads the per-element /SHELL Phi column
+    # only for IGTYP 17/51/52, so a uniform angle on an IGTYP 9/10/11/16 part
+    # has to be folded into that part's property instead. AFTER both /PROP
+    # assignment prepasses (it needs to know which class each part lands on) and
+    # before the elements and the properties are emitted.
+    _fold_element_beta(state)
+
     # Per-part hourglass control (*HOURGLASS + *PART HGID / *CONTROL_HOURGLASS):
     # allocate a dedicated /PROP id for each part whose effective hourglass
     # differs from its section base. Runs AFTER ortho (it skips ortho parts) and
@@ -529,6 +546,12 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # rather than in _make_joints keeps the implicit free-node guard correct
     # regardless of section order.
     _resolve_joints(state)
+
+    # *ELEMENT_DISCRETE, MAT_100 spotweld beams and *ELEMENT_PLOTEL all become
+    # /SPRING under their SOURCE-deck ids, which LS-DYNA keeps in three separate
+    # namespaces and Radioss in one. Report the overlap here rather than letting
+    # the starter be the first to mention it (ERROR 79, no restart file).
+    _warn_spring_eid_collisions(state)
 
     rbody_lines, rigid_nodes, rbody_info = _make_rbodies(state)
     # *CONSTRAINED_NODAL_RIGID_BODY produces additional /RBODY entries that must

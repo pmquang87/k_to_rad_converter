@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
-                        is_identity, linear_is_identity)
+                        is_identity, linear_is_identity, mat_apply)
 
 Vec3 = Tuple[float, float, float]
 
@@ -1390,6 +1390,81 @@ def _rewrite_point_fields(line: str, aff: Affine,
     return "".join(f"{t:>10}" for t in toks).rstrip()
 
 
+def _rewrite_direction_fields(line: str, aff: Affine, n: int) -> Optional[str]:
+    """Apply only the LINEAR part of *aff* to the leading (0,1,2) triplet of a
+    fixed-width card, keeping every other field verbatim.
+
+    A DIRECTION has no origin, so the translation must not be applied — the
+    *ELEMENT_BEAM_ORIENTATION vector is "relative to node N1" and the third node
+    it defines is placed at ``pos(N1) + V``, which already carries the include's
+    translation through N1. Returns None when the card is too short."""
+    toks = [t.strip() for t in _fields(line, n, 10)]
+    while toks and toks[-1] == "":
+        toks.pop()
+    if not toks:
+        return None
+    while len(toks) < 3:
+        toks.append("0.0")           # a blank VY/VZ column is 0.0, not absent
+    v = mat_apply(aff[0], (to_float(toks[0]), to_float(toks[1]),
+                           to_float(toks[2])))
+    for j in range(3):
+        toks[j] = _fmt_coord(v[j])
+    if "," in line or any(len(t) > 10 for t in toks):
+        return ",".join(toks)
+    return "".join(f"{t:>10}" for t in toks).rstrip()
+
+
+def _transform_beam_orientation(p: PendingInclude, aff: Affine, warn) -> None:
+    """Rotate the *ELEMENT_BEAM_ORIENTATION vectors with their include.
+
+    VX/VY/VZ is literal GEOMETRY, not an id: under a rotating or mirroring
+    TRANID the nodes move but an untouched vector leaves the beam's local Y-Z
+    frame behind, so Iyy/Izz act on the wrong axes — and at 90 deg the vector
+    can end up collinear with the rotated beam axis, which is a degenerate frame
+    (starter WARNING 3051, N3 := N2). Nothing else in the deck records the
+    error, so this is silent-wrong-answer territory rather than a missing
+    warning; applying the affine's linear part is the fix, and it composes for
+    nested includes the same way the *NODE rewrite does (the outer entry re-reads
+    the lines the inner one already rewrote).
+
+    The cards are located by stepping the same option grammar
+    ``_off_element_beam`` uses — the vector card is card 8, after the optional
+    _OFFSET card 7 — so an integer-valued vector is never mistaken for a base
+    card. Under an unmodelled suffix the step is unknown, so those blocks fall
+    back to the coordinate-bearing warning in ``_warn_coordinate_bearing``.
+    """
+    if linear_is_identity(aff):
+        return
+    for b in p.sub_blocks:
+        kw = b.keyword
+        if not (kw.startswith("ELEMENT_BEAM") and "ORIENTATION" in kw):
+            continue
+        opts, unknown = _elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)
+        if unknown:
+            continue                     # warned by _warn_coordinate_bearing
+        vec_off = 1 + int("OFFSET" in opts)
+        i = 0
+        n_short = 0
+        while i < len(b.raw):
+            f = [x for x in _fields(b.raw[i], 10, 8) if x]
+            if len(f) < 4:
+                i += 1
+                continue
+            vi = i + vec_off
+            # A blank card is the zero vector: no third node, nothing to rotate.
+            if vi < len(b.raw) and b.raw[vi].strip():
+                new = _rewrite_direction_fields(b.raw[vi], aff, 8)
+                if new is None:
+                    n_short += 1
+                else:
+                    b.raw[vi] = new
+            i = vi + 1
+        if n_short:
+            warn(f"*INCLUDE_TRANSFORM {p.filename}: {n_short} *{kw} orientation "
+                 "card(s) are too short to hold VX/VY/VZ — those vectors were "
+                 "NOT rotated with the include; check the beams' local axes.")
+
+
 def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
     """Move *RIGIDWALL_PLANAR* literal wall geometry with the include, the way
     the OpenRadioss starter replays a submodel transform on both wall points
@@ -1449,6 +1524,17 @@ def _carries_literal_axis_point(b: Block) -> bool:
     return False
 
 
+def _is_untransformed_beam_orientation(b: Block) -> bool:
+    """True for an *ELEMENT_BEAM*ORIENTATION block ``_transform_beam_orientation``
+    could NOT rotate — i.e. one whose option suffix is not in the grammar, so the
+    per-element card count (and with it the position of the vector card) is
+    unknown. The modelled spellings ARE rotated and must not be warned about."""
+    kw = b.keyword
+    if not (kw.startswith("ELEMENT_BEAM") and "ORIENTATION" in kw):
+        return False
+    return bool(_elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)[1])
+
+
 def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
     seen: Set[str] = set()
     rotates = not linear_is_identity(aff)
@@ -1457,7 +1543,8 @@ def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
         if kw in seen:
             continue
         if kw in _POINT_BEARING or (kw in _DIRECTION_BEARING and (
-                rotates or _carries_literal_axis_point(b))):
+                rotates or _carries_literal_axis_point(b))) \
+                or (rotates and _is_untransformed_beam_orientation(b)):
             seen.add(kw)
             warn(f"*INCLUDE_TRANSFORM {p.filename}: the TRANID transform is "
                  "applied to *NODE coordinates and *RIGIDWALL_PLANAR geometry "
@@ -1624,6 +1711,7 @@ def finalize(blocks: List[Block]) -> None:
             continue
         _rewrite_node_blocks(p.sub_blocks, aff=aff)
         _transform_rigidwalls(p, aff, warn)
+        _transform_beam_orientation(p, aff, warn)
         _warn_coordinate_bearing(p, aff, warn)
 
     # 5. *NODE_TRANSFORM acts on already-transformed geometry, deck order

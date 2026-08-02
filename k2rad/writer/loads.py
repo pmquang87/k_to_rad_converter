@@ -26,6 +26,8 @@ __all__ = [
     "_make_discrete_springs",
     "PLOTEL_ID",
     "PLOTEL_MASS",
+    "_spring_eid_families",
+    "_warn_spring_eid_collisions",
     "_make_plotel_elements",
     "_box_basis",
     "_box_global_corners",
@@ -686,6 +688,50 @@ PLOTEL_ID = 10000000
 PLOTEL_MASS = 1.1e-15
 
 
+def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
+    """Every /SPRING element id k2rad takes VERBATIM from the source deck.
+
+    Radioss has ONE /SPRING element-id namespace, but LS-DYNA hands these
+    families three separate ones, so ids that are legal input collide after
+    conversion (starter ERROR 79, DUPLICATE ID, IN SPRING ELEMENT DEFINITION,
+    and no restart file):
+
+      * ``*ELEMENT_DISCRETE``  → ``_make_discrete_springs`` / the grounding
+        springs, keyed on the discrete EID;
+      * ``*ELEMENT_BEAM`` on a *MAT_SPOTWELD (MAT_100) part →
+        ``_make_spotweld_beam_connectors``, keyed on the BEAM EID;
+      * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID.
+
+    The joint (/PROP/TYPE45) and *CONSTRAINED_SPOTWELD springs are not listed:
+    their ids come from ``next_id()`` during section emission, so they are
+    unique by construction and not yet allocated when this runs.
+    """
+    weld_pids = _spotweld_beam_pids(state)
+    return [
+        ("*ELEMENT_DISCRETE", {d.eid for d in state.discrete_elems}),
+        ("*ELEMENT_BEAM on a *MAT_SPOTWELD part",
+         {b.eid for b in state.beam_elems if b.pid in weld_pids}),
+        ("*ELEMENT_PLOTEL", {p.eid for p in state.plotel_elems}),
+    ]
+
+
+def _warn_spring_eid_collisions(state: ConversionState) -> None:
+    """Report every source-deck id two /SPRING families would both claim."""
+    fams = [(name, eids) for name, eids in _spring_eid_families(state) if eids]
+    for i, (name_a, eids_a) in enumerate(fams):
+        for name_b, eids_b in fams[i + 1:]:
+            clash = eids_a & eids_b
+            if not clash:
+                continue
+            state.warn(
+                f"{len(clash)} element id(s) are used by BOTH {name_a} and "
+                f"{name_b} (first: {sorted(clash)[0]}). LS-DYNA keeps those in "
+                "separate id namespaces, but both convert to /SPRING, which is "
+                "ONE namespace in the starter — the deck will be rejected with "
+                "ERROR 79 (DUPLICATE ID, IN SPRING ELEMENT DEFINITION). "
+                "Renumber one of the two families in the .k file.")
+
+
 def _make_plotel_elements(state: ConversionState) -> List[str]:
     """*ELEMENT_PLOTEL → inert /SPRING + one /PART + one /PROP/TYPE4.
 
@@ -697,10 +743,15 @@ def _make_plotel_elements(state: ConversionState) -> List[str]:
         exactly zero to the nodal time step of the parts it is drawn on.
       * ELEMENT time step — r1len3.F:139, DT = XM/MAX(EM15, SQRT(XC²+XM·XK)+XC).
         With K=C=0 the denominator floors at the EM15 clamp instead of going to
-        zero, giving DT = M/1e-15 ~ 1.1 s: some six orders of magnitude above a
-        structural shell step, so it never governs. (The MASS>1e-15 hard error
-        is what keeps M out of the DT=0 branch at r1len3.F:143.)
-      * Mass — 1.1e-15 per element, split over its two nodes.
+        zero, giving DT = M/1e-15 ~ 1.1 s raw; the starter's damping-limit term
+        (rinit3.F, DTC = HALF*XM/MAX(EM15,XCM)) halves it, and the element table
+        prints 0.55 s — MEASURED, against 1.67e-6 s for the shells of the same
+        deck, so it never governs. (The MASS>1e-15 hard error is what keeps M
+        out of the DT=0 branch at r1len3.F:143.)
+      * Mass — 1.1e-15 per element, split over its two nodes. It DOES show up in
+        the starter's TOTAL MASS echo (1.2560000000000E-05 -> 1.2560000003300E-05
+        Mg for three PLOTELs, a 2.6e-10 relative change); every structural part
+        mass, the time step and the result history are bit-identical.
 
     Everything else stays at the /PROP/TYPE4 reader defaults (no functions, no
     rupture limits), matching dyna2rad, which sets MASS and nothing else.
@@ -757,19 +808,9 @@ def _make_plotel_elements(state: ConversionState) -> List[str]:
         "and in the part list — delete the *ELEMENT_PLOTEL cards if you want "
         "them out of the model entirely.")
 
-    # /SPRING ids share one starter namespace across every spring emitter, and
-    # LS-DYNA does not force a PLOTEL EID to differ from an *ELEMENT_DISCRETE
-    # one. A clash is ERROR 79 (DUPLICATE ID) with no restart file, so say so
-    # rather than let the starter be the first to mention it.
-    clash = ({e.eid for e in state.plotel_elems}
-             & {d.eid for d in state.discrete_elems})
-    if clash:
-        state.warn(
-            f"*ELEMENT_PLOTEL: {len(clash)} element id(s) are also used by an "
-            f"*ELEMENT_DISCRETE (first: {sorted(clash)[0]}). Both convert to "
-            "/SPRING, which is ONE id namespace in the starter, so the deck "
-            "will be rejected with ERROR 79 (DUPLICATE ID, IN SPRING ELEMENT "
-            "DEFINITION). Renumber one of the two families in the .k file.")
+    # (The /SPRING id-namespace collision check covering this family lives in
+    # _warn_spring_eid_collisions, a build_starter prepass — the clash is not
+    # PLOTEL-specific and must be reported even on a deck with no PLOTELs.)
     return lines
 
 
@@ -2877,10 +2918,16 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         elem_nodes.update((e.n1, e.n2, e.n3))
     # /SPRING connector nodes carry spring stiffness; the synthesized ground
     # nodes are already fully /BCS-fixed by the connector section.
+    #
+    # *ELEMENT_PLOTEL is deliberately NOT in this list: its /PROP/TYPE4 is
+    # K=0/C=0 by construction, and r1len3.F:81-105 leaves STI at zero unless XK
+    # or XC is non-zero, so a node whose only attachment is a PLOTEL has exactly
+    # the same (zero) stiffness as a genuinely free node. Counting the drawing
+    # line as an attachment would switch the singularity guard off for that
+    # node — the same reasoning that makes a synthesized beam-orientation node
+    # subtractable a few lines below.
     for d in state.discrete_elems:
         elem_nodes.update((d.n1, d.n2))
-    for p in state.plotel_elems:
-        elem_nodes.update((p.n1, p.n2))
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
     # A beam's THIRD node is a geometric reference only — the starter tags it

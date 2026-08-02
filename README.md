@@ -107,27 +107,43 @@ export the image.
 `*SECTION_SOLID`, `*SECTION_BEAM`
 `*ELEMENT_SHELL_THICKNESS` / `_BETA` (+ every `_THICKNESS`/`_BETA`|`_MCID`/
 `_OFFSET`/`_DOF` combination): the nodal thicknesses `THIC1..THIC4` become the
-element's own `Thick` field (arithmetic mean over the 3 or 4 corners; only
-*populated* cells count, so a partly-filled card is not quartered) and `BETA`
-becomes its `Phi` field in degrees — both are real `/SHELL` // `SH3N` columns,
-not a property or a skew, and `Thick=0` still falls back to `/PROP/SHELL`.
+element's own `Thick` field — the arithmetic mean over the 3 or 4 corners, with
+the part's `*SECTION_SHELL` thickness substituted for every ZERO or blank cell,
+which is LS-DYNA's own per-value rule (Vol I R17 Remark 1; blank and `0.` are
+the same input there). An all-zero card leaves `Thick=0`, the documented "use
+the `/PROP/SHELL` thickness" value. `BETA` becomes the element's `Phi` field in
+degrees — but **OpenRadioss reads that column only for `IGTYP` 17/51/52**
+(`corthini.F:202-217`, `:429-435` take the layer angle from the property alone),
+so on a part k2rad routes to `/PROP/TYPE9`/`TYPE10`/`TYPE11`/`TYPE16` a uniform
+`BETA` is FOLDED into that property's reference angle instead (and a
+per-element *variation*, which one property cannot express, is warned about).
+On a `*PART_COMPOSITE` part (`/PROP/TYPE51`) the element angle is honoured by
+the solver and is left where it is.
 `MCID` (a coordinate-system id, **not** an angle), the `_OFFSET` mid-surface
 offset and the `_DOF` scalar nodes have no Radioss element field and are
 dropped with a counted warning. **Any other `*ELEMENT_SHELL_<option>` — known
 or not, including `_COMPOSITE` and `_SHL4_TO_SHL8` — still keeps every element**
-(the one exception is `_NURBS_PATCH`, an isogeometric patch rather than a mesh:
-its card holds polynomial orders where an element card holds node ids, so it is
-skipped whole and warned about)
+whose node ids the deck actually defines (an all-integer option card can imitate
+connectivity, so the candidates are re-checked against the node table before
+they are emitted, and the dropped count is reported). The one whole-block
+exception is `_NURBS_PATCH`, an isogeometric patch rather than a mesh: its card
+holds polynomial orders where an element card holds node ids, so it is skipped
+and warned about
 `*ELEMENT_BEAM_ORIENTATION` → a synthesized `/NODE` at `pos(N1) + (VX,VY,VZ)`
 wired into the beam's `node_ID3` (raw vector, unnormalized; one node shared per
-distinct `N1`+vector). A zero vector creates nothing and leaves the starter's
-own `INFO 2093` default (`N3 := N2`); a vector parallel to the beam axis is
-warned about. `*ELEMENT_BEAM_OFFSET` end offsets are dropped with a counted
-warning; any other `*ELEMENT_BEAM_<option>` keeps its elements
+distinct `N1`+vector; the vector is rotated with a `*INCLUDE_TRANSFORM` TRANID).
+A zero vector creates nothing and leaves the starter's own `INFO 2093` default
+(`N3 := N2`); a vector parallel to the beam axis is warned about.
+`*ELEMENT_BEAM_OFFSET` end offsets are dropped with a counted warning; any
+other `*ELEMENT_BEAM_<option>` keeps its elements
 `*ELEMENT_PLOTEL` → an inert 2-node `/SPRING` on a synthesized `/PART` +
 `/PROP/TYPE4` id 10000000 (the id LS-DYNA assigns PLOTELs) with `K=0`, `C=0`,
-`MASS=1.1e-15`: no stiffness, no nodal stiffness, and a spring time step of
-~0.5 s so it never governs
+`MASS=1.1e-15`: no stiffness, no nodal stiffness, and a spring time step the
+starter prints as 0.55 s, so it never governs. The `1.1e-15` per element does
+reach the starter's TOTAL MASS echo in its 11th significant digit; every part
+mass, the time step and the result history are unchanged. Because the spring
+carries no stiffness, a node attached to nothing else still counts as FREE for
+the implicit singularity guard
 `*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
 `*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
 (SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
