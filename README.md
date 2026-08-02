@@ -104,9 +104,11 @@ export the image.
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
 `*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
 `_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`
-(+ `_TITLE`; every card SET under one header, not just the first; `ICOMP = 1`
-reads the card-3 `B1..B8` per-layer material angles, and a negative card-1
-field 6 `QR/IRID` binds an `*INTEGRATION_SHELL` rule — see **Composites**),
+(+ `_TITLE`; every card SET under one header, not just the first, striding over
+the `ICOMP` angle cards, the keyword-option card and the ELFORM 101–105
+user-shell cards 5/5.1/5.2; `ICOMP = 1` reads the card-3 `B1..B8` per-layer
+material angles, and a negative card-1 field 6 `QR/IRID` binds an
+`*INTEGRATION_SHELL` rule — see **Composites**),
 `*INTEGRATION_SHELL` (user through-thickness integration rules: per-layer
 thickness `WF_i`, material `PID_i`, `ESOP = 0/1` — see **Composites**),
 `*SECTION_SOLID`, `*SECTION_BEAM`
@@ -491,8 +493,12 @@ was honoured), and the layer's material is `PID_i → *PART → MID`, falling ba
 to the element's own part material when the field is blank. The **rule's `NIP`
 wins** over the section's and is pushed onto the section, so it also drives the
 shared `/PROP/SHELL` point count, `/INISHE`'s layer count and the `NUMFIP`
-count-to-ratio conversion. `ESOP = 1` is NIP *equal* layers on one material —
-identical to a plain `/PROP/SHELL` with N points, so no property is split.
+count-to-ratio conversion — clamped at 10 on the way there, which is what a
+`/PROP/SHELL`'s `N` column takes (ERROR 788). The layered property the rule
+drives counts its plies off the rule directly and is capped at 100 instead, so
+that clamp never costs a laminate layer. `ESOP = 1` is NIP *equal* layers on one
+material — identical to a plain `/PROP/SHELL` with N points, so no property is
+split.
 
 **Layer positions are the cumulative-`WF` stack (`Ipos = 0`), not `S_i`** — a
 deliberate divergence from dyna2rad. `S_i` is a quadrature *sampling* coordinate
@@ -504,10 +510,15 @@ rule reaching `S = ±1` pushes half of each outer layer outside the shell and
 leaves gaps between the rest. On the validation windshield below that inflates a
 2.0 mm laminate to 2.8 mm; auto-stacking reproduces 2.0 mm exactly and tiles
 without gaps, which the starter's own echo confirms (layer 1 at −0.6 spanning
-[−1.0, −0.2], layer 2 at −0.1 spanning [−0.2, 0.0]). A rule whose `S` column runs
-top-down or out of order is **re-ordered bottom-up** first, carrying each layer's
-`ICOMP` angle with it — LS-DYNA leaves that ordering arbitrary (Figure 29-25) but
-an `Ipos = 0` stack is built in list order from the bottom face.
+[−1.0, −0.2], layer 2 at −0.1 spanning [−0.2, 0.0]). The trade has two halves and
+the conversion warning states both: the emitted stack reproduces `T1` and every
+`t_i` exactly, but it integrates at the layer **centres**, not at the rule's own
+sampling stations `S_i·T1/2` — so a rule whose outermost `S` is ±1 no longer
+samples the outer fibre, and `Σ t_i·z_i²` (hence the bending response) shifts
+with it. A rule whose `S` column runs top-down or out of order is **re-ordered
+bottom-up** first, carrying each layer's `ICOMP` angle with it — LS-DYNA leaves
+that ordering arbitrary (Figure 29-25) but an `Ipos = 0` stack is built in list
+order from the bottom face.
 
 The target property is chosen by what the **starter** accepts, not by preference.
 `/PROP/TYPE11` is a *single-law* property: `hm_read_prop11.F` takes only Radioss

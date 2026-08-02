@@ -996,6 +996,110 @@ class ReferenceOffsetEdgeTests(_AssemblyBase):
                              for w in PARSER_WARNINGS))
 
 
+class IntegrationShellOffsetTests(_AssemblyBase):
+    """*INTEGRATION_SHELL and *SECTION_SHELL are card-SET keywords: several
+    rules / several sections may stack under one header. A declarative offset
+    spec can only address the first set, so both need a walker."""
+
+    CHILD = "\n".join([
+        "*KEYWORD",
+        "*NODE",
+        _nline(1, 0.0, 0.0, 0.0), _nline(2, 1.0, 0.0, 0.0),
+        _nline(3, 1.0, 1.0, 0.0), _nline(4, 0.0, 1.0, 0.0),
+        "*ELEMENT_SHELL",
+        "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)),
+        "*PART", "child part", _row(1, 1, 1),
+        "*PART", "layer carrier", _row(5, 0, 2),
+        # two SETS under one *SECTION_SHELL header, the first binding a rule
+        "*SECTION_SHELL",
+        _row(1, 2, 1.0, 3, 0.0, -3.0), _row(1.5),
+        _row(2, 2, 1.0, 4), _row(2.5),
+        # two RULES under one *INTEGRATION_SHELL header
+        "*INTEGRATION_SHELL",
+        _row(3, 3, 0, 0),
+        _row(-1.0, 0.25, 0), _row(0.0, 0.5, 5), _row(1.0, 0.25, 0),
+        _row(4, 2, 1, 0),
+        # NOT *MAT_ELASTIC on the meshed part: Radioss bans LAW1 from every
+        # layered shell property (ERROR 658), so an elastic part's rule is
+        # warn-dropped and there would be no layup left to check.
+        "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+        _row(1, "7.85E-9", 210000.0, 0.3, 300.0),
+        "*MAT_PIECEWISE_LINEAR_PLASTICITY", _row(2, "1.0E-9", 3000.0, 0.4, 0.5),
+        "*END",
+    ]) + "\n"
+
+    def _offset_state(self):
+        d = self._dir()
+        self._write(d, "child.k", self.CHILD)
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k",
+            # card 2 IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF,
+            # card 3 IDROFF (the *SECTION / *INTEGRATION_SHELL id space)
+            _row(100, 200, 10, 20, 30, 40, 0),
+            _row(60),
+            "", "",
+            "*END",
+        ]) + "\n")
+        return self._state(main)
+
+    def test_every_stacked_rule_gets_its_irid_offset(self):
+        """Rule 2's card 1 used to be read as a point card: its IRID stayed put
+        (colliding with a parent rule of the same id) and its ESOP column was
+        offset with IDPOFF, which the reader then reported as 'ESOP=11 is
+        neither 0 nor 1' and dropped the rule."""
+        st = self._offset_state()
+        self.assertEqual(sorted(st.integration_shells), [63, 64])
+        self.assertEqual(st.integration_shells[64].esop, 1)
+        self.assertEqual(st.integration_shells[64].nip, 2)
+
+    def test_point_card_pids_are_offset_but_card_one_fields_are_not(self):
+        st = self._offset_state()
+        rule = st.integration_shells[63]
+        self.assertEqual([(p.s, p.wf, p.pid) for p in rule.points],
+                         [(-1.0, 0.25, 0), (0.0, 0.5, 15), (1.0, 0.25, 0)])
+        self.assertEqual((rule.nip, rule.esop), (3, 0))
+
+    def test_every_section_card_set_gets_its_secid_offset(self):
+        st = self._offset_state()
+        self.assertEqual(sorted(st.sec_shells), [61, 62])
+        self.assertEqual(st.sec_shells[62].t1, 2.5)
+        self.assertEqual(st.parts[11].secid, 61)
+
+    def test_the_negated_qr_irid_back_reference_follows_idroff(self):
+        """QR/IRID is the one signed back-reference here: its MAGNITUDE is a
+        rule id, so it has to move with IDROFF like the rule's own IRID.
+        _rewrite_line only touches positive cells, so the declarative spec left
+        it behind and the transformed section/rule pair always dangled."""
+        st = self._offset_state()
+        self.assertEqual(st.sec_shells[61].irid, 63)
+        self.assertEqual(st.sec_shells[62].irid, 0)
+
+    def test_a_transformed_rule_still_drives_the_layup(self):
+        """End to end: the offset section, rule and carrier part still resolve
+        as a set, so the laminate survives the include transform."""
+        d = self._dir()
+        self._write(d, "child.k", self.CHILD)
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k", _row(100, 200, 10, 20, 30, 40, 0), _row(60), "", "",
+            "*CONTROL_TERMINATION", _row(0.001),
+            "*END",
+        ]) + "\n")
+        result = convert(main, write_log=False)
+        with open(result.starter_path) as fh:
+            starter = fh.read()
+        plies = [ln for ln in starter.splitlines()
+                 if ln.startswith("/PROP/TYPE19/")]
+        self.assertEqual(len(plies), 3)
+        self.assertFalse([w for w in result.warnings
+                          if "is neither 0 nor 1" in w], result.warnings)
+        self.assertFalse([w for w in result.warnings
+                          if "does NOT define" in w and "IRID" in w])
+
+
 class CoordinatePrecisionTests(_AssemblyBase):
     def test_offset_only_rewrite_preserves_coordinate_text(self):
         d = self._dir()

@@ -1,4 +1,4 @@
-﻿"""Tests for *INTEGRATION_SHELL user through-thickness integration rules:
+"""Tests for *INTEGRATION_SHELL user through-thickness integration rules:
 
   *SECTION_SHELL card-1 field 6 (QR/IRID) < 0  -> the rule reference
   *INTEGRATION_SHELL S/WF/PID                  -> /PROP/TYPE11 layer cards, or
@@ -33,7 +33,7 @@ from k2rad.handlers import dispatch              # noqa: E402
 from k2rad.state import ConversionState          # noqa: E402
 
 
-# â”€â”€ Harness (same shape as tests/test_composites.py) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Harness (same shape as tests/test_composites.py) ─────────────────────────
 
 def _convert(deck: str):
     tmp = tempfile.TemporaryDirectory()
@@ -134,7 +134,7 @@ def _layup(starter):
     return _type11_layup(starter)
 
 
-# â”€â”€ Decks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Decks ────────────────────────────────────────────────────────────────────
 
 NODES = (
     "*NODE\n"
@@ -179,6 +179,16 @@ def _mat002(mid=2, beta=0.0):
             + "\n" + _row(5000.0, 3000.0, 4000.0, 0.0) + "\n"
             + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0) + "\n"
             + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, beta) + "\n")
+
+
+def _mat002_aopt2(mid=2):
+    """*MAT_ORTHOTROPIC_ELASTIC with AOPT = 2 (a and d vectors), which is the
+    only AOPT that makes k2rad synthesize a /SKEW/FIX for the property."""
+    return ("*MAT_ORTHOTROPIC_ELASTIC\n"
+            + _row(mid, 1.55e-9, 150000.0, 10000.0, 10000.0, 0.02, 0.02, 0.4)
+            + "\n" + _row(5000.0, 3000.0, 4000.0, 2.0) + "\n"
+            + _row(0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n"            # a = global X
+            + _row(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) + "\n")      # d = global Y
 
 
 def _mat032(mid=32, f=(0.0, 1.0, 1.0, 0.0), efg=0.01):
@@ -232,9 +242,9 @@ def _layered(starter) -> bool:
     return "/PROP/TYPE11/" in starter or "/PROP/TYPE51/" in starter
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 # Parsing: the rule card and the *SECTION_SHELL QR/IRID link
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class IntegrationShellParseTests(unittest.TestCase):
     """Card 1 IRID NIP ESOP FAILOPT, then NIP x (S WF PID) when ESOP = 0
@@ -325,9 +335,9 @@ class IntegrationShellParseTests(unittest.TestCase):
                             for w in state.warnings), state.warnings)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 # The emitted layer cards
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class RuleDrivenLayupTests(unittest.TestCase):
     """t_i = WF_i / sum(WF) * T1, material from PID_i -> *PART -> MID, layers
@@ -512,6 +522,38 @@ class RuleDrivenLayupTests(unittest.TestCase):
         self.assertEqual(len(_layup(starter)), 100)
         self.assertTrue(_warned(result, "CLAMPED to 100"))
 
+    def test_more_than_ten_points_does_not_poison_the_shared_prop(self):
+        """sec.nip is written as N on the SHARED /PROP/SHELL, and BOTH shell
+        readers cap N at 10 (hm_read_prop01.F:260 ERROR 788,
+        hm_read_prop09.F:368 ERROR 33). Pushing the raw rule count through made
+        any rule with more than 10 points ERROR-terminate the starter, on a deck
+        that converted cleanly before the feature existed. The LAYERED property
+        keeps every layer — only the shared one is clamped."""
+        n = 12
+        pts = tuple((-1.0 + 2.0 * k / (n - 1), 1.0 / n, 0) for k in range(n))
+        # a second, ELASTIC part on the same section stays on the shared prop
+        second = ("*PART\nq\n" + _row(9, 7, 5) + "\n" + ELASTIC
+                  + "*ELEMENT_SHELL\n" + _row(2, 9, 1, 2, 3, 4) + "\n")
+        result, starter = _convert(_deck(rule=_rule(nip=n, points=pts),
+                                         extra=second))
+        shared = _cards(_block(starter, "/PROP/SHELL/7"))
+        self.assertEqual(_i10(shared[2], 0), 10)               # N, not 12
+        self.assertEqual(len(_layup(starter)), n)              # laminate intact
+        self.assertTrue(_warned(result, "carries at most 10",
+                                "ERROR 788"))
+        self.assertTrue(_warned(result, "clamped to 10 on the shared "
+                                        "/PROP/SHELL"))
+
+    def test_esop_one_over_ten_layers_is_clamped_on_the_shared_prop(self):
+        """Same ceiling, reached without any point card at all: an ESOP=1 rule
+        never claims a layered property, so its NIP lands DIRECTLY on the shared
+        /PROP/SHELL."""
+        result, starter = _convert(_deck(rule=_rule(irid=3, nip=14, esop=1)))
+        self.assertFalse(_layered(starter))
+        self.assertEqual(_i10(_cards(_block(starter, "/PROP/SHELL/7"))[2], 0),
+                         10)
+        self.assertTrue(_warned(result, "ERROR 788"))
+
     def test_orthotropic_material_carries_the_rule_on_type11(self):
         """The rule composes with the *MAT_002 -> /MAT/LAW93 route, which
         already had a layered /PROP/TYPE11 with an even split. LAW93 >= 29 and
@@ -520,6 +562,74 @@ class RuleDrivenLayupTests(unittest.TestCase):
         self.assertEqual(len(_blocks(starter, "/PROP/TYPE11/")), 1)
         self.assertEqual([t for _, t, _ in _layup(starter)], [0.5, 1.0, 0.5])
         self.assertEqual([m for _, _, m in _layup(starter)], [2, 2, 2])
+
+    def test_aopt2_plus_a_foreign_pid_emits_exactly_one_skew(self):
+        """_emit_composite_props owns the synthesized /SKEW/FIX; re-emitting it
+        inside the TYPE51 branch wrote the same skew id twice, and the starter
+        ERROR-terminates on it (UDOUBLE -> ERROR 79 DUPLICATE ID). Only this
+        combination reaches it: AOPT=2 builds a skew, and a foreign PID_i
+        material is what pushes an orthotropic part off TYPE11 onto TYPE51."""
+        rule = _rule(points=((-1.0, 0.25, 0), (0.0, 0.5, 88), (1.0, 0.25, 0)))
+        _, starter = _convert(_deck(mat=_mat002_aopt2(), mid=2, rule=rule,
+                                    extra=CORE_PART + FOAM))
+        skews = [ln for ln in starter.splitlines()
+                 if ln.startswith("/SKEW/FIX/")]
+        self.assertEqual(len(skews), 1, skews)
+        self.assertEqual(len(skews), len(set(skews)))
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE51/")), 1)
+
+    def test_a_negative_weight_is_warned_by_name(self):
+        """Only the SUM of WF is guarded upstream, so a negative weight whose
+        sum is still positive turns into a negative ply thickness. WF is a
+        thickness FRACTION (Vol I R17 p.29-17), so that is unphysical."""
+        rule = _rule(points=((-1.0, 0.6, 0), (0.0, -0.1, 0), (1.0, 0.5, 0)))
+        result, starter = _convert(_deck(rule=rule))
+        self.assertEqual([t for _, t, _ in _layup(starter)],
+                         [1.2, -0.2, 1.0])                    # T1 = 2.0
+        self.assertTrue(_warned(result, "NEGATIVE weighting factor",
+                                "2 (WF=-0.1)"))
+
+    def test_messages_name_the_property_actually_emitted(self):
+        """An ordinary isotropic part is the DEFAULT rule route and it lands on
+        TYPE51 + TYPE19, so naming /PROP/TYPE11 in the conversion warning sent
+        users grepping the deck for a property that was never written."""
+        result, starter = _convert(_deck())
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE51/")), 1)
+        self.assertEqual(_blocks(starter, "/PROP/TYPE11/"), [])
+        self.assertTrue(_warned(result, "/PROP/TYPE51/90002 carries the rule's "
+                                        "OWN 3 layer thickness(es)"))
+        self.assertFalse(_warned(result, "/PROP/TYPE11/90002 carries"))
+
+    def test_the_type11_route_still_names_type11(self):
+        result, starter = _convert(_deck(mat=_mat002(), mid=2))
+        prop = _block(starter, "/PROP/TYPE11/")[0].rsplit("/", 1)[1]
+        self.assertTrue(_warned(result, f"/PROP/TYPE11/{prop} carries the "
+                                        "rule's OWN 3 layer thickness(es)"))
+
+    def test_the_sampling_tradeoff_is_stated_not_just_the_thickness_one(self):
+        """The Ipos=0 stack reproduces T1 exactly (dyna2rad's Zi = S_i*T1/2 does
+        not), but it integrates at the layer CENTRES, not at the rule's own
+        sampling stations — so the through-thickness quadrature is not the
+        deck's. Both halves of that trade have to be in the message."""
+        result, _ = _convert(_deck())
+        self.assertTrue(_warned(result, "BOTH HALVES OF THAT TRADE",
+                                "cumulative-WF layer CENTRES",
+                                "not the deck's quadrature rule"))
+        # S = -1 / 0 / +1 on T1 = 2 -> centres -0.75 / 0 / +0.75, stations -1/0/+1
+        self.assertTrue(_warned(result, "[-0.75, 0, 0.75]", "[-1, 0, 1]"))
+
+    def test_a_rigid_part_is_not_told_to_pick_a_plastic_law(self):
+        """*MAT_RIGID does convert to /MAT/ELAST for the /RBODY's inertia, so it
+        hits the same LAW1 gate — but a rigid body has no through-thickness
+        state at all, and telling the user to give it *MAT_PLASTIC_KINEMATIC is
+        nonsense."""
+        rigid = ("*MAT_RIGID\n" + _row(6, 7.85e-9, 210000.0, 0.3) + "\n"
+                 + _row(0, 7, 7) + "\n" + _row(0.0, 0.0, 0.0) + "\n")
+        result, starter = _convert(_deck(mat=rigid, mid=6))
+        self.assertFalse(_layered(starter))
+        self.assertTrue(_warned(result, "is *MAT_RIGID", "no through-thickness "
+                                        "state"))
+        self.assertFalse(_warned(result, "*MAT_PLASTIC_KINEMATIC"))
 
     def test_elementless_carrier_part_is_warned(self):
         """"It may reference a part with no elements" is the idiomatic way to
@@ -558,6 +668,22 @@ class RuleDrivenLayupTests(unittest.TestCase):
         self.assertEqual([p for p, _, _ in _layup(starter)],
                          [-45.0, 45.0, 0.0])
 
+    def test_too_few_icomp_angles_for_the_rules_points_is_warned(self):
+        """The card-3 B_i block is read with the SECTION's NIP, so a rule with
+        more integration points leaves the tail padded with 0 deg. Silent
+        padding turns a [0/45/90] layup into [0, 45, 90, 0, 0]."""
+        section = _section(nip=3, t1=1.0, icomp=1, betas=(0.0, 45.0, 90.0))
+        rule = _rule(nip=5, points=tuple((-1.0 + 0.5 * k, 0.2, 0)
+                                         for k in range(5)))
+        result, starter = _convert(_deck(mat=_mat002(), mid=2, section=section,
+                                         rule=rule))
+        self.assertEqual([p for p, _, _ in _layup(starter)],
+                         [0.0, 45.0, 90.0, 0.0, 0.0])
+        self.assertTrue(_warned(result, "ICOMP=1 supplies only 3 material "
+                                        "angle(s)",
+                                "defines 5 integration point(s)",
+                                "last 2 layer(s) are emitted at 0 deg"))
+
     def test_icomp_even_split_warning_survives_without_a_rule(self):
         """The no-rule ICOMP path is untouched: the section thickness is still
         split evenly and the warning still names the rule as where the real
@@ -573,9 +699,9 @@ class RuleDrivenLayupTests(unittest.TestCase):
                                 "*INTEGRATION_SHELL"))
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 # *MAT_LAMINATED_GLASS (032) driven by a rule
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class LaminatedGlassRuleTests(unittest.TestCase):
     """*MAT_032 is the material that REQUIRES an *INTEGRATION_SHELL rule in
@@ -636,6 +762,27 @@ class LaminatedGlassRuleTests(unittest.TestCase):
         for _, t, _ in _layup(starter):
             self.assertAlmostEqual(t, 0.5)
         self.assertTrue(_warned(result, "split EVENLY", "*INTEGRATION_SHELL"))
+        self.assertTrue(_warned(result, "this section references none"))
+
+    def test_an_esop_one_rule_is_not_reported_as_no_rule_at_all(self):
+        """_layered_rule() is None for an ESOP=1 rule BY DESIGN — equal layers
+        need no layered property — so the no-rule branch also ran when the deck
+        DID bind one, and told the user to add a rule that was already there.
+        Four equal layers is exactly what ESOP=1 means, so the split is right;
+        only the explanation was wrong."""
+        result, starter = self._glass(rule=_rule(irid=4, nip=4, esop=1))
+        for _, t, _ in _layup(starter):
+            self.assertAlmostEqual(t, 0.5)
+        self.assertFalse(_warned(result, "this section references none"))
+        self.assertTrue(_warned(result, "*INTEGRATION_SHELL 4 rule this "
+                                        "section references is ESOP=1",
+                                "the even split IS the rule"))
+
+    def test_a_dropped_rule_is_reported_as_dropped_not_as_absent(self):
+        result, _ = self._glass(rule=_rule(irid=4, nip=4, esop=7))
+        self.assertFalse(_warned(result, "this section references none"))
+        self.assertTrue(_warned(result, "*INTEGRATION_SHELL 4 rule this "
+                                        "section references was DROPPED"))
 
     def test_pid_wins_over_the_f_flag(self):
         """dyna2rad's precedence, verbatim: the isMat032 branch sits in the
@@ -663,9 +810,9 @@ class LaminatedGlassRuleTests(unittest.TestCase):
         self.assertEqual([m for _, _, m in _layup(starter)], [gid] * 4)
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 # Interaction rules and the routes a rule cannot reach
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class IntegrationShellInteractionTests(unittest.TestCase):
 
@@ -747,9 +894,9 @@ class IntegrationShellInteractionTests(unittest.TestCase):
         self.assertTrue(_warned(result, "LAW43", "single-layer orthotropic"))
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 # RIDER: multi card set *SECTION_SHELL
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class SectionShellMultiSetTests(unittest.TestCase):
     """"Card Sets.  For each shell section, of a type matching the keyword's
@@ -843,10 +990,67 @@ class SectionShellMultiSetTests(unittest.TestCase):
         self.assertEqual(state.sec_shells[7].betas, [0.0, 45.0, -45.0, 90.0])
         self.assertTrue(any("NIP=-4 is negative" in w for w in state.warnings))
 
+    def test_a_blank_title_line_is_the_title_card_not_padding(self):
+        """The 80a title card is read once per set unconditionally, so a blank
+        (or all-spaces) title IS the card. Skipping it as padding shifted the
+        set up one line, read card 1 as the title and card 2 as card 1, and
+        registered a phantom section under int(T1) that OVERWROTE a real one.
+        """
+        deck = ("*KEYWORD\n*SECTION_SHELL_TITLE\n"
+                + "skin section\n" + _row(2, 2, 1.0, 3) + "\n"
+                + _row(1.5, 1.5, 1.5, 1.5) + "\n"
+                + "   \n" + _row(8, 2, 1.0, 5) + "\n"
+                + _row(2.0, 2.0, 2.0, 2.0) + "\n*END\n")
+        state = _dispatch(deck)
+        self.assertEqual(sorted(state.sec_shells), [2, 8])
+        self.assertEqual((state.sec_shells[2].title, state.sec_shells[2].t1,
+                          state.sec_shells[2].nip), ("skin section", 1.5, 3))
+        self.assertEqual((state.sec_shells[8].title, state.sec_shells[8].t1,
+                          state.sec_shells[8].nip), ("", 2.0, 5))
+        self.assertEqual(state.warnings, [])
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    def test_trailing_blank_lines_end_the_walk_quietly(self):
+        deck = ("*KEYWORD\n" + self.TWO_SETS + "\n   \n\n*END\n")
+        state = _dispatch(deck)
+        self.assertEqual(sorted(state.sec_shells), [8, 9])
+        self.assertEqual(state.warnings, [])
+
+    def test_user_shell_elform_cards_are_strided_over(self):
+        """Cards 5 / 5.1 / 5.2 exist for ELFORM 101-105 (Vol I R17 p.41-63) and
+        card 5 starts with NIPP, a POSITIVE integer — so the "no positive SECID"
+        stop never fires on it. Striding by 1 + NIPP + ceil(LMC/8) is what keeps
+        the PRECEDING section from being clobbered by a phantom read out of
+        card 5's own columns."""
+        deck = ("*KEYWORD\n*SECTION_SHELL\n"
+                + _row(4, 2, 1.0, 3) + "\n" + _row(1.0) + "\n"
+                + _row(20, 101, 1.0, 3) + "\n" + _row(2.0) + "\n"
+                # card 5: NIPP=4 NXDOF=1 ... LMC=2
+                + _row(4, 1, 0, 0, 0, 2, 0, 0) + "\n"
+                + _row(0.0, 0.0, 0.0) + "\n" + _row(0.0, 0.0, 0.0) + "\n"
+                + _row(0.0, 0.0, 0.0) + "\n" + _row(0.0, 0.0, 0.0) + "\n"
+                + _row(1.0, 2.0) + "\n"
+                + _row(9, 2, 1.0, 4) + "\n" + _row(3.0) + "\n*END\n")
+        state = _dispatch(deck)
+        self.assertEqual(sorted(state.sec_shells), [4, 9, 20])
+        self.assertEqual((state.sec_shells[4].t1, state.sec_shells[4].elform),
+                         (1.0, 2))
+        self.assertEqual(state.sec_shells[20].t1, 2.0)
+        self.assertEqual(state.sec_shells[9].t1, 3.0)
+        self.assertTrue(any("ELFORM=101 is a USER-DEFINED shell" in w
+                            for w in state.warnings), state.warnings)
+
+    def test_a_duplicate_secid_is_warned(self):
+        state = _dispatch("*KEYWORD\n*SECTION_SHELL\n"
+                          + _row(8, 2, 1.0, 3) + "\n" + _row(2.0) + "\n"
+                          + _row(8, 2, 1.0, 5) + "\n" + _row(4.0) + "\n*END\n")
+        self.assertEqual(state.sec_shells[8].t1, 4.0)       # last wins
+        self.assertTrue(any("*SECTION_SHELL 8 is defined more than once" in w
+                            for w in state.warnings), state.warnings)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Regression: no flag, no behaviour change on a deck without these cards
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ═════════════════════════════════════════════════════════════════════════════
 
 class IntegrationShellRegressionTests(unittest.TestCase):
 

@@ -17,9 +17,11 @@ Prior history (before this changelog was introduced) is summarized in the
   `handle_section_shell` never read card-1 field 6, so the reference was lost
   twice over. A laminated windshield, a foam-core sandwich, any deck whose layer
   thicknesses live in a rule, converted to N identical layers with no warning
-  that the stack had been flattened. 60 new tests in a new
-  `tests/test_integration_shell.py` (1413 → 1473); no flag, and a deck without
-  these cards is byte-identical (all five goldens unchanged).
+  that the stack had been flattened. 75 new tests in a new
+  `tests/test_integration_shell.py` plus 5 in `tests/test_include_transform.py`
+  (1413 → 1493); no flag, and a deck without these cards is byte-identical (all
+  five goldens unchanged, and all 73 `.k`/`.key`/`.dyn` decks in the repo
+  re-convert to the same SHA256 as on `master`).
 
   **The link is card-1 field 6 (`QR/IRID`, cols 51–60), not `NIP`.** "Quadrature
   rules in the `*SECTION_SHELL` and `*SECTION_BEAM` cards need to be specified as
@@ -39,7 +41,15 @@ Prior history (before this changelog was introduced) is summarized in the
   material. The **rule's `NIP` wins** over the section's (dyna2rad reads it off
   the rule and never off the section, `convertprops.cxx:1890-1892`) and is pushed
   onto the section, so it also corrects the shared `/PROP/SHELL` point count,
-  `/INISHE`'s layer count and the `NUMFIP` count-to-ratio conversion. `ESOP = 1`
+  `/INISHE`'s layer count and the `NUMFIP` count-to-ratio conversion —
+  **clamped at 10 on the way onto the section**, because that is what a
+  `/PROP/SHELL`'s `N` column takes (`hm_read_prop01.F:260` ERROR 788,
+  `hm_read_prop09.F:368` ERROR 33), while the layered property the rule drives
+  counts its plies off the rule directly and is capped at 100 instead
+  (`hm_read_prop11.F:130` `NLYMAX`). The two limits are deliberately different:
+  clamping the section's `N` never deletes a laminate layer, and not clamping it
+  made any rule with more than 10 points ERROR-terminate the whole deck.
+  `ESOP = 1`
   is NIP *equal* layers on one material — exactly a plain `/PROP/SHELL` with N
   points — so no property is split. `ICOMP = 1` and a rule **compose**: LS-DYNA
   gives each integration point one `B_i` and the rule gives that same point its
@@ -125,12 +135,35 @@ Prior history (before this changelog was introduced) is summarized in the
   after the first in a multi-set block was dropped silently — and a `*PART`
   pointing at one of them fell through to `_auto_section_shell`'s **zero-
   thickness** placeholder, which the starter rejects. The cursor now advances by
-  what each set actually consumed (`1 title + 2 cards + ceil(NIP/8)` angle cards
-  when `ICOMP = 1`), and a set whose cards k2rad does not model — the ELFORM
-  101–105 user-shell block — stops the walk with a warning naming how many sets
-  were read, rather than mis-parsing the remainder as sections. Scoped to
-  `*SECTION_SHELL`: `handle_section_solid` / `_beam` / `_discrete` have the same
-  first-set-only shape and are left for their own change.
+  what each set actually consumed: `1 title + 2 cards + ceil(NIP/8)` angle cards
+  when `ICOMP = 1`, `+1` for the card the `EFG`/`THERMAL`/`XFEM`/`MISC` keyword
+  option adds, and `+1 + NIPP + ceil(LMC/8)` for the ELFORM 101–105 user-shell
+  cards 5/5.1/5.2 (p.41-63). Those last ones cannot be detected by content —
+  card 5 begins with `NIPP`, a *positive* integer, so a "stop when the next
+  field is not a SECID" guard never fires on it and the section BEFORE it gets
+  clobbered by a phantom read out of card 5's own columns. Only a genuinely
+  unreadable card stops the walk, and it says so.
+
+  The per-set 80a title card is likewise consumed **unconditionally**, blank or
+  not — the manual reads one per set with no "if non-empty" proviso, and
+  `parser.py` deliberately preserves a blank line as a card placeholder. Treating
+  a blank title as padding shifted the set up one line and registered a phantom
+  section under `int(T1)` that overwrote a real one, silently, leaving both
+  shells zero-thick. A duplicate `SECID` is now reported instead of overwriting
+  in silence. Scoped to `*SECTION_SHELL`: `handle_section_solid` / `_beam` /
+  `_discrete` have the same first-set-only shape and are left for their own
+  change.
+
+- **`*INCLUDE_TRANSFORM` id offsets follow both keywords' card SETS.** A
+  declarative offset spec addresses one set, so a second `*SECTION_SHELL` set
+  kept its original `SECID` (dangling for any `*PART` in the same include) and a
+  second stacked `*INTEGRATION_SHELL` rule kept its `IRID` while its `ESOP`
+  column was offset with `IDPOFF` as if card 1 were a point card. Both keywords
+  now use a walker. It also carries the **negated** `QR/IRID` back-reference
+  across with `IDROFF`, which the declarative form structurally could not —
+  `_rewrite_line` only touches positive cells, so the rule's own id moved and
+  the reference to it did not, and a transformed include's section/rule pair
+  always dangled into a silent even-thickness split.
 
 - **`*SECTION_SHELL` `ICOMP = 1` becomes a real layered property: the card-3
   `B1..B8` per-layer material angles now reach the `/PROP/TYPE11` layup.**

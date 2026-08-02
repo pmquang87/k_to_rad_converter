@@ -478,15 +478,17 @@ def _layered_rule(state: ConversionState,
 
 def _rule_layer_count(rule: IntegrationShell, state: ConversionState,
                       label: str) -> int:
-    """How many layers an ESOP=0 rule contributes, clamped at the TYPE11 limit."""
+    """How many layers an ESOP=0 rule contributes, clamped at the layered-shell
+    limit. Deliberately does NOT name a property: which one carries the layup is
+    only decided once the layer MATERIALS are known (see ``_type11_carries``)."""
     n = len(rule.points)
     if n > _MAX_RULE_LAYERS:
         state.warn(
-            f"{label}: the rule defines {n} integration points but "
-            f"/PROP/TYPE11 carries at most {_MAX_RULE_LAYERS} layers "
-            f"(prop_p11_sh_sandw.cfg 'NIP <= 100') — CLAMPED to "
-            f"{_MAX_RULE_LAYERS}. The dropped layers take their thickness and "
-            "their material with them, so the laminate is THINNER than the "
+            f"{label}: the rule defines {n} integration points but a layered "
+            f"Radioss shell property carries at most {_MAX_RULE_LAYERS} layers "
+            f"(/PROP/TYPE11 'NIP <= 100', prop_p11_sh_sandw.cfg:121) — CLAMPED "
+            f"to {_MAX_RULE_LAYERS}. The dropped layers take their thickness "
+            "and their material with them, so the laminate is THINNER than the "
             "deck's; merge adjacent plies of the same material to fit.")
         n = _MAX_RULE_LAYERS
     return n
@@ -554,6 +556,13 @@ def _rule_layers(state: ConversionState, rule: IntegrationShell, sec: SectionShe
             "be copied verbatim. dyna2rad copies it verbatim and relies on its "
             "explicit Zi to undo it.")
     layers = [(tuples[k][1], tuples[k][2], tuples[k][3]) for k in order]
+    # Which property actually carries the layup is decided by the layer
+    # MATERIALS, so it is only knowable here — and it must be, because an
+    # ordinary isotropic part (the common foam-core / glass-interlayer stack)
+    # lands on TYPE51 + TYPE19, not TYPE11. Naming TYPE11 unconditionally sent
+    # users grepping the deck for a property that was never emitted.
+    prop_kind = ("/PROP/TYPE11" if _type11_carries(state, pid, layers)
+                 else "/PROP/TYPE51")
 
     if missing_parts:
         state.warn(
@@ -572,9 +581,12 @@ def _rule_layers(state: ConversionState, rule: IntegrationShell, sec: SectionShe
             state.warn(
                 f"{label}: layer material {mid} is NOT emitted as a /MAT by "
                 "this conversion — either the deck defines no *MAT with that "
-                "id, or its law is one k2rad does not convert. The "
-                f"/PROP/TYPE11/{prop_id} mat_ID={mid} will dangle and the "
-                "starter will reject the property.")
+                "id, or its law is one k2rad does not convert. The layer "
+                f"carrying mat_ID={mid} on the {prop_kind}/{prop_id} "
+                "synthesized for this part"
+                + ("" if prop_kind == "/PROP/TYPE11" else
+                   " (on its own /PROP/TYPE19 ply)")
+                + " will dangle and the starter will reject the property.")
     out_of_range = [t[0] for t in tuples if abs(t[0]) > 1.0]
     if out_of_range:
         state.warn(
@@ -584,6 +596,20 @@ def _rule_layers(state: ConversionState, rule: IntegrationShell, sec: SectionShe
             "They are used as written for the layer ORDER only, so the layup is "
             "still emitted, but check the rule: a point outside the shell is "
             "almost always a mis-keyed column.")
+    # WF is a thickness FRACTION (Delta_t_i / t, Vol I R17 p.29-17). Only the
+    # SUM is guarded upstream, so a negative weight whose sum is still positive
+    # slips through and turns into a negative ply thickness — which no Radioss
+    # layered property can mean anything by.
+    negative_wf = [(i + 1, p.wf) for i, p in enumerate(pts) if p.wf < 0.0]
+    if negative_wf:
+        state.warn(
+            f"{label}: integration point(s) "
+            + ", ".join(f"{i} (WF={v:g})" for i, v in negative_wf)
+            + " carry a NEGATIVE weighting factor. WF is a thickness FRACTION, "
+            "so each of those becomes a layer of negative thickness in the "
+            f"emitted {prop_kind} — physically meaningless, and the layers "
+            "around it no longer stack to the section thickness. The rule is "
+            "converted as written; fix the sign in the deck.")
 
     # The measured cost of NOT copying dyna2rad's Zi = S_i*T1/2 (see the
     # docstring). zmin/zmax reproduce stackgroup.F's envelope exactly.
@@ -591,7 +617,7 @@ def _rule_layers(state: ConversionState, rule: IntegrationShell, sec: SectionShe
     zlo = min(t[0] * half - t[2] / 2.0 for t in tuples)
     zhi = max(t[0] * half + t[2] / 2.0 for t in tuples)
     state.warn(
-        f"{label}: /PROP/TYPE11/{prop_id} carries the rule's OWN "
+        f"{label}: {prop_kind}/{prop_id} carries the rule's OWN "
         f"{n} layer thickness(es) ["
         + ", ".join(f"{t:g}" for _, t, _ in layers)
         + f"] (t_i = WF_i/sum(WF) * T1, T1 = {thick:g}"
@@ -606,9 +632,30 @@ def _rule_layers(state: ConversionState, rule: IntegrationShell, sec: SectionShe
         f"slab centres. dyna2rad instead writes Zi = S_i*T1/2 with Ipos=1, "
         f"which makes the starter derive a {zhi - zlo:g} thick shell "
         f"({(zhi - zlo) / thick if thick else 0:.4g}x the deck's) from the "
-        "layer envelope. FAILOPT and the rule's S_i are the only fields not "
-        "carried.")
+        "layer envelope. BOTH HALVES OF THAT TRADE: the emitted stack "
+        "reproduces T1 and the layer thicknesses exactly, but it integrates at "
+        "the cumulative-WF layer CENTRES ["
+        + ", ".join(f"{z:g}" for z in _stack_centres(layers, thick))
+        + "] rather than at the rule's own sampling stations S_i*T1/2 ["
+        + ", ".join(f"{tuples[k][0] * half:g}" for k in order)
+        + "], so the through-thickness SAMPLING is not the deck's quadrature "
+        "rule — a rule whose outermost S is +/-1 no longer samples the outer "
+        "fibre, and sum(t_i * z_i^2) (hence the bending response) shifts with "
+        "it. FAILOPT and the rule's S_i are the only fields not carried.")
     return layers, label
+
+
+def _stack_centres(layers, thick: float) -> List[float]:
+    """The mid-plane-relative Zi of each layer of a cumulative-WF (Ipos=0)
+    stack — where the emitted property actually integrates. Mirrors the
+    starter's own bottom-up tiling, so the numbers quoted in the conversion
+    warning are the ones the echo prints."""
+    z = -thick / 2.0
+    out: List[float] = []
+    for _, t, _m in layers:
+        out.append(z + t / 2.0)
+        z += t
+    return out
 
 
 def _type11_carries(state: ConversionState, pid: int, layers) -> bool:
@@ -675,9 +722,14 @@ def _emit_rule_layup(state: ConversionState, prop_id: int, pid: int, title: str,
         + " do not satisfy. TYPE51 carries its materials on per-ply objects and "
         "has no such whitelist; it is also dyna2rad's own target for this "
         "keyword.")
-    lines = list(axis.lines)
-    lines += _emit_prop_type51(prop_id, title, ishell, 0, 0.0,
-                               _ASHEAR_DEFAULT, axis, ply_ids, istrain)
+    # The CALLER owns axis.lines. _emit_composite_props already emits the
+    # synthesized /SKEW/FIX before it reaches _emit_single_material_type11, and
+    # the other two callers build a local _RefAxis whose .lines is empty — so
+    # re-emitting them here wrote the same skew id TWICE and the starter
+    # ERROR-terminated on UDOUBLE (hm_read_skw.F -> ERROR 79 DUPLICATE ID) for
+    # every AOPT that synthesizes a skew.
+    lines = _emit_prop_type51(prop_id, title, ishell, 0, 0.0,
+                              _ASHEAR_DEFAULT, axis, ply_ids, istrain)
     return lines + ply_lines
 
 
@@ -780,14 +832,38 @@ def _resolve_integration_shells(state: ConversionState) -> None:
         # *MAT NUMFIP count-to-ratio conversion.
         eff = len(rule.points) if rule.esop == 0 else rule.nip
         eff = min(eff, _MAX_RULE_LAYERS)
-        if eff != sec.nip:
+        # ...but sec.nip is written as N on the SHARED /PROP/SHELL (and on
+        # /PROP/TYPE9), and BOTH readers cap N at 10 — hm_read_prop01.F:260
+        # ERROR 788 "NUMBER OF INTEGRATION POINTS SHOULD BE LOWER OR EQUAL TO
+        # 10", hm_read_prop09.F:368 ERROR 33. So the rule count is clamped at
+        # _MAX_SHELL_LAYERS on the way onto the section, and only there: the
+        # LAYERED property the rule drives counts its plies off rule.points and
+        # is capped at 100 instead (hm_read_prop11.F:130 NLYMAX), so clamping
+        # here never deletes a laminate layer. Writing the raw count through
+        # made any rule with more than 10 points ERROR-terminate the starter on
+        # a deck that master converted cleanly.
+        n_shell = min(eff, _MAX_SHELL_LAYERS)
+        if eff > _MAX_SHELL_LAYERS:
+            state.warn(
+                f"*INTEGRATION_SHELL {rule.irid} (referenced by *SECTION_SHELL "
+                f"{sec.secid}): the rule has {eff} integration points, but a "
+                f"Radioss /PROP/SHELL carries at most {_MAX_SHELL_LAYERS} "
+                "(starter ERROR 788 / ERROR 33), so the SHARED section property "
+                f"is written with N={_MAX_SHELL_LAYERS}. The layered property "
+                f"the rule drives keeps all {eff} layers — only the "
+                "through-thickness quadrature count of the parts that STAY on "
+                "the shared property is reduced.")
+        if n_shell != sec.nip:
             state.warn(
                 f"*SECTION_SHELL {sec.secid}: NIP={sec.nip} is OVERRIDDEN by "
                 f"the {eff} integration point(s) of *INTEGRATION_SHELL "
-                f"{rule.irid}. Once a user rule is referenced the section's own "
-                "NIP field is dead in LS-DYNA — the rule defines both the count "
-                "and the locations.")
-            sec.nip = eff
+                f"{rule.irid}"
+                + (f" (clamped to {n_shell} on the shared /PROP/SHELL)"
+                   if n_shell != eff else "")
+                + ". Once a user rule is referenced the section's own NIP field "
+                "is dead in LS-DYNA — the rule defines both the count and the "
+                "locations.")
+            sec.nip = n_shell
 
     # ── PID_i material-carrier parts ────────────────────────────────────────
     # "It may reference a part with no elements" (Vol I R17 p.29-17) is the
@@ -856,7 +932,21 @@ def _resolve_integration_shells(state: ConversionState) -> None:
                 f"{label}: the rule is DROPPED — the part has no elements at "
                 "all, so no property can be synthesized for it.")
             continue
-        if part.mid in state.mat_elastic or part.mid in state.mat_rigid:
+        if part.mid in state.mat_rigid:
+            # A rigid part deforms not at all, so a through-thickness layup is
+            # meaningless on it in EITHER code — this is not a conversion loss.
+            # (It also converts to /MAT/ELAST for the /RBODY's inertia, so it
+            # would hit the same LAW1 gate below, but saying so would send the
+            # user hunting for an elasto-plastic law a rigid body must not have.)
+            state.warn(
+                f"{label}: the rule is DROPPED — part {pid}'s material "
+                f"{part.mid} is *MAT_RIGID, so the part becomes an /RBODY with "
+                "no through-thickness state and no stress integration at all. "
+                "An integration rule has nothing to act on there; the layup is "
+                "irrelevant rather than lost. Make the part deformable if its "
+                "laminate is meant to carry load.")
+            continue
+        if part.mid in state.mat_elastic:
             # Not a converter limitation — a Radioss one, and an unavoidable
             # one. hm_read_part.F:289-290 rejects LAW1 on EVERY layered or
             # orthotropic shell property (IGTYP 9/10/11/16/17/51/52) with
@@ -1895,7 +1985,22 @@ def _shell_layup(state: ConversionState, sec: SectionShell, pid: int,
         nip = _shell_layer_count(sec, state, pid)
         angles = _icomp_layer_angles(sec, nip, state)
         return [(angles[i], thick / nip, mid) for i in range(nip)], nip, angles
-    angles = _icomp_layer_angles(sec, len(rule.points), state)
+    npts = len(rule.points)
+    # The card-3 B_i block was read with the SECTION's own NIP, so a rule with
+    # more integration points than the section declared leaves _icomp_layer_
+    # angles padding the tail with 0 deg. Silent padding turns a [0/45/90]
+    # layup into [0, 45, 90, 0, 0] — report it rather than inventing plies.
+    if sec.icomp == 1 and len(sec.betas) < npts:
+        state.warn(
+            f"*SECTION_SHELL {sec.secid} on part {pid}: ICOMP=1 supplies only "
+            f"{len(sec.betas)} material angle(s) {list(sec.betas)} but "
+            f"*INTEGRATION_SHELL {rule.irid} defines {npts} integration "
+            f"point(s), so the last {npts - len(sec.betas)} layer(s) are "
+            "emitted at 0 deg. LS-DYNA reads one B_i per integration point — "
+            "extend the card-3 angle block to the rule's point count (the "
+            "section's own NIP field is dead once a rule is referenced, so it "
+            "is the B_i COUNT that has to grow, not NIP).")
+    angles = _icomp_layer_angles(sec, npts, state)
     layers, _ = _rule_layers(state, rule, sec, pid, prop_id, thick, angles, mid)
     return layers, len(layers), [phi for phi, _, _ in layers]
 
@@ -1994,11 +2099,27 @@ def _emit_laminated_glass_prop(state: ConversionState, glass: MatLaminatedGlass,
            "the material requires, so an unequal glass/interlayer stack "
            "converts as written."
            if rule is not None else
-           "Layer thicknesses are the section thickness split EVENLY — LS-DYNA "
-           "takes them from the *INTEGRATION_SHELL rule the material requires, "
-           "and this section references none (card-1 field 6, QR/IRID, is not "
-           "a negative rule id), so an unequal glass/interlayer stack needs "
-           "either that rule added or the layer thicknesses edited by hand."))
+           # _layered_rule() is None for an ESOP=1 rule BY DESIGN (equal layers
+           # need no layered property), and also for a rule that was dropped —
+           # so "this section references none" would be a flat lie whenever
+           # sec.irid is set. Say which of the three cases actually holds.
+           "Layer thicknesses are the section thickness split EVENLY. "
+           + ("LS-DYNA takes them from the *INTEGRATION_SHELL rule the "
+              "material requires, and this section references none (card-1 "
+              "field 6, QR/IRID, is not a negative rule id), so an unequal "
+              "glass/interlayer stack needs either that rule added or the "
+              "layer thicknesses edited by hand."
+              if sec.irid <= 0 else
+              f"The *INTEGRATION_SHELL {sec.irid} rule this section "
+              "references is ESOP=1, i.e. NIP layers of EQUAL thickness with "
+              "no S/WF/PID cards — so the even split IS the rule, faithfully. "
+              "Give the rule ESOP=0 and per-point WF if the glass and the "
+              "interlayer are meant to differ in thickness."
+              if _usable_rule(state, sec) is not None else
+              f"The *INTEGRATION_SHELL {sec.irid} rule this section "
+              "references was DROPPED (see the warning above it), so an "
+              "unequal glass/interlayer stack is LOST until the rule is "
+              "fixed.")))
     axis = _RefAxis(ip=20, phi=beta_fold,
                     note="isotropic LAW27 phases (no material axes)")
     return _emit_rule_layup(state, prop_id, pid,

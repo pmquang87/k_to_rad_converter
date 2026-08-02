@@ -152,8 +152,12 @@ covering them unlocks a large class of real models.
   ply override of `*ELEMENT_SHELL_COMPOSITE` (its mesh is now kept — see the
   element-variant batch below — but the ply cards themselves are not read; no
   converter implements this, dyna2rad included),
-  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`, and the first-set-only
-  reader still in `handle_section_solid` / `_beam` / `_discrete`.
+  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`, the first-set-only
+  reader still in `handle_section_solid` / `_beam` / `_discrete`, and the
+  ELFORM 101–105 user-defined shell itself — its cards 5/5.1/5.2 are now strided
+  over so the sections around them parse, but the user routine's own integration
+  points, extra DOFs and `LMC` constants have no Radioss counterpart and are
+  dropped with a warning.
 - Element variants (P1): `*ELEMENT_SHELL_THICKNESS`/`_BETA`/`_MCID`/`_OFFSET`/
   `_DOF` (+ every combination) → the per-element `/SHELL` // `SH3N` `Phi` and
   `Thick` columns; `*ELEMENT_BEAM_ORIENTATION` → a synthesized third node at

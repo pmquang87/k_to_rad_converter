@@ -716,6 +716,20 @@ def handle_part(block: Block, state: ConversionState) -> None:
 # Sections → Properties
 # ─────────────────────────────────────────────────────────────────────────────
 
+# *SECTION_SHELL keyword-option suffixes that add exactly ONE extra card per
+# card set — card 4a EFG, 4b THERMAL, 4c XFEM, 4d MISC (Manual Vol I R17
+# p.41-62/63). None of them reaches this handler today: the dispatcher is
+# exact-key on block.keyword and only "SECTION_SHELL" is registered, so
+# *SECTION_SHELL_EFG lands in the unrecognized-keyword report instead. The walk
+# accounts for them anyway so that registering one later cannot silently make
+# every following set mis-stride.
+_SECTION_SHELL_OPTION_CARDS = ("EFG", "THERMAL", "XFEM", "MISC")
+
+# ELFORM values that add the user-defined-shell cards 5 / 5.1 / 5.2
+# (Manual Vol I R17 p.41-63): "EQ.101..105: User defined shell".
+_USER_SHELL_ELFORMS = frozenset({101, 102, 103, 104, 105})
+
+
 def handle_section_shell(block: Block, state: ConversionState) -> None:
     """*SECTION_SHELL (+ _TITLE/_ID) — every card SET under the header.
 
@@ -725,28 +739,38 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
     addition line is read for each section in 80a format" (p.41-1), so the title
     line repeats PER SET, not once for the block.
 
-    A set spans ``1 (title) + 2 (cards 1-2) + ceil(NIP/8) (card 3, ICOMP=1
-    only)`` lines, every term read from that set's OWN fields, so the cursor is
-    advanced by what each set actually consumed rather than by a fixed stride.
-    Reading only the first set — which is what this handler used to do — dropped
-    every later section silently, and a *PART pointing at one of them fell
-    through to ``_auto_section_shell``'s ZERO-thickness placeholder, which the
-    starter rejects.
+    A set spans ``1 (title) + 2 (cards 1-2) + ceil(NIP/8) (card 3, ICOMP=1 only)
+    + 1 (card 4, keyword option) + 1 + NIPP + ceil(LMC/8) (cards 5/5.1/5.2,
+    ELFORM 101-105)`` lines, every term read from that set's OWN fields, so the
+    cursor is advanced by what each set actually consumed rather than by a fixed
+    stride. Reading only the first set — which is what this handler used to do —
+    dropped every later section silently, and a *PART pointing at one of them
+    fell through to ``_auto_section_shell``'s ZERO-thickness placeholder, which
+    the starter rejects.
+
+    The title card is consumed UNCONDITIONALLY under the _TITLE option, blank or
+    not: the manual reads one 80a line per set with no "if non-empty" proviso,
+    and the parser deliberately preserves a blank line as a card placeholder
+    (``parser.py``: "an all-blank fixed-format card means all defaults"). Eating
+    a blank title as padding instead shifts the whole set up by one line and
+    registers a phantom section under ``int(T1)``, which then OVERWRITES a real
+    one. Only trailing padding — a tail with no non-blank line left in it — ends
+    the walk.
     """
     per_set_title = _title_offset(block)
+    opt_card = any(block.keyword.endswith("_" + o)
+                   for o in _SECTION_SHELL_OPTION_CARDS)
     raw = block.raw
     idx = 0
     n_sets = 0
     while idx < len(raw):
-        # Blank placeholder lines between sets carry no card (the parser keeps
-        # them so fixed-format card indices stay aligned).
-        if not raw[idx].strip():
-            idx += 1
-            continue
-        title = _read_title(block) if (per_set_title and n_sets == 0) else ""
+        # Trailing blank padding is not a card set. Anything else — including a
+        # blank line that IS this set's 80a title card — is walked, not skipped.
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
         if per_set_title:
-            if n_sets:
-                title = raw[idx].strip()
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
             idx += 1
             if idx >= len(raw):
                 break
@@ -756,16 +780,15 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
         f2 = _card(raw, idx + 1, fixed=True, n=8, w=10)
         secid = to_int(f1[0]) if f1 else 0
         if secid <= 0:
-            if n_sets:
-                state.warn(
-                    f"*SECTION_SHELL: after {n_sets} complete card set(s) the "
-                    f"next card ('{raw[idx][:40].strip()}') carries no positive "
-                    "SECID, so the multi-set walk STOPPED there and the "
-                    "remaining lines of the block are unread. That happens when "
-                    "a set holds cards k2rad does not model (the ELFORM 101-105 "
-                    "user-shell cards 5/5.1/5.2, or an EFG/THERMAL/XFEM/MISC "
-                    "option card) — split those sections into their own "
-                    "*SECTION_SHELL blocks so none is lost.")
+            state.warn(
+                "*SECTION_SHELL: "
+                + (f"after {n_sets} complete card set(s) the next card"
+                   if n_sets else "the first card of the block")
+                + f" ('{raw[idx][:40].strip()}') carries no positive SECID, so "
+                "the walk STOPPED there and the remaining lines of the block "
+                "are UNREAD — any *PART pointing at a section defined below it "
+                "falls back to a zero-thickness placeholder. Split the sets "
+                "k2rad cannot stride over into their own *SECTION_SHELL blocks.")
             break
         elform = to_int(f1[1]) if f1[1] else 2
         nip = to_int(f1[3]) if len(f1) > 3 else 3
@@ -796,6 +819,39 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
             sec.icomp = 1
             sec.betas = _read_icomp_angles(raw, idx, nip, secid, state)
             idx += ((nip if nip > 0 else 2) + 7) // 8
+        # Card 4a-4d: the single card the EFG/THERMAL/XFEM/MISC option adds.
+        if opt_card:
+            idx += 1
+        # Cards 5 / 5.1 / 5.2, ELFORM 101-105 only. Nothing on them is modelled,
+        # but the CURSOR has to clear them: card 5 begins with NIPP, a POSITIVE
+        # integer, so the "no positive SECID" stop above never trips on it and
+        # the next set would otherwise be read out of the middle of this one.
+        if elform in _USER_SHELL_ELFORMS:
+            f5 = _card(raw, idx, fixed=True, n=8, w=10)
+            nipp = to_int(f5[0]) if f5 else 0
+            lmc = to_int(f5[5]) if len(f5) > 5 else 0
+            state.warn(
+                f"*SECTION_SHELL {secid}: ELFORM={elform} is a USER-DEFINED "
+                "shell (*USER_INTERFACE routine), which has no Radioss "
+                "counterpart — the section is converted as an ordinary "
+                "/PROP/SHELL and the user routine's own integration points, "
+                "extra DOFs and LMC constants (cards 5/5.1/5.2) are DROPPED. "
+                "The element behaves as a standard Radioss shell, not as the "
+                "deck's user element.")
+            if not f5:
+                state.warn(
+                    f"*SECTION_SHELL {secid}: ELFORM={elform} needs card 5 "
+                    "(NIPP NXDOF IUNF IHGF ITAJ LMC NHSV ILOC) but the block "
+                    "ends first, so the walk STOPPED here.")
+                break
+            idx += 1 + max(nipp, 0) + (max(lmc, 0) + 7) // 8
+        if secid in state.sec_shells:
+            state.warn(
+                f"*SECTION_SHELL {secid} is defined more than once — the LAST "
+                "definition wins, as in LS-DYNA, so the earlier section's "
+                "thickness/NIP/ELFORM are discarded and every *PART on that "
+                "SECID silently takes this one's. Delete the duplicate if the "
+                "two sections differ.")
         state.sec_shells[secid] = sec
         n_sets += 1
 
