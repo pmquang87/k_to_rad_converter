@@ -907,9 +907,10 @@ class MatAnisoViscoplastic:
 # ── Composites ───────────────────────────────────────────────────────────────
 # The four composite/orthotropic material families and the *PART_COMPOSITE
 # per-ply layup. Every one of these laws is orthotropic- or composite-class in
-# the starter (PROP_SHELL=2), so a converted part can never sit on the isotropic
-# /PROP/SHELL (ERROR 3047) — each gets a synthesized orthotropic property, see
-# ``ConversionState.composite_prop_ids``.
+# the starter (PROP_SHELL=2), so a converted part that HOLDS ELEMENTS can never
+# sit on the isotropic /PROP/SHELL (ERROR 3047) — each gets a synthesized
+# orthotropic property, see ``ConversionState.composite_prop_ids``. The check is
+# per element GROUP, so an element-free part is never tested and needs none.
 #
 # AOPT convention (shared by MAT_002 and MAT_054/055, and identical to the
 # MAT_103 one above): the axis cards carry fixed slots that are blank where the

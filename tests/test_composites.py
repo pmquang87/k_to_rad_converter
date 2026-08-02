@@ -1448,6 +1448,22 @@ class SynthesizedSkewIdTests(unittest.TestCase):
 # Property routing / regression
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _meshless_ortho_deck(empty=None):
+    """A MESHED *MAT_024 plate (part 7) plus an ELEMENT-FREE part 9 on the
+    orthotropic *MAT_002 — the shape the softened "no shell or solid elements"
+    message reports on. The plate is *MAT_024 and not *MAT_ELASTIC so the deck
+    is starter-clean end to end (LAW1 with N > 1 raises the unrelated
+    WARNING 1084), which is what lets the run be quoted as 0 ERROR / 0 WARNING.
+    """
+    return ("*KEYWORD\n" + NODES + SHELL
+            + "*PART\nplate\n" + _row(7, 7, 3) + "\n" + SECTION
+            + (empty if empty is not None
+               else "*PART\northo carrier\n" + _row(9, 0, 2) + "\n")
+            + "*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+            + _row(3, 7.85e-9, 210000.0, 0.3, 300.0) + "\n"
+            + _mat002() + END)
+
+
 class CompositeRoutingTests(unittest.TestCase):
 
     def test_shared_section_keeps_its_prop_when_one_part_is_plain(self):
@@ -1491,6 +1507,70 @@ class CompositeRoutingTests(unittest.TestCase):
         self.assertEqual(_blocks(starter, "/PROP/TYPE11"), [])
         self.assertTrue(any("no shell or solid elements" in w
                             for w in result.warnings), result.warnings)
+
+    def _meshless_warning(self, result):
+        hits = [w for w in result.warnings if "no shell or solid elements" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        return hits[0]
+
+    def test_meshless_composite_warning_predicts_no_starter_failure(self):
+        """The old text promised starter ERROR 3047 for an element-free part on
+        an orthotropic law. It does not happen: check_mat_elem_prop_compatibility
+        .F loops `DO NG = 1,NGROUP` over ELEMENT GROUPS and only then over each
+        group's layers, so a part with no elements is never tested.
+
+        This exact deck, run on starter_win64 (nt=6): `0 ERROR(S)
+        0 WARNING(S)`, `NORMAL TERMINATION`. The empty part is echoed as
+        "ISOTROPIC SHELL PROPERTY SET NUMBER 9" and
+        "Part id,name: 9 ortho carrier, Mat type: 93 Elm type: N/A" — the
+        PROP_SHELL=2 law sitting on IGTYP 1 with no complaint. Same at 0/0 when
+        the empty part is also an *INTEGRATION_SHELL PID_i carrier; *MAT_054
+        (/MAT/LAW127) adds only the unrelated /BEGIN-format WARNING 100211."""
+        deck = _meshless_ortho_deck()
+        result, starter = _convert(deck)
+        warning = self._meshless_warning(result)
+        self.assertNotIn("3047", warning)
+        self.assertNotIn("rejects", warning)
+        self.assertIn("MESH check", warning)
+        self.assertIn("per ELEMENT GROUP", warning)
+        # ...and the mesh-typo advice the softened message replaces it with
+        self.assertIn("PID typo", warning)
+        self.assertIn("*INCLUDE that did not resolve", warning)
+        # the idiomatic case is named as NOT a defect
+        self.assertIn("*INTEGRATION_SHELL PID_i material carrier", warning)
+        # no layup is emitted for it, and its /PART still resolves a property
+        self.assertEqual(_blocks(starter, "/PROP/TYPE11"), [])
+        self.assertEqual(_i10(_cards(_block(starter, "/PART/9"))[0], 0), 9)
+        self.assertEqual(len(_blocks(starter, "/PROP/SHELL/9")), 1)
+
+    def test_meshless_part_composite_reports_the_dropped_layup(self):
+        """A *PART_COMPOSITE on an element-free part loses a real thing — the
+        per-ply stack — even though nothing downstream can miss it, so the
+        softened message still names the drop."""
+        deck = _meshless_ortho_deck(empty=_part_composite(pid=9))
+        result, starter = _convert(deck)
+        warning = self._meshless_warning(result)
+        self.assertIn("*PART_COMPOSITE layup is DROPPED", warning)
+        self.assertNotIn("3047", warning)
+        self.assertEqual(_blocks(starter, "/PROP/TYPE51"), [])
+        self.assertEqual(_i10(_cards(_block(starter, "/PART/9"))[0], 0), 9)
+
+    def test_a_plain_orthotropic_part_omits_the_dropped_layup_clause(self):
+        """No *PART_COMPOSITE, nothing to drop — the clause must not appear."""
+        result, _ = _convert(_meshless_ortho_deck())
+        self.assertNotIn("DROPPED", self._meshless_warning(result))
+
+    def test_the_meshed_part_keeps_the_real_error_3047_warning(self):
+        """Only the element-free branch was softened. A part that HOLDS shells
+        really would hard-fail on the isotropic /PROP/SHELL, so its own message
+        must still say so."""
+        deck = ("*KEYWORD\n" + NODES + SHELL + PART + SECTION + _mat002() + END)
+        result, starter = _convert(deck)
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE11")), 1)
+        self.assertTrue(any("ERROR 3047" in w for w in result.warnings),
+                        result.warnings)
+        self.assertFalse(any("no shell or solid elements" in w
+                             for w in result.warnings), result.warnings)
 
     def test_law43_on_solids_is_warned_as_shell_only(self):
         deck = ("*KEYWORD\n" + SOLID_NODES + BRICK

@@ -37,6 +37,8 @@ from .common import (
     _vnorm,
     _vsub,
 )
+# One-way: materials imports .common and .blast_ale only, never .mesh.
+from .materials import _null_part_eos_bindings
 
 __all__ = [
     "_make_nodes",
@@ -71,6 +73,10 @@ __all__ = [
     "_make_parts_and_elements",
     "_make_properties",
     "_emit_prop_beam",
+    "_TYPE3_BEAM_LAWS",
+    "_TYPE18_ONLY_BEAM_LAWS",
+    "_target_mat_law",
+    "_warn_beam_type3_material",
     "_assign_ortho_props",
     "_law128_ref_axis",
     "_emit_prop_type9",
@@ -1843,12 +1849,22 @@ def _make_properties(state: ConversionState) -> List[str]:
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
                                   else 0)
+    # Collected, not re-derived: the check below must see exactly the sections
+    # that really carry a /PROP/BEAM, so that a section routed to some other
+    # beam property stays out of it without the check having to know about that
+    # route (see _warn_beam_type3_material).
+    type3_secids: Set[int] = set()
     for sec in sorted(state.sec_beams.values(), key=lambda s: s.secid):
         if sec.secid in spotweld_only_secids:
             continue
         # A section that bound a usable *INTEGRATION_BEAM rule becomes the
         # INTEGRATED beam property instead of the resultant one; the rule hangs
         # off the SECTION in LS-DYNA, so every part on it switches together.
+        # This `continue` sits ABOVE the type3_secids bookkeeping on purpose:
+        # a section promoted to /PROP/TYPE18 must stay out of the TYPE3
+        # material check, which is exactly the seam that check was built to
+        # survive (it collects rather than re-derives, see
+        # _warn_beam_type3_material).
         int_prop = state.int_beam_props.get(sec.secid)
         if int_prop is not None:
             lines += _emit_prop_int_beam(sec, int_prop)
@@ -1860,12 +1876,16 @@ def _make_properties(state: ConversionState) -> List[str]:
                  if sec.secid in missing_beams else
                  f"*SECTION_BEAM {sec.secid}: ELFORM={sec.elform} carries no "
                  "cross-section area or inertia that k2rad can read, so its")
-                + " /PROP/BEAM is written with Area=Iyy=Izz=Ixx=0 — the beams "
-                "on it have NO stiffness and no mass of their own. State the "
+                + " /PROP/BEAM is written with Area=Iyy=Izz=Ixx=0, which the "
+                "starter REFUSES: hm_read_prop03.F:151-182 raises ERROR 314 "
+                "(AREA), 315 (IYY), 316 (IZZ) and 317 (IXX) on every "
+                "non-positive value, so the deck will not start. State the "
                 "section numerically (ELFORM=2 with A/ISS/ITT/J) or, for a "
                 "geometrically integrated beam, add an *INTEGRATION_BEAM rule "
                 "and reference it from a negative QR/IRID on card 1 field 4.")
+        type3_secids.add(sec.secid)
         lines += _emit_prop_beam(sec)
+    _warn_beam_type3_material(state, part_secids, spotweld_pids, type3_secids)
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
     lines += _emit_ortho_props(state, istrain)
@@ -2380,6 +2400,278 @@ def _emit_prop_beam(sec: SectionBeam) -> List[str]:
         "   000 000         0",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /PROP/BEAM (IGTYP 3) material compatibility
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The Radioss laws /PROP/BEAM accepts. The gate is on the MATERIAL, not the
+# property: every law declares a PROP_BEAM class through INIT_MAT_KEYWORD —
+# 1 BEAM_CLASSIC (TYPE3 only), 2 BEAM_INTEGRATED (TYPE18 only), 3 BEAM_ALL
+# (init_mat_keyword.F:251-258) — and IGTYP 3 requires 1 or 3:
+#
+#     CASE (3)
+#       IF (MAT_PARAM(IMAT)%PROP_BEAM /= 1 .AND.
+#    .      MAT_PARAM(IMAT)%PROP_BEAM /= 3) COMPAT_PROP = .FALSE.
+#         — check_mat_elem_prop_compatibility.F:379-381
+#
+# Grepping every INIT_MAT_KEYWORD call under starter/source/materials/ gives the
+# COMPLETE list (10 call sites, all unconditional): BEAM_CLASSIC = LAW1
+# (hm_read_mat01.F:148); BEAM_ALL = LAW0 (mat00:133), LAW2 in all three of its
+# readers — _jc:381, _zerilli:342, _predef:392 — LAW13 (mat13:128) and LAW44
+# (mat44:319); BEAM_INTEGRATED = LAW34 (mat34:162), LAW36 (mat36:360) and
+# LAW71 (mat71:251). Every OTHER law leaves PROP_BEAM at its 0 default
+# (ini_mat_elem.F:89) and so fails both beam properties.
+_TYPE3_BEAM_LAWS = frozenset({0, 1, 2, 13, 44})
+
+# ... and the three that are TYPE18-only, which fail TYPE3 one step LATER than
+# a PROP_BEAM=0 law and therefore under a different error id (see the warning).
+_TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
+
+
+def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
+    """The Radioss law number k2rad will actually EMIT for LS-DYNA material
+    *mid* — ``None`` when no ``/MAT`` is written for it at all (a spring/damper
+    material that lives entirely inside a ``/PROP/TYPE4``, a ``*MAT_SPOTWELD``
+    fully absorbed by its ``/PROP/TYPE13`` connector, or an id the deck never
+    defines).
+
+    This follows the CONVERTER's routing, not the LS-DYNA material number, so
+    it stays right where the two disagree — ``*MAT_024`` and
+    ``*MAT_POWER_LAW_PLASTICITY`` are different keywords that land on the same
+    ``/MAT/LAW36``, and one keyword can split: ``*MAT_JOHNSON_COOK`` is LAW2 or
+    LAW4 depending on whether an ``*EOS_*`` is attached, ``*MAT_NULL`` is
+    ``/MAT/VOID`` (LAW0) alone but the ``/MAT/LAW6`` hydro carrier with one, and
+    each rubber keyword picks its law off a curve/order field. Order and
+    conditions mirror ``_make_materials`` and ``_make_composite_materials``
+    exactly.
+
+    Wider than ``inistate.py::_xref_target_law``, which maps only 7 of the
+    families and returns ``None`` for the rest — including ``mat_rigid`` and the
+    ``mat_spotweld`` fallback, both of which really are LAW1 and really are on
+    that whitelist. Unifying the two is a follow-up, deliberately not done here:
+    it would change which parts get a ``/XREF`` and belongs in its own change.
+
+    Not mapped, because no ``*PART`` can name it: the ``/MAT/LAW6`` carrier a
+    bare ``*EOS_*`` with no companion ``*MAT_NULL`` gets under the EOSID, and
+    the ``/MAT/LAW51`` of an ALE multi-material group, whose id is synthesized
+    by ``next_mat_id()`` and so is guaranteed not to be any deck MID.
+    """
+    if mid in state.mat_elastic:
+        return 1                                   # /MAT/ELAST
+    if mid in state.mat_plas_tab:
+        return 36                                  # *MAT_024/123 → PLAS_TAB
+    if mid in state.mat_plas_kin:
+        return 44                                  # *MAT_003 → COWPER
+    m = state.mat_johnson_cook.get(mid)
+    if m is not None:
+        # _resolve_mat_johnson_cook sets use_law4 when an *EOS_* binds to the
+        # material (MAT_015 only); MAT_099 and the EOS-less MAT_015 stay LAW2.
+        return 4 if m.use_law4 else 2
+    if mid in state.mat_aniso_visco:
+        return 128                                 # *MAT_103 → HILL_VISC_PLAST
+    if mid in state.mat_rigid:
+        return 1                                   # /MAT/ELAST for the /RBODY
+    if mid in state.mat_null:
+        # A bare *MAT_NULL is /MAT/VOID (LAW0); one that carries a supported
+        # *EOS_* — by the shared-id pairing or a *PART EOSID binding — becomes
+        # the /MAT/HYD_VISC (LAW6) carrier instead. Same tests as
+        # _make_materials / _make_explosive_and_eos_materials, INCLUDING their
+        # seam: an *EOS_JWL id suppresses the /MAT/VOID (it is in `eos_mids`)
+        # but the LAW6 loop walks `eos_cards` only, so a *MAT_NULL carrying
+        # nothing but a companion-less *EOS_JWL gets NO /MAT at all.
+        if mid in state.mat_high_explosive:
+            return 5
+        if mid in state.eos_cards or mid in _null_part_eos_bindings(state):
+            return 6
+        if mid in state.eos_jwl:
+            return None
+        return 0
+    if mid in state.mat_power_law:
+        return 36                                  # *MAT_018 → PLAS_TAB fit
+    if mid in state.mat_samp:
+        return 76                                  # *MAT_187 → SAMP
+    if mid in state.mat_crushable_foam:
+        return 50                                  # *MAT_063
+    if mid in state.mat_low_density_foam:
+        return 38                                  # *MAT_057
+    if mid in state.mat_fu_chang_foam:
+        return 70                                  # *MAT_083
+    if mid in state.mat_honeycomb:
+        return 28                                  # *MAT_026
+    if mid in state.mat_blatz_ko:
+        return 42                                  # *MAT_007 → OGDEN form
+    m = state.mat_mooney_rivlin.get(mid)
+    if m is not None:
+        return 69 if m.use_law69 else 42           # curve branch vs constants
+    m = state.mat_ogden.get(mid)
+    if m is not None:
+        return 69 if m.n > 0 else 42               # *MAT_077_O
+    m = state.mat_hyper_rubber.get(mid)
+    if m is not None:
+        return 69 if m.n > 0 else 95               # *MAT_077_H
+    if mid in state.mat_high_explosive:
+        return 5                                   # +/EOS/JWL
+    if mid in state.mat_orthotropic:
+        return 93                                  # *MAT_002 → ORTH_HILL
+    if mid in state.mat_enhanced_composite:
+        return 127                                 # *MAT_054/055
+    if mid in state.mat_transverse_aniso:
+        return 43                                  # *MAT_037 → HILL_TAB
+    if mid in state.mat_laminated_glass:
+        return 27                                  # *MAT_032 → PLAS_BRIT pair
+    if mid in state.mat_spotweld:
+        # MAT_100 normally has NO /MAT at all — the material lives entirely in
+        # the /PROP/TYPE13 connector and the /PART is written with mat_id 0.
+        # _make_materials writes the /MAT/ELAST fallback only when some part on
+        # the mid is not a pure-beam spotweld part, which is the same test.
+        sw_pids = _spotweld_beam_pids(state)
+        if any(p.mid == mid and pid not in sw_pids
+               for pid, p in state.parts.items()):
+            return 1
+        return None
+    return None
+
+
+def _warn_beam_type3_material(state: ConversionState,
+                              part_secids: Dict[int, int],
+                              spotweld_pids: Set[int],
+                              type3_secids: Set[int]) -> None:
+    """Name every beam part whose material converts to a law ``/PROP/BEAM``
+    rejects — the deck is unrunnable and k2rad said nothing about it.
+
+    ``_make_properties`` writes a ``/PROP/BEAM`` (IGTYP 3) for every
+    ``*SECTION_BEAM`` regardless of the material on the parts using it, and the
+    starter accepts that only for ``PROP_BEAM`` 1 or 3, i.e. LAW0/1/2/13/44
+    (``_TYPE3_BEAM_LAWS``). ``*MAT_PIECEWISE_LINEAR_PLASTICITY`` — by some
+    distance the most common LS-DYNA beam material — routes to ``/MAT/LAW36``,
+    which is BEAM_INTEGRATED, so the single most likely beam deck there is
+    converted straight into an ERROR TERMINATION with no warning at all.
+
+    Measured on ``starter_win64`` (nt=6), one ``*SECTION_BEAM`` ELFORM=2 and two
+    ``*ELEMENT_BEAM`` per deck, everything else held constant:
+
+    ===========================  =====  ========================================
+    beam material                law    starter
+    ===========================  =====  ========================================
+    ``*MAT_ELASTIC``             1      NORMAL TERMINATION, 0 ERROR 0 WARNING
+    ``*MAT_JOHNSON_COOK``        2      0 ERROR (warnings unrelated)
+    ``*MAT_PLASTIC_KINEMATIC``   44     NORMAL TERMINATION, 0 ERROR 0 WARNING
+    ``*MAT_PIECEWISE_LIN…``      36     3 ERRORS: 3047 + one 745 per element
+    ``*MAT_BLATZ-KO_RUBBER``     42     1 ERROR: 3046
+    ===========================  =====  ========================================
+
+    The LAW36 run reads, verbatim::
+
+        ERROR ID :   3047
+        ** ERROR IN MATERIAL/PROPERTY COMPATIBILITY
+           PROPERTY ID 2  OF TYPE 3  IS NOT COMPATIBLE WITH MATERIAL ID 1  OF TYPE 36
+        ERROR ID :    745
+        ** ERROR IN MATERIAL-PROPERTY COMPATIBILITY
+           ON ELEMENT ID=11, PID TYPE 2 IS NOT COMPATIBLE WITH
+           MATERIAL LAW 36
+
+    and the LAW42 one::
+
+        ERROR ID :   3046
+        ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+           ELEMENTS OF TYPE BEAM ARE NOT COMPATIBLE WITH MATERIAL ID 1  OF TYPE 42
+
+    **The two error ids are not interchangeable, and the split is structural.**
+    A law that declares no beam keyword at all sits at ``PROP_BEAM == 0``, which
+    fails the ELEMENT test (``IF (MAT_PARAM(IMAT)%PROP_BEAM == 0) COMPAT_ELEM =
+    .FALSE.``, same file lines 153-155 / 342-343) and reports 3046 —
+    material-vs-element, the property never enters it. Only a law that IS beam
+    material but the WRONG class, i.e. the BEAM_INTEGRATED LAW34/36/71, passes
+    the element test and fails the property one, and that is 3047; the legacy
+    hard-coded pair check in ``initia.F:2806-2817`` fires ERROR 745 on the same
+    combination one phase earlier, per element. So the warning names the id the
+    user will actually read in their ``.out``.
+
+    WARN-ONLY, deliberately — no auto-promotion to ``/PROP/TYPE18``:
+
+    * A promotion is **not information-preserving**. ``*SECTION_BEAM`` ELFORM=2
+      states four independent resultants (A, Iss, Itt, J) while ``/PROP/TYPE18``
+      integrates a point cloud whose ``Ixx`` the starter *defines* as
+      ``Iyy + Izz`` (``hm_read_prop18.F:289-301``) — the polar moment, which is
+      the torsion constant only for a circular section. There is no point set
+      that reproduces a general (A, Iss, Itt, J) quadruple, so promoting means
+      inventing a cross-section and silently overwriting the deck's J.
+    * It would rescue a **subset**. TYPE18 takes ``PROP_BEAM`` 2 or 3, so it
+      covers LAW34/36/71 (and the LAW0/2/13/44 that already work) — but a beam
+      on LAW38/42/50/70/76/95/127/128 declares no beam keyword at all and has
+      no beam property in Radioss at either type. A warning that names the
+      remedy covers every case; a promotion covers one third of them and leaves
+      the rest failing exactly as before.
+    * The ``/PROP/TYPE18`` machinery is being written on ``feat/integration-beam``
+      right now (``writer/beams.py``, its own ``_type18_material`` gate for the
+      opposite direction). Building a second copy here would collide head-on
+      for no gain.
+
+    The promotion is therefore named as a FOLLOW-UP: once that branch merges,
+    a LAW34/36/71 beam part on a section whose ELFORM/CST implies a shape
+    ``_constants_from_shape`` can integrate could be routed to TYPE18 by
+    reusing that module — and this check is what tells us which parts qualify.
+
+    Structured to survive that merge unchanged: it is driven by *type3_secids*,
+    the sections that ACTUALLY emitted a ``/PROP/BEAM``, collected inside the
+    emit loop. A section promoted to ``/PROP/TYPE18`` never enters the set, so
+    it is never warned about — before the merge because nothing promotes, after
+    it because the promoted ones ``continue`` past the collection point.
+    """
+    if not type3_secids:
+        return
+    # Parts with beam ELEMENTS only. Two reasons, both load-bearing: the
+    # starter's compatibility loop runs per element GROUP, so an element-free
+    # part contributes nothing to check (the lesson of the composite
+    # element-free warning); and a *MAT_SPOTWELD beam part has already been
+    # turned into /SPRING elements on a /PROP/TYPE13 by the time this runs.
+    groups: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    for pid in sorted({e.pid for e in state.beam_elems
+                       if e.pid not in spotweld_pids}):
+        part = state.parts.get(pid)
+        if part is None or part_secids.get(pid) not in type3_secids:
+            continue
+        law = _target_mat_law(state, part.mid)
+        # None = k2rad emits no /MAT for this id, which is a different (and
+        # already reported) problem; do not guess a law for it.
+        if law is None or law in _TYPE3_BEAM_LAWS:
+            continue
+        groups[(part.mid, law)].append(pid)
+    if not groups:
+        return
+    entries = []
+    for (mid, law), pids in sorted(groups.items()):
+        plural = "s" if len(pids) > 1 else ""
+        entries.append(
+            f"part{plural} " + ", ".join(str(p) for p in pids)
+            + f" on mid {mid} (/MAT/LAW{law}, "
+            + ("BEAM_INTEGRATED — starter ERROR 3047 plus one ERROR 745 per "
+               "beam element" if law in _TYPE18_ONLY_BEAM_LAWS else
+               "no beam keyword at all — starter ERROR 3046")
+            + ")")
+    state.warn(
+        "/PROP/BEAM (TYPE3) material compatibility: " + "; ".join(entries)
+        + ". The classic beam property accepts only PROP_BEAM 1 or 3 — "
+        "/MAT/LAW0, LAW1, LAW2, LAW13 and LAW44 — and REJECTS everything "
+        "else (check_mat_elem_prop_compatibility.F:379-381, the class set by "
+        "INIT_MAT_KEYWORD in each law's reader). These beams do not degrade, "
+        "they ERROR-TERMINATE the starter, so the converted deck will not run "
+        "until the deck is changed: (a) state the section as an INTEGRATED "
+        "beam — /PROP/TYPE18 takes PROP_BEAM 2, i.e. LAW34/36/71 — by adding "
+        "an *INTEGRATION_BEAM rule and referencing it from *SECTION_BEAM card "
+        "1 field 4 (QR/IRID, written as the NEGATIVE of the rule id); this "
+        "warning is raised only for sections that really emit a /PROP/BEAM, "
+        "so it disappears by itself once the rule converts, and if it still "
+        "names the part afterwards then this k2rad did not convert the rule "
+        "and only (b) is left. Or (b) move the part to a law the classic beam "
+        "takes: *MAT_PLASTIC_KINEMATIC → /MAT/LAW44 is the closest "
+        "elasto-plastic substitute for *MAT_PIECEWISE_LINEAR_PLASTICITY "
+        "(bilinear hardening plus Cowper-Symonds rate), *MAT_ELASTIC → LAW1 "
+        "and *MAT_JOHNSON_COOK → LAW2 for the rest. Note the law is k2rad's "
+        "OWN routing, not the LS-DYNA material number: *MAT_024 and "
+        "*MAT_POWER_LAW_PLASTICITY both land on LAW36.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -16,11 +16,17 @@ deck reads):
 Every one of these laws registers as orthotropic- or composite-class in the
 starter (``PROP_SHELL = 2``), and ``/PROP/SHELL`` (IGTYP 1) accepts only
 ``PROP_SHELL`` 1 or 5 (``check_mat_elem_prop_compatibility.F:173-176``) — so a
-converted part can NEVER stay on the isotropic section property or the starter
-aborts with **ERROR 3047**. Each part therefore gets a dedicated orthotropic
-property, allocated by ``_assign_composite_props`` into
-``state.composite_prop_ids`` and emitted by ``_emit_composite_props``; this is
-the same /PROP-split mechanism the LAW128 (MAT_103) path uses.
+converted part that HOLDS ELEMENTS can never stay on the isotropic section
+property or the starter aborts with **ERROR 3047**. Each such part therefore
+gets a dedicated orthotropic property, allocated by ``_assign_composite_props``
+into ``state.composite_prop_ids`` and emitted by ``_emit_composite_props``;
+this is the same /PROP-split mechanism the LAW128 (MAT_103) path uses.
+
+The "holds elements" qualifier is load-bearing: that check runs
+``DO NG = 1,NGROUP`` over ELEMENT GROUPS and only then over each group's layers
+(same file, the loop at its head), so a part with no elements contributes no
+group and is never tested — an element-free *PART on an orthotropic law is
+starter-clean, see ``_assign_composite_props``.
 
 Note this is precisely the bug dyna2rad has: ``p_ConvertSectionShell``
 (``convertprops.cxx:734-765``) matches neither MAT_054/055 nor
@@ -408,11 +414,33 @@ def _assign_composite_props(state: ConversionState) -> None:
         if not is_composite_part and part.mid not in comp_mids:
             continue
         if pid not in shell_pids and pid not in solid_pids:
+            # A MESH sanity check, NOT a hard-failure prediction. This used to
+            # promise starter ERROR 3047; it does not happen.
+            # check_mat_elem_prop_compatibility.F runs `DO NG = 1,NGROUP` over
+            # ELEMENT GROUPS and only then over each group's layers, so the
+            # MAT/PROP class test never reaches a part that contributes no
+            # group. Measured on starter_win64: an element-free *PART on
+            # *MAT_002 (/MAT/LAW93, PROP_SHELL=2) pointing at the placeholder
+            # /PROP/SHELL an element-free part gets (writer/mesh.py
+            # `_element_free_part_ids`) reads 0 ERROR(S) 0 WARNING(S), and the
+            # starter echoes it as an ISOTROPIC SHELL PROPERTY SET without
+            # complaint. Same for *MAT_054 (/MAT/LAW127).
             state.warn(
-                f"Composite part {pid}: no shell or solid elements found, so no "
-                "orthotropic property can be synthesized. The part keeps its "
-                "default property, which the starter rejects as incompatible "
-                "with an orthotropic material (ERROR 3047) — check the mesh.")
+                f"Composite part {pid}: no shell or solid elements found, so "
+                "no orthotropic property is synthesized"
+                + (" and its *PART_COMPOSITE layup is DROPPED"
+                   if is_composite_part else "")
+                + ". The part keeps its ordinary property, and the starter "
+                "ACCEPTS that: its material/property compatibility check runs "
+                "per ELEMENT GROUP (check_mat_elem_prop_compatibility.F loops "
+                "over NGROUP), and a part with no elements contributes none. "
+                "No physics goes with it either — there is no element for the "
+                "orthotropy to act on. Read this as a MESH check: an "
+                "orthotropic or composite material is normally written for a "
+                "meshed part, so an empty one is usually a PID typo or an "
+                "*INCLUDE that did not resolve. A deliberately element-free "
+                "part — an *INTEGRATION_SHELL PID_i material carrier, say — is "
+                "idiomatic and needs no fix.")
             continue
         if pid in solid_pids and pid not in shell_pids:
             if is_composite_part:

@@ -860,8 +860,15 @@ class SectionDiscreteMultiSetTests(unittest.TestCase):
 
 class IntegrationBeamRegressionTests(unittest.TestCase):
     def test_a_plain_beam_deck_emits_no_integrated_property(self):
+        """A deck with no rule walks through this feature SILENTLY.
+
+        The material is *MAT_ELASTIC on purpose: LAW1 is BEAM_CLASSIC, the one
+        class /PROP/BEAM accepts, so the TYPE3 material gate is silent too and
+        the assertion can stay at "no warning at all" rather than filtering.
+        """
         deck = _deck("\n".join(["*SECTION_BEAM", _row(5, 2, 1.0, 2.0, 0),
-                                _row(24.0, 108.0, 228.0, 336.0)]), "")
+                                _row(24.0, 108.0, 228.0, 336.0)]), "",
+                     mat=MAT_ELAST)
         result, starter = _convert(deck)
         self.assertNotIn("/PROP/TYPE18/", starter)
         self.assertIn("/PROP/BEAM/5", starter)
