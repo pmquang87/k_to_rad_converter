@@ -397,7 +397,11 @@ def _make_ale_multimaterial(state: ConversionState) -> List[str]:
                        "submaterial (no known parts/materials) — /MAT/LAW51 not "
                        "emitted.")
             continue
-        law_id = state.next_id()
+        # next_mat_id(), not a bare next_id(): the synthesized /MAT/LAW51 shares
+        # the starter /MAT namespace with every converted *MAT, so a user MID at
+        # or above the auto-id base (90001) would collide (ERROR 79 DUPLICATE
+        # ID). A no-op on any deck without such a MID.
+        law_id = state.next_mat_id()
         lines += [
             f"/MAT/LAW51/{law_id}",
             f"ale_multimat_{law_id}",

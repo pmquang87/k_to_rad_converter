@@ -130,8 +130,21 @@ covering them unlocks a large class of real models.
 
 ### Tier 3 — large subsystems (dedicated milestones)
 
-- Composites: `MAT_54` / `MAT_55` + multi-ply `/PROP/TYPE10` / `TYPE11` /
-  `TYPE17`.
+- Composites: `MAT_54`/`MAT_55` → `/MAT/LAW127`, `MAT_002` → `/MAT/LAW93`,
+  `MAT_037` → `/MAT/LAW43`, `MAT_032` → a `/MAT/PLAS_BRIT` pair, and the
+  multi-ply `*PART_COMPOSITE` layup — **done**. The layup target is
+  `/PROP/TYPE51` + one `/PROP/TYPE19` (PLY) per layer, which is what dyna2rad
+  emits, rather than the `TYPE10`/`TYPE17` sketched here; single-material
+  orthotropic shells go on `/PROP/TYPE11` (SH_SANDW), solids on `/PROP/TYPE6`
+  and `MAT_037` on `/PROP/TYPE9`. Includes the full AOPT → `/SKEW/FIX` +
+  `Ip`/`Vx-Vy-Vz` axis mapping and the fix for `*PART_COMPOSITE`'s silent
+  whole-mesh loss (see CHANGELOG).
+  Still open in this family: `*SECTION_SHELL ICOMP=1` (the per-layer B_i/MID_i
+  cards are not read, so such a section silently degrades to a single-layer
+  isotropic property), `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
+  `*INTEGRATION_SHELL` user integration rules (which is where `MAT_032` layer
+  thicknesses really live), `*ELEMENT_SHELL_COMPOSITE`/`_BETA`, and
+  `*MAT_LAMINATED_COMPOSITE_FABRIC` (058) → `/MAT/LAW125`.
 - `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints) → `/PROP/TYPE45`
   (KJOINT2) + `/SPRING` + a node-derived `/SKEW/FIX`, plus
   `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED`/`_TRANSLATIONAL` DOF blocks —

@@ -970,12 +970,18 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         if pid in connector_pids:
             continue
         secid = part.secid if part.secid > 0 else pid
-        # A *MAT_ANISOTROPIC_VISCOPLASTIC (LAW128) part is repointed at its
-        # synthesized orthotropic /PROP/TYPE9|TYPE6 (LAW128 is orthotropic-only);
-        # a part whose per-part hourglass differs from its section is repointed
-        # at its dedicated hourglass /PROP. The two are mutually exclusive (the
-        # hourglass prepass skips ortho parts), so ortho wins where both exist.
-        prop_ref = (state.ortho_prop_ids.get(pid)
+        # A composite / orthotropic part is repointed at its synthesized
+        # property, because every one of those laws is orthotropic-class and the
+        # isotropic section /PROP is rejected by the starter (ERROR 3047):
+        #   composite  – *PART_COMPOSITE layup, MAT_002/037/054/055/032
+        #                (/PROP/TYPE51+TYPE19, TYPE11, TYPE9 or TYPE6)
+        #   ortho      – *MAT_ANISOTROPIC_VISCOPLASTIC → LAW128 (TYPE9/TYPE6)
+        #   hourglass  – per-part hourglass differing from the section base
+        # The three are mutually exclusive by construction (each prepass skips
+        # the parts the earlier ones claimed); the order here just makes the
+        # precedence explicit.
+        prop_ref = (state.composite_prop_ids.get(pid)
+                    or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
 
         lines += [
@@ -1329,11 +1335,13 @@ def _make_properties(state: ConversionState) -> List[str]:
     part_secids = {p.pid: p.secid if p.secid > 0 else p.pid for p in state.parts.values()}
 
     # Sections whose EVERY part is served by a dedicated per-part /PROP — a
+    # composite/orthotropic prop (MAT_002/032/037/054/055, *PART_COMPOSITE), a
     # LAW128 (MAT_103) orthotropic prop or a per-part hourglass prop — reference
     # that instead, so the shared isotropic section prop would be emitted unused.
     # Skip it in that case (a section with even one plain part keeps it, and the
     # split parts additionally get their own props). Mirrors the ortho split.
-    split_pids = set(state.ortho_prop_ids) | set(state.hourglass_prop_ids)
+    split_pids = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
+                  | set(state.hourglass_prop_ids))
     ortho_only_secids: Set[int] = set()
     if split_pids:
         parts_by_secid: Dict[int, List[int]] = defaultdict(list)
@@ -1510,6 +1518,9 @@ def _assign_ortho_props(state: ConversionState) -> None:
     for pid, part in sorted(state.parts.items()):
         if part.mid not in mat_mids or pid in state.ortho_prop_ids:
             continue
+        # A composite part already owns a dedicated orthotropic /PROP.
+        if pid in state.composite_prop_ids:
+            continue
         if pid not in shell_pids and pid not in solid_pids:
             state.warn(
                 f"*MAT_ANISOTROPIC_VISCOPLASTIC on part {pid}: no shell or solid "
@@ -1556,9 +1567,10 @@ def _assign_hourglass_props(state: ConversionState) -> None:
     prop_by_key: Dict[Tuple[bool, int, Tuple[Optional[float], Optional[int]]],
                       int] = {}
     for pid, part in sorted(state.parts.items()):
-        # A LAW128 part already owns a dedicated ortho /PROP; the hourglass
-        # overlay does not also split it (its TYPE6/TYPE9 keeps its defaults).
-        if pid in state.ortho_prop_ids:
+        # A LAW128 or composite part already owns a dedicated orthotropic /PROP;
+        # the hourglass overlay does not also split it (its TYPE6/TYPE9/TYPE11/
+        # TYPE51 keeps its defaults).
+        if pid in state.ortho_prop_ids or pid in state.composite_prop_ids:
             continue
         is_solid = pid in solid_pids
         is_shell = pid in shell_pids and not is_solid

@@ -29,6 +29,12 @@ from .mesh import (
     _snap_tet10_midsides,
     _synthesize_vector_skews,
 )
+from .composites import (
+    _assign_composite_props,
+    _emit_composite_props,
+    _make_composite_materials,
+    _resolve_composites,
+)
 from .contacts import (
     _make_force_transducers,
     _make_general_interfaces,
@@ -479,6 +485,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # decides the starter's solid-/XREF law whitelist).
     _resolve_xref_parts(state)
 
+    # Composites: allocate the *MAT_032 glass companion ids and the MAT_037
+    # hardening curves, then give every composite / orthotropic part its own
+    # /PROP id. Both run BEFORE _assign_ortho_props (which skips the parts
+    # claimed here), before parts (repoint) and properties (emit) — and
+    # _resolve_composites also before _make_functions, which emits the curves.
+    _resolve_composites(state)
+    _assign_composite_props(state)
+
     # Assign a synthesized orthotropic /PROP id to each LAW128 (MAT_103) part
     # (LAW128 is orthotropic-only). Must run before parts (which repoint the
     # /PART at it) and properties (which emit it) are built.
@@ -613,6 +627,10 @@ def _starter_section_registry():
         ("analysis_defaults", lambda c: _make_analysis_defaults(c.state)),
         ("ams",               lambda c: _make_ams(c.state)),
         ("materials",         lambda c: _make_materials(c.state)),
+        # Composite / orthotropic laws live in their own module (they carry a
+        # per-part property split that the plain material path does not), so
+        # they are their own section right after the materials block.
+        ("composite_materials", lambda c: _make_composite_materials(c.state)),
         ("_progress_nodes",   lambda c: _progress_marker(c, 0.08, "Writing nodes")),
         ("nodes",             lambda c: _make_nodes(
             c.state, progress=lambda fr: c.rep(0.08 + 0.32 * fr, "Writing nodes"))),
@@ -623,6 +641,7 @@ def _starter_section_registry():
             c.state, progress=lambda fr: c.rep(0.40 + 0.50 * fr, "Writing elements"))),
         ("_progress_final",   lambda c: _progress_marker(c, 0.90, "Finalizing starter deck")),
         ("properties",        lambda c: _make_properties(c.state)),
+        ("composite_properties", lambda c: _emit_composite_props(c.state)),
         ("functions",         lambda c: _make_functions(c.state)),
         ("extra_groups",      lambda c: _make_extra_groups(c.state)),
         ("rlinks",            lambda c: _make_rlinks(c.state)),
