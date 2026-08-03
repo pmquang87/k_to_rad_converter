@@ -1024,6 +1024,26 @@ def _off_load_segment(b: Block, offsets: Dict[str, int], warn) -> None:
             raw[k] = new
 
 
+def _off_hex_spotweld_assembly(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N][_TITLE]: an optional title/heading
+    card, then ID_SW on its OWN card, then EID1..EIDn.
+
+    ID_SW lives in its own weld-id namespace with no *INCLUDE_TRANSFORM bucket,
+    so it is left alone; every field after it is an *ELEMENT_SOLID id and moves
+    with IDEOFF. Getting this wrong is not a dangling reference in the .rad —
+    the writer finds no matching solid, drops the whole cluster, and the hex
+    weld silently loses its failure criterion for the rest of the run (see
+    _make_hex_spotweld_clusters' "none of its element id(s) resolved" warning).
+    """
+    start = _title_offset(b) + 1          # title (if any) + the ID_SW card
+    for k in range(start, len(b.raw)):
+        if not b.raw[k].strip():
+            continue
+        new = _rewrite_line(b.raw[k], [(ALL, "e")], offsets)
+        if new is not None:
+            b.raw[k] = new
+
+
 def _off_ale_multi_material_group(b: Block, offsets: Dict[str, int], warn) -> None:
     for k, line in enumerate(b.raw):
         if not line.strip():
@@ -1542,6 +1562,13 @@ for _kw in (
 for _kw in _SPOTWELD_CONTACT_KEYWORDS:
     if "_MPP" not in _kw:
         _OFFSET_SPECS[_kw] = _off_contact
+
+# *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
+# keyword with TITLE in options, so the base entry covers it.
+_OFFSET_SPECS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = _off_hex_spotweld_assembly
+for _n in range(1, 17):
+    _OFFSET_SPECS[f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{_n}"] = _off_hex_spotweld_assembly
+del _n
 
 #: Keywords that genuinely carry no offsetable ids — silently left alone.
 _NO_ID_KEYWORDS = frozenset({

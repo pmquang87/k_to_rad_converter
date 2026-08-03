@@ -3540,9 +3540,21 @@ def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) ->
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_contact_header(block: Block):
-    """Parse the optional *_ID header line, return (inter_id, title, data_offset)."""
+    """Parse the optional *_ID / _TITLE header line, return
+    (inter_id, title, data_offset).
+
+    ``_TITLE`` consumes a header card exactly like ``_ID``: contact_spotweld.cfg
+    is explicit about it on import (:1720-1725) — when ``_FIND(_opt,"_ID")``
+    misses it retries ``_FIND(_opt,"_TITLE")`` and reads the SAME
+    ``CARD("%10d%-70s", _ID_, TITLE)``. It is an Altair CFG extension (no
+    *CONTACT_..._TITLE appears in the LSTC manual, and contact_spotweld.cfg is
+    the only CONTACT cfg that defines it), but treating it as a plain option
+    with no header card reads Card 1 off the heading line: SSID/SSTYP/MSID/
+    MSTYP all come back 0 and the interface is silently dropped for "resolved
+    to no nodes". Wrong in every reading, so both spellings consume the card.
+    """
     raw = block.raw
-    if _has_id(block) and raw:
+    if (_has_id(block) or "TITLE" in block.options) and raw:
         f = parse_free(raw[0])
         inter_id = to_int(f[0]) if f else 0
         title = " ".join(f[1:]) if len(f) > 1 else ""
@@ -3918,8 +3930,13 @@ def handle_define_hex_spotweld_assembly(block: Block, state: ConversionState) ->
     suffix = block.keyword[len("DEFINE_HEX_SPOTWELD_ASSEMBLY"):].lstrip("_")
     declared = int(suffix) if suffix.isdigit() else 0
     eids: List[int] = []
-    for row in raw[idx + 1:]:
-        for tok in parse_fixed(row, 8, 10):
+    for i in range(idx + 1, len(raw)):
+        # _card, not a bare parse_fixed: a comma/free-format element card
+        # written narrower than 10 columns ("101,102,103") slices to
+        # ['101,102,10', '3', ...], so to_int silently drops 101/102/103 and
+        # ADDS element 3 to the weld cluster. _card detects that and re-splits.
+        # (The ID_SW card above already goes through it.)
+        for tok in _card(raw, i, fixed=True, n=8, w=10):
             v = to_int(tok)
             if v > 0:
                 eids.append(v)

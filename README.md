@@ -1344,21 +1344,32 @@ the weld rupture flag and is *not* part of `DEF` (`hm_read_thgrou.F:1519`);
 energy — the force *resultant* needs a `/CLUSTER`); and `/TH/CLUSTER` over the
 `*DEFINE_HEX_SPOTWELD_ASSEMBLY` welds with **`DEF FLOC`**, where `FLOC` adds the
 local `FS`/`FN`/`MS`/`MN` weld resultants dyna2rad never requests. Unlike the
-`/TH/INTER` / `/TH/NODE REAC*` channels these are instantaneous forces. A deck
-that asks for swforc but defines no weld gets a warning and **no** dangling
-`/TH` block; the `dt` still drives `/TFILE`
+`/TH/INTER` / `/TH/NODE REAC*` channels these are instantaneous forces — and
+they must be read from the T01, not the animation: `/ANIM/SPRING/FORC` writes
+zeros for `/PROP/TYPE13` connectors that the T01 shows carrying kilonewtons.
+Only welds that were actually emitted are listed: naming a weld whose part the
+connector writer skipped (zero-length, no `*SECTION_BEAM`, no area) is starter
+`ERROR 69` and the deck is refused, so those ids are dropped with a warning
+instead. A deck that asks for swforc but defines no weld gets a warning and
+**no** dangling `/TH` block; the `dt` joins the `/TFILE` minimum
 `*DEFINE_HEX_SPOTWELD_ASSEMBLY` (+ `_1` … `_16`) → one `/GRBRIC/BRIC` +
 one `/CLUSTER/BRICK` per assembly (LS-DYNA caps an assembly at 16 hexes,
 `/CLUSTER` at 500, so the 1:1 map always fits). `ID_SW` is reused verbatim as
-the cluster id; `skew_ID=0` lets the starter build the weld frame from the
-cluster's own bottom→top face normal; `Ifail=3` (multi-directional). Failure
-limits come from the `*MAT_SPOTWELD` of the first element's part:
-`Fn_fail1=NRR`, `Fs_fail=sqrt(NRS²+NRT²)`, `Mt_fail=MRR`,
-`Mb_fail=sqrt(MSS²+MTT²)` — the reductions the engine compares against
-(`clusterf.F:365,367`) — with `a1..a4=1` and **`b1..b4=2`**. The quadratic
-exponents reproduce MAT_100's own `(Nrr/NRR)²+…≥1` criterion; dyna2rad
-hardcodes `b=1`, which makes the interaction linear and fails a combined-load
-weld early. Element ids that are not 8-node `/BRICK` (tetrahedra, unknown ids)
+the cluster id when it is usable (a blank/zero or repeated `ID_SW` is replaced
+by a generated id with a warning — `/CLUSTER/BRICK/0` would make the
+`/TH/CLUSTER` request read as *all* clusters); `skew_ID=0` lets the starter
+build the weld frame from the cluster's own bottom→top face normal; `Ifail=3`
+(multi-directional). Failure limits come from the `*MAT_SPOTWELD` of the first
+element's part: `Fn_fail1=NRR`, `Mt_fail=MRR` straight through, and each
+two-direction pair collapsed to its live minimum — `Fs_fail=min(NRS,NRT)`,
+`Mb_fail=min(MSS,MTT)` — with `a1..a4=1` and **`b1..b4=2`**. Radioss scores one
+shear resultant against one limit (`clusterf.F:365,367`) where MAT_100 scores
+`NRS` and `NRT` separately, and `min` is the reduction that agrees with the
+quadratic exponent: it reproduces MAT_100's `(Nrr/NRR)²+…≥1` criterion exactly
+when `NRS==NRT` and `MSS==MTT`, and is conservative otherwise. (`sqrt(NRS²+NRT²)`
+paired with `b=2` would halve the shear damage; dyna2rad's `b=1` makes the
+interaction linear and fails a combined-load weld early — neither half is right
+on its own.) Element ids that are not 8-node `/BRICK` (tetrahedra, unknown ids)
 are screened out of the group with a warning — the starter *accepts* a tet
 there, which is exactly the problem: a cluster takes the weld's two joined faces
 from the hex node ordering (`hm_read_cluster.F:201-205`), so a tet's degenerate

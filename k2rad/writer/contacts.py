@@ -440,6 +440,12 @@ def _drop_interface(state: ConversionState, dropped: Dict[str, List[int]],
         f"contact. {_DROP_CONSEQUENCE} {remedy}"
     )
     dropped.setdefault(kw, []).append(inter_id)
+    # Also record it model-wide. /TH/INTER is built from the PARSED contact
+    # records, so without this a dropped interface is still listed and the
+    # starter answers WARNING 257 "NONEXISTENT INTER <id>". Every contact
+    # writer drops through here and all of them run before starter_th_inter in
+    # the section registry, so the set is complete by the time it is read.
+    state.dropped_inter_ids.add(inter_id)
 
 
 def _note_dropped_interfaces(state: ConversionState,
@@ -1849,6 +1855,37 @@ def _spotweld_slave_nids(state: ConversionState, sid: int, styp: int) -> List[in
     return sorted(n for n in nids if n > 0)
 
 
+def _styp_note(styp: int) -> str:
+    """Extra remedy text for the SURFATYP values k2rad does not resolve.
+
+    LS-DYNA SURFATYP 5 is "include all" (every part in the model) and 6 is
+    "part set exempted" (everything except the named *SET_PART); a blank SSID
+    with SSTYP=0 means the same "all" (Vol I R16, *CONTACT). Neither has a
+    k2rad resolver — _spotweld_slave_nids and _contact_master_pids both key on
+    a named id — so the side comes back empty and the whole interface is
+    dropped. Say so by name: dyna2rad DOES convert all three (into a
+    /SET/GENERAL with a KEY_type=ALL clause, plus an opt_D exemption clause for
+    6), so a native re-read of the same deck produces a tie where k2rad
+    produces none, and the user should know that rather than infer it from an
+    "resolved to no nodes" message.
+    """
+    if styp == 5:
+        return (" NOTE: SURFATYP=5 is LS-DYNA's \"include ALL parts\", which "
+                "k2rad has no resolver for — this is a converter limitation, "
+                "not a fault in the deck. dyna2rad converts it (/SET/GENERAL "
+                "with an ALL clause), so a native OpenRadioss read of this "
+                "deck WOULD produce a tie here. Name the parts explicitly "
+                "(a *SET_PART with SURFATYP=2) to convert it with k2rad.")
+    if styp == 6:
+        return (" NOTE: SURFATYP=6 is LS-DYNA's \"all parts EXCEPT the named "
+                "*SET_PART\", which k2rad has no resolver for — a converter "
+                "limitation, not a fault in the deck. dyna2rad converts it "
+                "(an ALL clause minus the set), so a native OpenRadioss read "
+                "WOULD produce a tie here. Invert the set by hand into an "
+                "explicit *SET_PART with SURFATYP=2 to convert it with k2rad.")
+    return ""
+
+
 def _make_spotweld_interfaces(state: ConversionState,
                               rigid_nodes: Set[int]) -> List[str]:
     """*CONTACT_SPOTWELD[...] → /INTER/TYPE2 (Ignore=2, Spotflag=28, Idel2=1).
@@ -1892,7 +1929,7 @@ def _make_spotweld_interfaces(state: ConversionState,
                  "the WELD (its beam/solid nugget part, or a node set of weld "
                  "nodes), and it may not be rigid. Check that SSID names a "
                  "deformable part, part set, node set or segment set that "
-                 "exists in this deck."))
+                 "exists in this deck." + _styp_note(c.sstyp)))
             continue
         master_lines: List[str] = []
         surf_id, _verts, _faces = _tied_master_surface(
@@ -1904,7 +1941,7 @@ def _make_spotweld_interfaces(state: ConversionState,
                 "to no contact surface",
                 "REMEDY: point MSID at the part, part set or *SET_SEGMENT of "
                 "the SHEETS being welded — it must exist in this deck and "
-                "carry shell/solid elements.")
+                "carry shell/solid elements." + _styp_note(c.mstyp))
             continue
         grnod_id = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"spotweld_{c.inter_id}_slave", clean)

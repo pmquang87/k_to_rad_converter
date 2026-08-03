@@ -3050,6 +3050,13 @@ class ConversionState:
     # _make_hex_spotweld_clusters, consumed by the *DATABASE_SWFORC accounting
     # (same pattern as sect_ids / blast_surf_ids)
     cluster_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # sprg_IDs actually written as /SPRING by _make_spotweld_beam_connectors.
+    # *DATABASE_SWFORC must list only these: the connector writer skips a whole
+    # MAT_100 part when the welds are zero-length, carry no *SECTION_BEAM, or
+    # size to no area, and a /TH/SPRING naming an element that was never
+    # emitted is starter ERROR 69 (hm_read_thgrne.F:189, MSGTYPE=MSGERROR) —
+    # the deck is refused, not degraded. Same accounting pattern as cluster_ids.
+    spotweld_spring_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
@@ -3224,6 +3231,10 @@ class ConversionState:
     contacts_tied: List[ContactTied] = field(default_factory=list)
     # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
     contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
+    # Interface ids the writers REFUSED to emit (filled by _drop_interface).
+    # /TH/INTER is assembled from the parsed contact records, so it has to
+    # subtract these or the starter answers WARNING 257 NONEXISTENT INTER.
+    dropped_inter_ids: Set[int] = field(default_factory=set)
     force_transducers: List[ContactForceTransducer] = field(default_factory=list)
     # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
     th_sub_ids: List[Tuple[int, str]] = field(default_factory=list)

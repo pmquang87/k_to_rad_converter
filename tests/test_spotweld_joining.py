@@ -513,12 +513,26 @@ class SpotweldKeywordGrammarTests(unittest.TestCase):
         self.assertGreaterEqual(c.inter_id, 90001)
         self.assertEqual((3, 3, 1, 2), (c.ssid, c.sstyp, c.msid, c.mstyp))
 
-    def test_TITLE_option_is_dispatched_too(self):
-        """_TITLE is stripped by _split_keyword, so one key covers it."""
+    def test_TITLE_consumes_its_header_card_like_ID(self):
+        """_TITLE is stripped by _split_keyword, so one key covers the dispatch
+        — but it also CONSUMES a cid/heading card, exactly like _ID.
+
+        contact_spotweld.cfg:1720-1725 is explicit on import: when
+        _FIND(_opt,"_ID") misses it retries _FIND(_opt,"_TITLE") and reads the
+        SAME CARD("%10d%-70s", _ID_, TITLE). Dispatching the block but not
+        consuming that card reads Card 1 off the heading line, so
+        ssid/sstyp/msid/mstyp all come back 0 and the interface is then
+        silently dropped — a spelling that certifies as "handled" while
+        producing nothing. Assert the FIELDS, not just the record count."""
         deck = SPOTWELD_DECK.replace(
             "*CONTACT_SPOTWELD_ID\n", "*CONTACT_SPOTWELD_TITLE\n")
         state = _dispatch(deck)
         self.assertEqual(1, len(state.contacts_spotweld))
+        c = state.contacts_spotweld[0]
+        self.assertEqual((3, 3, 1, 2), (c.ssid, c.sstyp, c.msid, c.mstyp))
+        self.assertEqual(1, c.inter_id)
+        _r, starter = _convert(deck)
+        self.assertIn("/INTER/TYPE2/1", starter)
 
     def test_variant_flavours_warn_and_still_convert(self):
         """dyna2rad parses ContactOption 2/3/4 and never reads it, so all five
@@ -769,20 +783,85 @@ class HexSpotweldAssemblyTests(unittest.TestCase):
         self.assertEqual("hex_spotweld_7001_bricks", group[1])
 
     def test_failure_limits_from_MAT_100(self):
-        """Fn_fail1 = NRR, Fs_fail = sqrt(NRS^2+NRT^2), Mt_fail = MRR,
-        Mb_fail = sqrt(MSS^2+MTT^2) — the reduction the ENGINE compares against
-        (clusterf.F:365 FT = sqrt(Fx^2+Fy^2), :367 MB = sqrt(Mx^2+My^2)).
+        """Fn_fail1 = NRR, Mt_fail = MRR (both single-direction, straight
+        through); the two PAIRS collapse to their live MINIMUM, because the
+        engine scores one resultant FT = sqrt(Fx^2+Fy^2) against one Fs_fail
+        (clusterf.F:365) and one MB against one Mb_fail (:367).
+
+        min is the reduction that agrees with the quadratic exponent b=2: with
+        NRS == NRT == S the /CLUSTER shear term is then (Fx^2+Fy^2)/S^2, which
+        IS MAT_100's (Fx/S)^2 + (Fy/S)^2. The obvious sqrt(NRS^2+NRT^2) gives
+        (Fx^2+Fy^2)/(2 S^2) — half the damage, i.e. a weld sqrt(2) too strong.
+
         Deck: NRR 8000, NRS 5000, NRT 4000, MRR 2000, MSS 1500, MTT 1200.
         All four recomputed by hand here."""
         cards = _cards(_block(self.starter, "/CLUSTER/BRICK/7001"))
         self.assertEqual(8000.0, _col_f(cards[1], 1, 20))
-        self.assertAlmostEqual((5000.0 ** 2 + 4000.0 ** 2) ** 0.5,
+        self.assertAlmostEqual(min(5000.0, 4000.0),
                                _col_f(cards[2], 1, 20), places=6)
-        self.assertAlmostEqual(6403.124237, _col_f(cards[2], 1, 20), places=6)
+        self.assertAlmostEqual(4000.0, _col_f(cards[2], 1, 20), places=6)
         self.assertEqual(2000.0, _col_f(cards[3], 1, 20))
-        self.assertAlmostEqual((1500.0 ** 2 + 1200.0 ** 2) ** 0.5,
+        self.assertAlmostEqual(min(1500.0, 1200.0),
                                _col_f(cards[4], 1, 20), places=6)
-        self.assertAlmostEqual(1920.937271, _col_f(cards[4], 1, 20), places=6)
+        self.assertAlmostEqual(1200.0, _col_f(cards[4], 1, 20), places=6)
+        # The rejected reduction, named so a regression cannot pass silently.
+        self.assertNotAlmostEqual(6403.124237, _col_f(cards[2], 1, 20), places=3)
+        self.assertNotAlmostEqual(1920.937271, _col_f(cards[4], 1, 20), places=3)
+
+    def test_isotropic_weld_reproduces_MAT_100_damage_exactly(self):
+        """The whole point of pairing b=2 with min(): on the normal round
+        nugget (NRS == NRT, MSS == MTT) the converted failure surface IS
+        MAT_100's, term for term.
+
+        Engine (clusterf.F:386-390): DMG = a2*(FT/Fs_fail)^b2 with
+        FT = sqrt(Fx^2+Fy^2). LS-DYNA: (Fx/NRS)^2 + (Fy/NRT)^2. Recomputed
+        here from the EMITTED card at a load the CHANGELOG's worked example
+        uses — 40% of the tension limit and 40% of the shear limit at once."""
+        deck = HEX_DECK.replace(
+            "       0.0    8000.0    5000.0    4000.0    2000.0    1500.0    1200.0",
+            "       0.0    8000.0    5000.0    5000.0    2000.0    1500.0    1500.0")
+        _r, starter = _convert(deck)
+        cards = _cards(_block(starter, "/CLUSTER/BRICK/7001"))
+        fn_fail, fs_fail = _col_f(cards[1], 1, 20), _col_f(cards[2], 1, 20)
+        a2, b2 = _col_f(cards[2], 21, 40), _col_f(cards[2], 41, 60)
+        self.assertEqual(5000.0, fs_fail)          # not 7071.07 = 5000*sqrt(2)
+        fn, fx = 0.4 * 8000.0, 0.4 * 5000.0
+        radioss = ((fn / fn_fail) ** _col_f(cards[1], 41, 60)
+                   + a2 * ((fx ** 2 + 0.0) ** 0.5 / fs_fail) ** b2)
+        lsdyna = (fn / 8000.0) ** 2 + (fx / 5000.0) ** 2 + (0.0 / 5000.0) ** 2
+        self.assertAlmostEqual(0.32, lsdyna, places=12)
+        self.assertAlmostEqual(lsdyna, radioss, places=12)
+
+    def test_anisotropic_pair_is_conservative_and_says_so(self):
+        """NRS != NRT cannot be carried by a single Radioss resultant limit.
+        min() is then not exact — but it errs on the safe side (damage at or
+        above LS-DYNA's, so the weld breaks no later), and the warning has to
+        name that rather than claim a fidelity that is not there."""
+        result, starter = _convert(HEX_DECK)          # NRS 5000 != NRT 4000
+        fs_fail = _col_f(_cards(_block(starter, "/CLUSTER/BRICK/7001"))[2], 1, 20)
+        for fx, fy in ((5000.0, 0.0), (0.0, 4000.0), (3000.0, 3000.0)):
+            with self.subTest(fx=fx, fy=fy):
+                radioss = ((fx * fx + fy * fy) ** 0.5 / fs_fail) ** 2
+                lsdyna = (fx / 5000.0) ** 2 + (fy / 4000.0) ** 2
+                self.assertGreaterEqual(radioss + 1e-12, lsdyna)
+        joined = " ".join(result.warnings)
+        self.assertIn("min(NRS,NRT)", joined)
+        self.assertIn("conservative", joined)
+        self.assertIn("NOT equal", joined)
+
+    def test_a_blank_pair_member_is_skipped_not_taken_as_the_minimum(self):
+        """A blank MAT_100 limit is LS-DYNA's 'this component never fails'.
+        Taking it as the minimum would emit 0, which the starter promotes to
+        INFINITY (hm_read_cluster.F:293-296) and switch the shear term OFF
+        entirely — the opposite of what the blank means for the OTHER
+        direction."""
+        deck = HEX_DECK.replace(
+            "       0.0    8000.0    5000.0    4000.0    2000.0    1500.0    1200.0",
+            "       0.0    8000.0    5000.0       0.0    2000.0    1500.0       0.0")
+        _r, starter = _convert(deck)
+        cards = _cards(_block(starter, "/CLUSTER/BRICK/7001"))
+        self.assertEqual(5000.0, _col_f(cards[2], 1, 20))
+        self.assertEqual(1500.0, _col_f(cards[4], 1, 20))
 
     def test_exponents_are_quadratic_not_dyna2rads_linear(self):
         """MAT_100's own criterion is (Nrr/NRR)^2 + ... >= 1, and the engine
@@ -1000,7 +1079,7 @@ class SwforcTimeHistoryTests(unittest.TestCase):
         self.assertNotIn("/TH/SPRING", starter)
         self.assertNotIn("/TH/BRIC", starter)
         self.assertNotIn("/TH/CLUSTER", starter)
-        self.assertIn("defines no spot weld", " ".join(result.warnings))
+        self.assertIn("has no spot weld", " ".join(result.warnings))
 
     def test_cluster_only_deck_does_not_warn_about_missing_welds(self):
         """A hex-weld deck IS answered — by /TH/CLUSTER — so the "no spot weld"
@@ -1014,15 +1093,233 @@ class SwforcTimeHistoryTests(unittest.TestCase):
 
     def test_swforc_dt_drives_the_engine_TFILE(self):
         """A SWFORC-only deck used to fall through to the 1e-3 /TFILE default,
-        writing the T01 at the wrong frequency."""
-        deck = SPOTWELD_DECK.replace("*CONTROL_UNITS\n", "*CONTROL_UNITS\n" + SWFORC)
+        writing the T01 at the wrong frequency.
+
+        The dt here is deliberately NOT 0.001: that is the fallback default, so
+        asserting it would pass whether or not db_swforc_dt reaches /TFILE at
+        all — a check that cannot fail."""
+        deck = SPOTWELD_DECK.replace(
+            "*CONTROL_UNITS\n",
+            "*CONTROL_UNITS\n" + SWFORC.replace("     0.001", "   2.5E-05"))
         _r, _s, engine = _convert_both(deck)
         tfile = engine.splitlines()[engine.splitlines().index("/TFILE") + 1]
-        self.assertEqual(0.001, float(tfile))
+        self.assertEqual(2.5e-05, float(tfile))
+
+    def test_TFILE_takes_the_MINIMUM_over_the_DATABASE_family(self):
+        """Radioss has ONE time-history frequency, so the whole *DATABASE_*
+        family collapses to one /TFILE. It must be the MINIMUM: a first-non-zero
+        rule hands the frequency to whichever card sits earliest in the chain,
+        and *DATABASE_NODOUT is first, so a weld deck asking SWFORC 2.5e-5 and
+        NODOUT 0.01 would sample every new weld channel 400x too coarsely."""
+        deck = SPOTWELD_DECK.replace(
+            "*CONTROL_UNITS\n",
+            "*CONTROL_UNITS\n"
+            + "*DATABASE_NODOUT\n      0.01\n"
+            + SWFORC.replace("     0.001", "   2.5E-05"))
+        _r, _s, engine = _convert_both(deck)
+        tfile = engine.splitlines()[engine.splitlines().index("/TFILE") + 1]
+        self.assertEqual(2.5e-05, float(tfile))
 
     def test_swforc_dt_is_parsed_onto_state(self):
         state = _dispatch("*KEYWORD\n" + SWFORC + "*END\n")
         self.assertEqual(0.001, state.db_swforc_dt)
+
+
+# ── Regression: a /TH block may never name an element that was not emitted ───
+
+class ThObjectsMustExistTests(unittest.TestCase):
+    """The invariant the starter enforces on every /TH element group.
+
+    hm_read_thgrne.F:189-191 answers an unresolvable object with
+    ANCMSG(MSGID=69, MSGTYPE=MSGERROR) — "TH ELEMENT SELECTION ID=n DOES NOT
+    EXIST". MSGERROR, not a warning: the deck is REFUSED and there is no restart
+    file. So a lost weld channel must be dropped from the /TH block, never
+    listed and left dangling.
+
+    The hole this pins: _make_starter_th_swforc builds the /TH/SPRING list from
+    PARSED state (every beam on a *MAT_SPOTWELD part), while
+    _make_spotweld_beam_connectors skips a whole part — emitting no /SPRING and
+    no /PROP/TYPE13 — for zero-length welds, a missing *SECTION_BEAM, or a
+    zero cross-section area. Both unconvertible flavours are exercised below.
+    """
+
+    # SPOTWELD_DECK's weld beams 11/12 with their two ends made COINCIDENT, so
+    # the connector writer's `L <= 1e-12` branch skips the whole part.
+    ZERO_LENGTH = (SHEET_NODES.replace("       101       2.0       2.0       2.0",
+                                       "       101       2.0       2.0       0.0")
+                   .replace("       103       8.0       8.0       2.0",
+                            "       103       8.0       8.0       0.0"))
+
+    def _emitted_spring_eids(self, starter):
+        out = set()
+        for block in _blocks(starter, "/SPRING/"):
+            for ln in block[1:]:
+                if not ln.startswith("#") and ln.strip():
+                    out.add(int(ln[:10]))
+        return out
+
+    def _th_ids(self, starter, header):
+        return {e for b in _blocks(starter, header) for e in _th_obj_ids(b)}
+
+    def test_zero_length_welds_are_not_listed_in_TH_SPRING(self):
+        deck = ("*KEYWORD\n" + self.ZERO_LENGTH + SHEET_ELEMS + SHEET_PARTS
+                + SET_PART + _spotweld_card()
+                + SWFORC + "*END\n")
+        result, starter = _convert(deck)
+        self.assertEqual(set(), self._emitted_spring_eids(starter))
+        self.assertNotIn("/TH/SPRING", starter)
+        joined = " ".join(result.warnings)
+        self.assertIn("have no /SPRING in the converted deck", joined)
+        self.assertIn("[11, 12]", joined)
+
+    def test_welds_with_no_SECTION_BEAM_are_not_listed_in_TH_SPRING(self):
+        deck = ("*KEYWORD\n" + SHEET_NODES + SHEET_ELEMS
+                + SHEET_PARTS.replace(
+                    "*SECTION_BEAM\n"
+                    "         9         9\n"
+                    "       1.0       3.0       3.0       0.0       0.0\n", "")
+                + SET_PART + _spotweld_card() + SWFORC + "*END\n")
+        result, starter = _convert(deck)
+        self.assertEqual(set(), self._emitted_spring_eids(starter))
+        self.assertNotIn("/TH/SPRING", starter)
+        self.assertIn("have no /SPRING in the converted deck",
+                      " ".join(result.warnings))
+
+    def test_every_TH_SPRING_and_TH_BRIC_id_was_actually_emitted(self):
+        """The general invariant, on the healthy deck: subsets, not equality —
+        a channel may be dropped, but never invented."""
+        deck = HEX_DECK.replace("*MAT_ELASTIC\n", SWFORC + "*MAT_ELASTIC\n")
+        _r, starter = _convert(deck)
+        solids = (_elem_ids(starter, "/BRICK/") | _elem_ids(starter, "/TETRA4/")
+                  | _elem_ids(starter, "/TETRA10/"))
+        th_bric = self._th_ids(starter, "/TH/BRIC/")
+        self.assertTrue(th_bric)
+        self.assertLessEqual(th_bric, solids)
+        self.assertLessEqual(self._th_ids(starter, "/TH/SPRING/"),
+                             self._emitted_spring_eids(starter))
+
+    def test_healthy_beam_welds_are_still_listed(self):
+        """The filter must not swallow the normal case."""
+        deck = SPOTWELD_DECK.replace("*CONTROL_UNITS\n", "*CONTROL_UNITS\n" + SWFORC)
+        result, starter = _convert(deck)
+        self.assertEqual({11, 12}, self._emitted_spring_eids(starter))
+        self.assertEqual({11, 12}, self._th_ids(starter, "/TH/SPRING/"))
+        self.assertNotIn("have no /SPRING in the converted deck",
+                         " ".join(result.warnings))
+
+
+# ── Regression: ID_SW is a user id and must be repaired, not passed through ──
+
+class ClusterIdHygieneTests(unittest.TestCase):
+    """A blank or duplicated ID_SW is a malformed deck (LS-DYNA Vol I R16
+    p.17-300 requires it unique), and passing it through breaks the .rad in two
+    different ways: /CLUSTER/BRICK/0 puts a literal 0 in the /TH/CLUSTER object
+    list, which hm_read_thgrki.F:123-137 reads as "ALL clusters" (WARNING
+    3083); a repeat is a duplicate-id starter rejection."""
+
+    def test_blank_ID_SW_gets_a_generated_id_and_never_a_zero_in_TH(self):
+        deck = HEX_DECK.replace("*DEFINE_HEX_SPOTWELD_ASSEMBLY\n      7001\n",
+                                "*DEFINE_HEX_SPOTWELD_ASSEMBLY\n          \n")
+        deck = deck.replace("*MAT_ELASTIC\n", SWFORC + "*MAT_ELASTIC\n")
+        result, starter = _convert(deck)
+        self.assertNotIn("/CLUSTER/BRICK/0\n", starter)
+        cluster_ids = [int(ln.rsplit("/", 1)[1])
+                       for ln in starter.splitlines()
+                       if ln.startswith("/CLUSTER/BRICK/")]
+        self.assertEqual(1, len(cluster_ids))
+        self.assertGreater(cluster_ids[0], 0)
+        th = _blocks(starter, "/TH/CLUSTER/")[0]
+        self.assertNotIn(0, _th_cluster_obj_ids(th))
+        self.assertEqual(cluster_ids, _th_cluster_obj_ids(th))
+        self.assertIn("is blank or zero", " ".join(result.warnings))
+
+    def test_duplicate_ID_SW_does_not_emit_two_clusters_with_one_id(self):
+        deck = HEX_DECK.replace(
+            HEX_ASSEMBLY,
+            HEX_ASSEMBLY + "*DEFINE_HEX_SPOTWELD_ASSEMBLY\n      7001\n"
+            + _row(102) + "\n")
+        result, starter = _convert(deck)
+        ids = [ln.rsplit("/", 1)[1] for ln in starter.splitlines()
+               if ln.startswith("/CLUSTER/BRICK/")]
+        self.assertEqual(2, len(ids))
+        self.assertEqual(2, len(set(ids)))
+        self.assertIn("used by more than one assembly", " ".join(result.warnings))
+
+    def test_a_good_ID_SW_still_goes_straight_through(self):
+        _r, starter = _convert(HEX_DECK)
+        self.assertIn("/CLUSTER/BRICK/7001", starter)
+
+
+# ── Regression: hex assembly element cards under *INCLUDE_TRANSFORM ──────────
+
+class HexAssemblyOffsetTests(unittest.TestCase):
+    """The EID cards are *ELEMENT_SOLID ids and move with IDEOFF. Without an
+    _OFFSET_SPECS entry they stay put, no solid matches, and
+    _make_hex_spotweld_clusters emits NO /CLUSTER at all — the hex weld
+    silently loses its failure criterion and holds for the whole run."""
+
+    def test_every_spelling_is_registered(self):
+        self.assertIn("DEFINE_HEX_SPOTWELD_ASSEMBLY", _OFFSET_SPECS)
+        for n in (1, 8, 16):
+            with self.subTest(n=n):
+                self.assertIn(f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{n}", _OFFSET_SPECS)
+
+    def test_element_ids_shift_and_ID_SW_does_not(self):
+        from k2rad.parser import Block
+        b = Block(keyword="DEFINE_HEX_SPOTWELD_ASSEMBLY", options=[],
+                  raw=[_row(7001), _row(101, 102)])
+        _OFFSET_SPECS["DEFINE_HEX_SPOTWELD_ASSEMBLY"](
+            b, {"e": 500, "n": 9, "p": 9}, lambda *a, **k: None)
+        self.assertEqual(7001, int(b.raw[0][:10]))
+        self.assertEqual([601, 602],
+                         [int(b.raw[1][i:i + 10]) for i in (0, 10)])
+
+
+# ── Regression: comma-format element cards on the hex assembly ───────────────
+
+class HexAssemblyFreeFormatTests(unittest.TestCase):
+    """A comma/free-format card written narrower than 10 columns slices to
+    ['101,102,10', '3', ...]: to_int drops 101/102/103 and ADDS element 3 to
+    the weld cluster — a wrong cluster with no warning at all."""
+
+    def test_comma_format_element_card_is_read_correctly(self):
+        state = _dispatch("*KEYWORD\n*DEFINE_HEX_SPOTWELD_ASSEMBLY\n"
+                          "7001\n101,102,103\n*END\n")
+        self.assertEqual(1, len(state.hex_spotweld_assemblies))
+        self.assertEqual([101, 102, 103], state.hex_spotweld_assemblies[0].eids)
+        self.assertEqual(7001, state.hex_spotweld_assemblies[0].sw_id)
+
+    def test_fixed_format_is_unchanged(self):
+        state = _dispatch("*KEYWORD\n*DEFINE_HEX_SPOTWELD_ASSEMBLY\n"
+                          + _row(7001) + "\n" + _row(101, 102, 103) + "\n*END\n")
+        self.assertEqual([101, 102, 103], state.hex_spotweld_assemblies[0].eids)
+
+
+# ── Regression: /TH/INTER must not name a dropped interface ──────────────────
+
+class DroppedInterfacesAreNotInThTests(unittest.TestCase):
+    """/TH/INTER was built from the PARSED contact records, so a contact whose
+    side resolved to nothing was still listed and the starter answered
+    WARNING 257 "NONEXISTENT INTER <id>" on an otherwise clean deck. Observed
+    on W16_SW_door_* (id 6) and W17_RS_FloorFrame (id 90001)."""
+
+    def test_a_dropped_spotweld_contact_is_not_listed(self):
+        deck = SPOTWELD_DECK.replace(
+            _spotweld_card(),
+            _spotweld_card(cid=7, ssid=999)          # names no part
+            + "*DATABASE_RCFORC\n     0.001\n")
+        result, starter = _convert(deck)
+        self.assertNotIn("/INTER/TYPE2/7", starter)
+        self.assertIn("resolved to no nodes at all", " ".join(result.warnings))
+        listed = {e for b in _blocks(starter, "/TH/INTER/") for e in _th_obj_ids(b)}
+        self.assertNotIn(7, listed)
+
+    def test_an_emitted_contact_is_still_listed(self):
+        deck = SPOTWELD_DECK.replace(
+            "*CONTROL_UNITS\n", "*CONTROL_UNITS\n*DATABASE_RCFORC\n     0.001\n")
+        _r, starter = _convert(deck)
+        listed = {e for b in _blocks(starter, "/TH/INTER/") for e in _th_obj_ids(b)}
+        self.assertIn(1, listed)
 
 
 # ── Regression: the master surface must not mix /SHELL and /SH3N ids ─────────
@@ -1092,10 +1389,17 @@ class MasterSurfaceTopologySplitTests(unittest.TestCase):
 # ── Corpus: decks WITHOUT spotweld keywords must be untouched ────────────────
 
 class UnrelatedDeckByteIdentityTests(unittest.TestCase):
-    """Every repo deck that carries none of this batch's keywords must convert
-    to exactly what it converted to before. The three keywords are the only
-    entry points, and the only shared code they touch is _make_master_surface's
-    topology split — which is a no-op on a master surface with no triangles."""
+    """The checked-in golden FIXTURES must convert to exactly what they
+    converted to before — these five decks, not the corpus.
+
+    Scope matters here: this batch is NOT corpus-wide byte-identical, and the
+    CHANGELOG names the exception. Ryan_Lee_Examples/W2_Door_Impact.k carries
+    none of the three keywords and still changes, through the shared
+    _make_master_surface topology split — deliberately, because on master its
+    3-corner shells land in a /GRSHEL/SHEL and the starter refuses the deck
+    with 19 ERROR 70s. The split is a no-op only on a master surface with no
+    triangles, which is what the fixtures below have.
+    """
 
     REPO = Path(__file__).resolve().parent.parent
 

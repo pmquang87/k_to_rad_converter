@@ -340,11 +340,17 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     force-transducer path (writer/contacts.py): the factor between the raw
     channel and the force is the elapsed accumulation time, not a constant.
     """
-    all_inter_ids = ([c.inter_id for c in state.contacts_single]
-                     + [c.inter_id for c in state.contacts_surf2surf]
-                     + [c.inter_id for c in state.contacts_general]
-                     + [c.inter_id for c in state.contacts_tied]
-                     + [c.inter_id for c in state.contacts_spotweld])
+    # Parsed contacts MINUS the ones the writers refused to emit. A contact
+    # whose side resolves to nothing is dropped with a loud warning, but its
+    # record stays in state — listing it here is starter WARNING 257
+    # "NONEXISTENT INTER <id>" on a deck that otherwise converts clean, and the
+    # channel does not exist either way. All four contact writers run before
+    # this section, so state.dropped_inter_ids is complete.
+    all_inter_ids = [c.inter_id for c in (
+        list(state.contacts_single) + list(state.contacts_surf2surf)
+        + list(state.contacts_general) + list(state.contacts_tied)
+        + list(state.contacts_spotweld))
+        if c.inter_id not in state.dropped_inter_ids]
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:
@@ -769,7 +775,30 @@ def _make_starter_th_swforc(state: ConversionState) -> List[str]:
     if not state.db_swforc_dt:
         return []
     weld_pids = _spotweld_beam_pids(state)
-    spring_eids = sorted(b.eid for b in state.beam_elems if b.pid in weld_pids)
+    # Only the springs the connector writer ACTUALLY emitted. It `continue`s
+    # over a whole MAT_100 part whose welds are zero-length, carry no
+    # *SECTION_BEAM, or size to no cross-section area — emitting neither
+    # /PROP/TYPE13 nor /SPRING while the beams stay in state.beam_elems. A
+    # /TH/SPRING naming one of those ids is not a lost channel, it is starter
+    # ERROR 69 ("TH ELEMENT SELECTION ID=n DOES NOT EXIST", hm_read_thgrne.F:189
+    # MSGTYPE=MSGERROR) and the whole deck is refused — strictly worse than the
+    # degraded-but-running deck the "welds NOT converted" warning describes.
+    # state.spotweld_spring_eids is filled by _make_spotweld_beam_connectors,
+    # which the section registry runs first (same ordering the /CLUSTER +
+    # cluster_ids pair relies on).
+    parsed_eids = sorted(b.eid for b in state.beam_elems if b.pid in weld_pids)
+    spring_eids = [e for e in parsed_eids if e in state.spotweld_spring_eids]
+    if len(spring_eids) != len(parsed_eids):
+        lost = [e for e in parsed_eids if e not in state.spotweld_spring_eids]
+        state.warn(
+            f"*DATABASE_SWFORC: {len(lost)} *MAT_SPOTWELD beam weld(s) "
+            f"(element id(s) {lost[:10]}{' ...' if len(lost) > 10 else ''}) "
+            "have no /SPRING in the converted deck — their part was skipped by "
+            "the connector writer (see its own warning for the cause: "
+            "zero-length welds, a missing *SECTION_BEAM, or no cross-section "
+            "area). Those swforc channels are LOST. They are left out of the "
+            "/TH/SPRING on purpose: listing an element the deck never defines "
+            "is starter ERROR 69 and the run would not start at all.")
     solid_pids = _spotweld_solid_pids(state)
     # EVERY solid on a MAT_100 part, with no topology screening. /TH/BRIC is
     # read over the whole solid array (hm_read_thgrou.F ITYP=1, NUMELS), so a
@@ -784,9 +813,10 @@ def _make_starter_th_swforc(state: ConversionState) -> List[str]:
     if not spring_eids and not brick_eids:
         if not state.cluster_ids:
             state.warn(
-                "*DATABASE_SWFORC requested but this deck defines no spot weld "
-                "k2rad can output: no *MAT_SPOTWELD (MAT_100) beam or solid "
-                "part and no *DEFINE_HEX_SPOTWELD_ASSEMBLY. No /TH block is "
+                "*DATABASE_SWFORC requested but this deck has no spot weld "
+                "k2rad could output: no *MAT_SPOTWELD (MAT_100) beam or solid "
+                "part was converted and there is no "
+                "*DEFINE_HEX_SPOTWELD_ASSEMBLY. No /TH block is "
                 "emitted (a /TH group listing nothing is a starter error). The "
                 "dt is still honoured as the /TFILE frequency. If the welds in "
                 "this deck are *CONSTRAINED_SPOTWELD ties, their springs are "
@@ -815,7 +845,18 @@ def _make_starter_th_swforc(state: ConversionState) -> List[str]:
             "is the weld rupture flag and is NOT part of DEF "
             "(hm_read_thgrou.F:1519). Unlike the /TH/INTER and /TH/NODE REAC* "
             "channels these are INSTANTANEOUS forces (thres.F writes GBUF%FOR "
-            "and GBUF%MOM with no dt) — no differentiation needed.")
+            "and GBUF%MOM with no dt) — no differentiation needed. READ THE "
+            "WELD FORCE FROM THE T01, NOT FROM THE ANIMATION: measured on a "
+            "live run, /ANIM/SPRING/FORC writes 0.00 N for /PROP/TYPE13 "
+            "connectors that the T01 shows carrying 13.4 kN, so the A-files "
+            "are not a usable weld-force source. Note also that a weld whose "
+            "*ELEMENT_BEAM card gives no third node (N3=0, the usual case) has "
+            "no transverse frame of its own: the starter says WARNING 327 and "
+            "resolves DOFs 2/3/5/6 against global X. That is harmless while "
+            "the weld is loaded along its axis and while NRS==NRT and "
+            "MSS==MTT, but on a lap-shear weld with unequal transverse limits "
+            "the failure directions are not the ones the deck named — give the "
+            "beam an N3 if that matters.")
     if brick_eids:
         th_id = state.next_id()
         lines += [

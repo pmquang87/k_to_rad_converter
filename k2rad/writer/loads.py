@@ -1049,6 +1049,11 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
         ]
         for e in beams:
             lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}{_i(e.n3)}")
+            # Record what was ACTUALLY written: *DATABASE_SWFORC lists these
+            # sprg_IDs, and every `continue` above skips a whole part without
+            # emitting a /SPRING. A /TH/SPRING naming a skipped id is starter
+            # ERROR 69 and the deck is refused outright.
+            state.spotweld_spring_eids.add(e.eid)
         lines.append(HDR)
         emitted = True
 
@@ -1189,17 +1194,64 @@ _CLUSTER_IFAIL = 3
 #   (Nrr/NRR)^2 + (Nrs/NRS)^2 + (Nrt/NRT)^2
 # + (Mrr/MRR)^2 + (Mss/MSS)^2 + (Mtt/MTT)^2  >= 1
 #
-# i.e. QUADRATIC in every term. With the shear/bending pairs already reduced to
-# their resultants (Fs_fail = sqrt(NRS^2+NRT^2), Mb_fail = sqrt(MSS^2+MTT^2) —
-# which is what the engine compares against, FT = sqrt(Fx^2+Fy^2) at
-# clusterf.F:365), b = 2 reproduces LS-DYNA exactly and b = 1 does not.
+# i.e. QUADRATIC in every term, so b = 2 is the right exponent and dyna2rad's
+# b1..b4 = 1.0 (convertdefinehexspotweldassembly.cxx:76-79) is not: its LINEAR
+# interaction fails a weld held at 40% of both its tension and its shear limit
+# at DMG = 0.4 + 0.4 = 0.8, where LS-DYNA gets 0.4^2 + 0.4^2 = 0.32.
 #
-# dyna2rad writes b1..b4 = 1.0 (convertdefinehexspotweldassembly.cxx:76-79),
-# making the interaction LINEAR: a weld loaded equally in tension and shear at
-# 40% of each limit reaches DMG = 0.8 there and fails, where LS-DYNA gets
-# 0.4^2 + 0.4^2 = 0.32 and does not. k2rad emits the quadratic form and says so.
+# But the EXPONENT is only half the mapping. Radioss compares one SHEAR
+# RESULTANT FT = sqrt(Fx^2+Fy^2) against ONE limit Fs_fail (clusterf.F:365-366),
+# where MAT_100 scores its two shear directions separately against NRS and NRT.
+# The exponent and the resultant reduction have to agree, and the obvious
+# reduction does NOT agree with b = 2: with Fs_fail = sqrt(NRS^2+NRT^2) the
+# shear term becomes (Fx^2+Fy^2)/(NRS^2+NRT^2), which for NRS = NRT = S is
+# (Fx^2+Fy^2)/(2S^2) — exactly HALF of MAT_100's (Fx^2+Fy^2)/S^2. Measured on
+# NRS=5000/NRT=4000: the weld then survives to 6403 N in pure s-shear where
+# LS-DYNA breaks at 5000 (+28%), and to 6403 N in pure t-shear where LS-DYNA
+# breaks at 4000 (+60%). Un-conservative in every load state involving shear.
+# (dyna2rad pairs that same sqrt with b = 1, whose over-strength happens to
+# cancel the other way; neither half is right on its own.)
+#
+# The reduction that agrees with b = 2 is the MINIMUM of the pair — see
+# _resultant_limit. It is EXACT whenever NRS == NRT (a round nugget: the normal
+# case, and the only one a single Radioss limit can carry) and conservative
+# otherwise, which is the safe direction for a failure criterion.
 _CLUSTER_A = 1.0
 _CLUSTER_B = 2.0
+
+
+def _resultant_limit(a: float, b: float) -> float:
+    """One Radioss resultant limit for a MAT_100 direction PAIR (NRS,NRT) /
+    (MSS,MTT).
+
+    /CLUSTER scores the shear RESULTANT FT = sqrt(Fx^2+Fy^2) against a single
+    Fs_fail (clusterf.F:365), so the two LS-DYNA per-direction limits have to
+    collapse to one number. With the quadratic exponent b = 2 the term is
+    (Fx^2+Fy^2)/Fs_fail^2, and MAT_100's is Fx^2/NRS^2 + Fy^2/NRT^2. Taking
+    ``Fs_fail = min(NRS, NRT)`` makes the two IDENTICAL when NRS == NRT, and
+    otherwise gives 1/min^2 >= 1/NRS^2 and >= 1/NRT^2, i.e. damage at or above
+    LS-DYNA's — the weld fails no later than it would in LS-DYNA.
+
+    A zero field is LS-DYNA's "this component never fails", so it is skipped
+    rather than taken as the minimum: min(5000, 0) = 0 would be promoted to
+    INFINITY by the starter (hm_read_cluster.F:293-296) and disable the shear
+    term entirely. With one of the pair blank the surviving limit is used, which
+    over-counts the blank direction's force into FT — unavoidable, because
+    Radioss cannot ignore one shear direction of a single resultant. Both blank
+    returns 0.0 and the starter's INFINITY promotion is then correct.
+    """
+    live = [v for v in (a, b) if v > 0.0]
+    return min(live) if live else 0.0
+
+
+def _pair_is_directional(a: float, b: float) -> bool:
+    """True when a MAT_100 limit pair carries direction dependence a single
+    Radioss resultant limit cannot reproduce — the two are live but unequal, or
+    exactly one of them is blank. Both equal (the round-nugget norm) or both
+    blank map exactly; anything else only maps conservatively."""
+    if a > 0.0 and b > 0.0:
+        return a != b
+    return (a > 0.0) != (b > 0.0)
 
 
 def _cluster_brick_eids(state: ConversionState, eids: List[int]):
@@ -1244,10 +1296,12 @@ def _cluster_failure_limits(state: ConversionState, eids: List[int]):
     element from sharing a MID with anything outside an assembly
     (Vol I R16 p.17-301), so one lookup describes the whole nugget.
 
-    The two resultants are reduced the way the engine compares them
-    (clusterf.F:365,367): Fs_fail = sqrt(NRS^2 + NRT^2) against
-    FT = sqrt(Fx^2 + Fy^2), Mb_fail = sqrt(MSS^2 + MTT^2) against
-    MB = sqrt(Mx^2 + My^2). Returns mat_id 0 when no MAT_100 is reachable.
+    The engine scores ONE shear resultant FT = sqrt(Fx^2+Fy^2) against ONE
+    Fs_fail and one bending resultant MB against one Mb_fail (clusterf.F:365,
+    367), so each MAT_100 direction PAIR collapses to a single limit via
+    _resultant_limit — the minimum of the live pair, which is what agrees with
+    the quadratic exponent b=2 (see the _CLUSTER_B comment for the arithmetic).
+    Returns mat_id 0 when no MAT_100 is reachable.
     """
     by_eid = {e.eid: e for e in state.solid_elems}
     for eid in eids:
@@ -1261,11 +1315,13 @@ def _cluster_failure_limits(state: ConversionState, eids: List[int]):
         if m is None:
             continue
         return (m.nrr,
-                math.sqrt(m.nrs * m.nrs + m.nrt * m.nrt),
+                _resultant_limit(m.nrs, m.nrt),
                 m.mrr,
-                math.sqrt(m.mss * m.mss + m.mtt * m.mtt),
-                part.mid)
-    return 0.0, 0.0, 0.0, 0.0, 0
+                _resultant_limit(m.mss, m.mtt),
+                part.mid,
+                _pair_is_directional(m.nrs, m.nrt)
+                or _pair_is_directional(m.mss, m.mtt))
+    return 0.0, 0.0, 0.0, 0.0, 0, False
 
 
 def _emit_cluster_brick(cluster_id: int, title: str, group_id: int,
@@ -1369,7 +1425,30 @@ def _make_hex_spotweld_clusters(state: ConversionState) -> List[str]:
         return []
     lines: List[str] = []
     cluster_ids: List[int] = []
+    seen_ids: Set[int] = set()
     for a in state.hex_spotweld_assemblies:
+        # ID_SW is a user id and goes straight through, like every other
+        # passthrough in the writer — but only when it is USABLE. A blank or
+        # zero ID_SW would emit /CLUSTER/BRICK/0, and a 0 in the /TH/CLUSTER
+        # object list is read as "every cluster" (WARNING 3083,
+        # hm_read_thgrki.F:123-137), silently widening the group. A repeated
+        # ID_SW is a duplicate-id starter rejection. LS-DYNA requires ID_SW to
+        # be unique (Vol I R16 p.17-300), so both cases are malformed decks;
+        # repair them the way handle_contact_spotweld repairs a bad interface
+        # id rather than passing the fault on to the starter.
+        cluster_id = a.sw_id
+        if cluster_id <= 0 or cluster_id in seen_ids:
+            cluster_id = state.next_id()
+            state.warn(
+                "*DEFINE_HEX_SPOTWELD_ASSEMBLY: ID_SW "
+                + (f"{a.sw_id} is used by more than one assembly"
+                   if a.sw_id > 0 else "is blank or zero")
+                + f" — the /CLUSTER/BRICK was given generated id {cluster_id} "
+                "instead. LS-DYNA requires ID_SW to be unique and non-zero "
+                "(Vol I R16 p.17-300); a zero would additionally make the "
+                "/TH/CLUSTER request read as ALL clusters (WARNING 3083). The "
+                "weld itself is unaffected — only the id it reports under.")
+        seen_ids.add(cluster_id)
         bricks, tets, unknown = _cluster_brick_eids(state, a.eids)
         if unknown:
             state.warn(
@@ -1408,27 +1487,37 @@ def _make_hex_spotweld_clusters(state: ConversionState) -> List[str]:
                 "rejected. Split the assembly.")
         grbric_id = state.next_id()
         lines += _emit_id_group("GRBRIC/BRIC", grbric_id,
-                                f"hex_spotweld_{a.sw_id}_bricks", bricks)
-        fn, fs, mt, mb, mid = _cluster_failure_limits(state, bricks)
-        lines += _emit_cluster_brick(a.sw_id, a.title or f"HEX_SPOTWELD_{a.sw_id}",
+                                f"hex_spotweld_{cluster_id}_bricks", bricks)
+        fn, fs, mt, mb, mid, aniso = _cluster_failure_limits(state, bricks)
+        lines += _emit_cluster_brick(cluster_id,
+                                     a.title or f"HEX_SPOTWELD_{cluster_id}",
                                      grbric_id, fn, fs, mt, mb)
-        cluster_ids.append(a.sw_id)
-        state.cluster_ids.append((a.sw_id, a.title))
+        cluster_ids.append(cluster_id)
+        state.cluster_ids.append((cluster_id, a.title))
         if mid:
             state.warn(
                 f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id} -> "
-                f"/CLUSTER/BRICK/{a.sw_id} over {len(bricks)} brick(s), "
+                f"/CLUSTER/BRICK/{cluster_id} over {len(bricks)} brick(s), "
                 f"failure limits from *MAT_SPOTWELD {mid}: Fn_fail1=NRR="
-                f"{fn:g}, Fs_fail=sqrt(NRS^2+NRT^2)={fs:g}, Mt_fail=MRR="
-                f"{mt:g}, Mb_fail=sqrt(MSS^2+MTT^2)={mb:g}, with a1..a4=1 and "
-                f"b1..b4={_CLUSTER_B:g}. The QUADRATIC exponents reproduce "
-                "MAT_100's own interaction; dyna2rad writes b=1 there, which "
-                "fails a combined-load weld early. A zero limit is promoted to "
-                "INFINITY by the starter (that term is then inactive).")
+                f"{fn:g}, Fs_fail=min(NRS,NRT)={fs:g}, Mt_fail=MRR="
+                f"{mt:g}, Mb_fail=min(MSS,MTT)={mb:g}, with a1..a4=1 and "
+                f"b1..b4={_CLUSTER_B:g}. /CLUSTER scores ONE shear resultant "
+                "against ONE limit where MAT_100 scores NRS and NRT "
+                "separately, so the pair is collapsed to its minimum: that "
+                "REPRODUCES MAT_100 exactly when NRS==NRT and MSS==MTT, and is "
+                "otherwise conservative (the weld fails no later than in "
+                "LS-DYNA). dyna2rad writes b=1 there, which fails a "
+                "combined-load weld early. A zero limit is promoted to "
+                "INFINITY by the starter (that term is then inactive)."
+                + (" NOTE: this weld's transverse limits are NOT equal, so the "
+                   "single Radioss resultant cannot carry the direction "
+                   "dependence — the converted weld is STRONGER-direction "
+                   "conservative, breaking earlier than LS-DYNA when the load "
+                   "leans towards the larger limit." if aniso else ""))
         else:
             state.warn(
                 f"*DEFINE_HEX_SPOTWELD_ASSEMBLY {a.sw_id} -> "
-                f"/CLUSTER/BRICK/{a.sw_id} over {len(bricks)} brick(s) with NO "
+                f"/CLUSTER/BRICK/{cluster_id} over {len(bricks)} brick(s) with NO "
                 "failure limits: no *MAT_SPOTWELD (MAT_100) is reachable from "
                 "the parts of its elements. Every limit is 0, which the "
                 "starter promotes to INFINITY — the weld monitors force and "
