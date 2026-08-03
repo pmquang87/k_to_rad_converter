@@ -730,9 +730,176 @@ def build_starter(state: ConversionState, progress=None) -> str:
     lines: List[str] = []
     for _name, builder in _starter_section_registry():
         lines.extend(builder(ctx))
+    _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
+
+
+# Every /SURF option of any type counts toward the engine's surface table, in
+# deck order (verified against a real run, see _pad_surfaces_for_spmd_th_surf).
+_SURF_CARD_RE = re.compile(r"^/SURF/(?:[A-Z0-9_]+/)+(\d+)\s*$")
+_TH_SURF_HEAD_RE = re.compile(r"^/TH/SURF/\d+\s*$")
+
+
+def _th_surf_listed_ids(lines: List[str]) -> List[int]:
+    """Surface ids listed inside every emitted /TH/SURF block (the block's id
+    lines are right-aligned integers; the title, the comments and the VAR line
+    are skipped; the block ends at the next '/' card)."""
+    ids: List[int] = []
+    i = 0
+    while i < len(lines):
+        if _TH_SURF_HEAD_RE.match(lines[i]):
+            j = i + 2                       # skip the head and the title line
+            while j < len(lines) and not lines[j].startswith("/"):
+                ln = lines[j]
+                if not ln.startswith("#"):
+                    toks = ln.split()
+                    if toks and all(t.isdigit() for t in toks):
+                        ids.extend(int(t) for t in toks)
+                j += 1
+            i = j
+        else:
+            i += 1
+    return ids
+
+
+def _pad_surfaces_for_spmd_th_surf(state: ConversionState,
+                                   lines: List[str]) -> None:
+    """Append inert /SURF/SEG padding cards so every /TH/SURF surface survives
+    the engine's SPMD reduction — the fix for "the second blast surface's P/A
+    channels are exactly 0.0 for the whole run".
+
+    **OpenRadioss engine bug** (present at least through the 20260520 tree):
+    the /TH/SURF channel array FSAVSURF is (TH_SURF_NUM_CHANNEL=6, NSURF)
+    (common_source/modules/interfaces/th_surf_mod.F:96-100, allocated with the
+    GLOBAL surface count in engine/source/engine/resol_alloc.F90:336), but the
+    MPI reduction only covers the first 5*NSURF of its 6*NSURF elements:
+
+        engine/source/output/th/hist2.F:679
+        IF(NSPMD > 1)CALL SPMD_GLOB_DSUM9(FSAVSURF,5*NSURF)
+
+    a stale length from before the 6th channel (cumulated mass) was added.
+    Fortran is column-major, so surface I's channel c sits at flat position
+    6*(I-1)+c and is reduced across MPI domains only while 6*(I-1)+c <= 5*NSURF.
+    Any surface with internal index I > ~(5/6)*NSURF loses the tail channels —
+    including ch4 (pressure accumulator) and ch5 (loaded area) that /LOAD/PBLAST
+    fills (engine pblast_1.F:418-419). Domain 0 then writes its LOCAL-only
+    values: exactly 0.0 whenever domain 0 owns none of the loaded segments, and
+    hist2.F:687-691 zeroes P outright when the unreduced ch5 stays 0. The
+    internal index is the surface's position among ALL /SURF options in deck
+    order (planes included), NOT its position inside the /TH/SURF block —
+    multiple ids per /TH/SURF block are fully legal (starter
+    hm_read_thgrsurf.F:147-175 flags each id; thsurf.F:71-80 writes one
+    var-set per listed surface).
+
+    Field evidence (OpenRadioss 2026, two independent SPMD runs):
+      * E:/w13/stack4 (12 domains, 13 surfaces): witness surface 90031 is the
+        10th surface -> positions 58/59 <= 65 -> correct (peak 222.7 MPa);
+        surface 90034 is the 12th -> positions 70/71 > 65 -> all-zero T01.
+      * E:/w13/neuberger (6 domains, 2 surfaces): 90001 is 1st -> correct;
+        90003 is 2nd -> its ch4 (position 10) IS reduced but ch5 (position 11)
+        is not, so the divide guard zeroes P as well -> all-zero T01.
+      * Cross-check: were /SURF/PLANE not counted, 90031 would have been the
+        10th of 11 (position 59 > 55) and failed too — it did not.
+
+    The deck-side fix: raise NSURF without moving the /TH/SURF surfaces, by
+    appending K inert /SURF/SEG cards AFTER every real surface, so that
+    6*(I_max-1)+5 <= 5*(NSURF+K) holds for the highest-indexed /TH/SURF
+    surface (K = ceil((6*I_max - 1 - 5*NSURF)/5), usually 1-2 cards). The
+    criterion covers channels 1..5 — everything through ch5 (loaded area),
+    which the emitted VAR line (P, A -> ch4, ch5) needs; ch6 is the
+    monvol/EBCS cumulated mass, which /LOAD/PBLAST never fills and k2rad
+    never requests. Each padding card duplicates one existing blast segment
+    (valid nodes, zero physics) and is referenced by nothing. Splitting the
+    /TH/SURF block per surface would change NOTHING — the failure depends
+    only on the global surface index. Harmless on SMP runs and after the
+    upstream one-word fix (5*NSURF -> TH_SURF_NUM_CHANNEL*NSURF)."""
+    th_ids = set(_th_surf_listed_ids(lines))
+    if not th_ids:
+        return
+    surf_ids = [int(m.group(1)) for ln in lines
+                if (m := _SURF_CARD_RE.match(ln))]
+    positions = [pos for pos, sid in enumerate(surf_ids, start=1)
+                 if sid in th_ids]
+    if not positions:
+        return
+    n_surf = len(surf_ids)
+    i_max = max(positions)
+    deficit = 6 * (i_max - 1) + 5 - 5 * n_surf
+    if deficit <= 0:
+        return
+    k_pad = -(-deficit // 5)        # ceil(deficit / 5)
+
+    # Donor segment for the inert cards: the first data line of the first
+    # /SURF/SEG among the /TH/SURF surfaces (k2rad emits blast surfaces as
+    # /SURF/SEG, so one always exists when th_ids is non-empty).
+    donor_nodes: List[int] = []
+    for sid in surf_ids:
+        if sid not in th_ids:
+            continue
+        try:
+            head = lines.index(f"/SURF/SEG/{sid}")
+        except ValueError:
+            continue
+        for ln in lines[head + 2:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#"):
+                continue
+            toks = ln.split()
+            if len(toks) >= 4 and all(t.isdigit() for t in toks):
+                donor_nodes = [int(t) for t in toks[1:5]]
+                break
+        if donor_nodes:
+            break
+    if not donor_nodes:
+        state.warn(
+            "/TH/SURF SPMD padding: no /SURF/SEG donor segment found for the "
+            "/TH/SURF surfaces — padding NOT emitted. On an MPI run the "
+            "highest-indexed /TH/SURF surfaces will record 0.0 (engine "
+            "hist2.F:679 reduces only 5*NSURF of the 6*NSURF /TH/SURF "
+            "channels). This is a k2rad bug — please report the deck.")
+        return
+
+    pad_ids = [state.next_id() for _ in range(k_pad)]
+    pad_lines: List[str] = [
+        "#-  /TH/SURF SPMD padding surfaces (inert, referenced by nothing):",
+        HDR,
+    ]
+    for k, pid in enumerate(pad_ids, start=1):
+        pad_lines += [
+            f"/SURF/SEG/{pid}",
+            f"TH_surf_spmd_pad_{k} (inert; extends the surface table for the "
+            f"SPMD /TH/SURF reduction)"[:100],
+            "#   seg_ID        n1        n2        n3        n4",
+            _i(1) + "".join(_i(n) for n in donor_nodes),
+            HDR,
+        ]
+    # Insert before the trailing /END so the padding surfaces are the LAST
+    # /SURF options in the deck (highest internal indices, ids from next_id()
+    # so they also sort last by id — the /TH/SURF surfaces keep their index).
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i] == "/END":
+            lines[i:i] = pad_lines
+            break
+    else:
+        lines.extend(pad_lines)
+    state.warn(
+        "/TH/SURF + MPI: the OpenRadioss engine reduces only 5*NSURF of the "
+        "6*NSURF-element /TH/SURF channel array across SPMD domains "
+        "(hist2.F:679 SPMD_GLOB_DSUM9(FSAVSURF,5*NSURF) vs "
+        "TH_SURF_NUM_CHANNEL=6, th_surf_mod.F:100), so a surface whose "
+        "internal index I violates 6*(I-1)+5 <= 5*NSURF records exactly 0.0 "
+        "for P and A on a multi-domain run (its channels never leave the domains "
+        f"that loaded them). Emitted {k_pad} inert padding /SURF/SEG card(s) "
+        f"(id(s) {', '.join(str(p) for p in pad_ids)}) after the last real "
+        f"surface so all {len(positions)} /TH/SURF surface(s) satisfy the "
+        "inequality (surface table "
+        f"{n_surf} -> {n_surf + k_pad}, highest /TH/SURF index {i_max}). The "
+        "padding has no physics and is harmless on SMP runs; it can be "
+        "dropped once the engine is fixed upstream "
+        "(5*NSURF -> TH_SURF_NUM_CHANNEL*NSURF).")
 
 
 # /TH group ids are unique across the WHOLE time-history namespace, not per
