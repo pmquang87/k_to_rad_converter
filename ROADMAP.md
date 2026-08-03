@@ -122,6 +122,26 @@ shipped, so the marginal cost is small.
   `/FAIL/LEMAITRE`, `*MAT_122` → `/MAT/LAW43` or `/MAT/LAW32` — **done**
   (starter-validated, 0 ERROR(S); several dyna2rad defects fixed rather than
   reproduced — see CHANGELOG).
+- Viscoelastic batch (P1): `*MAT_VISCOELASTIC` (6) → `/MAT/LAW34` (BOLTZMAN,
+  an exact 1:1 of `G(t)`); `*MAT_KELVIN-MAXWELL_VISCOELASTIC` (61) →
+  `/MAT/LAW40` (KELVINMAX, `G1 = G0−GI`); `*MAT_GENERAL_VISCOELASTIC` (76,
+  + `_MOISTURE`) → a `/MAT/LAW42` carrier + `/VISC/PRONY` (`Itab=0` explicit
+  four-column rows, `Itab=1` starter-side least-squares fit for the `LCID`/`NT`
+  form); `*MAT_SIMPLIFIED_RUBBER/FOAM` (181, + `_WITH_FAILURE` /
+  `_LOG_LOG_INTERPOLATION`) and `*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE` (183) →
+  `/MAT/LAW88` with the rate family, the specimen normalization baked into the
+  curve points and MAT_181's Prony cards as `/VISC/PRONY`; `*MAT_SOFT_TISSUE`
+  (91) / `_VISCO` (92) → `/MAT/LAW42` — **done** (starter-validated 0 ERROR(S);
+  the LAW34 mapping additionally engine-validated against the analytic
+  relaxation curve to 0.007 %; a dozen dyna2rad defects corrected rather than
+  reproduced, including the unreachable `LSD_LCIDK` fit branch, the dropped
+  `BETAKI` bulk decay constants, the `TENSIOM` typo and the unconditional
+  empty `/VISC/PRONY` — see CHANGELOG). Still open in this family: the
+  radioss2026 LAW88 extension cards (`SGL/SW/ST/G/SIGF` and the Feng-Hallquist
+  `KFAIL/GAM1/GAM2/EH`), which need `/BEGIN 2026` rather than converter work;
+  MAT_181's `MU` on the solid property (a per-part `/PROP/SOLID` split);
+  a real foam target for the `0 < PR < 0.49` Hill branch; and the
+  `*MAT_SOFT_TISSUE` fibre term, which no Radioss law offers.
 - Spotweld joining (P1): `*CONTACT_SPOTWELD` (+ `_WITH_TORSION` /
   `_BEAM_OFFSET` / `_CONSTRAINED_OFFSET` / `_PENALTY` / `_MPP`) →
   `/INTER/TYPE2` Spotflag=28 with `Ignore=2` and `Idel2=1`;

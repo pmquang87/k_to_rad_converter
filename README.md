@@ -478,6 +478,75 @@ takes the block (measured `0 ERROR(S) 0 WARNING(S)`) but it is inert, and
 emitting it would drag the part's `*SECTION_SOLID`, and any deformable part
 sharing it, to `Ismstr=10`. `REF=1` without usable
 reference geometry is warned
+Viscoelastics (dyna2rad's law choices and constants followed, its documented
+field-map defects corrected): `*MAT_VISCOELASTIC` (006) → `/MAT/LAW34`
+(BOLTZMAN) — the one EXACT 1:1 in the batch, since LS-DYNA's
+`G(t) = GI + (G0−GI)e^{−βt}` is literally LAW34's kernel and `BETA` is a decay
+rate on both sides (engine-validated on a single-element shear-relaxation run:
+0.007 % worst error over 195 states); a negative `BULK`/`G0`/`GI`/`BETA` is a
+temperature-curve id, which LAW34 cannot carry, so it is collapsed to the value
+at the LOWEST tabulated temperature and warned — including `BULK`, which
+dyna2rad never reads at all, leaving `K=0` and an unreadable card.
+`*MAT_KELVIN-MAXWELL_VISCOELASTIC` (061) → `/MAT/LAW40` (KELVINMAX) with
+`G_inf=GI`, `G1=G0−GI`, `BETA1=DC` and `Astass/Bstass/Kvm=0` (the starter turns
+0 into infinity, i.e. no Stassi/von-Mises cap); `FO=1` selects the KELVIN form,
+where `DC` is a *retardation* constant under a different evolution equation that
+LAW40 cannot express — loudly warned instead of silently converted, and the
+`ERROR 49` Poisson gate (`BULK ≥ (2/3)·G0`) and LAW40's **solids-only**
+applicability (`ERROR 3046` on a shell part, with `*MAT_006` named as the
+shell-capable substitute) are both checked up front.
+`*MAT_GENERAL_VISCOELASTIC` (076, + `_MOISTURE`) → a `/MAT/LAW42` elastic
+carrier (`Nu=0.495`, `Mu=±0.01·BULK`, `alpha=±2` — dyna2rad's fixed form, with a
+warning naming the ground shear modulus `0.02·BULK` and the derived bulk
+modulus `1.993·BULK` it really produces, plus the `Nu` that would pin `BULK`
+exactly) plus `/VISC/PRONY`: explicit `GI/BETAI/KI/BETAKI` rows go in as
+`Itab=0` with **all four columns** (dyna2rad asks for `"BETAK"` instead of
+`BETAKI` and drops every bulk decay constant), and the `LCID`/`NT` +
+`LCIDK`/`NTK` relaxation-curve form becomes `Itab=1`, so the starter runs the
+same least-squares Prony fit LS-DYNA does — a branch dyna2rad can never reach
+(it reads `LSD_LCIDK`, an attribute that does not exist) and whose absence makes
+it emit an empty `/VISC/PRONY`, i.e. `ERROR 2026` on the whole deck. An elastic
+MAT_076 gets no `/VISC/PRONY` at all rather than that error; `PCF` is *not*
+written into `sigma_cut` (a flag into a stress field would impose a 1-unit
+cut-off), and `EF`/`TREF`/`A`/`B`/`BSTART`/`TRAMP` and the whole `_MOISTURE`
+card are warn-dropped. `*MAT_SIMPLIFIED_RUBBER/FOAM` (181, +
+`_WITH_FAILURE`/`_LOG_LOG_INTERPOLATION`) and
+`*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE` (183) → `/MAT/LAW88`
+(TABULATED_HYPERELASTIC): a `*DEFINE_TABLE` `LC/TBID` becomes the `FCT_ID_LI`
+/`EPSI_LI` rate family with the top curve repeated at 10× the highest rate
+(dyna2rad's flat-extrapolation guard), a `*DEFINE_CURVE` becomes a single row,
+and unloading follows `LCUNLD` → `HU`/`SHAPE` → the loading curve itself. The
+specimen normalization is baked into the curve POINTS (abscissa `1/SGL`,
+ordinate `1/(SW·ST)`, into a `_Duplicate` `/FUNCT`) because a `/BEGIN 2022`
+starter forces `SGL=SW=ST=1.0`; a blank dimension reads as 1.0 instead of
+dyna2rad's refusal to write any curve, which turns an already-normalized deck
+into `NL=0` (`ERROR 866`). `PR` goes into `NU` verbatim — LAW88's own
+`nu≤0 → beta=|nu|, nu:=0.495` rule *is* LS-DYNA's viscous-pressure input, which
+dyna2rad loses by writing 0 — and `TENSION` is transferred (dyna2rad asks for
+`"TENSIOM"`, a string that appears nowhere else in the Radioss tree, so its
+MAT_181 rate-effect flag never arrives). `0 < PR < 0.49` selects LS-DYNA's
+compressible **Hill foam**, which LAW88 has no branch for (dyna2rad's
+MAT_181→LAW70 foam converter exists but has no caller) — loudly warned. The
+fields the `/BEGIN 2022` LAW88 card physically cannot carry — `RTYPE`,
+`G`/`SIGF`, `SGL/SW/ST` and the whole `_WITH_FAILURE` `K/GAMA1/GAMA2/EH`
+criterion, all of which live on the radioss2026 revision a 2022 starter
+*swallows without an error* — are warn-dropped rather than emitted as silent
+data loss, as is MAT_181's `MU` (a property field in dyna2rad). MAT_181's
+optional `Gi/BETAi` cards become a `/VISC/PRONY` of the material id.
+`*MAT_SOFT_TISSUE` (091) / `_VISCO` (092) → `/MAT/LAW42` with `Mu_1=2·C1`,
+`Mu_2=−2·C2`, `alpha=±2`, `Nu=0.495` and the `S_i`/`T_i` pairs in LAW42's own
+`Gamma_arr`/`Tau_arr` (relaxation *times* on both sides, so no inversion), with
+the non-zero pairs COMPACTED — dyna2rad counts the non-zero `S_i` but copies the
+first M slots, so a gap converts the wrong terms. This one gets the loudest
+warning in the batch: the material becomes an **isotropic incompressible
+Mooney-Rivlin rubber**, the transversely-isotropic collagen fibre term
+(`C3/C4/C5`, `XLAM`, `XLAM0`, `FANG`), the entire fibre orientation, the bulk
+modulus `XK` and all three `FAILS*` modes are dropped, and for a ligament or
+tendon that is not a physically equivalent material — dyna2rad performs exactly
+the same conversion without saying so. A second warning names the `S_i` unit
+mismatch it inherits (LS-DYNA's `S_i` are dimensionless factors; Radioss reads
+`Gamma_i` as a shear modulus) and prints the `S_i·MU0` values that would carry
+the intended viscous stiffness
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 

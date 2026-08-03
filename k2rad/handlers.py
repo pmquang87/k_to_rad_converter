@@ -29,6 +29,8 @@ from .state import (
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
     MatBlatzKo, MatMooneyRivlin, MatOgdenRubber, MatHyperelasticRubber,
     MatIsoElasPlas, MatStrainRatePlas, MatGurson, MatHill3R, MatPlasCompTens,
+    MatViscoelastic, MatKelvinMaxwell, MatGeneralViscoelastic,
+    MatSimplifiedRubber, MatSoftTissue,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
@@ -5885,6 +5887,261 @@ def handle_mat_hyperelastic_rubber(block: Block, state: ConversionState) -> None
     state.mat_hyper_rubber[mid] = mat
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Viscoelastic batch (MAT_006 / MAT_061 / MAT_076 / MAT_181 / MAT_183 /
+#                     MAT_091 / MAT_092)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_viscoelastic(block: Block, state: ConversionState) -> None:
+    """*MAT_VISCOELASTIC (MAT_006) → /MAT/LAW34 (BOLTZMAN).
+
+    ONE card (mat_006.cfg): MID RHO BULK G0 GI BETA. The mapping is exact —
+    LS-DYNA's G(t) = GI + (G0-GI)e^(-BETA t) is literally LAW34's kernel, and
+    BETA is a decay rate in both codes. From R6.1 on each of BULK/G0/GI/BETA
+    may be NEGATIVE, meaning "-LCID of a temperature-dependent curve"; the
+    negative value is stored as-is here and collapsed by the writer resolve
+    pass, which needs the parsed *DEFINE_CURVEs.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f1 = _card(block.raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_VISCOELASTIC: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    state.mat_viscoelastic[mid] = MatViscoelastic(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        bulk=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        g0=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        gi=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        beta=to_float(f1[5]) if len(f1) > 5 else 0.0)
+
+
+def handle_mat_kelvin_maxwell(block: Block, state: ConversionState) -> None:
+    """*MAT_KELVIN-MAXWELL_VISCOELASTIC (MAT_061) → /MAT/LAW40 (KELVINMAX).
+
+    ONE card (mat_061.cfg): MID RHO BULK G0 GI DC FO SO. dyna2rad
+    p_ConvertMatL61 maps G_inf = GI, G1 = G0-GI, BETA1 = DC and zeroes the
+    other four Maxwell branches plus the Stassi/von-Mises coefficients. FO
+    (0 = Maxwell / 1 = Kelvin) and SO (a d3plot output selector) are dropped by
+    dyna2rad without a word — both are warned in the writer resolve pass, FO
+    loudly because a Kelvin-form DC is a RETARDATION constant and converting it
+    as a Maxwell decay rate is silently wrong.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f1 = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_KELVIN-MAXWELL_VISCOELASTIC: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    state.mat_kelvin_maxwell[mid] = MatKelvinMaxwell(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        bulk=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        g0=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        gi=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        dc=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        fo=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        so=to_float(f1[7]) if len(f1) > 7 else 0.0)
+
+
+def handle_mat_general_viscoelastic(block: Block,
+                                    state: ConversionState) -> None:
+    """*MAT_GENERAL_VISCOELASTIC (MAT_076, + _MOISTURE) → /MAT/LAW42 +
+    /VISC/PRONY.
+
+    Cards (mat_076.cfg): MID RO BULK PCF EF TREF A B / LCID NT BSTART TRAMP
+    LCIDK NTK BSTARTK TRAMPK / [MO ALPHA BETA GAMMA MST, _MOISTURE only] /
+    then the FREE_CARD_LIST of GI BETAI KI BETAKI Prony rows.
+
+    Card 2 is MANDATORY in the cfg — a deck that uses the Prony rows leaves it
+    BLANK rather than omitting it, and both the parse below and the
+    *INCLUDE_TRANSFORM offset spec depend on that. A deck that really omitted
+    it would read its first Prony row as LCID/NT, which surfaces as the
+    "LCID has no parsed *DEFINE_CURVE" warning from the resolver.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_GENERAL_VISCOELASTIC: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    moisture = block.keyword.endswith("_MOISTURE")
+    mat = MatGeneralViscoelastic(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        bulk=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        pcf=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        ef=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        tref=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        a=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        b=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        moisture=moisture)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        mat.lcid    = to_int(f2[0])
+        mat.nt      = int(to_float(f2[1])) if len(f2) > 1 else 0
+        mat.bstart  = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.tramp   = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.lcidk   = to_int(f2[4]) if len(f2) > 4 else 0
+        mat.ntk     = int(to_float(f2[5])) if len(f2) > 5 else 0
+        mat.bstartk = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.trampk  = to_float(f2[7]) if len(f2) > 7 else 0.0
+    prony_start = offset + 3 if moisture else offset + 2
+    for gi, betai, ki, betaki in _prony_rows(raw, prony_start, 4):
+        mat.gi.append(gi)
+        mat.betai.append(betai)
+        mat.ki.append(ki)
+        mat.betaki.append(betaki)
+    state.mat_general_visco[mid] = mat
+
+
+def handle_mat_simplified_rubber(block: Block, state: ConversionState) -> None:
+    """*MAT_SIMPLIFIED_RUBBER/FOAM (181) and *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE
+    (183) → /MAT/LAW88.
+
+    181 (mat_181.cfg): MID RHO KM MU G SIGF REF PRTEN / SGL SW ST LC/TBID
+    TENSION RTYPE AVGOPT PR / [K GAMA1 GAMA2 EH — _WITH_FAILURE only] /
+    [LCUNLD HU SHAPE STOL VISCO HISOUT — optional] / [Gi BETAi VFLAG free list].
+    183 (mat_183.cfg): MID RHO K MU G SIGF / SGL SW ST LC TENSION RTYPE AVGOPT
+    / LCUNLD REF STOL — card 3 MANDATORY, no PR, no REF/PRTEN on card 1, no
+    HU/SHAPE/VISCO and no Prony cards at all.
+
+    HU defaults to 1.0 (no dissipation) per the cfg DEFAULTS, so a BLANK HU on
+    a present card 4 is 1.0, not 0. The optional card 4 counts as present only
+    when it carries a non-blank field — a trailing blank line in the block is
+    not a card, and a genuinely blank card 4 gives the same result either way
+    (every field falls back to its default and _prony_rows skips blanks).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    kw = block.keyword
+    is_183 = "WITH_DAMAGE" in kw or kw.startswith("MAT_183")
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{kw}: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    mat = MatSimplifiedRubber(
+        mid=mid, title=title, family="183" if is_183 else "181",
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        k=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        mu=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        g=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        sigf=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        log_log=kw.endswith("_LOG_LOG_INTERPOLATION"))
+    if not is_183:
+        mat.ref   = to_float(f1[6]) if len(f1) > 6 else 0.0
+        mat.prten = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        mat.sgl     = to_float(f2[0])
+        mat.sw      = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.st      = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.lc_tbid = to_int(f2[3]) if len(f2) > 3 else 0
+        mat.tension = int(to_float(f2[4])) if len(f2) > 4 else 0
+        mat.rtype   = int(to_float(f2[5])) if len(f2) > 5 else 0
+        mat.avgopt  = to_float(f2[6]) if len(f2) > 6 else 0.0
+        if not is_183:
+            mat.pr = to_float(f2[7]) if len(f2) > 7 else 0.0
+    if is_183:
+        f3 = _card(raw, offset + 2, fixed=True, n=3, w=10)
+        if f3:
+            mat.lcunld = to_int(f3[0])
+            mat.ref    = to_float(f3[1]) if len(f3) > 1 else 0.0
+            mat.stol   = to_float(f3[2]) if len(f3) > 2 else 0.0
+        state.mat_simplified_rubber[mid] = mat
+        return
+    nxt = offset + 2
+    if "_WITH_FAILURE" in kw:
+        mat.with_failure = True
+        f3 = _card(raw, nxt, fixed=True, n=4, w=10)
+        if f3:
+            mat.kfail = to_float(f3[0])
+            mat.gama1 = to_float(f3[1]) if len(f3) > 1 else 0.0
+            mat.gama2 = to_float(f3[2]) if len(f3) > 2 else 0.0
+            mat.eh    = to_float(f3[3]) if len(f3) > 3 else 0.0
+        nxt += 1
+    f4 = _card(raw, nxt, fixed=True, n=6, w=10)
+    if f4 and any(x.strip() for x in f4):
+        mat.has_unload_card = True
+        mat.lcunld = to_int(f4[0])
+        mat.hu     = _ffield(f4, 1, 1.0)
+        mat.shape  = to_float(f4[2]) if len(f4) > 2 else 0.0
+        mat.stol   = to_float(f4[3]) if len(f4) > 3 else 0.0
+        mat.visco  = int(to_float(f4[4])) if len(f4) > 4 else 0
+        mat.hisout = int(to_float(f4[5])) if len(f4) > 5 else 0
+        nxt += 1
+    rows = _prony_rows(raw, nxt, 3)
+    if rows:
+        mat.vflag = int(rows[0][2])
+    for gi, betai, _vf in rows:
+        mat.gi.append(gi)
+        mat.betai.append(betai)
+    state.mat_simplified_rubber[mid] = mat
+
+
+def handle_mat_soft_tissue(block: Block, state: ConversionState) -> None:
+    """*MAT_SOFT_TISSUE (091) / *MAT_SOFT_TISSUE_VISCO (092) → /MAT/LAW42.
+
+    FOUR mandatory cards (Vol II R17 p.2-669) — MID RO C1..C5 REF / XK XLAM
+    FANG XLAM0 FAILSF FAILSM FAILSHR / AOPT AX AY AZ BX BY BZ / LA1 LA2 LA3
+    MACF — plus S1..S6 and T1..T6 for the _VISCO (MAT_092) spelling. Cards 3
+    and 4 are required even for the non-VISCO variant; this material carries
+    its a/b fibre vectors inline on card 3 rather than through the generic
+    AOPT card expansion, so the S/T cards are always at a fixed offset.
+
+    dyna2rad keeps only the isotropic Mooney-Rivlin ground substance; the
+    dropped fields are enumerated by the writer resolve pass.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{block.keyword}: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    visco = block.keyword.endswith("_VISCO") or block.keyword in ("MAT_092",
+                                                                  "MAT_92")
+    mat = MatSoftTissue(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        c1=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        c2=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        c3=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        c4=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        c5=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        ref=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        visco=visco)
+    f2 = _card(raw, offset + 1, fixed=True, n=7, w=10)
+    if f2:
+        mat.xk      = to_float(f2[0])
+        mat.xlam    = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.fang    = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.xlam0   = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.failsf  = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.failsm  = to_float(f2[5]) if len(f2) > 5 else 0.0
+        mat.failshr = to_float(f2[6]) if len(f2) > 6 else 0.0
+    f3 = _card(raw, offset + 2, fixed=True, n=7, w=10)
+    if f3:
+        mat.aopt = to_float(f3[0])
+    f4 = _card(raw, offset + 3, fixed=True, n=4, w=10)
+    if f4 and len(f4) > 3:
+        mat.macf = to_float(f4[3])
+    if visco:
+        f5 = _card(raw, offset + 4, fixed=True, n=6, w=10)
+        f6 = _card(raw, offset + 5, fixed=True, n=6, w=10)
+        mat.s = [to_float(f5[i]) if len(f5) > i else 0.0 for i in range(6)]
+        mat.t = [to_float(f6[i]) if len(f6) > i else 0.0 for i in range(6)]
+    state.mat_soft_tissue[mid] = mat
+
+
 def handle_initial_foam_reference_geometry(block: Block,
                                            state: ConversionState) -> None:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → /XREF per intersecting part.
@@ -7075,6 +7332,34 @@ HANDLERS = {
     "MAT_HYPERELASTIC_RUBBER":                handle_mat_hyperelastic_rubber,
     "MAT_077_H":                              handle_mat_hyperelastic_rubber,
     "MAT_77_H":                               handle_mat_hyperelastic_rubber,
+    # Viscoelastic batch: MAT_006 → LAW34; MAT_061 → LAW40; MAT_076 → LAW42 +
+    # /VISC/PRONY; MAT_181/183 → LAW88 [+ /VISC/PRONY]; MAT_091/092 → LAW42.
+    # The dispatcher is an exact dict match after only _ID/_TITLE/_SUBTITLE are
+    # stripped, so the hyphen AND underscore spellings of the hyphenated names,
+    # the literal "/" of *MAT_SIMPLIFIED_RUBBER/FOAM, and every option suffix
+    # that changes the CARD LAYOUT each need a key of their own. The numeric
+    # aliases *MAT_076 and *MAT_183 are missing from dyna2rad's own keyword
+    # table (they fall into its raw 1:1 dump); k2rad registers them.
+    "MAT_VISCOELASTIC":                       handle_mat_viscoelastic,
+    "MAT_006":                                handle_mat_viscoelastic,
+    "MAT_6":                                  handle_mat_viscoelastic,
+    "MAT_KELVIN-MAXWELL_VISCOELASTIC":        handle_mat_kelvin_maxwell,
+    "MAT_KELVIN_MAXWELL_VISCOELASTIC":        handle_mat_kelvin_maxwell,
+    "MAT_061":                                handle_mat_kelvin_maxwell,
+    "MAT_61":                                 handle_mat_kelvin_maxwell,
+    "MAT_GENERAL_VISCOELASTIC":               handle_mat_general_viscoelastic,
+    "MAT_GENERAL_VISCOELASTIC_MOISTURE":      handle_mat_general_viscoelastic,
+    "MAT_076":                                handle_mat_general_viscoelastic,
+    "MAT_76":                                 handle_mat_general_viscoelastic,
+    # (*MAT_SIMPLIFIED_RUBBER/FOAM 181 and *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE
+    #  183 are registered below — their _WITH_FAILURE/_LOG_LOG_INTERPOLATION
+    #  grammar is generated rather than hand-listed.)
+    "MAT_SOFT_TISSUE":                        handle_mat_soft_tissue,
+    "MAT_091":                                handle_mat_soft_tissue,
+    "MAT_91":                                 handle_mat_soft_tissue,
+    "MAT_SOFT_TISSUE_VISCO":                  handle_mat_soft_tissue,
+    "MAT_092":                                handle_mat_soft_tissue,
+    "MAT_92":                                 handle_mat_soft_tissue,
     "INITIAL_FOAM_REFERENCE_GEOMETRY":        handle_initial_foam_reference_geometry,
     "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP":   handle_initial_foam_reference_geometry,
     # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors
@@ -7384,6 +7669,24 @@ _SPOTWELD_CONTACT_KEYWORDS = [
 for _kw in _SPOTWELD_CONTACT_KEYWORDS:
     HANDLERS[_kw] = handle_contact_spotweld
 del _kw
+
+# *MAT_SIMPLIFIED_RUBBER/FOAM{_WITH_FAILURE}{_LOG_LOG_INTERPOLATION} and
+# *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE{_LOG_LOG_INTERPOLATION}, over every base
+# spelling LS-DYNA and dyna2rad accept for each (the literal "/" survives
+# _split_keyword, which only splits on "_"). _WITH_FAILURE is not cosmetic — it
+# inserts a whole card between card 2 and the optional unloading card, so a
+# missing key would not just skip the material, it would shift the parse of
+# every deck that uses it. Generated rather than hand-listed: 3 base spellings
+# x 2 x 2 + 2 x 2 = 16 keys.
+for _base in ("MAT_SIMPLIFIED_RUBBER/FOAM", "MAT_SIMPLIFIED_RUBBER",
+              "MAT_SIMPLIFIED_RUBBER_FOAM", "MAT_181"):
+    for _o1 in ("", "_WITH_FAILURE"):
+        for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
+            HANDLERS[f"{_base}{_o1}{_o2}"] = handle_mat_simplified_rubber
+for _base in ("MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", "MAT_183"):
+    for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
+        HANDLERS[f"{_base}{_o2}"] = handle_mat_simplified_rubber
+del _base, _o1, _o2
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N}, N = 1..16 (definehexspotweld.cfg
 # APPEND_OPTIONS + CHECK idsmax<17). The bare keyword free-reads the list.

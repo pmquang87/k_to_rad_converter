@@ -1157,6 +1157,49 @@ def _off_mat_077(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[i2] = new
 
 
+def _off_mat_006(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_VISCOELASTIC (006): MID → IDMOFF, and each of BULK/G0/GI/BETA
+    (card 1 fields 3-6) is a SCALAR_OR_OBJECT whose NEGATIVE form is the
+    negated id of a temperature curve — those move with IDFOFF like any other
+    curve reference, which _rewrite_line alone would not do (it deliberately
+    touches only positive cells)."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (2, 3, 4, 5):
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+
+
+def _off_mat_181(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_SIMPLIFIED_RUBBER/FOAM (181): MID → IDMOFF, LC/TBID (card 2
+    field 4) → IDFOFF, and LCUNLD → IDFOFF on the OPTIONAL unloading card,
+    whose index depends on the keyword: the _WITH_FAILURE option inserts a
+    whole K/GAMA1/GAMA2/EH card between card 2 and it. A static spec would
+    rewrite that failure card's K value as a curve id."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw):
+        new = _rewrite_line(b.raw[i2], [(3, "f")], offsets)
+        if new is not None:
+            b.raw[i2] = new
+    iu = toff + (3 if "_WITH_FAILURE" in b.keyword else 2)
+    if iu < len(b.raw) and b.raw[iu].strip():
+        new = _rewrite_line(b.raw[iu], [(0, "f")], offsets)
+        if new is not None:
+            b.raw[iu] = new
+
+
 def _off_foam_ref_geometry(b: Block, offsets: Dict[str, int], warn) -> None:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]: node ids in the *NODE-format
     table → IDNOFF. The _RAMP variant's first card is NDTRRG (a step count,
@@ -1372,6 +1415,28 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_HYPERELASTIC_RUBBER": _off_mat_077,
     "MAT_077_H": _off_mat_077,
     "MAT_77_H": _off_mat_077,
+    # Viscoelastic batch. MAT_006's negative temperature-curve cells and
+    # MAT_181's option-dependent unloading-card index both need a callable.
+    # MAT_076 card 2 (LCID field 1, LCIDK field 5) is MANDATORY in the cfg even
+    # when the deck uses the Prony rows below it, so a static spec is safe.
+    # MAT_061 and MAT_091/092 carry no curve references at all.
+    "MAT_VISCOELASTIC": _off_mat_006,
+    "MAT_006": _off_mat_006,
+    "MAT_6": _off_mat_006,
+    "MAT_KELVIN-MAXWELL_VISCOELASTIC": _mat(),
+    "MAT_KELVIN_MAXWELL_VISCOELASTIC": _mat(),
+    "MAT_061": _mat(),
+    "MAT_61": _mat(),
+    "MAT_GENERAL_VISCOELASTIC": _mat({1: [(0, "f"), (4, "f")]}),
+    "MAT_GENERAL_VISCOELASTIC_MOISTURE": _mat({1: [(0, "f"), (4, "f")]}),
+    "MAT_076": _mat({1: [(0, "f"), (4, "f")]}),
+    "MAT_76": _mat({1: [(0, "f"), (4, "f")]}),
+    "MAT_SOFT_TISSUE": _mat(),
+    "MAT_091": _mat(),
+    "MAT_91": _mat(),
+    "MAT_SOFT_TISSUE_VISCO": _mat(),
+    "MAT_092": _mat(),
+    "MAT_92": _mat(),
     # Node table in the *NODE I8/E16 format → IDNOFF (base variant has no
     # header card; _RAMP prepends the NDTRRG card, which carries no ids).
     "INITIAL_FOAM_REFERENCE_GEOMETRY": _off_foam_ref_geometry,
@@ -1565,6 +1630,22 @@ for _kw in _SPOTWELD_CONTACT_KEYWORDS:
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
 # keyword with TITLE in options, so the base entry covers it.
+# *MAT_SIMPLIFIED_RUBBER/FOAM{_WITH_FAILURE}{_LOG_LOG_INTERPOLATION} and
+# *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE{_LOG_LOG_INTERPOLATION} — the same
+# generated grammar handlers.py registers, so the two tables cannot drift.
+# 181 needs the callable (the unloading card's index moves with _WITH_FAILURE);
+# 183's three cards are fixed, so LC (card 2 field 4) and LCUNLD (card 3 field
+# 1) take a static spec.
+for _base in ("MAT_SIMPLIFIED_RUBBER/FOAM", "MAT_SIMPLIFIED_RUBBER",
+              "MAT_SIMPLIFIED_RUBBER_FOAM", "MAT_181"):
+    for _o1 in ("", "_WITH_FAILURE"):
+        for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
+            _OFFSET_SPECS[f"{_base}{_o1}{_o2}"] = _off_mat_181
+for _base in ("MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", "MAT_183"):
+    for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
+        _OFFSET_SPECS[f"{_base}{_o2}"] = _mat({1: [(3, "f")], 2: [(0, "f")]})
+del _base, _o1, _o2
+
 _OFFSET_SPECS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = _off_hex_spotweld_assembly
 for _n in range(1, 17):
     _OFFSET_SPECS[f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{_n}"] = _off_hex_spotweld_assembly
