@@ -18,6 +18,7 @@ from .common import (
     _ordered_unique_nodes,
     _split_shell_eids_by_topology,
     _part_node_sets,
+    _ref_flag_materials,
     _vcross,
     _vnorm,
     _vsub,
@@ -316,7 +317,14 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     nothing, while on the solid side it drags the part's *SECTION_SOLID to
     Ismstr=10 (and, through the shared-section rule in ``_emit_prop_solid``,
     any deformable part sharing that section with it). Skipped for both solid
-    and shell rigid parts, so the rule is one rule with one reason."""
+    and shell rigid parts, so the rule is one rule with one reason.
+
+    The kept parts are then checked back against the material REF flags. The
+    /XREF is still emitted for a REF=0 material — that is dyna2rad's rule and
+    the pre-existing k2rad behaviour, and changing it silently would alter
+    already-validated rubber decks — but LS-DYNA would NOT apply the reference
+    geometry there ("EQ.0.0: Off"), so the deviation is warned rather than left
+    to be discovered in the results."""
     state.xref_part_ids = set()
     if not state.foam_ref_geoms:
         return
@@ -382,6 +390,43 @@ def _resolve_xref_parts(state: ConversionState) -> None:
         state.warn(
             "*INITIAL_FOAM_REFERENCE_GEOMETRY: its node table intersects no "
             "part's element nodes — no /XREF emitted (check node ids).")
+    _warn_xref_on_ref_zero(state)
+
+
+def _warn_xref_on_ref_zero(state: ConversionState) -> None:
+    """A /XREF kept by _resolve_xref_parts whose material card says REF=0.
+
+    LS-DYNA reads *INITIAL_FOAM_REFERENCE_GEOMETRY only for materials whose own
+    REF flag is on (EQ.0.0: Off / EQ.1.0: On — MAT_181 R17 p.2-1231, MAT_183
+    p.2-1240, MAT_091/092 p.2-669, and the four hyperelastic rubbers).
+    dyna2rad never reads those flags, and neither does the emission above; the
+    part therefore starts from the reference coordinates in Radioss and from
+    the modelled ones in LS-DYNA. Reported per part, not per material, because
+    that is the granularity at which the block is actually written."""
+    if not state.xref_part_ids:
+        return
+    ref_flag = {}
+    for kw, mats in _ref_flag_materials(state):
+        for mid, m in mats.items():
+            ref_flag[mid] = (kw, m.ref)
+    for pid in sorted(state.xref_part_ids):
+        part = state.parts.get(pid)
+        if part is None:
+            continue
+        hit = ref_flag.get(part.mid)
+        if hit is None or hit[1] != 0.0:
+            continue
+        kw, _ = hit
+        state.warn(
+            f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} gets a /XREF, but "
+            f"its material ({kw} mid={part.mid}) has REF=0, which in LS-DYNA "
+            "means the reference geometry is NOT used for that material "
+            "(EQ.0.0: Off). The block is still emitted — dyna2rad converts the "
+            "keyword unconditionally and k2rad follows it — so the converted "
+            "part starts stress-free at the REFERENCE coordinates while "
+            "LS-DYNA starts it at the MODELLED ones. Set REF=1 on the card if "
+            "that is intended, or drop the part's nodes from the reference "
+            "node table if it is not.")
 
 
 def _make_xref(state: ConversionState) -> List[str]:

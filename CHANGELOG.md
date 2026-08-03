@@ -33,7 +33,18 @@ Prior history (before this changelog was introduced) is summarized in the
     the curve is collapsed to its value at the LOWEST tabulated temperature —
     dyna2rad's rule for `G0/GI/BETA`, applied here to `BULK` as well, which
     dyna2rad never reads (`BULK_CURVES` appears nowhere in `convertmats.cxx`),
-    leaving `K = 0` and a card the starter's `CHECK` rejects.
+    leaving `K = 0`.
+    Non-positive fields are graded by what the SOLVER does, not by the
+    `matl34_boltzman.cfg` `CHECK` block (which asks for
+    `BULK/DECAY/G0/GI/RHO > 0` but is HyperMesh-side — `hm_read_mat34.F`
+    contains no `ANCMSG` at all). Measured on `starter_win64` +
+    `engine_win64`: `RHO = 0` is the only hard stop (`ERROR 683`); `G0 = 0`
+    and `BULK = 0` pass the starter but zero `YOUNG` (and `G0 = 0` gives a
+    `1.0E+21` element time step); `GI = 0` is fully LEGAL — "relaxes
+    completely" — and runs clean; and `BETA = 0` passes the starter and then
+    makes the engine form `C2 = −(1−exp(−BETA·dt))/BETA = 0/0`
+    (`sigeps34.F:101`), so every deviatoric stress increment is NaN while the
+    run still reports NORMAL TERMINATION (measured: 1114 NaN cycles).
 
   - **`*MAT_KELVIN-MAXWELL_VISCOELASTIC` (061) → `/MAT/LAW40` (KELVINMAX)** —
     `G_inf = GI`, `G1 = G0 − GI`, `BETA1 = DC`, branches 2-5 zero
@@ -78,6 +89,19 @@ Prior history (before this changelog was introduced) is summarized in the
     which is `ERROR 2026` and stops the whole deck; and the numeric spelling
     `*MAT_076`, missing from dyna2rad's keyword table (so it falls into the raw
     1:1 dump), is registered.
+    `/VISC/PRONY` carries a single `M` for both fits, computed as
+    `min(max(NT, NTK), 6)`. The "if zero, the default is 6" rule (p.2-560)
+    applies per fit and only to a fit that RUNS: LS-DYNA fits the bulk series
+    only when `LCIDK` is given, so an absent curve contributes 0, not 6 —
+    otherwise `M` is pinned at 6 for every single-curve card, `NT` is thrown
+    away, and a 10-point curve that LS-DYNA fits with `NT = 2` trips the
+    starter's `2·M < npoints` rule (`hm_read_visc_prony.F:473`, `ERROR 1921`).
+    Verified on `starter_win64`: `NT = 2` on a 10-point
+    `G(t) = 200 + 1000·exp(−t/0.05)` returns `G = 999.9999997806`,
+    `BETA = 20.00000000532` plus the equilibrium term, cost function
+    `7.1E−19`; the same curve at `M = 6` is `ERROR 1921` ("THE MAXIMUM ORDER
+    IN THIS CASE IS : 5"). `NT ≠ NTK` with both curves present is warned,
+    since only the larger survives.
     `PCF` is *not* written into `sigma_cut`: that field is a stress, not a flag,
     and a literal 1.0 would impose a 1-unit tensile cut-off. `EF`, the
     `TREF/A/B` WLF/Arrhenius shift, the `BSTART/TRAMP` fit seeds and the whole
@@ -106,6 +130,21 @@ Prior history (before this changelog was introduced) is summarized in the
     really present — `HU` defaults to 1.0 per the cfg, so a BLANK `HU` on a
     present card is 1.0, not 0) → the loading curve itself, which the starter
     then nulls out.
+    **What `FCT_ID_UN` is, and is not.** The `LCUNLD` → `FCT_ID_UN` mapping is
+    right (the starter echoes `UNLOADING STRESS-STRAIN FUNCTION ID = 20`) and
+    hysteresis really does appear, but LAW88 does NOT follow the unloading
+    curve as a stress-strain path. `hm_read_mat88.F90:405-421` forces the
+    unloading curve's two endpoints onto the loading curve's and then rescales
+    both axes, and `sigeps88.F90:762-790` uses the result only as a scalar
+    shape ratio `R = g_unl(x̂)/g_load(x̂)` clamped to `[0,1]`, applied to all
+    three principal stresses. Measured on a fully-prescribed isochoric
+    load-unload cycle: two runs with DIFFERENT `LCUNLD` shapes returned
+    byte-for-byte the same `R`, and the deviatoric axial stress collapsed to
+    `R ≈ 0.001` (99.96 % of the stored energy dissipated) where the
+    curve-ratio implies `R = 0.38..0.89`. So an LS-DYNA MAT_183 hysteresis
+    loop is not reproduced curve-for-curve. This is engine-side, not a
+    conversion defect — nothing to fix in k2rad, but do not read the converted
+    unloading curve as the path the material will take.
     Four more dyna2rad defects fixed: `TENSION` is transferred (dyna2rad asks
     for `"TENSIOM"` for MAT_181, CM:5150 — the only occurrence of that string in
     the entire Radioss tree — so its rate-effect flag never arrives and the
@@ -126,8 +165,23 @@ Prior history (before this changelog was introduced) is summarized in the
     an incompressible rubber — loudly warned here, naming
     `*MAT_LOW_DENSITY_FOAM` / `*MAT_FU_CHANG_FOAM` as the alternatives.
     `MU` (a `/PROP/SOLID` viscosity field in dyna2rad, which would need a
-    per-part property split here), `RTYPE`, `AVGOPT`, `REF`, `PRTEN`, `STOL`,
+    per-part property split here), `RTYPE`, `AVGOPT`, `PRTEN`, `STOL`,
     `HISOUT`, `VFLAG` and the `_LOG_LOG_INTERPOLATION` option are warn-dropped.
+    `REF` is NOT dropped — see the `/XREF` note under *Plumbing*.
+    A loading curve with no NEGATIVE-strain branch is warned: LAW88
+    interpolates the same curve at all three principal stretches
+    (`sigeps88.F90:375-377`), so uniaxial tension drives the two lateral
+    stretches into compression, where a tension-only table is extrapolated.
+    Measured on a single-element cell: the lateral stretches bifurcated at
+    `eps = 0.65` (`lam2` 0.79 → 0.41 while `lam3` grew to 1.45, kinetic energy
+    up four decades) and the run still reached NORMAL TERMINATION with wrong
+    results; adding the compression branch fixed it exactly
+    (`lam2 = lam3 = 0.70734` at `eps = 1`, `J = 1.00066`).
+    The rate family is clamped to the starter's `maxfunc = 128`
+    (`hm_read_mat.F90:294`), which sizes `ifunc/rate/yfac/lambda` at
+    `maxfunc+1` and then reads `do i = 1,nl` with no bound — an over-long
+    `*DEFINE_TABLE` would be an out-of-bounds write rather than a diagnosable
+    error.
     MAT_181's optional `Gi/BETAi` cards become a `/VISC/PRONY` of the material
     id, with the LS-DYNA `VISCO`/solids-only gate reported rather than enforced
     (older card-4 layouts have no `VISCO` field at all).
@@ -161,7 +215,16 @@ Prior history (before this changelog was introduced) is summarized in the
     and LAW88 are both in `_XREF_SOLID_LAWS`, so a `*MAT_076/091/092/181/183`
     solid part in a deck with `*INITIAL_FOAM_REFERENCE_GEOMETRY` now RECEIVES a
     `/XREF` (and its section switches to `Ismstr=10`) where it used to be
-    warn-skipped — asserted, not assumed. Neither beam frozenset changes: LAW34
+    warn-skipped — asserted, not assumed. Because that makes the `REF` flag
+    reachable for these families, BOTH directions are now reported, off one
+    shared registry (`writer/common.py::_ref_flag_materials`, which also feeds
+    the four older rubber families): `REF = 1` with no usable reference
+    geometry says nothing was initialized, and a `/XREF` landing on a
+    `REF = 0` material says the block was emitted anyway. The emission stays
+    unconditional — that is dyna2rad's rule and the pre-existing k2rad
+    behaviour, so already-validated rubber decks do not move — but LS-DYNA
+    would not apply it there (`EQ.0.0: Off`), so the deviation is stated
+    instead of left in the results. Neither beam frozenset changes: LAW34
     is BEAM_INTEGRATED (`hm_read_mat34.F:162`) and already listed, LAW40/42/88
     declare no beam class at all; the classification is recorded above the sets
     with the `hm_read_matNN.F` line for each. The two existing `/VISC/PRONY`
@@ -213,12 +276,21 @@ Prior history (before this changelog was introduced) is summarized in the
   residual is a flat 2.2 %, i.e. `exp(BETA · 74 µs)`, and monotonically
   decaying — the signature of a time offset, not a modelling error.
 
-  68 tests in `tests/test_viscoelastic.py` (1874 → 1942 repo-wide,
-  302 → 389 subtests).
+  82 tests in `tests/test_viscoelastic.py` (1874 → 1956 repo-wide,
+  302 → 398 subtests). Fourteen of them came out of the review pass below and
+  cover the two `*INCLUDE_TRANSFORM` offset callables end-to-end — both
+  mutation-checked, since registry membership alone cannot catch a wrong card
+  index (`_off_mat_181`'s `_WITH_FAILURE` shift) or a skipped `IDFOFF`
+  (`_off_mat_006`'s negative temperature-curve cells).
 
   **Corpus SHA256 sweep**, `master` (fa474ec) vs this branch: **every one of the
   73 `.k`/`.key`/`.dyn` decks in the local corpus is byte-identical** on both
-  `_0000.rad` and `_0001.rad`. This is a pure-addition batch and no deck in the
+  `_0000.rad` and `_0001.rad`, and so is the full warning set per deck. Re-run
+  after the review pass over a wider set — the same 73 plus the whole
+  127-deck `E:\openradioss_run\Ryan_Lee_Examples` tree, 201 conversions per
+  tree — still 0 starter, 0 engine and 0 warning-set differences, 0 exceptions
+  on either tree.
+  This is a pure-addition batch and no deck in the
   corpus carries any of these seven keywords: zero hits for
   `*MAT_VISCOELASTIC`, `*MAT_GENERAL_VISCOELASTIC`,
   `*MAT_KELVIN-MAXWELL_VISCOELASTIC`, `*MAT_SIMPLIFIED_RUBBER*`,
@@ -239,9 +311,38 @@ Prior history (before this changelog was introduced) is summarized in the
   cards**. The sweep is a pure no-movement check. Every claim about the
   emitted cards rests on the synthetic probe decks run through the live starter
   and engine, and on the unit tests — which were themselves mutation-checked
-  (breaking `G1 = G0−GI`, forcing LAW88 `TENSION` to 0, and re-introducing
-  dyna2rad's dropped `Beta_ki` each make the intended test fail, so they are
+  (breaking `G1 = G0−GI`, forcing LAW88 `TENSION` to 0, re-introducing
+  dyna2rad's dropped `Beta_ki`, restoring the `NTK`-defaults-to-6 bug,
+  disabling the `REF = 0` `/XREF` check, and flattening `_off_mat_181`'s
+  `_WITH_FAILURE` card shift each make the intended test fail, so they are
   checks that can fail).
+
+  **Review pass.** Two defects found and fixed before merge, both confirmed
+  against the OpenRadioss source and a live solver rather than argued:
+
+  1. *MAT_076 `NTK` defaulted to 6 even with no bulk curve*, pinning
+     `/VISC/PRONY` `M` at 6 for **every** `Itab=1` deck. Beyond discarding the
+     user's `NT`, that broke convertible decks: `hm_read_visc_prony.F:473`
+     needs `2·M < npoints`, so a 10-point curve LS-DYNA fits with `NT = 2`
+     stopped the starter with `ERROR 1921` — an error k2rad's own warning then
+     presented as inherent rather than self-inflicted. Fixed to default each
+     order only when its own curve exists, and re-validated on the starter
+     (see the MAT_076 entry above).
+  2. *`REF` was reported backwards.* MAT_181/183 listed `REF` as a dropped
+     field with "REF needs `*INITIAL_FOAM_REFERENCE_GEOMETRY` for a real
+     `/XREF`" on runs that emitted `/XREF/7`, and MAT_091/092 parsed `REF` and
+     never mentioned it at all. Both directions are now reported off one shared
+     registry covering all six REF-bearing families.
+
+  Also from the review, each verified first: the LAW34 zero-field warning was
+  re-graded by measurement (`GI = 0` is legal and was being called fatal;
+  `BETA = 0` was being called merely unreadable when it is a silent NaN run);
+  a tension-only LAW88 loading curve is now warned; the LAW88 rate family is
+  clamped to the starter's `maxfunc`; an unresolved `*DEFINE_TABLE` no longer
+  reports itself as a missing `*DEFINE_CURVE`; four write-only `MatViscoelastic`
+  fields were removed and the two write-only `MatSoftTissue` ones (`AOPT`,
+  `MACF`) are now printed by the fibre-drop warning instead of being named as
+  prose; and the MAT_061 shell scan was hoisted out of its per-material loop.
 
 - **Spotweld joining** (`*CONTACT_SPOTWELD` + `_WITH_TORSION` / `_BEAM_OFFSET` /
   `_CONSTRAINED_OFFSET`, each × `_PENALTY` × `_MPP` × `_ID`;

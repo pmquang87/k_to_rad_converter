@@ -38,7 +38,8 @@ from ..state import (
     EosJwl,
     EosCard,
 )
-from .common import HDR, _f, _i, _part_node_sets, _spotweld_beam_pids
+from .common import (HDR, _f, _i, _part_node_sets, _ref_flag_materials,
+                     _spotweld_beam_pids)
 from .blast_ale import _make_ale_multimaterial
 
 __all__ = [
@@ -3186,13 +3187,16 @@ def _warn_rubber_ref(state: ConversionState) -> None:
     MAT_007, where REF=1 makes a nodeless /XREF stub — not replicated: with no
     reference coordinates it initializes nothing). k2rad emits the real /XREF
     blocks from the keyword (writer.inistate._make_xref) and warns when a
-    REF=1 material has no reference-geometry coverage to initialize from."""
-    flagged = [(kw, m) for kw, mats in (
-        ("*MAT_BLATZ-KO_RUBBER", state.mat_blatz_ko),
-        ("*MAT_MOONEY-RIVLIN_RUBBER", state.mat_mooney_rivlin),
-        ("*MAT_OGDEN_RUBBER", state.mat_ogden),
-        ("*MAT_HYPERELASTIC_RUBBER", state.mat_hyper_rubber),
-    ) for m in mats.values() if m.ref != 0.0]
+    REF=1 material has no reference-geometry coverage to initialize from.
+
+    Covers EVERY REF-bearing family through ``_ref_flag_materials`` — including
+    *MAT_SIMPLIFIED_RUBBER/FOAM, *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE and
+    *MAT_SOFT_TISSUE, whose LAW88/LAW42 targets are on the solid-/XREF
+    whitelist just like the four hyperelastic rubbers. The mirror case (a /XREF
+    reaching a REF=0 material) is reported by ``_resolve_xref_parts``, which is
+    the pass that actually knows which parts kept a block."""
+    flagged = [(kw, m) for kw, mats in _ref_flag_materials(state)
+               for m in mats.values() if m.ref != 0.0]
     if not flagged:
         return
     if not state.foam_ref_geoms:
@@ -3435,6 +3439,14 @@ def _emit_mat_simplified_rubber(mat: MatSimplifiedRubber) -> List[str]:
     return lines
 
 
+# Loading functions a /MAT/LAW88 may carry. The starter declares
+# `parameter (maxfunc = 128)` (hm_read_mat.F90:294) and sizes
+# ifunc/rate/yfac/lambda at maxfunc+1 (hm_read_mat88.F90:103-108), then reads
+# `do i = 1,nl` with NO upper bound on NL — so an over-long rate family is an
+# out-of-bounds write rather than a diagnosable error.
+_LAW88_MAX_NL = 128
+
+
 def _law88_curve(state: ConversionState, kw: str, mat: MatSimplifiedRubber,
                  lcid: int, role: str, cache: Optional[dict] = None) -> int:
     """One *MAT_181/183 test curve → the /FUNCT id LAW88 should reference.
@@ -3473,6 +3485,23 @@ def _law88_curve(state: ConversionState, kw: str, mat: MatSimplifiedRubber,
                if role == "loading" else "")
             + "; add the curve to the deck.")
         return 0
+    xmin = min(x for x, _ in crv.pts)
+    if role == "loading" and xmin >= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: {role} curve {lcid} has NO negative-strain "
+            f"(compression) points — its lowest abscissa is "
+            f"{xmin:g}. /MAT/LAW88 evaluates this curve "
+            "at ALL THREE principal stretches (sigeps88.F90:375-377 feeds "
+            "lam1, lam2 and lam3 into the same table), so a uniaxial TENSION "
+            "test drives the two lateral stretches into compression — at 100% "
+            "axial strain they sit at lam=0.707, i.e. engineering strain "
+            "-0.293 — where the curve is EXTRAPOLATED. Measured consequence "
+            "on a single-element cell: the lateral stretches bifurcated at "
+            "eps=0.65 (lam2 0.79 -> 0.41 while lam3 grew to 1.45, kinetic "
+            "energy up 4 orders of magnitude) and the run still reached "
+            "NORMAL TERMINATION with wrong results; adding the compression "
+            "branch fixed it (lam2=lam3=0.70734 at eps=1, J=1.00066). Extend "
+            "the table into negative strain.")
     sgl = mat.sgl if mat.sgl != 0.0 else 1.0
     sw = mat.sw if mat.sw != 0.0 else 1.0
     st = mat.st if mat.st != 0.0 else 1.0
@@ -3519,8 +3548,30 @@ def _resolve_law88_curves(state: ConversionState, kw: str,
         state.warn(
             f"{kw} mid={mat.mid}: no LC/TBID loading curve is given — "
             "/MAT/LAW88 needs at least one (NL=0 is starter ERROR 866).")
-    elif tab is not None and tab.resolved and tab.rows:
-        for rate, lc in tab.rows:
+    elif tab is not None and not (tab.resolved and tab.rows):
+        # A table that IS in the deck but could not be resolved must not fall
+        # through to the single-curve branch: the id would then be reported as
+        # a missing *DEFINE_CURVE, which names the wrong keyword entirely.
+        state.warn(
+            f"{kw} mid={mat.mid}: LC/TBID={mat.lc_tbid} is a *DEFINE_TABLE "
+            "that could not be resolved to (rate, curve) rows — the rate "
+            "family is DROPPED and /MAT/LAW88 gets NL=0, which the starter "
+            "rejects (ERROR 866). See the *DEFINE_TABLE's own warning for why "
+            "it did not resolve.")
+    elif tab is not None:
+        rows = list(tab.rows)
+        if len(rows) > _LAW88_MAX_NL - 1:
+            state.warn(
+                f"{kw} mid={mat.mid}: *DEFINE_TABLE {mat.lc_tbid} has "
+                f"{len(rows)} rate rows; /MAT/LAW88 is limited to "
+                f"{_LAW88_MAX_NL} loading functions (the starter declares "
+                "maxfunc=128 and sizes ifunc/rate/yfac/lambda at maxfunc+1 "
+                "without checking NL — hm_read_mat.F90:294, "
+                "hm_read_mat88.F90:103-108), so the highest-rate rows past "
+                f"{_LAW88_MAX_NL - 1} are DROPPED to leave room for the "
+                "flat-extrapolation duplicate.")
+            rows = rows[:_LAW88_MAX_NL - 1]
+        for rate, lc in rows:
             fid = _law88_curve(state, kw, mat, lc, "loading", cache)
             if fid:
                 fcts.append(fid)
@@ -3587,15 +3638,12 @@ def _resolve_mat006(state: ConversionState) -> None:
     LAW34 preconditions."""
     kw = "*MAT_VISCOELASTIC"
     for mat in state.mat_viscoelastic.values():
-        for attr, lattr, name in (("bulk", "bulk_lcid", "BULK"),
-                                  ("g0", "g0_lcid", "G0"),
-                                  ("gi", "gi_lcid", "GI"),
-                                  ("beta", "beta_lcid", "BETA")):
+        for attr, name in (("bulk", "BULK"), ("g0", "G0"),
+                           ("gi", "GI"), ("beta", "BETA")):
             val = getattr(mat, attr)
             if val >= 0.0:
                 continue
             lcid = int(-val)
-            setattr(mat, lattr, lcid)
             crv = state.curves.get(lcid)
             if crv is None or not crv.pts:
                 setattr(mat, attr, 0.0)
@@ -3624,28 +3672,106 @@ def _resolve_mat006(state: ConversionState) -> None:
                 "left to convert. /MAT/LAW34 is still written (dyna2rad raises "
                 "its error 200003 here and also continues); use *MAT_ELASTIC "
                 "if that is intended.")
-        bad = [f"{n}={v:g}" for n, v in (("RHO", mat.rho), ("BULK", mat.bulk),
-                                         ("G0", mat.g0), ("GI", mat.gi),
-                                         ("BETA", mat.beta)) if v <= 0.0]
-        if bad:
-            state.warn(
-                f"{kw} mid={mat.mid}: {', '.join(bad)} — /MAT/LAW34 requires "
-                "RHO/K/G0/Gl/Beta all > 0 and the starter substitutes nothing "
-                "for a blank, so the deck will not read; fill the card in.")
+        _warn_law34_zero_fields(state, kw, mat)
 
 
-def _shell_parts_on_mid(state: ConversionState, mid: int) -> List[int]:
-    """Part ids on *mid* that carry shell elements or a *SECTION_SHELL."""
+def _warn_law34_zero_fields(state: ConversionState, kw: str,
+                            mat: MatViscoelastic) -> None:
+    """Non-positive /MAT/LAW34 fields, graded by what the solver really does.
+
+    The matl34_boltzman.cfg CHECK block asks for BULK/DECAY/G0/GI/RHO > 0, but
+    that is a HyperMesh-side rule: hm_read_mat34.F contains no ANCMSG at all —
+    it copies BULK/G0/GI/BETA straight into UPARAM(1..4). Each case below was
+    measured on starter_win64 + engine_win64 (/BEGIN 2022, single hex, held
+    shear) rather than read off the cfg, because the four outcomes differ:
+
+      RHO  = 0  starter ERROR 683, deck stops.               (measured)
+      G0   = 0  starter clean, but YOUNG = 9*K*G0/(3*K+G0) = 0 and the solid
+                element time step comes out 1.0E+21.        (measured)
+      BULK = 0  starter clean, YOUNG = 0, no volumetric stiffness left; the
+                element time step stays finite.             (measured)
+      GI   = 0  fully LEGAL — G_inf = 0 is "relaxes completely". Starter clean,
+                engine clean, sensible energies.            (measured)
+      BETA = 0  starter clean, then the ENGINE divides by it: sigeps34.F:101
+                computes C2 = -(1-exp(-BETA*dt))/BETA = 0/0, so every
+                deviatoric stress increment is NaN — and the run still reports
+                NORMAL TERMINATION.                          (measured: 1114
+                cycles of NaN I-ENERGY / EXT-WORK)
+
+    So GI = 0 must not be reported as fatal (the old wording pushed the user to
+    change a correct card), and BETA = 0 must not be reported as merely
+    unreadable (it is a silent NaN run, which is worse)."""
+    if mat.rho <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: RHO={mat.rho:g} <= 0 — the starter rejects "
+            "the material with ERROR 683 (zero density) and the deck does not "
+            "read; fill the card in.")
+    if mat.beta == 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BETA=0 — the starter takes the card, but the "
+            "LAW34 engine kernel forms C2 = -(1-exp(-BETA*dt))/BETA "
+            "(sigeps34.F:101), i.e. 0/0, so every deviatoric stress increment "
+            "becomes NaN while the run still ends NORMAL TERMINATION. If no "
+            "relaxation is wanted, use *MAT_ELASTIC; if the decay constant is "
+            "simply missing from the card, fill it in.")
+    elif mat.beta < 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BETA={mat.beta:g} < 0 makes exp(-BETA*t) "
+            "GROW without bound — the viscous shear stress diverges. LAW34 "
+            "takes the value unchecked; restate BETA as a positive decay "
+            "rate.")
+    if mat.g0 <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: G0={mat.g0:g} <= 0 — the starter takes the "
+            "card, but YOUNG = 9*K*G0/(3*K+G0) collapses to 0 "
+            "(hm_read_mat34.F:139) and the part's solid time step was measured "
+            "at 1.0E+21, i.e. the material carries no shear stiffness and sets "
+            "no stable step. Give the short-time shear modulus.")
+    if mat.bulk <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BULK={mat.bulk:g} <= 0 — the starter takes "
+            "the card, but the material then has NO volumetric stiffness "
+            "(YOUNG and the LAW34 sound speed PM(27) both come out 0). Give "
+            "the elastic bulk modulus.")
+    if mat.gi < 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: GI={mat.gi:g} < 0 — G_inf is the LONG-TIME "
+            "shear modulus and cannot be negative; LAW34 takes it unchecked "
+            "and the relaxed stiffness comes out negative.")
+    elif mat.gi == 0.0 and mat.g0 > 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: GI=0 means the material relaxes COMPLETELY — "
+            f"G(t) decays from G0={mat.g0:g} to zero long-time shear "
+            "stiffness. This is a legal card on both sides (LS-DYNA states no "
+            "lower bound for GI, and hm_read_mat34.F validates nothing), and "
+            "it converts and runs cleanly; flagged only because a blank GI "
+            "field reads the same way as a deliberate zero.")
+
+
+def _shell_parts_by_mid(state: ConversionState) -> dict:
+    """{mid: sorted part ids} over the parts that carry shell elements or a
+    *SECTION_SHELL.
+
+    Built ONCE per conversion rather than per material: the element scan is
+    O(n_shells), so doing it inside a per-material loop costs
+    O(n_shells x n_materials) — seconds of pure overhead on a million-shell
+    deck with several MAT_061s, in a pass that otherwise only touches the
+    material dicts."""
     shell_pids = {e.pid for e in state.shell_elems}
-    return sorted(pid for pid, p in state.parts.items()
-                  if p.mid == mid
-                  and (pid in shell_pids or p.secid in state.sec_shells))
+    out: dict = {}
+    for pid, p in sorted(state.parts.items()):
+        if pid in shell_pids or p.secid in state.sec_shells:
+            out.setdefault(p.mid, []).append(pid)
+    return out
 
 
 def _resolve_mat061(state: ConversionState) -> None:
     """*MAT_KELVIN-MAXWELL_VISCOELASTIC: the FO Kelvin branch, the LAW40
     Poisson gate and the solids-only applicability check."""
     kw = "*MAT_KELVIN-MAXWELL_VISCOELASTIC"
+    if not state.mat_kelvin_maxwell:
+        return
+    shell_parts = _shell_parts_by_mid(state)
     for mat in state.mat_kelvin_maxwell.values():
         g1 = mat.g0 - mat.gi
         if mat.fo != 0.0:
@@ -3690,7 +3816,7 @@ def _resolve_mat061(state: ConversionState) -> None:
                     f"must be at least (2/3)*G0 = {2.0 * mat.g0 / 3.0:g} for "
                     "this card.")
                 break
-        shell_pids = _shell_parts_on_mid(state, mat.mid)
+        shell_pids = shell_parts.get(mat.mid, [])
         if shell_pids:
             state.warn(
                 f"{kw} mid={mat.mid}: part(s) {shell_pids} are SHELL parts, "
@@ -3736,11 +3862,25 @@ def _resolve_mat076(state: ConversionState) -> None:
                     "silently lost there (CM:4526) and the bulk branch runs "
                     "with Ki != 0 and Beta_ki = 0.")
         elif mat.lcid > 0 or mat.lcidk > 0:
-            nt = mat.nt if mat.nt > 0 else 6
-            ntk = mat.ntk if mat.ntk > 0 else 6
+            # "If zero, the default is 6" applies to a fit that actually RUNS:
+            # LS-DYNA fits the shear series only when LCID is given and the bulk
+            # series only when LCIDK is (p.2-560). Defaulting the order of the
+            # ABSENT curve to 6 would pin M at 6 for every single-curve card,
+            # throwing away the user's NT — and, because the starter needs
+            # 2*M < npoints (hm_read_visc_prony.F:473, ERROR 1921), turning a
+            # 10-point curve that LS-DYNA fits with NT=2 into a dead deck.
+            nt = (mat.nt if mat.nt > 0 else 6) if mat.lcid > 0 else 0
+            ntk = (mat.ntk if mat.ntk > 0 else 6) if mat.lcidk > 0 else 0
             m = min(max(nt, ntk), 6)
             mat.prony_m = m
             mat.prony_itab = 1
+            if nt and ntk and nt != ntk:
+                state.warn(
+                    f"{kw} mid={mat.mid}: NT={nt} and NTK={ntk} ask for "
+                    "DIFFERENT fit orders, but /VISC/PRONY carries ONE M for "
+                    f"both the shear and the bulk fit — the larger, M={m}, is "
+                    "used for each. Split the material if the two series must "
+                    "have different term counts.")
             state.warn(
                 f"{kw} mid={mat.mid}: the relaxation-curve form "
                 f"(LCID={mat.lcid}, NT={mat.nt}, LCIDK={mat.lcidk}, "
@@ -3753,7 +3893,7 @@ def _resolve_mat076(state: ConversionState) -> None:
                 "and it emits an EMPTY /VISC/PRONY, i.e. starter ERROR 2026.")
             if max(nt, ntk) > 6:
                 state.warn(
-                    f"{kw} mid={mat.mid}: NT/NTK={max(mat.nt, mat.ntk)} is "
+                    f"{kw} mid={mat.mid}: NT/NTK={max(nt, ntk)} is "
                     "clamped to the 6-term fit dyna2rad uses; /VISC/PRONY "
                     "itself would take up to 100, but more terms also need "
                     "more curve points (2*M >= npoints is starter ERROR "
@@ -3941,18 +4081,21 @@ def _resolve_mat181_183(state: ConversionState) -> None:
         # VISCO is deliberately NOT in this list: it is the gate on the Gi/BETAi
         # branch, not an independent field, and the /VISC/PRONY warning below
         # reports both of its cases (honoured, or overridden when rows exist
-        # with VISCO=0).
+        # with VISCO=0). REF is not here either — it is NOT dropped: LAW88 is on
+        # the solid-/XREF whitelist, so a *INITIAL_FOAM_REFERENCE_GEOMETRY does
+        # reach this material. _warn_rubber_ref reports REF=1 without usable
+        # geometry and _resolve_xref_parts the reverse; saying "REF is DROPPED"
+        # here contradicted the /XREF the very same run emits.
         dropped = [f"{n}={v:g}" for n, v in (
-            ("REF", mat.ref), ("PRTEN", mat.prten), ("STOL", mat.stol),
+            ("PRTEN", mat.prten), ("STOL", mat.stol),
             ("HISOUT", float(mat.hisout)),
             ("VFLAG", float(mat.vflag))) if v]
         if dropped:
             state.warn(
                 f"{kw} mid={mat.mid}: {', '.join(dropped)} are DROPPED — none "
-                "has a /MAT/LAW88 counterpart (REF needs "
-                "*INITIAL_FOAM_REFERENCE_GEOMETRY for a real /XREF, PRTEN/"
-                "STOL/HISOUT are LS-DYNA solver controls, and VFLAG selects a "
-                "per-term Prony formulation Radioss does not offer).")
+                "has a /MAT/LAW88 counterpart (PRTEN/STOL/HISOUT are LS-DYNA "
+                "solver controls, and VFLAG selects a per-term Prony "
+                "formulation Radioss does not offer).")
         if mat.gi:
             state.warn(
                 f"{kw} mid={mat.mid}: {len(mat.gi)} viscoelastic Gi/BETAi "
@@ -3979,7 +4122,9 @@ def _resolve_mat091_092(state: ConversionState) -> None:
             f"{2.0 * mat.c1:g}, Mu_2=-2*C2={-2.0 * mat.c2:g}, alpha=+/-2, "
             "Nu=0.495). The transversely-isotropic COLLAGEN FIBRE term"
             + (f" ({', '.join(fibre)})" if fibre else "")
-            + " and the fibre DIRECTION (AOPT/AX-AZ/BX-BZ/LA1-LA3/MACF) have "
+            + " and the fibre DIRECTION "
+            + f"(AOPT={mat.aopt:g}, MACF={mat.macf:g}, plus the AX-AZ/BX-BZ "
+              "vectors and LA1-LA3) have "
               "no /MAT/LAW42 slot and are DROPPED. For a ligament or tendon, "
               "where the fibre term dominates the response, the converted "
               "material is NOT physically equivalent — dyna2rad performs the "

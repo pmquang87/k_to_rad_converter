@@ -262,13 +262,13 @@ def _mat183(mid=183, kw="*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", rho=1.1e-9,
 def _mat091(mid=91, kw="*MAT_SOFT_TISSUE", rho=1.1e-9, c1=20.0, c2=10.0,
             c3=5.0, c4=2.0, c5=100.0, ref=0, xk=2000.0, xlam=1.05, fang=30.0,
             xlam0=1.0, failsf=0.0, failsm=0.0, failshr=0.0,
-            s=None, t=None):
+            aopt=2.0, macf=0, s=None, t=None):
     """*MAT_SOFT_TISSUE (p.2-669) — FOUR mandatory cards (cards 3/4 exist even
     for the non-VISCO variant), plus S1..S6 / T1..T6 for _VISCO."""
     out = (kw + "\n" + _row(mid, rho, c1, c2, c3, c4, c5, ref) + "\n"
            + _row(xk, xlam, fang, xlam0, failsf, failsm, failshr) + "\n"
-           + _row(2.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0) + "\n"
-           + _row(0.0, 0.0, 0.0, 0) + "\n")
+           + _row(aopt, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0) + "\n"
+           + _row(0.0, 0.0, 0.0, macf) + "\n")
     if s is not None:
         out += _row(*(list(s) + [0.0] * 6)[:6]) + "\n"
         out += _row(*(list(t or []) + [0.0] * 6)[:6]) + "\n"
@@ -439,13 +439,47 @@ class Mat006Tests(unittest.TestCase):
         G0 == GI, and it converts anyway."""
         res, starter = _convert(_deck(_mat006(g0=40.0, gi=40.0), 6))
         self.assertTrue(_blocks(starter, "/MAT/LAW34/6"))
-        self.assertTrue(any("purely ELASTIC" in w for w in res.warnings),
-                        res.warnings)
+        self.assertTrue(any("G0=GI" in w and "200003" in w
+                            for w in res.warnings), res.warnings)
 
-    def test_blank_fields_warn_about_the_starter_check(self):
-        res, _ = _convert(_deck(_mat006(bulk=0.0, beta=0.0), 6))
-        hits = [w for w in res.warnings if "BULK=0" in w and "BETA=0" in w]
-        self.assertTrue(hits, res.warnings)
+    def test_non_positive_fields_are_graded_by_what_the_solver_does(self):
+        """matl34_boltzman.cfg's CHECK block asks for BULK/DECAY/G0/GI/RHO > 0,
+        but that is HyperMesh-side: hm_read_mat34.F contains NO ANCMSG at all.
+        Each field was therefore MEASURED on starter_win64 + engine_win64, and
+        the four outcomes differ, so one blanket "the deck will not read"
+        message is wrong for three of them:
+
+          RHO=0   starter ERROR 683 (the only hard stop on this card)
+          G0=0    starter clean; YOUNG=0 and the solid time step came out 1E+21
+          BULK=0  starter clean; YOUNG=0, no volumetric stiffness
+          GI=0    LEGAL — full relaxation; starter AND engine clean
+          BETA=0  starter clean, then sigeps34.F:101 forms C2 = -(1-exp(0))/0,
+                  so I-ENERGY/EXT-WORK go NaN for 1114 cycles and the run still
+                  reports NORMAL TERMINATION
+
+        Pinning the DECISION, not the prose: GI=0 must not claim the deck is
+        unreadable (that pushes the user to change a correct card) and BETA=0
+        must not be softened to "unreadable" (a silent NaN run is worse)."""
+        res, _ = _convert(_deck(_mat006(rho=0.0), 6))
+        self.assertTrue([w for w in res.warnings
+                         if "RHO=0" in w and "ERROR 683" in w], res.warnings)
+
+        res, _ = _convert(_deck(_mat006(gi=0.0), 6))
+        gi = [w for w in res.warnings if "GI=0" in w]
+        self.assertTrue(gi, res.warnings)
+        self.assertNotIn("will not read", gi[0])
+        self.assertNotIn("ERROR", gi[0])
+
+        res, _ = _convert(_deck(_mat006(beta=0.0), 6))
+        beta = [w for w in res.warnings if "BETA=0" in w]
+        self.assertTrue(beta, res.warnings)
+        self.assertIn("NaN", beta[0])
+        self.assertIn("sigeps34.F:101", beta[0])
+
+        res, _ = _convert(_deck(_mat006(bulk=0.0, g0=0.0), 6))
+        self.assertTrue([w for w in res.warnings if "BULK=0" in w],
+                        res.warnings)
+        self.assertTrue([w for w in res.warnings if "G0=0" in w], res.warnings)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -505,7 +539,7 @@ class Mat061Tests(unittest.TestCase):
     def test_so_is_reported_as_output_only(self):
         res, _ = _convert(_solid_deck(_mat061(so=2.0), 61))
         self.assertTrue([w for w in res.warnings
-                         if "SO=2" in w and "output selector" in w],
+                         if "SO=2" in w and "DROPPED" in w],
                         res.warnings)
 
     def test_poisson_gate_error_49(self):
@@ -634,6 +668,40 @@ class Mat076Tests(unittest.TestCase):
         c = _fail_cards(_block(starter, "/VISC/PRONY/76"))
         self.assertEqual(_col_i(c[0], 1, 10), 6)
         self.assertTrue([w for w in res.warnings if "clamped" in w])
+
+    def test_absent_second_curve_does_not_default_its_order_to_six(self):
+        """"If zero, the default is 6" belongs to a fit that RUNS: LS-DYNA fits
+        the bulk series only when LCIDK is given (p.2-560). Defaulting the
+        ABSENT curve's order to 6 pins M at 6 for every single-curve card,
+        which (a) throws away NT and (b) breaks decks LS-DYNA converts fine,
+        because the starter needs 2*M < npoints (hm_read_visc_prony.F:473,
+        ERROR 1921) — a 10-point curve fits with NT=2 and dies at M=6."""
+        pts = tuple((0.1 * i, 100.0 * 0.9 ** i + 20.0) for i in range(10))
+        crv = _curve(801, pts)
+        deck = _solid_deck(_mat076(lcid=801, nt=2, prony=()), 76, crv)
+        res, starter = _convert(deck)
+        c = _fail_cards(_block(starter, "/VISC/PRONY/76"))
+        self.assertEqual(_col_i(c[0], 1, 10), 2)
+        self.assertEqual(_col_i(c[1], 1, 10), 801)             # Ifunc_G
+        self.assertEqual(_col_i(c[2], 1, 10), 0)               # no bulk fit
+        self.assertFalse([w for w in res.warnings if "ERROR 1921" in w],
+                         res.warnings)
+        # ... and the mirror: bulk curve only, NTK=3, NT blank -> M = 3.
+        deck = _solid_deck(_mat076(lcidk=801, ntk=3, prony=()), 76, crv)
+        _, starter = _convert(deck)
+        c = _fail_cards(_block(starter, "/VISC/PRONY/76"))
+        self.assertEqual(_col_i(c[0], 1, 10), 3)
+
+    def test_differing_nt_and_ntk_are_warned_because_prony_has_one_m(self):
+        """/VISC/PRONY carries a SINGLE M for both the shear and the bulk fit,
+        so NT != NTK cannot be honoured — the larger wins."""
+        deck = _solid_deck(_mat076(lcid=801, nt=2, lcidk=802, ntk=4,
+                                   prony=()), 76, LC_RELAX_G + LC_RELAX_K)
+        res, starter = _convert(deck)
+        c = _fail_cards(_block(starter, "/VISC/PRONY/76"))
+        self.assertEqual(_col_i(c[0], 1, 10), 4)
+        self.assertTrue([w for w in res.warnings
+                         if "NT=2" in w and "NTK=4" in w], res.warnings)
 
     def test_no_prony_and_no_curve_emits_no_visc_block(self):
         """dyna2rad creates /VISC/PRONY unconditionally, so an elastic MAT_076
@@ -841,6 +909,58 @@ class Mat181Tests(unittest.TestCase):
         self.assertEqual(rates, [0.0, 1.0])
         self.assertTrue(all(b > a for a, b in zip(rates, rates[1:])))
 
+    def test_rate_family_is_clamped_to_the_starter_maxfunc(self):
+        """hm_read_mat.F90:294 declares `parameter (maxfunc = 128)` and
+        hm_read_mat88.F90:103-108 sizes ifunc/rate/yfac/lambda at maxfunc+1,
+        then reads `do i = 1,nl` with NO bound on NL — so an over-long rate
+        family is an out-of-bounds WRITE, not a diagnosable error. Same
+        treatment as the >100-term /VISC/PRONY case: clamp and say so."""
+        n = 140
+        curves = "".join(_curve(2000 + i, ((0.0, 0.0), (1.0, 100.0 + i)))
+                         for i in range(n))
+        tab = _table2d(900, tuple((float(i + 1), 2000 + i) for i in range(n)))
+        res, starter = _convert(_deck(_mat181(lc=900), 181, curves + tab))
+        c = _cards(_block(starter, "/MAT/LAW88/181"))
+        self.assertEqual(_col_i(c[1], 71, 80), 128)            # NL == maxfunc
+        self.assertTrue([w for w in res.warnings
+                         if "maxfunc=128" in w and "DROPPED" in w],
+                        res.warnings)
+        # the flat-extrapolation duplicate still made it in
+        fcts = [_col_i(c[3 + i], 1, 10) for i in range(128)]
+        self.assertEqual(fcts[-1], fcts[-2])
+
+    def test_unresolved_table_is_not_reported_as_a_missing_curve(self):
+        """A legacy *DEFINE_TABLE with too few following curves stays
+        unresolved. It must not fall through to the single-curve branch, which
+        would name the wrong keyword: "loading curve 900 has no parsed
+        *DEFINE_CURVE" for what is a table id."""
+        legacy = ("*DEFINE_TABLE\n" + _row(900) + "\n"
+                  + f"{0.001:>20}\n{1.0:>20}\n")
+        res, _ = _convert(_deck(_mat181(lc=900), 181, legacy))
+        self.assertTrue([w for w in res.warnings
+                         if "*DEFINE_TABLE" in w and "could not be resolved"
+                         in w and "ERROR 866" in w], res.warnings)
+        self.assertFalse([w for w in res.warnings
+                          if "loading curve 900 has no parsed" in w],
+                         res.warnings)
+
+    def test_tension_only_loading_curve_is_warned(self):
+        """LAW88 interpolates the SAME curve at all three principal stretches
+        (sigeps88.F90:375-377), so uniaxial tension drives the two lateral
+        stretches into compression, where a tension-only table is
+        EXTRAPOLATED. Measured: the cell bifurcated at eps=0.65 (lam2 0.79 ->
+        0.41, lam3 -> 1.45, KE up 4 decades) and still reached NORMAL
+        TERMINATION; adding the compression branch fixed it exactly."""
+        res, _ = _convert(_deck(_mat181(), 181, LC_LOAD))
+        self.assertTrue([w for w in res.warnings
+                         if "compression" in w and "sigeps88" in w],
+                        res.warnings)
+        both = _curve(901, ((-0.6, -240.0), (0.0, 0.0), (1.0, 100.0),
+                            (3.0, 240.0)))
+        res, _ = _convert(_deck(_mat181(), 181, both))
+        self.assertFalse([w for w in res.warnings if "sigeps88" in w],
+                         res.warnings)
+
     def test_unloading_priority_lcunld_then_hu_then_loading(self):
         """dyna2rad's three branches (CM:5085-5145), in order."""
         # 1) LCUNLD present
@@ -890,7 +1010,7 @@ class Mat181Tests(unittest.TestCase):
         res, _ = _convert(_deck(_mat181(pr=0.3), 181, LC_LOAD))
         hits = [w for w in res.warnings if "Hill FOAM" in w]
         self.assertTrue(hits, res.warnings)
-        self.assertIn("NO caller", hits[0])
+        self.assertIn("/MAT/LAW70", hits[0])
 
     def test_with_failure_card_is_parsed_and_warned(self):
         """_WITH_FAILURE inserts K/GAMA1/GAMA2/EH between card 2 and the
@@ -904,7 +1024,8 @@ class Mat181Tests(unittest.TestCase):
         self.assertEqual(_col_i(c[2], 1, 10), 902)     # card 4 still found
         hits = [w for w in res.warnings if "_WITH_FAILURE" in w]
         self.assertTrue(hits, res.warnings)
-        self.assertIn("NEVER", hits[0])
+        self.assertIn("KFAIL", hits[0])
+        self.assertIn("radioss2026", hits[0])
         self.assertIn("GAMA1=0.11", hits[0])
 
     def test_prony_cards_become_visc_prony(self):
@@ -1021,6 +1142,16 @@ class Mat091Tests(unittest.TestCase):
         c = _cards(_block(starter, "/MAT/LAW42/91"))
         self.assertEqual(_col_i(c[1], 81, 90), 0)              # M
         self.assertEqual(len(c), 6)                            # no Gamma/Tau
+
+    def test_fibre_direction_warning_names_the_parsed_values(self):
+        """AOPT and MACF are parsed off cards 3 and 4; the drop warning must
+        report what it read, not a fixed list of field NAMES — otherwise the
+        two fields are write-only and a parse regression is invisible."""
+        res, _ = _convert(_solid_deck(_mat091(aopt=3.0, macf=2), 91))
+        hits = [w for w in res.warnings if "fibre DIRECTION" in w]
+        self.assertTrue(hits, res.warnings)
+        self.assertIn("AOPT=3", hits[0])
+        self.assertIn("MACF=2", hits[0])
 
     def test_visco_prony_arrays(self):
         """S_i/T_i go into LAW42's OWN Gamma_arr/Tau_arr (no /VISC/PRONY): both
@@ -1267,6 +1398,174 @@ class BatchIntegrationTests(unittest.TestCase):
                         golden = (expected / f"{stem}_{suffix}.rad").read_text()
                         self.assertEqual(produced.replace("\r\n", "\n"),
                                          golden.replace("\r\n", "\n"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REF flags vs *INITIAL_FOAM_REFERENCE_GEOMETRY (/XREF)
+# ═════════════════════════════════════════════════════════════════════════════
+
+REF_GEOM = ("*INITIAL_FOAM_REFERENCE_GEOMETRY\n"
+            + "".join(f"{n:>8}{0.0:>16}{0.0:>16}{0.0:>16}\n"
+                      for n in range(1, 9)))
+
+
+class RefFlagTests(unittest.TestCase):
+    """MAT_181/183 (R17 p.2-1231 / p.2-1240) and MAT_091/092 (p.2-669) all
+    carry REF — "use reference geometry to initialize the stress tensor",
+    EQ.0.0 Off / EQ.1.0 On — and both convert to laws on the starter's
+    solid-/XREF whitelist (LAW88 and LAW42), so the keyword really does reach
+    them. Both directions must be reported:
+
+      REF=1, no usable geometry  -> nothing is initialized (the four older
+                                    rubber families already said so)
+      REF=0, geometry present    -> a /XREF IS still emitted (dyna2rad's
+                                    unconditional rule, kept so validated
+                                    rubber decks do not move), which LS-DYNA
+                                    would NOT apply
+
+    The second case shipped SILENT for all six families, and for 181/183 the
+    batch's own message said the opposite of what it emitted ("REF is DROPPED
+    — REF needs *INITIAL_FOAM_REFERENCE_GEOMETRY for a real /XREF", printed on
+    a run that wrote /XREF/7)."""
+
+    def _mats(self):
+        return (("*MAT_SIMPLIFIED_RUBBER/FOAM", 181,
+                 lambda r: _mat181(ref=r), LC_LOAD),
+                ("*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", 183,
+                 lambda r: _mat183(ref=r), LC_LOAD),
+                ("*MAT_SOFT_TISSUE", 91, lambda r: _mat091(ref=r), ""))
+
+    def test_ref_zero_with_reference_geometry_warns_and_still_emits(self):
+        for kw, mid, build, extra in self._mats():
+            with self.subTest(kw=kw):
+                res, starter = _convert(
+                    _solid_deck(build(0), mid, extra + REF_GEOM))
+                self.assertTrue(_blocks(starter, "/XREF/7"),
+                                "the /XREF must still be emitted")
+                hits = [w for w in res.warnings
+                        if "REF=0" in w and "/XREF" in w]
+                self.assertTrue(hits, res.warnings)
+                self.assertIn(f"mid={mid}", hits[0])
+
+    def test_ref_one_without_reference_geometry_is_diagnosed(self):
+        for kw, mid, build, extra in self._mats():
+            with self.subTest(kw=kw):
+                res, starter = _convert(_solid_deck(build(1), mid, extra))
+                self.assertEqual(_blocks(starter, "/XREF/7"), [])
+                self.assertTrue(
+                    [w for w in res.warnings
+                     if f"mid={mid}" in w and "REF=1" in w
+                     and "INITIAL_FOAM_REFERENCE_GEOMETRY" in w],
+                    res.warnings)
+
+    def test_ref_one_with_geometry_is_the_quiet_case(self):
+        """REF=1 + coverage is what the flag asks for — no REF complaint."""
+        for kw, mid, build, extra in self._mats():
+            with self.subTest(kw=kw):
+                res, starter = _convert(
+                    _solid_deck(build(1), mid, extra + REF_GEOM))
+                self.assertTrue(_blocks(starter, "/XREF/7"))
+                self.assertFalse([w for w in res.warnings
+                                  if "REF=0" in w or "REF=1" in w],
+                                 res.warnings)
+
+    def test_mat181_no_longer_calls_ref_a_dropped_field(self):
+        """The old message listed REF alongside PRTEN/STOL/HISOUT/VFLAG as
+        having no counterpart — while the same run wrote the /XREF."""
+        res, _ = _convert(_deck(_mat181(ref=1, prten=1), 181, LC_LOAD))
+        hits = [w for w in res.warnings if "are DROPPED" in w and "PRTEN" in w]
+        self.assertTrue(hits, res.warnings)
+        self.assertNotIn("REF=", hits[0])
+        # REF=1 is still reported — by the pass that knows what it means.
+        self.assertTrue([w for w in res.warnings
+                         if "REF=1" in w
+                         and "INITIAL_FOAM_REFERENCE_GEOMETRY" in w],
+                        res.warnings)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# *INCLUDE_TRANSFORM id offsets (the two hand-written callables)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class IncludeTransformOffsetTests(unittest.TestCase):
+    """_off_mat_006 and _off_mat_181 are the only two offset callables in this
+    batch that are not a fixed cell list, and both key off content: MAT_006
+    offsets a cell by IDFOFF only when it is NEGATIVE (a temperature-curve id
+    hiding in a modulus field), and MAT_181 shifts the unloading-card index by
+    one more when _WITH_FAILURE inserted a card. Registry membership alone
+    cannot catch either — replacing MAT_181's
+    `3 if "_WITH_FAILURE" in b.keyword else 2` with a constant 2 leaves the
+    whole suite green while rewriting a Feng-Hallquist K as a curve id."""
+
+    def _child_deck(self, mat: str, extra: str = "") -> str:
+        return "*KEYWORD\n" + mat + extra + "*END\n"
+
+    def _convert_with_transform(self, mat: str, extra: str,
+                                idmoff: int, idfoff: int):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write(self._child_deck(mat, extra))
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF
+            fh.write("*KEYWORD\n"
+                     "*INCLUDE_TRANSFORM\n"
+                     "child.k\n"
+                     + _row(0, 0, 0, idmoff, 0, idfoff) + "\n"
+                     + "*END\n")
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        return state
+
+    def test_mat006_offsets_the_id_and_only_the_negative_curve_cells(self):
+        """MID by IDMOFF; a NEGATIVE BULK/G0/GI/BETA is a *DEFINE_CURVE id and
+        moves by IDFOFF (staying negative); positive moduli must NOT move."""
+        mat = ("*MAT_VISCOELASTIC\n"
+               + _row(6, "1.1E-9", -951, -950, 20.0, 300.0) + "\n")
+        state = self._convert_with_transform(mat, "", 4000, 6000)
+        m = state.mat_viscoelastic[4006]
+        self.assertEqual(m.mid, 4006)
+        self.assertEqual(m.bulk, -6951.0)
+        self.assertEqual(m.g0, -6950.0)
+        self.assertEqual(m.gi, 20.0)          # positive modulus untouched
+        self.assertEqual(m.beta, 300.0)
+
+    def test_mat181_with_failure_shifts_the_unloading_card(self):
+        """_WITH_FAILURE inserts K/GAMA1/GAMA2/EH, so the LCUNLD card is one
+        row later. Offsetting the wrong row would rewrite K as a curve id."""
+        mat = _mat181(kw="*MAT_SIMPLIFIED_RUBBER/FOAM_WITH_FAILURE",
+                      lc=901, failure=(0.8, 0.11, 0.22, 0.33),
+                      card4=(902, 0.7, 2.0))
+        state = self._convert_with_transform(mat, "", 4000, 6000)
+        m = state.mat_simplified_rubber[4181]
+        self.assertEqual(m.mid, 4181)
+        self.assertEqual(m.lc_tbid, 6901)
+        self.assertEqual(m.lcunld, 6902)
+        self.assertEqual(m.kfail, 0.8)        # failure card left alone
+        self.assertEqual(m.gama1, 0.11)
+
+    def test_mat181_without_failure_offsets_the_earlier_unloading_card(self):
+        mat = _mat181(lc=901, card4=(902, 0.7, 2.0))
+        state = self._convert_with_transform(mat, "", 4000, 6000)
+        m = state.mat_simplified_rubber[4181]
+        self.assertEqual(m.lc_tbid, 6901)
+        self.assertEqual(m.lcunld, 6902)
+
+    def test_mat183_and_mat076_curve_cells_offset(self):
+        state = self._convert_with_transform(
+            _mat183(lc=901, lcunld=902), "", 4000, 6000)
+        m = state.mat_simplified_rubber[4183]
+        self.assertEqual(m.lc_tbid, 6901)
+        self.assertEqual(m.lcunld, 6902)
+        state = self._convert_with_transform(
+            _mat076(lcid=801, nt=3, lcidk=802, ntk=3, prony=()), "",
+            4000, 6000)
+        m = state.mat_general_visco[4076]
+        self.assertEqual(m.lcid, 6801)
+        self.assertEqual(m.lcidk, 6802)
 
 
 if __name__ == "__main__":

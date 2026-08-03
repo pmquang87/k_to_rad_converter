@@ -2372,8 +2372,9 @@ class MatViscoelastic:
     From R6.1 on, each of BULK/G0/GI/BETA is a SCALAR_OR_OBJECT: a NEGATIVE
     entry is the negated id of a temperature-dependent *DEFINE_CURVE. LAW34 has
     no temperature slot, so the writer resolve pass collapses such a curve to
-    its value at the LOWEST tabulated temperature (dyna2rad's own rule) and
-    records which field it came from here.
+    its value at the LOWEST tabulated temperature (dyna2rad's own rule),
+    OVERWRITING the negative entry in place — the curve id is not kept, because
+    nothing downstream of the collapse can use it.
     """
     mid: int
     title: str
@@ -2382,11 +2383,6 @@ class MatViscoelastic:
     g0: float              # → LAW34 G0 (short-time shear modulus)
     gi: float              # → LAW34 Gl (long-time shear modulus)
     beta: float            # → LAW34 Beta (decay constant, 1/time)
-    # writer-resolved: |field| when the field was a -LCID, else 0
-    bulk_lcid: int = 0
-    g0_lcid: int = 0
-    gi_lcid: int = 0
-    beta_lcid: int = 0
 
 
 @dataclass

@@ -140,8 +140,17 @@ shipped, so the marginal cost is small.
   radioss2026 LAW88 extension cards (`SGL/SW/ST/G/SIGF` and the Feng-Hallquist
   `KFAIL/GAM1/GAM2/EH`), which need `/BEGIN 2026` rather than converter work;
   MAT_181's `MU` on the solid property (a per-part `/PROP/SOLID` split);
-  a real foam target for the `0 < PR < 0.49` Hill branch; and the
-  `*MAT_SOFT_TISSUE` fibre term, which no Radioss law offers.
+  a real foam target for the `0 < PR < 0.49` Hill branch; the
+  `*MAT_SOFT_TISSUE` fibre term, which no Radioss law offers; and LAW88's
+  unloading, which the engine applies as a normalised shape ratio rather than
+  as the LCUNLD stress-strain path, so a MAT_183 hysteresis loop is not
+  reproduced curve-for-curve (engine-side — no converter fix exists).
+  Also still open, and NOT specific to this batch: `/XREF` emission does not
+  read the material `REF` flag (dyna2rad parity), so a `REF=0` material with
+  reference-geometry coverage gets a block LS-DYNA would not apply. Both
+  directions are now warned off one registry
+  (`writer/common.py::_ref_flag_materials`); gating the emission would change
+  already-validated MAT_027/077 rubber decks and wants its own change.
 - Spotweld joining (P1): `*CONTACT_SPOTWELD` (+ `_WITH_TORSION` /
   `_BEAM_OFFSET` / `_CONSTRAINED_OFFSET` / `_PENALTY` / `_MPP`) →
   `/INTER/TYPE2` Spotflag=28 with `Ignore=2` and `Idel2=1`;

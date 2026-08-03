@@ -477,7 +477,10 @@ are kinematically slaved and it has no strain state to define — the starter
 takes the block (measured `0 ERROR(S) 0 WARNING(S)`) but it is inert, and
 emitting it would drag the part's `*SECTION_SOLID`, and any deformable part
 sharing it, to `Ismstr=10`. `REF=1` without usable
-reference geometry is warned
+reference geometry is warned, and so is the mirror case — a `/XREF` landing on
+a `REF=0` material, which LS-DYNA would not apply (`EQ.0.0: Off`) but which
+dyna2rad and k2rad both still emit.
+
 Viscoelastics (dyna2rad's law choices and constants followed, its documented
 field-map defects corrected): `*MAT_VISCOELASTIC` (006) → `/MAT/LAW34`
 (BOLTZMAN) — the one EXACT 1:1 in the batch, since LS-DYNA's
@@ -506,7 +509,12 @@ exactly) plus `/VISC/PRONY`: explicit `GI/BETAI/KI/BETAKI` rows go in as
 same least-squares Prony fit LS-DYNA does — a branch dyna2rad can never reach
 (it reads `LSD_LCIDK`, an attribute that does not exist) and whose absence makes
 it emit an empty `/VISC/PRONY`, i.e. `ERROR 2026` on the whole deck. An elastic
-MAT_076 gets no `/VISC/PRONY` at all rather than that error; `PCF` is *not*
+MAT_076 gets no `/VISC/PRONY` at all rather than that error. The single
+`M = min(max(NT,NTK),6)` counts only the fits that RUN: "if zero the default is
+6" is per fit, and LS-DYNA fits the bulk series only when `LCIDK` is given, so
+an absent curve contributes 0 — defaulting it to 6 would pin `M` at 6 for every
+single-curve card and trip the starter's `2·M < npoints` rule (`ERROR 1921`) on
+a deck LS-DYNA fits fine. `PCF` is *not*
 written into `sigma_cut` (a flag into a stress field would impose a 1-unit
 cut-off), and `EF`/`TREF`/`A`/`B`/`BSTART`/`TRAMP` and the whole `_MOISTURE`
 card are warn-dropped. `*MAT_SIMPLIFIED_RUBBER/FOAM` (181, +
@@ -515,7 +523,15 @@ card are warn-dropped. `*MAT_SIMPLIFIED_RUBBER/FOAM` (181, +
 (TABULATED_HYPERELASTIC): a `*DEFINE_TABLE` `LC/TBID` becomes the `FCT_ID_LI`
 /`EPSI_LI` rate family with the top curve repeated at 10× the highest rate
 (dyna2rad's flat-extrapolation guard), a `*DEFINE_CURVE` becomes a single row,
-and unloading follows `LCUNLD` → `HU`/`SHAPE` → the loading curve itself. The
+and unloading follows `LCUNLD` → `HU`/`SHAPE` → the loading curve itself —
+though note that LAW88 uses `FCT_ID_UN` only as a normalised SHAPE RATIO
+`g_unl/g_load` clamped to `[0,1]` (`sigeps88.F90:762-790`, after
+`hm_read_mat88.F90:405-421` forces the endpoints together and rescales both
+axes), so an LS-DYNA MAT_183 hysteresis loop is not reproduced curve-for-curve.
+A loading curve with no negative-strain branch is warned, because LAW88
+evaluates it at all three principal stretches and uniaxial tension drives the
+lateral ones into compression (measured: the cell bifurcated at `eps=0.65` and
+still reached NORMAL TERMINATION with wrong results). The
 specimen normalization is baked into the curve POINTS (abscissa `1/SGL`,
 ordinate `1/(SW·ST)`, into a `_Duplicate` `/FUNCT`) because a `/BEGIN 2022`
 starter forces `SGL=SW=ST=1.0`; a blank dimension reads as 1.0 instead of
