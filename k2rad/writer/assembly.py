@@ -16,6 +16,7 @@ from .materials import (
     _resolve_mat_iso_elas_plas,
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_comp_tens,
+    _resolve_mat_viscoelastic,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
 )
@@ -549,6 +550,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _resolve_mat_iso_elas_plas(state)
     _resolve_mat_gurson(state)
     _resolve_mat_plas_comp_tens(state)
+    # Viscoelastic batch. MAT_006's temperature curves and MAT_181/183's
+    # loading/unloading families both need the parsed *DEFINE_CURVEs (and
+    # MAT_181's LC/TBID may be a *DEFINE_TABLE, so after _resolve_define_tables
+    # above); the LAW88 specimen normalization synthesizes rescaled duplicate
+    # curves, so before _make_functions. Also before _resolve_xref_parts: LAW42
+    # (MAT_076, MAT_091/092) and LAW88 (MAT_181/183) are BOTH on the starter's
+    # solid-/XREF law whitelist, so these containers decide which parts get a
+    # /XREF and pick up Ismstr=10.
+    _resolve_mat_viscoelastic(state)
 
     # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
     # its connectivity by CONTENT, which cannot distinguish an all-integer

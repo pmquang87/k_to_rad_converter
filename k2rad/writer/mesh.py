@@ -2476,6 +2476,28 @@ _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 #                                    as LAW43 (writer/composites.py).
 # LAW2 (*MAT_012's target) is BEAM_ALL in all three of its readers and is
 # already in _TYPE3_BEAM_LAWS, so a *MAT_012 beam part converts and runs.
+#
+# Classification of the laws the VISCOELASTIC batch adds, read from the same
+# INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. Neither frozenset
+# above changes: LAW34 is already listed as TYPE18-only, and none of the other
+# three declares any beam class at all, so the existing "no beam keyword at all
+# — starter ERROR 3046" message is already the right one for them:
+#   LAW34  hm_read_mat34.F:155-162   HOOK, SHELL_ISOTROPIC, SOLID_ISOTROPIC,
+#                                    SPH, TRUSS, BEAM_INTEGRATED  — the only
+#                                    beam-capable law in this batch, and it is
+#                                    already in _TYPE18_ONLY_BEAM_LAWS, so a
+#                                    *MAT_006 beam part reaches the TYPE18
+#                                    routing in writer/beams.py unchanged.
+#   LAW40  hm_read_mat40.F:182-185   HOOK, SOLID_ISOTROPIC, SPH — no shell
+#                                    class either, so a *MAT_061 on a SHELL
+#                                    part is ERROR 3046 as well; warned by
+#                                    _resolve_mat061, since neither the beam
+#                                    gate here nor any property pass sees it.
+#   LAW42  hm_read_mat42.F:265-271   INCOMPRESSIBLE, TOTAL, HOOK,
+#                                    SHELL_ISOTROPIC, SOLID_ISOTROPIC, SPH
+#   LAW88  hm_read_mat88.F90:669-679 COMPRESSIBLE/INCOMPRESSIBLE, TOTAL,
+#                                    LARGE_STRAIN, HOOK,
+#                                    SOLID_BRICK_ISOTROPIC, SHELL_ISOTROPIC
 
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
@@ -2571,6 +2593,20 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 52                                  # *MAT_120 → GURSON
     if mid in state.mat_plas_comp_tens:
         return 66                                  # *MAT_124
+    # Viscoelastic batch. None of these five splits — each keyword has exactly
+    # one target law — but LAW42 and LAW88 are both on the solid-/XREF
+    # whitelist inistate.py reads through this function, so an
+    # *INITIAL_FOAM_REFERENCE_GEOMETRY deck newly reaches those parts.
+    if mid in state.mat_viscoelastic:
+        return 34                                  # *MAT_006 → BOLTZMAN
+    if mid in state.mat_kelvin_maxwell:
+        return 40                                  # *MAT_061 → KELVINMAX
+    if mid in state.mat_general_visco:
+        return 42                                  # *MAT_076 → OGDEN carrier
+    if mid in state.mat_simplified_rubber:
+        return 88                                  # *MAT_181/183
+    if mid in state.mat_soft_tissue:
+        return 42                                  # *MAT_091/092 → OGDEN
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

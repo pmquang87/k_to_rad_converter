@@ -34,6 +34,7 @@ __all__ = [
     "_emit_line_seg",
     "_emit_line_surf",
     "_part_node_sets",
+    "_ref_flag_materials",
 ]
 
 
@@ -458,6 +459,27 @@ def _part_node_sets(state: ConversionState) -> dict:
         if e.n2 > 0:
             s.add(e.n2)
     return pnodes
+
+
+def _ref_flag_materials(state: ConversionState):
+    """Every material container whose LS-DYNA card carries a REF flag ("use
+    reference geometry to initialize the stress tensor", EQ.0.0 off / EQ.1.0
+    on), as (keyword, {mid: material}) pairs.
+
+    The single list behind both REF diagnostics: the coverage warnings in
+    ``materials._warn_rubber_ref`` (REF=1 with no reference geometry to read)
+    and the reverse check in ``inistate._resolve_xref_parts`` (a /XREF landing
+    on a REF=0 material). Keeping them on one registry is what stops a new
+    REF-bearing family from being reported by one and not the other — which is
+    exactly how *MAT_SOFT_TISSUE and *MAT_SIMPLIFIED_RUBBER first shipped."""
+    return (
+        ("*MAT_BLATZ-KO_RUBBER", state.mat_blatz_ko),            # 007, p.2-108
+        ("*MAT_MOONEY-RIVLIN_RUBBER", state.mat_mooney_rivlin),  # 027, p.2-249
+        ("*MAT_OGDEN_RUBBER", state.mat_ogden),                  # 077_O
+        ("*MAT_HYPERELASTIC_RUBBER", state.mat_hyper_rubber),    # 077_H
+        ("*MAT_SIMPLIFIED_RUBBER/FOAM", state.mat_simplified_rubber),
+        ("*MAT_SOFT_TISSUE", state.mat_soft_tissue),             # 091/092
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

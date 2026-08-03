@@ -2359,6 +2359,205 @@ class MatHyperelasticRubber:
 
 
 @dataclass
+class MatViscoelastic:
+    """*MAT_VISCOELASTIC (MAT_006) → /MAT/LAW34 (BOLTZMAN).
+
+    LS-DYNA card (Keyword971_R6.1 mat_006.cfg), ONE card:
+      MID RHO BULK G0 GI BETA
+
+    G(t) = GI + (G0-GI)·exp(-BETA·t) is LAW34's kernel verbatim
+    (sigeps34.F:88-101), so this is an exact 1:1 — BETA is a decay rate (1/time)
+    in both codes and needs no conversion.
+
+    From R6.1 on, each of BULK/G0/GI/BETA is a SCALAR_OR_OBJECT: a NEGATIVE
+    entry is the negated id of a temperature-dependent *DEFINE_CURVE. LAW34 has
+    no temperature slot, so the writer resolve pass collapses such a curve to
+    its value at the LOWEST tabulated temperature (dyna2rad's own rule),
+    OVERWRITING the negative entry in place — the curve id is not kept, because
+    nothing downstream of the collapse can use it.
+    """
+    mid: int
+    title: str
+    rho: float
+    bulk: float            # → LAW34 K
+    g0: float              # → LAW34 G0 (short-time shear modulus)
+    gi: float              # → LAW34 Gl (long-time shear modulus)
+    beta: float            # → LAW34 Beta (decay constant, 1/time)
+
+
+@dataclass
+class MatKelvinMaxwell:
+    """*MAT_KELVIN-MAXWELL_VISCOELASTIC (MAT_061) → /MAT/LAW40 (KELVINMAX).
+
+    LS-DYNA card (Keyword971 mat_061.cfg), ONE card:
+      MID RHO BULK G0 GI DC FO SO
+
+    LAW40 is a generalised Maxwell chain, so the single LS-DYNA branch becomes
+    G_inf = GI, G1 = G0 - GI, BETA1 = DC and G2..G5 / BETA2..BETA5 = 0.
+    Astass/Bstass/Kvm are written 0, which the starter turns into INFINITY,
+    i.e. the Stassi/von-Mises yield surface is disabled (hm_read_mat40.F:122).
+    """
+    mid: int
+    title: str
+    rho: float
+    bulk: float            # → LAW40 K
+    g0: float              # instantaneous shear modulus; LAW40 G1 = G0 - GI
+    gi: float              # → LAW40 G_inf
+    dc: float              # → LAW40 BETA1
+    fo: float = 0.0        # 0 = Maxwell (exact map), 1 = Kelvin (no counterpart)
+    so: float = 0.0        # d3plot strain-output selector — output-only
+
+
+@dataclass
+class MatGeneralViscoelastic:
+    """*MAT_GENERAL_VISCOELASTIC (MAT_076, + _MOISTURE) → /MAT/LAW42 (OGDEN)
+    carrier + /VISC/PRONY.
+
+    LS-DYNA cards (Keyword971_R7.1 mat_076.cfg):
+      Card1: MID RO BULK PCF EF TREF A B
+      Card2: LCID NT BSTART TRAMP LCIDK NTK BSTARTK TRAMPK
+             (mandatory in the cfg — blank when the Prony rows below are used)
+      Card3: MO ALPHA BETA GAMMA MST          (_MOISTURE only)
+      Card4+: GI BETAI KI BETAKI              (FREE_CARD_LIST, up to 18)
+
+    LAW42 has no bulk-modulus field of its own (the starter derives one from
+    Nu), so the elastic carrier is dyna2rad's fixed 2-term Ogden ground state
+    Mu_1 = +0.01·BULK / Mu_2 = -0.01·BULK / alpha = ±2 / Nu = 0.495. The whole
+    Prony series — including the BULK terms dyna2rad drops — rides the separate
+    /VISC/PRONY block, which is the only Radioss card carrying all four columns.
+    """
+    mid: int
+    title: str
+    rho: float
+    bulk: float                  # → the LAW42 Mu_1/Mu_2 ground state
+    pcf: float = 0.0             # tensile-pressure cut-off FLAG (no LAW42 slot)
+    ef: float = 0.0              # 1 = elastic layer
+    tref: float = 0.0            # WLF / Arrhenius shift function — no slot
+    a: float = 0.0
+    b: float = 0.0
+    lcid: int = 0                # G(t) curve  → /VISC/PRONY Itab=1 Ifunc_G
+    nt: int = 0                  # shear fit order (blank → 6, max 18)
+    bstart: float = 0.0
+    tramp: float = 0.0
+    lcidk: int = 0               # K(t) curve  → /VISC/PRONY Itab=1 Ifunc_K
+    ntk: int = 0
+    bstartk: float = 0.0
+    trampk: float = 0.0
+    moisture: bool = False       # the _MOISTURE card is present (dropped)
+    gi: List[float] = field(default_factory=list)      # → /VISC/PRONY G_i
+    betai: List[float] = field(default_factory=list)   # → /VISC/PRONY Beta_i
+    ki: List[float] = field(default_factory=list)      # → /VISC/PRONY Ki
+    betaki: List[float] = field(default_factory=list)  # → /VISC/PRONY Beta_ki
+    # writer-resolved /VISC/PRONY shape (0 = no /VISC/PRONY at all)
+    prony_m: int = 0
+    prony_itab: int = 0
+
+
+@dataclass
+class MatSimplifiedRubber:
+    """*MAT_SIMPLIFIED_RUBBER/FOAM (181) and *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE
+    (183) → /MAT/LAW88 (TABULATED_HYPERELASTIC) [+ /VISC/PRONY for 181].
+
+    LS-DYNA cards — 181 (Keyword971_R11.1 mat_181.cfg):
+      Card1: MID RHO KM MU G SIGF REF PRTEN
+      Card2: SGL SW ST LC/TBID TENSION RTYPE AVGOPT PR
+      Card3: K GAMA1 GAMA2 EH            (_WITH_FAILURE only)
+      Card4: LCUNLD HU SHAPE STOL VISCO HISOUT      (optional)
+      Card5+: Gi BETAi VFLAG             (optional free list, up to 12)
+    ... and 183 (Keyword971_R8.0 mat_183.cfg), where card 3 is MANDATORY and
+    holds something else entirely, and there are no HU/SHAPE/VISCO/Prony cards:
+      Card1: MID RHO K MU G SIGF
+      Card2: SGL SW ST LC TENSION RTYPE AVGOPT
+      Card3: LCUNLD REF STOL
+
+    One container for both because the LAW88 target and the whole curve/
+    unloading wiring are shared; ``family`` carries the discriminator (the same
+    pattern MatPlasTAB.family uses for MAT_024/081/082/105).
+    """
+    mid: int
+    title: str
+    family: str                  # "181" | "183"
+    rho: float
+    k: float                     # KM (181) / K (183) → LAW88 K
+    mu: float = 0.0              # damping coefficient — a /PROP field, dropped
+    g: float = 0.0               # frequency-independent damping shear modulus
+    sigf: float = 0.0            # frequency-independent damping limit stress
+    ref: float = 0.0
+    prten: float = 0.0
+    sgl: float = 0.0             # specimen gauge length  → curve abscissa /SGL
+    sw: float = 0.0              # specimen width         → curve ordinate
+    st: float = 0.0              # specimen thickness     →   /(SW*ST)
+    lc_tbid: int = 0             # *DEFINE_CURVE or *DEFINE_TABLE of the loading
+    tension: int = 0             # -1/0/+1 → LAW88 TENSION 1:1
+    rtype: int = 0               # 0 true / 1 engineering strain rate
+    avgopt: float = 0.0          # rate averaging — no /BEGIN 2022 LAW88 slot
+    pr: float = 0.0              # → LAW88 NU verbatim (<=0 → the beta=|NU| rule)
+    with_failure: bool = False   # the _WITH_FAILURE card 3 is present
+    kfail: float = 0.0           # Feng-Hallquist damage — LAW88 2026 card only
+    gama1: float = 0.0
+    gama2: float = 0.0
+    eh: float = 0.0
+    lcunld: int = 0              # unloading curve → LAW88 FCT_ID_UN
+    hu: float = 1.0              # hysteretic unloading factor → LAW88 HYS
+    shape: float = 0.0           # → LAW88 SHAPE
+    stol: float = 0.0
+    visco: int = 0               # 1 = the Gi/BETAi branch is live (solids only)
+    hisout: int = 0
+    has_unload_card: bool = False
+    log_log: bool = False        # the _LOG_LOG_INTERPOLATION spelling
+    gi: List[float] = field(default_factory=list)      # → /VISC/PRONY G_i
+    betai: List[float] = field(default_factory=list)   # → /VISC/PRONY Beta_i
+    vflag: int = 0               # per-term formulation flag — no counterpart
+    # writer-resolved LAW88 curve wiring (_resolve_mat_viscoelastic)
+    fct_load: List[int] = field(default_factory=list)    # FCT_ID_LI, len = NL
+    rates: List[float] = field(default_factory=list)     # EPSI_LI, len = NL
+    fct_unload: int = 0                                  # FCT_ID_UN
+    hys: float = 0.0                                     # HYS
+    shape_out: float = 0.0                               # SHAPE
+
+
+@dataclass
+class MatSoftTissue:
+    """*MAT_SOFT_TISSUE (091) / *MAT_SOFT_TISSUE_VISCO (092) → /MAT/LAW42.
+
+    LS-DYNA cards (Vol II R17 p.2-669), FOUR always + two for _VISCO:
+      Card1: MID RO C1 C2 C3 C4 C5 REF
+      Card2: XK XLAM FANG XLAM0 FAILSF FAILSM FAILSHR
+      Card3: AOPT AX AY AZ BX BY BZ
+      Card4: LA1 LA2 LA3 MACF          (may be blank, but the card is there)
+      Card5: S1..S6                    (_VISCO)
+      Card6: T1..T6                    (_VISCO)
+
+    Only the isotropic Mooney-Rivlin ground substance survives: Mu_1 = 2·C1,
+    Mu_2 = -2·C2, alpha = ±2, Nu = 0.495. The transversely-isotropic collagen
+    fibre term (C3/C4/C5, XLAM, XLAM0, FANG), the bulk modulus XK, all three
+    FAILS* modes and the whole fibre orientation are DROPPED — loudly warned,
+    unlike dyna2rad which converts silently.
+    """
+    mid: int
+    title: str
+    rho: float
+    c1: float = 0.0              # → LAW42 Mu_1 = 2·C1 (alpha_1 = 2)
+    c2: float = 0.0              # → LAW42 Mu_2 = -2·C2 (alpha_2 = -2)
+    c3: float = 0.0              # collagen fibre term — DROPPED
+    c4: float = 0.0
+    c5: float = 0.0
+    ref: float = 0.0
+    xk: float = 0.0              # bulk modulus — DROPPED (LAW42 derives K from Nu)
+    xlam: float = 0.0            # fibre straightening stretch — DROPPED
+    fang: float = 0.0            # fibre angle about the c-axis — DROPPED
+    xlam0: float = 0.0
+    failsf: float = 0.0          # fibre / matrix / shear failure — all DROPPED
+    failsm: float = 0.0
+    failshr: float = 0.0
+    aopt: float = 0.0            # fibre orientation — DROPPED entirely
+    macf: float = 0.0
+    visco: bool = False          # the _VISCO (MAT_092) spelling
+    s: List[float] = field(default_factory=list)   # → LAW42 Gamma_arr (ratios)
+    t: List[float] = field(default_factory=list)   # → LAW42 Tau_arr (TIMES)
+
+
+@dataclass
 class FoamRefGeometry:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per part whose nodes
     intersect the keyword's node table (dyna2rad ConvertInitialFoamReferenceGeometry;
@@ -3025,6 +3224,17 @@ class ConversionState:
     mat_gurson: Dict[int, MatGurson] = field(default_factory=dict)
     mat_hill_3r: Dict[int, MatHill3R] = field(default_factory=dict)
     mat_plas_comp_tens: Dict[int, MatPlasCompTens] = field(default_factory=dict)
+    # Viscoelastic batch (dyna2rad targets):
+    #   MAT_006      → /MAT/LAW34 (BOLTZMAN), an exact 1:1 of G(t)
+    #   MAT_061      → /MAT/LAW40 (KELVINMAX), G1 = G0-GI, BETA1 = DC
+    #   MAT_076      → /MAT/LAW42 (OGDEN) carrier + /VISC/PRONY (Itab 0 or 1)
+    #   MAT_181/183  → /MAT/LAW88 (TABULATED_HYPERELASTIC) [+ /VISC/PRONY]
+    #   MAT_091/092  → /MAT/LAW42 (OGDEN), isotropic ground substance only
+    mat_viscoelastic: Dict[int, MatViscoelastic] = field(default_factory=dict)
+    mat_kelvin_maxwell: Dict[int, MatKelvinMaxwell] = field(default_factory=dict)
+    mat_general_visco: Dict[int, MatGeneralViscoelastic] = field(default_factory=dict)
+    mat_simplified_rubber: Dict[int, MatSimplifiedRubber] = field(default_factory=dict)
+    mat_soft_tissue: Dict[int, MatSoftTissue] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -3392,7 +3602,9 @@ class ConversionState:
                   self.mat_transverse_aniso, self.mat_laminated_glass,
                   self.mat_iso_elas_plas, self.mat_strain_rate_plas,
                   self.mat_gurson, self.mat_hill_3r,
-                  self.mat_plas_comp_tens):
+                  self.mat_plas_comp_tens, self.mat_viscoelastic,
+                  self.mat_kelvin_maxwell, self.mat_general_visco,
+                  self.mat_simplified_rubber, self.mat_soft_tissue):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

@@ -28,12 +28,18 @@ from ..state import (
     MatStrainRatePlas,
     MatGurson,
     MatPlasCompTens,
+    MatViscoelastic,
+    MatKelvinMaxwell,
+    MatGeneralViscoelastic,
+    MatSimplifiedRubber,
+    MatSoftTissue,
     Curve,
     MatHighExplosiveBurn,
     EosJwl,
     EosCard,
 )
-from .common import HDR, _f, _i, _part_node_sets, _spotweld_beam_pids
+from .common import (HDR, _f, _i, _part_node_sets, _ref_flag_materials,
+                     _spotweld_beam_pids)
 from .blast_ale import _make_ale_multimaterial
 
 __all__ = [
@@ -67,7 +73,15 @@ __all__ = [
     "_emit_mat_hyper_rubber",
     "_emit_visc_prony",
     "_emit_visc_prony_kv",
+    "_emit_visc_prony_full",
+    "_emit_visc_prony_fit",
     "_resolve_mat_hyper_rubber",
+    "_emit_mat_viscoelastic",
+    "_emit_mat_kelvin_maxwell",
+    "_emit_mat_general_visco",
+    "_emit_mat_simplified_rubber",
+    "_emit_mat_soft_tissue",
+    "_resolve_mat_viscoelastic",
     "_law2_plas_johns_lines",
     "_resolve_mat_iso_elas_plas",
     "_emit_mat_law2_iso_elas_plas",
@@ -143,6 +157,17 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_ogden_rubber(mat)
     for mat in state.mat_hyper_rubber.values():
         lines += _emit_mat_hyper_rubber(mat)
+    # Viscoelastic batch (curve wiring resolved by _resolve_mat_viscoelastic)
+    for mat in state.mat_viscoelastic.values():
+        lines += _emit_mat_viscoelastic(mat)
+    for mat in state.mat_kelvin_maxwell.values():
+        lines += _emit_mat_kelvin_maxwell(mat)
+    for mat in state.mat_general_visco.values():
+        lines += _emit_mat_general_visco(mat)
+    for mat in state.mat_simplified_rubber.values():
+        lines += _emit_mat_simplified_rubber(mat)
+    for mat in state.mat_soft_tissue.values():
+        lines += _emit_mat_soft_tissue(mat)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -2564,22 +2589,89 @@ def _emit_mat_law66(mat: MatPlasCompTens, state: ConversionState) -> List[str]:
     return lines
 
 
+def _visc_prony_lines(mid: int, m: int, k_v: float = 0.0, itab: int = 0,
+                      ishape: int = 0,
+                      gis: Optional[List[float]] = None,
+                      betais: Optional[List[float]] = None,
+                      kis: Optional[List[float]] = None,
+                      betakis: Optional[List[float]] = None,
+                      fct_g: int = 0, fct_k: int = 0) -> List[str]:
+    """The one /VISC/PRONY card writer, shared by every caller so the layout
+    cannot drift. Audited against hm_cfg_files MAT/mat_VISC_PRONY.cfg
+    FORMAT(radioss2021) — the block a /BEGIN 2022 deck is read with. NOTE: no
+    title line after the header, and the M card has a 10-space LITERAL gap
+    before K_v (the cfg's own "%10d          %20lg%10d%10d").
+
+      Itab 0: M(10) gap(10) K_v(20) Itab(10) Ishape(10)
+              + M x [G_i Beta_i Ki Beta_ki](4x20)
+      Itab 1: same first card + EXACTLY two rows
+              Ifunc_G(10) XGscale(20) YGscale(20) /
+              Ifunc_K(10) XKscale(20) YKscale(20)
+              — the starter then least-squares-fits an M-term Prony series to
+              the tabulated relaxation curve (LM_LEAST_SQUARE_PRONY).
+
+    Binding is by id alone: the block id must equal the /MAT id or the starter
+    raises ERROR 1663 (hm_read_visc.F:106-121). M = 0 is ERROR 2026, so no
+    caller may emit this block with an empty series."""
+    lines = [
+        f"/VISC/PRONY/{mid}",
+        "#        M                           K_v      Itab    Ishape",
+        f"{_i(m)}{' ' * 10}{_f(k_v)}{_i(itab)}{_i(ishape)}",
+    ]
+    if itab == 1:
+        lines += [
+            "#  Ifunc_G             XGscale             YGscale",
+            f"{_i(fct_g)}{_f(0.0)}{_f(0.0)}",
+            "#  Ifunc_K             XKscale             YKscale",
+            f"{_i(fct_k)}{_f(0.0)}{_f(0.0)}",
+        ]
+    else:
+        gis = gis or []
+        betais = betais or []
+        kis = kis or [0.0] * len(gis)
+        betakis = betakis or [0.0] * len(gis)
+        lines.append(
+            "#                G_i              Beta_i                  Ki             Beta_ki")
+        for i, g in enumerate(gis):
+            lines.append(f"{_f(g)}{_f(betais[i] if i < len(betais) else 0.0)}"
+                         f"{_f(kis[i] if i < len(kis) else 0.0)}"
+                         f"{_f(betakis[i] if i < len(betakis) else 0.0)}")
+    lines.append(HDR)
+    return lines
+
+
 def _emit_visc_prony_kv(mid: int, gis: List[float], betais: List[float],
                         k_v: float) -> List[str]:
     """/VISC/PRONY with a non-zero bulk modulus — the *MAT_124 form. Same
     layout as _emit_visc_prony (which writes K_v = 0 for the MAT_077_H path);
     the bulk relaxation terms Ki/Beta_ki stay 0 because LS-DYNA's card carries
     only the deviatoric Gi/BETAi pairs."""
-    lines = [
-        f"/VISC/PRONY/{mid}",
-        "#        M                           K_v      Itab    Ishape",
-        f"{_i(len(gis))}{' ' * 10}{_f(k_v)}{_i(0)}{_i(0)}",
-        "#                G_i              Beta_i                  Ki             Beta_ki",
-    ]
-    for g, b in zip(gis, betais):
-        lines.append(f"{_f(g)}{_f(b)}{_f(0.0)}{_f(0.0)}")
-    lines.append(HDR)
-    return lines
+    return _visc_prony_lines(mid, len(gis), k_v=k_v, gis=gis, betais=betais)
+
+
+def _emit_visc_prony_full(mid: int, gis: List[float], betais: List[float],
+                          kis: List[float], betakis: List[float],
+                          k_v: float = 0.0) -> List[str]:
+    """/VISC/PRONY carrying BOTH the deviatoric and the bulk relaxation
+    columns — the *MAT_076 form, whose LS-DYNA card really does supply
+    GI/BETAI/KI/BETAKI per term. dyna2rad copies GI/BETAI/KI but asks the SDI
+    layer for "BETAK", which is not the array's solver name ("BETAKI"), so
+    every bulk decay constant is silently dropped and the bulk branch runs with
+    K_i != 0 and beta_ki = 0 (CM:4526). k2rad writes all four."""
+    return _visc_prony_lines(mid, len(gis), k_v=k_v, gis=gis, betais=betais,
+                             kis=kis, betakis=betakis)
+
+
+def _emit_visc_prony_fit(mid: int, m: int, fct_g: int, fct_k: int) -> List[str]:
+    """/VISC/PRONY Itab=1 — the starter fits an M-term Prony series to the
+    tabulated relaxation function(s), which is exactly *MAT_076's LCID+NT
+    input. dyna2rad intends this branch but never reaches it: it reads the
+    LS-DYNA field through sdiIdentifier("LSD_LCIDK"), and the cfg attribute is
+    LSD_LCID2 (solver name LCIDK), so the handle is always invalid, the
+    Itab=1 test `lcId > 0 && lcIdk > 0` is never true, and its Ifunc_G/Ifunc_K
+    would in any case have been written onto the LAW42 MATERIAL, which has no
+    such fields (CM:4496-4516)."""
+    return _visc_prony_lines(mid, m, itab=1, fct_g=fct_g, fct_k=fct_k)
 
 
 def _emit_mat124_fail(mat: MatPlasCompTens,
@@ -2719,16 +2811,7 @@ def _emit_visc_prony(mid: int, gis: List[float], betais: List[float]) -> List[st
     dyna2rad (MAT_077_H both branches) writes K_v=0, Itab/Ishape 0, the LS-DYNA
     Gi/BETAi pairs verbatim (Beta_i is the decay constant directly — no 1/BETA
     inversion) and zero bulk terms."""
-    lines = [
-        f"/VISC/PRONY/{mid}",
-        "#        M                           K_v      Itab    Ishape",
-        f"{_i(len(gis))}{' ' * 10}{_f(0.0)}{_i(0)}{_i(0)}",
-        "#                G_i              Beta_i                  Ki             Beta_ki",
-    ]
-    for g, b in zip(gis, betais):
-        lines.append(f"{_f(g)}{_f(b)}{_f(0.0)}{_f(0.0)}")
-    lines.append(HDR)
-    return lines
+    return _visc_prony_lines(mid, len(gis), gis=gis, betais=betais)
 
 
 def _emit_mat_law42_blatz_ko(mat: MatBlatzKo) -> List[str]:
@@ -3104,13 +3187,16 @@ def _warn_rubber_ref(state: ConversionState) -> None:
     MAT_007, where REF=1 makes a nodeless /XREF stub — not replicated: with no
     reference coordinates it initializes nothing). k2rad emits the real /XREF
     blocks from the keyword (writer.inistate._make_xref) and warns when a
-    REF=1 material has no reference-geometry coverage to initialize from."""
-    flagged = [(kw, m) for kw, mats in (
-        ("*MAT_BLATZ-KO_RUBBER", state.mat_blatz_ko),
-        ("*MAT_MOONEY-RIVLIN_RUBBER", state.mat_mooney_rivlin),
-        ("*MAT_OGDEN_RUBBER", state.mat_ogden),
-        ("*MAT_HYPERELASTIC_RUBBER", state.mat_hyper_rubber),
-    ) for m in mats.values() if m.ref != 0.0]
+    REF=1 material has no reference-geometry coverage to initialize from.
+
+    Covers EVERY REF-bearing family through ``_ref_flag_materials`` — including
+    *MAT_SIMPLIFIED_RUBBER/FOAM, *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE and
+    *MAT_SOFT_TISSUE, whose LAW88/LAW42 targets are on the solid-/XREF
+    whitelist just like the four hyperelastic rubbers. The mirror case (a /XREF
+    reaching a REF=0 material) is reported by ``_resolve_xref_parts``, which is
+    the pass that actually knows which parts kept a block."""
+    flagged = [(kw, m) for kw, mats in _ref_flag_materials(state)
+               for m in mats.values() if m.ref != 0.0]
     if not flagged:
         return
     if not state.foam_ref_geoms:
@@ -3136,6 +3222,960 @@ def _warn_rubber_ref(state: ConversionState) -> None:
                 "*INITIAL_FOAM_REFERENCE_GEOMETRY node table covers no node "
                 "of this material's part(s) — no /XREF reaches it; the run "
                 "starts unstressed at the modeled coordinates.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Viscoelastic batch: MAT_006 / MAT_061 / MAT_076 / MAT_181 / MAT_183 /
+#                     MAT_091 / MAT_092
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _law34_lines(mid: int, title: str, rho: float, bulk: float, g0: float,
+                 gl: float, beta: float) -> List[str]:
+    """/MAT/LAW34 (BOLTZMAN) card block. Layout audited against hm_cfg_files
+    MAT/matl34_boltzman.cfg FORMAT(radioss51) — the block a /BEGIN 2022 deck is
+    read with — and against hm_read_mat34.F:
+      Init.dens.(20) / K(20) / G0(20) Gl(20) Beta(20) / P0(20) Phi(20) Gamma0(20)
+    All four data cards are UNCONDITIONAL: the P0/Phi/Gamma0 air-in-foam card
+    must be present even when every value is zero, or the reader runs off the
+    end of the block. G(t) = Gl + (G0-Gl)*exp(-Beta*t) (sigeps34.F:88-101).
+
+    Reference-density trap, shared by LAW34/40/42/62: the reader pre-scans
+    columns 21-40 of the density card (CARD_PREREAD) and switches to the
+    two-field form if anything non-blank sits there — so the density line must
+    be exactly the 20-column field and nothing else. _f() gives that.
+
+    The starter applies NO defaults to K/G0/Gl/Beta; the cfg CHECK block wants
+    all of them > 0."""
+    return [
+        f"/MAT/LAW34/{mid}",
+        title or f"MAT_{mid}",
+        "#        Init. dens.",
+        f"{_f(rho)}",
+        "#                  K",
+        f"{_f(bulk)}",
+        "#                 G0                  Gl                Beta",
+        f"{_f(g0)}{_f(gl)}{_f(beta)}",
+        "#                 P0                 Phi              Gamma0",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _law40_lines(mid: int, title: str, rho: float, bulk: float, g_inf: float,
+                 gs: List[float], betas: List[float]) -> List[str]:
+    """/MAT/LAW40 (KELVINMAX) card block. Layout audited against hm_cfg_files
+    MAT/matl40_kelvinmax.cfg FORMAT(radioss90) and hm_read_mat40.F:
+      RHO_I(20) / K(20) G_inf(20) Astass(20) Bstass(20) Kvm(20) /
+      G1..G5(5x20) / BETA1..BETA5(5x20)
+
+    Astass/Bstass/Kvm are written 0 on purpose: hm_read_mat40.F:122-124 turns
+    any value <= 1e-20 into INFINITY, which disables the Stassi/von-Mises yield
+    surface and leaves pure viscoelasticity — dyna2rad's choice and the right
+    one for a *MAT_061.
+
+    FIVE Maxwell branches, hard — the card has no CELL_LIST and no
+    continuation, so a series with more terms has to go to LAW42 +
+    /VISC/PRONY (up to 100) instead."""
+    g5 = (list(gs) + [0.0] * 5)[:5]
+    b5 = (list(betas) + [0.0] * 5)[:5]
+    return [
+        f"/MAT/LAW40/{mid}",
+        title or f"MAT_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#                  K               G_inf              Astass              Bstass                 Kvm",
+        f"{_f(bulk)}{_f(g_inf)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#                 G1                  G2                  G3                  G4                  G5",
+        "".join(_f(v) for v in g5),
+        "#              BETA1               BETA2               BETA3               BETA4               BETA5",
+        "".join(_f(v) for v in b5),
+        HDR,
+    ]
+
+
+def _law88_lines(mid: int, title: str, rho: float, nu: float, k: float,
+                 fcut: float, fct_unload: int, fscale_unload: float,
+                 hys: float, shape: float, tension: int,
+                 fct_load: List[int], rates: List[float]) -> List[str]:
+    """/MAT/LAW88 (TABULATED_HYPERELASTIC) card block. Layout audited against
+    hm_cfg_files MAT/mat_law88.cfg FORMAT(radioss2017) — the block a /BEGIN
+    2022 deck is read with — and against hm_read_mat88.F90:
+      RHO_I(20) /
+      NU(20) K(20) F_CUT(20) F_SMOOTH(10) NL(10) /
+      FCT_ID_UN(10) gap(10) F_SCALE_UN(20) HYS(20) SHAPE(20) TENSION(10) /
+      NL x [FCT_ID_LI(10) gap(10) F_SCALE_LI(20) EPSI_LI(20)]
+
+    EXACTLY three cards plus the NL rows. The radioss2026 revision adds an
+    SGL/SW/ST/G/SIGF card and a KFAIL/GAM1/GAM2/EH/FAILIP card, and a /BEGIN
+    2022 starter SWALLOWS them without an error — measured: SGL=0.05 reads back
+    as 1.0 — so emitting them would be silent data loss, not a diagnosable
+    version complaint. The specimen normalization is therefore baked into the
+    curve POINTS instead (see _law88_curve).
+
+    Three traps: card 2 columns 61-70 (F_SMOOTH) are consumed by the format and
+    read by NOBODY in the current starter — written blank; card 3's TENSION
+    sits at columns 81-90, past the 80-column mark; and EPSI_LI == 0 on a row
+    i > 1 is silently replaced by 1.0 in the unit system, not 0.
+
+    Blank(0) fields keep the starter defaults: F_SCALE_UN/F_SCALE_LI 0 -> 1.0,
+    F_CUT 0 -> a sound-speed-derived cut-off, NU <= 0 -> beta = |NU| viscous
+    pressure and NU := 0.495 (hm_read_mat88.F90:128-227). NL == 0 is ERROR
+    866."""
+    lines = [
+        f"/MAT/LAW88/{mid}",
+        title or f"MAT_{mid}",
+        "#              RHO_I",
+        f"{_f(rho)}",
+        "#                 NU                   K               F_CUT  F_SMOOTH        NL",
+        f"{_f(nu)}{_f(k)}{_f(fcut)}{' ' * 10}{_i(len(fct_load))}",
+        "#FCT_ID_UN                    F_SCALE_UN                 HYS               SHAPE   TENSION",
+        f"{_i(fct_unload)}{' ' * 10}{_f(fscale_unload)}{_f(hys)}{_f(shape)}"
+        f"{_i(tension)}",
+    ]
+    if fct_load:
+        lines.append(
+            "#FCT_ID_LI                    F_SCALE_LI             EPSI_LI")
+        for fid, rate in zip(fct_load, rates):
+            lines.append(f"{_i(fid)}{' ' * 10}{_f(0.0)}{_f(rate)}")
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_viscoelastic(mat: MatViscoelastic) -> List[str]:
+    """*MAT_VISCOELASTIC (MAT_006) → /MAT/LAW34 (BOLTZMAN) — an exact 1:1.
+    BULK/G0/GI/BETA go straight across (BETA is a decay RATE in both codes,
+    so there is nothing to convert) and the P0/Phi/Gamma0 air-in-foam term is
+    left inactive, exactly like dyna2rad p_ConvertMatL6."""
+    return _law34_lines(mat.mid, mat.title, mat.rho, mat.bulk, mat.g0, mat.gi,
+                        mat.beta)
+
+
+def _emit_mat_kelvin_maxwell(mat: MatKelvinMaxwell) -> List[str]:
+    """*MAT_KELVIN-MAXWELL_VISCOELASTIC (MAT_061) → /MAT/LAW40 (KELVINMAX),
+    dyna2rad p_ConvertMatL61 verbatim: G_inf = GI, G1 = G0 - GI, BETA1 = DC,
+    and the four remaining Maxwell branches plus Astass/Bstass/Kvm zeroed."""
+    return _law40_lines(mat.mid, mat.title, mat.rho, mat.bulk, mat.gi,
+                        [mat.g0 - mat.gi], [mat.dc])
+
+
+def _emit_mat_general_visco(mat: MatGeneralViscoelastic) -> List[str]:
+    """*MAT_GENERAL_VISCOELASTIC (MAT_076) → /MAT/LAW42 (OGDEN) + /VISC/PRONY.
+
+    The elastic carrier is dyna2rad p_ConvertMatL76 verbatim (CM:4457-4472):
+    Nu = 0.495, Mu_1 = +0.01*BULK, Mu_2 = -0.01*BULK, alpha = +2/-2 — i.e. a
+    Mooney-Rivlin ground state with C10 = C01 = 0.005*BULK. LAW42 has no bulk
+    field at all (it derives one from Nu), so the LS-DYNA BULK reaches Radioss
+    only through those mu values; the resolve pass reports what that really
+    costs. PCF/EF/TREF/A/B and the BSTART/TRAMP fit seeds have no LAW42 slot.
+
+    The Prony series rides the separate /VISC/PRONY block, which is the only
+    Radioss card with all four LS-DYNA columns (LAW42's own embedded Gamma/Tau
+    arrays have no bulk column, and their Tau is a relaxation TIME while
+    LS-DYNA gives decay constants). Itab=1 carries the LCID/NT curve-fit form
+    onto the starter's own Levenberg-Marquardt Prony fit."""
+    lines = _law42_lines(mat.mid, mat.title, mat.rho, nu=0.495, sigma_cut=0.0,
+                         funidbulk=0, fscale_bulk=0.0, iform=0,
+                         mus=[0.01 * mat.bulk, -0.01 * mat.bulk],
+                         alphas=[2.0, -2.0], gammas=[], taus=[])
+    if mat.prony_m > 0 and mat.prony_itab == 1:
+        lines += _emit_visc_prony_fit(mat.mid, mat.prony_m, mat.lcid, mat.lcidk)
+    elif mat.prony_m > 0:
+        lines += _emit_visc_prony_full(mat.mid, mat.gi, mat.betai, mat.ki,
+                                       mat.betaki)
+    return lines
+
+
+def _soft_tissue_prony(mat: MatSoftTissue):
+    """The (S_i, T_i) pairs that reach LAW42's Gamma_arr/Tau_arr: the NON-ZERO
+    ones, COMPACTED. dyna2rad counts every non-zero S_i but then copies slots
+    0..M-1 (CM:11010-11021), so an S1 = 0 with S2 != 0 silently converts the
+    wrong terms — and it indexes an sdiDoubleList that was only reserve()d, not
+    resize()d, which is out of bounds on top of that."""
+    kept = [(s, t) for s, t in zip(mat.s, mat.t) if s != 0.0]
+    return [s for s, _ in kept], [t for _, t in kept]
+
+
+def _emit_mat_soft_tissue(mat: MatSoftTissue) -> List[str]:
+    """*MAT_SOFT_TISSUE (091) / _VISCO (092) → /MAT/LAW42 (OGDEN), dyna2rad
+    p_ConvertMatL91_92 verbatim: Mu_1 = 2*C1, Mu_2 = -2*C2, alpha = +2/-2,
+    Nu = 0.495 — the standard Mooney-Rivlin <-> Ogden identity for the
+    ISOTROPIC ground substance of LS-DYNA's strain energy. The _VISCO S_i/T_i
+    pairs go into LAW42's own Gamma_arr/Tau_arr (relaxation TIMES on both
+    sides, so T_i needs no inversion); no /VISC/PRONY is involved.
+
+    Everything transversely isotropic — the C3/C4/C5 collagen fibre term,
+    XLAM/XLAM0/FANG, all of AOPT and the three FAILS* modes — has no LAW42
+    slot and is enumerated by the resolve pass."""
+    gammas, taus = _soft_tissue_prony(mat)
+    return _law42_lines(mat.mid, mat.title, mat.rho, nu=0.495, sigma_cut=0.0,
+                        funidbulk=0, fscale_bulk=0.0, iform=0,
+                        mus=[2.0 * mat.c1, -2.0 * mat.c2], alphas=[2.0, -2.0],
+                        gammas=gammas, taus=taus)
+
+
+def _emit_mat_simplified_rubber(mat: MatSimplifiedRubber) -> List[str]:
+    """*MAT_SIMPLIFIED_RUBBER/FOAM (181) / *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE
+    (183) → /MAT/LAW88, with the loading/unloading curve family resolved by
+    _resolve_mat_viscoelastic (which needs the parsed *DEFINE_CURVE /
+    *DEFINE_TABLE and synthesizes the specimen-normalized duplicates).
+
+    NU is the LS-DYNA PR verbatim, unlike dyna2rad's hard 0: LAW88's own
+    `nu <= 0 -> beta = |nu|, nu := 0.495` rule (hm_read_mat88.F90:186-191) IS
+    the LS-DYNA `PR <= 0` viscous-pressure-decay rule, so passing PR through
+    transfers it exactly and still reproduces dyna2rad's output for a blank PR.
+    TENSION is transferred too — dyna2rad asks for "TENSIOM" for MAT_181, a
+    string that appears nowhere else in the whole Radioss tree, so its
+    rate-effect flag never arrives (it gets MAT_183 right).
+
+    F_SMOOTH is written blank because the current starter never reads it.
+    MAT_181's optional Gi/BETAi cards become a /VISC/PRONY of the same id."""
+    lines = _law88_lines(
+        mat.mid, mat.title, mat.rho, nu=mat.pr, k=mat.k, fcut=0.0,
+        fct_unload=mat.fct_unload, fscale_unload=0.0, hys=mat.hys,
+        shape=mat.shape_out, tension=mat.tension,
+        fct_load=mat.fct_load, rates=mat.rates)
+    if mat.gi:
+        lines += _emit_visc_prony(mat.mid, mat.gi, mat.betai)
+    return lines
+
+
+# Loading functions a /MAT/LAW88 may carry. The starter declares
+# `parameter (maxfunc = 128)` (hm_read_mat.F90:294) and sizes
+# ifunc/rate/yfac/lambda at maxfunc+1 (hm_read_mat88.F90:103-108), then reads
+# `do i = 1,nl` with NO upper bound on NL — so an over-long rate family is an
+# out-of-bounds write rather than a diagnosable error.
+_LAW88_MAX_NL = 128
+
+
+def _law88_curve(state: ConversionState, kw: str, mat: MatSimplifiedRubber,
+                 lcid: int, role: str, cache: Optional[dict] = None) -> int:
+    """One *MAT_181/183 test curve → the /FUNCT id LAW88 should reference.
+
+    LS-DYNA states the curve as specimen FORCE vs CHANGE IN GAUGE LENGTH and
+    normalizes it with SGL/SW/ST; LAW88 has SGL/SW/ST fields only from the
+    radioss2026 card revision on, and a /BEGIN 2022 starter forces all three to
+    1.0 (hm_read_mat88.F90:205-215). The normalization therefore has to be in
+    the points: abscissa x 1/SGL (engineering strain), ordinate x 1/(SW*ST)
+    (engineering stress). Same construction as dyna2rad, which carries the two
+    factors on a /MOVE_FUNCT instead — except that dyna2rad REFUSES to write
+    any curve at all unless SGL, SW and ST are ALL non-zero (CM:4955), which
+    turns a curve already given in stress-strain form into NL = 0, i.e. starter
+    ERROR 866; and for MAT_183 it uses the two scale factors UNINITIALISED in
+    that case (CM:5165-5166). k2rad reads a blank dimension as 1.0 — "the curve
+    is already engineering stress vs strain", which is also what the starter
+    itself assumes.
+
+    *cache* maps a source LCID to the id already synthesized for it inside this
+    material, so a curve used twice — the same LCID on LC and LCUNLD, or repeated
+    across the rows of a *DEFINE_TABLE — yields ONE duplicate. That is not just
+    tidiness: with two distinct ids the starter's self-unloading rule
+    (`if ifunc_unload == ifunc(1) then ifunc_unload = 0`,
+    hm_read_mat88.F90:221-225) would no longer fire, and the material would
+    unload along a separate-but-identical function instead of being flagged
+    hysteresis-free."""
+    if cache is not None and lcid in cache:
+        return cache[lcid]
+    crv = state.curves.get(lcid)
+    if crv is None or not crv.pts:
+        state.warn(
+            f"{kw} mid={mat.mid}: {role} curve {lcid} has no parsed "
+            "*DEFINE_CURVE — the reference is DROPPED"
+            + (", and with no loading curve at all /MAT/LAW88 gets NL=0, "
+               "which the starter rejects (ERROR 866)"
+               if role == "loading" else "")
+            + "; add the curve to the deck.")
+        return 0
+    xmin = min(x for x, _ in crv.pts)
+    if role == "loading" and xmin >= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: {role} curve {lcid} has NO negative-strain "
+            f"(compression) points — its lowest abscissa is "
+            f"{xmin:g}. /MAT/LAW88 evaluates this curve "
+            "at ALL THREE principal stretches (sigeps88.F90:375-377 feeds "
+            "lam1, lam2 and lam3 into the same table), so a uniaxial TENSION "
+            "test drives the two lateral stretches into compression — at 100% "
+            "axial strain they sit at lam=0.707, i.e. engineering strain "
+            "-0.293 — where the curve is EXTRAPOLATED. Measured consequence "
+            "on a single-element cell: the lateral stretches bifurcated at "
+            "eps=0.65 (lam2 0.79 -> 0.41 while lam3 grew to 1.45, kinetic "
+            "energy up 4 orders of magnitude) and the run still reached "
+            "NORMAL TERMINATION with wrong results; adding the compression "
+            "branch fixed it (lam2=lam3=0.70734 at eps=1, J=1.00066). Extend "
+            "the table into negative strain.")
+    sgl = mat.sgl if mat.sgl != 0.0 else 1.0
+    sw = mat.sw if mat.sw != 0.0 else 1.0
+    st = mat.st if mat.st != 0.0 else 1.0
+    sfa = 1.0 / sgl
+    sfo = 1.0 / (sw * st)
+    if sfa == 1.0 and sfo == 1.0:
+        if cache is not None:
+            cache[lcid] = lcid
+        return lcid
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, (crv.title or f"FUNCT_{lcid}") + "_Duplicate",
+                    [(x * sfa, y * sfo) for x, y in crv.pts])
+    if cache is not None:
+        cache[lcid] = fid
+    state.warn(
+        f"{kw} mid={mat.mid}: {role} curve {lcid} normalized to engineering "
+        f"stress-strain as /FUNCT {fid} (abscissa x{sfa:g} = 1/SGL, ordinate "
+        f"x{sfo:g} = 1/(SW*ST)) — the /BEGIN 2022 /MAT/LAW88 card has no "
+        "SGL/SW/ST fields, so the specimen normalization has to live in the "
+        "points; the original curve is kept unchanged.")
+    return fid
+
+
+def _resolve_law88_curves(state: ConversionState, kw: str,
+                          mat: MatSimplifiedRubber) -> None:
+    """LAW88 FCT_ID_LI / EPSI_LI / FCT_ID_UN, following dyna2rad
+    ConvertMatL181ToMatL88 (CM:4953-5145) and p_ConvertMatL183 (CM:5188-5462).
+
+    A *DEFINE_TABLE LC/TBID becomes one loading curve per rate, plus a
+    DUPLICATE of the highest-rate curve at 10x that rate — dyna2rad's
+    deliberate flat-extrapolation guard, so Radioss does not extrapolate the
+    rate axis past the measured data. A *DEFINE_CURVE becomes a single row at
+    rate 1.0.
+
+    Unloading, in dyna2rad's priority order: LCUNLD -> HU/SHAPE (181 only,
+    and only when the optional card is really there — HU defaults to 1.0, "no
+    dissipation") -> the loading curve itself, which the starter then nulls out
+    (`if ifunc_unload == ifunc(1) then ifunc_unload = 0`)."""
+    fcts: List[int] = []
+    rates: List[float] = []
+    cache: dict = {}
+    tab = state.define_tables.get(mat.lc_tbid)
+    if mat.lc_tbid <= 0:
+        state.warn(
+            f"{kw} mid={mat.mid}: no LC/TBID loading curve is given — "
+            "/MAT/LAW88 needs at least one (NL=0 is starter ERROR 866).")
+    elif tab is not None and not (tab.resolved and tab.rows):
+        # A table that IS in the deck but could not be resolved must not fall
+        # through to the single-curve branch: the id would then be reported as
+        # a missing *DEFINE_CURVE, which names the wrong keyword entirely.
+        state.warn(
+            f"{kw} mid={mat.mid}: LC/TBID={mat.lc_tbid} is a *DEFINE_TABLE "
+            "that could not be resolved to (rate, curve) rows — the rate "
+            "family is DROPPED and /MAT/LAW88 gets NL=0, which the starter "
+            "rejects (ERROR 866). See the *DEFINE_TABLE's own warning for why "
+            "it did not resolve.")
+    elif tab is not None:
+        rows = list(tab.rows)
+        if len(rows) > _LAW88_MAX_NL - 1:
+            state.warn(
+                f"{kw} mid={mat.mid}: *DEFINE_TABLE {mat.lc_tbid} has "
+                f"{len(rows)} rate rows; /MAT/LAW88 is limited to "
+                f"{_LAW88_MAX_NL} loading functions (the starter declares "
+                "maxfunc=128 and sizes ifunc/rate/yfac/lambda at maxfunc+1 "
+                "without checking NL — hm_read_mat.F90:294, "
+                "hm_read_mat88.F90:103-108), so the highest-rate rows past "
+                f"{_LAW88_MAX_NL - 1} are DROPPED to leave room for the "
+                "flat-extrapolation duplicate.")
+            rows = rows[:_LAW88_MAX_NL - 1]
+        for rate, lc in rows:
+            fid = _law88_curve(state, kw, mat, lc, "loading", cache)
+            if fid:
+                fcts.append(fid)
+                rates.append(rate)
+        if fcts:
+            extra = rates[-1] * 10.0
+            if extra <= rates[-1]:
+                # A non-increasing extra rate is starter ERROR 478; dyna2rad
+                # multiplies blindly, which for a top rate of 0 repeats it.
+                extra = rates[-1] + 1.0
+            fcts.append(fcts[-1])
+            rates.append(extra)
+            state.warn(
+                f"{kw} mid={mat.mid}: *DEFINE_TABLE {mat.lc_tbid} converted to "
+                f"{len(fcts) - 1} rate-dependent loading curve(s); the highest-"
+                f"rate curve is REPEATED at Eps_dot={extra:g} so Radioss holds "
+                "it flat instead of extrapolating past the measured rate range "
+                "(dyna2rad does the same).")
+    else:
+        fid = _law88_curve(state, kw, mat, mat.lc_tbid, "loading", cache)
+        if fid:
+            fcts.append(fid)
+            rates.append(1.0)
+    mat.fct_load = fcts
+    mat.rates = rates
+    if mat.lcunld > 0:
+        mat.fct_unload = _law88_curve(state, kw, mat, mat.lcunld, "unloading",
+                                      cache)
+        if mat.fct_unload and mat.family == "181" and mat.has_unload_card \
+                and mat.hu != 1.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: HU={mat.hu:g} is IGNORED because "
+                f"LCUNLD={mat.lcunld} is given — LS-DYNA's own rule, and "
+                "/MAT/LAW88 applies HYS only when FCT_ID_UN is 0.")
+    elif mat.family == "181" and mat.has_unload_card and mat.hu > 0.0:
+        mat.hys = mat.hu
+        mat.shape_out = mat.shape
+    elif fcts:
+        # dyna2rad's third branch: point FCT_ID_UN at the loading curve. The
+        # starter recognizes that and disables unloading, so the effect is
+        # "unload along the loading curve", i.e. no hysteresis.
+        mat.fct_unload = fcts[0]
+
+
+def _resolve_mat_viscoelastic(state: ConversionState) -> None:
+    """Routing, curve synthesis and drop-warnings for the viscoelastic batch,
+    before _make_materials emits. Runs after _resolve_define_tables (MAT_181's
+    LC/TBID may be a table) and before _resolve_xref_parts (LAW42 and LAW88 are
+    both on the starter's solid-/XREF law whitelist, so these materials change
+    which parts get a /XREF).
+
+    Every field dyna2rad drops in silence is warned here instead — for this
+    batch that is most of them, and for *MAT_SOFT_TISSUE it is the entire
+    reason the material is not physically equivalent."""
+    _resolve_mat006(state)
+    _resolve_mat061(state)
+    _resolve_mat076(state)
+    _resolve_mat181_183(state)
+    _resolve_mat091_092(state)
+
+
+def _resolve_mat006(state: ConversionState) -> None:
+    """*MAT_VISCOELASTIC: collapse the temperature curves, then check the
+    LAW34 preconditions."""
+    kw = "*MAT_VISCOELASTIC"
+    for mat in state.mat_viscoelastic.values():
+        for attr, name in (("bulk", "BULK"), ("g0", "G0"),
+                           ("gi", "GI"), ("beta", "BETA")):
+            val = getattr(mat, attr)
+            if val >= 0.0:
+                continue
+            lcid = int(-val)
+            crv = state.curves.get(lcid)
+            if crv is None or not crv.pts:
+                setattr(mat, attr, 0.0)
+                state.warn(
+                    f"{kw} mid={mat.mid}: {name}={val:g} names temperature "
+                    f"curve {lcid}, which has no parsed *DEFINE_CURVE — the "
+                    f"field is written 0, and /MAT/LAW34 requires {name} > 0 "
+                    "(starter rejects the material); add the curve.")
+                continue
+            setattr(mat, attr, crv.pts[0][1])
+            state.warn(
+                f"{kw} mid={mat.mid}: {name}={val:g} is a TEMPERATURE-dependent "
+                f"curve (LCID {lcid}). /MAT/LAW34 has no temperature "
+                f"dependence, so it is collapsed to {crv.pts[0][1]:g}, the "
+                f"value at the lowest tabulated temperature "
+                f"({crv.pts[0][0]:g}) — dyna2rad's rule for G0/GI/BETA. "
+                + ("(dyna2rad never reads the BULK curve at all and leaves "
+                   "K=0, which the starter then rejects.) "
+                   if name == "BULK" else "")
+                + "The converted material is isothermal; re-state it at the "
+                  "working temperature if that is not what the run needs.")
+        if mat.g0 == mat.gi:
+            state.warn(
+                f"{kw} mid={mat.mid}: G0=GI={mat.g0:g}, so G(t) is constant "
+                "and the material is purely ELASTIC — there is no relaxation "
+                "left to convert. /MAT/LAW34 is still written (dyna2rad raises "
+                "its error 200003 here and also continues); use *MAT_ELASTIC "
+                "if that is intended.")
+        _warn_law34_zero_fields(state, kw, mat)
+
+
+def _warn_law34_zero_fields(state: ConversionState, kw: str,
+                            mat: MatViscoelastic) -> None:
+    """Non-positive /MAT/LAW34 fields, graded by what the solver really does.
+
+    The matl34_boltzman.cfg CHECK block asks for BULK/DECAY/G0/GI/RHO > 0, but
+    that is a HyperMesh-side rule: hm_read_mat34.F contains no ANCMSG at all —
+    it copies BULK/G0/GI/BETA straight into UPARAM(1..4). Each case below was
+    measured on starter_win64 + engine_win64 (/BEGIN 2022, single hex, held
+    shear) rather than read off the cfg, because the four outcomes differ:
+
+      RHO  = 0  starter ERROR 683, deck stops.               (measured)
+      G0   = 0  starter clean, but YOUNG = 9*K*G0/(3*K+G0) = 0 and the solid
+                element time step comes out 1.0E+21.        (measured)
+      BULK = 0  starter clean, YOUNG = 0, no volumetric stiffness left; the
+                element time step stays finite.             (measured)
+      GI   = 0  fully LEGAL — G_inf = 0 is "relaxes completely". Starter clean,
+                engine clean, sensible energies.            (measured)
+      BETA = 0  starter clean, then the ENGINE divides by it: sigeps34.F:101
+                computes C2 = -(1-exp(-BETA*dt))/BETA = 0/0, so every
+                deviatoric stress increment is NaN — and the run still reports
+                NORMAL TERMINATION.                          (measured: 1114
+                cycles of NaN I-ENERGY / EXT-WORK)
+
+    So GI = 0 must not be reported as fatal (the old wording pushed the user to
+    change a correct card), and BETA = 0 must not be reported as merely
+    unreadable (it is a silent NaN run, which is worse)."""
+    if mat.rho <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: RHO={mat.rho:g} <= 0 — the starter rejects "
+            "the material with ERROR 683 (zero density) and the deck does not "
+            "read; fill the card in.")
+    if mat.beta == 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BETA=0 — the starter takes the card, but the "
+            "LAW34 engine kernel forms C2 = -(1-exp(-BETA*dt))/BETA "
+            "(sigeps34.F:101), i.e. 0/0, so every deviatoric stress increment "
+            "becomes NaN while the run still ends NORMAL TERMINATION. If no "
+            "relaxation is wanted, use *MAT_ELASTIC; if the decay constant is "
+            "simply missing from the card, fill it in.")
+    elif mat.beta < 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BETA={mat.beta:g} < 0 makes exp(-BETA*t) "
+            "GROW without bound — the viscous shear stress diverges. LAW34 "
+            "takes the value unchecked; restate BETA as a positive decay "
+            "rate.")
+    if mat.g0 <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: G0={mat.g0:g} <= 0 — the starter takes the "
+            "card, but YOUNG = 9*K*G0/(3*K+G0) collapses to 0 "
+            "(hm_read_mat34.F:139) and the part's solid time step was measured "
+            "at 1.0E+21, i.e. the material carries no shear stiffness and sets "
+            "no stable step. Give the short-time shear modulus.")
+    if mat.bulk <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: BULK={mat.bulk:g} <= 0 — the starter takes "
+            "the card, but the material then has NO volumetric stiffness "
+            "(YOUNG and the LAW34 sound speed PM(27) both come out 0). Give "
+            "the elastic bulk modulus.")
+    if mat.gi < 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: GI={mat.gi:g} < 0 — G_inf is the LONG-TIME "
+            "shear modulus and cannot be negative; LAW34 takes it unchecked "
+            "and the relaxed stiffness comes out negative.")
+    elif mat.gi == 0.0 and mat.g0 > 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: GI=0 means the material relaxes COMPLETELY — "
+            f"G(t) decays from G0={mat.g0:g} to zero long-time shear "
+            "stiffness. This is a legal card on both sides (LS-DYNA states no "
+            "lower bound for GI, and hm_read_mat34.F validates nothing), and "
+            "it converts and runs cleanly; flagged only because a blank GI "
+            "field reads the same way as a deliberate zero.")
+
+
+def _shell_parts_by_mid(state: ConversionState) -> dict:
+    """{mid: sorted part ids} over the parts that carry shell elements or a
+    *SECTION_SHELL.
+
+    Built ONCE per conversion rather than per material: the element scan is
+    O(n_shells), so doing it inside a per-material loop costs
+    O(n_shells x n_materials) — seconds of pure overhead on a million-shell
+    deck with several MAT_061s, in a pass that otherwise only touches the
+    material dicts."""
+    shell_pids = {e.pid for e in state.shell_elems}
+    out: dict = {}
+    for pid, p in sorted(state.parts.items()):
+        if pid in shell_pids or p.secid in state.sec_shells:
+            out.setdefault(p.mid, []).append(pid)
+    return out
+
+
+def _resolve_mat061(state: ConversionState) -> None:
+    """*MAT_KELVIN-MAXWELL_VISCOELASTIC: the FO Kelvin branch, the LAW40
+    Poisson gate and the solids-only applicability check."""
+    kw = "*MAT_KELVIN-MAXWELL_VISCOELASTIC"
+    if not state.mat_kelvin_maxwell:
+        return
+    shell_parts = _shell_parts_by_mid(state)
+    for mat in state.mat_kelvin_maxwell.values():
+        g1 = mat.g0 - mat.gi
+        if mat.fo != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: FO={mat.fo:g} selects the KELVIN "
+                f"formulation, in which DC={mat.dc:g} is a RETARDATION time "
+                "constant obeying a different evolution equation, not a "
+                "Maxwell decay rate. /MAT/LAW40's kernel is exp(-BETA*dt) "
+                "(Maxwell only), so DC is written into BETA1 as if FO were 0 "
+                "— the same thing dyna2rad does SILENTLY. The converted "
+                "relaxation is WRONG for this card; re-state the branch as a "
+                "Maxwell one (FO=0) with an equivalent decay rate.")
+        if mat.so != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: SO={mat.so:g} (which principal strain "
+                "measure LS-DYNA writes to the d3plot history variables) is "
+                "DROPPED — it is an output selector with no Radioss "
+                "counterpart and does not affect the solution.")
+        if g1 < 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: G0={mat.g0:g} < GI={mat.gi:g}, so the "
+                f"Maxwell branch modulus G1 = G0-GI is NEGATIVE ({g1:g}). "
+                "LS-DYNA expects the instantaneous modulus G0 to exceed the "
+                "long-term GI; check the card.")
+        elif g1 == 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: G0=GI={mat.g0:g} leaves G1 = G0-GI = 0, "
+                "i.e. no Maxwell branch at all — the converted /MAT/LAW40 is "
+                "purely elastic with shear modulus G_inf.")
+        for label, gsum in (("G_inf", mat.gi), ("G_inf+sum(G_i)", mat.g0)):
+            denom = 2.0 * gsum + 6.0 * mat.bulk
+            if denom == 0.0:
+                nu = -1.0
+            else:
+                nu = (3.0 * mat.bulk - 2.0 * gsum) / denom
+            if nu < 0.0 or nu >= 0.5:
+                state.warn(
+                    f"{kw} mid={mat.mid}: the Poisson's ratio /MAT/LAW40 "
+                    f"derives from BULK={mat.bulk:g} and {label}={gsum:g} is "
+                    f"{nu:g}, outside [0, 0.5) — the starter REJECTS this "
+                    "material with ERROR 49 (hm_read_mat40.F:126-143). BULK "
+                    f"must be at least (2/3)*G0 = {2.0 * mat.g0 / 3.0:g} for "
+                    "this card.")
+                break
+        shell_pids = shell_parts.get(mat.mid, [])
+        if shell_pids:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) {shell_pids} are SHELL parts, "
+                "but /MAT/LAW40 declares only SOLID_ISOTROPIC and SPH "
+                "(hm_read_mat40.F:184-185) and its engine kernel sigeps40 is "
+                "never called from the shell path. The starter rejects the "
+                "combination with ERROR 3046 (material/element "
+                "compatibility). dyna2rad never checks this. Use "
+                "*MAT_VISCOELASTIC (006) -> /MAT/LAW34, which IS shell-capable "
+                "and has the identical Maxwell G(t), for shell parts.")
+
+
+def _resolve_mat076(state: ConversionState) -> None:
+    """*MAT_GENERAL_VISCOELASTIC: decide the /VISC/PRONY shape and report what
+    the LAW42 elastic carrier really encodes."""
+    kw = "*MAT_GENERAL_VISCOELASTIC"
+    for mat in state.mat_general_visco.values():
+        rows = len(mat.gi)
+        if rows:
+            mat.prony_m = rows
+            mat.prony_itab = 0
+            if mat.lcid > 0 or mat.lcidk > 0:
+                state.warn(
+                    f"{kw} mid={mat.mid}: card 2 names LCID={mat.lcid}/"
+                    f"LCIDK={mat.lcidk} AND {rows} explicit Prony row(s) are "
+                    "given. LS-DYNA takes the explicit rows (card 2 is meant "
+                    "to be blank then) — so does k2rad, and the curve-fit "
+                    "input is IGNORED.")
+            if rows > 100:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {rows} Prony terms exceed "
+                    "/VISC/PRONY's limit of 100 — the extra terms are "
+                    "DROPPED.")
+                mat.prony_m = 100
+                del mat.gi[100:], mat.betai[100:], mat.ki[100:], \
+                    mat.betaki[100:]
+            if any(k != 0.0 for k in mat.ki):
+                state.warn(
+                    f"{kw} mid={mat.mid}: the bulk Prony columns KI/BETAKI are "
+                    "converted to /VISC/PRONY Ki/Beta_ki. dyna2rad copies KI "
+                    "but asks the reader for \"BETAK\" instead of the array's "
+                    "real name BETAKI, so every bulk DECAY constant is "
+                    "silently lost there (CM:4526) and the bulk branch runs "
+                    "with Ki != 0 and Beta_ki = 0.")
+        elif mat.lcid > 0 or mat.lcidk > 0:
+            # "If zero, the default is 6" applies to a fit that actually RUNS:
+            # LS-DYNA fits the shear series only when LCID is given and the bulk
+            # series only when LCIDK is (p.2-560). Defaulting the order of the
+            # ABSENT curve to 6 would pin M at 6 for every single-curve card,
+            # throwing away the user's NT — and, because the starter needs
+            # 2*M < npoints (hm_read_visc_prony.F:473, ERROR 1921), turning a
+            # 10-point curve that LS-DYNA fits with NT=2 into a dead deck.
+            nt = (mat.nt if mat.nt > 0 else 6) if mat.lcid > 0 else 0
+            ntk = (mat.ntk if mat.ntk > 0 else 6) if mat.lcidk > 0 else 0
+            m = min(max(nt, ntk), 6)
+            mat.prony_m = m
+            mat.prony_itab = 1
+            if nt and ntk and nt != ntk:
+                state.warn(
+                    f"{kw} mid={mat.mid}: NT={nt} and NTK={ntk} ask for "
+                    "DIFFERENT fit orders, but /VISC/PRONY carries ONE M for "
+                    f"both the shear and the bulk fit — the larger, M={m}, is "
+                    "used for each. Split the material if the two series must "
+                    "have different term counts.")
+            state.warn(
+                f"{kw} mid={mat.mid}: the relaxation-curve form "
+                f"(LCID={mat.lcid}, NT={mat.nt}, LCIDK={mat.lcidk}, "
+                f"NTK={mat.ntk}) is converted to /VISC/PRONY Itab=1 with "
+                f"M={m}, so the STARTER runs the least-squares Prony fit "
+                "(LM_LEAST_SQUARE_PRONY) — the same thing LS-DYNA does. "
+                "dyna2rad can never reach this branch: it reads the second "
+                "curve through the identifier \"LSD_LCIDK\", which does not "
+                "exist (the attribute is LSD_LCID2), so its test always fails "
+                "and it emits an EMPTY /VISC/PRONY, i.e. starter ERROR 2026.")
+            if max(nt, ntk) > 6:
+                state.warn(
+                    f"{kw} mid={mat.mid}: NT/NTK={max(nt, ntk)} is "
+                    "clamped to the 6-term fit dyna2rad uses; /VISC/PRONY "
+                    "itself would take up to 100, but more terms also need "
+                    "more curve points (2*M >= npoints is starter ERROR "
+                    "1921).")
+            for lcid, role in ((mat.lcid, "shear G(t)"),
+                               (mat.lcidk, "bulk K(t)")):
+                if lcid <= 0:
+                    continue
+                crv = state.curves.get(lcid)
+                if crv is None or not crv.pts:
+                    state.warn(
+                        f"{kw} mid={mat.mid}: the {role} relaxation curve "
+                        f"{lcid} has no parsed *DEFINE_CURVE — the starter "
+                        "cannot run the fit and stops with ERROR 1928; add "
+                        "the curve to the deck.")
+                elif 2 * m >= len(crv.pts):
+                    state.warn(
+                        f"{kw} mid={mat.mid}: the {role} relaxation curve "
+                        f"{lcid} has only {len(crv.pts)} point(s) but the fit "
+                        f"asks for M={m} Prony terms — the starter requires "
+                        f"2*M < npoints and stops with ERROR 1921 "
+                        f"(max M here is {len(crv.pts) // 2}).")
+            if mat.bstart or mat.tramp or mat.bstartk or mat.trampk:
+                state.warn(
+                    f"{kw} mid={mat.mid}: the fit seeds BSTART={mat.bstart:g}/"
+                    f"TRAMP={mat.tramp:g}/BSTARTK={mat.bstartk:g}/"
+                    f"TRAMPK={mat.trampk:g} are DROPPED — /VISC/PRONY's "
+                    "Levenberg-Marquardt fit has no slot for a starting decay "
+                    "constant or a ramp time and initializes itself.")
+        else:
+            mat.prony_m = 0
+            state.warn(
+                f"{kw} mid={mat.mid}: neither Prony rows nor a relaxation "
+                "curve is given, so this is an ELASTIC material — NO "
+                "/VISC/PRONY is emitted. dyna2rad creates the block "
+                "unconditionally with M=0, which is starter ERROR 2026 and "
+                "stops the whole deck.")
+        state.warn(
+            f"{kw} mid={mat.mid}: BULK={mat.bulk:g} does NOT become a bulk "
+            "modulus. /MAT/LAW42 has no bulk field — it derives one from Nu — "
+            "so dyna2rad's fixed carrier (Nu=0.495, Mu_1=+0.01*BULK, "
+            "Mu_2=-0.01*BULK, alpha=+/-2) is reproduced here and gives a "
+            f"ground shear modulus of {0.02 * mat.bulk:g} (=0.02*BULK) and an "
+            f"effective bulk modulus of {_law42_bulk(0.02 * mat.bulk):g} "
+            "(=GS*(1+Nu)/(3*(1-2*Nu)), i.e. about 2x the LS-DYNA BULK). "
+            "Check the near-incompressible response against the source deck; "
+            "to pin the bulk modulus exactly, restate Nu as "
+            f"{_nu_for_bulk(mat.bulk, 0.02 * mat.bulk):g} on the emitted "
+            "/MAT/LAW42.")
+        if mat.bulk <= 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: BULK={mat.bulk:g} <= 0 leaves every "
+                "/MAT/LAW42 mu at 0, so the Ogden sum GS = sum(mu_i*alpha_i) "
+                "is not positive and the starter refuses the material "
+                "(ERROR 828).")
+        if mat.pcf != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PCF={mat.pcf:g} (1 = zero out tensile "
+                "pressures) is DROPPED. /MAT/LAW42's nearest field, "
+                "sigma_cut, is a STRESS and not a flag — writing 1.0 into it "
+                "would impose a 1-unit tensile cut-off — so it is left blank "
+                "(starter default 1e20, no cut-off).")
+        if mat.ef != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: EF={mat.ef:g} (elastic layer) is "
+                "DROPPED — no dyna2rad or Radioss counterpart.")
+        if mat.tref or mat.a or mat.b:
+            state.warn(
+                f"{kw} mid={mat.mid}: the time-temperature shift function "
+                f"(TREF={mat.tref:g}, A={mat.a:g}, B={mat.b:g} — WLF when all "
+                "three are set, Arrhenius when B=0) is DROPPED; the converted "
+                "material relaxes at one temperature only.")
+        if mat.moisture:
+            state.warn(
+                f"{kw} mid={mat.mid}: the _MOISTURE option's whole card "
+                "(MO/ALPHA/BETA/GAMMA/MST) is DROPPED and the material "
+                "converts as the plain variant — dyna2rad never reads those "
+                "fields either.")
+
+
+def _law42_bulk(g_ground: float, nu: float = 0.495) -> float:
+    """The bulk modulus /MAT/LAW42 really runs with, for a ground-state shear
+    modulus MU0 = *g_ground*: BULK = GS*(1+Nu)/max(1e-20, 3*(1-2*Nu)) with
+    GS = sum(mu_i*alpha_i) = 2*MU0 (hm_read_mat42.F:193-195). LAW42 has no bulk
+    input, so this is the ONLY way the LS-DYNA BULK/XK could have arrived —
+    used in the warnings that report what dyna2rad's hard-coded Nu = 0.495
+    really costs. Starter-verified: MU0 = 60 with Nu = 0.495 echoes
+    "BULK MODULUS = 5980.000000000"."""
+    return 2.0 * g_ground * (1.0 + nu) / max(1e-20, 3.0 * (1.0 - 2.0 * nu))
+
+
+def _nu_for_bulk(bulk: float, g_ground: float) -> float:
+    """The inverse of _law42_bulk: the Nu that makes LAW42's derived bulk
+    modulus equal *bulk* for a ground shear modulus MU0 = *g_ground*.
+    3K(1-2v) = GS(1+v) => v = (3K - GS)/(6K + GS), GS = 2*MU0. Reported in a
+    warning only — k2rad emits dyna2rad's Nu."""
+    gs = 2.0 * g_ground
+    denom = 6.0 * bulk + gs
+    if denom == 0.0:
+        return 0.495
+    return (3.0 * bulk - gs) / denom
+
+
+def _resolve_mat181_183(state: ConversionState) -> None:
+    """*MAT_SIMPLIFIED_RUBBER/FOAM and _WITH_DAMAGE: curve wiring plus the long
+    list of fields the /BEGIN 2022 LAW88 card cannot carry."""
+    for mat in state.mat_simplified_rubber.values():
+        kw = ("*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE" if mat.family == "183"
+              else "*MAT_SIMPLIFIED_RUBBER/FOAM")
+        _resolve_law88_curves(state, kw, mat)
+        if 0.0 < mat.pr < 0.49:
+            state.warn(
+                f"{kw} mid={mat.mid}: PR={mat.pr:g} is in (0, 0.49), which "
+                "selects LS-DYNA's COMPRESSIBLE Hill FOAM formulation. "
+                "/MAT/LAW88 is an INCOMPRESSIBLE tabulated hyperelastic law "
+                "and has no foam branch — the deviatoric response is the "
+                "rubber one, and only the compressibility follows PR (written "
+                "into NU). dyna2rad has a MAT_181 -> /MAT/LAW70 foam "
+                "converter in its source but NO caller for it, so it silently "
+                "makes every simplified foam an incompressible rubber. Use "
+                "*MAT_LOW_DENSITY_FOAM (057) or *MAT_FU_CHANG_FOAM (083) if "
+                "the foam volumetric response matters.")
+        elif mat.pr < 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PR={mat.pr:g} < 0 is LS-DYNA's viscous "
+                f"pressure-decay input (beta = {abs(mat.pr):g}); it is written "
+                "into /MAT/LAW88 NU verbatim, because the starter's own "
+                "`nu <= 0 -> beta = |nu|, nu := 0.495` rule is exactly that "
+                "(hm_read_mat88.F90:186-191). dyna2rad writes NU=0 and loses "
+                "it.")
+        if mat.tension and mat.family == "181":
+            state.warn(
+                f"{kw} mid={mat.mid}: TENSION={mat.tension} is transferred to "
+                "/MAT/LAW88 TENSION 1:1. dyna2rad asks for the field name "
+                "\"TENSIOM\" for MAT_181 (a typo that appears nowhere else in "
+                "the Radioss tree), so its rate-effect flag never arrives and "
+                "the material silently falls back to \"rate effect for "
+                "compressive loading only\".")
+        if mat.rtype:
+            state.warn(
+                f"{kw} mid={mat.mid}: RTYPE={mat.rtype} (1 = ENGINEERING "
+                "strain rate) is DROPPED — /MAT/LAW88's Rtype field only "
+                "exists from the radioss2026 card revision on, and k2rad "
+                "writes /BEGIN 2022 decks, so the rate axis is always read as "
+                "a TRUE strain rate. Rescale the rate abscissas if the "
+                "difference matters.")
+        if mat.avgopt:
+            state.warn(
+                f"{kw} mid={mat.mid}: AVGOPT={mat.avgopt:g} (strain-rate "
+                "averaging; negative = a time window) is DROPPED. "
+                "/MAT/LAW88's nearest control is F_CUT, a cut-off FREQUENCY "
+                "with a different meaning, and it is left blank so the starter "
+                "picks its own sound-speed-derived value.")
+        if mat.mu:
+            state.warn(
+                f"{kw} mid={mat.mid}: MU={mat.mu:g} (damping coefficient) is "
+                "DROPPED. It is not a material field at all — dyna2rad writes "
+                "it into the SOLID PROPERTY's viscosity slot, which would need "
+                "a per-part /PROP/SOLID split here; k2rad leaves the property "
+                "alone and reports the loss.")
+        if mat.g or mat.sigf:
+            state.warn(
+                f"{kw} mid={mat.mid}: G={mat.g:g}/SIGF={mat.sigf:g} "
+                "(frequency-independent damping) are DROPPED. /MAT/LAW88 does "
+                "have matching G/SIGF fields, but only on the extra card of "
+                "the radioss2026 revision — a /BEGIN 2022 starter SWALLOWS "
+                "that card without an error (measured), so emitting it would "
+                "be silent data loss rather than a diagnosable version "
+                "complaint.")
+        if mat.with_failure and (mat.kfail or mat.gama1 or mat.gama2 or mat.eh):
+            state.warn(
+                f"{kw} mid={mat.mid}: the _WITH_FAILURE card "
+                f"(K={mat.kfail:g}, GAMA1={mat.gama1:g}, GAMA2={mat.gama2:g}, "
+                f"EH={mat.eh:g}) is DROPPED — the converted material NEVER "
+                "FAILS. /MAT/LAW88's KFAIL/GAM1/GAM2/EH are the same "
+                "Feng-Hallquist criterion and map 1:1, but they live on the "
+                "radioss2026 card revision, which a /BEGIN 2022 starter reads "
+                "as absent. dyna2rad drops them too, silently.")
+        if mat.log_log:
+            state.warn(
+                f"{kw} mid={mat.mid}: the _LOG_LOG_INTERPOLATION option is "
+                "DROPPED — /MAT/LAW88 interpolates its rate family linearly "
+                "and has no log-log flag. Rate values far from a tabulated "
+                "curve will differ from LS-DYNA.")
+        # VISCO is deliberately NOT in this list: it is the gate on the Gi/BETAi
+        # branch, not an independent field, and the /VISC/PRONY warning below
+        # reports both of its cases (honoured, or overridden when rows exist
+        # with VISCO=0). REF is not here either — it is NOT dropped: LAW88 is on
+        # the solid-/XREF whitelist, so a *INITIAL_FOAM_REFERENCE_GEOMETRY does
+        # reach this material. _warn_rubber_ref reports REF=1 without usable
+        # geometry and _resolve_xref_parts the reverse; saying "REF is DROPPED"
+        # here contradicted the /XREF the very same run emits.
+        dropped = [f"{n}={v:g}" for n, v in (
+            ("PRTEN", mat.prten), ("STOL", mat.stol),
+            ("HISOUT", float(mat.hisout)),
+            ("VFLAG", float(mat.vflag))) if v]
+        if dropped:
+            state.warn(
+                f"{kw} mid={mat.mid}: {', '.join(dropped)} are DROPPED — none "
+                "has a /MAT/LAW88 counterpart (PRTEN/STOL/HISOUT are LS-DYNA "
+                "solver controls, and VFLAG selects a per-term Prony "
+                "formulation Radioss does not offer).")
+        if mat.gi:
+            state.warn(
+                f"{kw} mid={mat.mid}: {len(mat.gi)} viscoelastic Gi/BETAi "
+                f"pair(s) -> /VISC/PRONY/{mat.mid}, which Radioss binds to the "
+                "material by shared id. LS-DYNA gates this branch on card-4 "
+                f"VISCO=1 (here {mat.visco}) and applies it to SOLID elements "
+                "only; k2rad emits it whenever the rows are present, like "
+                "dyna2rad — delete the rows if the branch is meant to be off.")
+
+
+def _resolve_mat091_092(state: ConversionState) -> None:
+    """*MAT_SOFT_TISSUE / _VISCO: the fidelity warning that makes the silent
+    dyna2rad conversion honest."""
+    for mat in state.mat_soft_tissue.values():
+        kw = "*MAT_SOFT_TISSUE_VISCO" if mat.visco else "*MAT_SOFT_TISSUE"
+        mu0 = 2.0 * (mat.c1 + mat.c2)
+        fibre = [f"{n}={v:g}" for n, v in (("C3", mat.c3), ("C4", mat.c4),
+                                           ("C5", mat.c5), ("XLAM", mat.xlam),
+                                           ("XLAM0", mat.xlam0),
+                                           ("FANG", mat.fang)) if v]
+        state.warn(
+            f"{kw} mid={mat.mid}: converts to an ISOTROPIC incompressible "
+            "Mooney-Rivlin rubber (/MAT/LAW42 with Mu_1=2*C1="
+            f"{2.0 * mat.c1:g}, Mu_2=-2*C2={-2.0 * mat.c2:g}, alpha=+/-2, "
+            "Nu=0.495). The transversely-isotropic COLLAGEN FIBRE term"
+            + (f" ({', '.join(fibre)})" if fibre else "")
+            + " and the fibre DIRECTION "
+            + f"(AOPT={mat.aopt:g}, MACF={mat.macf:g}, plus the AX-AZ/BX-BZ "
+              "vectors and LA1-LA3) have "
+              "no /MAT/LAW42 slot and are DROPPED. For a ligament or tendon, "
+              "where the fibre term dominates the response, the converted "
+              "material is NOT physically equivalent — dyna2rad performs the "
+              "same conversion without saying so.")
+        if mat.xk:
+            state.warn(
+                f"{kw} mid={mat.mid}: the bulk modulus XK={mat.xk:g} is "
+                "DROPPED — /MAT/LAW42 derives its bulk modulus from Nu, and "
+                "dyna2rad hard-codes Nu=0.495, which for this card gives "
+                f"{_law42_bulk(mu0):g} instead. Restate Nu as "
+                f"{_nu_for_bulk(mat.xk, mu0):g} on the emitted /MAT/LAW42 to "
+                "pin the bulk modulus to XK.")
+        fails = [f"{n}={v:g}" for n, v in (("FAILSF", mat.failsf),
+                                           ("FAILSM", mat.failsm),
+                                           ("FAILSHR", mat.failshr)) if v]
+        if fails:
+            state.warn(
+                f"{kw} mid={mat.mid}: {', '.join(fails)} are DROPPED — no "
+                "/FAIL card is emitted and the converted material never "
+                "fails.")
+        if mat.c1 + mat.c2 <= 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: C1+C2={mat.c1 + mat.c2:g} <= 0 makes the "
+                "Ogden sum GS = sum(mu_i*alpha_i) = 4*(C1+C2) non-positive, "
+                "and the starter refuses /MAT/LAW42 with ERROR 828.")
+        if mat.visco:
+            gammas, taus = _soft_tissue_prony(mat)
+            extra = [i + 1 for i, (s, t) in enumerate(zip(mat.s, mat.t))
+                     if s == 0.0 and t != 0.0]
+            if extra:
+                state.warn(
+                    f"{kw} mid={mat.mid}: term(s) {extra} have T_i set but "
+                    "S_i = 0 and are DROPPED (a zero relaxation factor "
+                    "contributes nothing). The kept pairs are COMPACTED, "
+                    "unlike dyna2rad, which counts the non-zero S_i but then "
+                    "copies the FIRST M slots — so a gap in the S list makes "
+                    "it convert the wrong terms.")
+            if gammas:
+                state.warn(
+                    f"{kw} mid={mat.mid}: the {len(gammas)} viscoelastic "
+                    "term(s) S_i/T_i go into /MAT/LAW42's Gamma_arr/Tau_arr "
+                    "(T_i needs no conversion — both codes use relaxation "
+                    "TIMES). UNIT MISMATCH, inherited from dyna2rad: LS-DYNA's "
+                    "S_i are DIMENSIONLESS relaxation factors, while Radioss "
+                    "multiplies Gamma_i by a strain-history term "
+                    "(sigeps42.F:475), i.e. it is a shear MODULUS. To carry "
+                    "the intended viscous stiffness, scale each S_i by the "
+                    f"ground shear modulus MU0 = 2*(C1+C2) = {mu0:g} "
+                    "(Gamma_i = "
+                    + ", ".join(f"{g * mu0:g}" for g in gammas)
+                    + ") before converting, or edit the emitted card.")
 
 
 def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
