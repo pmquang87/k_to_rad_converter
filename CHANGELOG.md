@@ -552,6 +552,44 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **`/TH/SURF` blast surfaces beyond the SPMD-reduced prefix recorded exactly
+  0.0 — inert padding `/SURF` cards now keep every one inside it.** Observed
+  2026-08-03 on two independent OpenRadioss 2026 MPI runs: the single
+  `/TH/SURF` block from `*DATABASE_BINARY_BLSTFOR` listed every blast-loaded
+  surface, yet only the lower-indexed ones carried P/A data
+  (`E:\w13\stack4\run\main_blastT01.csv`: surface 90031 peak 222.7 MPa at
+  64 µs, surface 90034 all-zero; `E:\w13\neuberger\run_fine\neubergerT01.csv`:
+  90001 peak 25.2 MPa, 90003 all-zero). NOT a "one surface per block" limit —
+  multiple ids per block are legal and fully wired (starter
+  `hm_read_thgrsurf.F:147-175` flags each listed id, the segment→surface CSR
+  in `th_surf_load_pressure.F` maps every loaded segment to every containing
+  TH surface, engine `thsurf.F:71-80` writes one var-set per surface). The
+  root cause is an OpenRadioss engine bug: the `/TH/SURF` channel array is
+  `(TH_SURF_NUM_CHANNEL=6, NSURF)` (`th_surf_mod.F:96-100`, global surface
+  count per `resol_alloc.F90:336`), but the MPI reduction covers only its
+  first `5*NSURF` elements — `engine/source/output/th/hist2.F:679`
+  `IF(NSPMD > 1)CALL SPMD_GLOB_DSUM9(FSAVSURF,5*NSURF)`, a stale length from
+  before the 6th channel existed. Column-major, surface I channel c sits at
+  flat position `6*(I-1)+c`, so any surface violating
+  `6*(I-1)+5 <= 5*NSURF` never gets its P (ch4) / loaded-area (ch5) summed
+  across domains; domain 0 then writes its local zeros and `hist2.F:687-691`
+  zeroes P outright when the unreduced ch5 stays 0. The arithmetic locks all
+  four observations: stack4 (12 domains, 13 surfaces) 90031 = 10th surface →
+  positions 58/59 ≤ 65 ✓ correct, 90034 = 12th → 70/71 > 65 ✗ zero;
+  neuberger (6 domains, 2 surfaces) 90001 = 1st ✓, 90003 = 2nd → ch4 at
+  position 10 reduced but ch5 at 11 not, divide-guard zeroes P ✗. (Had
+  `/SURF/PLANE` not counted toward NSURF, 90031 — 10th of 11, position
+  59 > 55 — would have failed too; it did not, pinning the index model.)
+  `writer/assembly.py:_pad_surfaces_for_spmd_th_surf` now runs after all
+  starter sections and appends `K = ceil((6*I_max − 1 − 5*NSURF)/5)` inert
+  `/SURF/SEG` cards (a copy of one blast segment, referenced by nothing,
+  ids from `next_id()` so they sort last under both deck-order and id-order
+  numbering) — 1 card on the neuberger deck, 2 on stack4 — plus a conversion
+  log warning naming the engine bug. Harmless on SMP runs; drop once the
+  engine is fixed upstream (`5*NSURF` → `TH_SURF_NUM_CHANNEL*NSURF`).
+  Regression: `tests/test_th_surf_spmd_padding.py` pins the block shape, the
+  padding count/position/ids, the donor segment and the no-padding cases.
+
 - **`/TH/INTER` listed contacts the writer had dropped**, so the starter
   answered `WARNING 257 NONEXISTENT INTER <id>` on decks that otherwise convert
   clean. The id list was built from the PARSED `*CONTACT` records; a contact

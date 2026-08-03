@@ -545,6 +545,15 @@ def _make_starter_th_surf(state: ConversionState) -> List[str]:
     differentiating them (the fix for the REAC* and /TH/INTER channels) is
     meaningless — tools/th_to_csv.py deliberately leaves /TH/SURF alone and
     prints this caveat instead.
+
+    **Multiple ids in ONE block are legal and correct** (starter
+    hm_read_thgrsurf.F flags each id; engine thsurf.F writes one P/A pair per
+    listed surface) — but on an SPMD (MPI) run the engine only reduces the
+    first 5*NSURF of the 6*NSURF /TH/SURF channel elements across domains
+    (hist2.F:679), which silently zeroes the highest-indexed surfaces. The
+    deck-shape fix lives in assembly._pad_surfaces_for_spmd_th_surf, which
+    runs after all sections are assembled and appends inert padding /SURF
+    cards so every surface listed here stays inside the reduced prefix.
     """
     if not state.db_blstfor_dt:
         return []
