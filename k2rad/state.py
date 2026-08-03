@@ -2011,6 +2011,64 @@ class ContactTied:
 
 
 @dataclass
+class ContactSpotweld:
+    """*CONTACT_SPOTWELD[_WITH_TORSION|_BEAM_OFFSET|_CONSTRAINED_OFFSET]
+    [_PENALTY][_MPP][_ID] → OpenRadioss /INTER/TYPE2 with Spotflag=28.
+
+    LS-DYNA's spotweld contact ties the nodes of the WELD elements (the MAT_100
+    beam nuggets, SSTYP=3 naming their part) to the surface of the sheets they
+    join (MSTYP=2, a *SET_PART_LIST). Without it the weld beams reach the
+    solver attached to nothing but each other and carry zero force.
+
+    Kept in its own dataclass rather than as a fourth ``ContactTied.variant``
+    because three of its field values differ from every *CONTACT_TIED_*:
+
+      * ``Idel2 = 1`` — dyna2rad's spotweld default (convertcontacts.cxx:49
+        ``interTypeVsMapDefaultVals["TYPE2"] = {Ignore 2, Idel2 1, Spotflag 28}``),
+        so the tie dies with the sheet segment it is welded to instead of
+        holding a deleted element in place. The tied path emits Idel2=0.
+      * the secondary side is resolved over BEAM elements too — a weld part is
+        beams, and the tied resolver walks shells and solids only.
+      * ``dsearch`` comes from the card (0.6*(SST+MST)), never from a measured
+        node-to-segment distance: for a spotweld the secondary side IS the weld,
+        so there is no tie surface to measure against.
+
+    ``variant`` records the keyword flavour purely for reporting — dyna2rad
+    parses ContactOption 2/3/4 (_WITH_TORSION / _BEAM_OFFSET /
+    _CONSTRAINED_OFFSET) in the CFG and then never reads it, so all five
+    spellings produce byte-identical output there. k2rad emits the same card
+    and WARNS about the dropped flavour instead of dropping it silently.
+    """
+    inter_id: int
+    title: str
+    ssid: int; sstyp: int   # secondary: 3=part (the weld part), 2=part set, 4=node set
+    msid: int; mstyp: int   # main: 2=part set (the joined sheets), 3=part, 0=segment set
+    variant: str            # "" | "WITH_TORSION" | "BEAM_OFFSET" | "CONSTRAINED_OFFSET"
+    penalty: bool = False   # _PENALTY keyword flavour
+    mpp: bool = False       # _MPP keyword flavour (extra MPP card(s) before Card 1)
+    sst: float = 0.0        # Card3 SST (negative = absolute tie-criterion distance)
+    mst: float = 0.0        # Card3 MST (negative = absolute tie-criterion distance)
+
+
+@dataclass
+class HexSpotweldAssembly:
+    """*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC.
+
+    A group of up to 16 solid elements that together form ONE spot weld. In
+    LS-DYNA the assembly is what *MAT_SPOTWELD's failure resultants act on (the
+    forces are summed over the whole nugget, not per element); OpenRadioss
+    spells the same construct /CLUSTER/BRICK — a force/moment monitor around a
+    brick group that deletes every element of the group at once when its
+    failure surface is reached.
+
+    ``sw_id`` is LS-DYNA's ID_SW, reused verbatim as the /CLUSTER id.
+    """
+    sw_id: int
+    title: str
+    eids: List[int]         # the assembly's solid element ids, in card order
+
+
+@dataclass
 class ContactForceTransducer:
     """*CONTACT_FORCE_TRANSDUCER[_PENALTY] — a measurement-only "contact" that
     reports the contact force already acting on a surface/part from the model's
@@ -2986,6 +3044,19 @@ class ConversionState:
     # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
     constrained_spotwelds: List[ConstrainedSpotweld] = field(default_factory=list)
+    # *DEFINE_HEX_SPOTWELD_ASSEMBLY[_N] → /CLUSTER/BRICK + its /GRBRIC/BRIC
+    hex_spotweld_assemblies: List[HexSpotweldAssembly] = field(default_factory=list)
+    # (cluster_id, title) of each emitted /CLUSTER/BRICK — set by the writer's
+    # _make_hex_spotweld_clusters, consumed by the *DATABASE_SWFORC accounting
+    # (same pattern as sect_ids / blast_surf_ids)
+    cluster_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # sprg_IDs actually written as /SPRING by _make_spotweld_beam_connectors.
+    # *DATABASE_SWFORC must list only these: the connector writer skips a whole
+    # MAT_100 part when the welds are zero-length, carry no *SECTION_BEAM, or
+    # size to no area, and a /TH/SPRING naming an element that was never
+    # emitted is starter ERROR 69 (hm_read_thgrne.F:189, MSGTYPE=MSGERROR) —
+    # the deck is refused, not degraded. Same accounting pattern as cluster_ids.
+    spotweld_spring_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
@@ -3158,6 +3229,12 @@ class ConversionState:
     contacts_general: List[ContactAutoGeneral] = field(default_factory=list)
     # *CONTACT_TIED_* → /INTER/TYPE2 (kinematic) or /INTER/TYPE10 (penalty tie)
     contacts_tied: List[ContactTied] = field(default_factory=list)
+    # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
+    contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
+    # Interface ids the writers REFUSED to emit (filled by _drop_interface).
+    # /TH/INTER is assembled from the parsed contact records, so it has to
+    # subtract these or the starter answers WARNING 257 NONEXISTENT INTER.
+    dropped_inter_ids: Set[int] = field(default_factory=set)
     force_transducers: List[ContactForceTransducer] = field(default_factory=list)
     # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
     th_sub_ids: List[Tuple[int, str]] = field(default_factory=list)
@@ -3197,6 +3274,10 @@ class ConversionState:
     db_rwforc_dt: float = 0.0
     db_secforc_dt: float = 0.0
     db_sleout_dt: float = 0.0
+    # *DATABASE_SWFORC → /TH/SPRING over the *MAT_SPOTWELD (MAT_100) /PROP/TYPE13
+    # weld connectors, /TH/BRIC over MAT_100 solid welds, and /TH/CLUSTER over
+    # the *DEFINE_HEX_SPOTWELD_ASSEMBLY clusters
+    db_swforc_dt: float = 0.0
     # *DATABASE_SPCFORC → /TH/NODE REAC* on the /BCS nodes + /ANIM/VECT/FREAC
     db_spcforc_dt: float = 0.0
     # *DATABASE_NCFORC → /TH/INTER on every converted contact interface

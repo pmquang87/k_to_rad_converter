@@ -49,6 +49,7 @@ from .contacts import (
     _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
+    _make_spotweld_interfaces,
     _recipe_active,
 )
 from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
@@ -58,6 +59,7 @@ from .loads import (
     _make_bcs,
     _make_body_loads,
     _make_constrained_spotweld_springs,
+    _make_hex_spotweld_clusters,
     _make_damping,
     _make_discrete_springs,
     _make_free_node_constraints,
@@ -101,6 +103,7 @@ from .output import (
     _make_starter_th_inter,
     _make_starter_th_node_reac,
     _make_starter_th_node_spc,
+    _make_starter_th_swforc,
     _make_starter_th_surf,
     _make_title,
     _spc_constrains_rotations,
@@ -192,11 +195,20 @@ def _make_engine_header(state: ConversionState) -> List[str]:
 
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
-    dt_th = (state.db_nodout_dt or state.db_elout_dt or state.db_glstat_dt
-             or state.db_matsum_dt or state.db_spcforc_dt
-             or state.db_ncforc_dt or state.db_rcforc_dt
-             or state.db_blstfor_dt
-             or state.db_rwforc_dt or state.db_secforc_dt or 1e-3)
+    # Radioss has ONE time-history frequency for the whole T01, so the whole
+    # *DATABASE_* family has to collapse to a single /TFILE. Take the MINIMUM
+    # of everything the deck asked for, never the first one that happens to be
+    # set: an `or`-chain hands the frequency to whichever card sits earliest in
+    # the chain, so a deck with *DATABASE_NODOUT DT=0.01 and *DATABASE_SWFORC
+    # DT=1e-5 would sample every weld channel 1000x coarser than requested. The
+    # minimum is the only rule that honours every channel; it can only ever
+    # write MORE data than asked for, never less.
+    dt_th = min([v for v in (state.db_nodout_dt, state.db_elout_dt,
+                             state.db_glstat_dt, state.db_matsum_dt,
+                             state.db_spcforc_dt, state.db_ncforc_dt,
+                             state.db_rcforc_dt, state.db_blstfor_dt,
+                             state.db_rwforc_dt, state.db_secforc_dt,
+                             state.db_swforc_dt) if v > 0.0] or [1e-3])
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -804,6 +816,8 @@ def _starter_section_registry():
         ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
         ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
+        ("spotweld_interfaces",
+                              lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
         ("rbodies",           lambda c: c.rbody_lines),
         ("imposed_motions",   lambda c: _make_imposed_motions(c.state, c.rbody_info)),
@@ -835,6 +849,10 @@ def _starter_section_registry():
         ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
+        # The clusters must precede starter_th_swforc: the SWFORC block
+        # reports "no weld to output" only when no cluster was emitted
+        # either, and it reads state.cluster_ids to know.
+        ("spotweld_clusters", lambda c: _make_hex_spotweld_clusters(c.state)),
         ("joints",            lambda c: _make_joints(c.state, c.rigid_nodes,
                                                      set(c.rbody_info))),
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
@@ -851,6 +869,7 @@ def _starter_section_registry():
         ("starter_th_node_spc",  lambda c: _make_starter_th_node_spc(c.state, c.rbody_info)),
         ("starter_th_surf",   lambda c: _make_starter_th_surf(c.state)),
         ("starter_th_sectio", lambda c: _make_starter_th_sectio(c.state)),
+        ("starter_th_swforc", lambda c: _make_starter_th_swforc(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),

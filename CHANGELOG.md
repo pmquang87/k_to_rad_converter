@@ -11,6 +11,292 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Spotweld joining** (`*CONTACT_SPOTWELD` + `_WITH_TORSION` / `_BEAM_OFFSET` /
+  `_CONSTRAINED_OFFSET`, each × `_PENALTY` × `_MPP` × `_ID`;
+  `*DEFINE_HEX_SPOTWELD_ASSEMBLY` + `_1` … `_16`; `*DATABASE_SWFORC`) — the
+  roadmap P1 batch. All three were `SKIPPED` before, and the loss was not
+  cosmetic: on `W16_spotweld_E1` the four `*MAT_SPOTWELD` weld beams
+  (nodes 2059–2066) share **zero** nodes with the 2058-node sheet mesh, so the
+  nuggets reached the solver attached to nothing but each other and the weld
+  force was 0.000 N before *and* after the impact.
+
+  - **`*CONTACT_SPOTWELD` → `/INTER/TYPE2`** with `Ignore=2`, `Spotflag=28`,
+    `Idel2=1` — dyna2rad's spotweld defaults verbatim
+    (`convertcontacts.cxx:49` `interTypeVsMapDefaultVals["TYPE2"]`, reached
+    through the `keyWord.find("SPOTWELD")` branch at `:183-189`). Spotflag 28
+    is the auto-penalty spotweld formulation and the kinematic ones are not an
+    option here: `chktyp2.F:82` tags a TYPE2's secondary nodes only when
+    Spotflag is outside {25,26,27,28}, and any MAIN node carrying that tag is
+    hard `ERROR 556`; a weld meshed conformally with the sheets it joins puts
+    the same node in both the secondary `/GRNOD` and the main `/SURF`.
+    `itagsl2.F:225-245` is the other half — for 27/28 only, a secondary node
+    that collides with a rigid body, an `/RBE2`/`/RBE3` or another tie is
+    switched to a penalty tie (`WARNING 1179`) instead of failing the run.
+    `Idel2=1` (the tie dies with the sheet segment it welds) is what separates
+    this from the `*CONTACT_TIED_*` path, which deliberately keeps `Idel2=0`;
+    it survives the starter's whitelist because 28 is in it
+    (`hm_read_inter_type02.F:269`). The mandatory penalty Card 2
+    (`Stfac Visc <20 blanks> Istf` = `1.0 / 0.05 / 2`) is emitted by the same
+    `_emit_inter_type2` the tied path uses, which now takes an `idel2` keyword
+    argument and is otherwise untouched.
+
+    **The secondary side is resolved over BEAM end nodes**, and that single
+    difference is what makes the keyword work. `SSTYP=3` on a spot-weld card
+    names the *weld* part, and a weld part is `*ELEMENT_BEAM` nuggets — that is
+    the card on every W16/W17 deck in the corpus (`ssid=3 sstyp=3`,
+    `msid=1 mstyp=2`). Reusing `_tied_slave_nids`, which walks shells and
+    solids only, returns an empty node group and the interface is dropped for
+    "no nodes at all", which is worse than skipping the keyword because it
+    looks converted. `_spotweld_slave_nids` covers `SSTYP` 0 (segment set),
+    1 (shell element set), 2 (part set), 3 (part), 4 (node set) over
+    `_part_node_sets`, which already counts beams. The main side reuses
+    `_tied_master_surface` (now parameterised with a title tag and a
+    `measure=False` switch that skips the surface tessellation the tied path
+    needs for its measured `dsearch` and a spotweld does not).
+
+    **`dsearch` comes from the card, and this is one place k2rad exceeds
+    native.** dyna2rad reads `SST`/`MST` and then drops them for
+    `*CONTACT_SPOTWELD` (`convertcontacts.cxx:61,318` — the
+    `dSearch = 0.6*(lsdSST + lsdMST)` branch at `:205` is entered only for
+    `TIED_NODES_TO_SURFACE` / `TIEBREAK_NODES`). That is a gap, not a decision:
+    the starter's own default for `dsearch = 0` contains the identical
+    `0.6*(t_s + t_m)` term (`i2cor3.F:198`,
+    `GAPV = MAX(0.05*DD, 0.6*(THKSECND + THKMAIN))`), so feeding it the deck's
+    thicknesses can only agree better with LS-DYNA than ignoring them. Both
+    must be positive, exactly as dyna2rad's own branch requires; a NEGATIVE
+    Card-3 `SST`/`MST` is LS-DYNA's absolute tie-criterion distance and wins
+    over the computed value; otherwise 0 = the starter's own default, which is
+    what the native reader always gets. Every corpus deck has `SST=MST=0`, so
+    the corpus reproduces dyna2rad exactly and the new term only fires on a
+    deck that actually supplies thicknesses.
+
+    All **sixteen** legal spellings are generated rather than hand-listed
+    (`_SPOTWELD_CONTACT_KEYWORDS`), because the CFG advertises five
+    `USER_NAMES` while `contact_spotweld.cfg:827-856` also parses `_PENALTY`
+    and `_MPP`, and a missed spelling is a silently unwelded model. `_MPP`
+    inserts its own card *before* mandatory Card 1, optionally followed by a
+    second card recognised by a literal `&` in column 1
+    (`CARD_PREREAD("%-1s")`) — both are stepped over, so `SSID` cannot come
+    back as the MPP `IGNORE` flag. The `_WITH_TORSION` / `_BEAM_OFFSET` /
+    `_CONSTRAINED_OFFSET` flavours emit the same card as the plain one (there
+    is no `/INTER/TYPE2` field for any of them) and **warn** about what was
+    dropped — dyna2rad parses the same flag into `ContactOption` and then never
+    reads it, so all five spellings convert byte-identically there, silently.
+    `*INCLUDE_TRANSFORM` id offsetting is registered for the twelve non-`_MPP`
+    spellings from the same generated list; the `_MPP` ones are deliberately
+    left to the unmapped warn rather than have `_off_contact` rewrite the MPP
+    bucket parameters as if they were `SSID`/`MSID`.
+
+  - **`*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N]` → `/GRBRIC/BRIC` + `/CLUSTER/BRICK`.**
+    First `/CLUSTER` card in the converter. `ID_SW` (which sits on its own card,
+    not on the keyword line) is reused as the cluster id when it is usable — a
+    blank/zero or repeated `ID_SW` is replaced by a generated id with a warning,
+    because `/CLUSTER/BRICK/0` puts a literal `0` in the `/TH/CLUSTER` object
+    list and `hm_read_thgrki.F:123-137` reads that as *every* cluster
+    (`WARNING 3083`), and a repeat is a duplicate-id rejection. `skew_ID=0`
+    lets the starter build the weld frame from the cluster's own bottom→top
+    face normal (`hm_read_cluster.F:104`); `Ifail=3`. All five data cards are
+    emitted unconditionally — the CFG puts no `if` around cards 2–5, and
+    omitting one makes the starter read the next keyword's line as a failure
+    limit. The `_N` suffix is the total number of ELEMENTS (1…16, Vol I R16
+    p.17-300), not a card count.
+
+    **The failure surface: `b1..b4 = 2.0` *paired with* a `min()` resultant
+    reduction.** The engine forms
+    `DMG = a1*(FN/Fn)^b1 + a2*(FT/Fs)^b2 + a3*(MR/Mt)^b3 + a4*(MB/Mb)^b4`
+    (`clusterf.F:386-390`) with `FT = sqrt(Fx²+Fy²)` (`:365`) and
+    `MB = sqrt(Mx²+My²)` (`:367`), while `*MAT_SPOTWELD`'s own criterion is
+    `(Nrr/NRR)² + (Nrs/NRS)² + … ≥ 1` — quadratic in every term, and scored per
+    direction. Two things have to agree, not one:
+
+    - the EXPONENT is 2, where dyna2rad hardcodes 1
+      (`convertdefinehexspotweldassembly.cxx:76-79`). With `b=1` a weld at 40 %
+      of both its tension and shear limits reaches `DMG = 0.8` and is one small
+      increment from failing, against `0.4² + 0.4² = 0.32` in LS-DYNA.
+    - the two-direction limits collapse by `Fs_fail = min(NRS, NRT)`,
+      `Mb_fail = min(MSS, MTT)`, because Radioss scores ONE shear resultant
+      against ONE limit. The obvious `sqrt(NRS²+NRT²)` does *not* agree with
+      `b=2`: for `NRS = NRT = S` it makes the shear term `(Fx²+Fy²)/(2S²)`,
+      exactly **half** of MAT_100's `(Fx²+Fy²)/S²`, i.e. a weld `sqrt(2)` too
+      strong in shear (+28 % to +60 % on `NRS=5000/NRT=4000`). `min()` is exact
+      whenever `NRS == NRT` and `MSS == MTT` — the round-nugget norm — and
+      conservative otherwise; the warning names the anisotropic case.
+
+    `Fn_fail1 = NRR` and `Mt_fail = MRR` are single-direction and pass straight
+    through. Starter-echo confirmed: `FAILURE EXPONENT N1..N4 = 2.0`,
+    `FAILURE COEFFICIENT A1..A4 = 1.0`, `MAX TANGENT FORCE = 20000.0`.
+    Solver-confirmed on a pure in-plane-shear hex weld: the engine's own `FAIL`
+    channel matches `DMG` recomputed from the emitted card to **0.0000 %** at
+    every sampled state, and equals MAT_100's criterion to **+0.0000 %** — where
+    the `sqrt` reduction scores **−50.0000 %** on the same measured state.
+
+    Element ids that are not 8-node `/BRICK` are screened out of the group with
+    a warning naming them. Not because the starter rejects them — measured, it
+    does not: a `/GRBRIC/BRIC` listing a `/TETRA4` id resolves and the cluster
+    counts it, 0 ERROR(S). Because the result is silently wrong:
+    `hm_read_cluster.F:201-205` takes the weld's two joined faces from
+    `IXS(2:5)` and `IXS(6:9)` — the hex's bottom and top faces — so a collapsed
+    tet contributes a degenerate top face and corrupts the local frame, and
+    with it the FN/FT/MR/MB split the entire failure surface is evaluated on,
+    for the *whole* weld. The Reference Guide says the same in prose
+    (`/CLUSTER` comment 2, 8-node hexa only) and notes it is not code-enforced.
+    An assembly with no usable brick, or with no reachable MAT_100 (every limit
+    0, which the starter promotes to INFINITY → a weld that never fails), is
+    reported with its physical consequence rather than left to be discovered in
+    the results.
+
+  - **`*DATABASE_SWFORC` → `/TH/SPRING` + `/TH/BRIC` + `/TH/CLUSTER`**, matching
+    dyna2rad's own split (`dyna2rad.cxx:613-695`, where `SWFORC` appears TWICE
+    in `dbCardList`: i=3 filters `*ELEMENT_DISCRETE`/`*ELEMENT_BEAM` on a
+    MAT_100 part to `/TH/SPRING`, i=4 filters `*ELEMENT_SOLID` to `/TH/BRIC`)
+    plus the `/TH/CLUSTER` its hex-weld converter emits separately
+    (`convertdefinehexspotweldassembly.cxx:315`). The spring list is the
+    MAT_100 beams the connector writer actually emitted — the PR #104 path
+    writes `sprg_ID = e.eid` under a `/SPRING/<original PID>`, so the ids are
+    the deck's own and a T01 channel maps 1:1 onto an swforc row, but that
+    writer skips a whole part for zero-length welds, a missing `*SECTION_BEAM`
+    or a zero cross-section area. Naming a skipped id is not a lost channel, it
+    is `ERROR 69` (`hm_read_thgrne.F:189`, `MSGTYPE=MSGERROR`) and the deck is
+    refused outright, so the emitted ids are tracked on state and intersected
+    here, with a warning listing what was lost. Two variable-list corrections
+    over dyna2rad:
+    `/TH/SPRING` asks for **`DEF FAIL`** (index 66 `FAIL`, the weld rupture
+    flag, is not in `DEF` — `hm_read_thgrou.F:1519` — and on a weld it is the
+    channel swforc is *about*), and `/TH/CLUSTER` asks for **`DEF FLOC`**
+    (`FLOC` = the local `FS`/`FN`/`MS`/`MN` weld resultants,
+    `hm_read_thgrou.F:1763-1766`; dyna2rad requests `DEF` alone, so the local
+    frame never reaches its T01). Object ids follow the two different reader
+    paths: one per line for `/TH/SPRING` and `/TH/BRIC` (`hm_read_thgrne.F`),
+    ten per line for `/TH/CLUSTER` (`hm_read_thgrki.F`). A deck that requests
+    swforc with no weld at all gets a warning and **no** block — a `/TH` group
+    listing nothing is a starter error. `db_swforc_dt` also joins the `/TFILE`
+    selection, which a SWFORC-only deck previously fell through to the 1e-3
+    default.
+
+  **Starter-validated** (`starter_win64`, `/BEGIN 2022`): the converted
+  `W16_spotweld_E1` runs **0 ERROR(S)** and the starter echoes
+  `FORMULATION LEVEL = 28`, `SEARCH FORMULATION = 2`, `STIFFNESS FACTOR = 1.0`,
+  `STIFFNESS FORMULATION = 2`, `CRITICAL DAMPING FACTOR = 5.0E-02`,
+  `IGNORE FLAG = 2`, `DELETION FLAG CASE FAILURE OF MAIN ELEMENT SET TO 1` —
+  every field asserted in the tests. A hex-weld probe deck echoes
+  `SPOTWELD CLUSTER OF BRICK ELEMENTS`, group id, `FAILURE FLAG = 3`,
+  `MAX NORMAL FORCE`, `MAX TANGENT FORCE`, `MAX TORSION MOMENT`,
+  `MAX BENDING MOMENT`, and `A1..A4 = 1.0` / `N1..N4 = 2.0`. The `/TH` variable
+  names were confirmed by a **negative control**: replacing the emitted
+  `DEF FLOC` with the CFG GUI's `FT MB` makes the same starter answer
+  `ERROR 260` on the same THGROUP — so the clean run is a check that can fail.
+
+  **Engine-validated.** `W16_spotweld_E1` reaches `NORMAL TERMINATION` at
+  t = 0.1 s (1 712 068 cycles): the four welds transmit 12.1 kN at 1 mm rising
+  smoothly to 57.4 kN at 10 mm, agreeing with the independent external-work
+  slope to within ±0.8 % at every checkpoint. Deleting only the `/INTER/TYPE2`
+  block from the same converted deck drops the weld force to **exactly 0.000 N**
+  with 99.07 % free separation between the sheets, against 1.25 % with the tie —
+  that is the loss this batch repairs, measured. `W16_spotweld_E1_Fail` ruptures
+  at t = 0.02472 s against 0.0247 s predicted from the no-fail curve (+0.08 %),
+  at F = NRR = 5000 N (+0.04 %), and the `FAIL` channel is exactly `(F/NRR)²`.
+  A synthetic hex-weld deck's `/TH/CLUSTER` normal force lands on the applied
+  405.0 N to −0.001 %, and a pure-shear variant reproduces MAT_100's damage to
+  +0.0000 % (see the failure-surface note above).
+
+  79 tests in `tests/test_spotweld_joining.py` (1795 → 1874 repo-wide,
+  231 → 302 subtests).
+
+  **Corpus SHA256 sweep**, `master` (68cf5e7) vs this branch: the decks that
+  change are the eight carrying one of the three keywords —
+  `W16_spotweld_E1`, `W16_spotweld_E1_Fail`, `W16_spotweld_D1`,
+  `W16_InitialModel_spotweld_D1`, `W16_SW_door_{INITIAL,NoFail,Fail}`,
+  `W17_RS_FloorFrame` — plus `W2_Door_Impact` (the master-surface repair below)
+  and, from the `/TH/INTER` fix below, `W6_SETUP_SandwichImpact` and
+  `W15_SETUP_Fabric_Impact_model`. Everything else is byte-identical, including
+  the whole `implicit_hr-anlenkung` family (spot-checked byte-for-byte, and
+  provably on the unchanged path: no dropped interface, and its `*DATABASE_*`
+  minimum is already what the old first-non-zero rule picked). What this corpus
+  *cannot* see: no deck in it has a `*DEFINE_HEX_SPOTWELD_ASSEMBLY`, a MAT_100
+  SOLID part, an `_MPP` or `_WITH_TORSION` spelling, or a nonzero Card-3
+  `SST`/`MST` on a spotweld card — every one of those paths is covered only by
+  the unit tests and the probe decks run through the live solver.
+
+### Fixed
+
+- **`/TH/INTER` listed contacts the writer had dropped**, so the starter
+  answered `WARNING 257 NONEXISTENT INTER <id>` on decks that otherwise convert
+  clean. The id list was built from the PARSED `*CONTACT` records; a contact
+  whose side resolves to no geometry is dropped with a loud warning but its
+  record stays in state. `_drop_interface` — the single choke point every
+  contact writer goes through — now records the id, and the `/TH` builder
+  subtracts it. Removes the warning from `W17_RS_FloorFrame` (10 → 9 warnings)
+  and `W16_SW_door_NoFail` (8 → 7); on `W6_SETUP_SandwichImpact`, whose only
+  contact is dropped, the whole dangling `/TH/INTER` block now correctly
+  disappears and the existing "no interface to output" warning fires instead.
+  Also affects `W15_SETUP_Fabric_Impact_model` (two ids).
+
+- **`/TFILE` took the first non-zero `*DATABASE_*` interval, not the minimum.**
+  Radioss has one time-history frequency for the whole T01, and an `or`-chain
+  hands it to whichever card sits earliest in a fixed order — `*DATABASE_NODOUT`
+  first. A deck asking `NODOUT DT=0.01` and `SWFORC DT=1e-5` therefore sampled
+  every weld channel 1000× coarser than requested. Now the minimum over the
+  whole family, which can only ever write more data than asked for, never less.
+  No corpus deck changes (in all 13 decks with mixed intervals the minimum is
+  already what the old rule picked).
+
+- **`*DEFINE_HEX_SPOTWELD_ASSEMBLY` element ids were not offset under
+  `*INCLUDE_TRANSFORM`.** The keyword had no `_OFFSET_SPECS` entry, so its
+  `EID` cards kept the un-offset ids, no `*ELEMENT_SOLID` matched, and
+  `_make_hex_spotweld_clusters` emitted **no** `/CLUSTER/BRICK` at all — the hex
+  weld silently lost its failure criterion and held for the whole run. Now every
+  field after the `ID_SW` card moves with `IDEOFF`; `ID_SW` itself has no
+  offset bucket and stays put.
+
+- **Comma/free-format element cards on `*DEFINE_HEX_SPOTWELD_ASSEMBLY` were
+  silently corrupted.** The `EID` cards used a bare `parse_fixed(row, 8, 10)`
+  while the `ID_SW` card two lines above already used `_card`, so a line written
+  `101,102,103` sliced to `['101,102,10', '3', …]`: ids 101/102/103 were dropped
+  and element **3** was silently added to the weld cluster, with no warning if
+  element 3 happens to be a solid.
+
+- **`*CONTACT_..._TITLE` read Card 1 off its own heading line.**
+  `_parse_contact_header` handled `_ID` only, so a `_TITLE` block came back
+  `ssid=0 sstyp=0 msid=0 mstyp=0` and the interface was then dropped for
+  "resolved to no nodes" — a spelling that looked handled and produced nothing.
+  `contact_spotweld.cfg:1720-1725` is explicit that `_TITLE` consumes the same
+  `CARD("%10d%-70s", _ID_, TITLE)` as `_ID`, so both now do. Pre-existing on the
+  `*CONTACT_TIED_*` path too; no corpus deck uses the spelling.
+
+- **A contact master surface built from a part that carries 3-corner shells was
+  rejected by the starter.** `_make_master_surface` put every shell id of the
+  part into a `/GRSHEL/SHEL` group, but since `d1ade12` a shell with 3 distinct
+  corners — written as 3 ids *or* as a collapsed quad `n1 n2 n3 n3` — is
+  emitted as `/SH3N`, and a `/GRSHEL/SHEL` resolves only 4-node `/SHELL` ids.
+  The result is hard `ERROR 70` (`ELEMENT ID=n DOES NOT EXIST`) and the deck is
+  refused. `_emit_grsh3n`'s own docstring already stated the rule
+  ("callers must split a mixed shell id list with
+  `_split_shell_eids_by_topology` first") that this caller did not follow.
+
+  Triangles now get their own `/GRSH3N/SH3N` + `/SURF/GRSH3N` (the starter
+  reads it through the branch symmetric to `/SURF/GRSHEL`,
+  `hm_read_surf.F:925` vs `:893`), and a surface that mixes two or three of
+  {quads, triangles, solids} combines them under a `/SURF/SURF`. The
+  single-kind and quad+solid `state.next_id()` allocation orders are unchanged,
+  so a master surface with no triangles is emitted byte-for-byte as before.
+
+  Found by the new `*CONTACT_SPOTWELD` path, which is the first thing to build
+  a master surface over `W16_spotweld_E1`'s welded sheets — they carry the
+  collapsed quad `529 = 695/665/664/664`. The failure also cost the tie two
+  secondary nodes it could not project (`WARNING 1071`) before the missing
+  segments were restored; with the fix all 8 weld nodes tie and the run is
+  clean.
+
+  **This was live on `master`, not a latent risk.** `W2_Door_Impact.k` — an
+  ordinary `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` deck with no spotweld
+  keyword anywhere — converts on `master` to a starter deck the solver
+  **refuses**: 19 `ERROR(S)`, the first being `ERROR 70` /
+  `** ERROR IN SHEL ELEMENT GROUP` / `GROUP TITLE: contact_master_1_grshel` /
+  `ELEMENT ID=190 DOES NOT EXIST`. The same deck converted on this branch runs
+  the starter with **0 ERROR(S)**. It is the ninth changed deck in the corpus
+  sweep above, and it is the only one that changed for a reason other than the
+  three new keywords.
+
 - **Metal plasticity batch 2** (`*MAT_PLASTICITY_WITH_DAMAGE` / `*MAT_081` /
   `*MAT_082` + `_ORTHO` / `_ORTHO_RCDC` / `_ORTHO_RCDC1980` / `_STOCHASTIC` /
   `*MAT_082_RCDC` / `*MAT_082_RCDC1980`; `*MAT_DAMAGE_2` / `*MAT_105`;

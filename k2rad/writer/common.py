@@ -22,6 +22,7 @@ __all__ = [
     "_emit_id_group",
     "_emit_surf_part",
     "_emit_surf_grshel",
+    "_emit_surf_grsh3n",
     "_emit_surf_surf",
     "_make_master_surface",
     "_ordered_unique_nodes",
@@ -279,6 +280,21 @@ def _emit_surf_grshel(surf_id: int, title: str, grshel_id: int) -> List[str]:
     ]
 
 
+def _emit_surf_grsh3n(surf_id: int, title: str, grsh3n_id: int) -> List[str]:
+    """The /GRSH3N counterpart of /SURF/GRSHEL.
+
+    The starter reads the two identically — hm_read_surf.F:893 handles
+    ``KEY(1:6)=='GRSHEL'`` over IGRSH4N/IXC and :925 ``KEY(1:6)=='GRSH3N'``
+    over IGRSH3N/IXTG, same body (one group id), same segment builder.
+    """
+    return [
+        f"/SURF/GRSH3N/{surf_id}",
+        title or f"SURF_GRSH3N_{surf_id}",
+        f"{_i(grsh3n_id)}",
+        HDR,
+    ]
+
+
 def _emit_surf_surf(surf_id: int, title: str, sub_surf_ids: List[int]) -> List[str]:
     lines = [f"/SURF/SURF/{surf_id}", title or f"SURF_SURF_{surf_id}"]
     row: List[str] = []
@@ -295,7 +311,23 @@ def _emit_surf_surf(surf_id: int, title: str, sub_surf_ids: List[int]) -> List[s
 
 def _make_master_surface(state: ConversionState, surf_id: int, title: str,
                          pids: List[int], out_lines: List[str]) -> bool:
-    """Emit a master surface (for /INTER) from a list of PIDs."""
+    """Emit a master surface (for /INTER) from a list of PIDs.
+
+    The part's shells are split by topology before they are grouped. A
+    /GRSHEL/SHEL group resolves only 4-node /SHELL ids, and since d1ade12 a
+    shell with 3 distinct corners — written either as 3 ids or as a collapsed
+    quad ``n1 n2 n3 n3`` — is emitted as /SH3N. Putting one in the quad group
+    is not a soft loss: the starter answers ERROR 70 "ELEMENT ID=n DOES NOT
+    EXIST" and refuses the deck. (Measured on W16_spotweld_E1, whose welded
+    sheets carry the collapsed quad 529 = 695/665/664/664.) The triangles get
+    their own /GRSH3N/SH3N + /SURF/GRSH3N, which the starter reads through the
+    symmetric branch at hm_read_surf.F:925.
+
+    One element kind → the surface IS that group; two or three kinds → one
+    sub-surface each under a /SURF/SURF. The single-kind and quad+solid id
+    allocation orders are unchanged, so a master surface with no triangles in
+    it is emitted byte-for-byte as before.
+    """
     shell_eids: List[int] = []
     solid_pids: List[int] = []
     for pid in sorted(pids):
@@ -307,25 +339,43 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
             solid_pids.append(pid)
 
     shell_eids.sort()
+    quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
 
-    if shell_eids and not solid_pids:
-        grshel_id = state.next_id()
-        out_lines += _emit_grshel(grshel_id, f"{title}_grshel", shell_eids)
-        out_lines += _emit_surf_grshel(surf_id, title, grshel_id)
+    kinds = sum(1 for group in (quad_eids, tri_eids, solid_pids) if group)
+    if kinds == 0:
+        return False
+    if kinds == 1:
+        if quad_eids:
+            grshel_id = state.next_id()
+            out_lines += _emit_grshel(grshel_id, f"{title}_grshel", quad_eids)
+            out_lines += _emit_surf_grshel(surf_id, title, grshel_id)
+        elif tri_eids:
+            grsh3n_id = state.next_id()
+            out_lines += _emit_grsh3n(grsh3n_id, f"{title}_grsh3n", tri_eids)
+            out_lines += _emit_surf_grsh3n(surf_id, title, grsh3n_id)
+        else:
+            out_lines += _emit_surf_part(surf_id, title, solid_pids)
         return True
-    if solid_pids and not shell_eids:
-        out_lines += _emit_surf_part(surf_id, title, solid_pids)
-        return True
-    if shell_eids and solid_pids:
+
+    sub_ids: List[int] = []
+    if quad_eids:
         grshel_id = state.next_id()
         sub_shell = state.next_id()
-        sub_solid = state.next_id()
-        out_lines += _emit_grshel(grshel_id, f"{title}_grshel", shell_eids)
+        out_lines += _emit_grshel(grshel_id, f"{title}_grshel", quad_eids)
         out_lines += _emit_surf_grshel(sub_shell, f"{title}_shells", grshel_id)
+        sub_ids.append(sub_shell)
+    if tri_eids:
+        grsh3n_id = state.next_id()
+        sub_tri = state.next_id()
+        out_lines += _emit_grsh3n(grsh3n_id, f"{title}_grsh3n", tri_eids)
+        out_lines += _emit_surf_grsh3n(sub_tri, f"{title}_tris", grsh3n_id)
+        sub_ids.append(sub_tri)
+    if solid_pids:
+        sub_solid = state.next_id()
         out_lines += _emit_surf_part(sub_solid, f"{title}_solids", solid_pids)
-        out_lines += _emit_surf_surf(surf_id, title, [sub_shell, sub_solid])
-        return True
-    return False
+        sub_ids.append(sub_solid)
+    out_lines += _emit_surf_surf(surf_id, title, sub_ids)
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

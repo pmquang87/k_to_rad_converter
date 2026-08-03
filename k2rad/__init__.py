@@ -62,12 +62,12 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         return
     if state.contacts_single or state.contacts_surf2surf or state.contacts_general:
         return
-    if state.contacts_tied:
-        # A tied deck already gets an /INTER (TYPE2). More importantly, the
-        # all-parts TYPE7 self-contact stub would ENGAGE across the tied gaps:
-        # tied nodes sit within half a shell thickness of their main surface —
-        # inside the TYPE7 thickness-derived gap — so the "inert" stub would
-        # add parasitic contact stiffness at every weld.
+    if state.contacts_tied or state.contacts_spotweld:
+        # A tied or spot-welded deck already gets an /INTER (TYPE2). More
+        # importantly, the all-parts TYPE7 self-contact stub would ENGAGE across
+        # the tied gaps: tied nodes sit within half a shell thickness of their
+        # main surface — inside the TYPE7 thickness-derived gap — so the "inert"
+        # stub would add parasitic contact stiffness at every weld.
         return
     if not (state.solid_elems or state.shell_elems):
         return  # no deformable surface to build the interface from

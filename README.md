@@ -1166,11 +1166,34 @@ segment distance × 1.2 — so tied nodes offset from a shell master's MID-PLANE
 by half the plate thickness (the usual welded-shell layout) stay tied;
 `Ignore=2` makes the starter drop (and print) any node beyond it, and a
 negative Card-3 `SST`/`MST` (LS-DYNA's absolute tie distance) floors `dsearch`.
+`*CONTACT_SPOTWELD` (+ `_WITH_TORSION`, `_BEAM_OFFSET`, `_CONSTRAINED_OFFSET`,
+each optionally `_PENALTY` / `_MPP` / `_ID`) → `/INTER/TYPE2` with
+`Ignore=2`, `Spotflag=28`, **`Idel2=1`** — dyna2rad's spotweld defaults
+(`convertcontacts.cxx:49`). This is what attaches the weld elements to the
+sheets they join: without it the `*MAT_SPOTWELD` nuggets reach the solver
+joined to nothing but each other and the weld force stays 0.000 N. The
+secondary (SSID) side is resolved over **beam** end nodes as well as shells and
+solids — `SSTYP=3` on a spot-weld card names the *weld* part, which is beams —
+for `SSTYP` 0 (segment set), 1 (shell set), 2 (part set), 3 (part), 4 (node
+set); the main (MSID) side takes the same part / part-set / segment-set routes
+as the tied contacts. `dsearch` comes from the card: `0.6*(SST+MST)` when both
+Card-3 thicknesses are positive (dyna2rad drops them here but uses exactly that
+formula for the sibling tied contacts, and it is the starter's own internal
+term), a negative `SST`/`MST` as an absolute tie distance, otherwise 0 = the
+starter's average-main-segment default. The `_WITH_TORSION` / `_BEAM_OFFSET` /
+`_CONSTRAINED_OFFSET` flavours emit the same card and **warn** about the
+dropped behaviour (dyna2rad parses the flag and never reads it)
 `ignore=0/1/2` → `Inacti=5` (LS-DYNA neutralizes initial penetrations at
 initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
 deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
 pre-engagement bootstrap needs the t=0 stiffness path)
+A contact **master surface** built from a part that carries 3-corner shells
+splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
+`/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT`, combined under a
+`/SURF/SURF` when more than one kind is present. A `/SH3N` id inside a
+`/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
+rejects the whole deck
 
 ### Control / output
 `*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks
@@ -1311,6 +1334,46 @@ it on the rank that writes the T01 (`hist2.F:616-622` zeroes `FSAV` only for
 `ISPMD/=0`; `sortie_main.F:1945`, headed "TRAITEMENT SUR FSAV NON CUMULE",
 resets only the monvol block, `FSAV(26)` and `FSAV(29)`). The rcforc-equivalent
 force is `d(FNX)/dt`; `tools/th_to_csv.py` writes that column
+`*DATABASE_SWFORC` → the three spot-weld force channels, matching dyna2rad's
+own two-pass split (`dyna2rad.cxx:613-695`, where `SWFORC` appears twice):
+`/TH/SPRING` over the `*MAT_SPOTWELD` (MAT_100) **beam** welds, listed by their
+original `*ELEMENT_BEAM` ids (the `/PROP/TYPE13` connectors keep them, so a T01
+channel maps 1:1 onto an swforc row) with variables **`DEF FAIL`** — `FAIL` is
+the weld rupture flag and is *not* part of `DEF` (`hm_read_thgrou.F:1519`);
+`/TH/BRIC` over the MAT_100 **solid** welds (`DEF` = stress and internal
+energy — the force *resultant* needs a `/CLUSTER`); and `/TH/CLUSTER` over the
+`*DEFINE_HEX_SPOTWELD_ASSEMBLY` welds with **`DEF FLOC`**, where `FLOC` adds the
+local `FS`/`FN`/`MS`/`MN` weld resultants dyna2rad never requests. Unlike the
+`/TH/INTER` / `/TH/NODE REAC*` channels these are instantaneous forces — and
+they must be read from the T01, not the animation: `/ANIM/SPRING/FORC` writes
+zeros for `/PROP/TYPE13` connectors that the T01 shows carrying kilonewtons.
+Only welds that were actually emitted are listed: naming a weld whose part the
+connector writer skipped (zero-length, no `*SECTION_BEAM`, no area) is starter
+`ERROR 69` and the deck is refused, so those ids are dropped with a warning
+instead. A deck that asks for swforc but defines no weld gets a warning and
+**no** dangling `/TH` block; the `dt` joins the `/TFILE` minimum
+`*DEFINE_HEX_SPOTWELD_ASSEMBLY` (+ `_1` … `_16`) → one `/GRBRIC/BRIC` +
+one `/CLUSTER/BRICK` per assembly (LS-DYNA caps an assembly at 16 hexes,
+`/CLUSTER` at 500, so the 1:1 map always fits). `ID_SW` is reused verbatim as
+the cluster id when it is usable (a blank/zero or repeated `ID_SW` is replaced
+by a generated id with a warning — `/CLUSTER/BRICK/0` would make the
+`/TH/CLUSTER` request read as *all* clusters); `skew_ID=0` lets the starter
+build the weld frame from the cluster's own bottom→top face normal; `Ifail=3`
+(multi-directional). Failure limits come from the `*MAT_SPOTWELD` of the first
+element's part: `Fn_fail1=NRR`, `Mt_fail=MRR` straight through, and each
+two-direction pair collapsed to its live minimum — `Fs_fail=min(NRS,NRT)`,
+`Mb_fail=min(MSS,MTT)` — with `a1..a4=1` and **`b1..b4=2`**. Radioss scores one
+shear resultant against one limit (`clusterf.F:365,367`) where MAT_100 scores
+`NRS` and `NRT` separately, and `min` is the reduction that agrees with the
+quadratic exponent: it reproduces MAT_100's `(Nrr/NRR)²+…≥1` criterion exactly
+when `NRS==NRT` and `MSS==MTT`, and is conservative otherwise. (`sqrt(NRS²+NRT²)`
+paired with `b=2` would halve the shear damage; dyna2rad's `b=1` makes the
+interaction linear and fails a combined-load weld early — neither half is right
+on its own.) Element ids that are not 8-node `/BRICK` (tetrahedra, unknown ids)
+are screened out of the group with a warning — the starter *accepts* a tet
+there, which is exactly the problem: a cluster takes the weld's two joined faces
+from the hex node ordering (`hm_read_cluster.F:201-205`), so a tet's degenerate
+top face corrupts the local frame and the whole failure surface with it
 `*DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG`, `*MAT_ADD_FATIGUE` → no
 OpenRadioss equivalent; honoured **offline** by
 `tools/modal_random_response.py` on top of the modal solution (see
