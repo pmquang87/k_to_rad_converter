@@ -819,6 +819,26 @@ class TestDefineTable3D(unittest.TestCase):
         self.assertNotIn("/TABLE/1/400", starter)
         self.assertTrue(_warns(res, "ERROR 3089"))
 
+    def test_mat024_lcss_3d_guard(self):
+        # An UNSUPPORTED consumer of a *DEFINE_TABLE_3D must warn: MAT_024's
+        # LCSS would otherwise wire the 3-D id into funct_id as if it were a
+        # /FUNCT (dangling, starter ERROR 779) with no message.
+        deck = (MESH
+                + "*MAT_PIECEWISE_LINEAR_PLASTICITY\n"
+                + _row(7, "7.85E-9", "2.1E5", 0.3, 350.0, 1000.0) + "\n"
+                + _row(0, 0, 400) + "\n"
+                + _table3d(400, [(293.0, 101)])
+                + _table2d(101, [(0.001, 110), (1.0, 111)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertTrue(_warns(res, "LCSS=400 is a *DEFINE_TABLE_3D"))
+        # the LAW36 falls back to bilinear (a synthesized hardening curve),
+        # not a dangling reference to id 400
+        blk = _block(starter, "/MAT/LAW36/7")
+        self.assertNotIn(f"{400:>10}", "\n".join(blk))
+
     def test_rows_missing_inner_table_dropped(self):
         deck = (MESH.replace(_row(7, 7, 7), _row(7, 7, 8))
                 + "*MAT_ELASTIC\n" + _row(8, "7.85E-9", "2.1E5", 0.3) + "\n"

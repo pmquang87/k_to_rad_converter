@@ -7008,6 +7008,21 @@ def _resolve_mat_plas_tab(state: ConversionState) -> None:
                 "SIGY/ETAN bilinear hardening.")
             mat.lcss = 0
 
+        # LCSS pointing at a *DEFINE_TABLE_3D: LS-DYNA reads a 3-D LCSS as
+        # sigma(eps_p, rate, T), and LAW36's rate-function family has no
+        # temperature dimension — without this guard the 3-D id would be
+        # wired into funct_id as if it were a /FUNCT (dangling reference,
+        # starter ERROR 779) with no message.
+        if mat.lcss > 0 and mat.lcss in state.define_tables_3d:
+            state.warn(
+                f"*MAT mid={mat.mid}: LCSS={mat.lcss} is a *DEFINE_TABLE_3D "
+                "(temperature-dependent hardening family) — /MAT/LAW36 has "
+                "no temperature dimension, so the 3-D form is not "
+                "convertible here; falling back to SIGY/ETAN bilinear "
+                "hardening. Re-tabulate the working temperature's plane as a "
+                "2-D *DEFINE_TABLE to keep the rate family.")
+            mat.lcss = 0
+
         if mat.lcss > 0:
             mat.funct_id = mat.lcss
 

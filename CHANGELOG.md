@@ -105,6 +105,11 @@ Prior history (before this changelog was introduced) is summarized in the
     plane grids warn and skip the flat emission (naming ERROR 3089) while
     `*MAT_224` LCK1 plane-slicing still converts. `*DEFINE_TABLE_4D`+ stay
     skipped (Radioss `/TABLE` caps at Ndim=4; no supported consumer).
+    Unsupported consumers warn: a `*MAT_024` LCSS pointing at a 3-D table
+    (temperature-dependent hardening) now warn-falls-back to bilinear
+    instead of silently wiring the id into a function slot (dangling /FUNCT,
+    starter ERROR 779); the MAT_120/252/DIEM table slots already carried
+    loud dangling warnings that cover the 3-D case.
 
   - **Live-starter validation** (starter_win64 2026-05-20, `/BEGIN 2022`,
     np=1): the converted combined deck — LAW109 all-cards + 1-D/2-D/3-D
@@ -115,7 +120,7 @@ Prior history (before this changelog was introduced) is summarized in the
     `TEMPERATURE SCALE FUNCTION = 0`, one-layer/first-IP deletion) and the
     3-D ordinate echo reproducing the `Scale_y` product numerically
     (`1.2·1.3 = 1.56`). Negative control: the same deck minus ONE grid row →
-    `ERROR ID: 3089` twice. 49 new tests (column-exact, hand-computed) in
+    `ERROR ID: 3089` twice. 50 new tests (column-exact, hand-computed) in
     `tests/test_tabulated_jc.py`.
 
 - **Foam batch** (`*MAT_SOIL_AND_FOAM` 005, `*MAT_LOW_DENSITY_VISCOUS_FOAM`
