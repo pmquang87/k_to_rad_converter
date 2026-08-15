@@ -1397,11 +1397,17 @@ _OFFSET_SPECS: Dict[str, object] = {
     "SET_SEGMENT": {"cards": {0: [(0, "s")]},
                     "data": (1, [(0, "n"), (1, "n"), (2, "n"), (3, "n")])},
 
-    # Curves / tables
+    # Curves / tables. The table point cards are 2E20.0 ("VALUE LCID"; the
+    # legacy *DEFINE_TABLE form has bare-VALUE rows, whose absent field 1 is
+    # simply untouched) while the header card is I10 — hence "data_w": 20;
+    # without it the offset lands inside the VALUE (chars 11-20) and the real
+    # curve/table reference in chars 21-40 dangles after the id shift.
     "DEFINE_CURVE": {"cards": {0: [(0, "f")]}},
     "DEFINE_CURVE_FUNCTION": {"cards": {0: [(0, "f")]}},
-    "DEFINE_TABLE": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")])},
-    "DEFINE_TABLE_2D": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")])},
+    "DEFINE_TABLE": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")]),
+                     "data_w": 20},
+    "DEFINE_TABLE_2D": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")]),
+                        "data_w": 20},
 
     # *DEFINE geometry entities
     "DEFINE_COORDINATE_SYSTEM": {"cards": {0: [(0, "d"), (7, "d")]}},
@@ -1573,6 +1579,33 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_TOUGHENED_ADHESIVE_POLYMER": _mat({1: [(0, "f")]}),
     "MAT_252": _mat({1: [(0, "f")]}),
     "MAT_ADD_DAMAGE_DIEM": _off_mat_add_damage_diem,
+    # Tabulated Johnson-Cook batch. Card 2 is all curve/table ids
+    # (LCK1 LCKT LCF LCG LCH LCI; BFLG field 7 is a flag) and card 3 field 5
+    # is LCPS (a table id; FAILOPT/NUMAVG/NCYFAIL/ERODE are counts/flags).
+    # The E<0 / BETA<0 encodings (|value| is a curve id inside a FLOAT cell)
+    # are NOT offset — the machinery shifts integer id cells only; a
+    # transformed deck using them draws the dangling-reference warning
+    # instead of a silent wrong-curve remap. The _GYS/_ORTHO_PLASTICITY
+    # variants are parse-time warn-skips but still get MID offset so the
+    # dropped material's id story stays consistent.
+    "MAT_TABULATED_JOHNSON_COOK":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_TABULATED_JOHNSON_COOK_LOG_INTERPOLATION":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_224":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_TABULATED_JOHNSON_COOK_GYS": _mat(),
+    "MAT_224_GYS": _mat(),
+    "MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY": _mat(),
+    "MAT_264": _mat(),
+    # Same 2E20.0 point-card layout as *DEFINE_TABLE above (Vol I R17 p.2571:
+    # VALUE chars 1-20, TABLEID chars 21-40) — "data_w": 20 or the offset
+    # corrupts the VALUE and leaves the inner-table reference dangling.
+    "DEFINE_TABLE_3D": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")]),
+                        "data_w": 20},
     "SECTION_SOLID_MISC": _off_section_solid,
     # Node table in the *NODE I8/E16 format → IDNOFF (base variant has no
     # header card; _RAMP prepends the NDTRRG card, which carries no ids).
@@ -1885,9 +1918,14 @@ def _offset_block(b: Block, spec, offsets: Dict[str, int], warn) -> None:
     if data:
         start, mods = data
         stride = spec.get("stride", 1)
+        # "data_w": field width of the DATA cards when it differs from the
+        # header cards' (the *DEFINE_TABLE family: I10 header, but E20.0
+        # point cards — slicing those at w=10 would land field 1 INSIDE the
+        # VALUE and corrupt it while leaving the real id untouched).
+        wd = spec.get("data_w", w)
         for idx in range(toff + start, len(raw), stride):
             if raw[idx].strip():
-                new = _rewrite_line(raw[idx], mods, offsets, w)
+                new = _rewrite_line(raw[idx], mods, offsets, wd)
                 if new is not None:
                     raw[idx] = new
 

@@ -11,11 +11,13 @@ from .materials import (
     _make_functions,
     _make_materials,
     _resolve_define_tables,
+    _resolve_define_tables_3d,
     _resolve_mat_gurson,
     _resolve_mat_hyper_rubber,
     _resolve_mat_iso_elas_plas,
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_comp_tens,
+    _resolve_mat_tabulated_jc,
     _resolve_mat_viscoelastic,
     _resolve_mat_adhesives,
     _resolve_mat_foams,
@@ -638,6 +640,19 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # (Nothing between the adhesives pass and here allocates curve ids, so
     # the synthesized /FUNCT numbering is unchanged by this placement.)
     _resolve_mat_foams(state)
+
+    # Tabulated Johnson-Cook batch. *DEFINE_TABLE_3D validation + its flat
+    # Ndim=3 /TABLE/1 first (needs the resolved 2-D tables from
+    # _resolve_define_tables above), then the MAT_224 wiring, which slices
+    # the same nesting for LCK1, synthesizes flipped/exp-unwrapped curves and
+    # AutoTables (so before _make_functions) and re-routes table-slot curves
+    # via state.table_1d_ids. NUMINT's solid/shell split reads the FINAL
+    # element lists (after _screen_provisional_elements, like the foams).
+    # Before _resolve_xref_parts below: LAW109 is NOT on the starter's
+    # solid-/XREF law whitelist, so the _target_mat_law entry alone makes
+    # that gate warn-skip MAT_224 parts naming the law.
+    _resolve_define_tables_3d(state)
+    _resolve_mat_tabulated_jc(state)
 
     # Decide which parts get a /XREF (reference-geometry) block. AFTER the
     # tet10 passes (the 8/4-node-solid gate must see the final connectivity)

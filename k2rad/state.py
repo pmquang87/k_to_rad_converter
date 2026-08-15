@@ -1624,6 +1624,53 @@ class DefineTable:
 
 
 @dataclass
+class DefineTable3D:
+    """*DEFINE_TABLE_3D → /TABLE/1 with Ndim=3 (a table of 2-D tables).
+
+    Header card (Keyword971_R13.0 define_table_3D.cfg): TBID SFA OFFA — same
+    shape as the 2-D form. Each row pairs a 3rd-dimension abscissa VALUE
+    (stored already scaled: V = SFA·(VALUE+OFFA)) with a *DEFINE_TABLE[_2D]
+    id, so the full nesting is TABLE_3D(V) → TABLE(A) → CURVE(x): dim 1 = the
+    leaf curves' own abscissa, dim 2 = the inner tables' VALUEs, dim 3 = this
+    card's VALUEs. There is NO legacy positional form — the manual's point
+    card is always "VALUE TABLEID" (20-char fields).
+
+    Validation + the flat Ndim=3 /TABLE/1 emission (grid-completeness checked
+    against starter ERROR 3089) happen in the writer post-pass
+    ``_resolve_define_tables_3d``; *MAT_224's LCK1 additionally SLICES the
+    nesting (a 2-D plane for tab_ID_h, the per-plane quasi-static curves for
+    tab_ID_t) instead of referencing the 3-D card.
+    """
+    tbid: int
+    title: str
+    sfa: float
+    offa: float
+    rows: List[Tuple[float, int]] = field(default_factory=list)   # (V, 2-D tbid)
+    resolved: bool = False  # post-pass validated; emitted as Ndim=3 /TABLE/1
+
+
+@dataclass
+class AutoTable:
+    """A synthesized multi-dimensional /TABLE/1 (Ndim 2 or 3), built by a
+    writer prepass with EXPLICIT rows — unlike ``DefineTable`` (whose rows are
+    the parsed LS-DYNA table) these carry per-row Scale_y and, for Ndim=3, a
+    (A, B) coordinate pair per row. Emitted by ``_make_functions`` after the
+    *DEFINE_TABLE loop, layout from CURVE/table_1.cfg FORMAT(radioss110):
+    row = fct_ID(10) blank(10) A(20) [B(20)] blank(40|20) Scale_y(20).
+
+    Rows must already satisfy the starter's grid rules for Ndim=3 (complete
+    rectangular secondary grid, no duplicate (A,B) with different fct/scale —
+    hm_read_table2_1.F:197-303, ERRORs 3087/3088/3089); the builders construct
+    them as full tensor grids so this holds by construction.
+    """
+    tid: int
+    title: str
+    ndim: int
+    # (fct_id, (A,) or (A, B), Scale_y)
+    rows: List[Tuple[int, Tuple[float, ...], float]] = field(default_factory=list)
+
+
+@dataclass
 class CoordSys:
     cid: int
     xo: float; yo: float; zo: float
@@ -2989,6 +3036,62 @@ class FailDiem:
 
 
 @dataclass
+class MatTabulatedJC:
+    """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1].
+
+    R16/R17 cards (Vol II R17 p.1591-1597; the shipped Keyword971_R7.1
+    mat_224.cfg is STALE — no BFLG/ERODE/LCPS and card 3 typed as floats):
+      Card1: MID RO E PR CP TR BETA NUMINT
+      Card2: LCK1 LCKT LCF LCG LCH LCI BFLG
+      Card3 (optional): FAILOPT NUMAVG NCYFAIL ERODE LCPS
+    Negative encodings: E<0 → -E is a curve E(T); BETA<0 → -BETA is a curve /
+    table / TABLE_3D(4D) of the Taylor-Quinney factor; NUMINT<0 → |NUMINT| is
+    a PERCENT of failed IPs/layers (-200 = erosion off); a table whose first
+    VALUE is negative carries natural-log strain rates.
+
+    All routing (tables, failure model, warnings) is resolved by the writer
+    prepass ``_resolve_mat_tabulated_jc`` into the ``tab_*``/``fail_*``
+    fields below; the emitters only format cards.
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float = 0.0           # E<0: -E is an E(T) curve — sampled at TR (warned)
+    pr: float = 0.0
+    cp: float = 0.0          # specific heat per MASS on BOTH sides → C_p 1:1
+    tr: float = 0.0          # → T_ref (0 keeps the starter default 293)
+    beta: float = 1.0        # ≥0 scalar → ETA; <0: -BETA → TAB_ETA
+    numint: float = 1.0
+    lck1: int = 0
+    lckt: int = 0
+    lcf: int = 0
+    lcg: int = 0
+    lch: int = 0
+    lci: int = 0
+    bflg: int = 0            # R16+: β(shear/rate/size) reinterpretation — DROPPED
+    failopt: int = 0         # F2 = eps_p/eps_f criterion — DROPPED (warned)
+    numavg: int = 1
+    ncyfail: int = 1
+    erode: int = 0           # R16+: no-erosion stress handling — DROPPED
+    lcps: int = 0            # R16+: post-processing principal-stress limit — DROPPED
+    log_interpolation: bool = False   # _LOG_INTERPOLATION spelling → I_smooth=2
+    # ── resolved by _resolve_mat_tabulated_jc ──────────────────────────────
+    e_eff: float = 0.0       # scalar E actually emitted
+    eta: float = 1.0         # scalar ETA actually emitted
+    ismooth: int = 1         # LAW109 I_smooth (1 linear / 2 log)
+    tab_h: int = 0           # tab_ID_h (flow stress, Ndim ≤ 2)
+    tab_t: int = 0           # tab_ID_t (quasi-static yield vs T)
+    yscale_h: float = 0.0    # Yscale_h; 0 = default 1.0 (3-D-split T-plane fix)
+    tab_eta: int = 0         # TAB_ETA (Taylor-Quinney scale)
+    emit_fail: bool = False  # a usable LCF exists → write /FAIL/TAB1
+    fail_table1: int = 0     # TAB1 table1_ID (function or Auto/DefineTable id)
+    fct_idel: int = 0        # TAB1 fct_IDel (element-size function, EI_ref=1)
+    ifail_sh: int = 1
+    ifail_so: int = 1
+    pthickfail: float = 0.0
+
+
+@dataclass
 class FoamRefGeometry:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per part whose nodes
     intersect the keyword's node table (dyna2rad ConvertInitialFoamReferenceGeometry;
@@ -3694,6 +3797,8 @@ class ConversionState:
     mat_cohesive_mm_epr: Dict[int, MatCohesiveMMEPR] = field(default_factory=dict)
     mat_toughened_adhesive: Dict[int, MatToughenedAdhesive] = field(default_factory=dict)
     fail_diem: Dict[int, FailDiem] = field(default_factory=dict)
+    # *MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1]
+    mat_tabulated_jc: Dict[int, MatTabulatedJC] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -3764,6 +3869,17 @@ class ConversionState:
     # *DEFINE_TABLE[_2D] → /TABLE/1 (Ndim=2), keyed by table id (shares the
     # LS-DYNA load-curve id space with state.curves).
     define_tables: Dict[int, DefineTable] = field(default_factory=dict)
+    # *DEFINE_TABLE_3D → /TABLE/1 (Ndim=3), same shared id space. Validated
+    # (+ marked resolved) by _resolve_define_tables_3d; *MAT_224 LCK1 slices
+    # the nesting instead of referencing the flat 3-D card.
+    define_tables_3d: Dict[int, DefineTable3D] = field(default_factory=dict)
+    # Synthesized multi-dimensional /TABLE/1 cards (Ndim 2/3) with explicit
+    # (fct, coords, Scale_y) rows — built by writer prepasses (the MAT_224
+    # LAW109/TAB1 wiring, the *DEFINE_TABLE_3D flat emission), emitted by
+    # _make_functions. Keyed by the emitted table id (a *DEFINE_TABLE_3D
+    # keeps its deck id; fresh ids come from next_curve_id, checked free of
+    # every table namespace too).
+    auto_tables: Dict[int, AutoTable] = field(default_factory=dict)
     coord_sys: Dict[int, CoordSys] = field(default_factory=dict)
     # *DEFINE_COORDINATE_NODES → /SKEW (moving or fixed)
     coord_nodes: Dict[int, CoordNodes] = field(default_factory=dict)
@@ -4025,12 +4141,19 @@ class ConversionState:
         return v
 
     def next_curve_id(self) -> int:
-        """A next_id() guaranteed free in the /FUNCT (curve) namespace, so a
-        synthesized curve can never silently clobber a user *DEFINE_CURVE whose
-        LCID happens to be >= the auto-id base (90001). A no-op vs next_id() in
-        the common case (no user curve that high), so it does not shift ids."""
+        """A next_id() guaranteed free in the /FUNCT *and* /TABLE namespaces.
+
+        The starter checks FUNCTION and TABLE ids in ONE merged duplicate scan
+        (hm_read_table.F:88 counts "total number /TABLE + /FUNCT" before the
+        UDOUBLE pass), so a synthesized /FUNCT must dodge user *DEFINE_TABLE /
+        _2D / _3D ids and already-synthesized AutoTables as well as user
+        curves — a collision is starter ERROR 79 (DUPLICATE ID in "FUNCTION &
+        TABLE DEFINITION"), reachable whenever a renumbered deck carries a
+        table id at or above the auto-id base (90001). A no-op vs next_id()
+        in the common case (no user id that high), so it does not shift ids."""
         fid = self.next_id()
-        while fid in self.curves:
+        while (fid in self.curves or fid in self.define_tables
+               or fid in self.define_tables_3d or fid in self.auto_tables):
             fid = self.next_id()
         return fid
 
@@ -4088,7 +4211,8 @@ class ConversionState:
                   self.mat_kelvin_maxwell, self.mat_general_visco,
                   self.mat_simplified_rubber, self.mat_soft_tissue,
                   self.mat_cohesive_mixed_mode, self.mat_arup_adhesive,
-                  self.mat_cohesive_mm_epr, self.mat_toughened_adhesive):
+                  self.mat_cohesive_mm_epr, self.mat_toughened_adhesive,
+                  self.mat_tabulated_jc):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

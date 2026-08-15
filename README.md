@@ -765,6 +765,73 @@ mechanism, `GASKETT` is not an adhesive path, and hourglass splits
 (`*HOURGLASS`/`*CONTROL_HOURGLASS`) never touch a cohesive part.
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
+`*MAT_TABULATED_JOHNSON_COOK` (224, `_LOG_INTERPOLATION` → `I_smooth=2`) →
+`/MAT/LAW109` `[+ /FAIL/TAB1]` — the fully tabulated flow stress
+`σ_y = k1(ε_p, ε̇)·kt(ε_p,T)/kt(ε_p,T_ref)`. `CP` copies 1:1 (LAW109's `C_p`
+is per-MASS — the engine divides by ρ itself — unlike the LAW2/LAW4 `rhoC_p`);
+adiabatic self-heating is law-internal, so NO `/HEAT/MAT` is emitted (its
+presence would switch LAW109 to the imposed-temperature path). `LCK1` routes
+by form: a plain curve is re-emitted as a 1-D `/TABLE/1` (dyna2rad leaves the
+slot 0 — deck broken); a 2-D table is referenced by id under `I_smooth=1`;
+every `I_smooth=2` table — the `_LOG_INTERPOLATION` spelling or a NEGATIVE
+first rate (LS-DYNA's natural-log axis, `exp()`-unwrapped) — is rebuilt with
+BOTH flat-clamp rows: dyna2rad's high-rate sentinel (last curve duplicated at
+`10·max+1`) plus the first curve anchored at rate `1e-10`, because the engine
+clamps only the log-lookup SAMPLE there and otherwise EXTRAPOLATES in log10
+below the lowest rate — at the zero plastic strain rate of every elastic
+phase the yield goes NEGATIVE (e.g. rates `[1,100,1000]`: `6·Y1−5·Y2`) and
+the run diverges silently under NORMAL TERMINATION; solver-validated, the
+anchored deck tracks the log10 prediction to 0.0000%. A 3-D `σ(ε_p,ε̇,T)` is
+SPLIT — `tab_ID_h` = the plane nearest `T_ref`, `tab_ID_t` = the per-plane
+lowest-rate curves over T (LAW109's yield lookup hard-stops on NDIM>2 at
+cycle 1; d2r wires the 3-D id straight in and produces exactly that crash;
+the split is exact iff rate/temperature separate multiplicatively — warned,
+`LCKT` then ignored like LS-DYNA does), and when the nearest plane is NOT at
+`T_ref`, `Yscale_h = kt(T_ref)/kt(T_plane)` cancels the constant separable-
+factor offset the reconstruction would otherwise carry. `BETA≥0` → `ETA`;
+`BETA<0` → `TAB_ETA` (curve → 1-D table; a negative first abscissa makes the
+WHOLE axis ln(rate) per LS-DYNA's stated convention, so EVERY point is
+`exp()`-unwrapped — d2r exp()s only the negative points, scrambling
+mixed-sign axes; 2-D table direct — LS-DYNA's (T → rate) nesting IS
+TAB_ETA's (rate, T) axis order, per the manual's own level tags for the
+3-D/4-D forms and d2r's untransposed pass-through; TABLE_3D would need a
+full axis transpose → the table warn-drops and a representative scalar
+`ETA`, sampled at (lowest rate, plane nearest `T_ref`, ε_p→0), replaces the
+old flat 1.0). Failure emits `/FAIL/TAB1` ONLY for a usable `LCF` (d2r
+writes its card unconditionally → starter ERROR 3000 on LCF-less decks): the
+triaxiality axis is FLIPPED (LS-DYNA `p/σ_vm` compression-positive → Radioss
+`σ_m/σ_vm` tension-positive), a Lode-dependent LCF adds dim 3 with
+`θ = (2/π)·asin(ξ)` (Radioss interpolates the normalized Lode ANGLE, not the
+Lode parameter; shells read the axis at θ=0), and `LCG` — which has no TAB1
+function slot — becomes the PRE-MULTIPLIED `ε_f(triax)·g(rate)` tensor grid
+via per-row `Scale_y` (a natural-log LCG axis is `exp()`-unwrapped; d2r
+copies it raw). `LCI` → `fct_IDel` with `EI_ref` blank → 1.0 (abscissa =
+absolute element size, same as LCI); `NUMINT` → `Ifail_sh=1` (count 1),
+`P_thickfail=count/NIP` (d2r's `FAILIP=NUMINT/100` truncates every
+0<NUMINT<100 to zero), or `|NUMINT|/100` for the percent form; `NUMINT=8` on
+fully integrated solids (ELFORM 2/−1/−2 → Isolid 17, 8 IPs both sides) maps
+to `Ifail_so=2` — deletion when ALL IPs fail, exactly LS-DYNA's 8-of-8 rule
+— other solid counts keep first-IP deletion, warned; `NUMINT=-200` (no
+erosion) emits NO /FAIL. `LCH` is ALWAYS warn-dropped: TAB1's `fct_IDT` is
+evaluated at `TSTAR`, which no LAW109 engine path ever fills — a mapped
+`LCH(T)` would read at abscissa 0 every cycle and erode the mesh at cycle 1.
+`E<0` (E(T) curve) is sampled at `T_ref` (d2r takes the first ordinate);
+`BFLG`/`ERODE`/`LCPS`/`FAILOPT`/`NUMAVG`/`NCYFAIL` warn-drop; the `_GYS`
+(224_GYS) and `_ORTHO_PLASTICITY` (264) variants warn-skip — dyna2rad drops
+both SILENTLY with the part wired to `mat_ID=0`. `Xscale_h` deliberately
+stays blank: the engine applies it to the pre-yield rate sample but NOT to
+the in-loop plastic re-lookup (sigeps109.F:221 vs 349), so the two lookups
+agree only at 1.0. Note LAW109 has no initial-temperature input in LS-DYNA's
+MAT_224 either — `T_ini` defaults to `T_ref` and a second temperature is
+reachable only through self-heating (or a thermal analysis); the engine's
+plastic-strain-rate filter is hardwired FCUT = 10 kHz, so mass-scaled decks
+with dt > 1.6e-5 s put the filter recursion outside its stability range.
+Starter-validated end to end (0 errors, field-by-field echo incl. the 3-D
+grid's `1.2·1.3=1.56` Scale_y product; ERROR-3089 negative control) and
+solver-validated on 22 single-element decks (rate table to 0.2%, log10
+interpolation to 0.0000%, adiabatic heating to 0.002%, triaxiality-flipped
+failure to 0.06%, LCG/LCI scaling to 0.12%, NUMINT layer counting exact) —
+see `tests/test_tabulated_jc.py`.
 
 ### Composites
 
@@ -1204,6 +1271,15 @@ value); legacy `*DEFINE_TABLE` resolves explicit-LCID rows directly and
 bare-VALUE rows positionally (value *i* pairs with the *i*-th `*DEFINE_CURVE`
 parsed after the table — LS-DYNA's "curves follow" rule; unpairable tables
 warn + skip)
+`*DEFINE_TABLE_3D` → `/TABLE/1` (Ndim=3, flat): one row per (inner VALUE,
+outer VALUE) pair — dim 1 = the leaf curves' own abscissa, dim 2 = the inner
+`*DEFINE_TABLE`s' VALUEs (their own SFA/OFFA applied — dyna2rad's generic 3-D
+path drops them), dim 3 = the outer card's VALUEs, ascending by (B, A). The
+starter demands a COMPLETE rectangular secondary grid (a function for every
+(A,B) pair — ERROR 3089, negative-control-measured), so a 3-D table whose
+planes carry different inner grids is warned and not emitted flat (`*MAT_224`
+LCK1 still slices its planes); `*DEFINE_TABLE_4D`+ have no `/TABLE` target
+(Ndim caps at 4, no consumer) and stay skipped
 `*DEFINE_CURVE_FUNCTION` → `/FUNCT` (a pure single-variable `x`/`time` analytic
 expression is sampled into an X-Y function over `[0, termination]`; expressions
 that reference parameters, other curves, or runtime state are warned + skipped)
