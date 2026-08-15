@@ -11,6 +11,270 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Adhesives / cohesive batch** (`*MAT_COHESIVE_MIXED_MODE` 138,
+  `*MAT_ARUP_ADHESIVE` 169, `*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE` 240,
+  `*MAT_TOUGHENED_ADHESIVE_POLYMER` 252, `*MAT_ADD_DAMAGE_DIEM`, and the
+  cohesive `*SECTION_SOLID` ELFORM ±19/20/±21/22 → `/PROP/TYPE43` element
+  path) — the roadmap P1 batch. All were `SKIPPED` before; a cohesive ELFORM
+  additionally fell through `_elform_to_isolid`'s default to a full-integration
+  structural-hex `/PROP/SOLID` (Isolid 17), i.e. a zero-thickness cohesive on a
+  volume element. Numeric aliases `*MAT_138`/`*MAT_252` are registered too —
+  they are absent from dyna2rad's own keyword table and die in its broken
+  `Convert1To1` fallback (no `/MAT`, no message).
+
+  - **`*MAT_COHESIVE_MIXED_MODE` (138) → `/MAT/LAW117`** (dyna2rad
+    `p_ConvertMatL138`, CM:6248-6360; card layout audited against `mat117.cfg`
+    `FORMAT(radioss2022)` — the 2021 block lacks the whole
+    `Fct_TN/Fct_TT/Fscale_x` card and reads `GAMMA` as an integer). `EN`/`ET`
+    copy RAW — both sides are stiffness PER UNIT LENGTH (`DIMENSION="PRESSURE
+    PER UNIT LENGTH"`, mat117.cfg:25-26), no thickness rescale. `ROFLG` 0/1 →
+    `Imass` 2/1 written EXPLICITLY: the starter coerces blank/0 to 1 = AREA
+    density (`hm_read_mat117.F:140`), which would silently flip LS-DYNA's
+    volume default — the validation run measured the difference as part mass
+    `ρ·A = 1.1e-7` vs `ρ·V = 2.2e-7`. `XMU>0` → power law
+    (`Irupt=1`, `EXP_G=XMU`); `XMU<0` → Benzeggagh-Kenane (`Irupt=2`,
+    `EXP_BK=|XMU|` — written explicitly, `EXP_BK` has NO starter default);
+    negative `T`/`S` → element-size traction curves (`Fct_TN/TT`, `TMAX=1.0`,
+    UND-fallback suppressed exactly as d2r's curve branch does); `T=0` →
+    `TN = 2·GIC/UND` (LS-DYNA's `GIC = T·UND/2` inverted — stays under the
+    starter's `GIC ≥ TN²/(2·EN)` floor by construction); a zero peak traction
+    with no curve warns in BOTH modes (the mode-II case additionally names
+    the starter's own division by zero: `UTD = 2·GIIC/(DELTA0S·ET)` with
+    `DELTA0S = TT/ET = 0`, `hm_read_mat117.F:162-166`); negative `GIC`/`GIIC`
+    (R13 curve form) zeroed LOUDLY (d2r loses them silently through a scalar
+    read). `INTFAIL` → `Idel` with both semantic gaps warned: 0 is LS-DYNA's
+    never-delete state (starter coerces `Idel` 0→1 — the element WILL erode),
+    negative is Newton-Cotes (TYPE43 is fixed 4-point Gauss; only the count
+    carries). `GAMMA` copies raw — dyna2rad's `GAMMA==0 → 2` branch is dead
+    code (its post-handler attribMap overwrites it, CM:6357 vs 609).
+
+  - **`*MAT_ARUP_ADHESIVE` (169) → `/MAT/LAW169`** (dyna2rad
+    `p_ConvertMatL169`, CM:6426-6439; layout audited against
+    `radioss2025/MAT/LAW169.cfg`, the card's only FORMAT block). Two layout
+    traps handled: `SHT_SL` moves to the MIDDLE of LAW169 card 2 (between `PR`
+    and `TENMAX`; starter echo `SLOPE OF YIELD SURFACE AT ZERO TENSION`
+    confirmed the slot) and `PWRT`/`PWRS` are `%10d` INTEGERS (floats in
+    LS-DYNA — rounded with a warning naming the exponent change; d2r
+    truncates silently). Version gate measured, not guessed: LAW169 is
+    registered only from radioss2025, and under k2rad's `/BEGIN 2022` the
+    starter prints non-fatal `WARNING 100211` then parses the card with the
+    2025 layout anyway — byte-identical field echo vs a `/BEGIN 2025` control,
+    NORMAL TERMINATION; the k2rad warning says exactly that so the starter
+    output does not read as a conversion defect. Warned drops (d2r drops all
+    of them silently — `LAW169.cfg` comments them out): `EDOT0`/`EDOT2` rate
+    scaling + the `SDFAC/SGFAC/SDEFAC/SGEFAC` card it gates, the `EXTRA` edge
+    cards (walked in the true 3,4,5,6 order — the `EDOT2` card sits BETWEEN
+    the edge pair and the `BTHK` card), `BTHK`, and negative (curve-form)
+    strengths, which fall back to the 1e20 no-failure default with the
+    consequence named (`SHRP`'s curve form is special-cased: it is the shear
+    PLATEAU ratio, absent from `LAW169.cfg`'s `DEFAULTS` block, so the
+    dropped curve leaves NO plateau — the 1e20 no-failure default applies
+    only to the four strengths/energies). `THKDIR != 1` warns the
+    ORIENTATION trap, not a mere drop: LS-DYNA's default `THKDIR=0` detects
+    the bond normal as each element's SMALLEST dimension, while
+    `/PROP/TYPE43` always uses face 1-2-3-4 → 5-6-7-8 (the `THKDIR=1`
+    convention, which converts exactly and stays silent) — an element whose
+    smallest dimension is not its 1234→5678 axis gets its
+    traction-separation directions rotated 90° with no starter complaint.
+    LAW169 is absent from the `sini43.F`
+    area-mass list → VOLUME density always: a zero-height ARUP cohesive has
+    zero nodal mass, warned whenever MAT_169 lands on a cohesive ELFORM.
+
+  - **`*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE` (240) → `/MAT/LAW116`**
+    (dyna2rad `p_ConvertMatL240`, CM:6619-6757; layout audited against
+    `mat116.cfg FORMAT(radioss2021)` — no 2022 revision exists). `EMOD`/`GMOD`
+    are TRUE moduli: the starter divides by `Thick` itself
+    (`UPARAM(1)=E/THICK`, `hm_read_mat116.F:197`) — dividing in the converter
+    would apply it twice (the LAW117-vs-LAW116 stiffness-dimension trap).
+    Rate encodings sign-for-sign: `G*C_0<0` → rate-dependent toughness
+    (`GC_ini/GC_inf/SRATG`), `T0<0` → rate-dependent yield with `T1`'s sign
+    picking quadratic/linear-log (`ORDER` 2/1), `FG` sign picking the
+    energy/displacement criterion (`FAIL` 1/2), all magnitudes through
+    `abs()` as d2r does. **Three dyna2rad defects fixed consciously**:
+    (1) the mode-II rate gate keys on `G2C_0<0` like mode I and the LS-DYNA
+    manual — d2r keys on `EDOT_G2<0` (CM:6715), a transcription slip that
+    zeroes `GC2_inf`/`SRATG2` on every valid rate-dependent deck (`EDOT_G2`
+    is a positive reference rate) and would pass a negative one through raw;
+    starter echo confirmed `SRATG2=0` for `G2C_0>0` despite `EDOT_G2=0.4` on
+    the card, and both fields kept for `G2C_0<0`. (2) `Idel` carries
+    `|INTFAIL|` — d2r hard-codes `Idel=1` for ANY positive `INTFAIL`
+    (CM:6754), turning an `INTFAIL=4` all-IPs bondline into delete-on-first-
+    IP (~4× over-erosion). (3) the yield rate terms `T1`/`EDOT_T` (and
+    `S1`/`EDOT_S`) are gated on `T0 < 0` (`S0 < 0`) as the manual states
+    ("only considered if T0 < 0") — d2r copies them unconditionally
+    (CM:6725), and since the LAW116 engine switches rate hardening on for
+    ANY `SIGB > 0` (`sigeps116.F:143`) a static-yield deck with stale
+    `T1`/`EDOT_T` fields would run rate-dependent in Radioss where LS-DYNA
+    ran a constant yield (live-confirmed in a starter echo); zeroed live
+    fields are warned. `INICRT` (which d2r never reads — its cfg
+    mislabels the field `OUTPUT`) maps onto `Icrit` against the engine
+    kernel (`sigeps116.F:226`: `ICRIT==1` = quadratic interaction, else
+    pure-mode maximum): 0 → default, 1/2 → `Icrit=2` (+ output note for 2),
+    negative (flexible-exponent criterion) warned. Also warned: `THICK<=0`
+    (LS-DYNA = element geometric thickness; LAW116 coerces 0 → 1.0 LENGTH
+    UNIT, `hm_read_mat116.F:149-152` — silent stiffness change; a NEGATIVE
+    `THICK` is written 0 too, because the starter's guard is `== 0` only and
+    a raw copy would survive to `UPARAM(1)=E/THICK` as a negative
+    stiffness), `LCG1C`/`LCG2C` (LS-DYNA IGNORES the scalar toughness when
+    the thickness curve is set — the copied scalars are then not what the
+    LS-DYNA run used), `FG=0`/`GC_ini=0` (the STARTER silently disables that
+    mode's failure, `hm_read_mat116.F:147-148`), and the optional R16 Card 6
+    (`RFILTF/COMPY/SMOLIM/XMU` — the manual's cards 4/5 are the `_3MODES`
+    mode-III cards, so this card sits fourth in the option-free spelling;
+    LAW116 filters rate with a fixed
+    `ALPHA=0.005`). The `_THERMAL`/`_3MODES`/`_FUNCTIONS` spellings (all six
+    legal combinations registered — `THERMAL_FUNCTIONS` is not one) WARN-SKIP
+    with a `recognized_not_emitted` entry: their cards hold curve ids /
+    mode-III data with no LAW116 slot, and parsing them as the base card
+    would read curve ids as moduli. dyna2rad's gate
+    (`lsdThermal==0 && lsd3Modes==0`, CM:6664) drops them with no message
+    and a part whose `mat_ID` dangles.
+
+  - **`*MAT_TOUGHENED_ADHESIVE_POLYMER` (252) → `/MAT/LAW120` (TAPO)**
+    (dyna2rad `p_ConvertMatL252`, CM:6759-6815; layout audited against
+    `mat120_tapo.cfg FORMAT(radioss2022)`, including the card-1
+    reference-density `CARD_PREREAD` trap — columns 21-40 stay blank). LAW120
+    IS the TAPO model, so the copy is near 1:1 including `D1→D1F`, `D2→D2F`,
+    `D3→Dtrx`, `D4→Djc` (CM:6806-6809). `LCSS` → `Table_Id` with the curve
+    re-emitted as a 1-D `/TABLE/1` (a TABLE slot — the LAW76/LAW52
+    `table_1d_ids` mechanism); both codes ignore the analytic `TAU0..GAMM`
+    when it is set (LS-DYNA drops them, the reader zeroes them,
+    `hm_read_mat120.F:183-189`), so copying both is exact either way.
+    **dyna2rad defect fixed consciously**: its `JCFL`/`DOPT` switch tests
+    `== 2` — DEAD branches, the LS-DYNA fields are 0/1 — so every `JCFL=1`
+    (triaxiality factor in tension AND compression) deck silently converted
+    to the tension-only default, and `DOPT=1` to the wrong damage variable.
+    Verified against the engine kernels (`sigeps120_*.F:108-111`: `ITRX=1`
+    pressure-dependent for all T / `=2` none for T<0; `IDAM=1` plastic arc
+    length / `=2` scaled damage plastic strain): `FLG` 0/2 → `Iform` 1/2,
+    `JCFL` 0/1 → `Itrx` 2/1, `DOPT` 0/1 → `Idam` 2/1, undefined values
+    warned. `SRFILT` and `IHIS` are parsed from the R16 manual positions —
+    the local Altair R7.1 cfg blanks both cells, so a cfg-driven parse drops
+    them silently — and warn-dropped (no LAW120 slot); the `IHIS` warning
+    names what is actually lost: `IHIS >= 1` is INPUT initialization
+    (per-element stiffness/plasticity/damage scaling factors read from
+    `*INITIAL_STRESS_SOLID` process-simulation data, R16 Remark 1), not
+    history-variable output.
+
+  - **`*MAT_ADD_DAMAGE_DIEM` → `/FAIL/INIEVO`** (dyna2rad
+    `p_ConvertMatAddDamageDiem`, CM:10111-10515; layout audited against
+    `fail_inievo.cfg FORMAT(radioss2022)` + `hm_read_fail_inievo.F` — no
+    title line, four lines per criterion, and line 5 is `DISP, ALPHA, ENER`,
+    NOT the order the starter's own listing prints). A rider keyed by the
+    parent MID like GISSMO/ADD_EROSION, and coexisting with both (`/FAIL`
+    types are independent entities in Radioss — the integration deck carries
+    `/FAIL/GENE1` + `/FAIL/INIEVO` on one MID). Criterion map 1:1:
+    `DITYP` 0..4 → `INITYPE` 1..5 (same order), `P1`→`TAB_ID` (mandatory —
+    `P1=0` warns naming starter ERROR 2088), `P2`/`P3`→`PARAM` per DITYP
+    (the MSFLD/FLD layer flag and the DITYP-1 shell-shear flag warn-drop),
+    `P5`→`TAB_EL`, `DETYP`/`DCTYP`+1 → `EVOTYPE`/`COMPTYP`, `Q1`→`DISP`/
+    `ENER` (zero warns ERROR 2089/2090), `Q3`→`ALPHA` with `EVOSHAP=2`.
+    `P4` → `ISHEAR` INVERTED — verified sense: LS-DYNA `P4=0` *includes* the
+    transverse shear stresses, Radioss `ISHEAR=1` *considers* them
+    (`hm_read_fail_inievo.F:291-293`), so d2r's inversion is correct and the
+    flag is always written explicitly (the Radioss blank default would
+    silently exclude what the LS-DYNA default includes); a per-criterion
+    conflict on the ONE global flag is warned, last wins (d2r parity —
+    CM:10273 writes it inside the loop, silently). A table-form `Q1`
+    (negative) collapses to the MINIMUM ordinate over the already-scaled
+    `(y+OFFO)·SFO` points — d2r's conservative rule (CM:10399/10473), warned
+    with the value. **Deliberate fix of d2r's scoping**: `NUMFIP` resolves
+    against the parts that actually reference the MID — `FAILIP` for solid
+    use, `PTHICKFAIL` for shell use through the same `_numfip_to_pthickfail`
+    rule `/FAIL/GENE1` uses — instead of d2r's whole-model element-count
+    heuristic with solids-take-priority and a stale `p_PartBeingConverted`
+    NIP — with `NUMFIP < -100` clamped to -100 (all layers) first, because
+    the `_numfip_to_pthickfail` helper carries `*MAT_ADD_EROSION`'s
+    `(|NUMFIP|-100) integration points` convention and DIEM defines a
+    negative `NUMFIP` as a percentage of layers ONLY (R16 p.2-56). A DIEM
+    `P1` `*DEFINE_TABLE` whose FIRST rate value is negative warns the
+    LS-DYNA log-rate-axis convention ("assumed to be given with respect to
+    logarithmic strain rate") — `/TABLE` interpolation reads the same
+    abscissae as literal rates. `DCTYP=-1` (damage kept OFF the stress in
+    LS-DYNA) is warned as the
+    physics change it becomes; `DINIT`/`DEPS`/`VOLFRAC`/`Q4` warn-drop; `Q2`
+    is a d3hsp log flag (output-only, ignored as d2r does); a second DIEM on
+    one MID overwrites with a warning; short criterion lists reduce
+    `NINIEVO` to the cards that exist.
+
+  - **Cohesive element path: `*SECTION_SOLID` ELFORM ±19/20/±21/22 →
+    `/PROP/TYPE43` (CONNECT)** under the SECID verbatim (layout audited
+    against `prop_p43_connect.cfg FORMAT(radioss140)`: title + ONE card,
+    `Ismstr(1-10)` + 70 blanks + `True_thickness(81-100)`). `Ismstr=1`
+    pinned (the starter collapses every input to 1 or 4 anyway,
+    `hm_read_prop43.F:121-124`; 1 is what d2r sets for its MAT_138/240
+    CONNECT props). A section is ALSO routed to TYPE43 when any part on it
+    carries a SOLID_COHESIVE law — d2r's material rule (`convertprops.cxx:
+    385-395` routes on the *MAT keyword and never looks at ELFORM), needed
+    because `*MAT_ARUP_ADHESIVE` runs on ordinary ELFORM 1/2/15 bricks in
+    LS-DYNA and `/MAT/LAW169` on a plain `/PROP/SOLID` is starter ERROR
+    3047. MAT_252 deliberately does NOT trigger the material route (d2r
+    sends it to the plain solid property; LAW120 is SOLID_ALL — legal on
+    both). Pairing enforcement from the starter source
+    (`check_mat_elem_prop_compatibility.F:228-232`: TYPE43 takes PROP_SOLID
+    classes 4/6/7 = laws {59,83,116,117,169} ∪ {13,120} ∪ {77,88}): every
+    off-class pairing warns naming ERROR 3047 + ERROR 658 — both measured
+    verbatim on a negative control (`PROPERTY ID 100 OF TYPE 43 IS NOT
+    COMPATIBLE WITH MATERIAL ID 5 OF TYPE 36` plus the 658 mirror `MATERIAL
+    TYPE 36 IS NOT COMPATIBLE WITH PROPERTY TYPE 43`, exit 2) — aggregated
+    per (section, law) so a many-part shared section produces one line, not
+    one per part (the LAW169 volume-density and LAW120-Thick notes
+    aggregate the same way). The REVERSE orientation is warned too: a
+    cohesive material (LAW116/117/169) referenced by SHELL parts — LS-DYNA's
+    cohesive-shell path, `*SECTION_SHELL` ELFORM 29 — has no Radioss
+    counterpart at all, and the emitted `/MAT` + `/PROP/SHELL` pairing is
+    the starter's ERROR 3046 + 658 (live-confirmed); without the warning the
+    only trace was the generic ELFORM→Ishell remap note, which mislabels the
+    cohesive-shell formulation as an integration choice. Node ordering passes through
+    unpermuted (LS-DYNA bottom 1-2-3-4 / top 5-6-7-8 IS TYPE43's t-axis
+    convention); pentahedron cohesives (±21/22, `N1 N2 N3 N3 N5 N6 N7 N7`)
+    stay the same degenerate `/BRICK` pattern; zero-height pads survive the
+    degenerate-element screens (8 distinct ids) and took their full `ρ·A`
+    mass on the validation run. `*SECTION_SOLID_MISC` is now a registered
+    spelling: card-2c `COHTHK` (supersedes `*MAT_240 THICK` in LS-DYNA) →
+    `True_thickness`, its exact Radioss analogue. Card 2c is OPTIONAL in the
+    manual and holds only field 1, so it is consumed per set only when the
+    next line positionally IS one (fields 2..8 blank, field 1 numeric or
+    blank) — a multi-set `_MISC` block that omits it no longer loses the
+    following set to a mis-stride (`True_thickness` = that set's SECID).
+    `COHOFF`, `GASKETT` and the ELFORM 20/22 shell-offset moments warn (no
+    TYPE43 mechanism); hourglass control never splits a cohesive part onto a
+    `/PROP/SOLID` clone (`_solid_hg_values` gate + a material-route-aware
+    skip in `_assign_hourglass_props`); `_target_mat_law` covers all four
+    families (beam parts draw the ERROR 3046 wording — none of
+    LAW116/117/120/169 declares a BEAM_* or SHELL_* class — and the
+    solid-/XREF gate now names the law instead of claiming "no /MAT");
+    `all_mat_ids()` includes the four dicts (the ERROR 79 duplicate-id
+    guard). No REF-flag registry entries: MAT_138/169/240/252 carry no REF
+    field (`ROFLG` is a density-per-area flag, not REF).
+
+  Starter-validated end to end (`starter_win64`, `/BEGIN 2022`, np=1): a
+  five-part probe deck (LAW117 + LAW116 on ELFORM 19 incl. a shared-section
+  part and a zero-thickness pad, LAW169 material-routed off ELFORM 1, LAW120
+  on a plain solid, LAW36 + GENE1 + INIEVO on shells with `/TABLE/1` rerouted
+  curves) runs **0 ERROR(S), exit 0**, with two warnings: the documented
+  `WARNING 100211` (the only batch-attributable one) and the pre-existing
+  GENE1-path `WARNING 3029` (`/PROP/SHELL`'s starter-default PTHICKFAIL
+  0.999999 vs the `/FAIL` rider's negative failed-IP-fraction convention —
+  the starter reconciles the sign in the engine, verified to delete on the
+  first failed IP exactly as `NUMFIP=1` asks); the listing echoes every
+  field in the slot the tests assert. `*INCLUDE_TRANSFORM` offsets ship for every spelling —
+  negative-encoded curve cells on MAT_138/169 (with MAT_169's conditional
+  SDFAC-card index), per-spelling curve-cell tables for the six MAT_240
+  variants, and NDIEMC-repeated criterion cells on the DIEM rider.
+
+  **Corpus census + sweep**, `master` (b482c50) vs this branch: zero hits for
+  every batch keyword and zero cohesive-ELFORM `*SECTION_SOLID` card-1s in
+  both corpora (the repo's 73 `.k`/`.key`/`.dyn` decks and the 127-deck
+  `E:\openradioss_run\Ryan_Lee_Examples` tree — a structured scan, not a
+  grep), so the sweep is a pure no-movement check: every one of the 200
+  decks is byte-identical on `_0000.rad` and `_0001.rad`, with identical
+  warning sets and skip lists, 0 exceptions on either side. What this corpus
+  cannot see: anything about the new cards — that evidence is the starter
+  probe/negative-control pair and the column-exact tests
+  (tests/test_adhesives.py: 71 tests + 74 subtests; suite 1963 → 2034
+  passed, 2 skipped, 398 → 472 subtests).
+
 - **Viscoelastic batch** (`*MAT_VISCOELASTIC` 006, `*MAT_KELVIN-MAXWELL_-`
   `VISCOELASTIC` 061, `*MAT_GENERAL_VISCOELASTIC` 076 + `_MOISTURE`,
   `*MAT_SIMPLIFIED_RUBBER/FOAM` 181 + `_WITH_FAILURE` /

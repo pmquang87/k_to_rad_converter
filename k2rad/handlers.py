@@ -31,6 +31,8 @@ from .state import (
     MatIsoElasPlas, MatStrainRatePlas, MatGurson, MatHill3R, MatPlasCompTens,
     MatViscoelastic, MatKelvinMaxwell, MatGeneralViscoelastic,
     MatSimplifiedRubber, MatSoftTissue,
+    MatCohesiveMixedMode, MatArupAdhesive, MatCohesiveMMEPR,
+    MatToughenedAdhesive, FailDiem, FailDiemCriterion,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
@@ -1132,7 +1134,9 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
     it is not positionally detectable, and LS-PrePost eats it whether or not it
     is there (a multi-set _EFG block that omits it reads the next set's card 1
     as the optional card and produces a garbage section). Neither spelling is
-    dispatched today, so this only matters if one is registered later.
+    dispatched today, so this only matters if one is registered later. The
+    _MISC card 2c IS positionally detectable (only field 1 defined) and is
+    consumed per-set only when present — see the walk.
     """
     per_set_title = _title_offset(block)
     opt_cards = sum(n for o, n in _SECTION_SOLID_OPTION_CARDS.items()
@@ -1165,7 +1169,50 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
             state.warn(f"*SECTION_SOLID {secid}: ELFORM={elform} (ALE) -> "
                        "/PROP/SOLID Iale=1. If the mesh is fixed (Eulerian), "
                        "switch Iale to 2 (Euler) for a cheaper run.")
-        idx += 1 + opt_cards
+        # Cohesive sections (ELFORM ±19/20/±21/22 → /PROP/TYPE43): card-1
+        # fields 7/8 are COHOFF and GASKETT (Vol I R16 p.41-88). COHOFF only
+        # matters for the shell-offset forms 20/22 (it places the cohesive
+        # layer between shells of unequal thickness) and TYPE43 has no slot
+        # for it; GASKETT turns the section into a *MAT_COHESIVE_GASKET
+        # element, which is not an adhesive path at all.
+        cohoff  = to_float(f1[6]) if len(f1) > 6 else 0.0
+        gaskett = to_float(f1[7]) if len(f1) > 7 else 0.0
+        if cohoff != 0.0:
+            state.warn(
+                f"*SECTION_SOLID {secid}: COHOFF={cohoff:g} places the "
+                "cohesive layer off-center between shells of different "
+                "thickness (ELFORM 20/22) — /PROP/TYPE43 has no offset field, "
+                "so the layer acts at the nodal mid-plane. DROPPED.")
+        if gaskett != 0.0:
+            state.warn(
+                f"*SECTION_SOLID {secid}: GASKETT={gaskett:g} converts the "
+                "cohesive ELFORM into a *MAT_COHESIVE_GASKET gasket element — "
+                "no Radioss counterpart; the flag is DROPPED and the section "
+                "is emitted as a plain cohesive /PROP/TYPE43.")
+        # _MISC option card 2c: COHTHK (field 1) supersedes *MAT_240 THICK —
+        # exactly what /PROP/TYPE43 True_thickness does, so it maps 1:1. The
+        # card position is idx+1 (option cards follow card 1) — but unlike
+        # _EFG/_SPG the card is BOTH optional ("It is optional", Vol I R16
+        # p.41-83) and positionally detectable: it holds ONLY COHTHK, fields
+        # 2..8 are undefined/blank. Consuming it unconditionally would eat
+        # the next set's card 1 in a multi-set block that omits it
+        # (True_thickness = that set's SECID and the set vanishes), so it is
+        # consumed only when the next line looks like a MISC card: fields
+        # 2..8 blank and field 1 blank or numeric (a short non-numeric lone
+        # field is the next set's title in the _TITLE spellings).
+        cohthk = 0.0
+        set_opt_cards = opt_cards
+        if (block.keyword.endswith("_MISC") or "_MISC_" in block.keyword):
+            fm = _card(raw, idx + 1, fixed=True, n=8, w=10)
+            misc_present = bool(fm) and not any(x.strip() for x in fm[1:])
+            if misc_present and fm[0].strip():
+                v = to_float(fm[0], float("nan"))
+                if v != v:                       # NaN — not a number
+                    misc_present = False
+                else:
+                    cohthk = v
+            set_opt_cards = opt_cards - 1 + (1 if misc_present else 0)
+        idx += 1 + set_opt_cards
         # Cards 3 / 4 / 5, ELFORM 101-105 only. Nothing on them is modelled, but
         # the CURSOR has to clear them: card 3 begins with NIP, a positive
         # integer, so the "no positive SECID" stop above never trips on it and
@@ -1188,7 +1235,8 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
             lmc = to_int(f3[4]) if len(f3) > 4 else 0
             idx += 1 + max(nip, 0) + (max(lmc, 0) + 7) // 8
         _dup_secid("*SECTION_SOLID", secid, state.sec_solids, state)
-        state.sec_solids[secid] = SectionSolid(secid, title, elform, iale)
+        state.sec_solids[secid] = SectionSolid(secid, title, elform, iale,
+                                               cohthk=cohthk)
         n_sets += 1
 
 
@@ -6142,6 +6190,297 @@ def handle_mat_soft_tissue(block: Block, state: ConversionState) -> None:
     state.mat_soft_tissue[mid] = mat
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Adhesives / cohesive batch (MAT_138 / MAT_169 / MAT_240 / MAT_252 /
+#                             MAT_ADD_DAMAGE_DIEM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_cohesive_mixed_mode(block: Block,
+                                   state: ConversionState) -> None:
+    """*MAT_COHESIVE_MIXED_MODE (MAT_138) → /MAT/LAW117.
+
+    TWO cards (mat_138.cfg R13.0): MID RO ROFLG INTFAIL EN ET GIC GIIC /
+    XMU T S UND UTD GAMMA. Every sign encoding is kept raw here (XMU's sign is
+    the power-law/B-K switch, negative T/S/GIC/GIIC are curve ids) and decoded
+    by the emitter, which is where the semantic warnings live.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_COHESIVE_MIXED_MODE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    mat = MatCohesiveMixedMode(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        roflg=int(to_float(f1[2])) if len(f1) > 2 else 0,
+        intfail=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        en=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        et=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        gic=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        giic=to_float(f1[7]) if len(f1) > 7 else 0.0)
+    f2 = _card(raw, offset + 1, fixed=True, n=6, w=10)
+    if f2:
+        mat.xmu   = to_float(f2[0])
+        mat.t     = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.s     = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.und   = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.utd   = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.gamma = _ffield(f2, 5, 1.0)
+    state.mat_cohesive_mixed_mode[mid] = mat
+
+
+def handle_mat_arup_adhesive(block: Block, state: ConversionState) -> None:
+    """*MAT_ARUP_ADHESIVE (MAT_169) → /MAT/LAW169.
+
+    Cards 1/2 always; card 3+4 iff EXTRA in (1,3); card 5 iff EDOT2 != 0;
+    card 6 iff EXTRA in (2,3) — IN THAT ORDER (the EDOT2 card sits BETWEEN the
+    edge cards and the bond-thickness card, mat_169.cfg R11.1 == R16 manual).
+    The walk must clear the conditional cards even though everything on them
+    is dropped, otherwise a following keyword's parse position would be wrong
+    for multi-material files read through *INCLUDE assembly.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ARUP_ADHESIVE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    mat = MatArupAdhesive(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        e=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        pr=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        tenmax=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        gcten=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        shrmax=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        gcshr=to_float(f1[7]) if len(f1) > 7 else 0.0)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        mat.pwrt   = _ffield(f2, 0, 2.0)
+        mat.pwrs   = _ffield(f2, 1, 2.0)
+        mat.shrp   = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.sht_sl = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.edot0  = _ffield(f2, 4, 1.0)
+        mat.edot2  = to_float(f2[5]) if len(f2) > 5 else 0.0
+        mat.thkdir = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.extra  = int(to_float(f2[7])) if len(f2) > 7 else 0
+    nxt = offset + 2
+    if mat.extra in (1, 3):
+        nxt += 2                        # cards 3 + 4: edge data (dropped)
+    if mat.edot2 != 0.0:
+        nxt += 1                        # card 5: SDFAC..SGEFAC (dropped)
+    if mat.extra in (2, 3):
+        f6 = _card(raw, nxt, fixed=True, n=5, w=10)
+        if f6:
+            mat.bthk = to_float(f6[0])
+    state.mat_arup_adhesive[mid] = mat
+
+
+# *MAT_240 keyword options that change the CARD CONTENT itself: _THERMAL (and
+# _FUNCTIONS, R16) turn EMOD/GMOD/G*C_0/T0/S0/FG* into curve ids, _3MODES adds
+# the mode-III cards. /MAT/LAW116 holds none of that, and dyna2rad's own gate
+# is `if (lsdThermal == 0 && lsd3Modes == 0)` — with the variants falling
+# through to NO material and NO message (convertmats.cxx:6664). k2rad registers
+# the variant spellings so they warn-skip loudly instead of parsing garbage.
+_MAT240_UNSUPPORTED_OPTIONS = ("_THERMAL", "_3MODES", "_FUNCTIONS")
+
+
+def handle_mat_cohesive_mm_epr(block: Block, state: ConversionState) -> None:
+    """*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE (MAT_240) → /MAT/LAW116.
+
+    THREE cards (mat_240.cfg R11.1) plus the optional R16 Card 6 (the
+    manual's cards 4/5 are the _3MODES mode-III cards, absent from the
+    option-free spelling, so Card 6 sits at position offset+3 here):
+    MID RO ROFLG INTFAIL EMOD GMOD THICK INICRT / G1C_0 G1C_INF EDOT_G1 T0 T1
+    EDOT_T FG1 LCG1C / G2C_0 G2C_INF EDOT_G2 S0 S1 EDOT_S FG2 LCG2C /
+    [RFILTF COMPY SMOLIM XMU]. Sign encodings stay raw for the emitter.
+
+    The _THERMAL / _3MODES / _FUNCTIONS variants are warn-skipped HERE (their
+    cards hold curve ids / mode-III data with no LAW116 slot); dyna2rad drops
+    them with no message and the part ends with mat_ID=0.
+    """
+    kw = block.keyword
+    unsupported = [o for o in _MAT240_UNSUPPORTED_OPTIONS if o in kw]
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{kw}: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if unsupported:
+        state.warn(
+            f"*{kw} mid={mid}: the {'/'.join(o.lstrip('_') for o in unsupported)} "
+            "option has no /MAT/LAW116 counterpart — _THERMAL/_FUNCTIONS turn "
+            "EMOD/GMOD/G1C_0/G2C_0/T0/S0/FG1/FG2 into curve ids and _3MODES "
+            "adds mode-III cards, none of which LAW116 can hold. The material "
+            "is SKIPPED (no /MAT emitted), so any part referencing MID "
+            f"{mid} will fail the starter with a dangling mat_ID. Re-state the "
+            "material as the option-free *MAT_240 card (evaluate the curves at "
+            "the working temperature/rate) to convert it. dyna2rad drops these "
+            "variants silently (convertmats.cxx:6664).")
+        state.note_recognized_not_emitted(
+            kw, f"MAT_240 option variant not convertible to LAW116 (mid {mid})")
+        return
+    mat = MatCohesiveMMEPR(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        roflg=int(to_float(f1[2])) if len(f1) > 2 else 0,
+        intfail=_ffield(f1, 3, 1.0),
+        emod=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        gmod=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        thick=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        inicrt=to_float(f1[7]) if len(f1) > 7 else 0.0)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        mat.g1c_0   = to_float(f2[0])
+        mat.g1c_inf = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.edot_g1 = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.t0      = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.t1      = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.edot_t  = to_float(f2[5]) if len(f2) > 5 else 0.0
+        mat.fg1     = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.lcg1c   = to_int(f2[7]) if len(f2) > 7 else 0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    if f3:
+        mat.g2c_0   = to_float(f3[0])
+        mat.g2c_inf = to_float(f3[1]) if len(f3) > 1 else 0.0
+        mat.edot_g2 = to_float(f3[2]) if len(f3) > 2 else 0.0
+        mat.s0      = to_float(f3[3]) if len(f3) > 3 else 0.0
+        mat.s1      = to_float(f3[4]) if len(f3) > 4 else 0.0
+        mat.edot_s  = to_float(f3[5]) if len(f3) > 5 else 0.0
+        mat.fg2     = to_float(f3[6]) if len(f3) > 6 else 0.0
+        mat.lcg2c   = to_int(f3[7]) if len(f3) > 7 else 0
+    f4 = _card(raw, offset + 3, fixed=True, n=4, w=10)
+    if f4 and any(x.strip() for x in f4):
+        mat.rfiltf = to_float(f4[0])
+        mat.compy  = to_float(f4[1]) if len(f4) > 1 else 0.0
+        mat.smolim = to_float(f4[2]) if len(f4) > 2 else 0.0
+        mat.xmu    = to_float(f4[3]) if len(f4) > 3 else 0.0
+    state.mat_cohesive_mm_epr[mid] = mat
+
+
+def handle_mat_toughened_adhesive(block: Block,
+                                  state: ConversionState) -> None:
+    """*MAT_TOUGHENED_ADHESIVE_POLYMER (MAT_252) → /MAT/LAW120 (TAPO).
+
+    FOUR cards, parsed to the R16 manual layout — NOT the local R7.1 cfg,
+    which blanks card-3 field 8 (SRFILT) and card-4 field 1 (IHIS) and would
+    silently drop both: MID RO E PR FLG JCFL DOPT / LCSS TAU0 Q B H C GAM0
+    GAMM / A10 A20 A1H A2H A2S POW - SRFILT / IHIS - D1 D2 D3 D4 D1C D2C.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=7, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_TOUGHENED_ADHESIVE_POLYMER: empty material card — "
+                   "skipped")
+        return
+    mid = to_int(f1[0])
+    mat = MatToughenedAdhesive(
+        mid=mid, title=title,
+        rho=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        e=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        pr=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        flg=int(to_float(f1[4])) if len(f1) > 4 else 0,
+        jcfl=int(to_float(f1[5])) if len(f1) > 5 else 0,
+        dopt=int(to_float(f1[6])) if len(f1) > 6 else 0)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if f2:
+        mat.lcss = to_int(f2[0])
+        mat.tau0 = to_float(f2[1]) if len(f2) > 1 else 0.0
+        mat.q    = to_float(f2[2]) if len(f2) > 2 else 0.0
+        mat.b    = to_float(f2[3]) if len(f2) > 3 else 0.0
+        mat.h    = to_float(f2[4]) if len(f2) > 4 else 0.0
+        mat.c    = to_float(f2[5]) if len(f2) > 5 else 0.0
+        mat.gam0 = to_float(f2[6]) if len(f2) > 6 else 0.0
+        mat.gamm = to_float(f2[7]) if len(f2) > 7 else 0.0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    if f3:
+        mat.a10    = to_float(f3[0])
+        mat.a20    = to_float(f3[1]) if len(f3) > 1 else 0.0
+        mat.a1h    = to_float(f3[2]) if len(f3) > 2 else 0.0
+        mat.a2h    = to_float(f3[3]) if len(f3) > 3 else 0.0
+        mat.a2s    = to_float(f3[4]) if len(f3) > 4 else 0.0
+        mat.pow    = to_float(f3[5]) if len(f3) > 5 else 0.0
+        mat.srfilt = to_float(f3[7]) if len(f3) > 7 else 0.0
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    if f4:
+        mat.ihis = to_float(f4[0])
+        mat.d1   = to_float(f4[2]) if len(f4) > 2 else 0.0
+        mat.d2   = to_float(f4[3]) if len(f4) > 3 else 0.0
+        mat.d3   = to_float(f4[4]) if len(f4) > 4 else 0.0
+        mat.d4   = to_float(f4[5]) if len(f4) > 5 else 0.0
+        mat.d1c  = to_float(f4[6]) if len(f4) > 6 else 0.0
+        mat.d2c  = to_float(f4[7]) if len(f4) > 7 else 0.0
+    state.mat_toughened_adhesive[mid] = mat
+
+
+def handle_mat_add_damage_diem(block: Block, state: ConversionState) -> None:
+    """*MAT_ADD_DAMAGE_DIEM → /FAIL/INIEVO (rider keyed by the parent MID).
+
+    Card 1: MID NDIEMC DINIT DEPS NUMFIP [VOLFRAC], then NDIEMC contiguous
+    pairs of criterion cards (max 5, mat_add_damage_diem.cfg R13.0 +
+    VOLFRAC/Q4 from R16):
+      Card 2: DITYP P1 P2 P3 P4 P5
+      Card 3: DETYP DCTYP Q1 Q2 Q3 Q4
+    Column positions are fixed regardless of DITYP/DETYP (the cfg pads unused
+    slots with _BLANK_), so a plain fixed read per card is exact.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ADD_DAMAGE_DIEM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    diem = FailDiem(
+        mid=mid,
+        ndiemc=int(to_float(f1[1])) if len(f1) > 1 else 0,
+        dinit=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        deps=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        numfip=_ffield(f1, 4, 1.0),
+        volfrac=to_float(f1[5]) if len(f1) > 5 else 0.0)
+    for i in range(max(diem.ndiemc, 0)):
+        c2 = _card(raw, offset + 1 + 2 * i, fixed=True, n=6, w=10)
+        c3 = _card(raw, offset + 2 + 2 * i, fixed=True, n=6, w=10)
+        if not c2:
+            state.warn(
+                f"*MAT_ADD_DAMAGE_DIEM mid={mid}: NDIEMC={diem.ndiemc} but "
+                f"only {i} criterion card pair(s) follow — the missing "
+                "criteria are dropped and NINIEVO is reduced to match.")
+            diem.ndiemc = i
+            break
+        crit = FailDiemCriterion(
+            dityp=int(to_float(c2[0])),
+            p1=to_int(c2[1]) if len(c2) > 1 else 0,
+            p2=to_float(c2[2]) if len(c2) > 2 else 0.0,
+            p3=to_float(c2[3]) if len(c2) > 3 else 0.0,
+            p4=to_float(c2[4]) if len(c2) > 4 else 0.0,
+            p5=to_int(c2[5]) if len(c2) > 5 else 0)
+        if c3:
+            crit.detyp = int(to_float(c3[0]))
+            crit.dctyp = int(to_float(c3[1])) if len(c3) > 1 else 0
+            crit.q1    = to_float(c3[2]) if len(c3) > 2 else 0.0
+            crit.q2    = to_float(c3[3]) if len(c3) > 3 else 0.0
+            crit.q3    = to_float(c3[4]) if len(c3) > 4 else 0.0
+            crit.q4    = to_float(c3[5]) if len(c3) > 5 else 0.0
+        diem.criteria.append(crit)
+    if mid in state.fail_diem:
+        state.warn(f"*MAT_ADD_DAMAGE_DIEM: a second card for MID {mid} "
+                   "overwrites the first — k2rad emits one /FAIL/INIEVO per "
+                   "material (put all criteria on one keyword, NDIEMC up to "
+                   "5). The earlier card's criteria are dropped.")
+    state.fail_diem[mid] = diem
+
+
 def handle_initial_foam_reference_geometry(block: Block,
                                            state: ConversionState) -> None:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → /XREF per intersecting part.
@@ -7168,6 +7507,12 @@ HANDLERS = {
     # Sections
     "SECTION_SHELL":                          handle_section_shell,
     "SECTION_SOLID":                          handle_section_solid,
+    # _MISC adds one option card whose field 1 (COHTHK) is the section-wise
+    # cohesive-thickness override → /PROP/TYPE43 True_thickness. The handler's
+    # card-set walk already strides the option card (_SECTION_SOLID_OPTION_
+    # CARDS), so registering the spelling is what turns it from a
+    # skipped_keywords entry (part loses its whole property) into a parse.
+    "SECTION_SOLID_MISC":                     handle_section_solid,
     "SECTION_BEAM":                           handle_section_beam,
     "SECTION_DISCRETE":                       handle_section_discrete,
 
@@ -7360,6 +7705,19 @@ HANDLERS = {
     "MAT_SOFT_TISSUE_VISCO":                  handle_mat_soft_tissue,
     "MAT_092":                                handle_mat_soft_tissue,
     "MAT_92":                                 handle_mat_soft_tissue,
+    # Adhesives / cohesive batch: MAT_138 → LAW117; MAT_169 → LAW169;
+    # MAT_240 → LAW116 (option variants warn-skip, registered below with the
+    # generated grammars); MAT_252 → LAW120; MAT_ADD_DAMAGE_DIEM →
+    # /FAIL/INIEVO. The numeric aliases *MAT_138 and *MAT_252 are missing from
+    # dyna2rad's own keyword table (they fall into its broken Convert1To1
+    # fallback — no /MAT, no message); k2rad registers them.
+    "MAT_COHESIVE_MIXED_MODE":                handle_mat_cohesive_mixed_mode,
+    "MAT_138":                                handle_mat_cohesive_mixed_mode,
+    "MAT_ARUP_ADHESIVE":                      handle_mat_arup_adhesive,
+    "MAT_169":                                handle_mat_arup_adhesive,
+    "MAT_TOUGHENED_ADHESIVE_POLYMER":         handle_mat_toughened_adhesive,
+    "MAT_252":                                handle_mat_toughened_adhesive,
+    "MAT_ADD_DAMAGE_DIEM":                    handle_mat_add_damage_diem,
     "INITIAL_FOAM_REFERENCE_GEOMETRY":        handle_initial_foam_reference_geometry,
     "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP":   handle_initial_foam_reference_geometry,
     # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors
@@ -7687,6 +8045,20 @@ for _base in ("MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", "MAT_183"):
     for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
         HANDLERS[f"{_base}{_o2}"] = handle_mat_simplified_rubber
 del _base, _o1, _o2
+
+# *MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE_{OPTION} — the legal option
+# spellings are <blank>, THERMAL, 3MODES, FUNCTIONS, THERMAL_3MODES and
+# FUNCTIONS_3MODES (R16 Vol II; THERMAL_FUNCTIONS is NOT a legal combination).
+# All land on the same handler, which converts the option-free card and
+# warn-skips the variants (their fields are curve ids / mode-III data with no
+# /MAT/LAW116 slot). Registering the variant spellings matters beyond the
+# message: an unregistered one would fall into skipped_keywords and the part
+# would silently lose its material with only the generic skip note.
+for _base in ("MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE", "MAT_240"):
+    for _opt in ("", "_THERMAL", "_3MODES", "_FUNCTIONS", "_THERMAL_3MODES",
+                 "_FUNCTIONS_3MODES"):
+        HANDLERS[f"{_base}{_opt}"] = handle_mat_cohesive_mm_epr
+del _base, _opt
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N}, N = 1..16 (definehexspotweld.cfg
 # APPEND_OPTIONS + CHECK idsmax<17). The bare keyword free-reads the list.

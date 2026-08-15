@@ -151,6 +151,25 @@ shipped, so the marginal cost is small.
   directions are now warned off one registry
   (`writer/common.py::_ref_flag_materials`); gating the emission would change
   already-validated MAT_027/077 rubber decks and wants its own change.
+- Adhesives / cohesive batch (P1): `*MAT_COHESIVE_MIXED_MODE` (138) →
+  `/MAT/LAW117`; `*MAT_ARUP_ADHESIVE` (169) → `/MAT/LAW169` (radioss2025
+  card, non-fatal WARNING 100211 under /BEGIN 2022); `*MAT_COHESIVE_MIXED_-`
+  `MODE_ELASTOPLASTIC_RATE` (240) → `/MAT/LAW116`;
+  `*MAT_TOUGHENED_ADHESIVE_POLYMER` (252) → `/MAT/LAW120` (TAPO);
+  `*MAT_ADD_DAMAGE_DIEM` → `/FAIL/INIEVO`; cohesive `*SECTION_SOLID`
+  ELFORM ±19/20/±21/22 (+ `_MISC` COHTHK) and the SOLID_COHESIVE material
+  route → `/PROP/TYPE43` (CONNECT) — **done** (starter-validated 0 ERROR(S)
+  + engine-validated traction-separation/energy/rate physics on 13 decks to
+  <0.1 % of the analytic targets; several dyna2rad defects fixed rather
+  than reproduced — the MAT_240 EDOT_G2 and T0/S0 rate gates, the Idel
+  collapse, the MAT_252 dead JCFL/DOPT branches — see CHANGELOG). Still
+  open in this family: `*MAT_ADD_COHESIVE` (wrap an ordinary material into
+  a cohesive element — no Radioss counterpart), cohesive SHELLS
+  (`*SECTION_SHELL` ELFORM 29 — Radioss has no cohesive-shell element,
+  warned naming starter ERROR 3046), the DIEM `Q4` element-size evolution
+  regularization (initiation-side `P5` → `TAB_EL` does carry over), and
+  `*MAT_240`'s `_THERMAL`/`_3MODES`/`_FUNCTIONS` variants (curve-valued
+  cards / mode III — no LAW116 slots, warn-skipped).
 - Spotweld joining (P1): `*CONTACT_SPOTWELD` (+ `_WITH_TORSION` /
   `_BEAM_OFFSET` / `_CONSTRAINED_OFFSET` / `_PENALTY` / `_MPP`) →
   `/INTER/TYPE2` Spotflag=28 with `Ignore=2` and `Idel2=1`;

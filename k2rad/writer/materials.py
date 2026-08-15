@@ -33,6 +33,11 @@ from ..state import (
     MatGeneralViscoelastic,
     MatSimplifiedRubber,
     MatSoftTissue,
+    MatCohesiveMixedMode,
+    MatArupAdhesive,
+    MatCohesiveMMEPR,
+    MatToughenedAdhesive,
+    FailDiem,
     Curve,
     MatHighExplosiveBurn,
     EosJwl,
@@ -82,6 +87,12 @@ __all__ = [
     "_emit_mat_simplified_rubber",
     "_emit_mat_soft_tissue",
     "_resolve_mat_viscoelastic",
+    "_emit_mat_law117",
+    "_emit_mat_law169",
+    "_emit_mat_law116",
+    "_emit_mat_law120",
+    "_emit_fail_inievo",
+    "_resolve_mat_adhesives",
     "_law2_plas_johns_lines",
     "_resolve_mat_iso_elas_plas",
     "_emit_mat_law2_iso_elas_plas",
@@ -168,6 +179,17 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_simplified_rubber(mat)
     for mat in state.mat_soft_tissue.values():
         lines += _emit_mat_soft_tissue(mat)
+    # Adhesives / cohesive batch (curve wiring resolved by
+    # _resolve_mat_adhesives; the cohesive /PROP/TYPE43 routing lives in
+    # writer/mesh.py::_make_properties)
+    for mat in state.mat_cohesive_mixed_mode.values():
+        lines += _emit_mat_law117(mat, state)
+    for mat in state.mat_arup_adhesive.values():
+        lines += _emit_mat_law169(mat, state)
+    for mat in state.mat_cohesive_mm_epr.values():
+        lines += _emit_mat_law116(mat, state)
+    for mat in state.mat_toughened_adhesive.values():
+        lines += _emit_mat_law120(mat, state)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -192,6 +214,12 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_fail_tab2(fail, state)
     for ero in state.mat_add_erosion.values():
         lines += _emit_mat_add_erosion(ero, state)
+    # *MAT_ADD_DAMAGE_DIEM rides the same rider pattern: an independent /FAIL
+    # entity bound by the trailing mat id, so it coexists with a /FAIL/TAB2
+    # (GISSMO) and/or /FAIL/GENE1 (ADD_EROSION) on the same MID — different
+    # /FAIL types on one material are legal in Radioss.
+    for diem in state.fail_diem.values():
+        lines += _emit_fail_inievo(diem, state)
     return lines
 
 
@@ -3411,6 +3439,891 @@ def _emit_mat_soft_tissue(mat: MatSoftTissue) -> List[str]:
                         funidbulk=0, fscale_bulk=0.0, iform=0,
                         mus=[2.0 * mat.c1, -2.0 * mat.c2], alphas=[2.0, -2.0],
                         gammas=gammas, taus=taus)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adhesives / cohesive batch: LAW117, LAW169, LAW116, LAW120, /FAIL/INIEVO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cohesive_intfail_to_idel(state: ConversionState, kw: str, mid: int,
+                              intfail: float) -> int:
+    """LS-DYNA INTFAIL → LAW116/117 Idel (failed-IP count to delete).
+
+    INTFAIL > 0 = Gauss scheme, delete at INTFAIL failed IPs; < 0 =
+    Newton-Cotes, delete at |INTFAIL|; = 0 = Newton-Cotes and NEVER delete.
+    /PROP/TYPE43 integrates at 4 fixed mid-plane Gauss points, so only the
+    count carries over: the scheme choice is warned once, and the
+    LS-DYNA "never delete" state is inexpressible — the starter coerces
+    Idel 0 → 1 (hm_read_mat117.F:141 / mat116:141), i.e. delete on the FIRST
+    failed IP, which is warned loudly rather than shipped silently.
+
+    Deliberate deviation from dyna2rad on MAT_240: dyna2rad collapses ANY
+    positive INTFAIL to Idel=1 (convertmats.cxx:6754), throwing the count
+    away; k2rad transfers |INTFAIL| for both materials.
+    """
+    if intfail == 0.0:
+        state.warn(
+            f"{kw} mid={mid}: INTFAIL=0 means the element is NEVER deleted in "
+            "LS-DYNA (tractions just stay at their damaged value); Radioss "
+            "LAW116/117 has no never-delete state — the starter coerces "
+            "Idel 0 -> 1 (delete when 1 of the 4 Gauss points fails). The "
+            "element will therefore ERODE in Radioss where LS-DYNA kept it. "
+            "Set INTFAIL explicitly (e.g. 4 = all IPs) to control the count.")
+        return 0
+    if intfail < 0.0:
+        state.warn(
+            f"{kw} mid={mid}: INTFAIL={intfail:g} < 0 selects the "
+            "Newton-Cotes integration scheme in LS-DYNA; /PROP/TYPE43 always "
+            "uses 4 mid-plane Gauss points, so only the failed-IP count "
+            f"|INTFAIL|={abs(intfail):g} is transferred (Idel).")
+    return int(round(abs(intfail)))
+
+
+def _emit_mat_law117(mat: MatCohesiveMixedMode,
+                     state: ConversionState) -> List[str]:
+    """*MAT_COHESIVE_MIXED_MODE (138) → /MAT/LAW117. Layout audited against
+    hm_cfg_files MAT/mat117.cfg FORMAT(radioss2022) — the block a /BEGIN 2022
+    deck is read with (NOT the radioss2021 block, which lacks the whole
+    Fct_TN/Fct_TT/Fscale_x card and reads GAMMA as an integer):
+
+      RHO_I(20) /
+      EN(20) ET(20) Imass(10) Idel(10) Irupt(10) /
+      Fct_TN(10) Fct_TT(10) TN(20) TT(20) Fscale_x(20) /
+      GIC(20) GIIC(20) EXP_G(20) EXP_BK(20) GAMMA(20)
+
+    Field semantics follow dyna2rad p_ConvertMatL138 (convertmats.cxx:
+    6248-6360): ROFLG 0 → Imass=2 (volume) / 1 → Imass=1 (area) — written
+    EXPLICITLY because the starter coerces a blank Imass to 1 (area), which
+    would silently flip the LS-DYNA volume-density default; EN/ET copy raw
+    (stiffness per unit length on BOTH sides — no thickness rescale); XMU>0 →
+    Irupt=1 power law with EXP_G=XMU, XMU<0 → Irupt=2 Benzeggagh-Kenane with
+    EXP_BK=|XMU| (EXP_BK has NO starter default, so it must be written);
+    T/S<0 → |id| is a peak-traction-vs-element-size curve → Fct_TN/TT with
+    TMAX=1.0; T=0 with UND>0 → TN = 2·GIC/UND (the LS-DYNA fallback
+    GIC = T·UND/2 inverted); GAMMA copies raw (0 → starter default 1.0, the
+    LS-DYNA default — dyna2rad's `GAMMA==0 → 2` branch is dead code, its
+    post-handler attribMap copy overwrites it, CM:6357 vs 609).
+
+    Starter floors GIC at TN²/(2·EN) and GIIC at TT²/(2·ET) with its own
+    WARNINGs 3016/3017 (hm_read_mat117.F:146-157) — the LS-DYNA identity
+    GIC = T·UND/2 keeps consistent inputs below those floors automatically.
+    """
+    imass = 1 if mat.roflg == 1 else 2
+    idel = _cohesive_intfail_to_idel(state, "*MAT_COHESIVE_MIXED_MODE",
+                                     mat.mid, mat.intfail)
+    gic, giic = mat.gic, mat.giic
+    if gic < 0.0:
+        state.warn(
+            f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: GIC={gic:g} < 0 is the "
+            f"LS-DYNA curve form (|GIC| = curve {int(abs(gic))} of energy "
+            "release rate vs element size); LAW117 has no curve slot for GIC "
+            "— the field is left 0 and the starter floors it at TN^2/(2*EN) "
+            "with its WARNING 3016. Supply a scalar GIC for the real "
+            "toughness.")
+        gic = 0.0
+    if giic < 0.0:
+        state.warn(
+            f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: GIIC={giic:g} < 0 is "
+            f"the LS-DYNA curve form (|GIIC| = curve {int(abs(giic))} vs "
+            "element size); LAW117 has no curve slot — left 0, starter floors "
+            "it at TT^2/(2*ET) with WARNING 3017.")
+        giic = 0.0
+    # T: scalar / curve / UND-fallback (dyna2rad CM:6268-6281, 6335-6336).
+    fct_tn, tn = 0, 0.0
+    if mat.t < 0.0:
+        fct_tn, tn = int(round(-mat.t)), 1.0
+        if fct_tn not in state.curves:
+            state.warn(
+                f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: T={mat.t:g} "
+                f"references load curve {fct_tn} (peak traction vs element "
+                "size) that is not in the model — the LAW117 Fct_TN "
+                "reference will dangle.")
+    elif mat.t > 0.0:
+        tn = mat.t
+    elif mat.und > 0.0 and gic > 0.0:
+        tn = 2.0 * gic / mat.und
+    fct_tt, tt = 0, 0.0
+    if mat.s < 0.0:
+        fct_tt, tt = int(round(-mat.s)), 1.0
+        if fct_tt not in state.curves:
+            state.warn(
+                f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: S={mat.s:g} "
+                f"references load curve {fct_tt} that is not in the model — "
+                "the LAW117 Fct_TT reference will dangle.")
+    elif mat.s > 0.0:
+        tt = mat.s
+    elif mat.utd > 0.0 and giic > 0.0:
+        tt = 2.0 * giic / mat.utd
+    if tn == 0.0 and fct_tn == 0:
+        state.warn(
+            f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: no peak normal traction "
+            "(T=0 and no usable UND/GIC pair to back-compute TN=2*GIC/UND) — "
+            "TN is written 0, which LAW117 treats as no mode-I strength. "
+            "Check the card.")
+    if tt == 0.0 and fct_tt == 0:
+        # Mirror of the TN case, and worse in the starter: hm_read_mat117.F:
+        # 162-166 derives DELTA0S = TT/ET and then UTD = 2*GIIC/(DELTA0S*ET)
+        # — a DIVISION BY ZERO in the derived ultimate displacement when
+        # TT = 0.
+        state.warn(
+            f"*MAT_COHESIVE_MIXED_MODE mid={mat.mid}: no peak shear traction "
+            "(S=0 and no usable UTD/GIIC pair to back-compute TT=2*GIIC/UTD) "
+            "— TT is written 0, which LAW117 treats as no mode-II strength, "
+            "and the starter's derived ultimate displacement "
+            "UTD=2*GIIC/(DELTA0S*ET) divides by DELTA0S=TT/ET=0 "
+            "(hm_read_mat117.F:162-166). Check the card.")
+    # XMU sign = power-law / Benzeggagh-Kenane switch (CM:6305-6316).
+    if mat.xmu > 0.0:
+        irupt, exp_g, exp_bk = 1, mat.xmu, 0.0
+    elif mat.xmu < 0.0:
+        irupt, exp_g, exp_bk = 2, 0.0, abs(mat.xmu)
+    else:
+        irupt, exp_g, exp_bk = 0, 0.0, 0.0   # starter defaults: Irupt 1, EXP_G 2
+    return [
+        f"/MAT/LAW117/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                 EN                  ET     Imass      Idel     Irupt",
+        f"{_f(mat.en)}{_f(mat.et)}{_i(imass)}{_i(idel)}{_i(irupt)}",
+        "#   Fct_TN    Fct_TT                  TN                  TT            Fscale_x",
+        f"{_i(fct_tn)}{_i(fct_tt)}{_f(tn)}{_f(tt)}{_f(0.0)}",
+        "#                GIC                GIIC               EXP_G              EXP_BK               GAMMA",
+        f"{_f(gic)}{_f(giic)}{_f(exp_g)}{_f(exp_bk)}{_f(mat.gamma)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law169(mat: MatArupAdhesive,
+                     state: ConversionState) -> List[str]:
+    """*MAT_ARUP_ADHESIVE (169) → /MAT/LAW169 (dyna2rad p_ConvertMatL169).
+    Layout audited against hm_cfg_files radioss2025/MAT/LAW169.cfg — the ONLY
+    format block this card has:
+
+      Rho_I(20) /
+      E(20) PR(20) SHT_SL(20) TENMAX(20) GCTEN(20) /
+      SHRMAX(20) GCSHR(20) PWRT(10,int) PWRS(10,int) SHRP(20)
+
+    Two layout traps: SHT_SL moves from *MAT_169 card 2 field 4 to the MIDDLE
+    of LAW169 card 2 (between PR and TENMAX), and PWRT/PWRS are floats in
+    LS-DYNA but %10d INTEGERS here (rounded, warned when the value changes).
+
+    /MAT/LAW169 is registered only from the radioss2025 profile; under
+    k2rad's /BEGIN 2022 the starter prints non-fatal WARNING 100211
+    ("Unsupported option ... in format < 2025") and then parses the card with
+    the 2025 FORMAT anyway — verified NORMAL TERMINATION with a
+    byte-identical field echo vs a /BEGIN 2025 run. The warning below names
+    that so the starter output does not read as a conversion defect.
+
+    Everything LAW169 does not implement is warned per field: the rate
+    scaling (EDOT0/EDOT2 + SDFAC/SGFAC/SDEFAC/SGEFAC), the EXTRA edge cards,
+    THKDIR, BTHK, and the negative-value curve forms of the strengths.
+    """
+    kw = f"*MAT_ARUP_ADHESIVE mid={mat.mid}"
+
+    def _strength(name: str, v: float) -> float:
+        if v < 0.0:
+            if name == "SHRP":
+                # SHRP is the shear PLATEAU ratio, not a strength: LAW169
+                # defaults it to 0 (it is absent from LAW169.cfg's
+                # DEFAULTS(COMMON) block — only the four strengths/energies
+                # get the 1e20 no-failure default), so the dropped curve
+                # leaves NO plateau, not "no failure".
+                state.warn(
+                    f"{kw}: SHRP={v:g} < 0 is the LS-DYNA curve form "
+                    f"(|value| = function {int(abs(v))}); /MAT/LAW169 has "
+                    "no curve inputs — SHRP is written 0, i.e. NO shear "
+                    "plateau (the LAW169 default). Supply a scalar ratio "
+                    "to keep the plateau.")
+            else:
+                state.warn(
+                    f"{kw}: {name}={v:g} < 0 is the LS-DYNA curve form "
+                    f"(|value| = function {int(abs(v))}); /MAT/LAW169 has "
+                    "no curve inputs — the field is left blank and defaults "
+                    f"to 1e20, i.e. NO {name} failure. Supply a scalar to "
+                    "keep the failure mode.")
+            return 0.0
+        return v
+
+    tenmax = _strength("TENMAX", mat.tenmax)
+    gcten  = _strength("GCTEN", mat.gcten)
+    shrmax = _strength("SHRMAX", mat.shrmax)
+    gcshr  = _strength("GCSHR", mat.gcshr)
+    shrp   = _strength("SHRP", mat.shrp)
+
+    def _power(name: str, v: float) -> int:
+        p = int(round(v)) if v else 2
+        if v and abs(v - p) > 1e-9:
+            state.warn(
+                f"{kw}: {name}={v:g} is not an integer — /MAT/LAW169 reads "
+                f"{name} as a %10d integer, so it is ROUNDED to {p}. The "
+                "yield-surface exponent changes accordingly.")
+        return p
+
+    pwrt = _power("PWRT", mat.pwrt)
+    pwrs = _power("PWRS", mat.pwrs)
+    if mat.edot0 not in (0.0, 1.0) or mat.edot2 != 0.0:
+        state.warn(
+            f"{kw}: rate dependence (EDOT0={mat.edot0:g}, EDOT2={mat.edot2:g}"
+            " and the SDFAC/SGFAC/SDEFAC/SGEFAC card it gates) has no "
+            "/MAT/LAW169 slot — the adhesive converts RATE-INDEPENDENT at "
+            "the static strengths/energies. dyna2rad drops the same fields "
+            "silently (LAW169.cfg comments them out).")
+    if mat.extra in (1, 3):
+        state.warn(
+            f"{kw}: EXTRA={mat.extra} activates the edge-specific cards "
+            "(TMAXE/GCTE/SMAXE/GCSE/PWRTE/PWRSE + FACET/FACCT/FACES/FACCS/"
+            "SOFTT/SOFTS) — /MAT/LAW169 has no edge data; interior values "
+            "apply everywhere. DROPPED.")
+    if mat.extra in (2, 3) and mat.bthk != 0.0:
+        state.warn(
+            f"{kw}: BTHK={mat.bthk:g} (bond thickness override) has no "
+            "/MAT/LAW169 slot — the element's geometric height governs. "
+            "DROPPED.")
+    if mat.thkdir != 1.0:
+        # "Unless THKDIR = 1, the smallest dimension of the element is
+        # assumed to be the through-thickness dimension of the bond"
+        # (R16 Vol II p.2-1128) — THKDIR=0 is the DEFAULT. /PROP/TYPE43 has
+        # no such detection: the bond normal is always face 1-2-3-4 to face
+        # 5-6-7-8 (the THKDIR=1 convention, which therefore needs no
+        # warning). An element whose smallest dimension is NOT its
+        # 1234->5678 axis gets its traction-separation directions rotated
+        # 90 deg with no starter complaint.
+        state.warn(
+            f"{kw}: THKDIR={mat.thkdir:g} means LS-DYNA detects the bond "
+            "thickness direction as the SMALLEST dimension of each element; "
+            "/PROP/TYPE43 always takes it from face 1-2-3-4 to face 5-6-7-8 "
+            "(the THKDIR=1 convention) and LAW169 has no slot to change "
+            "that. Verify the element connectivity is oriented with the "
+            "bondline as the 1234->5678 axis — otherwise the "
+            "traction-separation directions rotate 90 deg SILENTLY.")
+    state.warn(
+        f"{kw}: /MAT/LAW169 is a radioss2025 card; under the emitted "
+        "/BEGIN 2022 header the starter prints non-fatal WARNING 100211 "
+        "(\"Unsupported option /MAT/LAW169 in format < 2025\") and then "
+        "parses the card with the 2025 layout — verified byte-identical "
+        "field echo and NORMAL TERMINATION. No action needed; the warning "
+        "is the version gate, not a data error.")
+    return [
+        f"/MAT/LAW169/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              Rho_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  PR              SHT_SL              TENMAX               GCTEN",
+        f"{_f(mat.e)}{_f(mat.pr)}{_f(mat.sht_sl)}{_f(tenmax)}{_f(gcten)}",
+        "#             SHRMAX               GCSHR      PWRT      PWRS                SHRP",
+        f"{_f(shrmax)}{_f(gcshr)}{_i(pwrt)}{_i(pwrs)}{_f(shrp)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law116(mat: MatCohesiveMMEPR,
+                     state: ConversionState) -> List[str]:
+    """*MAT_240 (option-free) → /MAT/LAW116. Layout audited against
+    hm_cfg_files radioss2021/MAT/mat116.cfg FORMAT(radioss2021) — there is no
+    2022 revision, so this is the block a /BEGIN 2022 deck reads with:
+
+      RHO_I(20) /
+      E(20) G(20) Thick(20) Imass(10) Idel(10) Icrit(10) /
+      GC1_ini(20) GC1_inf(20) SRATG1(20) FG1(20) /
+      GC2_ini(20) GC2_inf(20) SRATG2(20) FG2(20) /
+      SIGA1(20) SIGB1(20) SRATE1(20) ORDER1(10) FAIL1(10) /
+      SIGA2(20) SIGB2(20) SRATE2(20) ORDER2(10) FAIL2(10)
+
+    E/G are TRUE moduli — the starter divides by Thick itself
+    (UPARAM(1)=E/THICK, hm_read_mat116.F:197), so no per-length conversion
+    here (dividing twice was the trap this comment guards).
+
+    Rate forms follow dyna2rad p_ConvertMatL240 (convertmats.cxx:6619-6757)
+    with TWO conscious deviations, both documented in the CHANGELOG:
+      * mode II gates GC2_inf/SRATG2 on G2C_0 < 0 — the same convention as
+        mode I and as the LS-DYNA manual ("G1C_0 <= 0 activates the
+        rate-dependent branch"); dyna2rad gates on EDOT_G2 < 0 (CM:6715), a
+        transcription slip that both loses the mode-II reference rate for
+        every valid deck (EDOT_G2 is a positive rate) and would smuggle a
+        negative one through as-is.
+      * Idel carries |INTFAIL| (dyna2rad hard-codes 1, CM:6754).
+    INICRT maps onto Icrit against the ENGINE kernel (sigeps116.F:226): 0
+    (quadratic nominal stress) → starter default Icrit=1 = quadratic
+    interaction; 1/2 (maximum nominal stress) → Icrit=2 = pure-mode maximum
+    criterion; negative INICRT (mixed-mode with flexible exponent) has no
+    LAW116 slot. dyna2rad never reads the field (its cfg mislabels it
+    OUTPUT).
+    """
+    kw = "*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE"
+    imass = 1 if mat.roflg == 1 else 2
+    idel = _cohesive_intfail_to_idel(state, kw, mat.mid, mat.intfail)
+    icrit = 0
+    if mat.inicrt in (1.0, 2.0):
+        icrit = 2
+        if mat.inicrt == 2.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: INICRT=2 additionally outputs the "
+                "maximum nominal strain as LS-DYNA history variable #15 — "
+                "LAW116 has no such output; the criterion itself (maximum "
+                "nominal stress, Icrit=2) is converted.")
+    elif mat.inicrt < 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: INICRT={mat.inicrt:g} < 0 selects the "
+            f"mixed-mode initiation criterion with exponent {abs(mat.inicrt):g}"
+            " — LAW116 only has the quadratic (Icrit=1) and maximum-stress "
+            "(Icrit=2) criteria; left at the quadratic default.")
+    elif mat.inicrt != 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: INICRT={mat.inicrt:g} is not a defined "
+            "LS-DYNA value (0/1/2 or negative exponent) — left at the "
+            "quadratic default Icrit=1.")
+    # THICK "LE.0.0: initial thickness is calculated from nodal coordinates"
+    # (R16) — zero and negative are the same LS-DYNA state. The starter's
+    # default guard is `IF (THICK == ZERO)` ONLY (hm_read_mat116.F:149-151),
+    # so a negative value copied through would survive to UPARAM(1)=E/THICK
+    # as a NEGATIVE stiffness; it is written 0.0 instead so the starter's
+    # 1.0-length-unit default applies (and is warned like the zero case).
+    thick = max(mat.thick, 0.0)
+    if mat.thick <= 0.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: THICK={mat.thick:g} <= 0 means LS-DYNA "
+            "uses each element's GEOMETRIC thickness for the cohesive "
+            "stiffness EMOD/thickness; LAW116 instead defaults a zero Thick "
+            "to 1.0 LENGTH UNIT (hm_read_mat116.F:149-152), so the "
+            "stiffness becomes E/1.0 regardless of the element height "
+            "(a negative Thick is written 0 — copied raw it would pass the "
+            "starter's ==0 guard and turn into a NEGATIVE stiffness "
+            "E/Thick). Set THICK to the real adhesive-layer thickness (or "
+            "add *SECTION_SOLID_MISC COHTHK) for matching stiffness.")
+    # Mode I toughness/yield rate forms. T1/EDOT_T are "only considered if
+    # T0 < 0" (R16 Vol II p.2-1545) — at the static limit (T0 >= 0) LS-DYNA
+    # runs a constant yield |T0| whatever sits in T1/EDOT_T, while the LAW116
+    # ENGINE switches rate hardening on for ANY SIGB1 > 0 (sigeps116.F:143:
+    # YLD = SIGA1 + SIGB1*LOG(EPSP/RATE1), and the starter fills ORDER 0 -> 1,
+    # hm_read_mat116.F:142). So the rate terms are gated on T0's sign, with a
+    # warning when that zeroes live fields; dyna2rad copies them
+    # unconditionally (CM:6725) — the same defect class as its EDOT_G2 slip.
+    rate1 = mat.g1c_0 < 0.0
+    gc1_ini = abs(mat.g1c_0)
+    gc1_inf = abs(mat.g1c_inf) if rate1 else 0.0
+    sratg1 = mat.edot_g1 if rate1 else 0.0
+    siga1 = abs(mat.t0)
+    sigb1 = abs(mat.t1) if mat.t0 < 0.0 else 0.0
+    srate1 = mat.edot_t if sigb1 > 0.0 else 0.0
+    order1 = 2 if (mat.t0 < 0.0 and mat.t1 > 0.0) else \
+        (1 if (mat.t0 < 0.0 and mat.t1 < 0.0) else 0)
+    fail1 = 1 if mat.fg1 > 0.0 else (2 if mat.fg1 < 0.0 else 0)
+    # Mode II — same gate as mode I (G2C_0 < 0), NOT dyna2rad's EDOT_G2 < 0.
+    rate2 = mat.g2c_0 < 0.0
+    gc2_ini = abs(mat.g2c_0)
+    gc2_inf = abs(mat.g2c_inf) if rate2 else 0.0
+    sratg2 = mat.edot_g2 if rate2 else 0.0
+    siga2 = abs(mat.s0)
+    sigb2 = abs(mat.s1) if mat.s0 < 0.0 else 0.0
+    srate2 = mat.edot_s if sigb2 > 0.0 else 0.0
+    order2 = 2 if (mat.s0 < 0.0 and mat.s1 > 0.0) else \
+        (1 if (mat.s0 < 0.0 and mat.s1 < 0.0) else 0)
+    fail2 = 1 if mat.fg2 > 0.0 else (2 if mat.fg2 < 0.0 else 0)
+    for mode, x0, x1, xdot in (("I (T0)", mat.t0, mat.t1, mat.edot_t),
+                               ("II (S0)", mat.s0, mat.s1, mat.edot_s)):
+        if x0 >= 0.0 and (x1 != 0.0 or xdot != 0.0):
+            state.warn(
+                f"{kw} mid={mat.mid}: mode {mode} static yield "
+                f"{x0:g} >= 0 — LS-DYNA considers the rate terms "
+                f"({x1:g}/{xdot:g}) ONLY when the yield field is negative, "
+                "but LAW116 activates rate hardening for any SIGB > 0 "
+                "(sigeps116.F:143) — SIGB/SRATE are zeroed to keep the "
+                "constant yield LS-DYNA ran. Make the yield field negative "
+                "in the source deck if rate dependence was intended.")
+    for mode, fg, gc in ((1, mat.fg1, gc1_ini), (2, mat.fg2, gc2_ini)):
+        if fg == 0.0 or gc == 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: FG{mode}={fg:g} / G{mode}C_0={gc:g} — "
+                "the starter DISABLES the mode-"
+                + ("I" if mode == 1 else "II")
+                + " failure criterion when either is zero (hm_read_mat116.F:"
+                "147-148, IFAIL:=0): the traction-separation law then never "
+                "softens in that mode. If failure was intended, supply both.")
+    for name, lc in (("LCG1C", mat.lcg1c), ("LCG2C", mat.lcg2c)):
+        if lc:
+            state.warn(
+                f"{kw} mid={mat.mid}: {name}={lc} (fracture toughness vs "
+                "cohesive thickness curve) has no /MAT/LAW116 slot — LS-DYNA "
+                "IGNORES G*C_0/G*C_INF when this curve is set, so the "
+                "scalar toughness k2rad emits is NOT what the LS-DYNA run "
+                "used unless the curve is flat. Replace the curve by its "
+                "value at the actual bondline thickness.")
+    if any((mat.rfiltf, mat.compy, mat.smolim, mat.xmu)):
+        state.warn(
+            f"{kw} mid={mat.mid}: optional card 6 (RFILTF={mat.rfiltf:g}, "
+            f"COMPY={mat.compy:g}, SMOLIM={mat.smolim:g}, XMU={mat.xmu:g}) "
+            "has no /MAT/LAW116 counterpart — rate filtering, "
+            "yield-in-compression and the mixed-mode exponent are DROPPED "
+            "(LAW116 filters the rate with a fixed exponential-average "
+            "ALPHA=0.005, hm_read_mat116.F:153).")
+    return [
+        f"/MAT/LAW116/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                   G               Thick     Imass      Idel     Icrit",
+        f"{_f(mat.emod)}{_f(mat.gmod)}{_f(thick)}{_i(imass)}{_i(idel)}{_i(icrit)}",
+        "#            GC1_ini             GC1_inf              SRATG1                 FG1",
+        f"{_f(gc1_ini)}{_f(gc1_inf)}{_f(sratg1)}{_f(abs(mat.fg1))}",
+        "#            GC2_ini             GC2_inf              SRATG2                 FG2",
+        f"{_f(gc2_ini)}{_f(gc2_inf)}{_f(sratg2)}{_f(abs(mat.fg2))}",
+        "#              SIGA1               SIGB1              SRATE1    ORDER1     FAIL1",
+        f"{_f(siga1)}{_f(sigb1)}{_f(srate1)}{_i(order1)}{_i(fail1)}",
+        "#              SIGA2               SIGB2              SRATE2    ORDER2     FAIL2",
+        f"{_f(siga2)}{_f(sigb2)}{_f(srate2)}{_i(order2)}{_i(fail2)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law120(mat: MatToughenedAdhesive,
+                     state: ConversionState) -> List[str]:
+    """*MAT_TOUGHENED_ADHESIVE_POLYMER (252) → /MAT/LAW120 (TAPO). Layout
+    audited against hm_cfg_files radioss2022/MAT/mat120_tapo.cfg
+    FORMAT(radioss2022):
+
+      RHO_I(20)                     <- cols 21-40 MUST stay blank: a
+                                       CARD_PREREAD there switches the reader
+                                       to the two-field reference-density form
+      E(20) nu(20) Iform(10) Itrx(10) Idam(10) blank(10) THICK(20) /
+      Table_Id(10) Xscale(20) Yscale(20) /
+      T0(20) Q(20) Beta(20) H(20) /
+      AF1(20) AF2(20) AH1(20) AH2(20) AS(20) /
+      C(20) EPSD0(20) EPSDF(20) /
+      D1C(20) D2C(20) D1F(20) D2F(20) /
+      Dtrx(20) Djc(20) EXP_N(20)
+
+    Copies follow dyna2rad p_ConvertMatL252 (convertmats.cxx:6759-6815)
+    including D1→D1F, D2→D2F, D3→Dtrx, D4→Djc — LAW120 IS the TAPO model, so
+    the Johnson-Cook-style damage constants map 1:1. Flag enums verified
+    against the ENGINE kernels (sigeps120_*.F:108-111): FLG 0 → Iform=1
+    (Drucker-Prager cap) / 2 → Iform=2 (von Mises); JCFL 0 → Itrx=2 (no
+    pressure dependency for T<0, i.e. triaxiality factor in tension only) /
+    1 → Itrx=1 (pressure dependent for ALL T); DOPT 0 → Idam=2 (damage
+    plastic strain, increments scaled by 1-D) / 1 → Idam=1 (plain plastic
+    arc length). The JCFL=1/DOPT=1 branches are conscious FIXES of dyna2rad,
+    whose switch tests `== 2` (dead — JCFL/DOPT are 0/1 in LS-DYNA) and so
+    silently converts JCFL=1 decks to tension-only triaxiality (CM:6783-6790).
+
+    When LCSS is set both codes ignore the analytic yield inputs (LS-DYNA
+    drops TAU0..GAMM; the LAW120 reader zeroes Y0/Q/B/H/EPSPMIN/EPSPMAX,
+    hm_read_mat120.F:183-189), so copying both is exact either way.
+    """
+    kw = f"*MAT_TOUGHENED_ADHESIVE_POLYMER mid={mat.mid}"
+    if mat.flg == 0:
+        iform = 1
+    elif mat.flg == 2:
+        iform = 2
+    else:
+        iform = 0
+        state.warn(
+            f"{kw}: FLG={mat.flg} is not a defined LS-DYNA value (0 = "
+            "Drucker-Prager cap, 2 = von Mises cap) — Iform left at the "
+            "starter default 1 (Drucker-Prager).")
+    if mat.jcfl == 0:
+        itrx = 2
+    elif mat.jcfl == 1:
+        itrx = 1
+    else:
+        itrx = 0
+        state.warn(
+            f"{kw}: JCFL={mat.jcfl} is not a defined LS-DYNA value (0/1) — "
+            "Itrx left at the starter default 2 (triaxiality factor in "
+            "tension only).")
+    if mat.dopt == 0:
+        idam = 2
+    elif mat.dopt == 1:
+        idam = 1
+    else:
+        idam = 0
+        state.warn(
+            f"{kw}: DOPT={mat.dopt} is not a defined LS-DYNA value (0/1) — "
+            "Idam left at the starter default 2 (damage plastic strain).")
+    if mat.srfilt != 0.0:
+        state.warn(
+            f"{kw}: SRFILT={mat.srfilt:g} (exponential-moving-average strain-"
+            "rate filter) has no /MAT/LAW120 slot — the rate entering the "
+            "C/GAM0/GAMM terms and the D_JC damage factor is unfiltered. "
+            "DROPPED.")
+    if mat.ihis != 0.0:
+        # IHIS >= 1 is INPUT, not output: it reads per-element scaling
+        # factors for stiffness/plasticity/damage (and a pre-damage D2) from
+        # *INITIAL_STRESS_SOLID history data — process-simulation mapping
+        # (R16 Vol II p.2-1663 + Remark 1).
+        state.warn(
+            f"{kw}: IHIS={mat.ihis:g} initializes stiffness/plasticity/"
+            "damage parameters PER ELEMENT from *INITIAL_STRESS_SOLID "
+            "history data (prior process simulation, R16 Remark 1) — "
+            "/MAT/LAW120 has no such input, so that initialization is LOST "
+            "and every element starts from the nominal card values. "
+            "DROPPED.")
+    return [
+        f"/MAT/LAW120/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu     Iform      Itrx      Idam                           THICK",
+        f"{_f(mat.e)}{_f(mat.pr)}{_i(iform)}{_i(itrx)}{_i(idam)}{' ' * 10}{_f(0.0)}",
+        "# Table_Id              Xscale              Yscale",
+        f"{_i(mat.lcss)}{_f(0.0)}{_f(0.0)}",
+        "#                 T0                   Q                Beta                   H",
+        f"{_f(mat.tau0)}{_f(mat.q)}{_f(mat.b)}{_f(mat.h)}",
+        "#                AF1                 AF2                 AH1                 AH2                  AS",
+        f"{_f(mat.a10)}{_f(mat.a20)}{_f(mat.a1h)}{_f(mat.a2h)}{_f(mat.a2s)}",
+        "#                  C               EPSD0               EPSDF",
+        f"{_f(mat.c)}{_f(mat.gam0)}{_f(mat.gamm)}",
+        "#                D1C                 D2C                 D1F                 D2F",
+        f"{_f(mat.d1c)}{_f(mat.d2c)}{_f(mat.d1)}{_f(mat.d2)}",
+        "#               Dtrx                 Djc               EXP_N",
+        f"{_f(mat.d3)}{_f(mat.d4)}{_f(mat.pow)}",
+        HDR,
+    ]
+
+
+def _diem_collapse_q1_table(state: ConversionState, mid: int,
+                            tid: int) -> float:
+    """DETYP=0 with Q1 < 0: |Q1| is a plastic-displacement table (vs
+    triaxiality and damage). /FAIL/INIEVO DISP is a scalar, so dyna2rad
+    collapses the table to its MINIMUM ordinate — the most conservative
+    (earliest-failing) displacement (convertmats.cxx:10335-10475). k2rad
+    reproduces that and says so. k2rad curve points are stored already
+    scaled ((y+OFFO)·SFO baked in at parse), so the minimum is direct."""
+    ys: List[float] = []
+    curve = state.curves.get(tid)
+    if curve is not None and curve.pts:
+        ys = [y for _, y in curve.pts]
+    else:
+        tab = state.define_tables.get(tid)
+        if tab is not None and tab.resolved:
+            for _, lcid in tab.rows:
+                c = state.curves.get(lcid)
+                if c is not None:
+                    ys.extend(y for _, y in c.pts)
+    if not ys:
+        state.warn(
+            f"*MAT_ADD_DAMAGE_DIEM mid={mid}: Q1 references table/curve "
+            f"{tid} which is not in the model — the plastic displacement at "
+            "failure is written 0, which /FAIL/INIEVO rejects (starter "
+            "ERROR 2089). Define the table or give Q1 as a scalar.")
+        return 0.0
+    dmin = min(ys)
+    state.warn(
+        f"*MAT_ADD_DAMAGE_DIEM mid={mid}: Q1 is the table form (|Q1|={tid}, "
+        "plastic displacement at failure vs triaxiality/damage) — "
+        "/FAIL/INIEVO DISP is a scalar, so the table is COLLAPSED to its "
+        f"minimum ordinate {dmin:g} (the most conservative displacement; "
+        "same rule as dyna2rad). Elements at other triaxialities fail "
+        "earlier than in LS-DYNA.")
+    return dmin
+
+
+def _emit_fail_inievo(diem: FailDiem, state: ConversionState) -> List[str]:
+    """*MAT_ADD_DAMAGE_DIEM → /FAIL/INIEVO. Layout audited against
+    hm_cfg_files radioss2022/FAIL/fail_inievo.cfg FORMAT(radioss2022) and
+    hm_read_fail_inievo.F — no title line, bound by the trailing mat id:
+
+      C1  NINIEVO(10) ISHEAR(10) ILEN(10) blank(40) FAILIP(10) PTHICKFAIL(20)
+      then EXACTLY four lines per criterion, NINIEVO times, no separators:
+      L2  INITYPE(10) EVOTYPE(10) EVOSHAP(10) COMPTYP(10)
+      L3  TAB_ID(10) SR_REF(20) FSCALE(20) PARAM(20)
+      L4  TAB_EL(10) EL_REF(20) ELSCAL(20)
+      L5  DISP(20) ALPHA(20) ENER(20)      <- DISP, ALPHA, ENER — the
+                                              starter's own listing prints a
+                                              different order; the CARD is
+                                              this one.
+
+    Mapping follows dyna2rad p_ConvertMatAddDamageDiem (convertmats.cxx:
+    10111-10515): DITYP 0..4 → INITYPE 1..5 (same criterion order), P1 →
+    TAB_ID, P2/P3 → PARAM per DITYP, P5 → TAB_EL, DETYP 0/1 → EVOTYPE 1/2,
+    DCTYP 0/1 → COMPTYP 1/2, Q1 → DISP or ENER, Q3 → ALPHA with EVOSHAP=2,
+    P4 → ISHEAR INVERTED (LS-DYNA P4=0 *includes* the transverse shear
+    stresses, Radioss ISHEAR=1 *considers* them — hm_read_fail_inievo.F:
+    291-293 — so the flags have opposite sense and d2r's inversion is
+    correct; written explicitly because the Radioss blank default 0 would
+    silently EXCLUDE what the LS-DYNA default includes).
+
+    Deliberate deviations from dyna2rad, each warned: NUMFIP resolves
+    against the parts that actually reference this MID (FAILIP for solid
+    use, PTHICKFAIL via the same NUMFIP rule /FAIL/GENE1 uses for shell use)
+    instead of d2r's whole-model element-count heuristic with its stale
+    per-part NIP; and a conflicting per-criterion P4 is warned (d2r lets the
+    last criterion win silently — the last still wins here, for parity).
+    """
+    mid = diem.mid
+    kw = f"*MAT_ADD_DAMAGE_DIEM mid={mid}"
+    if not diem.criteria:
+        state.warn(f"{kw}: NDIEMC={diem.ndiemc} defines no criterion — no "
+                   "/FAIL/INIEVO emitted.")
+        return []
+    if diem.dinit != 0.0:
+        state.warn(f"{kw}: DINIT={diem.dinit:g} (initial damage) has no "
+                   "/FAIL/INIEVO slot — the damage starts at 0. DROPPED.")
+    if diem.deps != 0.0:
+        state.warn(f"{kw}: DEPS={diem.deps:g} has no /FAIL/INIEVO slot. "
+                   "DROPPED.")
+    if diem.volfrac not in (0.0, 0.5):
+        state.warn(f"{kw}: VOLFRAC={diem.volfrac:g} (failed-volume fraction "
+                   "for solid deletion) has no /FAIL/INIEVO slot — solids "
+                   "delete on the FAILIP failed-IP count instead. DROPPED.")
+    solid_pids = {e.pid for e in state.solid_elems}
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_use = any(p.mid == mid and pid in solid_pids
+                    for pid, p in state.parts.items())
+    shell_use = any(p.mid == mid and pid in shell_pids
+                    for pid, p in state.parts.items())
+    failip = 0
+    pthk = 0.0
+    if solid_use and diem.numfip > 0.0:
+        failip = int(round(diem.numfip))
+    if shell_use:
+        numfip = diem.numfip
+        if numfip < -100.0:
+            # _numfip_to_pthickfail carries *MAT_ADD_EROSION's
+            # "NUMFIP < -100 -> (|NUMFIP|-100) integration points"
+            # convention; DIEM has NO such form — its LT.0 is a percentage
+            # of layers only (R16 Vol II p.2-56) — so a raw pass-through
+            # would silently reinterpret the field as an IP count.
+            state.warn(
+                f"{kw}: NUMFIP={diem.numfip:g} < -100 — *MAT_ADD_DAMAGE_"
+                "DIEM defines a negative NUMFIP as a PERCENTAGE of layers "
+                "only (the *MAT_ADD_EROSION '(|NUMFIP|-100) integration "
+                "points' form does not exist for DIEM) — clamped to -100, "
+                "i.e. ALL layers must fail.")
+            numfip = -100.0
+        pthk, needs_nptt = _numfip_to_pthickfail(
+            numfip, _shell_nptt_for_mid(state, mid))
+        if needs_nptt:
+            state.warn(
+                f"{kw}: NUMFIP={diem.numfip:g} is an integration-point count "
+                "but no *SECTION_SHELL NIP was found for the material — "
+                "PTHICKFAIL left at the default (delete on the first failed "
+                "IP). Verify the shell integration scheme.")
+    if solid_use and diem.numfip < 0.0:
+        state.warn(
+            f"{kw}: NUMFIP={diem.numfip:g} < 0 is the percent-of-layers form, "
+            "defined for shells; the material also has SOLID parts, whose "
+            "FAILIP (failed-IP count) cannot take a percentage — FAILIP is "
+            "left at the default 1 for them.")
+    # ISHEAR: per-criterion P4, inverted; conflict warned, last wins (d2r
+    # parity — CM:10273 writes the global from inside the per-criterion loop).
+    ishear_vals = [1 if c.p4 == 0.0 else 0 for c in diem.criteria]
+    if len(set(ishear_vals)) > 1:
+        state.warn(
+            f"{kw}: the criteria disagree on P4 (plane-stress transverse-"
+            f"shear flag): {[c.p4 for c in diem.criteria]} — /FAIL/INIEVO "
+            "has ONE global ISHEAR, so the LAST criterion's value "
+            f"(ISHEAR={ishear_vals[-1]}) applies to all of them (same "
+            "last-wins rule as dyna2rad, but warned).")
+    ishear = ishear_vals[-1]
+    lines = [
+        f"/FAIL/INIEVO/{mid}",
+        "#  NINIEVO    ISHEAR      ILEN                                                  FAILIP          PTHICKFAIL",
+        f"{_i(len(diem.criteria))}{_i(ishear)}{_i(0)}{' ' * 40}{_i(failip)}{_f(pthk)}",
+    ]
+    for n, c in enumerate(diem.criteria, start=1):
+        if 0 <= c.dityp <= 4:
+            initype = c.dityp + 1
+        else:
+            initype = 0
+            state.warn(f"{kw}: criterion {n}: DITYP={c.dityp} is not a "
+                       "defined LS-DYNA value (0..4) — INITYPE left at the "
+                       "starter default 1 (ductile, triaxiality).")
+        if c.detyp in (0, 1):
+            evotype = c.detyp + 1
+        else:
+            evotype = 0
+            state.warn(f"{kw}: criterion {n}: DETYP={c.detyp} is not a "
+                       "defined LS-DYNA value (0/1) — EVOTYPE left at the "
+                       "starter default (plastic displacement).")
+        if c.dctyp in (0, 1):
+            comptyp = c.dctyp + 1
+        else:
+            comptyp = 0
+            if c.dctyp == -1:
+                state.warn(
+                    f"{kw}: criterion {n}: DCTYP=-1 (damage NOT coupled to "
+                    "the stress) has no /FAIL/INIEVO counterpart — COMPTYP "
+                    "falls to the default 1 (maximum damage), so this "
+                    "criterion DOES soften the stress in Radioss. Remove the "
+                    "criterion if it was output-only.")
+            else:
+                state.warn(f"{kw}: criterion {n}: DCTYP={c.dctyp} is not a "
+                           "defined LS-DYNA value (-1/0/1) — COMPTYP left at "
+                           "the starter default 1 (maximum damage).")
+        if c.p1 == 0:
+            state.warn(
+                f"{kw}: criterion {n}: P1=0 — the initiation curve/table is "
+                "MANDATORY (TAB_ID=0 is starter ERROR 2088). The card is "
+                "emitted as-is so the starter names it; supply P1.")
+        if c.dityp in (1, 4):
+            param = c.p2
+        elif c.dityp in (2, 3):
+            param = c.p3
+            if c.p2 != 0.0:
+                state.warn(
+                    f"{kw}: criterion {n}: P2={c.p2:g} (MSFLD/FLD layer "
+                    "selection, 0=mid 1=outer) has no /FAIL/INIEVO slot — "
+                    "the criterion evaluates per integration point. DROPPED.")
+        else:
+            param = 0.0
+        if c.dityp == 1 and c.p3 != 0.0:
+            state.warn(
+                f"{kw}: criterion {n}: P3={c.p3:g} (shell shear-stress "
+                "formulation flag for DITYP=1) has no /FAIL/INIEVO slot. "
+                "DROPPED.")
+        disp, alpha, ener, evoshap = 0.0, 0.0, 0.0, 0
+        if evotype == 2:
+            ener = c.q1
+            if ener <= 0.0:
+                state.warn(
+                    f"{kw}: criterion {n}: DETYP=1 (energy evolution) needs "
+                    f"a positive fracture energy, got Q1={c.q1:g} — "
+                    "/FAIL/INIEVO rejects ENER=0 (starter ERROR 2090).")
+        else:
+            if c.q1 > 0.0:
+                disp = c.q1
+                if c.q3 > 0.0:
+                    alpha, evoshap = c.q3, 2
+            elif c.q1 < 0.0:
+                disp = _diem_collapse_q1_table(state, mid,
+                                               int(round(-c.q1)))
+            else:
+                state.warn(
+                    f"{kw}: criterion {n}: DETYP=0 (displacement evolution) "
+                    f"needs a positive plastic displacement, got Q1={c.q1:g} "
+                    "— /FAIL/INIEVO rejects DISP=0 (starter ERROR 2089).")
+        if c.q3 > 0.0 and evoshap == 0 and evotype != 2 and c.q1 < 0.0:
+            state.warn(
+                f"{kw}: criterion {n}: Q3={c.q3:g} (nonlinear evolution "
+                "exponent) applies only to a SCALAR Q1 in LS-DYNA — with the "
+                "table form it is ignored there and here (linear evolution).")
+        if c.q4 != 0.0:
+            state.warn(
+                f"{kw}: criterion {n}: Q4={c.q4:g} (regularization curve "
+                "scaling Q1 by element size) has no /FAIL/INIEVO slot — "
+                "only the initiation-side regularization (P5 → TAB_EL) "
+                "carries over. DROPPED.")
+        lines += [
+            "#  INITYPE   EVOTYPE   EVOSHAP   COMPTYP",
+            f"{_i(initype)}{_i(evotype)}{_i(evoshap)}{_i(comptyp)}",
+            "#   TAB_ID              SR_REF              FSCALE               PARAM",
+            f"{_i(c.p1)}{_f(0.0)}{_f(0.0)}{_f(param)}",
+            "#   TAB_EL              EL_REF              ELSCAL",
+            f"{_i(c.p5)}{_f(0.0)}{_f(0.0)}",
+            "#               DISP               ALPHA                ENER",
+            f"{_f(disp)}{_f(alpha)}{_f(ener)}",
+        ]
+    lines.append(HDR)
+    return lines
+
+
+def _resolve_mat_adhesives(state: ConversionState) -> None:
+    """Adhesives-batch curve wiring — build_starter prepass, AFTER
+    _resolve_define_tables (table membership must be final) and BEFORE
+    _make_functions (curves consumed through TABLE slots must be re-routed to
+    1-D /TABLE/1 via state.table_1d_ids — the LAW76/LAW52 mechanism).
+
+    /MAT/LAW120's Table_Id and /FAIL/INIEVO's TAB_ID/TAB_EL are TABLE slots
+    (read through the starter's table interface), so a *DEFINE_CURVE
+    referenced there must be emitted as /TABLE/1, not /FUNCT. A
+    *DEFINE_TABLE keeps its id (already a /TABLE/1). Dangling references are
+    warned here, naming the starter error the user would otherwise meet.
+    MAT_138's Fct_TN/Fct_TT are FUNCTION slots — their curves stay /FUNCT
+    (checked at emit time). The DIEM Q1 displacement tables are NOT wired:
+    they are collapsed to a scalar at emit and never referenced.
+
+    Also warns two batch-wide semantic traps that need the resolved model:
+    a DIEM P1 table whose first rate value is negative (LS-DYNA's
+    log-rate-axis convention, which /TABLE reads literally) and a cohesive
+    material referenced by SHELL parts (starter ERROR 3046/658 — Radioss has
+    no cohesive-shell element).
+    """
+    for mat in state.mat_toughened_adhesive.values():
+        if mat.lcss == 0:
+            continue
+        if mat.lcss in state.curves:
+            state.table_1d_ids.add(mat.lcss)
+        elif mat.lcss in state.define_tables:
+            tab = state.define_tables[mat.lcss]
+            if not tab.resolved:
+                state.warn(
+                    f"*MAT_TOUGHENED_ADHESIVE_POLYMER mid={mat.mid}: "
+                    f"LCSS={mat.lcss} references a *DEFINE_TABLE that could "
+                    "not be resolved — the /MAT/LAW120 Table_Id will dangle "
+                    "(starter ERROR 779) and the analytic TAU0/Q/B/H "
+                    "parameters (which both codes ignore when a table is "
+                    "set) will NOT take over. Fix the table or clear LCSS.")
+        else:
+            state.warn(
+                f"*MAT_TOUGHENED_ADHESIVE_POLYMER mid={mat.mid}: "
+                f"LCSS={mat.lcss} references a *DEFINE_CURVE/_TABLE that is "
+                "not in the deck — the /MAT/LAW120 Table_Id will dangle "
+                "(starter ERROR 779).")
+    for diem in state.fail_diem.values():
+        for n, c in enumerate(diem.criteria, start=1):
+            for name, tid in (("P1", c.p1), ("P5", c.p5)):
+                if tid == 0:
+                    continue
+                if tid in state.curves:
+                    state.table_1d_ids.add(tid)
+                elif tid in state.define_tables:
+                    # "If the first strain rate value in the table is
+                    # negative, it is assumed to be given with respect to
+                    # logarithmic strain rate" — the R16 P1 description for
+                    # every DITYP. Radioss /TABLE interpolation reads the
+                    # same abscissae as LITERAL rates, silently changing the
+                    # rate axis. (P5 has no such convention — its table axes
+                    # are element size and the P1-criterion abscissa.)
+                    tab = state.define_tables[tid]
+                    if (name == "P1" and tab.resolved and tab.rows
+                            and tab.rows[0][0] < 0.0):
+                        state.warn(
+                            f"*MAT_ADD_DAMAGE_DIEM mid={diem.mid}: criterion "
+                            f"{n}: P1 table {tid} has a NEGATIVE first "
+                            f"strain-rate value ({tab.rows[0][0]:g}) — "
+                            "LS-DYNA then reads the whole rate axis as "
+                            "LOGARITHMIC strain rate; /FAIL/INIEVO TAB_ID "
+                            "interpolation reads the same values as LITERAL "
+                            "rates. Rewrite the table's rate values as "
+                            "exp(value) to keep the LS-DYNA axis.")
+                else:
+                    state.warn(
+                        f"*MAT_ADD_DAMAGE_DIEM mid={diem.mid}: criterion "
+                        f"{n}: {name}={tid} references a curve/table that is "
+                        "not in the deck — the /FAIL/INIEVO "
+                        + ("TAB_ID" if name == "P1" else "TAB_EL")
+                        + " reference will dangle (starter ERROR 779).")
+    # Cohesive material on SHELL parts: legal in LS-DYNA (MAT_138/240 run on
+    # cohesive shells, *SECTION_SHELL ELFORM 29; MAT_169 is solids-only there
+    # too) but Radioss has NO cohesive shell element — the conversion emits
+    # /MAT/LAW116/117/169 + /PROP/SHELL and the starter refuses the pair
+    # (live-confirmed: ERROR 3046 "ELEMENTS OF TYPE SHELL ARE NOT COMPATIBLE
+    # WITH MATERIAL ... TYPE 117" + ERROR 658). Without this warning the only
+    # k2rad message is the generic ELFORM->Ishell remap note, which mislabels
+    # the cohesive-shell formulation as an ordinary integration choice.
+    cohesive_shell_fams = (
+        ("*MAT_COHESIVE_MIXED_MODE", state.mat_cohesive_mixed_mode, 117),
+        ("*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE",
+         state.mat_cohesive_mm_epr, 116),
+        ("*MAT_ARUP_ADHESIVE", state.mat_arup_adhesive, 169),
+    )
+    if any(fam for _, fam, _ in cohesive_shell_fams):
+        shell_pids = {e.pid for e in state.shell_elems}
+        for kwname, fam, law in cohesive_shell_fams:
+            for mid in fam:
+                pids = sorted(pid for pid, p in state.parts.items()
+                              if p.mid == mid and pid in shell_pids)
+                if pids:
+                    state.warn(
+                        f"{kwname} mid={mid}: SHELL part(s) {pids} reference "
+                        "this cohesive material — Radioss has NO "
+                        "cohesive-shell element (LS-DYNA's *SECTION_SHELL "
+                        f"ELFORM 29 path), so the emitted /MAT/LAW{law} + "
+                        "/PROP/SHELL pairing is refused by the starter "
+                        f"(ERROR 3046 'ELEMENTS OF TYPE SHELL ARE NOT "
+                        f"COMPATIBLE WITH MATERIAL ... TYPE {law}' + ERROR "
+                        "658). Model the bondline with cohesive SOLIDS "
+                        "(*SECTION_SOLID ELFORM 19/20) to convert it.")
 
 
 def _emit_mat_simplified_rubber(mat: MatSimplifiedRubber) -> List[str]:

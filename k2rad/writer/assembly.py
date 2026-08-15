@@ -17,6 +17,7 @@ from .materials import (
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_comp_tens,
     _resolve_mat_viscoelastic,
+    _resolve_mat_adhesives,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
 )
@@ -559,6 +560,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # solid-/XREF law whitelist, so these containers decide which parts get a
     # /XREF and pick up Ismstr=10.
     _resolve_mat_viscoelastic(state)
+    # Adhesives / cohesive batch. Needs the parsed *DEFINE_CURVE/_TABLEs (so
+    # after _resolve_define_tables above) because /MAT/LAW120's Table_Id and
+    # /FAIL/INIEVO's TAB_ID/TAB_EL are TABLE slots: a *DEFINE_CURVE referenced
+    # there is re-routed to a 1-D /TABLE/1 via state.table_1d_ids, which
+    # _make_functions reads — so before _make_functions. Nothing here touches
+    # _resolve_xref_parts' inputs: none of LAW116/117/120/169 is on the
+    # solid-/XREF law whitelist (the _target_mat_law entries alone make the
+    # gate warn-skip those parts correctly instead of claiming "no /MAT").
+    _resolve_mat_adhesives(state)
 
     # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
     # its connectivity by CONTENT, which cannot distinguish an all-integer
