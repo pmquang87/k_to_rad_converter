@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 from ..state import (
     ConversionState,
@@ -20,6 +21,11 @@ from ..state import (
     MatLowDensityFoam,
     MatFuChangFoam,
     MatHoneycomb,
+    MatSoilAndFoam,
+    MatLowDensityViscousFoam,
+    MatModifiedHoneycomb,
+    MatDeshpandeFleckFoam,
+    MatHillFoam,
     MatBlatzKo,
     MatMooneyRivlin,
     MatOgdenRubber,
@@ -43,8 +49,8 @@ from ..state import (
     EosJwl,
     EosCard,
 )
-from .common import (HDR, _f, _i, _part_node_sets, _ref_flag_materials,
-                     _spotweld_beam_pids)
+from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
+                     _ref_flag_materials, _spotweld_beam_pids)
 from .blast_ale import _make_ale_multimaterial
 
 __all__ = [
@@ -72,6 +78,12 @@ __all__ = [
     "_emit_mat_law38",
     "_emit_mat_law70",
     "_emit_mat_law28",
+    "_resolve_mat_foams",
+    "_emit_mat_law21",
+    "_emit_mat_law90",
+    "_emit_mat_law50_modified",
+    "_emit_mat_law115",
+    "_emit_mat_law62",
     "_emit_mat_law42_blatz_ko",
     "_emit_mat_mooney_rivlin",
     "_emit_mat_ogden_rubber",
@@ -149,6 +161,19 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law70(mat, state)
     for mat in state.mat_honeycomb.values():
         lines += _emit_mat_law28(mat, state)
+    # Foam batch (curve synthesis, slot wiring and every semantic warning are
+    # resolved by _resolve_mat_foams; MAT_126's orthotropic /PROP/TYPE6 lives
+    # in writer/composites.py like the other material-driven ortho props)
+    for mat in state.mat_soil_and_foam.values():
+        lines += _emit_mat_law21(mat)
+    for mat in state.mat_low_density_viscous_foam.values():
+        lines += _emit_mat_law90(mat)
+    for mat in state.mat_modified_honeycomb.values():
+        lines += _emit_mat_law50_modified(mat)
+    for mat in state.mat_deshpande_fleck.values():
+        lines += _emit_mat_law115(mat)
+    for mat in state.mat_hill_foam.values():
+        lines += _emit_mat_law62(mat)
     # Metal plasticity batch 2 (MAT_081/082 and MAT_105 are already covered by
     # the mat_plas_tab loop above; MAT_122 by _make_composite_materials)
     for mat in state.mat_iso_elas_plas.values():
@@ -1864,6 +1889,919 @@ def _emit_mat_law28(mat: MatHoneycomb, state: ConversionState) -> List[str]:
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         HDR,
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Foam batch: MAT_005 / MAT_073 / MAT_126 / MAT_154 / MAT_177
+# (MAT_126's orthotropic /PROP/TYPE6 rides writer/composites.py; the
+#  *CONTACT_INTERIOR resolution lives in writer/mesh.py.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_mat_foams(state: ConversionState) -> None:
+    """build_starter prepass for the foam batch: synthesize the MAT_005 P(mu)
+    function and the MAT_126 V/V0-recomputed yield curves (both BEFORE
+    _make_functions, which emits them), resolve the MAT_126 slot wiring and
+    LCSR rate samples, compute the MAT_177 Ogden pairs, and raise every
+    material-level warning. Runs before _resolve_xref_parts, whose law gate
+    reads these containers through _target_mat_law (LAW90 is on the starter's
+    solid-/XREF whitelist, so *MAT_073 parts newly RECEIVE a /XREF; LAW21/50/
+    62/115 are off-whitelist and warn-skip naming the law)."""
+    _resolve_mat_soil_and_foam(state)
+    _resolve_mat_low_density_viscous_foam(state)
+    _resolve_mat_modified_honeycomb(state)
+    _resolve_mat_deshpande_fleck(state)
+    _resolve_mat_hill_foam(state)
+
+
+def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
+    """*MAT_SOIL_AND_FOAM: the pressure-curve axis transform and the
+    field-level approximation warnings.
+
+    THE transform (the classic trap of this batch, taken from the engine
+    sources, not intuition): LS-DYNA tabulates pressure against volumetric
+    strain EPS = ln(V/V0), NEGATIVE in compression (Manual Vol II R17 Remark
+    1); the LAW21 engine evaluates its function at mu = rho/rho0 - 1
+    = V0/V - 1, POSITIVE in compression (mmain.F90:686-692 `amu = one/df -
+    one`, m21law.F:161 `P = FACY*FINTER(IFUNC, MU, ...)`). So mu =
+    exp(-EPS) - 1, the point order REVERSES (LS-DYNA's increasing-compression
+    order is decreasing EPS), and the ordinate is unchanged (P is positive in
+    compression in BOTH codes: m21law.F:143 `POLD = -THIRD*(SIG1+SIG2+SIG3)`).
+    dyna2rad implements exactly this for curves with negative abscissae
+    (CM:800-859) but silently creates NO function when every abscissa is
+    positive (both its branches require cptneg > 0, CM:814/837) — k2rad
+    converts that case too, reading positive abscissae as |EPS|."""
+    kw = "*MAT_SOIL_AND_FOAM"
+    if not state.mat_soil_and_foam:
+        return
+    shell_parts = _shell_parts_by_mid(state)
+    for mat in state.mat_soil_and_foam.values():
+        g, k = mat.g, mat.kun
+        denom = 3.0 * k + g
+        E = 9.0 * g * k / denom if denom != 0.0 else 0.0
+        dnu = 6.0 * k + 2.0 * g
+        nu_raw = (3.0 * k - 2.0 * g) / dnu if dnu != 0.0 else 0.0
+        mat.e_res = E
+        mat.nu_res = min(max(nu_raw, 0.0), 0.495)
+        if mat.nu_res != nu_raw:
+            state.warn(
+                f"{kw} mid={mat.mid}: G={g:g} / KUN={k:g} imply Nu = "
+                f"(3K-2G)/(6K+2G) = {nu_raw:g}, outside the [0, 0.495] "
+                f"range /MAT/LAW21 accepts — CLAMPED to {mat.nu_res:g} "
+                "(dyna2rad applies the same clamp, silently). The emitted "
+                "elastic constants no longer reproduce the card's G/KUN "
+                "pair exactly; check the two moduli (they are the SHEAR "
+                "and UNLOADING BULK modulus, not E and nu).")
+        if g <= 0.0 or k <= 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: G={g:g} / KUN={k:g} must both be "
+                f"positive — the derived E={E:g} and Kt land on /MAT/LAW21, "
+                "whose starter requires a positive tensile bulk modulus "
+                "(ERROR 829 'TENSILE BULK MODULUS IS LOWER OR EQUAL TO "
+                "0.').")
+        elif mat.vcr != 1.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: Kt = B = KUN = {k:g}, so the LAW21 "
+                "unloading/reloading bulk modulus equals LS-DYNA's KUN at "
+                "every compression AND in tension. This deliberately "
+                "diverges from dyna2rad's Kt = KUN/100 (+ B = KUN, Mu_max "
+                "unset): the engine interpolates the unloading bulk as "
+                "alpha*B + (1-alpha)*Kt with alpha = mu/Mu_max, and the "
+                "unset Mu_max becomes 1e20 (hm_read_mat21.F), so alpha ~ 0 "
+                "and d2r's B field is DEAD — its converted soil/foam "
+                "unloads at KUN/100 in BOTH signs, retraces the loading "
+                "curve and dissipates ~nothing (measured: -0.12% retained "
+                "IE vs LS-DYNA's elastic-line unload).")
+        if mat.vcr == 1.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: VCR=1 (no volumetric crushing — "
+                "unloading follows the loading curve) has no exact LAW21 "
+                "counterpart. dyna2rad's mapping B=0 + Kt=KUN/100 is kept "
+                f"HERE (Kt={k / 100.0:g}): the starter substitutes "
+                "B=Kt with its own WARNING 829, and that soft unloading "
+                "bulk makes the engine's min(elastic, curve) pressure "
+                "RETRACE the loading curve wherever the curve is steeper "
+                "than KUN/100 (measured) — i.e. a close approximation of "
+                "VCR=1's load=unload semantics. Tension is 100x softer "
+                "than LS-DYNA's K; verify if the foam sees tension.")
+        elif mat.vcr != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: VCR={mat.vcr:g} is neither 0 nor 1 — "
+                "treated as 0 (volumetric crushing on, elastic unloading "
+                "with B=KUN), which is what LS-DYNA does with any VCR != 1.")
+        if mat.pc > 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PC={mat.pc:g} is POSITIVE. LS-DYNA "
+                "defines the pressure cutoff for tensile fracture as a "
+                "NEGATIVE number, and /MAT/LAW21 P_min copies it verbatim — "
+                f"a positive P_min forbids every pressure below {mat.pc:g}, "
+                "including the unloaded state. Check the sign on the card.")
+        elif mat.pc == 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PC is 0/blank. LS-DYNA's default "
+                "cutoff IS an active floor at zero — 'if the pressure drops "
+                "below the cutoff value specified, it is reset to that "
+                "value' (Manual Vol II R17 MAT_005 Remark 1), i.e. the "
+                "material carries NO tensile pressure. /MAT/LAW21 P_min=0 "
+                "means the opposite: the starter substitutes -INFINITY "
+                "(hm_read_mat21.F: PMIN==0 -> -1e20), i.e. UNLIMITED "
+                "tension through Kt. P_min is copied verbatim (dyna2rad "
+                "does the same) — set P_min to a small negative value "
+                "(e.g. -1e-20) by hand if the no-tension behaviour "
+                "matters.")
+        # ── The pressure curve ────────────────────────────────────────────
+        pts: Optional[List[Tuple[float, float]]] = None
+        src = ""
+        if mat.lcid:
+            crv = state.curves.get(mat.lcid)
+            if crv is None or not crv.pts:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCID={mat.lcid} has no parsed "
+                    "*DEFINE_CURVE — falling back to the EPS1..10/P1..10 "
+                    "card pairs.")
+            else:
+                pts = list(crv.pts)
+                src = f"LCID={mat.lcid}"
+        from_pairs = pts is None
+        if from_pairs:
+            pairs = list(zip(mat.eps, mat.p))
+            while pairs and pairs[-1] == (0.0, 0.0):
+                pairs.pop()          # unused trailing card slots, not data
+            pts = pairs
+            src = "the EPS/P card pairs"
+        neg = [x for x, _ in pts if x < 0.0]
+        pos = [x for x, _ in pts if x > 0.0]
+        kept = pts
+        if neg and pos:
+            kept = [(x, y) for x, y in pts if x >= 0.0]
+            state.warn(
+                f"{kw} mid={mat.mid}: the pressure curve ({src}) mixes "
+                f"negative and positive abscissae — following dyna2rad "
+                f"(CM:814-836), the {len(pts) - len(kept)} negative-EPS "
+                "point(s) are DROPPED and the positive abscissae are read as "
+                "|ln(V/V0)| compressive strain. A pure LS-DYNA-convention "
+                "curve is all-negative; check which convention the card "
+                "really uses.")
+        elif pos and not neg:
+            state.warn(
+                f"{kw} mid={mat.mid}: every pressure-curve abscissa ({src}) "
+                "is POSITIVE — LS-DYNA's convention is EPS = ln(V/V0), "
+                "negative in compression, so the abscissae are read as "
+                "|ln(V/V0)| (an already-positive compression measure) and "
+                "transformed mu = exp(|EPS|)-1 all the same. dyna2rad "
+                "creates NO function at all for this case (both its "
+                "branches require a negative abscissa, CM:814/837) and the "
+                "deck would fail downstream; verify the curve convention.")
+        else:
+            kept = [(x, y) for x, y in pts if x <= 0.0]
+        # exp() guard: |EPS| beyond ~709.78 overflows a double. A volumetric
+        # strain that large is not physical data — it almost always means the
+        # LCID points at the wrong curve (time series, force curve ...), the
+        # input class every other branch here degrades gracefully on.
+        huge = [x for x, _ in kept if abs(x) > 700.0]
+        if huge:
+            state.warn(
+                f"{kw} mid={mat.mid}: {len(huge)} pressure-curve point(s) "
+                f"with |EPS| > 700 dropped (abscissae {huge[:4]}"
+                + ("..." if len(huge) > 4 else "") + ") — "
+                "mu = exp(|EPS|)-1 overflows a float there, and a "
+                "volumetric strain |ln(V/V0)| above 700 is not soil data; "
+                "check that LCID points at the pressure curve.")
+            kept = [(x, y) for x, y in kept if abs(x) <= 700.0]
+        mu_pts: List[Tuple[float, float]] = []
+        collapsed = []
+        for x, y in sorted((math.exp(abs(x)) - 1.0, y) for x, y in kept):
+            if mu_pts and x == mu_pts[-1][0]:
+                # duplicated abscissa (e.g. two (0,0) slots, or +EPS/-EPS
+                # folding onto one mu): keep the LAST ordinate — a /FUNCT
+                # with a repeated X is not a valid Radioss function.
+                if y != mu_pts[-1][1]:
+                    collapsed.append(x)
+                mu_pts[-1] = (x, y)
+                continue
+            mu_pts.append((x, y))
+        if collapsed:
+            state.warn(
+                f"{kw} mid={mat.mid}: the transformed pressure curve had "
+                f"{len(collapsed)} duplicated mu abscissa(e) with DIFFERENT "
+                f"pressures (mu = {collapsed[:4]}"
+                + ("..." if len(collapsed) > 4 else "") + ") — collapsed "
+                "to the last point each (a /FUNCT cannot carry a vertical "
+                "step). A pressure step in the source curve loses its "
+                "jump; restate it with two closely-spaced abscissae.")
+        if from_pairs and mu_pts and mu_pts[0][0] > 0.0:
+            # LS-DYNA auto-generates the (0,0) first point when EPS1 != 0
+            # (Manual Vol II R17, MAT_005 Remark 1) — mirror it.
+            mu_pts.insert(0, (0.0, 0.0))
+        if len(mu_pts) < 2:
+            state.warn(
+                f"{kw} mid={mat.mid}: no usable pressure-curve points "
+                f"(source: {src}) — /MAT/LAW21 is emitted with func_IDf=0, "
+                "which leaves the material without a P(mu) function to "
+                "evaluate. Give the card an LCID curve or at least two "
+                "EPS/P pairs.")
+        else:
+            fid = state.next_curve_id()
+            _add_auto_curve(state, fid, f"Auto_MAT005_P_mu_mid{mat.mid}",
+                            mu_pts)
+            mat.func_id = fid
+            state.warn(
+                f"{kw} mid={mat.mid}: pressure curve ({src}) converted to "
+                f"/FUNCT {fid} with the LAW21 axis transform mu = exp(-EPS) "
+                "- 1: LS-DYNA tabulates P vs EPS = ln(V/V0) (negative in "
+                "compression), the LAW21 engine evaluates P at mu = "
+                "rho/rho0 - 1 = V0/V - 1 (positive in compression, "
+                "mmain.F90:686-692) — abscissae transformed and re-sorted "
+                "ascending, ordinates unchanged (P is compression-positive "
+                "in both codes).")
+        shell_pids = shell_parts.get(mat.mid, [])
+        if shell_pids:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) {shell_pids} are SHELL parts, "
+                "but /MAT/LAW21 declares only SOLID_ISOTROPIC and SPH "
+                "(hm_read_mat21.F:223-224) — the starter rejects the "
+                "combination with ERROR 3046. Use a shell-capable foam/soil "
+                "law or re-mesh as solids.")
+
+
+def _resolve_mat_low_density_viscous_foam(state: ConversionState) -> None:
+    """*MAT_073: dropped-field warnings and the /VISC/PRONY branch report.
+    The card wiring itself (E→E0, LCID→the single loading function, HU→Hys,
+    SHAPE→Shape, Gi/BETAi→/VISC/PRONY of the same id) follows dyna2rad
+    p_ConvertMatL73 (CM:4275-4338) exactly and needs no synthesis."""
+    kw = "*MAT_LOW_DENSITY_VISCOUS_FOAM"
+    if not state.mat_low_density_viscous_foam:
+        return
+    shell_parts = _shell_parts_by_mid(state)
+    for mat in state.mat_low_density_viscous_foam.values():
+        if not mat.lcid:
+            state.warn(
+                f"{kw} mid={mat.mid}: no loading curve (LCID=0) — "
+                "/MAT/LAW90's function row carries fct_IDL=0, which the "
+                "starter rejects (ERROR 126). Add the nominal stress-strain "
+                "curve.")
+        elif mat.lcid not in state.curves:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID={mat.lcid} has no parsed "
+                "*DEFINE_CURVE — the /MAT/LAW90 function reference dangles "
+                "and the starter will reject it; add the curve to the deck.")
+        if mat.lcid2 > 0:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID2={mat.lcid2} selects the "
+                "relaxation-curve branch, where LS-DYNA least-squares fits "
+                f"the Gi/BETAi series itself (BSTART={mat.bstart:g}, "
+                f"TRAMP={mat.tramp:g}, NV={mat.nv}). Neither dyna2rad nor "
+                "k2rad performs that fit — NO /VISC/PRONY is emitted and the "
+                "foam converts RATE-INDEPENDENT (quasi-static branch only). "
+                "State the explicit Gi/BETAi cards (LCID2=0) to keep the "
+                "viscosity.")
+        elif mat.lcid2 == -1:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCID2=-1 selects the frequency-data "
+                f"branch (LCID3={mat.lcid3}, LCID4={mat.lcid4}) — "
+                "unsupported by dyna2rad and k2rad alike; NO /VISC/PRONY is "
+                "emitted and the foam converts rate-independent.")
+        else:
+            dropped = [t for t in mat.prony if t[1] <= 0.0]
+            if dropped:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {len(dropped)} Gi/BETAi term(s) "
+                    "with BETAi <= 0 dropped from the /VISC/PRONY series "
+                    "(a non-positive decay constant is a permanent extra "
+                    "stiffness the G_i/Beta_i pair cannot express; dyna2rad "
+                    "filters identically, CM:4317-4333).")
+        if mat.tc != 0.0 and mat.tc < 1.0e19:
+            state.warn(
+                f"{kw} mid={mat.mid}: tension cutoff TC={mat.tc:g} — "
+                "/MAT/LAW90's Tcut field exists only from the radioss2026 "
+                "card revision, and a /BEGIN 2022 deck has no slot for it — "
+                "DROPPED (LAW90 tension follows the loading curve's negative "
+                "branch, uncut).")
+        if mat.fail != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: FAIL={mat.fail:g} (tensile stress "
+                "reset to zero past the cutoff) — LAW90's FAIL flag is "
+                "radioss2026-only; DROPPED at /BEGIN 2022.")
+        if mat.kcon != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: contact-stiffness modulus "
+                f"KCON={mat.kcon:g} — LAW90's Kcont field is radioss2026-"
+                "only; DROPPED at /BEGIN 2022 (contact stiffness follows "
+                "E0).")
+        if mat.beta != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: HU decay constant BETA={mat.beta:g} "
+                "has no /MAT/LAW90 field — dropped (LAW90's hysteretic "
+                "unloading is governed by Hys/Shape alone).")
+        if mat.bvflag != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: bulk-viscosity flag "
+                f"BVFLAG={mat.bvflag:g} has no /MAT/LAW90 field — dropped.")
+        if mat.damp != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: viscous damping DAMP={mat.damp:g}"
+                + (" (the LS-DYNA default 0.05 — the card left it blank)"
+                   if mat.damp == 0.05 else "")
+                + " is DROPPED: dyna2rad moves it onto the solid property "
+                "(/PROP/TYPE14 Mu=DAMP, Lambda=DAMP/3, CP:484-495), but "
+                "k2rad keeps the section-derived /PROP/SOLID — the same "
+                "policy as its *MAT_LOW_DENSITY_FOAM (057) handling — so "
+                "the foam converts without the Navier damping (the "
+                "Ismstr=10 pin from that same d2r rule IS adopted, see "
+                "the property warning). Add LAMBDA_V/MU_V on the "
+                "/PROP/SOLID by hand if the foam needs it.")
+        shell_pids = shell_parts.get(mat.mid, [])
+        if shell_pids:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) {shell_pids} are SHELL parts, "
+                "but /MAT/LAW90 declares only SOLID_ISOTROPIC "
+                "(hm_read_mat90.F:233) — the starter rejects the "
+                "combination with ERROR 3046.")
+
+
+# LAW50 direction slots in card order — 11, 22, 33 then 12, 23, 31
+# (hm_read_mat50.F90:308-315 and the starter's YIELD STRESS 11/22/33/12/23/31
+# printout).
+_LAW50_SLOTS = ("11", "22", "33", "12", "23", "31")
+
+
+def _mat126_curve(state: ConversionState, mat, cid: int, slot: str,
+                  cache: dict) -> int:
+    """One MAT_126 yield curve → the /FUNCT id LAW50 should reference,
+    applying dyna2rad's RecomputeCurvesBasedOnFirstAbcissa (CM:9215-9266):
+    a curve whose FIRST abscissa is > 0 is taken as stress vs relative
+    volume V/V0 and every abscissa is replaced by 1 - V/V0 (volumetric
+    engineering strain, compression positive), re-sorted ascending, into a
+    new /FUNCT; a curve starting at 0 (or negative) is already strain-based
+    and is referenced by its original id."""
+    if cid in cache:
+        return cache[cid]
+    crv = state.curves.get(cid)
+    if crv is None or not crv.pts:
+        state.warn(
+            f"*MAT_MODIFIED_HONEYCOMB mid={mat.mid}: yield curve {cid} "
+            f"(slot {slot}) has no parsed *DEFINE_CURVE — the slot is left "
+            "EMPTY (funID=0: no yield function, the direction stays "
+            "elastic); add the curve to the deck.")
+        cache[cid] = 0
+        return 0
+    if crv.pts[0][0] > 0.0:
+        fid = state.next_curve_id()
+        pts: List[Tuple[float, float]] = []
+        for x, y in sorted((1.0 - x, y) for x, y in crv.pts):
+            if pts and x == pts[-1][0]:
+                if y != pts[-1][1]:
+                    state.warn(
+                        f"*MAT_MODIFIED_HONEYCOMB mid={mat.mid}: yield curve "
+                        f"{cid} repeats the abscissa V/V0={1.0 - x:g} with "
+                        "different ordinates — collapsed to the last point "
+                        "(a /FUNCT cannot carry a vertical step).")
+                pts[-1] = (x, y)
+                continue
+            pts.append((x, y))
+        _add_auto_curve(state, fid,
+                        (crv.title or f"FUNCT_{cid}") + "_MatL50_recomputed",
+                        pts)
+        state.warn(
+            f"*MAT_MODIFIED_HONEYCOMB mid={mat.mid}: yield curve {cid} "
+            f"starts at abscissa {crv.pts[0][0]:g} > 0, which dyna2rad's "
+            "RecomputeCurvesBasedOnFirstAbcissa reads as stress vs RELATIVE "
+            "VOLUME V/V0 — abscissae replaced by 1 - V/V0 (volumetric "
+            "engineering strain, compression positive) and re-sorted "
+            f"ascending as /FUNCT {fid}; ordinates unchanged, the original "
+            "curve is kept. If the curve was already strain-based, prepend "
+            "its (0, y0) point so the first abscissa is 0.")
+        cache[cid] = fid
+        return fid
+    cache[cid] = cid
+    return cid
+
+
+def _resolve_mat_modified_honeycomb(state: ConversionState) -> None:
+    """*MAT_126 → LAW50 wiring, following dyna2rad p_ConvertMatL26 +
+    UpdateMatConvertingLoadCurves (CM:1744-1815, 8923-9213):
+
+    * normal surface (LCA >= 0): identity slot map a→11 b→22 c→33 ab→12
+      bc→23 ca→31 with the LS-DYNA fallback chain (missing normal → LCA,
+      missing shear → LCS → LCA); moduli EAAU..GCAU with 0 → E (E-row) and
+      0 → E/2(1+PR) (G-row); Iflag1 = Iflag2 = -1 (yield vs -strain, i.e.
+      compression-positive).
+    * LCA < 0 (transversely isotropic surface): dyna2rad's remap fun11←LCB,
+      fun22=fun33←LCC, all shears←LCS; E11=EAAU, E22=E33=EBBU, G12=GBCU,
+      G23=G31=GABU; Iflag1=0, Iflag2=1 — an APPROXIMATION (the LS-DYNA
+      damage curves become yield curves), warned loudly.
+    * LCSR > 0: up to 5 (rate, scale) samples — the curve's FIRST FIVE
+      points (the "MODIFIED" rule, CM:9017-9021: points 1-4, then point 5
+      when the curve has more; the plain MAT_026 rule takes points 1-4 plus
+      the LAST point instead); each direction's base function is replicated
+      per rate with Fscale = the sampled ordinate. LCSR = -1 (per-direction
+      rate curves) is dropped like dyna2rad, loudly.
+    """
+    kw = "*MAT_MODIFIED_HONEYCOMB"
+    if not state.mat_modified_honeycomb:
+        return
+    for mat in state.mat_modified_honeycomb.values():
+        cache: dict = {}
+        G0 = (mat.E / (2.0 * (1.0 + mat.nu)) if mat.nu > -1.0
+              else mat.E / 2.0)
+        if mat.lca < 0:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCA={mat.lca} < 0 selects the SECOND "
+                "(transversely isotropic) yield surface, which /MAT/LAW50 "
+                "does not have. dyna2rad's remap is followed (CM:8955, "
+                "1784, 1802-1812): LCB (strong-axis hardening) → the 11 "
+                "yield function, LCC (weak-axis) → 22 and 33, and the LCS "
+                "curve → ALL THREE shear slots — but in this variant "
+                "LCS/LCAB/LCBC/LCCA are shear DAMAGE curves, not yield "
+                "curves, so the converted shear response is a DIFFERENT "
+                "physical quantity. E11=EAAU, E22=E33=EBBU, G12=GBCU, "
+                "G23=G31=GABU (ECCU/GCAU discarded); Iflag1=0 (yield vs "
+                "volumetric strain), Iflag2=1. Validate against a known "
+                "crush case before trusting this material.")
+            if mat.eccu < 0.0:
+                state.warn(
+                    f"{kw} mid={mat.mid}: ECCU={mat.eccu:g} < 0 activates "
+                    "the THIRD yield surface (|ECCU| = initial shear yield, "
+                    "GCAU re-read as the hydrostatic yield) — no LAW50 "
+                    "counterpart, DROPPED (dyna2rad discards both in this "
+                    "variant too).")
+            base = mat.lcb
+            f11 = _mat126_curve(state, mat, base, "11", cache) if base else 0
+            f22 = _mat126_curve(state, mat, mat.lcc or base, "22", cache) \
+                if (mat.lcc or base) else 0
+            f33 = _mat126_curve(state, mat, mat.lcc or base, "33", cache) \
+                if (mat.lcc or base) else 0
+            fsh = _mat126_curve(state, mat, mat.lcs or base, "12/23/31",
+                                cache) if (mat.lcs or base) else 0
+            mat.fun_ids = [f11, f22, f33, fsh, fsh, fsh]
+            mat.moduli = [mat.eaau or mat.E, mat.ebbu or mat.E,
+                          mat.ebbu or mat.E, mat.gbcu or G0,
+                          mat.gabu or G0, mat.gabu or G0]
+            mat.iflag1, mat.iflag2 = 0, 1
+        else:
+            lcb = mat.lcb or mat.lca
+            lcc = mat.lcc or mat.lca
+            lcs = mat.lcs or mat.lca
+            lcab = mat.lcab or lcs
+            lcbc = mat.lcbc or lcs
+            lcca = mat.lcca or lcs
+            srcs = (mat.lca, lcb, lcc, lcab, lcbc, lcca)
+            if not mat.lca:
+                state.warn(
+                    f"{kw} mid={mat.mid}: no yield curve at all (LCA=0) — "
+                    "every /MAT/LAW50 direction is emitted without a yield "
+                    "function and the honeycomb has no crush resistance; "
+                    "add the LCA..LCCA curves.")
+            fids = []
+            for slot, cid in zip(_LAW50_SLOTS, srcs):
+                fids.append(_mat126_curve(state, mat, cid, slot, cache)
+                            if cid else 0)
+            mat.fun_ids = fids
+            mat.moduli = [mat.eaau or mat.E, mat.ebbu or mat.E,
+                          mat.eccu or mat.E, mat.gabu or G0,
+                          mat.gbcu or G0, mat.gcau or G0]
+            mat.iflag1, mat.iflag2 = -1, -1
+        # ── LCSR strain-rate scaling ──────────────────────────────────────
+        mat.rates, mat.scales = [], []
+        if mat.lcsr == -1.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCSR=-1 supplies PER-DIRECTION rate "
+                f"curves (LCSRA..LCSRCA = {mat.lcsr_dirs}) — dyna2rad never "
+                "reads that card and k2rad follows it: ALL strain-rate data "
+                "is DROPPED and the honeycomb converts rate-independent. "
+                "Re-state a single LCSR curve to keep an (isotropic) rate "
+                "scaling.")
+        elif mat.lcsr > 0.0:
+            rc = state.curves.get(int(mat.lcsr))
+            if rc is None or not rc.pts:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCSR={mat.lcsr:g} has no parsed "
+                    "*DEFINE_CURVE — the rate scaling is dropped and the "
+                    "honeycomb converts rate-independent.")
+            else:
+                samp = list(rc.pts[:4])
+                if len(rc.pts) > 4:
+                    samp.append(rc.pts[4])
+                mat.rates = [x for x, _ in samp]
+                mat.scales = [y for _, y in samp]
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCSR={int(mat.lcsr)} sampled into "
+                    f"{len(samp)} (strain-rate, scale) pair(s) — dyna2rad's "
+                    "MODIFIED-honeycomb rule: the curve's FIRST FIVE points "
+                    "(CM:9017-9021; the plain MAT_026 rule instead takes "
+                    "the first 4 plus the LAST point). Each direction's "
+                    "base yield function is REPLICATED per rate with "
+                    "Fscale = the sampled ordinate (rate dependence as a "
+                    "pure ordinate scale); LCSR points beyond the fifth "
+                    "are dropped — including the high-rate end of a long "
+                    "curve.")
+        # ── Inexpressible / dropped fields ───────────────────────────────
+        if mat.E or mat.nu or mat.sigy or mat.vf:
+            state.warn(
+                f"{kw} mid={mat.mid}: the fully-compacted continuum "
+                f"(E={mat.E:g}, PR={mat.nu:g}, SIGY={mat.sigy:g}, "
+                f"VF={mat.vf:g}) maps onto /MAT/LAW50's ECOMP/NU/SIGY/"
+                "VCOMP compaction card, which exists only in the "
+                "radioss2025 LAW50 format — a /BEGIN 2022 deck reads "
+                "mat_law50.cfg FORMAT(radioss90), 24 cards, no compaction "
+                "card — so it is DROPPED and the converted honeycomb NEVER "
+                "stiffens into the compacted solid. E and PR still serve "
+                "as the fallback for blank EAAU..GCAU moduli.")
+        for label, val in (("viscosity coefficient MU", mat.mu),
+                           ("bulk-viscosity flag BULK", mat.bulk),
+                           ("VREF", mat.vref), ("TREF", mat.tref),
+                           ("SHDFLG", mat.shdflg), ("RFAC", mat.rfac)):
+            if val != 0.0:
+                state.warn(
+                    f"{kw} mid={mat.mid}: {label}={val:g} has no "
+                    "/MAT/LAW50 field — dropped.")
+        if mat.pru != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PRU={mat.pru:g} (Poisson effect "
+                "during compaction"
+                + (f", ratios {mat.pru_ratios}" if mat.pru_ratios else "")
+                + ") has no /MAT/LAW50 counterpart — dropped; LAW50 keeps "
+                "the uncoupled orthotropic behaviour up to compaction.")
+        if mat.macf not in (0, 1):
+            state.warn(
+                f"{kw} mid={mat.mid}: MACF={mat.macf} switches the material "
+                "axes — no counterpart on the synthesized /PROP/TYPE6; "
+                "dropped. Restate the axes directly via AOPT.")
+        if mat.tsef < 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: TSEF={mat.tsef:g} < 0 means |TSEF| is "
+                "a failure-strain CURVE id — /MAT/LAW50's Eps_max is a "
+                "constant; the curve form is dropped (Eps_max11/22/33 = 0, "
+                "no tensile failure).")
+        if mat.ssef < 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: SSEF={mat.ssef:g} < 0 means |SSEF| is "
+                "a failure-strain CURVE id — dropped (Eps_max12/23/31 = 0, "
+                "no shear failure).")
+
+
+def _resolve_mat_deshpande_fleck(state: ConversionState) -> None:
+    """*MAT_154 → LAW115: the 1:1 map needs no synthesis; the warnings cover
+    the two fields whose MEANING has no counterpart (DERFI, NUM), the
+    starter's own bound checks so they fail here, not at starter time, and
+    the Isolid=24 routing (the hex default Isolid=17 is engine-fatal for
+    LAW115 — announced here, applied in _make_properties)."""
+    kw = "*MAT_DESHPANDE_FLECK_FOAM"
+    if not state.mat_deshpande_fleck:
+        return
+    shell_parts = _shell_parts_by_mid(state)
+    sqrt45 = math.sqrt(4.5)
+    # Loop-invariants hoisted (the _shell_parts_by_mid rule: an O(n_elems)
+    # scan inside a per-material loop is O(n_elems x n_mats) for nothing).
+    solid_pids = {e.pid for e in state.solid_elems}
+    parts_sorted = sorted(state.parts.items())
+    for mat in state.mat_deshpande_fleck.values():
+        if mat.derfi != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: DERFI={mat.derfi:g} selects the "
+                "analytical yield-surface derivative — /MAT/LAW115's Ires "
+                "flag chooses the return-mapping ALGORITHM (1 NICE explicit "
+                "/ 2 Newton implicit), not the derivative evaluation, so "
+                "DERFI is dropped and Ires stays at the starter default "
+                "Newton (Ires=2). No accuracy loss expected.")
+        if mat.pfail > 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: PFAIL={mat.pfail:g} maps to LAW115 "
+                "SIGP_F (max principal stress at failure) — note LS-DYNA "
+                f"deletes the element only after NUM={mat.num} consecutive "
+                "violated timesteps, while Radioss deletes on the FIRST "
+                "violation, so the converted foam can erode earlier under "
+                "spiky loads. (dyna2rad's cfg never parses PFAIL at all — "
+                "its SIGP_F is silently always 0; k2rad carries it.)")
+        if mat.alpha < 0.0 or mat.alpha > sqrt45:
+            state.warn(
+                f"{kw} mid={mat.mid}: ALPHA={mat.alpha:g} is outside "
+                f"[0, sqrt(4.5)={sqrt45:g}] — the starter REJECTS it "
+                "(ERROR 1897).")
+        if mat.nu < 0.0 or mat.nu >= 0.5:
+            state.warn(
+                f"{kw} mid={mat.mid}: PR={mat.nu:g} is outside [0, 0.5) — "
+                "the starter REJECTS it (ERROR 49).")
+        shell_pids = shell_parts.get(mat.mid, [])
+        if shell_pids:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) {shell_pids} are SHELL parts, "
+                "but /MAT/LAW115 declares only SOLID_ISOTROPIC "
+                "(hm_read_mat115.F:319) — the starter rejects the "
+                "combination with ERROR 3046.")
+        routed = []
+        gated = []
+        for pid, part in parts_sorted:
+            if part.mid != mat.mid or pid not in solid_pids:
+                continue
+            sec = state.sec_solids.get(part.secid if part.secid > 0 else pid)
+            isolid = _elform_to_isolid(sec.elform) if sec else 17
+            if isolid == 17:
+                routed.append(pid)
+            elif 2 < isolid < 21:
+                gated.append((pid, isolid))
+        if routed:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) {routed} would land on "
+                "k2rad's ELFORM-derived full-integration /PROP/SOLID "
+                "Isolid=17, where /MAT/LAW115 is UNRUNNABLE: the starter "
+                "only answers WARNING 1905 (sgrtails.F:631 gates JHBE "
+                "3..20), but the ENGINE collapses the solid time step "
+                "below DTMIN at cycle 0, jumps past the end time and "
+                "prints NORMAL TERMINATION after 1 cycle — a silent empty "
+                "run (measured on this starter/engine pair; the identical "
+                "deck at Isolid=24 runs to completion, 0 warnings). Their "
+                "/PROP/SOLID is emitted with Isolid=24 (HEPH — also "
+                "dyna2rad's default hex formulation for MAT_154 decks); "
+                "any non-LAW115 part sharing the *SECTION_SOLID switches "
+                "along (warned separately).")
+        if gated:
+            state.warn(
+                f"{kw} mid={mat.mid}: part(s) "
+                f"{[p for p, _ in gated]} land on /PROP/SOLID Isolid="
+                f"{sorted({i for _, i in gated})} (k2rad's ELFORM-derived "
+                "formulation), and the starter answers WARNING 1905 for any "
+                "/MAT/LAW115 group at Isolid 3..20 (sgrtails.F:631). Only "
+                "the hex Isolid=17 pairing is auto-routed to 24 (the one "
+                "measured to kill the engine time step); this formulation "
+                "is left as derived — LAW115's preferred pairings are the "
+                "under-integrated linear solids Isolid 1/2/24, so VERIFY "
+                "the engine time step survives cycle 0, and reformulate "
+                "the foam mesh as bricks if it does not.")
+
+
+def _hill_foam_nu(n: float) -> float:
+    """MAT_177 N → LAW62 Nu = N/(1+2N), the standard Hill-foam relation
+    (dyna2rad CM:9773-9775)."""
+    denom = 1.0 + 2.0 * n
+    return n / denom if denom != 0.0 else 0.0
+
+
+def _resolve_mat_hill_foam(state: ConversionState) -> None:
+    """*MAT_177 (LCID=0 branch) → LAW62 constants: mu_i = Ci*Bi/2, alpha_i =
+    Bi per the exact Hill→Ogden identity, INDEX-ALIGNED over the nonzero-C
+    slots — dyna2rad compacts the C and B lists independently, so a zero Ci
+    mid-list makes it read Bi out of alignment/range (CM:9877-9883); k2rad
+    keeps each Ci with ITS OWN Bi."""
+    kw = "*MAT_HILL_FOAM"
+    if not state.mat_hill_foam:
+        return
+    for mat in state.mat_hill_foam.values():
+        mat.mu_i, mat.alpha_i = [], []
+        dead = []
+        for i in range(min(len(mat.c), len(mat.b))):
+            if mat.c[i] == 0.0:
+                continue
+            mat.mu_i.append(mat.c[i] * mat.b[i] / 2.0)
+            mat.alpha_i.append(mat.b[i])
+            if mat.b[i] == 0.0:
+                dead.append(i + 1)
+        if dead:
+            state.warn(
+                f"{kw} mid={mat.mid}: C{'/C'.join(str(i) for i in dead)} "
+                "nonzero with a ZERO B in the same slot — the Ogden pair "
+                "mu_i = Ci*Bi/2 degenerates to 0 (the starter then defaults "
+                "alpha_i to 1), i.e. the term contributes nothing. Check "
+                "the C/B pairing on the card. (dyna2rad compacts the two "
+                "lists independently here and reads B values out of "
+                "alignment.)")
+        if not mat.mu_i:
+            state.warn(
+                f"{kw} mid={mat.mid}: no nonzero Ci constant — /MAT/LAW62 "
+                "is emitted with law order N=0, which the starter REJECTS "
+                "(ERROR 559). Provide the C1..C8/B1..B8 constants.")
+        nu = _hill_foam_nu(mat.n)
+        if nu < 0.0 or nu >= 0.5:
+            state.warn(
+                f"{kw} mid={mat.mid}: N={mat.n:g} gives Nu = N/(1+2N) = "
+                f"{nu:g}"
+                + (" — the starter clamps Nu >= 0.5 to 0.499"
+                   if nu >= 0.5 else " (negative)")
+                + "; check N (the LS-DYNA card's 4th field, Manual Vol II "
+                "R17 p.2-1216: MID RO K N MU).")
+        if mat.k != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: bulk modulus K={mat.k:g} has no "
+                "/MAT/LAW62 field — LAW62 derives the bulk response from "
+                f"Nu = N/(1+2N) = {nu:g} and the mu_i; verify the converted "
+                "compressibility matches.")
+        if mat.mu != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: damping coefficient MU={mat.mu:g} "
+                "has no /MAT/LAW62 field — dropped (LAW62's viscous branch "
+                "is a Maxwell gamma_i/tau_i series, not a damping "
+                "coefficient).")
+        if mat.lcsr:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCSR={mat.lcsr} (stretch-ratio curve "
+                "of the fit branch) has no /MAT/LAW62 counterpart — "
+                "dropped; the conversion is rate-independent.")
+        if mat.r != 0.0 or mat.m != 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: Mullins-effect card (R={mat.r:g}, "
+                f"M={mat.m:g}) has no /MAT/LAW62 counterpart — dropped "
+                "(no stress softening on reloading).")
+
+
+def _emit_mat_law21(mat: MatSoilAndFoam) -> List[str]:
+    """*MAT_SOIL_AND_FOAM (MAT_005) → /MAT/LAW21 (DPRAG). Column layout from
+    matl21_dprag.cfg FORMAT(radioss130) (the block a /BEGIN 2022 deck reads):
+    RHO_I; E Nu; A0 A1 A2 Amax; [func_IDf(10) + 10 literal blanks + Kt +
+    FscaleP]; P_min P_ext; B Mu_max. E and Nu derive from the card's G/KUN
+    exactly as dyna2rad (CM:742-757): E = 9GK/(3K+G), Nu = (3K-2G)/(6K+2G)
+    clamped to [0, 0.495] — resolved (and clamp-warned) in
+    _resolve_mat_soil_and_foam. A0/A1/A2 copy verbatim (identical yield
+    algebra), P_min = PC verbatim (no sign change — both codes' tension
+    cutoff is negative; PC=0's semantic flip is warned in the resolver).
+
+    Kt = B = KUN for VCR=0 — a conscious fix over dyna2rad's Kt = KUN/100:
+    with Mu_max unset the starter substitutes 1e20 (hm_read_mat21.F) and the
+    engine's unloading bulk alpha*B + (1-alpha)*Kt with alpha = mu/Mu_max
+    degenerates to Kt for every reachable mu (m21law.F:166-170), so d2r's B
+    is a DEAD field and its soil unloads at KUN/100 in BOTH signs (measured:
+    the loading curve is retraced, ~0% dissipation). Kt = KUN makes the
+    unloading/reloading modulus LS-DYNA's KUN everywhere, tension included
+    (LS-DYNA has a single bulk modulus for both). VCR=1 keeps d2r's B=0 +
+    Kt=KUN/100: the starter substitutes B=Kt (WARNING 829) and the soft
+    modulus reproduces VCR=1's unload-along-the-curve semantics (measured).
+    Amax/FscaleP/P_ext/Mu_max are written 0, matching dyna2rad's unset
+    fields → the starter substitutes 1e30 / 1.0 / 0 / 1e20."""
+    k = mat.kun
+    vcr1 = mat.vcr == 1.0
+    b = 0.0 if vcr1 else k
+    kt = k / 100.0 if vcr1 else k
+    return [
+        f"/MAT/LAW21/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu",
+        f"{_f(mat.e_res)}{_f(mat.nu_res)}",
+        "#                 A0                  A1                  A2                Amax",
+        f"{_f(mat.a0)}{_f(mat.a1)}{_f(mat.a2)}{_f(0.0)}",
+        "#  func_IDf                              Kt             FscaleP",
+        f"{_i(mat.func_id)}{' ' * 10}{_f(kt)}{_f(0.0)}",
+        "#              P_min               P_ext",
+        f"{_f(mat.pc)}{_f(0.0)}",
+        "#                  B              Mu_max",
+        f"{_f(b)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law90(mat: MatLowDensityViscousFoam) -> List[str]:
+    """*MAT_LOW_DENSITY_VISCOUS_FOAM (MAT_073) → /MAT/LAW90 [+ /VISC/PRONY].
+    Column layout from LAW90.cfg FORMAT(radioss2022) (the block a /BEGIN 2022
+    deck reads — TFLAG/FAIL/Kcont/Tcut are 2024/2026-only and absent here):
+    Rho_I; E0 Nu; [NL(10) Ismooth(10) Fcut Shape Hys Alpha]; then NL rows of
+    [fct_IDL(10) Eps_dot(20) Fscale(20)]. Fixed values exactly as dyna2rad
+    (CM:4289-4299): NL=1 (the single quasi-static loading curve, referenced
+    BY ID, rate 0), Ismooth=1, Fcut=0; HU→Hys, SHAPE→Shape; Nu/Alpha/Fscale
+    written 0 → starter defaults (0 / 1.0 / 1.0). The Gi/BETAi terms with
+    BETAi > 0 ride a /VISC/PRONY of the SAME id (Radioss pairs them by id
+    alone — dyna2rad CM:4305-4333; the misleadingly-named radTimeRel/
+    radGammaArr there map 1:1 GI→G_i, BETAI→Beta_i)."""
+    lines = [
+        f"/MAT/LAW90/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              Rho_I",
+        f"{_f(mat.rho)}",
+        "#                 E0                  Nu",
+        f"{_f(mat.E)}{_f(0.0)}",
+        "#       NL   Ismooth                Fcut               Shape                 Hys               Alpha",
+        f"{_i(1)}{_i(1)}{_f(0.0)}{_f(mat.shape)}{_f(mat.hu)}{_f(0.0)}",
+        "#  fct_IDL             Eps_dot              Fscale",
+        f"{_i(mat.lcid)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+    if mat.lcid2 == 0:
+        gis = [t[0] for t in mat.prony if t[1] > 0.0]
+        betais = [t[1] for t in mat.prony if t[1] > 0.0]
+        if gis:
+            lines += _emit_visc_prony(mat.mid, gis, betais)
+    return lines
+
+
+def _emit_mat_law50_modified(mat: MatModifiedHoneycomb) -> List[str]:
+    """*MAT_MODIFIED_HONEYCOMB (MAT_126) → /MAT/LAW50 (VISC_HONEY). Same
+    mat_law50.cfg FORMAT(radioss90) column layout as _emit_mat_law50
+    (MAT_063) above, but per-direction: fun_ids/moduli/Iflags come resolved
+    from _resolve_mat_modified_honeycomb, TSEF fills the normal Eps_max
+    components and SSEF the shear ones (both 0 when negative = the
+    unsupported curve form), and the LCSR samples replicate each direction's
+    base function into slots 2..5 with Eps_rate = the sampled abscissa and
+    Fscale = its ordinate (dyna2rad CM:9196-9208 — rate dependence is a pure
+    ordinate scale). The radioss2025-only compaction card (ECOMP NU SIGY ET
+    VCOMP) is NOT emitted: under /BEGIN 2022 the starter reads 24 cards and
+    a 25th line would be a stray card, not compaction data."""
+    e11, e22, e33, g12, g23, g31 = mat.moduli
+    n = max(1, len(mat.rates))
+    rates = mat.rates or [0.0]
+    scales = mat.scales or [1.0]
+    tmax = mat.tsef if mat.tsef > 0.0 else 0.0
+    smax = mat.ssef if mat.ssef > 0.0 else 0.0
+
+    def _dir(label: str, f: int) -> List[str]:
+        fids = [(f if i < n else 0) for i in range(5)]
+        fsc = [(scales[i] if i < n and i < len(scales) else 0.0)
+               for i in range(5)]
+        eps = [(rates[i] if i < n and i < len(rates) else 0.0)
+               for i in range(5)]
+        return [
+            f"#funID{label}-1 funID{label}-2 funID{label}-3 funID{label}-4 funID{label}-5",
+            "".join(_i(x) for x in fids),
+            f"#        Fscale_{label}-1         Fscale_{label}-2         Fscale_{label}-3         Fscale_{label}-4         Fscale_{label}-5",
+            "".join(_f(x) for x in fsc),
+            f"#      Eps_rate_{label}-1       Eps_rate_{label}-2       Eps_rate_{label}-3       Eps_rate_{label}-4       Eps_rate_{label}-5",
+            "".join(_f(x) for x in eps),
+        ]
+
+    f11, f22, f33, f12, f23, f31 = mat.fun_ids
+    lines = [
+        f"/MAT/LAW50/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                E11                 E22                 E33",
+        f"{_f(e11)}{_f(e22)}{_f(e33)}",
+        "#                G12                 G23                 G31",
+        f"{_f(g12)}{_f(g23)}{_f(g31)}",
+        "#             asrate",
+        f"{_f(0.0)}",
+        "#   Iflag1           Eps_max11           Eps_max22           Eps_max33",
+        f"{_i(mat.iflag1)}{_f(tmax)}{_f(tmax)}{_f(tmax)}",
+    ]
+    lines += _dir("11", f11) + _dir("22", f22) + _dir("33", f33)
+    lines += [
+        "#   Iflag2           Eps_max12           Eps_max23           Eps_max31",
+        f"{_i(mat.iflag2)}{_f(smax)}{_f(smax)}{_f(smax)}",
+    ]
+    lines += _dir("12", f12) + _dir("23", f23) + _dir("31", f31)
+    lines.append(HDR)
+    return lines
+
+
+def _emit_mat_law115(mat: MatDeshpandeFleckFoam) -> List[str]:
+    """*MAT_DESHPANDE_FLECK_FOAM (MAT_154) → /MAT/LAW115 (DESHFLECK).
+    Column layout from matl115_deshfleck.cfg FORMAT(radioss2021) (the block
+    a /BEGIN 2022 deck reads), deterministic Istat=0 branch: RHO_I; [E(20)
+    nu(20) Ires(10) Istat(10)]; [ALPHA EPSVP_F SIGP_F]; [SIGP GAMMA EPSD
+    ALPHA2 BETA]. LAW115 IS the Deshpande-Fleck surface — no formulation
+    selector exists; the hardening constants transfer verbatim (identical
+    law sigma_y = SIGP + GAMMA*(e/EPSD) + ALPHA2*ln[1/(1-(e/EPSD)^BETA)]).
+    Ires/Istat are written 0 → starter defaults (Newton return mapping,
+    deterministic card). CFAIL → EPSVP_F and PFAIL → SIGP_F — the latter is
+    a conscious fix over dyna2rad, whose cfg has no PFAIL attribute so its
+    CopyValue silently no-ops and SIGP_F is always 0."""
+    return [
+        f"/MAT/LAW115/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  nu      Ires     Istat",
+        f"{_f(mat.E)}{_f(mat.nu)}{_i(0)}{_i(0)}",
+        "#              ALPHA             EPSVP_F              SIGP_F",
+        f"{_f(mat.alpha)}{_f(mat.cfail)}{_f(mat.pfail)}",
+        "#               SIGP               GAMMA                EPSD              ALPHA2                BETA",
+        f"{_f(mat.sigp)}{_f(mat.gamma)}{_f(mat.epsd)}{_f(mat.alpha2)}{_f(mat.beta)}",
+        HDR,
+    ]
+
+
+def _emit_mat_law62(mat: MatHillFoam) -> List[str]:
+    """*MAT_HILL_FOAM (MAT_177, LCID=0) → /MAT/LAW62 (VISC_HYP). Column
+    layout from matl62_visc_hyp.cfg FORMAT(radioss2022): RHO_I; [Nu(20)
+    N(10) M(10) mu_max(20) Flag_Visc(10) Flag_Rigi(10)]; then the
+    CELL_LIST blocks, 5 cells of 20 columns per line: mu_i (ceil(N/5)
+    lines), alpha_i, and nu_i — the nu_i block is part of the 2022 format
+    (undocumented in the 2022 Reference Guide but read by the starter), so
+    it is emitted explicitly as zeros: any nonzero nu_i would OVERRIDE the
+    card-2 Nu (hm_read_mat62.F ITAG branch). M=0 (no Maxwell terms — MAT_177
+    has none), mu_max=0 → starter 1e20, Flag_Visc/Flag_Rigi 0 — all exactly
+    dyna2rad's fixed values (CM:9889-9891)."""
+    nu = _hill_foam_nu(mat.n)
+    order = len(mat.mu_i)
+
+    def _rows5(vals: List[float]) -> List[str]:
+        return ["".join(_f(v) for v in vals[i:i + 5])
+                for i in range(0, len(vals), 5)]
+
+    lines = [
+        f"/MAT/LAW62/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                 Nu         N         M              mu_max Flag_Visc Flag_Rigi",
+        f"{_f(nu)}{_i(order)}{_i(0)}{_f(0.0)}{_i(0)}{_i(0)}",
+    ]
+    if order:
+        lines.append("#               mu_i")
+        lines += _rows5(mat.mu_i)
+        lines.append("#            alpha_i")
+        lines += _rows5(mat.alpha_i)
+        lines.append("#               nu_i")
+        lines += _rows5([0.0] * order)
+    lines.append(HDR)
+    return lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────

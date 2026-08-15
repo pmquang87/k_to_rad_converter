@@ -104,10 +104,13 @@ _TFAIL_ABSOLUTE_MAX = 0.1
 
 
 def _composite_material_mids(state: ConversionState) -> Set[int]:
-    """Every MID handled by this module (used by the /PROP-split prepasses)."""
+    """Every MID handled by this module (used by the /PROP-split prepasses).
+    *MAT_MODIFIED_HONEYCOMB rides along for its /PROP/TYPE6: /MAT/LAW50's
+    orthotropy axes exist only on the SOL_ORTH property (see
+    _emit_mat126_solid_prop)."""
     return (set(state.mat_orthotropic) | set(state.mat_enhanced_composite)
             | set(state.mat_transverse_aniso) | set(state.mat_laminated_glass)
-            | set(state.mat_hill_3r))
+            | set(state.mat_hill_3r) | set(state.mat_modified_honeycomb))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -551,6 +554,10 @@ def _assign_composite_props(state: ConversionState) -> None:
                                 "/MAT/LAW32" if hill.use_law32 else "/MAT/LAW43")
     for mid in state.mat_laminated_glass:
         shell_only_laws[mid] = ("*MAT_LAMINATED_GLASS", "/MAT/PLAS_BRIT (LAW27)")
+    # ... and the mirror case: a SOLID-only law whose part holds shells.
+    solid_only_laws = {}
+    for mid in state.mat_modified_honeycomb:
+        solid_only_laws[mid] = ("*MAT_MODIFIED_HONEYCOMB", "/MAT/LAW50")
 
     for pid, part in sorted(state.parts.items()):
         if pid in state.composite_prop_ids:
@@ -614,6 +621,16 @@ def _assign_composite_props(state: ConversionState) -> None:
                     "synthesized and the starter will reject the combination — "
                     "re-mesh as shells or pick a solid-capable law.")
                 continue
+        if part.mid in solid_only_laws and pid in shell_pids:
+            law = solid_only_laws[part.mid]
+            state.warn(
+                f"{law[0]} on part {pid}: {law[1]} is a SOLID-ONLY law "
+                "(SOLID_ISOTROPIC with no shell class, "
+                "hm_read_mat50.F90:435), but the part holds shell elements. "
+                "No orthotropic property is synthesized and the starter "
+                "will reject the combination (ERROR 3046) — re-mesh the "
+                "honeycomb as solids or pick a shell-capable law.")
+            continue
         state.composite_prop_ids[pid] = state.next_prop_id()
 
 
@@ -2102,6 +2119,22 @@ def _emit_composite_props(state: ConversionState,
         elif mid in state.mat_hill_3r:
             lines += _emit_hill_3r_prop(state, state.mat_hill_3r[mid], pid,
                                         prop_id, sec, istrain, beta_fold)
+        elif mid in state.mat_modified_honeycomb:
+            # Solid-only by construction: _assign_composite_props refuses a
+            # MAT_126 part holding shell elements.
+            hc = state.mat_modified_honeycomb[mid]
+            axis = _composite_ref_axis(hc, state, label, prop_id,
+                                       for_solid=True)
+            if axis.mapped:
+                state.warn(f"{label}: orthotropy axes from the material "
+                           f"{axis.note}."
+                           + (" (Written on the /PROP/TYPE6 as Ip=0 + "
+                              "skew_ID — the starter's exact skew branch, "
+                              "element-independent — not the note's Ip=22.)"
+                              if axis.skew_id else ""))
+            lines += axis.lines
+            lines += _emit_mat126_solid_prop(state, prop_id, pid, axis,
+                                             istrain)
         else:
             mat = (state.mat_orthotropic.get(mid)
                    or state.mat_enhanced_composite.get(mid))
@@ -2196,6 +2229,77 @@ def _emit_hill_3r_prop(state: ConversionState, mat: MatHill3R, pid: int,
     return _emit_prop_type9(prop_id, f"HILL_3R_ORTHO_PROP_{prop_id} "
                             f"(part {pid})", sec, state.is_implicit,
                             istrain, state, refvec=refvec, phi=phi)
+
+
+def _emit_mat126_solid_prop(state: ConversionState, prop_id: int, pid: int,
+                            axis: "_RefAxis", istrain: int) -> List[str]:
+    """The /PROP/TYPE6 (SOL_ORTH) a *MAT_MODIFIED_HONEYCOMB part is
+    repointed at.
+
+    The reason is NOT the ERROR-3047 class check that drives the other
+    composite solids: /MAT/LAW50 declares SOLID_ISOTROPIC
+    (hm_read_mat50.F90:435 — "Compatibility with /PROP/TYPE 6/14/20/21/22"),
+    so the starter ACCEPTS it on a plain /PROP/SOLID. But the orthotropy
+    tensor GBUF%GAMA is built only by SMORTH3, and SMORTH3 is called only
+    for IGTYP == 6 (s8zinit3.F:435; s4init3.F:200 adds IGTYP 21 for tets/
+    tshells) — on /PROP/TYPE14 GAMA stays identity and the honeycomb's
+    11/22/33 directions silently collapse onto each element's local frame.
+    dyna2rad routes every MAT_026/126 *SECTION_SOLID to /PROP/TYPE6 for the
+    same reason (CP:404-415).
+
+    Isolid=1 + Ismstr=1 are PINNED (dyna2rad's fixed values for the
+    honeycomb family, CP:415 ``isolid = 1`` overriding the ELFORM map +
+    CP:472 ``Ismstr = 1``), not ELFORM-derived: MAT_126's default element
+    is LS-DYNA solid type 0, "a nonlinear spring-type solid" with 1-point
+    integration (Manual Vol II R17), and its yield-curve abscissa for the
+    corotational types 0/9 is the ENGINEERING strain — which is what a
+    small-strain (Ismstr=1) Radioss solid measures. The previous
+    ELFORM-derived Isolid=17/Ismstr=0(->4 large-incremental) evaluated the
+    curves at the LOGARITHMIC strain instead (measured: |SX| tracked
+    curve(0.5108) at 0.40 nominal crush), pulling a densification knee at
+    abscissa 0.70 forward to 1-exp(-0.70) = 0.50 nominal — a 28% early
+    onset. LAW50 itself declares SMALL_STRAIN (init_mat_keyword in
+    hm_read_mat50.F90:437), so Ismstr=1 is also the law's own preference."""
+    from .mesh import _emit_prop_type6      # local: mesh must not import this
+    tet10 = any(e.pid == pid and len(e.nodes) == 10 for e in state.solid_elems)
+    part = state.parts.get(pid)
+    secid = part.secid if part and part.secid > 0 else pid
+    sec = state.sec_solids.get(secid)
+    ip = axis.ip
+    if axis.skew_id:
+        ip = 0
+    state.warn(
+        f"/PROP for part {pid}: *MAT_MODIFIED_HONEYCOMB → /MAT/LAW50 needs "
+        f"its material axes on a /PROP/TYPE6 (SOL_ORTH), so the part is "
+        f"repointed at the synthesized property {prop_id}. This is not the "
+        "usual compatibility split: the starter would ACCEPT LAW50 on the "
+        "plain /PROP/SOLID (SOLID_ISOTROPIC class), but only IGTYP 6 builds "
+        "the orthotropy tensor (SMORTH3 runs for IGTYP 6 alone, "
+        "s8zinit3.F:435) — on TYPE14 the 11/22/33 directions silently "
+        "collapse onto each element's local frame. The property pins "
+        "Isolid=1 + Ismstr=1 (dyna2rad's fixed honeycomb values, "
+        "CP:415/472): MAT_126's default element is the 1-point corotational "
+        "type 0, whose yield curves are ENGINEERING-strain — the "
+        "small-strain formulation keeps that measure, where a large-strain "
+        "one would evaluate them at LOGARITHMIC strain and shift the "
+        "densification knee earlier.")
+    if sec is not None and sec.elform not in (0, 9):
+        state.warn(
+            f"/PROP for part {pid}: the *SECTION_SOLID states ELFORM="
+            f"{sec.elform}, a NON-corotational LS-DYNA formulation — for "
+            "those, MAT_126 expects the yield curves in LOGARITHMIC strain "
+            "(Manual Vol II R17, LCA note), while the emitted "
+            "Isolid=1/Ismstr=1 property evaluates them at ENGINEERING "
+            "strain. The plateau is measure-independent, but a "
+            "densification knee at abscissa x_log acts at the smaller "
+            "1-exp(-x_log) engineering crush. If the curves were really "
+            "fitted as log strain, restate them in engineering strain "
+            "(x_eng = 1-exp(-x_log)).")
+    return _emit_prop_type6(prop_id, f"HONEYCOMB_SOLID_PROP_{prop_id} "
+                            f"(part {pid})", sec, 1000 if tet10 else 0,
+                            istrain, refvec=axis.vec, ip=ip, phi=axis.phi,
+                            skew_id=axis.skew_id, refpoint=axis.pt,
+                            isolid=1, ismstr=1)
 
 
 def _emit_composite_solid_prop(state: ConversionState, prop_id: int, pid: int,

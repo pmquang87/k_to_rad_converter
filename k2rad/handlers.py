@@ -27,6 +27,8 @@ from .state import (
     CompositePly, PartComposite,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
+    MatSoilAndFoam, MatLowDensityViscousFoam, MatModifiedHoneycomb,
+    MatDeshpandeFleckFoam, MatHillFoam,
     MatBlatzKo, MatMooneyRivlin, MatOgdenRubber, MatHyperelasticRubber,
     MatIsoElasPlas, MatStrainRatePlas, MatGurson, MatHill3R, MatPlasCompTens,
     MatViscoelastic, MatKelvinMaxwell, MatGeneralViscoelastic,
@@ -3440,12 +3442,24 @@ def handle_set_beam_list(block: Block, state: ConversionState) -> None:
     _handle_set_elem_list(block, state, state.beam_sets)
 
 
+def _record_part_set_attrs(state: ConversionState, psid: int,
+                           f1: List[str]) -> None:
+    """Record the *SET_PART header's DA1..DA4 attributes when any is set.
+    *CONTACT_INTERIOR reads them as per-set defaults (PSF / Fa / ED / TYPE,
+    Manual Vol I R17 p.11-178); no other consumer uses them yet."""
+    da = tuple(to_float(f1[i]) if len(f1) > i and f1[i].strip() else 0.0
+               for i in range(1, 5))
+    if any(da):
+        state.part_set_attrs[psid] = da
+
+
 def handle_set_part_list(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=6, w=10)
     psid = to_int(f1[0])
+    _record_part_set_attrs(state, psid, f1)
     pids: List[int] = []
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
@@ -3453,6 +3467,32 @@ def handle_set_part_list(block: Block, state: ConversionState) -> None:
             if v > 0:
                 pids.append(v)
     state.part_sets[psid] = (title, pids)
+
+
+def handle_set_part_add(block: Block, state: ConversionState) -> None:
+    """*SET_PART_ADD — its data ids are part-SET ids (one nesting level), NOT
+    part ids, so it cannot land in state.part_sets AT PARSE TIME (a child set
+    may not be read yet, and every consumer reads the members as part ids).
+    Stored separately here; the post-parse ``_flatten_part_set_adds`` prepass
+    (writer/mesh.py) expands exactly one nesting level — the rule dyna2rad's
+    ConvertContactInterior applies, CC:692-727 — into a plain part_sets
+    entry, so EVERY part-set consumer (contacts SSTYP/MSTYP=2,
+    *CONTACT_INTERIOR, --auto-gapmin, gravity scopes, ALE groups ...)
+    resolves the set without knowing the variant. The header carries the
+    same SID DA1..DA4 layout as *SET_PART."""
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    psid = to_int(f1[0])
+    _record_part_set_attrs(state, psid, f1)
+    ids: List[int] = []
+    for line in raw[offset + 1:]:
+        for tok in parse_free(line):
+            v = to_int(tok)
+            if v > 0:
+                ids.append(v)
+    state.part_set_adds[psid] = (title, ids)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5733,6 +5773,320 @@ def handle_mat_honeycomb(block: Block, state: ConversionState) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Foam batch (MAT_005 / MAT_073 / MAT_126 / MAT_154 / MAT_177 + *CONTACT_INTERIOR)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_mat_soil_and_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_SOIL_AND_FOAM (MAT_005) → /MAT/LAW21.
+
+    LS-DYNA cards (mat_005.cfg Keyword971_R6.1):
+      Card1: MID RO G KUN A0 A1 A2 PC
+      Card2: VCR REF LCID   (pre-R6.1 decks have no LCID cell; a blank reads 0)
+      Card3-4: EPS1..EPS10  Card5-6: P1..P10
+    Every sign encoding is kept raw here — EPS = ln(V/V0), NEGATIVE in
+    compression, and PC < 0 — and decoded by the emitter's P(mu) transform,
+    which is where the semantic warnings live.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SOIL_AND_FOAM: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    g   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    kun = to_float(f1[3]) if len(f1) > 3 else 0.0
+    a0  = to_float(f1[4]) if len(f1) > 4 else 0.0
+    a1  = to_float(f1[5]) if len(f1) > 5 else 0.0
+    a2  = to_float(f1[6]) if len(f1) > 6 else 0.0
+    pc  = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=3, w=10)
+    vcr  = to_float(f2[0]) if f2 else 0.0
+    ref  = to_float(f2[1]) if len(f2) > 1 else 0.0
+    lcid = to_int(f2[2])   if len(f2) > 2 else 0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+    f6 = _card(raw, offset + 5, fixed=True, n=8, w=10)
+    eps = ([to_float(f3[i]) if len(f3) > i else 0.0 for i in range(8)]
+           + [to_float(f4[i]) if len(f4) > i else 0.0 for i in range(2)])
+    p = ([to_float(f5[i]) if len(f5) > i else 0.0 for i in range(8)]
+         + [to_float(f6[i]) if len(f6) > i else 0.0 for i in range(2)])
+    state.mat_soil_and_foam[mid] = MatSoilAndFoam(
+        mid, title, rho, g, kun, a0, a1, a2, pc, vcr, ref, lcid, eps, p)
+
+
+def handle_mat_low_density_viscous_foam(block: Block,
+                                        state: ConversionState) -> None:
+    """*MAT_LOW_DENSITY_VISCOUS_FOAM (MAT_073) → /MAT/LAW90 [+ /VISC/PRONY].
+
+    LS-DYNA cards (mat_073.cfg Keyword971_R6.1):
+      Card1: MID RO E LCID TC HU BETA DAMP
+      Card2: SHAPE FAIL BVFLAG KCON LCID2 BSTART TRAMP NV
+      Card3a (iff LCID2 == 0, repeated up to 6x): Gi BETAi REF
+      Card3b (iff LCID2 == -1): LCID3 LCID4 SCALEW SCALEA
+      (LCID2 > 0: NO card 3 — the Gi/BETAi come from LS-DYNA's internal
+       least-squares fit of the LCID2 relaxation curve.)
+    The walk must branch on LCID2 exactly like the cfg's CARD_PREREAD — the
+    Gi list and the LCID3/LCID4 card are mutually exclusive, and misreading
+    one as the other turns curve ids into moduli. Blank-vs-zero defaults that
+    carry semantics (HU=1.0, SHAPE=1.0) go through _ffield.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_LOW_DENSITY_VISCOUS_FOAM: empty material card — "
+                   "skipped")
+        return
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    lcid = to_int(f1[3])   if len(f1) > 3 else 0
+    tc   = to_float(f1[4]) if len(f1) > 4 else 0.0    # 0/blank = 1e20 (no cutoff)
+    hu   = _ffield(f1, 5, 1.0)
+    beta = to_float(f1[6]) if len(f1) > 6 else 0.0
+    damp = _ffield(f1, 7, 0.05)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    shape  = _ffield(f2, 0, 1.0)
+    fail   = to_float(f2[1]) if len(f2) > 1 else 0.0
+    bvflag = to_float(f2[2]) if len(f2) > 2 else 0.0
+    kcon   = to_float(f2[3]) if len(f2) > 3 else 0.0
+    lcid2  = to_int(f2[4])   if len(f2) > 4 else 0
+    bstart = to_float(f2[5]) if len(f2) > 5 else 0.0
+    tramp  = to_float(f2[6]) if len(f2) > 6 else 0.0
+    nv     = to_int(f2[7]) if len(f2) > 7 and f2[7].strip() else 6
+    prony: List[Tuple[float, float, float]] = []
+    lcid3 = lcid4 = 0
+    if lcid2 == 0:
+        for k in range(offset + 2, min(offset + 8, len(raw))):
+            f = _card(raw, k, fixed=True, n=3, w=10)
+            if not f or not any(x.strip() for x in f):
+                break
+            prony.append((to_float(f[0]),
+                          to_float(f[1]) if len(f) > 1 else 0.0,
+                          to_float(f[2]) if len(f) > 2 else 0.0))
+    elif lcid2 == -1:
+        f = _card(raw, offset + 2, fixed=True, n=4, w=10)
+        lcid3 = to_int(f[0]) if f else 0
+        lcid4 = to_int(f[1]) if len(f) > 1 else 0
+    ref = 1.0 if any(t[2] != 0.0 for t in prony) else 0.0
+    state.mat_low_density_viscous_foam[mid] = MatLowDensityViscousFoam(
+        mid, title, rho, E, lcid, tc, hu, beta, damp, shape, fail, bvflag,
+        kcon, lcid2, bstart, tramp, nv, prony, lcid3, lcid4, ref)
+
+
+def handle_mat_modified_honeycomb(block: Block,
+                                  state: ConversionState) -> None:
+    """*MAT_MODIFIED_HONEYCOMB (MAT_126) → /MAT/LAW50 + /PROP/TYPE6.
+
+    LS-DYNA cards (Manual Vol II R17 p.2-886 — the shipped Keyword971 cfg is
+    behind the manual, so the manual layout is authoritative):
+      Card1: MID RO E PR SIGY VF MU BULK
+      Card2: LCA LCB LCC LCS LCAB LCBC LCCA LCSR
+      Card3: EAAU EBBU ECCU GABU GBCU GCAU AOPT MACF
+      Card4: XP YP ZP A1 A2 A3 RFAC PRU
+      Card5: D1 D2 D3 TSEF SSEF VREF TREF SHDFLG
+      Card6 (iff AOPT == 3 or 4): V1 V2 V3
+      Card7 (iff LCSR == -1): LCSRA LCSRB LCSRC LCSRAB LCSRBC LCSRCA
+      Card8 (iff PRU == 2): PRUAB PRUAC PRUBC PRUBA PRUCA PRUCB
+    The walk must clear every conditional card that is present — otherwise a
+    following keyword's parse position would be wrong. Sign flags (LCA < 0,
+    ECCU < 0, TSEF/SSEF < 0) are kept raw; the writer prepass decodes them.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_MODIFIED_HONEYCOMB: empty material card — skipped")
+        return
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    sigy = to_float(f1[4]) if len(f1) > 4 else 0.0
+    vf   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    mu   = _ffield(f1, 6, 0.05)
+    bulk = to_float(f1[7]) if len(f1) > 7 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    lca  = to_int(f2[0]) if f2        else 0
+    lcb  = to_int(f2[1]) if len(f2) > 1 else 0
+    lcc  = to_int(f2[2]) if len(f2) > 2 else 0
+    lcs  = to_int(f2[3]) if len(f2) > 3 else 0
+    lcab = to_int(f2[4]) if len(f2) > 4 else 0
+    lcbc = to_int(f2[5]) if len(f2) > 5 else 0
+    lcca = to_int(f2[6]) if len(f2) > 6 else 0
+    lcsr = to_float(f2[7]) if len(f2) > 7 else 0.0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    eaau = to_float(f3[0]) if f3        else 0.0
+    ebbu = to_float(f3[1]) if len(f3) > 1 else 0.0
+    eccu = to_float(f3[2]) if len(f3) > 2 else 0.0
+    gabu = to_float(f3[3]) if len(f3) > 3 else 0.0
+    gbcu = to_float(f3[4]) if len(f3) > 4 else 0.0
+    gcau = to_float(f3[5]) if len(f3) > 5 else 0.0
+    aopt = to_float(f3[6]) if len(f3) > 6 else 0.0
+    macf = to_int(f3[7])   if len(f3) > 7 else 0
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    xp = to_float(f4[0]) if f4        else 0.0
+    yp = to_float(f4[1]) if len(f4) > 1 else 0.0
+    zp = to_float(f4[2]) if len(f4) > 2 else 0.0
+    a1 = to_float(f4[3]) if len(f4) > 3 else 0.0
+    a2 = to_float(f4[4]) if len(f4) > 4 else 0.0
+    a3 = to_float(f4[5]) if len(f4) > 5 else 0.0
+    rfac = to_float(f4[6]) if len(f4) > 6 else 0.0
+    pru  = to_float(f4[7]) if len(f4) > 7 else 0.0
+    f5 = _card(raw, offset + 4, fixed=True, n=8, w=10)
+    d1 = to_float(f5[0]) if f5        else 0.0
+    d2 = to_float(f5[1]) if len(f5) > 1 else 0.0
+    d3 = to_float(f5[2]) if len(f5) > 2 else 0.0
+    tsef = to_float(f5[3]) if len(f5) > 3 else 0.0
+    ssef = to_float(f5[4]) if len(f5) > 4 else 0.0
+    vref = to_float(f5[5]) if len(f5) > 5 else 0.0
+    tref = to_float(f5[6]) if len(f5) > 6 else 0.0
+    shdflg = to_float(f5[7]) if len(f5) > 7 else 0.0
+    k = offset + 5
+    v1 = v2 = v3 = 0.0
+    if int(round(aopt)) in (3, 4):
+        fv = _card(raw, k, fixed=True, n=3, w=10)
+        v1 = to_float(fv[0]) if fv        else 0.0
+        v2 = to_float(fv[1]) if len(fv) > 1 else 0.0
+        v3 = to_float(fv[2]) if len(fv) > 2 else 0.0
+        k += 1
+    lcsr_dirs: List[float] = []
+    if lcsr == -1.0:
+        fr = _card(raw, k, fixed=True, n=6, w=10)
+        lcsr_dirs = [to_float(fr[i]) if len(fr) > i else 0.0
+                     for i in range(6)]
+        k += 1
+    pru_ratios: List[float] = []
+    if pru == 2.0:
+        fp = _card(raw, k, fixed=True, n=6, w=10)
+        pru_ratios = [to_float(fp[i]) if len(fp) > i else 0.0
+                      for i in range(6)]
+        k += 1
+    state.mat_modified_honeycomb[mid] = MatModifiedHoneycomb(
+        mid, title, rho, E, nu, sigy, vf, mu, bulk,
+        lca, lcb, lcc, lcs, lcab, lcbc, lcca, lcsr,
+        eaau, ebbu, eccu, gabu, gbcu, gcau, aopt, macf,
+        xp, yp, zp, a1, a2, a3, rfac, pru,
+        d1, d2, d3, tsef, ssef, vref, tref, shdflg,
+        v1, v2, v3, lcsr_dirs, pru_ratios)
+
+
+def handle_mat_deshpande_fleck_foam(block: Block,
+                                    state: ConversionState) -> None:
+    """*MAT_DESHPANDE_FLECK_FOAM (MAT_154) → /MAT/LAW115.
+
+    LS-DYNA cards (mat_154.cfg Keyword971_R6.1):
+      Card1: MID RHO E PR ALPHA GAMMA
+      Card2: EPSD ALPHA2 BETA SIGP DERFI CFAIL PFAIL NUM
+    (The pre-R6.1 card 2 stops after CFAIL; blank PFAIL/NUM read 0/1000.)
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_DESHPANDE_FLECK_FOAM: empty material card — skipped")
+        return
+    mid   = to_int(f1[0])
+    rho   = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E     = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu    = to_float(f1[3]) if len(f1) > 3 else 0.0
+    alpha = to_float(f1[4]) if len(f1) > 4 else 0.0
+    gamma = to_float(f1[5]) if len(f1) > 5 else 0.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    epsd   = to_float(f2[0]) if f2        else 0.0
+    alpha2 = to_float(f2[1]) if len(f2) > 1 else 0.0
+    beta   = to_float(f2[2]) if len(f2) > 2 else 0.0
+    sigp   = to_float(f2[3]) if len(f2) > 3 else 0.0
+    derfi  = to_float(f2[4]) if len(f2) > 4 else 0.0
+    cfail  = to_float(f2[5]) if len(f2) > 5 else 0.0
+    pfail  = to_float(f2[6]) if len(f2) > 6 else 0.0
+    num    = to_int(f2[7]) if len(f2) > 7 and f2[7].strip() else 1000
+    state.mat_deshpande_fleck[mid] = MatDeshpandeFleckFoam(
+        mid, title, rho, E, nu, alpha, gamma, epsd, alpha2, beta, sigp,
+        derfi, cfail, pfail, num)
+
+
+def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
+    """*MAT_HILL_FOAM (MAT_177) → /MAT/LAW62 — constants branch (LCID = 0).
+
+    LS-DYNA cards (Manual Vol II R17 p.2-1216; the shipped Keyword971
+    mat_177.cfg CARD(...,LSDYNA_K,LSDYNA_N,LSD_MU,...) states the SAME
+    order — field 4 is N, field 5 is MU):
+      Card1: MID RO K N MU LCID FITTYPE LCSR
+      Card2 (iff LCID == 0): C1..C8    Card3 (iff LCID == 0): B1..B8
+      Card4 (optional, both branches): R M
+    LCID > 0 selects the curve-fit branch (FITTYPE test data), for which
+    /MAT/LAW62 has NO counterpart — LAW62 takes only constants (no Itab/fit
+    path, hm_read_mat62.F reads no function id at all). dyna2rad produces
+    NOTHING for that variant and wires the part's mat_ID to 0 silently
+    (CM:9746-9750 + 140-143); k2rad skips it too but says so LOUDLY. The
+    branch changes the CARD LAYOUT (no C/B cards), so the skip lives here at
+    parse — the same policy as the MAT_240 option variants.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_HILL_FOAM: empty material card — skipped")
+        return
+    mid     = to_int(f1[0])
+    rho     = to_float(f1[1]) if len(f1) > 1 else 0.0
+    kbulk   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    n       = to_float(f1[3]) if len(f1) > 3 else 0.0
+    mu      = to_float(f1[4]) if len(f1) > 4 else 0.0
+    lcid    = to_int(f1[5])   if len(f1) > 5 else 0
+    fittype = to_int(f1[6])   if len(f1) > 6 else 0
+    lcsr    = to_int(f1[7])   if len(f1) > 7 else 0
+    if lcid > 0:
+        state.warn(
+            f"*MAT_HILL_FOAM mid={mid}: LCID={lcid} selects the curve-fit "
+            f"branch (FITTYPE={fittype} test data), and /MAT/LAW62 has NO "
+            "curve-fit path — unlike LAW42/LAW69 there is no Itab or function "
+            "field anywhere on the card (hm_read_mat62.F reads constants "
+            "only), so the Hill-series fit LS-DYNA performs internally cannot "
+            "be delegated to the Radioss starter. dyna2rad emits NOTHING for "
+            "this variant and silently wires the part's mat_ID to 0 "
+            "(CM:9746-9750); k2rad also skips the material — every /PART "
+            "referencing it has no /MAT and the starter will reject the deck. "
+            "Run the fit in LS-DYNA once (the fitted C_i/B_i are echoed in "
+            "d3hsp), then re-state the card with LCID=0 and the constants.")
+        return
+    c: List[float] = []
+    b: List[float] = []
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    c = [to_float(f2[i]) if len(f2) > i else 0.0 for i in range(8)]
+    b = [to_float(f3[i]) if len(f3) > i else 0.0 for i in range(8)]
+    f4 = _card(raw, offset + 3, fixed=True, n=2, w=10)
+    r = to_float(f4[0]) if f4        else 0.0
+    m = to_float(f4[1]) if len(f4) > 1 else 0.0
+    state.mat_hill_foam[mid] = MatHillFoam(
+        mid, title, rho, kbulk, mu, n, lcid, fittype, lcsr, c, b, r, m)
+
+
+def handle_contact_interior(block: Block, state: ConversionState) -> None:
+    """*CONTACT_INTERIOR — a FREE_CELL_LIST of part-set ids, 8 per card,
+    ending at the next keyword; the keyword may appear more than once and the
+    ids accumulate. Resolution and the version-gated Icontrol mapping live in
+    writer/mesh.py::_resolve_contact_interior (*SET_PART_ADD ids arrive
+    pre-expanded by _flatten_part_set_adds)."""
+    offset = _title_offset(block)
+    for line in block.raw[offset:]:
+        for tok in parse_free(line):
+            v = to_int(tok)
+            if v > 0:
+                state.contact_interior_psids.append(v)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Hyperelastic rubber batch (MAT_007 / MAT_027 / MAT_077_O / MAT_077_H)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -7659,6 +8013,25 @@ HANDLERS = {
     "MAT_HONEYCOMB":                          handle_mat_honeycomb,
     "MAT_26":                                 handle_mat_honeycomb,
     "MAT_026":                                handle_mat_honeycomb,
+    # Foam batch: MAT_005 → LAW21 (P(mu) transform); MAT_073 → LAW90
+    # [+ /VISC/PRONY]; MAT_126 → LAW50 (+ /PROP/TYPE6); MAT_154 → LAW115;
+    # MAT_177 → LAW62 (LCID=0 constants branch; LCID>0 warn-skips at parse).
+    # *MAT_SOIL_AND_FOAM_FAILURE (MAT_014) is deliberately NOT routed here:
+    # dyna2rad maps it to law 14, which has no case in its dispatch switch and
+    # falls into the generic 1:1 dump — k2rad leaves it in skipped_keywords
+    # rather than silently converting away its failure semantics.
+    "MAT_SOIL_AND_FOAM":                      handle_mat_soil_and_foam,
+    "MAT_5":                                  handle_mat_soil_and_foam,
+    "MAT_005":                                handle_mat_soil_and_foam,
+    "MAT_LOW_DENSITY_VISCOUS_FOAM":           handle_mat_low_density_viscous_foam,
+    "MAT_73":                                 handle_mat_low_density_viscous_foam,
+    "MAT_073":                                handle_mat_low_density_viscous_foam,
+    "MAT_MODIFIED_HONEYCOMB":                 handle_mat_modified_honeycomb,
+    "MAT_126":                                handle_mat_modified_honeycomb,
+    "MAT_DESHPANDE_FLECK_FOAM":               handle_mat_deshpande_fleck_foam,
+    "MAT_154":                                handle_mat_deshpande_fleck_foam,
+    "MAT_HILL_FOAM":                          handle_mat_hill_foam,
+    "MAT_177":                                handle_mat_hill_foam,
     # Hyperelastic rubber batch: MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or
     # LAW69 (LCID); MAT_077_O → LAW42 (embedded Prony) or LAW69; MAT_077_H →
     # LAW95 + /VISC/PRONY or LAW69. Underscore spellings of the hyphenated
@@ -7762,6 +8135,7 @@ HANDLERS = {
     "SET_NODE":                               handle_set_node_list,
     "SET_PART_LIST":                          handle_set_part_list,
     "SET_PART":                               handle_set_part_list,
+    "SET_PART_ADD":                           handle_set_part_add,
     "SET_SHELL_LIST":                         handle_set_shell_list,
     "SET_SHELL":                              handle_set_shell_list,
     "SET_SOLID_LIST":                         handle_set_solid_list,
@@ -7887,6 +8261,10 @@ HANDLERS = {
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
     # Spot welds → /INTER/TYPE2 Spotflag=28 (the *_SPOTWELD_* spellings are
     # generated below — see _SPOTWELD_CONTACT_KEYWORDS)
+    # Interior (foam self-) contact → Icontrol on the solid /PROP, which the
+    # /BEGIN 2022 property format cannot carry (radioss2025-only column);
+    # parsed and resolved so the affected parts are NAMED in the warning.
+    "CONTACT_INTERIOR":                       handle_contact_interior,
 
     # Control
     "CONTROL_IMPLICIT_GENERAL":               handle_control_implicit_general,

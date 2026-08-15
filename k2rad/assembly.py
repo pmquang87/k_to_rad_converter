@@ -1384,6 +1384,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     "SET_NODE": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "n")])},
     "SET_PART_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "p")])},
     "SET_PART": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "p")])},
+    # *SET_PART_ADD data ids are part-SET ids (one nesting level), bucket "s".
+    "SET_PART_ADD": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "s")])},
+    # *CONTACT_INTERIOR is a bare free list of part-set ids (no header card).
+    "CONTACT_INTERIOR": {"data": (0, [(ALL, "s")])},
     "SET_SHELL_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_SHELL": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_SOLID_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
@@ -1491,6 +1495,28 @@ _OFFSET_SPECS: Dict[str, object] = {
                                 1: [(i, "f") for i in range(8)]}},
     "MAT_26": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
     "MAT_026": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
+    # Foam batch. MAT_005 card 2 field 3 is LCID. MAT_073 card 1 field 4 is
+    # LCID, card 2 field 5 is LCID2 (a curve id only when > 0; the -1
+    # frequency-data flag is negative and _rewrite_line leaves negative cells
+    # alone) — its conditional card-3 forms are NOT modelled, so an LCID2=-1
+    # deck's LCID3/LCID4 keep their original ids (same policy as the
+    # MAT_GURSON_RCDC card-5 note above). MAT_126 card 2 is the 7-curve+LCSR
+    # row exactly like MAT_026 (negative flag cells untouched); its
+    # conditional cards 6-8 hold no ids. MAT_154 has no curve references.
+    # MAT_177 card 1 fields 6/8 are LCID/LCSR.
+    "MAT_SOIL_AND_FOAM": _mat({1: [(2, "f")]}),
+    "MAT_5": _mat({1: [(2, "f")]}),
+    "MAT_005": _mat({1: [(2, "f")]}),
+    "MAT_LOW_DENSITY_VISCOUS_FOAM": _mat({0: [(3, "f")], 1: [(4, "f")]}),
+    "MAT_73": _mat({0: [(3, "f")], 1: [(4, "f")]}),
+    "MAT_073": _mat({0: [(3, "f")], 1: [(4, "f")]}),
+    "MAT_MODIFIED_HONEYCOMB": {"cards": {0: [(0, "m")],
+                                         1: [(i, "f") for i in range(8)]}},
+    "MAT_126": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
+    "MAT_DESHPANDE_FLECK_FOAM": _mat(),
+    "MAT_154": _mat(),
+    "MAT_HILL_FOAM": _mat({0: [(5, "f"), (7, "f")]}),
+    "MAT_177": _mat({0: [(5, "f"), (7, "f")]}),
     # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve
     # (blank in the constants path → no-op). MAT_077_O/_H card 2 is CONDITIONAL:
     # LCID1/LCID2 only exist when N>0 (with N=0 the same card holds MU4/MU6 or

@@ -2248,6 +2248,221 @@ class MatHoneycomb:
 
 
 @dataclass
+class MatSoilAndFoam:
+    """*MAT_SOIL_AND_FOAM (MAT_005) → /MAT/LAW21 (DPRAG).
+
+    LS-DYNA cards (mat_005.cfg Keyword971_R6.1):
+      Card1: MID RO G KUN A0 A1 A2 PC
+      Card2: VCR REF LCID
+      Card3-4: EPS1..EPS10   Card5-6: P1..P10
+    E and Nu are derived from G/KUN (dyna2rad CM:742-757); A0/A1/A2 transfer
+    coefficient-for-coefficient (identical yield surface phi = J2 - (a0 + a1*p
+    + a2*p^2)); PC → P_min verbatim (both are the negative tension cutoff).
+    The pressure curve (LCID preferred, else the EPS/P pairs) needs the
+    abscissa transform mu = exp(-EPS) - 1: LS-DYNA tabulates P against
+    EPS = ln(V/V0) (negative in compression), the LAW21 engine evaluates the
+    function at mu = rho/rho0 - 1 = V0/V - 1 (positive in compression,
+    mmain.F90:686-692) — resolved by the writer prepass.
+    """
+    mid: int
+    title: str
+    rho: float
+    g: float           # shear modulus → E/Nu via 9GK/(3K+G), (3K-2G)/(6K+2G)
+    kun: float         # bulk unloading modulus → B and Kt (KUN/100 for VCR=1)
+    a0: float          # yield coefficients, 1:1 → A0/A1/A2
+    a1: float
+    a2: float
+    pc: float          # tension cutoff pressure (< 0) → P_min verbatim
+    vcr: float         # 1.0 = no volumetric crushing → B = 0 (dyna2rad)
+    ref: float         # 1.0 = init from *INITIAL_FOAM_REFERENCE_GEOMETRY
+    lcid: int          # pressure vs volumetric strain curve (preferred source)
+    eps: List[float] = field(default_factory=list)   # up to 10 ln(V/V0) values
+    p: List[float] = field(default_factory=list)     # up to 10 pressures
+    func_id: int = 0   # resolved /FUNCT id of the transformed P(mu) curve
+    # Writer-resolved elastic constants (set by _resolve_mat_soil_and_foam so
+    # the clamp warning and the emitted values cannot drift apart):
+    e_res: float = 0.0     # E = 9GK/(3K+G)
+    nu_res: float = 0.0    # (3K-2G)/(6K+2G) clamped to [0, 0.495]
+
+
+@dataclass
+class MatLowDensityViscousFoam:
+    """*MAT_LOW_DENSITY_VISCOUS_FOAM (MAT_073) → /MAT/LAW90 [+ /VISC/PRONY].
+
+    LS-DYNA cards (mat_073.cfg Keyword971_R6.1):
+      Card1: MID RO E LCID TC HU BETA DAMP
+      Card2: SHAPE FAIL BVFLAG KCON LCID2 BSTART TRAMP NV
+      Card3a (iff LCID2 == 0, up to 6): Gi BETAi REF
+      Card3b (iff LCID2 == -1): LCID3 LCID4 SCALEW SCALEA
+      (LCID2 > 0: no card 3 at all — LS-DYNA least-squares fits Gi/BETAi
+       from the LCID2 relaxation curve; neither dyna2rad nor k2rad fits.)
+    E → E0, LCID → the single loading function, HU → Hys, SHAPE → Shape
+    (dyna2rad CM:4275-4338); the explicit Gi/BETAi pairs with BETAi > 0
+    become a /VISC/PRONY of the same id.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    lcid: int          # nominal stress vs strain loading curve → fct_IDL row 1
+    tc: float          # tension cutoff (LAW90 Tcut is radioss2026-only → warned)
+    hu: float          # hysteretic unloading factor → LAW90 Hys
+    beta: float        # HU decay constant (no LAW90 slot → warned)
+    damp: float        # viscous damping (dyna2rad moves it onto the prop → warned)
+    shape: float       # unloading shape factor → LAW90 Shape
+    fail: float        # tension behaviour flag (LAW90 FAIL is 2026-only → warned)
+    bvflag: float      # bulk-viscosity activation flag (dropped → warned)
+    kcon: float        # contact stiffness modulus (LAW90 Kcont is 2026-only)
+    lcid2: int         # 0 = explicit Gi/BETAi; >0 = fit branch; -1 = freq data
+    bstart: float      # fit-branch parameters (unsupported branch)
+    tramp: float
+    nv: int
+    prony: List[Tuple[float, float, float]] = field(default_factory=list)  # (Gi, BETAi, REF)
+    lcid3: int = 0     # LCID2 == -1 frequency-data branch (unsupported)
+    lcid4: int = 0
+    ref: float = 0.0   # 1.0 when any Gi card's REF flag is on (registry hook)
+
+
+@dataclass
+class MatModifiedHoneycomb:
+    """*MAT_MODIFIED_HONEYCOMB (MAT_126) → /MAT/LAW50 (VISC_HONEY) on a
+    synthesized orthotropic /PROP/TYPE6 (SOL_ORTH).
+
+    LS-DYNA cards (Manual Vol II R17 p.2-886; the Keyword971 cfg is behind it):
+      Card1: MID RO E PR SIGY VF MU BULK
+      Card2: LCA LCB LCC LCS LCAB LCBC LCCA LCSR
+      Card3: EAAU EBBU ECCU GABU GBCU GCAU AOPT MACF
+      Card4: XP YP ZP A1 A2 A3 RFAC PRU
+      Card5: D1 D2 D3 TSEF SSEF VREF TREF SHDFLG
+      Card6 (iff AOPT 3/4): V1 V2 V3
+      Card7 (iff LCSR == -1): LCSRA LCSRB LCSRC LCSRAB LCSRBC LCSRCA
+      Card8 (iff PRU == 2): PRUAB PRUAC PRUBC PRUBA PRUCA PRUCB
+    Slot order and fallbacks follow dyna2rad (CM:1744-1815 + 8923-9213); the
+    per-direction curve wiring, the V/V0-abscissa transform and the LCSR rate
+    sampling are resolved by the writer prepass into fun_ids/rates/scales.
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float           # compacted modulus → LAW50 compaction card (2025-only → warned)
+    nu: float
+    sigy: float        # compacted yield (2025-only compaction card → warned)
+    vf: float          # relative compaction volume (2025-only → warned)
+    mu: float          # viscosity coefficient (no LAW50 slot → warned)
+    bulk: float        # bulk viscosity flag (no LAW50 slot → warned)
+    lca: int           # < 0 selects the transversely isotropic yield surface
+    lcb: int
+    lcc: int
+    lcs: int
+    lcab: int
+    lcbc: int
+    lcca: int
+    lcsr: float        # > 0: rate-scale curve; -1: per-direction curve card
+    eaau: float        # uncompressed moduli (0 → E / E/2(1+PR) fallbacks)
+    ebbu: float
+    eccu: float        # < 0 activates the third yield surface (unsupported)
+    gabu: float
+    gbcu: float
+    gcau: float
+    aopt: float
+    macf: int
+    xp: float = 0.0    # AOPT geometry (same field names _composite_ref_axis reads)
+    yp: float = 0.0
+    zp: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    rfac: float = 0.0
+    pru: float = 0.0
+    d1: float = 0.0
+    d2: float = 0.0
+    d3: float = 0.0
+    tsef: float = 0.0  # tensile failure strain → Eps_max11/22/33 (< 0 = curve id, warned)
+    ssef: float = 0.0  # shear failure strain → Eps_max12/23/31 (< 0 = curve id, warned)
+    vref: float = 0.0
+    tref: float = 0.0
+    shdflg: float = 0.0
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    lcsr_dirs: List[float] = field(default_factory=list)   # LCSR == -1 card (dropped)
+    pru_ratios: List[float] = field(default_factory=list)  # PRU == 2 card (dropped)
+    # Writer-resolved wiring: base /FUNCT per LAW50 slot 11/22/33/12/23/31,
+    # the sampled (rate, scale) pairs, and the resolved moduli/flags.
+    fun_ids: List[int] = field(default_factory=list)
+    rates: List[float] = field(default_factory=list)
+    scales: List[float] = field(default_factory=list)
+    moduli: List[float] = field(default_factory=list)      # E11 E22 E33 G12 G23 G31
+    iflag1: int = -1
+    iflag2: int = -1
+
+
+@dataclass
+class MatDeshpandeFleckFoam:
+    """*MAT_DESHPANDE_FLECK_FOAM (MAT_154) → /MAT/LAW115 (DESHFLECK, Istat=0).
+
+    LS-DYNA cards (mat_154.cfg Keyword971_R6.1):
+      Card1: MID RHO E PR ALPHA GAMMA
+      Card2: EPSD ALPHA2 BETA SIGP DERFI CFAIL PFAIL NUM
+    The direct 1:1 counterpart: same flow law sigma_y = SIGP + GAMMA*(e/EPSD)
+    + ALPHA2*ln[1/(1-(e/EPSD)^BETA)], same parameter meanings. CFAIL →
+    EPSVP_F, PFAIL → SIGP_F (dyna2rad's cfg never parses PFAIL, so its
+    SIGP_F is silently always 0 — k2rad maps it). DERFI (0/1 numerical/
+    analytical derivative) is NOT the LAW115 Ires enumeration and is dropped;
+    NUM (sustained violation steps) has no counterpart (Radioss fails on the
+    first violation).
+    """
+    mid: int
+    title: str
+    rho: float
+    E: float
+    nu: float
+    alpha: float       # pressure-sensitivity shape parameter (0 <= a <= sqrt(4.5))
+    gamma: float       # linear hardening modulus
+    epsd: float        # densification strain
+    alpha2: float      # nonlinear hardening modulus
+    beta: float        # nonlinear hardening exponent
+    sigp: float        # initial flow stress
+    derfi: float       # derivative-evaluation flag (dropped → warned)
+    cfail: float       # tensile volumetric strain at failure → EPSVP_F
+    pfail: float       # max principal stress at failure → SIGP_F
+    num: int           # sustained-timestep count for PFAIL (dropped → warned)
+
+
+@dataclass
+class MatHillFoam:
+    """*MAT_HILL_FOAM (MAT_177) → /MAT/LAW62 (VISC_HYP), constants branch only.
+
+    LS-DYNA cards (Manual Vol II R17 p.2-1216, and the shipped Keyword971
+    mat_177.cfg agrees — field 4 is N, field 5 is MU):
+      Card1: MID RO K N MU LCID FITTYPE LCSR
+      Card2 (iff LCID == 0): C1..C8    Card3 (iff LCID == 0): B1..B8
+      Card4 (optional, both branches): R M
+    Hill → Ogden identity per pair: mu_i = Ci*Bi/2, alpha_i = Bi (index-
+    aligned — dyna2rad compacts the C and B lists independently and misreads
+    B out of range when a Ci is zero mid-list); Nu = N/(1+2N). LCID > 0 (the
+    curve-fit branch) has no LAW62 counterpart (LAW62 has no Itab/fit path)
+    and is warn-skipped at parse.
+    """
+    mid: int
+    title: str
+    rho: float
+    k: float           # bulk modulus, card field 3 (LAW62 derives bulk from Nu)
+    mu: float          # damping coefficient, card field 5 (no LAW62 slot)
+    n: float           # Poisson-like exponent, card field 4 → Nu = N/(1+2N)
+    lcid: int
+    fittype: int
+    lcsr: int          # transverse-stretch curve (no LAW62 slot → warned)
+    c: List[float] = field(default_factory=list)   # C1..C8
+    b: List[float] = field(default_factory=list)   # B1..B8
+    r: float = 0.0     # Mullins-effect card (no LAW62 slot → warned)
+    m: float = 0.0
+    # Writer-resolved Ogden pairs (index-aligned over the nonzero-C slots):
+    mu_i: List[float] = field(default_factory=list)      # C_i*B_i/2
+    alpha_i: List[float] = field(default_factory=list)   # B_i
+
+
+@dataclass
 class MatBlatzKo:
     """*MAT_BLATZ-KO_RUBBER (MAT_007) → /MAT/LAW42 fixed form (dyna2rad case 7:
     Mu_1 = G, alpha_1 = 2, Nu = 0.463 — the Blatz-Ko Poisson value LS-DYNA
@@ -3420,6 +3635,20 @@ class ConversionState:
     mat_low_density_foam: Dict[int, MatLowDensityFoam] = field(default_factory=dict)  # MAT_057 → /MAT/LAW38
     mat_fu_chang_foam: Dict[int, MatFuChangFoam] = field(default_factory=dict)        # MAT_083 → /MAT/LAW70
     mat_honeycomb: Dict[int, MatHoneycomb] = field(default_factory=dict)              # MAT_026 → /MAT/LAW28
+    # Foam batch (dyna2rad targets):
+    #   MAT_005 → /MAT/LAW21 (DPRAG) with the P(mu) abscissa transform
+    #   MAT_073 → /MAT/LAW90 + /VISC/PRONY (explicit Gi/BETAi branch only)
+    #   MAT_126 → /MAT/LAW50 on a synthesized /PROP/TYPE6 (SOL_ORTH)
+    #   MAT_154 → /MAT/LAW115 (DESHFLECK, deterministic Istat=0 card)
+    #   MAT_177 → /MAT/LAW62 (constants branch; LCID>0 fit branch warn-skips)
+    mat_soil_and_foam: Dict[int, MatSoilAndFoam] = field(default_factory=dict)
+    mat_low_density_viscous_foam: Dict[int, MatLowDensityViscousFoam] = \
+        field(default_factory=dict)
+    mat_modified_honeycomb: Dict[int, MatModifiedHoneycomb] = \
+        field(default_factory=dict)
+    mat_deshpande_fleck: Dict[int, MatDeshpandeFleckFoam] = \
+        field(default_factory=dict)
+    mat_hill_foam: Dict[int, MatHillFoam] = field(default_factory=dict)
     # Hyperelastic rubber batch (dyna2rad targets):
     #   MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or LAW69; MAT_077_O → LAW42
     #   (embedded Prony) or LAW69; MAT_077_H → LAW95 (+/VISC/PRONY) or LAW69
@@ -3563,6 +3792,18 @@ class ConversionState:
     # ── Sets / groups ──────────────────────────────────────────
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
     part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
+    # *SET_PART_ADD: psid → (title, [child part-set ids]) — one level of
+    # part-set nesting (dyna2rad CC:692-727: an "ADD" set's ids are part-SET
+    # ids). Expanded ONCE post-parse by _flatten_part_set_adds (writer/mesh.py)
+    # into a plain part_sets entry, so every part-set consumer resolves it.
+    part_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    part_set_adds_flattened: bool = False    # _flatten_part_set_adds ran
+    # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
+    # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
+    # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined
+    # compression+shear) — none has an Icontrol counterpart, warned when set.
+    part_set_attrs: Dict[int, Tuple[float, float, float, float]] = \
+        field(default_factory=dict)
     # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
     segment_sets: Dict[int, SegmentSet] = field(default_factory=dict)           # sid → SegmentSet
     # *SET_SHELL/_SOLID/_BEAM element sets: sid → (title, [eids]).
@@ -3678,6 +3919,14 @@ class ConversionState:
     force_transducers: List[ContactForceTransducer] = field(default_factory=list)
     # (sub_id, title) for each emitted /INTER/SUB → used to build /TH/SUBS
     th_sub_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # *CONTACT_INTERIOR part-set ids, in deck order (the keyword is a free
+    # PSID list and may appear more than once). The natural Radioss target is
+    # Icontrol=1 on the parts' solid /PROP — a radioss2025-only input column
+    # that a /BEGIN 2022 deck cannot carry (measured: the starter reads the
+    # trailing prop card as "Ndir sphpartID" only, echoes ICONTROL 0 and
+    # raises WARNING 100213) — so the writer prepass resolves the sets and
+    # warns instead of emitting; see writer/mesh.py::_resolve_contact_interior.
+    contact_interior_psids: List[int] = field(default_factory=list)
 
     # ── Control ────────────────────────────────────────────────
     ctrl_accuracy: Optional[ControlAccuracy] = None
@@ -3825,7 +4074,10 @@ class ConversionState:
                   self.mat_johnson_cook, self.mat_aniso_visco, self.mat_rigid,
                   self.mat_null, self.mat_power_law, self.mat_samp,
                   self.mat_crushable_foam, self.mat_low_density_foam,
-                  self.mat_fu_chang_foam, self.mat_honeycomb, self.mat_blatz_ko,
+                  self.mat_fu_chang_foam, self.mat_honeycomb,
+                  self.mat_soil_and_foam, self.mat_low_density_viscous_foam,
+                  self.mat_modified_honeycomb, self.mat_deshpande_fleck,
+                  self.mat_hill_foam, self.mat_blatz_ko,
                   self.mat_mooney_rivlin, self.mat_ogden, self.mat_hyper_rubber,
                   self.mat_high_explosive, self.mat_spotweld,
                   self.mat_orthotropic, self.mat_enhanced_composite,

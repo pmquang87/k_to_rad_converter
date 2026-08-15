@@ -479,6 +479,16 @@ def _ref_flag_materials(state: ConversionState):
         ("*MAT_HYPERELASTIC_RUBBER", state.mat_hyper_rubber),    # 077_H
         ("*MAT_SIMPLIFIED_RUBBER/FOAM", state.mat_simplified_rubber),
         ("*MAT_SOFT_TISSUE", state.mat_soft_tissue),             # 091/092
+        # Foam batch. MAT_005 card 2 carries REF directly (p.2-179). MAT_073
+        # has no card-level REF: each optional Gi/BETAi card ends in a REF
+        # flag, folded to mat.ref = 1.0 when any term sets it (p.2-547).
+        # Only MAT_073's LAW90 target is on the starter's solid-/XREF law
+        # whitelist; a REF=1 MAT_005 additionally draws the off-whitelist
+        # warn-skip from _resolve_xref_parts (LAW21, ERROR 2014).
+        # MAT_126/154/177 carry no REF flag at all.
+        ("*MAT_SOIL_AND_FOAM", state.mat_soil_and_foam),         # 005
+        ("*MAT_LOW_DENSITY_VISCOUS_FOAM",
+         state.mat_low_density_viscous_foam),                    # 073
     )
 
 
