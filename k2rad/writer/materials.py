@@ -581,6 +581,9 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
     # An *EOS_* consumed by a *MAT_JOHNSON_COOK /MAT/LAW4 route is emitted
     # there (rebound to the mat id) — not as a standalone LAW6-carrier fluid.
     jc_consumed = _jc_consumed_eos_ids(state)
+    # ... and the ids the impact/blast batch already owns, which the shared-id
+    # carrier convention below must not claim a second time (ERROR 79).
+    impact_claimed = _impact_claimed_mids(state)
     # JWL high explosives: *MAT_HIGH_EXPLOSIVE_BURN + *EOS_JWL → /MAT/LAW5
     for mid, heb in sorted(state.mat_high_explosive.items()):
         lines += _emit_mat_law5(state, heb, state.eos_jwl.get(mid))
@@ -623,6 +626,35 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                             if ids[0] == eosid)
         if not null_mids:
             if eosid in jc_consumed:
+                continue
+            if eosid in impact_claimed:
+                # The id belongs to a /MAT/LAW79, /MAT/LAW126 or the /MAT/LAW6
+                # of a *MAT_ELASTIC_FLUID; emitting the shared-id carrier here
+                # would be a second /MAT of that id (starter ERROR 79).
+                owner = ("*MAT_JOHNSON_HOLMQUIST_CERAMICS -> /MAT/LAW79"
+                         if eosid in state.mat_jh_ceramics else
+                         "*MAT_JOHNSON_HOLMQUIST_CONCRETE -> /MAT/LAW126"
+                         if eosid in state.mat_jh_concrete else
+                         "*MAT_ELASTIC_FLUID -> /MAT/LAW6")
+                if eosid in state.mat_elastic_fluid:
+                    why = ("that material already emits its OWN "
+                           f"/EOS/POLYNOMIAL/{eosid} built from the card's "
+                           "bulk modulus K, which IS the fluid's pressure law")
+                else:
+                    why = ("that law computes pressure from its own K1/K2/K3 "
+                           "polynomial and declares no EOS class, so it "
+                           "neither needs nor accepts a companion /EOS")
+                state.warn(
+                    f"*EOS_{eos.kind} {eosid}: id {eosid} is already held by "
+                    f"a {owner}, and {why}. The equation of state was NOT "
+                    "emitted and no /MAT/LAW6 carrier was created — doing "
+                    "either would put a SECOND /MAT (or /EOS) under id "
+                    f"{eosid} and the starter would stop with ERROR 79 "
+                    "(DUPLICATE ID). Note k2rad's shared-id pairing is a "
+                    "convenience convention: in LS-DYNA an *EOS_* binds only "
+                    "through the *PART EOSID field, so a material that does "
+                    "not name this EOS has no EOS at all. Renumber the "
+                    "*EOS_* if it was meant for a different material.")
                 continue
             rho = eos.params.get("rho0", 0.0)
             if rho <= 0.0:
@@ -837,6 +869,31 @@ def _jc_consumed_eos_ids(state: ConversionState) -> set:
     the LAW4, rebound to the mat id — not as standalone LAW6-carrier fluids)."""
     return {m.eos_id for m in state.mat_johnson_cook.values()
             if m.use_law4 and m.eos_id}
+
+
+def _impact_claimed_mids(state: ConversionState) -> set:
+    """Material ids already OWNED by the impact/blast batch.
+
+    k2rad's shared-id convention — "an *EOS_* whose id matches a material's is
+    that material's equation of state" — is a convenience k2rad adds on top of
+    LS-DYNA, where an *EOS_* binds ONLY through the *PART EOSID field. The
+    standalone-fluid branch of ``_make_explosive_and_eos_materials`` acts on
+    that convention by emitting a /MAT/LAW6 CARRIER under the EOS id whenever
+    no *MAT_NULL claims it — and it walks ``state.mat_null`` only, so it cannot
+    see that one of these three families already holds the id. Without this
+    guard a deck carrying both ``*MAT_110`` id 110 and an ``*EOS_*`` id 110
+    emits ``/MAT/LAW79/110`` AND ``/MAT/HYD_VISC/110``: starter ERROR 79,
+    DUPLICATE ID. (Measured, not theorised.)
+
+    Both Johnson-Holmquist laws compute pressure from their own K1/K2/K3
+    polynomial and LAW6 is not a legal carrier for them anyway; the fluid
+    already emits its OWN /EOS/POLYNOMIAL under its mid, so a second one would
+    duplicate that too. In every case the material owns the id and the
+    convenience convention must stand down. Same shape as the MAT_015 hijack
+    guard in ``_resolve_mat_johnson_cook`` (PR #73), for the same reason.
+    """
+    return (set(state.mat_jh_ceramics) | set(state.mat_jh_concrete)
+            | set(state.mat_elastic_fluid))
 
 
 def _emit_mat_johnson_cook(mat: MatJohnsonCook,

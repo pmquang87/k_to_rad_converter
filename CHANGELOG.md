@@ -11,6 +11,284 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Impact / blast materials batch** (`*MAT_JOHNSON_HOLMQUIST_CERAMICS` 110,
+  `*MAT_JOHNSON_HOLMQUIST_CONCRETE` 111, `*MAT_ELASTIC_FLUID` 001+`_FLUID`) —
+  the roadmap P1 "Impact/blast mats" item. All were `SKIPPED` before. Numeric
+  aliases `MAT_110`/`MAT_111` registered, plus three spellings dyna2rad lacks:
+  `MAT_001_FLUID` and `MAT_1_FLUID` (its `dynamatlawkeywordmap.h` has
+  `*MAT_ELASTIC_FLUID` but not the numeric form, so there the keyword misses
+  the map, falls into the broken `Convert1To1` fallback and produces **no
+  `/MAT` at all** — part wired to `mat_ID=0`, starter `ERROR 3046`; its own
+  `convertprops.cxx:331` does test both spellings, so the omission is an
+  inconsistency, not intent) and the bare `MAT_001`/`MAT_1`, which k2rad
+  previously dropped into `skipped_keywords`, leaving every referencing
+  `/PART` without a material. `*INCLUDE_TRANSFORM` offset specs for every
+  spelling — MID only, since every other cell on all three cards is a physical
+  constant (no curve, table or set id anywhere in this family).
+
+  **The batch's defining property: NOTHING is normalized on conversion.** Both
+  Johnson-Holmquist laws state their strength surfaces in the same normalized
+  form on both sides, and the Radioss starter/engine re-derive every
+  normalizer with the identical definitions LS-DYNA uses — JH-2's
+  `sigma_HEL = 1.5*(HEL-PHEL)` and `T* = T/PHEL` at `hm_read_mat79.F:211-213`,
+  `P* = P/PHEL` and `sigma* = sigma_vm/sigma_HEL` at `sigeps79.F:153,190`;
+  JHC's `P* = P/FC`, `sigma* = sigma_vm/FC`, `T* = T/FC` and the
+  `sigy = fc*sigy` de-normalization at `sigeps126.F90:264,305,338,383`. So
+  `A B C M N SFMAX EFMIN D1 D2 MUC MUL` pass through as the dimensionless
+  numbers they are, and `HEL PHEL T FC PC PL G K1 K2 K3` as physical stresses.
+  Pre-dividing `T` by PHEL/FC, or writing `sigma_HEL` into a stress slot,
+  would apply the normalization TWICE and silently soften the material — this
+  is the classic trap of the family and the reason dyna2rad copies all 18/21
+  fields verbatim. `K1/K2/K3` are each law's OWN polynomial pressure law
+  (`sigeps79.F:143-147`, LAW126 `uparam(14..16)`), so **no `/EOS` is emitted
+  for either** — LAW126's `HYDRO_EOS` class tag is a pressure-treatment
+  capability, not a request for a companion block, and an `/EOS` sharing the
+  material id would be starter `ERROR 79`.
+
+  - **`*MAT_JOHNSON_HOLMQUIST_CERAMICS` (110) → `/MAT/LAW79` (`JOHN_HOLM`)**
+    (dyna2rad `p_ConvertMatL110`, CM:12491-12506 — 18 verbatim copies and
+    nothing else; layout audited against `radioss120/MAT/matl79_79.cfg`
+    `FORMAT(radioss120):207-236`, the newest LAW79 block a `/BEGIN 2022` deck
+    reads — LAW79 is registered natively at 2022
+    (`radioss2022/data_hierarchy.cfg:1301-1307`) so there is **no** version
+    warning, and the layout is identical to the worked Al2O3 example in the
+    Altair Radioss 2022 Reference Guide p.634). Card 1 is written with ONE
+    density field: the CFG runs `CARD_PREREAD("%20s")` on cols 21-40 and any
+    non-blank there switches it to the two-field `rho_i`/`rho_0` form. Two
+    field-order traps handled: `*MAT_110` card 1 runs `… C M N` (M at field 7,
+    N at field 8) while LAW79 card 3 runs `a b m n` with `c` moving to card 4,
+    and `BETA` moves from LS-DYNA card 2 to the END of LAW79 card 7. Note
+    `MAT_E`/`MAT_EPS` are the cfg SKeywords of the **HEL** and **PHEL** slots —
+    legacy generic attribute names, not Young's modulus and strain.
+
+    **`FS` is NOT EXPRESSIBLE at `/BEGIN 2022` and is warn-dropped.** LAW79's
+    `IDEL`/`EPSMAX` live on the `FORMAT(radioss2023)` card 8 only; the
+    `FORMAT(radioss120)` block a 2022 deck reads ends at `D1`/`D2`, and
+    `Fcut` (card 4 field 4) is likewise 2023+. Emitting them anyway would draw
+    `WARNING 100213` for fields the starter then discards, so the cards stop
+    where the reader does and the criterion is reported instead — naming what
+    it meant (`FS>0` → `IDEL=2` with `EPSMAX=FS`; `FS<0` → `IDEL=1`, deletion
+    in tension, per `hm_read_mat79.F:275-280`), the `*MAT_ADD_EROSION` remedy
+    (a `/FAIL` card, version-independent), the `/BEGIN 2023` alternative, and
+    the fact that the tensile pressure cutoff `PMIN = -T*.PHEL.(1-D)` IS still
+    applied at `IDEL=0` (`sigeps79.F:149-151`), so only element DELETION is
+    lost. `FS=0` needs no warning: it is "no failure" in LS-DYNA and `IDEL=0`
+    "no deletion" in Radioss — the default on both sides. dyna2rad drops
+    MAT_110's `FS` **silently at every format version**, though the same
+    converter implements the flag for MAT_111.
+
+    **Note a defect in the reference material, recorded here because it is the
+    kind that propagates:** the dyna2rad-semantics write-up's own
+    reimplementation checklist proposes reusing MAT_111's three-way rule for
+    MAT_110 (`FS<0 → IDEL 3`, `FS=0 → IDEL 1`). That is wrong for this law —
+    both the LS-DYNA `FS` meanings and the Radioss `IDEL` enumerations differ
+    between 110 and 111 (MAT_110 `FS<0` is "fail if p*+t* < 0" → LAW79 `IDEL 1`
+    "tension only", and MAT_110 `FS=0` is "no failure" → `IDEL 0`, whereas
+    MAT_111 `FS<0` is "damage strength < 0" → LAW126 `IDEL 3` "SIGY ≤ 0" and
+    its `FS=0` is the tensile default → `IDEL 1`). Moot in the emitted deck
+    since neither field is writable at 2022, but the warning states the
+    semantically correct mapping and `tests/test_impact_mats.py` pins both
+    rules against each other so a later `/BEGIN` bump cannot transplant one
+    onto the other.
+
+    Guards the starter does not have, all warned: **`PHEL ≤ 0`** — LAW79's
+    ONLY PHEL check is `PHEL > HEL` (`ERROR 907`), so a zero passes with 0
+    errors and 0 warnings and then makes `T* = TMAX/0` = Inf, poisoning every
+    stress evaluation. **`EPS0 ≤ 0` with `C ≠ 0`** is FATAL (`ERROR 910`) and
+    a dyna2rad-converted deck walks straight into it; k2rad substitutes
+    `EPS0 = 1.0`, the same value the starter itself uses when `C == 0`
+    (`hm_read_mat79.F:159`), so the deck runs — the LS-DYNA card is equally
+    undefined at `EPS0 = 0`. `C == 0` with a zero `EPS0` is left alone (the
+    starter fixes it and 910 never fires). `G ≤ 0` (`ERROR 908`), `K1 ≤ 0`
+    (`ERROR 909`), `BETA` outside `[0,1]` (`ERROR 911`) and `PHEL > HEL`
+    (`ERROR 907`) are reported with their ids.
+
+  - **`*MAT_JOHNSON_HOLMQUIST_CONCRETE` (111) → `/MAT/LAW126`** (dyna2rad
+    `p_ConvertMatL111`, CM:5639-5674; layout audited against
+    `radioss2024/MAT/matl126_johnson_holmquist_concrete.cfg`
+    `FORMAT(radioss2024):189-202` — the OLDEST block that exists for this law,
+    so a `/BEGIN 2022` deck falls forward into it, including card 7's
+    `%20lg%20lg%10s%10d%20lg` shape where `IDEL` is a 10-char INTEGER at cols
+    51-60 after a 10-char blank run). Card 1 takes EXACTLY one density field —
+    unlike LAW79 there is no `CARD_PREREAD` and no `Refer_Rho` attribute, so a
+    second field is `WARNING 100213`. `*MAT_111` card 1 field 7/8 are `N` then
+    `FC` where 110 has `M` then `N`, and LS-DYNA `UC`/`UL` are Radioss
+    `MUC`/`MUL`. **Not LAW24 (`CONC`)** — that is Radioss's own smeared-crack
+    concrete with a completely different card set.
+
+    **`FS` → `IDEL`/`EPS_MAX` DOES work at 2022** (the fields are in the 2024
+    format): `FS>0 → IDEL=2` + `EPS_MAX=FS`; `FS=0 → IDEL=1` (tensile
+    `P*+T* ≤ 0` — LS-DYNA's default for THIS law, and writing it explicitly is
+    required because LAW126's own blank default `IDEL=0` means no deletion);
+    `FS<0 → IDEL=3` (`SIGY ≤ 0`). `EPS_MAX` carries `FS` verbatim including
+    the meaningless negative value at `IDEL=3`, exactly as dyna2rad does — it
+    is inert there (only `IDEL=2` reads it) and keeps the source value visible.
+
+    **`WARNING 100211` is expected and warned about**: LAW126 is first
+    registered in the radioss2024 profile (`radioss2022/data_hierarchy.cfg`
+    has no LAW126 entry at all), so a 2022 deck draws one cosmetic
+    "Unsupported option … in format < 2024" and is then parsed with the 2024
+    FORMAT — the same trade-off `/MAT/LAW169` and `/MAT/LAW127` already ship
+    under. Reported once per material so the starter listing does not read as
+    a conversion defect. Real consequence of the gate: `IFAILSO` (post-failure
+    stress handling) is a radioss2025 field, unreachable at 2022 and pinned to
+    its clamped default 1 — dyna2rad never sets it either, so nothing is lost
+    relative to that converter. `FCUT` is written blank (no rate filter) and
+    the radioss2026 `CT/POWT/CC/POWC` card is not emitted.
+
+    `hm_read_mat126.F90` contains **no ANCMSG check at all** — unlike LAW79,
+    `G ≤ 0`, `K1 ≤ 0` and `EPS0 ≤ 0` all pass silently — so every diagnostic
+    for this law comes from the converter. The two compaction divisions
+    `k0 = PC/MUC` (`:140`) and `h = (PL-PC)/MUL` (`:146`) have **no zero
+    guard**: `UC=0` yields an infinite region-1 bulk modulus and a NaN Young's
+    modulus and Poisson ratio while the starter reports *0 ERROR / 0 WARNING*
+    — a silent NaN, warned as such, and `UL=0` likewise. `EPS0 ≤ 0` with
+    `C ≠ 0` is substituted with 1.0 (the starter's own `if (cc==zero) eps0=one`
+    default) rather than left to evaluate `C*log(eps_dot/0)` every cycle.
+    `G`, `K1` and `FC` at ≤ 0 are warned naming that the starter checks
+    nothing — `FC` in particular is the JHC normalizer, so a zero makes the
+    entire yield surface Inf/NaN. The derived Poisson ratio
+    `(3*k0-2G)/(6*k0+2G)` is checked against `[0, 0.5)` and warned when a
+    too-soft `PC/UC` pair against `G` drives it negative, which the starter
+    prints without complaint.
+
+  - **`*MAT_ELASTIC` `_FLUID` option (001) → `/MAT/HYD_VISC` (LAW6) +
+    `/EOS/POLYNOMIAL` of the same id** (dyna2rad `p_ConvertMatL1_FLUID`,
+    CM:12093-12136; LAW6 layout audited against `radioss2020/MAT/mat_law6.cfg`
+    `FORMAT(radioss2018):318-326`, the newest LAW6 block a `/BEGIN 2022` deck
+    reads, and the EOS against `radioss2022/MAT/mat_EOS.cfg`
+    `FORMAT(radioss2022)`). The option is a SUBSTRING test on the keyword,
+    exactly as both dyna2rad (`sourceCard.find("FLUID")`) and the LS-DYNA
+    reader (`ASSIGN(MAT_OPTION,_FIND(TYPE,"_FLUID"),IMPORT)`) define it, so
+    `*MAT_ELASTIC_FLUID_TITLE` is handled — the same one-handler-one-flag
+    shape as MAT_224's `_LOG_INTERPOLATION`.
+
+    **Kept in its own container, so the plain `*MAT_ELASTIC` path is
+    byte-for-byte untouched**: `/MAT/ELAST`, its LAW1 entry in
+    `_target_mat_law` and therefore its place on the starter's solid-`/XREF`
+    law whitelist are unchanged, and no existing deck's `/XREF` decisions can
+    move. (Asserted directly in `TestMat001BaseVsFluidSplit`, including that a
+    card-1 `K` field on a non-FLUID `*MAT_ELASTIC` still does nothing.)
+
+    **The `/EOS` is mandatory, not optional**: a 2-card LAW6 with no `/EOS`
+    passes the starter with 0 errors and 0 warnings but leaves `IEOS = 0` and
+    `PM(32) = C1 = 0`, i.e. zero bulk modulus and zero sound speed. The modern
+    2-card form is emitted rather than the legacy embedded-EOS form (which is
+    gated on the trailing free-card COUNT, `hm_read_mat06.F:105,113-116`,
+    needs exactly 3 or exactly 0 trailing cards, and binds `Pmin` twice with
+    the later value winning). `/EOS/POLYNOMIAL` is used where dyna2rad writes
+    `/EOS/LINEAR`: the two express the same law — `P = C0 + C1*mu` with
+    `C0 = 0` IS the linear form, and the 2022 Reference Guide p.1060 Comment 3
+    confirms `C2`/`C3` are simply not evaluated for a linear volumetric
+    material — but POLYNOMIAL is native to the radioss2022 profile this
+    converter targets and is the block k2rad already emits for
+    `*EOS_LINEAR_POLYNOMIAL`.
+
+    `K` is card-1 field 7 (**not** a second card — the FLUID-only card 2
+    carries only `VC` and `CP`) and becomes `C1`, with
+    `C0 = C2 = C3 = C4 = C5 = E0 = Psh = 0`. **The `K == 0` fallback uses the
+    REAL Poisson ratio**, `K = E/(3(1-2*PR))` — the relation the LS-DYNA
+    manual itself states for this option (Vol II R16 p.2-148, Remark 5).
+    dyna2rad's expression spells the token `NU` where the `mat_001.cfg`
+    attribute is `Nu` (solver name `PR`), identifier lookup is case-sensitive,
+    and an unresolved token silently becomes `"0"`
+    (`convertutilsbase.cxx:192`), so it computes `E/3` and loses Poisson's
+    ratio entirely — measured on a live starter as `BULK MODULUS = 1.0e9`
+    where `E=3e9, PR=0.25` should give `2.0e9`. `K < 0` matches NEITHER of its
+    two branches and leaves `B = 0`, a fluid with zero sound speed, silently;
+    k2rad falls back to the same E/PR relation and warns. `PR ≥ 0.5` makes the
+    fallback unusable and is warned naming the inert-fluid consequence.
+
+    **`VC` is DROPPED, not copied.** LS-DYNA's `VC` is a **dimensionless**
+    tensor-viscosity coefficient scaling an artificial deviatoric stress
+    `S'ij = VC*dL*a*rho*edot'ij` (dL the characteristic element length, a the
+    bulk sound speed); the Radioss slot it lands in is `DAMP1`, a **true
+    kinematic viscosity** with `DIMENSION="eddyviscosity"` (L²/T) entering as
+    `sigma_dev = 2*rho*nu*edot_dev`. The factor `dL*a` between them is
+    per-element and not knowable at material-conversion time, so dyna2rad's
+    verbatim copy is wrong by orders of magnitude on any real mesh. k2rad
+    writes `Nu = 0` and carries the hand-conversion recipe in the warning with
+    `a = sqrt(K/rho)` already evaluated (`nu ≈ VC*dL*a = <number>*dL`). A zero
+    `VC` needs no warning.
+
+    **`CP` → `Pmin` with the sign flipped, but only when it is a real limit.**
+    LS-DYNA's documented `CP` default is `1e20` = "no cavitation"
+    (`mat_001.cfg:52`), and Radioss reads `Pmin = 0` as the sentinel for no
+    cut-off (`hm_read_mat06.F:154  IF (PMIN == ZERO) PMIN = -INFINITY`), so an
+    absent card 2, a blank `CP` cell and a defaulted `1e20` all map to `0` —
+    **not** to `-1e20`. A finite `CP` becomes `-CP`; a negative one is
+    sign-corrected and warned. An **explicit** `CP = 0.0` ("cavitate at zero
+    pressure") is the one semantic the Radioss card cannot state and is
+    reported as inexpressible with the small-negative-`Pmin` remedy — the
+    handler tracks cell blankness (`cp_given`) precisely so blank and explicit
+    zero can be told apart, which dyna2rad cannot do. `E`/`PR` are otherwise
+    dropped (LS-DYNA ignores them under FLUID and zeroes the shear modulus;
+    LAW6 has no shear slot at all, so the pure-hydrodynamic response is exact
+    rather than approximated) and `DA`/`DB` are beam-only damping.
+
+  - **Solid-only enforcement, `_target_mat_law`, beam and REF classification.**
+    None of LAW79 / LAW126 / LAW6 declares any `SHELL_*` class, so a shell
+    part on any of them is starter `ERROR 3046` — warned per the PR #110
+    pattern (keyword + mid + the offending pids + the exact declared class
+    list + the reader file:line + the error id + a remedy), from a
+    `_shell_parts_by_mid` map built ONCE per conversion. dyna2rad checks none
+    of the three: its converters never look at the element type at all.
+    `_target_mat_law` gains all three families (79 / 126 / 6); none is on
+    `_XREF_SOLID_LAWS`, so `inistate._resolve_xref_parts` warn-skips such
+    parts NAMING the law instead of misreporting "no `/MAT` at all". Neither
+    beam frozenset changes — no `BEAM_*` keyword on any of them, so
+    `PROP_BEAM` stays 0 and the existing "no beam keyword at all" message is
+    already right; the `INIT_MAT_KEYWORD` grep audit is recorded in
+    `writer/mesh.py` alongside the earlier batches, including the finding that
+    **LAW6 declares `SOLID_POROUS`, not `SOLID_ISOTROPIC`** — both include
+    `/PROP/TYPE14` so an ordinary solid part is fine, but LAW6 is NOT
+    compatible with the orthotropic/composite solid properties TYPE 6/20/21/22
+    (`ERROR 3047`) the way LAW79/LAW126 are. No `_ref_flag_materials` entries:
+    none of `*MAT_110`, `*MAT_111` or `*MAT_ELASTIC(_FLUID)` carries a REF
+    flag on any card — recorded in `writer/common.py` so the next batch does
+    not re-derive it.
+
+  **Corpus census + sweep**, `master` (b762de2) vs this branch. Census first:
+  `*MAT_110` / `*MAT_JOHNSON_HOLMQUIST_CERAMICS` and `*MAT_111` /
+  `*MAT_JOHNSON_HOLMQUIST_CONCRETE` have **zero hits anywhere** — not in the
+  repo's `.k`/`.key`/`.dyn` decks, not in the 127-deck
+  `E:\openradioss_run\Ryan_Lee_Examples` tree, not under `E:\foxcore_data\`.
+  `*MAT_ELASTIC_FLUID` appears in exactly one deck,
+  `Ryan_Lee_Examples/W11_SETUP_SPH_BirdStrike_Multi.k` (plus three
+  unit-converted copies of the same deck on `E:`), as
+  `*MAT_ELASTIC_FLUID_TITLE` "Head" with ρ=2600, E=8.5e8, ν=0.24, K=2.2e9,
+  VC=0.0, CP=1.0e20 — a real bird-strike "bird as fluid" material, and the
+  source of this batch's realistic field values. `*MAT_001`/`*MAT_1` have zero
+  hits, so registering those aliases moves nothing.
+
+  The sweep is therefore a near-pure no-movement check, and it is: every deck
+  is byte-identical on `_0000.rad` and `_0001.rad` with identical warning sets
+  and skip lists, **except the four W11 copies**, which change for exactly the
+  intended reason — `MAT_ELASTIC_FLUID` leaves `skipped_keywords` and a
+  `/MAT/HYD_VISC/3` + `/EOS/POLYNOMIAL/3` pair appears where PART 8's material
+  previously dangled. That deck is a card-source, not an end-to-end validation
+  case: its MID 3 sits on PART 8 → SECID 2 = `*SECTION_SPH`, and k2rad has no
+  SPH path at all, so the part still has no property and the deck still cannot
+  run. **What this corpus cannot see**: anything about the new cards
+  themselves. That evidence is the column-exact tests plus the starter probes
+  the card layouts were audited against — `/BEGIN` 2022/2023/2024/2025/2026
+  round-trips that measured which fields each version actually reads (LAW79
+  `Fcut`/`IDEL`/`EPSMAX` dropped with `WARNING 100213` below 2023; LAW126 read
+  at 2022 under `WARNING 100211`; LAW126 `IFAILSO` dropped below 2025) and
+  field-by-field `.out` echoes for the SI values used throughout the tests
+  (LAW79: derived `E = 219991445311.7`, `nu = 0.22000579…` from `K1`/`G`;
+  LAW126: `IDEL = 2`, `EPS_MAX = 0.30`, `IFAILSO = 1`, `K0 = PC/MUC = 16e9`;
+  LAW6: `VISCOSITY 0.1`, `PRESSURE CUTOFF −1000000`, `BULK MODULUS 2.2e9`).
+  Suite 2185 → **2289 passed**, 2 skipped, 544 → **593 subtests**; 104 new
+  column-exact tests in `tests/test_impact_mats.py`, every physics constant
+  recomputed by hand — `sigma_HEL = 1.5*(19e9-1.46e9) = 2.631e10` and
+  `T* = 0.2e9/1.46e9 = 0.1369863` asserted **absent** from every emitted field,
+  `T*/FC = 1/12` likewise, `E = 9*K1*G/(3*K1+G)` and
+  `nu = (3*K1-2G)/(6*K1+2G)` matched against the starter's own echo,
+  `k0 = PC/MUC = 16e9`, `(PL-PC)/MUL = 7.84e9`, the negative derived Poisson
+  `-0.7480403`, `K = E/(3(1-2*PR)) = 2.0e9` with dyna2rad's `E/3 = 1.0e9`
+  asserted absent, and `a = sqrt(2.2e9/2600) = 919.8662` in the VC recipe.
+
 - **Tabulated Johnson-Cook batch** (`*MAT_TABULATED_JOHNSON_COOK` 224 incl.
   `_LOG_INTERPOLATION`, `*DEFINE_TABLE_3D`) — the roadmap P1 item. All were
   `SKIPPED` before. Numeric alias `MAT_224` registered; the `_GYS` (224_GYS)

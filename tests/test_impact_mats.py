@@ -1190,6 +1190,74 @@ class TestMultiMaterialDeck(unittest.TestCase):
         self.assertEqual(len(heads), len(set(heads)))
 
 
+class TestSharedIdEosDoesNotDuplicateTheMaterial(unittest.TestCase):
+    """k2rad's shared-id convention ("an *EOS_* whose id matches a material's
+    is that material's EOS") is a convenience it adds on top of LS-DYNA, where
+    an *EOS_* binds only through the *PART EOSID field. The standalone-fluid
+    branch walks state.mat_null only, so without a guard it emits a SECOND
+    /MAT under an id this batch already owns -- starter ERROR 79."""
+
+    EOS = ("*EOS_LINEAR_POLYNOMIAL\n"
+           + _row(110, 0.0, "2.0E9", 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+           + _row(0.0) + "\n")
+
+    def _headers(self, starter):
+        return [ln for ln in starter.splitlines()
+                if ln.startswith("/MAT/") or ln.startswith("/EOS/")]
+
+    def test_mat110_sharing_an_id_with_an_EOS_stays_single(self):
+        res, starter = _convert(MESH(110) + _mat110(fs=0.0)
+                                + self.EOS + "*END\n")
+        self.assertEqual(self._headers(starter), ["/MAT/LAW79/110"])
+        hits = _warns(res, "ERROR 79")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("its own K1/K2/K3 polynomial", hits[0])
+        self.assertIn("*PART EOSID field", hits[0])
+
+    def test_mat111_sharing_an_id_with_an_EOS_stays_single(self):
+        eos = self.EOS.replace(f"{110:>10}", f"{111:>10}", 1)
+        res, starter = _convert(MESH(111) + _mat111() + eos + "*END\n")
+        self.assertEqual(self._headers(starter), ["/MAT/LAW126/111"])
+        self.assertEqual(len(_warns(res, "ERROR 79")), 1)
+
+    def test_fluid_sharing_an_id_with_an_EOS_keeps_only_its_own(self):
+        # The fluid already emits /EOS/POLYNOMIAL/3 from its own K, so the
+        # shared-id carrier would duplicate BOTH the /MAT and the /EOS.
+        eos = self.EOS.replace(f"{110:>10}", f"{3:>10}", 1)
+        res, starter = _convert(MESH(3) + _fluid() + eos + "*END\n")
+        self.assertEqual(self._headers(starter),
+                         ["/MAT/HYD_VISC/3", "/EOS/POLYNOMIAL/3"])
+        # ... and the surviving /EOS is the fluid's own K = 2.2e9, not the
+        # dropped *EOS_LINEAR_POLYNOMIAL's C1 = 2.0e9.
+        eos_cards = _cards(_block(starter, "/EOS/POLYNOMIAL/3"))
+        self.assertEqual(_col_f(eos_cards[0], 21, 40), 2.2e9)
+        self.assertEqual(len(_warns(res, "ERROR 79")), 1)
+        self.assertIn("already emits its OWN", _warns(res, "ERROR 79")[0])
+
+    def test_an_unrelated_EOS_id_still_gets_its_carrier(self):
+        # The guard must be narrow: an *EOS_* on an id NO material holds keeps
+        # the pre-existing companion-less-fluid behaviour.
+        res, starter = _convert(MESH(110) + _mat110(fs=0.0)
+                                + self.EOS.replace(f"{110:>10}",
+                                                   f"{500:>10}", 1)
+                                + "*END\n")
+        self.assertEqual(self._headers(starter),
+                         ["/MAT/LAW79/110", "/MAT/HYD_VISC/500",
+                          "/EOS/POLYNOMIAL/500"])
+        self.assertEqual(_warns(res, "ERROR 79"), [])
+
+    def test_no_duplicate_MAT_ids_in_any_of_the_three_cases(self):
+        for mid, txt in ((110, _mat110(fs=0.0)), (111, _mat111()),
+                         (3, _fluid())):
+            with self.subTest(mid=mid):
+                eos = self.EOS.replace(f"{110:>10}", f"{mid:>10}", 1)
+                _, starter = _convert(MESH(mid) + txt + eos + "*END\n")
+                ids = [ln.rsplit("/", 1)[-1]
+                       for ln in starter.splitlines()
+                       if ln.startswith("/MAT/")]
+                self.assertEqual(len(ids), len(set(ids)))
+
+
 class TestNoMovementOnDecksWithoutTheBatch(unittest.TestCase):
     """A deck that uses none of the three keywords must be byte-identical to
     what master produced -- the batch adds emission, never rewrites."""
