@@ -38,27 +38,48 @@ Prior history (before this changelog was introduced) is summarized in the
     regardless of TR, CM:11141-11161). `LCK1` by form: plain curve →
     re-emitted 1-D `/TABLE/1` under its id (d2r's branch requires "TABLE",
     CM:11196, and leaves `tab_ID_h=0` — deck broken); 2-D table →
-    referenced by id, negative first rate value (LS-DYNA's natural-log axis,
-    Vol II p.357) → rebuilt with `exp()`-unwrapped rates + d2r's
-    flat-extrapolation sentinel (last curve duplicated at `10·max+1`,
-    CM:11219-11250) + `I_smooth=2`; **3-D table → SPLIT** into `tab_ID_h` =
-    the plane nearest `T_ref` and `tab_ID_t` = the per-plane lowest-rate
-    curves over T, because LAW109's yield lookup is strictly 2-D
+    referenced by id under `I_smooth=1`; every `I_smooth=2` table — the
+    `_LOG_INTERPOLATION` spelling or a negative first rate value (LS-DYNA's
+    natural-log axis, Vol II p.357, `exp()`-unwrapped) — is rebuilt with
+    BOTH flat-clamp rows: d2r's high-rate sentinel (last curve duplicated
+    at `10·max+1`, CM:11219-11250) **plus the first curve anchored at rate
+    `1e-10`** — the engine clamps only the log-lookup SAMPLE there
+    (`table2d_vinterp_log.F:206`) and otherwise EXTRAPOLATES in log10 below
+    the lowest rate, so an unanchored table returns a NEGATIVE yield at the
+    zero plastic strain rate of every elastic phase (rates `[1,100,1000]`:
+    `6·Y1−5·Y2`) and the run diverges silently under NORMAL TERMINATION;
+    solver-validated, the anchored deck tracks the log10 prediction to
+    0.0000% where the bare one collapses dt 24×. **3-D table → SPLIT** into
+    `tab_ID_h` = the plane nearest `T_ref` and `tab_ID_t` = the per-plane
+    lowest-rate curves over T, because LAW109's yield lookup is strictly 2-D
     (`table2d_vinterp_log.F:93-97` `ANCMSG(36)+ARRET(2)` at cycle 1 — d2r
     wires the 3-D id straight in and produces exactly that crash), warned as
-    exact-iff-separable, with `LCKT` then ignored (LS-DYNA's own rule).
+    exact-iff-separable, with `LCKT` then ignored (LS-DYNA's own rule);
+    when the nearest plane is NOT at `T_ref`, `Yscale_h = kt(T_ref)/
+    kt(T_plane)` cancels the constant separable-factor offset the
+    reconstruction `k1·kt(T)/kt(T_ref)` would otherwise carry, and
+    duplicate plane temperatures are deduped (first kept, warned — the
+    synthesized `tab_ID_t` would repeat an outer value, starter ERROR 3088).
     `LCKT` 2-D table → `tab_ID_t` (Radioss forms the `kt(T)/kt(T_ref)` ratio
     internally — absolute curves pass through); a plain-curve `LCKT` carries
     no temperature family (ratio ≡ 1) → warn-drop (d2r drops silently).
-    `BETA≥0` → `ETA`; `BETA<0` curve → 1-D `TAB_ETA` with d2r's point-wise
-    `exp()` unwrap (CM:11318-11327) but WITHOUT its side effect of forcing
-    the YIELD table's `I_smooth` to 2 off a BETA curve; 2-D table → direct
-    (LS-DYNA's T → rate-curves nesting lands exactly on TAB_ETA's
-    (rate, T) axes); TABLE_3D → warn-drop (LS-DYNA nests (T, rate, εp),
-    TAB_ETA reads (rate, T, εp) — a full axis transpose); `BFLG≠0`
+    `BETA≥0` → `ETA`; `BETA<0` curve → 1-D `TAB_ETA` with the WHOLE axis
+    `exp()`-unwrapped on a negative first abscissa (LS-DYNA: "the natural
+    logarithm of the strain rate value is used for all abscissa values" —
+    d2r exp()s only the negative points, CM:11320, scrambling mixed-sign
+    axes, and forces the YIELD table's `I_smooth` to 2 off a BETA curve;
+    neither replicated); 2-D table → direct (LS-DYNA's T → rate-curves
+    nesting lands exactly on TAB_ETA's (rate, T) axes, per the manual's own
+    level tags on the 3-D/4-D forms and d2r's untransposed pass-through,
+    CM:11342); TABLE_3D → the table warn-drops (LS-DYNA nests (T, rate, εp),
+    TAB_ETA reads (rate, T, εp) — a full axis transpose) and a
+    representative scalar `ETA`, sampled at (lowest rate, plane nearest
+    `T_ref`, εp→0), replaces the old flat 1.0; `BFLG≠0`
     reinterprets the tables → warn-drop. `FAILOPT/NUMAVG/NCYFAIL/ERODE/LCPS`
     warn-drop (no TAB1/LAW109 counterpart; LCPS is post-processing-only even
-    in LS-DYNA).
+    in LS-DYNA). `Xscale_h` deliberately stays blank: the engine applies it
+    to the pre-yield rate sample but not to the in-loop plastic re-lookup
+    (`sigeps109.F:221` vs `349`) — the two agree only at 1.0.
 
   - **`*MAT_224` LCF/LCG/LCI/NUMINT → `/FAIL/TAB1`** (layout audited against
     `fail_tab1.cfg` `FORMAT(radioss2021)`; card 2 all-blank keeps
@@ -87,29 +108,51 @@ Prior history (before this changelog was introduced) is summarized in the
     the whole mesh at cycle 1. `LCI` → `fct_IDel` with `EI_ref` blank → 1.0
     length unit (abscissa `l_c/EI_ref` = absolute element size, same as
     LCI); a multi-row LCI table warn-drops (TAB1's regularization has no
-    triaxiality axis), a 1-row table collapses to its curve. `NUMINT`:
+    triaxiality axis), a 1-row table collapses to its curve. LCF-table rows
+    whose curves parsed to zero points are dropped (an empty synthesized
+    /FUNCT is a starter reject); no surviving row → no /FAIL. `NUMINT`:
     count 1 → `Ifail_sh=1`/`Ifail_so=1` (first-IP deletion); count > 1 →
     `Ifail_sh=2` + `P_thickfail = count/NIP` via the shell stack that
     references the MID (d2r's `FAILIP=NUMINT/100` integer-truncates every
     `0<NUMINT<100` to 0 → starter default 1); percent form →
-    `P_thickfail=|NUMINT|/100`; `NUMINT=-200` (LS-DYNA: track damage, never
-    erode) → NO /FAIL at all, warned (Radioss has no track-but-never-delete
-    mode).
+    `P_thickfail=|NUMINT|/100`; **`NUMINT=8` on fully integrated solids**
+    (ELFORM 2/−1/−2 → Isolid 17, 8 IPs on both sides) → `Ifail_so=2`,
+    deletion when ALL integration points fail — exactly LS-DYNA's 8-of-8
+    rule (`fail_tab_s.F:258`); other solid counts keep first-IP deletion
+    (warned: solids erode earlier); `NUMINT=-200` (LS-DYNA: track damage,
+    never erode) → NO /FAIL at all, warned (Radioss has no
+    track-but-never-delete mode).
 
   - **`*DEFINE_TABLE_3D` → `/TABLE/1` Ndim=3 (flat)** — one row per
     (inner VALUE, outer VALUE): dim 1 = leaf-curve abscissa, dim 2 = the
     inner tables' VALUEs (their own SFA/OFFA applied — d2r's generic 3-D
     path never reads them, and it also puts the OUTER value on dim 2), dim 3
     = the outer card's VALUEs, rows ascending by (B, A), `Scale_y=1`. The
-    starter's complete-rectangular-grid rule is enforced up front: ragged
-    plane grids warn and skip the flat emission (naming ERROR 3089) while
-    `*MAT_224` LCK1 plane-slicing still converts. `*DEFINE_TABLE_4D`+ stay
+    starter's grid rules are enforced up front: ragged plane grids warn and
+    skip the flat emission (naming ERROR 3089), duplicate outer VALUEs too
+    (same (A,B) under two fct ids = contradictory data, ERROR 3088), and a
+    single-row flat grid as well (NFUN==1, ERROR 778) — while `*MAT_224`
+    LCK1 plane-slicing still converts. `*DEFINE_TABLE_4D`+ stay
     skipped (Radioss `/TABLE` caps at Ndim=4; no supported consumer).
     Unsupported consumers warn: a `*MAT_024` LCSS pointing at a 3-D table
     (temperature-dependent hardening) now warn-falls-back to bilinear
     instead of silently wiring the id into a function slot (dangling /FUNCT,
     starter ERROR 779); the MAT_120/252/DIEM table slots already carried
     loud dangling warnings that cover the 3-D case.
+
+  - **Shared /FUNCT + /TABLE id namespace** — the starter runs FUNCTION and
+    TABLE ids through ONE duplicate scan (`hm_read_table.F:88`, ERROR 79
+    on a clash), so `ConversionState.next_curve_id()` now dodges the
+    `*DEFINE_TABLE`/`_2D`/`_3D` registries and synthesized AutoTables as
+    well as user curves — a renumbered deck carrying a table id at/above
+    the auto-id base (90001) no longer collides with a synthesized /FUNCT
+    (starter-proven ERROR 79 before the fix). This hardens every
+    pre-existing `_add_auto_curve` call site too. The `*INCLUDE_TRANSFORM`
+    offset specs for the `*DEFINE_TABLE` family gained the point-card
+    width (`data_w=20`): the 2E20.0 "VALUE LCID/TABLEID" rows were being
+    sliced at the header's 10-char width, which corrupted the VALUE
+    (`293` → `1293`) and left the actual reference dangling — fixed for
+    `*DEFINE_TABLE`, `_2D` and `_3D` alike.
 
   - **Live-starter validation** (starter_win64 2026-05-20, `/BEGIN 2022`,
     np=1): the converted combined deck — LAW109 all-cards + 1-D/2-D/3-D
@@ -120,8 +163,22 @@ Prior history (before this changelog was introduced) is summarized in the
     `TEMPERATURE SCALE FUNCTION = 0`, one-layer/first-IP deletion) and the
     3-D ordinate echo reproducing the `Scale_y` product numerically
     (`1.2·1.3 = 1.56`). Negative control: the same deck minus ONE grid row →
-    `ERROR ID: 3089` twice. 50 new tests (column-exact, hand-computed) in
-    `tests/test_tabulated_jc.py`.
+    `ERROR ID: 3089` twice. **Full-solver validation** on 22 single-element
+    decks (engine_win64 2026-05-20): the 3-curve rate table tracks all three
+    on-table rates and the linear between-rate interpolation to ≤0.17%; the
+    `I_smooth=2` paths track the engine-exact log10 prediction to 0.0000%
+    (both the `_LOG_INTERPOLATION` rebuild and the ln-axis unwrap, incl.
+    above-range sentinel clamping — and the unanchored negative-yield
+    divergence is reproduced by the pre-fix decks as the negative control);
+    3-D-split temperature scaling engages through adiabatic self-heating
+    (T to 0.001%, σ_vm to 0.014%); adiabatic heating matches the closed
+    form to 0.002%; triaxiality-flipped failure hits LCF(−1/3)=1.0000 and
+    LCF(−2/3)=1.5000 to 0.06% with the compression-positive sign convention
+    proven; LCG rate scaling to 0.12%; LCI element-size regularization
+    exact on both plateaus; NUMINT=1/3/5 delete on exactly the 1st/3rd/5th
+    failed layer. 63 tests (column-exact, hand-computed) in
+    `tests/test_tabulated_jc.py` + the *DEFINE_TABLE offset coverage in
+    `tests/test_include_transform.py`.
 
 - **Foam batch** (`*MAT_SOIL_AND_FOAM` 005, `*MAT_LOW_DENSITY_VISCOUS_FOAM`
   073, `*MAT_MODIFIED_HONEYCOMB` 126, `*MAT_DESHPANDE_FLECK_FOAM` 154,

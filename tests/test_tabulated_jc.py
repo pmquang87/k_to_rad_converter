@@ -16,11 +16,15 @@ implementation: the triaxiality flip -(-0.667/0.333) -> (-0.333, 0.667)
 TRIAX = sigma_m/sigma_vm tension-positive), the Lode remap
 theta = (2/pi)*asin(xi) with theta(0.5) = 1/3 exactly, the natural-log rate
 unwrap exp(ln 0.001) = 0.001 with dyna2rad's flat-extrapolation sentinel
-10*max+1 = 11, E(T) sampled at TR=300 as 2.2e5 + 0.5*(1.8e5-2.2e5) = 2e5,
-NUMINT=-30 -> P_thickfail 0.30 and NUMINT=2 on a NIP=5 stack -> 0.40, and
-CP passed through PER MASS (450000000, NOT rho*CP=3.5325 — LAW109's engine
-divides by RHO itself, sigeps109.F:419, unlike the LAW2/LAW4 rhoC_p
-convention).
+10*max+1 = 11 AND the low-rate anchor 1e-10 (the engine's log-sample clamp
+— every I_smooth=2 table carries both, or the log10 lookup extrapolates to
+a NEGATIVE yield at the zero rate of the elastic phase), the 3-D-split
+Yscale_h = kt(300)/kt(280) = 350/400 = 0.875, E(T) sampled at TR=300 as
+2.2e5 + 0.5*(1.8e5-2.2e5) = 2e5, NUMINT=-30 -> P_thickfail 0.30 and
+NUMINT=2 on a NIP=5 stack -> 0.40 (NUMINT=8 on an ELFORM-2 hex ->
+Ifail_so=2, the exact all-IP rule), and CP passed through PER MASS
+(450000000, NOT rho*CP=3.5325 — LAW109's engine divides by RHO itself,
+sigeps109.F:419, unlike the LAW2/LAW4 rhoC_p convention).
 
 Where a conversion turns on what an LS-DYNA field MEANS rather than on
 arithmetic — LCH being inexpressible because no LAW109 engine path fills
@@ -377,7 +381,14 @@ class TestLck1Routing(unittest.TestCase):
     def test_log_rate_table_exp_unwrap_and_sentinel(self):
         # First VALUE negative -> the whole axis is ln(rate) (Vol II p.357):
         # exp() every rate, duplicate the last curve at 10*max+1 (dyna2rad's
-        # flat-extrapolation sentinel), I_smooth=2.
+        # flat-extrapolation sentinel), duplicate the FIRST curve at the
+        # engine's log-sample clamp 1e-10, I_smooth=2. Without the low-rate
+        # anchor the I_smooth=2 lookup EXTRAPOLATES in log10 below the
+        # lowest tabulated rate (table2d_vinterp_log.F clamps only the
+        # SAMPLE, to 1e-10) and the yield stress goes NEGATIVE at the zero
+        # plastic strain rate of every elastic phase — solver-validated: the
+        # anchored deck runs NORMAL TERMINATION on the log10 prediction to
+        # 0.0000% where the bare one collapses its dt (3.8e-8 -> 1.6e-9 s).
         deck = (MESH
                 + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
                           (100, 0, 0, 0, 0, 0))
@@ -391,15 +402,46 @@ class TestLck1Routing(unittest.TestCase):
         self.assertEqual(_col_i(mat[3], 91, 100), 2)         # I_smooth = log
         tab = _block(starter, "/TABLE/1/90001")
         rows = [ln for ln in tab[4:] if not ln.startswith("#")]
-        self.assertEqual(len(rows), 3)
-        # exp(ln 0.001) = 0.001, exp(0) = 1, sentinel = 1*10+1 = 11
-        self.assertEqual(_col_i(rows[0], 1, 10), 110)
-        self.assertEqual(rows[0][20:40].strip(), "0.001")
-        self.assertEqual(_col_i(rows[1], 1, 10), 111)
-        self.assertEqual(_col_f(rows[1], 21, 40), 1.0)
-        self.assertEqual(_col_i(rows[2], 1, 10), 111)        # duplicated last
-        self.assertEqual(_col_f(rows[2], 21, 40), 11.0)
+        self.assertEqual(len(rows), 4)
+        # anchor = first curve at 1e-10, exp(ln 0.001) = 0.001, exp(0) = 1,
+        # sentinel = 1*10+1 = 11
+        self.assertEqual(_col_i(rows[0], 1, 10), 110)        # anchored first
+        self.assertEqual(_col_f(rows[0], 21, 40), 1.0e-10)
+        self.assertEqual(_col_i(rows[1], 1, 10), 110)
+        self.assertEqual(rows[1][20:40].strip(), "0.001")
+        self.assertEqual(_col_i(rows[2], 1, 10), 111)
+        self.assertEqual(_col_f(rows[2], 21, 40), 1.0)
+        self.assertEqual(_col_i(rows[3], 1, 10), 111)        # duplicated last
+        self.assertEqual(_col_f(rows[3], 21, 40), 11.0)
         self.assertTrue(_warns(res, "flat-extrapolation sentinel"))
+        self.assertTrue(_warns(res, "1e-10"))
+
+    def test_log_interpolation_table_rebuilt_with_anchor(self):
+        # The _LOG_INTERPOLATION spelling with an already-linear rate axis:
+        # a by-id reference would leave I_smooth=2 free to log-extrapolate
+        # below rate 1 -> negative yield at eps_dot=0 (with axis [1, 100]:
+        # R2=(log10 100-log10 1e-10)/(log10 100-log10 1)=6 -> 6*Y1-5*Y2).
+        # The table is rebuilt with the same two flat-clamp rows.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
+                          (100, 0, 0, 0, 0, 0),
+                          kw="*MAT_TABULATED_JOHNSON_COOK_LOG_INTERPOLATION")
+                + _table2d(100, [(1.0, 110), (100.0, 111)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[3], 1, 10), 90001)       # rebuilt, not 100
+        self.assertEqual(_col_i(mat[3], 91, 100), 2)
+        tab = _block(starter, "/TABLE/1/90001")
+        rows = [ln for ln in tab[4:] if not ln.startswith("#")]
+        expect = [(110, 1.0e-10), (110, 1.0), (111, 100.0), (111, 1001.0)]
+        self.assertEqual(len(rows), 4)
+        for r, (fct, rate) in zip(rows, expect):
+            self.assertEqual(_col_i(r, 1, 10), fct)
+            self.assertEqual(_col_f(r, 21, 40), rate)
+        self.assertTrue(_warns(res, "NEGATIVE yield"))
 
     def test_3d_lck1_split(self):
         # sigma(eps_p, rate, T) cannot enter tab_ID_h (the engine ARRETs on
@@ -465,6 +507,105 @@ class TestLck1Routing(unittest.TestCase):
             self.assertEqual(_col_f(r, 81, 100), 1.0)
             self.assertEqual(len(r), 100)
 
+    def test_3d_split_yscale_corrects_off_tref_plane(self):
+        # T_ref=300 sits BETWEEN the planes (280, 360): tab_ID_h is the
+        # nearest plane (280), so even a perfectly separable deck would come
+        # out scaled by f(280)/f(300). Yscale_h = kt(300)/kt(280) cancels
+        # that: kt sampled from the lowest-rate family at eps0=0 gives
+        # kt(280)=400, kt(360)=200, kt(300) = 400 + (300-280)/(360-280)*
+        # (200-400) = 350 -> Yscale_h = 350/400 = 0.875 exactly.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 300.0, 1.0, 1),
+                          (400, 0, 0, 0, 0, 0))
+                + _table3d(400, [(280.0, 101), (360.0, 102)])
+                + _table2d(101, [(0.001, 110), (1.0, 111)])
+                + _table2d(102, [(0.001, 120), (1.0, 121)])
+                + _curve(110, [(0.0, 400.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 480.0), (0.5, 600.0)])
+                + _curve(120, [(0.0, 200.0), (0.5, 250.0)])
+                + _curve(121, [(0.0, 240.0), (0.5, 300.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[3], 1, 10), 101)     # plane at 280
+        self.assertEqual(_col_f(mat[3], 41, 60), 0.875)  # Yscale_h
+        self.assertTrue(_warns(res, "Yscale_h=0.875"))
+
+    def test_3d_split_yscale_untouched_when_plane_at_tref(self):
+        # v_sel == T_ref: no correction, the field keeps the blank default.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 293.0, 1.0, 1),
+                          (400, 0, 0, 0, 0, 0))
+                + _table3d(400, [(293.0, 101), (493.0, 102)])
+                + _table2d(101, [(0.001, 110), (1.0, 111)])
+                + _table2d(102, [(0.001, 120), (1.0, 121)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + _curve(120, [(0.0, 280.0), (0.5, 400.0)])
+                + _curve(121, [(0.0, 330.0), (0.5, 480.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_f(mat[3], 41, 60), 0.0)    # default 1.0
+        self.assertFalse(_warns(res, "Yscale_h="))
+
+    def test_3d_split_duplicate_plane_temperature_deduped(self):
+        # Two planes at the same T: the synthesized tab_ID_t would repeat an
+        # outer value (starter ERROR 3088) — first plane kept, warned.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 293.0, 1.0, 1),
+                          (400, 0, 0, 0, 0, 0))
+                + _table3d(400, [(293.0, 101), (293.0, 102), (493.0, 103)])
+                + _table2d(101, [(0.001, 110), (1.0, 111)])
+                + _table2d(102, [(0.001, 120), (1.0, 121)])
+                + _table2d(103, [(0.001, 130), (1.0, 131)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + _curve(120, [(0.0, 280.0), (0.5, 400.0)])
+                + _curve(121, [(0.0, 330.0), (0.5, 480.0)])
+                + _curve(130, [(0.0, 180.0), (0.5, 300.0)])
+                + _curve(131, [(0.0, 230.0), (0.5, 380.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[3], 1, 10), 101)     # first 293 plane
+        tab = _block(starter, f"/TABLE/1/{_col_i(mat[3], 11, 20)}")
+        rows = [ln for ln in tab[4:] if not ln.startswith("#")]
+        self.assertEqual(len(rows), 2)                   # deduped: 293, 493
+        self.assertEqual(_col_i(rows[0], 1, 10), 110)
+        self.assertEqual(_col_i(rows[1], 1, 10), 130)
+        self.assertTrue(_warns(res, "more than one plane at the same "
+                                    "temperature"))
+
+    def test_synthesized_ids_dodge_user_table_ids_at_auto_base(self):
+        # /FUNCT and /TABLE share ONE starter id namespace (ERROR 79 on a
+        # duplicate): a user *DEFINE_TABLE_2D parked AT the auto-id base
+        # 90001 must push every synthesized id (the LCF flip /FUNCT and the
+        # LCFxLCG AutoTable) past it.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
+                          (90001, 0, 300, 301, 0, 0))
+                + _table2d(90001, [(0.001, 110), (100.0, 111)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + _curve(300, [(-0.667, 1.2), (0.333, 0.3)])
+                + _curve(301, [(0.001, 1.0), (100.0, 1.3)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        # the user table keeps its id; the flip curve and the LCFxLCG grid
+        # land beyond it
+        _block(starter, "/TABLE/1/90001")
+        _block(starter, "/FUNCT/90002")
+        tab1 = [ln for ln in _block(starter, "/FAIL/TAB1/7")[1:]
+                if not ln.startswith("#")]
+        self.assertEqual(_col_i(tab1[2], 1, 10), 90003)
+        # no id appears under both a /FUNCT and a /TABLE header
+        ids = []
+        for ln in starter.splitlines():
+            if ln.startswith("/FUNCT/") or ln.startswith("/TABLE/1/"):
+                ids.append(int(ln.rsplit("/", 1)[1]))
+        self.assertEqual(len(ids), len(set(ids)))
+
     def test_dangling_lck1(self):
         deck = (MESH
                 + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
@@ -517,10 +658,13 @@ class TestLcktAndBeta(unittest.TestCase):
         self.assertEqual(_block(starter, "/TABLE/1/500")[3].strip(), "1")
 
     def test_beta_negative_curve_log_axis(self):
-        # Negative abscissas are natural-log rates: exp()-unwrapped POINT-WISE
-        # (dyna2rad CM:11318-11327) into a fresh 1-D table. d2r's side effect
-        # of forcing the YIELD table's I_smooth to 2 off a BETA curve is NOT
-        # replicated — I_smooth stays with LCK1's own axis convention.
+        # A negative abscissa marks the WHOLE axis as natural-log rates
+        # ("the natural logarithm of the strain rate value is used for all
+        # abscissa values", Vol II R17) -> EVERY point exp()-unwrapped into
+        # a fresh 1-D table. Two dyna2rad defects NOT replicated: it exp()s
+        # only the negative points (CM:11320) and it forces the YIELD
+        # table's I_smooth to 2 off a BETA curve — I_smooth stays with
+        # LCK1's own axis convention.
         ln01 = -2.302585092994046      # ln(0.1)
         deck = (MESH
                 + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, -500, 1),
@@ -540,6 +684,45 @@ class TestLcktAndBeta(unittest.TestCase):
         self.assertEqual(pts[1][:20].strip(), "0.1")     # exp(ln 0.1)
         self.assertEqual(_col_f(pts[1], 21, 40), 0.8)
         self.assertTrue(_warns(res, "BETA curve 500"))
+
+    def test_beta_mixed_sign_log_axis_unwraps_every_point(self):
+        # The trap the per-point treatment hid: a mixed-sign ln axis
+        # [ln 0.001, 0.0, ln 100] means rates 0.001 / 1 / 100. exp()ing only
+        # the negatives would leave 0.0 and ln(100)=4.605 RAW — the points
+        # come out physically scrambled (0 < 0.001 inverts the order, 4.605
+        # is read as 4.605 1/s instead of 100 1/s).
+        ln100 = 4.605170185988092      # ln(100)
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, -500, 1),
+                          (110, 0, 0, 0, 0, 0))
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(500, [(LN0001, 0.8), (0.0, 0.95), (ln100, 1.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[4], 1, 10), 90001)
+        tab = _block(starter, "/TABLE/1/90001")
+        pts = [ln for ln in tab[4:] if not ln.startswith("#")]
+        self.assertEqual(len(pts), 3)
+        self.assertEqual(pts[0][:20].strip(), "0.001")   # exp(ln 0.001)
+        self.assertEqual(_col_f(pts[0], 21, 40), 0.8)
+        self.assertEqual(_col_f(pts[1], 1, 20), 1.0)     # exp(0) = 1, NOT 0
+        self.assertEqual(_col_f(pts[1], 21, 40), 0.95)
+        self.assertEqual(_col_f(pts[2], 1, 20), 100.0)   # exp(ln 100)
+        self.assertEqual(_col_f(pts[2], 21, 40), 1.0)
+        self.assertTrue(_warns(res, "WHOLE axis"))
+
+    def test_beta_empty_curve_dropped(self):
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, -500, 1),
+                          (110, 0, 0, 0, 0, 0))
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + "*DEFINE_CURVE\n" + _row(500) + "\n"
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[4], 1, 10), 0)
+        self.assertTrue(_warns(res, "BETA curve 500 has no points"))
 
     def test_beta_negative_2d_table_direct(self):
         # LS-DYNA nests a 2-D BETA table as T -> curves-over-rate, which lands
@@ -568,6 +751,31 @@ class TestLcktAndBeta(unittest.TestCase):
         res, starter = _convert(deck)
         mat = _cards(_block(starter, "/MAT/LAW109/7"))
         self.assertEqual(_col_i(mat[4], 1, 10), 0)
+        self.assertTrue(_warns(res, "axis TRANSPOSE"))
+
+    def test_beta_table_3d_representative_scalar(self):
+        # The TABLE_3D itself stays inexpressible (transpose), but instead
+        # of the old flat ETA=1.0 a representative scalar is sampled at the
+        # reference state: lowest rate, plane nearest T_ref, eps_p -> 0.
+        # Here beta(0.001, T=293, 0) = 0.35 — an ETA=1.0 fallback would heat
+        # ~3x too fast.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 400.0, -500, 1),
+                          (110, 0, 0, 0, 0, 0))
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _table3d(500, [(293.0, 501), (893.0, 502)])
+                + _table2d(501, [(0.001, 510), (1.0, 511)])
+                + _table2d(502, [(0.001, 512), (1.0, 513)])
+                + _curve(510, [(0.0, 0.35), (0.5, 0.5)])
+                + _curve(511, [(0.0, 0.6), (0.5, 0.7)])
+                + _curve(512, [(0.0, 0.8), (0.5, 0.85)])
+                + _curve(513, [(0.0, 0.9), (0.5, 0.95)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        mat = _cards(_block(starter, "/MAT/LAW109/7"))
+        self.assertEqual(_col_i(mat[4], 1, 10), 0)       # no TAB_ETA
+        self.assertEqual(_col_f(mat[2], 21, 40), 0.35)   # sampled scalar
+        self.assertTrue(_warns(res, "reference state"))
         self.assertTrue(_warns(res, "axis TRANSPOSE"))
 
     def test_beta_above_one_warns(self):
@@ -671,6 +879,62 @@ class TestFailVariants(unittest.TestCase):
         self.assertEqual(_col_f(tab1[0], 41, 60), 0.0)
         self.assertTrue(_warns(res, "NUMINT=3 > 1 but no shell"))
         self.assertTrue(_warns(res, "NUMINT=3 on SOLID"))
+
+    def test_numint_8_all_ip_rule_on_fully_integrated_solids(self):
+        # NUMINT=8 on an ELFORM-2 hex (8 IPs) converting to the 8-IP Isolid
+        # 17: LS-DYNA's 8-of-8 rule IS /FAIL/TAB1's Ifail_so=2 ("element
+        # deleted when rupture in all integration points", fail_tab_s.F:258)
+        # — exact, no early erosion.
+        mesh = ("*KEYWORD\n" + NODES + SOLID + PART
+                + "*SECTION_SOLID\n" + _row(7, 2) + "\n")
+        deck = self._deck((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 8),
+                          (110, 0, 300, 0, 0, 0), mesh=mesh)
+        res, starter = _convert(deck)
+        tab1 = [ln for ln in _block(starter, "/FAIL/TAB1/7")[1:]
+                if not ln.startswith("#")]
+        self.assertEqual(_col_i(tab1[0], 11, 20), 2)         # Ifail_so
+        self.assertTrue(_warns(res, "8-of-8"))
+        self.assertFalse(_warns(res, "erode EARLIER"))
+
+    def test_numint_count_on_underintegrated_solid_keeps_first_ip(self):
+        # ELFORM 1 (single-IP hex in LS-DYNA) with NUMINT=8: the count does
+        # not match an 8-IP LS-DYNA element, so the conservative first-IP
+        # deletion stays, with the earlier-erosion warning.
+        deck = self._deck((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 8),
+                          (110, 0, 300, 0, 0, 0))
+        res, starter = _convert(deck)
+        tab1 = [ln for ln in _block(starter, "/FAIL/TAB1/7")[1:]
+                if not ln.startswith("#")]
+        self.assertEqual(_col_i(tab1[0], 11, 20), 1)         # Ifail_so
+        self.assertTrue(_warns(res, "erode EARLIER"))
+
+    def test_lcf_table_rows_with_empty_curves(self):
+        # A row whose curve parsed to zero points would synthesize an empty
+        # /FUNCT (starter reject) — dropped with a warning; if nothing
+        # survives, no /FAIL/TAB1 at all.
+        deck = (MESH
+                + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
+                          (110, 0, 500, 0, 0, 0))
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _table2d(500, [(-1.0, 300), (0.5, 301)])
+                + "*DEFINE_CURVE\n" + _row(300) + "\n"
+                + _curve(301, [(-0.667, 1.0), (0.333, 0.25)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertIn("/FAIL/TAB1/7", starter)
+        self.assertTrue(_warns(res, "zero points"))
+        deck_all_empty = (
+            MESH
+            + _mat224((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, 1),
+                      (110, 0, 500, 0, 0, 0))
+            + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+            + _table2d(500, [(-1.0, 300), (0.5, 301)])
+            + "*DEFINE_CURVE\n" + _row(300) + "\n"
+            + "*DEFINE_CURVE\n" + _row(301) + "\n"
+            + "*END\n")
+        res2, starter2 = _convert(deck_all_empty)
+        self.assertNotIn("/FAIL/TAB1", starter2)
+        self.assertTrue(_warns(res2, "no usable LCF row"))
 
     def test_numint_minus_200_no_fail_card(self):
         deck = self._deck((7, "7.85E-9", "2.1E5", 0.3, 0, 0, 1.0, -200),
@@ -818,6 +1082,38 @@ class TestDefineTable3D(unittest.TestCase):
         res, starter = _convert(deck)
         self.assertNotIn("/TABLE/1/400", starter)
         self.assertTrue(_warns(res, "ERROR 3089"))
+
+    def test_duplicate_outer_value_not_emitted(self):
+        # Two rows at the same outer VALUE put the same (A,B) coordinate
+        # under two fct ids — the starter's contradictory-data check
+        # (ERROR 3088, hm_read_table2_1.F:228) — warn and skip the flat
+        # emission instead.
+        deck = (MESH.replace(_row(7, 7, 7), _row(7, 7, 8))
+                + "*MAT_ELASTIC\n" + _row(8, "7.85E-9", "2.1E5", 0.3) + "\n"
+                + _table3d(400, [(293.0, 101), (293.0, 102)])
+                + _table2d(101, [(0.001, 110), (1.0, 111)])
+                + _table2d(102, [(0.001, 120), (1.0, 121)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + _curve(111, [(0.0, 420.0), (0.5, 600.0)])
+                + _curve(120, [(0.0, 280.0), (0.5, 400.0)])
+                + _curve(121, [(0.0, 330.0), (0.5, 480.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertNotIn("/TABLE/1/400", starter)
+        self.assertTrue(_warns(res, "ERROR 3088"))
+
+    def test_single_row_grid_not_emitted(self):
+        # One plane with a one-row inner table flattens to a single-row
+        # /TABLE/1 — starter ERROR 778 (NFUN==1) — warn and skip.
+        deck = (MESH.replace(_row(7, 7, 7), _row(7, 7, 8))
+                + "*MAT_ELASTIC\n" + _row(8, "7.85E-9", "2.1E5", 0.3) + "\n"
+                + _table3d(400, [(293.0, 101)])
+                + _table2d(101, [(0.001, 110)])
+                + _curve(110, [(0.0, 350.0), (0.5, 500.0)])
+                + "*END\n")
+        res, starter = _convert(deck)
+        self.assertNotIn("/TABLE/1/400", starter)
+        self.assertTrue(_warns(res, "ERROR 778"))
 
     def test_mat024_lcss_3d_guard(self):
         # An UNSUPPORTED consumer of a *DEFINE_TABLE_3D must warn: MAT_024's

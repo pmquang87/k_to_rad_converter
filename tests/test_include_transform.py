@@ -321,6 +321,77 @@ class IncludeTransformOffsetTests(_AssemblyBase):
         self.assertFalse([w for w in PARSER_WARNINGS
                           if "INCLUDE_TRANSFORM" in w])
 
+    def test_define_table_point_cards_offset_id_not_value(self):
+        # The *DEFINE_TABLE family's point cards are 2E20.0 (VALUE chars
+        # 1-20, LCID/TABLEID chars 21-40) under an I10 header. Slicing the
+        # data cards at the header width would land the offset INSIDE the
+        # VALUE (chars 11-20) — e.g. rewriting "...293" to "...1293", a
+        # corrupted temperature — while the actual reference in chars 21-40
+        # dangles un-offset. The "data_w": 20 spec offsets the id and keeps
+        # the VALUE intact, for all three spellings (legacy bare-VALUE rows
+        # simply have no field 1).
+        def w20(*vals):
+            return "".join(f"{v:>20}" for v in vals)
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*DEFINE_CURVE",
+            _row(7),
+            "0.0,0.0",
+            "1.0,10.0",
+            "*DEFINE_CURVE",
+            _row(8),
+            "0.0,0.0",
+            "1.0,20.0",
+            "*DEFINE_TABLE_2D",
+            _row(70, 1.0, 0.0),
+            w20(0.001, 7),
+            w20(100.0, 8),
+            "*DEFINE_TABLE_3D",
+            _row(80, 1.0, 0.0),
+            w20(293.0, 70),
+            "*DEFINE_TABLE",
+            _row(90),
+            w20(100.0),
+            w20(200.0),
+            "*DEFINE_CURVE",
+            _row(11),
+            "0.0,0.0",
+            "1.0,30.0",
+            "*DEFINE_CURVE",
+            _row(12),
+            "0.0,0.0",
+            "1.0,40.0",
+            "*END",
+        ]) + "\n")
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k",
+            _row(100, 200, 10, 20, 30, 40, 50),
+            _row(60),
+            "", "",
+            "*END",
+        ]) + "\n")
+        st = self._state(main)
+        # curves moved by IDFOFF=40
+        for lcid in (47, 48, 51, 52):
+            self.assertIn(lcid, st.curves)
+        # 2-D table: id +40, row LCIDs +40, VALUEs INTACT
+        self.assertIn(110, st.define_tables)
+        self.assertEqual(st.define_tables[110].rows, [(0.001, 47),
+                                                      (100.0, 48)])
+        # 3-D table: id +40, inner-table reference +40, VALUE 293 INTACT
+        self.assertIn(120, st.define_tables_3d)
+        self.assertEqual(st.define_tables_3d[120].rows, [(293.0, 110)])
+        # legacy bare-VALUE table: id +40, values untouched, still pairs
+        # positionally with the (offset) curves that follow it
+        self.assertIn(130, st.define_tables)
+        self.assertEqual(st.define_tables[130].pending_values,
+                         [100.0, 200.0])
+        self.assertFalse([w for w in PARSER_WARNINGS
+                          if "INCLUDE_TRANSFORM" in w])
+
     def test_offsets_and_transform_combine(self):
         d = self._dir()
         self._write(d, "child.k", CHILD_NODES)

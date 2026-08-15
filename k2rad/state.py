@@ -3081,6 +3081,7 @@ class MatTabulatedJC:
     ismooth: int = 1         # LAW109 I_smooth (1 linear / 2 log)
     tab_h: int = 0           # tab_ID_h (flow stress, Ndim ≤ 2)
     tab_t: int = 0           # tab_ID_t (quasi-static yield vs T)
+    yscale_h: float = 0.0    # Yscale_h; 0 = default 1.0 (3-D-split T-plane fix)
     tab_eta: int = 0         # TAB_ETA (Taylor-Quinney scale)
     emit_fail: bool = False  # a usable LCF exists → write /FAIL/TAB1
     fail_table1: int = 0     # TAB1 table1_ID (function or Auto/DefineTable id)
@@ -4140,12 +4141,19 @@ class ConversionState:
         return v
 
     def next_curve_id(self) -> int:
-        """A next_id() guaranteed free in the /FUNCT (curve) namespace, so a
-        synthesized curve can never silently clobber a user *DEFINE_CURVE whose
-        LCID happens to be >= the auto-id base (90001). A no-op vs next_id() in
-        the common case (no user curve that high), so it does not shift ids."""
+        """A next_id() guaranteed free in the /FUNCT *and* /TABLE namespaces.
+
+        The starter checks FUNCTION and TABLE ids in ONE merged duplicate scan
+        (hm_read_table.F:88 counts "total number /TABLE + /FUNCT" before the
+        UDOUBLE pass), so a synthesized /FUNCT must dodge user *DEFINE_TABLE /
+        _2D / _3D ids and already-synthesized AutoTables as well as user
+        curves — a collision is starter ERROR 79 (DUPLICATE ID in "FUNCTION &
+        TABLE DEFINITION"), reachable whenever a renumbered deck carries a
+        table id at or above the auto-id base (90001). A no-op vs next_id()
+        in the common case (no user id that high), so it does not shift ids."""
         fid = self.next_id()
-        while fid in self.curves:
+        while (fid in self.curves or fid in self.define_tables
+               or fid in self.define_tables_3d or fid in self.auto_tables):
             fid = self.next_id()
         return fid
 
