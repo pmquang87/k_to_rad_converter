@@ -253,23 +253,30 @@ Prior history (before this changelog was introduced) is summarized in the
   `*MAT_JOHNSON_HOLMQUIST_CONCRETE` have **zero hits anywhere** — not in the
   repo's `.k`/`.key`/`.dyn` decks, not in the 127-deck
   `E:\openradioss_run\Ryan_Lee_Examples` tree, not under `E:\foxcore_data\`.
-  `*MAT_ELASTIC_FLUID` appears in exactly one deck,
-  `Ryan_Lee_Examples/W11_SETUP_SPH_BirdStrike_Multi.k` (plus three
-  unit-converted copies of the same deck on `E:`), as
+  `*MAT_ELASTIC_FLUID` appears in exactly one deck — 5 copies of it:
+  `Ryan_Lee_Examples/W11_SETUP_SPH_BirdStrike_Multi.k` in-repo, an identical
+  copy on `E:`, and three `__ton-mm-s` unit-converted copies — as
   `*MAT_ELASTIC_FLUID_TITLE` "Head" with ρ=2600, E=8.5e8, ν=0.24, K=2.2e9,
-  VC=0.0, CP=1.0e20 — a real bird-strike "bird as fluid" material, and the
+  VC=0.0, CP=1.0e20, a real bird-strike "bird as fluid" material and the
   source of this batch's realistic field values. `*MAT_001`/`*MAT_1` have zero
   hits, so registering those aliases moves nothing.
 
-  The sweep is therefore a near-pure no-movement check, and it is: every deck
-  is byte-identical on `_0000.rad` and `_0001.rad` with identical warning sets
-  and skip lists, **except the four W11 copies**, which change for exactly the
-  intended reason — `MAT_ELASTIC_FLUID` leaves `skipped_keywords` and a
-  `/MAT/HYD_VISC/3` + `/EOS/POLYNOMIAL/3` pair appears where PART 8's material
-  previously dangled. That deck is a card-source, not an end-to-end validation
-  case: its MID 3 sits on PART 8 → SECID 2 = `*SECTION_SPH`, and k2rad has no
-  SPH path at all, so the part still has no property and the deck still cannot
-  run. **What this corpus cannot see**: anything about the new cards
+  The sweep is therefore a near-pure no-movement check, and measured (200
+  decks, `master` b762de2 vs `feat/impact-mats`, 0 exceptions on either side)
+  it is exactly that: **195/200 byte-identical on BOTH `_0000.rad` and
+  `_0001.rad`, with identical warning sets and identical skip lists**. The 5
+  that moved are precisely the 5 W11 copies, and they moved only in the
+  starter deck (`_0001.rad` unchanged — materials live in `_0000.rad` alone),
+  each by exactly one skip removed and one warning added:
+  `MAT_ELASTIC_FLUID` leaves `skipped_keywords` and a `/MAT/HYD_VISC/3` +
+  `/EOS/POLYNOMIAL/3` pair appears where PART 8's material previously dangled,
+  with the single warning naming the dropped E/PR. The `VC=0.0` and the
+  defaulted `CP=1.0e20` correctly produce **no** warning and `Nu = Pmin = 0` —
+  the very case where dyna2rad would write a finite `Pmin = -1e20`. That deck
+  is a card-source, not an end-to-end validation case: its MID 3 sits on
+  PART 8 → SECID 2 = `*SECTION_SPH`, and k2rad has no SPH path at all, so the
+  part still has no property and the deck still cannot run.
+  **What this corpus cannot see**: anything about the new cards
   themselves. That evidence is the column-exact tests plus the starter probes
   the card layouts were audited against — `/BEGIN` 2022/2023/2024/2025/2026
   round-trips that measured which fields each version actually reads (LAW79
