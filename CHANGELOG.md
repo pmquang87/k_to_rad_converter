@@ -25,12 +25,24 @@ Prior history (before this changelog was introduced) is summarized in the
     `p_ConvertMatL5`, CM:719-983; layout audited against `matl21_dprag.cfg`
     `FORMAT(radioss130)`, the block a `/BEGIN 2022` deck reads — including
     the card-4 `%10d` + 10 literal blanks before `Kt`). `E = 9GK/(3K+G)`,
-    `ν = (3K−2G)/(6K+2G)` clamped `[0, 0.495]`; `A0/A1/A2` verbatim
-    (identical yield algebra); `PC → P_min` verbatim; `Kt = KUN/100`
-    (dyna2rad's deliberate tensile softening — warned, it is 100× softer
-    than LS-DYNA's KUN in tension); `B = KUN`, `VCR=1 → B=0` with the
-    consequence named (the starter substitutes `Kt` under its own WARNING
-    829). THE pressure-curve transform encoded from the engine sources, not
+    `ν = (3K−2G)/(6K+2G)` clamped `[0, 0.495]` — the clamp WARNED when it
+    fires (d2r clamps silently); `A0/A1/A2` verbatim (identical yield
+    algebra); `PC → P_min` verbatim, with the `PC=0` blank default's
+    semantic flip warned (LS-DYNA: an ACTIVE zero-tension floor, Manual
+    Remark 1; LAW21: `PMIN==0 → -INFINITY`, unlimited tension —
+    `hm_read_mat21.F:120`). **`Kt = B = KUN` for `VCR=0` — a conscious,
+    solver-measured fix over dyna2rad's `Kt = KUN/100`**: with `Mu_max`
+    unset the starter substitutes `1e20` and the engine's unloading bulk
+    `α·B + (1−α)·Kt` with `α = μ/Mu_max` degenerates to `Kt` for every
+    reachable μ (`m21law.F:166-170`), so d2r's `B` is a DEAD field
+    (bitwise-identical run with B 200→2) and its converted soil unloads at
+    `KUN/100` in BOTH signs — it retraces the loading curve and dissipates
+    ~nothing (measured −0.12% retained IE); with `Kt = KUN` the unload leg
+    matches LS-DYNA's elastic line (measured 5.296 vs 5.256 at μ=0.20).
+    `VCR=1` keeps d2r's `B=0` + `Kt=KUN/100` ON PURPOSE: the starter
+    substitutes `B=Kt` (its WARNING 829) and that soft modulus reproduces
+    VCR=1's load=unload retrace (measured), warned with tension named.
+    THE pressure-curve transform encoded from the engine sources, not
     intuition: LS-DYNA tabulates `P` vs `EPS = ln(V/V0)` (negative in
     compression, Manual Remark 1) while the LAW21 engine evaluates the
     function at `mu = ρ/ρ0 − 1` (positive in compression,
@@ -43,9 +55,13 @@ Prior history (before this changelog was introduced) is summarized in the
     dyna2rad (keep `x ≥ 0` as `|EPS|`, warned); an ALL-POSITIVE curve is a
     closed d2r gap — both its branches require a negative abscissa
     (CM:814/837) and silently create NO function — k2rad converts it as
-    `|EPS|` under a warning. Starter-validated: echo `PRESSURE FUNCTION
-    NUMBER = 90001`, `TENSILE BULK = 10`, `UNLOADING BULK = 1000` for
-    KUN=1000, 0 ERROR(S).
+    `|EPS|` under a warning. Points with `|EPS| > 700` are dropped with a
+    wrong-curve warning instead of crashing the conversion (`exp()`
+    overflow), and points folding onto a duplicated μ abscissa collapse to
+    the last ordinate, warned (a `/FUNCT` cannot carry a vertical step).
+    Starter-validated: echo `PRESSURE FUNCTION NUMBER = 90001`,
+    `TENSILE BULK = 500`, `UNLOADING BULK = 500` for KUN=500,
+    0 ERROR(S).
 
   - **`*MAT_LOW_DENSITY_VISCOUS_FOAM` (073) → `/MAT/LAW90` [+
     `/VISC/PRONY`]** (dyna2rad `p_ConvertMatL73`, CM:4275-4338; layout
@@ -68,7 +84,11 @@ Prior history (before this changelog was introduced) is summarized in the
     folds into the `_ref_flag_materials` registry (both /XREF diagnostics
     fire). LAW90 is already on the starter's solid-/XREF whitelist, so the
     `_target_mat_law` entry alone makes MAT_073 parts RECEIVE
-    `*INITIAL_FOAM_REFERENCE_GEOMETRY` blocks (+ `Ismstr=10`).
+    `*INITIAL_FOAM_REFERENCE_GEOMETRY` blocks. The parts' `/PROP/SOLID` is
+    pinned `Ismstr=10` (total strain) UNCONDITIONALLY — dyna2rad's own
+    rule for every MAT_073 section (CP:484-495), not only on the /XREF
+    path (LAW90 is a total-formulation law; deep-crush robustness) — with
+    a drag warning when a non-foam part shares the section.
     Starter-validated: NORMAL TERMINATION 0 ERROR(S) 0 WARNING(S), echo
     `ORDER OF PRONY SERIES = 2`.
 
@@ -86,8 +106,9 @@ Prior history (before this changelog was introduced) is summarized in the
     compression-positive — d2r's values). Curves whose FIRST abscissa is
     `>0` are stress-vs-`V/V0` and recompute to `1−V/V0` as a new `/FUNCT`
     (d2r `RecomputeCurvesBasedOnFirstAbcissa`, CM:9215-9266), originals
-    kept; `LCSR>0` samples the first 4 points + the 5th (the MODIFIED rule,
-    CM:9017-9021) and replicates each direction's base function per rate
+    kept; `LCSR>0` samples the curve's FIRST FIVE points (the MODIFIED
+    rule, CM:9017-9021 — the plain MAT_026 rule takes the first 4 + the
+    LAST instead) and replicates each direction's base function per rate
     with `Fscale`=ordinate; `LCSR=−1` per-direction cards are dropped
     loudly (d2r never reads them). The `LCA<0` transversely-isotropic
     surface follows d2r's remap (`fun11←LCB`, `fun22=fun33←LCC`,
@@ -100,7 +121,18 @@ Prior history (before this changelog was introduced) is summarized in the
     the honest reason: the starter ACCEPTS LAW50 on `/PROP/TYPE14`
     (SOLID_ISOTROPIC class) but only `IGTYP 6` builds the orthotropy tensor
     (`SMORTH3`, `s8zinit3.F:435`) — on TYPE14 the directions silently
-    collapse onto the element frame. A MAT_126 part holding SHELL elements
+    collapse onto the element frame. **The property pins `Isolid=1` +
+    `Ismstr=1` — dyna2rad's fixed honeycomb values (CP:415 overrides the
+    ELFORM map, CP:472), solver-measured**: MAT_126's default element is
+    LS-DYNA solid type 0, a 1-point corotational "nonlinear spring-type
+    solid" whose yield curves are ENGINEERING strain (the manual's LCA
+    note scopes log strain to the NON-corotational formulations, warned
+    when the deck states one); the previous ELFORM-derived
+    `Isolid=17`/`Ismstr=0→4` evaluated the curves at LOG strain
+    (measured: |SX| = curve(0.5108) at 0.40 nominal crush to 5 digits),
+    pulling a densification knee at 0.70 forward to `1−exp(−0.70)` = 0.50
+    nominal — 28% early. LAW50 itself declares SMALL_STRAIN
+    (`hm_read_mat50.F90:437`). A MAT_126 part holding SHELL elements
     is refused (LAW50 has no shell class → ERROR 3046). Starter-validated:
     NORMAL TERMINATION 0/0, `YIELD STRESS 11` echo listing exactly the 5
     sampled `STRAIN RATE` lines.
@@ -121,12 +153,19 @@ Prior history (before this changelog was introduced) is summarized in the
     enumeration), `NUM` named-dropped (LS-DYNA needs NUM sustained
     violation steps, Radioss deletes on the FIRST — earlier erosion
     possible). Starter bound checks pre-announced (`ALPHA ∉ [0,√4.5]` →
-    ERROR 1897, `PR ∉ [0,0.5)` → ERROR 49). Version gate measured, not
-    guessed: LAW115 on k2rad's ELFORM-derived `Isolid 17` draws starter
-    WARNING 1905 — `sgrtails.F:631` gates on `JHBE 3..20` WITHOUT checking
-    Istat although the message text names the statistic formulation —
-    non-fatal (0 ERROR(S) measured); k2rad pre-announces it with the
-    `Isolid=24` remedy.
+    ERROR 1897, `PR ∉ [0,0.5)` → ERROR 49). **LAW115 hex parts are routed
+    to `/PROP/SOLID Isolid=24` (HEPH), ENGINE-measured**: on the
+    ELFORM-derived full-integration `Isolid=17` the starter only answers
+    WARNING 1905 (`sgrtails.F:631` gates `JHBE 3..20` without checking
+    Istat), but the ENGINE collapses the solid time step below DTMIN at
+    cycle 0, jumps past the end time and prints NORMAL TERMINATION after
+    1 cycle — a silent empty run (all four LAW115 validation decks did
+    this; the identical decks at Isolid=24 ran 24k-264k cycles to
+    completion with 0 ERROR(S) 0 WARNING(S)). Isolid=24 is also dyna2rad's
+    default hex formulation, so d2r decks never see the trap. Only the
+    measured-fatal 17 is remapped — tet formulations keep their derived
+    value with the 1905 window pre-announced — and a non-LAW115 part
+    sharing the *SECTION_SOLID is drag-warned by name.
 
   - **`*MAT_HILL_FOAM` (177) → `/MAT/LAW62` (VISC_HYP)** (dyna2rad
     `p_ConvertMatL177H`, CM:9741-9896; layout audited against
@@ -138,17 +177,21 @@ Prior history (before this changelog was introduced) is summarized in the
     Hill→Ogden identity, **INDEX-ALIGNED over the nonzero-C slots — a d2r
     defect fixed consciously**: dyna2rad compacts the C and B lists
     independently (CM:9877-9883), so a zero `Ci` mid-list makes it read
-    `Bi` out of alignment (and potentially out of range). The parse
-    follows the MANUAL's field order `MID RO K MU N LCID FITTYPE LCSR` —
-    the shipped `Keyword971/mat_177.cfg` transposes N and MU and would
-    feed the deck's damping into `Nu`. `K` (LAW62 derives bulk from Nu),
+    `Bi` out of alignment (and potentially out of range). Card 1 is
+    `MID RO K N MU LCID FITTYPE LCSR` — the manual (p.2-1216) and the
+    shipped `Keyword971/mat_177.cfg` agree, field 4 is N (an earlier
+    draft of this batch read the two transposed, feeding MU into
+    `Nu = N/(1+2N)`; caught in review, fixed before merge). `K` (LAW62
+    derives bulk from Nu),
     `MU`, `LCSR` and the Mullins `R/M` card are named-dropped. The
     `LCID>0` curve-fit branch warn-skips AT PARSE (it changes the card
     layout — no C/B cards — the MAT_240-variant policy): LAW62 has no
     `Itab`/fit path anywhere (`hm_read_mat62.F` reads constants only), and
     dyna2rad emits NOTHING while silently wiring the part's mat to 0.
     Starter-validated: NORMAL TERMINATION 0/0, echo `EQUIVALENT POISSON
-    RATIO = 0.1667` = N/(1+2N). The only shell-capable law of the batch
+    RATIO = 0.25` = N/(1+2N) for N=0.5 read from FIELD 4 of a
+    manual-order deck (a transposed read of that deck would print 0.0454
+    from MU=0.05). The only shell-capable law of the batch
     (SHELL_ISOTROPIC + SOLID_ISOTROPIC).
 
   - **`*CONTACT_INTERIOR` → `Icontrol` resolution (warned, not emitted)**
@@ -165,8 +208,8 @@ Prior history (before this changelog was introduced) is summarized in the
     0 warnings. Emitting the dead field would be silently wrong, so k2rad
     resolves and WARNS: each PSID resolves per d2r CC:692-727 (a
     `*SET_PART`'s ids are part ids; a new `*SET_PART_ADD` handler stores
-    one level of part-set nesting, expanded here — the Yaris/Camry NCAC
-    decks use exactly that shape), solid parts are NAMED as running
+    one level of part-set nesting — the Yaris/Camry NCAC decks use
+    exactly that shape), solid parts are NAMED as running
     without interior contact (mitigation: `/DT/BRICK/CST`, or hand-set
     `Icontrol=1` after migrating the deck to the 2025 format), parts
     whose property type has no Icontrol at ANY version are named
@@ -174,6 +217,23 @@ Prior history (before this changelog was introduced) is summarized in the
     `DA1..DA4` attributes (PSF/Fa/ED/TYPE — defined on the referenced set
     per Manual Vol I; d2r reads none of them) are named-dropped, TYPE=2
     specifically. `note_recognized_not_emitted` records the keyword.
+
+  - **`*SET_PART_ADD` flattened for EVERY part-set consumer** — the
+    post-parse `_flatten_part_set_adds` prepass expands each `_ADD` set
+    (one nesting level, order-independent: only sets that were DIRECT
+    `*SET_PART[_LIST]`s at parse count as children; nested `_ADD`
+    children and unresolvable ids are warned) into a plain
+    `state.part_sets` entry, so contact sides `SSTYP/MSTYP=2`,
+    `--auto-gapmin`, `/GRAV` scopes, ALE groups and `*CONTACT_INTERIOR`
+    all resolve it through the ordinary lookup. Before the pass, a
+    contact referencing an `_ADD` set resolved to an EMPTY side with a
+    warning blaming the set for "naming no parts" — a diagnosability
+    regression over the old skipped-keyword report, and a silently-empty
+    interface. An `_ADD` colliding with a direct set of the same id
+    keeps the direct set, warned. (Parse-time consumers —
+    `*ELEMENT_MASS_PART_SET`, `*LOAD_BODY_PARTS` — still resolve during
+    dispatch and see only direct sets, a pre-existing deck-order
+    limitation.)
 
   - Registry plumbing: the five families extend `_target_mat_law` (LAW21/
     90/50/115/62 — only LAW90 is on the starter's solid-/XREF whitelist;
@@ -187,12 +247,18 @@ Prior history (before this changelog was introduced) is summarized in the
     MAT_005 on a shell part answers exactly `ERROR 3046 ... MATERIAL ...
     OF TYPE 21`).
 
-  - tests/test_foams.py: 67 tests + 68 subtests; suite 2046 → 2113
-    (2111 passed + 2 skipped). Every emitted card starter-validated live
-    (`starter_win64` 2026-05-20, `/BEGIN 2022`, np=1): all five materials
-    0 ERROR(S); MAT_073/126/177 NORMAL TERMINATION with 0 WARNINGS;
-    MAT_005's WARNING 829 and MAT_154's WARNING 1905 are data/pairing
-    artifacts documented above; goldens byte-identical.
+  - tests/test_foams.py: 77 tests + 68 subtests; suite 2046 → 2123
+    (2121 passed + 2 skipped). Every emitted card starter-validated live
+    (`starter_win64` 2026-05-20, `/BEGIN 2022`, np=1): the combined
+    all-five-materials deck reads back NORMAL TERMINATION, 0 ERROR(S),
+    0 WARNING(S); goldens
+    byte-identical. Engine-validated on single-element and crush decks
+    (see the PR): MAT_005 pressure curve ≤0.53% + exact Drucker-Prager
+    limits + LS-DYNA-line unloading after the Kt fix, MAT_126 exact
+    2.0/3.0/4.0 MPa per-direction plateaus + skew-rotated frame swap,
+    MAT_154 SIGP −0.01% and hardening ≤0.01% (now runnable as emitted),
+    MAT_177 Ogden nominal-stress match ≤0.01%, MAT_073 loading curve
+    +viscous ≤2% with measured Prony stiffening and HU hysteresis.
 
 - **Adhesives / cohesive batch** (`*MAT_COHESIVE_MIXED_MODE` 138,
   `*MAT_ARUP_ADHESIVE` 169, `*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE` 240,

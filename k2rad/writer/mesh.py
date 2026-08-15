@@ -1899,7 +1899,62 @@ def _make_properties(state: ConversionState) -> List[str]:
                 "only the LAW95 element groups (WARNING 1200) and would "
                 "leave these parts at the default. Give the LAW95 parts "
                 "their own *SECTION_SOLID to keep the others unchanged.")
-    ismstr10_secids: Set[int] = xref_secids | law95_secids
+    # ... and sections serving a /MAT/LAW90 (*MAT_LOW_DENSITY_VISCOUS_FOAM)
+    # part: dyna2rad pins Ismstr=10 on the generated /PROP/TYPE14 for every
+    # MAT_073 *SECTION_SOLID unconditionally (convertprops.cxx CP:484-495 —
+    # the same rule that moves DAMP onto the property), LAW90 being a
+    # total-strain law whose deep-crush robustness needs it. Same drag
+    # caveat as above for a shared section.
+    law90_pids = {pid for pid, part in state.parts.items()
+                  if part.mid in state.mat_low_density_viscous_foam}
+    law90_secids: Set[int] = {
+        part_secids[pid] for pid in law90_pids
+        if pid in solid_elem_pids and pid in part_secids}
+    if law90_secids:
+        dragged90 = sorted(pid for pid, sid in part_secids.items()
+                           if sid in law90_secids and pid in solid_elem_pids
+                           and pid not in law90_pids
+                           and pid not in xref_solid_pids
+                           and pid not in law95_pids)
+        if dragged90:
+            state.warn(
+                "/MAT/LAW90 (*MAT_LOW_DENSITY_VISCOUS_FOAM): solid part(s) "
+                f"{dragged90} share a *SECTION_SOLID with a LAW90 foam "
+                "part, so their shared /PROP/SOLID also switches to "
+                "Ismstr=10 (total-strain formulation — dyna2rad pins it "
+                "for every MAT_073 section, CP:484-495). Give the foam "
+                "parts their own *SECTION_SOLID to keep the others at "
+                "the default.")
+    ismstr10_secids: Set[int] = xref_secids | law95_secids | law90_secids
+
+    # Sections serving a /MAT/LAW115 (*MAT_DESHPANDE_FLECK_FOAM) part leave
+    # the full-integration hex Isolid=17 for 24 (HEPH): LAW115 at Isolid 17
+    # is engine-fatal — the solid time step collapses below DTMIN at cycle 0
+    # and the run "completes" after 1 cycle with NORMAL TERMINATION
+    # (measured; the starter only answers WARNING 1905). Isolid=24 is also
+    # dyna2rad's default hex formulation, and the identical deck runs to
+    # completion there with 0 warnings. Announced per material in
+    # _resolve_mat_deshpande_fleck; only the measured-fatal 17 is remapped
+    # (tet formulations keep their ELFORM-derived value, warned there).
+    law115_pids = {pid for pid, part in state.parts.items()
+                   if part.mid in state.mat_deshpande_fleck}
+    law115_secids: Set[int] = {
+        part_secids[pid] for pid in law115_pids
+        if pid in solid_elem_pids and pid in part_secids}
+    if law115_secids:
+        dragged115 = sorted(pid for pid, sid in part_secids.items()
+                            if sid in law115_secids
+                            and pid in solid_elem_pids
+                            and pid not in law115_pids)
+        if dragged115:
+            state.warn(
+                "/MAT/LAW115 (*MAT_DESHPANDE_FLECK_FOAM): solid part(s) "
+                f"{dragged115} share a *SECTION_SOLID with a LAW115 foam "
+                "part, so their shared /PROP/SOLID also switches from "
+                "Isolid=17 to Isolid=24 (HEPH — LAW115 on 17 collapses "
+                "the engine time step at cycle 0). Give the foam parts "
+                "their own *SECTION_SOLID to keep the others at the "
+                "full-integration default.")
 
     # Spotweld beam parts become /SPRING connectors (their /PROP/TYPE13 is
     # emitted by _make_spotweld_beam_connectors); their beams must not force an
@@ -2035,6 +2090,12 @@ def _make_properties(state: ConversionState) -> List[str]:
         h, iso = _solid_hg_values(state, sec, None)
         if iso is not None:
             isolid = iso
+        # LAW115 sections: remap the (engine-fatal) full-integration hex 17
+        # to HEPH 24 — see the law115_secids comment above. Applied last so
+        # a *HOURGLASS-resolved formulation is respected; only the measured
+        # 17 is touched.
+        if sec.secid in law115_secids and isolid == 17:
+            isolid = 24
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
@@ -2114,6 +2175,72 @@ def _make_properties(state: ConversionState) -> List[str]:
     return lines
 
 
+def _flatten_part_set_adds(state: ConversionState) -> None:
+    """*SET_PART_ADD → a plain part set, resolved ONCE for every consumer.
+
+    An "_ADD" set's data ids are part-SET ids, nested exactly one level
+    (LS-DYNA Vol I R17 p.43-57 "combining part sets"; dyna2rad's
+    ConvertContactInterior applies the same one-level rule, CC:692-727).
+    Expanding it here into a normal ``state.part_sets`` entry makes every
+    part-set consumer — contact sides SSTYP/MSTYP=2, *CONTACT_INTERIOR,
+    --auto-gapmin, /GRAV part scopes, ALE material groups, /INIBRI part
+    scopes — resolve the set without knowing the variant; before this pass
+    existed, a contact referencing an _ADD set silently resolved to an
+    EMPTY side with a warning blaming the set for "naming no parts".
+
+    Runs post-parse (all *SET_PART blocks are read by then; a parse-time
+    expansion could miss a child defined later in the deck) and is
+    idempotent: convert() calls it right after dispatch so --auto-gapmin
+    sees it, and build_starter calls it again for direct-writer callers.
+    Parse-time consumers (*ELEMENT_MASS_PART_SET, *LOAD_BODY_PARTS) resolve
+    during dispatch and still see only direct *SET_PART sets — a
+    pre-existing deck-order limitation this pass cannot lift.
+    """
+    if state.part_set_adds_flattened:
+        return
+    state.part_set_adds_flattened = True
+    # Snapshot the DIRECT sets before anything is added: the one-level rule
+    # must not depend on the psid iteration order (a lower-id _ADD flattened
+    # first would otherwise be visible to a higher-id _ADD as if it were a
+    # direct set — an accidental second nesting level).
+    direct_ids = set(state.part_sets)
+    for psid, (title, child_ids) in sorted(state.part_set_adds.items()):
+        if psid in direct_ids:
+            state.warn(
+                f"*SET_PART_ADD {psid}: a *SET_PART[_LIST] with the same id "
+                "is also defined — LS-DYNA set ids are unique per set type, "
+                "so the direct set wins and the _ADD block is IGNORED. "
+                "Check the two blocks.")
+            continue
+        pids: List[int] = []
+        seen: Set[int] = set()
+        missing: List[int] = []
+        nested: List[int] = []
+        for child in child_ids:
+            if child not in direct_ids:
+                (nested if child in state.part_set_adds
+                 else missing).append(child)
+                continue
+            for p in state.part_sets[child][1]:
+                if p not in seen:
+                    seen.add(p)
+                    pids.append(p)
+        if missing:
+            state.warn(
+                f"*SET_PART_ADD {psid}: child part-set id(s) {missing} have "
+                "no parsed *SET_PART[_LIST] (or use an unsupported variant "
+                "such as _COLUMN/_GENERATE) — that slice of the combined "
+                "set is unresolved.")
+        if nested:
+            state.warn(
+                f"*SET_PART_ADD {psid}: child id(s) {nested} are themselves "
+                "*SET_PART_ADD sets — an _ADD set nests part-set ids "
+                "exactly ONE level (dyna2rad CC:692-727), so the nested "
+                "_ADD children are NOT expanded and that slice of the "
+                "combined set is dropped.")
+        state.part_sets[psid] = (title, pids)
+
+
 def _resolve_contact_interior(state: ConversionState) -> None:
     """*CONTACT_INTERIOR → Icontrol=1 (solid distortion control) on the
     listed parts' /PROP — resolved, classified and WARNED, not emitted.
@@ -2132,7 +2259,8 @@ def _resolve_contact_interior(state: ConversionState) -> None:
     wrong, so the conversion is a loud warning naming the affected parts
     (plus note_recognized_not_emitted), the PSID resolution following
     dyna2rad CC:671-767: each id is a *SET_PART (part ids); a *SET_PART_ADD
-    expands ONE level of part-set nesting. The per-set attributes DA1..DA4
+    arrives pre-expanded by _flatten_part_set_adds (ONE level of part-set
+    nesting). The per-set attributes DA1..DA4
     (PSF/Fa/ED/TYPE — the manual defines them on the referenced set, not the
     contact card) have no Icontrol counterpart at any version and are warned
     when set; dyna2rad reads none of them.
@@ -2149,34 +2277,20 @@ def _resolve_contact_interior(state: ConversionState) -> None:
     # (hm_read_prop06/14/20/21/22.F + /DEF_SOLID); k2rad has no
     # *ELEMENT_TSHELL path, so "has an Icontrol-bearing property" reduces
     # to "holds solid elements" here.
+    # *SET_PART_ADD sets were already expanded into part_sets by
+    # _flatten_part_set_adds (one nesting level, dyna2rad CC:692-727), so a
+    # single lookup covers both variants.
     solid_pids = {e.pid for e in state.solid_elems}
     for psid in sorted(set(state.contact_interior_psids)):
-        title = ""
-        pids: List[int] = []
         direct = state.part_sets.get(psid)
-        added = state.part_set_adds.get(psid)
-        if direct is not None:
-            title, pids = direct[0], list(direct[1])
-        elif added is not None:
-            title = added[0]
-            for child in added[1]:
-                sub = state.part_sets.get(child)
-                if sub is None:
-                    state.warn(
-                        f"*CONTACT_INTERIOR: *SET_PART_ADD {psid} lists "
-                        f"part-set {child}, which is not a parsed *SET_PART"
-                        "[_LIST] — that slice of the interior-contact scope "
-                        "is unresolved (an *_ADD set nests part-set ids one "
-                        "level, dyna2rad CC:692-727).")
-                else:
-                    pids.extend(sub[1])
-        else:
+        if direct is None:
             state.warn(
                 f"*CONTACT_INTERIOR: part set {psid} is not defined in the "
                 "deck (or uses an unsupported *SET_PART variant such as "
                 "_COLUMN/_GENERATE) — the interior-contact scope cannot be "
                 "resolved for it.")
             continue
+        title, pids = direct[0], list(direct[1])
         known = [p for p in pids if p in state.parts]
         unknown = sorted(set(pids) - set(known))
         if unknown:
@@ -2487,7 +2601,9 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
                      itetra10: int, istrain: int,
                      refvec=(1.0, 0.0, 0.0), ip: int = 11,
                      phi: float = 0.0, skew_id: int = 0,
-                     refpoint=(0.0, 0.0, 0.0)) -> List[str]:
+                     refpoint=(0.0, 0.0, 0.0),
+                     isolid: Optional[int] = None,
+                     ismstr: int = 0) -> List[str]:
     """Orthotropic solid property /PROP/TYPE6 (SOL_ORTH). With skew_id the
     orthotropy axes are taken DIRECTLY from the /SKEW (starter maps Ip=0 +
     skew_ID to the internal Ip<0 skew branch: material dir 1 = skew X' for
@@ -2502,8 +2618,14 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
     ``'Px'/'Py'/'Pz'`` into ``GEO(33..35)`` and echoes them for ``Ip=21``
     (point alone, :496) and ``Ip=24`` (cylindrical, point AND vector, :500).
     Routing a point through *refvec* puts it in the wrong columns and the
-    orthotropy is silently built about the global origin instead."""
-    isolid = _elform_to_isolid(sec.elform) if sec else 0
+    orthotropy is silently built about the global origin instead.
+
+    *isolid* None (default) derives the formulation from the section ELFORM
+    as everywhere else; an explicit value pins it (the MAT_126 honeycomb
+    path passes 1 — with *ismstr* 1 — matching dyna2rad's fixed
+    ISOLID=1/Ismstr=1 for the honeycomb-family TYPE6, CP:404-476)."""
+    if isolid is None:
+        isolid = _elform_to_isolid(sec.elform) if sec else 0
     vx, vy, vz = (0.0, 0.0, 0.0) if skew_id else refvec
     px, py, pz = (0.0, 0.0, 0.0) if skew_id else refpoint
     if skew_id:
@@ -2513,7 +2635,7 @@ def _emit_prop_type6(prop_id: int, title: str, sec: Optional[SectionSolid],
         f"/PROP/TYPE6/{prop_id}",
         title,
         "#   Isolid    Ismstr               Icpre  Itetra10     Inpts   Itetra4    Iframe                  Dn",
-        f"{_i(isolid)}{_i(0)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
+        f"{_i(isolid)}{_i(ismstr)}{b10}{_i(0)}{_i(itetra10)}{_i(0)}{_i(0)}{_i(0)}{_f(0.0)}",
         "#                 qa                  qb                   h",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         "#                 Vx                  Vy                  Vz   skew_ID        Ip     Iorth",

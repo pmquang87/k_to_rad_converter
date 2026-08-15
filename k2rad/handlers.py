@@ -3471,10 +3471,15 @@ def handle_set_part_list(block: Block, state: ConversionState) -> None:
 
 def handle_set_part_add(block: Block, state: ConversionState) -> None:
     """*SET_PART_ADD — its data ids are part-SET ids (one nesting level), NOT
-    part ids, so it must not land in state.part_sets where every consumer
-    reads part ids directly. Stored separately; *CONTACT_INTERIOR expands
-    exactly one level (dyna2rad ConvertContactInterior CC:692-727 does the
-    same). The header carries the same SID DA1..DA4 layout as *SET_PART."""
+    part ids, so it cannot land in state.part_sets AT PARSE TIME (a child set
+    may not be read yet, and every consumer reads the members as part ids).
+    Stored separately here; the post-parse ``_flatten_part_set_adds`` prepass
+    (writer/mesh.py) expands exactly one nesting level — the rule dyna2rad's
+    ConvertContactInterior applies, CC:692-727 — into a plain part_sets
+    entry, so EVERY part-set consumer (contacts SSTYP/MSTYP=2,
+    *CONTACT_INTERIOR, --auto-gapmin, gravity scopes, ALE groups ...)
+    resolves the set without knowing the variant. The header carries the
+    same SID DA1..DA4 layout as *SET_PART."""
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
@@ -6011,10 +6016,10 @@ def handle_mat_deshpande_fleck_foam(block: Block,
 def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
     """*MAT_HILL_FOAM (MAT_177) → /MAT/LAW62 — constants branch (LCID = 0).
 
-    LS-DYNA cards (Manual Vol II R17 p.2-1216, OFFICIAL field order — the
-    shipped Keyword971 cfg transposes N and MU, loading the deck's MU into
-    "N"; k2rad follows the manual: MID RO K MU N LCID FITTYPE LCSR):
-      Card1: MID RO K MU N LCID FITTYPE LCSR
+    LS-DYNA cards (Manual Vol II R17 p.2-1216; the shipped Keyword971
+    mat_177.cfg CARD(...,LSDYNA_K,LSDYNA_N,LSD_MU,...) states the SAME
+    order — field 4 is N, field 5 is MU):
+      Card1: MID RO K N MU LCID FITTYPE LCSR
       Card2 (iff LCID == 0): C1..C8    Card3 (iff LCID == 0): B1..B8
       Card4 (optional, both branches): R M
     LCID > 0 selects the curve-fit branch (FITTYPE test data), for which
@@ -6035,8 +6040,8 @@ def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
     mid     = to_int(f1[0])
     rho     = to_float(f1[1]) if len(f1) > 1 else 0.0
     kbulk   = to_float(f1[2]) if len(f1) > 2 else 0.0
-    mu      = to_float(f1[3]) if len(f1) > 3 else 0.0
-    n       = to_float(f1[4]) if len(f1) > 4 else 0.0
+    n       = to_float(f1[3]) if len(f1) > 3 else 0.0
+    mu      = to_float(f1[4]) if len(f1) > 4 else 0.0
     lcid    = to_int(f1[5])   if len(f1) > 5 else 0
     fittype = to_int(f1[6])   if len(f1) > 6 else 0
     lcsr    = to_int(f1[7])   if len(f1) > 7 else 0
@@ -6070,9 +6075,9 @@ def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
 def handle_contact_interior(block: Block, state: ConversionState) -> None:
     """*CONTACT_INTERIOR — a FREE_CELL_LIST of part-set ids, 8 per card,
     ending at the next keyword; the keyword may appear more than once and the
-    ids accumulate. Resolution (incl. the *SET_PART_ADD one-level expansion)
-    and the version-gated Icontrol mapping live in
-    writer/mesh.py::_resolve_contact_interior."""
+    ids accumulate. Resolution and the version-gated Icontrol mapping live in
+    writer/mesh.py::_resolve_contact_interior (*SET_PART_ADD ids arrive
+    pre-expanded by _flatten_part_set_adds)."""
     offset = _title_offset(block)
     for line in block.raw[offset:]:
         for tok in parse_free(line):

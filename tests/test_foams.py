@@ -19,11 +19,14 @@ tests/test_metal_plasticity_2.py).
 Assertions are COLUMN-EXACT against the emitted cards, and every physics
 constant is recomputed by hand in the test rather than copied from the
 implementation: MAT_005's E = 9GK/(3K+G) = 900 and Nu = (3K-2G)/(6K+2G)
-= 0.2 for G=375/KUN=500, Kt = KUN/100, the curve transform mu = exp(-EPS)-1
-point by point, MAT_126's G-row fallback E/2(1+PR) = 200, the V/V0 recompute
-1 - x, MAT_154's verbatim Deshpande-Fleck constants, and MAT_177's Hill →
-Ogden identity mu_i = Ci*Bi/2 / alpha_i = Bi with Nu = N/(1+2N) = 0.25 for
-N=0.5.
+= 0.2 for G=375/KUN=500, Kt = B = KUN (the solver-measured fix over
+dyna2rad's dead-B Kt=KUN/100 — see _emit_mat_law21; VCR=1 keeps KUN/100 on
+purpose), the curve transform mu = exp(-EPS)-1 point by point, MAT_126's
+G-row fallback E/2(1+PR) = 200, the V/V0 recompute 1 - x, MAT_154's
+verbatim Deshpande-Fleck constants, and MAT_177's Hill → Ogden identity
+mu_i = Ci*Bi/2 / alpha_i = Bi with Nu = N/(1+2N) = 0.25 for N=0.5 — the
+_mat177 fixture states card 1 in the MANUAL's MID RO K N MU order, so the
+Nu assertion pins the parse columns.
 
 Where a conversion turns on what an LS-DYNA field MEANS rather than on
 arithmetic — VCR=1's B=0 that the starter replaces by Kt (its WARNING 829),
@@ -40,23 +43,24 @@ A third d2r gap is closed loudly: an all-positive MAT_005 pressure curve
 function) converts with a warning.
 
 Every emitted card in this batch was validated on a live OpenRadioss starter
-run (starter_win64 2026-05-20, /BEGIN 2022, np=1): all five materials read
-back 0 ERROR(S), exit 0 — MAT_073/126/177 with NORMAL TERMINATION and 0
-WARNINGS. The starter's own listing confirmed the field-by-field placement
-asserted below: LAW21's "PRESSURE FUNCTION NUMBER = 90001 / TENSILE BULK =
-10 / UNLOADING BULK = 1000" (Kt=KUN/100 and B=KUN for KUN=1000), LAW90's
+run (starter_win64 2026-05-20, /BEGIN 2022, np=1): the all-five-materials
+combined deck reads back NORMAL TERMINATION, 0 ERROR(S), 0 WARNING(S). The
+starter's own listing confirmed the field-by-field placement asserted
+below: LAW21's "PRESSURE FUNCTION NUMBER = 90001 / TENSILE BULK = 500 /
+UNLOADING BULK = 500" (Kt=B=KUN for KUN=500 — the dead-B fix), LAW90's
 "SHAPE FACTOR FOR UNLOADING = 2 / HYSTERETIC UNLOADING FACTOR = 0.2" plus
 "ORDER OF PRONY SERIES = 2" from the same-id /VISC/PRONY, LAW50's "YIELD
 STRESS 11" block listing exactly the five sampled "STRAIN RATE" lines
-1e-3..100 (the LCSR 5-point rule), LAW62's "EQUIVALENT POISSON RATIO =
-0.1667" = N/(1+2N), and — a check that could FAIL — LAW115's "MAX.
-PRINCIPAL STRESS AT FAILURE = 25", proving the PFAIL->SIGP_F fix reached
-the starter (dyna2rad reads 0 there). The two non-clean runs are DATA
-artifacts, not conversion defects: MAT_005's WARNING 829 "YIELD SURFACE HAS
-NO ROOT" fires on the synthetic A0/A1/A2 (A1^2-4*A0*A2 < 0), and MAT_154
-draws WARNING 1905 for LAW115 on Isolid 17 (sgrtails.F:631 gates on JHBE
-3..20 without checking Istat) — surfaced by k2rad's own pairing warning
-tested below. A NEGATIVE control — the same MAT_005 on a SHELL part —
+1e-3..100 (the LCSR first-five rule), LAW62's "EQUIVALENT POISSON RATIO =
+0.25" = N/(1+2N) for N=0.5 read from FIELD 4 of a manual-order deck (a
+transposed read would print 0.0454 from MU=0.05), and — a check that could
+FAIL — LAW115's "MAX.
+PRINCIPAL STRESS AT FAILURE = 50", proving the PFAIL->SIGP_F fix reached
+the starter (dyna2rad reads 0 there). MAT_154 now starts warning-free: the
+Isolid=24 routing clears WARNING 1905, whose Isolid-17 pairing was
+ENGINE-fatal (dt collapse at cycle 0, 1-cycle "NORMAL TERMINATION" with an
+empty result — the trap the routing closes).
+A NEGATIVE control — the same MAT_005 on a SHELL part —
 answers exit 2 with "ERROR ID: 3046 ... ELEMENTS OF TYPE SHELL ARE NOT
 COMPATIBLE WITH MATERIAL ID 7 OF TYPE 21", the exact refusal the shell
 warning names.
@@ -252,11 +256,15 @@ def _mat154(kw="*MAT_DESHPANDE_FLECK_FOAM", mid=7, rho="2.7E-10", e=1000.0,
             + _row(epsd, alpha2, beta, sigp, derfi, cfail, pfail, num) + "\n")
 
 
-def _mat177(kw="*MAT_HILL_FOAM", mid=7, rho="1.0E-10", k="", mu="", n=0.5,
+def _mat177(kw="*MAT_HILL_FOAM", mid=7, rho="1.0E-10", k="", n=0.5, mu="",
             lcid="", fittype="", lcsr="",
             c=(0.8, "", 0.4, "", "", "", "", ""),
             b=(4.0, 5.0, 2.0, "", "", "", "", ""), rm=None) -> str:
-    deck = kw + "\n" + _row(mid, rho, k, mu, n, lcid, fittype, lcsr) + "\n"
+    # Card 1 in the MANUAL's field order MID RO K N MU (Vol II R17 p.2-1216;
+    # the shipped mat_177.cfg agrees) — with the deck stated in that order,
+    # the Nu = N/(1+2N) assertions below are real checks of the parse
+    # columns, not echoes of a fixture that mirrors the implementation.
+    deck = kw + "\n" + _row(mid, rho, k, n, mu, lcid, fittype, lcsr) + "\n"
     if not lcid:
         deck += _row(*c) + "\n" + _row(*b) + "\n"
     if rm is not None:
@@ -344,13 +352,17 @@ class Mat005Tests(unittest.TestCase):
         fid = _col_i(cards[3], 1, 10)
         self.assertEqual(fid, 90001)
         self.assertEqual(cards[3][10:20], " " * 10)        # literal gap
-        self.assertEqual(_col_f(cards[3], 21, 40), 5.0)    # Kt = KUN/100
+        self.assertEqual(_col_f(cards[3], 21, 40), 500.0)  # Kt = KUN (VCR=0)
         self.assertEqual(_col_f(cards[3], 41, 60), 0.0)    # FscaleP -> 1.0
         self.assertEqual(_col_f(cards[4], 1, 20), -0.05)   # P_min = PC
         self.assertEqual(_col_f(cards[4], 21, 40), 0.0)    # P_ext
         self.assertEqual(_col_f(cards[5], 1, 20), 500.0)   # B = KUN
         self.assertEqual(_col_f(cards[5], 21, 40), 0.0)    # Mu_max -> 1e20
-        self.assertTrue(_warns(res, "Kt = KUN/100 = 5"))
+        # The Kt = B = KUN fix over dyna2rad's dead-B Kt=KUN/100 is warned
+        # with the engine mechanism named.
+        hits = _warns(res, "Kt = B = KUN = 500")
+        self.assertTrue(hits)
+        self.assertIn("Mu_max", hits[0])
 
     def test_eps_p_transform(self):
         """mu_i = exp(-EPS_i) - 1, ascending, ordinates unchanged."""
@@ -398,11 +410,17 @@ class Mat005Tests(unittest.TestCase):
         self.assertTrue(_blocks(starter, "/FUNCT/90001"))
 
     def test_vcr_1_zeroes_unloading_bulk(self):
+        """VCR=1 keeps dyna2rad's B=0 + Kt=KUN/100 pair ON PURPOSE: the
+        starter substitutes B=Kt (WARNING 829) and the soft modulus makes
+        the engine retrace the loading curve — VCR=1's load=unload
+        semantics — where the VCR=0 Kt=KUN fix would unload elastically."""
         res, starter = _convert(_solid_deck(_mat005(vcr=1.0)))
         cards = _cards(_block(starter, "/MAT/LAW21/7"))
         self.assertEqual(_col_f(cards[5], 1, 20), 0.0)     # B = 0
+        self.assertEqual(_col_f(cards[3], 21, 40), 5.0)    # Kt = KUN/100
         self.assertTrue(_warns(res, "VCR=1"))
         self.assertTrue(_warns(res, "WARNING 829"))
+        self.assertFalse(_warns(res, "Kt = B = KUN"))
 
     def test_mixed_sign_curve_drops_negative_branch(self):
         res, starter = _convert(_solid_deck(
@@ -434,6 +452,56 @@ class Mat005Tests(unittest.TestCase):
     def test_pc_positive_warns(self):
         res, _ = _convert(_solid_deck(_mat005(pc=0.05)))
         self.assertTrue(_warns(res, "PC=0.05 is POSITIVE"))
+
+    def test_pc_blank_semantic_flip_warns(self):
+        """LS-DYNA PC=0 is an ACTIVE zero-tension floor (Remark 1: pressure
+        below the cutoff is reset to it); LAW21 P_min=0 becomes -INFINITY
+        (unlimited tension) — the most common card state, warned."""
+        res, starter = _convert(_solid_deck(_mat005(pc=0.0)))
+        self.assertTrue(_warns(res, "PC is 0/blank"))
+        cards = _cards(_block(starter, "/MAT/LAW21/7"))
+        self.assertEqual(_col_f(cards[4], 1, 20), 0.0)     # still verbatim
+        res2, _ = _convert(_solid_deck(_mat005()))         # pc=-0.05 default
+        self.assertFalse(_warns(res2, "PC is 0/blank"))
+
+    def test_nu_clamp_warns_when_it_fires(self):
+        """G > 1.5*KUN drives (3K-2G)/(6K+2G) negative — clamped to 0 AND
+        warned (dyna2rad clamps silently); the normal G/KUN pair stays
+        unwarned."""
+        res, starter = _convert(_solid_deck(_mat005(g=900.0, kun=500.0)))
+        hits = _warns(res, "CLAMPED")
+        self.assertTrue(hits)
+        self.assertIn("outside the [0, 0.495]", hits[0])
+        cards = _cards(_block(starter, "/MAT/LAW21/7"))
+        self.assertEqual(_col_f(cards[1], 21, 40), 0.0)
+        res2, _ = _convert(_solid_deck(_mat005()))
+        self.assertFalse(_warns(res2, "CLAMPED"))
+
+    def test_huge_abscissa_dropped_not_crashed(self):
+        """|EPS| > 700 would overflow exp() — dropped with a warning naming
+        the wrong-curve suspicion instead of aborting the conversion."""
+        res, starter = _convert(_solid_deck(
+            _mat005(lcid=334, eps=(0.0,), p=(0.0,)),
+            _curve(334, ((0.0, 0.0), (-0.1, 10.0), (-800.0, 99.0)))))
+        self.assertTrue(_warns(res, "|EPS| > 700"))
+        fn = _block(starter, "/FUNCT/90001")
+        pts = [(_col_f(ln, 1, 20), _col_f(ln, 21, 40))
+               for ln in fn[3:] if not ln.startswith("#")]
+        self.assertEqual(len(pts), 2)                      # the -800 dropped
+        self.assertAlmostEqual(pts[1][0], math.exp(0.1) - 1.0, places=9)
+
+    def test_duplicate_mu_abscissa_collapsed(self):
+        """Two source points folding onto one mu (a pressure step) collapse
+        to the LAST ordinate — a /FUNCT cannot carry a vertical step — and
+        the collapse is warned."""
+        res, starter = _convert(_solid_deck(
+            _mat005(eps=(0.0, -0.1, -0.1, -0.2), p=(0.0, 10.0, 15.0, 30.0))))
+        self.assertTrue(_warns(res, "duplicated mu abscissa"))
+        fn = _block(starter, "/FUNCT/90001")
+        pts = [(_col_f(ln, 1, 20), _col_f(ln, 21, 40))
+               for ln in fn[3:] if not ln.startswith("#")]
+        self.assertEqual(len(pts), 3)
+        self.assertEqual(pts[1][1], 15.0)                  # keep-last
 
     def test_ref_flag_without_geometry_warns(self):
         res, _ = _convert(_solid_deck(_mat005(ref=1.0)))
@@ -555,6 +623,16 @@ class Mat073Tests(unittest.TestCase):
         self.assertEqual(_col_i(prop[0], 11, 20), 10)      # Ismstr = 10
         self.assertFalse(_warns(res, "solid-/XREF whitelist"))
 
+    def test_ismstr10_pinned_without_reference_geometry(self):
+        """dyna2rad pins Ismstr=10 on every MAT_073 solid property
+        UNCONDITIONALLY (CP:484-495) — not only on the /XREF path; LAW90
+        is a total-strain law. A MAT_073 deck with NO reference geometry
+        must still emit Ismstr=10."""
+        _, starter = _convert(_solid_deck(_mat073(), LC073))
+        self.assertFalse(_blocks(starter, "/XREF"))
+        prop = _cards(_block(starter, "/PROP/SOLID/7"))
+        self.assertEqual(_col_i(prop[0], 11, 20), 10)      # Ismstr = 10
+
     def test_shell_part_warns_error_3046(self):
         res, _ = _convert(_shell_deck(_mat073(), LC073))
         hits = _warns(res, "ERROR 3046")
@@ -626,9 +704,11 @@ class Mat126Tests(unittest.TestCase):
         self.assertEqual(fun_shear, [404, 404, 404])
 
     def test_lcsr_five_point_sampling(self):
-        """First 4 points + the 5th (the MODIFIED rule, CM:9017-9021);
-        the 6th point is dropped; funID replicated per rate with Fscale =
-        the ordinate."""
+        """The curve's FIRST FIVE points (dyna2rad's MODIFIED rule,
+        CM:9017-9021: curvePnts[8]/[9] = point 5); funID replicated per
+        rate with Fscale = the ordinate. The 6-point curve DISCRIMINATES
+        the rules: the plain MAT_026 rule (first 4 + the LAST point) would
+        emit 1000.0 in the 5th rate slot — asserted absent."""
         lcsr_crv = _curve(408, ((0.001, 1.0), (0.1, 1.1), (1.0, 1.2),
                                 (10.0, 1.3), (100.0, 1.4), (1000.0, 1.5)))
         res, starter = _convert(_solid_deck(
@@ -641,7 +721,8 @@ class Mat126Tests(unittest.TestCase):
                           for i in range(5)], [1.0, 1.1, 1.2, 1.3, 1.4])
         self.assertEqual([_col_f(eps_row, 1 + 20 * i, 20 + 20 * i)
                           for i in range(5)], [0.001, 0.1, 1.0, 10.0, 100.0])
-        self.assertTrue(_warns(res, "first 4 points plus its 5th"))
+        self.assertNotIn("1000", eps_row)                  # not first-4+LAST
+        self.assertTrue(_warns(res, "FIRST FIVE points"))
 
     def test_lcsr_minus1_drops_rate_data_loudly(self):
         res, starter = _convert(_solid_deck(
@@ -697,11 +778,18 @@ class Mat126Tests(unittest.TestCase):
     def test_prop_type6_with_skew_and_part_repointed(self):
         """AOPT=2 (a=(1,0,0), d=(0,1,0)) -> /SKEW/FIX with Y'=(0,1,0),
         Z'=(0,0,1); the /PART repoints at the /PROP/TYPE6 and the unused
-        isotropic /PROP/SOLID is suppressed."""
+        isotropic /PROP/SOLID is suppressed. Card 1 pins Isolid=1 +
+        Ismstr=1 (dyna2rad CP:415/472): MAT_126's yield curves are
+        ENGINEERING strain for the default corotational elements, which
+        only a small-strain Radioss solid preserves — the ELFORM-derived
+        Isolid=17/Ismstr=0(->4) evaluated them at LOG strain (measured
+        28% early densification onset for a knee at 0.70)."""
         res, starter = _convert(_solid_deck(_mat126(), CRVS126))
         prop = _block(starter, "/PROP/TYPE6/")
         prop_id = int(prop[0].rsplit("/", 1)[1])
         prow = _cards(prop)
+        self.assertEqual(_col_i(prow[0], 1, 10), 1)        # Isolid = 1
+        self.assertEqual(_col_i(prow[0], 11, 20), 1)       # Ismstr = 1
         skew_id = _col_i(prow[2], 61, 70)
         self.assertGreater(skew_id, 0)
         self.assertEqual(_col_i(prow[2], 71, 80), 0)       # Ip=0 with skew
@@ -799,14 +887,59 @@ class Mat154Tests(unittest.TestCase):
         self.assertTrue(_warns(res, "ERROR 1897"))
         self.assertTrue(_warns(res, "ERROR 49"))
 
-    def test_isolid_pairing_warning_1905(self):
-        """LAW115 on k2rad's ELFORM-derived Isolid 17 draws starter WARNING
-        1905 (sgrtails.F gates on JHBE 3..20 without checking Istat) —
-        surfaced with the measured fix named."""
-        res, _ = _convert(_solid_deck(_mat154()))
-        hits = _warns(res, "WARNING 1905")
+    def test_hex_isolid_routed_to_24(self):
+        """LAW115 on the ELFORM-derived full-integration Isolid=17 is
+        ENGINE-fatal (dt collapses below DTMIN at cycle 0, 1-cycle 'NORMAL
+        TERMINATION' with an empty result — measured), so the /PROP/SOLID
+        of a MAT_154 hex part is emitted with Isolid=24 (HEPH, dyna2rad's
+        own hex default), announced with the mechanism named."""
+        res, starter = _convert(_solid_deck(_mat154()))
+        prop = _cards(_block(starter, "/PROP/SOLID/7"))
+        self.assertEqual(_col_i(prop[0], 1, 10), 24)       # Isolid = 24
+        hits = _warns(res, "UNRUNNABLE")
         self.assertTrue(hits)
         self.assertIn("Isolid=24", hits[0])
+        self.assertIn("NORMAL TERMINATION after 1 cycle", hits[0])
+
+    def test_tet_formulation_left_with_warning(self):
+        """A MAT_154 TET part (ELFORM 10 -> Isolid 14) is NOT remapped —
+        only the measured-fatal hex 17 is — but the WARNING-1905 window
+        pre-announcement survives, telling the user to verify the engine
+        time step."""
+        tet = ("*ELEMENT_SOLID\n" + _row(1, 7)
+               + "\n" + _row(1, 2, 3, 5, 5, 5, 5, 5) + "\n")
+        deck = (NODES + tet + PART
+                + "*SECTION_SOLID\n" + _row(7, 10) + "\n"
+                + _mat154() + END)
+        res, starter = _convert(deck)
+        prop = _cards(_block(starter, "/PROP/SOLID/7"))
+        self.assertEqual(_col_i(prop[0], 1, 10), 14)       # tet Isolid kept
+        hits = _warns(res, "WARNING 1905")
+        self.assertTrue(hits)
+        self.assertIn("VERIFY", hits[0])
+        self.assertFalse(_warns(res, "UNRUNNABLE"))
+
+    def test_shared_section_drag_warned(self):
+        """A non-LAW115 part sharing the *SECTION_SOLID switches to
+        Isolid=24 along with the foam part — warned by name."""
+        deck = (NODES + SOLID + PART
+                + "*NODE\n" + "".join(
+                    f"{n:>8}{x:>16}{y:>16}{z:>16}\n" for n, x, y, z in (
+                        (21, 0.0, 0.0, 30.0), (22, 10.0, 0.0, 30.0),
+                        (23, 10.0, 10.0, 30.0), (24, 0.0, 10.0, 30.0),
+                        (25, 0.0, 0.0, 40.0), (26, 10.0, 0.0, 40.0),
+                        (27, 10.0, 10.0, 40.0), (28, 0.0, 10.0, 40.0)))
+                + "*ELEMENT_SOLID\n" + _row(2, 8) + "\n"
+                + _row(*range(21, 29)) + "\n"
+                + "*PART\nsteel\n" + _row(8, 7, 8) + "\n"   # same SECID 7
+                + "*MAT_ELASTIC\n" + _row(8, "7.8E-9", 210000.0, 0.3) + "\n"
+                + SEC + _mat154() + END)
+        res, starter = _convert(deck)
+        prop = _cards(_block(starter, "/PROP/SOLID/7"))
+        self.assertEqual(_col_i(prop[0], 1, 10), 24)
+        hits = _warns(res, "share a *SECTION_SOLID with a LAW115")
+        self.assertTrue(hits)
+        self.assertIn("[8]", hits[0])
 
     def test_pre_r61_short_card2(self):
         """The pre-R6.1 card 2 stops after CFAIL: PFAIL reads 0 (no
@@ -892,7 +1025,7 @@ class Mat177Tests(unittest.TestCase):
         """LCID>0 has no LAW62 counterpart (no fit path) — dyna2rad silently
         wires mat_ID 0; k2rad skips with the warning and emits no /MAT."""
         mat = ("*MAT_HILL_FOAM\n"
-               + _row(7, "1.0E-10", 100.0, "", 0.5, 340, 1, "") + "\n")
+               + _row(7, "1.0E-10", 100.0, 0.5, "", 340, 1, "") + "\n")
         res, starter = _convert(_solid_deck(
             mat, _curve(340, ((1.0, 0.0), (1.5, 12.0)))))
         self.assertTrue(_warns(res, "curve-fit branch"))
@@ -948,7 +1081,8 @@ class ContactInteriorTests(unittest.TestCase):
         res, _ = _convert(self._deck(sets))
         hits = _warns(res, "*CONTACT_INTERIOR (set 52")
         self.assertTrue(any("[7]" in w for w in hits))
-        self.assertTrue(_warns(res, "part-set 53"))
+        self.assertTrue(any("[53]" in w for w in
+                           _warns(res, "child part-set id(s)")))
 
     def test_unresolved_psid_warns(self):
         res, _ = _convert(self._deck(
@@ -1001,6 +1135,53 @@ class ContactInteriorTests(unittest.TestCase):
         res, _ = _convert(self._deck(sets))
         self.assertTrue(_warns(res, "*CONTACT_INTERIOR (set 51"))
         self.assertTrue(_warns(res, "part set 88 is not defined"))
+
+
+class SetPartAddFlattenTests(unittest.TestCase):
+    """_flatten_part_set_adds: *SET_PART_ADD becomes a plain part set for
+    EVERY consumer, not only *CONTACT_INTERIOR — before it, a contact side
+    with SSTYP=2 on an _ADD set silently resolved to an EMPTY /GRNOD with
+    a warning blaming the set for naming no parts."""
+
+    def test_contact_side_resolves_through_add_set(self):
+        deck = (NODES + SOLID + PART + SEC + _mat073() + LC073
+                + "*SET_PART_LIST\n" + _row(61) + "\n" + _row(7) + "\n"
+                + "*SET_PART_ADD\n" + _row(62) + "\n" + _row(61) + "\n"
+                + "*CONTACT_AUTOMATIC_SINGLE_SURFACE\n"
+                + _row(62, 0, 2, 0) + "\n" + _row() + "\n" + _row() + "\n"
+                + END)
+        res, starter = _convert(deck)
+        self.assertFalse(_warns(res, "resolved to no nodes at all"))
+        grnods = _blocks(starter, "/GRNOD/NODE/")
+        self.assertTrue(any(len([ln for ln in g
+                                 if not ln.startswith(("#", "/"))
+                                 and ln.strip()]) >= 1 for g in grnods))
+        self.assertNotIn("SET_PART_ADD", res.skipped_keywords)
+
+    def test_direct_set_wins_id_collision(self):
+        deck = (NODES + SOLID + PART + SEC + _mat073() + LC073
+                + "*SET_PART_LIST\n" + _row(61) + "\n" + _row(7) + "\n"
+                + "*SET_PART_ADD\n" + _row(61) + "\n" + _row(99) + "\n"
+                + END)
+        res, _ = _convert(deck)
+        hits = _warns(res, "same id")
+        self.assertTrue(hits)
+        self.assertIn("_ADD block is IGNORED", hits[0])
+
+    def test_nested_add_child_warned_one_level_only(self):
+        deck = (NODES + SOLID + PART + SEC + _mat073() + LC073
+                + "*SET_PART_LIST\n" + _row(61) + "\n" + _row(7) + "\n"
+                + "*SET_PART_ADD\n" + _row(62) + "\n" + _row(61) + "\n"
+                + "*SET_PART_ADD\n" + _row(63) + "\n" + _row(62, 61) + "\n"
+                + "*CONTACT_INTERIOR\n" + _row(63) + "\n"
+                + END)
+        res, _ = _convert(deck)
+        hits = _warns(res, "exactly ONE level")
+        self.assertTrue(hits)
+        self.assertIn("[62]", hits[0])
+        # the direct *SET_PART child still resolved
+        self.assertTrue(any("[7]" in w for w in
+                            _warns(res, "arms interior contact")))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

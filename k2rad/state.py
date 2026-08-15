@@ -2268,7 +2268,7 @@ class MatSoilAndFoam:
     title: str
     rho: float
     g: float           # shear modulus → E/Nu via 9GK/(3K+G), (3K-2G)/(6K+2G)
-    kun: float         # bulk unloading modulus → B (and Kt = KUN/100)
+    kun: float         # bulk unloading modulus → B and Kt (KUN/100 for VCR=1)
     a0: float          # yield coefficients, 1:1 → A0/A1/A2
     a1: float
     a2: float
@@ -2279,6 +2279,10 @@ class MatSoilAndFoam:
     eps: List[float] = field(default_factory=list)   # up to 10 ln(V/V0) values
     p: List[float] = field(default_factory=list)     # up to 10 pressures
     func_id: int = 0   # resolved /FUNCT id of the transformed P(mu) curve
+    # Writer-resolved elastic constants (set by _resolve_mat_soil_and_foam so
+    # the clamp warning and the emitted values cannot drift apart):
+    e_res: float = 0.0     # E = 9GK/(3K+G)
+    nu_res: float = 0.0    # (3K-2G)/(6K+2G) clamped to [0, 0.495]
 
 
 @dataclass
@@ -2429,10 +2433,9 @@ class MatDeshpandeFleckFoam:
 class MatHillFoam:
     """*MAT_HILL_FOAM (MAT_177) → /MAT/LAW62 (VISC_HYP), constants branch only.
 
-    LS-DYNA cards (Manual Vol II R17 p.2-1216; official field order MID RO K
-    MU N LCID FITTYPE LCSR — NOT the transposed N/MU order of the shipped
-    Keyword971 cfg, which loads MU into "N"; k2rad follows the manual):
-      Card1: MID RO K MU N LCID FITTYPE LCSR
+    LS-DYNA cards (Manual Vol II R17 p.2-1216, and the shipped Keyword971
+    mat_177.cfg agrees — field 4 is N, field 5 is MU):
+      Card1: MID RO K N MU LCID FITTYPE LCSR
       Card2 (iff LCID == 0): C1..C8    Card3 (iff LCID == 0): B1..B8
       Card4 (optional, both branches): R M
     Hill → Ogden identity per pair: mu_i = Ci*Bi/2, alpha_i = Bi (index-
@@ -2444,9 +2447,9 @@ class MatHillFoam:
     mid: int
     title: str
     rho: float
-    k: float           # bulk modulus (LAW62 derives bulk from Nu → warned)
-    mu: float          # damping coefficient (no LAW62 slot → warned)
-    n: float           # Poisson-like exponent → Nu = N/(1+2N)
+    k: float           # bulk modulus, card field 3 (LAW62 derives bulk from Nu)
+    mu: float          # damping coefficient, card field 5 (no LAW62 slot)
+    n: float           # Poisson-like exponent, card field 4 → Nu = N/(1+2N)
     lcid: int
     fittype: int
     lcsr: int          # transverse-stretch curve (no LAW62 slot → warned)
@@ -3790,9 +3793,11 @@ class ConversionState:
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
     part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
     # *SET_PART_ADD: psid → (title, [child part-set ids]) — one level of
-    # part-set nesting, expanded by consumers (*CONTACT_INTERIOR follows
-    # dyna2rad CC:692-727: an "ADD" set's ids are part-SET ids).
+    # part-set nesting (dyna2rad CC:692-727: an "ADD" set's ids are part-SET
+    # ids). Expanded ONCE post-parse by _flatten_part_set_adds (writer/mesh.py)
+    # into a plain part_sets entry, so every part-set consumer resolves it.
     part_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    part_set_adds_flattened: bool = False    # _flatten_part_set_adds ran
     # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
     # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
     # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined

@@ -26,6 +26,7 @@ from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
     _downgrade_tet10_to_tet4,
+    _flatten_part_set_adds,
     _resolve_contact_interior,
     _make_extra_groups,
     _make_nodes,
@@ -532,6 +533,11 @@ def _warn_orphan_elements(state: ConversionState) -> None:
 
 
 def build_starter(state: ConversionState, progress=None) -> str:
+    # *SET_PART_ADD → plain part sets, one nesting level, BEFORE anything
+    # reads state.part_sets (contact sides, *CONTACT_INTERIOR, gravity/ALE
+    # scopes). Idempotent — convert() already ran it so --auto-gapmin sees
+    # the flattened sets; this covers direct build_starter callers.
+    _flatten_part_set_adds(state)
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)
@@ -571,16 +577,6 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # solid-/XREF law whitelist (the _target_mat_law entries alone make the
     # gate warn-skip those parts correctly instead of claiming "no /MAT").
     _resolve_mat_adhesives(state)
-    # Foam batch. MAT_005's P(mu) transform and MAT_126's V/V0-recomputed
-    # yield curves synthesize /FUNCTs (so after _resolve_define_tables, and
-    # before _make_functions which emits them); the MAT_126 slot wiring and
-    # LCSR sampling need the parsed *DEFINE_CURVEs. Also before
-    # _resolve_xref_parts: LAW90 (MAT_073) is on the starter's solid-/XREF
-    # law whitelist, so that container decides which parts get a /XREF and
-    # pick up Ismstr=10; the other four (LAW21/50/62/115) are off-whitelist
-    # and their _target_mat_law entries make the gate warn-skip naming the
-    # law instead of claiming "no /MAT".
-    _resolve_mat_foams(state)
 
     # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
     # its connectivity by CONTENT, which cannot distinguish an all-integer
@@ -625,6 +621,23 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # BEFORE any section is built, so the free-node guard sees the post-drop
     # connectivity and constrains any node the drops left unattached.
     _screen_sliver_tets(state)
+
+    # Foam batch. MAT_005's P(mu) transform and MAT_126's V/V0-recomputed
+    # yield curves synthesize /FUNCTs (so after _resolve_define_tables, and
+    # before _make_functions which emits them); the MAT_126 slot wiring and
+    # LCSR sampling need the parsed *DEFINE_CURVEs. Runs AFTER
+    # _screen_provisional_elements / the tet passes so its shell-vs-solid
+    # part classification (the ERROR-3046 warnings, MAT_154's Isolid gate)
+    # reads the FINAL element lists — a phantom shell recovered from an
+    # unmodelled *ELEMENT_SHELL_* option would otherwise draw a false
+    # shell-part warning. And before _resolve_xref_parts below: LAW90
+    # (MAT_073) is on the starter's solid-/XREF law whitelist, so that
+    # container decides which parts get a /XREF; the other four
+    # (LAW21/50/62/115) are off-whitelist and their _target_mat_law entries
+    # make the gate warn-skip naming the law instead of claiming "no /MAT".
+    # (Nothing between the adhesives pass and here allocates curve ids, so
+    # the synthesized /FUNCT numbering is unchanged by this placement.)
+    _resolve_mat_foams(state)
 
     # Decide which parts get a /XREF (reference-geometry) block. AFTER the
     # tet10 passes (the 8/4-node-solid gate must see the final connectivity)

@@ -371,8 +371,14 @@ def convert(
     # and every *INCLUDE has been read — BEFORE --auto-gapmin analyses the mesh
     # and before build_starter emits it. Idempotent: build_starter calls it too
     # for the direct-writer callers, and the second call is a no-op.
-    from .writer import _screen_provisional_elements
+    from .writer import _flatten_part_set_adds, _screen_provisional_elements
     _screen_provisional_elements(state)
+
+    # *SET_PART_ADD → plain part sets (one nesting level) now that every
+    # *SET_PART block has been read, so --auto-gapmin's contact-side
+    # resolution below and every build_starter consumer see the combined
+    # sets. Idempotent: build_starter calls it too for direct callers.
+    _flatten_part_set_adds(state)
 
     # 2a. Blast decks: /LOAD/PBLAST reads the /BEGIN unit labels to convert its
     #     internal {cm,g,µs} TM5-1300 data to model units, so those labels MUST
