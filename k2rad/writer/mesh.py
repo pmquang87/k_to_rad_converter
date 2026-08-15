@@ -3003,6 +3003,38 @@ _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 #                                     — shell- and solid-capable, beam-
 #                                     incompatible with BOTH /PROP/TYPE3
 #                                     and /PROP/TYPE18.
+#
+# Classification of the laws the IMPACT/BLAST batch adds, read from the same
+# INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. NONE of the
+# three declares any BEAM_* keyword — nor any SHELL_* class, so all three are
+# solid/SPH-only — so neither frozenset above changes and the existing "no
+# beam keyword at all — starter ERROR 3046" message is already the right one
+# for a beam part on any of them:
+#   LAW79  hm_read_mat79.F:233-234    SOLID_ISOTROPIC, SPH — the shortest
+#                                     class list in the tree; the shell-part
+#                                     refusal for *MAT_110 is warned by
+#                                     _resolve_mat110 (materials.py).
+#   LAW126 hm_read_mat126.F90:247-255 SOLID_ISOTROPIC, SPH, COMPRESSIBLE,
+#                                     INCREMENTAL, LARGE_STRAIN, HYDRO_EOS,
+#                                     ISOTROPIC — HYDRO_EOS here is a
+#                                     pressure-treatment capability tag, NOT
+#                                     a requirement for a companion /EOS
+#                                     block (LAW126 reads its own K1/K2/K3);
+#                                     warned by _resolve_mat111.
+#   LAW6   hm_read_mat06.F:185-194    EOS, HYDRO_EOS, INCOMPRESSIBLE,
+#                                     SOLID_POROUS, SPH — note SOLID_POROUS,
+#                                     not SOLID_ISOTROPIC: both map to
+#                                     PROP_SOLID classes that include
+#                                     /PROP/TYPE14 (init_mat_keyword.F:212-231
+#                                     gives ISOTROPIC->1 = TYPE 6/14/20/21/22
+#                                     and POROUS->5 = TYPE 14/15), so an
+#                                     ordinary solid part is fine, but LAW6 is
+#                                     NOT compatible with the orthotropic /
+#                                     composite solid properties TYPE 6/20/21/
+#                                     22 (ERROR 3047) the way LAW79/LAW126
+#                                     are. Warned by _resolve_mat_elastic_fluid.
+#                                     (hm_read_mat06_keps.F:217-226 is the k-eps
+#                                     variant, same class set — not converted.)
 
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
@@ -3152,6 +3184,19 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     # variant pattern.
     if mid in state.mat_tabulated_jc:
         return 109                                 # *MAT_224 → LAW109
+    # Impact / blast batch. None of the three splits (one law per keyword) and
+    # NONE of LAW79 / LAW126 / LAW6 is on the solid-/XREF whitelist, so the
+    # gate in inistate.py warn-skips such parts NAMING the law — without these
+    # entries it would misreport them as having no /MAT at all. The fluid is
+    # deliberately its own container: a plain *MAT_ELASTIC stays on
+    # `mat_elastic` above and keeps LAW1 (which IS whitelisted), so adding the
+    # _FLUID variant cannot move any existing deck's /XREF decisions.
+    if mid in state.mat_jh_ceramics:
+        return 79                                  # *MAT_110 → JOHN_HOLM
+    if mid in state.mat_jh_concrete:
+        return 126                                 # *MAT_111 → LAW126
+    if mid in state.mat_elastic_fluid:
+        return 6                                   # *MAT_001_FLUID → HYD_VISC
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

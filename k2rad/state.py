@@ -3092,6 +3092,143 @@ class MatTabulatedJC:
 
 
 @dataclass
+class MatJHCeramics:
+    """*MAT_JOHNSON_HOLMQUIST_CERAMICS (110, JH-2) → /MAT/LAW79 (JOHN_HOLM).
+
+    Cards (Vol II R16 p.2-761; mat_110.cfg:170-182), 8 x 10 chars:
+      Card1: MID RO G A B C M N
+      Card2: EPS0 T SFMAX HEL PHEL BETA
+      Card3: D1 D2 K1 K2 K3 FS
+
+    **Nothing is normalized on conversion.** A/B/C/M/N/SFMAX are dimensionless
+    in BOTH codes; HEL, PHEL and T are copied as PHYSICAL stresses. The Radioss
+    starter re-derives the JH-2 normalizers itself with the identical
+    definitions LS-DYNA uses — ``sigma_HEL = 1.5*(HEL-PHEL)`` and
+    ``T* = T/PHEL`` (hm_read_mat79.F:211-213), ``P* = P/PHEL`` and
+    ``sigma* = sigma_VM/sigma_HEL`` (sigeps79.F:153,190). Pre-dividing T by
+    PHEL, or passing sigma_HEL in a stress slot, would double-apply the
+    normalization. K1/K2/K3 are LAW79's OWN polynomial EOS
+    (P = K1*mu + K2*mu^2 + K3*mu^3, sigeps79.F:143-147) — no /EOS is emitted.
+
+    All guards, the EPS0 substitution and every warning are resolved by the
+    writer prepass ``_resolve_mat_impact``; the emitter only formats cards.
+    """
+    mid: int
+    title: str
+    rho: float
+    g: float = 0.0
+    a: float = 0.0
+    b: float = 0.0
+    c: float = 0.0
+    m: float = 0.0           # FRACTURED pressure exponent (card1 field 7)
+    n: float = 0.0           # INTACT pressure exponent (card1 field 8)
+    eps0: float = 0.0        # EPS0/EPSI reference strain rate, 1/time
+    t: float = 0.0           # max tensile hydrostatic pressure, PHYSICAL
+    sfmax: float = 0.0       # max normalized fractured strength (0 → INFINITY)
+    hel: float = 0.0
+    phel: float = 0.0
+    beta: float = 0.0        # bulking fraction, must be in [0, 1]
+    d1: float = 0.0
+    d2: float = 0.0
+    k1: float = 0.0
+    k2: float = 0.0
+    k3: float = 0.0
+    fs: float = 0.0          # failure flag — NOT expressible at /BEGIN 2022
+    # ── resolved by _resolve_mat_impact ───────────────────────────────────
+    eps0_eff: float = 0.0    # EPS0 actually emitted (1.0 substituted for the
+                             # ERROR-910 case C != 0 with EPS0 <= 0)
+
+
+@dataclass
+class MatJHConcrete:
+    """*MAT_JOHNSON_HOLMQUIST_CONCRETE (111, JHC) → /MAT/LAW126.
+
+    Cards (Vol II R16 p.2-765; mat_111.cfg), 8 x 10 chars:
+      Card1: MID RO G A B C N FC     <- note field 7 is N and field 8 is FC,
+                                        NOT the M,N pair of *MAT_110
+      Card2: T EPS0 EFMIN SFMAX PC UC PL UL
+      Card3: D1 D2 K1 K2 K3 FS
+
+    **Nothing is normalized on conversion.** A/B/N/SFMAX/EFMIN/D1/D2 and the
+    volumetric strains UC/UL are dimensionless; FC, T, PC, PL, K1..K3 and G are
+    stresses. The engine forms ``P* = P/FC``, ``sigma* = sigma_VM/FC`` and
+    ``T* = T/FC`` itself (sigeps126.F90:264,305,338) and multiplies the yield
+    back up by FC at :383 — so T must NOT be pre-divided by FC.
+
+    All guards (the unguarded ``k0 = PC/UC`` and ``h = (PL-PC)/UL`` divisions),
+    the EPS0 substitution and the FS → IDEL/EPS_MAX mapping are resolved by the
+    writer prepass ``_resolve_mat_impact``; the emitter only formats cards.
+    """
+    mid: int
+    title: str
+    rho: float
+    g: float = 0.0
+    a: float = 0.0
+    b: float = 0.0
+    c: float = 0.0
+    n: float = 0.0
+    fc: float = 0.0          # quasi-static uniaxial compressive strength
+    t: float = 0.0           # max tensile hydrostatic pressure, PHYSICAL
+    eps0: float = 0.0
+    efmin: float = 0.0       # damage-strain floor (0 → starter 1e-20)
+    sfmax: float = 0.0       # 0 → starter INFINITY
+    pc: float = 0.0          # crushing pressure
+    uc: float = 0.0          # crushing volumetric strain → MUC
+    pl: float = 0.0          # locking pressure
+    ul: float = 0.0          # locking volumetric strain → MUL
+    d1: float = 0.0
+    d2: float = 0.0
+    k1: float = 0.0
+    k2: float = 0.0
+    k3: float = 0.0
+    fs: float = 0.0
+    # ── resolved by _resolve_mat_impact ───────────────────────────────────
+    eps0_eff: float = 0.0
+    idel: int = 1            # FS<0 → 3, FS=0 → 1, FS>0 → 2
+    eps_max: float = 0.0     # = FS (copied verbatim, d2r CM:5654)
+
+
+@dataclass
+class MatElasticFluid:
+    """*MAT_ELASTIC with the _FLUID option (001) → /MAT/LAW6 (HYD_VISC) +
+    /EOS/POLYNOMIAL of the same id.
+
+    Cards (Vol II R16 p.2-145..2-148; mat_001.cfg:191-201):
+      Card1: MID RO E PR DA DB K      <- K is card-1 field 7, NOT a second card
+      Card2: VC CP                    <- FLUID option only
+
+    Manual Remark 5: under the FLUID option **K must be defined, E and PR are
+    ignored, and the shear modulus is set to zero**. /MAT/LAW6 has no shear
+    slot at all (the deviatoric response comes only from the viscosity), so
+    G = 0 is structural rather than a conversion loss. E and PR survive here
+    solely for the ``K == 0`` fallback ``B = E/(3(1-2*PR))``, which is the
+    manual's own relation.
+
+    Kept in its OWN container rather than as a flag on ``MatElastic`` so the
+    plain *MAT_ELASTIC path — its /MAT/ELAST emitter, its ``_target_mat_law``
+    LAW1 entry and therefore its place on the starter's solid-/XREF law
+    whitelist — is byte-for-byte untouched by this family.
+
+    ``bulk``/``nu_visc``/``pmin`` are resolved by ``_resolve_mat_impact``.
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float = 0.0           # ignored by LS-DYNA under FLUID; K==0 fallback only
+    pr: float = 0.0          # idem
+    da: float = 0.0          # beam-only axial damping — dropped
+    db: float = 0.0          # beam-only bending damping — dropped
+    k: float = 0.0           # bulk modulus → /EOS/POLYNOMIAL C1
+    vc: float = 0.0          # DIMENSIONLESS tensor-viscosity coefficient
+    cp: float = 0.0          # cavitation pressure, LS-DYNA default 1e20
+    cp_given: bool = False   # card 2 present with a non-blank CP cell
+    # ── resolved by _resolve_mat_impact ───────────────────────────────────
+    bulk: float = 0.0        # /EOS/POLYNOMIAL C1
+    nu_visc: float = 0.0     # /MAT/LAW6 Nu (kinematic viscosity, L^2/T)
+    pmin: float = 0.0        # /MAT/LAW6 Pmin (0 → starter -INFINITY)
+
+
+@dataclass
 class FoamRefGeometry:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per part whose nodes
     intersect the keyword's node table (dyna2rad ConvertInitialFoamReferenceGeometry;
@@ -3799,6 +3936,16 @@ class ConversionState:
     fail_diem: Dict[int, FailDiem] = field(default_factory=dict)
     # *MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1]
     mat_tabulated_jc: Dict[int, MatTabulatedJC] = field(default_factory=dict)
+    # Impact / blast materials:
+    #   MAT_110 → /MAT/LAW79  (Johnson-Holmquist JH-2 ceramics)
+    #   MAT_111 → /MAT/LAW126 (Johnson-Holmquist concrete)
+    #   MAT_001 + _FLUID → /MAT/LAW6 (HYD_VISC) + /EOS/POLYNOMIAL. Its OWN
+    #   container: the plain *MAT_ELASTIC path (mat_elastic → /MAT/ELAST,
+    #   LAW1) must stay byte-identical, and only the fluid variant carries
+    #   K/VC/CP.
+    mat_jh_ceramics: Dict[int, MatJHCeramics] = field(default_factory=dict)
+    mat_jh_concrete: Dict[int, MatJHConcrete] = field(default_factory=dict)
+    mat_elastic_fluid: Dict[int, MatElasticFluid] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -4212,7 +4359,8 @@ class ConversionState:
                   self.mat_simplified_rubber, self.mat_soft_tissue,
                   self.mat_cohesive_mixed_mode, self.mat_arup_adhesive,
                   self.mat_cohesive_mm_epr, self.mat_toughened_adhesive,
-                  self.mat_tabulated_jc):
+                  self.mat_tabulated_jc, self.mat_jh_ceramics,
+                  self.mat_jh_concrete, self.mat_elastic_fluid):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

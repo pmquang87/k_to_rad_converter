@@ -1424,6 +1424,18 @@ _OFFSET_SPECS: Dict[str, object] = {
 
     # Materials (mid + the curve/table reference fields k2rad models)
     "MAT_ELASTIC": _mat(),
+    # Impact / blast batch. Every field of *MAT_110, *MAT_111 and the
+    # *MAT_ELASTIC _FLUID card is a physical constant — no curve, table or set
+    # id anywhere on the three cards — so MID is the only cell to offset.
+    "MAT_JOHNSON_HOLMQUIST_CERAMICS": _mat(),
+    "MAT_110": _mat(),
+    "MAT_JOHNSON_HOLMQUIST_CONCRETE": _mat(),
+    "MAT_111": _mat(),
+    "MAT_ELASTIC_FLUID": _mat(),
+    "MAT_001_FLUID": _mat(),
+    "MAT_1_FLUID": _mat(),
+    "MAT_001": _mat(),
+    "MAT_1": _mat(),
     "MAT_PIECEWISE_LINEAR_PLASTICITY": _mat({1: [(2, "f"), (3, "f")]}),
     "MAT_024": _mat({1: [(2, "f"), (3, "f")]}),
     "MAT_24": _mat({1: [(2, "f"), (3, "f")]}),
