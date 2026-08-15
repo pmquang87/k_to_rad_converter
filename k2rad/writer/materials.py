@@ -44,6 +44,8 @@ from ..state import (
     MatCohesiveMMEPR,
     MatToughenedAdhesive,
     FailDiem,
+    MatTabulatedJC,
+    AutoTable,
     Curve,
     MatHighExplosiveBurn,
     EosJwl,
@@ -117,6 +119,10 @@ __all__ = [
     "_emit_fail_lemaitre",
     "_emit_plas_tab_extra_fail",
     "_emit_fail_tab2",
+    "_emit_mat_law109",
+    "_emit_mat224_tab1",
+    "_resolve_mat_tabulated_jc",
+    "_resolve_define_tables_3d",
     "_make_functions",
     "_resolve_define_tables",
     "_resolve_mat_plas_tab",
@@ -215,6 +221,15 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law116(mat, state)
     for mat in state.mat_toughened_adhesive.values():
         lines += _emit_mat_law120(mat, state)
+    # Tabulated Johnson-Cook batch (every curve/table routing decision and
+    # warning is resolved by _resolve_mat_tabulated_jc; the /FAIL/TAB1 rides
+    # the same MID like the MAT_081 pattern, and only when a usable LCF
+    # exists — deliberately unlike dyna2rad's unconditional /FAIL/TAB2,
+    # which is starter ERROR 3000 on an LCF-less deck)
+    for mat in state.mat_tabulated_jc.values():
+        lines += _emit_mat_law109(mat, state)
+        if mat.emit_fail:
+            lines += _emit_mat224_tab1(mat, state)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -5264,6 +5279,746 @@ def _resolve_mat_adhesives(state: ConversionState) -> None:
                         "(*SECTION_SOLID ELFORM 19/20) to convert it.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tabulated Johnson-Cook batch: *MAT_224 → /MAT/LAW109 [+ /FAIL/TAB1],
+# *DEFINE_TABLE_3D → /TABLE/1 Ndim=3
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _interp_curve(pts: List[Tuple[float, float]], x: float) -> float:
+    """Piecewise-linear interpolation on a curve's points, clamped at the
+    ends — the same lookup the starter's own function reader performs."""
+    if not pts:
+        return 0.0
+    p = sorted(pts)
+    if x <= p[0][0]:
+        return p[0][1]
+    if x >= p[-1][0]:
+        return p[-1][1]
+    for (x0, y0), (x1, y1) in zip(p, p[1:]):
+        if x0 <= x <= x1:
+            return y1 if x1 == x0 else y0 + (x - x0) / (x1 - x0) * (y1 - y0)
+    return p[-1][1]
+
+
+def _next_table_id(state: ConversionState) -> int:
+    """A next_curve_id() additionally guaranteed free in every TABLE registry
+    (user *DEFINE_TABLE[_2D]/_3D ids and already-synthesized AutoTables) —
+    /FUNCT and /TABLE share ONE starter id namespace (duplicate → UDOUBLE in
+    hm_read_table.F:193), so a synthesized table must dodge both."""
+    tid = state.next_curve_id()
+    while (tid in state.define_tables or tid in state.define_tables_3d
+           or tid in state.auto_tables):
+        tid = state.next_curve_id()
+    return tid
+
+
+def _resolve_define_tables_3d(state: ConversionState) -> None:
+    """Validate *DEFINE_TABLE_3D entries and build their flat Ndim=3 /TABLE/1
+    emission — build_starter prepass, AFTER _resolve_define_tables (the inner
+    2-D tables' rows must be final) and BEFORE _resolve_mat_tabulated_jc
+    (whose LCK1 slices the same nesting).
+
+    The flat form is the starter-verified /TABLE/1 recipe: one row per
+    (inner VALUE, outer VALUE) pair — fct_ID = the leaf curve, A = the INNER
+    table's VALUE (dim 2), B = the OUTER card's VALUE (dim 3), Scale_y = 1.0,
+    rows ascending by (B, A); dim 1 is the leaf curves' own abscissa, so the
+    nesting order TABLE_3D(V) → TABLE(A) → CURVE(x) is preserved. Two
+    conscious fixes over dyna2rad's generic 3-D path (convertcurves.cxx:
+    109-149): the inner tables' own SFA/OFFA reach their VALUEs (k2rad scales
+    them at parse; d2r never reads them), and the inner VALUE sits on dim 2
+    with the outer on dim 3 (d2r transposes — moot there only because its
+    lone 3-D consumer ARRETs the engine).
+
+    hm_read_table2_1.F:238-303 requires a COMPLETE rectangular secondary grid
+    (every A under every B, else starter ERROR 3089 — negative-control-
+    verified), so a 3-D table whose planes carry different inner grids is
+    warned and NOT emitted flat; consumers that slice individual planes
+    (*MAT_224 LCK1) still work off the parsed nesting.
+    """
+    for tbid, tab in sorted(state.define_tables_3d.items()):
+        rows = []
+        bad = []
+        for v, tid in tab.rows:
+            inner = state.define_tables.get(tid)
+            if inner is None or not inner.resolved or not inner.rows:
+                bad.append(tid)
+                continue
+            rows.append((v, inner))
+        if bad:
+            state.warn(
+                f"*DEFINE_TABLE_3D tbid={tbid}: dropped row(s) referencing "
+                f"missing/unresolved *DEFINE_TABLE(s) {sorted(set(bad))} — a "
+                "dangling fct_ID would be starter ERROR 781.")
+        if not rows:
+            state.warn(
+                f"*DEFINE_TABLE_3D tbid={tbid}: no usable rows — not emitted.")
+            continue
+        grids = {tuple(a for a, _ in inner.rows) for _, inner in rows}
+        if len(grids) > 1:
+            state.warn(
+                f"*DEFINE_TABLE_3D tbid={tbid}: its inner *DEFINE_TABLEs do "
+                "not share one secondary-abscissa grid — /TABLE/1 requires a "
+                "COMPLETE rectangular grid (a function for every (A,B) "
+                "combination, starter ERROR 3089), so the flat Ndim=3 table "
+                "is NOT emitted. Consumers that slice individual planes "
+                "(*MAT_224 LCK1) still convert; re-tabulate the inner tables "
+                "on one shared value list to emit the 3-D table itself.")
+            continue
+        flat = []
+        for v, inner in sorted(rows, key=lambda r: r[0]):
+            for a, lcid in inner.rows:
+                flat.append((lcid, (a, v), 1.0))
+        state.auto_tables[tbid] = AutoTable(
+            tid=tbid, title=tab.title or f"TABLE3D_{tbid}", ndim=3, rows=flat)
+        tab.resolved = True
+
+
+def _flip_triax_curve(state: ConversionState, lcid: int, mid: int) -> int:
+    """Duplicate curve *lcid* with its abscissa NEGATED and re-sorted — the
+    LS-DYNA→Radioss triaxiality flip (LS-DYNA *MAT_224 LCF tabulates the
+    pressure-based p/σvm, compression-positive; /FAIL/TAB1 interpolates
+    TRIAX = σm/σvm, tension-positive — fail_tab_s.F:163-172; dyna2rad applies
+    the same ×(−1), CM:11616-11618). The *DEFINE_CURVE SFA/SFO/OFFA/OFFO are
+    already baked into the parsed points, so the flip lands on the physical
+    axis — avoiding dyna2rad's Ashiftx=OFFA slip (CM:11623: DYNA semantics
+    need SFA·OFFA), which mis-shifts any flipped curve with OFFA≠0."""
+    pts = sorted((-x, y) for x, y in state.curves[lcid].pts)
+    fid = state.next_curve_id()
+    _add_auto_curve(state, fid, f"Auto_MAT224_LCF_flip{lcid}_mid{mid}",
+                    list(pts))
+    return fid
+
+
+# Degenerate strain-rate axis for a Lode-dependent LCF with no LCG: dim 2 of
+# a 3-D /FAIL/TAB1 failure table IS the plastic strain rate (fail_tab_s.F:
+# 316-333), so the Lode angle must sit on dim 3 — two identical flat planes
+# keep the lookup rate-independent while satisfying the /TABLE/1 grid rules
+# (every nK >= 2, hm_read_table2_1.F / ERROR 778).
+_MAT224_FLAT_RATE_AXIS = ((0.0, 1.0), (1.0e30, 1.0))
+
+
+def _resolve_mat_tabulated_jc(state: ConversionState) -> None:
+    """*MAT_TABULATED_JOHNSON_COOK (224) wiring — build_starter prepass,
+    AFTER _resolve_define_tables + _resolve_define_tables_3d (table rows must
+    be final) and BEFORE _make_functions (synthesized curves/AutoTables and
+    the table_1d_ids re-routing must exist when functions are emitted).
+
+    ── Flow stress (LCK1/LCKT → tab_ID_h/tab_ID_t) ──────────────────────────
+    LAW109's yield lookup is STRICTLY 2-D — σy = k1(εp, rate) scaled by
+    kt(εp,T)/kt(εp,T_ref) — and its interpolator hard-stops on NDIM>2
+    (table2d_vinterp_log.F:93-97, ANCMSG 36 + ARRET(2) at the FIRST engine
+    cycle), so:
+      * LCK1 curve       → 1-D /TABLE/1 under its own id (state.table_1d_ids;
+        dyna2rad leaves tab_ID_h=0 here, CM:11196 — deck broken; fixed).
+      * LCK1 2-D table   → referenced by id. A NEGATIVE first rate VALUE is
+        LS-DYNA's natural-log axis (Vol II p.357): every rate exp()-unwrapped
+        into a fresh AutoTable + dyna2rad's flat-extrapolation sentinel (the
+        last curve duplicated at 10·max+1, CM:11219-11250), I_smooth=2.
+      * LCK1 3-D table   → SPLIT, never referenced whole (dyna2rad passes the
+        3-D id through and the engine ARRETs — not replicated): tab_ID_h =
+        the 2-D plane nearest T_ref, tab_ID_t = a synthesized (εp,T) table
+        from every plane's LOWEST-rate curve. Exact iff the deck's
+        σ(εp,rate,T) is multiplicatively separable — warned. LCKT is ignored
+        alongside (LS-DYNA ignores LCKT when LCK1 is 3-D).
+      * LCKT 2-D table   → tab_ID_t by id (Radioss forms the kt ratio
+        internally, sigeps109.F:230-244 — pass absolute yield curves).
+        A plain-curve LCKT carries no temperature family (the ratio would be
+        ≡1) → warned drop; dyna2rad drops it silently (CM:11169-11181).
+
+    ── Taylor-Quinney (BETA → ETA/TAB_ETA) ──────────────────────────────────
+    BETA ≥ 0 is the scalar ETA (engine clamps FTHERM=MIN(ETA·f,1)). BETA < 0:
+    a curve becomes a 1-D TAB_ETA on the rate axis (negative abscissas
+    exp()-unwrapped point-wise, dyna2rad CM:11318-11327 — WITHOUT d2r's
+    side-effect of forcing the YIELD table's I_smooth to 2 off a BETA curve);
+    a 2-D table maps directly (TAB_ETA dims are (rate, T, εp), sigeps109.F:
+    162-184, and the LS-DYNA nesting T→curves-over-rate puts rate on dim 1
+    and T on dim 2 — same order); a TABLE_3D would need a full axis TRANSPOSE
+    ((T, rate, εp) nesting vs (rate, T, εp) lookup) → warned drop, ETA
+    stays 1.0. BFLG≠0 reinterprets the BETA tables entirely → warned drop.
+
+    ── Failure (LCF/LCG/LCH/LCI/NUMINT → /FAIL/TAB1) ────────────────────────
+    Emitted ONLY when a usable LCF exists (dyna2rad writes /FAIL/TAB2 for
+    every MAT_224 and hits starter ERROR 3000 on an LCF-less deck — not
+    replicated). table1_ID = the triaxiality-FLIPPED failure-strain family;
+    a Lode-dependent LCF (2-D table) adds dim 3 with θ = (2/π)·asin(ξ) — the
+    engine interpolates on the normalized Lode ANGLE θ = 1 − 2·acos(ξ)/π
+    (fail_tab_s.F:180) while LCF tabulates the Lode PARAMETER ξ = 27J₃/2σvm³,
+    and the two coincide only at −1/0/+1 (shells evaluate dim 3 at θ=0).
+    LCG (rate scale) has NO function slot on TAB1 — the rate must be table
+    dim 2, so the grid is the PRE-MULTIPLIED tensor product εpf(triax)·g(rate)
+    via per-row Scale_y (a natural-log LCG axis is exp()-unwrapped — dyna2rad
+    forgets this one, CM: raw copy to FCT_SR). LCH is ALWAYS dropped loudly:
+    TAB1's fct_IDT is evaluated at TSTAR and no LAW109 engine path ever
+    fills TSTAR (only the Johnson-Cook-family laws do), so a mapped LCH(T)
+    would be read at abscissa 0 every cycle — for an absolute-temperature
+    curve that multiplies every failure strain by ~LCH(0)≈0 and erodes the
+    mesh at cycle 1. LCI → fct_IDel with EI_ref blank (default 1.0 length
+    unit ⇒ abscissa l_c/EI_ref = absolute element size, same as LCI);
+    NUMINT>0 → Ifail_sh=1 (count 1) or P_thickfail=count/NIP (Ifail_sh=2);
+    NUMINT<0 → P_thickfail=|NUMINT|/100 (percent→fraction — dyna2rad's
+    FAILIP=NUMINT/100 integer-truncation loses every 0<NUMINT<100, not
+    replicated); NUMINT=−200 (no erosion) → NO /FAIL at all, warned.
+    """
+    for mat in state.mat_tabulated_jc.values():
+        kw = "*MAT_TABULATED_JOHNSON_COOK"
+        tr_eff = mat.tr if mat.tr != 0.0 else 293.0
+        # ── E (negative = temperature-dependent curve) ─────────────────────
+        mat.e_eff = mat.e
+        if mat.e < 0.0:
+            cid = int(round(-mat.e))
+            crv = state.curves.get(cid)
+            if crv is not None and crv.pts:
+                mat.e_eff = _interp_curve(crv.pts, tr_eff)
+                state.warn(
+                    f"{kw} mid={mat.mid}: E={mat.e:g} references curve {cid} "
+                    "(temperature-dependent Young's modulus). /MAT/LAW109 "
+                    "has a SCALAR E only, so the curve is sampled at T_ref: "
+                    f"E({tr_eff:g}) = {mat.e_eff:g}; the modulus loses its "
+                    "temperature dependence (the yield tables keep theirs). "
+                    "dyna2rad instead takes the curve's FIRST ordinate "
+                    "regardless of TR (CM:11141-11161).")
+            else:
+                mat.e_eff = 0.0
+                state.warn(
+                    f"{kw} mid={mat.mid}: E={mat.e:g} references curve {cid} "
+                    "which is not in the deck — E stays 0 and the starter "
+                    "will reject the material (LAW109 requires E > 0).")
+        # ── I_smooth base (the _LOG_INTERPOLATION spelling) ────────────────
+        mat.ismooth = 2 if mat.log_interpolation else 1
+        # ── LCK1 → tab_ID_h [+ tab_ID_t from a 3-D split] ──────────────────
+        lck1_is_3d = mat.lck1 in state.define_tables_3d
+        if mat.lck1 == 0:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCK1=0 — LAW109 has NO analytic "
+                "hardening fallback, tab_ID_h stays 0 and the engine cannot "
+                "run this material (sigeps109.F reads the yield table "
+                "unconditionally). Supply LCK1.")
+        elif mat.lck1 in state.curves:
+            state.table_1d_ids.add(mat.lck1)
+            mat.tab_h = mat.lck1
+        elif mat.lck1 in state.define_tables:
+            tab = state.define_tables[mat.lck1]
+            if not tab.resolved or not tab.rows:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCK1={mat.lck1} references a "
+                    "*DEFINE_TABLE that could not be resolved — tab_ID_h "
+                    "dangles (starter ERROR 781).")
+            elif tab.rows[0][0] < 0.0:
+                rows = [(math.exp(a), lcid) for a, lcid in tab.rows]
+                last_rate, last_lcid = rows[-1]
+                rows.append((last_rate * 10.0 + 1.0, last_lcid))
+                tid = _next_table_id(state)
+                state.auto_tables[tid] = AutoTable(
+                    tid=tid,
+                    title=f"Duplicate_table_ID_{mat.lck1}_MatL224_ID_{mat.mid}",
+                    ndim=2, rows=[(lcid, (a,), 1.0) for a, lcid in rows])
+                mat.tab_h = tid
+                mat.ismooth = 2
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCK1={mat.lck1} has a NEGATIVE "
+                    "first strain-rate value — LS-DYNA's natural-log rate "
+                    "axis. Rebuilt as /TABLE/1 "
+                    f"{tid} with every rate exp()-unwrapped, the last curve "
+                    f"duplicated at {last_rate * 10.0 + 1.0:g} (dyna2rad's "
+                    "flat-extrapolation sentinel, CM:11219-11250) and "
+                    "I_smooth=2 (log-basis rate interpolation, matching "
+                    "LS-DYNA's linear-in-ln(rate) lookup).")
+            else:
+                mat.tab_h = mat.lck1
+        elif lck1_is_3d:
+            t3 = state.define_tables_3d[mat.lck1]
+            planes = sorted(
+                (v, tid) for v, tid in t3.rows
+                if (tid in state.define_tables
+                    and state.define_tables[tid].resolved
+                    and state.define_tables[tid].rows))
+            if not planes:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCK1={mat.lck1} is a "
+                    "*DEFINE_TABLE_3D with no usable temperature plane — "
+                    "tab_ID_h stays 0 and the engine cannot run this "
+                    "material (LAW109 has no analytic hardening fallback).")
+            else:
+                v_sel, tid_sel = min(planes,
+                                     key=lambda p: abs(p[0] - tr_eff))
+                plane = state.define_tables[tid_sel]
+                if plane.rows[0][0] < 0.0:
+                    rows = [(math.exp(a), lcid) for a, lcid in plane.rows]
+                    last_rate, last_lcid = rows[-1]
+                    rows.append((last_rate * 10.0 + 1.0, last_lcid))
+                    tid = _next_table_id(state)
+                    state.auto_tables[tid] = AutoTable(
+                        tid=tid,
+                        title=(f"Duplicate_table_ID_{tid_sel}"
+                               f"_MatL224_ID_{mat.mid}"),
+                        ndim=2, rows=[(lcid, (a,), 1.0) for a, lcid in rows])
+                    mat.tab_h = tid
+                    mat.ismooth = 2
+                else:
+                    mat.tab_h = tid_sel
+                trows = [(state.define_tables[tid].rows[0][1], (v,), 1.0)
+                         for v, tid in planes]
+                if len(trows) >= 2:
+                    ttid = _next_table_id(state)
+                    state.auto_tables[ttid] = AutoTable(
+                        tid=ttid,
+                        title=f"Auto_MAT224_LCKT_from3D_mid{mat.mid}",
+                        ndim=2, rows=trows)
+                    mat.tab_t = ttid
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCK1={mat.lck1} is a 3-D table "
+                    "σ(εp, rate, T), but LAW109's yield lookup is strictly "
+                    "2-D (table2d_vinterp_log.F ARRETs the engine on NDIM>2 "
+                    "— dyna2rad wires the 3-D id through and produces "
+                    "exactly that crash). SPLIT instead: tab_ID_h = plane "
+                    f"{tid_sel} at T={v_sel:g} (nearest T_ref={tr_eff:g}), "
+                    "tab_ID_t = the (εp, T) table of every plane's "
+                    "lowest-rate curve"
+                    + (f" (/TABLE/1 {mat.tab_t})" if mat.tab_t else
+                       " — single plane, no temperature variation to carry")
+                    + ". LAW109 then reconstructs σ = k1(εp,rate) · "
+                    "kt(εp,T)/kt(εp,T_ref); EXACT only if the tabulated "
+                    "σ(εp,rate,T) is multiplicatively separable in rate and "
+                    "temperature — verify against the source data.")
+                if mat.lckt:
+                    state.warn(
+                        f"{kw} mid={mat.mid}: LCKT={mat.lckt} is IGNORED "
+                        "because LCK1 is a 3-D table (LS-DYNA's own rule, "
+                        "Vol II p.1592) — tab_ID_t comes from the LCK1 "
+                        "split above.")
+        else:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCK1={mat.lck1} references a curve/"
+                "table that is not in the deck — tab_ID_h dangles (starter "
+                "ERROR 781).")
+        # ── LCKT → tab_ID_t (when not consumed by the 3-D split) ───────────
+        if mat.lckt and not lck1_is_3d:
+            if mat.lckt in state.define_tables:
+                tab = state.define_tables[mat.lckt]
+                if tab.resolved and tab.rows:
+                    mat.tab_t = mat.lckt
+                else:
+                    state.warn(
+                        f"{kw} mid={mat.mid}: LCKT={mat.lckt} references a "
+                        "*DEFINE_TABLE that could not be resolved — "
+                        "tab_ID_t dangles (starter ERROR 781).")
+            elif mat.lckt in state.curves:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCKT={mat.lckt} is a plain "
+                    "*DEFINE_CURVE — it carries no temperature family, and "
+                    "tab_ID_t works as the RATIO kt(εp,T)/kt(εp,T_ref) "
+                    "(sigeps109.F:230-244), which a 1-D σ(εp) table makes "
+                    "identically 1. DROPPED (temperature scaling of the "
+                    "yield ≡ 1); dyna2rad drops it too, silently "
+                    "(CM:11169-11181 has no curve branch). Restate LCKT as "
+                    "a *DEFINE_TABLE over temperature.")
+            elif mat.lckt in state.define_tables_3d:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCKT={mat.lckt} is a "
+                    "*DEFINE_TABLE_3D — LCKT is a 2-D table (per T, a "
+                    "quasi-static σ(εp) curve) in LS-DYNA and tab_ID_t is "
+                    "read 2-D; DROPPED (temperature scaling ≡ 1).")
+            else:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCKT={mat.lckt} references a "
+                    "curve/table that is not in the deck — tab_ID_t dangles "
+                    "(starter ERROR 781).")
+        # ── BETA → ETA / TAB_ETA ───────────────────────────────────────────
+        if mat.beta >= 0.0:
+            mat.eta = mat.beta
+            if mat.beta > 1.0:
+                state.warn(
+                    f"{kw} mid={mat.mid}: BETA={mat.beta:g} > 1 — the "
+                    "engine clamps the heat fraction to 1 "
+                    "(FTHERM=MIN(ETA,1), sigeps109.F:189).")
+        elif mat.bflg:
+            state.warn(
+                f"{kw} mid={mat.mid}: BFLG={mat.bflg} reinterprets the "
+                f"BETA={mat.beta:g} tables as β(max shear strain / rate / "
+                "element size) — /MAT/LAW109's TAB_ETA reads (rate, T, εp) "
+                "and cannot express that; the BETA table is DROPPED and the "
+                "heat fraction stays ETA=1.0.")
+        else:
+            bid = int(round(-mat.beta))
+            if bid in state.curves:
+                crv = state.curves[bid]
+                if any(x < 0.0 for x, _ in crv.pts):
+                    pts = sorted((math.exp(x) if x < 0.0 else x, y)
+                                 for x, y in crv.pts)
+                    fid = state.next_curve_id()
+                    _add_auto_curve(
+                        state, fid, f"Auto_MAT224_TAB_ETA_mid{mat.mid}",
+                        list(pts))
+                    state.table_1d_ids.add(fid)
+                    mat.tab_eta = fid
+                    state.warn(
+                        f"{kw} mid={mat.mid}: BETA curve {bid} has negative "
+                        "strain-rate abscissas — natural-log rates, "
+                        "exp()-unwrapped point-wise into /TABLE/1 "
+                        f"{fid} (dyna2rad CM:11318-11327; its side effect of "
+                        "forcing the YIELD table's I_smooth to 2 off a BETA "
+                        "curve is NOT replicated). Radioss interpolates "
+                        "TAB_ETA linearly in rate (TABLE_VINTERP) where "
+                        "LS-DYNA interpolated linearly in ln(rate).")
+                else:
+                    state.table_1d_ids.add(bid)
+                    mat.tab_eta = bid
+            elif bid in state.define_tables:
+                tab = state.define_tables[bid]
+                if tab.resolved and tab.rows:
+                    mat.tab_eta = bid
+                else:
+                    state.warn(
+                        f"{kw} mid={mat.mid}: BETA table {bid} could not be "
+                        "resolved — TAB_ETA dangles (starter ERROR 781).")
+            elif bid in state.define_tables_3d:
+                state.warn(
+                    f"{kw} mid={mat.mid}: BETA={mat.beta:g} references "
+                    f"*DEFINE_TABLE_3D {bid} — LS-DYNA nests it (T → rate → "
+                    "εp), i.e. flat dims (εp, rate, T), while LAW109's "
+                    "TAB_ETA reads (rate, T, εp) (sigeps109.F:162-184): a "
+                    "full axis TRANSPOSE with curve resampling would be "
+                    "required. DROPPED — the heat fraction stays ETA=1.0 "
+                    "(constant); bake a representative scalar BETA if the "
+                    "variation matters.")
+            else:
+                state.warn(
+                    f"{kw} mid={mat.mid}: BETA={mat.beta:g} references "
+                    f"curve/table {bid} which is not in the deck (a "
+                    "*DEFINE_TABLE_4D is not supported either) — DROPPED, "
+                    "ETA stays 1.0.")
+        # ── Failure: LCF/LCG/LCH/LCI + NUMINT → /FAIL/TAB1 ─────────────────
+        _resolve_mat224_failure(state, mat, kw)
+        # ── Optional card 3 + BFLG drops ───────────────────────────────────
+        if mat.failopt:
+            state.warn(
+                f"{kw} mid={mat.mid}: FAILOPT={mat.failopt} (load-path-"
+                f"independent F2=εp/εpf criterion, NUMAVG={mat.numavg}, "
+                f"NCYFAIL={mat.ncyfail}) has no /FAIL/TAB1 counterpart — "
+                "DROPPED; the converted criterion is the accumulated "
+                "F = ∫dεp/εpf ≥ 1 only.")
+        if mat.erode:
+            state.warn(
+                f"{kw} mid={mat.mid}: ERODE={mat.erode} (keep failed solids "
+                "with zeroed/uncoupled stresses instead of eroding) has no "
+                "/FAIL/TAB1 counterpart — DROPPED (failed elements are "
+                "deleted).")
+        if mat.lcps:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCPS={mat.lcps} (1st-principal-stress "
+                "limit, post-processing history variable #17 only in "
+                "LS-DYNA) has no Radioss counterpart — DROPPED.")
+        if mat.bflg and mat.beta >= 0.0:
+            state.warn(
+                f"{kw} mid={mat.mid}: BFLG={mat.bflg} without a BETA table "
+                "has no effect in LS-DYNA and no LAW109 counterpart — "
+                "ignored.")
+
+
+def _resolve_mat224_failure(state: ConversionState, mat: MatTabulatedJC,
+                            kw: str) -> None:
+    """The /FAIL/TAB1 half of _resolve_mat_tabulated_jc (see its docstring
+    for the full semantics). Sets emit_fail/fail_table1/fct_idel/ifail_sh/
+    ifail_so/pthickfail on *mat*."""
+    if mat.numint == -200.0:
+        state.warn(
+            f"{kw} mid={mat.mid}: NUMINT=-200 disables erosion in LS-DYNA "
+            "(damage is tracked but elements are never deleted). /FAIL/TAB1 "
+            "always deletes at D ≥ Dcrit and Radioss has no track-but-never-"
+            "delete mode, so NO /FAIL card is emitted — the LCF/LCG/LCH/LCI "
+            "damage bookkeeping is DROPPED rather than converted into "
+            "erosion LS-DYNA would not perform.")
+        return
+    if mat.lcf == 0:
+        extras = [f"{n}={v}" for n, v in
+                  (("LCG", mat.lcg), ("LCH", mat.lch), ("LCI", mat.lci)) if v]
+        if extras:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCF=0 but {', '.join(extras)} set — "
+                "LCG/LCH/LCI are multiplicative scales ON the LCF failure "
+                "strain and are DROPPED without it. No /FAIL/TAB1 is "
+                "emitted (dyna2rad emits one for every MAT_224 and hits "
+                "starter ERROR 3000 when no failure table exists — not "
+                "replicated).")
+        return
+    # ── LCF → the (flipped) failure-strain family ──────────────────────────
+    base = None          # list of (theta | None, flipped fct id)
+    if mat.lcf in state.curves:
+        if not state.curves[mat.lcf].pts:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCF curve {mat.lcf} has no points — "
+                "no /FAIL/TAB1 emitted.")
+            return
+        base = [(None, _flip_triax_curve(state, mat.lcf, mat.mid))]
+    elif mat.lcf in state.define_tables:
+        tab = state.define_tables[mat.lcf]
+        if not tab.resolved or not tab.rows:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCF={mat.lcf} references a "
+                "*DEFINE_TABLE that could not be resolved — no /FAIL/TAB1 "
+                "emitted (an empty table1_ID would be starter ERROR 2068).")
+            return
+        base = []
+        clamped = []
+        for xi, lcid in tab.rows:
+            xi_c = min(1.0, max(-1.0, xi))
+            if xi_c != xi:
+                clamped.append(xi)
+            base.append(((2.0 / math.pi) * math.asin(xi_c),
+                         _flip_triax_curve(state, lcid, mat.mid)))
+        base.sort(key=lambda t: t[0])
+        state.warn(
+            f"{kw} mid={mat.mid}: LCF={mat.lcf} is Lode-dependent — its "
+            "table values are the Lode PARAMETER ξ = 27J₃/(2σvm³), while "
+            "/FAIL/TAB1 interpolates dim 3 on the normalized Lode ANGLE "
+            "θ = 1 − 2·acos(ξ)/π (fail_tab_s.F:180); each value is remapped "
+            "θ = (2/π)·asin(ξ) (they coincide only at −1/0/+1). SHELL "
+            "elements evaluate the Lode axis at θ=0 (fail_tab_c.F:215-225 — "
+            "'only 2D tables' per the Radioss manual); solids use the full "
+            "3-D lookup."
+            + (f" Value(s) {clamped} outside [-1,1] were clamped."
+               if clamped else ""))
+    elif mat.lcf in state.define_tables_3d:
+        state.warn(
+            f"{kw} mid={mat.mid}: LCF={mat.lcf} is a *DEFINE_TABLE_3D — "
+            "LS-DYNA defines LCF as a curve (εpf vs triaxiality) or a 2-D "
+            "table (per Lode parameter) only, and /FAIL/TAB1's temperature-"
+            "free (triax, rate, Lode) table cannot absorb a third LCF axis. "
+            "No /FAIL/TAB1 is emitted (dyna2rad's 'TABLE' branch reads the "
+            "3-D card's absent CurveIds and emits an EMPTY table — starter "
+            "error — not replicated).")
+        return
+    else:
+        state.warn(
+            f"{kw} mid={mat.mid}: LCF={mat.lcf} references a curve/table "
+            "that is not in the deck — no /FAIL/TAB1 emitted (a dangling "
+            "table1_ID would be starter ERROR 781/2068).")
+        return
+    # ── LCG → the rate axis (pre-multiplied Scale_y grid) ──────────────────
+    rates = None         # list of (rate, scale)
+    if mat.lcg:
+        if mat.lcg in state.curves:
+            pts = sorted(state.curves[mat.lcg].pts)
+            if len(pts) >= 2:
+                if pts[0][0] < 0.0:
+                    rates = sorted((math.exp(x), y) for x, y in pts)
+                    state.warn(
+                        f"{kw} mid={mat.mid}: LCG curve {mat.lcg} has a "
+                        "negative first abscissa — LS-DYNA reads the WHOLE "
+                        "axis as natural-log strain rates (Vol II p.1593); "
+                        "exp()-unwrapped onto the table1_ID rate axis "
+                        "(dyna2rad copies the log axis raw into its rate "
+                        "slot — not replicated). Radioss interpolates the "
+                        "rate dimension linearly in rate.")
+                else:
+                    rates = pts
+            else:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCG curve {mat.lcg} has fewer "
+                    "than 2 points — unusable as a rate axis (/TABLE/1 "
+                    "needs ≥ 2 rows per dimension, starter ERROR 778); "
+                    "rate scaling DROPPED (g ≡ 1).")
+        elif (mat.lcg in state.define_tables
+              or mat.lcg in state.define_tables_3d):
+            state.warn(
+                f"{kw} mid={mat.mid}: LCG={mat.lcg} is a *DEFINE_TABLE — "
+                "LS-DYNA defines LCG as a CURVE of εpf-scale vs plastic "
+                "strain rate; a table here is not defined and cannot be "
+                "mapped — rate scaling DROPPED (g ≡ 1).")
+        else:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCG={mat.lcg} references a curve that "
+                "is not in the deck — rate scaling DROPPED (g ≡ 1).")
+    # ── assemble table1_ID ─────────────────────────────────────────────────
+    if base[0][0] is None:                      # triaxiality-only LCF
+        flip_fid = base[0][1]
+        if rates is None:
+            mat.fail_table1 = flip_fid          # 1-D function in the table
+        else:                                   # slot — MAT_081 precedent
+            tid = _next_table_id(state)
+            state.auto_tables[tid] = AutoTable(
+                tid=tid, title=f"Auto_MAT224_LCFxLCG_mid{mat.mid}", ndim=2,
+                rows=[(flip_fid, (r,), g) for r, g in rates])
+            mat.fail_table1 = tid
+    else:                                       # Lode-dependent LCF
+        rate_axis = rates if rates is not None else list(_MAT224_FLAT_RATE_AXIS)
+        rows = [(fid, (r, theta), g)
+                for theta, fid in base for r, g in rate_axis]
+        rows.sort(key=lambda t: (t[1][1], t[1][0]))
+        tid = _next_table_id(state)
+        state.auto_tables[tid] = AutoTable(
+            tid=tid, title=f"Auto_MAT224_LCF_lode_mid{mat.mid}", ndim=3,
+            rows=rows)
+        mat.fail_table1 = tid
+    mat.emit_fail = True
+    # ── LCH: inexpressible under LAW109 ────────────────────────────────────
+    if mat.lch:
+        state.warn(
+            f"{kw} mid={mat.mid}: LCH={mat.lch} (failure-strain scale vs "
+            "temperature) is DROPPED (h(T) ≡ 1): /FAIL/TAB1's fct_IDT is "
+            "evaluated at TSTAR (fail_tab_s.F:200) and NO LAW109 engine "
+            "path ever fills TSTAR (only the Johnson-Cook-family laws do), "
+            "so a mapped LCH would be read at abscissa 0 every cycle — for "
+            "an absolute-temperature curve that multiplies every failure "
+            "strain by ~LCH(0)≈0 and erodes the whole mesh at cycle 1. "
+            "The temperature dependence of the failure strain cannot be "
+            "expressed under /MAT/LAW109 + /FAIL/TAB1.")
+    # ── LCI → fct_IDel ─────────────────────────────────────────────────────
+    if mat.lci:
+        if mat.lci in state.curves:
+            mat.fct_idel = mat.lci
+        elif mat.lci in state.define_tables:
+            tab = state.define_tables[mat.lci]
+            if tab.resolved and len(tab.rows) == 1:
+                mat.fct_idel = tab.rows[0][1]
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCI={mat.lci} is a 1-row table — "
+                    "collapsed to its only curve "
+                    f"{mat.fct_idel} for fct_IDel (the single-value "
+                    "triaxiality axis carries no variation).")
+            else:
+                state.warn(
+                    f"{kw} mid={mat.mid}: LCI={mat.lci} is a per-"
+                    "triaxiality table of element-size curves — "
+                    "/FAIL/TAB1's regularization is a single FUNCTION of "
+                    "element size (fct_IDel), with no triaxiality axis; "
+                    "DROPPED (no element-size regularization). Re-state LCI "
+                    "as one curve to convert it.")
+        elif mat.lci in state.define_tables_3d:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCI={mat.lci} is a *DEFINE_TABLE_3D "
+                "(size × triaxiality × Lode) — /FAIL/TAB1's fct_IDel is a "
+                "single function of element size; DROPPED (no element-size "
+                "regularization).")
+        else:
+            state.warn(
+                f"{kw} mid={mat.mid}: LCI={mat.lci} references a curve that "
+                "is not in the deck — fct_IDel left 0 (no element-size "
+                "regularization).")
+    # ── NUMINT → Ifail_sh / Ifail_so / P_thickfail ─────────────────────────
+    if mat.numint < 0.0:
+        mat.ifail_sh = 2
+        mat.pthickfail = min(abs(mat.numint) / 100.0, 1.0)
+        state.warn(
+            f"{kw} mid={mat.mid}: NUMINT={mat.numint:g} (negative = PERCENT "
+            "of failed layers) → Ifail_sh=2 with P_thickfail="
+            f"{mat.pthickfail:g} (fraction; dyna2rad's FAILIP=|NUMINT|/100 "
+            "route is a TAB2 field — on TAB1 the fraction lands on "
+            "P_thickfail, which the reader honours only for Ifail_sh>1).")
+    else:
+        count = int(round(mat.numint))
+        if count <= 1:
+            mat.ifail_sh = 1        # first failed layer deletes the shell
+            mat.ifail_so = 1        # first failed IP deletes the solid
+        else:
+            nptt = _shell_nptt_for_mid(state, mat.mid)
+            if nptt:
+                mat.ifail_sh = 2
+                mat.pthickfail = min(count / nptt, 1.0)
+                state.warn(
+                    f"{kw} mid={mat.mid}: NUMINT={count} (integration-point "
+                    "COUNT) → Ifail_sh=2 with P_thickfail="
+                    f"{mat.pthickfail:g} = {count}/{nptt} of the shell's "
+                    "NIP stack (dyna2rad's FAILIP=NUMINT/100 integer-"
+                    "truncates every 0<NUMINT<100 to 0 → starter default 1 "
+                    "— not replicated).")
+            else:
+                mat.ifail_sh = 2
+                state.warn(
+                    f"{kw} mid={mat.mid}: NUMINT={count} > 1 but no shell "
+                    "part with a *SECTION_SHELL NIP references this "
+                    "material — the count cannot become a thickness "
+                    "fraction. Ifail_sh=2 (whole stack must fail) is the "
+                    "closest conservative mapping; SOLID elements delete on "
+                    "their FIRST failed integration point regardless "
+                    "(Ifail_so has no count field).")
+        solid_pids = {e.pid for e in state.solid_elems}
+        if count > 1 and any(pid in solid_pids
+                             for pid, p in state.parts.items()
+                             if p.mid == mat.mid):
+            state.warn(
+                f"{kw} mid={mat.mid}: NUMINT={count} on SOLID part(s) — "
+                "/FAIL/TAB1's Ifail_so has no integration-point count "
+                "(1 = delete on first failed IP), so solids erode EARLIER "
+                f"than LS-DYNA's {count}-IP rule.")
+
+
+def _emit_mat_law109(mat: MatTabulatedJC, state: ConversionState) -> List[str]:
+    """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 (elasto-plastic
+    tabulated). Layout audited against hm_cfg_files MAT/mat109.cfg — its ONLY
+    format block is FORMAT(radioss2021), so a /BEGIN 2022 deck reads exactly
+    this (starter-verified, 0 errors, every field echoed):
+      C1: RHO_I(20)
+      C2: E(20) Nu(20)
+      C3: C_p(20) ETA(20) T_ref(20) T_ini(20)
+      C4: tab_ID_h(10) tab_ID_t(10) Xscale_h(20) Yscale_h(20) [30 blanks]
+          I_smooth(10)
+      C5: TAB_ETA(10) Xscale_ETA(20) — NOT optional: the CFG always reads it
+          (omitting the line would consume the next card).
+    Blank(0) fields keep the starter defaults (hm_read_mat109.F:118-136):
+    Xscale_h/Yscale_h/Xscale_ETA → 1.0, T_ref 0 → 293, T_ini 0 → T_ref; the
+    rate filter is hardwired FCUT = 10 kHz. C_p is the per-MASS specific
+    heat, copied 1:1 from LS-DYNA CP — the engine divides by RHO itself
+    (sigeps109.F:419: TEMP += FTHERM·YLD·DPLA/(CP·RHO)) — deliberately NOT
+    the rho-premultiplied rhoC_p of the LAW2/LAW4 (MAT_015) convention.
+    Adiabatic self-heating needs NO /HEAT/MAT — emitting one would SWITCH
+    LAW109 to the imposed-temperature path and kill the self-heating update
+    (sigeps109.F:411-414; Reference Guide p.693) — so none is written."""
+    return [
+        f"/MAT/LAW109/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu",
+        f"{_f(mat.e_eff)}{_f(mat.pr)}",
+        "#                C_p                 ETA               T_ref               T_ini",
+        f"{_f(mat.cp)}{_f(mat.eta)}{_f(mat.tr)}{_f(0.0)}",
+        "# tab_ID_h  tab_ID_t            Xscale_h            Yscale_h                                I_smooth",
+        f"{_i(mat.tab_h)}{_i(mat.tab_t)}{_f(0.0)}{_f(0.0)}{' ' * 30}{_i(mat.ismooth)}",
+        "#  TAB_ETA          Xscale_ETA",
+        f"{_i(mat.tab_eta)}{_f(0.0)}",
+        HDR,
+    ]
+
+
+def _emit_mat224_tab1(mat: MatTabulatedJC, state: ConversionState) -> List[str]:
+    """*MAT_224 LCF/LCG/LCI/NUMINT → /FAIL/TAB1. Layout from hm_cfg_files
+    FAIL/fail_tab1.cfg FORMAT(radioss2021) — the block a /BEGIN 2022 deck
+    reads with; the literal space runs on cards 1 and 5 are documented on
+    _emit_mat123_tab1. The header id is the MATERIAL id and there is no
+    title line; Shear_limit/Biax_limit are 2021+ fields, legal at 2022
+    (blank keeps their defaults −1/1 = no triaxiality cutoffs).
+
+    Card 2 all-blank keeps the starter's damage defaults Dcrit=1, D=0, n=1,
+    Dadv=Dcrit (hm_read_fail_tab1.F:139-177): damage accumulates as
+    dD = dεp/εpf and the element erodes the instant D ≥ 1, with NO softening
+    (no TABLE2 and FAD_EXP=0 leave DMG_FLAG=0) — exactly MAT_224's
+    F = ∫dεp/εpf ≥ 1 instant-deletion criterion, nothing double-counted.
+    table1_ID carries the pre-flipped triaxiality axis (and the θ-remapped
+    Lode axis / pre-multiplied LCG rate axis — see _resolve_mat_tabulated_jc);
+    a plain-curve family is referenced as a 1-D /FUNCT, which the TAB1
+    reader accepts in a table slot (MAT_081 precedent, live-verified).
+    fct_IDel takes LCI with Fscale_el/EI_ref blank → 1.0, so the abscissa
+    l_c/EI_ref is the ABSOLUTE element size, same as LCI; Ch_i_f blank → 1
+    (size scaling applies to the fracture strain — LCI's role). fct_IDT
+    stays 0 ALWAYS (the LCH trap — see the resolver warning)."""
+    sp20, sp10, sp30 = " " * 20, " " * 10, " " * 30
+    return [
+        f"/FAIL/TAB1/{mat.mid}",
+        "# IFAIL_SH  IFAIL_SO                             P_THICKFAIL          P_thinfail               Ixfem",
+        f"{_i(mat.ifail_sh)}{_i(mat.ifail_so)}{sp20}{_f(mat.pthickfail)}{_f(0.0)}{sp10}{_i(0)}",
+        "#              Dcrit                   D                   N                Dadv   fct_IDD",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#TABLE1_ID             Xscale1             Xscale2 TABLE2_ID             Xscale3             Xscale4",
+        f"{_i(mat.fail_table1)}{_f(0.0)}{_f(0.0)}{_i(0)}{_f(0.0)}{_f(0.0)}",
+        "# fct_IDEL           Fscale_EL              EI_REF          INST_START             FAD_EXP    CH_I_F",
+        f"{_i(mat.fct_idel)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
+        "#  fct_IDT             FscaleT                              Shear_limit             Biax_limit",
+        f"{_i(0)}{_f(0.0)}{sp30}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+
+
 def _emit_mat_simplified_rubber(mat: MatSimplifiedRubber) -> List[str]:
     """*MAT_SIMPLIFIED_RUBBER/FOAM (181) / *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE
     (183) → /MAT/LAW88, with the loading/unloading curve family resolved by
@@ -6088,7 +6843,7 @@ def _emit_fail_tab2(fail: FailGissmo, state: ConversionState) -> List[str]:
 def _make_functions(state: ConversionState) -> List[str]:
     tables_2d = {tbid: t for tbid, t in state.define_tables.items()
                  if t.resolved and t.rows}
-    if not state.curves and not tables_2d:
+    if not state.curves and not tables_2d and not state.auto_tables:
         return []
     table_ids = getattr(state, "table_1d_ids", set())
     lines = ["#-  FUNCTIONS:", HDR]
@@ -6129,6 +6884,30 @@ def _make_functions(state: ConversionState) -> List[str]:
         ]
         for a, lcid in tab.rows:
             lines.append(f"{_i(lcid)}{' ' * 10}{_f(a)}{' ' * 40}{_f(1.0)}")
+        lines.append(HDR)
+    for tid, tab in sorted(state.auto_tables.items()):
+        # Synthesized multi-dimensional /TABLE/1 (the MAT_224 wiring and the
+        # *DEFINE_TABLE_3D flat form). Same CURVE/table_1.cfg
+        # FORMAT(radioss110) layout; the Ndim=3 row moves Scale_y's 40-blank
+        # run to B(20 chars, cols 41-60) + 20 blanks:
+        #   fct_ID(%10d) blank(10) A(%20lg) [B(%20lg)] blank(40|20) Scale_y.
+        lines += [
+            f"/TABLE/1/{tid}",
+            tab.title or f"TABLE_{tid}",
+            "#dimension",
+            f"{_i(tab.ndim)}",
+        ]
+        if tab.ndim == 2:
+            lines.append("#  fct_ID1                             A                                                    Scale_y1")
+            for lcid, coords, sy in tab.rows:
+                lines.append(
+                    f"{_i(lcid)}{' ' * 10}{_f(coords[0])}{' ' * 40}{_f(sy)}")
+        else:
+            lines.append("#  fct_ID1                             A                   B                                Scale_y1")
+            for lcid, coords, sy in tab.rows:
+                lines.append(
+                    f"{_i(lcid)}{' ' * 10}{_f(coords[0])}{_f(coords[1])}"
+                    f"{' ' * 20}{_f(sy)}")
         lines.append(HDR)
     return lines
 

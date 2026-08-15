@@ -11,6 +11,113 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Tabulated Johnson-Cook batch** (`*MAT_TABULATED_JOHNSON_COOK` 224 incl.
+  `_LOG_INTERPOLATION`, `*DEFINE_TABLE_3D`) — the roadmap P1 item. All were
+  `SKIPPED` before. Numeric alias `MAT_224` registered; the `_GYS` (224_GYS)
+  and `_ORTHO_PLASTICITY` (264) variants get a LOUD warn-skip (dyna2rad drops
+  both SILENTLY: `_GYS` is absent from its keyword map and 264 has no case in
+  its dispatch switch, so each falls into the broken `Convert1To1` fallback —
+  no /MAT, no message, part wired to `mat_ID=0`, CM:140-143/196-201/527-554).
+  `*INCLUDE_TRANSFORM` offset specs for every spelling (card 2 = six
+  curve/table ids, card 3 = LCPS; the `E<0`/`BETA<0` negative float-cell
+  encodings are deliberately NOT offset and instead draw the dangling
+  warnings).
+
+  - **`*MAT_TABULATED_JOHNSON_COOK` (224) → `/MAT/LAW109`** (dyna2rad
+    `p_ConvertMatL224`, CM:11108-11705; layout audited against `mat109.cfg`
+    `FORMAT(radioss2021)` — the ONLY block, read as-is at `/BEGIN 2022`,
+    including card 4's 30 literal blanks before `I_smooth` and the
+    NOT-optional card 5). `RHO/E/PR/TR` verbatim (`TR=0` keeps the starter's
+    293 default; `T_ini` blank → `T_ref`). **`CP` copies 1:1 — LAW109's
+    `C_p` is specific heat per unit MASS** (the engine divides by ρ itself,
+    `sigeps109.F:419`), deliberately unlike the MAT_015 → LAW2/LAW4
+    ρ-premultiplied `rhoC_p`; adiabatic self-heating is law-internal, so no
+    `/HEAT/MAT` is emitted (it would SWITCH LAW109 to the
+    imposed-temperature path, `sigeps109.F:411-414`). `E<0` (E(T) curve) is
+    sampled at `T_ref` and warned (d2r takes the curve's FIRST ordinate
+    regardless of TR, CM:11141-11161). `LCK1` by form: plain curve →
+    re-emitted 1-D `/TABLE/1` under its id (d2r's branch requires "TABLE",
+    CM:11196, and leaves `tab_ID_h=0` — deck broken); 2-D table →
+    referenced by id, negative first rate value (LS-DYNA's natural-log axis,
+    Vol II p.357) → rebuilt with `exp()`-unwrapped rates + d2r's
+    flat-extrapolation sentinel (last curve duplicated at `10·max+1`,
+    CM:11219-11250) + `I_smooth=2`; **3-D table → SPLIT** into `tab_ID_h` =
+    the plane nearest `T_ref` and `tab_ID_t` = the per-plane lowest-rate
+    curves over T, because LAW109's yield lookup is strictly 2-D
+    (`table2d_vinterp_log.F:93-97` `ANCMSG(36)+ARRET(2)` at cycle 1 — d2r
+    wires the 3-D id straight in and produces exactly that crash), warned as
+    exact-iff-separable, with `LCKT` then ignored (LS-DYNA's own rule).
+    `LCKT` 2-D table → `tab_ID_t` (Radioss forms the `kt(T)/kt(T_ref)` ratio
+    internally — absolute curves pass through); a plain-curve `LCKT` carries
+    no temperature family (ratio ≡ 1) → warn-drop (d2r drops silently).
+    `BETA≥0` → `ETA`; `BETA<0` curve → 1-D `TAB_ETA` with d2r's point-wise
+    `exp()` unwrap (CM:11318-11327) but WITHOUT its side effect of forcing
+    the YIELD table's `I_smooth` to 2 off a BETA curve; 2-D table → direct
+    (LS-DYNA's T → rate-curves nesting lands exactly on TAB_ETA's
+    (rate, T) axes); TABLE_3D → warn-drop (LS-DYNA nests (T, rate, εp),
+    TAB_ETA reads (rate, T, εp) — a full axis transpose); `BFLG≠0`
+    reinterprets the tables → warn-drop. `FAILOPT/NUMAVG/NCYFAIL/ERODE/LCPS`
+    warn-drop (no TAB1/LAW109 counterpart; LCPS is post-processing-only even
+    in LS-DYNA).
+
+  - **`*MAT_224` LCF/LCG/LCI/NUMINT → `/FAIL/TAB1`** (layout audited against
+    `fail_tab1.cfg` `FORMAT(radioss2021)`; card 2 all-blank keeps
+    `Dcrit=1, D=0, n=1` — measured — which IS MAT_224's instant
+    `F = ∫dε_p/ε_f ≥ 1` criterion, with no TABLE2/FAD_EXP so `DMG_FLAG=0`,
+    no softening, nothing double-counted). Emitted ONLY when a usable `LCF`
+    exists — d2r creates its failure card for EVERY MAT_224 and hits starter
+    ERROR 3000 on an LCF-less deck. The triaxiality axis is FLIPPED
+    (LS-DYNA LCF tabulates pressure-based `p/σ_vm`, compression-positive;
+    Radioss `TRIAX = σ_m/σ_vm` tension-positive, `fail_tab_s.F:163-172`)
+    with the *DEFINE_CURVE scales baked in before the flip — avoiding d2r's
+    `Ashiftx=OFFA` slip (CM:11623). A Lode-dependent LCF (2-D table) adds
+    dim 3 with **`θ = (2/π)·asin(ξ)`** — Radioss interpolates the normalized
+    Lode ANGLE (`fail_tab_s.F:180`) while LCF tabulates the Lode PARAMETER
+    `ξ = 27J₃/2σ_vm³` (they coincide only at −1/0/+1; d2r passes ξ through
+    unchanged); shells read the axis at θ=0 (Radioss-documented); without
+    LCG a two-plane flat rate axis carries the Lode dimension (dim 2 of a
+    3-D TAB1 table IS the strain rate). `LCG` has NO function slot on TAB1,
+    so the grid is the PRE-MULTIPLIED `ε_f(triax)·g(rate)` tensor product
+    via per-row `Scale_y`; a negative-first-abscissa LCG (natural-log rates)
+    is `exp()`-unwrapped — d2r copies the log axis raw into its rate slot
+    (CM: LCG→FCT_SR raw id copy). `LCH` is ALWAYS warn-dropped: TAB1's
+    `fct_IDT` is evaluated at `TSTAR` and NO LAW109 engine path ever fills
+    `TSTAR` (grep: only the Johnson-Cook-family laws do) — a mapped
+    absolute-temperature `LCH` would read `LCH(0)≈0` every cycle and erode
+    the whole mesh at cycle 1. `LCI` → `fct_IDel` with `EI_ref` blank → 1.0
+    length unit (abscissa `l_c/EI_ref` = absolute element size, same as
+    LCI); a multi-row LCI table warn-drops (TAB1's regularization has no
+    triaxiality axis), a 1-row table collapses to its curve. `NUMINT`:
+    count 1 → `Ifail_sh=1`/`Ifail_so=1` (first-IP deletion); count > 1 →
+    `Ifail_sh=2` + `P_thickfail = count/NIP` via the shell stack that
+    references the MID (d2r's `FAILIP=NUMINT/100` integer-truncates every
+    `0<NUMINT<100` to 0 → starter default 1); percent form →
+    `P_thickfail=|NUMINT|/100`; `NUMINT=-200` (LS-DYNA: track damage, never
+    erode) → NO /FAIL at all, warned (Radioss has no track-but-never-delete
+    mode).
+
+  - **`*DEFINE_TABLE_3D` → `/TABLE/1` Ndim=3 (flat)** — one row per
+    (inner VALUE, outer VALUE): dim 1 = leaf-curve abscissa, dim 2 = the
+    inner tables' VALUEs (their own SFA/OFFA applied — d2r's generic 3-D
+    path never reads them, and it also puts the OUTER value on dim 2), dim 3
+    = the outer card's VALUEs, rows ascending by (B, A), `Scale_y=1`. The
+    starter's complete-rectangular-grid rule is enforced up front: ragged
+    plane grids warn and skip the flat emission (naming ERROR 3089) while
+    `*MAT_224` LCK1 plane-slicing still converts. `*DEFINE_TABLE_4D`+ stay
+    skipped (Radioss `/TABLE` caps at Ndim=4; no supported consumer).
+
+  - **Live-starter validation** (starter_win64 2026-05-20, `/BEGIN 2022`,
+    np=1): the converted combined deck — LAW109 all-cards + 1-D/2-D/3-D
+    `/TABLE/1` + `/FAIL/TAB1` with the Ndim=3 (triax, rate, Lode) grid —
+    answers NORMAL TERMINATION, 0 ERROR(S), 0 WARNING(S), with the listing
+    echoing every asserted field (`SPECIFIC HEAT COEFFICIENT = 450000000`,
+    `STRAIN TABLE ID = 90003`, `REFERENCE ELEMENT LENGTH = 1.0`,
+    `TEMPERATURE SCALE FUNCTION = 0`, one-layer/first-IP deletion) and the
+    3-D ordinate echo reproducing the `Scale_y` product numerically
+    (`1.2·1.3 = 1.56`). Negative control: the same deck minus ONE grid row →
+    `ERROR ID: 3089` twice. 49 new tests (column-exact, hand-computed) in
+    `tests/test_tabulated_jc.py`.
+
 - **Foam batch** (`*MAT_SOIL_AND_FOAM` 005, `*MAT_LOW_DENSITY_VISCOUS_FOAM`
   073, `*MAT_MODIFIED_HONEYCOMB` 126, `*MAT_DESHPANDE_FLECK_FOAM` 154,
   `*MAT_HILL_FOAM` 177, `*CONTACT_INTERIOR`, `*SET_PART_ADD`) — the roadmap

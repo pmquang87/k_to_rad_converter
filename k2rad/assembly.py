@@ -1573,6 +1573,29 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_TOUGHENED_ADHESIVE_POLYMER": _mat({1: [(0, "f")]}),
     "MAT_252": _mat({1: [(0, "f")]}),
     "MAT_ADD_DAMAGE_DIEM": _off_mat_add_damage_diem,
+    # Tabulated Johnson-Cook batch. Card 2 is all curve/table ids
+    # (LCK1 LCKT LCF LCG LCH LCI; BFLG field 7 is a flag) and card 3 field 5
+    # is LCPS (a table id; FAILOPT/NUMAVG/NCYFAIL/ERODE are counts/flags).
+    # The E<0 / BETA<0 encodings (|value| is a curve id inside a FLOAT cell)
+    # are NOT offset — the machinery shifts integer id cells only; a
+    # transformed deck using them draws the dangling-reference warning
+    # instead of a silent wrong-curve remap. The _GYS/_ORTHO_PLASTICITY
+    # variants are parse-time warn-skips but still get MID offset so the
+    # dropped material's id story stays consistent.
+    "MAT_TABULATED_JOHNSON_COOK":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_TABULATED_JOHNSON_COOK_LOG_INTERPOLATION":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_224":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f"), (4, "f"),
+                  (5, "f")], 2: [(4, "f")]}),
+    "MAT_TABULATED_JOHNSON_COOK_GYS": _mat(),
+    "MAT_224_GYS": _mat(),
+    "MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY": _mat(),
+    "MAT_264": _mat(),
+    "DEFINE_TABLE_3D": {"cards": {0: [(0, "f")]}, "data": (1, [(1, "f")])},
     "SECTION_SOLID_MISC": _off_section_solid,
     # Node table in the *NODE I8/E16 format → IDNOFF (base variant has no
     # header card; _RAMP prepends the NDTRRG card, which carries no ids).

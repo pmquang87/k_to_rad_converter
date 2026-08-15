@@ -35,6 +35,7 @@ from .state import (
     MatSimplifiedRubber, MatSoftTissue,
     MatCohesiveMixedMode, MatArupAdhesive, MatCohesiveMMEPR,
     MatToughenedAdhesive, FailDiem, FailDiemCriterion,
+    MatTabulatedJC, DefineTable3D,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
@@ -3101,6 +3102,57 @@ def handle_define_table_2d(block: Block, state: ConversionState) -> None:
     _handle_define_table_common(block, state, is_2d=True)
 
 
+def handle_define_table_3d(block: Block, state: ConversionState) -> None:
+    """*DEFINE_TABLE_3D → /TABLE/1 (Ndim=3) — a table of *DEFINE_TABLE[_2D]s.
+
+    Header card (Keyword971_R13.0 define_table_3D.cfg): TBID SFA OFFA — same
+    as the 2-D form. Point cards (Vol I R17 p.2571): VALUE (chars 1-20) and
+    TABLEID (chars 21-40), a *DEFINE_TABLE/_2D id — ALWAYS explicit, there is
+    no legacy positional form for the 3-D keyword. V = SFA·(VALUE+OFFA), the
+    *DEFINE_CURVE abscissa convention. Validation against the referenced 2-D
+    tables and the flat Ndim=3 /TABLE/1 emission (starter grid rules, ERROR
+    3089) live in the writer post-pass _resolve_define_tables_3d.
+
+    *DEFINE_TABLE_4D..9D stay unregistered on purpose: Radioss /TABLE caps at
+    Ndim=4 and no supported consumer reads one — they fall into
+    skipped_keywords and any material referencing them warns as dangling.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    tbid = to_int(f1[0])
+    sfa  = _ffield(f1, 1, 1.0)
+    if sfa == 0.0:
+        sfa = 1.0
+    offa = to_float(f1[2]) if len(f1) > 2 else 0.0
+    rows: List = []          # (V, 2-D table id)
+    bad = 0
+    for line in raw[offset + 1:]:
+        f = parse_free(line)
+        if not f:
+            continue
+        val = (to_float(f[0]) + offa) * sfa
+        tid = to_int(f[1]) if len(f) > 1 else 0
+        if tid > 0:
+            rows.append((val, tid))
+        else:
+            bad += 1
+    if bad:
+        state.warn(
+            f"*DEFINE_TABLE_3D tbid={tbid}: {bad} row(s) without the required "
+            "TABLEID field — those rows are dropped (the 3-D form has no "
+            "positional curve pairing).")
+    if not rows:
+        state.warn(f"*DEFINE_TABLE_3D tbid={tbid}: no usable rows — skipped.")
+        state.skipped_keywords.append(block.keyword)
+        return
+    state.define_tables_3d[tbid] = DefineTable3D(
+        tbid=tbid, title=title, sfa=sfa, offa=offa, rows=rows)
+
+
 # Whitelisted names for the *DEFINE_CURVE_FUNCTION expression sampler. Only a
 # pure single-variable arithmetic/trig expression can be sampled into a /FUNCT;
 # anything referencing parameters, other curves (LC(...)), or runtime state is
@@ -6072,6 +6124,104 @@ def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
         mid, title, rho, kbulk, mu, n, lcid, fittype, lcsr, c, b, r, m)
 
 
+def handle_mat_tabulated_johnson_cook(block: Block,
+                                      state: ConversionState) -> None:
+    """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1].
+
+    R16/R17 cards (Vol II R17 p.1591-1597; the shipped Keyword971_R7.1
+    mat_224.cfg is STALE — it lacks BFLG/ERODE/LCPS and types card 3 as
+    floats, so the layout is stated from the manual):
+      Card1: MID RO E PR CP TR BETA NUMINT
+      Card2: LCK1 LCKT LCF LCG LCH LCI BFLG
+      Card3 (optional): FAILOPT NUMAVG NCYFAIL ERODE LCPS
+
+    Blank/0.0 BETA and NUMINT take the manual's defaults (both 1.0, "EQ.0.0:
+    Defaults to 1.0"). CP is the specific heat per unit MASS on BOTH sides —
+    LAW109's C_p divides by RHO itself (sigeps109.F:419) — so it is stored
+    RAW, deliberately unlike the MAT_015 → LAW2/LAW4 rho-premultiplied
+    rhoC_p convention. The _LOG_INTERPOLATION spelling (log interpolation of
+    the LCK1 rate axis) sets I_smooth=2, dyna2rad's choice (CM:11131-11132;
+    Ismooth 2 and 3 are numerically identical weights in
+    table2d_vinterp_log.F:210/241). Every curve/table routing decision lives
+    in the writer prepass _resolve_mat_tabulated_jc.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_TABULATED_JOHNSON_COOK: empty material card — skipped")
+        return
+    mid  = to_int(f1[0])
+    rho  = to_float(f1[1]) if len(f1) > 1 else 0.0
+    e    = to_float(f1[2]) if len(f1) > 2 else 0.0
+    pr   = to_float(f1[3]) if len(f1) > 3 else 0.0
+    cp   = to_float(f1[4]) if len(f1) > 4 else 0.0
+    tr   = to_float(f1[5]) if len(f1) > 5 else 0.0
+    beta = _ffield(f1, 6, 1.0)
+    if beta == 0.0:
+        beta = 1.0
+    numint = _ffield(f1, 7, 1.0)
+    if numint == 0.0:
+        numint = 1.0
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    lck1 = to_int(f2[0]) if f2         else 0
+    lckt = to_int(f2[1]) if len(f2) > 1 else 0
+    lcf  = to_int(f2[2]) if len(f2) > 2 else 0
+    lcg  = to_int(f2[3]) if len(f2) > 3 else 0
+    lch  = to_int(f2[4]) if len(f2) > 4 else 0
+    lci  = to_int(f2[5]) if len(f2) > 5 else 0
+    bflg = to_int(f2[6]) if len(f2) > 6 else 0
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    failopt = to_int(f3[0]) if f3         else 0
+    numavg  = to_int(f3[1]) if len(f3) > 1 and f3[1].strip() else 1
+    ncyfail = to_int(f3[2]) if len(f3) > 2 and f3[2].strip() else 1
+    erode   = to_int(f3[3]) if len(f3) > 3 else 0
+    lcps    = to_int(f3[4]) if len(f3) > 4 else 0
+    state.mat_tabulated_jc[mid] = MatTabulatedJC(
+        mid, title, rho, e, pr, cp, tr, beta, numint,
+        lck1, lckt, lcf, lcg, lch, lci, bflg,
+        failopt, numavg, ncyfail, erode, lcps,
+        log_interpolation="LOG_INTERPOLATION" in block.keyword)
+
+
+def handle_mat_tabulated_jc_variant(block: Block,
+                                    state: ConversionState) -> None:
+    """*MAT_TABULATED_JOHNSON_COOK_GYS (224_GYS) and
+    *MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY (264) — warn-skip.
+
+    dyna2rad's verdict for BOTH is a silent drop: _GYS is absent from its
+    keyword map (operator[] default-inserts law 0) and _ORTHO_PLASTICITY maps
+    to 264 which has no case in the dispatch switch, so both fall into the
+    Convert1To1 fallback whose error message is commented out and whose
+    LsDynaToRad.cfg lookup has no MAT_224/264 rule — no /MAT is created, no
+    message is shown, and the part is wired to mat_ID=0 (CM:140-143,
+    196-201, 527-554). k2rad matches the DROP (their yield surfaces are
+    genuinely inexpressible in the isotropic von-Mises /MAT/LAW109) but says
+    so loudly, naming what is lost.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=2, w=10)
+    mid = to_int(f1[0]) if f1 and f1[0].strip() else 0
+    if "ORTHO" in block.keyword or block.keyword in ("MAT_264",):
+        lost = ("orthotropic plasticity (per-direction tabulated yield "
+                "surfaces + anisotropy angles)")
+        name = "*MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY (264)"
+    else:
+        lost = ("the GYS tension/compression/shear-asymmetric yield surface "
+                "(separate LCK-style tables per stress state)")
+        name = "*MAT_TABULATED_JOHNSON_COOK_GYS (224_GYS)"
+    state.warn(
+        f"{name} mid={mid}: DROPPED — /MAT/LAW109 is an isotropic von-Mises "
+        f"tabulated law and cannot express {lost}. dyna2rad drops this "
+        "variant too, but SILENTLY (no /MAT, no message, part wired to "
+        "mat_ID=0). Every /PART referencing this MID has no /MAT in the "
+        "converted deck and the starter will reject it; restate the material "
+        "as plain *MAT_TABULATED_JOHNSON_COOK to convert it.")
+    state.skipped_keywords.append(block.keyword)
+
+
 def handle_contact_interior(block: Block, state: ConversionState) -> None:
     """*CONTACT_INTERIOR — a FREE_CELL_LIST of part-set ids, 8 per card,
     ending at the next keyword; the keyword may appear more than once and the
@@ -8091,6 +8241,22 @@ HANDLERS = {
     "MAT_TOUGHENED_ADHESIVE_POLYMER":         handle_mat_toughened_adhesive,
     "MAT_252":                                handle_mat_toughened_adhesive,
     "MAT_ADD_DAMAGE_DIEM":                    handle_mat_add_damage_diem,
+    # ── Tabulated Johnson-Cook batch ───────────────────────────────────────
+    # MAT_224 → /MAT/LAW109 [+ /FAIL/TAB1]. _LOG_INTERPOLATION is the only
+    # convertible option spelling (same handler, I_smooth=2 — the MAT_024
+    # _LOG_INTERPOLATION precedent); LS-DYNA accepts no options on the
+    # numeric *MAT_224 alias. _GYS and _ORTHO_PLASTICITY (264) change the
+    # yield-surface model AND the card set, so they get the loud warn-skip
+    # handler — dyna2rad drops both silently (no /MAT, part wired to 0).
+    "MAT_TABULATED_JOHNSON_COOK":             handle_mat_tabulated_johnson_cook,
+    "MAT_TABULATED_JOHNSON_COOK_LOG_INTERPOLATION":
+        handle_mat_tabulated_johnson_cook,
+    "MAT_224":                                handle_mat_tabulated_johnson_cook,
+    "MAT_TABULATED_JOHNSON_COOK_GYS":         handle_mat_tabulated_jc_variant,
+    "MAT_224_GYS":                            handle_mat_tabulated_jc_variant,
+    "MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY":
+        handle_mat_tabulated_jc_variant,
+    "MAT_264":                                handle_mat_tabulated_jc_variant,
     "INITIAL_FOAM_REFERENCE_GEOMETRY":        handle_initial_foam_reference_geometry,
     "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP":   handle_initial_foam_reference_geometry,
     # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors
@@ -8117,6 +8283,7 @@ HANDLERS = {
     "DEFINE_CURVE_FUNCTION":                  handle_define_curve_function,
     "DEFINE_TABLE":                           handle_define_table,
     "DEFINE_TABLE_2D":                        handle_define_table_2d,
+    "DEFINE_TABLE_3D":                        handle_define_table_3d,
     "DEFINE_COORDINATE_SYSTEM":               handle_define_coordinate_system,
     "DEFINE_COORDINATE_NODES":                handle_define_coordinate_nodes,
     "DEFINE_COORDINATE_VECTOR":               handle_define_coordinate_vector,

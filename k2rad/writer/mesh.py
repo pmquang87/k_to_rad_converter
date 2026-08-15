@@ -2991,6 +2991,18 @@ _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 #                                     LARGE_STRAIN, HOOK; SOLID_ISOTROPIC
 #                                     only; warned by
 #                                     _resolve_mat_deshpande_fleck.
+#
+# Classification of the TABULATED JOHNSON-COOK batch's law, read from the
+# same INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. No BEAM_*
+# keyword, so neither frozenset above changes and the existing "no beam
+# keyword at all — starter ERROR 3046" message is already the right one for
+# a *MAT_224 beam part:
+#   LAW109 hm_read_mat109.F:182-191   ELASTO_PLASTIC, INCREMENTAL,
+#                                     LARGE_STRAIN, HOOK, EOS (conditional),
+#                                     SHELL_ISOTROPIC, SOLID_ISOTROPIC, SPH
+#                                     — shell- and solid-capable, beam-
+#                                     incompatible with BOTH /PROP/TYPE3
+#                                     and /PROP/TYPE18.
 
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
@@ -3131,6 +3143,15 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 116                                 # *MAT_240 (option-free)
     if mid in state.mat_toughened_adhesive:
         return 120                                 # *MAT_252 → TAPO
+    # Tabulated Johnson-Cook batch. LAW109 is NOT on the solid-/XREF
+    # whitelist this function feeds, so a MAT_224 part hit by
+    # *INITIAL_FOAM_REFERENCE_GEOMETRY warn-skips NAMING the law (without
+    # the entry the gate would misreport "no /MAT at all"). The _GYS /
+    # _ORTHO_PLASTICITY variants are warn-skipped at parse and never fill
+    # the dict, so they correctly read as "no /MAT" here — the MAT_240
+    # variant pattern.
+    if mid in state.mat_tabulated_jc:
+        return 109                                 # *MAT_224 → LAW109
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:
