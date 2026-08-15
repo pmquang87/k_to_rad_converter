@@ -11,6 +11,189 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Foam batch** (`*MAT_SOIL_AND_FOAM` 005, `*MAT_LOW_DENSITY_VISCOUS_FOAM`
+  073, `*MAT_MODIFIED_HONEYCOMB` 126, `*MAT_DESHPANDE_FLECK_FOAM` 154,
+  `*MAT_HILL_FOAM` 177, `*CONTACT_INTERIOR`, `*SET_PART_ADD`) — the roadmap
+  P1 batch. All were `SKIPPED` before. Numeric aliases
+  `MAT_5/005`, `MAT_73/073`, `MAT_126`, `MAT_154`, `MAT_177` registered, with
+  `*INCLUDE_TRANSFORM` offset specs for every spelling.
+  `*MAT_SOIL_AND_FOAM_FAILURE` (014) deliberately stays skipped — dyna2rad
+  maps it to law 14, which has no case in its dispatch switch, and silently
+  converting away its failure semantics onto LAW21 would be worse.
+
+  - **`*MAT_SOIL_AND_FOAM` (005) → `/MAT/LAW21` (DPRAG)** (dyna2rad
+    `p_ConvertMatL5`, CM:719-983; layout audited against `matl21_dprag.cfg`
+    `FORMAT(radioss130)`, the block a `/BEGIN 2022` deck reads — including
+    the card-4 `%10d` + 10 literal blanks before `Kt`). `E = 9GK/(3K+G)`,
+    `ν = (3K−2G)/(6K+2G)` clamped `[0, 0.495]`; `A0/A1/A2` verbatim
+    (identical yield algebra); `PC → P_min` verbatim; `Kt = KUN/100`
+    (dyna2rad's deliberate tensile softening — warned, it is 100× softer
+    than LS-DYNA's KUN in tension); `B = KUN`, `VCR=1 → B=0` with the
+    consequence named (the starter substitutes `Kt` under its own WARNING
+    829). THE pressure-curve transform encoded from the engine sources, not
+    intuition: LS-DYNA tabulates `P` vs `EPS = ln(V/V0)` (negative in
+    compression, Manual Remark 1) while the LAW21 engine evaluates the
+    function at `mu = ρ/ρ0 − 1` (positive in compression,
+    `mmain.F90:686-692`; `P` compression-positive on BOTH sides,
+    `m21law.F:143/161`) → `mu = exp(−EPS) − 1`, points re-sorted ascending,
+    ordinates unchanged. `LCID` preferred (`*DEFINE_CURVE` scales bake in
+    BEFORE the exp — the physical EPS is `SFA·x`), else the `EPS/P` card
+    pairs with unused trailing `(0,0)` slots stripped and LS-DYNA's
+    auto-generated `(0,0)` first point reproduced. Mixed-sign curves follow
+    dyna2rad (keep `x ≥ 0` as `|EPS|`, warned); an ALL-POSITIVE curve is a
+    closed d2r gap — both its branches require a negative abscissa
+    (CM:814/837) and silently create NO function — k2rad converts it as
+    `|EPS|` under a warning. Starter-validated: echo `PRESSURE FUNCTION
+    NUMBER = 90001`, `TENSILE BULK = 10`, `UNLOADING BULK = 1000` for
+    KUN=1000, 0 ERROR(S).
+
+  - **`*MAT_LOW_DENSITY_VISCOUS_FOAM` (073) → `/MAT/LAW90` [+
+    `/VISC/PRONY`]** (dyna2rad `p_ConvertMatL73`, CM:4275-4338; layout
+    audited against `LAW90.cfg` `FORMAT(radioss2022)` — `TFLAG` needs ≥2024
+    and `FAIL/Kcont/Tcut` ≥2026, so `TC/FAIL/KCON` are named-dropped as
+    version-gated, not merely unmapped). `E→E0`; `LCID` referenced BY ID as
+    the single quasi-static loading row (`NL=1`, rate 0), `Ismooth=1`,
+    `Fcut=0` — dyna2rad's fixed values; `HU→Hys`, `SHAPE→Shape` with the
+    blank-field defaults 1.0 through `_ffield` (a bare `to_float` would
+    flip LAW90 into a different unloading regime). The explicit `Gi/BETAi`
+    cards (LCID2=0) become a same-id `/VISC/PRONY` with the `BETAi>0`
+    filter (d2r filters identically; its `radTimeRel/radGammaArr` names are
+    misleading — the map is 1:1 `GI→G_i`, `BETAI→Beta_i`). The `LCID2>0`
+    relaxation-fit branch (LS-DYNA fits internally; nobody re-fits) and the
+    `LCID2=−1` frequency-data branch convert rate-independent LOUDLY, with
+    the conditional card-3 forms walked so the parse position never drifts.
+    `DAMP` (blank = the LS-DYNA 0.05 default) is named-dropped — dyna2rad
+    moves it onto `/PROP/TYPE14 Mu/Lambda`; k2rad keeps the section-derived
+    `/PROP/SOLID`, matching its MAT_057 policy. The per-term `REF` flag
+    folds into the `_ref_flag_materials` registry (both /XREF diagnostics
+    fire). LAW90 is already on the starter's solid-/XREF whitelist, so the
+    `_target_mat_law` entry alone makes MAT_073 parts RECEIVE
+    `*INITIAL_FOAM_REFERENCE_GEOMETRY` blocks (+ `Ismstr=10`).
+    Starter-validated: NORMAL TERMINATION 0 ERROR(S) 0 WARNING(S), echo
+    `ORDER OF PRONY SERIES = 2`.
+
+  - **`*MAT_MODIFIED_HONEYCOMB` (126) → `/MAT/LAW50` + `/PROP/TYPE6`**
+    (dyna2rad `p_ConvertMatL26` + `UpdateMatConvertingLoadCurves`,
+    CM:1744-1815/8923-9213 + CP:404-415; layout audited against
+    `mat_law50.cfg` `FORMAT(radioss90)`, the 24-card block a `/BEGIN 2022`
+    deck reads — `Irate` and the whole `ECOMP NU SIGY ET VCOMP` compaction
+    card exist only in `FORMAT(radioss2025)`, so the compacted-state block
+    `E/PR/SIGY/VF` is INEXPRESSIBLE at 2022 and warned, never emitted as a
+    stray 25th card). Slot order `11/22/33/12/23/31`
+    (`hm_read_mat50.F90:308-315`); identity map `a→11 b→22 c→33 ab→12
+    bc→23 ca→31` with the LS-DYNA fallback chain; moduli `EAAU..GCAU` with
+    `0→E` / `0→E/2(1+PR)` fallbacks; `Iflag1=Iflag2=−1` (yield vs −strain,
+    compression-positive — d2r's values). Curves whose FIRST abscissa is
+    `>0` are stress-vs-`V/V0` and recompute to `1−V/V0` as a new `/FUNCT`
+    (d2r `RecomputeCurvesBasedOnFirstAbcissa`, CM:9215-9266), originals
+    kept; `LCSR>0` samples the first 4 points + the 5th (the MODIFIED rule,
+    CM:9017-9021) and replicates each direction's base function per rate
+    with `Fscale`=ordinate; `LCSR=−1` per-direction cards are dropped
+    loudly (d2r never reads them). The `LCA<0` transversely-isotropic
+    surface follows d2r's remap (`fun11←LCB`, `fun22=fun33←LCC`,
+    shears←LCS; `E22=E33=EBBU`, `G12=GBCU`, `G23=G31=GABU`; `Iflag 0/1`)
+    under a loud approximation warning — the LS-DYNA damage curves become
+    yield curves; `ECCU<0`'s third surface named-dropped. `TSEF/SSEF →
+    Eps_max` components (negative curve forms warned to 0). The
+    `/PROP/TYPE6` rides the composite AOPT machinery (`AOPT=2 →
+    /SKEW/FIX`, part repointed, isotropic section prop suppressed) — with
+    the honest reason: the starter ACCEPTS LAW50 on `/PROP/TYPE14`
+    (SOLID_ISOTROPIC class) but only `IGTYP 6` builds the orthotropy tensor
+    (`SMORTH3`, `s8zinit3.F:435`) — on TYPE14 the directions silently
+    collapse onto the element frame. A MAT_126 part holding SHELL elements
+    is refused (LAW50 has no shell class → ERROR 3046). Starter-validated:
+    NORMAL TERMINATION 0/0, `YIELD STRESS 11` echo listing exactly the 5
+    sampled `STRAIN RATE` lines.
+
+  - **`*MAT_DESHPANDE_FLECK_FOAM` (154) → `/MAT/LAW115`** (dyna2rad
+    `p_ConvertMatL154`, CM:6363-6386; layout audited against
+    `matl115_deshfleck.cfg` `FORMAT(radioss2021)`, deterministic `Istat=0`
+    branch). The direct 1:1 counterpart — LAW115 IS the Deshpande-Fleck
+    surface, no formulation selector exists; hardening constants transfer
+    verbatim (identical law `σy = SIGP + GAMMA·(ε̂/EPSD) +
+    ALPHA2·ln[1/(1−(ε̂/EPSD)^BETA)]`). `CFAIL→EPSVP_F`; **`PFAIL→SIGP_F`
+    is a conscious d2r fix**: the shipped `mat_154.cfg` parses only 6
+    fields on card 2 (no PFAIL attribute at all), so dyna2rad's
+    `CopyValue("PFAIL","SIGP_F")` silently no-ops and its SIGP_F is always
+    0 — the k2rad validation run echoed `MAX. PRINCIPAL STRESS AT FAILURE
+    = 25`. `DERFI` named-dropped (a derivative-evaluation flag; LAW115's
+    `Ires` selects the return-mapping ALGORITHM — not the same
+    enumeration), `NUM` named-dropped (LS-DYNA needs NUM sustained
+    violation steps, Radioss deletes on the FIRST — earlier erosion
+    possible). Starter bound checks pre-announced (`ALPHA ∉ [0,√4.5]` →
+    ERROR 1897, `PR ∉ [0,0.5)` → ERROR 49). Version gate measured, not
+    guessed: LAW115 on k2rad's ELFORM-derived `Isolid 17` draws starter
+    WARNING 1905 — `sgrtails.F:631` gates on `JHBE 3..20` WITHOUT checking
+    Istat although the message text names the statistic formulation —
+    non-fatal (0 ERROR(S) measured); k2rad pre-announces it with the
+    `Isolid=24` remedy.
+
+  - **`*MAT_HILL_FOAM` (177) → `/MAT/LAW62` (VISC_HYP)** (dyna2rad
+    `p_ConvertMatL177H`, CM:9741-9896; layout audited against
+    `matl62_visc_hyp.cfg` `FORMAT(radioss2022)` — the `nu_i` CELL_LIST
+    block is part of the 2022 card and read by the starter even though the
+    2022 Reference Guide omits it, so it is emitted as explicit zeros: any
+    nonzero `nu_i` would OVERRIDE the card-2 `Nu`). Constants branch only:
+    `Nu = N/(1+2N)`; `mu_i = Ci·Bi/2`, `alpha_i = Bi` per the exact
+    Hill→Ogden identity, **INDEX-ALIGNED over the nonzero-C slots — a d2r
+    defect fixed consciously**: dyna2rad compacts the C and B lists
+    independently (CM:9877-9883), so a zero `Ci` mid-list makes it read
+    `Bi` out of alignment (and potentially out of range). The parse
+    follows the MANUAL's field order `MID RO K MU N LCID FITTYPE LCSR` —
+    the shipped `Keyword971/mat_177.cfg` transposes N and MU and would
+    feed the deck's damping into `Nu`. `K` (LAW62 derives bulk from Nu),
+    `MU`, `LCSR` and the Mullins `R/M` card are named-dropped. The
+    `LCID>0` curve-fit branch warn-skips AT PARSE (it changes the card
+    layout — no C/B cards — the MAT_240-variant policy): LAW62 has no
+    `Itab`/fit path anywhere (`hm_read_mat62.F` reads constants only), and
+    dyna2rad emits NOTHING while silently wiring the part's mat to 0.
+    Starter-validated: NORMAL TERMINATION 0/0, echo `EQUIVALENT POISSON
+    RATIO = 0.1667` = N/(1+2N). The only shell-capable law of the batch
+    (SHELL_ISOTROPIC + SOLID_ISOTROPIC).
+
+  - **`*CONTACT_INTERIOR` → `Icontrol` resolution (warned, not emitted)**
+    (dyna2rad `ConvertContactInterior`, CC:671-767 — its whole conversion
+    is `SetValue(prop, "Icontrol", 1)` per part; the earlier per-part
+    `/INTER/TYPE7` synthesis is commented out in its source). **Version
+    gate MEASURED on starter_win64, not guessed**: the Icontrol input
+    column exists only in the radioss2025 property formats
+    (`prop_p14_solid.cfg`/`prop_p6_sol_orth.cfg` `FORMAT(radioss2025)`
+    last card `Ndir sphpartID Icontrol`; the 2022 blocks end at
+    `Ndir sphpartID`) — appending the 3-field card under `/BEGIN 2022`
+    leaves the per-part echo at `ICONTROL 0` and draws WARNING 100213,
+    while the identical deck under `/BEGIN 2025` echoes `ICONTROL 1` with
+    0 warnings. Emitting the dead field would be silently wrong, so k2rad
+    resolves and WARNS: each PSID resolves per d2r CC:692-727 (a
+    `*SET_PART`'s ids are part ids; a new `*SET_PART_ADD` handler stores
+    one level of part-set nesting, expanded here — the Yaris/Camry NCAC
+    decks use exactly that shape), solid parts are NAMED as running
+    without interior contact (mitigation: `/DT/BRICK/CST`, or hand-set
+    `Icontrol=1` after migrating the deck to the 2025 format), parts
+    whose property type has no Icontrol at ANY version are named
+    separately, unresolvable/unknown ids are named, and the set-header
+    `DA1..DA4` attributes (PSF/Fa/ED/TYPE — defined on the referenced set
+    per Manual Vol I; d2r reads none of them) are named-dropped, TYPE=2
+    specifically. `note_recognized_not_emitted` records the keyword.
+
+  - Registry plumbing: the five families extend `_target_mat_law` (LAW21/
+    90/50/115/62 — only LAW90 is on the starter's solid-/XREF whitelist;
+    the off-whitelist four now warn-skip NAMING the law instead of
+    misreporting "no /MAT"), `all_mat_ids()` (ERROR-79 collision
+    avoidance), and the beam-compat classification block (none of the five
+    declares a BEAM_* keyword — verified against every `INIT_MAT_KEYWORD`
+    call site in the 2026-05-20 starter tree — so neither beam frozenset
+    changes; LAW62 alone declares SHELL_ISOTROPIC). Solid-only shell-part
+    refusals warned per family (ERROR 3046; negative control measured:
+    MAT_005 on a shell part answers exactly `ERROR 3046 ... MATERIAL ...
+    OF TYPE 21`).
+
+  - tests/test_foams.py: 67 tests + 68 subtests; suite 2046 → 2113
+    (2111 passed + 2 skipped). Every emitted card starter-validated live
+    (`starter_win64` 2026-05-20, `/BEGIN 2022`, np=1): all five materials
+    0 ERROR(S); MAT_073/126/177 NORMAL TERMINATION with 0 WARNINGS;
+    MAT_005's WARNING 829 and MAT_154's WARNING 1905 are data/pairing
+    artifacts documented above; goldens byte-identical.
+
 - **Adhesives / cohesive batch** (`*MAT_COHESIVE_MIXED_MODE` 138,
   `*MAT_ARUP_ADHESIVE` 169, `*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE` 240,
   `*MAT_TOUGHENED_ADHESIVE_POLYMER` 252, `*MAT_ADD_DAMAGE_DIEM`, and the

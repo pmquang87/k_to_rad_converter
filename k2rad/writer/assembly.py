@@ -18,6 +18,7 @@ from .materials import (
     _resolve_mat_plas_comp_tens,
     _resolve_mat_viscoelastic,
     _resolve_mat_adhesives,
+    _resolve_mat_foams,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
 )
@@ -25,6 +26,7 @@ from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
     _downgrade_tet10_to_tet4,
+    _resolve_contact_interior,
     _make_extra_groups,
     _make_nodes,
     _make_parts_and_elements,
@@ -569,6 +571,16 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # solid-/XREF law whitelist (the _target_mat_law entries alone make the
     # gate warn-skip those parts correctly instead of claiming "no /MAT").
     _resolve_mat_adhesives(state)
+    # Foam batch. MAT_005's P(mu) transform and MAT_126's V/V0-recomputed
+    # yield curves synthesize /FUNCTs (so after _resolve_define_tables, and
+    # before _make_functions which emits them); the MAT_126 slot wiring and
+    # LCSR sampling need the parsed *DEFINE_CURVEs. Also before
+    # _resolve_xref_parts: LAW90 (MAT_073) is on the starter's solid-/XREF
+    # law whitelist, so that container decides which parts get a /XREF and
+    # pick up Ismstr=10; the other four (LAW21/50/62/115) are off-whitelist
+    # and their _target_mat_law entries make the gate warn-skip naming the
+    # law instead of claiming "no /MAT".
+    _resolve_mat_foams(state)
 
     # An *ELEMENT_SHELL/_BEAM block with an option k2rad does not model keeps
     # its connectivity by CONTENT, which cannot distinguish an all-integer
@@ -620,6 +632,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # rubber routing from _resolve_mat_hyper_rubber above (LAW42-vs-LAW69
     # decides the starter's solid-/XREF law whitelist).
     _resolve_xref_parts(state)
+
+    # *CONTACT_INTERIOR → Icontrol: resolution + warnings only (the input
+    # column is radioss2025-only, measured — see _resolve_contact_interior).
+    # AFTER _screen_provisional_elements so the solid-part classification
+    # reads the final element lists; emits nothing, so order past that is
+    # free.
+    _resolve_contact_interior(state)
 
     # Composites: allocate the *MAT_032 glass companion ids and the MAT_037
     # hardening curves, then give every composite / orthotropic part its own

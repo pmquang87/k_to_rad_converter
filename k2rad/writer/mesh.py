@@ -77,6 +77,7 @@ __all__ = [
     "_TYPE18_ONLY_BEAM_LAWS",
     "_target_mat_law",
     "_warn_beam_type3_material",
+    "_resolve_contact_interior",
     "_assign_ortho_props",
     "_law128_ref_axis",
     "_emit_prop_type9",
@@ -2113,6 +2114,133 @@ def _make_properties(state: ConversionState) -> List[str]:
     return lines
 
 
+def _resolve_contact_interior(state: ConversionState) -> None:
+    """*CONTACT_INTERIOR → Icontrol=1 (solid distortion control) on the
+    listed parts' /PROP — resolved, classified and WARNED, not emitted.
+
+    dyna2rad's whole conversion is one property write (CC:751-759): look up
+    each part of each PSID and `SetValue(prop, "Icontrol", 1)`. The catch is
+    a version gate this converter measured rather than guessed: the Icontrol
+    input column exists only in the radioss2025 property formats
+    (prop_p14_solid.cfg / prop_p6_sol_orth.cfg FORMAT(radioss2025) last card
+    "Ndir sphpartID Icontrol"; the radioss2022 blocks end at "Ndir
+    sphpartID"), and k2rad emits /BEGIN 2022 decks. Measured on starter_win64
+    (2026-05-20): appending the 3-field card under /BEGIN 2022 leaves the
+    per-part echo at ICONTROL 0 and draws WARNING 100213 (unsupported field
+    at end of line); the identical deck under /BEGIN 2025 echoes ICONTROL 1
+    cleanly. Emitting a dead field that claims to be set would be silently
+    wrong, so the conversion is a loud warning naming the affected parts
+    (plus note_recognized_not_emitted), the PSID resolution following
+    dyna2rad CC:671-767: each id is a *SET_PART (part ids); a *SET_PART_ADD
+    expands ONE level of part-set nesting. The per-set attributes DA1..DA4
+    (PSF/Fa/ED/TYPE — the manual defines them on the referenced set, not the
+    contact card) have no Icontrol counterpart at any version and are warned
+    when set; dyna2rad reads none of them.
+    """
+    if not state.contact_interior_psids:
+        return
+    state.note_recognized_not_emitted(
+        "*CONTACT_INTERIOR",
+        "its Radioss counterpart Icontrol=1 on the solid /PROP is a "
+        "radioss2025-only input column; a /BEGIN 2022 deck cannot carry it "
+        "(measured: ICONTROL echo stays 0 + starter WARNING 100213), so the "
+        "affected parts are named in a warning instead")
+    # Icontrol lives on the solid and thick-shell property readers
+    # (hm_read_prop06/14/20/21/22.F + /DEF_SOLID); k2rad has no
+    # *ELEMENT_TSHELL path, so "has an Icontrol-bearing property" reduces
+    # to "holds solid elements" here.
+    solid_pids = {e.pid for e in state.solid_elems}
+    for psid in sorted(set(state.contact_interior_psids)):
+        title = ""
+        pids: List[int] = []
+        direct = state.part_sets.get(psid)
+        added = state.part_set_adds.get(psid)
+        if direct is not None:
+            title, pids = direct[0], list(direct[1])
+        elif added is not None:
+            title = added[0]
+            for child in added[1]:
+                sub = state.part_sets.get(child)
+                if sub is None:
+                    state.warn(
+                        f"*CONTACT_INTERIOR: *SET_PART_ADD {psid} lists "
+                        f"part-set {child}, which is not a parsed *SET_PART"
+                        "[_LIST] — that slice of the interior-contact scope "
+                        "is unresolved (an *_ADD set nests part-set ids one "
+                        "level, dyna2rad CC:692-727).")
+                else:
+                    pids.extend(sub[1])
+        else:
+            state.warn(
+                f"*CONTACT_INTERIOR: part set {psid} is not defined in the "
+                "deck (or uses an unsupported *SET_PART variant such as "
+                "_COLUMN/_GENERATE) — the interior-contact scope cannot be "
+                "resolved for it.")
+            continue
+        known = [p for p in pids if p in state.parts]
+        unknown = sorted(set(pids) - set(known))
+        if unknown:
+            state.warn(
+                f"*CONTACT_INTERIOR (set {psid}): part id(s) {unknown} have "
+                "no *PART card — ignored.")
+        with_icontrol = sorted(p for p in known if p in solid_pids)
+        without = sorted(p for p in known if p not in solid_pids)
+        setname = f" '{title}'" if title else ""
+        if with_icontrol:
+            state.warn(
+                f"*CONTACT_INTERIOR (set {psid}{setname}): LS-DYNA arms "
+                "interior contact inside the foam solids of part(s) "
+                f"{with_icontrol}; the Radioss counterpart is Icontrol=1 "
+                "(solid distortion control) on their /PROP — but that input "
+                "column exists only in the radioss2025 property format, and "
+                "k2rad emits /BEGIN 2022 decks, where the starter reads the "
+                "trailing property card as 'Ndir sphpartID' only (measured "
+                "on starter_win64: the appended field is ignored — per-part "
+                "echo ICONTROL 0 — and draws WARNING 100213). NOT emitted: "
+                "these parts run WITHOUT interior contact, so deep crush "
+                "can invert elements (negative volume) that LS-DYNA would "
+                "have caught. Mitigate with /DT/BRICK/CST (small-strain "
+                "switching) in the engine file, or migrate the deck to the "
+                "2025 format and set Icontrol=1 by hand.")
+        if without:
+            state.warn(
+                f"*CONTACT_INTERIOR (set {psid}{setname}): part(s) "
+                f"{without} carry no solid/thick-shell elements — their "
+                "converted property type has NO Icontrol field at ANY "
+                "format version (interior contact is a solid-element "
+                "mechanism), so there is nothing to convert for them. "
+                "(dyna2rad's blind SetValue silently no-ops there too.)")
+        attrs = state.part_set_attrs.get(psid)
+        if attrs:
+            psf, fa, ed, ctype = attrs
+            named = []
+            if psf not in (0.0, 1.0):
+                named.append(f"PSF={psf:g} (penalty scale factor)")
+            if fa:
+                named.append(f"Fa={fa:g} (activation factor: contact begins "
+                             f"at {fa:g} x initial thickness; LS-DYNA "
+                             "default 0.1)")
+            if ed:
+                named.append(f"ED={ed:g} (interior-contact stiffness "
+                             "modulus)")
+            if named:
+                state.warn(
+                    f"*CONTACT_INTERIOR (set {psid}{setname}): set "
+                    f"attribute(s) {', '.join(named)} tune the LS-DYNA "
+                    "interior-contact penalty — Icontrol is a plain on/off "
+                    "flag with no equivalent knobs, and since it cannot be "
+                    "emitted at /BEGIN 2022 anyway, they are dropped "
+                    "(dyna2rad never reads DA1..DA4 either).")
+            if ctype == 2.0:
+                state.warn(
+                    f"*CONTACT_INTERIOR (set {psid}{setname}): TYPE=2 "
+                    "(DA4) selects the combined compression+shear "
+                    "formulation for ELFORM 1/10 solids — the distinction "
+                    "has no Radioss counterpart and is dropped (dyna2rad "
+                    "never reads it; every listed part would get the same "
+                    "Icontrol=1).")
+
+
 def _assign_ortho_props(state: ConversionState) -> None:
     """*MAT_ANISOTROPIC_VISCOPLASTIC → /MAT/LAW128 is orthotropic-only, so a part
     using it cannot sit on the isotropic /PROP/SHELL|SOLID (starter ERROR 3047).
@@ -2713,6 +2841,34 @@ _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 # the /PROP/TYPE43 routing (_cohesive_solid_secids/_warn_type43_pairings
 # above): SOLID_COHESIVE lives ONLY on TYPE43, and TYPE43 takes ONLY
 # PROP_SOLID classes 4/6/7 (ERROR 3047 either way around).
+#
+# Classification of the laws the FOAM batch adds, read from the same
+# INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. NONE of the
+# five declares any BEAM_* keyword, so neither frozenset above changes and
+# the existing "no beam keyword at all — starter ERROR 3046" message is
+# already the right one for a beam part on any of them:
+#   LAW21  hm_read_mat21.F:213-224    ELASTO_PLASTIC, DRUCKER, EOS,
+#                                     HYDRO_EOS; SOLID_ISOTROPIC, SPH — no
+#                                     shell class either, so *MAT_005 on a
+#                                     SHELL part is ERROR 3046 as well;
+#                                     warned by _resolve_mat_soil_and_foam.
+#   LAW50  hm_read_mat50.F90:430-435  HOOK, COMPRESSIBLE, SMALL_STRAIN,
+#                                     ORTHOTROPIC; SOLID_ISOTROPIC — the
+#                                     shell-part refusal for *MAT_126 lives
+#                                     in _assign_composite_props (the part
+#                                     never gets an orthotropic /PROP).
+#   LAW62  hm_read_mat62.F:265-274    TOTAL, IN/COMPRESSIBLE, HOOK;
+#                                     SHELL_ISOTROPIC + SOLID_ISOTROPIC —
+#                                     the only shell-capable law of the
+#                                     batch, so a *MAT_177 shell part
+#                                     converts and runs.
+#   LAW90  hm_read_mat90.F:225-233    TOTAL, IN/COMPRESSIBLE, HOOK;
+#                                     SOLID_ISOTROPIC only; warned by
+#                                     _resolve_mat_low_density_viscous_foam.
+#   LAW115 hm_read_mat115.F:313-319   COMPRESSIBLE, INCREMENTAL,
+#                                     LARGE_STRAIN, HOOK; SOLID_ISOTROPIC
+#                                     only; warned by
+#                                     _resolve_mat_deshpande_fleck.
 
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
@@ -2787,6 +2943,23 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 70                                  # *MAT_083
     if mid in state.mat_honeycomb:
         return 28                                  # *MAT_026
+    # Foam batch. Only MAT_073's LAW90 is on the solid-/XREF whitelist this
+    # function feeds — the entry alone makes *MAT_073 parts newly RECEIVE a
+    # /XREF (and Ismstr=10) from *INITIAL_FOAM_REFERENCE_GEOMETRY; LAW21/50/
+    # 62/115 are off-whitelist, so their parts warn-skip NAMING the law
+    # (without these entries the gate would misreport "no /MAT at all").
+    # A *MAT_177 with LCID>0 warn-skips at parse and never fills its dict,
+    # so it correctly reads as "no /MAT" here — like the MAT_240 variants.
+    if mid in state.mat_soil_and_foam:
+        return 21                                  # *MAT_005
+    if mid in state.mat_low_density_viscous_foam:
+        return 90                                  # *MAT_073
+    if mid in state.mat_modified_honeycomb:
+        return 50                                  # *MAT_126
+    if mid in state.mat_deshpande_fleck:
+        return 115                                 # *MAT_154
+    if mid in state.mat_hill_foam:
+        return 62                                  # *MAT_177 (LCID=0 branch)
     if mid in state.mat_blatz_ko:
         return 42                                  # *MAT_007 → OGDEN form
     m = state.mat_mooney_rivlin.get(mid)
