@@ -489,6 +489,10 @@ class SectionSolid:
     # LS-DYNA *SECTION_SOLID ELFORM 11 (1-pt ALE multi-material) / 12 (1-pt ALE
     # single material) set this to 1.
     iale: int = 0
+    # *SECTION_SOLID_MISC card 2c COHTHK: a section-wise cohesive-thickness
+    # override (supersedes *MAT_240 THICK in LS-DYNA) → /PROP/TYPE43
+    # True_thickness, its exact Radioss analogue. 0 = element geometric height.
+    cohthk: float = 0.0
 
 
 @dataclass
@@ -2558,6 +2562,218 @@ class MatSoftTissue:
 
 
 @dataclass
+class MatCohesiveMixedMode:
+    """*MAT_COHESIVE_MIXED_MODE (138) → /MAT/LAW117.
+
+    LS-DYNA cards (mat_138.cfg, R13.0):
+      Card1: MID RO ROFLG INTFAIL EN ET GIC GIIC
+      Card2: XMU T S UND UTD GAMMA
+
+    Fields keep the LS-DYNA sign encodings raw; the emitter decodes them:
+    XMU>0 = power law (Irupt=1, EXP_G), XMU<0 = Benzeggagh-Kenane (Irupt=2,
+    EXP_BK=|XMU|); T/S<0 = |id| of a peak-traction-vs-element-size curve
+    (→ Fct_TN/Fct_TT with TMAX=1.0); GIC/GIIC<0 = |id| of an
+    energy-vs-element-size curve, which LAW117 cannot express (warned, zeroed).
+    EN/ET are stiffness PER UNIT LENGTH on both sides — raw copy, no thickness
+    rescale (LAW117 MAT_E_ELAS_N/S carry the same stress/length dimension).
+    """
+    mid: int
+    title: str
+    rho: float
+    roflg: int = 0          # 0 = volume density → Imass=2; 1 = area → Imass=1
+    intfail: float = 0.0    # IPs-to-fail; <0 Newton-Cotes, 0 = never delete
+    en: float = 0.0         # → EN (stiffness / length)
+    et: float = 0.0         # → ET (0 → starter defaults ET=EN)
+    gic: float = 0.0        # → GIC (<0 = curve id, dropped with warning)
+    giic: float = 0.0       # → GIIC
+    xmu: float = 0.0        # sign = power-law / B-K switch
+    t: float = 0.0          # peak traction (<0 = curve id → Fct_TN)
+    s: float = 0.0          # peak shear traction (<0 = curve id → Fct_TT)
+    und: float = 0.0        # ultimate normal displacement (T=0: TN = 2·GIC/UND)
+    utd: float = 0.0        # ultimate shear displacement (S=0: TT = 2·GIIC/UTD)
+    gamma: float = 0.0      # B-K gamma → GAMMA (0 → starter default 1.0)
+
+
+@dataclass
+class MatArupAdhesive:
+    """*MAT_ARUP_ADHESIVE (169) → /MAT/LAW169 (ARUP_ADHESIVE, radioss2025).
+
+    LS-DYNA cards (mat_169.cfg R11.1; card order 3,4,5,6 with card 5 BETWEEN
+    the edge cards and the bond-thickness card):
+      Card1: MID RO E PR TENMAX GCTEN SHRMAX GCSHR
+      Card2: PWRT PWRS SHRP SHT_SL EDOT0 EDOT2 THKDIR EXTRA
+      Card3 (EXTRA 1|3): TMAXE GCTE SMAXE GCSE PWRTE PWRSE
+      Card4 (EXTRA 1|3): FACET FACCT FACES FACCS SOFTT SOFTS
+      Card5 (EDOT2≠0):   SDFAC SGFAC SDEFAC SGEFAC
+      Card6 (EXTRA 2|3): BTHK OUTFAIL FSIP FBR713 [ELF2NS]
+
+    Radioss LAW169 implements card 1 plus PWRT/PWRS/SHRP/SHT_SL only; the rate
+    scaling (EDOT0/EDOT2 + card 5), the edge data (cards 3/4), THKDIR and
+    card 6 are all dropped by the emitter with warnings. Strengths/energies
+    accept a NEGATIVE value = function id in LS-DYNA — LAW169 has no curve
+    inputs, so those are warned and left at the 1e20 no-failure default.
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float = 0.0
+    pr: float = 0.0
+    tenmax: float = 0.0     # 0 → LAW169 default 1e20 (no tension failure)
+    gcten: float = 0.0
+    shrmax: float = 0.0
+    gcshr: float = 0.0
+    pwrt: float = 2.0       # float in LS-DYNA, INT in LAW169 (rounded, warned)
+    pwrs: float = 2.0
+    shrp: float = 0.0       # shear plateau ratio (<0 = curve id — dropped)
+    sht_sl: float = 0.0     # slope of shear/tension interaction
+    edot0: float = 0.0      # rate scaling — DROPPED
+    edot2: float = 0.0      # ≠0 gates card 5 — DROPPED
+    thkdir: float = 0.0     # thickness-direction flag — DROPPED
+    extra: int = 0          # gates cards 3/4 (edge data) and 6 (BTHK...)
+    bthk: float = 0.0       # bond thickness override (card 6) — DROPPED
+
+
+@dataclass
+class MatCohesiveMMEPR:
+    """*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE (240) → /MAT/LAW116.
+
+    Base cards (mat_240.cfg R11.1):
+      Card1: MID RO ROFLG INTFAIL EMOD GMOD THICK INICRT
+      Card2: G1C_0 G1C_INF EDOT_G1 T0 T1 EDOT_T FG1 LCG1C
+      Card3: G2C_0 G2C_INF EDOT_G2 S0 S1 EDOT_S FG2 LCG2C
+      Card 6 (optional, R16): RFILTF COMPY SMOLIM XMU — the manual's cards
+      4/5 are the _3MODES mode-III cards, absent from the option-free
+      spelling, so this card is parsed at position offset+3
+
+    Only the option-free keyword converts (a _THERMAL/_3MODES/_FUNCTIONS
+    variant turns these fields into curve ids / adds mode III, neither of
+    which LAW116 can hold — the handler warn-skips those spellings and no
+    entry lands here). EMOD/GMOD are TRUE moduli — LAW116 divides by Thick
+    internally (UPARAM(1)=E/THICK), unlike LAW117's per-length EN/ET.
+    Sign encodings stay raw for the emitter: G*C_0<0 activates rate-dependent
+    toughness, T0<0 rate-dependent yield with T1's sign picking the
+    quadratic/linear log form, FG1/FG2's sign picking the energy/displacement
+    failure criterion.
+    """
+    mid: int
+    title: str
+    rho: float
+    roflg: int = 0
+    intfail: float = 1.0     # LS-DYNA default 1 (unlike MAT_138's 0)
+    emod: float = 0.0        # true Young's modulus → E
+    gmod: float = 0.0        # true shear modulus → G
+    thick: float = 0.0       # 0 = LS-DYNA element thickness; LAW116 0→1·unit_L!
+    inicrt: float = 0.0      # initiation criterion: 0 quad → Icrit 1, 1/2 max → 2
+    g1c_0: float = 0.0
+    g1c_inf: float = 0.0
+    edot_g1: float = 0.0
+    t0: float = 0.0
+    t1: float = 0.0
+    edot_t: float = 0.0
+    fg1: float = 0.0
+    lcg1c: int = 0           # GC-vs-thickness curve — DROPPED (warned)
+    g2c_0: float = 0.0
+    g2c_inf: float = 0.0
+    edot_g2: float = 0.0
+    s0: float = 0.0
+    s1: float = 0.0
+    edot_s: float = 0.0
+    fg2: float = 0.0
+    lcg2c: int = 0
+    rfiltf: float = 0.0      # optional R16 card — all four DROPPED (warned)
+    compy: float = 0.0
+    smolim: float = 0.0
+    xmu: float = 0.0
+
+
+@dataclass
+class MatToughenedAdhesive:
+    """*MAT_TOUGHENED_ADHESIVE_POLYMER (252) → /MAT/LAW120 (TAPO).
+
+    R16 cards (the local R7.1 cfg is outdated — it lacks SRFILT and IHIS):
+      Card1: MID RO E PR FLG JCFL DOPT
+      Card2: LCSS TAU0 Q B H C GAM0 GAMM
+      Card3: A10 A20 A1H A2H A2S POW — SRFILT
+      Card4: IHIS — D1 D2 D3 D4 D1C D2C
+
+    LAW120 is the same TAPO model, so the copy is near-1:1 (D1→D1F, D2→D2F,
+    D3→Dtrx, D4→Djc per dyna2rad CM:6806-6809). Flags translate 1:1 against
+    the engine kernels (sigeps120_*.F): FLG 0→Iform 1 (Drucker-Prager cap) /
+    2→Iform 2 (von Mises); JCFL 0→Itrx 2 (triaxiality factor in tension only)
+    / 1→Itrx 1 (all T); DOPT 0→Idam 2 (damage plastic strain, "with turning
+    point") / 1→Idam 1 (plastic arc length). SRFILT/IHIS have no LAW120 slot.
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float = 0.0
+    pr: float = 0.0
+    flg: int = 0
+    jcfl: int = 0
+    dopt: int = 0
+    lcss: int = 0            # τ_Y vs plastic strain curve/table → Table_Id
+    tau0: float = 0.0
+    q: float = 0.0
+    b: float = 0.0
+    h: float = 0.0
+    c: float = 0.0
+    gam0: float = 0.0
+    gamm: float = 0.0
+    a10: float = 0.0
+    a20: float = 0.0
+    a1h: float = 0.0
+    a2h: float = 0.0
+    a2s: float = 0.0
+    pow: float = 0.0
+    srfilt: float = 0.0      # strain-rate EMA filter — DROPPED (warned)
+    ihis: float = 0.0        # history-output selector — DROPPED (warned)
+    d1: float = 0.0          # → D1F
+    d2: float = 0.0          # → D2F
+    d3: float = 0.0          # → Dtrx
+    d4: float = 0.0          # → Djc
+    d1c: float = 0.0
+    d2c: float = 0.0
+
+
+@dataclass
+class FailDiemCriterion:
+    """One DIEM criterion — the card-2 + card-3 pair of *MAT_ADD_DAMAGE_DIEM."""
+    dityp: int = 0           # 0..4 → INITYPE 1..5 (same order)
+    p1: int = 0              # initiation curve/table id → TAB_ID (mandatory)
+    p2: float = 0.0          # → PARAM for DITYP 1/4; layer flag for 2/3 (dropped)
+    p3: float = 0.0          # → PARAM for DITYP 2/3; shell shear flag for 1 (dropped)
+    p4: float = 0.0          # transverse-shear flag → ISHEAR inverted (global!)
+    p5: int = 0              # element-size regularization curve/table → TAB_EL
+    detyp: int = 0           # 0 displacement → EVOTYPE 1; 1 energy → EVOTYPE 2
+    dctyp: int = 0           # 0 max → COMPTYP 1; 1 multiplicative → 2; -1 none
+    q1: float = 0.0          # DISP or ENER; <0 with DETYP 0 = table id (collapsed)
+    q2: float = 0.0          # d3hsp logging flag — output-only, ignored
+    q3: float = 0.0          # >0 with scalar Q1 → ALPHA + EVOSHAP 2
+    q4: float = 0.0          # regularization curve on Q1 — DROPPED (warned)
+
+
+@dataclass
+class FailDiem:
+    """*MAT_ADD_DAMAGE_DIEM → /FAIL/INIEVO (multi-criteria initiation +
+    evolution; one /FAIL/INIEVO per keyword, bound by the trailing mat id).
+
+    Card1: MID NDIEMC DINIT DEPS NUMFIP [VOLFRAC], then NDIEMC pairs of
+    criterion cards (max 5). DINIT/DEPS/VOLFRAC have no INIEVO slot.
+    NUMFIP maps to FAILIP (solid parts, IP count) and/or PTHICKFAIL (shell
+    parts, through the same NUMFIP→Pthickfail rule /FAIL/GENE1 uses) — k2rad
+    resolves solid/shell per the parts that actually reference the MID,
+    instead of dyna2rad's whole-model element-count heuristic.
+    """
+    mid: int
+    ndiemc: int = 0
+    dinit: float = 0.0
+    deps: float = 0.0
+    numfip: float = 0.0
+    volfrac: float = 0.0
+    criteria: List[FailDiemCriterion] = field(default_factory=list)
+
+
+@dataclass
 class FoamRefGeometry:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → one /XREF per part whose nodes
     intersect the keyword's node table (dyna2rad ConvertInitialFoamReferenceGeometry;
@@ -3235,6 +3451,20 @@ class ConversionState:
     mat_general_visco: Dict[int, MatGeneralViscoelastic] = field(default_factory=dict)
     mat_simplified_rubber: Dict[int, MatSimplifiedRubber] = field(default_factory=dict)
     mat_soft_tissue: Dict[int, MatSoftTissue] = field(default_factory=dict)
+    # Adhesives / cohesive batch (dyna2rad targets):
+    #   MAT_138 → /MAT/LAW117 (linear mixed-mode cohesive)
+    #   MAT_169 → /MAT/LAW169 (ARUP_ADHESIVE — radioss2025 card, WARNING 100211
+    #             under /BEGIN 2022, parsed correctly and non-fatal)
+    #   MAT_240 → /MAT/LAW116 (rate-dependent elastoplastic cohesive;
+    #             _THERMAL/_3MODES/_FUNCTIONS variants warn-skip)
+    #   MAT_252 → /MAT/LAW120 (TAPO)
+    #   MAT_ADD_DAMAGE_DIEM → /FAIL/INIEVO (rider keyed by parent MID, like
+    #             fail_gissmo/mat_add_erosion above; coexists with both)
+    mat_cohesive_mixed_mode: Dict[int, MatCohesiveMixedMode] = field(default_factory=dict)
+    mat_arup_adhesive: Dict[int, MatArupAdhesive] = field(default_factory=dict)
+    mat_cohesive_mm_epr: Dict[int, MatCohesiveMMEPR] = field(default_factory=dict)
+    mat_toughened_adhesive: Dict[int, MatToughenedAdhesive] = field(default_factory=dict)
+    fail_diem: Dict[int, FailDiem] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
@@ -3604,7 +3834,9 @@ class ConversionState:
                   self.mat_gurson, self.mat_hill_3r,
                   self.mat_plas_comp_tens, self.mat_viscoelastic,
                   self.mat_kelvin_maxwell, self.mat_general_visco,
-                  self.mat_simplified_rubber, self.mat_soft_tissue):
+                  self.mat_simplified_rubber, self.mat_soft_tissue,
+                  self.mat_cohesive_mixed_mode, self.mat_arup_adhesive,
+                  self.mat_cohesive_mm_epr, self.mat_toughened_adhesive):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

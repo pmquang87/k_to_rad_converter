@@ -113,7 +113,9 @@ material angles, and a negative card-1 field 6 `QR/IRID` binds an
 thickness `WF_i`, material `PID_i`, `ESOP = 0/1` — see **Composites**),
 `*SECTION_SOLID` (+ `_TITLE`; every card SET under one header, striding over the
 `_EFG`/`_SPG`/`_MISC` option cards and the ELFORM 101–105 user-solid cards
-3/4/5), `*SECTION_BEAM` (+ `_TITLE`; every card SET under one header, with the
+3/4/5; cohesive ELFORM ±19/20/±21/22 → `/PROP/TYPE43`, and `_MISC` is now a
+registered spelling whose card-2c `COHTHK` becomes TYPE43's `True_thickness` —
+see **Adhesives / cohesives** under Materials), `*SECTION_BEAM` (+ `_TITLE`; every card SET under one header, with the
 card-2 dialect — `2a` thicknesses, `2b` named `SECTION_nn`, `2c` `A/ISS/ITT/J`,
 `2d` truss, `2e`/`2h`/`2i`/`2j` — chosen per set from `ELFORM` and the card's own
 first 10 columns, so the `OPTCARD` and `ELFORM = 12` riders stride correctly; a
@@ -563,6 +565,103 @@ the same conversion without saying so. A second warning names the `S_i` unit
 mismatch it inherits (LS-DYNA's `S_i` are dimensionless factors; Radioss reads
 `Gamma_i` as a shear modulus) and prints the `S_i·MU0` values that would carry
 the intended viscous stiffness
+
+Adhesives / cohesives (dyna2rad's law choices followed; its two documented
+flag/gate defects corrected, its silent drops warned; every card
+starter-validated at `/BEGIN 2022`, 0 errors, plus a negative control that
+draws the real `ERROR 3047`): `*MAT_COHESIVE_MIXED_MODE` (138) →
+`/MAT/LAW117` — `EN`/`ET` copy RAW (stiffness per unit length on both sides,
+no thickness rescale), `ROFLG` 0/1 → `Imass` 2/1 written explicitly (a blank
+`Imass` is coerced to 1 = AREA density, which would silently flip the LS-DYNA
+volume default), `XMU`'s **sign** is the criterion switch (`>0` power law →
+`Irupt=1`/`EXP_G`; `<0` Benzeggagh-Kenane → `Irupt=2`/`EXP_BK=|XMU|`, written
+explicitly since `EXP_BK` has no starter default), a negative `T`/`S` is a
+peak-traction-vs-element-size curve → `Fct_TN`/`Fct_TT` with `TMAX=1.0`, and
+`T=0` back-computes `TN = 2·GIC/UND` from the ultimate displacement (LS-DYNA's
+own `GIC = T·UND/2` identity, which also keeps the input below the starter's
+`GIC ≥ TN²/(2·EN)` floor); curve-valued `GIC`/`GIIC` (negative, R13 form) have
+no LAW117 slot — zeroed loudly. `INTFAIL` transfers as the `Idel` failed-IP
+count with its two semantic gaps warned: `INTFAIL=0` is LS-DYNA's
+*never-delete* state (Radioss coerces `Idel` 0→1, the element WILL erode) and
+a negative `INTFAIL` selects Newton-Cotes, which TYPE43's fixed 4-Gauss-point
+scheme cannot hold.
+`*MAT_ARUP_ADHESIVE` (169) → `/MAT/LAW169` (the dedicated radioss2025 ARUP
+card; under k2rad's `/BEGIN 2022` the starter prints non-fatal
+`WARNING 100211` and parses the 2025 layout correctly — verified against a
+`/BEGIN 2025` control run). Two layout traps handled: `SHT_SL` moves into the
+MIDDLE of LAW169 card 2, and `PWRT`/`PWRS` are `%10d` INTEGERS (a non-integer
+exponent is rounded and warned). Only the static core converts — the rate
+scaling (`EDOT0`/`EDOT2` + `SDFAC/SGFAC/SDEFAC/SGEFAC`), the `EXTRA` edge
+cards, `THKDIR`, `BTHK` and the negative-value curve forms of the strengths
+are all warn-dropped (dyna2rad drops them silently) — and LAW169 always uses
+VOLUME density (absent from the `sini43.F` area-mass list), so a zero-height
+ARUP cohesive gets zero mass: warned whenever MAT_169 lands on a cohesive
+ELFORM.
+`*MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE` (240) → `/MAT/LAW116` — `EMOD`/
+`GMOD` are TRUE moduli (the starter divides by `Thick` itself:
+`UPARAM(1)=E/THICK`; dividing in the converter would apply it twice), and the
+rate encodings map sign-for-sign: `G*C_0<0` activates rate-dependent
+toughness (`GC_ini=|G*C_0|`, `GC_inf`, `SRATG`), `T0<0` rate-dependent yield
+with `T1`'s sign picking the quadratic/linear-log form (`ORDER` 2/1),
+`FG>0`/`<0` the energy/displacement failure criterion (`FAIL` 1/2). Two
+dyna2rad defects fixed consciously: the mode-II rate gate keys on `G2C_0<0`
+like mode I and the manual (d2r keys on `EDOT_G2<0` — a slip that zeroes the
+mode-II reference rate on every valid deck), and `Idel` carries `|INTFAIL|`
+(d2r hard-codes 1, ~4× over-erosion for an `INTFAIL=4` bondline). `INICRT`
+maps onto `Icrit` against the engine kernel (0 quadratic → default; 1/2
+maximum nominal → `Icrit=2`); `THICK=0` is warned (LS-DYNA = element
+geometric thickness, LAW116 = 1.0 length unit); `LCG1C`/`LCG2C` toughness-vs-
+thickness curves are warned as the override they are (LS-DYNA *ignores* the
+scalars when they are set); the `_THERMAL`/`_3MODES`/`_FUNCTIONS` variants
+warn-skip (their cards hold curve ids / mode-III data with no LAW116 slot —
+dyna2rad drops them with no message and a dangling part).
+`*MAT_TOUGHENED_ADHESIVE_POLYMER` (252) → `/MAT/LAW120` (TAPO — the same
+model): a near 1:1 copy including `D1→D1F`, `D2→D2F`, `D3→Dtrx`, `D4→Djc`,
+with `LCSS` re-emitted as a 1-D `/TABLE/1` (LAW120's `Table_Id` is a TABLE
+slot; both codes ignore the analytic `TAU0..GAMM` when it is set). The three
+flags translate against the engine kernels — `FLG` 0/2 → `Iform` 1/2, `JCFL`
+0/1 → `Itrx` 2/1, `DOPT` 0/1 → `Idam` 2/1 — fixing dyna2rad's dead `== 2`
+switch branches, under which every `JCFL=1`/`DOPT=1` deck silently ran the
+wrong engine branch. `SRFILT` and `IHIS` are parsed from the R16 positions
+(the local R7.1 cfg blanks both) and warn-dropped.
+`*MAT_ADD_DAMAGE_DIEM` → `/FAIL/INIEVO` (a rider keyed by the parent MID,
+coexisting with `*MAT_ADD_EROSION`'s `/FAIL/GENE1` and GISSMO's `/FAIL/TAB2`
+on the same material): `NDIEMC` criteria (max 5) map 1:1 — `DITYP` 0..4 →
+`INITYPE` 1..5 in the same order, `P1`/`P5` → `TAB_ID`/`TAB_EL` (TABLE slots,
+curves re-routed to 1-D `/TABLE/1`), `P2`/`P3` → `PARAM` per `DITYP`,
+`DETYP`/`DCTYP` +1 → `EVOTYPE`/`COMPTYP`, `Q1` → `DISP` or `ENER`, `Q3` →
+`ALPHA` with the exponential `EVOSHAP=2`. `P4` → `ISHEAR` INVERTED (the flags
+have opposite sense: LS-DYNA `P4=0` *includes* the transverse shear stresses,
+Radioss `ISHEAR=1` *considers* them) and written explicitly; a per-criterion
+`P4` conflict is warned (one global flag — last wins, dyna2rad parity).
+`NUMFIP` resolves against the parts that actually reference the MID —
+`FAILIP` for solid use, `PTHICKFAIL` through the same NUMFIP rule
+`/FAIL/GENE1` uses for shell use — instead of dyna2rad's whole-model
+element-count heuristic with its stale per-part NIP. A table-form `Q1`
+(negative) collapses to its MINIMUM ordinate (dyna2rad's conservative rule,
+warned with the value); `DCTYP=-1` (damage kept OFF the stress) has no
+counterpart and is warned as the physics change it is; `DINIT`/`DEPS`/
+`VOLFRAC`/`Q2`/`Q4` and the MSFLD/FLD layer selection are warn-dropped;
+`P1=0`/`Q1=0` name the exact starter errors (2088/2089/2090) they will draw.
+**Cohesive element path**: `*SECTION_SOLID` ELFORM ±19/20/±21/22 →
+`/PROP/TYPE43` (CONNECT) under the SECID verbatim — `Ismstr=1` pinned (what
+the starter resolves anyway), `True_thickness` from `*SECTION_SOLID_MISC`
+`COHTHK` (its exact analogue). The LS-DYNA node convention (bottom face
+1-2-3-4, top 5-6-7-8) is identical to TYPE43's, so `*ELEMENT_SOLID`
+connectivity passes through unpermuted, pentahedron cohesives (±21/22,
+`N1 N2 N3 N3 N5 N6 N7 N7`) stay the same degenerate `/BRICK` pattern, and
+zero-height pads survive every degenerate-element screen (TYPE43 is
+area-based; the validation run gave a zero-height pad its full `ρ·A` mass).
+A section is ALSO routed to TYPE43 when any part on it carries a
+SOLID_COHESIVE law (LAW116/117/169 — dyna2rad's material rule, covering
+`*MAT_ARUP_ADHESIVE` on ordinary ELFORM 1/2/15 bricks), while MAT_252 stays
+on the plain solid property unless the ELFORM itself is cohesive (LAW120 is
+SOLID_ALL — legal on both, d2r parity). Every pairing the starter would
+refuse is warned with the real id: a non-TYPE43-class law on a cohesive
+section (and the reverse) is `ERROR 3047` — measured verbatim on a negative
+control — ELFORM 20/22's shell-offset moments and `COHOFF` have no TYPE43
+mechanism, `GASKETT` is not an adhesive path, and hourglass splits
+(`*HOURGLASS`/`*CONTROL_HOURGLASS`) never touch a cohesive part.
 `*EOS_LINEAR_POLYNOMIAL` → `/EOS/POLYNOMIAL`, `*EOS_GRUNEISEN` → `/EOS/GRUNEISEN`,
 `*EOS_IDEAL_GAS` → `/EOS/IDEAL-GAS` (γ = Cp/Cv, P0 = ρ(Cp−Cv)T0)
 

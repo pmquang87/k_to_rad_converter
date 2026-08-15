@@ -1540,6 +1540,8 @@ def _solid_hg_values(state: ConversionState, sec: Optional[SectionSolid],
     # (LS-DYNA tets are ELFORM 10/13, not 2 — 2 is a hex).
     if sec.iale or sec.elform in (2, 13):
         return (None, None)
+    if sec.elform in _COHESIVE_ELFORMS:
+        return (None, None)     # /PROP/TYPE43: 4 mid-plane points, no HG modes
     if _elform_to_isolid(sec.elform) in (14, 18):
         return (None, None)     # tet4 (Kessler=14) / cohesive (18): no HG modes
     h: Optional[float] = None
@@ -1592,6 +1594,158 @@ def _effective_solid_isolid(state: ConversionState, pid: int,
         return iso_over if iso_over is not None else base
     _, iso = _solid_hg_values(state, sec, None)
     return iso if iso is not None else base
+
+
+# LS-DYNA cohesive solid formulations (*SECTION_SOLID Vol I R16 p.41-88):
+# ±19 = 8-node 4-point cohesive (+19 zero-thickness, -19 with plane offset),
+# 20 = 19 with offsets for use WITH SHELLS (transmits moments), ±21/22 = the
+# 6-node pentahedron counterparts (*ELEMENT_SOLID pattern N1 N2 N3 N3 N5 N6
+# N7 N7 — a degenerate hex the /BRICK writer passes through verbatim, which
+# is exactly what /PROP/TYPE43 wants: it is 8-node-hex-only, so the penta
+# lives as the collapsed pattern on both sides).
+_COHESIVE_ELFORMS = frozenset({19, -19, 20, 21, -21, 22})
+
+# Radioss laws /PROP/TYPE43 accepts (check_mat_elem_prop_compatibility.F:
+# 228-232: PROP_SOLID must be 4, 6 or 7, else ERROR 3047):
+#   4 SOLID_COHESIVE  = LAW59, LAW83, LAW116, LAW117, LAW169 (the complete
+#     INIT_MAT_KEYWORD("SOLID_COHESIVE") call-site list in the 2026-05-20
+#     starter tree)
+#   6 SOLID_ALL       = LAW13, LAW120 (+ user laws 29/31/99, never emitted)
+#   7 SOLID_BRICK_ISOTROPIC = LAW77, LAW88
+# The reverse also holds: a SOLID_COHESIVE law on a plain /PROP/SOLID
+# (TYPE14 accepts classes 1/5/6/7) is the same ERROR 3047 — which is why the
+# routing below follows the MATERIAL when the ELFORM alone says nothing
+# (*MAT_ARUP_ADHESIVE runs on ordinary ELFORM 1/2/15 bricks in LS-DYNA).
+_TYPE43_LAWS = frozenset({13, 59, 77, 83, 88, 116, 117, 120, 169})
+
+# The three laws of this converter that are SOLID_COHESIVE-classed — a part
+# on one of them can ONLY live on /PROP/TYPE43.
+_SOLID_COHESIVE_LAWS = frozenset({116, 117, 169})
+
+
+def _cohesive_solid_secids(state: ConversionState) -> Set[int]:
+    """Solid SECIDs that must emit /PROP/TYPE43 instead of /PROP/SOLID.
+
+    Two routes, mirroring dyna2rad's *SECTION_SOLID branch (convertprops.cxx:
+    385-395, which routes on the part's MATERIAL keyword — MAT_138/169/240 →
+    /PROP/CONNECT — and never looks at ELFORM) plus the ELFORM the task
+    actually encodes:
+      * ELFORM ±19/20/±21/22 — the section IS cohesive whatever material
+        sits on it (a non-cohesive material there is warned as ERROR 3047
+        by the pairing check).
+      * any part on the section maps to a SOLID_COHESIVE law (116/117/169) —
+        those laws are TYPE43-only, so an ordinary ELFORM 1 ARUP-adhesive
+        brick section must still become TYPE43 (d2r parity).
+    MAT_252 (LAW120) deliberately does NOT trigger the material route: d2r
+    sends it to the plain solid property (LAW120 is SOLID_ALL and legal on
+    both), so only an explicit cohesive ELFORM puts it on TYPE43.
+    """
+    out = {secid for secid, sec in state.sec_solids.items()
+           if sec.elform in _COHESIVE_ELFORMS}
+    cohesive_mids = (set(state.mat_cohesive_mixed_mode)
+                     | set(state.mat_cohesive_mm_epr)
+                     | set(state.mat_arup_adhesive))
+    if cohesive_mids:
+        solid_pids = {e.pid for e in state.solid_elems}
+        for pid, part in state.parts.items():
+            if part.mid in cohesive_mids and pid in solid_pids:
+                out.add(part.secid if part.secid > 0 else pid)
+    return out
+
+
+def _emit_prop_type43(prop_id: int, title: str,
+                      true_thickness: float) -> List[str]:
+    """/PROP/TYPE43 (CONNECT), audited against hm_cfg_files
+    radioss140/PROP/prop_p43_connect.cfg — the newest FORMAT block, i.e. what
+    a /BEGIN 2022 deck reads with: title, then ONE data card
+    ``Ismstr(10) blank(70) True_thickness(81-100)``.
+
+    Ismstr is written 1 explicitly: the starter collapses every other value
+    to 1 or 4 anyway (hm_read_prop43.F:121-124 — 0/2/3 → 1, 10 → 4, and a
+    blank falls to /DEF_SOLID first), and 1 (small strain from t=0) is what
+    dyna2rad sets for its MAT_138/MAT_240 CONNECT props; k2rad emits no
+    /DEF_SOLID, so this pins the resolved value instead of leaving it to a
+    default chain. True_thickness 0 = use the element's geometric height in
+    the strain measure; a *SECTION_SOLID_MISC COHTHK lands here (the exact
+    Radioss analogue of its supersede-*MAT_240-THICK rule). The property has
+    no other input: 4 mid-plane Gauss points, local t-axis from face 1-2-3-4
+    to face 5-6-7-8 (identical to the LS-DYNA cohesive convention, so
+    *ELEMENT_SOLID connectivity passes through unpermuted), zero element
+    height legal (the element computes no time step of its own — nodal
+    time step governs).
+    """
+    return [
+        f"/PROP/TYPE43/{prop_id}",
+        title,
+        "#   Ismstr                                                                        True_thickness",
+        f"{_i(1)}{' ' * 70}{_f(true_thickness)}",
+        HDR,
+    ]
+
+
+def _warn_type43_pairings(state: ConversionState, secid: int,
+                          sec: SectionSolid) -> None:
+    """Name every starter refusal a cohesive section conversion sets up.
+
+    One warning per (section, defect class), naming all the offending part
+    ids — a realistic adhesive model shares one cohesive section across many
+    parts, and ``state.warn`` does not deduplicate, so per-part emission
+    floods the log with near-identical lines (the aggregation rule the
+    element-free-*PART path and _assign_ortho_props already follow)."""
+    parts_here = [(pid, p) for pid, p in sorted(state.parts.items())
+                  if (p.secid if p.secid > 0 else pid) == secid]
+    offclass: Dict[int, List[int]] = {}
+    offclass_mids: Dict[int, Set[int]] = {}
+    arup_pids: List[int] = []
+    law120_pids: List[int] = []
+    for pid, part in parts_here:
+        law = _target_mat_law(state, part.mid)
+        if law is None:
+            continue    # no /MAT at all — the dangling-material path warns
+        if law not in _TYPE43_LAWS:
+            offclass.setdefault(law, []).append(pid)
+            offclass_mids.setdefault(law, set()).add(part.mid)
+        if law == 169 and sec.elform in _COHESIVE_ELFORMS:
+            arup_pids.append(pid)
+        if law == 120:
+            law120_pids.append(pid)
+    for law, pids in sorted(offclass.items()):
+        mids = sorted(offclass_mids[law])
+        state.warn(
+            f"*SECTION_SOLID {secid} converts to /PROP/TYPE43 (cohesive) "
+            f"but part(s) {pids} pair it with /MAT/LAW{law} (mid(s) "
+            f"{mids}), which is not in TYPE43's accepted classes "
+            "(SOLID_COHESIVE LAW59/83/116/117/169, SOLID_ALL LAW13/120, "
+            "SOLID_BRICK_ISOTROPIC LAW77/88) — the starter refuses the "
+            "pair with ERROR 3047 + ERROR 658 "
+            "(check_mat_elem_prop_compatibility.F:228-232). Put a cohesive "
+            "material on the part(s) or move them off the cohesive section.")
+    if arup_pids:
+        state.warn(
+            f"*SECTION_SOLID {secid} (part(s) {arup_pids}): /MAT/LAW169 "
+            "always uses VOLUME density — it is missing from the sini43.F "
+            "area-mass flag list (MLW 59/83/116/117 only) and has no "
+            "Imass field — so a ZERO-HEIGHT cohesive element gets zero "
+            "nodal mass from these parts. Model the ARUP adhesive with "
+            "finite bondline height, or use MAT_138/MAT_240 (LAW117/116, "
+            "which default to area mass) for zero-thickness meshes.")
+    if law120_pids:
+        state.warn(
+            f"*SECTION_SOLID {secid} (part(s) {law120_pids}): /MAT/LAW120 "
+            "on /PROP/TYPE43 is legal (SOLID_ALL), but LAW120's own Thick "
+            "field is unset and defaults to 1.0 LENGTH UNIT in the "
+            "cohesive strain measure (hm_read_mat120.F:170-176; LS-DYNA "
+            "pairs MAT_252 with *MAT_ADD_COHESIVE for this, which k2rad "
+            "does not convert). Verify the traction-separation scaling "
+            "against a coupon before trusting the bondline response.")
+    if sec.elform in (20, 22):
+        state.warn(
+            f"*SECTION_SOLID {secid}: ELFORM={sec.elform} is the cohesive "
+            "form WITH SHELL OFFSETS — LS-DYNA generates moments on the "
+            "connected shells from the offset between the cohesive mid-plane "
+            "and the shell reference surfaces; /PROP/TYPE43 has no offset "
+            "mechanism, so those moments are NOT reproduced (forces act at "
+            "the nodes). Expect softer peel response on shell-bonded joints.")
 
 
 def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
@@ -1817,8 +1971,43 @@ def _make_properties(state: ConversionState) -> List[str]:
         hm, _ = _shell_hg_values(state, sec, None)
         lines += _emit_prop_shell(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   ishell, nip, istrain, sec.t1, hcoef=hm)
+    cohesive_secids = _cohesive_solid_secids(state)
     for sec in sorted(state.sec_solids.values(), key=lambda s: s.secid):
         if sec.secid in ortho_only_secids:
+            continue
+        # Cohesive route (ELFORM ±19/20/±21/22, or any part pairing the
+        # section with a SOLID_COHESIVE law): /PROP/TYPE43 under the SECID
+        # verbatim, exactly where /PROP/SOLID would sit, so no /PART repoint.
+        # MUST come before _elform_to_isolid — ELFORM 19/20 has no entry
+        # there and would silently fall to the structural-hex default 17,
+        # i.e. a zero-thickness cohesive on a full-integration brick prop
+        # (ERROR 245 zero volume at best, garbage stiffness at worst).
+        # /INIBRI note: _effective_solid_isolid still reports the ELFORM
+        # default for these sections — an *INITIAL_STRESS_SOLID on a cohesive
+        # part is not supported (TYPE43 has 4 mid-plane points, no Radioss
+        # /INIBRI layout matches it).
+        if sec.secid in cohesive_secids:
+            if sec.elform not in _COHESIVE_ELFORMS:
+                mids = sorted({p.mid for pid, p in state.parts.items()
+                               if (p.secid if p.secid > 0 else pid)
+                               == sec.secid
+                               and _target_mat_law(state, p.mid)
+                               in _SOLID_COHESIVE_LAWS})
+                state.warn(
+                    f"*SECTION_SOLID {sec.secid}: ELFORM={sec.elform} is not "
+                    "a cohesive formulation, but the section is used by "
+                    f"cohesive-law material(s) {mids} "
+                    "(LAW116/117/169 are SOLID_COHESIVE — a plain "
+                    "/PROP/SOLID pairing is starter ERROR 3047), so it is "
+                    "routed to /PROP/TYPE43 like dyna2rad's material-based "
+                    "*SECTION_SOLID → /PROP/CONNECT rule. *MAT_ARUP_ADHESIVE "
+                    "on ELFORM 1/2/15 bricks is the standard LS-DYNA usage "
+                    "this covers; verify any NON-cohesive part sharing the "
+                    "section (warned separately if present).")
+            _warn_type43_pairings(state, sec.secid, sec)
+            lines += _emit_prop_type43(sec.secid,
+                                       sec.title or f"PROP_{sec.secid}",
+                                       sec.cohthk)
             continue
         # ALE/Euler elements need an ALE-compatible solid formulation; the
         # full-integration Lagrangian Isolid 17 is rejected (ERROR 131/608
@@ -1987,11 +2176,21 @@ def _assign_hourglass_props(state: ConversionState) -> None:
     # (is_solid, secid, eff) → prop_id.
     prop_by_key: Dict[Tuple[bool, int, Tuple[Optional[float], Optional[int]]],
                       int] = {}
+    cohesive_secids = _cohesive_solid_secids(state)
     for pid, part in sorted(state.parts.items()):
         # A LAW128 or composite part already owns a dedicated orthotropic /PROP;
         # the hourglass overlay does not also split it (its TYPE6/TYPE9/TYPE11/
         # TYPE51 keeps its defaults).
         if pid in state.ortho_prop_ids or pid in state.composite_prop_ids:
+            continue
+        # A cohesive section emits /PROP/TYPE43, which has no hourglass (4
+        # mid-plane Gauss points) — splitting the part onto a /PROP/SOLID
+        # clone would both drop the cohesive formulation and hit the
+        # SOLID_COHESIVE-law compatibility refusal (ERROR 3047). The
+        # elform-cohesive case is already gated inside _solid_hg_values;
+        # this skip also covers the MATERIAL-routed sections (ARUP adhesive
+        # on ELFORM 1), which that sec-only gate cannot see.
+        if part_secids.get(pid) in cohesive_secids:
             continue
         is_solid = pid in solid_pids
         is_shell = pid in shell_pids and not is_solid
@@ -2498,6 +2697,22 @@ _TYPE18_ONLY_BEAM_LAWS = frozenset({34, 36, 71})
 #   LAW88  hm_read_mat88.F90:669-679 COMPRESSIBLE/INCOMPRESSIBLE, TOTAL,
 #                                    LARGE_STRAIN, HOOK,
 #                                    SOLID_BRICK_ISOTROPIC, SHELL_ISOTROPIC
+#
+# Classification of the laws the ADHESIVES/COHESIVE batch adds, read from the
+# same INIT_MAT_KEYWORD call sites in the 2026-05-20 starter tree. NONE of
+# the four declares any BEAM_* keyword (or any SHELL_* class either — these
+# are solid-only laws), so neither frozenset above changes and the existing
+# "no beam keyword at all — starter ERROR 3046" message is already the right
+# one for a beam part on any of them:
+#   LAW116 hm_read_mat116.F:236,239    HOOK; SOLID_COHESIVE
+#   LAW117 hm_read_mat117.F:208,211    HOOK; SOLID_COHESIVE
+#   LAW120 hm_read_mat120.F:257-262    COMPRESSIBLE, INCREMENTAL,
+#                                      LARGE_STRAIN, HOOK; SOLID_ALL
+#   LAW169 hm_read_mat169.F90:191      SOLID_COHESIVE (no HOOK call)
+# The SOLID-side compatibility these classes encode is enforced/warned by
+# the /PROP/TYPE43 routing (_cohesive_solid_secids/_warn_type43_pairings
+# above): SOLID_COHESIVE lives ONLY on TYPE43, and TYPE43 takes ONLY
+# PROP_SOLID classes 4/6/7 (ERROR 3047 either way around).
 
 
 def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
@@ -2607,6 +2822,20 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 88                                  # *MAT_181/183
     if mid in state.mat_soft_tissue:
         return 42                                  # *MAT_091/092 → OGDEN
+    # Adhesives / cohesive batch. None of the four splits (one law per
+    # keyword; a MAT_240 option variant is warn-skipped at parse and never
+    # fills its dict, so it correctly reads as "no /MAT" here). None of
+    # 116/117/120/169 is on the solid-/XREF whitelist, so the gate in
+    # inistate.py warn-skips such parts NAMING the law — without these
+    # entries it would misreport them as having no /MAT at all.
+    if mid in state.mat_cohesive_mixed_mode:
+        return 117                                 # *MAT_138
+    if mid in state.mat_arup_adhesive:
+        return 169                                 # *MAT_169
+    if mid in state.mat_cohesive_mm_epr:
+        return 116                                 # *MAT_240 (option-free)
+    if mid in state.mat_toughened_adhesive:
+        return 120                                 # *MAT_252 → TAPO
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

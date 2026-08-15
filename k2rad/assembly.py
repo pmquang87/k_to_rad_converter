@@ -1200,6 +1200,101 @@ def _off_mat_181(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[iu] = new
 
 
+def _off_mat_138(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_COHESIVE_MIXED_MODE (138): MID → IDMOFF; GIC/GIIC (card 1 fields
+    7/8) and T/S (card 2 fields 2/3) are floats whose NEGATIVE form is the
+    negated id of an element-size curve — moved with IDFOFF via the
+    sign-preserving rewriter (positive values are physics, never touched)."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (6, 7):
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw) and b.raw[i2].strip():
+        for i in (1, 2):
+            new = _rewrite_neg_ref(b.raw[i2], i, foff)
+            if new is not None:
+                b.raw[i2] = new
+
+
+def _off_mat_169(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_ARUP_ADHESIVE (169): MID → IDMOFF; TENMAX/GCTEN/SHRMAX/GCSHR
+    (card 1 fields 5-8), SHRP (card 2 field 3) and SDFAC/SGFAC (card 5 fields
+    1/2) all accept a NEGATIVE value = function id (R9.0+). Card 5's INDEX is
+    conditional — it exists only when EDOT2 != 0 and shifts down 2 when the
+    EXTRA edge cards (EXTRA 1|3) are present — so a static spec cannot hold
+    it."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (4, 5, 6, 7):
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 >= len(b.raw) or not b.raw[i2].strip():
+        return
+    new = _rewrite_neg_ref(b.raw[i2], 2, foff)
+    if new is not None:
+        b.raw[i2] = new
+    f2 = _fields(b.raw[i2])
+    extra = int(to_float(f2[7], 0.0)) if len(f2) > 7 and str(f2[7]).strip() \
+        else 0
+    edot2 = to_float(f2[5], 0.0) if len(f2) > 5 and str(f2[5]).strip() else 0.0
+    if edot2 == 0.0:
+        return
+    i5 = i2 + 1 + (2 if extra in (1, 3) else 0)
+    if i5 < len(b.raw) and b.raw[i5].strip():
+        for i in (0, 1):
+            new = _rewrite_neg_ref(b.raw[i5], i, foff)
+            if new is not None:
+                b.raw[i5] = new
+
+
+def _off_mat_add_damage_diem(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_ADD_DAMAGE_DIEM: MID → IDMOFF; per criterion i (NDIEMC pairs) the
+    initiation curve P1 (card 2 field 2) and the regularization curve P5
+    (field 6) are positive ids → IDFOFF, Q1 (card 3 field 3) is a table id
+    only when NEGATIVE, and Q4 (field 6) is |id| under either sign (its sign
+    selects the table's second input, not id-ness)."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    f1 = _fields(b.raw[toff])
+    ndiemc = int(to_float(f1[1], 0.0)) if len(f1) > 1 and str(f1[1]).strip() \
+        else 0
+    foff = offsets.get("f", 0)
+    for i in range(max(ndiemc, 0)):
+        i2 = toff + 1 + 2 * i
+        i3 = toff + 2 + 2 * i
+        if i2 < len(b.raw) and b.raw[i2].strip():
+            new = _rewrite_line(b.raw[i2], [(1, "f"), (5, "f")], offsets)
+            if new is not None:
+                b.raw[i2] = new
+        if i3 < len(b.raw) and b.raw[i3].strip():
+            new = _rewrite_line(b.raw[i3], [(5, "f")], offsets)
+            if new is not None:
+                b.raw[i3] = new
+            for j in (2, 5):
+                new = _rewrite_neg_ref(b.raw[i3], j, foff)
+                if new is not None:
+                    b.raw[i3] = new
+
+
 def _off_foam_ref_geometry(b: Block, offsets: Dict[str, int], warn) -> None:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP]: node ids in the *NODE-format
     table → IDNOFF. The _RAMP variant's first card is NDTRRG (a step count,
@@ -1437,6 +1532,22 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_SOFT_TISSUE_VISCO": _mat(),
     "MAT_092": _mat(),
     "MAT_92": _mat(),
+    # Adhesives / cohesive batch. MAT_138's and MAT_169's curve references are
+    # NEGATIVE-encoded floats (and MAT_169's SDFAC card index is conditional),
+    # so both need callables; MAT_240's LCG1C/LCG2C sit at fixed cells, but the
+    # _THERMAL/_FUNCTIONS spellings turn eight more cells into curve ids — a
+    # static spec PER SPELLING stays exact (the base spelling must not offset
+    # those cells: there they are float physics). MAT_ADD_DAMAGE_DIEM repeats
+    # its curve cells NDIEMC times → callable. (The MAT_240 variant specs are
+    # filled in by the grammar loop below the dict, mirroring HANDLERS.)
+    "MAT_COHESIVE_MIXED_MODE": _off_mat_138,
+    "MAT_138": _off_mat_138,
+    "MAT_ARUP_ADHESIVE": _off_mat_169,
+    "MAT_169": _off_mat_169,
+    "MAT_TOUGHENED_ADHESIVE_POLYMER": _mat({1: [(0, "f")]}),
+    "MAT_252": _mat({1: [(0, "f")]}),
+    "MAT_ADD_DAMAGE_DIEM": _off_mat_add_damage_diem,
+    "SECTION_SOLID_MISC": _off_section_solid,
     # Node table in the *NODE I8/E16 format → IDNOFF (base variant has no
     # header card; _RAMP prepends the NDTRRG card, which carries no ids).
     "INITIAL_FOAM_REFERENCE_GEOMETRY": _off_foam_ref_geometry,
@@ -1645,6 +1756,34 @@ for _base in ("MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", "MAT_183"):
     for _o2 in ("", "_LOG_LOG_INTERPOLATION"):
         _OFFSET_SPECS[f"{_base}{_o2}"] = _mat({1: [(3, "f")], 2: [(0, "f")]})
 del _base, _o1, _o2
+
+# *MAT_240{_THERMAL|_3MODES|_FUNCTIONS|_THERMAL_3MODES|_FUNCTIONS_3MODES} —
+# the same generated grammar handlers.py registers. Cells are curve ids per
+# SPELLING: the base card only carries LCG1C/LCG2C (cards 2/3 field 8);
+# _THERMAL/_FUNCTIONS additionally turn EMOD/GMOD (card 1 fields 5/6) and
+# G*C_0/T0|S0/FG* (cards 2/3 fields 1/4/7) into function ids; _3MODES adds a
+# mode-III card with the same shape (its LCG3C — and under THERMAL its
+# G3C_0/R0/FG3 — plus the GMOD3 card). The handler warn-skips the variants,
+# but the include-transform rewrite must still move their ids so the warning
+# and any hand-recovery see the post-offset deck consistently.
+_MAT240_CURVE_CELLS = {
+    "":                  {1: [(7, "f")], 2: [(7, "f")]},
+    "_3MODES":           {1: [(7, "f")], 2: [(7, "f")], 3: [(7, "f")]},
+    "_THERMAL":          {0: [(4, "f"), (5, "f")],
+                          1: [(0, "f"), (3, "f"), (6, "f"), (7, "f")],
+                          2: [(0, "f"), (3, "f"), (6, "f"), (7, "f")]},
+    "_THERMAL_3MODES":   {0: [(4, "f"), (5, "f")],
+                          1: [(0, "f"), (3, "f"), (6, "f"), (7, "f")],
+                          2: [(0, "f"), (3, "f"), (6, "f"), (7, "f")],
+                          3: [(0, "f"), (3, "f"), (6, "f"), (7, "f")],
+                          4: [(0, "f")]},
+}
+_MAT240_CURVE_CELLS["_FUNCTIONS"] = _MAT240_CURVE_CELLS["_THERMAL"]
+_MAT240_CURVE_CELLS["_FUNCTIONS_3MODES"] = _MAT240_CURVE_CELLS["_THERMAL_3MODES"]
+for _base in ("MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE", "MAT_240"):
+    for _opt, _cells in _MAT240_CURVE_CELLS.items():
+        _OFFSET_SPECS[f"{_base}{_opt}"] = _mat(_cells)
+del _base, _opt, _cells
 
 _OFFSET_SPECS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = _off_hex_spotweld_assembly
 for _n in range(1, 17):
