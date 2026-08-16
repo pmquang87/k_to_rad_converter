@@ -7681,23 +7681,24 @@ class RigidWallPlanarTests(unittest.TestCase):
         self.assertEqual(data.split()[0], "0")
         self.assertEqual(data.split()[1], "0")
         self.assertNotEqual(data.split()[2], "0")
-        # geometry: M=(0,0,-1), M1=(0,0,1)
-        self.assertIn("-1", block.splitlines()[5])
-        self.assertIn("1", block.splitlines()[7])
+        # geometry: M=(0,0,-1), M1=(0,0,1) — cards 3 and 4 of the cfg layout
+        self.assertIn("-1", block.splitlines()[7])
+        self.assertIn("1", block.splitlines()[9])
 
     def test_friction_wall_gets_slide2_and_fric_card(self):
         result, starter = _convert_string_deck(self._deck("       0.3"))
         block = starter.split("/RWALL/PLANE/")[1]
         data = block.splitlines()[3]
         self.assertEqual(data.split()[1], "2")
-        self.assertIn("0.3", block.splitlines()[5])
+        # fric is card 2 column 21-40, not a card of its own
+        self.assertEqual(block.splitlines()[5][20:40].strip(), "0.3")
 
     def test_stick_wall_gets_slide1(self):
         result, starter = _convert_string_deck(self._deck("       1.0"))
         block = starter.split("/RWALL/PLANE/")[1]
         self.assertEqual(block.splitlines()[3].split()[1], "1")
 
-    def test_all_nodes_wall_uses_bbox_search_distance(self):
+    def test_all_nodes_wall_uses_a_search_distance(self):
         deck = TINY_K.replace(
             "*CONTROL_TERMINATION",
             "*RIGIDWALL_PLANAR\n"
@@ -7705,9 +7706,9 @@ class RigidWallPlanarTests(unittest.TestCase):
             "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
             "*CONTROL_TERMINATION")
         result, starter = _convert_string_deck(deck)
-        data = starter.split("/RWALL/PLANE/")[1].splitlines()[3]
-        self.assertEqual(data.split()[2], "0")     # grnd_ID1 = 0 (all nodes)
-        self.assertGreater(float(data.split()[4]), 0.0)
+        lines = starter.split("/RWALL/PLANE/")[1].splitlines()
+        self.assertEqual(lines[3].split()[2], "0")  # grnd_ID1 = 0 (all nodes)
+        self.assertGreater(float(lines[5][0:20]), 0.0)   # d on card 2
 
     def test_moving_flavour_now_converts(self):
         # _MOVING used to warn-skip; it now converts to a moving /RWALL/PLANE

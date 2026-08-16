@@ -228,14 +228,29 @@ class SphereTests(unittest.TestCase):
         self.assertNotIn("/RWALL/", starter)
         self.assertTrue(any("RADSPH = 0" in w for w in result.warnings))
 
-    def test_fractional_fric_becomes_coulomb(self):
-        wall = self.WALL.replace(
+    def _with_fric(self, fric: str) -> str:
+        return self.WALL.replace(
             "       1.0       2.0       3.0       1.0       2.0       4.0       1.0\n",
-            "       1.0       2.0       3.0       1.0       2.0       4.0      0.25\n")
-        _result, starter = _convert(_deck(wall))
-        b = _one(starter, "SPHER")
-        self.assertEqual(b[3][10:20], "         2")
-        self.assertEqual(b[5][20:40], "                0.25")
+            "       1.0       2.0       3.0       1.0       2.0       4.0"
+            + fric.rjust(10) + "\n")
+
+    def test_fric_maps_by_exact_value_not_by_threshold(self):
+        # *RIGIDWALL_GEOMETRIC Card 2 (Manual p. 40-8): "FRIC: Coulomb
+        # friction coefficient, except as noted below: EQ.0.0 Frictionless
+        # sliding when in contact; EQ.1.0 No sliding when in contact." Only
+        # those TWO values are special here — the 2.0/3.0 weld values exist on
+        # *RIGIDWALL_PLANAR only — so FRIC = 2.0 is a Coulomb mu of 2.0, and a
+        # "FRIC >= 1 → tied" threshold would silently no-slip the wall and
+        # throw the coefficient away.
+        for fric, slide, coeff in (("0.0", 0, 0.0), ("0.25", 2, 0.25),
+                                   ("1.0", 1, 0.0), ("2.0", 2, 2.0),
+                                   ("3.0", 2, 3.0), ("1.5", 2, 1.5)):
+            with self.subTest(fric=fric):
+                result, starter = _convert(_deck(self._with_fric(fric)))
+                b = _one(starter, "SPHER")
+                self.assertEqual(int(b[3][10:20]), slide)
+                self.assertEqual(float(b[5][20:40]), coeff)
+                self.assertFalse([w for w in result.warnings if "FRIC" in w])
 
 
 class FlatTests(unittest.TestCase):
@@ -292,9 +307,11 @@ class FlatTests(unittest.TestCase):
         self.assertEqual(_nums(b[9]), [1.0, 1.0, 3.0])
         self.assertEqual(_nums(b[11]), [1.0, -5.0, 1.0])
 
-    def test_blank_hev_is_the_infinite_plane_exactly(self):
-        # cfg geometrytype 2: a blank edge-vector head IS LS-DYNA's infinite
-        # plane, which /RWALL/PLANE expresses exactly — no loss, no warning.
+    def test_blank_card_3_is_the_infinite_plane_exactly(self):
+        # "LENL/LENM: A ZERO VALUE DEFINES AN INFINITE SIZE PLANE"
+        # (Manual p. 40-9), which /RWALL/PLANE expresses exactly — no loss,
+        # no warning. dyna2rad builds a 1e20 PARAL quadrant instead, which
+        # misses every node on its -l/-m side.
         wall = self.WALL.replace(
             "       2.0       0.0       0.0       4.0       3.0\n",
             "       0.0       0.0       0.0       0.0       0.0\n")
@@ -307,14 +324,46 @@ class FlatTests(unittest.TestCase):
         self.assertFalse(any("RIGIDWALL_GEOMETRIC_FLAT id=503" in w
                              for w in result.warnings))
 
-    def test_zero_lenl_falls_back_to_infinite_plane_with_warning(self):
+    def test_zero_lenl_is_the_infinite_plane_too(self):
+        # Same rule, one length at a time: LENL = 0 alone already makes the
+        # LS-DYNA plane infinite, so /RWALL/PLANE is exact here as well.
         wall = self.WALL.replace(
             "       2.0       0.0       0.0       4.0       3.0\n",
             "       2.0       0.0       0.0       0.0       3.0\n")
         result, starter = _convert(_deck(wall))
         self.assertNotIn("/RWALL/PARAL/", starter)
         self.assertIn("/RWALL/PLANE/503", starter)
-        self.assertTrue(any("semi-infinite wall" in w and "INFINITE" in w
+        self.assertFalse(any("RIGIDWALL_GEOMETRIC_FLAT id=503" in w
+                             for w in result.warnings))
+
+    def test_blank_hev_is_classified_tail_relatively(self):
+        # HEV is a POINT ("coordinate of head of edge vector l", p. 40-9), so
+        # l = HEV - tail. A blank card 3 with FINITE lengths therefore means
+        # l = -tail, NOT "infinite plane": classifying on the ABSOLUTE HEV
+        # would make the same physical wall convert differently once an
+        # *INCLUDE_TRANSFORM translation moved it off the global origin.
+        wall = (
+            "*RIGIDWALL_GEOMETRIC_FLAT_ID\n"
+            "       503flat wall\n"
+            "        30\n"
+            "       5.0       0.0       0.0       5.0       0.0       1.0\n"
+            "                                     4.0       3.0\n"
+        )
+        _result, starter = _convert(_deck(wall))
+        b = _one(starter, "PARAL")
+        self.assertEqual(_nums(b[7]), [5.0, 0.0, 0.0])       # M = tail
+        self.assertEqual(_nums(b[9]), [1.0, 0.0, 0.0])       # l̂ = -x̂, LENL 4
+        self.assertEqual(_nums(b[11]), [5.0, -3.0, 0.0])     # m̂ = n̂ x l̂
+
+    def test_hev_on_the_tail_falls_back_to_the_infinite_plane_with_warning(self):
+        wall = self.WALL.replace(
+            "       2.0       0.0       0.0       4.0       3.0\n",
+            "       0.0       0.0       0.0       4.0       3.0\n")
+        result, starter = _convert(_deck(wall))
+        self.assertNotIn("/RWALL/PARAL/", starter)
+        self.assertIn("/RWALL/PLANE/503", starter)
+        self.assertTrue(any("l edge direction is undefined" in w
+                            and "blocks more than" in w
                             for w in result.warnings))
 
     def test_degenerate_normal_is_dropped(self):
@@ -498,25 +547,60 @@ class MotionTests(unittest.TestCase):
         self.assertTrue(any("direction cosines VX/VY/VZ are all zero" in w
                             for w in result.warnings))
 
-    def test_prism_motion_drives_all_six_face_nodes(self):
-        wall = (
-            "*RIGIDWALL_GEOMETRIC_PRISM_MOTION_ID\n"
-            "       506moving prism\n"
-            "        30\n"
-            "       0.0       0.0       0.0       0.0       0.0       1.0\n"
-            "       2.0       0.0       0.0       4.0       3.0       5.0\n"
-            "        99         0       1.0       0.0       0.0\n"
-        )
-        _result, starter = _convert(_deck(wall))
+    PRISM_MOTION = (
+        "*RIGIDWALL_GEOMETRIC_PRISM_MOTION_ID\n"
+        "       506moving prism\n"
+        "        30\n"
+        "       0.0       0.0       0.0       0.0       0.0       1.0\n"
+        "       2.0       0.0       0.0       4.0       3.0       5.0\n"
+        "        99         0       1.0       0.0       0.0\n"
+    )
+
+    def test_prism_motion_drives_every_face_node(self):
+        # A moving /RWALL takes M from its carrier node, so each DISTINCT face
+        # base point needs one. Faces 1/2/3 all start at the tail corner and
+        # SHARE a node (several /RWALLs may name the same MSR): 6 faces, 4
+        # nodes. Fewer carrier nodes also means fewer of them landing in a
+        # sibling face's secondary-node search.
+        _result, starter = _convert(_deck(self.PRISM_MOTION))
         blocks = _blocks(starter, "PARAL")
         self.assertEqual(len(blocks), 6)
         node_ids = [int(b[3][0:10]) for b in blocks]
-        self.assertEqual(node_ids, [5, 6, 7, 8, 9, 10])
+        self.assertEqual(node_ids, [5, 5, 5, 6, 7, 8])
         imp = starter.split("/IMPVEL/")[1].splitlines()
         grnod_id = int(imp[3][40:50])
         grnod = starter.split(f"/GRNOD/NODE/{grnod_id}\n")[1].splitlines()
-        self.assertEqual(grnod[1].split(),
-                         ["5", "6", "7", "8", "9", "10"])
+        self.assertEqual(grnod[1].split(), ["5", "6", "7", "8"])
+
+    def test_carrier_nodes_are_excluded_from_every_face_search(self):
+        # The carrier nodes sit ON the box corners, so a sibling face's
+        # "track all nodes" distance search would take them as SECONDARY nodes
+        # at DISN = 0 — the starter excludes only the wall's OWN main node
+        # (hm_read_rwall_paral.F:281 `I /= MSR`) — and the rigid-wall
+        # constraint would then fight the /IMPVEL driving them. grnd_ID2 is
+        # applied after the search and simply zeroes them out.
+        wall = self.PRISM_MOTION.replace("        30\n", "         0\n")
+        _result, starter = _convert(_deck(wall))
+        blocks = _blocks(starter, "PARAL")
+        self.assertEqual({b[3][20:30] for b in blocks}, {"         0"})  # no set
+        grnd2 = {int(b[3][30:40]) for b in blocks}
+        self.assertEqual(len(grnd2), 1)                 # one shared group
+        gid = grnd2.pop()
+        self.assertGreater(gid, 0)
+        grnod = starter.split(f"/GRNOD/NODE/{gid}\n")[1].splitlines()
+        self.assertEqual(grnod[0], "rwall_moving_carrier_nodes")
+        self.assertEqual(grnod[1].split(), ["5", "6", "7", "8"])
+
+    def test_carrier_node_is_not_swept_into_the_implicit_free_node_group(self):
+        # The implicit singularity guard fixes every element-free node with
+        # /BCS 111 111. A carrier node driven by /IMPVEL must be exempt, or
+        # the fix-up fights the prescribed motion on the same node.
+        deck = _deck(self.PRISM_MOTION).replace(
+            "*CONTROL_TERMINATION\n",
+            "*CONTROL_IMPLICIT_GENERAL\n         1       0.1\n"
+            "*CONTROL_TERMINATION\n")
+        _result, starter = _convert(deck)
+        self.assertNotIn("FREE-NODE CONSTRAINTS", starter)
 
 
 class SecondaryNodeTests(unittest.TestCase):
@@ -541,13 +625,45 @@ class SecondaryNodeTests(unittest.TestCase):
         grnod = starter.split(f"/GRNOD/NODE/{grnd1}\n")[1].splitlines()
         self.assertEqual(grnod[1].split(), ["1", "2", "3", "4"])
 
-    def test_blank_nsid_tracks_all_nodes_via_the_bbox_search_distance(self):
+    def test_blank_nsid_tracks_all_nodes_via_the_search_distance(self):
         # LS-DYNA NSID = 0 tracks ALL nodes; /RWALL has no "all" group id, so
-        # grnd_ID1 stays 0 and d is the model bounding-box diagonal.
+        # grnd_ID1 stays 0 and the tracked set comes from d.
         _result, starter = _convert(_deck(self._sphere("         0\n")))
         b = _one(starter, "SPHER")
         self.assertEqual(b[3][20:30], "         0")
         self.assertGreater(float(b[5][0:20]), 0.0)
+
+    def test_search_distance_reaches_a_wall_parked_off_the_structure(self):
+        # The starter measures DISN from the wall SURFACE and keeps only
+        # DISN <= d (hm_read_rwall_spher.F:241-247). The plate spans
+        # x,y in [0,1] at z = 1, so its bbox DIAGONAL is 1.4142 — but an
+        # impactor sphere of radius 1 centred at (0,0,-5) is 5 units away.
+        # Sizing d from the diagonal would emit a wall that tracks NOTHING.
+        wall = ("*RIGIDWALL_GEOMETRIC_SPHERE_ID\n"
+                "       507sphere\n"
+                "         0\n"
+                "       0.0       0.0      -5.0       0.0       0.0      -4.0\n"
+                "       1.0\n")
+        _result, starter = _convert(_deck(wall))
+        b = _one(starter, "SPHER")
+        d = float(b[5][0:20])
+        # furthest plate corner from the centre: |(1,1,6)| = 6.16441..., minus
+        # the radius, plus the 0.1% card-rounding margin.
+        self.assertAlmostEqual(d, (1 + 1 + 36) ** 0.5 * 1.0 - 1.0, delta=0.01)
+        self.assertGreater(d, (1 + 1 + 36) ** 0.5 - 1.0)
+
+    def test_wall_facing_away_from_the_whole_model_is_flagged(self):
+        # Normal points -Z, the plate is at z = +1: every node is BEHIND the
+        # wall, the DISN >= 0 filter keeps none of them and no d can help.
+        wall = ("*RIGIDWALL_GEOMETRIC_FLAT_ID\n"
+                "       507flat\n"
+                "         0\n"
+                "       0.0       0.0      -5.0       0.0       0.0      -6.0\n"
+                "       0.0       0.0       0.0       0.0       0.0\n")
+        result, starter = _convert(_deck(wall))
+        self.assertIn("/RWALL/PLANE/507", starter)
+        self.assertTrue(any("lies BEHIND its outward normal" in w
+                            for w in result.warnings))
 
     def test_nsidex_becomes_grnd_id2(self):
         deck = _deck(self._sphere("        30        31\n")).replace(
@@ -600,18 +716,47 @@ class SecondaryNodeTests(unittest.TestCase):
 
 class SuffixDispatchTests(unittest.TestCase):
     def test_all_shape_and_option_permutations_are_registered(self):
-        from k2rad.handlers import HANDLERS
+        from k2rad.handlers import HANDLERS, _rwall_geometric_keywords
         keys = [k for k in HANDLERS if k.startswith("RIGIDWALL_GEOMETRIC")]
-        # 4 shapes x every ORDERING of {_MOTION,_DISPLAY} (+ _INTERIOR for
+        # 4 shapes x every ORDERING of {_MOTION,_DISPLAY,_ID} (+ _INTERIOR for
         # CYLINDER/SPHERE) — the manual says the option NAMES may appear in
-        # any order (p. 3659), only the DATA CARDS are ordered.
-        self.assertEqual(len(keys), 42)
+        # any order (p. 40-4), only the DATA CARDS are ordered. A TRAILING _ID
+        # is stripped into block.options by the parser, so those spellings are
+        # covered by the base key and are not generated.
+        self.assertEqual(len(keys), len(set(k for k, _ in
+                                            _rwall_geometric_keywords())))
         for kw in ("RIGIDWALL_GEOMETRIC_FLAT",
                    "RIGIDWALL_GEOMETRIC_PRISM_MOTION",
                    "RIGIDWALL_GEOMETRIC_CYLINDER_DISPLAY_MOTION",
                    "RIGIDWALL_GEOMETRIC_SPHERE_MOTION_DISPLAY",
+                   "RIGIDWALL_GEOMETRIC_SPHERE_ID_MOTION",
+                   "RIGIDWALL_GEOMETRIC_FLAT_ID_DISPLAY",
                    "RIGIDWALL_GEOMETRIC_CYLINDER_INTERIOR"):
             self.assertIn(kw, HANDLERS)
+        for kw in ("RIGIDWALL_GEOMETRIC_FLAT_ID",
+                   "RIGIDWALL_GEOMETRIC_SPHERE_MOTION_ID"):
+            self.assertNotIn(kw, HANDLERS)      # trailing _ID: parser strips it
+
+    def test_id_in_a_non_final_position_still_reads_the_rwid_card(self):
+        # "The order of the OPTIONS is arbitrary" (Manual p. 40-4) and the cfg
+        # locates _ID with an unanchored _FIND, so _ID need not come last. The
+        # keyword parser only strips a TRAILING _ID, so without its own key the
+        # RWID header would be read as Card 1 and the whole wall would vanish.
+        wall = (
+            "*RIGIDWALL_GEOMETRIC_SPHERE_ID_MOTION\n"
+            "       778mid-keyword id\n"
+            "        30\n"
+            "       1.0       2.0       3.0       1.0       2.0       4.0\n"
+            "       4.0\n"
+            "        99         0       1.0       0.0       0.0\n"
+        )
+        result, starter = _convert(_deck(wall))
+        self.assertEqual(result.skipped_keywords, [])
+        b = _one(starter, "SPHER")
+        self.assertEqual(b[0], "/RWALL/SPHER/778")
+        self.assertEqual(b[1], "mid-keyword id")
+        self.assertEqual(_nums(b[5])[2], 8.0)           # Phi = 2 x RADSPH
+        self.assertIn("/IMPVEL/", starter)              # MOTION card found
 
     def test_id_option_supplies_the_rwall_id_and_title(self):
         wall = (
@@ -654,6 +799,9 @@ class SuffixDispatchTests(unittest.TestCase):
         self.assertIn("/IMPVEL/", starter)
         self.assertTrue(any("visualization mesh only" in w
                             for w in result.warnings))
+        # the DISPLAY card is the last one, not an extra card set
+        self.assertFalse(any("further card line(s) follow" in w
+                             for w in result.warnings))
 
     def test_interior_warn_skips_instead_of_inverting_the_physics(self):
         wall = (
@@ -671,8 +819,10 @@ class SuffixDispatchTests(unittest.TestCase):
 
     def test_deform_option_is_not_silently_converted(self):
         # *RIGIDWALL_GEOMETRIC_CYLINDER_DEFORM (R17 manual, absent from the
-        # R10.1 cfg) carries two extra cards k2rad does not parse — it must
-        # land in skipped_keywords, not be read as a plain cylinder.
+        # R10.1 cfg) carries two extra cards BETWEEN the cylinder card and the
+        # MOTION card, so reading it as a plain cylinder would take the motion
+        # data off the wrong line. The keyword-prefix fallback names the
+        # offending option instead of leaving a bare skipped-keyword note.
         wall = (
             "*RIGIDWALL_GEOMETRIC_CYLINDER_DEFORM\n"
             "        30\n"
@@ -683,6 +833,64 @@ class SuffixDispatchTests(unittest.TestCase):
         self.assertNotIn("/RWALL/", starter)
         self.assertIn("RIGIDWALL_GEOMETRIC_CYLINDER_DEFORM",
                       result.skipped_keywords)
+        self.assertTrue(any("DEFORM" in w and "card index" in w
+                            for w in result.warnings))
+
+    def test_interior_on_a_flat_wall_warn_skips(self):
+        # _INTERIOR exists for CYLINDER and SPHERE only (Manual p. 40-4), so
+        # this spelling is not registered and reaches the prefix fallback.
+        result, starter = _convert(_deck(
+            "*RIGIDWALL_GEOMETRIC_FLAT_INTERIOR\n"
+            "        30\n"
+            "       0.0       0.0       0.0       0.0       0.0       1.0\n"
+            "       2.0       0.0       0.0       4.0       3.0\n"))
+        self.assertNotIn("/RWALL/", starter)
+        self.assertIn("RIGIDWALL_GEOMETRIC_FLAT_INTERIOR",
+                      result.skipped_keywords)
+        self.assertTrue(any("not a legal" in w and "_INTERIOR" in w
+                            for w in result.warnings))
+
+    def test_missing_shape_option_warn_skips(self):
+        result, starter = _convert(_deck(
+            "*RIGIDWALL_GEOMETRIC\n"
+            "        30\n"
+            "       0.0       0.0       0.0       0.0       0.0       1.0\n"))
+        self.assertNotIn("/RWALL/", starter)
+        self.assertIn("RIGIDWALL_GEOMETRIC", result.skipped_keywords)
+        self.assertTrue(any("no FLAT/PRISM/CYLINDER/SPHERE shape option" in w
+                            for w in result.warnings))
+
+    def test_extra_card_sets_under_one_keyword_are_not_silently_dropped(self):
+        # "Card Sets. For each rigid wall include one set of the following
+        # data cards. This input ends at the next keyword card" (p. 40-5).
+        wall = (
+            "*RIGIDWALL_GEOMETRIC_SPHERE\n"
+            "        30\n"
+            "       1.0       2.0       3.0       1.0       2.0       4.0\n"
+            "       4.0\n"
+            "        30\n"
+            "      10.0      20.0      30.0      10.0      20.0      40.0\n"
+            "       6.0\n"
+        )
+        result, starter = _convert(_deck(wall))
+        self.assertEqual(len(_blocks(starter, "SPHER")), 1)
+        self.assertTrue(any("further card line(s) follow" in w
+                            for w in result.warnings))
+        self.assertTrue(any("first of several card sets" in reason
+                            for _kw, reason in result.recognized_not_emitted))
+
+    def test_a_lone_display_card_is_not_read_as_an_extra_card_set(self):
+        wall = (
+            "*RIGIDWALL_GEOMETRIC_SPHERE_DISPLAY_ID\n"
+            "       510sphere\n"
+            "        30\n"
+            "       0.0       0.0       0.0       0.0       0.0       1.0\n"
+            "       4.0\n"
+            "         1    1.0e-9    1.0e-4       0.3\n"
+        )
+        result, _starter = _convert(_deck(wall))
+        self.assertFalse(any("further card line(s) follow" in w
+                             for w in result.warnings))
 
 
 class MultiWallAndThTests(unittest.TestCase):
@@ -739,8 +947,18 @@ class MultiWallAndThTests(unittest.TestCase):
         self.assertNotIn("/TH/RWALL/", starter)
 
 
-class PlanarUnchangedTests(unittest.TestCase):
-    """A deck WITHOUT the new keywords must emit byte-identical output."""
+class PlanarLayoutTests(unittest.TestCase):
+    """A fixed infinite *RIGIDWALL_PLANAR uses the SAME cfg card layout.
+
+    The old emission put ``d`` in card-1 columns 41-60 and, for Slide 2, the
+    friction alone on a 20-column card — neither of which exists in
+    RWALL/plane.cfg FORMAT(radioss51). The starter then read card 2 off the
+    XM/YM/ZM line, card 3 off the XM1/YM1/ZM1 line and card 4 off whatever
+    followed, so the wall came back with M = the head point, an INVERTED
+    normal and no secondary nodes, at 0 ERRORS (only WARNING 100213
+    "unsupported field exists at the end of line" and 100217 "card is
+    missing"). Four such ground planes ship in the Toyota Yaris deck.
+    """
 
     WALL = (
         "*RIGIDWALL_PLANAR\n"
@@ -754,27 +972,71 @@ class PlanarUnchangedTests(unittest.TestCase):
         "----7----|----8----|----9----|---10----|\n"
         "/RWALL/PLANE/{rwid}\n"
         "RWALL_{rwid}\n"
-        "#  node_ID     Slide  grnd_ID1  grnd_ID2                   d\n"
-        "         0         0{grnd1:>10}         0                   0\n"
+        "#  node_ID     Slide  grnd_ID1  grnd_ID2\n"
+        "         0         0{grnd1:>10}         0\n"
+        "#           D_search                fric            Diameter"
+        "                ffac       ifq\n"
+        "                   0                   0                   0"
+        "                   0         0\n"
         "#                 XM                  YM                  ZM\n"
         "                   0                   0                  -1\n"
         "#                XM1                 YM1                 ZM1\n"
         "                   0                   0                   1\n"
     )
 
-    def test_plain_planar_block_is_byte_identical(self):
+    def test_fixed_plane_uses_the_cfg_card_layout(self):
         result, starter = _convert(_deck(self.WALL))
         self.assertEqual(result.skipped_keywords, [])
         b = _one(starter, "PLANE")
         rwid = int(b[0].rsplit("/", 1)[1])
         grnd1 = int(b[3][20:30])
         block = starter[starter.index("#-  RIGID WALLS:"):]
+        self.assertEqual(len(b[3]), 40)         # card 1 is exactly 40 columns
+        self.assertEqual(len(b[5]), 90)         # card 2 is the full 90
         self.assertTrue(block.startswith(
             self.EXPECTED.format(rwid=rwid, grnd1=grnd1)))
         # No geometric-path leakage into a planar-only deck.
-        self.assertNotIn("D_search", starter)
         self.assertNotIn("/RWALL/CYL/", starter)
         self.assertNotIn("/RWALL/SPHER/", starter)
+
+    def test_friction_goes_in_the_card_2_column_not_on_its_own_card(self):
+        wall = self.WALL.replace(
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n",
+            "       0.0       0.0      -1.0       0.0       0.0       1.0      0.25\n")
+        _result, starter = _convert(_deck(wall))
+        b = _one(starter, "PLANE")
+        self.assertEqual(b[3][10:20], "         2")         # Slide 2
+        self.assertEqual(b[5][20:40], "                0.25")
+        self.assertNotIn("#               fric", starter)
+
+    def test_id_header_recovers_a_fused_id_and_the_verbatim_heading(self):
+        # Both rigidwall cfgs write the header as CARD("%10d%-70s", _ID_,
+        # TITLE), so an unpadded heading is FUSED to the id: the free split
+        # reads "901my" — not an integer — and the wall used to lose BOTH its
+        # user id (falling back to an auto id) and the first word of its name.
+        wall = (
+            "*RIGIDWALL_PLANAR_ID\n"
+            "       901my   spaced    wall\n"
+            "        30         0         0\n"
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+        )
+        _result, starter = _convert(_deck(wall))
+        b = _one(starter, "PLANE")
+        self.assertEqual(b[0], "/RWALL/PLANE/901")
+        self.assertEqual(b[1], "my   spaced    wall")
+
+    def test_a_deck_whose_only_wall_is_dropped_has_no_rwall_section(self):
+        # A degenerate cylinder axis is refused (starter ERROR 167), so the
+        # section header must not be left behind with nothing under it.
+        result, starter = _convert(_deck(
+            "*RIGIDWALL_GEOMETRIC_CYLINDER\n"
+            "        30\n"
+            "       0.0       0.0       0.0       0.0       0.0       0.0\n"
+            "       2.5       0.0\n"))
+        self.assertNotIn("/RWALL/", starter)
+        self.assertNotIn("#-  RIGID WALLS:", starter)
+        self.assertTrue(any("cylinder axis is degenerate" in w
+                            for w in result.warnings))
 
     def test_deck_without_any_rigidwall_has_no_rwall_section(self):
         _result, starter = _convert(_deck(""))

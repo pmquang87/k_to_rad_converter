@@ -68,10 +68,16 @@ class _AssemblyBase(unittest.TestCase):
         return path
 
     def _state(self, main_path) -> ConversionState:
+        return self._state_and_blocks(main_path)[0]
+
+    def _state_and_blocks(self, main_path):
+        """(state, blocks) — blocks for assertions on fields no handler reads
+        (the offsetting is a ``b.raw`` rewrite, so it has to be read there)."""
         state = ConversionState()
-        for block in parse_k_file(main_path):
+        blocks = list(parse_k_file(main_path))
+        for block in blocks:
             dispatch(block, state)
-        return state
+        return state, blocks
 
     def _main_with_transform(self, d, option_cards, tranid=1,
                              child="child.k"):
@@ -992,7 +998,7 @@ class GeometricRigidwallTransformTests(_AssemblyBase):
             "", "", "",
             "*END",
         ]) + "\n")
-        st = self._state(main)
+        st, blocks = self._state_and_blocks(main)
         rw = st.rigid_walls_geometric[0]
         self.assertEqual(rw.rwid, 1007)                 # _ID header + IDPOFF
         self.assertEqual(rw.nsid, 211)
@@ -1000,6 +1006,70 @@ class GeometricRigidwallTransformTests(_AssemblyBase):
         self.assertEqual(rw.boxid, 53)
         self.assertEqual(rw.lcid, 3099)                 # past the NSEGS cards
         self.assertAlmostEqual(rw.vx, 1.0)              # not an id
+        # The _DISPLAY PID is a *PART id and follows IDPOFF too. The handler
+        # never reads it (a visualization mesh has no solution effect), so
+        # this has to be asserted on the rewritten raw block.
+        block = next(b for b in blocks
+                     if b.keyword.startswith("RIGIDWALL_GEOMETRIC"))
+        self.assertEqual(int(block.raw[7][:10]), 1021)
+
+    def test_id_option_in_a_non_final_position_still_offsets(self):
+        # "The order of the OPTIONS is arbitrary" (Manual p. 40-4): with _ID
+        # before _MOTION the keyword parser leaves it in the keyword, so the
+        # offset spec has to find it there or it would rewrite Card 1 as the
+        # RWID header (and the wall would keep its original NSID/LCID).
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*RIGIDWALL_GEOMETRIC_SPHERE_ID_MOTION",
+            _row(7) + "sph",
+            _row(11, 12, 13),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            _row(4.0),
+            _row(99, 0, 1.0, 0.0, 0.0),
+            "*END",
+        ]) + "\n")
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k",
+            _row(0, 0, 1000, 0, 200, 3000, 40),
+            "", "", "",
+            "*END",
+        ]) + "\n")
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertEqual(rw.rwid, 1007)
+        self.assertEqual(rw.nsid, 211)
+        self.assertEqual(rw.boxid, 53)
+        self.assertEqual(rw.lcid, 3099)
+
+    def test_blank_edge_head_classification_survives_a_translation(self):
+        # A FLAT wall with a blank card-3 edge head and FINITE lengths: HEV is
+        # a POINT, so the translation moves it. The l direction is taken
+        # TAIL-RELATIVELY, so the same physical wall converts to the same
+        # /RWALL/PARAL whether it is read directly or through the transform.
+        for shift in (0.0, 100.0):
+            with self.subTest(shift=shift):
+                d = self._dir()
+                self._write(d, "child.k", "\n".join([
+                    "*KEYWORD",
+                    "*NODE",
+                    _nline(1, 0.0, 0.0, 0.0),
+                    "*RIGIDWALL_GEOMETRIC_FLAT",
+                    _row(0, 0, 0),
+                    _row(5.0, 0.0, 0.0, 5.0, 0.0, 1.0),
+                    _row(0.0, 0.0, 0.0, 4.0, 3.0),
+                    "*END",
+                ]) + "\n")
+                main = self._main_with_transform(
+                    d, [_opt("TRANSL", 0.0, 0.0, shift)])
+                st = self._state(main)
+                rw = st.rigid_walls_geometric[0]
+                # l̂ = normalize(HEV - tail) = -x̂ either way, so M1 = M - 4x̂.
+                self.assertAlmostEqual(rw.xhev - rw.xt, -5.0)
+                self.assertAlmostEqual(rw.zhev - rw.zt, 0.0)
+                self.assertAlmostEqual(rw.lenl, 4.0)
 
 
 class ReferenceOffsetEdgeTests(_AssemblyBase):

@@ -42,10 +42,11 @@ Prior history (before this changelog was introduced) is summarized in the
   - `_SPHERE` → `/RWALL/SPHER`. `M` = the centre = the tail point,
     `Phi = 2 x RADSPH` (`hm_read_rwall_spher.F:230, 243`). The block is exactly
     five lines: `/RWALL/SPHER` has **no card 4** at all.
-  - `_FLAT` → `/RWALL/PLANE` when `XHEV/YHEV/ZHEV` is blank and `/RWALL/PARAL`
-    otherwise. A blank edge-vector head *is* LS-DYNA's infinite plane (cfg
-    `geometrytype 2`), and `/RWALL/PLANE` with `M` = tail, `M1` = head expresses
-    it exactly — dyna2rad has no branch for it and builds a 1e20 x 1e20 PARAL
+  - `_FLAT` → `/RWALL/PLANE` when the wall is infinite and `/RWALL/PARAL` when
+    it is finite. **`LENL` / `LENM` decide** — "Length of the l/m edge. A zero
+    value defines an infinite size plane" (Manual p. 40-9) — and `/RWALL/PLANE`
+    with `M` = tail, `M1` = head expresses that infinite plane *exactly*, so no
+    warning is due. dyna2rad has no branch for it and builds a 1e20 x 1e20 PARAL
     *quadrant* anchored at the tail, which never catches a node on its -l or -m
     side (and hard-fails `ERROR 168` when the tail is the origin). The finite
     form takes the corner points `M1 = T + LENL*l`, `M2 = T + LENM*m` with `l` =
@@ -54,11 +55,16 @@ Prior history (before this changelog was introduced) is summarized in the
     (`hm_read_rwall_paral.F:245-267`), so the LS-DYNA outward normal is
     preserved exactly. dyna2rad normalizes `HEV - T` raw and leaves `m`
     un-normalized, which shortens every m-edge by `sin(theta)` whenever `HEV` is
-    not exactly perpendicular to the normal. `LENL`/`LENM` = 0 is LS-DYNA's
-    *infinite extent in that direction*, which `/RWALL/PARAL` (strictly finite)
-    cannot express: it falls back to the infinite plane with a warning — the
-    same convention the `*RIGIDWALL_PLANAR_FINITE` path already uses, rather
-    than dyna2rad's `1e20` substitution.
+    not exactly perpendicular to the normal. The l direction is taken
+    **tail-relatively** (`l = HEV - T`, matching the manual's "coordinate of
+    head of edge vector l" and the sibling `*RIGIDWALL_PLANAR_FINITE` path);
+    classifying on the ABSOLUTE `HEV` — what `rigidwall_geometric.cfg:416` does
+    for its HyperMesh `geometrytype` radio button — is not
+    `*INCLUDE_TRANSFORM`-invariant, because a translation moves `HEV` off the
+    global origin and the same physical wall would then convert to a different
+    Radioss wall depending on how the deck is assembled. A degenerate l (HEV on
+    the tail, or projecting onto the normal) still falls back to the infinite
+    plane, with a warning.
   - `_PRISM` → **six** `/RWALL/PARAL` faces. Radioss has no box rigid wall (the
     only `/RWALL` readers are
     `hm_read_rwall_{plane,paral,cyl,spher,lagmul,therm}.F`), so the box
@@ -67,11 +73,16 @@ Prior history (before this changelog was introduced) is summarized in the
     outside it. The five extra walls take fresh `/RWALL` ids (checked against
     every wall in the deck — the starter's `UDOUBLE` pass spans
     PLANE/CYL/SPHER/PARAL together) and share the parent's tracked group,
-    friction and prescribed motion. `LENP = 0` means an infinitely deep prism;
-    the four sides and the bottom would each need a semi-infinite PARAL, so only
-    the top face is emitted, with a warning — dyna2rad applies its `0 -> 1e20`
-    substitution to `LENL`/`LENM` but **not** to `LENP`, so it emits four walls
-    with a zero edge vector, i.e. `ERROR 168` x 4.
+    friction and prescribed motion. Every box EDGE is covered by two faces and
+    every CORNER by three, so the starter reports the decomposition as
+    `WARNING ID 312` (INCOMPATIBLE KINEMATIC CONDITIONS ... BETWEEN SEVERAL
+    RIGID WALLS) — expected, not a deck error, and the converter now says so
+    unconditionally rather than only when `*DATABASE_RWFORC` is present.
+    `LENP = 0` means an infinitely deep prism; the four sides and the bottom
+    would each need a semi-infinite PARAL, so only the top face is emitted, with
+    a warning — dyna2rad applies its `0 -> 1e20` substitution to `LENL`/`LENM`
+    but **not** to `LENP`, so it emits four walls with a zero edge vector, i.e.
+    `ERROR 168` x 4.
   - `_MOTION` → the moving `/RWALL` form. Each face gets a synthesized carrier
     node at that face's own base point `M` (a moving wall has **no** `XM/YM/ZM`
     card — `M` is the node's position, `hm_read_rwall_cyl.F:199-230`), and one
@@ -88,9 +99,14 @@ Prior history (before this changelog was introduced) is summarized in the
     and degraded to a FIXED wall instead: `LCID = 0` (dyna2rad leaves a
     massless, unconstrained free-floating wall), a `LCID` that is not in the
     deck, and all-zero direction cosines (dyna2rad's `Dir="X"` then silently
-    means global +X).
+    means global +X). The wall's own `Mass` field stays 0, matching the LS-DYNA
+    card, and that makes the motion **purely kinematic**: `rgwal0.F:417-423`
+    scales the wall reaction by `MS(MSR)/(MS(MSR)+Sum(m_secondary))`, which is 0
+    here, so contact can never accelerate or laterally drift the carrier node —
+    unlike a `*RIGIDWALL_PLANAR_MOVING` wall, which carries a real mass and does
+    get that drift caveat.
   - `_DISPLAY`'s `PID/RO/E/PR` card describes a visualization mesh with no
-    solution effect (Manual p. 3669) — parsed away so the card cursor stays
+    solution effect (Manual p. 40-13) — parsed away so the card cursor stays
     correct, and warned. `_INTERIOR` (`CYLINDER`/`SPHERE` only) confines nodes
     *inside* the form, but `/RWALL/CYL` and `/RWALL/SPHER` test `DP <= RA2` and
     push nodes **outward** (`rgwalc.F:132-133`, `rgwals.F:126-127`) with no
@@ -99,15 +115,21 @@ Prior history (before this changelog was introduced) is summarized in the
   - Secondary-node selection matches the planar path and dyna2rad's decision
     table: `NSID` -> `grnd_ID1`; `NSIDEX` -> `grnd_ID2`; `BOXID` alone -> a
     `/GRNOD` of the in-box nodes; `NSID` + `BOXID` -> the box is dropped and
-    `NSID` wins; blank `NSID` = *all nodes*, expressed with the model
-    bounding-box diagonal as the search distance `d` because the 2022 `/RWALL`
-    format has no "all" group id. For CYL/SPHER the starter measures `d` from
-    the wall **surface** and keeps only `DISN >= 0`, so nodes already inside the
-    obstacle are never auto-selected — correct, since an exterior wall cannot
-    resolve an initial penetration.
-  - `FRIC` uses the **planar** table for geometric walls too (`0 -> Slide 0`,
-    `>= 1 -> Slide 1` tied, `0 < f < 1 -> Slide 2` + the coefficient on card 2).
-    dyna2rad's geometric path does `FRIC > 0 -> Slide = 2, fric = FRIC`
+    `NSID` wins; blank `NSID` = *all nodes*, expressed with the search distance
+    `d` because the 2022 `/RWALL` format has no "all" group id. For CYL/SPHER
+    the starter measures `d` from the wall **surface** and keeps only
+    `DISN >= 0`, so nodes already inside the obstacle are never auto-selected —
+    correct, since an exterior wall cannot resolve an initial penetration.
+  - `FRIC` maps by EXACT value, not by threshold. "FRIC could be any positive
+    value. Three special values of FRIC trigger special treatments" (Manual
+    p. 40-20), and the special set differs by family: the geometric card
+    documents only `EQ.0.0` frictionless and `EQ.1.0` no-sliding (p. 40-8),
+    while the planar card adds the WVEL-gated welds `EQ.2.0` / `EQ.3.0`. So
+    `0.0 -> Slide 0`, exactly `1.0 -> Slide 1` (tied), anything else positive
+    `-> Slide 2` with the coefficient on card 2 — a geometric `FRIC = 2.0` is a
+    Coulomb mu of 2.0, and a planar `FRIC = 2.0`/`3.0` degrades to Slide 0 /
+    Slide 1 with a warning naming the lost velocity gate. dyna2rad's geometric
+    path instead does `FRIC > 0 -> Slide = 2, fric = FRIC`
     (`convertrwalls.cxx:234-238`), which turns LS-DYNA's tied `FRIC = 1.0` into
     a Coulomb coefficient of 1.0 — its single highest-impact rigidwall defect.
   - `*DATABASE_RWFORC` -> `/TH/RWALL` covers the new walls through the existing
@@ -115,7 +137,21 @@ Prior history (before this changelog was introduced) is summarized in the
     split across six entries, and that is warned explicitly (sum them before
     comparing against one LS-DYNA `rwforc` record). The `DEF` channels remain a
     time-accumulated **impulse**, as already documented.
-  - `*INCLUDE_TRANSFORM`: all 42 spellings get an id-offset map (`NSID`/`NSIDEX`
+  - Every spelling is generated, including `_ID` in a **non-final** position
+    (`*RIGIDWALL_GEOMETRIC_SPHERE_ID_MOTION`): "the order of the OPTIONS is
+    arbitrary" (Manual p. 40-4) and the cfg locates `_ID` with an unanchored
+    `_FIND`, but the keyword parser only strips a TRAILING `_ID` into
+    `block.options` — so without its own key the RWID header card would be read
+    as Card 1 and the whole wall would vanish. A spelling that is still NOT
+    understood (today: `_DEFORM`, whose Cards 3c.2/3c.3 sit between the cylinder
+    card and the MOTION card) now reaches a keyword-PREFIX fallback that names
+    the offending option and warn-skips, instead of leaving a bare
+    skipped-keyword note.
+  - LS-DYNA allows several **card sets** under one keyword ("for each rigid wall
+    include one set of the following data cards", p. 40-5). k2rad converts the
+    first set only and now says so loudly, in `warnings` and in
+    `recognized_not_emitted`, instead of dropping the extra walls in silence.
+  - `*INCLUDE_TRANSFORM`: every spelling gets an id-offset map (`NSID`/`NSIDEX`
     -> `IDSOFF`, `BOXID` -> `IDDOFF`, the `_MOTION` `LCID` -> `IDFOFF`, the
     `_DISPLAY` `PID` -> `IDPOFF`, the `_ID` header -> `IDPOFF`) whose card index
     walks past the shape card and any `NSEGS` sub-cards, and the TRANID
@@ -123,20 +159,77 @@ Prior history (before this changelog was introduced) is summarized in the
     `_FLAT`/`_PRISM` edge head, and a `_MOTION` card's direction cosines under
     the linear part only. Wall dimensions (`LENL`/`LENM`/`LENP`, `RADCYL`,
     `RADSPH`) are warned, not rescaled, under scale/shear.
-  - Also fixed on the way through: the `_ID` header card is
-    `CARD("%10d%-70s", _ID_, TITLE)` in both rigidwall cfgs, so a canonical
-    unpadded title is *fused* to the id (`"       777my wall"`). The previous
-    free-split read that as the token `777my`, silently costing the wall both
-    its user id and its name; both `*RIGIDWALL_PLANAR` and the new geometric
-    handler now slice the I10 field first and fall back to the free split.
 
-  45 new tests in `tests/test_rwall_geometric.py` (column-exact card lines,
-  hand-computed diameters / corner points / skew axes, all six prism face
-  normals recomputed the way the starter does, suffix-permutation dispatch,
-  multi-wall and `/TH/RWALL` coverage, and a byte-identity guard on the planar
-  emission). There is **no** `*RIGIDWALL_GEOMETRIC` deck anywhere in the
-  reference corpora, so the 73-deck byte-identity sweep proves no regression but
-  exercises no new path — the fixtures are the evidence.
+  New tests in `tests/test_rwall_geometric.py` and
+  `tests/test_include_transform.py` (column-exact card lines, hand-computed
+  diameters / corner points / skew axes, all six prism face normals recomputed
+  the way the starter does, suffix-permutation dispatch, multi-wall and
+  `/TH/RWALL` coverage). There is **no** `*RIGIDWALL_GEOMETRIC` deck anywhere in
+  the reference corpora, so the corpus sweep proves no regression but exercises
+  no new path — the fixtures and the starter/engine runs are the evidence.
+
+### Fixed
+
+- **`*RIGIDWALL_PLANAR` fixed infinite plane used a card layout that does not
+  exist.** The emission put the search distance `d` in card-1 columns 41-60 and,
+  for `Slide = 2`, the friction alone on a 20-column card of its own — neither
+  is in `RWALL/plane.cfg` `FORMAT(radioss51)`, whose card 1 is exactly 4 x I10
+  (40 columns) and whose card 2 is the 90-column `d fric Diameter ffac ifq`. The
+  starter therefore read every following card one line early, at **0 ERRORS**.
+  Measured on the real 2010 Toyota Yaris deck, whose four ground planes
+  (`*RIGIDWALL_PLANAR`, `FRIC = 0.9`, `NSID` given) take the `Slide = 2` flavour:
+  the stray friction card was read as card 2, giving `d = 0.9` and `fric = 0`,
+  and the starter echoed `NUMBER OF NODES . . . 15` and `FRICTION COEFFICIENT
+  0.000` for each — 15 of 1 492 728 nodes, frictionless. After the fix the same
+  four walls echo `NUMBER OF NODES . . . 1492728` and `FRICTION COEFFICIENT
+  0.9000`, and the five `WARNING ID 100213` ("unsupported field exists at the
+  end of line") are gone. Without the friction card (`Slide != 2`) the block is
+  one card SHORT instead, and the reader consumes the following block's header
+  (`WARNING 100217`), leaving a mis-oriented, inert wall. Both families now go
+  through one card writer.
+- **`d` for a wall that tracks ALL nodes was sized from the mesh bounding-box
+  DIAGONAL**, but the starter measures `DISN` from the wall SURFACE
+  (`hm_read_rwall_{plane,paral,cyl,spher}.F`), so a wall parked further away
+  than the mesh is wide tracked nothing and was emitted completely inert — the
+  normal geometry for an impactor cylinder or sphere. `d` is now the maximum of
+  the starter's own `DISN` over the eight model-bbox corners (each `DISN` is
+  convex in X, so a corner attains the maximum), plus a 0.1% margin for the
+  card's 10-significant-digit field. Measured: an elastic hex flying at
+  5000 mm/s into a `RADSPH = 10` sphere 40 mm below it, `NSID = 0` — before,
+  `NUMBER OF NODES . . . 0`, wall impulse exactly 0 and the impactor passed
+  straight through at an unchanged −5000 mm/s; after, contact at
+  t = 8.1901660e-03 s against a hand-computed 8.1889230e-03 s (**+0.015%**), CoM
+  velocity reversing to +2441.88 mm/s, and `|wall impulse| = 1.261844e-02` N*s
+  matching the impactor's `m*dv` to **-0.0000%**. A wall whose outward normal
+  faces away from every node in the model is now warned instead of being
+  silently inert.
+- **Synthesized moving-wall carrier nodes are excluded from other walls'
+  distance search.** They are real `/NODE` entries, and the starter excludes only
+  a wall's OWN main node (`I /= MSR`), so a prism's six faces took each other's
+  corner-mounted carrier nodes as secondary nodes at `DISN = 0` and the rigid-wall
+  constraint fought the `/IMPVEL` driving them. They now go in `grnd_ID2`, which
+  the starter applies AFTER the search. Measured on a moving 4x3x2 prism scoped
+  to a 4-node plate: secondary-node counts per face fell from 8/5/6/3/2/0 (24, of
+  which 20 were carrier nodes) to 4/2/2/2/2/0, and the starter's WARNING 312 lost
+  its `RIGID WALL / IMPOSED ACCELERATION, IMPOSED DISPLACEMENT, IMPOSED VELOCITY`
+  clause entirely (20 -> 8 conditions, the remainder being the expected box-edge
+  overlap between faces). Faces that share a base point now also share one
+  carrier node.
+- **`*RIGIDWALL_GEOMETRIC_*_MOTION` carrier nodes are exempt from the implicit
+  free-node guard.** On a `*CONTROL_IMPLICIT_*` deck they were swept into the
+  `/BCS 111 111` singularity fix-up, which fights the `/IMPVEL`/`/IMPDISP` on the
+  same node; the guard only knew about `*RIGIDWALL_PLANAR_MOVING` nodes.
+  Measured on a `*CONTROL_IMPLICIT_GENERAL` deck with a moving prism: all six
+  carrier nodes 5..10 used to land in `/GRNOD/NODE` `free_reference_nodes` under
+  `/BCS/... 111 111`; now the deck has no FREE-NODE CONSTRAINTS block at all.
+- The `_ID` header card is `CARD("%10d%-70s", _ID_, TITLE)` in both rigidwall
+  cfgs, so a canonical unpadded title is *fused* to the id
+  (`"       777my wall"`). The previous free split read that as the token
+  `777my`, silently costing the wall both its user id and its name; both
+  `*RIGIDWALL_PLANAR` and the geometric handler now slice the I10 field first
+  and fall back to the free split. **This shifts `*RIGIDWALL_PLANAR` output on
+  decks with a fused `_ID` header** (no corpus deck has that shape — they are
+  all zero-padded with a blank title, which both readings agree on).
 
 - **Eroding / node-to-surface contact + `*DEFINE_FRICTION` batch**
   (`*CONTACT_ERODING_SINGLE_SURFACE`, `*CONTACT_ERODING_SURFACE_TO_SURFACE`,

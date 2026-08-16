@@ -267,8 +267,15 @@ class OrthoWallTests(unittest.TestCase):
                             for w in result.warnings))
 
 
-class PlainWallUnchangedTests(unittest.TestCase):
-    """The fixed infinite wall must keep the historical emission exactly."""
+class PlainWallLayoutTests(unittest.TestCase):
+    """The fixed infinite wall uses the cfg FORMAT(radioss51) card layout.
+
+    Same 40-column card 1 + 90-column card 2 as every other /RWALL k2rad
+    writes (RWALL/plane.cfg). The old emission appended ``d`` to card 1 and
+    put a Slide-2 friction on a card of its own; the starter then read every
+    following card one line early and the wall came back mis-oriented and
+    inert with 0 ERRORS.
+    """
 
     WALL = (
         "*RIGIDWALL_PLANAR\n"
@@ -276,31 +283,71 @@ class PlainWallUnchangedTests(unittest.TestCase):
         "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
     )
 
-    def test_plain_planar_output_unchanged(self):
+    def test_plain_planar_uses_the_cfg_layout(self):
         result, starter = _convert(_deck(self.WALL))
         self.assertNotIn("RIGIDWALL_PLANAR", result.skipped_keywords)
         lines = _rwall_block(starter, "PLANE")
         self.assertEqual(
-            lines[1],
-            "#  node_ID     Slide  grnd_ID1  grnd_ID2                   d")
+            lines[1], "#  node_ID     Slide  grnd_ID1  grnd_ID2")
         card1 = lines[2]
+        self.assertEqual(len(card1), 40)                # exactly 4 x I10
         self.assertEqual(card1[0:10], "         0")     # node_ID = 0
         self.assertEqual(card1[10:20], "         0")    # Slide = 0
         self.assertNotEqual(card1[20:30].strip(), "0")  # grnd_ID1 emitted
-        self.assertEqual(card1[40:60].strip(), "0")     # d on card 1
         self.assertEqual(
             lines[3],
-            "#                 XM                  YM                  ZM")
-        self.assertEqual([float(t) for t in lines[4].split()],
-                         [0.0, 0.0, -1.0])
+            "#           D_search                fric            Diameter"
+            "                ffac       ifq")
+        self.assertEqual(len(lines[4]), 90)             # 20/20/20/20/10
+        self.assertEqual(lines[4][0:20].strip(), "0")   # d = 0 (group given)
         self.assertEqual(
             lines[5],
-            "#                XM1                 YM1                 ZM1")
+            "#                 XM                  YM                  ZM")
         self.assertEqual([float(t) for t in lines[6].split()],
+                         [0.0, 0.0, -1.0])
+        self.assertEqual(
+            lines[7],
+            "#                XM1                 YM1                 ZM1")
+        self.assertEqual([float(t) for t in lines[8].split()],
                          [0.0, 0.0, 1.0])
-        # No new-format leakage into the fixed-wall emission.
-        self.assertNotIn("D_search", starter)
+        # A fixed wall never carries the moving form's Mass/V0 card.
         self.assertNotIn("Mass", starter.split("/RWALL/PLANE/")[1])
+
+    def _with_fric(self, fric: str) -> str:
+        return self.WALL.replace(
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n",
+            "       0.0       0.0      -1.0       0.0       0.0       1.0"
+            + fric.rjust(10) + "\n")
+
+    def test_fric_maps_by_exact_value_not_by_threshold(self):
+        # *RIGIDWALL_PLANAR Card 2 (Manual p. 40-20): "Coulomb friction
+        # coefficient except as noted below: EQ.0.0 frictionless sliding;
+        # EQ.1.0 no sliding; EQ.2.0/3.0 node is WELDED after contact ... if
+        # and only if the normal impact velocity exceeds WVEL. In summary,
+        # FRIC could be any positive value." So the table is a set of exact
+        # matches: FRIC = 1.5 is a Coulomb mu of 1.5, not a tie.
+        for fric, slide, coeff in (("0.0", 0, 0.0), ("0.3", 2, 0.3),
+                                   ("1.0", 1, 0.0), ("1.5", 2, 1.5),
+                                   ("4.0", 2, 4.0)):
+            with self.subTest(fric=fric):
+                result, starter = _convert(_deck(self._with_fric(fric)))
+                lines = _rwall_block(starter, "PLANE")
+                self.assertEqual(int(lines[2][10:20]), slide)
+                self.assertEqual(float(lines[4][20:40]), coeff)
+                self.assertFalse([w for w in result.warnings if "FRIC" in w])
+
+    def test_velocity_gated_weld_values_degrade_loudly(self):
+        # FRIC 2.0 = weld above WVEL with frictionless sliding; 3.0 = weld
+        # above WVEL with no sliding. /RWALL has no velocity gate, so take the
+        # closest unconditional mode and say what changed.
+        for fric, slide, phrase in (("2.0", 0, "will rebound"),
+                                    ("3.0", 1, "UNCONDITIONALLY")):
+            with self.subTest(fric=fric):
+                result, starter = _convert(_deck(self._with_fric(fric)))
+                lines = _rwall_block(starter, "PLANE")
+                self.assertEqual(int(lines[2][10:20]), slide)
+                self.assertTrue(any("WVEL" in w and phrase in w
+                                    for w in result.warnings), result.warnings)
 
 
 if __name__ == "__main__":

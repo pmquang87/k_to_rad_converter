@@ -1545,8 +1545,10 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
 `*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
-`FRIC` 0 → sliding, 0<f<1 → Coulomb friction, ≥1 → tied; `NSID=0` tracks all
-nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`,
+`FRIC` 0 → sliding, exactly 1 → tied, 2/3 → the WVEL-gated weld (degraded +
+warned), anything else positive → Coulomb friction; `NSID=0` tracks all
+nodes via a search distance sized from the mesh bounding box;
+`*DATABASE_RWFORC` → `/TH/RWALL`,
 whose `FNX/Y/Z` + `FTX/Y/Z` are a time-accumulated **impulse** — `rgwal0.F:504-509`
 sums the per-cycle nodal impulses, while the engine's `/DT12`-divided true wall
 force goes only to `/ANIM` and the sensors (`rgwal0.F:496-500`), so rwforc
@@ -1568,11 +1570,13 @@ are warned + skipped (their card count is honoured, so the `_MOTION` card is
 still found)
 `*RIGIDWALL_GEOMETRIC_SPHERE` → `/RWALL/SPHER` (`M` = centre = tail,
 `Phi = 2 × RADSPH`; the card has no `XM1` line at all)
-`*RIGIDWALL_GEOMETRIC_FLAT` → `/RWALL/PLANE` when `XHEV/YHEV/ZHEV` is blank
-(that IS LS-DYNA's infinite plane — an exact mapping; dyna2rad instead builds a
-1e20 quadrant that misses half the model), else `/RWALL/PARAL` with
-`M1 = T + LENL·l̂`, `M2 = T + LENM·m̂`, `m̂ = n̂ × l̂` normalized. A zero
-`LENL`/`LENM` is semi-infinite and falls back to the infinite plane + warning
+`*RIGIDWALL_GEOMETRIC_FLAT` → `/RWALL/PLANE` when `LENL` or `LENM` is zero
+("a zero value defines an infinite size plane", Manual p. 40-9 — an exact
+mapping; dyna2rad instead builds a 1e20 quadrant that misses half the model),
+else `/RWALL/PARAL` with `M1 = T + LENL·l̂`, `M2 = T + LENM·m̂`,
+`m̂ = n̂ × l̂` normalized. `l̂` comes from `HEV − T` (tail-relative, so the
+classification is `*INCLUDE_TRANSFORM`-invariant); a degenerate `l̂` falls back
+to the infinite plane + warning
 `*RIGIDWALL_GEOMETRIC_PRISM` → **six** `/RWALL/PARAL` faces with outward
 normals (Radioss has no box rigid wall; the five extra walls get fresh ids and
 share the tracked group, friction and prescribed motion). `LENP = 0` (an
@@ -1587,12 +1591,24 @@ motion-curve field and the imposed motion wins over the wall reaction
 all-zero direction cosines degrade to a FIXED wall + warning rather than to
 dyna2rad's free-floating / silently-global-X wall
 `*RIGIDWALL_GEOMETRIC_*_DISPLAY` — the `PID/RO/E/PR` card is a visualization
-mesh with no solution effect (Manual p. 3669): parsed away and warned.
+mesh with no solution effect (Manual p. 40-13): parsed away and warned.
 `_INTERIOR` (`CYLINDER`/`SPHERE`) warn-**skips** — Radioss always pushes nodes
 outward (`DP <= RA2`) and has no inversion flag, so converting it would invert
-the physics. `FRIC` maps through the same table as the planar wall
-(`0 → Slide 0`, `≥1 → Slide 1` tied, `0<f<1 → Slide 2 + fric`), unlike
-dyna2rad's geometric path, which turns a tied `FRIC = 1.0` into `mu = 1.0`
+the physics. `_DEFORM` and any other spelling k2rad cannot parse warn-skip by
+name (their extra cards would shift every card index after them), and several
+card sets under one keyword convert the first only, loudly
+`FRIC` maps by EXACT value, not by threshold ("FRIC could be any positive
+value. Three special values ... trigger special treatments", Manual p. 40-20):
+`0.0 → Slide 0`, exactly `1.0 → Slide 1` (tied), anything else positive
+`→ Slide 2` + the coefficient. The geometric card has no weld values, so a
+geometric `FRIC = 2.0` is a Coulomb `mu = 2.0`; on `*RIGIDWALL_PLANAR` the
+WVEL-gated welds `2.0`/`3.0` degrade to Slide 0 / Slide 1 with a warning.
+dyna2rad's geometric path turns a tied `FRIC = 1.0` into `mu = 1.0` instead
+A wall with `NSID = 0` tracks ALL nodes, which `/RWALL` has no group id for:
+`D_search` is set to the largest `DISN` the starter would measure over the mesh
+bounding box (a bbox *diagonal* is not an upper bound — an impactor parked
+further away than the mesh is wide would track nothing and be silently inert),
+and synthesized moving-wall carrier nodes are excluded via `grnd_ID2`
 
 ### Loads
 `*LOAD_RIGID_BODY` → `/CLOAD` on rigid body master node

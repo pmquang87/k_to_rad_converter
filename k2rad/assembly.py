@@ -1086,8 +1086,12 @@ def _off_rigidwall_geometric(b: Block, offsets: Dict[str, int], warn) -> None:
     *PART id, offset with IDPOFF.
     """
     raw = b.raw
-    start = _title_offset(b)
-    if start and "ID" in b.options and raw:
+    # "The order of the OPTIONS is arbitrary" (Manual p. 40-4), so _ID may sit
+    # in a non-final position, where the keyword parser leaves it in the
+    # keyword instead of in block.options (mirrors handlers._rwall_has_id).
+    has_id = "ID" in b.options or "_ID_" in f"_{b.keyword}_"
+    start = 1 if has_id else _title_offset(b)
+    if has_id and raw:
         new = _rewrite_id_header(raw[0], offsets.get("p", 0))
         if new is not None:
             raw[0] = new
@@ -1947,9 +1951,9 @@ for _o1 in ("", "_OFFSET"):
 del _o1, _o2, _o3, _o4
 
 #: Family prefix → rewriter for the *ELEMENT_ spellings the table does not list
-#: (mirrors handlers._ELEMENT_PREFIX_HANDLERS). Without it every unrecognized
-#: *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its original
-#: node/part ids while the rest of the include was offset — dangling
+#: (mirrors the *ELEMENT_ rows of handlers._PREFIX_HANDLERS). Without it every
+#: unrecognized *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its
+#: original node/part ids while the rest of the include was offset — dangling
 #: connectivity, which is worse than the warning it would have produced.
 _ELEMENT_PREFIX_SPECS = (
     ("ELEMENT_SHELL", _off_element_shell),
@@ -2366,7 +2370,7 @@ def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
         if not (planar or geom):
             continue
         label = f"*INCLUDE_TRANSFORM {p.filename}: *{b.keyword}"
-        gi = _title_offset(b) + 1
+        gi = (1 if "_ID_" in f"_{b.keyword}_" else _title_offset(b)) + 1
         new = (_rewrite_point_fields(b.raw[gi], aff, [0, 3])
                if gi < len(b.raw) and b.raw[gi].strip() else None)
         if new is None:

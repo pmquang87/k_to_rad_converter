@@ -2231,6 +2231,11 @@ class RigidWallGeomFace:
     is the base point (unused when ``node_id`` > 0 — the carrier node's
     coordinates ARE M then); ``m1``/``m2`` are the absolute card-4/card-5
     points (``m2`` only for PARAL, ``m1`` None for SPHER).
+
+    Also the emission record for a *RIGIDWALL_PLANAR wall, so both families
+    go through one card writer (``_emit_rwall_geom_face``): ``mass``/``v0``
+    fill the moving form's "Mass VX0 VY0 VZ0" card, which a _MOVING planar
+    wall uses and a geometric _MOTION wall leaves at zero.
     """
     rwid: int
     title: str
@@ -2240,6 +2245,8 @@ class RigidWallGeomFace:
     m2: Optional[Tuple[float, float, float]] = None
     diameter: float = 0.0
     node_id: int = 0            # synthesized carrier node (_MOTION walls)
+    mass: float = 0.0                                   # moving form only
+    v0: Tuple[float, float, float] = (0.0, 0.0, 0.0)    # moving form only
 
 
 @dataclass

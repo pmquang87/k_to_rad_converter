@@ -381,8 +381,9 @@ Cases that convert today but drop or approximate detail worth recovering:
   the _MOTION route through /IMPVEL|/IMPDISP on a synthesized /SKEW/FIX; see
   CHANGELOG). What genuinely has no /RWALL counterpart and is now warned rather
   than silently dropped: a finite `LENCYL`, `NSEGS` per-segment force output,
-  `_INTERIOR` (inverted sidedness — warn-skipped), `_DEFORM`, and semi-infinite
-  `LENL`/`LENM`/`LENP` extents.
+  `_INTERIOR` (inverted sidedness — warn-skipped), `_DEFORM` (warn-skipped by
+  name), an infinite `LENP`, and several card sets under one keyword (the first
+  is converted).
 - **CNRB per-node DOF releases** *(remaining)* — nodal rigid bodies are tied in
   all DOFs; the per-node `DRFLAG`/`RRFLAG` release codes are not honoured
   (Radioss `/RBODY` has no direct partial-release construct).
