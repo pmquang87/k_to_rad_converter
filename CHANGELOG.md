@@ -270,6 +270,30 @@ Prior history (before this changelog was introduced) is summarized in the
     that the axial DOF is still right but the shear/bending pair may be rotated
     about it.
 
+  **Starter-validated, and two decisions the starter made for us.** A deck
+  exercising every new path at once (S03/S05/S06/S08 springs, a `DRO=1`
+  torsional spring, MAT_066 on `SCOOR=2`, MAT_119 on a `CID`, a MAT_071 cable,
+  plus a real shell part) converts and runs `starter_win64` to **0 ERROR(S)**.
+  Two of its warnings were k2rad's own and are now fixed:
+
+  - `WARNING 506` "STIFFNESS VALUE IS NOT CONSISTENT WITH THE MAXIMUM SLOPE OF
+    THE YIELD FUNCTION — THE STIFFNESS VALUE IS CHANGED" on the S06 spring.
+    Under `H=6` `K1` IS the unloading stiffness, and the starter refuses to let
+    it be smaller than the loading curve's steepest segment: it raises it
+    silently, i.e. the hysteresis loop the deck runs was being chosen
+    downstream. `K1` now comes from that same maximum slope. `*MAT_S04` keeps
+    its slope-at-the-origin `K` (with `H=0`, `K` only feeds the time step — and
+    changing it would move the Yaris/Camry canaries), and `*MAT_S08` keeps `KU`,
+    because the starter applying its own rule to it reproduces LS-DYNA's
+    `max(KU, max loading slope)` exactly.
+  - `WARNING 432` "INERTIA OF SPRING SEEMS TO BE MASS AND LENGTH INCONSISTENT
+    (REFERENCE INERTIA = MASS·LENGTH²)" on the torsional connector, which used a
+    fixed `1e-6` token inertia. It now uses `mass·L²` from the elements' own
+    geometry — the starter's own reference. An inertia that came from a
+    `*SECTION_BEAM` `INER` is left alone: that is the deck's number, not one
+    k2rad invents, and the same warning on it is then correct feedback about the
+    deck.
+
   **Corpus census + sweep.** A structured scan of the 628 unique
   `.k`/`.key`/`.dyn`/`.inc` files across the repo, `E:\openradioss_run` (incl.
   `Ryan_Lee_Examples` and `ls-dyna_example`) and `E:\foxcore_data` finds **zero**
