@@ -205,8 +205,27 @@ Prior history (before this changelog was introduced) is summarized in the
   TYPE19), each with `FS=-2` against a two-pair `*DEFINE_FRICTION`: starter
   **0 ERROR(S)** on all three, each echoing `INTERFACE FRICTION MODEL. 5` — the
   binding really is read on TYPE11 and TYPE19, which is what the old "no
-  fric_ID column" claim denied. TYPE11 and TYPE19 additionally raise the
-  informational `WARNING 1595` described above; TYPE7 raises none.
+  fric_ID column" claim denied — and engine **NORMAL TERMINATION** (19 185 and
+  21 576 cycles). TYPE11 and TYPE19 additionally raise the informational
+  `WARNING 1595` described above; TYPE7 raises none.
+
+  Converting the same deck with the pre-fix package gives the control: zero
+  `fric_ID` occurrences, i.e. the frictionless interface the old code produced,
+  with the `/FRICTION` column fix and the `fric_ID` card as the only deltas.
+  Running both, the TYPE19 pair diverges as it should — the prescribed motion
+  now works against friction:
+
+  | TYPE19 | cycles | I-ENERGY | EXT-WORK |
+  |---|---|---|---|
+  | no binding (old) | 21 502 | 100.1 | 192.5 |
+  | table bound (new) | 21 575 | **159.0** | **715.2** |
+
+  External work **3.7×**, internal energy **+59 %** — the friction the old code
+  silently discarded, doing real work. The TYPE11 pair came out
+  energy-identical: that rig is a slab-on-plates geometry built for surface
+  contact, so its edge-to-edge interface carries no sustained sliding load and
+  friction has nothing to act on. A rig limitation, not a binding one — the
+  starter echo shows the table is read either way.
 
   **Solver validation.** A synthetic deck exercising all three eroding variants
   plus a bound `/FRICTION` runs the starter at **0 ERROR(S)** (2 warnings, both
