@@ -95,10 +95,20 @@ shipped, so the marginal cost is small.
   is correct. Validate on a single-weld coupon. Original note: — needs new
   `/MAT/LAW59` + `/PROP/TYPE13` machinery and single-weld pull/shear validation.
 - `*ELEMENT_DISCRETE` + `*MAT_SPRING_*` / `*MAT_DAMPER_*` -> /PROP/TYPE4 —
-  **done** (S01/S04/D01; grounded springs; oriented/torsional warn+skip).
-  Original note: — reuses the grounding-spring `/SPRING` template, but the
-  `/PROP/TYPE4` card layout and the orientation/torsional (`VID`, `DRO=1`) cases
-  need pinning before shipping.
+  **done** (S01/S03/S04/S05/S06/S08/D01; grounded springs; `VID`-oriented →
+  `/PROP/TYPE8`; `DRO=1` torsional → DOF 4 of a `/PROP/TYPE13` or `/PROP/TYPE8`;
+  only `IOP=1/3` orientations stay warn+skip). Original note: — reuses the
+  grounding-spring `/SPRING` template, but the `/PROP/TYPE4` card layout and the
+  orientation/torsional (`VID`, `DRO=1`) cases need pinning before shipping.
+- Discrete spring/damper + discrete-beam materials (P1): `*MAT_S03/S05/S06/S08`
+  on `*SECTION_DISCRETE`, and `*MAT_066/067/068/071/074/119/121/196` on a
+  `*SECTION_BEAM` `ELFORM=6` → 6-DOF `/PROP/TYPE8` (skew oriented) or
+  `/PROP/TYPE13` (node oriented) `/SPRING` connectors — **done**. k2rad emits
+  the PROPERTY-driven twin of dyna2rad's `/MAT/LAW108`//`LAW113` + `/PROP/TYPE23`
+  pair: identical card bodies and identical frame builders, no `MID`-on-TYPE23
+  rule to satisfy. `*MAT_069/070/093/094/095/097/146` have no Radioss spring law
+  and warn-drop to an inert connector naming what is lost. See CHANGELOG for the
+  dyna2rad defects reproduced vs. corrected.
 - Foams: `MAT_63` → LAW50, `MAT_57` → LAW38, `MAT_83` → LAW70,
   `MAT_26` → LAW28 — **done**.
 - Johnson-Cook metals (P1): `*MAT_JOHNSON_COOK` (15) → `/MAT/LAW2`
