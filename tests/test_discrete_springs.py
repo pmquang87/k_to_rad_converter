@@ -1000,6 +1000,79 @@ class SpringEidCollisionTests(unittest.TestCase):
                             for w in result.warnings))
 
 
+class IncludeTransformOffsetTests(unittest.TestCase):
+    """*INCLUDE_TRANSFORM must move the MID (IDMOFF) and every curve reference
+    (IDFOFF) of the new materials, and the *SECTION_BEAM card-2f CID (IDDOFF).
+    A keyword with no offset spec keeps its ids and is only warned about."""
+
+    def _state(self, child: str, offsets: str) -> ConversionState:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "child.k"), "w") as fh:
+            fh.write("*KEYWORD\n" + child + "*END\n")
+        main = os.path.join(tmp.name, "main.k")
+        with open(main, "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n" + offsets
+                     + "\n*END\n")
+        state = ConversionState()
+        for block in parse_k_file(main):
+            dispatch(block, state)
+        return state
+
+    # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF ; then IDROFF
+    OFFS = ("      1000      2000      3000      4000      5000      6000"
+            "      7000\n      8000\n")
+
+    def test_material_ids_and_curve_ids_move(self):
+        st = self._state(
+            "*MAT_SPRING_GENERAL_NONLINEAR\n"
+            "         9        50        51\n"
+            "*MAT_SPRING_INELASTIC\n"
+            "         8        50     800.0\n"
+            "*MAT_DAMPER_NONLINEAR_VISCOUS\n"
+            "         7        50\n", self.OFFS)
+        self.assertIn(4009, st.mat_spring_general_nl)
+        self.assertEqual((st.mat_spring_general_nl[4009].lcdl,
+                          st.mat_spring_general_nl[4009].lcdu), (6050, 6051))
+        self.assertEqual(st.mat_spring_inelastic[4008].lcfd, 6050)
+        self.assertEqual(st.mat_damper_nl_viscous[4007].lcdr, 6050)
+
+    def test_discrete_beam_curve_runs_move(self):
+        st = self._state(
+            "*MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM\n"
+            "         9    7.8E-9        51        52         0         0"
+            "         0         0\n"
+            "        50         0         0         0         0         0\n",
+            self.OFFS)
+        m = st.mat_dbeam_nl_elastic[4009]
+        self.assertEqual(m.lcid[:2], [6051, 6052])
+        self.assertEqual(m.lcid_damp[0], 6050)
+
+    def test_mat196_pair_walker_moves_only_the_curve_card(self):
+        st = self._state(
+            "*MAT_GENERAL_SPRING_DISCRETE_BEAM\n"
+            "         9    7.8E-9\n"
+            "         1         0    1000.0      12.0       3.0       4.0\n"
+            "        50         0       0.5       0.6       0.7        51\n",
+            self.OFFS)
+        m = st.mat_general_spring_dbeam[4009]
+        # DOF number and TYPE are NOT ids and must stay put.
+        self.assertEqual(m.dofs[0][0], 1)
+        self.assertEqual(m.dofs[0][1], 0)
+        self.assertEqual(m.dofs[0][6], 6050)     # FLCID
+        self.assertEqual(m.dofs[0][11], 6051)    # GLCID
+
+    def test_section_beam_card2f_cid_moves(self):
+        st = self._state(
+            "*SECTION_BEAM\n"
+            "         3         6       0.0       0.0       0.0       2.0\n"
+            "     100.0       5.0        77      12.0\n", self.OFFS)
+        sec = st.sec_beams[8003]                 # SECID under IDROFF
+        self.assertEqual(sec.cid, 7077)          # CID under IDDOFF
+        self.assertEqual(sec.vol, 100.0)         # geometry untouched
+        self.assertEqual(sec.ca, 12.0)
+
+
 class ByteIdentityTests(unittest.TestCase):
     """A deck with none of the batch's keywords must convert exactly as before
     — the whole corpus sweep rests on that."""
