@@ -599,7 +599,8 @@ class Mat068Tests(unittest.TestCase):
 class Mat071CableTests(unittest.TestCase):
     def _deck(self, mat_card: str, ca: str = "      12.0"):
         return _dbeam_deck(
-            mat_card, card2="     100.0       5.0         0" + ca + "\n")
+            mat_card, card2="     100.0       5.0         0" + ca + "\n",
+            extra=CURVE_50 + CURVE_51)
 
     def test_positive_e_gives_k_equal_e_times_ca_and_ileng_one(self):
         _, starter = _convert(self._deck(
@@ -647,6 +648,26 @@ class Mat071CableTests(unittest.TestCase):
         self.assertEqual(_funct_points(starter, fid),
                          [(-1.0, 0.0), (0.0, 0.0), (1.0, 5000.0)])
         self.assertTrue(any("TMAXF0" in w for w in result.warnings))
+
+    def test_user_curve_is_clamped_where_it_would_push(self):
+        """A cable cannot push: LS-DYNA computes F = max(curve, 0). Curve 51
+        is (-1,-400) (0,0) (1,400), so the compression half must be flattened
+        (there is no zero crossing to insert — it already passes through 0)."""
+        result, starter = _convert(self._deck(
+            "*MAT_CABLE_DISCRETE_BEAM\n"
+            "         9    7.8E-9   -5000.0        51\n"))
+        fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
+        self.assertNotEqual(fid, 51)          # a clamped COPY, not the original
+        self.assertEqual(_funct_points(starter, fid),
+                         [(-1.0, 0.0), (0.0, 0.0), (1.0, 400.0)])
+        self.assertTrue(any("cannot push" in w for w in result.warnings))
+
+    def test_tension_only_user_curve_is_referenced_verbatim(self):
+        _, starter = _convert(self._deck(
+            "*MAT_CABLE_DISCRETE_BEAM\n"
+            "         9    7.8E-9   -5000.0        50\n"))
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE13/")[7][0:10].strip(), "50")
 
     def test_missing_ca_with_positive_e_warns(self):
         result, _ = _convert(self._deck(

@@ -131,7 +131,10 @@ def _clamp_tension_only(pts):
             pa, po = prev
             if (po < 0.0) != (o < 0.0) and o != po:
                 x0 = pa + (a - pa) * (0.0 - po) / (o - po)
-                if out and x0 > out[-1][0]:
+                # Strictly INSIDE the segment: a crossing that lands on either
+                # end point is already there, and a duplicated abscissa makes
+                # the /FUNCT non-monotonic.
+                if out and out[-1][0] < x0 < a:
                     out.append((x0, 0.0))
         out.append((a, max(o, 0.0)))
         prev = (a, o)
@@ -455,12 +458,20 @@ def _build_mat071(state, label, mat, sec, fid_alloc, curves):
     fid = 0
     keep_f0 = mat.f0 != 0.0 and mat.tmaxf0 == 0.0
     if mat.lcid and mat.lcid in curves and len(curves[mat.lcid].pts) >= 2:
-        if keep_f0:
+        user_pts = sorted(curves[mat.lcid].pts)
+        compressive = any(o < 0.0 for _, o in user_pts)
+        if keep_f0 or compressive:
             fid = fid_alloc()
             funct += _emit_funct(
                 fid, f"MAT071_cable_lc{mat.lcid}_mid{mat.mid}",
-                _clamp_tension_only(
-                    _shift_curve(sorted(curves[mat.lcid].pts), mat.f0)))
+                _clamp_tension_only(_shift_curve(user_pts, mat.f0)
+                                    if keep_f0 else user_pts))
+            if compressive:
+                state.warn(
+                    f"{label}: force curve LCID={mat.lcid} carries NEGATIVE "
+                    f"force, but a cable cannot push — LS-DYNA clamps it with "
+                    f"F = max(…, 0). The converted /FUNCT/{fid} is cut at the "
+                    "zero crossing so the cable goes slack instead.")
         else:
             fid = mat.lcid
     else:
