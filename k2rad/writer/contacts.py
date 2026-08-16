@@ -14,6 +14,7 @@ from .common import (
     _f,
     _i,
     _make_master_surface,
+    _ordered_unique_nodes,
     _part_node_sets,
 )
 
@@ -46,8 +47,22 @@ __all__ = [
     "_sst_mst_to_gapmin",
     "_emit_inter_type7",
     "_emit_inter_type25_self",
+    "_emit_inter_type25",
     "_emit_inter_type11",
     "_emit_inter_type19",
+    "_TYPE25_IDEL",
+    "_TYPE25_DEFAULT_VISS",
+    "_FRIC_ID_TYPES",
+    "_bind_friction_table",
+    "_contact_friction",
+    "_type25_viss",
+    "_type25_stfac",
+    "_type25_istf_iedge",
+    "_type25_surface",
+    "_solid_pids_by_part",
+    "_warn_eroding_card4",
+    "_warn_eroding_smp_friction",
+    "_make_type25_interfaces",
     "_segment_set_edges",
     "_general_line_group",
     "_make_general_interfaces",
@@ -179,6 +194,9 @@ def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
         else:
             out |= _contact_master_pids(state, c.ssid, c.sstyp) & all_solid_pids
     for c in state.contacts_surf2surf:
+        out |= _contact_master_pids(state, c.msid, c.mstyp) & all_solid_pids
+    for c in state.contacts_type25:
+        out |= _contact_master_pids(state, c.ssid, c.sstyp) & all_solid_pids
         out |= _contact_master_pids(state, c.msid, c.mstyp) & all_solid_pids
     return out
 
@@ -538,10 +556,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 )
                 self_surf = state.next_id()
                 lines += _emit_surf_part(self_surf, f"contact_{c.inter_id}_self", all_pids)
+                fric, fric_id = _contact_friction(
+                    state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
                 lines += _emit_inter_type25_self(
-                    c.inter_id, c.title, self_surf, c.fs,
+                    c.inter_id, c.title, self_surf, fric,
                     _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0),
-                    _stfac_for(state, c.sfs, c.inter_id) or 1.0)
+                    _stfac_for(state, c.sfs, c.inter_id) or 1.0,
+                    fric_id=fric_id)
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_id()
@@ -562,10 +583,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+            fric, fric_id = _contact_friction(
+                state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                       fric_id=fric_id)
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -594,10 +618,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+            fric, fric_id = _contact_friction(
+                state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                       fric_id=fric_id)
 
     for c in state.contacts_surf2surf:
         diag = {}
@@ -629,10 +656,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                   gapmin_overrides)
         inacti = (5 if c.inter_id in recipe_inacti_ids
                   else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
-        lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+        fric, fric_id = _contact_friction(
+            state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+        lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                   fric_id=fric_id)
 
     for iid, val in sorted(gapmin_overrides.items()):
         state.warn(
@@ -657,21 +687,41 @@ def _select_parent_interface(state: ConversionState) -> Optional[int]:
     existing parent interface. Prefer an all-parts single-surface contact (it
     covers any surface pair); otherwise fall back to the first contact defined.
     Used only when _match_parent_interface finds no surface-compatible parent.
+
+    Every candidate is filtered through ``state.dropped_inter_ids``: a contact
+    whose side resolved to nothing is registered there and NO /INTER was
+    written for it, so parenting on it is a dangling reference — starter
+    ERROR 581 from /INTER/SUB, or WARNING 257 "NONEXISTENT INTER" from the
+    /TH/INTER block that also calls this. All FIVE contact writers — interfaces,
+    general_interfaces, type25_interfaces, tied_interfaces, spotweld_interfaces
+    (writer/assembly.py registry positions 19-23) — run before both call sites
+    (force_transducers 24, starter_th_inter 60), so the set is complete here.
     """
+    def live(c) -> bool:
+        return c.inter_id not in state.dropped_inter_ids
+
     for c in state.contacts_single:
-        if c.ssid == 0:
+        if c.ssid == 0 and live(c):
             return c.inter_id
-    if state.contacts_single:
-        return state.contacts_single[0].inter_id
-    if state.contacts_surf2surf:
-        return state.contacts_surf2surf[0].inter_id
+    for c in state.contacts_single:
+        if live(c):
+            return c.inter_id
+    for c in state.contacts_surf2surf:
+        if live(c):
+            return c.inter_id
+    # /INTER/TYPE25 hosts an /INTER/SUB the same way TYPE7 does, but only when
+    # it actually has a main surface — the ILEV=3 one-way node-to-surface form
+    # (surf_ID1=0) has no secondary SEGMENTS for a sub-interface to sit on.
+    for c in state.contacts_type25:
+        if c.variant != "NODES_TO_SURFACE" and live(c):
+            return c.inter_id
     # A SOFT-routed general contact is also a real interface a transducer can
     # parent on (before the SOFT-routing split, AUTOMATIC_GENERAL lived in
     # contacts_single and was picked up here). /INTER/SUB needs a surface-based
     # parent, so offer only the surface routes (-7 → TYPE7, -19 → TYPE19); a
     # -11 edge/line interface cannot host an /INTER/SUB.
     for c in state.contacts_general:
-        if c.soft in (-7, -19):
+        if c.soft in (-7, -19) and live(c):
             return c.inter_id
     return None
 
@@ -724,8 +774,20 @@ def _match_parent_interface(state: ConversionState, main_pids: Set[int],
         candidates.append((c.inter_id,
                            _contact_master_pids(state, c.msid, c.mstyp),
                            _contact_slave_pids(state, c.ssid, c.sstyp)))
+    for c in state.contacts_type25:
+        if c.variant == "NODES_TO_SURFACE":
+            continue        # ILEV=3 has no secondary segments (see _select_parent_interface)
+        main_sid, main_styp = ((c.ssid, c.sstyp) if c.variant == "SINGLE_SURFACE"
+                               else (c.msid, c.mstyp))
+        candidates.append((c.inter_id,
+                           _contact_master_pids(state, main_sid, main_styp),
+                           _contact_slave_pids(state, c.ssid, c.sstyp)))
 
+    # An interface the writers refused to emit is not in the deck, so it cannot
+    # parent anything — see _select_parent_interface.
     for inter_id, mast, slav in candidates:
+        if inter_id in state.dropped_inter_ids:
+            continue
         if main_pids and not (main_pids <= mast):
             continue
         if sec_pids and slav is not None and not (sec_pids <= slav):
@@ -1055,12 +1117,22 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
                       mast_id: int, fric: float, inacti: int = 0,
                       viss: float = 0.0, visf: float = 0.0,
                       gapmin: float = 0.0, stfac: float = 0.0,
-                      istf: int = 4, igap: int = 0) -> List[str]:
+                      istf: int = 4, igap: int = 0,
+                      fric_id: int = 0) -> List[str]:
     # istf/igap default to the ordinary single-surface/surf2surf values (Istf=4
     # minimum stiffness, Igap=0 constant gap) so those validated paths stay
     # byte-identical. The SOFT=-7 AUTOMATIC_GENERAL route overrides them to
     # Istf=2, Igap=2 to match dyna2rad's routed TYPE7 (convertcontacts.cxx map
     # cc:52 Igap=2, and cc:626 Istf=2 for SOFT<1).
+    #
+    # Card 6 is `%10d%10d%20lg%10d%10d%10d%20lg%10d` at radioss2020 (the FORMAT
+    # /BEGIN 2022 selects — inter_type7.cfg has no newer block): Ifric Ifiltr
+    # Xfreq Iform sens_ID fct_IDF AscaleF **fric_ID**, so the /FRICTION binding
+    # lives in cols 91-100. The three trailing columns are only written when a
+    # table is actually bound, which keeps every fric_ID-free deck byte-identical.
+    fric_card = "         0         0                   0         2         0"
+    if fric_id:
+        fric_card += f"         0{_f(0.0)}{_i(fric_id)}"
     return [
         f"/INTER/TYPE7/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -1074,14 +1146,17 @@ def _emit_inter_type7(inter_id: int, title: str, slav_id: int,
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
         "#      IBC                        Inacti                VisS                VisF              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
-        "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
-        "         0         0                   0         2         0",
+        ("#    Ifric    Ifiltr               Xfreq     Iform   sens_ID   fct_IDF"
+         "             AscaleF   fric_ID" if fric_id else
+         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID"),
+        fric_card,
         HDR,
     ]
 
 
 def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float,
-                            inacti: int = 5, stfac: float = 1.0) -> List[str]:
+                            inacti: int = 5, stfac: float = 1.0,
+                            fric_id: int = 0) -> List[str]:
     """*CONTACT_AUTOMATIC_SINGLE_SURFACE → /INTER/TYPE25 self-contact (explicit).
 
     surf_id is ONE surface (surf_ID1); surf_ID2=0 → self-impact, so every segment
@@ -1091,6 +1166,20 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
     blows through, flying the model apart in explicit dynamics. Params match the
     native TYPE25 echo: Istf=4, Igap=2, Iedge=1000 (no edge), Inacti from ignore,
     Stfac, Coulomb Fric.
+
+    NB there are TWO hand-written /INTER/TYPE25 layouts in this module — this
+    one and :func:`_emit_inter_type25`, which the eroding / node-to-surface
+    families use. They differ deliberately: this one writes the radioss2026
+    card-1 width (100 cols, with the trailing IPSTIF column) and spells the
+    "take the default" values out (Gap_max_s/m = 1e30, Igap0 = 1000,
+    Stmax = 1e30, card-6 header labelled DTSTIF), while _emit_inter_type25
+    writes the radioss2022 width (90) and leaves those fields 0 — which the
+    starter turns back into exactly the same values (2022 Reference Guide
+    p.366; ``hm_read_inter_type25.F:539,565,566``). Behaviourally equivalent at
+    /BEGIN 2022, confirmed by the starter echo (MAXIMUM STIFFNESS 1.0E+30 both
+    ways), but KEEP THEM IN SYNC: a column added to one belongs in the other.
+    They stay separate only because merging them would rewrite the bytes of the
+    solver-validated *CONTACT_AUTOMATIC_SINGLE_SURFACE path for no gain.
     """
     return [
         f"/INTER/TYPE25/{inter_id}",
@@ -1106,7 +1195,98 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
         "#      IBC               IVIS2    Inacti                VISs    Ithick                          Pmax",
         f"       000                   0{_i(inacti)}                0.05         0                             0",
         "#    Ifric    Ifiltr               Xfreq             sens_ID              DTSTIF             fric_ID",
-        "         0         0                   0                   0                   0                   0",
+        f"         0         0                   0                   0                   0{_i(fric_id, 20)}",
+        HDR,
+    ]
+
+
+#: /INTER/TYPE25 Idel. 2 = "when A 4-node shell, 3-node shell or solid element
+#: is deleted, the corresponding segment is removed from the main side"
+#: (radioss2022/INTER/inter_type25.cfg:230-236); 1 is the ALL-quorum variant
+#: (the segment survives until EVERY attached element is gone).
+#:
+#: dyna2rad writes Idel=1 for every TYPE25 — a copy of its per-type default
+#: table (convertcontacts.cxx:47) with no eroding-specific logic at all.
+#:
+#: WHAT ACTUALLY MATTERS on the eroding path is only that Idel be > 0: that is
+#: the flag which ARMS solid erosion (``i25surfi.F:607-625`` sets IPARI(100)=1
+#: on ``IDEL > 0 .AND. SOLID_SEGMENT > 0``). Once it is armed, 1 and 2 are
+#: EQUIVALENT — ``check_surface_state.F:138`` defines
+#:     TYPE_INTER = (ITY==7 .OR. 10 .OR. 22 .OR. 24 .OR.
+#:                   (IPARI(100,NIN)==0 .AND. ITY==25))
+#: so a TYPE25 with erosion armed has TYPE_INTER false, the ``IDEL==2`` branch
+#: at :170 is unreachable, and :155 takes the ``IPARI(100)/=0 .AND. ITY==25``
+#: half regardless of Idel. Do NOT read the two engine branches as an Idel
+#: 1-vs-2 switch on an eroding contact; they are not.
+#:
+#: k2rad still writes 2, for the case where Idel IS observable — a TYPE25 whose
+#: main side carries no solids (IPARI(100)==0, TYPE_INTER true). There 2
+#: reproduces LS-DYNA's per-element segment removal, while 1 keeps the segment
+#: alive until EVERY attached element is gone (the CHECK_ACTIVE_ELEM_EDGE
+#: ALL-quorum). It is also already the k2rad convention on every other penalty
+#: interface (_emit_inter_type7, _emit_inter_type25_self, _emit_inter_type11).
+_TYPE25_IDEL = 2
+
+
+def _emit_inter_type25(inter_id: int, title: str, surf_id1: int, surf_id2: int,
+                       grnod_id: int = 0, istf: int = 2, igap: int = 2,
+                       idel: int = _TYPE25_IDEL, iedge: int = 1000,
+                       gap_scale: float = 1.0, stfac: float = 0.0,
+                       fric: float = 0.0, tstart: float = 0.0,
+                       tstop: float = 0.0, inacti: int = 5,
+                       viss: float = 0.05, fric_id: int = 0) -> List[str]:
+    """/INTER/TYPE25, FORMAT(radioss2022) — the exact card set /BEGIN 2022 reads.
+
+    Column map, verbatim from ``radioss2022/INTER/inter_type25.cfg:503-527``::
+
+      1  %10d%10d%10d%10d%10d%10d%10s%10d%10d
+         surf_ID1 surf_ID2 Istf Ithe Igap Irem_i2 <blank> Idel Iedge
+      2  %10d%10s%20lg%20lg%20lg%20lg
+         grnd_IDs <blank> Gap_scale %mesh_size Gap_max_s Gap_max_m
+      3  %20lg%20lg%10d%10d%20lg      Stmin Stmax Igap0 Ishape Edge_angle
+      4  %20lg%20lg%20lg%20lg%20lg    Stfac Fric Tpressfit Tstart Tstop
+      5  %7s%1d%1d%1d%10s%10d%10d%20lg%10d%10s%20lg
+         <blank7> IBC-X IBC-Y IBC-Z <blank> IVIS2 Inacti VISs Ithick <blank> Pmax
+      6  %10d%10d%20lg%10s%10d%30s%10d
+         Ifric Ifiltr Xfreq <blank> sens_ID <blank30> fric_ID
+
+    Note there is NO Iform and NO VISF column on TYPE25 — friction critical
+    damping is zeroed for NTY 24/25 in the engine regardless
+    (``frictionparts_model.F:108-112``), which is why VIS_f on a bound
+    /FRICTION does not reach this interface either.
+
+    ``surf_ID2 = 0`` makes it self-impact of ``surf_ID1`` (ILEV=1);
+    ``surf_ID1 = 0`` with a ``grnod_id`` makes it a ONE-WAY node-to-surface
+    contact against ``surf_ID2`` (ILEV=3) — ``hm_read_inter_type25.F:399-434``.
+    Gap_max_s/Gap_max_m are written 0, which the starter turns back into 1e30
+    (``:565-566``), and a Tstop of 0 likewise becomes EP30 (``:579``).
+    """
+    return [
+        f"/INTER/TYPE25/{inter_id}",
+        title or f"CONTACT_{inter_id}",
+        "# surf_ID1  surf_ID2      Istf      Ithe      Igap   Irem_i2"
+        "                Idel     Iedge",
+        f"{_i(surf_id1)}{_i(surf_id2)}{_i(istf)}         0{_i(igap)}"
+        f"         0          {_i(idel)}{_i(iedge)}",
+        "# grnd_IDs                     Gap_scale          %mesh_size"
+        "           Gap_max_s           Gap_max_m",
+        f"{_i(grnod_id)}          {_f(gap_scale)}                   0"
+        "                   0                   0",
+        "#              Stmin               Stmax     Igap0    Ishape"
+        "          Edge_angle",
+        "                   0                   0         0         0"
+        "                   0",
+        "#              Stfac                Fric           Tpressfit"
+        "              Tstart               Tstop",
+        f"{_f(stfac)}{_f(fric)}                   0{_f(tstart)}{_f(tstop)}",
+        "#      IBC               IVIS2    Inacti                VISs    Ithick"
+        "                          Pmax",
+        f"       000                   0{_i(inacti)}{_f(viss)}         0"
+        "                             0",
+        "#    Ifric    Ifiltr               Xfreq             sens_ID"
+        "                                 fric_ID",
+        f"         0         0                   0                   0"
+        f"                              {_i(fric_id)}",
         HDR,
     ]
 
@@ -1119,14 +1299,19 @@ def _emit_inter_type25_self(inter_id: int, title: str, surf_id: int, fric: float
 def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
                        fric: float, inacti: int = 6, viss: float = 0.0,
                        visf: float = 0.0, gapmin: float = 0.0,
-                       stfac: float = 0.0) -> List[str]:
+                       stfac: float = 0.0, fric_id: int = 0) -> List[str]:
     """/INTER/TYPE11 edge-to-edge (line) contact (FORMAT radioss2020).
 
     ``line_ids``/``line_idm`` are /LINE group ids (NOT /SURF or /GRNOD). A
     ``line_idm`` of 0 makes the interface self edge-impact of ``line_ids``.
     Matches dyna2rad's routed TYPE11 (Idel=2, Igap=0, Istf=2, Fric=FS).
+
+    A bound /FRICTION table needs one EXTRA card after the IBC card —
+    ``radioss2020/INTER/inter_type11.cfg:409-410`` is 90 blank columns then
+    ``%10d`` — which is written only when ``fric_id`` is set, so every
+    table-free deck stays byte-identical.
     """
-    return [
+    lines = [
         f"/INTER/TYPE11/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "# line_IDs  line_IDm      Istf      Ithe      Igap                            Idel",
@@ -1137,14 +1322,20 @@ def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
         "#      IBC                        Inacti                VIS_S               VIS_F              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
-        HDR,
     ]
+    if fric_id:
+        lines += [
+            "#" + " " * 92 + "fric_ID",
+            " " * 90 + _i(fric_id),
+        ]
+    lines.append(HDR)
+    return lines
 
 
 def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
                        fric: float, inacti: int = 6, viss: float = 0.0,
                        visf: float = 0.0, gapmin: float = 0.0,
-                       stfac: float = 0.0) -> List[str]:
+                       stfac: float = 0.0, fric_id: int = 0) -> List[str]:
     """/INTER/TYPE19 combined surface + edge contact (FORMAT radioss2021).
 
     Both entities are /SURF ids; the starter auto-generates the child TYPE7
@@ -1152,7 +1343,16 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
     low-effort route to edge contact (no hand-built /LINE). ``surf_idm`` may
     equal ``surf_ids`` for self-contact. Iedge=2 = all segment edges.
     Matches dyna2rad's routed TYPE19 (Idel=1, Igap=0, Istf=2).
+
+    A bound /FRICTION table extends the LAST card by 30 blank columns and a
+    ``%10d`` fric_ID (``radioss2021/INTER/inter_type19.cfg:801-802``); the
+    columns are written only when ``fric_id`` is set, so a table-free deck
+    stays byte-identical. The hm_reader carries the binding onto every child
+    interface the TYPE19 expands into (``GlobalModelSdi.cpp:1247/1341/1432``).
     """
+    fric_card = "         0         0                   0         2         0"
+    if fric_id:
+        fric_card += " " * 30 + _i(fric_id)
     return [
         f"/INTER/TYPE19/{inter_id}",
         title or f"CONTACT_{inter_id}",
@@ -1166,8 +1366,10 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
         f"{_f(stfac)}{_f(fric)}{_f(gapmin)}                   0                   0",
         "#      IBC                        Inacti                VISs                VISf              Bumult",
         f"       000{_i(inacti, 30)}{_f(viss)}{_f(visf)}                   0",
-        "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID",
-        "         0         0                   0         2         0",
+        ("#    Ifric    Ifiltr               Xfreq     Iform   sens_ID"
+         "                                 fric_ID" if fric_id else
+         "#    Ifric    Ifiltr               Xfreq     Iform   sens_ID"),
+        fric_card,
         HDR,
     ]
 
@@ -1275,6 +1477,11 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id)
         stfac = _stfac_for(state, c.sfs, c.inter_id)
+        # All three sentinel routes can hold a /FRICTION binding: TYPE7,
+        # TYPE11 and TYPE19 each carry fric_ID in cols 91-100 of their last
+        # card at /BEGIN 2022 — see _FRIC_ID_TYPES for the CFG lines.
+        fric, fric_id = _contact_friction(
+            state, c.fs, c.fd, c.inter_id, "CONTACT_AUTOMATIC_GENERAL", tname)
 
         if c.soft == -7:
             slav = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
@@ -1289,9 +1496,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -7 route), or use SOFT=-11 for an edge "
                     "contact built from a segment set.")
                 continue
-            lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, c.fs,
+            lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                       istf=2, igap=2)
+                                       istf=2, igap=2, fric_id=fric_id)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
                 f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
@@ -1310,8 +1517,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -19 route), or use SOFT=-11 for an "
                     "edge contact built from a segment set.")
                 continue
-            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, c.fs,
-                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, fric,
+                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
+                                        fric_id=fric_id)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-19 -> "
                 f"/INTER/TYPE19 (surface+edge {'self-' if self_contact else ''}"
@@ -1331,8 +1539,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "or at a part / part set carrying shell or solid "
                     "elements.")
                 continue
-            lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, c.fs,
-                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac)
+            lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, fric,
+                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
+                                        fric_id=fric_id)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-11 -> "
                 f"/INTER/TYPE11 edge-to-edge {'self-' if self_contact else ''}"
@@ -1341,6 +1550,632 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                 "/LINE/SURF over the part surface so the starter derives the "
                 "edges) — dyna2rad instead forwards the raw set and lets the "
                 "starter build the edges.")
+    _note_dropped_interfaces(state, dropped)
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *DEFINE_FRICTION binding  (*CONTACT Card-2 FS sentinels → /FRICTION fric_ID)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: LS-DYNA *CONTACT Card-2 FS sentinels (Vol I pp. 11-27 … 11-31).
+_FS_PART_CONTACT = -1.0      # "the *PART_CONTACT coefficients are to be used"
+_FS_DEFINE_FRICTION = -2.0   # "use the one *DEFINE_FRICTION table / the FD id"
+_FS_DEFINE_TABLE = 2.0       # "FD is a *DEFINE_TABLE id: mu(pressure, velocity)"
+
+#: Radioss interface types whose /BEGIN 2022 input FORMAT carries a ``fric_ID``
+#: column, so a /FRICTION table can be bound to them. All four put it in cols
+#: 91-100 of the card named below:
+#:   * TYPE7  — radioss2020/INTER/inter_type7.cfg  card 6 (Ifric…fric_ID)
+#:   * TYPE11 — radioss2020/INTER/inter_type11.cfg:409-410, a card of its OWN
+#:     after the IBC card: ``%10s%10s%10s%10s%20s%20s%10s%10d`` = 90 blank
+#:     columns then fric_ID. Read by ``hm_read_inter_type11.F:185``
+#:     (``HM_GET_INTV('Fric_ID',INTFRIC,…)`` → ``IPARI(72)``, echoed at :584).
+#:   * TYPE19 — radioss2021/INTER/inter_type19.cfg:801-802, appended to the
+#:     Ifric card: ``…%10d%10s%10s%10s%10d`` = sens_ID, 30 blank columns,
+#:     fric_ID. TYPE19 has no starter reader of its own — the hm_reader expands
+#:     it into TYPE7 + symmetric TYPE7 + TYPE11 and carries the binding onto all
+#:     three (``GlobalModelSdi.cpp:929`` reads it, ``:1247``/``:1341``/``:1432``
+#:     re-emit it).
+#:   * TYPE25 — radioss2022/INTER/inter_type25.cfg card 6
+#: TYPE2 and TYPE10 are excluded because they are TIED interfaces with no
+#: friction model at all. The table is not silently lost on those —
+#: _bind_friction_table says so, naming the interface.
+_FRIC_ID_TYPES = ("TYPE7", "TYPE11", "TYPE19", "TYPE25")
+
+
+def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
+                         keyword: str, target: str) -> int:
+    """Resolve *CONTACT ``FS = -2`` to a /FRICTION id, or 0 with a loud warning.
+
+    dyna2rad's rules (``convertcontacts.cxx:341-390``), reproduced:
+      * exactly ONE *DEFINE_FRICTION in the model → it is bound to EVERY
+        FS=-2 interface, whatever the contact pointed at ("same friction to
+        apply to all interfaces in the model");
+      * several → bind the one whose id is in the FD column;
+      * none, or no match → warning (dyna2rad message 200029, "Friction card
+        for contact is not defined, friction is set to 0") and FS = FD = 0.
+
+    One deliberate improvement: dyna2rad reads the table id from
+    ``LSDYNA_FD_DefineFriction``, an attribute the LS-DYNA CFG only fills for
+    the ``_AUTOMATIC_`` node-to-surface spelling
+    (``contact_option_nodes_to_surface.cfg:2506-2548`` gates the FS pre-read on
+    ``ContactOption == 2``). For plain ``*CONTACT_NODES_TO_SURFACE`` and
+    ``*CONTACT_ERODING_NODES_TO_SURFACE`` it stays 0, so with two or more
+    tables in the deck dyna2rad zeroes the friction of a contact whose table
+    exists. k2rad reads the raw FD column itself and does not have that hole.
+    """
+    kw = keyword or "CONTACT"
+    tables = state.define_frictions
+
+    def edge_caveat(fid: int) -> None:
+        """TYPE11 takes the table's per-pair COEFFICIENTS but not its LAW.
+
+        ``inter_dcod_friction.F:80`` accepts a fric_ID on NTYP 7/11/19/21/24/25
+        and resolves it, but ``:101-112`` then warns for NTYP==11 whenever the
+        table's ``FRICMOD > 0`` (k2rad always writes Ifric=2) and copies only
+        ``FRICFORM`` into ``IPARI(30)``. The engine matches: ``i11mainf.F:
+        233-241`` pulls TABCOUPLEPARTS_FRIC / TABCOEF_FRIC and ``i11cor3.F:386``
+        resolves the part pair, but ``i11for3.F`` uses the flat ``FRICC`` only —
+        no ``C5*exp(C6*v)`` term anywhere. So the pair coefficients act and the
+        velocity decay does not. Confirmed on the starter: the echo reads
+        "INTERFACE FRICTION MODEL. 5" AND raises WARNING 1595.
+        """
+        if target not in ("TYPE11", "TYPE19"):
+            return
+        via = ("" if target == "TYPE11" else
+               " — /INTER/TYPE19 is expanded by the reader into a TYPE7 plus a "
+               "TYPE11, and it is the TYPE11 half that is limited; the TYPE7 "
+               "half gets the full law")
+        state.warn(
+            f"*{kw} {inter_id}: /FRICTION/{fid} is bound to /INTER/{target}, "
+            "and the per-part-pair COEFFICIENTS do act, but the Ifric=2 "
+            "Darmstad velocity decay does NOT on an edge (TYPE11) contact"
+            f"{via}. Expect starter WARNING 1595 'THE FRICTION MODEL DEFINED IN "
+            "FRICTION INTERFACE IS NOT COMPATIBLE WITH INTERFACE TYPE 11' — it "
+            "is informational, not an error, and the contact is NOT "
+            "frictionless. Only the DC decay term is lost; mu falls back to the "
+            "pair's FRIC (= LS-DYNA FD).")
+
+    if target not in _FRIC_ID_TYPES:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=-2 asks for a *DEFINE_FRICTION "
+            f"table, but this contact converts to /INTER/{target}, a TIED "
+            "interface with no friction model and so no fric_ID column. The "
+            f"friction table is NOT bound and /INTER/{target} runs "
+            "FRICTIONLESS. Convert this pair with a sliding contact "
+            "(TYPE7/TYPE11/TYPE19/TYPE25 all carry fric_ID) if the friction is "
+            "load-bearing.")
+        return 0
+    if not tables:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=-2 selects a *DEFINE_FRICTION table, "
+            "but the deck defines NONE — friction set to 0 on this interface "
+            "(same as dyna2rad warning 200029). Add the *DEFINE_FRICTION the "
+            "contact refers to, or put an ordinary FS/FD on Card 2.")
+        return 0
+    if len(tables) == 1:
+        fid = next(iter(tables))
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=-2 -> /FRICTION/{fid} bound via "
+            f"fric_ID on /INTER/{target}. The deck has exactly one "
+            "*DEFINE_FRICTION, so it applies to every FS=-2 contact regardless "
+            "of the FD column (LS-DYNA Vol I p.17-279; dyna2rad "
+            "convertcontacts.cxx:350-357). The interface's own Fric/Ifric are "
+            "dead while fric_ID is set (2022 Reference Guide p.268 remark 16).")
+        edge_caveat(fid)
+        return fid
+    want = int(fd)
+    if want in tables:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=-2 with FD={want} -> /FRICTION/{want} "
+            f"bound via fric_ID on /INTER/{target} (the deck has "
+            f"{len(tables)} *DEFINE_FRICTION tables, so FD names the one to "
+            "use). The interface's own Fric/Ifric are dead while fric_ID is "
+            "set.")
+        edge_caveat(want)
+        return want
+    state.warn(
+        f"*{kw} {inter_id}: Card-2 FS=-2 but FD={fd:g} matches none of the "
+        f"{len(tables)} *DEFINE_FRICTION ids in the deck "
+        f"({sorted(tables)}) — friction set to 0 on this interface (dyna2rad "
+        "warning 200029; LS-DYNA itself calls this an error termination, Vol I "
+        "p.17-279). Point FD at the friction table's ID.")
+    return 0
+
+
+def _contact_friction(state: ConversionState, fs: float, fd: float,
+                      inter_id: int, keyword: str, target: str,
+                      fsf: float = 1.0):
+    """(*Fric*, *fric_ID*) for one contact, honouring the FS sentinels.
+
+    ``FS >= 0`` (the ordinary case) is unchanged: scalar Coulomb ``Fric = FS``
+    with ``Ifric = 0``, no binding, no new warning — every deck that converted
+    before still converts byte-for-byte. Only the three sentinel values move.
+    """
+    kw = keyword or "CONTACT"
+    if fs == _FS_DEFINE_FRICTION:
+        return 0.0, _bind_friction_table(state, fd, inter_id, kw, target)
+    if fs == _FS_PART_CONTACT:
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=-1 means 'take the friction "
+            "coefficients from the *PART_CONTACT cards', which k2rad does not "
+            f"convert -> /INTER/{target} Fric=0 (FRICTIONLESS) for this "
+            "interface. Writing FS through literally would put a NEGATIVE "
+            "Coulomb coefficient on the card. Put the real FS/FD on *CONTACT "
+            "Card 2, or collect the per-part values into a *DEFINE_FRICTION "
+            "table and reference it with FS=-2.")
+        return 0.0, 0
+    if fs == _FS_DEFINE_TABLE:
+        tid = int(fd)
+        named = (f"names *DEFINE_TABLE {tid}" if tid > 0
+                 else f"should name a *DEFINE_TABLE in FD, but FD={fd:g}")
+        known = ("" if tid > 0 and tid in getattr(state, "define_tables", {})
+                 else " (that table is not in this deck either — check the "
+                      "*INCLUDE tree, or whether it is a *DEFINE_TABLE_2D/_3D, "
+                      "which k2rad does not parse)")
+        state.warn(
+            f"*{kw} {inter_id}: Card-2 FS=2 is the LS-DYNA sentinel for "
+            f"'FD is a friction TABLE id' — mu(contact pressure, relative "
+            f"velocity), Vol I p.11-28 'FS.EQ.2: Table ID …'. This one {named}"
+            f"{known}. OpenRadioss has no pressure-AND-velocity friction table "
+            "(Ifric=1/2 are polynomial/exponential in p and v only), so "
+            f"/INTER/{target} gets Fric=0 (FRICTIONLESS) and the table is "
+            "DROPPED. Writing FS through literally would put mu=2.0 on the "
+            "card — 4-40x a typical table's 0.05-0.5. Replace the table with a "
+            "*DEFINE_FRICTION (FS/FD/DC) and reference it with FS=-2 to keep "
+            "the velocity dependence. NB: LS-DYNA itself falls back to a "
+            "literal mu=2.0 for SMP non-Mortar AUTOMATIC/FORMING contacts with "
+            "SOFT=0/1 (Vol I p.11-31 remark 1) — if the source run really did "
+            "that, put the 2.0 on Card 2 as FD with FS blank.")
+        return 0.0, 0
+    return fs * fsf, 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: /INTER/TYPE25 interfaces
+#   *CONTACT_ERODING_{SINGLE_SURFACE,SURFACE_TO_SURFACE,NODES_TO_SURFACE}
+#   *CONTACT_{,AUTOMATIC_}NODES_TO_SURFACE
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: /INTER/TYPE25 VISs when the deck gives no VDC. The Radioss CFG default is
+#: 0.05 and dyna2rad leaves it there; k2rad's existing TYPE25 self-contact
+#: emitter writes the same. (LS-DYNA's own VDC default is 0, but a TYPE25 with
+#: zero contact-normal damping rings on impact, which is exactly the load case
+#: an eroding contact is written for.)
+_TYPE25_DEFAULT_VISS = 0.05
+
+#: Iedge = 1000 ("no edge contact") is the Radioss default and what every k2rad
+#: TYPE25 gets, except the dyna2rad SOFT=2 route below.
+_TYPE25_IEDGE_NONE = 1000
+_TYPE25_IEDGE_ALL_SOLID_AND_SHELL = 22
+
+
+def _type25_viss(vdc: float, state: ConversionState, inter_id: int,
+                 keyword: str = "CONTACT") -> float:
+    """LS-DYNA Card-2 VDC (% of critical) → /INTER/TYPE25 VISs, defaulting to
+    the Radioss 0.05 rather than to 0 (see _TYPE25_DEFAULT_VISS)."""
+    if vdc and vdc > 0.0:
+        viss = vdc / 100.0
+        state.warn(f"*{keyword} {inter_id}: Card-2 VDC={vdc:g} (% critical) -> "
+                   f"/INTER/TYPE25 VISs={viss:g} (normal contact damping).")
+        return viss
+    return _TYPE25_DEFAULT_VISS
+
+
+def _type25_stfac(state: ConversionState, c) -> float:
+    """/INTER/TYPE25 Stfac = min(SFS, SFM) with LS-DYNA's blank→1.0 defaulting,
+    which is dyna2rad's rule for this family (``convertcontacts.cxx:459-464``,
+    ``stfac = min(lsdSFS, lsdSFM)`` after ``:410-414`` resets 0 to 1).
+    ``--soften-stfac``, when given, overrides it as everywhere else."""
+    if state.options.soften_stfac is not None:
+        return state.options.soften_stfac
+    sfs = c.sfs if c.sfs != 0.0 else 1.0
+    sfm = c.sfm if c.sfm != 0.0 else 1.0
+    stfac = min(sfs, sfm)
+    if stfac != 1.0:
+        state.warn(
+            f"*{c.keyword or 'CONTACT'} {c.inter_id}: Card-3 SFS={c.sfs:g}/"
+            f"SFM={c.sfm:g} -> /INTER/TYPE25 Stfac={stfac:g} (dyna2rad's "
+            "min(SFS,SFM); 1.0 is the Radioss default = no scaling).")
+    return stfac
+
+
+def _type25_istf_iedge(state: ConversionState, c):
+    """(Istf, Iedge) for one TYPE25 contact, following dyna2rad's SOFT if-chain.
+
+    dyna2rad splits the families across two branches that treat SOFT
+    differently — an asymmetry that is documented nowhere and is simply how the
+    chain fell out, but it IS the reference behaviour:
+
+      * ``convertcontacts.cxx:583-613`` — ERODING_SURFACE_TO_SURFACE and
+        AUTOMATIC_NODES_TO_SURFACE: ``Istf=2`` by default, ``4`` for SOFT==1,
+        and for SOFT==2 ``Istf=2`` plus ``IPSTIF=1`` and ``Iedge=22``.
+      * ``convertcontacts.cxx:614-628`` — ERODING_SINGLE_SURFACE,
+        ERODING_NODES_TO_SURFACE and plain NODES_TO_SURFACE: the coarse
+        ``Istf = 4 if SOFT>=1 else 2``, never IPSTIF, never Iedge.
+
+    ``IPSTIF`` is not a /BEGIN 2022 column (TYPE25 card 1 ends at Iedge, col
+    90), so a SOFT=2 contact loses the segment-based penalty stiffness and is
+    warned about. Istf: 2 = average of the two sides' stiffness, 4 = minimum
+    (``radioss2026/INTER/inter_type25.cfg:208-216``).
+    """
+    base = (c.keyword or "").replace("_MPP", "")
+    full_soft_rule = ("ERODING_SURFACE_TO_SURFACE" in base
+                      or "AUTOMATIC_NODES_TO_SURFACE" in base)
+    iedge = _TYPE25_IEDGE_NONE
+    if full_soft_rule:
+        if c.soft == 2:
+            istf = 2
+            iedge = _TYPE25_IEDGE_ALL_SOLID_AND_SHELL
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: optional-Card-A SOFT=2 "
+                "(segment-based penalty) -> /INTER/TYPE25 Istf=2 with "
+                f"Iedge={iedge} (secondary and main edges = all external solid "
+                "segments + all shell segments), matching dyna2rad "
+                "convertcontacts.cxx:593-611. Its companion IPSTIF=1 has NO "
+                "column in the /BEGIN 2022 TYPE25 format (card 1 ends at Iedge, "
+                "col 90) and is dropped — the contact uses the ordinary nodal "
+                "penalty stiffness.")
+        else:
+            istf = 4 if c.soft == 1 else 2
+    else:
+        istf = 4 if c.soft >= 1 else 2
+    return istf, iedge
+
+
+def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
+    """``{part id: the largest node count of any solid in it}`` in ONE pass.
+
+    Both facts _type25_surface needs about a part — "does it carry solids at
+    all" and "are any of them quadratic (>8 distinct nodes)" — come out of the
+    same walk. Built per call site rather than per part: the membership test
+    used to be ``any(e.pid == p for e in state.solid_elems)`` evaluated once
+    per pid, which is O(|pids| x |solid_elems|) per contact SIDE and does not
+    short-circuit at all for a part that carries no solids (0.45 s at 200k
+    solids / 40-part side, 1.24 s at 500k). _solid_contact_master_pids already
+    uses the one-pass form.
+    """
+    out: Dict[int, int] = {}
+    for e in state.solid_elems:
+        n = len(_ordered_unique_nodes(list(e.nodes)))
+        if n > out.get(e.pid, 0):
+            out[e.pid] = n
+    return out
+
+
+def _type25_surface(state: ConversionState, c, sid: int, styp: int,
+                    tag: str, out_lines: List[str],
+                    sid_zero_is_all_parts: bool = False) -> int:
+    """Emit one side's /SURF for a TYPE25 contact and return its id (0 = none).
+
+    The whole point of the eroding batch lives here: for an ``*CONTACT_ERODING_*``
+    whose side resolves to SOLID parts, the surface is built with ``/SURF/PART/
+    ALL`` (every face, interior ones included) instead of the ``/SURF/PART/EXT``
+    every other k2rad contact uses. Without it the eroding contact converts to a
+    card that LOOKS right and then fails SILENTLY: the starter arms solid
+    erosion on ``Idel>0`` alone (``i25surfi.F:607-625``, ``IPARI(100)=1``) but
+    the segment list holds no interior faces, so when a brick dies the crater
+    face it exposes has no segment, no stiffness and no friction. dyna2rad has
+    exactly this gap — it builds every contact surface from a bare ``PART``
+    clause with no ``opt_A`` (``convertcontacts.cxx:264-274``).
+
+    SCOPE, measured: this matters when the eroding part supplies the contact
+    SEGMENTS, i.e. when it is a /SURF side. A driven punch ground through a
+    six-layer plate kept live contact in 4 of 6 layers with /ALL (384 bricks
+    eroded, contact impulse 0.2093) and only 1 of 6 with --eroding-surf-ext
+    (303 bricks, 0.1294). But the same plate on the NODE side of a plain
+    non-eroding *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE eroded all 384 anyway
+    (impulse 0.2031): k2rad builds a TYPE7 secondary side as a /GRNOD over
+    EVERY node of the part, interior nodes included, and a node outlives the
+    elements that used to own it. So "only TYPE25 keeps working through
+    erosion" is true of the segment side, not of the node side.
+    """
+    # SURFATYP/SURFBTYP 5 is "include all non-spot-weld parts" on EITHER side
+    # (Vol I p.11-25), so it always expands. A bare id of 0 does NOT: p.11-24
+    # reads "SURFA … EQ.0: Includes all parts IN THE CASE OF SINGLE SURFACE
+    # CONTACT TYPES", and for SURFB "EQ.0: SURFB side is not applicable for
+    # single surface contact types" — there is no all-parts reading of a blank
+    # main side at all. Expanding it anyway (as this did) turns a deck with a
+    # dropped MSID into a plausible-looking global contact that also puts the
+    # secondary part on both sides. `sid_zero_is_all_parts` is therefore passed
+    # true only for the SSID of a SINGLE_SURFACE; every other side falls
+    # through to _contact_master_pids and, if that is empty, to _drop_interface
+    # with its MSID/SSID remedy text.
+    # _contact_master_pids models neither form (it is written for the 0/1/2/3
+    # part forms), so they are resolved here.
+    if styp == 5 or (sid == 0 and sid_zero_is_all_parts):
+        pids = set(state.parts.keys())
+    else:
+        pids = _contact_master_pids(state, sid, styp)
+    if not pids:
+        return 0
+    solid_max_nodes = _solid_pids_by_part(state)
+    solid_pids = {p for p in pids if p in solid_max_nodes}
+    solid_all = False
+    if c.eroding and solid_pids:
+        quad_pids = sorted(p for p in solid_pids if solid_max_nodes[p] > 8)
+        if state.options.eroding_surf_ext:
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: --eroding-surf-ext -> the solid "
+                f"side(s) {sorted(solid_pids)} use /SURF/PART/EXT (external "
+                "skin only), reproducing LS-DYNA SMP's literal IADJ=0. The "
+                "contact then CANNOT re-expose an interior face when a brick "
+                "erodes: only segments already in the list can be woken "
+                "(engine check_surface_state.F:174-203 flips a dormant "
+                "negative-stiffness segment active), and /EXT puts none there. "
+                "Drop the flag for erosion-correct behaviour.")
+        elif quad_pids:
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: solid part(s) {quad_pids} carry "
+                "QUADRATIC elements (TET10/HEX20), so their side uses "
+                "/SURF/PART/EXT, not the eroding-correct /SURF/PART/ALL — the "
+                "2022 Reference Guide p.372 recommends /EXT for quadratic "
+                "solids because only then are the mid-side nodes used in the "
+                "contact treatment. CONSEQUENCE: a face exposed by an eroded "
+                "quadratic solid gets no contact segment. Convert with "
+                "--tet10-to-tet4 if the erosion behaviour matters more than "
+                "the quadratic accuracy.")
+        else:
+            solid_all = True
+            state.warn(
+                f"*{c.keyword} {c.inter_id}: eroding contact on solid part(s) "
+                f"{sorted(solid_pids)} -> /SURF/PART/ALL (every face, INTERIOR "
+                "faces included) instead of the /SURF/PART/EXT k2rad uses "
+                "elsewhere. That is what makes erosion work: the starter puts "
+                "each interior (two-solid) face in the segment list with a "
+                "NEGATIVE stiffness (i25sti3.F:950-951) and the engine flips it "
+                "active the moment one of its two solids dies "
+                "(check_surface_state.F:174-203), which is LS-DYNA's IADJ=1 / "
+                "EROSOP=1 behaviour exactly. Two caveats: the 2022 Reference "
+                "Guide p.372 states '/SURF/PART/ALL is not available with "
+                "TYPE25' — the current OpenRadioss starter implements it and "
+                "has no check that rejects it, but an older binary may not; and "
+                "the segment count grows with the interior mesh, so contact "
+                "sorting costs more. --eroding-surf-ext falls back to /EXT.")
+    surf_id = state.next_id()
+    if not _make_master_surface(state, surf_id, tag, sorted(pids), out_lines,
+                                solid_all=solid_all):
+        return 0
+    return surf_id
+
+
+def _warn_eroding_card4(state: ConversionState, c) -> None:
+    """Report the ERODING Card-4 fields k2rad cannot express.
+
+    dyna2rad parses ISYM/EROSOP/IADJ in the CFG and then discards all three
+    without a word (a grep for ``EROSOP|IADJ|ISYM`` over the whole dyna2rad
+    tree returns zero hits) — including EROSOP, whose entire purpose is to
+    enable eroding contact.
+    """
+    if c.isym == 1:
+        state.warn(
+            f"*{c.keyword} {c.inter_id}: ERODING Card-4 ISYM=1 ('do not "
+            "include faces with normal boundary constraints', i.e. drop "
+            "symmetry-plane faces) has NO /SURF or /INTER equivalent and is "
+            "DROPPED — the symmetry-plane faces stay in the contact surface. "
+            "On a half-model this can let the symmetry plane contact itself. "
+            "Build the contact side from an explicit *SET_SEGMENT that omits "
+            "those faces if it matters.")
+    if c.erosop == 0:
+        state.warn(
+            f"*{c.keyword} {c.inter_id}: ERODING Card-4 EROSOP=0 ('only "
+            "exterior boundary information is saved') is treated as 1. "
+            "LS-DYNA hardcodes EROSOP to 1 in both SMP and MPP (Vol I "
+            "p.11-65), so a 0 in the deck is a legacy no-op there too — "
+            "reading it literally would switch eroding contact off in a "
+            "keyword whose whole purpose is eroding contact.")
+    if c.iadj == 0:
+        state.warn(
+            f"*{c.keyword} {c.inter_id}: ERODING Card-4 IADJ=0/blank means "
+            "'solid element faces are included only for free boundaries' in "
+            "LS-DYNA SMP, but MPP HARDCODES IADJ=1 (Vol I p.11-66), so a blank "
+            "IADJ in an MPP-authored deck means interior faces. k2rad assumes "
+            "1 and builds the solid side with /SURF/PART/ALL; the alternative "
+            "(/EXT) fails silently — no warning from the solver, just no "
+            "contact on the newly exposed crater face. Use --eroding-surf-ext "
+            "to force the literal IADJ=0 reading.")
+
+
+#: The two eroding families LS-DYNA's SMP solver runs FRICTIONLESS unless
+#: SOFT=2 — Vol I p.11-65 remark 4, verbatim: "SMP LS-DYNA does not consider
+#: contact friction for *CONTACT_ERODING_NODES_TO_SURFACE and *CONTACT_ERODING_
+#: SURFACE_TO_SURFACE unless SOFT is set to 2 on Optional Card A. MPP LS-DYNA
+#: has no such exclusion." (ERODING_SINGLE_SURFACE is NOT in the exclusion.)
+_SMP_FRICTIONLESS_ERODING = ("ERODING_NODES_TO_SURFACE",
+                             "ERODING_SURFACE_TO_SURFACE")
+
+
+def _warn_eroding_smp_friction(state: ConversionState, c, fric: float,
+                               fric_id: int) -> None:
+    """Warn when /INTER/TYPE25 will apply friction the SMP source run did not.
+
+    This is the one direction the rest of the batch does not cover: every other
+    inexpressible field (SST/MST, DC, ISYM, EROSOP, IADJ, VC, IPSTIF) is
+    friction k2rad DROPS, and is warned about. Here k2rad writes friction that
+    may never have acted in the reference model — silently, because the deck
+    itself cannot say whether it was run under SMP or MPP.
+    """
+    if not c.eroding or (not fric and not fric_id):
+        return
+    base = (c.keyword or "").replace("_MPP", "")
+    if not any(v in base for v in _SMP_FRICTIONLESS_ERODING) or c.soft == 2:
+        return
+    got = (f"/FRICTION/{fric_id}" if fric_id else f"Fric={fric:g}")
+    state.warn(
+        f"*{c.keyword} {c.inter_id}: SOFT={c.soft} (not 2) on optional Card A, "
+        "so if this deck was run with SMP LS-DYNA the contact was FRICTIONLESS "
+        "there — "
+        "SMP ignores contact friction on *CONTACT_ERODING_NODES_TO_SURFACE and "
+        "*CONTACT_ERODING_SURFACE_TO_SURFACE unless SOFT=2 (Vol I p.11-65 "
+        f"remark 4). MPP has no such exclusion. /INTER/TYPE25 applies {got} "
+        "UNCONDITIONALLY, so an SMP-authored deck gains friction it did not "
+        "have. Set FS=FD=0 on Card 2 to reproduce the SMP run, or leave it if "
+        "the reference was MPP (or if the friction is what you actually want).")
+
+
+def _make_type25_interfaces(state: ConversionState,
+                            rigid_nodes: Set[int]) -> List[str]:
+    """*CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
+    /INTER/TYPE25 (see :class:`~k2rad.state.ContactType25`).
+
+    The three side topologies map onto the starter's ILEV classification
+    (``hm_read_inter_type25.F:399-434``):
+
+      ===================  =========  =========  =========  ====
+      variant              surf_ID1   surf_ID2   grnd_IDs   ILEV
+      ===================  =========  =========  =========  ====
+      SINGLE_SURFACE       SSID surf  0          0          1
+      SURFACE_TO_SURFACE   SSID surf  MSID surf  0          2
+      NODES_TO_SURFACE     0          MSID surf  SSID nodes 3
+      ===================  =========  =========  =========  ====
+
+    ILEV=3 is a GENUINE one-way node-to-surface contact: the secondary nodes
+    are tracked against the main surface and the main surface's own nodes are
+    never secondary. dyna2rad does not symmetrize this family either — it sets
+    ``surfAttrNames[0] = "grnd_IDs"`` (``convertcontacts.cxx:128-129, 212-216``)
+    — so k2rad does not, and the LS-DYNA one-way semantics survive the
+    conversion unchanged. (The *symmetrizing* bug dyna2rad does have is in
+    ``AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE``, a different keyword, which k2rad
+    routes elsewhere.)
+
+    Idel is 2 on every one of them — see _TYPE25_IDEL for why that differs from
+    dyna2rad's 1 — and Idel>0 is also what arms the solid-erosion machinery at
+    all.
+    """
+    if not state.contacts_type25:
+        return []
+    lines = ["#-  ERODING / NODE-TO-SURFACE INTERFACES (/INTER/TYPE25):", HDR]
+    dropped: Dict[str, List[int]] = {}
+
+    for c in state.contacts_type25:
+        kw = c.keyword or "CONTACT"
+        if c.eroding:
+            _warn_eroding_card4(state, c)
+        if c.sst or c.mst:
+            state.warn(
+                f"*{kw} {c.inter_id}: Card-3 SST={c.sst:g}/MST={c.mst:g} "
+                "(explicit per-side contact thickness) is DROPPED. "
+                "/INTER/TYPE25 has no Gapmin column, and the Igap=5 route that "
+                "carries THICK_S/THICK_M is a radioss2026-only card that a "
+                "/BEGIN 2022 deck cannot hold — the gap comes from the "
+                "elements' own thickness/size instead (Igap=2). Scale it with "
+                "Gap_scale by hand if the explicit thickness is load-bearing.")
+        istf, iedge = _type25_istf_iedge(state, c)
+        fric, fric_id = _contact_friction(state, c.fs, c.fd, c.inter_id, kw,
+                                          "TYPE25", fsf=c.fsf)
+        if c.dc and not fric_id:
+            state.warn(
+                f"*{kw} {c.inter_id}: Card-2 DC={c.dc:g} (exponential "
+                "static→dynamic friction decay) is DROPPED — k2rad writes a "
+                "scalar Coulomb Fric with Ifric=0 on this interface. Collect "
+                "FS/FD/DC into a *DEFINE_FRICTION table and reference it with "
+                "FS=-2 to get the decay law (/FRICTION Ifric=2, exact).")
+        _warn_eroding_smp_friction(state, c, fric, fric_id)
+        inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0)
+        viss = _type25_viss(c.vdc, state, c.inter_id, kw)
+        stfac = _type25_stfac(state, c)
+        # LS-DYNA's blank DT is 1e20; TYPE25 turns a Tstop of 0 back into EP30
+        # (hm_read_inter_type25.F:579), so "no death time" is written as 0.
+        tstop = 0.0 if c.dt >= 1e19 else c.dt
+
+        surf1 = surf2 = grnod = 0
+        if c.variant == "NODES_TO_SURFACE":
+            diag: Dict[str, int] = {}
+            grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
+                                           lines, diag=diag)
+            if not grnod:
+                _drop_interface(state, dropped, kw, c.inter_id,
+                                _describe_empty_secondary(diag, c.ssid, c.sstyp),
+                                _RIGID_SECONDARY_REMEDY if diag.get("raw") else
+                                "REMEDY: for a node-to-surface contact SSID "
+                                "should name a *SET_NODE_LIST holding every "
+                                "node that may become exposed as elements "
+                                "erode (LS-DYNA Vol I p.11-24); a part or part "
+                                "set works too, but it must exist and carry "
+                                "elements.")
+                continue
+            surf2 = _type25_surface(state, c, c.msid, c.mstyp,
+                                    f"contact_{c.inter_id}_main", lines)
+            if not surf2:
+                _drop_interface(
+                    state, dropped, kw, c.inter_id,
+                    f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} "
+                    "resolved to no contact surface (it names no part or part "
+                    "set carrying shell/solid elements)",
+                    "REMEDY: point MSID at a part or part set that exists in "
+                    "this deck; a *SET_NODE or *SET_SEGMENT cannot supply the "
+                    "main surface of a /INTER/TYPE25.")
+                continue
+            _warn_partial_rigid_secondary(state, kw, c.inter_id, diag, c.ssid)
+            state.warn(
+                f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} ONE-WAY "
+                "node-to-surface (surf_ID1=0, grnd_IDs=secondary node group, "
+                "surf_ID2=main surface -> starter ILEV=3, "
+                "hm_read_inter_type25.F:399-434). The main surface's own nodes "
+                "are NOT tracked against the secondary side — the LS-DYNA "
+                "one-way semantics are preserved, not symmetrized.")
+        else:
+            single = c.variant == "SINGLE_SURFACE"
+            tag = ("self" if single else "secnd")
+            # Only a SINGLE_SURFACE reads SSID=0 as "all parts" (Vol I p.11-24).
+            surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
+                                    f"contact_{c.inter_id}_{tag}", lines,
+                                    sid_zero_is_all_parts=single)
+            if not surf1:
+                _drop_interface(
+                    state, dropped, kw, c.inter_id,
+                    f"the SECONDARY (SSID) side ssid={c.ssid} sstyp={c.sstyp} "
+                    "resolved to no contact surface (it names no part or part "
+                    "set carrying shell/solid elements)",
+                    "REMEDY: LS-DYNA Vol I p.11-24 requires a part id or a "
+                    "part set id on an ERODING_SINGLE_SURFACE / "
+                    "ERODING_SURFACE_TO_SURFACE contact — point SSID at one "
+                    "that exists in this deck.")
+                continue
+            if c.variant == "SURFACE_TO_SURFACE":
+                surf2 = _type25_surface(state, c, c.msid, c.mstyp,
+                                        f"contact_{c.inter_id}_main", lines)
+                if not surf2:
+                    _drop_interface(
+                        state, dropped, kw, c.inter_id,
+                        f"the MAIN (MSID) side msid={c.msid} mstyp={c.mstyp} "
+                        "resolved to no contact surface",
+                        "REMEDY: point MSID at a part or part set that exists "
+                        "in this deck and carries shell/solid elements.")
+                    continue
+                state.warn(
+                    f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} "
+                    "surface-to-surface (surf_ID1=secondary, surf_ID2=main -> "
+                    f"starter ILEV=2, symmetric), Istf={istf}, Igap=2, "
+                    f"Idel={_TYPE25_IDEL}, Iedge={iedge}.")
+            else:
+                state.warn(
+                    f"*{kw} {c.inter_id} -> /INTER/TYPE25/{c.inter_id} "
+                    "self-contact (surf_ID1=the one surface, surf_ID2=0 -> "
+                    f"starter ILEV=1, self-impact), Istf={istf}, Igap=2, "
+                    f"Idel={_TYPE25_IDEL}, Iedge={iedge}.")
+
+        lines += _emit_inter_type25(
+            c.inter_id, c.title, surf1, surf2, grnod_id=grnod, istf=istf,
+            igap=2, idel=_TYPE25_IDEL, iedge=iedge, stfac=stfac, fric=fric,
+            tstart=c.bt, tstop=tstop, inacti=inacti, viss=viss,
+            fric_id=fric_id)
+
+    if any(c.eroding for c in state.contacts_type25):
+        state.warn(
+            "Eroding contact converted: the interface can only retreat as fast "
+            "as the elements actually FAIL, and k2rad's default shell "
+            "formulation Ishell=12 (fully integrated) needs 4 in-plane x 2 "
+            "through-thickness = 8 failure events to delete a shell under "
+            "/FAIL/JOHNSON Ifail_sh=2, against the 2 an under-integrated "
+            "LS-DYNA ELFORM=2 implies — up to ~1.7x under-erosion, measured. "
+            "On an eroding-contact deck that means the eroding surface barely "
+            "retreats. Convert with --shell-formulation qeph (Ishell=24, "
+            "reduced integration) if the erosion rate matters. Solid erosion "
+            "additionally needs a failure model (/FAIL/*, or *MAT_ADD_EROSION) "
+            "on the eroding parts: without one nothing is ever deleted and the "
+            "contact behaves like an ordinary TYPE25.")
     _note_dropped_interfaces(state, dropped)
     return lines
 
@@ -1656,6 +2491,13 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
     dropped: Dict[str, List[int]] = {}
     for c in state.contacts_tied:
         itype = _tied_interface_type(c)
+        if c.fs == _FS_DEFINE_FRICTION:
+            # Not silently dropped: _bind_friction_table names the interface,
+            # the target type and why neither TYPE2 nor TYPE10 can hold the
+            # binding. (Friction on a tie is meaningless until the tie fails,
+            # so this is rarely load-bearing — but "rarely" is not "never".)
+            _bind_friction_table(state, 0.0, c.inter_id,
+                                 f"CONTACT_TIED_{c.variant}", itype)
         nids = _tied_slave_nids(state, c.ssid, c.sstyp)
         if itype == "TYPE10":
             # Penalty tie: rigid-body secondary nodes are permitted (the bond is

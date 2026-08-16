@@ -43,7 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from .handlers import _SPOTWELD_CONTACT_KEYWORDS
+from .handlers import _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -615,6 +615,47 @@ def _off_contact(b: Block, offsets: Dict[str, int], warn) -> None:
     new = _rewrite_line(b.raw[start], mods, offsets)
     if new is not None:
         b.raw[start] = new
+
+
+def _off_define_friction(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*DEFINE_FRICTION: the table ID → IDDOFF, every Card-2 part pair → IDPOFF
+    or IDSOFF depending on that row's own PTYPEi/PTYPEj.
+
+    IDDOFF, not IDROFF: LS-DYNA Vol I p.27-5 defines it as "Offset to any ID
+    defined through *DEFINE, except the FUNCTION, TABLE, and CURVE options",
+    which is where every other *DEFINE_* entry in this table sends its id
+    (bucket "d"), while *DEFINE_CURVE / *DEFINE_TABLE use IDFOFF ("f").
+
+    A walker rather than a declarative spec because the bucket is PER ROW AND
+    PER COLUMN: PTYPEi/j (fields 6/7) is the literal string ``PSET`` when the
+    id in field 0/1 names a *SET_PART, and blank/anything else when it names a
+    part. The two columns are independent — a row may mix a part with a part
+    set. Getting this wrong is not cosmetic: an un-offset part id inside an
+    *INCLUDE_TRANSFORM matches nothing, and writer/frictions.py then drops the
+    whole pair row back to the table's default coefficients.
+    """
+    toff = _title_offset(b)
+    if toff < len(b.raw) and b.raw[toff].strip():
+        new = _rewrite_line(b.raw[toff], [(0, "d")], offsets)
+        if new is not None:
+            b.raw[toff] = new
+    if not offsets.get("p", 0) and not offsets.get("s", 0):
+        return
+
+    def bucket(f: List[str], i: int) -> str:
+        """PTYPEi/PTYPEj sits 6 fields to the right of the id it types."""
+        ptype = f[i + 6].strip().upper() if len(f) > i + 6 else ""
+        return "s" if ptype == "PSET" else "p"
+
+    for k in range(toff + 1, len(b.raw)):
+        line = b.raw[k]
+        if not line.strip():
+            continue
+        f = _fields(line)
+        new = _rewrite_line(line, [(0, bucket(f, 0)), (1, bucket(f, 1))],
+                            offsets)
+        if new is not None:
+            b.raw[k] = new
 
 
 def _off_define_transformation(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -1462,6 +1503,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     "DEFINE_BOX": {"cards": {0: [(0, "d")]}},
     "DEFINE_BOX_LOCAL": {"cards": {0: [(0, "d")]}},
     "DEFINE_TRANSFORMATION": _off_define_transformation,
+    # *DEFINE_FRICTION: table id on IDDOFF (Vol I p.27-5, "any ID defined
+    # through *DEFINE" other than CURVE/TABLE/FUNCTION), Card-2 part pairs on
+    # IDPOFF/IDSOFF per row. See _off_define_friction for why it is a walker.
+    "DEFINE_FRICTION": _off_define_friction,
     "NODE_TRANSFORM": {"data": (0, [(0, "d"), (1, "s")])},
 
     # Materials (mid + the curve/table reference fields k2rad models)
@@ -1910,6 +1955,14 @@ for _kw in (
 for _kw in _SPOTWELD_CONTACT_KEYWORDS:
     if "_MPP" not in _kw:
         _OFFSET_SPECS[_kw] = _off_contact
+
+# *CONTACT_ERODING_* and *CONTACT_{,AUTOMATIC_}NODES_TO_SURFACE share the same
+# Card-1 layout. Their mandatory ERODING Card 4 (ISYM/EROSOP/IADJ) sits AFTER
+# Card 1, so _off_contact — which only rewrites b.raw[start] — is unaffected by
+# it. The _MPP spellings are excluded for the same reason the spotweld ones are:
+# the MPP card(s) push Card 1 down and _off_contact rewrites that line blind.
+for _kw in _TYPE25_CONTACT_BASES:
+    _OFFSET_SPECS[_kw] = _off_contact
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
 # keyword with TITLE in options, so the base entry covers it.

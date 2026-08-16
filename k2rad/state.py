@@ -2337,6 +2337,11 @@ class ContactTied:
     sfm: float = 0.0        # Card3 SFM (main penalty stiffness scale)
     sfst: float = 0.0       # Card3 SFST (scale on SST) — TYPE10 discriminator term
     sfmt: float = 0.0       # Card3 SFMT (scale on MST) — TYPE10 discriminator term
+    # Card2 FS. Friction is meaningless on a tie and is NOT carried over — this
+    # is kept only so the writer can spot FS=-2 (*DEFINE_FRICTION reference) and
+    # say out loud that neither /INTER/TYPE2 nor /INTER/TYPE10 has a fric_ID
+    # column to bind the table to.
+    fs: float = 0.0
 
 
 @dataclass
@@ -2377,6 +2382,121 @@ class ContactSpotweld:
     mpp: bool = False       # _MPP keyword flavour (extra MPP card(s) before Card 1)
     sst: float = 0.0        # Card3 SST (negative = absolute tie-criterion distance)
     mst: float = 0.0        # Card3 MST (negative = absolute tie-criterion distance)
+
+
+@dataclass
+class ContactType25:
+    """The *CONTACT families dyna2rad routes to **/INTER/TYPE25**:
+
+      * ``*CONTACT_ERODING_SINGLE_SURFACE``     (``variant="SINGLE_SURFACE"``)
+      * ``*CONTACT_ERODING_SURFACE_TO_SURFACE`` (``variant="SURFACE_TO_SURFACE"``)
+      * ``*CONTACT_ERODING_NODES_TO_SURFACE``   (``variant="NODES_TO_SURFACE"``)
+      * ``*CONTACT_NODES_TO_SURFACE`` and ``*CONTACT_AUTOMATIC_NODES_TO_SURFACE``
+        (``variant="NODES_TO_SURFACE"``, ``eroding=False``)
+
+    They share one dataclass because they share one target card and every field
+    of it — ``eroding`` only gates (a) the mandatory ERODING Card 4
+    (ISYM/EROSOP/IADJ), which shifts the optional-card stack down by one line,
+    and (b) whether the solid side's /SURF is built with ``ALL`` (interior faces
+    included) instead of ``EXT``.
+
+    dyna2rad reaches TYPE25 for all of them through
+    ``convertcontacts.cxx:117-131`` (ERODING_SINGLE/SURFACE_TO_SURFACE and
+    AUTOMATIC_NODES_TO_SURFACE) and ``:212-216`` (the generic
+    ``find("NODES_TO_SURFACE")`` branch, which is where plain NODES_TO_SURFACE
+    and ERODING_NODES_TO_SURFACE land).
+
+    Side topology follows the starter's ILEV classification
+    (``hm_read_inter_type25.F:399-434``):
+
+      * SINGLE_SURFACE     → ``surf_ID1`` = SSID surface, ``surf_ID2`` = 0
+        (ILEV=1, self-impact of one surface).
+      * SURFACE_TO_SURFACE → ``surf_ID1`` = SSID, ``surf_ID2`` = MSID (ILEV=2,
+        symmetric).
+      * NODES_TO_SURFACE   → ``surf_ID1`` = 0, ``surf_ID2`` = MSID surface,
+        ``grnd_IDs`` = the SSID node group (ILEV=3) — a genuine ONE-WAY
+        node-to-surface contact. dyna2rad does NOT symmetrize this family
+        (``surfAttrNames[0] = "grnd_IDs"``), so neither does k2rad.
+
+    ``isym``/``erosop``/``iadj`` are the ERODING Card-4 fields. dyna2rad parses
+    them in the CFG and then discards all three with no message
+    (``grep EROSOP|IADJ|ISYM`` over the whole dyna2rad tree: zero hits) — k2rad
+    WARNS about all three (``_warn_eroding_card4``) but acts on none of them:
+    the solid side is built with /SURF/PART/ALL whenever the contact is eroding
+    (``writer/contacts.py`` ``_type25_surface``, ``if c.eroding and
+    solid_pids``), i.e. IADJ is assumed to be 1 unconditionally, which is what
+    MPP hardcodes. The only lever is the global ``--eroding-surf-ext``; a deck
+    mixing an IADJ=0 and an IADJ=1 eroding contact cannot be expressed.
+    """
+    inter_id: int
+    title: str
+    ssid: int; sstyp: int
+    msid: int; mstyp: int
+    variant: str            # "SINGLE_SURFACE" | "SURFACE_TO_SURFACE" | "NODES_TO_SURFACE"
+    eroding: bool = False   # *CONTACT_ERODING_* (mandatory Card 4 present)
+    fs: float = 0.0         # Card2 FS: static friction, or -1/-2/2 sentinel
+    fd: float = 0.0         # Card2 FD: dynamic friction, or a *DEFINE_FRICTION id when FS=-2
+    dc: float = 0.0         # Card2 DC: exponential decay coefficient
+    bt: float = 0.0         # Card2 BT: birth time  → Tstart
+    dt: float = 0.0         # Card2 DT: death time  → Tstop
+    vdc: float = 0.0        # Card2 VDC: viscous damping (% critical) → VISs
+    sfs: float = 0.0        # Card3 SFS: secondary penalty stiffness scale → Stfac
+    sfm: float = 0.0        # Card3 SFM: main penalty stiffness scale
+    sst: float = 0.0        # Card3 SST: secondary contact thickness
+    mst: float = 0.0        # Card3 MST: main contact thickness
+    fsf: float = 1.0        # Card3 FSF: Coulomb friction scale (mu_sc = FSF * mu_c)
+    isym: int = 0           # ERODING Card4 ISYM   (1 = drop symmetry-plane faces)
+    erosop: int = 1         # ERODING Card4 EROSOP (hardcoded 1 in LS-DYNA)
+    iadj: int = 0           # ERODING Card4 IADJ   (1 = material-subset boundary faces)
+    soft: int = 0           # optional Card A SOFT (dyna2rad -7/-11/-19 sentinels)
+    ignore: int = 0         # optional Card C IGNORE → Inacti
+    keyword: str = ""       # source *CONTACT spelling — see ContactAutoSingle.keyword
+
+
+@dataclass
+class FrictionPair:
+    """One ``*DEFINE_FRICTION`` Card-2 row → one /FRICTION part-pair block."""
+    pid_i: int              # PIDi  (part id, or *SET_PART id when pset_i)
+    pid_j: int              # PIDj
+    fs: float = 0.0         # FSij static friction
+    fd: float = 0.0         # FDij dynamic friction
+    dc: float = 0.0         # DCij exponential decay coefficient
+    vc: float = 0.0         # VCij viscous friction (shear-stress cap)
+    pset_i: bool = False    # PTYPEi == "PSET"  → grpart_ID1 rather than part_ID1
+    pset_j: bool = False    # PTYPEj == "PSET"
+
+
+@dataclass
+class DefineFriction:
+    """*DEFINE_FRICTION → /FRICTION (id preserved 1:1, which is what makes the
+    interfaces' ``fric_ID`` binding work — dyna2rad ``convertfrictions.cxx:57``
+    creates the entity with ``selFriction->GetId()``).
+
+    LS-DYNA's law is ``mu_c = FD + (FS - FD) * exp(-DC * |v_rel|)``
+    (Vol I p.17-280). Radioss ``Ifric=2`` (Darmstad,
+    ``engine/.../i7for3.F:1911-1914``) evaluates
+
+        XMU = Fric + C1*e^(C2*v)*p^2 + C3*e^(C4*v)*p + C5*e^(C6*v)
+
+    so with ``C1..C4 = 0`` and ``Fric = FD``, ``C5 = FS - FD``, ``C6 = -DC``
+    the two are algebraically IDENTICAL. That is dyna2rad's mapping
+    (``convertfrictions.cxx:94-97``) and it is also the only 2022-legal one:
+    Radioss's own exponential-decay law ``Ifric=4`` would need one fewer sign
+    flip but does not exist before radioss2023 (``radioss2020/FRICTION/
+    friction.cfg:87-93`` offers 0-3; the 2022 Reference Guide p.223 likewise).
+
+    The Card-1 defaults become the /FRICTION header row — the fallback friction
+    for every part pair not listed (the engine seeds every contact pair from it,
+    ``frictionparts_model.F:88-92``).
+    """
+    fric_id: int
+    title: str
+    fs: float = 0.0         # FS_D default static friction
+    fd: float = 0.0         # FD_D default dynamic friction
+    dc: float = 0.0         # DC_D default decay coefficient
+    vc: float = 0.0         # VC_D default viscous friction
+    icnep: int = 0          # 0 = a missing PID is an error, 1 = ignore that row
+    pairs: List["FrictionPair"] = field(default_factory=list)
 
 
 @dataclass
@@ -4000,6 +4120,25 @@ class ConvertOptions:
     # writer/common._elform_to_ishell for why this is a choice at all and why
     # under-integrated Ishell 1..4 is deliberately not offered.
     shell_formulation: str = "qbat"
+    # *CONTACT_ERODING_* solid sides: emit /SURF/PART/EXT (external skin only)
+    # instead of the default /SURF/PART/ALL.
+    #
+    # /ALL is what makes eroding contact WORK on solids. The starter puts every
+    # interior (two-solid) face in the segment list with a NEGATIVE stiffness
+    # (i25sti3.F:950-951 "Case of internal segment : put stiffness to
+    # negative"), and the engine flips it active the moment one of the two
+    # solids dies (check_surface_state.F:174-203, NB_CONNECTED_ELM==1 and
+    # STFM<0 → ACTIVATION). With /EXT there are no interior segments, so the
+    # machinery arms (IPARI(100)=1 needs only Idel>0 and a solid segment) and
+    # then has nothing to wake up — the newly exposed crater face is
+    # frictionless and stiffness-free, SILENTLY. dyna2rad has exactly this gap:
+    # it builds contact surfaces from a bare PART clause with no opt_A
+    # (convertcontacts.cxx:264-274).
+    #
+    # Set True to reproduce LS-DYNA SMP's literal IADJ=0 ("solid element faces
+    # are included only for free boundaries") instead. Note LS-DYNA MPP
+    # hardcodes IADJ=1, so a blank IADJ in an MPP-authored deck means /ALL.
+    eroding_surf_ext: bool = False
 
     @property
     def shell_default_ishell(self) -> int:
@@ -4489,6 +4628,12 @@ class ConversionState:
     contacts_tied: List[ContactTied] = field(default_factory=list)
     # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
     contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
+    # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
+    # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
+    contacts_type25: List[ContactType25] = field(default_factory=list)
+    # *DEFINE_FRICTION tables → /FRICTION, keyed by their (preserved) id and
+    # kept in deck order so "exactly one table in the model" is decidable.
+    define_frictions: Dict[int, DefineFriction] = field(default_factory=dict)
     # Interface ids the writers REFUSED to emit (filled by _drop_interface).
     # /TH/INTER is assembled from the parsed contact records, so it has to
     # subtract these or the starter answers WARNING 257 NONEXISTENT INTER.

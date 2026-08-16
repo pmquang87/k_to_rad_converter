@@ -348,8 +348,8 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     # this section, so state.dropped_inter_ids is complete.
     all_inter_ids = [c.inter_id for c in (
         list(state.contacts_single) + list(state.contacts_surf2surf)
-        + list(state.contacts_general) + list(state.contacts_tied)
-        + list(state.contacts_spotweld))
+        + list(state.contacts_general) + list(state.contacts_type25)
+        + list(state.contacts_tied) + list(state.contacts_spotweld))
         if c.inter_id not in state.dropped_inter_ids]
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)
@@ -407,6 +407,21 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
         "Differentiate with respect to time (F = d(FNX)/dt, e.g. "
         "numpy.gradient, or tools/th_to_csv.py which writes the differentiated "
         "column) before comparing against an LS-DYNA rcforc/ncforc file.")
+    if any(c.variant == "SINGLE_SURFACE"
+           for c in getattr(state, "contacts_type25", [])
+           if c.inter_id not in state.dropped_inter_ids):
+        state.warn(
+            "/TH/INTER on a SELF-IMPACT interface (a *CONTACT_ERODING_SINGLE_"
+            "SURFACE converts to /INTER/TYPE25 with surf_ID2=0, so both sides "
+            "of the contact are the SAME surface): the FN/FT resultants are a "
+            "SIGNED SUM over both sides and largely cancel. Measured on a "
+            "converted punch/plate deck, the self-impact interface reported an "
+            "impulse of -0.0668 against a true m*dv of +0.1833 (-63.6%) while "
+            "the identical two-surface run gave +0.1913 (+4.4%). Do NOT use a "
+            "self-impact interface's channels for a momentum balance — split "
+            "the contact into a two-surface (ERODING_SURFACE_TO_SURFACE) "
+            "interface, or take the impacting body's rigid-body deceleration "
+            "instead.")
     # The TH group id namespace is GLOBAL across /TH types, not per type: the
     # starter rejects a deck carrying both /TH/NODE/1 and /TH/INTER/1 with
     # "ERROR ID : 79 / DUPLICATE ID / IN TH GROUP DEFINITION / ID=1 is

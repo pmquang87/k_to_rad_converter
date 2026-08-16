@@ -21,6 +21,8 @@ __all__ = [
     "_emit_grsh3n",
     "_emit_id_group",
     "_emit_surf_part",
+    "_emit_surf_part_all",
+    "_emit_grpart_part",
     "_emit_surf_grshel",
     "_emit_surf_grsh3n",
     "_emit_surf_surf",
@@ -275,6 +277,51 @@ def _emit_surf_part(surf_id: int, title: str, pids: List[int]) -> List[str]:
     return lines
 
 
+def _emit_surf_part_all(surf_id: int, title: str, pids: List[int]) -> List[str]:
+    """/SURF/PART/ALL — every face of every solid, INTERIOR faces included.
+
+    The difference from /SURF/PART/EXT is one flag deep in the starter:
+    ``hm_read_surf.F:636-641`` sets ``IGRSURF(IGS)%EXT_ALL`` to ``EXT_SURF=1``
+    for ``EXT`` and ``ALL_SURF=2`` for ``ALL``, and ``ssurftag.F:122``
+    (``IF(IEXT==1) THEN … C External surface only.``) then masks every face
+    shared with another tagged solid. With ``ALL`` that masking is skipped, so a
+    face between two bricks survives as a segment.
+
+    Only /INTER/TYPE25 can use those interior segments safely: the starter marks
+    them dormant by negating the stiffness (``i25sti3.F:950-951``) and the
+    engine wakes one up only when a neighbour element dies
+    (``check_surface_state.F:174-203``). On any other interface type every
+    interior face would be ACTIVE at t=0 — instant self-contact of the solid
+    against its own interior. Callers must gate on TYPE25.
+
+    Same card body as /SURF/PART/EXT (``radioss110/SETS/surf_all.cfg``:
+    ``HEADER("/SURF/%-s/ALL/%d")`` + title + a free 10-wide id list).
+    """
+    lines = [f"/SURF/PART/ALL/{surf_id}", title or f"SURF_PART_ALL_{surf_id}"]
+    row: List[str] = []
+    for p in pids:
+        row.append(_i(p))
+        if len(row) == 10:
+            lines.append("".join(row))
+            row = []
+    if row:
+        lines.append("".join(row))
+    lines.append(HDR)
+    return lines
+
+
+def _emit_grpart_part(grpart_id: int, title: str, pids: List[int]) -> List[str]:
+    """/GRPART/PART — a part group, the target of /FRICTION's grpart_ID1/2.
+
+    ``hm_read_grpart.F:212`` accepts ``PART`` (alongside SUBSET/MAT/PROP) as the
+    second key, and ``radioss2020/FRICTION/friction.cfg:43-44`` types
+    ``grpart_ID1/2`` as ``SUBTYPES = (/SETS/GRPART)``. Body is the usual free
+    10-wide id list.
+    """
+    return _emit_id_group("GRPART/PART", grpart_id, title or f"GRPART_{grpart_id}",
+                          pids)
+
+
 def _emit_surf_grshel(surf_id: int, title: str, grshel_id: int) -> List[str]:
     return [
         f"/SURF/GRSHEL/{surf_id}",
@@ -314,8 +361,14 @@ def _emit_surf_surf(surf_id: int, title: str, sub_surf_ids: List[int]) -> List[s
 
 
 def _make_master_surface(state: ConversionState, surf_id: int, title: str,
-                         pids: List[int], out_lines: List[str]) -> bool:
+                         pids: List[int], out_lines: List[str],
+                         solid_all: bool = False) -> bool:
     """Emit a master surface (for /INTER) from a list of PIDs.
+
+    ``solid_all`` switches the SOLID sub-surface from /SURF/PART/EXT (external
+    skin) to /SURF/PART/ALL (interior faces too) — see _emit_surf_part_all.
+    Default False, so every existing caller is byte-for-byte unchanged; only
+    the /INTER/TYPE25 eroding path sets it.
 
     The part's shells are split by topology before they are grouped. A
     /GRSHEL/SHEL group resolves only 4-node /SHELL ids, and since d1ade12 a
@@ -344,6 +397,7 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
 
     shell_eids.sort()
     quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
+    _emit_solid_surf = _emit_surf_part_all if solid_all else _emit_surf_part
 
     kinds = sum(1 for group in (quad_eids, tri_eids, solid_pids) if group)
     if kinds == 0:
@@ -358,7 +412,7 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
             out_lines += _emit_grsh3n(grsh3n_id, f"{title}_grsh3n", tri_eids)
             out_lines += _emit_surf_grsh3n(surf_id, title, grsh3n_id)
         else:
-            out_lines += _emit_surf_part(surf_id, title, solid_pids)
+            out_lines += _emit_solid_surf(surf_id, title, solid_pids)
         return True
 
     sub_ids: List[int] = []
@@ -376,7 +430,7 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
         sub_ids.append(sub_tri)
     if solid_pids:
         sub_solid = state.next_id()
-        out_lines += _emit_surf_part(sub_solid, f"{title}_solids", solid_pids)
+        out_lines += _emit_solid_surf(sub_solid, f"{title}_solids", solid_pids)
         sub_ids.append(sub_solid)
     out_lines += _emit_surf_surf(surf_id, title, sub_ids)
     return True

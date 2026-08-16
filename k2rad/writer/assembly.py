@@ -58,8 +58,10 @@ from .contacts import (
     _make_interfaces,
     _make_tied_interfaces,
     _make_spotweld_interfaces,
+    _make_type25_interfaces,
     _recipe_active,
 )
+from .frictions import _make_frictions
 from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
 from .joints import _make_joints, _resolve_joints
 from .dbeam import _make_discrete_beam_connectors
@@ -1062,8 +1064,15 @@ def _starter_section_registry():
         ("functions",         lambda c: _make_functions(c.state)),
         ("extra_groups",      lambda c: _make_extra_groups(c.state)),
         ("rlinks",            lambda c: _make_rlinks(c.state)),
+        # /FRICTION before the interfaces that reference it by fric_ID. The
+        # starter resolves entities by id, not by order, so this is only for
+        # readability — but it also keeps the friction tables' (preserved,
+        # LS-DYNA-side) ids away from the state.next_id() stream the surfaces
+        # below draw from.
+        ("frictions",         lambda c: _make_frictions(c.state)),
         ("interfaces",        lambda c: _make_interfaces(c.state, c.rigid_nodes)),
         ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
+        ("type25_interfaces", lambda c: _make_type25_interfaces(c.state, c.rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
         ("spotweld_interfaces",
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),

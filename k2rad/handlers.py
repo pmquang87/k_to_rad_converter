@@ -52,7 +52,8 @@ from .state import (
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
     LoadNode, RigidWallPlanar,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
-    ContactForceTransducer, ContactTied, ContactSpotweld, HexSpotweldAssembly,
+    ContactForceTransducer, ContactTied, ContactSpotweld, ContactType25,
+    DefineFriction, FrictionPair, HexSpotweldAssembly,
     InitialVelocityNode, InitialVelocityRigidBody,
     InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
@@ -3838,13 +3839,20 @@ def _parse_contact_header(block: Block):
     return 0, "", 0
 
 
-def _read_contact_ignore(raw: List[str], offset: int) -> int:
-    """Read LS-DYNA optional Card E (Card 6): igap ignore dprfac dtstif ..."""
-    f = _card(raw, offset + 5, fixed=True, n=8, w=10)
+def _read_contact_ignore(raw: List[str], offset: int, extra: int = 0) -> int:
+    """Read LS-DYNA optional Card C (the 6th card): igap ignore dprfac dtstif ...
+
+    ``extra`` is the number of MANDATORY cards that sit between Card 3 and
+    optional Card A for this keyword flavour — 1 for *CONTACT_ERODING_* (its
+    ISYM/EROSOP/IADJ Card 4), 0 otherwise. Reading IGNORE one line too early on
+    an eroding deck lands on optional Card B (PENMAX/THKOPT/SHLTHK/SNLOG...),
+    whose field 2 is THKOPT, and silently produces the wrong Inacti.
+    """
+    f = _card(raw, offset + 5 + extra, fixed=True, n=8, w=10)
     return to_int(f[1]) if len(f) > 1 else 0
 
 
-def _read_contact_soft(raw: List[str], offset: int) -> int:
+def _read_contact_soft(raw: List[str], offset: int, extra: int = 0) -> int:
     """Read LS-DYNA optional Card A field 1 = SOFT (soft-constraint formulation).
 
     Card A sits immediately after Card 3 (offset+3), consistent with
@@ -3853,8 +3861,11 @@ def _read_contact_soft(raw: List[str], offset: int) -> int:
     on this field: SOFT -7/-11/-19 are hand-entered sentinels selecting
     /INTER/TYPE7/TYPE11/TYPE19; any ordinary value (0/1/2/blank, or Card A
     absent) leaves SOFT=0 → the default single-surface routing.
+
+    ``extra`` shifts past a keyword-specific mandatory card between Card 3 and
+    Card A — see _read_contact_ignore.
     """
-    f = _card(raw, offset + 3, fixed=True, n=8, w=10)
+    f = _card(raw, offset + 3 + extra, fixed=True, n=8, w=10)
     return to_int(f[0]) if f and f[0].strip() else 0
 
 
@@ -4024,6 +4035,206 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     handle_contact_automatic_surface_to_surface(block, state)
 
 
+#: The LS-DYNA keyword bases dyna2rad routes to /INTER/TYPE25, and the
+#: ``ContactType25.variant`` each maps to. ``eroding`` marks the families whose
+#: mandatory Card 4 (ISYM/EROSOP/IADJ) shifts the optional-card stack.
+_TYPE25_CONTACT_BASES = {
+    "CONTACT_ERODING_SINGLE_SURFACE":       ("SINGLE_SURFACE", True),
+    "CONTACT_ERODING_SURFACE_TO_SURFACE":   ("SURFACE_TO_SURFACE", True),
+    "CONTACT_ERODING_NODES_TO_SURFACE":     ("NODES_TO_SURFACE", True),
+    "CONTACT_NODES_TO_SURFACE":             ("NODES_TO_SURFACE", False),
+    "CONTACT_AUTOMATIC_NODES_TO_SURFACE":   ("NODES_TO_SURFACE", False),
+}
+
+
+def handle_contact_type25(block: Block, state: ConversionState) -> None:
+    """*CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
+    /INTER/TYPE25 (see :class:`~k2rad.state.ContactType25`).
+
+    Card stack (LS-DYNA Vol I p.11-6, "cards must appear in the exact order
+    listed"), with the ERODING Card 4 present only for the ERODING spellings::
+
+        [MPP 1[, MPP 2]]                      _MPP option
+        Card 1  ssid msid sstyp mstyp sboxid mboxid spr mpr
+        Card 2  fs fd dc vc vdc penchk bt dt
+        Card 3  sfs sfm sst mst sfst sfmt fsf vsf
+        Card 4  isym erosop iadj                    ERODING only
+        Card A  soft sofscl lcidab maxpar sbopt depth bsort frcfrq
+        Card B  penmax thkopt shlthk snlog isym i2d3d sldthk sldstf
+        Card C  igap ignore dprfac dtstif edgek <blank> flangl cid_rcf
+
+    The ERODING Card 4 is what makes an eroding contact impossible to alias onto
+    the existing automatic handlers: it pushes Card A and Card C down one line,
+    so the SOFT and IGNORE reads would land on ISYM and Card B respectively.
+
+    The dyna2rad SOFT sentinels (-7/-11/-19) are honoured for
+    ERODING_SINGLE_SURFACE, exactly as ``convertcontacts.cxx:133-165`` does
+    (that branch is gated on ``ERODING_SINGLE_SURFACE`` or ``AUTOMATIC_GENERAL``
+    — ERODING_SURFACE_TO_SURFACE has no such escape). A sentinel-routed contact
+    goes to the existing /INTER/TYPE7|11|19 path and LOSES the eroding
+    re-exposure, which is warned about: only TYPE25 implements the dormant
+    interior-segment mechanism (``check_surface_state.F:174`` is gated on
+    ``ITY==25``).
+    """
+    base = block.keyword
+    if base.endswith("_MPP"):
+        base = base[:-4]
+    variant, eroding = _TYPE25_CONTACT_BASES[base]
+
+    inter_id, title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    raw = block.raw
+    if block.keyword.endswith("_MPP"):
+        new_offset = _contact_mpp_card_offset(raw, offset, True)
+        state.warn(
+            f"*{block.keyword} {inter_id}: the _MPP option card(s) "
+            f"({new_offset - offset} line(s): bucket-sort and MPP-decomposition "
+            "tuning) are skipped — they carry no field OpenRadioss has an "
+            "equivalent for. The contact itself converts normally.")
+        offset = new_offset
+
+    # Card 1: ssid msid sstyp mstyp sboxid mboxid spr mpr
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid  = to_int(f1[0]) if f1 else 0
+    msid  = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
+    # Card 2: fs fd dc vc vdc penchk bt dt
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs  = to_float(f2[0]) if f2 else 0.0
+    fd  = to_float(f2[1]) if len(f2) > 1 else 0.0
+    dc  = to_float(f2[2]) if len(f2) > 2 else 0.0
+    vdc = to_float(f2[4]) if len(f2) > 4 else 0.0
+    bt  = to_float(f2[6]) if len(f2) > 6 else 0.0
+    dt  = to_float(f2[7]) if len(f2) > 7 else 1e28
+    # Card 3: sfs sfm sst mst sfst sfmt fsf vsf
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f3[0]) if f3 else 0.0
+    sfm = to_float(f3[1]) if len(f3) > 1 else 0.0
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    fsf = to_float(f3[6]) if len(f3) > 6 else 0.0
+    fsf = fsf if fsf != 0.0 else 1.0        # LS-DYNA blank/0 → 1.0
+    # Card 4 (ERODING only): isym erosop iadj
+    isym = erosop = iadj = 0
+    if eroding:
+        f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+        isym   = to_int(f4[0]) if f4 else 0
+        erosop = to_int(f4[1]) if len(f4) > 1 else 1
+        iadj   = to_int(f4[2]) if len(f4) > 2 else 0
+    extra = 1 if eroding else 0
+    soft = _read_contact_soft(raw, offset, extra=extra)
+    ignore = _read_contact_ignore(raw, offset, extra=extra)
+
+    # dyna2rad's SOFT escape hatch, ERODING_SINGLE_SURFACE only (cc:133-165).
+    if variant == "SINGLE_SURFACE" and soft in (-7, -11, -19):
+        target = {-7: "TYPE7", -11: "TYPE11", -19: "TYPE19"}[soft]
+        state.warn(
+            f"*{block.keyword} {inter_id}: optional-Card-A SOFT={soft} is the "
+            f"dyna2rad sentinel that forces /INTER/{target} instead of the "
+            "default /INTER/TYPE25 (convertcontacts.cxx:133-165). Honoured — "
+            "but the EROSION half of this contact is then LOST: only "
+            "/INTER/TYPE25 keeps interior solid faces as dormant "
+            "negative-stiffness segments, and only TYPE25 wakes them "
+            "(engine check_surface_state.F:174 is gated on ITY==25). Segments "
+            "whose element dies are still removed, but no NEW surface is ever "
+            "exposed, so the contact goes under-stiff as the crater grows. "
+            "Remove the SOFT sentinel to keep the eroding behaviour.")
+        if msid == 0:
+            msid, mstyp = ssid, sstyp
+        state.contacts_general.append(
+            ContactAutoGeneral(inter_id, title, ssid, sstyp, msid, mstyp, soft,
+                               fs, fd, bt, dt, ignore, vdc=vdc, sst=sst,
+                               mst=mst, sfs=sfs))
+        return
+
+    state.contacts_type25.append(
+        ContactType25(inter_id, title, ssid, sstyp, msid, mstyp, variant,
+                      eroding=eroding, fs=fs, fd=fd, dc=dc, bt=bt, dt=dt,
+                      vdc=vdc, sfs=sfs, sfm=sfm, sst=sst, mst=mst, fsf=fsf,
+                      isym=isym, erosop=erosop, iadj=iadj, soft=soft,
+                      ignore=ignore, keyword=block.keyword))
+
+
+def handle_define_friction(block: Block, state: ConversionState) -> None:
+    """*DEFINE_FRICTION → /FRICTION (id preserved; see
+    :class:`~k2rad.state.DefineFriction`).
+
+    Card 1: ``ID FS_D FD_D DC_D VC_D [ICNEP]`` — the default coefficients, which
+    become the /FRICTION header row (the fallback for every part pair not
+    listed).
+
+    Card 2 (repeated to the end of the block): ``PIDi PIDj FSij FDij DCij VCij
+    PTYPEi PTYPEj`` — one part pair each. ``PTYPEi/j`` is the literal string
+    ``PSET`` when the id names a *SET_PART; blank means a part id. Rows are kept
+    in deck order, un-expanded and un-deduplicated, exactly as dyna2rad does
+    (``convertfrictions.cxx:107-184``).
+    """
+    toff = _title_offset(block)
+    raw = block.raw[toff:]
+    if not raw:
+        return
+    f1 = _card(raw, 0, fixed=True, n=6, w=10)
+    fric_id = to_int(f1[0]) if f1 else 0
+    if fric_id <= 0:
+        state.warn(
+            "*DEFINE_FRICTION with no (or a non-positive) ID on Card 1 — the "
+            "table cannot be referenced by a *CONTACT FS=-2 and is DROPPED. "
+            "Give the friction definition a positive ID.")
+        state.note_recognized_not_emitted(
+            "DEFINE_FRICTION",
+            "a friction table had no usable ID on Card 1, so no /FRICTION was "
+            "written; contacts that meant to use it fall back to their own "
+            "FS/FD.")
+        return
+    fric = DefineFriction(
+        fric_id=fric_id,
+        title=_read_title(block, f"FRICTION_{fric_id}"),
+        fs=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        fd=to_float(f1[2]) if len(f1) > 2 else 0.0,
+        dc=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        vc=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        icnep=to_int(f1[5]) if len(f1) > 5 else 0,
+    )
+    for ln in raw[1:]:
+        if not ln.strip():
+            continue
+        f = _card([ln], 0, fixed=True, n=8, w=10)
+        pid_i = to_int(f[0]) if f else 0
+        pid_j = to_int(f[1]) if len(f) > 1 else 0
+        if pid_i <= 0 or pid_j <= 0:
+            # Do NOT drop this silently: a fixed-format row written one column
+            # short, or one whose second id field was left blank, otherwise
+            # loses that part pair without a word and it falls back to the
+            # table's default coefficients. The two other drop paths (part /
+            # *SET_PART does not exist, writer/frictions.py) both warn.
+            state.warn(
+                f"*DEFINE_FRICTION {fric_id}: a part-pair row has a blank or "
+                f"non-positive part id (PID_i={pid_i}, PID_j={pid_j}) and is "
+                f"DROPPED — that pair falls back to the table's default "
+                f"FS/FD/DC. Row as read: {ln.rstrip()!r}. Check the row's "
+                "column alignment (both ids are 10-wide fields) if this pair "
+                "was meant to have its own coefficients.")
+            continue
+        fric.pairs.append(FrictionPair(
+            pid_i=pid_i, pid_j=pid_j,
+            fs=to_float(f[2]) if len(f) > 2 else 0.0,
+            fd=to_float(f[3]) if len(f) > 3 else 0.0,
+            dc=to_float(f[4]) if len(f) > 4 else 0.0,
+            vc=to_float(f[5]) if len(f) > 5 else 0.0,
+            pset_i=(f[6].strip().upper() == "PSET") if len(f) > 6 else False,
+            pset_j=(f[7].strip().upper() == "PSET") if len(f) > 7 else False,
+        ))
+    if fric_id in state.define_frictions:
+        state.warn(
+            f"*DEFINE_FRICTION {fric_id} is defined more than once — the LAST "
+            "definition wins (/FRICTION ids are unique). Renumber one of them "
+            "if both tables are meant to be used.")
+    state.define_frictions[fric_id] = fric
+
+
 def handle_contact_tied(block: Block, state: ConversionState) -> None:
     """*CONTACT_TIED_{NODES,SURFACE,SHELL_EDGE}_TO_SURFACE[_OFFSET…] →
     /INTER/TYPE2 (tied kinematic interface).
@@ -4047,6 +4258,9 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
     sstyp = to_int(f1[2]) if len(f1) > 2 else 0
     mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    # Card2: fs fd dc vc vdc penchk bt dt — only FS is kept (see ContactTied.fs)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs_tied = to_float(f2[0]) if f2 else 0.0
     # Card3: sfs sfm sst mst sfst sfmt fsf vsf
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
     sfs  = to_float(f3[0]) if len(f3) > 0 else 0.0
@@ -4066,7 +4280,7 @@ def handle_contact_tied(block: Block, state: ConversionState) -> None:
     state.contacts_tied.append(
         ContactTied(inter_id, title, ssid, sstyp, msid, mstyp, variant,
                     offset=kw.endswith("OFFSET"), sst=sst, mst=mst,
-                    sfs=sfs, sfm=sfm, sfst=sfst, sfmt=sfmt)
+                    sfs=sfs, sfm=sfm, sfst=sfst, sfmt=sfmt, fs=fs_tied)
     )
 
 
@@ -4094,14 +4308,20 @@ _SPOTWELD_VARIANT_LOSS = {
 }
 
 
-def _spotweld_card_offset(raw: List[str], offset: int, mpp: bool) -> int:
-    """First index of the *CONTACT_SPOTWELD mandatory Card 1.
+def _contact_mpp_card_offset(raw: List[str], offset: int, mpp: bool) -> int:
+    """First index of a *CONTACT's mandatory Card 1, past any ``_MPP`` cards.
 
-    ``_MPP`` inserts its own card BEFORE Card 1 (contact_spotweld.cfg: IGNORE
-    BCKT LCBCKT NS2TRK INITITR PARMAX <blank> CPARM8), optionally followed by a
-    second MPP card recognised by a literal ``&`` in COLUMN 1
-    (``CARD_PREREAD("%-1s")``). Miss either and every field of the real card is
-    read one line too early — SSID would come back as the MPP IGNORE flag.
+    ``_MPP`` inserts its own card BEFORE Card 1 (IGNORE BCKT LCBCKT NS2TRK
+    INITITR PARMAX <blank> CPARM8), optionally followed by a second MPP card
+    recognised by a literal ``&`` in COLUMN 1 (``CARD_PREREAD("%-1s")``). Miss
+    either and every field of the real card is read one line too early — SSID
+    would come back as the MPP IGNORE flag.
+
+    The rule is identical in every *CONTACT CFG that offers the option —
+    ``contact_spotweld.cfg`` and ``contact_option_nodes_to_surface.cfg:2414-2434``
+    carry the same two-card block verbatim — so the spotweld and eroding /
+    node-to-surface handlers share this one implementation rather than each
+    guessing at the card count.
     """
     if not mpp:
         return offset
@@ -4139,7 +4359,7 @@ def handle_contact_spotweld(block: Block, state: ConversionState) -> None:
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
     raw = block.raw
-    c1 = _spotweld_card_offset(raw, offset, mpp)
+    c1 = _contact_mpp_card_offset(raw, offset, mpp)
     f1 = _card(raw, c1, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
     msid  = to_int(f1[1]) if len(f1) > 1 else 0
@@ -9013,6 +9233,8 @@ HANDLERS = {
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET": handle_contact_tied,
     # Spot welds → /INTER/TYPE2 Spotflag=28 (the *_SPOTWELD_* spellings are
     # generated below — see _SPOTWELD_CONTACT_KEYWORDS)
+    # Eroding + node-to-surface contacts → /INTER/TYPE25 (the *_MPP spellings
+    # are generated below — see _TYPE25_CONTACT_KEYWORDS)
     # Interior (foam self-) contact → Icontrol on the solid /PROP, which the
     # /BEGIN 2022 property format cannot carry (radioss2025-only column);
     # parsed and resolved so the affected parts are NAMED in the warning.
@@ -9157,6 +9379,28 @@ _SPOTWELD_CONTACT_KEYWORDS = [
 for _kw in _SPOTWELD_CONTACT_KEYWORDS:
     HANDLERS[_kw] = handle_contact_spotweld
 del _kw
+
+# *CONTACT_ERODING_{SINGLE_SURFACE|SURFACE_TO_SURFACE|NODES_TO_SURFACE}{_MPP}
+# and *CONTACT_{<blank>|AUTOMATIC_}NODES_TO_SURFACE{_MPP} — ten spellings
+# (_ID/_TITLE are stripped by the parser, so they need no key of their own).
+#
+# Generated rather than hand-listed for the reason the spotweld grammar is:
+# dispatch() is an exact dict lookup with no CONTACT_ prefix fallback, so a
+# missing spelling lands in skipped_keywords — and a skipped *CONTACT is not a
+# missing output card, it is a missing LOAD PATH. The _MPP flavours matter here
+# in particular because the two eroding families in the reference corpus (W9
+# missile, W11 bird strike) are impact decks, which is exactly where an MPP
+# deck is likely to come from.
+_TYPE25_CONTACT_KEYWORDS = [
+    f"{_base}{_mpp}"
+    for _base in _TYPE25_CONTACT_BASES
+    for _mpp in ("", "_MPP")
+]
+for _kw in _TYPE25_CONTACT_KEYWORDS:
+    HANDLERS[_kw] = handle_contact_type25
+del _kw
+
+HANDLERS["DEFINE_FRICTION"] = handle_define_friction
 
 # *MAT_SIMPLIFIED_RUBBER/FOAM{_WITH_FAILURE}{_LOG_LOG_INTERPOLATION} and
 # *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE{_LOG_LOG_INTERPOLATION}, over every base

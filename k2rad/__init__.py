@@ -170,6 +170,7 @@ def convert(
     ams: bool = False,
     shell_formulation: str = "qbat",
     dt_del: Optional[float] = None,
+    eroding_surf_ext: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -275,6 +276,17 @@ def convert(
         (back to /DT/NODA/CST) or lower ``|DT2MS|``. Implies ``rigid_cog_master``
         (a whole-part rigid body's master must be element-free or AMS errors with
         ERROR 1066). Off by default.
+    eroding_surf_ext : bool
+        Build the SOLID side of an ``*CONTACT_ERODING_*`` from
+        ``/SURF/PART/EXT`` (external skin only) instead of the default
+        ``/SURF/PART/ALL``. Off by default, because /ALL is what makes eroding
+        contact work: the starter marks each interior (two-solid) face dormant
+        with a negative stiffness and the engine wakes it the moment one of its
+        solids dies, which is LS-DYNA's IADJ=1 / EROSOP=1 behaviour. With /EXT
+        the newly exposed crater face has no contact segment at all, and the
+        solver says nothing about it. Turn this on only to reproduce LS-DYNA
+        SMP's literal IADJ=0, or if the extra interior segments make the
+        contact sort too expensive.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -336,6 +348,7 @@ def convert(
         ams=ams,
         shell_formulation=shell_formulation,
         dt_del=dt_del,
+        eroding_surf_ext=eroding_surf_ext,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(
