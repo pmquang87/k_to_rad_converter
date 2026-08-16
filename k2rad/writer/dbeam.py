@@ -44,7 +44,7 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-from ..state import ConversionState, BeamElem
+from ..state import ConversionState, BeamElem, SectionBeam
 from .common import HDR, _i, _discrete_beam_pids
 from .loads import (
     SpringDof, _curve_slope_at_origin, _emit_funct, _emit_prop_type8,
@@ -744,15 +744,22 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         secid = part.secid if part.secid > 0 else pid
         sec = state.sec_beams.get(secid)
         label = f"*SECTION_BEAM {secid} (ELFORM=6) part {pid}"
-        if sec is None or sec.elform != 6:
+        wrong_section = sec is None or sec.elform != 6
+        if wrong_section:
+            # The part was CLAIMED (its material is a discrete-beam material),
+            # so nothing else will write it — skipping here would delete the
+            # /PART along with every *SET_PART member and /GRNOD/PART scope
+            # that names it. An inert connector on a synthesized empty section
+            # keeps the deck startable and the ids addressable.
             state.warn(
                 f"Discrete-beam part {pid}: its material is a discrete-beam "
-                f"material but *SECTION_BEAM {secid} is "
+                f"(6-DOF spring) material but *SECTION_BEAM {secid} is "
                 + ("missing" if sec is None else f"ELFORM={sec.elform}, not 6")
-                + f" — {len(beams)} element(s) NOT converted. A discrete-beam "
-                "material only means anything on an ELFORM=6 section (that is "
-                "where VOL, INER and CID live).")
-            continue
+                + f", so there is no VOL/INER/CID to size the connector with — "
+                f"its {len(beams)} element(s) were written as an INERT /SPRING "
+                "(zero stiffness, token mass) and the material is LOST. Put "
+                "the discrete-beam material on an ELFORM=6 section.")
+            sec = SectionBeam(secid, "", 6)
 
         fid_alloc = state.next_curve_id
         mat066 = state.mat_dbeam_linear.get(part.mid)
@@ -793,6 +800,12 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         else:
             rho = state.mat_unsupported_dbeam.get(part.mid, ("", 0.0))[1]
             built = _unsupported_payload(state, label, part.mid)
+        if wrong_section:
+            # Already reported above; nothing the material states can be sized
+            # or oriented without the ELFORM=6 card.
+            rho, ileng, force_type13 = 0.0, 0, False
+            built = ([SpringDof() for _ in range(6)], 0, 0, [],
+                     "unsized discrete beam")
         dofs, ifail, ifail2, funct_lines, kind = built
 
         # ── frame: TYPE13 (node oriented) vs TYPE8 (skew oriented) ──────────
@@ -800,7 +813,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         if sec.cid:
             skew_id = _resolve_section_skew(state, label, sec.cid)
         use13 = force_type13 or abs(sec.scoor) == 2.0 or not skew_id
-        if force_type13 and skew_id:
+        if wrong_section:
+            pass                       # the cause is already named
+        elif force_type13 and skew_id:
             state.warn(f"{label}: CID={sec.cid} is not used — {kind} acts "
                        "along the element's own axis (node1->node2), so the "
                        "connector is a node-oriented /PROP/TYPE13 and the "
@@ -823,14 +838,15 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         else:
             mass = rho * sec.vol
         if mass <= 0.0:
-            state.warn(f"{label}: RO={rho:g} x "
-                       + (f"CA={sec.ca:g}" if mat071 is not None
-                          else f"VOL={sec.vol:g}")
-                       + f" gives a non-positive connector mass — the token "
-                       f"mass {_TOKEN_MASS:g} was used instead so the "
-                       "explicit time step stays finite. Fill in the "
-                       "*SECTION_BEAM card 2f if the connector's inertia "
-                       "matters.")
+            if not wrong_section:
+                state.warn(f"{label}: RO={rho:g} x "
+                           + (f"CA={sec.ca:g}" if mat071 is not None
+                              else f"VOL={sec.vol:g}")
+                           + f" gives a non-positive connector mass — the token "
+                           f"mass {_TOKEN_MASS:g} was used instead so the "
+                           "explicit time step stays finite. Fill in the "
+                           "*SECTION_BEAM card 2f if the connector's inertia "
+                           "matters.")
             mass = _TOKEN_MASS
         inertia = _resolve_inertia(state, label, sec.iner, sec.vol, mass,
                                    length)

@@ -860,6 +860,22 @@ class UnmappedDiscreteBeamTests(unittest.TestCase):
             float(_block_lines(starter, "/PROP/TYPE13/")[3][0:20]),
             7.8e-9 * 100.0)
 
+    def test_discrete_beam_material_on_a_non_elform6_section(self):
+        """The part is CLAIMED by the connector path (its material is a
+        6-DOF spring material), so skipping it would delete the /PART along
+        with every *SET_PART member that names it. An inert connector keeps
+        the deck startable and the ids addressable."""
+        deck = _dbeam_deck(MAT066, card1_tail="").replace(
+            "         3         6\n     100.0       5.0         0\n",
+            "         3         2\n       4.0       1.2       1.2       2.4\n")
+        result, starter = _convert(deck)
+        self.assertTrue(any("ELFORM=2, not 6" in w for w in result.warnings))
+        self.assertTrue(any("INERT /SPRING" in w for w in result.warnings))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[5][0:20].strip(), "0")     # no stiffness
+        self.assertIn("\n/PART/7\n", starter)
+        self.assertIn("\n/SPRING/7\n", starter)
+
     def test_unknown_material_on_an_elform6_section_still_warns(self):
         result, starter = _convert(_dbeam_deck(
             "*MAT_ELASTIC\n         9    7.8E-9  210000.0       0.3\n",

@@ -11,6 +11,280 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Discrete spring/damper + discrete-beam materials batch**
+  (`*MAT_SPRING_ELASTOPLASTIC` S03, `*MAT_DAMPER_NONLINEAR_VISCOUS` S05,
+  `*MAT_SPRING_GENERAL_NONLINEAR` S06, `*MAT_SPRING_INELASTIC` S08;
+  `*MAT_LINEAR_ELASTIC_DISCRETE_BEAM` 066, `*MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM`
+  067, `*MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM` 068, `*MAT_CABLE_DISCRETE_BEAM`
+  071, `*MAT_ELASTIC_SPRING_DISCRETE_BEAM` 074,
+  `*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM` 119,
+  `*MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM` 121,
+  `*MAT_GENERAL_SPRING_DISCRETE_BEAM` 196; plus `*MAT_069`/`070`/`093`/`094`/
+  `095`/`097`/`146` as recognised-but-unmappable) — the roadmap P1 "Discrete
+  spring/damper + discrete-beam mats" item. **All were `SKIPPED` before**, and
+  an `ELFORM=6` `*SECTION_BEAM` only warned that the `/PROP/BEAM` k2rad wrote
+  from it would be refused with starter `ERROR 314-317`. Numeric aliases
+  (`MAT_S03`/`S05`/`D02`/`S06`/`S08`, `MAT_066`/`66` … `MAT_196`) and
+  `*INCLUDE_TRANSFORM` offset specs registered for every spelling, including a
+  bespoke walker for `*MAT_196`'s repeating card PAIRS (its curve ids sit on the
+  second card of each pair, so a flat `data` spec would offset the DOF/TYPE
+  integers too) and the `*SECTION_BEAM` card-2f `CID` under `IDDOFF`.
+
+  **The batch's defining decision: k2rad emits the PROPERTY-driven twin of
+  dyna2rad's material-driven pair.** dyna2rad sends every one of these to
+  `/PROP/TYPE23` (SPR_MAT) plus `/MAT/LAW108` (SPR_GENE) or `/MAT/LAW113`
+  (SPR_BEAM), switching on `SCOOR = ±2` (`convertmats.cxx:3359-3376`, the same
+  17-line block copied into `p_ConvertMatL66/67/68/119/121`). The card BODY of
+  LAW108 is byte-identical to `/PROP/TYPE8`'s six DOF blocks and LAW113's to
+  `/PROP/TYPE13`'s, with an absolute `Mass`/`Inertia` in place of `RHO` and
+  TYPE23's `Volume`; the orientation is the same both ways (`rinit3.F:703` sends
+  TYPE23+LAW108 and TYPE8 to the same frame builder `R2BUF3`, TYPE23+LAW113 and
+  TYPE13 to `R4BUF3`). The property route additionally sidesteps TYPE23's own
+  rules — `hm_read_part.F` makes a `MID = 0` on a TYPE23 part `ERROR 179` and a
+  law other than 108/113/114/135 `ERROR 1715` — because TYPE4/8/13 need no
+  material at all, so every connector `/PART` is written with `mat_id 0`, the
+  pattern the MAT_100 spotweld connectors already use.
+
+  **The one place the two routes genuinely differ, measured in the starter
+  source: `A`.** `/PROP/TYPE4`, `/PROP/TYPE8` and `/PROP/TYPE13` all store the
+  stiffness as `K / A` (`hm_read_prop04.F:249`, `hm_read_prop08.F:282,410,537,
+  667,794,922`, `hm_read_prop13.F:295,450,605,777,930,1083`), which exactly
+  cancels the `·A` the engine applies in the no-function branch of
+  `redef3.F90:1148`. `/MAT/LAW108` stores `XK` raw (`hm_read_mat108.F:271`) and
+  does NOT cancel. So dyna2rad's `A1 = 1e-20` trick for `*MAT_S04`'s `LCR`
+  (`convertprops.cxx:974`, which makes `F = f(δ)·[A + E·g] ≈ f·g`) is a LAW108-
+  only device: written on a property-driven spring it would multiply the
+  time-step stiffness by 1e20 and collapse `dt` at cycle 0. `LCR` therefore
+  stays warn-dropped, now saying exactly that, and the per-element force scale
+  `S` on a nonlinear spring pre-multiplies `K` by `S²` so the stored `K/A` is
+  the true scaled tangent `S·K` (it used to store `K/S`, understating the
+  time-step stiffness by `S²`).
+
+  - **`*MAT_SPRING_ELASTOPLASTIC` (S03) → `/PROP/TYPE4` `K1 = K`, `H1 = 1`**
+    plus a synthesized symmetric 5-point elastic-plastic `/FUNCT`
+    `(-(FY/K+1), -(FY+KT)) (-FY/K, -FY) (0,0) (FY/K, FY) (FY/K+1, FY+KT)` —
+    dyna2rad's shape (`convertprops.cxx:914-935`), i.e. an elastic branch of
+    slope `K` to the yield force and a plastic branch of slope `KT` carried one
+    displacement unit past yield (Radioss extrapolates the last segment). A
+    blank or non-positive `K`/`FY` is warn-skipped instead of producing the
+    `inf`/`NaN` abscissae dyna2rad's unguarded `FY/K` gives.
+  - **`*MAT_DAMPER_NONLINEAR_VISCOUS` (S05) → `fct_ID41 = LCDR`**, the `h(δ̇)`
+    additional-damping-force slot, with `Hscale1` left 0 (reader default 1.0) —
+    LS-DYNA's `F = LCDR(δ̇)` exactly. `K`/`C` stay 0; the whole force comes from
+    the function. dyna2rad also sets `destCard = "/PROP/TYPE8"` on this branch
+    (`convertprops.cxx:989`), which has no effect at all — the TYPE23 was
+    already instantiated 130 lines earlier.
+  - **`*MAT_SPRING_GENERAL_NONLINEAR` (S06) → `fct_ID11 = LCDL`,
+    `fct_ID31 = LCDU`, `H1 = 6`.** `H=6` with a blank `fct_ID31` is starter
+    `ERROR 1057` (`hm_read_prop04.F:171`, and the identical guard in
+    `hm_read_mat108.F`), so a missing `LCDU` DEMOTES the flag to `H=0` with a
+    warning rather than shipping a deck that cannot start — dyna2rad writes
+    `H=6` unconditionally. `BETA`/`TYI`/`CYI` are warn-dropped naming what each
+    means; Radioss's kinematic flag `H=4` is deliberately never emitted (it is
+    `ERROR 230` on LAW108/113 unconditionally and on TYPE4 whenever `K=0`).
+  - **`*MAT_SPRING_INELASTIC` (S08) → `K1 = KU`, `H1 = 1`, `fct_ID11` = the
+    mirrored `LCFD`.** `LCFD` is defined in the POSITIVE quadrant only whatever
+    the tension/compression sense, so it is reflected per `CTF` (`-1` tension
+    only → prepend `(-1, 0)`; `+1` compression only, the LS-DYNA default →
+    reflect through the origin and close with `(+1, 0)`), reproducing
+    `HandleCurveLCFD` (`convertprops.cxx:1066-1128`). **`H1 = 1` is a
+    deliberate deviation:** LS-DYNA S08 unloads along `max(KU, max loading
+    slope)`, which is precisely Radioss `H=1`; dyna2rad never sets the flag
+    (`convertprops.cxx:1000-1028`), leaving an INELASTIC spring converted as a
+    nonlinear ELASTIC one that dissipates nothing. A blank `KU` demotes back to
+    `H=0` with a warning, because there would be no slope to unload along.
+  - **`*SECTION_DISCRETE` `DRO=1` (torsional) is now converted.** It used to be
+    a warn-and-skip. `/PROP/TYPE4` is purely translational, so the payload moves
+    to local DOF 4 (Rx) of a 6-DOF property: `/PROP/TYPE13`, whose local X is
+    `node1→node2` by construction (`r4buf3.F:145`), so the torsion acts about
+    the element's own axis; or DOF 4 of the oriented `/PROP/TYPE8` when the
+    element carries a `*DEFINE_SD_ORIENTATION`, whose skew's local X IS the
+    orientation axis. LS-DYNA already states a `DRO=1` spring in moment per
+    radian, so nothing is rescaled — only the DOF changes, which is also all
+    dyna2rad does (`(lsdDRO == 0) ? "K1" : "K4"`, and it never touches DOF 5/6
+    either). Zero-length and grounded (`N2=0`) torsional elements are
+    warn-skipped: there is no axis to twist about, and `r4buf3.F` answers
+    `WARNING 325`. `KD`/`V0` (the `F=(1+KD·V/V0)·F_static` dynamic
+    magnification) and `CL` (clearance, which makes the LS-DYNA spring
+    compression-only with `CL` of free travel first) now warn INDIVIDUALLY and
+    name what the converted spring does instead; dyna2rad drops `KD`, `V0`,
+    `CL`, `FD`, `CDL` and `TDL` silently (grep-verified over its whole tree).
+
+  **Discrete beams — `*SECTION_BEAM` `ELFORM=6`.** The section's card 2f
+  (`VOL INER CID CA OFFSET RRCON SRCON TRCON`, Manual Vol I R17 p.41-20) is now
+  read; `SectBeam.cfg`'s `COMMENT` mislabels fields 4/5 as `DOFN1`/`DOFN2` (that
+  is card 2g, the `*MAT_146` dialect) while its `CARD` spec binds `LSD_CA` /
+  `LSD_OFFSET`, which is what the manual says and what k2rad reads. Card 1's
+  `SCOOR` is read too. The part is claimed by a new connector writer
+  (`k2rad/writer/dbeam.py`), so it never reaches `_make_properties` — an
+  `ELFORM=6` section states no cross-section at all, so its `/PROP/BEAM` is
+  `ERROR 314` (AREA), `315` (IYY), `316` (IZZ) and `317` (IXX). The section is
+  suppressed by the same `spotweld_only_secids` construct the ELFORM-9 welds
+  use, and the parts join the `_warn_beam_type3_material` exclusion set, so a
+  discrete-beam part is no longer reported as "no `/MAT` at all".
+
+  **Frame rule (stated positively rather than as dyna2rad's law switch).**
+  `|SCOOR| = 2` means "node 1/2 rotates AND the r-axis is realigned along
+  n1→n2" — that IS `/PROP/TYPE13`, it is what `*MAT_066/067/068/196` require for
+  a finite-length discrete beam, and it is exactly the test dyna2rad makes to
+  pick LAW113. Otherwise a resolvable `CID` gives a real triad →
+  `/PROP/TYPE8` with that `/SKEW`. Otherwise `/PROP/TYPE13` again, **with a
+  warning**, because a TYPE8 with no skew falls back to the GLOBAL axes —
+  dyna2rad's `convertprops.cxx:1471` leaves `skew_ID` 0 whenever the CID does
+  not resolve and the local frame is silently lost. `*MAT_071` and `*MAT_074`
+  are always TYPE13 (both act along the element), matching dyna2rad's
+  unconditional LAW113. A `CID` that names no converted
+  `*DEFINE_COORDINATE_SYSTEM/_NODES/_VECTOR` is warn-dropped rather than written
+  (an unresolved `skew_ID` is `ERROR 137`).
+
+  **Mass model.** `Mass = RO·VOL` (LS-DYNA's `Imass=2` equivalent), except the
+  cable, which is `RO·CA` with `Ileng=1` — `rinit3.F:408-412` makes the TYPE8/13
+  `Mass` field a mass PER UNIT LENGTH when `Ileng > 0`, so `RO·CA·L` comes out
+  right and the stiffness and curve abscissae become strains, which is what a
+  cable wants. `INER = -1` ("compute it as a solid sphere of volume VOL") is
+  resolved exactly, `INER = -2` ("pick it so the rotational time step matches
+  the translational one", `*MAT_196` only) as the lumped `m·L²/12` with a
+  warning. `OFFSET`, `RRCON`, `SRCON` and `TRCON` are warn-dropped naming what
+  each does; dyna2rad drops them silently.
+
+  - **`*MAT_066` → K1..K6 = `TKR TKS TKT RKR RKS RKT`, C1..C6 =
+    `TDR … RDT`** (`p_ConvertMatL66`, CM:3352-3481 — `r,s,t → 1,2,3` and
+    `4,5,6` straight through, no axis swap anywhere in the family). A non-zero
+    preload becomes a 2-point stiffness function `(0, P) (1, K+P)` whose
+    y-intercept IS the preload; a zero preload creates no curve, so `FOR…MOT`
+    are only lost where they are already zero.
+  - **`*MAT_067` → `fct_ID1i = LCIDTR…LCIDRT`, `fct_ID4i = LCIDTDR…LCIDRDT`**
+    with `Hscale_i = 1` on the damped DOFs (`p_ConvertMatL67`, CM:3483-3707). A
+    loading curve that starts at `x ≥ 0` is extended by ODD symmetry into the
+    third quadrant (Radioss reads a spring function over the whole deformation
+    range and extrapolates its end segments), and a preload is added to every
+    ORDINATE — dyna2rad puts MAT_068's and MAT_196's preload on the ABSCISSA
+    instead, a 7-argument `CreateCurve` call where the 8-argument one was meant
+    (`convertmats.cxx:3827`, `:6603`), which shifts a displacement by a force.
+    **`K` is taken from the slope of the loading curve at the origin**: MAT_067
+    states no stiffness, and a `K=0` spring contributes nothing to the explicit
+    time step (`r1len3.F:81-105` only fills `STI` when `XK` or `XC` is
+    non-zero); with `H=0` the force still comes entirely from the function, so
+    `K` is free to carry the tangent. dyna2rad leaves it 0.
+  - **`*MAT_068` → MAT_066's K/C plus `LCPDR…LCPMT` on `fct_ID1i` with
+    `H_i = 1`** (`p_ConvertMatL68`, CM:3709-3887). The curve abscissae are
+    PLASTIC displacement and gain the elastic part `F/K` to become the TOTAL
+    displacement Radioss reads, then are mirrored through the origin
+    (`ConvertPlasticDispPointsTotalDisp`, CM:8862-8921). Only emitted where the
+    DOF has a stiffness, since the conversion divides by it. dyna2rad's absolute
+    `+0.01` monotonicity patch is a unit-dependent magic number; k2rad uses a
+    `1e-9` tie-break instead. `RYLD` (card 2 cols 61-70, `Keyword971_R12.0` only)
+    is read and warn-dropped.
+  - **Failure criteria.** `*MAT_067` prefers the DISPLACEMENT limits
+    (`UFAIL*`/`TFAIL*`) and `*MAT_068` the FORCE ones (`FFAIL*`/`MFAIL*`) — a
+    real dyna2rad inconsistency (CM:3680 vs :3848) that k2rad keeps, because it
+    is each material's documented behaviour. What k2rad does NOT keep is 067's
+    detection test: dyna2rad checks `sum > 0` there, so mixed-sign entries can
+    cancel and suppress the whole failure block, while 068 checks `any ≠ 0`;
+    k2rad always checks "any non-zero". Limits are written as `(-|v|, +|v|)`,
+    not dyna2rad's `(-v, +v)` — the CFG constrains `MIN_RUP <= 0` and a negative
+    input would otherwise invert its own interval. `Ifail = 1`
+    (multi-directional) on 067/068/119, `Ifail2 = 1` for displacement and `2`
+    for force.
+  - **`*MAT_071` (cable) → a TENSION-ONLY `/PROP/TYPE13` DOF 1 with
+    `Ileng = 1`.** `E < 0` means the value already IS the stiffness; `E > 0`
+    gives `K = E·CA` with `CA` from the section's card 2f (dyna2rad reads that
+    `CA` into an UNINITIALISED local, `convertmats.cxx:4156`). The force
+    function is `(-1,0) (0,0) (1,K)` — flat in compression, so the cable goes
+    slack. **The pretension is applied as a shifted SLACK POINT, not a plain
+    ordinate offset**: LS-DYNA's law is `F = max(F0 + K·strain, 0)`, so the flat
+    branch has to end at `strain = -F0/K`; dyna2rad's `Fshifty = F0`
+    (`convertmats.cxx:4205`) loses the `max` and leaves the cable PUSHING with
+    `F0` in compression. A user `LCID` is shifted and then clamped at zero with
+    the exact crossing inserted. `TMAXF0 ≠ 0` (time-limited pretension) drops
+    the offset entirely, as dyna2rad does — a Radioss spring carries it for the
+    whole run or not at all. `TRAMP` and the `IREAD > 0` card 2
+    (`OUTPUT/TSTART/FRACL0/MXEPS/MXFRC`) are warn-dropped.
+  - **`*MAT_074` → `K→K1`, `D→C1`, `-|CDF|→DeltaMin1`, `TDF→DeltaMax1`,
+    `FLCID→fct_ID11`, `HLCID→fct_ID21`, `C2→B1`, `C1→E1`, `DLE→D1`.** Two
+    dyna2rad defects are not reproduced: it maps `D` to the cfg ATTRIBUTE `C1`,
+    which on LAW113 is the relative-velocity coefficient `c1` on the tail cards
+    and not the damping (`convertmats.cxx:4345` — the exact trap its own author
+    guarded against 100 lines earlier with `//DAMP1...DAMP6 are used because
+    C1...C6 are variables in the cfg`), and it puts the whole `DLE`/`C1`/`C2`/
+    `GLCID` block INSIDE `if (FLCID valid)`, so a blank `FLCID` silently loses
+    the rate law. k2rad writes by COLUMN, so `D` lands in the damping column by
+    construction, and the rate terms apply unconditionally. `F0` with no `FLCID`
+    becomes a 3-point line of slope `K` through `(0, F0)`. `GLCID` is
+    warn-dropped: dyna2rad writes it to a `fct_ID51` field that does not exist
+    on LAW113 at any format version, so it is lost there too.
+  - **`*MAT_119` → `fct_ID1i` loading / `fct_ID3i` unloading / `fct_ID4i`
+    damping, `K1..3 = KT`, `K4..6 = KR`, `+UTFAIL*`/`-UCFAIL*`.**
+    `IUNLD → H` is `0→0`, `1→6`, `2→7`, **`3→5`** — dyna2rad maps `3` only for
+    `*MAT_121` (CM:6062) and leaves MAT_119's `IUNLD=3` springs purely elastic,
+    though the LS-DYNA option means the same thing on both cards. A DOF whose
+    unloading curve is absent or identical to its loading curve is written as
+    nonlinear elastic with `fct_ID3i` cleared (dyna2rad's rule at CM:5795), and
+    every remaining `H ∈ {5,6,7}` is guarded against the starter's hard errors
+    (`231` / `1057` / `1058`) before the card is written. `IFLAG → Iequil` is
+    NOT reproduced: LS-DYNA's `IFLAG` is a local-frame/strain formulation flag
+    and Radioss's `Iequil` the force/moment equilibrium flag, so `IFLAG=2`
+    (crushable-frame buckling, whose cards 9-15 no Radioss spring law can hold)
+    and `IUNLD=2`'s card-15 unloading stiffnesses are reported instead. Card 5's
+    `LCIDTE*` elastic-scale curves, `OFFSET`, `DAMPF` and `FCRIT` are
+    warn-dropped naming what each does. Cards 9-15 are absent from the shipped
+    `Keyword971/MAT/mat_119.cfg`, which also omits `FCRIT`; both are read from
+    the manual's columns.
+  - **`*MAT_121` → the 1-DOF flavour** (`K→K1`, `LCIDT→fct_ID11`,
+    `LCIDTU→fct_ID31`, `LCIDTD→fct_ID41`, `UTFAIL→DeltaMax1`,
+    `-UCFAIL→DeltaMin1`, `H1` from `IUNLD` with the same override and guards).
+    `LCIDTE`, `OFFSET` and `DAMPF` are warn-dropped.
+  - **`*MAT_196` → one card PAIR per active DOF, each filling the slot it
+    names** (`K→Ki`, `D→Ci`, `C2→Bi`, `DLE→Di`, `C1→Ei`, `-|CDF|`/`+|TDF|`,
+    `HLCID→fct_ID2i`, `FLCID→fct_ID1i`). `TYPE ≠ 0` (inelastic) runs the same
+    plastic→total displacement conversion as MAT_068 **and sets `H_i = 1`** —
+    dyna2rad never sets `H` here (CM:6549-6613), leaving an inelastic DOF
+    converted as nonlinear elastic. It also reads `FLCID` with a FIXED index
+    `(…, 0, 0)`, i.e. the first DOF's curve reused for every DOF; k2rad reads
+    each pair's own. `MDFAIL` (0 = largest deflection/limit ratio over all DOFs,
+    1 = separate tension/compression, 2 = combined) and `DOSPOT` are absent from
+    the shipped `mat_196.cfg` — both are read from the manual's columns and
+    warn-reported, since Radioss offers only `Ifail` 0/1 and the per-DOF limits
+    are checked independently.
+  - **`*MAT_069`/`070`/`093`/`094`/`095`/`097`/`146` are RECOGNISED and
+    warn-dropped**, each naming the device the deck loses (the tabulated
+    orifice/piston damper, the hydraulic+gas strut law, the 6-DOF elastic spring
+    with per-DOF unloading, the 1-/6-DOF inelastic springs with yield offsets,
+    the penalty-stiffness general joint — which should be a
+    `*CONSTRAINED_JOINT_*` instead, k2rad's `/PROP/TYPE45` path — and the
+    generalized 1-DOF spring between two arbitrary nodal DOFs). MID and `RO` are
+    parsed so the connector still gets its real lumped mass; the `/PROP` and
+    `/SPRING` are written with every DOF inert, so the run starts and the
+    elements stay addressable. dyna2rad has no `case` for any of them: they fall
+    to its `default:` branch, which builds the target card name by POINTER
+    ARITHMETIC on a string literal (`convertutils.cxx:1011`, `const char* +
+    unsigned`) and produces no usable `/MAT` — silently, because the
+    unsupported-material error at `convertmats.cxx:530` is commented out.
+  - **Element side.** `*ELEMENT_BEAM` on a discrete-beam part becomes a
+    `/SPRING` row keeping the beam EID and the third node verbatim (dyna2rad
+    `resize(2)`s the connectivity and DISCARDS N3 unless the `_ORIENT` option is
+    used, `convertelements.cxx:171-231`); the family joins
+    `_spring_eid_families`, so an id it shares with the `*ELEMENT_DISCRETE`,
+    spotweld-beam or PLOTEL springs is reported before the starter answers
+    `ERROR 79`. A node-oriented connector whose beams carry no third node warns
+    that the axial DOF is still right but the shear/bending pair may be rotated
+    about it.
+
+  **Corpus census + sweep.** A structured scan of the 628 unique
+  `.k`/`.key`/`.dyn`/`.inc` files across the repo, `E:\openradioss_run` (incl.
+  `Ryan_Lee_Examples` and `ls-dyna_example`) and `E:\foxcore_data` finds **zero**
+  hits for every keyword in this batch: no `*SECTION_BEAM` with `ELFORM=6`, no
+  `*MAT_066/067/068/069/070/071/074/093/094/095/119/121/196`, and none of the
+  `*MAT_S03/S05/S06/S08` spellings. The 201-deck byte-identity sweep (the 73
+  repo decks, the 127-deck `Ryan_Lee_Examples` tree and the one
+  `ls-dyna_example` deck) is therefore a **pure no-movement check**, and the
+  only decks that can move at all are the Yaris and Camry, whose suspension
+  springs are `*MAT_SPRING_ELASTIC` / `_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS`
+  on `DRO=0` sections with blank `S`/`VID`/`OFFSET` — every field this batch
+  touches is at its pre-existing default there. All the evidence is therefore in
+  the 78 new column-exact tests plus the two byte-identity canaries in
+  `tests/test_discrete_springs.py::ByteIdentityTests`.
+
 - **Impact / blast materials batch** (`*MAT_JOHNSON_HOLMQUIST_CERAMICS` 110,
   `*MAT_JOHNSON_HOLMQUIST_CONCRETE` 111, `*MAT_ELASTIC_FLUID` 001+`_FLUID`) —
   the roadmap P1 "Impact/blast mats" item. All were `SKIPPED` before. Numeric
