@@ -34,6 +34,20 @@ that converter's expression uses the token 'NU' where the attribute is spelled
 'Nu', identifier lookup is case-sensitive, and an unresolved token silently
 becomes 0 (convertutilsbase.cxx:192), so it loses Poisson's ratio entirely.
 
+Two fields are NOT straight copies, and each is pinned from both ends. PHEL: a
+blank/0 PHEL is a documented LS-DYNA derivation request ("These are calculated
+automatically by LS-DYNA if p_hel is zero on input", Vol II R16 p.2-764), which
+Radioss does not implement, so the test Newton-solves
+HEL = K1*mu + K2*mu^2 + K3*mu^3 + (4/3)*G*mu/(1+mu) itself -- mu_hel =
+0.07837428750607 and PHEL = 1.0263112948920e10 for the card in use -- and
+asserts the emitted field against that, plus that a stated PHEL is untouched
+and that an underivable card still draws the hard warning. EPS0: it is a
+1/TIME quantity and k2rad rescales nothing, so the value substituted for an
+unusable EPS0 is asserted to be 1 s^-1 expressed in the DECK's time unit (1.0
+on Mg-mm-s, 1e-3 on ms, 1e-6 on us), with the label parser checked against the
+starter's own rule (unit_code.F:99-143: at most three characters, last one 's')
+including the labels it rejects.
+
 Where a conversion turns on what an LS-DYNA field MEANS rather than on
 arithmetic -- MAT_110's FS being inexpressible at /BEGIN 2022 because LAW79's
 IDEL/EPSMAX are radioss2023 fields, MAT_111's FS mapping onto a DIFFERENT
@@ -44,7 +58,11 @@ ERROR / 0 WARNING, PHEL <= 0 passing LAW79's only guard (PHEL > HEL) and then
 poisoning T* with Inf, VC being a dimensionless tensor-viscosity coefficient
 rather than the kinematic viscosity its Radioss slot expects, and a defaulted
 CP = 1e20 meaning "no cavitation limit" rather than a finite one -- the
-assertion pins the warning that states it.
+assertion pins the warning that states it. The CP sentinel additionally has to
+be unit-INVARIANT, since 1e20 is a raw literal a unit converter rescales: the
+corpus bird-strike fluid carries CP = 1e20 with K = 2.2e9 in its kg-m-s copy
+and CP = 1e14 with K = 2200 in the ton-mm-s one, the same material, and both
+are asserted to emit the same Pmin.
 
 Several dyna2rad defects are FIXED consciously and asserted as fixes:
 MAT_110's FS is dropped SILENTLY there at every format version (it is absent
@@ -436,7 +454,13 @@ class TestMat110Guards(unittest.TestCase):
         self.assertEqual(_col_f(mat[3], 1, 20), 0.007)      # C untouched
         hits = _warns(res, "ERROR 910")
         self.assertEqual(len(hits), 1)
-        self.assertIn("k2rad writes EPS0 = 1.0", hits[0])
+        # EPS0 is a 1/TIME quantity (Vol II R16 *MAT_015: "input in units of
+        # [time]^-1"), so the substituted value has to name its unit. On the
+        # default Mg-mm-s deck 1 s^-1 IS 1.0, so the emitted number is
+        # unchanged; TestEps0UnitDependence pins the ms/us cases.
+        self.assertIn("k2rad writes EPS0 = 1 per the deck's time unit 's' "
+                      "(= 1 s^-1)", hits[0])
+        self.assertIn("sigeps79.F:178-182", hits[0])
 
     def test_eps0_zero_with_C_zero_is_left_alone(self):
         # hm_read_mat79.F:159 IF(CC==ZERO) EPS0 = ONE -- the starter fixes it
@@ -448,15 +472,73 @@ class TestMat110Guards(unittest.TestCase):
         self.assertEqual(_col_f(mat[3], 21, 40), 0.0)
         self.assertEqual(_warns(res, "ERROR 910"), [])
 
-    def test_phel_zero_warns_about_the_silent_Inf(self):
-        # The ONLY LAW79 guard on PHEL is PHEL > HEL (ERROR 907), so PHEL = 0
-        # passes with 0 errors / 0 warnings and makes T* = TMAX/0.
+    def test_phel_zero_is_derived_the_way_LS_DYNA_derives_it(self):
+        # A blank/0 PHEL is a DOCUMENTED LS-DYNA input mode, not a malformed
+        # card: Vol II R16 p.2-763/764 -- "Given HEL and G, mu_hel can be found
+        # iteratively from HEL = k1*mu + k2*mu^2 + k3*mu^3 + (4/3)*g*mu/(1+mu)"
+        # and "These are calculated automatically by LS-DYNA if p_hel is zero
+        # on input."  Radioss has no such derivation (hm_read_mat79.F:211 just
+        # divides), so the converter has to reproduce it or the emitted deck
+        # runs with T* = T/0 and P* = P/0 while the starter reports 0 ERROR /
+        # 0 WARNING.
+        #
+        # Hand-solved for THIS card (K1 = 130.95e9, G = 90.16e9, K2 = K3 = 0,
+        # HEL = 19e9), independently of the implementation:
+        #   f(mu) = 130.95e9*mu + (4/3)*90.16e9*mu/(1+mu) - 19e9 = 0
+        # Newton from mu = 0.08 converges to mu_hel = 0.07837428750607,
+        # whence PHEL = K1*mu = 1.0263112948920e10 and
+        # sigma_HEL = 1.5*(19e9 - PHEL) = 1.3105330576620e10.
+        k1, g, hel = 130.95e9, 90.16e9, 19.0e9
+        mu = 0.08
+        for _ in range(60):
+            f = k1 * mu + (4.0 / 3.0) * g * mu / (1.0 + mu) - hel
+            df = k1 + (4.0 / 3.0) * g / (1.0 + mu) ** 2
+            mu -= f / df
+        phel = k1 * mu
+        self.assertAlmostEqual(mu, 0.07837428750607, places=12)
+        self.assertAlmostEqual(phel, 1.0263112948920e10, delta=1.0)
+
         c2 = (1.0, "0.2E9", 0.8, "19E9", 0.0, 1.0)
-        res, _ = _convert(MESH(110) + _mat110(c2=c2) + "*END\n")
+        res, starter = _convert(
+            MESH(110) + _mat110(c2=c2, fs=0.0) + "*END\n")
+        mat = _cards(_block(starter, "/MAT/LAW79/110"))
+        # The 20-char field carries 10 significant digits, so compare
+        # RELATIVELY -- the emitted 1.026311295E+10 is the hand value rounded.
+        self.assertAlmostEqual(_col_f(mat[4], 41, 60) / phel, 1.0, places=9)
+        self.assertNotEqual(_col_f(mat[4], 41, 60), 0.0)
+        # T and HEL are still the physical card values -- the derivation
+        # touches PHEL and nothing else.
+        self.assertEqual(_col_f(mat[4], 1, 20), 0.2e9)
+        self.assertEqual(_col_f(mat[4], 21, 40), 19.0e9)
+        hits = _warns(res, "calculated automatically by LS-DYNA")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("p.2-764", hits[0])
+        self.assertIn("DERIVED PHEL", hits[0])
+        # The derived PHEL can never exceed HEL (PHEL = HEL - (4/3)G*mu/(1+mu)
+        # and G > 0), so it cannot manufacture an ERROR 907.
+        self.assertLess(_col_f(mat[4], 41, 60), _col_f(mat[4], 21, 40))
+        self.assertEqual(_warns(res, "rejects this with ERROR 907"), [])
+
+    def test_phel_zero_that_cannot_be_derived_still_warns(self):
+        # The derivation needs HEL > 0, K1 > 0 and G > 0. With HEL = 0 there is
+        # nothing to solve, so the original hard warning has to stand.
+        c2 = (1.0, "0.2E9", 0.8, 0.0, 0.0, 1.0)
+        res, starter = _convert(MESH(110) + _mat110(c2=c2) + "*END\n")
+        mat = _cards(_block(starter, "/MAT/LAW79/110"))
+        self.assertEqual(_col_f(mat[4], 41, 60), 0.0)
         hits = _warns(res, "PHEL=0 <= 0")
         self.assertEqual(len(hits), 1)
         self.assertIn("NO error and NO warning", hits[0])
         self.assertIn("PRESSURE NORMALIZER", hits[0])
+        self.assertEqual(_warns(res, "calculated automatically by LS-DYNA"), [])
+
+    def test_a_supplied_phel_is_never_touched(self):
+        # The derivation is gated on PHEL <= 0 only: a card that states PHEL
+        # keeps it verbatim and draws no derivation warning.
+        res, starter = _convert(MESH(110) + _mat110() + "*END\n")
+        mat = _cards(_block(starter, "/MAT/LAW79/110"))
+        self.assertEqual(_col_f(mat[4], 41, 60), 1.46e9)
+        self.assertEqual(_warns(res, "calculated automatically by LS-DYNA"), [])
 
     def test_phel_greater_than_hel_warns_error_907(self):
         c2 = (1.0, "0.2E9", 0.8, "1.46E9", "19E9", 1.0)     # HEL/PHEL swapped
@@ -731,6 +813,92 @@ class TestMat111Guards(unittest.TestCase):
         self.assertIn("WARNING 100211", hits[0])
 
 
+class TestEps0UnitDependence(unittest.TestCase):
+    """EPS0 is a 1/TIME quantity and k2rad rescales nothing, so the value
+    substituted for an unusable EPS0 has to be expressed in the DECK's time
+    unit. Vol II R16 *MAT_015 -- which both *MAT_110 and *MAT_111 point at for
+    this field -- states it outright: "input in units of [time]^-1 ... if the
+    system of units for the model input is {kg, mm, ms}, then EPS0 should be
+    set to 10^-5".  A bare 1.0 on a ton-mm-ms deck is 1000 s^-1, and both
+    engines CLAMP the rate factor to 1 below EPS0 (sigeps79.F:178-182,
+    sigeps126.F90:279), so it would switch rate hardening off rather than
+    shift its onset."""
+
+    def _eps0(self, deck, units, header, col=(21, 40), card=3):
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        res = convert(path, write_log=False, units=units)
+        with open(res.starter_path) as fh:
+            starter = fh.read()
+        tmp.cleanup()
+        got = _col_f(_cards(_block(starter, header))[card], *col)
+        return res, got
+
+    # EPS0 = 0 with C != 0 on both laws.
+    DECK_110 = (MESH(110)
+                + _mat110(c2=(0.0, "0.2E9", 0.8, "19E9", "1.46E9", 1.0))
+                + "*END\n")
+    DECK_111 = (MESH(111)
+                + _mat111(c2=("4E6", 0.0, 0.01, 7.0, "16E6", "1E-3",
+                              "800E6", 0.10))
+                + "*END\n")
+
+    def test_seconds_deck_is_unchanged(self):
+        for deck, header in ((self.DECK_110, "/MAT/LAW79/110"),
+                             (self.DECK_111, "/MAT/LAW126/111")):
+            with self.subTest(header=header):
+                _, got = self._eps0(deck, ("Mg", "mm", "s"), header)
+                self.assertEqual(got, 1.0)
+
+    def test_millisecond_deck_gets_1_per_second_expressed_in_ms(self):
+        # 1 s^-1 = 1e-3 ms^-1. The raw 1.0 would be 1000 s^-1.
+        for deck, header in ((self.DECK_110, "/MAT/LAW79/110"),
+                             (self.DECK_111, "/MAT/LAW126/111")):
+            with self.subTest(header=header):
+                res, got = self._eps0(deck, ("Mg", "mm", "ms"), header)
+                self.assertEqual(got, 1.0e-3)
+                self.assertNotEqual(got, 1.0)
+                self.assertIn("per the deck's time unit 'ms' (= 1 s^-1)",
+                              "\n".join(res.warnings))
+
+    def test_microsecond_deck_scales_too(self):
+        for label in ("mus", "us"):
+            with self.subTest(label=label):
+                _, got = self._eps0(self.DECK_110, ("g", "cm", label),
+                                    "/MAT/LAW79/110")
+                self.assertEqual(got, 1.0e-6)
+
+    def test_an_unparseable_time_label_falls_back_to_the_raw_default(self):
+        # The starter itself rejects a label of more than three characters
+        # (unit_code.F:99-143 -> ERROR 573), so guessing would be worse than
+        # keeping the starter's own EPS0 = 1 substitution.
+        _, got = self._eps0(self.DECK_110, ("g", "cm", "micros"),
+                            "/MAT/LAW79/110")
+        self.assertEqual(got, 1.0)
+
+    def test_the_time_unit_parser_mirrors_the_starter(self):
+        from k2rad.writer.materials import _time_unit_in_seconds
+        for label, want in (("s", 1.0), ("ms", 1.0e-3), ("us", 1.0e-6),
+                            ("mus", 1.0e-6), ("ns", 1.0e-9), ("ks", 1.0e3),
+                            (" s ", 1.0),
+                            # rejected by unit_code.F for the same reasons
+                            ("micros", None), ("sec", None), ("m", None),
+                            ("", None), ("qs", None)):
+            with self.subTest(label=label):
+                self.assertEqual(_time_unit_in_seconds(label), want)
+
+    def test_a_supplied_EPS0_is_never_rescaled(self):
+        # Only the SUBSTITUTION is unit-aware; a stated EPS0 is a deck value
+        # and passes through verbatim on every unit system, like every other
+        # number in this converter.
+        for units in (("Mg", "mm", "s"), ("Mg", "mm", "ms")):
+            with self.subTest(units=units):
+                _, got = self._eps0(DECK_110, units, "/MAT/LAW79/110")
+                self.assertEqual(got, 1.0)     # MAT110_C2's EPS0 = 1.0
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # C) *MAT_ELASTIC_FLUID (001 + FLUID) -> /MAT/LAW6 + /EOS/POLYNOMIAL
 # ─────────────────────────────────────────────────────────────────────────────
@@ -853,6 +1021,32 @@ class TestFluidBulkModulus(unittest.TestCase):
         self.assertEqual(len(_warns(res, "PR=0.5 >= 0.5")), 1)
         self.assertEqual(len(_warns(res, "ZERO bulk modulus")), 1)
 
+    def test_the_singular_fallback_is_never_quoted_as_a_value(self):
+        # At PR >= 0.5 the expression K = E/(3(1-2*PR)) is singular or
+        # negative, so `derived` stays at its 0.0 SENTINEL -- printing
+        # "K = E/(3(1-2*PR)) = 0" would state a value the formula does not
+        # have. Exactly ONE warning covers the case, and it says so.
+        for pr in (0.5, 0.6):
+            with self.subTest(pr=pr):
+                res, _ = _convert(MESH(3)
+                                  + _fluid(e="3.0E9", pr=pr, k=0.0) + "*END\n")
+                hits = _warns(res, "MAT_ELASTIC_FLUID mid=3: K=")
+                self.assertEqual(len(hits), 1)
+                self.assertIn("is infinite or negative and cannot be used",
+                              hits[0])
+                self.assertNotIn("K = E/(3(1-2*PR)) = 0", hits[0])
+                self.assertEqual(_warns(res, "the bulk modulus is derived"), [])
+
+    def test_a_negative_K_at_incompressible_PR_reports_the_same_way(self):
+        res, starter = _convert(
+            MESH(3) + _fluid(e="3.0E9", pr=0.5, k="-2.2E9") + "*END\n")
+        c1 = _col_f(_cards(_block(starter, "/EOS/POLYNOMIAL/3"))[0], 21, 40)
+        self.assertEqual(c1, 0.0)
+        hits = _warns(res, "MAT_ELASTIC_FLUID mid=3: K=-2.2e+09")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("is infinite or negative and cannot be used", hits[0])
+        self.assertNotIn("= 0 from card 1 fields 3 and 4", hits[0])
+
     def test_all_zero_card_warns_about_the_inert_fluid(self):
         res, _ = _convert(MESH(3) + _fluid(e=0.0, pr=0.0, k=0.0) + "*END\n")
         self.assertEqual(len(_warns(res, "the fluid would be completely inert")),
@@ -929,6 +1123,52 @@ class TestFluidCavitation(unittest.TestCase):
         res, _ = _convert(MESH(3) + _fluid(card2=(0.0, "-1.0E6")) + "*END\n")
         self.assertEqual(len(_warns(res, "is negative. LS-DYNA's cavitation")),
                          1)
+
+    def test_a_UNIT_RESCALED_default_CP_is_still_the_default(self):
+        # The 1e20 literal is a RAW number, so testing it alone makes the
+        # emitted card depend on the deck's units. The corpus proves it on one
+        # material: W11_SETUP_SPH_BirdStrike_Multi's "Head" fluid writes
+        # K = 2.2e9 / CP = 1.00000E20 in its kg-m-s copy and K = 2200 /
+        # CP = 1E+14 in the kunit-converted ton-mm-s copy -- the same 1e20 Pa.
+        # Both must emit the same card.
+        si = self._pmin((0.0, "1.00000E20"))
+        _, starter = _convert(
+            MESH(3) + _fluid(rho="2.6E-9", k=2200.0, card2=(0.0, "1E+14"))
+            + "*END\n")
+        mm = _col_f(_cards(_block(starter, "/MAT/HYD_VISC/3"))[1], 21, 40)
+        self.assertEqual(si, 0.0)
+        self.assertEqual(mm, 0.0)
+        self.assertNotAlmostEqual(mm, -1.0e14, delta=1.0)
+
+    def test_the_unreachable_CP_substitution_is_warned_with_the_ratio(self):
+        res, _ = _convert(
+            MESH(3) + _fluid(rho="2.6E-9", k=2200.0, card2=(0.0, "1E+14"))
+            + "*END\n")
+        hits = _warns(res, "x the bulk modulus")
+        self.assertEqual(len(hits), 1)
+        # 1e14 / 2200 = 4.5454...e10
+        self.assertIn(f"{1.0e14 / 2200.0:g} x the bulk modulus K=2200", hits[0])
+        self.assertIn("-INFINITY", hits[0])
+
+    def test_a_reachable_CP_is_still_a_real_cutoff(self):
+        # The guard must be far above anything physical: a cut-off of even
+        # 1e5 x K stays a finite Pmin, and so does a realistic fraction of K.
+        for cp, want in (("1.0E6", -1.0e6),          # K/2200
+                         ("2.2E14", -2.2e14)):       # 1e5 * K, still finite
+            with self.subTest(cp=cp):
+                _, starter = _convert(
+                    MESH(3) + _fluid(k="2.2E9", card2=(0.0, cp)) + "*END\n")
+                mat = _cards(_block(starter, "/MAT/HYD_VISC/3"))
+                self.assertEqual(_col_f(mat[1], 21, 40), want)
+
+    def test_the_guard_needs_a_bulk_modulus_to_compare_against(self):
+        # With K unresolvable there is nothing to scale by, so only the raw
+        # 1e20 literal can still be recognised.
+        _, starter = _convert(
+            MESH(3) + _fluid(e=0.0, pr=0.0, k=0.0, card2=(0.0, "1E+14"))
+            + "*END\n")
+        mat = _cards(_block(starter, "/MAT/HYD_VISC/3"))
+        self.assertEqual(_col_f(mat[1], 21, 40), -1.0e14)
 
 
 class TestFluidDroppedFields(unittest.TestCase):
@@ -1008,6 +1248,84 @@ class TestDispatch(unittest.TestCase):
         for kw in ("MAT_JOHNSON_HOLMQUIST_CERAMICS",
                    "MAT_JOHNSON_HOLMQUIST_CONCRETE", "MAT_ELASTIC_FLUID"):
             self.assertNotIn(kw, res.skipped_keywords)
+
+    def test_offset_specs_cover_every_spelling(self):
+        # A missing spelling means an *INCLUDE_TRANSFORM-ed MID is NOT offset,
+        # i.e. a silent id collision on a merged deck.
+        from k2rad.assembly import _OFFSET_SPECS
+        for kw in ("MAT_JOHNSON_HOLMQUIST_CERAMICS", "MAT_110",
+                   "MAT_JOHNSON_HOLMQUIST_CONCRETE", "MAT_111",
+                   "MAT_ELASTIC_FLUID", "MAT_001_FLUID", "MAT_1_FLUID",
+                   "MAT_001", "MAT_1"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, _OFFSET_SPECS)
+
+    def test_include_transform_offsets_every_new_MID(self):
+        tmp = tempfile.TemporaryDirectory()
+        inc = os.path.join(tmp.name, "inc.k")
+        with open(inc, "w") as fh:
+            fh.write("*KEYWORD\n" + _mat110() + _mat111() + _fluid() + "*END\n")
+        main = os.path.join(tmp.name, "main.k")
+        with open(main, "w") as fh:
+            fh.write("*KEYWORD\n" + NODES + _solid(1, 7) + _part(7, 7, 110)
+                     + _part(8, 7, 111) + _part(9, 7, 3) + SEC_SOLID
+                     + "*INCLUDE_TRANSFORM\ninc.k\n"
+                     + _row(0, 0, 0, 1000, 0, 0) + "\n" + _row(0, 0) + "\n"
+                     + "*END\n")
+        res = convert(main, write_log=False)
+        with open(res.starter_path) as fh:
+            starter = fh.read()
+        tmp.cleanup()
+        for header in ("/MAT/LAW79/1110", "/MAT/LAW126/1111",
+                       "/MAT/HYD_VISC/1003", "/EOS/POLYNOMIAL/1003"):
+            with self.subTest(header=header):
+                self.assertIn(header, starter)
+
+
+class TestEmptyCardGuards(unittest.TestCase):
+    """The file's standard empty-material-card guard (21 other handlers carry
+    it, e.g. handle_mat_soil_and_foam). Without it a block with no data card
+    aborts the WHOLE conversion with a bare IndexError, and a card whose MID
+    cell is blank silently emits a /MAT of id 0 -- the *MAT_187 failure mode
+    already recorded in this repo."""
+
+    def test_a_block_with_no_data_card_is_skipped_not_a_crash(self):
+        for kw in ("*MAT_JOHNSON_HOLMQUIST_CERAMICS",
+                   "*MAT_JOHNSON_HOLMQUIST_CONCRETE",
+                   "*MAT_110", "*MAT_111",
+                   "*MAT_ELASTIC", "*MAT_ELASTIC_FLUID",
+                   "*MAT_001", "*MAT_1", "*MAT_001_FLUID"):
+            with self.subTest(kw=kw):
+                res, starter = _convert("*KEYWORD\n" + kw + "\n*END\n")
+                hits = _warns(res, "empty material card")
+                self.assertEqual(len(hits), 1)
+                self.assertNotIn("/MAT/", starter)
+
+    def test_a_blank_MID_cell_does_not_emit_a_material_of_id_zero(self):
+        cases = (
+            ("*MAT_JOHNSON_HOLMQUIST_CERAMICS",
+             _mat110(c1=("", 3700.0, "90.16E9", 0.93, 0.31, 0.007, 0.6,
+                         0.64))),
+            ("*MAT_JOHNSON_HOLMQUIST_CONCRETE",
+             _mat111(c1=("", 2440.0, "14.86E9", 0.79, 1.6, 0.007, 0.61,
+                         "48E6"))),
+            ("*MAT_ELASTIC_FLUID", _fluid(mid="")),
+        )
+        for kw, card in cases:
+            with self.subTest(kw=kw):
+                res, starter = _convert("*KEYWORD\n" + card + "*END\n")
+                self.assertEqual(len(_warns(res, "empty material card")), 1)
+                for header in ("/MAT/LAW79/0", "/MAT/LAW126/0",
+                               "/MAT/HYD_VISC/0", "/EOS/POLYNOMIAL/0",
+                               "/MAT/ELAST/0"):
+                    self.assertNotIn(header, starter)
+
+    def test_a_truncated_card_1_still_converts(self):
+        # Guarded field reads, like the rest of the file: only the MID cell is
+        # mandatory.
+        st = _dispatch("*KEYWORD\n*MAT_ELASTIC_FLUID\n" + _row(3) + "\n*END\n")
+        self.assertIn(3, st.mat_elastic_fluid)
+        self.assertEqual(st.mat_elastic_fluid[3].rho, 0.0)
 
 
 class TestMat001BaseVsFluidSplit(unittest.TestCase):

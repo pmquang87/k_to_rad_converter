@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from ..state import (
     ConversionState,
     MatElastic,
@@ -6367,6 +6367,118 @@ def _emit_mat224_tab1(mat: MatTabulatedJC) -> List[str]:
 # (written as a blank 0, hm_read_mat06.F:154) rather than to -1e20.
 _LSD_CP_NO_CAVITATION = 1.0e20
 
+# ...but the literal 1e20 is a RAW NUMBER, so testing it alone is unit-system
+# dependent. The corpus proves it on one material: the W11 bird-strike "Head"
+# fluid writes CP = 1.0e20 in its SI (kg-m-s) copy and CP = 1e14 in the
+# unit-converted ton-mm-s copy — the same 1e20 Pa, the same physical material,
+# one hitting the sentinel and one missing it. A cut-off this far above the
+# material's OWN bulk modulus is unreachable in either code (Pmin = -CP is
+# reached at a volumetric strain of CP/K), so it is the card default in
+# disguise. 1e6 is deliberately far above any physical cavitation pressure,
+# which is at most a fraction of K.
+_CP_UNREACHABLE_BULK_FACTOR = 1.0e6
+
+# SI multiplier prefixes exactly as the starter's own /BEGIN unit-label parser
+# reads them (unit_code.F:99-143). A time label is at most THREE characters,
+# the last of which must be 's'; the leading one or two are the prefix. Any
+# other spelling is starter ERROR 573, so returning None for it is right.
+_SI_PREFIX_FACTORS: Dict[str, float] = {
+    "y": 1.0e-24, "z": 1.0e-21, "a": 1.0e-18, "f": 1.0e-15, "p": 1.0e-12,
+    "n": 1.0e-9, "mu": 1.0e-6, "u": 1.0e-6, "m": 1.0e-3, "c": 1.0e-2,
+    "d": 1.0e-1, "": 1.0, "da": 1.0e1, "h": 1.0e2, "k": 1.0e3, "K": 1.0e3,
+    "M": 1.0e6, "G": 1.0e9, "T": 1.0e12, "P": 1.0e15, "E": 1.0e18,
+    "Z": 1.0e21, "Y": 1.0e24,
+}
+
+# The quasi-static threshold strain rate substituted for an unusable EPS0, in
+# 1/SECOND. 1 s^-1 is the reference rate of the Johnson-Holmquist papers both
+# laws come from, and it is what the starter's own C == 0 default
+# (hm_read_mat79.F:159, hm_read_mat126.F90:161) means on a seconds-based deck.
+_QUASI_STATIC_RATE_PER_S = 1.0
+
+# Bracket for LS-DYNA's mu_hel iteration (see _mat110_mu_hel). mu_hel is O(0.1)
+# for every real ceramic; mu = 1 is a doubled density and far outside any
+# elastic limit, so a root beyond it means the card is not a JH-2 card.
+_MU_HEL_MAX = 1.0
+_MU_HEL_SCAN_STEPS = 10000
+
+
+def _time_unit_in_seconds(label: str) -> Optional[float]:
+    """Seconds per one deck time unit, parsed the way the starter parses the
+    /BEGIN unit labels itself (unit_code.F:99-143): ``'s'`` -> 1.0,
+    ``'ms'`` -> 1e-3, ``'mus'``/``'us'`` -> 1e-6. ``None`` for any label the
+    starter would itself reject (more than 3 characters, not ending in 's', or
+    an unknown prefix), so a caller can fall back instead of guessing.
+    """
+    key = (label or "").strip()
+    if not key or len(key) > 3 or key[-1] != "s":
+        return None
+    return _SI_PREFIX_FACTORS.get(key[:-1])
+
+
+def _quasi_static_eps0(state: ConversionState) -> Tuple[float, str]:
+    """The EPS0 substituted for an unusable one, expressed in the DECK's time
+    unit, plus a phrase naming that unit for the warning.
+
+    EPS0 is a 1/time quantity (Vol II R16 *MAT_015: "input in units of
+    [time]^-1 ... if the system of units for the model input is {kg, mm, ms},
+    then EPS0 should be set to 10^-5") and k2rad rescales nothing — the /BEGIN
+    input units ARE the work units — so a bare 1.0 means one per DECK time
+    unit, i.e. 1000 s^-1 on a ton-mm-ms deck. That is not "quasi-static": both
+    engines clamp the rate factor to 1 BELOW EPS0 (sigeps79.F:178-182,
+    sigeps126.F90:279), so an over-large EPS0 switches rate hardening off over
+    the whole range of interest instead of merely shifting its onset.
+    """
+    fac = _time_unit_in_seconds(state.units[2])
+    if fac is None:
+        # Unparseable label: the deck will not reach the engine anyway
+        # (starter ERROR 573), so keep the starter's own raw default.
+        return _QUASI_STATIC_RATE_PER_S, ""
+    value = _QUASI_STATIC_RATE_PER_S * fac
+    return value, (f" per the deck's time unit '{state.units[2]}' "
+                   f"(= {_QUASI_STATIC_RATE_PER_S:g} s^-1)")
+
+
+def _mat110_mu_hel(hel: float, g: float,
+                   k1: float, k2: float, k3: float) -> Optional[float]:
+    """Smallest positive root of LS-DYNA's own mu_hel equation, Vol II R16
+    p.2-763::
+
+        HEL = k1*mu + k2*mu^2 + k3*mu^3 + (4/3)*g*mu/(1+mu)
+
+    "Given HEL and G, mu_hel can be found iteratively from ..." — and p.2-764:
+    "These are calculated automatically by LS-DYNA if p_hel is zero on input."
+
+    f(0) = -HEL < 0, so a linear scan finds the first sign change and bisection
+    refines it; scanning rather than Newton keeps the SMALLEST root when K2 < 0
+    makes the polynomial non-monotonic. ``None`` when no root lies in
+    (0, _MU_HEL_MAX], which is the signal to leave PHEL alone and warn.
+    """
+    def f(mu: float) -> float:
+        return (k1 * mu + k2 * mu * mu + k3 * mu * mu * mu
+                + (4.0 / 3.0) * g * mu / (1.0 + mu) - hel)
+
+    step = _MU_HEL_MAX / _MU_HEL_SCAN_STEPS
+    lo = 0.0
+    hi = None
+    for i in range(1, _MU_HEL_SCAN_STEPS + 1):
+        mu = i * step
+        if f(mu) >= 0.0:
+            hi = mu
+            break
+        lo = mu
+    if hi is None:
+        return None
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if mid <= lo or mid >= hi:
+            break
+        if f(mid) < 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
 
 def _resolve_mat_impact(state: ConversionState) -> None:
     """Guards, defaults and warnings for the impact/blast material batch.
@@ -6410,42 +6522,92 @@ def _resolve_mat110(state: ConversionState, shell_parts: dict) -> None:
     reported as-is; the sixth (ERROR 910, EPS0 <= 0 with C != 0) is repaired
     with the starter's OWN rate-free default so an otherwise valid ceramic
     still converts to a runnable deck.
+
+    The one field that does NOT come straight off the card is PHEL: a blank/0
+    PHEL is a documented LS-DYNA derivation request (Vol II R16 p.2-763/764)
+    that Radioss does not implement, so the iteration is reproduced here and
+    the derived value goes into ``phel_eff``.
     """
     kw = "*MAT_JOHNSON_HOLMQUIST_CERAMICS"
+    eps0_sub, eps0_unit = _quasi_static_eps0(state)
     for mat in state.mat_jh_ceramics.values():
         tag = f"{kw} mid={mat.mid}"
         mat.eps0_eff = mat.eps0
+        mat.phel_eff = mat.phel
         # ERROR 910 (hm_read_mat79.F:164-198) — fatal, and repairable. The
         # starter already substitutes EPS0 = 1 when C == 0 (:159); do the same
         # substitution for C != 0, where it refuses to, because the LS-DYNA
         # card is just as undefined there (1 + C*ln(eps_dot/0)).
         if mat.c != 0.0 and mat.eps0 <= 0.0:
-            mat.eps0_eff = 1.0
+            mat.eps0_eff = eps0_sub
             state.warn(
                 f"{tag}: EPS0={mat.eps0:g} with C={mat.c:g} != 0 is a FATAL "
                 "input for /MAT/LAW79 — the starter stops with ERROR 910 "
                 "(NEGATIVE OR ZERO REFERENCE STRAIN RATE, "
                 "hm_read_mat79.F:164-198), which is exactly what a "
                 "dyna2rad-converted deck does (it copies the 0 through). "
-                "k2rad writes EPS0 = 1.0 instead, the same value the starter "
-                "itself substitutes when C == 0 (:159), so the deck runs; the "
-                "rate term becomes 1 + C*ln(eps_dot/1). The LS-DYNA card is "
-                "equally undefined at EPS0 = 0, so set the real quasi-static "
-                "threshold rate on card 2 field 1 if the rate sensitivity "
-                "matters.")
+                f"k2rad writes EPS0 = {eps0_sub:g}{eps0_unit} instead — the "
+                "starter's own rate-free substitution when C == 0 (:159), "
+                "expressed in the deck's time unit because EPS0 is a 1/time "
+                "quantity (Vol II R16 *MAT_015, which this card's EPS0 refers "
+                "to) and k2rad rescales nothing. The rate term becomes "
+                f"1 + C*ln(eps_dot/{eps0_sub:g}), and note the engine CLAMPS "
+                "it to 1 below EPS0 (sigeps79.F:178-182), so an over-large "
+                "EPS0 switches rate hardening off rather than shifting it. "
+                "The LS-DYNA card is equally undefined at EPS0 = 0, so set the "
+                "real quasi-static threshold rate on card 2 field 1 if the "
+                "rate sensitivity matters.")
         # PHEL is the JH-2 pressure normalizer: the starter divides by it
         # (T* = TMAX/PHEL, P* = P/PHEL) and guards ONLY the PHEL > HEL case,
         # so a zero PHEL poisons the run with Inf/NaN and no diagnostic.
+        # A zero PHEL is NOT a malformed card, though: it is a documented
+        # LS-DYNA input mode in which LS-DYNA derives mu_hel, PHEL and
+        # sigma_HEL itself (Vol II R16 p.2-763/764). Radioss has no such
+        # derivation, so the converter has to do it — this is the one field of
+        # the batch whose LS-DYNA value is not the number on the card.
         if mat.phel <= 0.0:
-            state.warn(
-                f"{tag}: PHEL={mat.phel:g} <= 0. PHEL is the JH-2 PRESSURE "
-                "NORMALIZER — the starter forms T* = T/PHEL "
-                "(hm_read_mat79.F:211) and the engine P* = P/PHEL "
-                "(sigeps79.F:153) — and its ONLY guard is PHEL > HEL "
-                "(ERROR 907), so this passes the starter with NO error and NO "
-                "warning and then poisons every stress evaluation with "
-                "Inf/NaN. Supply the real pressure at the Hugoniot elastic "
-                "limit (card 2 field 5).")
+            mu_hel = None
+            if mat.hel > 0.0 and mat.k1 > 0.0 and mat.g > 0.0:
+                mu_hel = _mat110_mu_hel(mat.hel, mat.g,
+                                        mat.k1, mat.k2, mat.k3)
+            if mu_hel is not None:
+                mat.phel_eff = (mat.k1 * mu_hel + mat.k2 * mu_hel ** 2
+                                + mat.k3 * mu_hel ** 3)
+                sig_hel = 1.5 * (mat.hel - mat.phel_eff)
+                state.warn(
+                    f"{tag}: PHEL is blank/0, which in LS-DYNA is not a "
+                    "defect but a REQUEST — \"These are calculated "
+                    "automatically by LS-DYNA if p_hel is zero on input\" "
+                    "(Vol II R16 p.2-764): given HEL and G it solves "
+                    "HEL = K1*mu + K2*mu^2 + K3*mu^3 + (4/3)*G*mu/(1+mu) for "
+                    "mu_hel, then PHEL = K1*mu + K2*mu^2 + K3*mu^3 and "
+                    "sigma_HEL = 1.5*(HEL-PHEL). /MAT/LAW79 has NO such "
+                    "derivation — hm_read_mat79.F:211 forms T* = T/PHEL "
+                    "directly and its only guard is PHEL > HEL (ERROR 907) — "
+                    "so a copied-through 0 passes the starter with 0 ERROR / "
+                    "0 WARNING and then poisons every P* and T* with Inf/NaN "
+                    "for the whole run (that is what a dyna2rad-converted deck "
+                    "does). k2rad reproduces LS-DYNA's own derivation instead "
+                    f"and writes the DERIVED PHEL = {mat.phel_eff:g} "
+                    f"(mu_hel = {mu_hel:g}, sigma_HEL = 1.5*(HEL-PHEL) = "
+                    f"{sig_hel:g}, which the starter re-forms itself at "
+                    ":212). Put that value on card 2 field 5 if you want the "
+                    "two decks to read identically.")
+            else:
+                state.warn(
+                    f"{tag}: PHEL={mat.phel:g} <= 0. PHEL is the JH-2 PRESSURE "
+                    "NORMALIZER — the starter forms T* = T/PHEL "
+                    "(hm_read_mat79.F:211) and the engine P* = P/PHEL "
+                    "(sigeps79.F:153) — and its ONLY guard is PHEL > HEL "
+                    "(ERROR 907), so this passes the starter with NO error and "
+                    "NO warning and then poisons every stress evaluation with "
+                    "Inf/NaN. LS-DYNA's own automatic derivation from HEL and "
+                    "G (Vol II R16 p.2-763/764) cannot be reproduced here "
+                    f"either: it needs HEL > 0 (got {mat.hel:g}), K1 > 0 (got "
+                    f"{mat.k1:g}) and G > 0 (got {mat.g:g}) and a root of "
+                    "HEL = K1*mu + K2*mu^2 + K3*mu^3 + (4/3)*G*mu/(1+mu) "
+                    f"below mu = {_MU_HEL_MAX:g}. Supply the real pressure at "
+                    "the Hugoniot elastic limit (card 2 field 5).")
         elif mat.phel > mat.hel:
             state.warn(
                 f"{tag}: PHEL={mat.phel:g} > HEL={mat.hel:g}. The starter "
@@ -6518,6 +6680,7 @@ def _resolve_mat111(state: ConversionState, shell_parts: dict) -> None:
     guard — so every diagnostic for this law has to come from the converter.
     """
     kw = "*MAT_JOHNSON_HOLMQUIST_CONCRETE"
+    eps0_sub, eps0_unit = _quasi_static_eps0(state)
     for mat in state.mat_jh_concrete.values():
         tag = f"{kw} mid={mat.mid}"
         mat.eps0_eff = mat.eps0
@@ -6539,7 +6702,7 @@ def _resolve_mat111(state: ConversionState, shell_parts: dict) -> None:
         # leaves the source FS visible in the converted deck.
         mat.eps_max = mat.fs
         if mat.c != 0.0 and mat.eps0 <= 0.0:
-            mat.eps0_eff = 1.0
+            mat.eps0_eff = eps0_sub
             state.warn(
                 f"{tag}: EPS0={mat.eps0:g} with C={mat.c:g} != 0. "
                 "hm_read_mat126.F90 substitutes EPS0 = 1 only when C == 0 "
@@ -6547,8 +6710,13 @@ def _resolve_mat111(state: ConversionState, shell_parts: dict) -> None:
                 "0 passes the starter with no diagnostic and the engine then "
                 "evaluates C*log(eps_dot/0) every cycle "
                 "(sigeps126.F90) — that is what a dyna2rad-converted deck "
-                "does. k2rad writes EPS0 = 1.0 instead, the starter's own "
-                "rate-free default, so the run is finite. Set the real "
+                f"does. k2rad writes EPS0 = {eps0_sub:g}{eps0_unit} instead — "
+                "the starter's own rate-free default, expressed in the deck's "
+                "time unit because EPS0 is a 1/time quantity (Vol II R16 "
+                "*MAT_015) and k2rad rescales nothing — so the run is finite. "
+                "Note the engine applies the rate factor ONLY above EPS0 "
+                "(sigeps126.F90:279), so an over-large EPS0 switches rate "
+                "hardening off rather than shifting it. Set the real "
                 "quasi-static threshold rate on card 2 field 2 if the rate "
                 "sensitivity matters.")
         # The two unguarded divisions of hm_read_mat126.F90:140,146.
@@ -6635,7 +6803,9 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
     Three deliberate departures from dyna2rad, all recorded in the warnings:
     the K == 0 fallback uses the REAL Poisson ratio, VC is not copied into a
     slot that means something else, and a defaulted CP does not become a
-    finite pressure cut-off.
+    finite pressure cut-off — where "defaulted" is judged against the
+    material's own bulk modulus as well as against the raw 1e20 literal, so
+    the emitted card does not depend on the deck's unit system.
     """
     kw = "*MAT_ELASTIC_FLUID"
     for mat in state.mat_elastic_fluid.values():
@@ -6651,6 +6821,21 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                 derived = mat.e / denom
         if mat.k > 0.0:
             mat.bulk = mat.k
+        elif mat.pr >= 0.5:
+            # `derived` is still its 0.0 SENTINEL here — the expression is
+            # singular at PR == 0.5 and negative above it, so there is no
+            # value to quote and no fallback to announce. One warning, not the
+            # "derived as ... = 0" wording plus a contradiction.
+            mat.bulk = 0.0
+            state.warn(
+                f"{tag}: K={mat.k:g} on card 1 field 7 is blank/0 or negative "
+                f"AND PR={mat.pr:g} >= 0.5, so the manual's fallback "
+                "K = E/(3(1-2*PR)) (Vol II R16 p.2-148, Remark 5) is infinite "
+                "or negative and cannot be used — the /EOS/POLYNOMIAL C1 is "
+                "written 0. A LAW6 whose EOS gives C1 = 0 passes the starter "
+                "with 0 errors and 0 warnings but has ZERO bulk modulus and "
+                "zero sound speed (PM(32) = C1, hm_read_mat06.F), so the fluid "
+                "is inert. Supply K on card 1 field 7.")
         else:
             mat.bulk = derived
             if mat.k < 0.0:
@@ -6677,16 +6862,6 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
                     f"({mat.e / 3.0 if mat.e else 0.0:g}) and loses Poisson's "
                     "ratio entirely. Supplying K explicitly avoids the "
                     "question.")
-            if mat.pr >= 0.5:
-                state.warn(
-                    f"{tag}: K is blank/0 AND PR={mat.pr:g} >= 0.5, so the "
-                    "manual's fallback K = E/(3(1-2*PR)) is infinite or "
-                    "negative and cannot be used — the /EOS/POLYNOMIAL C1 is "
-                    "written 0. A LAW6 whose EOS gives C1 = 0 passes the "
-                    "starter with 0 errors and 0 warnings but has ZERO bulk "
-                    "modulus and zero sound speed (PM(32) = C1, "
-                    "hm_read_mat06.F), so the fluid is inert. Supply K on "
-                    "card 1 field 7.")
         if mat.bulk <= 0.0 and mat.k >= 0.0 and mat.pr < 0.5:
             state.warn(
                 f"{tag}: the /EOS/POLYNOMIAL C1 (bulk modulus) resolves to "
@@ -6731,8 +6906,31 @@ def _resolve_mat_elastic_fluid(state: ConversionState,
         # the positive cavitation pressure, default 1e20 = "no limit". A
         # blank/defaulted CP must therefore leave Pmin at 0, which the starter
         # turns into -INFINITY (hm_read_mat06.F:154).
+        # The raw 1e20 test is unit-dependent, so a CP that is unreachable
+        # relative to the material's OWN bulk modulus counts as the default
+        # too — otherwise the same physical fluid converts to two different
+        # cards depending only on the deck's units.
+        unreachable = (mat.bulk > 0.0
+                       and abs(mat.cp)
+                       >= _CP_UNREACHABLE_BULK_FACTOR * mat.bulk)
         if not mat.cp_given or abs(mat.cp) >= _LSD_CP_NO_CAVITATION:
             mat.pmin = 0.0
+        elif unreachable:
+            mat.pmin = 0.0
+            state.warn(
+                f"{tag}: CP={mat.cp:g} is {abs(mat.cp) / mat.bulk:g} x the "
+                f"bulk modulus K={mat.bulk:g}, i.e. a tension cut-off that "
+                "would need a volumetric strain of that order to reach and can "
+                "never bind. LS-DYNA's 'no cavitation' card default is the RAW "
+                "literal 1e20 (mat_001.cfg:52), and a unit-converted deck "
+                "carries it RESCALED — the same bird-strike fluid reads "
+                "CP=1e20 in its kg-m-s copy and CP=1e14 in the ton-mm-s one — "
+                "so testing the literal alone would make the emitted card "
+                "depend on the deck's units. k2rad treats this as the default "
+                "and writes Pmin = 0, which the starter turns into -INFINITY "
+                "(hm_read_mat06.F:154), the same card the SI copy gets. Supply "
+                "a CP within a few multiples of K if a real cavitation cut-off "
+                "is meant.")
         elif mat.cp > 0.0:
             mat.pmin = -mat.cp
         elif mat.cp < 0.0:
@@ -6815,6 +7013,11 @@ def _emit_mat_law79(mat: MatJHCeramics) -> List[str]:
     LS-DYNA definitions (Vol II R16 p.2-763). K1/K2/K3 are LAW79's own
     polynomial EOS, so NO /EOS block is emitted.
 
+    The one field that is NOT a straight copy is PHEL: a blank/0 PHEL is the
+    documented LS-DYNA mode in which LS-DYNA solves for ``mu_hel`` itself
+    (p.2-764), which Radioss does not implement, so ``phel_eff`` carries either
+    the card value or the reproduced derivation — see ``_resolve_mat110``.
+
     Two field-order traps vs the LS-DYNA card: *MAT_110 card 1 runs
     ``... C M N`` while LAW79 card 3 runs ``a b m n`` with c moving to card 4,
     and BETA moves from LS-DYNA card 2 to the END of LAW79 card 7.
@@ -6836,7 +7039,7 @@ def _emit_mat_law79(mat: MatJHCeramics) -> List[str]:
         "#                  c                EPS0          SIGMA_FMAX",
         f"{_f(mat.c)}{_f(mat.eps0_eff)}{_f(mat.sfmax)}",
         "#                  T                 HEL                PHEL",
-        f"{_f(mat.t)}{_f(mat.hel)}{_f(mat.phel)}",
+        f"{_f(mat.t)}{_f(mat.hel)}{_f(mat.phel_eff)}",
         "#                 D1                  D2",
         f"{_f(mat.d1)}{_f(mat.d2)}",
         "#                 K1                  K2                  K3                BETA",

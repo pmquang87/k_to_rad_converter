@@ -868,15 +868,34 @@ draws one cosmetic `WARNING 100211` and is read with the 2024 layout — warned
 so the starter output does not read as a defect; its `IFAILSO` is a
 radioss2025 field, unreachable at 2022 and pinned to 1 (dyna2rad never sets it
 either). Every guard the starter lacks is supplied by the converter, because
-these two laws are unusually silent: `PHEL ≤ 0` passes LAW79's only PHEL check
-(`PHEL > HEL`, ERROR 907) and then poisons T\* with Inf; LAW126 has **no
-ANCMSG check at all**, and its compaction divisions `k0 = PC/MUC` and
-`h = (PL−PC)/MUL` are unguarded, so `UC=0`/`UL=0` produce a NaN Young's
-modulus and Poisson ratio at *0 ERROR / 0 WARNING*. `EPS0 ≤ 0` with `C ≠ 0` is
-substituted with the starter's own rate-free default 1.0 — fatal ERROR 910 on
-LAW79 otherwise, and a per-cycle `C·log(ε̇/0)` on LAW126. Both laws are
+both laws are unusually quiet — LAW126 in particular has **no ANCMSG check at
+all**, and its compaction divisions `k0 = PC/MUC` and `h = (PL−PC)/MUL` are
+unguarded, so `UC=0`/`UL=0` produce a NaN Young's modulus and Poisson ratio at
+*0 ERROR /
+0 WARNING*. `EPS0 ≤ 0` with `C ≠ 0` is substituted with the starter's own
+rate-free default (fatal ERROR 910 on LAW79 otherwise, and a per-cycle
+`C·log(ε̇/0)` on LAW126) — **expressed in the deck's time unit**, since `EPS0`
+is a 1/time quantity (Vol II R16 `*MAT_015`, which both cards refer to) and
+k2rad rescales nothing, so a bare `1.0` would be 1000 s⁻¹ on a ton-mm-ms deck
+and, because both engines clamp the rate factor to 1 *below* `EPS0`, would
+switch rate hardening off rather than shift its onset. Both laws are
 solid/SPH-only (no `SHELL_*` class on either), so a shell part is warned as
 `ERROR 3046`.
+
+**`PHEL` is the one field of this batch that is not a straight copy.** A blank
+or zero `PHEL` is not a malformed card but a *documented LS-DYNA input mode*:
+given `HEL` and `G`, LS-DYNA solves
+`HEL = K1·μ + K2·μ² + K3·μ³ + (4/3)·G·μ/(1+μ)` for μ_hel and then sets
+`PHEL = K1·μ + K2·μ² + K3·μ³` and `σ_HEL = 1.5(HEL−PHEL)` — *"These are
+calculated automatically by LS-DYNA if p_hel is zero on input"* (Vol II R16
+p.2-763/764). `/MAT/LAW79` has no such derivation: the starter forms
+`T* = T/PHEL` directly and its only guard is `PHEL > HEL`, so a copied-through
+0 passes with **0 ERROR / 0 WARNING** and then leaves every `P*` and `T*` at
+Inf/NaN for the whole run (what a dyna2rad-converted deck does). k2rad
+reproduces LS-DYNA's own iteration and emits the derived `PHEL`, reporting
+μ_hel, `PHEL` and `σ_HEL`; when the derivation is not possible (`HEL ≤ 0`,
+`K1 ≤ 0`, `G ≤ 0`) the hard warning stands, and a stated `PHEL` is never
+touched.
 
 `*MAT_ELASTIC_FLUID` (001 with the `_FLUID` option; also `*MAT_001_FLUID` and
 `*MAT_1_FLUID`, which dyna2rad's keyword map misses entirely — there they
@@ -905,7 +924,13 @@ evaluated. `CP` (cavitation pressure) → `Pmin` with the sign flipped, but only
 when it is a real limit: LS-DYNA's documented default `CP = 1e20` means "no
 cavitation" and maps to `Pmin = 0` → −INFINITY, not to −1e20 (an explicit
 `CP = 0.0` is the one semantic Radioss cannot state, since `Pmin = 0` is the
-reader's no-cutoff sentinel — reported). LAW6 declares `SOLID_POROUS` rather
+reader's no-cutoff sentinel — reported). That default is a **raw literal**, so
+a unit-converted deck carries it rescaled — the corpus bird-strike fluid reads
+`CP = 1e20` in its kg-m-s copy and `CP = 1e14` in the ton-mm-s one, the same
+material — and testing the literal alone would make the emitted card depend on
+the deck's units; a `CP` at or above 10⁶·K is therefore treated as the default
+too (it is unreachable: `Pmin` binds at a volumetric strain of `CP/K`), warned
+with the ratio. LAW6 declares `SOLID_POROUS` rather
 than `SOLID_ISOTROPIC`, so an ordinary `/PROP/TYPE14` solid is fine but an
 orthotropic/composite solid property is `ERROR 3047`; shells are `ERROR 3046`.
 See `tests/test_impact_mats.py`.

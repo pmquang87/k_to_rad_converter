@@ -3110,8 +3110,11 @@ class MatJHCeramics:
     normalization. K1/K2/K3 are LAW79's OWN polynomial EOS
     (P = K1*mu + K2*mu^2 + K3*mu^3, sigeps79.F:143-147) — no /EOS is emitted.
 
-    All guards, the EPS0 substitution and every warning are resolved by the
-    writer prepass ``_resolve_mat_impact``; the emitter only formats cards.
+    The ONE field that is not a straight copy is PHEL — a blank/0 PHEL is a
+    documented LS-DYNA derivation request, not a defective card (see
+    ``phel_eff``). All guards, the EPS0 substitution and every warning are
+    resolved by the writer prepass ``_resolve_mat_impact``; the emitter only
+    formats cards.
     """
     mid: int
     title: str
@@ -3135,8 +3138,15 @@ class MatJHCeramics:
     k3: float = 0.0
     fs: float = 0.0          # failure flag — NOT expressible at /BEGIN 2022
     # ── resolved by _resolve_mat_impact ───────────────────────────────────
-    eps0_eff: float = 0.0    # EPS0 actually emitted (1.0 substituted for the
-                             # ERROR-910 case C != 0 with EPS0 <= 0)
+    eps0_eff: float = 0.0    # EPS0 actually emitted (a deck-time-unit
+                             # quasi-static rate substituted for the ERROR-910
+                             # case C != 0 with EPS0 <= 0)
+    phel_eff: float = 0.0    # PHEL actually emitted. A blank/0 PHEL is a
+                             # documented LS-DYNA input mode ("calculated
+                             # automatically by LS-DYNA if p_hel is zero on
+                             # input", Vol II R16 p.2-764) that Radioss does
+                             # NOT implement, so the converter reproduces the
+                             # mu_hel iteration and emits the derived value.
 
 
 @dataclass

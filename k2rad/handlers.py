@@ -1541,10 +1541,16 @@ def handle_mat_elastic(block: Block, state: ConversionState) -> None:
     raw = block.raw
     # Card1: mid rho E PR DA DB K
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    # The file's standard guard, placed BEFORE the option split so it covers
+    # every spelling: a block with no data card, or one whose MID cell is
+    # blank, would otherwise raise IndexError / emit a /MAT of id 0.
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{block.keyword}: empty material card — skipped")
+        return
     mid = to_int(f1[0])
-    rho = to_float(f1[1])
-    E   = to_float(f1[2])
-    nu  = to_float(f1[3])
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
     if "FLUID" not in block.keyword:
         state.mat_elastic[mid] = MatElastic(mid, title, rho, E, nu)
         return
@@ -1583,6 +1589,11 @@ def handle_mat_jh_ceramics(block: Block, state: ConversionState) -> None:
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
 
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_JOHNSON_HOLMQUIST_CERAMICS: empty material card — "
+                   "skipped")
+        return
+
     def _v(f, i):
         return to_float(f[i]) if len(f) > i else 0.0
 
@@ -1615,6 +1626,11 @@ def handle_mat_jh_concrete(block: Block, state: ConversionState) -> None:
     f1 = _card(raw, offset,     fixed=True, n=8, w=10)
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_JOHNSON_HOLMQUIST_CONCRETE: empty material card — "
+                   "skipped")
+        return
 
     def _v(f, i):
         return to_float(f[i]) if len(f) > i else 0.0

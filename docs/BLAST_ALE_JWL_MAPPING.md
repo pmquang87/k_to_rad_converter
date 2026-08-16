@@ -175,6 +175,14 @@ Reader spec `MAT/mat_EOS.cfg` `FORMAT(radioss2022)` gives every EOS option's car
 * **Carrier choice:** a bare `*MAT_NULL` (no EOS) stays `/MAT/VOID` (its existing
   mapping, used for vacuum/void ALE phases). A `*MAT_NULL` *with* a companion
   `*EOS_*` becomes `/MAT/LAW6` so the EOS has a hydro carrier.
+* **`*MAT_ELASTIC_FLUID` is no longer a carrier case.** Since the impact/blast
+  materials batch it converts on its own to `/MAT/HYD_VISC` + an
+  `/EOS/POLYNOMIAL` of the same id built from its `K` field, so the shared-id
+  carrier convention above must NOT also claim that id — an `/EOS/*` and a
+  `/MAT/*` of the same id emitted twice is starter `ERROR 79`, DUPLICATE ID.
+  `_impact_claimed_mids` (writer/materials.py) stands the convention down for
+  every id owned by `*MAT_110`, `*MAT_111` or `*MAT_ELASTIC_FLUID`; an `*EOS_*`
+  on an unrelated id still gets its LAW6 carrier as before.
 
 ### B3. ALE multi-material — `*ALE_MULTI-MATERIAL_GROUP` + `*SECTION_SOLID` 11/12 → `/MAT/LAW51`
 

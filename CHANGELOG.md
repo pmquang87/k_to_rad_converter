@@ -91,17 +91,52 @@ Prior history (before this changelog was introduced) is summarized in the
     rules against each other so a later `/BEGIN` bump cannot transplant one
     onto the other.
 
-    Guards the starter does not have, all warned: **`PHEL ≤ 0`** — LAW79's
-    ONLY PHEL check is `PHEL > HEL` (`ERROR 907`), so a zero passes with 0
-    errors and 0 warnings and then makes `T* = TMAX/0` = Inf, poisoning every
-    stress evaluation. **`EPS0 ≤ 0` with `C ≠ 0`** is FATAL (`ERROR 910`) and
-    a dyna2rad-converted deck walks straight into it; k2rad substitutes
-    `EPS0 = 1.0`, the same value the starter itself uses when `C == 0`
-    (`hm_read_mat79.F:159`), so the deck runs — the LS-DYNA card is equally
-    undefined at `EPS0 = 0`. `C == 0` with a zero `EPS0` is left alone (the
-    starter fixes it and 910 never fires). `G ≤ 0` (`ERROR 908`), `K1 ≤ 0`
-    (`ERROR 909`), `BETA` outside `[0,1]` (`ERROR 911`) and `PHEL > HEL`
-    (`ERROR 907`) are reported with their ids.
+    **`PHEL` is the one field of the batch that is NOT copied verbatim**, and
+    it is the one place where "copy the number on the card" is the wrong rule:
+    a blank/zero `PHEL` is a DOCUMENTED LS-DYNA input mode, not a defective
+    card. Vol II R16 p.2-763 — *"Given HEL and G, μ_hel can be found
+    iteratively from `HEL = k1·μ + k2·μ² + k3·μ³ + (4/3)·g·μ/(1+μ)`"*, then
+    `P_hel = k1·μ + k2·μ² + k3·μ³` and `σ_hel = 1.5(HEL − P_hel)` — and
+    p.2-764: *"These are calculated automatically by LS-DYNA if p_hel is zero
+    on input."* `/MAT/LAW79` implements none of that: `hm_read_mat79.F:211`
+    forms `UPARAM(10) = TMAX/PHEL` directly and the ONLY PHEL guard anywhere
+    is `PHEL > HEL` (`ERROR 907`), so a copied-through 0 passes the starter
+    with **0 ERROR / 0 WARNING** (measured: the `.out` echoes
+    `PRESSURE AT HUGONIOT ELASTIC LIMIT = 0.000000000000`) and then leaves
+    every `P*`, `T*` and `σ_HEL` at Inf or 0/0 for the whole run — which is
+    exactly what a dyna2rad-converted deck does. k2rad reproduces LS-DYNA's
+    own derivation instead: the smallest root of that equation in `(0, 1]` by
+    scan + bisection (a scan, not Newton, so a negative `K2` cannot hand back
+    a larger root), and emits the derived `PHEL`, reporting μ_hel, `PHEL` and
+    `σ_HEL` in the warning. The derived value can never trip `ERROR 907`
+    (`PHEL = HEL − (4/3)·G·μ/(1+μ) < HEL` for `G > 0`), a stated `PHEL` is
+    never touched, and when the iteration cannot run (`HEL ≤ 0`, `K1 ≤ 0`,
+    `G ≤ 0`, or no root below μ = 1) the original hard warning stands.
+    Worked check, hand-solved independently in the test: `K1 = 130.95e9`,
+    `G = 90.16e9`, `K2 = K3 = 0`, `HEL = 19e9` → μ_hel = 0.07837428750607,
+    `PHEL = 1.0263112948920e10`, `σ_HEL = 1.3105330576620e10`.
+
+    Guards the starter does not have, all warned: **`EPS0 ≤ 0` with `C ≠ 0`**
+    is FATAL (`ERROR 910`) and a dyna2rad-converted deck walks straight into
+    it; k2rad substitutes the rate-free value the starter itself uses when
+    `C == 0` (`hm_read_mat79.F:159`), so the deck runs — the LS-DYNA card is
+    equally undefined at `EPS0 = 0`. The substitution is **expressed in the
+    deck's time unit**: `EPS0` is a 1/time quantity (Vol II R16 `*MAT_015`,
+    which this card's `EPS0` refers to: *"input in units of [time]⁻¹ … if the
+    system of units for the model input is {kg, mm, ms}, then EPS0 should be
+    set to 10⁻⁵"*) and k2rad rescales nothing, so a bare `1.0` would be
+    1000 s⁻¹ on a ton-mm-ms deck; and because `sigeps79.F:178-182` sets
+    `CE = 1` for `ε̇ ≤ EPS0` (LAW126 the same at `sigeps126.F90:279`), an
+    over-large `EPS0` switches rate hardening **off** across the range of
+    interest rather than shifting its onset. The emitted value is
+    `1 s⁻¹` converted into the deck's time label, parsed the way the starter
+    parses `/BEGIN` itself (`unit_code.F:99-143`: at most three characters,
+    last one `s`, leading one or two an SI prefix) — so `1.0` on the default
+    Mg-mm-s deck, `1e-3` on ms, `1e-6` on µs, and the raw starter default for
+    a label the starter would itself reject. `C == 0` with a zero `EPS0` is
+    left alone (the starter fixes it and 910 never fires). `G ≤ 0`
+    (`ERROR 908`), `K1 ≤ 0` (`ERROR 909`), `BETA` outside `[0,1]`
+    (`ERROR 911`) and `PHEL > HEL` (`ERROR 907`) are reported with their ids.
 
   - **`*MAT_JOHNSON_HOLMQUIST_CONCRETE` (111) → `/MAT/LAW126`** (dyna2rad
     `p_ConvertMatL111`, CM:5639-5674; layout audited against
@@ -143,8 +178,10 @@ Prior history (before this changelog was introduced) is summarized in the
     guard**: `UC=0` yields an infinite region-1 bulk modulus and a NaN Young's
     modulus and Poisson ratio while the starter reports *0 ERROR / 0 WARNING*
     — a silent NaN, warned as such, and `UL=0` likewise. `EPS0 ≤ 0` with
-    `C ≠ 0` is substituted with 1.0 (the starter's own `if (cc==zero) eps0=one`
-    default) rather than left to evaluate `C*log(eps_dot/0)` every cycle.
+    `C ≠ 0` is substituted with the starter's own `if (cc==zero) eps0=one`
+    default rather than left to evaluate `C*log(eps_dot/0)` every cycle — in
+    the deck's time unit, for the reason spelled out under LAW79 above
+    (`sigeps126.F90:279` applies the rate factor only ABOVE `EPS0`).
     `G`, `K1` and `FC` at ≤ 0 are warned naming that the starter checks
     nothing — `FC` in particular is the JHC normalizer, so a zero makes the
     entire yield surface Inf/NaN. The derived Poisson ratio
@@ -197,7 +234,10 @@ Prior history (before this changelog was introduced) is summarized in the
     where `E=3e9, PR=0.25` should give `2.0e9`. `K < 0` matches NEITHER of its
     two branches and leaves `B = 0`, a fluid with zero sound speed, silently;
     k2rad falls back to the same E/PR relation and warns. `PR ≥ 0.5` makes the
-    fallback unusable and is warned naming the inert-fluid consequence.
+    fallback unusable — singular at 0.5, negative above it — and takes a
+    branch of its own that reports the inert-fluid consequence WITHOUT quoting
+    a derived value, since at that Poisson ratio the expression has none (the
+    internal 0.0 there is a sentinel, not a result).
 
     **`VC` is DROPPED, not copied.** LS-DYNA's `VC` is a **dimensionless**
     tensor-viscosity coefficient scaling an artificial deviatoric stress
@@ -221,7 +261,20 @@ Prior history (before this changelog was introduced) is summarized in the
     pressure") is the one semantic the Radioss card cannot state and is
     reported as inexpressible with the small-negative-`Pmin` remedy — the
     handler tracks cell blankness (`cp_given`) precisely so blank and explicit
-    zero can be told apart, which dyna2rad cannot do. `E`/`PR` are otherwise
+    zero can be told apart, which dyna2rad cannot do.
+
+    The `1e20` default is a **raw literal**, so a magnitude test against it
+    alone is unit-system dependent — and the corpus proves it on one material:
+    `W11_SETUP_SPH_BirdStrike_Multi`'s "Head" fluid writes `K = 2.2e9` /
+    `CP = 1.00000E20` in its kg-m-s copy and `K = 2200` / `CP = 1E+14` in the
+    kunit-converted ton-mm-s copy — the same 1e20 Pa, the same physical
+    material, one hitting the sentinel and one missing it. A `CP` at or above
+    `1e6 × K` is therefore recognised as the default too: `Pmin = -CP` binds
+    at a volumetric strain of `CP/K`, so such a cut-off is unreachable in
+    either code, and 1e6 sits far above any physical cavitation pressure
+    (which is at most a fraction of K). The substitution is warned with the
+    measured ratio; with `K` unresolvable there is nothing to scale by and
+    only the raw literal is still recognised. `E`/`PR` are otherwise
     dropped (LS-DYNA ignores them under FLUID and zeroes the shear modulus;
     LAW6 has no shear slot at all, so the pure-hydrodynamic response is exact
     rather than approximated) and `DA`/`DB` are beam-only damping.
@@ -256,26 +309,36 @@ Prior history (before this changelog was introduced) is summarized in the
   `*MAT_ELASTIC_FLUID` appears in exactly one deck — 5 copies of it:
   `Ryan_Lee_Examples/W11_SETUP_SPH_BirdStrike_Multi.k` in-repo, an identical
   copy on `E:`, and three `__ton-mm-s` unit-converted copies — as
-  `*MAT_ELASTIC_FLUID_TITLE` "Head" with ρ=2600, E=8.5e8, ν=0.24, K=2.2e9,
-  VC=0.0, CP=1.0e20, a real bird-strike "bird as fluid" material and the
-  source of this batch's realistic field values. `*MAT_001`/`*MAT_1` have zero
-  hits, so registering those aliases moves nothing.
+  `*MAT_ELASTIC_FLUID_TITLE` "Head", a real bird-strike "bird as fluid"
+  material and the source of this batch's realistic field values. The five
+  split by unit system, and the split matters: the **2 SI (kg-m-s) copies**
+  carry ρ=2600, E=8.5e8, ν=0.24, K=2.2e9, VC=0.0, **CP=1.00000E20**, while the
+  **3 `__ton-mm-s` copies** carry ρ=2.6e-9, E=850, K=2200, VC=0.0 and
+  **CP=1E+14** — the same 1e20 Pa, rescaled by the unit converter, which is
+  precisely why the CP sentinel is tested against the bulk modulus and not only
+  against the literal. `*MAT_001`/`*MAT_1` have zero hits, so registering those
+  aliases moves nothing.
 
-  The sweep is therefore a near-pure no-movement check, and measured (200
-  decks, `master` b762de2 vs `feat/impact-mats`, 0 exceptions on either side)
-  it is exactly that: **195/200 byte-identical on BOTH `_0000.rad` and
-  `_0001.rad`, with identical warning sets and identical skip lists**. The 5
-  that moved are precisely the 5 W11 copies, and they moved only in the
-  starter deck (`_0001.rad` unchanged — materials live in `_0000.rad` alone),
-  each by exactly one skip removed and one warning added:
-  `MAT_ELASTIC_FLUID` leaves `skipped_keywords` and a `/MAT/HYD_VISC/3` +
-  `/EOS/POLYNOMIAL/3` pair appears where PART 8's material previously dangled,
-  with the single warning naming the dropped E/PR. The `VC=0.0` and the
-  defaulted `CP=1.0e20` correctly produce **no** warning and `Nu = Pmin = 0` —
-  the very case where dyna2rad would write a finite `Pmin = -1e20`. That deck
-  is a card-source, not an end-to-end validation case: its MID 3 sits on
-  PART 8 → SECID 2 = `*SECTION_SPH`, and k2rad has no SPH path at all, so the
-  part still has no property and the deck still cannot run.
+  The sweep is therefore a near-pure no-movement check, and measured over
+  **201 decks** — the 73 `.k`/`.key`/`.dyn` decks in the repo, the 127-deck
+  `E:\openradioss_run\Ryan_Lee_Examples` tree and the one
+  `E:\openradioss_run\ls-dyna_example` deck — (`master` b762de2 vs
+  `feat/impact-mats`, 0 exceptions on either side) it is exactly that:
+  **196/201 byte-identical on BOTH `_0000.rad` and `_0001.rad`, with identical
+  warning sets and identical skip lists**. Total warnings 2164 → 2172. The 5
+  that moved are precisely the 5 W11 copies, and they
+  moved only in the starter deck (`_0001.rad` unchanged — materials live in
+  `_0000.rad` alone): `MAT_ELASTIC_FLUID` leaves `skipped_keywords` and a
+  `/MAT/HYD_VISC/3` + `/EOS/POLYNOMIAL/3` pair appears where PART 8's material
+  previously dangled. The 2 SI copies gain exactly one warning (the dropped
+  E/PR); the 3 ton-mm-s copies gain two, the second naming the rescaled CP
+  (`CP=1e+14 is 4.54545e+10 x the bulk modulus K=2200`). All five emit
+  `Nu = 0` and `Pmin = 0` → `-INFINITY`, i.e. the **same** cavitation card
+  regardless of units — the very case where dyna2rad would write a finite
+  `Pmin = -1e20` (SI) or `-1e14` (ton-mm-s). That deck is a card-source, not
+  an end-to-end validation case: its MID 3 sits on PART 8 → SECID 2 =
+  `*SECTION_SPH`, and k2rad has no SPH path at all, so the part still has no
+  property and the deck still cannot run.
   **What this corpus cannot see**: anything about the new cards
   themselves. That evidence is the column-exact tests plus the starter probes
   the card layouts were audited against — `/BEGIN` 2022/2023/2024/2025/2026
@@ -285,8 +348,24 @@ Prior history (before this changelog was introduced) is summarized in the
   field-by-field `.out` echoes for the SI values used throughout the tests
   (LAW79: derived `E = 219991445311.7`, `nu = 0.22000579…` from `K1`/`G`;
   LAW126: `IDEL = 2`, `EPS_MAX = 0.30`, `IFAILSO = 1`, `K0 = PC/MUC = 16e9`;
-  LAW6: `VISCOSITY 0.1`, `PRESSURE CUTOFF −1000000`, `BULK MODULUS 2.2e9`).
-  Suite 2185 → **2289 passed**, 2 skipped, 544 → **593 subtests**; 104 new
+  LAW6: `VISCOSITY 0.1`, `PRESSURE CUTOFF −1000000`, `BULK MODULUS 2.2e9`) —
+  and, for the `PHEL` derivation, an end-to-end starter run: the same card
+  with a blank `PHEL` echoes `PRESSURE AT HUGONIOT ELASTIC LIMIT =
+  0.000000000000` at *0 ERROR / 0 WARNING* before the fix and
+  `= 10263112950.00` after it, both NORMAL TERMINATION.
+
+  **Robustness.** The three handlers carry the file's standard
+  empty-material-card guard (21 other handlers already have it), placed in
+  `handle_mat_elastic` BEFORE the `_FLUID` split so it covers every spelling:
+  a block with no data card was aborting the whole conversion with a bare
+  `IndexError` — which `*MAT_ELASTIC` already did before this batch, so the
+  guard closes a pre-existing hole as well as the four new keyword families —
+  and a card whose MID cell is blank was silently emitting `/MAT/LAW79/0` or
+  `/MAT/HYD_VISC/0` + `/EOS/POLYNOMIAL/0`, the `/MAT/LAW76/0` failure mode
+  already recorded for `*MAT_187`. Card-1 reads past MID are guarded the same
+  way, so a truncated card still converts.
+
+  Suite 2185 → **2313 passed**, 2 skipped, 544 → **645 subtests**; 128 new
   column-exact tests in `tests/test_impact_mats.py`, every physics constant
   recomputed by hand — `sigma_HEL = 1.5*(19e9-1.46e9) = 2.631e10` and
   `T* = 0.2e9/1.46e9 = 0.1369863` asserted **absent** from every emitted field,
@@ -294,7 +373,12 @@ Prior history (before this changelog was introduced) is summarized in the
   `nu = (3*K1-2G)/(6*K1+2G)` matched against the starter's own echo,
   `k0 = PC/MUC = 16e9`, `(PL-PC)/MUL = 7.84e9`, the negative derived Poisson
   `-0.7480403`, `K = E/(3(1-2*PR)) = 2.0e9` with dyna2rad's `E/3 = 1.0e9`
-  asserted absent, and `a = sqrt(2.2e9/2600) = 919.8662` in the VC recipe.
+  asserted absent, `a = sqrt(2.2e9/2600) = 919.8662` in the VC recipe, and the
+  `PHEL` derivation Newton-solved independently in the test
+  (μ_hel = 0.07837428750607 → `PHEL = 1.0263112948920e10`). The nine
+  `_OFFSET_SPECS` spellings get the `test_offset_specs_cover_every_spelling`
+  assertion the two preceding batches carry, plus a live `*INCLUDE_TRANSFORM`
+  with `IDMOFF` that checks all four emitted ids actually move.
 
 - **Tabulated Johnson-Cook batch** (`*MAT_TABULATED_JOHNSON_COOK` 224 incl.
   `_LOG_INTERPOLATION`, `*DEFINE_TABLE_3D`) — the roadmap P1 item. All were

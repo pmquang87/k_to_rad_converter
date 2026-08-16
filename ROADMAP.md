@@ -196,9 +196,15 @@ shipped, so the marginal cost is small.
   CHANGELOG. Still open in this family: `*MAT_110`'s `FS` failure flag, which
   is **not expressible under /BEGIN 2022** because LAW79's `IDEL`/`EPSMAX` are
   radioss2023 fields — it is warn-dropped naming the `*MAT_ADD_EROSION`
-  remedy, and needs a `/BEGIN` bump rather than converter work (LAW79's `Fcut`
-  and LAW126's `IFAILSO` and Cowper-Symonds `CT/POWT/CC/POWC` card are gated
-  the same way, at 2023 / 2025 / 2026); LS-DYNA `VC`'s ΔL·a factor, which is
+  remedy. A `/BEGIN` bump is the direct route (LAW79's `Fcut` and LAW126's
+  `IFAILSO` and Cowper-Symonds `CT/POWT/CC/POWC` card are gated the same way,
+  at 2023 / 2025 / 2026), but not the only conceivable one: `/FAIL` cards are
+  version-independent, so `FS > 0` could in principle be auto-emitted as one.
+  Neither candidate is a clean drop-in, which is why it was not done —
+  `/FAIL/GENE1`'s `Eps_eff` is built from the TOTAL deviatoric strain
+  (`fail_gene1_s.F:278-279`), not the plastic strain LAW79's `IDEL=2` uses,
+  and a `/FAIL/JOHNSON` with `D2..D5 = 0` would need its own validation.
+  LS-DYNA `VC`'s ΔL·a factor, which is
   per-element and cannot be resolved at material-conversion time; an explicit
   `CP = 0.0`, since `Pmin = 0` is Radioss's no-cutoff sentinel; and — the real
   blocker for the one natural corpus deck — `*SECTION_SPH` / `*ELEMENT_SPH`,
