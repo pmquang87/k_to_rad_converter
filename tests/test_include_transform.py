@@ -870,6 +870,138 @@ class RigidwallTransformTests(_AssemblyBase):
                             for w in PARSER_WARNINGS))
 
 
+class GeometricRigidwallTransformTests(_AssemblyBase):
+    """*RIGIDWALL_GEOMETRIC_* geometry and ids follow the include."""
+
+    def test_cylinder_points_move_radii_kept(self):
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*NODE",
+            _nline(1, 0.0, 0.0, 5.0),
+            "*RIGIDWALL_GEOMETRIC_CYLINDER",
+            _row(0, 0, 0),
+            _row(1.0, 2.0, 0.0, 1.0, 2.0, 1.0, 0.3),
+            _row(2.5, 0.0),
+            "*END",
+        ]) + "\n")
+        main = self._main_with_transform(
+            d, [_opt("TRANSL", 0.0, 0.0, 100.0)])
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertEqual(rw.shape, "CYLINDER")
+        self.assertAlmostEqual(rw.zt, 100.0)
+        self.assertAlmostEqual(rw.zh, 101.0)
+        self.assertAlmostEqual(rw.radcyl, 2.5)          # a radius, not a point
+        self.assertAlmostEqual(rw.fric, 0.3)
+        self.assertFalse([w for w in PARSER_WARNINGS if "RIGIDWALL" in w])
+
+    def test_prism_edge_head_moves_extents_kept(self):
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*NODE",
+            _nline(1, 0.0, 0.0, 5.0),
+            "*RIGIDWALL_GEOMETRIC_PRISM",
+            _row(0, 0, 0),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            _row(1.0, 0.0, 0.0, 4.0, 2.0, 6.0),
+            "*END",
+        ]) + "\n")
+        main = self._main_with_transform(
+            d, [_opt("TRANSL", 10.0, 20.0, 30.0)])
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertAlmostEqual(rw.xhev, 11.0)           # edge head is a point
+        self.assertAlmostEqual(rw.yhev, 20.0)
+        self.assertAlmostEqual(rw.zhev, 30.0)
+        self.assertAlmostEqual(rw.lenl, 4.0)            # extents untouched
+        self.assertAlmostEqual(rw.lenm, 2.0)
+        self.assertAlmostEqual(rw.lenp, 6.0)
+
+    def test_motion_direction_cosines_rotate_position_does_not_translate(self):
+        # 90 deg about +z then a translation: the wall POINTS take both, the
+        # motion direction cosines take only the linear part.
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*NODE",
+            _nline(1, 0.0, 0.0, 5.0),
+            "*RIGIDWALL_GEOMETRIC_SPHERE_MOTION",
+            _row(0, 0, 0),
+            _row(1.0, 0.0, 0.0, 1.0, 0.0, 1.0),
+            _row(4.0),
+            _row(99, 0, 1.0, 0.0, 0.0),
+            "*END",
+        ]) + "\n")
+        main = self._main_with_transform(
+            d, [_opt("ROTATE", 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 90.0),
+                _opt("TRANSL", 0.0, 0.0, 7.0)])
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertAlmostEqual(rw.xt, 0.0, places=9)    # (1,0,0) → (0,1,0)
+        self.assertAlmostEqual(rw.yt, 1.0, places=9)
+        self.assertAlmostEqual(rw.zt, 7.0, places=9)    # + the translation
+        self.assertAlmostEqual(rw.vx, 0.0, places=9)    # +x → +y, NO translate
+        self.assertAlmostEqual(rw.vy, 1.0, places=9)
+        self.assertAlmostEqual(rw.vz, 0.0, places=9)
+
+    def test_scale_warns_that_wall_dimensions_are_not_rescaled(self):
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*NODE",
+            _nline(1, 0.0, 0.0, 5.0),
+            "*RIGIDWALL_GEOMETRIC_SPHERE",
+            _row(0, 0, 0),
+            _row(1.0, 1.0, 0.0, 1.0, 1.0, 1.0),
+            _row(4.0),
+            "*END",
+        ]) + "\n")
+        main = self._main_with_transform(d, [_opt("SCALE", 2.0, 2.0, 2.0)])
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertAlmostEqual(rw.xt, 2.0)              # points still scale
+        self.assertAlmostEqual(rw.radsph, 4.0)          # the radius does not
+        self.assertTrue(any("RADSPH) are NOT rescaled" in w
+                            for w in PARSER_WARNINGS))
+
+    def test_ids_are_offset(self):
+        # NSID/NSIDEX → IDSOFF, BOXID → IDDOFF, the _MOTION LCID → IDFOFF,
+        # the _DISPLAY PID and the _ID header → IDPOFF.
+        d = self._dir()
+        self._write(d, "child.k", "\n".join([
+            "*KEYWORD",
+            "*RIGIDWALL_GEOMETRIC_CYLINDER_MOTION_DISPLAY_ID",
+            _row(7) + "cyl",
+            _row(11, 12, 13),
+            _row(0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            _row(2.5, 0.0, 2),                 # NSEGS = 2 shifts the cards
+            _row(1.0, 2.0),
+            _row(3.0, 4.0),
+            _row(99, 0, 1.0, 0.0, 0.0),
+            _row(21, 1.0e-9, 1.0e-4, 0.3),
+            "*END",
+        ]) + "\n")
+        main = self._write(d, "main.k", "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM",
+            "child.k",
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF
+            _row(0, 0, 1000, 0, 200, 3000, 40),
+            "", "", "",
+            "*END",
+        ]) + "\n")
+        st = self._state(main)
+        rw = st.rigid_walls_geometric[0]
+        self.assertEqual(rw.rwid, 1007)                 # _ID header + IDPOFF
+        self.assertEqual(rw.nsid, 211)
+        self.assertEqual(rw.nsidex, 212)
+        self.assertEqual(rw.boxid, 53)
+        self.assertEqual(rw.lcid, 3099)                 # past the NSEGS cards
+        self.assertAlmostEqual(rw.vx, 1.0)              # not an id
+
+
 class ReferenceOffsetEdgeTests(_AssemblyBase):
     def test_cnrb_spc_local_system_reference_offset(self):
         # CMO<0 → CON1 is a *DEFINE_COORDINATE_* id and follows IDDOFF.
