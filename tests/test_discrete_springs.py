@@ -198,6 +198,15 @@ class MatS06Tests(unittest.TestCase):
         self.assertEqual(fcard[10:20].strip(), "6")    # H1 = 6
         self.assertEqual(fcard[30:40].strip(), "51")   # fct_ID31 = LCDU
 
+    def test_k1_is_the_loading_curve_max_slope(self):
+        """Under H=6, K1 IS the unloading stiffness, and the starter refuses
+        to let it be smaller than the loading curve's steepest segment — it
+        raises it silently under WARNING 506 (measured on starter_win64).
+        Curve 50 is (0,0) (1,100) (2,150): steepest secant = 100."""
+        _, starter = _convert(self.DECK)
+        blk = _block_lines(starter, "/PROP/TYPE4/")
+        self.assertEqual(blk[5][0:20].strip(), "100")   # LCDL=50's max slope
+
     def test_beta_tyi_cyi_are_named_in_the_warning(self):
         result, _ = _convert(self.DECK)
         self.assertTrue(any("BETA, TYI, CYI" in w for w in result.warnings))
@@ -291,6 +300,15 @@ class TorsionalDro1Tests(unittest.TestCase):
             k_card = blk[4 + 6 * (slot - 1) + 1]
             self.assertEqual(k_card[0:20].strip(), expected,
                              f"K{slot}")
+
+    def test_inertia_matches_the_starter_reference_mass_times_length_squared(self):
+        """rinit3.F answers WARNING 432 when the spring's Inertia is not
+        mass·L² (measured on starter_win64). The connector's mass is the
+        artificial 1e-4 and the element is 1.0 long, so I = 1e-4."""
+        _, starter = _convert(self.DECK)
+        card1 = _block_lines(starter, "/PROP/TYPE13/")[3]
+        self.assertAlmostEqual(float(card1[0:20]), 1.0e-4)
+        self.assertAlmostEqual(float(card1[20:40]), 1.0e-4)
 
     def test_zero_length_torsional_element_is_not_converted(self):
         """With node1 == node2 there is no axis to twist about (r4buf3.F
