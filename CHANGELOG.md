@@ -294,19 +294,31 @@ Prior history (before this changelog was introduced) is summarized in the
     k2rad invents, and the same warning on it is then correct feedback about the
     deck.
 
-  **Corpus census + sweep.** A structured scan of the 628 unique
+  **Corpus census + sweep.** A structured scan of the **618** unique
   `.k`/`.key`/`.dyn`/`.inc` files across the repo, `E:\openradioss_run` (incl.
   `Ryan_Lee_Examples` and `ls-dyna_example`) and `E:\foxcore_data` finds **zero**
-  hits for every keyword in this batch: no `*SECTION_BEAM` with `ELFORM=6`, no
-  `*MAT_066/067/068/069/070/071/074/093/094/095/119/121/196`, and none of the
-  `*MAT_S03/S05/S06/S08` spellings. The 201-deck byte-identity sweep (the 73
-  repo decks, the 127-deck `Ryan_Lee_Examples` tree and the one
-  `ls-dyna_example` deck) is therefore a **pure no-movement check**, and the
-  only decks that can move at all are the Yaris and Camry, whose suspension
-  springs are `*MAT_SPRING_ELASTIC` / `_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS`
-  on `DRO=0` sections with blank `S`/`VID`/`OFFSET` — every field this batch
-  touches is at its pre-existing default there. All the evidence is therefore in
-  the 78 new column-exact tests plus the two byte-identity canaries in
+  hits for every keyword in this batch: none of the
+  `*MAT_066/067/068/069/070/071/074/093/094/095/119/121/196` spellings, none of
+  `*MAT_S03/S05/S06/S08`, and — read back through k2rad's own parser rather than
+  a regex — the corpus's **24 `*SECTION_BEAM` sets (15 files) are ELFORM 1 (×10)
+  and 9 (×14) with `SCOOR = 0` throughout, so there is no `ELFORM=6` section
+  anywhere**. Two independent scans (a Python walk and a PowerShell
+  `Select-String` pass) agree.
+
+  The sweep is therefore a **pure no-movement check**, and it was run over
+  exactly the decks that can reach code this batch touched — every deck carrying
+  an `*ELEMENT_DISCRETE`, `*SECTION_DISCRETE`, `*SECTION_BEAM`,
+  `*ELEMENT_PLOTEL`, `*MAT_SPRING_*`, `*MAT_DAMPER_*` or `*MAT_SPOTWELD`, i.e.
+  the six W16/W17 spotweld decks (which exercise the refactored
+  `_emit_prop_type13`), the Yaris and its variants and the Camry (the only decks
+  in the corpus with `*ELEMENT_DISCRETE` at all), and the `ls-dyna_example`
+  deck. Result: **16/16 byte-identical on BOTH `_0000.rad` and `_0001.rad`, with
+  identical warning sets (12 705 warnings on each side) and identical skip
+  lists.** The Yaris/Camry suspension springs are `*MAT_SPRING_ELASTIC` /
+  `_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` on `DRO=0` sections with blank
+  `S`/`VID`/`OFFSET`, so every field this batch touches is at its pre-existing
+  default there — which is exactly what the sweep confirms. The rest of the
+  evidence is the 88 new column-exact tests plus the byte-identity canaries in
   `tests/test_discrete_springs.py::ByteIdentityTests`.
 
 - **Impact / blast materials batch** (`*MAT_JOHNSON_HOLMQUIST_CERAMICS` 110,
