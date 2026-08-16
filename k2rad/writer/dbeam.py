@@ -357,8 +357,14 @@ def _build_mat067(state, label, mat, fid_alloc, curves):
                        "DROPPED (there is nothing to shift, and this material "
                        "has no stiffness field).")
         if mat.lcid_damp[i]:
-            dofs[i].fct4 = mat.lcid_damp[i]
-            dofs[i].hscale = 1.0
+            if mat.lcid_damp[i] in curves:
+                dofs[i].fct4 = mat.lcid_damp[i]
+                dofs[i].hscale = 1.0
+            else:
+                state.warn(f"{label}: DOF {i + 1} {_dof_label(i)} damping curve "
+                           f"{mat.lcid_damp[i]} is not defined in the deck — "
+                           "the fct_ID4 reference would dangle, so the slot was "
+                           "CLEARED and that DOF is undamped.")
     ifail2, limits = _dbeam_failure(mat.ufail, mat.ffail, disp_first=True)
     for i in range(6):
         dofs[i].dmin, dofs[i].dmax = limits[i]
