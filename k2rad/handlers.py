@@ -4902,6 +4902,16 @@ def handle_database_deforc(block: Block, state: ConversionState) -> None:
     state.db_deforc_dt = _handle_db_dt(block, state, "*DATABASE_DEFORC")
 
 
+def handle_database_disbout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_DISBOUT: "Discrete beam element, type 6, relative
+    displacements, rotations, and forces" (Vol I R16 p.1945) — the sibling of
+    DEFORC, which covers *ELEMENT_DISCRETE only. k2rad turns both families into
+    /SPRING elements, so both land in a /TH/SPRING; keeping the two cards apart
+    keeps each T01 channel attributed to the database LS-DYNA attributes it to.
+    """
+    state.db_disbout_dt = _handle_db_dt(block, state, "*DATABASE_DISBOUT")
+
+
 def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
@@ -5675,9 +5685,16 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
       _MOVING: mass v0 — wall mass and initial speed along the outward
         normal (free-flying finite-mass wall) → the /RWALL moving form
         (node_ID > 0 carrier node + "Mass VX0 VY0 VZ0" card).
-    _FORCES only appends force-output cards, which /TH/RWALL replaces, so it
-    needs no extra parsing. _ORTHO (orthotropic friction) has no /RWALL
-    equivalent and is warn-skipped by handle_rigidwall_ortho.
+      _FORCES: soft ssid n1 n2 n3 n4 — ONE card, always the LAST of the set
+        (Card Summary, Manual p. 40-17: ID -> 1 -> 2 -> [ORTHO 3,4] ->
+        [FINITE 5] -> [MOVING 6] -> [FORCES 7], whatever order the options are
+        spelled in the keyword name). It is mostly output plumbing that
+        /TH/RWALL already covers, but SOFT is a solver knob, so the card is
+        READ rather than assumed absent — leaving it unconsumed made every
+        following line shift by one and, worse, made the multi-card-set guard
+        below unusable on the planar family.
+    _ORTHO (orthotropic friction) has no /RWALL equivalent and is warn-skipped
+    by handle_rigidwall_ortho.
     """
     kw = block.keyword
     label = f"*{kw}"
@@ -5743,6 +5760,55 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
                 "is carried by a free node, which frictionless contact only "
                 "loads along the normal — but with FRIC>0 tangential contact "
                 "forces may also drift the wall laterally.")
+
+    if "_FORCES" in kw:
+        # Card 7: SOFT SSID N1 N2 N3 N4 (Manual p. 40-23). Consumed leniently,
+        # the same way handle_rigidwall_geometric treats the DISPLAY card: it is
+        # the LAST card of the set, so a deck that stops after MOVING is legal
+        # LS-DYNA and must not be warned at.
+        if idx < len(raw) and raw[idx].strip():
+            ff = _card(raw, idx, fixed=True, n=8, w=10)
+            idx += 1
+            soft = to_int(ff[0]) if ff else 0
+            ssid = to_int(ff[1]) if len(ff) > 1 else 0
+            # N1..N4 are "Optional node for visualization" (Manual p. 40-23) —
+            # they change nothing about the wall and are dropped in silence.
+            if soft:
+                state.warn(
+                    f"{label} id={rwid}: FORCES SOFT={soft} (ramp the relative "
+                    "velocity to zero over that many cycles to soften the "
+                    "initial contact-force spike) has no /RWALL equivalent — "
+                    "dropped. The wall engages at full stiffness from the "
+                    "first contact cycle, so expect a sharper force peak at "
+                    "t=0 than LS-DYNA reports. Soften it by ramping the "
+                    "approach velocity, or replace the wall with an /INTER "
+                    "interface, whose penalty stiffness IS tunable.")
+            if ssid:
+                state.warn(
+                    f"{label} id={rwid}: FORCES SSID={ssid} splits the wall "
+                    "force over the segments of that *SET_SEGMENT for "
+                    "per-area output in rwforc — dropped. /RWALL reports ONE "
+                    "resultant for the whole wall (/TH/RWALL), so the "
+                    "distribution over sub-areas is not available; split the "
+                    "wall into several *RIGIDWALL_PLANAR blocks if you need "
+                    "the force per region.")
+
+    # "Card Sets. For each rigid wall include ONE SET of the following data
+    # cards" (Manual p. 40-5) — the planar keyword may carry several walls, and
+    # k2rad converts the first set only. This guard can only be trusted now that
+    # the FORCES card above is consumed: without it, `idx` stopped one line
+    # short on every *RIGIDWALL_PLANAR_*FORCES deck and the wall's own last card
+    # was reported as a second, phantom card set.
+    if any(ln.strip() for ln in raw[idx:]):
+        state.warn(
+            f"{label} id={rwid}: {len(raw) - idx} further card line(s) follow "
+            "the first wall's card set. LS-DYNA reads one set per wall and "
+            "keeps going to the next keyword (Manual p. 40-5), but k2rad "
+            "converts the FIRST set only — split the extra wall(s) into their "
+            "own *RIGIDWALL_PLANAR blocks.")
+        state.note_recognized_not_emitted(
+            kw, "only the first of several card sets under the keyword was "
+                "converted")
 
     state.rigid_walls.append(RigidWallPlanar(
         rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
@@ -8599,10 +8665,29 @@ def _blast_unit_system(unit: int):
     /BEGIN unit labels to convert its internal {cm, g, µs} data to model units —
     those labels must therefore match the deck's real units. Only the physically
     consistent SI-family flags get an automatic mapping.
+
+    Every label here must be one the STARTER can parse, not merely one a human
+    can read. unit_code.F:70-98 splits the %20s field into an SI prefix + a base
+    letter and accepts a token of ONE, TWO or THREE characters only; anything
+    longer takes the ELSE branch at :92-98, which blanks CUNIT and sets IERR1=0,
+    and the test at :151-158 (last character must be 'g'/'m'/'s' per
+    MASS/LENGTH/TIME, or IERR1==0) then raises ERROR 573 INVALID UNIT CODE.
+    Microseconds are therefore ``mus`` (the label begin.cfg:127 itself lists),
+    never ``micros``: measured on starter_win64, ``micros`` gives
+      ERROR ID : 573 ** INVALID UNIT CODE / UNIT: micros - CODE: TIME
+    on BOTH /BEGIN unit lines — the "2 GLOBAL UNITS ERROR(S)" that stops the run
+    — and the factor it reports is 1.0E+00, i.e. it would silently have read
+    seconds and been wrong by 1e6 had the run continued.
+    Legal token = (prefix in {'', y z a f p n mu u m c d da h k K M G T P E Z Y})
+    + (base in {g, m, s}); the same grammar the writer's _time_unit_in_seconds
+    transcribes for the *CONTROL_UNITS side. (The two tables are deliberately
+    NOT shared: handlers.py imports only .parser/.state, and reaching into
+    k2rad.writer from a handler would invert the layer direction. Unifying them
+    belongs in a units module of its own.)
     """
     return {
         2: ("kg", "m", "s"),
-        4: ("g", "cm", "micros"),
+        4: ("g", "cm", "mus"),
     }.get(unit)
 
 
@@ -9425,6 +9510,14 @@ HANDLERS = {
     "RIGIDWALL_PLANAR_ORTHO_FINITE":          handle_rigidwall_ortho,
     "RIGIDWALL_PLANAR_ORTHO_MOVING":          handle_rigidwall_ortho,
     "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING":   handle_rigidwall_ortho,
+    # The remaining three legal ORTHO spellings. Without a row each they miss
+    # the exact-match lookup, and there is no RIGIDWALL_PLANAR prefix fallback
+    # in _PREFIX_HANDLERS to catch them, so they landed in the generic
+    # skipped_keywords list with no reason attached — the user was told the
+    # wall was skipped but never why.
+    "RIGIDWALL_PLANAR_ORTHO_MOVING_FORCES":   handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_FINITE_FORCES":   handle_rigidwall_ortho,
+    "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING_FORCES": handle_rigidwall_ortho,
 
     # Discrete (spring/damper) elements
     "ELEMENT_DISCRETE":                       handle_element_discrete,
@@ -9504,6 +9597,7 @@ HANDLERS = {
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,
     "DATABASE_BINARY_INTFOR":                 handle_database_binary_intfor,
     "DATABASE_DEFORC":                        handle_database_deforc,
+    "DATABASE_DISBOUT":                       handle_database_disbout,
     "DATABASE_EXTENT_BINARY":                 handle_database_extent_binary,
     "DATABASE_JNTFORC":                       handle_database_jntforc,
     "DATABASE_MATSUM":                        handle_database_matsum,

@@ -4512,10 +4512,20 @@ class ConversionState:
     # emitted is starter ERROR 69 (hm_read_thgrne.F:189, MSGTYPE=MSGERROR) —
     # the deck is refused, not degraded. Same accounting pattern as cluster_ids.
     spotweld_spring_eids: Set[int] = field(default_factory=set)
-    # (No dbeam_spring_eids twin: the *SECTION_BEAM ELFORM=6 connectors have no
-    # /TH consumer yet — *DATABASE_DEFORC / *DATABASE_DISBOUT are unconverted —
-    # and an accounting set nothing reads only promises a guarantee nothing
-    # enforces. Add it back with the /TH/SPRING route that needs it.)
+    # The same accounting, for the two connector families LS-DYNA reports in its
+    # OWN two discrete-element databases (Vol I R16 p.1944-1945):
+    #   *DATABASE_DEFORC  -> "*ELEMENT_DISCRETE data"          -> discrete_spring_eids
+    #   *DATABASE_DISBOUT -> "discrete beam element, type 6"   -> dbeam_spring_eids
+    # Both writers `continue` past elements they cannot emit (a grounded
+    # discrete element whose anchor node has no coordinates; a discrete-beam
+    # part with no usable beams), so these are filled AT THE LINE THAT WRITES
+    # the /SPRING, never from the parsed element list — a /TH/SPRING naming an
+    # id the deck does not define is starter ERROR 69 and the whole run is
+    # refused. Synthesized springs (PLOTEL, --ground-springs,
+    # *CONSTRAINED_SPOTWELD ties, joints) are deliberately NOT in here: their
+    # ids are invented by the converter and match no LS-DYNA deforc/disbout row.
+    discrete_spring_eids: Set[int] = field(default_factory=set)
+    dbeam_spring_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)
@@ -4765,6 +4775,7 @@ class ConversionState:
     db_d3thdt_dt: float = 0.0
     db_intfor_dt: float = 0.0
     db_deforc_dt: float = 0.0
+    db_disbout_dt: float = 0.0
     db_jntforc_dt: float = 0.0
     db_matsum_dt: float = 0.0
     db_nodout_dt: float = 0.0
@@ -4800,6 +4811,13 @@ class ConversionState:
     sect_ids: List[Tuple[int, str]] = field(default_factory=list)
     # *MAT_ADD_FATIGUE per material id → offline fatigue post-processing
     mat_add_fatigue: Dict[int, MatAddFatigue] = field(default_factory=dict)
+    # How many /TH/<type>/<id> blocks build_starter actually wrote, counted from
+    # the emitted lines by _warn_duplicate_th_group_ids. build_engine reads it
+    # to decide whether an INVENTED /TFILE frequency (no *DATABASE_ card states
+    # a dt) is worth warning about: with no /TH group in the deck the invented
+    # number governs nothing anyone reads. Stays 0 for a caller that runs
+    # build_engine without build_starter — silence, never a spurious warning.
+    th_groups_emitted: int = 0
 
     # ── Skipped / warnings ─────────────────────────────────────
     warnings: List[str] = field(default_factory=list)

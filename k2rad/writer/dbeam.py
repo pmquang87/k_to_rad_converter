@@ -1098,6 +1098,12 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 if not n3:
                     no_n3 += 1
                 lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}{_i(n3)}")
+                # *DATABASE_DISBOUT lists exactly these sprg_IDs. Recorded here
+                # rather than from the part's beam list because the `if beams:`
+                # guard and the wrong-section branch above skip whole parts
+                # without emitting a /SPRING, and a /TH/SPRING naming a
+                # never-written element is starter ERROR 69.
+                state.dbeam_spring_eids.add(e.eid)
             if use13 and no_n3:
                 state.warn(
                     f"{label}: {no_n3} element(s) carry no third node, so the "

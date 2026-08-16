@@ -5181,8 +5181,51 @@ class BlastLoadTests(unittest.TestCase):
         self.assertEqual(lines[i + 3].split(), ["kg", "m", "s"])
         self.assertEqual(lines[i + 4].split(), ["kg", "m", "s"])
 
+    def test_unit4_writes_the_starter_legal_microsecond_label(self):
+        """UNIT=4 is {g, cm, microsecond, megabar}, and OpenRadioss spells the
+        microsecond ``mus``.
+
+        ``micros`` is REJECTED: unit_code.F:70-98 accepts a token of one, two or
+        three characters only, and a longer one takes the ELSE branch at :92-98
+        which blanks CUNIT and sets IERR1=0, so the check at :151-158 fires
+        ANCMSG(MSGID=573) INVALID UNIT CODE. Measured on starter_win64 against a
+        converted UNIT=4 deck: the old label gave "2 GLOBAL UNITS ERROR(S)",
+        exit 2 (one per /BEGIN unit line) while REPORTING the time factor as
+        1.0E+00 — seconds, a silent 1e6 error had the run continued; ``mus``
+        gives 0 ERROR(S), exit 0, and a TIME factor of 1.0000000000000E-06.
+        """
+        deck = BLAST_K.replace(
+            "       0.0       5.0       0.0         2         1",
+            "       0.0       5.0       0.0         4         1")
+        _r, starter, _e = self._convert(deck)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.strip() == "/BEGIN")
+        # Both the input-units and the work-units line carry the label.
+        self.assertEqual(lines[i + 3].split(), ["g", "cm", "mus"])
+        self.assertEqual(lines[i + 4].split(), ["g", "cm", "mus"])
+
+    def test_every_auto_mapped_unit_label_is_starter_legal(self):
+        """The whole _blast_unit_system table against the starter's grammar
+        (unit_code.F): token length 1..3, last character 'g'/'m'/'s' by slot,
+        and a prefix from the table at :100-149."""
+        from k2rad.handlers import _blast_unit_system
+        prefixes = {"", "y", "z", "a", "f", "p", "n", "mu", "u", "m", "c", "d",
+                    "da", "h", "k", "K", "M", "G", "T", "P", "E", "Z", "Y"}
+        for flag in range(1, 6):
+            labels = _blast_unit_system(flag)
+            if labels is None:
+                continue
+            for label, base in zip(labels, "gms"):
+                with self.subTest(flag=flag, label=label):
+                    self.assertIn(len(label), (1, 2, 3), label)
+                    self.assertEqual(label[-1], base, label)
+                    self.assertIn(label[:-1], prefixes, label)
+
     def test_explicit_units_override_not_clobbered(self):
         # An explicit caller units= must win over the blast-flag default.
+        # NOTE: "micros" here is deliberately a label the STARTER would reject
+        # — this asserts only that an explicit caller override reaches /BEGIN
+        # verbatim on a different code path, never that the label is valid.
         _r, starter, _e = self._convert(units=("g", "cm", "micros"))
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.strip() == "/BEGIN")

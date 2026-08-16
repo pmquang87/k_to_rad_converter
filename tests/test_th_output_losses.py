@@ -275,5 +275,290 @@ class TestRecognizedButNotEmittedReporting(unittest.TestCase):
         tmp.cleanup()
 
 
+# ── D. *DATABASE_DEFORC / *DATABASE_DISBOUT -> /TH/SPRING ────────────────────
+
+def _tfile(engine: str) -> str:
+    return engine[engine.index("/TFILE"):].splitlines()[1].strip()
+
+
+def _th_spring_eids(starter: str) -> list:
+    """Element ids listed under the first /TH/SPRING block."""
+    lines = starter.split("/TH/SPRING/")[1].splitlines()
+    eids = []
+    for ln in lines[4:]:            # id line, title, var comment, var line
+        if not ln.strip() or ln.startswith("#") or ln.startswith("/"):
+            break
+        eids.append(int(ln))
+    return eids
+
+
+# Two convertible discrete springs (11, 12) plus a grounded one (13) whose
+# anchor node 999 has no *NODE record — the discrete-spring writer `continue`s
+# past that one, so its id must NOT reach the /TH/SPRING.
+_DISCRETE = """*NODE
+      41             0.0             0.0            50.0
+      42             1.0             0.0            50.0
+      43             2.0             0.0            50.0
+*PART
+spring part
+        20        20        20
+*SECTION_DISCRETE
+        20         0
+*MAT_SPRING_ELASTIC
+        20    1000.0
+*ELEMENT_DISCRETE
+      11      20      41      42
+      12      20      42      43
+      13      20     999       0
+"""
+
+# *SECTION_BEAM ELFORM=6 discrete beam, element id 77.
+_DBEAM = """*NODE
+      51             0.0             0.0            80.0
+      52             0.0             0.0            90.0
+      53             1.0             0.0            80.0
+*PART
+discrete beam
+        30        30        30
+*SECTION_BEAM
+        30         6
+     100.0       5.0         0
+*MAT_LINEAR_ELASTIC_DISCRETE_BEAM
+        30    7.8E-9    1000.0    2000.0    3000.0    4000.0    5000.0\
+    6000.0
+      10.0      20.0      30.0      40.0      50.0      60.0
+     500.0       0.0       0.0       0.0       0.0       0.0
+*ELEMENT_BEAM
+      77      30      51      52      53
+"""
+
+
+class TestDeforcDiscreteSpringOutput(unittest.TestCase):
+    """*DATABASE_DEFORC was parsed into state and consumed by nothing: no /TH
+    block, and not even a contribution to the /TFILE frequency.
+
+    Vol I R16 p.1944: DEFORC is "discrete spring and discrete damper
+    (*ELEMENT_DISCRETE) data" — k2rad turns those into /SPRING elements, so
+    /TH/SPRING is where the channel belongs.
+    """
+
+    DECK = _MESH + _DISCRETE + "*DATABASE_DEFORC\n       0.1\n" + _TERM
+
+    def test_deforc_emits_a_th_spring_group(self):
+        _r, starter, _e = _convert(self.DECK)
+        self.assertIn("/TH/SPRING/", starter)
+        self.assertIn("TH_DISCRETE_SPRINGS_", starter)
+
+    def test_only_actually_emitted_eids_are_listed(self):
+        """hm_read_thgrne.F:189 — a /TH/SPRING naming an element the deck does
+        not define is starter ERROR 69 and the WHOLE deck is refused. Element
+        13 is grounded on a node with no coordinates, so the spring writer
+        skips it and it must not appear."""
+        result, starter, _e = _convert(self.DECK)
+        self.assertEqual(_th_spring_eids(starter), [11, 12])
+        self.assertTrue(any("element skipped" in w for w in result.warnings),
+                        result.warnings)
+
+    def test_group_carries_a_title_and_the_def_variable(self):
+        """The title line is MANDATORY: the reader takes the first line after
+        the header as the title unconditionally, so dropping it feeds ``DEF``
+        to the title and the deck dies with ERROR 260 + ERROR 1109."""
+        _r, starter, _e = _convert(self.DECK)
+        blk = starter.split("/TH/SPRING/")[1].splitlines()
+        self.assertTrue(blk[1].startswith("TH_DISCRETE_SPRINGS_"))
+        self.assertEqual(blk[3].strip(), "DEF")
+
+    def test_ids_go_one_per_line(self):
+        """/TH/SPRING is read by hm_read_thgrne.F (one %10d id per line), not
+        the ten-per-line hm_read_thgrki.F that /TH/CLUSTER uses — measured, a
+        second id on the same line is WARNING 100214 and is SILENTLY DROPPED."""
+        _r, starter, _e = _convert(self.DECK)
+        blk = starter.split("/TH/SPRING/")[1].splitlines()
+        for ln in blk[4:6]:
+            self.assertEqual(len(ln), 10, repr(ln))
+            self.assertEqual(ln, f"{int(ln):>10d}")
+
+    def test_deforc_reaches_the_tfile_frequency(self):
+        _r, _s, engine = _convert(
+            _MESH + _DISCRETE + "*DATABASE_DEFORC\n   2.5E-06\n" + _TERM)
+        self.assertEqual(_tfile(engine), "2.5E-06")
+
+    def test_deforc_reports_the_mapping_and_the_units(self):
+        result, _s, _e = _convert(self.DECK)
+        hits = [w for w in result.warnings
+                if "*DATABASE_DEFORC" in w and "/TH/SPRING" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("DECK'S OWN UNITS", hits[0])
+
+    def test_deforc_without_a_discrete_element_warns_instead_of_silence(self):
+        """An empty /TH group is starter ERROR 1109, so emitting nothing is
+        right — but it must be said out loud, and the dt must still land."""
+        result, starter, engine = _convert(
+            _MESH + "*DATABASE_DEFORC\n   2.5E-06\n" + _TERM)
+        self.assertNotIn("/TH/SPRING/", starter)
+        self.assertEqual(_tfile(engine), "2.5E-06")
+        self.assertTrue(
+            any("*DATABASE_DEFORC requested" in w for w in result.warnings),
+            result.warnings)
+
+    def test_deforc_does_not_claim_the_discrete_beams(self):
+        """DISBOUT, not DEFORC, is "discrete beam element, type 6" (p.1945).
+        A DEFORC-only deck must leave the ELFORM=6 connector out."""
+        _r, starter, _e = _convert(
+            _MESH + _DISCRETE + _DBEAM + "*DATABASE_DEFORC\n       0.1\n"
+            + _TERM)
+        self.assertEqual(_th_spring_eids(starter), [11, 12])
+
+    def test_deck_without_deforc_gets_no_th_spring(self):
+        _r, starter, _e = _convert(_MESH + _DISCRETE + _TERM)
+        self.assertNotIn("/TH/SPRING/", starter)
+
+    def test_synthesized_springs_are_not_claimed(self):
+        """`*ELEMENT_PLOTEL` also becomes a `/SPRING`, but with a converter-
+        invented part and no LS-DYNA deforc row behind it. Only the springs
+        `_emit_spring_part` writes for `*ELEMENT_DISCRETE` may be listed —
+        the same boundary that keeps `--ground-springs`, the
+        `*CONSTRAINED_SPOTWELD` ties and the joint springs out."""
+        _r, starter, _e = _convert(
+            _MESH + _DISCRETE + "*ELEMENT_PLOTEL\n     501       1       2\n"
+            + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        self.assertIn("PLOTEL", starter)         # the PLOTEL spring was emitted
+        self.assertEqual(_th_spring_eids(starter), [11, 12])
+
+
+class TestDisboutDiscreteBeamOutput(unittest.TestCase):
+    """*DATABASE_DISBOUT: "discrete beam element, type 6, relative
+    displacements, rotations, and forces" (Vol I R16 p.1945)."""
+
+    DECK = _MESH + _DBEAM + "*DATABASE_DISBOUT\n       0.1\n" + _TERM
+
+    def test_disbout_emits_a_th_spring_group_over_the_beams(self):
+        _r, starter, _e = _convert(self.DECK)
+        self.assertIn("TH_DISCRETE_BEAMS_", starter)
+        self.assertEqual(_th_spring_eids(starter), [77])
+
+    def test_disbout_reaches_the_tfile_frequency(self):
+        _r, _s, engine = _convert(
+            _MESH + _DBEAM + "*DATABASE_DISBOUT\n   2.5E-06\n" + _TERM)
+        self.assertEqual(_tfile(engine), "2.5E-06")
+
+    def test_disbout_without_a_discrete_beam_warns(self):
+        result, starter, _e = _convert(
+            _MESH + "*DATABASE_DISBOUT\n       0.1\n" + _TERM)
+        self.assertNotIn("/TH/SPRING/", starter)
+        self.assertTrue(
+            any("*DATABASE_DISBOUT requested" in w for w in result.warnings),
+            result.warnings)
+
+    def test_both_cards_emit_two_separately_attributed_groups(self):
+        result, starter, _e = _convert(
+            _MESH + _DISCRETE + _DBEAM + "*DATABASE_DEFORC\n       0.1\n"
+            + "*DATABASE_DISBOUT\n       0.2\n" + _TERM)
+        self.assertEqual(starter.count("/TH/SPRING/"), 2)
+        self.assertIn("TH_DISCRETE_SPRINGS_", starter)
+        self.assertIn("TH_DISCRETE_BEAMS_", starter)
+        # /TH ids are ONE namespace across every /TH type (PR #83, ERROR 79).
+        ids = [int(ln.split("/")[-1]) for ln in starter.splitlines()
+               if ln.startswith("/TH/SPRING/")]
+        self.assertEqual(len(set(ids)), 2, ids)
+
+
+# ── C/E. Invented output frequencies: /TFILE and /ANIM/DT ────────────────────
+
+class TestTfileFallbackFrequency(unittest.TestCase):
+    """With no *DATABASE_ dt anywhere, the T01 frequency has to be invented.
+    A hard-coded 1e-3 is wrong at both ends of the scale: on a 0.01 s impact it
+    writes 10 records for the whole event."""
+
+    def _deck(self, endtim=None, extra=""):
+        term = "" if endtim is None else f"*CONTROL_TERMINATION\n{endtim}\n"
+        return _MESH + extra + term + "*END\n"
+
+    def test_fallback_scales_with_the_termination_time(self):
+        for endtim, expected in (("      0.01", "1E-05"),
+                                 ("       1.0", "0.001"),
+                                 ("       2.0", "0.002"),
+                                 ("     100.0", "0.1")):
+            with self.subTest(endtim=endtim):
+                _r, _s, engine = _convert(self._deck(endtim))
+                self.assertEqual(_tfile(engine), expected)
+
+    def test_no_termination_card_keeps_the_floor(self):
+        """Nothing states a time scale, and a zero /TFILE is silently ignored
+        by the engine (lectur.F:335), so the historical constant is the floor."""
+        _r, _s, engine = _convert(self._deck(None))
+        self.assertEqual(_tfile(engine), "0.001")
+
+    def test_zero_termination_keeps_the_floor(self):
+        _r, _s, engine = _convert(self._deck("       0.0      1000"))
+        self.assertEqual(_tfile(engine), "0.001")
+
+    def test_a_stated_dt_always_wins(self):
+        _r, _s, engine = _convert(
+            self._deck("      0.01", "*DATABASE_GLSTAT\n     0.002\n"))
+        self.assertEqual(_tfile(engine), "0.002")
+
+    def test_derived_frequency_is_silent_without_a_th_group(self):
+        """With no /TH block in the deck the invented number governs nothing
+        anyone reads, so it must not add noise."""
+        result, _s, _e = _convert(self._deck("      0.01"))
+        self.assertEqual([w for w in result.warnings if "TIME HISTORY" in w],
+                         [])
+
+    def test_derived_frequency_warns_once_when_a_th_group_exists(self):
+        result, starter, engine = _convert(
+            _MESH + _CONTACT
+            + "*DATABASE_HISTORY_NODE\n         1\n"
+            + "*CONTROL_TERMINATION\n      0.01\n*END\n")
+        self.assertIn("/TH/", starter)
+        self.assertEqual(_tfile(engine), "1E-05")
+        hits = [w for w in result.warnings if w.startswith("TIME HISTORY:")]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("DERIVED", hits[0])
+        self.assertIn("/TFILE 1E-05", hits[0])
+
+
+class TestAnimDtZeroGuard(unittest.TestCase):
+    """``/ANIM/DT  0. 0`` is not a harmless no-op: freanim.F:131-134 raises
+    engine MESSAGE 293 ("TIME FREQUENCY ... MUST BE GREATER THAN ZERO") and
+    calls ARRET(0), so the run stops before cycle 1. Verified end to end: the
+    same deck ERROR-TERMINATES on master and NORMAL-TERMINATES with the card
+    omitted."""
+
+    ZERO_TERM = "*CONTROL_TERMINATION\n       0.0      1000\n*END\n"
+
+    def test_zero_endtim_omits_the_anim_dt_card(self):
+        _r, _s, engine = _convert(_MESH + self.ZERO_TERM)
+        self.assertNotIn("/ANIM/DT", engine)
+
+    def test_zero_endtim_warns_that_no_animation_is_written(self):
+        result, _s, _e = _convert(_MESH + self.ZERO_TERM)
+        hits = [w for w in result.warnings if "/ANIM/DT" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("NO ANIMATION", hits[0])
+
+    def test_a_d3plot_dt_rescues_the_animation(self):
+        _r, _s, engine = _convert(
+            _MESH + "*DATABASE_BINARY_D3PLOT\n     1.0E-4\n" + self.ZERO_TERM)
+        self.assertIn("/ANIM/DT\n0. 0.0001", engine)
+
+    def test_npltc_does_not_invent_a_run_length_on_a_zero_endtim(self):
+        """NPLTC with ENDTIM 0 would divide zero by the frame count; inventing
+        a 1 s run instead would fabricate a frequency the deck never stated."""
+        _r, _s, engine = _convert(
+            _MESH + "*DATABASE_BINARY_D3PLOT\n       0.0        20\n"
+            + self.ZERO_TERM)
+        self.assertNotIn("/ANIM/DT", engine)
+
+    def test_positive_endtim_is_untouched(self):
+        _r, _s, engine = _convert(
+            _MESH + "*CONTROL_TERMINATION\n       2.0\n*END\n")
+        self.assertIn("/ANIM/DT\n0. 0.05", engine)
+
+    def test_no_termination_card_keeps_the_historical_default(self):
+        _r, _s, engine = _convert(_MESH + "*END\n")
+        self.assertIn("/ANIM/DT\n0. 0.01", engine)
+
+
 if __name__ == "__main__":
     unittest.main()

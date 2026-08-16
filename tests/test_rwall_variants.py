@@ -350,5 +350,147 @@ class PlainWallLayoutTests(unittest.TestCase):
                                     for w in result.warnings), result.warnings)
 
 
+class ForcesCardTests(unittest.TestCase):
+    """The ``_FORCES`` option's Card 7: ``SOFT SSID N1 N2 N3 N4``.
+
+    The Card Summary (Manual p. 40-17) fixes the order regardless of how the
+    options are spelled in the keyword name — ID, 1, 2, [ORTHO 3+4], [FINITE 5],
+    [MOVING 6], [FORCES 7] — so the FORCES card is ALWAYS last. (There is no
+    second FORCES card and no ``WPSET`` field: a full-text scan of Vol I R16 and
+    R17 returns zero pages containing that string.)
+
+    The card used to go unread, which cost two things: SOFT/SSID vanished with
+    no trace, and the "further card line(s)" multi-card-set guard could not be
+    extended to the planar family at all, because the wall's own FORCES card
+    would have been counted as a phantom second wall on all 15 corpus
+    *RIGIDWALL_PLANAR_MOVING_FORCES decks.
+    """
+
+    PLAIN = (
+        "*RIGIDWALL_PLANAR_FORCES\n"
+        "        30         0         0\n"
+        "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+        "{FORCES}"
+    )
+    # The shape every corpus _FORCES deck actually uses (W8 CrushBox): all
+    # defaults except a visualization node.
+    W8_SHAPE = "         0         0     99999\n"
+
+    def test_forces_card_defaults_stay_silent(self):
+        """W8's own card set: SOFT=0, SSID=0, N1 only → nothing to report."""
+        result, starter = _convert(
+            _deck(self.PLAIN.replace("{FORCES}", self.W8_SHAPE)))
+        self.assertIn("/RWALL/PLANE/", starter)
+        self.assertEqual(
+            [w for w in result.warnings if "FORCES" in w or "further card" in w],
+            [])
+
+    def test_soft_and_ssid_are_reported_not_dropped(self):
+        result, _s = _convert(_deck(
+            self.PLAIN.replace("{FORCES}", "         3         7     99999\n")))
+        self.assertTrue(any("SOFT=3" in w for w in result.warnings),
+                        result.warnings)
+        self.assertTrue(any("SSID=7" in w for w in result.warnings),
+                        result.warnings)
+
+    def test_visualization_nodes_alone_stay_silent(self):
+        """N1..N4 are "Optional node for visualization" — no solution effect,
+        so all four present must still produce no warning."""
+        result, _s = _convert(_deck(self.PLAIN.replace(
+            "{FORCES}", "         0         0         1         2         3"
+                        "         4\n")))
+        self.assertEqual([w for w in result.warnings if "FORCES" in w], [])
+
+    def test_moving_forces_stacks_mass_card_then_forces_card(self):
+        """_MOVING_FORCES: Card 6 (MASS V0) then Card 7 — the FORCES card must
+        not be read as the moving card, nor counted as a second wall."""
+        wall = ("*RIGIDWALL_PLANAR_MOVING_FORCES\n"
+                "        30         0         0\n"
+                "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+                "      10.0       2.0\n"
+                "         5         9     99999\n")
+        result, starter = _convert(_deck(wall))
+        lines = _rwall_block(starter, "PLANE")
+        # The MOVING card still landed on the Mass card, not the FORCES card.
+        self.assertEqual(lines[6][0:20].strip(), "10")
+        self.assertEqual(lines[6][60:80].strip(), "2")     # VZ0 = V0 * nz
+        self.assertTrue(any("SOFT=5" in w for w in result.warnings))
+        self.assertTrue(any("SSID=9" in w for w in result.warnings))
+        self.assertEqual(
+            [w for w in result.warnings if "further card line" in w], [])
+
+    def test_second_card_set_is_caught_on_the_plain_family(self):
+        """A planar keyword may carry several walls; k2rad converts the first
+        only and must never let the rest vanish (Manual p. 40-5)."""
+        wall = ("*RIGIDWALL_PLANAR\n"
+                "        30         0         0\n"
+                "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+                "        30         0         0\n"
+                "       0.0       0.0       5.0       0.0       0.0      -1.0\n")
+        result, _s = _convert(_deck(wall))
+        hits = [w for w in result.warnings if "further card line" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("2 further card line(s)", hits[0])
+        self.assertIn(
+            ("RIGIDWALL_PLANAR",
+             "only the first of several card sets under the keyword was "
+             "converted"),
+            result.recognized_not_emitted)
+
+    def test_second_card_set_counted_past_the_forces_card(self):
+        """The guard must start counting AFTER Card 7, not at it."""
+        wall = (
+            "*RIGIDWALL_PLANAR_FORCES\n"
+            "        30         0         0\n"
+            "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+            "         0         0     99999\n"
+            "        30         0         0\n"
+            "       0.0       0.0       5.0       0.0       0.0      -1.0\n"
+            "         0         0\n")
+        result, _s = _convert(_deck(wall))
+        hits = [w for w in result.warnings if "further card line" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("3 further card line(s)", hits[0])
+
+    def test_comments_around_the_cards_do_not_trip_the_guard(self):
+        """`$` comments are stripped by the parser (parser.py:287) and never
+        reach block.raw, so a commented deck must not read as a second wall —
+        the false positive that would make the guard unusable in practice."""
+        wall = ("*RIGIDWALL_PLANAR_FORCES\n"
+                "$ card 1\n"
+                "        30         0         0\n"
+                "$ card 2: tail, head, fric\n"
+                "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+                "$ card 7: soft ssid n1\n"
+                "         0         0     99999\n"
+                "$ nothing follows\n")
+        result, starter = _convert(_deck(wall))
+        self.assertIn("/RWALL/PLANE/", starter)
+        self.assertEqual(
+            [w for w in result.warnings if "further card line" in w], [])
+
+    def test_every_ortho_spelling_warn_skips_with_a_reason(self):
+        """All 8 ORTHO spellings must reach handle_rigidwall_ortho. Three of
+        them had no registry row, so they fell through to the generic
+        skipped-keyword list with no reason attached (there is no
+        RIGIDWALL_PLANAR prefix fallback to catch them)."""
+        for opts in ("", "_FORCES", "_FINITE", "_MOVING", "_FINITE_MOVING",
+                     "_MOVING_FORCES", "_FINITE_FORCES",
+                     "_FINITE_MOVING_FORCES"):
+            kw = f"RIGIDWALL_PLANAR_ORTHO{opts}"
+            with self.subTest(kw=kw):
+                wall = (
+                    f"*{kw}\n"
+                    "        30         0         0\n"
+                    "       0.0       0.0      -1.0       0.0       0.0"
+                    "       1.0\n")
+                result, starter = _convert(_deck(wall))
+                self.assertNotIn("/RWALL/", starter)
+                self.assertEqual(result.skipped_keywords, [kw])
+                self.assertTrue(
+                    any("orthotropic friction (ORTHO)" in w
+                        for w in result.warnings), result.warnings)
+
+
 if __name__ == "__main__":
     unittest.main()
