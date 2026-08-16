@@ -28,6 +28,9 @@ __all__ = [
     "_ordered_unique_nodes",
     "_split_shell_eids_by_topology",
     "_fmt_eid_list",
+    "_discrete_beam_mids",
+    "_discrete_beam_claim_conflicts",
+    "_discrete_beam_pids",
     "_discrete_part_ids",
     "_spotweld_beam_pids",
     "_emit_surf_seg",
@@ -512,13 +515,89 @@ def _discrete_part_ids(state: ConversionState) -> Set[int]:
     _make_discrete_springs; the DYNA section/material ids have no /PROP or
     /MAT of their own)."""
     spring_mids = (set(state.mat_spring_elastic) | set(state.mat_spring_nonlinear)
-                   | set(state.mat_damper_viscous))
+                   | set(state.mat_damper_viscous)
+                   | set(state.mat_spring_elastoplastic)
+                   | set(state.mat_damper_nl_viscous)
+                   | set(state.mat_spring_general_nl)
+                   | set(state.mat_spring_inelastic))
     pids = {e.pid for e in state.discrete_elems}
     for pid, p in state.parts.items():
         secid = p.secid if p.secid > 0 else pid
         if secid in state.sec_discrete or p.mid in spring_mids:
             pids.add(pid)
     return pids
+
+
+def _discrete_beam_mids(state: ConversionState) -> Set[int]:
+    """Every MID that names a *SECTION_BEAM ELFORM=6 discrete-beam material —
+    the eight k2rad converts plus the seven it can only warn about."""
+    mids: Set[int] = set()
+    for d in (state.mat_dbeam_linear, state.mat_dbeam_nl_elastic,
+              state.mat_dbeam_nl_plastic, state.mat_cable_dbeam,
+              state.mat_elastic_spring_dbeam, state.mat_gnl_6dof,
+              state.mat_gnl_1dof, state.mat_general_spring_dbeam,
+              state.mat_unsupported_dbeam):
+        mids |= set(d)
+    return mids
+
+
+def _discrete_beam_pids(state: ConversionState) -> Set[int]:
+    """Part ids handled by the DISCRETE-BEAM connector path: parts whose
+    *SECTION_BEAM is ELFORM=6, or whose material is a discrete-beam material.
+
+    An LS-DYNA discrete beam is a 6-DOF spring, so these parts get a
+    /PROP/TYPE8 or /PROP/TYPE13 + /SPRING from _make_discrete_beam_connectors
+    instead of the ordinary /PART + /PROP/BEAM + /BEAM — an ELFORM=6 section
+    states no cross-section at all, so a /PROP/BEAM built from it is starter
+    ERROR 314-317 and the deck never starts.
+
+    Parts carrying shell or solid elements are excluded (the same guard
+    _spotweld_beam_pids uses): a discrete-beam material on a continuum part is
+    a modelling error k2rad must not silently reinterpret as a spring.
+
+    Parts already claimed by _discrete_part_ids are excluded too, and for a
+    harder reason: BOTH writers emit ``/PART/<pid>`` under the source pid, so a
+    part that satisfies both tests would be written twice and the starter would
+    answer ERROR 79 (DUPLICATE ID) and refuse the deck. That overlap is
+    reachable without anything exotic — a *PART with a blank SECID falls back
+    to ``secid = pid`` (see _discrete_part_ids), so a discrete-spring part whose
+    id happens to equal an ELFORM=6 *SECTION_BEAM's id lands in both sets. The
+    *ELEMENT_DISCRETE side wins because its elements are the ones that name the
+    part; _make_discrete_beam_connectors reports what the beam side lost.
+    """
+    elform6 = {s.secid for s in state.sec_beams.values() if s.elform == 6}
+    dbeam_mids = _discrete_beam_mids(state)
+    if not elform6 and not dbeam_mids:
+        return set()
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    discrete_pids = _discrete_part_ids(state)
+    pids: Set[int] = set()
+    for pid, p in state.parts.items():
+        if pid in shell_pids or pid in solid_pids or pid in discrete_pids:
+            continue
+        secid = p.secid if p.secid > 0 else pid
+        if secid in elform6 or p.mid in dbeam_mids:
+            pids.add(pid)
+    return pids
+
+
+def _discrete_beam_claim_conflicts(state: ConversionState) -> Set[int]:
+    """Parts an ELFORM=6 *SECTION_BEAM (or a discrete-beam material) claims but
+    that the *ELEMENT_DISCRETE spring path owns — see _discrete_beam_pids."""
+    elform6 = {s.secid for s in state.sec_beams.values() if s.elform == 6}
+    dbeam_mids = _discrete_beam_mids(state)
+    if not elform6 and not dbeam_mids:
+        return set()
+    out: Set[int] = set()
+    for pid in _discrete_part_ids(state):
+        p = state.parts.get(pid)
+        if p is None:
+            continue
+        secid = p.secid if p.secid > 0 else pid
+        if secid in elform6 or p.mid in dbeam_mids:
+            out.add(pid)
+    return out
 
 
 def _spotweld_beam_pids(state: ConversionState) -> Set[int]:

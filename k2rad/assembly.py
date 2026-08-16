@@ -852,7 +852,11 @@ def _off_section_solid(b: Block, offsets: Dict[str, int], warn) -> None:
 def _off_section_beam(b: Block, offsets: Dict[str, int], warn) -> None:
     """Every *SECTION_BEAM card set: SECID (IDROFF) plus the card-1 field-4
     QR/IRID back-reference to an *INTEGRATION_BEAM rule, which is NEGATED and so
-    needs the sign-preserving rewriter."""
+    needs the sign-preserving rewriter.
+
+    Card 2 carries an id in exactly one dialect: the ELFORM=6 discrete beam's
+    card 2f field 3, ``CID``, a *DEFINE_COORDINATE_* reference (IDDOFF). Every
+    other card-2 dialect is pure geometry."""
     per_set_title = _title_offset(b)
     raw = b.raw
     idx = 0
@@ -876,6 +880,10 @@ def _off_section_beam(b: Block, offsets: Dict[str, int], warn) -> None:
         elform = _geti(f1, 1)
         f2 = _fields(raw[idx + 1], 8, 10) if idx + 1 < len(raw) else []
         kind = _beam_card2_kind(elform, f2[0] if f2 else "")
+        if kind == "2f" and idx + 1 < len(raw):
+            new = _rewrite_line(raw[idx + 1], [(2, "d")], offsets)   # CID
+            if new is not None:
+                raw[idx + 1] = new
         idx += 2
         if kind == "2b" and elform == 2:        # card 2b.1 OPTCARD
             nxt = _fields(raw[idx], 2, 10) if idx < len(raw) else []
@@ -1338,6 +1346,40 @@ def _mat(extra: Optional[Dict[int, List[Tuple[int, str]]]] = None) -> dict:
 
 _ELEM_SHELL_MODS = [(0, "e"), (1, "p")] + [(i, "n") for i in range(2, 10)]
 
+# A discrete-beam LCID run: six consecutive *DEFINE_CURVE references (IDFOFF).
+_SIX_CURVE_FIELDS = [(i, "f") for i in range(6)]
+# MAT_067: card 1 fields 3-8 (LCIDTR…LCIDRT, after MID+RO) and the whole of
+# card 2 (LCIDTDR…LCIDRDT).
+_DBEAM_CURVE_CARDS_67 = {0: [(i, "f") for i in range(2, 8)],
+                         1: _SIX_CURVE_FIELDS}
+# MAT_119: cards 2-5 are the loading / unloading / damping / elastic LCID runs.
+_DBEAM_CURVE_CARDS_119 = {i: _SIX_CURVE_FIELDS for i in (1, 2, 3, 4)}
+
+
+def _off_mat_196(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_GENERAL_SPRING_DISCRETE_BEAM: MID on card 1, then repeating card
+    PAIRS (``DOF TYPE K D CDF TDF`` / ``FLCID HLCID C1 C2 DLE GLCID``) — the
+    curve references sit on the SECOND card of every pair, so the stride has to
+    be walked; a flat ``data`` spec would offset the DOF/TYPE integers too."""
+    toff = _title_offset(b)
+    raw = b.raw
+    new = _rewrite_line(raw[toff], [(0, "m")], offsets) if toff < len(raw) else None
+    if new is not None:
+        raw[toff] = new
+    idx = toff + 1
+    pairs = 0
+    while idx + 1 < len(raw) and pairs < 6:
+        fa = _fields(raw[idx], 8, 10)
+        dof = _geti(fa, 0)
+        if dof < 1 or dof > 6:
+            break
+        new = _rewrite_line(raw[idx + 1], [(0, "f"), (1, "f"), (5, "f")],
+                            offsets)
+        if new is not None:
+            raw[idx + 1] = new
+        idx += 2
+        pairs += 1
+
 _OFFSET_SPECS: Dict[str, object] = {
     # Mesh
     "NODE": _off_node,
@@ -1630,6 +1672,65 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_S04": {"cards": {0: [(0, "m"), (1, "f"), (2, "f")]}},
     "MAT_DAMPER_VISCOUS": _mat(),
     "MAT_D01": _mat(),
+    # S03 K/KT/FY are scalars; S05/S06/S08 carry *DEFINE_CURVE references
+    # (IDFOFF) on card 1.
+    "MAT_SPRING_ELASTOPLASTIC": _mat(),
+    "MAT_S03": _mat(),
+    "MAT_DAMPER_NONLINEAR_VISCOUS": _mat({0: [(1, "f")]}),
+    "MAT_S05": _mat({0: [(1, "f")]}),
+    "MAT_D02": _mat({0: [(1, "f")]}),
+    "MAT_SPRING_GENERAL_NONLINEAR": _mat({0: [(1, "f"), (2, "f")]}),
+    "MAT_S06": _mat({0: [(1, "f"), (2, "f")]}),
+    "MAT_SPRING_INELASTIC": _mat({0: [(1, "f")]}),
+    "MAT_S08": _mat({0: [(1, "f")]}),
+    # Discrete-beam materials. MID on card 1 field 1 everywhere; the LCID runs
+    # are IDFOFF. MAT_066's cards carry only stiffness/damping/preload scalars.
+    "MAT_LINEAR_ELASTIC_DISCRETE_BEAM": _mat(),
+    "MAT_066": _mat(),
+    "MAT_66": _mat(),
+    "MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM": _mat(_DBEAM_CURVE_CARDS_67),
+    "MAT_067": _mat(_DBEAM_CURVE_CARDS_67),
+    "MAT_67": _mat(_DBEAM_CURVE_CARDS_67),
+    "MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM": _mat({2: _SIX_CURVE_FIELDS}),
+    "MAT_068": _mat({2: _SIX_CURVE_FIELDS}),
+    "MAT_68": _mat({2: _SIX_CURVE_FIELDS}),
+    "MAT_CABLE_DISCRETE_BEAM": _mat({0: [(3, "f")]}),
+    "MAT_071": _mat({0: [(3, "f")]}),
+    "MAT_71": _mat({0: [(3, "f")]}),
+    # MAT_074 card 2: FLCID HLCID C1 C2 DLE GLCID — fields 0, 1 and 5 are curves.
+    "MAT_ELASTIC_SPRING_DISCRETE_BEAM": _mat({1: [(0, "f"), (1, "f"), (5, "f")]}),
+    "MAT_074": _mat({1: [(0, "f"), (1, "f"), (5, "f")]}),
+    "MAT_74": _mat({1: [(0, "f"), (1, "f"), (5, "f")]}),
+    "MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM": _mat(_DBEAM_CURVE_CARDS_119),
+    "MAT_119": _mat(_DBEAM_CURVE_CARDS_119),
+    "MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM":
+        _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f")]}),
+    "MAT_121": _mat({1: [(0, "f"), (1, "f"), (2, "f"), (3, "f")]}),
+    "MAT_GENERAL_SPRING_DISCRETE_BEAM": _off_mat_196,
+    "MAT_196": _off_mat_196,
+    # The ELFORM=6 materials with no Radioss spring law: k2rad reads only their
+    # MID, but the id STILL has to move under IDMOFF or the *PART reference
+    # would dangle and the warn-drop would name the wrong material.
+    "MAT_SID_DAMPER_DISCRETE_BEAM": _mat(),
+    "MAT_069": _mat(),
+    "MAT_69": _mat(),
+    "MAT_HYDRAULIC_GAS_DAMPER_DISCRETE_BEAM": _mat(),
+    "MAT_070": _mat(),
+    "MAT_70": _mat(),
+    "MAT_ELASTIC_6DOF_SPRING_DISCRETE_BEAM": _mat(),
+    "MAT_093": _mat(),
+    "MAT_93": _mat(),
+    "MAT_INELASTIC_SPRING_DISCRETE_BEAM": _mat(),
+    "MAT_094": _mat(),
+    "MAT_94": _mat(),
+    "MAT_INELASTIC_6DOF_SPRING_DISCRETE_BEAM": _mat(),
+    "MAT_095": _mat(),
+    "MAT_95": _mat(),
+    "MAT_GENERAL_JOINT_DISCRETE_BEAM": _mat(),
+    "MAT_097": _mat(),
+    "MAT_97": _mat(),
+    "MAT_1DOF_GENERALIZED_SPRING": _mat(),
+    "MAT_146": _mat(),
     "MAT_SPOTWELD": _mat(),
     "MAT_100": _mat(),
     "MAT_187": {"cards": {0: [(0, "m")],

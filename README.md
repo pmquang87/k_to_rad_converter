@@ -163,13 +163,67 @@ reach the starter's TOTAL MASS echo in its 11th significant digit; every part
 mass, the time step and the result history are unchanged. Because the spring
 carries no stiffness, a node attached to nothing else still counts as FREE for
 the implicit singularity guard
-`*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + `*MAT_SPRING_ELASTIC` /
-`*MAT_SPRING_NONLINEAR_ELASTIC` / `*MAT_DAMPER_VISCOUS` → `/PROP/TYPE4`
-(SPRING) `/SPRING` connectors (grounded `N2=0` springs get a fixed ground node
-+ `/BCS`). An element oriented by a `*DEFINE_SD_ORIENTATION` (`VID`) becomes an
-oriented `/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation's
-`/SKEW` axis (only TYPE8 carries a `skew_ID`); a `DRO=1` torsional section and an
-unresolvable `VID` (`IOP=1/3`, which dyna2rad lacks too) stay warned + skipped
+`*ELEMENT_DISCRETE` + `*SECTION_DISCRETE` + a discrete spring/damper material —
+`*MAT_SPRING_ELASTIC` (S01), `*MAT_SPRING_ELASTOPLASTIC` (S03),
+`*MAT_SPRING_NONLINEAR_ELASTIC` (S04), `*MAT_DAMPER_NONLINEAR_VISCOUS` (S05),
+`*MAT_SPRING_GENERAL_NONLINEAR` (S06), `*MAT_SPRING_INELASTIC` (S08) or
+`*MAT_DAMPER_VISCOUS` (S02) — → `/PROP/TYPE4` (SPRING) `/SPRING` connectors
+(grounded `N2=0` springs get a fixed ground node + `/BCS`). Each of these is a
+1-DOF connector and lands in the single DOF block of the property, which carries
+the whole Radioss spring law (loading function, hardening flag, rate function,
+unloading function, damping function, rupture displacements), so no `/MAT` is
+written and the `/PART` keeps `mat_id 0`. dyna2rad instead pairs an empty
+`/MAT/LAW108` with a `/PROP/TYPE23` and fills it from the property pass; the card
+BODY is the same six DOF blocks either way, and the property route avoids
+TYPE23's rule that its `/PART` must carry a MID whose law is 108/113/114/135
+(ERROR 179 / ERROR 1715). S03 gets a synthesized 5-point elastic-plastic function
+with `H=1`; S06's `LCDL`/`LCDU` become `fct_ID11`/`fct_ID31` with `H=6`, demoted
+to `H=0` with a warning when `LCDU` is blank (`H=6` without `fct_ID31` is starter
+ERROR 1057); S08's one-sided `LCFD` is mirrored into the opposite quadrant per
+`CTF` and gets `H=1` on `K1=KU` (dyna2rad leaves `H` at 0, which silently turns an
+inelastic spring elastic). A part whose material, curve or elements cannot be
+converted still gets an INERT `/PROP/TYPE4` + `/PART`: the pid is claimed by the
+connector path either way, so dropping it would delete the `/PART` id from under
+every `*SET_PART` member, `/GRNOD/PART` scope, contact and `/TH` channel that
+names it
+
+An element oriented by a `*DEFINE_SD_ORIENTATION` (`VID`) becomes an oriented
+`/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation's `/SKEW`
+axis (only TYPE8 and TYPE23+LAW108 honour a `skew_ID`); an unresolvable `VID`
+(`IOP=1/3`, which dyna2rad lacks too) stays warned + skipped. A `DRO=1`
+(torsional) section is a MOMENT-per-radian spring, so it moves to local DOF 4 of
+a 6-DOF property — `/PROP/TYPE13`, whose local X is node1→node2, so the torsion
+acts about the element's own axis, or DOF 4 of the oriented `/PROP/TYPE8`. LS-DYNA
+already states a `DRO=1` spring in moment per radian, so nothing is rescaled;
+zero-length and grounded torsional elements are warn-skipped (no axis to twist
+about). `KD`/`V0` (dynamic magnification) and `CL` (clearance, which makes the
+LS-DYNA spring compression-only) have no Radioss slot and are warn-dropped
+individually
+
+`*SECTION_BEAM` `ELFORM=6` is a DISCRETE BEAM — a 6-DOF spring, not a beam: its
+card 2f states a lumped `VOL`/`INER` and a `CID`, never a cross-section, so a
+`/PROP/BEAM` from it is starter ERROR 314-317. Such a part becomes a
+`/PROP/TYPE8` (skew oriented) or `/PROP/TYPE13` (node oriented) `/SPRING`
+connector instead, from `*MAT_066` (linear elastic), `*MAT_067` (nonlinear
+elastic), `*MAT_068` (nonlinear plastic), `*MAT_071` (cable), `*MAT_074` (elastic
+spring), `*MAT_119` (general nonlinear 6-DOF), `*MAT_121` (general nonlinear
+1-DOF) or `*MAT_196` (general spring). The frame rule: `|SCOOR| = 2` ("the local
+r-axis is realigned along n1→n2") selects TYPE13; otherwise a resolvable `CID`
+selects TYPE8 with that `/SKEW`; otherwise TYPE13 again, because a TYPE8 with no
+skew would silently fall back to the GLOBAL axes — the hole dyna2rad has here.
+`*MAT_071` and `*MAT_074` are always TYPE13 (both act along the element); a
+resolved `CID` is still written on the TYPE13 property, where `r4buf3.F` reads it
+as the XY-plane reference for elements that carry no third node — which is what
+`|SCOOR| = 2` + `CID` means in LS-DYNA too ("a final adjustment is made … so that
+the local r-axis lies along the n1 to n2 axis", Manual Vol I R17 p.41-26). Mass is
+`RO·VOL` (`RO·CA` per unit length for the cable when `VOL` is blank, which also
+sets `Ileng=1`; a non-zero `VOL` wins, per Manual Vol II R17 p.2-531);
+`INER=-1` is resolved as a solid sphere of volume `VOL`, `INER=-2` as the lumped
+`m·L²/12` with a warning. The cable's `LCID` is engineering STRESS vs engineering
+strain, so its ordinates are multiplied by `CA` and the result clamped at zero
+force with a flat compression branch — a cable must not push. `*MAT_069`/`070`/`093`/`094`/`095`/`097`/`146` have no
+OpenRadioss spring law: the connector is still written, inert, and a warning
+names the device the deck loses (dyna2rad drops all seven silently)
 
 Elements are emitted **per `*PART`**, so an element whose `PID` no `*PART`
 defines cannot be written at all. Rather than let that mesh disappear quietly,
