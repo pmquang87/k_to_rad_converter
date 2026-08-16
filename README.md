@@ -1663,6 +1663,71 @@ self-contact with no deformable nodes, the `SOFT`-routed
 `*CONTACT_AUTOMATIC_GENERAL` interfaces and `*CONTACT_TIED_*`. A *partially*
 rigid secondary side keeps its interface and warns about the nodes removed
 from it.
+`*CONTACT_ERODING_{SINGLE_SURFACE,SURFACE_TO_SURFACE,NODES_TO_SURFACE}` (each
+optionally `_MPP` / `_ID` / `_TITLE`) → `/INTER/TYPE25`, following dyna2rad's
+routing (`convertcontacts.cxx:117-131` and the generic `NODES_TO_SURFACE`
+branch at `:212-216`). The three side topologies map onto the starter's `ILEV`
+classification (`hm_read_inter_type25.F:399-434`): SINGLE_SURFACE →
+`surf_ID1` = the SSID surface with `surf_ID2=0` (ILEV=1, self-impact);
+SURFACE_TO_SURFACE → both surfaces (ILEV=2, symmetric); NODES_TO_SURFACE →
+`surf_ID1=0`, `grnd_IDs` = the SSID node group, `surf_ID2` = the MSID surface
+(ILEV=3, genuinely **one-way**).
+**The solid side is emitted as `/SURF/PART/ALL`, not `/SURF/PART/EXT`** — the
+single thing that makes an eroding contact behave like one. The starter puts
+every interior (two-solid) face in the segment list with a *negative* stiffness
+(`i25sti3.F:950-951`) and the engine flips it active the moment one of its two
+solids dies (`check_surface_state.F:174-203`), which is LS-DYNA's `IADJ=1` /
+`EROSOP=1` behaviour exactly. With `/EXT` the machinery still arms
+(`i25surfi.F:607-625` sets `IPARI(100)=1` on `Idel>0` alone) but has no interior
+segment to wake, so the crater face a dying brick exposes carries no contact at
+all — and **nothing in the solver output says so**. dyna2rad has precisely this
+gap: it builds every contact surface from a bare `PART` clause with no `opt_A`
+(`convertcontacts.cxx:264-274`). `--eroding-surf-ext` (CLI) / the GUI checkbox
+falls back to `/EXT` (LS-DYNA SMP's literal `IADJ=0`); parts carrying
+**quadratic** solids fall back on their own, because the 2022 Reference Guide
+p.372 wants `/EXT` there so the mid-side nodes take part in the contact.
+`Idel=2` (remove the main segment as soon as *one* attached element dies) rather
+than dyna2rad's `1` — LS-DYNA's own per-element face removal, and already the
+k2rad convention on every other penalty interface. Note the 2022 Reference Guide
+p.372 states `/SURF/PART/ALL` "is not available with TYPE25"; the current
+OpenRadioss starter implements it and has no check that rejects it, but an older
+binary may not. The Card-4 fields `ISYM` / `EROSOP` / `IADJ` are all **reported**
+(dyna2rad parses and discards all three with no message — including `EROSOP`,
+whose entire purpose is to enable eroding contact), as are the `SST`/`MST`
+thicknesses, which `/INTER/TYPE25` has no column for at `/BEGIN 2022`.
+`*CONTACT_NODES_TO_SURFACE` and `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` (+ `_MPP`)
+→ the same `/INTER/TYPE25` ILEV=3 one-way form. dyna2rad does **not** symmetrize
+this family (`surfAttrNames[0] = "grnd_IDs"`), so neither does k2rad: the
+secondary nodes stay secondary and the main surface's own nodes are never
+tracked against them. `SSTYP=4` (a `*SET_NODE_LIST`, LS-DYNA's own
+recommendation for an eroding node-to-surface contact) and the part / part-set /
+segment-set forms all resolve.
+`*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
+`fric_ID` binding work). LS-DYNA's
+`μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`
+(Darmstad) with `Fric = FD`, `C5 = FS − FD`, `C6 = −DC` and `C1..C4 = 0` — the
+engine evaluates `XMU = Fric + C5·e^(C6·v)` once the other terms vanish
+(`i7for3.F:1911-1914`). That is dyna2rad's mapping and the only 2022-legal one:
+Radioss's own exponential-decay law `Ifric=4` needs one fewer sign flip but does
+not exist before `radioss2023`. The Card-1 defaults become the `/FRICTION`
+header row (the engine seeds every contact pair from it,
+`frictionparts_model.F:88-92`) and each Card-2 part pair becomes one pair block,
+in deck order, un-expanded; a `PSET` row gets a `/GRPART/PART`. A contact binds
+the table with **Card-2 `FS = −2`**, written to the `fric_ID` column at cols
+91–100 of card 6 on `/INTER/TYPE7` and `/INTER/TYPE25`. One table in the deck →
+it applies to every `FS=−2` contact; several → the `FD` column names the one to
+use; none or no match → friction 0 with a warning (dyna2rad's message 200029).
+An interface with `fric_ID` set ignores its own `Fric`/`Ifric` entirely (2022
+Reference Guide p.268, remark 16). `/INTER/TYPE11`, `/INTER/TYPE19`,
+`/INTER/TYPE2` and `/INTER/TYPE10` have **no `fric_ID` column** in their newest
+`/BEGIN 2022` FORMAT, so an `FS=−2` on one of those gets a loud warning naming
+the interface instead of a silent frictionless run.
+Card-2 `FS = −1` ("use the `*PART_CONTACT` coefficients") is **not** written
+through literally any more — that put a *negative* Coulomb coefficient on the
+interface card. It becomes `Fric=0` with a warning naming the interface.
+`FS = 2` (LS-DYNA reinterprets `FD` as a `*DEFINE_TABLE` id, μ(pressure,
+velocity)) keeps its literal value and warns only when the deck really does
+contain that table — OpenRadioss has no pressure-and-velocity friction table.
 `*CONTACT_..._TIEBREAK` (`SURFACE_TO_SURFACE_TIEBREAK`, `_ONE_WAY_...`,
 `TIEBREAK_{SURFACE,NODES}_TO_SURFACE`) → `/INTER/TYPE7` for the post-failure
 contact, **with a warning that the cohesive pre-bond (NFLS/SFLS stress failure)
@@ -1707,7 +1772,8 @@ deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
 pre-engagement bootstrap needs the t=0 stiffness path)
 A contact **master surface** built from a part that carries 3-corner shells
 splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
-`/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT`, combined under a
+`/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT` (or
+`/SURF/PART/ALL` on an `*CONTACT_ERODING_*`, see above), combined under a
 `/SURF/SURF` when more than one kind is present. A `/SH3N` id inside a
 `/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
 rejects the whole deck

@@ -334,6 +334,21 @@ class Type25CardTests(unittest.TestCase):
         self.assertIn(f"/SURF/PART/ALL/{surf1}", starter)
         self.assertEqual(cards[0][10:20], "         0", "surf_ID2 must be 0")
 
+    def test_all_parts_sides_resolve(self):
+        """SURFATYP 5 ("include all non-spot-weld parts") and a bare SSID=0 both
+        mean every part in the deck. _contact_master_pids models neither, so
+        without the explicit branch the side comes back empty and the whole
+        interface is dropped."""
+        for ssid, sstyp in ((0, 0), (0, 5), (7, 5)):
+            _, starter = _convert(_MESH + _eroding(
+                "CONTACT_ERODING_SINGLE_SURFACE", ssid, 0, sstyp, 0) + _TERM)
+            cards = _cards(_block(starter, "/INTER/TYPE25/90001"))
+            surf1 = int(cards[0][0:10])
+            self.assertTrue(surf1, f"ssid={ssid} sstyp={sstyp} dropped")
+            # both parts of the deck are on it (shells + solids → /SURF/SURF)
+            self.assertIn(f"/SURF/SURF/{surf1}", starter)
+            self.assertIn("/SURF/PART/ALL/", starter)
+
     def test_idel_is_2_any_quorum(self):
         """Idel=2 removes the segment as soon as ONE attached element dies —
         LS-DYNA's own per-element face removal, and the engine's own split

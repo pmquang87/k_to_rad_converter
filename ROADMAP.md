@@ -233,6 +233,21 @@ shipped, so the marginal cost is small.
   so the `SSTYP=3` weld part actually resolves, and the `/CLUSTER` exponents are
   quadratic where dyna2rad's are linear — see CHANGELOG). Original note: — the
   W16/W17 sheets are node-disjoint without it, so the weld force is 0.
+- Eroding / node-to-surface contact + friction batch (P1):
+  `*CONTACT_ERODING_{SINGLE_SURFACE,SURFACE_TO_SURFACE,NODES_TO_SURFACE}` and
+  `*CONTACT_{,AUTOMATIC_}NODES_TO_SURFACE` (each also `_MPP`) →
+  `/INTER/TYPE25` at ILEV 1/2/3, plus `*DEFINE_FRICTION` → `/FRICTION`
+  (`Ifric=2` Darmstad, bound through `fric_ID`) — **done**. These were the only
+  unhandled `*CONTACT_` spellings left in the corpus (W11 bird-strike, W9
+  missile). The batch's defining decision is `/SURF/PART/ALL` for the solid
+  side of an eroding contact: it is the only way `/INTER/TYPE25`'s dormant
+  interior-segment mechanism can re-expose a face when the brick behind it
+  dies, and dyna2rad never enables it. Still open: `ISYM=1` (no `/SURF`
+  equivalent for "drop symmetry-plane faces"), the LS-DYNA `VC` shear-stress
+  friction cap (Radioss `VIS_f` is a different quantity), `FS=2`
+  (`*DEFINE_TABLE` μ(p, v) — no Radioss construct), `FS=-1` resolved from
+  `*PART_CONTACT` rather than warned, and per-side `SST`/`MST` on a TYPE25
+  (the `Igap=5` + `THICK_S`/`THICK_M` route is radioss2026-only).
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

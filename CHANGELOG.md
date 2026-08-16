@@ -11,6 +11,179 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Eroding / node-to-surface contact + `*DEFINE_FRICTION` batch**
+  (`*CONTACT_ERODING_SINGLE_SURFACE`, `*CONTACT_ERODING_SURFACE_TO_SURFACE`,
+  `*CONTACT_ERODING_NODES_TO_SURFACE`, `*CONTACT_NODES_TO_SURFACE`,
+  `*CONTACT_AUTOMATIC_NODES_TO_SURFACE` — each also `_MPP` — and
+  `*DEFINE_FRICTION`) — the roadmap P1 "eroding/n2s contact batch +
+  DEFINE_FRICTION" item. **All were `SKIPPED` before**, and these were the *only*
+  unhandled `*CONTACT_` spellings left in the reference corpus: 30 ×
+  `ERODING_NODES_TO_SURFACE` across the three W11 bird-strike decks and their
+  unit-converted copies, 7 × `ERODING_SURFACE_TO_SURFACE` across the W9 missile
+  decks. `dispatch()` is an exact dict lookup with no `CONTACT_` prefix
+  fallback, and a skipped `*CONTACT` is not a missing output card — it is a
+  missing load path, in impact decks whose entire point is the contact.
+  The ten spellings are generated rather than hand-listed (same policy as the
+  spotweld grammar), and every non-`_MPP` one is registered in
+  `*INCLUDE_TRANSFORM`'s `_OFFSET_SPECS`.
+
+  **The batch's defining decision: `/SURF/PART/ALL` for the solid side of an
+  eroding contact, not the `/SURF/PART/EXT` every other k2rad contact uses.**
+  This is the one thing that makes an eroding contact behave like one, and it
+  is a delta against the reference converter, not a copy of it. `/INTER/TYPE25`
+  already implements LS-DYNA's `EROSOP=1` exactly: the starter puts every
+  interior (two-solid) face in the segment list with a *negative* stiffness
+  (`i25sti3.F:950-951`, `C -----Case of internal segment : put stiffness to
+  negative ------`), and the engine flips one active the moment a neighbour
+  element dies (`check_surface_state.F:174-203`, `NB_CONNECTED_ELM==1 .AND.
+  STFM(k)<ZERO → ACTIVATION`, then `STFM(K) = ABS(STFM(K))`). Interior segments
+  only exist if the `/SURF` was built with `ALL` — `hm_read_surf.F:636-641`
+  stores `EXT_ALL=2` for `ALL` vs `1` for `EXT`, and `ssurftag.F:122`
+  (`IF(IEXT==1)THEN … C External surface only.`) masks every shared solid face
+  in the `EXT` case. With `/EXT` the machinery still **arms** —
+  `i25surfi.F:607-625` sets `IPARI(100)=1` on `IDEL>0 .AND. SOLID_SEGMENT>0`
+  alone — and then has nothing to wake, so the crater face a dying brick
+  exposes carries no segment, no stiffness and no friction, and **nothing in
+  the solver output says so**. dyna2rad has precisely this gap: it builds every
+  contact surface from a bare `PART` clause with no `opt_A`
+  (`convertcontacts.cxx:264-274`), so `IELEM_M(2,I)` is never `>0`. It also
+  parses `ISYM`/`EROSOP`/`IADJ` in the CFG and discards all three with no
+  message — a grep for `EROSOP|IADJ|ISYM` over the whole `dyna2rad` tree returns
+  zero hits, *including* `EROSOP`, the flag whose entire purpose is eroding
+  contact.
+  Independently checked rather than asserted: the same 2-brick deck converted
+  both ways and run through the starter gives a restart file of **303 630 B with
+  `/ALL` against 303 122 B with `/EXT`** — the extra interior segments are
+  really there — at **0 ERROR(S)** either way.
+  Escape hatches: `--eroding-surf-ext` (CLI) / a GUI checkbox reproduces
+  LS-DYNA SMP's literal `IADJ=0`, and parts carrying **quadratic** solids fall
+  back to `/EXT` on their own, because the 2022 Reference Guide p.372 wants
+  `/EXT` there so the mid-side nodes take part in the contact. `IADJ=0`/blank is
+  treated as 1 (LS-DYNA MPP hardcodes it to 1, Vol I p.11-66) and `EROSOP=0` as
+  1 (hardcoded in both SMP and MPP, p.11-65), both said out loud. Caveat also
+  said out loud: the 2022 Reference Guide p.372 states `/SURF/PART/ALL` "is not
+  available with TYPE25" — the current OpenRadioss starter implements it and has
+  no check that rejects it (grepped `EXT_ALL` across the whole starter: it
+  appears only in `hm_read_surf.F`, `i25surfi.F` and the `/SET` plumbing), but
+  an older binary may not.
+
+  **Side topology follows the starter's own ILEV classification**
+  (`hm_read_inter_type25.F:399-434`), verified in the starter echo (`CONTACT
+  TYPES (1:S1/S1;2:S1/S2;3:N/S`): SINGLE_SURFACE → `surf_ID1` = the SSID surface
+  with `surf_ID2=0` (ILEV=1); SURFACE_TO_SURFACE → both surfaces (ILEV=2);
+  NODES_TO_SURFACE → `surf_ID1=0`, `grnd_IDs` = the SSID node group, `surf_ID2`
+  = the MSID surface (**ILEV=3**). ILEV=3 is a genuine one-way contact, and
+  dyna2rad does not symmetrize this family either (`surfAttrNames[0] =
+  "grnd_IDs"`, `convertcontacts.cxx:128-129, 212-216`) — the one place it *does*
+  lose one-way-ness is `AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE`, a different
+  keyword k2rad routes elsewhere. `Istf` follows dyna2rad's two-branch `SOFT`
+  if-chain including its undocumented asymmetry at `SOFT=2` (`:583-613` gives
+  ERODING_SURFACE_TO_SURFACE and AUTOMATIC_NODES_TO_SURFACE `Istf=2` +
+  `Iedge=22`; `:614-628` gives the other three the coarse `Istf = 4 if SOFT>=1`).
+  `Idel=2` rather than dyna2rad's `1`: `2` removes the main segment as soon as
+  **one** attached element dies, which is LS-DYNA's own per-element face removal
+  and the literal engine split (`check_surface_state.F:155-171` runs
+  `CHECK_ACTIVE_ELEM_EDGE` for `IDEL==1` and sets `DEACTIVATION=.TRUE.`
+  unconditionally for `IDEL==2`); dyna2rad's `1` is just a copy of its
+  per-interface-type default table (`convertcontacts.cxx:47`), which has no
+  eroding-specific logic at all.
+
+  **`*DEFINE_FRICTION` → `/FRICTION`, id preserved 1:1** (which is what makes
+  the `fric_ID` binding work at all). LS-DYNA's `μ = FD + (FS − FD)·exp(−DC·
+  |v_rel|)` maps **exactly** onto Radioss `Ifric=2` (Darmstad) with `Fric = FD`,
+  `C5 = FS − FD`, `C6 = −DC` and `C1..C4 = 0`, because the engine's
+  `XMU = FRICC + C1·e^(C2·v)·p² + C3·e^(C4·v)·p + C5·e^(C6·v)`
+  (`i7for3.F:1911-1914`) collapses to `Fric + C5·e^(C6·v)`. That is dyna2rad's
+  mapping (`convertfrictions.cxx:64, 94-97`) and the only 2022-legal one:
+  Radioss's own exponential-decay law `Ifric=4` needs one fewer sign flip but is
+  absent from `radioss2020/FRICTION/friction.cfg:87-93` (which offers 0-3) and
+  from the 2022 Reference Guide p.223 — emitting it from a `/BEGIN 2022` deck
+  would be `WARNING 100211` territory. The Card-1 defaults become the
+  `/FRICTION` header row, which is not decoration: the engine SEEDS every
+  contact pair from it (`frictionparts_model.F:88-92`) and a part-pair row only
+  overrides where a pair matches, so the deck's default friction has to land
+  there rather than on the interface card. Each Card-2 row becomes one pair
+  block in deck order, un-expanded and un-deduplicated; a `PSET` row gets a
+  `/GRPART/PART`. `Idir` is always 0 — `*DEFINE_FRICTION_ORIENTATION` is a
+  separate keyword neither converter handles.
+  Binding is `fric_ID` at **cols 91-100 of card 6** on `/INTER/TYPE7`
+  (`radioss2020/INTER/inter_type7.cfg`) and `/INTER/TYPE25`
+  (`radioss2022/INTER/inter_type25.cfg`), activated by *CONTACT Card-2
+  `FS = −2`, with dyna2rad's rules: one table in the deck → it applies to every
+  `FS=−2` contact regardless of `FD`; several → `FD` names the one; none or no
+  match → friction 0 and a warning (dyna2rad's message 200029). **Minus
+  dyna2rad's hole**: it reads the table id from `LSDYNA_FD_DefineFriction`, an
+  attribute the LS-DYNA CFG only fills for the `_AUTOMATIC_` node-to-surface
+  spelling (`contact_option_nodes_to_surface.cfg:2506-2548` gates the FS
+  pre-read on `ContactOption == 2`), so with ≥2 tables it silently zeroes the
+  friction of a plain `*CONTACT_NODES_TO_SURFACE` whose table exists — k2rad
+  reads the raw FD column itself. **`/INTER/TYPE11`, `/INTER/TYPE19`,
+  `/INTER/TYPE2` and `/INTER/TYPE10` have no `fric_ID` column** in their newest
+  `/BEGIN 2022` FORMAT (TYPE11's `radioss2020` block ends at the IBC card,
+  TYPE19's `radioss2021` block at `Iform`; TYPE2/TYPE10 have no friction model),
+  so an `FS=−2` on one of those gets a loud warning naming the interface and the
+  target type instead of a silently frictionless run.
+
+  **Fixed on the way through.** `FS = −1` ("the `*PART_CONTACT` coefficients are
+  to be used") was written straight through as `Fric = −1` — a *negative* Coulomb
+  coefficient on the interface card, on every contact family, silently. It now
+  becomes `Fric=0` with a warning naming the interface. `FS = 2` (LS-DYNA
+  reinterprets `FD` as a `*DEFINE_TABLE` id, μ(pressure, velocity)) keeps its
+  literal value and warns only when the deck really contains that table, so a
+  legitimate μ=2 deck is untouched. `_select_parent_interface` and
+  `_match_parent_interface` did not filter `state.dropped_inter_ids`
+  (`writer/contacts.py:653`), so a deck whose first contact was dropped parented
+  its `/INTER/SUB` — and the `/TH/INTER` parent id — on an interface that was
+  never written: starter `ERROR 581` / `WARNING 257` on a conversion that
+  reported success. Both now filter, and both were already ordered after every
+  drop-registering writer, so no ordering work was needed.
+  `_read_contact_soft`/`_read_contact_ignore` take an `extra` card offset,
+  because the mandatory ERODING Card 4 (`ISYM`/`EROSOP`/`IADJ`) pushes optional
+  cards A and C down one line — reading blind takes `ISYM` for `SOFT` and Card
+  B's `THKOPT` for `IGNORE`, i.e. the wrong `Inacti`.
+
+  **Reported, not dropped in silence**: `ISYM=1` (no `/SURF` equivalent for
+  "omit symmetry-plane faces"), `EROSOP=0`, `IADJ=0`, per-side `SST`/`MST` (the
+  `Igap=5` + `THICK_S`/`THICK_M` route is radioss2026-only, so `/INTER/TYPE25`
+  has nowhere to put them at 2022), Card-2 `DC` on a contact with no friction
+  table, the `SOFT=2` companion flag `IPSTIF` (no 2022 column), the `_MPP`
+  option cards, `VC` (LS-DYNA's viscous friction *stress cap*, `F_lim = VC ·
+  A_contact`, is not Radioss's `VIS_f` friction damping coefficient — and
+  `hm_read_friction.F:182` zeroes `VIS_f` for `Iform=2` anyway, as does
+  `frictionparts_model.F:108-112` for NTY 24/25), an `ICNEP` flag, a
+  `*DEFINE_FRICTION` row naming a part or part set the deck does not have, and
+  the interaction with `Ishell=12`'s ~1.7× under-erosion (an eroding surface can
+  only retreat as fast as elements actually fail).
+
+  **Solver validation.** A synthetic deck exercising all three eroding variants
+  plus a bound `/FRICTION` runs the starter at **0 ERROR(S)** (2 warnings, both
+  the unrelated `LAW1` integration-point note), and its echo reads every field
+  back: `FRICTION MODEL 2 (Darmstad Law)` with `Muo=0.2 C5=0.2 C6=-1.5` from
+  `FS_D=0.4 FD_D=0.2 DC_D=1.5` and the part-pair row `Muo=0.3 C5=0.2 C6=-2.0`
+  from `0.5/0.3/2.0`; `INTERFACE FRICTION MODEL. 7`; `DELETION FLAG ON FAILURE
+  OF MAIN ELEMENT (1:YES-ALL/2:YES-ANY/1000:NO) : 2`; `CONTACT TYPES` 2 for the
+  surface-to-surface and **3** for both node-to-surface interfaces. The real
+  corpus deck `W11_SETUP_SPH_BirdStrike.k` (two
+  `*CONTACT_ERODING_NODES_TO_SURFACE`, one with `MBOXID`) converts and reaches
+  starter **NORMAL TERMINATION, 0 ERROR(S) 0 WARNING(S)**. `W9_SETUP_
+  MSLprojectile.k` converts its eroding contact to `/INTER/TYPE25/1` over two
+  `/SURF/PART/ALL` solid sides, but still fails the starter on a **pre-existing**
+  gap unrelated to this batch: `*MAT_CSCM_CONCRETE` is not converted, so PART 3
+  has no material (`ERROR 179`/`61`/`3046`, and the 209 106 `WARNING 96` all
+  read `MATERIAL OF SOLID ... IS EQUAL TO 0` on the pre-existing `/INTER/TYPE7`).
+
+  **Corpus sweep.** Measured over **201 decks** — the 73 `.k`/`.key`/`.dyn`
+  decks in the repo, the 127-deck `E:\openradioss_run\Ryan_Lee_Examples` tree
+  and the one `E:\openradioss_run\ls-dyna_example` deck — `master` 7d504ba vs
+  `feat/eroding-contacts`, 0 conversion exceptions on either side.
+  <!-- SWEEP-NUMBERS -->
+  **What this corpus cannot see**: any deck with `*DEFINE_FRICTION`, with a
+  contact `FS` of −1/−2/2, or with `*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE` or
+  `*CONTACT_ERODING_SINGLE_SURFACE` — the census counts all of those at **zero**
+  occurrences. That evidence is the column-exact tests (built against the CFG
+  `FORMAT` blocks field by field) plus the starter echo above, which is what
+  actually reads the cards back.
+
 - **Discrete spring/damper + discrete-beam materials batch**
   (`*MAT_SPRING_ELASTOPLASTIC` S03, `*MAT_DAMPER_NONLINEAR_VISCOUS` S05,
   `*MAT_SPRING_GENERAL_NONLINEAR` S06, `*MAT_SPRING_INELASTIC` S08;

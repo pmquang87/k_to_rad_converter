@@ -1738,7 +1738,14 @@ def _type25_surface(state: ConversionState, c, sid: int, styp: int,
     exactly this gap — it builds every contact surface from a bare ``PART``
     clause with no ``opt_A`` (``convertcontacts.cxx:264-274``).
     """
-    pids = _contact_master_pids(state, sid, styp)
+    # SURFATYP 5 ("include all non-spot-weld parts") and a bare SSID=0 both mean
+    # every part in the deck. _contact_master_pids does not model either (it is
+    # written for the 0/1/2/3 part forms), so they are resolved here rather than
+    # silently returning an empty side and dropping the interface.
+    if styp == 5 or sid == 0:
+        pids = set(state.parts.keys())
+    else:
+        pids = _contact_master_pids(state, sid, styp)
     if not pids:
         return 0
     solid_pids = {p for p in pids if any(e.pid == p for e in state.solid_elems)}
@@ -1931,17 +1938,9 @@ def _make_type25_interfaces(state: ConversionState,
                 "are NOT tracked against the secondary side — the LS-DYNA "
                 "one-way semantics are preserved, not symmetrized.")
         else:
-            sside = (sorted(state.parts.keys()) if c.ssid == 0 else None)
-            if sside is not None:
-                # SSID=0 on a single-surface contact = every part in the deck.
-                surf1 = state.next_id()
-                if not _make_master_surface(state, surf1,
-                                            f"contact_{c.inter_id}_self",
-                                            sside, lines):
-                    surf1 = 0
-            else:
-                surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
-                                        f"contact_{c.inter_id}_secnd", lines)
+            tag = ("self" if c.variant == "SINGLE_SURFACE" else "secnd")
+            surf1 = _type25_surface(state, c, c.ssid, c.sstyp,
+                                    f"contact_{c.inter_id}_{tag}", lines)
             if not surf1:
                 _drop_interface(
                     state, dropped, kw, c.inter_id,
