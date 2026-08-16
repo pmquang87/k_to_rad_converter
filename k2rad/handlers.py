@@ -7438,16 +7438,18 @@ def handle_mat_general_nonlinear_6dof(block: Block,
         state.warn("*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM: empty card – skipped")
         return
     mid = to_int(f1[0])
+    # c(n) is the n-th card AFTER card 1, so the manual's card 6 (UTFAIL* +
+    # FCRIT) is c(5) and card 7 (UCFAIL*) is c(6).
     c = lambda i: _card(raw, offset + i, fixed=True, n=8, w=10)
     g = lambda f, i: to_float(f[i]) if len(f) > i else 0.0
-    c6 = c(6)
+    c6 = c(5)
     m = MatGeneralNonlinear6dof(
         mid, g(f1, 1), g(f1, 2), g(f1, 3),
         to_int(f1[4]) if len(f1) > 4 else 0,
         g(f1, 5), g(f1, 6),
         to_int(f1[7]) if len(f1) > 7 else 0,
         _six_i(c(1)), _six_i(c(2)), _six_i(c(3)), _six_i(c(4)),
-        _six(c6), _six(c(7)),
+        _six(c6), _six(c(6)),
         to_float(c6[6]) if len(c6) > 6 else 0.0)
     state.mat_gnl_6dof[mid] = m
     if m.iflag == 2:

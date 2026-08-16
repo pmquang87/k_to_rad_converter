@@ -4283,9 +4283,9 @@ class ConversionState:
     spotweld_spring_eids: Set[int] = field(default_factory=set)
     # sprg_IDs actually written as /SPRING by _make_discrete_beam_connectors
     # (the *SECTION_BEAM ELFORM=6 path). Same accounting reason as
-    # spotweld_spring_eids: a *DATABASE_HISTORY_BEAM / *DATABASE_DISBOUT
-    # channel naming an element the connector writer skipped is starter
-    # ERROR 69, which refuses the whole deck.
+    # spotweld_spring_eids — a /TH channel naming an element the connector
+    # writer skipped is starter ERROR 69, which refuses the whole deck — and
+    # the same pattern a *DATABASE_DISBOUT converter will read.
     dbeam_spring_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
