@@ -4035,29 +4035,6 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     handle_contact_automatic_surface_to_surface(block, state)
 
 
-def _contact_mpp_offset(block: Block, offset: int) -> int:
-    """Extra lines the ``_MPP`` option inserts before *CONTACT Card 1.
-
-    ``contact_option_nodes_to_surface.cfg:2415-2435`` reads one MPP card
-    (IGNORE/BUCKET/LCBUCKET/NS2TRACK/INITITER/PARMAX) and, when its 7th field
-    (``CPARM8``) marks the extended form, a second one. k2rad cannot know which
-    without re-implementing the CFG's pre-read, so it counts the physical cards
-    that precede a plausible Card 1: an MPP card's first field is a small flag,
-    while Card 1's first field is the SSID. Both MPP cards are advisory
-    (bucket-sort tuning, MPP decomposition) and carry nothing k2rad converts.
-    """
-    n = 0
-    while offset + n < len(block.raw) and n < 2:
-        f = _card(block.raw, offset + n, fixed=True, n=8, w=10)
-        # Card 1 has SSTYP in field 3; an MPP card's field 3 is LCBUCKET (a
-        # curve id, normally blank). A blank field 3 with a nonzero field 1 is
-        # therefore an MPP card, not Card 1.
-        if len(f) > 2 and f[2].strip():
-            break
-        n += 1
-    return n
-
-
 #: The LS-DYNA keyword bases dyna2rad routes to /INTER/TYPE25, and the
 #: ``ContactType25.variant`` each maps to. ``eroding`` marks the families whose
 #: mandatory Card 4 (ISYM/EROSOP/IADJ) shifts the optional-card stack.
@@ -4109,13 +4086,13 @@ def handle_contact_type25(block: Block, state: ConversionState) -> None:
         inter_id = state.next_id()
     raw = block.raw
     if block.keyword.endswith("_MPP"):
-        n_mpp = _contact_mpp_offset(block, offset)
+        new_offset = _contact_mpp_card_offset(raw, offset, True)
         state.warn(
             f"*{block.keyword} {inter_id}: the _MPP option card(s) "
-            f"({n_mpp} line(s): bucket-sort and decomposition tuning) are "
-            "skipped — they carry no field OpenRadioss has an equivalent for. "
-            "The contact itself converts normally.")
-        offset += n_mpp
+            f"({new_offset - offset} line(s): bucket-sort and MPP-decomposition "
+            "tuning) are skipped — they carry no field OpenRadioss has an "
+            "equivalent for. The contact itself converts normally.")
+        offset = new_offset
 
     # Card 1: ssid msid sstyp mstyp sboxid mboxid spr mpr
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
@@ -4319,14 +4296,20 @@ _SPOTWELD_VARIANT_LOSS = {
 }
 
 
-def _spotweld_card_offset(raw: List[str], offset: int, mpp: bool) -> int:
-    """First index of the *CONTACT_SPOTWELD mandatory Card 1.
+def _contact_mpp_card_offset(raw: List[str], offset: int, mpp: bool) -> int:
+    """First index of a *CONTACT's mandatory Card 1, past any ``_MPP`` cards.
 
-    ``_MPP`` inserts its own card BEFORE Card 1 (contact_spotweld.cfg: IGNORE
-    BCKT LCBCKT NS2TRK INITITR PARMAX <blank> CPARM8), optionally followed by a
-    second MPP card recognised by a literal ``&`` in COLUMN 1
-    (``CARD_PREREAD("%-1s")``). Miss either and every field of the real card is
-    read one line too early — SSID would come back as the MPP IGNORE flag.
+    ``_MPP`` inserts its own card BEFORE Card 1 (IGNORE BCKT LCBCKT NS2TRK
+    INITITR PARMAX <blank> CPARM8), optionally followed by a second MPP card
+    recognised by a literal ``&`` in COLUMN 1 (``CARD_PREREAD("%-1s")``). Miss
+    either and every field of the real card is read one line too early — SSID
+    would come back as the MPP IGNORE flag.
+
+    The rule is identical in every *CONTACT CFG that offers the option —
+    ``contact_spotweld.cfg`` and ``contact_option_nodes_to_surface.cfg:2414-2434``
+    carry the same two-card block verbatim — so the spotweld and eroding /
+    node-to-surface handlers share this one implementation rather than each
+    guessing at the card count.
     """
     if not mpp:
         return offset
@@ -4364,7 +4347,7 @@ def handle_contact_spotweld(block: Block, state: ConversionState) -> None:
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
     raw = block.raw
-    c1 = _spotweld_card_offset(raw, offset, mpp)
+    c1 = _contact_mpp_card_offset(raw, offset, mpp)
     f1 = _card(raw, c1, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
     msid  = to_int(f1[1]) if len(f1) > 1 else 0

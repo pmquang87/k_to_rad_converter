@@ -220,6 +220,26 @@ class DispatchTests(unittest.TestCase):
             c = st.contacts_type25[0]
             self.assertEqual((c.variant, c.eroding), (variant, eroding), kw)
 
+    def test_mpp_option_cards_are_stepped_over(self):
+        """_MPP inserts one card BEFORE Card 1 (IGNORE BCKT LCBCKT NS2TRK
+        INITITR PARMAX <blank> CPARM8), plus a second recognised by a literal
+        '&' in COLUMN 1 (contact_option_nodes_to_surface.cfg:2414-2434 — the
+        same block contact_spotweld.cfg carries, hence the shared helper). Miss
+        either and SSID comes back as the MPP IGNORE flag."""
+        mpp1 = "         0        10         0         0         0    1.0005\n"
+        mpp2 = "&                  1       1.0         1\n"
+        for extra in (mpp1, mpp1 + mpp2):
+            deck = (_MESH + "*CONTACT_ERODING_NODES_TO_SURFACE_MPP\n" + extra
+                    + "       500         1         4         3         0         0         0         0\n"
+                    + _card2(fs="       0.3") + _CARD3
+                    + "         0         1         1\n" + _TERM)
+            st = _dispatch(deck)
+            c = st.contacts_type25[0]
+            self.assertEqual((c.ssid, c.msid, c.sstyp, c.mstyp), (500, 1, 4, 3))
+            self.assertEqual(c.fs, 0.3)
+            self.assertEqual((c.isym, c.erosop, c.iadj), (0, 1, 1))
+            self.assertTrue(any("_MPP option card(s)" in w for w in st.warnings))
+
     def test_multi_contact_deck_keeps_every_interface(self):
         deck = (_MESH
                 + _eroding("CONTACT_ERODING_SURFACE_TO_SURFACE", 2, 1, 3, 3)
