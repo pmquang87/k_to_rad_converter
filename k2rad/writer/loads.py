@@ -30,7 +30,9 @@ __all__ = [
     "_plastic_to_total_disp",
     "_emit_funct",
     "_s03_curve_points",
+    "_curve_max_slope",
     "_finite_length",
+    "_element_length",
     "_new_ground_node",
     "_emit_spring_part",
     "_make_discrete_springs",
@@ -611,18 +613,41 @@ def _plastic_to_total_disp(pts, stiff: float):
 _PLASTIC_CURVE_EPS = 1.0e-9
 
 
+def _curve_max_slope(curve: Curve) -> float:
+    """The largest |secant slope| of a force-displacement function.
+
+    ``hm_read_prop04.F``'s companion check (starter WARNING 506, "STIFFNESS
+    VALUE IS NOT CONSISTENT WITH THE MAXIMUM SLOPE OF THE YIELD FUNCTION - THE
+    STIFFNESS VALUE IS CHANGED") compares the spring's K against exactly this
+    number and RAISES K itself when it is smaller. On an elastic-plastic spring
+    (H != 0) K is the unloading stiffness, so letting the starter pick it means
+    shipping a card whose physics is decided downstream — better to state it."""
+    pts = sorted(curve.pts)
+    best = 0.0
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        if x2 > x1:
+            best = max(best, abs((y2 - y1) / (x2 - x1)))
+    return best
+
+
 def _finite_length(state: ConversionState, e) -> bool:
     """True when a 2-node connector element has two REAL, distinct nodes — the
     precondition for any node-oriented frame (r4buf3.F builds local X from
     node1→node2 and answers WARNING 325 when it cannot). A grounded element
     (N2=0) fails it: its synthesized ground node sits on top of N1."""
+    return _element_length(state, e) > 1e-12
+
+
+def _element_length(state: ConversionState, e) -> float:
+    """Distance between a 2-node connector element's nodes; 0 when either end
+    is missing or the element is grounded (N2=0)."""
     if e.n1 <= 0 or e.n2 <= 0:
-        return False
+        return 0.0
     a, b = state.nodes.get(e.n1), state.nodes.get(e.n2)
     if a is None or b is None:
-        return False
+        return 0.0
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2
-            + (a.z - b.z) ** 2) > 1e-24
+            + (a.z - b.z) ** 2) ** 0.5
 
 
 def _new_ground_node(state: ConversionState, at: NodeData) -> int:
@@ -867,6 +892,11 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                            f"({len(elems)} element(s)) NOT converted.")
                 continue
             fct1 = mat_gnl.lcdl
+            # H=6 makes K1 the UNLOADING stiffness, and the starter refuses to
+            # let it be smaller than the loading curve's steepest segment: it
+            # raises it silently under WARNING 506. State it instead, so the
+            # hysteresis loop the deck runs is the one the card says.
+            k = _curve_max_slope(state.curves[mat_gnl.lcdl])
             if mat_gnl.lcdu and mat_gnl.lcdu in state.curves:
                 fct3 = mat_gnl.lcdu
                 hflag = 6                # iso. hardening + nonlinear unloading
@@ -1087,9 +1117,16 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             if torsional:
                 dofs = [SpringDof(), SpringDof(), SpringDof(),
                         _dof(s), SpringDof(), SpringDof()]
+                # rinit3.F's consistency check (WARNING 432) compares the
+                # spring's Inertia against mass·L², so a rotational connector
+                # whose inertia k2rad invents should BE that reference rather
+                # than a fixed token an order of magnitude away from it.
+                lens = [_element_length(state, e) for e in g_elems]
+                lens = [x for x in lens if x > 0.0]
+                l_mean = (sum(lens) / len(lens)) if lens else 1.0
                 lines += _emit_prop_type13(
                     prop_id, f"{title} ({kind}, torsional DRO=1)",
-                    1.0e-4, 1.0e-6, 0, 0, dofs)
+                    1.0e-4, max(1.0e-4 * l_mean * l_mean, 1.0e-20), 0, 0, dofs)
             else:
                 k_s, c_s, a_coef = _scaled(s)
                 lines += _emit_prop_type4(
