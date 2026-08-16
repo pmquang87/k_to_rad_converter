@@ -43,7 +43,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from .handlers import _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES
+from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
+                       _rwall_geometric_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -1073,6 +1074,48 @@ def _off_load_segment(b: Block, offsets: Dict[str, int], warn) -> None:
             raw[k] = new
 
 
+def _off_rigidwall_geometric(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*RIGIDWALL_GEOMETRIC_<shape>[_MOTION][_DISPLAY][_ID].
+
+    Card 1 carries NSID/NSIDEX (IDSOFF) and BOXID (IDDOFF), Card 2 is pure
+    geometry, and the shape card is geometry too — but the optional _MOTION
+    card's LCID is a curve id (IDFOFF) whose CARD INDEX depends on the shape
+    and, for a cylinder, on NSEGS (each of the NSEGS "VL HEIGHT" sub-cards sits
+    between the shape card and the MOTION card). A fixed ``cards`` map cannot
+    express that, so the position is walked here. The _DISPLAY card's PID is a
+    *PART id, offset with IDPOFF.
+    """
+    raw = b.raw
+    # "The order of the OPTIONS is arbitrary" (Manual p. 40-4), so _ID may sit
+    # in a non-final position, where the keyword parser leaves it in the
+    # keyword instead of in block.options (mirrors handlers._rwall_has_id).
+    has_id = "ID" in b.options or "_ID_" in f"_{b.keyword}_"
+    start = 1 if has_id else _title_offset(b)
+    if has_id and raw:
+        new = _rewrite_id_header(raw[0], offsets.get("p", 0))
+        if new is not None:
+            raw[0] = new
+    if start < len(raw):
+        new = _rewrite_line(raw[start], [(0, "s"), (1, "s"), (2, "d")], offsets)
+        if new is not None:
+            raw[start] = new
+    # start+1 = geometry card, start+2 = shape card (+ NSEGS sub-cards)
+    idx = start + 3
+    if "_CYLINDER" in b.keyword and start + 2 < len(raw):
+        f3 = [x.strip() for x in _fields(raw[start + 2], 8, 10)]
+        idx += to_int(f3[2]) if len(f3) > 2 and f3[2] else 0
+    if "_MOTION" in b.keyword:
+        if idx < len(raw):
+            new = _rewrite_line(raw[idx], [(0, "f")], offsets)
+            if new is not None:
+                raw[idx] = new
+        idx += 1
+    if "_DISPLAY" in b.keyword and idx < len(raw):
+        new = _rewrite_line(raw[idx], [(0, "p")], offsets)
+        if new is not None:
+            raw[idx] = new
+
+
 def _off_hex_spotweld_assembly(b: Block, offsets: Dict[str, int], warn) -> None:
     """*DEFINE_HEX_SPOTWELD_ASSEMBLY[_N][_TITLE]: an optional title/heading
     card, then ID_SW on its OWN card, then EID1..EIDn.
@@ -1851,6 +1894,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Rigid walls (id → IDPOFF per the R16 manual bucket list)
     "RIGIDWALL_PLANAR": {"cards": {0: [(0, "s"), (1, "s"), (2, "d")]},
                          "idhdr": "p"},
+    # *RIGIDWALL_GEOMETRIC Card 1 is the same NSID/NSIDEX/BOXID triple, plus a
+    # _MOTION curve id and a _DISPLAY part id at shape-dependent card indices.
+    "RIGIDWALL_GEOMETRIC": _off_rigidwall_geometric,
 
     # Loads
     "LOAD_NODE_POINT": {"data": (0, [(0, "n"), (2, "f"), (4, "d"), (5, "n"),
@@ -1905,9 +1951,9 @@ for _o1 in ("", "_OFFSET"):
 del _o1, _o2, _o3, _o4
 
 #: Family prefix → rewriter for the *ELEMENT_ spellings the table does not list
-#: (mirrors handlers._ELEMENT_PREFIX_HANDLERS). Without it every unrecognized
-#: *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its original
-#: node/part ids while the rest of the include was offset — dangling
+#: (mirrors the *ELEMENT_ rows of handlers._PREFIX_HANDLERS). Without it every
+#: unrecognized *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its
+#: original node/part ids while the rest of the include was offset — dangling
 #: connectivity, which is worse than the warning it would have produced.
 _ELEMENT_PREFIX_SPECS = (
     ("ELEMENT_SHELL", _off_element_shell),
@@ -1924,6 +1970,14 @@ for _kw in ("RIGIDWALL_PLANAR_FORCES", "RIGIDWALL_PLANAR_MOVING",
             "RIGIDWALL_PLANAR_ORTHO_MOVING",
             "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING"):
     _OFFSET_SPECS[_kw] = _OFFSET_SPECS["RIGIDWALL_PLANAR"]
+
+# Every *RIGIDWALL_GEOMETRIC spelling handlers.py registers — generated from
+# the same source so the two tables cannot drift apart (an unmapped keyword
+# would keep its original NSID/BOXID/LCID while the rest of the include is
+# offset, i.e. dangling or colliding references).
+for _kw, _ in _rwall_geometric_keywords():
+    _OFFSET_SPECS[_kw] = _off_rigidwall_geometric
+del _kw
 
 # All CONTACT_* handled by k2rad share the Card-1 (ssid msid sstyp mstyp
 # sboxid mboxid) layout; unlisted CONTACT_ variants fall to the unmapped warn.
@@ -2224,8 +2278,9 @@ def _rewrite_point_fields(line: str, aff: Affine,
     return "".join(f"{t:>10}" for t in toks).rstrip()
 
 
-def _rewrite_direction_fields(line: str, aff: Affine, n: int) -> Optional[str]:
-    """Apply only the LINEAR part of *aff* to the leading (0,1,2) triplet of a
+def _rewrite_direction_fields(line: str, aff: Affine, n: int,
+                              start: int = 0) -> Optional[str]:
+    """Apply only the LINEAR part of *aff* to the (start, +1, +2) triplet of a
     fixed-width card, keeping every other field verbatim.
 
     A DIRECTION has no origin, so the translation must not be applied — the
@@ -2235,14 +2290,14 @@ def _rewrite_direction_fields(line: str, aff: Affine, n: int) -> Optional[str]:
     toks = [t.strip() for t in _fields(line, n, 10)]
     while toks and toks[-1] == "":
         toks.pop()
-    if not toks:
+    if not toks or len(toks) <= start:
         return None
-    while len(toks) < 3:
+    while len(toks) < start + 3:
         toks.append("0.0")           # a blank VY/VZ column is 0.0, not absent
-    v = mat_apply(aff[0], (to_float(toks[0]), to_float(toks[1]),
-                           to_float(toks[2])))
+    v = mat_apply(aff[0], (to_float(toks[start]), to_float(toks[start + 1]),
+                           to_float(toks[start + 2])))
     for j in range(3):
-        toks[j] = _fmt_coord(v[j])
+        toks[start + j] = _fmt_coord(v[j])
     if "," in line or any(len(t) > 10 for t in toks):
         return ",".join(toks)
     return "".join(f"{t:>10}" for t in toks).rstrip()
@@ -2300,18 +2355,22 @@ def _transform_beam_orientation(p: PendingInclude, aff: Affine, warn) -> None:
 
 
 def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
-    """Move *RIGIDWALL_PLANAR* literal wall geometry with the include, the way
-    the OpenRadioss starter replays a submodel transform on both wall points
+    """Move *RIGIDWALL_* literal wall geometry with the include, the way the
+    OpenRadioss starter replays a submodel transform on both wall points
     (hm_read_rwall_plane.F: SUBROTPOINT on XT/YT/ZT and XH/YH/ZH): Card 2's
-    base and head points, plus the _FINITE card's in-plane edge head
-    (XHEV/YHEV/ZHEV) — a plain point, so any affine maps it consistently with
-    the wall plane. LENL/LENM are lengths: exact under translation/rotation/
-    mirror; warned (not rescaled) under scale/shear."""
+    base and head points, plus the _FINITE/_FLAT/_PRISM card's in-plane edge
+    head (XHEV/YHEV/ZHEV) — a plain point, so any affine maps it consistently
+    with the wall plane. LENL/LENM/LENP are lengths and RADCYL/RADSPH are
+    radii: exact under translation/rotation/mirror; warned (not rescaled)
+    under scale/shear. A _MOTION card's VX/VY/VZ are direction cosines, so
+    only the linear part of the affine applies to them."""
     for b in p.sub_blocks:
-        if not b.keyword.startswith("RIGIDWALL_PLANAR"):
+        planar = b.keyword.startswith("RIGIDWALL_PLANAR")
+        geom = b.keyword.startswith("RIGIDWALL_GEOMETRIC")
+        if not (planar or geom):
             continue
         label = f"*INCLUDE_TRANSFORM {p.filename}: *{b.keyword}"
-        gi = _title_offset(b) + 1
+        gi = (1 if "_ID_" in f"_{b.keyword}_" else _title_offset(b)) + 1
         new = (_rewrite_point_fields(b.raw[gi], aff, [0, 3])
                if gi < len(b.raw) and b.raw[gi].strip() else None)
         if new is None:
@@ -2319,12 +2378,12 @@ def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
                  "was NOT transformed; verify its position manually.")
             continue
         b.raw[gi] = new
-        if "_ORTHO" in b.keyword:
+        if planar and "_ORTHO" in b.keyword:
             # Friction-direction cards sit between the geometry and _FINITE
             # cards; the ORTHO wall is warn-skipped by the handler anyway
             # (no /RWALL equivalent), so only the plane points are moved.
             continue
-        if "_FINITE" in b.keyword:
+        if planar and "_FINITE" in b.keyword:
             fi = gi + 1
             if fi < len(b.raw) and b.raw[fi].strip():
                 newf = _rewrite_point_fields(b.raw[fi], aff, [0])
@@ -2334,6 +2393,35 @@ def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
                 warn(f"{label}: the TRANID transform scales or shears — the "
                      "finite-wall extents LENL/LENM are NOT rescaled; verify "
                      "the wall coverage.")
+        elif geom:
+            # Card 3 is shape-specific: FLAT/PRISM lead with the edge-vector
+            # head, a POINT; CYLINDER/SPHERE carry only radii and lengths.
+            si = gi + 1
+            flat = "_FLAT" in b.keyword or "_PRISM" in b.keyword
+            if flat and si < len(b.raw) and b.raw[si].strip():
+                news = _rewrite_point_fields(b.raw[si], aff, [0])
+                if news is not None:
+                    b.raw[si] = news
+            if not _linear_preserves_lengths(aff):
+                warn(f"{label}: the TRANID transform scales or shears — the "
+                     "wall dimensions (LENL/LENM/LENP, RADCYL/LENCYL, RADSPH) "
+                     "are NOT rescaled; verify the wall size.")
+            if "_MOTION" not in b.keyword:
+                continue
+            # Card 3c of a CYLINDER carries NSEGS sub-cards before the MOTION
+            # card; without NSEGS the MOTION card is the one right after.
+            mi = si + 1
+            if "_CYLINDER" in b.keyword and si < len(b.raw):
+                f3 = [x.strip() for x in _fields(b.raw[si], 8, 10)]
+                mi += to_int(f3[2]) if len(f3) > 2 and f3[2] else 0
+            if mi < len(b.raw) and b.raw[mi].strip():
+                newm = _rewrite_direction_fields(b.raw[mi], aff, 8, start=2)
+                if newm is None:
+                    warn(f"{label}: the MOTION card is too short to hold "
+                         "VX/VY/VZ — the motion direction was NOT rotated "
+                         "with the include.")
+                else:
+                    b.raw[mi] = newm
 
 
 def _carries_literal_axis_point(b: Block) -> bool:

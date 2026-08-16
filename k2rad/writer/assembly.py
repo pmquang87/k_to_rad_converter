@@ -90,6 +90,7 @@ from .loads import (
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
     _synthesize_rwall_moving_nodes,
+    _resolve_geometric_rigid_walls,
     _warn_spring_eid_collisions,
 )
 from .blast_ale import (
@@ -739,6 +740,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # Moving rigid walls need their carrier node in the deck BEFORE the /NODE
     # section is built (the /RWALL cards themselves are emitted later).
     _synthesize_rwall_moving_nodes(state)
+
+    # *RIGIDWALL_GEOMETRIC_*: resolve each wall's geometry to the concrete
+    # /RWALL wall(s) — a prism becomes six /RWALL/PARAL faces — and synthesize
+    # the _MOTION carrier nodes. Same constraint as above (nodes before /NODE),
+    # and it has to follow the planar prepass so both allocate off a
+    # max(state.nodes)+1 that already includes the earlier synthesis.
+    _resolve_geometric_rigid_walls(state)
 
     # Assign a /SKEW id to every *DEFINE_VECTOR[_NODES] / *DEFINE_SD_ORIENTATION
     # and synthesize the third node each moving /SKEW/MOV needs — before the

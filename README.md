@@ -1452,8 +1452,11 @@ includes, so no `//SUBMODEL` is emitted): the id offsets
 are added to every id the included file defines **and** references (per-keyword
 field map covering the supported keyword families; an included keyword outside
 the map warns loudly), and the `TRANID` `*DEFINE_TRANSFORMATION` moves the
-included `*NODE` coordinates **and `*RIGIDWALL_PLANAR*` wall geometry** (base +
-head points, `_FINITE` edge head — the starter's `SUBROTPOINT` submodel replay).
+included `*NODE` coordinates **and `*RIGIDWALL_*` wall geometry** (base + head
+points, the `_FINITE`/`_FLAT`/`_PRISM` edge head, and a `_MOTION` card's
+direction cosines under the linear part only — the starter's `SUBROTPOINT`
+submodel replay). Wall *dimensions* (`LENL`/`LENM`/`LENP`, `RADCYL`, `RADSPH`)
+are lengths: exact under translation/rotation/mirror, warned under scale.
 TRANID binds against **post-offset** definition ids (dyna2rad's
 offset-then-resolve order; a nested include card's TRANID shifts with the
 enclosing files' cumulative `IDDOFF`). Nested `*INCLUDE_TRANSFORM`s accumulate
@@ -1542,8 +1545,10 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
 `*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
-`FRIC` 0 → sliding, 0<f<1 → Coulomb friction, ≥1 → tied; `NSID=0` tracks all
-nodes via a bounding-box search distance; `*DATABASE_RWFORC` → `/TH/RWALL`,
+`FRIC` 0 → sliding, exactly 1 → tied, 2/3 → the WVEL-gated weld (degraded +
+warned), anything else positive → Coulomb friction; `NSID=0` tracks all
+nodes via a search distance sized from the mesh bounding box;
+`*DATABASE_RWFORC` → `/TH/RWALL`,
 whose `FNX/Y/Z` + `FTX/Y/Z` are a time-accumulated **impulse** — `rgwal0.F:504-509`
 sums the per-cycle nodal impulses, while the engine's `/DT12`-divided true wall
 force goes only to `/ANIM` and the sensors (`rgwal0.F:496-500`), so rwforc
@@ -1555,6 +1560,55 @@ exactly the starter reader's moving-wall semantics, no extra cards needed
 points computed from `XHEV`/`LENL`/`LENM` (a zero length means semi-infinite
 in LS-DYNA and falls back to the infinite plane with a warning);
 `_ORTHO` (orthotropic friction) still warn-skips — no `/RWALL` equivalent
+`*RIGIDWALL_GEOMETRIC_CYLINDER` → `/RWALL/CYL`: `M` = tail, `M1` = head (only
+`normalize(M1−M)` survives as the axis), `Phi = 2 × RADCYL` — the card field is
+a **diameter** while LS-DYNA gives a radius (`hm_read_rwall_cyl.F:272` halves
+it). `/RWALL/CYL` has no length field and is **axially infinite**, so a
+`LENCYL > 0` cylinder is warned (the converted wall also blocks beyond both
+ends); `NSEGS` sub-cards are per-segment force output with no counterpart and
+are warned + skipped (their card count is honoured, so the `_MOTION` card is
+still found)
+`*RIGIDWALL_GEOMETRIC_SPHERE` → `/RWALL/SPHER` (`M` = centre = tail,
+`Phi = 2 × RADSPH`; the card has no `XM1` line at all)
+`*RIGIDWALL_GEOMETRIC_FLAT` → `/RWALL/PLANE` when `LENL` or `LENM` is zero
+("a zero value defines an infinite size plane", Manual p. 40-9 — an exact
+mapping; dyna2rad instead builds a 1e20 quadrant that misses half the model),
+else `/RWALL/PARAL` with `M1 = T + LENL·l̂`, `M2 = T + LENM·m̂`,
+`m̂ = n̂ × l̂` normalized. `l̂` comes from `HEV − T` (tail-relative, so the
+classification is `*INCLUDE_TRANSFORM`-invariant); a degenerate `l̂` falls back
+to the infinite plane + warning
+`*RIGIDWALL_GEOMETRIC_PRISM` → **six** `/RWALL/PARAL` faces with outward
+normals (Radioss has no box rigid wall; the five extra walls get fresh ids and
+share the tracked group, friction and prescribed motion). `LENP = 0` (an
+infinitely deep prism) emits the top face only + warning — dyna2rad emits four
+walls with a zero edge vector, which the starter rejects with `ERROR 168`
+`*RIGIDWALL_GEOMETRIC_*_MOTION` → the moving `/RWALL` form (synthesized carrier
+node per face, `Mass`/`VX0..VZ0` = 0) driven by `/IMPVEL` (`OPT=0`) or
+`/IMPDISP` (`OPT≠0`) on the LS-DYNA `LCID`, along the local X′ of a synthesized
+`/SKEW/FIX` built from the `VX/VY/VZ` direction cosines. `/RWALL` has no
+motion-curve field and the imposed motion wins over the wall reaction
+(`resol.F` calls `FIXVEL` after `RGWALF`). `LCID = 0`, a missing curve or
+all-zero direction cosines degrade to a FIXED wall + warning rather than to
+dyna2rad's free-floating / silently-global-X wall
+`*RIGIDWALL_GEOMETRIC_*_DISPLAY` — the `PID/RO/E/PR` card is a visualization
+mesh with no solution effect (Manual p. 40-13): parsed away and warned.
+`_INTERIOR` (`CYLINDER`/`SPHERE`) warn-**skips** — Radioss always pushes nodes
+outward (`DP <= RA2`) and has no inversion flag, so converting it would invert
+the physics. `_DEFORM` and any other spelling k2rad cannot parse warn-skip by
+name (their extra cards would shift every card index after them), and several
+card sets under one keyword convert the first only, loudly
+`FRIC` maps by EXACT value, not by threshold ("FRIC could be any positive
+value. Three special values ... trigger special treatments", Manual p. 40-20):
+`0.0 → Slide 0`, exactly `1.0 → Slide 1` (tied), anything else positive
+`→ Slide 2` + the coefficient. The geometric card has no weld values, so a
+geometric `FRIC = 2.0` is a Coulomb `mu = 2.0`; on `*RIGIDWALL_PLANAR` the
+WVEL-gated welds `2.0`/`3.0` degrade to Slide 0 / Slide 1 with a warning.
+dyna2rad's geometric path turns a tied `FRIC = 1.0` into `mu = 1.0` instead
+A wall with `NSID = 0` tracks ALL nodes, which `/RWALL` has no group id for:
+`D_search` is set to the largest `DISN` the starter would measure over the mesh
+bounding box (a bbox *diagonal* is not an upper bound — an impactor parked
+further away than the mesh is wide would track nothing and be silently inert),
+and synthesized moving-wall carrier nodes are excluded via `grnd_ID2`
 
 ### Loads
 `*LOAD_RIGID_BODY` → `/CLOAD` on rigid body master node
@@ -2184,7 +2238,7 @@ python -m unittest discover -s tests
   numerically at parse time; unit factors (`FCTMAS`/`FCTTIM`/`FCTLEN`/
   `FCTTEM`) are **not** applied (convert the include with kunit first —
   warned loudly), and the TRANID transform moves `*NODE` coordinates and
-  `*RIGIDWALL_PLANAR*` wall geometry only (literal geometry inside other
+  `*RIGIDWALL_*` wall geometry only (literal geometry inside other
   keywords of the include — coordinate-system origins, box extents,
   velocity vectors under rotation, literal rotation-axis points under any
   transform — is warned per keyword).
