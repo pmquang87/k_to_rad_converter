@@ -4137,7 +4137,7 @@ def handle_contact_type25(block: Block, state: ConversionState) -> None:
             "default /INTER/TYPE25 (convertcontacts.cxx:133-165). Honoured — "
             "but the EROSION half of this contact is then LOST: only "
             "/INTER/TYPE25 keeps interior solid faces as dormant "
-            f"negative-stiffness segments, and only TYPE25 wakes them "
+            "negative-stiffness segments, and only TYPE25 wakes them "
             "(engine check_surface_state.F:174 is gated on ITY==25). Segments "
             "whose element dies are still removed, but no NEW surface is ever "
             "exposed, so the contact goes under-stiff as the crater grows. "

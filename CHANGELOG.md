@@ -175,8 +175,21 @@ Prior history (before this changelog was introduced) is summarized in the
   **Corpus sweep.** Measured over **201 decks** — the 73 `.k`/`.key`/`.dyn`
   decks in the repo, the 127-deck `E:\openradioss_run\Ryan_Lee_Examples` tree
   and the one `E:\openradioss_run\ls-dyna_example` deck — `master` 7d504ba vs
-  `feat/eroding-contacts`, 0 conversion exceptions on either side.
-  <!-- SWEEP-NUMBERS -->
+  `feat/eroding-contacts`, 0 conversion exceptions on either side:
+  **179/201 byte-identical on BOTH `_0000.rad` and `_0001.rad`, with identical
+  warning sets and identical skip lists.** Total warnings 2172 → 2379. The 22
+  that moved are exactly the 22 decks the census predicts — 15 `W11_SETUP_SPH_
+  BirdStrike{,_Multi,_thick}` copies and 7 `W9_SETUP_MSLprojectile` /
+  `W9s` copies — and every one of them moved only in the starter deck
+  (`_0001.rad` unchanged on all 22: contacts live in `_0000.rad` alone).
+  `CONTACT_ERODING_NODES_TO_SURFACE` leaves `skipped_keywords` on 15 and
+  `CONTACT_ERODING_SURFACE_TO_SURFACE` on 7, which is the entire census of those
+  two spellings. Each W9 copy gains 6 warnings (the interface, the `IADJ`
+  reading, one `/SURF/PART/ALL` note per solid side, `Inacti`, and the
+  once-per-deck erosion-rate note); each W11 copy gains 12 and LOSES one — the
+  old "`*DATABASE_RCFORC` requested but no `*CONTACT` was converted" — because
+  the two eroding contacts it now emits are what that request was for. +207 net,
+  which is exactly 7×6 + 15×11.
   **What this corpus cannot see**: any deck with `*DEFINE_FRICTION`, with a
   contact `FS` of −1/−2/2, or with `*CONTACT_[AUTOMATIC_]NODES_TO_SURFACE` or
   `*CONTACT_ERODING_SINGLE_SURFACE` — the census counts all of those at **zero**
