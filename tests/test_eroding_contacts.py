@@ -585,7 +585,7 @@ class FrictionIncludeTransformTests(unittest.TestCase):
     row then hit writer/frictions.py's "part does not exist" drop, and the whole
     table silently fell back to its default coefficients."""
 
-    def _offset(self, idpoff=0, idsoff=0, idroff=0):
+    def _offset(self, idpoff=0, idsoff=0, iddoff=0):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         child = os.path.join(tmp.name, "child.k")
@@ -602,15 +602,26 @@ class FrictionIncludeTransformTests(unittest.TestCase):
                      "*END\n")
         master = os.path.join(tmp.name, "master.k")
         with open(master, "w") as fh:
-            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF ... IDROFF
+            # Card 2b.1: IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF
+            # Card 2b.2: IDROFF
             fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
                      f"{0:10d}{0:10d}{idpoff:10d}{0:10d}{idsoff:10d}"
-                     f"{0:10d}\n"
-                     f"{idroff:10d}\n*END\n")
+                     f"{0:10d}{iddoff:10d}\n"
+                     f"{0:10d}\n*END\n")
         state = ConversionState()
         for block in parse_k_file(master):
             dispatch(block, state)
         return state
+
+    def test_table_id_takes_iddoff_not_idroff(self):
+        """Vol I p.27-5: IDDOFF is "Offset to any ID defined through *DEFINE,
+        except the FUNCTION, TABLE, and CURVE options" — so a *DEFINE_FRICTION
+        id moves with IDDOFF like every other *DEFINE_* entry in _OFFSET_SPECS,
+        NOT with IDROFF ("used for all offsets except for those listed above").
+        The id is what a *CONTACT FS=-2 names, so getting the bucket wrong
+        breaks the binding as surely as not offsetting at all."""
+        st = self._offset(iddoff=3000)
+        self.assertEqual(sorted(st.define_frictions), [3007])
 
     def test_part_and_pset_columns_take_different_offsets(self):
         st = self._offset(idpoff=100, idsoff=5000)

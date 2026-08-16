@@ -618,8 +618,13 @@ def _off_contact(b: Block, offsets: Dict[str, int], warn) -> None:
 
 
 def _off_define_friction(b: Block, offsets: Dict[str, int], warn) -> None:
-    """*DEFINE_FRICTION: the table ID → IDROFF, every Card-2 part pair → IDPOFF
+    """*DEFINE_FRICTION: the table ID → IDDOFF, every Card-2 part pair → IDPOFF
     or IDSOFF depending on that row's own PTYPEi/PTYPEj.
+
+    IDDOFF, not IDROFF: LS-DYNA Vol I p.27-5 defines it as "Offset to any ID
+    defined through *DEFINE, except the FUNCTION, TABLE, and CURVE options",
+    which is where every other *DEFINE_* entry in this table sends its id
+    (bucket "d"), while *DEFINE_CURVE / *DEFINE_TABLE use IDFOFF ("f").
 
     A walker rather than a declarative spec because the bucket is PER ROW AND
     PER COLUMN: PTYPEi/j (fields 6/7) is the literal string ``PSET`` when the
@@ -631,7 +636,7 @@ def _off_define_friction(b: Block, offsets: Dict[str, int], warn) -> None:
     """
     toff = _title_offset(b)
     if toff < len(b.raw) and b.raw[toff].strip():
-        new = _rewrite_line(b.raw[toff], [(0, "r")], offsets)
+        new = _rewrite_line(b.raw[toff], [(0, "d")], offsets)
         if new is not None:
             b.raw[toff] = new
     if not offsets.get("p", 0) and not offsets.get("s", 0):
@@ -1498,8 +1503,8 @@ _OFFSET_SPECS: Dict[str, object] = {
     "DEFINE_BOX": {"cards": {0: [(0, "d")]}},
     "DEFINE_BOX_LOCAL": {"cards": {0: [(0, "d")]}},
     "DEFINE_TRANSFORMATION": _off_define_transformation,
-    # *DEFINE_FRICTION: table id on IDROFF (it shares no namespace with the
-    # curves/tables — /FRICTION keeps the LS-DYNA id 1:1), Card-2 part pairs on
+    # *DEFINE_FRICTION: table id on IDDOFF (Vol I p.27-5, "any ID defined
+    # through *DEFINE" other than CURVE/TABLE/FUNCTION), Card-2 part pairs on
     # IDPOFF/IDSOFF per row. See _off_define_friction for why it is a walker.
     "DEFINE_FRICTION": _off_define_friction,
     "NODE_TRANSFORM": {"data": (0, [(0, "d"), (1, "s")])},
