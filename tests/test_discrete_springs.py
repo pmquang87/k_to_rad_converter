@@ -909,6 +909,28 @@ class TargetMatLawTests(unittest.TestCase):
                                            extra=CURVE_50 + CURVE_51))
                 self.assertEqual(_target_mat_law(st, 9), expected)
 
+    def test_element_free_spring_part_is_claimed_by_the_connector_path(self):
+        """A *PART on a spring material with no elements must NOT reach the
+        ordinary /PART emission — it would reference a MID that emits no /MAT
+        (starter ERROR 3046) and a *SECTION_DISCRETE that emits no /PROP."""
+        from k2rad.writer.common import _discrete_part_ids
+        for mat, kw in (
+                ("*MAT_SPRING_ELASTOPLASTIC\n"
+                 "         9    1000.0     200.0      50.0\n", "S03"),
+                ("*MAT_DAMPER_NONLINEAR_VISCOUS\n         9        50\n", "S05"),
+                ("*MAT_SPRING_GENERAL_NONLINEAR\n"
+                 "         9        50        51\n", "S06"),
+                ("*MAT_SPRING_INELASTIC\n"
+                 "         9        50     800.0\n", "S08")):
+            with self.subTest(kw=kw):
+                deck = ("*KEYWORD\n*PART\nempty spring\n"
+                        "         7         3         9\n"
+                        "*SECTION_DISCRETE\n         3         0\n"
+                        + mat + CURVE_50 + CURVE_51
+                        + "*CONTROL_TERMINATION\n       1.0\n*END\n")
+                st = _dispatch(deck)
+                self.assertIn(7, _discrete_part_ids(st))
+
     def test_spring_parts_do_not_reach_the_beam_type3_check(self):
         """A discrete-beam part HAS *ELEMENT_BEAMs, so it would otherwise be
         reported as 'no /MAT at all' by _warn_beam_type3_material."""

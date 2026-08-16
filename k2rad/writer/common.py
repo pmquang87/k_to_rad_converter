@@ -514,7 +514,11 @@ def _discrete_part_ids(state: ConversionState) -> Set[int]:
     _make_discrete_springs; the DYNA section/material ids have no /PROP or
     /MAT of their own)."""
     spring_mids = (set(state.mat_spring_elastic) | set(state.mat_spring_nonlinear)
-                   | set(state.mat_damper_viscous))
+                   | set(state.mat_damper_viscous)
+                   | set(state.mat_spring_elastoplastic)
+                   | set(state.mat_damper_nl_viscous)
+                   | set(state.mat_spring_general_nl)
+                   | set(state.mat_spring_inelastic))
     pids = {e.pid for e in state.discrete_elems}
     for pid, p in state.parts.items():
         secid = p.secid if p.secid > 0 else pid
