@@ -141,13 +141,19 @@ class MatS03Tests(unittest.TestCase):
             [(-1.05, -250.0), (-0.05, -50.0), (0.0, 0.0),
              (0.05, 50.0), (1.05, 250.0)])
 
-    def test_zero_stiffness_is_warn_skipped(self):
+    def test_zero_stiffness_keeps_an_inert_part(self):
+        """K=0 leaves no yield point to place, but the pid is claimed by
+        _discrete_part_ids either way — dropping it would delete /PART/1 from
+        under every *SET_PART member and contact that names it."""
         deck = _spring_deck("*MAT_SPRING_ELASTOPLASTIC\n"
                             "         1       0.0     200.0      50.0\n")
         result, starter = _convert(deck)
-        self.assertNotIn("/PROP/TYPE4/", starter)
-        self.assertTrue(any("MAT_SPRING_ELASTOPLASTIC" in w
-                            and "NOT converted" in w for w in result.warnings))
+        blk = _block_lines(starter, "/PROP/TYPE4/")
+        self.assertEqual(blk[5][0:20].strip(), "0")     # K = 0, inert
+        self.assertIn("/PART/1", starter)
+        self.assertNotIn("/SPRING/1", starter)
+        self.assertTrue(any("MAT_SPRING_ELASTOPLASTIC" in w and "INERT" in w
+                            for w in result.warnings))
 
 
 class MatS05Tests(unittest.TestCase):
@@ -169,12 +175,33 @@ class MatS05Tests(unittest.TestCase):
         self.assertEqual(blk[5][0:20].strip(), "0")
         self.assertEqual(blk[5][20:40].strip(), "0")
 
-    def test_missing_curve_warn_skips(self):
+    def test_missing_curve_keeps_an_inert_part(self):
         deck = _spring_deck("*MAT_DAMPER_NONLINEAR_VISCOUS\n"
                             "         1        99\n", extra=CURVE_50)
         result, starter = _convert(deck)
-        self.assertNotIn("/PROP/TYPE4/", starter)
-        self.assertTrue(any("LCDR=99" in w for w in result.warnings))
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE4/")[5][20:40].strip(), "0")
+        self.assertIn("/PART/1", starter)
+        self.assertNotIn("/SPRING/1", starter)
+        self.assertTrue(any("LCDR=99" in w and "INERT" in w
+                            for w in result.warnings))
+
+    def test_per_element_force_scale_reaches_hscale(self):
+        """S05's whole payload is fct_ID41, which the engine adds as
+        Hscale*h(rate) (redef3.F90:1143) — the A coefficient never touches it,
+        so without Hscale the *ELEMENT_DISCRETE S is lost without a trace."""
+        deck = _spring_deck(
+            "*MAT_DAMPER_NONLINEAR_VISCOUS\n         1        50\n",
+            extra=CURVE_50).replace(
+            "*ELEMENT_DISCRETE\n       1       1       1       2\n",
+            "*ELEMENT_DISCRETE\n"
+            "       1       1       1       2       0       1.0\n"
+            "       2       1       2       1       0       4.0\n")
+        _, starter = _convert(deck)
+        rows = starter.splitlines()
+        hscales = [rows[i + 1][60:80].strip() for i, ln in enumerate(rows)
+                   if ln.startswith("#                 F1")]
+        self.assertEqual(hscales, ["0", "4"])   # 0 -> reader default 1.0
 
 
 class MatS06Tests(unittest.TestCase):
@@ -207,9 +234,36 @@ class MatS06Tests(unittest.TestCase):
         blk = _block_lines(starter, "/PROP/TYPE4/")
         self.assertEqual(blk[5][0:20].strip(), "100")   # LCDL=50's max slope
 
-    def test_beta_tyi_cyi_are_named_in_the_warning(self):
+    def test_beta_one_is_the_isotropic_rule_and_stays_silent(self):
+        """BETA=1.0 IS "isotropic hardening without strain softening"
+        (Manual Vol II R17 p.2-2087), which is exactly the H=6 that is
+        emitted — the one value that must NOT be reported as dropped."""
         result, _ = _convert(self.DECK)
-        self.assertTrue(any("BETA, TYI, CYI" in w for w in result.warnings))
+        drop = [w for w in result.warnings
+                if "MAT_SPRING_GENERAL_NONLINEAR" in w and "no Radioss spring "
+                "slot" in w]
+        self.assertEqual(len(drop), 1)
+        self.assertIn("TYI, CYI", drop[0])
+        self.assertNotIn("BETA=", drop[0])
+
+    def test_blank_beta_is_softening_and_IS_reported(self):
+        """The blank default BETA=0.0 selects "tensile and compressive yield
+        with strain softening", a different hardening rule from the emitted
+        H=6 — so the deck that is NOT faithfully converted must be the one
+        that warns."""
+        deck = _spring_deck("*MAT_SPRING_GENERAL_NONLINEAR\n"
+                            "         1        50        51\n",
+                            extra=CURVE_50 + CURVE_51)
+        result, _ = _convert(deck)
+        self.assertTrue(any("BETA=0" in w and "strain softening" in w
+                            for w in result.warnings))
+
+    def test_kinematic_beta_is_reported(self):
+        deck = _spring_deck("*MAT_SPRING_GENERAL_NONLINEAR\n"
+                            "         1        50        51       0.5\n",
+                            extra=CURVE_50 + CURVE_51)
+        result, _ = _convert(deck)
+        self.assertTrue(any("BETA=0.5" in w for w in result.warnings))
 
     def test_missing_unloading_curve_demotes_h_to_zero(self):
         """H=6 with fct_ID31 = 0 is starter ERROR 1057 — the deck would not
@@ -651,23 +705,69 @@ class Mat071CableTests(unittest.TestCase):
 
     def test_user_curve_is_clamped_where_it_would_push(self):
         """A cable cannot push: LS-DYNA computes F = max(curve, 0). Curve 51
-        is (-1,-400) (0,0) (1,400), so the compression half must be flattened
-        (there is no zero crossing to insert — it already passes through 0)."""
+        is (-1,-400) (0,0) (1,400) in STRESS, so x CA=12 gives
+        (-1,-4800) (0,0) (1,4800), the compression half is flattened, and a
+        flat leading point stops Radioss extrapolating a compressive force out
+        of the first segment."""
         result, starter = _convert(self._deck(
             "*MAT_CABLE_DISCRETE_BEAM\n"
             "         9    7.8E-9   -5000.0        51\n"))
         fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
         self.assertNotEqual(fid, 51)          # a clamped COPY, not the original
         self.assertEqual(_funct_points(starter, fid),
-                         [(-1.0, 0.0), (0.0, 0.0), (1.0, 400.0)])
-        self.assertTrue(any("cannot push" in w for w in result.warnings))
+                         [(-2.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 4800.0)])
+        self.assertTrue(any("goes slack instead of pushing" in w
+                            for w in result.warnings))
 
-    def test_tension_only_user_curve_is_referenced_verbatim(self):
+    def test_stress_curve_is_multiplied_by_the_section_area(self):
+        """LCID gives engineering STRESS vs engineering strain (Manual Vol II
+        R17 p.2-530) and a /PROP/TYPE13 function's ordinate is a FORCE, so the
+        curve must be scaled by CA — passing it through raw makes the cable a
+        factor CA too weak. Curve 50 is (0,0) (1,100) (2,150), CA=12."""
         _, starter = _convert(self._deck(
             "*MAT_CABLE_DISCRETE_BEAM\n"
             "         9    7.8E-9   -5000.0        50\n"))
-        self.assertEqual(
+        fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
+        self.assertNotEqual(fid, 50)
+        self.assertEqual(_funct_points(starter, fid),
+                         [(-1.0, 0.0), (0.0, 0.0), (1.0, 1200.0),
+                          (2.0, 1800.0)])
+
+    def test_one_sided_tension_curve_cannot_push(self):
+        """The regression the raw pass-through hid: a curve that only spans
+        tension leaves Radioss extrapolating its FIRST segment into
+        compression, so the cable pushes — the one behaviour MAT_071 exists to
+        prevent."""
+        _, starter = _convert(self._deck(
+            "*MAT_CABLE_DISCRETE_BEAM\n"
+            "         9    7.8E-9   -5000.0        50\n"))
+        fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
+        pts = _funct_points(starter, fid)
+        self.assertEqual(pts[0][1], 0.0)
+        self.assertEqual(pts[1][1], 0.0)     # flat, so no compressive force
+
+    def test_stress_curve_without_ca_is_refused_not_scaled(self):
+        result, starter = _convert(self._deck(
+            "*MAT_CABLE_DISCRETE_BEAM\n"
+            "         9    7.8E-9   -5000.0        50\n", ca=""))
+        self.assertNotEqual(
             _block_lines(starter, "/PROP/TYPE13/")[7][0:10].strip(), "50")
+        self.assertTrue(any("no area to turn it into the FORCE" in w
+                            for w in result.warnings))
+
+    def test_nonzero_vol_wins_over_ca_for_the_mass(self):
+        """"The cable mass will be calculated from length x area x density if
+        VOL is set to zero on *SECTION_BEAM. Otherwise, VOL x density will be
+        used" (Manual Vol II R17 p.2-531). The element is 10 long, so the
+        per-unit-length Mass is RO*VOL/L."""
+        result, starter = _convert(self._deck(
+            "*MAT_CABLE_DISCRETE_BEAM\n"
+            "         9    7.8E-9   -5000.0\n"))
+        self.assertAlmostEqual(
+            float(_block_lines(starter, "/PROP/TYPE13/")[3][0:20]),
+            7.8e-9 * 100.0 / 10.0)
+        self.assertTrue(any("VOL=100 is non-zero" in w
+                            for w in result.warnings))
 
     def test_missing_ca_with_positive_e_warns(self):
         result, _ = _convert(self._deck(
@@ -702,7 +802,11 @@ class Mat074Tests(unittest.TestCase):
         #                                                 coefficient)
         self.assertEqual(kcard[60:80].strip(), "2.2")   # B1 = C2
         self.assertEqual(kcard[80:100].strip(), "3.3")  # D1 = DLE
-        self.assertEqual(blk[9][20:40].strip(), "1.1")  # E1 = C1
+        # E1 stays 0 without an FLCID: E multiplies fct_ID2, and Radioss
+        # force-zeroes both E and B when fct_ID1 is blank
+        # (hm_read_prop04.F:220) — exactly as LS-DYNA states the rate bracket
+        # only for the load-curve branch.
+        self.assertEqual(blk[9][20:40].strip(), "0")
 
     def test_failure_displacements_are_signed(self):
         """CDF is input POSITIVE in LS-DYNA but DeltaMin must be <= 0."""
@@ -710,7 +814,6 @@ class Mat074Tests(unittest.TestCase):
         fcard = _block_lines(starter, "/PROP/TYPE13/")[7]
         self.assertEqual(fcard[60:80].strip(), "-4")    # -CDF
         self.assertEqual(fcard[80:100].strip(), "6")    # TDF
-        self.assertEqual(fcard[20:30].strip(), "50")    # fct_ID21 = HLCID
 
     def test_glcid_is_warn_dropped(self):
         result, _ = _convert(self.DECK)
@@ -830,7 +933,11 @@ class Mat196Tests(unittest.TestCase):
         _, starter = _convert(self.DECK)
         blk = _block_lines(starter, "/PROP/TYPE13/")
         k1 = blk[5]
-        self.assertEqual(k1[0:20].strip(), "1000")     # K1
+        # DOF 1 is TYPE=0 with FLCID=50, so K=1000 is the DIMENSIONLESS scale
+        # in F = K*f(dL) ([K] = unitless when FLCID > 0, Manual Vol II R17
+        # p.2-1322); it is baked into the curve and the K column carries the
+        # scaled tangent 1000 * 100 instead.
+        self.assertEqual(k1[0:20].strip(), "100000")
         self.assertEqual(k1[20:40].strip(), "12")      # C1 = D
         self.assertEqual(k1[60:80].strip(), "0.6")     # B1 = C2
         self.assertEqual(k1[80:100].strip(), "0.7")    # D1 = DLE
@@ -852,10 +959,42 @@ class Mat196Tests(unittest.TestCase):
         self.assertEqual(_funct_points(starter, fid),
                          [(-1.2, -400.0), (0.0, 0.0), (1.2, 400.0)])
 
-    def test_type_zero_dof_references_the_curve_verbatim(self):
-        _, starter = _convert(self.DECK)
+    def test_type_zero_dof_curve_is_scaled_by_k(self):
+        """With FLCID > 0, K is a unitless SCALE and the elastic force is
+        K*f(dL) — Radioss reads fct_ID1 raw (A defaults to 1), so the product
+        has to be baked into the ordinates. Curve 50 is (0,0) (1,100) (2,150)
+        and K = 1000."""
+        result, starter = _convert(self.DECK)
+        fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
+        self.assertNotEqual(fid, 50)
+        self.assertEqual(_funct_points(starter, fid),
+                         [(0.0, 0.0), (1.0, 100000.0), (2.0, 150000.0)])
+        self.assertTrue(any("dimensionless SCALE" in w
+                            for w in result.warnings))
+
+    def test_unit_k_leaves_the_deck_curve_alone(self):
+        mat = self.MAT.replace("         1         0    1000.0",
+                               "         1         0       1.0")
+        _, starter = _convert(_dbeam_deck(mat, card1_tail=SCOOR2,
+                                          extra=CURVE_50 + CURVE_51))
         self.assertEqual(
             _block_lines(starter, "/PROP/TYPE13/")[7][0:10].strip(), "50")
+
+    def test_hlcid_lands_on_the_additive_rate_slot(self):
+        """HLCID is "force as a function of relative velocity" and enters the
+        law as + g(dL)*h(dL') (Manual Vol II R17 p.2-1322) — the engine's
+        Hscale*fct_ID4 term (redef3.F90:1143), NOT the fct_ID2 rate SCALE that
+        multiplies the deflection curve."""
+        mat = self.MAT.replace("        50         0       0.5",
+                               "        50        51       0.5")
+        _, starter = _convert(_dbeam_deck(mat, card1_tail=SCOOR2,
+                                          extra=CURVE_50 + CURVE_51))
+        fcard = _block_lines(starter, "/PROP/TYPE13/")[7]
+        self.assertEqual(fcard[40:50].strip(), "51")    # fct_ID41 = HLCID
+        self.assertNotEqual(fcard[20:30].strip(), "51")  # NOT fct_ID21
+        # Hscale = 1 so the curve is added at face value.
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE13/")[9][60:80].strip(), "1")
 
     def test_mdfail_is_named_in_a_warning(self):
         result, _ = _convert(self.DECK)
@@ -1007,7 +1146,15 @@ class CurveHelperTests(unittest.TestCase):
             [(-1.0, -100.0), (0.0, 0.0), (1.0, 100.0)])
 
     def test_clamp_tension_only_inserts_the_zero_crossing(self):
+        """The crossing is inserted AND a flat leading point is prepended:
+        Radioss extrapolates a function's end segments, so without it the
+        cable grows a compressive force out of the first segment's slope."""
         out = wdbeam._clamp_tension_only([(-1.0, -100.0), (1.0, 100.0)])
+        self.assertEqual(out,
+                         [(-2.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 100.0)])
+
+    def test_clamp_tension_only_flattens_a_purely_tensile_curve(self):
+        out = wdbeam._clamp_tension_only([(0.0, 0.0), (1.0, 100.0)])
         self.assertEqual(out, [(-1.0, 0.0), (0.0, 0.0), (1.0, 100.0)])
 
     def test_unload_hflag_table(self):
@@ -1152,6 +1299,314 @@ class ByteIdentityTests(unittest.TestCase):
         self.assertEqual(blk[7], f"{0:>10d}" * 5 + " " * 10
                          + f"{0.0:>20g}" * 2)
         self.assertEqual(blk[9], f"{0.0:>20g}" * 4)
+
+
+# -- review round: the defects the first pass shipped -------------------------
+
+class FunctMonotonicityTests(unittest.TestCase):
+    """hm_read_funct.F:143 refuses a function whose abscissa does not GROW -
+    `IF (PLD(NPC(L+1)) <= PLD(NPC(L+1)-2)) ... MSGID = 156` (MSGERROR), so the
+    deck is rejected outright. The comparison is on the CARD value, and `_f`
+    prints ten significant digits, so the invariant has to hold on the printed
+    string and not on the float."""
+
+    def test_card_resolution_swallows_a_fixed_1e_minus_9_nudge(self):
+        self.assertEqual(wloads._card_value(20.0),
+                         wloads._card_value(20.0 + 1.0e-9))
+
+    def test_monotonic_abscissae_repairs_a_printed_tie(self):
+        out = wloads._monotonic_abscissae(
+            [(20.0, 1.0), (20.0 + 1.0e-9, 2.0), (25.0, 3.0)])
+        printed = [wloads._card_value(a) for a, _ in out]
+        self.assertEqual(printed, sorted(set(printed)))
+
+    def test_monotonic_abscissae_leaves_a_clean_curve_untouched(self):
+        pts = [(-1.0, -100.0), (0.0, 0.0), (2.5, 300.0)]
+        self.assertEqual(wloads._monotonic_abscissae(pts), pts)
+
+    def test_softening_plastic_curve_keeps_distinct_abscissae(self):
+        """*MAT_068 with a softening branch steeper than -K: the plastic->total
+        map x = a + F/K runs BACKWARDS there, and the tie-break has to survive
+        the card. K = 1000 and the branch drops 60 over 0.05, so both points
+        would otherwise land on x = 25."""
+        curve = ("*DEFINE_CURVE\n        60\n"
+                 "            20.0          5000.0\n"
+                 "           20.05          4940.0\n"
+                 "            25.0          4000.0\n")
+        mat = ("*MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM\n"
+               "         9    7.8E-9    1000.0\n"
+               "       0.0       0.0       0.0       0.0       0.0       0.0\n"
+               "        60\n")
+        _, starter = _convert(_dbeam_deck(mat, card1_tail=SCOOR2, extra=curve))
+        fid = int(_block_lines(starter, "/PROP/TYPE13/")[7][0:10])
+        xs = [float(x) for x, _ in _funct_points(starter, fid)]
+        self.assertEqual(xs, sorted(set(xs)),
+                         "duplicate abscissa on the card is starter ERROR 156")
+
+
+class PartIdCollisionTests(unittest.TestCase):
+    """One /PART id, two writers, is starter ERROR 79 (DUPLICATE ID). A *PART
+    with a blank SECID falls back to `secid = pid`, so a discrete-spring part
+    whose id equals an ELFORM=6 *SECTION_BEAM's id is claimed by BOTH
+    _discrete_part_ids and _discrete_beam_pids."""
+
+    DECK = (
+        "*KEYWORD\n*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             0.0             0.0            10.0\n"
+        "       3             1.0             0.0             0.0\n"
+        "       4            10.0             0.0             0.0\n"
+        "       5            11.0             0.0             0.0\n"
+        "*PART\nspring part\n         3         0         1\n"
+        "*MAT_SPRING_ELASTIC\n         1     500.0\n"
+        "*ELEMENT_DISCRETE\n       1       3       4       5\n"
+        "*PART\ndiscrete beam\n         8         3         9\n"
+        "*SECTION_BEAM\n"
+        "         3         6       0.0       0.0       0.0       2.0\n"
+        "     100.0       5.0         0\n"
+        "*MAT_LINEAR_ELASTIC_DISCRETE_BEAM\n"
+        "         9    7.8E-9    1000.0    2000.0    3000.0    4000.0"
+        "    5000.0    6000.0\n"
+        "*ELEMENT_BEAM\n       2       8       1       2       3\n"
+        "*CONTROL_TERMINATION\n       1.0\n*END\n"
+    )
+
+    def test_no_id_is_written_twice(self):
+        _, starter = _convert(self.DECK)
+        for kind in ("/PART/", "/PROP/", "/SPRING/", "/FUNCT/"):
+            ids = [ln.rsplit("/", 1)[-1] for ln in starter.splitlines()
+                   if ln.startswith(kind)]
+            self.assertEqual(sorted(ids), sorted(set(ids)),
+                             f"duplicate {kind} id: {ids}")
+
+    def test_both_families_are_still_emitted(self):
+        _, starter = _convert(self.DECK)
+        self.assertIn("/SPRING/3", starter)
+        self.assertIn("/SPRING/8", starter)
+
+    def test_a_real_collision_names_the_winner(self):
+        """With the discrete-beam *PART removed, *SECTION_BEAM 3 is claimed
+        only through the SPRING part's blank-SECID fallback: one /PART, and the
+        *ELEMENT_DISCRETE side wins."""
+        deck = self.DECK.replace(
+            "*PART\ndiscrete beam\n         8         3         9\n", "")
+        deck = deck.replace(
+            "*ELEMENT_BEAM\n       2       8       1       2       3\n", "")
+        result, starter = _convert(deck)
+        self.assertEqual(starter.count("\n/PART/3\n"), 1)
+        self.assertTrue(any("ALSO claimed by the *ELEMENT_DISCRETE spring path"
+                            in w for w in result.warnings), result.warnings)
+
+
+class DiscreteBeamMaterialOnAContinuumPartTests(unittest.TestCase):
+    """Recognising the keyword took away the only diagnosis master had (the
+    skipped-keyword line), so the writer has to say it itself: the /PART keeps
+    its MID and NO /MAT is written for a discrete-beam material."""
+
+    DECK = (
+        "*KEYWORD\n*NODE\n"
+        "       1             0.0             0.0             0.0\n"
+        "       2             1.0             0.0             0.0\n"
+        "       3             1.0             1.0             0.0\n"
+        "       4             0.0             1.0             0.0\n"
+        "*PART\nshell part\n        20        20         9\n"
+        "*SECTION_SHELL\n        20         2\n       1.0\n"
+        "*MAT_LINEAR_ELASTIC_DISCRETE_BEAM\n"
+        "         9    7.8E-9    1000.0    2000.0    3000.0    4000.0"
+        "    5000.0    6000.0\n"
+        "*ELEMENT_SHELL\n       1      20       1       2       3       4\n"
+        "*CONTROL_TERMINATION\n       1.0\n*END\n"
+    )
+
+    def test_the_dangling_material_is_reported(self):
+        result, starter = _convert(self.DECK)
+        self.assertNotIn("/MAT/", starter)
+        self.assertTrue(
+            any("carries shell elements" in w
+                and "references material 9, which the deck does not contain" in w
+                for w in result.warnings), result.warnings)
+
+
+class Mat119DanglingDampingCurveTests(unittest.TestCase):
+    """hm_read_prop04.F's H guards (MSGID 231 / 1057 / 1058 / 1059) only ever
+    look at fct_ID1 and fct_ID3, so a dangling fct_ID4 must cost the DAMPING
+    force and nothing else - demoting H would silently turn a hysteretic
+    connector into a nonlinear-elastic one that dissipates zero."""
+
+    def test_dangling_damping_curve_keeps_the_hysteresis(self):
+        mat = ("*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM\n"
+               "         9    7.8E-9    1000.0    2000.0         1\n"
+               "        50\n"
+               "        51\n"
+               "        99\n")
+        result, starter = _convert(_dbeam_deck(mat, card1_tail=SCOOR2,
+                                               extra=CURVE_50 + CURVE_51))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        fcard = blk[7]
+        self.assertEqual(fcard[0:10].strip(), "50")     # fct_ID11
+        self.assertEqual(fcard[10:20].strip(), "6")     # H1 SURVIVES
+        self.assertEqual(fcard[30:40].strip(), "51")    # fct_ID31
+        self.assertEqual(fcard[40:50].strip(), "0")     # fct_ID41 cleared
+        # Hscale goes with it, or the card claims a scale on nothing.
+        self.assertEqual(blk[9][60:80].strip(), "0")
+        self.assertTrue(any("[99]" in w for w in result.warnings))
+
+    def test_dangling_loading_curve_still_demotes(self):
+        mat = ("*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM\n"
+               "         9    7.8E-9    1000.0    2000.0         1\n"
+               "        99\n"
+               "        51\n")
+        _, starter = _convert(_dbeam_deck(mat, card1_tail=SCOOR2,
+                                          extra=CURVE_50 + CURVE_51))
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE13/")[7][10:20].strip(), "0")
+
+
+class SectionBeamSkewOnType13Tests(unittest.TestCase):
+    """|SCOOR| = 2 with a CID does not throw the coordinate system away:
+    "a final adjustment is made to the local coordinate system so that the
+    local r-axis lies along the n1 to n2 axis of the beam" (Manual Vol I R17
+    p.41-26, Remark 8) - the CID still fixes the other two axes, which is
+    exactly what r4buf3.F reads the property skew for."""
+
+    def _deck(self, n3: str = "       0"):
+        return (DBEAM_HEAD + COORD_77
+                + "*PART\ndiscrete beam\n         7         3         9\n"
+                + "*SECTION_BEAM\n         3         6" + SCOOR2 + "\n"
+                + "     100.0       5.0        77\n" + MAT066
+                + "*ELEMENT_BEAM\n       1       7       1       2" + n3
+                + "\n*CONTROL_TERMINATION\n       1.0\n*END\n")
+
+    def test_resolved_cid_reaches_the_type13_card(self):
+        _, starter = _convert(self._deck())
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[3][40:50].strip(), "77")   # skew_ID
+        self.assertIn("/SKEW/FIX/77", starter)
+
+    def test_the_partial_frame_is_explained(self):
+        result, _ = _convert(self._deck())
+        self.assertTrue(any("Remark 8" in w and "XY-plane reference" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_no_cid_still_writes_a_blank_skew(self):
+        deck = self._deck().replace("     100.0       5.0        77\n",
+                                    "     100.0       5.0         0\n")
+        _, starter = _convert(deck)
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE13/")[3][40:50].strip(), "0")
+
+
+class ReviewRoundSpringTests(unittest.TestCase):
+    def test_mat_s02_is_the_damper_alias_the_manual_uses(self):
+        """*MAT_DAMPER_VISCOUS's numeric alias is *MAT_S02 (Manual Vol II R17
+        p.2-2083); without it an S02 deck loses the damper AND its /PART."""
+        deck = _spring_deck("*MAT_S02\n         1       7.5\n")
+        st = _dispatch(deck)
+        self.assertEqual(st.mat_damper_viscous[1].dc, 7.5)
+        _, starter = _convert(deck)
+        self.assertEqual(
+            _block_lines(starter, "/PROP/TYPE4/")[5][20:40].strip(), "7.5")
+
+    def test_oriented_torsional_spring_inertia_is_the_starter_reference(self):
+        """rinit3.F:427 measures every TYPE8/13/25 spring against Mass*L^2 and
+        answers WARNING 432 outside a factor of 1000 - a fixed 1e-6 token trips
+        it on any element longer than ~3.2, and the oriented and unoriented
+        DRO=1 twins must not disagree by 50x for the same section."""
+        deck = (
+            "*KEYWORD\n*NODE\n"
+            "       1             0.0             0.0             0.0\n"
+            "       2            10.0             0.0             0.0\n"
+            "*DEFINE_SD_ORIENTATION\n"
+            "         5         0       1.0       0.0       0.0\n"
+            "*PART\ntorsional\n        44         1         1\n"
+            "*SECTION_DISCRETE\n         1         1\n"
+            "*MAT_SPRING_ELASTIC\n         1     500.0\n"
+            "*ELEMENT_DISCRETE\n       1      44       1       2       5\n"
+            "*CONTROL_TERMINATION\n       1.0\n*END\n")
+        _, starter = _convert(deck)
+        blk = _block_lines(starter, "/PROP/TYPE8/")
+        self.assertAlmostEqual(float(blk[3][0:20]), 1.0e-4)
+        self.assertAlmostEqual(float(blk[3][20:40]), 1.0e-4 * 10.0 * 10.0)
+
+    def test_all_grounded_torsional_part_keeps_its_id(self):
+        """A DRO=1 element with N2=0 has no n1->n2 axis to twist about, but the
+        pid is claimed by _discrete_part_ids either way."""
+        deck = (
+            "*KEYWORD\n*NODE\n"
+            "       1             0.0             0.0             0.0\n"
+            "*PART\ntorsional\n        44         1         1\n"
+            "*SECTION_DISCRETE\n         1         1\n"
+            "*MAT_SPRING_ELASTIC\n         1     500.0\n"
+            "*ELEMENT_DISCRETE\n       1      44       1       0\n"
+            "*CONTROL_TERMINATION\n       1.0\n*END\n")
+        result, starter = _convert(deck)
+        self.assertIn("/PART/44", starter)
+        self.assertTrue(any("INERT" in w and "part 44" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_wrong_section_does_not_run_the_payload_builder(self):
+        """The builders' result is discarded on a non-ELFORM=6 section, but
+        their warnings and their /FUNCT ids are not - they would describe a
+        conversion that never happened."""
+        deck = _dbeam_deck(MAT066, card1_tail=SCOOR2).replace(
+            "         3         6", "         3         1")
+        result, starter = _convert(deck)
+        self.assertFalse(any("preload" in w for w in result.warnings),
+                         result.warnings)
+        self.assertNotIn("MAT066_preload", starter)
+        self.assertTrue(any("INERT /SPRING" in w for w in result.warnings))
+
+
+class Mat074RateLawTests(unittest.TestCase):
+    """F = F0 + K*f(dL)*[1 + C1*dL' + C2*sgn*ln(max(1, dL'/DLE))] + D*dL'
+           + g(dL)*h(dL')      (Manual Vol II R17 p.2-553)
+    against redef3.F90:1140-1143
+        F = f(d)*[A + B*ln(max(1,|d'/D|)) + E*g(d')] + C*d' + Hscale*h(d')
+    with gx = fct_ID2 and gx2 = fct_ID4."""
+
+    def _deck(self, card2):
+        mat = ("*MAT_ELASTIC_SPRING_DISCRETE_BEAM\n"
+               "         9    7.8E-9       2.0       0.0       2.5       4.0"
+               "       6.0\n" + card2)
+        return _dbeam_deck(mat, extra=CURVE_50 + CURVE_51)
+
+    def test_hlcid_is_additive_not_a_scale(self):
+        _, starter = _convert(self._deck(
+            "        50        51       0.0       0.0       0.0         0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        fcard = blk[7]
+        self.assertEqual(fcard[40:50].strip(), "51")     # fct_ID41 = HLCID
+        self.assertNotEqual(fcard[20:30].strip(), "51")  # NOT the fct_ID21 scale
+        self.assertEqual(blk[9][60:80].strip(), "1")     # Hscale = 1
+
+    def test_c1_gets_an_identity_rate_function(self):
+        """Radioss's only linear-in-rate handle is E*g(d'), so C1 needs
+        g = identity; sharing fct_ID2 with HLCID would make it C1*HLCID(rate),
+        and with no HLCID at all `if(ifv(i)==0) gx(i)=zero`
+        (redef3.F90:1126) makes C1 vanish."""
+        _, starter = _convert(self._deck(
+            "        50         0       1.1       0.0       0.0         0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        self.assertEqual(blk[9][20:40].strip(), "1.1")   # E1 = C1
+        fid = int(blk[7][20:30])
+        self.assertNotEqual(fid, 0)
+        self.assertEqual(_funct_points(starter, fid),
+                         [(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)])
+
+    def test_flcid_is_scaled_by_k_and_k_becomes_the_tangent(self):
+        _, starter = _convert(self._deck(
+            "        50         0       0.0       0.0       0.0         0\n"))
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        fid = int(blk[7][0:10])
+        self.assertEqual(_funct_points(starter, fid),
+                         [(0.0, 0.0), (1.0, 200.0), (2.0, 300.0)])
+        self.assertEqual(blk[5][0:20].strip(), "200")
+
+    def test_glcid_is_named_as_the_scale_on_hlcid(self):
+        result, _ = _convert(self._deck(
+            "        50        51       0.0       0.0       0.0        51\n"))
+        self.assertTrue(any("GLCID=51" in w and "SCALE on HLCID" in w
+                            for w in result.warnings), result.warnings)
 
 
 if __name__ == "__main__":

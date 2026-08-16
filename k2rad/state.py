@@ -313,6 +313,13 @@ class MatCableDiscreteBeam:
     *SECTION_BEAM card 2f, and a 3-point (-1,0)(0,0)(1,K) force function
     carrying the initial tension F0 as its y offset.
 
+    ``LCID`` is a STRESS-vs-engineering-strain curve, not a force curve
+    ("The points on the load curve are defined as engineering stress versus
+    engineering strain", Manual Vol II R17 p.2-530), so its ordinates are
+    multiplied by CA on the way to the /FUNCT; ``F0`` is a FORCE and is added
+    after that. Both ends are then clamped at zero force — the whole point of
+    the material is that "no force will develop in compression" (p.2-529).
+
     Card1: MID RO E LCID F0 TMAXF0 TRAMP IREAD
     Card2 (IREAD > 0): OUTPUT [TSTART [FRACL0 MXEPS MXFRC]] — never converted.
     """
@@ -4281,12 +4288,10 @@ class ConversionState:
     # emitted is starter ERROR 69 (hm_read_thgrne.F:189, MSGTYPE=MSGERROR) —
     # the deck is refused, not degraded. Same accounting pattern as cluster_ids.
     spotweld_spring_eids: Set[int] = field(default_factory=set)
-    # sprg_IDs actually written as /SPRING by _make_discrete_beam_connectors
-    # (the *SECTION_BEAM ELFORM=6 path). Same accounting reason as
-    # spotweld_spring_eids — a /TH channel naming an element the connector
-    # writer skipped is starter ERROR 69, which refuses the whole deck — and
-    # the same pattern a *DATABASE_DISBOUT converter will read.
-    dbeam_spring_eids: Set[int] = field(default_factory=set)
+    # (No dbeam_spring_eids twin: the *SECTION_BEAM ELFORM=6 connectors have no
+    # /TH consumer yet — *DATABASE_DEFORC / *DATABASE_DISBOUT are unconverted —
+    # and an accounting set nothing reads only promises a guarantee nothing
+    # enforces. Add it back with the /TH/SPRING route that needs it.)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)

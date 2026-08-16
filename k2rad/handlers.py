@@ -7185,7 +7185,7 @@ def handle_mat_spring_nonlinear_elastic(block: Block, state: ConversionState) ->
 
 
 def handle_mat_damper_viscous(block: Block, state: ConversionState) -> None:
-    """*MAT_DAMPER_VISCOUS (MAT_D01): MID DC → /PROP/TYPE4 damping C."""
+    """*MAT_DAMPER_VISCOUS (MAT_S02): MID DC → /PROP/TYPE4 damping C."""
     offset = _title_offset(block)
     f = _card(block.raw, offset, fixed=True, n=2, w=10)
     if not f or not f[0].strip():
@@ -8811,6 +8811,12 @@ HANDLERS = {
     "MAT_SPRING_NONLINEAR_ELASTIC":           handle_mat_spring_nonlinear_elastic,
     "MAT_S04":                                handle_mat_spring_nonlinear_elastic,
     "MAT_DAMPER_VISCOUS":                     handle_mat_damper_viscous,
+    # *MAT_DAMPER_VISCOUS's own numeric alias is *MAT_S02 (Manual Vol II R17
+    # p.2-2083 headers the card "*MAT_DAMPER_VISCOUS / *MAT_S02", and that is
+    # what dyna2rad's keyword map carries). "MAT_D01"/"MAT_D02" are k2rad
+    # legacy spellings that appear nowhere in the manual — kept so old decks
+    # written against them still dispatch, but S02 is the one LS-DYNA writes.
+    "MAT_S02":                                handle_mat_damper_viscous,
     "MAT_D01":                                handle_mat_damper_viscous,
     "MAT_SPRING_ELASTOPLASTIC":               handle_mat_spring_elastoplastic,
     "MAT_S03":                                handle_mat_spring_elastoplastic,

@@ -167,7 +167,7 @@ the implicit singularity guard
 `*MAT_SPRING_ELASTIC` (S01), `*MAT_SPRING_ELASTOPLASTIC` (S03),
 `*MAT_SPRING_NONLINEAR_ELASTIC` (S04), `*MAT_DAMPER_NONLINEAR_VISCOUS` (S05),
 `*MAT_SPRING_GENERAL_NONLINEAR` (S06), `*MAT_SPRING_INELASTIC` (S08) or
-`*MAT_DAMPER_VISCOUS` (D01) — → `/PROP/TYPE4` (SPRING) `/SPRING` connectors
+`*MAT_DAMPER_VISCOUS` (S02) — → `/PROP/TYPE4` (SPRING) `/SPRING` connectors
 (grounded `N2=0` springs get a fixed ground node + `/BCS`). Each of these is a
 1-DOF connector and lands in the single DOF block of the property, which carries
 the whole Radioss spring law (loading function, hardening flag, rate function,
@@ -181,7 +181,11 @@ with `H=1`; S06's `LCDL`/`LCDU` become `fct_ID11`/`fct_ID31` with `H=6`, demoted
 to `H=0` with a warning when `LCDU` is blank (`H=6` without `fct_ID31` is starter
 ERROR 1057); S08's one-sided `LCFD` is mirrored into the opposite quadrant per
 `CTF` and gets `H=1` on `K1=KU` (dyna2rad leaves `H` at 0, which silently turns an
-inelastic spring elastic)
+inelastic spring elastic). A part whose material, curve or elements cannot be
+converted still gets an INERT `/PROP/TYPE4` + `/PART`: the pid is claimed by the
+connector path either way, so dropping it would delete the `/PART` id from under
+every `*SET_PART` member, `/GRNOD/PART` scope, contact and `/TH` channel that
+names it
 
 An element oriented by a `*DEFINE_SD_ORIENTATION` (`VID`) becomes an oriented
 `/PROP/TYPE8` (SPR_GENE) whose local DOF 1 acts along that orientation's `/SKEW`
@@ -207,10 +211,17 @@ spring), `*MAT_119` (general nonlinear 6-DOF), `*MAT_121` (general nonlinear
 r-axis is realigned along n1→n2") selects TYPE13; otherwise a resolvable `CID`
 selects TYPE8 with that `/SKEW`; otherwise TYPE13 again, because a TYPE8 with no
 skew would silently fall back to the GLOBAL axes — the hole dyna2rad has here.
-`*MAT_071` and `*MAT_074` are always TYPE13 (both act along the element). Mass is
-`RO·VOL` (`RO·CA` per unit length for the cable, which also sets `Ileng=1`);
+`*MAT_071` and `*MAT_074` are always TYPE13 (both act along the element); a
+resolved `CID` is still written on the TYPE13 property, where `r4buf3.F` reads it
+as the XY-plane reference for elements that carry no third node — which is what
+`|SCOOR| = 2` + `CID` means in LS-DYNA too ("a final adjustment is made … so that
+the local r-axis lies along the n1 to n2 axis", Manual Vol I R17 p.41-26). Mass is
+`RO·VOL` (`RO·CA` per unit length for the cable when `VOL` is blank, which also
+sets `Ileng=1`; a non-zero `VOL` wins, per Manual Vol II R17 p.2-531);
 `INER=-1` is resolved as a solid sphere of volume `VOL`, `INER=-2` as the lumped
-`m·L²/12` with a warning. `*MAT_069`/`070`/`093`/`094`/`095`/`097`/`146` have no
+`m·L²/12` with a warning. The cable's `LCID` is engineering STRESS vs engineering
+strain, so its ordinates are multiplied by `CA` and the result clamped at zero
+force with a flat compression branch — a cable must not push. `*MAT_069`/`070`/`093`/`094`/`095`/`097`/`146` have no
 OpenRadioss spring law: the connector is still written, inert, and a warning
 names the device the deck loses (dyna2rad drops all seven silently)
 

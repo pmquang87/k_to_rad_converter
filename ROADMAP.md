@@ -95,7 +95,7 @@ shipped, so the marginal cost is small.
   is correct. Validate on a single-weld coupon. Original note: — needs new
   `/MAT/LAW59` + `/PROP/TYPE13` machinery and single-weld pull/shear validation.
 - `*ELEMENT_DISCRETE` + `*MAT_SPRING_*` / `*MAT_DAMPER_*` -> /PROP/TYPE4 —
-  **done** (S01/S03/S04/S05/S06/S08/D01; grounded springs; `VID`-oriented →
+  **done** (S01/S02/S03/S04/S05/S06/S08; grounded springs; `VID`-oriented →
   `/PROP/TYPE8`; `DRO=1` torsional → DOF 4 of a `/PROP/TYPE13` or `/PROP/TYPE8`;
   only `IOP=1/3` orientations stay warn+skip). Original note: — reuses the
   grounding-spring `/SPRING` template, but the `/PROP/TYPE4` card layout and the
@@ -108,7 +108,11 @@ shipped, so the marginal cost is small.
   pair: identical card bodies and identical frame builders, no `MID`-on-TYPE23
   rule to satisfy. `*MAT_069/070/093/094/095/097/146` have no Radioss spring law
   and warn-drop to an inert connector naming what is lost. See CHANGELOG for the
-  dyna2rad defects reproduced vs. corrected.
+  dyna2rad defects reproduced vs. corrected, and for the 15 defects the
+  review round found in k2rad's own first pass.
+  Still open on this family: `*DATABASE_DEFORC` / `*DATABASE_DISBOUT` →
+  `/TH/SPRING`, so a converted spring deck has no force time-history channel of
+  its own (`*DATABASE_SWFORC` covers only `*MAT_SPOTWELD` parts).
 - Foams: `MAT_63` → LAW50, `MAT_57` → LAW38, `MAT_83` → LAW70,
   `MAT_26` → LAW28 — **done**.
 - Johnson-Cook metals (P1): `*MAT_JOHNSON_COOK` (15) → `/MAT/LAW2`

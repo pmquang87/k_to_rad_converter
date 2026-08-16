@@ -321,6 +321,135 @@ Prior history (before this changelog was introduced) is summarized in the
   evidence is the 88 new column-exact tests plus the byte-identity canaries in
   `tests/test_discrete_springs.py::ByteIdentityTests`.
 
+  **Review round (post-implementation), 15 confirmed defects fixed.** Every
+  item below was verified against the OpenRadioss starter/engine source or the
+  LS-DYNA manual before it was touched; the `.rad` output of all 8
+  solver-validated decks is **byte-identical (SHA256) after the round**, so the
+  measured force-deflection / hysteresis / 6-DOF numbers still describe the
+  decks the engine ran.
+
+  - **`*MAT_071`'s `LCID` is engineering STRESS, not force.** "The points on
+    the load curve are defined as engineering stress versus engineering strain"
+    (Manual Vol II R17 p.2-530) — the ordinates now get multiplied by the
+    section area `CA` before they reach the `/PROP/TYPE13` function, which reads
+    a FORCE. Passing the curve through raw made the cable a factor `CA` too
+    weak, and added `F0` (a force) to stress ordinates. A blank `CA` refuses the
+    curve with a warning instead of writing it unscaled — LS-DYNA gets zero
+    force out of a zero-area cable too (`F = A·σ`).
+  - **A one-sided cable curve made the cable PUSH.** The tension-only clamp was
+    gated on the curve carrying negative force or on `F0` being kept, so a curve
+    that merely starts at (0, 0) went through untouched and Radioss extrapolated
+    its first segment into compression — the one behaviour `*MAT_071` exists to
+    prevent. The clamp now always runs, and prepends a FLAT leading point so the
+    extrapolated compression branch is zero (LS-DYNA holds a load curve at its
+    end value, so the flat continuation is also the faithful end condition).
+  - **The cable's `VOL` is no longer ignored.** "The cable mass will be
+    calculated from length × area × density if `VOL` is set to zero on
+    `*SECTION_BEAM`. Otherwise, `VOL` × density will be used" (p.2-531). A
+    non-zero `VOL` now sets the mass, carried as `RO·VOL/L` because `Ileng=1` is
+    not optional (it is what makes the stiffness and curve abscissae
+    strain-based); the warning says so, and names the mean element length it
+    divided by.
+  - **`*MAT_074`/`*MAT_196`: `HLCID` was in the wrong slot.** It is an ADDITIVE
+    force-vs-relative-velocity curve — `F = … + D·ΔL̇ + g(ΔL)·h(ΔL̇)` (p.2-553
+    and p.2-1322) — and the engine's additive rate term is `Hscale·h(δ̇)` on
+    `fct_ID4` (`redef3.F90:1143`, `gx2 ← ifunc3 ← IGEO(119) ← fct_ID4`), while
+    `fct_ID2` is the MULTIPLICATIVE `E·g(δ̇)` inside the `A + B·ln(…) + E·g(δ̇)`
+    bracket. Writing it to `fct_ID2` (dyna2rad's slot) made it multiply the
+    deflection curve, and took `C1` down with it: with `HLCID` present `C1`
+    became `C1·HLCID(rate)`, and without one `if(ifv(i)==0) gx(i)=zero`
+    (`redef3.F90:1126`) made `C1` vanish silently. `HLCID` now goes to `fct_ID4`
+    with `Hscale = 1`, and `C1` gets a 2-point IDENTITY function in `fct_ID2`
+    with `E = C1`, which reproduces `1 + C1·ΔL̇` exactly (`vinter2` extrapolates
+    the end segments, so two points cover the whole rate range). `GLCID` stays
+    warn-dropped, now named as the deflection scale ON `HLCID` that it is.
+  - **`K` is a dimensionless SCALE when `FLCID > 0`.** `[K] = unitless` for
+    `FLCID > 0` against `[force]/[length]` when blank (p.2-1322 dimension
+    table), and the elastic force is `K·f(ΔL)·[…]`. Radioss reads `fct_ID1` raw
+    (`A` defaults to 1, `hm_read_prop04.F:220`), so the product is now baked
+    into the ordinates and the `K` column carries the SCALED curve's tangent at
+    the origin — the number the explicit time step actually needs. `K = 0` with
+    a curve keeps the curve unscaled and says why (LS-DYNA's own formula gives
+    zero force there).
+  - **`/FUNCT` abscissae are now strictly increasing AS PRINTED.** The
+    plastic→total tie-break was a fixed `1e-9`, which is below `_f`'s %.10G card
+    resolution for `|x| ≥ 10` — `_f(20.0)` and `_f(20.0 + 1e-9)` are both `"20"`
+    — so a `*MAT_068`/`*MAT_196` softening branch steeper than `-K` shipped a
+    DUPLICATE abscissa and `hm_read_funct.F:143` answered `ERROR 156`
+    (`IF (PLD(NPC(L+1)) <= PLD(NPC(L+1)-2))`, MSGERROR: the deck is refused).
+    The nudge is now relative (`max(1e-9, |x|·1e-7)`) and `_emit_funct` carries
+    a last-resort repair that checks the invariant on the CARD value, which also
+    covers the cable's inserted zero crossing.
+  - **A `/PART` id could be written TWICE.** `_discrete_beam_pids` excluded
+    shell and solid parts but not `*ELEMENT_DISCRETE` parts, so a part claimed
+    by both writers got two `/PART/<pid>` blocks — starter `ERROR 79`
+    (DUPLICATE ID), deck refused. Reachable without anything exotic: a `*PART`
+    with a blank `SECID` falls back to `secid = pid`, so a discrete-spring part
+    whose id equals an `ELFORM=6` `*SECTION_BEAM`'s id lands in both sets. The
+    `*ELEMENT_DISCRETE` side now wins and the discrete-beam writer reports what
+    it lost.
+  - **A resolved `CID` now reaches the `/PROP/TYPE13` card.** With `|SCOOR| = 2`
+    the section's coordinate system was dropped silently. LS-DYNA keeps it:
+    "a final adjustment is made to the local coordinate system so that the local
+    r-axis lies along the n1 to n2 axis of the beam" (Manual Vol I R17 p.41-26,
+    Remark 8) — the CID still fixes the other two axes, which is exactly what
+    `r4buf3.F:194-203` reads the property skew for. The `skew_ID` is written,
+    the partial-frame rule is warned, and the "no third node" message no longer
+    promises a property-skew fallback the card did not carry.
+  - **A dangling DAMPING curve no longer kills the hysteresis.** `*MAT_119` and
+    `*MAT_121` zeroed `H` whenever ANY of the three curve slots named an
+    undefined curve, including `fct_ID4`. The starter's `H` guards (MSGID 231 /
+    1057 / 1058 / 1059) only ever test `fct_ID1` and `fct_ID3`, so a DOF with a
+    valid loading and unloading curve is no longer demoted from `H=6/7` to `H=0`
+    (which would dissipate nothing); `Hscale` is cleared with the slot.
+  - **`*MAT_S02` registered.** `*MAT_DAMPER_VISCOUS`'s numeric alias is `S02`
+    (Manual Vol II R17 p.2-2083 headers the card with both names; `MAT_D01`
+    appears nowhere in the manual and is kept only as a k2rad legacy spelling).
+    Without it an S02 deck lost the damper AND its `/PART`.
+  - **`*MAT_S06`'s `BETA` warning was inverted.** The dropped-field test fired
+    only when `BETA` was non-zero, so the deck that is faithfully converted
+    (`BETA = 1.0` IS "isotropic hardening without strain softening", the emitted
+    `H=6`) got warned and the one that is not (the BLANK default `BETA = 0.0` =
+    "tensile and compressive yield with strain softening", p.2-2087) stayed
+    quiet. It now warns for every `BETA ≠ 1.0` and names all three flavours.
+  - **The per-element force scale `S` reaches a curve-driven damper.** `*MAT_S05`
+    puts its whole payload on `fct_ID41`, which the engine adds as
+    `Hscale·h(δ̇)` — the `A` coefficient never touches it, so two elements with
+    `S = 1` and `S = 4` used to produce byte-identical properties. `Hscale` now
+    carries the scale.
+  - **Parts that could not be converted keep their id.** Every bad-input branch
+    of the discrete-spring writer (`continue`) used to delete the `/PART` along
+    with the elements, even though `_discrete_part_ids` claims the pid either
+    way — so a `*SET_PART` member, a `/GRNOD/PART` scope or a contact naming it
+    was left dangling. All of them (including a `DRO=1` part whose elements are
+    all zero-length or grounded) now emit an INERT `/PROP/TYPE4` + `/PART`, the
+    same guard the sibling discrete-beam writer already had.
+  - **The oriented `DRO=1` connector's inertia** was a fixed `1e-6` while its
+    unoriented twin used `mass·L²`. `rinit3.F:427-437` measures every
+    TYPE8/13/25 spring against `Mass·L²` and answers `WARNING 432` outside a
+    factor of 1000 either way, so the token tripped it on any element longer
+    than ~3.2 length units. Both routes now use the starter's own reference.
+  - **A discrete-beam material on a continuum part is reported.** Recognising
+    the keyword removed the `skipped_keywords` line that used to be the only
+    diagnosis: the `/PART` still carries the MID and no `/MAT` is written for a
+    discrete-beam material, so the deck came out referencing a material it does
+    not contain and the log said nothing at all. Same pattern as `*MAT_SPOTWELD`
+    on a continuum part.
+  - **Housekeeping.** The payload builders no longer run on a part whose section
+    is missing or not `ELFORM=6` — their result was discarded but their warnings
+    and their `/FUNCT` ids were not, so the log described a conversion that never
+    happened. `state.dbeam_spring_eids` (populated, never read) was dropped until
+    the `/TH/SPRING` route that would consume it exists, and the builder-contract
+    comment now states the 5-tuple the builders actually return.
+
+  Byte-identity re-checked at the end of the round over every corpus deck that
+  can reach any touched code — the six W16/W17 spotweld decks, `W17_RS_FloorFrame`,
+  the Yaris (`combine.key` + its two component decks) and the Camry, and the
+  73 MB `Model-318_Achshebel-fein_tobi.k` — plus the 8 solver-validation decks:
+  identical `_0000.rad`/`_0001.rad` SHA256 on both sides, with only the three
+  intentionally-corrected warning TEXTS differing (the cable's no-third-node
+  message, and `BETA` moving from the faithful deck to the unfaithful one).
+
 - **Impact / blast materials batch** (`*MAT_JOHNSON_HOLMQUIST_CERAMICS` 110,
   `*MAT_JOHNSON_HOLMQUIST_CONCRETE` 111, `*MAT_ELASTIC_FLUID` 001+`_FLUID`) —
   the roadmap P1 "Impact/blast mats" item. All were `SKIPPED` before. Numeric

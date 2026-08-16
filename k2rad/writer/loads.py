@@ -25,9 +25,12 @@ __all__ = [
     "_emit_prop_type4",
     "_emit_prop_type8",
     "_emit_prop_type13",
+    "_pts_slope_at_origin",
     "_curve_slope_at_origin",
     "_mirror_one_sided_curve",
     "_plastic_to_total_disp",
+    "_card_value",
+    "_monotonic_abscissae",
     "_emit_funct",
     "_s03_curve_points",
     "_curve_max_slope",
@@ -515,11 +518,10 @@ def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
     return lines
 
 
-def _curve_slope_at_origin(curve: Curve) -> float:
-    """Slope of the curve segment spanning (or nearest to) the origin — used as
-    the /PROP/TYPE4 K (unloading / time-step stiffness) for a nonlinear
-    spring's force-displacement function."""
-    pts = sorted(curve.pts)
+def _pts_slope_at_origin(pts) -> float:
+    """Slope of the segment spanning (or nearest to) the origin of a raw point
+    list — the stiffness a nonlinear spring's force function implies there."""
+    pts = sorted((float(a), float(o)) for a, o in pts)
     for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
         if x2 > x1 and x1 <= 0.0 <= x2:
             return (y2 - y1) / (x2 - x1)
@@ -527,6 +529,13 @@ def _curve_slope_at_origin(curve: Curve) -> float:
         if x2 > x1:
             return (y2 - y1) / (x2 - x1)
     return 0.0
+
+
+def _curve_slope_at_origin(curve: Curve) -> float:
+    """Slope of the curve segment spanning (or nearest to) the origin — used as
+    the /PROP/TYPE4 K (unloading / time-step stiffness) for a nonlinear
+    spring's force-displacement function."""
+    return _pts_slope_at_origin(curve.pts)
 
 
 def _mirror_one_sided_curve(pts, tension_only: bool):
@@ -597,8 +606,9 @@ def _plastic_to_total_disp(pts, stiff: float):
         if total and x <= total[-1][0]:
             # Non-monotonic after the elastic shift: a Radioss function must
             # have strictly increasing abscissae, so nudge past the previous
-            # point by the same tiny epsilon dyna2rad uses.
-            x = total[-1][0] + _PLASTIC_CURVE_EPS
+            # point.
+            prev = total[-1][0]
+            x = prev + max(_PLASTIC_CURVE_EPS, abs(prev) * _PLASTIC_CURVE_REL)
         total.append((x, o))
     if total[0][0] > 0.0:
         total.insert(0, (0.0, 0.0))
@@ -606,11 +616,15 @@ def _plastic_to_total_disp(pts, stiff: float):
 
 
 #: Abscissa nudge that keeps a plastic→total curve strictly increasing
-#: (dyna2rad hard-codes 0.01 at convertmats.cxx:8892; that is a unit-dependent
-#: magic number, so k2rad uses a RELATIVE-free but far smaller absolute step —
-#: it only has to break the tie, and 1e-9 is below any meaningful mesh length in
-#: mm/m/in decks alike while staying representable in the %20lg card field).
+#: (dyna2rad hard-codes 0.01 at convertmats.cxx:8892, a unit-dependent magic
+#: number). The step has to survive ``_f``'s %.10G card field, so it is RELATIVE
+#: to the running abscissa with an absolute floor: 1e-9 alone vanishes at
+#: |x| >= 10 (``_f(20.0)`` and ``_f(20.0 + 1e-9)`` are both "20"), which would
+#: put a DUPLICATE abscissa on the card and earn starter ERROR 156. 1e-7
+#: relative is two decades above the ten-significant-digit resolution and still
+#: far below any meaningful deformation.
 _PLASTIC_CURVE_EPS = 1.0e-9
+_PLASTIC_CURVE_REL = 1.0e-7
 
 
 def _curve_max_slope(curve: Curve) -> float:
@@ -648,6 +662,55 @@ def _element_length(state: ConversionState, e) -> float:
         return 0.0
     return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2
             + (a.z - b.z) ** 2) ** 0.5
+
+
+#: Artificial mass every discrete-spring connector property carries. LS-DYNA's
+#: discrete elements are massless (nodal mass comes from *ELEMENT_MASS) but
+#: hm_read_prop04.F:136 rejects MASS <= 1e-15 outright (ERROR 229), and the
+#: explicit time step needs a finite one.
+_SPRING_TOKEN_MASS = 1.0e-4
+
+
+def _connector_inertia(state: ConversionState, elems) -> float:
+    """The rotational inertia written on a synthesized 6-DOF spring property.
+
+    ``rinit3.F:427-437`` measures every /PROP/TYPE8, /TYPE13 and /TYPE25 spring
+    against ``RATIO = Mass·L²`` and answers WARNING 432 outside a factor of
+    1000 either way, so an inertia k2rad invents should BE that reference
+    rather than a fixed token: with the 1e-4 spring mass, a flat 1e-6 already
+    trips the check at any element longer than ~3.2 length units. TYPE8 skips
+    the check for zero-length elements only (``.NOT.((IGTYP == 8).AND.
+    (LENGTH < EM15))``), which is exactly the grounded-spring case the 1e-20
+    floor covers."""
+    lens = [x for x in (_element_length(state, e) for e in elems) if x > 0.0]
+    l_mean = (sum(lens) / len(lens)) if lens else 1.0
+    return max(_SPRING_TOKEN_MASS * l_mean * l_mean, 1.0e-20)
+
+
+def _emit_inert_spring_part(state: ConversionState, pid: int, title: str,
+                            reason: str) -> List[str]:
+    """An inert /PROP/TYPE4 + /PART for a discrete-spring part whose elements
+    could not be converted.
+
+    ``_discrete_part_ids`` claims the part unconditionally, so the ordinary
+    /PART emitter skips it — dropping it here would delete the /PART id along
+    with every *SET_PART member, /GRNOD/PART scope, contact and /TH channel
+    that names it. The sibling discrete-BEAM writer guards the same hazard the
+    same way (dbeam.py's ``wrong_section`` branch)."""
+    state.warn(
+        f"*ELEMENT_DISCRETE part {pid}: {reason} An INERT /PROP/TYPE4 + "
+        f"/PART/{pid} (zero stiffness, token mass, no /SPRING) was written in "
+        "its place so the part id stays addressable — a *SET_PART member, a "
+        "/GRNOD/PART scope or a contact that names it would otherwise dangle.")
+    prop_id = state.next_prop_id()
+    return _emit_prop_type4(
+        prop_id, f"{title} (inert - not converted)", _SPRING_TOKEN_MASS,
+        0.0, 0.0, 0.0, 0, 0, 0.0, 0.0) + [
+        f"/PART/{pid}",
+        title,
+        f"{_i(prop_id)}{_i(0)}{_i(0)}",
+        HDR,
+    ]
 
 
 def _new_ground_node(state: ConversionState, at: NodeData) -> int:
@@ -715,6 +778,45 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
     return lines
 
 
+def _card_value(v: float) -> float:
+    """The number the starter reads back from a ``_f`` field.
+
+    ``_f`` prints %.10G (or %.6E outside 1e-4 .. 1e15), so the card carries ten
+    significant digits — anything finer than that is invented precision that
+    only exists in the converter."""
+    return float(_f(v))
+
+
+def _monotonic_abscissae(pts):
+    """Force a /FUNCT point list to be strictly increasing AS PRINTED.
+
+    ``hm_read_funct.F:143`` refuses a function whose abscissa does not grow —
+    ``IF (PLD(NPC(L+1)) <= PLD(NPC(L+1)-2)) ... MSGID = 156`` (MSGERROR), i.e.
+    the deck is rejected, not degraded. The comparison the starter makes is on
+    the CARD value, so the invariant has to be checked on ``_f``'s output and
+    not on the float: a tie-break below the ten-digit field resolution survives
+    in memory and disappears on the card.
+
+    This is a last-resort guard — every builder that can produce a tie (the
+    plastic→total mapping, the cable's zero-crossing insertion) breaks it with a
+    step of its own. Points that are already strictly increasing are returned
+    unchanged, so the emitted card is byte-identical for every well-formed
+    curve."""
+    out = []
+    for a, o in pts:
+        x = float(a)
+        if out:
+            prev = _card_value(out[-1][0])
+            step = max(abs(prev), 1.0) * 1.0e-8
+            for _ in range(64):
+                if _card_value(x) > prev:
+                    break
+                x = prev + step
+                step *= 2.0
+        out.append((x, float(o)))
+    return out
+
+
 def _emit_funct(fid: int, title: str, pts) -> List[str]:
     """A /FUNCT written INLINE in a connector section.
 
@@ -725,7 +827,7 @@ def _emit_funct(fid: int, title: str, pts) -> List[str]:
     are built — the same thing the spotweld bilinear-axial function does."""
     lines = [f"/FUNCT/{fid}", title[:100],
              "#                  X                   Y"]
-    for a, o in pts:
+    for a, o in _monotonic_abscissae(pts):
         lines.append(f"{_f(a)}{_f(o)}")
     lines.append(HDR)
     return lines
@@ -758,7 +860,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
     (S03), ``*MAT_SPRING_NONLINEAR_ELASTIC`` (S04),
     ``*MAT_DAMPER_NONLINEAR_VISCOUS`` (S05),
     ``*MAT_SPRING_GENERAL_NONLINEAR`` (S06), ``*MAT_SPRING_INELASTIC`` (S08) and
-    ``*MAT_DAMPER_VISCOUS`` (D01/S02). Every one of them is a 1-DOF connector and
+    ``*MAT_DAMPER_VISCOUS`` (S02). Every one of them is a 1-DOF connector and
     lands in the single DOF block of a /PROP/TYPE4, which carries the full
     Radioss spring law — loading function, hardening flag, rate function,
     unloading function, damping function and the rupture displacements — so no
@@ -780,7 +882,13 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
     own n1→n2 axis) for an unoriented spring, /PROP/TYPE8 slot 4 for one carrying
     a *DEFINE_SD_ORIENTATION. LS-DYNA already states a DRO=1 spring in
     moment-per-radian, which is exactly what the Radioss rotational slot wants,
-    so no unit conversion applies — only the DOF changes."""
+    so no unit conversion applies — only the DOF changes.
+
+    A part whose material, curve or elements cannot be converted still gets an
+    INERT /PROP/TYPE4 + /PART (``_emit_inert_spring_part``): the pid is claimed
+    by ``_discrete_part_ids`` either way, so dropping it would delete the /PART
+    id from under every *SET_PART member, /GRNOD/PART scope, contact and /TH
+    channel that names it."""
     if not state.discrete_elems:
         return []
     lines: List[str] = [
@@ -807,6 +915,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                        "assumed (no failure deflection).")
             sec = SectionDiscrete(secid, "")
         torsional = sec.dro == 1
+        title = part.title or f"DISCRETE_{pid}"
 
         # Material → the single spring DOF (K / C / A / B / D, fct_ID1..4, H).
         k = c = 0.0
@@ -828,9 +937,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         elif mat_nl is not None:
             curve = state.curves.get(mat_nl.lcd)
             if curve is None or len(curve.pts) < 2:
-                state.warn(f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}: load "
-                           f"curve LCD={mat_nl.lcd} not found — part {pid} "
-                           f"({len(elems)} element(s)) NOT converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}'s load curve "
+                    f"LCD={mat_nl.lcd} is not defined, so its {len(elems)} "
+                    "element(s) carry no force at all.")
+                emitted = True
                 continue
             fct1 = mat_nl.lcd            # curve is already emitted as /FUNCT
             hflag = 0                    # H=0: nonlinear ELASTIC (S04 semantics)
@@ -862,11 +974,13 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
         elif mat_ep is not None:
             pts = _s03_curve_points(mat_ep.k, mat_ep.kt, mat_ep.fy)
             if not pts:
-                state.warn(f"*MAT_SPRING_ELASTOPLASTIC {part.mid}: K="
-                           f"{mat_ep.k:g}/FY={mat_ep.fy:g} — both must be "
-                           "positive to place the yield point (the elastic "
-                           f"branch is FY/K wide) — part {pid} "
-                           f"({len(elems)} element(s)) NOT converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_SPRING_ELASTOPLASTIC {part.mid} states K="
+                    f"{mat_ep.k:g}/FY={mat_ep.fy:g}, and both must be positive "
+                    "to place the yield point (the elastic branch is FY/K "
+                    f"wide), so its {len(elems)} element(s) carry no force.")
+                emitted = True
                 continue
             fct1 = state.next_curve_id()
             funct_lines = _emit_funct(
@@ -876,10 +990,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             kind = "elastoplastic spring"
         elif mat_nlv is not None:
             if not mat_nlv.lcdr or mat_nlv.lcdr not in state.curves:
-                state.warn(f"*MAT_DAMPER_NONLINEAR_VISCOUS {part.mid}: force-"
-                           f"vs-rate curve LCDR={mat_nlv.lcdr} not found — "
-                           f"part {pid} ({len(elems)} element(s)) NOT "
-                           "converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_DAMPER_NONLINEAR_VISCOUS {part.mid}'s force-vs-rate "
+                    f"curve LCDR={mat_nlv.lcdr} is not defined, so its "
+                    f"{len(elems)} element(s) carry no damping force.")
+                emitted = True
                 continue
             # fct_ID41 is h(δ̇), added to the force as Hscale·h(δ̇) — exactly
             # LS-DYNA's F = LCDR(δ̇). Hscale = 0 takes the reader default 1.0.
@@ -887,9 +1003,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             kind = "nonlinear viscous damper"
         elif mat_gnl is not None:
             if not mat_gnl.lcdl or mat_gnl.lcdl not in state.curves:
-                state.warn(f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}: loading "
-                           f"curve LCDL={mat_gnl.lcdl} not found — part {pid} "
-                           f"({len(elems)} element(s)) NOT converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}'s loading curve "
+                    f"LCDL={mat_gnl.lcdl} is not defined, so its {len(elems)} "
+                    "element(s) carry no force.")
+                emitted = True
                 continue
             fct1 = mat_gnl.lcdl
             # H=6 makes K1 the UNLOADING stiffness, and the starter refuses to
@@ -912,36 +1031,48 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                            "ELASTIC: it unloads along the loading curve and "
                            "dissipates nothing). Supply LCDU to keep the "
                            "hysteresis.")
-            dropped = [n for n, v in (("BETA", mat_gnl.beta),
-                                      ("TYI", mat_gnl.tyi),
+            # BETA is tested against 1.0, NOT against 0: LS-DYNA's BLANK
+            # default BETA=0.0 selects "tensile and compressive yield with
+            # strain SOFTENING" and any other non-unit value selects KINEMATIC
+            # hardening (Manual Vol II R17 p.2-2087) — both differ from the
+            # isotropic H=6 that is emitted. BETA=1.0 is the one value that
+            # matches it exactly, so it is the one value that must stay silent.
+            dropped = [n for n, v in (("TYI", mat_gnl.tyi),
                                       ("CYI", mat_gnl.cyi)) if v]
+            if mat_gnl.beta != 1.0:
+                dropped.insert(0, f"BETA={mat_gnl.beta:g}")
             if dropped:
                 state.warn(f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}: "
                            f"{', '.join(dropped)} have no Radioss spring slot "
                            "— dropped. BETA selects LS-DYNA's hardening "
-                           "flavour (0 = softening, 1 = isotropic, else "
-                           "kinematic) and TYI/CYI the initial tensile/"
-                           "compressive yield; the converted spring always "
-                           "uses the ISOTROPIC rule H=6 with the yield taken "
-                           "from the loading curve. Radioss's kinematic flag "
-                           "H=4 is not an option — hm_read_prop04.F:157 "
-                           "rejects it outright when K=0 and LAW108 rejects it "
-                           "unconditionally (ERROR 230).")
+                           "flavour (0.0, the BLANK DEFAULT = tensile and "
+                           "compressive yield with strain softening; 1.0 = "
+                           "isotropic; anything else = kinematic) and TYI/CYI "
+                           "the initial tensile/compressive yield; the "
+                           "converted spring always uses the ISOTROPIC rule "
+                           "H=6 with the yield taken from the loading curve. "
+                           "Radioss's kinematic flag H=4 is not an option — "
+                           "hm_read_prop04.F:157 rejects it outright when K=0 "
+                           "and LAW108 rejects it unconditionally (ERROR 230).")
             kind = "general nonlinear spring"
         elif mat_inel is not None:
             curve = state.curves.get(mat_inel.lcfd)
             if curve is None or len(curve.pts) < 2:
-                state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: force-vs-"
-                           f"displacement curve LCFD={mat_inel.lcfd} not found "
-                           f"— part {pid} ({len(elems)} element(s)) NOT "
-                           "converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_SPRING_INELASTIC {part.mid}'s force-vs-displacement "
+                    f"curve LCFD={mat_inel.lcfd} is not defined, so its "
+                    f"{len(elems)} element(s) carry no force.")
+                emitted = True
                 continue
             pts = _mirror_one_sided_curve(curve.pts, mat_inel.ctf < 0.0)
             if not pts:
-                state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: LCFD "
-                           f"{mat_inel.lcfd} could not be mirrored into the "
-                           f"opposite quadrant — part {pid} "
-                           f"({len(elems)} element(s)) NOT converted.")
+                lines += _emit_inert_spring_part(
+                    state, pid, title,
+                    f"*MAT_SPRING_INELASTIC {part.mid}'s LCFD "
+                    f"{mat_inel.lcfd} could not be mirrored into the opposite "
+                    f"quadrant, so its {len(elems)} element(s) carry no force.")
+                emitted = True
                 continue
             fct1 = state.next_curve_id()
             side = "tension" if mat_inel.ctf < 0.0 else "compression"
@@ -974,9 +1105,12 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             c = mat_dmp.dc
             kind = "viscous damper"
         else:
-            state.warn(f"*ELEMENT_DISCRETE part {pid}: material {part.mid} is "
-                       "not a supported discrete material (S01/S03/S04/S05/"
-                       f"S06/S08/D01) — {len(elems)} element(s) NOT converted.")
+            lines += _emit_inert_spring_part(
+                state, pid, title,
+                f"material {part.mid} is not a discrete spring/damper material "
+                "k2rad converts (S01/S02/S03/S04/S05/S06/S08), so its "
+                f"{len(elems)} element(s) carry no force.")
+            emitted = True
             continue
 
         if sec.kd or sec.v0:
@@ -1045,9 +1179,8 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
 
         # MASS: LS-DYNA discrete elements are massless (nodal mass comes from
         # *ELEMENT_MASS); OpenRadioss wants a spring mass > 0 for the explicit
-        # time step. 1e-4 is the same inert token mass the validated
-        # grounding-spring emitter uses.
-        title = part.title or f"DISCRETE_{pid}"
+        # time step. _SPRING_TOKEN_MASS is the same inert token mass the
+        # validated grounding-spring emitter uses.
         part_id_used = [False]
 
         def _alloc_part_id():
@@ -1057,7 +1190,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             return state.next_id()
 
         def _scaled(s):
-            """(K, C, A) for a per-element force scale S.
+            """(K, C, A, Hscale) for a per-element force scale S.
 
             With no function the force is K·δ and A cancels out entirely (the
             reader stores K/A, the engine multiplies by A again), so K and C
@@ -1065,30 +1198,40 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             so A carries the scale — but then the STORED stiffness is K/A, and
             the true scaled tangent is S·K, so K must be pre-multiplied by S²
             for K/A to come out right. Leaving that out understates the
-            time-step stiffness by S² on a scaled nonlinear spring."""
+            time-step stiffness by S² on a scaled nonlinear spring.
+
+            ``A`` does NOT reach the fct_ID4 damping force: the engine adds it
+            as a separate ``Hscale·h(δ̇)`` term (redef3.F90:1143), so a
+            curve-driven damper (*MAT_S05, whose whole payload sits on
+            fct_ID41 with K = C = 0) needs the scale on Hscale or S is lost
+            without a trace."""
             a_coef = 0.0            # 0 → reader default 1.0
-            k_s, c_s = k, c
+            k_s, c_s, h_s = k, c, hscale
             if s != 1.0:
                 if fct1:
                     a_coef = s      # scales f(δ) (A coefficient, B=0)
                     k_s, c_s = k * s * s, c * s
                 else:
                     k_s, c_s = k * s, c * s
-            return k_s, c_s, a_coef
+                if fct4:
+                    # 0 → reader default 1.0, so the unscaled base is 1.
+                    h_s = (hscale or 1.0) * s
+            return k_s, c_s, a_coef, h_s
 
         def _dof(s):
             """The loaded SpringDof for per-element force scale *s*."""
-            k_s, c_s, a_coef = _scaled(s)
+            k_s, c_s, a_coef, h_s = _scaled(s)
             return SpringDof(k=k_s, c=c_s, a=a_coef, b=b_coef, d=d_coef,
                              fct1=fct1, h=hflag, fct2=fct2, fct3=fct3,
                              fct4=fct4, dmin=dmin, dmax=dmax, e=e_coef,
-                             hscale=hscale)
+                             hscale=h_s)
 
         # ── translational (axial) springs → /PROP/TYPE4 ────────────────────
         # A DRO=1 torsional section cannot use TYPE4 (a purely translational
         # 1-DOF property): the payload moves to slot 4 (Rx) of a /PROP/TYPE13,
         # whose local X is node1→node2 by construction (r4buf3.F:145), so the
         # torsion acts about the element's own axis exactly as in LS-DYNA.
+        pid_emitted = False
         for s in sorted(groups):
             g_elems = groups[s]
             if torsional:
@@ -1117,26 +1260,19 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             if torsional:
                 dofs = [SpringDof(), SpringDof(), SpringDof(),
                         _dof(s), SpringDof(), SpringDof()]
-                # rinit3.F's consistency check (WARNING 432) compares the
-                # spring's Inertia against mass·L², so a rotational connector
-                # whose inertia k2rad invents should BE that reference rather
-                # than a fixed token an order of magnitude away from it.
-                lens = [_element_length(state, e) for e in g_elems]
-                lens = [x for x in lens if x > 0.0]
-                l_mean = (sum(lens) / len(lens)) if lens else 1.0
                 lines += _emit_prop_type13(
                     prop_id, f"{title} ({kind}, torsional DRO=1)",
-                    1.0e-4, max(1.0e-4 * l_mean * l_mean, 1.0e-20), 0, 0, dofs)
+                    1.0e-4, _connector_inertia(state, g_elems), 0, 0, dofs)
             else:
-                k_s, c_s, a_coef = _scaled(s)
+                k_s, c_s, a_coef, h_s = _scaled(s)
                 lines += _emit_prop_type4(
                     prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
                     fct1, hflag, dmin, dmax, fct2=fct2, fct3=fct3, fct4=fct4,
-                    b=b_coef, d=d_coef, e=e_coef, hscale=hscale)
+                    b=b_coef, d=d_coef, e=e_coef, hscale=h_s)
             lines += _emit_spring_part(
                 state, part_id, prop_id, title, g_elems, pid,
                 spring_kind_label="TYPE13" if torsional else "TYPE4")
-            emitted = True
+            emitted = pid_emitted = True
             state.warn(f"*ELEMENT_DISCRETE part {pid} ({kind}, "
                        f"{len(g_elems)} element(s)) -> "
                        + (f"/PROP/TYPE13/{prop_id} (SPR_BEAM): the section is "
@@ -1163,21 +1299,22 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             skew_id = state.sdorient_skew_ids[vid]
             prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
-            k_s, c_s, a_coef = _scaled(s)
+            k_s, c_s, a_coef, h_s = _scaled(s)
             lines += funct_lines
             funct_lines = []
             lines += [
                 f"/PROP/TYPE8/{prop_id}",
                 f"{title} ({kind}, oriented VID {vid})",
                 "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
-                f"{_f(1.0e-4)}{_f(1.0e-6)}{_i(skew_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
+                f"{_f(1.0e-4)}{_f(_connector_inertia(state, g_elems))}"
+                f"{_i(skew_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
             ]
             for j in range(1, 7):
                 if j == slot:
                     lines += _emit_spr_gene_dof_kc(
                         k_s, c_s, a_coef, fct1, hflag, dmin, dmax,
                         fct2=fct2, fct3=fct3, fct4=fct4, b=b_coef, d=d_coef,
-                        e=e_coef, hscale=hscale)
+                        e=e_coef, hscale=h_s)
                 else:
                     lines += _emit_spr_gene_dof_kc(0.0)
             lines += [
@@ -1186,7 +1323,7 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             ]
             lines += _emit_spring_part(state, part_id, prop_id, title,
                                        g_elems, pid, spring_kind_label="TYPE8")
-            emitted = True
+            emitted = pid_emitted = True
             state.warn(
                 f"*ELEMENT_DISCRETE part {pid} ({kind}, {len(g_elems)} "
                 f"element(s)) oriented by *DEFINE_SD_ORIENTATION VID={vid} -> "
@@ -1195,6 +1332,16 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 + ("rotation about" if torsional else "translation along")
                 + " the orientation axis). Carries a small artificial mass "
                 "(1e-4) for the explicit time step.")
+
+        if not pid_emitted:
+            # Every element was filtered out (grounded/zero-length under DRO=1,
+            # node-less, or bound to an unresolved *DEFINE_SD_ORIENTATION), so
+            # no /PART was written above — but the pid is still claimed by
+            # _discrete_part_ids and would vanish from the deck entirely.
+            lines += _emit_inert_spring_part(
+                state, pid, title,
+                f"none of its {len(elems)} element(s) could be converted.")
+            emitted = True
 
     return lines if emitted else []
 

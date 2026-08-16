@@ -45,10 +45,13 @@ from collections import defaultdict
 from typing import Dict, List, Tuple
 
 from ..state import ConversionState, BeamElem, SectionBeam
-from .common import HDR, _i, _discrete_beam_pids
+from .common import (
+    HDR, _i, _discrete_beam_claim_conflicts, _discrete_beam_mids,
+    _discrete_beam_pids,
+)
 from .loads import (
     SpringDof, _curve_slope_at_origin, _emit_funct, _emit_prop_type8,
-    _emit_prop_type13, _plastic_to_total_disp,
+    _emit_prop_type13, _plastic_to_total_disp, _pts_slope_at_origin,
 )
 
 __all__ = [
@@ -117,13 +120,22 @@ def _odd_extend_curve(pts):
 
 
 def _clamp_tension_only(pts):
-    """Clamp a shifted cable curve at zero force, inserting the exact crossing.
+    """Clamp a cable curve at zero force and flatten its compression end.
 
     ``*MAT_071``'s force law is ``F = max(F0 + K·strain, 0)`` — the ``max``
-    is what makes a cable go SLACK. A plain ordinate shift by F0 (what dyna2rad
-    writes, ``convertmats.cxx:4205``) loses it and leaves the cable PUSHING with
-    F0 in compression. Walking the points and cutting them at the zero crossing
-    reproduces the clamp exactly on a piecewise-linear function."""
+    is what makes a cable go SLACK, and the material exists precisely so that
+    "no force will develop in compression" (Manual Vol II R17 p.2-529). Two
+    things have to happen for a Radioss /FUNCT to reproduce that:
+
+    * every ordinate is cut at zero, with the exact crossing inserted so the
+      piecewise-linear function bends where LS-DYNA's ``max`` does. A plain
+      ordinate shift by F0 (what dyna2rad writes, ``convertmats.cxx:4205``)
+      loses it and leaves the cable PUSHING with F0 in compression;
+    * a flat leading point is prepended. Radioss EXTRAPOLATES a function's end
+      segments (``vinter2``), so a curve that merely starts at (0, 0) grows a
+      compressive force from the first segment's slope — the cable pushes
+      exactly where it must not. LS-DYNA holds a load curve at its end value
+      instead, so the flat continuation is also the faithful end condition."""
     out = []
     prev = None
     for a, o in pts:
@@ -138,6 +150,9 @@ def _clamp_tension_only(pts):
                     out.append((x0, 0.0))
         out.append((a, max(o, 0.0)))
         prev = (a, o)
+    if out:
+        x0, y0 = out[0]
+        out.insert(0, (x0 - max(1.0, abs(x0)), y0))
     return out
 
 
@@ -277,8 +292,10 @@ def _resolve_inertia(state: ConversionState, label: str, iner: float,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-material payload builders. Each returns (dofs, ifail, ifail2, ileng,
-# funct_lines, kind) or None when the material cannot be converted.
+# Per-material payload builders. Each returns the 5-tuple
+# (dofs, ifail, ifail2, funct_lines, kind); Ileng is set by the caller, and
+# none of them can fail — an unconvertible material still yields an inert
+# payload so the /PART and its element ids stay addressable.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _dof_label(i: int) -> str:
@@ -443,7 +460,13 @@ def _build_mat071(state, label, mat, sec, fid_alloc, curves):
     ``E < 0`` means the value already IS the stiffness; otherwise K = E·CA with
     CA from the *SECTION_BEAM card 2f. With ``Ileng=1`` the stiffness, the
     curve abscissae and the mass are all per unit length, which is exactly
-    LS-DYNA's cable formulation (F = E·A·strain)."""
+    LS-DYNA's cable formulation (F = E·A·strain).
+
+    ``LCID`` is NOT a force curve: "The points on the load curve are defined as
+    engineering STRESS versus engineering strain" (Manual Vol II R17 p.2-530),
+    while a /PROP/TYPE13 function's ordinate is a FORCE — so every ordinate is
+    multiplied by the section area CA before it is written. F0, which the same
+    page calls the "initial tensile FORCE", is added afterwards."""
     if mat.e < 0.0:
         k = abs(mat.e)
     else:
@@ -457,28 +480,40 @@ def _build_mat071(state, label, mat, sec, fid_alloc, curves):
     funct: List[str] = []
     fid = 0
     keep_f0 = mat.f0 != 0.0 and mat.tmaxf0 == 0.0
-    if mat.lcid and mat.lcid in curves and len(curves[mat.lcid].pts) >= 2:
-        user_pts = sorted(curves[mat.lcid].pts)
-        compressive = any(o < 0.0 for _, o in user_pts)
-        if keep_f0 or compressive:
-            fid = fid_alloc()
-            funct += _emit_funct(
-                fid, f"MAT071_cable_lc{mat.lcid}_mid{mat.mid}",
-                _clamp_tension_only(_shift_curve(user_pts, mat.f0)
-                                    if keep_f0 else user_pts))
-            if compressive:
-                state.warn(
-                    f"{label}: force curve LCID={mat.lcid} carries NEGATIVE "
-                    f"force, but a cable cannot push — LS-DYNA clamps it with "
-                    f"F = max(…, 0). The converted /FUNCT/{fid} is cut at the "
-                    "zero crossing so the cable goes slack instead.")
-        else:
-            fid = mat.lcid
+    crv = curves.get(mat.lcid) if mat.lcid else None
+    if crv is not None and len(crv.pts) >= 2 and sec.ca > 0.0:
+        # stress → force, then the preload, then the tension-only clamp.
+        pts = [(a, o * sec.ca) for a, o in sorted(crv.pts)]
+        if keep_f0:
+            pts = _shift_curve(pts, mat.f0)
+        fid = fid_alloc()
+        funct += _emit_funct(fid, f"MAT071_cable_lc{mat.lcid}_mid{mat.mid}",
+                             _clamp_tension_only(pts))
+        state.warn(
+            f"{label}: LCID={mat.lcid} is a STRESS-vs-engineering-strain curve "
+            f"(Manual Vol II R17 p.2-530), so every ordinate was multiplied by "
+            f"the section area CA={sec.ca:g} to make it the FORCE a "
+            f"/PROP/TYPE13 function carries -> /FUNCT/{fid}"
+            + (f", with the initial tension F0={mat.f0:g} (already a force) "
+               "added afterwards" if keep_f0 else "")
+            + ". The result is cut at zero force and flattened below its first "
+            "point, so the cable goes slack instead of pushing — LS-DYNA's "
+            "F = max(…, 0), which dyna2rad drops.")
     else:
-        if mat.lcid:
-            state.warn(f"{label}: force-vs-engineering-strain curve LCID="
+        if mat.lcid and crv is None:
+            state.warn(f"{label}: stress-vs-engineering-strain curve LCID="
                        f"{mat.lcid} is not defined — the cable falls back to "
                        "the linear tension-only law F = K·strain.")
+        elif mat.lcid and sec.ca <= 0.0:
+            state.warn(
+                f"{label}: LCID={mat.lcid} states the cable's STRESS against "
+                f"engineering strain and *SECTION_BEAM {sec.secid} card 2f "
+                f"gives CA={sec.ca:g}, so there is no area to turn it into the "
+                "FORCE a Radioss spring function carries — the curve was "
+                "DROPPED rather than written a factor CA too small. LS-DYNA "
+                "gets zero force out of a zero-area cable too (F = A·σ); fill "
+                "in CA.")
+            k = 0.0
         fid = fid_alloc()
         if keep_f0 and k > 0.0:
             # F = max(F0 + K·strain, 0): the cable is already stretched by
@@ -517,19 +552,112 @@ def _build_mat071(state, label, mat, sec, fid_alloc, curves):
     return dofs, 0, 0, funct, "cable discrete beam"
 
 
+def _apply_dbeam_rate_law(state, label, dof, mat_label, hlcid, glcid, c1,
+                          fid_alloc, curves, funct):
+    """The shared ``HLCID / C1 / GLCID`` rate block of *MAT_074 and *MAT_196.
+
+    Both cards state the SAME force law (Manual Vol II R17 p.2-553 and
+    p.2-1322)::
+
+        F = F0 + K·f(ΔL)·[1 + C1·ΔL̇ + C2·sgn(ΔL̇)·ln(max(1, |ΔL̇|/DLE))]
+              + D·ΔL̇ + g(ΔL)·h(ΔL̇)
+
+    and Radioss's is (``redef3.F90:1140-1143``, with ``gx`` = fct_ID2 and
+    ``gx2`` = fct_ID4, both evaluated at the RATE)::
+
+        F = f(δ)·[A + B·ln(max(1, |δ̇/D|)) + E·g(δ̇)] + C·δ̇ + Hscale·h(δ̇)
+
+    so the two rate terms land in different slots and must not be swapped:
+
+    * ``HLCID`` is h(ΔL̇), an ADDITIVE force-vs-relative-velocity curve
+      ("Load curve ID defining force as a function of relative velocity") →
+      ``fct_ID4`` with ``Hscale = 1``. Writing it to ``fct_ID2`` — dyna2rad's
+      slot, and k2rad's before this — makes it MULTIPLY the deflection curve
+      instead of adding to it, and silently kills C1 as well.
+    * ``C1`` multiplies ΔL̇ itself, and Radioss's only linear-in-rate handle is
+      ``E·g(δ̇)``. A 2-point identity function in ``fct_ID2`` makes g(δ̇) = δ̇
+      (``vinter2`` extrapolates the end segments, so 2 points cover the whole
+      rate range) and ``E = C1`` then reproduces the term exactly.
+    * ``GLCID`` scales h by the DEFLECTION; Radioss's Hscale is a constant, so
+      it is warn-dropped (dyna2rad loses it too).
+
+    Radioss zeroes B and E whenever fct_ID1 is blank (``hm_read_prop04.F:220``),
+    which matches LS-DYNA: the bracket only exists in the load-curve branch.
+    """
+    if hlcid:
+        if hlcid in curves:
+            dof.fct4, dof.hscale = hlcid, 1.0
+        else:
+            state.warn(f"{label}: HLCID={hlcid} (the additive "
+                       "force-vs-relative-velocity curve) is not defined — the "
+                       "fct_ID4 reference would dangle, so it was dropped and "
+                       f"{mat_label} carries no rate force.")
+    if c1:
+        if dof.fct1:
+            f2 = fid_alloc()
+            funct += _emit_funct(f2, f"MAT{mat_label}_rate_identity",
+                                 [(-1.0, -1.0), (0.0, 0.0), (1.0, 1.0)])
+            dof.fct2, dof.e = f2, c1
+        else:
+            state.warn(f"{label}: C1={c1:g} multiplies the deflection curve by "
+                       "(1 + C1·ΔL̇), but there is no FLCID for it to scale — "
+                       "LS-DYNA's linear branch F = F0 + K·ΔL + D·ΔL̇ has no "
+                       "C1 term either, so nothing is lost.")
+    if glcid:
+        state.warn(f"{label}: GLCID={glcid} (the deflection-dependent SCALE on "
+                   "HLCID, g(ΔL) in F = … + g(ΔL)·h(ΔL̇)) has no Radioss spring "
+                   "slot — DROPPED, so the rate force is applied unscaled "
+                   "(g = 1, LS-DYNA's own default when GLCID is blank). "
+                   "dyna2rad loses it too. Fold the scale into HLCID if the "
+                   "rate force really varies with deflection.")
+
+
+def _scale_elastic_curve(state, label, pts, k, what):
+    """``K·f(ΔL)``: on *MAT_074 and *MAT_196 TYPE=0, K is a DIMENSIONLESS scale
+    on the deflection curve, not a stiffness — ``[K] = unitless`` when
+    ``FLCID > 0`` (Manual Vol II R17 p.2-1322), against ``[force]/[length]``
+    when it is blank. Radioss reads its own fct_ID1 raw (A defaults to 1,
+    hm_read_prop04.F:220), so the product has to be baked into the ordinates."""
+    if k == 1.0:
+        return pts
+    if k == 0.0:
+        state.warn(f"{label}: K=0 with a deflection curve. LS-DYNA's elastic "
+                   f"force is K·f(ΔL) with K a dimensionless SCALE there, so "
+                   f"{what} would carry NO force at all; k2rad wrote the curve "
+                   "UNSCALED instead, which is what a deck that means 'use the "
+                   "curve' expects. Set K=1 to say so explicitly.")
+        return pts
+    state.warn(f"{label}: K={k:g} is a dimensionless SCALE on the deflection "
+               f"curve, not a stiffness (LS-DYNA's F = K·f(ΔL)·[…]) — every "
+               f"ordinate of {what} was multiplied by it, because Radioss "
+               "reads fct_ID1 raw. The spring's K column then carries the "
+               "scaled curve's slope at the origin, which is the tangent the "
+               "explicit time step needs.")
+    return [(a, o * k) for a, o in pts]
+
+
 def _build_mat074(state, label, mat, fid_alloc, curves):
     """*MAT_074 — a 1-DOF elastic spring with rate terms and displacement
     failure limits."""
     funct: List[str] = []
     fid = 0
-    if mat.flcid and mat.flcid in curves and len(curves[mat.flcid].pts) >= 2:
+    stiff = mat.k
+    crv = curves.get(mat.flcid) if mat.flcid else None
+    if crv is not None and len(crv.pts) >= 2:
+        raw = sorted(crv.pts)
+        pts = _scale_elastic_curve(state, label, raw, mat.k,
+                                   f"FLCID {mat.flcid}")
         if mat.f0:
-            fid = fid_alloc()
-            funct += _emit_funct(
-                fid, f"MAT074_lc{mat.flcid}_mid{mat.mid}",
-                _shift_curve(curves[mat.flcid].pts, mat.f0))
+            pts = _shift_curve(pts, mat.f0)
+        if pts is raw:
+            fid = mat.flcid           # nothing to change: use the deck's curve
         else:
-            fid = mat.flcid
+            fid = fid_alloc()
+            funct += _emit_funct(fid, f"MAT074_lc{mat.flcid}_mid{mat.mid}", pts)
+        # With a function and H=0 the force comes entirely from the curve
+        # (redef3.F90:757); K only feeds the explicit time step, so it must be
+        # the SCALED curve's tangent and not the dimensionless scale factor.
+        stiff = abs(_pts_slope_at_origin(pts)) or mat.k
     elif mat.flcid:
         state.warn(f"{label}: force-vs-deflection curve FLCID={mat.flcid} is "
                    f"not defined — the spring falls back to the linear law "
@@ -544,21 +672,10 @@ def _build_mat074(state, label, mat, fid_alloc, curves):
         state.warn(f"{label}: F0={mat.f0:g} (initial force) has no Radioss "
                    f"spring field — it was baked into /FUNCT/{fid}, a line of "
                    f"slope K={mat.k:g} through (0, {mat.f0:g}).")
-    dof = SpringDof(k=mat.k, c=mat.d, b=mat.c2, d=mat.dle, e=mat.c1,
-                    fct1=fid, fct2=mat.hlcid,
-                    dmin=-abs(mat.cdf), dmax=abs(mat.tdf))
-    if mat.hlcid and mat.hlcid not in curves:
-        state.warn(f"{label}: rate-scale curve HLCID={mat.hlcid} is not "
-                   "defined — the fct_ID21 reference would dangle, so it was "
-                   "dropped and the spring is rate-independent.")
-        dof.fct2 = 0
-    if mat.glcid:
-        state.warn(f"{label}: GLCID={mat.glcid} (the optional force-vs-"
-                   "deflection curve used when the spring is in tension only) "
-                   "has no Radioss spring slot — DROPPED. dyna2rad writes it "
-                   "to a `fct_ID51` field that does not exist on LAW113, so "
-                   "it is lost there too. Fold the two branches into one "
-                   "asymmetric FLCID if the tension response differs.")
+    dof = SpringDof(k=stiff, c=mat.d, b=mat.c2, d=mat.dle,
+                    fct1=fid, dmin=-abs(mat.cdf), dmax=abs(mat.tdf))
+    _apply_dbeam_rate_law(state, label, dof, "074", mat.hlcid, mat.glcid,
+                          mat.c1, fid_alloc, curves, funct)
     ifail2 = 1 if (mat.cdf or mat.tdf) else 0
     return [dof] + [SpringDof() for _ in range(5)], 0, ifail2, funct, \
         "elastic spring discrete beam"
@@ -591,17 +708,24 @@ def _build_mat119(state, label, mat, curves):
             state.warn(f"{label}: {name} curve(s) {missing} are not defined in "
                        "the deck — the reference would dangle (starter ERROR "
                        "on an unknown fct_ID), so those slots were CLEARED "
-                       "and the affected DOFs fall back to their linear "
-                       "stiffness.")
+                       "and the affected DOFs lose that part of their law.")
             for d, c in zip(dofs, ids):
-                if c in missing:
-                    if d.fct1 == c:
-                        d.fct1 = 0
-                    if d.fct3 == c:
-                        d.fct3 = 0
-                    if d.fct4 == c:
-                        d.fct4 = 0
+                if c not in missing:
+                    continue
+                # The hardening flag is a property of fct_ID1/fct_ID3 ONLY —
+                # those are what hm_read_prop04.F's H guards test (MSGID 231
+                # for H=5, 1057 for H=6, 1058/1059 for H=7). A dangling
+                # fct_ID4 is a lost DAMPING force and nothing else, so clearing
+                # it must not demote a valid hysteresis loop to H=0.
+                if d.fct1 == c:
+                    d.fct1 = 0
                     d.h = 0
+                if d.fct3 == c:
+                    d.fct3 = 0
+                    d.h = 0
+                if d.fct4 == c:
+                    d.fct4 = 0
+                    d.hscale = 0.0
     if any(mat.lcid_elast):
         state.warn(f"{label}: card 5's LCIDTE*/LCIDRE* elastic-scale curves "
                    f"{[c for c in mat.lcid_elast if c]} have no Radioss spring "
@@ -644,10 +768,15 @@ def _build_mat121(state, label, mat, curves):
         if cid and cid not in curves:
             state.warn(f"{label}: the {role} curve {cid} is not defined in the "
                        "deck — the slot was CLEARED so the reference cannot "
-                       "dangle, and the spring falls back to its linear "
-                       f"stiffness K={mat.k:g}.")
+                       "dangle, and the spring loses that part of its law "
+                       f"(linear stiffness K={mat.k:g}).")
             setattr(d, slot, 0)
-            d.h = 0
+            # Only the loading/unloading slots carry the hardening flag; a
+            # dangling damping curve costs the fct_ID4 force, not the loop.
+            if slot == "fct4":
+                d.hscale = 0.0
+            else:
+                d.h = 0
     _apply_unload_guard(state, label, d, 1)
     if mat.lcidte:
         state.warn(f"{label}: LCIDTE={mat.lcidte} (the elastic-scale curve) "
@@ -673,14 +802,9 @@ def _build_mat196(state, label, mat, fid_alloc, curves):
          glcid) in mat.dofs:
         i = dof_no - 1
         s = dofs[i]
-        s.k, s.c, s.b, s.d, s.e = k, d, c2, dle, c1
+        s.k, s.c, s.b, s.d = k, d, c2, dle
         s.dmin, s.dmax = -abs(cdf), abs(tdf)
-        if hlcid:
-            if hlcid in curves:
-                s.fct2 = hlcid
-            else:
-                state.warn(f"{label}: DOF {dof_no} rate-scale curve HLCID="
-                           f"{hlcid} is not defined — the slot was cleared.")
+        dof_label = f"{label}: DOF {dof_no}"
         if flcid:
             crv = curves.get(flcid)
             if crv is None or len(crv.pts) < 2:
@@ -709,12 +833,26 @@ def _build_mat196(state, label, mat, fid_alloc, curves):
                         "which leaves an INELASTIC DOF converted as nonlinear "
                         "elastic.")
             else:
-                s.fct1 = flcid
-        if glcid:
-            state.warn(f"{label}: DOF {dof_no} GLCID={glcid} has no Radioss "
-                       "spring slot — DROPPED (dyna2rad loses it too).")
+                # TYPE=0: the curve is a plain force-vs-deflection function and
+                # K is the DIMENSIONLESS scale in F = K·f(ΔL)·[…].
+                raw = sorted(crv.pts)
+                scaled = _scale_elastic_curve(state, dof_label, raw, k,
+                                              f"FLCID {flcid}")
+                if scaled is raw:
+                    s.fct1 = flcid
+                else:
+                    fid = fid_alloc()
+                    funct += _emit_funct(
+                        fid, f"MAT196_dof{dof_no}_lc{flcid}_mid{mat.mid}",
+                        scaled)
+                    s.fct1 = fid
+                # The force now comes entirely from the function, so the K
+                # column is free to carry the tangent the time step needs.
+                s.k = abs(_pts_slope_at_origin(scaled)) or k
+        _apply_dbeam_rate_law(state, dof_label, s, f"196_dof{dof_no}",
+                              hlcid, glcid, c1, fid_alloc, curves, funct)
     missing = [i + 1 for i in range(6) if not any(
-        (dofs[i].k, dofs[i].c, dofs[i].fct1, dofs[i].fct2))]
+        (dofs[i].k, dofs[i].c, dofs[i].fct1, dofs[i].fct4))]
     if missing:
         state.warn(f"{label}: DOF(s) {missing} were not given a card pair, so "
                    "they carry NO stiffness and NO damping — the connector is "
@@ -728,9 +866,11 @@ def _build_mat196(state, label, mat, fid_alloc, curves):
                    "CDF/TDF limits checked independently (Ifail=0) — a "
                    "coupled criterion would fail earlier.")
     if mat.dospot:
-        state.warn(f"{label}: DOSPOT={mat.dospot} (report the connector in "
-                   "the spot-weld force file) has no Radioss counterpart — "
-                   "the springs still appear in /TH/SPRING.")
+        state.warn(f"{label}: DOSPOT={mat.dospot} (thin the tied shells when "
+                   "SPOTHIN > 0 on *CONTROL_CONTACT) has no Radioss "
+                   "counterpart — DROPPED. The tied shells keep their full "
+                   "thickness, so the joint is slightly stiffer than in "
+                   "LS-DYNA.")
     has_fail = any(d.dmin or d.dmax for d in dofs)
     return dofs, 0, (1 if has_fail else 0), funct, "general spring discrete beam"
 
@@ -743,6 +883,7 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
     """*SECTION_BEAM ELFORM=6 discrete-beam parts -> /PROP/TYPE8 or
     /PROP/TYPE13 6-DOF /SPRING connectors (see the module docstring)."""
     pids = sorted(_discrete_beam_pids(state))
+    _warn_unclaimed_discrete_beam_parts(state, set(pids))
     if not pids:
         return []
     lines: List[str] = [
@@ -790,7 +931,15 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         rho = 0.0
         ileng = 0
         force_type13 = False
-        if mat066 is not None:
+        if wrong_section:
+            # Reported above, and the payload builders must not run at all:
+            # their result is discarded here, but their warnings and their
+            # /FUNCT ids are not — they would describe a conversion that never
+            # happened and consume auto-ids nothing references.
+            mat071 = None
+            built = ([SpringDof() for _ in range(6)], 0, 0, [],
+                     "unsized discrete beam")
+        elif mat066 is not None:
             rho = mat066.rho
             built = _build_mat066(state, label, mat066, fid_alloc)
         elif mat067 is not None:
@@ -817,12 +966,6 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         else:
             rho = state.mat_unsupported_dbeam.get(part.mid, ("", 0.0))[1]
             built = _unsupported_payload(state, label, part.mid)
-        if wrong_section:
-            # Already reported above; nothing the material states can be sized
-            # or oriented without the ELFORM=6 card.
-            rho, ileng, force_type13 = 0.0, 0, False
-            built = ([SpringDof() for _ in range(6)], 0, 0, [],
-                     "unsized discrete beam")
         dofs, ifail, ifail2, funct_lines, kind = built
 
         # ── frame: TYPE13 (node oriented) vs TYPE8 (skew oriented) ──────────
@@ -833,10 +976,24 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         if wrong_section:
             pass                       # the cause is already named
         elif force_type13 and skew_id:
-            state.warn(f"{label}: CID={sec.cid} is not used — {kind} acts "
+            state.warn(f"{label}: CID={sec.cid} cannot orient {kind} — it acts "
                        "along the element's own axis (node1->node2), so the "
-                       "connector is a node-oriented /PROP/TYPE13 and the "
-                       "coordinate system would be ignored.")
+                       "connector is a node-oriented /PROP/TYPE13. The skew is "
+                       "still written on the property, where r4buf3.F uses it "
+                       "only as the XY-plane fallback for elements that carry "
+                       "no third node; the axial DOF is unaffected either way.")
+        elif use13 and skew_id:
+            state.warn(
+                f"{label}: |SCOOR|={abs(sec.scoor):g} makes the local r-axis "
+                f"follow node1->node2 and CID={sec.cid} then only fixes the "
+                "REMAINING two axes - 'a final adjustment is made to the local "
+                "coordinate system so that the local r-axis lies along the n1 "
+                "to n2 axis of the beam' (Manual Vol I R17 p.41-26, Remark 8). "
+                f"That is exactly /PROP/TYPE13 + skew_ID={skew_id}, which "
+                "r4buf3.F reads as the XY-plane reference - but ONLY for "
+                "elements with no third node: where *ELEMENT_BEAM gives an N3, "
+                "Radioss takes the plane from it and ignores the skew, while "
+                "LS-DYNA keeps using the CID.")
         elif use13 and not skew_id and abs(sec.scoor) != 2.0:
             state.warn(
                 f"{label}: SCOOR={sec.scoor:g} and no usable CID, so there is "
@@ -850,8 +1007,28 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         length = _mean_beam_length(state, beams)
         if mat071 is not None:
             # Ileng=1 makes the property's Mass a mass PER UNIT LENGTH
-            # (rinit3.F:408-412), which is exactly LS-DYNA's Imass=1 rho*CA*L.
-            mass = rho * sec.ca
+            # (rinit3.F:408-412), which is exactly LS-DYNA's rho*CA*L rule -
+            # but only when VOL is blank: "The cable mass will be calculated
+            # from length x area x density if VOL is set to zero on
+            # *SECTION_BEAM. Otherwise, VOL x density will be used" (Manual
+            # Vol II R17 p.2-531). Ileng=1 is not optional (it is what makes
+            # the stiffness and the curve abscissae strain-based), so an
+            # absolute VOL*rho has to be carried as VOL*rho/L.
+            if sec.vol > 0.0 and length > 0.0:
+                mass = rho * sec.vol / length
+                if abs(mass - rho * sec.ca) > 1e-9 * max(abs(mass), 1e-30):
+                    state.warn(
+                        f"{label}: *SECTION_BEAM VOL={sec.vol:g} is non-zero, "
+                        f"so the cable mass is RO*VOL = {rho * sec.vol:.6G} "
+                        f"and NOT RO*CA*L = {rho * sec.ca * length:.6G} "
+                        "(Manual Vol II R17 p.2-531). The property carries it "
+                        f"as RO*VOL/L = {mass:.6G} per unit length, because "
+                        "Ileng=1 is what makes the cable's stiffness and curve "
+                        "abscissae strain-based; L is the MEAN element length "
+                        f"{length:.6G}, so elements of a different length get "
+                        "a mass in proportion to their own.")
+            else:
+                mass = rho * sec.ca
         else:
             mass = rho * sec.vol
         if mass <= 0.0:
@@ -900,7 +1077,7 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         if use13:
             lines += _emit_prop_type13(
                 prop_id, f"{title} ({kind})", mass, inertia, ifail, ifail2,
-                dofs, ileng=ileng)
+                dofs, ileng=ileng, skew_id=skew_id)
         else:
             lines += _emit_prop_type8(
                 prop_id, f"{title} ({kind})", mass, inertia, skew_id, dofs,
@@ -921,15 +1098,17 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 if not n3:
                     no_n3 += 1
                 lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}{_i(n3)}")
-                state.dbeam_spring_eids.add(e.eid)
             if use13 and no_n3:
                 state.warn(
                     f"{label}: {no_n3} element(s) carry no third node, so the "
                     "node-oriented /PROP/TYPE13 has nothing to set its XY "
-                    "plane from and falls back to the property skew's Y' (or "
-                    "the global axes). The AXIAL DOF is still correct; the two "
-                    "shear and two bending DOFs may be rotated about it. Give "
-                    "the beams a third node, or use *ELEMENT_BEAM_ORIENTATION.")
+                    "plane from and falls back to "
+                    + (f"the property skew's Y' (skew_ID={skew_id}, from "
+                       f"CID={sec.cid})" if skew_id else "the GLOBAL axes")
+                    + ". The AXIAL DOF is still correct; the two shear and two "
+                    "bending DOFs may be rotated about it. Give the beams a "
+                    "third node, or use *ELEMENT_BEAM_ORIENTATION"
+                    + ("." if skew_id else ", or a *SECTION_BEAM CID."))
         lines.append(HDR)
         emitted = True
 
@@ -937,7 +1116,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
             f"{label}: {kind} (MID {part.mid}) -> "
             f"/PROP/TYPE{'13' if use13 else '8'}/{prop_id} + "
             f"{len(beams)} /SPRING element(s) on /PART/{pid}"
-            + (f", skew_ID={skew_id} from CID={sec.cid}" if not use13 else "")
+            + (f", skew_ID={skew_id} from CID={sec.cid}"
+               + (" (XY-plane fallback only)" if use13 else "")
+               if skew_id else "")
             + f". Mass={mass:.6G}"
             + (" per unit length (Ileng=1)" if ileng else "")
             + f", Inertia={inertia:.6G}. A discrete beam is a SPRING, not a "
@@ -945,6 +1126,62 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
             "stiffness the material states.")
 
     return lines if emitted else []
+
+
+def _warn_unclaimed_discrete_beam_parts(state: ConversionState,
+                                        claimed) -> None:
+    """Report every *PART that names an ELFORM=6 section or a discrete-beam
+    material but that this writer does NOT own.
+
+    Two ways in, both silent before this: the part carries shell or solid
+    elements (a discrete-beam material on a continuum part - a modelling error
+    k2rad must not reinterpret as a spring), or the *ELEMENT_DISCRETE spring
+    path already claims the pid (_discrete_beam_pids). Either way the /PART is
+    still written with its MID, and NO /MAT is emitted for a discrete-beam
+    material - so without this the deck comes out referencing a material that
+    is not there and the conversion log says nothing at all. Recognising the
+    keyword took away even the "skipped keyword" line master used to print.
+    Same pattern as *MAT_SPOTWELD on a continuum part (materials.py)."""
+    elform6 = {s.secid for s in state.sec_beams.values() if s.elform == 6}
+    dbeam_mids = _discrete_beam_mids(state)
+    if not elform6 and not dbeam_mids:
+        return
+    conflicts = _discrete_beam_claim_conflicts(state)
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    for pid, p in sorted(state.parts.items()):
+        if pid in claimed:
+            continue
+        secid = p.secid if p.secid > 0 else pid
+        by_sec = secid in elform6
+        by_mat = p.mid in dbeam_mids
+        if not by_sec and not by_mat:
+            continue
+        why = (f"*SECTION_BEAM {secid} is ELFORM=6" if by_sec else
+               f"MID {p.mid} is a discrete-beam (6-DOF spring) material")
+        if pid in conflicts:
+            state.warn(
+                f"Discrete-beam part {pid}: {why}, but the part is ALSO "
+                "claimed by the *ELEMENT_DISCRETE spring path - one /PART id, "
+                "two writers, which is starter ERROR 79 (DUPLICATE ID). The "
+                "*ELEMENT_DISCRETE side won, so the discrete-beam side and any "
+                "*ELEMENT_BEAM on this part were DROPPED. Give the discrete "
+                "beams a *PART of their own (a blank SECID falls back to the "
+                "part id, which is the usual way the two collide).")
+            continue
+        where = ("shell" if pid in shell_pids else
+                 "solid" if pid in solid_pids else "non-beam")
+        state.warn(
+            f"Discrete-beam part {pid}: {why} and the part carries {where} "
+            "elements, so it was NOT converted to a /SPRING connector - a "
+            "discrete beam on a continuum part is a modelling error k2rad must "
+            "not silently reinterpret."
+            + (f" No /MAT is written for a discrete-beam material either, so "
+               f"/PART/{pid} now references material {p.mid}, which the deck "
+               "does not contain: the starter will refuse it. Move the "
+               "material onto an ELFORM=6 *SECTION_BEAM part, or give this "
+               "part a continuum material." if by_mat else
+               " Give the continuum elements a section of their own."))
 
 
 def _beam_length(state: ConversionState, e: BeamElem) -> float:
