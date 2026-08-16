@@ -7,9 +7,9 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve
 from .common import (
-    HDR, _dof_string, _emit_grnod_grnod, _emit_grnod_node, _emit_id_group, _f,
-    _fmt_eid_list, _i, _part_node_sets, _spotweld_beam_pids, _vcross, _vnorm,
-    _vsub,
+    HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
+    _emit_id_group, _f, _fmt_eid_list, _i, _part_node_sets,
+    _spotweld_beam_pids, _vcross, _vnorm, _vsub,
 )
 
 __all__ = [
@@ -1188,6 +1188,10 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
         springs, keyed on the discrete EID;
       * ``*ELEMENT_BEAM`` on a *MAT_SPOTWELD (MAT_100) part →
         ``_make_spotweld_beam_connectors``, keyed on the BEAM EID;
+      * ``*ELEMENT_BEAM`` on a *SECTION_BEAM ELFORM=6 discrete-beam part →
+        ``_make_discrete_beam_connectors``, also keyed on the BEAM EID (so the
+        two beam families cannot clash with each other — their part sets are
+        disjoint — but both can clash with the discrete and PLOTEL springs);
       * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID.
 
     The joint (/PROP/TYPE45) and *CONSTRAINED_SPOTWELD springs are not listed:
@@ -1195,10 +1199,13 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
     unique by construction and not yet allocated when this runs.
     """
     weld_pids = _spotweld_beam_pids(state)
+    dbeam_pids = _discrete_beam_pids(state)
     return [
         ("*ELEMENT_DISCRETE", {d.eid for d in state.discrete_elems}),
         ("*ELEMENT_BEAM on a *MAT_SPOTWELD part",
          {b.eid for b in state.beam_elems if b.pid in weld_pids}),
+        ("*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 discrete-beam part",
+         {b.eid for b in state.beam_elems if b.pid in dbeam_pids}),
         ("*ELEMENT_PLOTEL", {p.eid for p in state.plotel_elems}),
     ]
 

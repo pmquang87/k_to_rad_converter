@@ -28,6 +28,8 @@ __all__ = [
     "_ordered_unique_nodes",
     "_split_shell_eids_by_topology",
     "_fmt_eid_list",
+    "_discrete_beam_mids",
+    "_discrete_beam_pids",
     "_discrete_part_ids",
     "_spotweld_beam_pids",
     "_emit_surf_seg",
@@ -517,6 +519,49 @@ def _discrete_part_ids(state: ConversionState) -> Set[int]:
     for pid, p in state.parts.items():
         secid = p.secid if p.secid > 0 else pid
         if secid in state.sec_discrete or p.mid in spring_mids:
+            pids.add(pid)
+    return pids
+
+
+def _discrete_beam_mids(state: ConversionState) -> Set[int]:
+    """Every MID that names a *SECTION_BEAM ELFORM=6 discrete-beam material —
+    the eight k2rad converts plus the seven it can only warn about."""
+    mids: Set[int] = set()
+    for d in (state.mat_dbeam_linear, state.mat_dbeam_nl_elastic,
+              state.mat_dbeam_nl_plastic, state.mat_cable_dbeam,
+              state.mat_elastic_spring_dbeam, state.mat_gnl_6dof,
+              state.mat_gnl_1dof, state.mat_general_spring_dbeam,
+              state.mat_unsupported_dbeam):
+        mids |= set(d)
+    return mids
+
+
+def _discrete_beam_pids(state: ConversionState) -> Set[int]:
+    """Part ids handled by the DISCRETE-BEAM connector path: parts whose
+    *SECTION_BEAM is ELFORM=6, or whose material is a discrete-beam material.
+
+    An LS-DYNA discrete beam is a 6-DOF spring, so these parts get a
+    /PROP/TYPE8 or /PROP/TYPE13 + /SPRING from _make_discrete_beam_connectors
+    instead of the ordinary /PART + /PROP/BEAM + /BEAM — an ELFORM=6 section
+    states no cross-section at all, so a /PROP/BEAM built from it is starter
+    ERROR 314-317 and the deck never starts.
+
+    Parts carrying shell or solid elements are excluded (the same guard
+    _spotweld_beam_pids uses): a discrete-beam material on a continuum part is
+    a modelling error k2rad must not silently reinterpret as a spring.
+    """
+    elform6 = {s.secid for s in state.sec_beams.values() if s.elform == 6}
+    dbeam_mids = _discrete_beam_mids(state)
+    if not elform6 and not dbeam_mids:
+        return set()
+    shell_pids = {e.pid for e in state.shell_elems}
+    solid_pids = {e.pid for e in state.solid_elems}
+    pids: Set[int] = set()
+    for pid, p in state.parts.items():
+        if pid in shell_pids or pid in solid_pids:
+            continue
+        secid = p.secid if p.secid > 0 else pid
+        if secid in elform6 or p.mid in dbeam_mids:
             pids.add(pid)
     return pids
 

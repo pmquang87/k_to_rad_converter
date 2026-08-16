@@ -22,6 +22,8 @@ from ..topology import (
 from .beams import _constants_from_thicknesses, _emit_prop_int_beam
 from .common import (
     HDR,
+    _discrete_beam_mids,
+    _discrete_beam_pids,
     _discrete_part_ids,
     _elform_to_ishell,
     _ELFORM_ALWAYS_QEPH,
@@ -1222,11 +1224,13 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     for e in state.beam_elems:
         beams_by_pid[e.pid].append(e)
 
-    # Connector parts (discrete springs/dampers, MAT_100 spotweld beam parts)
-    # are emitted by the connector sections with their own /PROP/TYPE4-13 and
-    # /SPRING elements — emitting them here would reference a DYNA section /
-    # material id that has no /PROP or /MAT counterpart.
-    connector_pids = _discrete_part_ids(state) | _spotweld_beam_pids(state)
+    # Connector parts (discrete springs/dampers, MAT_100 spotweld beam parts,
+    # *SECTION_BEAM ELFORM=6 discrete beams) are emitted by the connector
+    # sections with their own /PROP/TYPE4-13 and /SPRING elements — emitting
+    # them here would reference a DYNA section / material id that has no /PROP
+    # or /MAT counterpart.
+    connector_pids = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
+                      | _discrete_beam_pids(state))
 
     for pid, part in sorted(state.parts.items()):
         if pid in connector_pids:
@@ -1485,8 +1489,10 @@ def _element_free_part_ids(state: ConversionState,
     # Parts the normal /PART emission skips: their /PART *and* /PROP come from
     # the connector writers, so they never carry a section-derived prop_ref.
     # (_discrete_part_ids already claims an element-free part whose SECID is a
-    # *SECTION_DISCRETE or whose MID is a spring/damper material.)
-    connectors = _discrete_part_ids(state) | _spotweld_beam_pids(state)
+    # *SECTION_DISCRETE or whose MID is a spring/damper material, and
+    # _discrete_beam_pids one whose SECID is an ELFORM=6 *SECTION_BEAM.)
+    connectors = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
+                  | _discrete_beam_pids(state))
     # A part repointed at a synthesized composite / orthotropic / per-part
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
@@ -1960,12 +1966,19 @@ def _make_properties(state: ConversionState) -> List[str]:
     # emitted by _make_spotweld_beam_connectors); their beams must not force an
     # auto /PROP/BEAM, and a *SECTION_BEAM used ONLY by spotweld parts is not
     # emitted (its ELFORM-9 card has no /PROP/BEAM meaning).
+    # Beam parts that become /SPRING connectors instead: the MAT_100 spotweld
+    # beams (/PROP/TYPE13) and the *SECTION_BEAM ELFORM=6 discrete beams
+    # (/PROP/TYPE8 or /PROP/TYPE13). Their beams must not force an auto
+    # /PROP/BEAM, and a *SECTION_BEAM used ONLY by such parts is not emitted —
+    # neither the ELFORM-9 spotweld card nor the ELFORM-6 discrete-beam card
+    # states a cross-section, so a /PROP/BEAM from either is ERROR 314-317.
     spotweld_pids = _spotweld_beam_pids(state)
+    connector_beam_pids = spotweld_pids | _discrete_beam_pids(state)
     spotweld_only_secids: Set[int] = set()
-    if spotweld_pids:
+    if connector_beam_pids:
         other_beam_secids = {part_secids.get(e.pid) for e in state.beam_elems
-                             if e.pid not in spotweld_pids}
-        spotweld_only_secids = {part_secids[pid] for pid in spotweld_pids
+                             if e.pid not in connector_beam_pids}
+        spotweld_only_secids = {part_secids[pid] for pid in connector_beam_pids
                                 if pid in part_secids} - other_beam_secids
 
     for e in state.shell_elems:
@@ -1977,7 +1990,7 @@ def _make_properties(state: ConversionState) -> List[str]:
         if secid and secid not in state.sec_solids:
             missing_solids.add(secid)
     for e in state.beam_elems:
-        if e.pid in spotweld_pids:
+        if e.pid in connector_beam_pids:
             continue
         secid = part_secids.get(e.pid)
         if secid and secid not in state.sec_beams:
@@ -2147,6 +2160,19 @@ def _make_properties(state: ConversionState) -> List[str]:
                     "*INTEGRATION_BEAM rule on a negative QR/IRID to keep "
                     "through-section plasticity, or numerically on an "
                     "ELFORM=2 section to control J.")
+            elif sec.elform == 6:
+                state.warn(
+                    f"*SECTION_BEAM {sec.secid}: ELFORM=6 is a DISCRETE beam — "
+                    "its card 2f states a lumped VOL/INER and a CID, never a "
+                    "cross-section — but a *PART on it is NOT claimed by the "
+                    "discrete-beam connector path (it carries shell or solid "
+                    "elements, or shares the section with an ordinary beam "
+                    "part). Its /PROP/BEAM is therefore written with "
+                    "Area=Iyy=Izz=Ixx=0 and the starter REFUSES it (ERROR "
+                    "314-317). Give the discrete beams their own "
+                    "*SECTION_BEAM, and a discrete-beam material "
+                    "(*MAT_066/067/068/071/074/119/121/196) so k2rad can turn "
+                    "them into a 6-DOF /SPRING.")
             else:
                 state.warn(
                     (f"*SECTION_BEAM {sec.secid} is referenced by a beam *PART "
@@ -2165,7 +2191,8 @@ def _make_properties(state: ConversionState) -> List[str]:
                     "QR/IRID on card 1 field 4.")
         type3_secids.add(sec.secid)
         lines += _emit_prop_beam(sec)
-    _warn_beam_type3_material(state, part_secids, spotweld_pids, type3_secids)
+    _warn_beam_type3_material(state, part_secids, connector_beam_pids,
+                              type3_secids)
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
     lines += _emit_ortho_props(state, istrain)
@@ -3226,12 +3253,27 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
                for pid, p in state.parts.items()):
             return 1
         return None
+    # Discrete SPRING/DAMPER (S01/S03/S04/S05/S06/S08/D01) and DISCRETE-BEAM
+    # (MAT_066/067/068/071/074/119/121/196, plus the seven with no Radioss
+    # spring law) materials never get a /MAT of their own: the whole material
+    # lives in the /PROP/TYPE4 / TYPE8 / TYPE13 connector and the /PART is
+    # written with mat_id 0. Listed EXPLICITLY rather than left to fall through
+    # to `return None` so that a future reader (and _resolve_xref_parts, which
+    # shares this map) sees the routing stated, not inferred from an absence.
+    if (mid in state.mat_spring_elastic or mid in state.mat_spring_nonlinear
+            or mid in state.mat_damper_viscous
+            or mid in state.mat_spring_elastoplastic
+            or mid in state.mat_damper_nl_viscous
+            or mid in state.mat_spring_general_nl
+            or mid in state.mat_spring_inelastic
+            or mid in _discrete_beam_mids(state)):
+        return None
     return None
 
 
 def _warn_beam_type3_material(state: ConversionState,
                               part_secids: Dict[int, int],
-                              spotweld_pids: Set[int],
+                              connector_beam_pids: Set[int],
                               type3_secids: Set[int]) -> None:
     """Name every beam part whose material converts to a law ``/PROP/BEAM``
     rejects — the deck is unrunnable and k2rad said nothing about it.
@@ -3320,11 +3362,12 @@ def _warn_beam_type3_material(state: ConversionState,
     # Parts with beam ELEMENTS only. Two reasons, both load-bearing: the
     # starter's compatibility loop runs per element GROUP, so an element-free
     # part contributes nothing to check (the lesson of the composite
-    # element-free warning); and a *MAT_SPOTWELD beam part has already been
-    # turned into /SPRING elements on a /PROP/TYPE13 by the time this runs.
+    # element-free warning); and a *MAT_SPOTWELD beam part — or a
+    # *SECTION_BEAM ELFORM=6 discrete-beam part — has already been turned into
+    # /SPRING elements on a spring property by the time this runs.
     groups: Dict[Tuple[int, int], List[int]] = defaultdict(list)
     for pid in sorted({e.pid for e in state.beam_elems
-                       if e.pid not in spotweld_pids}):
+                       if e.pid not in connector_beam_pids}):
         part = state.parts.get(pid)
         if part is None or part_secids.get(pid) not in type3_secids:
             continue

@@ -4255,6 +4255,13 @@ class ConversionState:
     mat_gnl_6dof: Dict[int, MatGeneralNonlinear6dof] = field(default_factory=dict)                    # MAT_119
     mat_gnl_1dof: Dict[int, MatGeneralNonlinear1dof] = field(default_factory=dict)                    # MAT_121
     mat_general_spring_dbeam: Dict[int, MatGeneralSpringDiscreteBeam] = field(default_factory=dict)   # MAT_196
+    # mid → (keyword, RO) of a discrete-beam material that is RECOGNISED but
+    # has no OpenRadioss spring counterpart (MAT_069/070/093/094/095/097/146).
+    # Only those two fields are parsed: the keyword so the connector writer can
+    # name what the deck loses instead of leaving the *PART with no material at
+    # all, and RO so the inert connector still gets its real lumped mass.
+    # dyna2rad drops all seven silently.
+    mat_unsupported_dbeam: Dict[int, Tuple[str, float]] = field(default_factory=dict)
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
     # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with
@@ -4274,6 +4281,12 @@ class ConversionState:
     # emitted is starter ERROR 69 (hm_read_thgrne.F:189, MSGTYPE=MSGERROR) —
     # the deck is refused, not degraded. Same accounting pattern as cluster_ids.
     spotweld_spring_eids: Set[int] = field(default_factory=set)
+    # sprg_IDs actually written as /SPRING by _make_discrete_beam_connectors
+    # (the *SECTION_BEAM ELFORM=6 path). Same accounting reason as
+    # spotweld_spring_eids: a *DATABASE_HISTORY_BEAM / *DATABASE_DISBOUT
+    # channel naming an element the connector writer skipped is starter
+    # ERROR 69, which refuses the whole deck.
+    dbeam_spring_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)

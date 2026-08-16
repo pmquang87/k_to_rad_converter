@@ -62,6 +62,7 @@ from .contacts import (
 )
 from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
 from .joints import _make_joints, _resolve_joints
+from .dbeam import _make_discrete_beam_connectors
 from .loads import (
     _make_added_masses,
     _make_bcs,
@@ -1096,6 +1097,10 @@ def _starter_section_registry():
         ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
         ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
+        # ELFORM=6 discrete beams: their /PART + spring property come from here,
+        # not from _make_properties (an ELFORM=6 *SECTION_BEAM states no
+        # cross-section, so a /PROP/BEAM from it is starter ERROR 314-317).
+        ("discrete_beams",    lambda c: _make_discrete_beam_connectors(c.state)),
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
         # The clusters must precede starter_th_swforc: the SWFORC block
         # reports "no weld to output" only when no cluster was emitted

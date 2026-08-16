@@ -291,6 +291,13 @@ from .joints import (
     _stiffness_dof_map,
     _make_joints,
 )
+from .dbeam import (
+    _UNMAPPED_DISCRETE_BEAM_LOSS,
+    _odd_extend_curve,
+    _dbeam_unload_hflag,
+    _dbeam_failure,
+    _make_discrete_beam_connectors,
+)
 from .blast_ale import (
     _AXIS_VEC,
     _blast_target_bbox,
@@ -574,6 +581,11 @@ __all__ = [
     "_match_joint_stiffness",
     "_stiffness_dof_map",
     "_make_joints",
+    "_UNMAPPED_DISCRETE_BEAM_LOSS",
+    "_odd_extend_curve",
+    "_dbeam_unload_hflag",
+    "_dbeam_failure",
+    "_make_discrete_beam_connectors",
     "_resolve_composites",
     "_assign_composite_props",
     "_resolve_integration_shells",

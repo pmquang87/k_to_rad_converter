@@ -7540,6 +7540,50 @@ def handle_mat_general_spring_discrete_beam(block: Block,
     state.mat_general_spring_dbeam[mid] = m
 
 
+#: *SECTION_BEAM ELFORM=6 materials that OpenRadioss has no spring law for.
+#: Recorded (not converted) so the connector writer can name the physics the
+#: deck loses; dyna2rad routes all of them to its ``default:`` branch, which
+#: produces no usable /MAT and says nothing (convertmats.cxx:527-554, with the
+#: unsupported-material error at :530 commented out).
+_UNSUPPORTED_DBEAM_KEYWORDS = {
+    "MAT_SID_DAMPER_DISCRETE_BEAM": "MAT_069",
+    "MAT_069": "MAT_069", "MAT_69": "MAT_069",
+    "MAT_HYDRAULIC_GAS_DAMPER_DISCRETE_BEAM": "MAT_070",
+    "MAT_070": "MAT_070", "MAT_70": "MAT_070",
+    "MAT_ELASTIC_6DOF_SPRING_DISCRETE_BEAM": "MAT_093",
+    "MAT_093": "MAT_093", "MAT_93": "MAT_093",
+    "MAT_INELASTIC_SPRING_DISCRETE_BEAM": "MAT_094",
+    "MAT_094": "MAT_094", "MAT_94": "MAT_094",
+    "MAT_INELASTIC_6DOF_SPRING_DISCRETE_BEAM": "MAT_095",
+    "MAT_095": "MAT_095", "MAT_95": "MAT_095",
+    "MAT_GENERAL_JOINT_DISCRETE_BEAM": "MAT_097",
+    "MAT_097": "MAT_097", "MAT_97": "MAT_097",
+    "MAT_1DOF_GENERALIZED_SPRING": "MAT_146",
+    "MAT_146": "MAT_146",
+}
+
+
+def handle_mat_unsupported_discrete_beam(block: Block,
+                                         state: ConversionState) -> None:
+    """A discrete-beam material with NO OpenRadioss spring counterpart.
+
+    Only MID and RO are read — every one of these cards puts them in the first
+    two columns. Registering the keyword (instead of letting it fall into
+    ``skipped_keywords``) is what lets the ELFORM=6 connector writer say WHICH
+    device the deck loses and emit an inert spring in its place — a *PART left
+    with no material and a /PROP/BEAM built from a section that states no
+    cross-section is starter ERROR 314-317, i.e. no run at all.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=2, w=10)
+    if not f or not f[0].strip():
+        state.warn(f"*{block.keyword}: empty material card – skipped")
+        return
+    state.mat_unsupported_dbeam[to_int(f[0])] = (
+        _UNSUPPORTED_DBEAM_KEYWORDS.get(block.keyword, block.keyword),
+        to_float(f[1]) if len(f) > 1 else 0.0)
+
+
 def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
     """*MAT_SPOTWELD (MAT_100) → /PROP/TYPE13 (SPR_BEAM) spring connectors.
 
@@ -8797,6 +8841,8 @@ HANDLERS = {
     "MAT_121":                                handle_mat_general_nonlinear_1dof,
     "MAT_GENERAL_SPRING_DISCRETE_BEAM":       handle_mat_general_spring_discrete_beam,
     "MAT_196":                                handle_mat_general_spring_discrete_beam,
+    # (the seven ELFORM=6 materials with no Radioss spring law are registered
+    # from _UNSUPPORTED_DBEAM_KEYWORDS just below this dict)
     "MAT_SPOTWELD":                           handle_mat_spotweld,
     "MAT_100":                                handle_mat_spotweld,
     "MAT_187":                                handle_mat_187,
@@ -9142,6 +9188,12 @@ HANDLERS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = handle_define_hex_spotweld_assembly
 for _n in range(1, 17):
     HANDLERS[f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{_n}"] = handle_define_hex_spotweld_assembly
 del _n
+
+# The ELFORM=6 discrete-beam materials OpenRadioss has no spring law for. They
+# are parsed for their MID only — see handle_mat_unsupported_discrete_beam.
+for _kw in _UNSUPPORTED_DBEAM_KEYWORDS:
+    HANDLERS[_kw] = handle_mat_unsupported_discrete_beam
+del _kw
 
 
 #: Keyword PREFIX → handler, tried when the exact-match lookup misses. Only the
