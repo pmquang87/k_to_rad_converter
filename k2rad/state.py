@@ -2218,6 +2218,84 @@ class RigidWallPlanar:
 
 
 @dataclass
+class RigidWallGeomFace:
+    """One emitted Radioss wall of a *RIGIDWALL_GEOMETRIC conversion.
+
+    A CYLINDER/SPHERE/FLAT wall resolves to exactly one face; a PRISM (a box,
+    which Radioss has no single card for) resolves to six ``/RWALL/PARAL``
+    faces with outward normals. Filled in by the writer prepass
+    ``_resolve_geometric_rigid_walls`` so the geometry warnings are raised
+    once and the carrier nodes exist before the /NODE section is built.
+
+    ``form`` is the Radioss keyword tail (PLANE / PARAL / CYL / SPHER); ``m``
+    is the base point (unused when ``node_id`` > 0 — the carrier node's
+    coordinates ARE M then); ``m1``/``m2`` are the absolute card-4/card-5
+    points (``m2`` only for PARAL, ``m1`` None for SPHER).
+    """
+    rwid: int
+    title: str
+    form: str
+    m: Tuple[float, float, float]
+    m1: Optional[Tuple[float, float, float]] = None
+    m2: Optional[Tuple[float, float, float]] = None
+    diameter: float = 0.0
+    node_id: int = 0            # synthesized carrier node (_MOTION walls)
+
+
+@dataclass
+class RigidWallGeometric:
+    """*RIGIDWALL_GEOMETRIC_{FLAT|PRISM|CYLINDER|SPHERE}[_MOTION][_DISPLAY].
+
+    Card 1: nsid nsidex boxid birth death
+    Card 2: xt yt zt xh yh zh fric   — (xt,yt,zt) is the tail T, the wall's
+      anchor point; n̂ = normalize(head − tail) is the outward normal /
+      cylinder axis.
+    Card 3 (shape-specific):
+      _FLAT     xhev yhev zhev lenl lenm
+      _PRISM    xhev yhev zhev lenl lenm lenp
+      _CYLINDER radcyl lencyl nsegs   (+ nsegs "vl height" sub-cards)
+      _SPHERE   radsph
+    Card 4 (_MOTION):  lcid opt vx vy vz — opt 0 = velocity, else displacement;
+      (vx,vy,vz) are DIRECTION COSINES, the curve carries the amplitude.
+    Card 5 (_DISPLAY): pid ro e pr — visualization mesh only, no solution
+      effect (Manual p. 3669), so it is parsed away and dropped.
+
+    RADCYL/RADSPH are RADII while the Radioss card field is a DIAMETER
+    (starter hm_read_rwall_cyl.F:272 / hm_read_rwall_spher.F:243 both halve
+    it), so Phi = 2 x RAD. The resolved Radioss walls live in ``faces``.
+    """
+    rwid: int
+    title: str
+    shape: str                  # FLAT | PRISM | CYLINDER | SPHERE
+    nsid: int = 0
+    nsidex: int = 0
+    boxid: int = 0
+    birth: float = 0.0
+    death: float = 0.0
+    xt: float = 0.0; yt: float = 0.0; zt: float = 0.0
+    xh: float = 0.0; yh: float = 0.0; zh: float = 0.0
+    fric: float = 0.0
+    # FLAT / PRISM card 3
+    xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
+    lenl: float = 0.0
+    lenm: float = 0.0
+    lenp: float = 0.0
+    # CYLINDER card 3
+    radcyl: float = 0.0
+    lencyl: float = 0.0
+    nsegs: int = 0
+    # SPHERE card 3
+    radsph: float = 0.0
+    # _MOTION card
+    motion: bool = False
+    lcid: int = 0
+    opt: int = 0
+    vx: float = 0.0; vy: float = 0.0; vz: float = 0.0
+    # writer prepass results
+    faces: List["RigidWallGeomFace"] = field(default_factory=list)
+
+
+@dataclass
 class LoadRigidBody:
     """*LOAD_RIGID_BODY — force/moment applied to a rigid body part."""
     pid: int            # rigid body part ID
@@ -4550,6 +4628,8 @@ class ConversionState:
 
     # *RIGIDWALL_PLANAR → /RWALL/PLANE
     rigid_walls: List[RigidWallPlanar] = field(default_factory=list)
+    # *RIGIDWALL_GEOMETRIC_* → /RWALL/CYL, /SPHER, /PLANE, /PARAL (x6 for a prism)
+    rigid_walls_geometric: List[RigidWallGeometric] = field(default_factory=list)
 
     # ── Loads ──────────────────────────────────────────────────
     load_rigid_bodies: List[LoadRigidBody] = field(default_factory=list)

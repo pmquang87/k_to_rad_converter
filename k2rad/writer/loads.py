@@ -5,12 +5,16 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
-from ..state import ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve
+from ..state import (
+    ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
+    RigidWallGeomFace,
+)
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
     _emit_id_group, _f, _fmt_eid_list, _i, _part_node_sets,
     _spotweld_beam_pids, _vcross, _vnorm, _vsub,
 )
+from .mesh import _emit_skew_fix
 
 __all__ = [
     "_make_rlinks",
@@ -82,6 +86,13 @@ __all__ = [
     "_make_node_cloads",
     "_synthesize_rwall_moving_nodes",
     "_rwall_finite_corners",
+    "_rwall_geom_triad",
+    "_rwall_geom_faces",
+    "_resolve_geometric_rigid_walls",
+    "_make_geometric_rwall_motion",
+    "_emit_rwall_geom_face",
+    "_rwall_node_groups",
+    "_rwall_slide",
     "_make_rigid_walls",
     "_make_modal_dummy_cload",
     "_make_damping",
@@ -3618,6 +3629,400 @@ def _rwall_finite_corners(rw, state: ConversionState):
     return m1, m2
 
 
+def _rwall_geom_triad(rw, n):
+    """The (n̂, l̂, m̂) orthonormal triad of a geometric FLAT/PRISM wall.
+
+    ``n`` is the already-validated unit wall normal (LS-DYNA's
+    normalize(head − tail)). The l-edge direction comes from
+    (XHEV,YHEV,ZHEV) − tail and m = n × l (Manual p. 3661); the HEV vector is
+    projected into the wall plane first, because a raw normalize(HEV − T) —
+    what dyna2rad uses, convertrwalls.cxx:255-259 — leaves m̂ = n̂ × l̂ short by
+    sin(theta) whenever HEV is not exactly perpendicular to the normal, so
+    every m-edge length comes out wrong by that factor. Returns None when HEV
+    has no in-plane component (no l direction exists).
+    """
+    v = (rw.xhev - rw.xt, rw.yhev - rw.yt, rw.zhev - rw.zt)
+    dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2]
+    proj = (v[0] - dot * n[0], v[1] - dot * n[1], v[2] - dot * n[2])
+    vmag = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
+    pmag = (proj[0] ** 2 + proj[1] ** 2 + proj[2] ** 2) ** 0.5
+    if pmag <= 1e-10 * max(1.0, vmag):
+        return None
+    lu = (proj[0] / pmag, proj[1] / pmag, proj[2] / pmag)
+    return n, lu, _vcross(n, lu)        # n ⊥ l and both unit ⇒ |n × l| = 1
+
+
+def _rwall_geom_faces(rw, state: ConversionState, label: str, title: str,
+                      alloc_rwid) -> List[RigidWallGeomFace]:
+    """Resolve one *RIGIDWALL_GEOMETRIC card to its Radioss /RWALL wall(s).
+
+    CYLINDER → one /RWALL/CYL, SPHERE → one /RWALL/SPHER, FLAT → one
+    /RWALL/PLANE (infinite) or /RWALL/PARAL (finite), PRISM → six /RWALL/PARAL
+    faces with outward normals, because Radioss has no box rigid wall (the only
+    /RWALL readers are hm_read_rwall_{plane,paral,cyl,spher,lagmul,therm}.F).
+    Returns [] when nothing can be emitted; every loss is warned.
+    """
+    if rw.shape == "CYLINDER":
+        # /RWALL/CYL: M and M1 are two absolute points, the axis is
+        # normalize(M1 − M) and only the DIRECTION survives (the length is
+        # divided out, hm_read_rwall_cyl.F:240-254) — so the LS-DYNA head
+        # point is carried over verbatim, exactly as dyna2rad does.
+        if _vnorm((rw.xh - rw.xt, rw.yh - rw.yt, rw.zh - rw.zt)) is None:
+            state.warn(f"{label}: the cylinder axis is degenerate (head == "
+                       "tail) — the starter would abort with ERROR 167, so "
+                       "the wall was skipped.")
+            return []
+        if rw.radcyl <= 0.0:
+            state.warn(f"{label}: RADCYL = {rw.radcyl:g} — a zero-radius "
+                       "cylinder never contacts anything, so the wall was "
+                       "skipped.")
+            return []
+        if rw.lencyl > 0.0:
+            state.warn(
+                f"{label}: LENCYL = {rw.lencyl:g} makes the LS-DYNA cylinder "
+                "FINITE (length running from the tail plane along -n), but "
+                "/RWALL/CYL stores only a base point, an axis direction and a "
+                "diameter and is AXIALLY INFINITE (there is no length field; "
+                "the engine's only contact test is the perpendicular distance "
+                "to the axis line, rgwalc.F:129-133) — the converted wall also "
+                "blocks nodes beyond both ends of the LS-DYNA cylinder.")
+        return [RigidWallGeomFace(
+            rwid=rw.rwid, title=title, form="CYL",
+            m=(rw.xt, rw.yt, rw.zt), m1=(rw.xh, rw.yh, rw.zh),
+            diameter=2.0 * rw.radcyl)]
+
+    if rw.shape == "SPHERE":
+        if rw.radsph <= 0.0:
+            state.warn(f"{label}: RADSPH = {rw.radsph:g} — a zero-radius "
+                       "sphere never contacts anything, so the wall was "
+                       "skipped.")
+            return []
+        # /RWALL/SPHER has no card 4: M is the centre and Diameter the size
+        # (hm_read_rwall_spher.F:204-206, 230).
+        return [RigidWallGeomFace(
+            rwid=rw.rwid, title=title, form="SPHER",
+            m=(rw.xt, rw.yt, rw.zt), diameter=2.0 * rw.radsph)]
+
+    # ── FLAT / PRISM ────────────────────────────────────────────────────────
+    tail = (rw.xt, rw.yt, rw.zt)
+    head = (rw.xh, rw.yh, rw.zh)
+    plane_face = RigidWallGeomFace(rwid=rw.rwid, title=title, form="PLANE",
+                                   m=tail, m1=head)
+    n = _vnorm((rw.xh - rw.xt, rw.yh - rw.yt, rw.zh - rw.zt))
+    if n is None:
+        state.warn(f"{label}: degenerate wall normal (head == tail) — the "
+                   "wall orientation is undefined, so it was skipped.")
+        return []
+    no_hev = not (rw.xhev or rw.yhev or rw.zhev)
+    if rw.shape == "FLAT" and no_hev:
+        # cfg geometrytype 2: a blank edge-vector head IS LS-DYNA's infinite
+        # plane, which /RWALL/PLANE expresses exactly (M = tail, M1 = head).
+        # dyna2rad instead builds a 1e20 x 1e20 PARAL quadrant anchored at the
+        # tail, which misses every node on the -l/-m side of it.
+        return [plane_face]
+
+    triad = None if no_hev else _rwall_geom_triad(rw, n)
+    finite_in_plane = rw.lenl > 0.0 and rw.lenm > 0.0
+    if triad is None or not finite_in_plane:
+        why = ("the edge-vector head (XHEV,YHEV,ZHEV) is blank or projects "
+               "onto the wall normal, so there is no in-plane edge direction"
+               if triad is None else
+               "LENL/LENM = 0 means an infinite extent in that direction in "
+               "LS-DYNA and /RWALL/PARAL cannot express a semi-infinite wall")
+        state.warn(
+            f"{label}: {why} — emitted as an INFINITE /RWALL/PLANE through the "
+            "tail point, which blocks more than the LS-DYNA wall does"
+            + (" (the prism's four side faces and its bottom face are lost)."
+               if rw.shape == "PRISM" else "."))
+        return [plane_face]
+
+    nu, lu, mu = triad
+    lvec = (rw.lenl * lu[0], rw.lenl * lu[1], rw.lenl * lu[2])
+    mvec = (rw.lenm * mu[0], rw.lenm * mu[1], rw.lenm * mu[2])
+    add = lambda *vs: tuple(sum(v[i] for v in vs) for i in range(3))
+    # /RWALL/PARAL takes the two opposite corner POINTS; the starter forms the
+    # normal as (M1-M) x (M2-M) = LENL*LENM*(l x m) = +n̂ and keeps the
+    # UN-normalized edge vectors as the patch extents (hm_read_rwall_paral.F:
+    # 245-267), so the LS-DYNA outward normal is preserved exactly.
+    top = RigidWallGeomFace(rwid=rw.rwid, title=title, form="PARAL",
+                            m=tail, m1=add(tail, lvec), m2=add(tail, mvec))
+    if rw.shape == "FLAT":
+        return [top]
+
+    if rw.lenp <= 0.0:
+        state.warn(
+            f"{label}: LENP = 0 makes the prism infinitely deep along -n; the "
+            "four side faces and the bottom face would each need a "
+            "semi-infinite /RWALL/PARAL, which does not exist — only the top "
+            "face was emitted (dyna2rad emits four walls with a zero edge "
+            "vector here, which the starter rejects with ERROR 168).")
+        return [top]
+
+    pvec = (-rw.lenp * nu[0], -rw.lenp * nu[1], -rw.lenp * nu[2])
+    neg = lambda v: (-v[0], -v[1], -v[2])
+    # Box corner T with edges +l (LENL), +m (LENM) and -n (LENP). Each face is
+    # (M, M1, M2) with (M1-M) x (M2-M) pointing OUT of the box, so the six
+    # walls together keep nodes outside the prism — the same decomposition
+    # dyna2rad uses (convertrwalls.cxx:299-374), verified face by face.
+    faces = [top]
+    for suffix, m0, e1, e2 in (
+            ("2", tail,                      pvec,      lvec),   # m = 0
+            ("3", tail,                      mvec,      pvec),   # l = 0
+            ("4", add(tail, mvec),           lvec,      pvec),   # m = LENM
+            ("5", add(tail, mvec, lvec),     neg(mvec), pvec),   # l = LENL
+            ("6", add(tail, pvec),           mvec,      lvec)):  # p = LENP
+        faces.append(RigidWallGeomFace(
+            rwid=alloc_rwid(), title=f"{title}_FACE{suffix}", form="PARAL",
+            m=m0, m1=add(m0, e1), m2=add(m0, e2)))
+    return faces
+
+
+def _resolve_geometric_rigid_walls(state: ConversionState) -> None:
+    """build_starter prepass for *RIGIDWALL_GEOMETRIC_*.
+
+    Resolves every geometric wall to its concrete Radioss wall(s) (so the
+    geometry warnings are raised exactly once), allocates the extra /RWALL ids
+    a PRISM's five additional faces need, and synthesizes the _MOTION carrier
+    nodes. Must run before the /NODE section is built and alongside the other
+    node-synthesizing prepasses, which all allocate off max(state.nodes)+1.
+    """
+    if not state.rigid_walls_geometric:
+        return
+    used_rwids = ({rw.rwid for rw in state.rigid_walls}
+                  | {g.rwid for g in state.rigid_walls_geometric})
+    next_node = (max(state.nodes) + 1) if state.nodes else 90000001
+
+    def alloc_rwid() -> int:
+        # /RWALL ids are checked by ONE starter UDOUBLE pass across PLANE, CYL,
+        # SPHER and PARAL (read_rwall.F), so a synthesized face id must dodge
+        # every wall in the deck, not just the geometric ones.
+        rid = state.next_id()
+        while rid in used_rwids:
+            rid = state.next_id()
+        used_rwids.add(rid)
+        return rid
+
+    for rw in state.rigid_walls_geometric:
+        label = f"*RIGIDWALL_GEOMETRIC_{rw.shape} id={rw.rwid}"
+        title = rw.title or f"RWALL_{rw.rwid}"
+        rw.faces = _rwall_geom_faces(rw, state, label, title, alloc_rwid)
+        if not rw.faces:
+            rw.motion = False
+            continue
+        if len(rw.faces) > 1 and state.db_rwforc_dt > 0.0:
+            state.warn(
+                f"{label}: the prism became {len(rw.faces)} separate /RWALL "
+                "walls, so its /TH/RWALL reaction is split across "
+                f"{len(rw.faces)} entries (ids "
+                + ", ".join(str(f.rwid) for f in rw.faces)
+                + ") — sum them to compare against one LS-DYNA rwforc record.")
+        if not rw.motion:
+            continue
+        # ── _MOTION validity ────────────────────────────────────────────────
+        if rw.lcid <= 0:
+            state.warn(
+                f"{label}: the MOTION card has no load curve (LCID = 0), so "
+                "there is nothing to prescribe — the wall is emitted as a "
+                "FIXED wall rather than as a free, unconstrained one "
+                "(dyna2rad emits the massless free wall).")
+            rw.motion = False
+            continue
+        if rw.lcid not in state.curves:
+            state.warn(
+                f"{label}: MOTION curve LCID={rw.lcid} is not in the deck — "
+                "the wall is emitted as a FIXED wall.")
+            rw.motion = False
+            continue
+        if _vnorm((rw.vx, rw.vy, rw.vz)) is None:
+            state.warn(
+                f"{label}: the MOTION direction cosines VX/VY/VZ are all zero, "
+                "so the motion direction is undefined — the wall is emitted as "
+                "a FIXED wall (dyna2rad silently moves it along global +X).")
+            rw.motion = False
+            continue
+        # A moving /RWALL takes its base point M from the carrier node's
+        # coordinates and replaces the XM/YM/ZM card with "Mass VX0 VY0 VZ0"
+        # (hm_read_rwall_cyl.F:199-230) — so every face needs its own node at
+        # that face's own M, and one prescribed-motion card drives them all.
+        for face in rw.faces:
+            face.node_id = next_node
+            next_node += 1
+            state.nodes[face.node_id] = NodeData(*face.m)
+        state.warn(
+            f"{label}: MOTION → the wall is carried by synthesized free "
+            f"node(s) {', '.join(str(f.node_id) for f in rw.faces)} driven by "
+            f"/{'IMPVEL' if rw.opt == 0 else 'IMPDISP'} on curve {rw.lcid}; "
+            "/RWALL itself has no motion-curve field, and the imposed motion "
+            "wins over the wall reaction (resol.F calls FIXVEL after RGWALF). "
+            "The wall's own Mass field stays 0, matching the LS-DYNA card, "
+            "which specifies no wall mass.")
+
+
+def _make_geometric_rwall_motion(rw, state: ConversionState,
+                                 grnod_id: int) -> List[str]:
+    """The /SKEW/FIX + /GRNOD + /IMPVEL|/IMPDISP driving a _MOTION wall.
+
+    LS-DYNA gives a motion DIRECTION (VX,VY,VZ direction cosines) plus a curve
+    that carries the amplitude; /IMPVEL and /IMPDISP prescribe along one axis
+    of a skew, so the direction becomes a /SKEW/FIX whose local X' is the
+    motion vector and the card asks for Dir = "X". /SKEW/FIX's two vector
+    cards are the local Y' and Z' (NOT X and Y), and the starter rebuilds
+    X' = Y' x Z' (hm_read_skw.F:448-459): with Y' = ê x V and Z' = V x Y',
+    X' = Y' x Z' = V |Y'|^2, i.e. exactly +V.
+    """
+    v = _vnorm((rw.vx, rw.vy, rw.vz))
+    # ê = global Z, or global X when V is parallel to Z (a zero cross product).
+    yax = _vnorm(_vcross((0.0, 0.0, 1.0), v))
+    if yax is None:
+        yax = _vnorm(_vcross((1.0, 0.0, 0.0), v))
+    zax = _vnorm(_vcross(v, yax))
+    skew_id = state.reserve_skew_id(state.next_id())
+    motion_id = state.next_id()
+    keyword = "IMPVEL" if rw.opt == 0 else "IMPDISP"
+    lines = _emit_skew_fix(skew_id, f"RWALL_{rw.rwid}_MOTION_DIR",
+                           (0.0, 0.0, 0.0), yax, zax)
+    lines += [
+        f"/{keyword}/{motion_id}",
+        f"RWALL_{rw.rwid}_MOTION",
+        "#funct_IDT       Dir   skew_ID sensor_ID  grnod_ID  frame_ID     Icoor",
+        f"{_i(rw.lcid)}{'X'.rjust(10)}{_i(skew_id)}         0{_i(grnod_id)}"
+        "         0         0",
+        "#           Ascale_x            Fscale_Y              Tstart               Tstop",
+        f"                   1{_f(1.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
+    lines += _emit_grnod_node(grnod_id, f"RWALL_{rw.rwid}_MOTION_NODES",
+                              [f.node_id for f in rw.faces])
+    return lines
+
+
+def _emit_rwall_geom_face(face: RigidWallGeomFace, slide: int, fric: float,
+                          grnd1: int, grnd2: int, d: float) -> List[str]:
+    """One /RWALL block in the exact cfg FORMAT(radioss51) layout.
+
+    Card 1 is exactly 40 columns (cols 41-50 are the 2026-only Iform, silently
+    dropped at /BEGIN 2022); card 2 is the full 90-column
+    "d fric Diameter ffac ifq" (20/20/20/20/10). Diameter is meaningful for CYL
+    and SPHER only and is read-but-unused for PLANE/PARAL. The title line is
+    MANDATORY: omitting it shifts every following card by one and the starter
+    accepts the result with 0 ERRORS.
+    """
+    lines = [
+        f"/RWALL/{face.form}/{face.rwid}",
+        face.title,
+        "#  node_ID     Slide  grnd_ID1  grnd_ID2",
+        f"{_i(face.node_id)}{_i(slide)}{_i(grnd1)}{_i(grnd2)}",
+        "#           D_search                fric            Diameter"
+        "                ffac       ifq",
+        f"{_f(d)}{_f(fric if slide == 2 else 0.0)}{_f(face.diameter)}"
+        f"{_f(0.0)}{_i(0)}",
+    ]
+    if face.node_id:
+        # Moving form: M comes from the node, and the card carries the wall
+        # mass + initial velocity instead. Both stay 0 here — the LS-DYNA
+        # _MOTION card specifies no mass, and the prescribed motion (applied
+        # by FIXVEL, after RGWALF) sets the velocity every cycle anyway.
+        lines += [
+            "#               Mass                VX_0             "
+            "   VY_0                VZ_0",
+            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        ]
+    else:
+        lines += [
+            "#                 XM                  YM                  ZM",
+            f"{_f(face.m[0])}{_f(face.m[1])}{_f(face.m[2])}",
+        ]
+    if face.m1 is not None:                      # PLANE, CYL, PARAL
+        lines += [
+            "#                XM1                 YM1                 ZM1",
+            f"{_f(face.m1[0])}{_f(face.m1[1])}{_f(face.m1[2])}",
+        ]
+    if face.m2 is not None:                      # PARAL only
+        lines += [
+            "#                XM2                 YM2                 ZM2",
+            f"{_f(face.m2[0])}{_f(face.m2[1])}{_f(face.m2[2])}",
+        ]
+    lines.append(HDR)
+    return lines
+
+
+def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
+                       nsid: int, nsidex: int, boxid: int):
+    """A rigid wall's tracked (grnd_ID1) and excluded (grnd_ID2) node groups.
+
+    Returns (grnd_ID1, grnd_ID2, /GRNOD blocks), or None when the wall must be
+    dropped entirely. NSID wins over BOXID (matching dyna2rad); a box-only wall
+    becomes a /GRNOD of the in-box nodes; neither means "track ALL nodes",
+    which the caller expresses with a bounding-box search distance d because
+    the 2022 /RWALL format has no "all nodes" group id.
+    """
+    grnd1 = grnd2 = 0
+    grnod_blocks: List[str] = []
+    if nsid > 0:
+        set_title, nids = state.node_sets.get(nsid, ("", []))
+        if nids:
+            grnd1 = state.next_id()
+            grnod_blocks += _emit_grnod_node(
+                grnd1, set_title or f"rwall_{rwid}_nodes", nids)
+        else:
+            state.warn(
+                f"{label}: node set {nsid} not "
+                "found — the wall tracks ALL nodes instead.")
+    # BOXID scopes the tracked node group. dyna2rad drops the box when NSID
+    # is also given (NSID wins); a box-only wall becomes a /GRNOD of the
+    # in-box nodes (the same role the NSID set plays above).
+    if boxid:
+        if grnd1:
+            state.warn(
+                f"{label}: both NSID and BOXID given "
+                "— BOXID dropped, the NSID node set scopes the wall "
+                "(matching dyna2rad).")
+        else:
+            box_nids = _resolve_box_nodes(
+                state, boxid, f"{label} BOXID={boxid}")
+            if box_nids:
+                box_nids = sorted(box_nids)
+                grnd1 = state.next_id()
+                grnod_blocks += _emit_grnod_node(
+                    grnd1, f"rwall_{rwid}_box{boxid}", box_nids)
+                state.warn(
+                    f"{label}: tracked nodes scoped "
+                    f"to the {len(box_nids)} node(s) inside *DEFINE_BOX "
+                    f"{boxid}.")
+            elif box_nids is not None:          # resolved but empty
+                state.warn(
+                    f"{label}: *DEFINE_BOX {boxid} "
+                    "encloses no mesh node — no slave nodes, so the wall is "
+                    "inactive (LS-DYNA tracks nothing); the wall was skipped "
+                    "rather than falling back to tracking ALL nodes.")
+                return None
+    if nsidex > 0:
+        set_title, nids = state.node_sets.get(nsidex, ("", []))
+        if nids:
+            grnd2 = state.next_id()
+            grnod_blocks += _emit_grnod_node(
+                grnd2, set_title or f"rwall_{rwid}_excluded", nids)
+        else:
+            state.warn(
+                f"{label}: excluded node set "
+                f"{nsidex} not found — no nodes excluded.")
+    return grnd1, grnd2, grnod_blocks
+
+
+def _rwall_slide(fric: float) -> int:
+    """LS-DYNA FRIC → the /RWALL ``Slide`` flag.
+
+    0 = frictionless sliding, 1 = tied (LS-DYNA's "no sliding" FRIC = 1.0),
+    2 = Coulomb friction with the coefficient on card 2. Applied to GEOMETRIC
+    walls as well as PLANAR ones: dyna2rad's geometric path instead does
+    ``FRIC > 0 → Slide = 2, fric = FRIC`` (convertrwalls.cxx:234-238), which
+    turns LS-DYNA's tied FRIC = 1.0 into a Coulomb coefficient of 1.0.
+    """
+    if fric >= 1.0:
+        return 1
+    return 2 if fric > 0.0 else 0
+
+
 def _make_rigid_walls(state: ConversionState) -> List[str]:
     """*RIGIDWALL_PLANAR → /RWALL/PLANE (fixed infinite plane, node_ID = 0).
 
@@ -3637,7 +4042,7 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
     "XM1 YM1 ZM1" (+ "XM2 YM2 ZM2" for PARAL). The moving wall's initial
     velocity is V0 along the outward unit normal (LS-DYNA's V0 convention).
     """
-    if not state.rigid_walls:
+    if not (state.rigid_walls or state.rigid_walls_geometric):
         return []
     lines: List[str] = ["#-  RIGID WALLS:", HDR]
 
@@ -3651,67 +4056,17 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
 
     th_wall_ids: List[Tuple[int, str]] = []
     for rw in state.rigid_walls:
-        grnd1 = grnd2 = 0
-        grnod_blocks: List[str] = []
-        if rw.nsid > 0:
-            set_title, nids = state.node_sets.get(rw.nsid, ("", []))
-            if nids:
-                grnd1 = state.next_id()
-                grnod_blocks += _emit_grnod_node(
-                    grnd1, set_title or f"rwall_{rw.rwid}_nodes", nids)
-            else:
-                state.warn(
-                    f"*RIGIDWALL_PLANAR id={rw.rwid}: node set {rw.nsid} not "
-                    "found — the wall tracks ALL nodes instead.")
-        # BOXID scopes the tracked node group. dyna2rad drops the box when NSID
-        # is also given (NSID wins); a box-only wall becomes a /GRNOD of the
-        # in-box nodes (the same role the NSID set plays above).
-        if rw.boxid:
-            if grnd1:
-                state.warn(
-                    f"*RIGIDWALL_PLANAR id={rw.rwid}: both NSID and BOXID given "
-                    "— BOXID dropped, the NSID node set scopes the wall "
-                    "(matching dyna2rad).")
-            else:
-                box_nids = _resolve_box_nodes(
-                    state, rw.boxid,
-                    f"*RIGIDWALL_PLANAR id={rw.rwid} BOXID={rw.boxid}")
-                if box_nids:
-                    box_nids = sorted(box_nids)
-                    grnd1 = state.next_id()
-                    grnod_blocks += _emit_grnod_node(
-                        grnd1, f"rwall_{rw.rwid}_box{rw.boxid}", box_nids)
-                    state.warn(
-                        f"*RIGIDWALL_PLANAR id={rw.rwid}: tracked nodes scoped "
-                        f"to the {len(box_nids)} node(s) inside *DEFINE_BOX "
-                        f"{rw.boxid}.")
-                elif box_nids is not None:          # resolved but empty
-                    state.warn(
-                        f"*RIGIDWALL_PLANAR id={rw.rwid}: *DEFINE_BOX {rw.boxid} "
-                        "encloses no mesh node — no slave nodes, so the wall is "
-                        "inactive (LS-DYNA tracks nothing); the wall was skipped "
-                        "rather than falling back to tracking ALL nodes.")
-                    continue
-        if rw.nsidex > 0:
-            set_title, nids = state.node_sets.get(rw.nsidex, ("", []))
-            if nids:
-                grnd2 = state.next_id()
-                grnod_blocks += _emit_grnod_node(
-                    grnd2, set_title or f"rwall_{rw.rwid}_excluded", nids)
-            else:
-                state.warn(
-                    f"*RIGIDWALL_PLANAR id={rw.rwid}: excluded node set "
-                    f"{rw.nsidex} not found — no nodes excluded.")
+        groups = _rwall_node_groups(
+            state, f"*RIGIDWALL_PLANAR id={rw.rwid}", rw.rwid,
+            rw.nsid, rw.nsidex, rw.boxid)
+        if groups is None:
+            continue
+        grnd1, grnd2, grnod_blocks = groups
         # d only matters when no node group is given (grnd_ID1=0 → distance
         # search); the bbox diagonal guarantees every node qualifies.
         d = 0.0 if grnd1 else (bbox_diag if bbox_diag > 0 else 1e10)
 
-        if rw.fric >= 1.0:
-            slide = 1          # LS-DYNA FRIC=1: stick (no sliding) → tied
-        elif rw.fric > 0.0:
-            slide = 2          # Coulomb friction
-        else:
-            slide = 0          # frictionless sliding
+        slide = _rwall_slide(rw.fric)
 
         title = rw.title or f"RWALL_{rw.rwid}"
         paral = _rwall_finite_corners(rw, state) if rw.finite else None
@@ -3793,6 +4148,36 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
             lines.append(HDR)
         lines += grnod_blocks
         th_wall_ids.append((rw.rwid, title))
+
+    # *RIGIDWALL_GEOMETRIC_* — geometry already resolved to concrete Radioss
+    # walls by the _resolve_geometric_rigid_walls prepass (which also created
+    # the _MOTION carrier nodes, since those must exist before /NODE).
+    for rw in state.rigid_walls_geometric:
+        if not rw.faces:
+            continue
+        label = f"*RIGIDWALL_GEOMETRIC_{rw.shape} id={rw.rwid}"
+        groups = _rwall_node_groups(state, label, rw.rwid,
+                                    rw.nsid, rw.nsidex, rw.boxid)
+        if groups is None:
+            continue
+        grnd1, grnd2, grnod_blocks = groups
+        # NSID = 0 tracks ALL nodes in LS-DYNA. /RWALL has no "all" group id,
+        # so the bbox diagonal as the search distance d picks up every node.
+        # For CYL/SPHER the starter measures d from the wall SURFACE outward
+        # and keeps only DISN >= 0 (hm_read_rwall_cyl.F:272), so nodes already
+        # inside the obstacle are never auto-selected — which is correct, an
+        # initially-penetrating node cannot be pushed out by an exterior wall.
+        d = 0.0 if grnd1 else (bbox_diag if bbox_diag > 0 else 1e10)
+        slide = _rwall_slide(rw.fric)
+        # All faces of a prism share one tracked group, one friction setting
+        # and (for _MOTION) one prescribed-motion card.
+        for face in rw.faces:
+            lines += _emit_rwall_geom_face(face, slide, rw.fric,
+                                           grnd1, grnd2, d)
+            th_wall_ids.append((face.rwid, face.title))
+        if rw.motion:
+            lines += _make_geometric_rwall_motion(rw, state, state.next_id())
+        lines += grnod_blocks
 
     # *DATABASE_RWFORC → /TH/RWALL (wall resultant IMPULSE time history).
     #

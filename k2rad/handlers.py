@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast as _ast
 import math as _math
+from itertools import permutations as _permutations
 from typing import List, Optional, Tuple
 
 from .parser import (
@@ -50,7 +51,7 @@ from .state import (
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
     BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
-    LoadNode, RigidWallPlanar,
+    LoadNode, RigidWallPlanar, RigidWallGeometric,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
     ContactForceTransducer, ContactTied, ContactSpotweld, ContactType25,
     DefineFriction, FrictionPair, HexSpotweldAssembly,
@@ -5684,11 +5685,7 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
     is_moving = "_MOVING" in kw
     raw = block.raw
     offset = _title_offset(block)
-    if offset and _has_id(block):
-        rwid = to_int(parse_free(raw[0])[0]) if parse_free(raw[0]) else 0
-        title = _read_title(block)
-    else:
-        rwid, title = 0, ""
+    rwid, title = _rwall_id_and_title(block)
     if rwid <= 0:
         rwid = state.next_id()
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
@@ -5755,6 +5752,169 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
         moving=is_moving, mass=mass, v0=v0,
         finite=is_finite, xhev=xhev, yhev=yhev, zhev=zhev,
         lenl=lenl, lenm=lenm))
+
+
+def _rwall_id_and_title(block: Block) -> Tuple[int, str]:
+    """(RWID, HEADING) from a *RIGIDWALL_* ``_ID`` header card, else (0, "").
+
+    Both rigidwall cfgs write the header as ``CARD("%10d%-70s", _ID_, TITLE)``
+    (rigidwall_geometric.cfg:469, rigidwall_planar.cfg), so an unpadded title
+    is FUSED to the id — "       777my wall" free-splits to the token
+    "777my", which is not an integer and would silently cost the wall both its
+    user id and its name. Slice the I10 field first and fall back to the free
+    split only when that field is not a bare integer (a comma-separated or
+    narrower hand-written card).
+    """
+    if not (_has_id(block) and block.raw):
+        return 0, ""
+    line = block.raw[0]
+    head = line[:10].strip()
+    if head.isdigit() or (head.startswith("-") and head[1:].isdigit()):
+        return to_int(head), line[10:].strip()
+    tokens = parse_free(line)
+    if not tokens:
+        return 0, ""
+    return to_int(tokens[0]), " ".join(tokens[1:])
+
+
+#: *RIGIDWALL_GEOMETRIC shape suffix → the LS-DYNA card-3 flavour.
+_RWALL_GEOM_SHAPES = ("FLAT", "PRISM", "CYLINDER", "SPHERE")
+
+
+def handle_rigidwall_geometric(block: Block, state: ConversionState) -> None:
+    """*RIGIDWALL_GEOMETRIC_<shape>[_MOTION][_DISPLAY][_ID] → /RWALL/*.
+
+    Card 1: nsid nsidex boxid birth death
+    Card 2: xt yt zt xh yh zh fric
+    Card 3 (shape, LS-DYNA's strict card order — the option NAMES may be in
+    any order, the CARDS may not, Manual p. 3659):
+      _FLAT      xhev yhev zhev lenl lenm
+      _PRISM     xhev yhev zhev lenl lenm lenp
+      _CYLINDER  radcyl lencyl nsegs, then NSEGS "vl height" sub-cards
+      _SPHERE    radsph
+    Card 4 (_MOTION):  lcid opt vx vy vz   — always BEFORE card 5
+    Card 5 (_DISPLAY): pid ro e pr
+
+    The geometry is resolved to Radioss walls by the writer prepass
+    ``_resolve_geometric_rigid_walls`` (it also synthesizes the _MOTION
+    carrier nodes, which must exist before the /NODE section is built).
+    """
+    kw = block.keyword
+    shape = next((s for s in _RWALL_GEOM_SHAPES if f"_{s}" in kw), "")
+    if not shape:
+        # No shape suffix at all: LS-DYNA has no such card and dyna2rad drops
+        # it silently (convertrwalls.cxx:214, `if (GeomType)`). Be loud.
+        state.warn(f"*{kw}: no FLAT/PRISM/CYLINDER/SPHERE shape option — "
+                   "the wall geometry is undefined, so it was skipped.")
+        state.skipped_keywords.append(kw)
+        return
+    label = f"*{kw}"
+    raw = block.raw
+    offset = _title_offset(block)
+    rwid, title = _rwall_id_and_title(block)
+    if rwid <= 0:
+        rwid = state.next_id()
+
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1:
+        state.warn(f"{label}: missing data card — skipped.")
+        state.note_recognized_not_emitted(
+            kw, "the wall's Card 1 (NSID/NSIDEX/BOXID) is missing")
+        return
+    nsid   = to_int(f1[0])
+    nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+    boxid  = to_int(f1[2]) if len(f1) > 2 else 0
+    birth  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    death  = _ffield(f1, 4, 0.0)
+
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    if len(f2) < 6:
+        state.warn(f"{label} id={rwid}: missing geometry card — skipped.")
+        state.note_recognized_not_emitted(
+            kw, "the wall's Card 2 (XT..ZH/FRIC) is missing or too short")
+        return
+    g = lambda i: to_float(f2[i]) if len(f2) > i else 0.0
+    fric = g(6)
+    if birth > 0.0 or (0.0 < death < 1e20):
+        state.warn(f"{label} id={rwid}: BIRTH/DEATH have no /RWALL "
+                   "equivalent — the wall is active for the whole run.")
+
+    rw = RigidWallGeometric(
+        rwid=rwid, title=title, shape=shape,
+        nsid=nsid, nsidex=nsidex, boxid=boxid, birth=birth, death=death,
+        xt=g(0), yt=g(1), zt=g(2), xh=g(3), yh=g(4), zh=g(5), fric=fric)
+
+    idx = offset + 2
+    f3 = _card(raw, idx, fixed=True, n=8, w=10)
+    idx += 1
+    if not f3:
+        state.warn(f"{label} id={rwid}: missing the {shape} shape card — "
+                   "the wall dimensions are unknown, so it was skipped.")
+        state.note_recognized_not_emitted(
+            kw, f"the {shape} shape card (Card 3) is missing")
+        return
+    h = lambda i: to_float(f3[i]) if len(f3) > i else 0.0
+    if shape in ("FLAT", "PRISM"):
+        rw.xhev, rw.yhev, rw.zhev = h(0), h(1), h(2)
+        rw.lenl, rw.lenm = h(3), h(4)
+        if shape == "PRISM":
+            rw.lenp = h(5)
+    elif shape == "CYLINDER":
+        rw.radcyl, rw.lencyl = h(0), h(1)
+        rw.nsegs = to_int(f3[2]) if len(f3) > 2 else 0
+        if rw.nsegs > 0:
+            # Card 3c.1 repeats NSEGS times (VL HEIGHT) — force-output
+            # subdivisions with no /RWALL counterpart, but they DO shift the
+            # _MOTION / _DISPLAY cards, so the cursor has to skip them.
+            idx += rw.nsegs
+            state.warn(
+                f"{label} id={rwid}: NSEGS={rw.nsegs} subdivides the cylinder "
+                "for per-segment force output; /RWALL/CYL is one wall with one "
+                "resultant, so the VL/HEIGHT sub-cards were dropped and "
+                "/TH/RWALL reports the whole-cylinder resultant only.")
+    else:                       # SPHERE
+        rw.radsph = h(0)
+
+    if "_MOTION" in kw:
+        fm = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
+        if len(fm) < 2:
+            state.warn(f"{label} id={rwid}: missing the MOTION card — the "
+                       "wall is emitted as a FIXED wall.")
+        else:
+            rw.motion = True
+            rw.lcid = to_int(fm[0])
+            rw.opt = to_int(fm[1])
+            rw.vx = to_float(fm[2]) if len(fm) > 2 else 0.0
+            rw.vy = to_float(fm[3]) if len(fm) > 3 else 0.0
+            rw.vz = to_float(fm[4]) if len(fm) > 4 else 0.0
+    if "_DISPLAY" in kw:
+        # PID/RO/E/PR describe a visualization mesh only and have no effect on
+        # the solution (Manual p. 3669) — dyna2rad never reads them either.
+        state.warn(f"{label} id={rwid}: the DISPLAY card (PID/RO/E/PR) defines "
+                   "a visualization mesh only and has no solution effect — "
+                   "dropped.")
+
+    state.rigid_walls_geometric.append(rw)
+
+
+def handle_rigidwall_geometric_interior(block: Block,
+                                        state: ConversionState) -> None:
+    """*RIGIDWALL_GEOMETRIC_{CYLINDER,SPHERE}_INTERIOR*: nodes confined INSIDE.
+
+    Radioss /RWALL/CYL and /RWALL/SPHER are unconditionally exterior obstacles
+    — the engine tests ``DP <= RA2`` and pushes the node radially OUT
+    (rgwalc.F:132-133, rgwals.F:126-127) — and there is no inversion flag on
+    any /RWALL card. Converting an _INTERIOR wall would therefore INVERT the
+    physics, so warn-skip it instead (dyna2rad parses the option and then
+    ignores it, silently producing that inverted wall).
+    """
+    state.warn(
+        f"*{block.keyword}: the INTERIOR option confines nodes INSIDE the "
+        "cylinder/sphere, but /RWALL/CYL and /RWALL/SPHER always push nodes "
+        "OUTWARD and have no inversion flag — converting it would invert the "
+        "wall physics, so this rigid wall was skipped.")
+    state.skipped_keywords.append(block.keyword)
 
 
 def handle_rigidwall_ortho(block: Block, state: ConversionState) -> None:
@@ -9446,6 +9606,34 @@ del _n
 for _kw in _UNSUPPORTED_DBEAM_KEYWORDS:
     HANDLERS[_kw] = handle_mat_unsupported_discrete_beam
 del _kw
+
+
+def _rwall_geometric_keywords():
+    """Every *RIGIDWALL_GEOMETRIC spelling, generated rather than hand-listed.
+
+    "The order of the OPTIONS is arbitrary" (Manual p. 3659) — only the DATA
+    CARDS have a fixed order — so every permutation of the optional suffixes
+    is a legal spelling and each needs its own dispatch key (k2rad registers
+    exact keywords; a substring rule would misclassify neighbouring
+    families). _INTERIOR exists for CYLINDER/SPHERE only (R10.1+ cfg).
+    _ID/_TITLE are stripped by the parser and never appear here.
+
+    Yields (keyword, has_interior) pairs.
+    """
+    for _shape in _RWALL_GEOM_SHAPES:
+        opts = ["_MOTION", "_DISPLAY"]
+        if _shape in ("CYLINDER", "SPHERE"):
+            opts.append("_INTERIOR")
+        for _r in range(len(opts) + 1):
+            for _combo in _permutations(opts, _r):
+                yield (f"RIGIDWALL_GEOMETRIC_{_shape}" + "".join(_combo),
+                       "_INTERIOR" in _combo)
+
+
+for _kw, _interior in _rwall_geometric_keywords():
+    HANDLERS[_kw] = (handle_rigidwall_geometric_interior if _interior
+                     else handle_rigidwall_geometric)
+del _kw, _interior
 
 
 #: Keyword PREFIX → handler, tried when the exact-match lookup misses. Only the
