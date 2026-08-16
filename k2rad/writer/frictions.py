@@ -9,7 +9,7 @@ column, which is plumbed from ``contacts.py``.
 
 from __future__ import annotations
 
-from typing import Dict, List, Set
+from typing import Dict, List
 
 from ..state import ConversionState, DefineFriction, FrictionPair
 from .common import HDR, _emit_grpart_part, _f, _i
@@ -93,7 +93,13 @@ def _friction_pair_lines(state: ConversionState, fric: DefineFriction,
     p_fric, p_c5, p_c6 = _friction_coeffs(pair.fs, pair.fd, pair.dc)
     return [
         "#grpartID1 grpartID2   partID1   partID2                IDIR",
-        f"{_i(grp1)}{_i(grp2)}{_i(part1)}{_i(part2)}                    0",
+        # friction.cfg:281 is "%10d%10d%10d%10d          %10d": 40 id columns,
+        # then TEN literal blanks, then Idir as a 10-wide field in cols 51-60.
+        # A 20-blank tail would push the 0 into column 61 — outside the card,
+        # leaving Idir itself blank. Harmless while Idir is always 0, but the
+        # row would then disagree with its own 60-char COMMENT header and would
+        # silently mis-parse the day *DEFINE_FRICTION_ORIENTATION makes it 1.
+        f"{_i(grp1)}{_i(grp2)}{_i(part1)}{_i(part2)}" + " " * 10 + _i(0),
         "#            C1_DIR1             C2_DIR1             C3_DIR1"
         "             C4_DIR1             C5_DIR1",
         f"                   0                   0                   0"
@@ -137,7 +143,6 @@ def _make_frictions(state: ConversionState) -> List[str]:
     #: *SET_PART id → the /GRPART/PART emitted for it, so a set referenced by
     #: several rows (or several tables) gets exactly one group.
     grpart_ids: Dict[int, int] = {}
-    warned_vc: Set[int] = set()
 
     for fric in state.define_frictions.values():
         d_fric, d_c5, d_c6 = _friction_coeffs(fric.fs, fric.fd, fric.dc)
@@ -182,8 +187,7 @@ def _make_frictions(state: ConversionState) -> List[str]:
                 "field — k2rad drops such a row and warns either way, so the "
                 "behaviour already matches ICNEP=1.")
         vc_values = [fric.vc] + [p.vc for p in fric.pairs]
-        if any(v != 0.0 for v in vc_values) and fric.fric_id not in warned_vc:
-            warned_vc.add(fric.fric_id)
+        if any(v != 0.0 for v in vc_values):
             state.warn(
                 f"*DEFINE_FRICTION {fric.fric_id}: the VC column is written to "
                 "/FRICTION VIS_f (as dyna2rad does), but the two are NOT the "

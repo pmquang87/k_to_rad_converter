@@ -2421,7 +2421,12 @@ class ContactType25:
     ``isym``/``erosop``/``iadj`` are the ERODING Card-4 fields. dyna2rad parses
     them in the CFG and then discards all three with no message
     (``grep EROSOP|IADJ|ISYM`` over the whole dyna2rad tree: zero hits) — k2rad
-    acts on IADJ (the /SURF/PART/ALL choice) and warns about the rest.
+    WARNS about all three (``_warn_eroding_card4``) but acts on none of them:
+    the solid side is built with /SURF/PART/ALL whenever the contact is eroding
+    (``writer/contacts.py`` ``_type25_surface``, ``if c.eroding and
+    solid_pids``), i.e. IADJ is assumed to be 1 unconditionally, which is what
+    MPP hardcodes. The only lever is the global ``--eroding-surf-ext``; a deck
+    mixing an IADJ=0 and an IADJ=1 eroding contact cannot be expressed.
     """
     inter_id: int
     title: str

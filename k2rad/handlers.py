@@ -4205,6 +4205,18 @@ def handle_define_friction(block: Block, state: ConversionState) -> None:
         pid_i = to_int(f[0]) if f else 0
         pid_j = to_int(f[1]) if len(f) > 1 else 0
         if pid_i <= 0 or pid_j <= 0:
+            # Do NOT drop this silently: a fixed-format row written one column
+            # short, or one whose second id field was left blank, otherwise
+            # loses that part pair without a word and it falls back to the
+            # table's default coefficients. The two other drop paths (part /
+            # *SET_PART does not exist, writer/frictions.py) both warn.
+            state.warn(
+                f"*DEFINE_FRICTION {fric_id}: a part-pair row has a blank or "
+                f"non-positive part id (PID_i={pid_i}, PID_j={pid_j}) and is "
+                f"DROPPED — that pair falls back to the table's default "
+                f"FS/FD/DC. Row as read: {ln.rstrip()!r}. Check the row's "
+                "column alignment (both ids are 10-wide fields) if this pair "
+                "was meant to have its own coefficients.")
             continue
         fric.pairs.append(FrictionPair(
             pid_i=pid_i, pid_j=pid_j,

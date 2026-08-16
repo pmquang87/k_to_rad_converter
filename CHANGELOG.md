@@ -117,20 +117,42 @@ Prior history (before this changelog was introduced) is summarized in the
   spelling (`contact_option_nodes_to_surface.cfg:2506-2548` gates the FS
   pre-read on `ContactOption == 2`), so with ≥2 tables it silently zeroes the
   friction of a plain `*CONTACT_NODES_TO_SURFACE` whose table exists — k2rad
-  reads the raw FD column itself. **`/INTER/TYPE11`, `/INTER/TYPE19`,
-  `/INTER/TYPE2` and `/INTER/TYPE10` have no `fric_ID` column** in their newest
-  `/BEGIN 2022` FORMAT (TYPE11's `radioss2020` block ends at the IBC card,
-  TYPE19's `radioss2021` block at `Iform`; TYPE2/TYPE10 have no friction model),
-  so an `FS=−2` on one of those gets a loud warning naming the interface and the
-  target type instead of a silently frictionless run.
+  reads the raw FD column itself. The binding is written on **every sliding
+  interface type this converter emits** — `TYPE7` (`radioss2020/INTER/
+  inter_type7.cfg` card 6), `TYPE11` (`radioss2020/INTER/inter_type11.cfg:
+  409-410`, a card of its own: 90 blank columns then `%10d`, read by
+  `hm_read_inter_type11.F:185` into `IPARI(72)`), `TYPE19`
+  (`radioss2021/INTER/inter_type19.cfg:801-802`, appended to the `Ifric` card;
+  the hm_reader carries it onto every child interface the TYPE19 expands into,
+  `GlobalModelSdi.cpp:1247/1341/1432`) and `TYPE25`
+  (`radioss2022/INTER/inter_type25.cfg` card 6) — all four at cols 91-100. Only
+  `/INTER/TYPE2` and `/INTER/TYPE10` are excluded, because they are *tied*
+  interfaces with no friction model at all; an `FS=−2` on one of those gets a
+  loud warning naming the interface instead of a silently frictionless run. The
+  extra columns are written only when a table is actually bound, so a
+  table-free deck stays byte-identical. `inter_dcod_friction.F:80` confirms the
+  accepted set is exactly `NTYP 7/11/19/21/24/25`. One caveat k2rad now states
+  up front: on an **edge** contact the pair *coefficients* act but the `Ifric=2`
+  Darmstad velocity decay does not — `inter_dcod_friction.F:101-112` raises
+  `WARNING 1595` for `NTYP==11` whenever the table's `FRICMOD > 0` and copies
+  only `FRICFORM` into `IPARI(30)`, and the engine agrees (`i11mainf.F:233-241`
+  pulls the pair tables, `i11cor3.F:386` resolves the pair, but `i11for3.F` uses
+  the flat `FRICC` with no `exp` term). `/INTER/TYPE19` inherits it through its
+  TYPE11 child; its TYPE7 child gets the full law. Only the `DC` term is lost,
+  and the contact is **not** frictionless — which is what it used to be.
 
   **Fixed on the way through.** `FS = −1` ("the `*PART_CONTACT` coefficients are
   to be used") was written straight through as `Fric = −1` — a *negative* Coulomb
   coefficient on the interface card, on every contact family, silently. It now
-  becomes `Fric=0` with a warning naming the interface. `FS = 2` (LS-DYNA
-  reinterprets `FD` as a `*DEFINE_TABLE` id, μ(pressure, velocity)) keeps its
-  literal value and warns only when the deck really contains that table, so a
-  legitimate μ=2 deck is untouched. `_select_parent_interface` and
+  becomes `Fric=0` with a warning naming the interface. `FS = 2` is the same
+  class of bug and gets the same treatment: it is the LS-DYNA sentinel for "`FD`
+  is a friction *table* id", μ(contact pressure, relative velocity) — Vol I
+  p.11-28 *"FS.EQ.2: Table ID for a table that specifies two or more values of
+  contact pressure…"* — and used to fall through as a literal Coulomb
+  coefficient of 2.0, which is 4-40× a real table's typical 0.05-0.5. It now
+  writes `Fric=0` and warns **unconditionally**; the old warning was gated on
+  the table being resolvable, so a blank, dangling or `*DEFINE_TABLE_2D` `FD`
+  wrote μ=2.0 in total silence. `_select_parent_interface` and
   `_match_parent_interface` did not filter `state.dropped_inter_ids`
   (`writer/contacts.py:653`), so a deck whose first contact was dropped parented
   its `/INTER/SUB` — and the `/TH/INTER` parent id — on an interface that was
@@ -142,8 +164,27 @@ Prior history (before this changelog was introduced) is summarized in the
   cards A and C down one line — reading blind takes `ISYM` for `SOFT` and Card
   B's `THKOPT` for `IGNORE`, i.e. the wrong `Inacti`.
 
+  **Side resolution.** A bare `SSID`/`MSID` of 0 used to expand to *every part
+  in the deck* on both sides of every variant. LS-DYNA gives it that meaning on
+  exactly one side of one family — Vol I p.11-24, *"SURFA … EQ.0: Includes all
+  parts in the case of single surface contact types"*, against *"SURFB … EQ.0:
+  SURFB side is not applicable for single surface contact types"*. A
+  surface-to-surface or node-to-surface deck that simply dropped its `MSID` was
+  therefore turned into a plausible-looking contact over the whole model, with
+  the secondary part on *both* sides, and nothing said so. Now only a
+  `SINGLE_SURFACE`'s `SSID` reads 0 as "all parts"; every other side falls
+  through to the normal drop-with-remedy path. `SURFATYP`/`SURFBTYP = 5`
+  ("include all non-spot-weld parts", p.11-25) is a different thing and still
+  expands on either side.
+
   **Reported, not dropped in silence**: `ISYM=1` (no `/SURF` equivalent for
-  "omit symmetry-plane faces"), `EROSOP=0`, `IADJ=0`, per-side `SST`/`MST` (the
+  "omit symmetry-plane faces"), `EROSOP=0`, `IADJ=0`, the SMP friction
+  exclusion (Vol I p.11-65 remark 4 — SMP LS-DYNA runs
+  `*CONTACT_ERODING_NODES_TO_SURFACE` and `*CONTACT_ERODING_SURFACE_TO_SURFACE`
+  **frictionless** unless `SOFT=2`, while `/INTER/TYPE25` applies the friction
+  unconditionally, so an SMP-authored deck *gains* friction it never had — the
+  one direction every other note in this list does not cover), per-side
+  `SST`/`MST` (the
   `Igap=5` + `THICK_S`/`THICK_M` route is radioss2026-only, so `/INTER/TYPE25`
   has nowhere to put them at 2022), Card-2 `DC` on a contact with no friction
   table, the `SOFT=2` companion flag `IPSTIF` (no 2022 column), the `_MPP`
@@ -151,9 +192,21 @@ Prior history (before this changelog was introduced) is summarized in the
   A_contact`, is not Radioss's `VIS_f` friction damping coefficient — and
   `hm_read_friction.F:182` zeroes `VIS_f` for `Iform=2` anyway, as does
   `frictionparts_model.F:108-112` for NTY 24/25), an `ICNEP` flag, a
-  `*DEFINE_FRICTION` row naming a part or part set the deck does not have, and
-  the interaction with `Ishell=12`'s ~1.7× under-erosion (an eroding surface can
-  only retreat as fast as elements actually fail).
+  `*DEFINE_FRICTION` row naming a part or part set the deck does not have *or
+  whose part id column is blank*, a `/TH/INTER` block on a self-impact
+  (`surf_ID2=0`) interface — whose `FN`/`FT` resultants are a signed sum over
+  both sides and cancel, measured −63.6 % against the true `m·Δv` where the
+  two-surface interface came in at +4.4 % — and the interaction with
+  `Ishell=12`'s ~1.7× under-erosion (an eroding surface can only retreat as
+  fast as elements actually fail).
+
+  **Solver validation — the `fric_ID` binding on every type.** Three decks
+  differing only in the `SOFT` sentinel (`-7` → TYPE7, `-11` → TYPE11, `-19` →
+  TYPE19), each with `FS=-2` against a two-pair `*DEFINE_FRICTION`: starter
+  **0 ERROR(S)** on all three, each echoing `INTERFACE FRICTION MODEL. 5` — the
+  binding really is read on TYPE11 and TYPE19, which is what the old "no
+  fric_ID column" claim denied. TYPE11 and TYPE19 additionally raise the
+  informational `WARNING 1595` described above; TYPE7 raises none.
 
   **Solver validation.** A synthetic deck exercising all three eroding variants
   plus a bound `/FRICTION` runs the starter at **0 ERROR(S)** (2 warnings, both

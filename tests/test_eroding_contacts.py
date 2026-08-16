@@ -9,10 +9,14 @@
 Before this batch all five landed in ``skipped_keywords``: the exact-match
 dispatch has no CONTACT_ prefix fallback, and a *CONTACT that misses it does not
 merely lose an output card — the two surfaces stop interacting and the run
-produces a plausible-looking answer with no load path. They were the ONLY
-unhandled *CONTACT spellings left in the reference corpus (30 x
+produces a plausible-looking answer with no load path. They were the only
+unhandled *CONTACT spellings left IN THE REFERENCE CORPUS (30 x
 ERODING_NODES_TO_SURFACE in the three W11 bird-strike decks, 7 x
-ERODING_SURFACE_TO_SURFACE in the W9 missile decks).
+ERODING_SURFACE_TO_SURFACE in the W9 missile decks) — not in LS-DYNA at
+large: the plain *CONTACT_SURFACE_TO_SURFACE, *CONTACT_SINGLE_SURFACE and
+*CONTACT_ONE_WAY_SURFACE_TO_SURFACE spellings are still unhandled and still
+land in ``skipped_keywords`` (their card stacks are identical to the
+_AUTOMATIC_ ones, so aliasing them is a separate, easy batch).
 
 The batch's defining decision is the /SURF flavour, and it is the thing these
 tests exist to pin: an eroding contact on SOLID parts is emitted over
@@ -37,6 +41,8 @@ from k2rad.writer.contacts import (
     _bind_friction_table,
     _contact_friction,
     _emit_inter_type7,
+    _emit_inter_type11,
+    _emit_inter_type19,
     _emit_inter_type25,
     _emit_inter_type25_self,
     _type25_istf_iedge,
@@ -518,6 +524,144 @@ class ErodingSurfaceTests(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Which side may read id 0 as "all parts"
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SideZeroTests(unittest.TestCase):
+    """LS-DYNA Vol I p.11-24, verbatim:
+
+        SURFA ... EQ.0: Includes all parts IN THE CASE OF SINGLE SURFACE
+                        CONTACT TYPES.
+        SURFB ... EQ.0: SURFB side is not applicable for single surface
+                        contact types.
+
+    So a blank id expands to every part on exactly ONE side of exactly ONE
+    family. Applying it everywhere (as this did) converts a deck that simply
+    dropped its MSID into a plausible-looking global contact — and puts the
+    secondary part on BOTH sides of it — instead of dropping the interface with
+    a remedy. SURFATYP/SURFBTYP = 5 ("include all non-spot-weld parts",
+    p.11-25) is a different thing and does expand on either side."""
+
+    def test_single_surface_ssid_zero_still_means_all_parts(self):
+        _, starter = _convert(
+            _MESH + _eroding("CONTACT_ERODING_SINGLE_SURFACE", 0, 0, 0, 0)
+            + _TERM)
+        self.assertIn("/INTER/TYPE25/90001", starter)
+        header = next(ln for ln in starter.splitlines()
+                      if ln.startswith("/SURF/PART/ALL/"))
+        self.assertIn("         1", _block(starter, header))
+
+    def test_surface_to_surface_blank_msid_is_dropped_not_expanded(self):
+        result, starter = _convert(
+            _MESH + _eroding("CONTACT_ERODING_SURFACE_TO_SURFACE", 2, 0, 3, 3)
+            + _TERM)
+        self.assertNotIn("/INTER/TYPE25/", starter)
+        self.assertTrue(any("NO /INTER was emitted" in w for w in result.warnings))
+        self.assertTrue(any("msid=0" in w for w in result.warnings))
+
+    def test_nodes_to_surface_blank_msid_is_dropped_not_expanded(self):
+        result, starter = _convert(
+            _MESH + _n2s("CONTACT_AUTOMATIC_NODES_TO_SURFACE", 500, 0, 4, 3)
+            + _TERM)
+        self.assertNotIn("/INTER/TYPE25/", starter)
+        self.assertTrue(any("NO /INTER was emitted" in w for w in result.warnings))
+
+    def test_mstyp_five_still_expands_on_the_main_side(self):
+        """SURFBTYP=5 is explicitly legal on the SURFB side (p.11-25), so it
+        keeps expanding even though a bare 0 no longer does."""
+        _, starter = _convert(
+            _MESH + _n2s("CONTACT_AUTOMATIC_NODES_TO_SURFACE", 500, 0, 4, 5)
+            + _TERM)
+        self.assertIn("/INTER/TYPE25/90001", starter)
+
+
+class FrictionIncludeTransformTests(unittest.TestCase):
+    """*DEFINE_FRICTION inside an *INCLUDE_TRANSFORM.
+
+    A walker rather than a declarative _OFFSET_SPECS entry because the bucket
+    is per row AND per column: PTYPEi/j (fields 6/7) says whether the id in
+    field 0/1 is a part or a *SET_PART, and the two columns are independent.
+    Left unregistered, the pair rows kept their un-transformed part ids, every
+    row then hit writer/frictions.py's "part does not exist" drop, and the whole
+    table silently fell back to its default coefficients."""
+
+    def _offset(self, idpoff=0, idsoff=0, idroff=0):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write("*KEYWORD\n"
+                     "*DEFINE_FRICTION\n"
+                     "         7       0.4       0.2       1.5       0.0\n"
+                     "         1         2       0.5       0.3       0.0"
+                     "       0.0\n"
+                     "       800       900       0.6       0.4       0.0"
+                     "       0.0      PSET      PSET\n"
+                     "         3       800       0.7       0.5       0.0"
+                     "       0.0                PSET\n"
+                     "*END\n")
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF ... IDROFF
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
+                     f"{0:10d}{0:10d}{idpoff:10d}{0:10d}{idsoff:10d}"
+                     f"{0:10d}\n"
+                     f"{idroff:10d}\n*END\n")
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        return state
+
+    def test_part_and_pset_columns_take_different_offsets(self):
+        st = self._offset(idpoff=100, idsoff=5000)
+        f = next(iter(st.define_frictions.values()))
+        rows = [(p.pid_i, p.pid_j, p.pset_i, p.pset_j) for p in f.pairs]
+        self.assertEqual(rows, [
+            (101, 102, False, False),      # both parts   -> IDPOFF
+            (5800, 5900, True, True),      # both *SET_PART -> IDSOFF
+            (103, 5800, False, True),      # mixed row: one of each
+        ])
+
+    def test_no_offset_leaves_every_id_alone(self):
+        st = self._offset()
+        f = next(iter(st.define_frictions.values()))
+        self.assertEqual([(p.pid_i, p.pid_j) for p in f.pairs],
+                         [(1, 2), (800, 900), (3, 800)])
+
+
+class ErodingSmpFrictionTests(unittest.TestCase):
+    """LS-DYNA Vol I p.11-65 remark 4: SMP ignores contact friction on
+    *CONTACT_ERODING_NODES_TO_SURFACE and *CONTACT_ERODING_SURFACE_TO_SURFACE
+    unless SOFT=2. /INTER/TYPE25 applies it unconditionally, so an SMP-authored
+    deck GAINS friction — the one direction the rest of the batch's warnings do
+    not cover, since every other note is about a field k2rad drops."""
+
+    def _warn(self, kw, soft=None, fs="       0.3"):
+        opt_a = "" if soft is None else f"{soft:>10d}\n"
+        deck = _eroding(kw, 2, 1, 3, 3, card2=_card2(fs=fs),
+                        optional_a=opt_a)
+        result, _ = _convert(_MESH + deck + _TERM)
+        return [w for w in result.warnings if "FRICTIONLESS there" in w]
+
+    def test_s2s_and_n2s_warn(self):
+        for kw in ("CONTACT_ERODING_SURFACE_TO_SURFACE",
+                   "CONTACT_ERODING_NODES_TO_SURFACE"):
+            with self.subTest(kw=kw):
+                self.assertTrue(self._warn(kw))
+
+    def test_soft_two_is_silent(self):
+        self.assertFalse(
+            self._warn("CONTACT_ERODING_SURFACE_TO_SURFACE", soft=2))
+
+    def test_single_surface_is_not_in_the_exclusion(self):
+        self.assertFalse(self._warn("CONTACT_ERODING_SINGLE_SURFACE"))
+
+    def test_frictionless_deck_is_silent(self):
+        self.assertFalse(
+            self._warn("CONTACT_ERODING_SURFACE_TO_SURFACE", fs="       0.0"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # *DEFINE_FRICTION -> /FRICTION
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -585,13 +729,36 @@ class FrictionCardTests(unittest.TestCase):
         # C6 = -DC_D = -1.5, FRIC = FD_D = 0.2, VIS_f = VC_D = 0
         self.assertEqual(cards[2],
                          f"{-1.5:>20.10G}{0.2:>20.10G}" + "                   0")
-        # pair row: grpart1 grpart2 part1 part2 <10 blanks> Idir
+        # pair row, from friction.cfg:281 "%10d%10d%10d%10d          %10d":
+        # grpart1 grpart2 part1 part2, TEN literal blanks, then Idir as a
+        # 10-wide field in cols 51-60. Built from the format here rather than
+        # copied off the emitter — the emitter used to write 20 blanks + "0",
+        # putting the 0 in column 61 and leaving Idir itself blank.
         self.assertEqual(cards[3],
-                         "         0         0         1         2"
-                         "                    0")
+                         f"{0:>10d}{0:>10d}{1:>10d}{2:>10d}"
+                         + " " * 10 + f"{0:>10d}")
+        self.assertEqual(len(cards[3]), 60)
         self.assertEqual(cards[4], "                   0" * 4 + f"{0.2:>20.10G}")
         self.assertEqual(cards[5],
                          f"{-2.0:>20.10G}{0.3:>20.10G}" + "                   0")
+
+    def test_card_widths_match_the_cfg_format(self):
+        """Every /FRICTION data line is exactly as wide as its CARD() format in
+        radioss2020/FRICTION/friction.cfg:270-284 — the guard /INTER/TYPE25 has
+        had all along (test_card_widths_match_the_cfg_format above) and whose
+        absence here let a 61-char part-pair row through.
+
+            header block  %10d%10d%20lg%10d              -> 50
+                          %20lg x5                       -> 100
+                          %20lg x3                       -> 60
+            per pair      %10d%10d%10d%10d          %10d -> 60
+                          %20lg x5                       -> 100
+                          %20lg x3                       -> 60
+        """
+        _, starter = _convert(self.DECK)
+        cards = _cards(_block(starter, "/FRICTION/7"))
+        self.assertEqual([len(c) for c in cards[0:3]], [50, 100, 60])
+        self.assertEqual([len(c) for c in cards[3:6]], [60, 100, 60])
 
     def test_friction_id_is_preserved(self):
         _, starter = _convert(self.DECK)
@@ -614,6 +781,9 @@ class FrictionCardTests(unittest.TestCase):
         row = _cards(_block(starter, "/FRICTION/7"))[3]
         self.assertEqual(row[0:20], f"{gid:>10d}{gid:>10d}")
         self.assertEqual(row[20:40], "         0         0")
+        # cols 41-50 literal blanks, Idir in 51-60 (isotropic = 0)
+        self.assertEqual(row[40:50], " " * 10)
+        self.assertEqual(row[50:60], f"{0:>10d}")
 
     def test_unknown_part_row_is_dropped_with_a_warning(self):
         deck = (_MESH
@@ -692,19 +862,107 @@ class FrictionBindingTests(unittest.TestCase):
         self.assertEqual(cards[5][90:100], "         7")
 
     def test_tied_contact_says_it_cannot_hold_the_binding(self):
-        """/INTER/TYPE2 has no friction model, and neither TYPE11's nor
-        TYPE19's newest FORMAT at 2022 reaches a fric_ID column."""
+        """/INTER/TYPE2 is a TIED interface with no friction model at all, so
+        there is nothing for a /FRICTION table to bind to."""
         tied = ("*CONTACT_TIED_NODES_TO_SURFACE\n"
                 "       500         1         4         3\n"
                 + _card2(fs="      -2.0") + _CARD3)
         result, _ = _convert(_MESH + FRICTION_7 + tied + _TERM)
-        self.assertTrue(any("NO fric_ID column" in w and "TYPE2" in w
+        self.assertTrue(any("no fric_ID column" in w and "TYPE2" in w
                             for w in result.warnings))
 
-    def test_bind_helper_rejects_unsupported_targets(self):
+    def test_bind_helper_rejects_only_the_tied_types(self):
         st = ConversionState()
-        for target in ("TYPE2", "TYPE10", "TYPE11", "TYPE19"):
+        for target in ("TYPE2", "TYPE10"):
             self.assertEqual(_bind_friction_table(st, 0.0, 1, "CONTACT", target), 0)
+
+    def test_bind_helper_accepts_every_sliding_type(self):
+        """TYPE11 and TYPE19 DO carry fric_ID at /BEGIN 2022 — TYPE11 on a card
+        of its own (radioss2020/INTER/inter_type11.cfg:409-410, 90 blank cols
+        then %10d, read by hm_read_inter_type11.F:185) and TYPE19 appended to
+        its Ifric card (radioss2021/INTER/inter_type19.cfg:801-802)."""
+        st = ConversionState()
+        st.define_frictions[7] = object()
+        for target in ("TYPE7", "TYPE11", "TYPE19", "TYPE25"):
+            self.assertEqual(
+                _bind_friction_table(st, 0.0, 1, "CONTACT", target), 7,
+                f"/INTER/{target} must accept a fric_ID binding")
+
+    def test_type11_and_type19_write_fric_id_in_cols_91_100(self):
+        """The SOFT=-11 / -19 sentinel routes bind the table like TYPE7 does."""
+        for soft, tname in ((-11, "TYPE11"), (-19, "TYPE19")):
+            with self.subTest(soft=soft):
+                gen = ("*CONTACT_AUTOMATIC_GENERAL\n"
+                       "         2         1         3         3\n"
+                       + _card2(fs="      -2.0", fd="       7.0") + _CARD3
+                       + f"{soft:>10d}\n")
+                _, starter = _convert(_MESH + FRICTION_7 + gen + _TERM)
+                cards = _cards(_block(starter, f"/INTER/{tname}/90001"))
+                self.assertEqual(cards[-1][90:100], "         7")
+                self.assertEqual(len(cards[-1]), 100)
+
+    def test_edge_contacts_warn_that_only_the_decay_is_lost(self):
+        """The starter accepts a fric_ID on NTYP 7/11/19/21/24/25
+        (inter_dcod_friction.F:80) but raises WARNING 1595 for NTYP==11 when the
+        table's FRICMOD > 0, and copies only FRICFORM into IPARI(30). The engine
+        agrees: i11mainf.F:233-241 pulls the pair tables and i11cor3.F:386
+        resolves the pair, but i11for3.F uses the flat FRICC with no exp term.
+        So the pair coefficients DO act and only the DC decay is lost — k2rad
+        says so rather than letting the starter warning look like a defect."""
+        for target, expect in (("TYPE7", 0), ("TYPE25", 0),
+                               ("TYPE11", 1), ("TYPE19", 1)):
+            with self.subTest(target=target):
+                st = ConversionState()
+                st.define_frictions[5] = object()
+                self.assertEqual(
+                    _bind_friction_table(st, 0.0, 1, "CONTACT", target), 5)
+                self.assertEqual(
+                    len([w for w in st.warnings if "WARNING 1595" in w]), expect)
+
+    def test_type11_and_type19_card_widths_match_the_cfg_format(self):
+        """Widths re-derived from the CFG FORMAT blocks, not from the emitter.
+
+        TYPE11, radioss2020/INTER/inter_type11.cfg:393-410 —
+            %10d%10d%10d%10d%10d%10s%10d%10d             -> 80
+            %20lg%20lg%20lg%20lg%10d%10d                 -> 100
+            %20lg x5                                     -> 100
+            %7s%1d%1d%1d%20s%10d%20lg%20lg%20lg          -> 100
+            %10s%10s%10s%10s%20s%20s%10s%10d  (fric_ID)  -> 100
+        TYPE19, radioss2021/INTER/inter_type19.cfg:772-802 —
+            %10d x9                                      -> 90
+            %20lg%20lg                                   -> 40
+            %20lg%20lg%20lg%20lg%10d%10d                 -> 100
+            %20lg x5                                     -> 100
+            %7s%1d%1d%1d%10s%10s%10d%20lg%20lg%20lg      -> 100
+            %10d%10d%20lg%10d%10d%10s%10s%10s%10d        -> 100
+        """
+        def data(lines):
+            return [ln for ln in lines if not ln.startswith(("#", "/"))][1:]
+        self.assertEqual(
+            [len(ln) for ln in data(_emit_inter_type11(1, "T", 11, 22, 0.3,
+                                                       fric_id=7))],
+            [80, 100, 100, 100, 100])
+        self.assertEqual(
+            [len(ln) for ln in data(_emit_inter_type19(1, "T", 11, 22, 0.3,
+                                                       fric_id=7))],
+            [90, 40, 100, 100, 100, 100])
+
+    def test_type11_and_type19_are_byte_identical_without_a_table(self):
+        """No fric_ID -> no extra columns, so every table-free deck in the
+        corpus stays byte-for-byte where it was."""
+        self.assertEqual(
+            _emit_inter_type11(1, "T", 11, 22, 0.3),
+            _emit_inter_type11(1, "T", 11, 22, 0.3, fric_id=0))
+        self.assertEqual(
+            _emit_inter_type19(1, "T", 11, 22, 0.3),
+            _emit_inter_type19(1, "T", 11, 22, 0.3, fric_id=0))
+        # ... and the binding adds exactly the one card / one column it should
+        self.assertEqual(
+            len(_emit_inter_type11(1, "T", 11, 22, 0.3, fric_id=7))
+            - len(_emit_inter_type11(1, "T", 11, 22, 0.3)), 2)
+        self.assertEqual(
+            len(_emit_inter_type19(1, "T", 11, 22, 0.3, fric_id=7)),
+            len(_emit_inter_type19(1, "T", 11, 22, 0.3)))
 
 
 class FsSentinelTests(unittest.TestCase):
@@ -725,13 +983,34 @@ class FsSentinelTests(unittest.TestCase):
                                           "CONTACT", "TYPE7")
         self.assertEqual((fric, fric_id), (0.3, 0))
 
-    def test_fs_two_only_warns_when_a_matching_define_table_exists(self):
+    def test_fs_two_never_writes_the_literal_two(self):
+        """FS=2 is the LS-DYNA sentinel for 'FD is a friction TABLE id' —
+        mu(contact pressure, relative velocity), Vol I p.11-28 'FS.EQ.2: Table
+        ID …'. It used to fall through as a literal Coulomb coefficient of 2.0,
+        which is 4-40x a real table's typical 0.05-0.5. It must now be 0 with a
+        warning in EVERY branch, including the ones where FD names nothing —
+        the warning used to be gated on the table being resolvable, so a blank
+        or dangling FD wrote mu=2.0 in total silence."""
+        for fd in (5.0, 0.0, -1.0):
+            with self.subTest(fd=fd, table_present=False):
+                st = ConversionState()
+                self.assertEqual(
+                    _contact_friction(st, 2.0, fd, 1, "C", "TYPE7"), (0.0, 0))
+                self.assertTrue(any("FS=2" in w for w in st.warnings))
         st = ConversionState()
-        self.assertEqual(_contact_friction(st, 2.0, 5.0, 1, "C", "TYPE7"), (2.0, 0))
-        self.assertEqual(st.warnings, [])
         st.define_tables[5] = object()
-        self.assertEqual(_contact_friction(st, 2.0, 5.0, 1, "C", "TYPE7"), (2.0, 0))
-        self.assertTrue(any("*DEFINE_TABLE" in w for w in st.warnings))
+        self.assertEqual(_contact_friction(st, 2.0, 5.0, 1, "C", "TYPE7"), (0.0, 0))
+        self.assertTrue(any("*DEFINE_TABLE 5" in w for w in st.warnings))
+
+    def test_fs_two_reaches_the_interface_card_as_zero(self):
+        s2s = ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+               "         2         1         3         3\n"
+               + _card2(fs="       2.0", fd="     900.0") + _CARD3)
+        result, starter = _convert(_MESH + s2s + _TERM)
+        cards = _cards(_block(starter, "/INTER/TYPE7/90001"))
+        self.assertEqual(cards[3][20:40], "                   0")
+        self.assertNotIn("                   2", cards[3][20:40])
+        self.assertTrue(any("FS=2" in w for w in result.warnings))
 
     def test_fsf_scales_the_coulomb_coefficient(self):
         fric, _ = _contact_friction(ConversionState(), 0.4, 0.0, 1, "C",

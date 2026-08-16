@@ -245,9 +245,20 @@ shipped, so the marginal cost is small.
   dies, and dyna2rad never enables it. Still open: `ISYM=1` (no `/SURF`
   equivalent for "drop symmetry-plane faces"), the LS-DYNA `VC` shear-stress
   friction cap (Radioss `VIS_f` is a different quantity), `FS=2`
-  (`*DEFINE_TABLE` μ(p, v) — no Radioss construct), `FS=-1` resolved from
-  `*PART_CONTACT` rather than warned, and per-side `SST`/`MST` on a TYPE25
-  (the `Igap=5` + `THICK_S`/`THICK_M` route is radioss2026-only).
+  (`*DEFINE_TABLE` μ(p, v) — no Radioss construct; now `Fric=0` + a loud
+  warning rather than a literal μ=2.0), `FS=-1` resolved from `*PART_CONTACT`
+  rather than warned, per-side `SST`/`MST` on a TYPE25 (the `Igap=5` +
+  `THICK_S`/`THICK_M` route is radioss2026-only), a per-contact `IADJ=0` (only
+  the global `--eroding-surf-ext` exists), a `*SET_SEGMENT` / `*SET_SHELL`
+  contact side (only the part and part-set forms resolve), and
+  `*DEFINE_FRICTION_ORIENTATION` (which is what would make `/FRICTION` `Idir`
+  non-zero).
+- The plain, non-`AUTOMATIC` `*CONTACT_SURFACE_TO_SURFACE`,
+  `*CONTACT_SINGLE_SURFACE` and `*CONTACT_ONE_WAY_SURFACE_TO_SURFACE`
+  spellings are still unhandled and land in `skipped_keywords` — a contact that
+  silently vanishes. Their card stacks are identical to the `_AUTOMATIC_` ones
+  already handled, so this is an aliasing job, not a new conversion. Not in the
+  reference corpus, which is why the eroding batch did not surface it.
 - `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
   cohesive rupture tie remains open (no open-source equivalent found).
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

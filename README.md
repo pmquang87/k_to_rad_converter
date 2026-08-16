@@ -1691,7 +1691,16 @@ than dyna2rad's `1` — LS-DYNA's own per-element face removal, and already the
 k2rad convention on every other penalty interface. Note the 2022 Reference Guide
 p.372 states `/SURF/PART/ALL` "is not available with TYPE25"; the current
 OpenRadioss starter implements it and has no check that rejects it, but an older
-binary may not. The Card-4 fields `ISYM` / `EROSOP` / `IADJ` are all **reported**
+binary may not. A third, purely operational consequence: the segment list grows
+roughly 5× for a solid block (a 16×16×6 brick mesh has 896 external faces but
+5056 total), so **any per-segment starter diagnostic is multiplied by the same
+factor**. On `W9_SETUP_MSLprojectile` — whose own unconverted
+`*MAT_CSCM_CONCRETE` fires a `WARNING 96` per main segment on both branches —
+the warning count goes 25 250 → 209 108 and the starter `.out` 7 MB → 46 MB.
+That is amplification of a pre-existing deck defect, not a new error class (a
+healthy deck fires none of them), but a large listing file on an eroding deck
+is worth reading as "fix the underlying warning", not "the contact is broken".
+The Card-4 fields `ISYM` / `EROSOP` / `IADJ` are all **reported**
 (dyna2rad parses and discards all three with no message — including `EROSOP`,
 whose entire purpose is to enable eroding contact), as are the `SST`/`MST`
 thicknesses, which `/INTER/TYPE25` has no column for at `/BEGIN 2022`.
@@ -1700,8 +1709,13 @@ thicknesses, which `/INTER/TYPE25` has no column for at `/BEGIN 2022`.
 this family (`surfAttrNames[0] = "grnd_IDs"`), so neither does k2rad: the
 secondary nodes stay secondary and the main surface's own nodes are never
 tracked against them. `SSTYP=4` (a `*SET_NODE_LIST`, LS-DYNA's own
-recommendation for an eroding node-to-surface contact) and the part / part-set /
-segment-set forms all resolve.
+recommendation for an eroding node-to-surface contact — Vol I p.11-65 remark 2)
+resolves, as do the part (`3`) and part-set (`2`) forms. A **`*SET_SEGMENT`
+side does not**: `SSTYP=0`/`1` fall back to looking the id up as a part, part
+set or node set, so a real segment-set id resolves only by coincidence. The
+main (`MSID`) side always needs a part or a part set. A side that resolves to
+nothing drops the interface with a remedy naming what to point it at, rather
+than converting a contact with no load path.
 `*DEFINE_FRICTION` → `/FRICTION`, **id preserved 1:1** (which is what makes the
 `fric_ID` binding work). LS-DYNA's
 `μ = FD + (FS − FD)·exp(−DC·|v_rel|)` maps *exactly* onto Radioss `Ifric=2`
@@ -1769,7 +1783,13 @@ dropped behaviour (dyna2rad parses the flag and never reads it)
 initialization for every ignore setting; `Inacti=0` would apply the full
 penalty force to resting-contact nodes at cycle 0). Exception: an implicit
 deck with an SST/MST-derived `Gapmin` keeps `Inacti=0` (the documented
-pre-engagement bootstrap needs the t=0 stiffness path)
+pre-engagement bootstrap needs the t=0 stiffness path). `Inacti=5` can only
+*shrink* the gap, never create clearance, so two parts drawn **exactly
+coincident** still hit starter **ERROR 611** (`INITIAL PENETRATION = ...
+IMPOSSIBLE TO CALCULATE NEW COORDINATES OF SECONDARY NODE`) — the penetration
+equals the whole element-derived gap and there is nowhere to shift the node to.
+Met in practice on a friction rig whose slab touched its plate: 264 × ERROR 611,
+cleared by a 0.01 mm modelling clearance
 A contact **master surface** built from a part that carries 3-corner shells
 splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSH3N/SH3N` + `/SURF/GRSH3N`, solids → `/SURF/PART/EXT` (or
