@@ -43,7 +43,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from .handlers import _SPOTWELD_CONTACT_KEYWORDS
+from .handlers import _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -1910,6 +1910,14 @@ for _kw in (
 for _kw in _SPOTWELD_CONTACT_KEYWORDS:
     if "_MPP" not in _kw:
         _OFFSET_SPECS[_kw] = _off_contact
+
+# *CONTACT_ERODING_* and *CONTACT_{,AUTOMATIC_}NODES_TO_SURFACE share the same
+# Card-1 layout. Their mandatory ERODING Card 4 (ISYM/EROSOP/IADJ) sits AFTER
+# Card 1, so _off_contact — which only rewrites b.raw[start] — is unaffected by
+# it. The _MPP spellings are excluded for the same reason the spotweld ones are:
+# the MPP card(s) push Card 1 down and _off_contact rewrites that line blind.
+for _kw in _TYPE25_CONTACT_BASES:
+    _OFFSET_SPECS[_kw] = _off_contact
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
 # keyword with TITLE in options, so the base entry covers it.

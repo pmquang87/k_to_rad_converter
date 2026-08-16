@@ -283,6 +283,24 @@ def build_parser() -> argparse.ArgumentParser:
              "step and runs before the NODADT return), but interacts with "
              "--ams, which is warned about.",
     )
+    parser.add_argument(
+        "--eroding-surf-ext",
+        action="store_true",
+        help="Build the SOLID side of a *CONTACT_ERODING_* contact from "
+             "/SURF/PART/EXT (external skin only) instead of the default "
+             "/SURF/PART/ALL. /ALL is the default because it is what makes "
+             "eroding contact WORK: the starter puts every interior "
+             "(two-solid) face in the segment list with a negative stiffness "
+             "and the engine flips it active the moment one of its two solids "
+             "dies — LS-DYNA's IADJ=1 / EROSOP=1 behaviour exactly. With /EXT "
+             "the face a dying brick exposes has no contact segment, no "
+             "stiffness and no friction, and NOTHING in the solver output says "
+             "so. Use this flag only to reproduce LS-DYNA SMP's literal "
+             "IADJ=0, or when the extra interior segments make contact sorting "
+             "too expensive. (Quadratic solids fall back to /EXT on their own: "
+             "the 2022 Reference Guide p.372 wants /EXT there so the mid-side "
+             "nodes take part in the contact.)",
+    )
     return parser
 
 
@@ -345,6 +363,7 @@ def main(argv=None) -> int:
         ams=args.ams,
         shell_formulation=args.shell_formulation,
         dt_del=args.dt_del,
+        eroding_surf_ext=args.eroding_surf_ext,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

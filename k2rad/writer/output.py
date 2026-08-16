@@ -348,8 +348,8 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     # this section, so state.dropped_inter_ids is complete.
     all_inter_ids = [c.inter_id for c in (
         list(state.contacts_single) + list(state.contacts_surf2surf)
-        + list(state.contacts_general) + list(state.contacts_tied)
-        + list(state.contacts_spotweld))
+        + list(state.contacts_general) + list(state.contacts_type25)
+        + list(state.contacts_tied) + list(state.contacts_spotweld))
         if c.inter_id not in state.dropped_inter_ids]
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)

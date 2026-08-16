@@ -97,7 +97,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          write_restart: bool = False,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
-                         dt_del: str = "") -> dict:
+                         dt_del: str = "",
+                         eroding_surf_ext: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -173,6 +174,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["ams"] = bool(ams)
 
+    kwargs["eroding_surf_ext"] = bool(eroding_surf_ext)
+
     if shell_formulation not in ("qbat", "qeph"):
         raise ValueError(
             "Shell formulation must be 'qbat' or 'qeph', not "
@@ -228,6 +231,7 @@ class ConverterGUI:
         self.rigid_cog = tk.BooleanVar(value=True)
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
+        self.eroding_surf_ext = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -308,6 +312,15 @@ class ConverterGUI:
                      "dynamics instead of adding real mass; can diverge on stiff / "
                      "contact-heavy models — implies element-free rigid masters)",
             variable=self.ams).grid(row=9, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            io, text="Eroding contacts: external skin only (*CONTACT_ERODING_* "
+                     "solid sides on /SURF/PART/EXT instead of the default "
+                     "/SURF/PART/ALL). Leave OFF for erosion-correct behaviour — "
+                     "/ALL keeps interior solid faces as dormant segments the "
+                     "engine wakes when a brick dies; with /EXT the crater face a "
+                     "dying element exposes has NO contact and nothing warns you",
+            variable=self.eroding_surf_ext).grid(row=10, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -488,6 +501,7 @@ class ConverterGUI:
                 ams=self.ams.get(),
                 shell_formulation=self.shell_formulation.get(),
                 dt_del=self.dt_del.get(),
+                eroding_surf_ext=self.eroding_surf_ext.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -585,6 +599,8 @@ class ConverterGUI:
             bits.append("keep restart (.rst) files")
         if kwargs.get("ams"):
             bits.append("Advanced Mass Scaling (/DT/AMS)")
+        if kwargs.get("eroding_surf_ext"):
+            bits.append("eroding contacts on /SURF/PART/EXT (no interior re-exposure)")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
