@@ -16,7 +16,10 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   `*DEFINE_CURVE_FUNCTION` → sampled `/FUNCT`.
 - **Tier 2:** foams/honeycomb `*MAT_CRUSHABLE_FOAM`/`LOW_DENSITY_FOAM`/
   `FU_CHANG_FOAM`/`HONEYCOMB` → `/MAT/LAW50`/`LAW38`/`LAW70`/`LAW28`;
-  `*CONTACT_..._TIEBREAK` → `/INTER/TYPE7` (contact-only, cohesive bond warned).
+  `*CONTACT_..._TIEBREAK` → `/INTER/TYPE7` (contact-only, cohesive bond warned);
+  the impact/blast materials `*MAT_JOHNSON_HOLMQUIST_CERAMICS`/`_CONCRETE` →
+  `/MAT/LAW79`/`LAW126` and `*MAT_ELASTIC_FLUID` → `/MAT/LAW6` +
+  `/EOS/POLYNOMIAL`.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
@@ -170,6 +173,43 @@ shipped, so the marginal cost is small.
   regularization (initiation-side `P5` → `TAB_EL` does carry over), and
   `*MAT_240`'s `_THERMAL`/`_3MODES`/`_FUNCTIONS` variants (curve-valued
   cards / mode III — no LAW116 slots, warn-skipped).
+- Impact / blast materials batch (P1): `*MAT_JOHNSON_HOLMQUIST_CERAMICS` (110)
+  → `/MAT/LAW79` (JOHN_HOLM, JH-2); `*MAT_JOHNSON_HOLMQUIST_CONCRETE` (111) →
+  `/MAT/LAW126` (radioss2024 card, non-fatal WARNING 100211 under /BEGIN 2022);
+  `*MAT_ELASTIC`'s `_FLUID` option (1) → `/MAT/HYD_VISC` (LAW6) +
+  `/EOS/POLYNOMIAL` of the same id — **done**. Nothing is normalized on
+  conversion: σ_HEL = 1.5(HEL−PHEL), T\* = T/PHEL and P\* = P/PHEL for JH-2,
+  and P\*/σ\*/T\* = ·/f′c for JHC, are all re-derived by the Radioss
+  starter/engine with the identical definitions LS-DYNA uses, so the strength
+  constants stay dimensionless and HEL/PHEL/T/FC stay physical stresses;
+  `K1/K2/K3` are each law's own polynomial pressure law, so neither emits an
+  `/EOS`. Guards the starter itself lacks are supplied by the converter
+  (`PHEL ≤ 0`, whose only check is `PHEL > HEL`; LAW126's unguarded
+  `k0 = PC/MUC` and `h = (PL−PC)/MUL`, a silent NaN at 0 ERROR / 0 WARNING;
+  `EPS0 ≤ 0` with `C ≠ 0`, fatal ERROR 910 on LAW79), and several dyna2rad
+  defects are corrected rather than reproduced — the `_FLUID` `K == 0`
+  fallback's lost Poisson ratio (its expression's `NU` token never resolves,
+  so it computes `E/3`), the `K < 0` zero-sound-speed fluid, the verbatim `VC`
+  copy into a slot that means kinematic viscosity rather than a dimensionless
+  coefficient, the defaulted `CP = 1e20` landing on a finite `Pmin`, and the
+  missing `*MAT_001_FLUID` alias (which there yields no `/MAT` at all) — see
+  CHANGELOG. Still open in this family: `*MAT_110`'s `FS` failure flag, which
+  is **not expressible under /BEGIN 2022** because LAW79's `IDEL`/`EPSMAX` are
+  radioss2023 fields — it is warn-dropped naming the `*MAT_ADD_EROSION`
+  remedy. A `/BEGIN` bump is the direct route (LAW79's `Fcut` and LAW126's
+  `IFAILSO` and Cowper-Symonds `CT/POWT/CC/POWC` card are gated the same way,
+  at 2023 / 2025 / 2026), but not the only conceivable one: `/FAIL` cards are
+  version-independent, so `FS > 0` could in principle be auto-emitted as one.
+  Neither candidate is a clean drop-in, which is why it was not done —
+  `/FAIL/GENE1`'s `Eps_eff` is built from the TOTAL deviatoric strain
+  (`fail_gene1_s.F:278-279`), not the plastic strain LAW79's `IDEL=2` uses,
+  and a `/FAIL/JOHNSON` with `D2..D5 = 0` would need its own validation.
+  LS-DYNA `VC`'s ΔL·a factor, which is
+  per-element and cannot be resolved at material-conversion time; an explicit
+  `CP = 0.0`, since `Pmin = 0` is Radioss's no-cutoff sentinel; and — the real
+  blocker for the one natural corpus deck — `*SECTION_SPH` / `*ELEMENT_SPH`,
+  which k2rad does not support at all, so the W11 bird-strike fluid converts
+  its material but still has no property.
 - Spotweld joining (P1): `*CONTACT_SPOTWELD` (+ `_WITH_TORSION` /
   `_BEAM_OFFSET` / `_CONSTRAINED_OFFSET` / `_PENALTY` / `_MPP`) →
   `/INTER/TYPE2` Spotflag=28 with `Ignore=2` and `Idel2=1`;

@@ -36,6 +36,7 @@ from .state import (
     MatCohesiveMixedMode, MatArupAdhesive, MatCohesiveMMEPR,
     MatToughenedAdhesive, FailDiem, FailDiemCriterion,
     MatTabulatedJC, DefineTable3D,
+    MatJHCeramics, MatJHConcrete, MatElasticFluid,
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
@@ -1520,16 +1521,129 @@ def handle_section_discrete(block: Block, state: ConversionState) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handle_mat_elastic(block: Block, state: ConversionState) -> None:
+    """*MAT_ELASTIC (001) → /MAT/ELAST, plus its _FLUID option variant →
+    /MAT/LAW6 (HYD_VISC) + /EOS/POLYNOMIAL.
+
+    The option is a SUBSTRING test on the keyword, exactly as dyna2rad does it
+    (CM:216-222 ``sourceCard.find("FLUID")``) and as the LS-DYNA reader defines
+    it (mat_001.cfg ``ASSIGN(MAT_OPTION,_FIND(TYPE,"_FLUID"),IMPORT)``);
+    ``_split_keyword`` has already stripped _TITLE/_ID, so
+    ``*MAT_ELASTIC_FLUID_TITLE`` arrives here as ``MAT_ELASTIC_FLUID``. Same
+    shape as MAT_224's _LOG_INTERPOLATION branch — one handler, one flag, base
+    path untouched.
+
+    K (bulk modulus) is card-1 field 7 on BOTH spellings — blank and unused for
+    plain *MAT_ELASTIC. Only the FLUID option adds card 2 (VC, CP); DA/DB are
+    beam-only damping and are dropped by both converters.
+    """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
     # Card1: mid rho E PR DA DB K
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    # The file's standard guard, placed BEFORE the option split so it covers
+    # every spelling: a block with no data card, or one whose MID cell is
+    # blank, would otherwise raise IndexError / emit a /MAT of id 0.
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{block.keyword}: empty material card — skipped")
+        return
     mid = to_int(f1[0])
-    rho = to_float(f1[1])
-    E   = to_float(f1[2])
-    nu  = to_float(f1[3])
-    state.mat_elastic[mid] = MatElastic(mid, title, rho, E, nu)
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    E   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    if "FLUID" not in block.keyword:
+        state.mat_elastic[mid] = MatElastic(mid, title, rho, E, nu)
+        return
+    # Card2 (FLUID only): VC CP. LS-DYNA's documented CP default is 1e20
+    # (mat_001.cfg:52 DEFAULTS), i.e. "no cavitation limit" — a blank cell must
+    # NOT read as an explicit 0.0 cavitation pressure, so cp_given records
+    # whether the cell was actually written.
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    state.mat_elastic_fluid[mid] = MatElasticFluid(
+        mid, title, rho,
+        e=E, pr=nu,
+        da=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        db=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        k=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        vc=to_float(f2[0]) if f2 else 0.0,
+        cp=_ffield(f2, 1, 1.0e20),
+        cp_given=bool(len(f2) > 1 and f2[1].strip()))
+
+
+def handle_mat_jh_ceramics(block: Block, state: ConversionState) -> None:
+    """*MAT_JOHNSON_HOLMQUIST_CERAMICS (110) → /MAT/LAW79.
+
+    THREE cards (Vol II R16 p.2-761; mat_110.cfg:170-182), 8 x 10 chars:
+      Card1: MID RO G A B C M N
+      Card2: EPS0 T SFMAX HEL PHEL BETA
+      Card3: D1 D2 K1 K2 K3 FS
+    mat_110.cfg declares NO defaults block, so every blank cell is a real 0.0
+    on both sides — parsed with plain to_float, no _ffield substitution. The
+    one field that cannot survive a 0 (EPS0 with C != 0, starter ERROR 910) is
+    repaired in the writer prepass, where the substitution can be warned about.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset,     fixed=True, n=8, w=10)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_JOHNSON_HOLMQUIST_CERAMICS: empty material card — "
+                   "skipped")
+        return
+
+    def _v(f, i):
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    mid = to_int(f1[0])
+    state.mat_jh_ceramics[mid] = MatJHCeramics(
+        mid, title, _v(f1, 1),
+        g=_v(f1, 2), a=_v(f1, 3), b=_v(f1, 4), c=_v(f1, 5),
+        m=_v(f1, 6), n=_v(f1, 7),
+        eps0=_v(f2, 0), t=_v(f2, 1), sfmax=_v(f2, 2),
+        hel=_v(f2, 3), phel=_v(f2, 4), beta=_v(f2, 5),
+        d1=_v(f3, 0), d2=_v(f3, 1),
+        k1=_v(f3, 2), k2=_v(f3, 3), k3=_v(f3, 4), fs=_v(f3, 5))
+
+
+def handle_mat_jh_concrete(block: Block, state: ConversionState) -> None:
+    """*MAT_JOHNSON_HOLMQUIST_CONCRETE (111) → /MAT/LAW126.
+
+    THREE cards (Vol II R16 p.2-765; mat_111.cfg), 8 x 10 chars:
+      Card1: MID RO G A B C N FC
+      Card2: T EPS0 EFMIN SFMAX PC UC PL UL
+      Card3: D1 D2 K1 K2 K3 FS
+    Card 1 is NOT the *MAT_110 layout: field 7 is N and field 8 is FC, where
+    110 has M then N. There is no M, no HEL, no PHEL and no BETA on this card,
+    and card 2 holds eight fields instead of six. mat_111.cfg declares no
+    defaults, so blanks are 0.0.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset,     fixed=True, n=8, w=10)
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_JOHNSON_HOLMQUIST_CONCRETE: empty material card — "
+                   "skipped")
+        return
+
+    def _v(f, i):
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    mid = to_int(f1[0])
+    state.mat_jh_concrete[mid] = MatJHConcrete(
+        mid, title, _v(f1, 1),
+        g=_v(f1, 2), a=_v(f1, 3), b=_v(f1, 4), c=_v(f1, 5),
+        n=_v(f1, 6), fc=_v(f1, 7),
+        t=_v(f2, 0), eps0=_v(f2, 1), efmin=_v(f2, 2), sfmax=_v(f2, 3),
+        pc=_v(f2, 4), uc=_v(f2, 5), pl=_v(f2, 6), ul=_v(f2, 7),
+        d1=_v(f3, 0), d2=_v(f3, 1),
+        k1=_v(f3, 2), k2=_v(f3, 3), k3=_v(f3, 4), fs=_v(f3, 5))
 
 
 def _is_mat123(block: Block) -> bool:
@@ -8257,6 +8371,32 @@ HANDLERS = {
     "MAT_TABULATED_JOHNSON_COOK_ORTHO_PLASTICITY":
         handle_mat_tabulated_jc_variant,
     "MAT_264":                                handle_mat_tabulated_jc_variant,
+    # ── Impact / blast materials batch ─────────────────────────────────────
+    # MAT_110 → /MAT/LAW79, MAT_111 → /MAT/LAW126 (dyna2rad p_ConvertMatL110
+    # CM:12491-12506 / p_ConvertMatL111 CM:5639-5674), and *MAT_ELASTIC's
+    # _FLUID option → /MAT/LAW6 + /EOS/POLYNOMIAL (p_ConvertMatL1_FLUID
+    # CM:12093-12136), which shares handle_mat_elastic above.
+    #
+    # Three alias registrations dyna2rad LACKS. (a) *MAT_001_FLUID: its
+    # dynamatlawkeywordmap.h has *MAT_ELASTIC_FLUID but not the numeric
+    # spelling, so the keyword misses the map, falls into the broken
+    # Convert1To1 fallback and produces NO /MAT at all — the part is wired to
+    # mat_ID 0 and the starter dies with ERROR 3046 (its own convertprops.cxx
+    # :331 does test both spellings, so the omission is an inconsistency, not
+    # intent). The LS-DYNA reader accepts it: mat_001.cfg matches the option
+    # by _FIND(TYPE,"_FLUID"), and data_hierarchy.cfg:467 lists MAT_001_FLUID
+    # in USER_NAMES. (b) the bare *MAT_001 / *MAT_1 numerics, which k2rad
+    # previously dropped into skipped_keywords, leaving every referencing
+    # /PART without a material.
+    "MAT_JOHNSON_HOLMQUIST_CERAMICS":         handle_mat_jh_ceramics,
+    "MAT_110":                                handle_mat_jh_ceramics,
+    "MAT_JOHNSON_HOLMQUIST_CONCRETE":         handle_mat_jh_concrete,
+    "MAT_111":                                handle_mat_jh_concrete,
+    "MAT_ELASTIC_FLUID":                      handle_mat_elastic,
+    "MAT_001_FLUID":                          handle_mat_elastic,
+    "MAT_1_FLUID":                            handle_mat_elastic,
+    "MAT_001":                                handle_mat_elastic,
+    "MAT_1":                                  handle_mat_elastic,
     "INITIAL_FOAM_REFERENCE_GEOMETRY":        handle_initial_foam_reference_geometry,
     "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP":   handle_initial_foam_reference_geometry,
     # Discrete-element (spring/damper) materials + spotwelds → /SPRING connectors

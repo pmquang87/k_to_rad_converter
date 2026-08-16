@@ -18,6 +18,7 @@ from .materials import (
     _resolve_mat_johnson_cook,
     _resolve_mat_plas_comp_tens,
     _resolve_mat_tabulated_jc,
+    _resolve_mat_impact,
     _resolve_mat_viscoelastic,
     _resolve_mat_adhesives,
     _resolve_mat_foams,
@@ -653,6 +654,19 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # that gate warn-skip MAT_224 parts naming the law.
     _resolve_define_tables_3d(state)
     _resolve_mat_tabulated_jc(state)
+
+    # Impact / blast batch (MAT_110 -> LAW79, MAT_111 -> LAW126,
+    # *MAT_ELASTIC_FLUID -> LAW6 + /EOS/POLYNOMIAL). Synthesizes no curve and
+    # no id, so its placement is free of the /FUNCT numbering; what it DOES
+    # need is the final element lists, because all three laws are solid-only
+    # (no SHELL_* class on any of them) and the ERROR-3046 warnings classify
+    # parts as shell-vs-solid — hence after _screen_provisional_elements and
+    # the tet passes, exactly like the foam and MAT_224 passes above. Before
+    # _resolve_xref_parts below: NONE of LAW79 / LAW126 / LAW6 is on the
+    # starter's solid-/XREF law whitelist, so their _target_mat_law entries
+    # are what make that gate warn-skip such parts NAMING the law instead of
+    # claiming they have no /MAT at all.
+    _resolve_mat_impact(state)
 
     # Decide which parts get a /XREF (reference-geometry) block. AFTER the
     # tet10 passes (the 8/4-node-solid gate must see the final connectivity)

@@ -489,6 +489,14 @@ def _ref_flag_materials(state: ConversionState):
         ("*MAT_SOIL_AND_FOAM", state.mat_soil_and_foam),         # 005
         ("*MAT_LOW_DENSITY_VISCOUS_FOAM",
          state.mat_low_density_viscous_foam),                    # 073
+        # Impact / blast batch: *MAT_110, *MAT_111 and *MAT_ELASTIC(_FLUID)
+        # carry NO REF flag on any card (mat_110.cfg / mat_111.cfg are three
+        # pure-constant cards; mat_001.cfg card 1 ends at K and the FLUID card
+        # holds only VC and CP), so none of them belongs on this registry —
+        # recorded here so the next batch does not re-derive it. Their /XREF
+        # story is the law whitelist instead: LAW79/LAW126/LAW6 are all OFF
+        # _XREF_SOLID_LAWS, so inistate._resolve_xref_parts warn-skips such
+        # parts naming the law.
     )
 
 
