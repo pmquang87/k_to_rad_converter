@@ -40,6 +40,12 @@ from .state import (
     FoamRefGeometry,
     DiscreteElem, SectionDiscrete, MatSpringElastic, MatSpringNonlinearElastic,
     MatDamperViscous, MatSpotweld, ConstrainedSpotweld,
+    MatSpringElastoplastic, MatDamperNonlinearViscous,
+    MatSpringGeneralNonlinear, MatSpringInelastic,
+    MatDiscreteBeamLinear, MatDiscreteBeamNonlinearElastic,
+    MatDiscreteBeamNonlinearPlastic, MatCableDiscreteBeam,
+    MatElasticSpringDiscreteBeam, MatGeneralNonlinear6dof,
+    MatGeneralNonlinear1dof, MatGeneralSpringDiscreteBeam,
     ConstrainedJoint, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
@@ -1343,6 +1349,10 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
         else:
             sec.qr = qr_irid
         sec.cst = to_int(f1[4]) if len(f1) > 4 else 0
+        # SCOOR (cols 51-60) is a FLOAT and only meaningful for ELFORM=6; it is
+        # the discrete beam's triad-rotation rule and |SCOOR|=2 is what selects
+        # the node-oriented (n1->n2 r-axis) spring property.
+        sec.scoor = to_float(f1[5]) if len(f1) > 5 else 0.0
         f2 = _card(raw, idx + 1, fixed=True, n=8, w=10)
         kind = _beam_card2_kind(elform, f2[0] if f2 else "")
         if kind in ("2a", "2e", "2h", "2i"):
@@ -1395,14 +1405,20 @@ def handle_section_beam(block: Block, state: ConversionState) -> None:
                 "beam, as an *INTEGRATION_BEAM rule referenced from a negative "
                 "QR/IRID.")
         elif kind == "2f":
-            state.warn(
-                f"*SECTION_BEAM {secid}: ELFORM=6 card 2 is "
-                f"'{_BEAM_CARD2[kind]}', which carries no cross-section area or "
-                "inertia at all, so /PROP/BEAM is written with "
-                "Area=Iyy=Izz=Ixx=0 and the starter refuses it (ERROR "
-                "314-317). ELFORM 6 is a DISCRETE beam — model it as "
-                "*ELEMENT_DISCRETE + *SECTION_DISCRETE, which k2rad converts "
-                "to a /SPRING.")
+            # ELFORM=6 DISCRETE beam, card 2f: VOL INER CID CA OFFSET RRCON
+            # SRCON TRCON (Manual Vol I R17 p.41-20). There is no cross-section
+            # here at all — VOL is a lumped VOLUME (mass = RO·VOL) and INER a
+            # lumped rotary inertia, so the set never becomes a /PROP/BEAM: the
+            # discrete-beam connector path turns it into a 6-DOF spring
+            # property instead (/PROP/TYPE8 or /PROP/TYPE13).
+            sec.vol = to_float(f2[0]) if f2 else 0.0
+            sec.iner = to_float(f2[1]) if len(f2) > 1 else 0.0
+            sec.cid = to_int(f2[2]) if len(f2) > 2 else 0
+            sec.ca = to_float(f2[3]) if len(f2) > 3 else 0.0
+            sec.cable_offset = to_float(f2[4]) if len(f2) > 4 else 0.0
+            sec.rrcon = to_float(f2[5]) if len(f2) > 5 else 0.0
+            sec.srcon = to_float(f2[6]) if len(f2) > 6 else 0.0
+            sec.trcon = to_float(f2[7]) if len(f2) > 7 else 0.0
         elif kind == "2j":
             # ELFORM 14 is the ELBOW integrated tubular beam: "A user-defined
             # integration rule with a tubular cross section (9) must be used"
@@ -7180,6 +7196,350 @@ def handle_mat_damper_viscous(block: Block, state: ConversionState) -> None:
     state.mat_damper_viscous[mid] = MatDamperViscous(mid, dc)
 
 
+def handle_mat_spring_elastoplastic(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_ELASTOPLASTIC (MAT_S03): MID K KT FY → /PROP/TYPE4 K1 = K,
+    H1 = 1 and a synthesized 5-point elastic-plastic force function."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=4, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_SPRING_ELASTOPLASTIC: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    g = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    state.mat_spring_elastoplastic[mid] = MatSpringElastoplastic(
+        mid, g(1), g(2), g(3))
+
+
+def handle_mat_damper_nonlinear_viscous(block: Block,
+                                        state: ConversionState) -> None:
+    """*MAT_DAMPER_NONLINEAR_VISCOUS (MAT_S05): MID LCDR → /PROP/TYPE4
+    fct_ID41 (the h(rate) damping-force function)."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=2, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_DAMPER_NONLINEAR_VISCOUS: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    state.mat_damper_nl_viscous[mid] = MatDamperNonlinearViscous(
+        mid, to_int(f[1]) if len(f) > 1 else 0)
+
+
+def handle_mat_spring_general_nonlinear(block: Block,
+                                        state: ConversionState) -> None:
+    """*MAT_SPRING_GENERAL_NONLINEAR (MAT_S06): MID LCDL LCDU BETA TYI CYI →
+    /PROP/TYPE4 fct_ID11 = LCDL, fct_ID31 = LCDU, H1 = 6."""
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=6, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_SPRING_GENERAL_NONLINEAR: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    gi = lambda i: to_int(f[i]) if len(f) > i else 0
+    gf = lambda i: to_float(f[i]) if len(f) > i else 0.0
+    state.mat_spring_general_nl[mid] = MatSpringGeneralNonlinear(
+        mid, gi(1), gi(2), gf(3), gf(4), gf(5))
+
+
+def handle_mat_spring_inelastic(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_INELASTIC (MAT_S08): MID LCFD KU CTF → /PROP/TYPE4 K1 = KU
+    plus the one-sided LCFD mirrored into the opposite quadrant.
+
+    CTF's LS-DYNA default is +1.0 (compression only); a blank column therefore
+    means compression-only, not "unset". Only CTF < 0 selects tension-only,
+    which is also the test dyna2rad makes (``if (lsdCTF == -1)``).
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=4, w=10)
+    if not f or not f[0].strip():
+        state.warn("*MAT_SPRING_INELASTIC: empty card – skipped")
+        return
+    mid = to_int(f[0])
+    state.mat_spring_inelastic[mid] = MatSpringInelastic(
+        mid,
+        to_int(f[1]) if len(f) > 1 else 0,
+        to_float(f[2]) if len(f) > 2 else 0.0,
+        _ffield(f, 3, 1.0))
+
+
+# ── *SECTION_BEAM ELFORM=6 discrete-beam materials ───────────────────────────
+#
+# Every one of these is a 6-DOF (or 1-DOF) SPRING, not a beam: the LS-DYNA card
+# carries stiffnesses / load curves per local DOF and the *SECTION_BEAM card 2f
+# carries only a lumped VOL and INER. They convert to /PROP/TYPE8 (SPR_GENE,
+# skew oriented — the /MAT/LAW108 card body with an absolute Mass instead of
+# RHO×Volume) or /PROP/TYPE13 (SPR_BEAM, node oriented — likewise for LAW113).
+
+def _six(f: List[str], start: int = 0, n: int = 6) -> List[float]:
+    """*n* consecutive float fields from *start*, zero-filled — every discrete
+    beam card is a plain run of six local-DOF cells (r,s,t then Rr,Rs,Rt)."""
+    return [to_float(f[start + i]) if len(f) > start + i else 0.0
+            for i in range(n)]
+
+
+def _six_i(f: List[str], start: int = 0, n: int = 6) -> List[int]:
+    """The integer form of _six — the LCID runs. The manual types the discrete
+    beam curve columns ``F`` on some cards (LS-DYNA reads them as reals and
+    rounds), so parse as a number and use as an id."""
+    return [to_int(f[start + i]) if len(f) > start + i else 0
+            for i in range(n)]
+
+
+def handle_mat_linear_elastic_discrete_beam(block: Block,
+                                            state: ConversionState) -> None:
+    """*MAT_LINEAR_ELASTIC_DISCRETE_BEAM (MAT_066) → a 6-DOF spring property.
+
+    Card1: MID RO TKR TKS TKT RKR RKS RKT
+    Card2: TDR TDS TDT RDR RDS RDT
+    Card3: FOR FOS FOT MOR MOS MOT
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_LINEAR_ELASTIC_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    state.mat_dbeam_linear[mid] = MatDiscreteBeamLinear(
+        mid,
+        to_float(f1[1]) if len(f1) > 1 else 0.0,
+        _six(f1, 2),
+        _six(_card(raw, offset + 1, fixed=True, n=8, w=10)),
+        _six(_card(raw, offset + 2, fixed=True, n=8, w=10)))
+
+
+def handle_mat_nonlinear_elastic_discrete_beam(block: Block,
+                                               state: ConversionState) -> None:
+    """*MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM (MAT_067) → a 6-DOF spring property.
+
+    Card1: MID RO LCIDTR LCIDTS LCIDTT LCIDRR LCIDRS LCIDRT
+    Card2: LCIDTDR LCIDTDS LCIDTDT LCIDRDR LCIDRDS LCIDRDT
+    Card3: FOR FOS FOT MOR MOS MOT
+    Card4: FFAILR FFAILS FFAILT MFAILR MFAILS MFAILT
+    Card5: UFAILR UFAILS UFAILT TFAILR TFAILS TFAILT
+
+    Manual R17 marks cards 3-5 as required; the shipped cfg models them as
+    optional FREE_CARDs, so they are read POSITIONALLY here (a missing card
+    just yields zeros).
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    c = lambda i: _card(raw, offset + i, fixed=True, n=8, w=10)
+    state.mat_dbeam_nl_elastic[mid] = MatDiscreteBeamNonlinearElastic(
+        mid,
+        to_float(f1[1]) if len(f1) > 1 else 0.0,
+        _six_i(f1, 2), _six_i(c(1)), _six(c(2)), _six(c(3)), _six(c(4)))
+
+
+def handle_mat_nonlinear_plastic_discrete_beam(block: Block,
+                                               state: ConversionState) -> None:
+    """*MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM (MAT_068) → a 6-DOF spring property.
+
+    Card1: MID RO TKR TKS TKT RKR RKS RKT
+    Card2: TDR TDS TDT RDR RDS RDT RYLD
+    Card3: LCPDR LCPDS LCPDT LCPMR LCPMS LCPMT
+    Card4: FFAILR … MFAILT   Card5: UFAILR … TFAILT   Card6: FOR … MOT
+
+    ``RYLD`` (card 2 cols 61-70) exists only from Keyword971_R12.0 on; the base
+    cfg stops at RDT. Reading the column unconditionally is safe — an older
+    deck leaves it blank.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    c = lambda i: _card(raw, offset + i, fixed=True, n=8, w=10)
+    c2 = c(1)
+    state.mat_dbeam_nl_plastic[mid] = MatDiscreteBeamNonlinearPlastic(
+        mid,
+        to_float(f1[1]) if len(f1) > 1 else 0.0,
+        _six(f1, 2), _six(c2),
+        to_float(c2[6]) if len(c2) > 6 else 0.0,
+        _six_i(c(2)), _six(c(3)), _six(c(4)), _six(c(5)))
+
+
+def handle_mat_cable_discrete_beam(block: Block, state: ConversionState) -> None:
+    """*MAT_CABLE_DISCRETE_BEAM (MAT_071) → a tension-only 1-DOF spring.
+
+    Card1: MID RO E LCID F0 TMAXF0 TRAMP IREAD
+    Card2 (only when IREAD > 0): OUTPUT [TSTART [FRACL0 MXEPS MXFRC]] — output
+    control and strain/force limits with no Radioss slot; warn-dropped.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_CABLE_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    g = lambda i: to_float(f1[i]) if len(f1) > i else 0.0
+    m = MatCableDiscreteBeam(
+        mid, g(1), g(2), to_int(f1[3]) if len(f1) > 3 else 0, g(4), g(5), g(6),
+        to_int(f1[7]) if len(f1) > 7 else 0)
+    state.mat_cable_dbeam[mid] = m
+    if m.iread > 0:
+        state.warn(f"*MAT_CABLE_DISCRETE_BEAM mid={mid}: IREAD={m.iread} card 2 "
+                   "(OUTPUT/TSTART/FRACL0/MXEPS/MXFRC) has no /PROP/TYPE13 "
+                   "slot — cable output control and the strain/force limits "
+                   "are DROPPED (the cable keeps the CDF/TDF-free 'never "
+                   "fails' behaviour).")
+
+
+def handle_mat_elastic_spring_discrete_beam(block: Block,
+                                            state: ConversionState) -> None:
+    """*MAT_ELASTIC_SPRING_DISCRETE_BEAM (MAT_074) → a 1-DOF spring.
+
+    Card1: MID RO K F0 D CDF TDF
+    Card2: FLCID HLCID C1 C2 DLE GLCID
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_ELASTIC_SPRING_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    g = lambda f, i: to_float(f[i]) if len(f) > i else 0.0
+    gi = lambda f, i: to_int(f[i]) if len(f) > i else 0
+    state.mat_elastic_spring_dbeam[mid] = MatElasticSpringDiscreteBeam(
+        mid, g(f1, 1), g(f1, 2), g(f1, 3), g(f1, 4), g(f1, 5), g(f1, 6),
+        gi(f2, 0), gi(f2, 1), g(f2, 2), g(f2, 3), g(f2, 4), gi(f2, 5))
+
+
+def handle_mat_general_nonlinear_6dof(block: Block,
+                                      state: ConversionState) -> None:
+    """*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM (MAT_119) → a 6-DOF spring.
+
+    Cards 1-8 (Manual Vol I R17):
+      1: MID RO KT KR IUNLD OFFSET DAMPF IFLAG
+      2: LCIDTR LCIDTS LCIDTT LCIDRR LCIDRS LCIDRT      (loading)
+      3: LCIDTUR … LCIDRUT                               (unloading)
+      4: LCIDTDR … LCIDRDT                               (damping)
+      5: LCIDTER … LCIDRET                               (elastic/scale)
+      6: UTFAILR … WTFAILT FCRIT
+      7: UCFAILR … WCFAILT
+      8: IUR IUS IUT IWR IWS IWT
+    Cards 9-15 exist only for IFLAG=2 (crushable-frame buckling) or IUNLD=2 and
+    are NOT in the shipped Keyword971 cfg — they are counted (so the block is
+    fully consumed) and reported, never converted.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    c = lambda i: _card(raw, offset + i, fixed=True, n=8, w=10)
+    g = lambda f, i: to_float(f[i]) if len(f) > i else 0.0
+    c6 = c(6)
+    m = MatGeneralNonlinear6dof(
+        mid, g(f1, 1), g(f1, 2), g(f1, 3),
+        to_int(f1[4]) if len(f1) > 4 else 0,
+        g(f1, 5), g(f1, 6),
+        to_int(f1[7]) if len(f1) > 7 else 0,
+        _six_i(c(1)), _six_i(c(2)), _six_i(c(3)), _six_i(c(4)),
+        _six(c6), _six(c(7)),
+        to_float(c6[6]) if len(c6) > 6 else 0.0)
+    state.mat_gnl_6dof[mid] = m
+    if m.iflag == 2:
+        state.warn(f"*MAT_119 mid={mid}: IFLAG=2 (crushable-frame buckling "
+                   "formulation) needs cards 9-15 (LM*/LUM*/KUM*/E1*/E2* "
+                   "moment-interaction tables) that no Radioss spring law can "
+                   "express — the material is converted as the ordinary 6-DOF "
+                   "spring (IFLAG=0) and the buckling interaction is LOST.")
+    elif m.iunld == 2:
+        state.warn(f"*MAT_119 mid={mid}: IUNLD=2 additionally reads card 15 "
+                   "(KTS KTT KRS KRT, the unloading stiffnesses); those four "
+                   "values have no per-DOF unloading-stiffness slot on the "
+                   "Radioss spring card and are DROPPED — unloading follows "
+                   "the H=7 elastic-hysteresis rule with K1..K6 instead.")
+
+
+def handle_mat_general_nonlinear_1dof(block: Block,
+                                      state: ConversionState) -> None:
+    """*MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM (MAT_121) → a 1-DOF spring.
+
+    Card1: MID RO K IUNLD OFFSET DAMPF
+    Card2: LCIDT LCIDTU LCIDTD LCIDTE
+    Card3: UTFAIL UCFAIL IU
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    g = lambda f, i: to_float(f[i]) if len(f) > i else 0.0
+    gi = lambda f, i: to_int(f[i]) if len(f) > i else 0
+    state.mat_gnl_1dof[mid] = MatGeneralNonlinear1dof(
+        mid, g(f1, 1), g(f1, 2), gi(f1, 3), g(f1, 4), g(f1, 5),
+        gi(f2, 0), gi(f2, 1), gi(f2, 2), gi(f2, 3), g(f3, 0), g(f3, 1))
+
+
+def handle_mat_general_spring_discrete_beam(block: Block,
+                                            state: ConversionState) -> None:
+    """*MAT_GENERAL_SPRING_DISCRETE_BEAM (MAT_196) → a 6-DOF spring.
+
+    Card1:  MID RO … MDFAIL(61-70) DOSPOT(71-80)
+    Card2i: DOF TYPE K D CDF TDF
+    Card3i: FLCID HLCID C1 C2 DLE GLCID
+
+    Cards 2 and 3 form a repeating PAIR, one per active DOF, up to six pairs.
+    The shipped ``Keyword971/MAT/mat_196.cfg`` card 1 reads only MID and RO —
+    MDFAIL and DOSPOT are read here from the manual's columns.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_GENERAL_SPRING_DISCRETE_BEAM: empty card – skipped")
+        return
+    mid = to_int(f1[0])
+    m = MatGeneralSpringDiscreteBeam(
+        mid,
+        to_float(f1[1]) if len(f1) > 1 else 0.0,
+        to_int(f1[6]) if len(f1) > 6 else 0,
+        to_int(f1[7]) if len(f1) > 7 else 0)
+    idx = offset + 1
+    seen: set = set()
+    while idx < len(raw) and len(m.dofs) < 6:
+        fa = _card(raw, idx, fixed=True, n=8, w=10)
+        if not fa or not fa[0].strip():
+            break
+        dof = to_int(fa[0])
+        if dof < 1 or dof > 6:
+            state.warn(f"*MAT_196 mid={mid}: the line '{raw[idx].strip()}' read "
+                       f"as a DOF card names DOF={dof}, which is outside 1-6 — "
+                       "the per-DOF walk STOPPED there and every later card "
+                       "PAIR in this block is UNREAD.")
+            break
+        if dof in seen:
+            state.warn(f"*MAT_196 mid={mid}: DOF {dof} is defined more than "
+                       "once — the LAST pair wins (LS-DYNA allows each DOF at "
+                       "most once).")
+        seen.add(dof)
+        fb = _card(raw, idx + 1, fixed=True, n=8, w=10)
+        g = lambda f, i: to_float(f[i]) if len(f) > i else 0.0
+        gi = lambda f, i: to_int(f[i]) if len(f) > i else 0
+        m.dofs.append((dof, gi(fa, 1), g(fa, 2), g(fa, 3), g(fa, 4), g(fa, 5),
+                       gi(fb, 0), gi(fb, 1), g(fb, 2), g(fb, 3), g(fb, 4),
+                       gi(fb, 5)))
+        idx += 2
+    state.mat_general_spring_dbeam[mid] = m
+
+
 def handle_mat_spotweld(block: Block, state: ConversionState) -> None:
     """*MAT_SPOTWELD (MAT_100) → /PROP/TYPE13 (SPR_BEAM) spring connectors.
 
@@ -8406,6 +8766,37 @@ HANDLERS = {
     "MAT_S04":                                handle_mat_spring_nonlinear_elastic,
     "MAT_DAMPER_VISCOUS":                     handle_mat_damper_viscous,
     "MAT_D01":                                handle_mat_damper_viscous,
+    "MAT_SPRING_ELASTOPLASTIC":               handle_mat_spring_elastoplastic,
+    "MAT_S03":                                handle_mat_spring_elastoplastic,
+    "MAT_DAMPER_NONLINEAR_VISCOUS":           handle_mat_damper_nonlinear_viscous,
+    "MAT_S05":                                handle_mat_damper_nonlinear_viscous,
+    "MAT_D02":                                handle_mat_damper_nonlinear_viscous,
+    "MAT_SPRING_GENERAL_NONLINEAR":           handle_mat_spring_general_nonlinear,
+    "MAT_S06":                                handle_mat_spring_general_nonlinear,
+    "MAT_SPRING_INELASTIC":                   handle_mat_spring_inelastic,
+    "MAT_S08":                                handle_mat_spring_inelastic,
+    # *SECTION_BEAM ELFORM=6 discrete beams → 6-DOF /PROP/TYPE8 / TYPE13 springs
+    "MAT_LINEAR_ELASTIC_DISCRETE_BEAM":       handle_mat_linear_elastic_discrete_beam,
+    "MAT_066":                                handle_mat_linear_elastic_discrete_beam,
+    "MAT_66":                                 handle_mat_linear_elastic_discrete_beam,
+    "MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM":    handle_mat_nonlinear_elastic_discrete_beam,
+    "MAT_067":                                handle_mat_nonlinear_elastic_discrete_beam,
+    "MAT_67":                                 handle_mat_nonlinear_elastic_discrete_beam,
+    "MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM":    handle_mat_nonlinear_plastic_discrete_beam,
+    "MAT_068":                                handle_mat_nonlinear_plastic_discrete_beam,
+    "MAT_68":                                 handle_mat_nonlinear_plastic_discrete_beam,
+    "MAT_CABLE_DISCRETE_BEAM":                handle_mat_cable_discrete_beam,
+    "MAT_071":                                handle_mat_cable_discrete_beam,
+    "MAT_71":                                 handle_mat_cable_discrete_beam,
+    "MAT_ELASTIC_SPRING_DISCRETE_BEAM":       handle_mat_elastic_spring_discrete_beam,
+    "MAT_074":                                handle_mat_elastic_spring_discrete_beam,
+    "MAT_74":                                 handle_mat_elastic_spring_discrete_beam,
+    "MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM": handle_mat_general_nonlinear_6dof,
+    "MAT_119":                                handle_mat_general_nonlinear_6dof,
+    "MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM": handle_mat_general_nonlinear_1dof,
+    "MAT_121":                                handle_mat_general_nonlinear_1dof,
+    "MAT_GENERAL_SPRING_DISCRETE_BEAM":       handle_mat_general_spring_discrete_beam,
+    "MAT_196":                                handle_mat_general_spring_discrete_beam,
     "MAT_SPOTWELD":                           handle_mat_spotweld,
     "MAT_100":                                handle_mat_spotweld,
     "MAT_187":                                handle_mat_187,

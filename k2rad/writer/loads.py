@@ -19,9 +19,18 @@ __all__ = [
     "_emit_spr_gene_dof",
     "_emit_spr_gene_dof_kc",
     "_make_grounding_springs",
+    "SpringDof",
+    "_as_spring_dof",
+    "_emit_spring_dof",
     "_emit_prop_type4",
+    "_emit_prop_type8",
     "_emit_prop_type13",
     "_curve_slope_at_origin",
+    "_mirror_one_sided_curve",
+    "_plastic_to_total_disp",
+    "_emit_funct",
+    "_s03_curve_points",
+    "_finite_length",
     "_new_ground_node",
     "_emit_spring_part",
     "_make_discrete_springs",
@@ -180,19 +189,26 @@ _FORCE_DOF_AXIS = {1: 0, 2: 1, 3: 2}
 
 def _emit_spr_gene_dof_kc(k: float, c: float = 0.0, a: float = 0.0,
                           fct: int = 0, h: int = 0,
-                          dmin: float = 0.0, dmax: float = 0.0) -> List[str]:
+                          dmin: float = 0.0, dmax: float = 0.0,
+                          fct2: int = 0, fct3: int = 0, fct4: int = 0,
+                          b: float = 0.0, d: float = 0.0, e: float = 0.0,
+                          hscale: float = 0.0) -> List[str]:
     """The 3 data lines of one /PROP/TYPE8 (SPR_GENE) DOF, with stiffness K,
     viscous C, scale A, an optional force function fct (+ hardening flag H) and
     the rupture displacements DeltaMin/DeltaMax. Zero-valued A/B/D and rupture
     fields take the reader defaults (A=1, B=0, ±1e30) — the same convention the
-    validated grounding-spring emitter relies on."""
+    validated grounding-spring emitter relies on.
+
+    The un-indexed comment header is kept (rather than the DOF-numbered one
+    /PROP/TYPE13 uses) so the grounding-spring and oriented-discrete-spring
+    output stays byte-identical; new 6-DOF emitters use _emit_spring_dof."""
     return [
         "#                 K                   C                   A                   B                   D",
-        f"{_f(k)}{_f(c)}{_f(a)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(k)}{_f(c)}{_f(a)}{_f(b)}{_f(d)}",
         "#  fct_ID1         H   fct_ID2   fct_ID3   fct_ID4                      DeltaMin            DeltaMax",
-        f"{_i(fct)}{_i(h)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
+        f"{_i(fct)}{_i(h)}{_i(fct2)}{_i(fct3)}{_i(fct4)}          {_f(dmin)}{_f(dmax)}",
         "#                 F                   E              Ascale              Hscale",
-        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(e)}{_f(0.0)}{_f(hscale)}",
     ]
 
 
@@ -328,51 +344,162 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
     return lines if emitted else []
 
 
+class SpringDof:
+    """One local DOF of a Radioss spring property (/PROP/TYPE4 slot 1, or one
+    of the six blocks of /PROP/TYPE8 and /PROP/TYPE13).
+
+    The three cards are byte-identical across all three properties (and across
+    /MAT/LAW108 and /MAT/LAW113, whose bodies are the same blocks with RHO in
+    place of Mass), so ONE payload object drives every spring emitter:
+
+        K  C  A  B  D
+        fct_ID1  H  fct_ID2  fct_ID3  fct_ID4  <10 blanks>  DeltaMin  DeltaMax
+        F  E  Ascale  Hscale
+
+    Force law (redef3.F90:1140-1148):
+        F = f(δ)·[A + B·ln(max(1,|δ̇/D|)) + E·g(δ̇)] + C·δ̇ + Hscale·h(δ̇)
+    with f = fct_ID1 (loading), g = fct_ID2 (rate scale), fct_ID3 the unloading
+    curve used by H = 4/5/6/7/9, and h = fct_ID4 (extra damping force).
+
+    ⚠ ``A`` is NOT a free scale factor on a PROPERTY-driven spring: the readers
+    store the stiffness as ``K / A`` (hm_read_prop04.F:249, hm_read_prop08.F:282
+    and hm_read_prop13.F:295, once per DOF), which exactly cancels the ``·A`` the
+    engine applies in the no-function branch. /MAT/LAW108 and /MAT/LAW113 store
+    XK raw (hm_read_mat108.F:271) and do NOT cancel. So dyna2rad's
+    ``A1 = 1e-20`` trick for *MAT_S04's LCR (convertprops.cxx:974) is a LAW108-
+    only device — writing it on a TYPE4/8/13 would multiply the time-step
+    stiffness by 1e20 and collapse dt at cycle 0. Leave A at 0 (→ reader default
+    1.0) unless the force really is scaled, and then pre-multiply K by A so the
+    stored K/A is the true tangent.
+    """
+
+    __slots__ = ("k", "c", "a", "b", "d", "fct1", "h", "fct2", "fct3", "fct4",
+                 "dmin", "dmax", "f", "e", "ascale", "hscale")
+
+    def __init__(self, k: float = 0.0, c: float = 0.0, a: float = 0.0,
+                 b: float = 0.0, d: float = 0.0, fct1: int = 0, h: int = 0,
+                 fct2: int = 0, fct3: int = 0, fct4: int = 0,
+                 dmin: float = 0.0, dmax: float = 0.0, f: float = 0.0,
+                 e: float = 0.0, ascale: float = 0.0, hscale: float = 0.0):
+        self.k, self.c, self.a, self.b, self.d = k, c, a, b, d
+        self.fct1, self.h, self.fct2, self.fct3, self.fct4 = \
+            fct1, h, fct2, fct3, fct4
+        self.dmin, self.dmax = dmin, dmax
+        self.f, self.e, self.ascale, self.hscale = f, e, ascale, hscale
+
+
+def _as_spring_dof(dof) -> SpringDof:
+    """Accept a SpringDof or the legacy ``(k, fct, h, dmin, dmax)`` 5-tuple the
+    spotweld connectors pass — the tuple form maps onto a SpringDof whose other
+    fields are all 0, i.e. byte-identical output."""
+    if isinstance(dof, SpringDof):
+        return dof
+    k, fct, h, dmin, dmax = dof
+    return SpringDof(k=k, fct1=fct, h=h, dmin=dmin, dmax=dmax)
+
+
+def _emit_spring_dof(i: int, dof) -> List[str]:
+    """The 6 lines (3 comments + 3 data cards) of spring DOF block *i* (1..6).
+
+    Column layout is identical for /PROP/TYPE8, /PROP/TYPE13, /MAT/LAW108 and
+    /MAT/LAW113: %20lg x5, then %10d x5 + 10 blanks + %20lg x2, then %20lg x4.
+    Cols 51-60 of the middle card MUST stay blank at /BEGIN 2022 — they only
+    become ``fct_ID5i`` at radioss2023."""
+    d = _as_spring_dof(dof)
+    return [
+        f"#                 K{i}                  C{i}                  A{i}                  B{i}                  D{i}",
+        f"{_f(d.k)}{_f(d.c)}{_f(d.a)}{_f(d.b)}{_f(d.d)}",
+        f"# fct_ID1{i}        H{i}  fct_ID2{i}  fct_ID3{i}  fct_ID4{i}                     DeltaMin{i}           DeltaMax{i}",
+        f"{_i(d.fct1)}{_i(d.h)}{_i(d.fct2)}{_i(d.fct3)}{_i(d.fct4)}          {_f(d.dmin)}{_f(d.dmax)}",
+        f"#                 F{i}                  E{i}             Ascale{i}             Hscale{i}",
+        f"{_f(d.f)}{_f(d.e)}{_f(d.ascale)}{_f(d.hscale)}",
+    ]
+
+
 def _emit_prop_type4(prop_id: int, title: str, mass: float, k: float, c: float,
                      a: float, fct1: int, hflag: int,
-                     dmin: float, dmax: float) -> List[str]:
+                     dmin: float, dmax: float, fct2: int = 0, fct3: int = 0,
+                     fct4: int = 0, b: float = 0.0, d: float = 0.0,
+                     e: float = 0.0, hscale: float = 0.0) -> List[str]:
     """/PROP/TYPE4 (SPRING). Layout: prop_p4_spring.cfg FORMAT(radioss140), the
     newest TYPE4 reader format ≤ /BEGIN-2022. Zero-valued A/B/D and rupture
     displacements take the reader defaults (A=1, B=0, D=1, ±1e30) — same
-    convention the validated TYPE8 grounding-spring emitter relies on."""
+    convention the validated TYPE8 grounding-spring emitter relies on.
+
+    The optional fct_ID21/31/41 + B/D/E/Hscale arguments carry the rate,
+    unloading and damping-function slots the S03/S05/S06/S08 spring materials
+    need; leaving them at their defaults reproduces the original card exactly.
+    """
     return [
         f"/PROP/TYPE4/{prop_id}",
         title,
         "#               MASS                                 sens_ID    Isflag     Ileng",
         f"{_f(mass)}{' ' * 30}{_i(0)}{_i(0)}{_i(0)}",
         "#                  K                   C                   A                   B                   D",
-        f"{_f(k)}{_f(c)}{_f(a)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(k)}{_f(c)}{_f(a)}{_f(b)}{_f(d)}",
         "# fct_ID11        H1  fct_ID21  fct_ID31  fct_ID41                      DeltaMin            DeltaMax",
-        f"{_i(fct1)}{_i(hflag)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
+        f"{_i(fct1)}{_i(hflag)}{_i(fct2)}{_i(fct3)}{_i(fct4)}          {_f(dmin)}{_f(dmax)}",
         "#                 F1                  E1             AScale1             HScale1",
-        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_f(0.0)}{_f(e)}{_f(0.0)}{_f(hscale)}",
         HDR,
     ]
 
 
+def _emit_prop_type8(prop_id: int, title: str, mass: float, inertia: float,
+                     skew_id: int, dofs, ifail: int = 0, ifail2: int = 0,
+                     iequil: int = 0) -> List[str]:
+    """/PROP/TYPE8 (SPR_GENE). Layout: prop_p8_spr_gene.cfg FORMAT(radioss2018).
+
+    Card 1 is ``Mass I skew_ID sens_ID Isflag Ifail Ifail2 Iequil`` — note the
+    order differs from /PROP/TYPE13's ``… Ifail Ileng Ifail2``, and that TYPE8
+    accepts Ifail2 ∈ {1,2} only (hm_read_prop08.F:150 forces anything else to 0;
+    there is no energy criterion here).
+
+    This is the SKEW-oriented 6-DOF spring: r2buf3.F builds the local triad
+    entirely from the skew (per-element /SPRING Skew_ID first, else the property
+    skew_ID, else global). It is the property-driven twin of /PROP/TYPE23 +
+    /MAT/LAW108, with an absolute Mass in place of RHO×Volume.
+    """
+    lines = [
+        f"/PROP/TYPE8/{prop_id}",
+        title,
+        "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
+        f"{_f(mass)}{_f(inertia)}{_i(skew_id)}{_i(0)}{_i(0)}{_i(ifail)}{_i(ifail2)}{_i(iequil)}",
+    ]
+    for i, dof in enumerate(dofs, start=1):
+        lines += _emit_spring_dof(i, dof)
+    lines += [
+        "#  Fsmooth                Fcut",
+        f"{_i(0)}{_f(0.0)}",
+        HDR,
+    ]
+    return lines
+
+
 def _emit_prop_type13(prop_id: int, title: str, mass: float, inertia: float,
-                      ifail: int, ifail2: int, dofs) -> List[str]:
+                      ifail: int, ifail2: int, dofs, ileng: int = 0,
+                      skew_id: int = 0) -> List[str]:
     """/PROP/TYPE13 (SPR_BEAM). Layout: prop_p13_spr_beam.cfg
     FORMAT(radioss2018), the newest TYPE13 reader format ≤ /BEGIN-2022.
-    ``dofs`` is 6 (k, fct_id, hflag, dmin, dmax) tuples for Tx Ty Tz Rx Ry Rz.
+    ``dofs`` is 6 SpringDof (or legacy ``(k, fct_id, hflag, dmin, dmax)``
+    tuples) for Tx Ty Tz Rx Ry Rz.
     With Ifail2=2 the DeltaMin/DeltaMax fields are failure FORCES (moments on
     the rotational DOFs); zero-valued fields take the ±1e30 'no failure'
-    reader defaults."""
+    reader defaults.
+
+    This is the NODE-oriented 6-DOF spring: r4buf3.F sets local X along
+    node_ID1→node_ID2 and takes the XY plane from node_ID3 (falling back to the
+    property skew's Y′). It is the property-driven twin of /PROP/TYPE23 +
+    /MAT/LAW113. ``Ileng=1`` makes K, the input curves and the failure limits
+    per unit length (strain based) — what *MAT_CABLE_DISCRETE_BEAM needs."""
     lines = [
         f"/PROP/TYPE13/{prop_id}",
         title,
         "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail     Ileng    Ifail2",
-        f"{_f(mass)}{_f(inertia)}{_i(0)}{_i(0)}{_i(0)}{_i(ifail)}{_i(0)}{_i(ifail2)}",
+        f"{_f(mass)}{_f(inertia)}{_i(skew_id)}{_i(0)}{_i(0)}{_i(ifail)}{_i(ileng)}{_i(ifail2)}",
     ]
-    for i, (k, fct, h, dmin, dmax) in enumerate(dofs, start=1):
-        lines += [
-            f"#                 K{i}                  C{i}                  A{i}                  B{i}                  D{i}",
-            f"{_f(k)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-            f"# fct_ID1{i}        H{i}  fct_ID2{i}  fct_ID3{i}  fct_ID4{i}                     DeltaMin{i}           DeltaMax{i}",
-            f"{_i(fct)}{_i(h)}{_i(0)}{_i(0)}{_i(0)}          {_f(dmin)}{_f(dmax)}",
-            f"#                 F{i}                  E{i}             Ascale{i}             Hscale{i}",
-            f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-        ]
+    for i, dof in enumerate(dofs, start=1):
+        lines += _emit_spring_dof(i, dof)
     lines += [
         "#                 Vo                  Wo                Fcut   Fsmooth",
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_i(0)}",
@@ -398,6 +525,104 @@ def _curve_slope_at_origin(curve: Curve) -> float:
         if x2 > x1:
             return (y2 - y1) / (x2 - x1)
     return 0.0
+
+
+def _mirror_one_sided_curve(pts, tension_only: bool):
+    """Mirror a ONE-SIDED force-displacement curve into the opposite quadrant.
+
+    ``*MAT_SPRING_INELASTIC`` (S08) defines LCFD in the POSITIVE quadrant only
+    whatever the tension/compression sense; CTF picks the sense. Radioss reads a
+    spring function over the full displacement range and extrapolates the end
+    segments, so a positive-only curve on a compression-only spring would invent
+    a tensile force. dyna2rad's ``HandleCurveLCFD`` (convertprops.cxx:1066-1128)
+    is reproduced here: an already two-quadrant curve is left alone, otherwise
+
+      * ``CTF = -1`` (tension only)  → prepend ``(-1, 0)``: zero force in
+        compression, the given branch in tension;
+      * ``CTF = +1`` (compression only, the LS-DYNA default) → reflect the
+        branch through the origin (x,y → -x,-y, order reversed) and close it off
+        with ``(+1, 0)``.
+
+    Returns the new point list; ``[]`` when the input cannot be used.
+    """
+    pts = sorted((float(a), float(o)) for a, o in pts)
+    if len(pts) < 2:
+        return []
+    if pts[0][0] < 0.0:
+        return pts                      # already spans both quadrants
+    if tension_only:
+        # Keep the positive branch; a flat zero-force point one unit into
+        # compression makes the extrapolated compressive force zero.
+        head = [(-1.0, 0.0)]
+        if pts[0][0] > 0.0:
+            head.append((0.0, 0.0))
+        return head + pts
+    # Compression only: reflect the branch through the origin, then close it
+    # off with a flat zero-force point one unit into tension.
+    out = [(-a, -o) for a, o in reversed(pts)]
+    if out[-1][0] < 0.0:
+        out.append((0.0, 0.0))
+    return out + [(1.0, 0.0)]
+
+
+def _plastic_to_total_disp(pts, stiff: float):
+    """LS-DYNA PLASTIC-displacement abscissa → Radioss TOTAL displacement.
+
+    ``*MAT_068``'s LCPD*/LCPM* curves and ``*MAT_196``'s TYPE≠0 FLCID give the
+    yield force against the PLASTIC deformation; a Radioss spring function is
+    read against the TOTAL deformation, so every abscissa gains the elastic part
+    ``F/K`` (dyna2rad ``ConvertPlasticDispPointsTotalDisp``,
+    convertmats.cxx:8862-8921). The curve is then mirrored through the origin so
+    the spring yields symmetrically in compression, which is what LS-DYNA does
+    for a one-sided plastic curve.
+
+    Returns ``[]`` when *stiff* is zero (no elastic branch to add) or the curve
+    is unusable, so the caller can warn instead of emitting nonsense.
+    """
+    pts = [(float(a), float(o)) for a, o in pts]
+    if len(pts) < 2 or stiff == 0.0:
+        return []
+    pts.sort()
+    if any(a < 0.0 for a, _ in pts):
+        # Already a two-quadrant curve: keep the positive half only, so the
+        # mirroring below stays symmetric (dyna2rad:8866-8883 does the same).
+        pts = [p for p in pts if p[0] >= 0.0]
+        if len(pts) < 2:
+            return []
+    total = []
+    for a, o in pts:
+        x = a + o / stiff
+        if total and x <= total[-1][0]:
+            # Non-monotonic after the elastic shift: a Radioss function must
+            # have strictly increasing abscissae, so nudge past the previous
+            # point by the same tiny epsilon dyna2rad uses.
+            x = total[-1][0] + _PLASTIC_CURVE_EPS
+        total.append((x, o))
+    if total[0][0] > 0.0:
+        total.insert(0, (0.0, 0.0))
+    return [(-a, -o) for a, o in reversed(total) if a != 0.0] + total
+
+
+#: Abscissa nudge that keeps a plastic→total curve strictly increasing
+#: (dyna2rad hard-codes 0.01 at convertmats.cxx:8892; that is a unit-dependent
+#: magic number, so k2rad uses a RELATIVE-free but far smaller absolute step —
+#: it only has to break the tie, and 1e-9 is below any meaningful mesh length in
+#: mm/m/in decks alike while staying representable in the %20lg card field).
+_PLASTIC_CURVE_EPS = 1.0e-9
+
+
+def _finite_length(state: ConversionState, e) -> bool:
+    """True when a 2-node connector element has two REAL, distinct nodes — the
+    precondition for any node-oriented frame (r4buf3.F builds local X from
+    node1→node2 and answers WARNING 325 when it cannot). A grounded element
+    (N2=0) fails it: its synthesized ground node sits on top of N1."""
+    if e.n1 <= 0 or e.n2 <= 0:
+        return False
+    a, b = state.nodes.get(e.n1), state.nodes.get(e.n2)
+    if a is None or b is None:
+        return False
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2
+            + (a.z - b.z) ** 2) > 1e-24
 
 
 def _new_ground_node(state: ConversionState, at: NodeData) -> int:
@@ -465,13 +690,72 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
     return lines
 
 
+def _emit_funct(fid: int, title: str, pts) -> List[str]:
+    """A /FUNCT written INLINE in a connector section.
+
+    The single /FUNCT emitter (materials.py::_make_functions) runs at the
+    "functions" step, which is BEFORE every connector step in the writer
+    dispatch, so a curve registered in state.curves from here would never reach
+    the deck. Connector-synthesized functions are therefore written where they
+    are built — the same thing the spotweld bilinear-axial function does."""
+    lines = [f"/FUNCT/{fid}", title[:100],
+             "#                  X                   Y"]
+    for a, o in pts:
+        lines.append(f"{_f(a)}{_f(o)}")
+    lines.append(HDR)
+    return lines
+
+
+def _s03_curve_points(k: float, kt: float, fy: float):
+    """The 5-point symmetric elastic-plastic force function of *MAT_S03.
+
+    dyna2rad (convertprops.cxx:923) synthesizes
+
+        (-(FY/K + 1), -(FY + KT))  (-FY/K, -FY)  (0,0)  (FY/K, FY)
+        (FY/K + 1, FY + KT)
+
+    i.e. an elastic branch of slope K up to the yield force FY, then a plastic
+    branch of slope KT carried ONE displacement unit past yield (Radioss
+    extrapolates the last segment, so the branch continues at slope KT beyond
+    it). Returns [] when the card cannot produce a usable curve."""
+    if k <= 0.0 or fy <= 0.0:
+        return []
+    dy = fy / k
+    return [(-(dy + 1.0), -(fy + kt)), (-dy, -fy), (0.0, 0.0),
+            (dy, fy), (dy + 1.0, fy + kt)]
+
+
 def _make_discrete_springs(state: ConversionState) -> List[str]:
-    """*ELEMENT_DISCRETE + *SECTION_DISCRETE + *MAT_SPRING_ELASTIC /
-    *MAT_SPRING_NONLINEAR_ELASTIC / *MAT_DAMPER_VISCOUS → /PROP/TYPE4 (SPRING)
-    + /PART + /SPRING. A grounded element (N2=0) gets a fixed ground node at
-    N1's coordinates + /BCS 111 111 (the _make_grounding_springs pattern); the
-    zero-length TYPE4 spring then acts as a central restoring force F=K·|d|
-    toward the anchor — TYPE4 explicitly allows zero-length springs."""
+    """*ELEMENT_DISCRETE + *SECTION_DISCRETE + a discrete spring/damper material
+    → /PROP/TYPE4 (SPRING) + /PART + /SPRING.
+
+    Materials: ``*MAT_SPRING_ELASTIC`` (S01), ``*MAT_SPRING_ELASTOPLASTIC``
+    (S03), ``*MAT_SPRING_NONLINEAR_ELASTIC`` (S04),
+    ``*MAT_DAMPER_NONLINEAR_VISCOUS`` (S05),
+    ``*MAT_SPRING_GENERAL_NONLINEAR`` (S06), ``*MAT_SPRING_INELASTIC`` (S08) and
+    ``*MAT_DAMPER_VISCOUS`` (D01/S02). Every one of them is a 1-DOF connector and
+    lands in the single DOF block of a /PROP/TYPE4, which carries the full
+    Radioss spring law — loading function, hardening flag, rate function,
+    unloading function, damping function and the rupture displacements — so no
+    /MAT is written and the /PART keeps mat_id 0.
+
+    dyna2rad instead pairs an (initially empty) /MAT/LAW108 with a /PROP/TYPE23
+    and fills the stiffness in from the property pass; the card BODY is the same
+    six DOF blocks either way, and the property-driven route avoids TYPE23's
+    "a /PART on it must carry a MID whose law is 108/113/114/135" rule
+    (hm_read_part.F, ERROR 179 / ERROR 1715).
+
+    A grounded element (N2=0) gets a fixed ground node at N1's coordinates +
+    /BCS 111 111 (the _make_grounding_springs pattern); the zero-length TYPE4
+    spring then acts as a central restoring force F=K·|d| toward the anchor —
+    TYPE4 explicitly allows zero-length springs.
+
+    A DRO=1 (torsional) section puts the same payload on the ROTATIONAL DOF of a
+    6-DOF property instead: /PROP/TYPE13 slot 4 (Rx = torsion about the element's
+    own n1→n2 axis) for an unoriented spring, /PROP/TYPE8 slot 4 for one carrying
+    a *DEFINE_SD_ORIENTATION. LS-DYNA already states a DRO=1 spring in
+    moment-per-radian, which is exactly what the Radioss rotational slot wants,
+    so no unit conversion applies — only the DOF changes."""
     if not state.discrete_elems:
         return []
     lines: List[str] = [
@@ -497,23 +781,22 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                        f"{secid} found — a default translational section is "
                        "assumed (no failure deflection).")
             sec = SectionDiscrete(secid, "")
-        if sec.dro == 1:
-            # A torsional spring acts about the N1-N2 axis on the ROTATIONAL
-            # DOFs; /PROP/TYPE4 is purely translational, and emitting it anyway
-            # would put the stiffness on the wrong DOFs. Warn and skip.
-            state.warn(f"*SECTION_DISCRETE {secid}: DRO=1 (torsional "
-                       f"spring/damper) has no confident /PROP/TYPE4 mapping — "
-                       f"part {pid} ({len(elems)} element(s)) NOT converted.")
-            continue
+        torsional = sec.dro == 1
 
-        # Material → TYPE4 K / C / fct_ID1.
+        # Material → the single spring DOF (K / C / A / B / D, fct_ID1..4, H).
         k = c = 0.0
-        fct1 = 0
+        b_coef = d_coef = e_coef = hscale = 0.0
+        fct1 = fct2 = fct3 = fct4 = 0
         hflag = 0
         kind = None
+        funct_lines: List[str] = []
         mat_lin = state.mat_spring_elastic.get(part.mid)
         mat_nl = state.mat_spring_nonlinear.get(part.mid)
         mat_dmp = state.mat_damper_viscous.get(part.mid)
+        mat_ep = state.mat_spring_elastoplastic.get(part.mid)
+        mat_nlv = state.mat_damper_nl_viscous.get(part.mid)
+        mat_gnl = state.mat_spring_general_nl.get(part.mid)
+        mat_inel = state.mat_spring_inelastic.get(part.mid)
         if mat_lin is not None:
             k = mat_lin.k
             kind = "linear spring"
@@ -534,23 +817,154 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                            "stiffness); verify the curve.")
                 k = 0.0
             if mat_nl.lcr:
+                # LS-DYNA S04 is F = LCD(δ)·LCR(δ̇). The Radioss spring law is
+                # F = f(δ)·[A + B·ln(…) + E·g(δ̇)] + …, so an exact match needs
+                # A = 0 and E = 1 — and A = 0 is re-defaulted to 1 by the
+                # reader, giving f·(1 + g). dyna2rad dodges that with A = 1e-20
+                # (convertprops.cxx:974), which is only legal on /MAT/LAW108:
+                # the PROPERTY readers store the stiffness as K/A
+                # (hm_read_prop04.F:249), so A = 1e-20 would multiply the
+                # time-step stiffness by 1e20 and collapse dt at cycle 0.
                 state.warn(f"*MAT_SPRING_NONLINEAR_ELASTIC {part.mid}: rate "
-                           f"scale curve LCR={mat_nl.lcr} has no confident "
-                           "/PROP/TYPE4 slot — converted rate-independent.")
+                           f"scale curve LCR={mat_nl.lcr} has no /PROP/TYPE4 "
+                           "slot that reproduces F=LCD(d)*LCR(d/dt) — the "
+                           "spring is converted RATE-INDEPENDENT (F=LCD(d)). "
+                           "The A=1e-20 trick dyna2rad uses is a /MAT/LAW108 "
+                           "device: a property-driven spring stores K/A, so it "
+                           "would blow up the time step. Fold the rate scale "
+                           "into LCD if it matters.")
             kind = "nonlinear elastic spring"
+        elif mat_ep is not None:
+            pts = _s03_curve_points(mat_ep.k, mat_ep.kt, mat_ep.fy)
+            if not pts:
+                state.warn(f"*MAT_SPRING_ELASTOPLASTIC {part.mid}: K="
+                           f"{mat_ep.k:g}/FY={mat_ep.fy:g} — both must be "
+                           "positive to place the yield point (the elastic "
+                           f"branch is FY/K wide) — part {pid} "
+                           f"({len(elems)} element(s)) NOT converted.")
+                continue
+            fct1 = state.next_curve_id()
+            funct_lines = _emit_funct(
+                fct1, f"MATS03_elastoplastic_mid{part.mid}", pts)
+            k = mat_ep.k
+            hflag = 1                    # isotropic hardening, unloads along K
+            kind = "elastoplastic spring"
+        elif mat_nlv is not None:
+            if not mat_nlv.lcdr or mat_nlv.lcdr not in state.curves:
+                state.warn(f"*MAT_DAMPER_NONLINEAR_VISCOUS {part.mid}: force-"
+                           f"vs-rate curve LCDR={mat_nlv.lcdr} not found — "
+                           f"part {pid} ({len(elems)} element(s)) NOT "
+                           "converted.")
+                continue
+            # fct_ID41 is h(δ̇), added to the force as Hscale·h(δ̇) — exactly
+            # LS-DYNA's F = LCDR(δ̇). Hscale = 0 takes the reader default 1.0.
+            fct4 = mat_nlv.lcdr
+            kind = "nonlinear viscous damper"
+        elif mat_gnl is not None:
+            if not mat_gnl.lcdl or mat_gnl.lcdl not in state.curves:
+                state.warn(f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}: loading "
+                           f"curve LCDL={mat_gnl.lcdl} not found — part {pid} "
+                           f"({len(elems)} element(s)) NOT converted.")
+                continue
+            fct1 = mat_gnl.lcdl
+            if mat_gnl.lcdu and mat_gnl.lcdu in state.curves:
+                fct3 = mat_gnl.lcdu
+                hflag = 6                # iso. hardening + nonlinear unloading
+            else:
+                # H=6 with fct_ID31 = 0 is a hard starter ERROR 1057
+                # (hm_read_prop04.F:171). Demote rather than emit a deck that
+                # cannot start.
+                hflag = 0
+                state.warn(f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}: "
+                           f"LCDU={mat_gnl.lcdu} (the unloading curve) is "
+                           "missing, and H=6 without fct_ID31 is starter ERROR "
+                           "1057 — the spring was DEMOTED to H=0 (nonlinear "
+                           "ELASTIC: it unloads along the loading curve and "
+                           "dissipates nothing). Supply LCDU to keep the "
+                           "hysteresis.")
+            dropped = [n for n, v in (("BETA", mat_gnl.beta),
+                                      ("TYI", mat_gnl.tyi),
+                                      ("CYI", mat_gnl.cyi)) if v]
+            if dropped:
+                state.warn(f"*MAT_SPRING_GENERAL_NONLINEAR {part.mid}: "
+                           f"{', '.join(dropped)} have no Radioss spring slot "
+                           "— dropped. BETA selects LS-DYNA's hardening "
+                           "flavour (0 = softening, 1 = isotropic, else "
+                           "kinematic) and TYI/CYI the initial tensile/"
+                           "compressive yield; the converted spring always "
+                           "uses the ISOTROPIC rule H=6 with the yield taken "
+                           "from the loading curve. Radioss's kinematic flag "
+                           "H=4 is not an option — hm_read_prop04.F:157 "
+                           "rejects it outright when K=0 and LAW108 rejects it "
+                           "unconditionally (ERROR 230).")
+            kind = "general nonlinear spring"
+        elif mat_inel is not None:
+            curve = state.curves.get(mat_inel.lcfd)
+            if curve is None or len(curve.pts) < 2:
+                state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: force-vs-"
+                           f"displacement curve LCFD={mat_inel.lcfd} not found "
+                           f"— part {pid} ({len(elems)} element(s)) NOT "
+                           "converted.")
+                continue
+            pts = _mirror_one_sided_curve(curve.pts, mat_inel.ctf < 0.0)
+            if not pts:
+                state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: LCFD "
+                           f"{mat_inel.lcfd} could not be mirrored into the "
+                           f"opposite quadrant — part {pid} "
+                           f"({len(elems)} element(s)) NOT converted.")
+                continue
+            fct1 = state.next_curve_id()
+            side = "tension" if mat_inel.ctf < 0.0 else "compression"
+            funct_lines = _emit_funct(
+                fct1, f"MATS08_{side}_only_mid{part.mid}", pts)
+            k = mat_inel.ku
+            if k > 0.0:
+                # LS-DYNA S08 unloads along max(KU, max loading slope) — that
+                # is precisely Radioss H=1 (elastic-plastic, unloading with K).
+                # dyna2rad leaves H at 0 here (convertprops.cxx:1000-1028),
+                # which silently turns the INELASTIC spring into a nonlinear
+                # ELASTIC one that dissipates nothing; k2rad sets the flag.
+                hflag = 1
+            else:
+                state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: KU (the "
+                           "unloading stiffness) is blank, so there is no "
+                           "slope to unload along — the spring is converted "
+                           "as nonlinear ELASTIC (H=0) and dissipates NO "
+                           "energy. Give KU to keep the inelastic loop.")
+            state.warn(f"*MAT_SPRING_INELASTIC {part.mid}: LCFD "
+                       f"{mat_inel.lcfd} is one-sided (CTF={mat_inel.ctf:g} = "
+                       f"{side} only), so it was mirrored into the opposite "
+                       f"quadrant and closed off with a flat zero-force point "
+                       f"-> /FUNCT/{fct1} ({len(pts)} points). Radioss reads a "
+                       "spring function over the whole displacement range and "
+                       "extrapolates its end segments, so an unmirrored curve "
+                       "would invent force on the inactive side.")
+            kind = "inelastic spring"
         elif mat_dmp is not None:
             c = mat_dmp.dc
             kind = "viscous damper"
         else:
             state.warn(f"*ELEMENT_DISCRETE part {pid}: material {part.mid} is "
-                       "not a supported discrete material (S01/S04/D01) — "
-                       f"{len(elems)} element(s) NOT converted.")
+                       "not a supported discrete material (S01/S03/S04/S05/"
+                       f"S06/S08/D01) — {len(elems)} element(s) NOT converted.")
             continue
 
-        if sec.kd or sec.v0 or sec.cl:
-            state.warn(f"*SECTION_DISCRETE {secid}: KD/V0/CL (dynamic "
-                       "magnification / clearance) have no /PROP/TYPE4 "
-                       "equivalent — dropped.")
+        if sec.kd or sec.v0:
+            state.warn(f"*SECTION_DISCRETE {secid}: KD={sec.kd:g}/V0={sec.v0:g} "
+                       "(the dynamic magnification F=(1+KD·V/V0)·F_static) has "
+                       "no Radioss spring slot that reproduces it — DROPPED, "
+                       "the spring is converted rate-independent. The nearest "
+                       "equivalent is a B/D log-rate pair or an fct_ID21 rate "
+                       "curve on the property; state it there if the "
+                       "magnification carries load.")
+        if sec.cl:
+            state.warn(f"*SECTION_DISCRETE {secid}: CL={sec.cl:g} (clearance — "
+                       "a non-zero value makes the LS-DYNA spring "
+                       "COMPRESSION-ONLY with CL of free travel first) has no "
+                       "Radioss spring field and is DROPPED: the converted "
+                       "spring carries load in both directions from zero "
+                       "displacement. Restate it as a shifted, one-sided "
+                       "force-displacement function if it matters.")
         # Failure deflections: TDL/CDL deflection limits and the FD failure
         # deflection map to the TYPE4 rupture displacements (element deletion
         # in both codes). 0 = no limit (reader default ±1e30).
@@ -613,58 +1027,122 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
             return state.next_id()
 
         def _scaled(s):
+            """(K, C, A) for a per-element force scale S.
+
+            With no function the force is K·δ and A cancels out entirely (the
+            reader stores K/A, the engine multiplies by A again), so K and C
+            are scaled directly. With a loading function the force is f(δ)·A,
+            so A carries the scale — but then the STORED stiffness is K/A, and
+            the true scaled tangent is S·K, so K must be pre-multiplied by S²
+            for K/A to come out right. Leaving that out understates the
+            time-step stiffness by S² on a scaled nonlinear spring."""
             a_coef = 0.0            # 0 → reader default 1.0
             k_s, c_s = k, c
             if s != 1.0:
                 if fct1:
                     a_coef = s      # scales f(δ) (A coefficient, B=0)
+                    k_s, c_s = k * s * s, c * s
                 else:
                     k_s, c_s = k * s, c * s
             return k_s, c_s, a_coef
 
+        def _dof(s):
+            """The loaded SpringDof for per-element force scale *s*."""
+            k_s, c_s, a_coef = _scaled(s)
+            return SpringDof(k=k_s, c=c_s, a=a_coef, b=b_coef, d=d_coef,
+                             fct1=fct1, h=hflag, fct2=fct2, fct3=fct3,
+                             fct4=fct4, dmin=dmin, dmax=dmax, e=e_coef,
+                             hscale=hscale)
+
         # ── translational (axial) springs → /PROP/TYPE4 ────────────────────
+        # A DRO=1 torsional section cannot use TYPE4 (a purely translational
+        # 1-DOF property): the payload moves to slot 4 (Rx) of a /PROP/TYPE13,
+        # whose local X is node1→node2 by construction (r4buf3.F:145), so the
+        # torsion acts about the element's own axis exactly as in LS-DYNA.
         for s in sorted(groups):
             g_elems = groups[s]
+            if torsional:
+                usable = [e for e in g_elems if _finite_length(state, e)]
+                if len(usable) < len(g_elems):
+                    state.warn(
+                        f"*SECTION_DISCRETE {secid}: {len(g_elems) - len(usable)}"
+                        f" of part {pid}'s DRO=1 (torsional) element(s) are "
+                        "ZERO-LENGTH or grounded (N2=0), so there is no "
+                        "node1->node2 axis to twist about — those elements were "
+                        "NOT converted. Give the torsional spring a second "
+                        "node, or orient it with a *DEFINE_SD_ORIENTATION "
+                        "(VID), which k2rad puts on a skew-oriented "
+                        "/PROP/TYPE8 instead.")
+                    g_elems = usable
+                if not g_elems:
+                    continue
             prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
             if part_id != pid:
                 state.warn(f"*ELEMENT_DISCRETE part {pid}: elements with force "
                            f"scale S={s:g} were split onto auto part {part_id} "
                            "(the per-element scale has no /SPRING field).")
-            k_s, c_s, a_coef = _scaled(s)
-            lines += _emit_prop_type4(
-                prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
-                fct1, hflag, dmin, dmax)
-            lines += _emit_spring_part(state, part_id, prop_id, title,
-                                       g_elems, pid)
+            lines += funct_lines
+            funct_lines = []       # one /FUNCT, shared by every scaled clone
+            if torsional:
+                dofs = [SpringDof(), SpringDof(), SpringDof(),
+                        _dof(s), SpringDof(), SpringDof()]
+                lines += _emit_prop_type13(
+                    prop_id, f"{title} ({kind}, torsional DRO=1)",
+                    1.0e-4, 1.0e-6, 0, 0, dofs)
+            else:
+                k_s, c_s, a_coef = _scaled(s)
+                lines += _emit_prop_type4(
+                    prop_id, f"{title} ({kind})", 1.0e-4, k_s, c_s, a_coef,
+                    fct1, hflag, dmin, dmax, fct2=fct2, fct3=fct3, fct4=fct4,
+                    b=b_coef, d=d_coef, e=e_coef, hscale=hscale)
+            lines += _emit_spring_part(
+                state, part_id, prop_id, title, g_elems, pid,
+                spring_kind_label="TYPE13" if torsional else "TYPE4")
             emitted = True
             state.warn(f"*ELEMENT_DISCRETE part {pid} ({kind}, "
-                       f"{len(g_elems)} element(s)) -> /PROP/TYPE4/{prop_id} + "
-                       f"/SPRING on /PART/{part_id}. The spring carries a small "
-                       "artificial mass (1e-4) for the explicit time step — "
-                       "add *ELEMENT_MASS-equivalent mass if dynamics of the "
-                       "spring ends matter.")
+                       f"{len(g_elems)} element(s)) -> "
+                       + (f"/PROP/TYPE13/{prop_id} (SPR_BEAM): the section is "
+                          "torsional (DRO=1), so the payload sits on local DOF "
+                          "4 (Rx = rotation about the node1->node2 axis) and "
+                          "K/C are read as MOMENT per radian and per rad/s — "
+                          "the units LS-DYNA already states them in, so "
+                          "nothing is rescaled"
+                          if torsional else f"/PROP/TYPE4/{prop_id}")
+                       + f" + /SPRING on /PART/{part_id}. The spring carries a "
+                       "small artificial mass (1e-4) for the explicit time "
+                       "step — add *ELEMENT_MASS-equivalent mass if dynamics "
+                       "of the spring ends matter.")
 
         # ── oriented springs → /PROP/TYPE8 (SPR_GENE) on the VID's /SKEW ────
         # Only TYPE8 carries a skew_ID, so an oriented discrete element becomes a
         # SPR_GENE whose local DOF 1 (Tx) acts along the skew's local X (= the
         # *DEFINE_SD_ORIENTATION axis); DOFs 2-6 stay inert.
+        # A DRO=1 section puts the payload on slot 4 instead: the skew's local X
+        # IS the *DEFINE_SD_ORIENTATION axis, so Rx is rotation about it.
+        slot = 4 if torsional else 1
         for (vid, s) in sorted(ori_groups):
             g_elems = ori_groups[(vid, s)]
             skew_id = state.sdorient_skew_ids[vid]
             prop_id = state.next_prop_id()
             part_id = _alloc_part_id()
             k_s, c_s, a_coef = _scaled(s)
+            lines += funct_lines
+            funct_lines = []
             lines += [
                 f"/PROP/TYPE8/{prop_id}",
                 f"{title} ({kind}, oriented VID {vid})",
                 "#               Mass             Inertia   skew_ID   sens_ID    Isflag     Ifail   Ifail2     Iequil",
                 f"{_f(1.0e-4)}{_f(1.0e-6)}{_i(skew_id)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}{_i(0)}",
             ]
-            lines += _emit_spr_gene_dof_kc(k_s, c_s, a_coef, fct1, hflag,
-                                           dmin, dmax)
-            for _ in range(5):
-                lines += _emit_spr_gene_dof_kc(0.0)
+            for j in range(1, 7):
+                if j == slot:
+                    lines += _emit_spr_gene_dof_kc(
+                        k_s, c_s, a_coef, fct1, hflag, dmin, dmax,
+                        fct2=fct2, fct3=fct3, fct4=fct4, b=b_coef, d=d_coef,
+                        e=e_coef, hscale=hscale)
+                else:
+                    lines += _emit_spr_gene_dof_kc(0.0)
             lines += [
                 "#  Fsmooth                Fcut",
                 f"{_i(0)}{_f(0.0)}",
@@ -676,8 +1154,9 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
                 f"*ELEMENT_DISCRETE part {pid} ({kind}, {len(g_elems)} "
                 f"element(s)) oriented by *DEFINE_SD_ORIENTATION VID={vid} -> "
                 f"/PROP/TYPE8/{prop_id} (SPR_GENE) + /SPRING on /PART/{part_id} "
-                f"with skew_ID={skew_id}; stiffness on local DOF 1 (translation "
-                "along the orientation axis). Carries a small artificial mass "
+                f"with skew_ID={skew_id}; stiffness on local DOF {slot} ("
+                + ("rotation about" if torsional else "translation along")
+                + " the orientation axis). Carries a small artificial mass "
                 "(1e-4) for the explicit time step.")
 
     return lines if emitted else []

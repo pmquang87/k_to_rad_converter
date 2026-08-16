@@ -177,6 +177,258 @@ class MatDamperViscous:
 
 
 @dataclass
+class MatSpringElastoplastic:
+    """*MAT_SPRING_ELASTOPLASTIC (MAT_S03): K KT FY → /PROP/TYPE4 K1 + a
+    synthesized 5-point elastic-plastic force function on fct_ID11 with H1=1
+    (isotropic hardening, unloading along K).
+
+    Card (Keyword971 MAT/SDMAT3.cfg): MID(I10) K(E10) KT(E10) FY(E10).
+      k  = elastic stiffness, kt = tangent (plastic) stiffness,
+      fy = yield force (or moment on a DRO=1 section).
+    """
+    mid: int
+    k: float = 0.0
+    kt: float = 0.0
+    fy: float = 0.0
+
+
+@dataclass
+class MatDamperNonlinearViscous:
+    """*MAT_DAMPER_NONLINEAR_VISCOUS (MAT_S05): LCDR = force vs rate-of-
+    displacement → /PROP/TYPE4 fct_ID41 (the h(δ̇) damping-force function),
+    Hscale1 = 1.
+
+    Card (Keyword971 MAT/SDMAT5.cfg): MID(I10) LCDR(I10).
+    """
+    mid: int
+    lcdr: int = 0
+
+
+@dataclass
+class MatSpringGeneralNonlinear:
+    """*MAT_SPRING_GENERAL_NONLINEAR (MAT_S06) → /PROP/TYPE4 fct_ID11 = LCDL
+    (loading), fct_ID31 = LCDU (unloading), H1 = 6 (isotropic hardening with
+    nonlinear unloading).
+
+    Card (Keyword971 MAT/SDMAT6.cfg):
+        MID(I10) LCDL(I10) LCDU(I10) BETA(E10) TYI(E10) CYI(E10)
+      beta = 0 tension+compression yield with softening, != 0 kinematic
+             hardening, 1 isotropic hardening
+      tyi/cyi = initial yield force in tension / compression
+    """
+    mid: int
+    lcdl: int = 0
+    lcdu: int = 0
+    beta: float = 0.0
+    tyi: float = 0.0
+    cyi: float = 0.0
+
+
+@dataclass
+class MatSpringInelastic:
+    """*MAT_SPRING_INELASTIC (MAT_S08) → /PROP/TYPE4 K1 = KU + a mirrored
+    LCFD force function on fct_ID11.
+
+    Card (Keyword971 MAT/SDMAT8.cfg): MID(I10) LCFD(I10) KU(E10) CTF(E10).
+      lcfd = force/torque vs displacement/rotation, defined in the POSITIVE
+             quadrant only whatever the tension/compression sense
+      ku   = unloading stiffness (max(KU, max loading stiffness) is used)
+      ctf  = -1 tension only, +1 compression only (default)
+    """
+    mid: int
+    lcfd: int = 0
+    ku: float = 0.0
+    ctf: float = 1.0
+
+
+# ── *SECTION_BEAM ELFORM=6 discrete-beam materials → 6-DOF spring properties ──
+
+@dataclass
+class MatDiscreteBeamLinear:
+    """*MAT_LINEAR_ELASTIC_DISCRETE_BEAM (MAT_066) → a 6-DOF spring property
+    (/PROP/TYPE8 or TYPE13) with K1..K6 = TKR TKS TKT RKR RKS RKT and
+    C1..C6 = TDR TDS TDT RDR RDS RDT.
+
+    Card1: MID RO TKR TKS TKT RKR RKS RKT
+    Card2: TDR TDS TDT RDR RDS RDT
+    Card3: FOR FOS FOT MOR MOS MOT   (preloads → 2-point stiffness functions)
+    """
+    mid: int
+    rho: float = 0.0
+    k: List[float] = field(default_factory=lambda: [0.0] * 6)
+    c: List[float] = field(default_factory=lambda: [0.0] * 6)
+    preload: List[float] = field(default_factory=lambda: [0.0] * 6)
+
+
+@dataclass
+class MatDiscreteBeamNonlinearElastic:
+    """*MAT_NONLINEAR_ELASTIC_DISCRETE_BEAM (MAT_067) → a 6-DOF spring
+    property: fct_ID1i = LCIDTR..LCIDRT (loading f(δ)), fct_ID4i =
+    LCIDTDR..LCIDRDT (damping h(δ̇)) with Hscale_i = 1.
+
+    Card1: MID RO LCIDTR LCIDTS LCIDTT LCIDRR LCIDRS LCIDRT
+    Card2: LCIDTDR LCIDTDS LCIDTDT LCIDRDR LCIDRDS LCIDRDT
+    Card3: FOR FOS FOT MOR MOS MOT
+    Card4: FFAILR FFAILS FFAILT MFAILR MFAILS MFAILT
+    Card5: UFAILR UFAILS UFAILT TFAILR TFAILS TFAILT
+    """
+    mid: int
+    rho: float = 0.0
+    lcid: List[int] = field(default_factory=lambda: [0] * 6)
+    lcid_damp: List[int] = field(default_factory=lambda: [0] * 6)
+    preload: List[float] = field(default_factory=lambda: [0.0] * 6)
+    ffail: List[float] = field(default_factory=lambda: [0.0] * 6)
+    ufail: List[float] = field(default_factory=lambda: [0.0] * 6)
+
+
+@dataclass
+class MatDiscreteBeamNonlinearPlastic:
+    """*MAT_NONLINEAR_PLASTIC_DISCRETE_BEAM (MAT_068) → a 6-DOF spring
+    property: K/C as MAT_066, plus the LCPD*/LCPM* yield curves on fct_ID1i
+    with H_i = 1 (their abscissa is PLASTIC displacement and is converted to
+    the TOTAL displacement Radioss wants).
+
+    Card1: MID RO TKR TKS TKT RKR RKS RKT
+    Card2: TDR TDS TDT RDR RDS RDT RYLD     (RYLD only from Keyword971_R12.0)
+    Card3: LCPDR LCPDS LCPDT LCPMR LCPMS LCPMT
+    Card4: FFAILR FFAILS FFAILT MFAILR MFAILS MFAILT
+    Card5: UFAILR UFAILS UFAILT TFAILR TFAILS TFAILT
+    Card6: FOR FOS FOT MOR MOS MOT
+    """
+    mid: int
+    rho: float = 0.0
+    k: List[float] = field(default_factory=lambda: [0.0] * 6)
+    c: List[float] = field(default_factory=lambda: [0.0] * 6)
+    ryld: float = 0.0
+    lcp: List[int] = field(default_factory=lambda: [0] * 6)
+    ffail: List[float] = field(default_factory=lambda: [0.0] * 6)
+    ufail: List[float] = field(default_factory=lambda: [0.0] * 6)
+    preload: List[float] = field(default_factory=lambda: [0.0] * 6)
+
+
+@dataclass
+class MatCableDiscreteBeam:
+    """*MAT_CABLE_DISCRETE_BEAM (MAT_071) → a tension-only 1-DOF spring
+    (/PROP/TYPE13, Ileng=1): K1 = |E| when E < 0, else E·CA from the
+    *SECTION_BEAM card 2f, and a 3-point (-1,0)(0,0)(1,K) force function
+    carrying the initial tension F0 as its y offset.
+
+    Card1: MID RO E LCID F0 TMAXF0 TRAMP IREAD
+    Card2 (IREAD > 0): OUTPUT [TSTART [FRACL0 MXEPS MXFRC]] — never converted.
+    """
+    mid: int
+    rho: float = 0.0
+    e: float = 0.0
+    lcid: int = 0
+    f0: float = 0.0
+    tmaxf0: float = 0.0
+    tramp: float = 0.0
+    iread: int = 0
+
+
+@dataclass
+class MatElasticSpringDiscreteBeam:
+    """*MAT_ELASTIC_SPRING_DISCRETE_BEAM (MAT_074) → a 1-DOF spring
+    (/PROP/TYPE13): K→K1, D→C1, -CDF→DeltaMin1, TDF→DeltaMax1,
+    FLCID→fct_ID11, HLCID→fct_ID21, DLE→D1, C2→B1, C1→E1.
+
+    Card1: MID RO K F0 D CDF TDF
+    Card2: FLCID HLCID C1 C2 DLE GLCID
+    """
+    mid: int
+    rho: float = 0.0
+    k: float = 0.0
+    f0: float = 0.0
+    d: float = 0.0
+    cdf: float = 0.0
+    tdf: float = 0.0
+    flcid: int = 0
+    hlcid: int = 0
+    c1: float = 0.0
+    c2: float = 0.0
+    dle: float = 0.0
+    glcid: int = 0
+
+
+@dataclass
+class MatGeneralNonlinear6dof:
+    """*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM (MAT_119) → a 6-DOF spring
+    property: fct_ID1i loading, fct_ID3i unloading, fct_ID4i damping;
+    K1..3 = KT, K4..6 = KR; +UTFAIL*/WTFAIL* and -UCFAIL*/-WCFAIL* limits;
+    H_i from IUNLD.
+
+    Card1: MID RO KT KR IUNLD OFFSET DAMPF IFLAG
+    Card2: LCIDTR LCIDTS LCIDTT LCIDRR LCIDRS LCIDRT   (loading)
+    Card3: LCIDTUR … LCIDRUT                            (unloading)
+    Card4: LCIDTDR … LCIDRDT                            (damping)
+    Card5: LCIDTER … LCIDRET                            (elastic/scale)
+    Card6: UTFAILR … WTFAILT FCRIT
+    Card7: UCFAILR … WCFAILT
+    Card8: IUR IUS IUT IWR IWS IWT
+    Cards 9-15 exist only for IFLAG=2 / IUNLD=2 and are not modelled by the
+    shipped Keyword971 cfg — parsed positionally per Manual R17.
+    """
+    mid: int
+    rho: float = 0.0
+    kt: float = 0.0
+    kr: float = 0.0
+    iunld: int = 0
+    offset: float = 0.0
+    dampf: float = 0.0
+    iflag: int = 0
+    lcid: List[int] = field(default_factory=lambda: [0] * 6)
+    lcid_unld: List[int] = field(default_factory=lambda: [0] * 6)
+    lcid_damp: List[int] = field(default_factory=lambda: [0] * 6)
+    lcid_elast: List[int] = field(default_factory=lambda: [0] * 6)
+    utfail: List[float] = field(default_factory=lambda: [0.0] * 6)
+    ucfail: List[float] = field(default_factory=lambda: [0.0] * 6)
+    fcrit: float = 0.0
+
+
+@dataclass
+class MatGeneralNonlinear1dof:
+    """*MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM (MAT_121) → a 1-DOF spring:
+    K→K1, LCIDT→fct_ID11, LCIDTU→fct_ID31, LCIDTD→fct_ID41,
+    UTFAIL→DeltaMax1, -UCFAIL→DeltaMin1, H1 from IUNLD.
+
+    Card1: MID RO K IUNLD OFFSET DAMPF
+    Card2: LCIDT LCIDTU LCIDTD LCIDTE
+    Card3: UTFAIL UCFAIL IU
+    """
+    mid: int
+    rho: float = 0.0
+    k: float = 0.0
+    iunld: int = 0
+    offset: float = 0.0
+    dampf: float = 0.0
+    lcidt: int = 0
+    lcidtu: int = 0
+    lcidtd: int = 0
+    lcidte: int = 0
+    utfail: float = 0.0
+    ucfail: float = 0.0
+
+
+@dataclass
+class MatGeneralSpringDiscreteBeam:
+    """*MAT_GENERAL_SPRING_DISCRETE_BEAM (MAT_196) → a 6-DOF spring property
+    built from the per-DOF card PAIRS: each pair names its own DOF (1..6) and
+    fills that slot's K / C / B / D / DeltaMin / DeltaMax / E and functions.
+
+    Card1: MID RO … MDFAIL DOSPOT  (the shipped cfg stops after RO)
+    Card2i: DOF TYPE K D CDF TDF
+    Card3i: FLCID HLCID C1 C2 DLE GLCID
+    ``dofs`` is a list of (dof, type, k, d, cdf, tdf, flcid, hlcid, c1, c2,
+    dle, glcid) in deck order.
+    """
+    mid: int
+    rho: float = 0.0
+    mdfail: int = 0
+    dospot: int = 0
+    dofs: List[tuple] = field(default_factory=list)
+
+
+@dataclass
 class MatSpotweld:
     """*MAT_SPOTWELD (MAT_100) on beam elements → /PROP/TYPE13 (SPR_BEAM)
     2-node /SPRING connectors (per-DOF stiffness from E,G + the beam section,
@@ -546,6 +798,25 @@ class SectionBeam:
     # Card 1 field 5 (cols 41-50): cross-section type, 0 = rectangular,
     # 1 = tubular, 2 = arbitrary (defined by the *INTEGRATION_BEAM rule).
     cst: int = 0
+    # Card 1 field 6 (cols 51-60), FLOAT: which node's angular velocity rotates
+    # the DISCRETE-beam (ELFORM=6) triad. |SCOOR| = 2 additionally realigns the
+    # local r-axis along n1→n2 — exactly Radioss's /PROP/TYPE13 (SPR_BEAM,
+    # r4buf3.F) frame, and the same value dyna2rad tests to pick /MAT/LAW113
+    # over /MAT/LAW108 (convertmats.cxx:3374). 0 = centred (default).
+    scoor: float = 0.0
+    # *SECTION_BEAM card 2f (ELFORM=6 DISCRETE beam), Manual Vol I R17 p.41-20:
+    #   VOL INER CID CA OFFSET RRCON SRCON TRCON
+    # SectBeam.cfg's COMMENT mislabels fields 4/5 as DOFN1/DOFN2 (that is card
+    # 2g, the *MAT_146 dialect); its CARD spec binds LSD_CA / LSD_OFFSET, which
+    # is what the manual says and what k2rad reads.
+    vol: float = 0.0        # → spring Mass = RO·VOL (Imass=2 equivalent)
+    iner: float = 0.0       # → spring Inertia; -1 = solid sphere of VOL, -2 = auto
+    cid: int = 0            # *DEFINE_COORDINATE_* id → /SKEW (orientation)
+    ca: float = 0.0         # cable area (MAT_071) → Mass = RO·CA·L
+    cable_offset: float = 0.0   # cable offset (MAT_071) — no Radioss slot
+    rrcon: float = 0.0      # rotational constraint about local r/s/t
+    srcon: float = 0.0
+    trcon: float = 0.0
 
 
 @dataclass
@@ -3969,6 +4240,21 @@ class ConversionState:
     mat_spring_elastic: Dict[int, MatSpringElastic] = field(default_factory=dict)             # MAT_S01
     mat_spring_nonlinear: Dict[int, MatSpringNonlinearElastic] = field(default_factory=dict)  # MAT_S04
     mat_damper_viscous: Dict[int, MatDamperViscous] = field(default_factory=dict)             # MAT_D01
+    mat_spring_elastoplastic: Dict[int, MatSpringElastoplastic] = field(default_factory=dict)         # MAT_S03
+    mat_damper_nl_viscous: Dict[int, MatDamperNonlinearViscous] = field(default_factory=dict)         # MAT_S05
+    mat_spring_general_nl: Dict[int, MatSpringGeneralNonlinear] = field(default_factory=dict)         # MAT_S06
+    mat_spring_inelastic: Dict[int, MatSpringInelastic] = field(default_factory=dict)                 # MAT_S08
+    # *SECTION_BEAM ELFORM=6 discrete-beam materials → 6-DOF /PROP/TYPE8 (skew
+    # oriented, = /MAT/LAW108's card body) or /PROP/TYPE13 (node oriented, =
+    # /MAT/LAW113's card body) /SPRING connectors
+    mat_dbeam_linear: Dict[int, MatDiscreteBeamLinear] = field(default_factory=dict)                  # MAT_066
+    mat_dbeam_nl_elastic: Dict[int, MatDiscreteBeamNonlinearElastic] = field(default_factory=dict)    # MAT_067
+    mat_dbeam_nl_plastic: Dict[int, MatDiscreteBeamNonlinearPlastic] = field(default_factory=dict)    # MAT_068
+    mat_cable_dbeam: Dict[int, MatCableDiscreteBeam] = field(default_factory=dict)                    # MAT_071
+    mat_elastic_spring_dbeam: Dict[int, MatElasticSpringDiscreteBeam] = field(default_factory=dict)   # MAT_074
+    mat_gnl_6dof: Dict[int, MatGeneralNonlinear6dof] = field(default_factory=dict)                    # MAT_119
+    mat_gnl_1dof: Dict[int, MatGeneralNonlinear1dof] = field(default_factory=dict)                    # MAT_121
+    mat_general_spring_dbeam: Dict[int, MatGeneralSpringDiscreteBeam] = field(default_factory=dict)   # MAT_196
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
     # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with

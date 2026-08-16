@@ -192,13 +192,20 @@ class OrientationAndTorsionalWarnTests(unittest.TestCase):
         self.assertNotIn("\n         1         1         2\n", starter)
         self.assertNotIn("/SPRING/", starter)
 
-    def test_torsional_dro1_warns_and_is_skipped(self):
+    def test_torsional_dro1_goes_to_type13_slot4(self):
+        """DRO=1 is a MOMENT-per-radian spring: it must land on the rotational
+        slot of a 6-DOF property, never on the translational /PROP/TYPE4."""
         deck = SPRING_DECK.replace(
             "*SECTION_DISCRETE\n         1         0\n",
             "*SECTION_DISCRETE\n         1         1\n")
         result, starter = _convert(deck)
-        self.assertTrue(any("torsional" in w for w in result.warnings))
         self.assertNotIn("/PROP/TYPE4/", starter)
+        blk = _block_lines(starter, "/PROP/TYPE13/")
+        # blk[0] header, [1] title, [2] card-1 comment, [3] card 1, then six
+        # 6-line DOF blocks. DOF i's K card is blk[4 + 6*(i-1) + 1].
+        self.assertEqual(blk[5][0:20].strip(), "0")      # K1 (Tx) inert
+        self.assertEqual(blk[23][0:20].strip(), "250")   # K4 (Rx) = K
+        self.assertTrue(any("torsional" in w for w in result.warnings))
 
     def test_failure_deflection_maps_to_deltamax(self):
         deck = SPRING_DECK.replace(
