@@ -554,10 +554,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                 )
                 self_surf = state.next_id()
                 lines += _emit_surf_part(self_surf, f"contact_{c.inter_id}_self", all_pids)
+                fric, fric_id = _contact_friction(
+                    state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE25")
                 lines += _emit_inter_type25_self(
-                    c.inter_id, c.title, self_surf, c.fs,
+                    c.inter_id, c.title, self_surf, fric,
                     _ignore_to_inacti(c.ignore, state, c.inter_id, 0.0),
-                    _stfac_for(state, c.sfs, c.inter_id) or 1.0)
+                    _stfac_for(state, c.sfs, c.inter_id) or 1.0,
+                    fric_id=fric_id)
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
             slav_grnod = state.next_id()
@@ -578,10 +581,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+            fric, fric_id = _contact_friction(
+                state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                       fric_id=fric_id)
         else:
             diag: Dict[str, int] = {}
             slav_grnod = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes,
@@ -610,10 +616,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
             gapmin = _gapmin_override(state, c.inter_id,
                                       _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id),
                                       gapmin_overrides)
-            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+            fric, fric_id = _contact_friction(
+                state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+            lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                        _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin),
                                        viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                       gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                       fric_id=fric_id)
 
     for c in state.contacts_surf2surf:
         diag = {}
@@ -645,10 +654,13 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                   gapmin_overrides)
         inacti = (5 if c.inter_id in recipe_inacti_ids
                   else _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin))
-        lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, c.fs,
+        fric, fric_id = _contact_friction(
+            state, c.fs, c.fd, c.inter_id, c.keyword, "TYPE7")
+        lines += _emit_inter_type7(c.inter_id, c.title, slav_grnod, mast_surf, fric,
                                    inacti,
                                    viss=_vdc_to_viss(c.vdc, state, c.inter_id),
-                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id))
+                                   gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
+                                   fric_id=fric_id)
 
     for iid, val in sorted(gapmin_overrides.items()):
         state.warn(
@@ -1417,6 +1429,12 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id)
         stfac = _stfac_for(state, c.sfs, c.inter_id)
+        # Only the -7 route can hold a /FRICTION binding: TYPE11's newest
+        # FORMAT at /BEGIN 2022 (radioss2020) stops at the IBC card and
+        # TYPE19's (radioss2021) stops at Iform, so neither has a fric_ID
+        # column. _contact_friction says so, naming the interface.
+        fric, fric_id = _contact_friction(
+            state, c.fs, c.fd, c.inter_id, "CONTACT_AUTOMATIC_GENERAL", tname)
 
         if c.soft == -7:
             slav = _resolve_contact_slave(state, c.ssid, c.sstyp, rigid_nodes, lines)
@@ -1431,9 +1449,9 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -7 route), or use SOFT=-11 for an edge "
                     "contact built from a segment set.")
                 continue
-            lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, c.fs,
+            lines += _emit_inter_type7(c.inter_id, c.title, slav, mast, fric,
                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                       istf=2, igap=2)
+                                       istf=2, igap=2, fric_id=fric_id)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-7 -> "
                 f"/INTER/TYPE7 (penalty node->surface {'self-' if self_contact else ''}"
@@ -1452,7 +1470,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -19 route), or use SOFT=-11 for an "
                     "edge contact built from a segment set.")
                 continue
-            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, c.fs,
+            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, fric,
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-19 -> "
@@ -1473,7 +1491,7 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "or at a part / part set carrying shell or solid "
                     "elements.")
                 continue
-            lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, c.fs,
+            lines += _emit_inter_type11(c.inter_id, c.title, line_s, line_m, fric,
                                         inacti, viss=viss, gapmin=gapmin, stfac=stfac)
             state.warn(
                 f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-11 -> "
