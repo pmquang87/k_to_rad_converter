@@ -1414,12 +1414,13 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # property's.
         #
         # Which interfaces actually read it is narrower than the Reference Guide's
-        # sentence suggests, and _warn_part_contact_fields says so per deck: on
-        # /INTER/TYPE7 the whole THK_PART block is gated by `IF(IGAP >= 1)`
-        # (i7sti3.F:222), and k2rad's plain TYPE7 is Igap=0. TYPE11/20/24/25 read
-        # it ungated (i11sti3.F:212, i20sti3.F:157, i24sti3.F:182), and the TYPE25
-        # k2rad emits is Igap=2 — measured live, OPTT=5.0 moved that interface's
-        # contact onset by 0.0020025591 s against 0.002000 s predicted.
+        # sentence suggests, and _warn_part_contact_fields says so per deck. The
+        # secondary-gap block is gated by `IF(IGAP >= 1)` on TYPE7 (i7sti3.F:222)
+        # and TYPE20 (i20sti3.F:149), and k2rad's plain TYPE7 is Igap=0. TYPE11
+        # and TYPE24 read it UNgated (i11sti3.F:212, i24sti3.F:182), and the
+        # TYPE25 k2rad emits carries Igap=2 — measured live, OPTT=5.0 moved that
+        # interface's contact onset by 0.0020025591 s against 0.002000 s
+        # predicted (+0.128 %).
         #
         # The field is only written when non-zero. That test is not cosmetic: the
         # starter's own gate is `/= ZERO`, so a written 0.0 is INDISTINGUISHABLE
