@@ -2150,7 +2150,10 @@ class RigidInertia:
     ylip: float = 0.0
     zlip: float = 0.0
     cid: int = 0
-    #: True when card 6 was actually present in the deck (IRCS = 1).
+    #: True when card 6 was actually PRESENT in the deck, not merely promised by
+    #: ``IRCS = 1``. ``writer/rbody.py::_inertia_frame`` splits its "the local
+    #: system is unusable" diagnostic on it: a missing card 6 (the block ended)
+    #: and a card 6 stating two zero/parallel vectors are different defects.
     has_local_card: bool = False
 
     def has_mass_data(self) -> bool:

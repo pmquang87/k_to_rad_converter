@@ -1220,6 +1220,11 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
     ``SFT`` scales the TRUE (element) thickness, while ``Thick`` REPLACES it, so
     folding one into the other would apply the factor to a quantity it was never
     meant for.
+
+    ``OPTT`` itself gets three warnings of its own, all of them about the value
+    reaching ``Thick`` and then not being read: it BEATS the element thickness
+    rather than losing to it, it is dead on a solid-only part, and it is dead on
+    any interface written with ``Igap = 0``. See the comments at each.
     """
     if not state.part_contacts:
         return
@@ -1262,23 +1267,86 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
             f"*PART_CONTACT: CPARM8 on part(s) {', '.join(cparm_parts)} is DROPPED "
             "(it exists only from FORMAT(Keyword971_R8.0) and has no Radioss "
             "counterpart).")
-    # Comment 3 on the /PART card: Thick "supersedes the thickness defined in the
-    # shell property, if the value of the Thick field equals 0 in the /SHELL or
-    # /SH3N keyword" — i.e. a non-zero per-ELEMENT Thick wins over the part's.
-    # k2rad writes a per-element Thick from *ELEMENT_SHELL_THICKNESS, so a part
-    # carrying both loses the OPTT it just asked for, silently.
+    # The CONTACT-gap cascade is THK_PART first, element THK second, property
+    # GEO(1,MG) third — i7sti3.F:230-238 tests `IF (THK_PART(IP) /= ZERO .AND.
+    # IINTTHICK == 0)` and only falls through to `THK(I)` when the part value is
+    # zero (same three-level cascade at :248, :264, :275, :285, :494, :580, :750,
+    # :833, and in i11sti3/i20sti3/i24sti3). So a part carrying both loses the
+    # ELEMENT thickness from its contact gap, not the OPTT. Measured: an
+    # /INTER/TYPE7 at Igap=1 over *ELEMENT_SHELL_THICKNESS 2.0 read GAP MIN =
+    # 1.0 without OPTT and 7.0E-3 with OPTT=0.007 — a factor of ~143 the other way
+    # from what this warning used to claim. (The Reference Guide's /PART Comment 3
+    # is about the shell PROPERTY thickness, level 3, not the element card.)
     thick_elem_pids = {e.pid for e in state.shell_elems
                        if any(t > 0.0 for t in e.thick_nodes)}
     clash = sorted(pid for pid, pc in state.part_contacts.items()
                    if pc.optt and pid in thick_elem_pids)
     if clash:
+        named = ", ".join(str(p) for p in clash[:10])
+        if len(clash) > 10:
+            named += f", ... ({len(clash)} parts)"
         state.warn(
-            f"*PART_CONTACT: part(s) {', '.join(str(p) for p in clash)} carry BOTH "
+            f"*PART_CONTACT: part(s) {named} carry BOTH "
             "an OPTT contact thickness and per-element *ELEMENT_SHELL_THICKNESS "
-            "values. The element's own Thick column WINS (/PART Comment 3: the "
-            "part Thick supersedes the property thickness only when the /SHELL or "
-            "/SH3N Thick is 0), so OPTT has no effect on those elements. Drop one "
-            "of the two.")
+            "values. For the CONTACT GAP the part-level OPTT SUPERSEDES the "
+            "element thickness (i7sti3.F:230 tests THK_PART first and only falls "
+            "through to THK(I) when it is zero) — the element value still governs "
+            "the STRUCTURAL thickness. LS-DYNA's OPTT is likewise contact-only, so "
+            "this matches; check the two are meant to differ.")
+    # OPTT on a part with no shell/tria/1D element is written and then never read:
+    # the starter applies THK_PART only in loops over NUMELC, NUMELTG, NUMELT,
+    # NUMELP and NUMELR (i7sti3.F:226/244/261/272/283, and the same shape in
+    # i11sti3/i20sti3/i24sti3) — there is no NUMELS loop. LS-DYNA differs ("OPTT —
+    # Optional contact thickness.  For SOFT = 2, it applies to solids, shells, and
+    # beams", Vol I R17 p.37-11), so this is a real silent loss on a solid part.
+    non_solid_pids = ({e.pid for e in state.shell_elems}
+                      | {e.pid for e in state.beam_elems}
+                      | {e.pid for e in state.discrete_elems})
+    solid_pids = {e.pid for e in state.solid_elems}
+    solid_only = sorted(f"{pid} (OPTT={pc.optt:g})"
+                        for pid, pc in state.part_contacts.items()
+                        if pc.optt and pid in solid_pids
+                        and pid not in non_solid_pids)
+    if solid_only:
+        listed = ", ".join(solid_only[:10])
+        if len(solid_only) > 10:
+            listed += f", ... ({len(solid_only)} parts)"
+        state.warn(
+            f"*PART_CONTACT: part(s) {listed} hold SOLID elements "
+            "only, so the OPTT written into their /PART Thick column has NO "
+            "EFFECT. The starter reads THK_PART in its shell/tria/truss/beam/"
+            "spring loops only (i7sti3.F:226-293) — there is no solid loop — while "
+            "LS-DYNA does apply OPTT to solids under SOFT=2. Set the gap on the "
+            "interface instead (/INTER Gapmin, or Igap=2 to take it from the "
+            "element size).")
+    # And the /PART Thick column is only consulted at all by an interface with
+    # Igap >= 1: on /INTER/TYPE7 the whole secondary-node gap block that reads
+    # THK_PART sits inside `IF(IGAP >= 1)` (i7sti3.F:222), and at Igap=0 the
+    # interface uses ONE constant gap (Gapmin, or the main surface's own average
+    # when Gapmin is 0 — the secondary side's thickness never enters). k2rad's
+    # default TYPE7 is Igap=0. Measured: identical decks with and without OPTT=5.0
+    # on the 1.0 mm moving plate gave the SAME contact onset 0.0090042418 s;
+    # patching only the Igap column of that same deck to 1 moved it to
+    # 0.0070024668 s, the hand-computed 0.002000 s earlier (+0.089 %). The TYPE25
+    # route k2rad emits from *CONTACT_AUTOMATIC_NODES_TO_SURFACE (Igap=2) is live
+    # as shipped: 0.0090043144 -> 0.0070017553 s (+0.128 %).
+    optt_pids = sorted(pid for pid, pc in state.part_contacts.items() if pc.optt)
+    if optt_pids:
+        # A crash deck can carry hundreds of *PART_CONTACT cards (512 on the Yaris
+        # model), so the list is capped the way the /RBE3 reporters cap theirs.
+        shown = ", ".join(str(p) for p in optt_pids[:10])
+        if len(optt_pids) > 10:
+            shown += f", ... ({len(optt_pids)} parts)"
+        state.warn(
+            f"*PART_CONTACT: OPTT on part(s) {shown} reaches the /PART Thick "
+            "column, but Radioss only consults it for interfaces with Igap >= 1 — "
+            "on /INTER/TYPE7 the whole THK_PART block is inside `IF(IGAP >= 1)` "
+            "(i7sti3.F:222), and at Igap=0 the gap is the single constant Gapmin. "
+            "k2rad's plain TYPE7 (from *CONTACT_SURFACE_TO_SURFACE and friends) "
+            "carries Igap=0, so OPTT is INERT there; the TYPE25 route and the "
+            "SOFT=-7 TYPE7 both use Igap=2 and do honour it. Check the Igap column "
+            "of the interfaces that scope these parts, and set /INTER Gapmin "
+            "directly (or *CONTACT Card 3 SST/MST) if the gap has to change.")
 
 
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
@@ -1340,11 +1408,18 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # *PART_CONTACT OPTT → the /PART card's 4th field, Thick (cols 31-50,
         # F20): "(Optional) Virtual thickness for shells.  Define a thickness for
         # shells, only used to calculate gap in interfaces" (Reference Guide 2022
-        # p.194-195), which feeds the gap in /INTER/TYPE7, 11, 18, 19, 20, 21, 24
-        # and 25 — exactly the interface types k2rad emits. Starter side,
-        # hm_read_part.F:193-198, stores it raw as THK_PART(I), and i7sti3.F:226-238
-        # picks it as the first of three levels: `IF (THK_PART(IP) /= ZERO ...)`,
-        # then the element thickness, then the property's.
+        # p.194-195). Starter side, hm_read_part.F:193-198 stores it raw as
+        # THK_PART(I), and i7sti3.F:226-238 picks it as the FIRST of three levels:
+        # `IF (THK_PART(IP) /= ZERO ...)`, then the element thickness, then the
+        # property's.
+        #
+        # Which interfaces actually read it is narrower than the Reference Guide's
+        # sentence suggests, and _warn_part_contact_fields says so per deck: on
+        # /INTER/TYPE7 the whole THK_PART block is gated by `IF(IGAP >= 1)`
+        # (i7sti3.F:222), and k2rad's plain TYPE7 is Igap=0. TYPE11/20/24/25 read
+        # it ungated (i11sti3.F:212, i20sti3.F:157, i24sti3.F:182), and the TYPE25
+        # k2rad emits is Igap=2 — measured live, OPTT=5.0 moved that interface's
+        # contact onset by 0.0020025591 s against 0.002000 s predicted.
         #
         # The field is only written when non-zero. That test is not cosmetic: the
         # starter's own gate is `/= ZERO`, so a written 0.0 is INDISTINGUISHABLE

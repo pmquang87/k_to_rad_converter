@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
-                       _cnrb_option_keywords, _part_option_keywords,
+                       _cnrb_option_keywords, _cnrb_options,
+                       _part_option_keywords,
                        _part_options, _rwall_geometric_keywords,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
@@ -793,16 +794,21 @@ def _off_cnrb(b: Block, offsets: Dict[str, int], warn) -> None:
     Every option card must be STEPPED OVER even when it carries no id: without the
     stride, an ``_INERTIA`` block's card 6 ``CID2`` would never be offset while the
     coordinate system it names would be, leaving the reference dangling.
+
+    ``_TITLE`` costs a card too, from either place it can end up in: the parser
+    moves a TRAILING one into ``block.options`` (``_title_offset`` sees it), a
+    MID-position one stays spelled out in the keyword. Missing the second kind
+    would rewrite the 80a title line as if it were card 1.
     """
-    kw_opts = b.keyword[len("CONSTRAINED_NODAL_RIGID_BODY"):]
-    toff = _title_offset(b)
+    opts, kw_title = _cnrb_options(b.keyword)
+    toff = _title_offset(b) or (1 if kw_title else 0)
     if toff < len(b.raw) and b.raw[toff].strip():
         new = _rewrite_line(b.raw[toff], [(0, "p"), (1, "d"), (2, "s"),
                                           (3, "n")], offsets)
         if new is not None:
             b.raw[toff] = new
     i = toff + 1
-    if "_SPC" in kw_opts:
+    if "SPC" in opts:
         if i < len(b.raw) and b.raw[i].strip():
             f = _fields(b.raw[i])
             cmo = to_float(f[0]) if f and str(f[0]).strip() else 0.0
@@ -813,7 +819,7 @@ def _off_cnrb(b: Block, offsets: Dict[str, int], warn) -> None:
             if new is not None:
                 b.raw[i] = new
         i += 1
-    if "_INERTIA" in kw_opts:
+    if "INERTIA" in opts:
         ircs = 0
         if i < len(b.raw):
             ircs = _geti(_fields(b.raw[i]), 4)
@@ -827,9 +833,9 @@ def _off_cnrb(b: Block, offsets: Dict[str, int], warn) -> None:
                 if new is not None:
                     b.raw[i] = new
             i += 1
-    if "_OVERRIDE" in kw_opts:
+    if "OVERRIDE" in opts:
         i += 1
-    if "_THERMAL" in kw_opts:
+    if "THERMAL" in opts:
         i += 1
 
 
@@ -857,10 +863,16 @@ def _off_constrained_interpolation(b: Block, offsets: Dict[str, int],
         if new is not None:
             b.raw[toff] = new
     ind_bucket = "s" if ityp else "n"
-    i = toff + 1
-    while i < len(b.raw):
-        if not any(line.strip() for line in b.raw[i:]):
+    # Last non-blank line located once — a re-sliced ``b.raw[i:]`` blank-tail probe
+    # per iteration is quadratic on a thousand-node spider (mirrors the same fix in
+    # handlers.handle_constrained_interpolation).
+    last_data = -1
+    for j in range(len(b.raw) - 1, toff, -1):
+        if b.raw[j].strip():
+            last_data = j
             break
+    i = toff + 1
+    while i <= last_data:
         new = _rewrite_line(b.raw[i], [(0, ind_bucket)], offsets)
         if new is not None:
             b.raw[i] = new
@@ -2131,10 +2143,11 @@ for _o1 in ("", "_OFFSET"):
 del _o1, _o2, _o3, _o4
 
 # *PART_{OPTION1..6} (3588 spellings) and *CONSTRAINED_NODAL_RIGID_BODY_{SPC,
-# INERTIA,OVERRIDE,THERMAL} (65) — generated from the SAME functions handlers.py
-# registers its dispatch keys from, so a spelling can never reach one table and
-# miss the other. That pairing is the #116 lesson: the rigid-wall list used to be
-# a literal here and had already fallen three spellings behind the registry.
+# INERTIA,OVERRIDE,THERMAL,TITLE} (326) — generated from the SAME functions
+# handlers.py registers its dispatch keys from, so a spelling can never reach one
+# table and miss the other. That pairing is the #116 lesson: the rigid-wall list
+# used to be a literal here and had already fallen three spellings behind the
+# registry.
 for _kw in _part_option_keywords():
     _OFFSET_SPECS[_kw] = _off_part
 for _kw, _cnrb_opts in _cnrb_option_keywords():
@@ -2367,8 +2380,9 @@ def _apply_offsets(p: PendingInclude, warn) -> None:
         kw = b.keyword
         spec = _OFFSET_SPECS.get(kw)
         if spec is None:
+            # Token boundary, not a bare character prefix — see handlers.dispatch.
             for _prefix, _spec in _ELEMENT_PREFIX_SPECS:
-                if kw.startswith(_prefix):
+                if kw == _prefix or kw.startswith(_prefix + "_"):
                     spec = _spec
                     break
         if spec is None:

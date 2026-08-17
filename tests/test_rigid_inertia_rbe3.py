@@ -90,12 +90,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from k2rad import convert                                    # noqa: E402
 from k2rad.assembly import _OFFSET_SPECS                     # noqa: E402
 from k2rad.handlers import (HANDLERS, dispatch,              # noqa: E402
-                            dof_digits_to_flags,
-                            _cnrb_option_keywords,
+                            _cnrb_option_keywords, _cnrb_options,
                             _part_option_keywords, _part_options)
 from k2rad.parser import parse_k_file                        # noqa: E402
 from k2rad.state import ConversionState                      # noqa: E402
-from k2rad.writer.rbe3 import _trarot                        # noqa: E402
+from k2rad.writer.rbe3 import (_trarot,                      # noqa: E402
+                               dof_digits_to_flags)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -499,37 +499,59 @@ class PartInertiaTests(unittest.TestCase):
         self.assertNotIn((1.5, 0.0, 0.0), vs)
         self.assertTrue(_warned(res, "*INITIAL_VELOCITY_RIGID_BODY also drives"))
 
+    #: (card-3 replacement, card-4 replacement, warning needle) for each way the
+    #: `_INERTIA` card set can be incomplete. Every one of them would reach the
+    #: starter as a hard stop, because ICoG=4 discards the mesh contribution and
+    #: leaves nothing to fall back on.
+    _INCOMPLETE_INERTIA = (
+        # TM blank -> total rigid-body mass 0
+        ("     22.05      2.125       0.75       0.0         0         0",
+         None, "ERROR 679"),
+        # whole diagonal blank
+        (None, "       0.0       1.0       3.0       0.0       2.0       0.0",
+         "IXX=IYY=IZZ=0"),
+        # ONE diagonal term blank — the plausible one: the CNRB Card 4 Default
+        # row in the manual reads `none 0 0 none 0 0`, so a deck can leave IZZ
+        # empty and look complete. Still starter ERROR 274.
+        (None, "      20.0       1.0       3.0      25.0       2.0       0.0",
+         "IZZ=0"),
+        (None, "       0.0       1.0       3.0      25.0       2.0      30.0",
+         "IXX=0"),
+        (None, "      20.0       1.0       3.0       0.0       2.0       0.0",
+         "IYY=IZZ=0"),
+    )
+
     def test_incomplete_inertia_drops_the_override_loudly(self):
-        """A blank ``TM`` or a zero inertia diagonal is a source-deck defect —
+        """A blank ``TM`` or ANY zero inertia diagonal is a source-deck defect —
         *PART Remark 3: "all mass and inertia properties of the body must be
         specified.  There are no default values."
 
         ICoG=4 throws the mesh contribution away, so writing the card as-is would
         be starter ERROR 679 (total mass <= 1e-30) or ERROR 274 (min principal
-        inertia <= 0). The override is dropped and the mesh-derived body kept —
-        which is what LS-DYNA does WITHOUT the option.
+        inertia <= 0): with ICoG=4 the parallel-axis block is skipped
+        (``inirby.F:322``) and the main node is a fresh free node, so nothing ever
+        fills a zero term in. The override is dropped and the mesh-derived body
+        kept — which is what LS-DYNA does WITHOUT the option.
         """
-        for bad, needle in (
-            ("     22.05      2.125       0.75       0.0         0         0",
-             "ERROR 679"),
-        ):
+        for card3, card4, needle in self._INCOMPLETE_INERTIA:
             with self.subTest(needle=needle):
-                deck = _deck(PART_SHELL, PART_INERTIA.replace(
-                    "     22.05      2.125       0.75      7.25"
-                    "         0         0", bad))
-                res, st = _convert(deck)
+                frag = PART_INERTIA
+                if card3 is not None:
+                    frag = frag.replace(
+                        "     22.05      2.125       0.75      7.25"
+                        "         0         0", card3)
+                if card4 is not None:
+                    frag = frag.replace(
+                        "      20.0       1.0       3.0      25.0"
+                        "       2.0      30.0", card4)
+                res, st = _convert(_deck(PART_SHELL, frag))
                 (_rid, rb), = _rbody_cards(st)
                 self.assertEqual(rb["ICoG"], 0, "override must be refused")
                 self.assertEqual(rb["Jxx"], 0.0)
+                self.assertEqual(rb["Mass"], 0.0)
                 self.assertTrue(_warned(res, "INCOMPLETE", needle))
-        # zero inertia tensor, TM fine
-        deck = _deck(PART_SHELL, PART_INERTIA.replace(
-            "      20.0       1.0       3.0      25.0       2.0      30.0",
-            "       0.0       1.0       3.0       0.0       2.0       0.0"))
-        res, st = _convert(deck)
-        (_rid, rb), = _rbody_cards(st)
-        self.assertEqual(rb["ICoG"], 0)
-        self.assertTrue(_warned(res, "INCOMPLETE", "ERROR 274"))
+                if card4 is not None:
+                    self.assertTrue(_warned(res, "ERROR 274"))
 
     def test_all_blank_inertia_cards_are_no_override(self):
         """LS-PrePost writes an all-blank card set for an option that is present
@@ -545,6 +567,95 @@ rigid brick
         self.assertEqual(rb["ICoG"], 0)
         self.assertEqual(rb["Mass"], 0.0)
         self.assertTrue(_warned(res, "entirely blank"))
+
+    def test_element_mass_is_superseded_by_tm_with_exactly_one_warning(self):
+        """``TM`` is the body's TOTAL, so lumped mass on the part is replaced, not
+        added — and only ONE of the two messages about it may fire.
+
+        The generic "*MAT_RIGID pid=N: total added mass ... placed in /RBODY Mass
+        field" is false the moment `_INERTIA` is accepted: the Mass field holds
+        TM. Both used to be emitted, back to back, saying opposite things.
+        """
+        res, st = _convert(_deck(PART_SHELL, PART_INERTIA,
+                                 "*ELEMENT_MASS\n       1      11      0.05\n"))
+        (_rid, rb), = _rbody_cards(st)
+        self.assertEqual(rb["Mass"], 7.25)
+        self.assertTrue(_warned(res, "SUPERSEDED by TM=7.25"))
+        self.assertFalse(_warned(res, "placed in /RBODY Mass field"))
+
+    def test_element_mass_on_a_free_nodeid_main_node_is_still_reported(self):
+        """With ``NODEID`` naming a free node OUTSIDE the part, an `*ELEMENT_MASS`
+        sitting on it is in neither sum: ``node_added`` runs over the part's own
+        nodes, and `_make_added_masses` skips rigid nodes (the main node joins
+        ``rigid_nodes``). Dropping it is right under ICoG=4 — going unmentioned is
+        not."""
+        deck = _deck(PART_SHELL, PART_INERTIA.replace(
+            "     22.05      2.125       0.75      7.25         0         0",
+            "     22.05      2.125       0.75      7.25         0        99"),
+            "*ELEMENT_MASS\n       1      99      0.05\n")
+        res, st = _convert(deck)
+        (_rid, rb), = _rbody_cards(st)
+        self.assertEqual(rb["node_ID"], 99, "NODEID 99 is free, so it is reused")
+        self.assertEqual(rb["Mass"], 7.25)
+        self.assertTrue(_warned(res, "SUPERSEDED by TM=7.25", "0.05"))
+
+    def test_element_mass_without_inertia_still_reports_the_mass_field(self):
+        """The negative control: without `_INERTIA` the lumped mass really IS what
+        the Mass field holds, and that message must survive."""
+        res, st = _convert(_deck(PART_SHELL, PART_RIGID,
+                                 "*ELEMENT_MASS\n       1      11      0.05\n"))
+        (_rid, rb), = _rbody_cards(st)
+        self.assertEqual(rb["Mass"], 0.05)
+        self.assertTrue(_warned(res, "placed in /RBODY Mass field"))
+        self.assertFalse(_warned(res, "SUPERSEDED"))
+
+    def test_two_allocators_never_hand_out_the_same_node_id(self):
+        """A `*PART_INERTIA` part takes its main node from
+        ``state.next_node_id()``; a plain `*MAT_RIGID` part takes one from the
+        open-coded ``_next_free`` counter in ``_make_rbodies``. Two allocators
+        over one range hand the same id out twice, and ``state.nodes`` being a
+        dict means the second write REPLACES the first — one rigid body's main
+        node teleported onto another's, silently, with no starter error.
+
+        Inertia part FIRST, so the plain part's counter is stale when it draws.
+        Both halves of the assertion matter: distinct ids, and each /NODE row
+        holding its OWN body's coordinates (a collision passes the id test if the
+        writer happens to renumber, but never the coordinate test).
+        """
+        deck = _deck(PART_SHELL, PART_INERTIA, """\
+*MAT_RIGID
+       3   7.85E-9  210000.0       0.3
+       1.0       0.0       0.0
+*PART
+plain rigid brick
+       3       2       3
+""").replace("""*ELEMENT_SOLID
+      11       2      11      12      13      14      15      16      17      18
+""", """*ELEMENT_SOLID
+      11       2      11      12      13      14      15      16      17      18
+      12       3      21      22      23      24      25      26      27      28
+""").replace("""      99            30.0            30.0            30.0
+""", """      21            40.0             0.0             0.0
+      22            44.0             0.0             0.0
+      23            44.0             4.0             0.0
+      24            40.0             4.0             0.0
+      25            40.0             0.0             4.0
+      26            44.0             0.0             4.0
+      27            44.0             4.0             4.0
+      28            40.0             4.0             4.0
+      99            30.0            30.0            30.0
+""")
+        _res, st = _convert(deck)
+        cards = _rbody_cards(st)
+        self.assertEqual(len(cards), 2)
+        mains = [rb["node_ID"] for _rid, rb in cards]
+        self.assertEqual(len(mains), len(set(mains)),
+                         f"/RBODY main nodes collide: {mains}")
+        by_mass = {rb["Mass"]: rb["node_ID"] for _rid, rb in cards}
+        # the *PART_INERTIA body sits at its STATED centre of mass ...
+        self.assertEqual(_node_coords(st, by_mass[7.25]), (22.05, 2.125, 0.75))
+        # ... and the plain rigid part at its own nodal centroid (42, 2, 2).
+        self.assertEqual(_node_coords(st, by_mass[0.0]), (42.0, 2.0, 2.0))
 
     def test_non_rigid_part_inertia_is_warned_and_the_mesh_survives(self):
         """"This applies to rigid bodies (see *MAT_RIGID) only" (p.37-2).
@@ -647,6 +758,24 @@ rigid brick
         (_rid, rb), = _rbody_cards(st)
         self.assertEqual(rb["Skew_ID"], 0)
         self.assertTrue(_warned(res, "degenerate"))
+        self.assertFalse(_warned(res, "ENDS before card 6"))
+
+    def test_ircs1_with_no_card6_at_all_says_so(self):
+        """"IRCS=1 but the block ended" and "card 6 is there and degenerate" are
+        different source-deck defects with different fixes, and both used to come
+        out as the same "local system is degenerate" line.
+
+        ``RigidInertia.has_local_card`` records whether the card was PRESENT (the
+        walk still strides over it either way, so the *PART set boundary is safe).
+        """
+        deck = _deck(PART_SHELL, self.IRCS_VECTORS.replace(
+            "       0.0       0.0       1.0       1.0       0.0       0.0\n", ""))
+        res, st = _convert(deck)
+        (_rid, rb), = _rbody_cards(st)
+        self.assertEqual(rb["Skew_ID"], 0)
+        self.assertEqual(rb["ICoG"], 4, "the mass override still applies")
+        self.assertTrue(_warned(res, "ENDS before card 6"))
+        self.assertFalse(_warned(res, "degenerate"))
 
     def test_ircs0_never_binds_a_skew(self):
         """With IRCS=0 the tensor is GLOBAL, so nothing may be bound.
@@ -732,6 +861,87 @@ class CnrbInertiaTests(unittest.TestCase):
         self.assertIn(3.75, masses)
         self.assertEqual(len([m for m in masses if m == 0.0]), 2,
                          "the plain CNRB and the rigid part must both survive")
+
+    def test_two_allocators_never_hand_out_the_same_node_id(self):
+        """An `_INERTIA` CNRB draws its main node from ``state.next_node_id()``
+        while a plain one uses the open-coded ``_next_free`` counter in
+        ``_make_cnrb_rbodies``. Two allocators over one range hand the same id out
+        twice, and because ``state.nodes`` is a dict the second write silently
+        REPLACES the first — one rigid body's main node teleported onto another's,
+        with no starter error to catch it. The ``while _next_free[0] in
+        state.nodes`` guard is what prevents that, and this is the test that fails
+        without it.
+
+        The `_INERTIA` body comes FIRST so the plain body's counter is already
+        stale by the time it allocates.
+        """
+        _res, st = _convert(_deck(
+            PART_SHELL, PART_RIGID, CNRB_SET, CNRB_INERTIA,
+            "*SET_NODE_LIST\n       301\n"
+            "        11        12        13        14\n"
+            "*CONSTRAINED_NODAL_RIGID_BODY\n"
+            "       401         0       301\n"))
+        mains = [rb["node_ID"] for _rid, rb in _rbody_cards(st)]
+        self.assertEqual(len(mains), len(set(mains)),
+                         f"/RBODY main nodes collide: {mains}")
+        # and each main node's own /NODE row must hold ITS body's coordinates:
+        # the inertia body's stated CoM, the plain body's node-set centroid.
+        by_mass = {rb["Mass"]: rb["node_ID"] for _rid, rb in _rbody_cards(st)}
+        self.assertEqual(_node_coords(st, by_mass[3.75]), (0.25, 0.35, 0.45))
+        plain = [n for m, n in by_mass.items() if m == 0.0]
+        self.assertTrue(plain)
+        self.assertEqual(_node_coords(st, plain[0]), (22.0, 2.0, 0.0))
+
+    def test_title_in_a_non_final_option_position_still_converts(self):
+        """"The order of the options in the keyword name is arbitrary" (Vol I R17
+        p.10-146) of a list that includes TITLE, so `_TITLE_INERTIA` is as legal
+        as `_INERTIA_TITLE`.
+
+        The parser only lifts a TRAILING `_TITLE` into ``block.options``, so a
+        mid-position one reaches ``dispatch`` spelled out in the keyword. Without
+        a key for it the block lands in ``skipped_keywords`` — and a CNRB owns no
+        elements, so nothing downstream notices: the rigid body is simply not in
+        the model. Measured before the fix: `_INERTIA_TITLE` gave /RBODY Mass 7.25,
+        `_TITLE_INERTIA` gave ``SKIPPED`` and no /RBODY at all.
+        """
+        body = ("a cnrb title line\n"
+                "       400         0       300         0         0         0"
+                "         0\n"
+                "      0.25       0.35       0.45      3.75         0         0\n"
+                "      31.0       1.0       3.0      35.0       2.0      40.0\n"
+                "\n")
+        for kw in ("*CONSTRAINED_NODAL_RIGID_BODY_INERTIA_TITLE",
+                   "*CONSTRAINED_NODAL_RIGID_BODY_TITLE_INERTIA"):
+            with self.subTest(kw=kw):
+                res, st = _convert(_deck(PART_SHELL, PART_RIGID, CNRB_SET,
+                                         kw + "\n" + body))
+                self.assertEqual(res.skipped_keywords, [])
+                rbs = {rb["Mass"]: rb for _rid, rb in _rbody_cards(st)}
+                self.assertIn(3.75, rbs, f"*{kw} produced no /RBODY")
+                self.assertEqual(rbs[3.75]["ICoG"], 4)
+                self.assertEqual((rbs[3.75]["Jxx"], rbs[3.75]["Jyy"],
+                                  rbs[3.75]["Jzz"]), (31.0, 35.0, 40.0))
+                self.assertIn("a cnrb title line", st)
+
+    def test_mid_position_title_consumes_exactly_one_card(self):
+        """The title line must be consumed ONCE, not zero times (card 1 read off
+        the title) and not twice (card 1 skipped). `_SPC` is the sharpest probe:
+        its CMO/CON1/CON2 land in the /BCS mask, so a one-card phase error is
+        visible as a wrong mask rather than as a missing body."""
+        body = ("a cnrb title line\n"
+                "       400         0       300\n"
+                "       1.0         7         4\n")
+        masks = []
+        for kw in ("*CONSTRAINED_NODAL_RIGID_BODY_SPC_TITLE",
+                   "*CONSTRAINED_NODAL_RIGID_BODY_TITLE_SPC"):
+            res, st = _convert(_deck(PART_SHELL, PART_RIGID, CNRB_SET,
+                                     kw + "\n" + body))
+            self.assertEqual(res.skipped_keywords, [], kw)
+            masks.append([ln for ln in st.splitlines()
+                          if ln.strip().startswith("111")])
+        self.assertEqual(masks[0], masks[1],
+                         "the two spellings must read the same SPC card")
+        self.assertTrue(masks[0], "no /BCS mask was emitted")
 
     def test_pnode_is_not_the_main_node_with_inertia(self):
         """LS-DYNA relocates PNODE to the centre of mass itself, so it is a
@@ -845,9 +1055,16 @@ shells
         self.assertTrue(_warned(res, "CPARM8"))
 
     def test_element_thickness_clash_is_reported(self):
-        """/PART Comment 3: the part ``Thick`` supersedes the PROPERTY thickness
-        only when the /SHELL or /SH3N ``Thick`` is 0 — so a non-zero per-element
-        thickness WINS and the OPTT the deck just asked for does nothing."""
+        """The CONTACT-gap cascade is THK_PART first, element THK second.
+
+        ``i7sti3.F:230-238`` tests ``IF (THK_PART(IP) /= ZERO .AND. IINTTHICK ==
+        0) DX=HALF*THK_PART(IP)`` and only falls through to ``THK(I)`` when the
+        part value is zero, so the part-level OPTT SUPERSEDES the element card —
+        measured on an Igap=1 TYPE7, GAP MIN 1.0 without OPTT and 7.0E-3 with
+        OPTT=0.007. The warning used to state that backwards, and its remedy
+        ("drop the OPTT") would have changed the physics. The Reference Guide's
+        /PART Comment 3 is about the shell PROPERTY thickness, which is level 3.
+        """
         deck = _deck(PART_RIGID, """\
 *PART_CONTACT
 shells
@@ -860,7 +1077,67 @@ shells
              2.0             2.0             2.0             2.0
 """)
         res, _st = _convert(deck)
-        self.assertTrue(_warned(res, "BOTH", "OPTT", "*ELEMENT_SHELL_THICKNESS"))
+        self.assertTrue(_warned(res, "BOTH", "OPTT", "*ELEMENT_SHELL_THICKNESS",
+                                "SUPERSEDES", "i7sti3.F:230"))
+        # ... and never the other way round.
+        self.assertFalse(_warned(res, "element's own Thick column WINS"))
+        self.assertFalse(_warned(res, "OPTT has no effect on those elements"))
+
+    def test_optt_on_a_solid_only_part_is_reported_as_inert(self):
+        """The starter reads ``THK_PART`` in its NUMELC/NUMELTG/NUMELT/NUMELP/
+        NUMELR loops only (``i7sti3.F:226-293``) — there is no solid loop — while
+        LS-DYNA does apply OPTT to solids under SOFT=2 (Vol I R17 p.37-11). So the
+        value is written and then never read, and that has to be said."""
+        res, st = _convert(_deck(PART_SHELL, """\
+*PART_CONTACT
+rigid brick
+       2       2       2
+       0.0       0.0       0.0       0.0       5.0       0.0       0.0
+"""))
+        # the column is still written — the diagnosis is about the READER
+        self.assertEqual(_part_cards(st)[2][3], 5.0)
+        self.assertTrue(_warned(res, "SOLID elements", "2 (OPTT=5)",
+                                "NO EFFECT"))
+        # the shell part carries no OPTT, so it must not be named
+        self.assertFalse(_warned(res, "1 (OPTT="))
+
+    def test_optt_on_a_shell_part_is_not_called_solid_only(self):
+        res, _st = _convert(_deck(PART_RIGID, """\
+*PART_CONTACT
+shells
+       1       1       1
+       0.0       0.0       0.0       0.0       0.5       0.0       0.0
+"""))
+        self.assertFalse(_warned(res, "SOLID elements"))
+
+    def test_optt_igap_gate_is_reported(self):
+        """/PART ``Thick`` is only consulted by an interface with ``Igap >= 1``.
+
+        On /INTER/TYPE7 the whole THK_PART block sits inside ``IF(IGAP >= 1)``
+        (``i7sti3.F:222``) and at Igap=0 the gap is the single constant Gapmin —
+        measured, identical decks with and without OPTT=5.0 on the moving plate
+        gave the same contact onset 0.0090042418 s, and patching only the Igap
+        column of that same deck to 1 moved it to 0.0070024668 s. k2rad's plain
+        TYPE7 is Igap=0, so the value has to be flagged as possibly inert."""
+        res, _st = _convert(_deck(PART_RIGID, """\
+*PART_CONTACT
+shells
+       1       1       1
+       0.0       0.0       0.0       0.0       0.5       0.0       0.0
+"""))
+        self.assertTrue(_warned(res, "Igap >= 1", "i7sti3.F:222", "INERT"))
+
+    def test_no_optt_means_no_optt_warnings_at_all(self):
+        """A *PART_CONTACT that only carries the dropped fields must not pick up
+        any of the three OPTT diagnostics."""
+        res, _st = _convert(_deck(PART_SHELL, """\
+*PART_CONTACT
+rigid brick
+       2       2       2
+      0.31      0.22       0.0       0.0       0.0       0.0       0.0
+"""))
+        for needle in ("Igap >= 1", "SOLID elements", "SUPERSEDES"):
+            self.assertFalse(_warned(res, needle), needle)
 
     def test_stacked_spellings_read_inertia_first_then_contact(self):
         """"Options 1, 2, 3, 4, 5, and 6 may be specified in any order on the
@@ -896,15 +1173,22 @@ rigid brick
 class PartOptionGrammarTests(unittest.TestCase):
 
     def test_every_legal_spelling_is_registered_in_both_tables(self):
-        """3588 `*PART` spellings and 65 CNRB ones, generated from ONE source and
+        """3588 `*PART` spellings and 326 CNRB ones, generated from ONE source and
         mirrored into ``_OFFSET_SPECS`` — the #116 lesson. A spelling that reaches
         only one table either loses the mesh (no handler) or keeps un-offset ids
-        inside an `*INCLUDE_TRANSFORM` (no offset spec)."""
+        inside an `*INCLUDE_TRANSFORM` (no offset spec).
+
+        326 = every ordering of {SPC, INERTIA, OVERRIDE, THERMAL, TITLE}, i.e.
+        sum(P(5, r) for r in 0..5). TITLE is in the permutation because the
+        manual's arbitrary-order sentence covers the whole documented option list
+        (Vol I R17 p.10-146, "<BLANK> INERTIA OVERRIDE SPC THERMAL TITLE"), and
+        because the parser only lifts a TRAILING _TITLE out of the keyword."""
         part_kws = list(_part_option_keywords())
         self.assertEqual(len(part_kws), 3588)
         self.assertEqual(len(set(part_kws)), 3588)
         cnrb_kws = [k for k, _ in _cnrb_option_keywords()]
-        self.assertEqual(len(cnrb_kws), 65)
+        self.assertEqual(len(cnrb_kws), 326)
+        self.assertEqual(len(set(cnrb_kws)), 326)
         for kw in part_kws + cnrb_kws:
             self.assertIn(kw, HANDLERS, f"*{kw} has no handler")
             self.assertIn(kw, _OFFSET_SPECS, f"*{kw} has no offset spec")
@@ -912,6 +1196,24 @@ class PartOptionGrammarTests(unittest.TestCase):
                    "CONSTRAINED_INTERPOLATION_LOCAL"):
             self.assertIn(kw, HANDLERS)
             self.assertIn(kw, _OFFSET_SPECS)
+
+    def test_cnrb_option_set_ignores_the_title_token(self):
+        """``_cnrb_options`` returns the DATA options only — TITLE costs a card but
+        contributes none, and mixing it into the set would make the walk look for
+        a card that does not exist."""
+        self.assertEqual(_cnrb_options("CONSTRAINED_NODAL_RIGID_BODY"),
+                         (set(), False))
+        self.assertEqual(
+            _cnrb_options("CONSTRAINED_NODAL_RIGID_BODY_TITLE_INERTIA"),
+            ({"INERTIA"}, True))
+        self.assertEqual(
+            _cnrb_options("CONSTRAINED_NODAL_RIGID_BODY_INERTIA"),
+            ({"INERTIA"}, False))
+        self.assertEqual(
+            _cnrb_options("CONSTRAINED_NODAL_RIGID_BODY_SPC_TITLE_THERMAL"),
+            ({"SPC", "THERMAL"}, True))
+        for kw, opts in _cnrb_option_keywords():
+            self.assertEqual(_cnrb_options(kw)[0], set(opts), kw)
 
     def test_option_suffix_tokenises_order_independently(self):
         """ATTACHMENT_NODES itself contains an underscore, so the suffix cannot be
@@ -969,6 +1271,31 @@ rigid brick
         self.assertTrue(_warned(res, "*PART_SENSOR is a separate LS-DYNA keyword"))
         self.assertEqual(sorted(_part_cards(st)), [1, 2],
                          "no phantom part may be invented")
+
+    def test_particle_keywords_do_not_route_into_the_part_fallback(self):
+        """`*PARTICLE_BLAST` is not a `*PART` spelling.
+
+        ``dispatch``'s prefix fallback matches on a TOKEN boundary, so a bare
+        ``startswith("PART")`` no longer drags `*PARTICLE_*` into the *PART
+        handler — which used to tell the user that "_ICLE_BLAST is not one of
+        INERTIA/REPOSITION, CONTACT, ..." and that its parts might have lost every
+        element. The emitted deck was the same either way; the diagnostic named
+        the wrong keyword family.
+        """
+        res, st = _convert(_deck(PART_SHELL, PART_RIGID,
+                                 "*PARTICLE_BLAST\n         1         2\n"))
+        self.assertIn("PARTICLE_BLAST", res.skipped_keywords)
+        self.assertFalse(_warned(res, "*PART option tokens"))
+        self.assertFalse(_warned(res, "_ICLE_BLAST"))
+        self.assertEqual(sorted(_part_cards(st)), [1, 2])
+
+    def test_a_real_unknown_part_option_still_gets_the_part_diagnosis(self):
+        """The negative control for the token-boundary gate: `*PART_FOOBAR` IS a
+        `*PART_`-prefixed keyword, so it must keep the *PART-specific message."""
+        res, _st = _convert(_deck(PART_SHELL, PART_RIGID,
+                                  "*PART_FOOBAR\nx\n       3       2       2\n"))
+        self.assertIn("PART_FOOBAR", res.skipped_keywords)
+        self.assertTrue(_warned(res, "*PART option tokens", "_FOOBAR"))
 
     def test_plain_part_deck_line_is_unchanged(self):
         """Byte-identity guard for every deck without the new keywords: the /PART
@@ -1199,6 +1526,132 @@ class Rbe3Tests(unittest.TestCase):
         self.assertEqual(sets[0]["WTi"], 2.0)
         self.assertEqual(_grnod_nodes(st, sets[0]["grnod_IDi"]), [1, 2])
         self.assertTrue(_warned(res, "ERROR 705"))
+
+    def test_zero_weight_is_written_but_the_starter_rewrites_it_to_one(self):
+        """``hm_read_rbe3.F:227`` is ``IF (W==ZERO.OR.IMODIF==3) W=ONE``.
+
+        So an explicit ``TWGHTX = 0`` is emitted as ``WTi = 0`` and then RUN at
+        full weight — a materially different constraint delivered silently. Every
+        other hazard on this path is warned, so this one is too.
+        """
+        res, st = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1       123       0.0
+         2       123       2.0
+"""))
+        (_rid, _dep, sets), = _rbe3_cards(st)
+        self.assertEqual(sorted(s["WTi"] for s in sets), [0.0, 2.0])
+        self.assertTrue(_warned(res, "TWGHTX = 0", "hm_read_rbe3.F:227",
+                                "FULL weight"))
+
+    def test_negative_weight_is_warned(self):
+        res, st = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1       123      -3.0
+         2       123       2.0
+         3       123       2.0
+"""))
+        (_rid, _dep, sets), = _rbe3_cards(st)
+        self.assertIn(-3.0, [s["WTi"] for s in sets])
+        self.assertTrue(_warned(res, "NEGATIVE TWGHTX"))
+
+    def test_positive_weights_are_never_warned(self):
+        res, _st = _convert(_deck(PART_SHELL, PART_RIGID, INTERP))
+        for needle in ("TWGHTX = 0", "NEGATIVE TWGHTX", "reuses ICID",
+                       "IERR=322", "rbe3chk IERR="):
+            self.assertFalse(_warned(res, needle), needle)
+
+    def test_duplicate_icid_is_reported(self):
+        """LS-DYNA requires ICID unique and ``hm_read_rbe3.F`` has no duplicate-id
+        pass, so two cards with one id give two /RBE3 blocks under that id and
+        nothing anywhere says so."""
+        res, st = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1       123       1.0
+         2       123       1.0
+         3       123       1.0
+*CONSTRAINED_INTERPOLATION
+       500        99    123456
+         1       123       1.0
+         2       123       1.0
+         3       123       1.0
+"""))
+        self.assertEqual([rid for rid, _d, _s in _rbe3_cards(st)], [500, 500])
+        self.assertTrue(_warned(res, "reuses ICID 500"))
+
+    def test_translation_restricted_idof_is_reported_as_error_706(self):
+        """``rbe3chk`` needs a non-zero weight sum on EACH of Tx/Ty/Tz — ``IF
+        (ABS(DENFX) <= EM20) IERR = 326`` and its Y/Z twins
+        (``hm_read_rbe3.F:685-695``), which become ``ANCMSG(MSGID=706)``, a hard
+        stop. A deck whose every IDOF is ``3`` (z only) is legal LS-DYNA input and
+        converted clean before this check: /RBE3 with ``001 000`` everywhere, zero
+        warnings, and starter ``ERROR ID 706``."""
+        res, _st = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200         3
+         1         3       1.0
+         2         3       1.0
+         3         3       1.0
+"""))
+        self.assertTrue(_warned(res, "ERROR 706", "rbe3chk IERR=326/327",
+                                "TX/TY"))
+
+    def test_two_independent_nodes_without_rotation_is_reported(self):
+        """``IF (NG == 2 .AND. IROT == 0) IERR = 322`` (``hm_read_rbe3.F:637``) —
+        the constraint cannot carry a moment about its own axis.
+
+        ``NG`` counts independent NODES, not sets: three nodes whose rows collapse
+        to two groups must NOT trip it, which is the negative control below.
+        """
+        res, _st = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1       123       2.0
+         2       123       1.0
+"""))
+        self.assertTrue(_warned(res, "ERROR 706", "IERR=322",
+                                "TWO independent nodes"))
+        # a rotational IDOF digit on either node clears it
+        res2, _st2 = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1    123456       2.0
+         2       123       1.0
+"""))
+        self.assertFalse(_warned(res2, "IERR=322"))
+        # and so does a third NODE, even when it shares a group with another
+        res3, st3 = _convert(_deck(PART_SHELL, PART_RIGID, """\
+*CONSTRAINED_INTERPOLATION
+       500       200    123456
+         1       123       2.0
+         2       123       1.0
+         3       123       1.0
+"""))
+        (_rid, dep, _sets), = _rbe3_cards(st3)
+        self.assertEqual(dep["N_set"], 2, "the three rows must collapse to 2 sets")
+        self.assertFalse(_warned(res3, "IERR=322"),
+                         "NG counts NODES (3), not sets (2)")
+
+    def test_a_per_set_skew_suppresses_the_axis_sum_check(self):
+        """With ``IELSUB > 0`` the starter accumulates ``TW(I,K)*EL(I,axis,K)**2``
+        over all three components (``hm_read_rbe3.F:669-673``), so a rotated set
+        CAN feed an axis its own IDOF never names. Guessing at that would produce
+        a false alarm, so the axis check stands down — the NG==2 test does not,
+        because it runs before the skews are resolved."""
+        res, _st = _convert(_deck(PART_SHELL, PART_RIGID, COORD_7, """\
+*CONSTRAINED_INTERPOLATION_LOCAL
+       500       200         3
+         1         3       1.0
+         7
+         2         3       1.0
+         7
+         3         3       1.0
+         7
+"""))
+        self.assertFalse(_warned(res, "rbe3chk IERR=326"))
 
     def test_idnsw_and_fgm_are_warn_dropped(self):
         res, _st = _convert(_deck(PART_SHELL, PART_RIGID, """\

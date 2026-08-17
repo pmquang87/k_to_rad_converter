@@ -142,14 +142,21 @@ card-3 `IRCS` value is 1. **The mesh survives every stacking**, modelled or not:
   starter `ERROR 679` / `ERROR 274`, and a non-rigid or merged-away part reports
   the lost `TM` by value
 - `*PART_CONTACT` → `OPTT` into the `/PART` card's `Thick` column (cols 31–50),
-  the virtual contact thickness that feeds the gap in `/INTER/TYPE7, 11, 18, 19,
-  20, 21, 24, 25`. Written only when non-zero (the starter's own test is
+  the virtual contact thickness the starter reads as the FIRST of three gap
+  levels (`THK_PART`, then the element thickness, then the property's —
+  `i7sti3.F:230`). Written only when non-zero (the starter's own test is
   `THK_PART /= ZERO`, so a literal zero is indistinguishable from blank).
   `FS`/`FD`/`DC`/`VC`, `SFT`, `SSF` and `CPARM8` are warn-dropped — Radioss has
   no per-part friction or stiffness scale, and `SFT` is deliberately *not* folded
-  into `Thick` (it scales the true thickness; `Thick` replaces it). A part
-  carrying both `OPTT` and per-element `*ELEMENT_SHELL_THICKNESS` is warned,
-  because the element value wins
+  into `Thick` (it scales the true thickness; `Thick` replaces it). Three ways the
+  value can reach `Thick` and still not be read are each warned per part: a part
+  carrying per-element `*ELEMENT_SHELL_THICKNESS` too (`OPTT` supersedes it for
+  the contact gap, while the element value keeps the structural thickness), a
+  SOLID-only part (the starter has no solid `THK_PART` loop, though LS-DYNA
+  applies `OPTT` to solids under `SOFT = 2`), and an interface written with
+  `Igap = 0` — on `/INTER/TYPE7` the whole `THK_PART` block sits inside
+  `IF(IGAP >= 1)`, so the plain TYPE7 k2rad emits ignores it while the TYPE25 and
+  `SOFT=-7` routes (`Igap = 2`) honour it
 - `_REPOSITION`, `_PRINT` (`PRBF`), `_ATTACHMENT_NODES` (`ANSID`) and `_FIELD`
   (`FIDBO`) are warn-dropped with their cards consumed, so the walk stays in
   phase; `_AVERAGED` adds no card. `*PART_SENSOR` / `_ADD` / `_MODES` / `_MOVE` /
@@ -1558,10 +1565,10 @@ failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
 `/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
 exponents are warned)
-`*CONSTRAINED_NODAL_RIGID_BODY` → `/RBODY` (id = `PID`, `NSID` blank = `PID`), in
-**all 65 option spellings** — `_SPC`, `_INERTIA`, `_OVERRIDE`, `_THERMAL` in any
-order, generated from one grammar, with the cards consumed in the fixed
-Card-Summary order. `_SPC` → an inline `/BCS` on the master node (see
+`*CONSTRAINED_NODAL_RIGID_BODY` → `/RBODY` (id = the `/RBODY` main node id, as on
+the `*MAT_RIGID` path; `NSID` blank = `PID`), in **all 326 option spellings** —
+`_SPC`, `_INERTIA`, `_OVERRIDE`, `_THERMAL`, `_TITLE` in any order, generated
+from one grammar, with the cards consumed in the fixed Card-Summary order. `_SPC` → an inline `/BCS` on the master node (see
 **Boundary conditions**); `_INERTIA` carries the *same* card set as
 `*PART_INERTIA` (Vol I Appendix X: "the same keyword data (except … CID2)") and
 gets the same transfer — `Mass`, `Jxx..Jxz`, `ICoG = 4`, the main node at

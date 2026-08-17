@@ -214,7 +214,7 @@ Prior history (before this changelog was introduced) is summarized in the
 
   **8. Option spellings are GENERATED, and positional consumption is absolute.**
   "Options 1, 2, 3, 4, 5, and 6 may be specified in any order on the \*PART card"
-  (Vol I R17 p.37-2) makes **3588** legal `*PART` spellings and 65
+  (Vol I R17 p.37-2) makes **3588** legal `*PART` spellings and **326**
   `*CONSTRAINED_NODAL_RIGID_BODY` ones; the CARD order stays the fixed
   Card-Summary one whichever way the keyword is spelled. Altair's own reader
   matches the whole suffix against a closed list of 12 (`_CONTACT_INERTIA` falls
@@ -254,6 +254,97 @@ Prior history (before this changelog was introduced) is summarized in the
   `/PART`, `/RBODY`, `/GRNOD` and `/INIVEL` paths are untouched. Tests
   2768 → 2828 (+60, all in the new `tests/test_rigid_inertia_rbe3.py`), subtests
   851 → 854; `ruff check .` clean.
+
+  **Review round.** Fifteen findings from an adversarial fidelity pass, an
+  independent code review and an end-to-end solver run were confirmed against the
+  starter source and fixed. Two of them were the kind that ships silently:
+
+  * `*CONSTRAINED_NODAL_RIGID_BODY` spellings with `_TITLE` in a NON-FINAL option
+    position were dropped WHOLE. The generator permuted only the four data
+    options, and `parser._split_keyword` recovers a further 65 spellings by
+    stripping a TRAILING `_TITLE` — so 130 of the 326 legal spellings worked and
+    **196 did not**. Measured on one deck: `*..._INERTIA_TITLE` → `/RBODY/205`,
+    Mass 7.25, `ICoG 4`; `*..._TITLE_INERTIA` → `SKIPPED` and no rigid body
+    anywhere, with nothing to notice the loss (a CNRB owns no elements). `TITLE`
+    is now in the permutation (326 keys, both tables), and both the handler and
+    `assembly._off_cnrb` take the title-card offset from the keyword as well as
+    from `block.options`.
+  * The `*PART_CONTACT` `OPTT` / `*ELEMENT_SHELL_THICKNESS` clash warning stated
+    the precedence **backwards** and its remedy would have changed the physics.
+    `i7sti3.F:230-238` tests `IF (THK_PART(IP) /= ZERO .AND. IINTTHICK == 0)`
+    FIRST and only falls through to `THK(I)` when the part value is zero (the same
+    cascade at `:248/264/275/285/494/580/750/833` and in
+    `i11sti3`/`i20sti3`/`i24sti3`). Measured: an `/INTER/TYPE7` at `Igap=1` over
+    `*ELEMENT_SHELL_THICKNESS 2.0` read `GAP MIN = 1.000000000000` without OPTT
+    and `7.0000000000000E-03` with `OPTT=0.007` — a factor of ~143 the other way
+    from what the warning claimed. A user who followed "OPTT has no effect …
+    drop one of the two" would have silently restored the 1.0 gap. (The Reference
+    Guide's `/PART` Comment 3 is about the shell PROPERTY thickness, level 3.)
+
+  Two more OPTT diagnostics were added for cases where the value reaches `Thick`
+  and is then never read: a **SOLID-only** part (the starter applies `THK_PART`
+  in its `NUMELC`/`NUMELTG`/`NUMELT`/`NUMELP`/`NUMELR` loops only,
+  `i7sti3.F:226-293` — there is no solid loop — while LS-DYNA does apply OPTT to
+  solids under `SOFT = 2`, Vol I R17 p.37-11), and an interface at **`Igap = 0`**
+  (on TYPE7 the whole `THK_PART` block sits inside `IF(IGAP >= 1)`,
+  `i7sti3.F:222`; k2rad's plain TYPE7 is `Igap=0`). Measured live: identical
+  decks with and without `OPTT = 5.0` on the 1.0 mm moving plate gave the SAME
+  contact onset `0.0090042418 s`; patching only that deck's `Igap` column to 1
+  moved it to `0.0070024668 s`, against `0.002000 s` predicted (+0.089 %). The
+  TYPE25 route (`Igap=2`) is live as shipped: `0.0090043144 → 0.0070017553 s`
+  (+0.128 %). The README's "feeds the gap in `/INTER/TYPE7, 11, 18, 19, 20, 21,
+  24, 25`" is corrected to name the gate.
+
+  The rest:
+
+  * The `_INERTIA` completeness guard now checks **each** diagonal term, not just
+    "all three zero". `TM=7.25 IXX=20 IYY=IZZ=0` used to emit `/RBODY` `ICoG=4`
+    with `Jxx=20 Jyy=0 Jzz=0` and zero warnings — starter `ERROR 274`, since with
+    `ICoG=4` the parallel-axis block is skipped (`inirby.F:322`) and the main node
+    is a fresh free node, so nothing fills the zero in. A partial tensor is the
+    plausible defect: the CNRB Card 4 Default row reads `none 0 0 none 0 0`.
+  * A `*PART_INERTIA` part carrying `*ELEMENT_MASS` emitted **two contradictory
+    warnings** back to back — "…placed in /RBODY Mass field" (false; `TM` is what
+    the field holds) followed by "…SUPERSEDED by TM". The first is now gated on
+    the override having been refused, so exactly one fires.
+  * `/RBE3` gained the two `rbe3chk` pre-checks whose failures are starter
+    `ERROR 706`, a hard stop on input LS-DYNA accepts: a translation-restricted
+    `IDOF` leaving an axis weight-sum at zero (`IERR = 326/327/328`,
+    `hm_read_rbe3.F:685-695`) and exactly two independent NODES with no rotational
+    participation (`IERR = 322`, `:637`). Both are skipped when a set carries a
+    skew, because `EL(I,axis,K)` then mixes the axes (`:669-673`). It also warns
+    for `WTi <= 0` — a zero weight is REWRITTEN to 1.0 by the starter
+    (`IF (W==ZERO.OR.IMODIF==3) W=ONE`, `:227`), i.e. the node runs at full weight
+    — and for a duplicate `ICID`, which the reader has no pass to catch.
+  * `dispatch`'s prefix fallback matches on a **token boundary** now, so
+    `*PARTICLE_BLAST` is no longer routed into the `*PART` fallback and told that
+    "`_ICLE_BLAST` is not one of INERTIA/REPOSITION, CONTACT, …". Diagnostics
+    only — the emitted deck was identical either way. Same change in
+    `assembly._apply_offsets`.
+  * `RigidInertia.has_local_card` was written and never read; it now records
+    whether card 6 was PRESENT (not merely promised by `IRCS = 1`) and splits the
+    "local system is unusable" warning into its two distinct source-deck defects.
+  * `dof_digits_to_flags` moved from `handlers.py` (no caller there) to
+    `writer/rbe3.py` next to `_trarot`, so the writer stops reaching back into the
+    handler layer through a deferred import that was never breaking a cycle.
+  * The blank-tail probe on the `/RBE3` independent-node list no longer re-slices
+    `raw[i:]` per pair card (quadratic on a thousand-node spider); the last
+    non-blank line is located once. Same in `assembly.
+    _off_constrained_interpolation`.
+  * The node-id collision guard — the one silent-corruption path the batch
+    introduced, where `state.next_node_id()` and the open-coded `_next_free`
+    counter can hand out the same id and the second `state.nodes` write REPLACES
+    the first — now has direct coverage on both the `*PART_INERTIA` and the CNRB
+    side, asserting distinct main-node ids AND that each `/NODE` row holds its own
+    body's coordinates. A mutation that deletes both `while … in state.nodes`
+    loops left the old suite entirely green.
+  * README: the CNRB `/RBODY` id is the main node id, not the `PID`.
+
+  Sweep after the review round, `ccc792d` vs this commit over the same corpus
+  (564 files → 254 unique decks): **0 `.rad` hash deltas** on either file, 0
+  skip-list deltas; the only warning-set deltas are the added OPTT and RBE3
+  diagnostics on the decks that carry those keywords. Tests 2828 → 2849 (+21),
+  subtests 854 → 860; `ruff check .` clean.
 
 - **Prescribed-motion and body/pressure load VARIANTS: `*BOUNDARY_PRESCRIBED_`
   `MOTION_RIGID_LOCAL` → a co-rotating `/SKEW/MOV`, `*BOUNDARY_PRESCRIBED_`

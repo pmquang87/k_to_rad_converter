@@ -34,7 +34,8 @@ from typing import Dict, List, Set, Tuple
 from ..state import ConversionState
 from .common import HDR, _emit_grnod_node, _f, _i
 
-__all__ = ["_make_rbe3", "_trarot", "I_MODIF_NO_MODIFICATION"]
+__all__ = ["_make_rbe3", "_trarot", "dof_digits_to_flags",
+           "I_MODIF_NO_MODIFICATION"]
 
 
 #: /RBE3 ``I_modif`` — forbid Radioss from modifying the weights.
@@ -50,6 +51,36 @@ __all__ = ["_make_rbe3", "_trarot", "I_MODIF_NO_MODIFICATION"]
 #: nearly-unconstrained arrangement surfaces as WARNING 749 instead of silent
 #: weight surgery. dyna2rad hard-codes 2 as well.
 I_MODIF_NO_MODIFICATION = 2
+
+
+def dof_digits_to_flags(code: int) -> List[int]:
+    """A LS-DYNA DOF DIGIT-STRING (``DDOF``/``IDOF``) → six 0/1 flags.
+
+    "The list of dependent degrees-of-freedom consists of a number with up to six
+    digits, with each digit representing a degree of freedom.  For example, the
+    value 1356 indicates that degrees of freedom 1, 3, 5, and 6 are controlled by
+    the constraint" (Vol I R17 p.10-42), where 1/2/3 are x/y/z translation and
+    4/5/6 the rotations about x/y/z. So it is digit-SET membership, not a bitfield
+    and not a positional row: ``123`` is Tx/Ty/Tz, ``3`` is Tz alone.
+
+    Digits outside 1..6 are ignored. That guard is not theoretical — dyna2rad's
+    own decoder (``convertconstrainedinterpolations.cxx:67``) tests ``d <= 6``,
+    which a ``0`` digit passes, and then writes ``flags[-1]``: an out-of-bounds
+    stack write on any code containing a zero, e.g. ``DDOF = 10``.
+
+    An all-zero result is not the same thing as "no DOFs": the starter's own
+    default fills in the three translations (``hm_read_rbe3.F:244-247``, ``IF
+    ((J6(1)+...+J6(6))==0) J6(1:3)=1``), which is why ``_rbe3_check`` substitutes
+    Tx/Ty/Tz for an all-zero mask when it sums the axis weights.
+    """
+    flags = [0, 0, 0, 0, 0, 0]
+    v = abs(int(code))
+    while v:
+        d = v % 10
+        if 1 <= d <= 6:
+            flags[d - 1] = 1
+        v //= 10
+    return flags
 
 
 def _trarot(flags) -> str:
@@ -75,6 +106,79 @@ def _trarot(flags) -> str:
     """
     t = "".join("1" if f else "0" for f in flags)
     return f"   {t[0]}{t[1]}{t[2]} {t[3]}{t[4]}{t[5]}"
+
+
+def _rbe3_check(state: ConversionState, label: str,
+                groups: Dict[Tuple[int, float, int], List[int]]) -> None:
+    """Warn for the arrangements ``RBE3CHK`` turns into starter ERROR 706.
+
+    ``hm_read_rbe3.F`` runs a Nastran-style RBE3 check over every constraint after
+    reading it, and ``IERR1 > 0`` becomes ``ANCMSG(MSGID=706)`` — a hard stop
+    ("HAS UNCONSTRAINED DEGREES OF FREEDOM FOR THE DEPENDENT NODE", :499-505). Two
+    of its four failure codes are decidable from the deck alone, and both come
+    from input LS-DYNA itself accepts, so without this the conversion is clean and
+    the starter is not:
+
+      * ``IERR = 322`` (:637) — ``IF (NG == 2 .AND. IROT == 0)``: exactly two
+        independent NODES and no rotational DOF anywhere on the independent side.
+        The element cannot carry a moment about its own axis. ``NG`` counts NODES,
+        not sets: three nodes whose rows collapse to two groups is fine, two nodes
+        in two groups is not.
+      * ``IERR = 326/327/328`` (:685-695) — ``ABS(DENFX/DENFY/DENFZ) <= EM20``,
+        where ``DENFx`` is the sum over independent nodes of that axis's weight
+        (:675-677). A deck whose every ``IDOF`` omits an axis (say ``IDOF = 3``,
+        z only) leaves that denominator at zero.
+
+    Two starter behaviours the sums have to mirror. A weight of exactly 0 is
+    promoted before it is stored — ``IF (W==ZERO.OR.IMODIF==3) W=ONE`` (:227) — so
+    a zero weight does NOT zero a denominator. An all-zero ``Trarot_Mi`` is
+    likewise refilled with the three translations (:244-247), which is why
+    ``dof_digits_to_flags`` returning all zeros counts as Tx/Ty/Tz here.
+
+    A per-set skew makes the axes mix — with ``IELSUB > 0`` the starter accumulates
+    ``TW(I,K)*EL(I,axis,K)**2`` over all three components (:669-673) — so the
+    axis-sum test is skipped entirely when any set carries one, rather than
+    guessing at the rotation. The ``NG == 2`` test is unaffected: it runs before
+    the skews are even resolved.
+    """
+    n_indep = sum(len(nids) for nids in groups.values())
+    irot = False
+    denom = [0.0, 0.0, 0.0]
+    skewed = False
+    for (idof, wt, _cidi), nids in groups.items():
+        flags = dof_digits_to_flags(idof)
+        if not any(flags):
+            flags = [1, 1, 1, 0, 0, 0]      # the starter's own blank default
+        if any(flags[3:]):
+            irot = True
+        if _cidi:
+            skewed = True
+        w = 1.0 if wt == 0.0 else wt        # hm_read_rbe3.F:227
+        for a in range(3):
+            if flags[a]:
+                denom[a] += w * len(nids)
+    if n_indep == 2 and not irot:
+        state.warn(
+            f"{label}: exactly TWO independent nodes and no rotational DOF on the "
+            "independent side (every IDOF is translations only). That is starter "
+            "ERROR 706 — rbe3chk IERR=322, 'RBE3 ELEMENT HAS TWO INDEPENDENT NODES "
+            "WITH NO ROTATIONAL WEIGHTS SET', because the constraint cannot carry "
+            "a moment about its own axis. LS-DYNA accepts it; OpenRadioss will not "
+            "start. Add a third independent node, or give one of them a rotational "
+            "IDOF digit (4/5/6).")
+    if skewed:
+        return
+    axes = [n for n, d in zip("XYZ", denom) if abs(d) <= 1e-20]
+    if axes:
+        state.warn(
+            f"{label}: no independent node carries a T{'/T'.join(axes)} weight "
+            f"(the IDOF digits never name {', '.join(str('XYZ'.index(a) + 1) for a in axes)}), "
+            f"so the /RBE3 force denominator DENF{'/DENF'.join(axes)} is zero. That "
+            "is starter ERROR 706 — rbe3chk IERR="
+            f"{'/'.join(str(326 + 'XYZ'.index(a)) for a in axes)} — and the run "
+            "stops before the first cycle. Radioss needs a non-zero weight sum on "
+            "EACH of Tx/Ty/Tz even when the DEPENDENT DDOF asks for only one of "
+            "them; widen the independent IDOF to 123 (the LS-DYNA default).")
 
 
 def _make_rbe3(state: ConversionState, rbody_info: Dict,
@@ -120,15 +224,27 @@ def _make_rbe3(state: ConversionState, rbody_info: Dict,
     state.rbe3_nodes = set()
     if not state.interpolations:
         return []
-    from ..handlers import dof_digits_to_flags
 
     lines: List[str] = []
+    seen_icids: Set[int] = set()
     # /RBODY main nodes, and every node any /RBODY governs — the hierarchy rule is
     # RBODY > RBE3 > RBE2 > INTERFACE TYPE2 (Reference Guide 2022 p.1959 comment 6).
     rbody_mains = {info["ind_node"] for info in rbody_info.values()}
 
     for rec in state.interpolations:
         label = f"*CONSTRAINED_INTERPOLATION{'_LOCAL' if rec.local else ''} {rec.icid}"
+        if rec.icid in seen_icids:
+            # LS-DYNA requires ICID unique, and hm_read_rbe3.F has no UDOUBLE pass
+            # to catch a repeat, so the deck simply carries two /RBE3 blocks under
+            # one id. Reported like every other id collision the converter can see
+            # (_warn_spring_eid_collisions, _warn_duplicate_th_group_ids).
+            state.warn(
+                f"{label}: a second *CONSTRAINED_INTERPOLATION reuses ICID "
+                f"{rec.icid}. Both are emitted, so the deck holds two /RBE3 blocks "
+                "with the SAME id — LS-DYNA requires the id to be unique and the "
+                "starter's /RBE3 reader has no duplicate-id check, so which one "
+                "wins downstream (readouts, /TH) is undefined. Renumber one.")
+        seen_icids.add(rec.icid)
         if rec.dnid <= 0 or rec.dnid not in state.nodes:
             state.warn(
                 f"{label}: the dependent node DNID={rec.dnid} is not a *NODE in "
@@ -239,6 +355,32 @@ def _make_rbe3(state: ConversionState, rbody_info: Dict,
                 "interpolation reads a prescribed displacement rather than a free "
                 "one — legal, but usually a sign the constraint was meant to hang "
                 "off the deformable mesh.")
+        # WTi has no domain check on the card, and the starter quietly substitutes
+        # for one of the two illegal values.
+        zero_w = sorted({n for (_d, w, _c), nn in groups.items() if w == 0.0
+                         for n in nn})
+        neg_w = sorted({n for (_d, w, _c), nn in groups.items() if w < 0.0
+                        for n in nn})
+        if zero_w:
+            shown = ", ".join(str(n) for n in zero_w[:10])
+            state.warn(
+                f"{label}: {len(zero_w)} independent node(s) ({shown}) carry "
+                "TWGHTX = 0. The card is written as WTi=0, but the starter REWRITES "
+                "it to 1.0 — `IF (W==ZERO.OR.IMODIF==3) W=ONE`, hm_read_rbe3.F:227 "
+                "— so those nodes run at FULL weight, not at none. A zero weight is "
+                "not a way to exclude a node from an /RBE3; delete its card-2 row "
+                "instead.")
+        if neg_w:
+            shown = ", ".join(str(n) for n in neg_w[:10])
+            state.warn(
+                f"{label}: {len(neg_w)} independent node(s) ({shown}) carry a "
+                "NEGATIVE TWGHTX. It is passed through to WTi verbatim and the "
+                "starter does not reject it, but a negative interpolation factor "
+                "makes the force denominators (hm_read_rbe3.F:675-677) subtract "
+                "rather than add — the split is not a weighted average any more, "
+                "and a denominator that cancels to zero is ERROR 706. Check the "
+                "sign in the source deck.")
+        _rbe3_check(state, label, groups)
 
         # ── emit ────────────────────────────────────────────────────────────
         set_cards: List[str] = []

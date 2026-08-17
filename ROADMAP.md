@@ -115,6 +115,15 @@ shipped, so the marginal cost is small.
   pair is radioss2026-only) and `FS=-1` resolved from the per-part coefficients
   rather than warned; and `*CONSTRAINED_INTERPOLATION`'s per-component
   `TWGHTY..RWGHTZ` and `_LOCAL` `CIDD`, neither of which `/RBE3` can express.
+  Also open: **`OPTT` is warned but not routed**. It reaches the `/PART` `Thick`
+  column and Radioss reads it only for interfaces with `Igap >= 1`
+  (`i7sti3.F:222`), while k2rad's plain `/INTER/TYPE7` is `Igap = 0` — measured
+  inert, +0.089 % against the prediction once the `Igap` column alone is patched
+  to 1. Raising `Igap` on a TYPE7 whose scope includes an `OPTT` part would need
+  the part→interface map the writer does not build today (`_make_parts_and_
+  elements` runs before `_make_interfaces`), so the converter names the problem
+  instead. Likewise `OPTT` on a SOLID part: the starter has no `NUMELS`
+  `THK_PART` loop, so there is nothing to route it to.
 - `*MAT_SPOTWELD` (100) — **done** as /PROP/TYPE13 (SPR_BEAM) connectors; the
   cfg shows LAW59 binds to /PROP/TYPE43 connection solids, so the spring route
   is correct. Validate on a single-weld coupon. Original note: — needs new

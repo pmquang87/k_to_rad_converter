@@ -774,7 +774,14 @@ def _read_rigid_inertia(raw: List[str], idx: int):
             inr.ylip = to_float(f6[4]) if len(f6) > 4 else 0.0
             inr.zlip = to_float(f6[5]) if len(f6) > 5 else 0.0
             inr.cid = to_int(f6[6]) if len(f6) > 6 else 0
-        inr.has_local_card = True
+        # Records whether the card was THERE (``_card`` returns [] past the end of
+        # the block), not just whether IRCS asked for it. The writer needs the two
+        # apart: "IRCS=1 and the block ended" and "card 6 present but its vectors
+        # are degenerate" are different source-deck defects with different fixes.
+        inr.has_local_card = bool(f6)
+        # The card is still STRIDDEN over unconditionally — the card count follows
+        # IRCS, and a *PART block whose next set exists must not have its HEADING
+        # eaten. Past the end of the block the extra step is harmless.
         used = 4
     return inr, used
 
@@ -4261,9 +4268,34 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
 #: order is arbitrary — "The order of the options in the keyword name is
 #: arbitrary" (p.10-146) — so the spellings are generated (see
 #: _cnrb_option_keywords) while the card walk always follows this order.
-#: `_TITLE` is not here: the parser strips a trailing _TITLE into block.options
-#: and _title_offset already consumes its card.
 _CNRB_OPTIONS = ("SPC", "INERTIA", "OVERRIDE", "THERMAL")
+
+#: `_TITLE` is an option of this keyword too, and the manual's arbitrary-order
+#: sentence covers it: the documented list is "<BLANK> INERTIA OVERRIDE SPC
+#: THERMAL TITLE" (p.10-146). It gets its own tuple because it adds a card but no
+#: DATA — one 80a line ahead of card 1 — and because ``parser._split_keyword``
+#: already moves a TRAILING `_TITLE` into ``block.options``. Only a MID-position
+#: one (``*..._TITLE_INERTIA``) reaches the dispatcher spelled out, and without a
+#: key for it the whole rigid body vanishes with no diagnostic at all.
+_CNRB_TITLE_OPTIONS = ("TITLE", "SUBTITLE")
+
+
+def _cnrb_options(keyword: str):
+    """`(option set, has_title)` for a `*CONSTRAINED_NODAL_RIGID_BODY` spelling.
+
+    Tokenises the suffix on ``_`` — safe here, unlike `*PART`, because none of the
+    five option tokens contains an underscore. ``has_title`` is True when a
+    `_TITLE`/`_SUBTITLE` survives IN THE KEYWORD, i.e. when it is not the trailing
+    token the parser already stripped into ``block.options``.
+    """
+    opts: set = set()
+    has_title = False
+    for tok in keyword[len("CONSTRAINED_NODAL_RIGID_BODY"):].split("_"):
+        if tok in _CNRB_OPTIONS:
+            opts.add(tok)
+        elif tok in _CNRB_TITLE_OPTIONS:
+            has_title = True
+    return opts, has_title
 
 
 def _cnrb_option_keywords():
@@ -4272,18 +4304,37 @@ def _cnrb_option_keywords():
     Same reasoning as _part_option_keywords and the #116 rigid-wall generator:
     the option order is free, ``dispatch()`` is an exact lookup, and an unlisted
     spelling means the rigid body silently vanishes from the model (here without
-    even the orphan-element warning, because a CNRB owns no elements). 65
-    spellings. Yields (keyword, frozenset(options)).
+    even the orphan-element warning, because a CNRB owns no elements).
+
+    ``TITLE`` is permuted in with the four data options, which takes the count
+    from 65 to 326 — "The order of the options in the keyword name is arbitrary"
+    (p.10-146) applies to the whole documented list, TITLE included. Leaving it
+    out covered only the 130 spellings with `_TITLE` last (which the parser strips
+    for us) and dropped the other 196 on the floor: measured, an otherwise
+    identical deck gave `/RBODY/205` with Mass 7.25 for
+    `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA_TITLE` and
+    ``SKIPPED: ['CONSTRAINED_NODAL_RIGID_BODY_TITLE_INERTIA']`` — no rigid body at
+    all — for the same options written the other way round.
+
+    The trailing-`_TITLE` keys are unreachable through ``dispatch`` today, since
+    ``parser._split_keyword`` never leaves one on ``block.keyword``. They are
+    generated anyway: a superset costs a dict entry, and it makes "every legal
+    spelling has a key" true of the table itself rather than of the table plus an
+    assumption about the parser.
+
+    Yields (keyword, frozenset(data options)) — the title carries no data, so it
+    is not in the returned set.
     """
-    for r in range(len(_CNRB_OPTIONS) + 1):
-        for combo in _permutations(_CNRB_OPTIONS, r):
+    tokens = _CNRB_OPTIONS + ("TITLE",)
+    for r in range(len(tokens) + 1):
+        for combo in _permutations(tokens, r):
             yield ("_".join(("CONSTRAINED_NODAL_RIGID_BODY",) + combo),
-                   frozenset(combo))
+                   frozenset(t for t in combo if t in _CNRB_OPTIONS))
 
 
 def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) -> None:
-    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC][_INERTIA][_OVERRIDE][_THERMAL] →
-    /RBODY (+ /BCS for _SPC, + Mass/Jxx..Jxz and /INIVEL for _INERTIA).
+    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC][_INERTIA][_OVERRIDE][_THERMAL][_TITLE]
+    → /RBODY (+ /BCS for _SPC, + Mass/Jxx..Jxz and /INIVEL for _INERTIA).
 
     LS-DYNA R17 Vol I (p.10-146..152), CARD-SUMMARY order — which is fixed even
     though the keyword's option order is not:
@@ -4310,9 +4361,11 @@ def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) ->
     has "LS-DYNA compute the inertia tensor from the nodal masses".
     """
     raw = block.raw
-    offset = _title_offset(block)          # title line for the _TITLE option
-    opts = {t for t in _CNRB_OPTIONS
-            if f"_{t}" in block.keyword[len("CONSTRAINED_NODAL_RIGID_BODY"):]}
+    # The `_TITLE` line, from whichever place the option ended up: the parser
+    # moves a TRAILING _TITLE into block.options, a mid-position one stays spelled
+    # out in the keyword. Exactly one card either way — never two.
+    opts, kw_title = _cnrb_options(block.keyword)
+    offset = _title_offset(block) or (1 if kw_title else 0)
     # Card 1
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     if len(f1) < 3:
@@ -4332,7 +4385,12 @@ def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) ->
             f"{rrflag} (per-node DOF releases) are not converted — the /RBODY ties "
             "all secondary-node DOFs. Model these releases manually if required."
         )
-    title = _read_title(block) if offset else ""
+    title = ""
+    if offset and raw:
+        # _read_title only fires off block.options; a keyword-spelled _TITLE has
+        # its 80a line at raw[0] just the same.
+        title = (_read_title(block) if (_has_title(block) or _has_id(block))
+                 else raw[0].strip())
     cnrb = ConstrainedNodalRigidBody(
         pid=pid, nsid=nsid, pnode=pnode, cid=cid, title=title,
     )
@@ -4388,32 +4446,12 @@ def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) ->
 
 # ─────────────────────────────────────────────────────────────────────────────
 # *CONSTRAINED_INTERPOLATION → /RBE3
+#
+# The DDOF/IDOF digit-string decoder that turns these cards into the /RBE3
+# ``Trarot`` sub-columns lives next to the card layout it feeds,
+# ``writer/rbe3.py::dof_digits_to_flags`` — no handler needs it, and no writer
+# module imports handlers.
 # ─────────────────────────────────────────────────────────────────────────────
-
-def dof_digits_to_flags(code: int) -> List[int]:
-    """A LS-DYNA DOF DIGIT-STRING (``DDOF``/``IDOF``) → six 0/1 flags.
-
-    "The list of dependent degrees-of-freedom consists of a number with up to six
-    digits, with each digit representing a degree of freedom.  For example, the
-    value 1356 indicates that degrees of freedom 1, 3, 5, and 6 are controlled by
-    the constraint" (Vol I R17 p.10-42), where 1/2/3 are x/y/z translation and
-    4/5/6 the rotations about x/y/z. So it is digit-SET membership, not a bitfield
-    and not a positional row: ``123`` is Tx/Ty/Tz, ``3`` is Tz alone.
-
-    Digits outside 1..6 are ignored. That guard is not theoretical — dyna2rad's
-    own decoder (``convertconstrainedinterpolations.cxx:67``) tests ``d <= 6``,
-    which a ``0`` digit passes, and then writes ``flags[-1]``: an out-of-bounds
-    stack write on any code containing a zero, e.g. ``DDOF = 10``.
-    """
-    flags = [0, 0, 0, 0, 0, 0]
-    v = abs(int(code))
-    while v:
-        d = v % 10
-        if 1 <= d <= 6:
-            flags[d - 1] = 1
-        v //= 10
-    return flags
-
 
 def handle_constrained_interpolation(block: Block, state: ConversionState) -> None:
     """*CONSTRAINED_INTERPOLATION[_LOCAL] → /RBE3 (+ one /GRNOD/NODE per set).
@@ -4456,12 +4494,17 @@ def handle_constrained_interpolation(block: Block, state: ConversionState) -> No
     rec = ConstrainedInterpolation(icid=icid, dnid=dnid, ddof=ddof, cidd=cidd,
                                   ityp=ityp, idnsw=idnsw, fgm=fgm,
                                   local=is_local)
-    i = offset + 1
-    while i < len(raw):
-        # A wholly blank tail is padding, not a pair card. Anything else — blank
-        # or not — is one card of the pair list.
-        if not any(line.strip() for line in raw[i:]):
+    # A wholly blank TAIL is padding, not a pair card; anything before the last
+    # non-blank line — blank or not — is one card of the pair list. Located once
+    # rather than by re-slicing ``raw[i:]`` per iteration: an RBE3 spider runs to
+    # thousands of independent nodes and the slice copies N-i references each time.
+    last_data = -1
+    for j in range(len(raw) - 1, offset, -1):
+        if raw[j].strip():
+            last_data = j
             break
+    i = offset + 1
+    while i <= last_data:
         f2 = _card(raw, i, fixed=True, n=8, w=10)
         i += 1
         cidi = 0
@@ -10676,11 +10719,13 @@ for _kw in _part_option_keywords():
     HANDLERS[_kw] = handle_part
 del _kw
 
-# *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL} in any order — 65
-# spellings ("The order of the options in the keyword name is arbitrary",
-# p.10-146). A missing key here is worse than for *PART: a CNRB owns no elements,
-# so nothing downstream notices the loss and the rigid body simply is not in the
-# model.
+# *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL,TITLE} in any order
+# — 326 spellings ("The order of the options in the keyword name is arbitrary",
+# p.10-146, of a list that includes TITLE). A missing key here is worse than for
+# *PART: a CNRB owns no elements, so nothing downstream notices the loss and the
+# rigid body simply is not in the model. Measured before TITLE joined the
+# permutation: *..._INERTIA_TITLE gave /RBODY Mass 7.25, *..._TITLE_INERTIA gave
+# SKIPPED and no rigid body.
 for _kw, _cnrb_opts in _cnrb_option_keywords():
     HANDLERS[_kw] = handle_constrained_nodal_rigid_body
 del _kw, _cnrb_opts
@@ -10912,11 +10957,22 @@ _PREFIX_HANDLERS = (
 
 
 def dispatch(block: Block, state: ConversionState) -> None:
-    """Look up and call the handler for *block.keyword*."""
+    """Look up and call the handler for *block.keyword*.
+
+    The prefix fallback matches on a TOKEN boundary — ``kw == prefix`` or
+    ``kw.startswith(prefix + "_")`` — not on a bare character prefix.
+    ``*PARTICLE_BLAST`` is not a `*PART` spelling, and a bare
+    ``startswith("PART")`` routed it into the *PART fallback, which then told the
+    user that "_ICLE_BLAST is not one of INERTIA/REPOSITION, CONTACT, ..." and
+    that its parts might have lost every element. The emitted deck was the same
+    either way (both land in skipped_keywords), but the diagnostic named the wrong
+    keyword family.
+    """
     handler = HANDLERS.get(block.keyword)
     if handler is None:
         for _prefix, _handler in _PREFIX_HANDLERS:
-            if block.keyword.startswith(_prefix):
+            if (block.keyword == _prefix
+                    or block.keyword.startswith(_prefix + "_")):
                 handler = _handler
                 break
     if handler is not None:

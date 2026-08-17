@@ -130,12 +130,25 @@ def _inertia_frame(state: ConversionState, label: str,
     ex = _vnorm(xl)
     ez = _vnorm(_vcross(xl, vip)) if ex is not None else None
     if ex is None or ez is None:
-        state.warn(
-            f"{label}: IRCS=1 but the inertia card's local system is degenerate "
-            f"(XL={xl}, XLIP={vip} are zero or parallel, and CID is blank). The "
-            "tensor is written in the GLOBAL frame, so it is WRONG by whatever "
-            "rotation was intended. Give two non-parallel vectors, or name a "
-            "*DEFINE_COORDINATE_* in the card's CID field.")
+        # Two distinct source-deck defects reach this point, and the remedy
+        # differs: a card 6 that is simply NOT THERE (the block ended after card
+        # 5, so ``_read_rigid_inertia`` never set has_local_card) versus a card 6
+        # that is there and states two zero or parallel vectors.
+        if not inr.has_local_card:
+            state.warn(
+                f"{label}: IRCS=1 but the block ENDS before card 6, so the local "
+                "system it promises was never read. Card 6 is mandatory with "
+                "IRCS=1 ('optional unless IRCS = 1', Card Summary Vol I R17 "
+                "p.37-4). The tensor is written in the GLOBAL frame, so it is "
+                "WRONG by whatever rotation was intended — add the card (XL YL ZL "
+                "XLIP YLIP ZLIP CID), or restate IXX..IZZ globally with IRCS=0.")
+        else:
+            state.warn(
+                f"{label}: IRCS=1 but the inertia card's local system is degenerate "
+                f"(XL={xl}, XLIP={vip} are zero or parallel, and CID is blank). The "
+                "tensor is written in the GLOBAL frame, so it is WRONG by whatever "
+                "rotation was intended. Give two non-parallel vectors, or name a "
+                "*DEFINE_COORDINATE_* in the card's CID field.")
         return 0, []
     ey = _vcross(ez, ex)
     # /SKEW/FIX's two vector cards are the local Y' and Z' (NOT X' and Y'); the
@@ -155,8 +168,17 @@ def _resolve_inertia(state: ConversionState, label: str, inr: RigidInertia):
     away and there is then nothing to fall back on:
 
       * ``TM <= 0`` → total mass 0 → ``ERROR 679`` (``inirby.F:273``);
-      * every diagonal ``IXX/IYY/IZZ`` zero → ``ERROR 274``, min principal inertia
-        <= 0 (``inirby.F:824``).
+      * ANY diagonal ``IXX``/``IYY``/``IZZ`` zero → ``ERROR 274``, min principal
+        inertia <= 0 (``inirby.F:824``).
+
+    The diagonal is checked TERM BY TERM, not as "all three blank". A partial
+    tensor is the more plausible defect of the two — the CNRB Card 4 Default row
+    in the manual reads ``none 0 0 none 0 0``, so a deck can leave ``IZZ`` empty
+    and look complete — and it is just as fatal: with ICoG=4 the parallel-axis
+    block is skipped (``inirby.F:322``, ``IF(ICDG<=3)``) and the main node is a
+    fresh free node (``IN(M)=0``), so nothing ever fills the zero in. Measured
+    before this guard was per-term: ``TM=7.25 IXX=20 IYY=IZZ=0`` emitted /RBODY
+    ICoG=4 with ``Jxx=20 Jyy=0 Jzz=0`` and ZERO warnings.
 
     Both are source-deck defects by *PART Remark 3 ("all mass and inertia
     properties of the body must be specified.  There are no default values"), so
@@ -165,14 +187,17 @@ def _resolve_inertia(state: ConversionState, label: str, inr: RigidInertia):
     The tensor is copied VERBATIM — only the field ORDER changes. See
     ``state.RigidInertia`` for the two quotes that settle the sign.
     """
-    if inr.tm <= 0.0 or not (inr.ixx or inr.iyy or inr.izz):
+    zero_diag = [n for n, v in (("IXX", inr.ixx), ("IYY", inr.iyy),
+                                ("IZZ", inr.izz)) if not v]
+    if inr.tm <= 0.0 or zero_diag:
         missing = []
         if inr.tm <= 0.0:
             missing.append(
                 f"TM={inr.tm:g} (starter ERROR 679, total rigid-body mass <= 1e-30)")
-        if not (inr.ixx or inr.iyy or inr.izz):
+        if zero_diag:
             missing.append(
-                "IXX=IYY=IZZ=0 (starter ERROR 274, min principal inertia <= 0)")
+                f"{'='.join(zero_diag)}=0 (starter ERROR 274, min principal "
+                "inertia <= 0)")
         state.warn(
             f"{label}: the _INERTIA cards are INCOMPLETE — {'; '.join(missing)}. "
             "*PART Remark 3 requires all of them ('There are no default "
@@ -527,7 +552,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         else:
             part_mass_total = part_add
         added_mass = node_added + part_mass_total
-        if added_mass > 0:
+        # Gated on `props is None`: with an accepted *PART_INERTIA the Mass field
+        # holds TM, not this sum, so saying it is "placed in /RBODY Mass field"
+        # would be false — and the SUPERSEDED warning a few lines down already
+        # names the same number with the right verb. Exactly one of the two fires.
+        if added_mass > 0 and props is None:
             sources = []
             if node_added > 0:
                 where = ("the part's nodes" if state.options.rigid_cog_master
@@ -548,17 +577,27 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             # "should be considered part of the rigid body" — i.e. TM already
             # accounts for them. With ICoG=4 Radioss likewise takes Mass verbatim,
             # so anything added here would EXCEED TM.
-            if added_mass > 0:
+            #
+            # A NODEID main node outside the part is in NEITHER sum above
+            # (``node_added`` runs over the part's own nodes), and its /ADMAS is
+            # skipped too — _make_added_masses passes over rigid nodes, and
+            # ind_node joined rigid_nodes above. Dropping it is right under
+            # ICoG=4; going unmentioned is not, so it is folded into the number
+            # this warning reports.
+            superseded = added_mass
+            if ind_node not in unique_nodes:
+                superseded += state.added_node_masses.get(ind_node, 0.0)
+            if superseded > 0:
                 state.warn(
-                    f"*PART_INERTIA {pid}: the {added_mass:.6G} of "
-                    "*ELEMENT_MASS/_PART mass on this part is SUPERSEDED by "
-                    f"TM={inertia_mass:.6G}, not added to it. TM is the body's "
-                    "total (Remark 3: all mass properties must be specified; "
-                    "Remark 2: contributions from deformable bodies to shared "
-                    "nodes should be considered part of the rigid body), and "
-                    "/RBODY ICoG=4 takes Mass verbatim — summing them would make "
-                    f"the body {added_mass:.6G} heavier than the deck states. Fold "
-                    "the lumped mass into TM if it is meant to count.")
+                    f"*PART_INERTIA {pid}: the {superseded:.6G} of "
+                    "*ELEMENT_MASS/_PART mass on this part (and on its main node) "
+                    f"is SUPERSEDED by TM={inertia_mass:.6G}, not added to it. TM "
+                    "is the body's total (Remark 3: all mass properties must be "
+                    "specified; Remark 2: contributions from deformable bodies to "
+                    "shared nodes should be considered part of the rigid body), "
+                    "and /RBODY ICoG=4 takes Mass verbatim — summing them would "
+                    f"make the body {superseded:.6G} heavier than the deck states. "
+                    "Fold the lumped mass into TM if it is meant to count.")
             added_mass = inertia_mass
         # /RBODY format (cfg radioss2021, selected for /BEGIN 2022) — FOUR cards
         # after title:
@@ -902,7 +941,10 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         node_added = state.added_node_masses.get(ind_node, 0.0)
         part_add, part_fin = state.element_mass_parts.get(cnrb.pid, (0.0, 0.0))
         added_mass = node_added + (part_fin if part_fin > 0 else part_add)
-        if added_mass > 0:
+        # `props is None` — see the matching gate in _make_rbodies: with _INERTIA
+        # accepted the Mass field holds TM and the SUPERSEDED warning below is the
+        # true one, so the two must not both fire.
+        if added_mass > 0 and props is None:
             state.warn(
                 f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: added mass "
                 f"{added_mass:.6G} placed in /RBODY Mass field."
