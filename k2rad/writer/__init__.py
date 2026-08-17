@@ -288,6 +288,9 @@ from .loads import (
     _make_rigid_walls,
     _make_modal_dummy_cload,
     _make_damping,
+    _make_damping_part_mass,
+    _make_damping_frequency_range,
+    _resolve_damping_relative,
     _make_free_node_constraints,
 )
 from .composites import (
@@ -640,6 +643,9 @@ __all__ = [
     "_make_rigid_walls",
     "_make_modal_dummy_cload",
     "_make_damping",
+    "_make_damping_part_mass",
+    "_make_damping_frequency_range",
+    "_resolve_damping_relative",
     "_make_free_node_constraints",
     "DEG2RAD",
     "JointDof",

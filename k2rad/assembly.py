@@ -1639,6 +1639,45 @@ def _off_mat_196(b: Block, offsets: Dict[str, int], warn) -> None:
         idx += 2
         pairs += 1
 
+
+def _off_damping_part_mass_common(b: Block, offsets: Dict[str, int],
+                                  pid_bucket: str) -> None:
+    """*DAMPING_PART_MASS[_SET]: offset PID/PSID and LCID on every card 1, and
+    STEP OVER the FLAG=1 Scale Factor Card.
+
+    A flat ``data`` spec cannot be used here. ``_rewrite_line`` decides what is
+    an id with ``to_int(tok) > 0``, and ``to_int`` goes through ``float`` — so a
+    scale factor of ``1.5`` reads back as the id ``1`` and would be rewritten to
+    ``1 + IDPOFF``, silently turning a damping scale factor into a part number.
+    The FLAG column makes the optional card unambiguous, so the walk skips it.
+
+    The row filter mirrors ``handlers._damping_data_rows`` (blank placeholder
+    cards and ``$`` comments are not card 1s).
+    """
+    toff = _title_offset(b)
+    raw = b.raw
+    rows = [i for i in range(toff, len(raw))
+            if raw[i].strip() and not raw[i].lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        idx = rows[k]
+        k += 1
+        flag = _geti(_fields(raw[idx], 4, 10), 3)
+        new = _rewrite_line(raw[idx], [(0, pid_bucket), (1, "f")], offsets)
+        if new is not None:
+            raw[idx] = new
+        if flag == 1:
+            k += 1                      # the Scale Factor Card holds no ids
+
+
+def _off_damping_part_mass(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_damping_part_mass_common(b, offsets, "p")
+
+
+def _off_damping_part_mass_set(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_damping_part_mass_common(b, offsets, "s")
+
+
 _OFFSET_SPECS: Dict[str, object] = {
     # Mesh
     "NODE": _off_node,
@@ -2125,6 +2164,18 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Damping / control cards that carry ids
     "DAMPING_GLOBAL": {"cards": {0: [(0, "f")]}},
     "DAMPING_PART_STIFFNESS": {"data": (0, [(0, "p")])},
+    # *DAMPING_PART_MASS: PID(p)/PSID(s) + LCID(f), repeated card SETS whose
+    # optional second card must be SKIPPED, not offset — hence a callable
+    # rather than a flat "data" spec (the _off_mat_196 situation).
+    "DAMPING_PART_MASS": _off_damping_part_mass,
+    "DAMPING_PART_MASS_SET": _off_damping_part_mass_set,
+    # *DAMPING_FREQUENCY_RANGE: PSID(s) at field 3, PIDREL(p) at field 5.
+    # Every option spelling needs its own row (see the HANDLERS comment).
+    "DAMPING_FREQUENCY_RANGE": {"cards": {0: [(3, "s"), (5, "p")]}},
+    "DAMPING_FREQUENCY_RANGE_DEFORM": {"cards": {0: [(3, "s")]}},
+    "DAMPING_FREQUENCY_RANGE_DEFORM_DMIG": {"cards": {0: [(3, "s")]}},
+    # *DAMPING_RELATIVE: PIDRB(p) field 2, PSID(s) field 3, LCID(f) field 5.
+    "DAMPING_RELATIVE": {"cards": {0: [(2, "p"), (3, "s"), (5, "f")]}},
     "CONTROL_TIMESTEP": {"cards": {0: [(5, "f")]}},
 }
 

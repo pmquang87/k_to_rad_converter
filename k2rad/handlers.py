@@ -70,7 +70,8 @@ from .state import (
     ControlOutput, ControlShell, ControlSolid,
     ControlImplicitGeneral, ControlImplicitSolution, ControlImplicitEigenvalue,
     ControlTermination, ControlTimestep,
-    DampingGlobal, DampingPartStiffness,
+    DampingGlobal, DampingPartStiffness, DampingPartMass,
+    DampingFrequencyRange, DampingRelative,
     DbD3Plot, DbHistory, DbExtentBinary,
     GravityLoadPart, MatAddFatigue, DbFreqBinary,
     InitialStressShell, InitialStressSolid, CrossSection,
@@ -10056,6 +10057,131 @@ def handle_damping_part_stiffness(block: Block, state: ConversionState) -> None:
             state.damping_part_stiffness.append(DampingPartStiffness(pid=pid, coef=coef))
 
 
+def _damping_data_rows(block: Block) -> List[int]:
+    """Indices of the real data lines of a *DAMPING_* block.
+
+    The parser keeps blank cards as ``""`` placeholders so multi-card keywords
+    hold their column positions (parser.py:299-308); the *DAMPING_* cards are
+    all single-card-per-entry, so those placeholders and ``$`` comments are just
+    skipped — the same walk ``handle_damping_part_stiffness`` uses.
+    """
+    return [i for i in range(_title_offset(block), len(block.raw))
+            if block.raw[i].strip() and not block.raw[i].lstrip().startswith("$")]
+
+
+def handle_damping_part_mass(block: Block, state: ConversionState) -> None:
+    """*DAMPING_PART_MASS / _SET: mass-proportional damping scoped to parts.
+
+    Card 1: ``PID|PSID  LCID  SF  FLAG``  (SF default 1.0, everything else 0)
+    Card 2: ``STX STY STZ SRX SRY SRZ``   — present only when ``FLAG == 1``
+
+    Repeated card sets are supported: LS-DYNA lets one keyword block define as
+    many parts as wanted, and the FLAG column makes the optional second card
+    unambiguous to consume.
+    """
+    is_set = "_SET" in block.keyword
+    rows = _damping_data_rows(block)
+    raw = block.raw
+    k = 0
+    n_before = len(state.damping_part_mass)
+    while k < len(rows):
+        f = _card(raw, rows[k], fixed=True, n=4, w=10)
+        k += 1
+        if not f:
+            continue
+        pid = to_int(f[0])
+        lcid = to_int(f[1]) if len(f) > 1 else 0
+        # SF is one of the rare LS-DYNA fields with a NON-ZERO default, so a
+        # blank column must fall back to 1.0 rather than to to_float("") == 0.0.
+        sf = _ffield(f, 2, 1.0)
+        flag = to_int(f[3]) if len(f) > 3 else 0
+        st = [0.0] * 6
+        if flag == 1 and k < len(rows):
+            f2 = _card(raw, rows[k], fixed=True, n=6, w=10)
+            k += 1
+            for j in range(6):
+                st[j] = to_float(f2[j]) if len(f2) > j else 0.0
+        if pid <= 0:
+            continue
+        state.damping_part_mass.append(DampingPartMass(
+            pid=pid, is_set=is_set, lcid=lcid, sf=sf, flag=flag,
+            stx=st[0], sty=st[1], stz=st[2], srx=st[3], sry=st[4], srz=st[5]))
+    if len(state.damping_part_mass) == n_before:
+        state.warn(f"*{block.keyword}: no usable data card found — skipped")
+
+
+def handle_damping_frequency_range(block: Block, state: ConversionState) -> None:
+    """*DAMPING_FREQUENCY_RANGE[_DEFORM[_DMIG]]: banded frequency damping.
+
+    Card 1: ``CDAMP FLOW FHIGH PSID <blank> PIDREL IFLG ICARD2``
+    Card 2: ``CDAMPV IPWP`` — only when ``ICARD2 == 1`` and the DEFORM option.
+
+    The two option spellings share ONE card layout: the ``_DEFORM`` variant
+    simply leaves the PIDREL slot (cols 51-60) blank, because the manual states
+    PIDREL "does not apply to the DEFORM keyword option". IFLG stays at cols
+    61-70 either way, so a single 8-field read serves both.
+
+    Unlike dyna2rad — which folds ``_DEFORM`` into the base subtype through a
+    cfg ``USER_NAMES`` alias and never calls ``GetKeyword()`` in
+    ``ConvertDampingFrequencyRange`` (convertdampings.cxx:321), so the two forms
+    are indistinguishable to it — k2rad keeps the distinction, because the two
+    have genuinely different Radioss fidelity (see
+    :func:`k2rad.writer.loads._make_damping_frequency_range`).
+    """
+    kw = block.keyword
+    deform = "_DEFORM" in kw
+    dmig = "_DMIG" in kw
+    rows = _damping_data_rows(block)
+    if not rows:
+        state.warn(f"*{kw}: no data card found — skipped")
+        return
+    f = _card(block.raw, rows[0], fixed=True, n=8, w=10)
+    cdamp = to_float(f[0]) if len(f) > 0 else 0.0
+    flow = to_float(f[1]) if len(f) > 1 else 0.0
+    fhigh = to_float(f[2]) if len(f) > 2 else 0.0
+    psid = to_int(f[3]) if len(f) > 3 else 0
+    pidrel = to_int(f[5]) if len(f) > 5 else 0
+    iflg = to_int(f[6]) if len(f) > 6 else 0
+    icard2 = to_int(f[7]) if len(f) > 7 else 0
+    # CDAMPV defaults to CDAMP and IPWP to 1 — both NON-ZERO defaults, so they
+    # are seeded before the read: an all-blank Card 2 (a legal "all defaults"
+    # card, which the row filter drops along with the other blank placeholders)
+    # must still land on those values, not on 0.
+    cdampv, ipwp = (cdamp, 1) if (icard2 == 1 and deform) else (0.0, 1)
+    if icard2 == 1 and deform and len(rows) > 1:
+        f2 = _card(block.raw, rows[1], fixed=True, n=2, w=10)
+        cdampv = _ffield(f2, 0, cdamp)
+        ipwp = to_int(f2[1]) if len(f2) > 1 and f2[1].strip() else 1
+    state.damping_frequency_range.append(DampingFrequencyRange(
+        cdamp=cdamp, flow=flow, fhigh=fhigh, psid=psid, pidrel=pidrel,
+        iflg=iflg, icard2=icard2, cdampv=cdampv, ipwp=ipwp,
+        deform=deform, dmig=dmig))
+
+
+def handle_damping_relative(block: Block, state: ConversionState) -> None:
+    """*DAMPING_RELATIVE: damping of motion relative to a rigid body.
+
+    Card: ``CDAMP FREQ PIDRB PSID DV2 LCID``.
+
+    ``DV2`` (cols 41-50) and ``LCID`` (cols 51-60) only exist from the R7.1 /
+    R9.3 profiles on; older decks simply leave those columns blank, which the
+    fixed-width read turns into 0 — the same value their absence means.
+    """
+    rows = _damping_data_rows(block)
+    if not rows:
+        state.warn(f"*{block.keyword}: no data card found — skipped")
+        return
+    f = _card(block.raw, rows[0], fixed=True, n=6, w=10)
+    state.damping_relative.append(DampingRelative(
+        cdamp=to_float(f[0]) if len(f) > 0 else 0.0,
+        freq=to_float(f[1]) if len(f) > 1 else 0.0,
+        pidrb=to_int(f[2]) if len(f) > 2 else 0,
+        psid=to_int(f[3]) if len(f) > 3 else 0,
+        dv2=to_float(f[4]) if len(f) > 4 else 0.0,
+        lcid=to_int(f[5]) if len(f) > 5 else 0,
+    ))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dispatch table
 # ─────────────────────────────────────────────────────────────────────────────
@@ -10609,6 +10735,16 @@ HANDLERS = {
     # Damping
     "DAMPING_GLOBAL":                         handle_damping_global,
     "DAMPING_PART_STIFFNESS":                 handle_damping_part_stiffness,
+    "DAMPING_PART_MASS":                      handle_damping_part_mass,
+    "DAMPING_PART_MASS_SET":                  handle_damping_part_mass,
+    "DAMPING_RELATIVE":                       handle_damping_relative,
+    # *DAMPING_FREQUENCY_RANGE_{OPTION1}_{OPTION2}. parser._split_keyword only
+    # strips a trailing _ID/_TITLE, so _DEFORM does NOT fall back to the base
+    # key — every spelling needs its own row or it lands in skipped_keywords
+    # with no warning at all (the #117 *LOAD_BODY_R* defect).
+    "DAMPING_FREQUENCY_RANGE":                handle_damping_frequency_range,
+    "DAMPING_FREQUENCY_RANGE_DEFORM":         handle_damping_frequency_range,
+    "DAMPING_FREQUENCY_RANGE_DEFORM_DMIG":    handle_damping_frequency_range,
 
     # Database / output
     "DATABASE_BINARY_D3PLOT":                 handle_database_binary_d3plot,

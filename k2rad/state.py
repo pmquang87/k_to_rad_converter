@@ -4272,6 +4272,92 @@ class DampingPartStiffness:
 
 
 @dataclass
+class DampingPartMass:
+    """LS-DYNA *DAMPING_PART_MASS / _SET: mass-proportional damping, part-scoped.
+
+    Card 1 (10-wide fields, Manual Vol I R16 p.15-8): ``PID|PSID LCID SF FLAG``;
+    the Scale Factor Card ``STX STY STZ SRX SRY SRZ`` follows only when
+    ``FLAG == 1``.
+
+    Unlike *DAMPING_GLOBAL this card carries **no constant-value field** — the
+    damping constant comes entirely from ``LCID`` (``F_damp = D_s·m·v`` with
+    ``D_s`` read off the curve), and ``SF`` only rescales it. Maps to plain
+    /DAMP ``Alpha`` (both sides are ``F = -α·m·v``); see
+    :func:`k2rad.writer.loads._make_damping_part_mass` for the constant-value
+    reduction a /BEGIN 2022 deck forces.
+
+    dyna2rad has **no converter for this keyword at all** (``convertdampings.
+    cxx`` selects only GLOBAL/PART_STIFFNESS/RELATIVE/FREQUENCY_RANGE at lines
+    51/167/247/321) — it parses the card and silently drops it. k2rad converts
+    it deliberately, as a documented super-set of dyna2rad.
+    """
+    pid: int            # PID, or PSID when is_set
+    is_set: bool        # True for the _SET spelling (pid is a *SET_PART id)
+    lcid: int = 0       # damping constant vs time (0 = nothing to apply)
+    sf: float = 1.0     # scale factor on the curve (LS-DYNA default 1.0)
+    flag: int = 0       # 1 → the per-DOF Scale Factor Card follows
+    stx: float = 0.0
+    sty: float = 0.0
+    stz: float = 0.0
+    srx: float = 0.0
+    sry: float = 0.0
+    srz: float = 0.0
+
+
+@dataclass
+class DampingFrequencyRange:
+    """LS-DYNA *DAMPING_FREQUENCY_RANGE[_DEFORM[_DMIG]] → /DAMP/FREQUENCY_RANGE.
+
+    Card 1 (10-wide, Manual Vol I R16 p.15-11):
+    ``CDAMP FLOW FHIGH PSID <blank> PIDREL IFLG ICARD2``.
+    Card 2 (only when ``ICARD2 == 1`` **and** the DEFORM option): ``CDAMPV IPWP``.
+
+    ``FLOW``/``FHIGH`` are mandatory and must satisfy ``0 < FLOW < FHIGH``: the
+    Radioss starter fits three Maxwell branches at ``[FLOW, sqrt(FLOW·FHIGH),
+    FHIGH]`` (``damping_range_compute_param.F90``) and ``FLOW = 0`` makes that
+    3x3 system singular — NaN alpha/tau propagate silently into every element,
+    because the ``KEY(1:4)=='FREQ'`` reader branch validates neither bound.
+    """
+    cdamp: float
+    flow: float
+    fhigh: float
+    psid: int = 0       # *SET_PART id; 0 = "all parts EXCEPT other cards' parts"
+    pidrel: int = 0     # optional rigid-body part; no Radioss equivalent
+    iflg: int = 0       # 0 = iterative (LS-DYNA default), 1 = approximate
+    icard2: int = 0     # 1 → Card 2 present (DEFORM only)
+    cdampv: float = 0.0  # volumetric damping ratio (Card 2)
+    ipwp: int = 1       # pore-pressure flag (Card 2)
+    deform: bool = False  # the _DEFORM option
+    dmig: bool = False    # the _DEFORM_DMIG option (superelements)
+
+
+@dataclass
+class DampingRelative:
+    """LS-DYNA *DAMPING_RELATIVE → /DAMP/VREL (a radioss2024 card).
+
+    Card 1 (10-wide, Manual Vol I R16 p.15-16):
+    ``CDAMP FREQ PIDRB PSID DV2 LCID``. The manual's Type row prints ``PIDRB``
+    as ``F``; that is a typo — it is a part id and is written right-justified
+    as an integer.
+
+    Damping force, Remark 3: ``F = -(D·m·v) - (DV2·m·v^2)`` with
+    ``D = 4*pi*CDAMP*FREQ`` and ``v`` measured RELATIVE to the point of the
+    rigid body ``PIDRB`` at the node's coordinates. That is byte-for-byte the
+    Radioss ``damp_a = Alpha_x*4*pi*freq`` of
+    ``engine/source/assembly/damping_vref_compute_dampa.F90``, so the card is a
+    clean 1:1 — but only from /BEGIN 2024 up. See
+    :func:`k2rad.writer.loads._resolve_damping_relative` for the measured
+    version gate that keeps k2rad from emitting it.
+    """
+    cdamp: float
+    freq: float
+    pidrb: int = 0
+    psid: int = 0
+    dv2: float = 0.0    # quadratic velocity term; Radioss Alpha2_x
+    lcid: int = 0       # fraction of critical damping vs time; REPLACES CDAMP
+
+
+@dataclass
 class ControlCpu:
     cputim: float       # max CPU time in seconds
 
@@ -5150,6 +5236,9 @@ class ConversionState:
     ctrl_timestep: Optional[ControlTimestep] = None
     damping_global: Optional[DampingGlobal] = None
     damping_part_stiffness: List[DampingPartStiffness] = field(default_factory=list)
+    damping_part_mass: List[DampingPartMass] = field(default_factory=list)
+    damping_frequency_range: List[DampingFrequencyRange] = field(default_factory=list)
+    damping_relative: List[DampingRelative] = field(default_factory=list)
 
     # ── Database / output ──────────────────────────────────────
     db_d3plot: Optional[DbD3Plot] = None

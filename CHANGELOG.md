@@ -11,6 +11,234 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The damping batch: `*DAMPING_PART_MASS`/`_SET` → a part-scoped `/DAMP`,
+  `*DAMPING_FREQUENCY_RANGE`/`_DEFORM` → `/DAMP/FREQUENCY_RANGE`, and
+  `*DAMPING_RELATIVE` → `/DAMP/VREL` resolved-and-reported rather than
+  emitted.** All three previously landed in `skipped_keywords` with **no warning
+  at all** — the same silent class as the `*LOAD_BODY_R*` defect of the previous
+  batch. Measured live before the change: `8.1.plate_vibem.k` reported
+  `Skipped (unsupported) keywords (3): *DAMPING_FREQUENCY_RANGE, …` and
+  `11.3.sqt_iga_s.k` reported `*DAMPING_PART_MASS`, neither with a single
+  damping warning. Six new dispatch keys (`_SET`, `_DEFORM`, `_DEFORM_DMIG`
+  each need their own row — `parser._split_keyword` strips only a trailing
+  `_ID`/`_TITLE`, so `_DEFORM` does **not** fall back to the base keyword).
+
+  1. **The version gate was measured, not assumed — and it came out DIFFERENT
+     for the two new cards.** `radioss2022/data_hierarchy.cfg:2545-2571`
+     registers only `DAMP` and `DAMP_INTER` under `DAMPING`; `Damp_Vrel.cfg`
+     first exists in `radioss2023` (reduced) / `radioss2024` (full) and
+     `Damp_freq_range.cfg` in `radioss2025`. k2rad writes `/BEGIN 2022`. Twin
+     decks differing only in the `/BEGIN` line, on `starter_win64` 2026-05-20:
+
+     ```
+     /BEGIN 2025   (both cards, 0 ERROR, no 100211/100213)
+       RAYLEIGH DAMPING WITH RELATIVE VELOCITIES
+         DAMPING FUNCTION ID     91002
+         MASS DAMPING COEFFICIENT IN X/Y/Z-DIRECTION  3.0E-02 / 3.0E-02 / 3.0E-02
+         DAMPING FREQUENCY       12.5
+       DAMPING OVER FREQUENCY RANGE
+         PART GROUP ID 91004 / RATIO 2.0E-02 / LOW 10.0 / HIGH 200.0
+
+     /BEGIN 2022
+       WARNING 100211  Unsupported option /DAMP/VREL in format < 2023
+       WARNING 100213  unsupported field exists at the end of line
+                       -- LINE: 12.5         0     91002                   1
+       WARNING 100211  Unsupported option /DAMP/FREQUENCY_RANGE in format < 2025
+       RAYLEIGH DAMPING WITH RELATIVE VELOCITIES
+         DAMPING FUNCTION ID     0            <-- LOST
+         MASS DAMPING COEFFICIENT IN X/Y/Z-DIRECTION  3.0E-02 / 12.5 / 3.0E-02
+                                                                ^^^^ the Freq value
+         DAMPING FREQUENCY       0.0          <-- LOST
+       DAMPING OVER FREQUENCY RANGE
+         PART GROUP ID 91004 / RATIO 2.0E-02 / LOW 10.0 / HIGH 200.0   <-- CORRECT
+     ```
+
+     So `/DAMP/FREQUENCY_RANGE` **is emitted**: its cfg carries exactly one
+     `FORMAT` block (radioss2025), there is no older layout to fall back to, and
+     every field reads identically at 2022 and 2025 — the 100211 is advisory and
+     is restated to the user. `/DAMP/VREL` is **not**: at 2022 the reader falls
+     back to the reduced radioss2023 layout, swallows the
+     `Freq RbodyID FuncID Xscale` card as the `Alpha_y` row, and leaves `Freq`
+     at 0 — which switches the engine from `damp_a = Alpha_x*4*pi*freq` to
+     `damp_a = Alpha_x/dt_initial` (`damping_vref_compute_dampa.F90`), about
+     1e12 off at a dt of 1e-6, on top of an `Alpha_y` 400× too large. Emitting a
+     card that reads as something else is what `_resolve_contact_interior`
+     already refused to do, so this follows that precedent: resolve everything,
+     name every resolved id in the warning so the card can be pasted into a
+     `/BEGIN 2024` deck by hand, emit nothing, and record the keyword in
+     `recognized_not_emitted`.
+
+  2. **The dyna2rad `FuncID` defect is deliberately NOT reproduced.**
+     `convertdampings.cxx:305` routes `*DAMPING_RELATIVE`'s **curve** id through
+     `GetRadiossSetIdFromLsdSet(lcid, "*SET_PART")` — the part-SET map, written
+     with the SET entity type — a copy-paste of the `PSID` line at `:299`. Since
+     `dyna2rad.cxx:139-150` only remaps when one number is used by two or more
+     `*SET_*` families, this misfires exactly when the curve id collides with a
+     multiply-used part-set id, and then either points at the wrong `/FUNCT`
+     (silent) or at none (starter **ERROR 3049**, run aborts) — the latter made
+     likelier by `convertsets.cxx:149-166` renumbering duplicate sets to
+     `max+1`. k2rad resolves `LCID` against `state.curves`, the
+     `*DEFINE_CURVE` → `/FUNCT` table, and never against `part_sets`. Both
+     failure shapes have their own test: a curve id matching no set, and one
+     numerically colliding with a part-set id (there the deck also proves the
+     curve is really emitted as `/FUNCT/3` while `*SET_PART 3` resolves to its
+     own parts). Two further d2r defects are also avoided — `RbodyID` is looked
+     up from `PIDRB`'s **own** part (d2r walks `PIDRB → MID → conversion log`,
+     so parts sharing one `*MAT_RIGID` give a last-one-wins wrong body), and
+     `PIDRB=0` / a non-rigid `PIDRB` are guarded instead of dereferenced. Three
+     further traps ride in the same warning: `Alpha_*` must be **1.0** when a
+     curve is given (LS-DYNA's `LCID` *replaces* `CDAMP`, Radioss's `FuncID`
+     *multiplies* `Alpha_x` — copying both double-counts); `Alpha2_*` is read
+     only by `damping_vref_rby.F90` inside `if (id_rby > 0)`, so `DV2` without a
+     usable rigid body is zeroed and said so; and `Xscale` is **dead** — the
+     starter stores it in `DAMPR(27)` and no engine file reads that slot back,
+     so abscissa scaling has to be baked into the curve's own X values.
+     `FREQ = 0` gets its own warning: LS-DYNA reads `CDAMP` as the damping
+     fraction *at* `FREQ` so the card asks for nothing, while Radioss's
+     documented `alpha = CDAMP*dt*Func(t)` disagrees with its own source, which
+     *divides* by the initial timestep (`damp_a = Alpha_x/dt_initial`) — about
+     1e12 apart at a dt of 1e-6.
+
+  3. **`PSID = 0` on `*DAMPING_FREQUENCY_RANGE` is the opposite of
+     `grpart_ID = 0`.** LS-DYNA: "the damping is applied to all parts **except
+     those referred to by other** `*DAMPING_FREQUENCY_RANGE` cards". Radioss:
+     `hm_read_damp.F:299-307` tags `DAMP_RANGE_PART(J) = I` for **every** part
+     with no exclusion, and by plain overwrite — so a single `grpart_ID = 0`
+     card silently overrides every earlier one. k2rad emits `grpart_ID = 0` only
+     when no other card claims a part (there the two agree exactly) and an
+     explicit complement `/GRPART/PART` otherwise; a second `PSID=0` card, and
+     any part claimed twice, each get their own last-one-wins warning.
+
+  4. **The Radioss card *is* LS-DYNA's `_DEFORM` behaviour, so the plain option
+     is the approximation — not the other way round.** Damping enters as a
+     Maxwell/Prony viscous stress inside the material law
+     (`damping_range_{shell,shell_mom,solid}.F90`, reached from `mulawc.F90:1974`
+     and `viscmain.F`, gated by the static `IPARG(93)`), never as a nodal force:
+     rigid-body motion is not damped and natural frequencies shift **up**.
+     `_DEFORM` therefore converts clean and silent; the blank option gets the
+     loud warning. dyna2rad cannot even tell them apart — `data_hierarchy.cfg`
+     folds `_DEFORM` into the base subtype as a `USER_NAMES` alias and
+     `ConvertDampingFrequencyRange` never calls `GetKeyword()`.
+
+  5. **`FLOW`/`FHIGH` are validated because the starter validates neither.** The
+     `KEY(1:4)=='FREQ'` branch reads and proceeds; with `FLOW = 0` the
+     three-Maxwell fit of `damping_range_compute_param.F90` collocates at
+     `f_mid = sqrt(FLOW*FHIGH) = 0`, its 3×3 matrix fills with `0/0`, and NaN
+     `alpha`/`tau` propagate into every element of the group. `FLOW <= 0`,
+     `FHIGH <= FLOW` and `CDAMP <= 0` are dropped with the reason. `IFLG=0` (the
+     LS-DYNA iterative default, ~1% error) is warned about because Radioss
+     implements only the one-shot 3-point collocation, i.e. the `IFLG=1`
+     analogue: about −8%…0% at `CDAMP=0.01`, −26%…−4% at 0.05. `PIDREL`,
+     `ICARD2`/`CDAMPV`/`IPWP` and the `_DEFORM_DMIG` superelement variant have
+     no counterpart and say so. `Tstart`/`Tstop` are written as the neutral
+     0 / 1e30 — the starter stores and echoes them and **nothing applies them**
+     for this type (`damping.F:120-127` and `DAMPING44` both guard on
+     `FL_FREQ_RANGE == 0`, and the material-law path has no time argument).
+
+  6. **`*DAMPING_PART_MASS` is a deliberate super-set: dyna2rad has no converter
+     for it at all.** `convertdampings.cxx` runs exactly four converters (`:38-44`)
+     and its only `SelectionRead` calls are at `:51/167/247/321` — the card
+     parses cleanly into its model and is then silently dropped. k2rad maps it to
+     plain `/DAMP`, which needs no version bump (readable since radioss42):
+     `Alpha = SF · curve`, both sides applying `F = -α·m·v`. The card has **no
+     constant-value column** — unlike `*DAMPING_GLOBAL`'s `VALDMP`, the constant
+     is read entirely off `LCID` — so `LCID=0` is a dropped card with that
+     reason, and since plain `/DAMP` has no function slot (`/DAMP/FUNCT` is a
+     radioss2026 keyword) a time-varying curve is reduced to its first ordinate
+     with a warning. That reduction is *exact* for the flat curves these decks
+     carry — the corpus case `11.3.sqt_iga_s.k` is `(0, 200) (0.01, 200)` — so
+     the warning fires only when the curve really varies. `FLAG=1` maps
+     `STX..SRZ` onto the Format-2 per-DOF rows (`α_i = SF·curve·ST_i`), with
+     `FLAG=1`-and-all-six-zero read as "uniform" rather than "no damping". `SF`
+     is one of the rare LS-DYNA fields whose default is **not** zero, so it is
+     read through `_ffield` — `to_float("")` would have silently zeroed the
+     damping.
+
+  7. **Overlap is reported on both mechanisms, and the check is on NODES.** Two
+     `/DAMP` cards covering one node compound their α terms harmlessly but share
+     a single per-node history buffer `DAMP(1:6,I)`: `damping.F:145` stores
+     `A()` into it and the next card overwrites, so the first card's `β` term
+     reads a foreign acceleration from the following cycle on (2022 Reference
+     Guide p.130 comment 4). The clash is therefore nodal, not per-part — two
+     conformally meshed parts share the nodes along their common edge even when
+     the part lists are disjoint, which a part-id intersection would miss — so
+     the part-mass grnod is intersected with the node group of the
+     `*DAMPING_PART_STIFFNESS` `/DAMP`, and only when that card actually carries
+     a non-zero `β`. Separately, a deck holding both `*DAMPING_PART_MASS` and
+     `*DAMPING_GLOBAL` is warned — LS-DYNA forbids the combination and Radioss
+     would apply both additively.
+
+  8. **`*INCLUDE_TRANSFORM` offsets could not use a flat `data` spec.**
+     `_rewrite_line` decides what is an id with `to_int(tok) > 0` and `to_int`
+     goes through `float`, so a damping scale factor of `1.5` reads back as the
+     id `1` and would be rewritten to `1 + IDPOFF` — a scale factor silently
+     turned into a part number. `*DAMPING_PART_MASS` therefore gets a
+     stride-walking callable (the `_off_mat_196` situation) that offsets
+     `PID`(`p`)/`PSID`(`s`) and `LCID`(`f`) on each card 1 and steps over the
+     `FLAG=1` Scale Factor Card. `*DAMPING_FREQUENCY_RANGE` offsets `PSID`(`s`)
+     and `PIDREL`(`p`), `*DAMPING_RELATIVE` offsets `PIDRB`(`p`), `PSID`(`s`) and
+     `LCID`(`f`). Every one of the six spellings has a row, so none can draw the
+     "id offsets are NOT applied" warning.
+
+  Scoping runs in the **writer**, not the handler, so `*SET_PART_ADD` sets —
+  flattened by `_flatten_part_set_adds` post-parse — resolve for all three
+  keywords. Not in scope and still unhandled: `*DAMPING_PART_STIFFNESS_SET`
+  (mapping it to the existing handler would silently read its `PSID` as a `PID`,
+  which is worse than the current skip), and `*DAMPING_GLOBAL`'s per-DOF
+  `STX..SRZ`, which stay warned-and-dropped.
+
+  Regression evidence: starter-validated on `starter_win64`. A converted deck
+  carrying both new emitting keywords gives **0 ERROR**, exactly one advisory
+  `WARNING 100211`, and the echo `NODE GROUP ID 90001 / ALPHA 200.0 /
+  BETA 0.0` for the part-mass card (`SF=1.0` × the flat curve's 200.0) plus
+  `PART GROUP ID 90003 / DAMPING RATIO 2.0E-02 / LOWEST 10.0 / HIGHEST 200.0`
+  for the frequency-range card. The Format-2 per-DOF path was run separately —
+  `SF=2.0`, a flat 200.0 curve and `STX..SRZ = 1.0 0.5 0.0 0.25 0.1 2.0` echo
+  back as **0 ERROR** and
+
+  ```
+  ALPHA IN X-DIRECTION.  400.0     BETA IN X-DIRECTION.  0.0
+  ALPHA IN Y-DIRECTION.  200.0     BETA IN Y-DIRECTION.  0.0
+  ALPHA IN Z-DIRECTION.    0.0     BETA IN Z-DIRECTION.  0.0
+  ALPHA IN RX-DIRECTION. 100.0     BETA IN RX-DIRECTION. 0.0
+  ALPHA IN RY-DIRECTION.  40.0     BETA IN RY-DIRECTION. 0.0
+  ALPHA IN RZ-DIRECTION. 800.0     BETA IN RZ-DIRECTION. 0.0
+  ```
+
+  i.e. exactly `2.0 × 200.0 × ST_i` on all six DOFs, with the per-direction echo
+  confirming the starter took the Format-2 read from the presence of the five
+  extra cards alone. The first of those decks was then run through the **engine**
+  as well — 89 975 cycles to `NORMAL TERMINATION` with both new cards live, so
+  the radioss2025 `/DAMP/FREQUENCY_RANGE` under `/BEGIN 2022` is accepted by the
+  engine and not only by the starter. Corpus sweep over the full 201-deck roster
+  (repo tree 73 + `E:\openradioss_run\Ryan_Lee_Examples` 127 +
+  `ls-dyna_example` 1), master `62a53e8` vs this commit, SHA-256 over BOTH the
+  `_0000.rad` and the `_0001.rad`: **201/201 converted on each side, 0 hash
+  deltas, 0 conversion errors, 0 error deltas.** None of those decks carries any
+  of the three new keywords, and the three new sections return `[]` before
+  touching `state.next_id()`, so no auto id shifts — pinned by its own test, and
+  the five golden fixtures stay byte-identical. The four dynaexamples decks that DO carry them were converted
+  end-to-end: the three NVH plates
+  (`8.1.plate_vibem` / `8.2.plate_rayleigh` / `8.3.plate_kirchhoff`, all
+  `CDAMP=0.01 FLOW=30 FHIGH=300 PSID=0`) now emit
+  `/DAMP/FREQUENCY_RANGE` with `grpart_ID = 0` instead of landing in
+  `skipped_keywords`. `8.1.plate_vibem.k` was taken all the way to the starter
+  as a production-deck check — **0 ERROR**, one advisory `WARNING 100211`, and
+
+  ```
+  DAMPING OVER FREQUENCY RANGE
+    PART GROUP ID . . . .        0
+    DAMPING RATIO . . . .        1.0000000000000E-02
+    LOWEST FREQUENCY  . .        30.00000000000
+    HIGHEST FREQUENCY . .        300.0000000000
+  ```
+
+  i.e. the LS-DYNA card read straight back out. `11.3.sqt_iga_s.k` — an IGA deck whose
+  `*ELEMENT_SHELL_NURBS_PATCH` mesh k2rad drops whole — now reports its
+  `*DAMPING_PART_MASS` as "part(s) [1] carry no deformable shell or solid nodes"
+  instead of silently vanishing. Tests 2850 → 2936 (+86), subtests 860 → 880;
+  `ruff check .` clean.
+
 - **Rigid-body inertia and load distribution: `*PART_INERTIA` (and every legal
   `*PART` option stacking) → `/RBODY` `Mass`/`Jxx..Jxz` with `ICoG=4`,
   `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA` → the same transfer on the CNRB path,
@@ -938,6 +1166,26 @@ Prior history (before this changelog was introduced) is summarized in the
   no new path — the fixtures and the starter/engine runs are the evidence.
 
 ### Fixed
+
+- **An all-zero `*DAMPING_PART_STIFFNESS` aborted the whole conversion.**
+  Surfaced by the damping batch above and fixed with it. `_make_damping`'s early
+  return only fires when there is neither a `*DAMPING_GLOBAL` nor any
+  `*DAMPING_PART_STIFFNESS`, so a deck carrying a stiffness card whose every
+  `COEF` is `0.0` reaches the `beta == 0.0` Format-1 branch with
+  `state.damping_global` still `None` — and that branch opened with
+  `d = state.damping_global; per_dof = (d.stx, …)`. Verified against master
+  `62a53e8` on a one-shell deck holding nothing but
+  `*DAMPING_PART_STIFFNESS / 1  0.0`:
+
+  ```
+  MASTER CRASH: AttributeError: 'NoneType' object has no attribute 'stx'
+  ```
+
+  It is an `AttributeError` out of the writer, so it takes down the **entire**
+  conversion — no starter, no engine, no warning list — not just the one card.
+  The per-DOF tuple now falls back to all-zeros when there is no
+  `*DAMPING_GLOBAL`, which leaves the emitted card byte-identical on every deck
+  that did not crash.
 
 - **Motion/load variants, review round.** Twelve defects found against the batch
   above by an adversarial fidelity pass, a code review and an end-to-end solver
