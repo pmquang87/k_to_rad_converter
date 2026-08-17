@@ -604,6 +604,200 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **Motion/load variants, review round.** Twelve defects found against the batch
+  above by an adversarial fidelity pass, a code review and an end-to-end solver
+  campaign, verified against `hm_cfg_files`, the starter/engine sources and the
+  pinned manuals before acting. Two were REGRESSIONS vs `master`, four more were
+  silent-wrong loads or kinematics, the rest documentation of record.
+
+  **1. An unhandled `VAD` aborted the whole conversion.** `_pm_vad_supported`
+  enumerated only the known-bad values (`3` and `4`), so any OTHER value — a
+  typo, a negative, a future LS-DYNA code — passed the guard and reached the
+  writer's bare `{0:IMPVEL,1:IMPACC,2:IMPDISP}[pm.vad]`: `KeyError`, traceback,
+  no deck at all. Reproduced on both paths (`VAD=7` on `_RIGID`, `VAD=9` on
+  `_SET`); `master` produced a deck via `.get(vad, "IMPDISP")`, so this was
+  strictly worse. The mapping now lives in ONE place, `state.PM_VAD_KEYWORD`,
+  which the guard tests membership of and the writer indexes — the guard is
+  total by construction, and a test asserts the two agree for `VAD` in
+  `-2..12`.
+
+  **2. A BLANK continuation card swallowed the NEXT entity's card 1.** Every
+  field of card 3 defaults (`OFFSET1 0., OFFSET2 0., LRB 0, NODE1 0, NODE2 0` —
+  Vol I R16 p.753), so an all-blank card 3 is legal input. `_bpm_walk` skipped
+  blank lines while hunting for it and then advanced unconditionally, eating the
+  following row. Measured: a `_SET` block with `nsid 20, DOF 11, VAD 0`, one
+  blank line, then `nsid 21, DOF 2, VAD 2, curve 10, SF 2.0` — `master` emitted
+  entity 2's `/IMPDISP`, HEAD emitted NOTHING and never mentioned it. The
+  `assembly._bpm_cards` half was worse (and pre-existed on `master`): entity 2's
+  card 1 got the CONTINUATION id spec, leaving NSID un-offset, `VAD+IDPOFF`,
+  `LCID+IDNOFF` and the float `SF` rewritten as `5002`. Cards 2 and 3 are
+  POSITIONAL and are now consumed as such in both walkers — blank means
+  all-defaults — while only the card-1 hunt skips blanks (an all-default card 1
+  has `TYPEID 0` and is not an entity).
+
+  **3. `SF = 0.0` became a FULL-scale pressure.** `hm_read_pload.F:167` is
+  `IF (FCY == ZERO) FCY = FAC_FCY`, so a `/PLOAD` written with `Fscale_y = 0` is
+  silently replaced by the unit-system factor. Measured on a live starter: a
+  `*LOAD_SHELL_ELEMENT / 1 10 0.0` row echoed `SCALE-Y 1.000000000000` — unit
+  magnitude with the sign INVERTED — while its blank-`SF` sibling echoed `-1.0`.
+  This is the exact `read_impvel.F:248` trap the batch already documents for
+  `_pm_lock_cards`, one function away. Every card in the family documents
+  `SF ... Default 1.` (p.33-99 / p.33-115 / p.3421) and LS-DYNA applies its
+  defaults on a ZERO test — the same keyword family spells that out for `DEATH`,
+  "EQ.0.0: default set to 1e28" — so `0.0` now reads as `1.0`, WARNED, because a
+  zeroed `SF` is also a common way of switching a load off by hand and `/PLOAD`
+  cannot express either reading of a zero. Applied to `*LOAD_SHELL`,
+  `*LOAD_SEGMENT` and `*LOAD_SEGMENT_SET` (the last two pre-existing), plus a
+  belt-and-braces refusal in the emitter so no literal `0` can ever reach the
+  card.
+
+  **4. Plain `*LOAD_SEGMENT` dropped the arrival time `AT` silently.** Field 2
+  was never read — the code's own comment listed it, its `_SET` sibling now
+  routes `AT` to a `/SENSOR/TIME`, and the summary warning implied `AT` was
+  covered everywhere. Measured: `*LOAD_SEGMENT 10 2.0 0.004 1 2 3 4` produced
+  `sensor_ID = 0` and ZERO warnings, i.e. the pressure started at `t = 0`
+  instead of `t = 0.004`. `PressureLoad` carries `at` now and joins the
+  three-element group key, so the existing `/SENSOR/TIME` emitter picks it up;
+  Remark 3 (p.33-101) confirms the shift semantics ("evaluated at the offset
+  time given by the difference of the solution time and AT").
+
+  **5. `_SET_BOX` with `NSID = 0` drove nodes k2rad had SYNTHESIZED.**
+  `_box_node_ids` scanned `state.nodes`, which by write time also holds the
+  `/RBODY` CoG masters, the `/SKEW/MOV` third nodes, the rigid-wall carriers and
+  this batch's own `_LOCAL` triads. Measured: a box round a `*MAT_RIGID` brick
+  meshed on nodes 11-18 emitted `/GRNOD/NODE ... 11 … 18 19`, where 19 is the
+  synthesized `/RBODY` MASTER — so the `/IMPVEL` drove the whole body, a
+  kinematic condition the source deck never states (starter WARNING 312,
+  0 ERRORS, restart written: the wrong model runs). The `if not box_nodes` guard
+  cannot see it, because the box DOES contain nodes. `build_starter` now
+  snapshots the deck's own node ids into `state.source_node_ids` before any
+  prepass synthesizes one, and `_box_node_ids` intersects with it — which also
+  closes the same flaw on the pre-existing rigid-wall and `/INIVEL` `BOXID`
+  paths.
+
+  **6. `_RIGID_LOCAL`'s triad now comes from the DECK, not the global axes.**
+  LS-DYNA takes the local system from "LCO and CID in `*MAT_RIGID` and
+  `*CONSTRAINED_NODAL_RIGID_BODY`, respectively. If LCO/CID is 0, the local
+  coordinate system defaults to the principal inertia directions" (p.756-757
+  Remark 7). k2rad ALREADY parsed the CNRB's `CID` — with zero consumers — so
+  the triad was global-aligned even when `/SKEW/FIX/40` carrying exactly the
+  right axes sat in the same `.rad`, and the warning asserted k2rad read neither
+  field. Measured: `*CONSTRAINED_NODAL_RIGID_BODY 500 40 200` with a `CID 40`
+  whose local x is global `+Y` gave `N1->N2 = +X`, i.e. 90° wrong AT `t = 0`,
+  not the "exact at t=0" the warning promised. `handle_mat_rigid` now reads card
+  3 as well (`LCO or A1 A2 A3 V1 V2 V3`, Vol II R16 p.2-233 — a non-zero
+  `V1/V2/V3` selects the vector form, whose triad is `c = a × v`, `b = c × a`;
+  a lone non-zero field 1 is `LCO`), and `_local_body_basis` resolves CNRB
+  `CID`, `*MAT_RIGID` `LCO` and the `A1-V3` pair through the `/SKEW` k2rad
+  already emits. Named systems are now EXACT; only the LCO/CID = 0
+  principal-inertia default is approximated, and the warning says which case it
+  is in and how to make it exact. This closes the measured 30° fidelity gap on
+  the solver campaign's `t4c` (a 40×20×20 box rotated 30° about Z: `u_y` was
+  0.49935 mm, 50 % of `|u|`, short).
+
+  **7. The `_LOCAL` helper triad shifted the written `/RBODY` master.** The
+  three helpers must be `/RBODY` secondaries to co-rotate, and `_make_rbodies`
+  used that same node list for the `--rigid-cog-master` centroid — so the master
+  landed at (22.036364, 2.036364, 2) instead of the mesh centroid (22, 2, 2),
+  0.9 % of the body span, because the offsets are 0.1·span. Inert at runtime
+  (`hm_read_rbody.F` forces `ICoG` and relocates the master to the true CoM; the
+  helpers are massless) but a silently wrong pre-run coordinate, and wrong
+  outright the moment `ICoG=2` is ever emitted. Both `_make_rbodies` and
+  `_make_cnrb_rbodies` take the centroid over the MESH nodes only now.
+
+  **8. Triads were built for motions the writer then dropped.** The prepass
+  created three element-free nodes and folded them into the `/RBODY` group before
+  `_make_imposed_motions` decided anything, so a `|DOF|` of 9/10/11/12 (no
+  `/IMP*` `Dir` letter) or a pid with no `rbody_info` left unexplained nodes plus
+  a warning describing a `/SKEW/MOV` the `.rad` never contained. The prepass now
+  skips DOFs with no `Dir`, and any triad whose card is dropped later still gets
+  its `/SKEW/MOV` written (an unreferenced `/SKEW` is inert) so nothing in
+  `/NODE` is unaccounted for.
+
+  **9. Two summary warnings described conversions that had not happened.** Both
+  new paragraphs fired on the presence of a PARSED card (`if
+  state.body_load_vectors:` / `if state.body_load_rots:`), so a
+  `*LOAD_BODY_VECTOR` with a missing `LCID` warned "load curve 999 not found —
+  skipped" and then asserted the `/GRAV` + `/SKEW/FIX` mapping anyway. Both are
+  gated on emission now, matching the `*LOAD_BODY_{X,Y,Z}` paragraph beside
+  them, and the `#- ROTATIONAL BODY LOADS` section header is buffered so it
+  cannot dangle.
+
+  **10. `/GRNOD` id allocation was inconsistent inside one function.** The
+  motion path drew from `next_grnod_id()`; the `SF = 0` → `/BCS` path four lines
+  away still used plain `next_id()`, so a user `*SET_NODE` at or above the
+  auto-id base could land on the same `/GRNOD` id twice — starter ERROR 79
+  DUPLICATE ID / IN NODE GROUP DEFINITION, no restart file, which is exactly the
+  hazard `next_grnod_id` exists to close.
+
+  **11. Dispatch and walker coverage.** `*LOAD_BODY_GENERALIZED_SET_NODE` and
+  `_SET_PART` were still mute `skipped_keywords` entries — the manual's name is
+  `*LOAD_BODY_GENERALIZED_OPTION` with OPTION in {SET_NODE, SET_PART} (p.33-31)
+  and only the bare form was registered, i.e. the two spellings a real deck
+  actually uses were the ones the registration failed to cover.
+  `_pm_skew_for`'s `VID` fallback omitted `state.coord_nodes`, so a `|DOF| 4/8`
+  card naming a `*DEFINE_COORDINATE_NODES` system took the "no /SKEW exists …
+  THE DIRECTION IS WRONG" exit while `_emit_skew_from_nodes` had put that very
+  skew in the deck. `_carries_literal_axis_point` called `_bpm_cards` without
+  `is_box`, the one call site the two-card walk was not threaded through. A
+  `*LOAD_SHELL` row with a blank/zero `EID`/`ESID` was dropped with no warning,
+  unlike every other rejection in that handler.
+
+  **12. Documentation of record.** The `-4`/`-8` lock warning now names the
+  precondition k2rad does NOT test — the negative forms apply "to rigid bodies
+  [only] if |CMO| = 2" (p.750), and since the manual does not say what LS-DYNA
+  does instead, the lock is still emitted but flagged as a possible
+  over-constraint. `_centri_frame` no longer claims "LS-DYNA reads the centre
+  fields only when CID is blank": `*LOAD_BODY` is SILENT on the interaction
+  (p.33-27 describes `CID` as the acceleration's system only) and the sibling
+  `*LOAD_BODY_GENERALIZED` documents the OPPOSITE for its own card — "the
+  coordinate (XC, YC, ZC) is defined with respect to the local coordinate system
+  if CID is nonzero" (p.33-32) — so the docstring and the warning now present
+  CID-wins as k2rad's choice, following dyna2rad, with both readings named. The
+  `handle_load_shell` docstring said "/PLOAD's attribute is `Fscale_y`"; the cfg
+  attribute is `magnitude` (`radioss2021/LOADS/pload.cfg:25`) and `Fscale_y` is
+  only the COMMENT label — the substantive claim (dyna2rad's `Fscale_Y` write is
+  discarded and the cfg default `1.` survives) is unchanged and holds. Stale
+  comments on `next_grnod_id` and on `_make_imposed_motions`' id counter
+  corrected; the box resolution is memoized so N rows on one missing box report
+  it once; the `_SET_BOX` label is built only where it is used and the resolved
+  node lists are carried with their rows instead of keyed on `id(pm)`.
+
+  **Regression evidence.** 201-deck roster (73 repo + 127 `Ryan_Lee_Examples` +
+  1 `ls-dyna_example`; 100 distinct file contents — the corpora hold byte-equal
+  copies of the same deck under several paths, 4x `tobias_mesh.k` at 195 MB
+  among them) converted with `origin/master` (2d067cf) and with HEAD:
+  **100/100 byte-identical on both `_0000.rad` and `_0001.rad`**, 0 conversion
+  failures either side, identical warning sets and skip lists (1205 distinct
+  warnings, delta +0). Measured, not assumed: the corpus contains ZERO decks with
+  any of the five new spellings, and every changed shared path is a no-op on it
+  (`_bpm_walk`: 39 decks / 103 rows, all `DOF ∈ {1,2,3,5,6,7}`, `VAD` all `2`,
+  `VID` literally `0`, ZERO rows needing a continuation card; `SF = 0` guards: no
+  zero-`SF` pressure row anywhere; `AT`: every `*LOAD_SEGMENT[_SET]` row carries
+  `AT` blank or `0.0`; `next_grnod_id`: no deck pairs a `*SET_NODE` at/above
+  90001 with a zero-scale motion; `_box_node_ids`: the only `*DEFINE_BOX` in the
+  corpus feeds a contact, not a box-scoped load).
+
+  **Re-validation of the solver-validated decks.** Of the 17 decks the batch's
+  solver campaign ran, 14 regenerate BYTE-IDENTICALLY against the pre-review
+  commit. The three movers are the `_RIGID_LOCAL` decks, whose only changed data
+  line is the `/RBODY` master coordinate — `(0.2483682545, 0.2483682545, 0)` →
+  `(0, 0, 0)` on t4a/t4b and `(0.40582742, 0.40582742, 0)` → `(0, 0, 0)` on t4c,
+  i.e. the fix. All three were re-run on the real solver
+  (`starter_win64`/`engine_win64`, np=1 nt=6): **0 ERRORS, 0 WARNINGS, NORMAL
+  TERMINATION each**, and every measured quantity reproduces its ANALYTIC target:
+  t4a/t4c master `u_x` = 0.99869615 mm vs 1000·t_end (+0.0000%), `u_y = u_z = 0`
+  exactly, worst mesh-node deviation from a pure global-X translation 6.9e-08 mm;
+  t4b body rotation worst `|θ − ωt|` = 2.42e-07 rad over a full revolution, CoG
+  trajectory within 0.048% of the one-DOF co-rotating solution at s = π/2, π and
+  ~6, prescribed component `|v·x̂′ − 1000|` ≤ 1.06 mm/s (the T01
+  central-difference resolution). The written coordinate is a pre-run value only:
+  `hm_read_rbody.F:244` is `IF(ICDG == 0) ICDG=1`, so the starter relocates the
+  master to the mass-weighted CoG and the massless helpers cannot move it.
+
+  2768 tests + 851 subtests pass (+52 tests / +35 subtests over the batch;
+  the master baseline is 2633 / 787, verified independently), ruff clean.
+
 - **`*LOAD_BLAST_ENHANCED` `UNIT=6/7/8` had no unit mapping, and the docs said
   the table was complete.** The `UNIT` table was transcribed from a five-row
   LSTC note ("Blast Loading in LS-DYNA"), but the keyword defines **eight**

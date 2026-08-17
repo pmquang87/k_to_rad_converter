@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
-    RigidWallGeomFace,
+    PM_VAD_KEYWORD, RigidWallGeomFace,
 )
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
@@ -2329,12 +2329,20 @@ def _pm_skew_for(state: ConversionState, pm, keyword: str, ref: str) -> int:
             f"fixed VID skew is used and the co-rotating /SKEW/MOV/{local_skew} "
             "the _LOCAL option built is left unused for this card.")
     # *DEFINE_VECTOR[_NODES] keeps its VID as the /SKEW id when that is free and
-    # falls back to a reserved auto id (state.vector_skew_ids records which);
-    # *DEFINE_COORDINATE_VECTOR / _SYSTEM keep their CID verbatim.
+    # falls back to a reserved auto id (state.vector_skew_ids records which).
+    # A VID naming a *DEFINE_COORDINATE_* system is accepted too, because
+    # _make_skews emits all three flavours under their own cid (_SYSTEM and
+    # _VECTOR via _emit_skew_fix / _emit_coord_vector_skew, _NODES via
+    # _emit_skew_from_nodes) — so a skew with that id really is in the deck and
+    # the card resolves. All three registries are tested, the same set
+    # _make_body_loads accepts for its CID; leaving coord_nodes out sent a card
+    # whose VID named a *DEFINE_COORDINATE_NODES system down the "no /SKEW exists
+    # — THE DIRECTION IS WRONG" exit while the skew sat in the same .rad.
     skew_id = state.vector_skew_ids.get(pm.vid)
     if skew_id:
         return skew_id
-    if pm.vid in state.coord_vectors or pm.vid in state.coord_sys:
+    if (pm.vid in state.coord_vectors or pm.vid in state.coord_sys
+            or pm.vid in state.coord_nodes):
         return pm.vid
     state.warn(
         f"*{keyword} {ref}: DOF={pm.dof} references *DEFINE_VECTOR {pm.vid}, "
@@ -2375,7 +2383,15 @@ def _pm_lock_cards(state: ConversionState, pm, keyword: str,
         "Fscale_Y = 0: read_impvel.F:248 replaces a zero ordinate scale with "
         "the unit-system factor, so those cards would drive the transverse "
         "axes at FULL scale (measured on a live starter run). dyna2rad uses the "
-        "same synthetic 2-point function (convertbcs.cxx:644,663).")
+        "same synthetic 2-point function (convertbcs.cxx:644,663). NOTE the "
+        "precondition k2rad does NOT test: LS-DYNA applies the negative forms "
+        "\"to rigid bodies [only] if |CMO| = 2 on *MAT_RIGID or "
+        "*CONSTRAINED_NODAL_RIGID_BODY\" (p.750). The manual does not document "
+        "what it does instead when |CMO| != 2, so k2rad emits the lock either "
+        "way rather than guessing the constraint away — on a rigid body with "
+        "|CMO| != 2 these two cards may therefore be an OVER-CONSTRAINT LS-DYNA "
+        "would have ignored. Check card 2 of the body's *MAT_RIGID / "
+        "*CONSTRAINED_NODAL_RIGID_BODY_SPC.")
     return locked, fct, lines
 
 
@@ -2388,10 +2404,12 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
     lines.append("#-  IMPOSED MOTIONS:")
 
     # /IMPVEL, /IMPACC and /IMPDISP ids come from a local counter, not
-    # state.next_id(): the only writer of those three keywords is this function,
-    # so no user id can collide (the starter's UDOUBLE scan runs separately per
-    # option, hm_read_impvel.F:129/169), and keeping the counter means a deck
-    # with no _LOCAL / no VID motion converts byte-identically to PR #116.
+    # state.next_id(). _make_imposed_motions_set writes the same three keywords,
+    # but from next_id(), whose _auto_id base is 90001 — far above anything this
+    # counter reaches — so the two cannot collide, and no user id can either (the
+    # starter's UDOUBLE scan runs separately per option,
+    # hm_read_impvel.F:129/169). Keeping the counter means a deck with no _LOCAL /
+    # no VID motion converts byte-identically to PR #116.
     motion_counter = 1
     # Several cards may drive the same body on different DOFs, and the _LOCAL
     # prepass gives them ONE shared /SKEW/MOV — emitting the card per motion
@@ -2430,7 +2448,9 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
         skew_id = _pm_skew_for(state, pm, keyword, ref)
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop = pm.death if pm.death < 1e27 else 0.0
-        kw = {0: "IMPVEL", 1: "IMPACC", 2: "IMPDISP"}[pm.vad]
+        # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,
+        # so this index can never miss (a VAD outside it never reaches here).
+        kw = PM_VAD_KEYWORD[pm.vad]
         if pm.local and pm.skew_id and pm.skew_id not in skews_written:
             skews_written.add(pm.skew_id)
             lines += _emit_skew_mov(
@@ -2447,7 +2467,75 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id)
             motion_counter += 1
+    # A triad the prepass built for a card the loop then dropped (no /RBODY for
+    # the pid — an element-free rigid part, or a *CONSTRAINED_RIGID_BODIES slave
+    # whose nodes were merged into its master) still has its three nodes in /NODE
+    # and in the body's /RBODY secondary group. Write the /SKEW/MOV that explains
+    # them rather than leaving three unaccounted-for element-free nodes behind
+    # and a prepass warning describing a skew the deck does not contain. An
+    # unreferenced /SKEW is inert.
+    for pm in state.prescribed_motions:
+        if pm.local and pm.skew_id and pm.skew_id not in skews_written:
+            skews_written.add(pm.skew_id)
+            lines += _emit_skew_mov(
+                pm.skew_id, f"SKEW_MOV_LOCAL_PID{pm.pid}", *pm.mov_nodes, "X")
     return lines
+
+
+def _local_body_basis(state: ConversionState, pid: int):
+    """The rigid body's OWN local system, as ``(basis, source)`` where *basis* is
+    the global-frame orthonormal triad ``(ex, ey, ez)``, or ``(None, reason)``.
+
+    LS-DYNA takes the *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL system from
+    "LCO and CID in *MAT_RIGID and *CONSTRAINED_NODAL_RIGID_BODY, respectively.
+    If LCO/CID is 0, the local coordinate system defaults to the principal
+    inertia directions of the rigid body" (Manual Vol I R16 p.756-757 Remark 7;
+    *MAT_RIGID's own card 3 repeats it, Vol II R16 p.2-233). k2rad parses both,
+    so both are honoured EXACTLY:
+
+      * ``CID`` on *CONSTRAINED_NODAL_RIGID_BODY, and ``LCO`` on *MAT_RIGID card
+        3, are *DEFINE_COORDINATE_* ids — the /SKEW k2rad already emits for them,
+        read back through ``_icid_basis``;
+      * *MAT_RIGID card 3's alternative ``A1-V3`` pair gives the triad directly:
+        "the output parameters are in the directions a, b, and c where the latter
+        are given by the cross products c = a x v and b = c x a".
+
+    Only the LCO/CID = 0 default is unrecoverable, because it needs the body's
+    inertia tensor and k2rad computes none. A CNRB whose PID collides with a
+    rigid part's id resolves to the CNRB, matching _make_cnrb_rbodies' precedence.
+    """
+    for c in state.cnrbs:
+        if c.pid != pid:
+            continue
+        if not c.cid:
+            return None, ("*CONSTRAINED_NODAL_RIGID_BODY CID is 0, so LS-DYNA "
+                          "uses the body's PRINCIPAL INERTIA directions")
+        basis = _icid_basis(state, c.cid)
+        if basis is None:
+            return None, (f"*CONSTRAINED_NODAL_RIGID_BODY CID={c.cid} is not a "
+                          "*DEFINE_COORDINATE_* system in the deck (or is "
+                          "degenerate)")
+        return basis, f"CID={c.cid} on *CONSTRAINED_NODAL_RIGID_BODY {pid}"
+    part = state.parts.get(pid)
+    mat = state.mat_rigid.get(part.mid) if part is not None else None
+    if mat is None:
+        return None, "the part has no *MAT_RIGID card to read a local system from"
+    if mat.a_vec is not None and mat.v_vec is not None:
+        ex = _vnorm(mat.a_vec)
+        ez = _vnorm(_vcross(mat.a_vec, mat.v_vec)) if ex is not None else None
+        if ex is None or ez is None:
+            return None, (f"*MAT_RIGID {mat.mid} card 3 gives A1-V3, but a and v "
+                          "are zero or parallel so c = a x v is degenerate")
+        return (ex, _vcross(ez, ex), ez), \
+            f"the A1-V3 vector pair on *MAT_RIGID {mat.mid} card 3"
+    if not mat.lco:
+        return None, (f"LCO on *MAT_RIGID {mat.mid} card 3 is 0 (or blank), so "
+                      "LS-DYNA uses the body's PRINCIPAL INERTIA directions")
+    basis = _icid_basis(state, mat.lco)
+    if basis is None:
+        return None, (f"LCO={mat.lco} on *MAT_RIGID {mat.mid} card 3 is not a "
+                      "*DEFINE_COORDINATE_* system in the deck (or is degenerate)")
+    return basis, f"LCO={mat.lco} on *MAT_RIGID {mat.mid} card 3"
 
 
 def _synthesize_local_motion_frames(state: ConversionState) -> None:
@@ -2475,14 +2563,15 @@ def _synthesize_local_motion_frames(state: ConversionState) -> None:
     into the body's /RBODY secondary group via ``state.local_frame_nodes`` so
     they co-rotate with it.
 
-    **What is approximated, and by how much.** The triad is initialised to the
-    GLOBAL axes. LS-DYNA's local system is LCO on *MAT_RIGID / CID on
-    *CONSTRAINED_NODAL_RIGID_BODY, defaulting to the body's PRINCIPAL INERTIA
-    directions when that is 0 — k2rad parses neither (*MAT_RIGID card 3 is not
-    read) and computes no inertia tensor, so the initial orientation cannot be
-    recovered. The residual error is therefore the CONSTANT rotation R0 between
-    the global axes and the true local system: exact whenever the body's local
-    system is global-aligned at t=0, and a fixed misalignment otherwise. That is
+    **The triad's ORIENTATION.** ``_local_body_basis`` reads the body's own local
+    system from LCO on *MAT_RIGID card 3 or CID on *CONSTRAINED_NODAL_RIGID_BODY
+    — the two fields LS-DYNA itself names (Manual Vol I R16 p.756-757 Remark 7)
+    — and places N2/N3 along that ex/ey, so a deck that states its local system
+    converts EXACTLY. Only the LCO/CID = 0 default is out of reach: it is the
+    body's PRINCIPAL INERTIA directions and k2rad computes no inertia tensor. The
+    triad then falls back to the GLOBAL axes and the residual is the CONSTANT
+    rotation R0 between them and the true principal system — exact when the body
+    happens to be principal-aligned, a fixed misalignment otherwise. Even that is
     strictly better than the Radioss dyna-reader, which never reads
     ``localOption`` at all (``convertbcs.cxx`` has no match for LOCAL) and so
     freezes the axes at t=0 — an error that GROWS as cos(theta(t)) and becomes
@@ -2495,12 +2584,16 @@ def _synthesize_local_motion_frames(state: ConversionState) -> None:
     # A motion on a part that is neither *MAT_RIGID nor a *CONSTRAINED_NODAL_
     # RIGID_BODY has no /RBODY to drive at all: the writer drops it with its own
     # "no RBODY found" warning, and building a triad for it would leave three
-    # free nodes attached to nothing.
+    # free nodes attached to nothing. Same reason for the _DOF_DIR test: a DOF
+    # with no /IMP* Dir letter (9/10/11/12) is refused by the writer, so a triad
+    # for it would be three unexplained nodes plus a warning promising a
+    # co-rotating skew that the .rad never contains.
     rigid_pids = {p for p, part in state.parts.items()
                   if part.mid in state.mat_rigid}
     rigid_pids |= {c.pid for c in state.cnrbs}
     locals_ = [pm for pm in state.prescribed_motions
-               if pm.local and pm.pid in rigid_pids]
+               if pm.local and pm.pid in rigid_pids
+               and _DOF_DIR.get(abs(pm.dof)) is not None]
     if not locals_:
         return
     # Node coordinates of each candidate body, to scale the helper offsets: a
@@ -2536,31 +2629,49 @@ def _synthesize_local_motion_frames(state: ConversionState) -> None:
                    max(p.y for p in pts) - min(p.y for p in pts),
                    max(p.z for p in pts) - min(p.z for p in pts))
         s = span * 0.1 if span > 0.0 else 1.0
+        basis, why = _local_body_basis(state, pm.pid)
+        ex, ey = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)) if basis is None \
+            else (basis[0], basis[1])
         n1, n2, n3 = next_node, next_node + 1, next_node + 2
         next_node += 3
         state.nodes[n1] = NodeData(cx, cy, cz)
-        state.nodes[n2] = NodeData(cx + s, cy, cz)      # N1->N2 = local X'
-        state.nodes[n3] = NodeData(cx, cy + s, cz)      # fixes the X'Y' plane
+        # N1->N2 = the body's local X'; N3 fixes the X'Y' plane.
+        state.nodes[n2] = NodeData(cx + s * ex[0], cy + s * ex[1], cz + s * ex[2])
+        state.nodes[n3] = NodeData(cx + s * ey[0], cy + s * ey[1], cz + s * ey[2])
         pm.skew_id = state.reserve_skew_id(state.next_id())
         pm.mov_nodes = (n1, n2, n3)
         state.local_frame_nodes.setdefault(pm.pid, []).extend([n1, n2, n3])
         done[pm.pid] = (pm.skew_id, pm.mov_nodes)
-        state.warn(
+        common = (
             f"*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL pid={pm.pid}: the DOF is "
             f"driven in a CO-ROTATING /SKEW/MOV/{pm.skew_id}, built on three "
             f"synthesized element-free nodes ({n1}, {n2}, {n3}) that join the "
             "body's /RBODY secondary group so the triad turns with it "
             "(newskw.F rebuilds it every cycle; fixvel.F:390-417 projects the "
-            "imposed component onto the updated row). Its axes are INITIALISED "
-            "TO THE GLOBAL AXES: LS-DYNA takes them from LCO on *MAT_RIGID / CID "
-            "on *CONSTRAINED_NODAL_RIGID_BODY, or from the body's PRINCIPAL "
-            "INERTIA directions when that is 0, and k2rad reads neither. So the "
-            "conversion is EXACT if the body's local system is global-aligned at "
-            "t=0, and off by that constant rotation otherwise — check the "
-            "\"principal directions\" block of the LS-DYNA d3hsp mass summary. "
-            "(The Radioss dyna-reader ignores the _LOCAL flag entirely, which "
-            "freezes the axes at t=0 instead: an error that grows with the "
-            "body's rotation.)")
+            "imposed component onto the updated row). ")
+        if basis is not None:
+            state.warn(
+                common
+                + f"Its axes are taken from {why}, which is the field LS-DYNA "
+                "itself reads for this option (Manual Vol I R16 p.756-757 "
+                "Remark 7), so the local system is reproduced EXACTLY. (The "
+                "Radioss dyna-reader ignores the _LOCAL flag entirely, which "
+                "freezes the axes at t=0 instead: an error that grows with the "
+                "body's rotation.)")
+        else:
+            state.warn(
+                common
+                + f"Its axes are INITIALISED TO THE GLOBAL AXES because {why}, "
+                "and k2rad computes no inertia tensor, so the true orientation "
+                "cannot be recovered. The conversion is therefore EXACT only if "
+                "the body's local system is global-aligned at t=0 and off by "
+                "that CONSTANT rotation otherwise — check the \"principal "
+                "directions\" block of the LS-DYNA d3hsp mass summary, and name "
+                "the system explicitly (LCO on *MAT_RIGID card 3, or CID on "
+                "*CONSTRAINED_NODAL_RIGID_BODY) to make it exact. (The Radioss "
+                "dyna-reader ignores the _LOCAL flag entirely, which freezes the "
+                "axes at t=0 instead: an error that grows with the body's "
+                "rotation.)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2586,7 +2697,9 @@ def _or_dof_codes(codes: List[str]) -> str:
     return "".join(out)
 
 
-def _pm_set_nodes(state: ConversionState, pm) -> Optional[List[int]]:
+def _pm_set_nodes(state: ConversionState, pm,
+                  box_cache: Optional[Dict[int, Optional[Set[int]]]] = None
+                  ) -> Optional[List[int]]:
     """The node ids one *BOUNDARY_PRESCRIBED_MOTION_SET[_BOX] row drives, or
     None (already warned) when the row cannot be resolved.
 
@@ -2602,10 +2715,18 @@ def _pm_set_nodes(state: ConversionState, pm) -> Optional[List[int]]:
     **Caveat, warned:** LS-DYNA re-evaluates box membership as nodes move in and
     out of the box every timestep; both the numeric resolution here and the
     dyna2rad /SET/GENERAL are a t = 0 SNAPSHOT.
+
+    ``box_cache`` memoizes the per-box resolution across the rows of one deck, so
+    N rows naming one missing box report it once instead of N times.
     """
-    label = f"*BOUNDARY_PRESCRIBED_MOTION_SET_BOX nsid={pm.nsid}"
     if pm.boxid:
-        box_nodes = _resolve_box_nodes(state, pm.boxid, label)
+        label = f"*BOUNDARY_PRESCRIBED_MOTION_SET_BOX nsid={pm.nsid}"
+        if box_cache is not None and pm.boxid in box_cache:
+            box_nodes = box_cache[pm.boxid]
+        else:
+            box_nodes = _resolve_box_nodes(state, pm.boxid, label)
+            if box_cache is not None:
+                box_cache[pm.boxid] = box_nodes
         if pm.nsid:
             if pm.nsid not in state.node_sets:
                 state.warn(f"BOUNDARY_PRESCRIBED_MOTION_SET nsid={pm.nsid}: node set not found – skipped")
@@ -2687,13 +2808,14 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     fix_rot: Dict[Tuple[int, int], List[str]] = defaultdict(list)
     fix_nodes: Dict[Tuple[int, int], List[int]] = {}
     fix_order: List[Tuple[int, int]] = []
-    motions: List = []
-    resolved: Dict[int, List[int]] = {}
+    # (row, its resolved node ids) — carried together rather than looked up by
+    # id(pm) later, which only stays unique while the objects are alive.
+    motions: List[Tuple[object, List[int]]] = []
+    box_cache: Dict[int, Optional[Set[int]]] = {}
     for pm in state.prescribed_motion_sets:
-        nids = _pm_set_nodes(state, pm)
+        nids = _pm_set_nodes(state, pm, box_cache)
         if nids is None:
             continue
-        resolved[id(pm)] = nids
         if pm.sf == 0.0:
             mapped = _PM_DOF_TO_BCS.get(pm.dof)
             if mapped is None:
@@ -2710,7 +2832,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             fix_tra[key].append(mapped[0])
             fix_rot[key].append(mapped[1])
         else:
-            motions.append(pm)
+            motions.append((pm, nids))
 
     for key in fix_order:
         nsid, boxid = key
@@ -2719,7 +2841,12 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         tra = _or_dof_codes(fix_tra[key])
         rot = _or_dof_codes(fix_rot[key])
         bc_id = state.next_id()
-        grnod_id = state.next_id()
+        # next_grnod_id, not next_id: a user *SET_NODE whose SID sits at or above
+        # the auto-id base is re-emitted verbatim as /GRNOD/NODE/<sid>, and a
+        # collision is starter ERROR 79 DUPLICATE ID / IN NODE GROUP DEFINITION
+        # with no restart file. The motion path below already drew from it; this
+        # branch, four lines away, still used the unguarded counter.
+        grnod_id = state.next_grnod_id()
         lines += [
             f"/BCS/{bc_id}",
             set_title or f"BC_set_{nsid}",
@@ -2730,11 +2857,10 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{nsid}", nids)
 
     # Non-zero scale: real prescribed motion → /IMPDISP, /IMPVEL, /IMPACC
-    for pm in motions:
+    for pm, nids in motions:
         keyword = ("BOUNDARY_PRESCRIBED_MOTION_SET_BOX" if pm.boxid
                    else "BOUNDARY_PRESCRIBED_MOTION_SET")
         set_title = state.node_sets.get(pm.nsid, ("", []))[0]
-        nids = resolved[id(pm)]
         base_dir = _DOF_DIR.get(abs(pm.dof))
         if base_dir is None:
             state.warn(
@@ -2752,7 +2878,9 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         motion_id = state.next_id()
         tstart = pm.birth if pm.birth < 1e27 else 0.0
         tstop  = pm.death if pm.death < 1e27 else 0.0
-        kw = {0: "IMPVEL", 1: "IMPACC", 2: "IMPDISP"}[pm.vad]
+        # PM_VAD_KEYWORD is the SAME dict handlers._pm_vad_supported gates on,
+        # so this index can never miss (a VAD outside it never reaches here).
+        kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
                                 skew_id)
@@ -3257,6 +3385,11 @@ def _make_body_loads(state: ConversionState,
             "REVERSED.")
 
     # ── *LOAD_BODY_VECTOR → /GRAV along a synthesized skew's local X' ─────────
+    # The two summary warnings below are gated on EMISSION, not on the presence
+    # of a parsed card: a *LOAD_BODY_VECTOR whose LCID is missing warns "load
+    # curve N not found — skipped" and must not then be followed by a paragraph
+    # describing the /GRAV + /SKEW/FIX pair it did not produce.
+    vec_emitted = False
     for bv in state.body_load_vectors:
         if bv.lcid not in state.curves:
             state.warn(f"*LOAD_BODY_VECTOR: load curve {bv.lcid} not found "
@@ -3283,6 +3416,7 @@ def _make_body_loads(state: ConversionState,
                        "after mapping through CID — skipped.")
             continue
         emitted = True
+        vec_emitted = True
         grav_id = _first_group() if grnod_id is None else state.next_id()
         skew_id = state.reserve_skew_id(state.next_id())
         # /SKEW/FIX's two vector cards are the local Y' and Z'; the starter
@@ -3294,7 +3428,7 @@ def _make_body_loads(state: ConversionState,
                                 (bv.xc, bv.yc, bv.zc), axes[0], axes[1])
         lines += _emit_grav_card(grav_id, "Body_accel_VECTOR", bv.lcid,
                                  "X", grnod_id, -bv.sf, skew_id)
-    if state.body_load_vectors:
+    if vec_emitted:
         state.warn(
             "*LOAD_BODY_VECTOR -> ONE /GRAV with DIR=X in a companion /SKEW/FIX "
             "whose local X' is +V, and Fscale_Y = -SF. The two halves belong "
@@ -3307,9 +3441,15 @@ def _make_body_loads(state: ConversionState,
             "a direction only.")
 
     # ── *LOAD_BODY_RX/_RY/_RZ → /LOAD/CENTRI (+ /FRAME/FIX for the axis) ──────
-    if state.body_load_rots:
-        lines += ["#-  ROTATIONAL BODY LOADS (*LOAD_BODY_R* -> /LOAD/CENTRI):",
-                  HDR]
+    # The section HEADER is INSERTED at the position it would have been appended
+    # at, and only if a card was actually written: a deck whose R* curves are all
+    # missing used to get a dangling header plus two paragraphs describing
+    # /LOAD/CENTRI cards the .rad does not contain. Inserting (rather than
+    # buffering the cards) keeps the header ahead of the shared /GRNOD that
+    # _first_group() emits inside the loop, so a deck that DOES emit converts
+    # byte-identically.
+    rot_header_at = len(lines)
+    rot_emitted = False
     for br in state.body_load_rots:
         if br.lcid not in state.curves:
             state.warn(f"*LOAD_BODY_R{br.dir}: angular-velocity curve "
@@ -3317,12 +3457,15 @@ def _make_body_loads(state: ConversionState,
                        "/LOAD/CENTRI: a missing function is starter ERROR 883).")
             continue
         emitted = True
+        rot_emitted = True
         centri_id = _first_group() if grnod_id is None else state.next_id()
         frame_id, flines = _centri_frame(state, br)
         lines += flines
         lines += _emit_centri_card(centri_id, f"Body_omega_{br.dir}", br.lcid,
                                    br.dir * 2, frame_id, grnod_id, br.sf)
-    if state.body_load_rots:
+    if rot_emitted:
+        lines[rot_header_at:rot_header_at] = [
+            "#-  ROTATIONAL BODY LOADS (*LOAD_BODY_R* -> /LOAD/CENTRI):", HDR]
         state.warn(
             "*LOAD_BODY_R{X,Y,Z} -> /LOAD/CENTRI with fct_IDT = LCID and "
             "Fscaley = +SF. The curve carries the ANGULAR VELOCITY omega(t), "
@@ -3391,10 +3534,18 @@ def _centri_frame(state: ConversionState, br) -> Tuple[int, List[str]]:
     initialised to the identity with origin (0,0,0),
     ``hm_read_frm.F:133-135``, so no card is needed at all.
 
-    A CID SUPERSEDES XC/YC/ZC: the frame is then the CID's own origin and axes
-    (LS-DYNA reads the centre fields only when CID is blank, and dyna2rad
-    likewise ignores XC/YC/ZC in its ``_SYSTEM`` branch,
-    ``convertloads.cxx:325-385``).
+    A CID SUPERSEDES XC/YC/ZC: the frame is then the CID's own origin and axes.
+    That is a CHOICE, not a documented rule — *LOAD_BODY's card says only
+    "Coordinate system ID to define acceleration in local coordinate system. The
+    accelerations (LCID) are with respect to CID" (Manual Vol I R16 p.33-27) and
+    is SILENT on how CID interacts with the centre of rotation. It follows
+    dyna2rad, whose ``_SYSTEM`` branch copies the CID skew's origin verbatim and
+    ignores XC/YC/ZC (``convertloads.cxx:325-385``), and it is warned loudly
+    whenever a deck supplies both. Note the sibling *LOAD_BODY_GENERALIZED
+    documents the OPPOSITE for its own card — "the coordinate (XC, YC, ZC) is
+    defined with respect to the local coordinate system if CID is nonzero"
+    (p.33-32) — so if that reading is the intended one for *LOAD_BODY too, the
+    frame origin should be ``CID_origin + R*(XC,YC,ZC)`` instead.
 
     Frame ids are drawn one per card from ``reserve_skew_id``: /FRAME and /SKEW
     share ONE starter table, so a collision is ERROR 79. (dyna2rad calls
@@ -3431,10 +3582,17 @@ def _centri_frame(state: ConversionState, br) -> Tuple[int, List[str]]:
             if any(origin) and cid_origin != origin:
                 state.warn(
                     f"*LOAD_BODY_R{br.dir}: both CID={br.cid} and a centre of "
-                    f"rotation ({br.xc:g}, {br.yc:g}, {br.zc:g}) are given. CID "
-                    "supersedes the centre fields in LS-DYNA, so the axis passes "
-                    f"through the CID origin {cid_origin} and XC/YC/ZC are "
-                    "IGNORED (dyna2rad does the same).")
+                    f"rotation ({br.xc:g}, {br.yc:g}, {br.zc:g}) are given. "
+                    f"k2rad lets CID win: the axis passes through the CID origin "
+                    f"{cid_origin} and XC/YC/ZC are IGNORED, which is what "
+                    "dyna2rad does (convertloads.cxx:325-385). The *LOAD_BODY "
+                    "card does NOT document how the two interact (p.33-27 covers "
+                    "only the acceleration direction), and the sibling "
+                    "*LOAD_BODY_GENERALIZED documents the opposite for its own "
+                    "card — \"the coordinate (XC, YC, ZC) is defined with respect "
+                    "to the local coordinate system if CID is nonzero\" (p.33-32) "
+                    "— which would put the axis through CID_origin + R*(XC,YC,ZC). "
+                    "Give only one of the two if the axis position matters.")
             origin = cid_origin
     if not br.cid and not any(origin):
         return 0, []                        # frame 0 = global axes at (0,0,0)
@@ -3619,23 +3777,40 @@ def _box_contains(box, x: float, y: float, z: float) -> bool:
 def _box_node_ids(state: ConversionState, box) -> Set[int]:
     """Set of node ids whose coordinates fall inside *box* (O(nodes) scan — the
     same cost class as the existing NSIDEX set-difference; there is no spatial
-    index in the codebase). The _LOCAL frame is computed once."""
+    index in the codebase). The _LOCAL frame is computed once.
+
+    Only the SOURCE deck's nodes are candidates. By write time ``state.nodes``
+    also holds everything the writer synthesized — /RBODY CoG masters, /SKEW/MOV
+    third nodes, the *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL triads, rigid-wall
+    carriers, *ELEMENT_BEAM_ORIENTATION third nodes — and a *DEFINE_BOX names a
+    region of the USER's model, so those artefacts must not be picked up.
+    Measured: a box-only ``*BOUNDARY_PRESCRIBED_MOTION_SET_BOX`` round a rigid
+    brick emitted an /IMPVEL on the brick's synthesized /RBODY MASTER node, i.e.
+    drove the whole body (starter WARNING 312, 0 errors, restart written — the
+    wrong model runs), and the ``if not box_nodes`` guard cannot see it because
+    the box does contain nodes, just the wrong ones. ``source_node_ids`` is empty
+    only when build_starter has not run (direct unit-test calls), in which case
+    every node is a candidate as before.
+    """
     lox, hix = min(box.xmn, box.xmx), max(box.xmn, box.xmx)
     loy, hiy = min(box.ymn, box.ymx), max(box.ymn, box.ymx)
     loz, hiz = min(box.zmn, box.zmx), max(box.zmn, box.zmx)
+    src = state.source_node_ids
+    cands = ((nid, nd) for nid, nd in state.nodes.items()
+             if not src or nid in src)
     if box.local:
         basis = _box_basis(box)
         if basis is None:
             return set()
         origin, ex, ey, ez = basis
         out: Set[int] = set()
-        for nid, nd in state.nodes.items():
+        for nid, nd in cands:
             d = (nd.x - origin[0], nd.y - origin[1], nd.z - origin[2])
             u, v, w = _vdot(d, ex), _vdot(d, ey), _vdot(d, ez)
             if lox <= u <= hix and loy <= v <= hiy and loz <= w <= hiz:
                 out.add(nid)
         return out
-    return {nid for nid, nd in state.nodes.items()
+    return {nid for nid, nd in cands
             if lox <= nd.x <= hix and loy <= nd.y <= hiy and loz <= nd.z <= hiz}
 
 
@@ -4075,7 +4250,7 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     # load. `at` joins the key because it becomes a per-load /SENSOR/TIME.
     groups: Dict[Tuple, List[List[int]]] = defaultdict(list)
     for pl in state.pressure_loads:
-        groups[(pl.lcid, pl.sf, 0.0)].append(pl.nodes)
+        groups[(pl.lcid, pl.sf, pl.at)].append(pl.nodes)
     # *LOAD_SEGMENT_SET: expand each referenced *SET_SEGMENT into per-segment
     # cards, grouped alongside *LOAD_SEGMENT by (lcid, sf).
     for ssl in state.segment_set_pressure_loads:
@@ -4116,6 +4291,18 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
     pload_id = 1
     sensors_emitted = False
     for (lcid, sf, at), segs in groups.items():
+        if sf == 0.0:
+            # Unreachable from the handlers, which default SF = 0 to 1.0 — kept
+            # because a /PLOAD carrying a zero ordinate scale is not a zero load
+            # but a FULL-amplitude one: hm_read_pload.F:167 is
+            # `IF (FCY == ZERO) FCY = FAC_FCY`, so the starter substitutes the
+            # unit-system factor. Never let a literal 0 reach the card.
+            state.warn(
+                f"Pressure load on curve {lcid} resolved to Fscale_y = 0, which "
+                "/PLOAD cannot express: hm_read_pload.F:167 replaces a zero "
+                "ordinate scale with the unit-system factor, so the load would "
+                "run at FULL amplitude. The load is DROPPED instead.")
+            continue
         surf_id = state.next_id()
         lines += [
             f"/SURF/SEG/{surf_id}",

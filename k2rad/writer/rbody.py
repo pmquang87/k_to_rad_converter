@@ -109,7 +109,18 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             # change in post-processing. A synthesized master keeps every mesh
             # node put; OpenRadioss still moves the master itself to the true
             # CoM (ICoG default), which is harmless for a free node.
-            pts = [state.nodes[n] for n in unique_nodes if n in state.nodes]
+            #
+            # The centroid is taken over the MESH nodes only. The _LOCAL /SKEW/MOV
+            # helper triad was folded into unique_nodes above (it has to be an
+            # /RBODY secondary to co-rotate), and its three offsets are 0.1x the
+            # body's span — averaging them in shifted the written master
+            # coordinate by ~0.9% of the span. Inert at runtime (ICoG relocates
+            # the master to the true CoM and the helpers are massless) but a
+            # silently wrong pre-run coordinate, and wrong outright the moment
+            # ICoG=2 "keep coordinates" is ever emitted.
+            helpers = set(state.local_frame_nodes.get(pid, ()))
+            pts = [state.nodes[n] for n in unique_nodes
+                   if n in state.nodes and n not in helpers]
             ind_node = _next_free
             _next_free += 1
             if pts:
@@ -437,8 +448,11 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
             continue
         # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL on this CNRB: the three
         # synthesized nodes carrying its co-rotating /SKEW/MOV triad have to be
-        # secondaries of THIS body. They are element-free and massless, so the
-        # centroid the master is placed at is the only thing they shift.
+        # secondaries of THIS body. They are element-free and massless, so they
+        # only ever shifted the centroid the master is placed at — and the master
+        # is now placed from mesh_nodes, i.e. the node set alone, so the written
+        # coordinate is the same with and without a _LOCAL card.
+        mesh_nodes = unique_nodes
         helpers = state.local_frame_nodes.get(cnrb.pid)
         if helpers:
             unique_nodes = sorted(set(unique_nodes) | set(helpers))
@@ -453,7 +467,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         if cnrb.pnode > 0 and cnrb.pnode not in elem_nodes:
             ind_node = cnrb.pnode
         else:
-            ind_node = _new_master_at_centroid(unique_nodes)
+            ind_node = _new_master_at_centroid(mesh_nodes)
             if cnrb.pnode > 0:
                 state.warn(
                     f"*CONSTRAINED_NODAL_RIGID_BODY pid={cnrb.pid}: PNODE "

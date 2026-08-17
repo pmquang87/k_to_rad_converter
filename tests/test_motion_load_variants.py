@@ -1116,9 +1116,16 @@ class TestLoadBodyRotational(unittest.TestCase):
         self.assertEqual((y, z), ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
         self.assertEqual(tuple(round(c, 12) for c in x), (1.0, 0.0, 0.0))
 
-    def test_cid_supersedes_the_centre_fields(self):
-        """LS-DYNA reads XC/YC/ZC only when CID is blank, and dyna2rad also
-        ignores them in its _SYSTEM branch (convertloads.cxx:325-385)."""
+    def test_cid_wins_over_the_centre_fields(self):
+        """CID takes the frame origin and XC/YC/ZC are dropped — the dyna2rad
+        _SYSTEM behaviour (convertloads.cxx:325-385).
+
+        *LOAD_BODY does NOT document the interaction (p.33-27 describes CID as
+        the acceleration's system and says nothing about the centre of rotation)
+        and *LOAD_BODY_GENERALIZED documents the OPPOSITE for its own card
+        (p.33-32), so the warning must present this as k2rad's choice with both
+        readings named, not as an LS-DYNA rule.
+        """
         result, starter = _convert(_deck(COORD_40,
                                          _body_rot("Z", xc=9.0, yc=9.0,
                                                    zc=9.0, cid=40)))
@@ -1127,7 +1134,10 @@ class TestLoadBodyRotational(unittest.TestCase):
         self.assertEqual(o, (1.0, 2.0, 3.0), "the CID origin, not XC/YC/ZC")
         self.assertEqual(tuple(round(c, 12) for c in y), (-1.0, 0.0, 0.0))
         self.assertEqual(tuple(round(c, 12) for c in z), (0.0, 0.0, 1.0))
-        self.assertTrue(_has_warn(result, "CID supersedes the centre fields"))
+        self.assertTrue(_has_warn(result, "k2rad lets CID win",
+                                  "XC/YC/ZC are IGNORED",
+                                  "does NOT document how the two interact",
+                                  "LOAD_BODY_GENERALIZED documents the opposite"))
 
     def test_unknown_cid_is_warned(self):
         result, _starter = _convert(_deck(_body_rot("Z", cid=77)))
@@ -1356,6 +1366,866 @@ class TestIncludeTransformTables(unittest.TestCase):
                         raw=["        10       1.0"])
         self.assertTrue(_carries_literal_axis_point(with_centre))
         self.assertFalse(_carries_literal_axis_point(without))
+
+    def test_axis_point_scan_threads_is_box(self):
+        """_carries_literal_axis_point walks the same two-card grammar. Without
+        is_box the _SET_BOX card 2 is read as a card 1 and its TOFFSET tested
+        against (9, 10, 11) — and when a real card 1 does carry |DOF| 9/10/11 the
+        pending continuation slot then swallows the BOX card instead."""
+        from k2rad.assembly import _bpm_cards
+        from k2rad.parser import Block
+        b = Block(keyword="BOUNDARY_PRESCRIBED_MOTION_SET_BOX", options=[],
+                  raw=["         1        11         2        10       1.0",
+                       "         5         0         0",
+                       "       1.0       2.5         0         0         0",
+                       "         1         1         2        10       1.0",
+                       "         5         0         0"])
+        self.assertEqual(list(_bpm_cards(b, is_box=True)),
+                         [(0, ""), (1, "box"), (2, "cont"), (3, ""),
+                          (4, "box")])
+
+    def test_blank_continuation_card_does_not_shift_the_id_specs(self):
+        """Card 3 is all-defaults-able (p.753), so a blank one is legal. Skipping
+        blanks to find it left the pending 'cont' slot to swallow entity 2's card
+        1, which then got the CONTINUATION spec: NSID un-offset, VAD+IDPOFF,
+        LCID+IDNOFF and the float SF turned into an id."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.parser import Block
+        b = Block(keyword="BOUNDARY_PRESCRIBED_MOTION_SET", options=[],
+                  raw=["         1        11         2        10       1.0",
+                       "",
+                       "         2         1         2        10       2.0"])
+        _OFFSET_SPECS["BOUNDARY_PRESCRIBED_MOTION_SET"](
+            b, {"s": 1000, "d": 2000, "f": 300, "n": 7000, "p": 8000, "e": 0,
+                "m": 0, "r": 0}, lambda m: None)
+        self.assertEqual(b.raw[1], "", "the blank card 3 stays blank")
+        c1 = _fields(b.raw[2], 10, 5)
+        self.assertEqual(int(c1[0]), 1002, "entity 2's NSID moves with IDSOFF")
+        self.assertEqual(int(c1[1]), 1, "DOF is not an id")
+        self.assertEqual(int(c1[2]), 2, "VAD is not an id")
+        self.assertEqual(int(c1[3]), 310, "LCID moves with IDFOFF")
+        self.assertEqual(float(c1[4]), 2.0, "SF is a float, not an id")
+
+    def test_blank_box_card_does_not_shift_the_id_specs(self):
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.parser import Block
+        b = Block(keyword="BOUNDARY_PRESCRIBED_MOTION_SET_BOX", options=[],
+                  raw=["         1         1         2        10       1.0",
+                       "",
+                       "         2         3         2        10       2.0",
+                       "         5         0         0"])
+        _OFFSET_SPECS["BOUNDARY_PRESCRIBED_MOTION_SET_BOX"](
+            b, {"s": 1000, "d": 2000, "f": 300, "n": 0, "p": 0, "e": 0,
+                "m": 0, "r": 0}, lambda m: None)
+        c1 = _fields(b.raw[2], 10, 5)
+        self.assertEqual(int(c1[0]), 1002, "entity 2's NSID moves with IDSOFF")
+        self.assertEqual(int(c1[3]), 310, "LCID moves with IDFOFF")
+        self.assertEqual(int(_fields(b.raw[3], 10, 3)[0]), 2005,
+                         "entity 2's BOXID moves with IDDOFF")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# G) Review-round fixes: card-walk positioning, VAD totality, zero scales,
+#    box membership, the body-local frame, and the /RBODY master coordinate.
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestVadGuardIsTotal(unittest.TestCase):
+    """PM_VAD_KEYWORD is the single source of truth for which VADs convert.
+
+    The guard used to enumerate only the KNOWN-bad values (3 and 4), so every
+    other value passed it and hit the writer's bare ``PM_VAD_KEYWORD[pm.vad]``:
+    KeyError, traceback, no deck at all — strictly worse than master's
+    ``.get(vad, "IMPDISP")``.
+    """
+
+    def test_out_of_range_vad_on_rigid_is_refused_not_a_crash(self):
+        for vad in (5, 7, 9, -1):
+            with self.subTest(vad=vad):
+                deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_RIGID\n"
+                             f"         2         1{vad:10d}        10       1.0\n")
+                result, starter = _convert(deck)
+                self.assertEqual(_imp_cards(starter), [])
+                self.assertTrue(_has_warn(result, f"VAD={vad}",
+                                          "not a *BOUNDARY_PRESCRIBED_MOTION",
+                                          "defines 0-4 only"))
+
+    def test_out_of_range_vad_on_set_is_refused_not_a_crash(self):
+        for vad in (5, 9):
+            with self.subTest(vad=vad):
+                deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                             f"         1         2{vad:10d}        10       2.0\n")
+                result, starter = _convert(deck)
+                self.assertEqual(_imp_cards(starter), [])
+                self.assertTrue(_has_warn(result, f"VAD={vad}"))
+
+    def test_the_guard_and_the_writer_read_one_dict(self):
+        from k2rad.handlers import _pm_vad_supported
+        from k2rad.state import PM_VAD_KEYWORD
+        self.assertEqual(set(PM_VAD_KEYWORD), {0, 1, 2})
+        st = ConversionState()
+        for vad in range(-2, 13):
+            with self.subTest(vad=vad):
+                self.assertEqual(
+                    _pm_vad_supported(st, "KW", "ref", vad),
+                    vad in PM_VAD_KEYWORD,
+                    "the guard must accept exactly the writer's keys")
+
+
+class TestBlankContinuationCard(unittest.TestCase):
+    """Cards 2 and 3 are POSITIONAL. Every field of card 3 defaults (OFFSET1 0.,
+    OFFSET2 0., LRB 0, NODE1 0, NODE2 0 — p.753), so an all-blank continuation
+    card is legal input; hunting for the next NON-blank line ate the FOLLOWING
+    entity's card 1 and lost that motion with no diagnostic at all.
+    """
+
+    def test_blank_card_3_keeps_the_next_entity(self):
+        deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                     "         1        11         0        10       1.0\n"
+                     "\n"
+                     "         1         2         2        10       2.0\n")
+        st = _parse(deck)
+        self.assertEqual([(p.dof, p.vad, p.sf)
+                          for p in st.prescribed_motion_sets],
+                         [(11, 0, 1.0), (2, 2, 2.0)])
+        _result, starter = _convert(deck)
+        imps = _imp_cards(starter)
+        self.assertEqual(len(imps), 1, "DOF=11 is refused, DOF=2 is not")
+        self.assertEqual(imps[0][0], "/IMPDISP")
+        self.assertEqual((imps[0][2], imps[0][3], imps[0][10]), (10, "Y", 2.0))
+
+    def test_blank_vad4_card_3_keeps_the_next_entity(self):
+        deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_RIGID\n"
+                     "         2         1         4        10       1.0\n"
+                     "\n"
+                     "         2         3         0        10       3.0\n")
+        st = _parse(deck)
+        self.assertEqual([(p.dof, p.vad) for p in st.prescribed_motions],
+                         [(3, 0)], "VAD=4 refused, the DOF=3 row kept")
+        _result, starter = _convert(deck)
+        imps = _imp_cards(starter)
+        self.assertEqual(len(imps), 1)
+        self.assertEqual((imps[0][0], imps[0][3], imps[0][10]),
+                         ("/IMPVEL", "Z", 3.0))
+
+    def test_blank_box_card_2_keeps_the_next_entity(self):
+        deck = _deck(BOX_HALF,
+                     "*BOUNDARY_PRESCRIBED_MOTION_SET_BOX\n"
+                     "         1         1         2        10       1.0\n"
+                     "\n"
+                     "         1         3         2        10       2.0\n"
+                     "         5         0         0\n")
+        st = _parse(deck)
+        self.assertEqual([(p.dof, p.boxid)
+                          for p in st.prescribed_motion_sets],
+                         [(1, 0), (3, 5)],
+                         "the blank card 2 is BOXID 0, and entity 2 survives")
+
+    def test_a_real_continuation_card_is_still_consumed(self):
+        deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                     "         1        11         2        10       1.0\n"
+                     "       1.0       2.5         0         0         0\n"
+                     "         1         2         2        10       2.0\n")
+        st = _parse(deck)
+        self.assertEqual([(p.dof, p.sf) for p in st.prescribed_motion_sets],
+                         [(11, 1.0), (2, 2.0)])
+
+
+class TestPressureZeroScale(unittest.TestCase):
+    """A /PLOAD written with ``Fscale_y = 0`` is NOT a zero load.
+
+    ``hm_read_pload.F:167`` is ``IF (FCY == ZERO) FCY = FAC_FCY``, so the starter
+    substitutes the unit-system factor and the curve runs at FULL amplitude —
+    with the sign inverted on the *LOAD_SHELL path, which negates SF. Measured:
+    an ``SF = 0.0`` shell row echoed ``SCALE-Y 1.000000000000`` while its
+    blank-SF sibling echoed -1.0. Every card documents ``SF ... Default 1.`` and
+    LS-DYNA applies its defaults on a ZERO test (the same keyword family spells
+    that out for DEATH, "EQ.0.0: default set to 1e28"), so 0.0 reads as 1.0 —
+    warned, because a zeroed SF is also a common way of switching a load off.
+    """
+
+    def test_load_shell_zero_sf_reads_as_the_default(self):
+        result, starter = _convert(_deck("*LOAD_SHELL_ELEMENT\n"
+                                         "         1        10       0.0\n"))
+        self.assertEqual(_pload_card(starter, 1)[4], -1.0)
+        self.assertTrue(_has_warn(result, "SF = 0.0 on element 1",
+                                  "documented default 1.0",
+                                  "hm_read_pload.F:167"))
+
+    def test_load_segment_zero_sf_reads_as_the_default(self):
+        result, starter = _convert(_deck(
+            "*LOAD_SEGMENT\n"
+            "        10       0.0       0.0         1         2         3"
+            "         4\n"))
+        self.assertEqual(_pload_card(starter, 1)[4], 1.0,
+                         "*LOAD_SEGMENT is NOT negated — SF passes through")
+        self.assertTrue(_has_warn(result, "SF = 0.0", "hm_read_pload.F:167"))
+
+    def test_load_segment_set_zero_sf_reads_as_the_default(self):
+        result, starter = _convert(_deck(
+            "*SET_SEGMENT\n"
+            "        80\n"
+            "         1         2         3         4\n"
+            "*LOAD_SEGMENT_SET\n"
+            "        80        10       0.0\n"))
+        self.assertEqual(_pload_card(starter, 1)[4], 1.0)
+        self.assertTrue(_has_warn(result, "SF = 0.0 on segment set 80"))
+
+    def test_no_pload_ever_carries_a_literal_zero_scale(self):
+        """Belt and braces: whatever the handlers do, the emitter refuses a zero
+        ordinate scale rather than letting the starter turn it into 1.0."""
+        from k2rad.state import PressureLoad
+        from k2rad.writer.loads import _make_pressure_loads
+        st = ConversionState()
+        st.pressure_loads.append(PressureLoad(10, 0.0, [1, 2, 3, 4]))
+        lines = _make_pressure_loads(st)
+        self.assertFalse([ln for ln in lines if ln.startswith("/PLOAD")])
+        self.assertTrue(any("Fscale_y = 0" in w and "DROPPED" in w
+                            for w in st.warnings))
+
+    def test_zero_eid_row_is_warned_not_silently_dropped(self):
+        result, starter = _convert(_deck("*LOAD_SHELL_ELEMENT\n"
+                                         "                  10       2.0\n"))
+        self.assertEqual(_blocks(starter, "/PLOAD"), [])
+        self.assertTrue(_has_warn(result, "*LOAD_SHELL_ELEMENT",
+                                  "blank or non-positive"))
+
+
+class TestLoadSegmentArrivalTime(unittest.TestCase):
+    """AT on the PLAIN *LOAD_SEGMENT reached nothing: field 2 was never read.
+
+    Its own comment listed the field, its _SET sibling routes AT to a
+    /SENSOR/TIME, and the summary warning claimed AT was now covered — but a
+    ``*LOAD_SEGMENT 10 2.0 0.004 1 2 3 4`` produced ``sensor_ID = 0`` and ZERO
+    warnings, i.e. a pressure starting at t = 0 instead of t = 0.004.
+    """
+
+    _SEG_AT = ("*LOAD_SEGMENT\n"
+               "        10       2.0     0.004         1         2         3"
+               "         4\n")
+
+    def test_at_is_parsed(self):
+        st = _parse(_deck(self._SEG_AT))
+        self.assertEqual(len(st.pressure_loads), 1)
+        self.assertEqual(st.pressure_loads[0].at, 0.004)
+
+    def test_at_becomes_a_sensor_time_in_the_pload(self):
+        result, starter = _convert(_deck(self._SEG_AT))
+        _surf, fct, sens, ascale, fscale = _pload_card(starter, 1)
+        self.assertEqual((fct, ascale, fscale), (10, 1.0, 2.0))
+        self.assertNotEqual(sens, 0, "AT > 0 needs a /SENSOR/TIME")
+        sensors = _blocks(starter, "/SENSOR/TIME")
+        self.assertEqual([s[0] for s in sensors], [sens])
+        self.assertEqual(float(sensors[0][1][0][0:20]), 0.004)
+        self.assertTrue(_has_warn(result, "arrival time AT > 0",
+                                  "/SENSOR/TIME"))
+
+    def test_rows_with_different_at_do_not_share_a_pload(self):
+        deck = _deck(self._SEG_AT,
+                     "*LOAD_SEGMENT\n"
+                     "        10       2.0       0.0         5         6"
+                     "         7         8\n")
+        _result, starter = _convert(deck)
+        cards = [_pload_card(starter, i) for i in (1, 2)]
+        self.assertEqual({c[4] for c in cards}, {2.0})
+        self.assertEqual(len([c for c in cards if c[2] == 0]), 1,
+                         "exactly one row keeps sensor_ID = 0")
+
+    def test_at_zero_emits_no_sensor(self):
+        _result, starter = _convert(_deck(
+            "*LOAD_SEGMENT\n"
+            "        10       2.0       0.0         1         2         3"
+            "         4\n"))
+        self.assertEqual(_blocks(starter, "/SENSOR/TIME"), [])
+        self.assertEqual(_pload_card(starter, 1)[2], 0)
+
+    def test_negative_at_is_warned_and_clamped(self):
+        result, starter = _convert(_deck(
+            "*LOAD_SEGMENT\n"
+            "        10       2.0    -0.001         1         2         3"
+            "         4\n"))
+        self.assertEqual(_blocks(starter, "/SENSOR/TIME"), [])
+        self.assertEqual(_pload_card(starter, 1)[2], 0)
+        self.assertTrue(_has_warn(result, "negative arrival time",
+                                  "Tdelay cannot be negative"))
+
+
+#: A rigid brick (part 2, nodes 11-18, x in [20, 24]) plus a box round it.
+BOX_ROUND_BRICK = """\
+*DEFINE_BOX
+         8      19.0      25.0      -1.0       5.0      -1.0       5.0
+"""
+
+
+class TestBoxMembershipIgnoresSynthesizedNodes(unittest.TestCase):
+    """A *DEFINE_BOX names a region of the USER's model.
+
+    By write time ``state.nodes`` also holds the /RBODY CoG masters, the
+    /SKEW/MOV third nodes, the _LOCAL triads and the rigid-wall carriers.
+    Measured before the fix: a box-only ``_SET_BOX`` round the rigid brick
+    emitted ``/GRNOD/NODE ... 11 ... 18 19`` where 19 is the brick's synthesized
+    /RBODY MASTER, so the /IMPVEL drove the whole body — starter WARNING 312,
+    0 errors, restart written, i.e. the wrong model runs. The ``if not
+    box_nodes`` guard cannot catch it: the box DOES contain nodes.
+    """
+
+    def test_box_only_group_holds_only_source_nodes(self):
+        result, starter = _convert(_deck(
+            BOX_ROUND_BRICK,
+            _set_box(nsid=0, dof=3, vad=0, lcid=10, sf=2.0, boxid=8)))
+        imps = _imp_cards(starter)
+        self.assertEqual(len(imps), 1)
+        self.assertEqual(sorted(_grnod_nodes(starter, imps[0][6])),
+                         [11, 12, 13, 14, 15, 16, 17, 18])
+        self.assertTrue(_has_warn(result, "NSID is 0", "all 8 node(s)"))
+
+    def test_the_rbody_master_is_in_the_deck_but_not_in_the_box_group(self):
+        """Proves the exclusion is real: the master node exists, sits inside the
+        box geometrically, and is still absent from the driven group."""
+        _result, starter = _convert(_deck(
+            BOX_ROUND_BRICK,
+            _set_box(nsid=0, dof=3, vad=0, lcid=10, sf=2.0, boxid=8)))
+        master = None
+        for _gid, gdata in _blocks(starter, "/GRNOD/NODE"):
+            flat = []
+            for ln in gdata:
+                flat += [int(x) for x in _fields(ln) if x]
+            if len(flat) == 1:                    # rb_indnode_pid2
+                master = flat[0]
+        self.assertIsNotNone(master, "no /RBODY master group found")
+        coords = {}
+        for ln in starter.splitlines():
+            m = re.match(r"^\s*(\d+)\s+(-?[\d.eE+-]+)\s+(-?[\d.eE+-]+)"
+                         r"\s+(-?[\d.eE+-]+)\s*$", ln)
+            if m:
+                coords[int(m.group(1))] = tuple(float(m.group(i))
+                                                for i in (2, 3, 4))
+        self.assertIn(master, coords)
+        x, y, z = coords[master]
+        self.assertTrue(19.0 <= x <= 25.0 and -1.0 <= y <= 5.0
+                        and -1.0 <= z <= 5.0,
+                        "the master must lie INSIDE the box for this to prove "
+                        f"anything — got {coords[master]}")
+        imps = _imp_cards(starter)
+        self.assertNotIn(master, _grnod_nodes(starter, imps[0][6]))
+
+    def _build(self, deck):
+        from k2rad.parser import parse_k_file
+        from k2rad.writer.assembly import build_starter
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(deck)
+        st = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, st)
+        deck_nodes = set(st.nodes)
+        build_starter(st)
+        tmp.cleanup()
+        return st, deck_nodes
+
+    def test_source_snapshot_is_taken_before_any_synthesis(self):
+        st, deck_nodes = self._build(_deck(BOX_ROUND_BRICK))
+        self.assertEqual(st.source_node_ids, deck_nodes)
+        self.assertTrue(set(st.nodes) - st.source_node_ids,
+                        "this deck must synthesize at least one node for the "
+                        "test to mean anything")
+
+    def test_no_snapshot_without_a_box(self):
+        """A set of ints per node is a real cost on the 100-200 MB mesh decks in
+        the reference corpora, and nothing reads it unless a *DEFINE_BOX exists —
+        which is exactly the precondition for _box_node_ids being reachable."""
+        st, _deck_nodes = self._build(_deck())
+        self.assertEqual(st.source_node_ids, set())
+        self.assertTrue(st.nodes, "the deck does have nodes")
+
+    def test_one_warning_per_missing_box_not_one_per_row(self):
+        deck = _deck(_set_box(nsid=1, dof=1, boxid=99),
+                     _set_box(nsid=1, dof=2, boxid=99),
+                     _set_box(nsid=1, dof=3, boxid=99))
+        result, _starter = _convert(deck)
+        hits = [w for w in result.warnings if "no *DEFINE_BOX 99" in w]
+        self.assertEqual(len(hits), 1, f"one warning expected, got {len(hits)}")
+
+
+#: *MAT_RIGID for part 2 whose card 3 names LCO = 40 (local x = global +Y).
+MAT_RIGID_LCO_40 = """\
+*MAT_RIGID
+       2   7.85E-9  210000.0       0.3
+       1.0       7.0       7.0
+      40.0
+"""
+
+#: *MAT_RIGID for part 2 whose card 3 gives the A1-V3 vector pair:
+#: a = +Y, v = +Z  ->  c = a x v = +X, b = c x a = +Z.
+MAT_RIGID_A_V = """\
+*MAT_RIGID
+       2   7.85E-9  210000.0       0.3
+       1.0       7.0       7.0
+       0.0       1.0       0.0       0.0       0.0       1.0
+"""
+
+
+def _triad(starter):
+    """(N1, X'-direction, Y'-direction) of the single /SKEW/MOV, from the helper
+    nodes' coordinates."""
+    _sid, data = _blocks(starter, "/SKEW/MOV")[0]
+    h = [int(x) for x in _fields(data[0], 10, 4)[:3]]
+    pos = {}
+    for ln in starter.splitlines():
+        m = re.match(r"^\s*(\d+)\s+(-?[\d.eE+-]+)\s+(-?[\d.eE+-]+)"
+                     r"\s+(-?[\d.eE+-]+)\s*$", ln)
+        if m and int(m.group(1)) in h:
+            pos[int(m.group(1))] = tuple(float(m.group(i)) for i in (2, 3, 4))
+
+    def _unit(a, b):
+        v = tuple(pos[b][i] - pos[a][i] for i in range(3))
+        n = math.sqrt(sum(c * c for c in v))
+        return tuple(round(c / n, 12) for c in v)
+    return pos[h[0]], _unit(h[0], h[1]), _unit(h[0], h[2])
+
+
+class TestLocalFrameFromTheDeck(unittest.TestCase):
+    """_RIGID_LOCAL's triad is the body's OWN local system when the deck names it.
+
+    LS-DYNA: "the local coordinate system is specified with LCO and CID in
+    *MAT_RIGID and *CONSTRAINED_NODAL_RIGID_BODY, respectively. If LCO/CID is 0,
+    the local coordinate system defaults to the principal inertia directions"
+    (Manual Vol I R16 p.756-757 Remark 7). k2rad already parsed the CNRB's CID
+    (zero consumers) and now parses *MAT_RIGID card 3 as well, so both named
+    forms are EXACT and only the principal-inertia default is approximated.
+    """
+
+    def test_mat_rigid_card_3_lco_is_parsed(self):
+        st = _parse(HEAD.replace(
+            "*MAT_RIGID\n       2   7.85E-9  210000.0       0.3\n"
+            "       1.0       7.0       7.0\n", MAT_RIGID_LCO_40) + END)
+        self.assertEqual(st.mat_rigid[2].lco, 40)
+        self.assertIsNone(st.mat_rigid[2].a_vec)
+
+    def test_mat_rigid_card_3_vector_pair_is_parsed(self):
+        st = _parse(HEAD.replace(
+            "*MAT_RIGID\n       2   7.85E-9  210000.0       0.3\n"
+            "       1.0       7.0       7.0\n", MAT_RIGID_A_V) + END)
+        self.assertEqual(st.mat_rigid[2].lco, 0)
+        self.assertEqual(st.mat_rigid[2].a_vec, (0.0, 1.0, 0.0))
+        self.assertEqual(st.mat_rigid[2].v_vec, (0.0, 0.0, 1.0))
+
+    def test_a_deck_without_card_3_keeps_lco_zero(self):
+        st = _parse(_deck())
+        self.assertEqual((st.mat_rigid[2].lco, st.mat_rigid[2].a_vec,
+                          st.mat_rigid[2].v_vec), (0, None, None))
+
+    def test_card_3_is_found_past_interleaved_comment_lines(self):
+        """The manual's own worked example (Vol I R16 p.11-150) writes a `$`
+        header above every card, and that is how LS-PrePost writes *MAT_RIGID —
+        so card 3 must be located by CARD index, not by line index."""
+        st = _parse("*KEYWORD\n"
+                    "*MAT_RIGID\n"
+                    "$      MID        RO         E        PR\n"
+                    "         9   7.85E-9  210000.0       0.3\n"
+                    "$      CMO      CON1      CON2\n"
+                    "        -1        40    110111\n"
+                    "$LCO or A1        A2        A3        V1        V2"
+                    "        V3\n"
+                    "        40\n"
+                    "*END\n")
+        m = st.mat_rigid[9]
+        self.assertEqual((m.cmo, m.con1, m.con2), (-1.0, 40, 110111))
+        self.assertEqual((m.lco, m.a_vec, m.v_vec), (40, None, None))
+
+    def test_a_partial_card_3_is_read_as_neither_form(self):
+        """Field 1 is LCO **or** A1 and the card does not disambiguate. A non-zero
+        V1/V2/V3 picks the vector form; a lone non-zero field 1 is LCO. Anything
+        else (A2/A3 set with V zero — no valid c = a x v) is neither, and the
+        writer's global-axes fallback reports it."""
+        for card3, want in (("      40.0", (40, None, None)),
+                            ("       0.0       1.0       0.0       0.0"
+                             "       0.0       1.0",
+                             (0, (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))),
+                            ("       1.0       2.0       3.0", (0, None, None)),
+                            ("", (0, None, None))):
+            with self.subTest(card3=card3):
+                st = _parse("*KEYWORD\n*MAT_RIGID\n"
+                            "         9   7.85E-9  210000.0       0.3\n"
+                            "       0.0       0.0       0.0\n"
+                            + (card3 + "\n" if card3 else "")
+                            + "*END\n")
+                m = st.mat_rigid[9]
+                self.assertEqual((m.lco, m.a_vec, m.v_vec), want)
+
+    def _lco_deck(self, *frags):
+        return HEAD.replace(
+            "*MAT_RIGID\n       2   7.85E-9  210000.0       0.3\n"
+            "       1.0       7.0       7.0\n",
+            MAT_RIGID_LCO_40) + COORD_40 + "".join(frags) + END
+
+    def test_triad_follows_mat_rigid_lco(self):
+        """COORD_40's local x is global +Y and its local y is global -X, so
+        N1->N2 must be +Y and N1->N3 must be -X — NOT the global axes."""
+        result, starter = _convert(self._lco_deck(_RIGID_LOCAL))
+        _n1, xdir, ydir = _triad(starter)
+        self.assertEqual(xdir, (0.0, 1.0, 0.0))
+        self.assertEqual(ydir, (-1.0, 0.0, 0.0))
+        self.assertTrue(_has_warn(result, "axes are taken from LCO=40",
+                                  "reproduced EXACTLY"))
+        self.assertFalse(_has_warn(result, "INITIALISED TO THE GLOBAL AXES"))
+
+    def test_triad_follows_the_a_v_vector_pair(self):
+        """a = +Y, v = +Z  ->  c = a x v = +X, b = c x a = +Z, and the emitted
+        triad is (a, b, c) = (X', Y', Z')."""
+        deck = HEAD.replace(
+            "*MAT_RIGID\n       2   7.85E-9  210000.0       0.3\n"
+            "       1.0       7.0       7.0\n",
+            MAT_RIGID_A_V) + _RIGID_LOCAL + END
+        result, starter = _convert(deck)
+        _n1, xdir, ydir = _triad(starter)
+        self.assertEqual(xdir, (0.0, 1.0, 0.0))
+        self.assertEqual(ydir, (0.0, 0.0, 1.0))
+        self.assertTrue(_has_warn(result, "the A1-V3 vector pair",
+                                  "reproduced EXACTLY"))
+
+    def test_triad_follows_the_cnrb_cid(self):
+        """The CNRB's CID was already parsed and had ZERO consumers, so the triad
+        was global-aligned while /SKEW/FIX/40 with exactly the right axes sat in
+        the same .rad — and the warning claimed k2rad read neither field."""
+        deck = _deck(COORD_40,
+                     "*CONSTRAINED_NODAL_RIGID_BODY\n"
+                     "        50        40         1\n",
+                     "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL\n"
+                     "        50         1         0        10       2.5\n")
+        result, starter = _convert(deck)
+        _n1, xdir, ydir = _triad(starter)
+        self.assertEqual(xdir, (0.0, 1.0, 0.0))
+        self.assertEqual(ydir, (-1.0, 0.0, 0.0))
+        self.assertTrue(_has_warn(
+            result, "axes are taken from CID=40 on "
+            "*CONSTRAINED_NODAL_RIGID_BODY 50", "reproduced EXACTLY"))
+
+    def test_cnrb_without_a_cid_falls_back_and_says_why(self):
+        deck = _deck("*CONSTRAINED_NODAL_RIGID_BODY\n"
+                     "        50         0         1\n",
+                     "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL\n"
+                     "        50         1         0        10       2.5\n")
+        result, starter = _convert(deck)
+        _n1, xdir, ydir = _triad(starter)
+        self.assertEqual((xdir, ydir), ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)))
+        self.assertTrue(_has_warn(result, "INITIALISED TO THE GLOBAL AXES",
+                                  "*CONSTRAINED_NODAL_RIGID_BODY CID is 0",
+                                  "PRINCIPAL INERTIA"))
+
+    def test_mat_rigid_without_card_3_falls_back_and_says_why(self):
+        result, starter = _convert(_deck(_RIGID_LOCAL))
+        _n1, xdir, ydir = _triad(starter)
+        self.assertEqual((xdir, ydir), ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)))
+        self.assertTrue(_has_warn(result, "INITIALISED TO THE GLOBAL AXES",
+                                  "LCO on *MAT_RIGID 2 card 3 is 0",
+                                  "PRINCIPAL INERTIA"))
+
+    def test_an_lco_that_is_not_in_the_deck_falls_back_and_says_so(self):
+        deck = HEAD.replace(
+            "*MAT_RIGID\n       2   7.85E-9  210000.0       0.3\n"
+            "       1.0       7.0       7.0\n",
+            MAT_RIGID_LCO_40.replace("      40.0", "      77.0")) \
+            + _RIGID_LOCAL + END
+        result, starter = _convert(deck)
+        _n1, xdir, _ydir = _triad(starter)
+        self.assertEqual(xdir, (1.0, 0.0, 0.0))
+        self.assertTrue(_has_warn(result, "LCO=77", "is not a "
+                                  "*DEFINE_COORDINATE_* system in the deck"))
+
+    def test_a_named_frame_does_not_change_the_binding_or_the_scale(self):
+        """Only the ORIENTATION changes: the skew still goes in skew_ID, the
+        triad legs stay 10% of the body span, and Fscale_Y is still SF."""
+        _result, starter = _convert(self._lco_deck(_RIGID_LOCAL))
+        skew_id, _data = _blocks(starter, "/SKEW/MOV")[0]
+        imps = _imp_cards(starter)
+        self.assertEqual(len(imps), 1)
+        self.assertEqual((imps[0][4], imps[0][7], imps[0][10]),
+                         (skew_id, 0, 2.5))
+        n1, xdir, ydir = _triad(starter)
+        _sid, data = _blocks(starter, "/SKEW/MOV")[0]
+        h = [int(x) for x in _fields(data[0], 10, 4)[:3]]
+        pos = {}
+        for ln in starter.splitlines():
+            m = re.match(r"^\s*(\d+)\s+(-?[\d.eE+-]+)\s+(-?[\d.eE+-]+)"
+                         r"\s+(-?[\d.eE+-]+)\s*$", ln)
+            if m and int(m.group(1)) in h:
+                pos[int(m.group(1))] = tuple(float(m.group(i))
+                                             for i in (2, 3, 4))
+        for other in (h[1], h[2]):
+            leg = math.sqrt(sum((pos[other][i] - n1[i]) ** 2
+                                for i in range(3)))
+            self.assertAlmostEqual(leg, 0.4, places=9)
+        self.assertNotEqual(xdir, ydir)
+
+
+class TestRbodyMasterCoordinate(unittest.TestCase):
+    """The _LOCAL helper triad must not move the written /RBODY master node.
+
+    ``_make_rbodies`` folds the helpers into ``nodes_by_pid[pid]`` (they have to
+    be rigid secondaries to co-rotate) and used the SAME list for the centroid,
+    so the master landed 0.9% of the body span off the mesh centre — measured
+    (22.036364, 2.036364, 2) instead of (22, 2, 2). Inert at runtime (ICoG
+    relocates the master to the true CoM and the helpers are massless) but a
+    silently wrong pre-run coordinate.
+    """
+
+    @staticmethod
+    def _master_coord(starter, mesh_nodes):
+        rb_master = None
+        for _gid, gdata in _blocks(starter, "/GRNOD/NODE"):
+            flat = []
+            for ln in gdata:
+                flat += [int(x) for x in _fields(ln) if x]
+            if len(flat) == 1 and flat[0] not in mesh_nodes:
+                rb_master = flat[0]
+        assert rb_master is not None, "no /RBODY master group"
+        for ln in starter.splitlines():
+            m = re.match(r"^\s*(\d+)\s+(-?[\d.eE+-]+)\s+(-?[\d.eE+-]+)"
+                         r"\s+(-?[\d.eE+-]+)\s*$", ln)
+            if m and int(m.group(1)) == rb_master:
+                return tuple(float(m.group(i)) for i in (2, 3, 4))
+        raise AssertionError("master node not in /NODE")
+
+    def test_mat_rigid_master_is_the_mesh_centroid(self):
+        brick = set(range(11, 19))
+        _r1, without = _convert(_deck())
+        _r2, with_local = _convert(_deck(_RIGID_LOCAL))
+        self.assertEqual(self._master_coord(without, brick), (22.0, 2.0, 2.0))
+        self.assertEqual(self._master_coord(with_local, brick),
+                         (22.0, 2.0, 2.0),
+                         "a _LOCAL card must not shift the master")
+
+    def test_cnrb_master_is_the_node_set_centroid(self):
+        cnrb = ("*CONSTRAINED_NODAL_RIGID_BODY\n"
+                "        50         0         1\n")
+        shell = {1, 2, 3, 4}
+        _r1, without = _convert(_deck(cnrb))
+        _r2, with_local = _convert(_deck(
+            cnrb,
+            "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL\n"
+            "        50         1         0        10       2.5\n"))
+        # set 1 = nodes 1-4, a 10x10 square in z = 0 -> centroid (5, 5, 0)
+        base = self._master_coord(without, shell | set(range(11, 19)))
+        self.assertEqual(base, (5.0, 5.0, 0.0))
+        self.assertEqual(self._master_coord(with_local,
+                                            shell | set(range(11, 19))),
+                         base, "a _LOCAL card must not shift the CNRB master")
+
+
+class TestLocalTriadLifecycle(unittest.TestCase):
+    """No triad without a motion, and no motion-less triad without its skew."""
+
+    def test_no_triad_for_a_dof_with_no_dir(self):
+        """|DOF| 9/10/11/12 have no /IMP* Dir letter, so the writer refuses the
+        card — building a triad for it left three unexplained element-free nodes
+        in /NODE and in the /RBODY group, plus a warning promising a co-rotating
+        skew the .rad does not contain."""
+        for dof in (9, 10, 11, 12):
+            with self.subTest(dof=dof):
+                result, starter = _convert(_deck(
+                    "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL\n"
+                    f"         2{dof:10d}         0        10       2.5\n"))
+                self.assertEqual(_blocks(starter, "/SKEW/MOV"), [])
+                self.assertEqual(_imp_cards(starter), [])
+                self.assertFalse(_has_warn(result, "CO-ROTATING"))
+                self.assertTrue(_has_warn(result, f"DOF={dof}",
+                                          "no /IMP* Dir"))
+                brick = set(range(11, 19))
+                self.assertEqual(
+                    TestRbodyMasterCoordinate._master_coord(starter, brick),
+                    (22.0, 2.0, 2.0))
+
+    def test_a_dropped_motion_still_gets_its_skew_mov(self):
+        """An ELEMENT-FREE *MAT_RIGID part gets no /RBODY, so rbody_info has no
+        entry and the motion is dropped — but the prepass has already put three
+        helper nodes in /NODE, so the /SKEW/MOV that explains them has to be
+        written rather than leaving them unaccounted for and the prepass warning
+        describing a skew the .rad does not contain. An unreferenced /SKEW is
+        inert."""
+        deck = _deck(
+            "*PART\nrigid, no elements\n"
+            "       3       2       2\n",
+            "*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL\n"
+            "         3         1         0        10       2.5\n")
+        result, starter = _convert(deck)
+        self.assertTrue(_has_warn(result, "pid=3", "no RBODY found"))
+        self.assertEqual(_imp_cards(starter), [],
+                         "the motion itself must be dropped")
+        skews = _blocks(starter, "/SKEW/MOV")
+        self.assertEqual(len(skews), 1,
+                         "the triad's own /SKEW/MOV must be in the deck")
+        helpers = [int(x) for x in _fields(skews[0][1][0], 10, 4)[:3]]
+        node_ids = set()
+        for ln in starter.splitlines():
+            m = re.match(r"^\s*(\d+)\s+-?[\d.eE+-]+\s+-?[\d.eE+-]+"
+                         r"\s+-?[\d.eE+-]+\s*$", ln)
+            if m:
+                node_ids.add(int(m.group(1)))
+        for h in helpers:
+            self.assertIn(h, node_ids,
+                          f"helper node {h} is not explained by anything")
+
+
+class TestBodyLoadSummaryWarningsAreGatedOnEmission(unittest.TestCase):
+    """A summary paragraph must describe what the .rad CONTAINS.
+
+    Both new ones fired on ``if state.<container>:`` — the presence of a PARSED
+    card — so a *LOAD_BODY_VECTOR with a missing LCID warned "load curve 999 not
+    found — skipped" and then asserted the /GRAV + /SKEW/FIX mapping anyway. The
+    *LOAD_BODY_{X,Y,Z} paragraph next to them was already gated on emission.
+    """
+
+    def test_vector_summary_is_silent_when_the_curve_is_missing(self):
+        result, starter = _convert(_deck(_body_vector(lcid=999)))
+        self.assertEqual(_grav_card(starter), [])
+        self.assertTrue(_has_warn(result, "*LOAD_BODY_VECTOR",
+                                  "load curve 999 not found"))
+        self.assertFalse(_has_warn(result, "ONE /GRAV with DIR=X"))
+
+    def test_rotational_summary_and_header_are_silent_when_nothing_emitted(self):
+        result, starter = _convert(_deck(_body_rot("Z", lcid=999)))
+        self.assertEqual(_centri_card(starter), [])
+        self.assertTrue(_has_warn(result, "*LOAD_BODY_RZ",
+                                  "curve 999 not found"))
+        self.assertFalse(_has_warn(result, "/LOAD/CENTRI with fct_IDT"))
+        self.assertFalse(_has_warn(result, "Dir is written as XX/YY/ZZ"))
+        self.assertNotIn("ROTATIONAL BODY LOADS", starter,
+                         "no dangling section header")
+
+    def test_the_summaries_still_fire_when_a_card_is_emitted(self):
+        result, starter = _convert(_deck(_body_vector(), _body_rot("Z")))
+        self.assertEqual(len(_grav_card(starter)), 1)
+        self.assertEqual(len(_centri_card(starter)), 1)
+        self.assertTrue(_has_warn(result, "ONE /GRAV with DIR=X"))
+        self.assertTrue(_has_warn(result, "/LOAD/CENTRI with fct_IDT"))
+        self.assertIn("ROTATIONAL BODY LOADS", starter)
+
+    def test_a_missing_rotational_curve_next_to_a_good_one_keeps_the_header(self):
+        result, starter = _convert(_deck(_body_rot("Z"),
+                                         _body_rot("X", lcid=999)))
+        self.assertEqual(len(_centri_card(starter)), 1)
+        self.assertIn("ROTATIONAL BODY LOADS", starter)
+        self.assertTrue(_has_warn(result, "*LOAD_BODY_RX",
+                                  "curve 999 not found"))
+
+
+class TestGrnodIdAllocation(unittest.TestCase):
+    """Both branches of _make_imposed_motions_set draw from next_grnod_id().
+
+    k2rad re-emits every user *SET_NODE under its own SID, so a set at or above
+    the auto-id base (90001) collides with a synthesized /GRNOD id — starter
+    ERROR 79 DUPLICATE ID / IN NODE GROUP DEFINITION and no restart file. The
+    motion branch was fixed; the zero-scale /BCS branch four lines away still
+    used the unguarded next_id().
+    """
+
+    @staticmethod
+    def _run(sf):
+        """_make_imposed_motions_set on a state whose ONLY node sets sit exactly
+        on the auto-id base, so an unguarded next_id() lands on one of them.
+        Driven directly: on a full deck the /RBODY groups (still next_id(), the
+        pre-existing hazard the docstring names) consume the low auto ids first
+        and hide which branch allocated what."""
+        from k2rad.state import NodeData, PrescribedMotionSet
+        from k2rad.writer.loads import _make_imposed_motions_set
+        st = ConversionState()
+        st.nodes = {1: NodeData(0.0, 0.0, 0.0), 2: NodeData(1.0, 0.0, 0.0)}
+        st.node_sets[90001] = ("high_a", [1, 2])
+        st.node_sets[90002] = ("high_b", [1, 2])
+        st.node_sets[90003] = ("high_c", [1, 2])
+        st.prescribed_motion_sets.append(
+            PrescribedMotionSet(90001, 1, 2, 10, sf, 1e28, 0.0))
+        lines = _make_imposed_motions_set(st)
+        ids = [int(ln.split("/")[-1]) for ln in lines
+               if ln.startswith("/GRNOD/NODE/")]
+        return st, ids
+
+    def test_bcs_grnod_dodges_a_high_user_set_id(self):
+        st, ids = self._run(0.0)
+        self.assertEqual(len(ids), 1)
+        self.assertNotIn(ids[0], st.node_sets,
+                         f"/GRNOD/{ids[0]} collides with a user *SET_NODE — "
+                         "starter ERROR 79 DUPLICATE ID")
+
+    def test_motion_grnod_dodges_a_high_user_set_id(self):
+        st, ids = self._run(1.0)
+        self.assertEqual(len(ids), 1)
+        self.assertNotIn(ids[0], st.node_sets)
+
+
+class TestVidRegistries(unittest.TestCase):
+    def test_vid_may_name_a_define_coordinate_nodes_system(self):
+        """*DEFINE_COORDINATE_NODES emits its /SKEW under `cid` too
+        (_emit_skew_from_nodes), so a |DOF| 4/8 card naming one resolves. Leaving
+        coord_nodes out of the fallback sent it down the "no /SKEW exists — THE
+        DIRECTION IS WRONG" exit while the skew sat in the same .rad."""
+        deck = _deck("*DEFINE_COORDINATE_NODES\n"
+                     "        45         1         2         4         X\n",
+                     "*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                     "         1         4         0        10       1.0"
+                     "        45\n")
+        result, starter = _convert(deck)
+        imps = _imp_cards(starter)
+        self.assertEqual(len(imps), 1)
+        self.assertEqual(imps[0][4], 45,
+                         "the *DEFINE_COORDINATE_NODES skew must bind")
+        self.assertFalse(_has_warn(result, "THE DIRECTION IS WRONG"))
+
+    def test_an_unknown_vid_still_warns(self):
+        deck = _deck("*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                     "         1         4         0        10       1.0"
+                     "        66\n")
+        result, _starter = _convert(deck)
+        self.assertTrue(_has_warn(result, "*DEFINE_VECTOR 66",
+                                  "THE DIRECTION IS WRONG"))
+
+
+class TestNegativeDofLockPrecondition(unittest.TestCase):
+    def test_lock_warning_names_the_cmo_precondition(self):
+        """DOF -4/-8 "only applies to rigid bodies if |CMO| = 2 on *MAT_RIGID or
+        *CONSTRAINED_NODAL_RIGID_BODY" (p.750). k2rad emits the lock either way
+        (the manual does not say what LS-DYNA does instead), so the warning has
+        to name the precondition."""
+        deck = _deck(VECTOR_Z,
+                     "*BOUNDARY_PRESCRIBED_MOTION_RIGID\n"
+                     "         2        -4         0        10       1.0"
+                     "        30\n")
+        result, starter = _convert(deck)
+        self.assertEqual(len(_imp_cards(starter)), 3, "1 driven + 2 locked")
+        self.assertTrue(_has_warn(result, "DOF=-4", "|CMO| = 2",
+                                  "OVER-CONSTRAINT"))
+
+
+class TestLoadBodyGeneralizedSpellings(unittest.TestCase):
+    def test_all_three_option_spellings_are_registered(self):
+        """The manual's name is *LOAD_BODY_GENERALIZED_OPTION with OPTION in
+        {SET_NODE, SET_PART} (p.33-31), and only the bare form was registered —
+        so the two spellings a real deck actually uses still arrived as mute
+        skipped_keywords entries, which is exactly what the registration exists
+        to prevent."""
+        for kw in ("LOAD_BODY_GENERALIZED",
+                   "LOAD_BODY_GENERALIZED_SET_NODE",
+                   "LOAD_BODY_GENERALIZED_SET_PART"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, HANDLERS)
+
+    def test_each_spelling_is_skipped_with_a_reason(self):
+        for kw in ("LOAD_BODY_GENERALIZED",
+                   "LOAD_BODY_GENERALIZED_SET_NODE",
+                   "LOAD_BODY_GENERALIZED_SET_PART"):
+            with self.subTest(kw=kw):
+                result, starter = _convert(_deck(
+                    f"*{kw}\n"
+                    "         1         0        10         0       0.0"
+                    "       0.0       0.0\n"
+                    "       0.0       0.0    -9810.0       0.0       0.0"
+                    "       0.0         0\n"))
+                self.assertEqual(_grav_card(starter), [])
+                self.assertEqual(_centri_card(starter), [])
+                self.assertTrue(_has_warn(result, f"*{kw}",
+                                          "no OpenRadioss equivalent"))
+                self.assertIn(kw, result.skipped_keywords)
 
 
 if __name__ == "__main__":

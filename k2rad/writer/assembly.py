@@ -658,6 +658,19 @@ def _warn_orphan_elements(state: ConversionState) -> None:
 
 
 def build_starter(state: ConversionState, progress=None) -> str:
+    # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
+    # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
+    # carriers, beam-orientation nodes). Everything resolving a *DEFINE_BOX by
+    # scanning state.nodes has to intersect with this, or a box drawn round the
+    # user's model also catches k2rad's own artefacts — measured: a box-only
+    # *BOUNDARY_PRESCRIBED_MOTION_SET_BOX drove a rigid body's synthesized master
+    # node, a kinematic condition the source deck never states.
+    #
+    # Only taken when the deck HAS a *DEFINE_BOX, which is the precondition for
+    # _box_node_ids being reachable at all: a set of ints per node is a real cost
+    # on the 100-200 MB mesh decks in the corpora and nothing would read it.
+    if state.boxes:
+        state.source_node_ids = set(state.nodes)
     # *SET_PART_ADD → plain part sets, one nesting level, BEFORE anything
     # reads state.part_sets (contact sides, *CONTACT_INTERIOR, gravity/ALE
     # scopes). Idempotent — convert() already ran it so --auto-gapmin sees

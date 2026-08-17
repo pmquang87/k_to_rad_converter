@@ -1649,7 +1649,17 @@ class PartComposite:
 
 @dataclass
 class MatRigid:
-    """*MAT_RIGID → /MAT/ELAST + /RBODY (deferred)."""
+    """*MAT_RIGID → /MAT/ELAST + /RBODY (deferred).
+
+    Card 3 ("must be included but may be left blank", Vol II R16 p.2-233) is
+    ``LCO or A1 | A2 | A3 | V1 | V2 | V3`` and carries the body's own LOCAL
+    system: ``LCO`` is a *DEFINE_COORDINATE_* id, or ``a``/``v`` are two
+    body-fixed vectors whose triad is ``(a, b, c)`` with ``c = a x v`` and
+    ``b = c x a``. Either form "specifies the coordinate system used for
+    *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL", defaulting to the body's
+    principal inertia directions when both are absent — which is the one case
+    k2rad cannot recover (it computes no inertia tensor).
+    """
     mid: int
     title: str
     rho: float
@@ -1658,6 +1668,9 @@ class MatRigid:
     cmo: float
     con1: int
     con2: int
+    lco: int = 0
+    a_vec: Optional[Tuple[float, float, float]] = None
+    v_vec: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass
@@ -2129,6 +2142,15 @@ class CnrbSpcBc:
     ind_node: int       # /RBODY master node the /BCS acts on
     tra: str            # "111"-style translational mask, as emitted
     rot: str            # "111"-style rotational mask, as emitted
+
+
+#: *BOUNDARY_PRESCRIBED_MOTION VAD -> the OpenRadioss keyword that carries it.
+#: THE ONLY definition of which VADs k2rad converts: ``handlers._pm_vad_supported``
+#: refuses everything this dict does not hold, and the writer indexes it directly.
+#: Keeping one dict is the point — a guard that enumerated the unsupported values
+#: instead let an out-of-range VAD (typo, negative, a future LS-DYNA code) reach
+#: the writer's bare lookup and abort the whole conversion with a KeyError.
+PM_VAD_KEYWORD = {0: "IMPVEL", 1: "IMPACC", 2: "IMPDISP"}
 
 
 @dataclass
@@ -3761,10 +3783,20 @@ class FoamRefGeometry:
 
 @dataclass
 class PressureLoad:
-    """*LOAD_SEGMENT / *LOAD_SEGMENT_ID → /PLOAD."""
+    """*LOAD_SEGMENT / *LOAD_SEGMENT_ID → /PLOAD.
+
+    ``at`` is the arrival time (card 2 field 3, Manual Vol I R16 p.33-99). It has
+    the same shift semantics as on *LOAD_SEGMENT_SET / *LOAD_SHELL — "the
+    function value of the load curves will be evaluated at the offset time given
+    by the difference of the solution time and AT" (Remark 3) — so it becomes a
+    /SENSOR/TIME with ``Tdelay = at`` in the /PLOAD ``sens_ID`` slot. k2rad <=
+    PR #116 never read the field at all: the pressure started at t = 0 with no
+    diagnostic, while the identical AT on the _SET sibling was warned about.
+    """
     lcid: int
     sf: float
     nodes: List[int]
+    at: float = 0.0
 
 
 @dataclass
@@ -4776,6 +4808,17 @@ class ConversionState:
     # part" warning would misreport these.
     local_frame_nodes: Dict[int, List[int]] = field(default_factory=dict)
 
+    #: Every node id the SOURCE deck defined, snapshotted by build_starter as its
+    #: very first act — i.e. before any prepass synthesizes a node. The writer
+    #: adds plenty: /RBODY CoG masters, the /SKEW/MOV third nodes, the
+    #: *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL triads, rigid-wall carriers,
+    #: *ELEMENT_BEAM_ORIENTATION third nodes. A *DEFINE_BOX names a region of
+    #: the USER's model, so anything resolving box membership by scanning
+    #: state.nodes has to intersect with this set or it drives k2rad's own
+    #: artefacts (see _box_node_ids). Empty means "not snapshotted yet", in which
+    #: case consumers fall back to the whole node table.
+    source_node_ids: Set[int] = field(default_factory=set)
+
     # ── Constraints ────────────────────────────────────────────
     # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
     cnrbs: List[ConstrainedNodalRigidBody] = field(default_factory=list)
@@ -5114,9 +5157,10 @@ class ConversionState:
         no-op vs next_id() in the common case (no user node set that high), so
         it does not shift ids on any ordinary deck.
 
-        NOTE: only the gravity groups draw from this yet. The other synthesized
-        /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...) still use
-        next_id() and carry the same latent hazard."""
+        NOTE: the gravity groups, the *BOUNDARY_PRESCRIBED_MOTION_SET motion
+        groups and that path's zero-scale /BCS groups draw from this. The other
+        synthesized /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...)
+        still use next_id() and carry the same latent hazard."""
         gid = self.next_id()
         while gid in self.node_sets:
             gid = self.next_id()

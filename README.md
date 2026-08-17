@@ -2446,6 +2446,24 @@ python -m unittest discover -s tests
   keywords of the include — coordinate-system origins, box extents,
   velocity vectors under rotation, literal rotation-axis points under any
   transform — is warned per keyword).
+- **Single-element / sparsely-connected SOLID validation decks need
+  `*CONTROL_TIMESTEP TSSFAC <= 0.35`.** `*SECTION_SOLID ELFORM = 1` maps to
+  `/PROP/SOLID` `Isolid = 17`, which is FULL 2x2x2 integration
+  (`hm_read_prop14.F:333-341` sets `NPT = NPG = 8`); LS-DYNA's `TSSFAC = 0.9`
+  default was calibrated for the UNDER-integrated `ELFORM = 1` element k2rad
+  substitutes away from. No `/DT` card is emitted unless the deck states
+  `TSSFAC > 0`, so the engine then runs at Radioss's own default `Tsca = 0.9`
+  (`dt = 0.857 L/c`), which is super-critical for a lightly-connected hex:
+  measured on a 10 mm steel hex, an unstable mode amplified round-off by x3.07
+  per cycle (a brick driven rigidly on all 8 nodes — physically unable to deform
+  — grew 0.2906 mm of in-plane distortion out of 1.85e-18, with I-ENERGY still
+  ~1e-27), and sibling decks hit ENERGY ERROR LIMIT at 1121-1323 cycles.
+  `Isolid = 24` at the same step does not help. Real meshes share nodal mass
+  across up to 8 elements, which lowers `omega_max` by up to `sqrt(8)`, so this
+  bites validation decks rather than production models — but a one-element deck
+  that "diverges" is almost always this and not the keyword under test. Adding
+  `TSSFAC = 0.3` makes k2rad emit `/DT  0.3  0` and the same deck reaches
+  NORMAL TERMINATION.
 
 ---
 

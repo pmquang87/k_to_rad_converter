@@ -50,7 +50,8 @@ from .state import (
     ConstrainedJoint, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
-    BcsSpc, PrescribedMotionRigid, PrescribedMotionSet, LoadRigidBody,
+    BcsSpc, PM_VAD_KEYWORD, PrescribedMotionRigid, PrescribedMotionSet,
+    LoadRigidBody,
     LoadNode, RigidWallPlanar, RigidWallGeometric,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
     ContactForceTransducer, ContactTied, ContactSpotweld, ContactType25,
@@ -2860,6 +2861,22 @@ def handle_mat_plastic_kinematic(block: Block, state: ConversionState) -> None:
 
 
 def handle_mat_rigid(block: Block, state: ConversionState) -> None:
+    """*MAT_RIGID (MAT_020) → /MAT/ELAST + a deferred /RBODY.
+
+    Card 3 (``LCO or A1  A2  A3  V1  V2  V3``, Vol II R16 p.2-233) is read for
+    the body's own LOCAL system, which is what
+    *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL drives in: "LCO also specifies the
+    coordinate system used for *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL. Defaults
+    to the principal coordinate system of the rigid body."
+
+    Field 1 is EITHER ``LCO`` (a *DEFINE_COORDINATE_* id) or ``A1`` (the first
+    component of vector **a**), which the card itself does not disambiguate. The
+    vector form needs BOTH **a** and **v** to be real vectors — the triad is
+    ``c = a x v``, ``b = c x a`` — so a non-zero V1/V2/V3 selects it and a lone
+    non-zero field 1 is LCO. The manual's own worked example
+    (Vol I R16 p.11-150) writes card 3 as a single ``&flg5cid`` next to a
+    *BOUNDARY_PRESCRIBED_MOTION_RIGID_local, which is exactly that shape.
+    """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
@@ -2874,7 +2891,17 @@ def handle_mat_rigid(block: Block, state: ConversionState) -> None:
     cmo = to_float(f2[0]) if f2 else 0.0
     con1 = to_int(f2[1]) if len(f2) > 1 else 0
     con2 = to_int(f2[2]) if len(f2) > 2 else 0
-    state.mat_rigid[mid] = MatRigid(mid, title, rho, E, nu, cmo, con1, con2)
+    # Card3: LCO or A1 | A2 A3 | V1 V2 V3 — "must be included but may be blank".
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    v3 = [to_float(f3[j]) if len(f3) > j and f3[j].strip() else 0.0
+          for j in range(6)]
+    lco, a_vec, v_vec = 0, None, None
+    if any(v3[3:]) and any(v3[:3]):
+        a_vec, v_vec = (v3[0], v3[1], v3[2]), (v3[3], v3[4], v3[5])
+    elif v3[0] and not (v3[1] or v3[2]):
+        lco = int(v3[0])
+    state.mat_rigid[mid] = MatRigid(mid, title, rho, E, nu, cmo, con1, con2,
+                                    lco=lco, a_vec=a_vec, v_vec=v_vec)
 
 
 def handle_mat_null(block: Block, state: ConversionState) -> None:
@@ -3773,6 +3800,14 @@ def _bpm_walk(block: Block, is_box: bool = False):
     PHANTOM motion on whatever set id ``OFFSET1`` happens to name — silent
     whenever that set exists. ``assembly._bpm_cards`` already implemented the
     correct rule for the *INCLUDE_TRANSFORM offsets; this is the parser half.
+
+    **Cards 2 and 3 are consumed POSITIONALLY — blank lines included.** Every
+    field of card 3 defaults (``OFFSET1 0., OFFSET2 0., LRB 0, NODE1 0, NODE2
+    0``, p.753) and TOFFSET/LCBCHK default to 0 (p.752), so an all-blank
+    continuation card is legal input. Hunting for the next NON-blank line
+    instead ate the FOLLOWING entity's card 1 and lost that motion silently.
+    Only the card-1 hunt skips blanks (an all-default card 1 has TYPEID 0 and is
+    not a motion at all).
     """
     raw = block.raw
     i = _title_offset(block)
@@ -3784,31 +3819,41 @@ def _bpm_walk(block: Block, is_box: bool = False):
         i += 1
         box: List[str] = []
         if is_box:
-            while i < len(raw) and not raw[i].strip():
-                i += 1
-            if i < len(raw):
-                box = _card(raw, i, fixed=True, n=8, w=10)
-                i += 1
+            box = _card(raw, i, fixed=True, n=8, w=10)   # blank => all defaults
+            i += 1
         # Card 3 is consumed and discarded: OFFSET1/OFFSET2 place a rotation
         # axis (|DOF| 9/10/11) and LRB/NODE1/NODE2 drive VAD=4, none of which
         # k2rad converts. Skipping it here is what stops it being misread.
         if abs(to_int(f1[1]) if len(f1) > 1 else 0) in (9, 10, 11) \
                 or (to_int(f1[2]) if len(f1) > 2 else 0) == 4:
-            while i < len(raw) and not raw[i].strip():
-                i += 1
             i += 1
         yield f1, box
 
 
 def _pm_vad_supported(state: ConversionState, keyword: str, ref: str,
                       vad: int) -> bool:
-    """False (with a warning) for a VAD k2rad will not convert. See
-    ``_PM_VAD_UNSUPPORTED``. Previously ``{0:IMPVEL,1:IMPACC,2:IMPDISP}
-    .get(vad, "IMPDISP")`` turned VAD 3 and 4 into an /IMPDISP with no
-    diagnostic at all."""
+    """False (with a warning) for a VAD k2rad will not convert.
+
+    The test is TOTAL: anything outside ``PM_VAD_KEYWORD`` is refused, whether or
+    not ``_PM_VAD_UNSUPPORTED`` has an explanation for it. Enumerating only the
+    known-bad values (3 and 4) left every OTHER value — a typo, a negative, a
+    future LS-DYNA code — passing the guard and reaching the writer's bare
+    ``PM_VAD_KEYWORD[pm.vad]``, which raised KeyError and aborted the whole
+    conversion with a traceback (measured: VAD=7 on _RIGID, VAD=9 on _SET).
+    Before the guard existed at all, ``.get(vad, "IMPDISP")`` turned VAD 3 and 4
+    into an /IMPDISP with no diagnostic.
+    """
+    if vad in PM_VAD_KEYWORD:
+        return True
     info = _PM_VAD_UNSUPPORTED.get(vad)
     if info is None:
-        return True
+        state.warn(
+            f"*{keyword} {ref}: VAD={vad} is not a *BOUNDARY_PRESCRIBED_MOTION "
+            "velocity/acceleration/displacement flag — the keyword defines 0-4 "
+            "only (Manual Vol I R16 p.751). Nothing is emitted for this card; "
+            "the DOF is left free. VAD 0 = velocity, 1 = acceleration, "
+            "2 = displacement.")
+        return False
     kind, why = info
     state.warn(
         f"*{keyword} {ref}: VAD={vad} ({kind}) is NOT converted — {why}. "
@@ -8568,10 +8613,52 @@ def handle_constrained_node_set(block: Block, state: ConversionState) -> None:
     state.constrained_node_sets.append(ConstrainedNodeSet(nsid, dof, tf))
 
 
+def _pload_sf_default(state: ConversionState, kw: str, ref: str,
+                      warned: bool) -> bool:
+    """Report SF = 0.0 being read as the documented default 1.0, once per block.
+
+    Every *LOAD_SEGMENT/_SET/*LOAD_SHELL card documents ``SF ... Default 1.``
+    (Manual Vol I R16 p.33-99 / p.33-115 / p.3421) and LS-DYNA applies its card
+    defaults on a ZERO test, not a blank test — the same keyword family spells
+    that out for DEATH ("EQ.0.0: default set to 1e28", p.752). So an explicit
+    0.0 is the default, and blank/0.0 cannot be told apart downstream.
+
+    It is warned rather than silently substituted because a zeroed SF is also a
+    common way of switching a load off by hand, and /PLOAD cannot express either
+    reading of a zero: ``hm_read_pload.F:167`` is ``IF (FCY == ZERO) FCY =
+    FAC_FCY``, so a card written with ``Fscale_y = 0`` runs the curve at FULL
+    unit-system amplitude — and for *LOAD_SHELL, whose sign is flipped, with the
+    pressure pointing the wrong way as well.
+    """
+    if warned:
+        return True
+    state.warn(
+        f"*{kw}: SF = 0.0 on {ref} is read as the card's documented default "
+        "1.0 (LS-DYNA applies its defaults on a zero test — the same keyword "
+        "family says so explicitly for DEATH, \"EQ.0.0: default set to 1e28\"). "
+        "If the zero was meant to switch the load OFF, delete the row instead: "
+        "/PLOAD cannot carry a zero scale either, because hm_read_pload.F:167 "
+        "replaces a zero ordinate scale with the unit-system factor and the "
+        "load would run at FULL amplitude.")
+    return True
+
+
 def handle_load_segment(block: Block, state: ConversionState) -> None:
+    """*LOAD_SEGMENT[_ID] → /PLOAD on the segment's own node order.
+
+    Card 2: ``LCID SF AT N1 N2 N3 N4 N5`` (Manual Vol I R16 p.33-99, defaults
+    ``none 1. 0.``). ``AT`` is the arrival time and SHIFTS the curve — "the
+    function value of the load curves will be evaluated at the offset time given
+    by the difference of the solution time and AT" (Remark 3) — so it becomes a
+    /SENSOR/TIME in the /PLOAD ``sens_ID`` slot, exactly as on the _SET sibling.
+    k2rad <= PR #116 never read the field: the pressure started at t = 0 with no
+    diagnostic at all.
+    """
     raw = block.raw
     # _ID variant: first line is "id  title", data starts at index 1
     data = raw[1:] if _has_id(block) else raw
+    warned_sf = False
+    warned_at = False
     # One card per loaded segment; the card may REPEAT inside one keyword.
     for i in range(len(data)):
         if not data[i].strip():       # blank card placeholder → skip
@@ -8580,11 +8667,24 @@ def handle_load_segment(block: Block, state: ConversionState) -> None:
         f1   = _card(data, i, fixed=True, n=8, w=10)
         lcid = to_int(f1[0])   if f1 else 0
         sf   = _ffield(f1, 1, 1.0)
+        at   = to_float(f1[2]) if len(f1) > 2 else 0.0
         nodes = [to_int(f1[j]) for j in range(3, min(7, len(f1)))]
         while nodes and nodes[-1] == 0:
             nodes.pop()
         if len(nodes) >= 3 and lcid > 0:
-            state.pressure_loads.append(PressureLoad(lcid, sf, nodes))
+            if sf == 0.0:
+                warned_sf = _pload_sf_default(
+                    state, block.keyword, f"the segment on curve {lcid}",
+                    warned_sf)
+                sf = 1.0
+            if at < 0.0 and not warned_at:
+                state.warn(
+                    f"*{block.keyword}: negative arrival time AT={at:g} on the "
+                    f"segment on curve {lcid} — ignored (the load applies from "
+                    "t=0). /SENSOR/TIME's Tdelay cannot be negative.")
+                warned_at = True
+            state.pressure_loads.append(
+                PressureLoad(lcid, sf, nodes, at=max(at, 0.0)))
 
 
 def handle_load_segment_set(block: Block, state: ConversionState) -> None:
@@ -8597,13 +8697,17 @@ def handle_load_segment_set(block: Block, state: ConversionState) -> None:
       at   = arrival/activation time → a /SENSOR/TIME with Tdelay = at in the
              /PLOAD sens_ID slot (the load is zero for t < at and the curve is
              then read at t - at; see ShellPressureLoad). k2rad <= PR #116
-             dropped it with a warning, having no /SENSOR emitter at all.
+             dropped it with a warning, having no /SENSOR emitter at all. The
+             shift itself is the manual's own reading of an arrival time
+             (*LOAD_SEGMENT Remark 3, p.33-101: "evaluated at the offset time
+             given by the difference of the solution time and AT").
     The segments are resolved from state.segment_sets at write time, so the
     *SET_SEGMENT may appear anywhere in the deck.
     """
     raw = block.raw
     data = raw[1:] if _has_id(block) else raw
     warned_at = False
+    warned_sf = False
     for i in range(len(data)):
         if not data[i].strip():           # blank card placeholder → skip
             continue
@@ -8616,6 +8720,10 @@ def handle_load_segment_set(block: Block, state: ConversionState) -> None:
         at   = to_float(f[3]) if len(f) > 3 else 0.0
         if ssid <= 0 or lcid <= 0:
             continue
+        if sf == 0.0:
+            warned_sf = _pload_sf_default(state, block.keyword,
+                                          f"segment set {ssid}", warned_sf)
+            sf = 1.0
         if at < 0.0 and not warned_at:
             state.warn(f"*{block.keyword}: negative arrival time AT={at:g} on "
                        f"segment set {ssid} — ignored (the load applies from "
@@ -8628,17 +8736,20 @@ def handle_load_segment_set(block: Block, state: ConversionState) -> None:
 def handle_load_shell(block: Block, state: ConversionState) -> None:
     """*LOAD_SHELL_ELEMENT / *LOAD_SHELL_SET[_ID] → /SURF/SEG + /PLOAD.
 
-    Card: ``EID|ESID  LCID  SF  AT`` (4 x I10/F10, Manual Vol I R16 p.3421).
-    The _ELEMENT form repeats the card once per loaded shell, each with its OWN
-    LCID/SF/AT; the _SET form takes a *SET_SHELL id. SF defaults to 1.0.
+    Card: ``EID|ESID  LCID  SF  AT`` (4 x I10/F10, Manual Vol I R16 p.3421,
+    defaults ``none none 1. 0.``). The _ELEMENT form repeats the card once per
+    loaded shell, each with its OWN LCID/SF/AT; the _SET form takes a *SET_SHELL
+    id.
 
     Two dyna2rad defects are deliberately NOT reproduced:
 
-      * ``ConvertLoadShell`` writes the magnitude as ``Fscale_Y`` while /PLOAD's
-        attribute is ``Fscale_y`` (lowercase y). The solver-name map is
-        case-sensitive (``mv_descriptor.cpp:93``), so the value is parked in a
-        stray sub-object and never reaches the card: the /PLOAD keeps
-        ``magnitude``'s cfg default of ``1.`` — SF is lost AND the sign inverts.
+      * ``ConvertLoadShell`` writes the magnitude under the solver name
+        ``Fscale_Y``, but that is only the COMMENT label on the /PLOAD card —
+        the cfg attribute is ``magnitude`` (``radioss2021/LOADS/pload.cfg:25``,
+        ``DEFAULTS { magnitude = 1.; }``). The solver-name map is case-sensitive
+        (``mv_descriptor.cpp:93``), so the value is parked in a stray sub-object
+        and never reaches the card: the /PLOAD keeps the cfg default of ``1.``
+        — SF is lost AND the sign inverts.
       * multi-row _ELEMENT blocks are collapsed onto row 0's LCID/SF/AT
         (``sdiIdentifier("SF")`` without a row index reads only the first
         sub-object, ``sdiModelViewPO.h:3015-3021``), silently applying one
@@ -8653,6 +8764,8 @@ def handle_load_shell(block: Block, state: ConversionState) -> None:
     kw = block.keyword
     is_set = kw.endswith("_SET")
     raw = block.raw
+    warned_sf = False
+    warned_at = False
     for i in range(_title_offset(block), len(raw)):
         if not raw[i].strip():            # blank card placeholder → skip
             continue
@@ -8664,6 +8777,11 @@ def handle_load_shell(block: Block, state: ConversionState) -> None:
         sf   = _ffield(f, 2, 1.0)
         at   = to_float(f[3]) if len(f) > 3 else 0.0
         if ref <= 0:
+            state.warn(
+                f"*{kw}: a row names {'shell set' if is_set else 'shell'} id "
+                f"{ref} (blank or non-positive), which cannot be resolved — the "
+                "row carries no /PLOAD. EID/ESID has no default (Manual Vol I "
+                "R16 p.3421).")
             continue
         if lcid in (-1, -2):
             state.warn(
@@ -8681,6 +8799,17 @@ def handle_load_shell(block: Block, state: ConversionState) -> None:
                        "(/PLOAD has no constant-pressure form: fct_IDT is "
                        "mandatory, hm_read_pload.F).")
             continue
+        if sf == 0.0:
+            warned_sf = _pload_sf_default(
+                state, kw, f"{'set' if is_set else 'element'} {ref}", warned_sf)
+            sf = 1.0
+        if at < 0.0 and not warned_at:
+            state.warn(
+                f"*{kw}: negative arrival time AT={at:g} on "
+                f"{'set' if is_set else 'element'} {ref} — ignored (the load "
+                "applies from t=0). /SENSOR/TIME's Tdelay cannot be negative.")
+            warned_at = True
+        at = max(at, 0.0)
         # The *SET_SHELL may legitimately appear after the load in the deck, so
         # the set is recorded and resolved at write time (the same deferral
         # *LOAD_SEGMENT_SET uses for *SET_SEGMENT).
@@ -9925,10 +10054,14 @@ HANDLERS = {
     "LOAD_SHELL_SET":                         handle_load_shell,
     # *LOAD_BODY_{X,Y,Z} -> /GRAV, _VECTOR -> /GRAV + /SKEW/FIX,
     # _RX/_RY/_RZ -> /LOAD/CENTRI + /FRAME/FIX, _GENERALIZED -> explicit
-    # warn-skip. All seven share one handler because card 1a.1 has the same
-    # column grid; _GENERALIZED is registered ON PURPOSE so the skip is
-    # reported with its reason instead of arriving as a mute skipped_keywords
-    # entry (the handler's docstring used to claim that and was not true).
+    # warn-skip. They share one handler because card 1a.1 has the same column
+    # grid; _GENERALIZED is registered ON PURPOSE so the skip is reported with
+    # its reason instead of arriving as a mute skipped_keywords entry (the
+    # handler's docstring used to claim that and was not true). The manual's
+    # spelling is *LOAD_BODY_GENERALIZED_OPTION with OPTION in {SET_NODE,
+    # SET_PART} (p.33-31 + the keyword index on p.33-1), so all THREE forms are
+    # registered — a real deck names one of the two option forms, and those were
+    # the spellings still arriving mute.
     "LOAD_BODY_X":                            handle_load_body,
     "LOAD_BODY_Y":                            handle_load_body,
     "LOAD_BODY_Z":                            handle_load_body,
@@ -9937,6 +10070,8 @@ HANDLERS = {
     "LOAD_BODY_RZ":                           handle_load_body,
     "LOAD_BODY_VECTOR":                       handle_load_body,
     "LOAD_BODY_GENERALIZED":                  handle_load_body,
+    "LOAD_BODY_GENERALIZED_SET_NODE":         handle_load_body,
+    "LOAD_BODY_GENERALIZED_SET_PART":         handle_load_body,
     "LOAD_BODY_PARTS":                        handle_load_body_parts,
     "LOAD_BLAST_ENHANCED":                    handle_load_blast_enhanced,
     "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,

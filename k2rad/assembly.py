@@ -1024,20 +1024,35 @@ def _bpm_cards(b: Block, is_box: bool = False):
 
     The empty string for a card 1 keeps ``not kind`` true for it, so callers
     that only care "is this a card 1" read unchanged.
+
+    Cards 2 and 3 are consumed POSITIONALLY: every one of their fields defaults
+    (``BOXID`` aside, p.752-753), so an all-blank continuation card is legal
+    input, and skipping blanks while looking for it consumed the FOLLOWING
+    entity's card 1 instead — which then got the continuation card's id spec
+    (NSID un-offset, VAD+IDPOFF, LCID+IDNOFF, the float SF turned into an id).
+    A blank card 2/3 carries no id to rewrite, so it is simply not yielded.
+    Blank lines are still skipped while hunting for a card 1: an all-default
+    card 1 has TYPEID 0 and is not an entity at all.
     """
-    pending: List[str] = []
-    for k in range(_title_offset(b), len(b.raw)):
-        if not b.raw[k].strip():
+    raw = b.raw
+    i = _title_offset(b)
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
             continue
-        if pending:
-            yield k, pending.pop(0)
-            continue
-        f = _fields(b.raw[k])
+        f = _fields(raw[i])
+        has_cont = abs(_geti(f, 1)) in (9, 10, 11) or _geti(f, 2) == 4
+        yield i, ""
+        i += 1
         if is_box:
-            pending.append("box")
-        if abs(_geti(f, 1)) in (9, 10, 11) or _geti(f, 2) == 4:
-            pending.append("cont")
-        yield k, ""
+            if i < n and raw[i].strip():
+                yield i, "box"
+            i += 1
+        if has_cont:
+            if i < n and raw[i].strip():
+                yield i, "cont"
+            i += 1
 
 
 def _off_bpm(id_bucket: str, is_box: bool = False):
@@ -2488,8 +2503,12 @@ def _carries_literal_axis_point(b: Block) -> bool:
                    for i in (3, 4, 5)
                    if len(f1) > i and str(f1[i]).strip())
     if kw.startswith("BOUNDARY_PRESCRIBED_MOTION"):
+        # is_box has to be threaded through here too, or the _SET_BOX card 2 is
+        # walked as a card 1 and its TOFFSET tested against (9, 10, 11) — the one
+        # call site the two-card walk was not wired into (_off_bpm already
+        # passes it).
         return any(not cont and abs(_geti(_fields(b.raw[k]), 1)) in (9, 10, 11)
-                   for k, cont in _bpm_cards(b))
+                   for k, cont in _bpm_cards(b, is_box=kw.endswith("_BOX")))
     return False
 
 
