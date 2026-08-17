@@ -1567,6 +1567,33 @@ and are reported as recognized-but-not-emitted (the joint itself still converts)
 `*BOUNDARY_PRESCRIBED_MOTION_RIGID` → `/IMPDISP`, `/IMPVEL`, `/IMPACC`
 `*BOUNDARY_PRESCRIBED_MOTION_SET` / `_NODE` → `/IMPDISP` (or `/BCS` when
 `sf=0`, a common LS-DYNA idiom for symmetry/fixed-DOF)
+`*BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL` → the same three cards driven in a
+**co-rotating** `/SKEW/MOV`, built on three synthesized element-free nodes that
+join the body's `/RBODY` secondary group so the triad turns with it
+(`newskw.F` rebuilds it every cycle, `fixvel.F:390-417` projects the imposed
+component onto the updated row). Its axes are **initialised to the global
+axes**: LS-DYNA takes them from `LCO` on `*MAT_RIGID` / `CID` on
+`*CONSTRAINED_NODAL_RIGID_BODY`, or from the body's *principal inertia*
+directions when that is 0, and k2rad reads neither — so the conversion is exact
+if the body's local system is global-aligned at t=0 and off by that constant
+rotation otherwise (warned). The moving system goes in the **`skew_ID`** column,
+never `frame_ID`: measured under `/BEGIN 2022` an `/IMPDISP` carrying `frame_ID`
+echoes `FRAME 0` and silently falls back to the global axis. The Radioss
+dyna-reader ignores `_LOCAL` entirely, freezing the axes at t=0
+`*BOUNDARY_PRESCRIBED_MOTION_SET_BOX` → the `_SET` path scoped to
+`nodes(NSID) ∩ nodes-inside(BOXID)` (`NSID=0` → the box alone, `BOXID=0` → the
+plain set). Box membership is a **t=0 snapshot** — LS-DYNA re-tests it every
+timestep — and `TOFFSET` (per-node curve time shift) and `LCBCHK` have no
+equivalent; all three are warned
+`VAD=3` (velocity-vs-displacement) and `VAD=4` (relative displacement) are
+**refused**, not silently written as an `/IMPDISP`: all three `/IMP*` cards
+evaluate their function against *time*
+`|DOF| = 4`/`8` (translation along / rotation about a `*DEFINE_VECTOR`) now bind
+that vector's `/SKEW` in the `skew_ID` column, so `Dir = X`/`XX` really means
+"along V"/"about V"; the negative forms `-4`/`-8` additionally hold the two
+transverse axes at zero. `|DOF| = 9/10/11` and `12` have no single skew axis and
+are warn-skipped (the continuation card they carry is consumed, not misread as
+another motion)
 `*RIGIDWALL_PLANAR` (+`_ID`, `_FORCES`) → `/RWALL/PLANE` (fixed infinite plane;
 `FRIC` 0 → sliding, exactly 1 → tied, 2/3 → the WVEL-gated weld (degraded +
 warned), anything else positive → Coulomb friction; `NSID=0` tracks all
@@ -1657,7 +1684,25 @@ and synthesized moving-wall carrier nodes are excluded via `grnd_ID2`
 `*LOAD_NODE_POINT/_SET` → `/CLOAD` (forces DOF 1-3, moments DOF 5-7; the CID
 local system maps to the `/CLOAD` skew; follower loads 4/8 are warned)
 `*LOAD_SEGMENT`, `*LOAD_SEGMENT_ID` → `/PLOAD`
-`*LOAD_SEGMENT_SET` → `/PLOAD` (pressure on a `*SET_SEGMENT` surface)
+`*LOAD_SEGMENT_SET` → `/PLOAD` (pressure on a `*SET_SEGMENT` surface). The
+segment orientation carries the direction, so the scale passes through
+**un-negated**
+`*LOAD_SHELL_ELEMENT` / `_SET` → `/SURF/SEG` (the shell connectivity pasted
+column-for-column) + `/PLOAD` with **`Fscale_y = -SF`**: LS-DYNA's positive
+pressure acts along the shell's *negative* normal (Manual Vol I R16 p.3421,
+"positive pressure acting in the negative t-direction") while a `/PLOAD` with
+positive `Fscale_y` pushes along the *positive* segment normal
+(`force.F90:451-465` sums `+P·A·n̂`) — so exactly **one** flip is right, and
+reversing the node order as well would cancel it back out. A blank `SF` reads as
+1.0. Each `_ELEMENT` row keeps its own `LCID`/`SF`/`AT` (the dyna-reader
+collapses them onto row 0); `LCID = -1`/`-2` (Brode/ConWep) are refused, since
+those are `/LOAD/PBLAST` sources
+Arrival time `AT > 0` on `*LOAD_SHELL*` **or** `*LOAD_SEGMENT_SET` → a
+`/SENSOR/TIME` with `Tdelay = AT` in the `/PLOAD` `sens_ID` column: the load is
+zero for `t < AT` and the curve is then evaluated at `t − AT`
+(`sensor_time.F:66-68` sets `TSTART = TDELAY`, `force.F90:216-218` evaluates at
+`ts = tt − TSTART`) — a *shift*, warned, since a curve whose abscissa is already
+absolute time must be pre-shifted instead
 `*LOAD_GRAVITY_PART[_SET]` → `/GRAV` on a `/GRNOD/PART` (non-modal decks;
 the load is `ACCEL × factor(t)` — `LC` supplies the factor curve and never
 replaces `ACCEL` (Manual p.33-57) — and DOF 1/2/3 loads along −X/−Y/−Z, so
@@ -1668,9 +1713,37 @@ the NEGATIVE axis — Manual Vol I R16 p.33-28, "Positive body load acts in the
 negative direction" — so `Fscale_Y = -SF`, matching the Radioss dyna-reader
 and the `*LOAD_GRAVITY_PART` path. `CID` becomes the `/GRAV` `skew_ID`;
 `LCIDDR` has no equivalent and is warned)
+`*LOAD_BODY_VECTOR` → **one** `/GRAV` with `DIR = X` inside a companion
+`/SKEW/FIX` whose local X′ is `+V`, and `Fscale_Y = -SF`. The two halves belong
+together: `/GRAV` adds `+Fscale_Y·f(t)` along `DIR` (`gravit.F:147`), so the
+applied acceleration is along **−V**, which is what LS-DYNA prescribes (p.33-29 —
+the manual's own validation example writes `V = (−1,−1,−1)` to obtain gravity
+along `+(1,1,1)`). Reproducing one half without the other flips the load. `|V|`
+is irrelevant (both codes use `V` as a direction only); `CID` maps `V1/V2/V3`
+from that system's basis to global; `XC/YC/ZC` become the skew origin (inert for
+a uniform field); a zero `V` is refused (the dyna-reader turns it into a global
+−X load)
+`*LOAD_BODY_RX` / `_RY` / `_RZ` → `/LOAD/CENTRI` (+ a `/FRAME/FIX` for the
+rotation axis). `LCID` carries the **angular velocity ω(t), linearly**: LS-DYNA
+forms `b = ρ·[ω × (ω × r)]` internally (p.33-20 Remark 3) and the engine squares
+the curve for itself (`cfield.F`: `VROT = Fscaley·f(t)`, then `VROT2 = VROT·VROT`,
+`AREL = r⊥·VROT2`) — do **not** pre-square or square-root it. There is **no sign
+flip** either: unlike the translational forms, both codes push radially outward.
+`Dir` is emitted as **`XX`/`YY`/`ZZ`**, never `X`/`Y`/`Z` — the starter accepts
+both but the engine only branches on `IDIR` 4/5, so 1/2/3 all rotate about the
+*frame's Z axis*, silently (the dyna-reader writes `X`/`Y`/`Z` and is therefore
+wrong for `RX` and `RY`). `Ivar = 1` omits the `dω/dt` Euler term, matching
+LS-DYNA Remark 2. `XC/YC/ZC` become the frame origin, or the `CID` origin when
+`CID` is set (`CID` supersedes the centre fields); with neither, `frame_ID = 0`
+is the global axes through the global origin and no `/FRAME` card is emitted.
+Each card gets its own frame id — the dyna-reader's `GetDynaMaxEntityID`-in-a-loop
+gives two cards two `/FRAME`s with **one** id (`ERROR 79`)
+`*LOAD_BODY_GENERALIZED` warn-skips: its per-part scaling is neither a uniform
+`/GRAV` nor a single-axis `/LOAD/CENTRI` (split it into `*LOAD_GRAVITY_PART`
+rows, which k2rad does convert)
 `*LOAD_BODY_PARTS` → the `PSID` part set becomes the `/GRNOD/PART` scope of
-every `*LOAD_BODY_*` in the deck (one card per deck, last one wins; all the
-`/GRAV` cards share that one group)
+every `*LOAD_BODY_*` in the deck — the `_X/_Y/_Z`, `_VECTOR` and `_R*` forms all
+share that one group (one card per deck, last one wins)
 Both gravity paths route around rigid bodies: a `/GRAV` whose group holds only
 rigid *secondary* nodes moves nothing, because the engine overwrites their
 acceleration from the `/RBODY` main node after `GRAVIT` has run
@@ -2373,6 +2446,24 @@ python -m unittest discover -s tests
   keywords of the include — coordinate-system origins, box extents,
   velocity vectors under rotation, literal rotation-axis points under any
   transform — is warned per keyword).
+- **Single-element / sparsely-connected SOLID validation decks need
+  `*CONTROL_TIMESTEP TSSFAC <= 0.35`.** `*SECTION_SOLID ELFORM = 1` maps to
+  `/PROP/SOLID` `Isolid = 17`, which is FULL 2x2x2 integration
+  (`hm_read_prop14.F:333-341` sets `NPT = NPG = 8`); LS-DYNA's `TSSFAC = 0.9`
+  default was calibrated for the UNDER-integrated `ELFORM = 1` element k2rad
+  substitutes away from. No `/DT` card is emitted unless the deck states
+  `TSSFAC > 0`, so the engine then runs at Radioss's own default `Tsca = 0.9`
+  (`dt = 0.857 L/c`), which is super-critical for a lightly-connected hex:
+  measured on a 10 mm steel hex, an unstable mode amplified round-off by x3.07
+  per cycle (a brick driven rigidly on all 8 nodes — physically unable to deform
+  — grew 0.2906 mm of in-plane distortion out of 1.85e-18, with I-ENERGY still
+  ~1e-27), and sibling decks hit ENERGY ERROR LIMIT at 1121-1323 cycles.
+  `Isolid = 24` at the same step does not help. Real meshes share nodal mass
+  across up to 8 elements, which lowers `omega_max` by up to `sqrt(8)`, so this
+  bites validation decks rather than production models — but a one-element deck
+  that "diverges" is almost always this and not the keyword under test. Adding
+  `TSSFAC = 0.3` makes k2rad emit `/DT  0.3  0` and the same deck reaches
+  NORMAL TERMINATION.
 
 ---
 

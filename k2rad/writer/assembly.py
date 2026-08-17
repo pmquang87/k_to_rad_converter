@@ -89,6 +89,7 @@ from .loads import (
     _make_rlinks,
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
+    _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
     _warn_spring_eid_collisions,
@@ -657,6 +658,19 @@ def _warn_orphan_elements(state: ConversionState) -> None:
 
 
 def build_starter(state: ConversionState, progress=None) -> str:
+    # Snapshot the deck's OWN node ids first, before any prepass synthesizes one
+    # (/RBODY CoG masters, /SKEW/MOV third nodes, the _LOCAL triads, rigid-wall
+    # carriers, beam-orientation nodes). Everything resolving a *DEFINE_BOX by
+    # scanning state.nodes has to intersect with this, or a box drawn round the
+    # user's model also catches k2rad's own artefacts — measured: a box-only
+    # *BOUNDARY_PRESCRIBED_MOTION_SET_BOX drove a rigid body's synthesized master
+    # node, a kinematic condition the source deck never states.
+    #
+    # Only taken when the deck HAS a *DEFINE_BOX, which is the precondition for
+    # _box_node_ids being reachable at all: a set of ints per node is a real cost
+    # on the 100-200 MB mesh decks in the corpora and nothing would read it.
+    if state.boxes:
+        state.source_node_ids = set(state.nodes)
     # *SET_PART_ADD → plain part sets, one nesting level, BEFORE anything
     # reads state.part_sets (contact sides, *CONTACT_INTERIOR, gravity/ALE
     # scopes). Idempotent — convert() already ran it so --auto-gapmin sees
@@ -870,6 +884,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # /NODE section (so the nodes are emitted) and before /FRAME allocation (so
     # the ids are reserved in the shared /SKEW+/FRAME namespace).
     _synthesize_vector_skews(state)
+
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: build each body's co-rotating
+    # /SKEW/MOV triad out of three synthesized element-free nodes. Same two
+    # constraints as the vector skews (nodes before /NODE, ids before /FRAME),
+    # plus a third: it must precede the /RBODY sections below, which fold
+    # state.local_frame_nodes into the bodies' secondary groups.
+    _synthesize_local_motion_frames(state)
 
     # Reserve a /SKEW id for each *CONSTRAINED_JOINT frame and register the
     # joint /SPRING nodes. After the vector skews (which prefer their own VID
