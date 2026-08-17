@@ -59,6 +59,17 @@ python k2rad.py path/to/model.k --units Mg mm s
 never rescaled, so the labels should match the units already used in the
 `.k` file. The default is the LS-DYNA `Mg mm s` system.
 
+A label must be one the **starter** parses, not merely one a human reads:
+`unit_code.F:70-98` splits the field into an SI prefix plus a base letter and
+accepts a token of one, two or three characters only, ending in `g` (mass),
+`m` (length) or `s` (time). A longer token blanks the unit and raises
+`ERROR 573 INVALID UNIT CODE`. So microseconds are **`mus`** (or `us`) — not
+`micros`, `usec` or `microsecond`. Legal prefixes are
+`y z a f p n mu u m c d (none) da h k K M G T P E Z Y`; note `M` is 1e6 while
+`m` is 1e-3, and the base letter is case-sensitive (`S` is rejected). A field
+that parses as a plain real number is taken as the conversion factor directly
+(`1.0E-6` works), and a blank one is `ERROR 574 UNIT NOT DEFINED`.
+
 Output is written as `<stem>_0000.rad` (starter) and `<stem>_0001.rad`
 (engine) next to the input file by default.
 
@@ -618,7 +629,19 @@ radioss2025 input format); `*MAT_HYPERELASTIC_RUBBER` (077_H) `N=0` →
 `/MAT/LAW95` (`C10..C30` 1:1 in the Radioss column order, incompressibility as
 `D1=|2/K|`, `K=2G(1+PR)/3/(1−2PR)`, `G=2(C10+C01)`; blank `PR` reproduces
 dyna2rad's `K=2G/3`, i.e. ν=0 — warned; its solid sections are emitted with
-`Ismstr=10`, which the starter would force anyway — WARNING 1200) or `N>0` →
+`Ismstr=10`, which the starter would force anyway — WARNING 1200). **Running a
+LAW95 part free and explicit needs care.** At a realistic `PR≈0.495` the bulk
+modulus is ~100× the shear modulus, so the volumetric mode is two orders of
+magnitude stiffer than the deviatoric one and, being essentially undamped, it
+rings: the part's volume oscillates (and can grow) long after the deviatoric
+response has settled. Nothing in the conversion is wrong when this happens —
+it is the near-incompressible explicit problem itself. Mitigate it by ramping
+the load instead of applying it as a step, by adding damping or bulk viscosity,
+or by running the load case implicit quasi-static. Note also that the sibling
+`/MAT/LAW42` bulk curve is not an escape hatch: `funIDbulk`'s ordinate is a
+dimensionless multiplier on the `Nu`-derived bulk (`sigeps42.F`,
+`K_eff = RBULK·Fscale·f(J)`), and supplying it BYPASSES the no-curve branch's
+anti-buckling `P_FAC` floor. `N>0` →
 `/MAT/LAW69`; its
 `Gi/BETAi` list becomes `/VISC/PRONY` of the material id on BOTH branches
 (`Beta_i` used directly, no inversion). `*INITIAL_FOAM_REFERENCE_GEOMETRY`
@@ -1560,6 +1583,25 @@ exactly the starter reader's moving-wall semantics, no extra cards needed
 points computed from `XHEV`/`LENL`/`LENM` (a zero length means semi-infinite
 in LS-DYNA and falls back to the infinite plane with a warning);
 `_ORTHO` (orthotropic friction) still warn-skips — no `/RWALL` equivalent
+"The ordering of the options in the keyword name is unimportant" (p. 40-16), so
+every ordering of `ORTHO`/`FINITE`/`MOVING`/`FORCES` is generated into the
+dispatch table — all 65 spellings, not just the 13 canonical ones. A spelling
+without a row would miss the exact-match lookup and, with no `RIGIDWALL_PLANAR`
+prefix fallback, land in the generic skipped list: the wall silently gone, the
+user told only that "a keyword" was skipped. The `*INCLUDE_TRANSFORM` offset
+table is generated from the same source, so the two cannot drift apart.
+(`_DISPLAY` is legal on this family and needs no extra card, but is **not** yet
+registered — a known gap, not a silent one.)
+The `_FORCES` option's extra card (`SOFT SSID N1 N2 N3 N4`, always the LAST of
+the card set whatever order the options are spelled in — Manual p. 40-17 Card
+Summary) is read rather than assumed absent. `N1..N4` are visualization nodes
+and drop silently; `SOFT` (cycles over which the relative velocity is ramped to
+zero, softening the initial force spike) and `SSID` (a `*SET_SEGMENT` splitting
+the wall force for per-area rwforc output) have no `/RWALL` equivalent and are
+warned when non-default. Consuming it is also what lets the multi-card-set
+guard work on the planar family: LS-DYNA reads one card set per wall and keeps
+going to the next keyword (p. 40-5), k2rad converts the **first** set only, and
+extra sets are now caught with a warning instead of vanishing
 `*RIGIDWALL_GEOMETRIC_CYLINDER` → `/RWALL/CYL`: `M` = tail, `M1` = head (only
 `normalize(M1−M)` survives as the axis), `Phi = 2 × RADCYL` — the card field is
 a **diameter** while LS-DYNA gives a radius (`hm_read_rwall_cyl.F:272` halves
@@ -1644,7 +1686,29 @@ and one mass, so it cannot be loaded fractionally and the whole cluster gets
 
 ### Blast & coupled ALE / high explosive
 Empirical (ConWep / TM5-1300) air blast:
-`*LOAD_BLAST_ENHANCED`, `*LOAD_BLAST` (legacy) → `/LOAD/PBLAST`
+`*LOAD_BLAST_ENHANCED`, `*LOAD_BLAST` (legacy) → `/LOAD/PBLAST`. The TM5-1300
+formula is unit-dependent — `/LOAD/PBLAST` converts its internal `{g, cm, mus}`
+data using the `/BEGIN` labels — so the card's `UNIT` flag sets those labels
+when the caller states none. All five consistent systems of the manual's
+eight-row table (Vol I R16/R17 p.33-17) are mapped:
+
+| `UNIT` | LS-DYNA system | `/BEGIN` |
+|---|---|---|
+| 1 | pound-mass, foot, second, psi | *(none — imperial)* |
+| 2 | kilogram, meter, second, Pascal | `kg m s` |
+| 3 | dozen slugs, inch, second, psi | *(none — imperial)* |
+| 4 | centimeters, grams, microseconds, Megabars | `g cm mus` |
+| 5 | user conversions on Card 2 | *(none — unnamed)* |
+| 6 | kilogram, millimeter, millisecond, GPa | `kg mm ms` |
+| 7 | metric ton, millimeter, second, MPa | `Mg mm s` |
+| 8 | gram, millimeter, millisecond, MPa | `g mm ms` |
+
+Every triple is checked against the starter's own label grammar (see `--units`
+above); `mus`, not `micros`, is the microsecond OpenRadioss accepts. `UNIT=1`
+and `3` have no legal `*g`/`*m`/`*s` label at all, and `UNIT=5` states its units
+only as the `CFM/CFL/CFT/CFP` factors, so those three get no automatic mapping —
+state them with `--units`. The legacy `*LOAD_BLAST` card's `IUNIT` is documented
+`1..5` only, so `6/7/8` are not applied there.
 `*LOAD_BLAST_SEGMENT_SET`, `*LOAD_BLAST_SEGMENT` (per-segment) → `/SURF/SEG` +
 `/LOAD/PBLAST` (surface bursts synthesize a `/SURF/PLANE` reflecting ground,
 `--blast-ground`); `*SET_SEGMENT` → `/SURF/SEG`; `*LOAD_BODY_{X,Y,Z}` → `/GRAV`
@@ -2009,6 +2073,32 @@ connector writer skipped (zero-length, no `*SECTION_BEAM`, no area) is starter
 `ERROR 69` and the deck is refused, so those ids are dropped with a warning
 instead. A deck that asks for swforc but defines no weld gets a warning and
 **no** dangling `/TH` block; the `dt` joins the `/TFILE` minimum
+`*DATABASE_DEFORC`, `*DATABASE_DISBOUT` → one `/TH/SPRING` each, over the
+two connector families LS-DYNA keeps in separate databases: DEFORC is
+"discrete spring and discrete damper (`*ELEMENT_DISCRETE`) data" and DISBOUT is
+"discrete beam element, type 6" (Vol I R16 p.1944-1945), so the springs
+synthesized from `*ELEMENT_DISCRETE` and the ones from a `*SECTION_BEAM`
+`ELFORM=6` part get their own group and each T01 channel stays attributable to
+the card the deck wrote. Variables `DEF` = `OFF FX FY FZ MX MY MZ LX LY LZ RX
+RY RZ IE LENGTH` (`hm_read_thgrou.F:1518-1520`). Element ids are the original
+LS-DYNA ones, **one per line** — `/TH/SPRING` is read by `hm_read_thgrne.F`,
+not the ten-per-line `hm_read_thgrki.F` that `/TH/CLUSTER` uses, and a second
+id on the same line is `WARNING 100214` with the id **silently dropped**. As
+with swforc, only ids a `/SPRING` was actually written for are listed (both
+spring writers skip elements — a grounded element whose anchor node has no
+coordinates, a part with no usable beams — and naming one is starter
+`ERROR 69`, which refuses the whole deck). These are instantaneous forces and
+they are in **raw deck units**: k2rad rescales nothing, so a ton-mm-s deck
+reports newtons and millimetres exactly as the `.k` states them. A deck that
+asks for either card but has no matching connector gets a warning and no
+`/TH` block, and both `dt`s join the `/TFILE` minimum.
+LS-DYNA offers two ways to narrow the deforc selection (p.1944): `PF=1` on
+`*ELEMENT_DISCRETE` ("forces are **not** printed DEFORC file", p.19-32) is
+**honoured** — the `/SPRING` is still emitted, only the `/TH` group shrinks —
+while `*DATABASE_HISTORY_DISCRETE` has no handler, so a deck that uses it gets a
+group listing every converted connector, a **superset** of its own deforc file.
+That is over-reporting, never under-reporting, and the emitted warning says so
+whenever the card is present
 `*DEFINE_HEX_SPOTWELD_ASSEMBLY` (+ `_1` … `_16`) → one `/GRBRIC/BRIC` +
 one `/CLUSTER/BRICK` per assembly (LS-DYNA caps an assembly at 16 hexes,
 `/CLUSTER` at 500, so the 1:1 map always fits). `ID_SW` is reused verbatim as
@@ -2056,6 +2146,47 @@ no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no
 changes the physics, not just the instrumentation, so it can never be
 invisible in the log.
 
+### Output frequencies the deck does not state
+
+Radioss has ONE time-history frequency for the whole T01, so the whole
+`*DATABASE_*` family collapses to a single `/TFILE`. k2rad takes the **minimum**
+of every interval the deck asked for — never the first one in some arbitrary
+order, which would sample a channel coarser than requested.
+
+A **negative** `DT` means "output every `-DT` time steps" (p.16-7). Radioss's
+`/TFILE` is a *time* interval with no cycle-based form, so such a request cannot
+be honoured and takes no part in the minimum — but it is named in the warning
+below rather than counted as "the deck stated nothing".
+
+When **no** `*DATABASE_` card states a positive interval at all, the frequency
+has to be invented, and it is derived from the run length: `/TFILE =
+ENDTIM/1000`, i.e. 1000 samples over `*CONTROL_TERMINATION` — the same shape as
+the `/ANIM/DT` default (`ENDTIM/40`, 40 frames). A fixed constant is wrong at
+both ends of the scale: `0.001 s` on a `0.01 s` impact is ten T01 records for
+the whole event.
+
+`0.001` remains the floor whenever `ENDTIM` is not a usable run length — no
+`*CONTROL_TERMINATION` at all (an include-only fragment), `ENDTIM <= 0`, or an
+`ENDTIM >= 1e6` **sentinel**, the idiom for a deck that really terminates on
+`ENDCYC`/`ENDENG`. Scaling from a `1e20` sentinel would derive `/TFILE 1E+17`, a
+T01 that never fires — a silent total loss of output, worse than the constant.
+(The whole 201-deck regression corpus states an `ENDTIM` between `8.5e-5` and
+`30`, four orders of magnitude below that threshold.) The floor also matters
+because a zero `/TFILE` is *silently ignored* by the engine (`lectur.F:335`) and
+the T01 would then be written at a frequency nobody chose. The derivation is
+reported as a warning whenever the deck actually contains a `/TH` group.
+
+`/ANIM/DT` is guarded the same way but in the opposite direction: with
+`ENDTIM <= 0` and no `*DATABASE_BINARY_D3PLOT` `DT`/`NPLTC`, the animation
+frequency computes to zero — and `/ANIM/DT  0. 0` is **not** a harmless no-op.
+`freanim.F:131-134` raises engine `MESSAGE 293` ("TIME FREQUENCY … MUST BE
+GREATER THAN ZERO") and calls `ARRET(0)`, so the run stops before cycle 1. k2rad
+**omits the card entirely** in that case (`DTANIM0` stays zero,
+`lectur.F:2648-2651` pushes `TANIM` to 1e30, no A-files, no error) and warns
+that no animation will be written. Verified end to end: the same cycle-
+terminated deck `ERROR TERMINATION`s with the zero card and
+`NORMAL TERMINATION`s without it.
+
 ### Reading the T01: which channels are integrated
 
 Several OpenRadioss `/TH` channels are written as a running **time integral**
@@ -2075,7 +2206,7 @@ Every `/TH` variable k2rad emits, audited against the engine source at
 | `/TH/SECTIO` | `FNX/Y/Z`, `FTX/Y/Z`, `M1/M2/M3` (`DEF`) | **accumulated impulse + angular impulse** | `section_c.F:459-467`, `section_s.F:565-572` (`+DT12*FST`) |
 | `/TH/RWALL` | `FNX/Y/Z`, `FTX/Y/Z` (`DEF`) | **accumulated impulse** | `rgwal0.F:504-509`; the `÷DT12` true force goes only to `FOPT` (/ANIM) and the sensors, `:496-500` |
 | `/TH/SURF` | `P`, `A` | **per-`/TFILE`-interval aggregate** — `P` is the interval mean, `A` is the loaded area × cycle count, so `P*A` is not a force | `pblast_1.F:418-419` accumulate; `hist2.F:688` divides `P` by `A`; `sortie_main.F:1976-1982` resets both every write |
-| `/TH/SPRING` | `FX..MZ`, `LX..RZ` (`DEF`) | instantaneous | `thres.F:355-361` writes `GBUF%FOR` / `GBUF%MOM` directly |
+| `/TH/SPRING` | `FX..MZ`, `LX..RZ` (`DEF`) | instantaneous, in **raw deck units** (k2rad never rescales, so a ton-mm-s deck reports N and mm) | `thres.F:355-361` writes `GBUF%FOR` / `GBUF%MOM` directly |
 | `/TH/SHEL`, `/TH/SH3N` | `F1/F2/F12`, `M1/M2/M12`, `OFF` (`DEF`) | instantaneous element state | `thcoq.F:305-315` |
 | `/TH/BRIC` | `OFF`, `SX..SXZ`, `DENS`, `TEMP` (`DEF`) | instantaneous element state | `thsol.F:329-336` |
 | all types | `IE`, `KE`, `PLAS`, energies | cumulative by nature (an energy, not a rate) — no correction needed | — |

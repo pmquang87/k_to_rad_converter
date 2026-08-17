@@ -763,6 +763,11 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
             ground_nodes.append(gnid)
             n1, n2 = anchor, gnid
         lines.append(f"{_i(e.eid)}{_i(n1)}{_i(n2)}")
+        # Recorded at the line that writes it, not from g_elems: the `continue`
+        # just above drops a grounded element whose anchor node has no
+        # coordinates, and *DATABASE_DEFORC must list only ids that reached the
+        # deck (a /TH/SPRING on a missing element is starter ERROR 69).
+        state.discrete_spring_eids.add(e.eid)
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_id()

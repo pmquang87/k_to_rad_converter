@@ -11,6 +11,66 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **`*DATABASE_DEFORC` / `*DATABASE_DISBOUT` → `/TH/SPRING`.** Both cards were
+  parsed into state and consumed by nothing: no `/TH` block, and not even a
+  contribution to the `/TFILE` frequency, so a deck asking for discrete-element
+  forces got a converted deck with the channel missing and no diagnostic.
+  (`*DATABASE_DISBOUT` had no handler at all and reached the generic skipped
+  list.) LS-DYNA keeps the two families in separate databases and so does this:
+  Vol I R16 p.1944 defines DEFORC as "discrete spring and discrete damper
+  (`*ELEMENT_DISCRETE`) data", p.1945 defines DISBOUT as "discrete beam element,
+  type 6, relative displacements, rotations, and forces". k2rad converts both
+  families to `/SPRING` elements, so each answers with its own `/TH/SPRING`
+  group and every T01 channel stays attributable to the card the deck wrote.
+
+  Format pinned against `hm_cfg_files/config/CFG/radioss110/OUTPUTBLOCK/
+  th_spring.cfg` `FORMAT(radioss51)` (the only `th_spring.cfg` in the CFG tree)
+  and verified on live `starter_win64` runs:
+
+  - the TITLE line after `/TH/SPRING/<id>` is **mandatory** — the reader takes
+    the first line after the header as the title unconditionally, so omitting it
+    feeds `DEF` to the title and the deck then dies with `ERROR 260` ×2 +
+    `ERROR 1109` (measured);
+  - element ids go **one per line** (`%10d`, optional name from column 21).
+    `/TH/SPRING` is read by `hm_read_thgrne.F`, not the ten-per-line
+    `hm_read_thgrki.F` that `/TH/CLUSTER` uses — measured, a second id on the
+    same line is `WARNING 100214` and the id is **silently dropped**, exit 0.
+    Data loss with no error, which is why the writer never packs them;
+  - `DEF` expands to 15 variables (`hm_read_thgrou.F:1518-1520`, indices
+    1-14 + 65): `OFF FX FY FZ MX MY MZ LX LY LZ RX RY RZ IE LENGTH`. `ALL_42` is
+    not a superset — it stops at index 16 (`NVALL = 16` for SPRING,
+    `hm_read_thgrou.F:2501`), gaining `F1`/`F2` but losing `LENGTH`;
+  - the group id comes from `state.next_id()`, never a literal: `/TH` ids are
+    ONE namespace across every `/TH` type and a hard-coded one already cost this
+    converter an `ERROR 79` with no restart file (PR #83).
+
+  **Only ids a `/SPRING` line was actually written for are listed.** Both spring
+  writers have live `continue` paths — an `*ELEMENT_DISCRETE` part with no
+  `*PART` record or no `*SECTION_DISCRETE`, a grounded element whose anchor node
+  has no coordinates, a discrete-beam part with no usable beams — and a
+  `/TH/SPRING` naming an element the deck never defines is starter `ERROR 69`
+  (`hm_read_thgrne.F:189`, `MSGTYPE=MSGERROR`): the deck is **refused**, not
+  degraded. The accounting sets (`state.discrete_spring_eids`,
+  `state.dbeam_spring_eids` — the twin the PR #113 note asked for) are therefore
+  filled at the line that writes the `/SPRING`, and the emitter is registered
+  after `discrete_springs` / `discrete_beams` in the starter section registry so
+  they are populated when it runs. Proven live on a synthetic deck: the
+  converted `/TH/SPRING` lists 11 and 12 but not the grounded 13, and the
+  starter says `0 ERROR(S)` — while the same deck with 13 spliced back in gives
+  `ERROR ID : 69 ** ERROR IN TH SELECTION (ELEMENT)`, exit 2.
+
+  A deck that asks for either card but has no matching connector gets a warning
+  and **no** dangling `/TH` block (an empty group is `ERROR 1109`); the `dt` is
+  still honoured as the `/TFILE` frequency. The warning states that the values
+  are in **raw deck units** — k2rad rescales nothing, so a ton-mm-s deck reports
+  newtons and millimetres exactly as the `.k` writes them — and README's `/TH`
+  semantics table now says the same next to the `/TH/SPRING` row.
+  New tests in `tests/test_th_output_losses.py`. No corpus deck contains
+  `*ELEMENT_DISCRETE`, so the fixtures and the starter runs are the evidence;
+  the 13 corpus `*DATABASE_DEFORC` decks (all `implicit_hr-anlenkung`) have no
+  discrete element and no discrete beam, so they get the warning and stay
+  byte-identical.
+
 - **Geometric rigid walls** (`*RIGIDWALL_GEOMETRIC_{FLAT,PRISM,CYLINDER,SPHERE}`,
   each with any ordering of `_MOTION` / `_DISPLAY` / `_INTERIOR` and `_ID`) —
   the roadmap P1 "geometric rigidwalls" item. **All 42 spellings were silently
@@ -169,6 +229,235 @@ Prior history (before this changelog was introduced) is summarized in the
   no new path — the fixtures and the starter/engine runs are the evidence.
 
 ### Fixed
+
+- **`*LOAD_BLAST_ENHANCED` `UNIT=6/7/8` had no unit mapping, and the docs said
+  the table was complete.** The `UNIT` table was transcribed from a five-row
+  LSTC note ("Blast Loading in LS-DYNA"), but the keyword defines **eight**
+  values — verified by full-text extraction of both pinned manuals, Vol I R16
+  p.33-17 and R17 p.33-17, which agree word for word:
+
+  | `UNIT` | LS-DYNA system | `/BEGIN` |
+  |---|---|---|
+  | 1 | pound-mass, foot, second, psi | *(none — imperial)* |
+  | 2 | kilogram, meter, second, Pascal | `kg m s` |
+  | 3 | dozen slugs (lbf-s²/in), inch, second, psi | *(none — imperial)* |
+  | 4 | centimeters, grams, microseconds, Megabars | `g cm mus` |
+  | 5 | user conversions (Card 2) | *(none — unnamed)* |
+  | 6 | kilogram, millimeter, millisecond, GPa | `kg mm ms` |
+  | 7 | metric ton, millimeter, second, MPa | `Mg mm s` |
+  | 8 | gram, millimeter, millisecond, MPa | `g mm ms` |
+
+  `6/7/8` are as physically consistent as `2` and `4` — `kg·mm/ms² = kN` over
+  `mm²` is `GPa`; `Mg·mm/s² = N` over `mm²` is `MPa`; `g·mm/ms² = N` over `mm²`
+  is `MPa`, each matching the pressure unit the manual states — and every label
+  they need (`kg`, `mm`, `ms`, `Mg`, `g`) is already in the starter's grammar,
+  so all three now map automatically instead of falling to the
+  "no automatic mapping" warning. `UNIT=7` is exactly k2rad's own default
+  `Mg mm s`. The docstring table, `README.md` and the warning text all carry the
+  manual's eight rows now, and the warning renders the mapped flags **from the
+  table** so the two cannot drift. The starter-grammar test loops `range(0, 12)`
+  instead of `range(1, 6)` and asserts which flags are mapped, so a new row
+  cannot slip past unchecked; it also imports `_SI_PREFIX_FACTORS` from the
+  writer rather than re-typing the 22-entry prefix set, closing the second copy
+  of that grammar.
+
+  The legacy `*LOAD_BLAST` card shares the mapping function but its `IUNIT` is
+  documented `1..5` only (Vol I R16 p.33-11/33-12: the list ends at "EQ.5: user
+  conversions will be supplied" and runs straight into `ISURF`), so it now
+  passes `legacy=True` and `6/7/8` are **not** applied there — a legacy deck
+  carrying one is malformed, and inventing a unit system LS-DYNA itself would
+  not apply is exactly the silent-wrong-units failure this batch is about.
+- **`*LOAD_BLAST_ENHANCED` `UNIT=4` wrote a `/BEGIN` time label the starter
+  rejects.** The blast `UNIT` flag sets the `/BEGIN` unit labels (the TM5-1300
+  formula is unit-dependent — `/LOAD/PBLAST` converts its internal `{g, cm, mus}`
+  data using them), and `UNIT=4` mapped the microsecond to `micros`. That is not
+  a label OpenRadioss can read: `unit_code.F:70-98` splits the `%20s` field into
+  an SI prefix plus a base letter and accepts a token of **one, two or three**
+  characters only; a longer one takes the `ELSE` branch at `:92-98`, which blanks
+  `CUNIT` and sets `IERR1=0`, and the test at `:151-158` then fires
+  `ANCMSG(MSGID=573)` **INVALID UNIT CODE**. Measured end to end on a converted
+  `UNIT=4` deck: master writes the bad label on **both** unit lines and the
+  starter answers `2 GLOBAL UNITS ERROR(S)`, exit 2 — while reporting the time
+  factor as `1.0E+00`, i.e. seconds, a silent 1e6 error had the run continued.
+  The correct label is **`mus`** (what `begin.cfg:127` itself lists, and what
+  the `/LOAD/PBLAST` reader echoes as `DEFAULT UNIT SYSTEM IS {g,cm,mus}`); the
+  same deck now gives `0 ERROR(S)`, exit 0, with `TIME 1.0000000000000E-06`.
+  The rest of the table was audited against the same source and is correct
+  (`kg`/`m`/`s` for `UNIT=2`, and `g`, `cm`; `UNIT=1/3/5` deliberately have no
+  automatic mapping — `UNIT=3`'s inch has no legal `*m` label at all).
+  **That audit was itself incomplete and is corrected below** — it covered only
+  the five rows of an older LSTC note, while `*LOAD_BLAST_ENHANCED` defines
+  eight. The PR
+  #112 transcription of the prefix table in `writer/materials.py`
+  (`_SI_PREFIX_FACTORS`, `_time_unit_in_seconds`) was cross-checked line by line
+  against `unit_code.F:100-149`: all 22 entries match, including `mu`/`u` → 1e-6,
+  both `k` and `K` → 1e3, and the `J > 3` / last-character-`s` rule. The two
+  tables are deliberately **not** shared — `handlers.py` imports only
+  `.parser`/`.state`, and reaching into `k2rad.writer` from a handler would
+  invert the layer direction — so the constraint is documented at both ends
+  instead, and a new test walks the whole `_blast_unit_system` table against the
+  starter's grammar (length 1-3, base letter by slot, prefix from the table).
+- **`*RIGIDWALL_PLANAR_*FORCES` dropped its extra card, and that blocked the
+  multi-card-set guard on the whole planar family.** The `_FORCES` option
+  appends one card — `SOFT SSID N1 N2 N3 N4`, always the **last** of the set
+  whatever order the options are spelled in the keyword name (Manual p. 40-17
+  Card Summary: ID → 1 → 2 → [ORTHO 3,4] → [FINITE 5] → [MOVING 6] →
+  [FORCES 7]). `handle_rigidwall_planar` advanced its card index for `_FINITE`
+  and `_MOVING` only, so `SOFT` and `SSID` vanished without a trace, and the
+  "further card line(s)" guard added for the geometric family in the previous
+  release could not be extended here: it would have fired on all 15 corpus
+  `*RIGIDWALL_PLANAR_MOVING_FORCES` decks (the W8 CrushBox family), reporting
+  each wall's own FORCES card as a phantom second wall. The card is now consumed
+  leniently — it is optional on the last card set, the same idiom the geometric
+  `_DISPLAY` card uses — and then the guard applies. `N1..N4` are "Optional node
+  for visualization" and drop in silence; `SOFT` (cycles over which the relative
+  velocity is ramped to zero, softening the initial contact-force spike) and
+  `SSID` (a `*SET_SEGMENT` splitting the wall force for per-area rwforc output)
+  have no `/RWALL` equivalent and are warned when non-default. There is no
+  second FORCES card and no `WPSET` field — a full-text scan of Vol I R16 and
+  R17 returns zero pages containing that string.
+  Effect assertion: `Ryan_Lee_Examples/W8_SETUP_CrushBox.k` (+`_refined`,
+  `_refined_angled`) convert to **byte-identical** `_0000.rad` / `_0001.rad`
+  with the identical 16 warnings and the identical not-emitted set, while a
+  synthetic `_FORCES` deck with `SOFT=3 SSID=7` gains the two warnings and a
+  two-card-set deck — plain or `_FORCES` — is now caught instead of silently
+  losing its second wall.
+- **Eleven legal `*RIGIDWALL_PLANAR` spellings had no registry row, and the
+  offset table had already drifted from the handler table.** "The ordering of
+  the options in the keyword name is unimportant. For example, both
+  `*RIGIDWALL_PLANAR_ORTHO_FINITE` and `*RIGIDWALL_PLANAR_FINITE_ORTHO` are
+  valid and have the same effect" (Manual p. 40-16) — only the *card* order is
+  fixed. The registry listed the canonical orderings only, so three `_ORTHO`
+  spellings and **eight of the sixteen** legal non-ORTHO orderings
+  (`_FORCES_MOVING`, `_MOVING_FINITE`, `_FINITE_ORTHO`, …) missed the
+  exact-match lookup; with no `RIGIDWALL_PLANAR` row in `_PREFIX_HANDLERS` to
+  catch them they fell into the generic skipped-keyword list, so the wall
+  vanished from the model and the user was told only that "a keyword" was
+  skipped — never that a rigid wall was lost.
+
+  All 65 spellings are now **generated** by `_rwall_planar_keywords()`, the same
+  way `_rwall_geometric_keywords()` has generated the geometric family, and
+  `assembly._OFFSET_SPECS` is generated from that one source instead of a
+  hand-kept literal. That literal had already fallen three spellings behind the
+  registry, which is live the moment `_ORTHO` becomes convertible: an unmapped
+  keyword keeps its original `NSID`/`BOXID` while the rest of an
+  `*INCLUDE_TRANSFORM` is offset, i.e. dangling or colliding references. A test
+  now asserts the two tables cover the same set.
+
+  Not generated, and deliberately: `_ID` (the parser strips a trailing `_ID`
+  into `block.options`, and p. 40-16 lists it apart from the `{OPTION}` slots)
+  and `_DISPLAY` (legal here and needing **no** extra card — the Card Summary
+  stops at Card 7 — but registering it would start *converting* walls that are
+  skipped today, which is a feature, not a fix; it stays a known gap).
+- **The multi-card-set guard was duplicated verbatim across the two rigid-wall
+  handlers.** Eleven identical lines, differing only in the family name in the
+  advice. Extracted to `_warn_extra_rwall_card_sets()`; the message text is
+  unchanged (both `tests/test_rwall_geometric.py` and
+  `tests/test_rwall_variants.py` assert on its wording).
+- **The `/TFILE` fallback frequency was a hard-coded `1e-3` with no relation to
+  the run.** When no `*DATABASE_` card states an interval — 57 of the 201 corpus
+  decks — the T01 frequency has to be invented, and the constant is wrong at
+  both ends of the scale: on a 0.01 s impact (`W2_Door_Impact.k`) it wrote
+  **ten** T01 records for the whole event; on a 100 s quasi-static run it would
+  write a hundred thousand. It is now derived from the termination time,
+  `ENDTIM/1000` — 1000 samples over the run, the same shape as the `/ANIM/DT`
+  default (`ENDTIM/40`, 40 frames) immediately below it. A deck with no
+  `*CONTROL_TERMINATION` (an include-only fragment, or one terminating on
+  `ENDCYC`) keeps `1e-3` as a floor, because a zero `/TFILE` is *silently
+  ignored* by the engine (`lectur.F:335`, `IF(DTH /= ZERO) …`) and the T01 would
+  then be written at a frequency nobody chose. The derivation is warned about
+  once, but only when the deck actually contains a `/TH` group — with no
+  time-history block the invented number governs nothing anyone reads. All five
+  golden fixtures ride this path and every one has `ENDTIM = 1.0`, so
+  `1.0/1000 = 0.001` reproduces the checked-in `/TFILE 0.001` exactly: no golden
+  regeneration.
+
+  The derivation is **windowed**, not open-ended: an `ENDTIM >= 1e6` is treated
+  as a sentinel rather than a run length and falls back to the `1e-3` floor.
+  `*CONTROL_TERMINATION ENDTIM = 1e20` is the common idiom for a deck that
+  really terminates on `ENDCYC`/`ENDENG` (neither of which k2rad converts), and
+  scaling from it would derive `/TFILE 1E+17` — a T01 that never fires at all,
+  a silent *total* loss of time-history output and strictly worse than the
+  constant it replaced. The threshold is four orders of magnitude above the
+  largest run length in the corpus (every one of the 201 decks states an
+  `ENDTIM` between `8.5e-5` and `30`), so no genuine run is caught by it, and
+  the warning names the sentinel as the reason.
+- **A negative `*DATABASE_` `DT` was silently treated as "the deck said
+  nothing".** "If `DT < 0.0`, the result will be output every `-DT` time steps"
+  (Manual p. 16-7) — a cycle-based request. Radioss's `/TFILE` is a *time*
+  interval with no cycle-based form, so it still cannot be honoured, but the
+  derived-frequency warning no longer claims "no `*DATABASE_` card states an
+  output interval" when one does; it says *positive* interval and names the
+  cycle-based cards it had to ignore. (`DT == 0` really is "no output is
+  printed", p.16-7, and is still skipped.)
+- **`*DATABASE_DEFORC`, `*DATABASE_DISBOUT` and `*DATABASE_JNTFORC` were absent
+  from the `/TFILE` minimum chain.** All three now drive a real `/TH/SPRING`
+  (the first two are new above; JNTFORC has driven one since the joints batch),
+  so leaving them out sampled a group the deck *did* ask for at whatever coarser
+  frequency the other cards happened to set. `ABSTAT`, `BINARY_D3THDT`,
+  `BINARY_INTFOR` and `SLEOUT` stay out on purpose: they have no `/TH` consumer
+  at all, so honouring them would only thicken the T01 for channels that are not
+  in it. Measured across the 27 corpus decks carrying `*DATABASE_JNTFORC`, its
+  `dt` is never the minimum, so no corpus deck changes.
+- **`/ANIM/DT  0. 0` on a deck with `ENDTIM <= 0` stopped the engine before
+  cycle 1.** With no `*DATABASE_BINARY_D3PLOT` `DT`/`NPLTC`, the animation
+  frequency is `ENDTIM/40`, which is `0.0` for a cycle-terminated deck
+  (`*CONTROL_TERMINATION 0.0` with `ENDCYC`) — and nothing re-checked it. That
+  card is not a harmless no-op: `freanim.F:131-134` raises `MESSAGE 293` ("TIME
+  FREQUENCY AT WHICH DATA IS WRITTEN TO THE ANIM FILE MUST BE GREATER THAN
+  ZERO") and calls `ARRET(0)`. The converter was silent about all of it. k2rad
+  now **omits the card entirely** in that case, which is the branch
+  `lectur.F:2648-2651` proves safe — `DTANIM0` stays zero from
+  `anim_set2zero_struct.F`, `TANIM` is pushed to 1e30, no A-files and no error —
+  and warns that no animation will be written, since silently getting none is
+  its own failure mode. Verified end to end: the same deck `ERROR
+  TERMINATION`s on master and `NORMAL TERMINATION`s with the card omitted. The
+  `NPLTC` branch is guarded the same way: with `ENDTIM = 0` it no longer
+  substitutes a 1 s run length (that stand-in stays reserved for a deck with no
+  `*CONTROL_TERMINATION` at all, matching what `/RUN` is written with). No
+  corpus deck has `ENDTIM <= 0`, so nothing changes there. The warning no longer
+  *misattributes* the cause on a deck that does state `NPLTC`: it said "no
+  `*DATABASE_BINARY_D3PLOT` states a positive `DT` or `NPLTC`" even when
+  `NPLTC = 20` was right there, sending the user to edit the wrong card — it now
+  names the zero `ENDTIM` that makes `ENDTIM/NPLTC` useless. (The test covering
+  that branch was also fixed: its deck put `20` in columns 11-20, which is
+  `LCDT` — `NPLTC` is field 4 — so it left `NPLTC` at `0` and exercised nothing.)
+- **`PF = 1` on `*ELEMENT_DISCRETE` was ignored, and the deforc `1:1` claim was
+  unqualified.** LS-DYNA gives a deck two ways to narrow the deforc element
+  selection (Vol I R16 p.1944): `*DATABASE_HISTORY_DISCRETE_OPTION`, or
+  `PF = 1` — the print flag, "EQ.0: forces are printed in DEFORC file, EQ.1:
+  forces are **not** printed DEFORC file" (p.19-32). `handle_element_discrete`
+  read field 6 as `S` and then jumped to field 8, never touching `PF` at all.
+  It is now parsed into `state.deforc_suppressed_eids` and subtracted from the
+  `*DATABASE_DEFORC` `/TH/SPRING` group. It is an **output** flag, so the
+  `/SPRING` element itself is still emitted — dropping it would change the
+  model, which the flag never asks for. `*DATABASE_HISTORY_DISCRETE` still has
+  no handler; rather than leave the unqualified claim standing, the warning now
+  says the group is a **superset** of the deforc file whenever that card is
+  present in the deck. (`*ELEMENT_BEAM` has no `PF` field, so `disbout` has
+  nothing to honour.)
+- The `/TH/SPRING` emitter is renamed `_make_starter_th_discrete_connectors`
+  (it emits `DISBOUT` as much as `DEFORC`) and its driving table is a
+  `NamedTuple` holding real accessors instead of `getattr(state, "…")` strings,
+  which no type checker or IDE rename could follow.
+- Docs: README gains the LAW95 free-explicit **volumetric-ringing** note (at
+  `PR ≈ 0.495` the bulk modulus is ~100× the shear modulus and essentially
+  undamped, so the volume oscillates and can grow; mitigate with a ramped load,
+  damping/bulk viscosity, or an implicit quasi-static run — and the `/MAT/LAW42`
+  `funIDbulk` curve is not an escape hatch, since its ordinate is a
+  dimensionless multiplier on the `Nu`-derived bulk and supplying it bypasses
+  the no-curve branch's anti-buckling `P_FAC` floor), the starter's `/BEGIN`
+  unit-label grammar next to `--units`, the full eight-row blast `UNIT` table,
+  the `PF` / `*DATABASE_HISTORY_DISCRETE` qualification on the deforc `1:1`
+  claim, and a section on the two output frequencies a deck does not state.
+  `ROADMAP.md` marks `*DATABASE_DEFORC`/`_DISBOUT` → `/TH/SPRING` done and
+  narrows the remaining gap on that family to `*DATABASE_HISTORY_DISCRETE`.
+  The backlog's "README overstates
+  `*DATABASE_SPCFORC` `REAC*` as forces" item is **stale**: README already
+  states in bold that `REAC*` is a time-accumulated reaction impulse, with the
+  `reaction_forces_th.F` / `bcs1th.F` / `resol.F` citations, the
+  `F = d(REAC)/dt` recipe and the `/ANIM/VECT/FREAC` contrast — PR #93 fixed it
+  and its own CHANGELOG entry records that. No change made.
 
 - **`*RIGIDWALL_PLANAR` fixed infinite plane used a card layout that does not
   exist.** The emission put the search distance `d` in card-1 columns 41-60 and,

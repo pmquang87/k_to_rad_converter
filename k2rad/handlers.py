@@ -675,6 +675,11 @@ def handle_element_discrete(block: Block, state: ConversionState) -> None:
     Fixed card (Keyword971 ELEMENTS/discrete.cfg):
         EID(I8) PID(I8) N1(I8) N2(I8) VID(I8) S(E16) PF(I8) OFFSET(E16)
     Free-format lines carry the same field order. N2=0 = grounded element.
+
+    PF is the deforc PRINT flag, not a solution parameter (Manual p. 19-32:
+    "EQ.0: forces are printed in DEFORC file, EQ.1: forces are not printed
+    DEFORC file"), so PF=1 leaves the /SPRING alone and only drops the element
+    from the *DATABASE_DEFORC selection — see state.deforc_suppressed_eids.
     """
     for line in block.raw:
         if not line.strip():
@@ -695,6 +700,8 @@ def handle_element_discrete(block: Block, state: ConversionState) -> None:
         n2 = to_int(f[3]) if len(f) > 3 else 0
         vid = to_int(f[4]) if len(f) > 4 else 0
         s = _ffield(f, 5, 1.0)
+        if len(f) > 6 and to_int(f[6]) == 1:
+            state.deforc_suppressed_eids.add(eid)
         offset = to_float(f[7]) if len(f) > 7 else 0.0
         state.discrete_elems.append(DiscreteElem(eid, pid, n1, n2, vid, s, offset))
 
@@ -4902,6 +4909,16 @@ def handle_database_deforc(block: Block, state: ConversionState) -> None:
     state.db_deforc_dt = _handle_db_dt(block, state, "*DATABASE_DEFORC")
 
 
+def handle_database_disbout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_DISBOUT: "Discrete beam element, type 6, relative
+    displacements, rotations, and forces" (Vol I R16 p.1945) — the sibling of
+    DEFORC, which covers *ELEMENT_DISCRETE only. k2rad turns both families into
+    /SPRING elements, so both land in a /TH/SPRING; keeping the two cards apart
+    keeps each T01 channel attributed to the database LS-DYNA attributes it to.
+    """
+    state.db_disbout_dt = _handle_db_dt(block, state, "*DATABASE_DISBOUT")
+
+
 def handle_database_extent_binary(block: Block, state: ConversionState) -> None:
     raw = block.raw
     if not raw:
@@ -5661,6 +5678,38 @@ def handle_constrained_generalized_weld_spot(block: Block, state: ConversionStat
                           0, 0, nsid, sn, ss, n_exp, m_exp, tfail, epsf)
 
 
+def _warn_extra_rwall_card_sets(state: ConversionState, label: str, kw: str,
+                                rwid: int, raw, idx: int, family: str) -> None:
+    """One guard for both rigid-wall families.
+
+    "Card Sets. For each rigid wall include ONE SET of the following data
+    cards. This input ends at the next keyword card" (Manual p. 40-5) — a
+    single *RIGIDWALL_ keyword may therefore carry several walls, and k2rad
+    converts the first set only. Never let the rest vanish silently.
+
+    ``family`` is the keyword stem named in the advice ("*RIGIDWALL_PLANAR" /
+    "*RIGIDWALL_GEOMETRIC_"); everything else in the message is identical, and
+    tests/test_rwall_geometric.py and tests/test_rwall_variants.py both assert
+    on that wording.
+
+    On the planar family this can only be trusted now that the FORCES card is
+    consumed: without it, ``idx`` stopped one line short on every
+    *RIGIDWALL_PLANAR_*FORCES deck and the wall's own last card was reported as
+    a second, phantom card set.
+    """
+    if not any(ln.strip() for ln in raw[idx:]):
+        return
+    state.warn(
+        f"{label} id={rwid}: {len(raw) - idx} further card line(s) follow "
+        "the first wall's card set. LS-DYNA reads one set per wall and "
+        "keeps going to the next keyword (Manual p. 40-5), but k2rad "
+        "converts the FIRST set only — split the extra wall(s) into their "
+        f"own {family} blocks.")
+    state.note_recognized_not_emitted(
+        kw, "only the first of several card sets under the keyword was "
+            "converted")
+
+
 def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
     """*RIGIDWALL_PLANAR[_ID] (+_FORCES/_FINITE/_MOVING combos) → /RWALL.
 
@@ -5675,9 +5724,16 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
       _MOVING: mass v0 — wall mass and initial speed along the outward
         normal (free-flying finite-mass wall) → the /RWALL moving form
         (node_ID > 0 carrier node + "Mass VX0 VY0 VZ0" card).
-    _FORCES only appends force-output cards, which /TH/RWALL replaces, so it
-    needs no extra parsing. _ORTHO (orthotropic friction) has no /RWALL
-    equivalent and is warn-skipped by handle_rigidwall_ortho.
+      _FORCES: soft ssid n1 n2 n3 n4 — ONE card, always the LAST of the set
+        (Card Summary, Manual p. 40-17: ID -> 1 -> 2 -> [ORTHO 3,4] ->
+        [FINITE 5] -> [MOVING 6] -> [FORCES 7], whatever order the options are
+        spelled in the keyword name). It is mostly output plumbing that
+        /TH/RWALL already covers, but SOFT is a solver knob, so the card is
+        READ rather than assumed absent — leaving it unconsumed made every
+        following line shift by one and, worse, made the multi-card-set guard
+        below unusable on the planar family.
+    _ORTHO (orthotropic friction) has no /RWALL equivalent and is warn-skipped
+    by handle_rigidwall_ortho.
     """
     kw = block.keyword
     label = f"*{kw}"
@@ -5743,6 +5799,41 @@ def handle_rigidwall_planar(block: Block, state: ConversionState) -> None:
                 "is carried by a free node, which frictionless contact only "
                 "loads along the normal — but with FRIC>0 tangential contact "
                 "forces may also drift the wall laterally.")
+
+    if "_FORCES" in kw:
+        # Card 7: SOFT SSID N1 N2 N3 N4 (Manual p. 40-23). Consumed leniently,
+        # the same way handle_rigidwall_geometric treats the DISPLAY card: it is
+        # the LAST card of the set, so a deck that stops after MOVING is legal
+        # LS-DYNA and must not be warned at.
+        if idx < len(raw) and raw[idx].strip():
+            ff = _card(raw, idx, fixed=True, n=8, w=10)
+            idx += 1
+            soft = to_int(ff[0]) if ff else 0
+            ssid = to_int(ff[1]) if len(ff) > 1 else 0
+            # N1..N4 are "Optional node for visualization" (Manual p. 40-23) —
+            # they change nothing about the wall and are dropped in silence.
+            if soft:
+                state.warn(
+                    f"{label} id={rwid}: FORCES SOFT={soft} (ramp the relative "
+                    "velocity to zero over that many cycles to soften the "
+                    "initial contact-force spike) has no /RWALL equivalent — "
+                    "dropped. The wall engages at full stiffness from the "
+                    "first contact cycle, so expect a sharper force peak at "
+                    "t=0 than LS-DYNA reports. Soften it by ramping the "
+                    "approach velocity, or replace the wall with an /INTER "
+                    "interface, whose penalty stiffness IS tunable.")
+            if ssid:
+                state.warn(
+                    f"{label} id={rwid}: FORCES SSID={ssid} splits the wall "
+                    "force over the segments of that *SET_SEGMENT for "
+                    "per-area output in rwforc — dropped. /RWALL reports ONE "
+                    "resultant for the whole wall (/TH/RWALL), so the "
+                    "distribution over sub-areas is not available; split the "
+                    "wall into several *RIGIDWALL_PLANAR blocks if you need "
+                    "the force per region.")
+
+    _warn_extra_rwall_card_sets(state, label, kw, rwid, raw, idx,
+                                "*RIGIDWALL_PLANAR")
 
     state.rigid_walls.append(RigidWallPlanar(
         rwid=rwid, title=title, nsid=nsid, nsidex=nsidex,
@@ -5910,20 +6001,8 @@ def handle_rigidwall_geometric(block: Block, state: ConversionState) -> None:
                    "a visualization mesh only and has no solution effect — "
                    "dropped.")
 
-    # "Card Sets. For each rigid wall include ONE SET of the following data
-    # cards. This input ends at the next keyword card" (Manual p. 40-5) — so a
-    # single *RIGIDWALL_GEOMETRIC_* keyword may carry several walls. k2rad
-    # converts the first set only; never let the rest vanish silently.
-    if any(ln.strip() for ln in raw[idx:]):
-        state.warn(
-            f"{label} id={rwid}: {len(raw) - idx} further card line(s) follow "
-            "the first wall's card set. LS-DYNA reads one set per wall and "
-            "keeps going to the next keyword (Manual p. 40-5), but k2rad "
-            "converts the FIRST set only — split the extra wall(s) into their "
-            "own *RIGIDWALL_GEOMETRIC_ blocks.")
-        state.note_recognized_not_emitted(
-            kw, "only the first of several card sets under the keyword was "
-                "converted")
+    _warn_extra_rwall_card_sets(state, label, kw, rwid, raw, idx,
+                                "*RIGIDWALL_GEOMETRIC_")
 
     state.rigid_walls_geometric.append(rw)
 
@@ -8585,25 +8664,93 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
 # Blast loads
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _blast_unit_system(unit: int):
+#: *LOAD_BLAST_ENHANCED UNIT flag → the (mass, length, time) label triple for
+#: /BEGIN, or None where the system has no clean OpenRadioss label.
+#:
+#: Transcribed from the pinned manual, Vol I R16 p.33-17 (identical in R17
+#: p.33-17) — the FULL eight-row table, not the five-row LSTC note the earlier
+#: version of this code carried:
+#:
+#:   EQ.1: pound-mass, foot, second, psi                     imperial
+#:   EQ.2: kilogram, meter, second, Pascal (default)         -> kg  m   s
+#:   EQ.3: dozen slugs (lbf-s2/in), inch, second, psi        imperial
+#:   EQ.4: centimeters, grams, microseconds, Megabars        -> g   cm  mus
+#:   EQ.5: user conversions will be supplied (see Card 2)    CFM/CFL/CFT/CFP
+#:   EQ.6: kilogram, millimeter, millisecond, GPa            -> kg  mm  ms
+#:   EQ.7: metric ton, millimeter, second, MPa               -> Mg  mm  s
+#:   EQ.8: gram, millimeter, millisecond, MPa                -> g   mm  ms
+#:
+#: 6/7/8 are as physically consistent as 2 and 4 and every label they need is
+#: already in the starter's grammar, so they map automatically too:
+#:   6: kg*mm/ms^2 = kN, kN/mm^2 = GPa                       matches the manual
+#:   7: Mg*mm/s^2  = N,  N/mm^2  = MPa                       matches the manual
+#:   8: g*mm/ms^2  = N,  N/mm^2  = MPa                       matches the manual
+#: 1 and 3 stay unmapped because an imperial base has no legal '*g'/'*m'/'*s'
+#: label at all (see the grammar note in _blast_unit_system); 5 stays unmapped
+#: because the deck's units live in the CFM/CFL/CFT/CFP factors on Card 2 and
+#: nothing names them.
+_BLAST_UNIT_SYSTEMS = {
+    1: None,
+    2: ("kg", "m", "s"),
+    3: None,
+    4: ("g", "cm", "mus"),
+    5: None,
+    6: ("kg", "mm", "ms"),
+    7: ("Mg", "mm", "s"),
+    8: ("g", "mm", "ms"),
+}
+
+#: The LEGACY *LOAD_BLAST card's IUNIT stops at 5 (Vol I R16 p.33-11/33-12:
+#: the list ends "EQ.5: user conversions will be supplied" and runs straight
+#: into ISURF). 6/7/8 exist on *LOAD_BLAST_ENHANCED only, so a legacy deck
+#: carrying one is malformed and must warn rather than have a unit system
+#: invented for it that LS-DYNA itself would not apply.
+_LEGACY_BLAST_MAX_UNIT = 5
+
+
+def _blast_unit_mapping_note() -> str:
+    """The auto-mapped flags, rendered from the table so the user-facing
+    warnings cannot drift away from what the code actually does."""
+    return ", ".join(
+        f"UNIT={flag} {'/'.join(labels)}"
+        for flag, labels in sorted(_BLAST_UNIT_SYSTEMS.items())
+        if labels is not None)
+
+
+def _blast_unit_system(unit: int, legacy: bool = False):
     """Map a *LOAD_BLAST_ENHANCED UNIT flag to an OpenRadioss (mass, length,
     time) label triple for /BEGIN, or None when it has no clean mapping.
 
-    UNIT table (LSTC — L. Slavik, "Blast Loading in LS-DYNA"):
-      1 = the original CONWEP *inconsistent* system ("do not use for analysis")
-      2 = kilogram, metre, second, Pascal
-      3 = "dozen slugs", inch, second, psi           (English)
-      4 = gram, centimetre, microsecond, megabar
-      5 = user-defined (CFM/CFL/CFT/CFP conversion factors)
+    The flag table itself is _BLAST_UNIT_SYSTEMS above. ``legacy=True`` is the
+    older *LOAD_BLAST card, whose IUNIT is documented only up to 5.
+
     The TM5-1300 empirical formula is unit-dependent, so /LOAD/PBLAST reads the
     /BEGIN unit labels to convert its internal {cm, g, µs} data to model units —
     those labels must therefore match the deck's real units. Only the physically
-    consistent SI-family flags get an automatic mapping.
+    consistent flags get an automatic mapping.
+
+    Every label here must be one the STARTER can parse, not merely one a human
+    can read. unit_code.F:70-98 splits the %20s field into an SI prefix + a base
+    letter and accepts a token of ONE, TWO or THREE characters only; anything
+    longer takes the ELSE branch at :92-98, which blanks CUNIT and sets IERR1=0,
+    and the test at :151-158 (last character must be 'g'/'m'/'s' per
+    MASS/LENGTH/TIME, or IERR1==0) then raises ERROR 573 INVALID UNIT CODE.
+    Microseconds are therefore ``mus`` (the label begin.cfg:127 itself lists),
+    never ``micros``: measured on starter_win64, ``micros`` gives
+      ERROR ID : 573 ** INVALID UNIT CODE / UNIT: micros - CODE: TIME
+    on BOTH /BEGIN unit lines — the "2 GLOBAL UNITS ERROR(S)" that stops the run
+    — and the factor it reports is 1.0E+00, i.e. it would silently have read
+    seconds and been wrong by 1e6 had the run continued.
+    Legal token = (prefix in {'', y z a f p n mu u m c d da h k K M G T P E Z Y})
+    + (base in {g, m, s}); the same grammar the writer's _time_unit_in_seconds
+    transcribes for the *CONTROL_UNITS side. (The two tables are deliberately
+    NOT shared: handlers.py imports only .parser/.state, and reaching into
+    k2rad.writer from a handler would invert the layer direction. Unifying them
+    belongs in a units module of its own.)
     """
-    return {
-        2: ("kg", "m", "s"),
-        4: ("g", "cm", "micros"),
-    }.get(unit)
+    if legacy and unit > _LEGACY_BLAST_MAX_UNIT:
+        return None
+    return _BLAST_UNIT_SYSTEMS.get(unit)
 
 
 def handle_load_blast_enhanced(block: Block, state: ConversionState) -> None:
@@ -8640,10 +8787,13 @@ def handle_load_blast_enhanced(block: Block, state: ConversionState) -> None:
     else:
         state.warn(
             f"*LOAD_BLAST_ENHANCED bid={bid}: UNIT={unit} has no automatic "
-            "OpenRadioss unit mapping (only UNIT=2 kg/m/s and UNIT=4 g/cm/µs "
-            "are auto-mapped). The TM5-1300 blast formula is unit-dependent, so "
-            "set /BEGIN to the deck's real mass/length/time via convert("
-            "units=...) or /LOAD/PBLAST will compute wrong pressures.")
+            f"OpenRadioss unit mapping (auto-mapped are "
+            f"{_blast_unit_mapping_note()}; the imperial UNIT=1/3 have no legal "
+            "Radioss unit label, and UNIT=5 states its units only as the "
+            "CFM/CFL/CFT/CFP factors on Card 2). The TM5-1300 blast formula is "
+            "unit-dependent, so set /BEGIN to the deck's real mass/length/time "
+            "via convert(units=...) or /LOAD/PBLAST will compute wrong "
+            "pressures.")
 
 
 def handle_load_blast_segment_set(block: Block, state: ConversionState) -> None:
@@ -8701,14 +8851,19 @@ def handle_load_blast(block: Block, state: ConversionState) -> None:
     state.blast_sources[bid] = LoadBlastEnhanced(
         bid=bid, m=wgt, xbo=xbo, ybo=ybo, zbo=zbo, tbo=tbo,
         unit=iunit, blast=isurf, death=death, negphs=negphs)
-    us = _blast_unit_system(iunit)
+    # legacy=True: this card's IUNIT is documented 1..5 only, so the
+    # *LOAD_BLAST_ENHANCED-only 6/7/8 must NOT be applied here.
+    us = _blast_unit_system(iunit, legacy=True)
     if us is not None:
         state.blast_unit_system = us
     else:
         state.warn(
             f"*LOAD_BLAST: IUNIT={iunit} has no automatic OpenRadioss unit "
-            "mapping (only 2 kg/m/s and 4 g/cm/µs are auto-mapped); set /BEGIN "
-            "via convert(units=...) or /LOAD/PBLAST pressures will be wrong.")
+            "mapping (auto-mapped on this legacy card are IUNIT=2 kg/m/s and "
+            "IUNIT=4 g/cm/mus; its IUNIT is documented 1..5 only — 6/7/8 are "
+            "*LOAD_BLAST_ENHANCED extensions and are not applied here); set "
+            "/BEGIN via convert(units=...) or /LOAD/PBLAST pressures will be "
+            "wrong.")
     state.warn(
         "*LOAD_BLAST (legacy) mapped to /LOAD/PBLAST with Exp_data from ISURF="
         f"{isurf} — the legacy surface/air-burst flag numbering differs from "
@@ -9411,20 +9566,8 @@ HANDLERS = {
     "CONSTRAINED_JOINT_STIFFNESS_FLEXION-TORSION": handle_constrained_joint_stiffness,
     "CONSTRAINED_JOINT_STIFFNESS_CYLINDRICAL":     handle_constrained_joint_stiffness,
 
-    # Rigid walls (LS-DYNA option order: _ORTHO _FINITE _MOVING _FORCES)
-    "RIGIDWALL_PLANAR":                       handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_FORCES":                handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_MOVING":                handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_MOVING_FORCES":         handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_FINITE":                handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_FINITE_FORCES":         handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_FINITE_MOVING":         handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_FINITE_MOVING_FORCES":  handle_rigidwall_planar,
-    "RIGIDWALL_PLANAR_ORTHO":                 handle_rigidwall_ortho,
-    "RIGIDWALL_PLANAR_ORTHO_FORCES":          handle_rigidwall_ortho,
-    "RIGIDWALL_PLANAR_ORTHO_FINITE":          handle_rigidwall_ortho,
-    "RIGIDWALL_PLANAR_ORTHO_MOVING":          handle_rigidwall_ortho,
-    "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING":   handle_rigidwall_ortho,
+    # Rigid walls: *RIGIDWALL_PLANAR is generated below, not listed here (the
+    # option order is free, so a literal list always misses spellings).
 
     # Discrete (spring/damper) elements
     "ELEMENT_DISCRETE":                       handle_element_discrete,
@@ -9504,6 +9647,7 @@ HANDLERS = {
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,
     "DATABASE_BINARY_INTFOR":                 handle_database_binary_intfor,
     "DATABASE_DEFORC":                        handle_database_deforc,
+    "DATABASE_DISBOUT":                       handle_database_disbout,
     "DATABASE_EXTENT_BINARY":                 handle_database_extent_binary,
     "DATABASE_JNTFORC":                       handle_database_jntforc,
     "DATABASE_MATSUM":                        handle_database_matsum,
@@ -9710,6 +9854,55 @@ for _kw, _interior in _rwall_geometric_keywords():
     HANDLERS[_kw] = (handle_rigidwall_geometric_interior if _interior
                      else handle_rigidwall_geometric)
 del _kw, _interior
+
+
+#: The four *RIGIDWALL_PLANAR keyword options, in the order their DATA CARDS
+#: appear (Card Summary, Manual p. 40-17). The card order is fixed; the NAME
+#: order is not — see _rwall_planar_keywords.
+_RWALL_PLANAR_OPTIONS = ("ORTHO", "FINITE", "MOVING", "FORCES")
+
+
+def _rwall_planar_keywords():
+    """Every *RIGIDWALL_PLANAR spelling, generated rather than hand-listed.
+
+    "The ordering of the input below as specified in the Card Summary must be
+    observed, but the ordering of the options in the keyword name is
+    unimportant. For example, both *RIGIDWALL_PLANAR_ORTHO_FINITE and
+    *RIGIDWALL_PLANAR_FINITE_ORTHO are valid and have the same effect."
+    (Manual p. 40-16.) k2rad dispatches on exact keywords, so each ordering
+    needs its own key.
+
+    Hand-listing only the canonical orderings left 8 of the 16 legal non-ORTHO
+    spellings — _FORCES_MOVING, _MOVING_FINITE, _FINITE_ORTHO and friends —
+    missing the exact-match lookup, and with no RIGIDWALL_PLANAR row in
+    _PREFIX_HANDLERS they fell into the generic skipped_keywords list: the wall
+    silently vanished from the model and the user was told only that some
+    keyword was skipped, never that a rigid wall was lost. Generating the
+    permutations closes that by construction, and _OFFSET_SPECS in assembly.py
+    is generated from this same source so the two cannot drift apart.
+
+    _ID is not generated: the parser strips a TRAILING _ID into block.options
+    (parser._TRAILING) and that is where p. 40-16 puts it — "an ID number may
+    be assigned ... using the following option: ID", listed apart from the
+    {OPTION} slots, unlike the geometric family where it sits in the
+    arbitrary-order list. _DISPLAY is not generated either: it is legal on this
+    family too and needs NO extra card (the Card Summary stops at Card 7), but
+    registering it would start CONVERTING walls that are skipped today, which
+    is a feature and not this batch's business — it stays a known gap.
+
+    Yields (keyword, is_ortho) pairs; ORTHO has no /RWALL equivalent and routes
+    to the warn-skip handler.
+    """
+    for _r in range(len(_RWALL_PLANAR_OPTIONS) + 1):
+        for _combo in _permutations(_RWALL_PLANAR_OPTIONS, _r):
+            yield ("_".join(("RIGIDWALL_PLANAR",) + _combo),
+                   "ORTHO" in _combo)
+
+
+for _kw, _is_ortho in _rwall_planar_keywords():
+    HANDLERS[_kw] = (handle_rigidwall_ortho if _is_ortho
+                     else handle_rigidwall_planar)
+del _kw, _is_ortho
 
 
 #: Keyword PREFIX → handler, tried when the exact-match lookup misses. Mostly
