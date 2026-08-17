@@ -44,7 +44,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
-                       _rwall_geometric_keywords, _rwall_planar_keywords)
+                       _cnrb_option_keywords, _part_option_keywords,
+                       _part_options, _rwall_geometric_keywords,
+                       _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -385,13 +387,69 @@ def _off_node(b: Block, offsets: Dict[str, int], warn) -> None:
     _rewrite_node_blocks([b], nodeoff=offsets.get("n", 0))
 
 
+#: `*PART` option cards that carry an id, by option token: {card offset within the
+#: option's cards: [(field index, bucket)]}. In CARD-SUMMARY order, mirroring
+#: handlers._PART_OPTION_CARDS.
+#:
+#: Card 7 (_REPOSITION: CMSN MDEP MOVOPT) is deliberately left UNOFFSET. k2rad
+#: warn-drops the card, so nothing downstream reads those ids, and guessing at
+#: which of them are node/part references would rewrite numbers on the strength of
+#: a guess. Card 8 (_CONTACT) and card 9 (_PRINT) hold no ids at all; card 11
+#: (_FIELD FIDBO) names a *DEFINE_FIELD, which this converter does not read.
+_PART_OPTION_ID_CARDS = {
+    "REPOSITION": (1, {}),
+    "CONTACT": (1, {}),
+    "PRINT": (1, {}),
+    "ATTACHMENT_NODES": (1, {0: [(0, "s")]}),   # ANSID = a *SET_NODE id
+    "AVERAGED": (0, {}),
+    "FIELD": (1, {}),
+}
+
+
 def _off_part(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every `*PART` spelling: the data card's ids, plus the option cards' ids.
+
+    The walk mirrors ``handlers.handle_part`` exactly (the way ``_off_section_shell``
+    mirrors its handler) rather than importing it. It has to: the old flat
+    stride-of-2 loop would, on a `*PART_INERTIA` inside an `*INCLUDE_TRANSFORM`,
+    rewrite the ``IXX IXY IXZ IYY IYZ IZZ`` card as if it were the next part's data
+    card — corrupting the inertia numbers with a part/material/section offset.
+    """
     # (title, data) pairs, possibly repeated: pid secid mid eosid hgid _ _ tmid
     mods = [(0, "p"), (1, "r"), (2, "m"), (3, "m"), (4, "r"), (7, "m")]
-    for i in range(0, len(b.raw) - 1, 2):
+    opts, _unknown = _part_options(b.keyword)
+    i = 0
+    while i + 1 < len(b.raw):
         new = _rewrite_line(b.raw[i + 1], mods, offsets)
         if new is not None:
             b.raw[i + 1] = new
+        i += 2
+        if "INERTIA" in opts:
+            # Card 3 XC YC ZC TM IRCS NODEID — NODEID is a node id; cards 4-5 are
+            # pure floats; card 6's CID is a *DEFINE_COORDINATE_* id (IDDOFF), and
+            # it exists only when card 3's IRCS reads 1.
+            ircs = 0
+            if i < len(b.raw):
+                ircs = _geti(_fields(b.raw[i]), 4)
+                new = _rewrite_line(b.raw[i], [(5, "n")], offsets)
+                if new is not None:
+                    b.raw[i] = new
+            i += 3
+            if ircs == 1:
+                if i < len(b.raw):
+                    new = _rewrite_line(b.raw[i], [(6, "d")], offsets)
+                    if new is not None:
+                        b.raw[i] = new
+                i += 1
+        for tok, (n_cards, id_fields) in _PART_OPTION_ID_CARDS.items():
+            if tok not in opts:
+                continue
+            for k, cell_mods in id_fields.items():
+                if i + k < len(b.raw):
+                    new = _rewrite_line(b.raw[i + k], cell_mods, offsets)
+                    if new is not None:
+                        b.raw[i + k] = new
+            i += n_cards
 
 
 # *ELEMENT_SHELL / *ELEMENT_BEAM option grammar — mirrors handlers.py
@@ -719,26 +777,100 @@ def _off_define_transformation(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[k] = f"{verb:<10}" + "".join(f"{x:>10}" for x in a).rstrip()
 
 
-def _off_cnrb_spc(b: Block, offsets: Dict[str, int], warn) -> None:
-    """*CONSTRAINED_NODAL_RIGID_BODY_SPC. Card 1: pid cid nsid pnode …;
-    SPC card: CMO CON1 CON2 SPCNID — with CMO<0 CON1 is a local
-    *DEFINE_COORDINATE_* system id (IDDOFF namespace), not a DOF code."""
+def _off_cnrb(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every `*CONSTRAINED_NODAL_RIGID_BODY` spelling.
+
+    Card 1: ``pid cid nsid pnode ...``. Then, in CARD-SUMMARY order (which is fixed
+    even though the keyword's option order is not — mirrors
+    ``handlers.handle_constrained_nodal_rigid_body``):
+
+      * ``_SPC`` card 2 ``CMO CON1 CON2 SPCNID`` — with ``CMO < 0`` ``CON1`` is a
+        local *DEFINE_COORDINATE_* system id (IDDOFF), not a DOF code;
+      * ``_INERTIA`` cards 3-5, of which only card 3's ``NODEID`` is an id, plus
+        card 6's ``CID2`` (IDDOFF) when card 3's ``IRCS`` reads 1;
+      * ``_OVERRIDE`` card 7 and ``_THERMAL`` card 8 hold flags only.
+
+    Every option card must be STEPPED OVER even when it carries no id: without the
+    stride, an ``_INERTIA`` block's card 6 ``CID2`` would never be offset while the
+    coordinate system it names would be, leaving the reference dangling.
+    """
+    kw_opts = b.keyword[len("CONSTRAINED_NODAL_RIGID_BODY"):]
     toff = _title_offset(b)
     if toff < len(b.raw) and b.raw[toff].strip():
         new = _rewrite_line(b.raw[toff], [(0, "p"), (1, "d"), (2, "s"),
                                           (3, "n")], offsets)
         if new is not None:
             b.raw[toff] = new
-    i2 = toff + 1
-    if i2 < len(b.raw) and b.raw[i2].strip():
-        f = _fields(b.raw[i2])
-        cmo = to_float(f[0]) if f and str(f[0]).strip() else 0.0
-        mods: List[Tuple[int, str]] = [(3, "n")]          # SPCNID
-        if cmo < 0.0:
-            mods.append((1, "d"))                         # CON1 = system id
-        new = _rewrite_line(b.raw[i2], mods, offsets)
+    i = toff + 1
+    if "_SPC" in kw_opts:
+        if i < len(b.raw) and b.raw[i].strip():
+            f = _fields(b.raw[i])
+            cmo = to_float(f[0]) if f and str(f[0]).strip() else 0.0
+            mods: List[Tuple[int, str]] = [(3, "n")]       # SPCNID
+            if cmo < 0.0:
+                mods.append((1, "d"))                     # CON1 = system id
+            new = _rewrite_line(b.raw[i], mods, offsets)
+            if new is not None:
+                b.raw[i] = new
+        i += 1
+    if "_INERTIA" in kw_opts:
+        ircs = 0
+        if i < len(b.raw):
+            ircs = _geti(_fields(b.raw[i]), 4)
+            new = _rewrite_line(b.raw[i], [(5, "n")], offsets)   # NODEID
+            if new is not None:
+                b.raw[i] = new
+        i += 3
+        if ircs == 1:
+            if i < len(b.raw):
+                new = _rewrite_line(b.raw[i], [(6, "d")], offsets)   # CID2
+                if new is not None:
+                    b.raw[i] = new
+            i += 1
+    if "_OVERRIDE" in kw_opts:
+        i += 1
+    if "_THERMAL" in kw_opts:
+        i += 1
+
+
+def _off_constrained_interpolation(b: Block, offsets: Dict[str, int],
+                                   warn) -> None:
+    """`*CONSTRAINED_INTERPOLATION[_LOCAL]`.
+
+    Card 1: ``ICID DNID DDOF CIDD ITYP IDNSW FGM`` — the constraint id goes to
+    IDROFF, ``DNID`` to IDNOFF and ``CIDD`` to IDDOFF. ``DDOF`` is a DOF digit
+    string, not an id, and must never be offset.
+
+    Card 2, repeated to the end of the block: ``INID`` is a NODE id when ``ITYP``
+    is 0 and a *SET_NODE id when it is 1 — the bucket depends on a card-1 value.
+    With ``_LOCAL`` each card 2 is followed by its own ``CIDI`` card (IDDOFF),
+    which has to be stepped over per pair or the pairing slips by one line.
+    """
+    is_local = b.keyword.endswith("_LOCAL")
+    toff = _title_offset(b)
+    if toff >= len(b.raw):
+        return
+    ityp = 0
+    if b.raw[toff].strip():
+        ityp = _geti(_fields(b.raw[toff]), 4)
+        new = _rewrite_line(b.raw[toff], [(0, "r"), (1, "n"), (3, "d")], offsets)
         if new is not None:
-            b.raw[i2] = new
+            b.raw[toff] = new
+    ind_bucket = "s" if ityp else "n"
+    i = toff + 1
+    while i < len(b.raw):
+        if not any(line.strip() for line in b.raw[i:]):
+            break
+        new = _rewrite_line(b.raw[i], [(0, ind_bucket)], offsets)
+        if new is not None:
+            b.raw[i] = new
+        i += 1
+        if is_local:
+            if i < len(b.raw):
+                new = _rewrite_line(b.raw[i], [(0, "d")], offsets)
+                if new is not None:
+                    b.raw[i] = new
+            i += 1
 
 
 # *SECTION_SHELL / *INTEGRATION_SHELL card-set walks. Both keywords let a deck
@@ -1896,10 +2028,11 @@ _OFFSET_SPECS: Dict[str, object] = {
     "INITIAL_DETONATION": {"data": (0, [(0, "p")])},
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
-    # Constraints
-    "CONSTRAINED_NODAL_RIGID_BODY": {"cards": {0: [(0, "p"), (1, "d"),
-                                                   (2, "s"), (3, "n")]}},
-    "CONSTRAINED_NODAL_RIGID_BODY_SPC": _off_cnrb_spc,
+    # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)
+    # and *CONSTRAINED_INTERPOLATION are registered below from the same generators
+    # handlers.py uses, so the two tables cannot drift apart.
+    "CONSTRAINED_NODAL_RIGID_BODY": _off_cnrb,
+    "CONSTRAINED_NODAL_RIGID_BODY_SPC": _off_cnrb,
     "CONSTRAINED_EXTRA_NODES_NODE": {"data": (0, [(0, "p"), (1, "n")])},
     "CONSTRAINED_EXTRA_NODES_SET": {"data": (0, [(0, "p"), (1, "s")])},
     "CONSTRAINED_RIGID_BODIES": {"data": (0, [(0, "p"), (1, "p")])},
@@ -1997,11 +2130,34 @@ for _o1 in ("", "_OFFSET"):
         _OFFSET_SPECS[f"ELEMENT_BEAM{_o1}{_o2}"] = _off_element_beam
 del _o1, _o2, _o3, _o4
 
+# *PART_{OPTION1..6} (3588 spellings) and *CONSTRAINED_NODAL_RIGID_BODY_{SPC,
+# INERTIA,OVERRIDE,THERMAL} (65) — generated from the SAME functions handlers.py
+# registers its dispatch keys from, so a spelling can never reach one table and
+# miss the other. That pairing is the #116 lesson: the rigid-wall list used to be
+# a literal here and had already fallen three spellings behind the registry.
+for _kw in _part_option_keywords():
+    _OFFSET_SPECS[_kw] = _off_part
+for _kw, _cnrb_opts in _cnrb_option_keywords():
+    _OFFSET_SPECS[_kw] = _off_cnrb
+del _kw, _cnrb_opts
+
+for _kw in ("CONSTRAINED_INTERPOLATION", "CONSTRAINED_INTERPOLATION_LOCAL"):
+    _OFFSET_SPECS[_kw] = _off_constrained_interpolation
+del _kw
+
 #: Family prefix → rewriter for the *ELEMENT_ spellings the table does not list
 #: (mirrors the *ELEMENT_ rows of handlers._PREFIX_HANDLERS). Without it every
 #: unrecognized *ELEMENT_SHELL_<option> in an *INCLUDE_TRANSFORM would keep its
 #: original node/part ids while the rest of the include was offset — dangling
 #: connectivity, which is worse than the warning it would have produced.
+#: *PART deliberately gets NO prefix row, unlike handlers._PREFIX_HANDLERS. Every
+#: one of the 3588 legal spellings is registered above by name, so a keyword that
+#: reaches this fallback is NOT a *PART option stacking — it is *PART_SENSOR,
+#: *PART_ADD, *PART_MODES or an unlisted *PART_COMPOSITE ordering, none of which
+#: has *PART's (HEADING, data) card layout. Walking those with _off_part would
+#: rewrite a composite PLY card as if it were a part data card. Letting them fall
+#: through to the "keyword has no offset map" warning is right: the handler side
+#: warn-skips them too, so no id of theirs is read anywhere.
 _ELEMENT_PREFIX_SPECS = (
     ("ELEMENT_SHELL", _off_element_shell),
     ("ELEMENT_BEAM", _off_element_beam),

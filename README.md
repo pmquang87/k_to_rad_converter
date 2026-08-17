@@ -113,7 +113,51 @@ export the image.
 ### Mesh & geometry
 `*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
-`*PART`, `*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
+`*PART` **and every legal option stacking** — `_INERTIA` / `_REPOSITION`,
+`_CONTACT`, `_PRINT`, `_ATTACHMENT_NODES`, `_AVERAGED`, `_FIELD`, in **any
+order** (all 3588 spellings are generated from one grammar, because "Options 1,
+2, 3, 4, 5, and 6 may be specified in any order"; the CARD order stays the fixed
+Card-Summary one whichever way the keyword is spelled). The option cards are
+consumed positionally by the option set — a blank line inside the block is a card
+of all-defaults, never padding, and `_INERTIA` card 6 is read only when the
+card-3 `IRCS` value is 1. **The mesh survives every stacking**, modelled or not:
+- `*PART_INERTIA` → the part's `/RBODY` carries defined mass properties —
+  `TM` → `Mass`, `IXX/IYY/IZZ` → `Jxx/Jyy/Jzz`, `IXY/IYZ/IXZ` → `Jxy/Jyz/Jxz`
+  (a pure field-order permutation, **no sign change**: both LS-DYNA and Radioss
+  hold the inertia *tensor* component, i.e. minus the product of inertia), and
+  `ICoG = 4` so the mesh's own mass and inertia are ignored and the centre of
+  gravity is pinned where the card puts it. The main node is placed at `NODEID`
+  (reused when element-free, else copied to a synthesized free node) or at
+  `XC/YC/ZC`. `IRCS = 1` binds `/RBODY Skew_ID` — the card-6 `CID`
+  `*DEFINE_COORDINATE_*` 1:1, or a synthesized `/SKEW/FIX` built from the two
+  card-6 vectors (`z' = x_L × v_ip`, `y' = z' × x_L`); a dangling `CID` or a
+  degenerate vector pair warns and stays global. Card 5 `VTX..VRZ` →
+  `/INIVEL/TRA` + `/INIVEL/ROT` on a group holding **only** the main node, which
+  is exact because `/INIVEL/ROT` writes the nodal angular velocity and the rigid
+  body then rotates about its main node = the centre of gravity. An
+  `*INITIAL_VELOCITY_RIGID_BODY` on the same part supersedes card 5 (Remark 5)
+  and the card-5 values are dropped with a warning. A blank `TM` or a zero
+  inertia diagonal is a source-deck defect (Remark 3: "There are no default
+  values") — the override is refused with a warning rather than emitted as
+  starter `ERROR 679` / `ERROR 274`, and a non-rigid or merged-away part reports
+  the lost `TM` by value
+- `*PART_CONTACT` → `OPTT` into the `/PART` card's `Thick` column (cols 31–50),
+  the virtual contact thickness that feeds the gap in `/INTER/TYPE7, 11, 18, 19,
+  20, 21, 24, 25`. Written only when non-zero (the starter's own test is
+  `THK_PART /= ZERO`, so a literal zero is indistinguishable from blank).
+  `FS`/`FD`/`DC`/`VC`, `SFT`, `SSF` and `CPARM8` are warn-dropped — Radioss has
+  no per-part friction or stiffness scale, and `SFT` is deliberately *not* folded
+  into `Thick` (it scales the true thickness; `Thick` replaces it). A part
+  carrying both `OPTT` and per-element `*ELEMENT_SHELL_THICKNESS` is warned,
+  because the element value wins
+- `_REPOSITION`, `_PRINT` (`PRBF`), `_ATTACHMENT_NODES` (`ANSID`) and `_FIELD`
+  (`FIDBO`) are warn-dropped with their cards consumed, so the walk stays in
+  phase; `_AVERAGED` adds no card. `*PART_SENSOR` / `_ADD` / `_MODES` / `_MOVE` /
+  `_DUPLICATE` / `_ANNEAL` / `_STACKED_ELEMENTS` are separate keywords, not
+  `*PART` options — they are warn-skipped by name rather than parsed into phantom
+  parts
+
+`*PART_COMPOSITE` (+ `_TITLE` / `_LONG` / `_CONTACT`; `_TSHELL` /
 `_IGA_SHELL` warn and fall back — see **Composites**), `*SECTION_SHELL`
 (+ `_TITLE`; every card SET under one header, not just the first, striding over
 the `ICOMP` angle cards, the keyword-option card and the ELFORM 101–105
@@ -1514,6 +1558,36 @@ failure forces the node pair becomes a 2-node nodal rigid body (the validated
 CNRB machinery); with `SN`/`SS` failure it becomes a stiff `/PROP/TYPE13`
 `/SPRING` connector carrying the failure forces (`TF`/`EP` and non-quadratic
 exponents are warned)
+`*CONSTRAINED_NODAL_RIGID_BODY` → `/RBODY` (id = `PID`, `NSID` blank = `PID`), in
+**all 65 option spellings** — `_SPC`, `_INERTIA`, `_OVERRIDE`, `_THERMAL` in any
+order, generated from one grammar, with the cards consumed in the fixed
+Card-Summary order. `_SPC` → an inline `/BCS` on the master node (see
+**Boundary conditions**); `_INERTIA` carries the *same* card set as
+`*PART_INERTIA` (Vol I Appendix X: "the same keyword data (except … CID2)") and
+gets the same transfer — `Mass`, `Jxx..Jxz`, `ICoG = 4`, the main node at
+`NODEID`/`XC,YC,ZC`, `CID2` → `Skew_ID` when `IRCS = 1`, and card 5 →
+`/INIVEL/TRA` + `/INIVEL/ROT`. `PNODE` is not used as the main node on an
+`_INERTIA` body (LS-DYNA relocates `PNODE` to the centre of mass itself, so it is
+a readout node); `DRFLAG`/`RRFLAG` DOF releases, the `_OVERRIDE` card
+(`ICNT`/`IBAG`/`IPSM`) and the `_THERMAL` card (`IDTHRM`) are warn-dropped
+`*CONSTRAINED_INTERPOLATION` / `_LOCAL` → `/RBE3` (id = `ICID`, `I_modif = 2` so
+Radioss may not modify the weights) plus one `/GRNOD/NODE` per set. `DNID` →
+`Node_IDr`, `DDOF` → `Trarot_ref` (digit-set membership: `1356` means DOFs
+1/3/5/6; blank = `123456`). The independent rows are **grouped on
+(`IDOF`, weight, `CIDI`)** and each group becomes its own set with its own `WTi`,
+`Trarot_Mi`, `skew_IDi` and node group — Radioss carries one scalar weight per
+SET, so collapsing them would throw the per-node weights away. `ITYP = 1` resolves
+each `INID` as a `*SET_NODE`; `_LOCAL` `CIDI` → the per-set `skew_IDi` (a card
+paired with every independent row). `CIDD`, `IDNSW` and `FGM` are warn-dropped
+(the 2022 `/RBE3` dependent card has no skew column, and `DDOF` is global
+regardless); per-component `TWGHTY..RWGHTZ` are not representable and fall back
+to `TWGHTX` with a warning. Guarded against the starter's own hard failures: a
+`DNID` that is not a node (`ERROR 78`/`760`), a dependent node that is an
+`/RBODY` main node (`ERROR 810` / `WARNING 3104`) or an `/RBODY` secondary, a node
+in two sets with different weights (`ERROR 705`, de-duplicated first-row-wins), a
+dangling `CIDI` (`ERROR 184`), and the dependent node appearing in its own
+independent list. The `/RBE3` nodes are also excluded from the implicit free-node
+`/BCS` guard, which would otherwise fight the constraint (`WARNING 3115`)
 
 ### Joints
 `*CONSTRAINED_JOINT_SPHERICAL` / `_REVOLUTE` / `_CYLINDRICAL` / `_PLANAR` /
@@ -1800,8 +1874,15 @@ See `docs/BLAST_ALE_JWL_MAPPING.md` for the full mapping table, card formats and
 unit/sign gotchas.
 
 ### Initial conditions
-`*INITIAL_VELOCITY_NODE` → `/INIVEL/NODE`
-`*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/RBODY`
+`*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),
+grouped by identical 6-tuple velocity
+`*INITIAL_VELOCITY_RIGID_BODY` → `/INIVEL/TRA` (+ `/INIVEL/ROT`) on the rigid
+body's MASTER node only — its 6 DOFs drive the body, and Radioss overwrites the
+secondary nodes from it anyway. (`TRA`/`ROT` are the only `/INIVEL` subtypes
+k2rad emits here; `/INIVEL/NODE` and `/INIVEL/RBODY` are not used.)
+A `*PART_INERTIA` / `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA` card-5 `VTX..VRZ` on
+the same body is superseded by this card and dropped with a warning (*PART
+Remark 5), since `/INIVEL` assigns rather than accumulates
 `*INITIAL_VELOCITY` (base set form) → `/INIVEL/TRA` (+ `/INIVEL/ROT` for
 rotational DOFs); `NSID`/`NSIDEX` node-set scoping (whole model when `NSID` is
 omitted or 0), `NSIDEX` removed by set difference, `BOXID` intersected against

@@ -90,6 +90,31 @@ shipped, so the marginal cost is small.
 
 ### Tier 2 — crash essentials
 
+- Rigid-body inertia & load distribution (P1): `*PART_INERTIA` and
+  `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA` → `/RBODY` `Mass`/`Jxx..Jxz` with
+  `ICoG=4` (the one flag that means "defined rather than calculated from the
+  mesh"), the main node placed at `NODEID`/`XC,YC,ZC`, `IRCS=1` routed through
+  `Skew_ID`, and card 5 `VTX..VRZ` → `/INIVEL/TRA` + `/INIVEL/ROT`;
+  `*PART_CONTACT` `OPTT` → the `/PART` `Thick` column; and
+  `*CONSTRAINED_INTERPOLATION[_LOCAL]` → `/RBE3` + one `/GRNOD/NODE` per
+  weight/DOF group — **done** (starter-validated, 0 ERROR; the products of
+  inertia transfer VERBATIM because both sides hold the tensor component, and
+  several dyna2rad defects were fixed rather than reproduced: its `/RBE3` is
+  unusable (`ERROR 78`/`760`, weights lost), its `NODEID` main-node position is
+  discarded, its `ICoG=1` fallback lands the node on the global origin, and it
+  rotates a global tensor when a CNRB carries `CID` with `IRCS=0`. See
+  CHANGELOG).
+  Still open: **`*ELEMENT_INERTIA`**, which Vol I Appendix X pairs with these two
+  and which the shared `_read_rigid_inertia` walker could serve directly; merging
+  a `*PART_INERTIA` slave into a `*CONSTRAINED_RIGID_BODIES` master (the merged
+  body's total mass/inertia about the merged centre of mass is not derivable from
+  the two cards, so it is warn-dropped); `DRFLAG`/`RRFLAG` per-node DOF releases
+  (the M2 item — still warn-dropped, as in dyna2rad); the `_OVERRIDE`
+  (`ICNT`/`IBAG`/`IPSM`) and `_THERMAL` (`IDTHRM`) CNRB cards; `*PART_REPOSITION`;
+  a `*PART_CONTACT` `SFT`/`SSF` route (the per-side `Igap=5` + `THICK_S`/`THICK_M`
+  pair is radioss2026-only) and `FS=-1` resolved from the per-part coefficients
+  rather than warned; and `*CONSTRAINED_INTERPOLATION`'s per-component
+  `TWGHTY..RWGHTZ` and `_LOCAL` `CIDD`, neither of which `/RBE3` can express.
 - `*MAT_SPOTWELD` (100) — **done** as /PROP/TYPE13 (SPR_BEAM) connectors; the
   cfg shows LAW59 binds to /PROP/TYPE43 connection solids, so the spring route
   is correct. Validate on a single-weld coupon. Original note: — needs new
@@ -250,7 +275,10 @@ shipped, so the marginal cost is small.
   friction cap (Radioss `VIS_f` is a different quantity), `FS=2`
   (`*DEFINE_TABLE` μ(p, v) — no Radioss construct; now `Fric=0` + a loud
   warning rather than a literal μ=2.0), `FS=-1` resolved from `*PART_CONTACT`
-  rather than warned, per-side `SST`/`MST` on a TYPE25 (the `Igap=5` +
+  rather than warned (the per-part `FS`/`FD`/`DC`/`VC` are now PARSED — see the
+  rigid-inertia batch in Tier 2 — but folding them into an interface still needs
+  a per-pair `/FRICTION` table, since Radioss has no per-part friction),
+  per-side `SST`/`MST` on a TYPE25 (the `Igap=5` +
   `THICK_S`/`THICK_M` route is radioss2026-only), a per-contact `IADJ=0` (only
   the global `--eroding-surf-ext` exists), a `*SET_SEGMENT` / `*SET_SHELL`
   contact side (only the part and part-set forms resolve), and

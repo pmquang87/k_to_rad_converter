@@ -3658,8 +3658,105 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
             lines += _emit_inivel("ROT", rot_id, f"InitVelRBRot_{rot_id}",
                                   grnod_id, (iv.vxr, iv.vyr, iv.vzr))
 
+    lines += _make_inertia_inivel(state, rbody_info)
+
     if lines:
         lines = ["#-  INITIAL CONDITIONS:", HDR] + lines
+    return lines
+
+
+def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
+    """`_INERTIA` card 5 ``VTX..VRZ`` → /INIVEL/TRA + /INIVEL/ROT on the main node.
+
+    **Why the main node alone is exact.** /INIVEL/ROT has no axis and no origin: it
+    writes its three components straight into the nodal rotational-velocity vector
+    (``hm_read_inivel.F:535-541``: ``VR(1,NOSYS)=V1`` ... for every node of the
+    group), and ``inirby.F`` then propagates the main node's ``V``/``VR`` to the
+    secondaries as a rigid field about the main node's position,
+    ``V(:,N) = V(:,M) + omega x (X_N - X_M)``. With ICoG=4 that position IS the
+    centre of mass the card states, so putting ``VTX..VTZ`` and ``VRX..VRZ`` on a
+    group containing only the main node reproduces "translational/rotational
+    velocity about the centre of mass" with no correction term — a pure
+    translation and a pure omega are both position-independent, which is why
+    /INIVEL/AXIS (the only variant that carries an origin, via a /FRAME) is not
+    needed and must not be used ("This option cannot be used when /INIVEL/TRA or
+    /INIVEL/ROT is applied on the same node").
+
+    ``IRODDL > 0`` is required for the ``VR`` write to happen at all, and
+    ``contrl.F:1053`` includes ``NRBODY`` in that MIN(), so any /RBODY in the deck
+    guarantees it — always true here.
+
+    **Double-application guard.** *PART Remark 5: "The *INITIAL_VELOCITY card may
+    overwrite the initial velocity of the rigid body." Radioss /INIVEL ASSIGNS
+    (``V(1,NOSYS) = V1``) rather than accumulating, so two cards on the same node
+    are not additive — the LAST one read wins. An
+    `*INITIAL_VELOCITY_RIGID_BODY` on the same body therefore makes the card-5
+    values dead weight, and they are dropped here with a warning instead of being
+    written to be silently overwritten. The whole-model and generated forms are
+    warned but kept: they are emitted by LATER sections
+    (``_make_initial_velocity`` / ``_make_initial_velocity_generation``), so
+    Radioss reads them after these cards and LS-DYNA's precedence falls out of the
+    section order by itself.
+    """
+    if not state.part_inertias and not any(c.inertia for c in state.cnrbs):
+        return []
+    # Bodies an *INITIAL_VELOCITY_RIGID_BODY already drives, by part id.
+    iv_rb_pids = {iv.pid for iv in state.inivel_rbodies}
+    # A whole-model *INITIAL_VELOCITY (NSID blank/0 → "whole model", which by then
+    # includes the synthesized main node) or an *INITIAL_VELOCITY_GENERATION with
+    # STYP=0 covers every node, main nodes included.
+    global_iv = ([f"*INITIAL_VELOCITY with NSID={iv.nsid or 0}"
+                  for iv in state.inivel_general
+                  if not iv.nsid and (iv.vx or iv.vy or iv.vz
+                                      or iv.vxr or iv.vyr or iv.vzr)]
+                 + [f"*INITIAL_VELOCITY_GENERATION with STYP={g.styp}"
+                    for g in state.inivel_generations if not g.styp])
+
+    todo: List[Tuple[int, str, object]] = [
+        (pid, f"*PART_INERTIA {pid}", inr)
+        for pid, inr in sorted(state.part_inertias.items())]
+    todo += [(c.pid, f"*CONSTRAINED_NODAL_RIGID_BODY_INERTIA pid={c.pid}",
+              c.inertia) for c in state.cnrbs if c.inertia is not None]
+
+    lines: List[str] = []
+    for pid, label, inr in todo:
+        if not inr.has_velocity():
+            continue
+        info = rbody_info.get(pid)
+        if not info:
+            state.warn(
+                f"{label}: the card-5 initial velocity "
+                f"(VT={inr.vtx:g},{inr.vty:g},{inr.vtz:g} "
+                f"VR={inr.vrx:g},{inr.vry:g},{inr.vrz:g}) is DROPPED — no /RBODY "
+                "was emitted for that id, so there is no main node to put it on.")
+            continue
+        if pid in iv_rb_pids:
+            state.warn(
+                f"{label}: the card-5 initial velocity is DROPPED because "
+                f"*INITIAL_VELOCITY_RIGID_BODY also drives part {pid}. *PART "
+                "Remark 5 gives *INITIAL_VELOCITY precedence ('may overwrite the "
+                "initial velocity of the rigid body'), and Radioss /INIVEL "
+                "ASSIGNS rather than accumulates, so emitting both would leave "
+                "the result decided by card order. Remove one of the two cards.")
+            continue
+        if global_iv:
+            state.warn(
+                f"{label}: the card-5 initial velocity is applied to /RBODY main "
+                f"node {info['ind_node']}, but {global_iv[0]} covers every node "
+                "in the model including that one. Radioss /INIVEL assigns rather "
+                "than accumulates and the whole-model card is written LATER in "
+                "the deck, so it WINS — which is LS-DYNA's own precedence (*PART "
+                "Remark 5), but scope the whole-model card if that is not what "
+                "was meant.")
+        grnod_id = info["ind_grnod_id"]
+        if inr.vtx or inr.vty or inr.vtz:
+            tid = state.next_id()
+            lines += _emit_inivel("TRA", tid, f"InitVelInertia_{tid}", grnod_id,
+                                  (inr.vtx, inr.vty, inr.vtz))
+        if inr.vrx or inr.vry or inr.vrz:
+            rid = state.next_id()
+            lines += _emit_inivel("ROT", rid, f"InitVelInertiaRot_{rid}", grnod_id,
+                                  (inr.vrx, inr.vry, inr.vrz))
     return lines
 
 
@@ -5532,6 +5629,12 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # so this does not depend on the joint section having run yet.
     elem_nodes.update(state.joint_spring_nodes)
     elem_nodes.update(state.connector_ground_nodes)
+    # /RBE3 nodes are kinematically coupled, so they are not zero rows — and a
+    # /BCS 111 111 on an /RBE3 DEPENDENT node fights the constraint outright
+    # (starter WARNING 3115: a dependent node that also has boundary conditions
+    # silently switches the whole element to the penalty formulation). Filled by
+    # _make_rbe3, which the section registry runs before this guard.
+    elem_nodes.update(state.rbe3_nodes)
     keep_free: Set[int] = set()
     for cn in state.coord_nodes.values():
         if cn.flag == 1:

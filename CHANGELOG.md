@@ -11,6 +11,250 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **Rigid-body inertia and load distribution: `*PART_INERTIA` (and every legal
+  `*PART` option stacking) → `/RBODY` `Mass`/`Jxx..Jxz` with `ICoG=4`,
+  `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA` → the same transfer on the CNRB path,
+  `*PART_CONTACT` `OPTT` → the `/PART` `Thick` column, and
+  `*CONSTRAINED_INTERPOLATION[_LOCAL]` → `/RBE3` + one `/GRNOD/NODE` per
+  weight/DOF group.** Before this batch `*PART_INERTIA` was not a dispatch key at
+  all, and that was not a soft failure: the block landed in `skipped_keywords`,
+  the part was never registered, and because `_make_parts_and_elements` emits
+  elements inside the `state.parts` loop, **every element on the part was
+  dropped**. Measured on a one-solid deck:
+
+  ```
+  SKIPPED: ['PART_INERTIA']
+  WARNINGS:
+   * MESH LOSS: 1 element(s) reference 1 part id(s) that no *PART card defines …
+  /PART cards in starter: ['/PART/2']      <- the rigid part is simply gone
+  ```
+
+  The naive fix is worse. Aliasing `HANDLERS["PART_INERTIA"] = handle_part` makes
+  the old stride-of-2 (title, data) walk read card 3 as a title and card 4 as a
+  data card, which registered a phantom `/PART/4321` from `IXX = 4321.0`, with
+  `secid=0`, `mid=0`, a coordinate card for a title — and no warning. So the walk
+  is now driven by the option SET at the Card-Summary order. Eight findings pin
+  the batch:
+
+  **1. The product-of-inertia sign — VERBATIM, do not negate.** Both sides define
+  the off-diagonals as the inertia *tensor* component, i.e. minus the product of
+  inertia. LS-DYNA `*PART` Remark 4 (Vol I R17 p.37-14), verbatim: *"Note that the
+  off-diagonal terms of the inertia tensor are opposite in sign from the products
+  of inertia."* Radioss matches — `starter/…/rbody/inirby.F:154-160` packs the 3×3
+  with the user values inserted **positively** on the off-diagonals:
+
+  ```fortran
+  RBY(2,NRB)=RBY(5,NRB)   ! (1,2) <- Jxy
+  RBY(4,NRB)=RBY(5,NRB)   ! (2,1) <- Jxy
+  RBY(3,NRB)=RBY(7,NRB)   ! (1,3) <- Jxz     [RBY(6) untouched -> (2,3) = Jyz]
+  ```
+
+  while `:331-339` accumulates the mesh contribution into the SAME slots with a
+  minus:
+
+  ```fortran
+  RBY(2,NRB)=RBY(2,NRB)-XY*XMG
+  RBY(3,NRB)=RBY(3,NRB)-XZ*XMG
+  RBY(6,NRB)=RBY(6,NRB)-YZ*XMG
+  ```
+
+  Two quantities summed into one tensor entry must share one convention, so
+  `Jxy = IXY` exactly. The only transformation is the FIELD ORDER: LS-DYNA card 4
+  is `IXX IXY IXZ IYY IYZ IZZ` on one line, Radioss is `Jxx Jyy Jzz` then
+  `Jxy Jyz Jxz` on two — and the second line is **not** `Jxy Jxz Jyz`. Pinned
+  empirically: a body fed `Jxx=100 Jyy=200 Jzz=250 / Jxy=10 Jyz=0 Jxz=0` echoed
+  `ADDED INERTIA 100.0 200.0 250.0 10.00 0.000 0.000`, printed in reader-storage
+  order `Mass, Jxx, Jyy, Jzz, Jxy, Jyz, Jxz` (`hm_read_rbody.F:553`). A negation
+  is invisible in the `.rad`; the only hint it ever leaves is starter
+  `WARNING 542` "NONPHYSICAL INERTIA".
+
+  **2. `ICoG = 4`, and only 4.** It is the sole flag that means "defined rather
+  than calculated from the finite element mesh". `inirby.F:266-282` + the gate at
+  `:322`:
+
+  ```fortran
+        ELSEIF(ICDG==4)THEN
+          DO J=1,3 ; XG(J)=X(J,M) ; ENDDO      ! COG = the main node, unmoved
+          MASRB=MS(M)                          ! secondary mesh mass IGNORED
+        ENDIF
+  …
+        IF(ICDG<=3)THEN                        ! <- 4 skips ALL inertia transport
+  ```
+
+  Measured on five otherwise-identical bodies (probe `pinE`; main node at
+  x = n·100, secondaries centred 20 further out, user `Mass` 1e-6, mesh mass
+  7.86e-7):
+
+  | ICoG | starter `NEW X` | starter `NEW MASS` |
+  |---|---|---|
+  | 1 | 108.8018 | 1.786e-6 (combined centroid; mesh mass added) |
+  | 2 | 220.0000 | 1.786e-6 (secondary centroid; main node MOVED) |
+  | 3 | 300.0000 | 1.786e-6 (main node kept; mesh mass still added) |
+  | **4** | **400.0000** | **1.000e-6** (main node kept; mesh mass DROPPED) |
+  | blank | 508.8018 | 1.786e-6 (= 1, and `Ispher` echoes 2) |
+
+  Any value but 4 double-counts the mesh, and 1/2 additionally move the COG off
+  the `XC/YC/ZC` the card states. Residual to respect: `inirby.F:146,166-169`
+  ALWAYS adds the main node's own `MS(M)`/`IN(M)`, so every `_INERTIA` main node
+  k2rad writes is element-free (a `NODEID` that carries elements is copied to a
+  synthesized free node at the same coordinates — reusing it would also be
+  `WARNING 448`, or the fatal `ERROR 1066` under `--ams`). For the same reason
+  `TM` **supersedes** any `*ELEMENT_MASS`/`_PART` on the body rather than being
+  added to it, with a warning naming both numbers.
+
+  **3. `IRCS = 1` goes through `/RBODY Skew_ID`, and that is exact.**
+  `inirby.F:161-164` applies `CALL CHBAS(SKEW(1,NOSKEW), RBY(1,NRB))` to the
+  packed 3×3 before any mesh contribution, and `chbas.F:29-67` computes
+  `M_out = A·M_in·Aᵀ` (its own header comment says `Aᵀ·M·A` and is wrong relative
+  to the code) with `A` filled column-major from `SKEW`, i.e. `A = [X′|Y′|Z′]` = R
+  (local→global). So `J_global = R·J_local·Rᵀ`, which is LS-DYNA's `IRCS=1`
+  definition. **Validated end to end**: a deck stating `J_local = diag(20,25,30)`
+  in a frame with X′=Z, Y′=X, Z′=Y came back from the starter as
+
+  ```
+       RIGID BODY ID         19 rigid brick local frame
+            SKEW NUMBER                                  90001
+            CENTER OF MASS FLAG                              4
+            NEW X,Y,Z              22.00000      2.000000      2.000000
+            NEW MASS               7.250000
+            NEW INERTIA xx yy zz   25.00000      30.00000      20.00000
+  ```
+
+  — the hand-computed `R J Rᵀ` — with **NORMAL TERMINATION, 0 ERROR, 0 WARNING**.
+  Card-6 `CID` binds the converted `/SKEW` 1:1; two card-6 vectors synthesize a
+  `/SKEW/FIX` (`z′ = x_L × v_ip`, `y′ = z′ × x_L`, written on the **Y′ and Z′**
+  lines after the mandatory ORIGIN line — a three-data-line card; omitting the
+  origin is `WARNING 100217` and silently shifts Y′ into it). A dangling `CID`
+  would be `ERROR 137`, so it is checked and warned instead. `IRCS = 0` binds
+  nothing — a deliberate divergence from dyna2rad, whose CNRB path binds card-1
+  `CID` as `Skew_ID` when `IRCS == 0` (`convertrigids.cxx:126-127`) and so rotates
+  a GLOBAL tensor (measured: `4.11 5.22 6.33` → `5.22 6.33 4.11`).
+
+  **4. Card-5 `VTX..VRZ` on the main node alone is exact.** `/INIVEL/ROT` has no
+  axis and no origin — `hm_read_inivel.F:535-541` writes the three components
+  straight into the nodal `VR` — and `inirby.F` then propagates the main node's
+  `V`/`VR` to the secondaries as `V(:,N) = V(:,M) + ω × (X_N − X_M)`. With
+  `ICoG=4` that origin IS the stated centre of mass, so a one-node group
+  reproduces "velocity about the COG" with no correction term. `/INIVEL/AXIS` (the
+  only variant with an origin) is deliberately not used: it needs a `/FRAME` and
+  "cannot be used when /INIVEL/TRA or /INIVEL/ROT is applied on the same node".
+  `IRODDL > 0` is required for the `VR` write and `contrl.F:1053` includes
+  `NRBODY` in that `MIN()`, so any `/RBODY` guarantees it. An
+  `*INITIAL_VELOCITY_RIGID_BODY` on the same body supersedes card 5 (*PART Remark
+  5: "The \*INITIAL_VELOCITY card may overwrite the initial velocity of the rigid
+  body") and the card-5 values are dropped with a warning rather than written to
+  be silently overwritten — Radioss `/INIVEL` assigns, so two cards on one node
+  are decided by order, not summed.
+
+  **5. `/RBE3` is written from scratch, not mirrored from dyna2rad.** Its output
+  is non-functional in the shipped build — a minimal four-node deck produced
+  `NODE ID=0 DOES NOT EXIST` → `ERROR 78` → `ERROR 760`, plus
+  `1.0 1.0 1.0 0.0 0.0 0.0` for every node whatever the deck said. Three
+  independent defects: `DNID` resolves through `GetEntityHandle` against the cfg
+  object name `NODE` while the LS-DYNA view keys nodes as `*NODE`, so the handle
+  is always invalid and `Node_IDr` is written 0; the per-set weights and
+  independent `Trarot_Mi` are written as SCALARS into attributes the cfg declares
+  `ARRAY[nset]` (and the weight list is an `sdiIntList` against a `FLOAT` array,
+  so it comes back empty and the `SetValue` never runs); and every independent
+  node is forced into ONE set. k2rad instead groups the rows on
+  `(IDOF, weight, CIDI)` and emits one set + one `/GRNOD/NODE` per group.
+  Validated at `Ipri=5` on a deck with `IDOF` 123/1234/12345/3 and weights
+  2/3/4/5:
+
+  ```
+       WEIGHTING FACTORS OF INDEPENDENT NODES
+           NODE  SKEW    DIR_TRA_1  DIR_TRA_2  DIR_TRA_3  DIR_ROT_1  DIR_ROT_2  DIR_ROT_3
+              5     0          2.0        2.0        2.0        0.0        0.0        0.0
+              6     0          3.0        3.0        3.0        3.0        0.0        0.0
+              7     0          4.0        4.0        4.0        4.0        4.0        0.0
+              8     0          0.0        0.0        5.0        0.0        0.0        0.0
+  ```
+
+  — exactly the deck, on a run with 0 ERROR.
+
+  **6. The `Trarot` sub-columns are positional, and getting them wrong is
+  silent.** `radioss110/RBODY/rbe3.cfg` writes
+  `CARD("%10d   %1d%1d%1d %1d%1d%1d%10d%10d", …)`: inside the 10-wide field, three
+  literal blanks, TxTyTz, one literal blank, RxRyRz. Corroborated by the Reference
+  Guide 2022 p.1957 sub-column table, whose TX/TY/TZ glyphs sit in grid cells
+  4/5/6 and whose θ glyphs sit in 8/9/10 with cell 7 empty. Negative control
+  (probe `pinD`): the six digits right-aligned as `      111111` produced
+  `WARNING 100213/100214/100217`, `REFERENCE DOF(Trarot) 000 111` — the three
+  translations silently lost — and the run still **TERMINATED NORMALLY**. Also
+  pinned: a blank `Trarot_Mi` does NOT mean all six DOFs, contradicting the
+  Reference Guide's own "Default (blank or 6 zeros), set on all DOF" — the reader
+  sets only the translations (`hm_read_rbe3.F:244-248`), confirmed empirically. So
+  k2rad writes all six digits explicitly and leans on neither side's default.
+  `I_modif = 2` (modification forbidden) keeps the deck's weights exactly; it is
+  the one value the starter leaves alone (`:322` `IF (IMODIF/=2) IRBE3(8,I)=4`,
+  and the floor-raising `WARNING 757` pass at `:516` is likewise gated on it).
+  `Iform` is **not** emitted — it is radioss2026-only; at 2022 the reader gets 0
+  and `SELECT CASE(IFORM) CASE(0,1)` maps it to 1, which is the 2022 behaviour.
+
+  **7. `*PART_CONTACT` `OPTT` → the `/PART` card's 4th field, cols 31-50.**
+  `hm_read_part.F:193-198` stores it raw as `THK_PART(I)`, and `i7sti3.F:226-238`
+  picks it as the first of three levels:
+
+  ```fortran
+        IF ( THK_PART(IP) /= ZERO .AND. IINTTHICK == 0) THEN
+          DX=HALF*THK_PART(IP)
+        ELSEIF ( THK(I)  /= ZERO .AND. IINTTHICK == 0) THEN
+          DX=HALF*THK(I)
+  ```
+
+  The test is `/= ZERO`, so a written `0.0` is indistinguishable from blank — a
+  literal zero contact thickness is not expressible through `/PART` at all — and
+  suppressing the field keeps every deck without the option byte-identical.
+  Read-back assertion from the starter: `VIRT. THICKN: 0.5000000000000` on the
+  part carrying `OPTT`, `0.000000000000` on the one without. `SFT` is deliberately
+  NOT folded into `Thick` (it scales the true thickness; `Thick` replaces it), and
+  `FS/FD/DC/VC`, `SSF`, `CPARM8` are warn-dropped — dyna2rad drops all seven
+  without a word (`convertparts.cxx:133-138` reads `OPTT` and nothing else; a grep
+  over its source finds zero references to the rest).
+
+  **8. Option spellings are GENERATED, and positional consumption is absolute.**
+  "Options 1, 2, 3, 4, 5, and 6 may be specified in any order on the \*PART card"
+  (Vol I R17 p.37-2) makes **3588** legal `*PART` spellings and 65
+  `*CONSTRAINED_NODAL_RIGID_BODY` ones; the CARD order stays the fixed
+  Card-Summary one whichever way the keyword is spelled. Altair's own reader
+  matches the whole suffix against a closed list of 12 (`_CONTACT_INERTIA` falls
+  into the final `else` and is mis-parsed), so both grammars are generated from
+  one function each and `_OFFSET_SPECS` in `assembly.py` is generated from the
+  SAME functions — the #116 lesson, where a hand-written rigid-wall list had
+  already fallen three spellings behind the registry. And a blank line inside an
+  option block is a card of all-DEFAULTS, never padding (the #117 lesson): card 6
+  is conditional on the `IRCS` VALUE read from card 3, so a skipped blank card 3
+  puts the whole rest of the block one card out of phase and on `*PART` eats the
+  next part's `HEADING`. `*PART_SENSOR`/`_ADD`/`_MODES`/`_MOVE`/`_DUPLICATE`/
+  `_ANNEAL`/`_STACKED_ELEMENTS` are separate keywords whose first card is not a
+  heading — they are warn-skipped by name rather than parsed into phantom parts.
+
+  **Regression evidence.** Full-deck starter validation: a combined probe
+  (`*PART_INERTIA_CONTACT` + `*PART_CONTACT` + `*CONSTRAINED_NODAL_RIGID_BODY_`
+  `INERTIA` + `*CONSTRAINED_INTERPOLATION`) runs **0 ERROR**, with the starter
+  echoing `CENTER OF MASS FLAG 4`, `NEW X,Y,Z 22.05 2.125 0.75` (= `XC/YC/ZC`),
+  `NEW MASS 7.250000` (= `TM`, the mesh mass absent), `NEW INERTIA xx yy zz
+  20.0 25.0 30.0` / `xy yz zx 1.0 2.0 3.0`, the CNRB body at `0.25 0.35 0.45` with
+  `31.0 35.0 40.0 / 1.0 2.0 3.0`, `VIRT. THICKN 0.5`, three `/INIVEL` and
+  `RBE3_ID 500 DEPENDENT_NODE 200 REF_DOF 111 111 #IND. 4 IMODIF 2`. The
+  `IRCS = 1` probe terminates **NORMAL, 0 ERROR, 0 WARNING**, and a second
+  `IRCS = 1` case through a CNRB `CID2` echoed `35.0 31.0 40.0 / -1.0 3.0 -2.0`
+  from a stated `31/35/40 / 1/2/3` — the hand-computed `R·J·Rᵀ` for a +90°-about-Z
+  skew, again 0 ERROR. Corpus sweep over **191/191 decks** (repo tree +
+  `Ryan_Lee_Examples` + `ls-dyna_example`), converted with `origin/master` and
+  with this branch and compared on both `_0000.rad` and `_0001.rad`: **0 hash
+  deltas, 0 warning-set deltas, 0 skip-list deltas** (the eight
+  `implicit_hr-anlenkung` TET10 decks are slow enough to need their own longer
+  budget and were re-run separately; they match too) — the
+  corpus contains no `*PART_INERTIA`, `*PART_CONTACT`,
+  `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA` or `*CONSTRAINED_INTERPOLATION` at all
+  (two independent passes over 618 files across the repo, `E:\openradioss_run` and
+  `E:\foxcore_data`, plus a header sniff of 6804 extensionless files), so every
+  new branch is gated on a spelling nothing in the corpus uses and the shared
+  `/PART`, `/RBODY`, `/GRNOD` and `/INIVEL` paths are untouched. Tests
+  2768 → 2828 (+60, all in the new `tests/test_rigid_inertia_rbe3.py`), subtests
+  851 → 854; `ruff check .` clean.
+
 - **Prescribed-motion and body/pressure load VARIANTS: `*BOUNDARY_PRESCRIBED_`
   `MOTION_RIGID_LOCAL` → a co-rotating `/SKEW/MOV`, `*BOUNDARY_PRESCRIBED_`
   `MOTION_SET_BOX` → the `_SET` path scoped by `*DEFINE_BOX`,

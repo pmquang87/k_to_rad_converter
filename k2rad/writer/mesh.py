@@ -1206,9 +1206,85 @@ def _shell_optional_fields(e: ShellElem, slots: List[int], sec_t: float) -> str:
     return _f(phi) + _f(thick)
 
 
+def _warn_part_contact_fields(state: ConversionState) -> None:
+    """Report the `*PART_CONTACT` card-8 fields that have no `/PART` destination.
+
+    ``OPTT`` becomes the `/PART` ``Thick`` column (see _make_parts_and_elements).
+    The other seven are dropped, and dyna2rad drops them without a word:
+    ``convertparts.cxx:133-138`` reads ``OPTT`` and nothing else, and a grep over
+    its whole source finds zero references to ``SCFC``/``DCFC``/``EDC``/``VCFC``/
+    ``SFT``/``SSF``/``CPARM8``. Two of them change results by a lot, so they are
+    named per part with their values.
+
+    ``SFT`` in particular is deliberately NOT multiplied into ``Thick``: LS-DYNA's
+    ``SFT`` scales the TRUE (element) thickness, while ``Thick`` REPLACES it, so
+    folding one into the other would apply the factor to a quantity it was never
+    meant for.
+    """
+    if not state.part_contacts:
+        return
+    fric_parts, sft_parts, ssf_parts, cparm_parts = [], [], [], []
+    for pid in sorted(state.part_contacts):
+        pc = state.part_contacts[pid]
+        if pc.fs or pc.fd or pc.dc or pc.vc:
+            fric_parts.append(
+                f"{pid} (FS={pc.fs:g} FD={pc.fd:g} DC={pc.dc:g} VC={pc.vc:g})")
+        if pc.sft:
+            sft_parts.append(f"{pid} (SFT={pc.sft:g})")
+        if pc.ssf:
+            ssf_parts.append(f"{pid} (SSF={pc.ssf:g})")
+        if pc.cparm8:
+            cparm_parts.append(f"{pid} (CPARM8={pc.cparm8:g})")
+    if fric_parts:
+        state.warn(
+            "*PART_CONTACT: the per-part friction coefficients on part(s) "
+            f"{', '.join(fric_parts)} are DROPPED. Radioss expresses friction per "
+            "INTERFACE (/INTER Fric, or a /FRICTION table bound through fric_ID), "
+            "never per part, and these values only take effect in LS-DYNA when a "
+            "*CONTACT card sets FS=-1 anyway. Put the real FS/FD on *CONTACT "
+            "Card 2, or collect the per-part pairs into a *DEFINE_FRICTION table "
+            "and reference it with FS=-2 (which k2rad does convert).")
+    if sft_parts:
+        state.warn(
+            f"*PART_CONTACT: the thickness SCALE factor on part(s) "
+            f"{', '.join(sft_parts)} is DROPPED — it is NOT folded into the /PART "
+            "Thick column, because LS-DYNA's SFT scales the element's true "
+            "thickness while Thick REPLACES it. Give the scaled value directly as "
+            "OPTT if that is what was meant.")
+    if ssf_parts:
+        state.warn(
+            "*PART_CONTACT: the penalty-stiffness scale on part(s) "
+            f"{', '.join(ssf_parts)} is DROPPED. Radioss has no per-part stiffness "
+            "scale at /BEGIN 2022 — /INTER Stfac is per interface, and the per-side "
+            "Igap=5 + THICK_S/THICK_M route is radioss2026-only.")
+    if cparm_parts:
+        state.warn(
+            f"*PART_CONTACT: CPARM8 on part(s) {', '.join(cparm_parts)} is DROPPED "
+            "(it exists only from FORMAT(Keyword971_R8.0) and has no Radioss "
+            "counterpart).")
+    # Comment 3 on the /PART card: Thick "supersedes the thickness defined in the
+    # shell property, if the value of the Thick field equals 0 in the /SHELL or
+    # /SH3N keyword" — i.e. a non-zero per-ELEMENT Thick wins over the part's.
+    # k2rad writes a per-element Thick from *ELEMENT_SHELL_THICKNESS, so a part
+    # carrying both loses the OPTT it just asked for, silently.
+    thick_elem_pids = {e.pid for e in state.shell_elems
+                       if any(t > 0.0 for t in e.thick_nodes)}
+    clash = sorted(pid for pid, pc in state.part_contacts.items()
+                   if pc.optt and pid in thick_elem_pids)
+    if clash:
+        state.warn(
+            f"*PART_CONTACT: part(s) {', '.join(str(p) for p in clash)} carry BOTH "
+            "an OPTT contact thickness and per-element *ELEMENT_SHELL_THICKNESS "
+            "values. The element's own Thick column WINS (/PART Comment 3: the "
+            "part Thick supersedes the property thickness only when the /SHELL or "
+            "/SH3N Thick is 0), so OPTT has no effect on those elements. Drop one "
+            "of the two.")
+
+
 def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]:
     if not state.parts:
         return []
+    _warn_part_contact_fields(state)
     lines = ["#-  PARTS AND ELEMENTS:", HDR]
 
     # Progress is driven off the solid elements (the dominant count); a single
@@ -1261,10 +1337,29 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
 
+        # *PART_CONTACT OPTT → the /PART card's 4th field, Thick (cols 31-50,
+        # F20): "(Optional) Virtual thickness for shells.  Define a thickness for
+        # shells, only used to calculate gap in interfaces" (Reference Guide 2022
+        # p.194-195), which feeds the gap in /INTER/TYPE7, 11, 18, 19, 20, 21, 24
+        # and 25 — exactly the interface types k2rad emits. Starter side,
+        # hm_read_part.F:193-198, stores it raw as THK_PART(I), and i7sti3.F:226-238
+        # picks it as the first of three levels: `IF (THK_PART(IP) /= ZERO ...)`,
+        # then the element thickness, then the property's.
+        #
+        # The field is only written when non-zero. That test is not cosmetic: the
+        # starter's own gate is `/= ZERO`, so a written 0.0 is INDISTINGUISHABLE
+        # from blank — a literal zero contact thickness is not expressible through
+        # /PART at all — and suppressing it keeps the 3-field line every deck
+        # without the option has always produced, byte for byte.
+        part_thick = 0.0
+        pc = state.part_contacts.get(pid)
+        if pc is not None and pc.optt:
+            part_thick = pc.optt
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",
-            f"{_i(prop_ref)}{_i(part.mid)}         0",
+            (f"{_i(prop_ref)}{_i(part.mid)}         0{_f(part_thick)}"
+             if part_thick else f"{_i(prop_ref)}{_i(part.mid)}         0"),
             HDR,
         ]
         if pid in shells_by_pid:

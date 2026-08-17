@@ -210,6 +210,14 @@ from .rbody import (
     _resolve_cnrb_spc,
     _make_cnrb_rbodies,
     _make_probe_rbody,
+    _inertia_element_nodes,
+    _resolve_inertia,
+    ICOG_DEFINED_PROPERTIES,
+)
+from .rbe3 import (
+    _make_rbe3,
+    _trarot,
+    I_MODIF_NO_MODIFICATION,
 )
 from .loads import (
     _make_rlinks,
@@ -558,6 +566,12 @@ __all__ = [
     "_resolve_cnrb_spc",
     "_make_cnrb_rbodies",
     "_make_probe_rbody",
+    "_inertia_element_nodes",
+    "_resolve_inertia",
+    "ICOG_DEFINED_PROPERTIES",
+    "_make_rbe3",
+    "_trarot",
+    "I_MODIF_NO_MODIFICATION",
     "_make_rlinks",
     "_make_bcs",
     "_FORCE_DOF_AXIS",

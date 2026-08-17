@@ -656,8 +656,11 @@ class AssemblyWarningTests(_AssemblyBase):
             "*KEYWORD",
             "*NODE",
             _nline(1, 0.0, 0.0, 0.0),
-            "*CONSTRAINED_INTERPOLATION",     # not in the offset map
-            _row(1, 1, 123456),
+            # Not in the offset map. (*CONSTRAINED_INTERPOLATION used to stand in
+            # here; it gained a walker with the /RBE3 batch, so the example moved
+            # to a keyword that is still genuinely unmapped.)
+            "*CONSTRAINED_SHELL_TO_SOLID",
+            _row(1, 1),
             "*END",
         ]) + "\n")
         main = self._write(d, "main.k", "\n".join([
@@ -667,7 +670,7 @@ class AssemblyWarningTests(_AssemblyBase):
             "*END",
         ]) + "\n")
         self._state(main)
-        self.assertTrue(any("CONSTRAINED_INTERPOLATION" in w
+        self.assertTrue(any("CONSTRAINED_SHELL_TO_SOLID" in w
                             and "NOT applied" in w for w in PARSER_WARNINGS))
 
     def test_coordinate_bearing_keyword_warns_under_transform(self):
