@@ -50,6 +50,8 @@ from .state import (
     ConstrainedJoint, JointStiffness, JOINT_TYPE45,
     Curve, DefineTable, CoordSys, CoordNodes, CoordVector, DefineVector,
     SdOrientation, DefineBox, ConstrainedNodalRigidBody,
+    RigidInertia, PartContact,
+    ConstrainedInterpolation, InterpolationIndep,
     BcsSpc, PM_VAD_KEYWORD, PrescribedMotionRigid, PrescribedMotionSet,
     LoadRigidBody,
     LoadNode, RigidWallPlanar, RigidWallGeometric,
@@ -708,21 +710,233 @@ def handle_element_discrete(block: Block, state: ConversionState) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared _INERTIA card walker (*PART_INERTIA and *CONSTRAINED_NODAL_RIGID_BODY_
+# INERTIA carry the SAME data — Vol I R17 Appendix X p.75-16)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_rigid_inertia(raw: List[str], idx: int):
+    """Read the `_INERTIA` cards starting at ``raw[idx]``.
+
+    Returns ``(RigidInertia, n_cards_consumed)``. Three cards are consumed
+    unconditionally and a fourth only when the card-3 ``IRCS`` field reads 1.
+
+    **Blank cards are CARDS, not whitespace.** LS-PrePost writes an all-default
+    card as a line of blanks (and writes every one of the eight columns even when
+    unused), so a blank card 5 with `VTX..VRZ` all zero is normal output. The
+    parser preserves such a line as ``""`` precisely so its card POSITION holds
+    (``parser.py``: "an all-blank fixed-format card means all defaults"), and the
+    walk must therefore consume by COUNT and never skip a blank line. Skipping
+    one shifts everything below it up by a card — and because card 6 is
+    conditional on a value read from card 3, a skipped blank card 3 makes ``IRCS``
+    read 0, card 6 is not consumed, and on ``*PART`` the next part's HEADING gets
+    eaten as a data card. That is the exact PR #117 positional-consumption
+    failure mode.
+    """
+    inr = RigidInertia()
+    # Card 3: XC YC ZC TM IRCS NODEID
+    f3 = _card(raw, idx, fixed=True, n=8, w=10)
+    if f3:
+        inr.xc = to_float(f3[0])
+        inr.yc = to_float(f3[1]) if len(f3) > 1 else 0.0
+        inr.zc = to_float(f3[2]) if len(f3) > 2 else 0.0
+        inr.tm = to_float(f3[3]) if len(f3) > 3 else 0.0
+        inr.ircs = to_int(f3[4]) if len(f3) > 4 else 0
+        inr.nodeid = to_int(f3[5]) if len(f3) > 5 else 0
+    # Card 4: IXX IXY IXZ IYY IYZ IZZ  (note the LS-DYNA order — the Radioss
+    # cards are Jxx Jyy Jzz / Jxy Jyz Jxz, a pure permutation, see RigidInertia)
+    f4 = _card(raw, idx + 1, fixed=True, n=8, w=10)
+    if f4:
+        inr.ixx = to_float(f4[0])
+        inr.ixy = to_float(f4[1]) if len(f4) > 1 else 0.0
+        inr.ixz = to_float(f4[2]) if len(f4) > 2 else 0.0
+        inr.iyy = to_float(f4[3]) if len(f4) > 3 else 0.0
+        inr.iyz = to_float(f4[4]) if len(f4) > 4 else 0.0
+        inr.izz = to_float(f4[5]) if len(f4) > 5 else 0.0
+    # Card 5: VTX VTY VTZ VRX VRY VRZ
+    f5 = _card(raw, idx + 2, fixed=True, n=8, w=10)
+    if f5:
+        inr.vtx = to_float(f5[0])
+        inr.vty = to_float(f5[1]) if len(f5) > 1 else 0.0
+        inr.vtz = to_float(f5[2]) if len(f5) > 2 else 0.0
+        inr.vrx = to_float(f5[3]) if len(f5) > 3 else 0.0
+        inr.vry = to_float(f5[4]) if len(f5) > 4 else 0.0
+        inr.vrz = to_float(f5[5]) if len(f5) > 5 else 0.0
+    used = 3
+    # Card 6 — "optional unless IRCS = 1" (Card Summary, Vol I R17 p.37-4). The
+    # condition is a VALUE just parsed, not an option name.
+    if inr.ircs == 1:
+        f6 = _card(raw, idx + 3, fixed=True, n=8, w=10)
+        if f6:
+            inr.xl = to_float(f6[0])
+            inr.yl = to_float(f6[1]) if len(f6) > 1 else 0.0
+            inr.zl = to_float(f6[2]) if len(f6) > 2 else 0.0
+            inr.xlip = to_float(f6[3]) if len(f6) > 3 else 0.0
+            inr.ylip = to_float(f6[4]) if len(f6) > 4 else 0.0
+            inr.zlip = to_float(f6[5]) if len(f6) > 5 else 0.0
+            inr.cid = to_int(f6[6]) if len(f6) > 6 else 0
+        # Records whether the card was THERE (``_card`` returns [] past the end of
+        # the block), not just whether IRCS asked for it. The writer needs the two
+        # apart: "IRCS=1 and the block ended" and "card 6 present but its vectors
+        # are degenerate" are different source-deck defects with different fixes.
+        inr.has_local_card = bool(f6)
+        # The card is still STRIDDEN over unconditionally — the card count follows
+        # IRCS, and a *PART block whose next set exists must not have its HEADING
+        # eaten. Past the end of the block the extra step is harmless.
+        used = 4
+    return inr, used
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Parts
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: The six `*PART` OPTION slots and the tokens each accepts (Vol I R17 p.37-2).
+#: "For OPTION1 ... <BLANK> / INERTIA / REPOSITION.  For OPTION2 ... <BLANK> /
+#: CONTACT.  For OPTION3 ... <BLANK> / PRINT.  For OPTION4 ... <BLANK> /
+#: ATTACHMENT_NODES.  For OPTION5 ... <BLANK> / AVERAGED.  For OPTION6 ...
+#: <BLANK> / FIELD.  **Options 1, 2, 3, 4, 5, and 6 may be specified in any order
+#: on the *PART card.**"
+#:
+#: Slot order here is the OPTION-NUMBER order, which is NOT the card order — see
+#: _PART_OPTION_CARDS.
+_PART_OPTION_SLOTS = (
+    ("INERTIA", "REPOSITION"),
+    ("CONTACT",),
+    ("PRINT",),
+    ("ATTACHMENT_NODES",),
+    ("AVERAGED",),
+    ("FIELD",),
+)
+
+#: Every `*PART` option token, for suffix tokenisation. ATTACHMENT_NODES is the
+#: one token that itself contains an underscore, so the suffix cannot simply be
+#: split on "_" — _part_options matches longest-first instead.
+_PART_OPTION_TOKENS = tuple(sorted(
+    (t for slot in _PART_OPTION_SLOTS for t in slot),
+    key=len, reverse=True))
+
+#: (option token, number of data cards it adds) in **CARD-SUMMARY order** (Vol I
+#: R17 p.37-4/37-5), which is fixed and independent of the spelling order:
+#: INERTIA cards 3/4/5(/6) -> REPOSITION card 7 -> CONTACT card 8 -> PRINT card 9
+#: -> ATTACHMENT_NODES card 10 -> FIELD card 11. AVERAGED adds no card.
+#: INERTIA is handled separately because its card count depends on IRCS.
+_PART_OPTION_CARDS = (
+    ("REPOSITION", 1),          # CMSN MDEP MOVOPT
+    ("CONTACT", 1),             # FS FD DC VC OPTT SFT SSF CPARM8
+    ("PRINT", 1),               # PRBF
+    ("ATTACHMENT_NODES", 1),    # ANSID
+    ("AVERAGED", 0),
+    ("FIELD", 1),               # FIDBO
+)
+
+
+def _part_options(keyword: str):
+    """Split a `*PART...` keyword into ``(option set, unknown tokens)``.
+
+    Tokenises the suffix into an order-INDEPENDENT set rather than matching the
+    whole suffix against a closed list of canonical spellings. Altair's own
+    LS-DYNA reader does the latter (``Keyword971_R8.0/COMPONENT/part.cfg`` tests
+    ``_opt`` against ``""``, ``"_INERTIA"``, ``"_INERTIA_CONTACT"``, ... and
+    ``_CONTACT_INERTIA`` falls into the final ``else``), which silently
+    mis-parses a legal spelling the manual explicitly permits.
+    """
+    rest = keyword[len("PART"):]
+    opts: set = set()
+    unknown: List[str] = []
+    while rest:
+        if not rest.startswith("_"):
+            unknown.append(rest)
+            break
+        rest = rest[1:]
+        for tok in _PART_OPTION_TOKENS:
+            if rest == tok or rest.startswith(tok + "_"):
+                opts.add(tok)
+                rest = rest[len(tok):]
+                break
+        else:
+            # Not a *PART option: take the whole remainder as one unknown token
+            # so the caller can name it in a warning.
+            unknown.append(rest)
+            break
+    return opts, unknown
+
+
+def _part_option_keywords():
+    """Every legal `*PART` spelling, generated rather than hand-listed.
+
+    The six OPTION slots "may be specified in any order" (Vol I R17 p.37-2), so
+    every permutation of the chosen tokens is a legal keyword and ``dispatch()``
+    — an exact dict lookup — needs a key for each: 3588 in total. Hand-listing
+    the canonical orderings is what the native reader does, and 3576 of those
+    spellings then fall through it.
+
+    This matters more here than for any other family: without a `*PART` key the
+    block lands in ``skipped_keywords``, the PART is never registered, and
+    ``_make_parts_and_elements`` (which emits elements inside the
+    ``state.parts`` loop) drops EVERY ELEMENT on it. The mesh is gone, not just
+    the option's data — the same failure the #116 rigid-wall generator and the
+    #91 element-suffix fallback were written to close. ``_OFFSET_SPECS`` in
+    ``assembly.py`` is generated from this same function so the two cannot
+    drift apart.
+
+    Yields keyword strings, including the bare ``"PART"``.
+    """
+    # A choice per slot: nothing, or one of that slot's tokens.
+    choices = [(None,) + slot for slot in _PART_OPTION_SLOTS]
+    seen: set = set()
+
+    def _walk(i: int, picked: List[str]):
+        if i == len(choices):
+            for combo in _permutations(picked, len(picked)):
+                kw = "PART" + "".join("_" + t for t in combo)
+                if kw not in seen:
+                    seen.add(kw)
+                    yield kw
+            return
+        for tok in choices[i]:
+            yield from _walk(i + 1, picked if tok is None else picked + [tok])
+
+    yield from _walk(0, [])
+
+
 def handle_part(block: Block, state: ConversionState) -> None:
-    """*PART: (title card, data card) pairs — the pair may REPEAT inside one
-    keyword block, so parse every pair, not just the first."""
+    """`*PART` and EVERY legal option stacking (`_INERTIA`, `_CONTACT`,
+    `_REPOSITION`, `_PRINT`, `_ATTACHMENT_NODES`, `_AVERAGED`, `_FIELD`, in any
+    order).
+
+    "Card Sets.  Repeat as many sets of data cards as desired (Cards 1 through
+    10, depending on the keyword options).  This input ends at the next keyword
+    ("*") card." (Vol I R17 p.37-4) — so a set is ``HEADING`` + the data card +
+    whatever cards this block's OPTION SET demands, and the set repeats. Every
+    part under one keyword gets the same option cards.
+
+    The card walk is driven by the option set at the CARD-SUMMARY order, never by
+    a fixed stride and never by guessing at a card's content: with the option set
+    known there is no reason to guess, and the extra cards are floats where cards
+    1-2 are integers, so a content test would look convincing right up to a
+    `*PART_INERTIA` whose ``IXX`` happens to be integral. Aliasing this handler
+    onto `*PART_INERTIA` with the OLD stride-of-2 loop was measured to register a
+    phantom ``/PART/4321`` (from the ``IXX=4321.0`` card) with ``secid=0``,
+    ``mid=0`` and a coordinate card as its title, silently.
+    """
+    opts, unknown = _part_options(block.keyword)
     raw = block.raw
     if len(raw) < 2:
         title = raw[0].strip() if raw else ""
         state.warn(f"*PART missing data card – skipped (title='{title}')")
         return
-    for i in range(0, len(raw) - 1, 2):
+    n_reposition = n_print = n_attach = n_field = n_averaged = 0
+    truncated = False
+    i = 0
+    # A set needs at least the HEADING + the data card. The guard is exactly the
+    # old ``range(0, len(raw) - 1, 2)`` bound, so a plain *PART block walks
+    # byte-identically (an odd trailing line is ignored, a trailing pair of blank
+    # lines still reports "data card with no part id" as it always has).
+    while i + 1 < len(raw):
         title = raw[i].strip()
         # Data card: pid secid mid eosid hgid grav adpopt tmid
         f = _card(raw, i + 1, fixed=True, n=8, w=10)
+        i += 2
         pid   = to_int(f[0])
         secid = to_int(f[1])
         mid   = to_int(f[2])
@@ -732,10 +946,161 @@ def handle_part(block: Block, state: ConversionState) -> None:
         # HGID (field 5, cols 41-50) → the *HOURGLASS card overriding
         # *CONTROL_HOURGLASS for this part (0 = global card / defaults).
         hgid  = to_int(f[4]) if len(f) > 4 else 0
+
+        # ── Option cards, in Card-Summary order ──────────────────────────────
+        inertia = None
+        if "INERTIA" in opts:
+            inertia, used = _read_rigid_inertia(raw, i)
+            i += used
+        for tok, n_cards in _PART_OPTION_CARDS:
+            if tok not in opts:
+                continue
+            if tok == "AVERAGED":
+                n_averaged += 1
+                continue
+            fo = _card(raw, i, fixed=True, n=8, w=10)
+            i += n_cards
+            if tok == "CONTACT":
+                if pid > 0:
+                    state.part_contacts[pid] = PartContact(
+                        pid,
+                        fs=to_float(fo[0]) if fo else 0.0,
+                        fd=to_float(fo[1]) if len(fo) > 1 else 0.0,
+                        dc=to_float(fo[2]) if len(fo) > 2 else 0.0,
+                        vc=to_float(fo[3]) if len(fo) > 3 else 0.0,
+                        optt=to_float(fo[4]) if len(fo) > 4 else 0.0,
+                        sft=to_float(fo[5]) if len(fo) > 5 else 0.0,
+                        ssf=to_float(fo[6]) if len(fo) > 6 else 0.0,
+                        cparm8=to_float(fo[7]) if len(fo) > 7 else 0.0)
+            elif tok == "REPOSITION":
+                if any(x.strip() for x in fo):
+                    n_reposition += 1
+            elif tok == "PRINT":
+                if fo and to_int(fo[0]):
+                    n_print += 1
+            elif tok == "ATTACHMENT_NODES":
+                if fo and to_int(fo[0]):
+                    n_attach += 1
+            elif tok == "FIELD":
+                if fo and to_int(fo[0]):
+                    n_field += 1
+
+        # A set whose option cards ran off the end of the block: the values above
+        # came from empty _card() reads, so say so instead of trusting them.
+        if i > len(raw) and opts:
+            truncated = True
         if pid <= 0:
             state.warn(f"*PART: data card with no part id – skipped (title='{title}')")
+            if truncated:
+                break
             continue
         state.parts[pid] = PartData(pid, title, secid, mid, hgid, eosid)
+        if inertia is not None:
+            if inertia.has_mass_data() or inertia.has_velocity():
+                state.part_inertias[pid] = inertia
+            else:
+                # LS-PrePost writes an all-blank card set when the option is
+                # present but unused. Remark 3 forbids DERIVING the values, so
+                # "all blank" can only mean "no override" — emitting Mass = 0 and
+                # Jxx = 0 with ICoG = 4 would instead throw the mesh's own mass
+                # away (starter ERROR 679 "total mass <= 1e-30" / ERROR 274 "min
+                # principal inertia <= 0").
+                state.warn(
+                    f"*{block.keyword} {pid}: the _INERTIA cards are entirely "
+                    "blank (no TM, no inertia tensor, no initial velocity). "
+                    "*PART Remark 3 says 'all mass and inertia properties of the "
+                    "body must be specified.  There are no default values', so "
+                    "there is nothing to transfer — the rigid body keeps its "
+                    "MESH-derived mass and inertia. Fill in TM and IXX..IZZ if "
+                    "the body was meant to carry defined properties.")
+        if truncated:
+            state.warn(
+                f"*{block.keyword}: the block ends part-way through the option "
+                f"cards of part {pid} — the {'/'.join(sorted(opts))} card(s) are "
+                "INCOMPLETE and any part defined below this point in the same "
+                "block is UNREAD. Split the block so every card set is whole.")
+            break
+
+    if n_reposition:
+        state.warn(
+            f"*{block.keyword}: {n_reposition} part(s) carry _REPOSITION data "
+            "(CMSN/MDEP/MOVOPT) — DROPPED. It repositions a rigid body onto a "
+            "deformable master at t=0, which has no OpenRadioss counterpart; the "
+            "part stays at its meshed coordinates. Pre-position the mesh instead.")
+    if n_print:
+        state.warn(
+            f"*{block.keyword}: {n_print} part(s) carry _PRINT PRBF — DROPPED. It "
+            "selects LS-DYNA rigid-body force printing (rbdout); use "
+            "*DATABASE_RBDOUT, which k2rad maps to /TH/RBODY.")
+    if n_attach:
+        state.warn(
+            f"*{block.keyword}: {n_attach} part(s) carry _ATTACHMENT_NODES ANSID "
+            "— DROPPED (the node set is not attached to anything). Altair's own "
+            "LS-DYNA reader does not implement this card either. Use "
+            "*CONSTRAINED_EXTRA_NODES_SET, which k2rad folds into the part's "
+            "/RBODY secondary-node group.")
+    if n_field:
+        state.warn(
+            f"*{block.keyword}: {n_field} part(s) carry _FIELD FIDBO — DROPPED "
+            "(no OpenRadioss counterpart for a *DEFINE_FIELD boundary).")
+    if n_averaged:
+        state.note_recognized_not_emitted(
+            block.keyword,
+            "the _AVERAGED option adds no data card and no Radioss field")
+    if unknown:
+        state.warn(
+            f"*{block.keyword}: the option token(s) "
+            f"{', '.join('_' + u for u in unknown)} are not part of the *PART "
+            "grammar (INERTIA/REPOSITION, CONTACT, PRINT, ATTACHMENT_NODES, "
+            "AVERAGED, FIELD). Cards 1-2 were read, so the parts and their "
+            "elements are in the deck, but any extra card the unknown option "
+            "adds was read as if it were the next part's HEADING — check the "
+            "converted /PART list against the source deck.")
+
+
+#: `*PART_`-prefixed keywords that are a DIFFERENT LS-DYNA keyword family, not a
+#: `*PART` option stacking: their cards have nothing to do with ``HEADING`` +
+#: ``PID SECID MID ...``, so parsing them as a `*PART` would invent phantom parts
+#: with a coordinate or flag card for a title (exactly the phantom-/PART/4321
+#: failure the option-driven walk in handle_part exists to prevent).
+_PART_NOT_A_PART_FAMILIES = (
+    "PART_ADAPTIVE_FAILURE", "PART_ADD", "PART_ANNEAL", "PART_DUPLICATE",
+    "PART_MODES", "PART_MOVE", "PART_SENSOR", "PART_STACKED_ELEMENTS",
+)
+
+
+def handle_part_unknown_option(block: Block, state: ConversionState) -> None:
+    """Prefix-fallback for a `*PART...` spelling the exact lookup missed.
+
+    Belt to _part_option_keywords' braces: a spelling whose suffix decomposes
+    into `*PART` option tokens is walked by ``handle_part`` (mesh AND options
+    survive), and anything else is warn-skipped by NAME. The distinction is
+    load-bearing — `*PART_SENSOR`, `*PART_ADD`, `*PART_MODES` and friends are
+    separate keywords whose first card is not a heading, so running the `*PART`
+    walk on them would register parts that do not exist.
+    """
+    if block.keyword in _PART_NOT_A_PART_FAMILIES or any(
+            block.keyword.startswith(f + "_") for f in _PART_NOT_A_PART_FAMILIES):
+        state.skipped_keywords.append(block.keyword)
+        state.warn(
+            f"*{block.keyword} is a separate LS-DYNA keyword, not a *PART option "
+            "stacking — its cards do not start with a HEADING line, so it is "
+            "skipped WHOLE rather than parsed as a part (which would invent "
+            "phantom /PART entries from its data cards). Nothing it defines is "
+            "in the converted deck.")
+        return
+    _opts, unknown = _part_options(block.keyword)
+    if unknown:
+        state.skipped_keywords.append(block.keyword)
+        state.warn(
+            f"*{block.keyword}: the suffix does not decompose into *PART option "
+            f"tokens ({', '.join('_' + u for u in unknown)} is not one of "
+            "INERTIA/REPOSITION, CONTACT, PRINT, ATTACHMENT_NODES, AVERAGED, "
+            "FIELD), so the block is skipped rather than guessed at. If it "
+            "defines parts, EVERY ELEMENT on them is missing from the converted "
+            "deck — check the orphan-element warning below.")
+        return
+    handle_part(block, state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3897,23 +4262,110 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
 # Constraints
 # ─────────────────────────────────────────────────────────────────────────────
 
-def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) -> None:
-    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS for _SPC).
+#: The `*CONSTRAINED_NODAL_RIGID_BODY` option tokens, in the order their DATA
+#: CARDS appear (Card Summary, Vol I R17 p.10-147): the `_SPC` constraint card is
+#: card 2, `_INERTIA` cards 3-6, `_OVERRIDE` card 7, `_THERMAL` card 8. The NAME
+#: order is arbitrary — "The order of the options in the keyword name is
+#: arbitrary" (p.10-146) — so the spellings are generated (see
+#: _cnrb_option_keywords) while the card walk always follows this order.
+_CNRB_OPTIONS = ("SPC", "INERTIA", "OVERRIDE", "THERMAL")
 
-    LS-DYNA R16 Vol I (p.10-146..151):
+#: `_TITLE` is an option of this keyword too, and the manual's arbitrary-order
+#: sentence covers it: the documented list is "<BLANK> INERTIA OVERRIDE SPC
+#: THERMAL TITLE" (p.10-146). It gets its own tuple because it adds a card but no
+#: DATA — one 80a line ahead of card 1 — and because ``parser._split_keyword``
+#: already moves a TRAILING `_TITLE` into ``block.options``. Only a MID-position
+#: one (``*..._TITLE_INERTIA``) reaches the dispatcher spelled out, and without a
+#: key for it the whole rigid body vanishes with no diagnostic at all.
+_CNRB_TITLE_OPTIONS = ("TITLE", "SUBTITLE")
+
+
+def _cnrb_options(keyword: str):
+    """`(option set, has_title)` for a `*CONSTRAINED_NODAL_RIGID_BODY` spelling.
+
+    Tokenises the suffix on ``_`` — safe here, unlike `*PART`, because none of the
+    five option tokens contains an underscore. ``has_title`` is True when a
+    `_TITLE`/`_SUBTITLE` survives IN THE KEYWORD, i.e. when it is not the trailing
+    token the parser already stripped into ``block.options``.
+    """
+    opts: set = set()
+    has_title = False
+    for tok in keyword[len("CONSTRAINED_NODAL_RIGID_BODY"):].split("_"):
+        if tok in _CNRB_OPTIONS:
+            opts.add(tok)
+        elif tok in _CNRB_TITLE_OPTIONS:
+            has_title = True
+    return opts, has_title
+
+
+def _cnrb_option_keywords():
+    """Every legal `*CONSTRAINED_NODAL_RIGID_BODY` spelling, generated.
+
+    Same reasoning as _part_option_keywords and the #116 rigid-wall generator:
+    the option order is free, ``dispatch()`` is an exact lookup, and an unlisted
+    spelling means the rigid body silently vanishes from the model (here without
+    even the orphan-element warning, because a CNRB owns no elements).
+
+    ``TITLE`` is permuted in with the four data options, which takes the count
+    from 65 to 326 — "The order of the options in the keyword name is arbitrary"
+    (p.10-146) applies to the whole documented list, TITLE included. Leaving it
+    out covered only the 130 spellings with `_TITLE` last (which the parser strips
+    for us) and dropped the other 196 on the floor: measured, an otherwise
+    identical deck gave `/RBODY/205` with Mass 7.25 for
+    `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA_TITLE` and
+    ``SKIPPED: ['CONSTRAINED_NODAL_RIGID_BODY_TITLE_INERTIA']`` — no rigid body at
+    all — for the same options written the other way round.
+
+    The trailing-`_TITLE` keys are unreachable through ``dispatch`` today, since
+    ``parser._split_keyword`` never leaves one on ``block.keyword``. They are
+    generated anyway: a superset costs a dict entry, and it makes "every legal
+    spelling has a key" true of the table itself rather than of the table plus an
+    assumption about the parser.
+
+    Yields (keyword, frozenset(data options)) — the title carries no data, so it
+    is not in the returned set.
+    """
+    tokens = _CNRB_OPTIONS + ("TITLE",)
+    for r in range(len(tokens) + 1):
+        for combo in _permutations(tokens, r):
+            yield ("_".join(("CONSTRAINED_NODAL_RIGID_BODY",) + combo),
+                   frozenset(t for t in combo if t in _CNRB_OPTIONS))
+
+
+def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_NODAL_RIGID_BODY[_SPC][_INERTIA][_OVERRIDE][_THERMAL][_TITLE]
+    → /RBODY (+ /BCS for _SPC, + Mass/Jxx..Jxz and /INIVEL for _INERTIA).
+
+    LS-DYNA R17 Vol I (p.10-146..152), CARD-SUMMARY order — which is fixed even
+    though the keyword's option order is not:
       Card 1: PID CID NSID PNODE IPRT DRFLAG RRFLAG
-      _SPC card (only with the _SPC option):
-        CMO CON1 CON2 SPCNID XSPC YSPC ZSPC
+      Card 2 (_SPC):      CMO CON1 CON2 SPCNID XSPC YSPC ZSPC
         CMO>0 → CON1/CON2 are global translation/rotation codes (0-7);
         CMO<0 → CON1 is the local coordinate-system ID, CON2 a 6-digit local
         DOF code. Card-1 CID is the rigid body's (output/release) local system.
+      Cards 3-5 (_INERTIA):  XC YC ZC TM IRCS NODEID / IXX..IZZ / VTX..VRZ
+      Card 6 (IRCS=1):       XL YL ZL XLIP YLIP ZLIP CID2
+      Card 7 (_OVERRIDE):    ICNT IBAG IPSM
+      Card 8 (_THERMAL):     IDTHRM
 
-    The _INERTIA option (extra mass/inertia cards) is not parsed here; mass is
-    instead taken from *ELEMENT_MASS_* on the part/master node (see writer).
+    Two positional traps this walk exists to avoid. First, the cards are consumed
+    by COUNT in the order above, never by option-name order and never with blank
+    lines skipped — LS-PrePost writes an all-default card as blanks and the
+    parser keeps it as a card placeholder, so `if not line.strip(): continue`
+    would put every following card one slot out of phase (the PR #117 lesson).
+    Second, card 6 is conditional on the ``IRCS`` VALUE read from card 3, not on
+    an option name, so mis-reading card 3 also mis-strides card 6.
+
+    Without `_INERTIA` the mass comes from `*ELEMENT_MASS_*` on the part/master
+    node (see writer) — which matches LS-DYNA, where a CNRB without the option
+    has "LS-DYNA compute the inertia tensor from the nodal masses".
     """
     raw = block.raw
-    offset = _title_offset(block)          # title line for the _TITLE option
-    is_spc = block.keyword.endswith("_SPC")
+    # The `_TITLE` line, from whichever place the option ended up: the parser
+    # moves a TRAILING _TITLE into block.options, a mid-position one stays spelled
+    # out in the keyword. Exactly one card either way — never two.
+    opts, kw_title = _cnrb_options(block.keyword)
+    offset = _title_offset(block) or (1 if kw_title else 0)
     # Card 1
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     if len(f1) < 3:
@@ -3933,20 +4385,171 @@ def handle_constrained_nodal_rigid_body(block: Block, state: ConversionState) ->
             f"{rrflag} (per-node DOF releases) are not converted — the /RBODY ties "
             "all secondary-node DOFs. Model these releases manually if required."
         )
-    title = _read_title(block) if offset else ""
+    title = ""
+    if offset and raw:
+        # _read_title only fires off block.options; a keyword-spelled _TITLE has
+        # its 80a line at raw[0] just the same.
+        title = (_read_title(block) if (_has_title(block) or _has_id(block))
+                 else raw[0].strip())
     cnrb = ConstrainedNodalRigidBody(
         pid=pid, nsid=nsid, pnode=pnode, cid=cid, title=title,
     )
-    if is_spc:
-        # SPC card: CMO CON1 CON2 SPCNID XSPC YSPC ZSPC
-        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    idx = offset + 1
+    if "SPC" in opts:
+        # Card 2: CMO CON1 CON2 SPCNID XSPC YSPC ZSPC. Altair's own CNRB cfg
+        # writes only the first three columns; the current manual has seven, and
+        # this reads all of them.
+        f2 = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
         if f2:
             cnrb.has_spc = True
             cnrb.cmo    = to_float(f2[0]) if len(f2) > 0 else 0.0
             cnrb.con1   = to_int(f2[1])   if len(f2) > 1 else 0
             cnrb.con2   = to_int(f2[2])   if len(f2) > 2 else 0
             cnrb.spcnid = to_int(f2[3])   if len(f2) > 3 else 0
+    if "INERTIA" in opts:
+        inertia, used = _read_rigid_inertia(raw, idx)
+        idx += used
+        if inertia.has_mass_data() or inertia.has_velocity():
+            cnrb.inertia = inertia
+        else:
+            state.warn(
+                f"*{block.keyword} pid={pid}: the _INERTIA cards are entirely "
+                "blank (no TM, no inertia tensor, no initial velocity), so there "
+                "is nothing to transfer — the /RBODY keeps its MESH-derived mass "
+                "and inertia (LS-DYNA does the same without the option). Card 4's "
+                "own Default row marks IXX and IYY as required.")
+        if idx > len(raw):
+            state.warn(
+                f"*{block.keyword} pid={pid}: the block ends part-way through the "
+                "_INERTIA cards, so the mass properties read as zeros and were "
+                "not transferred. Cards 3-5 are mandatory with the option (plus "
+                "card 6 when IRCS=1).")
+    if "OVERRIDE" in opts:
+        f7 = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
+        if any(to_int(x) for x in f7[:3]):
+            state.warn(
+                f"*{block.keyword} pid={pid}: the _OVERRIDE card (ICNT/IBAG/IPSM) "
+                "is DROPPED — it overrides LS-DYNA's automatic contact/airbag "
+                "treatment of the rigid body's nodes, which has no /RBODY "
+                "counterpart. Scope the contact interfaces explicitly instead.")
+    if "THERMAL" in opts:
+        f8 = _card(raw, idx, fixed=True, n=8, w=10)
+        idx += 1
+        state.warn(
+            f"*{block.keyword} pid={pid}: the _THERMAL card (IDTHRM="
+            f"{to_int(f8[0]) if f8 else 0}) is DROPPED — k2rad emits no thermal "
+            "solver, so a rigid body's thermal-conduction flag has no target.")
     state.cnrbs.append(cnrb)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONSTRAINED_INTERPOLATION → /RBE3
+#
+# The DDOF/IDOF digit-string decoder that turns these cards into the /RBE3
+# ``Trarot`` sub-columns lives next to the card layout it feeds,
+# ``writer/rbe3.py::dof_digits_to_flags`` — no handler needs it, and no writer
+# module imports handlers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_constrained_interpolation(block: Block, state: ConversionState) -> None:
+    """*CONSTRAINED_INTERPOLATION[_LOCAL] → /RBE3 (+ one /GRNOD/NODE per set).
+
+    Card 1: ICID DNID DDOF CIDD ITYP IDNSW FGM.
+    Card 2, repeated: INID IDOF TWGHTX TWGHTY TWGHTZ RWGHTX RWGHTY RWGHTZ.
+    Card 3, only with _LOCAL and PAIRED with each card 2: CIDI.
+
+    "One *CONSTRAINED_INTERPOLATION card is required for each constraint
+    definition.  The input list of independent nodes is terminated when the next
+    keyword ("*") card is found." (Vol I R17 p.10-41.) There is NO count field —
+    unlike Radioss /RBE3, whose ``N_set`` is authoritative — so the pair list runs
+    to the end of the block and the walk must consume it positionally.
+
+    A blank line inside the list is a card of all-defaults, not padding: with
+    ``_LOCAL`` a blank ``CIDI`` card is the NORMAL spelling for "global", and
+    skipping it would pull the NEXT pair card into the CIDI slot and lose an
+    independent node per pair. Only a wholly blank TAIL (no non-blank line left)
+    ends the walk.
+    """
+    raw = block.raw
+    is_local = block.keyword.endswith("_LOCAL")
+    offset = _title_offset(block)
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if len(f1) < 2 or to_int(f1[0]) <= 0:
+        state.warn("*CONSTRAINED_INTERPOLATION: incomplete Card 1 (no ICID) – "
+                   "skipped; the interpolation constraint is NOT in the deck.")
+        return
+    icid = to_int(f1[0])
+    dnid = to_int(f1[1])
+    # DDOF default 123456 ("The default is 123456", p.10-42) — a real non-zero
+    # default, so it must come from content, not from to_int("") == 0.
+    ddof = to_int(f1[2]) if len(f1) > 2 and f1[2].strip() else 123456
+    if ddof == 0:
+        ddof = 123456
+    cidd = to_int(f1[3]) if len(f1) > 3 else 0
+    ityp = to_int(f1[4]) if len(f1) > 4 else 0
+    idnsw = to_int(f1[5]) if len(f1) > 5 and f1[5].strip() else 1
+    fgm = to_int(f1[6]) if len(f1) > 6 else 0
+    rec = ConstrainedInterpolation(icid=icid, dnid=dnid, ddof=ddof, cidd=cidd,
+                                  ityp=ityp, idnsw=idnsw, fgm=fgm,
+                                  local=is_local)
+    # A wholly blank TAIL is padding, not a pair card; anything before the last
+    # non-blank line — blank or not — is one card of the pair list. Located once
+    # rather than by re-slicing ``raw[i:]`` per iteration: an RBE3 spider runs to
+    # thousands of independent nodes and the slice copies N-i references each time.
+    last_data = -1
+    for j in range(len(raw) - 1, offset, -1):
+        if raw[j].strip():
+            last_data = j
+            break
+    i = offset + 1
+    while i <= last_data:
+        f2 = _card(raw, i, fixed=True, n=8, w=10)
+        i += 1
+        cidi = 0
+        if is_local:
+            f3 = _card(raw, i, fixed=True, n=8, w=10)
+            i += 1
+            cidi = to_int(f3[0]) if f3 else 0
+        inid = to_int(f2[0]) if f2 else 0
+        if inid <= 0:
+            continue
+        # IDOF default 123456; the five trailing weights default to TWGHTX ("the
+        # other factors are set equal to this input value as the default",
+        # p.10-43), and TWGHTX itself to 1.0.
+        idof = to_int(f2[1]) if len(f2) > 1 and f2[1].strip() else 123456
+        if idof == 0:
+            idof = 123456
+        wx = _ffield(f2, 2, 1.0)
+        rec.indeps.append(InterpolationIndep(
+            inid=inid, idof=idof, twghtx=wx,
+            twghty=_ffield(f2, 3, wx), twghtz=_ffield(f2, 4, wx),
+            rwghtx=_ffield(f2, 5, wx), rwghty=_ffield(f2, 6, wx),
+            rwghtz=_ffield(f2, 7, wx), cidi=cidi))
+    if idnsw not in (0, 1):
+        state.warn(
+            f"*{block.keyword} {icid}: IDNSW={idnsw} (continue the analysis with "
+            "the constraints unchanged after a node is deleted) is DROPPED — "
+            "/RBE3 has no deleted-node policy field. The default behaviour is "
+            "kept.")
+    if fgm:
+        state.warn(
+            f"*{block.keyword} {icid}: FGM={fgm} (special implicit constraint "
+            "processing for a dependent node not attached to the mesh) is "
+            "DROPPED — it selects an LS-DYNA implicit assembly path with no "
+            "/RBE3 counterpart.")
+    if is_local and cidd:
+        state.warn(
+            f"*{block.keyword} {icid}: the _LOCAL dependent system CIDD={cidd} is "
+            "DROPPED. The /RBE3 dependent-node card is Node_IDr / Trarot_ref / "
+            "N_set / I_modif — there is no skew column on it at /BEGIN 2022 (only "
+            "the per-set skew_IDi, which carries CIDI). LS-DYNA keeps DDOF global "
+            "either way ('DDOF are in the global coordinate system regardless of "
+            "whether the LOCAL option is used or not'), so the dependent DOF "
+            "selection is unaffected; a genuinely rotated dependent frame is not "
+            "representable.")
+    state.interpolations.append(rec)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9883,9 +10486,13 @@ HANDLERS = {
     "BOUNDARY_NON_REFLECTING":                handle_boundary_non_reflecting,
     "CONTROL_ALE":                            handle_control_ale,
 
-    # Constraints
+    # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings are
+    # GENERATED below (_cnrb_option_keywords) — the two literal keys are kept
+    # here only so the family is visible in this table.
     "CONSTRAINED_NODAL_RIGID_BODY":           handle_constrained_nodal_rigid_body,
     "CONSTRAINED_NODAL_RIGID_BODY_SPC":       handle_constrained_nodal_rigid_body,
+    "CONSTRAINED_INTERPOLATION":              handle_constrained_interpolation,
+    "CONSTRAINED_INTERPOLATION_LOCAL":        handle_constrained_interpolation,
     "CONSTRAINED_EXTRA_NODES_NODE":           handle_constrained_extra_nodes,
     "CONSTRAINED_EXTRA_NODES_SET":            handle_constrained_extra_nodes,
     "CONSTRAINED_RIGID_BODIES":               handle_constrained_rigid_bodies,
@@ -10100,6 +10707,30 @@ for _o1 in ("", "_TSHELL", "_IGA_SHELL"):
 del _o1, _o2, _o3
 
 
+# *PART_{OPTION1..6} — 3588 legal spellings, since "Options 1, 2, 3, 4, 5, and 6
+# may be specified in any order on the *PART card" (Vol I R17 p.37-2). Registered
+# from the generator so a legal ordering can never miss the exact-match lookup:
+# without a key the whole block lands in skipped_keywords, the part is never
+# registered, and _make_parts_and_elements — which emits elements INSIDE the
+# state.parts loop — drops every element on it. Measured on a one-solid
+# *PART_INERTIA deck before this batch: "SKIPPED: ['PART_INERTIA']" plus a MESH
+# LOSS warning for the orphaned brick, and no /PART/1 in the starter at all.
+for _kw in _part_option_keywords():
+    HANDLERS[_kw] = handle_part
+del _kw
+
+# *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL,TITLE} in any order
+# — 326 spellings ("The order of the options in the keyword name is arbitrary",
+# p.10-146, of a list that includes TITLE). A missing key here is worse than for
+# *PART: a CNRB owns no elements, so nothing downstream notices the loss and the
+# rigid body simply is not in the model. Measured before TITLE joined the
+# permutation: *..._INERTIA_TITLE gave /RBODY Mass 7.25, *..._TITLE_INERTIA gave
+# SKIPPED and no rigid body.
+for _kw, _cnrb_opts in _cnrb_option_keywords():
+    HANDLERS[_kw] = handle_constrained_nodal_rigid_body
+del _kw, _cnrb_opts
+
+
 # *ELEMENT_SHELL_{THICKNESS}_{BETA|MCID}_{OFFSET}_{DOF} (Vol I R17): 24 legal
 # spellings, and *ELEMENT_BEAM_{OFFSET}_{ORIENTATION}: 4. Generating the grammar
 # beats hand-enumerating it — and unlike *PART_COMPOSITE (twelve spellings, all
@@ -10307,20 +10938,41 @@ del _kw, _is_ortho
 #: see an option it cannot parse, so the prefix routes every unregistered
 #: spelling to an explicit warn-skip instead of the generic skipped-keyword
 #: note (which says nothing about WHY the wall is gone).
+#: *PART is here for BOTH reasons at once. A spelling whose suffix decomposes
+#: into *PART option tokens is walked (mesh AND options survive) — belt to the
+#: generated keys above; a *PART_SENSOR / _ADD / _MODES / _MOVE / _DUPLICATE /
+#: _ANNEAL / _STACKED_ELEMENTS is a DIFFERENT keyword whose first card is not a
+#: HEADING, so it is warn-skipped by name rather than parsed into phantom parts.
+#: PART_COMPOSITE MUST precede it — the loop breaks on the first prefix match, and
+#: a composite ordering the twelve generated keys miss belongs on the composite
+#: walk (its ply cards are nothing like *PART's), not on the plain one.
 _PREFIX_HANDLERS = (
     ("ELEMENT_SHELL", handle_element_shell),
     ("ELEMENT_BEAM", handle_element_beam),
     ("ELEMENT_PLOTEL", handle_element_plotel),
     ("RIGIDWALL_GEOMETRIC", handle_rigidwall_geometric_unsupported),
+    ("PART_COMPOSITE", handle_part_composite),
+    ("PART", handle_part_unknown_option),
 )
 
 
 def dispatch(block: Block, state: ConversionState) -> None:
-    """Look up and call the handler for *block.keyword*."""
+    """Look up and call the handler for *block.keyword*.
+
+    The prefix fallback matches on a TOKEN boundary — ``kw == prefix`` or
+    ``kw.startswith(prefix + "_")`` — not on a bare character prefix.
+    ``*PARTICLE_BLAST`` is not a `*PART` spelling, and a bare
+    ``startswith("PART")`` routed it into the *PART fallback, which then told the
+    user that "_ICLE_BLAST is not one of INERTIA/REPOSITION, CONTACT, ..." and
+    that its parts might have lost every element. The emitted deck was the same
+    either way (both land in skipped_keywords), but the diagnostic named the wrong
+    keyword family.
+    """
     handler = HANDLERS.get(block.keyword)
     if handler is None:
         for _prefix, _handler in _PREFIX_HANDLERS:
-            if block.keyword.startswith(_prefix):
+            if (block.keyword == _prefix
+                    or block.keyword.startswith(_prefix + "_")):
                 handler = _handler
                 break
     if handler is not None:

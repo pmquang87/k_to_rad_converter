@@ -63,6 +63,7 @@ from .contacts import (
 )
 from .frictions import _make_frictions
 from .rbody import _make_cnrb_rbodies, _make_probe_rbody, _make_rbodies
+from .rbe3 import _make_rbe3
 from .joints import _make_joints, _resolve_joints
 from .dbeam import _make_discrete_beam_connectors
 from .loads import (
@@ -1230,6 +1231,12 @@ def _starter_section_registry():
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
         ("rbodies",           lambda c: c.rbody_lines),
+        # /RBE3 after the rigid bodies: its guards need the /RBODY main-node and
+        # secondary-node sets to report the RBODY > RBE3 hierarchy conflicts
+        # (starter ERROR 810 / WARNING 3104), and its dependent node has to be in
+        # state.rbe3_nodes before the implicit free-node guard runs.
+        ("rbe3",              lambda c: _make_rbe3(c.state, c.rbody_info,
+                                                   c.rigid_nodes)),
         ("imposed_motions",   lambda c: _make_imposed_motions(c.state, c.rbody_info)),
         ("imposed_motions_set", lambda c: _make_imposed_motions_set(c.state)),
         ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),

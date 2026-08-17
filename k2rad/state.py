@@ -2084,6 +2084,172 @@ class DefineBox:
 
 
 @dataclass
+class RigidInertia:
+    """The `_INERTIA` mass-property card set, shared by `*PART_INERTIA` and
+    `*CONSTRAINED_NODAL_RIGID_BODY_INERTIA`.
+
+    The two keywords carry IDENTICAL data — LS-DYNA Vol I R17 Appendix X p.75-16
+    says so in as many words: "The same method must be used for
+    *CONSTRAINED_NODAL_RIGID_BODY_INERTIA which has the same keyword data (except
+    the coordinate system in input in field CID2)". So one dataclass and one card
+    walker (``handlers._read_rigid_inertia``) serve both, and ``cid`` holds
+    *PART's card-6 ``CID`` or the CNRB's card-6 ``CID2`` indifferently.
+
+    Cards (each 8 x I10/E10.0, Vol I R17 p.37-4 / p.10-147):
+      3: XC YC ZC TM IRCS NODEID
+      4: IXX IXY IXZ IYY IYZ IZZ
+      5: VTX VTY VTZ VRX VRY VRZ
+      6: XL YL ZL XLIP YLIP ZLIP CID   — present ONLY when IRCS = 1
+
+    **The off-diagonal SIGN is not a product of inertia.** *PART Remark 4 (Vol I
+    R17 p.37-14) is explicit: "Note that the off-diagonal terms of the inertia
+    tensor are opposite in sign from the products of inertia." So LS-DYNA's
+    ``IXY`` is the tensor component ``-integral(xy dm)``. Radioss uses the SAME
+    convention — ``inirby.F:154-160`` inserts ``Jxy`` into slot (1,2) with a plus
+    sign while ``:331-339`` accumulates the mesh contribution into that same slot
+    as ``RBY(2)=RBY(2)-XY*XMG``, and two quantities summed into one tensor entry
+    must share one convention. Hence ``Jxy=IXY, Jyz=IYZ, Jxz=IXZ`` VERBATIM: the
+    only transformation is the field ORDER (LS-DYNA writes IXX IXY IXZ IYY IYZ
+    IZZ on one card, Radioss writes Jxx Jyy Jzz then Jxy Jyz Jxz on two).
+
+    **There are no defaults.** *PART Remark 3: "If the INERTIA keyword option is
+    used, all mass and inertia properties of the body must be specified. There
+    are no default values." A blank ``TM`` or a blank inertia tensor is therefore
+    a source-deck DEFECT, not a request to derive anything — the writer warns
+    rather than emitting ``Mass = 0``.
+    """
+    xc: float = 0.0
+    yc: float = 0.0
+    zc: float = 0.0
+    tm: float = 0.0
+    #: 0 = the tensor is in the GLOBAL frame, 1 = in the card-6 local system.
+    ircs: int = 0
+    #: Node whose coordinates ARE the centre of mass; beats XC/YC/ZC ("If nodal
+    #: point NODEID is defined, XC, YC, and ZC are ignored", p.37-7).
+    nodeid: int = 0
+    ixx: float = 0.0
+    ixy: float = 0.0
+    ixz: float = 0.0
+    iyy: float = 0.0
+    iyz: float = 0.0
+    izz: float = 0.0
+    vtx: float = 0.0
+    vty: float = 0.0
+    vtz: float = 0.0
+    vrx: float = 0.0
+    vry: float = 0.0
+    vrz: float = 0.0
+    # Card 6 — the local system the tensor is expressed in when IRCS = 1. Either
+    # two vectors (local x-axis XL,YL,ZL plus an in-plane vector XLIP,YLIP,ZLIP,
+    # "The origin lies at (0,0,0)") or a *DEFINE_COORDINATE_* id in ``cid``
+    # ("With this option, leave fields 1 - 6 blank").
+    xl: float = 0.0
+    yl: float = 0.0
+    zl: float = 0.0
+    xlip: float = 0.0
+    ylip: float = 0.0
+    zlip: float = 0.0
+    cid: int = 0
+    #: True when card 6 was actually PRESENT in the deck, not merely promised by
+    #: ``IRCS = 1``. ``writer/rbody.py::_inertia_frame`` splits its "the local
+    #: system is unusable" diagnostic on it: a missing card 6 (the block ended)
+    #: and a card 6 stating two zero/parallel vectors are different defects.
+    has_local_card: bool = False
+
+    def has_mass_data(self) -> bool:
+        """True when the card set carries ANY mass/inertia value.
+
+        An all-blank card set is what LS-PrePost writes for an ``_INERTIA``
+        option that is present but unused, and Remark 3 forbids deriving values,
+        so the writer treats it as "no override" instead of "zero mass"."""
+        return bool(self.tm or self.ixx or self.iyy or self.izz
+                    or self.ixy or self.iyz or self.ixz)
+
+    def has_velocity(self) -> bool:
+        return bool(self.vtx or self.vty or self.vtz
+                    or self.vrx or self.vry or self.vrz)
+
+
+@dataclass
+class PartContact:
+    """`*PART_CONTACT` card 8: FS FD DC VC OPTT SFT SSF CPARM8 (all 8 x E10.0).
+
+    Only ``OPTT`` has a Radioss home — the ``/PART`` card's 4th field ``Thick``
+    (cols 31-50), "Virtual thickness for shells ... only used to calculate gap in
+    interfaces" (Reference Guide 2022 p.194). Everything else is warn-dropped:
+    ``FS``/``FD``/``DC``/``VC`` are per-part friction coefficients that Radioss
+    expresses only per INTERFACE, ``SFT`` is a thickness SCALE (not multiplied
+    into ``Thick`` — that would silently double-apply once the property thickness
+    is also scaled), ``SSF`` is a per-part penalty-stiffness scale whose only
+    Radioss route is the radioss2026 ``Igap=5`` + ``THICK_S``/``THICK_M`` pair,
+    and ``CPARM8`` does not exist below FORMAT(Keyword971_R8.0)."""
+    pid: int
+    fs: float = 0.0
+    fd: float = 0.0
+    dc: float = 0.0
+    vc: float = 0.0
+    optt: float = 0.0
+    sft: float = 0.0
+    ssf: float = 0.0
+    cparm8: float = 0.0
+
+
+@dataclass
+class InterpolationIndep:
+    """One `*CONSTRAINED_INTERPOLATION` card-2 row (+ its `_LOCAL` card 3).
+
+    ``inid`` is a NODE id when the card's ``ITYP`` is 0 and a `*SET_NODE` id when
+    it is 1. ``idof`` is a DIGIT-STRING, not a bitfield: "The list of dependent
+    degrees-of-freedom consists of a number with up to six digits, with each
+    digit representing a degree of freedom. For example, the value 1356 indicates
+    that degrees of freedom 1, 3, 5, and 6 are controlled" (Vol I R17 p.10-42).
+
+    LS-DYNA gives SIX weights per row and defaults the last five to ``twghtx``
+    ("the other factors are set equal to this input value as the default",
+    p.10-43); Radioss `/RBE3` has ONE scalar ``WTi`` per set, so a row whose six
+    weights are not all equal is not representable and is warned."""
+    inid: int
+    idof: int = 123456
+    twghtx: float = 1.0
+    twghty: float = 1.0
+    twghtz: float = 1.0
+    rwghtx: float = 1.0
+    rwghty: float = 1.0
+    rwghtz: float = 1.0
+    #: `_LOCAL` card 3 — the local system this independent node's DOFs are in.
+    cidi: int = 0
+
+
+@dataclass
+class ConstrainedInterpolation:
+    """`*CONSTRAINED_INTERPOLATION[_LOCAL]` → `/RBE3` (+ one `/GRNOD/NODE` per set).
+
+    Card 1: ICID DNID DDOF CIDD ITYP IDNSW FGM.
+
+    ``ddof`` defaults to 123456 ("The default is 123456", Vol I R17 p.10-42) —
+    which is NOT the Radioss default for the same field: a blank Radioss
+    ``Trarot_Mi`` gives Tx/Ty/Tz only (``hm_read_rbe3.F:244-248`` sets
+    ``J6(1)=J6(2)=J6(3)=1``), contradicting the Reference Guide's own "set on all
+    DOF". k2rad therefore always writes the six digits explicitly and never
+    leans on either default.
+
+    ``cidd`` has no `/RBE3` destination at all: the 2022 dependent-node card is
+    ``Node_IDr Trarot_ref N_set I_modif`` with no skew column (only the per-set
+    ``skew_IDi`` exists), and DDOF is global regardless — "DDOF are in the global
+    coordinate system regardless of whether the LOCAL option is used or not".
+    """
+    icid: int
+    dnid: int
+    ddof: int = 123456
+    cidd: int = 0
+    ityp: int = 0
+    idnsw: int = 1
+    fgm: int = 0
+    local: bool = False
+    indeps: List[InterpolationIndep] = field(default_factory=list)
+
+
+@dataclass
 class ConstrainedNodalRigidBody:
     """*CONSTRAINED_NODAL_RIGID_BODY[_SPC] — a rigid body tied from a node set.
 
@@ -2115,6 +2281,10 @@ class ConstrainedNodalRigidBody:
     con1: int = 0
     con2: int = 0
     spcnid: int = 0
+    #: The `_INERTIA` option's cards 3-6 (``CID2`` lands in ``inertia.cid``).
+    #: None when the option is absent — then LS-DYNA "computes the inertia tensor
+    #: from the nodal masses", which is exactly Radioss's own ICoG=1 default.
+    inertia: Optional[RigidInertia] = None
 
 
 @dataclass
@@ -4830,6 +5000,27 @@ class ConversionState:
     # *CONSTRAINED_RIGID_BODIES: (master_pid, slave_pid) pairs — the slave
     # rigid part's nodes are folded into the master's single /RBODY
     rigid_body_merges: List[Tuple[int, int]] = field(default_factory=list)
+
+    # *PART_INERTIA cards 3-6, keyed by PID → the /RBODY Mass/Jxx..Jxz override,
+    # the main node's position and the card-5 /INIVEL. Only rigid parts consume
+    # it ("This applies to rigid bodies (see *MAT_RIGID) only", Vol I R17
+    # p.37-2); a non-rigid part's entry is warned and dropped by the writer.
+    part_inertias: Dict[int, RigidInertia] = field(default_factory=dict)
+
+    # *PART_CONTACT card 8, keyed by PID → the /PART card's Thick column (OPTT);
+    # every other field is warn-dropped. See PartContact.
+    part_contacts: Dict[int, PartContact] = field(default_factory=dict)
+
+    # *CONSTRAINED_INTERPOLATION[_LOCAL] → /RBE3 + one /GRNOD/NODE per weight/DOF
+    # group. Raw ids only; the writer resolves DNID/INID against state.nodes and
+    # state.node_sets and CIDI against the converted /SKEW ids.
+    interpolations: List[ConstrainedInterpolation] = field(default_factory=list)
+
+    #: Every node an emitted /RBE3 references (dependent + independent), filled by
+    #: _make_rbe3. The implicit free-node guard must treat them as ATTACHED: the
+    #: dependent node's DOFs are eliminated (or penalised) by the RBE3, so they are
+    #: not zero rows, and a /BCS 111 111 on it would fight the constraint outright.
+    rbe3_nodes: Set[int] = field(default_factory=set)
 
     # *RIGIDWALL_PLANAR → /RWALL/PLANE
     rigid_walls: List[RigidWallPlanar] = field(default_factory=list)
