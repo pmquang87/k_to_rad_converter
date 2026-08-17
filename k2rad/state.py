@@ -4526,6 +4526,12 @@ class ConversionState:
     # ids are invented by the converter and match no LS-DYNA deforc/disbout row.
     discrete_spring_eids: Set[int] = field(default_factory=set)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
+    # *ELEMENT_DISCRETE eids carrying PF=1, the deforc PRINT flag: "EQ.1: forces
+    # are not printed DEFORC file" (Vol I R16 p.19-32), and p.1944 names it as
+    # one of the two ways a deck narrows the deforc selection. It is an OUTPUT
+    # flag only — the /SPRING is emitted either way — so it subtracts from the
+    # *DATABASE_DEFORC /TH/SPRING group and nothing else.
+    deforc_suppressed_eids: Set[int] = field(default_factory=set)
     # *CONSTRAINED_JOINT_<KIND> → per joint one /PART + /PROP/TYPE45 (KJOINT2)
     # + one 2..4-node /SPRING, plus a /SKEW/FIX carrying the joint frame
     constrained_joints: List[ConstrainedJoint] = field(default_factory=list)

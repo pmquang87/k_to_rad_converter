@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
-                       _rwall_geometric_keywords)
+                       _rwall_geometric_keywords, _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
@@ -1961,15 +1961,14 @@ _ELEMENT_PREFIX_SPECS = (
     ("ELEMENT_PLOTEL", _OFFSET_SPECS["ELEMENT_PLOTEL"]),
 )
 
-# All *RIGIDWALL_PLANAR variants share Card 1 (nsid nsidex boxid ...).
-for _kw in ("RIGIDWALL_PLANAR_FORCES", "RIGIDWALL_PLANAR_MOVING",
-            "RIGIDWALL_PLANAR_MOVING_FORCES", "RIGIDWALL_PLANAR_FINITE",
-            "RIGIDWALL_PLANAR_FINITE_FORCES", "RIGIDWALL_PLANAR_FINITE_MOVING",
-            "RIGIDWALL_PLANAR_FINITE_MOVING_FORCES", "RIGIDWALL_PLANAR_ORTHO",
-            "RIGIDWALL_PLANAR_ORTHO_FORCES", "RIGIDWALL_PLANAR_ORTHO_FINITE",
-            "RIGIDWALL_PLANAR_ORTHO_MOVING",
-            "RIGIDWALL_PLANAR_ORTHO_FINITE_MOVING"):
+# All *RIGIDWALL_PLANAR variants share Card 1 (nsid nsidex boxid ...), and
+# every spelling handlers.py registers is generated from the same source, so the
+# two tables cannot drift apart — an unmapped keyword would keep its original
+# NSID/BOXID while the rest of the *INCLUDE_TRANSFORM was offset. The list used
+# to be a literal and had already fallen 3 spellings behind the registry.
+for _kw, _ in _rwall_planar_keywords():
     _OFFSET_SPECS[_kw] = _OFFSET_SPECS["RIGIDWALL_PLANAR"]
+del _kw
 
 # Every *RIGIDWALL_GEOMETRIC spelling handlers.py registers — generated from
 # the same source so the two tables cannot drift apart (an unmapped keyword

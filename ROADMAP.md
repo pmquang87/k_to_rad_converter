@@ -110,9 +110,12 @@ shipped, so the marginal cost is small.
   and warn-drop to an inert connector naming what is lost. See CHANGELOG for the
   dyna2rad defects reproduced vs. corrected, and for the 15 defects the
   review round found in k2rad's own first pass.
-  Still open on this family: `*DATABASE_DEFORC` / `*DATABASE_DISBOUT` →
-  `/TH/SPRING`, so a converted spring deck has no force time-history channel of
-  its own (`*DATABASE_SWFORC` covers only `*MAT_SPOTWELD` parts).
+  `*DATABASE_DEFORC` / `*DATABASE_DISBOUT` → `/TH/SPRING` over the converted
+  connectors, one group per card, `PF=1` honoured — **done**; both dts also join
+  the `/TFILE` minimum. Still open on this family: `*DATABASE_HISTORY_DISCRETE`
+  has no handler, so a deck that uses it to narrow the deforc selection gets a
+  `/TH/SPRING` listing every converted connector (a superset — the emitted
+  warning says so when the card is present).
 - Foams: `MAT_63` → LAW50, `MAT_57` → LAW38, `MAT_83` → LAW70,
   `MAT_26` → LAW28 — **done**.
 - Johnson-Cook metals (P1): `*MAT_JOHNSON_COOK` (15) → `/MAT/LAW2`

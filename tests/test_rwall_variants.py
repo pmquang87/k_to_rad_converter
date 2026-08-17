@@ -492,5 +492,81 @@ class ForcesCardTests(unittest.TestCase):
                         for w in result.warnings), result.warnings)
 
 
+class OptionOrderingTests(unittest.TestCase):
+    """"The ordering of the options in the keyword name is unimportant. For
+    example, both *RIGIDWALL_PLANAR_ORTHO_FINITE and
+    *RIGIDWALL_PLANAR_FINITE_ORTHO are valid and have the same effect."
+    (Manual p. 40-16.)
+
+    Only the canonical orderings used to have registry rows, so 8 of the 16
+    legal non-ORTHO spellings missed the exact-match lookup. With no
+    RIGIDWALL_PLANAR row in _PREFIX_HANDLERS they landed in the generic
+    skipped_keywords list: the wall silently vanished and the user was told
+    only that "a keyword" was skipped, never that a rigid wall was lost.
+    """
+
+    def test_every_ordering_of_every_option_set_is_registered(self):
+        from itertools import permutations
+        from k2rad.handlers import (HANDLERS, handle_rigidwall_ortho,
+                                    handle_rigidwall_planar)
+        opts = ("ORTHO", "FINITE", "MOVING", "FORCES")
+        seen = 0
+        for r in range(len(opts) + 1):
+            for combo in permutations(opts, r):
+                kw = "_".join(("RIGIDWALL_PLANAR",) + combo)
+                with self.subTest(kw=kw):
+                    self.assertIn(kw, HANDLERS)
+                    self.assertIs(
+                        HANDLERS[kw],
+                        handle_rigidwall_ortho if "ORTHO" in combo
+                        else handle_rigidwall_planar)
+                seen += 1
+        self.assertEqual(seen, 65)   # 1 + 4 + 12 + 24 + 24
+
+    def test_non_canonical_orderings_convert_the_wall(self):
+        """The spellings that used to vanish. Each must produce the SAME
+        /RWALL as its canonical twin, cards read in Card-Summary order."""
+        canonical = ("*RIGIDWALL_PLANAR_MOVING_FORCES\n"
+                     "        30         0         0\n"
+                     "       0.0       0.0      -1.0       0.0       0.0"
+                     "       1.0\n"
+                     "      10.0       2.0\n"
+                     "         0         0     99999\n")
+        _r, want = _convert(_deck(canonical))
+        want_block = _rwall_block(want, "PLANE")
+        for kw in ("RIGIDWALL_PLANAR_FORCES_MOVING",
+                   "RIGIDWALL_PLANAR_MOVING_FORCES"):
+            with self.subTest(kw=kw):
+                deck = canonical.replace("*RIGIDWALL_PLANAR_MOVING_FORCES",
+                                         f"*{kw}")
+                result, starter = _convert(_deck(deck))
+                self.assertIn("/RWALL/PLANE/", starter)
+                self.assertEqual(result.skipped_keywords, [])
+                self.assertEqual(_rwall_block(starter, "PLANE"), want_block)
+
+    def test_reversed_finite_ordering_still_builds_a_paral_wall(self):
+        """_MOVING_FINITE (reversed) must still read Card 5 as the FINITE card
+        and emit /RWALL/PARAL, not /RWALL/PLANE."""
+        wall = ("*RIGIDWALL_PLANAR_MOVING_FINITE\n"
+                "        30         0         0\n"
+                "       0.0       0.0      -1.0       0.0       0.0       1.0\n"
+                "       1.0       0.0      -1.0     200.0     200.0\n"
+                "      10.0       2.0\n")
+        result, starter = _convert(_deck(wall))
+        self.assertIn("/RWALL/PARAL/", starter)
+        self.assertEqual(result.skipped_keywords, [])
+
+    def test_offset_table_covers_every_registered_planar_spelling(self):
+        """_OFFSET_SPECS and HANDLERS are generated from ONE source, so they
+        cannot drift: an unmapped keyword would keep its original NSID/BOXID
+        while the rest of an *INCLUDE_TRANSFORM was offset. The hand-written
+        list this replaced had already fallen 3 spellings behind."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS
+        planar = {k for k in HANDLERS if k.startswith("RIGIDWALL_PLANAR")}
+        self.assertTrue(planar)
+        self.assertEqual(planar - set(_OFFSET_SPECS), set())
+
+
 if __name__ == "__main__":
     unittest.main()

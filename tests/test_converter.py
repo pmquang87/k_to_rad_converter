@@ -5207,11 +5207,19 @@ class BlastLoadTests(unittest.TestCase):
     def test_every_auto_mapped_unit_label_is_starter_legal(self):
         """The whole _blast_unit_system table against the starter's grammar
         (unit_code.F): token length 1..3, last character 'g'/'m'/'s' by slot,
-        and a prefix from the table at :100-149."""
-        from k2rad.handlers import _blast_unit_system
-        prefixes = {"", "y", "z", "a", "f", "p", "n", "mu", "u", "m", "c", "d",
-                    "da", "h", "k", "K", "M", "G", "T", "P", "E", "Z", "Y"}
-        for flag in range(1, 6):
+        and a prefix from the table at :100-149.
+
+        The prefix set is IMPORTED from the writer rather than re-typed: it
+        already transcribes unit_code.F:100-149 for the *CONTROL_UNITS side,
+        and two copies of one starter grammar can disagree silently.
+
+        The loop covers every flag the manual defines (1..8) plus a margin, so
+        adding a row to _BLAST_UNIT_SYSTEMS cannot slip past unchecked.
+        """
+        from k2rad.handlers import _BLAST_UNIT_SYSTEMS, _blast_unit_system
+        from k2rad.writer.materials import _SI_PREFIX_FACTORS
+        prefixes = set(_SI_PREFIX_FACTORS) | {""}
+        for flag in range(0, 12):
             labels = _blast_unit_system(flag)
             if labels is None:
                 continue
@@ -5220,6 +5228,40 @@ class BlastLoadTests(unittest.TestCase):
                     self.assertIn(len(label), (1, 2, 3), label)
                     self.assertEqual(label[-1], base, label)
                     self.assertIn(label[:-1], prefixes, label)
+        # ...and the loop really did reach every mapped row.
+        self.assertEqual(
+            {f for f, v in _BLAST_UNIT_SYSTEMS.items() if v is not None},
+            {2, 4, 6, 7, 8})
+
+    def test_blast_unit_table_matches_the_manual(self):
+        """*LOAD_BLAST_ENHANCED UNIT, Vol I R16/R17 p.33-17 — all EIGHT rows.
+
+        1/3 are imperial (no legal Radioss '*g'/'*m'/'*s' label) and 5 states
+        its units only through the Card-2 conversion factors, so those three
+        stay unmapped ON PURPOSE; 2/4/6/7/8 are consistent systems and map.
+        """
+        from k2rad.handlers import _blast_unit_system
+        self.assertEqual(_blast_unit_system(2), ("kg", "m", "s"))
+        self.assertEqual(_blast_unit_system(4), ("g", "cm", "mus"))
+        self.assertEqual(_blast_unit_system(6), ("kg", "mm", "ms"))
+        self.assertEqual(_blast_unit_system(7), ("Mg", "mm", "s"))
+        self.assertEqual(_blast_unit_system(8), ("g", "mm", "ms"))
+        for flag in (1, 3, 5):
+            self.assertIsNone(_blast_unit_system(flag))
+
+    def test_legacy_load_blast_iunit_stops_at_five(self):
+        """The legacy *LOAD_BLAST card documents IUNIT 1..5 only (p.33-11/12).
+
+        6/7/8 are *LOAD_BLAST_ENHANCED extensions, so applying them on the
+        legacy card would invent a unit system LS-DYNA itself would not.
+        """
+        from k2rad.handlers import _blast_unit_system
+        for flag in (6, 7, 8):
+            self.assertIsNotNone(_blast_unit_system(flag))
+            self.assertIsNone(_blast_unit_system(flag, legacy=True))
+        # the shared rows behave identically on both cards
+        self.assertEqual(_blast_unit_system(2, legacy=True), ("kg", "m", "s"))
+        self.assertEqual(_blast_unit_system(4, legacy=True), ("g", "cm", "mus"))
 
     def test_explicit_units_override_not_clobbered(self):
         # An explicit caller units= must win over the blast-flag default.

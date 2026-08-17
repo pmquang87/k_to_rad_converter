@@ -426,6 +426,86 @@ class TestDeforcDiscreteSpringOutput(unittest.TestCase):
         self.assertEqual(_th_spring_eids(starter), [11, 12])
 
 
+class TestDeforcPrintFlag(unittest.TestCase):
+    """`PF` on *ELEMENT_DISCRETE is the deforc PRINT flag — "EQ.0: forces are
+    printed in DEFORC file, EQ.1: forces are not printed DEFORC file" (Vol I
+    R16 p.19-32) — and p.1944 names it as one of the two ways a deck narrows
+    the deforc selection. It is an OUTPUT flag only: the /SPRING is emitted
+    either way, and only the /TH group shrinks.
+    """
+
+    # element 11 carries PF=1 (fixed columns: eid pid n1 n2 vid S(E16) PF)
+    _PF = """*NODE
+      41             0.0             0.0            50.0
+      42             1.0             0.0            50.0
+      43             2.0             0.0            50.0
+*PART
+spring part
+        20        20        20
+*SECTION_DISCRETE
+        20         0
+*MAT_SPRING_ELASTIC
+        20    1000.0
+*ELEMENT_DISCRETE
+      11      20      41      42       0             1.0       1
+      12      20      42      43
+"""
+
+    def test_pf_one_is_left_out_of_the_group(self):
+        _r, starter, _e = _convert(
+            _MESH + self._PF + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        self.assertEqual(_th_spring_eids(starter), [12])
+
+    def test_pf_one_still_emits_the_spring_itself(self):
+        """PF suppresses OUTPUT, not the connector — dropping the element
+        would change the model, which the flag never asks for."""
+        _r, starter, _e = _convert(
+            _MESH + self._PF + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        lines = starter.splitlines()
+        i = next(k for k, ln in enumerate(lines) if ln.startswith("/SPRING/"))
+        # "# sprg_ID  node_ID1  node_ID2" then one line per element
+        self.assertEqual([ln.split()[0] for ln in lines[i + 2:i + 4]],
+                         ["11", "12"])
+
+    def test_pf_zero_and_absent_are_both_reported(self):
+        _r, starter, _e = _convert(
+            _MESH + self._PF.replace("       1\n", "       0\n")
+            + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        self.assertEqual(_th_spring_eids(starter), [11, 12])
+
+    def test_all_suppressed_emits_no_group_and_says_why(self):
+        """An empty /TH group is starter ERROR 1109, so the block must be
+        omitted — and the warning must name PF rather than claim the deck has
+        no connectors at all."""
+        deck = self._PF.replace(
+            "      12      20      42      43\n",
+            "      12      20      42      43       0             1.0       1\n")
+        result, starter, _e = _convert(
+            _MESH + deck + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        self.assertNotIn("/TH/SPRING/", starter)
+        hits = [w for w in result.warnings if "*DATABASE_DEFORC" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("PF=1", hits[0])
+
+    def test_history_discrete_qualifies_the_one_to_one_claim(self):
+        """*DATABASE_HISTORY_DISCRETE has no handler, so a deck that uses it to
+        select elements gets a group that is a SUPERSET of its deforc file.
+        Over-reporting is harmless data; an unqualified 1:1 claim is not."""
+        result, _s, _e = _convert(
+            _MESH + _DISCRETE + "*DATABASE_DEFORC\n       0.1\n"
+            + "*DATABASE_HISTORY_DISCRETE\n        11\n" + _TERM)
+        hits = [w for w in result.warnings if "/TH/SPRING/" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("SUPERSET", hits[0])
+
+    def test_no_superset_note_without_the_history_card(self):
+        result, _s, _e = _convert(
+            _MESH + _DISCRETE + "*DATABASE_DEFORC\n       0.1\n" + _TERM)
+        hits = [w for w in result.warnings if "/TH/SPRING/" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertNotIn("SUPERSET", hits[0])
+
+
 class TestDisboutDiscreteBeamOutput(unittest.TestCase):
     """*DATABASE_DISBOUT: "discrete beam element, type 6, relative
     displacements, rotations, and forces" (Vol I R16 p.1945)."""
@@ -489,6 +569,62 @@ class TestTfileFallbackFrequency(unittest.TestCase):
         _r, _s, engine = _convert(self._deck(None))
         self.assertEqual(_tfile(engine), "0.001")
 
+    def test_sentinel_endtim_is_not_treated_as_a_run_length(self):
+        """`ENDTIM = 1e20` is the idiom for a deck that really terminates on
+        ENDCYC/ENDENG. Scaling from it would derive /TFILE 1E+17 — a T01 that
+        never fires at all, i.e. a silent TOTAL loss of time-history output,
+        strictly worse than the constant it replaced."""
+        # ENDTIM is a strict 10-column field, so the literals below are exactly
+        # 10 characters wide — a wider one silently truncates (see the module
+        # note on *CONTROL_TERMINATION field slicing).
+        for endtim in ("   1.0E+20", "   1.0E+10", "   1.0E+06"):
+            with self.subTest(endtim=endtim):
+                _r, _s, engine = _convert(self._deck(endtim))
+                self.assertEqual(_tfile(engine), "0.001")
+
+    def test_the_largest_real_run_length_still_scales(self):
+        """The sentinel window must not swallow long but genuine runs: the
+        whole 201-deck corpus lives between 8.5e-5 and 30."""
+        _r, _s, engine = _convert(self._deck("      30.0"))
+        self.assertEqual(_tfile(engine), "0.03")
+
+    def test_sentinel_warning_names_the_reason(self):
+        result, starter, _e = _convert(
+            _MESH + "*DATABASE_HISTORY_NODE\n         1\n"
+            + "*CONTROL_TERMINATION\n   1.0E+20\n*END\n")
+        self.assertIn("/TH/", starter)
+        hits = [w for w in result.warnings if w.startswith("TIME HISTORY:")]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("SENTINEL", hits[0])
+
+    def test_a_negative_dt_is_reported_not_silently_ignored(self):
+        """"If DT < 0.0, the result will be output every -DT time steps"
+        (Manual p. 16-7). Radioss's /TFILE is a TIME interval with no
+        cycle-based form, so the request cannot be honoured — but the warning
+        must not go on claiming the deck stated no interval at all."""
+        result, starter, engine = _convert(
+            _MESH + "*DATABASE_HISTORY_NODE\n         1\n"
+            + "*DATABASE_GLSTAT\n    -100.0\n"
+            + "*CONTROL_TERMINATION\n      0.01\n*END\n")
+        self.assertIn("/TH/", starter)
+        # the negative dt takes no part in the minimum...
+        self.assertEqual(_tfile(engine), "1E-05")
+        hits = [w for w in result.warnings if w.startswith("TIME HISTORY:")]
+        self.assertEqual(len(hits), 1, result.warnings)
+        # ...but it is named, and the claim is narrowed from "no *DATABASE_
+        # card states an output interval" to "no POSITIVE output interval".
+        self.assertIn("negative DT", hits[0])
+        self.assertIn("no *DATABASE_ card states a positive output interval",
+                      hits[0])
+
+    def test_a_positive_dt_says_nothing_about_negatives(self):
+        result, _s, _e = _convert(
+            _MESH + "*DATABASE_HISTORY_NODE\n         1\n"
+            + "*DATABASE_GLSTAT\n     0.002\n"
+            + "*CONTROL_TERMINATION\n      0.01\n*END\n")
+        self.assertEqual([w for w in result.warnings
+                          if w.startswith("TIME HISTORY:")], [])
+
     def test_zero_termination_keeps_the_floor(self):
         _r, _s, engine = _convert(self._deck("       0.0      1000"))
         self.assertEqual(_tfile(engine), "0.001")
@@ -526,6 +662,11 @@ class TestAnimDtZeroGuard(unittest.TestCase):
     omitted."""
 
     ZERO_TERM = "*CONTROL_TERMINATION\n       0.0      1000\n*END\n"
+    # NPLTC is *DATABASE_BINARY_D3PLOT field 4 (index 3): DT | LCDT | BEAM |
+    # NPLTC, 10 columns each. A "20" in columns 11-20 is LCDT and leaves NPLTC
+    # at 0, which made this deck exercise nothing at all.
+    D3PLOT_NPLTC_20 = ("*DATABASE_BINARY_D3PLOT\n"
+                       "       0.0                            20\n")
 
     def test_zero_endtim_omits_the_anim_dt_card(self):
         _r, _s, engine = _convert(_MESH + self.ZERO_TERM)
@@ -546,9 +687,27 @@ class TestAnimDtZeroGuard(unittest.TestCase):
         """NPLTC with ENDTIM 0 would divide zero by the frame count; inventing
         a 1 s run instead would fabricate a frequency the deck never stated."""
         _r, _s, engine = _convert(
-            _MESH + "*DATABASE_BINARY_D3PLOT\n       0.0        20\n"
-            + self.ZERO_TERM)
+            _MESH + self.D3PLOT_NPLTC_20 + self.ZERO_TERM)
         self.assertNotIn("/ANIM/DT", engine)
+
+    def test_the_warning_does_not_deny_a_stated_npltc(self):
+        """A deck that DOES state NPLTC must not be told it stated none: it is
+        the zero ENDTIM that makes ENDTIM/NPLTC useless, and naming the wrong
+        cause sends the user to edit the wrong card."""
+        result, _s, _e = _convert(
+            _MESH + self.D3PLOT_NPLTC_20 + self.ZERO_TERM)
+        hits = [w for w in result.warnings if "/ANIM/DT" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("its NPLTC 20", hits[0])
+        self.assertNotIn("no *DATABASE_BINARY_D3PLOT states a positive DT or "
+                         "NPLTC", hits[0])
+
+    def test_the_warning_still_reports_a_truly_absent_d3plot(self):
+        result, _s, _e = _convert(_MESH + self.ZERO_TERM)
+        hits = [w for w in result.warnings if "/ANIM/DT" in w]
+        self.assertEqual(len(hits), 1, result.warnings)
+        self.assertIn("no *DATABASE_BINARY_D3PLOT states a positive DT or "
+                      "NPLTC", hits[0])
 
     def test_positive_endtim_is_untouched(self):
         _r, _s, engine = _convert(

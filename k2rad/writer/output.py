@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Set
+from typing import Callable, Dict, List, NamedTuple, Set
 from ..state import ConversionState
 from .common import (
     HDR, _f, _i, _split_shell_eids_by_topology, _spotweld_beam_pids,
@@ -25,7 +25,7 @@ __all__ = [
     "_make_starter_th_node_spc",
     "_spotweld_solid_pids",
     "_make_starter_th_swforc",
-    "_make_starter_th_deforc",
+    "_make_starter_th_discrete_connectors",
 ]
 
 
@@ -903,31 +903,77 @@ def _make_starter_th_swforc(state: ConversionState) -> List[str]:
     return lines
 
 
-# *DATABASE_DEFORC / *DATABASE_DISBOUT: (card, dt attribute, accounting set
-# attribute, group-name stem, what LS-DYNA says the database covers, and the
-# k2rad source of the /SPRING elements). Vol I R16 p.1944-1945 keeps the two
-# apart and so does this, so every T01 channel is attributable to the database
-# card the deck actually wrote.
+class _DiscreteDatabase(NamedTuple):
+    """One LS-DYNA discrete-connector ASCII database and how k2rad answers it.
+
+    Real accessors rather than getattr(state, "...") strings: the fields below
+    are followed by a type checker and moved by an IDE rename, which a
+    stringly-typed table is not.
+    """
+    card: str                                   # the *DATABASE_ keyword
+    dt: Callable[[ConversionState], float]      # its requested output interval
+    eids: Callable[[ConversionState], Set[int]]  # ids a /SPRING was written for
+    #: ids the DECK excluded from this database (deforc's PF=1); the /SPRING
+    #: still exists, it is only left out of the /TH group.
+    excluded: Callable[[ConversionState], Set[int]]
+    stem: str                                   # /TH group title stem
+    covers: str                                 # what LS-DYNA says it reports
+    source: str                                 # the k2rad source of the ids
+
+
+# Vol I R16 p.1944-1945 keeps DEFORC and DISBOUT apart and so does this, so
+# every T01 channel is attributable to the database card the deck actually
+# wrote.
 _TH_DISCRETE_DATABASES = (
-    ("*DATABASE_DEFORC", "db_deforc_dt", "discrete_spring_eids",
-     "TH_DISCRETE_SPRINGS",
-     "discrete spring and discrete damper (*ELEMENT_DISCRETE) data",
-     "*ELEMENT_DISCRETE"),
-    ("*DATABASE_DISBOUT", "db_disbout_dt", "dbeam_spring_eids",
-     "TH_DISCRETE_BEAMS",
-     "discrete beam element, type 6, relative displacements, rotations and "
-     "forces",
-     "*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 part"),
+    _DiscreteDatabase(
+        card="*DATABASE_DEFORC",
+        dt=lambda s: s.db_deforc_dt,
+        eids=lambda s: s.discrete_spring_eids,
+        excluded=lambda s: s.deforc_suppressed_eids,
+        stem="TH_DISCRETE_SPRINGS",
+        covers="discrete spring and discrete damper (*ELEMENT_DISCRETE) data",
+        source="*ELEMENT_DISCRETE"),
+    _DiscreteDatabase(
+        card="*DATABASE_DISBOUT",
+        dt=lambda s: s.db_disbout_dt,
+        eids=lambda s: s.dbeam_spring_eids,
+        # *ELEMENT_BEAM has no PF field — disbout has no per-element print flag
+        # to honour, so nothing is ever excluded here.
+        excluded=lambda s: frozenset(),
+        stem="TH_DISCRETE_BEAMS",
+        covers="discrete beam element, type 6, relative displacements, "
+               "rotations and forces",
+        source="*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 part"),
 )
 
 
-def _make_starter_th_deforc(state: ConversionState) -> List[str]:
+def _history_discrete_used(state: ConversionState) -> bool:
+    """True when the deck carries a *DATABASE_HISTORY_DISCRETE[_SET][_ID] card.
+
+    k2rad registers no handler for it, so it lands in skipped_keywords — which
+    is exactly where to read it back from: this is only used to QUALIFY the
+    deforc claim, not to act on the card.
+    """
+    return any(kw.startswith("DATABASE_HISTORY_DISCRETE")
+               for kw in state.skipped_keywords)
+
+
+def _make_starter_th_discrete_connectors(state: ConversionState) -> List[str]:
     """*DATABASE_DEFORC / *DATABASE_DISBOUT → /TH/SPRING over the connectors.
 
     Both LS-DYNA databases report a family that k2rad converts to /SPRING
-    elements, so both answer with /TH/SPRING — one group per card, so a T01
-    channel maps 1:1 onto a deforc / disbout row. Element ids are kept VERBATIM
-    from the source deck by both writers (``sprg_ID = e.eid``).
+    elements, so both answer with /TH/SPRING — one group per card. Element ids
+    are kept VERBATIM from the source deck by both writers (``sprg_ID =
+    e.eid``), so a T01 channel lines up with a deforc / disbout row by id.
+
+    That correspondence is 1:1 only as far as k2rad honours the deck's ELEMENT
+    SELECTION. LS-DYNA offers two ways to narrow deforc (Manual p. 1944):
+    ``PF = 1`` on *ELEMENT_DISCRETE, which IS honoured here (see
+    ``state.deforc_suppressed_eids``), and *DATABASE_HISTORY_DISCRETE_OPTION,
+    for which k2rad has no handler at all — a deck using it gets a /TH/SPRING
+    listing EVERY converted connector while its own deforc file holds only the
+    selected ones. Over-reporting, never under-reporting, but the group is then
+    a superset and the emitted warning says so.
 
     Format, pinned against a live starter run (hm_read_thgrne.F, th_spring.cfg
     ``FORMAT(radioss51)``):
@@ -951,10 +997,15 @@ def _make_starter_th_deforc(state: ConversionState) -> List[str]:
     converter an ERROR 79 with no restart file (PR #83).
     """
     lines: List[str] = []
-    for (card, dt_attr, set_attr, stem, covers,
-         source) in _TH_DISCRETE_DATABASES:
-        dt = getattr(state, dt_attr)
-        if not dt:
+    for db in _TH_DISCRETE_DATABASES:
+        card, stem, covers, source = db.card, db.stem, db.covers, db.source
+        dt = db.dt(state)
+        # DT == 0 is "no output is printed" (Manual p. 16-7), so nothing to do.
+        # DT < 0 is NOT nothing: it means "output every -DT time steps". Radioss
+        # has no cycle-based /TH frequency, so the group is still written and
+        # only its INTERVAL is lost — writer/assembly.py reports that where it
+        # picks /TFILE.
+        if dt == 0.0:
             continue
         # ONLY the ids a /SPRING line was actually written for. Both writers
         # have live `continue` paths (an *ELEMENT_DISCRETE part with no *PART
@@ -965,7 +1016,9 @@ def _make_starter_th_deforc(state: ConversionState) -> List[str]:
         # hm_read_thgrne.F:189, MSGTYPE=MSGERROR) — the deck is REFUSED, not
         # degraded. The sets are filled by the writers that run earlier in the
         # section registry, the same ordering the SWFORC block relies on.
-        eids = sorted(getattr(state, set_attr))
+        # ...minus the ones the DECK itself excluded from this database (PF=1).
+        excluded = db.excluded(state) & db.eids(state)
+        eids = sorted(db.eids(state) - excluded)
         if not eids:
             state.warn(
                 f"{card} requested but this deck has no converted {source} "
@@ -974,7 +1027,10 @@ def _make_starter_th_deforc(state: ConversionState) -> List[str]:
                 "honoured as the /TFILE frequency. If the connectors are there "
                 "but were skipped, their own warning names the cause; joint "
                 "forces belong to *DATABASE_JNTFORC and spot-weld forces to "
-                "*DATABASE_SWFORC, which have their own /TH blocks.")
+                "*DATABASE_SWFORC, which have their own /TH blocks."
+                + (f" ({len(excluded)} connector(s) ARE converted but carry "
+                   "PF=1, which turns their deforc output off.)"
+                   if excluded else ""))
             continue
         th_id = state.next_id()
         lines += [
@@ -986,15 +1042,23 @@ def _make_starter_th_deforc(state: ConversionState) -> List[str]:
         ]
         lines += [_i(e) for e in eids]
         lines.append(HDR)
+        row = card.split('_')[-1].lower()
         state.warn(
             f"{card} -> /TH/SPRING/{th_id} over {len(eids)} {source} "
             "connector(s), listed by their ORIGINAL LS-DYNA element id, so a "
-            "T01 channel maps 1:1 onto a "
-            f"{card.split('_')[-1].lower()} row. Variables DEF = OFF FX FY FZ "
+            f"T01 channel maps 1:1 onto a {row} row"
+            + (f" ({len(excluded)} more connector(s) carry PF=1 and are left "
+               "out, matching LS-DYNA)" if excluded else "")
+            + ". Variables DEF = OFF FX FY FZ "
             "MX MY MZ LX LY LZ RX RY RZ IE LENGTH. These are INSTANTANEOUS "
             "forces and deflections (thres.F writes GBUF%FOR / GBUF%MOM with "
             "no dt factor), unlike the /TH/INTER and /TH/NODE REAC* channels "
             "which accumulate an impulse — no differentiation needed. The "
             "values are in the DECK'S OWN UNITS: k2rad never rescales, so a "
-            "ton-mm-s deck reports newtons and millimetres exactly as written.")
+            "ton-mm-s deck reports newtons and millimetres exactly as written."
+            + (" NOTE: this deck also carries *DATABASE_HISTORY_DISCRETE, which "
+               "k2rad does not convert — LS-DYNA would use it to narrow the "
+               f"{row} selection, so the group above is a SUPERSET of what "
+               f"{row} actually holds." if _history_discrete_used(state)
+               else ""))
     return lines

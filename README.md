@@ -1582,9 +1582,16 @@ exactly the starter reader's moving-wall semantics, no extra cards needed
 `*RIGIDWALL_PLANAR_FINITE` (+`_MOVING`) → `/RWALL/PARAL` with the corner
 points computed from `XHEV`/`LENL`/`LENM` (a zero length means semi-infinite
 in LS-DYNA and falls back to the infinite plane with a warning);
-`_ORTHO` (orthotropic friction) still warn-skips — no `/RWALL` equivalent (all
-eight `_ORTHO` spellings are registered, so each gets that reason rather than
-landing in the generic skipped list)
+`_ORTHO` (orthotropic friction) still warn-skips — no `/RWALL` equivalent
+"The ordering of the options in the keyword name is unimportant" (p. 40-16), so
+every ordering of `ORTHO`/`FINITE`/`MOVING`/`FORCES` is generated into the
+dispatch table — all 65 spellings, not just the 13 canonical ones. A spelling
+without a row would miss the exact-match lookup and, with no `RIGIDWALL_PLANAR`
+prefix fallback, land in the generic skipped list: the wall silently gone, the
+user told only that "a keyword" was skipped. The `*INCLUDE_TRANSFORM` offset
+table is generated from the same source, so the two cannot drift apart.
+(`_DISPLAY` is legal on this family and needs no extra card, but is **not** yet
+registered — a known gap, not a silent one.)
 The `_FORCES` option's extra card (`SOFT SSID N1 N2 N3 N4`, always the LAST of
 the card set whatever order the options are spelled in — Manual p. 40-17 Card
 Summary) is read rather than assumed absent. `N1..N4` are visualization nodes
@@ -1682,12 +1689,26 @@ Empirical (ConWep / TM5-1300) air blast:
 `*LOAD_BLAST_ENHANCED`, `*LOAD_BLAST` (legacy) → `/LOAD/PBLAST`. The TM5-1300
 formula is unit-dependent — `/LOAD/PBLAST` converts its internal `{g, cm, mus}`
 data using the `/BEGIN` labels — so the card's `UNIT` flag sets those labels
-when the caller states none: `UNIT=2` → `kg m s`, `UNIT=4` → `g cm mus`. Both
-triples are checked against the starter's own label grammar (see `--units`
+when the caller states none. All five consistent systems of the manual's
+eight-row table (Vol I R16/R17 p.33-17) are mapped:
+
+| `UNIT` | LS-DYNA system | `/BEGIN` |
+|---|---|---|
+| 1 | pound-mass, foot, second, psi | *(none — imperial)* |
+| 2 | kilogram, meter, second, Pascal | `kg m s` |
+| 3 | dozen slugs, inch, second, psi | *(none — imperial)* |
+| 4 | centimeters, grams, microseconds, Megabars | `g cm mus` |
+| 5 | user conversions on Card 2 | *(none — unnamed)* |
+| 6 | kilogram, millimeter, millisecond, GPa | `kg mm ms` |
+| 7 | metric ton, millimeter, second, MPa | `Mg mm s` |
+| 8 | gram, millimeter, millisecond, MPa | `g mm ms` |
+
+Every triple is checked against the starter's own label grammar (see `--units`
 above); `mus`, not `micros`, is the microsecond OpenRadioss accepts. `UNIT=1`
-(the inconsistent original CONWEP system), `3` (English — inch has no legal
-`*m` label at all) and `5` (user-defined `CFM/CFL/CFT/CFP`) get no automatic
-mapping, so state them with `--units`
+and `3` have no legal `*g`/`*m`/`*s` label at all, and `UNIT=5` states its units
+only as the `CFM/CFL/CFT/CFP` factors, so those three get no automatic mapping —
+state them with `--units`. The legacy `*LOAD_BLAST` card's `IUNIT` is documented
+`1..5` only, so `6/7/8` are not applied there.
 `*LOAD_BLAST_SEGMENT_SET`, `*LOAD_BLAST_SEGMENT` (per-segment) → `/SURF/SEG` +
 `/LOAD/PBLAST` (surface bursts synthesize a `/SURF/PLANE` reflecting ground,
 `--blast-ground`); `*SET_SEGMENT` → `/SURF/SEG`; `*LOAD_BODY_{X,Y,Z}` → `/GRAV`
@@ -2070,7 +2091,14 @@ coordinates, a part with no usable beams — and naming one is starter
 they are in **raw deck units**: k2rad rescales nothing, so a ton-mm-s deck
 reports newtons and millimetres exactly as the `.k` states them. A deck that
 asks for either card but has no matching connector gets a warning and no
-`/TH` block, and both `dt`s join the `/TFILE` minimum
+`/TH` block, and both `dt`s join the `/TFILE` minimum.
+LS-DYNA offers two ways to narrow the deforc selection (p.1944): `PF=1` on
+`*ELEMENT_DISCRETE` ("forces are **not** printed DEFORC file", p.19-32) is
+**honoured** — the `/SPRING` is still emitted, only the `/TH` group shrinks —
+while `*DATABASE_HISTORY_DISCRETE` has no handler, so a deck that uses it gets a
+group listing every converted connector, a **superset** of its own deforc file.
+That is over-reporting, never under-reporting, and the emitted warning says so
+whenever the card is present
 `*DEFINE_HEX_SPOTWELD_ASSEMBLY` (+ `_1` … `_16`) → one `/GRBRIC/BRIC` +
 one `/CLUSTER/BRICK` per assembly (LS-DYNA caps an assembly at 16 hexes,
 `/CLUSTER` at 500, so the 1:1 map always fits). `ID_SW` is reused verbatim as
@@ -2125,16 +2153,28 @@ Radioss has ONE time-history frequency for the whole T01, so the whole
 of every interval the deck asked for — never the first one in some arbitrary
 order, which would sample a channel coarser than requested.
 
-When **no** `*DATABASE_` card states an interval at all, the frequency has to be
-invented, and it is derived from the run length: `/TFILE = ENDTIM/1000`, i.e.
-1000 samples over `*CONTROL_TERMINATION` — the same shape as the `/ANIM/DT`
-default (`ENDTIM/40`, 40 frames). A fixed constant is wrong at both ends of the
-scale: `0.001 s` on a `0.01 s` impact is ten T01 records for the whole event.
-A deck with no `*CONTROL_TERMINATION` (an include-only fragment, or one that
-terminates on `ENDCYC`) keeps `0.001` as a floor, because a zero `/TFILE` is
-*silently ignored* by the engine (`lectur.F:335`) and the T01 would then be
-written at a frequency nobody chose. The derivation is reported as a warning
-whenever the deck actually contains a `/TH` group.
+A **negative** `DT` means "output every `-DT` time steps" (p.16-7). Radioss's
+`/TFILE` is a *time* interval with no cycle-based form, so such a request cannot
+be honoured and takes no part in the minimum — but it is named in the warning
+below rather than counted as "the deck stated nothing".
+
+When **no** `*DATABASE_` card states a positive interval at all, the frequency
+has to be invented, and it is derived from the run length: `/TFILE =
+ENDTIM/1000`, i.e. 1000 samples over `*CONTROL_TERMINATION` — the same shape as
+the `/ANIM/DT` default (`ENDTIM/40`, 40 frames). A fixed constant is wrong at
+both ends of the scale: `0.001 s` on a `0.01 s` impact is ten T01 records for
+the whole event.
+
+`0.001` remains the floor whenever `ENDTIM` is not a usable run length — no
+`*CONTROL_TERMINATION` at all (an include-only fragment), `ENDTIM <= 0`, or an
+`ENDTIM >= 1e6` **sentinel**, the idiom for a deck that really terminates on
+`ENDCYC`/`ENDENG`. Scaling from a `1e20` sentinel would derive `/TFILE 1E+17`, a
+T01 that never fires — a silent total loss of output, worse than the constant.
+(The whole 201-deck regression corpus states an `ENDTIM` between `8.5e-5` and
+`30`, four orders of magnitude below that threshold.) The floor also matters
+because a zero `/TFILE` is *silently ignored* by the engine (`lectur.F:335`) and
+the T01 would then be written at a frequency nobody chose. The derivation is
+reported as a warning whenever the deck actually contains a `/TH` group.
 
 `/ANIM/DT` is guarded the same way but in the opposite direction: with
 `ENDTIM <= 0` and no `*DATABASE_BINARY_D3PLOT` `DT`/`NPLTC`, the animation

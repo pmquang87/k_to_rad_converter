@@ -372,7 +372,7 @@ from .output import (
     _make_starter_th_node_spc,
     _spotweld_solid_pids,
     _make_starter_th_swforc,
-    _make_starter_th_deforc,
+    _make_starter_th_discrete_connectors,
 )
 from .assembly import (
     _make_engine_modal,
@@ -704,7 +704,7 @@ __all__ = [
     "_make_starter_th_node_spc",
     "_spotweld_solid_pids",
     "_make_starter_th_swforc",
-    "_make_starter_th_deforc",
+    "_make_starter_th_discrete_connectors",
     "_make_engine_modal",
     "_make_engine_header",
     "_make_engine_output",

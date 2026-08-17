@@ -230,6 +230,43 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **`*LOAD_BLAST_ENHANCED` `UNIT=6/7/8` had no unit mapping, and the docs said
+  the table was complete.** The `UNIT` table was transcribed from a five-row
+  LSTC note ("Blast Loading in LS-DYNA"), but the keyword defines **eight**
+  values — verified by full-text extraction of both pinned manuals, Vol I R16
+  p.33-17 and R17 p.33-17, which agree word for word:
+
+  | `UNIT` | LS-DYNA system | `/BEGIN` |
+  |---|---|---|
+  | 1 | pound-mass, foot, second, psi | *(none — imperial)* |
+  | 2 | kilogram, meter, second, Pascal | `kg m s` |
+  | 3 | dozen slugs (lbf-s²/in), inch, second, psi | *(none — imperial)* |
+  | 4 | centimeters, grams, microseconds, Megabars | `g cm mus` |
+  | 5 | user conversions (Card 2) | *(none — unnamed)* |
+  | 6 | kilogram, millimeter, millisecond, GPa | `kg mm ms` |
+  | 7 | metric ton, millimeter, second, MPa | `Mg mm s` |
+  | 8 | gram, millimeter, millisecond, MPa | `g mm ms` |
+
+  `6/7/8` are as physically consistent as `2` and `4` — `kg·mm/ms² = kN` over
+  `mm²` is `GPa`; `Mg·mm/s² = N` over `mm²` is `MPa`; `g·mm/ms² = N` over `mm²`
+  is `MPa`, each matching the pressure unit the manual states — and every label
+  they need (`kg`, `mm`, `ms`, `Mg`, `g`) is already in the starter's grammar,
+  so all three now map automatically instead of falling to the
+  "no automatic mapping" warning. `UNIT=7` is exactly k2rad's own default
+  `Mg mm s`. The docstring table, `README.md` and the warning text all carry the
+  manual's eight rows now, and the warning renders the mapped flags **from the
+  table** so the two cannot drift. The starter-grammar test loops `range(0, 12)`
+  instead of `range(1, 6)` and asserts which flags are mapped, so a new row
+  cannot slip past unchecked; it also imports `_SI_PREFIX_FACTORS` from the
+  writer rather than re-typing the 22-entry prefix set, closing the second copy
+  of that grammar.
+
+  The legacy `*LOAD_BLAST` card shares the mapping function but its `IUNIT` is
+  documented `1..5` only (Vol I R16 p.33-11/33-12: the list ends at "EQ.5: user
+  conversions will be supplied" and runs straight into `ISURF`), so it now
+  passes `legacy=True` and `6/7/8` are **not** applied there — a legacy deck
+  carrying one is malformed, and inventing a unit system LS-DYNA itself would
+  not apply is exactly the silent-wrong-units failure this batch is about.
 - **`*LOAD_BLAST_ENHANCED` `UNIT=4` wrote a `/BEGIN` time label the starter
   rejects.** The blast `UNIT` flag sets the `/BEGIN` unit labels (the TM5-1300
   formula is unit-dependent — `/LOAD/PBLAST` converts its internal `{g, cm, mus}`
@@ -247,7 +284,10 @@ Prior history (before this changelog was introduced) is summarized in the
   same deck now gives `0 ERROR(S)`, exit 0, with `TIME 1.0000000000000E-06`.
   The rest of the table was audited against the same source and is correct
   (`kg`/`m`/`s` for `UNIT=2`, and `g`, `cm`; `UNIT=1/3/5` deliberately have no
-  automatic mapping — `UNIT=3`'s inch has no legal `*m` label at all). The PR
+  automatic mapping — `UNIT=3`'s inch has no legal `*m` label at all).
+  **That audit was itself incomplete and is corrected below** — it covered only
+  the five rows of an older LSTC note, while `*LOAD_BLAST_ENHANCED` defines
+  eight. The PR
   #112 transcription of the prefix table in `writer/materials.py`
   (`_SI_PREFIX_FACTORS`, `_time_unit_in_seconds`) was cross-checked line by line
   against `unit_code.F:100-149`: all 22 entries match, including `mu`/`u` → 1e-6,
@@ -282,14 +322,38 @@ Prior history (before this changelog was introduced) is summarized in the
   synthetic `_FORCES` deck with `SOFT=3 SSID=7` gains the two warnings and a
   two-card-set deck — plain or `_FORCES` — is now caught instead of silently
   losing its second wall.
-- **Three legal `*RIGIDWALL_PLANAR_ORTHO` spellings had no registry row.**
-  `_ORTHO_MOVING_FORCES`, `_ORTHO_FINITE_FORCES` and
-  `_ORTHO_FINITE_MOVING_FORCES` missed the exact-match lookup, and there is no
-  `RIGIDWALL_PLANAR` entry in `_PREFIX_HANDLERS` to catch them, so they fell
-  through to the generic skipped-keyword list: the user was told the wall was
-  skipped but never why. All eight ORTHO spellings now reach
-  `handle_rigidwall_ortho` and get its specific "orthotropic friction has no
-  `/RWALL` equivalent" reason.
+- **Eleven legal `*RIGIDWALL_PLANAR` spellings had no registry row, and the
+  offset table had already drifted from the handler table.** "The ordering of
+  the options in the keyword name is unimportant. For example, both
+  `*RIGIDWALL_PLANAR_ORTHO_FINITE` and `*RIGIDWALL_PLANAR_FINITE_ORTHO` are
+  valid and have the same effect" (Manual p. 40-16) — only the *card* order is
+  fixed. The registry listed the canonical orderings only, so three `_ORTHO`
+  spellings and **eight of the sixteen** legal non-ORTHO orderings
+  (`_FORCES_MOVING`, `_MOVING_FINITE`, `_FINITE_ORTHO`, …) missed the
+  exact-match lookup; with no `RIGIDWALL_PLANAR` row in `_PREFIX_HANDLERS` to
+  catch them they fell into the generic skipped-keyword list, so the wall
+  vanished from the model and the user was told only that "a keyword" was
+  skipped — never that a rigid wall was lost.
+
+  All 65 spellings are now **generated** by `_rwall_planar_keywords()`, the same
+  way `_rwall_geometric_keywords()` has generated the geometric family, and
+  `assembly._OFFSET_SPECS` is generated from that one source instead of a
+  hand-kept literal. That literal had already fallen three spellings behind the
+  registry, which is live the moment `_ORTHO` becomes convertible: an unmapped
+  keyword keeps its original `NSID`/`BOXID` while the rest of an
+  `*INCLUDE_TRANSFORM` is offset, i.e. dangling or colliding references. A test
+  now asserts the two tables cover the same set.
+
+  Not generated, and deliberately: `_ID` (the parser strips a trailing `_ID`
+  into `block.options`, and p. 40-16 lists it apart from the `{OPTION}` slots)
+  and `_DISPLAY` (legal here and needing **no** extra card — the Card Summary
+  stops at Card 7 — but registering it would start *converting* walls that are
+  skipped today, which is a feature, not a fix; it stays a known gap).
+- **The multi-card-set guard was duplicated verbatim across the two rigid-wall
+  handlers.** Eleven identical lines, differing only in the family name in the
+  advice. Extracted to `_warn_extra_rwall_card_sets()`; the message text is
+  unchanged (both `tests/test_rwall_geometric.py` and
+  `tests/test_rwall_variants.py` assert on its wording).
 - **The `/TFILE` fallback frequency was a hard-coded `1e-3` with no relation to
   the run.** When no `*DATABASE_` card states an interval — 57 of the 201 corpus
   decks — the T01 frequency has to be invented, and the constant is wrong at
@@ -307,6 +371,25 @@ Prior history (before this changelog was introduced) is summarized in the
   golden fixtures ride this path and every one has `ENDTIM = 1.0`, so
   `1.0/1000 = 0.001` reproduces the checked-in `/TFILE 0.001` exactly: no golden
   regeneration.
+
+  The derivation is **windowed**, not open-ended: an `ENDTIM >= 1e6` is treated
+  as a sentinel rather than a run length and falls back to the `1e-3` floor.
+  `*CONTROL_TERMINATION ENDTIM = 1e20` is the common idiom for a deck that
+  really terminates on `ENDCYC`/`ENDENG` (neither of which k2rad converts), and
+  scaling from it would derive `/TFILE 1E+17` — a T01 that never fires at all,
+  a silent *total* loss of time-history output and strictly worse than the
+  constant it replaced. The threshold is four orders of magnitude above the
+  largest run length in the corpus (every one of the 201 decks states an
+  `ENDTIM` between `8.5e-5` and `30`), so no genuine run is caught by it, and
+  the warning names the sentinel as the reason.
+- **A negative `*DATABASE_` `DT` was silently treated as "the deck said
+  nothing".** "If `DT < 0.0`, the result will be output every `-DT` time steps"
+  (Manual p. 16-7) — a cycle-based request. Radioss's `/TFILE` is a *time*
+  interval with no cycle-based form, so it still cannot be honoured, but the
+  derived-frequency warning no longer claims "no `*DATABASE_` card states an
+  output interval" when one does; it says *positive* interval and names the
+  cycle-based cards it had to ignore. (`DT == 0` really is "no output is
+  printed", p.16-7, and is still skipped.)
 - **`*DATABASE_DEFORC`, `*DATABASE_DISBOUT` and `*DATABASE_JNTFORC` were absent
   from the `/TFILE` minimum chain.** All three now drive a real `/TH/SPRING`
   (the first two are new above; JNTFORC has driven one since the joints batch),
@@ -332,7 +415,31 @@ Prior history (before this changelog was introduced) is summarized in the
   `NPLTC` branch is guarded the same way: with `ENDTIM = 0` it no longer
   substitutes a 1 s run length (that stand-in stays reserved for a deck with no
   `*CONTROL_TERMINATION` at all, matching what `/RUN` is written with). No
-  corpus deck has `ENDTIM <= 0`, so nothing changes there.
+  corpus deck has `ENDTIM <= 0`, so nothing changes there. The warning no longer
+  *misattributes* the cause on a deck that does state `NPLTC`: it said "no
+  `*DATABASE_BINARY_D3PLOT` states a positive `DT` or `NPLTC`" even when
+  `NPLTC = 20` was right there, sending the user to edit the wrong card — it now
+  names the zero `ENDTIM` that makes `ENDTIM/NPLTC` useless. (The test covering
+  that branch was also fixed: its deck put `20` in columns 11-20, which is
+  `LCDT` — `NPLTC` is field 4 — so it left `NPLTC` at `0` and exercised nothing.)
+- **`PF = 1` on `*ELEMENT_DISCRETE` was ignored, and the deforc `1:1` claim was
+  unqualified.** LS-DYNA gives a deck two ways to narrow the deforc element
+  selection (Vol I R16 p.1944): `*DATABASE_HISTORY_DISCRETE_OPTION`, or
+  `PF = 1` — the print flag, "EQ.0: forces are printed in DEFORC file, EQ.1:
+  forces are **not** printed DEFORC file" (p.19-32). `handle_element_discrete`
+  read field 6 as `S` and then jumped to field 8, never touching `PF` at all.
+  It is now parsed into `state.deforc_suppressed_eids` and subtracted from the
+  `*DATABASE_DEFORC` `/TH/SPRING` group. It is an **output** flag, so the
+  `/SPRING` element itself is still emitted — dropping it would change the
+  model, which the flag never asks for. `*DATABASE_HISTORY_DISCRETE` still has
+  no handler; rather than leave the unqualified claim standing, the warning now
+  says the group is a **superset** of the deforc file whenever that card is
+  present in the deck. (`*ELEMENT_BEAM` has no `PF` field, so `disbout` has
+  nothing to honour.)
+- The `/TH/SPRING` emitter is renamed `_make_starter_th_discrete_connectors`
+  (it emits `DISBOUT` as much as `DEFORC`) and its driving table is a
+  `NamedTuple` holding real accessors instead of `getattr(state, "…")` strings,
+  which no type checker or IDE rename could follow.
 - Docs: README gains the LAW95 free-explicit **volumetric-ringing** note (at
   `PR ≈ 0.495` the bulk modulus is ~100× the shear modulus and essentially
   undamped, so the volume oscillates and can grow; mitigate with a ramped load,
@@ -340,8 +447,12 @@ Prior history (before this changelog was introduced) is summarized in the
   `funIDbulk` curve is not an escape hatch, since its ordinate is a
   dimensionless multiplier on the `Nu`-derived bulk and supplying it bypasses
   the no-curve branch's anti-buckling `P_FAC` floor), the starter's `/BEGIN`
-  unit-label grammar next to `--units`, and a section on the two output
-  frequencies a deck does not state. The backlog's "README overstates
+  unit-label grammar next to `--units`, the full eight-row blast `UNIT` table,
+  the `PF` / `*DATABASE_HISTORY_DISCRETE` qualification on the deforc `1:1`
+  claim, and a section on the two output frequencies a deck does not state.
+  `ROADMAP.md` marks `*DATABASE_DEFORC`/`_DISBOUT` → `/TH/SPRING` done and
+  narrows the remaining gap on that family to `*DATABASE_HISTORY_DISCRETE`.
+  The backlog's "README overstates
   `*DATABASE_SPCFORC` `REAC*` as forces" item is **stale**: README already
   states in bold that `REAC*` is a time-accumulated reaction impulse, with the
   `reaction_forces_th.F` / `bcs1th.F` / `resol.F` citations, the

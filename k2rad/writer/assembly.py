@@ -116,7 +116,7 @@ from .output import (
     _make_starter_th_node_reac,
     _make_starter_th_node_spc,
     _make_starter_th_swforc,
-    _make_starter_th_deforc,
+    _make_starter_th_discrete_connectors,
     _make_starter_th_surf,
     _make_title,
     _spc_constrains_rotations,
@@ -206,6 +206,15 @@ def _make_engine_header(state: ConversionState) -> List[str]:
     return [f"/RUN/{safe_title}/1", f"{endtim:.6G}", "#"]
 
 
+#: *CONTROL_TERMINATION ENDTIM at or above this is treated as a SENTINEL ("run
+#: until something else stops it") rather than a run length, and no output
+#: frequency is derived from it. LS-DYNA decks that terminate on ENDCYC/ENDENG
+#: conventionally write 1e10 or 1e20 here. Every deck in the 201-deck
+#: regression corpus states an ENDTIM between 8.5e-5 and 30, so this sits four
+#: orders of magnitude above any real run length in any unit system used there.
+_ENDTIM_SENTINEL = 1e6
+
+
 def _make_engine_output(state: ConversionState) -> List[str]:
     lines: List[str] = []
     # Radioss has ONE time-history frequency for the whole T01, so the whole
@@ -225,18 +234,26 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # BINARY_D3THDT, BINARY_INTFOR, SLEOUT) stay out: they have no /TH consumer
     # at all, so honouring them would only thicken the T01 for channels that
     # are not in it.
-    requested = [v for v in (state.db_nodout_dt, state.db_elout_dt,
-                             state.db_glstat_dt, state.db_matsum_dt,
-                             state.db_spcforc_dt, state.db_ncforc_dt,
-                             state.db_rcforc_dt, state.db_blstfor_dt,
-                             state.db_rwforc_dt, state.db_secforc_dt,
-                             state.db_swforc_dt, state.db_deforc_dt,
-                             state.db_disbout_dt,
-                             state.db_jntforc_dt) if v > 0.0]
+    _db_dts = (state.db_nodout_dt, state.db_elout_dt,
+               state.db_glstat_dt, state.db_matsum_dt,
+               state.db_spcforc_dt, state.db_ncforc_dt,
+               state.db_rcforc_dt, state.db_blstfor_dt,
+               state.db_rwforc_dt, state.db_secforc_dt,
+               state.db_swforc_dt, state.db_deforc_dt,
+               state.db_disbout_dt,
+               state.db_jntforc_dt)
+    requested = [v for v in _db_dts if v > 0.0]
+    # "If DT < 0.0, the result will be output every -DT time steps" (Manual
+    # p. 16-7) — a CYCLE-based request, which is a real request even though
+    # Radioss's /TFILE is a time interval only and cannot express it. Counted
+    # here so the derived-frequency warning below does not claim the deck said
+    # nothing when it did.
+    cycle_based = [v for v in _db_dts if v < 0.0]
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 0.0
+    derived_from_endtim = not requested and 0.0 < endtim < _ENDTIM_SENTINEL
     if requested:
         dt_th = min(requested)
-    elif endtim > 0.0:
+    elif derived_from_endtim:
         # No *DATABASE_ card states a dt, so the frequency has to be invented.
         # A hard-coded 1e-3 was the old answer and it is wrong at both ends of
         # the scale: on a 0.01 s impact it writes TEN T01 records for the whole
@@ -246,29 +263,49 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         # frames), so the T01 resolves the run rather than the number 0.001.
         dt_th = endtim / 1000.0
     else:
-        # No *CONTROL_TERMINATION either (an include-only fragment, or a deck
-        # that terminates on ENDCYC). Nothing states a time scale, so fall back
-        # to the historical constant: /TFILE must be strictly positive or
-        # lectur.F:335 (`IF(DTH /= ZERO) OUTPUT%TH%DTHIS=DTH`) silently ignores
-        # the card and the T01 is written at a frequency the deck never asked
-        # for, with no diagnostic at all.
+        # Either no *CONTROL_TERMINATION at all (an include-only fragment), or
+        # an ENDTIM that is not a run length: <= 0, or the sentinel a deck
+        # carries when it really terminates on ENDCYC / ENDENG. Nothing states a
+        # usable time scale, so fall back to the historical constant.
+        #
+        # The sentinel case is why this is a WINDOW and not just `endtim > 0`:
+        # `*CONTROL_TERMINATION ENDTIM = 1e20` would otherwise derive /TFILE
+        # 1E+17, a T01 that never fires at all — a silent total loss of
+        # time-history output, strictly worse than the old constant. /TFILE must
+        # also be strictly positive or lectur.F:335 (`IF(DTH /= ZERO)
+        # OUTPUT%TH%DTHIS=DTH`) silently ignores the card and the T01 is written
+        # at a frequency the deck never asked for, with no diagnostic at all.
         dt_th = 1e-3
     if not requested and state.th_groups_emitted:
         # Warned only when a /TH group was actually written (build_starter runs
         # first and records what it emitted): on a deck with no time-history
         # block the invented frequency governs nothing anyone reads.
+        if derived_from_endtim:
+            why = (f" (*CONTROL_TERMINATION ENDTIM {endtim:g} / 1000 = 1000 "
+                   "samples over the run)")
+        elif endtim >= _ENDTIM_SENTINEL:
+            why = (f" (the fallback constant — *CONTROL_TERMINATION ENDTIM "
+                   f"{endtim:g} is a SENTINEL, not a run length: a deck that "
+                   "big really terminates on ENDCYC/ENDENG, which k2rad does "
+                   "not convert, so scaling from it would have written a T01 "
+                   "that never fires)")
+        else:
+            why = (" (the fallback constant — the deck states no usable ENDTIM "
+                   "to scale it from)")
         state.warn(
             f"TIME HISTORY: this deck writes {state.th_groups_emitted} /TH "
-            "group(s) but no *DATABASE_ card states an output interval, so the "
-            f"T01 frequency was DERIVED as /TFILE {dt_th:.6G}"
-            + (f" (*CONTROL_TERMINATION ENDTIM {endtim:g} / 1000 = 1000 "
-               "samples over the run)" if endtim > 0.0 else
-               " (the fallback constant — the deck states no ENDTIM to scale "
-               "it from)")
+            "group(s) but no *DATABASE_ card states a positive output "
+            f"interval, so the T01 frequency was DERIVED as /TFILE {dt_th:.6G}"
+            + why
             + ". Radioss has ONE time-history frequency for the whole T01, and "
             "nothing in the deck picks it. Add a *DATABASE_ card (e.g. "
             "*DATABASE_NODOUT) with the dt you actually want if this "
-            "resolution is wrong.")
+            "resolution is wrong."
+            + (f" NOTE: {len(cycle_based)} *DATABASE_ card(s) DO state an "
+               "interval, but as a negative DT — 'output every -DT time steps' "
+               "(Manual p. 16-7). Radioss's /TFILE is a TIME interval and has "
+               "no cycle-based form, so those requests cannot be honoured and "
+               "took no part in the derivation above." if cycle_based else ""))
     lines += ["/TFILE", f"{dt_th:.6G}", "#", "/PRINT/-1", "#"]
 
     dt_anim = 0.0
@@ -298,10 +335,15 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         # cycle 1. Omitting the card entirely is the safe branch — DTANIM0
         # stays 0 from anim_set2zero_struct.F, lectur.F:2648-2651 pushes TANIM
         # to 1e30, and no A-file and no error are produced.
+        npltc = state.db_d3plot.npltc if state.db_d3plot else 0
         state.warn(
             "*CONTROL_TERMINATION ENDTIM is "
-            f"{endtim:g} and no *DATABASE_BINARY_D3PLOT states a positive DT "
-            "or NPLTC, so there is no time to derive an animation frequency "
+            f"{endtim:g} and "
+            + (f"*DATABASE_BINARY_D3PLOT states no positive DT — its NPLTC "
+               f"{npltc} would give ENDTIM/NPLTC, but there is no positive "
+               "ENDTIM to divide" if npltc > 0 else
+               "no *DATABASE_BINARY_D3PLOT states a positive DT or NPLTC")
+            + ", so there is no time to derive an animation frequency "
             "from. The /ANIM/DT card was OMITTED and NO ANIMATION (A-files) "
             "will be written. It is left out on purpose: `/ANIM/DT 0. 0` is "
             "engine MESSAGE 293 followed by ARRET(0) (freanim.F:131-134), "
@@ -1226,7 +1268,7 @@ def _starter_section_registry():
         # eids / dbeam_spring_eids), so it must not run before they are filled
         # or the group would come out empty. Same ordering constraint the
         # /CLUSTER + swforc pair records.
-        ("starter_th_deforc", lambda c: _make_starter_th_deforc(c.state)),
+        ("starter_th_discrete_connectors", lambda c: _make_starter_th_discrete_connectors(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),
