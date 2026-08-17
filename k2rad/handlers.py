@@ -58,7 +58,7 @@ from .state import (
     InitialVelocityNode, InitialVelocityRigidBody,
     InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
     SegmentSet, SegmentSetPressureLoad, LoadBlastEnhanced, LoadBlastSegmentSet,
-    LoadBody,
+    LoadBody, LoadBodyVector, LoadBodyRot, ShellPressureLoad,
     MatHighExplosiveBurn, EosJwl, EosCard, InitialDetonation,
     AleMultiMaterialGroup, ConstrainedLagrangeInSolid, InitialVolumeFraction,
     BoundaryNonReflecting, ControlAle,
@@ -3739,13 +3739,97 @@ def handle_boundary_spc_node(block: Block, state: ConversionState) -> None:
     _handle_boundary_spc(block, state, use_nsid=False)
 
 
-def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState) -> None:
+#: LS-DYNA *BOUNDARY_PRESCRIBED_MOTION VAD codes that k2rad cannot express.
+#: 3 = velocity-versus-DISPLACEMENT and 4 = relative displacement (both rigid
+#: bodies only, Manual Vol I R16 p.749): /IMPVEL, /IMPACC and /IMPDISP all take
+#: a function of TIME, so the curve would silently be re-read against the wrong
+#: abscissa. dyna2rad emits /IMPVEL anyway (warning 200002 for VAD=3 on _RIGID,
+#: and a SILENT ``continue`` for VAD=4 and for VAD=3 on the non-rigid forms,
+#: ``convertbcs.cxx:312-338``) — k2rad refuses instead, because a curve read
+#: against time when it means displacement is a wrong answer, not a missing one.
+_PM_VAD_UNSUPPORTED = {
+    3: ("velocity versus DISPLACEMENT", "the curve abscissa is a displacement, "
+        "but /IMPVEL evaluates its function against TIME"),
+    4: ("RELATIVE displacement", "the motion is relative to a lead rigid body "
+        "(LRB) and its two orientation nodes, which has no Radioss equivalent"),
+}
+
+
+def _bpm_walk(block: Block, is_box: bool = False):
+    """Walk a *BOUNDARY_PRESCRIBED_MOTION block, yielding one ``(card1_fields,
+    box_fields)`` tuple per ENTITY.
+
+    The keyword's cards are not all card 1s. Per entity the official reader
+    takes, in order (``boundary_prescribed_motion_{rigid,set,node}.cfg``;
+    Manual Vol I R16 p.747-752):
+
+      * card 1  ``TYPEID DOF VAD LCID SF VID DEATH BIRTH``            (always)
+      * card 2  ``BOXID TOFFSET LCBCHK``                        (_SET_BOX only)
+      * card 3  ``OFFSET1 OFFSET2 LRB NODE1 NODE2``   (|DOF| in 9/10/11, VAD=4)
+
+    k2rad <= PR #116 looped over every non-blank line and read each as a card 1,
+    so a |DOF|=11 or VAD=4 card's continuation was parsed as a second motion:
+    ``OFFSET1`` became the node-set/part id and ``OFFSET2`` the DOF. That is a
+    PHANTOM motion on whatever set id ``OFFSET1`` happens to name — silent
+    whenever that set exists. ``assembly._bpm_cards`` already implemented the
+    correct rule for the *INCLUDE_TRANSFORM offsets; this is the parser half.
+    """
     raw = block.raw
-    offset = 1 if _has_id(block) else 0
-    for i in range(offset, len(raw)):
-        if not raw[i].strip():        # blank card placeholder → skip
+    i = _title_offset(block)
+    while i < len(raw):
+        if not raw[i].strip():            # blank card placeholder → skip
+            i += 1
             continue
-        f = _card(raw, i, fixed=True, n=8, w=10)
+        f1 = _card(raw, i, fixed=True, n=8, w=10)
+        i += 1
+        box: List[str] = []
+        if is_box:
+            while i < len(raw) and not raw[i].strip():
+                i += 1
+            if i < len(raw):
+                box = _card(raw, i, fixed=True, n=8, w=10)
+                i += 1
+        # Card 3 is consumed and discarded: OFFSET1/OFFSET2 place a rotation
+        # axis (|DOF| 9/10/11) and LRB/NODE1/NODE2 drive VAD=4, none of which
+        # k2rad converts. Skipping it here is what stops it being misread.
+        if abs(to_int(f1[1]) if len(f1) > 1 else 0) in (9, 10, 11) \
+                or (to_int(f1[2]) if len(f1) > 2 else 0) == 4:
+            while i < len(raw) and not raw[i].strip():
+                i += 1
+            i += 1
+        yield f1, box
+
+
+def _pm_vad_supported(state: ConversionState, keyword: str, ref: str,
+                      vad: int) -> bool:
+    """False (with a warning) for a VAD k2rad will not convert. See
+    ``_PM_VAD_UNSUPPORTED``. Previously ``{0:IMPVEL,1:IMPACC,2:IMPDISP}
+    .get(vad, "IMPDISP")`` turned VAD 3 and 4 into an /IMPDISP with no
+    diagnostic at all."""
+    info = _PM_VAD_UNSUPPORTED.get(vad)
+    if info is None:
+        return True
+    kind, why = info
+    state.warn(
+        f"*{keyword} {ref}: VAD={vad} ({kind}) is NOT converted — {why}. "
+        "Nothing is emitted for this card; the DOF is left free. Re-express the "
+        "motion as a function of time (VAD=0/1/2) if you need it.")
+    return False
+
+
+def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] → /IMPVEL | /IMPACC | /IMPDISP
+    on the rigid body's /RBODY main node.
+
+    TYPEID is a *PART id (or a *CONSTRAINED_NODAL_RIGID_BODY PID). The _LOCAL
+    option expresses DOF in the body's own, co-rotating system (Manual Vol I R16
+    p.756-757 Remark 7) and is honoured with a /SKEW/MOV — see
+    ``_synthesize_local_motion_frames``. ``_ID`` needs no key of its own
+    (``parser._split_keyword`` strips it).
+    """
+    keyword = block.keyword
+    local = keyword.endswith("_LOCAL")
+    for f, _box in _bpm_walk(block):
         if len(f) < 4:
             continue
         pid   = to_int(f[0])
@@ -3753,10 +3837,14 @@ def handle_boundary_prescribed_motion_rigid(block: Block, state: ConversionState
         vad   = to_int(f[2])
         lcid  = to_int(f[3])
         sf    = _ffield(f, 4, 1.0)
+        vid   = to_int(f[5]) if len(f) > 5 else 0
         death = _ffield(f, 6, 1e28)
         birth = to_float(f[7]) if len(f) > 7 else 0.0
+        if not _pm_vad_supported(state, keyword, f"pid={pid}", vad):
+            continue
         state.prescribed_motions.append(
-            PrescribedMotionRigid(pid, dof, vad, lcid, sf, death, birth)
+            PrescribedMotionRigid(pid, dof, vad, lcid, sf, death, birth,
+                                  vid=vid, local=local)
         )
 
 
@@ -4591,6 +4679,25 @@ def handle_boundary_prescribed_motion_set(block: Block, state: ConversionState) 
     _handle_boundary_prescribed_motion(block, state, is_node=False)
 
 
+def handle_boundary_prescribed_motion_set_box(block: Block,
+                                              state: ConversionState) -> None:
+    """*BOUNDARY_PRESCRIBED_MOTION_SET_BOX — the _SET card plus one extra card
+    ``BOXID TOFFSET LCBCHK``, restricting the motion to the node-set members
+    that lie inside a *DEFINE_BOX.
+
+    The membership is the INTERSECTION ``nodes(NSID) AND nodes-inside(BOXID)``,
+    which is what the Radioss dyna-reader builds too (a /SET/GENERAL with a
+    ``SET`` clause and a ``SET_I`` clause, ``convertbcs.cxx:493-520``); with
+    NSID = 0 the box alone is the group (``:522-535``), and with BOXID = 0 the
+    card degenerates to a plain _SET (``:476-479``).
+
+    ``LCBCHK`` is R7.1+ (``boundary_prescribed_motion_set.cfg:319-324``); the
+    R6.1 form of the card has only ``BOXID TOFFSET``, so a two-field card parses
+    identically.
+    """
+    _handle_boundary_prescribed_motion(block, state, is_node=False, is_box=True)
+
+
 def handle_boundary_prescribed_motion_node(block: Block, state: ConversionState) -> None:
     """*BOUNDARY_PRESCRIBED_MOTION_NODE — same card as _SET with a node id in
     field 1; wrapped in an auto-created single-node set and sent down the _SET
@@ -4599,13 +4706,10 @@ def handle_boundary_prescribed_motion_node(block: Block, state: ConversionState)
 
 
 def _handle_boundary_prescribed_motion(block: Block, state: ConversionState,
-                                       is_node: bool) -> None:
-    raw = block.raw
-    offset = 1 if _has_id(block) else 0
-    for i in range(offset, len(raw)):
-        if not raw[i].strip():        # blank card placeholder → skip
-            continue
-        f = _card(raw, i, fixed=True, n=8, w=10)
+                                       is_node: bool,
+                                       is_box: bool = False) -> None:
+    keyword = block.keyword
+    for f, boxf in _bpm_walk(block, is_box=is_box):
         if len(f) < 4:
             continue
         nsid  = to_int(f[0])
@@ -4613,14 +4717,31 @@ def _handle_boundary_prescribed_motion(block: Block, state: ConversionState,
         vad   = to_int(f[2])
         lcid  = to_int(f[3])
         sf    = _ffield(f, 4, 1.0)
+        vid   = to_int(f[5]) if len(f) > 5 else 0
         death = _ffield(f, 6, 1e28)
         birth = to_float(f[7]) if len(f) > 7 else 0.0
+        boxid   = to_int(boxf[0]) if boxf else 0
+        toffset = to_int(boxf[1]) if len(boxf) > 1 else 0
+        lcbchk  = to_int(boxf[2]) if len(boxf) > 2 else 0
+        ref = f"nid={nsid}" if is_node else f"nsid={nsid}"
+        if not _pm_vad_supported(state, keyword, ref, vad):
+            continue
+        if is_box and not boxid:
+            state.warn(
+                f"*{keyword} nsid={nsid}: the _BOX card carries no BOXID — the "
+                "motion is applied to the WHOLE node set (which is what the "
+                "Radioss dyna-reader does too, convertbcs.cxx:476-479).")
+        # NSID = 0 with a BOXID is legal: the box alone is the group. It is left
+        # at 0 here and resolved to "every node inside the box" by the writer
+        # (the same shape convertbcs.cxx:522-535 emits).
         if is_node:
             nid = nsid
             nsid = state.next_id()
             state.node_sets[nsid] = (f"PM_node_{nid}", [nid])
         state.prescribed_motion_sets.append(
-            PrescribedMotionSet(nsid, dof, vad, lcid, sf, death, birth)
+            PrescribedMotionSet(nsid, dof, vad, lcid, sf, death, birth,
+                                vid=vid, boxid=boxid, toffset=toffset,
+                                lcbchk=lcbchk)
         )
 
 
@@ -8473,7 +8594,10 @@ def handle_load_segment_set(block: Block, state: ConversionState) -> None:
       ssid = *SET_SEGMENT id (the loaded surface)
       lcid = load curve (pressure vs time)
       sf   = curve scale factor (default 1.0)
-      at   = arrival/activation time (no /PLOAD equivalent — dropped, warned)
+      at   = arrival/activation time → a /SENSOR/TIME with Tdelay = at in the
+             /PLOAD sens_ID slot (the load is zero for t < at and the curve is
+             then read at t - at; see ShellPressureLoad). k2rad <= PR #116
+             dropped it with a warning, having no /SENSOR emitter at all.
     The segments are resolved from state.segment_sets at write time, so the
     *SET_SEGMENT may appear anywhere in the deck.
     """
@@ -8492,13 +8616,77 @@ def handle_load_segment_set(block: Block, state: ConversionState) -> None:
         at   = to_float(f[3]) if len(f) > 3 else 0.0
         if ssid <= 0 or lcid <= 0:
             continue
-        if at != 0.0 and not warned_at:
-            state.warn(f"*{block.keyword}: arrival time AT={at:g} on segment set "
-                       f"{ssid} has no /PLOAD equivalent — dropped (load applies "
-                       "from t=0).")
+        if at < 0.0 and not warned_at:
+            state.warn(f"*{block.keyword}: negative arrival time AT={at:g} on "
+                       f"segment set {ssid} — ignored (the load applies from "
+                       "t=0). /SENSOR/TIME's Tdelay cannot be negative.")
             warned_at = True
         state.segment_set_pressure_loads.append(
-            SegmentSetPressureLoad(ssid, lcid, sf))
+            SegmentSetPressureLoad(ssid, lcid, sf, max(at, 0.0)))
+
+
+def handle_load_shell(block: Block, state: ConversionState) -> None:
+    """*LOAD_SHELL_ELEMENT / *LOAD_SHELL_SET[_ID] → /SURF/SEG + /PLOAD.
+
+    Card: ``EID|ESID  LCID  SF  AT`` (4 x I10/F10, Manual Vol I R16 p.3421).
+    The _ELEMENT form repeats the card once per loaded shell, each with its OWN
+    LCID/SF/AT; the _SET form takes a *SET_SHELL id. SF defaults to 1.0.
+
+    Two dyna2rad defects are deliberately NOT reproduced:
+
+      * ``ConvertLoadShell`` writes the magnitude as ``Fscale_Y`` while /PLOAD's
+        attribute is ``Fscale_y`` (lowercase y). The solver-name map is
+        case-sensitive (``mv_descriptor.cpp:93``), so the value is parked in a
+        stray sub-object and never reaches the card: the /PLOAD keeps
+        ``magnitude``'s cfg default of ``1.`` — SF is lost AND the sign inverts.
+      * multi-row _ELEMENT blocks are collapsed onto row 0's LCID/SF/AT
+        (``sdiIdentifier("SF")`` without a row index reads only the first
+        sub-object, ``sdiModelViewPO.h:3015-3021``), silently applying one
+        curve to every listed element. k2rad groups by ``(lcid, sf, at)``
+        instead, so every row keeps its own load.
+
+    ``LCID = -1`` selects the Brode function and ``-2`` ConWep
+    (*LOAD_BRODE / *LOAD_BLAST): those are blast sources for /LOAD/PBLAST, not
+    a /PLOAD pressure curve, so they are refused rather than written as
+    ``functIDT = -1``.
+    """
+    kw = block.keyword
+    is_set = kw.endswith("_SET")
+    raw = block.raw
+    for i in range(_title_offset(block), len(raw)):
+        if not raw[i].strip():            # blank card placeholder → skip
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        if not f:
+            continue
+        ref  = to_int(f[0])
+        lcid = to_int(f[1]) if len(f) > 1 else 0
+        sf   = _ffield(f, 2, 1.0)
+        at   = to_float(f[3]) if len(f) > 3 else 0.0
+        if ref <= 0:
+            continue
+        if lcid in (-1, -2):
+            state.warn(
+                f"*{kw}: LCID={lcid} selects the "
+                + ("Brode" if lcid == -1 else "ConWep")
+                + " air-blast function, not a *DEFINE_CURVE (Manual Vol I R16 "
+                "p.3421). That is a /LOAD/PBLAST source, not a /PLOAD pressure "
+                f"curve — the load on {'set' if is_set else 'element'} {ref} is "
+                "NOT converted. Use *LOAD_BLAST_ENHANCED + "
+                "*LOAD_BLAST_SEGMENT_SET, which k2rad maps to /LOAD/PBLAST.")
+            continue
+        if lcid <= 0:
+            state.warn(f"*{kw}: no pressure curve (LCID={lcid}) on "
+                       f"{'set' if is_set else 'element'} {ref} — skipped "
+                       "(/PLOAD has no constant-pressure form: fct_IDT is "
+                       "mandatory, hm_read_pload.F).")
+            continue
+        # The *SET_SHELL may legitimately appear after the load in the deck, so
+        # the set is recorded and resolved at write time (the same deferral
+        # *LOAD_SEGMENT_SET uses for *SET_SEGMENT).
+        state.shell_pressure_loads.append(
+            ShellPressureLoad([] if is_set else [ref], lcid, sf, at,
+                              ssid=ref if is_set else 0, source=f"*{kw}"))
 
 
 def handle_load_gravity_part(block: Block, state: ConversionState) -> None:
@@ -8559,36 +8747,74 @@ def handle_load_body(block: Block, state: ConversionState) -> None:
     CID is a local system the acceleration is expressed in ("The accelerations
     (LCID) are with respect to CID", p.33-27) and maps to the /GRAV skew_ID;
     LCIDDR is the dynamic-relaxation curve and has no /GRAV equivalent (warned,
-    like LCDR on *LOAD_GRAVITY_PART). Angular (_RX/_RY/_RZ) and generic
-    (_VECTOR/_GENERALIZED) body loads have no /GRAV mapping and are skipped
-    with a warning.
+    like LCDR on *LOAD_GRAVITY_PART).
+
+    The sibling forms share this handler because card 1a.1 has the SAME seven-
+    field column grid for all of X/Y/Z/RX/RY/RZ/VECTOR (the CFG writes X/Y/Z
+    with cols 31-60 blank, but the grid is identical):
+
+      * ``_RX/_RY/_RZ`` -> /LOAD/CENTRI + /FRAME/FIX (see LoadBodyRot);
+      * ``_VECTOR``     -> /GRAV + /SKEW/FIX, and reads card 1a.2 V1 V2 V3;
+      * ``_GENERALIZED`` has a different card set (per-part scaling) and no
+        Radioss equivalent -> explicit warn-skip.
     """
     kw = block.keyword                       # e.g. "LOAD_BODY_Y"
     suffix = kw.rsplit("_", 1)[-1] if "_" in kw else ""
-    if suffix not in ("X", "Y", "Z"):
-        state.warn(f"*{kw}: only translational LOAD_BODY_X/Y/Z map to /GRAV "
-                   "— skipped (rotational / generalized body loads have no "
-                   "OpenRadioss /GRAV equivalent).")
+    if suffix not in ("X", "Y", "Z", "RX", "RY", "RZ", "VECTOR"):
+        state.warn(
+            f"*{kw}: no OpenRadioss equivalent — skipped. /GRAV takes a "
+            "uniform base acceleration along one axis and /LOAD/CENTRI a single "
+            "angular velocity about one frame axis; *LOAD_BODY_GENERALIZED's "
+            "per-part scaling (Manual Vol I R16 p.33-25: use it for per-part "
+            "body loads) cannot be expressed as either. Split it into one "
+            "*LOAD_GRAVITY_PART per part, which k2rad does convert.")
         state.skipped_keywords.append(kw)
         return
     raw = block.raw
-    offset = 1 if _has_id(block) else 0
+    offset = _title_offset(block)
     f = _card(raw, offset, fixed=True, n=8, w=10)
     if not f:
         return
     lcid   = to_int(f[0])
     sf     = to_float(f[1]) if len(f) > 1 else 1.0
     lciddr = to_int(f[2]) if len(f) > 2 else 0
+    xc     = to_float(f[3]) if len(f) > 3 else 0.0
+    yc     = to_float(f[4]) if len(f) > 4 else 0.0
+    zc     = to_float(f[5]) if len(f) > 5 else 0.0
     cid    = to_int(f[6]) if len(f) > 6 else 0
     if sf == 0.0:
         sf = 1.0
     if lcid <= 0:
-        state.warn(f"*{kw}: no acceleration curve (lcid={lcid}) — skipped.")
+        label = ("angular-velocity" if suffix in ("RX", "RY", "RZ")
+                 else "acceleration")
+        state.warn(f"*{kw}: no {label} curve (lcid={lcid}) — skipped.")
         return
     if lciddr:
         state.warn(f"*{kw}: dynamic-relaxation curve LCIDDR={lciddr} has no "
                    "OpenRadioss mapping - ignored (only the transient body "
                    "load is converted).")
+    if suffix in ("RX", "RY", "RZ"):
+        state.body_load_rots.append(
+            LoadBodyRot(dir=suffix[1], lcid=lcid, sf=sf, cid=cid,
+                        xc=xc, yc=yc, zc=zc))
+        return
+    if suffix == "VECTOR":
+        # Card 1a.2: V1 V2 V3 — a DIRECTION, magnitude irrelevant.
+        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+        v = (to_float(f2[0]) if len(f2) > 0 else 0.0,
+             to_float(f2[1]) if len(f2) > 1 else 0.0,
+             to_float(f2[2]) if len(f2) > 2 else 0.0)
+        if v == (0.0, 0.0, 0.0):
+            state.warn(
+                f"*{kw}: the direction vector V1 V2 V3 is zero (or its card is "
+                "missing) — skipped. The Radioss dyna-reader silently turns a "
+                "zero V into a global -X body load (convertloads.cxx:588-594), "
+                "which is a load nobody asked for.")
+            return
+        state.body_load_vectors.append(
+            LoadBodyVector(lcid=lcid, sf=sf, v=v, cid=cid,
+                           xc=xc, yc=yc, zc=zc))
+        return
     state.body_loads.append(LoadBody(dir=suffix, lcid=lcid, sf=sf, cid=cid))
 
 
@@ -9501,8 +9727,20 @@ HANDLERS = {
     "BOUNDARY_SPC_SET":                       handle_boundary_spc_set,
     "BOUNDARY_SPC_NODE":                      handle_boundary_spc_node,
     "BOUNDARY_SPC":                           handle_boundary_spc_node,
+    # *BOUNDARY_PRESCRIBED_MOTION_{NODE|SET|SET_BOX|RIGID|RIGID_LOCAL}. The _ID
+    # option needs no key of its own (parser._split_keyword strips it), but
+    # _BOX and _LOCAL stay in the base name and do need one — the *DEFINE_BOX /
+    # *DEFINE_BOX_LOCAL rule. Deliberately absent, so they land in
+    # skipped_keywords rather than being silently read as a near-alias: the IGA
+    # forms (_SET_POINT_UVW / _SET_EDGE_UVW / _SET_FACE_XYZ), _SET_LINE and
+    # _SET_SEGMENT. None of them exists in the Radioss dyna-reader's cfg tree
+    # either (verified by grep over hm_cfg_files), so its reader rejects them at
+    # parse time as well; _SET_SEGMENT in particular carries DOF=12 (translation
+    # along the segment normals), which no /IMPVEL Dir can express.
     "BOUNDARY_PRESCRIBED_MOTION_RIGID":       handle_boundary_prescribed_motion_rigid,
+    "BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL": handle_boundary_prescribed_motion_rigid,
     "BOUNDARY_PRESCRIBED_MOTION_SET":         handle_boundary_prescribed_motion_set,
+    "BOUNDARY_PRESCRIBED_MOTION_SET_BOX":     handle_boundary_prescribed_motion_set_box,
     "BOUNDARY_PRESCRIBED_MOTION_NODE":        handle_boundary_prescribed_motion_node,
     "INITIAL_VELOCITY":                       handle_initial_velocity,
     "INITIAL_VELOCITY_NODE":                  handle_initial_velocity_node,
@@ -9683,9 +9921,22 @@ HANDLERS = {
     "LOAD_SEGMENT_SET_ID":                    handle_load_segment_set,
     "LOAD_NODE_POINT":                        handle_load_node,
     "LOAD_NODE_SET":                          handle_load_node,
+    "LOAD_SHELL_ELEMENT":                     handle_load_shell,
+    "LOAD_SHELL_SET":                         handle_load_shell,
+    # *LOAD_BODY_{X,Y,Z} -> /GRAV, _VECTOR -> /GRAV + /SKEW/FIX,
+    # _RX/_RY/_RZ -> /LOAD/CENTRI + /FRAME/FIX, _GENERALIZED -> explicit
+    # warn-skip. All seven share one handler because card 1a.1 has the same
+    # column grid; _GENERALIZED is registered ON PURPOSE so the skip is
+    # reported with its reason instead of arriving as a mute skipped_keywords
+    # entry (the handler's docstring used to claim that and was not true).
     "LOAD_BODY_X":                            handle_load_body,
     "LOAD_BODY_Y":                            handle_load_body,
     "LOAD_BODY_Z":                            handle_load_body,
+    "LOAD_BODY_RX":                           handle_load_body,
+    "LOAD_BODY_RY":                           handle_load_body,
+    "LOAD_BODY_RZ":                           handle_load_body,
+    "LOAD_BODY_VECTOR":                       handle_load_body,
+    "LOAD_BODY_GENERALIZED":                  handle_load_body,
     "LOAD_BODY_PARTS":                        handle_load_body_parts,
     "LOAD_BLAST_ENHANCED":                    handle_load_blast_enhanced,
     "LOAD_BLAST_SEGMENT_SET":                 handle_load_blast_segment_set,

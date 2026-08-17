@@ -89,6 +89,7 @@ from .loads import (
     _make_rlinks,
     _make_spotweld_beam_connectors,
     _make_starter_cloads,
+    _synthesize_local_motion_frames,
     _synthesize_rwall_moving_nodes,
     _resolve_geometric_rigid_walls,
     _warn_spring_eid_collisions,
@@ -870,6 +871,13 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # /NODE section (so the nodes are emitted) and before /FRAME allocation (so
     # the ids are reserved in the shared /SKEW+/FRAME namespace).
     _synthesize_vector_skews(state)
+
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: build each body's co-rotating
+    # /SKEW/MOV triad out of three synthesized element-free nodes. Same two
+    # constraints as the vector skews (nodes before /NODE, ids before /FRAME),
+    # plus a third: it must precede the /RBODY sections below, which fold
+    # state.local_frame_nodes into the bodies' secondary groups.
+    _synthesize_local_motion_frames(state)
 
     # Reserve a /SKEW id for each *CONSTRAINED_JOINT frame and register the
     # joint /SPRING nodes. After the vector skews (which prefer their own VID

@@ -2133,25 +2133,54 @@ class CnrbSpcBc:
 
 @dataclass
 class PrescribedMotionRigid:
+    """*BOUNDARY_PRESCRIBED_MOTION_RIGID[_LOCAL] — motion of a rigid part.
+
+    ``local`` is the _LOCAL option: LS-DYNA then expresses DOF in the rigid
+    body's OWN system, which rotates with the body (Manual Vol I R16 p.756-757
+    Remark 7). k2rad honours that with a co-rotating /SKEW/MOV built on three
+    synthesized nodes rigidly attached to the body — see
+    ``_synthesize_local_motion_frames``; ``skew_id`` / ``mov_nodes`` are filled
+    in by that prepass. The Radioss dyna-reader instead drops the flag
+    entirely (``convertbcs.cxx`` never reads ``localOption``), which freezes
+    the axes at t = 0.
+    """
     pid: int            # rigid part ID
-    dof: int            # 1=X,2=Y,3=Z,5=RX,6=RY,7=RZ
-    vad: int            # 0=vel,1=acc,2=disp
+    dof: int            # 1=X,2=Y,3=Z,5=RX,6=RY,7=RZ; ±4/±8 = along/about VID
+    vad: int            # 0=vel,1=acc,2=disp,3=vel-vs-disp,4=relative disp
     lcid: int
     sf: float
     death: float
     birth: float
+    vid: int = 0                # *DEFINE_VECTOR id, only meaningful for |DOF| 4/8
+    local: bool = False         # the _LOCAL option
+    skew_id: int = 0            # co-rotating /SKEW/MOV id (_LOCAL prepass)
+    mov_nodes: Tuple[int, int, int] = (0, 0, 0)   # its N1/N2/N3
 
 
 @dataclass
 class PrescribedMotionSet:
-    """*BOUNDARY_PRESCRIBED_MOTION_SET / *_NODE — applies to a node set."""
-    nsid: int           # node set ID (0=node ID for _NODE variant)
-    dof: int            # 1=X,2=Y,3=Z,4=RX,5=RY,6=RZ
-    vad: int            # 0=vel,1=acc,2=disp
+    """*BOUNDARY_PRESCRIBED_MOTION_SET[_BOX] / *_NODE — applies to a node set.
+
+    DOF follows LS-DYNA: 1/2/3 = Tx/Ty/Tz, 5/6/7 = Rx/Ry/Rz, ±4/±8 =
+    translation along / rotation about the *DEFINE_VECTOR ``vid``.
+
+    ``boxid`` is the _BOX option's *DEFINE_BOX: the motion then applies to
+    ``nodes(NSID) INTERSECT nodes-inside(BOXID)`` (dyna2rad builds exactly that
+    as a /SET/GENERAL with a ``SET`` + ``SET_I`` clause pair,
+    ``convertbcs.cxx:493-520``). ``toffset`` / ``lcbchk`` are read so they can
+    be reported: neither has an OpenRadioss equivalent.
+    """
+    nsid: int           # node set ID (0 = "every node in the box" for _BOX)
+    dof: int            # 1=X,2=Y,3=Z,5=RX,6=RY,7=RZ; ±4/±8 = along/about VID
+    vad: int            # 0=vel,1=acc,2=disp,3=vel-vs-disp,4=relative disp
     lcid: int
     sf: float           # scale factor (0 → zero displacement → /BCS)
     death: float
     birth: float
+    vid: int = 0                # *DEFINE_VECTOR id, only meaningful for |DOF| 4/8
+    boxid: int = 0              # _BOX option: *DEFINE_BOX scoping the node set
+    toffset: int = 0            # _BOX card 2: per-node curve time shift (dropped)
+    lcbchk: int = 0             # _BOX card 2: box-check curve (dropped)
 
 
 @dataclass
@@ -3745,10 +3774,16 @@ class SegmentSetPressureLoad:
     ``ssid`` references a *SET_SEGMENT (``state.segment_sets``); the segments are
     resolved at write time so the set may be defined anywhere in the deck. Each
     segment becomes one /PLOAD entry with function ``lcid`` scaled by ``sf``.
+
+    ``at`` is the arrival time. /PLOAD has no Tstart column, so it becomes a
+    /SENSOR/TIME with ``Tdelay = at`` in the ``sens_ID`` slot — the same
+    mechanism, and the same shift semantics, as ShellPressureLoad.at. k2rad
+    <= PR #116 dropped it with a warning.
     """
     ssid: int
     lcid: int
     sf: float
+    at: float = 0.0
 
 
 @dataclass
@@ -3826,6 +3861,102 @@ class LoadBody:
     lcid: int
     sf: float
     cid: int = 0        # *DEFINE_COORDINATE_* id → /GRAV skew_ID (0 = global)
+
+
+@dataclass
+class LoadBodyVector:
+    """*LOAD_BODY_VECTOR — a base-acceleration body load along a free vector.
+
+    Card 1a.1: lcid sf lciddr xc yc zc cid;  Card 1a.2: v1 v2 v3.
+    ``(v1,v2,v3)`` is a DIRECTION only — its magnitude is irrelevant (both
+    LS-DYNA and the Radioss dyna-reader use it unnormalised and let the frame
+    construction normalise it). When ``cid`` is set the components are given in
+    that system's basis and must be mapped to global first.
+
+    The body force acts along **-V** (Manual Vol I R16 p.33-29: the manual's own
+    validation example writes ``V = (-1,-1,-1)`` to obtain gravity along
+    +(1,1,1)), which is the same opposite-sign rule the ``_X/_Y/_Z`` forms
+    follow. Maps to ONE /GRAV with ``DIR = "X"``, ``Fscale_Y = -sf`` and a
+    companion /SKEW/FIX whose local X' is +V_global — exactly what dyna2rad
+    emits (``convertloads.cxx:550`` ``Fscale_Y = -lsdSF``, ``:595-606`` the
+    X' = +V skew). Both halves must be reproduced together: either one alone
+    flips the load.
+    """
+    lcid: int
+    sf: float
+    v: Tuple[float, float, float]
+    cid: int = 0        # basis the components are given in (0 = global)
+    xc: float = 0.0     # skew origin; inert for a uniform acceleration field
+    yc: float = 0.0
+    zc: float = 0.0
+
+
+@dataclass
+class LoadBodyRot:
+    """*LOAD_BODY_RX/_RY/_RZ — an angular-velocity body load → /LOAD/CENTRI.
+
+    Card: lcid sf lciddr xc yc zc cid.  ``lcid`` carries the ANGULAR VELOCITY
+    omega(t), not omega^2 and not an acceleration: LS-DYNA forms
+    ``b = rho*[omega x (omega x r)]`` internally (Manual Vol I R16 p.33-20
+    Remark 3) and the OpenRadioss engine squares the curve for itself
+    (``cfield.F:121,128``: ``VROT = FAC(1,NL)*FINTER(...)`` then
+    ``VROT2 = VROT*VROT``). The mapping is therefore 1:1 and LINEAR in omega —
+    squaring or square-rooting it here would be catastrophic.
+
+    Both sides apply the acceleration radially OUTWARD from the axis
+    (LS-DYNA Remark 2; ``cfield.F:232-237`` ``AREL = DIST*VROT2`` with ``DIST``
+    the axis-perpendicular radius), so there is NO sign flip, unlike the
+    translational forms.
+
+    ``dir`` is the axis letter from the keyword suffix. The /LOAD/CENTRI ``Dir``
+    field must be spelled **XX/YY/ZZ**: the starter maps X/Y/Z to IDIR 1/2/3
+    (``hm_read_load_centri.F:206-211``) but the engine only branches on 4/5/6,
+    so IDIR 1/2/3 all fall into the ``ELSE`` and rotate about the frame's Z
+    axis instead (``cfield.F:132-144``) — silently, with no error. dyna2rad
+    writes X/Y/Z (``convertloads.cxx:271-288``) and is wrong for RX and RY.
+
+    The rotation axis passes through ``(xc,yc,zc)``, or through the ``cid``
+    system's origin when ``cid`` is set (``cid`` supersedes the centre fields);
+    that becomes a companion /FRAME/FIX.
+    """
+    dir: str            # "X" | "Y" | "Z" → /LOAD/CENTRI Dir "XX"/"YY"/"ZZ"
+    lcid: int           # omega(t) curve
+    sf: float           # scales omega (NOT omega^2)
+    cid: int = 0        # *DEFINE_COORDINATE_* id; supersedes xc/yc/zc
+    xc: float = 0.0     # centre of rotation (cid = 0)
+    yc: float = 0.0
+    zc: float = 0.0
+
+
+@dataclass
+class ShellPressureLoad:
+    """*LOAD_SHELL_ELEMENT / *LOAD_SHELL_SET → /PLOAD on the shells' faces.
+
+    Card: eid|esid lcid sf at.  ``eids`` holds the shell element ids the row
+    applies to (one for _ELEMENT, the expanded *SET_SHELL for _SET).
+
+    Sign: LS-DYNA's positive pressure acts along the shell's NEGATIVE normal
+    (Manual Vol I R16 p.3421: connectivity follows the right-hand rule, with
+    "positive pressure acting in the negative t-direction"), while a Radioss
+    /PLOAD with a positive ``Fscale_y`` pushes the surface along its POSITIVE
+    segment normal (``force.F90:451-465``: ``fx = Fscale_y*f(t)*nx/8`` summed
+    over the four nodes gives ``+P*A*n_hat``). k2rad builds the /SURF/SEG by
+    pasting the shell connectivity, so ``n_hat = t_hat`` and exactly ONE flip
+    is needed: ``Fscale_y = -sf``.
+
+    ``at`` is the arrival time. /PLOAD has no Tstart column, so it becomes a
+    /SENSOR/TIME with ``Tdelay = at`` in the ``sens_ID`` slot: the load is zero
+    for t < at and the curve is then evaluated at ``t - at``
+    (``sensor_time.F:66-68`` sets ``TSTART = TDELAY``; ``force.F90:216-218``
+    evaluates at ``ts = tt - TSTART``) — a shift, which is how LS-DYNA's
+    arrival time reads.
+    """
+    eids: List[int]
+    lcid: int
+    sf: float
+    at: float = 0.0
+    ssid: int = 0       # _SET form: *SET_SHELL id, resolved at write time
+    source: str = "*LOAD_SHELL_ELEMENT"
 
 
 @dataclass
@@ -4636,6 +4767,14 @@ class ConversionState:
     cnrb_spc_bcs: List[CnrbSpcBc] = field(default_factory=list)
     prescribed_motions: List[PrescribedMotionRigid] = field(default_factory=list)
     prescribed_motion_sets: List[PrescribedMotionSet] = field(default_factory=list)
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: pid → the three synthesized nodes
+    # that carry the body's co-rotating /SKEW/MOV triad. Filled by
+    # _synthesize_local_motion_frames and folded into that body's /RBODY
+    # secondary-node group by _make_rbodies / _make_cnrb_rbodies, so the triad
+    # rotates rigidly with the body. Kept OUT of extra_rigid_nodes on purpose:
+    # that field is *CONSTRAINED_EXTRA_NODES input and its "not a *MAT_RIGID
+    # part" warning would misreport these.
+    local_frame_nodes: Dict[int, List[int]] = field(default_factory=dict)
 
     # ── Constraints ────────────────────────────────────────────
     # *CONSTRAINED_NODAL_RIGID_BODY[_SPC] → /RBODY (+ /BCS)
@@ -4668,10 +4807,16 @@ class ConversionState:
     # *LOAD_SEGMENT_SET rows → /PLOAD (segments resolved from segment_sets
     # at write time so the *SET_SEGMENT may be defined later in the deck)
     segment_set_pressure_loads: List[SegmentSetPressureLoad] = field(default_factory=list)
+    # *LOAD_SHELL_ELEMENT / _SET rows → /SURF/SEG (shell connectivity) + /PLOAD
+    shell_pressure_loads: List[ShellPressureLoad] = field(default_factory=list)
     # *LOAD_GRAVITY_PART rows → /GRAV (non-modal decks only)
     gravity_loads: List[GravityLoadPart] = field(default_factory=list)
     # *LOAD_BODY_{X,Y,Z} whole-model base-acceleration rows → /GRAV
     body_loads: List[LoadBody] = field(default_factory=list)
+    # *LOAD_BODY_VECTOR rows → /GRAV + a companion /SKEW/FIX (local X' = +V)
+    body_load_vectors: List[LoadBodyVector] = field(default_factory=list)
+    # *LOAD_BODY_RX/_RY/_RZ rows → /LOAD/CENTRI (+ /FRAME/FIX for the axis)
+    body_load_rots: List[LoadBodyRot] = field(default_factory=list)
     # *LOAD_BODY_PARTS PSID — restricts EVERY *LOAD_BODY_* row to that part set
     # (Manual Vol I R16 p.33-25: the data applies to the complete problem
     # "unless a part subset is specified via the *LOAD_BODY_PARTS keyword", and

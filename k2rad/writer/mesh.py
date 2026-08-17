@@ -46,6 +46,7 @@ __all__ = [
     "_make_nodes",
     "_emit_skew_fix",
     "_emit_skew_mov",
+    "_ortho_skew_axes",
     "_make_skews",
     "_skew_axes_from_nodes",
     "_emit_skew_from_nodes",
@@ -364,14 +365,24 @@ def _synthesize_vector_skews(state: ConversionState) -> None:
                 "OpenRadioss skew equivalent — unhandled by dyna2rad too, so an "
                 "*ELEMENT_DISCRETE referencing this VID is NOT converted.")
 
-    # Surface dead output: *DEFINE_VECTOR has no k2rad consumer yet, and a
-    # *DEFINE_SD_ORIENTATION that no *ELEMENT_DISCRETE references is unused too.
-    # An unused /SKEW is harmless, but the moving (_NODES / IOP=2) forms also
-    # injected a free helper node above — flag both so that extra node is not a
-    # silent surprise (it would otherwise appear unexplained in the free-node
-    # /BCS guard for implicit decks).
+    # Surface dead output: a *DEFINE_VECTOR nothing consumes, and a
+    # *DEFINE_SD_ORIENTATION that no *ELEMENT_DISCRETE references. An unused
+    # /SKEW is harmless, but the moving (_NODES / IOP=2) forms also injected a
+    # free helper node above — flag both so that extra node is not a silent
+    # surprise (it would otherwise appear unexplained in the free-node /BCS
+    # guard for implicit decks).
+    #
+    # *BOUNDARY_PRESCRIBED_MOTION with |DOF| 4 or 8 IS a consumer: the VID skew
+    # becomes the motion's skew_ID (writer/loads.py _pm_skew_for). Before that
+    # was wired the vector skew was always dead output, which is why this used to
+    # read "no k2rad consumer exists".
     referenced_sd = {e.vid for e in state.discrete_elems if e.vid}
-    unref_vec = sorted(state.vector_skew_ids)             # no consumer exists
+    referenced_vec = {pm.vid
+                      for pm in (list(state.prescribed_motions)
+                                 + list(state.prescribed_motion_sets))
+                      if pm.vid and abs(pm.dof) in (4, 8)}
+    unref_vec = sorted(v for v in state.vector_skew_ids
+                       if v not in referenced_vec)
     unref_sd = sorted(v for v in state.sdorient_skew_ids
                       if v not in referenced_sd)
     if unref_vec or unref_sd:

@@ -62,6 +62,17 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             continue
         nodes_by_pid[pid].extend(extra)
 
+    # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL: the three synthesized nodes that
+    # carry the body's co-rotating /SKEW/MOV triad must be rigid secondaries, or
+    # the triad does not turn with the body. They are element-free, so they add
+    # no mass and no inertia. Silent by design here — the prepass that created
+    # them (_synthesize_local_motion_frames) already warned about the whole
+    # construction; a part that is not rigid never gets nodes in the first place
+    # (the motion needs an /RBODY to drive at all).
+    for pid, helpers in state.local_frame_nodes.items():
+        if pid in nodes_by_pid:
+            nodes_by_pid[pid].extend(helpers)
+
     # *CONSTRAINED_RIGID_BODIES: fold each slave rigid part's nodes into its
     # master so only the master emits an /RBODY. Chains (A<-B, B<-C) resolve
     # transitively via union-find with the master as the representative.
@@ -424,6 +435,13 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
                 f"{cnrb.nsid} is empty — /RBODY not emitted."
             )
             continue
+        # *BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL on this CNRB: the three
+        # synthesized nodes carrying its co-rotating /SKEW/MOV triad have to be
+        # secondaries of THIS body. They are element-free and massless, so the
+        # centroid the master is placed at is the only thing they shift.
+        helpers = state.local_frame_nodes.get(cnrb.pid)
+        if helpers:
+            unique_nodes = sorted(set(unique_nodes) | set(helpers))
 
         # Master/primary node. It MUST be element-free (see elem_nodes note): the
         # ICoG move would otherwise invert the elements it belongs to. Reuse an

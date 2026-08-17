@@ -1012,31 +1012,47 @@ def _off_mat_rigid(b: Block, offsets: Dict[str, int], warn) -> None:
                 b.raw[i2] = new
 
 
-def _bpm_cards(b: Block):
-    """Yield (line_index, is_continuation) over a *BOUNDARY_PRESCRIBED_MOTION
-    block: the official reader takes ONE extra card (OFFSET1 OFFSET2 MRB
-    NODE1 NODE2) after a card 1 with |DOF| in 9/10/11 or VAD=4
-    (boundary_prescribed_motion*.cfg)."""
-    expect2 = False
+def _bpm_cards(b: Block, is_box: bool = False):
+    """Yield ``(line_index, kind)`` over a *BOUNDARY_PRESCRIBED_MOTION block,
+    where *kind* is ``""`` for a card 1, ``"box"`` for the _SET_BOX card and
+    ``"cont"`` for the continuation card.
+
+    Per entity the official reader takes card 1 (typeid dof vad lcid sf vid
+    death birth), then — only on the _BOX option — ``BOXID TOFFSET LCBCHK``,
+    then — only when |DOF| is 9/10/11 or VAD=4 — ``OFFSET1 OFFSET2 LRB NODE1
+    NODE2`` (boundary_prescribed_motion*.cfg).
+
+    The empty string for a card 1 keeps ``not kind`` true for it, so callers
+    that only care "is this a card 1" read unchanged.
+    """
+    pending: List[str] = []
     for k in range(_title_offset(b), len(b.raw)):
         if not b.raw[k].strip():
             continue
-        if expect2:
-            yield k, True
-            expect2 = False
+        if pending:
+            yield k, pending.pop(0)
             continue
         f = _fields(b.raw[k])
-        expect2 = abs(_geti(f, 1)) in (9, 10, 11) or _geti(f, 2) == 4
-        yield k, False
+        if is_box:
+            pending.append("box")
+        if abs(_geti(f, 1)) in (9, 10, 11) or _geti(f, 2) == 4:
+            pending.append("cont")
+        yield k, ""
 
 
-def _off_bpm(id_bucket: str):
-    """*BOUNDARY_PRESCRIBED_MOTION_{RIGID,SET,NODE}: repeated card-1 entries
-    (typeid dof vad lcid sf vid death birth) with a conditional continuation
-    card that must NOT receive the card-1 mods — its OFFSET1/OFFSET2 are
-    literal coordinates; MRB is a rigid-body part, NODE1/NODE2 nodes."""
+def _off_bpm(id_bucket: str, is_box: bool = False):
+    """*BOUNDARY_PRESCRIBED_MOTION_{RIGID,RIGID_LOCAL,SET,SET_BOX,NODE}:
+    repeated card-1 entries (typeid dof vad lcid sf vid death birth) with two
+    conditional extra cards that must NOT receive the card-1 mods.
+
+    * the _BOX card is ``BOXID TOFFSET LCBCHK`` — BOXID is a *DEFINE_BOX
+      (IDDOFF, the bucket every other *DEFINE id uses) and LCBCHK a curve;
+    * the continuation card's OFFSET1/OFFSET2 are literal coordinates, LRB is a
+      rigid-body part and NODE1/NODE2 are nodes.
+    """
     c1 = [(0, id_bucket), (3, "f"), (5, "d")]
-    c2 = [(2, "p"), (3, "n"), (4, "n")]
+    cards = {"": c1, "box": [(0, "d"), (2, "f")],
+             "cont": [(2, "p"), (3, "n"), (4, "n")]}
 
     def _fn(b: Block, offsets: Dict[str, int], warn) -> None:
         raw = b.raw
@@ -1044,8 +1060,8 @@ def _off_bpm(id_bucket: str):
             new = _rewrite_id_header(raw[0], offsets.get("r", 0))
             if new is not None:
                 raw[0] = new
-        for k, cont in _bpm_cards(b):
-            new = _rewrite_line(raw[k], c2 if cont else c1, offsets)
+        for k, kind in _bpm_cards(b, is_box=is_box):
+            new = _rewrite_line(raw[k], cards[kind], offsets)
             if new is not None:
                 raw[k] = new
     return _fn
@@ -1853,7 +1869,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     "BOUNDARY_SPC_NODE": {"data": (0, [(0, "n"), (1, "d")]), "idhdr": "r"},
     "BOUNDARY_SPC": {"data": (0, [(0, "n"), (1, "d")]), "idhdr": "r"},
     "BOUNDARY_PRESCRIBED_MOTION_RIGID": _off_bpm("p"),
+    "BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL": _off_bpm("p"),
     "BOUNDARY_PRESCRIBED_MOTION_SET": _off_bpm("s"),
+    "BOUNDARY_PRESCRIBED_MOTION_SET_BOX": _off_bpm("s", is_box=True),
     "BOUNDARY_PRESCRIBED_MOTION_NODE": _off_bpm("n"),
     "INITIAL_VELOCITY": {"cards": {0: [(0, "s"), (1, "s"), (2, "d"),
                                        (4, "d")]}, "idhdr": "r"},
@@ -1909,9 +1927,23 @@ _OFFSET_SPECS: Dict[str, object] = {
     "LOAD_SEGMENT_SET": {"data": (0, [(0, "s"), (1, "f")]), "idhdr": "r"},
     "LOAD_GRAVITY_PART": {"data": (0, [(0, "p"), (2, "f"), (4, "f")])},
     "LOAD_GRAVITY_PART_SET": {"data": (0, [(0, "s"), (2, "f"), (4, "f")])},
+    # All of X/Y/Z/RX/RY/RZ/VECTOR share card 1a.1's grid: LCID and LCIDDR are
+    # curves, CID a *DEFINE_COORDINATE. _VECTOR's card 1a.2 (V1 V2 V3) and
+    # _R*'s XC/YC/ZC carry no ids, so no card-2 spec is needed — the geometry
+    # they DO carry is reported via _DIRECTION_BEARING /
+    # _carries_literal_axis_point instead.
     "LOAD_BODY_X": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
     "LOAD_BODY_Y": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
     "LOAD_BODY_Z": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
+    "LOAD_BODY_RX": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
+    "LOAD_BODY_RY": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
+    "LOAD_BODY_RZ": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]}, "idhdr": "r"},
+    "LOAD_BODY_VECTOR": {"cards": {0: [(0, "f"), (2, "f"), (6, "d")]},
+                         "idhdr": "r"},
+    "LOAD_BODY_PARTS": {"data": (0, [(0, "s")]), "idhdr": "r"},
+    # *LOAD_SHELL_{ELEMENT,SET}: repeated "eid|esid lcid sf at" rows.
+    "LOAD_SHELL_ELEMENT": {"data": (0, [(0, "e"), (1, "f")]), "idhdr": "r"},
+    "LOAD_SHELL_SET": {"data": (0, [(0, "s"), (1, "f")]), "idhdr": "r"},
     "LOAD_BLAST_ENHANCED": {"cards": {0: [(0, "r")], 1: [(4, "n")]}},
     "LOAD_BLAST": {"cards": {1: [(4, "n")]}},
     "LOAD_BLAST_SEGMENT_SET": {"data": (0, [(0, "r"), (1, "s"), (2, "p")])},
@@ -2106,10 +2138,18 @@ _DIRECTION_BEARING = frozenset({
     "DEFINE_COORDINATE_VECTOR", "DEFINE_SD_ORIENTATION", "INITIAL_VELOCITY",
     "INITIAL_VELOCITY_NODE", "INITIAL_VELOCITY_RIGID_BODY",
     "INITIAL_VELOCITY_GENERATION", "BOUNDARY_PRESCRIBED_MOTION_RIGID",
-    "BOUNDARY_PRESCRIBED_MOTION_SET", "BOUNDARY_PRESCRIBED_MOTION_NODE",
+    "BOUNDARY_PRESCRIBED_MOTION_RIGID_LOCAL",
+    "BOUNDARY_PRESCRIBED_MOTION_SET", "BOUNDARY_PRESCRIBED_MOTION_SET_BOX",
+    "BOUNDARY_PRESCRIBED_MOTION_NODE",
     "LOAD_NODE_POINT", "LOAD_NODE_SET", "LOAD_BODY_X", "LOAD_BODY_Y",
     "LOAD_BODY_Z", "INITIAL_STRESS_SHELL", "INITIAL_STRESS_SOLID",
     "BOUNDARY_SPC_SET", "BOUNDARY_SPC_NODE", "BOUNDARY_SPC",
+    # *LOAD_BODY_RX/RY/RZ carry BOTH a direction (the rotation axis, which the
+    # include's linear part must rotate) and a literal axis POINT (XC/YC/ZC,
+    # which even a pure translation must move) — the second half is reported by
+    # _carries_literal_axis_point below. *LOAD_BODY_VECTOR carries V1/V2/V3 on
+    # its second card.
+    "LOAD_BODY_RX", "LOAD_BODY_RY", "LOAD_BODY_RZ", "LOAD_BODY_VECTOR",
 })
 
 
@@ -2428,8 +2468,9 @@ def _carries_literal_axis_point(b: Block) -> bool:
     """True for DIRECTION-bearing blocks whose cards also carry a literal
     axis POINT that even a pure translation must move:
     *INITIAL_VELOCITY_GENERATION with OMEGA != 0 (axis through XC/YC/ZC,
-    unless node-defined via NX=-999) and *BOUNDARY_PRESCRIBED_MOTION_* with
-    |DOF| in 9/10/11 (axis through OFFSET1/OFFSET2)."""
+    unless node-defined via NX=-999), *BOUNDARY_PRESCRIBED_MOTION_* with
+    |DOF| in 9/10/11 (axis through OFFSET1/OFFSET2), and *LOAD_BODY_RX/RY/RZ
+    with a non-zero centre of rotation (XC/YC/ZC)."""
     kw = b.keyword
     if kw == "INITIAL_VELOCITY_GENERATION":
         start = _title_offset(b)
@@ -2440,6 +2481,12 @@ def _carries_literal_axis_point(b: Block) -> bool:
         f2 = _fields(b.raw[start + 1]) if start + 1 < len(b.raw) else []
         nx = to_float(f2[3]) if len(f2) > 3 and str(f2[3]).strip() else 0.0
         return not (-999.5 < nx < -998.5)
+    if kw in ("LOAD_BODY_RX", "LOAD_BODY_RY", "LOAD_BODY_RZ"):
+        start = _title_offset(b)
+        f1 = _fields(b.raw[start]) if start < len(b.raw) else []
+        return any(to_float(f1[i]) != 0.0
+                   for i in (3, 4, 5)
+                   if len(f1) > i and str(f1[i]).strip())
     if kw.startswith("BOUNDARY_PRESCRIBED_MOTION"):
         return any(not cont and abs(_geti(_fields(b.raw[k]), 1)) in (9, 10, 11)
                    for k, cont in _bpm_cards(b))
