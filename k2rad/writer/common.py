@@ -387,9 +387,16 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
     """
     shell_eids: List[int] = []
     solid_pids: List[int] = []
+    tshell_pids = {e.pid for e in state.tshell_elems}
     for pid in sorted(pids):
         eids_in_pid = [e.eid for e in state.shell_elems if e.pid == pid]
-        has_solids = any(e.pid == pid for e in state.solid_elems)
+        # A thick shell is a /BRICK in the emitted deck, so its part takes the
+        # same /SURF/PART[/EXT] a brick part does. Without this a contact naming
+        # a thick-shell part builds NO surface and the whole /INTER is dropped —
+        # loudly (``_drop_interface``), but dropped. ``tshell_elems`` is empty
+        # on every deck without *ELEMENT_TSHELL, so no other surface moves.
+        has_solids = (pid in tshell_pids
+                      or any(e.pid == pid for e in state.solid_elems))
         if eids_in_pid:
             shell_eids.extend(eids_in_pid)
         elif has_solids:
@@ -500,10 +507,14 @@ def _fmt_eid_list(eids: List[int], limit: int = 25) -> str:
 
 def _part_node_sets(state: ConversionState) -> dict:
     """{pid: set-of-node-ids} over the structural element containers (solids,
-    shells, beam end nodes) — the per-part node inventory the /XREF reference
-    geometry intersects with (dyna2rad GetNodesOfParts equivalent)."""
+    thick shells, shells, beam end nodes) — the per-part node inventory the
+    /XREF reference geometry intersects with (dyna2rad GetNodesOfParts
+    equivalent)."""
     pnodes: dict = {}
     for e in state.solid_elems:
+        s = pnodes.setdefault(e.pid, set())
+        s.update(n for n in e.nodes if n > 0)
+    for e in state.tshell_elems:
         s = pnodes.setdefault(e.pid, set())
         s.update(n for n in e.nodes if n > 0)
     for e in state.shell_elems:

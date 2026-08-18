@@ -5603,12 +5603,24 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
             f" - if waves aren't damped enough, try beta ~ 1e-7 to 1e-6."
         )
 
-    # Resolve target node set
+    # Resolve target node set.
+    #
+    # THICK SHELLS count. /DAMP is NODE-based Rayleigh damping — the engine adds
+    # -alpha*M*v - beta*K*v over the nodes of a /GRNOD, with no element-type
+    # restriction — so a thick shell's nodes are damped exactly like a brick's.
+    # (Contrast /DAMP/FREQUENCY_RANGE, which enters as a Maxwell/Prony viscous
+    # stress INSIDE the material law and really does reach only shells and
+    # solids; that path's own warning stays right.) Before the thick-shell batch
+    # this was moot because *ELEMENT_TSHELL was never parsed, and the r14
+    # ex_15 decks reported "*DAMPING_*: no target deformable nodes found - /DAMP
+    # not emitted" purely because their whole mesh was missing.
     if target_pids:
         target_nodes = sorted(
             {n for e in state.shell_elems if e.pid in target_pids
              for n in e.nodes if n > 0 and n not in rigid_nodes}
             | {n for e in state.solid_elems if e.pid in target_pids
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.tshell_elems if e.pid in target_pids
                for n in e.nodes if n > 0 and n not in rigid_nodes}
         )
         grnod_title = f"damping_target_pids_{'_'.join(str(p) for p in sorted(target_pids))}"
@@ -5620,6 +5632,9 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
              if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
              for n in e.nodes if n > 0 and n not in rigid_nodes}
             | {n for e in state.solid_elems
+               if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.tshell_elems
                if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
                for n in e.nodes if n > 0 and n not in rigid_nodes}
         )

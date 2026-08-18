@@ -76,6 +76,11 @@ def _inertia_element_nodes(state: ConversionState) -> Set[int]:
         elem_nodes.update(e.nodes)
     for e in state.solid_elems:
         elem_nodes.update(e.nodes)
+    # Thick shells are /BRICK in the emitted deck and carry real stiffness, so
+    # their nodes are "attached to an element" exactly like a hex's. The
+    # container is empty on every deck without *ELEMENT_TSHELL.
+    for e in state.tshell_elems:
+        elem_nodes.update(e.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
     return elem_nodes
@@ -355,6 +360,9 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
             nodes_by_pid[e.pid].extend(e.nodes)
     for e in state.solid_elems:
+        if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+            nodes_by_pid[e.pid].extend(e.nodes)
+    for e in state.tshell_elems:              # /BRICK too — see above
         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
             nodes_by_pid[e.pid].extend(e.nodes)
     for e in state.beam_elems:
@@ -818,6 +826,11 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
     for e in state.shell_elems:
         elem_nodes.update(e.nodes)
     for e in state.solid_elems:
+        elem_nodes.update(e.nodes)
+    # Thick shells are /BRICK in the emitted deck and carry real stiffness, so
+    # their nodes are "attached to an element" exactly like a hex's. The
+    # container is empty on every deck without *ELEMENT_TSHELL.
+    for e in state.tshell_elems:
         elem_nodes.update(e.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))

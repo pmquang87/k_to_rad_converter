@@ -339,7 +339,15 @@ covering them unlocks a large class of real models.
   `/PROP/BEAM` with the constants derived from the rule) — net-new capability,
   since dyna2rad neither parses the keyword nor implements the linkage. All four
   `*SECTION_*` keywords now read every card set under one header.
-  Still open in this family: `*SECTION_TSHELL ICOMP=1` → `/PROP/TYPE22`,
+  **Thick shells are done** as well: `*ELEMENT_TSHELL` (+ `_BETA` /
+  `_COMPOSITE`) → `/BRICK` with the connectivity copied 1:1 and `Icstr = 010`
+  carrying the thickness direction, and `*SECTION_TSHELL` → the three-way
+  `/PROP/TYPE20` / `TYPE21` / `TYPE22` split, plus `*PART_COMPOSITE_TSHELL` →
+  a real `/PROP/TYPE22` with per-ply `mat_IDi` / `ti/t` / `Phi_i` (dyna2rad
+  emits the thin-shell `/PROP/TYPE51` sandwich there and its own starter
+  refuses it on the bricks, ERROR 60 + 226). Starter-validated on the three r14
+  ELFORM decks and six hand-built TYPE21/TYPE22 decks.
+  Still open in this family:
   the `*INTEGRATION_BEAM` standard shapes needing three or more dimensions
   (`Isect ≥ 10` with `L3..L6` needs `/BEGIN ≥ 2024`, and k2rad writes 2022 —
   either bump the version declaration for the whole deck or expand the shape to

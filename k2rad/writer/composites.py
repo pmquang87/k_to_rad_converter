@@ -559,8 +559,16 @@ def _assign_composite_props(state: ConversionState) -> None:
     for mid in state.mat_modified_honeycomb:
         solid_only_laws[mid] = ("*MAT_MODIFIED_HONEYCOMB", "/MAT/LAW50")
 
+    tshell_pids = {e.pid for e in state.tshell_elems}
     for pid, part in sorted(state.parts.items()):
         if pid in state.composite_prop_ids:
+            continue
+        # THICK-SHELL parts belong to writer/tshell.py: their orthotropic /PROP
+        # is a TYPE21 or TYPE22, not the shell TYPE9/TYPE11/TYPE51 or the solid
+        # TYPE6 this pass allocates. Skipped BEFORE the element-kind ladder
+        # below, which would otherwise read a tshell-only part as "no shell or
+        # solid elements" and warn about a mesh that is perfectly fine.
+        if pid in tshell_pids:
             continue
         pc = state.part_composites.get(pid)
         is_composite_part = pc is not None and _layup_is_convertible(pc)
@@ -1283,8 +1291,17 @@ def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
     here instead, carrying the SUMMED layup thickness, so the fallback is a
     physically usable shell rather than a broken one.
     """
+    tshell_pids = {e.pid for e in state.tshell_elems}
     for pid, pc in sorted(state.part_composites.items()):
         if _layup_is_convertible(pc):
+            continue
+        # A *PART_COMPOSITE_TSHELL that really is thick-shell meshed has its own
+        # route — writer/tshell.py turns it into a /PROP/TYPE22 with real
+        # per-ply mat_ID/ti/t. Only the variants with nowhere to put a layup
+        # (a TSHELL spelling on a THIN-shell mesh, _IGA_SHELL) still fall back
+        # to a plain shell property here.
+        if pid in state.tshell_prop_ids or (pc.variant == "TSHELL"
+                                            and pid in tshell_pids):
             continue
         total = _layup_thickness(pc)
         secid = pid

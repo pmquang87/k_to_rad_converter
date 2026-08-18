@@ -13,6 +13,7 @@ from ..state import (
     SectionShell,
     SectionSolid,
     SectionBeam,
+    SectionTshell,
 )
 from ..topology import (
     TET10_MIDEDGE as _TET10_MIDEDGE,
@@ -1001,6 +1002,7 @@ def _screen_provisional_elements(state: ConversionState) -> None:
     dropped: Set[int] = set()
     shells = {e.eid: e for e in state.shell_elems if e.provisional}
     beams = {e.eid: e for e in state.beam_elems if e.provisional}
+    tshells = {e.eid: e for e in state.tshell_elems if e.provisional}
     for eid, e in shells.items():
         if not all(n in nodes for n in e.nodes) \
                 or len(_ordered_unique_nodes(e.nodes)) < 3:
@@ -1010,15 +1012,26 @@ def _screen_provisional_elements(state: ConversionState) -> None:
             dropped.add(eid)
         elif e.n3 and e.n3 not in nodes:
             e.n3 = 0
+    for eid, e in tshells.items():
+        # A thick shell needs both faces real: fewer than 6 distinct corners is
+        # below even the degenerate pentahedron (ERROR 245 zero volume), and an
+        # undefined node id is ERROR 78. A card 2b ply line is exactly what this
+        # catches when a deck's ply MIDs happen to look like node ids.
+        if not all(n in nodes for n in e.nodes) \
+                or len(_ordered_unique_nodes(e.nodes)) < 6:
+            dropped.add(eid)
     if dropped:
         state.shell_elems = [e for e in state.shell_elems
                              if not (e.provisional and e.eid in dropped)]
         state.beam_elems = [e for e in state.beam_elems
                             if not (e.provisional and e.eid in dropped)]
+        state.tshell_elems = [e for e in state.tshell_elems
+                              if not (e.provisional and e.eid in dropped)]
     for rec in state.provisional_elem_blocks:
         n_dropped = sum(1 for eid in rec.eids if eid in dropped)
         n_kept = len(rec.eids) - n_dropped
-        family = "/SHELL // SH3N" if rec.kind == "shell" else "/BEAM"
+        family = {"shell": "/SHELL // SH3N",
+                  "tshell": "/BRICK (thick shell)"}.get(rec.kind, "/BEAM")
         state.warn(
             f"*{rec.keyword}: option '{rec.option}' is not implemented — "
             f"{n_kept} element(s) were kept as plain {family} connectivity and "
@@ -1375,6 +1388,15 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     for e in state.solid_elems:
         solids_by_pid[e.pid].append(e)
 
+    # Thick shells are /BRICK too, but they get their OWN bucket: the solid
+    # bucket is split by distinct-node count into /TETRA4 // /TETRA10 //
+    # /BRICK, and a degenerate 6-node thick shell (written n1 n2 n3 n3 n5 n6 n7
+    # n7) must stay the collapsed 8-node form — ERROR 639 refuses the 6-node
+    # penta on a thick-shell property unless Isolid=15.
+    tshells_by_pid: Dict[int, List] = defaultdict(list)
+    for e in state.tshell_elems:
+        tshells_by_pid[e.pid].append(e)
+
     beams_by_pid: Dict[int, List[BeamElem]] = defaultdict(list)
     for e in state.beam_elems:
         beams_by_pid[e.pid].append(e)
@@ -1394,6 +1416,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # A composite / orthotropic part is repointed at its synthesized
         # property, because every one of those laws is orthotropic-class and the
         # isotropic section /PROP is rejected by the starter (ERROR 3047):
+        #   tshell     – a per-part thick-shell layup (*PART_COMPOSITE_TSHELL,
+        #                or a uniform *ELEMENT_TSHELL_COMPOSITE stack)
+        #                → /PROP/TYPE22. Claimed FIRST: the thick-shell prepass
+        #                runs before the composite one, which then skips the
+        #                part, so the two can never both fire.
         #   composite  – *PART_COMPOSITE layup, MAT_002/037/054/055/032
         #                (/PROP/TYPE51+TYPE19, TYPE11, TYPE9 or TYPE6)
         #   ortho      – *MAT_ANISOTROPIC_VISCOPLASTIC → LAW128 (TYPE9/TYPE6)
@@ -1401,7 +1428,8 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # The three are mutually exclusive by construction (each prepass skips
         # the parts the earlier ones claimed); the order here just makes the
         # precedence explicit.
-        prop_ref = (state.composite_prop_ids.get(pid)
+        prop_ref = (state.tshell_prop_ids.get(pid)
+                    or state.composite_prop_ids.get(pid)
                     or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
 
@@ -1580,6 +1608,37 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     lines.append(row)
                     _tick()
                 lines.append(HDR)
+        if pid in tshells_by_pid:
+            # *ELEMENT_TSHELL → /BRICK with the LS-DYNA n1..n8 order VERBATIM.
+            # LS-DYNA's n1-n4 = lower face / n5-n8 = upper face is exactly the
+            # pairing Radioss reads with Icstr=010 — scdtchk3.F takes the
+            # through-thickness edges as (1-5) (2-6) (3-7) (4-8) there, and
+            # scortho3.F builds the same S axis out of the connectivity — so
+            # the thickness direction survives with NO permutation. (Contrast
+            # /TETRA10, where a verbatim copy was the -30%-volume bug.)
+            #
+            # A degenerate 6-node thick shell arrives as the collapsed
+            # n1 n2 n3 n3 n5 n6 n7 n7 pattern and stays that way: written with
+            # trailing ZEROS instead it would be classified ISOLNOD=6 and then
+            # refused on any thick-shell property with Isolid != 15 —
+            # ERROR 639, whose own text names "n1 n2 n3 n4 n5 n6 n6 n5" as the
+            # alternative. The collapsed form is legal for both formulations.
+            if pid in solids_by_pid:
+                state.warn(
+                    f"PART {pid} holds BOTH *ELEMENT_SOLID and *ELEMENT_TSHELL "
+                    "elements. They share the /BRICK card but need different "
+                    "properties — a solid wants /PROP/SOLID, a thick shell "
+                    "/PROP/TYPE20|21|22 — and a /PART carries exactly one, so "
+                    "the thick shells run on the property the section route "
+                    "chose and one of the two groups is wrong. Split them into "
+                    "separate *PARTs.")
+            lines.append(f"/BRICK/{pid}")
+            for e in tshells_by_pid[pid]:
+                row = _i(e.eid)
+                for n in e.nodes[:8]:
+                    row += _i(n)
+                lines.append(row)
+            lines.append(HDR)
         if pid in beams_by_pid:
             lines.append(f"/BEAM/{pid}")
             for e in beams_by_pid[pid]:
@@ -1619,6 +1678,13 @@ def _auto_section_solid(secid: int) -> SectionSolid:
     an undefined section to the SAME formulation the property emit will use —
     ELFORM 1, the under-integrated structural hex."""
     return SectionSolid(secid, f"AutoPropSolid_{secid}", 1)
+
+
+def _auto_section_tshell(secid: int) -> SectionTshell:
+    """The placeholder *SECTION_TSHELL for a thick-shell *PART whose SECID has
+    no card. Re-exported from writer/tshell.py so the two cannot drift."""
+    from .tshell import auto_section_tshell
+    return auto_section_tshell(secid)
 
 
 def _auto_section_shell(secid: int) -> SectionShell:
@@ -1666,6 +1732,7 @@ def _element_free_part_ids(state: ConversionState,
     """
     meshed = ({e.pid for e in state.shell_elems}
               | {e.pid for e in state.solid_elems}
+              | {e.pid for e in state.tshell_elems}
               | {e.pid for e in state.beam_elems}
               | {e.pid for e in state.discrete_elems})
     # Parts the normal /PART emission skips: their /PART *and* /PROP come from
@@ -1678,12 +1745,13 @@ def _element_free_part_ids(state: ConversionState,
     # A part repointed at a synthesized composite / orthotropic / per-part
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
-             | set(state.hourglass_prop_ids))
+             | set(state.hourglass_prop_ids) | set(state.tshell_prop_ids))
     # Any section id already defined resolves on its own — including one shared
     # with a meshed sibling part, and including the auto-created sections the
     # caller has just filled in.
     defined = (set(state.sec_shells) | set(state.sec_solids)
-               | set(state.sec_beams) | set(state.sec_discrete))
+               | set(state.sec_beams) | set(state.sec_discrete)
+               | set(state.sec_tshells))
     return {pid for pid in state.parts
             if pid not in meshed and pid not in connectors and pid not in split
             and pid in part_secids and part_secids[pid] not in defined}
@@ -2177,6 +2245,17 @@ def _make_properties(state: ConversionState) -> List[str]:
         secid = part_secids.get(e.pid)
         if secid and secid not in state.sec_beams:
             missing_beams.add(secid)
+    # A thick-shell *PART with no *SECTION_TSHELL still needs a property: its
+    # /BRICK on a /PROP/SOLID would be starter ERROR 3047 the moment the
+    # material is orthotropic, and would carry no through-thickness layers
+    # either way. A part repointed at its own layup /PROP/TYPE22 does not.
+    missing_tshells: Set[int] = set()
+    for e in state.tshell_elems:
+        if e.pid in state.tshell_prop_ids:
+            continue
+        secid = part_secids.get(e.pid)
+        if secid and secid not in state.sec_tshells:
+            missing_tshells.add(secid)
 
     for ms in missing_shells:
         state.sec_shells[ms] = _auto_section_shell(ms)
@@ -2184,6 +2263,18 @@ def _make_properties(state: ConversionState) -> List[str]:
         state.sec_solids[ms] = _auto_section_solid(ms)
     for ms in missing_beams:
         state.sec_beams[ms] = SectionBeam(ms, f"AutoPropBeam_{ms}", 2)
+    if missing_tshells:
+        for ms in sorted(missing_tshells):
+            state.sec_tshells[ms] = _auto_section_tshell(ms)
+        state.warn(
+            "*ELEMENT_TSHELL element(s) reference section id(s) "
+            + ", ".join(str(s) for s in sorted(missing_tshells))
+            + " that no *SECTION_TSHELL card defines, so a PLACEHOLDER "
+            "thick-shell property was created for each (ELFORM 1 → Isolid=15, "
+            "NIP 2 — LS-DYNA's own defaults). Without it the /PART would point "
+            "at a property id nothing emits, which is starter ERROR 178 and "
+            "kills the whole run. Add the *SECTION_TSHELL if the deck was "
+            "meant to have one.")
 
     # A *PART with NO elements is invisible to every loop above (they all walk
     # the elements), but it still gets a /PART card — pointing at a property id
@@ -2375,6 +2466,15 @@ def _make_properties(state: ConversionState) -> List[str]:
         lines += _emit_prop_beam(sec)
     _warn_beam_type3_material(state, part_secids, connector_beam_pids,
                               type3_secids)
+    # Thick shells: /PROP/TYPE20 (iso) / TYPE21 (ortho) / TYPE22 (composite),
+    # under the SECID verbatim, plus one synthesized TYPE22 per per-part layup.
+    # Local import: writer/tshell.py reuses the #90 AOPT machinery out of
+    # writer/composites.py, which imports THIS module at load time, so a
+    # top-level import here would close the cycle (same rule as
+    # _emit_prop_type6, which composites.py imports locally for the same
+    # reason, in the opposite direction).
+    from .tshell import _make_tshell_properties
+    lines += _make_tshell_properties(state, istrain)
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
     lines += _emit_ortho_props(state, istrain)
@@ -2576,11 +2676,19 @@ def _assign_ortho_props(state: ConversionState) -> None:
     mat_mids = set(state.mat_aniso_visco)
     shell_pids = {e.pid for e in state.shell_elems}
     solid_pids = {e.pid for e in state.solid_elems}
+    tshell_pids = {e.pid for e in state.tshell_elems}
     for pid, part in sorted(state.parts.items()):
         if part.mid not in mat_mids or pid in state.ortho_prop_ids:
             continue
         # A composite part already owns a dedicated orthotropic /PROP.
         if pid in state.composite_prop_ids:
+            continue
+        # So does a THICK-SHELL part: /MAT/LAW128 is PROP_SOLID class 2, which
+        # /PROP/TYPE21 and TYPE22 accept and /PROP/TYPE20 rejects, so the
+        # thick-shell section route already picks the orthotropic property for
+        # it. Skipped before the element-kind test below, which would otherwise
+        # tell the user their thick shells are not a mesh.
+        if pid in tshell_pids:
             continue
         if pid not in shell_pids and pid not in solid_pids:
             state.warn(

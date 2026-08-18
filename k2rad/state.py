@@ -55,6 +55,73 @@ class SolidElem:
 
 
 @dataclass
+class TshellElem:
+    """*ELEMENT_TSHELL — an 8-node THICK SHELL, emitted as a Radioss /BRICK.
+
+    Kept in a container of its own rather than on ``solid_elems``, for two
+    independent reasons. The /BRICK writer splits a solid part by DISTINCT-node
+    count (4 → /TETRA4, 10 → /TETRA10, else /BRICK), which would turn a
+    degenerate 6-node thick shell — written ``n1 n2 n3 n3 n5 n6 n7 n7`` — into
+    something it is not; and the property a thick shell needs is
+    /PROP/TYPE20|21|22, never /PROP/SOLID (starter ERROR 3047 the moment the
+    material is orthotropic, and no through-thickness layers either way).
+
+    ``nodes`` is the LS-DYNA n1..n8 order VERBATIM. LS-DYNA's convention is
+    "nodes n1 to n4 define the lower surface, and nodes n5 to n8 define the
+    upper surface" (Vol I R16 p.2703 Remark 1), and with ``Icstr=010`` Radioss
+    reads the through-thickness pairs as (1-5) (2-6) (3-7) (4-8)
+    (``starter/source/elements/thickshell/solidec/scdtchk3.F:84-246``, and
+    ``scortho3.F`` builds the same S axis from the connectivity) — so the two
+    conventions coincide and NO permutation is needed. dyna2rad copies the
+    connectivity verbatim as well (``convertelements.cxx:146-149``).
+
+    ``beta`` is the *ELEMENT_TSHELL_BETA orthotropy offset angle in DEGREES.
+    /BRICK has NO per-element angle column at all (contrast /SHELL's Phi), so
+    the writer folds a value shared by a whole section into that property's
+    angle slot (TYPE21 ``MAT_BETA`` / TYPE22 ``Prop_phi``) and warn-drops a
+    non-uniform one — see writer/tshell.py ``_fold_tshell_beta``.
+    """
+    eid: int
+    pid: int
+    nodes: List[int]   # 8 node IDs, LS-DYNA order, bottom face first
+    beta: float = 0.0
+    #: See ShellElem.provisional — set for an element recovered by CONTENT from
+    #: an *ELEMENT_TSHELL block whose option suffix k2rad does not model.
+    provisional: bool = False
+
+
+@dataclass
+class TshellLayup:
+    """A per-PART thick-shell layup → one /PROP/TYPE22 (TSH_COMP).
+
+    Two sources, both of which state a REAL per-ply material and thickness (so
+    neither is the ``*SECTION_TSHELL`` ICOMP path, whose only per-layer datum is
+    the angle):
+
+    * ``*PART_COMPOSITE_TSHELL`` card 5a/5b — ``MID THICK B TMID`` per layer.
+    * ``*ELEMENT_TSHELL_COMPOSITE`` card 2b — ``MID THICK B`` per integration
+      point, per ELEMENT. Radioss has no per-element layup, so this is only
+      promoted when every thick shell on the part declares the SAME stack;
+      otherwise the writer warn-drops it and the part keeps its section
+      property.
+
+    LS-DYNA scales the THICK values to the element geometry in both cases ("For
+    thick shells, the total thickness is obtained from the positions of the
+    nodes on the top and bottom surfaces. In this case, the THICKi are also
+    scaled to conform to the geometry", Vol I R16 p.3529), which is exactly
+    /PROP/TYPE22's relative ``ti/t`` semantic — so the mapping is
+    ``ti/t = THICKi / sum(THICKj)`` with no unit conversion.
+    """
+    pid: int
+    title: str = ""
+    source: str = ""            # the keyword the layup came from
+    elform: int = 0
+    shrf: float = 0.0
+    tshear: int = 0
+    plies: List["CompositePly"] = field(default_factory=list)
+
+
+@dataclass
 class BeamElem:
     """*ELEMENT_BEAM (+ _ORIENTATION).
 
@@ -92,7 +159,7 @@ class ProvisionalElemBlock:
     drops the candidates the node table does not back.
     """
     keyword: str
-    kind: str                       # "shell" | "beam"
+    kind: str                       # "shell" | "beam" | "tshell"
     option: str                     # the unmodelled suffix, e.g. "_COMPOSITE"
     eids: List[int] = field(default_factory=list)
     n_unparsed: int = 0
@@ -737,6 +804,48 @@ class IntegrationShell:
     esop: int = 0
     failopt: int = 0
     points: List[IntegrationPoint] = field(default_factory=list)
+
+
+@dataclass
+class SectionTshell:
+    """*SECTION_TSHELL → /PROP/TYPE20 (TSHELL) | TYPE21 (TSH_ORTH) | TYPE22
+    (TSH_COMP).
+
+    Card 1 is ``SECID ELFORM SHRF NIP PROPT QR ICOMP TSHEAR`` (8 x I10,
+    ``Keyword971/PROPERTY/SectTShl.cfg:141``); card 2 is the ICOMP=1 angle
+    block, eight ``B_i`` per card over ``ceil(NIP/8)`` cards. There is NO
+    thickness field anywhere on this keyword — a thick shell's thickness is the
+    distance between its n1-n4 and n5-n8 faces, i.e. pure mesh.
+
+    ``elform`` defaults to LS-DYNA's own 1 for a blank field, NOT to 0. That is
+    a deliberate divergence from dyna2rad, which reads a blank as 0 and lands on
+    the ``else`` of its ``elform == 1 ? 15 : 14`` test — giving a deck that
+    asked for the DEFAULT one-point form the FULL-integration HA8 instead.
+
+    ``nip`` likewise defaults to 2 ("EQ.0: set to 2 integration points", Vol I
+    R16 p.3717) rather than dyna2rad's 0, which produces ``Inpts_S`` clamped to
+    1 against a ply list of length 0 → starter ERROR 675.
+
+    ``irid`` is ``|QR|`` when the QR cell is negative (an *INTEGRATION_SHELL
+    reference, Vol I R16 p.29-1). Radioss thick shells take no user quadrature
+    rule, so it is warn-dropped — but recorded, so the warning can name it.
+    """
+    secid: int
+    title: str = ""
+    elform: int = 1
+    shrf: float = 0.0
+    nip: int = 2
+    propt: float = 0.0
+    qr: float = 0.0
+    icomp: int = 0
+    tshear: int = 0
+    #: The card-2 B_i material angles in DEGREES, bottom layer first, one per
+    #: through-thickness integration point. Empty unless ICOMP=1.
+    betas: List[float] = field(default_factory=list)
+    irid: int = 0
+    #: True when the deck left ELFORM blank (so the divergence note above can
+    #: be reported per section rather than guessed at from the value 1).
+    elform_blank: bool = False
 
 
 @dataclass
@@ -1642,6 +1751,13 @@ class PartComposite:
     thshel: int = 0
     plies: List[CompositePly] = field(default_factory=list)
     variant: str = ""    # "", "TSHELL", "IGA_SHELL"
+    # Card 3b field 8, _TSHELL variant ONLY (the thin-shell card 3a has THSHEL
+    # there instead): 0 parabolic / 1 constant transverse-shear distribution.
+    # Radioss thick shells are always parabolic, so it is warn-dropped — but it
+    # is READ, because the *SECTION_TSHELL path reports the same field and
+    # dropping it silently on one route while naming it on the other is worse
+    # than either.
+    tshear: int = 0
     long_form: bool = False
     irpl: int = 0        # optional OPTCARD: 103 = 3-point Simpson per layer
     optt: float = 0.0    # _CONTACT contact thickness
@@ -4688,6 +4804,9 @@ class ConversionState:
     nodes: Dict[int, NodeData] = field(default_factory=dict)
     shell_elems: List[ShellElem] = field(default_factory=list)
     solid_elems: List[SolidElem] = field(default_factory=list)
+    # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not
+    # solid_elems — see TshellElem.
+    tshell_elems: List[TshellElem] = field(default_factory=list)
     beam_elems: List[BeamElem] = field(default_factory=list)
     # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
     discrete_elems: List[DiscreteElem] = field(default_factory=list)
@@ -4723,6 +4842,10 @@ class ConversionState:
     # layer thicknesses and materials of a layered /PROP/TYPE11.
     integration_shells: Dict[int, IntegrationShell] = field(default_factory=dict)
     sec_solids: Dict[int, SectionSolid] = field(default_factory=dict)
+    # *SECTION_TSHELL → /PROP/TYPE20|21|22, emitted under the SECID verbatim
+    # (the /PROP/TYPE43 shape — no /PART repoint). A FOURTH SECID-keyed /PROP
+    # namespace, so next_prop_id() guards against it too.
+    sec_tshells: Dict[int, SectionTshell] = field(default_factory=dict)
     sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
     # *INTEGRATION_BEAM user cross-section integration rules, keyed by IRID.
     # Bound from a *SECTION_BEAM whose card-1 field 4 (QR/IRID) is negative;
@@ -4759,6 +4882,25 @@ class ConversionState:
     # _fold_element_beta prepass, which also zeroes the elements' own beta so
     # the deck states the angle exactly once.
     part_beta_fold: Dict[int, float] = field(default_factory=dict)
+    # ── Thick shells ───────────────────────────────────────────
+    # eid → the *ELEMENT_TSHELL_COMPOSITE per-element ply stack (card 2b).
+    # Read so the writer can see whether a part's thick shells agree on one
+    # layup — the only shape a Radioss per-PART /PROP/TYPE22 can express.
+    tshell_elem_plies: Dict[int, List["CompositePly"]] = field(
+        default_factory=dict)
+    # pid → the per-PART thick-shell layup that becomes a /PROP/TYPE22, from
+    # *PART_COMPOSITE_TSHELL or a uniform *ELEMENT_TSHELL_COMPOSITE stack.
+    # Filled by the _resolve_tshells prepass (writer/tshell.py).
+    tshell_layups: Dict[int, TshellLayup] = field(default_factory=dict)
+    # pid → the synthesized /PROP/TYPE22 id for such a layup. Same /PART-repoint
+    # mechanism as composite_prop_ids, and claimed FIRST among the thick-shell
+    # routes: a part in here ignores its *SECTION_TSHELL property entirely.
+    tshell_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # secid → the *ELEMENT_TSHELL_BETA angle (degrees) FOLDED into that
+    # section's property angle slot, because /BRICK has no per-element angle
+    # column. Only set when every thick shell on the section agrees; the
+    # elements' own beta is zeroed so the deck states the angle exactly once.
+    tshell_beta_fold: Dict[int, float] = field(default_factory=dict)
 
     # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
     # HourglassDef; consumed by the per-part hourglass /PROP overlay.
@@ -5364,10 +5506,13 @@ class ConversionState:
 
         The ids of the synthesized ortho / hourglass properties come from
         next_id() themselves and are therefore unique by construction; only the
-        SECID-keyed properties can clash."""
+        SECID-keyed properties can clash. *SECTION_TSHELL joined that list with
+        the thick-shell batch — /PROP/TYPE20|21|22 is emitted under the SECID
+        verbatim too, so a deck with a *SECTION_TSHELL at or above 90001 would
+        otherwise collide with a synthesized ply/joint/spring property."""
         prop_id = self.next_id()
         while (prop_id in self.sec_shells or prop_id in self.sec_solids
-               or prop_id in self.sec_beams):
+               or prop_id in self.sec_beams or prop_id in self.sec_tshells):
             prop_id = self.next_id()
         return prop_id
 

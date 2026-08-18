@@ -458,6 +458,7 @@ def _off_part(b: Block, offsets: Dict[str, int], warn) -> None:
 # way _title_offset mirrors handlers._title_offset.
 _SHELL_OPT_TOKENS = frozenset({"THICKNESS", "BETA", "MCID", "OFFSET", "DOF"})
 _BEAM_OPT_TOKENS = frozenset({"ORIENTATION", "OFFSET"})
+_TSHELL_OPT_TOKENS = frozenset({"BETA", "COMPOSITE"})
 
 
 def _elem_opts(keyword: str, base: str, known: frozenset):
@@ -530,6 +531,62 @@ def _off_element_beam(b: Block, offsets: Dict[str, int], warn) -> None:
         if new is not None:
             b.raw[i] = new
         i += step
+
+
+def _off_tshell_ply_card(line: str) -> bool:
+    """True when *line* is an *ELEMENT_TSHELL_COMPOSITE card 2b (mirrors
+    handlers._tshell_ply_card's positional test): fields 4 and 8 blank or zero.
+
+    Its MID columns hold MATERIAL ids, which *INCLUDE_TRANSFORM offsets with
+    IDMOFF — a bucket ``_rewrite_line`` would never apply from the connectivity
+    mods — so the card is both strided over AND rewritten below."""
+    f = _fields(line, 8, 10)
+    if not f or not str(f[0]).strip():
+        return False
+    for gap in (3, 7):
+        cell = str(f[gap]).strip() if len(f) > gap else ""
+        if cell and to_float(cell, float("nan")) != 0.0:
+            return False
+    return True
+
+
+def _off_element_tshell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *ELEMENT_TSHELL spelling — the same shape as _off_element_shell.
+
+    Card 1 is ``EID PID N1..N8`` at I8. The _BETA card 2a holds no id (five F16
+    cells, only BETA defined) but must be STRIDDEN; the _COMPOSITE card 2b holds
+    two MATERIAL ids (IDMOFF) in fields 1 and 5, so it is rewritten at w=10 —
+    the only *ELEMENT_ card in the converter that carries a *MAT reference.
+
+    Mirrors handlers.handle_element_tshell's own walk rather than importing it,
+    the way _SHELL_OPT_TOKENS mirrors the element-option grammar."""
+    mods = [(0, "e"), (1, "p")] + [(i, "n") for i in range(2, 10)]
+    opts, unknown = _elem_opts(b.keyword, "ELEMENT_TSHELL", _TSHELL_OPT_TOKENS)
+    if unknown:
+        for k, line in enumerate(b.raw):
+            if _is_elem_conn_card(line, 6):
+                new = _rewrite_line(line, mods, offsets, w=8)
+                if new is not None:
+                    b.raw[k] = new
+        return
+    i = 0
+    while i < len(b.raw):
+        f = [x for x in _fields(b.raw[i], 10, 8) if x]
+        if len(f) < 6:
+            i += 1
+            continue
+        new = _rewrite_line(b.raw[i], mods, offsets, w=8)
+        if new is not None:
+            b.raw[i] = new
+        i += 1
+        if "BETA" in opts and i < len(b.raw):
+            i += 1                      # card 2a: no ids, but it IS a card
+        if "COMPOSITE" in opts:
+            while i < len(b.raw) and _off_tshell_ply_card(b.raw[i]):
+                new = _rewrite_line(b.raw[i], [(0, "m"), (4, "m")], offsets)
+                if new is not None:
+                    b.raw[i] = new
+                i += 1
 
 
 def _off_element_solid(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -1033,6 +1090,41 @@ def _off_section_solid(b: Block, offsets: Dict[str, int], warn) -> None:
             if not f3:
                 break
             idx += 1 + max(_geti(f3, 0), 0) + (max(_geti(f3, 4), 0) + 7) // 8
+
+
+def _off_section_tshell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_TSHELL card set: SECID (IDROFF).
+
+    The ICOMP=1 angle block is card **2** here, not card 3 — this keyword has no
+    thickness card — so the stride is ``1 + ceil(NIP/8)``, and the angle cards
+    are consumed BY COUNT (an all-zero angle card is written blank, and skipping
+    it as whitespace would offset the NEXT set's card 1 as if it were data).
+    Card 1 field 6 (QR) can hold a NEGATED *INTEGRATION_SHELL reference exactly
+    as *SECTION_SHELL's does, so it takes the sign-preserving rewriter too."""
+    per_set_title = _title_offset(b)
+    raw = b.raw
+    idx = 0
+    roff = offsets.get("r", 0)
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:                       # one 80a title card per set
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)      # SECID
+        if new is not None:
+            raw[idx] = new
+        new = _rewrite_neg_ref(raw[idx], 5, roff)               # -QR/IRID
+        if new is not None:
+            raw[idx] = new
+        nip = abs(_geti(f1, 3))
+        idx += 1
+        if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
+            idx += ((nip if nip > 0 else 2) + 7) // 8
 
 
 def _off_section_beam(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -1713,6 +1805,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     # unlisted spelling is offset rather than warned about.
     "ELEMENT_SHELL": _off_element_shell,
     "ELEMENT_SOLID": _off_element_solid,
+    # *ELEMENT_TSHELL — the _BETA/_COMPOSITE spellings come from the same
+    # grammar handlers.py uses, just below this dict, and the family prefix
+    # catches anything outside it.
+    "ELEMENT_TSHELL": _off_element_tshell,
     "ELEMENT_BEAM": _off_element_beam,
     # *ELEMENT_PLOTEL: EID N1 N2 (I8) — no PID column.
     "ELEMENT_PLOTEL": {"data": (0, [(0, "e"), (1, "n"), (2, "n")]), "w": 8},
@@ -1739,6 +1835,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     # *SECTION_BEAM carries the second NEGATED back-reference this converter
     # meets: card-1 field 4, QR/IRID.
     "SECTION_SOLID": _off_section_solid,
+    # *SECTION_TSHELL is a card-SET keyword too, and its ICOMP=1 angle block
+    # sits one card EARLIER than *SECTION_SHELL's (no thickness card).
+    "SECTION_TSHELL": _off_section_tshell,
     "SECTION_BEAM": _off_section_beam,
     "SECTION_DISCRETE": _off_section_discrete,
     # *INTEGRATION_BEAM: IRID shares the *SECTION id space (IDROFF, bucket "r"),
@@ -2226,6 +2325,8 @@ for _o1 in ("", "_THICKNESS"):
 for _o1 in ("", "_OFFSET"):
     for _o2 in ("", "_ORIENTATION"):
         _OFFSET_SPECS[f"ELEMENT_BEAM{_o1}{_o2}"] = _off_element_beam
+for _o1 in ("", "_BETA", "_COMPOSITE"):
+    _OFFSET_SPECS[f"ELEMENT_TSHELL{_o1}"] = _off_element_tshell
 del _o1, _o2, _o3, _o4
 
 # *PART_{OPTION1..6} (3588 spellings) and *CONSTRAINED_NODAL_RIGID_BODY_{SPC,
@@ -2257,7 +2358,12 @@ del _kw
 #: rewrite a composite PLY card as if it were a part data card. Letting them fall
 #: through to the "keyword has no offset map" warning is right: the handler side
 #: warn-skips them too, so no id of theirs is read anywhere.
+#: ELEMENT_TSHELL comes FIRST for the same reason it does in
+#: handlers._PREFIX_HANDLERS — the match is on a token boundary, so it is not an
+#: ELEMENT_SHELL spelling and needs its own row (its base card is 10 fields, not
+#: 5, and its option cards are laid out differently).
 _ELEMENT_PREFIX_SPECS = (
+    ("ELEMENT_TSHELL", _off_element_tshell),
     ("ELEMENT_SHELL", _off_element_shell),
     ("ELEMENT_BEAM", _off_element_beam),
     ("ELEMENT_PLOTEL", _OFFSET_SPECS["ELEMENT_PLOTEL"]),

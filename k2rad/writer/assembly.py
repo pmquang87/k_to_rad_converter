@@ -52,6 +52,7 @@ from .composites import (
     _resolve_icomp_sections,
     _resolve_integration_shells,
 )
+from .tshell import _resolve_tshells
 from .contacts import (
     _make_force_transducers,
     _make_general_interfaces,
@@ -616,7 +617,7 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
 # though `_make_discrete_springs` warns per part on its own — this stays the one
 # place that answers "did the conversion drop any of my mesh?", and it keeps
 # answering it if that emitter is ever short-circuited or reordered.
-_ORPHAN_ELEM_KINDS = ("shell", "solid", "beam", "discrete")
+_ORPHAN_ELEM_KINDS = ("shell", "solid", "tshell", "beam", "discrete")
 
 # Cap on the PIDs spelled out in the message: a deck missing a whole *INCLUDE
 # can orphan hundreds of parts, and one unreadable 10-kB warning line helps
@@ -629,6 +630,7 @@ def _warn_orphan_elements(state: ConversionState) -> None:
     orphans: Dict[int, Dict[str, int]] = {}
     for kind, elems in (("shell", state.shell_elems),
                         ("solid", state.solid_elems),
+                        ("tshell", state.tshell_elems),
                         ("beam", state.beam_elems),
                         ("discrete", state.discrete_elems)):
         for e in elems:
@@ -826,6 +828,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # /PROP id. Both run BEFORE _assign_ortho_props (which skips the parts
     # claimed here), before parts (repoint) and properties (emit) — and
     # _resolve_composites also before _make_functions, which emits the curves.
+    # Thick shells: fold the *ELEMENT_TSHELL_BETA angles into the properties
+    # that have an angle slot, resolve the per-part layups
+    # (*PART_COMPOSITE_TSHELL, a uniform *ELEMENT_TSHELL_COMPOSITE stack) and
+    # claim a /PROP id for each. BEFORE _assign_composite_props, which skips
+    # every thick-shell part: a *PART_COMPOSITE_TSHELL must reach /PROP/TYPE22
+    # and not the thin-shell /PROP/TYPE51 sandwich (which the starter refuses
+    # on bricks, ERROR 60 + 226 — dyna2rad's own defect). AFTER
+    # _screen_provisional_elements, so the fold sees the final element list.
+    _resolve_tshells(state)
     _resolve_composites(state)
     _assign_composite_props(state)
     # Bind every *SECTION_SHELL QR/IRID reference to its *INTEGRATION_SHELL
