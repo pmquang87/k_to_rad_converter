@@ -4070,6 +4070,9 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
         for e in state.solid_elems:
             if e.pid == pid:
                 nids.update(e.nodes)
+        for e in state.tshell_elems:        # /BRICK — same as an ordinary hex
+            if e.pid == pid:
+                nids.update(e.nodes)
         for e in state.beam_elems:
             if e.pid == pid:
                 nids.update((e.n1, e.n2))
@@ -5419,6 +5422,8 @@ def _make_modal_dummy_cload(state: ConversionState,
         elem_nodes.update(e.nodes)
     for e in state.solid_elems:
         elem_nodes.update(e.nodes)
+    for e in state.tshell_elems:        # /BRICK — a real structural node
+        elem_nodes.update(e.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2))
     constrained: Set[int] = set()
@@ -5486,15 +5491,19 @@ def _damping_part_nodes(state: ConversionState, pids: Set[int],
                         rigid_nodes: Set[int]) -> List[int]:
     """Deformable nodes carried by *pids*, rigid-body nodes excluded.
 
-    Only shells and solids are scanned — the same scope ``_make_damping`` has
-    always used. Beam / spring / SPH nodes are therefore NOT damped by a
-    part-scoped /DAMP; a deck whose damped part is built only from those
+    Shells, solids and THICK SHELLS are scanned — the same scope
+    ``_make_damping``'s own node sets use. /DAMP is node-based Rayleigh
+    damping with no element-type restriction, so a thick shell's nodes are
+    damped exactly like a brick's. Beam / spring / SPH nodes are NOT damped by
+    a part-scoped /DAMP; a deck whose damped part is built only from those
     element families gets an empty group and a warning instead of a card.
     """
     return sorted(
         {n for e in state.shell_elems if e.pid in pids
          for n in e.nodes if n > 0 and n not in rigid_nodes}
         | {n for e in state.solid_elems if e.pid in pids
+           for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for e in state.tshell_elems if e.pid in pids
            for n in e.nodes if n > 0 and n not in rigid_nodes}
     )
 
@@ -5603,12 +5612,24 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
             f" - if waves aren't damped enough, try beta ~ 1e-7 to 1e-6."
         )
 
-    # Resolve target node set
+    # Resolve target node set.
+    #
+    # THICK SHELLS count. /DAMP is NODE-based Rayleigh damping — the engine adds
+    # -alpha*M*v - beta*K*v over the nodes of a /GRNOD, with no element-type
+    # restriction — so a thick shell's nodes are damped exactly like a brick's.
+    # (Contrast /DAMP/FREQUENCY_RANGE, which enters as a Maxwell/Prony viscous
+    # stress INSIDE the material law and really does reach only shells and
+    # solids; that path's own warning stays right.) Before the thick-shell batch
+    # this was moot because *ELEMENT_TSHELL was never parsed, and the r14
+    # ex_15 decks reported "*DAMPING_*: no target deformable nodes found - /DAMP
+    # not emitted" purely because their whole mesh was missing.
     if target_pids:
         target_nodes = sorted(
             {n for e in state.shell_elems if e.pid in target_pids
              for n in e.nodes if n > 0 and n not in rigid_nodes}
             | {n for e in state.solid_elems if e.pid in target_pids
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.tshell_elems if e.pid in target_pids
                for n in e.nodes if n > 0 and n not in rigid_nodes}
         )
         grnod_title = f"damping_target_pids_{'_'.join(str(p) for p in sorted(target_pids))}"
@@ -5620,6 +5641,9 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
              if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
              for n in e.nodes if n > 0 and n not in rigid_nodes}
             | {n for e in state.solid_elems
+               if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+               for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for e in state.tshell_elems
                if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
                for n in e.nodes if n > 0 and n not in rigid_nodes}
         )
@@ -6317,6 +6341,13 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     for e in state.shell_elems:
         elem_nodes.update(e.nodes)
     for e in state.solid_elems:
+        elem_nodes.update(e.nodes)
+    # THICK SHELLS carry stiffness like any other /BRICK, so their nodes are
+    # NOT free reference nodes. Leaving them out put a /BCS 111 111 on every
+    # node of the mesh — the starter accepts that (a /BCS on real nodes is
+    # legal, 0 ERRORS) and the model then simply cannot move. Every r14
+    # *ELEMENT_TSHELL deck is implicit, so this guard sees them all.
+    for e in state.tshell_elems:
         elem_nodes.update(e.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))

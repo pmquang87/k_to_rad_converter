@@ -416,7 +416,11 @@ def _surface_triangles(state: ConversionState, pids: Iterable[int]
     # Solid boundary faces: keep a representative element+face for each face key
     # the first time it is seen, mark it None when seen again (interior/shared).
     seen: Dict[Tuple[int, ...], Optional[Tuple[List[int], Tuple[int, ...]]]] = {}
-    for e in state.solid_elems:
+    # Thick shells are 8-node /BRICK, so they contribute the same six quad
+    # faces an ordinary hex does. Leaving them out gave a thick-shell contact
+    # side an EMPTY surface, and --auto-gapmin then had no clearance to
+    # measure. The container is empty on every deck without *ELEMENT_TSHELL.
+    for e in list(state.solid_elems) + list(state.tshell_elems):
         if e.pid not in pidset:
             continue
         nds = e.nodes
@@ -579,7 +583,8 @@ def _min_node_to_segment(state: ConversionState, secondary_node_ids: Iterable[in
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
-    """pid → set of node ids used by that part's shell + solid elements.
+    """pid → set of node ids used by that part's shell, solid and thick-shell
+    elements.
 
     Built once and shared across all contacts (avoids re-scanning the element
     lists per side — important on a large TET10 mesh)."""
@@ -587,6 +592,8 @@ def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
     for e in state.shell_elems:
         m.setdefault(e.pid, set()).update(n for n in e.nodes if n > 0)
     for e in state.solid_elems:
+        m.setdefault(e.pid, set()).update(n for n in e.nodes if n > 0)
+    for e in state.tshell_elems:            # /BRICK — see _surface_triangles
         m.setdefault(e.pid, set()).update(n for n in e.nodes if n > 0)
     return m
 

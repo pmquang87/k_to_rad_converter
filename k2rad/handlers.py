@@ -18,7 +18,8 @@ from .parser import (
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
-    PartData, SectionShell, SectionSolid, SectionBeam,
+    TshellElem,
+    PartData, SectionShell, SectionSolid, SectionTshell, SectionBeam,
     IntegrationShell, IntegrationPoint,
     IntegrationBeam, IntegrationBeamPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
@@ -256,6 +257,11 @@ def handle_node(block: Block, state: ConversionState) -> None:
 # the mesh for every spelling, known or unknown (see dispatch()).
 _SHELL_SUFFIX_TOKENS = frozenset({"THICKNESS", "BETA", "MCID", "OFFSET", "DOF"})
 _BEAM_SUFFIX_TOKENS = frozenset({"ORIENTATION", "OFFSET"})
+# *ELEMENT_TSHELL_{BETA|COMPOSITE} (Vol I R16 pp.2703-2707). Neither option has
+# a CFG entry at all — Keyword971/ELEMENTS/tshell.cfg declares ONLY the bare
+# ``EID PID N1..N8`` card — so dyna2rad cannot even read the header and drops
+# the whole block, mesh included. k2rad walks both card layouts.
+_TSHELL_SUFFIX_TOKENS = frozenset({"BETA", "COMPOSITE"})
 
 #: Option tokens whose block is not a list of finite elements at all, so the
 #: "keep whatever parses as connectivity" fallback must NOT run on it.
@@ -537,6 +543,290 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
             pid = to_int(f[1])
             nodes = [to_int(f[i]) for i in range(2, min(10, len(f)))]
             state.solid_elems.append(SolidElem(eid, pid, nodes))
+
+
+def _parse_tshell_base(line: str):
+    """One *ELEMENT_TSHELL connectivity card → (eid, pid, nodes, n_given) or
+    None. *nodes* is always eight ids; *n_given* is how many the card actually
+    named, so the caller can report a short card.
+
+    Card 1 is ``EID PID N1..N8``, ten I8 fields
+    (``Keyword971/ELEMENTS/tshell.cfg:73``). A thick shell is ALWAYS eight-slot
+    in LS-DYNA: the 6-node pentahedron is entered by REPEATING ids rather than
+    blanking slots — "For a pentahedron, nodes n1, n2, n3 form the lower
+    triangular surface and the eight variables N1 to N8 should be defined using
+    nodes n1, n2, n3, n3, n4, n5, n6, n6, respectively. Note that node n3 and
+    node n6 are each repeated" (Vol I R14 p.19-139 Remark 1). A conforming deck
+    therefore never reaches the padding below.
+
+    A SHORT card (six ids given, or two trailing zeros) is not a form LS-DYNA
+    defines, but it has one obvious reading — the pentahedron's own six nodes —
+    so it is expanded into exactly the manual's 8-slot spelling
+    ``n1 n2 n3 n3 n4 n5 n6 n6``. Padding by repeating the LAST id instead was a
+    silent 50 % volume error: it produces ``n1 n2 n3 n4 n5 n6 n6 n6``, whose
+    upper face has collapsed to a point, and the starter accepts it with 0
+    ERRORS (measured 1.950E-10 against the correct 3.900E-10 for one prism,
+    with the CoG shifted 0.05 → 0.0625) — the /TETRA10 under-volume failure
+    mode again. Trailing zeros are examined BEFORE they are stripped so a card
+    written ``n1..n6 0 0`` takes the same route as a six-field one.
+
+    Seven ids is a genuine degenerate hex (a pyramid); repeating n7 there
+    changes nothing, so it is kept. Four or five ids cannot be a thick shell at
+    all and are still padded — the mesh is never dropped — but the caller says
+    so loudly.
+    """
+    f = [x for x in _elem_fields(line, 10) if x]
+    if len(f) < 6:                        # eid pid + at least one face
+        return None
+    eid, pid = to_int(f[0]), to_int(f[1])
+    nodes = [to_int(f[i]) for i in range(2, min(10, len(f)))]
+    while nodes and nodes[-1] == 0:
+        nodes.pop()
+    # An INTERIOR zero (or a non-integer that read as 0) is not connectivity —
+    # a thick shell fills every slot it uses. The test also keeps a malformed
+    # block from turning an *ELEMENT_TSHELL_COMPOSITE ply card into an element:
+    # ``1 0.6 0.0 - 2 0.4 90.0`` free-splits to six fields and would otherwise
+    # pass the length test with node ids 0, 2, 0, 90.
+    if not nodes or eid <= 0 or any(n <= 0 for n in nodes):
+        return None
+    n_given = len(nodes)
+    if n_given == 6:
+        n1, n2, n3, n4, n5, n6 = nodes
+        nodes = [n1, n2, n3, n3, n4, n5, n6, n6]
+    else:
+        while len(nodes) < 8:
+            nodes.append(nodes[-1])
+    return eid, pid, nodes, n_given
+
+
+def _tshell_ply_card(raw: List[str], idx: int):
+    """One *ELEMENT_TSHELL_COMPOSITE card 2b → its (mid, thick, beta) points,
+    or ``None`` when the line at *idx* is not a card 2b.
+
+    Layout is ``MID1 THICK1 B1 - MID2 THICK2 B2 -``, eight 10-char fields with
+    two integration points per card and "the fourth field must be zero or blank
+    to be interpreted as a Card 2b" (Vol I R16 p.2705) — verified by an
+    LS-PrePost round trip, whose ruler reads
+    ``$#    mid1    thick1        b1         -      mid2    thick2        b2``.
+
+    That blank-4th-field rule is also what ENDS the variable-length ply block:
+    the number of integration points is stated nowhere, only by "the number of
+    entries on these cards", so the walk has to recognise the next element's own
+    connectivity card. It cannot do that by content — guessing "all fields are
+    integers" is exactly the trap ``_screen_provisional_elements`` exists to
+    catch — so it counts CELLS. A connectivity card names at least six ids; a
+    ply card names three or six values with the gap columns 4 and 8 blank or
+    zero. Those two shapes never collide.
+
+    FREE-FORMAT card 2b needs its own branch, because ``_card`` falls back to a
+    whitespace split whenever a fixed slice contains internal whitespace: the
+    card ``1 0.6 0.0  2 0.4 90.0`` then arrives as six tokens whose FOURTH is
+    the second MID, and a purely positional 8-slot reading rejects the line —
+    measured as a whole layup vanishing with no message, and on the
+    *INCLUDE_TRANSFORM side as node offsets being added to ``2`` and ``90.0``.
+    The branch is taken on the SAME test ``_card`` uses to fall back, never on
+    the token count alone: a properly fixed card with blank gap columns
+    whitespace-splits to six tokens too, and remapping THAT would move MID2 out
+    of its column.
+    """
+    if idx >= len(raw):
+        return None
+    line = raw[idx]
+    fixed = parse_fixed(line, 8, 10)
+    if any(" " in x.strip() or "," in x for x in fixed):
+        tokens = parse_free(line)
+        if len(tokens) in (3, 6):
+            # Gap columns omitted: MID THICK B [MID THICK B].
+            f = ([tokens[0], tokens[1], tokens[2], ""]
+                 + ([tokens[3], tokens[4], tokens[5], ""] if len(tokens) == 6
+                    else ["", "", "", ""]))
+        else:
+            f = tokens + [""] * max(0, 8 - len(tokens))
+    else:
+        f = fixed
+    if not f or not f[0].strip():
+        return None
+    for gap in (3, 7):
+        cell = f[gap].strip() if len(f) > gap else ""
+        if cell and to_float(cell, float("nan")) != 0.0:
+            return None
+    pts = []
+    for im, it, ib in ((0, 1, 2), (4, 5, 6)):
+        if len(f) <= im or not f[im].strip():
+            continue
+        mid = to_int(f[im], -10 ** 9)
+        if mid == -10 ** 9:               # not a number → not a ply card
+            return None
+        pts.append((mid,
+                    to_float(f[it]) if len(f) > it else 0.0,
+                    to_float(f[ib]) if len(f) > ib else 0.0))
+    return pts or None
+
+
+def handle_element_tshell(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_TSHELL and its _BETA / _COMPOSITE spellings → /BRICK.
+
+    dyna2rad converts the bare keyword only, and even there the CFG declares no
+    BETA attribute and no option at all (``Keyword971/ELEMENTS/tshell.cfg`` is
+    one ``CARD`` line), so ``*ELEMENT_TSHELL_BETA`` and
+    ``*ELEMENT_TSHELL_COMPOSITE`` are unmatched headers whose WHOLE BLOCK it
+    drops — elements included. Here every spelling keeps its mesh:
+
+    * ``_BETA`` card 2a is five F16 fields with BETA in cols 65-80 (the manual's
+      10-column table is wrong; confirmed by an LS-PrePost round trip, which
+      re-emits the ruler ``$# - - - - beta``). The angle rides on the element
+      and the writer folds it into the property, because /BRICK has no
+      per-element angle column.
+    * ``_COMPOSITE`` card 2b is the variable-length ply block (see
+      ``_tshell_ply_card``). Radioss has no per-element layup either, so the
+      writer promotes it to a /PROP/TYPE22 only when every thick shell on the
+      part declares the same stack, and warn-drops it otherwise.
+    * an UNRECOGNIZED suffix takes the provisional path: keep every line that
+      can only be connectivity, mark it, and let
+      ``_screen_provisional_elements`` check it against the node table.
+    """
+    opts, unknown = _elem_options(block.keyword, "ELEMENT_TSHELL",
+                                  _TSHELL_SUFFIX_TOKENS)
+    raw = block.raw
+    if unknown and _elem_block_is_not_a_mesh(block, state, unknown):
+        return
+
+    if unknown:
+        # See handle_element_shell: kept by CONTENT, marked provisional, and
+        # screened against the node table before it reaches the deck.
+        rec = ProvisionalElemBlock(block.keyword, "tshell",
+                                   "_" + "_".join(unknown))
+        seen_eids: set = set()
+        for line in raw:
+            if not _is_connectivity_card(line, 6):
+                if line.strip():
+                    rec.n_unparsed += 1
+                continue
+            parsed = _parse_tshell_base(line)
+            if parsed is None:
+                rec.n_unparsed += 1
+                continue
+            eid, pid, nodes, _n_given = parsed
+            if eid in seen_eids:
+                rec.n_unparsed += 1
+                continue
+            seen_eids.add(eid)
+            state.tshell_elems.append(
+                TshellElem(eid, pid, nodes, provisional=True))
+            rec.eids.append(eid)
+        state.provisional_elem_blocks.append(rec)
+        return
+
+    n_penta = 0
+    n_odd = 0
+    n_rejected = 0
+    n_plied = 0
+    n_ply_cards = 0
+    n_beta_offcol = 0
+    i = 0
+    while i < len(raw):
+        parsed = _parse_tshell_base(raw[i])
+        if parsed is None:
+            # A line the connectivity reader refuses — an interior zero, a
+            # non-integer id, a truncated card. Counted so the loss is never
+            # silent: the orphan census cannot see it (no element was ever
+            # created) and the deck would simply be short a mesh line.
+            if raw[i].strip() and not raw[i].lstrip().startswith("$"):
+                n_rejected += 1
+            i += 1
+            continue
+        eid, pid, nodes, n_given = parsed
+        if n_given == 6:
+            n_penta += 1
+        elif n_given < 8:
+            n_odd += 1
+        i += 1
+        beta = 0.0
+        if "BETA" in opts and i < len(raw):
+            # Card 2a: five F16 cells, only the fifth (cols 65-80) defined.
+            # Consumed BY COUNT — the card is mandatory under the option and a
+            # blank one is a card, not padding (the #117 rule).
+            fb = _card(raw, i, fixed=True, n=5, w=16)
+            if len(fb) > 4 and fb[4].strip():
+                beta = to_float(fb[4])
+            else:
+                # The manual's own table shows BETA in field 5 of a TEN-column
+                # card (Vol I R14 p.19-137), i.e. cols 41-50, while LS-PrePost
+                # writes the five-F16 ruler this reader is pinned to. A card in
+                # the other spelling has its angle OUTSIDE cols 65-80, and
+                # reading it as 0.0 would silently zero a real material
+                # rotation — the worst available failure mode on the one layout
+                # claim here that rests on a round trip rather than the manual.
+                # So take it, and say where it came from.
+                alt = _card(raw, i, fixed=True, n=10, w=10)
+                cells = [c.strip() for c in (alt or []) if c.strip()]
+                _NOT_A_NUMBER = -1.0e300
+                if len(cells) == 1 and \
+                        to_float(cells[0], _NOT_A_NUMBER) != _NOT_A_NUMBER:
+                    beta = to_float(cells[0])
+                    if beta:
+                        n_beta_offcol += 1
+            i += 1
+        plies: List[CompositePly] = []
+        if "COMPOSITE" in opts:
+            while i < len(raw):
+                pts = _tshell_ply_card(raw, i)
+                if pts is None:
+                    break
+                plies += [CompositePly(mid=m, thick=t, beta=b)
+                          for (m, t, b) in pts]
+                n_ply_cards += 1
+                i += 1
+            if plies:
+                n_plied += 1
+                state.tshell_elem_plies[eid] = plies
+        state.tshell_elems.append(TshellElem(eid, pid, nodes, beta))
+
+    if n_penta:
+        state.warn(
+            f"*{block.keyword}: {n_penta} card(s) name six nodes (or two "
+            "trailing zeros) instead of eight. LS-DYNA has no six-field form — "
+            "a thick shell is always eight-SLOT and the pentahedron is written "
+            "n1 n2 n3 n3 n4 n5 n6 n6, repeating ids rather than blanking slots "
+            "(Vol I R14 p.19-139 Remark 1) — so the six ids were read as that "
+            "pentahedron's own n1..n6 and expanded to the manual's 8-slot "
+            "spelling. Volume, shape and thickness direction are preserved; "
+            "write the cards in the 8-slot form to state it unambiguously.")
+    if n_odd:
+        state.warn(
+            f"*{block.keyword}: {n_odd} card(s) name four, five or seven nodes. "
+            "A thick shell has eight slots and no LS-DYNA form is that short, "
+            "so the missing ones were filled by repeating the last id — which "
+            "IS a valid degenerate hex for seven ids (a pyramid) but collapses "
+            "a whole face for four or five, so the ELEMENT VOLUME is very "
+            "likely wrong. The mesh is kept; fix the source cards.")
+    if n_rejected:
+        state.warn(
+            f"*{block.keyword}: {n_rejected} non-blank line(s) in the block "
+            "are neither a connectivity card nor an option card and were "
+            "SKIPPED — an interior zero node, a non-numeric id or a truncated "
+            "line. Each one is a thick shell that is NOT in the converted "
+            "deck, and the orphan census cannot report it because no element "
+            "was ever created from it. Check the block for a stray or "
+            "misaligned line.")
+    if n_beta_offcol:
+        state.warn(
+            f"*{block.keyword}: {n_beta_offcol} BETA card(s) carry the angle "
+            "OUTSIDE columns 65-80. k2rad's card-2a reader is pinned to the "
+            "five-F16 ruler LS-PrePost writes ($# - - - - beta); the manual's "
+            "own table instead shows BETA in field 5 of a TEN-column card. The "
+            "value was read from the column it was found in rather than "
+            "treated as blank — verify the angle in the converted /PROP.")
+    if n_plied:
+        state.warn(
+            f"*{block.keyword}: {n_plied} element(s) carry a per-element ply "
+            f"stack ({n_ply_cards} card(s) of MID/THICK/B). Radioss has no "
+            "per-element layup — /BRICK carries connectivity only — so the "
+            "stack can survive only as a per-PART /PROP/TYPE22, which needs "
+            "every thick shell on the part to declare the SAME stack. The "
+            "writer reports per part whether that held. (dyna2rad cannot read "
+            "this keyword at all and drops the whole block, elements "
+            "included.)")
 
 
 def _positional_elem_fields(line: str, n: int):
@@ -1432,13 +1722,26 @@ def handle_integration_beam(block: Block, state: ConversionState) -> None:
 
 
 def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
-                       state: ConversionState) -> List[float]:
-    """*SECTION_SHELL / *SECTION_TSHELL card 3 (ICOMP=1): the B_i material
-    angles, eight per card over ``ceil(NIP/8)`` cards (Manual Vol I R17
+                       state: ConversionState,
+                       keyword: str = "*SECTION_SHELL") -> List[float]:
+    """*SECTION_SHELL card 3 / *SECTION_TSHELL card 2 (ICOMP=1): the B_i
+    material angles, eight per card over ``ceil(NIP/8)`` cards (Manual Vol I R17
     p.41-70). Returns exactly NIP values, bottom layer first.
 
     A blank NIP defaults to LS-DYNA's 2.0, so an ICOMP section that omits it
-    still reads its one angle card rather than none.
+    still reads its one angle card rather than none. (The thick-shell CFG agrees
+    on the card COUNT by a different route — ``if(LSD_NIP == 0 && LSD_ICOMP ==
+    1) BLANK;``, SectTShl.cfg:143 — one card either way.)
+
+    Cards are taken BY RAW INDEX, so an all-zero angle card, which is written
+    blank, is consumed as the CARD it is instead of being skipped as whitespace
+    (the #117 rule). ``_card`` returns eight empty strings for a blank line in
+    range and ``[]`` only past the end of the block, which is what separates
+    "this layer's angle is 0" from "the angle block is truncated".
+
+    *keyword* names the caller in the truncation warning; the two card layouts
+    are identical, only their card NUMBER differs (*SECTION_TSHELL has no
+    thickness card 2, because a thick shell's thickness is its mesh).
     """
     n = nip if nip > 0 else 2
     n_cards = (n + 7) // 8
@@ -1452,7 +1755,7 @@ def _read_icomp_angles(raw: List[str], idx: int, nip: int, secid: int,
         read += 1
     if read < n_cards:
         state.warn(
-            f"*SECTION_SHELL {secid}: ICOMP=1 with NIP={nip} needs {n_cards} "
+            f"{keyword} {secid}: ICOMP=1 with NIP={nip} needs {n_cards} "
             f"angle card(s) (8 values each) but only {read} follow(s) card 2 — "
             "the missing layer angles default to 0 degrees. Check the deck: a "
             "truncated angle block silently turns a balanced layup into a "
@@ -1623,6 +1926,104 @@ def handle_section_solid(block: Block, state: ConversionState) -> None:
         _dup_secid("*SECTION_SOLID", secid, state.sec_solids, state)
         state.sec_solids[secid] = SectionSolid(secid, title, elform, iale,
                                                cohthk=cohthk)
+        n_sets += 1
+
+
+#: *SECTION_TSHELL ELFORM values the manual defines (Vol I R16 p.3717, and the
+#: CFG enum SectTShl.cfg:84-92). Note 4 is NOT one of them — the thick-shell set
+#: is 1/2/3/5/6/7. Anything outside it is warned about and mapped like the
+#: non-default forms.
+_TSHELL_ELFORMS = frozenset({1, 2, 3, 5, 6, 7})
+
+#: The thick-shell ELFORMs that are EXTRUDED THIN SHELLS: they use thin-shell
+#: (plane-stress) material models and have an uncoupled stiffness in the
+#: thickness direction (Vol I R16 p.3717 Remark 1). Every Radioss thick shell is
+#: a 3D-stress element, so this distinction cannot be carried across.
+_TSHELL_PLANE_STRESS_ELFORMS = frozenset({1, 2, 6})
+
+#: The thick-shell ELFORMs whose integration is REDUCED. dyna2rad maps only
+#: ELFORM 1 to the under-integrated Isolid=15 and sends 5 and 6 to the
+#: full-integration HA8 (Isolid=14) along with 2/3/7, so those two lose their
+#: reduced integration; warned rather than silently remapped, because Isolid=15
+#: would also change their assumed-strain treatment.
+_TSHELL_REDUCED_ELFORMS = frozenset({1, 5, 6})
+
+
+def handle_section_tshell(block: Block, state: ConversionState) -> None:
+    """*SECTION_TSHELL (+ _TITLE/_ID) — every card SET under the header.
+
+    Card 1  ``SECID ELFORM SHRF NIP PROPT QR ICOMP TSHEAR``   (8 x I10)
+    Card 2  ``B1..B8``, ``ceil(NIP/8)`` cards, ICOMP=1 ONLY   (8 x F10)
+
+    (``Keyword971/PROPERTY/SectTShl.cfg:141-146``.) The angle block is card
+    **2**, not card 3 as on *SECTION_SHELL: this keyword has no thickness card
+    at all, because a thick shell's thickness is the distance between its two
+    faces in *NODE. Getting that wrong by one card would read the first angle
+    card as the next set's card 1.
+
+    A set therefore spans ``1 (title) + 1 (card 1) + ceil(NIP/8) (ICOMP=1)``
+    lines, every term read from that set's OWN fields — the same
+    walk-by-what-was-consumed discipline as *SECTION_SHELL / *SECTION_SOLID, and
+    for the same reason: reading only the first set drops every later section
+    silently and its *PARTs fall through to an auto-generated placeholder.
+    """
+    per_set_title = _title_offset(block)
+    raw = block.raw
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        # Trailing blank padding is not a card set. Anything else — including a
+        # blank line that IS this set's 80a title card — is walked, not skipped.
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=8, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            state.warn(_section_set_stop("*SECTION_TSHELL", n_sets, raw[idx]))
+            break
+        # A BLANK ELFORM is LS-DYNA's default 1 (one-point reduced integration),
+        # NOT 0. dyna2rad reads the blank as 0, which falls into the `else` of
+        # its `elform == 1 ? 15 : 14` test and hands the deck the FULL
+        # integration HA8 — the opposite element class from the one the deck
+        # asked for by leaving the field empty. Deliberate divergence.
+        elform_blank = not (len(f1) > 1 and f1[1].strip())
+        elform = 1 if elform_blank else to_int(f1[1])
+        shrf = to_float(f1[2]) if len(f1) > 2 else 0.0
+        # NIP: "EQ.0: set to 2 integration points" (Vol I R16 p.3717). dyna2rad
+        # keeps the raw 0 (measured: a blank-NIP section echoed NIP = 0), which
+        # on the composite branch writes ZERO ply cards against a property that
+        # expects one — starter ERROR 675. Deliberate divergence.
+        nip = to_int(f1[3]) if len(f1) > 3 and f1[3].strip() else 0
+        if nip < 0:
+            state.warn(
+                f"*SECTION_TSHELL {secid}: NIP={nip} is negative. NIP is an "
+                "integration-point COUNT — it is the QR field (card 1 field 6, "
+                f"cols 51-60) that takes a negative value to reference an "
+                f"*INTEGRATION_SHELL rule. |NIP| = {abs(nip)} is used.")
+            nip = abs(nip)
+        if nip == 0:
+            nip = 2
+        propt = to_float(f1[4]) if len(f1) > 4 else 0.0
+        qr = to_float(f1[5]) if len(f1) > 5 else 0.0
+        icomp = to_int(f1[6]) if len(f1) > 6 else 0
+        tshear = to_int(f1[7]) if len(f1) > 7 else 0
+        sec = SectionTshell(secid, title, elform, shrf, nip, propt, qr,
+                            icomp, tshear, elform_blank=elform_blank)
+        if qr < 0.0:
+            sec.irid = int(abs(qr))
+        idx += 1
+        if icomp == 1:
+            sec.betas = _read_icomp_angles(raw, idx, nip, secid, state,
+                                           "*SECTION_TSHELL")
+            idx += (nip + 7) // 8
+        _dup_secid("*SECTION_TSHELL", secid, state.sec_tshells, state)
+        state.sec_tshells[secid] = sec
         n_sets += 1
 
 
@@ -3143,6 +3544,13 @@ def handle_part_composite(block: Block, state: ConversionState) -> None:
     hgid = to_int(fd[5]) if len(fd) > 5 and fd[5].strip() else 0
     adpopt = to_int(fd[6]) if len(fd) > 6 and fd[6].strip() and variant == "" else 0
     thshel = to_int(fd[7]) if len(fd) > 7 and fd[7].strip() and variant == "" else 0
+    # Card 3b field 8 is TSHEAR where card 3a has THSHEL — the SAME column with
+    # a different meaning, so it is read on the _TSHELL variant only. Radioss
+    # thick shells have no constant-shear option, so the writer warn-drops it;
+    # reading it is what lets it be NAMED rather than lost silently, the way the
+    # *SECTION_TSHELL path names its own TSHEAR.
+    tshear = to_int(fd[7]) if len(fd) > 7 and fd[7].strip() \
+        and variant == "TSHELL" else 0
     idx += 1
     optt = 0.0
     if "CONTACT" in kw:
@@ -3179,7 +3587,7 @@ def handle_part_composite(block: Block, state: ConversionState) -> None:
     state.part_composites[pid] = PartComposite(
         pid=pid, title=title, elform=elform, shrf=shrf, nloc=nloc, marea=marea,
         hgid=hgid, adpopt=adpopt, thshel=thshel, plies=plies, variant=variant,
-        long_form=long_form, irpl=irpl, optt=optt)
+        tshear=tshear, long_form=long_form, irpl=irpl, optt=optt)
     # ALWAYS register the *PART itself (SECID 0 → the writer auto-creates a
     # *SECTION_SHELL under the part id if the layup cannot be converted), so the
     # part's elements are emitted whatever happens to the property.
@@ -10000,6 +10408,17 @@ def handle_database_history_solid(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "SOLID")
 
 
+def handle_database_history_tshell(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_TSHELL → /TH/BRIC, the same block *_SOLID takes.
+
+    A thick shell IS a /BRICK in the emitted deck (writer/tshell.py), and
+    /TH/BRIC resolves brick ids, so the requested channels land exactly where
+    the deck asked for them. Before the thick-shell batch this keyword was
+    unroutable — the elements it names did not exist in the conversion at all —
+    and it stayed in ``skipped_keywords`` on all nine r14 decks."""
+    _handle_db_history(block, state, "TSHELL")
+
+
 def handle_database_history_node(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "NODE")
 
@@ -10261,6 +10680,11 @@ HANDLERS = {
     # so no suffix can ever take a block's elements with it.
     "ELEMENT_SHELL":                          handle_element_shell,
     "ELEMENT_SOLID":                          handle_element_solid,
+    # *ELEMENT_TSHELL — an 8-node THICK shell → /BRICK on a /PROP/TYPE20|21|22.
+    # The _BETA / _COMPOSITE spellings are registered from the grammar below,
+    # and dispatch() routes any other one to the same handler's provisional
+    # path. dyna2rad's CFG has neither option, so it drops those blocks whole.
+    "ELEMENT_TSHELL":                         handle_element_tshell,
     "ELEMENT_BEAM":                           handle_element_beam,
     # *ELEMENT_PLOTEL is a visualization-only line element with no PID column
     # → an inert /SPRING on a synthesized PLOTEL /PART + /PROP/TYPE4.
@@ -10285,6 +10709,9 @@ HANDLERS = {
     # CARDS), so registering the spelling is what turns it from a
     # skipped_keywords entry (part loses its whole property) into a parse.
     "SECTION_SOLID_MISC":                     handle_section_solid,
+    # *SECTION_TSHELL takes no option suffix of its own (only the universal
+    # _TITLE / _ID, which the parser strips), so one exact key covers it.
+    "SECTION_TSHELL":                         handle_section_tshell,
     "SECTION_BEAM":                           handle_section_beam,
     "SECTION_DISCRETE":                       handle_section_discrete,
 
@@ -10819,6 +11246,7 @@ HANDLERS = {
     "DATABASE_GLSTAT":                        handle_database_glstat,
     "DATABASE_HISTORY_SHELL":                 handle_database_history_shell,
     "DATABASE_HISTORY_SOLID":                 handle_database_history_solid,
+    "DATABASE_HISTORY_TSHELL":                handle_database_history_tshell,
     "DATABASE_HISTORY_NODE":                  handle_database_history_node,
     "DATABASE_ABSTAT":                        handle_database_abstat,
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,
@@ -10949,6 +11377,14 @@ for _o1 in ("", "_OFFSET"):
     for _o2 in ("", "_ORIENTATION"):
         HANDLERS[f"ELEMENT_BEAM{_o1}{_o2}"] = handle_element_beam
 del _o1, _o2, _o3, _o4
+
+# *ELEMENT_TSHELL_{OPTION} with OPTION in {<blank>, BETA, COMPOSITE} — the
+# manual defines ONE option slot, not a stacking (Vol I R16 p.2703), so three
+# spellings. Generated for the same reason as the shell/beam grammars above,
+# and the prefix fallback in dispatch() covers anything outside it.
+for _o1 in ("", "_BETA", "_COMPOSITE"):
+    HANDLERS[f"ELEMENT_TSHELL{_o1}"] = handle_element_tshell
+del _o1
 
 
 # *CONTACT_SPOTWELD{_WITH_TORSION|_BEAM_OFFSET|_CONSTRAINED_OFFSET}{_PENALTY}
@@ -11149,7 +11585,15 @@ del _kw, _is_ortho
 #: PART_COMPOSITE MUST precede it — the loop breaks on the first prefix match, and
 #: a composite ordering the twelve generated keys miss belongs on the composite
 #: walk (its ply cards are nothing like *PART's), not on the plain one.
+#: ELEMENT_TSHELL is listed on its own row rather than under ELEMENT_SHELL:
+#: the match is on a TOKEN boundary, so "ELEMENT_TSHELL" is not an
+#: "ELEMENT_SHELL" spelling at all and would otherwise fall through to
+#: skipped_keywords — which for a thick shell means every element of the part
+#: silently missing from the deck (measured on master: the nine r14 thick-shell
+#: decks each emitted a bare /PART on a placeholder /PROP/SHELL and nothing
+#: else, with no MESH LOSS warning, because no element was ever parsed).
 _PREFIX_HANDLERS = (
+    ("ELEMENT_TSHELL", handle_element_tshell),
     ("ELEMENT_SHELL", handle_element_shell),
     ("ELEMENT_BEAM", handle_element_beam),
     ("ELEMENT_PLOTEL", handle_element_plotel),

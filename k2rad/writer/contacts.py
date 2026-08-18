@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Dict, List, Optional, Set
 from ..state import ConversionState, PartData
 from .common import (
@@ -107,6 +108,11 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
             if e.pid == pid: nids.update(e.nodes)
         for e in state.solid_elems:
             if e.pid == pid: nids.update(e.nodes)
+        # Thick shells are /BRICK in the emitted deck, so a *PART of them is a
+        # perfectly good contact side. The container is empty on every deck
+        # without *ELEMENT_TSHELL, so this cannot move any other conversion.
+        for e in state.tshell_elems:
+            if e.pid == pid: nids.update(e.nodes)
 
     if styp == 4:
         if sid in state.node_sets:
@@ -184,7 +190,11 @@ def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
     These are emitted as a /SURF/PART/EXT (the external surface of a solid part).
     See _warn_implicit_solid_contact_np1 for why that matters in implicit np>1.
     """
-    all_solid_pids = {e.pid for e in state.solid_elems}
+    # Thick shells are /BRICK, so a thick-shell part on a contact MAIN side
+    # wants the same /SURF/PART/EXT (external surface of a solid part) an
+    # ordinary brick part gets. Empty on every deck without *ELEMENT_TSHELL.
+    all_solid_pids = ({e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems})
     if not all_solid_pids:
         return set()
     out: Set[int] = set()
@@ -523,6 +533,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         | {n for e in state.solid_elems
            if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
            for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for e in state.tshell_elems          # /BRICK too — see above
+           if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           for n in e.nodes if n > 0 and n not in rigid_nodes}
     )
     all_pids: List[int] = sorted(state.parts.keys())
 
@@ -817,6 +830,9 @@ def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -
         if e.pid in pidset:
             nodes.update(n for n in e.nodes if n > 0)
     for e in state.solid_elems:
+        if e.pid in pidset:
+            nodes.update(n for n in e.nodes if n > 0)
+    for e in state.tshell_elems:              # /BRICK too — see above
         if e.pid in pidset:
             nodes.update(n for n in e.nodes if n > 0)
     for e in state.beam_elems:
@@ -1837,7 +1853,11 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
     uses the one-pass form.
     """
     out: Dict[int, int] = {}
-    for e in state.solid_elems:
+    # Thick shells are /BRICK, so they answer both questions the same way an
+    # ordinary hex does (and are never quadratic — always 8 slots). Chained
+    # rather than concatenated: this runs per contact side on the whole solid
+    # table, and copying both lists there is what the rewrite removed.
+    for e in itertools.chain(state.solid_elems, state.tshell_elems):
         n = len(_ordered_unique_nodes(list(e.nodes)))
         if n > out.get(e.pid, 0):
             out[e.pid] = n
@@ -2324,6 +2344,9 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
             if e.pid == pid:
                 nids.update(e.nodes)
         for e in state.solid_elems:
+            if e.pid == pid:
+                nids.update(e.nodes)
+        for e in state.tshell_elems:          # /BRICK too — see above
             if e.pid == pid:
                 nids.update(e.nodes)
 

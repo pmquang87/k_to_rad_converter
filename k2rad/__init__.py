@@ -69,8 +69,14 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # main surface — inside the TYPE7 thickness-derived gap — so the "inert"
         # stub would add parasitic contact stiffness at every weld.
         return
-    if not (state.solid_elems or state.shell_elems):
-        return  # no deformable surface to build the interface from
+    if not (state.solid_elems or state.shell_elems or state.tshell_elems):
+        # No deformable surface to build the interface from. THICK SHELLS count:
+        # they are /BRICK in the emitted deck and _make_master_surface gives
+        # their part the same /SURF/PART/EXT a brick part gets, so an implicit
+        # thick-shell deck — which every one of the r14 *ELEMENT_TSHELL decks
+        # is — can and should have the stub. (Empty on any deck without
+        # *ELEMENT_TSHELL, so no other conversion moves.)
+        return
     inter_id = state.next_id()
     state.contacts_single.append(
         ContactAutoSingle(

@@ -109,12 +109,17 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     since d1ade12 a 3-corner shell is emitted as /SH3N, and /TH/SHEL resolves
     only 4-node /SHELL ids, so a triangle named there is silently absent from
     the T01 instead of being recorded. Those ids go to /TH/SH3N.
+
+    *DATABASE_HISTORY_TSHELL joins the SOLID block: a thick shell IS a /BRICK
+    in the emitted deck, so /TH/BRIC resolves its ids exactly as it does an
+    ordinary hex's.
     """
     if not state.db_histories:
         return []
     lines = ["#-  TIME HISTORY OUTPUTS:", HDR]
     counter = 1
-    type_map = {"SHELL": "SHEL", "SOLID": "BRIC", "NODE": "NODE"}
+    type_map = {"SHELL": "SHEL", "SOLID": "BRIC", "NODE": "NODE",
+                "TSHELL": "BRIC"}
 
     def _emit_block(rad_type: str, ids: List[int], n: int) -> List[str]:
         block = [
