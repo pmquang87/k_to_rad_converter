@@ -533,21 +533,39 @@ def _off_element_beam(b: Block, offsets: Dict[str, int], warn) -> None:
         i += step
 
 
-def _off_tshell_ply_card(line: str) -> bool:
-    """True when *line* is an *ELEMENT_TSHELL_COMPOSITE card 2b (mirrors
-    handlers._tshell_ply_card's positional test): fields 4 and 8 blank or zero.
+def _off_tshell_ply_card(line: str) -> Optional[List[Tuple[int, str]]]:
+    """The MID field indices of an *ELEMENT_TSHELL_COMPOSITE card 2b, or None
+    when *line* is not one. Mirrors ``handlers._tshell_ply_card`` — including
+    its FREE-FORMAT branch, where the gap columns 4 and 8 are simply not
+    written and the second MID therefore sits at token 3 rather than 4.
 
     Its MID columns hold MATERIAL ids, which *INCLUDE_TRANSFORM offsets with
     IDMOFF — a bucket ``_rewrite_line`` would never apply from the connectivity
-    mods — so the card is both strided over AND rewritten below."""
-    f = _fields(line, 8, 10)
+    mods — so the card is both strided over AND rewritten below, and the mods
+    have to name the slots the ids are actually IN. The free branch is taken on
+    the SAME test ``_fields`` uses to fall back, not on the token count: a
+    fixed card with blank gap columns whitespace-splits to six tokens too."""
+    fixed = parse_fixed(line, 8, 10)
+    if "," in line or any(" " in x.strip() for x in fixed):
+        toks = parse_free(line)
+        if len(toks) in (3, 6):
+            mids = [(0, "m")] + ([(3, "m")] if len(toks) == 6 else [])
+            f = ([toks[0], toks[1], toks[2], ""]
+                 + ([toks[3], toks[4], toks[5], ""] if len(toks) == 6
+                    else ["", "", "", ""]))
+        else:
+            mids = [(0, "m"), (4, "m")]
+            f = toks + [""] * max(0, 8 - len(toks))
+    else:
+        mids = [(0, "m"), (4, "m")]
+        f = fixed
     if not f or not str(f[0]).strip():
-        return False
+        return None
     for gap in (3, 7):
         cell = str(f[gap]).strip() if len(f) > gap else ""
         if cell and to_float(cell, float("nan")) != 0.0:
-            return False
-    return True
+            return None
+    return mids
 
 
 def _off_element_tshell(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -582,8 +600,11 @@ def _off_element_tshell(b: Block, offsets: Dict[str, int], warn) -> None:
         if "BETA" in opts and i < len(b.raw):
             i += 1                      # card 2a: no ids, but it IS a card
         if "COMPOSITE" in opts:
-            while i < len(b.raw) and _off_tshell_ply_card(b.raw[i]):
-                new = _rewrite_line(b.raw[i], [(0, "m"), (4, "m")], offsets)
+            while i < len(b.raw):
+                mids = _off_tshell_ply_card(b.raw[i])
+                if mids is None:
+                    break
+                new = _rewrite_line(b.raw[i], mids, offsets)
                 if new is not None:
                     b.raw[i] = new
                 i += 1
@@ -2281,6 +2302,7 @@ _OFFSET_SPECS: Dict[str, object] = {
     "DATABASE_HISTORY_NODE": {"data": (0, [(ALL, "n")])},
     "DATABASE_HISTORY_SHELL": {"data": (0, [(ALL, "e")])},
     "DATABASE_HISTORY_SOLID": {"data": (0, [(ALL, "e")])},
+    "DATABASE_HISTORY_TSHELL": {"data": (0, [(ALL, "e")])},
     "DATABASE_CROSS_SECTION_PLANE": {"cards": {0: [(0, "s")]}, "idhdr": "p"},
     "DATABASE_CROSS_SECTION_SET": {"cards": {0: [(i, "s") for i in range(6)]},
                                    "idhdr": "p"},

@@ -546,18 +546,34 @@ def handle_element_solid(block: Block, state: ConversionState) -> None:
 
 
 def _parse_tshell_base(line: str):
-    """One *ELEMENT_TSHELL connectivity card → (eid, pid, nodes) or None.
+    """One *ELEMENT_TSHELL connectivity card → (eid, pid, nodes, n_given) or
+    None. *nodes* is always eight ids; *n_given* is how many the card actually
+    named, so the caller can report a short card.
 
     Card 1 is ``EID PID N1..N8``, ten I8 fields
-    (``Keyword971/ELEMENTS/tshell.cfg:73``). A thick shell is ALWAYS eight-slot:
-    the 6-node pentahedron form repeats nodes rather than blanking them ("the
-    eight variables N1 to N8 should be defined using nodes n1, n2, n3, n3, n4,
-    n5, n6, n6 ... Note that node n3 and node n6 are each repeated", Vol I R16
-    p.2703 Remark 1), which is why the returned list is padded by REPEATING the
-    last id rather than zero-filled: a Radioss /BRICK with trailing ZEROS is
-    classified as a 6-node penta and then rejected on a thick-shell property
-    unless Isolid=15 (ERROR 639), while the collapsed 8-node form is accepted by
-    both formulations.
+    (``Keyword971/ELEMENTS/tshell.cfg:73``). A thick shell is ALWAYS eight-slot
+    in LS-DYNA: the 6-node pentahedron is entered by REPEATING ids rather than
+    blanking slots — "For a pentahedron, nodes n1, n2, n3 form the lower
+    triangular surface and the eight variables N1 to N8 should be defined using
+    nodes n1, n2, n3, n3, n4, n5, n6, n6, respectively. Note that node n3 and
+    node n6 are each repeated" (Vol I R14 p.19-139 Remark 1). A conforming deck
+    therefore never reaches the padding below.
+
+    A SHORT card (six ids given, or two trailing zeros) is not a form LS-DYNA
+    defines, but it has one obvious reading — the pentahedron's own six nodes —
+    so it is expanded into exactly the manual's 8-slot spelling
+    ``n1 n2 n3 n3 n4 n5 n6 n6``. Padding by repeating the LAST id instead was a
+    silent 50 % volume error: it produces ``n1 n2 n3 n4 n5 n6 n6 n6``, whose
+    upper face has collapsed to a point, and the starter accepts it with 0
+    ERRORS (measured 1.950E-10 against the correct 3.900E-10 for one prism,
+    with the CoG shifted 0.05 → 0.0625) — the /TETRA10 under-volume failure
+    mode again. Trailing zeros are examined BEFORE they are stripped so a card
+    written ``n1..n6 0 0`` takes the same route as a six-field one.
+
+    Seven ids is a genuine degenerate hex (a pyramid); repeating n7 there
+    changes nothing, so it is kept. Four or five ids cannot be a thick shell at
+    all and are still padded — the mesh is never dropped — but the caller says
+    so loudly.
     """
     f = [x for x in _elem_fields(line, 10) if x]
     if len(f) < 6:                        # eid pid + at least one face
@@ -573,9 +589,14 @@ def _parse_tshell_base(line: str):
     # pass the length test with node ids 0, 2, 0, 90.
     if not nodes or eid <= 0 or any(n <= 0 for n in nodes):
         return None
-    while len(nodes) < 8:
-        nodes.append(nodes[-1])
-    return eid, pid, nodes
+    n_given = len(nodes)
+    if n_given == 6:
+        n1, n2, n3, n4, n5, n6 = nodes
+        nodes = [n1, n2, n3, n3, n4, n5, n6, n6]
+    else:
+        while len(nodes) < 8:
+            nodes.append(nodes[-1])
+    return eid, pid, nodes, n_given
 
 
 def _tshell_ply_card(raw: List[str], idx: int):
@@ -591,13 +612,38 @@ def _tshell_ply_card(raw: List[str], idx: int):
     That blank-4th-field rule is also what ENDS the variable-length ply block:
     the number of integration points is stated nowhere, only by "the number of
     entries on these cards", so the walk has to recognise the next element's own
-    connectivity card. It does so positionally rather than by content — a
-    right-justified I8 connectivity card puts N2's tail and all of N3 into
-    columns 31-40, so field 4 is never blank on one, while a ply card leaves it
-    empty by construction. Guessing by content instead (all-integer fields) is
-    exactly the trap ``_screen_provisional_elements`` exists to catch.
+    connectivity card. It cannot do that by content — guessing "all fields are
+    integers" is exactly the trap ``_screen_provisional_elements`` exists to
+    catch — so it counts CELLS. A connectivity card names at least six ids; a
+    ply card names three or six values with the gap columns 4 and 8 blank or
+    zero. Those two shapes never collide.
+
+    FREE-FORMAT card 2b needs its own branch, because ``_card`` falls back to a
+    whitespace split whenever a fixed slice contains internal whitespace: the
+    card ``1 0.6 0.0  2 0.4 90.0`` then arrives as six tokens whose FOURTH is
+    the second MID, and a purely positional 8-slot reading rejects the line —
+    measured as a whole layup vanishing with no message, and on the
+    *INCLUDE_TRANSFORM side as node offsets being added to ``2`` and ``90.0``.
+    The branch is taken on the SAME test ``_card`` uses to fall back, never on
+    the token count alone: a properly fixed card with blank gap columns
+    whitespace-splits to six tokens too, and remapping THAT would move MID2 out
+    of its column.
     """
-    f = _card(raw, idx, fixed=True, n=8, w=10)
+    if idx >= len(raw):
+        return None
+    line = raw[idx]
+    fixed = parse_fixed(line, 8, 10)
+    if any(" " in x.strip() or "," in x for x in fixed):
+        tokens = parse_free(line)
+        if len(tokens) in (3, 6):
+            # Gap columns omitted: MID THICK B [MID THICK B].
+            f = ([tokens[0], tokens[1], tokens[2], ""]
+                 + ([tokens[3], tokens[4], tokens[5], ""] if len(tokens) == 6
+                    else ["", "", "", ""]))
+        else:
+            f = tokens + [""] * max(0, 8 - len(tokens))
+    else:
+        f = fixed
     if not f or not f[0].strip():
         return None
     for gap in (3, 7):
@@ -658,8 +704,9 @@ def handle_element_tshell(block: Block, state: ConversionState) -> None:
                 continue
             parsed = _parse_tshell_base(line)
             if parsed is None:
+                rec.n_unparsed += 1
                 continue
-            eid, pid, nodes = parsed
+            eid, pid, nodes, _n_given = parsed
             if eid in seen_eids:
                 rec.n_unparsed += 1
                 continue
@@ -670,18 +717,29 @@ def handle_element_tshell(block: Block, state: ConversionState) -> None:
         state.provisional_elem_blocks.append(rec)
         return
 
-    n_short = 0
+    n_penta = 0
+    n_odd = 0
+    n_rejected = 0
     n_plied = 0
     n_ply_cards = 0
+    n_beta_offcol = 0
     i = 0
     while i < len(raw):
         parsed = _parse_tshell_base(raw[i])
         if parsed is None:
+            # A line the connectivity reader refuses — an interior zero, a
+            # non-integer id, a truncated card. Counted so the loss is never
+            # silent: the orphan census cannot see it (no element was ever
+            # created) and the deck would simply be short a mesh line.
+            if raw[i].strip() and not raw[i].lstrip().startswith("$"):
+                n_rejected += 1
             i += 1
             continue
-        eid, pid, nodes = parsed
-        if len([x for x in _elem_fields(raw[i], 10) if x]) < 10:
-            n_short += 1
+        eid, pid, nodes, n_given = parsed
+        if n_given == 6:
+            n_penta += 1
+        elif n_given < 8:
+            n_odd += 1
         i += 1
         beta = 0.0
         if "BETA" in opts and i < len(raw):
@@ -689,9 +747,26 @@ def handle_element_tshell(block: Block, state: ConversionState) -> None:
             # Consumed BY COUNT — the card is mandatory under the option and a
             # blank one is a card, not padding (the #117 rule).
             fb = _card(raw, i, fixed=True, n=5, w=16)
-            i += 1
             if len(fb) > 4 and fb[4].strip():
                 beta = to_float(fb[4])
+            else:
+                # The manual's own table shows BETA in field 5 of a TEN-column
+                # card (Vol I R14 p.19-137), i.e. cols 41-50, while LS-PrePost
+                # writes the five-F16 ruler this reader is pinned to. A card in
+                # the other spelling has its angle OUTSIDE cols 65-80, and
+                # reading it as 0.0 would silently zero a real material
+                # rotation — the worst available failure mode on the one layout
+                # claim here that rests on a round trip rather than the manual.
+                # So take it, and say where it came from.
+                alt = _card(raw, i, fixed=True, n=10, w=10)
+                cells = [c.strip() for c in (alt or []) if c.strip()]
+                _NOT_A_NUMBER = -1.0e300
+                if len(cells) == 1 and \
+                        to_float(cells[0], _NOT_A_NUMBER) != _NOT_A_NUMBER:
+                    beta = to_float(cells[0])
+                    if beta:
+                        n_beta_offcol += 1
+            i += 1
         plies: List[CompositePly] = []
         if "COMPOSITE" in opts:
             while i < len(raw):
@@ -707,15 +782,41 @@ def handle_element_tshell(block: Block, state: ConversionState) -> None:
                 state.tshell_elem_plies[eid] = plies
         state.tshell_elems.append(TshellElem(eid, pid, nodes, beta))
 
-    if n_short:
+    if n_penta:
         state.warn(
-            f"*{block.keyword}: {n_short} card(s) name fewer than eight nodes. "
-            "A thick shell is always an eight-SLOT element — LS-DYNA writes the "
-            "6-node pentahedron as n1 n2 n3 n3 n4 n5 n6 n6, repeating ids "
-            "rather than blanking slots (Vol I R16 p.2703 Remark 1) — so the "
-            "missing slots were filled by REPEATING the last id given. That "
-            "keeps the element and its thickness direction; check the source "
-            "cards if the shape looks wrong.")
+            f"*{block.keyword}: {n_penta} card(s) name six nodes (or two "
+            "trailing zeros) instead of eight. LS-DYNA has no six-field form — "
+            "a thick shell is always eight-SLOT and the pentahedron is written "
+            "n1 n2 n3 n3 n4 n5 n6 n6, repeating ids rather than blanking slots "
+            "(Vol I R14 p.19-139 Remark 1) — so the six ids were read as that "
+            "pentahedron's own n1..n6 and expanded to the manual's 8-slot "
+            "spelling. Volume, shape and thickness direction are preserved; "
+            "write the cards in the 8-slot form to state it unambiguously.")
+    if n_odd:
+        state.warn(
+            f"*{block.keyword}: {n_odd} card(s) name four, five or seven nodes. "
+            "A thick shell has eight slots and no LS-DYNA form is that short, "
+            "so the missing ones were filled by repeating the last id — which "
+            "IS a valid degenerate hex for seven ids (a pyramid) but collapses "
+            "a whole face for four or five, so the ELEMENT VOLUME is very "
+            "likely wrong. The mesh is kept; fix the source cards.")
+    if n_rejected:
+        state.warn(
+            f"*{block.keyword}: {n_rejected} non-blank line(s) in the block "
+            "are neither a connectivity card nor an option card and were "
+            "SKIPPED — an interior zero node, a non-numeric id or a truncated "
+            "line. Each one is a thick shell that is NOT in the converted "
+            "deck, and the orphan census cannot report it because no element "
+            "was ever created from it. Check the block for a stray or "
+            "misaligned line.")
+    if n_beta_offcol:
+        state.warn(
+            f"*{block.keyword}: {n_beta_offcol} BETA card(s) carry the angle "
+            "OUTSIDE columns 65-80. k2rad's card-2a reader is pinned to the "
+            "five-F16 ruler LS-PrePost writes ($# - - - - beta); the manual's "
+            "own table instead shows BETA in field 5 of a TEN-column card. The "
+            "value was read from the column it was found in rather than "
+            "treated as blank — verify the angle in the converted /PROP.")
     if n_plied:
         state.warn(
             f"*{block.keyword}: {n_plied} element(s) carry a per-element ply "
@@ -10307,6 +10408,17 @@ def handle_database_history_solid(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "SOLID")
 
 
+def handle_database_history_tshell(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_TSHELL → /TH/BRIC, the same block *_SOLID takes.
+
+    A thick shell IS a /BRICK in the emitted deck (writer/tshell.py), and
+    /TH/BRIC resolves brick ids, so the requested channels land exactly where
+    the deck asked for them. Before the thick-shell batch this keyword was
+    unroutable — the elements it names did not exist in the conversion at all —
+    and it stayed in ``skipped_keywords`` on all nine r14 decks."""
+    _handle_db_history(block, state, "TSHELL")
+
+
 def handle_database_history_node(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "NODE")
 
@@ -11134,6 +11246,7 @@ HANDLERS = {
     "DATABASE_GLSTAT":                        handle_database_glstat,
     "DATABASE_HISTORY_SHELL":                 handle_database_history_shell,
     "DATABASE_HISTORY_SOLID":                 handle_database_history_solid,
+    "DATABASE_HISTORY_TSHELL":                handle_database_history_tshell,
     "DATABASE_HISTORY_NODE":                  handle_database_history_node,
     "DATABASE_ABSTAT":                        handle_database_abstat,
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,

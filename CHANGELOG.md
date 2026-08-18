@@ -37,25 +37,24 @@ Prior history (before this changelog was introduced) is summarized in the
      out of the connectivity. So a permutation would be a bug, not a fix — the
      `/TETRA10` lesson in reverse. **dyna2rad leaves the `Icstr` column blank**
      and relies on the starter's own `IF (IHBE == 14 .AND. ICSTR == 0) ICSTR =
-     10`. That is harmless on TYPE20/21 and a defect on TYPE22: the CFG computes
-     the number of layer cards ITSELF, in a chain that matches only
-     `Icstr == 100 / 10 / 1`, so with the column blank the count is never set,
-     the reader consumes the wrong number of cards, and the starter — which set
-     `ICSTR = 10` independently — expects `NPTS` of them. Measured on a
-     blank-`Icstr` TYPE22 with `Inpts = 232` and three layer cards:
+     10`, which exists for `IHBE == 14` ONLY — nothing restores the field on
+     `Isolid = 15`, where a blank column echoes `CONSTANT STRESS FLAG = 0`.
 
-     ```
-     WARNING ID : 100213  -- BLOCK: /PROP/TYPE22/1
-     -- LINE: 0                0.25                   0         1
-     unsupported field exists at the end of line
-     ERROR ID : 675  THICK SHELL THICKNESS DISCREPANCY WITH SUM OF LAYER THICKNESSES
-          NUMBER OF LAYERS = 3
-          LAYER : 3   THICKNESS = 0.0   MATERIAL NUMBER = 0
-     ```
+     The field is genuinely load-bearing, and the counterfactual proves it:
+     patching only `Icstr` from `010` to `100` on an otherwise untouched deck
+     moved the tip deflection by **2.08x**, landing bit-identically on the value
+     the WRONG connectivity gives (−0.950539 vs −1.973132 mm). Node order and
+     `Icstr` are the two halves of one statement and both are read. k2rad writes
+     it on all three property types so the answer never depends on a starter
+     default that covers one formulation.
 
-     Layer 3 came back EMPTY — and had the fractions happened to sum to ~1.0
-     that would have been a silent wrong stack-up rather than an error. k2rad
-     writes `Icstr` on all three property types.
+     *(An earlier revision of this entry also claimed a blank `Icstr` desyncs
+     the TYPE22 layer-card COUNT, citing `WARNING ID : 100213` + `ERROR ID :
+     675` with an empty last layer. That does not reproduce on the 2026-05-20
+     build — blanking the column on both an `Isolid=14 / Inpts=222` and an
+     `Isolid=15 / Inpts=2` two-layer TYPE22 gives 0 ERRORS, 0 WARNINGS and a
+     bit-identical engine result — so the claim is withdrawn and the
+     justification above is the one that holds.)*
 
   2. **A degenerate 6-node thick shell keeps LS-DYNA's collapsed
      `n1 n2 n3 n3 n4 n5 n6 n6` form**, and the thick shells get a bucket of
@@ -67,6 +66,22 @@ Prior history (before this changelog was introduced) is summarized in the
      `/BRICK` writer's solid path meanwhile splits by DISTINCT-node count
      (4 → `/TETRA4`, 10 → `/TETRA10`), which a 6-distinct-node thick shell would
      have fallen into.
+
+     A card that names only SIX ids is not a form LS-DYNA defines — Remark 1
+     spells the pentahedron out in all eight slots — but it has one obvious
+     reading, so it is expanded into exactly that spelling
+     (`n1 n2 n3 n3 n4 n5 n6 n6`), and a card written `n1..n6 0 0` takes the same
+     route because the trailing zeros are examined before they are stripped.
+     Padding by repeating the LAST id instead — the first cut of this batch —
+     produced `n1..n6 n6 n6`, whose upper face has collapsed to a point:
+     measured on one prism, **1.950E-10 against the correct 3.900E-10**, i.e.
+     exactly half the mass and volume, with the starter reporting NORMAL
+     TERMINATION, 0 ERRORS and 0 WARNINGS. That is the `/TETRA10` silent
+     under-volume failure mode again. All three spellings (six fields, the
+     manual's eight, and the trailing-zero form) now emit identical connectivity
+     and measure `3.90000000E-10` = ρ·V exactly. Four, five and seven ids still
+     repeat the last id — legal for seven (a pyramid), a collapsed face for four
+     or five — and say so.
 
   3. **`ELFORM` → `Isolid` follows dyna2rad's total map — `1 → 15`, everything
      else `→ 14` — but a BLANK `ELFORM` is LS-DYNA's default 1, not 0.**
@@ -89,19 +104,34 @@ Prior history (before this changelog was introduced) is summarized in the
      leading digit below 2 — or a bare `200` — is read as `Inpts_S = NBP` with
      zero points in `r` and `t`. On `Isolid = 15` it is the plain `NIP`, clamped
      to 1..9; **dyna2rad clamps only the packed branch** and passes a raw
-     `NIP > 9` straight through to starter MSGID 563.
+     `NIP > 9` straight through to starter MSGID 563. The clamp is REPORTED on
+     both formulations, naming the requested and the delivered count — it is a
+     through-thickness physics reduction either way.
 
-  5. **The >9-layer encoding, and the bug it caught.** More than nine layers
-     cannot live in a packed digit, so `/PROP/TYPE22` zeroes the thickness digit
-     and puts the count in `Iint` (`hm_read_prop22.F:272-275` reads `NLY` from
-     `IINT` exactly when `NPTS` is 0). That encoding exists **only on
-     `Isolid = 14`** — on 15 the layer count IS `Inpts`, capped at 9 — so a
-     12-ply `ELFORM = 1` section has to move formulation to be expressible at
-     all. The first cut of this batch clamped `Inpts` to 9 and still wrote 12
-     layer cards, i.e. a reader desync; `_tshell_layer_encoding` now owns the
-     decision for both TYPE22 paths, announces the formulation change, and the
-     invariant "cards written == count declared" is asserted over
-     `ELFORM x NIP` in the tests.
+  5. **The >9-layer encoding — and why TYPE22 does NOT change formulation for
+     it.** More than nine layers cannot live in a packed digit, so an
+     `Isolid = 14` `/PROP/TYPE22` zeroes the thickness digit and puts the count
+     in `Iint` (`hm_read_prop22.F:272-275` reads `NLY` from `IINT` exactly when
+     `NPTS` is 0). On `Isolid = 15` no such trick is needed: that branch is
+     `CASE(15) / NLY = NPT / IP = 3` with **no range check at all**, and the
+     only guards after it are ERROR 27 (`NLY <= 0`) and ERROR 28
+     (`NLY > NLYMAX = 200`). The 1..9 cap that MSGID 563 enforces belongs to
+     `hm_read_prop20.F:204-213` / `hm_read_prop21.F` — TYPE20 and TYPE21 — not
+     to TYPE22. The CFG agrees: for `Iint <= 9` and `NBP <= 200` the import
+     chain of `prop_p22_tsh_comp.cfg` falls through to `ASSIGN(N, NBP)`.
+
+     So a laminate of up to 200 layers is expressible on EITHER formulation and
+     the deck's own `ELFORM` is kept. An intermediate cut of this batch forced
+     `Isolid 15 → 14` above nine layers, which would have swapped HSEPH/PA6 (one
+     in-plane point, physical stabilization) for the fully integrated HA8 on the
+     most common composite case — LS-DYNA's own default `ELFORM 1` — for nothing.
+     Verified live: a 12-ply `ELFORM = 1` ICOMP section now emits
+     `Isolid 15 / Inpts 12 / Iint 0` and the starter echoes
+     `NUMBER OF INTEGRATION POINTS = 12` and `NUMBER OF LAYERS = 12` with
+     **0 ERRORS, 0 WARNINGS**; the `ELFORM = 2` control still takes the
+     `202 / Iint 12` encoding and echoes the same 12 layers. The invariant
+     "cards written == count declared" is asserted over `ELFORM x NIP` in the
+     tests, and covers both encodings.
 
   6. **Orthotropy: the #90 `AOPT` machinery, TRANSLATED — a thick-shell
      property has no `Ip` column.** `scmorth3.F:126-134` resolves the whole
@@ -214,6 +244,50 @@ Prior history (before this changelog was introduced) is summarized in the
       ladder, which would otherwise have read a tshell-only part as "no shell or
       solid elements" and warned about a mesh that is perfectly fine.
 
+      **The first cut of item 10 was not exhaustive**, and the two walks it
+      missed are the two that decide WHICH NODES CARRY STIFFNESS — the place
+      where being invisible is fatal rather than lossy, and the place a
+      starter-only check cannot see, because a `/BCS` on real nodes is perfectly
+      legal and reports 0 ERRORS:
+
+      * **`_make_free_node_constraints`.** The implicit singularity guard fixes
+        every node attached to no element in all six DOFs. Without a thick-shell
+        arm it classified the ENTIRE MESH as free reference nodes: measured on
+        `ex_15_thick_shell_elform_2.k`, **323 of 323 brick nodes inside
+        `/BCS/90008 … 111 111`** — a model that cannot move, on exactly the deck
+        class this batch exists to enable.
+      * **`_make_modal_dummy_cload`.** Same shape, same file: a modal run needs
+        a unit `/CLOAD` on a free structural node or the implicit engine stops
+        with MESSAGE ID 79, and on an all-thick-shell mesh the candidate set was
+        EMPTY — `ex_13_thick_shell_elform_2.k` reported *"no free node to put a
+        dummy /CLOAD on"* and could not have run.
+
+      Four more walks were lossy rather than fatal and are now covered:
+      `_damping_part_nodes` (the `*DAMPING_PART_MASS`/`_SET` route, which shares
+      its rationale with the `/DAMP` fix above but resolves its node group
+      through a different helper), `_inivel_gen_group_nodes`
+      (`*INITIAL_VELOCITY_GENERATION` scoped to a thick-shell part resolved to
+      an empty group and the initial condition was dropped), `_plane_cut`
+      (`*DATABASE_CROSS_SECTION_PLANE` cut nothing and no `/SECT` was written),
+      and `_referenced_node_ids`. Three more were only cosmetic and are
+      corrected for accuracy: `gapmin._surface_triangles` / `_part_nodes_map`
+      (`--auto-gapmin` had no surface to measure on a thick-shell contact side),
+      `_warn_part_contact_fields` (a thick-shell part's `OPTT` is unread for the
+      same missing-`NUMELS`-loop reason a solid's is) and
+      `_resolve_contact_interior` (whose comment still said k2rad has no
+      `*ELEMENT_TSHELL` path). The remaining `solid_elems` sites are TET10-,
+      spotweld-, ALE- or `/XREF`-specific and have no thick-shell reading.
+      `_make_damping_frequency_range` is deliberately left alone: `IPARG(93)` is
+      consumed only in `cmain3.F`, the SHELL material path, so its "cannot reach
+      a thick shell" warning is correct as written.
+
+  11. **`*DATABASE_HISTORY_TSHELL` → `/TH/BRIC`**, the last member of the family
+      that was still unroutable. Until the elements existed there was nothing to
+      record; now that a thick shell IS a `/BRICK`, the same block
+      `*DATABASE_HISTORY_SOLID` takes resolves its ids exactly. It was in
+      `skipped_keywords` on all nine r14 decks, all of which name real element
+      ids there (`ex_15` asks for 28/29/36/37).
+
   Dropped, with a message each (dyna2rad drops all four silently): `PROPT`, a
   printout option; `TSHEAR`, constant vs parabolic transverse shear, a real
   physics difference since Radioss thick shells are always parabolic; a negative
@@ -223,7 +297,48 @@ Prior history (before this changelog was introduced) is summarized in the
   `SHEAR AREA REDUCTION FACTOR = 1.000`). `*PART_COMPOSITE_TSHELL` card 3b puts
   `TSHEAR` in the column the thin-shell card 3a uses for `THSHEL`, so it needed
   its own read — naming the field on the `*SECTION_TSHELL` route and losing it
-  silently on the other would have been worse than either.
+  silently on the other would have been worse than either. An out-of-range
+  `SHRF` on the one property that DOES carry it is named too: `Ashear` takes
+  `(0, 1]` and anything else falls back to the solver default 1.0.
+
+  Four more drops that used to be silent, all of the "the module's standard is
+  that everything dropped is named, and these were not" shape:
+
+  * The `NIP > 9` clamp on `Isolid = 14` (see item 4). `ELFORM = 2, NIP = 15`
+    emitted `Inpts 292` — nine points, six lost — with ZERO warnings.
+  * A `*SECTION_TSHELL` on a TYPE20 whose material carries a non-default `AOPT`.
+    The iso/ortho split keys on the EMITTED law's `PROP_SOLID` class, not on
+    dyna2rad's "the card HAS an `AOPT` field", and the two disagree for exactly
+    one shape: `*MAT_MODIFIED_HONEYCOMB` → `/MAT/LAW50`, which declares
+    `SOLID_ISOTROPIC` yet carries per-direction moduli and yield curves. It
+    lands on `/PROP/TYPE20`, which has no reference-vector card at all, so the
+    axes are dropped and the frame falls back to the connectivity. Routing to
+    TYPE21 anyway (d2r's answer) would change the property type on a path with
+    no solver validation, so the drop is NAMED instead.
+  * A THIN `*PART_COMPOSITE` on a thick-shell mesh. Neither the layup route
+    (which wants `_TSHELL`) nor `_assign_composite_props` (which now skips every
+    thick-shell part) claimed it, so its whole laminate went out under the
+    generic "PLACEHOLDER created" note. LS-DYNA does not accept the pairing
+    either, so it is reported rather than quietly promoted.
+  * `ELFORM` losses on the `*PART_COMPOSITE_TSHELL` card-3b route. The same
+    value on a `*SECTION_TSHELL` produced the plane-stress and reduced-
+    integration warnings; on the layup route it produced none. `_warn_elform`
+    now takes `(label, elform, blank, isolid)` and both routes call it.
+
+  Three parser paths that used to lose a card in silence now report it: a
+  connectivity line the reader refuses (an interior zero — the orphan census
+  cannot see it, because no element was ever created); a `_BETA` card 2a written
+  in the manual's own ten-column spelling rather than the five-F16 ruler
+  LS-PrePost writes, which used to read as `beta = 0.0` — the worst available
+  failure mode on the one layout claim in this batch backed by a round trip
+  rather than the manual, so the value is now taken from the column it is found
+  in and the deviation named; and a FREE-FORMAT card 2b that omits the gap
+  columns, which `_card`'s fixed→free fallback turned into six tokens whose
+  fourth is the second MID — measured as a whole layup vanishing with no
+  message, and on the `*INCLUDE_TRANSFORM` side as node offsets landing on `2`
+  and `90.0`. The free branch is taken on the same test `_card` itself uses to
+  fall back, never on the token count, because a properly FIXED card with blank
+  gap columns whitespace-splits to six tokens too.
 
   Two hazards found in self-review, both fixed by the gate that now decides
   whether a section property is emitted at all — plus the case that gate must
@@ -234,7 +349,17 @@ Prior history (before this changelog was introduced) is summarized in the
   recognized-not-emitted channel); and a `*PART` on a `*SECTION_TSHELL` whose
   elements are SHELLS or ordinary SOLIDS would have got BOTH its own family's
   auto-created property and a thick-shell one under the same SECID, which is
-  starter ERROR 79. An element-free `*PART` on a `*SECTION_TSHELL` still gets
+  starter ERROR 79. That second gate only covered HALF the case at first — it
+  fired when NO part on the section was thick-shell meshed, and a MIXED section
+  (one thick-shell part, one shell part, one SECID) slipped through it: measured
+  `/PROP/SHELL/1` *and* `/PROP/TYPE20/1` in one deck and
+  `ERROR ID : 79 ** ERROR: DUPLICATE ID / IN PID DEFINITION / ID=1` plus 60, 226
+  and 495, with no converter warning at all. Both families need a property in
+  that case, so `_split_mixed_family_sections` (a prepass, because the /PART
+  repoint happens long before the /PROP is written) moves the thick-shell one to
+  a synthesized id and repoints its parts. Re-measured on the same deck:
+  `/PROP/SHELL/1` + `/PROP/TYPE20/90001`, ERROR 79 gone. An element-free
+  `*PART` on a `*SECTION_TSHELL` still gets
   its property, because `_element_free_part_ids` counts a defined `sec_tshells`
   entry as resolved and hands out no placeholder — without it that /PART would
   point at an id nothing writes (ERROR 178). All three are pinned by tests.
@@ -306,31 +431,46 @@ Prior history (before this changelog was introduced) is summarized in the
   (`ORTHOTROPIC SKEW FRAME = 1`, `Inpts 242`, `CONSTANT STRESS FLAG = 10`),
   `val21v` the AOPT=3 shift (`REFERENCE VECTOR VY = 1.0`, `ORTHOTROPIC ANGLE =
   −75.0` from `BETA = 15`), `val21b` the folded `*ELEMENT_TSHELL_BETA`
-  (`ORTHOTROPIC ANGLE = 30.0`), `val22b`/`val22c` the >9-layer encoding
-  (`Inpts 202`, `NUMBER OF LAYERS = 12`, positions −0.4583 … +0.4583, and
-  `val22c` confirms the `ELFORM = 1` → `Isolid = 14` switch), and `val22d` the
-  single-layer edge (`Isolid 15`, `Inpts 1`, and the starter's own
-  `NLY == 1 → ASHEAR = 1e-10`).
+  (`ORTHOTROPIC ANGLE = 30.0`), `val22b`/`val22c` the >9-layer encodings
+  (`Inpts 202` / `Iint 12` on `ELFORM = 2`, positions −0.4583 … +0.4583; the
+  `ELFORM = 1` twin keeps `Isolid 15` and states the count in `Inpts` directly),
+  and `val22d` the single-layer edge (`Isolid 15`, `Inpts 1`, and the starter's
+  own `NLY == 1 → ASHEAR = 1e-10`).
 
-  **Corpus sweep** (462 deduped decks over the repo, `Ryan_Lee_Examples`,
+  **Review round.** Six further probe decks, `starter_win64` (2026-05-20):
+  a 12-ply ICOMP section on `ELFORM = 1` and on `ELFORM = 2`
+  (`Isolid 15 / Inpts 12 / Iint 0` and `Isolid 14 / Inpts 202 / Iint 12`, both
+  echoing `NUMBER OF LAYERS = 12`, both 0 ERRORS 0 WARNINGS); the same
+  pentahedron in all three spellings (six fields, the manual's eight, and the
+  trailing-zero form) all giving `TOTAL MASS = 3.90000000E-10` = ρ·V exactly
+  where the six-field form used to give half that; and the mixed shell +
+  thick-shell SECID, whose `ERROR ID : 79` is gone.
+
+  All **nine r14 decks re-run: 0 starter ERRORS**, the free-node `/BCS` group
+  is absent on every one (it used to hold the entire mesh), the modal
+  `example-13` now gets the dummy `/CLOAD` it needs to start at all, and
+  `*DATABASE_HISTORY_TSHELL` rides `/TH/BRIC` instead of sitting in
+  `skipped_keywords`.
+
+  **Corpus sweep** (415 deduped decks over the repo, `Ryan_Lee_Examples`,
   `ls-dyna_example` and the r14 ton-mm-s tree), SHA-256 over both `_0000.rad`
   and `_0001.rad` plus warning-set / skip-list / `recognized_not_emitted`
-  deltas, master `3cd12d5` vs this branch: **453/462 byte-identical, 0
-  conversion errors either side.** The nine movers are exactly the nine
-  thick-shell decks — `example-02`, `example-13` and `example-15` at ELFORM 2,
-  3 and 5 — every one of which went from a mesh-free `/PART` on a placeholder
-  `/PROP/SHELL` to its full 16 / 192 / 192 `/BRICK` elements on a
-  `/PROP/TYPE20`. That is the intended delta, not noise.
+  deltas, master `3cd12d5` vs this branch: **406/415 fully identical, 0
+  conversion errors either side, and `_0001.rad` byte-identical on all 415** —
+  the whole delta is starter-side, which is the right shape. The nine movers are
+  exactly the nine thick-shell decks — `example-02`, `example-13` and
+  `example-15` at ELFORM 2, 3 and 5 — every one of which went from a mesh-free
+  `/PART` on a placeholder `/PROP/SHELL` to its full 16 / 192 / 192 `/BRICK`
+  elements on a `/PROP/TYPE20`. That is the intended delta, not noise.
+  (`example-13` still gets no implicit contact stub — the `is_modal` guard doing
+  its job, since a stub would pollute the exported stiffness matrix.)
 
-  Re-swept after the implicit-stub gate was widened, this time branch-vs-branch:
-  **456/462 identical, and the 6 that moved are the 6 NON-MODAL thick-shell
-  decks.** `example-13` did not move, which is the `is_modal` guard doing its
-  job — a stub on a modal deck would pollute the exported stiffness matrix. The
-  extra warnings on the other six are the ordinary contact-stub advisories every
-  implicit no-contact deck in the corpus already gets (Inacti=5 mapping, `vdc=0`
-  damping, the SPMD solid-surface note), not anything thick-shell-specific.
+  **The 52 solver-validated decks regenerate byte-identical.** The bending,
+  thickness-direction, orthotropy and ply-order campaign below was measured at
+  the first cut of this batch; every deck of it re-converts to a `_0000.rad` and
+  `_0001.rad` with the SAME SHA-256 afterwards, so none of those numbers moved.
 
-  Tests 2956 → 3042 (+86), subtests 888 (unchanged); `ruff check .` clean.
+  Tests 2956 → 3061 (+105), subtests 888 (unchanged); `ruff check .` clean.
 
 - **The damping batch: `*DAMPING_PART_MASS`/`_SET` → a part-scoped `/DAMP`,
   `*DAMPING_FREQUENCY_RANGE`/`_DEFORM` → `/DAMP/FREQUENCY_RANGE`, and

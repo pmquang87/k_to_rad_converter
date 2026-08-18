@@ -1295,13 +1295,15 @@ def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
     for pid, pc in sorted(state.part_composites.items()):
         if _layup_is_convertible(pc):
             continue
-        # A *PART_COMPOSITE_TSHELL that really is thick-shell meshed has its own
-        # route — writer/tshell.py turns it into a /PROP/TYPE22 with real
-        # per-ply mat_ID/ti/t. Only the variants with nowhere to put a layup
-        # (a TSHELL spelling on a THIN-shell mesh, _IGA_SHELL) still fall back
+        # A THICK-SHELL meshed part never falls back to a shell property: its
+        # /PROP is a TYPE20/21/22 from writer/tshell.py, and creating a
+        # SectionShell under the same SECID here would put two /PROP cards on
+        # one id (starter ERROR 79). writer/tshell.py reports the layup itself
+        # — as a real /PROP/TYPE22 for the _TSHELL spelling, as a named drop
+        # for any other. Only the variants with nowhere to put a layup AND a
+        # thin-shell mesh (a TSHELL spelling on shells, _IGA_SHELL) fall back
         # to a plain shell property here.
-        if pid in state.tshell_prop_ids or (pc.variant == "TSHELL"
-                                            and pid in tshell_pids):
+        if pid in state.tshell_prop_ids or pid in tshell_pids:
             continue
         total = _layup_thickness(pc)
         secid = pid

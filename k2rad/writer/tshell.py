@@ -23,21 +23,38 @@ Six deliberate divergences from dyna2rad, every one of them a measured defect
 on its side:
 
 1. **``Icstr`` is written explicitly** (010, the thickness direction that maps
-   LS-DYNA's n1-n4 → n5-n8 convention). dyna2rad leaves the column blank and
-   relies on the starter's own ``IF (IHBE == 14 .AND. ICSTR == 0) ICSTR = 10``.
-   That works for TYPE20/21 but DESYNCS TYPE22: the CFG counts the layer cards
-   itself in a chain that matches only ``Icstr == 100/10/1``, so with the column
-   blank ``N`` is never set and the reader consumes the wrong number of layer
-   cards while the starter expects ``NPTS`` of them. Measured: ``WARNING ID :
-   100213 ... unsupported field exists at the end of line`` followed by
-   ``ERROR ID : 675`` with an EMPTY last layer.
+   LS-DYNA's n1-n4 → n5-n8 convention). dyna2rad leaves the column blank.
+
+   The field is genuinely load-bearing: it SELECTS the through-thickness node
+   pairing, and ``scdtchk3.F`` CASE(10) pairs (1-5) (2-6) (3-7) (4-8) while
+   CASE(100) pairs (1-4) (2-3) (5-8) (6-7). Measured on an otherwise identical
+   deck, patching only 010 → 100 moved the tip deflection by 2.08x — exactly
+   onto the value the WRONG connectivity gives (-0.950539 vs -1.973132 mm), so
+   node order and ``Icstr`` are the two halves of one statement and both are
+   read.
+
+   What the blank column costs is a DEPENDENCE on a starter default that only
+   exists for one formulation: ``hm_read_prop20.F:179`` (and the same line in
+   prop21/prop22) restores ``ICSTR = 10`` when ``IHBE == 14``, and NOTHING
+   restores it on Isolid=15 — a blank there echoes ``CONSTANT STRESS FLAG = 0``
+   and leaves the pairing to whatever the reader falls back to. Writing it
+   removes the dependence on both formulations. (An earlier note here claimed a
+   blank column also desyncs the TYPE22 layer-card count with WARNING 100213 +
+   ERROR 675; that does NOT reproduce at 2 layers on the 2026-05-20 build —
+   both Isolid=14/Inpts=222 and Isolid=15/Inpts=2 read back clean — so the
+   claim is withdrawn and the justification above is the one that holds.)
 2. **A blank ELFORM is LS-DYNA's default 1**, not 0. dyna2rad's ``elform == 1 ?
    15 : 14`` sends a blank straight to the full-integration HA8.
 3. **A blank NIP is LS-DYNA's default 2**, not 0 (measured: dyna2rad echoed
    ``NIP = 0``). On the composite branch its 0 writes zero ply cards against a
    property that expects one — ERROR 675 again.
-4. **``Inpts`` is clamped to 1..9 on Isolid=15 too.** dyna2rad clamps only on
-   the Isolid=14 branch and passes a raw NIP > 9 through to starter ERROR 563.
+4. **``Inpts`` is clamped to 1..9 on Isolid=15 too** for TYPE20/TYPE21, whose
+   readers enforce that range (``hm_read_prop20.F:204-213``, MSGID 563), and
+   the clamp is REPORTED on both formulations. dyna2rad clamps only on the
+   Isolid=14 branch and passes a raw NIP > 9 through to starter ERROR 563.
+   TYPE22 is exempt — its Isolid=15 branch has no range check at all
+   (``hm_read_prop22.F:229-231``), so a laminate keeps the deck's own ELFORM up
+   to the 200-layer NLYMAX.
 5. **The orthotropy axes use the #90 ``_composite_ref_axis`` route** — all six
    AOPT modes, with a synthesized ``/SKEW/FIX`` where one is needed. dyna2rad
    copies ``A1/A2/A3`` for AOPT=2 and ``V1/V2/V3`` for AOPT=3 and writes NOTHING
@@ -238,38 +255,42 @@ def _tshell_inpts(isolid: int, nip: int) -> Tuple[int, int]:
 # Prepass
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tshell_layer_encoding(state: ConversionState, isolid: int, nply: int,
-                           what: str) -> Tuple[int, int, int]:
+def _tshell_layer_encoding(isolid: int, nply: int) -> Tuple[int, int, int]:
     """(Isolid, Inpts, Iint) for a /PROP/TYPE22 holding *nply* layers.
 
     Radioss derives ``NLY`` from the property card, and which field it reads
     depends on the formulation and on the packed digits
-    (``hm_read_prop22.F:228-293``, mirrored by the CFG's own layer-card count):
+    (``hm_read_prop22.F:225-292``, mirrored by the CFG's own layer-card count
+    in ``prop_p22_tsh_comp.cfg:381-424``):
 
-    * ``Isolid=15``  → ``NLY = Inpts``, which the reader caps at 9.
+    * ``Isolid=15``  → ``NLY = NPT``, i.e. the ``Inpts`` column read straight,
+      with NO range check on this branch. The 1..9 limit that MSGID 563
+      enforces is a **TYPE20/TYPE21** rule (``hm_read_prop20.F:204-213``,
+      ``hm_read_prop21.F``); on TYPE22 the only guards are ERROR 27
+      (``NLY <= 0``) and ERROR 28 (``NLY > NLYMAX = 200``). The CFG agrees: for
+      ``Iint <= 9`` and ``NBP <= 200`` its import chain falls through to
+      ``ASSIGN(N, NBP)``, so it reads exactly ``Inpts`` layer cards.
     * ``Isolid=14``  → ``NLY`` is the digit ``Icstr`` selects, here the middle
-      one (``Icstr = 010`` → ``NPTS``), so also at most 9;
-    * ``Isolid=14`` with that digit ZERO → ``NLY = Iint``, up to 200. This is
-      the ONLY encoding Radioss has for a laminate of more than nine layers.
+      one (``Icstr = 010`` → ``NPTS``), so at most 9;
+    * ``Isolid=14`` with that digit ZERO → ``NLY = Iint``, up to 200.
 
-    So a >9-ply stack on the under-integrated Isolid=15 has to move to Isolid=14
-    to be expressible at all. That is announced rather than done silently: it
-    changes the element formulation, and the alternative — writing 12 layer
-    cards under an ``Inpts`` that says 9 — is a reader desync, not a
-    compromise.
+    So a laminate of more than nine layers is expressible on BOTH formulations
+    and the deck's own ELFORM is kept either way. Switching Isolid=15 → 14 here
+    would trade HSEPH/PA6 (one in-plane point, physical stabilization) for HA8
+    (2x2 full integration) on the most common composite case — LS-DYNA's own
+    default ELFORM 1 — for no reason. Only a stack that exceeds ``NLYMAX`` is
+    reported, and it is reported by the callers, which truncate it.
     """
-    if nply > 9:
-        if isolid != 14:
-            state.warn(
-                f"{what}: {nply} layers exceed the 9 integration points "
-                f"Isolid={isolid} allows (MSGID 563), so the property switches "
-                "to the full-integration Isolid=14 with the layer count in "
-                "Iint — the only encoding Radioss has for a thick shell of "
-                "more than nine layers (hm_read_prop22.F:272-275 reads NLY "
-                "from Iint exactly when the thickness digit of Inpts is 0). "
-                "The element formulation changes with it.")
-        return 14, 202, nply
-    return isolid, _tshell_inpts(isolid, nply)[0], 0
+    if isolid == 14:
+        if nply > 9:
+            # The middle digit cannot hold two figures, so zero it and let the
+            # reader take NLY from Iint instead (hm_read_prop22.F:272-275 —
+            # "IF (NLY == 0) NLY = IINT").
+            return 14, 202, nply
+        return 14, _tshell_inpts(14, nply)[0], 0
+    # Isolid=15: Inpts IS the layer count, 1..200, and the starter forces
+    # Iint = 1 itself (hm_read_prop22.F:222), so 0 here is inert.
+    return 15, max(1, min(nply, 200)), 0
 
 
 def _plies_key(plies: List[CompositePly]):
@@ -408,7 +429,27 @@ def _part_composite_tshell_layups(state: ConversionState) -> None:
     """
     tshell_pids = _tshell_part_ids(state)
     for pid, pc in sorted(state.part_composites.items()):
-        if pc.variant != "TSHELL" or pid not in tshell_pids:
+        if pid not in tshell_pids:
+            continue
+        if pc.variant != "TSHELL":
+            # A THIN-shell *PART_COMPOSITE spelling on a thick-shell mesh. Both
+            # the thick-shell layup route (which wants _TSHELL) and the shell
+            # composite route (which skips every thick-shell part) leave it
+            # alone, so without this its whole laminate would go out silently.
+            # LS-DYNA does not accept the pairing either — *PART_COMPOSITE
+            # expects *ELEMENT_SHELL, *PART_COMPOSITE_TSHELL expects
+            # *ELEMENT_TSHELL (Vol I R14 p.35-19) — so it is reported rather
+            # than quietly promoted to the TYPE22 the _TSHELL spelling gets.
+            state.warn(
+                f"*PART_COMPOSITE{'_' + pc.variant if pc.variant else ''} "
+                f"{pid} carries a {len(pc.plies)}-ply layup, but the part is "
+                "meshed with *ELEMENT_TSHELL. The thin-shell spelling expects "
+                "*ELEMENT_SHELL (LS-DYNA pairs the two; the thick-shell form "
+                "is *PART_COMPOSITE_TSHELL), so the PLY STACK IS DROPPED — the "
+                "part keeps its mesh and runs on its *SECTION_TSHELL property "
+                "with that section's own integration instead. Rename the card "
+                "to *PART_COMPOSITE_TSHELL to get a real per-ply "
+                "/PROP/TYPE22.")
             continue
         plies = [p for p in pc.plies if p.mid > 0 and p.thick > 0.0]
         if not plies:
@@ -461,6 +502,53 @@ def _resolve_tshells(state: ConversionState) -> None:
     _part_composite_tshell_layups(state)
     for pid in sorted(state.tshell_layups):
         state.tshell_prop_ids[pid] = state.next_prop_id()
+    _split_mixed_family_sections(state)
+
+
+def _split_mixed_family_sections(state: ConversionState) -> None:
+    """A *SECTION_TSHELL shared by thick-shell parts AND by shell/solid parts
+    gets its thick-shell property moved to a SYNTHESIZED id, with those parts
+    repointed at it.
+
+    Two /PROP cards cannot share one id — starter ``ERROR ID : 79 DUPLICATE ID
+    / IN PID DEFINITION``. When NO part on the section is thick-shell meshed
+    ``_make_tshell_properties`` simply does not emit (the other family's
+    auto-created section owns the id). When the families are MIXED both need a
+    property, so the thick-shell one moves. Measured before this: a deck with
+    *ELEMENT_TSHELL on PART 1 and *ELEMENT_SHELL on PART 2, both on SECID 5,
+    emitted /PROP/SHELL/5 AND /PROP/TYPE20/5 and the starter reported ERROR 79
+    plus 60, 226 and 495, with no warning from the converter.
+
+    Runs in the prepass because ``_make_parts_and_elements`` reads
+    ``tshell_prop_ids`` to repoint the /PART, and that is long before
+    ``_make_tshell_properties`` writes the card.
+    """
+    tshell_pids = _tshell_part_ids(state)
+    if not tshell_pids:
+        return
+    other_meshed = ({e.pid for e in state.shell_elems}
+                    | {e.pid for e in state.solid_elems}
+                    | {e.pid for e in state.beam_elems})
+    for secid in sorted(state.sec_tshells):
+        ref_pids = _section_parts(state, secid)
+        here = sorted(p for p in ref_pids if p in tshell_pids
+                      and p not in state.tshell_layups)
+        others = sorted(p for p in ref_pids
+                        if p in other_meshed and p not in tshell_pids)
+        if not here or not others:
+            continue
+        prop_id = state.next_prop_id()
+        state.tshell_section_prop_ids[secid] = prop_id
+        for p in here:
+            state.tshell_prop_ids[p] = prop_id
+        state.warn(
+            f"*SECTION_TSHELL {secid} is shared by thick-shell part(s) {here} "
+            f"AND by part(s) {others} that carry shells or ordinary solids. "
+            "Both families need a /PROP and only one can own the SECID, so "
+            f"the thick-shell property is emitted as /PROP id {prop_id} and "
+            f"part(s) {here} are repointed at it. Writing both under {secid} "
+            "would be starter ERROR 79 (DUPLICATE ID IN PID DEFINITION). Give "
+            "the thick shells their own *SECTION_TSHELL to control the id.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -672,31 +760,122 @@ def _warn_dropped_fields(state: ConversionState, sec: SectionTshell,
                    "Dropped: " + "; ".join(notes) + ".")
 
 
+#: Radioss puts exactly ONE integration point per /PROP/TYPE22 layer, at the
+#: layer MID-PLANE (``hm_read_prop22.F:429-433``, ``Ipos=0``), so an N-equal-
+#: layer stack realises only ``1 - 1/N^2`` of the exact bending stiffness. This
+#: is faithful to LS-DYNA's own one-point-per-ply rule, but it means switching
+#: a section from ICOMP=0 to ICOMP=1 at the SAME NIP softens it measurably:
+#: measured against the same-mesh /PROP/TYPE20 NIP=2 Gauss baseline, N=2/4/8
+#: came out 0.790010 / 0.632468 / 0.602489 mm against a predicted 0.790545 /
+#: 0.632585 / 0.602497 (deviation -0.07 % / -0.02 % / -0.00 %).
+_LAYER_QUADRATURE_NOTE = (
+    "Each layer carries ONE integration point at its own mid-plane (Ipos=0), "
+    "so a stack of {n} equal layers realises 1 - 1/{n}^2 of the exact bending "
+    "stiffness — about {pct:.3g} % softer in bending than the same section "
+    "integrated with Gauss points (25 % at 2 layers, 6.3 % at 4, 1.6 % at 8). "
+    "Use more, thinner layers if bending stiffness matters.")
+
+
+def _warn_ashear(state: ConversionState, label: str, shrf: float) -> None:
+    """SHRF is the ONE *SECTION_TSHELL field that survives onto a TYPE22 — as
+    ``Ashear`` — so an out-of-range value being discarded there has to be said.
+    (On TYPE20/TYPE21 ``_warn_dropped_fields`` reports SHRF wholesale, because
+    those cards have no shear column at all.)"""
+    if shrf and not (0.0 < shrf <= 1.0):
+        state.warn(
+            f"{label} → /PROP/TYPE22: SHRF={shrf:g} is outside the (0, 1] "
+            "range Radioss's Ashear accepts, so it is DROPPED and the shear "
+            "area factor falls back to the solver default 1.0. LS-DYNA's own "
+            "default is 1.0, so a deck that never set SHRF loses nothing; "
+            "check the card if this value was meant.")
+
+
+def _warn_type20_axis_drop(state: ConversionState, secid: int,
+                           mids: List[int]) -> None:
+    """A material that carries real AOPT axes but whose Radioss law is
+    PROP_SOLID class 1 lands on /PROP/TYPE20, which has NO reference-vector
+    card — so those axes have nowhere to go.
+
+    The iso/ortho split keys on the EMITTED law's solid class, not on
+    dyna2rad's ``axisOptFlag = AOPT + 1 > 0`` (i.e. on the material card merely
+    HAVING an AOPT field). The two disagree for exactly this case, and
+    *MAT_MODIFIED_HONEYCOMB → /MAT/LAW50 is a real one: LAW50 declares
+    SOLID_ISOTROPIC yet carries per-direction moduli and yield curves. Routing
+    it to TYPE21 anyway would change the property type on a path with no
+    solver validation, so the drop is NAMED instead — the same shape as the
+    TYPE20 BETA-fold warning right above it."""
+    named = sorted({m for m in mids if _mat_has_ref_axis(state, m)})
+    if named:
+        state.warn(
+            f"*SECTION_TSHELL {secid} → /PROP/TYPE20: material(s) {named} "
+            "define an AOPT reference direction, but /PROP/TYPE20 has no "
+            "reference-vector card at all — the axes are DROPPED and the "
+            "material frame falls back to the element's own connectivity "
+            "(scortho3.F). For an isotropic law that changes nothing; for a "
+            "direction-dependent law that Radioss still classes as "
+            "SOLID_ISOTROPIC — /MAT/LAW50 from *MAT_MODIFIED_HONEYCOMB is the "
+            "case to watch, with per-direction moduli and yield curves — the "
+            "orientation is lost. Align the mesh with the intended material "
+            "axes, or move the part to an orthotropic law so the section takes "
+            "the /PROP/TYPE21 that has a vector. (dyna2rad splits on the "
+            "material merely HAVING an AOPT field and would emit TYPE21 here.)")
+
+
+#: Material containers whose cards carry an AOPT field. Only these can lose a
+#: stated direction on a TYPE20; every other law has no direction to lose.
+_AOPT_MAT_DICTS = ("mat_orthotropic", "mat_enhanced_composite",
+                   "mat_aniso_visco", "mat_honeycomb",
+                   "mat_modified_honeycomb", "mat_transverse_aniso",
+                   "mat_hill_3r", "mat_deshpande_fleck")
+
+
+def _mat_has_ref_axis(state: ConversionState, mid: int) -> bool:
+    """True when the material card states an EXPLICIT direction — a non-zero
+    AOPT. AOPT=0 means "axes from element nodes 1, 2 and 4", which is exactly
+    what Radioss's own element frame builds anyway (``scortho3.F:118-129``
+    takes E1 from the n1->n2 edge), so it loses nothing on a TYPE20 and is not
+    reported."""
+    for name in _AOPT_MAT_DICTS:
+        mat = getattr(state, name, {}).get(mid)
+        if mat is not None and getattr(mat, "aopt", 0.0):
+            return True
+    return False
+
+
 def _warn_elform(state: ConversionState, sec: SectionTshell,
                  isolid: int) -> None:
+    _warn_elform_value(state, f"*SECTION_TSHELL {sec.secid}", sec.elform,
+                       sec.elform_blank, isolid)
+
+
+def _warn_elform_value(state: ConversionState, label: str, elform: int,
+                       elform_blank: bool, isolid: int) -> None:
+    """The ELFORM report, shared by the *SECTION_TSHELL route and the
+    *PART_COMPOSITE_TSHELL card-3b route — both resolve an ELFORM through
+    ``_tshell_isolid`` and both lose the same things by doing so."""
     from ..handlers import (_TSHELL_ELFORMS, _TSHELL_PLANE_STRESS_ELFORMS,
                             _TSHELL_REDUCED_ELFORMS)
-    if sec.elform_blank:
+    if elform_blank:
         state.warn(
-            f"*SECTION_TSHELL {sec.secid}: ELFORM is blank, which is LS-DYNA's "
+            f"{label}: ELFORM is blank, which is LS-DYNA's "
             "default 1 (one-point reduced integration) → Isolid=15 (HSEPH). "
             "Note dyna2rad reads the blank as 0 and lands on the "
             "FULL-integration Isolid=14 instead, so a deck converted both ways "
             "will not match — this one follows the manual's default.")
-    elif sec.elform not in _TSHELL_ELFORMS:
+    elif elform not in _TSHELL_ELFORMS:
         state.warn(
-            f"*SECTION_TSHELL {sec.secid}: ELFORM={sec.elform} is not a "
+            f"{label}: ELFORM={elform} is not a "
             "thick-shell formulation (the manual defines 1, 2, 3, 5, 6 and 7 — "
             f"there is no ELFORM 4). Converted as Isolid={isolid} like the "
             "non-default forms; check the deck, because an out-of-range ELFORM "
             "usually means the card was written for *SECTION_SOLID.")
     lost = []
-    if sec.elform in _TSHELL_REDUCED_ELFORMS and isolid == 14:
+    if elform in _TSHELL_REDUCED_ELFORMS and isolid == 14:
         lost.append("its REDUCED integration (Isolid=14 is the "
                     "full-integration HA8; Radioss's under-integrated 15 is "
                     "HSEPH physical stabilization, not LS-DYNA's "
                     "assumed-strain enhancement, so it is not substituted)")
-    if sec.elform in _TSHELL_PLANE_STRESS_ELFORMS:
+    if elform in _TSHELL_PLANE_STRESS_ELFORMS:
         lost.append("its PLANE-STRESS treatment — ELFORM 1, 2 and 6 are "
                     "extruded thin shells with an uncoupled thickness-"
                     "direction stiffness (Vol I R16 p.3717 Remark 1), while "
@@ -704,7 +883,7 @@ def _warn_elform(state: ConversionState, sec: SectionTshell,
                     "part comes out stiffer through the thickness")
     if lost:
         state.warn(
-            f"*SECTION_TSHELL {sec.secid}: ELFORM={sec.elform} loses "
+            f"{label}: ELFORM={elform} loses "
             + "; and ".join(lost) + ".")
 
 
@@ -894,32 +1073,50 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
             unreferenced.append(sec.secid)
             continue
         if not here and any(p in other_meshed for p in ref_pids):
-            # A *PART on a *SECTION_TSHELL that carries SHELLS or ordinary
-            # SOLIDS instead. That part's own family already auto-creates a
-            # section under the SAME secid, and both properties would be
-            # emitted under that id — starter ERROR 79, duplicate id. The
-            # element family wins; this section is reported, not emitted.
+            # NO part on this section is thick-shell meshed, but at least one
+            # carries shells or ordinary solids. That part's own family already
+            # auto-creates a section under the SAME secid, and both properties
+            # would be emitted under that id — starter ERROR 79, duplicate id.
+            # The element family wins; this section is reported, not emitted.
+            # (The MIXED case — some parts thick-shell, some not — is resolved
+            # a step earlier, in ``_split_mixed_family_sections``, which moves
+            # the thick-shell property onto a synthesized id.)
             wrong_family.append(sec.secid)
             continue
         # A part with its own layup ignores the section property entirely; a
         # section ALL of whose thick-shell parts do would emit a property
         # nothing uses.
         pids = here or ref_pids
-        live = [p for p in pids if p not in state.tshell_prop_ids]
+        live = [p for p in pids if p not in state.tshell_layups]
         if not live:
             continue
+        # Normally the property IS the SECID (the /PROP/TYPE43 shape, no /PART
+        # repoint). When the SECID is shared with another element family it
+        # moves to the synthesized id the prepass allocated and repointed to.
+        prop_id = state.tshell_section_prop_ids.get(sec.secid, sec.secid)
         isolid = _tshell_isolid(sec.elform)
         _warn_elform(state, sec, isolid)
         inpts, _ = _tshell_inpts(isolid, sec.nip)
-        if isolid == 15 and sec.nip > 9 and sec.icomp != 1:
+        # ``_tshell_inpts`` clamps to 9 on BOTH formulations, so BOTH have to
+        # say so. (ICOMP=1 does not come through here at all — its layer count
+        # goes through ``_tshell_layer_encoding``, which holds up to 200.)
+        if sec.nip > 9 and sec.icomp != 1:
             state.warn(
                 f"*SECTION_TSHELL {sec.secid}: NIP={sec.nip} exceeds the 9 "
-                "through-thickness points Radioss allows on the "
-                "under-integrated Isolid=15 (hm_read_prop20.F, MSGID 563), so "
-                "it is CLAMPED to 9. dyna2rad passes the raw value through and "
-                "the starter refuses the deck.")
-        mids = [state.parts[p].mid for p in (live or pids)
-                if p in state.parts]
+                "through-thickness integration points a /PROP/TYPE"
+                f"{20 if isolid == 15 else 21}-family card can hold on "
+                f"Isolid={isolid} — "
+                + ("hm_read_prop20.F:204-213 rejects NPT > 9 outright "
+                   "(MSGID 563)" if isolid == 15 else
+                   "the middle digit of the packed 2j2 Inpts field cannot "
+                   "exceed 9")
+                + f" — so it is CLAMPED to 9 and {sec.nip - 9} "
+                "through-thickness point(s) are lost. State the stack as "
+                "ICOMP=1 or *PART_COMPOSITE_TSHELL to keep more than nine "
+                "(a /PROP/TYPE22 holds up to 200). dyna2rad clamps only the "
+                "Isolid=14 branch and lets the Isolid=15 deck fail in the "
+                "starter.")
+        mids = [state.parts[p].mid for p in live if p in state.parts]
         laws = [ln for ln in (_target_mat_law(state, m) for m in mids)
                 if ln is not None]
         ortho = any(_SOLID_MAT_CLASS.get(ln) == _ORTHO_SOLID_CLASS
@@ -942,8 +1139,7 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
                 "material; give each material its own *SECTION_TSHELL to get "
                 "that here.")
         _warn_dropped_fields(state, sec, prop_type)
-        _warn_mat_compat(state, sec.secid, prop_type, live or pids,
-                         inpts, isolid)
+        _warn_mat_compat(state, sec.secid, prop_type, live, inpts, isolid)
         title = sec.title or f"PROP_{sec.secid}"
         fold = state.tshell_beta_fold.get(sec.secid, 0.0)
         if prop_type == 20:
@@ -954,11 +1150,12 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
                     "the section's material is isotropic, so it converts to "
                     "the isotropic /PROP/TYPE20, which has no material "
                     "direction to rotate.")
-            lines += _emit_prop_type20(sec.secid, title, isolid, inpts,
+            _warn_type20_axis_drop(state, sec.secid, mids)
+            lines += _emit_prop_type20(prop_id, title, isolid, inpts,
                                        istrain)
             continue
         label = f"/PROP/TYPE{prop_type} for *SECTION_TSHELL {sec.secid}"
-        axis, src_mid = _tshell_axis(state, label, sec.secid, mids)
+        axis, src_mid = _tshell_axis(state, label, prop_id, mids)
         if axis is None:
             axis = _RefAxis(ip=0, vec=(1.0, 0.0, 0.0),
                             note="no orthotropic material on the section")
@@ -969,7 +1166,7 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
                 f"{src_mid} — {axis.note}.")
         lines += list(axis.lines)
         if prop_type == 21:
-            lines += _emit_prop_type21(sec.secid, title, isolid, inpts,
+            lines += _emit_prop_type21(prop_id, title, isolid, inpts,
                                        axis, axis.phi + fold)
             continue
         # ICOMP=1: one layer per through-thickness integration point, angle
@@ -985,10 +1182,10 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
                 "laminate is thinner than the deck's.")
         betas = (sec.betas + [0.0] * nply)[:nply]
         mat_id = mids[0] if mids else 0
-        isolid, inpts, iint = _tshell_layer_encoding(
-            state, isolid, nply, f"*SECTION_TSHELL {sec.secid} (ICOMP=1)")
+        isolid, inpts, iint = _tshell_layer_encoding(isolid, nply)
+        _warn_ashear(state, f"*SECTION_TSHELL {sec.secid}", sec.shrf)
         lines += _emit_prop_type22(
-            sec.secid, title, isolid, inpts, iint, axis,
+            prop_id, title, isolid, inpts, iint, axis,
             [(betas[k] + axis.phi + fold, 1.0 / nply, mat_id)
              for k in range(nply)],
             sec.shrf if 0.0 < sec.shrf <= 1.0 else 0.0)
@@ -999,7 +1196,8 @@ def _make_tshell_properties(state: ConversionState, istrain: int) -> List[str]:
             + f" deg, all on material {mat_id}. LS-DYNA's ICOMP states one "
             "ANGLE per integration point and nothing else — no per-layer "
             "material and no per-layer thickness — so a genuinely "
-            "heterogeneous laminate needs *PART_COMPOSITE_TSHELL instead.")
+            "heterogeneous laminate needs *PART_COMPOSITE_TSHELL instead. "
+            + _LAYER_QUADRATURE_NOTE.format(n=nply, pct=100.0 / (nply * nply)))
     if unreferenced:
         state.note_recognized_not_emitted(
             "SECTION_TSHELL",
@@ -1045,8 +1243,9 @@ def _emit_tshell_layup_props(state: ConversionState) -> List[str]:
             layup.plies = layup.plies[:200]
             nply = 200
         total = sum(p.thick for p in layup.plies)
-        isolid, inpts, iint = _tshell_layer_encoding(
-            state, isolid, nply, f"{layup.source} {pid} (ELFORM={elform})")
+        _warn_elform_value(state, f"{layup.source} {pid}", elform,
+                           layup.elform <= 0 and sec.elform_blank, isolid)
+        isolid, inpts, iint = _tshell_layer_encoding(isolid, nply)
         label = f"/PROP/TYPE22 for {layup.source} {pid}"
         axis, src_mid = _tshell_axis(state, label, prop_id,
                                      [p.mid for p in layup.plies])
@@ -1065,6 +1264,7 @@ def _emit_tshell_layup_props(state: ConversionState) -> List[str]:
         fold = state.tshell_beta_fold.get(secid, 0.0)
         layers = [(p.beta + axis.phi + fold, p.thick / total, p.mid)
                   for p in layup.plies]
+        _warn_ashear(state, f"{layup.source} {pid}", layup.shrf)
         lines += _emit_prop_type22(
             prop_id, (layup.title or f"TSHELL_LAYUP_{pid}")[:100],
             isolid, inpts, iint, axis, layers,
@@ -1080,7 +1280,9 @@ def _emit_tshell_layup_props(state: ConversionState) -> List[str]:
                "handler and emits /PROP/TYPE51 + /PROP/TYPE19, which its own "
                "starter then refuses on the bricks (ERROR 60 INVALID PROPERTY "
                "ID ... FOR BRICK ELEMENT, ERROR 226 WRONG SOLID PROPERTY TYPE "
-               "51)." if layup.source == "*PART_COMPOSITE_TSHELL" else ""))
+               "51)." if layup.source == "*PART_COMPOSITE_TSHELL" else "")
+            + " " + _LAYER_QUADRATURE_NOTE.format(
+                n=nply, pct=100.0 / (nply * nply)))
         for mid in sorted({p.mid for p in layup.plies}):
             if not _mid_is_known(state, mid):
                 state.warn(

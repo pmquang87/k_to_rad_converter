@@ -613,6 +613,12 @@ def _plane_cut(state: ConversionState, cs) -> Tuple[List[int], List[int],
         _try(e.nodes, e.eid, e.pid, shell_eids)
     for e in state.solid_elems:
         _try(e.nodes, e.eid, e.pid, solid_eids)
+    # A thick shell is a /BRICK in the emitted deck, so the same face logic
+    # applies and its eid belongs in the /GRBRIC the section references.
+    # Without this a *DATABASE_CROSS_SECTION_PLANE through a thick-shell part
+    # cut nothing and no /SECT was emitted at all.
+    for e in state.tshell_elems:
+        _try(e.nodes, e.eid, e.pid, solid_eids)
     for e in state.beam_elems:
         _try([e.n1, e.n2], e.eid, e.pid, beam_eids)
     return (sorted(node_ids), shell_eids, solid_eids, beam_eids)
@@ -689,6 +695,8 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         if shell_eids or solid_eids or beam_eids:
             shells = {e.eid: e for e in state.shell_elems}
             solids = {e.eid: e for e in state.solid_elems}
+            # Thick shells share the /BRICK id space and the solid_eids list.
+            solids.update({e.eid: e for e in state.tshell_elems})
             beams = {e.eid: e for e in state.beam_elems}
             for eid in shell_eids:
                 if eid in shells:

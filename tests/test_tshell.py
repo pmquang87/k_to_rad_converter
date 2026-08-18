@@ -226,14 +226,53 @@ class TshellElements(unittest.TestCase):
         self.assertNotIn(0, [_col_i(card, 11 + 10 * k, 20 + 10 * k)
                              for k in range(8)])
 
-    def test_short_card_is_padded_by_repeating_not_zeroed(self):
-        """Same reason: a zero slot changes the element CLASS. A card that
-        names only six nodes is padded by repeating the last id."""
+    def test_a_six_node_card_becomes_the_manuals_pentahedron(self):
+        """A card naming six ids is not a form LS-DYNA defines, but it has one
+        obvious reading — the pentahedron's own n1..n6 — so it expands to the
+        manual's 8-slot spelling n1 n2 n3 n3 n4 n5 n6 n6 (Vol I R14 p.19-139
+        Remark 1). Padding by repeating the LAST id instead gives
+        n1..n6 n6 n6, whose upper face has collapsed to a point: HALF the
+        volume, accepted by the starter with 0 ERRORS."""
         result, starter = _convert(deck(
             elem="*ELEMENT_TSHELL\n" + _row(1, 1, 1, 2, 3, 4, 5, 6) + "\n"))
         self.assertEqual(_block(starter, "/BRICK/1")[1],
-                         _row(1, 1, 2, 3, 4, 5, 6, 6, 6))
-        self.assertTrue(_warns(result, "fewer than eight nodes"))
+                         _row(1, 1, 2, 3, 3, 4, 5, 6, 6))
+        self.assertTrue(_warns(result, "read as that pentahedron's own"),
+                        result.warnings)
+
+    def test_trailing_zeros_take_the_same_pentahedron_route(self):
+        """`n1..n6 0 0` is the same card written with the slots spelled out —
+        the parser pops the trailing zeros first, so it must not then fall into
+        the repeat-the-last-id path the six-field form used to take."""
+        _, starter = _convert(deck(
+            elem="*ELEMENT_TSHELL\n" + _row(1, 1, 1, 2, 3, 4, 5, 6, 0, 0)
+                 + "\n"))
+        self.assertEqual(_block(starter, "/BRICK/1")[1],
+                         _row(1, 1, 2, 3, 3, 4, 5, 6, 6))
+
+    def test_a_seven_node_card_still_repeats_the_last_id(self):
+        """Seven ids IS a legal degenerate hex (a pyramid), so repeating n7
+        changes nothing — but it is reported, because no LS-DYNA form is that
+        short."""
+        result, starter = _convert(deck(
+            elem="*ELEMENT_TSHELL\n" + _row(1, 1, 1, 2, 3, 4, 5, 6, 7) + "\n"))
+        self.assertEqual(_block(starter, "/BRICK/1")[1],
+                         _row(1, 1, 2, 3, 4, 5, 6, 7, 7))
+        self.assertTrue(_warns(result, "four, five or seven nodes"),
+                        result.warnings)
+
+    def test_a_rejected_connectivity_line_is_reported(self):
+        """A line the reader refuses (an interior zero) is a thick shell that
+        is NOT in the deck, and the orphan census cannot see it — no element
+        was ever created. So the walk counts it."""
+        result, starter = _convert(deck(
+            elem="*ELEMENT_TSHELL\n" + _row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)
+                 + "\n" + _row(2, 1, 1, 2, 0, 4, 5, 6, 7, 8) + "\n"))
+        rows = [ln for ln in _block(starter, "/BRICK/1")[1:]
+                if ln.strip() and not ln.startswith("#")]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(_warns(result, "neither a connectivity card nor an "
+                                       "option card"), result.warnings)
 
     def test_a_ply_card_is_never_mistaken_for_an_element(self):
         """`1 0.6 0.0 - 2 0.4 90.0` free-splits to SIX fields, which is enough
@@ -245,7 +284,7 @@ class TshellElements(unittest.TestCase):
             _row(1, 0.6, 0.0, "", 2, 0.4, 90.0, "")))
         self.assertEqual(
             _parse_tshell_base(_row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)),
-            (1, 1, [1, 2, 3, 4, 5, 6, 7, 8]))
+            (1, 1, [1, 2, 3, 4, 5, 6, 7, 8], 8))
 
     def test_every_option_spelling_is_registered(self):
         """*ELEMENT_TSHELL_{OPTION} with OPTION in {<blank>, BETA, COMPOSITE}
@@ -316,6 +355,46 @@ class TshellElements(unittest.TestCase):
             [w for w in result.warnings if "no target deformable nodes" in w],
             [])
         self.assertIn("/DAMP", starter)
+
+    def test_a_part_scoped_damping_card_reaches_thick_shells(self):
+        """The _PART_MASS / _SET route resolves its node group through a
+        DIFFERENT helper than *DAMPING_GLOBAL, and it shares exactly the same
+        rationale — /DAMP is node-based. Measured before the fix: "/DAMP
+        emitted: False, part(s) [1] carry no deformable shell or solid nodes",
+        against True on the byte-identical solid control."""
+        curve = ("*DEFINE_CURVE\n" + _row(7, 0, 1.0, 1.0) + "\n"
+                 + _row(0.0, 5.0) + "\n" + _row(1.0, 5.0) + "\n")
+        result, starter = _convert(deck(
+            extra=curve + "*DAMPING_PART_MASS\n" + _row(1, 7, 1.0) + "\n"))
+        self.assertEqual(
+            [w for w in result.warnings if "carry no deformable" in w], [])
+        self.assertIn("/DAMP", starter)
+
+    def test_initial_velocity_generation_reaches_thick_shells(self):
+        """*INITIAL_VELOCITY_GENERATION resolves STYP=2 through its own part
+        walk. Without the thick-shell arm the group came out empty and the
+        whole initial condition was dropped with a warning that did not name
+        thick shells as the cause."""
+        result, starter = _convert(deck(
+            extra="*INITIAL_VELOCITY_GENERATION\n"
+                  + _row(1, 2, 0.0, 0.0, 0.0, -5.0) + "\n"))
+        self.assertEqual(
+            [w for w in result.warnings if "node group empty" in w], [])
+        self.assertIn("/INIVEL", starter)
+
+    def test_a_cross_section_plane_cuts_thick_shells(self):
+        """A thick shell is a /BRICK, so the same face logic applies and its
+        eid belongs in the /GRBRIC the /SECT references. Before: "the plane
+        cuts no element" and no /SECT at all."""
+        result, starter = _convert(deck(
+            elem=TSH2,
+            extra="*DATABASE_CROSS_SECTION_PLANE\n"
+                  + _row(0, 15.0, 5.0, 1.0, 16.0, 5.0, 1.0) + "\n"
+                  + _row(0.0, 0.0, 0.0, 0, 0.0) + "\n"))
+        self.assertEqual(
+            [w for w in result.warnings if "cuts no element" in w], [])
+        self.assertIn("/SECT", starter)
+        self.assertIn("/GRBRIC", starter)
 
     def test_a_thick_shell_part_is_a_usable_contact_side(self):
         """A thick shell IS a `/BRICK` in the emitted deck, so every place that
@@ -595,6 +674,35 @@ class PropType20(unittest.TestCase):
                          1)
         self.assertIn("/PROP/TYPE20/1", starter)
 
+    def test_a_mixed_family_secid_never_carries_two_props(self):
+        """The all-shell case is only half of it. When ONE part on the section
+        is thick-shell meshed and ANOTHER is not, both families need a /PROP
+        and only one can own the SECID — measured PROPS = ['/PROP/SHELL/1',
+        '/PROP/TYPE20/1'] and starter `ERROR ID : 79 DUPLICATE ID / IN PID
+        DEFINITION / ID=1` (plus 60, 226, 495) with no warning at all. The
+        thick-shell property moves to a synthesized id and its part is
+        repointed."""
+        mixed = ("*KEYWORD\n" + NODES
+                 + "*ELEMENT_TSHELL\n" + _row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)
+                 + "\n"
+                 + "*ELEMENT_SHELL\n" + _row(2, 2, 1, 2, 3, 4) + "\n"
+                 + PART + "*PART\nshell part\n" + _row(2, 1, 1) + "\n"
+                 + sec() + MAT_ISO + "*END\n")
+        result, starter = _convert(mixed)
+        props = [ln.split("/")[-1] for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        self.assertEqual(len(props), len(set(props)), props)
+        self.assertEqual(len(_blocks(starter, "/PROP/SHELL/1")), 1)
+        tsh = _blocks(starter, "/PROP/TYPE20/")
+        self.assertEqual(len(tsh), 1)
+        prop_id = int(tsh[0][0].rsplit("/", 1)[1])
+        self.assertNotEqual(prop_id, 1)
+        # the thick-shell /PART now points at the synthesized id
+        self.assertEqual(_col_i(_cards(_block(starter, "/PART/1"))[0], 1, 10),
+                         prop_id)
+        self.assertTrue(_warns(result, "Both families need a /PROP"),
+                        result.warnings)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 class PropType21(unittest.TestCase):
@@ -773,22 +881,22 @@ class PropType22(unittest.TestCase):
         self.assertEqual(_col_i(c[0], 61, 70), 12)     # Iint = NLY
         self.assertEqual([_col_f(ln, 1, 20) for ln in c[4:16]], list(angles))
 
-    def test_more_than_nine_layers_on_isolid_15_switch_formulation(self):
-        """The >9-ply Iint encoding exists ONLY on Isolid=14 — on 15 the layer
-        count IS Inpts, which the reader caps at 9. Writing 12 layer cards under
-        an Inpts that says 9 desyncs the reader, so the property has to move to
-        Isolid=14, and that changes the element formulation, so it is announced.
-        (Clamping the CARD count instead would silently drop three plies.)"""
+    def test_more_than_nine_layers_on_isolid_15_keep_the_formulation(self):
+        """The 1..9 cap is a TYPE20/TYPE21 rule. hm_read_prop22.F's Isolid=15
+        branch is `CASE(15) / NLY = NPT / IP = 3` with NO range check — the only
+        guards after it are ERROR 27 (NLY<=0) and ERROR 28 (NLY>200) — and the
+        CFG agrees, falling through to ASSIGN(N, NBP) for Iint<=9 and NBP<=200.
+        So a 12-ply laminate keeps LS-DYNA's own default ELFORM 1 (HSEPH, one
+        in-plane point) instead of being pushed to the fully integrated HA8."""
         angles = tuple(float(k) for k in range(12))
-        result, starter = _convert(deck(
+        _, starter = _convert(deck(
             section=sec(elform=1, nip=12, icomp=1, betas=angles)))
         c = _cards(_block(starter, "/PROP/TYPE22/1"))
-        self.assertEqual(_col_i(c[0], 1, 10), 14)
-        self.assertEqual(_col_i(c[0], 51, 60), 202)
-        self.assertEqual(_col_i(c[0], 61, 70), 12)
+        self.assertEqual(_col_i(c[0], 1, 10), 15)
+        self.assertEqual(_col_i(c[0], 51, 60), 12)     # Inpts IS the count
+        self.assertEqual(_col_i(c[0], 61, 70), 0)      # Iint unused on 15
         self.assertEqual(len([ln for ln in c[4:] if _col_i(ln, 61, 70)]), 12)
-        self.assertTrue(_warns(result, "switches to the full-integration "
-                                       "Isolid=14"), result.warnings)
+        self.assertEqual([_col_f(ln, 1, 20) for ln in c[4:16]], list(angles))
 
     def test_the_layer_card_count_always_matches_the_declared_count(self):
         """The one invariant that makes a TYPE22 readable at all: the number of
@@ -1139,6 +1247,92 @@ class DroppedFields(unittest.TestCase):
         self.assertTrue(_warns(result, "dyna2rad reads the blank as 0"),
                         result.warnings)
 
+    def test_the_nip_clamp_is_named_on_both_formulations(self):
+        """`_tshell_inpts` clamps NIP to 9 on Isolid=14 as well as 15 (the
+        middle digit of the packed 2j2 field cannot hold two figures), so both
+        have to say so. Measured before: ELFORM=2 NIP=15 emitted Inpts 292 —
+        six through-thickness points gone — with ZERO warnings."""
+        for elform, isolid in ((1, 15), (2, 14)):
+            result, starter = _convert(deck(section=sec(elform=elform,
+                                                        nip=15)))
+            w = _warns(result, "CLAMPED to 9")
+            self.assertTrue(w, (elform, result.warnings))
+            self.assertIn(f"Isolid={isolid}", w[0])
+            self.assertIn("6 through-thickness point(s) are lost", w[0])
+            card = _cards(_block(starter, "/PROP/TYPE20/1"))[0]
+            self.assertEqual(_col_i(card, 51, 60), 9 if isolid == 15 else 292)
+
+    def test_an_out_of_range_shrf_is_named_on_type22(self):
+        """SHRF is the ONE *SECTION_TSHELL field that survives onto a TYPE22 (as
+        Ashear), so an out-of-range value being discarded there has to be said
+        — `_warn_dropped_fields` deliberately skips SHRF for prop_type 22."""
+        result, _ = _convert(deck(
+            section=sec(elform=1, shrf=1.5, nip=2, icomp=1, betas=(0.0, 90.0))))
+        w = _warns(result, "outside the (0, 1] range")
+        self.assertTrue(w, result.warnings)
+        self.assertIn("SHRF=1.5", w[0])
+
+    def test_the_layup_route_reports_its_own_elform_losses(self):
+        """*PART_COMPOSITE_TSHELL card 3b carries its own ELFORM and maps it
+        through the same `_tshell_isolid`, so it loses the same things a
+        *SECTION_TSHELL ELFORM does — and used to report none of them."""
+        pct = ("*PART_COMPOSITE_TSHELL\n" + "layup part\n"
+               + _row(1, 0, 0, 0, 0, 0, 0, 0) + "\n"
+               + _row(1, 1.0, 0.0, "", 1, 1.0, 90.0, "") + "\n")
+        result, _ = _convert(deck(part=pct, section=sec(elform=2)))
+        w = _warns(result, "loses")
+        self.assertTrue(w, result.warnings)
+        self.assertIn("*PART_COMPOSITE_TSHELL 1", w[0])
+        self.assertIn("PLANE-STRESS", w[0])
+
+    def test_a_type20_section_names_the_material_axes_it_cannot_hold(self):
+        """The iso/ortho split keys on the EMITTED law's PROP_SOLID class, not
+        on dyna2rad's "the material card HAS an AOPT field". They disagree for
+        *MAT_MODIFIED_HONEYCOMB → /MAT/LAW50, which declares SOLID_ISOTROPIC
+        yet carries per-direction moduli and yield curves: it lands on TYPE20,
+        which has no reference-vector card at all. Routing to TYPE21 anyway
+        would change the property type on an unvalidated path, so the drop is
+        NAMED."""
+        m126 = ("*MAT_MODIFIED_HONEYCOMB\n"
+                + _row(1, 7.85e-9, 210000.0, 0.3, 100.0, 0.1, 0.0, 0.0) + "\n"
+                + _row(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + _row(1000.0, 1000.0, 1000.0, 400.0, 400.0, 400.0, 2.0, 0)
+                + "\n"
+                + _row(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        result, starter = _convert(deck(mat=m126))
+        self.assertIn("/PROP/TYPE20/1", starter)
+        self.assertTrue(_warns(result, "AOPT reference direction"),
+                        result.warnings)
+
+    def test_a_thin_part_composite_on_a_thick_shell_mesh_is_reported(self):
+        """*PART_COMPOSITE expects *ELEMENT_SHELL and *PART_COMPOSITE_TSHELL
+        expects *ELEMENT_TSHELL. Neither the thick-shell layup route nor the
+        shell composite route claims the mismatched pairing, so before this its
+        whole laminate went out with only the generic "PLACEHOLDER created"
+        note."""
+        pc = ("*PART_COMPOSITE\n" + "thin layup on thick shells\n"
+              + _row(1, 0, 0, 0, 0, 0, 0, 0) + "\n"
+              + _row(1, 1.0, 0.0, "", 1, 1.0, 90.0, "") + "\n")
+        result, starter = _convert(deck(part=pc))
+        self.assertTrue(_warns(result, "the PLY STACK IS DROPPED"),
+                        result.warnings)
+        props = [ln.split("/")[-1] for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        self.assertEqual(len(props), len(set(props)), props)
+        self.assertEqual(_blocks(starter, "/PROP/SHELL"), [])
+
+    def test_database_history_tshell_records_the_elements_it_names(self):
+        """Now that a thick shell IS a /BRICK, the last member of the family
+        that was still in skipped_keywords rides /TH/BRIC — the same block
+        *DATABASE_HISTORY_SOLID takes."""
+        result, starter = _convert(deck(
+            elem=TSH2,
+            extra="*DATABASE_HISTORY_TSHELL\n" + _row(1, 2) + "\n"))
+        self.assertNotIn("DATABASE_HISTORY_TSHELL", result.skipped_keywords)
+        block = _block(starter, "/TH/BRIC/")
+        self.assertEqual([int(ln) for ln in block[4:] if ln.strip()], [1, 2])
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 class IncludeTransformOffsets(unittest.TestCase):
@@ -1261,6 +1455,125 @@ class NoRegressionWithoutTheKeyword(unittest.TestCase):
         state = ConversionState()
         state.sec_tshells[90001] = object()
         self.assertNotEqual(state.next_prop_id(), 90001)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+IMPLICIT = ("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.01) + "\n"
+            + "*CONTROL_TERMINATION\n" + _row(1.0) + "\n")
+
+
+class ImplicitStiffnessGuards(unittest.TestCase):
+    """A mesh that exists has to be visible to everything that walks the
+    element tables — and the two guards that DECIDE WHICH NODES CARRY STIFFNESS
+    are the ones where being invisible is fatal rather than merely lossy. Both
+    are starter-clean when wrong (a /BCS on real nodes is legal, 0 ERRORS), so
+    only an emitted-deck assertion catches them. Every r14 *ELEMENT_TSHELL deck
+    is implicit, so this is the batch's own headline deck class."""
+
+    def test_thick_shell_nodes_are_not_free_reference_nodes(self):
+        """The implicit singularity guard fixes every node attached to no
+        element in all six DOFs. Without the thick-shell arm it clamped the
+        WHOLE MESH: measured on ex_15_thick_shell_elform_2.k, 323 of 323 brick
+        nodes in `/BCS/90008 ... 111 111`, i.e. a model that cannot move, with
+        the starter reporting 0 ERRORS."""
+        result, starter = _convert(deck(elem=TSH2, extra=IMPLICIT))
+        brick = set()
+        for ln in _block(starter, "/BRICK/1")[1:]:
+            if ln.strip() and not ln.startswith("#"):
+                brick.update(_col_i(ln, 1 + 10 * k, 10 + 10 * k)
+                             for k in range(2, 10))
+        fixed = set()
+        grab = False
+        for ln in starter.splitlines():
+            if ln.startswith("/GRNOD/NODE/"):
+                grab = False
+            if "free_reference_nodes" in ln:
+                grab = True
+                continue
+            if grab:
+                if ln.startswith("/") or ln.startswith("#"):
+                    grab = ln.startswith("#")
+                    continue
+                fixed.update(int(t) for t in ln.split())
+        self.assertTrue(brick)
+        self.assertEqual(sorted(brick & fixed), [])
+        self.assertEqual(
+            [w for w in result.warnings
+             if "free node(s) attached to no element" in w], [])
+
+    def test_a_modal_thick_shell_deck_finds_a_node_for_its_dummy_load(self):
+        """The implicit engine refuses to start with no loading data at all
+        (MESSAGE ID 79), so a modal run gets a unit /CLOAD on a free structural
+        node. On an all-thick-shell mesh that candidate set was EMPTY —
+        measured on ex_13_thick_shell_elform_2.k: "no free node to put a dummy
+        /CLOAD on", i.e. the modal deck could not run."""
+        modal = ("*CONTROL_IMPLICIT_EIGENVALUE\n" + _row(5) + "\n") + IMPLICIT
+        result, starter = _convert(deck(elem=TSH2, extra=modal))
+        self.assertEqual(
+            [w for w in result.warnings if "no free node to put a dummy" in w],
+            [])
+        self.assertIn("/CLOAD", starter)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class ParserEdgeCases(unittest.TestCase):
+    """The card layouts whose only witness is an LS-PrePost round trip, and the
+    free-format spellings ``_card``'s fixed/free fallback turns into a silent
+    loss."""
+
+    def test_a_beta_card_in_the_manuals_ten_column_spelling_is_read(self):
+        """k2rad's card-2a reader is pinned to the five-F16 ruler LS-PrePost
+        writes; the manual's own table (Vol I R14 p.19-137) instead shows BETA
+        in field 5 of a TEN-column card. Reading that as blank would silently
+        zero a real material rotation — the worst failure mode on the one
+        layout claim here backed by a round trip rather than the manual."""
+        result, starter = _convert(deck(
+            elem="*ELEMENT_TSHELL_BETA\n" + _row(1, 1, 1, 2, 3, 4, 5, 6, 7, 8)
+                 + "\n" + _row("", "", "", "", 30.0) + "\n",
+            mat=mat_ortho(aopt=2.0)))
+        # same Phi the five-F16 spelling produces (test_beta_folds_into_the_
+        # property_angle), so the angle really landed on the property
+        self.assertAlmostEqual(
+            _col_f(_cards(_block(starter, "/PROP/TYPE21/1"))[3], 1, 20), 30.0)
+        self.assertTrue(_warns(result, "OUTSIDE columns 65-80"),
+                        result.warnings)
+
+    def test_a_free_format_ply_card_is_not_dropped(self):
+        """`_card(..., fixed=True)` falls back to a whitespace split whenever a
+        slice holds internal whitespace, so a free-format card 2b that leaves
+        the gap column blank arrives as SIX tokens whose fourth is the second
+        MID — measured plies = {} with no warning at all, and on the
+        *INCLUDE_TRANSFORM side node offsets landing on `2` and `90.0`."""
+        from k2rad.handlers import _tshell_ply_card
+        self.assertEqual(_tshell_ply_card(["1 0.6 0.0 2 0.4 90.0"], 0),
+                         [(1, 0.6, 0.0), (2, 0.4, 90.0)])
+        self.assertEqual(_tshell_ply_card(["3 1.0 45.0"], 0),
+                         [(3, 1.0, 45.0)])
+        # the FIXED spelling with blank gap columns still reads positionally
+        self.assertEqual(
+            _tshell_ply_card([_row(1, 0.6, 0.0, "", 2, 0.4, 90.0, "")], 0),
+            [(1, 0.6, 0.0), (2, 0.4, 90.0)])
+
+    def test_a_truncated_icomp_angle_block_names_section_tshell(self):
+        """The truncation warning is shared with *SECTION_SHELL and takes the
+        caller's name as a parameter — untested until now, so a thick-shell
+        deck could have been told to check a *SECTION_SHELL it does not have."""
+        truncated = ("*SECTION_TSHELL\n"
+                     + _row(1, 1, "", 12, "", "", 1) + "\n"
+                     + _row(0.0, 90.0, 0.0, 90.0, 0.0, 90.0, 0.0, 90.0) + "\n")
+        result, _ = _convert(deck(section=truncated))
+        hits = _warns(result, "needs 2 angle card(s)")
+        self.assertTrue(hits, result.warnings)
+        self.assertIn("*SECTION_TSHELL 1", hits[0])
+
+    def test_an_odd_number_of_ply_points_reads_the_first_triple_only(self):
+        """Card 2b holds TWO integration points; an odd count leaves the second
+        triple blank, and the reader must take one ply from that card rather
+        than reject it or invent a zero-MID second."""
+        from k2rad.handlers import _tshell_ply_card
+        self.assertEqual(
+            _tshell_ply_card([_row(7, 1.0, 0.0, "", "", "", "", "")], 0),
+            [(7, 1.0, 0.0)])
 
 
 if __name__ == "__main__":

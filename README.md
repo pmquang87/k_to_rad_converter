@@ -1361,16 +1361,23 @@ the lower surface, and nodes n5 to n8 define the upper surface" (Vol I R16
 p.2703 Remark 1) is exactly the pairing Radioss reads at `Icstr = 010` —
 `scdtchk3.F:84-246` takes the through-thickness edges as (1-5) (2-6) (3-7)
 (4-8), and `scortho3.F` builds the same `S` axis out of the connectivity. So a
-permutation would be a bug, not a fix. dyna2rad leaves the `Icstr` column blank
-and lets the starter default it, which is fine on TYPE20/21 but **desyncs
-TYPE22**: the CFG counts the layer cards itself in a chain that matches only
-`Icstr == 100/10/1`, so a blank column leaves the count unset and the reader
-consumes the wrong number of cards — measured `WARNING ID : 100213` plus
-`ERROR ID : 675` with an empty last layer, i.e. a silently wrong stack-up
-whenever the fractions happen to sum to 1. A **degenerate 6-node** thick shell
-keeps LS-DYNA's collapsed `n1 n2 n3 n3 n4 n5 n6 n6` form: written with trailing
-zeros it becomes an `ISOLNOD = 6` penta, which Radioss then refuses on a
-thick-shell property unless `Isolid = 15` (ERROR 639).
+permutation would be a bug, not a fix. The field is genuinely read: patching
+only `010` → `100` on an otherwise untouched deck moved the tip deflection by
+**2.08x**, bit-identically onto the value the wrong connectivity gives. dyna2rad
+leaves the column blank and lets the starter default it — but that default
+(`IF (IHBE == 14 .AND. ICSTR == 0) ICSTR = 10`) exists for `Isolid = 14` only;
+on `Isolid = 15` a blank column echoes `CONSTANT STRESS FLAG = 0`. Writing it
+removes the dependence on both formulations.
+
+A **degenerate 6-node** thick shell keeps LS-DYNA's collapsed
+`n1 n2 n3 n3 n4 n5 n6 n6` form: written with trailing zeros it becomes an
+`ISOLNOD = 6` penta, which Radioss then refuses on a thick-shell property unless
+`Isolid = 15` (ERROR 639). A card that names only SIX ids — not a form LS-DYNA
+defines, since Remark 1 spells the pentahedron out in all eight slots — is
+expanded into exactly that spelling, and so is one written `n1..n6 0 0`.
+Repeating the LAST id instead collapses the upper face to a point and halves the
+volume (measured 1.950E-10 against the correct 3.900E-10, with the starter
+reporting NORMAL TERMINATION and 0 ERRORS); all three spellings now give ρ·V.
 
 `ELFORM` → `Isolid`: **1 → 15** (HSEPH, under-integrated + physical
 stabilization), **everything else → 14** (HA8, locking-free full integration) —
@@ -1421,8 +1428,16 @@ nodes … the THICKi are also scaled to conform to the geometry", Vol I R16
 p.3529), which is precisely TYPE22's `ti/t` semantic. `Zi` is left 0 with
 `Ipos = 0` so the starter stacks the layers itself
 (`Z1 = −0.5 + t1/2`, `Zk = Z(k−1) + (tk + t(k−1))/2`) — the `*INTEGRATION_SHELL`
-lesson applied to a thick shell. More than nine layers use the `Iint` encoding
-(thickness digit 0, count in `Iint`), the only form Radioss has for them.
+lesson applied to a thick shell — which also means each layer carries ONE
+integration point at its own mid-plane, so an N-equal-layer stack realises
+`1 − 1/N²` of the exact bending stiffness (25 % soft at N = 2, 6.3 % at 4, 1.6 %
+at 8, all measured). That is faithful to LS-DYNA's own one-point-per-ply rule
+and the warning says so, because it means switching `ICOMP` 0 → 1 at the same
+`NIP` changes the bending stiffness. More than nine layers on `Isolid = 14` use
+the `Iint` encoding (thickness digit 0, count in `Iint`); on `Isolid = 15` the
+count IS `Inpts` with no cap below `NLYMAX = 200` — `hm_read_prop22.F`'s
+`CASE(15)` has no range check, the 1..9 limit MSGID 563 enforces belongs to
+TYPE20/TYPE21 — so a laminate keeps the deck's own `ELFORM` either way.
 **dyna2rad emits `/PROP/TYPE51` + `/PROP/TYPE19` for `*PART_COMPOSITE_TSHELL`**
 — it dispatches on the substring `COMPOSITE` alone — and its own starter then
 refuses that on the bricks: `ERROR ID : 60 INVALID PROPERTY ID=1 (TYPE = 51) FOR
@@ -1454,12 +1469,13 @@ deck's `NIP` is reported as lost rather than silently discarded.
 Which sections actually emit a property is gated three ways, each guarding a
 starter refusal: a section **no `*PART` names** is skipped (it has no material
 either, and an `ICOMP = 1` one would be a `/PROP/TYPE22` with `mat_IDi = 0` —
-ERROR 676); a section whose `*PART`s carry **shells or ordinary solids** is
-skipped and warned, because that element family auto-creates its own section
-under the same id and two `/PROP` cards on one id is ERROR 79; and an
-**element-free** `*PART` on a `*SECTION_TSHELL` still gets its property, because
-the placeholder path treats a defined thick-shell section as already resolved
-(ERROR 178 otherwise).
+ERROR 676); a section **all** of whose `*PART`s carry shells or ordinary solids
+is skipped and warned, because that element family auto-creates its own section
+under the same id and two `/PROP` cards on one id is ERROR 79, while a section
+of MIXED families keeps both — the thick-shell property moves to a synthesized
+id and its parts are repointed; and an **element-free** `*PART` on a
+`*SECTION_TSHELL` still gets its property, because the placeholder path treats a
+defined thick-shell section as already resolved (ERROR 178 otherwise).
 
 Warn-dropped: `PROPT` (a printout option), `TSHEAR` (constant vs parabolic
 transverse shear — a real physics difference, and Radioss thick shells are
@@ -1467,14 +1483,29 @@ always parabolic; on `*PART_COMPOSITE_TSHELL` it sits in card 3b's eighth
 column, where the thin-shell card 3a has `THSHEL`), a negative `QR` (an
 `*INTEGRATION_SHELL` rule; thick shells take no user quadrature), and `SHRF` on
 TYPE20/TYPE21, which have no transverse-shear column at all. On TYPE22 `SHRF`
-**is** carried, to `Ashear` — dyna2rad drops it there too.
+**is** carried, to `Ashear` — dyna2rad drops it there too — and a value outside
+`(0, 1]`, which `Ashear` cannot take, is named rather than dropped in silence.
+So are: the `NIP > 9` clamp on BOTH formulations; a non-default `AOPT` on a
+material whose Radioss law is `PROP_SOLID` class 1 and therefore lands on
+`/PROP/TYPE20`, which has no reference-vector card (`*MAT_MODIFIED_HONEYCOMB` →
+`/MAT/LAW50` is the case to watch); a THIN `*PART_COMPOSITE` on a thick-shell
+mesh, a pairing LS-DYNA does not accept either; and the `ELFORM` losses of the
+`*PART_COMPOSITE_TSHELL` card-3b route, which shares the section route's report.
 
 Everything that walks the element tables sees thick shells: the orphan-element
 census, the `/XREF` per-part node inventory, contact sides and `/SURF/PART`
 (they are `/BRICK`, so a thick-shell part builds the same surface a brick part
 does — without that the whole `/INTER` was dropped), `/RBODY` secondary nodes,
 `/DAMP` (node-based Rayleigh damping, so it reaches them — the element-level
-`/DAMP/FREQUENCY_RANGE` still cannot), and the implicit no-contact stub.
+`/DAMP/FREQUENCY_RANGE` still cannot), `*INITIAL_VELOCITY_GENERATION`,
+`*DATABASE_CROSS_SECTION_PLANE`, `--auto-gapmin`'s surface extraction, the
+implicit no-contact stub — and, above all, the two guards that decide which
+nodes carry stiffness: the implicit free-node `/BCS` (which otherwise clamped
+the ENTIRE mesh in all six DOFs, 0 starter errors and a model that cannot move)
+and the modal dummy `/CLOAD` (whose candidate set was otherwise empty, so a
+modal thick-shell deck could not start at all).
+`*DATABASE_HISTORY_TSHELL` rides `/TH/BRIC`, the same block
+`*DATABASE_HISTORY_SOLID` takes.
 
 ### Integrated beams
 
@@ -2405,7 +2436,8 @@ impulses, not the instantaneous section resultants secforc reports** —
 `*DATABASE_HISTORY_SHELL` → `/TH/SHEL`, and `/TH/SH3N` for any named element
 the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
 shells, so a triangle listed there is absent from the T01);
-`*DATABASE_HISTORY_SOLID` → `/TH/BRIC`; `*DATABASE_HISTORY_NODE` → `/TH/NODE`
+`*DATABASE_HISTORY_SOLID` and `*DATABASE_HISTORY_TSHELL` → `/TH/BRIC` (a thick
+shell IS a `/BRICK` in the emitted deck); `*DATABASE_HISTORY_NODE` → `/TH/NODE`
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
 `/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction

@@ -345,8 +345,19 @@ covering them unlocks a large class of real models.
   `/PROP/TYPE20` / `TYPE21` / `TYPE22` split, plus `*PART_COMPOSITE_TSHELL` →
   a real `/PROP/TYPE22` with per-ply `mat_IDi` / `ti/t` / `Phi_i` (dyna2rad
   emits the thin-shell `/PROP/TYPE51` sandwich there and its own starter
-  refuses it on the bricks, ERROR 60 + 226). Starter-validated on the three r14
-  ELFORM decks and six hand-built TYPE21/TYPE22 decks.
+  refuses it on the bricks, ERROR 60 + 226). Starter-validated on all nine r14
+  thick-shell decks (0 ERRORS each) plus fourteen hand-built TYPE21/TYPE22 and
+  edge-case decks, and quantitatively validated against Timoshenko beam theory,
+  a thickness-direction discriminator, an orthotropic axis swap and a ply-order
+  discriminator over 52 purpose-built decks.
+  **Open follow-up, newly visible:** the r14 `*ELEMENT_TSHELL` decks are
+  implicit-DYNAMIC simply-supported plates, and now that their mesh is no longer
+  clamped by the free-node guard the OpenRadioss implicit engine DIVERGES on
+  them (`MESSAGE ID 79`, `ISTOP=-2`) — not caused by the conversion (removing
+  the injected contact stub and pinning the three in-plane rigid-body modes both
+  leave it unchanged), and invisible before, because a fully constrained model
+  has nothing to diverge about. Needs its own investigation; the starter is
+  clean.
   Still open in this family:
   the `*INTEGRATION_BEAM` standard shapes needing three or more dimensions
   (`Isect ≥ 10` with `L3..L6` needs `/BEGIN ≥ 2024`, and k2rad writes 2022 —

@@ -4896,6 +4896,13 @@ class ConversionState:
     # mechanism as composite_prop_ids, and claimed FIRST among the thick-shell
     # routes: a part in here ignores its *SECTION_TSHELL property entirely.
     tshell_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # secid → a SYNTHESIZED /PROP id for a *SECTION_TSHELL whose SECID is also
+    # claimed by another element family (a shell or ordinary-solid *PART on the
+    # same section). Two /PROP cards on one id is starter ERROR 79, so the
+    # thick-shell property moves here and its parts are repointed through
+    # tshell_prop_ids. Filled by _split_mixed_family_sections; empty on the
+    # ordinary one-family deck, where the property IS the SECID.
+    tshell_section_prop_ids: Dict[int, int] = field(default_factory=dict)
     # secid → the *ELEMENT_TSHELL_BETA angle (degrees) FOLDED into that
     # section's property angle slot, because /BRICK has no per-element angle
     # column. Only set when every thick shell on the section agrees; the

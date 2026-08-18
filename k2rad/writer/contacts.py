@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Dict, List, Optional, Set
 from ..state import ConversionState, PartData
 from .common import (
@@ -1852,9 +1853,11 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
     uses the one-pass form.
     """
     out: Dict[int, int] = {}
-    for e in list(state.solid_elems) + list(state.tshell_elems):
-        # Thick shells are /BRICK, so they answer both questions the same way
-        # an ordinary hex does (and are never quadratic — always 8 slots).
+    # Thick shells are /BRICK, so they answer both questions the same way an
+    # ordinary hex does (and are never quadratic — always 8 slots). Chained
+    # rather than concatenated: this runs per contact side on the whole solid
+    # table, and copying both lists there is what the rewrite removed.
+    for e in itertools.chain(state.solid_elems, state.tshell_elems):
         n = len(_ordered_unique_nodes(list(e.nodes)))
         if n > out.get(e.pid, 0):
             out[e.pid] = n

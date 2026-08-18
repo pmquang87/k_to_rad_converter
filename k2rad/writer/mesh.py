@@ -851,6 +851,8 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
         ref.update(n for n in e.nodes if n > 0)
     for e in state.solid_elems:
         ref.update(n for n in e.nodes if n > 0)
+    for e in state.tshell_elems:            # /BRICK — a real reference
+        ref.update(n for n in e.nodes if n > 0)
     for e in state.beam_elems:
         ref.update(n for n in (e.n1, e.n2, e.n3) if n > 0)
     for _title, nids in state.node_sets.values():
@@ -1312,10 +1314,13 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
     # i11sti3/i20sti3/i24sti3) — there is no NUMELS loop. LS-DYNA differs ("OPTT —
     # Optional contact thickness.  For SOFT = 2, it applies to solids, shells, and
     # beams", Vol I R17 p.37-11), so this is a real silent loss on a solid part.
+    # THICK SHELLS count as solids here: they are /BRICK, and the missing
+    # NUMELS loop is exactly what leaves their OPTT unread too.
     non_solid_pids = ({e.pid for e in state.shell_elems}
                       | {e.pid for e in state.beam_elems}
                       | {e.pid for e in state.discrete_elems})
-    solid_pids = {e.pid for e in state.solid_elems}
+    solid_pids = ({e.pid for e in state.solid_elems}
+                  | {e.pid for e in state.tshell_elems})
     solid_only = sorted(f"{pid} (OPTT={pc.optt:g})"
                         for pid, pc in state.part_contacts.items()
                         if pc.optt and pid in solid_pids
@@ -2582,14 +2587,14 @@ def _resolve_contact_interior(state: ConversionState) -> None:
         "radioss2025-only input column; a /BEGIN 2022 deck cannot carry it "
         "(measured: ICONTROL echo stays 0 + starter WARNING 100213), so the "
         "affected parts are named in a warning instead")
-    # Icontrol lives on the solid and thick-shell property readers
-    # (hm_read_prop06/14/20/21/22.F + /DEF_SOLID); k2rad has no
-    # *ELEMENT_TSHELL path, so "has an Icontrol-bearing property" reduces
-    # to "holds solid elements" here.
+    # Icontrol lives on the solid AND thick-shell property readers
+    # (hm_read_prop06/14/20/21/22.F + /DEF_SOLID), so "has an Icontrol-bearing
+    # property" is "holds solid OR thick-shell elements".
     # *SET_PART_ADD sets were already expanded into part_sets by
     # _flatten_part_set_adds (one nesting level, dyna2rad CC:692-727), so a
     # single lookup covers both variants.
-    solid_pids = {e.pid for e in state.solid_elems}
+    solid_pids = ({e.pid for e in state.solid_elems}
+                  | {e.pid for e in state.tshell_elems})
     for psid in sorted(set(state.contact_interior_psids)):
         direct = state.part_sets.get(psid)
         if direct is None:
