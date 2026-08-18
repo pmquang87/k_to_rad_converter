@@ -235,9 +235,92 @@ Prior history (before this changelog was introduced) is summarized in the
 
   i.e. the LS-DYNA card read straight back out. `11.3.sqt_iga_s.k` — an IGA deck whose
   `*ELEMENT_SHELL_NURBS_PATCH` mesh k2rad drops whole — now reports its
-  `*DAMPING_PART_MASS` as "part(s) [1] carry no deformable shell or solid nodes"
-  instead of silently vanishing. Tests 2850 → 2936 (+86), subtests 860 → 880;
-  `ruff check .` clean.
+  `*DAMPING_PART_MASS` as "*SET_PART … resolved to no existing part"
+  instead of silently vanishing.
+
+  **Review round.** Nine defects found by an adversarial re-read of the batch
+  and fixed on top of it; each was reproduced before being touched.
+
+  - **A blank Scale Factor Card swallowed the following card set.** `FLAG = 1`
+    plus an all-blank card 2 is legal LS-DYNA — every `STX..SRZ` defaults to
+    0.0 (Vol I R16 p.15-10) — but the parser keeps a blank card as a `""`
+    placeholder and `_damping_data_rows` filters placeholders out, so "the next
+    row" was the *following* card 1. Measured: `1 201 1.0 1 / <blank> /
+    2 202 3.0` parsed to ONE entry with `STX=2, STY=202, STZ=3.0`, i.e. part 1
+    damped on Y by a part number and part 2 lost, no warning. The card-2 slot is
+    now claimed by RAW contiguity. `assembly._off_damping_part_mass_common`
+    walked the same filtered list and desynced identically, so the offsetter got
+    the same fix — otherwise an `*INCLUDE_TRANSFORM`'d deck left the swallowed
+    card's PID/LCID un-offset.
+  - **The offsetter and the handler disagreed about which line is card 1.**
+    `DAMPING_FREQUENCY_RANGE[_DEFORM[_DMIG]]` and `DAMPING_RELATIVE` had flat
+    `{"cards": {0: …}}` specs addressing `raw[_title_offset + 0]` while their
+    handlers skip blank placeholders. Measured through `_offset_block` with one
+    blank line after the keyword: `psid 4`, `pidrel 9`, `pidrb 7`, `lcid 201`
+    all came through **un-offset**, with no "id offsets are NOT applied"
+    warning. All four are now callables using the handler's own rule. The
+    `_DEFORM_DMIG` row also stopped offsetting field 3 with the SET bucket:
+    there `PSID` is an `*ELEMENT_DIRECT_MATRIX_INPUT` superelement id, not a
+    `*SET_PART` id (Vol I R16 p.15-3).
+  - **A zero-COEF part still rides in the beta-bearing `/DAMP`.** The node
+    overlap check filtered `state.damping_part_stiffness` on `coef != 0.0`, but
+    `_make_damping` puts *every* stiffness pid in its `/GRNOD` and writes
+    `beta = max(coefs)` on it. Measured on node-disjoint parts 1 (COEF 0.0) and
+    2 (1e-7) with `*DAMPING_PART_MASS` on part 1: `/GRNOD` 1-8 driving
+    `beta=1E-07`, part-mass `/DAMP` on 1-4, and **no warning** — precisely the
+    shared-history-buffer corruption it exists to catch. The check now uses the
+    pid set `_make_damping` actually uses and gates on `max(coefs) != 0.0`.
+  - **A stacked second card set vanished in silence** on both
+    `*DAMPING_FREQUENCY_RANGE` and `*DAMPING_RELATIVE` (both read `rows[0]`
+    only). For FREQUENCY_RANGE that also corrupted the `PSID=0` route, since the
+    dropped card's parts never entered `claimed`. Whether LS-DYNA reads a
+    stacked set is unresolved — both HM cfgs and the manual show one card set —
+    so the extra lines are still not *interpreted*, but they are now quoted back
+    in a warning instead of dropped.
+  - **The element-scope caveat only fired for the blank option.** LS-DYNA's
+    `_DEFORM` covers "solid, beam, shell, thick shell and discrete elements"
+    (Vol I R16 Remark 4); Radioss reaches only `damping_range_shell` /
+    `_shell_mom` / `_solid.F90`. So under the option advertised as the clean 1:1
+    a beam-only or tshell-only part lost **all** its damping without a word. The
+    caveat moved out of the `if not dfr.deform` branch and became scope-aware:
+    it names the parts in scope that carry no shell or solid element.
+  - **An alpha=0 + beta=0 `/DAMP` is no longer emitted.** The crash fix above
+    left the deck with an inert card plus a `/GRNOD` over every deformable node
+    in the model. `COEF EQ.0.0` is documented "Inactive" (p.15-12), so the card
+    is dropped with a warning — the rule `_make_damping_part_mass` already
+    applied to `SF × curve == 0`. It cannot move a deck that converted before,
+    because every such deck used to crash.
+  - **`_make_damping`'s `/GRNOD` drew from the unguarded `next_id()`**
+    (pre-existing on master). Measured: a user `*SET_NODE 90001` plus
+    `*DAMPING_GLOBAL` emitted `/GRNOD/NODE/90001` **twice** → starter `ERROR 79
+    DUPLICATE ID / IN NODE GROUP DEFINITION`, which stops the whole model. Now
+    `next_grnod_id()`, like the new part-mass path; a no-op on any deck without
+    such a set.
+  - **`PID = 0` on `*DAMPING_PART_MASS`** was skipped silently unless the whole
+    block produced nothing; it is now reported per card. An **empty `*SET_PART`**
+    was reported as "part(s) `[]` carry no deformable shell or solid nodes",
+    naming the wrong cause; it gets the dedicated branch
+    `_make_damping_frequency_range` already had.
+  - **Two documentation defects.** `_DAMP_CARD1_HDR`'s docstring claimed to be
+    ``radioss110/DAMP/Damp.cfg``'s `COMMENT` string; that one is 100 chars with
+    every label right-aligned on its field, this one is 102 and sits two columns
+    off. The value is inherited verbatim from master's inline literal and is
+    kept byte-for-byte (re-aligning a `#` comment the starter never reads would
+    move the hash of every `/DAMP`-bearing deck), so the provenance claim was
+    corrected instead and the two duplicate literals in `_make_damping` now use
+    the constant. And the version-gate advice "bump `/BEGIN` to 2025 to silence
+    the warning" now says what that costs: `WARNING 100217 "card is missing"` on
+    the other cards k2rad writes in the 2022 layout — measured harmless (0
+    errors, every field still read back identically), but it reads like a
+    regression to anyone who follows the advice without being told.
+
+  Also settled from the manual rather than guessed: the bare
+  `*DAMPING_FREQUENCY_RANGE_DMIG` spelling (OPTION2 without OPTION1) has no
+  dispatch row because **it does not exist** — "OPTION2 is available only when
+  OPTION1 is DEFORM" (Vol I R16 p.15-2) — and the `HANDLERS` comment now says
+  so, rather than leaving the gap looking accidental.
+
+  Tests 2850 → 2954 (+104), subtests 860 → 888; `ruff check .` clean.
 
 - **Rigid-body inertia and load distribution: `*PART_INERTIA` (and every legal
   `*PART` option stacking) → `/RBODY` `Mass`/`Jxx..Jxz` with `ICoG=4`,

@@ -46,7 +46,7 @@ from k2rad.handlers import dispatch
 from k2rad.parser import parse_k_file
 from k2rad.state import ConversionState, Curve, DampingRelative
 from k2rad.writer.common import _f, _i
-from k2rad.writer.loads import _resolve_damping_relative
+from k2rad.writer.loads import _DAMP_CARD1_HDR, _resolve_damping_relative
 
 
 def _convert(deck: str):
@@ -253,6 +253,51 @@ class DampingPartMassParseTests(unittest.TestCase):
                          [(d.pid, d.lcid, d.sf, d.flag)
                           for d in st.damping_part_mass])
 
+    def test_blank_scale_factor_card_does_not_swallow_the_next_card_set(self):
+        """FLAG=1 with an all-BLANK Scale Factor Card. Every STX..SRZ defaults
+        to 0.0 (Manual Vol I R16 p.15-10), so a blank card 2 is legal and means
+        exactly that — LS-DYNA reads it and moves on to the next card 1.
+
+        The parser keeps it as a "" placeholder, `_damping_data_rows` filters
+        placeholders out, so taking "the next row" as card 2 consumed the
+        FOLLOWING card 1 instead: its PID/LCID/SF landed in STX/STY/STZ (part 1
+        got alpha_y scaled by a part number) and part 2 vanished without a
+        word. The card-2 slot is therefore claimed by RAW contiguity."""
+        st = _dispatch("*KEYWORD\n*DAMPING_PART_MASS\n"
+                       "         1       201       1.0         1\n"
+                       "\n"
+                       "         2       202       3.0\n*END\n")
+        self.assertEqual([(1, 201, 1.0, 1), (2, 202, 3.0, 0)],
+                         [(d.pid, d.lcid, d.sf, d.flag)
+                          for d in st.damping_part_mass])
+        # ...and the blank card really was read as all-zero scale factors
+        self.assertEqual([(0.0,) * 6],
+                         [(d.stx, d.sty, d.stz, d.srx, d.sry, d.srz)
+                          for d in st.damping_part_mass if d.flag == 1])
+
+    def test_blank_scale_factor_card_at_the_end_of_the_block(self):
+        """The same card with nothing after it: still all-zero, still no
+        second entry invented."""
+        st = _dispatch("*KEYWORD\n*DAMPING_PART_MASS\n"
+                       "         1       201       1.0         1\n"
+                       "\n*END\n")
+        self.assertEqual(1, len(st.damping_part_mass))
+        d = st.damping_part_mass[0]
+        self.assertEqual((1, 1), (d.pid, d.flag))
+        self.assertEqual((0.0,) * 6,
+                         (d.stx, d.sty, d.stz, d.srx, d.sry, d.srz))
+
+    def test_a_zero_pid_card_is_reported_not_dropped_in_silence(self):
+        """`pid <= 0` skips the card; the all-or-nothing block check at the end
+        only fires when NOTHING parsed, so a bad card next to a good one used
+        to disappear silently."""
+        st = _dispatch("*KEYWORD\n*DAMPING_PART_MASS\n"
+                       "         0       201       1.0\n"
+                       "         1       201       1.0\n*END\n")
+        self.assertEqual([1], [d.pid for d in st.damping_part_mass])
+        self.assertEqual(1, len([w for w in st.warnings
+                                 if "PID=0" in w and "DROPPED" in w]))
+
     def test_fused_fixed_width_columns_are_sliced_not_split(self):
         """A deck written hard against the column edges free-splits into ONE
         token; the fixed-width fallback has to recover PID and LCID."""
@@ -335,6 +380,76 @@ class DampingRelativeParseTests(unittest.TestCase):
                        "      0.03      12.5         7         3\n*END\n")
         d = st.damping_relative[0]
         self.assertEqual((0.0, 0), (d.dv2, d.lcid))
+
+
+class DampingStackedCardSetTests(unittest.TestCase):
+    """*DAMPING_FREQUENCY_RANGE and *DAMPING_RELATIVE are read as ONE entity per
+    keyword block — that is how both HyperMesh cfgs model them and how the R16
+    manual documents them. Whether LS-DYNA would go on to read a stacked second
+    set is unsettled, so the extra lines are NOT interpreted; but they must be
+    named, not dropped in silence. (For FREQUENCY_RANGE the silence was also
+    wrong twice over: an ignored card's parts never enter `claimed`, so the
+    PSID=0 complement came out too large.)"""
+
+    def test_stacked_frequency_range_cards_are_reported(self):
+        st = _dispatch("*KEYWORD\n*DAMPING_FREQUENCY_RANGE\n"
+                       "      0.02      10.0     200.0       910"
+                       "                   0         0         0\n"
+                       "      0.03      20.0     400.0       920"
+                       "                   0         0         0\n*END\n")
+        self.assertEqual(1, len(st.damping_frequency_range))
+        w = [x for x in st.warnings if "extra data line" in x]
+        self.assertEqual(1, len(w), st.warnings)
+        self.assertIn("0.03", w[0])          # the ignored line is quoted back
+
+    def test_stacked_relative_cards_are_reported(self):
+        st = _dispatch("*KEYWORD\n*DAMPING_RELATIVE\n"
+                       "      0.03      12.5         1         0\n"
+                       "      0.06      25.0         2         0\n*END\n")
+        self.assertEqual(1, len(st.damping_relative))
+        w = [x for x in st.warnings if "extra data line" in x]
+        self.assertEqual(1, len(w), st.warnings)
+        self.assertIn("0.06", w[0])
+
+    def test_the_icard2_card_is_not_mistaken_for_an_extra_line(self):
+        """ICARD2=1 + DEFORM legitimately has a second card, so the threshold
+        moves to 2 — no warning is due here."""
+        st = _dispatch("*KEYWORD\n*DAMPING_FREQUENCY_RANGE_DEFORM\n"
+                       "      0.02      10.0     200.0         0"
+                       "                   0         0         1\n"
+                       "     0.007         2\n*END\n")
+        self.assertEqual(1, len(st.damping_frequency_range))
+        self.assertEqual((0.007, 2), (st.damping_frequency_range[0].cdampv,
+                                      st.damping_frequency_range[0].ipwp))
+        self.assertEqual([], [x for x in st.warnings if "extra data line" in x])
+
+    def test_a_blank_icard2_card_keeps_its_defaults_and_names_the_stray_line(self):
+        """ICARD2=1 with an all-BLANK card 2: CDAMPV falls back to CDAMP and
+        IPWP to 1 (both non-zero defaults), and the line AFTER the blank is a
+        stray — not the card 2 the reader was looking for."""
+        st = _dispatch("*KEYWORD\n*DAMPING_FREQUENCY_RANGE_DEFORM\n"
+                       "      0.02      10.0     200.0         0"
+                       "                   0         0         1\n"
+                       "\n"
+                       "      0.09      99.0     999.0         0"
+                       "                   0         0         0\n*END\n")
+        d = st.damping_frequency_range[0]
+        self.assertEqual((0.02, 1), (d.cdampv, d.ipwp))
+        w = [x for x in st.warnings if "extra data line" in x]
+        self.assertEqual(1, len(w), st.warnings)
+        self.assertIn("0.09", w[0])
+
+    def test_a_single_card_never_warns(self):
+        for kw, card in (
+                ("DAMPING_FREQUENCY_RANGE",
+                 "      0.02      10.0     200.0         0"
+                 "                   0         0         0\n"),
+                ("DAMPING_RELATIVE",
+                 "      0.03      12.5         1         0\n")):
+            with self.subTest(keyword=kw):
+                st = _dispatch(f"*KEYWORD\n*{kw}\n{card}*END\n")
+                self.assertEqual(
+                    [], [x for x in st.warnings if "extra data line" in x])
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -530,6 +645,22 @@ class DampingPartMassEmissionTests(unittest.TestCase):
                 + "*DAMPING_PART_MASS\n        77       201       1.0\n" + _END)
         result, _ = _convert(deck)
         self.assertTrue(_warns(result, "part 77 has no *PART card"))
+
+    def test_an_empty_part_set_names_the_right_cause(self):
+        """An empty (or fully unresolvable) *SET_PART used to be reported as
+        "part(s) [] carry no deformable shell or solid nodes (only rigid, beam,
+        spring or SPH ones, or no mesh at all)" — a true sentence about an
+        empty list, but the wrong diagnosis. _make_damping_frequency_range
+        already had the dedicated branch; this is the sibling."""
+        deck = (_MESH + _CURVE_FLAT + "*SET_PART_LIST\n         3\n\n"
+                + "*DAMPING_PART_MASS_SET\n         3       201       1.0\n"
+                + _END)
+        result, starter = _convert(deck)
+        self.assertNotIn("PART MASS DAMPING", starter)
+        self.assertTrue(_warns(result, "*SET_PART 3 resolved to no existing "
+                                       "part"))
+        self.assertEqual([], _warns(result, "carry no deformable shell or "
+                                            "solid nodes"))
 
     def test_combination_with_damping_global_is_flagged(self):
         """LS-DYNA forbids it; Radioss would apply both additively."""
@@ -740,6 +871,40 @@ class DampingFrequencyRangeEmissionTests(unittest.TestCase):
         result, starter = _convert(deck)
         self.assertIn("/DAMP/FREQUENCY_RANGE/", starter)
         self.assertEqual([], _warns(result, "this is the BLANK option"))
+        # ...and with everything shell-meshed, no element-scope warning either
+        self.assertEqual([], _warns(result, "COMPLETELY UNDAMPED"))
+
+    def test_a_beam_only_part_in_scope_is_named_under_both_options(self):
+        """The element-scope caveat is NOT a blank-option matter. LS-DYNA's
+        _DEFORM damps solids, beams, shells, thick shells and discrete
+        elements (Manual Vol I R16 Remark 4); Radioss reaches only the shell
+        and solid material laws. Under the option k2rad advertises as the clean
+        1:1, a beam-only part would otherwise lose ALL its damping in silence."""
+        beam_part = (
+            "*ELEMENT_BEAM\n"
+            "      11       5       1       2       3\n"
+            "*PART\nbeam only\n         5         5         1\n"
+            "*SECTION_BEAM\n         5         1       1.0\n"
+            "       1.0       1.0       1.0       1.0\n"
+            "*SET_PART_LIST\n         7\n         5\n")
+        for suffix in ("", "_DEFORM"):
+            with self.subTest(option=suffix or "<BLANK>"):
+                deck = (_MESH + beam_part
+                        + _freq_card(psid="         7", suffix=suffix) + _END)
+                result, starter = _convert(deck)
+                self.assertIn("/DAMP/FREQUENCY_RANGE/", starter)
+                w = _warns(result, "COMPLETELY UNDAMPED")
+                self.assertEqual(1, len(w), result.warnings)
+                self.assertIn("[5]", w[0])
+
+    def test_the_version_gate_advice_names_its_own_cost(self):
+        """Bumping /BEGIN to 2025 silences WARNING 100211 but raises
+        WARNING 100217 "card is missing" on every other card k2rad writes in
+        the 2022 layout — measured harmless, but the advice has to say so or it
+        reads like a regression to whoever follows it."""
+        result, _ = _convert(_MESH + _freq_card() + _END)
+        w = _warns(result, "WARNING ID : 100211")[0]
+        self.assertIn("100217", w)
 
     def test_dmig_option_is_dropped(self):
         deck = _MESH + _freq_card(suffix="_DEFORM_DMIG") + _END
@@ -879,6 +1044,26 @@ class DampingRelativeResolutionTests(unittest.TestCase):
         self.assertIn("*SET_PART 3 -> parts [2]", w)
         # and the curve really is emitted as /FUNCT/3, so the reference resolves
         self.assertIn("/FUNCT/3", starter)
+
+    def test_a_set_id_alone_is_not_enough_to_make_a_funcid(self):
+        """The deck that actually SEPARATES the correct routing from the
+        dyna2rad bug. Above, curve 3 exists, so "route LCID through the curve
+        table" and "pass LCID straight through" agree — the assertion holds
+        either way. Here *SET_PART 3 exists and curve 3 does NOT: the part-set
+        route would happily hand back 3 and write a dangling FuncID (starter
+        ERROR 3049), while resolving against state.curves refuses it."""
+        deck = (_MESH                       # note: no *DEFINE_CURVE at all
+                + "*SET_PART_LIST\n         3\n         2\n"
+                + "*DAMPING_RELATIVE\n"
+                  "      0.03      12.5         1         3       0.0"
+                  "         3\n" + _END)
+        result, starter = _convert(deck)
+        w = _warns(result, "NOT EMITTED")[0]
+        self.assertIn("FuncID=0 (from LCID=3", w)
+        self.assertTrue(_warns(result, "LCID=3 has no *DEFINE_CURVE"))
+        self.assertNotIn("/FUNCT/3", starter)
+        # the part set still resolves — the two id spaces are independent
+        self.assertIn("*SET_PART 3 -> parts [2]", w)
 
     def test_curve_id_reaching_a_table_slot_is_refused(self):
         """A curve a material consumes through a TABLE slot is re-emitted as
@@ -1090,6 +1275,52 @@ class DampingOffsetSpecTests(unittest.TestCase):
         self.assertEqual(2003, int(f[3]))     # PSID  via IDSOFF
         self.assertEqual(3201, int(f[5]))     # LCID  via IDFOFF
 
+    def test_a_leading_blank_card_does_not_desync_the_offset_walk(self):
+        """The offsetter and the handler have to agree on which line is card 1.
+        A flat {"cards": {0: ...}} spec addresses raw[_title_offset + 0], but
+        `_damping_data_rows` skips blank placeholders — so one blank line after
+        the keyword had the offsetter rewriting the placeholder while the
+        handler read the real card below it, and the ids came through
+        un-offset with no "offsets are NOT applied" warning to show for it."""
+        cases = {
+            "*DAMPING_FREQUENCY_RANGE\n\n"
+            "      0.01      30.0     300.0         4"
+            "                   9         0         0\n": (3, 2004),
+            "*DAMPING_FREQUENCY_RANGE_DEFORM\n\n"
+            "      0.01      30.0     300.0         4\n": (3, 2004),
+            "*DAMPING_RELATIVE\n\n"
+            "      0.03      12.5         7         3       0.0"
+            "       201\n": (2, 1007),
+            "*DAMPING_PART_MASS\n\n"
+            "         1       201       1.0\n": (0, 1001),
+        }
+        for block, (field, want) in cases.items():
+            with self.subTest(keyword=block.split("\n", 1)[0]):
+                raw = self._apply(block)
+                self.assertEqual("", raw[0].strip())   # placeholder preserved
+                self.assertEqual(want, int(raw[1].split()[field]))
+
+    def test_a_blank_scale_factor_card_does_not_desync_the_offset_walk(self):
+        """The offsetter mirror of the handler fix: FLAG=1 with a BLANK Scale
+        Factor Card. Skipping rows[k] unconditionally stepped over the
+        FOLLOWING card 1, leaving its PID/LCID un-offset."""
+        raw = self._apply("*DAMPING_PART_MASS\n"
+                          "         1       201       1.0         1\n"
+                          "\n"
+                          "         2       202       3.0\n")
+        self.assertEqual([1001, 3201], [int(t) for t in raw[0].split()[:2]])
+        self.assertEqual("", raw[1].strip())
+        self.assertEqual([1002, 3202], [int(t) for t in raw[2].split()[:2]])
+
+    def test_the_dmig_psid_is_not_offset_as_a_part_set(self):
+        """Under _DEFORM_DMIG, PSID is an *ELEMENT_DIRECT_MATRIX_INPUT
+        superelement id, not a *SET_PART id (Manual Vol I R16 p.15-3), so the
+        SET bucket is the wrong offset. k2rad converts no superelement keyword
+        and the writer drops the card whole, so nothing here is offset."""
+        raw = self._apply("*DAMPING_FREQUENCY_RANGE_DEFORM_DMIG\n"
+                          "      0.01      30.0     300.0         4\n")
+        self.assertEqual(4, int(raw[0].split()[3]))
+
     def test_offsets_land_end_to_end_through_a_real_include(self):
         """The unit tests above call _offset_block directly. This one drives the
         whole parse -> _apply_offsets -> dispatch path, so it also proves
@@ -1167,12 +1398,45 @@ class DampingBatchNonRegressionTests(unittest.TestCase):
         where the same deck raises."""
         deck = (_MESH + "*DAMPING_PART_STIFFNESS\n         1       0.0\n"
                 + _END)
-        _, starter = _convert(deck)          # must not raise
-        lines = starter.splitlines()
-        i = next(k for k, ln in enumerate(lines) if ln.startswith("/DAMP/"))
-        self.assertEqual("Rayleigh mass damping (alpha=0)", lines[i + 1])
-        self.assertEqual(f"{_f(0.0)}{_f(0.0)}{_i(90001)}{_i(0)}"
-                         f"{_f(0.0)}{_f(1.0E30)}", lines[i + 3])
+        result, starter = _convert(deck)     # must not raise
+        # ...and must not emit an inert card either: COEF EQ.0.0 is documented
+        # "Inactive", so alpha=0 + beta=0 would be a /DAMP that damps nothing
+        # over a /GRNOD listing every deformable node in the model. Same rule
+        # _make_damping_part_mass applies to SF x curve == 0.
+        self.assertNotIn("/DAMP/", starter)
+        self.assertNotIn("/GRNOD/NODE/", starter)
+        self.assertTrue(_warns(result, "resolves to alpha=0 AND beta=0"))
+
+    def test_zero_coef_part_still_rides_in_the_beta_bearing_group(self):
+        """_make_damping puts EVERY *DAMPING_PART_STIFFNESS pid in its /GRNOD
+        and writes beta = max(coefs) on it, so a part whose own COEF is 0.0 is
+        still inside the beta-bearing card. The shared-history-buffer warning
+        must therefore test against ALL stiffness pids, not just the non-zero
+        ones — parts 1 and 2 here are node-DISJOINT, so filtering on the
+        per-card COEF would miss the clash entirely."""
+        deck = (_DISJOINT_MESH + _CURVE_FLAT
+                + "*DAMPING_PART_STIFFNESS\n         1       0.0\n"
+                  "         2    1.0E-7\n"
+                + "*DAMPING_PART_MASS\n         1       201       1.0\n"
+                + _END)
+        result, starter = _convert(deck)
+        # part 1 (COEF 0.0) really is inside the beta-bearing group
+        self.assertIn("damping_target_pids_1_2", starter)
+        self.assertIn("Rayleigh damping (alpha=0, beta=1E-07)", starter)
+        w = _warns(result, "history buffer")
+        self.assertEqual(1, len(w), w)
+        self.assertIn("node(s) of part(s) [1]", w[0])
+
+    def test_no_overlap_warning_when_the_max_coef_is_zero(self):
+        """The control: with every COEF 0.0 there is no beta-bearing /DAMP at
+        all (the card is dropped), so nothing can clash."""
+        deck = (_DISJOINT_MESH + _CURVE_FLAT
+                + "*DAMPING_PART_STIFFNESS\n         1       0.0\n"
+                  "         2       0.0\n"
+                + "*DAMPING_PART_MASS\n         1       201       1.0\n"
+                + _END)
+        result, _ = _convert(deck)
+        self.assertEqual([], _warns(result, "history buffer"))
 
     def test_existing_damping_global_path_is_untouched(self):
         deck = _MESH + "*DAMPING_GLOBAL\n         0     500.0\n" + _END
@@ -1182,6 +1446,29 @@ class DampingBatchNonRegressionTests(unittest.TestCase):
         self.assertEqual("Rayleigh mass damping (alpha=500)", lines[i + 1])
         self.assertEqual(f"{_f(500.0)}{_f(0.0)}{_i(90001)}{_i(0)}"
                          f"{_f(0.0)}{_f(1.0E30)}", lines[i + 3])
+
+    def test_the_damping_global_grnod_dodges_a_user_set_node_id(self):
+        """PRE-EXISTING on master and fixed here: _make_damping drew its group
+        id from the unguarded next_id(), so a user *SET_NODE numbered at or
+        above the auto-id base landed on the same id — k2rad re-emits every
+        user *SET_NODE under its own SID, so the deck came out with TWO
+        /GRNOD/NODE/90001 and the starter aborted the whole model with
+        ERROR 79 DUPLICATE ID / IN NODE GROUP DEFINITION. A no-op on any deck
+        without such a set, so no ordinary deck's ids shift."""
+        deck = (_MESH + "*SET_NODE_LIST\n     90001\n         1         2\n"
+                + "*DAMPING_GLOBAL\n         0     500.0\n" + _END)
+        _, starter = _convert(deck)
+        ids = [ln for ln in starter.splitlines()
+               if ln.startswith("/GRNOD/NODE/")]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertIn("/GRNOD/NODE/90002", ids)
+
+    def test_the_card1_header_constant_is_the_one_that_is_emitted(self):
+        """_DAMP_CARD1_HDR replaced two copies of the same inline literal in
+        _make_damping; the emitted decks must still carry that exact string."""
+        deck = _MESH + "*DAMPING_GLOBAL\n         0     500.0\n" + _END
+        _, starter = _convert(deck)
+        self.assertIn(_DAMP_CARD1_HDR, starter.splitlines())
 
 
 if __name__ == "__main__":

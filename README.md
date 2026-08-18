@@ -2109,7 +2109,10 @@ This is a **radioss2025 keyword and k2rad writes `/BEGIN 2022`**, so the starter
 draws `WARNING 100211 Unsupported option /DAMP/FREQUENCY_RANGE in format < 2025`.
 Measured on `starter_win64`: that warning is advisory — every field reads
 correctly and the echo is identical under `/BEGIN` 2022 and 2025 — so the card
-is emitted and the warning restated. Bump `/BEGIN` to 2025 by hand to silence it.
+is emitted and the warning restated. Bumping `/BEGIN` to 2025 by hand silences
+it, at the cost of `WARNING 100217 "card is missing"` on the other cards k2rad
+writes in the 2022 layout (measured harmless: 0 errors, every field still reads
+back identically) — the warning says so.
 `PSID=0` means "all parts **except** those claimed by other
 `*DAMPING_FREQUENCY_RANGE` cards", which is the *opposite* of Radioss
 `grpart_ID=0` (that grabs every part and silently re-tags the ones an earlier
@@ -2117,10 +2120,13 @@ card took). k2rad therefore emits `grpart_ID=0` only when nothing else claims a
 part, and an explicit complement `/GRPART/PART` otherwise
 The single Radioss card **is** LS-DYNA's `_DEFORM` behaviour: damping is applied
 as a Maxwell/Prony viscous stress inside the material law, not as a nodal force.
-So `_DEFORM` is a clean 1:1, and the blank option is an approximation that gets
-a loud warning — rigid-body motion is not damped and natural frequencies shift
-*up* instead of down. Only solids and shells are damped (LAW25 shells excluded);
-beams, springs and trusses are not. `PIDREL`, `IFLG`, `ICARD2`/`CDAMPV`/`IPWP`
+So `_DEFORM` is a clean 1:1 *on the elements Radioss can reach*, and the blank
+option is an approximation that gets a loud warning — rigid-body motion is not
+damped and natural frequencies shift *up* instead of down. The element scope is
+narrower on both options: Radioss damps only shells and solids, while LS-DYNA
+also damps beams, thick shells and discrete elements (Vol I R16 Remark 4), so
+any part in the damped scope carrying none of the former is named as
+**completely undamped**. `PIDREL`, `IFLG`, `ICARD2`/`CDAMPV`/`IPWP`
 have no Radioss counterpart and are warned and dropped; the `_DEFORM_DMIG`
 superelement variant is dropped whole. `Tstart`/`Tstop` are written as the
 neutral 0 / 1e30 because they are inert for this damping type — the starter

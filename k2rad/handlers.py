@@ -10061,12 +10061,54 @@ def _damping_data_rows(block: Block) -> List[int]:
     """Indices of the real data lines of a *DAMPING_* block.
 
     The parser keeps blank cards as ``""`` placeholders so multi-card keywords
-    hold their column positions (parser.py:299-308); the *DAMPING_* cards are
-    all single-card-per-entry, so those placeholders and ``$`` comments are just
-    skipped — the same walk ``handle_damping_part_stiffness`` uses.
+    hold their column positions (parser.py:299-308). Every *DAMPING_* card 1
+    starts with an id or a coefficient, so a placeholder is never one of them
+    and can be skipped here — the same walk ``handle_damping_part_stiffness``
+    uses.
+
+    A caller that also reads an OPTIONAL SECOND card must NOT simply take the
+    next entry of this list: *DAMPING_PART_MASS's Scale Factor Card may itself
+    be blank (all six scale factors default to 0.0, Manual Vol I R16 p.15-10),
+    and that blank card is filtered out here, so the next entry would be the
+    FOLLOWING card 1. ``handle_damping_part_mass`` therefore requires the card-2
+    row to be RAW-CONTIGUOUS with its card 1; see the comment there.
+
+    (The ``$`` guard is defensive only — ``parse_k_file`` drops column-1 ``$``
+    lines outright and ``_strip_inline_comment`` reduces an indented one to
+    ``""`` — but it is what ``handle_damping_part_stiffness`` writes, so the two
+    walks stay textually identical.)
     """
     return [i for i in range(_title_offset(block), len(block.raw))
             if block.raw[i].strip() and not block.raw[i].lstrip().startswith("$")]
+
+
+def _warn_extra_damping_rows(block: Block, state: ConversionState,
+                             rows: List[int], n_expected: int) -> None:
+    """Report the data lines a one-entity-per-block *DAMPING_* handler ignores.
+
+    *DAMPING_FREQUENCY_RANGE and *DAMPING_RELATIVE are modelled as one entity
+    per keyword block — that is how both HyperMesh cfgs read them
+    (``Keyword971_R7.1/DAMPING/DampFrequencyRange.cfg``,
+    ``Keyword971_R9.3/DAMPING/DampRelative.cfg``: a flat card each, no
+    CARD_LIST), and the R16 manual shows a single card set for both. Whether
+    LS-DYNA would go on to read a stacked second set is not settled here, so
+    the rows are NOT interpreted — but they are named rather than dropped in
+    silence, which is the whole point of this batch.
+
+    (*DAMPING_PART_MASS is different and really does loop: its manual entry
+    says the command "may appear multiple times", and the FLAG column makes the
+    optional second card unambiguous to consume.)
+    """
+    if len(rows) <= n_expected:
+        return
+    ignored = [block.raw[i].rstrip() for i in rows[n_expected:]]
+    state.warn(
+        f"*{block.keyword}: {len(ignored)} extra data line(s) after the "
+        f"{'card set' if n_expected == 1 else f'{n_expected} expected cards'} "
+        f"— k2rad reads ONE {block.keyword} entity per keyword block (as both "
+        "HyperMesh cfgs and the R16 manual describe it), so the following "
+        f"line(s) are IGNORED: {ignored}. Split them into separate "
+        f"*{block.keyword} blocks if they were meant as additional cards.")
 
 
 def handle_damping_part_mass(block: Block, state: ConversionState) -> None:
@@ -10085,7 +10127,8 @@ def handle_damping_part_mass(block: Block, state: ConversionState) -> None:
     k = 0
     n_before = len(state.damping_part_mass)
     while k < len(rows):
-        f = _card(raw, rows[k], fixed=True, n=4, w=10)
+        c1 = rows[k]
+        f = _card(raw, c1, fixed=True, n=4, w=10)
         k += 1
         if not f:
             continue
@@ -10096,12 +10139,23 @@ def handle_damping_part_mass(block: Block, state: ConversionState) -> None:
         sf = _ffield(f, 2, 1.0)
         flag = to_int(f[3]) if len(f) > 3 else 0
         st = [0.0] * 6
-        if flag == 1 and k < len(rows):
+        # The Scale Factor Card is positional: LS-DYNA reads the line
+        # IMMEDIATELY after card 1, and an all-blank one is the legal "every
+        # scale factor defaults to 0.0" card. So the card-2 slot is claimed by
+        # RAW index, not by "the next non-blank row" — a blank card 2 is dropped
+        # from `rows`, and taking rows[k] there would consume the FOLLOWING
+        # card 1 as scale factors (its PID/LCID landing in STX/STY) and lose
+        # that part entirely. Non-blank card 2 <=> rows[k] is raw-contiguous.
+        if flag == 1 and k < len(rows) and rows[k] == c1 + 1:
             f2 = _card(raw, rows[k], fixed=True, n=6, w=10)
             k += 1
             for j in range(6):
                 st[j] = to_float(f2[j]) if len(f2) > j else 0.0
         if pid <= 0:
+            state.warn(
+                f"*{block.keyword}: card {c1 - _title_offset(block) + 1} has "
+                f"{'PSID' if is_set else 'PID'}={pid} (0 or blank names no "
+                "part) — that card is DROPPED.")
             continue
         state.damping_part_mass.append(DampingPartMass(
             pid=pid, is_set=is_set, lcid=lcid, sf=sf, flag=flag,
@@ -10146,12 +10200,19 @@ def handle_damping_frequency_range(block: Block, state: ConversionState) -> None
     # CDAMPV defaults to CDAMP and IPWP to 1 — both NON-ZERO defaults, so they
     # are seeded before the read: an all-blank Card 2 (a legal "all defaults"
     # card, which the row filter drops along with the other blank placeholders)
-    # must still land on those values, not on 0.
+    # must still land on those values, not on 0. Card 2 is positional, exactly
+    # like *DAMPING_PART_MASS's Scale Factor Card, so it is claimed by RAW
+    # contiguity rather than as "the next non-blank row" — otherwise a blank
+    # card 2 followed by a stray line would read that line as CDAMPV/IPWP.
     cdampv, ipwp = (cdamp, 1) if (icard2 == 1 and deform) else (0.0, 1)
-    if icard2 == 1 and deform and len(rows) > 1:
+    n_consumed = 1
+    if (icard2 == 1 and deform and len(rows) > 1
+            and rows[1] == rows[0] + 1):
         f2 = _card(block.raw, rows[1], fixed=True, n=2, w=10)
         cdampv = _ffield(f2, 0, cdamp)
         ipwp = to_int(f2[1]) if len(f2) > 1 and f2[1].strip() else 1
+        n_consumed = 2
+    _warn_extra_damping_rows(block, state, rows, n_consumed)
     state.damping_frequency_range.append(DampingFrequencyRange(
         cdamp=cdamp, flow=flow, fhigh=fhigh, psid=psid, pidrel=pidrel,
         iflg=iflg, icard2=icard2, cdampv=cdampv, ipwp=ipwp,
@@ -10171,6 +10232,7 @@ def handle_damping_relative(block: Block, state: ConversionState) -> None:
     if not rows:
         state.warn(f"*{block.keyword}: no data card found — skipped")
         return
+    _warn_extra_damping_rows(block, state, rows, 1)
     f = _card(block.raw, rows[0], fixed=True, n=6, w=10)
     state.damping_relative.append(DampingRelative(
         cdamp=to_float(f[0]) if len(f) > 0 else 0.0,
@@ -10742,6 +10804,11 @@ HANDLERS = {
     # strips a trailing _ID/_TITLE, so _DEFORM does NOT fall back to the base
     # key — every spelling needs its own row or it lands in skipped_keywords
     # with no warning at all (the #117 *LOAD_BODY_R* defect).
+    # These THREE rows are the complete legal set: Manual Vol I R16 p.15-2
+    # states "OPTION2 is available only when OPTION1 is DEFORM", so the bare
+    # *DAMPING_FREQUENCY_RANGE_DMIG spelling (OPTION2 without OPTION1) does not
+    # exist and is deliberately absent — a deck carrying it is malformed, and
+    # skipped_keywords is the right place for it.
     "DAMPING_FREQUENCY_RANGE":                handle_damping_frequency_range,
     "DAMPING_FREQUENCY_RANGE_DEFORM":         handle_damping_frequency_range,
     "DAMPING_FREQUENCY_RANGE_DEFORM_DMIG":    handle_damping_frequency_range,
