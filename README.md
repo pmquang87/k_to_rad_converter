@@ -2077,6 +2077,84 @@ splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
 rejects the whole deck
 
+### Damping
+`*DAMPING_GLOBAL` → `/DAMP` `Alpha` (mass-proportional Rayleigh; `VALDMP` is
+carried verbatim, both sides apply `F = -α·m·v`). `LCID` is not converted —
+plain `/DAMP` has no function slot, so a time-varying curve is warned about and
+the constant `VALDMP` used. The per-DOF scale factors `STX..SRZ` are warned
+about and dropped
+`*DAMPING_PART_STIFFNESS` → `/DAMP` `Beta`. LS-DYNA derives `β_part = 2·COEF/ω_max`
+from each part's own highest frequency, which is not knowable at conversion
+time, so `COEF` is passed straight through and the largest value across the
+listed parts becomes one global `β` — both facts are warned about. Note the
+engine caps `β` at the current time step (`MIN(DAMP_B, DAMPT)` in `damping.F`)
+`*DAMPING_PART_MASS` / `_SET` → a part-scoped `/DAMP` `Alpha` per card, with
+`Alpha = SF · curve`. Unlike `*DAMPING_GLOBAL` this card has **no
+constant-value column** — the damping constant is read entirely off `LCID` — so
+`LCID=0` is a dropped card, and a *time-varying* curve is reduced to its first
+ordinate with a warning (exact for the flat curves these decks normally carry).
+`FLAG=1` maps `STX..SRZ` onto the `/DAMP` Format-2 per-DOF rows
+(`α_i = SF·curve·ST_i`); `FLAG=1` with all six left at 0.0 is read as "uniform"
+rather than as "no damping". LS-DYNA forbids combining this card with
+`*DAMPING_GLOBAL`, and Radioss would apply both additively, so a deck holding
+both is warned. **dyna2rad does not convert this keyword at all** — k2rad's
+mapping is a deliberate super-set
+`*DAMPING_FREQUENCY_RANGE` / `_DEFORM` → `/DAMP/FREQUENCY_RANGE`
+(`CDAMP`→`Cdamp`, `FLOW`→`Freq_low`, `FHIGH`→`Freq_high`, `PSID`→`grpart_ID`).
+`0 < FLOW < FHIGH` is enforced by the converter because the starter enforces
+neither: with `FLOW=0` its three-Maxwell fit collocates at
+`sqrt(FLOW·FHIGH) = 0`, the 3×3 system is singular and NaN damping parameters
+propagate silently into every element of the group.
+This is a **radioss2025 keyword and k2rad writes `/BEGIN 2022`**, so the starter
+draws `WARNING 100211 Unsupported option /DAMP/FREQUENCY_RANGE in format < 2025`.
+Measured on `starter_win64`: that warning is advisory — every field reads
+correctly and the echo is identical under `/BEGIN` 2022 and 2025 — so the card
+is emitted and the warning restated. Bumping `/BEGIN` to 2025 by hand silences
+it, at the cost of `WARNING 100217 "card is missing"` on the other cards k2rad
+writes in the 2022 layout (measured harmless: 0 errors, every field still reads
+back identically) — the warning says so.
+`PSID=0` means "all parts **except** those claimed by other
+`*DAMPING_FREQUENCY_RANGE` cards", which is the *opposite* of Radioss
+`grpart_ID=0` (that grabs every part and silently re-tags the ones an earlier
+card took). k2rad therefore emits `grpart_ID=0` only when nothing else claims a
+part, and an explicit complement `/GRPART/PART` otherwise
+The single Radioss card **is** LS-DYNA's `_DEFORM` behaviour: damping is applied
+as a Maxwell/Prony viscous stress inside the material law, not as a nodal force.
+So `_DEFORM` is a clean 1:1 *on the elements Radioss can reach*, and the blank
+option is an approximation that gets a loud warning — rigid-body motion is not
+damped and natural frequencies shift *up* instead of down. The element scope is
+narrower on both options: Radioss damps only shells and solids, while LS-DYNA
+also damps beams, thick shells and discrete elements (Vol I R16 Remark 4), so
+any part in the damped scope carrying none of the former is named as
+**completely undamped**. `PIDREL`, `IFLG`, `ICARD2`/`CDAMPV`/`IPWP`
+have no Radioss counterpart and are warned and dropped; the `_DEFORM_DMIG`
+superelement variant is dropped whole. `Tstart`/`Tstop` are written as the
+neutral 0 / 1e30 because they are inert for this damping type — the starter
+stores and echoes them, and nothing applies them
+`*DAMPING_RELATIVE` → `/DAMP/VREL`: **resolved and reported, not emitted.** The
+mapping is exact (LS-DYNA's `D = 4π·CDAMP·FREQ` is byte-for-byte Radioss's
+`damp_a = Alpha_x·4π·Freq`), but `/DAMP/VREL` needs the **radioss2024** card
+format. Measured on `starter_win64` with `/BEGIN` 2022-vs-2025 twins: at 2022
+the reader falls back to the reduced radioss2023 layout, swallows the
+`Freq RbodyID FuncID Xscale` card as if it were the `Alpha_y` row, and leaves
+`Freq` at 0 — which switches the engine to its `α = Cdamp/dt_initial` branch,
+roughly twelve orders of magnitude off. Emitting a card that reads as something
+else is worse than emitting none, so k2rad resolves everything and puts the
+finished card in a warning: `Alpha_*`, `Alpha2_x` (from `DV2`), `Freq`,
+`RbodyID` (from `PIDRB`, looked up against the emitted `/RBODY`), `FuncID`
+(from `LCID`, resolved through the `*DEFINE_CURVE` → `/FUNCT` table) and the
+`grnod` scope — ready to paste into a deck whose `/BEGIN` says 2024 or later.
+Three traps are called out in that warning: `Alpha_*` must be **1.0** when a
+curve is given (LS-DYNA's `LCID` *replaces* `CDAMP`, Radioss's `FuncID`
+*multiplies* `Alpha_x`, so copying both double-counts); `Alpha2_*` is ignored
+unless `RbodyID ≠ 0`; and `Xscale` is dead in the shipped engine, so abscissa
+scaling has to be baked into the curve's own X values
+Several `/DAMP*` cards covering the same node compound their α terms but share
+one per-node history buffer, which corrupts the `β` term of whichever is read
+first, so overlapping scopes are warned about. A part named by two
+`/DAMP/FREQUENCY_RANGE` cards is resolved by plain overwrite in the starter —
+last one wins, silently — and is warned about too
+
 ### Control / output
 `*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO/DYNAMICS` → `/IMPL/*` blocks
 `*CONTROL_IMPLICIT_EIGENVALUE` → modal stiffness-export recipe

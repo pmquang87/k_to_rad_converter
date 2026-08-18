@@ -7,11 +7,11 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
-    PM_VAD_KEYWORD, RigidWallGeomFace,
+    DampingFrequencyRange, PM_VAD_KEYWORD, RigidWallGeomFace,
 )
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
-    _emit_id_group, _f, _fmt_eid_list, _i, _part_node_sets,
+    _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i, _part_node_sets,
     _spotweld_beam_pids, _vcross, _vnorm, _vsub,
 )
 from .mesh import _emit_skew_fix, _emit_skew_mov, _ortho_skew_axes
@@ -106,6 +106,9 @@ __all__ = [
     "_make_rigid_walls",
     "_make_modal_dummy_cload",
     "_make_damping",
+    "_make_damping_part_mass",
+    "_make_damping_frequency_range",
+    "_resolve_damping_relative",
     "_make_free_node_constraints",
 ]
 
@@ -5466,6 +5469,67 @@ def _make_modal_dummy_cload(state: ConversionState,
 # Top-level assemblers
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: /DAMP card 1 column header, naming the FORMAT(radioss110) fields of
+#: ``radioss110/DAMP/Damp.cfg`` — Alpha(20) Beta(20) grnod_ID(10) skew_ID(10)
+#: Tstart(20) Tstop(20). k2rad's own wording, NOT that cfg's COMMENT string:
+#: the cfg's is 100 chars with every label right-aligned on its field's last
+#: column, this one is 102 and sits two columns to the right of the values it
+#: labels. Inherited verbatim from the pre-existing inline literal and kept
+#: byte-for-byte, because it is a ``#`` comment the starter never reads and
+#: re-aligning it would move the hash of every /DAMP-bearing deck in the
+#: corpus for a purely cosmetic gain.
+_DAMP_CARD1_HDR = ("#               alpha                beta   grnod_ID"
+                   "   skew_ID              Tstart               Tstop")
+
+
+def _damping_part_nodes(state: ConversionState, pids: Set[int],
+                        rigid_nodes: Set[int]) -> List[int]:
+    """Deformable nodes carried by *pids*, rigid-body nodes excluded.
+
+    Only shells and solids are scanned — the same scope ``_make_damping`` has
+    always used. Beam / spring / SPH nodes are therefore NOT damped by a
+    part-scoped /DAMP; a deck whose damped part is built only from those
+    element families gets an empty group and a warning instead of a card.
+    """
+    return sorted(
+        {n for e in state.shell_elems if e.pid in pids
+         for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for e in state.solid_elems if e.pid in pids
+           for n in e.nodes if n > 0 and n not in rigid_nodes}
+    )
+
+
+def _damping_resolve_pids(state: ConversionState, pid: int, is_set: bool,
+                          what: str) -> Optional[List[int]]:
+    """PID or *SET_PART PSID → a list of part ids, or None when unresolvable.
+
+    *SET_PART_ADD sets arrive pre-expanded by ``_flatten_part_set_adds`` (one
+    nesting level), so a single ``state.part_sets`` lookup covers both variants
+    — which is also why the resolution has to happen HERE, in the writer, and
+    not in the handler.
+    """
+    if is_set:
+        entry = state.part_sets.get(pid)
+        if entry is None:
+            state.warn(
+                f"{what}: *SET_PART {pid} is not defined in this deck (or uses "
+                "an unsupported variant such as _COLUMN/_GENERATE) — the "
+                "damping scope cannot be resolved, so the card is DROPPED and "
+                "those parts run UNDAMPED.")
+            return None
+        pids = [p for p in entry[1] if p in state.parts]
+        missing = sorted(set(entry[1]) - set(pids))
+        if missing:
+            state.warn(f"{what}: *SET_PART {pid} lists part id(s) {missing} "
+                       "with no *PART card — ignored.")
+        return pids
+    if pid not in state.parts:
+        state.warn(f"{what}: part {pid} has no *PART card — the card is "
+                   "DROPPED.")
+        return None
+    return [pid]
+
+
 def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     """Emit /DAMP from *DAMPING_GLOBAL and *DAMPING_PART_STIFFNESS.
 
@@ -5492,11 +5556,39 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 
     alpha = state.damping_global.valdmp if state.damping_global else 0.0
     # Aggregate β from *DAMPING_PART_STIFFNESS — use max coef across all parts
-    beta = 0.0
+    beta = max((d.coef for d in state.damping_part_stiffness), default=0.0)
+    if alpha == 0.0 and beta == 0.0:
+        # Two ways in, and the message has to name the one that applies:
+        #   - *DAMPING_PART_STIFFNESS with every COEF = 0.0 — documented
+        #     "Inactive" (Manual Vol I R16 p.15-12). With no *DAMPING_GLOBAL
+        #     alongside it, this is also the deck that used to CRASH the whole
+        #     conversion on `d.stx` further down.
+        #   - *DAMPING_GLOBAL with VALDMP = 0.0, which on the corpus is usually
+        #     a card whose damping really lives on its LCID curve — a field
+        #     handle_damping_global already warns it does not read.
+        # Either way there is nothing to apply, and emitting the card anyway
+        # costs a /GRNOD over every deformable node in the model plus a /DAMP
+        # that damps exactly zero. Same rule _make_damping_part_mass applies to
+        # SF x curve == 0.
+        why = []
+        if state.damping_global is not None:
+            g = state.damping_global
+            why.append("*DAMPING_GLOBAL VALDMP=0" + (
+                f" (its damping constant lives on LCID={g.lcid}, a curve this "
+                "card does not read — reported separately above)"
+                if g.lcid > 0 else ""))
+        if state.damping_part_stiffness:
+            why.append("*DAMPING_PART_STIFFNESS with every COEF=0.0, which "
+                       "LS-DYNA documents as 'Inactive'")
+        state.warn(
+            "*DAMPING_*: the deck's damping resolves to alpha=0 AND beta=0 ("
+            + "; ".join(why) + "), so there is nothing to apply — /DAMP is NOT "
+            "emitted. The model runs UNDAMPED either way; what is dropped is an "
+            "inert card plus a /GRNOD listing every deformable node.")
+        return []
     target_pids: Set[int] = set()
     if state.damping_part_stiffness:
         coefs = [d.coef for d in state.damping_part_stiffness]
-        beta = max(coefs)
         target_pids = {d.pid for d in state.damping_part_stiffness}
         unique_pids = sorted(target_pids)
         if len(set(coefs)) > 1:
@@ -5537,14 +5629,26 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
         state.warn("*DAMPING_*: no target deformable nodes found - /DAMP not emitted.")
         return []
 
-    grnod_id = state.next_id()
+    # next_grnod_id, not next_id: k2rad re-emits every user *SET_NODE under its
+    # own SID, so a set numbered at or above the auto-id base collides with this
+    # synthesized group and the starter aborts the whole deck with ERROR 79
+    # DUPLICATE ID / IN NODE GROUP DEFINITION. A no-op on any deck without such
+    # a set, so no ordinary deck's ids shift.
+    grnod_id = state.next_grnod_id()
     damp_id = state.next_id()
     lines = _emit_grnod_node(grnod_id, grnod_title, target_nodes)
 
     # If only α and no β, use Format 1 (simpler, smaller deck)
     if beta == 0.0:
         d = state.damping_global
-        per_dof = (d.stx, d.sty, d.stz, d.srx, d.sry, d.srz)
+        # The guard is now belt-and-braces: alpha comes ONLY from
+        # *DAMPING_GLOBAL, so `d is None` implies alpha == 0, and this branch
+        # implies beta == 0 — the pair the early return above already took.
+        # Before that return existed, a *DAMPING_PART_STIFFNESS whose every
+        # COEF was 0.0 reached here with d None and reading d.stx aborted the
+        # WHOLE conversion with an AttributeError, not just this card.
+        per_dof = ((d.stx, d.sty, d.stz, d.srx, d.sry, d.srz) if d
+                   else (0.0,) * 6)
         if any(s != 0.0 for s in per_dof):
             state.warn(
                 f"*DAMPING_GLOBAL: per-DOF scale factors (stx..srz) ignored; "
@@ -5557,7 +5661,7 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
         lines += [
             f"/DAMP/{damp_id}",
             f"Rayleigh mass damping (alpha={alpha:.6G})",
-            "#               alpha                beta   grnod_ID   skew_ID              Tstart               Tstop",
+            _DAMP_CARD1_HDR,
             f"{_f(alpha)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
             HDR,
         ]
@@ -5568,7 +5672,7 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     lines += [
         f"/DAMP/{damp_id}",
         title,
-        "#               alpha                beta   grnod_ID   skew_ID              Tstart               Tstop",
+        _DAMP_CARD1_HDR,
         f"{_f(alpha)}{_f(beta)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
         f"{_f(alpha)}{_f(beta)}",
         f"{_f(alpha)}{_f(beta)}",
@@ -5578,6 +5682,620 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
         HDR,
     ]
     return lines
+
+
+def _damping_curve_constant(state: ConversionState, lcid: int,
+                            what: str) -> Optional[float]:
+    """The single ordinate a /BEGIN 2022 /DAMP can carry for curve *lcid*.
+
+    LS-DYNA's *DAMPING_PART_MASS states its damping constant as ``D_s(t) =
+    SF * f_LCID(t)``; plain /DAMP has only a scalar ``Alpha``, and the Radioss
+    card that DOES take a function — /DAMP/FUNCT, whose engine kernel computes
+    ``alpha = f(t)*Alpha*Alpha_dir`` (``damping_funct_ini.F90:80-99``) — first
+    exists in ``radioss2026/DAMP/Damp_funct.cfg``, far above the /BEGIN 2022
+    this converter writes.
+
+    So the curve is reduced to its ordinate at the first abscissa. That is
+    EXACT for the flat curves these decks almost always use (the corpus case
+    ``11.3.sqt_iga_s.k`` is ``(0, 200) (0.01, 200)``), and is warned about
+    otherwise. Returns None when the curve cannot be used at all.
+    """
+    curve = state.curves.get(lcid)
+    if curve is None or not curve.pts:
+        state.warn(
+            f"{what}: load curve {lcid} is not defined in this deck (or has no "
+            "points) — the damping constant comes ENTIRELY from that curve, so "
+            "the card is DROPPED and those parts run UNDAMPED.")
+        return None
+    ordinates = [o for _, o in curve.pts]
+    value = ordinates[0]
+    if any(o != value for o in ordinates):
+        state.warn(
+            f"{what}: load curve {lcid} is time-VARYING "
+            f"(ordinates {min(ordinates):.6G}..{max(ordinates):.6G}); a "
+            f"/BEGIN 2022 /DAMP carries a constant Alpha only, so the value at "
+            f"the first point ({value:.6G}) is used for the whole run and the "
+            "time variation is LOST. The Radioss card that takes a function, "
+            "/DAMP/FUNCT, is a radioss2026 keyword.")
+    return value
+
+
+def _make_damping_part_mass(state: ConversionState,
+                            rigid_nodes: Set[int]) -> List[str]:
+    """*DAMPING_PART_MASS / _SET -> one part-scoped /DAMP per card.
+
+    Both sides apply the SAME force. LS-DYNA (Manual Vol I R16 p.15-8):
+    ``F_damp = D_s*m*v``. Radioss ``DAMPING51`` (``engine/source/assembly/
+    damping.F:127-170``) subtracts ``DAMP_A*V`` from the nodal acceleration,
+    i.e. ``F = -Alpha*m*v``. So ``Alpha = D_s = SF * curve``, with no unit
+    conversion and no frequency term — this is the one damping keyword of the
+    batch that needs no version bump at all, because plain /DAMP has been
+    readable since radioss42.
+
+    dyna2rad does NOT convert this keyword: ``convertdampings.cxx`` runs exactly
+    four converters (:38-44) and its only ``SelectionRead`` calls are at lines
+    51/167/247/321 — GLOBAL, PART_STIFFNESS, RELATIVE, FREQUENCY_RANGE. The card
+    parses cleanly into its model (registered in every profile's
+    ``data_hierarchy.cfg`` as ``DAMPING/DampMass.cfg``) and is then silently
+    dropped. k2rad converting it is a deliberate super-set, not a parity item.
+
+    Scoping: LS-DYNA damps the PART's nodes; Radioss /DAMP takes a grnod, so one
+    /GRNOD/NODE is emitted per card (``grnod_ID = 0`` is NOT "all nodes" on this
+    card — see _make_damping).
+    """
+    if not state.damping_part_mass:
+        return []
+    lines: List[str] = []
+    # LS-DYNA Manual Vol I R16 p.15-9: "cannot be combined with
+    # *DAMPING_GLOBAL". Radioss would happily apply both (hm_read_damp.F:146
+    # loops over every /DAMP card and damping.F:101 sums their contributions),
+    # so the deck would come out MORE damped than LS-DYNA would have run it.
+    if state.damping_global is not None:
+        state.warn(
+            "*DAMPING_PART_MASS: the deck also carries *DAMPING_GLOBAL, which "
+            "LS-DYNA forbids combining with it. Radioss applies every /DAMP "
+            "card additively, so the converted model is damped by the SUM of "
+            "the two — remove one of them.")
+    # The /DAMP that _make_damping builds from *DAMPING_PART_STIFFNESS carries a
+    # non-zero Beta, and Beta is the term that a shared history buffer corrupts.
+    # The clash is on NODES, not on part ids: two conformally meshed parts share
+    # the nodes along their common edge, so a part-id intersection would miss
+    # exactly the case that bites. And the pid set has to be the one
+    # _make_damping actually puts in that /GRNOD — ALL *DAMPING_PART_STIFFNESS
+    # pids, unfiltered — not just the ones whose own COEF is non-zero: the
+    # single card carries beta = max(coefs), so a part written with COEF 0.0
+    # still rides inside the beta-bearing group and its nodes still collide.
+    # What decides whether there is a clash at all is whether that MAXIMUM is
+    # non-zero.
+    stiff_nodes: Set[int] = set()
+    stiff_pids = {d.pid for d in state.damping_part_stiffness}
+    if stiff_pids and max(d.coef for d in state.damping_part_stiffness) != 0.0:
+        stiff_nodes = set(_damping_part_nodes(state, stiff_pids, rigid_nodes))
+    for dm in state.damping_part_mass:
+        kw = "*DAMPING_PART_MASS_SET" if dm.is_set else "*DAMPING_PART_MASS"
+        what = f"{kw} ({'PSID' if dm.is_set else 'PID'}={dm.pid})"
+        if dm.lcid == 0:
+            state.warn(
+                f"{what}: LCID=0. Unlike *DAMPING_GLOBAL this card has NO "
+                "constant-value column — the damping constant is read entirely "
+                "off the curve — so there is nothing to apply; card DROPPED.")
+            continue
+        value = _damping_curve_constant(state, dm.lcid, what)
+        if value is None:
+            continue
+        alpha = dm.sf * value
+        if alpha == 0.0:
+            state.warn(
+                f"{what}: SF={dm.sf:.6G} x curve {dm.lcid} = 0, so the card "
+                "damps nothing — /DAMP not emitted for it. (If the curve is "
+                "flat at zero it really does ask for no damping; if it only "
+                "STARTS at zero and ramps up, the time variation that is being "
+                "lost has been reported separately — a /BEGIN 2022 /DAMP "
+                "carries a constant Alpha and cannot ramp.)")
+            continue
+        pids = _damping_resolve_pids(state, dm.pid, dm.is_set, what)
+        if pids is None:
+            continue
+        if not pids:
+            # An empty (or fully unresolvable) *SET_PART. Distinguished from the
+            # "no deformable mesh" case below, which would otherwise report
+            # "part(s) [] carry no ... nodes" and name the wrong cause — the
+            # same branch _make_damping_frequency_range already has.
+            state.warn(f"{what}: *SET_PART {dm.pid} resolved to no existing "
+                       "part — /DAMP not emitted for this card.")
+            continue
+        nodes = _damping_part_nodes(state, set(pids), rigid_nodes)
+        if not nodes:
+            state.warn(
+                f"{what}: part(s) {sorted(pids)} carry no deformable shell or "
+                "solid nodes (only rigid, beam, spring or SPH ones, or no mesh "
+                "at all) — /DAMP not emitted for this card.")
+            continue
+        # Per-DOF scale factors. LS-DYNA FLAG=1 means "the global components of
+        # the damping forces require separate scale factors"; Radioss holds them
+        # in the /DAMP Format-2 per-DOF rows, so alpha_i = SF*curve*ST_i.
+        scales = (dm.stx, dm.sty, dm.stz, dm.srx, dm.sry, dm.srz)
+        per_dof = dm.flag == 1
+        if per_dof and not any(s != 0.0 for s in scales):
+            state.warn(
+                f"{what}: FLAG=1 requests per-DOF damping scale factors but "
+                "STX..SRZ are all 0.0, which would scale the damping to zero "
+                "on every DOF. Read as 'uniform' (the all-six-zero convention "
+                f"dyna2rad applies on /DAMP/FUNCT) and alpha={alpha:.6G} is "
+                "used on all six DOFs.")
+            per_dof = False
+        if shared := sorted(stiff_nodes.intersection(nodes)):
+            # Two /DAMP cards sharing a node share the single per-node history
+            # buffer DAMP(1:6,I): damping.F:145 stores A() into it and the next
+            # card overwrites, so the FIRST card's Beta term reads a foreign
+            # acceleration from the following cycle on. Alpha-only overlap is
+            # harmless, which is why only the Beta-bearing case is reported.
+            state.warn(
+                f"{what}: {len(shared)} node(s) of part(s) {sorted(pids)} "
+                f"(e.g. {shared[:5]}) are ALSO in the stiffness-damping /DAMP "
+                "built from *DAMPING_PART_STIFFNESS on part(s) "
+                f"{sorted(stiff_pids)} — conformally meshed parts share the "
+                "nodes along their common edge even when the part lists are "
+                "disjoint. Radioss keeps ONE per-node damping history buffer, "
+                "so two /DAMP cards sharing a node corrupt the Beta "
+                "(stiffness) term of whichever is read first (2022 Reference "
+                "Guide p.130 comment 4). Merge them or scope them apart.")
+        grnod_id = state.next_grnod_id()
+        damp_id = state.next_id()
+        lines += _emit_grnod_node(
+            grnod_id, f"damping_part_mass_{'pset' if dm.is_set else 'pid'}"
+                      f"_{dm.pid}", nodes)
+        if not per_dof:
+            lines += [
+                f"/DAMP/{damp_id}",
+                f"Mass damping *DAMPING_PART_MASS lcid={dm.lcid} "
+                f"(alpha={alpha:.6G})",
+                _DAMP_CARD1_HDR,
+                f"{_f(alpha)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+                HDR,
+            ]
+        else:
+            ax, ay, az, axx, ayy, azz = (alpha * s for s in scales)
+            # Format 2: the PRESENCE of the five extra cards is what sets
+            # Mass_Damp_Factor_Option — there is no explicit switch column.
+            lines += [
+                f"/DAMP/{damp_id}",
+                f"Mass damping *DAMPING_PART_MASS lcid={dm.lcid} per-DOF "
+                f"(alpha={alpha:.6G} x STX..SRZ)",
+                _DAMP_CARD1_HDR,
+                f"{_f(ax)}{_f(0.0)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+                f"{_f(ay)}{_f(0.0)}",
+                f"{_f(az)}{_f(0.0)}",
+                f"{_f(axx)}{_f(0.0)}",
+                f"{_f(ayy)}{_f(0.0)}",
+                f"{_f(azz)}{_f(0.0)}",
+                HDR,
+            ]
+    if not lines:
+        return []
+    return ["#-  PART MASS DAMPING (*DAMPING_PART_MASS -> /DAMP):", HDR] + lines
+
+
+def _dfr_what(dfr: DampingFrequencyRange) -> str:
+    """The keyword spelling + card values that every warning below leads with.
+
+    Built in one place so the two passes of _make_damping_frequency_range
+    cannot drift apart in how they name the same card.
+    """
+    kw = ("*DAMPING_FREQUENCY_RANGE_DEFORM_DMIG" if dfr.dmig else
+          "*DAMPING_FREQUENCY_RANGE_DEFORM" if dfr.deform else
+          "*DAMPING_FREQUENCY_RANGE")
+    return (f"{kw} (CDAMP={dfr.cdamp:.6G}, FLOW={dfr.flow:.6G}, "
+            f"FHIGH={dfr.fhigh:.6G})")
+
+
+def _make_damping_frequency_range(state: ConversionState) -> List[str]:
+    """*DAMPING_FREQUENCY_RANGE[_DEFORM] -> /DAMP/FREQUENCY_RANGE.
+
+    Card layout, ``radioss2025/DAMP/Damp_freq_range.cfg``::
+
+        /DAMP/FREQUENCY_RANGE/damp_ID
+        title
+        #              Cdamp                     grpart_ID          Tstart      Tstop
+                %20lg   (20 dead cols)      %10d   (10 dead cols)    %20lg      %20lg
+        #           Freq_low           Freq_high
+                %20lg               %20lg
+
+    The two dead 10-column slots on card 1 are real: the card was laid out to
+    keep ``grpart_ID`` in the same column block as the sibling cards' ``grnod_id``
+    / ``skew_id``. They must be spaces.
+
+    VERSION GATE — measured, not assumed. ``radioss2022/data_hierarchy.cfg``
+    registers only ``DAMP`` and ``DAMP_INTER`` under ``DAMPING``, so a /BEGIN
+    2022 deck names a keyword its registry does not carry. Measured on
+    starter_win64 (2026-05-20) with twin decks differing only in /BEGIN: at 2022
+    the starter draws ``WARNING ID : 100211  Unsupported option
+    /DAMP/FREQUENCY_RANGE in format < 2025`` and then reads the card ANYWAY,
+    with every field correct — echo ``PART GROUP ID 91004 / DAMPING RATIO
+    2.0E-02 / LOWEST FREQUENCY 10.0 / HIGHEST FREQUENCY 200.0``, identical to
+    the /BEGIN 2025 run. (The cfg has exactly one FORMAT block, radioss2025, so
+    there is no older layout for the reader to fall back to.) The card is
+    therefore emitted, with the warning restated for the user — the opposite
+    call from ``*DAMPING_RELATIVE``, whose twin measurement came out MISREAD.
+
+    Fidelity: the single Radioss card IS LS-DYNA's ``_DEFORM`` behaviour.
+    Damping is applied as a Maxwell/Prony viscous stress inside the material law
+    (``damping_range_{shell,shell_mom,solid}.F90``, reached through
+    ``mulawc.F90:1974`` / ``viscmain.F``), gated by the static per-element-group
+    flag ``IPARG(93)`` — never as a nodal force, so rigid-body motion is not
+    damped and natural frequencies shift UP. Radioss has no nodal variant, so
+    the blank (non-DEFORM) LS-DYNA option is an approximation and says so.
+    """
+    if not state.damping_frequency_range:
+        return []
+    parts_all = sorted(state.parts)
+    # Parts Radioss can actually reach with frequency-range damping — see the
+    # element-scope warning below.
+    meshed_pids = ({e.pid for e in state.shell_elems}
+                   | {e.pid for e in state.solid_elems})
+
+    # Pass 1: validate, then resolve each surviving card's part scope, so the
+    # PSID=0 complement and the overlap check both see the whole picture
+    # (dyna2rad builds the same union at convertdampings.cxx:323-334). The
+    # validation has to happen HERE and not in pass 2: `claimed` is what a
+    # PSID=0 card subtracts, and subtracting the parts of a card that is about
+    # to be dropped would shrink the complement for no reason. Resolving a DMIG
+    # card's PSID would likewise be wrong — there it is a SUPERELEMENT id, not
+    # a *SET_PART id, and would draw a misleading "set is not defined" warning.
+    resolved: List[Tuple[DampingFrequencyRange, Optional[List[int]]]] = []
+    claimed: Set[int] = set()
+    for dfr in state.damping_frequency_range:
+        what = _dfr_what(dfr)
+        if dfr.dmig:
+            state.warn(
+                f"{what}: the _DMIG option damps a SUPERELEMENT (PSID is a "
+                "superelement id, not a part set). k2rad converts no "
+                "superelement keywords and Radioss has no equivalent — card "
+                "DROPPED.")
+            continue
+        # The starter's KEY(1:4)=='FREQ' branch validates NEITHER bound. With
+        # Freq_low = 0 the starter's f_mid = sqrt(f_low*f_high) is 0, the 3x3
+        # collocation matrix of damping_range_compute_param.F90 fills with 0/0
+        # and NaN alpha/tau propagate into every element of the group.
+        if dfr.flow <= 0.0 or dfr.fhigh <= dfr.flow:
+            state.warn(
+                f"{what}: needs 0 < FLOW < FHIGH. The Radioss starter fits "
+                "three Maxwell branches at [FLOW, sqrt(FLOW*FHIGH), FHIGH] and "
+                "validates neither bound, so this card would make that 3x3 "
+                "system singular and push NaN damping parameters into every "
+                "element of the group — card DROPPED.")
+            continue
+        if dfr.cdamp <= 0.0:
+            state.warn(f"{what}: CDAMP <= 0 damps nothing — card DROPPED.")
+            continue
+        if dfr.psid == 0:
+            resolved.append((dfr, None))
+            continue
+        pids = _damping_resolve_pids(state, dfr.psid, True, f"{what} PSID")
+        if pids is None:
+            continue                     # unresolvable PSID, already warned
+        if not pids:
+            state.warn(f"{what}: *SET_PART {dfr.psid} resolved to no existing "
+                       "part — card DROPPED.")
+            continue
+        resolved.append((dfr, pids))
+        claimed |= set(pids)
+
+    lines: List[str] = []
+    tagged: Dict[int, str] = {}          # part id -> the card that claimed it
+    n_all_parts = 0
+    gate_warned = False
+    for dfr, pids in resolved:
+        # Pass 2 never sees a DMIG card — pass 1 drops those — so _dfr_what's
+        # third spelling cannot appear here.
+        what = _dfr_what(dfr)
+
+        # ── scope ────────────────────────────────────────────────────────────
+        pre: List[str] = []
+        if dfr.psid != 0:
+            scope = sorted(set(pids or []))
+            grpart_id = state.next_id()
+            pre = _emit_grpart_part(
+                grpart_id, f"damping_freq_range_pset_{dfr.psid}", scope)
+        else:
+            # LS-DYNA: "If PSID = 0, the damping is applied to all parts EXCEPT
+            # those referred to by other *DAMPING_FREQUENCY_RANGE cards."
+            # Radioss grpart_ID=0 means all parts with no exclusion AND, worse,
+            # re-tags every part (hm_read_damp.F:305-307 DAMP_RANGE_PART(J)=I),
+            # silently overriding every earlier card. So the complement is made
+            # explicit whenever anything else claimed parts.
+            n_all_parts += 1
+            scope = [p for p in parts_all if p not in claimed]
+            if not claimed:
+                grpart_id = 0
+                pre = []
+            elif not scope:
+                state.warn(
+                    f"{what}: PSID=0 means 'all parts except those claimed by "
+                    "other *DAMPING_FREQUENCY_RANGE cards', and the other "
+                    "cards already claim every part in the deck — nothing "
+                    "left to damp, card DROPPED.")
+                continue
+            else:
+                grpart_id = state.next_id()
+                pre = _emit_grpart_part(
+                    grpart_id, "damping_freq_range_all_other_parts", scope)
+        if n_all_parts == 2:
+            state.warn(
+                f"{what}: a SECOND *DAMPING_FREQUENCY_RANGE card also has "
+                "PSID=0. Both then cover the same complement set, and Radioss "
+                "resolves overlaps by plain overwrite (hm_read_damp.F:299-307) "
+                "— the LAST card silently wins on every shared part.")
+        if overlap := sorted(p for p in scope if p in tagged):
+            state.warn(
+                f"{what}: part(s) {overlap} are already damped by "
+                f"{tagged[overlap[0]]}. Radioss allows only ONE "
+                "/DAMP/FREQUENCY_RANGE per part and resolves the clash by "
+                "overwrite, so the LAST card silently wins on them.")
+        for p in scope:
+            tagged[p] = what
+
+        # ── fidelity warnings ────────────────────────────────────────────────
+        if not gate_warned:
+            gate_warned = True
+            state.warn(
+                "*DAMPING_FREQUENCY_RANGE -> /DAMP/FREQUENCY_RANGE is a "
+                "radioss2025 keyword and k2rad writes /BEGIN 2022, so the "
+                "starter draws 'WARNING ID : 100211 Unsupported option "
+                "/DAMP/FREQUENCY_RANGE in format < 2025'. Measured on "
+                "starter_win64: the warning is advisory — the card is read "
+                "with every field correct (Cdamp/grpart_ID/Freq_low/Freq_high "
+                "echo identically under /BEGIN 2022 and 2025), so it is "
+                "emitted rather than dropped. Bumping /BEGIN to 2025 by hand "
+                "silences it, but note that a 2025 read then raises "
+                "'WARNING ID : 100217 card is missing' on the OTHER cards "
+                "k2rad writes in the 2022 layout (several gained a trailing "
+                "card by 2025 — measured, about a dozen on a small deck, with "
+                "0 ERRORS and every field still read back identically).")
+        if not dfr.deform:
+            state.warn(
+                f"{what}: this is the BLANK option, which damps global NODE "
+                "motion. Radioss has only the element-level form — damping "
+                "enters as a Maxwell/Prony viscous stress inside the material "
+                "law (damping_range_shell/solid.F90, gated by IPARG(93)), "
+                "which is LS-DYNA's _DEFORM behaviour. Two consequences on "
+                "this deck: rigid-body motion is NOT damped, and natural "
+                "frequencies shift UP instead of down (Manual Vol I R16 "
+                "Remark 3).")
+        # Element scope — applies to BOTH options, so it lives outside the
+        # blank-option branch. LS-DYNA damps solids, beams, shells, thick
+        # shells and discrete elements (Manual Vol I R16 Remark 4); Radioss
+        # reaches only shells and solids (damping_range_shell / _shell_mom /
+        # _solid.F90), and LAW25 shells are excluded outright
+        # (mulawc.F90:1972). Under _DEFORM — advertised as the clean 1:1 —
+        # a beam-only or tshell-only part would otherwise lose ALL its damping
+        # without a word.
+        if unmeshed := sorted(p for p in scope if p not in meshed_pids):
+            shown = (f"{unmeshed[:10]} (+{len(unmeshed) - 10} more)"
+                     if len(unmeshed) > 10 else str(unmeshed))
+            state.warn(
+                f"{what}: {len(unmeshed)} part(s) {shown} in the damped scope "
+                "carry no shell or solid element. Radioss applies "
+                "frequency-range damping inside the shell and solid material "
+                "laws only (damping_range_shell/_shell_mom/_solid.F90, and "
+                "LAW25 shells are excluded outright, mulawc.F90:1972), while "
+                "LS-DYNA damps solids, beams, shells, thick shells and "
+                "discrete elements (Manual Vol I R16 Remark 4) — those part(s) "
+                "come out COMPLETELY UNDAMPED.")
+        if dfr.pidrel:
+            state.warn(
+                f"{what}: PIDREL={dfr.pidrel} asks for damping of the motion "
+                "RELATIVE to that rigid body. /DAMP/FREQUENCY_RANGE has no "
+                "such field at any format version (the relative-velocity "
+                "reference lives on /DAMP/VREL, a different card) — DROPPED, "
+                "so the rigid body's own motion is damped along with "
+                "everything else.")
+        if dfr.iflg == 0:
+            state.warn(
+                f"{what}: IFLG=0 selects LS-DYNA's ITERATIVE fit (errors ~1% "
+                "of the target CDAMP). Radioss implements a one-shot 3-point "
+                "collocation instead (damping_range_compute_param.F90 has no "
+                "refinement loop), i.e. the analogue of IFLG=1. Expect the "
+                "achieved damping to sit BELOW target across the band — about "
+                "-8%..0% at CDAMP=0.01, about -26%..-4% at CDAMP=0.05.")
+        if dfr.icard2 == 1:
+            state.warn(
+                f"{what}: ICARD2=1 supplies CDAMPV={dfr.cdampv:.6G} "
+                f"(volumetric/pressure damping for solids) and IPWP={dfr.ipwp} "
+                "(pore pressure). Radioss applies one damping ratio to both "
+                "the deviatoric and the volumetric branch (damping_range_"
+                "solid.F90 scales gv from the shear modulus and kv from Young "
+                "with the SAME alpha) and has no pore-pressure switch — both "
+                "fields are DROPPED and CDAMP alone is used.")
+
+        # ── the card ─────────────────────────────────────────────────────────
+        damp_id = state.next_id()
+        scope_txt = "all other parts" if dfr.psid == 0 and grpart_id else \
+                    "all parts" if dfr.psid == 0 else f"pset {dfr.psid}"
+        lines += pre
+        lines += [
+            f"/DAMP/FREQUENCY_RANGE/{damp_id}",
+            f"Frequency-range damping {dfr.cdamp:.6G} over "
+            f"{dfr.flow:.6G}-{dfr.fhigh:.6G} Hz ({scope_txt})",
+            "#              Cdamp                     grpart_ID"
+            "                        Tstart               Tstop",
+            # Tstart/Tstop are read and echoed but INERT for this type: both
+            # nodal kernels skip it (damping.F:120-127 guards on
+            # FL_FREQ_RANGE==0, DAMPING44 likewise) and the material-law path
+            # has no time argument at all. Written as the neutral 0 / 1e30.
+            f"{_f(dfr.cdamp)}{' ' * 20}{_i(grpart_id)}{' ' * 10}"
+            f"{_f(0.0)}{_f(1.0E30)}",
+            "#           Freq_low           Freq_high",
+            f"{_f(dfr.flow)}{_f(dfr.fhigh)}",
+            HDR,
+        ]
+    if not lines:
+        return []
+    return ["#-  FREQUENCY-RANGE DAMPING "
+            "(*DAMPING_FREQUENCY_RANGE -> /DAMP/FREQUENCY_RANGE):", HDR] + lines
+
+
+def _resolve_damping_relative(state: ConversionState,
+                              rbody_info: Dict[int, dict]) -> List[str]:
+    """*DAMPING_RELATIVE -> /DAMP/VREL: resolved, reported, NOT emitted.
+
+    The mapping itself is exact. LS-DYNA Remark 3 gives ``F = -(D*m*v) -
+    (DV2*m*v^2)`` with ``D = 4*pi*CDAMP*FREQ`` and ``v`` relative to the rigid
+    body ``PIDRB``; the Radioss engine computes ``damp_a = fact*Alpha_x*4*pi*
+    freq`` (``damping_vref_compute_dampa.F90``) and applies ``F = -alpha*m*
+    (v - v_ref)`` (``damping.F:231-266``). Field for field:
+    ``CDAMP->Alpha_x``, ``FREQ->Freq``, ``PIDRB->RbodyID``, ``DV2->Alpha2_x``,
+    ``LCID->FuncID``, ``PSID->grnod_id``.
+
+    VERSION GATE — measured, and it fails. /DAMP/VREL first appears in
+    ``radioss2023/DAMP/Damp_Vrel.cfg``; the 2023 block is REDUCED (``Alpha_x
+    <blank> grnod_id skew_id Tstart Tstop`` / ``Alpha_y`` / ``Alpha_z``) and
+    only radioss2024 adds the ``Freq RbodyID FuncID Xscale`` card and the
+    quadratic columns. Measured on starter_win64 (2026-05-20), /BEGIN 2022 vs
+    2025 twins carrying the identical 6-line 2024-format card:
+
+      2025  DAMPING FUNCTION ID 91002 / X 3.0E-02 / Y 3.0E-02 / Z 3.0E-02
+            DAMPING FREQUENCY 12.5                                    (correct)
+      2022  WARNING 100211 "Unsupported option /DAMP/VREL in format < 2023"
+            WARNING 100213 "unsupported field exists at the end of line"
+            DAMPING FUNCTION ID 0 / X 3.0E-02 / Y 12.5 / Z 3.0E-02
+            DAMPING FREQUENCY 0.0
+
+    i.e. at 2022 the reader falls back to the reduced 2023 layout, swallows the
+    ``Freq RbodyID FuncID Xscale`` card as if it were the ``Alpha_y`` row, and
+    leaves ``Freq`` at 0. That is not a degraded card, it is a wrong one twice
+    over: ``Alpha_y`` becomes 12.5 instead of 0.03, and with ``Freq == 0`` the
+    engine takes the other branch of ``damping_vref_compute_dampa.F90``,
+    ``damp_a = Alpha_x/dt_initial`` — for a dt around 1e-6 that is roughly
+    twelve orders of magnitude away from the intended ``4*pi*CDAMP*FREQ``.
+
+    Emitting a card that reads as something else is exactly what
+    ``_resolve_contact_interior`` refused to do, so this follows that
+    precedent: resolve everything, name every resolved id in the warning so the
+    user can paste the correct card into a /BEGIN 2024 deck by hand, and emit
+    nothing. Returns [] always; the return type keeps it registry-shaped.
+    """
+    if not state.damping_relative:
+        return []
+    state.note_recognized_not_emitted(
+        "*DAMPING_RELATIVE",
+        "its Radioss counterpart /DAMP/VREL needs the radioss2024 card format; "
+        "under the /BEGIN 2022 this converter writes, the starter falls back "
+        "to the reduced radioss2023 layout and MISREADS it (measured: Freq "
+        "lost to 0, which switches the engine to the alpha=Cdamp/dt_initial "
+        "branch, and the Freq value lands in Alpha_y) — the resolved card is "
+        "reported in a warning instead")
+    for dr in state.damping_relative:
+        what = f"*DAMPING_RELATIVE (CDAMP={dr.cdamp:.6G}, FREQ={dr.freq:.6G})"
+
+        if dr.freq <= 0.0:
+            # Altair's online card documents the Freq=0 branch as
+            # "alpha = CDAMP * dt * Func(t)"; the shipped engine DIVIDES by the
+            # initial timestep instead (damping_vref_compute_dampa.F90:
+            # `damp_a(1) = fact*dampr(3,id)*(one/dtini)`), latched on first
+            # activation. At dt ~ 1e-6 the two readings are ~1e12 apart, so the
+            # card is unusable at Freq=0 whichever /BEGIN it lands in.
+            state.warn(
+                f"{what}: FREQ is 0, and LS-DYNA reads CDAMP as the fraction of "
+                "critical damping AT that frequency (D = 4*pi*CDAMP*FREQ), so "
+                "the card asks for zero damping. Radioss does something else "
+                "entirely on Freq=0 — the engine divides by the INITIAL "
+                "timestep (alpha = Alpha_x/dt_initial), which its own "
+                "documentation describes as a multiplication; the two readings "
+                "are about 1e12 apart at a dt of 1e-6. Set a real FREQ (the "
+                "lowest mode of interest) before using the resolved card below.")
+
+        # RbodyID: PIDRB's OWN part, not "any /RBODY built from that part's
+        # material" — dyna2rad walks PIDRB -> MID -> conversion log
+        # (convertdampings.cxx:274-293) and, when several parts share one
+        # *MAT_RIGID, its loop lets the LAST /RBODY win, which is generally not
+        # PIDRB's. k2rad keys rbody_info by part id, so the lookup is direct.
+        # The emitted /RBODY id is the main node id (writer/rbody.py:624).
+        rbody_id = 0
+        if dr.pidrb <= 0:
+            state.warn(
+                f"{what}: PIDRB is 0, so there is no rigid body to measure "
+                "velocity against — the card would degrade to ordinary "
+                "absolute damping, which is not what *DAMPING_RELATIVE means.")
+        else:
+            info = rbody_info.get(dr.pidrb)
+            if info is None:
+                state.warn(
+                    f"{what}: PIDRB={dr.pidrb} is not a rigid body in the "
+                    "converted deck (no *MAT_RIGID part and no "
+                    "*CONSTRAINED_NODAL_RIGID_BODY of that id), so there is no "
+                    "/RBODY for the relative-velocity reference to point at.")
+            else:
+                rbody_id = info["ind_node"]
+
+        pids = _damping_resolve_pids(state, dr.psid, True, f"{what} PSID") \
+            if dr.psid else None
+        scope_txt = (f"*SET_PART {dr.psid} -> parts {sorted(pids)}"
+                     if pids else
+                     f"*SET_PART {dr.psid} (unresolved)" if dr.psid else
+                     "PSID=0 (no part scope given)")
+
+        # FuncID — THE deliberate deviation from dyna2rad. convertdampings.cxx:
+        # 305 routes the CURVE id through GetRadiossSetIdFromLsdSet(lcid,
+        # "*SET_PART") with the SET entity type, a copy-paste of the PSID line
+        # above it. When that id also numbers two or more *SET_* families the
+        # part-set branch fires and a part-set id is written into a /FUNCT slot
+        # — either pointing at the wrong curve (silent) or at no curve at all
+        # (starter ERROR 3049). k2rad resolves LCID against state.curves, the
+        # *DEFINE_CURVE -> /FUNCT table, and never against part_sets.
+        func_id = 0
+        alpha_x = dr.cdamp
+        if dr.lcid:
+            if dr.lcid in state.table_1d_ids:
+                state.warn(
+                    f"{what}: LCID={dr.lcid} is consumed by a material through "
+                    "a TABLE slot, so k2rad emits it as /TABLE/1/"
+                    f"{dr.lcid} rather than /FUNCT/{dr.lcid} — a /DAMP/VREL "
+                    "FuncID pointing at it would dangle (starter ERROR 3049). "
+                    "The time-varying damping reference is DROPPED.")
+            elif dr.lcid not in state.curves:
+                state.warn(
+                    f"{what}: LCID={dr.lcid} has no *DEFINE_CURVE in this deck "
+                    "— a dangling FuncID is starter ERROR 3049, so the "
+                    "time-varying damping reference is DROPPED.")
+            else:
+                func_id = dr.lcid
+                # LS-DYNA: "CDAMP will be ignored if LCID is non-zero" — the
+                # curve REPLACES the constant. Radioss MULTIPLIES: damp_a =
+                # fact*Alpha_x*4*pi*freq. Copying CDAMP into Alpha_x alongside
+                # a FuncID would therefore double-count, so Alpha_* becomes 1.0.
+                alpha_x = 1.0
+
+        alpha2 = dr.dv2
+        if dr.dv2 != 0.0 and rbody_id == 0:
+            # DAMPR(22:24) is referenced in exactly one engine file,
+            # damping_vref_rby.F90:141-143, inside `if (id_rby > 0)`. The
+            # grnod path of damping.F:231 never touches it.
+            state.warn(
+                f"{what}: DV2={dr.dv2:.6G} (quadratic velocity term) is only "
+                "applied by Radioss on the rigid-body path — with no usable "
+                "RbodyID the Alpha2_* columns are read and then ignored.")
+            alpha2 = 0.0
+
+        state.warn(
+            f"{what}: NOT EMITTED. The Radioss equivalent /DAMP/VREL is a "
+            "radioss2024 card and k2rad writes /BEGIN 2022, where the starter "
+            "falls back to the reduced radioss2023 layout and MISREADS it "
+            "(measured on starter_win64: WARNING 100211 + 100213, Freq lost to "
+            "0 so the engine switches to the alpha=Cdamp/dt_initial branch — "
+            "about 1e12 off for a dt of 1e-6 — and the Freq value lands in "
+            "Alpha_y). Emitting a card that reads as something else would be "
+            "silently wrong, so the run is left UNDAMPED for this card. "
+            "Resolved mapping, ready to paste into a deck whose /BEGIN says "
+            f"2024 or later: Alpha_x=Alpha_y=Alpha_z={alpha_x:.6G}, "
+            f"Alpha2_x={alpha2:.6G}, Freq={dr.freq:.6G}, RbodyID={rbody_id} "
+            f"(from PIDRB={dr.pidrb}), FuncID={func_id} (from LCID={dr.lcid}, "
+            f"resolved through the *DEFINE_CURVE -> /FUNCT table), grnod_id = a "
+            f"node group covering {scope_txt}. Note Xscale must stay 1.0: the "
+            "starter reads it into DAMPR(27) and no engine file ever reads "
+            "that slot back, so abscissa scaling has to be baked into the "
+            "curve's own X values.")
+    return []
 
 
 def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:

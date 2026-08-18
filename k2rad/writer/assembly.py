@@ -73,6 +73,9 @@ from .loads import (
     _make_constrained_spotweld_springs,
     _make_hex_spotweld_clusters,
     _make_damping,
+    _make_damping_part_mass,
+    _make_damping_frequency_range,
+    _resolve_damping_relative,
     _make_discrete_springs,
     _make_free_node_constraints,
     _make_gravity_loads,
@@ -1284,6 +1287,16 @@ def _starter_section_registry():
         ("eig",               lambda c: _make_eig(c.state)),
         ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
         ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
+        # The damping family, continued. Each of these three is a no-op (and
+        # draws no ids) on a deck without its keyword, so they cannot shift the
+        # id stream of an existing deck. *DAMPING_RELATIVE resolves and warns
+        # without emitting — see _resolve_damping_relative for the measured
+        # version gate that makes that the honest answer.
+        ("damping_part_mass", lambda c: _make_damping_part_mass(c.state,
+                                                                c.rigid_nodes)),
+        ("damping_freq_range", lambda c: _make_damping_frequency_range(c.state)),
+        ("damping_relative",  lambda c: _resolve_damping_relative(c.state,
+                                                                  c.rbody_info)),
         ("starter_th",        lambda c: _make_starter_th(c.state)),
         ("starter_th_inter",  lambda c: _make_starter_th_inter(c.state)),
         ("starter_th_node_reac", lambda c: _make_starter_th_node_reac(c.state, c.rbody_info)),

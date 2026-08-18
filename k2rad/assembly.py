@@ -1639,6 +1639,71 @@ def _off_mat_196(b: Block, offsets: Dict[str, int], warn) -> None:
         idx += 2
         pairs += 1
 
+
+def _off_damping_part_mass_common(b: Block, offsets: Dict[str, int],
+                                  pid_bucket: str) -> None:
+    """*DAMPING_PART_MASS[_SET]: offset PID/PSID and LCID on every card 1, and
+    STEP OVER the FLAG=1 Scale Factor Card.
+
+    A flat ``data`` spec cannot be used here. ``_rewrite_line`` decides what is
+    an id with ``to_int(tok) > 0``, and ``to_int`` goes through ``float`` — so a
+    scale factor of ``1.5`` reads back as the id ``1`` and would be rewritten to
+    ``1 + IDPOFF``, silently turning a damping scale factor into a part number.
+    The FLAG column makes the optional card unambiguous, so the walk skips it.
+
+    The row filter mirrors ``handlers._damping_data_rows`` (blank placeholder
+    cards and ``$`` comments are not card 1s), and — critically — so does the
+    RAW-CONTIGUITY test on the Scale Factor Card: an all-blank card 2 is a legal
+    "every scale factor defaults to 0.0" card that the filter drops, so skipping
+    ``rows[k]`` unconditionally on FLAG=1 would step over the FOLLOWING card 1
+    and leave its PID/LCID un-offset. The two walks must agree on which line is
+    a card 1 or *INCLUDE_TRANSFORM silently desyncs from the handler.
+    """
+    toff = _title_offset(b)
+    raw = b.raw
+    rows = [i for i in range(toff, len(raw))
+            if raw[i].strip() and not raw[i].lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        idx = rows[k]
+        k += 1
+        flag = _geti(_fields(raw[idx], 4, 10), 3)
+        new = _rewrite_line(raw[idx], [(0, pid_bucket), (1, "f")], offsets)
+        if new is not None:
+            raw[idx] = new
+        if flag == 1 and k < len(rows) and rows[k] == idx + 1:
+            k += 1                      # the Scale Factor Card holds no ids
+
+
+def _off_damping_first_data_card(mods):
+    """Offset *mods* on the first REAL data card, blank placeholders skipped.
+
+    A flat ``{"cards": {0: ...}}`` spec addresses ``raw[_title_offset + 0]``,
+    but ``handlers._damping_data_rows`` skips blank placeholder cards — so a
+    single blank line after the keyword makes the offsetter rewrite the
+    placeholder while the handler happily reads the real card one line down,
+    and its ids come through un-offset with no "offsets are NOT applied"
+    warning. Both walks have to use the same rule for finding card 1.
+    """
+    def _off(b: Block, offsets: Dict[str, int], warn) -> None:
+        raw = b.raw
+        for i in range(_title_offset(b), len(raw)):
+            if raw[i].strip() and not raw[i].lstrip().startswith("$"):
+                new = _rewrite_line(raw[i], mods, offsets)
+                if new is not None:
+                    raw[i] = new
+                return
+    return _off
+
+
+def _off_damping_part_mass(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_damping_part_mass_common(b, offsets, "p")
+
+
+def _off_damping_part_mass_set(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_damping_part_mass_common(b, offsets, "s")
+
+
 _OFFSET_SPECS: Dict[str, object] = {
     # Mesh
     "NODE": _off_node,
@@ -2125,6 +2190,27 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Damping / control cards that carry ids
     "DAMPING_GLOBAL": {"cards": {0: [(0, "f")]}},
     "DAMPING_PART_STIFFNESS": {"data": (0, [(0, "p")])},
+    # *DAMPING_PART_MASS: PID(p)/PSID(s) + LCID(f), repeated card SETS whose
+    # optional second card must be SKIPPED, not offset — hence a callable
+    # rather than a flat "data" spec (the _off_mat_196 situation).
+    "DAMPING_PART_MASS": _off_damping_part_mass,
+    "DAMPING_PART_MASS_SET": _off_damping_part_mass_set,
+    # *DAMPING_FREQUENCY_RANGE: PSID(s) at field 3, PIDREL(p) at field 5.
+    # Every option spelling needs its own row (see the HANDLERS comment).
+    # Callables, not flat "cards" specs, so the offset walk skips the same blank
+    # placeholder cards handlers._damping_data_rows does.
+    "DAMPING_FREQUENCY_RANGE":
+        _off_damping_first_data_card([(3, "s"), (5, "p")]),
+    "DAMPING_FREQUENCY_RANGE_DEFORM":
+        _off_damping_first_data_card([(3, "s")]),
+    # _DEFORM_DMIG: PSID is a SUPERELEMENT id (*ELEMENT_DIRECT_MATRIX_INPUT
+    # EID), not a *SET_PART id — Manual Vol I R16 p.15-3 — so the SET bucket
+    # would be the wrong offset. k2rad converts no superelement keyword and the
+    # writer drops the card whole, so nothing is offset here at all.
+    "DAMPING_FREQUENCY_RANGE_DEFORM_DMIG": _off_damping_first_data_card([]),
+    # *DAMPING_RELATIVE: PIDRB(p) field 2, PSID(s) field 3, LCID(f) field 5.
+    "DAMPING_RELATIVE":
+        _off_damping_first_data_card([(2, "p"), (3, "s"), (5, "f")]),
     "CONTROL_TIMESTEP": {"cards": {0: [(5, "f")]}},
 }
 
