@@ -1407,6 +1407,27 @@ class DampingBatchNonRegressionTests(unittest.TestCase):
         self.assertNotIn("/GRNOD/NODE/", starter)
         self.assertTrue(_warns(result, "resolves to alpha=0 AND beta=0"))
 
+    def test_a_zero_valdmp_damping_global_names_its_own_cause(self):
+        """The alpha=0 + beta=0 drop has two doors and the warning must say
+        which one was taken. Four r14 corpus decks come in through this one —
+        a *DAMPING_GLOBAL with VALDMP=0, three of them with a non-zero LCID
+        whose curve _make_damping has never read — so reporting them as an
+        all-zero-COEF *DAMPING_PART_STIFFNESS would name the wrong card."""
+        deck = _MESH + "*DAMPING_GLOBAL\n         0       0.0\n" + _END
+        result, starter = _convert(deck)
+        self.assertNotIn("/DAMP/", starter)
+        w = _warns(result, "resolves to alpha=0 AND beta=0")[0]
+        self.assertIn("*DAMPING_GLOBAL VALDMP=0", w)
+        self.assertNotIn("PART_STIFFNESS", w)
+
+        # ...and with an LCID the curve is named as the real damping source
+        deck = (_MESH + _CURVE_FLAT
+                + "*DAMPING_GLOBAL\n       201       0.0\n" + _END)
+        result, starter = _convert(deck)
+        self.assertNotIn("/DAMP/", starter)
+        w = _warns(result, "resolves to alpha=0 AND beta=0")[0]
+        self.assertIn("lives on LCID=201", w)
+
     def test_zero_coef_part_still_rides_in_the_beta_bearing_group(self):
         """_make_damping puts EVERY *DAMPING_PART_STIFFNESS pid in its /GRNOD
         and writes beta = max(coefs) on it, so a part whose own COEF is 0.0 is

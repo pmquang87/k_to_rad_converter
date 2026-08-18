@@ -288,8 +288,24 @@ Prior history (before this changelog was introduced) is summarized in the
     left the deck with an inert card plus a `/GRNOD` over every deformable node
     in the model. `COEF EQ.0.0` is documented "Inactive" (p.15-12), so the card
     is dropped with a warning — the rule `_make_damping_part_mass` already
-    applied to `SF × curve == 0`. It cannot move a deck that converted before,
-    because every such deck used to crash.
+    applied to `SF × curve == 0`.
+
+    This is the **one change in the review round that moves real corpus decks**,
+    and not through the `*DAMPING_PART_STIFFNESS` door it was written for: four
+    r14 decks (`beam.free`, `control_damping.beam`,
+    `control_adaptive.cup-draw`, `integration_shell.lobotto.beam`) carry a
+    `*DAMPING_GLOBAL` with `VALDMP = 0.0`, three of them with a non-zero `LCID`
+    — a curve `_make_damping` has never read (`handle_damping_global` already
+    warns "lcid=N … not supported; using constant valdmp=0.0"). They were
+    emitting the inert card. The warning is therefore case-aware and names
+    which door was taken, so a `VALDMP=0 + LCID` deck is not mis-reported as an
+    all-zero-COEF one. Verified per deck: the whole `.rad` delta is the removed
+    `/GRNOD` + `/DAMP` pair and the auto-ids after it shifting down by 2,
+    `_0001.rad` byte-identical, and the starter gives the **same 0 ERROR / same
+    warning count before and after** on all of them — so the renumbering
+    dangles nothing. `dps_zero.k` now converts to a `.rad` whose SHA-256 is
+    **identical to the same mesh carrying no damping card at all**, which is
+    the cleanest statement of what was dropped.
   - **`_make_damping`'s `/GRNOD` drew from the unguarded `next_id()`**
     (pre-existing on master). Measured: a user `*SET_NODE 90001` plus
     `*DAMPING_GLOBAL` emitted `/GRNOD/NODE/90001` **twice** → starter `ERROR 79
@@ -320,7 +336,23 @@ Prior history (before this changelog was introduced) is summarized in the
   OPTION1 is DEFORM" (Vol I R16 p.15-2) — and the `HANDLERS` comment now says
   so, rather than leaving the gap looking accidental.
 
-  Tests 2850 → 2954 (+104), subtests 860 → 888; `ruff check .` clean.
+  **Re-sweep after the review round**, 474 decks (the 462-deck roster above
+  plus the 12 solver-validation decks), `c1dee97` vs the fixed tree, SHA-256
+  over both `_0000.rad` and `_0001.rad`: **469/474 byte-identical, 0 conversion
+  errors either side, 0 skip deltas, 0 `recognized_not_emitted` deltas.** The 5
+  movers are `dps_zero.k` and the four `VALDMP=0` decks above — every one of
+  them the inert-card change, none of them a damping card that was doing
+  anything. Against master `62a53e8` the movers are the 14 decks that carry a
+  damping keyword at all, and `dps_zero.k` additionally goes from an
+  `AttributeError` crash to a clean conversion.
+
+  **11 of the 12 solver-validation decks are byte-identical to the commit the
+  physics campaign ran** — every `fr_*`, `vfr_trans` and `vrel_*` deck behind
+  the decay, momentum-conservation and LCID-switching numbers — so those
+  measurements carry over verbatim rather than needing a re-run. The twelfth is
+  `dps_zero.k`, which was the crash reproducer, not a physics deck.
+
+  Tests 2850 → 2956 (+106), subtests 860 → 888; `ruff check .` clean.
 
 - **Rigid-body inertia and load distribution: `*PART_INERTIA` (and every legal
   `*PART` option stacking) → `/RBODY` `Mass`/`Jxx..Jxz` with `ICoG=4`,

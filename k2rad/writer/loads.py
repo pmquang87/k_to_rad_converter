@@ -5558,17 +5558,33 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     # Aggregate β from *DAMPING_PART_STIFFNESS — use max coef across all parts
     beta = max((d.coef for d in state.damping_part_stiffness), default=0.0)
     if alpha == 0.0 and beta == 0.0:
-        # Reachable through *DAMPING_PART_STIFFNESS with every COEF = 0.0 and no
-        # *DAMPING_GLOBAL: COEF EQ.0.0 is documented "Inactive" (Manual Vol I
-        # R16 p.15-12), so there is nothing to damp with. Emitting the card
-        # anyway costs a /GRNOD over every deformable node in the model and a
-        # /DAMP that applies exactly zero damping. Same rule the sibling
-        # _make_damping_part_mass applies to SF x curve == 0.
+        # Two ways in, and the message has to name the one that applies:
+        #   - *DAMPING_PART_STIFFNESS with every COEF = 0.0 — documented
+        #     "Inactive" (Manual Vol I R16 p.15-12). With no *DAMPING_GLOBAL
+        #     alongside it, this is also the deck that used to CRASH the whole
+        #     conversion on `d.stx` further down.
+        #   - *DAMPING_GLOBAL with VALDMP = 0.0, which on the corpus is usually
+        #     a card whose damping really lives on its LCID curve — a field
+        #     handle_damping_global already warns it does not read.
+        # Either way there is nothing to apply, and emitting the card anyway
+        # costs a /GRNOD over every deformable node in the model plus a /DAMP
+        # that damps exactly zero. Same rule _make_damping_part_mass applies to
+        # SF x curve == 0.
+        why = []
+        if state.damping_global is not None:
+            g = state.damping_global
+            why.append("*DAMPING_GLOBAL VALDMP=0" + (
+                f" (its damping constant lives on LCID={g.lcid}, a curve this "
+                "card does not read — reported separately above)"
+                if g.lcid > 0 else ""))
+        if state.damping_part_stiffness:
+            why.append("*DAMPING_PART_STIFFNESS with every COEF=0.0, which "
+                       "LS-DYNA documents as 'Inactive'")
         state.warn(
-            "*DAMPING_*: the deck's damping resolves to alpha=0 AND beta=0 "
-            "(a *DAMPING_PART_STIFFNESS whose every COEF is 0.0 — documented "
-            "'Inactive' — with no *DAMPING_GLOBAL), so there is nothing to "
-            "apply; /DAMP not emitted.")
+            "*DAMPING_*: the deck's damping resolves to alpha=0 AND beta=0 ("
+            + "; ".join(why) + "), so there is nothing to apply — /DAMP is NOT "
+            "emitted. The model runs UNDAMPED either way; what is dropped is an "
+            "inert card plus a /GRNOD listing every deformable node.")
         return []
     target_pids: Set[int] = set()
     if state.damping_part_stiffness:
