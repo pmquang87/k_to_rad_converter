@@ -879,7 +879,13 @@ def _warn_no_pacing_element(state: ConversionState,
     on all five joint validation decks; each needed one constrained deformable
     element purely to pace the step.
     """
-    elem_pids = set(_part_node_sets(state))
+    # SPH particles count as elements here. _part_node_sets excludes them for
+    # the /XREF callers' sake (see its docstring), but a particle carries mass
+    # and kernel stiffness and has a time step of its own (mdtsph.F:132), so a
+    # deformable SPH part IS a pacing element — without this, a joint model
+    # with a particle cloud and otherwise-rigid parts gets a flat "every
+    # element in this deck belongs to a rigid part", which is false.
+    elem_pids = set(_part_node_sets(state)) | {c.pid for c in state.sph_elems}
     if elem_pids - rigid_pids:
         return
     if any(e.pid not in rigid_pids for e in state.discrete_elems):

@@ -420,6 +420,10 @@ def _surface_triangles(state: ConversionState, pids: Iterable[int]
     # faces an ordinary hex does. Leaving them out gave a thick-shell contact
     # side an EMPTY surface, and --auto-gapmin then had no clearance to
     # measure. The container is empty on every deck without *ELEMENT_TSHELL.
+    # SPH particles are absent BY DESIGN: a particle has no face, so there is
+    # nothing to facet. Its nodes still reach the clearance measurement through
+    # _part_nodes_map below — the node side of an SPH contact is real, the
+    # segment side is not.
     for e in list(state.solid_elems) + list(state.tshell_elems):
         if e.pid not in pidset:
             continue
@@ -595,6 +599,13 @@ def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
         m.setdefault(e.pid, set()).update(n for n in e.nodes if n > 0)
     for e in state.tshell_elems:            # /BRICK — see _surface_triangles
         m.setdefault(e.pid, set()).update(n for n in e.nodes if n > 0)
+    # SPH particles DO belong here even though they contribute no facet to
+    # _surface_triangles: the node-side clearance measurement is exactly what a
+    # particle can answer, and an SPH<->structure contact (a bird strike, a jet)
+    # is the case --auto-gapmin exists for. The asymmetry with the surface
+    # builder above is deliberate — a particle has nodes but no faces.
+    for c in state.sph_elems:
+        m.setdefault(c.pid, set()).update(n for n in c.nodes if n > 0)
     return m
 
 

@@ -4073,6 +4073,15 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
         for e in state.tshell_elems:        # /BRICK — same as an ordinary hex
             if e.pid == pid:
                 nids.update(e.nodes)
+        # SPH particles: their nodes ARE the mesh of the part, and driving an
+        # SPH body by *INITIAL_VELOCITY_GENERATION with STYP=2/3 (a part or a
+        # part set) is the idiomatic way to launch a bird / a jet. Without this
+        # arm the group comes out EMPTY and the projectile does not move — the
+        # #120 thick-shell failure again, and the highest-value SPH row in that
+        # audit because the W11 bird strike is exactly this shape.
+        for c in state.sph_elems:
+            if c.pid == pid:
+                nids.update(c.nodes)
         for e in state.beam_elems:
             if e.pid == pid:
                 nids.update((e.n1, e.n2))
@@ -5424,6 +5433,12 @@ def _make_modal_dummy_cload(state: ConversionState,
         elem_nodes.update(e.nodes)
     for e in state.tshell_elems:        # /BRICK — a real structural node
         elem_nodes.update(e.nodes)
+    # An SPH particle node carries mass and kernel stiffness, so it is a
+    # legitimate place to hang the dummy unit load. The candidate set is
+    # otherwise empty on a deck whose only OTHER mesh is rigid, and an empty
+    # set is engine MESSAGE ID 79 (SOLVER IMPLICIT STOPPED DUE TO LOADING DATA).
+    for c in state.sph_elems:
+        elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2))
     constrained: Set[int] = set()
@@ -5491,12 +5506,14 @@ def _damping_part_nodes(state: ConversionState, pids: Set[int],
                         rigid_nodes: Set[int]) -> List[int]:
     """Deformable nodes carried by *pids*, rigid-body nodes excluded.
 
-    Shells, solids and THICK SHELLS are scanned — the same scope
+    Shells, solids, THICK SHELLS and SPH PARTICLES are scanned — the same scope
     ``_make_damping``'s own node sets use. /DAMP is node-based Rayleigh
-    damping with no element-type restriction, so a thick shell's nodes are
-    damped exactly like a brick's. Beam / spring / SPH nodes are NOT damped by
-    a part-scoped /DAMP; a deck whose damped part is built only from those
-    element families gets an empty group and a warning instead of a card.
+    damping with no element-type restriction (the engine adds
+    ``-alpha*M*v - beta*K*v`` over the nodes of a /GRNOD), so a thick shell's or
+    a particle's node is damped exactly like a brick's. Beam and spring nodes
+    are NOT damped by a part-scoped /DAMP; a deck whose damped part is built
+    only from those families gets an empty group and a warning instead of a
+    card.
     """
     return sorted(
         {n for e in state.shell_elems if e.pid in pids
@@ -5505,6 +5522,8 @@ def _damping_part_nodes(state: ConversionState, pids: Set[int],
            for n in e.nodes if n > 0 and n not in rigid_nodes}
         | {n for e in state.tshell_elems if e.pid in pids
            for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for c in state.sph_elems if c.pid in pids
+           for n in c.nodes if n > 0 and n not in rigid_nodes}
     )
 
 
@@ -5614,9 +5633,10 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 
     # Resolve target node set.
     #
-    # THICK SHELLS count. /DAMP is NODE-based Rayleigh damping — the engine adds
-    # -alpha*M*v - beta*K*v over the nodes of a /GRNOD, with no element-type
-    # restriction — so a thick shell's nodes are damped exactly like a brick's.
+    # THICK SHELLS and SPH PARTICLES count. /DAMP is NODE-based Rayleigh damping
+    # — the engine adds -alpha*M*v - beta*K*v over the nodes of a /GRNOD, with
+    # no element-type restriction — so a thick shell's or a particle's node is
+    # damped exactly like a brick's.
     # (Contrast /DAMP/FREQUENCY_RANGE, which enters as a Maxwell/Prony viscous
     # stress INSIDE the material law and really does reach only shells and
     # solids; that path's own warning stays right.) Before the thick-shell batch
@@ -5631,6 +5651,8 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
                for n in e.nodes if n > 0 and n not in rigid_nodes}
             | {n for e in state.tshell_elems if e.pid in target_pids
                for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for c in state.sph_elems if c.pid in target_pids
+               for n in c.nodes if n > 0 and n not in rigid_nodes}
         )
         grnod_title = f"damping_target_pids_{'_'.join(str(p) for p in sorted(target_pids))}"
     else:
@@ -5646,6 +5668,9 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
             | {n for e in state.tshell_elems
                if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
                for n in e.nodes if n > 0 and n not in rigid_nodes}
+            | {n for c in state.sph_elems
+               if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+               for n in c.nodes if n > 0 and n not in rigid_nodes}
         )
         grnod_title = "damping_target_all_deformable"
 
@@ -5954,7 +5979,13 @@ def _make_damping_frequency_range(state: ConversionState) -> List[str]:
         return []
     parts_all = sorted(state.parts)
     # Parts Radioss can actually reach with frequency-range damping — see the
-    # element-scope warning below.
+    # element-scope warning below. THICK SHELLS were deliberately left out with
+    # the #120 batch and SPH PARTICLES are left out here for the same reason:
+    # unlike /DAMP, this damping is a Maxwell/Prony viscous stress INSIDE the
+    # material law, reached only through the IPARG(93)-gated shell and solid
+    # paths (damping_range_{shell,shell_mom,solid}.F90) — there is no SPH
+    # element loop that reads that flag at all, so listing a particle part here
+    # would claim a scope the engine never visits.
     meshed_pids = ({e.pid for e in state.shell_elems}
                    | {e.pid for e in state.solid_elems})
 
@@ -6349,6 +6380,18 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # *ELEMENT_TSHELL deck is implicit, so this guard sees them all.
     for e in state.tshell_elems:
         elem_nodes.update(e.nodes)
+    # SPH PARTICLES are NOT free reference nodes. A particle carries mass and,
+    # through its kernel, stiffness against every neighbour inside 2h — the
+    # node's rows in the tangent are anything but zero. Leaving them out would
+    # put a /BCS 111 111 on EVERY particle of the cloud, which the starter
+    # accepts without a single error (a /BCS on real nodes is legal) and which
+    # then freezes the whole SPH body in place. That is the #120 thick-shell
+    # failure exactly: 0 starter errors, a model that cannot move. Every SPH
+    # deck in the corpus is EXPLICIT and returns at the guard above, so no
+    # corpus run exercises this — which is precisely why it is closed here on
+    # principle and tested synthetically.
+    for c in state.sph_elems:
+        elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
     # /SPRING connector nodes carry spring stiffness; the synthesized ground

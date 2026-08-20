@@ -853,6 +853,10 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
         ref.update(n for n in e.nodes if n > 0)
     for e in state.tshell_elems:            # /BRICK — a real reference
         ref.update(n for n in e.nodes if n > 0)
+    # An SPH particle IS its node: dropping that node as "unreferenced" would
+    # delete the particle with it (starter ERROR 78 on the /SPHCEL id).
+    for c in state.sph_elems:
+        ref.update(n for n in c.nodes if n > 0)
     for e in state.beam_elems:
         ref.update(n for n in (e.n1, e.n2, e.n3) if n > 0)
     for _title, nids in state.node_sets.values():
@@ -1001,17 +1005,25 @@ def _screen_provisional_elements(state: ConversionState) -> None:
     if not state.provisional_elem_blocks:
         return
     nodes = state.nodes
-    dropped: Set[int] = set()
+    # Keyed by (FAMILY, id), never by id alone. LS-DYNA's element-id namespaces
+    # are per family and an SPH particle is keyed by its NODE id on top of
+    # that, so one flat set makes an id that two families both use into a drop
+    # in BOTH — measured, a provisional *ELEMENT_SPH block on nodes 1..8 beside
+    # a provisional *ELEMENT_SHELL block with EIDs 1,2,3 lost particles 1, 2
+    # and 3 (37.5 % of the cloud's mass) for no reason, and the per-block report
+    # then blamed the SPH block's own node screen, which had passed.
+    dropped: Set[Tuple[str, int]] = set()
     shells = {e.eid: e for e in state.shell_elems if e.provisional}
     beams = {e.eid: e for e in state.beam_elems if e.provisional}
     tshells = {e.eid: e for e in state.tshell_elems if e.provisional}
+    sph = {c.nid: c for c in state.sph_elems if c.provisional}
     for eid, e in shells.items():
         if not all(n in nodes for n in e.nodes) \
                 or len(_ordered_unique_nodes(e.nodes)) < 3:
-            dropped.add(eid)
+            dropped.add(("shell", eid))
     for eid, e in beams.items():
         if e.n1 not in nodes or e.n2 not in nodes or e.n1 == e.n2:
-            dropped.add(eid)
+            dropped.add(("beam", eid))
         elif e.n3 and e.n3 not in nodes:
             e.n3 = 0
     for eid, e in tshells.items():
@@ -1021,19 +1033,32 @@ def _screen_provisional_elements(state: ConversionState) -> None:
         # catches when a deck's ply MIDs happen to look like node ids.
         if not all(n in nodes for n in e.nodes) \
                 or len(_ordered_unique_nodes(e.nodes)) < 6:
-            dropped.add(eid)
+            dropped.add(("tshell", eid))
+    for nid, c in sph.items():
+        # A particle IS its node, so the whole test is "does that node exist".
+        # An option card whose first two cells happen to be positive integers
+        # is exactly what this catches: an invented particle sits on an id the
+        # deck never defines, which is starter ERROR 78.
+        if nid not in nodes:
+            dropped.add(("sph", nid))
     if dropped:
         state.shell_elems = [e for e in state.shell_elems
-                             if not (e.provisional and e.eid in dropped)]
+                             if not (e.provisional
+                                     and ("shell", e.eid) in dropped)]
         state.beam_elems = [e for e in state.beam_elems
-                            if not (e.provisional and e.eid in dropped)]
+                            if not (e.provisional
+                                    and ("beam", e.eid) in dropped)]
         state.tshell_elems = [e for e in state.tshell_elems
-                              if not (e.provisional and e.eid in dropped)]
+                              if not (e.provisional
+                                      and ("tshell", e.eid) in dropped)]
+        state.sph_elems = [c for c in state.sph_elems
+                           if not (c.provisional and ("sph", c.nid) in dropped)]
     for rec in state.provisional_elem_blocks:
-        n_dropped = sum(1 for eid in rec.eids if eid in dropped)
+        n_dropped = sum(1 for eid in rec.eids if (rec.kind, eid) in dropped)
         n_kept = len(rec.eids) - n_dropped
         family = {"shell": "/SHELL // SH3N",
-                  "tshell": "/BRICK (thick shell)"}.get(rec.kind, "/BEAM")
+                  "tshell": "/BRICK (thick shell)",
+                  "sph": "/SPHCEL (SPH particle)"}.get(rec.kind, "/BEAM")
         state.warn(
             f"*{rec.keyword}: option '{rec.option}' is not implemented — "
             f"{n_kept} element(s) were kept as plain {family} connectivity and "
@@ -1315,12 +1340,16 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
     # Optional contact thickness.  For SOFT = 2, it applies to solids, shells, and
     # beams", Vol I R17 p.37-11), so this is a real silent loss on a solid part.
     # THICK SHELLS count as solids here: they are /BRICK, and the missing
-    # NUMELS loop is exactly what leaves their OPTT unread too.
+    # NUMELS loop is exactly what leaves their OPTT unread too. SPH PARTICLES
+    # join the same bucket for the same reason — there is no NUMSPH loop in
+    # i7sti3.F either — and they must NOT join non_solid_pids, or a
+    # particles-only part would look like it had a thickness the starter reads.
     non_solid_pids = ({e.pid for e in state.shell_elems}
                       | {e.pid for e in state.beam_elems}
                       | {e.pid for e in state.discrete_elems})
     solid_pids = ({e.pid for e in state.solid_elems}
-                  | {e.pid for e in state.tshell_elems})
+                  | {e.pid for e in state.tshell_elems}
+                  | {c.pid for c in state.sph_elems})
     solid_only = sorted(f"{pid} (OPTT={pc.optt:g})"
                         for pid, pc in state.part_contacts.items()
                         if pc.optt and pid in solid_pids
@@ -1330,7 +1359,7 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
         if len(solid_only) > 10:
             listed += f", ... ({len(solid_only)} parts)"
         state.warn(
-            f"*PART_CONTACT: part(s) {listed} hold SOLID elements "
+            f"*PART_CONTACT: part(s) {listed} hold SOLID or SPH elements "
             "only, so the OPTT written into their /PART Thick column has NO "
             "EFFECT. The starter reads THK_PART in its shell/tria/truss/beam/"
             "spring loops only (i7sti3.F:226-293) — there is no solid loop — while "
@@ -1402,6 +1431,13 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     for e in state.tshell_elems:
         tshells_by_pid[e.pid].append(e)
 
+    # SPH particles get their own bucket for the strongest reason in this
+    # function: they have NO connectivity at all (one node, a mass) and a
+    # /SPHCEL is not an element card in the /SHELL // /BRICK sense.
+    sph_by_pid: Dict[int, List] = defaultdict(list)
+    for c in state.sph_elems:
+        sph_by_pid[c.pid].append(c)
+
     beams_by_pid: Dict[int, List[BeamElem]] = defaultdict(list)
     for e in state.beam_elems:
         beams_by_pid[e.pid].append(e)
@@ -1433,7 +1469,12 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         # The three are mutually exclusive by construction (each prepass skips
         # the parts the earlier ones claimed); the order here just makes the
         # precedence explicit.
+        #   sph        – an SPH part whose *SECTION_SPH SECID is also claimed
+        #                by another element family; the /PROP/SPH moved to a
+        #                synthesized id (writer/sph.py _split_mixed_family_
+        #                sections) and the /PART follows it.
         prop_ref = (state.tshell_prop_ids.get(pid)
+                    or state.sph_prop_ids.get(pid)
                     or state.composite_prop_ids.get(pid)
                     or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
@@ -1464,11 +1505,16 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         pc = state.part_contacts.get(pid)
         if pc is not None and pc.optt:
             part_thick = pc.optt
+        # An SPH part whose *MAT_PLASTIC_KINEMATIC is shared with a shell or
+        # solid part points at the /MAT/LAW2 CLONE instead: LAW44 is not
+        # SPH-declared and one /MAT id cannot be two laws (writer/sph.py
+        # ::_resolve_sph_materials). Empty on every other deck.
+        mat_ref = state.sph_mat_ids.get(pid, part.mid)
         lines += [
             f"/PART/{pid}",
             part.title or f"PART_{pid}",
-            (f"{_i(prop_ref)}{_i(part.mid)}         0{_f(part_thick)}"
-             if part_thick else f"{_i(prop_ref)}{_i(part.mid)}         0"),
+            (f"{_i(prop_ref)}{_i(mat_ref)}         0{_f(part_thick)}"
+             if part_thick else f"{_i(prop_ref)}{_i(mat_ref)}         0"),
             HDR,
         ]
         if pid in shells_by_pid:
@@ -1644,6 +1690,14 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     row += _i(n)
                 lines.append(row)
             lines.append(HDR)
+        if pid in sph_by_pid:
+            # *ELEMENT_SPH → /SPHCEL/<part_ID>, one row per particle. The cell
+            # id IS the node id (hm_read_sphcel.F:243-250), so there is nothing
+            # to renumber and nothing to permute; what the block does carry is
+            # the MASS, and whether it is written per row at all was decided
+            # once, per section, by writer/sph.py::_resolve_sph.
+            from .sph import _emit_sphcel_block
+            lines += _emit_sphcel_block(state, pid, sph_by_pid[pid])
         if pid in beams_by_pid:
             lines.append(f"/BEAM/{pid}")
             for e in beams_by_pid[pid]:
@@ -1738,6 +1792,12 @@ def _element_free_part_ids(state: ConversionState,
     meshed = ({e.pid for e in state.shell_elems}
               | {e.pid for e in state.solid_elems}
               | {e.pid for e in state.tshell_elems}
+              # SPH particles ARE a mesh. Leaving them out gave a particle part
+              # the placeholder /PROP/SHELL — measured on master, exactly the
+              # bare "/PART on a placeholder shell property and nothing else"
+              # shape the thick-shell batch found, and a /SPHCEL cannot run on
+              # a shell property at all.
+              | {c.pid for c in state.sph_elems}
               | {e.pid for e in state.beam_elems}
               | {e.pid for e in state.discrete_elems})
     # Parts the normal /PART emission skips: their /PART *and* /PROP come from
@@ -1750,13 +1810,14 @@ def _element_free_part_ids(state: ConversionState,
     # A part repointed at a synthesized composite / orthotropic / per-part
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
-             | set(state.hourglass_prop_ids) | set(state.tshell_prop_ids))
+             | set(state.hourglass_prop_ids) | set(state.tshell_prop_ids)
+             | set(state.sph_prop_ids))
     # Any section id already defined resolves on its own — including one shared
     # with a meshed sibling part, and including the auto-created sections the
     # caller has just filled in.
     defined = (set(state.sec_shells) | set(state.sec_solids)
                | set(state.sec_beams) | set(state.sec_discrete)
-               | set(state.sec_tshells))
+               | set(state.sec_tshells) | set(state.sec_sph))
     return {pid for pid in state.parts
             if pid not in meshed and pid not in connectors and pid not in split
             and pid in part_secids and part_secids[pid] not in defined}
@@ -2480,6 +2541,13 @@ def _make_properties(state: ConversionState) -> List[str]:
     # reason, in the opposite direction).
     from .tshell import _make_tshell_properties
     lines += _make_tshell_properties(state, istrain)
+    # SPH particles: /PROP/SPH (TYPE34), under the SECID verbatim unless the
+    # SECID is shared with another element family. Its payload — the particle
+    # mass Mp and the smoothing length h — was decided in the _resolve_sph
+    # prepass, together with whether each /SPHCEL row states its own mass, so
+    # the two emitters cannot disagree about where a particle's mass comes from.
+    from .sph import _make_sph_properties
+    lines += _make_sph_properties(state)
     # Orthotropic properties for LAW128 (MAT_103) parts (the section auto-create
     # above has already populated any missing section this reads).
     lines += _emit_ortho_props(state, istrain)
@@ -2589,7 +2657,10 @@ def _resolve_contact_interior(state: ConversionState) -> None:
         "affected parts are named in a warning instead")
     # Icontrol lives on the solid AND thick-shell property readers
     # (hm_read_prop06/14/20/21/22.F + /DEF_SOLID), so "has an Icontrol-bearing
-    # property" is "holds solid OR thick-shell elements".
+    # property" is "holds solid OR thick-shell elements". SPH is deliberately
+    # NOT in that set: /PROP/SPH has no Icontrol column at any version, and
+    # *CONTACT_INTERIOR is a solid-element keyword (it damps the interior of a
+    # crushing foam BRICK), so an SPH part named by one is not a lost mapping.
     # *SET_PART_ADD sets were already expanded into part_sets by
     # _flatten_part_set_adds (one nesting level, dyna2rad CC:692-727), so a
     # single lookup covers both variants.
@@ -2682,6 +2753,7 @@ def _assign_ortho_props(state: ConversionState) -> None:
     shell_pids = {e.pid for e in state.shell_elems}
     solid_pids = {e.pid for e in state.solid_elems}
     tshell_pids = {e.pid for e in state.tshell_elems}
+    sph_pids = {c.pid for c in state.sph_elems}
     for pid, part in sorted(state.parts.items()):
         if part.mid not in mat_mids or pid in state.ortho_prop_ids:
             continue
@@ -2694,6 +2766,16 @@ def _assign_ortho_props(state: ConversionState) -> None:
         # it. Skipped before the element-kind test below, which would otherwise
         # tell the user their thick shells are not a mesh.
         if pid in tshell_pids:
+            continue
+        # And so does an SPH part, differently: /MAT/LAW128 IS on the starter's
+        # SPH whitelist (init_mat_keyword.F), so the pairing is legal — but the
+        # only property an SPH part may carry is /PROP/SPH (IGTYP 34, else
+        # ERROR 3047), and that property has an orthotropy slot of its own
+        # (skew_ID). Synthesizing a /PROP/TYPE9 or TYPE6 here would replace the
+        # particle property outright. Skipped before the element-kind test
+        # below, which would otherwise tell the user their particles are not a
+        # mesh.
+        if pid in sph_pids:
             continue
         if pid not in shell_pids and pid not in solid_pids:
             state.warn(
@@ -2759,10 +2841,15 @@ def _assign_hourglass_props(state: ConversionState) -> None:
         is_solid = pid in solid_pids
         is_shell = pid in shell_pids and not is_solid
         if not (is_solid or is_shell):
-            # beams / discrete / tshell: no k2rad hourglass /PROP path. (dyna2rad
-            # additionally maps *HOURGLASS onto /PROP/SPH, but k2rad has no
-            # *SECTION_SPH → /PROP/SPH path, so SPH is out of scope here — not
-            # "dyna2rad maps none".)
+            # beams / discrete / tshell: no k2rad hourglass /PROP path.
+            # SPH is skipped DELIBERATELY, not for want of a property path
+            # (k2rad has had *SECTION_SPH → /PROP/SPH since the SPH batch):
+            # a particle has no hourglass modes and /PROP/SPH has no hourglass
+            # field at all, so a *HOURGLASS / HGID on a particle part is inert
+            # in both codes. dyna2rad maps QM/QH onto the /PROP/SPH cell named
+            # "h", which is a LENGTH — see writer/sph.py divergence 5, where
+            # the measured damage is a smoothing length of 0.13 (and, for the
+            # *CONTROL_HOURGLASS QH path, of zero).
             continue
         secid = part_secids[pid]
         # Resolve the part's *HOURGLASS (HGID). A dangling / undefined id is a
@@ -3394,6 +3481,15 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     if mid in state.mat_plas_tab:
         return 36                                  # *MAT_024/123 → PLAS_TAB
     if mid in state.mat_plas_kin:
+        # *MAT_003 → COWPER, EXCEPT on a material whose every part carries SPH
+        # particles: LAW44 is not SPH-declared (starter ERROR 3046), so the
+        # expressible cases are re-routed to LAW2. The ONE eligibility test
+        # lives with the emitter — if these two disagreed, writer/sph.py's
+        # compatibility report would warn about an error the emitted deck no
+        # longer raises, or stay silent about one it does.
+        from .materials import _plas_kin_law2_eligible
+        if _plas_kin_law2_eligible(state, state.mat_plas_kin[mid]):
+            return 2                               # /MAT/LAW2 (PLAS_JOHNS)
         return 44                                  # *MAT_003 → COWPER
     m = state.mat_johnson_cook.get(mid)
     if m is not None:

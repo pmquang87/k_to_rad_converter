@@ -18,8 +18,9 @@ from .parser import (
 from .state import (
     ConversionState,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
-    TshellElem,
+    TshellElem, SphCell,
     PartData, SectionShell, SectionSolid, SectionTshell, SectionBeam,
+    SectionSph, ControlSph,
     IntegrationShell, IntegrationPoint,
     IntegrationBeam, IntegrationBeamPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
@@ -262,6 +263,13 @@ _BEAM_SUFFIX_TOKENS = frozenset({"ORIENTATION", "OFFSET"})
 # ``EID PID N1..N8`` card — so dyna2rad cannot even read the header and drops
 # the whole block, mesh included. k2rad walks both card layouts.
 _TSHELL_SUFFIX_TOKENS = frozenset({"BETA", "COMPOSITE"})
+# *ELEMENT_SPH_{VOLUME} (Vol I R16/R17). One option slot, and it changes what
+# the MASS column MEANS: "If the VOLUME option is used, the field for MASS is
+# treated as particle volume. It has the same effect as giving a negative
+# number in the MASS field." dyna2rad's CFG (Keyword971/ELEMENTS/sphcel.cfg)
+# declares no option at all, so it reads a _VOLUME block's volumes as masses —
+# measured, wrong by exactly rho (1.6e-05 kg where the deck states 1.6e-02).
+_SPH_SUFFIX_TOKENS = frozenset({"VOLUME"})
 
 #: Option tokens whose block is not a list of finite elements at all, so the
 #: "keep whatever parses as connectivity" fallback must NOT run on it.
@@ -827,6 +835,244 @@ def handle_element_tshell(block: Block, state: ConversionState) -> None:
             "writer reports per part whether that held. (dyna2rad cannot read "
             "this keyword at all and drops the whole block, elements "
             "included.)")
+
+
+#: The largest ``NEND`` span one *ELEMENT_SPH card may generate. LS-DYNA's
+#: generator writes one card per id from NID to NEND, so a typo'd NEND (or a
+#: NEND that is really a second particle's id) would otherwise fabricate
+#: millions of particles on nodes that do not exist. Every real generated block
+#: in the corpus is far below this; anything above it is reported and the single
+#: written card is kept.
+_SPH_NEND_MAX_SPAN = 1_000_000
+
+
+def _parse_sph_cell(line: str):
+    """One *ELEMENT_SPH card → ``(nid, pid, mass, nend)`` or ``None``.
+
+    Card 1 is ``NID(I8) PID(I8) MASS(F16) NEND(I8)`` — the layout the R16/R17
+    manual's column table gives and an LS-PrePost round trip confirms
+    (``$#   nid     pid            mass      nend``; note LS-PrePost right-justifies
+    NEND across cols 33-42 rather than 33-40, which is why the tail is read
+    whole rather than sliced at 40).
+
+    A WHITESPACE split is tried first and preferred whenever it yields a
+    complete card, because that is the reading that survives both of the
+    column-layout variants in the wild: a deck writing MASS in EIGHT columns
+    with NEND at 25-32 fuses those two cells under a 16-wide slice (measured on
+    the native reader: ``0.002`` and ``108`` became ``0.002108``), and a deck
+    written with I10 ids cuts every field short under an I8 slice. The fixed
+    slice is the fallback for the one case the split cannot handle — ids wide
+    enough to fill all eight columns, which glues NID and PID into one token.
+
+    One shape the split alone cannot read: a BLANK MASS with a populated NEND.
+    ``"       1       1                       8"`` splits to three tokens and
+    the third IS a valid float, so the free reading makes the range generator
+    into an 8-mass-unit particle and loses the whole cloud. The columns
+    disambiguate it exactly — the MASS cell is blank and the NEND cell is not —
+    so a three-token card is cross-checked against the fixed slice before the
+    split is believed.
+
+    ``mass`` is returned SIGNED; the caller folds the sign (and the ``_VOLUME``
+    suffix) into the Flag column.
+    """
+    data = _strip_inline_comment(line)
+    if not data.strip():
+        return None
+    toks = parse_free(data)
+    f = None
+    if len(toks) >= 2 and _is_int_token(toks[0]) and _is_int_token(toks[1]):
+        if len(toks) == 2 or _is_float_token(toks[2]):
+            f = toks + [""] * max(0, 4 - len(toks))
+    if f is not None and len(toks) == 3 and _is_int_token(toks[2]) \
+            and not data[16:32].strip() and data[32:].strip():
+        # Third token is an integer sitting in the NEND columns while the MASS
+        # columns are empty: a generated range, not a mass.
+        f = [data[0:8], data[8:16], "", data[32:]]
+    if f is None:
+        f = [data[0:8], data[8:16], data[16:32], data[32:]]
+        if not (_is_int_token(f[0]) and _is_int_token(f[1])):
+            return None
+    nid, pid = to_int(f[0]), to_int(f[1])
+    if nid <= 0:
+        return None
+    mass = to_float(f[2]) if len(f) > 2 and f[2].strip() else 0.0
+    nend = to_int(f[3]) if len(f) > 3 and f[3].strip() else 0
+    return nid, pid, mass, nend
+
+
+def _is_int_token(tok: str) -> bool:
+    t = (tok or "").strip()
+    return bool(t) and (t[1:] if t[0] in "+-" else t).isdigit()
+
+
+def _is_float_token(tok: str) -> bool:
+    t = (tok or "").strip()
+    if not t:
+        return False
+    try:
+        float(t.replace("D", "E").replace("d", "e"))
+    except ValueError:
+        return False
+    return True
+
+
+def handle_element_sph(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_SPH and its _VOLUME spelling → /SPHCEL.
+
+    An SPH particle has no connectivity — it IS a node with a mass — so this
+    handler's whole job is the MASS column, and three of its conventions are
+    ones neither dyna2rad nor OpenRadioss's own native .k reader implements:
+
+    * ``MASS < 0`` is a VOLUME ("The absolute value will be used as volume …
+      SPH element mass is calculated by |MASS| x rho"). Passed through as a
+      negative mass the starter discards it and falls back to the fabricated
+      ``Mp = 1`` — measured, ``TOTAL MASS = 8.0`` instead of ``1.6E-02``.
+    * the ``_VOLUME`` suffix means the same thing with a positive number.
+      Measured through the native reader, a ``_VOLUME`` block came out wrong by
+      exactly rho (``1.6E-05`` instead of ``1.6E-02``).
+    * ``NEND > 0`` GENERATES the cards from NID to NEND with this card's PID and
+      MASS. Neither reader expands it (measured ``NUMSPH = 1``), which is a
+      whole particle cloud silently missing.
+
+    A blank or zero MASS is kept as Flag 0 and reported by the writer, not
+    silently defaulted: Radioss answers a type-0 particle with the property's
+    ``Mp``, and if that is also unset it invents 1.0 mass unit per particle with
+    only WARNING 138 to say so.
+    """
+    opts, unknown = _elem_options(block.keyword, "ELEMENT_SPH",
+                                  _SPH_SUFFIX_TOKENS)
+    raw = block.raw
+    if unknown and _elem_block_is_not_a_mesh(block, state, unknown):
+        return
+    is_volume = "VOLUME" in opts
+
+    if unknown:
+        # See handle_element_shell: kept by CONTENT, marked provisional, and
+        # screened against the node table before it reaches the deck. The
+        # content test is SPH-specific — a particle card's third cell is a
+        # float, so the all-integers test the other families use would reject
+        # every real card here.
+        rec = ProvisionalElemBlock(block.keyword, "sph",
+                                   "_" + "_".join(unknown))
+        seen: set = set()
+        for line in raw:
+            parsed = _parse_sph_cell(line)
+            if parsed is None or parsed[1] <= 0:
+                if line.strip():
+                    rec.n_unparsed += 1
+                continue
+            nid, pid, mass, _nend = parsed
+            if nid in seen:
+                rec.n_unparsed += 1
+                continue
+            seen.add(nid)
+            flag, mag = _sph_flag_and_mass(mass, is_volume)
+            state.sph_elems.append(
+                SphCell(nid, pid, mag, flag, provisional=True))
+            rec.eids.append(nid)
+        state.provisional_elem_blocks.append(rec)
+        return
+
+    n_rejected = 0
+    n_negative = 0
+    n_zero = 0
+    n_generated = 0
+    n_gen_cards = 0
+    n_gen_refused = 0
+    for line in raw:
+        parsed = _parse_sph_cell(line)
+        if parsed is None:
+            # A line the particle reader refuses. Counted so the loss is never
+            # silent: no cell was created, so the orphan census cannot see it.
+            if line.strip() and not line.lstrip().startswith("$"):
+                n_rejected += 1
+            continue
+        nid, pid, mass, nend = parsed
+        flag, mag = _sph_flag_and_mass(mass, is_volume)
+        if mass < 0.0:
+            n_negative += 1
+        elif mag == 0.0:
+            n_zero += 1
+        ids = [nid]
+        if nend > nid:
+            if nend - nid > _SPH_NEND_MAX_SPAN:
+                n_gen_refused += 1
+            else:
+                ids = list(range(nid, nend + 1))
+                n_gen_cards += 1
+                n_generated += len(ids) - 1
+        for k, gid in enumerate(ids):
+            state.sph_elems.append(
+                SphCell(gid, pid, mag, flag, generated=(k > 0)))
+
+    if n_rejected:
+        state.warn(
+            f"*{block.keyword}: {n_rejected} non-blank line(s) in the block are "
+            "not a particle card and were SKIPPED — a non-numeric NID or PID, "
+            "or a truncated line. Each one is an SPH particle that is NOT in "
+            "the converted deck, and the orphan census cannot report it because "
+            "no cell was ever created from it. Check the block for a stray or "
+            "misaligned line.")
+    if n_negative:
+        state.warn(
+            f"*{block.keyword}: {n_negative} card(s) state a NEGATIVE mass, "
+            "which LS-DYNA reads as a VOLUME (\"the absolute value will be used "
+            "as volume … SPH element mass is calculated by |MASS| x rho\"). "
+            "They are emitted as /SPHCEL Type 2 with |MASS| in the value column, "
+            "so the particle mass is rho x |MASS| exactly as the deck asks. "
+            "(dyna2rad copies the sign through and the starter then DISCARDS the "
+            "value and falls back to the property's fabricated Mp = 1 — measured "
+            "8.0 kg where the deck states 0.016 kg.)")
+    if is_volume:
+        state.warn(
+            f"*{block.keyword}: the _VOLUME suffix makes the MASS column a "
+            "particle VOLUME, so every cell is emitted as /SPHCEL Type 2 and "
+            "Radioss multiplies by the part's density itself "
+            "(spinit3.F:143-145). (dyna2rad's CFG declares no option on this "
+            "keyword and reads the volumes as masses — wrong by exactly rho.)")
+    if n_zero:
+        state.warn(
+            f"*{block.keyword}: {n_zero} card(s) leave the MASS column blank or "
+            "zero. Those particles carry NO mass of their own and fall back on "
+            "the /PROP/SPH particle mass Mp, so the mass they get is the "
+            "section's, NOT one the deck stated per particle. k2rad always "
+            "writes a POSITIVE Mp, which keeps the starter's own fabrication "
+            "out of it (hm_read_prop34.F:235-239 answers a non-positive Mp by "
+            "inventing 1.0 IN THE DECK'S MASS UNIT behind a single WARNING 138 "
+            "— measured, four blank-mass particles gave TOTAL MASS = 4.0). But "
+            "if NO particle of the section states a mass, that positive Mp is "
+            "one k2rad had to derive rather than read, and the writer's own "
+            "report for that section names it and states the number it wrote.")
+    if n_generated:
+        state.warn(
+            f"*{block.keyword}: {n_gen_cards} card(s) use the NEND range "
+            f"generator and were EXPANDED into {n_generated} additional "
+            "particle(s) (\"*ELEMENT_SPH cards are generated between NID to "
+            "NEND using current PID and MASS data\"). Generated ids whose "
+            "*NODE does not exist are dropped by the writer with their own "
+            "count — a /SPHCEL id with no node is starter ERROR 78. (Neither "
+            "dyna2rad nor OpenRadioss's native .k reader expands NEND at all: "
+            "measured, a card with NEND=108 produced NUMSPH = 1.)")
+    if n_gen_refused:
+        state.warn(
+            f"*{block.keyword}: {n_gen_refused} card(s) name a NEND more than "
+            f"{_SPH_NEND_MAX_SPAN} ids above their NID. That is far outside any "
+            "real generated block, so the range was NOT expanded and only the "
+            "written card became a particle — check whether the column really "
+            "holds NEND. Fix the card if the range was meant.")
+
+
+def _sph_flag_and_mass(mass: float, is_volume: bool):
+    """(/SPHCEL Type, magnitude) for one LS-DYNA MASS cell.
+
+    Type 1 = the value is a mass, Type 2 = the value is a volume
+    (``hm_read_sphcel.F:221-223`` / ``spinit3.F:139-153``). A blank cell keeps
+    Type 1 with a zero magnitude, which the emitter turns into a blank column so
+    the starter's own "type 0" fallback applies.
+    """
+    if is_volume or mass < 0.0:
+        return 2, abs(mass)
+    return 1, mass
 
 
 def _positional_elem_fields(line: str, n: int):
@@ -2025,6 +2271,112 @@ def handle_section_tshell(block: Block, state: ConversionState) -> None:
         _dup_secid("*SECTION_TSHELL", secid, state.sec_tshells, state)
         state.sec_tshells[secid] = sec
         n_sets += 1
+
+
+#: *SECTION_SPH_{OPTION}. ELLIPSE (called TENSOR before R8) is the only one
+#: that adds a CARD — six anisotropic h cells HXCSLH..HZINI — so it is the only
+#: one the card walk has to stride over. INTERACTION and USER change the
+#: SEMANTICS of card 1 without adding one. dyna2rad's CFG makes all four
+#: USER_NAMES of one entity and reads card 2 for ``sphOption == 2`` only, so
+#: the anisotropic cells are silently lost there; here they are named.
+_SPH_SECTION_OPTIONS = ("ELLIPSE", "TENSOR", "INTERACTION", "USER")
+
+
+def handle_section_sph(block: Block, state: ConversionState) -> None:
+    """*SECTION_SPH (+ _TITLE/_ID/_ELLIPSE/_TENSOR/_INTERACTION/_USER) → the
+    per-set *SECTION_SPH records the /PROP/SPH writer consumes.
+
+    Card 1  ``SECID CSLH HMIN HMAX SPHINI DEATH START SPHKERN``  (8 x I10)
+    Card 2  ``HXCSLH HYCSLH HZCSLH HXINI HYINI HZINI``  (_ELLIPSE/_TENSOR only)
+
+    Two things this walk does that dyna2rad does not:
+
+    * **it applies the manual's own defaults**, ``CSLH = 1.2``, ``HMIN = 0.2``,
+      ``HMAX = 2.0``, ``DEATH = 1e20``. The CFG declares them but the SDI read
+      path does not apply them, so on the far side a blank CSLH is 0 and the
+      section takes the CONSTANT-h branch — the wrong one for the commonest
+      deck there is (see SectionSph).
+    * **the _ELLIPSE card 2 is claimed by RAW CONTIGUITY** (the #119 rule).
+      The card is mandatory under that option and an all-blank one is still a
+      card, so it is strided by position; taking "the next non-blank row"
+      instead would consume the FOLLOWING set's card 1 as anisotropic h values
+      and lose that whole section.
+    """
+    per_set_title = _title_offset(block)
+    raw = block.raw
+    option = next((o for o in _SPH_SECTION_OPTIONS
+                   if f"_{o}" in f"_{block.keyword}"), "")
+    has_card2 = option in ("ELLIPSE", "TENSOR")
+    idx = 0
+    n_sets = 0
+    n_aniso = 0
+    while idx < len(raw):
+        # Trailing blank padding is not a card set. Anything else — including a
+        # blank line that IS this set's 80a title card — is walked, not skipped.
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=8, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            state.warn(_section_set_stop("*SECTION_SPH", n_sets, raw[idx]))
+            break
+        cslh_blank = not (len(f1) > 1 and f1[1].strip())
+        sec = SectionSph(
+            secid, title,
+            cslh=1.2 if cslh_blank else to_float(f1[1]),
+            hmin=_ffield(f1, 2, 0.2),
+            hmax=_ffield(f1, 3, 2.0),
+            sphini=to_float(f1[4]) if len(f1) > 4 else 0.0,
+            death=_ffield(f1, 5, 1.0e20),
+            start=to_float(f1[6]) if len(f1) > 6 else 0.0,
+            sphkern=to_int(f1[7]) if len(f1) > 7 else 0,
+            cslh_blank=cslh_blank,
+            option=option)
+        idx += 1
+        if has_card2:
+            # A NON-ZERO cell, not merely a non-blank one. A card 2 written out
+            # as explicit zeros is isotropic BY DEFINITION, and reporting it as
+            # "you lost your anisotropy" costs the reader a chase through a
+            # deck that never asked for any. (The card is still consumed
+            # positionally either way — the #119 rule.)
+            if idx < len(raw) and any(
+                    c.strip() and to_float(c) != 0.0
+                    for c in _card(raw, idx, fixed=True, n=6, w=10)):
+                n_aniso += 1
+            idx += 1
+        _dup_secid("*SECTION_SPH", secid, state.sec_sph, state)
+        state.sec_sph[secid] = sec
+        n_sets += 1
+    if n_aniso:
+        state.warn(
+            f"*{block.keyword}: {n_aniso} section(s) state an ANISOTROPIC "
+            "smoothing length (HXCSLH/HYCSLH/HZCSLH and/or HXINI/HYINI/HZINI on "
+            "card 2) — DROPPED. Radioss's /PROP/SPH carries ONE scalar h and "
+            "one scalar dilatation rule; there is no per-direction smoothing "
+            "length anywhere in the SPH property, so a deliberately flattened "
+            "or stretched kernel becomes an isotropic one and the particle's "
+            "neighbour set changes shape. Re-state the model with an isotropic "
+            "kernel, or accept the difference. (dyna2rad reads card 2 for this "
+            "option too and then writes none of its six cells, so it degrades "
+            "to isotropic with no message at all.)")
+    if option in ("INTERACTION", "USER"):
+        state.warn(
+            f"*{block.keyword}: the _{option} option is not carried. "
+            + ("_INTERACTION restricts the particle approximation to the parts "
+               "that name it (*CONTROL_SPH CONT=1); Radioss has no per-section "
+               "interaction switch, so every SPH part in the converted deck "
+               "interacts with every other one."
+               if option == "INTERACTION" else
+               "_USER hands the smoothing-length computation to a user "
+               "subroutine, which has no OpenRadioss counterpart at all.")
+            + " The section's ordinary CSLH/HMIN/HMAX/SPHINI cells ARE read and "
+            "converted, so the part keeps a usable /PROP/SPH.")
 
 
 # *SECTION_BEAM card 2 (Manual Vol I R17 pp.41-4..41-14). WHICH card 2 a set
@@ -5972,6 +6324,68 @@ def handle_control_solid(block: Block, state: ConversionState) -> None:
     state.ctrl_solid = ControlSolid(esort, fmatrix, niptets)
 
 
+def handle_control_sph(block: Block, state: ConversionState) -> None:
+    """*CONTROL_SPH — one to three cards, only NMNEIGH of which has a home.
+
+    Card 1  ``NCBS BOXID DT IDIM NMNEIGH FORM START MAXV``
+    Card 2  ``CONT DERIV INI ISHOW IEROD ICONT IAVIS ISYMP``   (optional)
+    Card 3  ``ITHK ISTAB QL - SPHSORT ISHIFT``                 (optional)
+
+    Cards 2 and 3 are claimed by RAW CONTIGUITY (the #119 rule): card 2 is the
+    line IMMEDIATELY after card 1 whether or not it is blank, and an all-blank
+    one IS a card ("every field defaults"). Skipping blanks and taking "the next
+    non-blank line" would read a following keyword's data as card 2 the moment
+    the deck writes an empty optional card — the corpus spans all three lengths
+    (hvi.k writes 1 card, W11 writes 2, model5.k writes 3).
+
+    The column-by-column fates are reported by ``writer/sph.py``, which is where
+    the one mapping that exists (``NMNEIGH`` → /SPHGLO) is decided. dyna2rad
+    drops the whole keyword without a message.
+    """
+    off = _title_offset(block)
+    raw = [ln for ln in block.raw]
+    while raw and not raw[-1].strip():
+        raw.pop()
+    if len(raw) <= off:
+        state.warn("*CONTROL_SPH: no data card found — skipped.")
+        return
+    f1 = _card(raw, off, fixed=True, n=8, w=10)
+    c = ControlSph(
+        ncbs=to_int(f1[0]) if f1 else 0,
+        boxid=to_int(f1[1]) if len(f1) > 1 else 0,
+        dt=_ffield(f1, 2, 1.0e20),
+        idim=to_int(f1[3]) if len(f1) > 3 and f1[3].strip() else 3,
+        nmneigh=to_int(f1[4]) if len(f1) > 4 else 0,
+        form=to_int(f1[5]) if len(f1) > 5 else 0,
+        start=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        maxv=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        n_cards=min(3, len(raw) - off))
+    if c.n_cards >= 2:
+        f2 = _card(raw, off + 1, fixed=True, n=8, w=10)
+        c.cont = to_int(f2[0]) if f2 else 0
+        c.deriv = to_int(f2[1]) if len(f2) > 1 else 0
+        c.ini = to_int(f2[2]) if len(f2) > 2 else 0
+        c.ishow = to_int(f2[3]) if len(f2) > 3 else 0
+        c.ierod = to_int(f2[4]) if len(f2) > 4 else 0
+        c.icont = to_int(f2[5]) if len(f2) > 5 else 0
+        c.iavis = to_int(f2[6]) if len(f2) > 6 else 0
+        c.isymp = to_int(f2[7]) if len(f2) > 7 else 0
+    if c.n_cards >= 3:
+        f3 = _card(raw, off + 2, fixed=True, n=8, w=10)
+        c.ithk = to_int(f3[0]) if f3 else 0
+        c.istab = to_int(f3[1]) if len(f3) > 1 else 0
+        c.ql = to_float(f3[2]) if len(f3) > 2 else 0.0
+        c.sphsort = to_int(f3[4]) if len(f3) > 4 else 0
+        c.ishift = to_int(f3[5]) if len(f3) > 5 else 0
+    if len(raw) - off > 3:
+        state.warn(
+            "*CONTROL_SPH: the keyword defines at most THREE cards (Vol I R16), "
+            f"so the {len(raw) - off - 3} line(s) after card 3 are UNREAD. "
+            "Split them into their own keyword block if they were meant as "
+            "data.")
+    state.control_sph = c
+
+
 _DT_PARSE_SENTINEL = -1.2345678e-300
 
 
@@ -6073,6 +6487,25 @@ def _handle_db_dt(block: Block, state: "ConversionState | None" = None,
 
 def handle_database_abstat(block: Block, state: ConversionState) -> None:
     state.db_abstat_dt = _handle_db_dt(block, state, "*DATABASE_ABSTAT")
+
+
+def handle_database_sphout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_SPHOUT — the SPH particle ASCII database.
+
+    Radioss has no ``sphout`` file; the particle channels come out of the
+    /TH/SPHCEL groups *DATABASE_HISTORY_SPH builds. What this card contributes
+    is its DT, which joins the /TFILE minimum scan so those channels are sampled
+    at the frequency the deck asked for (dyna2rad does exactly the same — the
+    keyword appears only in its ``dbCardList``, never in a TH converter).
+    """
+    state.db_sphout_dt = _handle_db_dt(block, state, "*DATABASE_SPHOUT")
+    state.note_recognized_not_emitted(
+        "DATABASE_SPHOUT",
+        "OpenRadioss has no 'sphout' database — the per-particle channels come "
+        "from the /TH/SPHCEL groups *DATABASE_HISTORY_SPH builds instead. The "
+        "dt IS honoured, as one term of the /TFILE minimum, so the particle "
+        "channels a deck also requests with *DATABASE_HISTORY_SPH are sampled "
+        "as often as this card asked for.")
 
 
 def handle_database_binary_d3thdt(block: Block, state: ConversionState) -> None:
@@ -10419,6 +10852,38 @@ def handle_database_history_tshell(block: Block, state: ConversionState) -> None
     _handle_db_history(block, state, "TSHELL")
 
 
+def handle_database_history_sph(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_SPH → /TH/SPHCEL.
+
+    The ids are SPH element ids, which LS-DYNA and Radioss both force equal to
+    the supporting NODE id, so no translation is needed — but every one of them
+    must resolve to a /SPHCEL this conversion actually emitted. A dangling id is
+    not a lost channel, it is starter ERROR 69 ("TH ELEMENT SELECTION ID=n DOES
+    NOT EXIST", hm_read_thgrne.F:189) and the whole deck is refused; the writer
+    intersects against ``state.sph_cell_ids`` for exactly that reason (the #106
+    rule). dyna2rad copies the raw id list through with no check at all — its
+    SPH branch is the only element branch in ``converttimehistory.cxx`` with no
+    ``FindRadElement`` filter.
+
+    Before this batch the keyword was unroutable (the elements it names did not
+    exist in the conversion) and stayed in ``skipped_keywords``.
+    """
+    _handle_db_history(block, state, "SPH")
+
+
+def handle_database_history_sph_set(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_SPH_SET → /TH/SPHCEL over the named *SET_NODEs.
+
+    "IDn for NODE_SET, SPH_SET, and DES_SET refers to node set ID n defined
+    using the *SET_NODE_{OPTION}" (Vol I R16), so these are SET ids, not
+    particle ids — resolving them as particle ids would list a handful of set
+    numbers as if they were cells and refuse the deck with ERROR 69. The writer
+    expands them through ``state.node_sets`` and then applies the same
+    emitted-cell screen.
+    """
+    _handle_db_history(block, state, "SPH_SET")
+
+
 def handle_database_history_node(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "NODE")
 
@@ -10712,6 +11177,10 @@ HANDLERS = {
     # *SECTION_TSHELL takes no option suffix of its own (only the universal
     # _TITLE / _ID, which the parser strips), so one exact key covers it.
     "SECTION_TSHELL":                         handle_section_tshell,
+    # *SECTION_SPH's four option spellings are registered from a loop below (an
+    # unregistered one would land in skipped_keywords and its parts would lose
+    # the whole /PROP/SPH, i.e. the particle mass AND the smoothing length).
+    "SECTION_SPH":                            handle_section_sph,
     "SECTION_BEAM":                           handle_section_beam,
     "SECTION_DISCRETE":                       handle_section_discrete,
 
@@ -11215,6 +11684,7 @@ HANDLERS = {
     "CONTROL_OUTPUT":                         handle_control_output,
     "CONTROL_SHELL":                          handle_control_shell,
     "CONTROL_SOLID":                          handle_control_solid,
+    "CONTROL_SPH":                            handle_control_sph,
     "CONTROL_ADAPTIVE":                       handle_skip,
     "CONTROL_BULK_VISCOSITY":                 handle_skip,
     "CONTROL_DYNAMIC_RELAXATION":             handle_skip,
@@ -11247,6 +11717,11 @@ HANDLERS = {
     "DATABASE_HISTORY_SHELL":                 handle_database_history_shell,
     "DATABASE_HISTORY_SOLID":                 handle_database_history_solid,
     "DATABASE_HISTORY_TSHELL":                handle_database_history_tshell,
+    # *DATABASE_HISTORY_SPH lists PARTICLE (= node) ids; _SPH_SET lists
+    # *SET_NODE ids. Both land on /TH/SPHCEL, and both are screened against the
+    # emitted /SPHCEL set before a single id is written (ERROR 69).
+    "DATABASE_HISTORY_SPH":                   handle_database_history_sph,
+    "DATABASE_HISTORY_SPH_SET":               handle_database_history_sph_set,
     "DATABASE_HISTORY_NODE":                  handle_database_history_node,
     "DATABASE_ABSTAT":                        handle_database_abstat,
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,
@@ -11261,6 +11736,7 @@ HANDLERS = {
     "DATABASE_RWFORC":                        handle_database_rwforc,
     "DATABASE_SECFORC":                       handle_database_secforc,
     "DATABASE_SLEOUT":                        handle_database_sleout,
+    "DATABASE_SPHOUT":                        handle_database_sphout,
     "DATABASE_SPCFORC":                       handle_database_spcforc,
     "DATABASE_SWFORC":                        handle_database_swforc,
     "DATABASE_NCFORC":                        handle_database_ncforc,
@@ -11384,6 +11860,17 @@ del _o1, _o2, _o3, _o4
 # and the prefix fallback in dispatch() covers anything outside it.
 for _o1 in ("", "_BETA", "_COMPOSITE"):
     HANDLERS[f"ELEMENT_TSHELL{_o1}"] = handle_element_tshell
+del _o1
+
+# *ELEMENT_SPH_{OPTION} with OPTION in {<blank>, VOLUME} — one option slot, two
+# spellings, and the option is not cosmetic: it makes the MASS column a VOLUME.
+# *SECTION_SPH_{OPTION} with OPTION in {<blank>, ELLIPSE, TENSOR, INTERACTION,
+# USER} — the pre-R8 name TENSOR is kept alongside ELLIPSE because old decks
+# still spell it that way and it selects the same anisotropic card 2.
+for _o1 in ("", "_VOLUME"):
+    HANDLERS[f"ELEMENT_SPH{_o1}"] = handle_element_sph
+for _o1 in ("",) + tuple(f"_{o}" for o in _SPH_SECTION_OPTIONS):
+    HANDLERS[f"SECTION_SPH{_o1}"] = handle_section_sph
 del _o1
 
 
@@ -11592,8 +12079,15 @@ del _kw, _is_ortho
 #: silently missing from the deck (measured on master: the nine r14 thick-shell
 #: decks each emitted a bare /PART on a placeholder /PROP/SHELL and nothing
 #: else, with no MESH LOSS warning, because no element was ever parsed).
+#: ELEMENT_SPH needs its own row for the same token-boundary reason, and the
+#: stakes are the same: measured on master, converting
+#: W11_SETUP_SPH_BirdStrike.k left ELEMENT_SPH in skipped_keywords and lost all
+#: 18,795 particles — 1.8199 kg, 100 % of the projectile — with NO MESH LOSS
+#: warning, while the two eroding contacts that scope those particle nodes
+#: converted and reported themselves healthy.
 _PREFIX_HANDLERS = (
     ("ELEMENT_TSHELL", handle_element_tshell),
+    ("ELEMENT_SPH", handle_element_sph),
     ("ELEMENT_SHELL", handle_element_shell),
     ("ELEMENT_BEAM", handle_element_beam),
     ("ELEMENT_PLOTEL", handle_element_plotel),

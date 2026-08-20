@@ -112,7 +112,9 @@ export the image.
 
 ### Mesh & geometry
 `*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_TSHELL` (+ `_BETA` /
-`_COMPOSITE` — see **Thick shells**), `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
+`_COMPOSITE` — see **Thick shells**), `*ELEMENT_SPH` (+ `_VOLUME`; the `MASS`
+column's sign and the suffix both select mass-vs-volume, and the `NEND` range
+generator is expanded — see **SPH particles**), `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
 `*ELEMENT_MASS_NODE_SET`, `*ELEMENT_MASS_PART`, `*ELEMENT_MASS_PART_SET`,
 `*PART` **and every legal option stacking** — `_INERTIA` / `_REPOSITION`,
 `_CONTACT`, `_PRINT`, `_ATTACHMENT_NODES`, `_AVERAGED`, `_FIELD`, in **any
@@ -171,7 +173,10 @@ while `_IGA_SHELL` and a `_TSHELL` on a THIN-shell mesh warn and fall back to a
 plain shell property, see **Composites**), `*SECTION_TSHELL` (+ `_TITLE`; every
 card SET under one header, striding over the `ICOMP` angle block, which sits one
 card EARLIER than `*SECTION_SHELL`'s because a thick shell has no thickness card
-— see **Thick shells**), `*SECTION_SHELL`
+— see **Thick shells**), `*SECTION_SPH` (+ `_TITLE` / `_ELLIPSE` / `_TENSOR` /
+`_INTERACTION` / `_USER`; every card SET under one header, striding the
+`_ELLIPSE` anisotropic-h card by RAW position — see **SPH particles**),
+`*SECTION_SHELL`
 (+ `_TITLE`; every card SET under one header, not just the first, striding over
 the `ICOMP` angle cards, the keyword-option card and the ELFORM 101–105
 user-shell cards 5/5.1/5.2; `ICOMP = 1` reads the card-3 `B1..B8` per-layer
@@ -1507,6 +1512,191 @@ modal thick-shell deck could not start at all).
 `*DATABASE_HISTORY_TSHELL` rides `/TH/BRIC`, the same block
 `*DATABASE_HISTORY_SOLID` takes.
 
+### SPH particles
+
+`*ELEMENT_SPH` → `/SPHCEL/<part_ID>`, `*SECTION_SPH` → `/PROP/SPH`
+(= `/PROP/TYPE34`), `*CONTROL_SPH` `NMNEIGH` → `/SPHGLO`. The property sits
+under the **SECID verbatim**, exactly where `/PROP/SOLID` would, so no `/PART`
+repoint is needed unless the SECID is also claimed by another element family.
+
+**An SPH particle has no connectivity: it IS its supporting node.** The
+`/SPHCEL` id column is read as the NODE user id and the cell id is then forced
+equal to it (`hm_read_sphcel.F:243-250`, "same identifier as the node"), so a
+cell can never be renumbered independently of a node — which is why the
+`*INCLUDE_TRANSFORM` offset spec gives field 0 the **node** bucket (`IDNOFF`),
+the only `*ELEMENT_` card in this converter where that is true. dyna2rad cannot
+follow: it emits a `//SUBMODEL` and lets Radioss apply the offsets, and the
+`/SPHCEL` id column is a plain `INT` with no entity type, so the submodel
+machinery leaves it alone while `/NODE` moves — measured, an
+`*INCLUDE_TRANSFORM` with `IDNOFF = 1000` (with or without a matching `IDEOFF`)
+gave four `ERROR 78 … NODE ID=1 DOES NOT EXIST` and `TOTAL MASS = 0`. k2rad
+bakes the offsets into the deck text, so it is immune by construction.
+
+#### Where the mass lives, and what it costs
+
+Radioss can state a particle's mass in exactly two places, and they are mutually
+exclusive because **the one that carries the mass also decides the smoothing
+length**:
+
+| where the mass is | particle mass | smoothing length `h` |
+|---|---|---|
+| `/SPHCEL` `Flag = 1`, `MASS = m` | `m` per particle, exact whatever the deck says | Radioss DERIVES `(√2·m/ρ)^(1/3)`; the property's `h` is **ignored** (`spinih.F:85-95`) |
+| `/SPHCEL` `Flag = 2`, `MASS = V` | `ρ·V` | same, from `(√2·V)^(1/3)` |
+| `/SPHCEL` MASS blank (`Flag = 0`) | `Mp` from `/PROP/SPH` | the property's `h`, verbatim |
+
+k2rad picks the **second** route whenever the section's particles all carry the
+identical mass and the deck states a usable `h` — then the total is
+`N × Mp`, exact, *and* the deck's own smoothing length survives; and the first
+route otherwise, which keeps the mass exact per particle and reports the
+smoothing-length ratio it costs, in numbers:
+
+> `Radioss will use h = (sqrt(2)*9.683426e-05/938)^(1/3) = 0.00526559 against
+> the deck's 0.00565387 — a ratio of 0.9313, i.e. 6.87 % smaller support radius
+> and 19.2 % fewer neighbours per particle.`
+
+(the figures are the W11 bird-strike deck's own — 18 795 particles of
+9.683426e-05 at ρ = 938, measured spacing 4.7116 mm — as they would read if its
+masses were not uniform. They are, so that deck takes the exact route instead.)
+
+When the masses genuinely differ the report gives the **span**, not one number:
+`h` is derived per particle, so a single value from the mean mass is a value no
+particle has, and on a two-population cloud its direction is wrong for half of
+them. Measured on 500 particles at 8e-9 plus 500 at 1.6e-8, the mean-mass
+reading said "7.07 % larger" while `spinih.F` gives 2.2449 for the light half
+(6.5 % *smaller*) and 2.8284 for the heavy — and the starter's governing time
+step matched the *smallest* `h`. So the message names the min, the max, and
+which one sets the step (`mdtsph.F:132`).
+
+Both mass columns are written with a formatter that **round-trips**. The
+converter's shared float field renders anything below 1e-4 with `%.6E`, and in
+Mg-mm-s every particle mass is below 1e-4: a deck stating `1.234567891E-09` on
+1000 particles came back from the starter as `TOTAL MASS = 1.2345680000000E-06`
+against the exact `1.234567891E-06`. Negligible in engineering terms, but mass
+is this batch's correctness criterion and the field is twenty characters wide
+with twelve used, so the digits were lost to the formatter rather than to the
+column.
+
+If **no** particle of a section states a mass or a volume, there is nothing to
+read one from, and writing `Mp ≤ 0` hands the fabrication to the starter (which
+invents 1.0 mass unit per particle behind a single `WARNING 138`). k2rad derives
+one from the fill instead — `ρ · d_ref³`, the mass of the cube each particle
+occupies — and reports it as `MASS INVENTED:`, stating the number now in the
+deck and that the source stated none. The deck's own `h` still survives, because
+a type-0 particle leaves the property's `h` alone.
+
+The `h` the deck asks for is `SPHINI` when given, else `CSLH × d_ref` with
+`d_ref` = "the maximum of the minimum distance between every particle" (Vol I
+R16 Remark 1), measured here from the node cloud with a uniform-grid
+nearest-neighbour search (exact on a lattice, a lower bound on a graded fill
+above 20 000 particles per part, where the queries are subsampled). Radioss's
+own `√2` is exactly the FCC packing factor, so its default support is
+systematically *smaller* than LS-DYNA's — **0.9354× on a simple-cubic fill,
+0.8333× on close packing** — which is why the choice is made rather than
+defaulted. `Mp` is **always** written positive: dyna2rad never sets the field, so
+`hm_read_prop34.F:235-239` raises `WARNING 138` on every deck it converts and
+forces `Mp = 1` **in the deck's mass unit** — harmless while the cells carry
+mass, and a fabricated whole mass unit per particle when they do not (measured:
+four blank-mass particles gave `TOTAL MASS = 4.0`).
+
+Three LS-DYNA conventions neither dyna2rad nor OpenRadioss's own native `.k`
+reader implements, all measured through `starter_win64`:
+
+* **`MASS < 0` is a VOLUME** ("the absolute value will be used as volume … SPH
+  element mass is calculated by |MASS| × ρ") → `/SPHCEL` `Flag = 2`. Passed
+  through signed, the starter discards it and the `Mp = 1` fallback takes over —
+  `8.0 kg` where the deck states `0.016 kg`.
+* **the `_VOLUME` suffix means the same thing with a positive number** → wrong by
+  exactly ρ otherwise (`1.6E-05` instead of `1.6E-02`).
+* **`NEND > 0` GENERATES the cards** from `NID` to `NEND` → `NUMSPH = 1` instead
+  of a whole cloud otherwise. Generated ids with no `*NODE` are dropped with
+  their own count (a `/SPHCEL` id with no node is `ERROR 78`).
+
+A zero-mass cell is written `Flag = 0`, **never** `Flag = 1`: an explicit
+`Flag = 1` with a blank MASS keeps `TYPE = 1` and `spinit3.F:142` computes
+`VOL = 0/ρ` — measured `TOTAL MASS = 0.000000000000` with no diagnostic at all.
+
+#### `/PROP/SPH` at `/BEGIN 2022`
+
+Two data cards, never three. `hmin` / `hmax` / `hcst` are **radioss2026-only**
+and a 2022 reader discards them **silently** while still accepting `h_1D = 3` on
+card 1 — measured, `hmin=0.37 hmax=3.77 hcst=1.77` echoed back as the hard-coded
+`0.2 / 2.0 / 1.2`, `0 ERROR(S)`, only advisory `WARNING 100213`, i.e. the
+bounded-dilatation algorithm running with bounds nobody chose. dyna2rad emits
+exactly that combination (and targets the attribute `"hcst"`, which does not
+exist — the real name is `h_scal`). So `h_1D` here is `0` (3D dilatation) or
+`2` (constant `h`), the latter only for LS-DYNA's own exact spelling of a
+constant smoothing length, `HMIN = HMAX = 1.0`. `Order` stays `0`: dyna2rad maps
+`SPHKERN == 2` onto it, but Radioss's `Order` is the *renormalisation correction*
+order and `spcompl.F:107-118` dispatches on `-1/0/1` only, so an `Order = 2`
+particle gets no kernel correction at all. `*HOURGLASS` / `*CONTROL_HOURGLASS`
+never reach `h`: SPH has no hourglass modes, and dyna2rad's copy of `QM`/`QH`
+into the field named `"h"` puts a dimensionless viscosity coefficient into a
+LENGTH — measured, `QM = 0.13` with `SPHINI = 0.5` echoed
+`SMOOTHING LENGTH = 0.13`, and a global `QH` **zeroed it outright**.
+
+The material is gated at conversion time against the laws that declare SPH
+compatibility (`INIT_MAT_KEYWORD(...,"SPH")`, `init_mat_keyword.F:272-273`);
+anything else is starter `ERROR 3046`/`3047` and is named before the run.
+dyna2rad imposes no law filter at all.
+
+One material is re-routed rather than only reported. `*MAT_PLASTIC_KINEMATIC`
+lands on `/MAT/LAW44` (COWPER), which `hm_read_mat44.F` does **not** declare for
+SPH — so a particle on it is `ERROR 3046` and the whole deck is refused, as it
+was for r14 `sph/bar-i/bar1.k` and `sph/bar-ii/bar2.k`, two decks LS-DYNA runs.
+`/MAT/LAW2` (PLAS_JOHNS) **is** declared (`mat002/hm_read_mat02_jc.F90:383`) and
+describes the identical curve — `a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1` is
+the same bilinear plastic branch LAW44 is given — whenever the material carries
+no Cowper-Symonds rate term (`SRC`/`SRP`) and no *effective* kinematic hardening
+(`BETA < 1` matters only when `ETAN > 0`). When it does, the particle parts get
+LAW2: under the material's own MID if nothing else uses it, otherwise under a
+**cloned** `/MAT` id with only those parts repointed, because one Radioss `/MAT`
+id cannot be two laws and the shells or solids sharing the material still need
+LAW44. A material that is *not* expressible keeps LAW44 and keeps the loud
+`ERROR 3046` report — a different constitutive law is never substituted
+silently.
+
+#### `*CONTROL_SPH`
+
+Only `NMNEIGH` maps — to `/SPHGLO` `Lneigh` and `Nneigh` — and **only when it
+asks for more than Radioss's own defaults** (120 computed / 240 stored). Writing
+a smaller value would reduce those caps for nothing, and an all-blank `/SPHGLO`
+is worse still: measured, it HALVES the stored cap from 240 to 120, so the card
+is emitted with every field explicit or not at all. Every other column is
+dropped by name — `NCBS`, `BOXID`, `DT`, `FORM`, `START`, `MAXV`, `CONT`,
+`DERIV`, `INI`, `ISHOW`, `IEROD`, `ICONT`, `IAVIS`, `ISYMP`, `ITHK`, `ISTAB`,
+`QL`, `SPHSORT`, `ISHIFT` — with `IDIM ≠ 3` singled out as the one whose loss
+changes the ANSWER rather than the accuracy (**OpenRadioss SPH is 3D only**).
+dyna2rad drops the whole keyword silently. Cards 2 and 3 are optional and are
+claimed by RAW contiguity (the `#119` rule): an all-blank card 2 IS a card, and
+"the next non-blank line" would read card 3 as card 2.
+
+Everything that walks the element tables sees particles: the orphan-element
+census, the `/PART` "is this part meshed?" test, contact SECONDARY node groups
+(`SSTYP = 2/3` part scoping now works, not just the node-set spelling), `/RBODY`
+secondary nodes, `*PART_INERTIA` node coverage, `/DAMP`,
+`*INITIAL_VELOCITY_GENERATION` (the idiomatic way to launch a bird — the group
+was otherwise EMPTY and the projectile did not move), `--auto-gapmin`'s node-side
+clearance, the `*PART_CONTACT` `OPTT` "no effect" bucket (there is no `NUMSPH`
+loop in `i7sti3.F` either) — and, above all, the two guards that decide which
+nodes carry stiffness: the implicit free-node `/BCS` (which would otherwise clamp
+every particle in all six DOFs, 0 starter errors and a cloud that cannot move)
+and the modal dummy `/CLOAD`.
+
+Four sites get a **named warning instead of an arm**, because a particle has no
+face and no second node: a contact MAIN surface (`/SURF` over an SPH part builds
+nothing — and with other parts in scope the interface converts *looking healthy*
+while the particles are absent), `--auto-gapmin`'s surface faceting,
+`*DATABASE_CROSS_SECTION_PLANE` (a `/SECT` has no SPH group at any version, so
+its force UNDER-REPORTS by the whole SPH contribution) and
+`*INITIAL_FOAM_REFERENCE_GEOMETRY` (`/XREF` is solid-only, `ERROR 2013`).
+
+**Not converted, and named as such:** `*BOUNDARY_SPH_SYMMETRY_PLANE` /
+`_FLOW` / `_NOFLOW` and `*SPH_SYMMETRY_PLANE` (Radioss target `/SPHBCS`),
+`*DEFINE_SPH_*` injection / massflow / active-region (`/SPH/RESERVE`,
+`/SPH/INOUT`), `*DEFINE_ADAPTIVE_SOLID_TO_SPH` (`/PROP/SOLID` `Nsphdir`), and
+the anisotropic `_ELLIPSE` smoothing lengths, `DEATH` / `START`, `SPHKERN ≠ 0`
+and any `HMIN`/`HMAX` pair other than `1/1`.
+
 ### Integrated beams
 
 `*INTEGRATION_BEAM` → `/PROP/TYPE18` (`INT_BEAM`), a beam whose cross-section is
@@ -2437,7 +2627,14 @@ impulses, not the instantaneous section resultants secforc reports** —
 the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
 shells, so a triangle listed there is absent from the T01);
 `*DATABASE_HISTORY_SOLID` and `*DATABASE_HISTORY_TSHELL` → `/TH/BRIC` (a thick
-shell IS a `/BRICK` in the emitted deck); `*DATABASE_HISTORY_NODE` → `/TH/NODE`
+shell IS a `/BRICK` in the emitted deck); `*DATABASE_HISTORY_SPH` and
+`*DATABASE_HISTORY_SPH_SET` → `/TH/SPHCEL` (the `_SET` form's ids are
+`*SET_NODE` ids, not particle ids, and are expanded first). **Both are screened
+against the `/SPHCEL` cells the conversion actually emitted**: a `/TH` group
+naming an element the deck does not define is starter `ERROR 69` and the whole
+run is refused, so a dangling id is dropped with a named warning and a group
+that screens to nothing is not written at all (`ERROR 1109`);
+`*DATABASE_HISTORY_NODE` → `/TH/NODE`
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
 `/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction

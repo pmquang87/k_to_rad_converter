@@ -335,6 +335,17 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     solid_pids = {e.pid for e in state.solid_elems}
     shell_pids = {e.pid for e in state.shell_elems}
     tet10_pids = {e.pid for e in state.solid_elems if len(e.nodes) == 10}
+    sph_hit = sorted({c.pid for c in state.sph_elems if c.nid in ref_nids})
+    if sph_hit:
+        state.warn(
+            f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part(s) {sph_hit} hold SPH "
+            "particles whose nodes are named by the reference geometry — "
+            "SKIPPED. /XREF is reference geometry for SOLID elements "
+            "(8/4-node only, else starter ERROR 2013) and an SPH particle is "
+            "neither; Radioss has no stress-free reference state for a "
+            "particle at all. Those particles start UNSTRESSED, which is what "
+            "they would do anyway. (dyna2rad converts no reference geometry of "
+            "any kind.)")
     any_hit = False
     for pid, part in sorted(state.parts.items()):
         if not (pnodes.get(pid, set()) & ref_nids):
@@ -386,7 +397,7 @@ def _resolve_xref_parts(state: ConversionState) -> None:
                 f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} has no solid/"
                 "shell elements — a reference geometry is meaningless for it; "
                 "/XREF skipped.")
-    if not any_hit:
+    if not any_hit and not sph_hit:
         state.warn(
             "*INITIAL_FOAM_REFERENCE_GEOMETRY: its node table intersects no "
             "part's element nodes — no /XREF emitted (check node ids).")
@@ -619,9 +630,49 @@ def _plane_cut(state: ConversionState, cs) -> Tuple[List[int], List[int],
     # cut nothing and no /SECT was emitted at all.
     for e in state.tshell_elems:
         _try(e.nodes, e.eid, e.pid, solid_eids)
+    # SPH particles are deliberately NOT cut. ``_try`` needs a sign CHANGE
+    # across the plane (``dmin < 0 < dmax``) and a particle has exactly one
+    # node, so the test could never fire — but that inertness is the point: a
+    # /SECT has no SPH group to put the id in either, so an arm here would be
+    # dead code that implied a channel exists. ``_warn_sect_sph_scope`` names
+    # the loss on the caller's side instead.
     for e in state.beam_elems:
         _try([e.n1, e.n2], e.eid, e.pid, beam_eids)
     return (sorted(node_ids), shell_eids, solid_eids, beam_eids)
+
+
+def _warn_sect_sph_scope(state: ConversionState, cs, label: str) -> None:
+    """A ``*DATABASE_CROSS_SECTION_PLANE`` whose PSID scope reaches SPH parts.
+
+    A ``/SECT`` is a CUT THROUGH ELEMENTS: the starter builds it from the
+    element groups grbric/grshel/grtrus/grbeam/grsprg/grtria and sums what the
+    tail-side nodes of those elements transmit across the plane. There is no
+    SPH group on the card at any version, and an SPH particle has neither a face
+    to be cut nor two nodes to be on opposite sides of a plane — so the
+    particles' contribution to the section force is simply absent. Reported,
+    because "the /SECT converted" plus "the number is too small" is exactly the
+    kind of silence that survives a review. (dyna2rad converts no
+    *DATABASE_CROSS_SECTION at all.)
+    """
+    if not state.sph_elems:
+        return
+    sph_pids = {c.pid for c in state.sph_elems}
+    if cs.psid > 0:
+        entry = state.part_sets.get(cs.psid)
+        scoped = sorted(sph_pids & set(entry[1])) if entry else []
+    else:
+        scoped = sorted(sph_pids)
+    if not scoped:
+        return
+    state.warn(
+        f"*DATABASE_CROSS_SECTION_PLANE {label}: its scope includes SPH "
+        f"part(s) {scoped}, whose particles CANNOT be cut. A /SECT sums the "
+        "force the cut ELEMENTS transmit across the plane and its card carries "
+        "brick/shell/truss/beam/spring/tria groups only — there is no SPH "
+        "group at any Radioss version, and a particle has no face to cut and "
+        "no second node to put on the far side. The section is emitted from "
+        "whatever structural elements the plane does cut, so the reported "
+        "force UNDER-REPORTS by the whole SPH contribution.")
 
 
 def _make_cross_sections(state: ConversionState) -> List[str]:
@@ -677,6 +728,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                     beam_eids = se[1]
         else:
             nids, shell_eids, solid_eids, beam_eids = _plane_cut(state, cs)
+            _warn_sect_sph_scope(state, cs, label)
             if not nids:
                 state.warn(f"*DATABASE_CROSS_SECTION_PLANE {label}: the plane "
                            "cuts no element (or the normal is zero / all cut "

@@ -11,6 +11,270 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The SPH batch: `*ELEMENT_SPH` (+ `_VOLUME`) → `/SPHCEL`, `*SECTION_SPH`
+  (+ `_ELLIPSE` / `_TENSOR` / `_INTERACTION` / `_USER`) → `/PROP/SPH`
+  (TYPE34), `*CONTROL_SPH` → `/SPHGLO`, and `*DATABASE_HISTORY_SPH[_SET]` →
+  `/TH/SPHCEL`.** Before this batch the whole family landed in
+  `skipped_keywords`, and for an element keyword that is not a soft failure.
+  Measured on master for `Ryan_Lee_Examples/W11_SETUP_SPH_BirdStrike.k`:
+  `SKIPPED: ['CONTROL_SPH', 'ELEMENT_SPH', 'SECTION_SPH']`, a bare `/PART/2` on
+  a placeholder `/PROP/SHELL/2` and **0 of 18 795 particles emitted — 1.8199 kg,
+  100 % of the projectile, with no `MESH LOSS:` warning**, because the orphan
+  census can only report elements that were parsed and none were. Worse than an
+  absent bird: those 18 795 nodes were still emitted, still carried
+  `*INITIAL_VELOCITY_NODE`, and were still the secondary side of two converted
+  eroding `/INTER/TYPE25` contacts — 18 795 massless free nodes flying into a
+  contact that reported itself healthy. The same shape on all ten independent
+  r14 SPH decks (1 000 / 18 759 / 19 848 / 683 394 … particles).
+
+  1. **Mass is transferred exactly, on both of the two routes Radioss offers,
+     and the ROUTE is chosen rather than defaulted.** A `/SPHCEL` row that
+     carries its own `MASS` is exact per particle — and makes the solver DERIVE
+     that particle's smoothing length as `(sqrt(2)*m/rho)^(1/3)` and IGNORE the
+     property's `h` (`spinih.F:85-95`, `spinit3.F:139-153`). A row that leaves
+     the column blank takes `Mp` from `/PROP/SPH`, which is exact too whenever
+     the particles agree on one mass — and then the deck's own `h` survives. So
+     k2rad states the mass ONCE on the property when the section's particles all
+     carry the identical value and the deck gives a usable `h`, and per cell
+     otherwise, reporting the smoothing-length ratio the second route costs in
+     numbers. Verified through `starter_win64` on the converted r14 `foam.k`:
+     `NUMSPH : NUMBER OF SMOOTH PARTICLES (SPH CELLS) . . . 1000`,
+     `PARTICLES MASS = 2.2640880000000E-07`, and the per-part echo
+     `PART : 101 … Mass 2.26408800E-04` — exactly 1000 × 2.264088e-07, to every
+     printed digit, with **no `WARNING 138`**. Converted W11 and r14 `boot.k`
+     (3 sections, 19 848 particles) both read back `0 ERROR(S) 0 WARNING(S)`.
+
+     The `h` the deck asks for is `SPHINI`, else `CSLH × d_ref` with `d_ref` =
+     "the maximum of the minimum distance between every particle" (Vol I R16
+     *SECTION_SPH Remark 1), measured from the node cloud with a uniform-grid
+     nearest-neighbour search (exact on a lattice; above 20 000 particles per
+     part the queries are subsampled, which can only under-estimate a max of
+     minima and is exact on any regular fill). Radioss's `sqrt(2)` is the FCC
+     packing factor, so its derived support is systematically SMALLER than
+     LS-DYNA's — **0.9354x on a simple-cubic fill, 0.8333x on close packing** —
+     which is why the choice is worth making. Numerically confirmed against the
+     starter: with `m = 0.002`, `rho = 1000` the ratio of two runs' time steps
+     (3.5700719306875E-06 / 3.1050391479609E-06 = 1.149769) matches the h ratio
+     0.0141421 / 0.0123 exactly, ruling out the `(m/2rho)^(1/3)` reading some
+     renderings of the Altair help card show.
+
+  2. **`Mp` is always written positive.** dyna2rad never sets the field, so
+     `hm_read_prop34.F:235-239` raises `WARNING 138` on EVERY deck it converts
+     and forces `MP = 1` **in the deck's mass unit**. Harmless while the cells
+     carry mass; a fabricated whole mass unit per particle when they do not —
+     measured, four blank-mass particles gave `TOTAL MASS = 4.000000000000`.
+     For the same reason a zero-mass cell is written `Flag = 0` and never
+     `Flag = 1`: an explicit `Flag = 1` with a blank MASS keeps `TYPE = 1` and
+     `spinit3.F:142` computes `VOL = 0/rho` — measured
+     `TOTAL MASS = 0.000000000000` **with no diagnostic at all**.
+
+  3. **Three LS-DYNA conventions neither dyna2rad nor OpenRadioss's own native
+     `.k` reader implements**, each measured through `starter_win64`:
+     `MASS < 0` is a VOLUME ("the absolute value will be used as volume … SPH
+     element mass is calculated by |MASS| x rho") → `/SPHCEL` `Flag = 2`; passed
+     through signed, the starter discards it and the `Mp = 1` fallback takes
+     over — **8.0 kg where the deck states 0.016 kg**. The `_VOLUME` suffix means
+     the same thing with a positive number — **wrong by exactly rho
+     (1.6E-05 instead of 1.6E-02)** otherwise. And `NEND > 0` GENERATES the cards
+     from `NID` to `NEND` — **`NUMSPH = 1`** instead of a whole cloud otherwise;
+     generated ids with no `*NODE` are dropped with their own count, since a
+     `/SPHCEL` id with no node is `ERROR 78`.
+
+  4. **`h_1D = 3` and the `hmin`/`hmax`/`hcst` cells are NEVER emitted**, and
+     the LS-DYNA card defaults are applied by the PARSER. Those three cells live
+     on a `radioss2026`-only third card that a `/BEGIN 2022` reader discards
+     SILENTLY — measured, `hmin=0.37 hmax=3.77 hcst=1.77` echoed back as the
+     hard-coded `0.2 / 2.0 / 1.2`, `0 ERROR(S)`, only advisory
+     `WARNING 100213` — while `h_1D = 3` on card 1 IS accepted, i.e. the bounded
+     dilatation algorithm running with bounds nobody chose. dyna2rad emits
+     exactly that combination on its `CSLH <= 0` branch, and targets the
+     attribute `"hcst"`, which is not an attribute of the property at all (the
+     real name is `h_scal`), so the value is discarded even at 2026. That branch
+     is also the COMMON one on its side: the CFG declares
+     `DEFAULTS(COMMON){ LSD_CSLH = 1.2; LSD_HMIN = 0.2; LSD_HMAX = 2.0;
+     LSD_TDEATH = 1.0e20; }` and the SDI read path does NOT apply them, so a
+     blank `CSLH` reaches `p_ConvertSectionSph` as 0 and a deck that left the
+     cell empty to take the manual's 1.2 is converted to a CONSTANT smoothing
+     length with `SPHINI` discarded (probe decks h and i:
+     `CONSTANT SMOOTHING LENGTH` + `SMOOTHING LENGTH AUTOMATICALLY COMPUTED`).
+     `HMIN = HMAX = 1.0` — LS-DYNA's own spelling of a constant `h` — is the one
+     pair that maps exactly, to `h_1D = 2`.
+
+  5. **`Order` stays 0 and hourglass never reaches `h`.** dyna2rad maps
+     `SPHKERN == 2` onto `ORDER = 2`; Radioss's `Order` is the RENORMALISATION
+     correction order, `spcompl.F:107-118` dispatches on `-1/0/1` only (so such a
+     particle gets no kernel correction at all) and `spgrhead.F:180-185` packs
+     the value into two bits of the group-sort key. Its own map is unreachable
+     anyway — the R11.1 IMPORT card reads seven fields, so `SPHKERN` is never
+     populated (verified: `FORMULATION CORRECTION ORDER = 0`). Separately,
+     dyna2rad copies `*HOURGLASS` `QM` / `*CONTROL_HOURGLASS` `QH` into the
+     `/PROP/SPH` field named `"h"` — a dimensionless viscosity coefficient into a
+     LENGTH, on a property with no hourglass field because SPH has no hourglass
+     modes. Measured: a part `*HOURGLASS QM=0.13` with `SPHINI=0.5` echoed
+     `SMOOTHING LENGTH = 0.13`, and a global `*CONTROL_HOURGLASS QH=0.07`
+     **zeroed the smoothing length outright** (its attribute is `LSD_QH`, which
+     the identifier `"QH"` does not resolve, so an empty value is written).
+
+  6. **`/TH/SPHCEL` lists only ids that reached a `/SPHCEL` — the #106 rule.**
+     A dangling id is not a lost channel, it is starter `ERROR 69` ("TH ELEMENT
+     SELECTION ID=n DOES NOT EXIST", `hm_read_thgrne.F:189`) and the whole deck
+     is refused; a group that screens to nothing is not written at all
+     (`ERROR 1109`). dyna2rad's SPH branch is the ONLY element branch in
+     `converttimehistory.cxx` with no `FindRadElement` filter, so a deck naming a
+     node that is not a particle converts "successfully" and then will not run.
+     Ids go ONE PER LINE: packing them the way `*DATABASE_HISTORY_SPH` writes
+     them (eight per card) is *worse* than an error — measured, seven dangling
+     ids in columns 11+ gave 0 errors and only advisory `WARNING 100214`, i.e.
+     the channels vanished without even reaching the ERROR 69 check.
+
+  7. **`*CONTROL_SPH`: only `NMNEIGH` maps, and only upward.** `/SPHGLO`
+     `Lneigh`/`Nneigh` are written only when the deck asks for more than
+     Radioss's own defaults (120 computed / 240 stored), never to reduce them —
+     and never blank: measured, an all-zero `/SPHGLO` HALVES the stored cap from
+     240 to 120, so every field is explicit or the card is omitted. The other
+     nineteen columns are dropped BY NAME, with `IDIM != 3` singled out as the
+     one whose loss changes the ANSWER rather than the accuracy (OpenRadioss SPH
+     is 3D only; r14 `bar-i/bar1.k` is exactly that deck). dyna2rad drops the
+     keyword whole and silently — the string `CONTROL_SPH` does not occur
+     anywhere under `reader/source/dyna2rad/`. Cards 2 and 3 are optional and
+     are claimed by RAW contiguity (the #119 rule) in BOTH the handler and the
+     `*INCLUDE_TRANSFORM` offset walk.
+
+  8. **The `#120` element-registry audit, walked in full for a family with no
+     connectivity.** An SPH particle IS its node, which changes most verdicts:
+     it gets an arm at the implicit free-node `/BCS` guard (without it every
+     particle is clamped `111 111`, which the starter accepts with 0 ERRORS and
+     which freezes the whole cloud — the thick-shell `#120` bug exactly, and
+     latent here because every corpus SPH deck is explicit), the modal dummy
+     `/CLOAD`, `/DAMP` part scoping, `*INITIAL_VELOCITY_GENERATION` (the group
+     was otherwise EMPTY and the projectile did not move), contact SECONDARY
+     node groups, `/RBODY` and `*PART_INERTIA` node coverage, the orphan census,
+     `_referenced_node_ids`, the element-free-part test, `--auto-gapmin`'s
+     node-side clearance and the `*PART_CONTACT` `OPTT` "no effect" bucket
+     (there is no `NUMSPH` loop in `i7sti3.F` either — that warning now reads
+     "SOLID or SPH elements"). Four sites get a NAMED WARNING instead of an arm,
+     because a particle has no face and no second node: a contact MAIN surface,
+     `--auto-gapmin`'s faceting, `*DATABASE_CROSS_SECTION_PLANE` (a `/SECT` has
+     no SPH group at any version, so its force under-reports by the whole SPH
+     contribution) and `*INITIAL_FOAM_REFERENCE_GEOMETRY` (`/XREF` is solid-only,
+     `ERROR 2013`). Every real arm has a test that FAILS when the arm is removed.
+
+  9. **The `/SPHCEL` id column takes `IDNOFF`, not `IDEOFF`** — the only
+     `*ELEMENT_` card in this converter whose field 0 is a NODE. Radioss forces
+     the cell id equal to the node id (`hm_read_sphcel.F:243-250`), so no other
+     offset can apply. This is where dyna2rad cannot follow at all: it emits a
+     `//SUBMODEL` and lets Radioss apply the offsets, and the `/SPHCEL` id
+     column is a plain `INT` with no entity type, so the submodel machinery
+     leaves it alone while `/NODE` moves — measured, `IDNOFF = 1000` with or
+     without a matching `IDEOFF` gave four `ERROR ID : 78 … NODE ID=1 DOES NOT
+     EXIST` and `TOTAL MASS = 0`. k2rad bakes the offsets into the deck text, so
+     it is immune by construction; the 16-wide `MASS` column is preserved
+     literally rather than re-sliced at 10 (the `*ELEMENT_MASS` defect).
+
+  10. **`*SECTION_SPH` is a FIFTH SECID-keyed `/PROP` namespace.**
+      `next_prop_id()` guards against it, and a SECID shared with a shell /
+      solid / thick-shell / beam part moves the SPH property to a synthesized id
+      with its parts repointed — two `/PROP` cards on one id is starter
+      `ERROR 79` (DUPLICATE ID IN PID DEFINITION). Corpus sweep over 528 deduped
+      decks, master vs branch: **501 fully identical, 27 moved, 0 conversion
+      errors either side, and the moved set is exactly the 27 SPH decks.**
+
+  11. **Review round.** Five defects that each produced a deck the starter
+      refuses or silently mutilates, plus the reports that described the wrong
+      thing:
+
+      * **The `*INCLUDE_TRANSFORM` rewriter read the particle card on a fixed
+        `8/8/16/8` slice while the handler that reads the same card prefers a
+        WHITESPACE split**, so the two disagreed on every layout whose columns
+        are not exactly 8/8/16. Measured with `IDNOFF=1000 IDPOFF=30`, the I10
+        card `"       101         2   9.6834260e-05"` came out as
+        `"    1001      31   2   9.6834260e-05"` — read back as node 1001, part
+        31 and a mass 20 000x out — and an end-to-end I10 include lost **100 %
+        of its particles** to a MESH LOSS that named ids the deck never
+        contained. The rewriter now makes the handler's own free-vs-fixed
+        decision, rewrites the id CELLS in place (so an I8 deck keeps its
+        columns and the mass text is untouched), and then **re-parses its own
+        output and asserts it equals source + offsets**, falling back to a plain
+        space-separated card when a layout cannot keep both. 24 000 generated
+        layout/offset combinations agree.
+      * **`*DATABASE_HISTORY_SPH[_SET]` had no offset spec** while every sibling
+        (`_NODE` / `_SHELL` / `_SOLID` / `_TSHELL`) has one, so the requested ids
+        stayed put while the particles they name moved with `IDNOFF` — measured,
+        an include offset to 1001-1004 asking for 1-4 got the PARENT deck's
+        particles, which the `ERROR 69` screen cannot catch because those ids do
+        exist as `/SPHCEL`. The ids are NODE ids (`IDNOFF`); the `_SET` spelling
+        takes `IDSOFF`.
+      * **A section whose particles ALL leave the MASS blank reproduced the
+        exact `Mp = 1` fabrication this batch exists to prevent**, and every
+        diagnostic denied it — "the fabrication cannot happen here", "the mean
+        of the particles that DO state one" when none does, "the particles carry
+        DIFFERENT masses" about eight identical blanks, and an h ratio computed
+        from the invented number. `Mp` is now derived from the FILL,
+        `rho x d_ref^3`, with a single `MASS INVENTED:` report stating the
+        number now in the deck and that the source stated none; the deck's own
+        `h` survives, because a type-0 particle leaves the property's `h` alone.
+      * **A `*SECTION_SPH` whose id is claimed by another family emitted a
+        SECOND `/PROP` on it** — starter `ERROR 79`, silently. Two holes, both
+        found by sweeping all four other meshed families x (meshed /
+        element-free / unreferenced): a section no particle sits on now takes
+        the `wrong_family` refusal `writer/tshell.py` already makes, and the
+        mixed-SECID split now also fires on another family's *CARD*, not only on
+        another family's meshed part (an unreferenced `*SECTION_SHELL` still
+        emits `/PROP/SHELL/<secid>`). Under both, a new deck-wide
+        `_warn_duplicate_prop_ids` scan over the assembled starter — the `/PROP`
+        analogue of `_warn_duplicate_th_group_ids` — names any duplicate no
+        single writer can see, including the pre-existing non-SPH ones.
+      * **The provisional-element screen keyed every family into ONE flat set of
+        ids.** SPH is keyed by its NODE id and LS-DYNA element ids are per
+        family, so any deck with two provisional blocks lost the intersection of
+        their id ranges: measured, a provisional `*ELEMENT_SPH_MADEUP` on nodes
+        1..8 beside a provisional `*ELEMENT_SHELL_MADEUP` with EIDs 1,2,3 lost
+        particles 1, 2 and 3 — 37.5 % of the cloud — while the report blamed the
+        SPH block's own node screen, which had passed. The set is keyed
+        `(family, id)` now.
+      * **`*MAT_PLASTIC_KINEMATIC` on a particle part refused the whole deck.**
+        `/MAT/LAW44` (COWPER) does not declare SPH — `hm_read_mat44.F` states
+        BEAM_ALL / ELASTO_PLASTIC / EOS / INCREMENTAL / LARGE_STRAIN /
+        SHELL_ISOTROPIC / SOLID_ISOTROPIC / TRUSS — so `ERROR 3046` refused r14
+        `sph/bar-i/bar1.k` and `sph/bar-ii/bar2.k`, two decks LS-DYNA runs.
+        `/MAT/LAW2` IS declared (`mat002/hm_read_mat02_jc.F90:383`) and
+        describes the identical curve whenever the material has no
+        Cowper-Symonds rate term and no EFFECTIVE kinematic hardening
+        (`a = SIGY`, `b = E*ETAN/(E-ETAN)`, `n = 1` is the same bilinear plastic
+        branch LAW44 is given). Both corpus decks share MID 1 between solid and
+        particle parts, and one `/MAT` id cannot be two laws, so a LAW2 CLONE is
+        written and only the SPH parts are repointed at it; the solid keeps
+        LAW44. A material that is NOT expressible keeps LAW44 and keeps the
+        loud `ERROR 3046` report — a different constitutive law is never
+        substituted silently. Both decks now read back **`0 ERROR(S)
+        0 WARNING(S)`** from `starter_win64`.
+      * Smaller, each measured: the two mass columns use a formatter that
+        ROUND-TRIPS (`common._f` writes `%.6E` below 1e-4, and in Mg-mm-s every
+        particle mass is — a stated `1.234567891E-09` came back as
+        `1.2345680000000E-06` over 1000 particles); the per-cell route reports
+        the derived `h` as a min..max SPAN and names the SMALLEST as the one
+        that sets the time step, instead of one value from the mean mass that no
+        particle has and whose direction is wrong for the governing half;
+        `*CONTROL_SPH` losses — `IDIM` above all — are reported even when the
+        particles never reached the state; a `_ELLIPSE` card 2 written as
+        explicit zeros is no longer reported as lost anisotropy; a blank MASS
+        with a populated `NEND` is read as the range it is; law **106** joined
+        the SPH whitelist (`mat106/hm_read_mat106.F90:295`) and the `/MAT/USER`
+        slots 29/30/31 are all three or none; `_discrete_beam_pids` no longer
+        claims a particle part (which was skipped WHOLE — `/PART`, `/SPHCEL`
+        block and `/TH/SPHCEL` alike); `_warn_no_pacing_element` counts
+        particles, which do pace the engine step (`mdtsph.F:132`); and the
+        `_interparticle_distance` / `_part_node_sets` / `_assign_hourglass_props`
+        comments now state what is actually true.
+
+  Out of scope, and named in the README rather than silently absent:
+  `*BOUNDARY_SPH_SYMMETRY_PLANE` / `_FLOW` / `_NOFLOW` and
+  `*SPH_SYMMETRY_PLANE` (Radioss target `/SPHBCS`), `*DEFINE_SPH_*` injection /
+  massflow / active-region (`/SPH/RESERVE`, `/SPH/INOUT`),
+  `*DEFINE_ADAPTIVE_SOLID_TO_SPH` (`/PROP/SOLID` `Nsphdir`), and the anisotropic
+  `_ELLIPSE` smoothing lengths, `DEATH` / `START`, `SPHKERN != 0` and any
+  `HMIN`/`HMAX` pair other than `1/1`.
+
 - **The thick-shell batch: `*ELEMENT_TSHELL` (+ `_BETA` / `_COMPOSITE`) →
   `/BRICK`, `*SECTION_TSHELL` → the three-way `/PROP/TYPE20` (TSHELL, isotropic)
   / `TYPE21` (TSH_ORTH, orthotropic) / `TYPE22` (TSH_COMP, layered) split, and
