@@ -372,6 +372,19 @@ covering them unlocks a large class of real models.
   echo `2.26408800E-04` = 1000 x 2.264088e-07 exactly, no `WARNING 138`), r14
   `boot.k` and W11 (both `0 ERROR(S) 0 WARNING(S)`); corpus sweep 528 decks,
   501 byte-identical, the 27 that moved are exactly the SPH ones.
+  The **review round** then closed five defects that each produced a deck the
+  starter refuses or silently mutilates: the `*INCLUDE_TRANSFORM` particle-card
+  rewriter read a fixed slice where the handler splits on whitespace (100 % mesh
+  loss on an I10 include, now self-checked against the handler's own parse);
+  `*DATABASE_HISTORY_SPH[_SET]` had no offset spec, so its channels attached to
+  the PARENT deck's particles; an all-blank-mass section reproduced the `Mp = 1`
+  fabrication the batch exists to prevent (now `rho x d_ref^3`, reported as
+  `MASS INVENTED:`); a `*SECTION_SPH` sharing an id with another family's card
+  emitted a second `/PROP` (starter `ERROR 79` — closed on both sides, plus a
+  deck-wide duplicate-`/PROP`-id scan that also catches the pre-existing
+  non-SPH cases); and the provisional-element screen shared one flat id set
+  across families, deleting valid particles at the intersection. Plus the
+  `*MAT_PLASTIC_KINEMATIC` re-route below.
   **Open follow-up, newly visible:** r14 `bar-iv/taylor1.k` loses `*NODE` 5 and
   7 (and gains a phantom node 0) to a PRE-EXISTING free-format `*NODE` parse
   defect — `       5-1.000000000E+01-1.000000000E+01 0.000000000E+00       7 0`
@@ -387,6 +400,17 @@ covering them unlocks a large class of real models.
   `HMIN`/`HMAX` bounded dilatation, which needs `h_1D = 3` plus a
   radioss2026-only bounds card that a `/BEGIN 2022` reader discards SILENTLY —
   a `/BEGIN` bump is the direct route there, exactly as for `*MAT_110`'s `FS`.
+  Also open: hybrid SPH<->FE coupling via `*CONSTRAINED_LAGRANGE_IN_SOLID`.
+  **Material compatibility is a general gap, not an SPH one.** The SPH batch
+  closed exactly one case — `*MAT_PLASTIC_KINEMATIC` re-routes from `/MAT/LAW44`
+  (not SPH-declared, `ERROR 3046`) to `/MAT/LAW2` when the material has no
+  Cowper-Symonds term and no effective kinematic hardening, cloning the `/MAT`
+  when it is shared with non-SPH parts — which is what made r14 `bar1.k` and
+  `bar2.k` start. Every other law outside `_SPH_COMPATIBLE_LAWS` is still only
+  WARNED about. The same shape exists for the other element families
+  (`check_mat_elem_prop_compatibility.F` has a `CASE` per element type), and a
+  general "is this law legal on this element family, and is there an equivalent
+  that is" table would subsume all of them.
   Still open in this family:
   the `*INTEGRATION_BEAM` standard shapes needing three or more dimensions
   (`Isect ≥ 10` with `L3..L6` needs `/BEGIN ≥ 2024`, and k2rad writes 2022 —

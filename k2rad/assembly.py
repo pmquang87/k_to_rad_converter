@@ -40,11 +40,13 @@ silently.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
+                       _is_float_token, _is_int_token, _parse_sph_cell,
                        _part_option_keywords,
                        _part_options, _rwall_geometric_keywords,
                        _rwall_planar_keywords)
@@ -636,7 +638,25 @@ def _off_element_sph(b: Block, offsets: Dict[str, int], warn) -> None:
     10-wide slice cuts a right-justified F16 mass in half — the
     ``*ELEMENT_MASS`` defect this mirrors — so the columns are preserved
     literally and only the id cells are re-rendered.
+
+    **The card is read the way its HANDLER reads it, never on a fixed slice
+    alone.** ``handlers._parse_sph_cell`` tries a whitespace split first and
+    prefers it whenever it yields a complete card, precisely because the two
+    column-layout variants in the wild (I10 ids, and an 8-wide MASS with NEND
+    at 25-32) do not survive an I8/I8/F16 slice. A rewriter that slices where
+    the handler splits is a SILENT DESYNC between two readers of one card:
+    measured with ``IDNOFF=1000 IDPOFF=30``, the I10 card
+    ``"       101         2   9.6834260e-05"`` came out as
+    ``"    1001      31   2   9.6834260e-05"``, which the handler then read as
+    ``(1001, 31, 2.0)`` — wrong node, wrong part, and a mass 20000x out — and
+    an end-to-end I10 include lost 100 % of its particles to MESH LOSS while
+    blaming ids that were never in the deck. So :func:`_sph_cell_split` makes
+    the same free-vs-fixed decision the handler makes, and the free branch
+    rewrites each id token IN PLACE, leaving the mass text byte-identical.
     """
+    noff, poff = offsets.get("n", 0), offsets.get("p", 0)
+    if not noff and not poff:
+        return
     for k in range(len(b.raw)):
         line = b.raw[k]
         if not line.strip() or line.lstrip().startswith("$"):
@@ -647,27 +667,96 @@ def _off_element_sph(b: Block, offsets: Dict[str, int], warn) -> None:
             if new is not None:
                 b.raw[k] = new
             continue
-        nid, pid = line[0:8], line[8:16]
-        mass, nend = line[16:32], line[32:]
-        if not (_geti([nid], 0) > 0 and pid.strip()):
-            # Not a particle card (a free-format line, a stray row). Fall back
-            # to the generic rewriter, which re-splits it on whitespace.
-            new = _rewrite_line(line, [(0, "n"), (1, "p"), (3, "n")],
-                                offsets, w=8)
-            if new is not None:
-                b.raw[k] = new
-            continue
-        noff, poff = offsets.get("n", 0), offsets.get("p", 0)
-        if not noff and not poff:
-            continue
+        new = _off_sph_cell_line(line, noff, poff)
+        if new is not None:
+            b.raw[k] = new
 
-        def _sh(tok: str, off: int, width: int) -> str:
-            if off and tok.strip() and to_int(tok) > 0:
-                return f"{to_int(tok) + off:>{width}}"
-            return tok
 
-        b.raw[k] = (_sh(nid, noff, 8) + _sh(pid, poff, 8) + mass
-                    + _sh(nend, noff, len(nend))).rstrip()
+#: ``NID``/``PID``/``MASS``/``NEND`` → the offset bucket each takes. Field 0 and
+#: field 3 are both NODE ids (see :func:`_off_element_sph`); the MASS cell is
+#: never an id and is never touched.
+_SPH_CELL_BUCKETS = {0: "n", 1: "p", 3: "n"}
+
+_NONBLANK_RE = re.compile(r"\S+")
+
+
+def _sph_cell_split(data: str):
+    """``(spans, fixed)`` for one *ELEMENT_SPH card — the SAME free-vs-fixed
+    decision ``handlers._parse_sph_cell`` makes, expressed as character spans so
+    the caller can rewrite an id without re-rendering the rest of the line.
+
+    ``spans`` is a list of ``(start, end)`` into *data*, one per field in card
+    order. ``fixed`` says which branch produced them, only so the caller can
+    keep the fixed branch's 16-wide MASS cell intact.
+    """
+    toks = [(m.start(), m.end()) for m in _NONBLANK_RE.finditer(data)]
+    words = [data[s:e] for s, e in toks]
+    if len(words) >= 2 and _is_int_token(words[0]) and _is_int_token(words[1]) \
+            and (len(words) == 2 or _is_float_token(words[2])):
+        return toks, False
+    # The one case the split cannot handle: ids wide enough to fill all eight
+    # columns, which glues NID and PID into a single token.
+    return [(0, 8), (8, 16), (16, 32), (32, len(data))], True
+
+
+def _off_sph_cell_line(line: str, noff: int, poff: int):
+    """Offset NID/PID/NEND on one *ELEMENT_SPH card, or None when nothing moved.
+
+    Only the id CELLS are re-rendered; the mass text and any trailing ``$``
+    comment survive byte-for-byte, and each id stays right-justified in its own
+    column while it still fits — so an I8 deck comes out of the rewriter in the
+    same columns it went in.
+
+    The result is then CHECKED against the handler rather than assumed: the
+    card is re-parsed with ``_parse_sph_cell`` and must read back as the source
+    card plus the offsets. That is the invariant the whole function exists to
+    hold, and it is cheap to assert. A layout that cannot keep its columns and
+    still read back (an id that outgrows its cell and would touch its
+    neighbour) falls back to a plain space-separated card, which always does.
+    """
+    src = _parse_sph_cell(line)
+    if src is None:
+        return None                     # not a particle card at all
+    cut = line.find("$")
+    data, tail = (line[:cut], line[cut:]) if cut >= 0 else (line, "")
+    spans, _fixed = _sph_cell_split(data)
+    cells: List[Tuple[int, int, str, Optional[str]]] = []
+    want = list(src)
+    changed = False
+    for i, (s, e) in enumerate(spans):
+        if s >= len(data):
+            break
+        tok = data[s:e]
+        off = {"n": noff, "p": poff}.get(_SPH_CELL_BUCKETS.get(i, ""), 0)
+        new = None
+        if off and tok.strip() and _is_int_token(tok) and to_int(tok) > 0:
+            new = str(to_int(tok) + off)
+            want[i] = src[i] + off
+            changed = True
+        cells.append((s, e, tok, new))
+    if not changed:
+        return None
+    out: List[str] = []
+    prev = 0
+    for s, e, tok, new in cells:
+        gap = data[prev:s]
+        if new is None:
+            out.append(gap + tok)
+        else:
+            width = len(gap) + len(tok)
+            out.append(new.rjust(width) if len(new) <= width else gap + new)
+        prev = max(prev, e)
+    cand = ("".join(out) + data[prev:]).rstrip()
+    if _parse_sph_cell(cand) != tuple(want):
+        # Re-render as a plain space-separated card. The handler prefers the
+        # whitespace split whenever it yields a complete card, so this reading
+        # is stable by construction.
+        toks = [(new if new is not None else tok).strip()
+                for _s, _e, tok, new in cells]
+        while toks and not toks[-1]:
+            toks.pop()
+        cand = " ".join(toks)
+    return (cand + tail).rstrip()
 
 
 def _off_section_sph(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -2403,6 +2492,16 @@ _OFFSET_SPECS: Dict[str, object] = {
     "DATABASE_HISTORY_SHELL": {"data": (0, [(ALL, "e")])},
     "DATABASE_HISTORY_SOLID": {"data": (0, [(ALL, "e")])},
     "DATABASE_HISTORY_TSHELL": {"data": (0, [(ALL, "e")])},
+    # *DATABASE_HISTORY_SPH lists PARTICLE ids, and an SPH particle IS its
+    # supporting node (hm_read_sphcel.F:243-250) — so these take IDNOFF, the
+    # same bucket _off_element_sph gives the card's field 0, NOT IDEOFF. Without
+    # the row the requested ids stay put while the particles they name move:
+    # measured, an include offset to 1001-1004 asked for 1-4 and got the
+    # PARENT deck's particles, which the ERROR-69 screen cannot catch because
+    # those ids do exist as /SPHCEL. The _SET spelling lists *SET_NODE ids
+    # (IDSOFF) for the same reason.
+    "DATABASE_HISTORY_SPH": {"data": (0, [(ALL, "n")])},
+    "DATABASE_HISTORY_SPH_SET": {"data": (0, [(ALL, "s")])},
     "DATABASE_CROSS_SECTION_PLANE": {"cards": {0: [(0, "s")]}, "idhdr": "p"},
     "DATABASE_CROSS_SECTION_SET": {"cards": {0: [(i, "s") for i in range(6)]},
                                    "idhdr": "p"},

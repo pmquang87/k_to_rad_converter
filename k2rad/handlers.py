@@ -864,6 +864,14 @@ def _parse_sph_cell(line: str):
     slice is the fallback for the one case the split cannot handle — ids wide
     enough to fill all eight columns, which glues NID and PID into one token.
 
+    One shape the split alone cannot read: a BLANK MASS with a populated NEND.
+    ``"       1       1                       8"`` splits to three tokens and
+    the third IS a valid float, so the free reading makes the range generator
+    into an 8-mass-unit particle and loses the whole cloud. The columns
+    disambiguate it exactly — the MASS cell is blank and the NEND cell is not —
+    so a three-token card is cross-checked against the fixed slice before the
+    split is believed.
+
     ``mass`` is returned SIGNED; the caller folds the sign (and the ``_VOLUME``
     suffix) into the Flag column.
     """
@@ -875,6 +883,11 @@ def _parse_sph_cell(line: str):
     if len(toks) >= 2 and _is_int_token(toks[0]) and _is_int_token(toks[1]):
         if len(toks) == 2 or _is_float_token(toks[2]):
             f = toks + [""] * max(0, 4 - len(toks))
+    if f is not None and len(toks) == 3 and _is_int_token(toks[2]) \
+            and not data[16:32].strip() and data[32:].strip():
+        # Third token is an integer sitting in the NEND columns while the MASS
+        # columns are empty: a generated range, not a mass.
+        f = [data[0:8], data[8:16], "", data[32:]]
     if f is None:
         f = [data[0:8], data[8:16], data[16:32], data[32:]]
         if not (_is_int_token(f[0]) and _is_int_token(f[1])):
@@ -1021,13 +1034,15 @@ def handle_element_sph(block: Block, state: ConversionState) -> None:
         state.warn(
             f"*{block.keyword}: {n_zero} card(s) leave the MASS column blank or "
             "zero. Those particles carry NO mass of their own and fall back on "
-            "the /PROP/SPH particle mass Mp — and if that is unset too, "
-            "hm_read_prop34.F:235-239 fabricates Mp = 1.0 IN THE DECK'S MASS "
-            "UNIT with only WARNING 138 to say so (measured: four blank-mass "
-            "particles gave TOTAL MASS = 4.0). k2rad always writes a positive "
-            "Mp, so the fabrication cannot happen here, but the mass those "
-            "particles get is the section's, NOT one the deck stated per "
-            "particle.")
+            "the /PROP/SPH particle mass Mp, so the mass they get is the "
+            "section's, NOT one the deck stated per particle. k2rad always "
+            "writes a POSITIVE Mp, which keeps the starter's own fabrication "
+            "out of it (hm_read_prop34.F:235-239 answers a non-positive Mp by "
+            "inventing 1.0 IN THE DECK'S MASS UNIT behind a single WARNING 138 "
+            "— measured, four blank-mass particles gave TOTAL MASS = 4.0). But "
+            "if NO particle of the section states a mass, that positive Mp is "
+            "one k2rad had to derive rather than read, and the writer's own "
+            "report for that section names it and states the number it wrote.")
     if n_generated:
         state.warn(
             f"*{block.keyword}: {n_gen_cards} card(s) use the NEND range "
@@ -2325,8 +2340,14 @@ def handle_section_sph(block: Block, state: ConversionState) -> None:
             option=option)
         idx += 1
         if has_card2:
+            # A NON-ZERO cell, not merely a non-blank one. A card 2 written out
+            # as explicit zeros is isotropic BY DEFINITION, and reporting it as
+            # "you lost your anisotropy" costs the reader a chase through a
+            # deck that never asked for any. (The card is still consumed
+            # positionally either way — the #119 rule.)
             if idx < len(raw) and any(
-                    c.strip() for c in _card(raw, idx, fixed=True, n=6, w=10)):
+                    c.strip() and to_float(c) != 0.0
+                    for c in _card(raw, idx, fixed=True, n=6, w=10)):
                 n_aniso += 1
             idx += 1
         _dup_secid("*SECTION_SPH", secid, state.sec_sph, state)

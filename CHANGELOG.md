@@ -179,6 +179,94 @@ Prior history (before this changelog was introduced) is summarized in the
       decks, master vs branch: **501 fully identical, 27 moved, 0 conversion
       errors either side, and the moved set is exactly the 27 SPH decks.**
 
+  11. **Review round.** Five defects that each produced a deck the starter
+      refuses or silently mutilates, plus the reports that described the wrong
+      thing:
+
+      * **The `*INCLUDE_TRANSFORM` rewriter read the particle card on a fixed
+        `8/8/16/8` slice while the handler that reads the same card prefers a
+        WHITESPACE split**, so the two disagreed on every layout whose columns
+        are not exactly 8/8/16. Measured with `IDNOFF=1000 IDPOFF=30`, the I10
+        card `"       101         2   9.6834260e-05"` came out as
+        `"    1001      31   2   9.6834260e-05"` — read back as node 1001, part
+        31 and a mass 20 000x out — and an end-to-end I10 include lost **100 %
+        of its particles** to a MESH LOSS that named ids the deck never
+        contained. The rewriter now makes the handler's own free-vs-fixed
+        decision, rewrites the id CELLS in place (so an I8 deck keeps its
+        columns and the mass text is untouched), and then **re-parses its own
+        output and asserts it equals source + offsets**, falling back to a plain
+        space-separated card when a layout cannot keep both. 24 000 generated
+        layout/offset combinations agree.
+      * **`*DATABASE_HISTORY_SPH[_SET]` had no offset spec** while every sibling
+        (`_NODE` / `_SHELL` / `_SOLID` / `_TSHELL`) has one, so the requested ids
+        stayed put while the particles they name moved with `IDNOFF` — measured,
+        an include offset to 1001-1004 asking for 1-4 got the PARENT deck's
+        particles, which the `ERROR 69` screen cannot catch because those ids do
+        exist as `/SPHCEL`. The ids are NODE ids (`IDNOFF`); the `_SET` spelling
+        takes `IDSOFF`.
+      * **A section whose particles ALL leave the MASS blank reproduced the
+        exact `Mp = 1` fabrication this batch exists to prevent**, and every
+        diagnostic denied it — "the fabrication cannot happen here", "the mean
+        of the particles that DO state one" when none does, "the particles carry
+        DIFFERENT masses" about eight identical blanks, and an h ratio computed
+        from the invented number. `Mp` is now derived from the FILL,
+        `rho x d_ref^3`, with a single `MASS INVENTED:` report stating the
+        number now in the deck and that the source stated none; the deck's own
+        `h` survives, because a type-0 particle leaves the property's `h` alone.
+      * **A `*SECTION_SPH` whose id is claimed by another family emitted a
+        SECOND `/PROP` on it** — starter `ERROR 79`, silently. Two holes, both
+        found by sweeping all four other meshed families x (meshed /
+        element-free / unreferenced): a section no particle sits on now takes
+        the `wrong_family` refusal `writer/tshell.py` already makes, and the
+        mixed-SECID split now also fires on another family's *CARD*, not only on
+        another family's meshed part (an unreferenced `*SECTION_SHELL` still
+        emits `/PROP/SHELL/<secid>`). Under both, a new deck-wide
+        `_warn_duplicate_prop_ids` scan over the assembled starter — the `/PROP`
+        analogue of `_warn_duplicate_th_group_ids` — names any duplicate no
+        single writer can see, including the pre-existing non-SPH ones.
+      * **The provisional-element screen keyed every family into ONE flat set of
+        ids.** SPH is keyed by its NODE id and LS-DYNA element ids are per
+        family, so any deck with two provisional blocks lost the intersection of
+        their id ranges: measured, a provisional `*ELEMENT_SPH_MADEUP` on nodes
+        1..8 beside a provisional `*ELEMENT_SHELL_MADEUP` with EIDs 1,2,3 lost
+        particles 1, 2 and 3 — 37.5 % of the cloud — while the report blamed the
+        SPH block's own node screen, which had passed. The set is keyed
+        `(family, id)` now.
+      * **`*MAT_PLASTIC_KINEMATIC` on a particle part refused the whole deck.**
+        `/MAT/LAW44` (COWPER) does not declare SPH — `hm_read_mat44.F` states
+        BEAM_ALL / ELASTO_PLASTIC / EOS / INCREMENTAL / LARGE_STRAIN /
+        SHELL_ISOTROPIC / SOLID_ISOTROPIC / TRUSS — so `ERROR 3046` refused r14
+        `sph/bar-i/bar1.k` and `sph/bar-ii/bar2.k`, two decks LS-DYNA runs.
+        `/MAT/LAW2` IS declared (`mat002/hm_read_mat02_jc.F90:383`) and
+        describes the identical curve whenever the material has no
+        Cowper-Symonds rate term and no EFFECTIVE kinematic hardening
+        (`a = SIGY`, `b = E*ETAN/(E-ETAN)`, `n = 1` is the same bilinear plastic
+        branch LAW44 is given). Both corpus decks share MID 1 between solid and
+        particle parts, and one `/MAT` id cannot be two laws, so a LAW2 CLONE is
+        written and only the SPH parts are repointed at it; the solid keeps
+        LAW44. A material that is NOT expressible keeps LAW44 and keeps the
+        loud `ERROR 3046` report — a different constitutive law is never
+        substituted silently. Both decks now read back **`0 ERROR(S)
+        0 WARNING(S)`** from `starter_win64`.
+      * Smaller, each measured: the two mass columns use a formatter that
+        ROUND-TRIPS (`common._f` writes `%.6E` below 1e-4, and in Mg-mm-s every
+        particle mass is — a stated `1.234567891E-09` came back as
+        `1.2345680000000E-06` over 1000 particles); the per-cell route reports
+        the derived `h` as a min..max SPAN and names the SMALLEST as the one
+        that sets the time step, instead of one value from the mean mass that no
+        particle has and whose direction is wrong for the governing half;
+        `*CONTROL_SPH` losses — `IDIM` above all — are reported even when the
+        particles never reached the state; a `_ELLIPSE` card 2 written as
+        explicit zeros is no longer reported as lost anisotropy; a blank MASS
+        with a populated `NEND` is read as the range it is; law **106** joined
+        the SPH whitelist (`mat106/hm_read_mat106.F90:295`) and the `/MAT/USER`
+        slots 29/30/31 are all three or none; `_discrete_beam_pids` no longer
+        claims a particle part (which was skipped WHOLE — `/PART`, `/SPHCEL`
+        block and `/TH/SPHCEL` alike); `_warn_no_pacing_element` counts
+        particles, which do pace the engine step (`mdtsph.F:132`); and the
+        `_interparticle_distance` / `_part_node_sets` / `_assign_hourglass_props`
+        comments now state what is actually true.
+
   Out of scope, and named in the README rather than silently absent:
   `*BOUNDARY_SPH_SYMMETRY_PLANE` / `_FLOW` / `_NOFLOW` and
   `*SPH_SYMMETRY_PLANE` (Radioss target `/SPHBCS`), `*DEFINE_SPH_*` injection /

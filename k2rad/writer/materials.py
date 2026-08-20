@@ -150,6 +150,8 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law36(mat, state)
     for mat in state.mat_plas_kin.values():
         lines += _emit_mat_law44(mat, state)
+    # The SPH twins of the LAW44 cards above (see _emit_plas_kin_as_law2).
+    lines += _emit_sph_mat_clones(state)
     for mat in state.mat_johnson_cook.values():
         lines += _emit_mat_johnson_cook(mat, state)
     for mat in state.mat_aniso_visco.values():
@@ -1542,12 +1544,62 @@ def _emit_fail_lemaitre(mat: MatPlasTAB, state: ConversionState) -> List[str]:
     ]
 
 
+def _plas_kin_b(mat: MatPlasKin) -> float:
+    """LS-DYNA ETAN is the tangent modulus of the bilinear TOTAL stress-strain
+    curve; LAW44's (and LAW2's) ``b`` with ``n = 1`` is dSigma/dEps_PLASTIC, so
+    the plastic hardening modulus ``H = E*ETAN/(E-ETAN)`` is what carries
+    through, not raw ETAN."""
+    return (mat.E * mat.etan / (mat.E - mat.etan)
+            if 0.0 < mat.etan < mat.E else mat.etan)
+
+
+def _sph_only_mid(state: ConversionState, mid: int) -> bool:
+    """True when EVERY *PART on *mid* carries SPH particles (and at least one
+    does) — the case where the material can simply BE LAW2, with no clone."""
+    pids = [pid for pid, p in state.parts.items() if p.mid == mid]
+    if not pids:
+        return False
+    sph_pids = {c.pid for c in state.sph_elems}
+    return all(pid in sph_pids for pid in pids)
+
+
+def _plas_kin_law2_expressible(mat: MatPlasKin) -> bool:
+    """Can this *MAT_PLASTIC_KINEMATIC be written as /MAT/LAW2 with NOTHING
+    lost? See :func:`_emit_plas_kin_as_law2` for what the two exclusions are.
+
+    The single expressibility test. Read by the emitter, by
+    ``mesh._target_mat_law`` (which is what ``writer/sph.py``'s ERROR-3046
+    report keys on) and by ``sph._resolve_sph_materials`` (which decides
+    whether to clone), so a disagreement between any two of them would either
+    warn about a refusal the deck no longer earns or stay quiet about one it
+    does.
+    """
+    if mat.src or mat.srp:
+        return False                    # Cowper-Symonds: no LAW2 column
+    return not (mat.beta < 1.0 and _plas_kin_b(mat) > 0.0)
+
+
+def _plas_kin_law2_eligible(state: ConversionState, mat: MatPlasKin) -> bool:
+    """Does this *MAT_PLASTIC_KINEMATIC become LAW2 UNDER ITS OWN ID?"""
+    return _sph_only_mid(state, mat.mid) and _plas_kin_law2_expressible(mat)
+
+
+def _emit_sph_mat_clones(state: ConversionState) -> List[str]:
+    """The extra /MAT/LAW2 cards ``sph._resolve_sph_materials`` asked for — one
+    per *MAT_PLASTIC_KINEMATIC shared between SPH and non-SPH parts."""
+    lines: List[str] = []
+    for mid, clone_id in sorted(state.sph_mat_clones.items()):
+        mat = state.mat_plas_kin.get(mid)
+        if mat is None:
+            continue
+        lines += _emit_plas_kin_as_law2(mat, state, clone_id=clone_id)
+    return lines
+
+
 def _emit_mat_law44(mat: MatPlasKin, state: ConversionState) -> List[str]:
-    # LS-DYNA ETAN is the tangent modulus of the bilinear TOTAL stress-strain
-    # curve; LAW44's b (with n=1) is dSigma/dEps_PLASTIC, so carry the plastic
-    # hardening modulus H = E*ETAN/(E-ETAN) through, not raw ETAN.
-    b = (mat.E * mat.etan / (mat.E - mat.etan)
-         if 0.0 < mat.etan < mat.E else mat.etan)
+    if _plas_kin_law2_eligible(state, mat):
+        return _emit_plas_kin_as_law2(mat, state)
+    b = _plas_kin_b(mat)
     # LS-DYNA BETA runs 0=kinematic..1=isotropic; Radioss Chard runs the
     # OPPOSITE way (0=isotropic..1=kinematic Prager-Ziegler): Chard = 1-BETA.
     chard = min(max(1.0 - mat.beta, 0.0), 1.0)
@@ -1569,6 +1621,93 @@ def _emit_mat_law44(mat: MatPlasKin, state: ConversionState) -> List[str]:
     ]
     if epmax > 0.0:
         lines += _emit_fail_johnson_all_layers(mat.mid, epmax, state)
+    return lines
+
+
+def _emit_plas_kin_as_law2(mat: MatPlasKin, state: ConversionState,
+                           clone_id: int = 0) -> List[str]:
+    """*MAT_PLASTIC_KINEMATIC → /MAT/LAW2, for the SPH parts that need it.
+
+    Two ways in, both gated on :func:`_plas_kin_law2_expressible`:
+
+    * ``clone_id = 0`` — every *PART on the material carries particles, so the
+      material simply IS LAW2 under its own MID;
+    * ``clone_id > 0`` — the material is SHARED with shells or solids, which
+      still need LAW44, so a SECOND /MAT card is written under a synthesized id
+      and only the SPH parts are repointed at it (``sph._resolve_sph_materials``
+      allocates the id and does the repointing). The clone is not an
+      approximation of the original: the expressibility gate is exactly the
+      condition under which LAW2 and LAW44 describe the SAME curve, so the two
+      cards are one material written twice.
+
+    /MAT/LAW44 (COWPER) is the faithful target for this keyword everywhere
+    else, and it stays the target everywhere else. But ``hm_read_mat44.F``
+    declares BEAM_ALL / ELASTO_PLASTIC / EOS / INCREMENTAL / LARGE_STRAIN /
+    SHELL_ISOTROPIC / SOLID_ISOTROPIC / TRUSS and NOT ``"SPH"``, so
+    ``check_mat_elem_prop_compatibility.F`` refuses the whole deck with
+    **ERROR 3046** ("ELEMENTS OF TYPE SPH ARE NOT COMPATIBLE WITH MATERIAL ID
+    ... OF TYPE 44") the moment a particle sits on it. Two decks in the r14
+    corpus do exactly that (``sph/bar-i/bar1.k``, ``sph/bar-ii/bar2.k``) and
+    LS-DYNA runs both.
+
+    /MAT/LAW2 (PLAS_JOHNS) IS SPH-declared (``mat002/hm_read_mat02_jc.F90:383``)
+    and expresses the same law EXACTLY as long as the deck uses neither of the
+    two features LAW2 has no slot for:
+
+    * the Cowper-Symonds rate term SRC/SRP. LAW2's rate term is Johnson-Cook's
+      LOGARITHMIC ``1 + c*ln(eps_dot/eps_dot_0)``, a different function — there
+      is no faithful transcription, so a rate-dependent material keeps LAW44
+      and the ERROR-3046 warning.
+    * kinematic hardening. BETA < 1 asks for a Prager-Ziegler back stress and
+      LAW2 has no Chard column. It only MATTERS when there is hardening to
+      split: with ETAN = 0 the material is perfectly plastic and BETA is inert,
+      which is why ``bar1.k`` (BETA 0, ETAN 0) converts losslessly too.
+
+    Everything else is 1:1 — ``a = SIGY``, ``b = E*ETAN/(E-ETAN)``, ``n = 1``
+    is the same bilinear plastic branch LAW44 is given, and FS goes to the same
+    /FAIL/JOHNSON the LAW44 path writes.
+    """
+    hardening = _plas_kin_b(mat)
+    dropped = []
+    if mat.vp:
+        dropped.append(f"VP={mat.vp} (the rate formulation flag, which selects "
+                       "between two readings of a rate term this material does "
+                       "not have)")
+    if mat.beta < 1.0:
+        dropped.append(
+            f"BETA={mat.beta:g} (the kinematic/isotropic hardening split) — "
+            f"inert here, because ETAN={mat.etan:g} leaves no hardening to "
+            "split between the two")
+    out_id = clone_id or mat.mid
+    where = (f"every *PART on this material carries SPH particles, so the "
+             f"material itself is written as LAW2 under MID {mat.mid}"
+             if not clone_id else
+             f"the material is SHARED with parts that carry shells or solids "
+             f"and still need LAW44, so a SECOND /MAT card is written as "
+             f"/MAT/LAW2/{clone_id} and only the SPH part(s) "
+             f"{sorted(p for p, c in state.sph_mat_ids.items() if c == clone_id)}"
+             " are repointed at it")
+    state.warn(
+        f"*MAT_PLASTIC_KINEMATIC {mat.mid} → /MAT/LAW2 (PLAS_JOHNS) instead of "
+        f"the usual /MAT/LAW44 (COWPER): {where}. LAW44 does NOT declare SPH "
+        "compatibility (hm_read_mat44.F states BEAM_ALL / ELASTO_PLASTIC / EOS "
+        "/ INCREMENTAL / LARGE_STRAIN / SHELL_ISOTROPIC / SOLID_ISOTROPIC / "
+        "TRUSS, no 'SPH'), so the starter would refuse the WHOLE DECK with "
+        "ERROR 3046 ('ELEMENTS OF TYPE SPH ARE NOT COMPATIBLE WITH MATERIAL ID "
+        f"{mat.mid} OF TYPE 44'). LAW2 is SPH-declared "
+        "(mat002/hm_read_mat02_jc.F90:383) and carries this material EXACTLY: "
+        f"a = SIGY = {mat.sigy:g}, b = E*ETAN/(E-ETAN) = {hardening:g}, n = 1 "
+        "is the same bilinear plastic branch LAW44 would have been given, and "
+        "E, nu, rho and FS are unchanged. The re-route is refused — and the "
+        "ERROR-3046 warning kept — whenever the deck uses a Cowper-Symonds "
+        "rate term (SRC/SRP) or real kinematic hardening, because LAW2 has no "
+        "column for either."
+        + (" Dropped: " + "; ".join(dropped) + "." if dropped else ""))
+    lines = _law2_plas_johns_lines(out_id, mat.title, mat.rho, mat.E, mat.nu,
+                                   mat.sigy, hardening, 1.0)
+    epmax = mat.fs if 0.0 < mat.fs < 1e19 else 0.0
+    if epmax > 0.0:
+        lines += _emit_fail_johnson_all_layers(out_id, epmax, state)
     return lines
 
 

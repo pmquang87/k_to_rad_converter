@@ -1558,6 +1558,32 @@ smoothing-length ratio it costs, in numbers:
 9.683426e-05 at ρ = 938, measured spacing 4.7116 mm — as they would read if its
 masses were not uniform. They are, so that deck takes the exact route instead.)
 
+When the masses genuinely differ the report gives the **span**, not one number:
+`h` is derived per particle, so a single value from the mean mass is a value no
+particle has, and on a two-population cloud its direction is wrong for half of
+them. Measured on 500 particles at 8e-9 plus 500 at 1.6e-8, the mean-mass
+reading said "7.07 % larger" while `spinih.F` gives 2.2449 for the light half
+(6.5 % *smaller*) and 2.8284 for the heavy — and the starter's governing time
+step matched the *smallest* `h`. So the message names the min, the max, and
+which one sets the step (`mdtsph.F:132`).
+
+Both mass columns are written with a formatter that **round-trips**. The
+converter's shared float field renders anything below 1e-4 with `%.6E`, and in
+Mg-mm-s every particle mass is below 1e-4: a deck stating `1.234567891E-09` on
+1000 particles came back from the starter as `TOTAL MASS = 1.2345680000000E-06`
+against the exact `1.234567891E-06`. Negligible in engineering terms, but mass
+is this batch's correctness criterion and the field is twenty characters wide
+with twelve used, so the digits were lost to the formatter rather than to the
+column.
+
+If **no** particle of a section states a mass or a volume, there is nothing to
+read one from, and writing `Mp ≤ 0` hands the fabrication to the starter (which
+invents 1.0 mass unit per particle behind a single `WARNING 138`). k2rad derives
+one from the fill instead — `ρ · d_ref³`, the mass of the cube each particle
+occupies — and reports it as `MASS INVENTED:`, stating the number now in the
+deck and that the source stated none. The deck's own `h` still survives, because
+a type-0 particle leaves the property's `h` alone.
+
 The `h` the deck asks for is `SPHINI` when given, else `CSLH × d_ref` with
 `d_ref` = "the maximum of the minimum distance between every particle" (Vol I
 R16 Remark 1), measured here from the node cloud with a uniform-grid
@@ -1612,6 +1638,22 @@ The material is gated at conversion time against the laws that declare SPH
 compatibility (`INIT_MAT_KEYWORD(...,"SPH")`, `init_mat_keyword.F:272-273`);
 anything else is starter `ERROR 3046`/`3047` and is named before the run.
 dyna2rad imposes no law filter at all.
+
+One material is re-routed rather than only reported. `*MAT_PLASTIC_KINEMATIC`
+lands on `/MAT/LAW44` (COWPER), which `hm_read_mat44.F` does **not** declare for
+SPH — so a particle on it is `ERROR 3046` and the whole deck is refused, as it
+was for r14 `sph/bar-i/bar1.k` and `sph/bar-ii/bar2.k`, two decks LS-DYNA runs.
+`/MAT/LAW2` (PLAS_JOHNS) **is** declared (`mat002/hm_read_mat02_jc.F90:383`) and
+describes the identical curve — `a = SIGY`, `b = E·ETAN/(E−ETAN)`, `n = 1` is
+the same bilinear plastic branch LAW44 is given — whenever the material carries
+no Cowper-Symonds rate term (`SRC`/`SRP`) and no *effective* kinematic hardening
+(`BETA < 1` matters only when `ETAN > 0`). When it does, the particle parts get
+LAW2: under the material's own MID if nothing else uses it, otherwise under a
+**cloned** `/MAT` id with only those parts repointed, because one Radioss `/MAT`
+id cannot be two laws and the shells or solids sharing the material still need
+LAW44. A material that is *not* expressible keeps LAW44 and keeps the loud
+`ERROR 3046` report — a different constitutive law is never substituted
+silently.
 
 #### `*CONTROL_SPH`
 

@@ -577,19 +577,33 @@ class PropSph(unittest.TestCase):
     def test_unequal_masses_lose_h_and_the_mismatch_is_quantified(self):
         """A cell that carries a mass makes Radioss derive h from it and IGNORE
         the property's (spinih.F:90-95). The mass stays exact; the report has to
-        state the smoothing-length ratio it costs."""
+        state the smoothing-length ratios it costs.
+
+        The ratios have to be the REAL ones — a single value derived from the
+        MEAN particle mass is a value no particle has, and on a spread cloud
+        its direction is wrong for the population that governs the time step.
+        """
+        import math
         elems = "*ELEMENT_SPH\n" + "".join(
             _cell(n, 1, MASS * (k + 1)) for k, (n, *_) in enumerate(LATTICE))
         result, starter = _convert(deck(elem=elems))
         cards = _cards(_block(starter, "/PROP/SPH/1"))
         self.assertEqual(_col_f(cards[1], 11, 30), 0.0)   # h auto-computed
-        hits = _warns(result, "a ratio of")
+        hits = _warns(result, "PER PARTICLE")
         self.assertTrue(hits, result.warnings)
-        # the ratio the message states must be the one spinih.F produces
-        import math
+        n = len(LATTICE)
+        h_lo = (math.sqrt(2.0) * MASS * 1 / RHO) ** (1.0 / 3.0)
+        h_hi = (math.sqrt(2.0) * MASS * n / RHO) ** (1.0 / 3.0)
+        h0 = 1.2 * D_REF
+        # both ends of the real span, not the mean-mass value in between
+        self.assertIn(f"spans {h_lo:g} to {h_hi:g}", hits[0])
+        self.assertIn(f"ratios {h_lo / h0:.4f} to {h_hi / h0:.4f}", hits[0])
+        # the SMALLEST h sets the time step, and the message has to say so
+        self.assertIn(f"{h_lo / h0:.4f} is the ratio that governs", hits[0])
+        # the mean-mass reading is NOT what is reported
         mp = _col_f(cards[0], 1, 20)
-        h_rad = (math.sqrt(2.0) * mp / RHO) ** (1.0 / 3.0)
-        self.assertIn(f"{h_rad / (1.2 * D_REF):.4f}", hits[0])
+        h_mean = (math.sqrt(2.0) * mp / RHO) ** (1.0 / 3.0)
+        self.assertNotIn(f"a ratio of {h_mean / h0:.4f}", hits[0])
 
     def test_sphini_with_unequal_masses_is_named_as_dropped(self):
         elems = "*ELEMENT_SPH\n" + "".join(
@@ -1206,6 +1220,847 @@ class NoRegressionWithoutTheKeyword(unittest.TestCase):
                                 "\r\n", "\n")
                     self.assertEqual(got, want, f"{src.name} {tag}")
                 tmp.cleanup()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REVIEW ROUND
+# ═════════════════════════════════════════════════════════════════════════════
+
+class OffsetReadsTheCardLikeTheHandler(unittest.TestCase):
+    """``*INCLUDE_TRANSFORM`` rewriter vs ``handlers._parse_sph_cell``.
+
+    The rewriter used to slice a FIXED 8/8/16/8 card while the handler that
+    reads the same card prefers a WHITESPACE split, so the two silently
+    disagreed on every layout whose columns are not exactly 8/8/16. The
+    invariant is one line long and is asserted directly:
+
+        parse(offset(line)) == parse(line) + offsets
+    """
+
+    OFF = {"n": 1000, "p": 30}
+
+    LAYOUTS = {
+        "I8 canonical":     "       1       2  9.6834260e-05",
+        "I8 + NEND":        "       1       2  9.6834260e-05       8",
+        "I10 ids":          "       101         2   9.6834260e-05",
+        "I10 wide ids":     "    100001         2   9.6834260e-05",
+        "comma free":       "1,2,9.6834260e-05",
+        "mixed fixed/free": "  150061 2 9.683426e-05",
+        "8-wide mass":      "       1       2 9.68e-05       8",
+        "ids fill 8 cols":  "1234567812345678  9.6834260e-05",
+        "trailing comment": "       1       2  9.6834260e-05  $ a note",
+    }
+
+    def _rewrite(self, line: str) -> str:
+        from k2rad.assembly import _off_element_sph
+
+        class _B:
+            def __init__(self, raw):
+                self.raw = list(raw)
+                self.keyword = "ELEMENT_SPH"
+
+        b = _B([line])
+        _off_element_sph(b, dict(self.OFF), lambda *a, **k: None)
+        return b.raw[0]
+
+    def test_every_layout_reads_back_as_the_source_plus_the_offsets(self):
+        from k2rad.handlers import _parse_sph_cell
+        for name, line in self.LAYOUTS.items():
+            with self.subTest(layout=name):
+                src = _parse_sph_cell(line)
+                self.assertIsNotNone(src, line)
+                want = (src[0] + self.OFF["n"], src[1] + self.OFF["p"],
+                        src[2], src[3] + self.OFF["n"] if src[3] else 0)
+                self.assertEqual(_parse_sph_cell(self._rewrite(line)), want)
+
+    def test_the_I10_layout_used_to_corrupt_all_three_id_cells(self):
+        """The measured regression, pinned by its numbers: the I8 slice read
+        NID 1001 / PID 31 / MASS 2.0 out of a card stating 101 / 2 / 9.68e-05 —
+        a mass 20000x out and a part id nothing in the deck defines."""
+        from k2rad.handlers import _parse_sph_cell
+        got = _parse_sph_cell(self._rewrite(self.LAYOUTS["I10 ids"]))
+        self.assertEqual(got, (1101, 32, 9.683426e-05, 0))
+
+    def test_a_canonical_I8_card_keeps_its_columns(self):
+        """The fallback must not be reached on the layout the corpus uses: a
+        reflowed card would still READ back, but every downstream column
+        assertion in this file — and any human reading the include — depends on
+        the ruler surviving."""
+        out = self._rewrite(self.LAYOUTS["I8 canonical"])
+        self.assertEqual(_col_i(out, 1, 8), 1001)
+        self.assertEqual(_col_i(out, 9, 16), 32)
+        self.assertAlmostEqual(_col_f(out, 17, 32), 9.683426e-05)
+
+    def test_a_trailing_comment_survives(self):
+        self.assertTrue(self._rewrite(self.LAYOUTS["trailing comment"])
+                        .endswith("$ a note"))
+
+
+class DatabaseHistorySphOffsets(unittest.TestCase):
+    """``*DATABASE_HISTORY_SPH[_SET]`` had no offset spec while every sibling
+    (NODE / SHELL / SOLID / TSHELL) has one, so under ``*INCLUDE_TRANSFORM`` the
+    requested ids stayed put while the particles they name moved — channels
+    silently attached to the PARENT deck's bodies, which the ERROR-69 screen
+    cannot catch because those ids do exist as /SPHCEL."""
+
+    def test_the_particle_ids_take_IDNOFF(self):
+        spec = _OFFSET_SPECS["DATABASE_HISTORY_SPH"]
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*DATABASE_HISTORY_SPH\n"
+                     + _row(1, 2, 3, 4) + "\n*END\n")
+        blk = [b for b in parse_k_file(path)
+               if b.keyword == "DATABASE_HISTORY_SPH"][0]
+        _offset_block(blk, spec, {"n": 1000, "e": 2000, "s": 7}, lambda m: None)
+        tmp.cleanup()
+        self.assertEqual([int(t) for t in blk.raw[0].split()],
+                         [1001, 1002, 1003, 1004])
+
+    def test_the_set_spelling_takes_IDSOFF(self):
+        spec = _OFFSET_SPECS["DATABASE_HISTORY_SPH_SET"]
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*DATABASE_HISTORY_SPH_SET\n"
+                     + _row(7, 8) + "\n*END\n")
+        blk = [b for b in parse_k_file(path)
+               if b.keyword == "DATABASE_HISTORY_SPH_SET"][0]
+        _offset_block(blk, spec, {"n": 1000, "s": 500}, lambda m: None)
+        tmp.cleanup()
+        self.assertEqual([int(t) for t in blk.raw[0].split()], [507, 508])
+
+    def test_an_include_attaches_the_channels_to_its_OWN_particles(self):
+        """End to end. Both decks number their particles 1-4; the include is
+        offset to 1001-1004 and asks for 1-4, which means ITS OWN."""
+        tmp = tempfile.TemporaryDirectory()
+        sub_nodes = "*NODE\n" + "".join(
+            f"{n:>8}{x + 50.0:>16}{y:>16}{z:>16}\n"
+            for n, x, y, z in LATTICE[:4])
+        sub = ("*KEYWORD\n" + sub_nodes
+               + "*ELEMENT_SPH\n"
+               + "".join(_cell(n, 1, MASS) for n, *_ in LATTICE[:4])
+               + "*PART\nsub\n" + _row(1, 1, 1) + "\n"
+               + "*DATABASE_HISTORY_SPH\n" + _row(1, 2, 3, 4) + "\n*END\n")
+        parent = ("*KEYWORD\n" + NODES + SPH8 + PART + sec() + MAT + TERM
+                  + "*INCLUDE_TRANSFORM\nsub.k\n"
+                  + _row(1000, 1000, 30, 30, 30, 30, 30) + "\n"
+                  + _row(30) + "\n*END\n")
+        with open(os.path.join(tmp.name, "sub.k"), "w") as fh:
+            fh.write(sub)
+        main = os.path.join(tmp.name, "deck.k")
+        with open(main, "w") as fh:
+            fh.write(parent)
+        result = convert(main, write_log=False)
+        starter = open(result.starter_path).read()
+        tmp.cleanup()
+        th = _blocks(starter, "/TH/SPHCEL/")
+        self.assertEqual(len(th), 1, starter)
+        ids = sorted(int(ln) for ln in th[0][3:] if ln.strip()
+                     and not ln.startswith("#") and ln.strip().isdigit())
+        self.assertEqual(ids, [1001, 1002, 1003, 1004])
+        # ... and the generic "no offset map" complaint is gone
+        self.assertEqual(
+            [w for w in result.warnings
+             if "no offset map" in w and "DATABASE_HISTORY_SPH" in w], [])
+
+
+class MassIsNeverSilentlyInvented(unittest.TestCase):
+    """A section whose particles state NO mass at all. The old code fell to a
+    hard-coded ``Mp = 1.0`` and then described it with four separate falsehoods:
+    that the fabrication "cannot happen here", that Mp was "the mean of the
+    particles that DO state one" when none does, that the particles "carry
+    DIFFERENT masses" when all were identically blank, and an h ratio computed
+    entirely from the invented number."""
+
+    BLANK = "*ELEMENT_SPH\n" + "".join(_cell(n, 1) for n, *_ in LATTICE)
+
+    def test_the_mass_is_derived_from_the_fill_not_set_to_one(self):
+        result, starter = _convert(deck(elem=self.BLANK))
+        mp = _col_f(_cards(_block(starter, "/PROP/SPH/1"))[0], 1, 20)
+        self.assertAlmostEqual(mp, RHO * D_REF ** 3, places=12)
+        self.assertNotAlmostEqual(mp, 1.0)
+        self.assertAlmostEqual(_total_mass(starter), 8 * RHO * D_REF ** 3,
+                               places=12)
+        self.assertTrue(_warns(result, "MASS INVENTED"), result.warnings)
+
+    def test_the_report_says_the_source_stated_none(self):
+        result, _ = _convert(deck(elem=self.BLANK))
+        hit = _warns(result, "MASS INVENTED")[0]
+        self.assertIn("NOT ONE of the 8 particle(s)", hit)
+        self.assertIn("SOURCE NEVER STATED", hit)
+        self.assertIn("rho x d_ref^3", hit)
+
+    def test_none_of_the_four_false_claims_is_made(self):
+        result, _ = _convert(deck(elem=self.BLANK))
+        joined = " ".join(result.warnings)
+        self.assertNotIn("the fabrication cannot happen here", joined)
+        self.assertNotIn("the mean of the particles that DO state one", joined)
+        self.assertNotIn("the particles carry DIFFERENT masses", joined)
+        self.assertNotIn("a ratio of", joined)
+
+    def test_the_decks_own_smoothing_length_still_survives(self):
+        """Every cell is Flag 0, so the property's h is NOT overwritten
+        (spinih.F:85-109) — the one piece of good news in this case."""
+        _, starter = _convert(deck(elem=self.BLANK))
+        cards = _cards(_block(starter, "/PROP/SPH/1"))
+        self.assertAlmostEqual(_col_f(cards[1], 11, 30), 1.2 * D_REF, places=9)
+
+    def test_without_a_density_it_falls_back_and_says_so(self):
+        nomat = "*MAT_ELASTIC\n" + _row(1, 0.0, 210000.0, 0.3) + "\n"
+        result, starter = _convert(deck(elem=self.BLANK, mat=nomat))
+        mp = _col_f(_cards(_block(starter, "/PROP/SPH/1"))[0], 1, 20)
+        self.assertEqual(mp, 1.0)
+        self.assertIn("a bare unit mass", _warns(result, "MASS INVENTED")[0])
+
+    def test_a_partly_blank_section_still_uses_the_stated_mean(self):
+        """The MIXED case is unchanged and its report is the accurate one: with
+        seven stated masses and one blank, Mp IS the mean of the seven."""
+        elems = ("*ELEMENT_SPH\n"
+                 + "".join(_cell(n, 1, MASS * (k + 1))
+                           for k, (n, *_) in enumerate(LATTICE[:7]))
+                 + _cell(LATTICE[7][0], 1))
+        result, starter = _convert(deck(elem=elems))
+        mean = MASS * (1 + 2 + 3 + 4 + 5 + 6 + 7) / 7.0
+        mp = _col_f(_cards(_block(starter, "/PROP/SPH/1"))[0], 1, 20)
+        self.assertAlmostEqual(mp, mean, places=12)
+        # the blank particle takes Mp, the seven keep their own
+        self.assertAlmostEqual(_total_mass(starter),
+                               MASS * (1 + 2 + 3 + 4 + 5 + 6 + 7) + mean,
+                               places=12)
+        self.assertEqual(_warns(result, "MASS INVENTED"), [])
+        self.assertTrue(_warns(result, "state no mass of their own"))
+
+    def test_an_all_volume_section_multiplies_by_the_density(self):
+        """Mp on the volume route is rho x V, not V. Dropping the rho factor is
+        a factor of 1/rho = 127389x on this deck and nothing else catches it."""
+        vol = 2.0e-6
+        elems = ("*ELEMENT_SPH_VOLUME\n"
+                 + "".join(_cell(n, 1, vol) for n, *_ in LATTICE))
+        _, starter = _convert(deck(elem=elems))
+        mp = _col_f(_cards(_block(starter, "/PROP/SPH/1"))[0], 1, 20)
+        self.assertAlmostEqual(mp, RHO * vol, places=15)
+        self.assertNotAlmostEqual(mp, vol, places=15)
+
+    def test_a_uniform_volume_section_is_not_blamed_on_a_mass_spread(self):
+        """C6. Every cell states the SAME volume, so "the particles carry
+        DIFFERENT masses" is false — /PROP/SPH simply has no volume field."""
+        elems = ("*ELEMENT_SPH_VOLUME\n"
+                 + "".join(_cell(n, 1, 2.0e-6) for n, *_ in LATTICE))
+        result, _ = _convert(deck(elem=elems))
+        hits = _warns(result, "only a /SPHCEL row can carry")
+        self.assertTrue(hits, result.warnings)
+        self.assertNotIn("carry DIFFERENT masses", hits[0])
+
+
+class InterparticleDistance(unittest.TestCase):
+    """``d_ref`` = "the maximum of the minimum distance between every particle"
+    (Vol I R16 *SECTION_SPH Remark 1), and ``h0 = CSLH x d_ref``. The search
+    used to stop at four grid rings, so a query whose nearest neighbour lay
+    farther kept the best candidate INSIDE the searched block — an OVER-estimate
+    of that particle's minimum, and therefore of a max OVER minima."""
+
+    @staticmethod
+    def _brute(pts):
+        best = 0.0
+        for i, p in enumerate(pts):
+            d2 = min(((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
+                      + (p[2] - q[2]) ** 2)
+                     for j, q in enumerate(pts) if j != i)
+            best = max(best, d2 ** 0.5)
+        return best
+
+    LATTICE10 = [(i * 0.01, j * 0.01, k * 0.01)
+                 for i in range(10) for j in range(10) for k in range(10)]
+
+    def test_a_regular_fill_is_exact(self):
+        from k2rad.writer.sph import _interparticle_distance
+        self.assertAlmostEqual(_interparticle_distance(self.LATTICE10), 0.01,
+                               places=12)
+
+    def test_a_far_outlier_is_found_not_clipped_at_four_rings(self):
+        """One particle at (5,5,5) beside a 0.09-wide lattice: its nearest
+        neighbour is 8.504 away, ~850 grid rings out. The four-ring loop
+        returned 0.01 — the lattice spacing — and h0 with it."""
+        from k2rad.writer.sph import _interparticle_distance
+        pts = self.LATTICE10 + [(5.0, 5.0, 5.0)]
+        self.assertAlmostEqual(_interparticle_distance(pts), self._brute(pts),
+                               places=9)
+
+    def test_random_uniform_and_clustered_clouds_are_exact(self):
+        import random
+        from k2rad.writer.sph import _interparticle_distance
+        random.seed(11)
+        for trial in range(6):
+            with self.subTest(trial=trial):
+                n = random.randint(30, 200)
+                pts = [(random.uniform(0, 10), random.uniform(0, 10),
+                        random.uniform(0, 10)) for _ in range(n)]
+                pts += [(random.gauss(0, 0.05), random.gauss(0, 0.05),
+                         random.gauss(0, 0.05)) for _ in range(n // 3)]
+                self.assertAlmostEqual(_interparticle_distance(pts),
+                                       self._brute(pts), places=9)
+
+
+class MassPrecision(unittest.TestCase):
+    """``common._f`` renders anything below 1e-4 with ``%.6E``, and in Mg-mm-s
+    every particle mass is below 1e-4 — measured, a stated 1.234567891E-09 came
+    back from the starter as 1.2345680000000E-06 over 1000 particles. The two
+    mass columns use a formatter that round-trips instead."""
+
+    M = 1.234567891e-09
+
+    #: Eight distinct nine-significant-digit masses. Each is written verbatim
+    #: into the card's 16-wide MASS cell, so what the source states and what the
+    #: emitted deck must state are the SAME decimal string — no rounding hides
+    #: in the fixture.
+    SPREAD = ["1.234567891e-09", "2.345678912e-09", "3.456789123e-09",
+              "4.567891234e-09", "5.678912345e-09", "6.789123456e-09",
+              "7.891234567e-09", "8.912345678e-09"]
+
+    def test_the_property_mass_reads_back_exactly(self):
+        elems = "*ELEMENT_SPH\n" + "".join(
+            _cell(n, 1, repr(self.M)) for n, *_ in LATTICE)
+        _, starter = _convert(deck(elem=elems))
+        cell = _cards(_block(starter, "/PROP/SPH/1"))[0][0:20]
+        self.assertEqual(len(cell), 20)
+        self.assertEqual(float(cell), self.M)
+
+    def test_a_per_cell_mass_reads_back_exactly(self):
+        elems = "*ELEMENT_SPH\n" + "".join(
+            _cell(n, 1, m) for m, (n, *_) in zip(self.SPREAD, LATTICE))
+        _, starter = _convert(deck(elem=elems))
+        rows = _rows(_block(starter, "/SPHCEL/1"))
+        self.assertEqual(len(rows), 8)
+        for k, ln in enumerate(rows):
+            with self.subTest(cell=k):
+                self.assertEqual(len(ln), 40)
+                self.assertEqual(_col_f(ln, 21, 40), float(self.SPREAD[k]))
+
+    def test_the_common_case_is_not_made_noisier(self):
+        """A value the shortest round-trip already covers must not grow a tail
+        of zeros — the corpus's own 9.683426E-05 stays as it was."""
+        from k2rad.writer.sph import _f_mass
+        self.assertEqual(_f_mass(9.683426e-05).strip(), "9.683426E-05")
+
+
+class PropertyIdNamespace(unittest.TestCase):
+    """The /PROP id namespace is GLOBAL across property types while LS-DYNA's
+    *SECTION_* namespaces are per family, so a *SECTION_SPH and a
+    *SECTION_SHELL may legally share an id — and two /PROP cards on one id is
+    starter ERROR 79, DUPLICATE ID IN PID DEFINITION."""
+
+    NODES8 = NODES
+    OTHER = {
+        "SHELL": ("*SECTION_SHELL\n" + _row(5, 2, "", 3) + "\n"
+                  + _row(1.0, 1.0, 1.0, 1.0) + "\n",
+                  "*ELEMENT_SHELL\n"
+                  + f"{1:>8}{9:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n"),
+        "SOLID": ("*SECTION_SOLID\n" + _row(5, 1) + "\n",
+                  "*ELEMENT_SOLID\n" + f"{1:>8}{9:>8}\n"
+                  + "".join(f"{n:>8}" for n in (1, 2, 4, 3, 5, 6, 8, 7))
+                  + "\n"),
+        "TSHELL": ("*SECTION_TSHELL\n" + _row(5, 2) + "\n",
+                   "*ELEMENT_TSHELL\n" + f"{1:>8}{9:>8}"
+                   + "".join(f"{n:>8}" for n in (1, 2, 4, 3, 5, 6, 8, 7))
+                   + "\n"),
+    }
+
+    def _prop_ids(self, starter):
+        return [ln.strip() for ln in starter.splitlines()
+                if ln.startswith("/PROP/")]
+
+    def test_a_card_of_another_family_on_the_same_id_moves_the_sph_prop(self):
+        """The other section need not be REFERENCED to collide: an unreferenced
+        *SECTION_SHELL still reaches _make_properties and still emits
+        /PROP/SHELL/<secid>."""
+        for fam, (secblk, _elem) in self.OTHER.items():
+            with self.subTest(family=fam):
+                d = ("*KEYWORD\n" + NODES + SPH8
+                     + "*PART\nsph\n" + _row(1, 5, 1) + "\n"
+                     + sec(secid=5) + secblk + MAT + TERM + "*END\n")
+                result, starter = _convert(d)
+                ids = self._prop_ids(starter)
+                nums = [x.rsplit("/", 1)[-1] for x in ids]
+                self.assertEqual(len(nums), len(set(nums)), ids)
+                self.assertTrue(_warns(result, "is shared by SPH part(s)"),
+                                result.warnings)
+
+    def test_a_section_no_particle_sits_on_is_not_emitted_at_all(self):
+        """The wrong-family guard. The other family auto-creates its OWN
+        property under the id, so emitting the SPH one too is ERROR 79."""
+        for fam, (_secblk, elem) in self.OTHER.items():
+            with self.subTest(family=fam):
+                d = ("*KEYWORD\n" + NODES + SPH8
+                     + "*PART\nsph\n" + _row(1, 1, 1) + "\n" + sec(secid=1)
+                     + "*PART\nother\n" + _row(9, 5, 1) + "\n"
+                     + sec(secid=5) + elem + MAT + TERM + "*END\n")
+                result, starter = _convert(d)
+                ids = self._prop_ids(starter)
+                nums = [x.rsplit("/", 1)[-1] for x in ids]
+                self.assertEqual(len(nums), len(set(nums)), ids)
+                self.assertNotIn("/PROP/SPH/5", ids)
+                self.assertTrue(
+                    _warns(result, "no particle sits on it at all"),
+                    result.warnings)
+
+    def test_the_deck_wide_scan_names_a_collision_nothing_else_caught(self):
+        """The net under every family's own guard: one pass over the assembled
+        starter, so a duplicate no single writer can see is still named."""
+        from k2rad.writer.assembly import _warn_duplicate_prop_ids
+        state = ConversionState()
+        _warn_duplicate_prop_ids(
+            state, ["/PROP/SHELL/2", "/PROP/SPH/2", "/PROP/SOLID/9"])
+        self.assertEqual(len(state.warnings), 1, state.warnings)
+        self.assertIn("PROPERTY ID 2", state.warnings[0])
+        self.assertIn("/PROP/SHELL/2", state.warnings[0])
+        self.assertIn("/PROP/SPH/2", state.warnings[0])
+
+    def test_the_scan_is_quiet_on_a_healthy_deck(self):
+        from k2rad.writer.assembly import _warn_duplicate_prop_ids
+        state = ConversionState()
+        _warn_duplicate_prop_ids(
+            state, ["/PROP/SHELL/2", "/PROP/SPH/3", "/PROP/TYPE20/4"])
+        self.assertEqual(state.warnings, [])
+
+    def test_the_scan_is_wired_into_the_assembled_starter(self):
+        """The one collision class this branch does NOT close, so it is what
+        proves the scan is CALLED: a *SECTION_SOLID and an UNREFERENCED
+        *SECTION_SHELL sharing an id. Both properties are emitted — pre-existing
+        behaviour, in no way SPH-specific — and before this scan nothing in the
+        converter said so."""
+        d = ("*KEYWORD\n" + NODES
+             + "*ELEMENT_SOLID\n" + f"{1:>8}{9:>8}\n"
+             + "".join(f"{n:>8}" for n in (1, 2, 4, 3, 5, 6, 8, 7)) + "\n"
+             + "*PART\nsolid\n" + _row(9, 2, 1) + "\n"
+             + "*SECTION_SOLID\n" + _row(2, 1) + "\n"
+             + "*SECTION_SHELL\n" + _row(2, 2, "", 3) + "\n"
+             + _row(1.0, 1.0, 1.0, 1.0) + "\n" + MAT + TERM + "*END\n")
+        result, starter = _convert(d)
+        props = [ln.strip() for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        self.assertEqual(sorted(props), ["/PROP/SHELL/2", "/PROP/SOLID/2"],
+                         props)
+        hits = _warns(result, "PROPERTY ID 2")
+        self.assertTrue(hits, result.warnings)
+        self.assertIn("ERROR 79", hits[0])
+
+    def test_a_healthy_sph_deck_raises_no_duplicate_property_warning(self):
+        result, _ = _convert(deck())
+        self.assertEqual(_warns(result, "PROPERTY ID"), [])
+
+
+class ProvisionalScreenIsPerFamily(unittest.TestCase):
+    """The provisional-element screen keyed every family into ONE flat set of
+    ids. SPH is keyed by its NODE id, and LS-DYNA element ids are per family, so
+    any deck with two provisional blocks lost the intersection of their id
+    ranges — valid particles deleted for no reason, with the per-block report
+    then blaming the SPH block's own node screen, which had passed."""
+
+    def test_a_shell_blocks_element_ids_do_not_delete_particles(self):
+        shell = ("*ELEMENT_SHELL_MADEUP\n"
+                 + "".join(f"{e:>8}{7:>8}{9001:>8}{9002:>8}{9003:>8}{9004:>8}\n"
+                           for e in (1, 2, 3)))
+        d = ("*KEYWORD\n" + NODES
+             + "*ELEMENT_SPH_MADEUP\n"
+             + "".join(_cell(n, 1, MASS) for n, *_ in LATTICE)
+             + shell + PART
+             + "*PART\nshell\n" + _row(7, 8, 1) + "\n" + sec()
+             + "*SECTION_SHELL\n" + _row(8, 2, "", 3) + "\n"
+             + _row(1.0, 1.0, 1.0, 1.0) + "\n" + MAT + TERM + "*END\n")
+        _, starter = _convert(d)
+        ids = [_col_i(ln, 1, 10) for ln in _rows(_block(starter, "/SPHCEL/1"))]
+        self.assertEqual(ids, [n for n, *_ in LATTICE])
+
+    def test_a_genuinely_undefined_particle_is_still_dropped(self):
+        """The control: namespacing must not disarm the screen it namespaces."""
+        d = ("*KEYWORD\n" + NODES
+             + "*ELEMENT_SPH_MADEUP\n"
+             + "".join(_cell(n, 1, MASS) for n, *_ in LATTICE)
+             + _cell(4242, 1, MASS)
+             + PART + sec() + MAT + TERM + "*END\n")
+        _, starter = _convert(d)
+        ids = [_col_i(ln, 1, 10) for ln in _rows(_block(starter, "/SPHCEL/1"))]
+        self.assertEqual(ids, [n for n, *_ in LATTICE])
+
+
+class SphMaterialCompatibility(unittest.TestCase):
+    """/MAT/LAW44 (COWPER) does NOT declare SPH (``hm_read_mat44.F``), so the
+    starter refuses the whole deck with ERROR 3046 the moment a particle sits on
+    a *MAT_PLASTIC_KINEMATIC — measured on r14 ``sph/bar-i/bar1.k`` and
+    ``sph/bar-ii/bar2.k``, two decks LS-DYNA runs. /MAT/LAW2 IS declared
+    (``mat002/hm_read_mat02_jc.F90:383``) and describes the identical curve
+    whenever there is no Cowper-Symonds rate term and no EFFECTIVE kinematic
+    hardening."""
+
+    @staticmethod
+    def _plaskin(mid=1, sigy=290.0, etan=0.0, beta=0.0, src=0.0, srp=0.0,
+                 fs=0.0):
+        return ("*MAT_PLASTIC_KINEMATIC\n"
+                + _row(mid, RHO, 210000.0, 0.3, sigy, etan, beta) + "\n"
+                + _row(src, srp, fs, 0.0) + "\n")
+
+    SOLID9 = ("*ELEMENT_SOLID\n" + f"{1:>8}{9:>8}\n"
+              + "".join(f"{n:>8}" for n in (1, 2, 4, 3, 5, 6, 8, 7)) + "\n"
+              + "*PART\nsolid\n" + _row(9, 9, 1) + "\n"
+              + "*SECTION_SOLID\n" + _row(9, 1) + "\n")
+
+    def test_an_sph_only_material_simply_becomes_law2(self):
+        result, starter = _convert(deck(mat=self._plaskin()))
+        self.assertIn("/MAT/LAW2/1", starter)
+        self.assertNotIn("/MAT/LAW44/1", starter)
+        self.assertEqual(_warns(result, "ERROR 3046 'ELEMENTS OF TYPE SPH"),
+                         [])
+        self.assertTrue(_warns(result, "→ /MAT/LAW2 (PLAS_JOHNS) instead"))
+
+    def test_the_bilinear_curve_carries_across_unchanged(self):
+        """a = SIGY, b = E*ETAN/(E-ETAN), n = 1 — the same plastic branch LAW44
+        would have been given, so the two cards are one material."""
+        e, etan, sigy = 210000.0, 1000.0, 290.0
+        _, starter = _convert(deck(mat=self._plaskin(sigy=sigy, etan=etan,
+                                                     beta=1.0)))
+        card = _cards(_block(starter, "/MAT/LAW2/1"))[2]
+        self.assertAlmostEqual(_col_f(card, 1, 20), sigy)
+        self.assertAlmostEqual(_col_f(card, 21, 40), e * etan / (e - etan),
+                               places=6)
+        self.assertAlmostEqual(_col_f(card, 41, 60), 1.0)
+
+    def test_a_material_shared_with_a_solid_part_is_CLONED(self):
+        """The shape both corpus decks have: MID 1 serves solid parts AND
+        particle parts. One /MAT id cannot be two laws, so the SPH parts get a
+        second card and are repointed at it — the solid keeps LAW44."""
+        d = ("*KEYWORD\n" + NODES + SPH8 + PART + sec() + self.SOLID9
+             + self._plaskin() + TERM + "*END\n")
+        result, starter = _convert(d)
+        self.assertIn("/MAT/LAW44/1", starter)
+        clones = _blocks(starter, "/MAT/LAW2/")
+        self.assertEqual(len(clones), 1, starter)
+        clone_id = int(clones[0][0].rsplit("/", 1)[1])
+        self.assertNotEqual(clone_id, 1)
+        # the SPH /PART points at the clone, the solid /PART at the original
+        self.assertEqual(_col_i(_rows(_block(starter, "/PART/1"))[1], 11, 20),
+                         clone_id)
+        self.assertEqual(_col_i(_rows(_block(starter, "/PART/9"))[1], 11, 20),
+                         1)
+        self.assertTrue(_warns(result, "a SECOND /MAT card is written"))
+        self.assertEqual(_warns(result, "ERROR 3046 'ELEMENTS OF TYPE SPH"),
+                         [])
+
+    def test_a_cowper_symonds_rate_term_refuses_the_reroute(self):
+        """LAW2's rate term is Johnson-Cook's LOGARITHMIC form, a different
+        function — there is no faithful transcription, so the loud refusal is
+        kept rather than a different material written silently."""
+        result, starter = _convert(deck(mat=self._plaskin(src=40.0, srp=5.0)))
+        self.assertIn("/MAT/LAW44/1", starter)
+        self.assertEqual(_blocks(starter, "/MAT/LAW2/"), [])
+        self.assertTrue(_warns(result, "ERROR 3046 'ELEMENTS OF TYPE SPH"))
+
+    def test_real_kinematic_hardening_refuses_the_reroute(self):
+        result, starter = _convert(deck(
+            mat=self._plaskin(etan=1000.0, beta=0.0)))
+        self.assertIn("/MAT/LAW44/1", starter)
+        self.assertEqual(_blocks(starter, "/MAT/LAW2/"), [])
+        self.assertTrue(_warns(result, "ERROR 3046 'ELEMENTS OF TYPE SPH"))
+
+    def test_beta_is_inert_when_there_is_no_hardening_to_split(self):
+        """bar1.k's exact shape: BETA=0 (pure kinematic) but ETAN=0, so the
+        material is perfectly plastic and the split has nothing to divide."""
+        result, starter = _convert(deck(mat=self._plaskin(etan=0.0, beta=0.0)))
+        self.assertIn("/MAT/LAW2/1", starter)
+        self.assertIn("inert here", _warns(result, "→ /MAT/LAW2")[0])
+
+    def test_a_non_sph_deck_keeps_law44(self):
+        """The re-route must be unreachable without particles."""
+        d = ("*KEYWORD\n" + NODES + self.SOLID9 + self._plaskin() + TERM
+             + "*END\n")
+        _, starter = _convert(d)
+        self.assertIn("/MAT/LAW44/1", starter)
+        self.assertEqual(_blocks(starter, "/MAT/LAW2/"), [])
+
+    def test_law_106_is_in_the_sph_whitelist(self):
+        """``mat106/hm_read_mat106.F90:295`` calls INIT_MAT_KEYWORD(...,"SPH").
+        It was missing, so a legal LAW106 particle part drew a warning about a
+        starter refusal that does not happen."""
+        from k2rad.writer.sph import _SPH_COMPATIBLE_LAWS
+        self.assertIn(106, _SPH_COMPATIBLE_LAWS)
+
+    def test_the_user_law_slots_are_all_three_or_none(self):
+        """29/30/31 are /MAT/USER1..3 — no matNNN directory, so nothing to
+        read. Permissive deliberately, and consistently."""
+        from k2rad.writer.sph import _SPH_COMPATIBLE_LAWS
+        self.assertEqual({29, 30, 31} & _SPH_COMPATIBLE_LAWS, {29, 30, 31})
+
+
+class ReviewRoundReports(unittest.TestCase):
+    """Reports that named the wrong thing."""
+
+    def test_control_sph_losses_are_named_without_any_particles(self):
+        """IDIM is the one column whose loss changes the ANSWER, and the deck
+        that most needs to hear about it is the one whose *INCLUDE did not
+        resolve — where there are no particles to gate the report on."""
+        d = ("*KEYWORD\n" + NODES + MAT + TERM
+             + "*CONTROL_SPH\n" + _row(1, 0, 1.0e20, 2) + "\n" + "*END\n")
+        result, _ = _convert(d)
+        hits = _warns(result, "*CONTROL_SPH. Dropped")
+        self.assertTrue(hits, result.warnings)
+        self.assertIn("IDIM=2", hits[0])
+        self.assertIn("changes the ANSWER", hits[0])
+
+    def test_an_explicit_zero_card_two_is_not_reported_as_anisotropic(self):
+        """A *SECTION_SPH_ELLIPSE whose card 2 is written out as zeros is
+        isotropic BY DEFINITION."""
+        zeros = sec(keyword="*SECTION_SPH_ELLIPSE",
+                    extra=_row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        result, _ = _convert(deck(section=zeros))
+        self.assertEqual(_warns(result, "ANISOTROPIC"), result.warnings and [])
+
+    def test_a_real_anisotropic_card_two_is_still_reported(self):
+        real = sec(keyword="*SECTION_SPH_ELLIPSE",
+                   extra=_row(1.0, 2.0, 0.5, 0.0, 0.0, 0.0) + "\n")
+        result, _ = _convert(deck(section=real))
+        self.assertTrue(_warns(result, "ANISOTROPIC"), result.warnings)
+
+    def test_a_blank_mass_with_a_populated_nend_is_a_range_not_a_mass(self):
+        """The one fixed-column shape the whitespace split cannot read: three
+        tokens whose third is a valid float sitting in the NEND columns."""
+        from k2rad.handlers import _parse_sph_cell
+        self.assertEqual(_parse_sph_cell(_cell(1, 1, "", 8)), (1, 1, 0.0, 8))
+        self.assertEqual(_parse_sph_cell(_cell(1, 1, "", 108)),
+                         (1, 1, 0.0, 108))
+
+    def test_a_stated_mass_is_still_a_mass(self):
+        from k2rad.handlers import _parse_sph_cell
+        self.assertEqual(_parse_sph_cell(_cell(1, 1, 2.0e-3, 8)),
+                         (1, 1, 2.0e-3, 8))
+        self.assertEqual(_parse_sph_cell("1 1 0.002"), (1, 1, 0.002, 0))
+
+
+class MoreElementRegistryArms(unittest.TestCase):
+    """Arms the first audit added but left untested — each of these fails if its
+    arm is removed, which is what the ``ElementRegistryArms`` docstring claims
+    for the whole set."""
+
+    def _ids(self, starter, header, pred):
+        out = set()
+        for b in _blocks(starter, header):
+            if not pred(b):
+                continue
+            for ln in b[2:]:
+                if not ln.startswith("#"):
+                    out.update(int(t) for t in ln.split())
+        return out
+
+    def test_a_part_inertia_covers_its_particles(self):
+        """*PART_INERTIA states a CoG and an inertia tensor for a rigid part;
+        the node set it is built over has to include the particles or the body
+        is anchored to nothing."""
+        rigid = ("*MAT_RIGID\n" + _row(1, RHO, 210000.0, 0.3) + "\n"
+                 + _row(0.0, 7, 7) + "\n" + _row(0.0, 0.0, 0.0) + "\n")
+        inertia = ("*PART_INERTIA\ninertia part\n"
+                   + _row(1, 1, 1) + "\n"
+                   + _row(5.0, 5.0, 5.0, 1.0) + "\n"
+                   + _row(1.0, 0.0, 0.0, 1.0, 0.0, 1.0) + "\n"
+                   + _row(0.0, 0.0, 0.0) + "\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + inertia + sec() + rigid + TERM
+             + "*END\n")
+        _, starter = _convert(d)
+        ids = self._ids(starter, "/GRNOD/NODE/",
+                        lambda b: b[1].startswith("rb_nodes"))
+        self.assertTrue({n for n, *_ in LATTICE} <= ids, sorted(ids))
+
+    def test_a_tied_contacts_secondary_side_reaches_particles(self):
+        shell = ("*ELEMENT_SHELL\n"
+                 + f"{1:>8}{2:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + shell + PART
+             + "*PART\nshell\n" + _row(2, 2, 1) + "\n" + sec()
+             + "*SECTION_SHELL\n" + _row(2, 2, "", 3) + "\n"
+             + _row(1.0, 1.0, 1.0, 1.0) + "\n" + MAT + TERM
+             + "*CONTACT_TIED_NODES_TO_SURFACE\n"
+             + _row(1, 2, 3, 3) + "\n" + _row(0.0, 0.0) + "\n" + "*END\n")
+        _, starter = _convert(d)
+        ids = {int(t) for b in _blocks(starter, "/GRNOD/NODE/")
+               for ln in b[2:] if not ln.startswith("#")
+               for t in ln.split()}
+        self.assertTrue({n for n, *_ in LATTICE} <= ids, sorted(ids))
+
+    def test_a_force_transducer_over_a_particle_part_is_not_empty(self):
+        """``_part_node_ids`` builds the /INTER/SUB secondary group of a
+        *CONTACT_FORCE_TRANSDUCER. Without the arm the group is empty and the
+        transducer is dropped for "no deformable nodes"."""
+        shell = ("*ELEMENT_SHELL\n"
+                 + f"{1:>8}{2:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + shell + PART
+             + "*PART\nshell\n" + _row(2, 2, 1) + "\n" + sec()
+             + "*SECTION_SHELL\n" + _row(2, 2, "", 3) + "\n"
+             + _row(1.0, 1.0, 1.0, 1.0) + "\n" + MAT + TERM
+             + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+             + _row(1, 2, 3, 3) + "\n" + _row(0.2, 0.2) + "\n"
+             + "*CONTACT_FORCE_TRANSDUCER_PENALTY\n"
+             + _row(1, 2, 3, 3) + "\n" + _row(0.0, 0.0) + "\n" + "*END\n")
+        result, starter = _convert(d)
+        self.assertEqual(
+            [w for w in result.warnings
+             if "secondary side has no" in w], [], result.warnings)
+        grp = [b for b in _blocks(starter, "/GRNOD/NODE/")
+               if b[1].endswith("_secnd")]
+        self.assertTrue(grp, starter)
+        ids = {int(t) for b in grp for ln in b[2:]
+               if not ln.startswith("#") for t in ln.split()}
+        self.assertTrue({n for n, *_ in LATTICE} <= ids, sorted(ids))
+
+    #: *MAT_ANISOTROPIC_VISCOPLASTIC (MAT_103) — the material whose parts
+    #: _assign_ortho_props splits onto a synthesized /PROP/TYPE6 or TYPE9.
+    MAT103 = (
+        "*MAT_ANISOTROPIC_VISCOPLASTIC\n"
+        "         1   1.05E-9    1800.0       0.4      35.0       0.0"
+        "       0.0       1.0\n"
+        "      10.0      50.0       5.0     300.0       0.0       0.0"
+        "       0.0       0.0\n"
+        "       0.0       0.0      1.35       1.0      0.75       0.0"
+        "       0.0       0.0\n"
+        "       0.0       0.1\n")
+
+    def test_an_orthotropic_material_does_not_claim_a_particle_part(self):
+        """/MAT/LAW128 IS on the starter's SPH whitelist, so the pairing is
+        legal — but the only property an SPH part may carry is /PROP/SPH
+        (else `ERROR 3047`), so the ortho split must SKIP it. Without the skip
+        the part falls through to the element-kind ladder and is told its
+        particles are not a mesh."""
+        result, starter = _convert(deck(mat=self.MAT103))
+        props = [ln.strip() for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        self.assertEqual(props, ["/PROP/SPH/1"], props)
+        self.assertEqual(_col_i(_rows(_block(starter, "/PART/1"))[1], 1, 10), 1)
+        self.assertEqual(
+            [w for w in result.warnings if "no shell or solid elements" in w],
+            [], result.warnings)
+
+    def test_a_composite_material_does_not_claim_a_particle_part(self):
+        """Same shape in `_assign_composite_props`. Without the skip the part
+        reaches the element-kind ladder and is warned about a mesh that is
+        perfectly fine — or, worse, gets a second orthotropic property."""
+        comp = ("*MAT_ENHANCED_COMPOSITE_DAMAGE\n"
+                + _row(1, RHO, 210000.0, 105000.0, 105000.0,
+                       0.3, 0.3, 0.3) + "\n"
+                + _row(80000.0, 80000.0, 80000.0, 0.0, 0.0, 0.0, 0.0, 2) + "\n"
+                + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + _row(1000.0, 1000.0, 1000.0, 1000.0, 100.0) + "\n"
+                + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        result, starter = _convert(deck(mat=comp))
+        props = [ln.strip() for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        self.assertEqual(props, ["/PROP/SPH/1"], props)
+        self.assertEqual(
+            [w for w in result.warnings if "no shell or solid elements" in w],
+            [], result.warnings)
+
+    def test_a_composite_layup_does_not_fabricate_a_shell_section(self):
+        """`_make_composite_fallback_sections` synthesizes a `SectionShell`
+        under the part's SECID for a layup it cannot convert. On an SPH part
+        that lands on the SAME id as the /PROP/SPH — two /PROP cards on one id,
+        starter ERROR 79."""
+        # _IGA_SHELL is a variant with nowhere to put a layup, so it takes the
+        # fallback branch — the one that synthesizes a SectionShell.
+        layup = ("*PART_COMPOSITE_IGA_SHELL\nsph composite\n"
+                 + _row(1, 0, 0, 0, 0, 0) + "\n"
+                 + _row(1, 1.0, 0.0, 1) + "\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + layup + sec() + MAT + TERM
+             + "*END\n")
+        _, starter = _convert(d)
+        props = [ln.strip() for ln in starter.splitlines()
+                 if ln.startswith("/PROP/")]
+        nums = [p.rsplit("/", 1)[-1] for p in props]
+        self.assertEqual(len(nums), len(set(nums)), props)
+        self.assertIn("/PROP/SPH/1", props)
+
+    def test_a_discrete_beam_section_id_does_not_swallow_a_particle_part(self):
+        """_discrete_beam_pids excluded shells and solids but not particles, so
+        an SPH part whose SECID matches an ELFORM=6 *SECTION_BEAM was claimed
+        as a connector and skipped WHOLE — /PART, /SPHCEL block, `sph_cell_ids`
+        registration and any /TH/SPHCEL naming those particles."""
+        d = ("*KEYWORD\n" + NODES + SPH8
+             + "*PART\nsph part\n" + _row(1, 99, 1) + "\n"
+             + sec(secid=99)
+             + "*SECTION_BEAM\n" + _row(99, 6) + "\n"
+             + _row(0.0, 0.0, 0.0, 0.0) + "\n" + MAT + TERM
+             + "*DATABASE_HISTORY_SPH\n" + _row(1, 2) + "\n" + "*END\n")
+        _, starter = _convert(d)
+        self.assertIn("/PART/1", starter)
+        self.assertEqual(len(_rows(_block(starter, "/SPHCEL/1"))), 8)
+        self.assertEqual(len(_blocks(starter, "/TH/SPHCEL/")), 1, starter)
+
+    def test_an_inertia_card_never_reuses_a_particle_as_its_main_node(self):
+        """`_inertia_element_nodes` is the "is this node element-free?" test for
+        an `_INERTIA` main node. ICoG=4 still adds the main node's own nodal
+        mass and rotary inertia (`inirby.F:146,166-169`), so reusing a particle
+        would add mass `TM` never accounted for — and a main node on an element
+        is WARNING 448, or ERROR 1066 under --ams."""
+        rigid = ("*MAT_RIGID\n" + _row(1, RHO, 210000.0, 0.3) + "\n"
+                 + _row(0.0, 7, 7) + "\n" + _row(0.0, 0.0, 0.0) + "\n")
+        # card 3 is XC YC ZC TM IRCS NODEID — NODEID names particle 3
+        inertia = ("*PART_INERTIA\ninertia part\n"
+                   + _row(1, 1, 1) + "\n"
+                   + _row(5.0, 5.0, 5.0, 1.0, 0, 3) + "\n"
+                   + _row(1.0, 0.0, 0.0, 1.0, 0.0, 1.0) + "\n"
+                   + _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + inertia + sec() + rigid + TERM
+             + "*END\n")
+        result, starter = _convert(d)
+        rb = _blocks(starter, "/RBODY/")
+        self.assertTrue(rb, starter)
+        main = _col_i(_cards(rb[0])[0], 1, 10)
+        self.assertNotIn(main, [n for n, *_ in LATTICE], starter)
+        self.assertTrue(_warns(result, "is attached to elements"),
+                        result.warnings)
+
+    def test_a_cnrb_never_reuses_a_particle_as_its_master(self):
+        """Same test, other caller: a CNRB master is moved to the centre of
+        gravity, and moving a node that belongs to elements INVERTS them."""
+        d = ("*KEYWORD\n" + NODES + SPH8 + PART + sec() + MAT + TERM
+             + "*SET_NODE_LIST\n" + _row(100) + "\n"
+             + "".join(f"{n:>10}" for n, *_ in LATTICE) + "\n"
+             + "*CONSTRAINED_NODAL_RIGID_BODY\n"
+             + _row(10, 0, 100, 1) + "\n" + "*END\n")   # PNODE = particle 1
+        _, starter = _convert(d)
+        rb = _blocks(starter, "/RBODY/")
+        self.assertTrue(rb, starter)
+        master = _col_i(_cards(rb[0])[0], 1, 10)
+        self.assertNotIn(master, [n for n, *_ in LATTICE], starter)
+
+    def test_an_all_parts_self_contact_finds_the_particles(self):
+        """`SSID = 0` is an ALL-PARTS self contact, and its secondary side is
+        the deck-wide deformable-node set. Without the SPH arm a particle-only
+        deck has none, and the whole interface is dropped."""
+        d = deck(extra="*CONTACT_AUTOMATIC_SINGLE_SURFACE\n"
+                       + _row(0, 0, 0, 0) + "\n" + _row(0.2, 0.2) + "\n")
+        result, starter = _convert(d)
+        self.assertEqual(
+            [w for w in result.warnings if "no deformable nodes left" in w],
+            [], result.warnings)
+        self.assertEqual(
+            [w for w in result.warnings if "DROPPED" in w and "90001" in w],
+            [], result.warnings)
+        self.assertTrue(_blocks(starter, "/INTER/TYPE25/"), starter)
+
+    def test_a_particle_part_paces_the_engine_time_step(self):
+        """_warn_no_pacing_element reads _part_node_sets as "parts that have
+        elements", and that inventory excludes particles for the /XREF callers'
+        sake. A particle has a time step of its own (mdtsph.F:132), so a joint
+        deck with a deformable cloud must NOT be told every element is rigid."""
+        rigid = ("*MAT_RIGID\n" + _row(2, RHO, 210000.0, 0.3) + "\n"
+                 + _row(0.0, 7, 7) + "\n" + _row(0.0, 0.0, 0.0) + "\n")
+        d = ("*KEYWORD\n" + NODES + SPH8 + PART + sec() + MAT + rigid
+             + "*ELEMENT_BEAM\n" + f"{1:>8}{4:>8}{1:>8}{2:>8}{3:>8}\n"
+             + "*PART\nrigid\n" + _row(4, 4, 2) + "\n"
+             + "*SECTION_BEAM\n" + _row(4, 1) + "\n"
+             + _row(1.0, 1.0, 1.0, 1.0, 1.0, 1.0) + "\n"
+             + "*CONSTRAINED_JOINT_REVOLUTE\n"
+             + _row(1, 2, 3, 4, 5, 6) + "\n" + TERM + "*END\n")
+        result, _ = _convert(d)
+        self.assertEqual(
+            [w for w in result.warnings
+             if "every element in this deck belongs to a rigid part" in w],
+            [], result.warnings)
 
 
 if __name__ == "__main__":

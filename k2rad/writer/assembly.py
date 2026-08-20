@@ -987,6 +987,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
         lines.extend(builder(ctx))
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
+    _warn_duplicate_prop_ids(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
 
@@ -1198,6 +1199,50 @@ def _warn_duplicate_th_group_ids(state: ConversionState,
                 "OpenRadioss starter will reject this deck with ERROR 79 "
                 "(DUPLICATE ID, IN TH GROUP DEFINITION) and write no restart "
                 "file. This is a k2rad bug — please report the deck.")
+
+
+#: Every property card header, whatever its type: ``/PROP/SHELL/12``,
+#: ``/PROP/TYPE20/12``, ``/PROP/SPH/12``, ``/PROP/SOLID/12``.
+_PROP_CARD_ID_RE = re.compile(r"^/PROP/(?:[A-Z0-9_]+/)*([A-Z0-9_]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_prop_ids(state: ConversionState,
+                             lines: List[str]) -> None:
+    """The /PROP id namespace is GLOBAL across property types — two cards on
+    one id is starter ``ERROR ID : 79 DUPLICATE ID / IN PID DEFINITION`` and the
+    whole deck is refused.
+
+    Every family that turns a ``*SECTION_*`` into a property keys it on the
+    SECID, and LS-DYNA's section-id namespaces are PER FAMILY: a
+    ``*SECTION_SHELL 2`` and a ``*SECTION_SPH 2`` are different cards in a legal
+    deck. Each family's writer guards the collisions it can see from where it
+    stands (``writer/sph.py`` and ``writer/tshell.py`` both split a shared
+    SECID and both refuse a section of the wrong family), but no single writer
+    sees the FINISHED deck — measured, a ``*SECTION_SOLID 2`` beside an
+    unreferenced ``*SECTION_SHELL 2`` emits both properties with no diagnostic
+    on any branch of the converter.
+
+    This is the scan that does see it: one pass over the assembled starter,
+    modelled on :func:`_warn_duplicate_th_group_ids`. It changes no output —
+    it only makes a refusal that was silent into one the log names, with the
+    ids and card types that collided.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _PROP_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for pid, types in sorted(seen.items()):
+        if len(types) > 1:
+            state.warn(
+                f"PROPERTY ID {pid} is emitted by more than one /PROP card ("
+                + ", ".join(f"/PROP/{t}/{pid}" for t in types)
+                + "). The /PROP id namespace is global across property TYPES, "
+                "while LS-DYNA's *SECTION_* id namespaces are per family, so "
+                "two sections of different families sharing an id land on one "
+                "Radioss property id. The starter refuses the whole deck with "
+                "ERROR 79 (DUPLICATE ID, IN PID DEFINITION). Renumber one of "
+                "the *SECTION_* cards.")
 
 
 class _StarterContext:

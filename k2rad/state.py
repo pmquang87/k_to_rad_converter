@@ -1014,6 +1014,14 @@ class SphProp:
     per_cell: bool = True
     #: Where ``h`` came from, for the report ("" when h is left automatic).
     h_source: str = ""
+    #: Where ``mp`` came from. ``"deck"`` = a mass (or a volume x rho) the
+    #: *ELEMENT_SPH cards actually state; ``"geometry"`` = rho x d_ref**3,
+    #: derived because NO particle of the section states a mass at all;
+    #: ``"fabricated"`` = neither was available and 1.0 had to be written to
+    #: keep the property legal. The last two are the cases where the emitted
+    #: deck holds a mass the SOURCE never stated, so every report keyed on this
+    #: says so instead of quoting derived numbers as if they were the deck's.
+    mp_source: str = "deck"
 
 
 @dataclass
@@ -5139,6 +5147,18 @@ class ConversionState:
     # pid → the /PROP/SPH id the part's /PART card must point at, when that is
     # NOT its own SECID (the mixed-family split above).
     sph_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # The /MAT twin of the two maps above. A *MAT_PLASTIC_KINEMATIC lands on
+    # /MAT/LAW44, which does NOT declare SPH compatibility — starter ERROR 3046
+    # refuses the whole deck the moment a particle sits on it — while /MAT/LAW2
+    # does and expresses the identical bilinear law whenever the material has
+    # no Cowper-Symonds rate term and no effective kinematic hardening. When
+    # such a material is SHARED between SPH and non-SPH parts, one /MAT id
+    # cannot be both laws, so writer/sph.py::_resolve_sph_materials allocates a
+    # clone: mid → the synthesized /MAT/LAW2 id, and pid → that id for the SPH
+    # parts whose /PART is repointed at it. Both empty on every deck without
+    # particles on a *MAT_PLASTIC_KINEMATIC.
+    sph_mat_clones: Dict[int, int] = field(default_factory=dict)
+    sph_mat_ids: Dict[int, int] = field(default_factory=dict)
     # secid → the resolved /PROP/SPH payload (Mp, h, and whether the per-cell
     # MASS column is written at all). Filled by the _resolve_sph prepass and
     # read by BOTH the /SPHCEL emitter and the /PROP/SPH emitter, so the two

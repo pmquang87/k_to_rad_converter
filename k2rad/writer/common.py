@@ -534,14 +534,37 @@ def _part_node_sets(state: ConversionState) -> dict:
     /XREF reference geometry intersects with (dyna2rad GetNodesOfParts
     equivalent).
 
-    SPH particles are deliberately NOT counted. The one caller is
-    ``_resolve_xref_parts``, and /XREF is reference geometry for SOLID elements
-    (``hm_read_xref.F``; the starter's whitelist is laws 1/35/38/42/70/88/90 on
-    8/4-node solids, ERROR 2013/2014 otherwise). Adding particles here would let
-    an *INITIAL_FOAM_REFERENCE_GEOMETRY node set that happens to touch an SPH
-    cloud claim that part for a /XREF — and, worse, drag its *SECTION into
-    Ismstr=10 along with every sibling part on it. ``_resolve_xref_parts`` names
-    an SPH part reached that way instead."""
+    SPH particles are deliberately NOT counted, and that verdict is per CALLER
+    — there are nine, not one:
+
+    * ``inistate._resolve_xref_parts`` / ``inistate._make_xref`` and
+      ``materials._resolve_mat_ref_geometry`` — /XREF reference geometry, which
+      is for SOLID elements (``hm_read_xref.F``; the starter's whitelist is laws
+      1/35/38/42/70/88/90 on 8/4-node solids, ERROR 2013/2014 otherwise). This
+      is the exclusion's REASON: counting particles would let an
+      *INITIAL_FOAM_REFERENCE_GEOMETRY node set that happens to touch an SPH
+      cloud claim that part for a /XREF — and, worse, drag its *SECTION into
+      Ismstr=10 along with every sibling part on it. ``_resolve_xref_parts``
+      names an SPH part reached that way instead.
+    * ``contacts._spotweld_slave_nids`` — a spot weld's secondary side is the
+      weld nugget, and a particle is not one.
+    * ``joints._resolve_joint_stiffness_targets`` — resolves a
+      *CONSTRAINED_JOINT_STIFFNESS onto rigid JOINT bodies; a particle part is
+      not a joint body.
+    * ``loads._make_local_prescribed_skews`` and the two
+      ``loads._rbody_mains_in_scope`` sites — node-overlap SCOPING of rigid-body
+      mains. A rigid body built on particles gets its node inventory from
+      ``rbody._make_rbodies`` (which does have an SPH arm), so the omission
+      here can only fail to widen a load group's scope onto a rigid main whose
+      nodes are exclusively particles — narrow, and it never drops mass or
+      clamps a node.
+    * ``joints._warn_no_pacing_element`` — the ONE caller that must count
+      particles, because an SPH part genuinely paces the engine time step
+      (``mdtsph.F``). It adds them itself rather than changing this inventory
+      for the /XREF callers' sake.
+
+    Add a caller to that list rather than to this function.
+    """
     pnodes: dict = {}
     for e in state.solid_elems:
         s = pnodes.setdefault(e.pid, set())
@@ -648,9 +671,15 @@ def _discrete_beam_pids(state: ConversionState) -> Set[int]:
     states no cross-section at all, so a /PROP/BEAM built from it is starter
     ERROR 314-317 and the deck never starts.
 
-    Parts carrying shell or solid elements are excluded (the same guard
-    _spotweld_beam_pids uses): a discrete-beam material on a continuum part is
-    a modelling error k2rad must not silently reinterpret as a spring.
+    Parts carrying shell, solid, THICK-SHELL or SPH elements are excluded (the
+    same guard _spotweld_beam_pids uses): a discrete-beam material on a
+    continuum part is a modelling error k2rad must not silently reinterpret as
+    a spring. The last two matter as much as the first two even though the
+    coincidence is rarer — a claimed part is skipped WHOLE by
+    _make_parts_and_elements, so an SPH part whose SECID happens to match an
+    ELFORM=6 *SECTION_BEAM loses its /PART, its entire /SPHCEL block and its
+    sph_cell_ids registration, and any /TH/SPHCEL naming those particles then
+    empties to nothing.
 
     Parts already claimed by _discrete_part_ids are excluded too, and for a
     harder reason: BOTH writers emit ``/PART/<pid>`` under the source pid, so a
@@ -666,12 +695,14 @@ def _discrete_beam_pids(state: ConversionState) -> Set[int]:
     dbeam_mids = _discrete_beam_mids(state)
     if not elform6 and not dbeam_mids:
         return set()
-    shell_pids = {e.pid for e in state.shell_elems}
-    solid_pids = {e.pid for e in state.solid_elems}
+    continuum_pids = ({e.pid for e in state.shell_elems}
+                      | {e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems}
+                      | {c.pid for c in state.sph_elems})
     discrete_pids = _discrete_part_ids(state)
     pids: Set[int] = set()
     for pid, p in state.parts.items():
-        if pid in shell_pids or pid in solid_pids or pid in discrete_pids:
+        if pid in continuum_pids or pid in discrete_pids:
             continue
         secid = p.secid if p.secid > 0 else pid
         if secid in elform6 or p.mid in dbeam_mids:
