@@ -76,6 +76,16 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         # thick-shell deck — which every one of the r14 *ELEMENT_TSHELL decks
         # is — can and should have the stub. (Empty on any deck without
         # *ELEMENT_TSHELL, so no other conversion moves.)
+        #
+        # SPH particles do NOT count, and that is a verdict rather than an
+        # omission: this stub is an all-parts /INTER/TYPE7 whose surface comes
+        # from _make_master_surface, and a particle has no face to put in one.
+        # Adding `or state.sph_elems` would inject an interface that
+        # _make_master_surface then refuses to build and _drop_interface
+        # immediately discards — noise, not a stabilization. A particles-only
+        # implicit deck is outside what this stub can help with; it is also
+        # outside what OpenRadioss SPH supports, and every SPH deck in the
+        # corpus is explicit.
         return
     inter_id = state.next_id()
     state.contacts_single.append(

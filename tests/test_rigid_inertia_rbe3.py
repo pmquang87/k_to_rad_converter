@@ -1087,7 +1087,11 @@ shells
         """The starter reads ``THK_PART`` in its NUMELC/NUMELTG/NUMELT/NUMELP/
         NUMELR loops only (``i7sti3.F:226-293``) — there is no solid loop — while
         LS-DYNA does apply OPTT to solids under SOFT=2 (Vol I R17 p.37-11). So the
-        value is written and then never read, and that has to be said."""
+        value is written and then never read, and that has to be said.
+
+        The message names SPH alongside SOLID since the SPH batch: there is no
+        NUMSPH loop in ``i7sti3.F`` either, so a particle part's OPTT is unread
+        for exactly the same reason (see ``tests/test_sph.py``)."""
         res, st = _convert(_deck(PART_SHELL, """\
 *PART_CONTACT
 rigid brick
@@ -1096,7 +1100,7 @@ rigid brick
 """))
         # the column is still written — the diagnosis is about the READER
         self.assertEqual(_part_cards(st)[2][3], 5.0)
-        self.assertTrue(_warned(res, "SOLID elements", "2 (OPTT=5)",
+        self.assertTrue(_warned(res, "SOLID or SPH elements", "2 (OPTT=5)",
                                 "NO EFFECT"))
         # the shell part carries no OPTT, so it must not be named
         self.assertFalse(_warned(res, "1 (OPTT="))

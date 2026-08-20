@@ -122,6 +122,73 @@ class TshellLayup:
 
 
 @dataclass
+class SphCell:
+    """*ELEMENT_SPH — one SMOOTHED-PARTICLE cell, emitted as a Radioss /SPHCEL.
+
+    An SPH particle has NO CONNECTIVITY: the card is ``NID PID MASS [NEND]`` and
+    the particle IS its supporting node. Radioss states the same thing twice
+    over — ``hm_read_sphcel.F:243-250`` reads the single id column into
+    ``KXSP(3,*)`` as the NODE user id and then sets the cell id to it
+    ("same identifier as the node"), and the Altair help card says "The
+    particles will have the same identifier as their supporting node". So there
+    is no separate element id to keep: ``nid`` is both.
+
+    ``nodes`` is a one-element list, so the ~40 ``ref.update(e.nodes)`` /
+    ``nids.update(e.nodes)`` element-registry walks take an SPH particle with no
+    shape change at all. ``eid`` is an alias of ``nid`` for the same reason (the
+    orphan census and the /TH screen address elements by ``eid``).
+
+    ``flag`` is the Radioss ``/SPHCEL`` Type column, and it decides what ``mass``
+    MEANS (``spinit3.F:139-153``):
+
+    ==========  =========================  ==============================
+    ``flag``    ``mass`` holds             particle mass
+    ==========  =========================  ==============================
+    1           a MASS                     ``mass``
+    2           a VOLUME                   ``rho * mass``
+    0           nothing (blank column)     ``/PROP/SPH`` Mp
+    ==========  =========================  ==============================
+
+    The LS-DYNA side states the same three cases in one signed cell: "GT.0.0:
+    Mass value. LT.0.0: Volume. The absolute value will be used as volume …
+    SPH element mass is calculated by |MASS| x rho" (Vol I R16/R17
+    *ELEMENT_SPH), plus the ``_VOLUME`` keyword suffix, which "has the same
+    effect as giving a negative number in the MASS field". So the sign and the
+    suffix are folded into ``flag`` at parse time and ``mass`` is always the
+    NON-NEGATIVE magnitude. dyna2rad copies the signed cell verbatim and honours
+    neither convention — measured, a MASS of -2e-6 gave ``TOTAL MASS = 8.0 kg``
+    instead of 0.016 kg (the negative value is discarded by the starter and the
+    fabricated ``Mp = 1`` fallback takes over), and ``*ELEMENT_SPH_VOLUME`` came
+    out wrong by exactly rho.
+
+    ``generated`` marks a particle expanded from the ``NEND`` range generator
+    ("*ELEMENT_SPH cards are generated between NID to NEND using current PID and
+    MASS data") rather than written out card by card. Neither dyna2rad nor
+    OpenRadioss's native reader performs that expansion — measured, a card with
+    NEND gave ``NUMSPH = 1``.
+    """
+    nid: int
+    pid: int
+    mass: float = 0.0
+    flag: int = 1
+    generated: bool = False
+    #: See ShellElem.provisional — set for a particle recovered by CONTENT from
+    #: an *ELEMENT_SPH block whose option suffix k2rad does not model.
+    provisional: bool = False
+
+    @property
+    def nodes(self) -> List[int]:
+        """The one node this particle sits on, as a list, so every element
+        registry walk that says ``update(e.nodes)`` works unchanged."""
+        return [self.nid]
+
+    @property
+    def eid(self) -> int:
+        """The cell id, which Radioss forces equal to the node id."""
+        return self.nid
+
+
+@dataclass
 class BeamElem:
     """*ELEMENT_BEAM (+ _ORIENTATION).
 
@@ -846,6 +913,151 @@ class SectionTshell:
     #: True when the deck left ELFORM blank (so the divergence note above can
     #: be reported per section rather than guessed at from the value 1).
     elform_blank: bool = False
+
+
+@dataclass
+class SectionSph:
+    """*SECTION_SPH (+ _ELLIPSE / _TENSOR / _INTERACTION / _USER) → /PROP/SPH
+    (= /PROP/TYPE34).
+
+    Card 1 is ``SECID CSLH HMIN HMAX SPHINI DEATH START SPHKERN`` (8 x I10,
+    ``Keyword971_R11.1/PROPERTY/SectSPH.cfg`` FORMAT(Keyword971_R11.1)).
+
+    **Every non-zero default below is applied HERE, by the parser, not left to
+    the reader.** That is a deliberate divergence from dyna2rad, and the biggest
+    single behavioural finding of this batch: the CFG declares
+    ``DEFAULTS(COMMON){ LSD_CSLH = 1.2; LSD_HMIN = 0.2; LSD_HMAX = 2.0;
+    LSD_TDEATH = 1.0e20; }`` but the SDI read path does NOT apply them, so a
+    blank ``CSLH`` reaches ``p_ConvertSectionSph`` as 0 and takes the
+    ``lsdCSLH > 0`` branch's ``else`` — i.e. a deck that left CSLH blank to get
+    the manual's 1.2 is converted to a CONSTANT smoothing length with SPHINI
+    discarded (measured on probe decks h/i: ``CONSTANT SMOOTHING LENGTH`` and
+    ``SMOOTHING LENGTH AUTOMATICALLY COMPUTED``).
+
+    ``cslh_blank`` records that the deck left the cell empty, so the report can
+    say which value it is talking about rather than guessing from 1.2.
+
+    ``sphkern`` is READ but never mapped. dyna2rad turns ``SPHKERN == 2`` into
+    ``/PROP/SPH ORDER = 2``, which is wrong twice over: Radioss's ``Order`` is
+    the renormalisation CORRECTION order, not a kernel-polynomial order, and 2
+    is out of range — ``spcompl.F:107-118`` dispatches only on -1/0/1, so an
+    Order=2 particle silently gets no kernel correction at all, and
+    ``spgrhead.F:180-185`` packs the value into two bits of the group-sort key.
+    (dyna2rad's map is unreachable anyway: the R11.1 IMPORT card reads seven
+    fields, so SPHKERN is never populated on its read path — verified, a
+    ``SPHKERN=2`` deck echoed ``FORMULATION CORRECTION ORDER = 0``.)
+    """
+    secid: int
+    title: str = ""
+    #: Scale on the initial smoothing length, LS-DYNA default 1.2 (Vol I R16:
+    #: "Values between 1.05 and 1.3 are acceptable. Taking a value less than 1
+    #: is inadmissible").
+    cslh: float = 1.2
+    hmin: float = 0.2          # scale factor for the MINIMUM smoothing length
+    hmax: float = 2.0          # scale factor for the MAXIMUM smoothing length
+    #: "Optional initial smoothing length (overrides true smoothing length).
+    #: With this option LS-DYNA will not calculate the smoothing length during
+    #: initialization, and the field CSLH is ignored." 0 = not given.
+    sphini: float = 0.0
+    death: float = 1.0e20      # time the SPH approximation is STOPPED
+    start: float = 0.0         # time the SPH approximation is ACTIVATED
+    sphkern: int = 0           # 0 cubic / 1 quintic / 2 quadratic / 3 quartic
+    #: True when the deck left CSLH empty (so the divergence above can be
+    #: reported per section rather than inferred from the value 1.2).
+    cslh_blank: bool = False
+    #: The keyword suffix this section came from ("", "ELLIPSE", "TENSOR",
+    #: "INTERACTION", "USER") — every one of them but the bare spelling loses
+    #: data, and the report names which.
+    option: str = ""
+
+
+@dataclass
+class SphProp:
+    """The resolved /PROP/SPH payload for one *SECTION_SPH, decided ONCE in the
+    ``_resolve_sph`` prepass and read by both emitters.
+
+    Radioss can express a particle's mass in exactly two places and they are
+    MUTUALLY EXCLUSIVE by construction, because the one that carries the mass
+    also decides the smoothing length (``spinih.F:85-109``):
+
+    * ``per_cell = True``  — every ``/SPHCEL`` row carries its own Flag+MASS.
+      The mass is exact per particle whatever the deck says, and Radioss
+      OVERWRITES the property's ``h`` with ``(sqrt(2)*m_p/rho)^(1/3)``. The
+      deck's own ``SPHINI`` / ``CSLH*d_ref`` cannot be honoured.
+    * ``per_cell = False`` — the ``/SPHCEL`` MASS column is left blank (Flag 0,
+      "type 0"), every particle takes ``mass = Mp`` from the property, and the
+      property's ``h`` is used verbatim. Only usable when the section's
+      particles all carry the IDENTICAL mass, and then the total is exact too
+      (``N * Mp``) while ``h`` matches LS-DYNA's own.
+
+    ``mp`` is ALWAYS positive on both routes: ``hm_read_prop34.F:235-239``
+    raises WARNING 138 and forces ``MP = 1`` in the deck's mass unit for any
+    ``Mp <= 0``, which on the per-cell route is merely noisy but on a TYPE-0
+    particle fabricates a whole mass unit per particle (measured: four blank-mass
+    particles gave ``TOTAL MASS = 4.0``). dyna2rad never writes the field at all.
+    """
+    secid: int
+    prop_id: int
+    title: str = ""
+    #: /PROP/SPH Mp — the property-level particle mass. Always > 0.
+    mp: float = 1.0
+    #: /PROP/SPH h — the smoothing length, 0 = "compute automatically".
+    h: float = 0.0
+    #: /PROP/SPH h_1D — 0 (3D dilatation), 1 (1D), 2 (constant h). NEVER 3 at
+    #: /BEGIN 2022: the hmin/hmax/hcst bounds that branch needs live on a
+    #: radioss2026-only third card, which a 2022 reader discards SILENTLY
+    #: (measured: hmin 0.37 / hmax 3.77 / hcst 1.77 echoed as 0.2 / 2.0 / 1.2,
+    #: 0 ERRORS, only advisory WARNING 100213), leaving the bounded-dilatation
+    #: algorithm running with bounds nobody chose.
+    h_1d: int = 0
+    #: True when each /SPHCEL row states its own mass (see above).
+    per_cell: bool = True
+    #: Where ``h`` came from, for the report ("" when h is left automatic).
+    h_source: str = ""
+
+
+@dataclass
+class ControlSph:
+    """*CONTROL_SPH — the global SPH controls.
+
+    Card 1 ``NCBS BOXID DT IDIM NMNEIGH FORM START MAXV`` (8 x I10; older decks
+    and LS-PrePost label column 5 ``memory``), card 2 ``CONT DERIV INI ISHOW
+    IEROD ICONT IAVIS ISYMP``, card 3 ``ITHK ISTAB QL - SPHSORT ISHIFT``. Cards
+    2 and 3 are OPTIONAL and are claimed by RAW CONTIGUITY (the #119 rule), not
+    by "the next non-blank row": an all-blank card 2 is a legal card and taking
+    the following non-blank line instead would read the NEXT keyword's data.
+
+    Exactly one column has a Radioss home: ``nmneigh`` → ``/SPHGLO``
+    ``Lneigh``/``Nneigh``. Everything else is dropped, and
+    ``writer/sph.py::_warn_control_sph`` names every one of them. dyna2rad
+    drops the whole keyword silently — the string ``CONTROL_SPH`` does not
+    occur anywhere under ``reader/source/dyna2rad/``.
+    """
+    ncbs: int = 1              # time steps between particle sorting
+    boxid: int = 0             # *DEFINE_BOX outside which particles deactivate
+    dt: float = 1.0e20         # death time for the SPH calculation
+    idim: int = 3              # 3 = 3D, 2 = 2D plane strain, -2 = axisymmetric
+    nmneigh: int = 0           # initial neighbours per particle (LS-DYNA 150)
+    form: int = 0              # particle approximation theory
+    start: float = 0.0         # start time for particle approximation
+    maxv: float = 0.0          # velocity magnitude above which a particle dies
+    # Card 2
+    cont: int = 0
+    deriv: int = 0
+    ini: int = 0               # 0 bucket sort / 1 global / 2 from particle MASS
+    ishow: int = 0
+    ierod: int = 0
+    icont: int = 0
+    iavis: int = 0
+    isymp: int = 0
+    # Card 3
+    ithk: int = 0
+    istab: int = 0
+    ql: float = 0.0
+    sphsort: int = 0
+    ishift: int = 0
+    #: How many of the three cards the deck actually wrote.
+    n_cards: int = 1
 
 
 @dataclass
@@ -4807,6 +5019,10 @@ class ConversionState:
     # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not
     # solid_elems — see TshellElem.
     tshell_elems: List[TshellElem] = field(default_factory=list)
+    # *ELEMENT_SPH → /SPHCEL on a /PROP/SPH (TYPE34). Its OWN container — an SPH
+    # particle has no connectivity at all (it IS a node with a mass), so it
+    # belongs on none of the other element lists; see SphCell.
+    sph_elems: List[SphCell] = field(default_factory=list)
     beam_elems: List[BeamElem] = field(default_factory=list)
     # *ELEMENT_DISCRETE → /SPRING (on a /PROP/TYPE4 built by the writer)
     discrete_elems: List[DiscreteElem] = field(default_factory=list)
@@ -4846,6 +5062,10 @@ class ConversionState:
     # (the /PROP/TYPE43 shape — no /PART repoint). A FOURTH SECID-keyed /PROP
     # namespace, so next_prop_id() guards against it too.
     sec_tshells: Dict[int, SectionTshell] = field(default_factory=dict)
+    # *SECTION_SPH → /PROP/SPH, emitted under the SECID verbatim (the same shape
+    # /PROP/TYPE20|21|22 uses — no /PART repoint). A FIFTH SECID-keyed /PROP
+    # namespace, so next_prop_id() guards against it too.
+    sec_sph: Dict[int, SectionSph] = field(default_factory=dict)
     sec_beams: Dict[int, SectionBeam] = field(default_factory=dict)
     # *INTEGRATION_BEAM user cross-section integration rules, keyed by IRID.
     # Bound from a *SECTION_BEAM whose card-1 field 4 (QR/IRID) is negative;
@@ -4908,6 +5128,28 @@ class ConversionState:
     # column. Only set when every thick shell on the section agrees; the
     # elements' own beta is zeroed so the deck states the angle exactly once.
     tshell_beta_fold: Dict[int, float] = field(default_factory=dict)
+
+    # ── SPH particles ──────────────────────────────────────────
+    # secid → a SYNTHESIZED /PROP id for a *SECTION_SPH whose SECID is also
+    # claimed by another element family. Two /PROP cards on one id is starter
+    # ERROR 79, so the SPH property moves here and its parts are repointed
+    # through sph_prop_ids. Same mechanism as tshell_section_prop_ids; empty on
+    # the ordinary one-family deck, where the property IS the SECID.
+    sph_section_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # pid → the /PROP/SPH id the part's /PART card must point at, when that is
+    # NOT its own SECID (the mixed-family split above).
+    sph_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # secid → the resolved /PROP/SPH payload (Mp, h, and whether the per-cell
+    # MASS column is written at all). Filled by the _resolve_sph prepass and
+    # read by BOTH the /SPHCEL emitter and the /PROP/SPH emitter, so the two
+    # cannot disagree about where each particle's mass comes from.
+    sph_props: Dict[int, "SphProp"] = field(default_factory=dict)
+    # The /SPHCEL ids this conversion ACTUALLY emitted. A /TH/SPHCEL naming
+    # anything else is starter ERROR 69 and the whole deck is refused (the #106
+    # rule), so the TH writer intersects against this set.
+    sph_cell_ids: Set[int] = field(default_factory=set)
+    # *CONTROL_SPH — the global SPH controls; only NMNEIGH reaches /SPHGLO.
+    control_sph: Optional["ControlSph"] = None
 
     # *HOURGLASS cards, keyed by HGID (referenced from *PART HGID). See
     # HourglassDef; consumed by the per-part hourglass /PROP overlay.
@@ -5406,6 +5648,11 @@ class ConversionState:
     db_rwforc_dt: float = 0.0
     db_secforc_dt: float = 0.0
     db_sleout_dt: float = 0.0
+    # *DATABASE_SPHOUT — the SPH particle database. It requests no channel of
+    # its own in Radioss (the /TH/SPHCEL groups come from
+    # *DATABASE_HISTORY_SPH), but its dt DOES join the /TFILE minimum scan, the
+    # same treatment dyna2rad gives it (convertcards.cxx:99, inside dbCardList).
+    db_sphout_dt: float = 0.0
     # *DATABASE_SWFORC → /TH/SPRING over the *MAT_SPOTWELD (MAT_100) /PROP/TYPE13
     # weld connectors, /TH/BRIC over MAT_100 solid welds, and /TH/CLUSTER over
     # the *DEFINE_HEX_SPOTWELD_ASSEMBLY clusters
@@ -5516,10 +5763,13 @@ class ConversionState:
         SECID-keyed properties can clash. *SECTION_TSHELL joined that list with
         the thick-shell batch — /PROP/TYPE20|21|22 is emitted under the SECID
         verbatim too, so a deck with a *SECTION_TSHELL at or above 90001 would
-        otherwise collide with a synthesized ply/joint/spring property."""
+        otherwise collide with a synthesized ply/joint/spring property.
+        *SECTION_SPH joined it with the SPH batch, for exactly the same reason —
+        /PROP/SPH is emitted under the SECID verbatim."""
         prop_id = self.next_id()
         while (prop_id in self.sec_shells or prop_id in self.sec_solids
-               or prop_id in self.sec_beams or prop_id in self.sec_tshells):
+               or prop_id in self.sec_beams or prop_id in self.sec_tshells
+               or prop_id in self.sec_sph):
             prop_id = self.next_id()
         return prop_id
 

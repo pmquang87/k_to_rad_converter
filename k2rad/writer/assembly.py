@@ -52,6 +52,7 @@ from .composites import (
     _resolve_icomp_sections,
     _resolve_integration_shells,
 )
+from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
     _make_force_transducers,
@@ -247,6 +248,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                state.db_rwforc_dt, state.db_secforc_dt,
                state.db_swforc_dt, state.db_deforc_dt,
                state.db_disbout_dt,
+               # *DATABASE_SPHOUT joins for the same reason: the SPH particle
+               # channels it asks for DO reach the T01, through the /TH/SPHCEL
+               # groups *DATABASE_HISTORY_SPH builds.
+               state.db_sphout_dt,
                state.db_jntforc_dt)
     requested = [v for v in _db_dts if v > 0.0]
     # "If DT < 0.0, the result will be output every -DT time steps" (Manual
@@ -617,7 +622,7 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
 # though `_make_discrete_springs` warns per part on its own — this stays the one
 # place that answers "did the conversion drop any of my mesh?", and it keeps
 # answering it if that emitter is ever short-circuited or reordered.
-_ORPHAN_ELEM_KINDS = ("shell", "solid", "tshell", "beam", "discrete")
+_ORPHAN_ELEM_KINDS = ("shell", "solid", "tshell", "sph", "beam", "discrete")
 
 # Cap on the PIDs spelled out in the message: a deck missing a whole *INCLUDE
 # can orphan hundreds of parts, and one unreadable 10-kB warning line helps
@@ -631,6 +636,12 @@ def _warn_orphan_elements(state: ConversionState) -> None:
     for kind, elems in (("shell", state.shell_elems),
                         ("solid", state.solid_elems),
                         ("tshell", state.tshell_elems),
+                        # SPH particles are emitted per /PART exactly as every
+                        # other family is, so an orphaned one is lost mass with
+                        # nothing else to say so — this census is the only
+                        # place that answers "did the conversion drop any of my
+                        # mesh?" and it has to see the SPH cloud too.
+                        ("sph", state.sph_elems),
                         ("beam", state.beam_elems),
                         ("discrete", state.discrete_elems)):
         for e in elems:
@@ -837,6 +848,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # on bricks, ERROR 60 + 226 — dyna2rad's own defect). AFTER
     # _screen_provisional_elements, so the fold sees the final element list.
     _resolve_tshells(state)
+    # SPH particles: screen the cells against the node table (a /SPHCEL id with
+    # no /NODE is starter ERROR 78, a repeated one ERROR 79), auto-create a
+    # placeholder *SECTION_SPH where a part names none, split a SECID shared
+    # with another element family, and decide PER SECTION whether each
+    # particle's mass rides on its own /SPHCEL row or on the property's Mp —
+    # the choice that also decides whether the deck's smoothing length survives.
+    # AFTER _screen_provisional_elements (state.sph_elems must be final) and
+    # before the parts (repoint + /SPHCEL emission) and properties are built.
+    _resolve_sph(state)
     _resolve_composites(state)
     _assign_composite_props(state)
     # Bind every *SECTION_SHELL QR/IRID reference to its *INTEGRATION_SHELL
@@ -1212,6 +1232,10 @@ def _starter_section_registry():
         ("title",             lambda c: _make_title(c.state)),
         ("analysis_defaults", lambda c: _make_analysis_defaults(c.state)),
         ("ams",               lambda c: _make_ams(c.state)),
+        # /SPHGLO is a global analysis card like /AMS, and only the FIRST one
+        # in the deck is read — so it sits with the other globals, above the
+        # entity sections. No-op (and draws no id) on any deck without SPH.
+        ("sphglo",            lambda c: _make_sphglo(c.state)),
         ("materials",         lambda c: _make_materials(c.state)),
         # Composite / orthotropic laws live in their own module (they carry a
         # per-part property split that the plain material path does not), so

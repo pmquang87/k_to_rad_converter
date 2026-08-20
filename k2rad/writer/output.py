@@ -113,13 +113,31 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     *DATABASE_HISTORY_TSHELL joins the SOLID block: a thick shell IS a /BRICK
     in the emitted deck, so /TH/BRIC resolves its ids exactly as it does an
     ordinary hex's.
+
+    *DATABASE_HISTORY_SPH and _SPH_SET become /TH/SPHCEL, a type of its own —
+    and the ONLY one here that is SCREENED. Every other family's ids always
+    resolve, because their elements are emitted unconditionally; an SPH
+    particle can be dropped by ``writer/sph.py`` (no *NODE, a duplicated id) or
+    never emitted at all if its part failed to convert, and a /TH group naming
+    one of those is not a lost channel — it is starter **ERROR 69** ("TH
+    ELEMENT SELECTION ID=n DOES NOT EXIST", ``hm_read_thgrne.F:189``) and the
+    whole deck is refused. That is the #106 rule; ``state.sph_cell_ids`` is the
+    set the /SPHCEL emitter actually wrote. An empty group is refused too
+    (ERROR 1109 NO TH VARIABLE / no element), so a group that screens to
+    nothing is not written at all.
+
+    Ids go ONE PER LINE for every type. That is not cosmetic on /TH/SPHCEL:
+    packing eight ids onto one card the way *DATABASE_HISTORY_SPH writes them
+    is read as ONE id plus trailing junk — measured, seven dangling ids packed
+    into columns 11+ produced 0 errors and only advisory ``WARNING 100214``,
+    i.e. the channels vanished without even reaching the ERROR 69 check.
     """
     if not state.db_histories:
         return []
     lines = ["#-  TIME HISTORY OUTPUTS:", HDR]
     counter = 1
     type_map = {"SHELL": "SHEL", "SOLID": "BRIC", "NODE": "NODE",
-                "TSHELL": "BRIC"}
+                "TSHELL": "BRIC", "SPH": "SPHCEL", "SPH_SET": "SPHCEL"}
 
     def _emit_block(rad_type: str, ids: List[int], n: int) -> List[str]:
         block = [
@@ -143,10 +161,76 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 lines += _emit_block("SH3N", tri_ids, counter)
                 counter += 1
             continue
+        if dbh.db_type in ("SPH", "SPH_SET"):
+            ids = _sph_th_ids(state, dbh)
+            if not ids:
+                continue
+            lines += _emit_block("SPHCEL", ids, counter)
+            counter += 1
+            continue
         lines += _emit_block(rad_type, dbh.ids, counter)
         counter += 1
+    if len(lines) == 2:
+        return []
     lines.append(HDR)
     return lines
+
+
+def _sph_th_ids(state: ConversionState, dbh) -> List[int]:
+    """The /SPHCEL ids one *DATABASE_HISTORY_SPH[_SET] request resolves to.
+
+    ``_SPH`` lists particle ids directly; ``_SPH_SET`` lists *SET_NODE ids
+    ("IDn for NODE_SET, SPH_SET, and DES_SET refers to node set ID n defined
+    using the *SET_NODE_{OPTION}", Vol I R16), which are expanded here. Both are
+    then intersected with the cells this conversion actually emitted — see the
+    ERROR 69 note on ``_make_starter_th``.
+    """
+    kw = ("*DATABASE_HISTORY_SPH_SET" if dbh.db_type == "SPH_SET"
+          else "*DATABASE_HISTORY_SPH")
+    if dbh.db_type == "SPH_SET":
+        wanted: List[int] = []
+        missing_sets: List[int] = []
+        for sid in dbh.ids:
+            entry = state.node_sets.get(sid)
+            if entry is None:
+                missing_sets.append(sid)
+                continue
+            wanted.extend(entry[1])
+        if missing_sets:
+            state.warn(
+                f"{kw}: *SET_NODE {missing_sets} is not defined in this deck "
+                "(or uses a variant k2rad does not expand), so the particles it "
+                "names get NO /TH/SPHCEL channel. Listing an unresolved set id "
+                "as if it were a particle id would be starter ERROR 69 and the "
+                "deck would not start at all.")
+    else:
+        wanted = list(dbh.ids)
+    seen: set = set()
+    ids = [i for i in wanted
+           if i in state.sph_cell_ids and not (i in seen or seen.add(i))]
+    lost = sorted({i for i in wanted if i not in state.sph_cell_ids})
+    if lost:
+        shown = ", ".join(str(i) for i in lost[:10])
+        if len(lost) > 10:
+            shown += f", ... ({len(lost)} ids)"
+        state.warn(
+            f"{kw}: {len(lost)} requested id(s) are not an emitted /SPHCEL — "
+            f"{shown}. They are LEFT OUT of the /TH/SPHCEL group on purpose: a "
+            "TH group naming an element the deck does not define is starter "
+            "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST) and the run "
+            "would not start at all, which is strictly worse than losing those "
+            "channels. Either the id is not an *ELEMENT_SPH particle, or its "
+            "particle was dropped (no *NODE, duplicated id) — see the SPH "
+            "warnings above. (dyna2rad copies the raw id list through with no "
+            "check: its SPH branch is the only element branch in "
+            "converttimehistory.cxx without a FindRadElement filter, so such a "
+            "deck converts 'successfully' and then refuses to run.)")
+    if wanted and not ids:
+        state.warn(
+            f"{kw}: none of the requested ids resolves to an emitted /SPHCEL, "
+            "so NO /TH/SPHCEL group is written — an empty TH group is itself a "
+            "starter refusal (ERROR 1109). Those channels are lost.")
+    return ids
 
 
 # ─────────────────────────────────────────────────────────────────────────────

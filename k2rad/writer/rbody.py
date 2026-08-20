@@ -81,6 +81,11 @@ def _inertia_element_nodes(state: ConversionState) -> Set[int]:
     # container is empty on every deck without *ELEMENT_TSHELL.
     for e in state.tshell_elems:
         elem_nodes.update(e.nodes)
+    # An SPH particle carries mass and kernel stiffness, so its node is
+    # "attached to an element" exactly like a hex's — and on a *PART_INERTIA
+    # part it is one of the nodes the fabricated CoG/inertia has to cover.
+    for c in state.sph_elems:
+        elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
     return elem_nodes
@@ -365,6 +370,9 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
     for e in state.tshell_elems:              # /BRICK too — see above
         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
             nodes_by_pid[e.pid].extend(e.nodes)
+    for c in state.sph_elems:                 # SPH nodes join like any other
+        if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
+            nodes_by_pid[c.pid].extend(c.nodes)
     for e in state.beam_elems:
         if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid in rigid_mids:
             nodes_by_pid[e.pid].extend([e.n1, e.n2])
@@ -832,6 +840,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
     # container is empty on every deck without *ELEMENT_TSHELL.
     for e in state.tshell_elems:
         elem_nodes.update(e.nodes)
+    for c in state.sph_elems:                 # SPH: the particle IS its node
+        elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
     # Synthesize new free node IDs above the current maximum (avoids collisions).

@@ -388,6 +388,8 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
     shell_eids: List[int] = []
     solid_pids: List[int] = []
     tshell_pids = {e.pid for e in state.tshell_elems}
+    sph_pids = {c.pid for c in state.sph_elems}
+    sph_only: List[int] = []
     for pid in sorted(pids):
         eids_in_pid = [e.eid for e in state.shell_elems if e.pid == pid]
         # A thick shell is a /BRICK in the emitted deck, so its part takes the
@@ -401,6 +403,27 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
             shell_eids.extend(eids_in_pid)
         elif has_solids:
             solid_pids.append(pid)
+        elif pid in sph_pids:
+            # An SPH part contributes NOTHING to a main surface — a particle
+            # has no face — and that has to be said rather than left to the
+            # `kinds == 0` branch below. When the scope holds other parts too
+            # the interface converts LOOKING HEALTHY while the SPH side is
+            # simply absent, which is a silence `_drop_interface` can never
+            # break because the interface is not dropped at all.
+            sph_only.append(pid)
+    if sph_only:
+        state.warn(
+            f"Contact surface '{title}': part(s) {sph_only} hold SPH particles "
+            "only, and a particle has NO FACE — so they contribute NOTHING to "
+            "the MAIN (segment) side of this interface"
+            + (". The interface is built from the other parts in its scope and "
+               "looks healthy, but the particles are not on this side of it."
+               if (shell_eids or solid_pids) else
+               " and the whole interface is dropped below.")
+            + " In Radioss an SPH<->structure contact puts the PARTICLES on the "
+            "SECONDARY side (a /GRNOD of their nodes, which k2rad does build) "
+            "and a structural surface on the main side — so swap the two sides "
+            "of the *CONTACT if the particles were meant to be contacted.")
 
     shell_eids.sort()
     quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
@@ -509,7 +532,16 @@ def _part_node_sets(state: ConversionState) -> dict:
     """{pid: set-of-node-ids} over the structural element containers (solids,
     thick shells, shells, beam end nodes) — the per-part node inventory the
     /XREF reference geometry intersects with (dyna2rad GetNodesOfParts
-    equivalent)."""
+    equivalent).
+
+    SPH particles are deliberately NOT counted. The one caller is
+    ``_resolve_xref_parts``, and /XREF is reference geometry for SOLID elements
+    (``hm_read_xref.F``; the starter's whitelist is laws 1/35/38/42/70/88/90 on
+    8/4-node solids, ERROR 2013/2014 otherwise). Adding particles here would let
+    an *INITIAL_FOAM_REFERENCE_GEOMETRY node set that happens to touch an SPH
+    cloud claim that part for a /XREF — and, worse, drag its *SECTION into
+    Ismstr=10 along with every sibling part on it. ``_resolve_xref_parts`` names
+    an SPH part reached that way instead."""
     pnodes: dict = {}
     for e in state.solid_elems:
         s = pnodes.setdefault(e.pid, set())

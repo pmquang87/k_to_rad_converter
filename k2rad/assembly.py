@@ -610,6 +610,98 @@ def _off_element_tshell(b: Block, offsets: Dict[str, int], warn) -> None:
                 i += 1
 
 
+def _off_element_sph(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *ELEMENT_SPH spelling: ``NID(I8) PID(I8) MASS(F16) NEND(I8)``.
+
+    Two things make this card unlike every other ``*ELEMENT_`` row in the table.
+
+    **Field 0 takes the NODE offset, not the element offset.** An SPH particle
+    IS its supporting node — the starter reads the single id column as the node
+    user id and then forces the cell id equal to it
+    (``hm_read_sphcel.F:243-250``) — so ``IDNOFF`` is the only offset that can
+    apply, and applying ``IDEOFF`` there would break the cell↔node identity that
+    Radioss enforces. ``NEND`` is a node id for the same reason and moves with
+    it.
+
+    This is precisely where dyna2rad cannot follow: it does not bake offsets in
+    at all, it emits a ``//SUBMODEL`` and lets Radioss apply them — and the
+    ``/SPHCEL`` id column is a PLAIN INT with no entity type, so the submodel
+    machinery leaves it alone while ``/NODE`` moves. Measured on probe decks j
+    and k, an ``*INCLUDE_TRANSFORM`` with ``IDNOFF=1000`` (with or without a
+    matching ``IDEOFF``) gave four ``ERROR ID : 78 … NODE ID=1 DOES NOT EXIST``
+    and ``TOTAL MASS = 0``. Baking the offset into the deck, as every k2rad
+    ``_off_*`` does, is immune to that by construction.
+
+    **The MASS column is SIXTEEN wide.** Rewriting the card on a uniform
+    10-wide slice cuts a right-justified F16 mass in half — the
+    ``*ELEMENT_MASS`` defect this mirrors — so the columns are preserved
+    literally and only the id cells are re-rendered.
+    """
+    for k in range(len(b.raw)):
+        line = b.raw[k]
+        if not line.strip() or line.lstrip().startswith("$"):
+            continue
+        if "," in line:
+            new = _rewrite_line(line, [(0, "n"), (1, "p"), (3, "n")],
+                                offsets, w=8)
+            if new is not None:
+                b.raw[k] = new
+            continue
+        nid, pid = line[0:8], line[8:16]
+        mass, nend = line[16:32], line[32:]
+        if not (_geti([nid], 0) > 0 and pid.strip()):
+            # Not a particle card (a free-format line, a stray row). Fall back
+            # to the generic rewriter, which re-splits it on whitespace.
+            new = _rewrite_line(line, [(0, "n"), (1, "p"), (3, "n")],
+                                offsets, w=8)
+            if new is not None:
+                b.raw[k] = new
+            continue
+        noff, poff = offsets.get("n", 0), offsets.get("p", 0)
+        if not noff and not poff:
+            continue
+
+        def _sh(tok: str, off: int, width: int) -> str:
+            if off and tok.strip() and to_int(tok) > 0:
+                return f"{to_int(tok) + off:>{width}}"
+            return tok
+
+        b.raw[k] = (_sh(nid, noff, 8) + _sh(pid, poff, 8) + mass
+                    + _sh(nend, noff, len(nend))).rstrip()
+
+
+def _off_section_sph(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_SPH card set: SECID (IDROFF).
+
+    A card-SET walker rather than a declarative spec, for the reason every
+    *SECTION_* keyword here is one — a declarative spec addresses only the first
+    set, and every later section in the block would keep its original SECID
+    while the *PARTs that name it moved. The ``_ELLIPSE``/``_TENSOR`` card 2 is
+    strided BY POSITION (the #119 rule) and must stay in lockstep with
+    ``handlers.handle_section_sph``, which claims it the same way: it carries no
+    id, but it IS a card, and skipping it as whitespace would rewrite the NEXT
+    set's SECID out of a column of anisotropic h values.
+    """
+    per_set_title = _title_offset(b)
+    raw = b.raw
+    has_card2 = ("ELLIPSE" in b.keyword) or ("TENSOR" in b.keyword)
+    idx = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:                       # one 80a title card per set
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)      # SECID
+        if new is not None:
+            raw[idx] = new
+        idx += 1 + (1 if has_card2 else 0)
+
+
 def _off_element_solid(b: Block, offsets: Dict[str, int], warn) -> None:
     """Both *ELEMENT_SOLID layouts (mirrors handle_element_solid detection):
     ten-node = (eid pid) / (n1..n10) line pairs, else eid pid n1..n8 per line."""
@@ -1830,6 +1922,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     # grammar handlers.py uses, just below this dict, and the family prefix
     # catches anything outside it.
     "ELEMENT_TSHELL": _off_element_tshell,
+    # *ELEMENT_SPH — the _VOLUME spelling comes from the same grammar
+    # handlers.py uses, just below this dict; field 0 is a NODE, not an element
+    # (see _off_element_sph).
+    "ELEMENT_SPH": _off_element_sph,
     "ELEMENT_BEAM": _off_element_beam,
     # *ELEMENT_PLOTEL: EID N1 N2 (I8) — no PID column.
     "ELEMENT_PLOTEL": {"data": (0, [(0, "e"), (1, "n"), (2, "n")]), "w": 8},
@@ -1859,6 +1955,10 @@ _OFFSET_SPECS: Dict[str, object] = {
     # *SECTION_TSHELL is a card-SET keyword too, and its ICOMP=1 angle block
     # sits one card EARLIER than *SECTION_SHELL's (no thickness card).
     "SECTION_TSHELL": _off_section_tshell,
+    # *SECTION_SPH is a card-SET keyword too; its _ELLIPSE/_TENSOR spellings add
+    # one card that carries no id but must be strided. Registered from the same
+    # option list handlers.py uses, just below this dict.
+    "SECTION_SPH": _off_section_sph,
     "SECTION_BEAM": _off_section_beam,
     "SECTION_DISCRETE": _off_section_discrete,
     # *INTEGRATION_BEAM: IRID shares the *SECTION id space (IDROFF, bucket "r"),
@@ -2349,6 +2449,12 @@ for _o1 in ("", "_OFFSET"):
         _OFFSET_SPECS[f"ELEMENT_BEAM{_o1}{_o2}"] = _off_element_beam
 for _o1 in ("", "_BETA", "_COMPOSITE"):
     _OFFSET_SPECS[f"ELEMENT_TSHELL{_o1}"] = _off_element_tshell
+# *ELEMENT_SPH_{VOLUME} and *SECTION_SPH_{ELLIPSE|TENSOR|INTERACTION|USER} —
+# the same spellings handlers.py registers, so the two tables cannot drift.
+for _o1 in ("", "_VOLUME"):
+    _OFFSET_SPECS[f"ELEMENT_SPH{_o1}"] = _off_element_sph
+for _o1 in ("", "_ELLIPSE", "_TENSOR", "_INTERACTION", "_USER"):
+    _OFFSET_SPECS[f"SECTION_SPH{_o1}"] = _off_section_sph
 del _o1, _o2, _o3, _o4
 
 # *PART_{OPTION1..6} (3588 spellings) and *CONSTRAINED_NODAL_RIGID_BODY_{SPC,
@@ -2384,8 +2490,12 @@ del _kw
 #: handlers._PREFIX_HANDLERS — the match is on a token boundary, so it is not an
 #: ELEMENT_SHELL spelling and needs its own row (its base card is 10 fields, not
 #: 5, and its option cards are laid out differently).
+#: ELEMENT_SPH likewise: its base card is four fields with a SIXTEEN-wide mass
+#: cell and a NODE id in field 0, none of which the shell rewriter would get
+#: right.
 _ELEMENT_PREFIX_SPECS = (
     ("ELEMENT_TSHELL", _off_element_tshell),
+    ("ELEMENT_SPH", _off_element_sph),
     ("ELEMENT_SHELL", _off_element_shell),
     ("ELEMENT_BEAM", _off_element_beam),
     ("ELEMENT_PLOTEL", _OFFSET_SPECS["ELEMENT_PLOTEL"]),

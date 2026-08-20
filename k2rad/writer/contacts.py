@@ -113,6 +113,15 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         # without *ELEMENT_TSHELL, so this cannot move any other conversion.
         for e in state.tshell_elems:
             if e.pid == pid: nids.update(e.nodes)
+        # SPH particles are deformable by construction and belong on the
+        # SECONDARY (node) side of any contact that scopes their part. This is
+        # what makes SSTYP=2/3 (part / part set) work at all; before the SPH
+        # batch only the *SET_NODE spelling reached them, and then only by
+        # accident. They are deliberately NOT added to the MAIN-surface route
+        # (_solid_contact_master_pids / _solid_pids_by_part): a particle has no
+        # face to build a /SURF from.
+        for c in state.sph_elems:
+            if c.pid == pid: nids.update(c.nodes)
 
     if styp == 4:
         if sid in state.node_sets:
@@ -193,6 +202,13 @@ def _solid_contact_master_pids(state: ConversionState) -> Set[int]:
     # Thick shells are /BRICK, so a thick-shell part on a contact MAIN side
     # wants the same /SURF/PART/EXT (external surface of a solid part) an
     # ordinary brick part gets. Empty on every deck without *ELEMENT_TSHELL.
+    #
+    # SPH parts are deliberately NOT here. A particle has no face, so
+    # /SURF/PART/EXT over an SPH part is a surface over nothing; in Radioss an
+    # SPH<->structure contact is a /INTER/TYPE7 (or TYPE25) with the PARTICLES
+    # as the SECONDARY node group, which is the side they DO join (see
+    # add_part_nodes / _part_node_ids). _make_master_surface names the loss when
+    # a contact's MAIN scope reaches an SPH-only part.
     all_solid_pids = ({e.pid for e in state.solid_elems}
                       | {e.pid for e in state.tshell_elems})
     if not all_solid_pids:
@@ -536,6 +552,9 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         | {n for e in state.tshell_elems          # /BRICK too — see above
            if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
            for n in e.nodes if n > 0 and n not in rigid_nodes}
+        | {n for c in state.sph_elems             # SPH: deformable by nature
+           if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           for n in c.nodes if n > 0 and n not in rigid_nodes}
     )
     all_pids: List[int] = sorted(state.parts.keys())
 
@@ -835,6 +854,9 @@ def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -
     for e in state.tshell_elems:              # /BRICK too — see above
         if e.pid in pidset:
             nodes.update(n for n in e.nodes if n > 0)
+    for c in state.sph_elems:                 # SPH: the particle IS its node
+        if c.pid in pidset:
+            nodes.update(n for n in c.nodes if n > 0)
     for e in state.beam_elems:
         if e.pid in pidset:
             nodes.update(n for n in (e.n1, e.n2) if n > 0)
@@ -1857,6 +1879,10 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
     # ordinary hex does (and are never quadratic — always 8 slots). Chained
     # rather than concatenated: this runs per contact side on the whole solid
     # table, and copying both lists there is what the rewrite removed.
+    #
+    # SPH is absent for the reason it is absent from _solid_contact_master_pids:
+    # this map answers "build a solid /SURF for this part?", and a particle has
+    # no face to put in one.
     for e in itertools.chain(state.solid_elems, state.tshell_elems):
         n = len(_ordered_unique_nodes(list(e.nodes)))
         if n > out.get(e.pid, 0):
@@ -2349,6 +2375,9 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
         for e in state.tshell_elems:          # /BRICK too — see above
             if e.pid == pid:
                 nids.update(e.nodes)
+        for c in state.sph_elems:             # SPH: secondary side only
+            if c.pid == pid:
+                nids.update(c.nodes)
 
     if styp == 4:
         if sid in state.node_sets:

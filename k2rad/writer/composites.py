@@ -560,6 +560,7 @@ def _assign_composite_props(state: ConversionState) -> None:
         solid_only_laws[mid] = ("*MAT_MODIFIED_HONEYCOMB", "/MAT/LAW50")
 
     tshell_pids = {e.pid for e in state.tshell_elems}
+    sph_pids = {c.pid for c in state.sph_elems}
     for pid, part in sorted(state.parts.items()):
         if pid in state.composite_prop_ids:
             continue
@@ -568,7 +569,11 @@ def _assign_composite_props(state: ConversionState) -> None:
         # TYPE6 this pass allocates. Skipped BEFORE the element-kind ladder
         # below, which would otherwise read a tshell-only part as "no shell or
         # solid elements" and warn about a mesh that is perfectly fine.
-        if pid in tshell_pids:
+        # SPH parts belong to writer/sph.py for the same reason, and more
+        # strictly: the ONLY property an SPH part may carry is /PROP/SPH
+        # (IGTYP 34), so synthesizing any orthotropic shell/solid property for
+        # one would replace the particle property outright.
+        if pid in tshell_pids or pid in sph_pids:
             continue
         pc = state.part_composites.get(pid)
         is_composite_part = pc is not None and _layup_is_convertible(pc)
@@ -1292,6 +1297,7 @@ def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
     physically usable shell rather than a broken one.
     """
     tshell_pids = {e.pid for e in state.tshell_elems}
+    sph_pids = {c.pid for c in state.sph_elems}
     for pid, pc in sorted(state.part_composites.items()):
         if _layup_is_convertible(pc):
             continue
@@ -1303,7 +1309,11 @@ def _resolve_part_composite_fallbacks(state: ConversionState) -> None:
         # for any other. Only the variants with nowhere to put a layup AND a
         # thin-shell mesh (a TSHELL spelling on shells, _IGA_SHELL) fall back
         # to a plain shell property here.
-        if pid in state.tshell_prop_ids or pid in tshell_pids:
+        # An SPH-meshed part likewise: a *PART_COMPOSITE layup has nowhere to
+        # go on a particle cloud, and a fallback SectionShell under its SECID
+        # would collide with the /PROP/SPH (starter ERROR 79).
+        if (pid in state.tshell_prop_ids or pid in tshell_pids
+                or pid in sph_pids):
             continue
         total = _layup_thickness(pc)
         secid = pid
