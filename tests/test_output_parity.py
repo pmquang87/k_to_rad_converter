@@ -44,7 +44,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from k2rad import convert                                # noqa: E402
-from k2rad.assembly import _OFFSET_SPECS, _offset_block  # noqa: E402
+from k2rad.assembly import (                             # noqa: E402
+    _NO_ID_KEYWORDS, _OFFSET_SPECS, _offset_block,
+)
 from k2rad.handlers import HANDLERS, dispatch            # noqa: E402
 from k2rad.parser import parse_k_file                    # noqa: E402
 from k2rad.state import ConversionState                  # noqa: E402
@@ -253,8 +255,17 @@ class Dispatch(unittest.TestCase):
 
     def test_every_history_base_keyword_has_an_offset_row(self):
         """A keyword with a handler but no _OFFSET_SPECS row converts fine and
-        then silently keeps its ORIGINAL ids under *INCLUDE_TRANSFORM."""
-        for base, _opts in self.HISTORY:
+        then silently keeps its ORIGINAL ids under *INCLUDE_TRANSFORM.
+
+        Iterates the WHOLE generated spelling set, not just the HISTORY half:
+        checking only HISTORY is what let *SET_DISCRETE / *SET_DISCRETE_LIST
+        ship with a handler and no offset row. Those two are consumed by
+        *DATABASE_HISTORY_DISCRETE_SET, whose own reference IS offset, so the
+        two halves of one lookup moved apart and the channel vanished.
+        """
+        for base, _opts in self.HISTORY + self.OTHER:
+            if base in _NO_ID_KEYWORDS:
+                continue
             with self.subTest(base):
                 self.assertIn(base, _OFFSET_SPECS)
         self.assertIn("DATABASE_NODAL_FORCE_GROUP", _OFFSET_SPECS)
@@ -264,7 +275,6 @@ class Dispatch(unittest.TestCase):
         counts and flags. Without the declaration *INCLUDE_TRANSFORM warns
         "id offsets are NOT applied" on a card that has no ids to apply them
         to."""
-        from k2rad.assembly import _NO_ID_KEYWORDS
         for kw in ("DATABASE_RBDOUT", "DATABASE_BNDOUT", "DATABASE_NODFOR",
                    "DATABASE_TPRINT", "CONTROL_PARALLEL"):
             with self.subTest(kw):
@@ -1141,8 +1151,9 @@ class Bndout(unittest.TestCase):
             extra=SETS + fixed + CURVE + "*DATABASE_BNDOUT\n" + _row(1.0e-5),
             body=self.BODY))
         self.assertNotIn("TH_NODE_BNDOUT", starter)
-        self.assertTrue(_warns(result, "drives no node with a prescribed "
-                                       "motion"), result.warnings)
+        self.assertTrue(_warns(result, "drives no node with a "
+                                       "*BOUNDARY_PRESCRIBED_MOTION"),
+                        result.warnings)
 
     def test_a_deck_with_no_prescribed_motion_writes_no_group(self):
         result, starter, _ = _convert(deck(
@@ -1464,6 +1475,562 @@ class OffsetSpecs(unittest.TestCase):
                     [i + self.OFF[bucket] for i in before.db_histories[0].ids],
                     state.db_histories[0].ids, kw)
 
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class HistoryVariables(unittest.TestCase):
+    """The variable line of a *DATABASE_HISTORY_* group is PER FAMILY.
+
+    dyna2rad starts ``outVars`` at ``{"DEF"}`` and pushes ``STRAIN`` on the
+    SHELL and SOLID branches and ``A``/``AR``/``VR`` on the NODE branch
+    (converttimehistory.cxx:238-296). ``DEF`` alone is six channels on a node,
+    DX DY DZ VX VY VZ (hm_read_thgrou.F IVARNG row 1), so emitting only ``DEF``
+    dropped nine node channels that LS-DYNA's nodout carries plus the whole
+    element strain tensor.
+
+    MEASURED on a live shell+solid bending run, plain-DEF baseline vs this:
+    /TH/NODE 6 -> 15 channels, /TH/SHEL 11 -> 19, /TH/BRIC 11 -> 17, starter
+    0 ERROR(S), and the decoded T01 is byte-identical to the same deck with
+    dyna2rad's var lists planted by hand.
+    """
+
+    def _vars(self, starter: str, header: str):
+        line = _var_line(_block(starter, header))
+        return [line[k:k + 10].strip() for k in range(0, len(line), 10)]
+
+    def test_a_node_group_asks_for_the_accelerations_and_rotations(self):
+        _, starter, _ = _convert(deck(
+            extra="*DATABASE_HISTORY_NODE\n" + _row(1, 2)))
+        self.assertEqual(self._vars(starter, "/TH/NODE/"),
+                         ["DEF", "A", "AR", "VR"])
+
+    def test_a_shell_group_asks_for_the_strain_tensor(self):
+        _, starter, _ = _convert(deck(
+            body=NODES + SHELL + MAT + TERM,
+            extra="*DATABASE_HISTORY_SHELL\n" + _row(301)))
+        self.assertEqual(self._vars(starter, "/TH/SHEL/"), ["DEF", "STRAIN"])
+
+    def test_a_solid_group_asks_for_the_strain_tensor(self):
+        _, starter, _ = _convert(deck(
+            body=NODES + RIGID + MAT + TERM,
+            extra="*DATABASE_HISTORY_SOLID\n" + _row(401)))
+        self.assertEqual(self._vars(starter, "/TH/BRIC/"), ["DEF", "STRAIN"])
+
+    def test_beam_and_spring_groups_stay_on_DEF_alone(self):
+        """dyna2rad pushes nothing extra onto the BEAM or DISCRETE branch, and
+        neither STRAIN nor A/AR/VR is a legal /TH/BEAM or /TH/SPRING name."""
+        _, starter, _ = _convert(deck(
+            body=NODES + BEAMS + SPRINGS + MAT + TERM,
+            extra="*DATABASE_HISTORY_BEAM\n" + _row(101)
+                  + "*DATABASE_HISTORY_DISCRETE\n" + _row(201)))
+        self.assertEqual(self._vars(starter, "/TH/BEAM/"), ["DEF"])
+        self.assertEqual(self._vars(starter, "/TH/SPRING/"), ["DEF"])
+
+    def test_the_cells_are_left_justified_like_every_cfg_declares(self):
+        """Every /TH cfg says FREE_CELL_LIST(...,"%-10s",VAR,100) and every
+        hand-written var line in the writer emits "DEF       ". A right-
+        justified cell only parses because the reader trims it."""
+        _, starter, _ = _convert(deck(
+            extra="*DATABASE_HISTORY_NODE\n" + _row(1)))
+        self.assertEqual(_var_line(_block(starter, "/TH/NODE/")),
+                         "DEF       A         AR        VR        ")
+
+    def test_the_var_ruler_names_one_cell_per_variable(self):
+        _, starter, _ = _convert(deck(
+            extra="*DATABASE_HISTORY_NODE\n" + _row(1)))
+        blk = _block(starter, "/TH/NODE/")
+        ruler = [ln for ln in blk if ln.startswith("#var")][0]
+        self.assertEqual(ruler, "#var1     var2      var3      var4")
+
+    def test_the_cells_wrap_at_ten_per_line(self):
+        """FREE_CELL_LIST caps a line at 100 characters. No caller reaches
+        eleven today; the chunking is what keeps that true if one ever does."""
+        from k2rad.writer.output import _th_var_lines
+        got = _th_var_lines([f"V{k}" for k in range(23)])
+        self.assertEqual([len(ln) for ln in got], [100, 100, 30])
+        self.assertEqual(got[0][:20], "V0        V1        ")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#: shell 301 on part 3 (real) + shell 999 on part 77, which has NO *PART record
+#: -- parsed into state.shell_elems, warned about ("MESH LOSS") and never
+#: written, because writer/mesh.py emits elements per /PART.
+GHOST_SHELL = ("*ELEMENT_SHELL\n"
+               + f"{301:>8}{3:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n"
+               + f"{999:>8}{77:>8}{1:>8}{2:>8}{6:>8}{5:>8}\n"
+               + "*PART\nshells\n" + _row(3, 3, 1)
+               + "*SECTION_SHELL\n" + _row(3, 2)
+               + _row(1.0, 1.0, 1.0, 1.0))
+
+
+class ShellSolidScreen(unittest.TestCase):
+    """*DATABASE_HISTORY_{SHELL,SOLID,TSHELL}[_SET] are screened against the
+    elements the writer ACTUALLY emitted (#106).
+
+    Both the plain and the _SET spelling used to synthesize their id list from
+    the parsed container. MEASURED before the fix on the deck below: the
+    starter answered ``ERROR ID : 69 ... TH ELEMENT SELECTION ID=999 DOES NOT
+    EXIST`` twice and refused the whole deck.
+    """
+
+    def test_a_shell_in_a_part_less_pid_is_screened_out(self):
+        result, starter, _ = _convert(deck(
+            body=NODES + GHOST_SHELL + MAT + TERM,
+            extra="*DATABASE_HISTORY_SHELL\n" + _row(301, 999)))
+        self.assertEqual([_col_i(ln, 1, 10)
+                          for ln in _rows(_block(starter, "/TH/SHEL/"))], [301])
+        self.assertTrue(_warns(result, "not an emitted /SHELL or /SH3N"),
+                        result.warnings)
+
+    def test_the_set_spelling_is_screened_too(self):
+        """The _SET route is the NEW exposure: on master this keyword went to
+        skipped_keywords, so the deck converted and ran."""
+        result, starter, _ = _convert(deck(
+            body=NODES + GHOST_SHELL + MAT + TERM,
+            extra="*SET_SHELL_LIST\n" + _row(50) + _row(301, 999)
+                  + "*DATABASE_HISTORY_SHELL_SET\n" + _row(50)))
+        self.assertEqual([_col_i(ln, 1, 10)
+                          for ln in _rows(_block(starter, "/TH/SHEL/"))], [301])
+        self.assertTrue(_warns(result, "not an emitted /SHELL or /SH3N"))
+
+    def test_a_solid_in_a_part_less_pid_is_screened_out(self):
+        ghost = ("*ELEMENT_SOLID\n"
+                 + f"{401:>8}{4:>8}"
+                 + f"{1:>8}{2:>8}{4:>8}{3:>8}{5:>8}{6:>8}{6:>8}{5:>8}\n"
+                 + f"{888:>8}{78:>8}"
+                 + f"{1:>8}{2:>8}{4:>8}{3:>8}{5:>8}{6:>8}{6:>8}{5:>8}\n"
+                 + "*PART\nsolids\n" + _row(4, 4, 1)
+                 + "*SECTION_SOLID\n" + _row(4, 1))
+        result, starter, _ = _convert(deck(
+            body=NODES + ghost + MAT + TERM,
+            extra="*DATABASE_HISTORY_SOLID\n" + _row(401, 888)))
+        self.assertEqual([_col_i(ln, 1, 10)
+                          for ln in _rows(_block(starter, "/TH/BRIC/"))], [401])
+        self.assertTrue(_warns(result, "not an emitted /BRICK, /TETRA4 or "
+                                       "/TETRA10"), result.warnings)
+
+    def test_a_group_that_screens_to_nothing_is_not_written(self):
+        result, starter, _ = _convert(deck(
+            body=NODES + GHOST_SHELL + MAT + TERM,
+            extra="*DATABASE_HISTORY_SHELL\n" + _row(999)))
+        self.assertEqual(_th_headers(starter), [])
+        self.assertTrue(_warns(result, "not an emitted /SHELL or /SH3N"))
+
+    def test_the_shel_sh3n_split_reads_the_writer_registries(self):
+        """A collapsed quad is emitted as /SH3N, so its id belongs to /TH/SH3N.
+        Splitting by re-deciding the topology from state.shell_elems is a second
+        opinion that can drift; reading the two registries back cannot."""
+        mixed = ("*ELEMENT_SHELL\n"
+                 + f"{301:>8}{3:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n"
+                 + f"{302:>8}{3:>8}{1:>8}{2:>8}{4:>8}{4:>8}\n"
+                 + "*PART\nshells\n" + _row(3, 3, 1)
+                 + "*SECTION_SHELL\n" + _row(3, 2)
+                 + _row(1.0, 1.0, 1.0, 1.0))
+        _, starter, _ = _convert(deck(
+            body=NODES + mixed + MAT + TERM,
+            extra="*DATABASE_HISTORY_SHELL\n" + _row(301, 302)))
+        self.assertEqual([_col_i(ln, 1, 10)
+                          for ln in _rows(_block(starter, "/TH/SHEL/"))], [301])
+        self.assertEqual([_col_i(ln, 1, 10)
+                          for ln in _rows(_block(starter, "/TH/SH3N/"))], [302])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class ElementRegistryReach(unittest.TestCase):
+    """Every element row the writer emits reaches its registry.
+
+    The same discipline SpringProducerReach applies to /SPRING: the emitted ids
+    are parsed out of the starter TEXT and compared against the set, so neither
+    side reports on itself. A registry that under-claims silently drops a
+    user's channel; one that over-claims lets a stale id through into ERROR 69.
+    """
+
+    @staticmethod
+    def _emitted(starter: str, header: str, stride: int = 1):
+        out, inside, skip = set(), False, 0
+        for ln in starter.splitlines():
+            if ln.startswith(header):
+                inside, skip = True, 0
+                continue
+            if not inside:
+                continue
+            if ln.startswith("#---1----") or ln.startswith("/"):
+                inside = False
+                continue
+            # A COLUMN header sits INSIDE the block and is not its end.
+            if ln.startswith("#") or not ln.strip():
+                continue
+            if skip:
+                skip -= 1
+                continue
+            out.add(int(ln[:10]))
+            skip = stride - 1
+        return out
+
+    @staticmethod
+    def _state_and_starter(deck_text: str):
+        from k2rad.writer import build_starter
+        state = _dispatch(deck_text)
+        text = build_starter(state)
+        if isinstance(text, (list, tuple)):
+            text = "\n".join(text)
+        return state, text
+
+    def test_quads_and_tris_land_in_their_own_registry(self):
+        mixed = ("*ELEMENT_SHELL\n"
+                 + f"{301:>8}{3:>8}{1:>8}{2:>8}{4:>8}{3:>8}\n"
+                 + f"{302:>8}{3:>8}{1:>8}{2:>8}{4:>8}{4:>8}\n"
+                 + "*PART\nshells\n" + _row(3, 3, 1)
+                 + "*SECTION_SHELL\n" + _row(3, 2)
+                 + _row(1.0, 1.0, 1.0, 1.0))
+        state, starter = self._state_and_starter(
+            deck(body=NODES + mixed + MAT + TERM))
+        self.assertEqual(self._emitted(starter, "/SHELL/"),
+                         set(state.shell_elem_ids))
+        self.assertEqual(self._emitted(starter, "/SH3N/"),
+                         set(state.sh3n_elem_ids))
+        self.assertEqual(set(state.shell_elem_ids), {301})
+        self.assertEqual(set(state.sh3n_elem_ids), {302})
+
+    def test_bricks_land_in_the_solid_registry(self):
+        state, starter = self._state_and_starter(
+            deck(body=NODES + RIGID + MAT + TERM))
+        self.assertEqual(self._emitted(starter, "/BRICK/"),
+                         set(state.solid_elem_ids))
+        self.assertTrue(state.solid_elem_ids)
+
+    def test_tetrahedra_share_the_solid_registry(self):
+        """/TETRA4, /TETRA10 and /BRICK are ONE Radioss solid id pool (all three
+        land in IXS), and /TH/BRIC resolves any of them -- confirmed on a live
+        run: a /TH/BRIC naming two /TETRA4 ids gives 0 ERROR(S) and the T01
+        records both, with the STRAIN channels populated."""
+        tets = ("*ELEMENT_SOLID\n"
+                + f"{701:>8}{6:>8}\n"
+                + f"{1:>8}{2:>8}{3:>8}{5:>8}{5:>8}{5:>8}{5:>8}{5:>8}\n"
+                + f"{702:>8}{6:>8}\n"
+                + f"{2:>8}{4:>8}{3:>8}{6:>8}{6:>8}{6:>8}{6:>8}{6:>8}\n"
+                + "*PART\ntets\n" + _row(6, 6, 1)
+                + "*SECTION_SOLID\n" + _row(6, 10))
+        state, starter = self._state_and_starter(
+            deck(body=NODES + tets + MAT + TERM))
+        self.assertEqual(self._emitted(starter, "/TETRA4/"), {701, 702})
+        self.assertEqual(set(state.solid_elem_ids), {701, 702})
+
+    def test_thick_shells_share_the_solid_registry(self):
+        tsh = ("*ELEMENT_TSHELL\n"
+               + f"{801:>8}{7:>8}"
+               + f"{1:>8}{2:>8}{4:>8}{3:>8}{5:>8}{6:>8}{6:>8}{5:>8}\n"
+               + "*PART\ntshell\n" + _row(7, 7, 1)
+               + "*SECTION_TSHELL\n" + _row(7, 1))
+        state, starter = self._state_and_starter(
+            deck(body=NODES + tsh + MAT + TERM))
+        self.assertEqual(self._emitted(starter, "/BRICK/"), {801})
+        self.assertEqual(set(state.solid_elem_ids), {801})
+
+    def test_a_part_less_pid_reaches_no_registry(self):
+        """The whole point: state.shell_elems HAS element 999, the emitted deck
+        does not, and the registry sides with the deck."""
+        state, starter = self._state_and_starter(
+            deck(body=NODES + GHOST_SHELL + MAT + TERM))
+        self.assertIn(999, {e.eid for e in state.shell_elems})
+        self.assertEqual(self._emitted(starter, "/SHELL/"), {301})
+        self.assertEqual(set(state.shell_elem_ids), {301})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class SphNameColumn(unittest.TestCase):
+    """Screening a particle out must take its NAME with it.
+
+    _th_id_lines pairs names[k] with ids[k] POSITIONALLY, so filtering only the
+    id column slid every later heading onto the wrong particle. Reproduced
+    before the fix: 1 "alpha", 9999 "ghost", 2 "beta" on a deck holding only
+    1 and 2 emitted 1 "alpha" and 2 "GHOST".
+    """
+
+    SPH = ("*ELEMENT_SPH\n"
+           + f"{1:>8}{8:>8}{1.0e-6:>16}\n"
+           + f"{2:>8}{8:>8}{1.0e-6:>16}\n"
+           + "*PART\nsph\n" + _row(8, 8, 1)
+           + "*SECTION_SPH\n" + _row(8, 1.0, 1.2))
+
+    def test_a_dangling_particle_takes_its_heading_with_it(self):
+        result, starter, _ = _convert(deck(
+            body=NODES + self.SPH + MAT + TERM,
+            extra="*DATABASE_HISTORY_SPH_ID\n"
+                  + f"{1:>10}" + "alpha particle\n"
+                  + f"{9999:>10}" + "ghost particle\n"
+                  + f"{2:>10}" + "beta particle\n"))
+        rows = _rows(_block(starter, "/TH/SPHCEL/"))
+        self.assertEqual([(_col_i(ln, 1, 10), ln[20:].strip()) for ln in rows],
+                         [(1, "alpha particle"), (2, "beta particle")])
+        self.assertTrue(_warns(result, "not an emitted /SPHCEL"),
+                        result.warnings)
+
+    def test_a_request_that_screens_to_nothing_says_so(self):
+        result, starter, _ = _convert(deck(
+            body=NODES + self.SPH + MAT + TERM,
+            extra="*DATABASE_HISTORY_SPH\n" + _row(9998, 9999)))
+        self.assertEqual(_th_headers(starter), [])
+        self.assertTrue(_warns(result, "none of the requested ids resolves to "
+                                       "an emitted /SPHCEL"), result.warnings)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class LocalIdHeadingWalk(unittest.TestCase):
+    """The _LOCAL_ID heading is claimed BEFORE the non-positive-id guard.
+
+    ``assembly._off_db_history(local=True)`` claims it unconditionally, so
+    running the guard first left the heading in the handler's walk. A heading
+    whose columns 1-10 happen to parse was then read as an entity id.
+    REPRODUCED: id 0 followed by ``"9000      Beam A"`` made the handler invent
+    entity 9000, swallow the REAL next entity card as that entity's heading,
+    and lose BOTH channels the card asked for.
+    """
+
+    BODY = (_row(0, 0, 0, 0) + "9000      Beam A\n"
+            + _row(2, 70, 1, 0) + "second node\n")
+
+    def test_a_zero_id_does_not_desync_the_heading_pairing(self):
+        state = _dispatch("*KEYWORD\n*DATABASE_HISTORY_NODE_LOCAL_ID\n"
+                          + self.BODY + "*END\n")
+        dbh = state.db_histories[0]
+        self.assertEqual(dbh.ids, [2])
+        self.assertEqual(dbh.names, ["second node"])
+        self.assertEqual(dbh.cids, [70])
+
+    def test_the_offset_walk_agrees_on_the_same_block(self):
+        """The #119 invariant on the spelling that was missing from it: offset
+        the block, dispatch the offset text, and check the handler sees exactly
+        the ids it saw before, moved by their bucket."""
+        before = _dispatch("*KEYWORD\n*DATABASE_HISTORY_NODE_LOCAL_ID\n"
+                           + self.BODY + "*END\n")
+        raw = OffsetSpecs()._off("*DATABASE_HISTORY_NODE_LOCAL_ID", self.BODY)
+        state = ConversionState()
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n*DATABASE_HISTORY_NODE_LOCAL_ID\n"
+                     + "\n".join(raw) + "\n*END\n")
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        self.assertEqual(
+            [i + OffsetSpecs.OFF["n"] for i in before.db_histories[0].ids],
+            state.db_histories[0].ids)
+        self.assertEqual(before.db_histories[0].names,
+                         state.db_histories[0].names)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class DbCardWithoutDt(unittest.TestCase):
+    """A presence-only *DATABASE_ card whose DT is blank or 0 warns.
+
+    The reference triggers on presence alone (convertrigids.cxx:767,
+    dyna2rad.cxx:461). k2rad gates on the interval, which is right -- DT=0 is
+    "no output is printed" (Vol I R16 p.16-7) and a blank DT defers to an LCDT
+    curve /TFILE cannot express -- but doing it silently turned a mistyped DT
+    into an empty T01 selection with no diagnostic anywhere.
+    """
+
+    BODY = NODES + RIGID + MAT + TERM
+
+    def test_a_zero_dt_rbdout_warns(self):
+        result, starter, _ = _convert(deck(
+            body=self.BODY, extra="*DATABASE_RBDOUT\n" + _row(0.0)))
+        self.assertNotIn("/TH/RBODY/", starter)
+        self.assertTrue(_warns(result, "*DATABASE_RBDOUT is present but its DT "
+                                       "field is blank"), result.warnings)
+
+    def test_a_blank_dt_rbdout_warns(self):
+        """DT blank, LCDT in field 3 -- a real LS-DYNA spelling, and the one
+        that is NOT covered by "no output is printed"."""
+        result, _starter, _ = _convert(deck(
+            body=self.BODY,
+            extra="*DATABASE_RBDOUT\n" + " " * 10 + f"{0:>10}{12:>10}\n"))
+        self.assertTrue(_warns(result, "*DATABASE_RBDOUT is present but its DT "
+                                       "field is blank"), result.warnings)
+
+    def test_a_zero_dt_bndout_warns(self):
+        result, starter, _ = _convert(deck(
+            body=self.BODY, extra="*DATABASE_BNDOUT\n" + _row(0.0)))
+        self.assertNotIn("TH_NODE_BNDOUT", starter)
+        self.assertTrue(_warns(result, "*DATABASE_BNDOUT is present but its DT "
+                                       "field is blank"), result.warnings)
+
+    def test_an_ABSENT_card_says_nothing(self):
+        """The gate must not fire on the default 0.0 of a deck that never
+        mentioned the keyword -- that would warn on every deck in the corpus."""
+        result, _starter, _ = _convert(deck(body=self.BODY))
+        self.assertEqual(_warns(result, "is present but its DT field"), [])
+
+    def test_a_positive_dt_still_emits(self):
+        _, starter, _ = _convert(deck(
+            body=self.BODY, extra="*DATABASE_RBDOUT\n" + _row(1.0e-4)))
+        self.assertIn("/TH/RBODY/", starter)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TfileMembership(unittest.TestCase):
+    """/TFILE counts a dt only when the card it came from paces a real channel.
+
+    The rule the batch states for *DATABASE_TPRINT -- "a card with no /TH
+    consumer would only thicken the T01 for channels that are not in it" --
+    applies to BNDOUT, RBDOUT and NODFOR on a deck where the group is not
+    emitted, and 52 of the 118 *DATABASE_BNDOUT decks in the corpus are exactly
+    that case.
+    """
+
+    @staticmethod
+    def _tfile(engine: str):
+        lines = engine.splitlines()
+        i = [k for k, ln in enumerate(lines) if ln.startswith("/TFILE")][0]
+        return float(lines[i + 1])
+
+    def test_a_bndout_with_no_driven_node_does_not_pace_the_tfile(self):
+        _, _starter, engine = _convert(deck(
+            extra="*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_BNDOUT\n" + _row(1.0e-6)))
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-3)
+
+    def test_a_bndout_that_DOES_emit_still_paces_the_tfile(self):
+        motion = "*BOUNDARY_PRESCRIBED_MOTION_NODE\n" + _row(1, 1, 2, 1, 1.0)
+        _, starter, engine = _convert(deck(
+            extra=CURVE + motion + "*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_BNDOUT\n" + _row(1.0e-6)))
+        self.assertIn("TH_NODE_BNDOUT", starter)
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-6)
+
+    def test_an_rbdout_with_no_rigid_body_does_not_pace_the_tfile(self):
+        _, _starter, engine = _convert(deck(
+            extra="*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_RBDOUT\n" + _row(1.0e-6)))
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-3)
+
+    def test_an_rbdout_that_DOES_emit_still_paces_the_tfile(self):
+        _, starter, engine = _convert(deck(
+            body=NODES + RIGID + MAT + TERM,
+            extra="*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_RBDOUT\n" + _row(1.0e-6)))
+        self.assertIn("/TH/RBODY/", starter)
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-6)
+
+    def test_a_nodfor_with_no_group_card_does_not_pace_the_tfile(self):
+        _, _starter, engine = _convert(deck(
+            extra="*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_NODFOR\n" + _row(1.0e-6)))
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-3)
+
+    def test_a_nodfor_with_a_group_card_paces_the_tfile(self):
+        _, starter, engine = _convert(deck(
+            extra=SETS + "*DATABASE_GLSTAT\n" + _row(1.0e-3)
+                  + "*DATABASE_NODFOR\n" + _row(1.0e-6)
+                  + "*DATABASE_NODAL_FORCE_GROUP\n" + _row(10)))
+        self.assertIn("/TH/NODE/", starter)
+        self.assertAlmostEqual(self._tfile(engine), 1.0e-6)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class SetDiscreteOffsets(unittest.TestCase):
+    """*SET_DISCRETE[_LIST] under *INCLUDE_TRANSFORM.
+
+    The set had a handler and no _OFFSET_SPECS row. Inert until this batch gave
+    it a consumer: *DATABASE_HISTORY_DISCRETE_SET offsets its set-id reference
+    through ``_off_db_history("s")``, so the two halves of one lookup moved
+    apart. MEASURED on an IDSOFF=6000 / IDEOFF=2000 include: without the rows
+    the history card resolved to nothing and the /TH/SPRING was dropped; with
+    them the group lists the include's own spring 2201.
+    """
+
+    def test_both_spellings_have_an_offset_row(self):
+        for kw in ("SET_DISCRETE", "SET_DISCRETE_LIST"):
+            with self.subTest(kw):
+                self.assertIn(kw, _OFFSET_SPECS)
+
+    def test_the_set_id_and_its_members_move_together(self):
+        raw = OffsetSpecs()._off("*SET_DISCRETE_LIST",
+                                 _row(21) + _row(201, 202))
+        self.assertEqual(_col_i(raw[0], 1, 10), 521)          # + IDSOFF
+        self.assertEqual([_col_i(raw[1], 1, 10), _col_i(raw[1], 11, 20)],
+                         [231, 232])                          # + IDEOFF
+
+    def test_the_history_reference_lands_on_the_same_set_id(self):
+        """The invariant that actually matters: whatever the set id becomes,
+        the *DATABASE_HISTORY_DISCRETE_SET reference must become the same."""
+        set_raw = OffsetSpecs()._off("*SET_DISCRETE", _row(21) + _row(201))
+        ref_raw = OffsetSpecs()._off("*DATABASE_HISTORY_DISCRETE_SET", _row(21))
+        self.assertEqual(_col_i(set_raw[0], 1, 10), _col_i(ref_raw[0], 1, 10))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class NodalForceGroupBanner(unittest.TestCase):
+    """One section banner for the whole block, like every other /TH section."""
+
+    TWO = (SETS + "*DATABASE_NODFOR\n" + _row(1.0e-4)
+           + "*DATABASE_NODAL_FORCE_GROUP\n" + _row(10)
+           + "*DATABASE_NODAL_FORCE_GROUP\n" + _row(11))
+
+    def test_two_group_cards_share_one_banner(self):
+        _, starter, _ = _convert(deck(extra=self.TWO))
+        banners = [ln for ln in starter.splitlines()
+                   if ln.startswith("#-  TIME HISTORY (*DATABASE_NODAL_FORCE")]
+        self.assertEqual(len(banners), 1)
+        self.assertEqual(len(_blocks(starter, "/TH/NODE/")), 2)
+
+    def test_the_nsid_still_appears_per_group(self):
+        _, starter, _ = _convert(deck(extra=self.TWO))
+        self.assertEqual(
+            len([ln for ln in starter.splitlines() if "#  nsid=" in ln]), 2)
+
+    def test_a_deck_whose_only_group_drops_writes_no_banner(self):
+        result, starter, _ = _convert(deck(
+            extra="*DATABASE_NODFOR\n" + _row(1.0e-4)
+                  + "*DATABASE_NODAL_FORCE_GROUP\n" + _row(999)))
+        self.assertNotIn("#-  TIME HISTORY (*DATABASE_NODAL_FORCE", starter)
+        self.assertTrue(_warns(result, "no converted *SET_NODE"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class ThToCsvRbodyChannels(unittest.TestCase):
+    """tools/th_to_csv.py has to know about the group this batch emits.
+
+    /TH/RBODY FX..MZ are an accumulated impulse (rgbodfp.F:261-266
+    ``FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)``); RX/RY/RZ integrate the angular VELOCITY
+    (rgbodv.F:91-93) and ARE the rotation angle, so they must NOT be
+    differentiated.
+    """
+
+    @staticmethod
+    def _mod():
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "tools" / "th_to_csv.py"
+        spec = importlib.util.spec_from_file_location("_th_to_csv", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_the_force_and_moment_channels_are_accumulated(self):
+        mod = self._mod()
+        for var in ("FX", "FY", "FZ", "MX", "MY", "MZ"):
+            with self.subTest(var):
+                self.assertTrue(mod.is_accumulated("RBODY", var))
+
+    def test_the_rotation_channels_are_not(self):
+        mod = self._mod()
+        for var in ("RX", "RY", "RZ"):
+            with self.subTest(var):
+                self.assertFalse(mod.is_accumulated("RBODY", var))
+
+    def test_every_accumulated_name_is_a_real_channel_of_its_group(self):
+        """A typo in the table is silent: the column simply never gets a _ddt
+        sibling. Cross-check each name against the group's own var table."""
+        mod = self._mod()
+        for group, names in mod.ACCUMULATED_CHANNELS.items():
+            table = mod._TYPED_VAR_TABLES.get(group)
+            if table is None:
+                continue
+            for var in names:
+                with self.subTest(f"{group}.{var}"):
+                    self.assertIn(var, table)
 
 # ═════════════════════════════════════════════════════════════════════════════
 class ByteIdentity(unittest.TestCase):

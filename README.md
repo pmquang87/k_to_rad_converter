@@ -2625,16 +2625,42 @@ impulses, not the instantaneous section resultants secforc reports** —
 `d(FNX)/dt`
 `*DATABASE_HISTORY_SHELL` → `/TH/SHEL`, and `/TH/SH3N` for any named element
 the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
-shells, so a triangle listed there is absent from the T01);
+shells, so a triangle listed there is absent from the T01). The split reads the
+writer's own two registries back rather than re-deciding the topology, so the
+group and the element block cannot drift;
 `*DATABASE_HISTORY_SOLID` and `*DATABASE_HISTORY_TSHELL` → `/TH/BRIC` (a thick
 shell IS a `/BRICK` in the emitted deck); `*DATABASE_HISTORY_SPH` and
 `*DATABASE_HISTORY_SPH_SET` → `/TH/SPHCEL` (the `_SET` form's ids are
-`*SET_NODE` ids, not particle ids, and are expanded first). **Both are screened
-against the `/SPHCEL` cells the conversion actually emitted**: a `/TH` group
-naming an element the deck does not define is starter `ERROR 69` and the whole
-run is refused, so a dangling id is dropped with a named warning and a group
-that screens to nothing is not written at all (`ERROR 1109`);
+`*SET_NODE` ids, not particle ids, and are expanded first).
+**EVERY family is screened against the entities the conversion actually
+emitted** — nodes against `state.nodes`, SPH against `state.sph_cell_ids`,
+beams against `beam_elem_ids ∪ spring_elem_ids`, discretes against
+`spring_elem_ids`, shells against `shell_elem_ids ∪ sh3n_elem_ids`, solids and
+thick shells against `solid_elem_ids`. Each of those registries is filled **at
+the line that writes the element row**, never derived from the parsed
+container, because the two differ: an `*ELEMENT_SHELL` whose PID has no `*PART`
+record is parsed and warned about ("MESH LOSS") and then never written. A `/TH`
+group naming an element the deck does not define is starter `ERROR 69` and the
+whole run is refused — measured: a two-shell deck with one such element gave
+`ERROR ID : 69 ... TH ELEMENT SELECTION ID=999 DOES NOT EXIST` twice. So a
+dangling id is dropped with a named warning, and a group that screens to
+nothing is not written at all. Note that an entity-less group is **not** an
+error: `hm_read_thgrne.F:123` raises `ERROR 1109` only for `NVAR == 0` (no
+VARIABLE), and a group with a title, a var line and no id card is accepted,
+runs, and writes a T01 group holding zero entities — a silent channel loss,
+which is why the guard exists;
 `*DATABASE_HISTORY_NODE` → `/TH/NODE`
+**The variable line is PER FAMILY, dyna2rad's `outVars` verbatim**
+(`converttimehistory.cxx:238-296`): `/TH/NODE` asks for `DEF A AR VR`,
+`/TH/SHEL` / `/TH/SH3N` / `/TH/BRIC` for `DEF STRAIN`, and `/TH/BEAM`,
+`/TH/SPRING` and `/TH/SPHCEL` for `DEF` alone. `DEF` on a node is only six
+channels — `DX DY DZ VX VY VZ` (`hm_read_thgrou.F` `IVARNG` row 1) — so
+without `A`/`AR`/`VR` a `*DATABASE_HISTORY_NODE` drops the nine acceleration
+and rotation channels LS-DYNA's own `nodout` carries, and an element group
+without `STRAIN` drops the strain tensor. Measured against the plain-`DEF`
+baseline on one run: `/TH/NODE` 6 → 15 channels, `/TH/SHEL` 11 → 19,
+`/TH/BRIC` 11 → 17, starter `0 ERROR(S)`, every added channel carrying real
+time-varying data
 `*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM`, **and `/TH/SPRING` for any named
 element k2rad emitted as a spring** — an `*ELEMENT_BEAM` on a `*MAT_SPOTWELD`
 part or on a `*SECTION_BEAM` `ELFORM=6` part is a `/PROP/TYPE13`/`TYPE8`

@@ -344,12 +344,187 @@ Prior history (before this changelog was introduced) is summarized in the
       whose two output decks hash the same but whose warnings or notes changed),
       so nothing shifted a diagnostic without shifting a card.
 
-  Not in scope, and deliberately left: `/TH/SHEL`, `/TH/SH3N` and `/TH/BRIC`
-  are still NOT screened against an emitted-element registry (their elements
-  are written from ten different places in `writer/mesh.py` and adding the
-  registry is a batch of its own), so a `*DATABASE_HISTORY_SHELL/_SOLID/
-  _TSHELL` naming an element k2rad dropped is still `ERROR 69`. The
-  pre-existing pass-through behaviour is unchanged.
+  **Review round.** Eleven findings from the fidelity / code / solver reviews
+  were confirmed against the source and fixed; two were rejected with reasons
+  (below). The behaviour changes worth naming:
+
+  * **The variable line is now PER FAMILY, not `DEF` everywhere.** dyna2rad
+    starts `outVars` at `{"DEF"}` and pushes `STRAIN` on the SHELL and SOLID
+    branches and `A`/`AR`/`VR` on the NODE branch
+    (`converttimehistory.cxx:238-296`); k2rad emitted the bare `DEF` for all of
+    them. On a node `DEF` is only six channels — `DX DY DZ VX VY VZ`
+    (`hm_read_thgrou.F` `IVARNG` row 1) — so every `*DATABASE_HISTORY_NODE`
+    silently dropped the accelerations and the rotational velocity and
+    acceleration that LS-DYNA's own `nodout` carries, and every element group
+    dropped the strain tensor. MEASURED on a shell + solid bending probe, the
+    plain-`DEF` baseline against this, same run: `/TH/NODE` 6 → **15**
+    channels, `/TH/SHEL` 11 → **19**, `/TH/BRIC` 11 → **17**, starter
+    `0 ERROR(S)`, and every added channel carries real time-varying data. The
+    decoded T01 is now **byte-identical** to the same deck with dyna2rad's var
+    lists planted into the `.rad` by hand. The one structural zero is
+    `VR*`/`AR*` on a node that belongs only to solids, where the dof genuinely
+    does not exist — a true answer, unlike the un-computed zero that keeps
+    `*DATABASE_TPRINT` out (above). Confirmed legal on `/TH/SH3N` and on a
+    `/TH/BRIC` built from `/TETRA4` ids by live starter runs.
+
+  * **`/TH/SHEL`, `/TH/SH3N` and `/TH/BRIC` ARE screened now** — the item this
+    batch previously listed as out of scope. `state.shell_elem_ids`,
+    `sh3n_elem_ids` and `solid_elem_ids` are filled at the six lines in
+    `_make_parts_and_elements` that write an element row (the "written from ten
+    different places" estimate was wrong; they are six, all in one function).
+    An `*ELEMENT_SHELL` whose PID has no `*PART` record is parsed into
+    `state.shell_elems` and warned about ("MESH LOSS") but never written, and
+    both the plain and the new `_SET` spelling synthesized their id list from
+    that parsed container: MEASURED on a two-shell deck, the starter answered
+    `ERROR ID : 69 ... TH ELEMENT SELECTION ID=999 DOES NOT EXIST` **twice** and
+    refused the deck. The SHEL/SH3N split now reads the two registries back
+    instead of re-deciding the topology, so the group and the element block
+    cannot drift. `/TETRA4`, `/TETRA10` and `/BRICK` share `solid_elem_ids`
+    because they share one Radioss solid id pool (all three land in `IXS`) —
+    confirmed live: a `/TH/BRIC` naming two `/TETRA4` ids gives `0 ERROR(S)` and
+    records both. **Audited independently over 394 corpus decks** by parsing
+    every emitted element block out of the `.rad` text and comparing it against
+    the registry in both directions: **0 mismatches**, all six families.
+
+  * **`*SET_DISCRETE` / `*SET_DISCRETE_LIST` get their `_OFFSET_SPECS` rows.**
+    They had a handler and no offset map, which was inert until this batch gave
+    the set a consumer — `*DATABASE_HISTORY_DISCRETE_SET` offsets its set-id
+    reference through `_off_db_history("s")`, so under an `*INCLUDE_TRANSFORM`
+    the two halves of one lookup moved apart. MEASURED on an IDSOFF=6000 /
+    IDEOFF=2000 include: without the rows the history card resolved to nothing
+    and the `/TH/SPRING` was dropped; with them the group lists the include's
+    own spring `2201` rather than the parent deck's. The `#116` spelling test
+    now iterates the whole generated set, not just the HISTORY half.
+
+  * **`*DATABASE_HISTORY_SPH[_ID]` goes through `_th_screen`** like every other
+    family, so screening a particle out takes its NAME with it. It used to
+    reassign only the id column while `_th_id_lines` pairs `names[k]` with
+    `ids[k]` positionally: a dangling id in the middle of the list slid every
+    later heading onto the wrong particle (`501 "alpha"`, `9999 "ghost"`,
+    `502 "beta"` on a deck holding only 501/502 emitted `502 "ghost particle"`).
+
+  * **The `_LOCAL_ID` walk claims its heading BEFORE the non-positive-id
+    guard**, where `assembly._off_db_history(local=True)` claims it — the #119
+    rule. A heading whose columns 1-10 happen to parse was otherwise read as an
+    entity id: `id 0` followed by `"9000      Beam A"` made the handler invent
+    entity 9000, swallow the REAL next entity card as that entity's heading,
+    and lose BOTH channels the card asked for.
+
+  * **A present `*DATABASE_RBDOUT` / `*DATABASE_BNDOUT` with a blank or zero DT
+    now warns.** The reference trigger is presence alone
+    (`convertrigids.cxx:767`, `dyna2rad.cxx:461`); k2rad also needs a positive
+    interval, which is right — `DT=0` is "no output is printed" (Vol I R16
+    p. 16-7) and a blank DT defers to an `LCDT` curve `/TFILE` cannot express —
+    but doing it silently turned a mistyped DT into an empty T01 selection with
+    no diagnostic. Two new `db_*_seen` flags separate "card absent" from "card
+    present, no usable interval" so the warning fires only for the second.
+
+  * **`/TFILE` counts a dt only when its card paces a channel that is in the
+    T01.** `state.db_bndout_dt` / `db_rbdout_dt` / `db_nodfor_dt` are each gated
+    on their own consumer, which is the same argument that keeps
+    `*DATABASE_TPRINT` out and it has to apply here too or the rule is not a
+    rule. It is reachable: 52 of the 118 `*DATABASE_BNDOUT` decks in the corpus
+    carry no `*BOUNDARY_PRESCRIBED_MOTION`.
+
+  * **`tools/th_to_csv.py` learns `/TH/RBODY`.** `ACCUMULATED_CHANNELS` had no
+    row for the group this batch newly emits, so its `FX..MZ` columns got no
+    differentiated sibling — while the RBDOUT warning tells the user the force
+    is `d(FX)/dt` "the same treatment `/TH/INTER` and `/TH/NODE REAC*` need".
+    Only the force/moment half is listed (`rgbodfp.F:261-266`); `RX/RY/RZ`
+    integrate the angular VELOCITY (`rgbodv.F:91-93`) and ARE the rotation
+    angle, so differentiating them would turn an angle back into a rate.
+
+  * **The "an empty `/TH` group is starter `ERROR 1109`" claim was wrong and is
+    corrected everywhere it appeared.** `hm_read_thgrne.F:123` raises 1109 only
+    for `NVAR == 0` (no VARIABLE). A group with a title, a `DEF` line and zero
+    id cards is ACCEPTED, runs to NORMAL TERMINATION and writes a T01 group
+    holding zero entities — which is worse than a refusal, not milder: on the
+    Yaris deck that was 94 channels lost in silence. The empty-group guard is
+    right and stays; only its justification changes.
+
+  * Cosmetic, in the same pass: the `*DATABASE_NODAL_FORCE_GROUP` section
+    banner is emitted once instead of once per card; the variable cells are
+    LEFT-justified, as every `/TH` cfg declares
+    (`FREE_CELL_LIST(...,"%-10s",VAR,100)`) and as every hand-written var line
+    in the writer already was; the `/RBODY` producer count says three Radioss
+    emission sites (four LS-DYNA sources funnelling through the first) instead
+    of "four producers", matching the `1 of 3` annotations at the sites; and
+    the `*DATABASE_DEFORC`/`_DISBOUT` note no longer says k2rad does not
+    convert `*DATABASE_HISTORY_DISCRETE`, which this batch does.
+
+  **Rejected, with reasons.**
+
+  * *"Register the `*RIGIDWALL_GEOMETRIC_*_MOTION` carrier nodes into the
+    `*DATABASE_BNDOUT` scope, because dyna2rad does."* dyna2rad does, but only
+    because it rebuilds the scope by re-walking the OUTPUT model's `/IMPVEL`
+    cards (`dyna2rad.cxx:456-479`) and cannot tell a prescribed motion from a
+    rigid-wall driver. LS-DYNA reports a wall reaction in `rwforc`, i.e.
+    `*DATABASE_RWFORC` → `/TH/RWALL`, never in `bndout`; k2rad's carrier nodes
+    are SYNTHESIZED (`loads.py:4980`), so they carry ids that appear in no
+    LS-DYNA deck; and they are massless free nodes with no element, so their
+    `REAC*` is identically zero — the same flat-channel-that-reads-as-data the
+    `*DATABASE_TPRINT` decision refused. The exclusion is now argued in
+    `_make_geometric_rwall_motion` and in `_make_starter_th_bndout`, and the
+    warning text no longer claims the deck has "no converted /IMPDISP, /IMPVEL
+    or /IMPACC" when it has one.
+
+  * Two pre-existing defects found during solver validation are real and are
+    **out of scope for an output-parity change**, because both move mass or
+    energy on solver-validated paths: `*ELEMENT_MASS` on a
+    `*CONSTRAINED_NODAL_RIGID_BODY` SECONDARY node is silently dropped
+    (`writer/rbody.py:969` reads only the master node's added mass, while the
+    `*MAT_RIGID` branch at `:559` sums over all of the part's nodes and
+    `_make_added_masses` skips every rigid-body node); and OpenRadioss's
+    default time-step factor 0.9 was observed to diverge on a plain converted
+    elastic solid bar where 0.7 and below converge. Both need their own PR and
+    their own validation.
+
+  **Review-round validation.**
+
+  * *Corpus, `origin/master` vs the branch over SHA-256 of both `.rad` files
+    plus the warning / skipped / note sets:* **395 decks, 0 conversion errors
+    on either side, 41 identical, 354 moved.** Every one of the 354 carries at
+    least one batch keyword; **0 moved without one and 0 keyword-carrying deck
+    failed to move**; **0 log-only movers**; **no keyword newly appears in
+    `skipped_keywords` anywhere**; and none of the 41 unchanged decks carries a
+    batch keyword. The mover count is up from 193 before the review round
+    purely because of the variable-line fix: 334 of them carry a
+    `*DATABASE_HISTORY_NODE`, 203 a `_SHELL`, 160 a `_SOLID`, and each of those
+    groups now asks for its family's variables instead of the bare `DEF`.
+  * *Is the starter delta exactly the `/TH` region?* Deleting every `/TH` block,
+    its banner, the rules around it and the `#-- SKIPPED` notes leaves the two
+    starters **identical**, including on the 1.49-million-line Yaris roof-crush
+    deck.
+  * *Engine:* exactly **3** of 395 engine decks differ. Two are the
+    `*CONTROL_PARALLEL` decks (`+/PARITH/ON` on `2Dlag.k`, `+/PARITH/OFF` on
+    `projectile.k`) and the third is `000_yaris_dynamic_roof_crush_01.k`, whose
+    `/TFILE` drops 0.01 → 1e-4 because it really does emit a `TH_NODE_BNDOUT`
+    group. The consumer gate was measured over all 140 decks carrying one of
+    the three gated cards and changes `/TFILE` on exactly **one**:
+    `000_yaris_stat_doorsag_fine_02.k`, which asks for `*DATABASE_BNDOUT` at
+    1e-3, drives no node with a `*BOUNDARY_PRESCRIBED_MOTION`, and therefore
+    keeps master's 0.01 instead of writing a 10x denser T01 for channels that
+    do not exist.
+  * *Registry audit, independent of the registries:* every emitted `/SHELL`,
+    `/SH3N`, `/BRICK`, `/TETRA4`, `/TETRA10`, `/BEAM`, `/SPRING` and `/SPHCEL`
+    row was parsed out of the `.rad` TEXT on **394 decks** and compared against
+    `state.*_elem_ids` in both directions: **0 mismatches**. (The first run of
+    that auditor cried wolf on `/SPRING` and `/SPHCEL` because it treated the
+    `# sprg_ID  node_ID1` column header as the end of the block; the registries
+    were right and the check was wrong.)
+  * *Live solver:* a deck exercising every reviewed route at once — quad and
+    tri shells, solids, a beam, a discrete spring, a rigid body, a prescribed
+    motion, `_NODE`, `_NODE_LOCAL_ID` (with a zero-id row), `_SHELL_SET`,
+    `_SOLID`, `_BEAM`, `_DISCRETE`, two nodal-force groups, RBDOUT, BNDOUT and
+    `/PARITH/ON` — gives **0 ERROR(S)** and NORMAL TERMINATION at 4542 cycles.
+    The prescribed node, driven at a constant 1000 mm/s stated before the run,
+    reports `DZ(t) = 1000*t` to within **0.00001 %** and `VZ = 1000.0000`
+    exactly at every sampled state. The deck that used to answer `ERROR 69`
+    twice now gives 0 ERROR(S).
+  * *Tests:* **3345 passed, 2 skipped, 1055 subtests** (master baseline
+    measured in a worktree at `a6484f7`: 3202 / 2 / 922). `ruff check k2rad/
+    tests/ tools/` clean. All **11** review-round fixes were mutation-checked
+    one at a time — reverting each one produces a failing test.
 
 - **The SPH batch: `*ELEMENT_SPH` (+ `_VOLUME`) → `/SPHCEL`, `*SECTION_SPH`
   (+ `_ELLIPSE` / `_TENSOR` / `_INTERACTION` / `_USER`) → `/PROP/SPH`

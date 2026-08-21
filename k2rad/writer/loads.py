@@ -5005,6 +5005,18 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
     cards are the local Y' and Z' (NOT X and Y), and the starter rebuilds
     X' = Y' x Z' (hm_read_skw.F:448-459): with Y' = ê x V and Z' = V x Y',
     X' = Y' x Z' = V |Y'|^2, i.e. exactly +V.
+
+    This is the THIRD /IMP* emission site in the writer, and the only one that
+    does NOT call ``_register_imp_motion_nodes``. Deliberate, not an omission:
+    that registry is the *DATABASE_BNDOUT scope, and LS-DYNA reports a rigid
+    wall's reaction in ``rwforc`` (-> *DATABASE_RWFORC -> /TH/RWALL), never in
+    ``bndout``. The carrier nodes are synthesized by k2rad as well — massless
+    free nodes that appear in no LS-DYNA deck and whose REAC* is identically
+    zero — so listing them would name ids the deck author never wrote and fill
+    the channel with zeros. dyna2rad does sweep them in, but only because it
+    rebuilds the scope by re-walking the OUTPUT model's /IMPVEL cards
+    (dyna2rad.cxx:456-479) and cannot tell the two sources apart. See
+    ``writer/output.py::_make_starter_th_bndout``.
     """
     v = _vnorm((rw.vx, rw.vy, rw.vz))
     # ê = global Z, or global X when V is parallel to Z (a zero cross product).

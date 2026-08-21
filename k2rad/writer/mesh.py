@@ -1578,6 +1578,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     row += "         0"          # blank field, cols 51-60
                     row += _shell_optional_fields(e, [0, 1, 2, 3], sec_t)
                     lines.append(row)
+                    # The #106 register, the /SHELL half. See the note on the
+                    # /BEAM one below: recorded at the line that writes the row
+                    # so a part with no *PART record — never visited by this
+                    # loop — cannot reach a /TH/SHEL group.
+                    state.shell_elem_ids.add(e.eid)
                 lines.append(HDR)
             if tris:
                 # /SH3N shares the part's /PROP/SHELL (its Ish3n field selects the
@@ -1593,6 +1598,10 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                         # to column 60 so Phi/Thick land at 61-80 / 81-100.
                         row += " " * 10 + tail
                     lines.append(row)
+                    # The #106 register, the /SH3N half — the split /TH/SHEL vs
+                    # /TH/SH3N reads back, so it can never re-decide the
+                    # topology differently from this loop.
+                    state.sh3n_elem_ids.add(e.eid)
                 lines.append(HDR)
         if pid in solids_by_pid:
             # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an
@@ -1632,6 +1641,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     for n in nd:
                         row += _i(n)
                     lines.append(row)
+                    # The #106 register. /TETRA4, /TETRA10 and /BRICK share one
+                    # Radioss solid id pool (all three land in IXS), so
+                    # /TH/BRIC resolves any of them and all three register into
+                    # the same set.
+                    state.solid_elem_ids.add(eid)
                     _tick()
                 lines.append(HDR)
             if tets10:
@@ -1645,6 +1659,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 for e in tets10:
                     lines.append(_i(e.eid))
                     lines.append("".join(_i(n) for n in e.nodes[:10]))
+                    state.solid_elem_ids.add(e.eid)          # #106 register
                     _tick()
                 lines.append(HDR)
             if bricks:
@@ -1657,6 +1672,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     for n in nodes[:8]:
                         row += _i(n)
                     lines.append(row)
+                    state.solid_elem_ids.add(e.eid)          # #106 register
                     _tick()
                 lines.append(HDR)
         if pid in tshells_by_pid:
@@ -1689,6 +1705,9 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                 for n in e.nodes[:8]:
                     row += _i(n)
                 lines.append(row)
+                # #106 register. A thick shell IS a /BRICK here, so
+                # *DATABASE_HISTORY_TSHELL screens against the same set.
+                state.solid_elem_ids.add(e.eid)
             lines.append(HDR)
         if pid in sph_by_pid:
             # *ELEMENT_SPH → /SPHCEL/<part_ID>, one row per particle. The cell

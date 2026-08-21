@@ -2125,6 +2125,15 @@ _OFFSET_SPECS: Dict[str, object] = {
     "SET_SOLID": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_BEAM_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_BEAM": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
+    # Same shape as its three siblings above. Inert until the output-parity
+    # batch gave the set a consumer: *DATABASE_HISTORY_DISCRETE_SET offsets its
+    # set-id reference through _off_db_history("s"), so without these two rows
+    # an *INCLUDE_TRANSFORM moved the REFERENCE and left the *SET_DISCRETE
+    # behind — the history card resolved to nothing and the /TH/SPRING was
+    # dropped, or (set inside, reference outside) the set resolved but listed
+    # un-offset member ids pointing at the PARENT deck's springs.
+    "SET_DISCRETE_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
+    "SET_DISCRETE": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_SEGMENT": {"cards": {0: [(0, "s")]},
                     "data": (1, [(0, "n"), (1, "n"), (2, "n"), (3, "n")])},
 

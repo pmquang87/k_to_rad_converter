@@ -257,19 +257,28 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                # groups *DATABASE_HISTORY_SPH builds.
                state.db_sphout_dt,
                state.db_jntforc_dt,
-               # The output-parity batch, on the same membership test: each of
-               # these three now drives a real /TH group, so leaving it out
-               # would sample a group the deck DID ask for at whatever coarser
-               # frequency the other cards happened to set.
-               #   BNDOUT  -> /TH/NODE 'TH_NODE_BNDOUT' on the /IMP* nodes
+               # The output-parity batch, on the same membership test — but
+               # each gated on its OWN consumer, because the test is "does this
+               # card pace a channel that is IN the T01", not "is this card in
+               # the deck". A *DATABASE_BNDOUT on a deck that prescribes no
+               # motion emits no group, so counting its dt would only thicken
+               # the T01 for channels that are not in it — which is the exact
+               # argument that keeps *DATABASE_TPRINT out (see
+               # handlers.handle_database_tprint), and it has to apply to these
+               # three as well or the rule is not a rule. It bites: 52 of the
+               # 118 *DATABASE_BNDOUT decks in the corpus carry no
+               # *BOUNDARY_PRESCRIBED_MOTION at all.
+               #
+               # build_starter runs before build_engine (k2rad/__init__.py:486),
+               # so all three registries are filled by the time this is read.
+               #   BNDOUT  -> /TH/NODE 'TH_NODE_BNDOUT' on the driven nodes
                #   RBDOUT  -> /TH/RBODY over every converted rigid body
                #   NODFOR  -> the interval of the *DATABASE_NODAL_FORCE_GROUP
                #              /TH/NODE groups (that card has no DT of its own)
-               # *DATABASE_TPRINT is deliberately ABSENT: k2rad emits no
-               # thermal solver, so it paces no channel — see
-               # handlers.handle_database_tprint. *DATABASE_HISTORY_* has no DT
-               # field at all, in any spelling.
-               state.db_bndout_dt, state.db_rbdout_dt, state.db_nodfor_dt)
+               # *DATABASE_HISTORY_* has no DT field at all, in any spelling.
+               state.db_bndout_dt if state.imp_motion_nodes else 0.0,
+               state.db_rbdout_dt if state.rbody_ids else 0.0,
+               state.db_nodfor_dt if state.db_nodal_force_groups else 0.0)
     requested = [v for v in _db_dts if v > 0.0]
     # "If DT < 0.0, the result will be output every -DT time steps" (Manual
     # p. 16-7) — a CYCLE-based request, which is a real request even though

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, NamedTuple, Optional, Set
 from ..state import ConversionState
 from .common import (
-    HDR, _f, _i, _split_shell_eids_by_topology, _spotweld_beam_pids,
+    HDR, _f, _i, _spotweld_beam_pids,
 )
 from .contacts import _select_parent_interface
 # The _LOCAL route synthesizes a frozen /SKEW/FIX from a co-rotating
@@ -150,9 +150,34 @@ _TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART"})
 _TH_SKEW_COLUMN_TYPES = frozenset({"NODE", "SHEL", "SH3N"})
 
 
-def _th_var_line(th_vars) -> str:
-    """The variable cells of a /TH group: 10-char fields, ten per line."""
-    return "".join(v.rjust(10) for v in th_vars)
+def _th_var_lines(th_vars) -> List[str]:
+    """The variable cards of a /TH group: 10-char cells, at most ten per line.
+
+    LEFT-justified, because that is what every /TH cfg declares —
+    ``FREE_CELL_LIST(Number_Of_Variables,"%-10s",VAR,100)`` in th_node.cfg,
+    th_rbody.cfg, th_beam.cfg, th_spring.cfg, th_shel.cfg, th_bric.cfg and
+    th_sphcel.cfg alike — and what every hand-written var line in this module
+    already emits (``"DEF       "``). A right-justified cell happens to parse
+    too, but only because the reader trims it.
+
+    ``FREE_CELL_LIST`` caps a line at 100 characters, so the cells are chunked
+    ten per line. No caller reaches eleven today (the longest list is the seven
+    of ``_NODFOR_VARS``); the chunking is here so that adding one later cannot
+    silently emit an over-long card.
+    """
+    return ["".join(v.ljust(10) for v in th_vars[k:k + 10])
+            for k in range(0, len(th_vars), 10)]
+
+
+def _th_var_header(th_vars) -> str:
+    """The ``#var1     var2 ...`` ruler above a variable card.
+
+    One label per 10-char cell, left-aligned on the cell it names — the first
+    one is a character short because column 1 belongs to the ``#``.
+    """
+    labels = [f"var{k + 1}" for k in range(len(th_vars))]
+    return ("#" + labels[0].ljust(9)
+            + "".join(v.ljust(10) for v in labels[1:])).rstrip()
 
 
 def _th_id_lines(rad_type: str, ids: List[int],
@@ -193,6 +218,34 @@ _TH_HISTORY_RAD = {
     "SPH": "SPHCEL", "SPH_SET": "SPHCEL",
     "BEAM": "BEAM", "BEAM_SET": "BEAM",
     "DISCRETE": "SPRING", "DISCRETE_SET": "SPRING",
+}
+
+#: /TH type → the variables a *DATABASE_HISTORY_* group requests for it,
+#: dyna2rad's ``outVars`` verbatim (converttimehistory.cxx:238-296: the list
+#: starts as ``{"DEF"}`` and the SHELL, SOLID and NODE branches push onto it).
+#:
+#: ``DEF`` alone is NOT the whole card. On a node it expands to six channels,
+#: DX DY DZ VX VY VZ (hm_read_thgrou.F IVARNG row 1) — so a plain ``DEF``
+#: group drops the accelerations and the rotational velocity/acceleration that
+#: LS-DYNA's own nodout carries, and an element group drops the strain tensor.
+#: All four names are legal at /BEGIN 2022: ``A``/``VR``/``AR`` are rows 4-6 of
+#: VARNG (hm_read_thgrou.F:1272-1274), ``STRAIN`` is in VARCG1 (:1371, the
+#: table /TH/SHEL and /TH/SH3N both read) and in VARSG1 (:1321, /TH/BRIC).
+#:
+#: MEASURED against the plain-DEF baseline on a shell+solid bending probe
+#: (500 states, same run): /TH/NODE goes 6 -> 15 channels, /TH/SHEL 11 -> 19,
+#: /TH/BRIC 11 -> 17, starter 0 ERROR(S), and every added channel carries real
+#: time-varying data. The one structural zero is VR*/AR* on a node that belongs
+#: only to solids — a solid node genuinely has no rotational dof, which is a
+#: true answer rather than the un-computed zero *DATABASE_TPRINT would have
+#: produced (see handle_database_tprint for that contrast).
+_TH_HISTORY_VARS = {
+    "NODE": ("DEF", "A", "AR", "VR"),
+    "SHEL": ("DEF", "STRAIN"),
+    "SH3N": ("DEF", "STRAIN"),
+    "BRIC": ("DEF", "STRAIN"),
+    # BEAM, SPRING and SPHCEL take DEF alone — dyna2rad pushes nothing extra
+    # onto their branches either (its SPH "ALL" push is commented out at :296).
 }
 
 
@@ -401,22 +454,44 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     in the emitted deck, so /TH/BRIC resolves its ids exactly as it does an
     ordinary hex's.
 
-    **Which families are SCREENED against the emitted entities** (the #106
-    rule — a dangling id is starter ERROR 69/78 and the whole deck is refused,
-    which is strictly worse than losing the channel): NODE against
-    ``state.nodes``, SPH against ``state.sph_cell_ids``, BEAM against
-    ``state.beam_elem_ids`` ∪ ``state.spring_elem_ids``, DISCRETE against
-    ``state.spring_elem_ids``. SHELL / SOLID / TSHELL are NOT screened yet —
-    they need an emitted-element registry of their own (their elements are
-    written from ten different places in writer/mesh.py), and adding one is a
-    batch of its own; the pre-existing pass-through behaviour is kept.
+    **EVERY family is SCREENED against the emitted entities** (the #106 rule —
+    a dangling id is starter ERROR 69/78 and the whole deck is refused, which
+    is strictly worse than losing the channel):
 
-    An EMPTY group is a starter refusal in its own right (ERROR 1109, NO TH
-    VARIABLE / no element), so a request that resolves to nothing writes no
-    block at all. That guard used to exist only on the SHELL and SPH branches:
-    a ``*DATABASE_HISTORY_NODE_ID`` card (whose fused ``%10d%-70s`` layout the
+      NODE     ``state.nodes`` (which IS the emitted /NODE block: _make_nodes
+               writes ``sorted(state.nodes.items())``)
+      SPH      ``state.sph_cell_ids``
+      BEAM     ``state.beam_elem_ids`` ∪ ``state.spring_elem_ids``
+      DISCRETE ``state.spring_elem_ids``
+      SHELL    ``state.shell_elem_ids`` ∪ ``state.sh3n_elem_ids``
+      SOLID    ``state.solid_elem_ids``
+      TSHELL   ``state.solid_elem_ids`` (a thick shell IS a /BRICK)
+
+    The last three are new. They close a hole that was live on BOTH spellings:
+    a ``*ELEMENT_SHELL`` whose PID has no ``*PART`` record is parsed into
+    ``state.shell_elems`` and warned about ("MESH LOSS") but never written, and
+    both ``*DATABASE_HISTORY_SHELL`` and the ``_SET`` route synthesized their
+    id list from that parsed container. MEASURED before the fix on a two-shell
+    deck with one such element: ``/TH/SHEL/1`` and ``/TH/SHEL/2`` both listed
+    it and the starter answered ``ERROR ID : 69 ... TH ELEMENT SELECTION
+    ID=999 DOES NOT EXIST`` twice, refusing the deck. ``shell_elem_ids`` /
+    ``sh3n_elem_ids`` / ``solid_elem_ids`` are filled at the six lines in
+    ``_make_parts_and_elements`` that write an element row, never derived from
+    ``state.shell_elems``/``solid_elems``, for exactly that reason — and the
+    SHEL/SH3N split then reads the two registries directly instead of
+    re-deciding the topology, so the writer and the /TH group cannot drift.
+
+    An empty group is not a starter ERROR — ``hm_read_thgrne.F:123`` raises
+    1109 only for ``NVAR == 0`` (no VARIABLE), and a group with a title, a
+    ``DEF`` line and no id card is accepted, runs to NORMAL TERMINATION and
+    writes a T01 group holding zero entities. That is WORSE than a refusal, not
+    milder: the channels are lost in silence. So a request that resolves to
+    nothing writes no block at all, and the loss is warned about instead. That
+    guard used to exist only on the SHELL and SPH branches: a
+    ``*DATABASE_HISTORY_NODE_ID`` card (whose fused ``%10d%-70s`` layout the
     handler mis-read, dropping every id) therefore emitted ``/TH/NODE/1`` with
-    no entity on the Toyota Yaris and Camry decks. Both halves are fixed.
+    no entity — 94 silently absent channels on the Toyota Yaris and Camry
+    decks. Both halves are fixed.
 
     Group ids stay on this function's OWN 1..N counter rather than
     ``state.next_id()``. The two streams cannot collide — ``_auto_id`` starts at
@@ -438,12 +513,13 @@ def _make_starter_th(state: ConversionState) -> List[str]:
 
     def _emit_block(rad_type: str, ids: List[int], n: int,
                     skews=None, names=None) -> List[str]:
+        th_vars = _TH_HISTORY_VARS.get(rad_type, ("DEF",))
         block = [
             f"/TH/{rad_type}/{n}",
             f"TH_{rad_type}_{n}",
-            "#     var1      var2",
-            "DEF       ",
+            _th_var_header(th_vars),
         ]
+        block += _th_var_lines(th_vars)
         block += _th_id_lines(rad_type, ids, skews, names)
         return block
 
@@ -457,7 +533,20 @@ def _make_starter_th(state: ConversionState) -> List[str]:
         ids, cids, refs, names = _th_dedup(ids, cids, refs, names)
         skews: Optional[List[int]] = None
         if dbh.db_type in ("SPH", "SPH_SET"):
-            ids = _sph_th_ids(state, dbh, ids)
+            # Through _th_screen like every other family, so the NAME column is
+            # filtered with the ids instead of keeping its pre-screen length:
+            # _th_id_lines pairs names[k] with ids[k] positionally, so dropping
+            # a particle from the middle of an _SPH_ID list used to slide every
+            # later heading onto the wrong particle (measured: 501 "alpha",
+            # 9999 "ghost", 502 "beta" on a deck holding only 501/502 emitted
+            # 501 "alpha" and 502 "GHOST"). _sph_th_ids keeps only its own
+            # SPH-specific warning text.
+            wanted = len(ids)
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted /SPHCEL",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.sph_cell_ids, ids, cids, refs, names)
+            _warn_sph_th_loss(state, dbh, wanted, len(ids))
         elif rad_type == "NODE":
             ids, cids, refs, names = _th_screen(
                 state, kw, "a node",
@@ -478,8 +567,24 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 state, kw, "an emitted /SPRING",
                 "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
                 state.spring_elem_ids, ids, cids, refs, names)
+        elif dbh.db_type in ("SHELL", "SHELL_SET"):
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted /SHELL or /SH3N",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.shell_elem_ids | state.sh3n_elem_ids,
+                ids, cids, refs, names)
+        elif dbh.db_type in ("SOLID", "SOLID_SET", "TSHELL", "TSHELL_SET"):
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted /BRICK, /TETRA4 or /TETRA10",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.solid_elem_ids, ids, cids, refs, names)
         if dbh.db_type in ("SHELL", "SHELL_SET"):
-            quad_ids, tri_ids = _split_shell_eids_by_topology(state, ids)
+            # Split by the registries the writer filled, not by re-deciding the
+            # topology from state.shell_elems: after the screen above every id
+            # is in exactly one of the two sets, so the group and the emitted
+            # element block cannot disagree about which is a quad.
+            quad_ids = [v for v in ids if v in state.shell_elem_ids]
+            tri_ids = [v for v in ids if v in state.sh3n_elem_ids]
             name_of = ({v: names[k] for k, v in enumerate(ids)}
                        if len(names) >= len(ids) else {})
             for sub, sub_ids in (("SHEL", quad_ids), ("SH3N", tri_ids)):
@@ -502,7 +607,9 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 counter += 1
             continue
         if not ids:
-            # Nothing resolved. Writing the header anyway is starter ERROR 1109.
+            # Nothing resolved. Writing the header anyway is accepted by the
+            # starter and produces a 0-entity T01 group, i.e. a lost channel
+            # dressed as data — see the note on _make_starter_th.
             continue
         lines += _emit_block(rad_type, ids, counter, skews, names or None)
         counter += 1
@@ -533,41 +640,31 @@ def _warn_seatbelt_history(state: ConversionState, dbh) -> None:
         "seatbelt / retractor / slipring batch).")
 
 
-def _sph_th_ids(state: ConversionState, dbh, wanted: List[int]) -> List[int]:
-    """The /SPHCEL ids one *DATABASE_HISTORY_SPH[_SET] request resolves to.
+def _warn_sph_th_loss(state: ConversionState, dbh, wanted: int, kept: int
+                      ) -> None:
+    """The SPH-specific half of the *DATABASE_HISTORY_SPH[_SET] screen.
+
+    ``_th_screen`` does the filtering and names the lost ids generically; this
+    adds the two things only the SPH route can say — WHY a particle id may be
+    absent, and that dyna2rad does not check at all.
 
     ``_SPH`` lists particle ids directly; ``_SPH_SET`` lists *SET_NODE ids
     ("IDn for NODE_SET, SPH_SET, and DES_SET refers to node set ID n defined
     using the *SET_NODE_{OPTION}", Vol I R16), expanded by
-    ``_th_history_entities`` before this runs. Both are then intersected with
-    the cells this conversion actually emitted — see the ERROR 69 note on
-    ``_make_starter_th``.
+    ``_th_history_entities`` before the screen runs.
     """
     kw = _th_history_kw(dbh)
-    ids = [i for i in wanted if i in state.sph_cell_ids]
-    lost = sorted({i for i in wanted if i not in state.sph_cell_ids})
-    if lost:
-        shown = ", ".join(str(i) for i in lost[:10])
-        if len(lost) > 10:
-            shown += f", ... ({len(lost)} ids)"
-        state.warn(
-            f"{kw}: {len(lost)} requested id(s) are not an emitted /SPHCEL — "
-            f"{shown}. They are LEFT OUT of the /TH/SPHCEL group on purpose: a "
-            "TH group naming an element the deck does not define is starter "
-            "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST) and the run "
-            "would not start at all, which is strictly worse than losing those "
-            "channels. Either the id is not an *ELEMENT_SPH particle, or its "
-            "particle was dropped (no *NODE, duplicated id) — see the SPH "
-            "warnings above. (dyna2rad copies the raw id list through with no "
-            "check: its SPH branch is the only element branch in "
-            "converttimehistory.cxx without a FindRadElement filter, so such a "
-            "deck converts 'successfully' and then refuses to run.)")
-    if wanted and not ids:
+    if wanted and not kept:
         state.warn(
             f"{kw}: none of the requested ids resolves to an emitted /SPHCEL, "
-            "so NO /TH/SPHCEL group is written — an empty TH group is itself a "
-            "starter refusal (ERROR 1109). Those channels are lost.")
-    return ids
+            "so NO /TH/SPHCEL group is written. Those channels are lost. "
+            "Either the id is not an *ELEMENT_SPH particle, or its particle "
+            "was dropped (no *NODE, duplicated id) — see the SPH warnings "
+            "above. (dyna2rad copies the raw id list through with no check: "
+            "its SPH branch is the only element branch in "
+            "converttimehistory.cxx without a FindRadElement filter, so such "
+            "a deck converts 'successfully' and then refuses to run with "
+            "ERROR 69.)")
 
 
 # ── the _LOCAL route: CID + REF -> the per-node skew_ID column ───────────────
@@ -1609,9 +1706,10 @@ def _make_starter_th_discrete_connectors(state: ConversionState) -> List[str]:
         if not eids:
             state.warn(
                 f"{card} requested but this deck has no converted {source} "
-                "connector to report on, so NO /TH block is emitted (a /TH "
-                "group listing nothing is starter ERROR 1109). The dt is still "
-                "honoured as the /TFILE frequency. If the connectors are there "
+                "connector to report on, so NO /TH block is emitted: a group "
+                "with no entity is not refused by the starter, it is accepted "
+                "and written to the T01 holding zero entities, so it would "
+                "only look like data. If the connectors are there "
                 "but were skipped, their own warning names the cause; joint "
                 "forces belong to *DATABASE_JNTFORC and spot-weld forces to "
                 "*DATABASE_SWFORC, which have their own /TH blocks."
@@ -1643,12 +1741,43 @@ def _make_starter_th_discrete_connectors(state: ConversionState) -> List[str]:
             "which accumulate an impulse — no differentiation needed. The "
             "values are in the DECK'S OWN UNITS: k2rad never rescales, so a "
             "ton-mm-s deck reports newtons and millimetres exactly as written."
-            + (" NOTE: this deck also carries *DATABASE_HISTORY_DISCRETE, which "
-               "k2rad does not convert — LS-DYNA would use it to narrow the "
-               f"{row} selection, so the group above is a SUPERSET of what "
-               f"{row} actually holds." if _history_discrete_used(state)
-               else ""))
+            + (" NOTE: this deck also carries *DATABASE_HISTORY_DISCRETE, "
+               "which LS-DYNA uses to NARROW this database to the elements it "
+               f"names, so the group above is a SUPERSET of what {row} "
+               "actually holds. k2rad converts that card too, into its own "
+               "narrowed /TH/SPRING group — both are in the starter deck, so "
+               "read the narrowed one when you want the LS-DYNA selection."
+               if _history_discrete_used(state) else ""))
     return lines
+
+
+def _warn_db_card_without_dt(state: ConversionState, card: str,
+                             would_be: str) -> None:
+    """A presence-only *DATABASE_ card whose DT field is blank, 0 or missing.
+
+    The REFERENCE trigger for *DATABASE_RBDOUT and *DATABASE_BNDOUT is presence
+    alone — ``convertrigids.cxx:767`` uses ``selDatabaseRbdout.Count()`` and
+    ``dyna2rad.cxx:461`` ``selDbCard.Count()``, neither reads DT. k2rad gates on
+    the interval instead, which is right for the two ways DT can be non-positive
+    and wrong to do silently:
+
+      * ``DT == 0`` — "if DT is zero, no output is printed" (Vol I R16 p. 16-7).
+        There is genuinely nothing to write;
+      * ``DT`` BLANK with LCDT set — the interval comes from a curve, which
+        Radioss's /TFILE (a single time interval) cannot express at all.
+
+    Either way no group is emitted, but the user asked for one, so say so: a
+    mistyped DT otherwise produces an empty T01 selection with no diagnostic
+    anywhere in the log.
+    """
+    state.warn(
+        f"{card} is present but its DT field is blank or non-positive, so no "
+        f"output interval is stated and NO {would_be} is emitted. DT=0 means "
+        "\"no output is printed\" (Vol I R16 p. 16-7); a BLANK DT means the "
+        "interval comes from the LCDT curve in field 3, which Radioss's "
+        "/TFILE cannot express (it takes one time interval, not a curve). Give "
+        "the card a positive DT to get the channels. (dyna2rad triggers on the "
+        "card's mere presence and ignores DT entirely.)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1736,9 +1865,10 @@ def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
         if not nodes:
             state.warn(
                 f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: the node set is "
-                "empty, so NO /TH/NODE group is written (an empty TH group is "
-                "starter ERROR 1109 in its own right). Those channels are "
-                "lost. dyna2rad drops this case silently.")
+                "empty, so NO /TH/NODE group is written — a group with no "
+                "entity is accepted by the starter and written to the T01 "
+                "holding zero entities, which only looks like data. Those "
+                "channels are lost. dyna2rad drops this case silently.")
             continue
         skew = 0
         if grp.cid:
@@ -1755,15 +1885,23 @@ def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
                     "REFERENCE FRAME ID) and no deck at all.")
         th_id = state.next_id()
         title = grp.title.strip() or f"DATABASE NODAL FORCE GROUP NSET {grp.nsid}"
+        if not lines:
+            # ONE section banner for the whole block, like every other /TH
+            # section. Emitted here rather than at the top of the loop so a
+            # deck whose groups ALL warn-and-drop writes no banner over an
+            # empty section; the per-card nsid detail goes on the group's own
+            # comment line below.
+            lines += ["#-  TIME HISTORY (*DATABASE_NODAL_FORCE_GROUP -> nodal "
+                      "reaction impulse):", HDR]
         lines += [
-            "#-  TIME HISTORY (*DATABASE_NODAL_FORCE_GROUP -> nodal reaction "
-            f"impulse, nsid={grp.nsid}):", HDR,
             f"/TH/NODE/{th_id}",
             title[:100],
-            "#  DEF (DX/Y/Z + VX/Y/Z) + reaction IMPULSE REACX/Y/Z + REACXX/YY/ZZ",
+            f"#  nsid={grp.nsid}: DEF (DX/Y/Z + VX/Y/Z) + reaction IMPULSE "
+            "REACX/Y/Z + REACXX/YY/ZZ",
             f"#  skew_ID {skew} per node (CID={grp.cid}); REAC* force = d(REAC*)/dt",
-            _th_var_line(_NODFOR_VARS),
+            _th_var_header(_NODFOR_VARS),
         ]
+        lines += _th_var_lines(_NODFOR_VARS)
         lines += _th_id_lines("NODE", nodes, [skew] * len(nodes))
         lines.append(HDR)
         _warn_reac_impulse(
@@ -1795,11 +1933,12 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     converted rigid body — the same shape /TH/RWALL, /TH/SECTIO and /TH/INTER
     use (convertrigids.cxx:766-772).
 
-    ``state.rbody_ids`` is the set the FOUR /RBODY producers register into at
-    the line that writes the card: *MAT_RIGID parts (rbody.py:640, which also
-    covers *PART_INERTIA, element-free CoG masters and
-    *CONSTRAINED_RIGID_BODIES merge masters), *CONSTRAINED_NODAL_RIGID_BODY
-    (rbody.py:998) and the implicit no-rigid-body probe (rbody.py:1076).
+    ``state.rbody_ids`` is the set the THREE Radioss-side /RBODY emission sites
+    register into at the line that writes the card — writer/rbody.py:645
+    *MAT_RIGID parts (which is also where *PART_INERTIA, element-free CoG
+    masters and *CONSTRAINED_RIGID_BODIES merge masters come out, so four
+    LS-DYNA sources funnel through it), :1004 *CONSTRAINED_NODAL_RIGID_BODY and
+    :1086 the implicit no-rigid-body probe.
     ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
     all (so a deck whose ONLY rigid body is the probe would get no group), a
     CNRB/part id collision drops one record from it, and a
@@ -1825,15 +1964,25 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
     because LS-DYNA's rbdout is a MOTION file and half of this is not motion.
     """
     if not state.db_rbdout_dt:
+        # DT == 0 is "no output is printed" (Manual p. 16-7) and a BLANK DT
+        # means the interval comes from LCDT, which Radioss's /TFILE cannot
+        # express. Either way there is no interval to honour, so no group —
+        # but say so when the CARD IS THERE, because a mistyped DT otherwise
+        # produces a silently empty T01 selection.
+        if state.db_rbdout_seen:
+            _warn_db_card_without_dt(state, "*DATABASE_RBDOUT",
+                                     "/TH/RBODY over every converted rigid "
+                                     "body")
         return []
     ids = sorted(state.rbody_ids)
     if not ids:
         state.warn(
             "*DATABASE_RBDOUT requested but this deck has no /RBODY — no "
             "*MAT_RIGID part, no *CONSTRAINED_NODAL_RIGID_BODY and no implicit "
-            "probe body. NO /TH/RBODY is emitted (a TH group listing nothing "
-            "is starter ERROR 1109). The dt is still honoured as the /TFILE "
-            "frequency.")
+            "probe body. NO /TH/RBODY is emitted: a group with no entity is "
+            "not refused by the starter, it is accepted and written to the T01 "
+            "holding zero entities, so it would only look like data. Those "
+            "channels do not exist in this deck.")
         return []
     th_id = state.next_id()
     lines = [
@@ -1843,9 +1992,9 @@ def _make_starter_th_rbody(state: ConversionState) -> List[str]:
         f"TH_RBODY_{th_id}",
         "#  DEF = FX FY FZ MX MY MZ (accumulated IMPULSE) + RX RY RZ (rotation angle)",
         "#  /RBODY ids are TEN PER LINE here, and a leading 0 would mean ALL",
-        "#     var1",
-        "DEF       ",
+        _th_var_header(("DEF",)),
     ]
+    lines += _th_var_lines(("DEF",))
     lines += _th_id_lines("RBODY", ids)
     lines.append(HDR)
     state.warn(
@@ -1879,28 +2028,58 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
     ``Gnod_id`` vs ``grnod_ID`` attribute switch at dyna2rad.cxx:466 — sorts
     and uniques them, and writes ONE group named ``TH_NODE_BNDOUT`` with SIX
     variables and no ``DEF`` (dyna2rad.cxx:449-495). Reproduced, with the node
-    scope taken from ``state.imp_motion_nodes``: the set the two imposed-motion
-    writers filled AT the point of emission, so a row they warned about and
-    dropped (an unsupported DOF, a missing /RBODY, an empty box intersection)
-    contributes no node and cannot dangle into starter ERROR 78.
+    scope taken from ``state.imp_motion_nodes``: the set the two
+    *BOUNDARY_PRESCRIBED_MOTION writers filled AT the point of emission, so a
+    row they warned about and dropped (an unsupported DOF, a missing /RBODY, an
+    empty box intersection) contributes no node and cannot dangle into starter
+    ERROR 78.
 
-    Zero-scale *BOUNDARY_PRESCRIBED_MOTION_SET rows are deliberately absent:
-    ``sf == 0`` means "fix this DOF" and k2rad folds those into a /BCS rather
-    than an /IMP* (writer/loads.py), which is exactly dyna2rad's SPCFORC scope,
-    not its BNDOUT scope. *DATABASE_SPCFORC already covers them.
+    **The scope is *BOUNDARY_PRESCRIBED_MOTION, not "every /IMP* card".** k2rad
+    has a third /IMP* producer — ``_make_geometric_rwall_motion`` drives a
+    *RIGIDWALL_GEOMETRIC_*_MOTION wall with an /IMPVEL or /IMPDISP over its
+    carrier nodes — and it is deliberately OUT of scope, unlike dyna2rad, whose
+    re-walk of the OUTPUT model (``SelectionRead(p_radiossModel, "/IMPVEL")``)
+    cannot tell the two apart and sweeps the wall in. Three reasons, in order
+    of weight:
+
+      * LS-DYNA does not put a rigid wall in bndout. Wall reactions are the
+        ``rwforc`` file, which is *DATABASE_RWFORC -> /TH/RWALL here;
+      * those carrier nodes are SYNTHESIZED by the converter (loads.py:4980,
+        one per distinct face base point). They carry ids that appear in no
+        LS-DYNA deck, so a channel labelled "bndout" keyed on them names
+        something the deck author never wrote;
+      * they are free nodes with zero mass and no element, so their REAC* is
+        identically zero — a flat channel that reads as data, which is exactly
+        what the *DATABASE_TPRINT decision refused to emit.
+
+    Zero-scale *BOUNDARY_PRESCRIBED_MOTION_SET rows are deliberately absent for
+    a different reason: ``sf == 0`` means "fix this DOF" and k2rad folds those
+    into a /BCS rather than an /IMP* (writer/loads.py), which is exactly
+    dyna2rad's SPCFORC scope, not its BNDOUT scope. *DATABASE_SPCFORC already
+    covers them.
 
     REACXX/YY/ZZ are added only when a prescribed motion drives a ROTATIONAL
     dof, the same gate ``_spc_constrains_rotations`` puts on the SPC block.
     """
     if not state.db_bndout_dt:
+        # See the matching note on _make_starter_th_rbody: DT == 0 prints
+        # nothing (Manual p. 16-7) and a blank DT defers to LCDT.
+        if state.db_bndout_seen:
+            _warn_db_card_without_dt(
+                state, "*DATABASE_BNDOUT",
+                "/TH/NODE 'TH_NODE_BNDOUT' over the prescribed-motion nodes")
         return []
     if not state.imp_motion_nodes:
         state.warn(
             "*DATABASE_BNDOUT requested but this deck drives no node with a "
-            "prescribed motion (no converted /IMPDISP, /IMPVEL or /IMPACC) — "
-            "there is no boundary-condition force to output, so NO /TH/NODE is "
-            "emitted. The dt is still honoured as the /TFILE frequency. SPC "
-            "reaction forces are a different card: *DATABASE_SPCFORC.")
+            "*BOUNDARY_PRESCRIBED_MOTION — there is no boundary-condition "
+            "force to output, so NO /TH/NODE is emitted. (A "
+            "*RIGIDWALL_GEOMETRIC_*_MOTION wall does not count: LS-DYNA "
+            "reports a wall reaction in rwforc, so it belongs to "
+            "*DATABASE_RWFORC -> /TH/RWALL, and its k2rad carrier nodes are "
+            "synthesized massless free nodes whose reaction is identically "
+            "zero.) SPC reaction forces are a different card again: "
+            "*DATABASE_SPCFORC.")
         return []
     nodes = sorted(state.imp_motion_nodes)
     th_vars = ["REACX", "REACY", "REACZ"]
@@ -1914,14 +2093,15 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
         "TH_NODE_BNDOUT",
         "#  reaction IMPULSE (REACX/Y/Z)[ + angular impulse (REACXX/YY/ZZ)] per driven node",
         "#  REAC* accumulates m*a*dt over the run: bndout force = d(REAC*)/dt",
-        _th_var_line(th_vars),
+        _th_var_header(th_vars),
     ]
+    lines += _th_var_lines(th_vars)
     lines += _th_id_lines("NODE", nodes)
     lines.append(HDR)
     _warn_reac_impulse(
         state,
         f"*DATABASE_BNDOUT -> /TH/NODE/{th_id} 'TH_NODE_BNDOUT' over "
-        f"{len(nodes)} node(s) driven by an /IMPDISP, /IMPVEL or /IMPACC",
+        f"{len(nodes)} node(s) driven by a *BOUNDARY_PRESCRIBED_MOTION",
         "Differentiate the T01 columns with respect to time (F = d(REAC)/dt, "
         "e.g. numpy.gradient(reac, t), or tools/th_to_csv.py which writes the "
         "differentiated column) before comparing them against an LS-DYNA "

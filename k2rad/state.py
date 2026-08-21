@@ -5419,10 +5419,27 @@ class ConversionState:
     # emitted as a /SPRING instead, and a beam whose PID has no *PART record is
     # never emitted at all (writer/mesh.py skips the whole part).
     beam_elem_ids: Set[int] = field(default_factory=set)
-    # Every /RBODY id this conversion wrote — from ALL FOUR producers:
-    # *MAT_RIGID parts (incl. *PART_INERTIA, element-free CoG masters and the
-    # *CONSTRAINED_RIGID_BODIES merge masters), *CONSTRAINED_NODAL_RIGID_BODY,
-    # and the implicit no-rigid-body probe. rbody_info cannot stand in for it:
+    # The same accounting for the two shell families and for the solids, and
+    # for the same reason: an *ELEMENT_SHELL / *ELEMENT_SOLID whose PID has no
+    # *PART record is parsed into state.shell_elems / solid_elems and warned
+    # about ("MESH LOSS"), but writer/mesh.py never visits that part, so no row
+    # is written. *DATABASE_HISTORY_SHELL / _SOLID / _TSHELL (and their _SET
+    # spellings) screen against these before naming an id — a /TH/SHEL or
+    # /TH/BRIC on an element the deck does not define is starter ERROR 69 and
+    # the whole run is refused. The SHEL/SH3N split is the writer's own: a
+    # 3-distinct-corner shell goes to sh3n_elem_ids, so /TH/SHEL and /TH/SH3N
+    # get exactly the ids their element blocks hold. /TETRA4 and /TETRA10 join
+    # solid_elem_ids — they are /TH/BRIC's own id pool (all three read IXS).
+    # Filled AT the six lines in _make_parts_and_elements that write a row.
+    shell_elem_ids: Set[int] = field(default_factory=set)
+    sh3n_elem_ids: Set[int] = field(default_factory=set)
+    solid_elem_ids: Set[int] = field(default_factory=set)
+    # Every /RBODY id this conversion wrote. THREE Radioss-side emission sites
+    # (writer/rbody.py:645 *MAT_RIGID parts — which also covers *PART_INERTIA,
+    # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
+    # :1004 *CONSTRAINED_NODAL_RIGID_BODY; :1086 the implicit no-rigid-body
+    # probe), i.e. four LS-DYNA sources funnelling through three writers.
+    # rbody_info cannot stand in for it:
     # the probe body is not in rbody_info at all, a CNRB/part id collision
     # drops one record, and a merge aliases several dict keys onto one master.
     # *DATABASE_RBDOUT lists exactly this set.
@@ -5779,6 +5796,16 @@ class ConversionState:
     db_bndout_dt: float = 0.0
     # *DATABASE_RBDOUT → /TH/RBODY over EVERY emitted /RBODY (state.rbody_ids).
     db_rbdout_dt: float = 0.0
+    # PRESENCE of the two cards above, separate from their interval. The
+    # reference trigger for both is presence alone (convertrigids.cxx:767
+    # selDatabaseRbdout.Count(), dyna2rad.cxx:461 selDbCard.Count()); k2rad also
+    # needs a positive dt, because DT=0 is "no output is printed" (Vol I R16
+    # p. 16-7) and a BLANK dt defers to an LCDT curve that /TFILE cannot
+    # express. Distinguishing "card absent" from "card present, no usable
+    # interval" is what lets the writer warn about the second WITHOUT warning
+    # about the first.
+    db_rbdout_seen: bool = False
+    db_bndout_seen: bool = False
     # *DATABASE_NODFOR — the ASCII nodal-force-group database. It selects no
     # channel of its own; it states the OUTPUT INTERVAL of the /TH/NODE groups
     # *DATABASE_NODAL_FORCE_GROUP builds ("The output interval must be

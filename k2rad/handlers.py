@@ -6005,6 +6005,7 @@ def handle_database_bndout(block: Block, state: ConversionState) -> None:
     a row that was warned-and-dropped contributes no node — a /TH/NODE naming
     an undefined node is starter ERROR 78, not a lost channel.
     """
+    state.db_bndout_seen = True
     state.db_bndout_dt = _handle_db_dt(block, state, "*DATABASE_BNDOUT")
 
 
@@ -6017,9 +6018,13 @@ def handle_database_rbdout(block: Block, state: ConversionState) -> None:
     (``convertrigids.cxx:766-772`` — ``selDatabaseRbdout.Count()``, then a full
     ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
     converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
-    lists ``state.rbody_ids``, which every one of the four /RBODY producers
-    registers into at the line that writes the card.
+    lists ``state.rbody_ids``, which all THREE Radioss-side /RBODY emission
+    sites register into at the line that writes the card (writer/rbody.py:645,
+    :1004, :1086 — four LS-DYNA sources, since *MAT_RIGID parts, *PART_INERTIA,
+    element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters all
+    come out of the first one).
     """
+    state.db_rbdout_seen = True
     state.db_rbdout_dt = _handle_db_dt(block, state, "*DATABASE_RBDOUT")
 
 
@@ -11021,7 +11026,10 @@ def _handle_db_history(block: Block, state: ConversionState, db_type: str) -> No
     literal layout in the Toyota Yaris deck — so the free split this function
     used for every spelling read ``5000390Left``, ``to_int`` returned 0, and
     EVERY requested channel was silently dropped; the writer then emitted an
-    empty ``/TH/NODE`` group, which is starter ERROR 1109. ``_id_heading_card``
+    empty ``/TH/NODE`` group, which the starter ACCEPTS (1109 fires only for
+    ``NVAR == 0``, hm_read_thgrne.F:123) and writes to the T01 holding zero
+    entities — 94 lost channels on the Yaris deck, with no diagnostic at all.
+    ``_id_heading_card``
     reads columns 1-10 as the id, with the free-format fallback for decks that
     write ``id  title``.
 
@@ -11042,18 +11050,25 @@ def _handle_db_history(block: Block, state: ConversionState, db_type: str) -> No
             k += 1
             f = _card(block.raw, i, fixed=True, n=4, w=10)
             v = to_int(f[0]) if f else 0
+            # Claim the HEADING card BEFORE the v <= 0 guard, exactly where
+            # assembly._off_db_history(local=True) claims it — the #119 rule
+            # again. Skipping the guard first left the heading in the walk, and
+            # a heading whose columns 1-10 happen to parse ("9000      Beam A"
+            # after a card with id 0) was then read as an entity id while the
+            # offsetter had already consumed it. MEASURED on exactly that deck:
+            # the handler invented entity 9000, swallowed the REAL next entity
+            # card as that entity's heading, and the card lost BOTH channels.
+            # RAW contiguity, never "the next row" — see _db_history_rows.
+            claimed = is_id and k < len(rows) and rows[k] == i + 1
+            if claimed:
+                k += 1
             if v <= 0:
                 continue
             ids.append(v)
             cids.append(to_int(f[1]) if len(f) > 1 else 0)
             refs.append(to_int(f[2]) if len(f) > 2 else 0)
             if is_id:
-                # RAW contiguity, never "the next row" — see _db_history_rows.
-                if k < len(rows) and rows[k] == i + 1:
-                    names.append(block.raw[rows[k]][:70].strip())
-                    k += 1
-                else:
-                    names.append("")
+                names.append(block.raw[i + 1][:70].strip() if claimed else "")
     elif is_id:
         for i in rows:
             v, heading = _id_heading_card(block.raw[i])
