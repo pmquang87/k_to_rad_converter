@@ -11,6 +11,346 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The output / instrumentation parity batch:
+  `*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM` (+ `/TH/SPRING`),
+  `*DATABASE_HISTORY_DISCRETE[_SET]` → `/TH/SPRING`, the `_SET` and `_LOCAL`
+  spellings of the whole `*DATABASE_HISTORY_*` family,
+  `*DATABASE_NODAL_FORCE_GROUP[_TITLE]` → `/TH/NODE`, `*DATABASE_RBDOUT` →
+  `/TH/RBODY`, `*DATABASE_BNDOUT` → `/TH/NODE`, and `*CONTROL_PARALLEL` →
+  engine `/PARITH`.** Eighteen keyword spellings that a deck writes to say
+  *what to record*, and every one of them was silently discarded. Measured on master
+  over 975 corpus decks: `*DATABASE_BNDOUT` in **119** decks,
+  `*DATABASE_RBDOUT` in **36** (an explicit `handle_skip` row, while
+  `handlers.py:1568` already told users the card "maps to `/TH/RBODY`"),
+  `*DATABASE_NODAL_FORCE_GROUP` in **30**, `*DATABASE_HISTORY_BEAM` in **22**,
+  `*DATABASE_HISTORY_NODE_SET` in **21**, `*DATABASE_TPRINT` in **18**,
+  `*DATABASE_NODFOR` in **28**, `*DATABASE_HISTORY_SHELL_SET` in **7**,
+  `_SOLID_SET` in **4**, `*CONTROL_PARALLEL` in **3**, `_BEAM_SET` and
+  `_NODE_SET_LOCAL` in one each — all in `skipped_keywords`, none of them
+  warned about. A lost instrumentation card does not change the physics, but it
+  does mean the channel the engineer asked for is simply absent from the T01
+  with no diagnostic anywhere.
+
+  1. **`*DATABASE_HISTORY_BEAM` resolves PER ELEMENT, because k2rad's beams do
+     not all become `/BEAM`.** An `*ELEMENT_BEAM` on a `*MAT_SPOTWELD` part is
+     a `/PROP/TYPE13` `/SPRING` and one on a `*SECTION_BEAM` `ELFORM=6` part is
+     a `/PROP/TYPE8|13` `/SPRING`, so one card can produce two groups. That is
+     also dyna2rad's own rule — `FindRadElement` re-initialises the keyword
+     INSIDE the id loop and walks `/BEAM` → `/SPRING` → `/TRUSS`
+     (`converttimehistory.cxx:246`, `convertutils.cxx:298-312`) — and it
+     matters here because the two families are screened against DIFFERENT
+     registries. k2rad emits no `/TRUSS`, so the third link of the chain has no
+     target and is not implemented.
+
+  2. **Every new `/TH` type is screened against what was actually emitted (the
+     #106 rule), which needed four new registries filled AT the write line.**
+     A `/TH` group naming an entity the deck does not define is not a lost
+     channel: it is `ERROR 69` (`TH ELEMENT SELECTION ID=n DOES NOT EXIST`,
+     `hm_read_thgrne.F:187-193`) for the element types and `ERROR 78`
+     (`UNDEFINED NODE NUMBER ... IN TH GROUP`, via `USR2SYS`) for nodes, and
+     the whole deck is refused. `state.spring_elem_ids` covers **all seven**
+     `/SPRING` producers — `*ELEMENT_DISCRETE`, `*MAT_SPOTWELD` beams,
+     `ELFORM=6` discrete beams, `*ELEMENT_PLOTEL`, `--ground-springs`,
+     `*CONSTRAINED_SPOTWELD` ties and `*CONSTRAINED_JOINT_*` — of which the
+     last three mint their ids with `next_id()` and were recorded NOWHERE
+     before this batch; `state.beam_elem_ids` covers `/BEAM`;
+     `state.rbody_ids` covers **all four** `/RBODY` producers;
+     `state.imp_motion_nodes` covers the emitted `/IMP*` node scope. None is
+     derivable from the parsed containers: `state.beam_elems` includes the
+     beams that became springs and the beams whose PID has no `*PART` record
+     (never emitted at all), and `rbody_info` misses the implicit probe body
+     entirely, drops one record on a CNRB/part id collision, and aliases
+     several keys onto one main node after a `*CONSTRAINED_RIGID_BODIES` merge.
+     Fifteen registration sites; each of the thirteen distinct arms has a
+     test that FAILS when the line is removed (verified by mutation), and the
+     two remaining ones are the lock-card duplicates of the imposed-motion
+     register, which add no node their base card did not.
+
+  3. **The `_LOCAL` route is a real per-entity skew binding, not a warn-drop.**
+     `/TH/NODE` is the one group in this family whose id card has a `skew_ID`
+     column (`th_node.cfg` `CARD("%10d%10d%-80s")`, cols 11-20) — which lines
+     up exactly with LS-DYNA, where `_LOCAL` exists only for `NODE` and
+     `NODE_SET` (a full-text scan of the R16 and R17 manuals finds no
+     `BEAM_LOCAL`, `DISCRETE_LOCAL` or `SEATBELT_LOCAL`). The column is fetched
+     with the same index as the id INSIDE the id loop
+     (`hm_read_thgrne.F:167-171`), and it accepts a `/SKEW` id **or** a
+     `/FRAME` id: `hm_read_thgrou.F:2560-2588` scans the skew table and then
+     falls through to the frame table, raising `ERROR 434` only when neither
+     matches, and the starter echoes the column as `SKEW(OR FRAME)`. Verified
+     live at `/BEGIN 2022` and at the newest `/BEGIN 2612` with a `/SKEW/FIX`,
+     a `/FRAME/MOV` and a `0` in one group — 0 errors, identical parse at both.
+     `REF` picks which entity a CID becomes: **0** → the CID's `/SKEW/FIX`;
+     **1** → the CID as it stands (the projection onto a possibly co-rotating
+     system); **2** → a synthesized `/FRAME/MOV` from the CID's `N1/N2/N3` +
+     `DIR`, because REF=2 asks for the motion RELATIVE to the system attached
+     to node N1 and only a `/FRAME` subtracts the frame's own motion. One frame
+     per CID, not per node.
+
+     Writing a skew into cols 11-20 of a `/TH/BEAM` or `/TH/SPRING` id card
+     instead is `WARNING 100214` with the value SILENTLY dropped (measured), so
+     the emitter refuses to put one there at all.
+
+  4. **`*DATABASE_TPRINT` emits nothing, deliberately, and this is the one
+     place the batch departs from dyna2rad on purpose rather than to fix a
+     defect.** dyna2rad answers the card with `/ANIM/NODA TEMP` +
+     `/ANIM/ELEM TEMP` and appends a `TEMP` variable to every existing
+     `/TH/NODE` and `/TH/BRIC` group (`dyna2rad.cxx:497-551`), with no check
+     that a thermal solution was ever requested. k2rad converts **no** thermal
+     keyword at all — no `*CONTROL_THERMAL_*`, `*MAT_THERMAL_*`,
+     `*INITIAL_TEMPERATURE` or `*BOUNDARY_TEMPERATURE`, and it emits no
+     `/HEAT/MAT` — so a converted deck cannot run a thermal solve and the
+     channel cannot carry data. What it WOULD carry was measured on a
+     576-brick deck with the A-file decoded by `anim_to_vtk_win64.exe`: with
+     `/MAT/ELAST` both `Nodal_Temperature` and `3DELEM_Temperature` come out
+     **all zero**; with `/MAT/PLAS_JOHNS`, which allocates `GBUF%TEMP` and
+     initialises it to 300 but never integrates it, both come out a **constant
+     300** while the `Von_Mises` control field has 576 distinct values. The
+     scalar is *always* created in the A-file (`genani.F:1905`, `:4547`), never
+     omitted, so the result is a flat fringe that reads as data. The starter
+     itself says so on the TH side and nowhere else — `WARNING 1087 OUTPUT TEMP
+     WHILE TEMPERATURE IS NOT COMPUTED (NO HEAT/MAT)`,
+     `hm_read_thgrne.F:228-236` — and there is **no** equivalent warning on the
+     ANIM side. An honest `recognized_not_emitted` note that says all of this
+     is worth more than three channels of zeros. Its `dt` also stays out of the
+     `/TFILE` minimum, on the documented membership rule: a card with no `/TH`
+     consumer would only thicken the T01 for channels that are not in it.
+
+  5. **`*DATABASE_HISTORY_SEATBELT` emits nothing either, for a different
+     reason: BOTH of dyna2rad's branches are unreachable here.** It probes the
+     FIRST listed element's `*ELEMENT_SEATBELT` → PID → SECID and routes the
+     whole list to `/TH/SPRING` (a `*SECTION_SEATBELT` 1D belt) or `/TH/SHEL`
+     (a `*SECTION_SHELL` 2D belt) on that single answer
+     (`converttimehistory.cxx:303-341`). k2rad converts neither
+     `*ELEMENT_SEATBELT` nor `*SECTION_SEATBELT`, so no `/SPRING` and no
+     `/SHELL` in the output deck carries those ids and naming them is `ERROR
+     69` — a deck that "converts" and then refuses to run, the worst of the
+     three outcomes. The gap is named in `recognized_not_emitted` and points at
+     the later seatbelt / retractor / slipring batch, after which the 2D-belt
+     route becomes correct (and, unlike dyna2rad's, should be decided per
+     element: a card mixing 1D and shell belts is misrouted wholesale by the
+     first-element rule).
+
+  6. **`*CONTROL_PARALLEL` is honoured, and the card is emitted only when the
+     deck carries it.** `CONST=1` requires "that all contributions to global
+     vectors be summed in a precise order independently of the number of
+     processors used" (Vol I R16 p.12-449), which is exactly `/PARITH/ON`: the
+     engine writes each contribution into a fixed per-node slot of the skyline
+     `FSKY` array and gathers it in a deterministic walk
+     (`engine/source/assembly/asspar4.F`), so the sum order is invariant in
+     both the thread count and the MPI domain count. **Measured** on a
+     576-brick / 845-node LAW2 model, T01 decoded to full precision with
+     `th_to_csv_win64.exe`: `/PARITH/ON` is **bitwise identical** between
+     `nt=1` and `nt=4` (200 rows x 41 cols); `/PARITH/OFF` differs (row 183 KE
+     `3.495637e-02` vs `3.495636e-02`). That diff IS the consumption check.
+     Cost on that model was 1.65x at nt=4 (it is far too small to amortize the
+     extra `FSKY` traffic; LS-DYNA quotes "at least 15 percent").
+
+     dyna2rad creates `/PARITH` **unconditionally** and defaults it to `OFF`
+     (`convertcards.cxx:973-974`) before it has even looked for the LS-DYNA
+     card. That is not neutral: OpenRadioss's own default is ON
+     (`starter/source/starter/contrl.F:400` sets `IPARI0 = 1` before
+     `HM_READ_ANALY`), so a dyna2rad deck silently flips the solver default on
+     every model it converts, parallelism card or not. k2rad does not change a
+     solver default from a card the deck does not carry — so a deck with no
+     `*CONTROL_PARALLEL` gets no `/PARITH` and its engine file is unchanged —
+     and when the card IS there both of its answers are honoured, `OFF`
+     included. `NCPU`, `NUMRHS` and `PARA` have no counterpart (NCPU is the
+     runtime `-nt` argument, not a deck card, and LS-DYNA itself disabled the
+     field in 971 R5) and are named as dropped. `/ANALY` `Iparith` is left at 0,
+     so nothing on the starter side vetoes `ON`; `/IMPL` and `/EIG` do veto it
+     at run time (`lectur.F:681`, `contrl.F:926`), which the warning says.
+
+  7. **`*DATABASE_RBDOUT` lists every emitted `/RBODY`, with two card rules
+     that are unique to `/TH/RBODY`.** It is a presence-only trigger with no id
+     list, answered by collecting every converted rigid body — the same shape
+     `/TH/RWALL`, `/TH/SECTIO` and `/TH/INTER` use
+     (`convertrigids.cxx:766-772`). The id list is a **ten-per-line** cell list
+     with no name and no skew column (`th_rbody.cfg`
+     `FREE_CELL_LIST(idsmax,"%10d",ids,100)`), not the one-id-per-line layout
+     every element group uses; and a leading id of `0` makes the reader loop
+     over the WHOLE `/RBODY` table instead of the requested list
+     (`hm_read_thgrki_rbody.F:123-125`), so a placeholder zero is never
+     written. A stale id here is only `WARNING 257 NONEXISTENT RBODY` rather
+     than the hard `ERROR 69` the element groups give, but the list is still
+     built from the emitted set so the group count is right.
+
+     **The two halves of `DEF` read differently, and the warning says so.**
+     `FX FY FZ MX MY MZ` are a time-ACCUMULATED force/moment impulse —
+     `rgbodfp.F:261-266` does `FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)` — so the force
+     is `d(FX)/dt`, the same treatment `/TH/INTER` and `/TH/NODE REAC*` need.
+     `RX RY RZ` integrate the angular VELOCITY (`rgbodv.F:91-93`,
+     `FS(7)=FS(7)+VR(1,M)*DT2*WEIGHT(M)`) and therefore ARE the body's rotation
+     angle, needing no differentiation. LS-DYNA's rbdout is a MOTION file, so
+     only the rotation half of it is in this group; the translation half is a
+     `*DATABASE_HISTORY_NODE` on the body's main node.
+
+  8. **`*DATABASE_NODAL_FORCE_GROUP` is emitted with the change of meaning
+     stated.** Seven variables, verbatim from dyna2rad
+     (`DEF REACX REACY REACZ REACXX REACYY REACZZ`, `convertcards.cxx:1045`),
+     `skew_ID = CID` on every expanded node. But LS-DYNA's nodfor is a
+     **free-body cut** — the force the rest of the model exerts on the group,
+     nonzero anywhere in the mesh — while the Radioss `REAC*` channel is the
+     **kinematic constraint reaction** and is identically zero on a node
+     carrying no `/BCS`, `/RBODY` or imposed motion. dyna2rad maps the two onto
+     each other with no comment; the emitted warning names the difference and
+     points at `*DATABASE_CROSS_SECTION_PLANE/_SET` → `/SECT` + `/TH/SECTIO`,
+     which IS a free-body cut, on top of the usual impulse-vs-force
+     derivation. The card's interval comes from `*DATABASE_NODFOR`, now parsed
+     for that purpose ("the output interval must be specified using
+     *DATABASE_NODFOR", p.16-121) and reported as interval-only when no group
+     card is present.
+
+  9. **Two live defects fixed on the way, both of which produced a deck the
+     starter refuses.**
+
+     * **The `_ID` card layout was mis-read, and the writer then emitted an
+       EMPTY `/TH` group.** `CARD("%10d%-70s")` FUSES the id and the heading —
+       `   5000390Left Rear Seat` is the literal layout in the Toyota Yaris
+       deck — so the free split every spelling used read `5000390Left`,
+       `to_int` returned 0, and EVERY requested channel was dropped. The writer
+       then wrote `/TH/NODE/1` with a title, a variable line and no entity,
+       which is starter `ERROR 1109` (`NO TH VARIABLE`). Measured on master:
+       `set-yaris-detailed-v2j.key` and `set-camry-detailed-v5a.key` both
+       convert to `db_histories: [('NODE', 0)]`. Both halves are fixed — the
+       fixed-column read, and an empty-group guard on every family (it existed
+       only on the SHELL and SPH branches).
+     * **The `*INCLUDE_TRANSFORM` walk and the handler read different rows.**
+       `_offset_block` starts its `data` walk at `_title_offset`, which is 1
+       whenever the `_ID` option is present — but on this family `_ID` is a
+       PER-ENTITY heading, not a card-level "id + title" header, so the
+       offsetter skipped the deck's first requested entity while the handler
+       read it. (Invisible only because the handler could not read an `_ID`
+       card either.) The family now uses a callable spec that reuses the
+       handler's own row walk, and the `_LOCAL_ID` heading card is claimed by
+       RAW CONTIGUITY (#119) in BOTH walks: a blank heading is legal and drops
+       out of the filtered row list, so "the next filtered row" would swallow
+       the following entity card. `_rewrite_line` cannot touch an `_ID` card at
+       all (`_split_card` sees the space inside the heading and field 0 becomes
+       `5000390Left`), so it goes through `_rewrite_id_header`, which rewrites
+       columns 1-10 and leaves the rest byte-identical. `REF` and `HFO` on a
+       `_LOCAL` card are flags and are NOT offset.
+
+  10. **The `_SET` twins of the whole family, and `*SET_DISCRETE`.** With one
+      `_SET` expander in place, `_NODE_SET` (21 decks), `_SHELL_SET` (7) and
+      `_SOLID_SET` (4) cost one dispatch row each and were completed with the
+      batch rather than left as the only unrouted spellings of keywords that
+      are otherwise handled. Per the cfgs each `_SET` accepts TWO id pools —
+      its own element set or a `*SET_PART`, which expands to every element of
+      that family in the named parts — so `*SET_DISCRETE[_LIST]` was added to
+      give `_DISCRETE_SET` its element pool. A set id that resolves in neither
+      pool is warned and dropped, never written through as an entity id:
+      dyna2rad's `*SET_PART_LIST` branch keys on the literal string
+      `"*SET_PART_LIST_TITLE"` (`converttimehistory.cxx:184`), so a plain
+      `*SET_PART_LIST` falls through to the `else` and its PART ids are pushed
+      as ELEMENT ids.
+
+  11. **Three documented dyna2rad defects deviated from, each with the reason
+      in a comment.** (a) The REF=0 frozen `/SKEW/FIX` id **is written back**
+      into the TH entry; `converttimehistory.cxx:468-507` builds the same skew
+      and never assigns it (unlike `:424` and `:461`), so its group silently
+      keeps the co-rotating system and the new card is orphaned. (b) A
+      `_SET_LOCAL` card applies **each set's own** CID and REF; dyna2rad
+      compares the CID-column length against the EXPANDED entity count and, on
+      the inevitable mismatch, broadcasts `DH_cid[0]` to every entity of every
+      set while discarding REF entirely (`:382-391`) — on the only `_SET_LOCAL`
+      deck in the corpus that would put the second intrusion set's nodes in the
+      first one's coordinate system. (c) An unresolvable CID becomes `skew_ID
+      0` (global, warned with the quantitative consequence) instead of the raw
+      CID written through (`:400`), which dangles into `ERROR 434` and refuses
+      the deck.
+
+  12. **`_make_starter_th` keeps its own `1..N` group counter.** The two id
+      streams cannot collide — `_auto_id` starts at 90001, four orders of
+      magnitude above anything that counter reaches — and moving them would
+      rewrite the starter of every corpus deck carrying a `*DATABASE_HISTORY_*`
+      card for no behavioural gain. The collision that cost PR #83 an `ERROR
+      79` was a hard-coded `/TH/INTER/1`, not this counter, and the three new
+      sections all draw from `state.next_id()`;
+      `assembly._warn_duplicate_th_group_ids` scans the emitted deck for the
+      next one.
+
+  13. **Validated on a live starter, not only against the sources.** A probe
+      deck exercising every route at once — `/TH/BEAM` x2, `/TH/SPRING` x2,
+      `/TH/BRIC`, three `/TH/NODE` (`_ID` with headings, `_LOCAL` with REF=0
+      and REF=2, `_SET_LOCAL` with REF=1), the nodal force group, the BNDOUT
+      group, `/TH/RBODY`, a `/SKEW/FIX`, a `/SKEW/MOV` and a synthesized
+      `/FRAME/MOV` — was run through `starter_win64.exe`: **0 ERRORS**, one
+      unrelated `WARNING 275` from the probe's own two-node CNRB. With
+      `/IOFLAG` raised, the starter's own echo confirms every decision:
+
+      ```
+      TH GROUP:         1,TH_BEAM_1,  8 VAR,    2 BEAM      :
+      OFF       F1        F2        F3        M1        M2        M3        IE
+      BEAM        P_SPMD       NAME
+             101         0
+      TH GROUP:         5,TH_NODE_5,  6 VAR,    2 NODES     :
+          NODE  SKEW(OR FRAME)     NAME
+               1         0         front left corner
+      TH GROUP:         6,TH_NODE_6,  6 VAR,    2 NODES     :
+               2        70                          <- REF=0, the CID's /SKEW/FIX
+               5     90006                          <- REF=2, the new /FRAME/MOV
+      TH GROUP:     90007,left rail cut, 12 VAR,    4 NODES :
+      DX DY DZ VX VY VZ REACX REACY REACZ REACXX REACYY REACZZ
+      TH GROUP:     90009,TH_NODE_BNDOUT,  3 VAR,    2 NODES :
+      TH GROUP:     90008,TH_RBODY_90008,  9 VAR    1RBODY  :
+      FX        FY        FZ        MX        MY        MZ        RX RY RZ
+      ```
+
+      The `_ID` heading reaches the channel name, the skew column is literally
+      labelled `SKEW(OR FRAME)` and resolves both an id from the skew table and
+      one from the frame table, and the eleven group ids (1-8 from
+      `_make_starter_th`'s counter, 90007-90009 from `next_id()`) coexist with
+      no `ERROR 79`.
+
+  14. **Corpus sweep.** 533 deduped decks — the 201-deck regression roster
+      (`Ryan_Lee_Examples` in the repo and on `E:`, `ls-dyna_example`, the
+      demo/tutorial decks and the five golden fixtures) plus the whole
+      `dynaexamples_r14` ton-mm-s tree, where this batch's keywords actually
+      live, plus the Toyota Yaris and Camry instrumentation includes and
+      `zug_test3`, which carry spellings nothing else does. Converted on master
+      and on the branch, comparing SHA-256 over **both** `_0000.rad` and
+      `_0001.rad` plus the warning / skip / not-emitted sets:
+      **340 byte-identical, 193 moved, 0 conversion errors either side.**
+
+      **The smaller roster is not a smaller sample of this batch**: it holds
+      every single occurrence of all twelve keywords the 974-deck corpus
+      contains — the per-keyword mover counts below match the corpus-wide
+      census exactly. What it leaves out is decks that carry none of them, and
+      chiefly the repo's `implicit_hr-anlenkung` folder, whose two decks take
+      ~80 s each to convert.
+
+      Every mover is accounted for. 192 of the 193 have at least one batch
+      keyword leaving `skipped_keywords` — `BNDOUT` on 119, `RBDOUT` on 36,
+      `NODAL_FORCE_GROUP` on 30, `NODFOR` on 28, `HISTORY_BEAM` on 22,
+      `HISTORY_NODE_SET` on 21, `TPRINT` on 18, `HISTORY_SHELL_SET` on 7,
+      `HISTORY_SOLID_SET` on 4, `CONTROL_PARALLEL` on 3, `HISTORY_BEAM_SET`
+      and `HISTORY_NODE_SET_LOCAL` on 1 each — and **no batch keyword is left
+      in `skipped_keywords` on any deck in the roster**. The 193rd is
+      `set-camry-detailed-v5a.key`, whose keyword
+      (`*DATABASE_HISTORY_NODE_ID`) normalizes to an already-handled base and
+      therefore never appeared in `skipped_keywords` at all; its entire diff is
+      the nine id cards the `_ID` layout fix recovered, against a master
+      `/TH/NODE/1` that had none:
+
+      ```
+      + 9000008         0Left Rear floor
+      + 9000016         0Right Rear floor
+      + 9000024         0Engine Top          ... (9 cards)
+      ```
+
+      **187 of the 340 unchanged decks carry a `*DATABASE_HISTORY_*` card** —
+      the evidence that rewriting the shared card reader moved only the
+      spellings it was meant to. There were **zero** log-only movers (a deck
+      whose two output decks hash the same but whose warnings or notes changed),
+      so nothing shifted a diagnostic without shifting a card.
+
+  Not in scope, and deliberately left: `/TH/SHEL`, `/TH/SH3N` and `/TH/BRIC`
+  are still NOT screened against an emitted-element registry (their elements
+  are written from ten different places in `writer/mesh.py` and adding the
+  registry is a batch of its own), so a `*DATABASE_HISTORY_SHELL/_SOLID/
+  _TSHELL` naming an element k2rad dropped is still `ERROR 69`. The
+  pre-existing pass-through behaviour is unchanged.
+
 - **The SPH batch: `*ELEMENT_SPH` (+ `_VOLUME`) → `/SPHCEL`, `*SECTION_SPH`
   (+ `_ELLIPSE` / `_TENSOR` / `_INTERACTION` / `_USER`) → `/PROP/SPH`
   (TYPE34), `*CONTROL_SPH` → `/SPHGLO`, and `*DATABASE_HISTORY_SPH[_SET]` →

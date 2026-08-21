@@ -6032,16 +6032,13 @@ def handle_database_nodfor(block: Block, state: ConversionState) -> None:
     builds. Same treatment as *DATABASE_SPHOUT: the dt joins the /TFILE
     minimum, the channels come from the other keyword. dyna2rad likewise has
     ``*DATABASE_NODFOR`` only in its ``dbCardList`` (convertcards.cxx:89).
+
+    Whether the deck ALSO carries a group card cannot be decided here: the two
+    keywords may appear in either order (every r14 deck writes the frequency
+    block first), so the "interval only, no channel" note is raised by the
+    writer once the whole deck has been read.
     """
     state.db_nodfor_dt = _handle_db_dt(block, state, "*DATABASE_NODFOR")
-    if not state.db_nodal_force_groups:
-        state.note_recognized_not_emitted(
-            "DATABASE_NODFOR",
-            "it is the output INTERVAL of the nodfor database, not a channel "
-            "selection — the nodes come from *DATABASE_NODAL_FORCE_GROUP, "
-            "which this deck does not carry. The dt IS honoured, as one term "
-            "of the /TFILE minimum. Add *DATABASE_NODAL_FORCE_GROUP with a "
-            "*SET_NODE to get the reaction channels.")
 
 
 def handle_database_tprint(block: Block, state: ConversionState) -> None:

@@ -316,8 +316,17 @@ def _th_dedup(ids, cids, refs, names):
             continue
         seen.add(v)
         keep.append(k)
-    pick = lambda col: [col[k] for k in keep if k < len(col)]  # noqa: E731
-    return [ids[k] for k in keep], pick(cids), pick(refs), pick(names)
+    return ([ids[k] for k in keep], _th_pick(cids, keep, len(ids)),
+            _th_pick(refs, keep, len(ids)), _th_pick(names, keep, len(ids)))
+
+
+def _th_pick(col, keep, n):
+    """Sub-select an aligned column. A column is either FULL-LENGTH or absent
+    (an entity list has a CID for every entity or for none), so a short one is
+    dropped whole rather than partially indexed — filtering out-of-range
+    indices instead would silently shift every surviving entry onto the wrong
+    entity."""
+    return [col[k] for k in keep] if len(col) >= n else []
 
 
 def _th_screen(state: ConversionState, kw: str, what: str, err: str,
@@ -344,8 +353,8 @@ def _th_screen(state: ConversionState, kw: str, what: str, err: str,
         f"naming one is starter {err} and the run would not start at all, "
         "which is strictly worse than losing those channels. Check the "
         "warnings above for the part or element that was not converted.")
-    pick = lambda col: [col[k] for k in keep if k < len(col)]  # noqa: E731
-    return [ids[k] for k in keep], pick(cids), pick(refs), pick(names)
+    return ([ids[k] for k in keep], _th_pick(cids, keep, len(ids)),
+            _th_pick(refs, keep, len(ids)), _th_pick(names, keep, len(ids)))
 
 
 def _th_beam_split(state: ConversionState, ids, cids, refs, names):
@@ -361,13 +370,13 @@ def _th_beam_split(state: ConversionState, ids, cids, refs, names):
     /TRUSS at all, so the third link of the chain has no target here.)
     """
     beam, spring = [], []
+    n = len(ids)
     for k, eid in enumerate(ids):
         (beam if eid in state.beam_elem_ids else spring).append(k)
-    pick = lambda idx, col: [col[k] for k in idx if k < len(col)]  # noqa: E731
-    return ((([ids[k] for k in beam]), pick(beam, cids), pick(beam, refs),
-             pick(beam, names)),
-            (([ids[k] for k in spring]), pick(spring, cids),
-             pick(spring, refs), pick(spring, names)))
+    return (([ids[k] for k in beam], _th_pick(cids, beam, n),
+             _th_pick(refs, beam, n), _th_pick(names, beam, n)),
+            ([ids[k] for k in spring], _th_pick(cids, spring, n),
+             _th_pick(refs, spring, n), _th_pick(names, spring, n)))
 
 
 def _make_starter_th(state: ConversionState) -> List[str]:
@@ -423,6 +432,9 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     lines = ["#-  TIME HISTORY OUTPUTS:", HDR]
     counter = 1
     frames: List[str] = []
+    #: (CID, REF) -> the /SKEW or /FRAME id the _LOCAL route resolved it to,
+    #: shared across the cards of this build. See _th_node_skews.
+    local_frames: Dict[tuple, int] = {}
 
     def _emit_block(rad_type: str, ids: List[int], n: int,
                     skews=None, names=None) -> List[str]:
@@ -452,7 +464,8 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 "ERROR 78 (UNDEFINED NODE NUMBER ... IN TH GROUP)",
                 state.nodes, ids, cids, refs, names)
             if dbh.db_type.endswith("_LOCAL"):
-                skews, frame_lines = _th_node_skews(state, kw, ids, cids, refs)
+                skews, frame_lines = _th_node_skews(state, kw, ids, cids,
+                                                    refs, local_frames)
                 frames += frame_lines
         elif dbh.db_type in ("BEAM", "BEAM_SET"):
             ids, cids, refs, names = _th_screen(
@@ -467,13 +480,14 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 state.spring_elem_ids, ids, cids, refs, names)
         if dbh.db_type in ("SHELL", "SHELL_SET"):
             quad_ids, tri_ids = _split_shell_eids_by_topology(state, ids)
-            by_id = {v: k for k, v in enumerate(ids)}
+            name_of = ({v: names[k] for k, v in enumerate(ids)}
+                       if len(names) >= len(ids) else {})
             for sub, sub_ids in (("SHEL", quad_ids), ("SH3N", tri_ids)):
                 if not sub_ids:
                     continue
-                sub_names = [names[by_id[v]] if by_id.get(v, -1) < len(names)
-                             else "" for v in sub_ids] if names else None
-                lines += _emit_block(sub, sub_ids, counter, None, sub_names)
+                lines += _emit_block(
+                    sub, sub_ids, counter, None,
+                    [name_of[v] for v in sub_ids] if name_of else None)
                 counter += 1
             continue
         if dbh.db_type in ("BEAM", "BEAM_SET"):
@@ -586,7 +600,8 @@ def _emit_frame_mov(frame_id: int, title: str, n1: int, n2: int, n3: int,
 
 
 def _th_node_skews(state: ConversionState, kw: str, ids: List[int],
-                   cids: List[int], refs: List[int]):
+                   cids: List[int], refs: List[int],
+                   cache: Optional[Dict[tuple, int]] = None):
     """(per-node skew_ID column, extra /FRAME/MOV lines) for a _LOCAL request.
 
     ``/TH/NODE`` is the only group in this batch whose id card carries a skew
@@ -623,10 +638,15 @@ def _th_node_skews(state: ConversionState, kw: str, ids: List[int],
     unresolved: List[int] = []
     ref2_no_nodes: List[int] = []
     frozen: List[int] = []
-    #: CID -> the id written into the column, so N nodes sharing a CID
+    #: (CID, REF) -> the id written into the column, so N nodes sharing a CID
     #: synthesize ONE frame/skew (writing the id twice is starter ERROR 79 over
-    #: the merged /SKEW + /FRAME table).
-    resolved: Dict[tuple, int] = {}
+    #: the merged /SKEW + /FRAME table). Owned by _make_starter_th and shared
+    #: across the cards of ONE build, so two *DATABASE_HISTORY_NODE[_SET]_LOCAL
+    #: cards naming the same CID reference one card instead of each minting an
+    #: identical twin — and a SECOND build_starter on the same state starts
+    #: with a fresh dict, so it re-emits every card it references rather than
+    #: pointing at a frame the new deck does not contain.
+    resolved = cache if cache is not None else {}
     for k in range(len(ids)):
         cid = cids[k] if k < len(cids) else 0
         ref = refs[k] if k < len(refs) else 0
@@ -1670,6 +1690,19 @@ def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
     (*DATABASE_CROSS_SECTION), which k2rad also converts.
     """
     if not state.db_nodal_force_groups:
+        if state.db_nodfor_dt:
+            # Decided HERE, not in the *DATABASE_NODFOR handler: the two
+            # keywords may appear in either order (every r14 deck writes the
+            # frequency block first), so a handler-side test would report a
+            # deck that DOES carry a group card as having none.
+            state.note_recognized_not_emitted(
+                "DATABASE_NODFOR",
+                "it is the output INTERVAL of the nodfor database, not a "
+                "channel selection - the nodes come from "
+                "*DATABASE_NODAL_FORCE_GROUP, which this deck does not carry. "
+                "The dt IS honoured, as one term of the /TFILE minimum. Add "
+                "*DATABASE_NODAL_FORCE_GROUP with a *SET_NODE to get the "
+                "reaction channels.")
         return []
     lines: List[str] = []
     for grp in state.db_nodal_force_groups:
