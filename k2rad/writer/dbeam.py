@@ -1104,6 +1104,7 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 # without emitting a /SPRING, and a /TH/SPRING naming a
                 # never-written element is starter ERROR 69.
                 state.dbeam_spring_eids.add(e.eid)
+                state.spring_elem_ids.add(e.eid)   # producer 3 of 7
             if use13 and no_n3:
                 state.warn(
                     f"{label}: {no_n3} element(s) carry no third node, so the "

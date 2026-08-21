@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, NamedTuple, Set
+from typing import Callable, Dict, List, NamedTuple, Optional, Set
 from ..state import ConversionState
 from .common import (
     HDR, _f, _i, _split_shell_eids_by_topology, _spotweld_beam_pids,
 )
 from .contacts import _select_parent_interface
+# The _LOCAL route synthesizes a frozen /SKEW/FIX from a co-rotating
+# *DEFINE_COORDINATE_NODES, using the very axes builder /SKEW emission uses, so
+# the two can never disagree about what "the system at t=0" means.
+from .mesh import _emit_skew_fix, _skew_axes_from_nodes
 
 __all__ = [
     "_make_header",
@@ -26,6 +30,11 @@ __all__ = [
     "_spotweld_solid_pids",
     "_make_starter_th_swforc",
     "_make_starter_th_discrete_connectors",
+    "_emit_frame_mov",
+    "_make_starter_th_nodal_force_group",
+    "_make_starter_th_rbody",
+    "_make_starter_th_bndout",
+    "_make_engine_parith",
 ]
 
 
@@ -102,8 +111,277 @@ def _make_ams(state: ConversionState) -> List[str]:
 # Starter: time history outputs
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── /TH card geometry ────────────────────────────────────────────────────────
+#
+# Pinned against live starter runs at /BEGIN 2022 AND at the newest /BEGIN 2612
+# (identical parse at both, so nothing here is version-gated):
+#
+#   /TH/<TYPE>/<id>            <- id from ONE GLOBAL pool across every /TH type
+#   <title>                    <- CARD("%-100s"), MANDATORY even when blank:
+#                                 the reader takes the next line as the title
+#                                 unconditionally, so omitting it feeds "DEF"
+#                                 to the title and then dies with ERROR 260 +
+#                                 ERROR 1109 ("no variable in the group")
+#   <var cells>                <- 10-char cells, ten per line, 100 per line
+#   <id cards>                 <- per type, below
+#
+# /TH/NODE            "%10d%10d%-80s"  = id, skew_ID, name   (th_node.cfg)
+# /TH/BEAM,SPRING,
+#     SHEL,SH3N,BRIC  "%10d          %-80s" = id, TEN BLANK COLUMNS, name
+# /TH/RBODY,PART      FREE_CELL_LIST(idsmax,"%10d",ids,100) = TEN IDS PER LINE,
+#                     no name column and no skew column at all
+#
+# Two measured traps this encodes:
+#   * putting anything in columns 11-20 of a /TH/BEAM or /TH/SPRING id card is
+#     WARNING 100214 ("unsupported field exists") and the value is SILENTLY
+#     dropped — the skew column exists only on /TH/NODE (and, since
+#     radioss140, /TH/SHEL and /TH/SH3N);
+#   * packing several ids onto one card of a per-line type is read as ONE id
+#     plus trailing junk: seven ids in columns 11+ gave 0 errors, only the
+#     advisory WARNING 100214, and the channels vanished without even reaching
+#     the existence check.
+
+#: /TH types whose id card is a ten-per-line cell list rather than one id per
+#: line. A leading 0 in a /TH/RBODY list means "ALL rigid bodies"
+#: (hm_read_thgrki_rbody.F:123-125), so a 0 is never written into one.
+_TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART"})
+
+#: /TH types whose id card HAS a skew_ID column in columns 11-20.
+_TH_SKEW_COLUMN_TYPES = frozenset({"NODE", "SHEL", "SH3N"})
+
+
+def _th_var_line(th_vars) -> str:
+    """The variable cells of a /TH group: 10-char fields, ten per line."""
+    return "".join(v.rjust(10) for v in th_vars)
+
+
+def _th_id_lines(rad_type: str, ids: List[int],
+                 skews: Optional[List[int]] = None,
+                 names: Optional[List[str]] = None) -> List[str]:
+    """The id cards of a /TH group, in that type's own layout (see above)."""
+    if rad_type in _TH_CELL_LIST_TYPES:
+        return ["".join(_i(v) for v in ids[k:k + 10])
+                for k in range(0, len(ids), 10)]
+    out: List[str] = []
+    for k, eid in enumerate(ids):
+        skew = skews[k] if skews and k < len(skews) else 0
+        # The reader keeps 40 characters of NAME_ARRAY
+        # (hm_read_thgrne.F:169 HM_GET_STRING_INDEX(...,40,...)) even though the
+        # cfg field is %-80s, so there is nothing to gain past 40.
+        name = (names[k][:40].rstrip() if names and k < len(names) else "")
+        if skew and rad_type not in _TH_SKEW_COLUMN_TYPES:
+            skew = 0            # columns 11-20 are dead here — never write one
+        if not skew and not name:
+            out.append(_i(eid))
+        elif rad_type in _TH_SKEW_COLUMN_TYPES:
+            out.append(_i(eid) + _i(skew) + name)
+        else:
+            out.append(_i(eid) + " " * 10 + name)
+    return out
+
+
+# ── *DATABASE_HISTORY_<FAMILY>[_SET][_LOCAL][_ID] ────────────────────────────
+
+#: db_type → the /TH sub-keyword its ids land on. SHELL is split further by
+#: element topology (SHEL vs SH3N) and BEAM per element (BEAM vs SPRING).
+_TH_HISTORY_RAD = {
+    "SHELL": "SHEL", "SHELL_SET": "SHEL",
+    "SOLID": "BRIC", "SOLID_SET": "BRIC",
+    "TSHELL": "BRIC", "TSHELL_SET": "BRIC",
+    "NODE": "NODE", "NODE_SET": "NODE",
+    "NODE_LOCAL": "NODE", "NODE_SET_LOCAL": "NODE",
+    "SPH": "SPHCEL", "SPH_SET": "SPHCEL",
+    "BEAM": "BEAM", "BEAM_SET": "BEAM",
+    "DISCRETE": "SPRING", "DISCRETE_SET": "SPRING",
+}
+
+
+class _ThSetSource(NamedTuple):
+    """How one ``*DATABASE_HISTORY_<FAMILY>_SET`` id is resolved.
+
+    The cfgs accept TWO id pools per family — e.g.
+    ``database_history_beam_set.cfg:25`` declares
+    ``SUBTYPES = (/SETS/SET_COMPONENT_IDPOOL, /SETS/SET_BEAM_IDPOOL)`` — so a
+    listed id may be an ELEMENT set or a PART set, and a part set expands to
+    every element of that family in the named parts. Real accessors rather than
+    ``getattr(state, "...")`` strings, the same reason
+    :class:`_DiscreteDatabase` gives.
+    """
+    sets: Callable[[ConversionState], Dict[int, tuple]]
+    set_kw: str                                   # the *SET_ keyword that fills it
+    #: elements of this family belonging to the given part ids, or None when
+    #: the family takes no part set (NODE: "IDn ... refers to node set ID n
+    #: defined using the *SET_NODE_{OPTION}", Vol I R16 p.16-111).
+    part_elems: Optional[Callable[[ConversionState, set], List[int]]]
+
+
+def _elems_of_parts(elems, pids: set) -> List[int]:
+    return [e.eid for e in elems if e.pid in pids]
+
+
+_TH_SET_SOURCES = {
+    "NODE_SET":       _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
+    "NODE_SET_LOCAL": _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
+    "SPH_SET":        _ThSetSource(lambda s: s.node_sets, "*SET_NODE", None),
+    "BEAM_SET":       _ThSetSource(
+        lambda s: s.beam_sets, "*SET_BEAM",
+        lambda s, pids: _elems_of_parts(s.beam_elems, pids)),
+    "DISCRETE_SET":   _ThSetSource(
+        lambda s: s.discrete_sets, "*SET_DISCRETE",
+        lambda s, pids: _elems_of_parts(s.discrete_elems, pids)),
+    "SHELL_SET":      _ThSetSource(
+        lambda s: s.shell_sets, "*SET_SHELL",
+        lambda s, pids: _elems_of_parts(s.shell_elems, pids)),
+    "SOLID_SET":      _ThSetSource(
+        lambda s: s.solid_sets, "*SET_SOLID",
+        lambda s, pids: _elems_of_parts(s.solid_elems, pids)),
+    # *SET_TSHELL is not converted, so only the part-set pool resolves here.
+    "TSHELL_SET":     _ThSetSource(
+        lambda s: {}, "*SET_TSHELL",
+        lambda s, pids: _elems_of_parts(s.tshell_elems, pids)),
+}
+
+
+def _th_history_kw(dbh) -> str:
+    return "*DATABASE_HISTORY_" + dbh.db_type
+
+
+def _th_history_entities(state: ConversionState, dbh):
+    """(ids, cids, refs, names) one *DATABASE_HISTORY_* card requests.
+
+    A ``_SET`` card is expanded here; the per-card ``CID``/``REF`` of a
+    ``_SET_LOCAL`` row is broadcast to the nodes THAT set expands to.
+
+    That last point is a deliberate deviation from dyna2rad, which compares the
+    CID-column length against the EXPANDED entity count and, on the inevitable
+    mismatch, broadcasts ``DH_cid[0]`` to every entity of every set and then
+    discards the REF column entirely (converttimehistory.cxx:382-391). On the
+    only ``_SET_LOCAL`` deck in the corpus that would put the second set's
+    nodes in the first set's coordinate system. One card LINE names one set and
+    carries that set's own CID and REF, so that is what is applied.
+    """
+    src = _TH_SET_SOURCES.get(dbh.db_type)
+    if src is None:                       # not a _SET spelling: already entities
+        return (list(dbh.ids), list(dbh.cids), list(dbh.refs), list(dbh.names))
+    kw = _th_history_kw(dbh)
+    elem_sets = src.sets(state)
+    ids: List[int] = []
+    cids: List[int] = []
+    refs: List[int] = []
+    unresolved: List[int] = []
+    for k, sid in enumerate(dbh.ids):
+        cid = dbh.cids[k] if k < len(dbh.cids) else 0
+        ref = dbh.refs[k] if k < len(dbh.refs) else 0
+        entry = elem_sets.get(sid)
+        if entry is not None:
+            members = list(entry[1])
+        elif src.part_elems is not None and sid in state.part_sets:
+            members = src.part_elems(state, set(state.part_sets[sid][1]))
+        else:
+            unresolved.append(sid)
+            continue
+        for m in members:
+            ids.append(m)
+            cids.append(cid)
+            refs.append(ref)
+    if unresolved:
+        pools = src.set_kw + (" (or *SET_PART)" if src.part_elems else "")
+        state.warn(
+            f"{kw}: set id(s) {unresolved} resolve to no converted {pools}, so "
+            "the entities they name get NO /TH channel. They are NOT written "
+            "through as if they were entity ids — that is what dyna2rad's "
+            "*SET_PART_LIST branch does (converttimehistory.cxx:184-211 keys "
+            "on the literal string \"*SET_PART_LIST_TITLE\", so a plain "
+            "*SET_PART_LIST falls through and its PART ids are pushed as "
+            "ELEMENT ids) and it turns a lost channel into a starter refusal. "
+            "*SET_..._ADD sets are among the spellings k2rad does not expand.")
+    # dyna2rad sorts and uniques the _SET path and leaves the plain path in
+    # deck order (converttimehistory.cxx:213-214); matched here, with the
+    # CID/REF columns carried along so they stay aligned with their entity.
+    order = sorted(range(len(ids)), key=lambda k: ids[k])
+    ids = [ids[k] for k in order]
+    cids = [cids[k] for k in order]
+    refs = [refs[k] for k in order]
+    return ids, cids, refs, []
+
+
+def _th_dedup(ids, cids, refs, names):
+    """Order-preserving de-duplication of an entity list and its aligned
+    columns. The FIRST occurrence wins, so a node named by two sets keeps the
+    first set's CID/REF."""
+    seen: Set[int] = set()
+    keep = []
+    for k, v in enumerate(ids):
+        if v in seen:
+            continue
+        seen.add(v)
+        keep.append(k)
+    pick = lambda col: [col[k] for k in keep if k < len(col)]  # noqa: E731
+    return [ids[k] for k in keep], pick(cids), pick(refs), pick(names)
+
+
+def _th_screen(state: ConversionState, kw: str, what: str, err: str,
+               exists, ids, cids, refs, names):
+    """Drop requested ids that name no emitted entity — the #106 rule.
+
+    A /TH group naming something the deck does not define is not a lost
+    channel: it is a starter ERROR that refuses the WHOLE deck (ERROR 69 "TH
+    ELEMENT SELECTION ID=n DOES NOT EXIST", hm_read_thgrne.F:187-193, for the
+    element types; ERROR 78 "UNDEFINED NODE NUMBER IN TH GROUP" via
+    ``USR2SYS`` for nodes). Losing the channel is strictly better than losing
+    the run, so the ids come out and the loss is named.
+    """
+    keep = [k for k, v in enumerate(ids) if v in exists]
+    if len(keep) == len(ids):
+        return ids, cids, refs, names
+    lost = sorted({v for v in ids if v not in exists})
+    shown = ", ".join(str(v) for v in lost[:10])
+    if len(lost) > 10:
+        shown += f", ... ({len(lost)} ids)"
+    state.warn(
+        f"{kw}: {len(lost)} requested id(s) are not {what} in the converted "
+        f"deck — {shown}. They are LEFT OUT of the /TH group on purpose: "
+        f"naming one is starter {err} and the run would not start at all, "
+        "which is strictly worse than losing those channels. Check the "
+        "warnings above for the part or element that was not converted.")
+    pick = lambda col: [col[k] for k in keep if k < len(col)]  # noqa: E731
+    return [ids[k] for k in keep], pick(cids), pick(refs), pick(names)
+
+
+def _th_beam_split(state: ConversionState, ids, cids, refs, names):
+    """Split a *DATABASE_HISTORY_BEAM id list into (/BEAM ids, /SPRING ids).
+
+    dyna2rad decides this PER ELEMENT through ``FindRadElement``'s fallback
+    chain — /BEAM, then /SPRING, then /TRUSS, with the keyword re-initialised
+    INSIDE the loop (converttimehistory.cxx:246, convertutils.cxx:298-312) — so
+    one card can produce up to three groups. k2rad needs two of the three for
+    its own reason: an *ELEMENT_BEAM on a *MAT_SPOTWELD part becomes a
+    /PROP/TYPE13 /SPRING and one on a *SECTION_BEAM ELFORM=6 part becomes a
+    /PROP/TYPE8|13 /SPRING, neither of which is a /BEAM. (k2rad emits no
+    /TRUSS at all, so the third link of the chain has no target here.)
+    """
+    beam, spring = [], []
+    for k, eid in enumerate(ids):
+        (beam if eid in state.beam_elem_ids else spring).append(k)
+    pick = lambda idx, col: [col[k] for k in idx if k < len(col)]  # noqa: E731
+    return ((([ids[k] for k in beam]), pick(beam, cids), pick(beam, refs),
+             pick(beam, names)),
+            (([ids[k] for k in spring]), pick(spring, cids),
+             pick(spring, refs), pick(spring, names)))
+
+
 def _make_starter_th(state: ConversionState) -> List[str]:
-    """*DATABASE_HISTORY_* → /TH/<type>.
+    """*DATABASE_HISTORY_<FAMILY>[_SET][_LOCAL][_ID] → /TH/<type>.
+
+    Family → group:
+
+      ``NODE`` / ``NODE_SET`` / ``NODE_LOCAL`` / ``NODE_SET_LOCAL`` → /TH/NODE
+      ``SHELL`` / ``SHELL_SET``   → /TH/SHEL + /TH/SH3N, split by topology
+      ``SOLID`` / ``TSHELL`` (+``_SET``) → /TH/BRIC
+      ``SPH`` / ``SPH_SET``       → /TH/SPHCEL
+      ``BEAM`` / ``BEAM_SET``     → /TH/BEAM + /TH/SPRING, split per element
+      ``DISCRETE`` (+``_SET``)    → /TH/SPRING
+      ``SEATBELT``                → nothing (see handle_database_history_seatbelt)
 
     A *DATABASE_HISTORY_SHELL request has to be split by element topology:
     since d1ade12 a 3-corner shell is emitted as /SH3N, and /TH/SHEL resolves
@@ -114,100 +392,145 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     in the emitted deck, so /TH/BRIC resolves its ids exactly as it does an
     ordinary hex's.
 
-    *DATABASE_HISTORY_SPH and _SPH_SET become /TH/SPHCEL, a type of its own —
-    and the ONLY one here that is SCREENED. Every other family's ids always
-    resolve, because their elements are emitted unconditionally; an SPH
-    particle can be dropped by ``writer/sph.py`` (no *NODE, a duplicated id) or
-    never emitted at all if its part failed to convert, and a /TH group naming
-    one of those is not a lost channel — it is starter **ERROR 69** ("TH
-    ELEMENT SELECTION ID=n DOES NOT EXIST", ``hm_read_thgrne.F:189``) and the
-    whole deck is refused. That is the #106 rule; ``state.sph_cell_ids`` is the
-    set the /SPHCEL emitter actually wrote. An empty group is refused too
-    (ERROR 1109 NO TH VARIABLE / no element), so a group that screens to
-    nothing is not written at all.
+    **Which families are SCREENED against the emitted entities** (the #106
+    rule — a dangling id is starter ERROR 69/78 and the whole deck is refused,
+    which is strictly worse than losing the channel): NODE against
+    ``state.nodes``, SPH against ``state.sph_cell_ids``, BEAM against
+    ``state.beam_elem_ids`` ∪ ``state.spring_elem_ids``, DISCRETE against
+    ``state.spring_elem_ids``. SHELL / SOLID / TSHELL are NOT screened yet —
+    they need an emitted-element registry of their own (their elements are
+    written from ten different places in writer/mesh.py), and adding one is a
+    batch of its own; the pre-existing pass-through behaviour is kept.
 
-    Ids go ONE PER LINE for every type. That is not cosmetic on /TH/SPHCEL:
-    packing eight ids onto one card the way *DATABASE_HISTORY_SPH writes them
-    is read as ONE id plus trailing junk — measured, seven dangling ids packed
-    into columns 11+ produced 0 errors and only advisory ``WARNING 100214``,
-    i.e. the channels vanished without even reaching the ERROR 69 check.
+    An EMPTY group is a starter refusal in its own right (ERROR 1109, NO TH
+    VARIABLE / no element), so a request that resolves to nothing writes no
+    block at all. That guard used to exist only on the SHELL and SPH branches:
+    a ``*DATABASE_HISTORY_NODE_ID`` card (whose fused ``%10d%-70s`` layout the
+    handler mis-read, dropping every id) therefore emitted ``/TH/NODE/1`` with
+    no entity on the Toyota Yaris and Camry decks. Both halves are fixed.
+
+    Group ids stay on this function's OWN 1..N counter rather than
+    ``state.next_id()``. The two streams cannot collide — ``_auto_id`` starts at
+    90001, four orders of magnitude above anything this counter reaches — and
+    moving them would rewrite the starter of every deck in the corpus that
+    carries a *DATABASE_HISTORY_* card for no behavioural gain. The collision
+    that cost PR #83 an ERROR 79 was a HARD-CODED ``/TH/INTER/1``, not this
+    counter, and ``assembly._warn_duplicate_th_group_ids`` scans the emitted
+    deck for the next one.
     """
     if not state.db_histories:
         return []
     lines = ["#-  TIME HISTORY OUTPUTS:", HDR]
     counter = 1
-    type_map = {"SHELL": "SHEL", "SOLID": "BRIC", "NODE": "NODE",
-                "TSHELL": "BRIC", "SPH": "SPHCEL", "SPH_SET": "SPHCEL"}
+    frames: List[str] = []
 
-    def _emit_block(rad_type: str, ids: List[int], n: int) -> List[str]:
+    def _emit_block(rad_type: str, ids: List[int], n: int,
+                    skews=None, names=None) -> List[str]:
         block = [
             f"/TH/{rad_type}/{n}",
             f"TH_{rad_type}_{n}",
             "#     var1      var2",
             "DEF       ",
         ]
-        for eid in ids:
-            block.append(_i(eid))
+        block += _th_id_lines(rad_type, ids, skews, names)
         return block
 
     for dbh in state.db_histories:
-        rad_type = type_map.get(dbh.db_type, dbh.db_type)
-        if dbh.db_type == "SHELL":
-            quad_ids, tri_ids = _split_shell_eids_by_topology(state, dbh.ids)
-            if quad_ids:
-                lines += _emit_block("SHEL", quad_ids, counter)
-                counter += 1
-            if tri_ids:
-                lines += _emit_block("SH3N", tri_ids, counter)
-                counter += 1
+        kw = _th_history_kw(dbh)
+        if dbh.db_type == "SEATBELT":
+            _warn_seatbelt_history(state, dbh)
             continue
+        rad_type = _TH_HISTORY_RAD.get(dbh.db_type, dbh.db_type)
+        ids, cids, refs, names = _th_history_entities(state, dbh)
+        ids, cids, refs, names = _th_dedup(ids, cids, refs, names)
+        skews: Optional[List[int]] = None
         if dbh.db_type in ("SPH", "SPH_SET"):
-            ids = _sph_th_ids(state, dbh)
-            if not ids:
-                continue
-            lines += _emit_block("SPHCEL", ids, counter)
-            counter += 1
+            ids = _sph_th_ids(state, dbh, ids)
+        elif rad_type == "NODE":
+            ids, cids, refs, names = _th_screen(
+                state, kw, "a node",
+                "ERROR 78 (UNDEFINED NODE NUMBER ... IN TH GROUP)",
+                state.nodes, ids, cids, refs, names)
+            if dbh.db_type.endswith("_LOCAL"):
+                skews, frame_lines = _th_node_skews(state, kw, ids, cids, refs)
+                frames += frame_lines
+        elif dbh.db_type in ("BEAM", "BEAM_SET"):
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted /BEAM or /SPRING",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.beam_elem_ids | state.spring_elem_ids,
+                ids, cids, refs, names)
+        elif dbh.db_type in ("DISCRETE", "DISCRETE_SET"):
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted /SPRING",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.spring_elem_ids, ids, cids, refs, names)
+        if dbh.db_type in ("SHELL", "SHELL_SET"):
+            quad_ids, tri_ids = _split_shell_eids_by_topology(state, ids)
+            by_id = {v: k for k, v in enumerate(ids)}
+            for sub, sub_ids in (("SHEL", quad_ids), ("SH3N", tri_ids)):
+                if not sub_ids:
+                    continue
+                sub_names = [names[by_id[v]] if by_id.get(v, -1) < len(names)
+                             else "" for v in sub_ids] if names else None
+                lines += _emit_block(sub, sub_ids, counter, None, sub_names)
+                counter += 1
             continue
-        lines += _emit_block(rad_type, dbh.ids, counter)
+        if dbh.db_type in ("BEAM", "BEAM_SET"):
+            (b_ids, _bc, _br, b_names), (s_ids, _sc, _sr, s_names) = \
+                _th_beam_split(state, ids, cids, refs, names)
+            for sub, sub_ids, sub_names in (("BEAM", b_ids, b_names),
+                                            ("SPRING", s_ids, s_names)):
+                if not sub_ids:
+                    continue
+                lines += _emit_block(sub, sub_ids, counter, None,
+                                     sub_names or None)
+                counter += 1
+            continue
+        if not ids:
+            # Nothing resolved. Writing the header anyway is starter ERROR 1109.
+            continue
+        lines += _emit_block(rad_type, ids, counter, skews, names or None)
         counter += 1
     if len(lines) == 2:
+        # Not one group survived; any /SKEW//FRAME the _LOCAL route synthesized
+        # for it would be orphaned, so nothing is written at all.
         return []
+    if frames:
+        # After the section banner, before the groups that reference them.
+        lines = lines[:2] + frames + lines[2:]
     lines.append(HDR)
     return lines
 
 
-def _sph_th_ids(state: ConversionState, dbh) -> List[int]:
+def _warn_seatbelt_history(state: ConversionState, dbh) -> None:
+    """*DATABASE_HISTORY_SEATBELT: recognized, deliberately not emitted."""
+    state.note_recognized_not_emitted(
+        "DATABASE_HISTORY_SEATBELT",
+        f"the {len(dbh.ids)} element(s) it names get NO /TH channel: k2rad "
+        "converts neither *ELEMENT_SEATBELT nor *SECTION_SEATBELT, so there is "
+        "no /SPRING (1D belt) and no /SHELL (2D belt) in the output deck "
+        "carrying those ids. dyna2rad probes the FIRST listed element's PID -> "
+        "SECID and routes the WHOLE list to /TH/SPRING or /TH/SHEL on that one "
+        "answer (converttimehistory.cxx:303-341); doing the same here would "
+        "name elements the deck never defines, which is starter ERROR 69 and a "
+        "run that refuses to start — worse than the lost channel. The 2D-belt "
+        "route becomes correct as soon as *ELEMENT_SEATBELT is converted (the "
+        "seatbelt / retractor / slipring batch).")
+
+
+def _sph_th_ids(state: ConversionState, dbh, wanted: List[int]) -> List[int]:
     """The /SPHCEL ids one *DATABASE_HISTORY_SPH[_SET] request resolves to.
 
     ``_SPH`` lists particle ids directly; ``_SPH_SET`` lists *SET_NODE ids
     ("IDn for NODE_SET, SPH_SET, and DES_SET refers to node set ID n defined
-    using the *SET_NODE_{OPTION}", Vol I R16), which are expanded here. Both are
-    then intersected with the cells this conversion actually emitted — see the
-    ERROR 69 note on ``_make_starter_th``.
+    using the *SET_NODE_{OPTION}", Vol I R16), expanded by
+    ``_th_history_entities`` before this runs. Both are then intersected with
+    the cells this conversion actually emitted — see the ERROR 69 note on
+    ``_make_starter_th``.
     """
-    kw = ("*DATABASE_HISTORY_SPH_SET" if dbh.db_type == "SPH_SET"
-          else "*DATABASE_HISTORY_SPH")
-    if dbh.db_type == "SPH_SET":
-        wanted: List[int] = []
-        missing_sets: List[int] = []
-        for sid in dbh.ids:
-            entry = state.node_sets.get(sid)
-            if entry is None:
-                missing_sets.append(sid)
-                continue
-            wanted.extend(entry[1])
-        if missing_sets:
-            state.warn(
-                f"{kw}: *SET_NODE {missing_sets} is not defined in this deck "
-                "(or uses a variant k2rad does not expand), so the particles it "
-                "names get NO /TH/SPHCEL channel. Listing an unresolved set id "
-                "as if it were a particle id would be starter ERROR 69 and the "
-                "deck would not start at all.")
-    else:
-        wanted = list(dbh.ids)
-    seen: set = set()
-    ids = [i for i in wanted
-           if i in state.sph_cell_ids and not (i in seen or seen.add(i))]
+    kw = _th_history_kw(dbh)
+    ids = [i for i in wanted if i in state.sph_cell_ids]
     lost = sorted({i for i in wanted if i not in state.sph_cell_ids})
     if lost:
         shown = ", ".join(str(i) for i in lost[:10])
@@ -231,6 +554,155 @@ def _sph_th_ids(state: ConversionState, dbh) -> List[int]:
             "so NO /TH/SPHCEL group is written — an empty TH group is itself a "
             "starter refusal (ERROR 1109). Those channels are lost.")
     return ids
+
+
+# ── the _LOCAL route: CID + REF -> the per-node skew_ID column ───────────────
+
+def _emit_frame_mov(frame_id: int, title: str, n1: int, n2: int, n3: int,
+                    dir_: str = "X") -> List[str]:
+    """Emit /FRAME/MOV — a MOVING reference frame, N1 its origin node.
+
+    Same (N1, N2, N3, Dir) convention as /SKEW/MOV, and the same card shape,
+    but a different entity: a /SKEW only ROTATES the reported components into
+    local axes, while a /FRAME reports the motion RELATIVE to the frame — the
+    origin's translation and the frame's rotation are subtracted. That is
+    exactly the difference between LS-DYNA's REF=1 ("projection of the node's
+    absolute motion onto the local system") and REF=2 ("the motion of the node,
+    expressed in the local system attached to node N1 of CID"), Vol I R16
+    p.16-113.
+
+    The Dir column (cols 31-40, ``%10s``) is a FORMAT(radioss2019) addition, so
+    it is legal at /BEGIN 2022; the older radioss51 block stops at N3.
+    /SKEW and /FRAME share ONE starter id namespace, which is why the id comes
+    from ``state.reserve_skew_id``.
+    """
+    return [
+        f"/FRAME/MOV/{frame_id}",
+        title,
+        "#  node_ID1  node_ID2  node_ID3       Dir",
+        f"{_i(n1)}{_i(n2)}{_i(n3)}{dir_.rjust(10)}",
+        HDR,
+    ]
+
+
+def _th_node_skews(state: ConversionState, kw: str, ids: List[int],
+                   cids: List[int], refs: List[int]):
+    """(per-node skew_ID column, extra /FRAME/MOV lines) for a _LOCAL request.
+
+    ``/TH/NODE`` is the only group in this batch whose id card carries a skew
+    column, and it is PER ENTITY, not per group: ``hm_read_thgrne.F:167-171``
+    fetches ``SKEW_ARRAY`` with the same index ``K`` as the id inside the id
+    loop, and there is no group-level skew field anywhere in the /TH cards. The
+    column accepts a ``/SKEW`` id OR a ``/FRAME`` id — ``hm_read_thgrou.F:
+    2560-2588`` scans the skew table first and then falls through to the frame
+    table, raising ERROR 434 only when neither matches; the starter echoes the
+    column as ``SKEW(OR FRAME)``. Verified on a live starter run at /BEGIN 2022
+    and 2612 with a /SKEW/FIX, a /FRAME/MOV and a 0 in one group.
+
+    REF decides which of the two a CID becomes (Vol I R16 p.16-113):
+
+      ``REF=0``  "output is in the local system FIXED for all time from the
+                 beginning of the calculation" → a /SKEW/FIX. A CID that k2rad
+                 emitted as a co-rotating /SKEW/MOV is frozen into a new
+                 /SKEW/FIX built from the t=0 node positions. (The deck is
+                 self-inconsistent in that case — LS-DYNA requires FLAG=0 on
+                 the *DEFINE_COORDINATE_NODES for REF=0 — so it is warned.)
+      ``REF=1``  "the projection of the node's absolute translational motion
+                 onto the local system", which may co-rotate → the CID's own
+                 /SKEW, whichever kind it is.
+      ``REF=2``  "the motion of the node, expressed in the local system
+                 ATTACHED TO NODE N1 of CID" — relative motion → /FRAME/MOV.
+
+    dyna2rad's REF=0 branch builds the frozen /SKEW/FIX and then never writes
+    its id back into the TH entry (converttimehistory.cxx:468-507 has no
+    ``skewIdList[i] = ...``, unlike :424 and :461), so the new card is orphaned
+    and the group keeps pointing at the moving skew. Fixed here.
+    """
+    skews: List[int] = [0] * len(ids)
+    lines: List[str] = []
+    unresolved: List[int] = []
+    ref2_no_nodes: List[int] = []
+    frozen: List[int] = []
+    #: CID -> the id written into the column, so N nodes sharing a CID
+    #: synthesize ONE frame/skew (writing the id twice is starter ERROR 79 over
+    #: the merged /SKEW + /FRAME table).
+    resolved: Dict[tuple, int] = {}
+    for k in range(len(ids)):
+        cid = cids[k] if k < len(cids) else 0
+        ref = refs[k] if k < len(refs) else 0
+        if cid <= 0:
+            continue                    # blank CID = the global system
+        key = (cid, ref)
+        if key in resolved:
+            skews[k] = resolved[key]
+            continue
+        cn = state.coord_nodes.get(cid)
+        known = (cid in state.coord_sys or cid in state.coord_vectors
+                 or cn is not None)
+        if not known:
+            unresolved.append(cid)
+            resolved[key] = 0
+            continue
+        out = cid
+        if ref == 2:
+            if cn is not None:
+                fid = state.reserve_skew_id(state.next_id())
+                lines += _emit_frame_mov(
+                    fid, f"FRAME_MOV_TH_NODE_CID{cid}",
+                    cn.n1, cn.n2, cn.n3, cn.dir or "X")
+                out = fid
+            else:
+                ref2_no_nodes.append(cid)
+        elif ref == 0 and cn is not None and cn.flag == 1:
+            axes = _skew_axes_from_nodes(state, cn)
+            if axes is not None:
+                origin, xax, yax = axes
+                zax = (xax[1] * yax[2] - xax[2] * yax[1],
+                       xax[2] * yax[0] - xax[0] * yax[2],
+                       xax[0] * yax[1] - xax[1] * yax[0])
+                sid = state.reserve_skew_id(state.next_id())
+                lines += _emit_skew_fix(
+                    sid, f"SKEW_FIX_TH_NODE_CID{cid}", origin, yax, zax)
+                out = sid
+                frozen.append(cid)
+        resolved[key] = out
+        skews[k] = out
+    if unresolved:
+        state.warn(
+            f"{kw}: CID {sorted(set(unresolved))} names no converted "
+            "*DEFINE_COORDINATE_SYSTEM/_NODES/_VECTOR, so those nodes are "
+            "recorded in the GLOBAL system (skew_ID 0) instead of the local "
+            "one. Writing the raw CID through — what dyna2rad does when the "
+            "lookup fails (converttimehistory.cxx:400) — would dangle into "
+            "starter ERROR 434 (WRONG SKEW SYSTEM OR REFERENCE FRAME ID) and "
+            "refuse the whole deck. QUANTITATIVELY: the T01 columns are then "
+            "the global DX/DY/DZ components, i.e. rotated by the full "
+            "orientation of the intended local system, so an intrusion "
+            "measured along a local axis reads as its global projection.")
+    if ref2_no_nodes:
+        state.warn(
+            f"{kw}: REF=2 asks for the motion RELATIVE to the system attached "
+            f"to node N1 of CID {sorted(set(ref2_no_nodes))}, but that CID is a "
+            "*DEFINE_COORDINATE_SYSTEM/_VECTOR — it has no nodes, so no moving "
+            "/FRAME/MOV can be built from it. The nodes keep the CID's fixed "
+            "/SKEW, which gives the REF=1 answer instead: the components are "
+            "rotated into the local axes but the frame's own translation and "
+            "rotation are NOT subtracted, so the channel is absolute motion in "
+            "local axes rather than relative motion. Define the system with "
+            "*DEFINE_COORDINATE_NODES to get the relative channel.")
+    if frozen:
+        state.warn(
+            f"{kw}: REF=0 (\"the local system fixed for all time\") on CID "
+            f"{sorted(set(frozen))}, whose *DEFINE_COORDINATE_NODES carries "
+            "FLAG=1 (co-rotating). LS-DYNA states that combination is invalid "
+            "(\"If CID is nonzero, FLAG in the corresponding "
+            "*DEFINE_COORDINATE_NODES command must be set to 0\", Vol I R16 "
+            "p.16-113). REF wins: a /SKEW/FIX frozen from the t=0 node "
+            "positions is synthesized and the /TH group points at IT, not at "
+            "the moving skew. (dyna2rad builds the same frozen skew and then "
+            "never writes its id back — converttimehistory.cxx:468-507 — so "
+            "its group silently keeps the CO-ROTATING system.)")
+    return skews, lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1039,12 +1511,18 @@ _TH_DISCRETE_DATABASES = (
 def _history_discrete_used(state: ConversionState) -> bool:
     """True when the deck carries a *DATABASE_HISTORY_DISCRETE[_SET][_ID] card.
 
-    k2rad registers no handler for it, so it lands in skipped_keywords — which
-    is exactly where to read it back from: this is only used to QUALIFY the
-    deforc claim, not to act on the card.
+    It used to be read out of ``skipped_keywords``, because k2rad had no
+    handler for the card. It has one now, so the card never reaches that list
+    and the parsed requests are the source instead — the qualifier below would
+    otherwise have gone silently dead the moment the keyword became supported.
+
+    The qualifier itself still stands: LS-DYNA narrows the deforc SELECTION
+    with this card, while the /TH/SPRING that answers *DATABASE_DEFORC lists
+    every converted *ELEMENT_DISCRETE connector. Both groups are written (they
+    answer different LS-DYNA files), so the deforc one is a superset.
     """
-    return any(kw.startswith("DATABASE_HISTORY_DISCRETE")
-               for kw in state.skipped_keywords)
+    return any(dbh.db_type in ("DISCRETE", "DISCRETE_SET")
+               for dbh in state.db_histories)
 
 
 def _make_starter_th_discrete_connectors(state: ConversionState) -> List[str]:
@@ -1151,3 +1629,359 @@ def _make_starter_th_discrete_connectors(state: ConversionState) -> List[str]:
                f"{row} actually holds." if _history_discrete_used(state)
                else ""))
     return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *DATABASE_NODAL_FORCE_GROUP -> /TH/NODE
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The seven variables dyna2rad writes for a nodal force group, verbatim
+#: (convertcards.cxx:1042-1045, Number_Of_Variables hard-coded to 7). All seven
+#: are legal /TH/NODE names (th_node.cfg:117, :134-139); ``DEF`` itself expands
+#: to DX DY DZ VX VY VZ (hm_read_thgrou.F IVARNG row 1).
+_NODFOR_VARS = ("DEF", "REACX", "REACY", "REACZ", "REACXX", "REACYY", "REACZZ")
+
+
+def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
+    """*DATABASE_NODAL_FORCE_GROUP[_TITLE] -> one /TH/NODE per card.
+
+    LS-DYNA writes the resultant force acting on a node GROUP to its ``nodfor``
+    file; dyna2rad answers with one /TH/NODE per card over the expanded node
+    set, ``skew_ID`` = the card's CID on every node, and the seven variables
+    above (convertcards.cxx:993-1052). Same here, with three deliberate
+    differences, each because the dyna2rad behaviour is a defect rather than a
+    convention:
+
+      * the node set is looked up through k2rad's own ``state.node_sets``.
+        dyna2rad looks the RADIOSS ``/SET/GENERAL`` up by the raw LS-DYNA NSID
+        (convertcards.cxx:1023) instead of going through its own
+        ``GetRadiossSetIdFromLsdSet`` mapping, so on a deck where a *SET_NODE
+        id collides with another set family it silently finds the WRONG set;
+      * an unresolved NSID and an empty set are WARNED, not dropped in silence
+        (convertcards.cxx:1017 / :1037);
+      * nodes are screened against the converted mesh — a /TH/NODE naming an
+        undefined node is starter ERROR 78, not a lost channel.
+
+    **What the channel actually is.** LS-DYNA's nodfor is a free-body cut: the
+    force the rest of the model exerts on the group. Radioss REAC* is the
+    KINEMATIC CONSTRAINT reaction, which is identically zero on an
+    unconstrained node — and it is a time-ACCUMULATED impulse on top of that.
+    Both are said in the warning; the free-body equivalent is /SECT
+    (*DATABASE_CROSS_SECTION), which k2rad also converts.
+    """
+    if not state.db_nodal_force_groups:
+        return []
+    lines: List[str] = []
+    for grp in state.db_nodal_force_groups:
+        entry = state.node_sets.get(grp.nsid)
+        if entry is None:
+            state.warn(
+                f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: no converted "
+                "*SET_NODE with that id (or a set spelling k2rad does not "
+                "expand, e.g. *SET_NODE_ADD), so NO /TH/NODE group is written "
+                "and those nodfor channels are lost. Listing the set id as if "
+                "it were a node id would be starter ERROR 78.")
+            continue
+        wanted: List[int] = []
+        seen: Set[int] = set()
+        for nid in entry[1]:
+            if nid not in seen:
+                seen.add(nid)
+                wanted.append(nid)
+        nodes = [n for n in wanted if n in state.nodes]
+        lost = sorted(set(wanted) - set(nodes))
+        if lost:
+            shown = ", ".join(str(n) for n in lost[:10])
+            if len(lost) > 10:
+                shown += f", ... ({len(lost)} ids)"
+            state.warn(
+                f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: {len(lost)} "
+                "member(s) of the set are not a node of the converted mesh — "
+                f"{shown}. Left out: a /TH/NODE naming an undefined node is "
+                "starter ERROR 78 (UNDEFINED NODE NUMBER IN TH GROUP) and the "
+                "whole deck is refused.")
+        if not nodes:
+            state.warn(
+                f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: the node set is "
+                "empty, so NO /TH/NODE group is written (an empty TH group is "
+                "starter ERROR 1109 in its own right). Those channels are "
+                "lost. dyna2rad drops this case silently.")
+            continue
+        skew = 0
+        if grp.cid:
+            if (grp.cid in state.coord_sys or grp.cid in state.coord_nodes
+                    or grp.cid in state.coord_vectors):
+                skew = grp.cid
+            else:
+                state.warn(
+                    f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: CID="
+                    f"{grp.cid} names no converted *DEFINE_COORDINATE_"
+                    "SYSTEM/_NODES/_VECTOR, so the reactions are reported in "
+                    "the GLOBAL system (skew_ID 0). A dangling skew id in that "
+                    "column would be starter ERROR 434 (WRONG SKEW SYSTEM OR "
+                    "REFERENCE FRAME ID) and no deck at all.")
+        th_id = state.next_id()
+        title = grp.title.strip() or f"DATABASE NODAL FORCE GROUP NSET {grp.nsid}"
+        lines += [
+            "#-  TIME HISTORY (*DATABASE_NODAL_FORCE_GROUP -> nodal reaction "
+            f"impulse, nsid={grp.nsid}):", HDR,
+            f"/TH/NODE/{th_id}",
+            title[:100],
+            "#  DEF (DX/Y/Z + VX/Y/Z) + reaction IMPULSE REACX/Y/Z + REACXX/YY/ZZ",
+            f"#  skew_ID {skew} per node (CID={grp.cid}); REAC* force = d(REAC*)/dt",
+            _th_var_line(_NODFOR_VARS),
+        ]
+        lines += _th_id_lines("NODE", nodes, [skew] * len(nodes))
+        lines.append(HDR)
+        _warn_reac_impulse(
+            state,
+            f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid} -> /TH/NODE/{th_id} "
+            f"REACX/Y/Z + REACXX/YY/ZZ over {len(nodes)} node(s)",
+            "Differentiate before comparing against an LS-DYNA nodfor file "
+            "(F = d(REAC)/dt, e.g. numpy.gradient, or tools/th_to_csv.py which "
+            "writes the differentiated column). AND NOTE THE CHANGE OF "
+            "MEANING: LS-DYNA's nodfor is a FREE-BODY CUT — the force the rest "
+            "of the model exerts on the group, nonzero anywhere in the mesh — "
+            "while the Radioss REAC* channel is the KINEMATIC CONSTRAINT "
+            "reaction and is identically zero on a node that carries no /BCS, "
+            "/RBODY or imposed motion. dyna2rad maps the two onto each other "
+            "anyway (convertcards.cxx:1045). For a real free-body section "
+            "force use *DATABASE_CROSS_SECTION_PLANE/_SET, which k2rad turns "
+            "into /SECT + /TH/SECTIO.")
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *DATABASE_RBDOUT -> /TH/RBODY
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_starter_th_rbody(state: ConversionState) -> List[str]:
+    """*DATABASE_RBDOUT -> /TH/RBODY over EVERY /RBODY the conversion wrote.
+
+    A presence-only trigger with no id list, answered by collecting every
+    converted rigid body — the same shape /TH/RWALL, /TH/SECTIO and /TH/INTER
+    use (convertrigids.cxx:766-772).
+
+    ``state.rbody_ids`` is the set the FOUR /RBODY producers register into at
+    the line that writes the card: *MAT_RIGID parts (rbody.py:640, which also
+    covers *PART_INERTIA, element-free CoG masters and
+    *CONSTRAINED_RIGID_BODIES merge masters), *CONSTRAINED_NODAL_RIGID_BODY
+    (rbody.py:998) and the implicit no-rigid-body probe (rbody.py:1076).
+    ``rbody_info`` cannot stand in for it: the probe body is not in that dict at
+    all (so a deck whose ONLY rigid body is the probe would get no group), a
+    CNRB/part id collision drops one record from it, and a
+    *CONSTRAINED_RIGID_BODIES merge aliases several keys onto one master node.
+
+    Two /TH/RBODY-only card rules, both measured:
+
+      * the id list is a TEN-PER-LINE cell list with no name and no skew column
+        (th_rbody.cfg ``FREE_CELL_LIST(idsmax,"%10d",ids,100)``), not the
+        one-id-per-line layout every element group uses;
+      * a leading id of 0 selects ALL rigid bodies
+        (hm_read_thgrki_rbody.F:123-125), so a placeholder zero is never
+        written. (A STALE id here is only ``WARNING 257 NONEXISTENT RBODY``,
+        not the hard ERROR 69 the element groups give — the list is still
+        built from the emitted set, so the group count is right.)
+
+    ``DEF`` expands to nine channels, ``FX FY FZ MX MY MZ RX RY RZ``
+    (hm_read_thgrou.F IVARRBG row 1). The first six are TIME-ACCUMULATED
+    impulses — ``rgbodfp.F:261-266`` does ``FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)`` —
+    while ``RX/RY/RZ`` integrate the angular VELOCITY
+    (``rgbodv.F:91-93 FS(7)=FS(7)+VR(1,M)*DT2*WEIGHT(M)``) and are therefore a
+    genuine rotation ANGLE, needing no differentiation. Said in the warning,
+    because LS-DYNA's rbdout is a MOTION file and half of this is not motion.
+    """
+    if not state.db_rbdout_dt:
+        return []
+    ids = sorted(state.rbody_ids)
+    if not ids:
+        state.warn(
+            "*DATABASE_RBDOUT requested but this deck has no /RBODY — no "
+            "*MAT_RIGID part, no *CONSTRAINED_NODAL_RIGID_BODY and no implicit "
+            "probe body. NO /TH/RBODY is emitted (a TH group listing nothing "
+            "is starter ERROR 1109). The dt is still honoured as the /TFILE "
+            "frequency.")
+        return []
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_RBDOUT -> rigid-body forces and rotation, "
+        f"dt={state.db_rbdout_dt:g}):", HDR,
+        f"/TH/RBODY/{th_id}",
+        f"TH_RBODY_{th_id}",
+        "#  DEF = FX FY FZ MX MY MZ (accumulated IMPULSE) + RX RY RZ (rotation angle)",
+        "#  /RBODY ids are TEN PER LINE here, and a leading 0 would mean ALL",
+        "#     var1",
+        "DEF       ",
+    ]
+    lines += _th_id_lines("RBODY", ids)
+    lines.append(HDR)
+    state.warn(
+        f"*DATABASE_RBDOUT -> /TH/RBODY/{th_id} over all {len(ids)} converted "
+        "rigid body(ies), listed by their /RBODY id (which k2rad sets to the "
+        "body's main node). Variables DEF = FX FY FZ MX MY MZ RX RY RZ. "
+        "READ THE TWO HALVES DIFFERENTLY: FX..MZ are a time-ACCUMULATED "
+        "force/moment IMPULSE, not a force — the engine adds a*dt every cycle "
+        "(rgbodfp.F:261-266, FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)) — so the force is "
+        "d(FX)/dt, the same treatment /TH/INTER and /TH/NODE REAC* need. "
+        "RX/RY/RZ integrate the angular VELOCITY instead (rgbodv.F:91-93) and "
+        "ARE the body's rotation angle, so they need no differentiation. "
+        "LS-DYNA's rbdout is a MOTION file (global and local displacement, "
+        "velocity and acceleration of each body); only the rotation half of "
+        "that is in this group. For rigid-body translation add a "
+        "*DATABASE_HISTORY_NODE on the body's main node, which gives DX/DY/DZ "
+        "and VX/VY/VZ directly.")
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *DATABASE_BNDOUT -> /TH/NODE on the prescribed-motion nodes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_starter_th_bndout(state: ConversionState) -> List[str]:
+    """*DATABASE_BNDOUT -> /TH/NODE REAC* over the imposed-motion nodes.
+
+    "Boundary condition forces and energy" (Vol I R16 p.16-4). dyna2rad reads
+    the card's mere presence and collects the node groups of every converted
+    ``/IMPDISP``, ``/IMPVEL`` and ``/IMPACC`` — in that order, with the
+    ``Gnod_id`` vs ``grnod_ID`` attribute switch at dyna2rad.cxx:466 — sorts
+    and uniques them, and writes ONE group named ``TH_NODE_BNDOUT`` with SIX
+    variables and no ``DEF`` (dyna2rad.cxx:449-495). Reproduced, with the node
+    scope taken from ``state.imp_motion_nodes``: the set the two imposed-motion
+    writers filled AT the point of emission, so a row they warned about and
+    dropped (an unsupported DOF, a missing /RBODY, an empty box intersection)
+    contributes no node and cannot dangle into starter ERROR 78.
+
+    Zero-scale *BOUNDARY_PRESCRIBED_MOTION_SET rows are deliberately absent:
+    ``sf == 0`` means "fix this DOF" and k2rad folds those into a /BCS rather
+    than an /IMP* (writer/loads.py), which is exactly dyna2rad's SPCFORC scope,
+    not its BNDOUT scope. *DATABASE_SPCFORC already covers them.
+
+    REACXX/YY/ZZ are added only when a prescribed motion drives a ROTATIONAL
+    dof, the same gate ``_spc_constrains_rotations`` puts on the SPC block.
+    """
+    if not state.db_bndout_dt:
+        return []
+    if not state.imp_motion_nodes:
+        state.warn(
+            "*DATABASE_BNDOUT requested but this deck drives no node with a "
+            "prescribed motion (no converted /IMPDISP, /IMPVEL or /IMPACC) — "
+            "there is no boundary-condition force to output, so NO /TH/NODE is "
+            "emitted. The dt is still honoured as the /TFILE frequency. SPC "
+            "reaction forces are a different card: *DATABASE_SPCFORC.")
+        return []
+    nodes = sorted(state.imp_motion_nodes)
+    th_vars = ["REACX", "REACY", "REACZ"]
+    if state.imp_motion_rot:
+        th_vars += ["REACXX", "REACYY", "REACZZ"]
+    th_id = state.next_id()
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_BNDOUT -> prescribed-motion reaction "
+        f"impulse, dt={state.db_bndout_dt:g}):", HDR,
+        f"/TH/NODE/{th_id}",
+        "TH_NODE_BNDOUT",
+        "#  reaction IMPULSE (REACX/Y/Z)[ + angular impulse (REACXX/YY/ZZ)] per driven node",
+        "#  REAC* accumulates m*a*dt over the run: bndout force = d(REAC*)/dt",
+        _th_var_line(th_vars),
+    ]
+    lines += _th_id_lines("NODE", nodes)
+    lines.append(HDR)
+    _warn_reac_impulse(
+        state,
+        f"*DATABASE_BNDOUT -> /TH/NODE/{th_id} 'TH_NODE_BNDOUT' over "
+        f"{len(nodes)} node(s) driven by an /IMPDISP, /IMPVEL or /IMPACC",
+        "Differentiate the T01 columns with respect to time (F = d(REAC)/dt, "
+        "e.g. numpy.gradient(reac, t), or tools/th_to_csv.py which writes the "
+        "differentiated column) before comparing them against an LS-DYNA "
+        "bndout file. The ENERGY half of bndout (the work done by the boundary "
+        "condition) has no /TH channel at all; take it from the global energy "
+        "balance in the .out / T01, where the external work appears."
+        + ("" if state.imp_motion_rot else
+           " Only the three translational REAC* are requested: no prescribed "
+           "motion in this deck drives a rotational dof, and the rotational "
+           "channels would read zero."))
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONTROL_PARALLEL -> engine /PARITH
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_engine_parith(state: ConversionState) -> List[str]:
+    """*CONTROL_PARALLEL -> ``/PARITH/ON`` or ``/PARITH/OFF`` (engine card).
+
+    ``CONST=1`` ("consistency: on") requires "that all contributions to global
+    vectors be summed in a precise order independently of the number of
+    processors used" (Vol I R16 p.12-449), which is precisely /PARITH/ON: the
+    engine writes each element's contribution into a fixed per-node slot of the
+    skyline ``FSKY`` array and gathers them in a deterministic walk
+    (engine/source/assembly/asspar4.F), so the sum order is invariant in both
+    the OpenMP thread count and the MPI domain count. MEASURED on a 576-brick
+    LAW2 model, T01 decoded to full precision: /PARITH/ON gives a BITWISE
+    identical T01 at nt=1 and nt=4, /PARITH/OFF differs in the 7th digit (row
+    183 KE 3.495637e-02 vs 3.495636e-02). Cost on that model was 1.65x at
+    nt=4; treat 15-25 % as the realistic figure on a real mesh, and re-measure.
+
+    The card is header-only — ``FORMAT(radioss51) HEADER("/PARITH/%s",
+    KEYWORD2)``, no data card — and the engine reader matches on a 5-character
+    truncated key (``freform.F:560-571``, ``KEY0(34)='PARIT'``), so both
+    ``/PARIT/ON`` and ``/PARITH/ON`` are accepted. An optional trailing integer
+    is clamped away by ``rdresa.F:309``, so the bare form is what is written.
+
+    **THE CARD IS EMITTED ONLY WHEN THE DECK CARRIES *CONTROL_PARALLEL.**
+    dyna2rad creates /PARITH unconditionally and defaults it to OFF
+    (convertcards.cxx:973-974) — before it has even looked for the LS-DYNA
+    card. That is not neutral: OpenRadioss's own default is ON
+    (starter/source/starter/contrl.F:400 sets ``IPARI0 = 1`` before
+    HM_READ_ANALY), so dyna2rad silently FLIPS the solver default on every deck
+    it converts, including decks that say nothing about parallelism. k2rad does
+    not change a solver default from a card the deck does not carry; when the
+    card IS there, both of its answers are honoured, OFF included.
+
+    NCPU / NUMRHS / PARA have no Radioss counterpart and are named as dropped.
+    """
+    cards = state.ctrl_parallels
+    if not cards:
+        return []
+    const_on = any(c.const == 1 for c in cards)
+    dropped = sorted({name for c in cards
+                      for name, v in (("NCPU", c.ncpu), ("NUMRHS", c.numrhs),
+                                      ("PARA", c.para)) if v})
+    if const_on:
+        state.warn(
+            "*CONTROL_PARALLEL CONST=1 (consistency on) -> engine /PARITH/ON: "
+            "OpenRadioss then assembles nodal forces through the fixed-slot "
+            "skyline array (asspar4.F) so the result is bit-reproducible "
+            "independently of -nt and of the MPI domain count, the same "
+            "guarantee LS-DYNA's CONST=1 gives. It costs run time (LS-DYNA "
+            "quotes at least 15 % for PARA=0; measured 1.65x at nt=4 on a "
+            "small brick model). VERIFY IT WAS CONSUMED by running the deck "
+            "twice at different -Nt and diffing the decoded T01 - identical "
+            "means the card took effect. Two things silently veto it and both "
+            "leave a line in the _0001.out: an implicit run (PARITH/ON IS NOT "
+            "COMPATIBLE WITH IMPLICIT OPTION ... RESETTING: PARITH/OFF, "
+            "lectur.F:681) and /ANALY Iparith=2, which k2rad never writes."
+            + (" NOTE: this deck is IMPLICIT or MODAL, so the engine WILL "
+               "reset it to OFF." if (state.is_implicit or state.is_modal)
+               else ""))
+    else:
+        state.warn(
+            "*CONTROL_PARALLEL CONST="
+            + ", ".join(str(c.const) for c in cards)
+            + " (consistency off, LS-DYNA's own default) -> engine "
+            "/PARITH/OFF. This is NOT a no-op: OpenRadioss's default is "
+            "/PARITH/ON (contrl.F:400 sets IPARI0=1), so the card is written "
+            "to hold the deck at the LS-DYNA behaviour - a faster run whose "
+            "results shift in the last digits when the thread or domain count "
+            "changes. Drop the card, or set CONST=1, if bit-reproducibility "
+            "matters more than speed.")
+    if dropped:
+        state.warn(
+            "*CONTROL_PARALLEL: " + ", ".join(dropped)
+            + " - no OpenRadioss counterpart, DROPPED. NCPU is an SMP thread "
+            "count, which "
+            "OpenRadioss takes as the runtime -nt argument rather than a deck "
+            "card (LS-DYNA itself disabled the field in 971 R5); NUMRHS and "
+            "PARA are storage and assembly details of LS-DYNA's own SMP force "
+            "accumulation, and /PARITH has no sub-option for either. dyna2rad "
+            "drops all three silently.")
+    return [f"/PARITH/{'ON' if const_on else 'OFF'}", "#"]

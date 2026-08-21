@@ -1702,6 +1702,13 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
             lines.append(f"/BEAM/{pid}")
             for e in beams_by_pid[pid]:
                 lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}{_i(e.n3)}")
+                # The #106 register. *DATABASE_HISTORY_BEAM has to know which
+                # of its ids became a /BEAM and which became a /SPRING (a
+                # *MAT_SPOTWELD or ELFORM=6 part), and which became NEITHER
+                # because the pid has no *PART record and this loop never
+                # visited it. Recorded at the line that writes the row, never
+                # derived from state.beam_elems, for exactly that reason.
+                state.beam_elem_ids.add(e.eid)
             lines.append(HDR)
 
     return lines

@@ -4832,8 +4832,54 @@ class DbD3Plot:
 
 @dataclass
 class DbHistory:
-    db_type: str        # "SHELL", "SOLID", "NODE"
+    """One *DATABASE_HISTORY_<FAMILY>[_SET][_LOCAL][_ID] request.
+
+    ``db_type`` is the keyword tail as the dispatcher resolved it — "SHELL",
+    "SOLID", "TSHELL", "NODE", "SPH", "BEAM", "DISCRETE", "SEATBELT", the
+    ``_SET`` spellings of each, and "NODE_LOCAL" / "NODE_SET_LOCAL". The three
+    optional columns are populated only by the spellings that carry them:
+
+      * ``cids`` / ``refs`` — the ``CID`` and ``REF`` columns of a ``_LOCAL``
+        card (Vol I R16 p.16-113 Card 1c). One entry per entry in ``ids``, so
+        the per-entity ``skew_ID`` column of ``/TH/NODE`` can be built from
+        them. ``_LOCAL`` exists ONLY for NODE / NODE_SET (a full-text scan of
+        the R16 and R17 manuals finds no BEAM_LOCAL, DISCRETE_LOCAL or
+        SEATBELT_LOCAL), which lines up with Radioss: ``/TH/NODE`` is the only
+        group type in this batch whose id card HAS a skew column.
+      * ``names`` — the 70-char ``HEADING`` of an ``_ID`` card, written into the
+        ``elem_name`` column of the emitted group so a T01 channel keeps the
+        label the deck gave it.
+    """
+    db_type: str        # "SHELL", "SOLID", "NODE", "BEAM", "DISCRETE", ...
     ids: List[int] = field(default_factory=list)
+    cids: List[int] = field(default_factory=list)
+    refs: List[int] = field(default_factory=list)
+    names: List[str] = field(default_factory=list)
+
+
+@dataclass
+class DbNodalForceGroup:
+    """*DATABASE_NODAL_FORCE_GROUP[_TITLE] — one node set whose reaction is
+    written to LS-DYNA's ``nodfor`` file, in the optional local system CID.
+    The card carries no DT of its own: "The output interval must be specified
+    using *DATABASE_NODFOR" (Vol I R16 p.16-121)."""
+    nsid: int
+    cid: int = 0
+    title: str = ""
+
+
+@dataclass
+class ControlParallel:
+    """*CONTROL_PARALLEL (Vol I R16 p.12-448). Only CONST reaches OpenRadioss:
+    CONST=1 ("consistency on") is the engine's /PARITH/ON, i.e. force assembly
+    in a thread-count-independent order. NCPU is an SMP thread count, which in
+    OpenRadioss is the runtime ``-nt`` argument and not a deck card at all;
+    NUMRHS and PARA have no /PARITH sub-option. All three are read so the
+    converter can name them as dropped."""
+    ncpu: int = 0
+    numrhs: int = 0
+    const: int = 0
+    para: int = 0
 
 
 @dataclass
@@ -5356,6 +5402,39 @@ class ConversionState:
     # ids are invented by the converter and match no LS-DYNA deforc/disbout row.
     discrete_spring_eids: Set[int] = field(default_factory=set)
     dbeam_spring_eids: Set[int] = field(default_factory=set)
+    # EVERY /SPRING id this conversion wrote, from ALL SEVEN producers — the
+    # three above plus *ELEMENT_PLOTEL, --ground-springs, the
+    # *CONSTRAINED_SPOTWELD ties and the *CONSTRAINED_JOINT_* springs, whose
+    # ids are minted by next_id() during section emission and were recorded
+    # NOWHERE before this batch. The three sets above stay separate because
+    # each answers ONE LS-DYNA database card and must not report the others'
+    # elements; this one answers "does a /SPRING with this id exist?", which is
+    # the question *DATABASE_HISTORY_DISCRETE (and the /BEAM->/SPRING fallback
+    # of *DATABASE_HISTORY_BEAM) has to ask before naming an id — a /TH/SPRING
+    # on an id the deck never defines is starter ERROR 69, not a lost channel.
+    # Filled AT the line that writes each /SPRING row.
+    spring_elem_ids: Set[int] = field(default_factory=set)
+    # The same accounting for /BEAM. NOT derivable from state.beam_elems: a
+    # beam on a *MAT_SPOTWELD part or on a *SECTION_BEAM ELFORM=6 part is
+    # emitted as a /SPRING instead, and a beam whose PID has no *PART record is
+    # never emitted at all (writer/mesh.py skips the whole part).
+    beam_elem_ids: Set[int] = field(default_factory=set)
+    # Every /RBODY id this conversion wrote — from ALL FOUR producers:
+    # *MAT_RIGID parts (incl. *PART_INERTIA, element-free CoG masters and the
+    # *CONSTRAINED_RIGID_BODIES merge masters), *CONSTRAINED_NODAL_RIGID_BODY,
+    # and the implicit no-rigid-body probe. rbody_info cannot stand in for it:
+    # the probe body is not in rbody_info at all, a CNRB/part id collision
+    # drops one record, and a merge aliases several dict keys onto one master.
+    # *DATABASE_RBDOUT lists exactly this set.
+    rbody_ids: Set[int] = field(default_factory=set)
+    # Nodes an /IMPDISP, /IMPVEL or /IMPACC was actually written for, and
+    # whether any of those motions drives a ROTATIONAL dof. This is the
+    # *DATABASE_BNDOUT scope (dyna2rad.cxx:456 collects the node groups of
+    # exactly those three cards). Recorded by the two imposed-motion writers at
+    # the point of emission, so a row that was warned-and-dropped (unsupported
+    # DOF, missing /RBODY, empty box intersection) contributes no node.
+    imp_motion_nodes: Set[int] = field(default_factory=set)
+    imp_motion_rot: bool = False
     # *ELEMENT_DISCRETE eids carrying PF=1, the deforc PRINT flag: "EQ.1: forces
     # are not printed DEFORC file" (Vol I R16 p.19-32), and p.1944 names it as
     # one of the two ways a deck narrows the deforc selection. It is an OUTPUT
@@ -5454,10 +5533,16 @@ class ConversionState:
     # *SET_SEGMENT → segment sets (used by /LOAD/PBLAST as /SURF/SEG)
     segment_sets: Dict[int, SegmentSet] = field(default_factory=dict)           # sid → SegmentSet
     # *SET_SHELL/_SOLID/_BEAM element sets: sid → (title, [eids]).
-    # Referenced by *DATABASE_CROSS_SECTION_SET (→ the /SECT element groups).
+    # Referenced by *DATABASE_CROSS_SECTION_SET (→ the /SECT element groups)
+    # and by the *DATABASE_HISTORY_<FAMILY>_SET expansion.
     shell_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
     solid_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
     beam_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    # *SET_DISCRETE[_LIST]: the *ELEMENT_DISCRETE twin of the three above. Its
+    # only consumer today is *DATABASE_HISTORY_DISCRETE_SET, whose cfg accepts
+    # a SET_DISCRETE_IDPOOL or a SET_COMPONENT_IDPOOL id
+    # (database_history_discrete_set.cfg:25).
+    discrete_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
 
     # ── Boundary conditions ────────────────────────────────────
     bcs_spcs: List[BcsSpc] = field(default_factory=list)
@@ -5635,6 +5720,11 @@ class ConversionState:
     ctrl_cpu: Optional[ControlCpu] = None
     ctrl_energy: Optional[ControlEnergy] = None
     ctrl_hourglass: Optional[ControlHourglass] = None
+    # *CONTROL_PARALLEL → engine /PARITH. A LIST, not a single record: LS-DYNA
+    # allows several cards and dyna2rad ORs their CONST flags
+    # (convertcards.cxx:978-986), so one CONST=1 anywhere turns parallel
+    # arithmetic on and a later CONST=2 cannot turn it back off.
+    ctrl_parallels: List[ControlParallel] = field(default_factory=list)
     ctrl_implicit_auto: Optional[ControlImplicitAuto] = None
     ctrl_implicit_dyn: Optional[ControlImplicitDynamics] = None
     ctrl_output: Optional[ControlOutput] = None
@@ -5684,6 +5774,24 @@ class ConversionState:
     # *DATABASE_BINARY_BLSTFOR → /TH/SURF (P,A) on the blast-loaded
     # surfaces + /ANIM/NODA/PEXT + /ANIM/VECT/FEXT
     db_blstfor_dt: float = 0.0
+    # *DATABASE_BNDOUT → /TH/NODE REAC* over the nodes an /IMPDISP, /IMPVEL or
+    # /IMPACC actually drives (dyna2rad.cxx:456 names exactly those three).
+    db_bndout_dt: float = 0.0
+    # *DATABASE_RBDOUT → /TH/RBODY over EVERY emitted /RBODY (state.rbody_ids).
+    db_rbdout_dt: float = 0.0
+    # *DATABASE_NODFOR — the ASCII nodal-force-group database. It selects no
+    # channel of its own; it states the OUTPUT INTERVAL of the /TH/NODE groups
+    # *DATABASE_NODAL_FORCE_GROUP builds ("The output interval must be
+    # specified using *DATABASE_NODFOR", Vol I R16 p.16-121), so its dt joins
+    # the /TFILE minimum exactly the way *DATABASE_SPHOUT's does.
+    db_nodfor_dt: float = 0.0
+    # *DATABASE_TPRINT — the THERMAL ASCII database interval. Parsed so it can
+    # be reported, and deliberately NOT in the /TFILE chain: k2rad converts no
+    # thermal keyword at all, so there is no thermal channel for it to pace.
+    db_tprint_dt: float = 0.0
+    # *DATABASE_NODAL_FORCE_GROUP[_TITLE] → one /TH/NODE per card, 7 variables,
+    # per-node skew_ID = CID.
+    db_nodal_force_groups: List[DbNodalForceGroup] = field(default_factory=list)
     db_extent_binary: Optional[DbExtentBinary] = None
     # *DATABASE_FREQUENCY_BINARY_D3PSD/D3RMS/D3FTG → offline post-processing
     db_freq_binary: Dict[str, DbFreqBinary] = field(default_factory=dict)

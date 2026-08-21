@@ -69,12 +69,12 @@ from .state import (
     BoundaryNonReflecting, ControlAle,
     ControlAccuracy, ControlContact, ControlCpu, ControlEnergy,
     ControlHourglass, HourglassDef, ControlImplicitAuto, ControlImplicitDynamics,
-    ControlOutput, ControlShell, ControlSolid,
+    ControlOutput, ControlParallel, ControlShell, ControlSolid,
     ControlImplicitGeneral, ControlImplicitSolution, ControlImplicitEigenvalue,
     ControlTermination, ControlTimestep,
     DampingGlobal, DampingPartStiffness, DampingPartMass,
     DampingFrequencyRange, DampingRelative,
-    DbD3Plot, DbHistory, DbExtentBinary,
+    DbD3Plot, DbHistory, DbExtentBinary, DbNodalForceGroup,
     GravityLoadPart, MatAddFatigue, DbFreqBinary,
     InitialStressShell, InitialStressSolid, CrossSection,
 )
@@ -4786,6 +4786,13 @@ def handle_set_beam_list(block: Block, state: ConversionState) -> None:
     _handle_set_elem_list(block, state, state.beam_sets)
 
 
+def handle_set_discrete_list(block: Block, state: ConversionState) -> None:
+    """*SET_DISCRETE[_LIST] — the *ELEMENT_DISCRETE twin of the three sets
+    above. Its only consumer is *DATABASE_HISTORY_DISCRETE_SET, whose cfg takes
+    a ``SET_DISCRETE_IDPOOL`` id (database_history_discrete_set.cfg:25)."""
+    _handle_set_elem_list(block, state, state.discrete_sets)
+
+
 def _record_part_set_attrs(state: ConversionState, psid: int,
                            f1: List[str]) -> None:
     """Record the *SET_PART header's DA1..DA4 attributes when any is set.
@@ -5982,6 +5989,163 @@ def handle_database_swforc(block: Block, state: ConversionState) -> None:
     (convertdefinehexspotweldassembly.cxx:315). k2rad emits all three.
     """
     state.db_swforc_dt = _handle_db_dt(block, state, "*DATABASE_SWFORC")
+
+
+def handle_database_bndout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_BNDOUT ("Boundary condition forces and energy") → /TH/NODE
+    REAC* over every node an /IMPDISP, /IMPVEL or /IMPACC drives.
+
+    dyna2rad names exactly those three converted cards as the node source
+    (``dyna2rad.cxx:456`` ``{"/IMPDISP","/IMPVEL","/IMPACC"}``, with the
+    ``Gnod_id`` vs ``grnod_ID`` attribute switch at :466), collects their node
+    groups, sorts and uniques them, and writes ONE group named
+    ``TH_NODE_BNDOUT`` with the six REAC* variables and no ``DEF``. k2rad
+    builds the node scope from what its two imposed-motion writers ACTUALLY
+    emitted (``state.imp_motion_nodes``) rather than from the parsed cards, so
+    a row that was warned-and-dropped contributes no node — a /TH/NODE naming
+    an undefined node is starter ERROR 78, not a lost channel.
+    """
+    state.db_bndout_dt = _handle_db_dt(block, state, "*DATABASE_BNDOUT")
+
+
+def handle_database_rbdout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_RBDOUT ("Motion of rigid bodies") → /TH/RBODY over EVERY
+    emitted /RBODY.
+
+    A presence-only trigger: the card carries no id list, and dyna2rad answers
+    it by collecting every ``/RBODY`` in the converted model
+    (``convertrigids.cxx:766-772`` — ``selDatabaseRbdout.Count()``, then a full
+    ``SelectionRead(p_radiossModel, "/RBODY")`` walk), the same "collect every
+    converted entity" shape /TH/RWALL, /TH/SECTIO and /TH/INTER use. k2rad
+    lists ``state.rbody_ids``, which every one of the four /RBODY producers
+    registers into at the line that writes the card.
+    """
+    state.db_rbdout_dt = _handle_db_dt(block, state, "*DATABASE_RBDOUT")
+
+
+def handle_database_nodfor(block: Block, state: ConversionState) -> None:
+    """*DATABASE_NODFOR — the nodal-force-group ASCII database.
+
+    It selects nothing on its own: "The output interval must be specified using
+    *DATABASE_NODFOR" is what *DATABASE_NODAL_FORCE_GROUP says about it (Vol I
+    R16 p.16-121), so its DT is the frequency of the /TH/NODE groups that card
+    builds. Same treatment as *DATABASE_SPHOUT: the dt joins the /TFILE
+    minimum, the channels come from the other keyword. dyna2rad likewise has
+    ``*DATABASE_NODFOR`` only in its ``dbCardList`` (convertcards.cxx:89).
+    """
+    state.db_nodfor_dt = _handle_db_dt(block, state, "*DATABASE_NODFOR")
+    if not state.db_nodal_force_groups:
+        state.note_recognized_not_emitted(
+            "DATABASE_NODFOR",
+            "it is the output INTERVAL of the nodfor database, not a channel "
+            "selection — the nodes come from *DATABASE_NODAL_FORCE_GROUP, "
+            "which this deck does not carry. The dt IS honoured, as one term "
+            "of the /TFILE minimum. Add *DATABASE_NODAL_FORCE_GROUP with a "
+            "*SET_NODE to get the reaction channels.")
+
+
+def handle_database_tprint(block: Block, state: ConversionState) -> None:
+    """*DATABASE_TPRINT — the THERMAL ASCII database. Recognized, not emitted.
+
+    dyna2rad answers it by switching on ``/ANIM/NODA TEMP`` + ``/ANIM/ELEM
+    TEMP`` and appending the ``TEMP`` variable to every existing /TH/NODE and
+    /TH/BRIC group (dyna2rad.cxx:497-551), with no check that a thermal
+    solution was ever requested. k2rad deliberately does NOT copy that, and the
+    reason is specific to this converter rather than a matter of taste:
+
+      * k2rad converts NO thermal keyword at all — no *CONTROL_THERMAL_*, no
+        *MAT_THERMAL_*, no *INITIAL_TEMPERATURE, no *BOUNDARY_TEMPERATURE, and
+        it emits no /HEAT/MAT and no /THERM_STRESS (writer/materials.py
+        explains the one deliberate omission). A converted deck therefore
+        CANNOT have a thermal solve, so the channel cannot ever carry data.
+      * What it would carry instead was measured on a 576-brick deck: with
+        /MAT/ELAST the Nodal_Temperature and 3DELEM_Temperature fields come out
+        ALL ZERO; with /MAT/PLAS_JOHNS (which allocates ``GBUF%TEMP`` but never
+        integrates it) they come out a constant 300. The scalar is ALWAYS
+        created in the A-file (``genani.F:1905``, ``:4547``) — it is never
+        omitted — so the result is a flat fringe that looks like data.
+      * The starter says the same thing on the /TH side and nowhere else:
+        ``WARNING 1087 OUTPUT TEMP WHILE TEMPERATURE IS NOT COMPUTED (NO
+        HEAT/MAT)`` fires for ``ITHBUF==19 .AND. ITHERM_FE==0``
+        (hm_read_thgrne.F:228-236). There is NO equivalent warning on the ANIM
+        side, so an emitted /ANIM/*/TEMP is silently uninformative.
+      * Its dt stays OUT of the /TFILE minimum for the documented membership
+        rule (writer/assembly.py): a card with no /TH consumer would only
+        thicken the T01 for channels that are not in it.
+    """
+    state.db_tprint_dt = _handle_db_dt(block, state, "*DATABASE_TPRINT")
+    state.note_recognized_not_emitted(
+        "DATABASE_TPRINT",
+        "the thermal ASCII database has no target: k2rad converts no thermal "
+        "keyword (*CONTROL_THERMAL_*, *MAT_THERMAL_*, *INITIAL_TEMPERATURE, "
+        "*BOUNDARY_TEMPERATURE) and emits no /HEAT/MAT, so the converted deck "
+        "runs no thermal solution. dyna2rad answers this card with /ANIM/NODA "
+        "TEMP + /ANIM/ELEM TEMP and a TEMP variable on every /TH/NODE and "
+        "/TH/BRIC group; measured on a converted deck those fields come out "
+        "all-zero (/MAT/ELAST) or a frozen 300 (/MAT/PLAS_JOHNS, which "
+        "allocates a temperature it never integrates) — a flat fringe that "
+        "reads as data. The starter's own diagnostic is WARNING 1087 (OUTPUT "
+        "TEMP WHILE TEMPERATURE IS NOT COMPUTED, hm_read_thgrne.F:228). The "
+        "dt is NOT added to the /TFILE minimum either, because no channel it "
+        "would pace exists.")
+
+
+def handle_control_parallel(block: Block, state: ConversionState) -> None:
+    """*CONTROL_PARALLEL → engine /PARITH (only when the card is present).
+
+    Card 1 (control_parallel.cfg:74-75, Vol I R16 p.12-448):
+    ``NCPU NUMRHS CONST PARA``, all %10d.
+
+    CONST is the consistency flag: "EQ.1 or n < 0: On (recommended). EQ.2 or
+    n > 0: Off, for a faster solution (default)." CONST=1 requires "that all
+    contributions to global vectors be summed in a precise order independently
+    of the number of processors used", which is exactly what OpenRadioss's
+    /PARITH/ON does (the skyline FSKY array with fixed per-node slots gathered
+    in a deterministic walk, engine/source/assembly/asspar4.F). Measured on a
+    576-brick LAW2 model: with /PARITH/ON the T01 is BITWISE identical between
+    nt=1 and nt=4; with /PARITH/OFF row 183's kinetic energy differs in the
+    7th digit.
+
+    NCPU, NUMRHS and PARA have no Radioss counterpart — NCPU is an SMP thread
+    count, which OpenRadioss takes as the runtime ``-nt`` argument rather than
+    a deck card (and LS-DYNA itself disabled the field in 971 R5), while
+    NUMRHS and PARA are storage/assembly details of LS-DYNA's own SMP force
+    accumulation with no /PARITH sub-option. Reported as dropped by the writer.
+    """
+    f = _card(block.raw, _title_offset(block), fixed=True, n=4, w=10)
+    state.ctrl_parallels.append(ControlParallel(
+        ncpu=to_int(f[0]) if len(f) > 0 else 0,
+        numrhs=to_int(f[1]) if len(f) > 1 else 0,
+        const=to_int(f[2]) if len(f) > 2 else 0,
+        para=to_int(f[3]) if len(f) > 3 else 0))
+
+
+def handle_database_nodal_force_group(block: Block,
+                                      state: ConversionState) -> None:
+    """*DATABASE_NODAL_FORCE_GROUP[_TITLE] → one /TH/NODE per card.
+
+    Card 1 (NodalForceGrp.cfg:110-116, Vol I R16 p.16-121): an optional 80-char
+    TITLE line for the ``_TITLE`` spelling, then ``NSID CID`` as ``%10d%10d``.
+    NSID is restricted to the *SET_NODE id pool; CID is a *DEFINE_COORDINATE
+    "for output of data in local system".
+
+    ``NSID == 0`` drops the whole card — dyna2rad does the same silently
+    (convertcards.cxx:1017 ``if (NSID)``); here it is warned, because a card
+    that asks for output and produces none should not be invisible.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=2, w=10)
+    nsid = to_int(f[0]) if f else 0
+    cid = to_int(f[1]) if len(f) > 1 else 0
+    if nsid <= 0:
+        state.warn(
+            "*DATABASE_NODAL_FORCE_GROUP: NSID is blank or 0, so the card "
+            "names no node set and NO /TH/NODE group is written. LS-DYNA "
+            "needs a *SET_NODE here (Vol I R16 p.16-121); dyna2rad drops such "
+            "a card silently.")
+        return
+    state.db_nodal_force_groups.append(DbNodalForceGroup(nsid, cid, title))
 
 
 def handle_contact_force_transducer(block: Block, state: ConversionState) -> None:
@@ -10823,14 +10987,89 @@ def handle_database_glstat(block: Block, state: ConversionState) -> None:
             "the data IS produced; it just is not driven by a converted card.")
 
 
+def _db_history_rows(block: Block) -> List[int]:
+    """RAW indices of a *DATABASE_HISTORY_* block's data cards.
+
+    Deliberately NOT ``_title_offset``: on this family ``_ID`` is a PER-ENTITY
+    70-char HEADING beside every id (Vol I R16 p.16-112 Card 1b), not the
+    card-level "id + title" header ``_title_offset`` assumes. Skipping raw[0]
+    on an ``_ID`` card would drop the deck's FIRST requested channel — which is
+    exactly what ``assembly._offset_block`` does today for the same reason, and
+    why the *INCLUDE_TRANSFORM walk for this family is a callable that reuses
+    this function (the #119 rule: both walks must agree on which line is a
+    card, or the offsetter and the handler silently address different rows).
+
+    Blank cards are dropped. That is what makes the ``_LOCAL_ID`` pairing below
+    safe: an all-blank HEADING card is legal and disappears from this list, so
+    the pairing claims its heading by RAW CONTIGUITY (``rows[k] == i + 1``)
+    instead of "the next row", which would swallow the following entity card.
+    """
+    return [i for i, ln in enumerate(block.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+
+
 def _handle_db_history(block: Block, state: ConversionState, db_type: str) -> None:
+    """Read one *DATABASE_HISTORY_<FAMILY>[_SET][_LOCAL][_ID] block.
+
+    Four card layouts, all from ``Keyword971_R6.1/OUTPUTBLOCK/
+    database_history_*.cfg`` and Vol I R16 p.16-110..16-115:
+
+      plain / ``_SET``  free list, EIGHT ids per line, ``%10d``
+      ``_ID``           one card per entity: ``%10d`` id + ``%-70s`` HEADING
+      ``_LOCAL``        one card per entity: ``%10d%10d%10d%10d``
+                        = ID, CID, REF, HFO
+      ``_LOCAL_ID``     the same 4-field card, then a ``%-70s`` heading card
+
+    The ``_ID`` card FUSES its two columns — ``   5000390Left Rear Seat`` is the
+    literal layout in the Toyota Yaris deck — so the free split this function
+    used for every spelling read ``5000390Left``, ``to_int`` returned 0, and
+    EVERY requested channel was silently dropped; the writer then emitted an
+    empty ``/TH/NODE`` group, which is starter ERROR 1109. ``_id_heading_card``
+    reads columns 1-10 as the id, with the free-format fallback for decks that
+    write ``id  title``.
+
+    HFO ("also write nodouthf") is read by the cfg and has no Radioss
+    counterpart at all, so it is not stored.
+    """
     ids: List[int] = []
-    for line in block.raw:
-        for tok in parse_free(line):
-            v = to_int(tok)
+    cids: List[int] = []
+    refs: List[int] = []
+    names: List[str] = []
+    rows = _db_history_rows(block)
+    is_id = "ID" in block.options
+    is_local = db_type.endswith("_LOCAL")
+    if is_local:
+        k = 0
+        while k < len(rows):
+            i = rows[k]
+            k += 1
+            f = _card(block.raw, i, fixed=True, n=4, w=10)
+            v = to_int(f[0]) if f else 0
+            if v <= 0:
+                continue
+            ids.append(v)
+            cids.append(to_int(f[1]) if len(f) > 1 else 0)
+            refs.append(to_int(f[2]) if len(f) > 2 else 0)
+            if is_id:
+                # RAW contiguity, never "the next row" — see _db_history_rows.
+                if k < len(rows) and rows[k] == i + 1:
+                    names.append(block.raw[rows[k]][:70].strip())
+                    k += 1
+                else:
+                    names.append("")
+    elif is_id:
+        for i in rows:
+            v, heading = _id_heading_card(block.raw[i])
             if v > 0:
                 ids.append(v)
-    state.db_histories.append(DbHistory(db_type, ids))
+                names.append(heading[:70])
+    else:
+        for i in rows:
+            for tok in parse_free(block.raw[i]):
+                v = to_int(tok)
+                if v > 0:
+                    ids.append(v)
+    state.db_histories.append(DbHistory(db_type, ids, cids, refs, names))
 
 
 def handle_database_history_shell(block: Block, state: ConversionState) -> None:
@@ -10886,6 +11125,118 @@ def handle_database_history_sph_set(block: Block, state: ConversionState) -> Non
 
 def handle_database_history_node(block: Block, state: ConversionState) -> None:
     _handle_db_history(block, state, "NODE")
+
+
+def handle_database_history_beam(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_BEAM[_ID] → /TH/BEAM, or /TH/SPRING per element.
+
+    The target group is decided PER ELEMENT, exactly as dyna2rad's
+    ``FindRadElement`` fallback chain does (convertutils.cxx:286-338 tries
+    /BEAM, then /SPRING, then /TRUSS, re-initialising the keyword INSIDE the
+    loop at converttimehistory.cxx:246). k2rad needs the same chain for its own
+    reason: an *ELEMENT_BEAM on a *MAT_SPOTWELD part or on a *SECTION_BEAM
+    ELFORM=6 part is emitted as a /SPRING, not a /BEAM, so one card can produce
+    both groups. (k2rad emits no /TRUSS at all, so that third link is absent.)
+    """
+    _handle_db_history(block, state, "BEAM")
+
+
+def handle_database_history_beam_set(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_BEAM_SET → /TH/BEAM (+/TH/SPRING) over the named sets.
+
+    ``database_history_beam_set.cfg:25`` declares
+    ``SUBTYPES = (/SETS/SET_COMPONENT_IDPOOL, /SETS/SET_BEAM_IDPOOL)``: the ids
+    may be *SET_BEAM sets OR *SET_PART sets, and a part set expands to every
+    beam of every named part."""
+    _handle_db_history(block, state, "BEAM_SET")
+
+
+def handle_database_history_discrete(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_DISCRETE[_ID] → /TH/SPRING.
+
+    dyna2rad copies the raw id list into the group with NO existence check at
+    all (converttimehistory.cxx:256-261 assigns ``containKeywordVsElemIds
+    ["/SPRING"] = elemidList`` without going through ``FindRadElement``, unlike
+    its BEAM and SHELL branches). k2rad screens against the /SPRING ids it
+    actually wrote: a /TH/SPRING naming an element the deck does not define is
+    starter ERROR 69 and the whole run is refused, which is strictly worse than
+    losing the channel.
+    """
+    _handle_db_history(block, state, "DISCRETE")
+
+
+def handle_database_history_discrete_set(block: Block,
+                                         state: ConversionState) -> None:
+    """*DATABASE_HISTORY_DISCRETE_SET → /TH/SPRING over the named sets
+    (``SET_COMPONENT_IDPOOL`` part sets or ``SET_DISCRETE_IDPOOL`` element
+    sets, database_history_discrete_set.cfg:25)."""
+    _handle_db_history(block, state, "DISCRETE_SET")
+
+
+def handle_database_history_seatbelt(block: Block, state: ConversionState) -> None:
+    """*DATABASE_HISTORY_SEATBELT[_ID] — recognized, and NOTHING is emitted.
+
+    dyna2rad probes the FIRST listed element's ``*ELEMENT_SEATBELT`` → PID →
+    SECID and routes the whole list to /TH/SPRING when the section is a
+    ``*SECTION_SEATBELT`` (1D belt) or to /TH/SHEL when it is a
+    ``*SECTION_SHELL`` (2D belt) — converttimehistory.cxx:303-341.
+
+    k2rad converts NEITHER ``*ELEMENT_SEATBELT`` nor ``*SECTION_SEATBELT``
+    (both land in ``skipped_keywords``), so BOTH branches are unreachable here:
+    there is no /SPRING and no /SHELL carrying those element ids, and naming
+    them would be starter ERROR 69 — a deck that "converts" and then refuses to
+    run, which is the worst of the three outcomes. So the request is recorded
+    as recognized-but-not-emitted with the gap named, and the channels are
+    honestly reported lost. The 2D-belt route becomes correct the moment
+    *ELEMENT_SEATBELT is converted (the later seatbelt/retractor batch); until
+    then there is no partial that is not a lie.
+    """
+    _handle_db_history(block, state, "SEATBELT")
+
+
+def handle_database_history_node_set(block: Block,
+                                     state: ConversionState) -> None:
+    """*DATABASE_HISTORY_NODE_SET → /TH/NODE over the named *SET_NODEs."""
+    _handle_db_history(block, state, "NODE_SET")
+
+
+def handle_database_history_node_local(block: Block,
+                                       state: ConversionState) -> None:
+    """*DATABASE_HISTORY_NODE_LOCAL[_ID] → /TH/NODE with a PER-NODE skew.
+
+    NODE (and NODE_SET) are the ONLY families with a ``_LOCAL`` option — a
+    full-text scan of the R16 and R17 manuals finds no BEAM_LOCAL,
+    DISCRETE_LOCAL or SEATBELT_LOCAL — and ``/TH/NODE`` is correspondingly the
+    only group in this batch whose id card carries a ``skew_ID`` column
+    (``th_node.cfg`` ``CARD("%10d%10d%-80s")``, cols 11-20; /TH/BEAM and
+    /TH/SPRING have ten BLANK columns there and answer a skew with
+    ``WARNING 100214`` plus a silent drop). See writer/output.py for how CID
+    and REF become that column."""
+    _handle_db_history(block, state, "NODE_LOCAL")
+
+
+def handle_database_history_node_set_local(block: Block,
+                                           state: ConversionState) -> None:
+    """*DATABASE_HISTORY_NODE_SET_LOCAL → /TH/NODE, per-node skew, sets."""
+    _handle_db_history(block, state, "NODE_SET_LOCAL")
+
+
+def handle_database_history_shell_set(block: Block,
+                                      state: ConversionState) -> None:
+    """*DATABASE_HISTORY_SHELL_SET → /TH/SHEL + /TH/SH3N over the named sets."""
+    _handle_db_history(block, state, "SHELL_SET")
+
+
+def handle_database_history_solid_set(block: Block,
+                                      state: ConversionState) -> None:
+    """*DATABASE_HISTORY_SOLID_SET → /TH/BRIC over the named sets."""
+    _handle_db_history(block, state, "SOLID_SET")
+
+
+def handle_database_history_tshell_set(block: Block,
+                                       state: ConversionState) -> None:
+    """*DATABASE_HISTORY_TSHELL_SET → /TH/BRIC (a thick shell IS a /BRICK)."""
+    _handle_db_history(block, state, "TSHELL_SET")
 
 
 def handle_damping_global(block: Block, state: ConversionState) -> None:
@@ -11538,6 +11889,8 @@ HANDLERS = {
     "SET_SOLID":                              handle_set_solid_list,
     "SET_BEAM_LIST":                          handle_set_beam_list,
     "SET_BEAM":                               handle_set_beam_list,
+    "SET_DISCRETE_LIST":                      handle_set_discrete_list,
+    "SET_DISCRETE":                           handle_set_discrete_list,
 
     # Boundary conditions
     "BOUNDARY_SPC_SET":                       handle_boundary_spc_set,
@@ -11723,6 +12076,26 @@ HANDLERS = {
     "DATABASE_HISTORY_SPH":                   handle_database_history_sph,
     "DATABASE_HISTORY_SPH_SET":               handle_database_history_sph_set,
     "DATABASE_HISTORY_NODE":                  handle_database_history_node,
+    # The *DATABASE_HISTORY_* family, completed. parser._split_keyword strips
+    # only a trailing _ID/_TITLE, so _SET and _LOCAL are part of the BASE
+    # keyword and every spelling needs its own row or it lands in
+    # skipped_keywords with no warning at all (the #117 *LOAD_BODY_R* defect).
+    # There is no _TITLE anywhere in this family and no _SET_ID: the R14.1/R15
+    # dictionaries list exactly BEAM / BEAM_ID / BEAM_SET, DISCRETE /
+    # DISCRETE_ID / DISCRETE_SET, SEATBELT / SEATBELT_ID, NODE / NODE_ID /
+    # NODE_LOCAL / NODE_LOCAL_ID / NODE_SET / NODE_SET_LOCAL, and the
+    # SHELL/SOLID/TSHELL/SPH triples.
+    "DATABASE_HISTORY_BEAM":                  handle_database_history_beam,
+    "DATABASE_HISTORY_BEAM_SET":              handle_database_history_beam_set,
+    "DATABASE_HISTORY_DISCRETE":              handle_database_history_discrete,
+    "DATABASE_HISTORY_DISCRETE_SET":          handle_database_history_discrete_set,
+    "DATABASE_HISTORY_SEATBELT":              handle_database_history_seatbelt,
+    "DATABASE_HISTORY_NODE_SET":              handle_database_history_node_set,
+    "DATABASE_HISTORY_NODE_LOCAL":            handle_database_history_node_local,
+    "DATABASE_HISTORY_NODE_SET_LOCAL":        handle_database_history_node_set_local,
+    "DATABASE_HISTORY_SHELL_SET":             handle_database_history_shell_set,
+    "DATABASE_HISTORY_SOLID_SET":             handle_database_history_solid_set,
+    "DATABASE_HISTORY_TSHELL_SET":            handle_database_history_tshell_set,
     "DATABASE_ABSTAT":                        handle_database_abstat,
     "DATABASE_BINARY_D3THDT":                 handle_database_binary_d3thdt,
     "DATABASE_BINARY_INTFOR":                 handle_database_binary_intfor,
@@ -11740,7 +12113,14 @@ HANDLERS = {
     "DATABASE_SPCFORC":                       handle_database_spcforc,
     "DATABASE_SWFORC":                        handle_database_swforc,
     "DATABASE_NCFORC":                        handle_database_ncforc,
-    "DATABASE_RBDOUT":                        handle_skip,
+    # *DATABASE_RBDOUT was an explicit handle_skip row while handlers.py:1568
+    # already told users it "maps to /TH/RBODY". The claim is now true.
+    "DATABASE_RBDOUT":                        handle_database_rbdout,
+    "DATABASE_BNDOUT":                        handle_database_bndout,
+    "DATABASE_NODFOR":                        handle_database_nodfor,
+    "DATABASE_TPRINT":                        handle_database_tprint,
+    "DATABASE_NODAL_FORCE_GROUP":             handle_database_nodal_force_group,
+    "CONTROL_PARALLEL":                       handle_control_parallel,
     "DATABASE_BINARY_D3DRLF":                handle_skip,
     "DATABASE_BINARY_D3DUMP":                 handle_skip,
     "DATABASE_BINARY_BLSTFOR":                handle_database_binary_blstfor,
