@@ -35,6 +35,8 @@ from .common import (
     _fmt_eid_list,
     _i,
     _ordered_unique_nodes,
+    _seatbelt_mat_law,
+    _seatbelt_part_ids,
     _spotweld_beam_pids,
     _vcross,
     _vnorm,
@@ -859,6 +861,26 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
         ref.update(n for n in c.nodes if n > 0)
     for e in state.beam_elems:
         ref.update(n for n in (e.n1, e.n2, e.n3) if n > 0)
+    # A belt element's nodes are a real reference on BOTH routes: a 1D belt is
+    # a /SPRING on (n1,n2), a 2D belt a /SHELL on all four. Dropping one as
+    # "unreferenced" during --tet10-to-tet4 pruning is starter ERROR 78.
+    for e in state.seatbelt_elems:
+        ref.update(n for n in (e.n1, e.n2, e.n3, e.n4) if n > 0)
+    # The restraint DEVICES reference nodes without owning an element: the
+    # slipring's anchorage and orientation nodes, the retractor's anchorage
+    # node, the SBSTYP=1 sensor's watched node, the SBSTYP=4 sensor's two
+    # distance nodes and the accelerometer's whole triad. None of them carries
+    # STIFFNESS (see loads.py::_make_free_node_constraints for that half), but
+    # every one is named on an emitted card, so pruning it dangles the card.
+    for s in state.seatbelt_sliprings:
+        ref.update(n for n in (s.sbrnid, s.onid) if n > 0)
+    for r in state.seatbelt_retractors:
+        if r.sbrnid > 0:
+            ref.add(r.sbrnid)
+    for sens in state.seatbelt_sensors.values():
+        ref.update(n for n in (sens.nid, sens.nid1, sens.nid2) if n > 0)
+    for a in state.seatbelt_accels:
+        ref.update(n for n in (a.nid1, a.nid2, a.nid3) if n > 0)
     for _title, nids in state.node_sets.values():
         ref.update(n for n in nids if n > 0)
     for iv in state.inivel_nodes:
@@ -1346,7 +1368,11 @@ def _warn_part_contact_fields(state: ConversionState) -> None:
     # particles-only part would look like it had a thickness the starter reads.
     non_solid_pids = ({e.pid for e in state.shell_elems}
                       | {e.pid for e in state.beam_elems}
-                      | {e.pid for e in state.discrete_elems})
+                      | {e.pid for e in state.discrete_elems}
+                      # A belt part is a /SPRING or /SHELL part, never a solid,
+                      # and i7sti3.F reads OPTT on NUMELC/NUMELP/NUMELR - the
+                      # /SPRING loop included - so its OPTT is not lost.
+                      | {e.pid for e in state.seatbelt_elems})
     solid_pids = ({e.pid for e in state.solid_elems}
                   | {e.pid for e in state.tshell_elems}
                   | {c.pid for c in state.sph_elems})
@@ -1443,12 +1469,13 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         beams_by_pid[e.pid].append(e)
 
     # Connector parts (discrete springs/dampers, MAT_100 spotweld beam parts,
-    # *SECTION_BEAM ELFORM=6 discrete beams) are emitted by the connector
-    # sections with their own /PROP/TYPE4-13 and /SPRING elements — emitting
-    # them here would reference a DYNA section / material id that has no /PROP
-    # or /MAT counterpart.
+    # *SECTION_BEAM ELFORM=6 discrete beams, 1D SEATBELTS) are emitted by the
+    # connector sections with their own /PROP/TYPE4-13/23 and /SPRING elements —
+    # emitting them here would reference a DYNA section / material id that has
+    # no /PROP or /MAT counterpart, and would write the /PART twice (ERROR 79).
     connector_pids = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
-                      | _discrete_beam_pids(state))
+                      | _discrete_beam_pids(state)
+                      | _seatbelt_part_ids(state))
 
     for pid, part in sorted(state.parts.items()):
         if pid in connector_pids:
@@ -1478,9 +1505,14 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         #                isotropic /PROP/SHELL a *SECTION_SHELL would give it
         #                (ERROR 3047), so the part must follow the synthesized
         #                property. Claimed first among the shell families.
+        #   seatbelt2d - a 2D (shell) *ELEMENT_SEATBELT part on
+        #                /MAT/LAW119, which declares SHELL_ORTHOTROPIC
+        #                (hm_read_mat119.F:218) and is refused on the
+        #                isotropic /PROP/SHELL for the same ERROR 3047.
         prop_ref = (state.tshell_prop_ids.get(pid)
                     or state.sph_prop_ids.get(pid)
                     or state.fabric_prop_ids.get(pid)
+                    or state.seatbelt_prop_ids.get(pid)
                     or state.composite_prop_ids.get(pid)
                     or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
@@ -1831,25 +1863,33 @@ def _element_free_part_ids(state: ConversionState,
               # a shell property at all.
               | {c.pid for c in state.sph_elems}
               | {e.pid for e in state.beam_elems}
-              | {e.pid for e in state.discrete_elems})
+              | {e.pid for e in state.discrete_elems}
+              # 1D belt SPRINGS are a mesh too. A belt part left out here would
+              # get the placeholder /PROP/SHELL *and* a duplicate /PART from
+              # the seatbelt section (ERROR 79). 2D belt elements are folded
+              # into state.shell_elems by _assign_seatbelt_props, so they are
+              # already covered by the first term.
+              | {e.pid for e in state.seatbelt_elems if not e.is_2d})
     # Parts the normal /PART emission skips: their /PART *and* /PROP come from
     # the connector writers, so they never carry a section-derived prop_ref.
     # (_discrete_part_ids already claims an element-free part whose SECID is a
     # *SECTION_DISCRETE or whose MID is a spring/damper material, and
     # _discrete_beam_pids one whose SECID is an ELFORM=6 *SECTION_BEAM.)
     connectors = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
-                  | _discrete_beam_pids(state))
+                  | _discrete_beam_pids(state) | _seatbelt_part_ids(state))
     # A part repointed at a synthesized composite / orthotropic / per-part
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
              | set(state.hourglass_prop_ids) | set(state.tshell_prop_ids)
-             | set(state.sph_prop_ids) | set(state.fabric_prop_ids))
+             | set(state.sph_prop_ids) | set(state.fabric_prop_ids)
+             | set(state.seatbelt_prop_ids))
     # Any section id already defined resolves on its own — including one shared
     # with a meshed sibling part, and including the auto-created sections the
     # caller has just filled in.
     defined = (set(state.sec_shells) | set(state.sec_solids)
                | set(state.sec_beams) | set(state.sec_discrete)
-               | set(state.sec_tshells) | set(state.sec_sph))
+               | set(state.sec_tshells) | set(state.sec_sph)
+               | set(state.sec_seatbelts))
     return {pid for pid in state.parts
             if pid not in meshed and pid not in connectors and pid not in split
             and pid in part_secids and part_secids[pid] not in defined}
@@ -2184,7 +2224,8 @@ def _make_properties(state: ConversionState) -> List[str]:
     # Skip it in that case (a section with even one plain part keeps it, and the
     # split parts additionally get their own props). Mirrors the ortho split.
     split_pids = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
-                  | set(state.hourglass_prop_ids) | set(state.fabric_prop_ids))
+                  | set(state.hourglass_prop_ids) | set(state.fabric_prop_ids)
+                  | set(state.seatbelt_prop_ids))
     ortho_only_secids: Set[int] = set()
     if split_pids:
         parts_by_secid: Dict[int, List[int]] = defaultdict(list)
@@ -2862,7 +2903,11 @@ def _assign_hourglass_props(state: ConversionState) -> None:
         # and on fabric an overlay would emit a /PROP/SHELL the starter refuses
         # for LAW19/LAW58, ERROR 3047).
         if (pid in state.ortho_prop_ids or pid in state.composite_prop_ids
-                or pid in state.fabric_prop_ids):
+                or pid in state.fabric_prop_ids
+                # A 2D belt part is on /PROP/TYPE9 for the same ERROR 3047
+                # reason a fabric part is, and Ishell=12 (QEPH) has no
+                # hourglass for an overlay to set.
+                or pid in state.seatbelt_prop_ids):
             continue
         # A cohesive section emits /PROP/TYPE43, which has no hourglass (4
         # mid-plane Gauss points) — splitting the part onto a /PROP/SOLID
@@ -3668,6 +3713,16 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
     if m is not None:
         from .fabric import _fabric_law
         return _fabric_law(m)                      # *MAT_034 → LAW19 or LAW58
+    # Seatbelts. Which law a *MAT_SEATBELT becomes is decided by the PROPERTY
+    # its parts carry, not by the keyword (common._seatbelt_mat_law is the ONE
+    # router, shared with the material writer and the property writer). Neither
+    # LAW114 nor LAW119 is on the solid-/XREF whitelist and neither can be on a
+    # solid part at all, so this entry never changes a /XREF decision; what it
+    # does is stop that gate - and the /PROP/BEAM and SPH compatibility reports
+    # - saying "no /MAT at all" about a material the deck plainly defines.
+    law = _seatbelt_mat_law(state, mid)
+    if law is not None:
+        return law                                 # *MAT_SEATBELT / *MAT_B01
     if mid in state.mat_transverse_aniso:
         return 43                                  # *MAT_037 → HILL_TAB
     m = state.mat_hill_3r.get(mid)

@@ -1413,7 +1413,11 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
         ``_make_discrete_beam_connectors``, also keyed on the BEAM EID (so the
         two beam families cannot clash with each other — their part sets are
         disjoint — but both can clash with the discrete and PLOTEL springs);
-      * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID.
+      * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID;
+      * ``*ELEMENT_SEATBELT`` (1D) → ``_make_seatbelts``, keyed on the BELT
+        EID — a FIFTH LS-DYNA namespace, so a belt element and a discrete
+        spring may legally share an id in the source deck and both become
+        ``/SPRING`` in the same one.
 
     The joint (/PROP/TYPE45) and *CONSTRAINED_SPOTWELD springs are not listed:
     their ids come from ``next_id()`` during section emission, so they are
@@ -1428,6 +1432,8 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
         ("*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 discrete-beam part",
          {b.eid for b in state.beam_elems if b.pid in dbeam_pids}),
         ("*ELEMENT_PLOTEL", {p.eid for p in state.plotel_elems}),
+        ("*ELEMENT_SEATBELT (1D belt)",
+         {e.eid for e in state.seatbelt_elems if not e.is_2d}),
     ]
 
 
@@ -4128,6 +4134,15 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
         for e in state.discrete_elems:      # *ELEMENT_DISCRETE (springs); n2=0=ground
             if e.pid == pid:
                 nids.update((e.n1, e.n2))
+        # Belt elements: a 1D belt part's nodes ARE its mesh, and a sled test
+        # launched with *INITIAL_VELOCITY_GENERATION over the whole vehicle
+        # scopes by part set. Leaving the belt out gives it zero initial
+        # velocity while the dummy it restrains has the sled's - the belt would
+        # be yanked taut at t=0. (2D belt elements are in state.shell_elems by
+        # then, so the shell arm above already covers them.)
+        for e in state.seatbelt_elems:
+            if e.pid == pid:
+                nids.update((e.n1, e.n2, e.n3, e.n4))
 
     if g.styp == 0 or g.sid == 0:
         return sorted(state.nodes.keys())            # whole model
@@ -4466,7 +4481,12 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
             lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
         sensor_id = 0
         if at > 0.0:
-            sensor_id = state.next_id()
+            # next_sensor_id, not next_id: *ELEMENT_SEATBELT_SENSOR puts USER
+            # ids into the /SENSOR namespace, so a deck with an SBSID at or
+            # above the auto-id base (90001) would otherwise collide here
+            # (starter ERROR 79 over the /SENSOR table). A no-op vs next_id()
+            # on any deck without one, so it shifts no existing id.
+            sensor_id = state.next_sensor_id()
             sensors_emitted = True
             lines += _emit_sensor_time(sensor_id, f"PLOAD_{pload_id}_arrival", at)
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
@@ -6458,6 +6478,24 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # subtractable a few lines below.
     for d in state.discrete_elems:
         elem_nodes.update((d.n1, d.n2))
+    # A 1D BELT is a /SPRING with a real force-strain curve on it, so its nodes
+    # carry stiffness exactly as a discrete spring's do - a /BCS 111 111 there
+    # would weld the belt to ground and the occupant would never move. (2D belt
+    # elements are folded into state.shell_elems by _assign_seatbelt_props and
+    # are already covered above.)
+    #
+    # The restraint DEVICES deliberately add NOTHING here. A slipring anchorage
+    # node, a retractor anchorage node, an orientation node, a sensor's watched
+    # node and an accelerometer triad all carry ZERO stiffness of their own -
+    # /SLIPRING and /RETRACTOR are kinematic devices that redistribute the
+    # belt's unstretched length, not elements with a tangent - so a node whose
+    # ONLY attachment is one of them has the same six zero rows a genuinely
+    # free node has, and pinning it changes no trajectory. In practice such a
+    # node is on the seat frame or the B-pillar and is in elem_nodes already;
+    # the case that reaches this guard is an anchorage node modelled as a bare
+    # marker, and that is exactly the *AIRBAG_HYBRID_JETTING situation below.
+    for e in state.seatbelt_elems:
+        elem_nodes.update((e.n1, e.n2))
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
     # A beam's THIRD node is a geometric reference only — the starter tags it
