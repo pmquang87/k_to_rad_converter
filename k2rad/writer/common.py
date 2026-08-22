@@ -884,7 +884,13 @@ def _seatbelt_part_ids(state: ConversionState) -> Set[int]:
     if not (state.seatbelt_elems or state.sec_seatbelts
             or state.mat_seatbelt):
         return set()
-    belt_1d_pids = {e.pid for e in state.seatbelt_elems if not e.is_2d}
+    # `pid in state.parts` is not a formality: a belt element whose PID has no
+    # *PART record is parsed, warned about by the mesh-loss census
+    # (assembly._warn_orphan_elements) and never written — claiming its part
+    # here would hand the seatbelt writer a pid it cannot look up. The three
+    # sibling claimers build from `state.parts` for the same reason.
+    belt_1d_pids = {e.pid for e in state.seatbelt_elems
+                    if not e.is_2d and e.pid in state.parts}
     law114_mids = {mid for mid in state.mat_seatbelt
                    if _seatbelt_mat_law(state, mid) == 114}
     continuum_pids = ({e.pid for e in state.shell_elems}
