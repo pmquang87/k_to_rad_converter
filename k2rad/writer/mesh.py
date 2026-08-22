@@ -1473,8 +1473,14 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
         #                by another element family; the /PROP/SPH moved to a
         #                synthesized id (writer/sph.py _split_mixed_family_
         #                sections) and the /PART follows it.
+        #   fabric     – *MAT_FABRIC → /PROP/TYPE9 (LAW19) or /PROP/TYPE16
+        #                (LAW58); the starter REFUSES either law on the
+        #                isotropic /PROP/SHELL a *SECTION_SHELL would give it
+        #                (ERROR 3047), so the part must follow the synthesized
+        #                property. Claimed first among the shell families.
         prop_ref = (state.tshell_prop_ids.get(pid)
                     or state.sph_prop_ids.get(pid)
+                    or state.fabric_prop_ids.get(pid)
                     or state.composite_prop_ids.get(pid)
                     or state.ortho_prop_ids.get(pid)
                     or state.hourglass_prop_ids.get(pid, secid))
@@ -1837,7 +1843,7 @@ def _element_free_part_ids(state: ConversionState,
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
              | set(state.hourglass_prop_ids) | set(state.tshell_prop_ids)
-             | set(state.sph_prop_ids))
+             | set(state.sph_prop_ids) | set(state.fabric_prop_ids))
     # Any section id already defined resolves on its own — including one shared
     # with a meshed sibling part, and including the auto-created sections the
     # caller has just filled in.
@@ -2178,7 +2184,7 @@ def _make_properties(state: ConversionState) -> List[str]:
     # Skip it in that case (a section with even one plain part keeps it, and the
     # split parts additionally get their own props). Mirrors the ortho split.
     split_pids = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
-                  | set(state.hourglass_prop_ids))
+                  | set(state.hourglass_prop_ids) | set(state.fabric_prop_ids))
     ortho_only_secids: Set[int] = set()
     if split_pids:
         parts_by_secid: Dict[int, List[int]] = defaultdict(list)
@@ -2850,10 +2856,13 @@ def _assign_hourglass_props(state: ConversionState) -> None:
                       int] = {}
     cohesive_secids = _cohesive_solid_secids(state)
     for pid, part in sorted(state.parts.items()):
-        # A LAW128 or composite part already owns a dedicated orthotropic /PROP;
-        # the hourglass overlay does not also split it (its TYPE6/TYPE9/TYPE11/
-        # TYPE51 keeps its defaults).
-        if pid in state.ortho_prop_ids or pid in state.composite_prop_ids:
+        # A LAW128, composite or FABRIC part already owns a dedicated
+        # orthotropic/anisotropic /PROP; the hourglass overlay does not also
+        # split it (its TYPE6/TYPE9/TYPE11/TYPE16/TYPE51 keeps its defaults —
+        # and on fabric an overlay would emit a /PROP/SHELL the starter refuses
+        # for LAW19/LAW58, ERROR 3047).
+        if (pid in state.ortho_prop_ids or pid in state.composite_prop_ids
+                or pid in state.fabric_prop_ids):
             continue
         # A cohesive section emits /PROP/TYPE43, which has no hourglass (4
         # mid-plane Gauss points) — splitting the part onto a /PROP/SOLID
@@ -3647,6 +3656,18 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 93                                  # *MAT_002 → ORTH_HILL
     if mid in state.mat_enhanced_composite:
         return 127                                 # *MAT_054/055
+    # Airbag fabric. *MAT_FABRIC splits on FORM + the card-7 curves
+    # (writer/fabric.py::_fabric_law is the ONE predicate; the property branch
+    # reads the same function, so law and property cannot disagree). NEITHER
+    # LAW19 nor LAW58 is on the solid-/XREF whitelist — but a fabric part is a
+    # SHELL part and inistate._resolve_xref_parts' shell arm keeps it with no
+    # law check at all, so this entry never changes a /XREF decision; what it
+    # does is stop that gate (and the /PROP/BEAM and SPH compatibility reports)
+    # reporting "no /MAT at all" for a material the deck plainly defines.
+    m = state.mat_fabric.get(mid)
+    if m is not None:
+        from .fabric import _fabric_law
+        return _fabric_law(m)                      # *MAT_034 → LAW19 or LAW58
     if mid in state.mat_transverse_aniso:
         return 43                                  # *MAT_037 → HILL_TAB
     m = state.mat_hill_3r.get(mid)

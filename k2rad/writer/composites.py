@@ -575,6 +575,23 @@ def _assign_composite_props(state: ConversionState) -> None:
         # one would replace the particle property outright.
         if pid in tshell_pids or pid in sph_pids:
             continue
+        # FABRIC parts belong to writer/fabric.py, which has already claimed
+        # them (_assign_fabric_props runs first). *MAT_FABRIC is not in
+        # comp_mids, so only a *PART_COMPOSITE layup written on a fabric part
+        # can reach here — and its /PROP/TYPE51 sandwich would REPLACE the
+        # /PROP/TYPE9|TYPE16 the fabric law requires, which is starter
+        # ERROR 3047. The layup is dropped instead, and named.
+        if pid in state.fabric_prop_ids:
+            if state.part_composites.get(pid) is not None:
+                state.warn(
+                    f"*PART_COMPOSITE {pid} sits on a *MAT_FABRIC part. The "
+                    "per-ply /PROP/TYPE51 layup is DROPPED: /MAT/LAW19 and "
+                    "/MAT/LAW58 each accept exactly one property class "
+                    "(/PROP/TYPE9 resp. /PROP/TYPE16, starter ERROR 3047 "
+                    "otherwise), and the fabric property the part is repointed "
+                    "at is that one. Split the plies into separate parts if "
+                    "the layup is load-bearing.")
+            continue
         pc = state.part_composites.get(pid)
         is_composite_part = pc is not None and _layup_is_convertible(pc)
         if not is_composite_part and part.mid not in comp_mids:

@@ -1935,6 +1935,145 @@ class MatLaminatedGlass:
     glass_mid: int = 0
 
 
+#: *MAT_FABRIC FORM values whose card 7 (LCA…LCUAB) exists at all — the only
+#: forms that can carry the tabulated warp/weft/shear curves /MAT/LAW58 needs
+#: (Vol II R16 p.2-313 card summary "if FORM = 4, 14, or -14"; the data-card
+#: heading on p.2-329 widens it to "4, 14, -14, or 24" — the wider set is used,
+#: because reading card 7 on a FORM=24 deck can only ADD curves that are there).
+FABRIC_CURVE_FORMS = frozenset({4, 14, -14, 24})
+
+#: *MAT_FABRIC FORM values that ARE the plain orthotropic elastic fabric
+#: /MAT/LAW19 models faithfully. Everything outside this set and
+#: FABRIC_CURVE_FORMS still converts (to the closest of the two laws) but has
+#: its FORM specialisation named as dropped — see writer/fabric.py.
+FABRIC_ELASTIC_FORMS = frozenset({0, 1, 2, 12})
+
+
+@dataclass
+class MatFabric:
+    """*MAT_FABRIC (*MAT_034) → /MAT/LAW19 (FABRI) or /MAT/LAW58 (FABR_A).
+
+    The airbag fabric law: "a variation on the layered orthotropic composite
+    model of material 22 and is valid for 3 and 4 node membrane elements only"
+    (Vol II R16 p.2-312).
+
+    **The law is chosen by FORM plus the presence of card-7 curves**, and the
+    PROPERTY follows the law with no freedom at all — the starter enforces the
+    pairing through the material's declared shell class:
+
+      * ``/MAT/LAW19`` declares ``SHELL_ORTHOTROPIC`` (``hm_read_mat19.F:236``
+        → ``MATPARAM%PROP_SHELL = 2``) and ``check_mat_elem_prop_compatibility
+        .F:174-179`` accepts that on ``/PROP/TYPE9`` — **not** on TYPE16.
+      * ``/MAT/LAW58`` declares ``SHELL_ANISOTROPIC`` (``hm_read_mat58.F:334``
+        → ``PROP_SHELL = 4``) and ``:194-197`` accepts that on
+        ``/PROP/TYPE16`` — **not** on TYPE9.
+
+    Crossing them is starter ``ERROR 3047`` (PROPERTY … IS NOT COMPATIBLE WITH
+    MATERIAL …), so the fabric part is repointed at a synthesized property of
+    the matching type (``state.fabric_prop_ids``), exactly as the honeycomb
+    (#110) and cohesive (#109) batches repoint theirs.
+
+    Card layout (Vol II R16 pp.2-312…2-330, all 10-char fields). Cards 4, 7 and
+    8 are CONDITIONAL and shift everything after them, so the walk is driven by
+    FVOPT and FORM rather than by a fixed card count:
+
+      1  MID RO EA EB (blank) PRBA PRAB (blank)
+      2  GAB (2 blanks) CSE EL PRL LRATIO DAMP
+      3  AOPT FLC/X2 FAC/X3 ELA LNRC FORM FVOPT TSRFAC
+      4  L R C1 C2 C3                          — only when FVOPT < 0
+      5  (blank) RGBRTH A0REF A1 A2 A3 X0 X1
+      6  V1 V2 V3 (3 blanks) BETA ISREFG
+      7  LCA LCB LCAB LCUA LCUB LCUAB RL       — only when FORM in {4,14,-14,24}
+      8  LCAA LCBB H DT (blank) ECOAT SCOAT TCOAT  — only when FORM = -14
+
+    Card-2 fields 2 and 3 are GBC and GCA in the R6.1 layout and blank from
+    R8.0 on; they are read (blank → 0) so an old deck's transverse shear moduli
+    are not lost, and they only ever act as a fallback for G23/G31.
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    ea: float = 0.0          # warp (a-axis) Young's modulus  → E11 / E1
+    eb: float = 0.0          # weft (b-axis)                  → E22 / E2
+    prba: float = 0.0        # nu_ba (minor)
+    prab: float = 0.0        # nu_ab (major)  → NU12 (see _fabric_nu12)
+    gab: float = 0.0         # in-plane shear → G12 / G0
+    gbc: float = 0.0         # R6.1-only, blank from R8.0     → G23 fallback
+    gca: float = 0.0         # R6.1-only                      → G31 fallback
+    cse: float = 0.0         # 0 = keep compressive stress, 1 = eliminate
+    el: float = 0.0          # liner Young's modulus
+    prl: float = 0.0         # liner Poisson
+    lratio: float = 0.0      # liner thickness ratio (non-zero activates it)
+    damp: float = 0.0        # Rayleigh damping → the property's Dm
+    aopt: float = 0.0
+    flc: float = 0.0         # porosity / leakage coefficient (or X2)
+    fac: float = 0.0         # fabric area coefficient (or X3)
+    ela: float = 0.0
+    lnrc: float = 0.0
+    form: int = 0
+    fvopt: float = 0.0
+    tsrfac: float = 0.0      # → ZEROSTRESS / ZERO_STRESS (closest, not equal)
+    rgbrth: float = 0.0      # material-dependent reference-geometry birth time
+    a0ref: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    x0: float = 0.0
+    x1: float = 0.0
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    beta: float = 0.0        # material angle (deg) for AOPT 0 and 3
+    isrefg: int = 0
+    # Card 7 (FORM 4/14/-14/24)
+    lca: int = 0             # sigma(eps) warp   → LAW58 FCT_ID1
+    lcb: int = 0             # weft              → FCT_ID2
+    lcab: int = 0            # shear             → FCT_ID3
+    lcua: int = 0            # unload warp       → FCT_ID4
+    lcub: int = 0            # unload weft       → FCT_ID5
+    lcuab: int = 0           # unload shear      → FCT_ID6
+    rl: float = 0.0          # reloading parameter (FORM 14/24)
+    # Card 8 (FORM = -14)
+    lcaa: int = 0
+    lcbb: int = 0
+    hyst: float = 0.0
+    dt_avg: float = 0.0
+    ecoat: float = 0.0
+    scoat: float = 0.0
+    tcoat: float = 0.0
+    # ── resolved by writer/fabric.py::_resolve_mat_fabric ─────────────────
+    use_law58: bool = False  # False → /MAT/LAW19 + /PROP/TYPE9
+    nu12: float = 0.0        # the Poisson's ratio actually written
+    g12: float = 0.0
+    g23: float = 0.0
+    g31: float = 0.0
+    e22: float = 0.0         # EB with the EA fallback already applied
+    r_e: float = 1.0         # LAW19 compression reduction factor (CSE)
+    # 0 = apply the reference-state pre-stress in full (LS-DYNA TSRFAC = 0);
+    # non-zero CANCELS it and relaxes it away. See writer/fabric.py.
+    zerostress: float = 0.0
+    sensor_id: int = 0       # /SENSOR/TIME id (0 = none)
+    # Tdelay of that sensor: RGBRTH (card 5) or, when the deck states none, the
+    # BIRTH of an *AIRBAG_REFERENCE_GEOMETRY_BIRTH covering the material's
+    # parts. Both mean "the reference geometry activates at this time"; the
+    # MATERIAL-level RGBRTH wins, because LS-DYNA documents it as the
+    # per-material override of the card-level BIRTH.
+    sensor_tdelay: float = 0.0
+    #: The six function ids actually written into LAW58's FCT_ID1..6. Four of
+    #: them are the deck's own curve ids; the two SHEAR slots (3 and 6) are
+    #: SYNTHESIZED copies, because Radioss evaluates the shear function at an
+    #: ANGLE IN DEGREES and needs it defined on both sides of zero — see
+    #: writer/fabric.py::_law58_shear_curve.
+    fct_ids: List[int] = field(default_factory=lambda: [0] * 6)
+
+    def curve_ids(self) -> List[int]:
+        """The six card-7 stress/strain curve ids, zeros included."""
+        return [self.lca, self.lcb, self.lcab, self.lcua, self.lcub, self.lcuab]
+
+    def has_curves(self) -> bool:
+        return any(self.curve_ids())
+
+
 @dataclass
 class CompositePly:
     """One layer of a *PART_COMPOSITE layup (card 5a/5b), bottom → top."""
@@ -2938,6 +3077,14 @@ class ContactAutoGeneral:
     sst: float = 0.0        # Card3 SST contact thickness, secondary → Gapmin
     mst: float = 0.0        # Card3 MST contact thickness, main → Gapmin
     sfs: float = 0.0        # Card3 SFS slave penalty stiffness scale → Stfac
+    sfst: float = 0.0       # Card3 SFST thickness scale (airbag route only)
+    # *CONTACT_AIRBAG_SINGLE_SURFACE rather than *CONTACT_AUTOMATIC_GENERAL.
+    # Same SOFT = -19 -> /INTER/TYPE19 routing (dyna2rad branches on the same
+    # sentinel for both, convertcontacts.cxx:167-181), but the airbag flavour
+    # carries four different interface settings — Istf=4, Idel=2, Ibag=1 and
+    # a scale-weighted Gapmin — see writer/contacts.py.
+    airbag: bool = False
+    keyword: str = ""
 
 
 @dataclass
@@ -4338,6 +4485,159 @@ class SegmentSet:
     segments: List[List[int]] = field(default_factory=list)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *AIRBAG_* → /MONVOL (monitored volumes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Airbag:
+    """One ``*AIRBAG_<MODEL>`` card → one ``/MONVOL/<type>``.
+
+    ONE dataclass for all five batch-1 models rather than five: every model
+    shares the whole of card 1 (SID/SIDTYP/RBID/VSCA/PSCA/VINI/MWD/SPSF) and
+    the surface machinery built on it, and the per-model card-3/4 fields are
+    disjoint, so a union keeps the surface contract in one place. ``model``
+    names which of the five was read and therefore which fields are live:
+
+      ``SIMPLE_PRESSURE_VOLUME``  → /MONVOL/PRES   (cn, beta, lcid, lciddr)
+      ``SIMPLE_AIRBAG_MODEL``     → /MONVOL/AIRBAG1 + /MAT/GAS + /PROP/INJECT1
+                                    (cv, cp, t, lcid, mu, area, pe, ro,
+                                     lou, t_ext, hc_a, hc_b, mw, gasc)
+      ``ADIABATIC_GAS_MODEL``     → /MONVOL/GAS    (psf, lcid, gamma, p0, pe, ro)
+      ``LOAD_CURVE``              → /MONVOL/PRES   (stime, lcid, …)
+      ``LINEAR_FLUID``            → /MONVOL/LFLUID (bulk, ro, lcint, lcoutt,
+                                     lcoutp, lcfit, lcbulk, lcid, p_limit,
+                                     p_limlc, nonull)
+
+    **SIDTYP is inverted relative to intuition**: ``0`` = *SET_SEGMENT,
+    non-zero = *SET_PART (Vol I R16 p.3-4, "EQ.0: segment / NE.0: part set ID").
+
+    **The scaling contract** (Vol I p.3-4, verbatim): ``V_cvolume = (VSCA ×
+    V_femodel) − VINI`` and ``P_femodel = PSCA × P_cvolume``. So VSCA/PSCA are
+    a UNIT BRIDGE and VINI is subtracted AFTER the volume scale — it is the
+    Radioss ``Vinc`` (incompressible volume), not an "initial fill".
+    """
+    airbag_id: int
+    model: str
+    title: str = ""
+    keyword: str = ""
+    # ── card 1, shared by every model ────────────────────────────────────
+    sid: int = 0
+    sidtyp: int = 0
+    rbid: int = 0
+    vsca: float = 1.0
+    psca: float = 1.0
+    vini: float = 0.0
+    mwd: float = 0.0
+    spsf: float = 0.0
+    # ── SIMPLE_PRESSURE_VOLUME ───────────────────────────────────────────
+    cn: float = 0.0
+    beta: float = 0.0
+    lciddr: int = 0
+    # ── SIMPLE_AIRBAG_MODEL ──────────────────────────────────────────────
+    cv: float = 0.0
+    cp: float = 0.0
+    t: float = 0.0           # temperature of the INJECTED gas
+    mu: float = 0.0          # vent shape factor (< 0 → |mu| is a curve id)
+    area: float = 0.0        # vent exit area  (< 0 → |area| is a curve id)
+    pe: float = 0.0          # ambient pressure
+    ro: float = 0.0          # ambient density
+    lou: int = 0             # mass-flow-out vs gauge-pressure curve
+    t_ext: float = 0.0       # ambient temperature (card 4a, CV == 0 only)
+    hc_a: float = 0.0        # molar heat-capacity coefficient A (card 4a)
+    hc_b: float = 0.0        # molar heat-capacity coefficient B (card 4a)
+    mw: float = 0.0          # molecular weight  (card 4a)
+    gasc: float = 0.0        # universal gas constant (card 4a)
+    # ── ADIABATIC_GAS_MODEL ──────────────────────────────────────────────
+    psf: float = 0.0
+    gamma: float = 0.0
+    p0: float = 0.0          # initial GAUGE pressure
+    # ── LOAD_CURVE ───────────────────────────────────────────────────────
+    stime: float = 0.0
+    t0: float = 0.0
+    # ── LINEAR_FLUID ─────────────────────────────────────────────────────
+    bulk: float = 0.0
+    lcint: int = 0
+    lcoutt: int = 0
+    lcoutp: int = 0
+    lcfit: int = 0
+    lcbulk: int = 0
+    p_limit: float = 0.0
+    p_limlc: int = 0
+    nonull: int = 0
+    # ── shared curve slot (SPV / SAM / AGM / LOAD_CURVE / LFLUID card 3) ─
+    lcid: int = 0
+    # ── resolved by writer/monvol.py::_resolve_airbags ───────────────────
+    monvol_id: int = 0       # the emitted /MONVOL id
+    surf_id: int = 0         # the emitted external /SURF id
+    quad_eids: List[int] = field(default_factory=list)
+    tri_eids: List[int] = field(default_factory=list)
+    fct_id: int = 0          # PRES: the pressure function
+    itypfun: int = 0         # PRES: 0 = f(V0/V), 1 = f(t), 2 = f(V/V0), 3 = t·V0/V
+    fscale: float = 0.0      # PRES: 0 → starter default (1 × unit)
+    gas_mat_id: int = 0      # AIRBAG1: the /MAT/GAS id
+    gas_mat_kind: str = ""   # AIRBAG1: "CSTA" or "MASS"
+    inject_prop_id: int = 0  # AIRBAG1: the /PROP/INJECT1 id
+    inject_temp_fct: int = 0  # AIRBAG1: the constant-T /FUNCT
+    avent: float = 0.0       # AIRBAG1: vent area (0 → no vent)
+    vent_fct_p: int = 0      # AIRBAG1: porosity-vs-gauge-pressure /FUNCT
+    pmax_fct: int = 0        # LFLUID: the flat P_LIMIT /FUNCT
+    dropped: bool = False    # resolved to nothing — no /MONVOL is written
+
+
+@dataclass
+class AirbagRefGeometry:
+    """``*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]`` → one ``/XREF`` per
+    part whose element nodes the table names.
+
+    Structurally the airbag twin of :class:`FoamRefGeometry` and it feeds the
+    SAME writer prepass (``inistate._resolve_xref_parts``) and emitter
+    (``inistate._make_xref``) — a shell part carrying it needs no law check at
+    all (the starter's law whitelist in ``hm_read_xref.F:222-226`` is gated on
+    ``ITYP == 2``, i.e. SOLID parts only), and ``cepsini.F``'s ``CMLAWI``
+    dispatch covers ILAW 1, 19 and 58, so both fabric laws honour it.
+
+    ``sx``/``sy``/``sz`` and ``nid0`` come from the ``_ID`` card and are applied
+    AT CONVERSION TIME (Radioss ``/XREF`` has no scale or origin field): each
+    listed coordinate is scaled about NID0's own reference position. ``birth``
+    (the ``_BIRTH`` card) becomes a ``/SENSOR/TIME`` on the fabric material's
+    ``SENS_ID``; ``_RDT`` has no Radioss counterpart at all and is warn-dropped.
+    """
+    nodes: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
+    sx: float = 1.0
+    sy: float = 1.0
+    sz: float = 1.0
+    nid0: int = 0
+    birth: float = 0.0
+    has_id: bool = False
+    has_rdt: bool = False
+    keyword: str = ""
+
+
+@dataclass
+class AirbagShellRefGeometry:
+    """``*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]`` → ``/EREF/SHELL`` and/or
+    ``/EREF/SH3N``, one per owning part.
+
+    Each entry of ``elems`` is ``(EID, [N1, N2, N3, N4])`` — the LS-DYNA PID
+    column is read but NOT used ("the part ID is not used in this section",
+    Vol I R16), because Radioss takes the part from the ``/EREF`` header.
+
+    The referenced node ids are GHOST nodes whose CURRENT ``/NODE`` coordinates
+    become the reference geometry (``hm_read_eref.F``: ``XREFC(IN,1,IE) =
+    X(1,NN)``), so they only carry a reference state when they are distinct
+    from the element's structural nodes.
+    """
+    elems: List[Tuple[int, List[int]]] = field(default_factory=list)
+    sx: float = 1.0
+    sy: float = 1.0
+    sz: float = 1.0
+    nid0: int = 0
+    has_id: bool = False
+    has_rdt: bool = False
+    keyword: str = ""
+
+
 @dataclass
 class LoadBlastEnhanced:
     """*LOAD_BLAST_ENHANCED — a ConWep / TM5-1300 empirical air-blast source.
@@ -5145,6 +5445,15 @@ class ConversionState:
     # Claimed FIRST: _assign_ortho_props and _assign_hourglass_props both skip a
     # part that already has a composite property.
     composite_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # part_id → synthesized FABRIC property id (*MAT_FABRIC → /PROP/TYPE9 for
+    # /MAT/LAW19, /PROP/TYPE16 for /MAT/LAW58). Same split mechanism as
+    # composite_prop_ids, and claimed FIRST among the shell families:
+    # _assign_composite_props / _assign_ortho_props / _assign_hourglass_props
+    # all skip a part that already has one. The reason is the starter's
+    # material/property CLASS check, not a duplicate id — LAW19 on a TYPE16
+    # (or LAW58 on a TYPE9, or either on the isotropic /PROP/SHELL a
+    # *SECTION_SHELL would give it) is ERROR 3047. See writer/fabric.py.
+    fabric_prop_ids: Dict[int, int] = field(default_factory=dict)
     # *PART_COMPOSITE parts, keyed by PID — the per-ply layup that replaces the
     # section-derived property (→ /PROP/TYPE51 + one /PROP/TYPE19 per ply).
     part_composites: Dict[int, PartComposite] = field(default_factory=dict)
@@ -5334,9 +5643,41 @@ class ConversionState:
     mat_jh_ceramics: Dict[int, MatJHCeramics] = field(default_factory=dict)
     mat_jh_concrete: Dict[int, MatJHConcrete] = field(default_factory=dict)
     mat_elastic_fluid: Dict[int, MatElasticFluid] = field(default_factory=dict)
+    # *MAT_FABRIC / *MAT_034 → /MAT/LAW19 (+ /PROP/TYPE9) or /MAT/LAW58
+    # (+ /PROP/TYPE16). Its OWN container: the law is chosen per material from
+    # FORM plus the card-7 curves, and the choice decides the PROPERTY type as
+    # well (see MatFabric and writer/fabric.py).
+    mat_fabric: Dict[int, MatFabric] = field(default_factory=dict)
     # *INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] blocks (one entry per keyword
     # instance, in deck order) → /XREF per intersecting part
     foam_ref_geoms: List[FoamRefGeometry] = field(default_factory=list)
+    # *AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT] blocks (one entry per
+    # keyword instance, deck order) → /XREF per intersecting part. Kept apart
+    # from foam_ref_geoms so the two keywords can be NAMED separately in the
+    # warnings and so the _ID scaling / _BIRTH sensor stay on their own card;
+    # both feed the same _resolve_xref_parts / _make_xref pair.
+    airbag_ref_geoms: List[AirbagRefGeometry] = field(default_factory=list)
+    # *AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT] blocks → /EREF/SHELL +
+    # /EREF/SH3N per owning part.
+    airbag_shell_ref_geoms: List[AirbagShellRefGeometry] = field(default_factory=list)
+    # pid -> ([(quad eid, [n1..n4])], [(tri eid, [n1..n3])]) resolved by
+    # writer/inistate.py::_resolve_airbag_eref at /EREF write time (it needs
+    # state.shell_elem_ids / sh3n_elem_ids, which only exist once the
+    # elements have been written), screened against the emitted mesh, the
+    # node table and the /XREF parts (starter ERROR 1011 / 1098).
+    airbag_eref_rows: Dict[int, Tuple[List[Tuple[int, List[int]]],
+                                      List[Tuple[int, List[int]]]]] = field(
+        default_factory=dict)
+    # *AIRBAG_<MODEL> cards, deck order → /MONVOL/PRES|AIRBAG1|GAS|LFLUID
+    airbags: List[Airbag] = field(default_factory=list)
+    # (monvol_id, title) of every /MONVOL actually written by
+    # writer/monvol.py::_make_monvols — filled AT THE LINE that writes the
+    # card, never derived from `airbags` (a model whose surface resolves to no
+    # shell element is dropped). *DATABASE_ABSTAT's /TH/MONV lists exactly
+    # these, the #106 dangling-id rule: a /TH group naming an entity the deck
+    # does not define is refused outright, which is worse than losing the
+    # channel. Same accounting pattern as blast_surf_ids / cluster_ids.
+    monvol_ids: List[Tuple[int, str]] = field(default_factory=list)
     # Parts that actually receive a /XREF (writer prepass _resolve_xref_parts:
     # intersection with the reference tables, gated by the starter's solid
     # /XREF law whitelist and the 8/4-node solid restriction). Solid sections
@@ -5806,6 +6147,10 @@ class ConversionState:
     # about the first.
     db_rbdout_seen: bool = False
     db_bndout_seen: bool = False
+    # *DATABASE_ABSTAT present (whatever its DT) — so a card with a
+    # blank or zero DT can be reported as "asked for, not emitted"
+    # instead of vanishing. Same pattern as the two above.
+    db_abstat_seen: bool = False
     # *DATABASE_NODFOR — the ASCII nodal-force-group database. It selects no
     # channel of its own; it states the OUTPUT INTERVAL of the /TH/NODE groups
     # *DATABASE_NODAL_FORCE_GROUP builds ("The output interval must be
@@ -5955,7 +6300,8 @@ class ConversionState:
                   self.mat_cohesive_mixed_mode, self.mat_arup_adhesive,
                   self.mat_cohesive_mm_epr, self.mat_toughened_adhesive,
                   self.mat_tabulated_jc, self.mat_jh_ceramics,
-                  self.mat_jh_concrete, self.mat_elastic_fluid):
+                  self.mat_jh_concrete, self.mat_elastic_fluid,
+                  self.mat_fabric):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}
@@ -6002,6 +6348,27 @@ class ConversionState:
         while gid in self.node_sets:
             gid = self.next_id()
         return gid
+
+    def next_monvol_id(self, used: set) -> int:
+        """A next_id() guaranteed free in the /MONVOL namespace.
+
+        /MONVOL ids are ONE Radioss namespace across PRES / AIRBAG1 / GAS /
+        LFLUID while LS-DYNA's ``*AIRBAG_<MODEL>_ID`` ids are per keyword, so
+        writer/monvol.py renumbers a colliding bag onto the auto stream. Without
+        this guard the renumbered id is never re-checked against the ids the
+        deck ITSELF states: a bag carrying an explicit ``_ID`` at or above the
+        auto-id base (90001) can be handed the very id a later un-ID'd bag then
+        draws, and both /MONVOLs go into the starter under the same number —
+        ``ERROR 79 DUPLICATE ID``, which refuses the whole deck. The failure the
+        renumbering exists to prevent, reintroduced by the renumbering.
+
+        Same guard shape as next_curve_id / next_part_id / next_prop_id /
+        next_mat_id / next_grnod_id, and a no-op vs next_id() in the common case
+        (no user airbag id that high), so it does not shift ids."""
+        mid = self.next_id()
+        while mid in used:
+            mid = self.next_id()
+        return mid
 
     def next_node_id(self) -> int:
         """Reserve and return a /NODE id guaranteed free in the NODE namespace.

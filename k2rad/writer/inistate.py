@@ -32,6 +32,9 @@ __all__ = [
     "_make_initial_stresses",
     "_make_xref",
     "_resolve_xref_parts",
+    "_airbag_ref_nodes",
+    "_resolve_airbag_eref",
+    "_make_eref",
     "_sect_frame_nodes",
     "_plane_cut",
     "_make_cross_sections",
@@ -294,6 +297,109 @@ def _make_initial_stresses(state: ConversionState) -> List[str]:
 _XREF_SOLID_LAWS = frozenset({1, 35, 38, 42, 70, 88, 90})
 
 
+def _airbag_ref_nodes(state: ConversionState) -> Dict[int, Tuple[float, float, float]]:
+    """``{nid: (x, y, z)}`` merged over every ``*AIRBAG_REFERENCE_GEOMETRY``
+    block, with the ``_ID`` card's SX/SY/SZ scaling already applied.
+
+    Radioss ``/XREF`` has no scale and no origin column, so the ``_ID`` card's
+    ``SX SY SZ`` about ``NIDO`` has to be baked into the coordinates at
+    CONVERSION time::
+
+        x' = x0 + (x - x0) * SX          (and likewise y, z)
+
+    The origin ``x0`` is NIDO's own REFERENCE coordinate when the table lists
+    it, and its structural ``/NODE`` coordinate otherwise. Scaling the
+    reference shape about a point of the reference shape keeps the operation
+    inside one geometry; dyna2rad takes the structural position unconditionally
+    (``convertcontrolvols.cxx:3316-3322``), which mixes the two whenever the
+    origin node has moved. NIDO blank defaults to the FIRST listed node
+    (Vol I R16), which is also LS-DYNA's own default.
+
+    Later blocks win per node id — LS-DYNA's last-definition order, the same
+    merge ``_make_xref`` already applies across *INITIAL_FOAM_REFERENCE_GEOMETRY
+    instances.
+    """
+    merged: Dict[int, Tuple[float, float, float]] = {}
+    for ref in state.airbag_ref_geoms:
+        if not ref.nodes:
+            continue
+        nid0 = ref.nid0 or next(iter(ref.nodes))
+        if (ref.sx, ref.sy, ref.sz) == (1.0, 1.0, 1.0):
+            merged.update(ref.nodes)
+            continue
+        origin = ref.nodes.get(nid0)
+        if origin is None:
+            nd = state.nodes.get(nid0)
+            origin = (nd.x, nd.y, nd.z) if nd is not None else (0.0, 0.0, 0.0)
+            if nd is None:
+                state.warn(
+                    f"*{ref.keyword}: NIDO={nid0} is neither in the reference "
+                    "node table nor in *NODE, so the SX/SY/SZ scaling is "
+                    "applied about the GLOBAL ORIGIN instead of about that "
+                    "node. Give a NIDO that exists, or state the scaled "
+                    "coordinates directly.")
+        for nid, (x, y, z) in ref.nodes.items():
+            merged[nid] = (origin[0] + (x - origin[0]) * ref.sx,
+                           origin[1] + (y - origin[1]) * ref.sy,
+                           origin[2] + (z - origin[2]) * ref.sz)
+    return merged
+
+
+def _warn_airbag_ref_options(state: ConversionState) -> None:
+    """``_RDT`` and ``_BIRTH`` — the two reference-geometry options that do not
+    map onto a ``/XREF`` column.
+
+    ``_RDT`` ("the time step size will be based on the reference geometry once
+    the solution time exceeds the birth time") has no Radioss counterpart at
+    all. ``_BIRTH`` does: it is the same idea as *MAT_FABRIC's RGBRTH, i.e. a
+    ``/SENSOR/TIME`` on the fabric law's ``SENS_ID`` — so it is carried through
+    to every fabric material the reference geometry's parts use, and the
+    material's own RGBRTH wins where both are stated (LS-DYNA documents RGBRTH
+    as the per-material override).
+    """
+    for ref in state.airbag_ref_geoms + state.airbag_shell_ref_geoms:
+        if ref.has_rdt:
+            state.warn(
+                f"*{ref.keyword}: the _RDT option asks LS-DYNA to base the TIME "
+                "STEP on the reference geometry once the birth time passes. "
+                "Radioss computes the element time step from the CURRENT "
+                "geometry with no such switch, so _RDT is DROPPED. On a bag "
+                "whose reference shape is much smaller than the modelled one "
+                "this makes the converted run's time step LARGER than "
+                "LS-DYNA's, i.e. less conservative — watch the energy balance.")
+    birth = max((r.birth for r in state.airbag_ref_geoms), default=0.0)
+    if birth <= 0.0:
+        return
+    pnodes = _part_node_sets(state)
+    ref_nids = set(_airbag_ref_nodes(state))
+    hit_mids = {state.parts[pid].mid for pid, nids in pnodes.items()
+                if pid in state.parts and (nids & ref_nids)}
+    armed = []
+    for mid in sorted(hit_mids & set(state.mat_fabric)):
+        mat = state.mat_fabric[mid]
+        if mat.sensor_id:
+            continue                       # its own RGBRTH already won
+        mat.sensor_id = state.next_id()
+        mat.sensor_tdelay = birth
+        armed.append(mid)
+    if armed:
+        state.warn(
+            f"*AIRBAG_REFERENCE_GEOMETRY_BIRTH: BIRTH={birth:g} arms the "
+            f"reference geometry of *MAT_FABRIC {armed} through a "
+            "/SENSOR/TIME on the law's SENS_ID (the starter's "
+            "MATPARAM%IPARAM(1) reference-state activation sensor) — the same "
+            "mechanism *MAT_FABRIC's own RGBRTH uses. LS-DYNA notes the card "
+            "\"does not support multiple birth times\" and the LAST value read "
+            "is used for all preceding blocks; the largest is used here.")
+    elif hit_mids:
+        state.warn(
+            f"*AIRBAG_REFERENCE_GEOMETRY_BIRTH: BIRTH={birth:g} is DROPPED — "
+            "the parts the reference geometry covers carry no *MAT_FABRIC, and "
+            "SENS_ID (the reference-state activation sensor) exists only on "
+            "/MAT/LAW19 and /MAT/LAW58. The reference geometry is active from "
+            "t=0 instead.")
+
+
 def _resolve_xref_parts(state: ConversionState) -> None:
     """Decide which parts receive a /XREF block (state.xref_part_ids) —
     build_starter prepass, after the tet10 downgrade/screening (connectivity
@@ -326,11 +432,26 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     geometry there ("EQ.0.0: Off"), so the deviation is warned rather than left
     to be discovered in the results."""
     state.xref_part_ids = set()
-    if not state.foam_ref_geoms:
+    # BEFORE the early return: _warn_airbag_ref_options also covers
+    # *AIRBAG_SHELL_REFERENCE_GEOMETRY, which never reaches this function's
+    # /XREF path at all (it becomes an /EREF), so gating it on the /XREF
+    # inputs left a _RDT on a shell-only deck silently dropped.
+    _warn_airbag_ref_options(state)
+    if not state.foam_ref_geoms and not state.airbag_ref_geoms:
         return
     ref_nids = set()
     for ref in state.foam_ref_geoms:
         ref_nids |= set(ref.nodes)
+    ref_nids |= set(_airbag_ref_nodes(state))
+    # Which KEYWORD the warnings below should name. Both spellings feed one
+    # /XREF per part, so a deck carrying both gets both names rather than a
+    # message that points at the wrong card.
+    _kws = []
+    if state.foam_ref_geoms:
+        _kws.append("*INITIAL_FOAM_REFERENCE_GEOMETRY")
+    if state.airbag_ref_geoms:
+        _kws.append("*AIRBAG_REFERENCE_GEOMETRY")
+    kw = " / ".join(_kws)
     pnodes = _part_node_sets(state)
     solid_pids = {e.pid for e in state.solid_elems}
     shell_pids = {e.pid for e in state.shell_elems}
@@ -338,7 +459,7 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     sph_hit = sorted({c.pid for c in state.sph_elems if c.nid in ref_nids})
     if sph_hit:
         state.warn(
-            f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part(s) {sph_hit} hold SPH "
+            f"{kw}: part(s) {sph_hit} hold SPH "
             "particles whose nodes are named by the reference geometry — "
             "SKIPPED. /XREF is reference geometry for SOLID elements "
             "(8/4-node only, else starter ERROR 2013) and an SPH particle is "
@@ -353,7 +474,7 @@ def _resolve_xref_parts(state: ConversionState) -> None:
         any_hit = True
         if part.mid in state.mat_rigid:
             state.warn(
-                f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} (mid "
+                f"{kw}: part {pid} (mid "
                 f"{part.mid}) is a *MAT_RIGID part — it converts to an /RBODY, "
                 "so all of its nodes are kinematically slaved to the rigid "
                 "master and it has no strain state for a stress-free "
@@ -370,7 +491,7 @@ def _resolve_xref_parts(state: ConversionState) -> None:
         if pid in solid_pids:
             if pid in tet10_pids:
                 state.warn(
-                    f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} has 10-node "
+                    f"{kw}: part {pid} has 10-node "
                     "tets — the starter only accepts /XREF on 8/4-node solids "
                     "(ERROR 2013); /XREF skipped for this part, it starts "
                     "unstressed (or convert with --tet10-to-tet4).")
@@ -378,7 +499,7 @@ def _resolve_xref_parts(state: ConversionState) -> None:
             law = _target_mat_law(state, part.mid)
             if law not in _XREF_SOLID_LAWS:
                 state.warn(
-                    f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} (mid "
+                    f"{kw}: part {pid} (mid "
                     f"{part.mid}) converts to "
                     + (f"/MAT/LAW{law}, which is" if law is not None
                        else "no /MAT at all, so it is")
@@ -394,17 +515,17 @@ def _resolve_xref_parts(state: ConversionState) -> None:
             state.xref_part_ids.add(pid)
         else:
             state.warn(
-                f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} has no solid/"
+                f"{kw}: part {pid} has no solid/"
                 "shell elements — a reference geometry is meaningless for it; "
                 "/XREF skipped.")
     if not any_hit and not sph_hit:
         state.warn(
-            "*INITIAL_FOAM_REFERENCE_GEOMETRY: its node table intersects no "
+            f"{kw}: its node table intersects no "
             "part's element nodes — no /XREF emitted (check node ids).")
-    _warn_xref_on_ref_zero(state)
+    _warn_xref_on_ref_zero(state, kw)
 
 
-def _warn_xref_on_ref_zero(state: ConversionState) -> None:
+def _warn_xref_on_ref_zero(state: ConversionState, kw: str) -> None:
     """A /XREF kept by _resolve_xref_parts whose material card says REF=0.
 
     LS-DYNA reads *INITIAL_FOAM_REFERENCE_GEOMETRY only for materials whose own
@@ -429,7 +550,7 @@ def _warn_xref_on_ref_zero(state: ConversionState) -> None:
             continue
         kw, _ = hit
         state.warn(
-            f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} gets a /XREF, but "
+            f"{kw}: part {pid} gets a /XREF, but "
             f"its material ({kw} mid={part.mid}) has REF=0, which in LS-DYNA "
             "means the reference geometry is NOT used for that material "
             "(EQ.0.0: Off). The block is still emitted — dyna2rad converts the "
@@ -469,9 +590,19 @@ def _make_xref(state: ConversionState) -> List[str]:
       /XREF/<part_ID> / title(100) / Nitrs(10) /
       rows: node_ID(10) X(20) Y(20) Z(20)
     """
-    if not state.foam_ref_geoms or not state.xref_part_ids:
+    if not state.xref_part_ids:
+        return []
+    if not state.foam_ref_geoms and not state.airbag_ref_geoms:
         return []
     pnodes = _part_node_sets(state)
+    # *AIRBAG_REFERENCE_GEOMETRY feeds the SAME per-part /XREF: it is the same
+    # keyword shape (node id + reference X/Y/Z) with the same target, and the
+    # starter has no law restriction on a SHELL part's /XREF at all
+    # (hm_read_xref.F's MTN whitelist is gated on ITYP == 2, i.e. SOLID parts).
+    # Its _ID scaling is already baked into the coordinates by
+    # _airbag_ref_nodes; it has no Nitrs equivalent, so a part covered only by
+    # an airbag reference geometry gets the starter default.
+    airbag_nodes = _airbag_ref_nodes(state)
     lines: List[str] = ["#-  REFERENCE GEOMETRY (/XREF):", HDR]
     for pid in sorted(state.xref_part_ids):
         part_nids = pnodes.get(pid, set())
@@ -485,6 +616,8 @@ def _make_xref(state: ConversionState) -> List[str]:
                 merged[nid] = ref.nodes[nid]
             if ref.ndtrrg > 0:
                 nitrs_vals.append(ref.ndtrrg)
+        for nid in part_nids & set(airbag_nodes):
+            merged[nid] = airbag_nodes[nid]
         if not merged:
             continue
         if len(set(nitrs_vals)) > 1:
@@ -504,6 +637,180 @@ def _make_xref(state: ConversionState) -> List[str]:
             x, y, z = merged[nid]
             lines.append(f"{_i(nid)}{_f(x)}{_f(y)}{_f(z)}")
         lines.append(HDR)
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: *AIRBAG_SHELL_REFERENCE_GEOMETRY → /EREF/SHELL + /EREF/SH3N
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_airbag_eref(state: ConversionState) -> None:
+    """Decide which elements get an ``/EREF`` row.
+
+    Called from ``_make_eref``, NOT from the build_starter prepass block, and
+    that is load-bearing: the screens below read ``state.shell_elem_ids`` /
+    ``sh3n_elem_ids``, which are filled at the lines that WRITE each element
+    row in ``_make_parts_and_elements`` (the #106 "registry filled at the write
+    line" rule). A prepass would see them empty and drop every row.
+
+    ``/EREF`` is the per-ELEMENT reference geometry: the row lists GHOST node
+    ids whose CURRENT ``/NODE`` coordinates become the reference shape
+    (``hm_read_eref.F``: ``XREFC(IN,1,IE) = X(1,NN)``), so the ghost nodes must
+    exist and, to carry anything at all, must be DIFFERENT from the element's
+    structural nodes.
+
+    Three screens, each guarding a hard starter failure:
+
+      * an element id that is not in the emitted mesh — ``ERROR 1011``
+        ("%s ELEMENT ID=%d DOES NOT EXIST");
+      * a ghost node id that is in no ``/NODE`` — ``USR2SYS`` refuses it;
+      * a node used by BOTH an ``/EREF`` and a ``/XREF`` — ``ERROR 1098``
+        ("COMMON NODE IN EREF AND XREF OPTIONS NODE ID: %d"). This is the one
+        that really bites, because the two airbag reference-geometry keywords
+        are written TOGETHER in LS-DYNA: the node card gives the coordinates
+        and the shell card names the elements. Radioss cannot take both on one
+        part, so the /XREF wins (it carries real coordinates; the /EREF would
+        only re-point at nodes the /XREF already moved) and the /EREF is
+        dropped for that part, named.
+    """
+    state.airbag_eref_rows = {}
+    if not state.airbag_shell_ref_geoms:
+        return
+    quad_pid = {e.eid: e.pid for e in state.shell_elems}
+    own_nodes = {e.eid: {n for n in e.nodes if n > 0}
+                 for e in state.shell_elems}
+    pnodes = _part_node_sets(state)
+    xref_nodes: Set[int] = set()
+    for pid in state.xref_part_ids:
+        xref_nodes |= pnodes.get(pid, set())
+    missing_elems: List[int] = []
+    missing_nodes: Set[int] = set()
+    short_rows: List[int] = []
+    noop_elems: List[int] = []
+    clash_parts: Set[int] = set()
+    rows: Dict[int, Tuple[List[Tuple[int, List[int]]],
+                          List[Tuple[int, List[int]]]]] = {}
+    for ref in state.airbag_shell_ref_geoms:
+        for eid, nodes in ref.elems:
+            pid = quad_pid.get(eid)
+            if pid is None or (eid not in state.shell_elem_ids
+                               and eid not in state.sh3n_elem_ids):
+                missing_elems.append(eid)
+                continue
+            bad = [n for n in nodes if n not in state.nodes]
+            if bad:
+                missing_nodes.update(bad)
+                continue
+            # A truncated card leaves NO node ids at all (the handler filters
+            # n > 0 down to []), and the `bad` screen above passes vacuously on
+            # an empty list. Without this the row reaches _make_eref as an
+            # element id with zero node columns.
+            if len(nodes) < 3:
+                short_rows.append(eid)
+                continue
+            if pid in state.xref_part_ids:
+                clash_parts.add(pid)
+                continue
+            if set(nodes) == own_nodes.get(eid, set()):
+                noop_elems.append(eid)
+            quads, tris = rows.setdefault(pid, ([], []))
+            if eid in state.sh3n_elem_ids:
+                tris.append((eid, nodes[:3]))
+            else:
+                quads.append((eid, (nodes + nodes[-1:] * 4)[:4]))
+    if missing_elems:
+        state.warn(
+            "*AIRBAG_SHELL_REFERENCE_GEOMETRY: element(s) "
+            f"{_fmt_eid_list(sorted(set(missing_elems)))} are not in the "
+            "emitted shell mesh, so they get no /EREF row. Naming one is "
+            "starter ERROR 1011 (\"ELEMENT ID DOES NOT EXIST\") and the deck "
+            "is refused, which is strictly worse than losing their reference "
+            "state.")
+    if missing_nodes:
+        state.warn(
+            "*AIRBAG_SHELL_REFERENCE_GEOMETRY: node id(s) "
+            f"{sorted(missing_nodes)[:10]} named as reference nodes are in no "
+            "*NODE, so their elements get no /EREF row. A /EREF row takes the "
+            "CURRENT coordinates of the nodes it lists, so those nodes have to "
+            "exist in the model.")
+    if short_rows:
+        state.warn(
+            "*AIRBAG_SHELL_REFERENCE_GEOMETRY: element(s) "
+            f"{_fmt_eid_list(sorted(set(short_rows)))} list fewer than three "
+            "reference node ids (a truncated card), so they get no /EREF row. "
+            "An /EREF row is an element id followed by its reference nodes; "
+            "one with no node columns is not a shape.")
+    if noop_elems:
+        state.warn(
+            "*AIRBAG_SHELL_REFERENCE_GEOMETRY: "
+            f"{len(noop_elems)} element(s) list their OWN structural nodes as "
+            "the reference nodes, so the /EREF reference shape is identical to "
+            "the modelled one and the block does nothing. In LS-DYNA the "
+            "reference COORDINATES come from *AIRBAG_REFERENCE_GEOMETRY and "
+            "the shell card only names the elements; without that companion "
+            "card the shell card alone carries no geometry. Add the node card "
+            "if a stress-free reference shape was intended.")
+    if clash_parts:
+        state.warn(
+            f"*AIRBAG_SHELL_REFERENCE_GEOMETRY: part(s) {sorted(clash_parts)} "
+            "are ALREADY covered by a /XREF from *AIRBAG_REFERENCE_GEOMETRY, "
+            "and Radioss refuses a node that appears in both (ERROR 1098, "
+            "\"COMMON NODE IN EREF AND XREF OPTIONS\"). The /XREF is kept — it "
+            "carries the real reference COORDINATES, while the /EREF would "
+            "only re-point at nodes the /XREF has already placed — and the "
+            "/EREF rows for those parts are DROPPED. Nothing is lost: the two "
+            "LS-DYNA cards describe one reference shape.")
+    state.airbag_eref_rows = {pid: v for pid, v in rows.items() if v[0] or v[1]}
+
+
+def _make_eref(state: ConversionState) -> List[str]:
+    """``*AIRBAG_SHELL_REFERENCE_GEOMETRY`` → ``/EREF/SHELL`` and ``/EREF/SH3N``,
+    one of each per owning part.
+
+    Card layout from ``INITIAL_GEOMETRY/eref_shell.cfg`` and ``eref_sh3n.cfg``
+    ``FORMAT(radioss120)``, reader
+    ``loads/reference_state/eref/hm_read_eref.F``::
+
+        /EREF/SHELL/<part_ID>
+        <title, 100>
+        shell_ID(10) node_ID1(10) node_ID2(10) node_ID3(10) node_ID4(10)
+
+        /EREF/SH3N/<part_ID>
+        <title, 100>
+        tria_ID(10) node_ID1(10) node_ID2(10) node_ID3(10)
+
+    The header id is the PART, exactly as on ``/XREF`` — LS-DYNA's own PID
+    column on the element row is read and discarded ("the part ID is not used
+    in this section"), because the owning part is the one the ELEMENT belongs
+    to and Radioss takes it from the header. There is no ``Nitrs`` card here.
+    """
+    if not state.airbag_shell_ref_geoms:
+        return []
+    _resolve_airbag_eref(state)
+    rows = state.airbag_eref_rows
+    if not rows:
+        return []
+    lines: List[str] = ["#-  REFERENCE GEOMETRY (/EREF):", HDR]
+    for pid in sorted(rows):
+        quads, tris = rows[pid]
+        if quads:
+            lines += [
+                f"/EREF/SHELL/{pid}",
+                f"EREF_SHELL_PART_{pid}",
+                "# shell_ID  node_ID1  node_ID2  node_ID3  node_ID4",
+            ]
+            for eid, nds in sorted(quads):
+                lines.append(_i(eid) + "".join(_i(n) for n in nds))
+            lines.append(HDR)
+        if tris:
+            lines += [
+                f"/EREF/SH3N/{pid}",
+                f"EREF_SH3N_PART_{pid}",
+                "#  tria_ID  node_ID1  node_ID2  node_ID3",
+            ]
+            for eid, nds in sorted(tris):
+                lines.append(_i(eid) + "".join(_i(n) for n in nds))
+            lines.append(HDR)
     return lines
 
 

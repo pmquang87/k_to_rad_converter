@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import permutations as _permutations
 from typing import Dict, List, Optional, Set, Tuple
 
-from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
+from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
+                       _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
                        _part_option_keywords,
@@ -52,6 +54,7 @@ from .handlers import (_SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
+from .state import FABRIC_CURVE_FORMS
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
@@ -1761,6 +1764,176 @@ def _off_mat_181(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[iu] = new
 
 
+#: ``*AIRBAG_<MODEL>`` → the card-3 (and card-4) cells that are CURVE ids, by
+#: model. Card 1 is shared and handled separately; the two card-3 cells that
+#: hold a curve id only when NEGATIVE (SPV's CN, SIMPLE_AIRBAG_MODEL's MU and
+#: AREA) are listed apart, because ``_rewrite_line`` only touches positive
+#: cells and a sign-preserving rewriter is needed for them.
+_AIRBAG_CURVE_CELLS = {
+    "AIRBAG_SIMPLE_PRESSURE_VOLUME": ([(2, "f"), (3, "f")], [0], []),
+    "AIRBAG_SIMPLE_AIRBAG_MODEL":    ([(3, "f")], [4, 5], [(0, "f")]),
+    "AIRBAG_ADIABATIC_GAS_MODEL":    ([(1, "f")], [], []),
+    "AIRBAG_LOAD_CURVE":             ([(1, "f")], [], []),
+    "AIRBAG_LINEAR_FLUID":           ([(i, "f") for i in range(2, 8)], [],
+                                      [(1, "f")]),
+}
+
+
+def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
+    """``*AIRBAG_<MODEL>``: SID → IDSOFF, RBID → IDPOFF, every curve slot →
+    IDFOFF, and the ``_ID`` header's ABID → IDROFF.
+
+    Card 3's INDEX moves with RBID — ``> 0`` inserts an ``N`` card plus
+    ``ceil(N/5)`` constant cards, ``< 0`` inserts three sensor cards (Vol I R16
+    p.3-4) — so a declarative spec would rewrite a sensor's acceleration
+    magnitude as a curve id on any RBID != 0 deck. Same walk the handler uses,
+    imported from it so the two cannot drift.
+
+    **Card-1 SID is mapped to IDSOFF unconditionally**, because that is what
+    SIDTYP says it is — a *SET_SEGMENT or a *SET_PART id, both of them SET
+    ids. ``writer/monvol.py::_airbag_surface_eids`` additionally accepts a bare
+    *PART id there as a fallback, and such a reference moves to the wrong id
+    under an *INCLUDE_TRANSFORM whose IDSOFF and IDPOFF differ. It is
+    diagnosed rather than silent — the writer then reports "names a *SET_PART
+    that this deck does not define" — and offsetting by IDPOFF instead would
+    break the documented case, so the fallback is left un-offset.
+    """
+    from .handlers import (_AIRBAG_MODELS, _airbag_base_keyword,
+                           _airbag_prelude)
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff and "ID" in b.options and raw:
+        new = _rewrite_id_header(raw[0], offsets.get("r", 0))
+        if new is not None:
+            raw[0] = new
+    if toff >= len(raw) or not raw[toff].strip():
+        return
+    new = _rewrite_line(raw[toff], [(0, "s"), (2, "p")], offsets)
+    if new is not None:
+        raw[toff] = new
+    # The legacy trailing "_<digits>" spelling is the base model's card stack
+    # (handlers._airbag_base_keyword), so it keys the same cell map.
+    base = _airbag_base_keyword(b.keyword)
+    model = _AIRBAG_MODELS.get(base)
+    if model is None:
+        return
+    _f1, i3 = _airbag_prelude(raw, toff)
+    cells, neg_cells, card4 = _AIRBAG_CURVE_CELLS[base]
+    foff = offsets.get("f", 0)
+    if i3 < len(raw) and raw[i3].strip():
+        if cells:
+            new = _rewrite_line(raw[i3], cells, offsets)
+            if new is not None:
+                raw[i3] = new
+        for i in neg_cells:
+            new = _rewrite_neg_ref(raw[i3], i, foff)
+            if new is not None:
+                raw[i3] = new
+    if card4 and i3 + 1 < len(raw) and raw[i3 + 1].strip():
+        new = _rewrite_line(raw[i3 + 1], card4, offsets)
+        if new is not None:
+            raw[i3 + 1] = new
+
+
+def _off_airbag_ref_geometry(b: Block, offsets: Dict[str, int], warn) -> None:
+    """``*AIRBAG_REFERENCE_GEOMETRY[...]``: the node ids of the coordinate rows
+    → IDNOFF, and the ``_ID`` card's NIDO with them.
+
+    The rows are ``NID(I10) X(E20) Y(E20) Z(E20)`` — TWENTY-column coordinates,
+    not the sixteen of *NODE — so ``data_w`` cannot be the header's 10 and the
+    walk is written out rather than declared. The card index of the first row
+    moves with the options (``_ID`` adds one card, ``_BIRTH`` another), the
+    same shift the handler walks.
+
+    The COORDINATES themselves are literal geometry a TRANID would have to
+    move, which this converter does not do — hence the entry in
+    ``_POINT_BEARING`` beside *INITIAL_FOAM_REFERENCE_GEOMETRY.
+    """
+    kw = b.keyword
+    raw = b.raw
+    i = 0
+    if "_ID" in kw or "ID" in b.options:
+        if i < len(raw):
+            new = _rewrite_line(raw[i], [(4, "n")], offsets)
+            if new is not None:
+                raw[i] = new
+        i += 1
+    if "_BIRTH" in kw:
+        i += 1
+    noff = offsets.get("n", 0)
+    if not noff:
+        return
+    for idx in range(i, len(raw)):
+        line = raw[idx]
+        if not line.strip():
+            continue
+        nid = to_int(line[0:10])
+        if nid > 0:
+            raw[idx] = f"{nid + noff:>10}" + line[10:]
+
+
+def _off_airbag_shell_ref_geometry(b: Block, offsets: Dict[str, int],
+                                   warn) -> None:
+    """``*AIRBAG_SHELL_REFERENCE_GEOMETRY[...]``: ``EID PID N1 N2 N3 N4``, all
+    I10 — element, part and four nodes, each to its own bucket."""
+    raw = b.raw
+    i = 1 if ("_ID" in b.keyword or "ID" in b.options) else 0
+    if i and raw:
+        new = _rewrite_line(raw[0], [(4, "n")], offsets)
+        if new is not None:
+            raw[0] = new
+    mods = [(0, "e"), (1, "p")] + [(k, "n") for k in range(2, 6)]
+    for idx in range(i, len(raw)):
+        if raw[idx].strip():
+            new = _rewrite_line(raw[idx], mods, offsets)
+            if new is not None:
+                raw[idx] = new
+
+
+def _off_mat_fabric(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_FABRIC (034): MID → IDMOFF, and the six card-7 stress/strain curve
+    ids (LCA LCB LCAB LCUA LCUB LCUAB) → IDFOFF.
+
+    Card 7's INDEX is conditional twice over: it exists only when
+    ``FORM in {4, 14, -14, 24}`` (card-3 field 5) and it sits one line lower
+    when the FVOPT<0 leakage card 4 is present (card-3 field 6). A static spec
+    would rewrite card 5's A0REF/A1/A2/A3 as curve ids on a FORM=0 deck and
+    move a leakage constant on an FVOPT<0 one — the ``_WITH_FAILURE`` hazard
+    ``_off_mat_181`` records, twice.
+
+    Card 3 is read with ``_fields`` and NOT with the bare ``parse_fixed``
+    slicer (#119). On a comma-separated or narrow *MAT_FABRIC the 10-char
+    slicer reads FORM out of the wrong columns, ``form`` comes back 0 and the
+    six card-7 curve ids are silently left UN-offset — while the MID on the
+    same block IS offset (``_rewrite_line`` goes through ``_split_card``,
+    which handles commas) and so are the ``*DEFINE_CURVE`` ids in the same
+    include, leaving the material pointing at the parent deck's curve numbers.
+
+    The FORM set comes from ``state.FABRIC_CURVE_FORMS``, the one the parser
+    and ``writer.fabric._fabric_law`` both use, so the two cannot drift (#116).
+    """
+    toff = _title_offset(b)
+    raw = b.raw
+    if toff >= len(raw) or not raw[toff].strip():
+        return
+    new = _rewrite_line(raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        raw[toff] = new
+    i3 = toff + 2
+    if i3 >= len(raw):
+        return
+    f3 = _fields(raw[i3], 8, 10)
+    form = int(round(to_float(f3[5]))) if len(f3) > 5 else 0
+    if form not in FABRIC_CURVE_FORMS:
+        return
+    fvopt = to_float(f3[6]) if len(f3) > 6 else 0.0
+    i7 = i3 + (4 if fvopt < 0.0 else 3)
+    if i7 < len(raw) and raw[i7].strip():
+        new = _rewrite_line(raw[i7], [(i, "f") for i in range(6)], offsets)
+        if new is not None:
+            raw[i7] = new
+
+
 def _off_mat_138(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_COHESIVE_MIXED_MODE (138): MID → IDMOFF; GIC/GIIC (card 1 fields
     7/8) and T/S (card 2 fields 2/3) are floats whose NEGATIVE form is the
@@ -2277,6 +2450,11 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_126": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
     "MAT_DESHPANDE_FLECK_FOAM": _mat(),
     "MAT_154": _mat(),
+    # Airbag fabric. MID → IDMOFF plus the six card-7 stress/strain curves →
+    # IDFOFF, on a card whose index moves with FORM and FVOPT — a callable.
+    "MAT_FABRIC": _off_mat_fabric,
+    "MAT_034": _off_mat_fabric,
+    "MAT_34": _off_mat_fabric,
     "MAT_HILL_FOAM": _mat({0: [(5, "f"), (7, "f")]}),
     "MAT_177": _mat({0: [(5, "f"), (7, "f")]}),
     # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve
@@ -2725,6 +2903,14 @@ for _kw in (
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_OFFSET",
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_BEAM_OFFSET",
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET",
+    # *CONTACT_AIRBAG_SINGLE_SURFACE writes SSID in the same cols 1-10 and
+    # SBOX in the same cols 41-50 — its card is the two-sided grid with the
+    # B-side cells left blank, which is exactly why it can share the handler
+    # (see handle_contact_airbag_single_surface). _off_contact only touches
+    # the id cells, and a blank one is left alone, so the interleaved blanks
+    # are harmless. The _MPP spelling is excluded for the reason the spotweld
+    # and eroding ones are: the MPP card pushes card 1 down a line.
+    "CONTACT_AIRBAG_SINGLE_SURFACE",
 ):
     _OFFSET_SPECS[_kw] = _off_contact
 
@@ -2792,6 +2978,29 @@ for _base in ("MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE", "MAT_240"):
         _OFFSET_SPECS[f"{_base}{_opt}"] = _mat(_cells)
 del _base, _opt, _cells
 
+# *AIRBAG_* — generated from the same dicts handlers.py dispatches on, so a
+# model cannot be readable and un-offsettable. The seven UNCONVERTED models are
+# deliberately left out: their card stacks are not modelled, so a blind rewrite
+# of "card 1 field 0" could land on something else entirely, and an unmapped
+# keyword warns rather than corrupting ids.
+for _kw in _AIRBAG_MODELS:
+    for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+        _OFFSET_SPECS[_kw + _sfx] = _off_airbag
+del _sfx
+for _r in range(4):
+    for _combo in _permutations(("_BIRTH", "_RDT", "_ID"), _r):
+        if _combo and _combo[-1] == "_ID":
+            continue
+        _OFFSET_SPECS["AIRBAG_REFERENCE_GEOMETRY" + "".join(_combo)] = \
+            _off_airbag_ref_geometry
+for _r in range(3):
+    for _combo in _permutations(("_RDT", "_ID"), _r):
+        if _combo and _combo[-1] == "_ID":
+            continue
+        _OFFSET_SPECS["AIRBAG_SHELL_REFERENCE_GEOMETRY" + "".join(_combo)] = \
+            _off_airbag_shell_ref_geometry
+del _kw, _r, _combo
+
 _OFFSET_SPECS["DEFINE_HEX_SPOTWELD_ASSEMBLY"] = _off_hex_spotweld_assembly
 for _n in range(1, 17):
     _OFFSET_SPECS[f"DEFINE_HEX_SPOTWELD_ASSEMBLY_{_n}"] = _off_hex_spotweld_assembly
@@ -2835,6 +3044,12 @@ _POINT_BEARING = frozenset({
     # Stress-free reference coordinates (→ /XREF): literal geometry that the
     # include affine does not rewrite (only the node IDS are offset).
     "INITIAL_FOAM_REFERENCE_GEOMETRY", "INITIAL_FOAM_REFERENCE_GEOMETRY_RAMP",
+    # The airbag twin: *AIRBAG_REFERENCE_GEOMETRY rows are node id +
+    # reference X/Y/Z, literal geometry the include affine does not
+    # rewrite (only the node IDS are offset). Every option permutation is
+    # listed, generated below this frozenset. *AIRBAG_SHELL_REFERENCE_
+    # GEOMETRY is NOT point-bearing: its rows are ids only, and the ghost
+    # nodes it names carry their coordinates in *NODE, which IS moved.
 })
 #: Direction/tensor-bearing keywords: valid under pure translation, wrong
 #: under rotation/mirror/scale — warned only when the linear part is not I.
@@ -2855,6 +3070,15 @@ _DIRECTION_BEARING = frozenset({
     # its second card.
     "LOAD_BODY_RX", "LOAD_BODY_RY", "LOAD_BODY_RZ", "LOAD_BODY_VECTOR",
 })
+
+# Every *AIRBAG_REFERENCE_GEOMETRY option permutation is point-bearing — the
+# option order in the keyword is arbitrary, so the set is generated from the
+# same grammar handlers.py and _OFFSET_SPECS use.
+_POINT_BEARING = _POINT_BEARING | frozenset(
+    "AIRBAG_REFERENCE_GEOMETRY" + "".join(combo)
+    for r in range(4)
+    for combo in _permutations(("_BIRTH", "_RDT", "_ID"), r)
+    if not (combo and combo[-1] == "_ID"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

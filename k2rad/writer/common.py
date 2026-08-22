@@ -535,7 +535,7 @@ def _part_node_sets(state: ConversionState) -> dict:
     equivalent).
 
     SPH particles are deliberately NOT counted, and that verdict is per CALLER
-    — there are nine, not one:
+    — there are eleven, not one:
 
     * ``inistate._resolve_xref_parts`` / ``inistate._make_xref`` and
       ``materials._resolve_mat_ref_geometry`` — /XREF reference geometry, which
@@ -546,6 +546,13 @@ def _part_node_sets(state: ConversionState) -> dict:
       cloud claim that part for a /XREF — and, worse, drag its *SECTION into
       Ismstr=10 along with every sibling part on it. ``_resolve_xref_parts``
       names an SPH part reached that way instead.
+    * ``inistate._warn_airbag_ref_options`` and
+      ``inistate._resolve_airbag_eref`` — the airbag reference-geometry pair,
+      which feeds the same /XREF (so it inherits the reason above) and needs
+      the per-part inventory for two more decisions: which fabric materials an
+      *AIRBAG_REFERENCE_GEOMETRY_BIRTH arms, and which parts a /XREF already
+      covers so their /EREF rows can be dropped (a node in both is starter
+      ERROR 1098). Particles have no place in either.
     * ``contacts._spotweld_slave_nids`` — a spot weld's secondary side is the
       weld nugget, and a particle is not one.
     * ``joints._resolve_joint_stiffness_targets`` — resolves a
@@ -620,6 +627,17 @@ def _ref_flag_materials(state: ConversionState):
         # story is the law whitelist instead: LAW79/LAW126/LAW6 are all OFF
         # _XREF_SOLID_LAWS, so inistate._resolve_xref_parts warn-skips such
         # parts naming the law.
+        #
+        # Airbag / MONVOL batch: *MAT_FABRIC carries NO REF flag on any of its
+        # eight cards (card 3 is AOPT FLC/X2 FAC/X3 ELA LNRC FORM FVOPT TSRFAC
+        # — no REF column anywhere), so it does not belong on this registry
+        # either. Recorded so the next batch does not re-derive it. Its
+        # reference-state story is a different mechanism entirely: LS-DYNA's
+        # ISREFG / RGBRTH fields ask for the *AIRBAG_REFERENCE_GEOMETRY to be
+        # applied, and in Radioss that request IS the emitted /XREF or /EREF —
+        # both fabric laws honour one (cepsini.F::CMLAWI dispatches ILAW 1, 19
+        # and 58), with no material flag to check. Fabric parts are SHELL
+        # parts, so they also skip the solid-/XREF law whitelist altogether.
     )
 
 

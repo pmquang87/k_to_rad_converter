@@ -1373,7 +1373,8 @@ def _emit_inter_type11(inter_id: int, title: str, line_ids: int, line_idm: int,
 def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
                        fric: float, inacti: int = 6, viss: float = 0.0,
                        visf: float = 0.0, gapmin: float = 0.0,
-                       stfac: float = 0.0, fric_id: int = 0) -> List[str]:
+                       stfac: float = 0.0, fric_id: int = 0,
+                       istf: int = 2, ibag: int = 0, idel: int = 1) -> List[str]:
     """/INTER/TYPE19 combined surface + edge contact (FORMAT radioss2021).
 
     Both entities are /SURF ids; the starter auto-generates the child TYPE7
@@ -1381,6 +1382,24 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
     low-effort route to edge contact (no hand-built /LINE). ``surf_idm`` may
     equal ``surf_ids`` for self-contact. Iedge=2 = all segment edges.
     Matches dyna2rad's routed TYPE19 (Idel=1, Igap=0, Istf=2).
+
+    ``istf`` / ``ibag`` / ``idel`` are parametrised for the AIRBAG flavour of
+    the same sentinel route (``*CONTACT_AIRBAG_SINGLE_SURFACE`` with
+    ``SOFT = -19``), which dyna2rad gives Istf=4, Idel=2 and Ibag=1
+    (``convertcontacts.cxx:659-664``). The defaults are the pre-existing
+    *CONTACT_AUTOMATIC_GENERAL values, so that route stays byte-identical.
+
+    **``Ibag = 1`` only makes sense with a /MONVOL in the deck.** It means
+    "close the vent holes where contact occurs", and ``hm_read_inter_type07.F:
+    403-410`` resets it to 0 with ``WARNING 614`` when ``NVOLU == 0``. The
+    reader expands a /INTER/TYPE19 into a child TYPE7 pair plus a TYPE11 and
+    propagates Ibag to the TYPE7s only (``GlobalModelSdi.cpp:1204/1298``),
+    which is right — it is a surface flag.
+
+    ``Edge_scale_gap`` (dyna2rad writes 0.9 here) is deliberately NOT emitted:
+    it is field 3 of card 2 and exists only from **radioss2024**
+    (``radioss2024/INTER/inter_type19.cfg:844-845`` adds it to the
+    ``Fscalegap | Gap_max`` pair), while k2rad declares ``/BEGIN 2022``.
 
     A bound /FRICTION table extends the LAST card by 30 blank columns and a
     ``%10d`` fric_ID (``radioss2021/INTER/inter_type19.cfg:801-802``); the
@@ -1395,7 +1414,8 @@ def _emit_inter_type19(inter_id: int, title: str, surf_ids: int, surf_idm: int,
         f"/INTER/TYPE19/{inter_id}",
         title or f"CONTACT_{inter_id}",
         "# surf_IDs  surf_IDm      Istf      Ithe      Igap     Iedge      Ibag      Idel     Icurv",
-        f"{_i(surf_ids)}{_i(surf_idm)}         2         0         0         2         0         1         0",
+        f"{_i(surf_ids)}{_i(surf_idm)}{_i(istf)}         0         0         2"
+        f"{_i(ibag)}{_i(idel)}         0",
         "#          Fscalegap             GAP_MAX",
         "                   0                   0",
         "#              Stmin               Stmax          %mesh_size               dtmin  Irem_gap  Irem_i2",
@@ -1503,6 +1523,23 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
         return []
     lines = ["#-  GENERAL EDGE/SOFT INTERFACES (*CONTACT_AUTOMATIC_GENERAL SOFT):", HDR]
     dropped: Dict[str, List[int]] = {}
+    # Ibag=1 means "close the airbag's vent holes where contact occurs", and
+    # hm_read_inter_type07.F:403-410 resets it to 0 with WARNING 614 whenever
+    # the deck has NVOLU == 0. Emitting it on a deck with no monitored volume
+    # would therefore trade a real setting for a warning; the flag is gated on
+    # a bag that actually converted.
+    #
+    # `dropped` is the PREPASS verdict, not the final one: _resolve_airbags (a
+    # build_starter prepass) sets it for a bag whose surface resolves to no
+    # shell, but _make_monvols sets it AGAIN when _emit_airbag_surface finds
+    # none of those shells in the emitted mesh — and this section runs first
+    # (_starter_section_registry: general_interfaces at :1469, monvols at
+    # :1507), so state.monvol_ids is still empty here and cannot be used. The
+    # residual case is therefore a bag that resolves in the prepass and then
+    # emits nothing: Ibag=1 with NVOLU == 0, which the starter resets to 0
+    # with WARNING 614. Warning-level, and strictly better than the mirror
+    # error of dropping Ibag on a deck whose bag DOES convert.
+    has_monvol = any(not a.dropped for a in state.airbags)
     for c in state.contacts_general:
         self_contact = (c.ssid, c.sstyp) == (c.msid, c.mstyp)
         if c.soft == -11:
@@ -1511,7 +1548,37 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             tname = "TYPE19"
         else:
             tname = "TYPE7"
-        gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id, target=tname)
+        if c.airbag:
+            # The airbag card has NO MST column — it is single-sided — so the
+            # two-sided (|SST| + |MST|)/2 helper would silently read a blank as
+            # a second thickness. dyna2rad's formula for this keyword is the
+            # scale-weighted single-sided one (convertcontacts.cxx:659-660),
+            # and it is passed explicitly rather than through the helper.
+            sfst = c.sfst if c.sfst != 0.0 else 1.0
+            gapmin = abs(c.sst) / 2.0 * sfst
+            # The two diagnostics _sst_mst_to_gapmin would have emitted. They
+            # are not part of the arithmetic, and skipping the helper for the
+            # single-sided formula silently skipped them too — a negative SST
+            # was absolutised with nothing said.
+            if c.sst < 0.0:
+                state.warn(
+                    f"CONTACT {c.inter_id}: negative SST ({c.sst:g}) — using "
+                    "the magnitude for the Gapmin mapping; the "
+                    "negative-thickness projection semantics have no "
+                    f"/INTER/{tname} equivalent.")
+            if gapmin > 0.0:
+                state.warn(
+                    f"CONTACT {c.inter_id}: SST contact thickness -> "
+                    f"/INTER/{tname} Gapmin={gapmin:g} (|SST|/2 * SFST — the "
+                    "airbag card is SINGLE-sided and has no MST column, so "
+                    "the two-sided (|SST|+|MST|)/2 form does not apply). On "
+                    "an implicit deck, keep ignore=0 to retain Inacti=0 if "
+                    "Gapmin exceeds the physical clearance; ignore=1/2 (and "
+                    "any explicit deck) maps to Inacti=5, which shrinks the "
+                    "gap back to the clearance.")
+        else:
+            gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
+                                        target=tname)
         inacti = _ignore_to_inacti(c.ignore, state, c.inter_id, gapmin)
         viss = _vdc_to_viss(c.vdc, state, c.inter_id)
         stfac = _stfac_for(state, c.sfs, c.inter_id)
@@ -1555,14 +1622,33 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
                     "not resolve on the -19 route), or use SOFT=-11 for an "
                     "edge contact built from a segment set.")
                 continue
-            lines += _emit_inter_type19(c.inter_id, c.title, surf_s, surf_m, fric,
-                                        inacti, viss=viss, gapmin=gapmin, stfac=stfac,
-                                        fric_id=fric_id)
+            # The AIRBAG flavour of the same sentinel: Istf=4 (the stiffness
+            # comes from the property, not from the master side), Idel=2
+            # (delete the interface segment when its element dies, matching a
+            # bag that can tear) and Ibag=1 (close the vent holes where the
+            # fabric self-contacts). dyna2rad sets all three,
+            # convertcontacts.cxx:659-664.
+            lines += _emit_inter_type19(
+                c.inter_id, c.title, surf_s, surf_m, fric, inacti, viss=viss,
+                gapmin=gapmin, stfac=stfac, fric_id=fric_id,
+                **({"istf": 4, "idel": 2, "ibag": 1 if has_monvol else 0}
+                   if c.airbag else {}))
+            kw = c.keyword or "CONTACT_AUTOMATIC_GENERAL"
             state.warn(
-                f"*CONTACT_AUTOMATIC_GENERAL {c.inter_id}: SOFT=-19 -> "
+                f"*{kw} {c.inter_id}: SOFT=-19 -> "
                 f"/INTER/TYPE19 (surface+edge {'self-' if self_contact else ''}"
                 "contact; the starter derives the edge lines from the two "
-                "/SURF, dyna2rad sentinel routing).")
+                "/SURF, dyna2rad sentinel routing)."
+                + (" Airbag flavour: Istf=4, Idel=2"
+                   + (", Ibag=1 (contact closes the monitored volume's vent "
+                      "holes)." if has_monvol else
+                      ". Ibag is left 0 because this deck has NO /MONVOL — "
+                      "the starter would reset it anyway, with WARNING 614 "
+                      "(hm_read_inter_type07.F:403-410).")
+                   + " Edge_scale_gap (dyna2rad writes 0.9) is NOT emitted: "
+                     "that column exists only from /BEGIN 2024 and k2rad "
+                     "declares 2022."
+                   if c.airbag else ""))
         else:  # c.soft == -11
             line_s = _general_line_group(state, c.ssid, c.sstyp,
                                          f"general_{c.inter_id}_s", lines)
