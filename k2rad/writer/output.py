@@ -2152,6 +2152,28 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
 #:            (1336 cycles), both vented bags and a deformable mini-bag.
 #:   LFLUID   ``volp_lfluid.F``: 1=GMASS 2=VOL 3=PRES 4=AREA, plus RVOLU(54)
 #:            = the cumulative mass in, which is the MASS-IN channel.
+#:   COMMU1   AIRBAG1's list plus **AC** and **UC**, the communication area
+#:            and the mean velocity through it. ``monvol0.F`` sends
+#:            ``ITYP==7 .OR. ITYP==9`` to the same ``AIRBAGA1``/``AIRBAGB1``
+#:            pair, so every AIRBAG1 channel is filled identically; AC and UC
+#:            are the ``DO I=1,NAV`` communication loop's own sums, which only
+#:            a COMMU1 has. A COMMU1 only ever exists here because an
+#:            *AIRBAG_INTERACTION gave it a communicating row, so the two are
+#:            never structurally zero on the cards this converter writes.
+#:            **Not 13/14** — DTBAG and NFV are FVMBAG-only, as on AIRBAG1.
+#:   FVMBAG2  ``fvbag1.F`` fills the finite-volume set: 1-7 and 10-12 as
+#:            usual (FSAV(3) and FSAV(5) are the MASS-AVERAGED pressure and
+#:            temperature over the FVs), plus the three this batch adds back —
+#:            **13 DTBAG** (``fvbag1.F:1832``, ``FSAV(13)=DTX``, the bag's own
+#:            CFL step, the thing ``/DT/FVMBAG`` overrides), **14 NFV**
+#:            (``:1801``, ``FSAV(14)=NPOLH``, how many finite volumes are
+#:            left after merging) and **19 UPCRIT** (``FSAV(19)=PDISP``, the
+#:            pressure standard-deviation/mean ratio the uniform-pressure
+#:            switch tests). This is the #123 handoff: DTBAG and NFV were
+#:            dropped from AIRBAG1 as measured flat zeros and named as
+#:            belonging "to the batch that adds /MONVOL/FVMBAG1" — this is
+#:            that batch. **AC/UC are excluded** (no communication loop) and
+#:            so is **18 WORK**, which the FV path never assigns.
 #:
 #: **Order matters and is not free.** The starter sorts the requested names
 #: into its OWN ``VARMV`` table order (``hm_read_thgrou.F:1181-1186``:
@@ -2167,27 +2189,39 @@ _TH_MONV_VARS = {
     "AIRBAG1": ("MASS", "VOL", "P", "A", "T", "CP", "CV", "GAMA",
                 "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK"),
     "LFLUID":  ("MASS", "VOL", "P", "A", "MASS-IN"),
+    "COMMU1":  ("MASS", "VOL", "P", "A", "T", "AC", "UC", "CP", "CV", "GAMA",
+                "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK"),
+    "FVMBAG2": ("MASS", "VOL", "P", "A", "T", "CP", "CV", "GAMA",
+                "DTBAG", "NFV", "MASS-IN", "ENTHA-IN", "ENER-INT", "UPCRIT"),
 }
 
-#: The four vent channels of an AIRBAG1 group that has a vent hole, and where
-#: they belong in VARMV order (right after T, before CP).
-_TH_MONV_VENT_VARS = ("AO", "UO", "AC", "UC")
+#: Per model, the channels that exist only when the bag HAS a vent hole, and
+#: where they belong in VARMV order (right after T). AIRBAG1 carries AC/UC
+#: here because on a non-communicating volume they can only ever be a vent's;
+#: COMMU1 does not, because its communication loop fills them whether or not
+#: there is a vent, so they live in its base list instead.
+_TH_MONV_VENT_VARS = {
+    "AIRBAG1": ("AO", "UO", "AC", "UC"),
+    "COMMU1":  ("AO", "UO"),
+    "FVMBAG2": ("AO", "UO"),
+}
 _TH_MONV_VENT_AFTER = "T"
 
 
 def _th_monv_groups(rad: str, ids: List[int], vented: set):
     """``[(variables, ids), ...]`` for one /MONVOL model.
 
-    One group for every model but AIRBAG1, and for AIRBAG1 one group per VENT
-    state: the vent channels are inserted in VARMV order (right after T) for
-    the bags that have a hole and left out for the ones that do not, so no bag
-    loses a real channel to a sealed neighbour and none gains a flat zero.
+    One group for a model with no vent channels, and otherwise one group per
+    VENT state: the vent channels are inserted in VARMV order (right after T)
+    for the bags that have a hole and left out for the ones that do not, so no
+    bag loses a real channel to a sealed neighbour and none gains a flat zero.
     """
     base = list(_TH_MONV_VARS[rad])
-    if rad != "AIRBAG1":
+    vent_vars = _TH_MONV_VENT_VARS.get(rad)
+    if not vent_vars:
         return [(base, ids)]
     at = base.index(_TH_MONV_VENT_AFTER) + 1
-    with_vent = base[:at] + list(_TH_MONV_VENT_VARS) + base[at:]
+    with_vent = base[:at] + list(vent_vars) + base[at:]
     groups = []
     for vars_, group_ids in ((with_vent, [i for i in ids if i in vented]),
                              (base, [i for i in ids if i not in vented])):
@@ -2262,11 +2296,17 @@ def _make_starter_th_monv(state: ConversionState) -> List[str]:
     for ab in state.airbags:
         if ab.dropped or not ab.monvol_id:
             continue
-        rad = {"SIMPLE_PRESSURE_VOLUME": "PRES", "LOAD_CURVE": "PRES",
-               "ADIABATIC_GAS_MODEL": "GAS", "LINEAR_FLUID": "LFLUID",
-               "SIMPLE_AIRBAG_MODEL": "AIRBAG1"}[ab.model]
+        # ``radioss_type`` and NOT ``model``: which card a bag ends up on is a
+        # resolver decision, not a keyword one — a *AIRBAG_HYBRID becomes a
+        # COMMU1 the moment an *AIRBAG_INTERACTION names it, and a
+        # *AIRBAG_PARTICLE becomes an AIRBAG1 under
+        # --airbag-particle-uniform. Keying off the keyword would then request
+        # channels the emitted card does not fill.
+        rad = ab.radioss_type
+        if rad not in _TH_MONV_VARS:                     # pragma: no cover
+            continue
         by_model.setdefault(rad, []).append(ab.monvol_id)
-        if ab.avent > 0.0 or ab.vent_fct_p:
+        if ab.vents or ab.avent > 0.0 or ab.vent_fct_p:
             vented.add(ab.monvol_id)
     emitted = {mid for mid, _t in state.monvol_ids}
     lines = [
@@ -2274,7 +2314,7 @@ def _make_starter_th_monv(state: ConversionState) -> List[str]:
         f"dt={state.db_abstat_dt:g}):", HDR,
     ]
     wrote = False
-    for rad in ("PRES", "GAS", "AIRBAG1", "LFLUID"):
+    for rad in ("PRES", "GAS", "AIRBAG1", "LFLUID", "COMMU1", "FVMBAG2"):
         ids = sorted(i for i in by_model.get(rad, []) if i in emitted)
         if not ids:
             continue

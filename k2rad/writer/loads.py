@@ -6490,6 +6490,20 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     keep_free.update(rw.node_id for rw in state.rigid_walls if rw.node_id > 0)
     keep_free.update(f.node_id for rw in state.rigid_walls_geometric
                      for f in rw.faces if f.node_id > 0)
+    # *AIRBAG_* deliberately adds NOTHING here, batch 2 included. A monitored
+    # volume owns no node: its surface, its vent surfaces, its internal
+    # surface and its inflator-nozzle surface are all built from shells the
+    # mesh already had, and the finite-volume mesh of a /MONVOL/FVMBAG2 is
+    # generated inside the STARTER (init_monvol.F appends its extra vertices
+    # to ITAB itself), so no FV node exists in the deck to be found free.
+    #
+    # The one case that reaches this guard is an *AIRBAG_HYBRID_JETTING whose
+    # node_ID1/2/3 are orphan geometry markers rather than mesh nodes. Those
+    # stay IN the constraint set on purpose: a node attached to no element and
+    # no rigid body is moved by nothing, so pinning it changes no trajectory —
+    # it only removes six zero rows from the implicit tangent, which is the
+    # whole point of the guard. A jet node that IS on the inflator housing is
+    # in elem_nodes already and never gets here.
     free = sorted(n for n in state.nodes
                   if n > 0 and n not in elem_nodes and n not in rigid_nodes
                   and n not in keep_free)

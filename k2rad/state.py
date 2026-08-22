@@ -4490,14 +4490,150 @@ class SegmentSet:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class GasSpecies:
+    """One gas species of a MULTI-GAS airbag (``*AIRBAG_HYBRID`` card 5.1,
+    ``*AIRBAG_PARTICLE`` card 13) → one ``/MAT/GAS/MOLE`` + one
+    ``/PROP/INJECT1`` row.
+
+    **The heat-capacity coefficients are MOLAR on both sides, so the copy is
+    1:1.** LS-DYNA states A/B/C as "Coefficient of MOLAR heat capacity of
+    inflator gas at constant pressure, (e.g., Joules/mole/K, /K^2, /K^3)"
+    (Vol I R17 p.3-50) and ``/MAT/GAS/MOLE`` is the variant whose reader
+    DIVIDES them by MW — ``hm_read_matgas.F:295-302``::
+
+        IF (IMOLE == 1) THEN
+          CPA = CPA / MW * FAC
+          CPB = CPB / MW * FAC
+          CPC = CPC / MW * FAC
+
+    so what the card carries is a molar Cp and what the solver stores is the
+    mass-specific one. Cross-checked against the hard-coded PREDEF gases, which
+    take the same ``IMOLE=1`` path with SI molar numbers (``:158-166``: N2 has
+    ``MW = 0.02801`` kg/mol and ``CPA = 26.0920000`` J/(mol K), i.e.
+    Cp/M = 931 J/(kg K), correct for nitrogen).
+
+    That is why this batch emits ``/MAT/GAS/MOLE`` and NOT the
+    ``/MAT/GAS/MASS`` batch 1 uses for ``*AIRBAG_SIMPLE_AIRBAG_MODEL``: there
+    the card-4a A and B are molar but the target slot is mass-specific, so
+    ``Cpa = A/MW`` is the converter's own division. Here the SOLVER does it,
+    and dividing again would be a second division by MW.
+
+    **The units still have to be the deck's.** ``MW`` must be in
+    deck-mass/mole and ``Cp*`` in deck-energy/(mole K); no rescaling is applied
+    on either side. MEASURED (card-format probe ``mole_0000.rad``, an Mg/mm/s
+    deck): ``MW=2.896e-05`` with ``Cpa=26789.065`` reproduces
+    ``/MAT/GAS/PREDEF AIR`` exactly, while the naive SI pair ``0.02896`` /
+    ``26.789065`` is accepted silently and is wrong by 1e6.
+    """
+    #: molecular weight — LS-DYNA ``MW`` (HYBRID) / ``XMi`` (PARTICLE)
+    mw: float = 0.0
+    #: MOLAR Cp polynomial, ``Cp = a + b*T + c*T^2`` — A/B/C or Ai/Bi/Ci
+    hc_a: float = 0.0
+    hc_b: float = 0.0
+    hc_c: float = 0.0
+    #: HYBRID ``INITM`` — the initial mass FRACTION of this species in the bag
+    #: at t=0 ("The sum of INITM of all gas components should be 1.0",
+    #: Vol I R17 p.3-50). NOT an absolute mass.
+    initm: float = 0.0
+    #: HYBRID ``FMASS`` — fraction of additional aspirated mass. No Radioss
+    #: counterpart; carried so the drop can be reported by value.
+    fmass: float = 0.0
+    #: inflator mass-FLOW-RATE curve — ``LCIDM`` / ``LCMi``
+    lcid_m: int = 0
+    #: inflator gas-temperature curve — ``LCIDT`` / ``LCTi``
+    lcid_t: int = 0
+    #: PARTICLE ``INFGi`` — the inflator this species belongs to
+    infg: int = 0
+    #: 1-based index on the LS-DYNA card, for warnings
+    index: int = 0
+    # ── resolved by writer/monvol.py ────────────────────────────────────
+    mat_id: int = 0          # the /MAT/GAS/MOLE id
+    fun_m: int = 0           # the /PROP/INJECT1 fun_ID_M
+    fun_t: int = 0           # the /PROP/INJECT1 fun_ID_T
+    injected: bool = False   # True → this species gets an injector row
+
+
+@dataclass
+class AirbagVent:
+    """One VENT HOLE of a ``/MONVOL``.
+
+    The four-card vent block is the one sub-block whose layout is pinned as
+    IDENTICAL across the three monitored volumes this converter writes it on —
+    ``radioss140/PROP/venthole1.cfg:17`` names itself *"SUBOBJECT of AIRBAG1,
+    COMMU1 AND FVMBAG1"* — which is why every leak path in batch 2 is stated
+    as a vent hole and ``Nporsurf`` stays 0. See ``_resolve_hybrid_vents`` for
+    the fabric-porosity case that decision covers.
+
+    ``surf_id == 0`` is the whole-bag mode: ``Avent`` is then an ABSOLUTE AREA
+    and ``Bvent`` is forced to 0 by the reader. With a NAMED surface ``Avent``
+    is a SCALE FACTOR on that surface's current area — the same column, two
+    meanings, selected by whether a surface is named. ``hm_read_monvol_type9.F``
+    (and its type-7/11 twins): *"if ``surf_IDv==0`` then ``Bvent→0`` and
+    ``Avent`` is an absolute area (``Avent 0→1.0``)"*.
+
+    The ``/TH`` per-hole channels ``AOUT1..HOUT10`` are addressed by the
+    POSITIONAL slot of the hole, not by ``surf_IDv``, so this list's order is
+    the order the T01 columns come back in.
+    """
+    title: str = "VENT"
+    #: the named vent /SURF id, 0 = whole-bag
+    surf_id: int = 0
+    #: the LS-DYNA parts the named surface was built from
+    pids: List[int] = field(default_factory=list)
+    quad_eids: List[int] = field(default_factory=list)
+    tri_eids: List[int] = field(default_factory=list)
+    iform: int = 1           # 1 isenthalpic, 2 Chemkin, 3 Graefe, 4 in-flow
+    avent: float = 0.0
+    bvent: float = 0.0
+    fct_t: int = 0           # area scale vs TIME
+    fct_p: int = 0           # area scale vs GAUGE pressure (P - Pext)
+    fct_a: int = 0           # area scale vs current AREA
+    tstart: float = 0.0
+    dpdef: float = 0.0
+
+
+@dataclass
+class AirbagInteraction:
+    """``*AIRBAG_INTERACTION`` — gas exchange BETWEEN two bags.
+
+    Not an :class:`Airbag`: it owns no surface, no gas and no ``/MONVOL`` id of
+    its own. It is a RELATION that promotes both of its partners from
+    ``/MONVOL/AIRBAG1`` to ``/MONVOL/COMMU1`` and writes one row into each
+    partner's ``Nbag`` block — the only Radioss card that expresses inter-bag
+    flow at all.
+
+    ``AREA < 0`` → ``|AREA|`` is a curve of orifice area vs ABSOLUTE pressure.
+    ``SF < 0`` → ``|SF|`` is a curve of vent coefficient vs relative time.
+    ``PID < 0`` → contact blockage of the orifice is considered.
+    ``LCID`` → mass flow vs pressure difference; when set, LS-DYNA ignores
+    AREA/SF/PID entirely.
+    ``IFLOW`` < 0 one-way AB1→AB2, 0 two-way, > 0 one-way AB2→AB1.
+    """
+    ab1: int = 0
+    ab2: int = 0
+    area: float = 0.0
+    sf: float = 0.0
+    pid: int = 0
+    lcid: int = 0
+    iflow: int = 0
+    excp: int = 0
+    keyword: str = ""
+    title: str = ""
+
+
+@dataclass
 class Airbag:
     """One ``*AIRBAG_<MODEL>`` card → one ``/MONVOL/<type>``.
 
     ONE dataclass for all five batch-1 models rather than five: every model
     shares the whole of card 1 (SID/SIDTYP/RBID/VSCA/PSCA/VINI/MWD/SPSF) and
     the surface machinery built on it, and the per-model card-3/4 fields are
-    disjoint, so a union keeps the surface contract in one place. ``model``
-    names which of the five was read and therefore which fields are live:
+    disjoint, so a union keeps the surface contract in one place. Batch 2 adds
+    ``HYBRID`` and ``PARTICLE`` to the same union for the same reason — both
+    carry that identical card 1 and the identical RBID walk above it, and their
+    multi-gas / multi-vent data goes into LISTS (``species``, ``vents``,
+    ``poros``) rather than into more scalar slots. ``model``
+    names which of the seven was read and therefore which fields are live:
 
       ``SIMPLE_PRESSURE_VOLUME``  → /MONVOL/PRES   (cn, beta, lcid, lciddr)
       ``SIMPLE_AIRBAG_MODEL``     → /MONVOL/AIRBAG1 + /MAT/GAS + /PROP/INJECT1
@@ -4508,6 +4644,14 @@ class Airbag:
       ``LINEAR_FLUID``            → /MONVOL/LFLUID (bulk, ro, lcint, lcoutt,
                                      lcoutp, lcfit, lcbulk, lcid, p_limit,
                                      p_limlc, nonull)
+      ``HYBRID``                  → /MONVOL/AIRBAG1 with N_gases > 1, or
+                                    /MONVOL/COMMU1 when an *AIRBAG_INTERACTION
+                                    joins it to another bag (atmost, atmosp,
+                                    hconv, c23/a23/cp23/ap23 + their curves,
+                                    opt, pvent, species, jet_*)
+      ``PARTICLE``                → /MONVOL/FVMBAG2 (sd1, sd2, unit, tatm,
+                                    patm, tsw, iair, pair/tair/xmair/aair/
+                                    bair/cair, species, orifices, vent_rows)
 
     **SIDTYP is inverted relative to intuition**: ``0`` = *SET_SEGMENT,
     non-zero = *SET_PART (Vol I R16 p.3-4, "EQ.0: segment / NE.0: part set ID").
@@ -4565,6 +4709,84 @@ class Airbag:
     p_limit: float = 0.0
     p_limlc: int = 0
     nonull: int = 0
+    # ── HYBRID (batch 2) ─────────────────────────────────────────────────
+    # card 3, the ambient state
+    atmost: float = 0.0      # ambient temperature  -> T0
+    atmosp: float = 0.0      # ambient pressure     -> Pext
+    atmosd: float = 0.0      # ambient density      (dropped)
+    gc: float = 0.0          # the deck's universal gas constant (dropped)
+    cc: float = 0.0          # conversion constant  (dropped)
+    hconv: float = 0.0       # convective heat-transfer coefficient -> Hconv
+    # card 4, the vent / fabric-porosity orifices
+    c23: float = 0.0         # vent orifice coefficient
+    lcc23: int = 0           # > 0 vs TIME, < 0 vs relative pressure
+    a23: float = 0.0         # vent area; < 0 -> |A23| is a PART or PART-SET id
+    lca23: int = 0           # vent area vs ABSOLUTE pressure; -1 = A23 is a set
+    cp23: float = 0.0        # fabric-porosity coefficient
+    lcp23: int = 0           # porosity coefficient vs TIME
+    ap23: float = 0.0        # fabric-porosity area
+    lcap23: int = 0          # porosity area vs ABSOLUTE pressure
+    # card 5
+    opt: int = 0             # the venting FORMULA switch (1..8)
+    pvent: float = 0.0       # gauge pressure at which venting begins
+    ngas: int = 0
+    lcefr: int = 0           # exit flow rate vs gauge pressure
+    lcidm0: int = 0          # total inflator mass inflow -> /PROP/INJECT2
+    vntopt: int = 0
+    # _JETTING cards 6/7 and _CM card 8
+    jetting: bool = False
+    jet_ca: float = 0.0      # cone half-angle, RADIANS (< 0 -> |CA| is a curve)
+    jet_beta: float = 0.0    # Bernoulli efficiency (< 0 -> curve)
+    jet_psid: int = 0
+    jet_n1: int = 0          # jet focal point node
+    jet_n2: int = 0          # jet axis node
+    jet_n3: int = 0          # secondary focal point (0 -> conical jet)
+    jet_fp: tuple = (0.0, 0.0, 0.0)     # XJFP  YJFP  ZJFP
+    jet_vh: tuple = (0.0, 0.0, 0.0)     # XJVH  YJVH  ZJVH
+    jet_sfp: tuple = (0.0, 0.0, 0.0)    # XSJFP YSJFP ZSJFP
+    jet_nreact: int = 0
+    # ── PARTICLE (batch 2) ───────────────────────────────────────────────
+    sd1: int = 0             # the bag part / part-set
+    stype1: int = 0          # 0 PART, 1 PART SET
+    sd2: int = 0             # the INTERNAL part / part-set
+    stype2: int = 0
+    block: int = 0
+    npdata: int = 0
+    fric: float = 0.0
+    irpd: int = 0
+    np: int = 0              # particle count (CPM-only)
+    unit: int = 0            # 0 kg-mm-ms-K, 1 SI, 2 t-mm-s-K, 3 user
+    visflg: int = 0
+    tatm: float = 0.0
+    patm: float = 0.0
+    nvent: int = 0
+    tend: float = 0.0
+    tsw: float = 0.0         # -> Tswitch
+    iair: int = 0
+    norif: int = 0
+    nid1: int = 0
+    nid2: int = 0
+    nid3: int = 0
+    chm: int = 0
+    cd_ext: float = 0.0
+    pair: float = 0.0
+    tair: float = 0.0
+    xmair: float = 0.0
+    aair: float = 0.0
+    bair: float = 0.0
+    cair: float = 0.0
+    npair: int = 0
+    nprlx: int = 0
+    lcmass: int = 0          # _MOLEFRACTION: the total mass-flow curve
+    #: raw ``(SID3, STYPE3, C23, LCTC23, LCPC23, ENH_V, PPOP)`` vent rows
+    vent_rows: List[tuple] = field(default_factory=list)
+    #: raw ``(NIDi, ANi, VDi, CAi, INFOi, IMOM, IANG, CHM_ID)`` orifice rows
+    orifices: List[tuple] = field(default_factory=list)
+    #: option flags that change the card walk or the physics
+    mole_fraction: bool = False
+    decomposition: bool = False
+    # ── multi-gas / multi-vent, shared by HYBRID and PARTICLE ────────────
+    species: List["GasSpecies"] = field(default_factory=list)
     # ── shared curve slot (SPV / SAM / AGM / LOAD_CURVE / LFLUID card 3) ─
     lcid: int = 0
     # ── resolved by writer/monvol.py::_resolve_airbags ───────────────────
@@ -4583,6 +4805,33 @@ class Airbag:
     vent_fct_p: int = 0      # AIRBAG1: porosity-vs-gauge-pressure /FUNCT
     pmax_fct: int = 0        # LFLUID: the flat P_LIMIT /FUNCT
     dropped: bool = False    # resolved to nothing — no /MONVOL is written
+    # ── resolved, batch 2 ────────────────────────────────────────────────
+    #: which /MONVOL card is written — "PRES" | "GAS" | "AIRBAG1" | "LFLUID"
+    #: | "COMMU1" | "FVMBAG2". Set by the resolver, NOT by ``model``: a
+    #: HYBRID bag is AIRBAG1 on its own and COMMU1 once an *AIRBAG_INTERACTION
+    #: names it, and a PARTICLE bag falls back from FVMBAG2 to AIRBAG1 under
+    #: ``--airbag-particle-uniform``.
+    radioss_type: str = ""
+    vents: List["AirbagVent"] = field(default_factory=list)
+    surf_in_id: int = 0      # FVMBAG2: the INTERNAL surface /SURF id
+    surf_inj_id: int = 0     # FVMBAG2: the inflator-nozzle /SURF id
+    in_quad_eids: List[int] = field(default_factory=list)
+    in_tri_eids: List[int] = field(default_factory=list)
+    inj_quad_eids: List[int] = field(default_factory=list)
+    inj_tri_eids: List[int] = field(default_factory=list)
+    #: FVMBAG2 numerics — see ``_FVMBAG2_*`` in writer/monvol.py
+    cgmerg: float = 0.0
+    dtsca: float = 0.0
+    dtmin: float = 0.0
+    tswitch: float = 0.0
+    #: ``(partner /MONVOL id, surf_IDc, Acom, fct_IDCt, fct_IDCP)`` rows of the
+    #: COMMU1 ``Nbag`` block, one per *AIRBAG_INTERACTION.
+    commu_rows: List[tuple] = field(default_factory=list)
+    #: The partition surfaces those rows name. Kept OUT of ``vents``: a
+    #: communicating surface is not a vent hole — it moves gas to the partner
+    #: volume, not to the outside — and putting it in the vent list would add a
+    #: leak-path block to the card as well as the Nbag row.
+    commu_surfs: List["AirbagVent"] = field(default_factory=list)
 
 
 @dataclass
@@ -5325,6 +5574,25 @@ class ConvertOptions:
     # are included only for free boundaries") instead. Note LS-DYNA MPP
     # hardcodes IADJ=1, so a blank IADJ in an MPP-authored deck means /ALL.
     eroding_surf_ext: bool = False
+    # *AIRBAG_PARTICLE: emit a uniform-pressure /MONVOL/AIRBAG1 instead of the
+    # finite-volume /MONVOL/FVMBAG2 the CPM bag actually maps to.
+    #
+    # FVMBAG2 is the faithful target and the default, but it CANNOT RUN on an
+    # open-source OpenRadioss build. hm_read_monvol_type11.F:299 hard-wires
+    # KMESH = 14, init_monvol.F then dispatches CASE (12, 14) to
+    # HYPERMESH_TETRA, and starter/stub/fvmbags_stub.F (guarded #ifndef DNC)
+    # is the whole of it:
+    #
+    #     SUBROUTINE HYPERMESH_TETRA(...)
+    #       WRITE(6,*) "FVMBAGS require a mesher"
+    #       STOP
+    #     END SUBROUTINE
+    #
+    # MEASURED on a probe deck: the reader echoes the whole /MONVOL cleanly,
+    # then the starter prints that line and terminates before writing any
+    # restart file. So the FVMBAG2 deck is CORRECT and UNRUNNABLE here, and
+    # this flag trades the finite-volume pressure field for a bag that runs.
+    airbag_particle_uniform: bool = False
 
     @property
     def shell_default_ishell(self) -> int:
@@ -5669,7 +5937,14 @@ class ConversionState:
                                       List[Tuple[int, List[int]]]]] = field(
         default_factory=dict)
     # *AIRBAG_<MODEL> cards, deck order → /MONVOL/PRES|AIRBAG1|GAS|LFLUID
+    # |COMMU1|FVMBAG2
     airbags: List[Airbag] = field(default_factory=list)
+    # *AIRBAG_INTERACTION cards, deck order. NOT Airbags: each is a RELATION
+    # that promotes both of its partner bags to /MONVOL/COMMU1 and writes one
+    # row into each partner's Nbag block. Kept apart so a card naming a bag
+    # this deck never defines can be reported by both ids rather than becoming
+    # a monitored volume of its own.
+    airbag_interactions: List[AirbagInteraction] = field(default_factory=list)
     # (monvol_id, title) of every /MONVOL actually written by
     # writer/monvol.py::_make_monvols — filled AT THE LINE that writes the
     # card, never derived from `airbags` (a model whose surface resolves to no
