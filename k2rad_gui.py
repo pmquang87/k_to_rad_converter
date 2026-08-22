@@ -98,7 +98,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
                          ams: bool = False,
                          shell_formulation: str = "qbat",
                          dt_del: str = "",
-                         eroding_surf_ext: bool = False) -> dict:
+                         eroding_surf_ext: bool = False,
+                         airbag_particle_uniform: bool = False) -> dict:
     """Turn the raw widget strings into validated keyword arguments for
     :func:`k2rad.convert`. Raises ValueError (with a user-facing message) on any
     bad field. With everything blank/off the result is just the input path,
@@ -176,6 +177,8 @@ def build_convert_kwargs(input_path: str, output_stem: str, units, *,
 
     kwargs["eroding_surf_ext"] = bool(eroding_surf_ext)
 
+    kwargs["airbag_particle_uniform"] = bool(airbag_particle_uniform)
+
     if shell_formulation not in ("qbat", "qeph"):
         raise ValueError(
             "Shell formulation must be 'qbat' or 'qeph', not "
@@ -232,6 +235,7 @@ class ConverterGUI:
         self.write_restart = tk.BooleanVar(value=False)
         self.ams = tk.BooleanVar(value=False)
         self.eroding_surf_ext = tk.BooleanVar(value=False)
+        self.airbag_particle_uniform = tk.BooleanVar(value=False)
         # 'qbat' = today's behaviour; see the radio buttons below.
         self.shell_formulation = tk.StringVar(value="qbat")
         self.dt_del = tk.StringVar(value="")
@@ -321,6 +325,19 @@ class ConverterGUI:
                      "engine wakes when a brick dies; with /EXT the crater face a "
                      "dying element exposes has NO contact and nothing warns you",
             variable=self.eroding_surf_ext).grid(row=10, column=0, columnspan=3, sticky="w", **pad)
+
+        # row 13: after the dt_del entry (row 12), the last row this frame uses.
+        ttk.Checkbutton(
+            io, text="*AIRBAG_PARTICLE as a uniform-pressure /MONVOL/AIRBAG1 "
+                     "instead of the finite-volume /MONVOL/FVMBAG2. FVMBAG2 is "
+                     "the faithful conversion and the default, but an "
+                     "open-source OpenRadioss build has NO FV mesher: the "
+                     "starter reads the card cleanly, prints \"FVMBAGS require "
+                     "a mesher\" and stops. Turn this ON to get a bag that "
+                     "actually inflates — same gas, injector and vents, "
+                     "uniform pressure instead of a pressure field",
+            variable=self.airbag_particle_uniform).grid(
+                row=13, column=0, columnspan=3, sticky="w", **pad)
 
         # ── Shell formulation (issue #77) ───────────────────────────────────
         # A radio PAIR rather than a checkbox: neither value is "the fix", and
@@ -502,6 +519,7 @@ class ConverterGUI:
                 shell_formulation=self.shell_formulation.get(),
                 dt_del=self.dt_del.get(),
                 eroding_surf_ext=self.eroding_surf_ext.get(),
+                airbag_particle_uniform=self.airbag_particle_uniform.get(),
             )
         except ValueError as exc:
             self._reset_log()
@@ -601,6 +619,8 @@ class ConverterGUI:
             bits.append("Advanced Mass Scaling (/DT/AMS)")
         if kwargs.get("eroding_surf_ext"):
             bits.append("eroding contacts on /SURF/PART/EXT (no interior re-exposure)")
+        if kwargs.get("airbag_particle_uniform"):
+            bits.append("*AIRBAG_PARTICLE as uniform-pressure /MONVOL/AIRBAG1")
         self._append("  Options: " + (", ".join(bits) if bits else "standard (no extra options)") + "\n")
 
     # ── log helpers ──────────────────────────────────────────────────────────
