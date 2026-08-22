@@ -42,10 +42,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from itertools import permutations as _permutations
+from itertools import permutations as _permutations, product as _product
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
+                       _AIRBAG_OPTION_STACKS,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -1776,6 +1777,14 @@ _AIRBAG_CURVE_CELLS = {
     "AIRBAG_LOAD_CURVE":             ([(1, "f")], [], []),
     "AIRBAG_LINEAR_FLUID":           ([(i, "f") for i in range(2, 8)], [],
                                       [(1, "f")]),
+    # HYBRID's card 3 is the ambient state and holds no id at all; its card 4
+    # (LCC23/LCA23/LCP23/LCAP23) and card 5 (LCEFR/LCIDM0) and its NGAS gas
+    # pairs are walked by _off_airbag_hybrid, because their INDEX moves with
+    # NGAS and their count is not knowable from a static cell list.
+    "AIRBAG_HYBRID":                 ([], [], []),
+    # PARTICLE shares nothing with the other six — different card 1, no RBID
+    # walk — so it has its own spec entirely.
+    "AIRBAG_PARTICLE":               ([], [], []),
 }
 
 
@@ -1801,6 +1810,10 @@ def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
     from .handlers import (_AIRBAG_MODELS, _airbag_base_keyword,
                            _airbag_prelude)
     raw = b.raw
+    base = _airbag_base_keyword(b.keyword)
+    if base == "AIRBAG_PARTICLE":
+        _off_airbag_particle(b, offsets, warn)
+        return
     toff = _title_offset(b)
     if toff and "ID" in b.options and raw:
         new = _rewrite_id_header(raw[0], offsets.get("r", 0))
@@ -1813,11 +1826,13 @@ def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
         raw[toff] = new
     # The legacy trailing "_<digits>" spelling is the base model's card stack
     # (handlers._airbag_base_keyword), so it keys the same cell map.
-    base = _airbag_base_keyword(b.keyword)
     model = _AIRBAG_MODELS.get(base)
     if model is None:
         return
     _f1, i3 = _airbag_prelude(raw, toff)
+    if base == "AIRBAG_HYBRID":
+        _off_airbag_hybrid(b, raw, i3, offsets)
+        return
     cells, neg_cells, card4 = _AIRBAG_CURVE_CELLS[base]
     foff = offsets.get("f", 0)
     if i3 < len(raw) and raw[i3].strip():
@@ -1833,6 +1848,176 @@ def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
         new = _rewrite_line(raw[i3 + 1], card4, offsets)
         if new is not None:
             raw[i3 + 1] = new
+
+
+def _off_airbag_hybrid(b: Block, raw, i3: int, offsets: Dict[str, int]) -> None:
+    """``*AIRBAG_HYBRID`` cards 4, 5 and the NGAS gas pairs.
+
+    Card 3 (ATMOST ATMOSP ATMOSD GC CC HCONV) holds no id — a NEGATIVE HCONV
+    is ``|HCONV|`` as a curve id, but the converter drops it rather than
+    referencing it, so rewriting it would move an id nothing points at.
+
+    Card 4  ``C23 LCC23 A23 LCA23 CP23 LCP23 AP23 LCAP23`` — four curve cells,
+            and ``A23`` is the sign-overloaded one: a NEGATIVE A23 is a *PART
+            id when ``LCA23 != -1`` and a *SET_PART id when it is ``-1``. Two
+            different buckets on one cell, decided by a neighbouring cell —
+            which is why it is walked rather than declared.
+    Card 5  ``OPT PVENT NGAS LCEFR LCIDM0 VNTOPT`` — two curve cells, and NGAS
+            is the count that positions everything below.
+    Card 5.1 (x NGAS) ``LCIDM LCIDT <blank> MW INITM A B C`` — two curve cells
+            per gas, at a card index that moves with the stride
+            ``_hybrid_gas_stride`` decides. Both are sign-overloaded: a
+            negative id means cubic-spline interpolation of ``|id|``.
+
+    The jetting cards below carry ``PSID`` (a *SET_PART) and NODE1/2/3, which
+    move with IDSOFF and IDNOFF — and both of those are among the offsets
+    ``*INCLUDE_TRANSFORM`` does NOT propagate to Radioss at all
+    (``convertincludes.cxx:121-124`` leaves IDSOFF/IDFOFF/IDDOFF commented
+    out), so they are rewritten here for the same reason every other set and
+    curve cell is: k2rad applies the offsets in the .k, before conversion.
+    """
+    from .handlers import _card, _hybrid_gas_stride
+    foff = offsets.get("f", 0)
+    if i3 + 1 < len(raw) and raw[i3 + 1].strip():
+        new = _rewrite_line(raw[i3 + 1],
+                            [(1, "f"), (3, "f"), (5, "f"), (7, "f")], offsets)
+        if new is not None:
+            raw[i3 + 1] = new
+        # A23 < 0 names a *PART (LCA23 != -1) or a *SET_PART (LCA23 == -1).
+        lca23 = to_int(_card(raw, i3 + 1, fixed=True, n=8, w=10)[3] or 0)
+        _rewrite_neg_cell(raw, i3 + 1, 2,
+                          offsets.get("s" if lca23 == -1 else "p", 0))
+    ngas = 0
+    if i3 + 2 < len(raw) and raw[i3 + 2].strip():
+        f5 = _card(raw, i3 + 2, fixed=True, n=8, w=10)
+        ngas = to_int(f5[2] or 0) if len(f5) > 2 else 0
+        new = _rewrite_line(raw[i3 + 2], [(3, "f"), (4, "f")], offsets)
+        if new is not None:
+            raw[i3 + 2] = new
+    i = i3 + 3
+    stride = _hybrid_gas_stride(raw, i, ngas)
+    for _k in range(max(0, ngas)):
+        if i < len(raw) and raw[i].strip():
+            new = _rewrite_line(raw[i], [(0, "f"), (1, "f")], offsets)
+            if new is not None:
+                raw[i] = new
+            for cell in (0, 1):
+                _rewrite_neg_cell(raw, i, cell, foff)
+        i += stride
+    if "_JETTING" in b.keyword and i + 1 < len(raw) and raw[i + 1].strip():
+        # Card 7: XSJFP YSJFP ZSJFP PSID IDUM NODE1 NODE2 NODE3 — read by the
+        # MANUAL, not by the reader cfg, which omits IDUM (see the handler).
+        new = _rewrite_line(raw[i + 1],
+                            [(3, "s"), (5, "n"), (6, "n"), (7, "n")], offsets)
+        if new is not None:
+            raw[i + 1] = new
+
+
+def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
+    """``*AIRBAG_PARTICLE``: SD1/SD2 → IDSOFF or IDPOFF by their own type
+    flags, the NVENT vent rows' SID3 the same way, every inflator curve →
+    IDFOFF, and the NORIF nozzles' NIDi → IDEOFF or IDNOFF by VDi.
+
+    Every one of those buckets is chosen by a NEIGHBOURING cell, which is what
+    makes this a walk and not a table:
+
+      ``SD1``  is a *PART when ``STYPE1 == 0`` and a *SET_PART otherwise —
+               the opposite convention from the ``SIDTYP`` on card 1 of the
+               other six models, where 0 is a *SET_SEGMENT.
+      ``SID3`` on each vent row, the same way, off ``STYPE3``.
+      ``NIDi`` is a SHELL ELEMENT id when ``VDi`` is -1/-2/-3/-4 and a NODE id
+               otherwise — the one cell in the whole airbag family whose
+               ENTITY TYPE, not just its namespace, depends on another cell.
+
+    The card walk itself is the handler's, imported so the two cannot drift.
+    """
+    from .handlers import (_card, _airbag_particle_id_row,
+                           _read_airbag_particle_indices)
+    raw = b.raw
+    # On an _MPP deck the SX/SY/SZ card comes FIRST and the _ID card second
+    # (Vol I R17 p.3-94 Card Summary), so the header is not always raw[0].
+    hdr = _airbag_particle_id_row(b)
+    if "ID" in b.options and len(raw) > hdr:
+        new = _rewrite_id_header(raw[hdr], offsets.get("r", 0))
+        if new is not None:
+            raw[hdr] = new
+    i1, vent_rows, gas_rows, orif_rows, partial = \
+        _read_airbag_particle_indices(b, raw)
+    if partial:
+        warn(f"*{b.keyword}: the card stack could not be walked past card 1 "
+             "(a STYPE2 = 2 block repeats once per part of the SD2 set, a "
+             "count that only exists after the *SET_PART is resolved). Card "
+             "1's SID1/SID2 ARE offset; the vent, gas and orifice rows below "
+             "it are NOT — check their set, curve and element ids by hand "
+             "against this *INCLUDE_TRANSFORM's IDSOFF / IDFOFF / IDEOFF.")
+    if i1 < len(raw) and raw[i1].strip():
+        f1 = _card(raw, i1, fixed=True, n=8, w=10)
+        stype1 = to_int(f1[1] or 0) if len(f1) > 1 else 0
+        stype2 = to_int(f1[3] or 0) if len(f1) > 3 else 0
+        new = _rewrite_line(
+            raw[i1],
+            [(0, "s" if stype1 else "p"), (2, "s" if stype2 else "p")],
+            offsets)
+        if new is not None:
+            raw[i1] = new
+    for r in vent_rows:
+        if r < len(raw) and raw[r].strip():
+            fv = _card(raw, r, fixed=True, n=8, w=10)
+            stype3 = to_int(fv[1] or 0) if len(fv) > 1 else 0
+            new = _rewrite_line(
+                raw[r], [(0, "s" if stype3 else "p"), (3, "f"), (4, "f")],
+                offsets)
+            if new is not None:
+                raw[r] = new
+    for r in gas_rows:
+        if r < len(raw) and raw[r].strip():
+            new = _rewrite_line(raw[r], [(0, "f"), (1, "f")], offsets)
+            if new is not None:
+                raw[r] = new
+    for r in orif_rows:
+        if r < len(raw) and raw[r].strip():
+            fo = _card(raw, r, fixed=True, n=8, w=10)
+            vdi = to_float(fo[2]) if len(fo) > 2 else 0.0
+            # VDi -1/-2/-3/-4 -> NIDi is a SHELL ELEMENT; otherwise a NODE.
+            new = _rewrite_line(
+                raw[r], [(0, "e" if vdi < 0.0 else "n")], offsets)
+            if new is not None:
+                raw[r] = new
+
+
+def _off_airbag_interaction(b: Block, offsets: Dict[str, int], warn) -> None:
+    """``*AIRBAG_INTERACTION``: ``AB1``/``AB2`` → IDROFF (they are *AIRBAG
+    ids, the same bucket the ``_ID`` header's ABID takes), ``PID`` → IDPOFF
+    and ``LCID`` → IDFOFF.
+
+    ``AREA`` and ``SF`` are sign-overloaded — a negative one is ``|value|`` as
+    a curve id — so both get the sign-preserving rewriter as well.
+    """
+    raw = b.raw
+    off = _title_offset(b)
+    if "ID" in b.options and raw:
+        new = _rewrite_id_header(raw[0], offsets.get("r", 0))
+        if new is not None:
+            raw[0] = new
+    if off >= len(raw) or not raw[off].strip():
+        return
+    new = _rewrite_line(raw[off],
+                        [(0, "r"), (1, "r"), (4, "p"), (5, "f")], offsets)
+    if new is not None:
+        raw[off] = new
+    foff = offsets.get("f", 0)
+    for cell in (2, 3):                       # AREA < 0, SF < 0 are curve ids
+        _rewrite_neg_cell(raw, off, cell, foff)
+
+
+def _rewrite_neg_cell(raw, idx: int, cell: int, off: int) -> None:
+    """``_rewrite_neg_ref`` applied in place, for the cells whose NEGATIVE
+    value is an id in some other namespace."""
+    if not off or idx >= len(raw):
+        return
+    new = _rewrite_neg_ref(raw[idx], cell, off)
+    if new is not None:
+        raw[idx] = new
 
 
 def _off_airbag_ref_geometry(b: Block, offsets: Dict[str, int], warn) -> None:
@@ -2979,14 +3164,22 @@ for _base in ("MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE", "MAT_240"):
 del _base, _opt, _cells
 
 # *AIRBAG_* — generated from the same dicts handlers.py dispatches on, so a
-# model cannot be readable and un-offsettable. The seven UNCONVERTED models are
+# model cannot be readable and un-offsettable. The UNCONVERTED models are
 # deliberately left out: their card stacks are not modelled, so a blind rewrite
 # of "card 1 field 0" could land on something else entirely, and an unmapped
-# keyword warns rather than corrupting ids.
+# keyword warns rather than corrupting ids. The batch-2 OPTION stacks are
+# generated from _AIRBAG_OPTION_STACKS, the same product the dispatch table
+# uses, so every readable spelling is also offsettable.
 for _kw in _AIRBAG_MODELS:
     for _sfx in _AIRBAG_LEGACY_SUFFIXES:
         _OFFSET_SPECS[_kw + _sfx] = _off_airbag
-del _sfx
+for _kw, _stack in _AIRBAG_OPTION_STACKS.items():
+    for _combo in _product(*_stack):
+        for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+            _OFFSET_SPECS[_kw + "".join(_combo) + _sfx] = _off_airbag
+for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+    _OFFSET_SPECS["AIRBAG_INTERACTION" + _sfx] = _off_airbag_interaction
+del _sfx, _stack, _combo
 for _r in range(4):
     for _combo in _permutations(("_BIRTH", "_RDT", "_ID"), _r):
         if _combo and _combo[-1] == "_ID":

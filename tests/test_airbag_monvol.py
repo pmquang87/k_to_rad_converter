@@ -1979,8 +1979,8 @@ class TestAirbagDispatch(unittest.TestCase):
         """An airbag that vanishes into skipped_keywords is not a missing
         output card: the bag never inflates and the run terminates NORMALLY
         with the fabric flapping loose."""
-        for kw in ("AIRBAG_WANG_NEFSKE", "AIRBAG_HYBRID", "AIRBAG_PARTICLE",
-                   "AIRBAG_INTERACTION"):
+        for kw in ("AIRBAG_WANG_NEFSKE", "AIRBAG_ALE", "AIRBAG_ADVANCED_ALE",
+                   "AIRBAG_FLUID_AND_GAS"):
             with self.subTest(kw=kw):
                 body = f"*{kw}\n" + _c10(7) + _c10(1) + "\n" + _c10(1.0) + "\n"
                 r, starter, _e = _convert(_box_deck(body))

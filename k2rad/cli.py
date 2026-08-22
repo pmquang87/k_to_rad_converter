@@ -301,6 +301,23 @@ def build_parser() -> argparse.ArgumentParser:
              "the 2022 Reference Guide p.372 wants /EXT there so the mid-side "
              "nodes take part in the contact.)",
     )
+    parser.add_argument(
+        "--airbag-particle-uniform",
+        action="store_true",
+        help="Convert *AIRBAG_PARTICLE to a UNIFORM-PRESSURE "
+             "/MONVOL/AIRBAG1 instead of the finite-volume /MONVOL/FVMBAG2 it "
+             "maps to. FVMBAG2 is the faithful target and stays the default, "
+             "but it CANNOT RUN on an open-source OpenRadioss build: "
+             "hm_read_monvol_type11.F hard-wires KMESH=14, init_monvol.F "
+             "dispatches that to HYPERMESH_TETRA, and starter/stub/"
+             "fvmbags_stub.F is a stub that prints 'FVMBAGS require a mesher' "
+             "and STOPs. MEASURED: the reader echoes the whole /MONVOL "
+             "cleanly, then the starter dies before writing a restart file. "
+             "This flag trades the finite-volume pressure field — the whole "
+             "point of a CPM bag — for a bag that actually inflates. The gas "
+             "species, the injector, the vents and the porous surfaces are "
+             "identical either way; only the pressure field is uniform.",
+    )
     return parser
 
 
@@ -364,6 +381,7 @@ def main(argv=None) -> int:
         shell_formulation=args.shell_formulation,
         dt_del=args.dt_del,
         eroding_surf_ext=args.eroding_surf_ext,
+        airbag_particle_uniform=args.airbag_particle_uniform,
         progress=None if args.quiet else _make_progress_printer(),
     )
 

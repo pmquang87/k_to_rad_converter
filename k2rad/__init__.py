@@ -187,6 +187,7 @@ def convert(
     shell_formulation: str = "qbat",
     dt_del: Optional[float] = None,
     eroding_surf_ext: bool = False,
+    airbag_particle_uniform: bool = False,
     progress: Optional[Callable[[float, str], None]] = None,
     write_log: bool = True,
 ) -> ConversionResult:
@@ -303,6 +304,14 @@ def convert(
         solver says nothing about it. Turn this on only to reproduce LS-DYNA
         SMP's literal IADJ=0, or if the extra interior segments make the
         contact sort too expensive.
+    airbag_particle_uniform : bool
+        Convert ``*AIRBAG_PARTICLE`` to a uniform-pressure ``/MONVOL/AIRBAG1``
+        instead of the finite-volume ``/MONVOL/FVMBAG2`` it maps to. Off by
+        default — FVMBAG2 is the faithful target — but that target cannot run
+        on an open-source OpenRadioss build, whose ``HYPERMESH_TETRA`` is a
+        stub that prints ``FVMBAGS require a mesher`` and stops. The gas
+        species, injector, vents and porous surfaces are identical either way;
+        only the pressure field differs.
     progress : callable(fraction, label), optional
         Called with an estimated completion fraction (0.0–1.0) and a short stage
         label as the conversion proceeds, for a progress display. The CLI prints a
@@ -365,6 +374,7 @@ def convert(
         shell_formulation=shell_formulation,
         dt_del=dt_del,
         eroding_surf_ext=eroding_surf_ext,
+        airbag_particle_uniform=airbag_particle_uniform,
     )
     if shell_formulation not in SHELL_FORMULATIONS:
         raise ValueError(
