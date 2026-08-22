@@ -7,6 +7,21 @@ k2rad.writer.monvol  –  *AIRBAG_<MODEL> → /MONVOL (monitored volumes).
   *AIRBAG_ADIABATIC_GAS_MODEL     → /MONVOL/GAS      (ITYPE 3)
   *AIRBAG_LOAD_CURVE              → /MONVOL/PRES     (Itypfun = 1)
   *AIRBAG_LINEAR_FLUID            → /MONVOL/LFLUID   (ITYPE 10)
+  *AIRBAG_HYBRID{_JETTING}{_CM}   → /MONVOL/AIRBAG1  with N_gases > 1
+                                    + one /MAT/GAS/MOLE per species
+  *AIRBAG_PARTICLE{…}             → /MONVOL/FVMBAG2  (ITYPE 11), or
+                                    /MONVOL/AIRBAG1 under
+                                    --airbag-particle-uniform
+  *AIRBAG_INTERACTION             → /MONVOL/COMMU1   (ITYPE 9) on BOTH bags,
+                                    with reciprocal Nbag rows
+
+OUT OF SCOPE, and each named by its own warn-drop rather than left silent:
+``*AIRBAG_WANG_NEFSKE*`` (the orifice/temperature card stack has no reader
+here yet), the ``*MAT_FABRIC`` LEAKAGE family — FLC/FAC/FVOPT, which is also
+what ``*AIRBAG_HYBRID``'s ``OPT != 0`` routes its porosity to — ``/MONVOL/
+FVMBAG1`` with an explicit ``grbric_ID`` (the only finite-volume bag an
+open-source build can run), ``/PROP/INJECT2`` (the molar-fraction injector
+``LCIDM0`` and ``_MOLEFRACTION`` need), and the ``*DEFINE_CPM_*`` family.
 
 THE SURFACE IS THE WHOLE PROBLEM, and it has one hard rule: **the external
 surface must be element-backed.** ``check_surf.F:55-62`` sets

@@ -2458,18 +2458,20 @@ rejects the whole deck
 | `*AIRBAG_ADIABATIC_GAS_MODEL` | `/MONVOL/GAS` (ITYPE 3) | `Pini = P0 + PE` (gauge → absolute) |
 | `*AIRBAG_LOAD_CURVE` | `/MONVOL/PRES` | `Itypfun = 1` (pressure vs time), `STIME` folded into the curve |
 | `*AIRBAG_LINEAR_FLUID` | `/MONVOL/LFLUID` (ITYPE 10) | `P = K·ln(V0/V) + Padd`, term for term |
+| `*AIRBAG_HYBRID[_JETTING][_CM]` | `/MONVOL/AIRBAG1` + one `/MAT/GAS/MOLE` **per species** + `/PROP/INJECT1` with `N_gases > 1` | the initial mixture is a **mole-fraction** average; `_JETTING` maps when it names NODE1/NODE2 |
+| `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION][_SEGMENT][_TIME]` | `/MONVOL/FVMBAG2` (ITYPE 11) + `surf_IDin` from SD2 + `surf_IDinj` from the nozzles | **cannot run on an open-source build** — see below; `--airbag-particle-uniform` gives a runnable `/MONVOL/AIRBAG1` |
+| `*AIRBAG_INTERACTION` | `/MONVOL/COMMU1` (ITYPE 9) on **both** bags, with reciprocal `Nbag` rows | `PID` → the shared `surf_IDc`; dyna2rad does not convert this keyword at all |
 | `*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]` | one `/XREF` per owning part | `_ID` scaling baked in, `_BIRTH` → `/SENSOR/TIME` |
 | `*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]` | `/EREF/SHELL` + `/EREF/SH3N` per part | |
 | `*MAT_FABRIC` / `*MAT_034` | `/MAT/LAW19` + `/PROP/TYPE9`, or `/MAT/LAW58` + `/PROP/TYPE16` | see *Fabric* below |
 | `*CONTACT_AIRBAG_SINGLE_SURFACE` | the single-surface interface, or `/INTER/TYPE19` on `SOFT = -19` | |
 | `*DATABASE_ABSTAT` | one `/TH/MONV` per monitored-volume model | its `DT` joins the `/TFILE` minimum |
 
-`*AIRBAG_WANG_NEFSKE*`, `*AIRBAG_HYBRID*`, `*AIRBAG_PARTICLE`, `*AIRBAG_ALE`,
-`*AIRBAG_ADVANCED_ALE`, `*AIRBAG_FLUID_AND_GAS` and `*AIRBAG_INTERACTION` are
-**registered but not converted**: each one warns by name and says what the
-Radioss counterpart would be. That matters more than it looks — an airbag that
-disappears is not a missing output card, it is a bag that never inflates, on a
-run that terminates *normally*.
+`*AIRBAG_WANG_NEFSKE*`, `*AIRBAG_ALE`, `*AIRBAG_ADVANCED_ALE` and
+`*AIRBAG_FLUID_AND_GAS` are **registered but not converted**: each one warns by
+name and says what the Radioss counterpart would be. That matters more than it
+looks — an airbag that disappears is not a missing output card, it is a bag
+that never inflates, on a run that terminates *normally*.
 
 Every spelling is also registered with the **legacy trailing `_<digits>`** the
 `dynaexamples` corpus still ships (`*AIRBAG_SIMPLE_PRESSURE_VOLUME_1`,
@@ -2601,6 +2603,134 @@ warned about and dropped. On a `PRES` bag `VSCA` cancels out of the `V0/V`
 ratio exactly, so it only loses something when `VINI` is also non-zero.
 `RBID` (a user subroutine or a built-in sensor arming the inflator), `MWD` and
 `SPSF` have no `/MONVOL` counterpart and are each named.
+
+#### The multi-gas inflators: why `/MONVOL/AIRBAG1` and not `COMMU1`
+
+dyna2rad sends `*AIRBAG_HYBRID` to `/MONVOL/COMMU1`
+(`convertcontrolvols.cxx:2428`) and gives no reason anywhere in its tree.
+Reading the two card definitions against each other, COMMU1 has exactly one
+capability AIRBAG1 lacks — the **communicating-bag block** — and dyna2rad never
+writes a row into it. Vents are the same sub-block on both
+(`venthole1.cfg:17` calls itself *"SUBOBJECT of AIRBAG1, COMMU1 AND
+FVMBAG1"*), `N_gases` lives on the `/PROP/INJECT1` both reference, jetting
+exists on both (`injector1.cfg:24-29` vs `monvol_commu1.cfg:47-51`), and both
+carry `Nporsurf`. A COMMU1 with an empty block is not even well-formed —
+`monvol_commu1.cfg:255-259` carries `CHECK(COMMON) { NBAG > 0; NBAG <= 20; }`.
+
+So k2rad emits `/MONVOL/AIRBAG1` for a stand-alone hybrid bag and promotes
+**both** partners to `/MONVOL/COMMU1` the moment an `*AIRBAG_INTERACTION` gives
+the `Nbag` block something to hold. The promotion is loss-free: `monvol0.F`
+dispatches `ITYP==7 .OR. ITYP==9` to the same `AIRBAGA1`/`AIRBAGB1` pair. One
+further consequence of dyna2rad's choice is that its hybrid bags get **no
+`/TH/MONV` at all**, because `p_CreateTHMonVolForDBAbstat` runs at
+`ConvertEntities():47` and `ConvertAirbagHybrid` at `:53`, so its selection
+cannot see them.
+
+**`/MAT/GAS/MOLE`, and the divide-once rule.** LS-DYNA's A/B/C are *molar* heat
+capacities on both the simple and the hybrid card, but the two targets differ:
+batch 1's `/MAT/GAS/MASS` slot is mass-specific and the **converter** divides
+by MW, while `/MAT/GAS/MOLE`'s is molar and the **solver** divides
+(`hm_read_matgas.F:295-302`, `CPA = CPA / MW * FAC`). Dividing in both places
+understates Cp by a factor MW — 36× on a 0.028 kg/mol gas. Note also that MOLE
+has **no `Cpf` card**: a sixth line written after one is the next keyword read
+as a Cpf, and everything below it shifts.
+
+**The initial mixture is a mole-fraction average.** `INITM` is a *mass*
+fraction ("The sum of INITM of all gas components should be 1.0", Vol I R17
+p.3-50) while MW and A/B/C are *molar*, so the weights are converted before
+averaging: `M = 1/Σ(w_i/M_i)` and `Cp = Σ x_i Cp_i`. That lands where it
+should — the solver's divide turns it into `Σ w_i·(Cp_i/M_i)`, the
+mass-fraction average of the mass-specific heat capacities. dyna2rad takes the
+arithmetic mean of molar quantities with mass weights, which agrees only when
+every MW is equal, and additionally gates the mixture on `INITM >= 1.0` so a
+species carrying its documented fraction — 0.79 nitrogen — vanishes from the
+deck entirely.
+
+**No `/SENSOR/TIME`, and `Ittf = 0`.** dyna2rad strips the leading zero-flow
+dead time off each `LCIDM`, re-emits the curve shifted by `−TTF`, arms a
+sensor and writes `Ittf = 3`. On the injector that cancels exactly
+(`airbaga1.F` reads the mass curve at `TSG = (TT − TSTART)/ASTIME` with the
+same sensor's start). On the vent it does not: dyna2rad writes `LCC23`/`LCP23`
+raw while `Ittf = 3` makes the engine evaluate them `TTF` seconds early.
+Doing neither is simpler and strictly more faithful.
+
+**Every leak path is a vent hole; `Nporsurf` is 0.** The vent sub-block is the
+one whose layout is pinned identical across AIRBAG1, COMMU1 and FVMBAG1, while
+the porous block is documented for type 9 only — and there the reader
+*discards* half of what dyna2rad writes into it whenever `Iformps == 0`
+(measured: a porous surface written with `surf_IDps=8005, Iblockage=1,
+fct_IDcps=106, fct_IDaps=108` echoes back `POROUS SURFACE ID = 0` and both
+functions 0). `CP23` is a dimensionless coefficient and `AP23` an area, so
+their product is an effective leak area — exactly what `Avent` means with no
+named surface — and it becomes a second vent hole. `OPT ≠ 0` is honoured:
+LS-DYNA itself zeroes CP23/AP23 then and takes the porosity from
+`*MAT_FABRIC`, which this batch does not convert and says so. dyna2rad never
+reads `OPT` at all.
+
+**A pop-open pressure needs `Tstart` out of reach.** `airbagb1.F:290` ORs the
+time and pressure opening criteria, so `dPdef = PVENT` (or `PPOP`) with
+`Tstart = 0` opens the hole on the first cycle and the threshold is never
+tested. Both become `dPdef` with `Tstart = 1e30`, the same sentinel the starter
+uses itself. dyna2rad never reads `PPOP`, so a vent that should stay shut opens
+at t=0 there.
+
+#### Named vent surfaces, and what "a subset of the bag" means
+
+A vent whose LS-DYNA card names a part — `*AIRBAG_HYBRID`'s negative `A23`,
+`*AIRBAG_PARTICLE`'s `SID3` — gets its **own** `/SURF`, built from the same
+element-backed machinery the bag's external surface uses, and `Avent` then
+changes meaning: with `surf_IDv = 0` it is an absolute **area**, and with a
+surface it is a **scale factor** on that surface's current area.
+
+Three rules are enforced at conversion time rather than left to the starter:
+the surface must be **shell-backed** (`ERROR 330` for a segment-based one,
+`ERROR 532` for an undefined one); it must be a **subset of the bag's own
+external surface**, which Radioss states outright for the communicating case —
+`ERROR 902`, *"COMMUNICATING SURFACE ID=%d IS NOT INCLUDED INTO AIRBAG SURFACE
+ID=%d"* — so elements outside the bag are dropped with a warning; and the
+sharing itself is **required, not double counting**, because `surf_IDex`
+measures the *volume* while `surf_IDv` scales an *area* and nothing is summed
+across the two.
+
+#### `/MONVOL/FVMBAG2` is emitted, and it will not run here
+
+`*AIRBAG_PARTICLE` converts to the finite-volume bag, with `surf_IDex` =
+`SD1 \ SD2`, `surf_IDin` = SD2 (the internal baffles the FV mesher needs kept
+apart, or every one of their edges is a T-connection and `WARNING 1882` gives
+up on the whole bag) and `surf_IDinj` built from the nozzle shells. That card
+is correct and a commercial build meshes it. **An open-source OpenRadioss
+build cannot**: `hm_read_monvol_type11.F:299` hard-wires `KMESH = 14`,
+`init_monvol.F` dispatches `CASE (12, 14)` to `HYPERMESH_TETRA`, and
+`starter/stub/fvmbags_stub.F` is the whole of it —
+
+```fortran
+      SUBROUTINE HYPERMESH_TETRA(…)
+        WRITE(6,*) "FVMBAGS require a mesher"
+        STOP
+      END SUBROUTINE
+```
+
+Measured on a probe deck: the reader echoes the entire `/MONVOL` cleanly and
+the starter then prints that line and terminates before writing a restart file.
+The conversion warns about exactly this, and **`--airbag-particle-uniform`**
+emits a uniform-pressure `/MONVOL/AIRBAG1` instead — same gas species, same
+injector, same vents and porous surfaces, only the pressure field is uniform.
+
+The corpuscular model itself is replaced by a continuum one either way, and
+that is reported once per bag with the CPM-only inputs named by value (`NP`,
+`BLOCK`, `NPDATA`, `FRIC`, `VISFLG`, `TEND`, `IRPD`, `NPAIR`, `NPRLX`,
+`CD_EXT`). What does not carry over is the **early** deployment: a CPM bag
+punches out of its fold with directed particle momentum before any pressure
+field exists, and neither Radioss model has that.
+
+Two dyna2rad defects are not copied. Its nozzle classification declares
+`sh4n`/`sh3n` outside the loop and never resets them, so once one `NIDi`
+resolves as a `/SHELL` every later one is pushed into the quad list whatever it
+is — and its SH3N write to `surf_IDinj` row 0 overwrites the SHELL one, losing
+the quads on a mixed bag. Here each id is classified on its own and a mixed set
+is wrapped in a `/SURF/SURF`. Its `Tswitch` is also inert, because `Iswitch`
+stays 0 (`monvol_fvmbag2.cfg:393`, "0: No switch to uniform pressure"); `TSW`
+is emitted with `Iswitch = 1` so it actually fires.
 
 #### Fabric
 
@@ -2829,6 +2959,8 @@ on a `PRES` bag — so a union would write flat zeros that read as data:
 | `GAS` | `VOL P A GAMA` |
 | `AIRBAG1` | `MASS VOL P A T` (+ `AO UO AC UC` when the bag has a vent) `CP CV GAMA MASS-IN ENTHA-IN ENER-INT WORK` |
 | `LFLUID` | `MASS VOL P A MASS-IN` |
+| `COMMU1` | `MASS VOL P A T` (+ `AO UO` when vented) `AC UC CP CV GAMA MASS-IN ENTHA-IN ENER-INT WORK` |
+| `FVMBAG2` | `MASS VOL P A T` (+ `AO UO` when vented) `CP CV GAMA DTBAG NFV MASS-IN ENTHA-IN ENER-INT UPCRIT` |
 
 Three names that *look* available are left out because they are structurally
 inert on the cards this converter emits. `volpvg.F` does write `FSAV(1) =
@@ -2840,6 +2972,21 @@ and `_emit_monvol_gas` hard-writes `I_equi = 0` and `Mini = 0`. Measured over
 0 while `VOL`/`P`/`A`/`GAMA` carry real data. On `AIRBAG1` the same holds for
 `DTBAG`: `airbagb1.F:655-679` fills `FSAV` 1-12 and 15-18 and never 13, which
 is written only by the FVMBAG routines (`fvbag1.F:1808,1832`).
+
+The two batch-2 rows differ from `AIRBAG1` in exactly the places the solver
+does. **`COMMU1` moves `AC`/`UC` into the base set**, because they are the
+`DO I=1,NAV` communication loop's own sums rather than a vent's — and a COMMU1
+only exists here because an `*AIRBAG_INTERACTION` filled its `Nbag` block, so
+they are never structurally zero. **`FVMBAG2` gets `DTBAG`, `NFV` and
+`UPCRIT` back**, which is the handoff the batch-1 note left open: `fvbag1.F`
+writes `FSAV(13) = DTX` (the bag's own CFL step, the thing `/DT/FVMBAG`
+overrides) at `:1832`, `FSAV(14) = NPOLH` (how many finite volumes survive
+merging) at `:1801`, and `FSAV(19) = PDISP` is the pressure
+standard-deviation/mean ratio the uniform-pressure switch tests. It drops
+`AC`/`UC` (no communication loop) and `WORK`, never assigned on the FV path.
+The variable set is keyed on the **resolved card type**, not on the keyword: a
+hybrid bag becomes a COMMU1 the moment an interaction names it, and a particle
+bag becomes an AIRBAG1 under `--airbag-particle-uniform`.
 
 **The order is the starter's, not the card's** — so k2rad writes it that way.
 `hm_read_thgrou.F:1181-1186` sorts the requested names into the `VARMV` table
