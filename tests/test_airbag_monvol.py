@@ -792,6 +792,131 @@ class TestFabricDispatchAndOffsets(unittest.TestCase):
         self.assertEqual(int(b.raw[0][0:10]), 1003)
 
 
+class TestAirbagIncludeTransformOffsets(unittest.TestCase):
+    """``*INCLUDE_TRANSFORM`` id offsets for the airbag family.
+
+    A missing offset spec is the #119 class of bug: the include moves the
+    REFERENCE and leaves the definition behind (or the other way round), and
+    the airbag then points at the parent deck's part set. Every model is
+    registered from the same dict ``handlers.py`` dispatches on, so a model
+    cannot be readable and un-offsettable.
+    """
+
+    def _blocks(self, deck: str, keyword: str):
+        return [b for b in _parse_str(deck) if b.keyword == keyword]
+
+    def test_every_airbag_keyword_has_a_spec(self):
+        from k2rad.handlers import _AIRBAG_MODELS
+        for kw in _AIRBAG_MODELS:
+            with self.subTest(kw=kw):
+                self.assertIn(kw, _OFFSET_SPECS)
+        for kw in ("AIRBAG_REFERENCE_GEOMETRY",
+                   "AIRBAG_REFERENCE_GEOMETRY_ID_BIRTH",
+                   "AIRBAG_REFERENCE_GEOMETRY_BIRTH_RDT",
+                   "AIRBAG_SHELL_REFERENCE_GEOMETRY",
+                   "AIRBAG_SHELL_REFERENCE_GEOMETRY_ID_RDT"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, _OFFSET_SPECS)
+        # A TRAILING _ID is stripped by parser._split_keyword into
+        # block.options, so it never reaches the dispatcher OR the offset
+        # table — and the two tables must agree about that.
+        self.assertNotIn("AIRBAG_SHELL_REFERENCE_GEOMETRY_ID", _OFFSET_SPECS)
+        self.assertNotIn("AIRBAG_SHELL_REFERENCE_GEOMETRY_ID", HANDLERS)
+
+    def test_sid_rbid_and_the_curve_slots_move(self):
+        deck = "*KEYWORD\n" + _spv(sid=7, lcid=90, lciddr=91, rbid=0)
+        b = self._blocks(deck, "AIRBAG_SIMPLE_PRESSURE_VOLUME")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_SIMPLE_PRESSURE_VOLUME"],
+                      {"s": 100, "f": 500, "r": 7000, "p": 20},
+                      lambda *_a: None)
+        self.assertEqual(int(b.raw[0][0:10]), 7011)      # ABID  -> IDROFF
+        self.assertEqual(int(b.raw[1][0:10]), 107)       # SID   -> IDSOFF
+        self.assertEqual(int(b.raw[2][20:30]), 590)      # LCID  -> IDFOFF
+        self.assertEqual(int(b.raw[2][30:40]), 591)      # LCIDDR
+
+    def test_the_rbid_cards_do_not_desync_the_curve_offset(self):
+        """RBID != 0 pushes card 3 down by up to six lines. A declarative spec
+        would rewrite a sensor's acceleration magnitude as a curve id."""
+        sensor = (_c10(9.81) + _c10(0.0) + _c10(0.0) + _c10(9.81)
+                  + _c10(0.001) + "\n"
+                  + _c10(1.0) + _c10(0.0) + _c10(0.0) + _c10(1.0) + "\n"
+                  + _c10(2.0) + _c10(0.0) + _c10(0.0) + _c10(2.0) + "\n")
+        deck = ("*KEYWORD\n"
+                + _spv(sid=7, lcid=90, rbid=-3, rbid_cards=sensor))
+        b = self._blocks(deck, "AIRBAG_SIMPLE_PRESSURE_VOLUME")[0]
+        before = list(b.raw)
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_SIMPLE_PRESSURE_VOLUME"],
+                      {"s": 100, "f": 500, "r": 0, "p": 20}, lambda *_a: None)
+        self.assertEqual(b.raw[2:5], before[2:5], "the sensor cards are data")
+        self.assertEqual(int(b.raw[1][0:10]), 107)       # SID
+        self.assertEqual(int(b.raw[1][20:30]), -3)       # RBID stays negative
+        self.assertEqual(int(b.raw[5][20:30]), 590)      # LCID on card 3
+
+    def test_linear_fluid_moves_all_six_curve_slots(self):
+        deck = "*KEYWORD\n" + _lfluid(lcint=1, lcoutt=2, lcoutp=3, lcfit=4,
+                                      lcbulk=5, lcid=6, p_limlc=7)
+        b = self._blocks(deck, "AIRBAG_LINEAR_FLUID")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_LINEAR_FLUID"],
+                      {"s": 100, "f": 500, "r": 0}, lambda *_a: None)
+        self.assertEqual([int(b.raw[2][i * 10:(i + 1) * 10] or 0)
+                          for i in range(2, 8)],
+                         [501, 502, 503, 504, 505, 506])
+        self.assertEqual(int(b.raw[3][10:20]), 507)      # P_LIMLC on card 4
+
+    def test_negative_curve_sentinels_keep_their_sign(self):
+        """SPV's CN and the SIMPLE_AIRBAG_MODEL's MU/AREA hold a curve id only
+        when NEGATIVE; a positive value there is physics and must not move."""
+        deck = "*KEYWORD\n" + _spv(cn=-90.0)
+        b = self._blocks(deck, "AIRBAG_SIMPLE_PRESSURE_VOLUME")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_SIMPLE_PRESSURE_VOLUME"],
+                      {"f": 500}, lambda *_a: None)
+        self.assertEqual(int(float(b.raw[2][0:10])), -590)
+        deck = "*KEYWORD\n" + _spv(cn=0.5)
+        b = self._blocks(deck, "AIRBAG_SIMPLE_PRESSURE_VOLUME")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_SIMPLE_PRESSURE_VOLUME"],
+                      {"f": 500}, lambda *_a: None)
+        self.assertAlmostEqual(float(b.raw[2][0:10]), 0.5)
+
+    def test_reference_geometry_node_ids_move_and_the_coordinates_do_not(self):
+        """The rows are ``NID(I10) X(E20) Y(E20) Z(E20)`` — TWENTY-column
+        coordinates, not *NODE's sixteen — so only columns 1-10 may be
+        rewritten. The coordinates are literal geometry a TRANID would have to
+        move, which is why the keyword is in _POINT_BEARING."""
+        from k2rad.assembly import _POINT_BEARING
+        deck = "*KEYWORD\n" + _ref_nodes()
+        b = self._blocks(deck, "AIRBAG_REFERENCE_GEOMETRY")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_REFERENCE_GEOMETRY"],
+                      {"n": 1000}, lambda *_a: None)
+        self.assertEqual([int(ln[0:10]) for ln in b.raw],
+                         [1001, 1002, 1003, 1004])
+        self.assertAlmostEqual(float(b.raw[2][10:30]), 5.0)
+        self.assertIn("AIRBAG_REFERENCE_GEOMETRY", _POINT_BEARING)
+        self.assertIn("AIRBAG_REFERENCE_GEOMETRY_ID_BIRTH", _POINT_BEARING)
+
+    def test_reference_geometry_id_and_birth_cards_do_not_shift_the_rows(self):
+        deck = "*KEYWORD\n" + _ref_nodes(sx=2.0, sy=2.0, sz=1.0, nid0=1,
+                                         birth=0.002)
+        b = self._blocks(deck, "AIRBAG_REFERENCE_GEOMETRY_ID_BIRTH")[0]
+        _offset_block(b,
+                      _OFFSET_SPECS["AIRBAG_REFERENCE_GEOMETRY_ID_BIRTH"],
+                      {"n": 1000}, lambda *_a: None)
+        self.assertEqual(int(b.raw[0][40:50]), 1001)     # NIDO
+        self.assertAlmostEqual(float(b.raw[1][0:10]), 0.002)  # BIRTH untouched
+        self.assertEqual([int(ln[0:10]) for ln in b.raw[2:]],
+                         [1001, 1002, 1003, 1004])
+
+    def test_shell_reference_geometry_splits_element_part_and_nodes(self):
+        deck = ("*KEYWORD\n*AIRBAG_SHELL_REFERENCE_GEOMETRY\n"
+                + _c10(1) + _c10(2) + _c10(11) + _c10(12) + _c10(13)
+                + _c10(14) + "\n")
+        b = self._blocks(deck, "AIRBAG_SHELL_REFERENCE_GEOMETRY")[0]
+        _offset_block(b, _OFFSET_SPECS["AIRBAG_SHELL_REFERENCE_GEOMETRY"],
+                      {"e": 10000, "p": 200, "n": 1000}, lambda *_a: None)
+        self.assertEqual([int(b.raw[0][i * 10:(i + 1) * 10])
+                          for i in range(6)],
+                         [10001, 202, 1011, 1012, 1013, 1014])
+
+
 def _parse_str(deck: str):
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "d.k")
