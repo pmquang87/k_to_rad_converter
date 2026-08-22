@@ -2464,6 +2464,7 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
             "surf_IDex, with no per-part exclusion, so EXCP is DROPPED.")
     # ── the shared partition surface ────────────────────────────────────
     surf_a = surf_b = 0
+    made_a = made_b = None
     if it.pid:
         pid = abs(it.pid)
         if it.pid < 0:
@@ -2488,6 +2489,7 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
             # "COMMUNICATING SURFACE ID IS NOT INCLUDED INTO AIRBAG SURFACE ID".
             a.commu_surfs.append(va)
             b.commu_surfs.append(vb)
+            made_a, made_b = va, vb
         else:
             state.warn(
                 f"{ref}: PART {pid} is not a shell part of BOTH bags' "
@@ -2553,11 +2555,21 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
     else:
         rows = ((a, row_a), (b, row_b))
         note = "TWO-WAY"
+    carrying = {id(bag) for bag, _row in rows}
     for bag, row in rows:
         bag.commu_rows.append(row)
-    for bag in (a, b):
-        if bag.commu_rows:
-            bag.radioss_type = "COMMU1"
+        bag.radioss_type = "COMMU1"
+    for bag, vent in ((a, made_a), (b, made_b)):
+        if id(bag) not in carrying and vent is not None:
+            # A one-way IFLOW gives the RECEIVING bag no row of its own, so it
+            # stays /MONVOL/AIRBAG1 — which is right twice over: its AC/UC
+            # channels would read zero anyway (nothing to sum over), and a
+            # COMMU1 with Nbag = 0 is what monvol_commu1.cfg:255-259 refuses
+            # ("CHECK(COMMON) { NBAG > 0; }"), the very thing this batch does
+            # not copy from dyna2rad. The partition /SURF it just built would
+            # then be referenced by nothing, so it is dropped rather than
+            # emitted as an orphan.
+            bag.commu_surfs = [v for v in bag.commu_surfs if v is not vent]
     state.warn(
         f"{ref}: converted — airbags {it.ab1} and {it.ab2} are promoted from "
         f"/MONVOL/AIRBAG1 to /MONVOL/COMMU1 with a {note} communicating "
@@ -2566,7 +2578,12 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
         "downhill — airbagb1.F guards the flow with IF(IDEF==1 .AND. "
         "P>PVOIS), so a two-way IFLOW needs both rows and a one-way IFLOW "
         "needs one. dyna2rad does not convert *AIRBAG_INTERACTION at all, so "
-        "there the two bags stay sealed.")
+        "there the two bags stay sealed."
+        + ("" if it.iflow == 0 else
+           " With a one-way flow only the SENDING bag becomes a COMMU1; the "
+           "receiving one stays /MONVOL/AIRBAG1, which is the same gas model "
+           "(monvol0.F) with no communicating block of its own — its AC/UC "
+           "time-history channels would read zero either way."))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
