@@ -2762,6 +2762,14 @@ for _kw in (
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_OFFSET",
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_BEAM_OFFSET",
     "CONTACT_TIED_SHELL_EDGE_TO_SURFACE_CONSTRAINED_OFFSET",
+    # *CONTACT_AIRBAG_SINGLE_SURFACE writes SSID in the same cols 1-10 and
+    # SBOX in the same cols 41-50 — its card is the two-sided grid with the
+    # B-side cells left blank, which is exactly why it can share the handler
+    # (see handle_contact_airbag_single_surface). _off_contact only touches
+    # the id cells, and a blank one is left alone, so the interleaved blanks
+    # are harmless. The _MPP spelling is excluded for the reason the spotweld
+    # and eroding ones are: the MPP card pushes card 1 down a line.
+    "CONTACT_AIRBAG_SINGLE_SURFACE",
 ):
     _OFFSET_SPECS[_kw] = _off_contact
 

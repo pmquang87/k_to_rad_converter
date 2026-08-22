@@ -144,7 +144,9 @@ def _make_ams(state: ConversionState) -> List[str]:
 #: /TH types whose id card is a ten-per-line cell list rather than one id per
 #: line. A leading 0 in a /TH/RBODY list means "ALL rigid bodies"
 #: (hm_read_thgrki_rbody.F:123-125), so a 0 is never written into one.
-_TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART"})
+#: MONV joins them from ``radioss2021/OUTPUTBLOCK/th_monv.cfg``, whose id card
+#: is the same ``FREE_CELL_LIST(idsmax,"%10d",ids,100)`` declaration.
+_TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART", "MONV"})
 
 #: /TH types whose id card HAS a skew_ID column in columns 11-20.
 _TH_SKEW_COLUMN_TYPES = frozenset({"NODE", "SHEL", "SH3N"})
@@ -2113,6 +2115,126 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
            "motion in this deck drives a rotational dof, and the rotational "
            "channels would read zero."))
     return lines
+
+
+# ── *DATABASE_ABSTAT -> /TH/MONV ─────────────────────────────────────────────
+
+#: /MONVOL model -> the /TH/MONV variables that model actually FILLS.
+#:
+#: The whole 19-name vocabulary of ``radioss2021/OUTPUTBLOCK/th_monv.cfg`` is
+#: legal on every monitored volume — a probe requested all sixteen of the
+#: non-vent names on a PRES bag and the starter took them without complaint —
+#: but most of them come back identically zero, because the ENGINE only fills
+#: the ``FSAV`` slots its own pressure law computes. Requesting the rest would
+#: write flat channels that read as data, which is the trap the
+#: *DATABASE_TPRINT decision already refused to walk into. So the list is per
+#: MODEL, and every entry below is backed by an FSAV assignment:
+#:
+#:   PRES     ``volpfv.F`` / ``volpres.F`` fill FSAV 2/3/4 only, and set
+#:            FSAV(1) = 0 — a PRES bag has no gas, so MASS is a literal zero.
+#:   GAS      ``volpvg.F``: 1=AMTOT 2=VOL 3=PRES 4=AREA 5=TEMPERATURE 12=GAMA.
+#:   AIRBAG1  ``airbaga1.F`` additionally computes the mixture CP/CV, the
+#:            injected mass and enthalpy, the internal energy, the work on the
+#:            structure (RVOLU(32)) and its own time step (ITYPTS=9).
+#:   LFLUID   ``volp_lfluid.F``: 1=GMASS 2=VOL 3=PRES 4=AREA, plus RVOLU(54)
+#:            = the cumulative mass in, which is the MASS-IN channel.
+#:
+#: The vent channels AO/UO/AC/UC are added to an AIRBAG1 group only when that
+#: bag really has a vent hole — with Nvent=0 the outflow area is never
+#: assigned and all four are flat zero.
+_TH_MONV_VARS = {
+    "PRES":    ("VOL", "P", "A"),
+    "GAS":     ("MASS", "VOL", "P", "A", "T", "GAMA"),
+    "AIRBAG1": ("MASS", "VOL", "P", "A", "T", "CP", "CV", "GAMA",
+                "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK", "DTBAG"),
+    "LFLUID":  ("MASS", "VOL", "P", "A", "MASS-IN"),
+}
+
+#: The four vent channels, appended to an AIRBAG1 group that has a vent hole.
+_TH_MONV_VENT_VARS = ("AO", "UO", "AC", "UC")
+
+
+def _make_starter_th_monv(state: ConversionState) -> List[str]:
+    """*DATABASE_ABSTAT -> /TH/MONV over every emitted /MONVOL.
+
+    "Airbag statistics. See *AIRBAG_OPTION" (Vol I R16 p.16-7), whose
+    components are volume, internal energy and pressure (p.16-13). A
+    presence-plus-DT trigger with no id list, answered by collecting every
+    monitored volume the conversion actually wrote — the same shape
+    /TH/RWALL, /TH/SECTIO, /TH/INTER and /TH/RBODY use.
+
+    ``state.monvol_ids`` is filled AT THE LINE that writes each /MONVOL card
+    (writer/monvol.py::_make_monvols), never derived from ``state.airbags``:
+    a bag whose surface resolves to no shell element is dropped, and the #106
+    rule is that a /TH group naming an entity the deck does not define is a
+    starter ERROR that refuses the WHOLE run — strictly worse than losing the
+    channel.
+
+    One group PER MODEL, not one group for all of them, because the variable
+    set is per model (see ``_TH_MONV_VARS``): a PRES bag's MASS, T and GAMA
+    channels are structural zeros, and a group that mixes the four models
+    would have to request the union and write those zeros for every PRES bag
+    in the deck.
+
+    Per-VENT-HOLE channels (``AOUT1``..``HOUT10``) are NOT requestable here —
+    probe: ``ERROR ID : 260 ... TH VARIABLE AOUT1 IS NOT AVAILABLE``. They live
+    in a second, AUTO-GENERATED group the starter creates after every /TH/MONV
+    (``hm_read_thgrou.F:2745-2762``, titled ``"VENT " // <title>``), so the
+    converter neither needs nor may emit one.
+    """
+    if not state.db_abstat_dt:
+        # DT == 0 prints nothing (Vol I R16 p.16-7) and a blank DT defers to
+        # LCDT, which /TFILE cannot express — the same two cases
+        # _make_starter_th_rbody / _bndout gate on.
+        if state.db_abstat_seen:
+            _warn_db_card_without_dt(
+                state, "*DATABASE_ABSTAT",
+                "/TH/MONV over every converted monitored volume")
+        return []
+    if not state.monvol_ids:
+        state.warn(
+            "*DATABASE_ABSTAT requested but this deck has no /MONVOL — no "
+            "*AIRBAG_* card converted to a monitored volume. NO /TH/MONV is "
+            "emitted: a group with no entity is not refused by the starter, "
+            "it is accepted and written to the T01 holding zero entities, so "
+            "it would only look like data. Check the warnings above for an "
+            "airbag that was dropped.")
+        return []
+    by_model: Dict[str, List[int]] = {}
+    vented: set = set()
+    for ab in state.airbags:
+        if ab.dropped or not ab.monvol_id:
+            continue
+        rad = {"SIMPLE_PRESSURE_VOLUME": "PRES", "LOAD_CURVE": "PRES",
+               "ADIABATIC_GAS_MODEL": "GAS", "LINEAR_FLUID": "LFLUID",
+               "SIMPLE_AIRBAG_MODEL": "AIRBAG1"}[ab.model]
+        by_model.setdefault(rad, []).append(ab.monvol_id)
+        if ab.avent > 0.0 or ab.vent_fct_p:
+            vented.add(ab.monvol_id)
+    emitted = {mid for mid, _t in state.monvol_ids}
+    lines = [
+        "#-  TIME HISTORY (*DATABASE_ABSTAT -> monitored-volume statistics, "
+        f"dt={state.db_abstat_dt:g}):", HDR,
+    ]
+    wrote = False
+    for rad in ("PRES", "GAS", "AIRBAG1", "LFLUID"):
+        ids = sorted(i for i in by_model.get(rad, []) if i in emitted)
+        if not ids:
+            continue
+        th_vars = list(_TH_MONV_VARS[rad])
+        if rad == "AIRBAG1" and all(i in vented for i in ids):
+            th_vars += list(_TH_MONV_VENT_VARS)
+        th_id = state.next_id()
+        lines += [
+            f"/TH/MONV/{th_id}",
+            f"TH_MONV_ABSTAT_{rad}",
+            _th_var_header(th_vars),
+        ]
+        lines += _th_var_lines(th_vars)
+        lines += _th_id_lines("MONV", ids)
+        lines.append(HDR)
+        wrote = True
+    return lines if wrote else []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

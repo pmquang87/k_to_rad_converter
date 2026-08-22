@@ -28,6 +28,7 @@ from .state import (
     MatOrthotropicElastic, MatEnhancedCompositeDamage,
     MatTransverselyAnisotropic, MatLaminatedGlass,
     MatFabric, FABRIC_CURVE_FORMS,
+    Airbag, AirbagRefGeometry, AirbagShellRefGeometry,
     CompositePly, PartComposite,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
@@ -5609,6 +5610,84 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     )
 
 
+def handle_contact_airbag_single_surface(block: Block,
+                                         state: ConversionState) -> None:
+    """``*CONTACT_AIRBAG_SINGLE_SURFACE`` (contact type a13) — a near-alias of
+    the single-surface path, with the dyna2rad ``SOFT = -19`` sentinel routing
+    to ``/INTER/TYPE19``.
+
+    **The card grid is column-compatible with the general contact card**, which
+    is what makes this an alias rather than a new parser.
+    ``contact_airbag_single_surface.cfg:556-563`` writes card 1 as
+    ``%10d          %10d          %10d          %10d%10d`` — SSID, then TEN
+    BLANK columns where SURFB would be, then SSTYP, blanks, SBOX, blanks,
+    SPR, IFLAG — so every field lands on the SAME 10-char grid index the
+    two-sided card uses: SSID -> 0, SSTYP -> 2, SBOX -> 4, SPR -> 6. Card 3 is
+    the same shape: SFS -> 0, SST -> 2, MST -> 3 (blank, so 0), SFST -> 4.
+
+    The ONE genuinely new field is ``IFLAG`` in card-1 slot 7, where MPR sits
+    on a two-sided contact. dyna2rad reads it and then branches on SOFT
+    instead — its two ``if (IFLAG == …)`` lines are commented out
+    (``convertcontacts.cxx:167-181``) — so the live routing is the same
+    hand-entered ``SOFT = -19`` sentinel *CONTACT_AUTOMATIC_GENERAL and
+    *CONTACT_ERODING_SINGLE_SURFACE already use here (#114). IFLAG is reported
+    rather than acted on, because acting on a field dyna2rad demonstrably does
+    not act on would silently split the two converters' output.
+
+    Default (any other SOFT, or no card A) -> the validated single-surface
+    routing, byte-for-byte unchanged: /INTER/TYPE25 explicit, /INTER/TYPE7
+    implicit.
+    """
+    raw = block.raw
+    _inter_id, _title, offset = _parse_contact_header(block)
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    iflag = to_int(f1[7]) if len(f1) > 7 else 0
+    if iflag:
+        state.warn(
+            f"*{block.keyword}: IFLAG={iflag} is read and DROPPED. dyna2rad "
+            "reads it too and then ignores it — the two IFLAG branches in "
+            "convertcontacts.cxx:170/176 are commented out and the live test "
+            "is on SOFT — so acting on it here would make the two converters "
+            "disagree with no way to tell which is right. Use the SOFT = -19 "
+            "sentinel on optional Card A to request /INTER/TYPE19 (combined "
+            "surface + edge contact); anything else gives the ordinary "
+            "single-surface interface.")
+    soft = _read_contact_soft(raw, offset)
+    if soft != -19:
+        handle_contact_automatic_single_surface(block, state)
+        return
+
+    inter_id, title, offset = _parse_contact_header(block)
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    ssid = to_int(f1[0]) if f1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    _warn_contact_box(state, block.keyword, inter_id, f1)
+    # Card2: fs fd dc vc vdc penchk bt dt
+    f3 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs = to_float(f3[0]) if f3 else 0.0
+    fd = to_float(f3[1]) if len(f3) > 1 else 0.0
+    vdc = to_float(f3[4]) if len(f3) > 4 else 0.0
+    bt = to_float(f3[6]) if len(f3) > 6 else 0.0
+    dt = to_float(f3[7]) if len(f3) > 7 else 1e28
+    # Card3: SFS <blank> SST <blank> SFST <blank> FSF VSF
+    f4 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sfs = to_float(f4[0]) if f4 else 0.0
+    sst = to_float(f4[2]) if len(f4) > 2 else 0.0
+    sfst = to_float(f4[4]) if len(f4) > 4 else 0.0
+    ignore = _read_contact_ignore(raw, offset)
+    state.contacts_general.append(
+        # SINGLE surface: the card genuinely has no SURFB, so the main side is
+        # the secondary side mirrored. dyna2rad omits that mirror on this
+        # keyword alone (the AUTOMATIC_GENERAL branch has it,
+        # convertcontacts.cxx:139-163) and leaves surf_IDm at 0, which is an
+        # interface against nothing.
+        ContactAutoGeneral(inter_id, title, ssid, sstyp, ssid, sstyp, soft,
+                           fs, fd, bt, dt, ignore, vdc=vdc, sst=sst, mst=0.0,
+                           sfs=sfs, sfst=sfst, airbag=True,
+                           keyword=block.keyword))
+
+
 def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     """*CONTACT_..._TIEBREAK (SURFACE_TO_SURFACE / ONE_WAY_...) → /INTER/TYPE7.
 
@@ -6734,6 +6813,17 @@ def _handle_db_dt(block: Block, state: "ConversionState | None" = None,
 
 
 def handle_database_abstat(block: Block, state: ConversionState) -> None:
+    """*DATABASE_ABSTAT -> /TH/MONV over every converted /MONVOL.
+
+    "Airbag statistics. See *AIRBAG_OPTION" (Vol I R16 p.16-7); its
+    components are volume, internal energy and pressure (p.16-13). Until
+    the airbag batch this card contributed nothing but a parsed DT that
+    was then deliberately left OUT of the /TFILE minimum, because it had
+    no /TH consumer at all. It has one now, so both halves are live —
+    see writer/output.py::_make_starter_th_monv and the /TFILE chain in
+    writer/assembly.py, which gates the dt on state.monvol_ids.
+    """
+    state.db_abstat_seen = True
     state.db_abstat_dt = _handle_db_dt(block, state, "*DATABASE_ABSTAT")
 
 
@@ -9500,6 +9590,311 @@ def handle_mat_add_damage_diem(block: Block, state: ConversionState) -> None:
     state.fail_diem[mid] = diem
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# *AIRBAG_* → /MONVOL  (monitored volumes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: LS-DYNA keyword base → the ``Airbag.model`` tag the writer routes on. ONE
+#: source for the dispatch keys, the model tag and the per-model card readers
+#: (#116) — ``parser._split_keyword`` strips a trailing ``_ID``/``_TITLE``, so
+#: those two spellings need no key of their own, but nothing else falls back:
+#: ``dispatch()`` is an exact dict lookup with no ``AIRBAG_`` prefix rule, and
+#: an unregistered spelling lands in ``skipped_keywords`` with no warning at
+#: all (the #117 ``*LOAD_BODY_R*`` defect).
+_AIRBAG_MODELS = {
+    "AIRBAG_SIMPLE_PRESSURE_VOLUME": "SIMPLE_PRESSURE_VOLUME",
+    "AIRBAG_SIMPLE_AIRBAG_MODEL":    "SIMPLE_AIRBAG_MODEL",
+    "AIRBAG_ADIABATIC_GAS_MODEL":    "ADIABATIC_GAS_MODEL",
+    "AIRBAG_LOAD_CURVE":             "LOAD_CURVE",
+    "AIRBAG_LINEAR_FLUID":           "LINEAR_FLUID",
+}
+
+#: ``*AIRBAG_<OPTION>`` models this batch does NOT convert, with what each one
+#: would need. Registered anyway — a keyword with a handler that warns by name
+#: is strictly better than one that disappears into ``skipped_keywords``,
+#: because an unconverted airbag is not a missing output card: the bag never
+#: inflates and the deck runs to termination looking healthy.
+_AIRBAG_UNSUPPORTED = {
+    "AIRBAG_WANG_NEFSKE":
+        "the Wang-Nefske inflator with its full orifice/temperature model — "
+        "the closest Radioss target is /MONVOL/AIRBAG1 with a /PROP/INJECT1 "
+        "per inflator gas and one vent-hole block per orifice",
+    "AIRBAG_HYBRID":
+        "the multi-species hybrid inflator — Radioss models it as "
+        "/MONVOL/AIRBAG1 with N_gases > 1 on the injector plus a /MAT/GAS per "
+        "species",
+    "AIRBAG_PARTICLE":
+        "the corpuscular (CPM) inflator — Radioss's counterpart is "
+        "/MONVOL/FVMBAG1 with a finite-volume mesh, a different solver "
+        "entirely",
+    "AIRBAG_ALE":
+        "the ALE-coupled bag — needs an ALE mesh and /INTER/TYPE18 coupling, "
+        "not a monitored volume",
+    "AIRBAG_ADVANCED_ALE":
+        "the advanced ALE bag — same as *AIRBAG_ALE",
+    "AIRBAG_FLUID_AND_GAS":
+        "the mixed fluid/gas bag — Radioss has no single-card equivalent",
+    "AIRBAG_INTERACTION":
+        "gas exchange BETWEEN two bags — Radioss states it as "
+        "/MONVOL/COMMU1 communicating volumes, which needs both bags "
+        "converted as COMMU1 rather than as independent monitored volumes",
+}
+
+
+def _airbag_prelude(raw: List[str], offset: int):
+    """``(card-1 fields, index of card 3)`` for any ``*AIRBAG_<MODEL>``.
+
+    Card 1 is shared by every model, and the cards BETWEEN it and card 3 are
+    conditional on RBID (Vol I R16 p.3-4):
+
+      * ``RBID > 0`` — a user activation subroutine: card 2a is ``N`` (the
+        number of constants, <= 25) and card 2a.1 carries C1..C5, five per
+        card, ``ceil(N/5)`` cards of them.
+      * ``RBID < 0`` — the built-in sensor: THREE cards (AX/AY/AZ/AMAG/TDUR,
+        DVX/DVY/DVZ/DVMAG, UX/UY/UZ/UMAG).
+      * ``RBID == 0`` — nothing; card 3 follows card 1 directly.
+
+    A fixed ``offset + 1`` would therefore read the sensor's acceleration
+    magnitudes as the model's thermodynamic constants on any RBID != 0 deck —
+    the #119 offset-walk rule, on a keyword where the shift is up to six cards.
+    """
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    rbid = to_int(f1[2]) if len(f1) > 2 else 0
+    i = offset + 1
+    if rbid > 0:
+        n = to_int(_card(raw, i, fixed=True, n=1, w=10)[0] or 0) if i < len(raw) else 0
+        i += 1 + max(0, (n + 4) // 5)
+    elif rbid < 0:
+        i += 3
+    return f1, i
+
+
+def handle_airbag(block: Block, state: ConversionState) -> None:
+    """``*AIRBAG_<MODEL>[_ID][_TITLE]`` → one ``/MONVOL``.
+
+    Five models, one handler, because card 1 (SID SIDTYP RBID VSCA PSCA VINI
+    MWD SPSF) and the RBID card walk above it are identical on all of them and
+    the per-model card 3 is disjoint. The Radioss target per model:
+
+      SIMPLE_PRESSURE_VOLUME  → /MONVOL/PRES
+      SIMPLE_AIRBAG_MODEL     → /MONVOL/AIRBAG1 + /MAT/GAS + /PROP/INJECT1
+      ADIABATIC_GAS_MODEL     → /MONVOL/GAS
+      LOAD_CURVE              → /MONVOL/PRES (pressure vs TIME)
+      LINEAR_FLUID            → /MONVOL/LFLUID
+
+    ``SIDTYP`` is inverted relative to intuition: **0 = *SET_SEGMENT**,
+    non-zero = *SET_PART. Both are resolved to the OWNING SHELL ELEMENTS by
+    ``writer/monvol.py`` — a /SURF/SEG external surface is starter ERROR 18 and
+    the run aborts (``check_surf.F:55-62``).
+    """
+    raw = block.raw
+    offset = _title_offset(block)
+    model = _AIRBAG_MODELS[block.keyword]
+    title = _read_title(block, default=f"AIRBAG_{model}")
+    airbag_id = 0
+    if _has_id(block) and raw:
+        toks = parse_free(raw[0])
+        airbag_id = to_int(toks[0]) if toks else 0
+
+    f1, i3 = _airbag_prelude(raw, offset)
+
+    def flt(f, k, dflt=0.0):
+        return _ffield(f, k, dflt)
+
+    def integer(f, k):
+        return to_int(f[k]) if len(f) > k else 0
+
+    ab = Airbag(
+        airbag_id=airbag_id, model=model, title=title, keyword=block.keyword,
+        sid=integer(f1, 0), sidtyp=integer(f1, 1), rbid=integer(f1, 2),
+        # VSCA/PSCA default to 1.0 on a BLANK cell; an explicit 0.0 is also
+        # LS-DYNA's 1.0 ("Volume scale factor (default = 1.0)" — a zero volume
+        # scale is not a thing), and real decks write both (airfilled.sphere.k
+        # states 0.0, airbag.deploy.k states 1.0).
+        vsca=flt(f1, 3, 1.0) or 1.0, psca=flt(f1, 4, 1.0) or 1.0,
+        vini=flt(f1, 5), mwd=flt(f1, 6), spsf=flt(f1, 7),
+    )
+
+    f3 = _card(raw, i3, fixed=True, n=8, w=10)
+    if model == "SIMPLE_PRESSURE_VOLUME":
+        ab.cn = flt(f3, 0)
+        ab.beta = flt(f3, 1)
+        ab.lcid = integer(f3, 2)
+        ab.lciddr = integer(f3, 3)
+    elif model == "SIMPLE_AIRBAG_MODEL":
+        ab.cv = flt(f3, 0)
+        ab.cp = flt(f3, 1)
+        ab.t = flt(f3, 2)
+        ab.lcid = integer(f3, 3)
+        ab.mu = flt(f3, 4)
+        ab.area = flt(f3, 5)
+        ab.pe = flt(f3, 6)
+        ab.ro = flt(f3, 7)
+        # Card 4 has TWO layouts, chosen by CV: 4a (CV == 0) is
+        # "LOU T_EXT A B MW GASC" and 4b (CV != 0) is LOU alone. Both are ONE
+        # card, so nothing after it shifts — but reading 4a's columns under
+        # CV != 0 would invent an ambient temperature and a molar Cp the deck
+        # never stated.
+        f4 = _card(raw, i3 + 1, fixed=True, n=8, w=10)
+        ab.lou = integer(f4, 0)
+        if ab.cv == 0.0:
+            ab.t_ext = flt(f4, 1)
+            ab.hc_a = flt(f4, 2)
+            ab.hc_b = flt(f4, 3)
+            ab.mw = flt(f4, 4)
+            ab.gasc = flt(f4, 5)
+        elif any(flt(f4, k) != 0.0 for k in range(1, 6)):
+            state.warn(
+                f"*{block.keyword}: CV={ab.cv:g} is non-zero, so LS-DYNA reads "
+                "card 4 in its 4b layout — LOU alone — but the card carries "
+                "non-zero values in the T_EXT/A/B/MW/GASC columns of the 4a "
+                "layout. Those columns are IGNORED (LS-DYNA ignores them too). "
+                "The gas is built from CV and CP directly; set CV=0 if the "
+                "molar A/B/MW form was meant.")
+    elif model == "ADIABATIC_GAS_MODEL":
+        ab.psf = flt(f3, 0)
+        ab.lcid = integer(f3, 1)
+        ab.gamma = flt(f3, 2)
+        ab.p0 = flt(f3, 3)
+        ab.pe = flt(f3, 4)
+        ab.ro = flt(f3, 5)
+    elif model == "LOAD_CURVE":
+        ab.stime = flt(f3, 0)
+        ab.lcid = integer(f3, 1)
+        ab.ro = flt(f3, 2)
+        ab.pe = flt(f3, 3)
+        ab.p0 = flt(f3, 4)
+        ab.t = flt(f3, 5)
+        ab.t0 = flt(f3, 6)
+    else:                                    # LINEAR_FLUID
+        ab.bulk = flt(f3, 0)
+        ab.ro = flt(f3, 1)
+        ab.lcint = integer(f3, 2)
+        ab.lcoutt = integer(f3, 3)
+        ab.lcoutp = integer(f3, 4)
+        ab.lcfit = integer(f3, 5)
+        ab.lcbulk = integer(f3, 6)
+        ab.lcid = integer(f3, 7)
+        f4 = _card(raw, i3 + 1, fixed=True, n=8, w=10)
+        ab.p_limit = flt(f4, 0)
+        ab.p_limlc = integer(f4, 1)
+        ab.nonull = integer(f4, 2)
+
+    state.airbags.append(ab)
+
+
+def handle_airbag_unsupported(block: Block, state: ConversionState) -> None:
+    """An ``*AIRBAG_<MODEL>`` this batch does not convert — named, not skipped.
+
+    An airbag that vanishes into ``skipped_keywords`` is not a missing output
+    card: the bag never inflates, and the deck runs to NORMAL TERMINATION with
+    the fabric flapping loose. Every unmodelled model therefore gets a handler
+    that says which one it is and what the Radioss counterpart would be.
+    """
+    base = block.keyword
+    reason = _AIRBAG_UNSUPPORTED.get(base)
+    if reason is None:
+        for kw, why in _AIRBAG_UNSUPPORTED.items():
+            if base.startswith(kw):
+                reason = why
+                break
+    if reason is None:
+        reason = "no Radioss counterpart is emitted by this batch"
+    state.warn(
+        f"*{base} is NOT converted: {reason}. NOTHING is emitted for it — the "
+        "monitored volume is absent, so the bag never inflates and the run "
+        "terminates normally with an empty bag. The mesh, materials and "
+        "contacts of the deck are unaffected.")
+    state.note_recognized_not_emitted(
+        base, "airbag model outside batch 1 (PRES / AIRBAG1 / GAS / LFLUID) — "
+              "no /MONVOL is emitted and the bag does not inflate")
+
+
+def handle_airbag_reference_geometry(block: Block,
+                                     state: ConversionState) -> None:
+    """``*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]`` → /XREF per part.
+
+    Card order is FIXED even though the option order in the keyword is not
+    (Vol I R16): the ``_ID`` card (ID SX SY SZ NIDO IOUT) comes first, then the
+    ``_BIRTH`` card (BIRTH), then the node rows.
+
+    The node rows are **NID(I10) X(E20) Y(E20) Z(E20)** — twenty-column
+    coordinates, not the sixteen of *NODE. Slicing them at 16 would read each
+    coordinate four columns short and silently move every reference node.
+    """
+    kw = block.keyword
+    ref = AirbagRefGeometry(keyword=kw,
+                            has_id="_ID" in kw or _has_id(block),
+                            has_rdt="_RDT" in kw)
+    raw = block.raw
+    i = 0
+    if ref.has_id:
+        f = _card(raw, i, fixed=True, n=6, w=10)
+        i += 1
+        ref.sx = _ffield(f, 1, 1.0) or 1.0
+        ref.sy = _ffield(f, 2, 1.0) or 1.0
+        ref.sz = _ffield(f, 3, 1.0) or 1.0
+        ref.nid0 = to_int(f[4]) if len(f) > 4 else 0
+    if "_BIRTH" in kw:
+        f = _card(raw, i, fixed=True, n=1, w=10)
+        i += 1
+        ref.birth = to_float(f[0]) if f else 0.0
+    for line in raw[i:]:
+        if not line.strip():
+            continue
+        nid = to_int(line[0:10])
+        if nid <= 0:
+            continue
+        ref.nodes[nid] = (to_float(line[10:30]), to_float(line[30:50]),
+                          to_float(line[50:70]))
+    if ref.nodes:
+        state.airbag_ref_geoms.append(ref)
+    else:
+        state.warn(
+            f"*{kw}: no node rows parsed — no /XREF is emitted for this block, "
+            "so the airbag starts stress-free at its MODELLED coordinates "
+            "instead of at the reference ones.")
+
+
+def handle_airbag_shell_reference_geometry(block: Block,
+                                           state: ConversionState) -> None:
+    """``*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]`` → /EREF/SHELL + /SH3N.
+
+    Element rows are ``EID PID N1 N2 N3 N4``, all I10. PID is read and then
+    DISCARDED — "the part ID is not used in this section" (Vol I R16) — because
+    Radioss takes the part from the ``/EREF`` header, and the owning part is
+    the one the ELEMENT really belongs to.
+    """
+    kw = block.keyword
+    ref = AirbagShellRefGeometry(keyword=kw,
+                                 has_id="_ID" in kw or _has_id(block),
+                                 has_rdt="_RDT" in kw)
+    raw = block.raw
+    i = 0
+    if ref.has_id:
+        f = _card(raw, i, fixed=True, n=6, w=10)
+        i += 1
+        ref.sx = _ffield(f, 1, 1.0) or 1.0
+        ref.sy = _ffield(f, 2, 1.0) or 1.0
+        ref.sz = _ffield(f, 3, 1.0) or 1.0
+        ref.nid0 = to_int(f[4]) if len(f) > 4 else 0
+    for idx in range(i, len(raw)):
+        if not raw[idx].strip():
+            continue
+        f = _card(raw, idx, fixed=True, n=6, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            continue
+        nodes = [to_int(f[k]) for k in range(2, 6) if len(f) > k]
+        ref.elems.append((eid, [n for n in nodes if n > 0]))
+    if ref.elems:
+        state.airbag_shell_ref_geoms.append(ref)
+    else:
+        state.warn(
+            f"*{kw}: no element rows parsed — no /EREF is emitted for this "
+            "block.")
+
+
 def handle_initial_foam_reference_geometry(block: Block,
                                            state: ConversionState) -> None:
     """*INITIAL_FOAM_REFERENCE_GEOMETRY[_RAMP] → /XREF per intersecting part.
@@ -12097,6 +12492,11 @@ HANDLERS = {
     "CONTACT_TIEBREAK_SURFACE_TO_SURFACE":    handle_contact_tiebreak,
     "CONTACT_TIEBREAK_NODES_TO_SURFACE":      handle_contact_tiebreak,
     "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_general,
+    # *CONTACT_AIRBAG_SINGLE_SURFACE (type a13) — a near-alias of the
+    # single-surface path (its card grid is column-compatible; see the
+    # handler), with the SOFT = -19 sentinel routing to /INTER/TYPE19. The
+    # _MPP spelling is generated below with the other contact grammars.
+    "CONTACT_AIRBAG_SINGLE_SURFACE":          handle_contact_airbag_single_surface,
     "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE": handle_contact_automatic_surface_to_surface,
     "CONTACT_FORCE_TRANSDUCER_PENALTY":        handle_contact_force_transducer,
     "CONTACT_FORCE_TRANSDUCER":                handle_contact_force_transducer,
@@ -12393,7 +12793,50 @@ for _kw in _TYPE25_CONTACT_KEYWORDS:
     HANDLERS[_kw] = handle_contact_type25
 del _kw
 
+HANDLERS["CONTACT_AIRBAG_SINGLE_SURFACE_MPP"] = (
+    handle_contact_airbag_single_surface)
+
 HANDLERS["DEFINE_FRICTION"] = handle_define_friction
+
+# ── *AIRBAG_* → /MONVOL ──────────────────────────────────────────────────────
+#
+# Generated from the SAME dicts the handler routes on (#116), so a model
+# cannot be readable by the writer and unreachable by the dispatcher. _ID and
+# _TITLE are stripped by parser._split_keyword and need no key; the WANG_NEFSKE
+# family's _POP / _JETTING suffixes DO need one each, because dispatch() is an
+# exact lookup — an unregistered spelling lands in skipped_keywords with no
+# warning, and a skipped airbag is a bag that never inflates while the run
+# terminates normally.
+for _kw in _AIRBAG_MODELS:
+    HANDLERS[_kw] = handle_airbag
+for _kw in _AIRBAG_UNSUPPORTED:
+    HANDLERS[_kw] = handle_airbag_unsupported
+for _o1 in ("", "_JETTING", "_MULTIPLE_JETTING"):
+    for _o2 in ("", "_POP"):
+        HANDLERS[f"AIRBAG_WANG_NEFSKE{_o1}{_o2}"] = handle_airbag_unsupported
+for _o1 in ("", "_JETTING", "_CHEMKIN"):
+    HANDLERS[f"AIRBAG_HYBRID{_o1}"] = handle_airbag_unsupported
+del _kw, _o1, _o2
+
+# *AIRBAG_REFERENCE_GEOMETRY{_BIRTH}{_RDT}{_ID} and
+# *AIRBAG_SHELL_REFERENCE_GEOMETRY{_RDT}{_ID}. "The order of the options in
+# the keyword name is arbitrary" for this family too, so every permutation is
+# generated rather than the documented order alone — and a TRAILING _ID is
+# skipped, because parser._split_keyword already moves it into block.options
+# (where _has_id finds it and the ID card is still read).
+for _r in range(4):
+    for _combo in _permutations(("_BIRTH", "_RDT", "_ID"), _r):
+        if _combo and _combo[-1] == "_ID":
+            continue
+        HANDLERS["AIRBAG_REFERENCE_GEOMETRY" + "".join(_combo)] = \
+            handle_airbag_reference_geometry
+for _r in range(3):
+    for _combo in _permutations(("_RDT", "_ID"), _r):
+        if _combo and _combo[-1] == "_ID":
+            continue
+        HANDLERS["AIRBAG_SHELL_REFERENCE_GEOMETRY" + "".join(_combo)] = \
+            handle_airbag_shell_reference_geometry
+del _r, _combo
 
 # *MAT_SIMPLIFIED_RUBBER/FOAM{_WITH_FAILURE}{_LOG_LOG_INTERPOLATION} and
 # *MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE{_LOG_LOG_INTERPOLATION}, over every base

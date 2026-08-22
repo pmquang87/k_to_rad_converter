@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from ..state import ConversionState
 from .beams import _resolve_integration_beams
 from .common import HDR, _f, _i
@@ -58,6 +58,7 @@ from .fabric import (
     _make_fabric_materials,
     _resolve_mat_fabric,
 )
+from .monvol import _make_monvols, _resolve_airbags
 from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
@@ -114,7 +115,8 @@ from .blast_ale import (
     _make_fsi_coupling,
     _make_inivol_notes,
 )
-from .inistate import (_make_cross_sections, _make_initial_stresses,
+from .inistate import (_make_cross_sections, _make_eref,
+                       _make_initial_stresses,
                        _make_starter_th_sectio, _make_xref,
                        _resolve_xref_parts)
 from .output import (
@@ -127,6 +129,7 @@ from .output import (
     _make_skipped_comment,
     _make_starter_th,
     _make_starter_th_bndout,
+    _make_starter_th_monv,
     _make_starter_th_inter,
     _make_starter_th_nodal_force_group,
     _make_starter_th_node_reac,
@@ -247,10 +250,20 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # over the *ELEMENT_DISCRETE springs, DISBOUT over the ELFORM=6 discrete
     # beams, JNTFORC over the joint springs), so leaving them out sampled a
     # group the deck DID ask for at whatever coarser frequency the other cards
-    # happened to set. The remaining *DATABASE_ dts k2rad parses (ABSTAT,
-    # BINARY_D3THDT, BINARY_INTFOR, SLEOUT) stay out: they have no /TH consumer
-    # at all, so honouring them would only thicken the T01 for channels that
-    # are not in it.
+    # happened to set. The remaining *DATABASE_ dts k2rad parses
+    # (BINARY_D3THDT, BINARY_INTFOR, SLEOUT) stay out: they have no /TH
+    # consumer at all, so honouring them would only thicken the T01 for
+    # channels that are not in it.
+    #
+    # *DATABASE_ABSTAT used to be on that out-list for exactly that reason and
+    # is now IN, on the same "does this card pace a channel that is in the T01"
+    # membership test — because the airbag batch gave it a consumer:
+    # writer/output.py::_make_starter_th_monv builds a /TH/MONV over every
+    # converted /MONVOL. It is gated on state.monvol_ids for the #122 reason
+    # the three output-parity cards are gated on theirs: the test is not "is
+    # the card in the deck". An ABSTAT on a deck whose only *AIRBAG_* was
+    # dropped (or that has none at all) emits no group, and counting its dt
+    # would thicken the T01 for channels that are not in it.
     _db_dts = (state.db_nodout_dt, state.db_elout_dt,
                state.db_glstat_dt, state.db_matsum_dt,
                state.db_spcforc_dt, state.db_ncforc_dt,
@@ -284,7 +297,9 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                # *DATABASE_HISTORY_* has no DT field at all, in any spelling.
                state.db_bndout_dt if state.imp_motion_nodes else 0.0,
                state.db_rbdout_dt if state.rbody_ids else 0.0,
-               state.db_nodfor_dt if state.db_nodal_force_groups else 0.0)
+               state.db_nodfor_dt if state.db_nodal_force_groups else 0.0,
+               #   ABSTAT  -> /TH/MONV over every converted monitored volume
+               state.db_abstat_dt if state.monvol_ids else 0.0)
     requested = [v for v in _db_dts if v > 0.0]
     # "If DT < 0.0, the result will be output every -DT time steps" (Manual
     # p. 16-7) — a CYCLE-based request, which is a real request even though
@@ -866,6 +881,16 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # — it only stops that gate claiming "no /MAT at all".
     _resolve_mat_fabric(state)
 
+    # *AIRBAG_* → /MONVOL. Resolves each bag's external surface to SHELL
+    # ELEMENTS (a /SURF/SEG external surface is starter ERROR 18 and aborts the
+    # run), measures the surface's closed-ness and signed volume, allocates the
+    # /MONVOL, /SURF, /MAT/GAS and /PROP/INJECT1 ids, and synthesizes the
+    # /FUNCTs the PRES / injector / LFLUID-Pmax slots need. Needs the FINAL
+    # element lists (after _screen_provisional_elements and the tet passes) and
+    # the flattened part sets (_flatten_part_set_adds, at the top); must run
+    # before _make_functions, which emits the synthesized curves.
+    _resolve_airbags(state)
+
     # Decide which parts get a /XREF (reference-geometry) block. AFTER the
     # tet10 passes (the 8/4-node-solid gate must see the final connectivity)
     # and BEFORE properties (their sections switch to Ismstr=10). Needs the
@@ -1042,6 +1067,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
+    _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
 
@@ -1299,6 +1325,66 @@ def _warn_duplicate_prop_ids(state: ConversionState,
                 "the *SECTION_* cards.")
 
 
+#: A ``/PART/<pid>`` header, and any ``/MAT/<...>/<mid>`` header whatever the
+#: law spelling (``/MAT/ELAST/1``, ``/MAT/LAW19/3``, ``/MAT/GAS/CSTA/90002``).
+_PART_CARD_ID_RE = re.compile(r"^/PART/(\d+)\s*$")
+_MAT_CARD_ID_RE = re.compile(r"^/MAT/(?:[A-Z0-9_]+/)*(\d+)\s*$")
+
+
+def _warn_dangling_part_materials(state: ConversionState,
+                                  lines: List[str]) -> None:
+    """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
+
+    A ``/PART`` card is ``prop_ID mat_ID subset_ID`` and the starter resolves
+    the material by id: a mat_ID that matches no ``/MAT`` is refused outright.
+    Until this scan existed the converter could produce exactly that and say
+    NOTHING — measured on ``airbag.deploy.k`` before the fabric batch:
+    ``/PART/3`` ("Airbag - Fabric") pointed at mid 3 while a grep of the whole
+    ``_0000.rad`` returned only ``/MAT/ELAST/1`` and ``/MAT/ELAST/2``, with no
+    warning on any branch. Implementing *MAT_FABRIC removed that CAUSE; this
+    scan removes the CLASS, the same way ``_warn_duplicate_prop_ids`` turned a
+    silent ERROR 79 into a named one.
+
+    One pass over the ASSEMBLED starter, so it sees what was really written
+    rather than what each builder intended — a material container that a
+    prepass warn-skipped, a *PART whose MID is a typo, and a family added
+    later that forgets its emitter are all caught by the same three lines.
+
+    ``mat_ID = 0`` is NOT a dangling reference: it is the connector convention
+    (a spring / damper / spotweld part whose whole material lives inside its
+    /PROP/TYPE4|8|13, ``mesh._target_mat_law`` returns None for those by
+    design), and the starter accepts it.
+    """
+    mats = {int(m.group(1)) for m in
+            (_MAT_CARD_ID_RE.match(ln) for ln in lines) if m}
+    dangling: List[Tuple[int, int]] = []
+    for k, ln in enumerate(lines):
+        m = _PART_CARD_ID_RE.match(ln)
+        if not m or k + 2 >= len(lines):
+            continue
+        row = lines[k + 2]                 # header, title, then the data card
+        if row.startswith("#") or row.startswith("/"):
+            continue
+        try:
+            mid = int(row[10:20] or 0)
+        except ValueError:
+            continue
+        if mid and mid not in mats:
+            dangling.append((int(m.group(1)), mid))
+    if not dangling:
+        return
+    shown = ", ".join(f"/PART/{p} -> mat {m}" for p, m in dangling[:10])
+    if len(dangling) > 10:
+        shown += f", ... ({len(dangling)} parts)"
+    state.warn(
+        f"{len(dangling)} /PART card(s) reference a material id that NO /MAT "
+        f"card in the emitted deck defines: {shown}. The starter resolves a "
+        "part's material by id and refuses the deck when it cannot. Every "
+        "such part had an LS-DYNA *MAT the converter did not write — look "
+        "above for the material family it belongs to, or for a *MAT keyword "
+        "in the skipped list.")
+
+
 class _StarterContext:
     """Values threaded across the starter section builders (see
     _starter_section_registry). ``rep(frac, label)`` forwards to the progress
@@ -1400,6 +1486,13 @@ def _starter_section_registry():
         ("detonations",       lambda c: _make_detonations(c.state)),
         ("fsi_coupling",      lambda c: _make_fsi_coupling(c.state)),
         ("ebcs",              lambda c: _make_ebcs(c.state)),
+        # Monitored volumes. AFTER parts_elements, whose write line fills
+        # state.shell_elem_ids / sh3n_elem_ids — the /SURF is screened against
+        # those so it can never name an element the deck does not define
+        # (starter ERROR 70). BEFORE the /TH block far below, which lists
+        # state.monvol_ids. A no-op (and draws no id) on any deck without an
+        # *AIRBAG_*, so it cannot shift an existing deck's id stream.
+        ("monvols",           lambda c: _make_monvols(c.state)),
         ("inivol_notes",      lambda c: _make_inivol_notes(c.state)),
         ("control_ale_notes", lambda c: _make_control_ale_notes(c.state)),
         ("starter_cloads",    lambda c: _make_starter_cloads(c.state)),
@@ -1423,6 +1516,13 @@ def _starter_section_registry():
         ("grounding_springs", lambda c: _make_grounding_springs(c.state, c.rbody_info)),
         ("added_masses",      lambda c: _make_added_masses(c.state, c.rigid_nodes)),
         ("xref",              lambda c: _make_xref(c.state)),
+        # /EREF is the per-ELEMENT twin of /XREF. AFTER it, because the
+        # two are mutually exclusive per node (starter ERROR 1098) and
+        # the /EREF resolver drops the rows of any part the /XREF
+        # already covers. AFTER parts_elements too, which is why the
+        # resolve runs inside the emitter rather than in the prepass
+        # block: the element screen reads the write-line registries.
+        ("eref",              lambda c: _make_eref(c.state)),
         ("initial_stresses",  lambda c: _make_initial_stresses(c.state)),
         ("cross_sections",    lambda c: _make_cross_sections(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),
@@ -1465,6 +1565,13 @@ def _starter_section_registry():
                               lambda c: _make_starter_th_nodal_force_group(c.state)),
         ("starter_th_rbody",  lambda c: _make_starter_th_rbody(c.state)),
         ("starter_th_bndout", lambda c: _make_starter_th_bndout(c.state)),
+        # *DATABASE_ABSTAT -> /TH/MONV. AFTER the monvols section far
+        # above, which fills state.monvol_ids at the line that writes
+        # each /MONVOL card — the same "registry filled at the write
+        # line, consumed by a later section" ordering the /CLUSTER +
+        # swforc and discrete-connector pairs rely on. A no-op, drawing
+        # no id, on any deck without a converted monitored volume.
+        ("starter_th_monv", lambda c: _make_starter_th_monv(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),

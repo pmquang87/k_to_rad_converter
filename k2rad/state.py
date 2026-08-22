@@ -3069,6 +3069,14 @@ class ContactAutoGeneral:
     sst: float = 0.0        # Card3 SST contact thickness, secondary → Gapmin
     mst: float = 0.0        # Card3 MST contact thickness, main → Gapmin
     sfs: float = 0.0        # Card3 SFS slave penalty stiffness scale → Stfac
+    sfst: float = 0.0       # Card3 SFST thickness scale (airbag route only)
+    # *CONTACT_AIRBAG_SINGLE_SURFACE rather than *CONTACT_AUTOMATIC_GENERAL.
+    # Same SOFT = -19 -> /INTER/TYPE19 routing (dyna2rad branches on the same
+    # sentinel for both, convertcontacts.cxx:167-181), but the airbag flavour
+    # carries four different interface settings — Istf=4, Idel=2, Ibag=1 and
+    # a scale-weighted Gapmin — see writer/contacts.py.
+    airbag: bool = False
+    keyword: str = ""
 
 
 @dataclass
@@ -5644,6 +5652,14 @@ class ConversionState:
     # *AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT] blocks → /EREF/SHELL +
     # /EREF/SH3N per owning part.
     airbag_shell_ref_geoms: List[AirbagShellRefGeometry] = field(default_factory=list)
+    # pid -> ([(quad eid, [n1..n4])], [(tri eid, [n1..n3])]) resolved by
+    # writer/inistate.py::_resolve_airbag_eref at /EREF write time (it needs
+    # state.shell_elem_ids / sh3n_elem_ids, which only exist once the
+    # elements have been written), screened against the emitted mesh, the
+    # node table and the /XREF parts (starter ERROR 1011 / 1098).
+    airbag_eref_rows: Dict[int, Tuple[List[Tuple[int, List[int]]],
+                                      List[Tuple[int, List[int]]]]] = field(
+        default_factory=dict)
     # *AIRBAG_<MODEL> cards, deck order → /MONVOL/PRES|AIRBAG1|GAS|LFLUID
     airbags: List[Airbag] = field(default_factory=list)
     # (monvol_id, title) of every /MONVOL actually written by
@@ -6123,6 +6139,10 @@ class ConversionState:
     # about the first.
     db_rbdout_seen: bool = False
     db_bndout_seen: bool = False
+    # *DATABASE_ABSTAT present (whatever its DT) — so a card with a
+    # blank or zero DT can be reported as "asked for, not emitted"
+    # instead of vanishing. Same pattern as the two above.
+    db_abstat_seen: bool = False
     # *DATABASE_NODFOR — the ASCII nodal-force-group database. It selects no
     # channel of its own; it states the OUTPUT INTERVAL of the /TH/NODE groups
     # *DATABASE_NODAL_FORCE_GROUP builds ("The output interval must be
