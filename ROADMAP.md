@@ -450,7 +450,21 @@ covering them unlocks a large class of real models.
   `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED`/`_TRANSLATIONAL` DOF blocks —
   **done** (dyna2rad-faithful type integers and axis conventions, with its
   documented field-map defects corrected; see CHANGELOG).
-- `*AIRBAG_*` → `/MONVOL`.
+- `*AIRBAG_*` → `/MONVOL` — **batch 1 done**: the five uniform-pressure models
+  (`_SIMPLE_PRESSURE_VOLUME` → `/MONVOL/PRES`, `_SIMPLE_AIRBAG_MODEL` →
+  `/MONVOL/AIRBAG1` + `/MAT/GAS` + `/PROP/INJECT1`, `_ADIABATIC_GAS_MODEL` →
+  `/MONVOL/GAS`, `_LOAD_CURVE` → `/MONVOL/PRES`, `_LINEAR_FLUID` →
+  `/MONVOL/LFLUID`), `*MAT_FABRIC` → `/MAT/LAW19`+`/PROP/TYPE9` or
+  `/MAT/LAW58`+`/PROP/TYPE16`, both reference-geometry keywords → `/XREF` /
+  `/EREF`, `*CONTACT_AIRBAG_SINGLE_SURFACE` and `*DATABASE_ABSTAT` →
+  `/TH/MONV` (see CHANGELOG). **Open for batch 2:** `*AIRBAG_WANG_NEFSKE*`
+  (a `/PROP/INJECT1` per inflator gas + one vent-hole block per orifice),
+  `*AIRBAG_HYBRID*` (`N_gases > 1` + a `/MAT/GAS` per species),
+  `*AIRBAG_INTERACTION` (`/MONVOL/COMMU1`), the fabric porosity family
+  (`FLC`/`FAC`/`FVOPT` → an `Nporsurf` porous-surface block or `/LEAK/MAT`),
+  named vent-hole SURFACES (`surf_IDv`, which needs the bag split into a bag
+  part and a vent part), and `*AIRBAG_PARTICLE` (`/MONVOL/FVMBAG1`, a
+  different solver).
 - `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO` — **done** (_SET direct;
   _PLANE via a geometric straddle resolver; SECFORC → /TH/SECTIO).
 - Seatbelts.

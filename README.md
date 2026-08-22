@@ -325,6 +325,11 @@ since an empty part is as often missing mesh as it is a deliberate carrier.
 `*MAT_PLASTIC_KINEMATIC` → `/MAT/LAW44` (`b` = plastic hardening modulus
 E·ETAN/(E−ETAN); `Chard` = 1−BETA — the iso/kinematic conventions run in
 opposite directions)
+`*MAT_FABRIC` / `*MAT_034` → `/MAT/LAW19` (FABRI) + `/PROP/TYPE9`, or
+`/MAT/LAW58` (FABR_A) + `/PROP/TYPE16` when `FORM` is one of 4/14/-14/24 AND
+the card-7 curves are given. The property is not a choice: each law declares a
+shell class the starter enforces (`ERROR 3047`). See *Airbags / monitored
+volumes*
 `*MAT_ANISOTROPIC_VISCOPLASTIC` (103) → `/MAT/LAW128` (HILL_VISC_PLAST) — the
 near 1:1 Radioss counterpart. The Voce (`QR/CR`) + kinematic (`QX/CX`)
 hardening and the Hill surface (shell Lankford `R00/R45/R90` or brick
@@ -2287,6 +2292,13 @@ edges — and references them from the interface (`line_IDm=0` = self edge-impac
 `SOFT=-19` hands two `/SURF` to the starter, which auto-generates the child
 TYPE7+TYPE11 (no hand-built `/LINE`). (`--inter-gapmin`/`--auto-gapmin` do not
 reach these SOFT-routed interfaces; their engagement gap is the Card-3 `SST`/`MST`.)
+`*CONTACT_AIRBAG_SINGLE_SURFACE` (contact type a13, + `_MPP`) — a near-alias of
+the single-surface path: its card grid is the two-sided grid with the B-side
+cells blank, so `SSID`/`SSTYP`/`SFS`/`SST`/`SFST` land on the same field
+indices. `SOFT = -19` routes to the airbag flavour of `/INTER/TYPE19`
+(`Istf = 4`, `Idel = 2`, `Ibag = 1`, `Gapmin = |SST|/2·SFST`); anything else
+falls back to the single-surface routing above. See *Airbags / monitored
+volumes*
 `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE` (+ `_ONE_WAY_*`) → `/INTER/TYPE7`.
 The SSID side becomes the secondary `/GRNOD` and the MSID side the main
 `/SURF`, so **the deformable part belongs on the SSID side**: `/INTER/TYPE7`
@@ -2436,6 +2448,220 @@ splits by topology: quads → `/GRSHEL/SHEL` + `/SURF/GRSHEL`, triangles →
 `/SURF/SURF` when more than one kind is present. A `/SH3N` id inside a
 `/GRSHEL/SHEL` is starter **ERROR 70** (`ELEMENT ID=n DOES NOT EXIST`), which
 rejects the whole deck
+
+### Airbags / monitored volumes
+
+| LS-DYNA | OpenRadioss | note |
+|---|---|---|
+| `*AIRBAG_SIMPLE_PRESSURE_VOLUME` | `/MONVOL/PRES` (ITYPE 2) | `Itypfun = 0`, `Fscale = BETA·CN` on a unit-slope `/FUNCT` |
+| `*AIRBAG_SIMPLE_AIRBAG_MODEL` | `/MONVOL/AIRBAG1` (ITYPE 7) + `/MAT/GAS/CSTA\|MASS` + `/PROP/INJECT1` [+ one vent hole] | |
+| `*AIRBAG_ADIABATIC_GAS_MODEL` | `/MONVOL/GAS` (ITYPE 3) | `Pini = P0 + PE` (gauge → absolute) |
+| `*AIRBAG_LOAD_CURVE` | `/MONVOL/PRES` | `Itypfun = 1` (pressure vs time), `STIME` folded into the curve |
+| `*AIRBAG_LINEAR_FLUID` | `/MONVOL/LFLUID` (ITYPE 10) | `P = K·ln(V0/V) + Padd`, term for term |
+| `*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]` | one `/XREF` per owning part | `_ID` scaling baked in, `_BIRTH` → `/SENSOR/TIME` |
+| `*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]` | `/EREF/SHELL` + `/EREF/SH3N` per part | |
+| `*MAT_FABRIC` / `*MAT_034` | `/MAT/LAW19` + `/PROP/TYPE9`, or `/MAT/LAW58` + `/PROP/TYPE16` | see *Fabric* below |
+| `*CONTACT_AIRBAG_SINGLE_SURFACE` | the single-surface interface, or `/INTER/TYPE19` on `SOFT = -19` | |
+| `*DATABASE_ABSTAT` | one `/TH/MONV` per monitored-volume model | its `DT` joins the `/TFILE` minimum |
+
+`*AIRBAG_WANG_NEFSKE*`, `*AIRBAG_HYBRID*`, `*AIRBAG_PARTICLE`, `*AIRBAG_ALE`,
+`*AIRBAG_ADVANCED_ALE`, `*AIRBAG_FLUID_AND_GAS` and `*AIRBAG_INTERACTION` are
+**registered but not converted**: each one warns by name and says what the
+Radioss counterpart would be. That matters more than it looks — an airbag that
+disappears is not a missing output card, it is a bag that never inflates, on a
+run that terminates *normally*.
+
+#### The external surface must be element-backed
+
+`/SURF/SEG` is a **hard failure** for a monitored volume, not a degradation.
+`check_surf.F:55-62` sets `IGRSURF%ISH4N3N` only for `ELTYP` 3 (4-node shell)
+and 7 (SH3N), a segment surface is never resolved back to an element at all
+(`tsurftag.F:293` passes `0, 0`), and every `hm_read_monvol_type*.F` then
+answers
+
+```
+ERROR ID :     18   -- SURFACE ID: 1000 IS NOT DEFINED WITH SHELLS
+ERROR ID :     54   ** ERROR IN INPUT FORMAT
+```
+
+and aborts (starter exit 172, measured). LS-DYNA's `SIDTYP` is inverted
+relative to intuition — **0 = `*SET_SEGMENT`**, non-zero = `*SET_PART` — so the
+segment-set case is the common one. k2rad resolves those segments back to the
+shells that own them (by corner-node **set**, since the segment's start corner
+and winding are free variables) and builds the surface as `/SURF/GRSHEL`, plus
+a `/SURF/GRSH3N` under a `/SURF/SURF` where the bag has triangles. A part in
+the scope that carries no shells is named and left out rather than emitted.
+
+When the named set family has no set with that id but the other one does, the
+deck's `SIDTYP` is simply wrong and the other family is used, with a warning —
+the r14 example `introduction/intro-by-a.-tabiei/misc/airbag-i/volume.k`
+writes `SIDTYP=0` and then defines a `*SET_PART_LIST 11` and a
+`*SET_NODE_LIST 11` and no segment set at all.
+
+#### Orientation and closure are the starter's job — k2rad measures them
+
+Every MONVOL reader runs the same four calls in the same order:
+
+```fortran
+CALL MONVOL_CHECK_SURFCLOSE(...)      ! free edges, then triangulate the holes
+CALL MONVOL_ORIENT_SURF(..., ITYPE)   ! all normals onto the same side
+CALL MONVOL_COMPUTE_VOLUME(...)
+CALL MONVOL_REVERSE_NORMALS(..., VOL) ! IF (VOL < ZERO) flip everything
+```
+
+so an inward-wound bag is corrected automatically and a converter-side flip
+would be a *second* correction of an already-correct surface. The connectivity
+is therefore passed through untouched, and what k2rad does instead is measure
+and report, with the engine's own expression
+(`get_volume_area.F90:156-169`, `V = Σ ⅓ (N·c)` with `N = ½ (x13 × x24)`):
+
+* the **signed volume** — negative means inward-wound, which the starter fixes;
+* the **free-edge count** — the bag is open there, and the starter attempts an
+  automatic closure and reports `WARNING 1875` only if it cannot;
+* the **non-manifold edge count** — a T-connection, on which
+  `MONVOL_ORIENT_SURF` gives up (`WARNING 1882`) and `MONVOL_REVERSE_NORMALS`
+  then returns immediately, so the normals stay as written.
+
+Measured on the r14 corpus: `airbag.deploy.k` 2432 segments, volume 754757,
+wound **inward**; `volume.k` 1538 segments, 1.17e7; both `tire-compression.k`
+decks 1296 segments, 6.887e7 with **144 free edges** (the bead ring, open by
+design). A near-zero volume is warned about separately: it means the segment
+normals *cancel*, i.e. the winding is mixed and there is nothing consistent
+for the starter to flip.
+
+#### The slots that are silently catastrophic
+
+* **`/PROP/INJECT1 Iflow = 1`.** LS-DYNA's `LCID` is a mass **flow rate**
+  ("Load curve ID specifying input mass flow rate", Vol I R16 p.3-13);
+  `airbaga1.F:349-362` branches on `IFLU = IGEO(24)` and with `Iflow = 0`
+  *differences* the curve (`DGMASS = GMASS − GMASS_OLD`) instead of integrating
+  it. No starter diagnostic, an error of order `1/Δt`. `Ascale_T` is written as
+  an explicit `1.0`: it *divides* the time abscissa while the `IFLU == 1`
+  integration multiplies by `DT1` without dividing, so the two disagree for any
+  other value.
+* **`/MAT/GAS` carries a mass-specific `Cp` polynomial and Radioss derives
+  `Cv = Cp − R/MW`.** `CV ≠ 0` → `/MAT/GAS/CSTA` with `Cp | Cv` verbatim (both
+  are mass-specific on the LS-DYNA card too); `CV = 0` → `/MAT/GAS/MASS` with
+  `Cpa = A/MW`, `Cpb = B/MW`, because card 4a's `A`/`B` are **molar**
+  (Vol I p.3-16 Remark 3). Writing LS-DYNA's `CV` into a `Cp` slot inverts the
+  gas.
+* **`/MONVOL/GAS Pini = P0 + PE`.** LS-DYNA's `P0` is a **gauge** pressure
+  (`e₀ = (p₀ + pₑ)/(ρ(γ−1))`, Vol I p.3-18) while Radioss feeds `Pini` straight
+  into `EI = PINI·(V+VEPS−VINC)/(GAMMA−1)` and applies `DP = Q + PRES − PEXT`.
+* **`/MONVOL/LFLUID` `P_LIMIT` goes through a flat `/FUNCT`.**
+  `hm_read_monvol_type10.F` overwrites `Fscale_Pmax` with `INFINITY` whenever
+  no function is given — probe: `5.5E+06` echoed as
+  `MAXIMUM PRESSURE TIME FUNCTION SCALE FACTOR = 1.0000000200409E+20`.
+  (`Fscale_Padd` with `fct_Padd = 0` **is** honoured, which is why a scalar
+  `BULK` rides its own scale factor and `P_LIMIT` cannot.)
+* **The vent's `fct_IDP` is a function of the GAUGE pressure `P − Pext`.** A
+  negative `MU` or `AREA` is a curve of that quantity vs **absolute** pressure
+  in LS-DYNA, so it is re-emitted with every abscissa shifted by `−PE`. This is
+  the most unit-sensitive number in the batch.
+
+#### The scaling contract, and what it costs
+
+Vol I R16 p.3-4, verbatim: `V_cvolume = (VSCA × V_femodel) − VINI` and
+`P_femodel = PSCA × P_cvolume`. So `VSCA`/`PSCA` are a **unit bridge** and
+`VINI` is subtracted *after* the volume scale — it is the Radioss `Vinc`
+(incompressible volume) in model units, `VINI/VSCA`, and only `/MONVOL/GAS` has
+that column. `PSCA` folds into the `/MONVOL/PRES` `Fscale`; everything else is
+warned about and dropped. On a `PRES` bag `VSCA` cancels out of the `V0/V`
+ratio exactly, so it only loses something when `VINI` is also non-zero.
+`RBID` (a user subroutine or a built-in sensor arming the inflator), `MWD` and
+`SPSF` have no `/MONVOL` counterpart and are each named.
+
+#### Fabric
+
+The law and its property are **one decision**, because the starter enforces the
+pairing through the material's declared shell class:
+
+| `*MAT_FABRIC` | Radioss law | class | the only property it may sit on |
+|---|---|---|---|
+| `FORM ∈ {4, 14, −14, 24}` **with** a card-7 curve | `/MAT/LAW58` (FABR_A) | `SHELL_ANISOTROPIC`, `PROP_SHELL 4` | `/PROP/TYPE16` (SH_FABR) |
+| everything else | `/MAT/LAW19` (FABRI) | `SHELL_ORTHOTROPIC`, `PROP_SHELL 2` | `/PROP/TYPE9` (SH_ORTH) |
+
+Crossing them — or leaving the fabric on the isotropic `/PROP/SHELL` its
+`*SECTION_SHELL` would give it — is starter **ERROR 3047** and refuses the whole
+deck (`check_mat_elem_prop_compatibility.F:174-197`). Fabric parts are
+therefore repointed at a synthesized per-part property, and a `*SECTION_SHELL`
+shared with a non-fabric part keeps its own `/PROP/SHELL` for the others.
+
+Every `FORM` whose specialisation has no faithful target — 1, 2, 3, 8, 12, 13,
+24, and the `−14` card-8 block (the biaxial `LCAA`/`LCBB` pair, the hysteresis
+`H`, the coat layer) — converts to the closest of the two laws with the
+refinement **named** as dropped. So do the liner (`EL`/`PRL`/`LRATIO`), the
+porosity family (`FLC`/`FAC`/`FVOPT`/`X0`/`X1`/`A0REF`) and `ELA`/`LNRC`.
+
+Fabric-specific property settings, and why each is not a default:
+
+* `Ismstr = 4` (full geometric non-linearity) — a membrane that deploys from a
+  folded state would otherwise carry the fold as stiffness;
+* `Ish3n = 2` so a bag meshed with triangles behaves like the quads beside it;
+* `Ip = 2` (reference direction from each element's own first two nodes) — on a
+  **closed** bag any single global `Vx/Vy/Vz` is nearly normal to some shell,
+  and that is `ERROR 197` raised **once per element**. An explicit `AOPT` 2 or 3
+  vector is honoured instead where the deck states one (AOPT 3 adds the 90°
+  offset, since LS-DYNA measures `BETA` from `v × n`);
+* `Istrain = 1` — `cinit3.F:529` gates the reference-state initial-strain pass
+  on it, so an emitted `/XREF` on an `Istrain = 0` fabric part would be read,
+  echoed and then do nothing;
+* `Dm` carries the card's own `DAMP` (Radioss has no damping field on the law);
+* `N` is collapsed to 1 only for the pure **membrane** `ELFORM = 9`; 2/5/16 are
+  ordinary shells whose `NIP` is real.
+
+Two column traps, both verified with a starter twin probe at `/BEGIN`
+2022 / 2024 / 2026:
+
+* `/MAT/LAW19` card 4 columns 21-40 are a **dead slot** the reader never touches
+  (a written `9.99` is echoed nowhere) — `ZEROSTRESS` is at 41-60;
+* `/PROP/TYPE9` card 4 columns **81-90** hold nothing at 2022 and become `Ipos`
+  from 2024, silently and with no `WARNING 100211` either way, so k2rad leaves
+  them blank. `Ip` is at 91-100 at every version. (`/PROP/TYPE16` *does* have a
+  real `Ipos` cell at 2022, at columns 71-80.)
+
+#### Reference geometry
+
+`*AIRBAG_REFERENCE_GEOMETRY` feeds the same per-part `/XREF` that
+`*INITIAL_FOAM_REFERENCE_GEOMETRY` does. A **shell** part needs no law check —
+`hm_read_xref.F`'s MTN whitelist is gated on `ITYP == 2`, i.e. solid parts only
+— and `cepsini.F`'s `CMLAWI` dispatch covers `ILAW` 1, 19 and 58, so both
+fabric laws honour a reference state. The `_ID` card's `SX/SY/SZ` about `NIDO`
+is applied at conversion time (Radioss has no scale or origin column) about
+`NIDO`'s own **reference** position. `_BIRTH` becomes a `/SENSOR/TIME` on the
+fabric law's `SENS_ID`, with `*MAT_FABRIC`'s own `RGBRTH` winning where both
+are stated. `_RDT` has no counterpart and is named.
+
+`*AIRBAG_SHELL_REFERENCE_GEOMETRY` becomes `/EREF/SHELL` + `/EREF/SH3N`, one of
+each per owning part; the LS-DYNA `PID` column is read and discarded, because
+Radioss takes the part from the header. The rows are screened three ways: an
+element not in the emitted mesh is `ERROR 1011`, a ghost node in no `/NODE`
+cannot carry coordinates, and **a node in both an `/EREF` and a `/XREF` is
+`ERROR 1098`**. Since the two LS-DYNA cards are written *together* — the node
+card gives the coordinates, the shell card names the elements — the `/XREF`
+wins for a part covered by both and the `/EREF` rows are dropped, named.
+
+#### `*DATABASE_ABSTAT`
+
+One `/TH/MONV` **per monitored-volume model**, not one for all of them. The
+whole 19-name vocabulary is legal on every type (a probe took all sixteen
+non-vent names on a `PRES` bag without complaint), but the engine only fills
+the `FSAV` slots its own pressure law computes — `volpfv.F` sets `FSAV(1) = 0`
+on a `PRES` bag — so a union would write flat zeros that read as data:
+
+| model | variables |
+|---|---|
+| `PRES` | `VOL P A` |
+| `GAS` | `MASS VOL P A T GAMA` |
+| `AIRBAG1` | `MASS VOL P A T CP CV GAMA MASS-IN ENTHA-IN ENER-INT WORK DTBAG` (+ `AO UO AC UC` when the bag has a vent) |
+| `LFLUID` | `MASS VOL P A MASS-IN` |
+
+The per-vent-hole channels (`AOUT1`…`HOUT10`) are **not** requestable here —
+probe: `ERROR ID : 260 … TH VARIABLE AOUT1 IS NOT AVAILABLE`. They live in a
+second group the starter auto-generates after every `/TH/MONV`
+(`hm_read_thgrou.F:2745-2762`, titled `"VENT " // <title>`), so the converter
+neither needs nor may emit one.
+
 
 ### Damping
 `*DAMPING_GLOBAL` → `/DAMP` `Alpha` (mass-proportional Rayleigh; `VALDMP` is
@@ -2930,11 +3156,14 @@ order, which would sample a channel coarser than requested.
 Membership is a rule, not a list: a card's `dt` joins the minimum **iff** that
 card drives a real `/TH` group. `NODOUT`, `ELOUT`, `GLSTAT`, `MATSUM`,
 `SPCFORC`, `NCFORC`, `RCFORC`, `BLSTFOR`, `RWFORC`, `SECFORC`, `SWFORC`,
-`DEFORC`, `DISBOUT`, `JNTFORC`, `SPHOUT`, `BNDOUT`, `RBDOUT` and `NODFOR` are
-in. `ABSTAT`, `BINARY_D3THDT`, `BINARY_INTFOR` and `SLEOUT` stay out — they
+`DEFORC`, `DISBOUT`, `JNTFORC`, `SPHOUT`, `BNDOUT`, `RBDOUT`, `NODFOR` and
+`ABSTAT` are in. `BINARY_D3THDT`, `BINARY_INTFOR` and `SLEOUT` stay out — they
 have no `/TH` consumer at all, so honouring them would only thicken the T01 for
 channels that are not in it — and so does `TPRINT`, because k2rad emits no
-thermal solver. The `*DATABASE_HISTORY_*` family has no `DT` field at all in
+thermal solver. Four of the members are gated on their **own** consumer rather
+than on the card's presence, because the test is "does this card pace a channel
+that is *in* the T01": `BNDOUT` needs a prescribed motion, `RBDOUT` a rigid
+body, `NODFOR` a nodal-force group, and `ABSTAT` a converted `/MONVOL`. The `*DATABASE_HISTORY_*` family has no `DT` field at all in
 any spelling, and `*DATABASE_NODAL_FORCE_GROUP` has none either: its interval
 is `*DATABASE_NODFOR`'s, which is why that card is in the list despite
 selecting nothing itself.
