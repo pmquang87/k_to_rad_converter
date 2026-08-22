@@ -303,11 +303,31 @@ Prior history (before this changelog was introduced) is summarized in the
       the converter built as `/SURF/GRSHEL` + `/SURF/GRSH3N` under a
       `/SURF/SURF`.
 
-  Tests: `tests/test_airbag_monvol.py`, 113 tests + 62 subtests, every card
+  **Corpus sweep**, `master 346af1d` vs this branch, over **827 decks** (the
+  repo tree, `Ryan_Lee_Examples`, `E:/openradioss_run`, `E:/foxcore_data` and
+  the 351-deck `dynaexamples_r14_ton-mm-s` tree, excluding the handful above
+  8 MB, which are converted and inspected individually): **0 exceptions on
+  either side**, and **819 / 827 `_0000.rad` byte-identical**. The eight that
+  changed are *exactly* the eight decks carrying an `*AIRBAG_*` or a
+  `*MAT_FABRIC` — `airfilled.sphere.k`, both `airbag.deploy.k`, `volume.k`,
+  both `tire-compression.k`, and the Toyota Yaris and Camry production models.
+  Skip lists move on the same eight and nowhere else; the one `_0001.rad` that
+  differs is `volume.k`, whose `/TFILE` now honours its `*DATABASE_ABSTAT`.
+
+  Warnings 18059 → 18383 (**+324** over 288 decks), and the split is the whole
+  story: **280** of those decks gain nothing but the new part → material
+  existence scan, which is a PRE-EXISTING defect finally named — every one
+  spot-checked is a `/PART` pointing at a material the converter does not
+  write, which the starter refuses. The other 8 are the airbag decks. Nothing
+  is *lost*: the handful of warnings that differ textually on those 8 decks are
+  auto-ids inside an existing message, shifted because a monitored volume draws
+  from the same `next_id()` stream.
+
+  Tests: `tests/test_airbag_monvol.py`, 122 tests + 72 subtests, every card
   assertion by COLUMN and every hand-computed value derived in the docstring
   (the SPV `Fscale = BETA·CN`, the `Cpa = A/MW` molar division, the
   `Pini = P0 + PE` gauge conversion, the `|SST|/2·SFST` contact gap, the exact
-  1000 mm³ of the reference box). Suite 3345/2/1055 → 3458/2/1117.
+  1000 mm³ of the reference box). Suite 3345/2/1055 → 3468/2/1127.
 
 - **The output / instrumentation parity batch:
   `*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM` (+ `/TH/SPRING`),
