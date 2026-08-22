@@ -251,11 +251,55 @@ Prior history (before this changelog was introduced) is summarized in the
       options, and the seven unconvertible `*AIRBAG_*` models are REGISTERED to
       a handler that warns by name rather than left to `skipped_keywords`.
 
-  Tests: `tests/test_airbag_monvol.py`, 110 tests + 62 subtests, every card
+  18. **Validated against the real OpenRadioss starter, which caught three
+      defects the test suite could not.** A probe deck exercising every card in
+      the batch — four monitored volumes (one per model), a LAW19 fabric part,
+      a LAW58 fabric part with all six curves, a /XREF, an airbag contact and
+      a *DATABASE_ABSTAT — was run through `starter_win64.exe`:
+
+      * `Ip = 2` on the fabric properties gave **99 x ERROR 197** ("REFERENCE
+        DIRECTION IS ALMOST NORMAL TO SHELL ID=%d", one per element per pass)
+        and ERROR TERMINATION. `IRP` is a SPARSE ENUM, not an index:
+        `corthini.F:122` is a `SELECT CASE (IRP)` over exactly 0/20/22/23/24/25
+        and a 2 matches no branch, so `Vx/Vy/Vz` are never assigned and the
+        projection check at `:610` reads uninitialised memory. **20** is
+        "N1 -> N2 (nodes)", the per-element direction actually wanted. AOPT 3
+        likewise moves to `Ip = 23` ("proj on the element, V x normal"), which
+        computes the cross product LS-DYNA's AOPT 3 defines, so BETA carries
+        over with NO +90 offset.
+      * The LAW58 **shear** curves needed two rewrites: the abscissa is the
+        shear ANGLE IN DEGREES (`sigeps58c.F:528`,
+        `PHI = atan(TAN_PHI)*180/PI`) where LS-DYNA gives an engineering shear
+        STRAIN, and the curve must span BOTH signs — `law58_upd.F`'s
+        `FUNC_INTERS_SHEAR` wants two loading/unloading intersections
+        straddling zero and answers `ERROR 1716` otherwise, measured with two
+        curves that genuinely crossed on the positive side. Both are done
+        exactly (`atan` per point, not dyna2rad's flat x57).
+      * `/MAT/GAS/MASS` produced `GAMMA AT INITIAL TEMPERATURE = -3.61E-03`
+        with **0 ERROR(S)** and TERMINATION WITH WARNING. The starter does not
+        use the card's `GASC`: it uses 8.314 rescaled into the `/BEGIN` unit
+        system (`hm_read_matgas.F:293`), so a gas stated in SI on a mm mesh
+        gets an R three orders of magnitude too large and a NEGATIVE Cv. The
+        converter now reproduces that arithmetic and warns, quoting the
+        numbers — its `-0.00361041` against the starter's
+        `-3.6102084432184E-03`.
+
+      Final state of the probe: **0 ERROR(S), TERMINATION WITH WARNING**, with
+      the starter echoing 4 monitored volumes, `SURFACE ERROR(NE.0 FOR NON
+      CLOSED SURF) = 0.0` and `INITIAL VOLUME = 1000.0` on each,
+      `INITIAL PRESSURE = 0.151325` on the GAS bag (= P0 0.05 + PE 0.101325,
+      the gauge-to-absolute fix), `AVENT:VENT HOLE AREA = 14.0` (= MU 0.7 x
+      AREA 20) under `ISENTHALPIC VENTING MODEL`, and the `/XREF` reference
+      state on the fabric part. The two remaining warnings are `WARNING 1084`
+      (LAW1 with NIP>1 on the probe's non-fabric boxes, pre-existing) and
+      `WARNING 863` ("ELEMENT(S) IS(ARE) INITIALLY IN TENSION", which is what a
+      reference geometry is for).
+
+  Tests: `tests/test_airbag_monvol.py`, 113 tests + 62 subtests, every card
   assertion by COLUMN and every hand-computed value derived in the docstring
   (the SPV `Fscale = BETA·CN`, the `Cpa = A/MW` molar division, the
   `Pini = P0 + PE` gauge conversion, the `|SST|/2·SFST` contact gap, the exact
-  1000 mm³ of the reference box). Suite 3345/2/1055 → 3455/2/1117.
+  1000 mm³ of the reference box). Suite 3345/2/1055 → 3458/2/1117.
 
 - **The output / instrumentation parity batch:
   `*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM` (+ `/TH/SPRING`),

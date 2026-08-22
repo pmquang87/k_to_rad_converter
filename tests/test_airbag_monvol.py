@@ -375,7 +375,13 @@ class TestFabricLaw19(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[2], 21, 40), 0.381)  # Thick
         self.assertEqual(cards[3][80:90].strip(), "",
                          "card 4 cols 81-90 must stay blank (Ipos at >=2024)")
-        self.assertEqual(_col_i(cards[3], 91, 100), 2)    # Ip = element nodes
+        self.assertEqual(
+            _col_i(cards[3], 91, 100), 20,
+            "Ip=20 (N1->N2). IRP is a SPARSE ENUM: corthini.F:122 SELECT "
+            "CASEs over 0/20/22/23/24/25 only, so a 2 matches no branch, "
+            "Vx/Vy/Vz are never assigned and the projection check fires "
+            "ERROR 197 ONCE PER ELEMENT. MEASURED on the real starter: "
+            "99 x ERROR 197 with Ip=2, 0 ERROR(S) with Ip=20.")
 
     def test_membrane_elform9_collapses_nip_to_one(self):
         """ELFORM=9 is a MEMBRANE: every through-thickness point is identical,
@@ -402,14 +408,29 @@ class TestFabricLaw19(unittest.TestCase):
         self.assertEqual(_col_i(part[0], 11, 20), 3)      # mat_ID
         self.assertNotIn("/PROP/SHELL/1", starter)
 
-    def test_aopt3_vector_and_beta_shift(self):
-        """AOPT=3 measures BETA from ``v x n``, a quarter turn from Radioss's
-        Phi datum, so Phi = BETA + 90 and Ip goes to 0 (explicit vector)."""
+    def test_aopt3_maps_to_ip_23_with_beta_unshifted(self):
+        """AOPT=3 measures BETA from a line "defined by the cross product of
+        the vector v with the element normal" — and Radioss ``Ip = 23`` is
+        exactly that: ``corthini.F`` CASE(23) computes ``n x v`` PER ELEMENT.
+        So the vector goes in Vx/Vy/Vz and BETA carries over with NO offset.
+        dyna2rad adds +90 (convertprops.cxx:1794); that offset belongs to the
+        SOLID path, where Radioss PROJECTS the vector instead of crossing it,
+        and on a shell it rotates the warp direction a quarter turn."""
         _r, starter, _e = _convert(
             self._law19_deck(aopt=3.0, v=(1.0, 0.0, 0.0), beta=17.0))
         cards = _cards(_block(starter, "/PROP/TYPE9/"))
         self.assertAlmostEqual(_col_f(cards[3], 1, 20), 1.0)
-        self.assertAlmostEqual(_col_f(cards[3], 61, 80), 107.0)
+        self.assertAlmostEqual(_col_f(cards[3], 61, 80), 17.0)
+        self.assertEqual(_col_i(cards[3], 91, 100), 23)
+
+    def test_aopt2_vector_uses_ip_0(self):
+        """AOPT 2 reads A1/A2/A3 from card 5 (``_fabric_mat`` writes A1 = 1),
+        and a stated global vector goes into Vx/Vy/Vz with Ip = 0 — Radioss
+        CASE(0) reads GEO(7,8,9) directly."""
+        _r, starter, _e = _convert(self._law19_deck(aopt=2.0, beta=11.0))
+        cards = _cards(_block(starter, "/PROP/TYPE9/"))
+        self.assertAlmostEqual(_col_f(cards[3], 1, 20), 1.0)     # Vx <- A1
+        self.assertAlmostEqual(_col_f(cards[3], 61, 80), 11.0)   # Phi <- BETA
         self.assertEqual(_col_i(cards[3], 91, 100), 0)
 
     def test_rgbrth_becomes_a_sensor(self):
@@ -511,11 +532,71 @@ class TestFabricLaw58(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[3], 81, 100), 1.0)
         # N1 | N2 | S1 | S2 | FLEX1 | FLEX2
         self.assertEqual(_col_i(cards[4], 1, 10), 0)
-        # FCT_ID1..3, one per card
+        # FCT_ID1..3, one per card. The warp/weft slots take the deck's curve
+        # ids unchanged; the SHEAR slot is a SYNTHESIZED copy — see
+        # test_shear_curve_is_converted_to_degrees_and_mirrored.
         self.assertEqual(_col_i(cards[5], 1, 10), 101)
         self.assertEqual(_col_i(cards[6], 1, 10), 102)
-        self.assertEqual(_col_i(cards[7], 1, 10), 103)
+        self.assertNotEqual(_col_i(cards[7], 1, 10), 103)
+        self.assertGreaterEqual(_col_i(cards[7], 1, 10), 90001)
         self.assertEqual(len(cards), 8)
+
+    def test_shear_curve_is_converted_to_degrees_and_mirrored(self):
+        """Two disagreements about the LAW58 shear abscissa, one of them a hard
+        starter error.
+
+        UNIT: ``sigeps58c.F:528`` evaluates the shear function at
+        ``PHI = atan(TAN_PHI)*180/PI`` — the shear ANGLE IN DEGREES — while
+        LS-DYNA's LCAB abscissa is the engineering shear STRAIN. dyna2rad
+        multiplies by a flat 57, which is the small-angle approximation AND a
+        0.5 % error against 180/pi.
+
+        RANGE: ``law58_upd.F:293-311`` refuses the material unless
+        ``FUNC_INTERS_SHEAR`` finds two loading/unloading intersections
+        STRADDLING zero (``XINT1 * XINT2 > 0`` is an error), so a one-sided
+        curve is ERROR 1716 — MEASURED on the real starter, with two curves
+        that genuinely crossed on the positive side.
+        """
+        import math
+        _r, starter, _e = _convert(self._law58_deck())
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        fct3 = _col_i(cards[7], 1, 10)
+        pts = [(_col_f(p, 1, 20), _col_f(p, 21, 40))
+               for p in _cards(_block(starter, f"/FUNCT/{fct3}"))]
+        # source curve 103 is (0, 0) / (0.5, 300)
+        deg = math.degrees(math.atan(0.5))
+        self.assertEqual(len(pts), 3)
+        self.assertAlmostEqual(pts[0][0], -deg, places=8)
+        self.assertAlmostEqual(pts[0][1], -300.0)
+        self.assertEqual(pts[1], (0.0, 0.0))
+        self.assertAlmostEqual(pts[2][0], deg, places=8)
+        self.assertAlmostEqual(pts[2][1], 300.0)
+        self.assertNotAlmostEqual(deg, 0.5 * 57.0, places=2,
+                                  msg="the flat x57 dyna2rad uses is not this")
+
+    def test_a_two_sided_shear_curve_is_converted_but_not_mirrored(self):
+        """A curve the deck already states on both sides of zero is
+        converted to degrees but NOT mirrored again — mirroring it would
+        duplicate every point."""
+        two_sided = (
+            "*DEFINE_CURVE" + chr(10) + "       103" + chr(10)
+            + "                -0.5              -300.0" + chr(10)
+            + "                 0.0                 0.0" + chr(10)
+            + "                 0.5               300.0" + chr(10))
+        one_sided = (
+            "*DEFINE_CURVE" + chr(10) + "       103" + chr(10)
+            + "                 0.0                 0.0" + chr(10)
+            + "                 0.5               300.0" + chr(10))
+        curves = _CURVES_3.replace(one_sided, two_sided)
+        self.assertNotEqual(curves, _CURVES_3)
+        deck = ("*KEYWORD" + chr(10) + _MESH_ONE_QUAD
+                + _fabric_mat(form=14, curves=(101, 102, 103, 0, 0, 0))
+                + curves + _TERM)
+        _r, starter, _e = _convert(deck)
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        fct3 = _col_i(cards[7], 1, 10)
+        pts = _cards(_block(starter, f"/FUNCT/{fct3}"))
+        self.assertEqual(len(pts), 3, "already two-sided: no extra mirror")
 
     def test_flex_from_cse(self):
         _r, starter, _e = _convert(self._law58_deck(cse=1.0))
@@ -554,7 +635,7 @@ class TestFabricLaw58(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[2], 21, 40), 0.381)
         self.assertEqual(_col_i(cards[3], 61, 70), 0)      # Skew_ID
         self.assertEqual(_col_i(cards[3], 71, 80), 0)      # Ipos
-        self.assertEqual(_col_i(cards[3], 91, 100), 2)     # Ip
+        self.assertEqual(_col_i(cards[3], 91, 100), 20)    # Ip = N1->N2
         # layer card: Phi_i | Alpha_i | T_i | Z_i | mat_IDi
         self.assertAlmostEqual(_col_f(cards[4], 21, 40), 90.0,
                                msg="90 deg = an ORTHOGONAL weave")

@@ -2057,6 +2057,12 @@ class MatFabric:
     # MATERIAL-level RGBRTH wins, because LS-DYNA documents it as the
     # per-material override of the card-level BIRTH.
     sensor_tdelay: float = 0.0
+    #: The six function ids actually written into LAW58's FCT_ID1..6. Four of
+    #: them are the deck's own curve ids; the two SHEAR slots (3 and 6) are
+    #: SYNTHESIZED copies, because Radioss evaluates the shear function at an
+    #: ANGLE IN DEGREES and needs it defined on both sides of zero — see
+    #: writer/fabric.py::_law58_shear_curve.
+    fct_ids: List[int] = field(default_factory=lambda: [0] * 6)
 
     def curve_ids(self) -> List[int]:
         """The six card-7 stress/strain curve ids, zeros included."""

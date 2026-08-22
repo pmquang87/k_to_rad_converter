@@ -172,8 +172,90 @@ def _resolve_mat_fabric(state: ConversionState) -> None:
         if mat.rgbrth > 0.0:
             mat.sensor_id = state.next_id()
             mat.sensor_tdelay = mat.rgbrth
+        if mat.use_law58:
+            _resolve_law58_curves(state, mat)
         _warn_fabric_form(state, mid, mat)
         _warn_fabric_dropped_fields(state, mid, mat)
+
+
+def _resolve_law58_curves(state: ConversionState, mat: MatFabric) -> None:
+    """Fill ``mat.fct_ids`` — the six functions LAW58's FCT_ID1..6 point at.
+
+    The warp and weft slots (1, 2, 4, 5) take the deck's curve id unchanged.
+    The two SHEAR slots (3 and 6) cannot: Radioss and LS-DYNA disagree about
+    both the UNIT and the RANGE of the shear abscissa, and the second
+    disagreement is a hard starter error.
+
+    * **Unit.** ``sigeps58c.F:528`` and ``cm58_refsta.F:325-327`` evaluate the
+      shear function at ``PHI = atan(TAN_PHI) * 180 / PI`` — the shear angle in
+      DEGREES. LS-DYNA's LCAB abscissa is the engineering shear STRAIN
+      (dimensionless, ~ tan of the angle). The exact conversion is therefore
+      ``deg = atan(strain) * 180/pi``, applied per point. dyna2rad multiplies
+      the abscissa by a flat **57** (``convertmats.cxx:2760``, commented "from
+      radians to degrees"), which is both the small-angle approximation and a
+      0.5 % error against 180/pi = 57.2958 — at the 45-degree locking angle
+      that is a 21 % abscissa error.
+    * **Range.** ``law58_upd.F:293-311`` runs ``FUNC_INTERS_SHEAR`` over the
+      loading/unloading pair and refuses the material unless it finds TWO
+      intersections straddling zero (``XINT1 * XINT2 > 0`` is an error), so a
+      one-sided curve is ``ERROR 1716`` — MEASURED: a probe deck whose shear
+      curves ran only over positive angles gave "NO INTERSECTION FOUND BETWEEN
+      LOADING AND UNLOADING CURVES 203 AND 206" and ERROR TERMINATION, even
+      with the two curves genuinely crossing on the positive side. Shear is
+      SIGNED and LS-DYNA mirrors internally; Radioss wants the mirror in the
+      table. A curve that already spans both signs is converted but not
+      mirrored.
+
+    The FIBRE curves are deliberately passed through UNCHANGED, which is a
+    documented deviation from dyna2rad's engineering-to-true transform
+    (``STRAIN_RADIOSS = LN(1+STRAIN_DYNA)``, ``convertmats.cxx:2220``): the
+    engine feeds those functions ``DCC = DC - DC0``, a change in FIBRE LENGTH
+    built from ``EC(I) = EXP(ETC) - ONE``, which ``sigeps58c.F:324`` labels
+    "eng strain" in the source itself. Converting an engineering strain to a
+    true one before handing it to a law that immediately converts back would
+    be a double transform.
+    """
+    from .materials import _add_auto_curve
+    mat.fct_ids = [mat.lca, mat.lcb, 0, mat.lcua, mat.lcub, 0]
+    mat.fct_ids[2] = _law58_shear_curve(state, mat, mat.lcab, "LOAD",
+                                        _add_auto_curve)
+    mat.fct_ids[5] = _law58_shear_curve(state, mat, mat.lcuab, "UNLOAD",
+                                        _add_auto_curve)
+
+
+def _law58_shear_curve(state: ConversionState, mat: MatFabric, src: int,
+                       role: str, add_curve) -> int:
+    """One LAW58 shear function: LS-DYNA strain abscissa → Radioss DEGREES,
+    mirrored into the third quadrant. Returns the new function id (or ``src``
+    when nothing can be done with it)."""
+    import math
+    if src <= 0:
+        return 0
+    curve = state.curves.get(src)
+    if curve is None or not curve.pts:
+        state.warn(
+            f"*MAT_FABRIC {mat.mid}: the shear curve {src} is not defined in "
+            "this deck, so /MAT/LAW58 references it unchanged. A missing "
+            "function is a starter error and the deck is refused.")
+        return src
+    pts = [(math.degrees(math.atan(x)), y) for x, y in curve.pts]
+    mirrored = any(x < 0.0 for x, _y in pts)
+    if not mirrored:
+        neg = [(-x, -y) for x, y in reversed(pts) if x > 0.0]
+        pts = neg + pts
+    fid = state.next_curve_id()
+    add_curve(state, fid, f"FABRIC_{mat.mid}_SHEAR_{role}_DEG", pts)
+    state.warn(
+        f"*MAT_FABRIC {mat.mid}: the {role.lower()}ing shear curve {src} is "
+        f"re-emitted as /FUNCT {fid} — its abscissa converted from LS-DYNA's "
+        "engineering shear STRAIN to the shear ANGLE IN DEGREES Radioss "
+        "evaluates it at (sigeps58c.F:528, PHI = atan(TAN_PHI)*180/PI)"
+        + ("" if mirrored else
+           ", and MIRRORED into the third quadrant: law58_upd.F's "
+           "FUNC_INTERS_SHEAR needs two loading/unloading intersections "
+           "straddling zero and answers ERROR 1716 without them")
+        + ". The ordinate is untouched.")
+    return fid
 
 
 def _warn_fabric_form(state: ConversionState, mid: int, mat: MatFabric) -> None:
@@ -485,8 +567,10 @@ def _law58_curve_cards(mat: MatFabric) -> List[str]:
     """The optional FCT_ID1..6 cards of a /MAT/LAW58, in reader order."""
     out: List[str] = []
     b10 = " " * 10
-    loading = (mat.lca, mat.lcb, mat.lcab)
-    unloading = (mat.lcua, mat.lcub, mat.lcuab)
+    fct = mat.fct_ids or [mat.lca, mat.lcb, mat.lcab,
+                          mat.lcua, mat.lcub, mat.lcuab]
+    loading = (fct[0], fct[1], fct[2])
+    unloading = (fct[3], fct[4], fct[5])
     for label, fid in zip(("1", "2", "3"), loading):
         if fid:
             out += [f"#  FCT_ID{label}                       Fscale{label}",
@@ -494,8 +578,8 @@ def _law58_curve_cards(mat: MatFabric) -> List[str]:
     if any(unloading) and all(loading):
         out += ["#  FCT_ID4   FCT_ID5             Fscale4             Fscale5"
                 "   FCT_ID6             Fscale6",
-                f"{_i(mat.lcua)}{_i(mat.lcub)}{_f(0.0)}{_f(0.0)}"
-                f"{_i(mat.lcuab)}{_f(0.0)}"]
+                f"{_i(fct[3])}{_i(fct[4])}{_f(0.0)}{_f(0.0)}"
+                f"{_i(fct[5])}{_f(0.0)}"]
     return out
 
 
@@ -527,18 +611,39 @@ def _make_fabric_materials(state: ConversionState) -> List[str]:
 # /PROP/TYPE9 (SH_ORTH) and /PROP/TYPE16 (SH_FABR) for the fabric parts
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Radioss ``Ip`` (reference-direction flag) written on every fabric property.
+#: Radioss ``Ip`` — the reference-direction flag — written on a fabric property
+#: whose material states no usable direction vector.
 #:
-#: 2 = "the reference direction is defined by the first two nodes of each
-#: element, projected into the shell plane". A CLOSED airbag has no single
-#: global direction that is non-normal to every one of its shells, and a
-#: Vx/Vy/Vz that IS nearly normal to one is starter ``ERROR 197`` —
-#: "REFERENCE DIRECTION IS ALMOST NORMAL TO SHELL ID=%d", raised ONCE PER
-#: ELEMENT, so a bag of 5000 shells produces 5000 errors. Ip=2 is per element
-#: and cannot be normal to its own shell by construction. AOPT 2/3 (an explicit
-#: A or V vector) is honoured instead where the deck states one — see
-#: ``_fabric_ref_axis``.
-_FABRIC_IP_ELEMENT_NODES = 2
+#: **20 = "N1 ---> N2 (nodes)"**, the per-element direction from the element's
+#: own first two nodes. It is the only value that is safe on a CLOSED bag: the
+#: alternative is a single global ``Vx/Vy/Vz``, and any one vector is nearly
+#: normal to SOME shell of a closed surface, which is ``ERROR 197``
+#: ("REFERENCE DIRECTION IS ALMOST NORMAL TO SHELL ID=%d") raised **once per
+#: element**.
+#:
+#: The value is 20 and not 2, and that is not a detail: ``IRP`` is a sparse
+#: enum, not an index. ``corthini.F:122-196`` is a
+#: ``SELECT CASE (IRP)`` over exactly **0, 20, 22, 23, 24, 25** (plus 26,
+#: which skips the projection check at ``:596``), and an IRP outside it matches
+#: no branch at all — ``VX/VY/VZ`` are then never assigned, the projection at
+#: ``:597-602`` reads uninitialised memory and the ``V < EM3`` test at ``:610``
+#: fires. MEASURED: a probe deck written with ``Ip = 2`` gave the real starter
+#: **99 x ERROR 197**, one per fabric element per pass, and ERROR TERMINATION
+#: with no restart file; the same deck with ``Ip = 20`` reads 0 ERROR(S).
+_FABRIC_IP_ELEMENT_NODES = 20
+
+#: ``Ip = 23`` — "proj on the element, ``V x normal_element``". This IS
+#: LS-DYNA's AOPT = 3 ("rotating the material axes about the element normal by
+#: BETA from a line in the plane of the element defined by the cross product of
+#: the vector v with the element normal"): ``corthini.F`` CASE(23) computes
+#: ``n x v`` per element, which is ``-(v x n)`` — a 180-degree flip of
+#: direction 1, immaterial for an orthotropic material — so BETA carries over
+#: with NO offset. (dyna2rad adds +90 here, ``convertprops.cxx:1794``; that
+#: offset belongs to the SOLID path, where Radioss projects the vector instead
+#: of crossing it, and applying it on a shell rotates the warp direction by a
+#: quarter turn.) A zero vector under Ip=23 is its own error, ``MSGID 1922``
+#: (``hm_read_prop09.F:274-283``), so the vector is checked before it is used.
+_FABRIC_IP_VECTOR_CROSS_NORMAL = 23
 
 
 def _fabric_ref_axis(state: ConversionState, pid: int,
@@ -550,14 +655,14 @@ def _fabric_ref_axis(state: ConversionState, pid: int,
     plus BETA; 2 = the global vector A1/A2/A3; 3 = rotate the projection of V
     about the element normal by BETA; < 0 = a *DEFINE_COORDINATE_* id.
 
-      * ``AOPT 0`` → ``Ip = 2`` (element-node reference direction) + ``Phi =
-        BETA``. Exactly LS-DYNA's meaning and immune to ERROR 197.
+      * ``AOPT 0`` → ``Ip = 20`` (the per-element N1→N2 direction) + ``Phi =
+        BETA``. LS-DYNA's own meaning, and the only choice immune to ERROR 197
+        on a closed bag.
       * ``AOPT 2`` → the A vector in Vx/Vy/Vz with ``Ip = 0``, ``Phi = BETA``.
-      * ``AOPT 3`` → the V vector, ``Ip = 0``, ``Phi = BETA + 90`` — AOPT 3
-        measures the angle from ``v x n``, i.e. from the perpendicular of the
-        projection, which is a quarter turn from Radioss's Phi datum
-        (dyna2rad applies the same +90, convertprops.cxx:1794).
-      * ``AOPT < 0`` → warn and fall back to ``Ip = 2``; a
+      * ``AOPT 3`` → the V vector with ``Ip = 23``, ``Phi = BETA`` — Radioss
+        computes the cross product with the element normal itself there, which
+        is exactly what AOPT 3 asks for (see _FABRIC_IP_VECTOR_CROSS_NORMAL).
+      * ``AOPT < 0`` → warn and fall back to ``Ip = 20``; a
         *DEFINE_COORDINATE_* reference would need a synthesized /SKEW that
         this batch does not build.
     """
@@ -566,13 +671,14 @@ def _fabric_ref_axis(state: ConversionState, pid: int,
     if aopt == 2 and (mat.a1 or mat.a2 or mat.a3):
         return (mat.a1, mat.a2, mat.a3), beta, 0
     if aopt == 3 and (mat.v1 or mat.v2 or mat.v3):
-        return (mat.v1, mat.v2, mat.v3), beta + 90.0, 0
+        return ((mat.v1, mat.v2, mat.v3), beta,
+                _FABRIC_IP_VECTOR_CROSS_NORMAL)
     if aopt < 0:
         state.warn(
             f"*MAT_FABRIC {mat.mid} on part {pid}: AOPT={mat.aopt:g} names a "
             "*DEFINE_COORDINATE_* system for the yarn directions. This batch "
             "does not synthesize the /SKEW that would carry it, so the "
-            "property falls back to Ip=2 (the reference direction taken from "
+            "property falls back to Ip=20 (the reference direction taken from "
             "each element's first two nodes) with Phi=BETA. That is the mesh's "
             "own direction, not the coordinate system's — check the warp "
             "orientation if the fabric is strongly orthotropic.")
@@ -581,7 +687,7 @@ def _fabric_ref_axis(state: ConversionState, pid: int,
             f"*MAT_FABRIC {mat.mid} on part {pid}: AOPT={mat.aopt:g} asks for a "
             "vector-defined yarn direction but the vector "
             f"({'A1/A2/A3' if aopt == 2 else 'V1/V2/V3'}) is all zero. The "
-            "property falls back to Ip=2 (element-node reference direction) "
+            "property falls back to Ip=20 (element-node reference direction) "
             "with Phi=BETA.")
     return (0.0, 0.0, 0.0), beta, _FABRIC_IP_ELEMENT_NODES
 
@@ -609,7 +715,8 @@ def _emit_prop_type16(prop_id: int, title: str, sec: Optional[SectionShell],
                       nlayer: int, thick: float, mat_id: int,
                       is_implicit: bool, istrain: int, state: ConversionState,
                       refvec=(0.0, 0.0, 0.0), phi: float = 0.0,
-                      ip: int = 2, dm: float = 0.0) -> List[str]:
+                      ip: int = _FABRIC_IP_ELEMENT_NODES,
+                      dm: float = 0.0) -> List[str]:
     """/PROP/TYPE16 (SH_FABR) — the layered ANISOTROPIC shell property.
 
     Column layout from ``PROP/prop_p16_sh_fabr.cfg FORMAT(radioss2022)``, the
@@ -670,7 +777,8 @@ def _emit_prop_type9_fabric(prop_id: int, title: str,
                             thick: float, is_implicit: bool, istrain: int,
                             state: ConversionState,
                             refvec=(0.0, 0.0, 0.0), phi: float = 0.0,
-                            ip: int = 2, dm: float = 0.0) -> List[str]:
+                            ip: int = _FABRIC_IP_ELEMENT_NODES,
+                            dm: float = 0.0) -> List[str]:
     """/PROP/TYPE9 (SH_ORTH) for a /MAT/LAW19 fabric part.
 
     ``mesh._emit_prop_type9`` cannot be reused verbatim: it hard-codes
@@ -683,9 +791,11 @@ def _emit_prop_type9_fabric(prop_id: int, title: str,
         (``convertprops.cxx:1834``).
       * ``Ish3n = 2`` gives the standard 3-node shell formulation, so a bag
         meshed with triangles behaves like the quads beside it.
-      * ``Ip = 2`` takes the reference direction from each element's own nodes;
-        a global Vx/Vy/Vz that happens to be normal to any shell of a CLOSED
-        bag is ``ERROR 197`` once per element.
+      * ``Ip = 20`` takes the reference direction from each element's own
+        first two nodes; a global Vx/Vy/Vz that happens to be normal to any
+        shell of a CLOSED bag is ``ERROR 197`` once per element — and 20, not
+        2, because ``IRP`` is a sparse enum (see
+        ``_FABRIC_IP_ELEMENT_NODES``).
       * ``Dm`` carries the card-2 DAMP, which is where *MAT_FABRIC's Rayleigh
         damping has to go — Radioss has no damping field on LAW19.
 

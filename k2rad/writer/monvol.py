@@ -95,6 +95,37 @@ ITYPFUN_TIME_OVER_VOLUME = 3
 #: no starter diagnostic at all.
 INJECT1_IFLOW_MASS_RATE = 1
 
+#: SI factor of each unit name the ``/BEGIN`` block can carry, used to
+#: reproduce the starter's own conversion of the universal gas constant:
+#: ``hm_read_matgas.F:293`` sets ``R_IGC1 = R_IGC / FAC_M / FAC_L / FAC_L *
+#: FAC_T**2`` and stores it as ``PM(27)``. Unknown names simply skip the check.
+_UNIT_FAC_M = {"kg": 1.0, "g": 1e-3, "mg": 1e-6, "Mg": 1e3, "t": 1e3,
+               "ton": 1e3, "tonne": 1e3, "lbm": 0.45359237, "slug": 14.5939029}
+_UNIT_FAC_L = {"m": 1.0, "mm": 1e-3, "cm": 1e-2, "dm": 1e-1, "km": 1e3,
+               "in": 0.0254, "ft": 0.3048, "micro_m": 1e-6}
+_UNIT_FAC_T = {"s": 1.0, "ms": 1e-3, "micro_s": 1e-6, "mus": 1e-6,
+               "min": 60.0, "h": 3600.0}
+
+#: The universal gas constant in SI, as the starter holds it before scaling.
+_R_IGC_SI = 8.314
+
+
+def _radioss_gas_constant(state: ConversionState):
+    """``R`` in the deck's WORK units, or ``None`` when they are not known.
+
+    Reproduces ``hm_read_matgas.F:293`` exactly. This is the number the starter
+    uses to derive ``Cv = Cp - R/MW``, and it is NOT the deck's own GASC — so a
+    card whose Cp polynomial and MW are stated in a different unit system from
+    the mesh produces a wrong Cv with no starter diagnostic at all.
+    """
+    mass, length, time = state.units
+    fac_m = _UNIT_FAC_M.get(mass)
+    fac_l = _UNIT_FAC_L.get(length)
+    fac_t = _UNIT_FAC_T.get(time)
+    if not (fac_m and fac_l and fac_t):
+        return None
+    return _R_IGC_SI / fac_m / fac_l / fac_l * (fac_t * fac_t)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The surface
@@ -721,15 +752,7 @@ def _resolve_simple_airbag(state: ConversionState, ab: Airbag,
                 f"states MW={ab.mw:g}. /MAT/GAS needs MW > 0 — it forms "
                 "Cv = Cp - R/MW — so the starter will refuse the gas "
                 "(ERROR 710). Give MW, or give CV and CP directly.")
-        if ab.gasc not in (0.0,) and abs(ab.gasc - 8.314) > 0.5 * 8.314:
-            state.warn(
-                f"{kw}: GASC={ab.gasc:g} is the universal gas constant in the "
-                "deck's units. Radioss uses its OWN R (PM(27) = 8.314, echoed "
-                "as UNIVERSAL GAS CONSTANT) to form Cv = Cp - R/MW and has no "
-                "column to override it, so a deck whose R is not ~8.314 is "
-                "working in a unit system Radioss's /MAT/GAS does not share. "
-                "Convert the deck to consistent SI-like units, or state CV and "
-                "CP directly (the /MAT/GAS/CSTA path, which needs no R).")
+        _warn_gas_gamma(state, ab)
     # Injector: N_gases = 1, Iflow = 1, the LS-DYNA LCID as fun_ID_M and a
     # 2-point constant-T curve as fun_ID_T.
     ab.inject_prop_id = state.next_prop_id()
@@ -751,6 +774,58 @@ def _resolve_simple_airbag(state: ConversionState, ab: Airbag,
             "P = (sum m_k R/MW_k) T / V). A zero or negative value gives a "
             "zero-pressure bag; state T in Kelvin.")
     _resolve_airbag_vent(state, ab, add_curve)
+
+
+def _warn_gas_gamma(state: ConversionState, ab: Airbag) -> None:
+    """Compute the gamma the STARTER will compute for a ``/MAT/GAS/MASS``, and
+    say so when it is not a usable ratio of specific heats.
+
+    This is an "assert the effect" check, and it exists because the failure it
+    catches is silent. ``hm_read_monvol_type7.F`` forms::
+
+        CPI  = Cpa + Cpb*T0 + Cpc*T0^2 + Cpd*T0^3 + Cpe/T0^2 + Cpf*T0^4
+        RMWI = R_IGC1 / MW          ! R_IGC1 = PM(27), NOT the deck's GASC
+        CVI  = CPI - RMWI
+        GAMAI = CPI / CVI
+
+    and ``R_IGC1`` is 8.314 rescaled into the ``/BEGIN`` unit system
+    (``hm_read_matgas.F:293``). A card whose Cp and MW are stated in SI while
+    the mesh is in Mg/mm/s therefore gets an R three orders of magnitude too
+    large, ``CVI`` goes NEGATIVE, and the starter reports
+    ``GAMMA AT INITIAL TEMPERATURE = -3.61E-03`` with **0 ERROR(S)** and
+    TERMINATION WITH WARNING. MEASURED on a probe deck: a bag whose gas would
+    then expand the wrong way, on a run that looks clean.
+
+    Only the ``/MAT/GAS/MASS`` branch is at risk. ``/MAT/GAS/CSTA`` takes Cp
+    and Cv directly and gamma is their unit-free ratio (the starter derives MW
+    from ``R/(Cp-Cv)`` there instead), which the Cp > Cv check already covers.
+    """
+    if ab.gas_mat_kind != "MASS" or ab.mw <= 0.0:
+        return
+    r_work = _radioss_gas_constant(state)
+    if r_work is None:
+        return
+    t0 = ab.t_ext if ab.t_ext != 0.0 else 295.0
+    cpa = ab.hc_a / ab.mw
+    cpb = ab.hc_b / ab.mw
+    cpi = cpa + cpb * t0
+    cvi = cpi - r_work / ab.mw
+    if cvi > 0.0 and cpi / cvi > 1.0:
+        return
+    gama = cpi / cvi if cvi != 0.0 else float("inf")
+    state.warn(
+        f"*{ab.keyword}: the /MAT/GAS/MASS this card converts to gives the "
+        f"starter Cv = Cp - R/MW = {cpi:.6g} - {r_work / ab.mw:.6g} = "
+        f"{cvi:.6g} at T0 = {t0:g}, i.e. GAMMA = {gama:.6g} — not a usable "
+        "ratio of specific heats. Radioss does NOT use the card's own GASC: it "
+        "uses its own universal gas constant rescaled into the /BEGIN unit "
+        f"system ({state.units[0]}/{state.units[1]}/{state.units[2]} here, so "
+        f"R = {r_work:.6g}), hm_read_matgas.F:293. The usual cause is a card "
+        "whose CV/CP/A/B/MW are in SI while the mesh is in mm — the starter "
+        "reports the resulting negative GAMMA and still finishes with 0 "
+        "ERROR(S), so nothing else will tell you. Restate the gas constants "
+        "in the deck's own unit system, or give CV and CP directly (the "
+        "/MAT/GAS/CSTA path, whose gamma is their unit-free ratio).")
 
 
 def _resolve_airbag_vent(state: ConversionState, ab: Airbag,

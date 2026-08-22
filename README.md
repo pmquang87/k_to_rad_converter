@@ -2598,11 +2598,20 @@ Fabric-specific property settings, and why each is not a default:
 * `Ismstr = 4` (full geometric non-linearity) — a membrane that deploys from a
   folded state would otherwise carry the fold as stiffness;
 * `Ish3n = 2` so a bag meshed with triangles behaves like the quads beside it;
-* `Ip = 2` (reference direction from each element's own first two nodes) — on a
-  **closed** bag any single global `Vx/Vy/Vz` is nearly normal to some shell,
-  and that is `ERROR 197` raised **once per element**. An explicit `AOPT` 2 or 3
-  vector is honoured instead where the deck states one (AOPT 3 adds the 90°
-  offset, since LS-DYNA measures `BETA` from `v × n`);
+* `Ip = 20` — the reference direction taken from each element's own first two
+  nodes. On a **closed** bag any single global `Vx/Vy/Vz` is nearly normal to
+  some shell, and that is `ERROR 197` raised **once per element**. The value is
+  20 and not 2 because `IRP` is a *sparse enum*, not an index:
+  `corthini.F:122` is a `SELECT CASE (IRP)` over exactly 0 / 20 / 22 / 23 / 24 /
+  25, and an `IRP` outside it matches no branch at all — `Vx/Vy/Vz` are then
+  never assigned and the projection check at `:610` fires on uninitialised
+  memory. Measured on the real starter: a probe deck written with `Ip = 2` gave
+  **99 × ERROR 197** and ERROR TERMINATION; the same deck with `Ip = 20` reads
+  `0 ERROR(S)`. An explicit `AOPT` 2 or 3 vector is honoured where the deck
+  states one — AOPT 2 → `Ip = 0` with the vector, AOPT 3 → `Ip = 23`, which is
+  Radioss computing `n × v` per element, i.e. exactly what AOPT 3 asks for, so
+  `BETA` carries over with **no** offset (dyna2rad's +90 belongs to the solid
+  path, where Radioss projects the vector instead of crossing it);
 * `Istrain = 1` — `cinit3.F:529` gates the reference-state initial-strain pass
   on it, so an emitted `/XREF` on an `Istrain = 0` fabric part would be read,
   echoed and then do nothing;
@@ -2619,6 +2628,53 @@ Two column traps, both verified with a starter twin probe at `/BEGIN`
   from 2024, silently and with no `WARNING 100211` either way, so k2rad leaves
   them blank. `Ip` is at 91-100 at every version. (`/PROP/TYPE16` *does* have a
   real `Ipos` cell at 2022, at columns 71-80.)
+
+#### The `/MAT/LAW58` shear curves are rewritten, and why
+
+The warp and weft slots (`FCT_ID1/2/4/5`) take the deck's curve id unchanged.
+The two **shear** slots cannot, because Radioss and LS-DYNA disagree about both
+the unit and the range of the shear abscissa — and the second disagreement is a
+hard starter error:
+
+* **Unit.** `sigeps58c.F:528` evaluates the shear function at
+  `PHI = atan(TAN_PHI)·180/π` — the shear **angle in degrees** — while
+  LS-DYNA's `LCAB` abscissa is the engineering shear *strain*. k2rad applies
+  the exact `atan` conversion per point. dyna2rad multiplies by a flat **57**,
+  which is both the small-angle approximation and a 0.5 % error against
+  180/π = 57.2958 (21 % at a 45° locking angle).
+* **Range.** `law58_upd.F:293-311` runs `FUNC_INTERS_SHEAR` over the
+  loading/unloading pair and refuses the material unless it finds **two**
+  intersections straddling zero (`XINT1 * XINT2 > 0` is an error), so a
+  one-sided curve is `ERROR 1716`. Measured on the real starter with two curves
+  that genuinely crossed on the positive side. Shear is signed and LS-DYNA
+  mirrors internally; Radioss wants the mirror in the table, so k2rad adds it
+  (a curve that already spans both signs is converted but not mirrored).
+
+The **fibre** curves are deliberately passed through unchanged, which is a
+documented deviation from dyna2rad's engineering-to-true transform: the engine
+feeds those functions `DCC = DC − DC0`, a change in fibre *length* built from
+`EC(I) = EXP(ETC) − ONE`, which `sigeps58c.F:324` labels `! eng strain` in the
+source itself. Converting an engineering strain to a true one before handing it
+to a law that immediately converts back would be a double transform.
+
+#### The gas constant is the starter's, not the card's
+
+`/MAT/GAS/MASS` is the one place a converted airbag can be badly wrong with
+**zero starter errors**. `hm_read_monvol_type7.F` forms
+`Cv = Cp − R_IGC1/MW` and `gamma = Cp/Cv`, and `R_IGC1` is **not** the deck's
+`GASC`: it is 8.314 rescaled into the `/BEGIN` unit system
+(`hm_read_matgas.F:293`, `R_IGC1 = R_IGC / FAC_M / FAC_L² · FAC_T²`). A card
+whose `CV`/`CP`/`A`/`B`/`MW` are in SI while the mesh is in mm therefore gets
+an `R` three orders of magnitude too large, `Cv` goes **negative**, and the
+starter reports `GAMMA AT INITIAL TEMPERATURE = -3.61E-03` and then finishes
+with `0 ERROR(S)` and `TERMINATION WITH WARNING`.
+
+k2rad reproduces that arithmetic at conversion time — the same rescaling, the
+same `T0`, the same polynomial — and warns when the resulting gamma is not a
+usable ratio of specific heats, quoting the numbers. Measured against the real
+starter on the probe deck: converter `-0.00361041`, starter
+`-3.6102084432184E-03`. `/MAT/GAS/CSTA` is not at risk (gamma is the unit-free
+ratio of the card's own Cp and Cv, and the `Cp > Cv` check already covers it).
 
 #### Reference geometry
 
