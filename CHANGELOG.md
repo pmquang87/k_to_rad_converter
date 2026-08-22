@@ -11,6 +11,289 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The seatbelt / restraint batch:
+  `*ELEMENT_SEATBELT` → `/SPRING` on `/PROP/TYPE23` + `/MAT/LAW114` (1D) or
+  `/SHELL` on `/PROP/TYPE9` + `/MAT/LAW119` (2D),
+  `*ELEMENT_SEATBELT_SLIPRING` → `/SLIPRING/SPRING`,
+  `*ELEMENT_SEATBELT_RETRACTOR` → `/RETRACTOR/SPRING` with
+  `*ELEMENT_SEATBELT_PRETENSIONER` folded onto its card 3,
+  `*ELEMENT_SEATBELT_SENSOR` → `/SENSOR/ACCE|TIME|DIST`,
+  `*ELEMENT_SEATBELT_ACCELEROMETER` → `/ACCEL` + `/SKEW/MOV` + `/ADMAS/0`,
+  `*SECTION_SEATBELT` → `/PROP/TYPE23`, `*MAT_SEATBELT` / `*MAT_B01` (+ both
+  `_2D` spellings) → `/MAT/LAW114` or `/MAT/LAW119`, `*DATABASE_SBTOUT` →
+  `/TH/SLIPRING` + `/TH/RETRACTOR`, and `*DATABASE_HISTORY_SEATBELT` now
+  LIVE.** Eleven keywords that landed in `skipped_keywords` before, on a
+  conversion that ran to termination with the occupant unbelted.
+
+  1. **The force–strain curve crosses between the two solvers UNTOUCHED, and
+     that is a measured fact rather than an omission.** LS-DYNA's `LLCID` is
+     "the points of which are (Strain, Force). Strain is defined as engineering
+     strain"; `/MAT/LAW114`'s `fct_load` is evaluated at
+     `ε = (L − L₀)/max(L₀, LMIN)` — `r23l114def3.F:366` sets
+     `XL0 = MAX(X0, LMIN)` and `redef_seatbelt.F90:162` divides by it — and the
+     starter names the axis on the listing itself:
+     `FORCE-ENGINEERING STRAIN CURVE`. Same quantity on both axes, so `Xscale`
+     and `Fscale` stay at the reader default and no transform is applied.
+     This is the one curve in k2rad that needs none.
+
+  2. **`K` and `C` are left 0 on purpose, and `C = 0` is a MATCH.**
+     `law114_upd.F:80,126` raises `K` to the maximum curve slope ÷ `Xscale` —
+     the exact tangent — and answers `WARNING 1640` plus an overwrite if a
+     smaller one is stated, so 0 is the only value that cannot be wrong. With
+     `C = 0` the starter computes its own belt damping
+     (`SEATBELTS DEFAULT DAMPING COMPUTATION` on the listing), which is exactly
+     what LS-DYNA's 1D belt does — its damping is automatic and capped at
+     `0.1·mass·v_rel/dt`. `DAMP` on card 1 is LS-DYNA's *shell* Rayleigh
+     coefficient, so on a 1D belt nothing is lost and the note says so instead
+     of reporting a phantom gap.
+
+  3. **`ρ × Area == MPUL`, and the SPLIT decides the stiffness.** Mass is
+     `GEO(1) · max(L₀,LMIN) · RHO` (`rinit3.F:464,474`), so the product fixes
+     the mass whichever way it is split — but the area also sets
+     `XK_COMP = E·AREA` (`r23l114def3.F:224`) and through it the element time
+     step. So it comes from `*MAT_SEATBELT` card 2's `A`, the belt's real
+     cross-section, and never from `*SECTION_SEATBELT`'s `AREA`, which LS-DYNA
+     uses only for contact stiffness and defaults to 0.01 — a search parameter,
+     not a webbing section. dyna2rad reads the same cell
+     (`convertprops.cxx:2538`) and ignores the section card entirely; k2rad does
+     the same and names the drop.
+
+  4. **`Imass` is written 1 always.** It is inert for LAW114 —
+     `rinit3.F:331-334` and `:453-456` force `IMASS = 1` for `MTN == 114`, and a
+     twin probe differing only in that cell gave bit-identical total mass, total
+     inertia and every element and nodal time step. What it is not is
+     cosmetic: dyna2rad writes 2 whenever the material states no cross-section
+     (`convertprops.cxx:2549`), which makes the starter listing print
+     `SPRING VOLUME` for a number that is an area, in the one artefact an
+     engineer reads to check the model.
+
+  5. **With no card 2 the belt is TENSION-ONLY, and that is reached by writing
+     ZERO.** `hm_read_mat114.F:169-170` has the `F_MAX = INFINITY` default
+     *commented out*, so a blank `FMAX` really is 0; with `E = 0` the
+     compression tangent `E·AREA` is 0 too, and `redef_seatbelt.F90:310-311,
+     478-482` then gives no compressive force at all — LS-DYNA's "zero forces
+     being generated whenever the strain becomes negative", exactly. A
+     "helpful" non-zero `FMAX` would give the belt compressive strength the deck
+     never asked for. When card 2 IS present the LS-DYNA defaults are applied —
+     `J = 2I`, `AS = A`, `F = M = 1e20`, `R = 0.05` — because each is real
+     physics a blank cell *states*; dyna2rad's `CopyValue` does no defaulting at
+     all (`convertutilsbase.cxx:101-137`), so a blank `F` reaches LAW114 as
+     `FMAX = 0` on a deck that explicitly asked for the bending model.
+
+  6. **`SLEN` is warn-dropped with the physics cost named.** Radioss forms the
+     strain from the element's initial *geometric* length
+     (`r23l114def3.F:263` `X0 = ALDP` at `TT == 0`) and nothing on `/SPRING`,
+     `/PROP/TYPE23` or `/MAT/LAW114` shifts it — `LMIN` floors the DENOMINATOR
+     only, leaving `(L − L₀)` untouched, so it cannot express slack either. The
+     converted belt therefore starts taut: it carries load at once instead of
+     after the slack is taken up, so the occupant is restrained earlier and the
+     peak belt force is higher. Baking it into the mesh would move every other
+     element sharing those nodes, so the warning names the loss and points at
+     `/INISPRI`. dyna2rad never reads the field — `grep '"SLEN"'` over its whole
+     tree returns zero hits.
+
+  7. **The device anchorage node is SPLIT off the belt, and without it the deck
+     does not start.** LS-DYNA lets a retractor's `SBRNID` be a node of its
+     mouth element and a slipring's be the node its two strands share; Radioss
+     requires a separate COINCIDENT node — `hm_read_retractor.F:341-345` raises
+     `ERROR 2030 ANCHORAGE NODE ID=n CANNOT BE ON THE SEATBELT`, with
+     `ERROR 2029`/`2004` for the slipring. MEASURED: copying `SBRNID` straight
+     through, which is what dyna2rad does
+     (`convertelements.cxx:862 CopyValue(…, "SBRNID", "Node_ID")`), gave
+     `ERROR TERMINATION / 1 ERROR(S) / --- SEATBELTS` on the very first probe
+     deck built from a faithful LS-DYNA belt. So the BELT gets a new node at the
+     same coordinates and the ORIGINAL keeps its id and every structural
+     attachment — that direction and not the reverse, because the anchorage is
+     the thing bolted to the car and a fresh node has nothing holding it.
+     Nothing else has to constrain the new node: the device imposes the tie
+     itself as a kinematic condition (`kine_seatbelt_force.F:112-127` adds the
+     mouth node's whole force and stiffness onto the anchor and then zeroes its
+     acceleration; `kine_seatbelt_vel.F:188-190` sets its velocity to the
+     anchor's plus the material flow), which is precisely what the shared node
+     expressed.
+
+  8. **`TDEL` and the pretensioner's `TIME` fold into the sensor as a FULL
+     copy.** `/RETRACTOR/SPRING` has no `Tdel` cell at all — locking happens in
+     the same cycle the sensor's `TSTART` is passed
+     (`material_flow.F:695-702`), gated only by `LOCK_PULL >= Pullout`. So the
+     delay has to live on the sensor, and dyna2rad's duplicate copies only
+     `Sensor_Type` and `Tdelay` (`convertelements.cxx:906-916`, `:997-1004`):
+     its `/DIST` copy has `N1 = N2 = Dmin = Dmax = 0` (starter `ERROR 78`,
+     twice, under a title that prints as `538976288` = `0x20202020`), its
+     `/ACCE` copy has `Nacc = 0` and no accelerometer, and its `/TIME` copy
+     loses the original `TIME` so it fires at `TDEL` instead of `TIME + TDEL` —
+     the wrong absolute instant. Copying the whole card costs one extra id and
+     fixes all three.
+
+  9. **`SID1..SID4` become a `/SENSOR/OR` tree — k2rad exceeding the
+     reference.** LS-DYNA gives a retractor four lock sensors and a
+     pretensioner four trigger sensors, ORed; `/RETRACTOR/SPRING` has one
+     `Sens_ID1` and one `Sens_ID2`, and dyna2rad simply takes the FIRST
+     NON-ZERO of each four (`convertelements.cxx:838-846`, `:944-951`), so a
+     belt that should lock on either the sled decelerating OR the webbing
+     paying out locks only on whichever the deck listed first. `/SENSOR/OR`
+     takes exactly two inputs (`sensor_or.F:75-78`), so three or four chain —
+     and the delay is folded into the LEAVES, because the OR gate sets
+     `TSTART = TT` with no reference to its own `Tdelay`. For latching sensors
+     that is exact: `min(t₁,t₂) + d == min(t₁+d, t₂+d)`.
+
+  10. **`/SENSOR/SENS` looks like the natural delay wrapper and is NOT one.**
+      Its `Tdelay` is a STOP delay: `sensor_sens.F:110-138` activates it at the
+      input sensor's own `TSTART` with no delay added, then DEACTIVATES it at
+      `TSTART + TDELAY` and sets `STATUS = -1` ("will never wake up again").
+      Recorded because the card's field name and the starter's echo
+      (`TIME DELAY BEFORE ACTIVATION`) both suggest the opposite.
+
+  11. **`Flow_flag` is established from the ENGINE, not from the two cards'
+      field names.** `material_flow.F:266-267` grows strand 1's unstretched
+      length by `DELTA_LO` and shrinks strand 2's by the same amount, so
+      `DELTA_LO > 0` means material flowing from element 2 INTO element 1; and
+      `:253-254` blocks `FL_FLAG == 1` exactly when `DELTA_LO > 0`. So
+      `Flow_flag 1` forbids 2→1, i.e. permits only 1→2 — which is LS-DYNA's
+      `DIRECT = 12`. Anything other than 0/12/21 writes 0 with the reason
+      named; dyna2rad leaves the cell unset, which reads as the same 0 without
+      saying so.
+
+  12. **`SBPRTY 7` → `Tens_typ 4`, which dyna2rad never produces.** LS-DYNA's
+      type 7 is the INDEPENDENT pretensioner/retractor, and Radioss's
+      `Tens_typ 4` is the additive force — `material_flow.F:576-581` and `:623`
+      `YY = YY + PRETENS` — which is exactly "independent": it adds to the
+      retractor rather than replacing it. dyna2rad maps 6 and 7 both to 3
+      (`convertelements.cxx:1019`), so `Tens_typ 4` is unreachable there. The
+      full table is 1→1, 4→2, 5→1, 6→3, 7→4, 8→5; **2, 3 and 9 have no target**
+      and the whole pretensioner is dropped with the reason named, where
+      dyna2rad writes `Tens_typ = 0` with the sensor, the curve and the force
+      still attached — a retractor carrying a pretensioner's data and doing
+      nothing with it.
+
+  13. **Pretensioners are matched to retractors through a map built up front.**
+      dyna2rad's `SelectionRead selSeatbeltPretensioner` is constructed ONCE
+      outside the retractor loop (`convertelements.cxx:826`) and never
+      `Restart()`ed, although it uses `Restart()` in five other places. Both
+      selections iterate in ascending id order, so the pretensioners are
+      consumed GLOBALLY: verified on its own probe decks, a retractor with no
+      matching pretensioner eats the rest of the list (`v6`: retractor 42 got
+      no `Sens_ID2`, no `Tens_typ`, no `Force` and no `Fct_ID3` at all), and two
+      pretensioners on one retractor make the second vanish AND strand the
+      retractor after it (`v7`).
+
+  14. **`RE` runs the OTHER WAY from dyna2rad, and `PRBA` goes to `NU12`.**
+      `RCOMP` MULTIPLIES the compressive stress —
+      `law119_membrane.F:190-191` `SIGNXX = (A11·EPSXX + A12·EPSYY)·RCOMP` in
+      the compression branch — so ELIMINATING compression is a SMALL `RE`.
+      `convertmats.cxx:11047` writes `RE = (CSE==0) ? 1.0 : 0.01`, so the
+      LS-DYNA DEFAULT (CSE = 0, "eliminate compressive stresses in shell
+      fabric", `SB_MAT.cfg:142-147`) converts to a membrane with FULL
+      compressive stiffness and a deck that explicitly asked to KEEP
+      compression gets it eliminated — both directions wrong on every deck that
+      states the field. Its own `*MAT_FABRIC` route has the sign right
+      (`convertmats.cxx:2085`). Separately, `convertmats.cxx:11049` copies
+      `PRBA` into `VC`, the COATING's Poisson ratio, leaving the belt's own
+      `NU12` at 0 — while `hm_read_mat119.F:165` `IF (NUCOAT == ZERO)
+      NUCOAT = N12` shows `NUCOAT` is meant to be left blank so the reader can
+      default it. k2rad deviates on both.
+
+  15. **The LAW119 determinant is enforced before the starter refuses it.**
+      `create_seatbelt.F:903` forms `N21 = N12·FSCALET` with
+      `FSCALET = 100·Fscale22`, and `:911` `DET = 1/(1 − N12·N21)`; a negative
+      determinant is raised LATE, from `:920`, as `ERROR 307 DETERMINANT OF
+      MATERIAL MATRIX IS LESS THAN 0` under the misleading title
+      `SEATBELT MATERIAL`. With `FSCALET` = `E22/E11` that product is exactly
+      the standard 2D orthotropic condition `ν₁₂·ν₂₁ < 1`, so a deck violating
+      it states a material that cannot exist; `NU12` is clamped to the boundary
+      — the stiffness ratio is a measured property, the minor Poisson ratio is
+      what the symmetry constrains — and the deck is told. dyna2rad never writes
+      `Fscale22` at all and lets the reader default it to 0.1, which puts the
+      LS-DYNA default `PRBA = 0.3` one decimal from failure.
+
+  16. **`*DATABASE_SBTOUT` → BOTH `/TH/SLIPRING` and `/TH/RETRACTOR`.** LS-DYNA
+      writes one `sbtout` file; Radioss splits the same data across two group
+      types with separate channel sets (`hm_read_thgrou.F:1258`
+      `RINGSLIP FN F1 F2 THETA GAMMA`, `:1261` `SLIP FN LOCK` — the cfg's
+      advertised `FORCE` variable does not exist in either reader), so both are
+      emitted with different group ids (sharing one is `ERROR 79`). dyna2rad
+      handles the card only as a `dbCardList` member whose sole effect is the
+      `/TFILE` interval (`convertcards.cxx:94`), and
+      `grep -rn "TH/RETRACTOR"` over the whole of `reader/source` returns
+      **zero hits** — a retractor's force, pull-out and lock state are simply
+      unavailable there. `RINGSLIP` and `SLIP` are RUNNING TOTALS
+      (`material_flow.F:284`), already lengths, so unlike the `/TH/INTER` force
+      channels they need no differentiation; said in the warning.
+
+  17. **`*DATABASE_HISTORY_SEATBELT` splits PER ELEMENT.** dyna2rad probes
+      `elemidList[0]`'s `PID → SECID` and routes the whole list on that one
+      answer (`converttimehistory.cxx:312-340`), so a card mixing a 1D shoulder
+      belt with a 2D lap belt sends every id to one keyword and the others
+      become `ERROR 69`. k2rad reads the writer's own registries, so after the
+      screen every surviving id is in exactly one of `/TH/SPRING`, `/TH/SHEL`
+      and `/TH/SH3N`. The 2D groups take `DEF` alone: a `/MAT/LAW119` shell does
+      not stay a shell — `starter0.F:782-803` hands it to
+      `hm_convert_2d_elements_seatbelt.F`, which rewrites the part into 1D
+      springs AND rewrites every `/TH/SHEL` that named those shells into a
+      `/TH/SPRING` (`:135-141`) — and `STRAIN` is not a `/TH/SPRING` variable.
+
+  18. **The registry audit, verified rather than assumed.** A belt element is
+      the EIGHTH `/SPRING` producer, so it registers into
+      `state.spring_elem_ids` at the line that writes the row, and it is a
+      FIFTH LS-DYNA element-id namespace, so it joins `_spring_eid_families`
+      (a belt eid and a discrete eid may legally collide in the source deck and
+      both become `/SPRING`, `ERROR 79`). It joins the orphan mesh-loss census,
+      the OPTT non-solid split, `_referenced_node_ids` (with every device node —
+      slipring anchorage and orientation, retractor anchorage, sensor nodes,
+      accelerometer triad — because each is named on an emitted card without
+      owning an element), the `*INITIAL_VELOCITY_GENERATION` part scope (a sled
+      test scopes by part set, and leaving the belt out would yank it taut at
+      t=0), the joint pacing census (a belt has a time step of its own,
+      `r2len3.F:182`) and the implicit free-node guard's `elem_nodes` (a belt
+      carries stiffness; a `/BCS 111 111` there would weld it to ground). It is
+      NOT added to `--auto-gapmin`'s faceting or part-node map, to the contact
+      scoping, or to `keep_free`: a 2-node spring has no face, and the device
+      nodes carry no stiffness of their own, so pinning an orphan one changes no
+      trajectory — the same argument the `*AIRBAG_HYBRID_JETTING` node markers
+      already record.
+
+  19. **The `*INCLUDE_TRANSFORM` walks.** Four of the six device keywords need a
+      card walker rather than a declarative spec, each for a reason a flat spec
+      cannot express: `*ELEMENT_SEATBELT` calls the HANDLER's own slicer so the
+      two readers of its 8/8/8/8/8/**16**/8/8 grid cannot desync (a uniform
+      8-wide re-render moves `N3`/`N4` into the right half of `SLEN`, which
+      silently turns a 1D belt into a 2D one); a slipring's `SBID1`/`SBID2`/
+      `SBRNID` change BUCKET with the sign of `SBRNID`, and a negative `FC`/
+      `FCS` is a signed curve reference; a sensor's card-2 field 0 is a NODE on
+      SBSTYP 1/4 and a RETRACTOR on 2/5; and the retractor's and
+      pretensioner's card 2 are claimed by RAW CONTIGUITY, because an all-blank
+      card 2 is legal on both and on SBPRTY 7/8/9 the legacy cfg writes the
+      pretensioner's field 0 literally blank. Both tables are generated from the
+      SAME dict, with an assert that they cover the same spellings (#116).
+
+  20. **Validated against the real OpenRadioss starter.** A probe deck carrying
+      five belt springs, two sliprings (one scalar friction, one curve-driven),
+      a retractor with a two-sensor OR lock and a pretensioner, four sensors
+      (SBSTYP 1/2/3/4), an accelerometer, `*DATABASE_SBTOUT` and
+      `*DATABASE_HISTORY_SEATBELT`: **0 ERROR(S)**, and every card reads back
+      as written — `FORCE-ENGINEERING STRAIN CURVE = 910`,
+      `SEATBELTS DEFAULT DAMPING COMPUTATION`,
+      `MAXIMUM FORCE FOR SHEAR/COMPRESSION = 0`, the slipring's
+      `FLOW FLAG = 1 / A = 0.5500 / ED = 0.7500 / FRICD = 0.2500`, the
+      retractor's `SENSOR ID1 = <the OR gate> / PRETENSION TYPE = 2 /
+      MAXIMUM FORCE = 7777.`, and `SENSOR TYPE 5: SENSOR1 OR SENSOR2` over the
+      two delayed copies. The same deck inside an `*INCLUDE_TRANSFORM` with all
+      eight offsets distinct: **NORMAL TERMINATION, 0 ERROR(S) / 0 WARNING(S)**.
+
+  **Corpus.** MEASURED over the whole corpus, the only seatbelt keyword any
+  production deck carries is `*ELEMENT_SEATBELT_ACCELEROMETER` — 11 on the
+  Toyota Yaris and 9 on the Camry, all with `IGRAV`/`INTOPT`/`MASS` blank —
+  plus four `*DATABASE_SBTOUT` on the implicit Yaris variants. On master all of
+  them landed in `skipped_keywords` with **no warning naming the lost
+  channel**: twenty acceleration channels, which is exactly what the crash-test
+  post-processing needs. The sweep is therefore a REGRESSION check, on the same
+  footing as the batch-2 airbag sweep.
+
+  Tests: `tests/test_seatbelts.py`, **113 tests + 78 subtests**, every card
+  asserted by column with a distinct number per slot; nine load-bearing claims
+  verified by MUTATION (each fails the suite when the line is changed to what
+  dyna2rad does).
+
 - **The airbag / monitored-volume batch 2:
   `*AIRBAG_HYBRID[_JETTING][_CM]` → `/MONVOL/AIRBAG1` with `N_gases > 1` plus
   one `/MAT/GAS/MOLE` per species, `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION]
