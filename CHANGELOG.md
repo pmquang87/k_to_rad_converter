@@ -283,11 +283,35 @@ Prior history (before this changelog was introduced) is summarized in the
   **Corpus.** MEASURED over the whole corpus, the only seatbelt keyword any
   production deck carries is `*ELEMENT_SEATBELT_ACCELEROMETER` — 11 on the
   Toyota Yaris and 9 on the Camry, all with `IGRAV`/`INTOPT`/`MASS` blank —
-  plus four `*DATABASE_SBTOUT` on the implicit Yaris variants. On master all of
+  plus four `*DATABASE_SBTOUT` on the implicit Yaris variants and one keyword
+  TEMPLATE (`275key2.k`, every seatbelt card commented out). On master all of
   them landed in `skipped_keywords` with **no warning naming the lost
   channel**: twenty acceleration channels, which is exactly what the crash-test
   post-processing needs. The sweep is therefore a REGRESSION check, on the same
   footing as the batch-2 airbag sweep.
+
+  **Sweep.** 377 decks (the repo tree, the r14 dynaexamples corpus and the two
+  Toyota production decks, deduplicated by content hash), converted with master
+  and with this branch and compared by SHA-256:
+
+  * **373 byte-identical starters, 377 byte-identical engines, 0 conversion
+    errors on either side.**
+  * The only four differing decks are exactly the four that carry
+    `*ELEMENT_SEATBELT_ACCELEROMETER` (the Yaris and Camry `set-*.key` masters
+    and their two `combine.key` includes). Each loses that keyword from
+    `skipped_keywords` and gains exactly ONE warning — the one naming the
+    channels it just recovered.
+  * The seven seatbelt-carrying decks swept separately: the four
+    `*DATABASE_SBTOUT` Yaris variants move the keyword from `skipped_keywords`
+    to `recognized_not_emitted` (they define no slipring or retractor, so a
+    note is the correct answer and the warning count is unchanged), the
+    keyword-template deck is byte-identical, and the Yaris and Camry emit
+    **11 and 9 `/ACCEL` cards with their full `/SKEW/MOV` triads plus a
+    `/TH/ACCEL` group**.
+  * A deck of the Yaris/Camry shape — two accelerometers with blank
+    IGRAV/INTOPT/MASS and a `*DATABASE_SBTOUT` with no device — runs through
+    the real OpenRadioss starter to **NORMAL TERMINATION, 0 ERROR(S) /
+    0 WARNING(S)**.
 
   Tests: `tests/test_seatbelts.py`, **113 tests + 78 subtests**, every card
   asserted by column with a distinct number per slot; nine load-bearing claims
