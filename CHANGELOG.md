@@ -323,7 +323,7 @@ Prior history (before this changelog was introduced) is summarized in the
   auto-ids inside an existing message, shifted because a monitored volume draws
   from the same `next_id()` stream.
 
-  Tests: `tests/test_airbag_monvol.py`, 122 tests + 72 subtests, every card
+  Tests: `tests/test_airbag_monvol.py`, 123 tests + 72 subtests, every card
   assertion by COLUMN and every hand-computed value derived in the docstring
   (the SPV `Fscale = BETA·CN`, the `Cpa = A/MW` molar division, the
   `Pini = P0 + PE` gauge conversion, the `|SST|/2·SFST` contact gap, the exact
