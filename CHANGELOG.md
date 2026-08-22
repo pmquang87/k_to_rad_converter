@@ -268,7 +268,7 @@ Prior history (before this changelog was introduced) is summarized in the
         computes the cross product LS-DYNA's AOPT 3 defines, so BETA carries
         over with NO +90 offset.
       * The LAW58 **shear** curves needed two rewrites: the abscissa is the
-        shear ANGLE IN DEGREES (`sigeps58c.F:528`,
+        shear ANGLE IN DEGREES (`sigeps58c.F:527`,
         `PHI = atan(TAN_PHI)*180/PI`) where LS-DYNA gives an engineering shear
         STRAIN, and the curve must span BOTH signs — `law58_upd.F`'s
         `FUNC_INTERS_SHEAR` wants two loading/unloading intersections
@@ -281,8 +281,10 @@ Prior history (before this changelog was introduced) is summarized in the
         system (`hm_read_matgas.F:293`), so a gas stated in SI on a mm mesh
         gets an R three orders of magnitude too large and a NEGATIVE Cv. The
         converter now reproduces that arithmetic and warns, quoting the
-        numbers — its `-0.00361041` against the starter's
-        `-3.6102084432184E-03`.
+        numbers — its `-0.0036102085` against the starter's
+        `-3.6102084432184E-03`. (The constant is the solver's own
+        `R_IGC = 8.314472`, `constant_mod.F:932`, not the textbook 8.314; the
+        starter's `MOLECULAR WEIGHT = 2.8970286405876E-05` echo pins it.)
 
       Final state of the probe: **0 ERROR(S), TERMINATION WITH WARNING**, with
       the starter echoing 4 monitored volumes, `SURFACE ERROR(NE.0 FOR NON
@@ -302,6 +304,130 @@ Prior history (before this changelog was introduced) is summarized in the
       blocks, `SURFACE ERROR = 0.0` and `INITIAL VOLUME = 1000.0` on a surface
       the converter built as `/SURF/GRSHEL` + `/SURF/GRSH3N` under a
       `/SURF/SURF`.
+
+  19. **Review round — five defects that changed physics, each measured on the
+      real solver rather than argued.**
+
+      * **`NU12 ← PRBA` was wrong by the factor EA/EB.** LS-DYNA's `PRBA` is
+        the **minor** ratio ν_ba (`mat_034.cfg:32`) while Radioss's `NU12` is
+        the one paired with E11 (`hm_read_mat19.F:122`, `N21 = N12*E22/E11`;
+        the CFG field the reader pulls is literally `MAT_PRAB`), so
+        reciprocity gives `NU12 = PRBA·EA/EB` — the #90 lesson
+        `composites.py::_emit_mat_law93` already records for
+        *MAT_ORTHOTROPIC_ELASTIC, unapplied here. MEASURED: `EA 1000 /
+        EB 13789.5 / PRBA 0.3` gave `nu21 = 4.137`, `DETC = −0.241` and
+        `ERROR ID : 307 DETERMINANT OF MATERIAL MATRIX IS LESS THAN 0` +
+        ERROR TERMINATION; the reciprocity value 0.021755 runs to NORMAL
+        TERMINATION. The `DETC ≤ 0` screen `_emit_mat_law93` carries is added
+        alongside it. The old test could not see the defect because its
+        fixture had EB == EA, so the factor was 1.
+      * **`TSRFAC = 0` wrote `ZEROSTRESS = 1.0`, which CANCELS the reference
+        geometry it is meant to arm.** `sigeps19c.F:131-167` (and
+        `sigeps58c.F:1690-1729`, identical) gate the whole reference-state
+        block on `IF (ZEROSTRESS /= ZERO)`: a non-zero value memorises the
+        /XREF pre-stress at cycle 1, SUBTRACTS it and relaxes it away. So
+        "no tensile stress reduction" (LS-DYNA's default) is **0**, and the
+        old map was non-monotone — 0 → 1.0, 0.5 → 0.5, 1.0 → 1.0. MEASURED on
+        a 0.5 %-pre-stretched LAW19 membrane loaded to ε=+0.01 and unloaded
+        (internal energy, mJ; analytic in brackets): peak **74.41** at ZS=1 vs
+        **134.04** at ZS=0 [135.0]; end **−28.98** at ZS=1 vs **+15.78** at
+        ZS=0 [15.0]. ZS=1 halved the loading-path work and drove the internal
+        energy NEGATIVE on unload — energy returned that was never stored.
+        Both variants are starter-clean, so nothing else says so. The
+        knock-on is named: both laws read the reference-state BIRTH sensor
+        only from inside that block, so an RGBRTH delay is inert while
+        ZEROSTRESS is 0, and Radioss has no slot that holds both.
+      * **A blank `S1`/`S2` on `/MAT/LAW58` is a DERIVATION REQUEST, not "no
+        crimp".** `hm_read_mat58.F:210-211` does `IF (EMBC == ZERO) EMBC =
+        EM01`, inventing a **10 %** yarn crimp *MAT_FABRIC has no concept of —
+        starter echo `NOMINAL WARP STRETCH = 0.1000000000000`. That crimp
+        rescales both axes of every tabulated curve: the engine evaluates
+        FCT_ID1 at `DCC = sqrt(LC²+HC0²) − DC0` and projects the fibre force
+        through `LC/DC` (`sigeps58c.F:474-477,507-509`). MEASURED end-to-end
+        on a FORM=14 uniaxial deck whose LCA has slope 400: **σ_xx = 2.501 MPa
+        at ε = 0.00971, i.e. 64 % of the curve's own 3.884**. Writing
+        `S1 = S2 = 1e-4` (dyna2rad's value, `convertmats.cxx:2156-2157`) gives
+        **σ_xx = 3.89459 at ε = 0.009733 — 400.1 apparent modulus, +0.04 %
+        against the curve**, hand-derivable from the crimp geometry to 0.05 %,
+        and the EA/EB anisotropy ratio moves from 3.25× to **3.971×**
+        (target 4.0). This is the "LAW58 ordinate mapping not validated" gap
+        closed, not just a slot filled.
+      * **A blank loading curve beside a stated unloading one silently
+        dropped the whole hysteresis model.** `LCAB = 0` is legal — Vol II R16
+        card 7, "LCAB … If zero, GAB is used" — but LAW58 makes all three
+        loading functions mandatory as soon as one unloading function is set
+        (`hm_read_mat58.F:176-195`, ERROR 1578/1579/1580), so the FCT_ID4/5/6
+        card was withheld with no warning of any kind, and the /FUNCT already
+        built for LCUAB was left in the deck referenced by nothing. The blank
+        slot is now SYNTHESIZED from the analytic constant the engine itself
+        would have used — `τ(Φ) = GAB·tan Φ` in degrees for shear
+        (`sigeps58c.F:540`, which is also LS-DYNA's own `τ = GAB·γ`), the
+        linear `f(x) = E·x` for warp/weft — but **only where the slot's own
+        unloading twin is also blank**, because the reader then sets
+        `IFUNC(n+3) = IFUNC(n)` and `law58_upd.F:297,318,344` takes the
+        `FUNC == FUND` arm, which never calls the intersection search whose
+        failure is ERROR 1716. Where it cannot be synthesized the drop is
+        named by curve id.
+      * **The `/MONVOL` id allocator's fallback did not re-check the ids the
+        deck states.** `used_monvol_ids` was consulted only for the LS-DYNA
+        `_ID` value, so a bag carrying an explicit `*AIRBAG_..._ID` at or
+        above the auto-id base (90001) could be handed the same id a later
+        un-ID'd bag drew — two `/MONVOL`s under one number, starter ERROR 79,
+        the whole deck refused. `state.next_monvol_id()` joins the five
+        existing `next_*_id` guards.
+
+  20. **Two `/TH/MONV` channels were structurally INERT and the column order
+      did not match the card (#118/#122 class).** `volpvg.F` does write
+      `FSAV(1) = AMTOT` and `FSAV(5) = TEMPERATURE`, but AMTOT comes from
+      `RVOLU(20) = MI`, which `hm_read_monvol_type3.F:300-315` only derives
+      when `I_equi > 0`, and TEMPERATURE is assigned only inside
+      `IF (IEQUI > 0)` — and `_emit_monvol_gas` hard-writes `I_equi = 0` and
+      `Mini = 0`. MEASURED over 505 samples / 675 cycles of the adiabatic box:
+      MASS and T both min = max = 0 while VOL/P/A/GAMA carry real data. On
+      AIRBAG1 the same applies to `DTBAG`: `airbagb1.F:655-679` fills FSAV
+      1-12 and 15-18 and never 13, which belongs to the FVMBAG routines
+      (`fvbag1.F:1808,1832`). All three are dropped. Separately, the starter
+      SORTS the requested names into its own `VARMV` table order
+      (`hm_read_thgrou.F:1181-1186`) and the T01 columns come back in THAT
+      order — a group written `… GAMA MASS-IN … DTBAG AO UO AC UC` came back
+      with AO/UO/AC/UC in columns 6-9, mis-labelling 9 of 17 channels for
+      anyone indexing `th_to_csv` positionally. The names are now emitted
+      pre-sorted, verified column by column against a real T01
+      (`AO = 70.0 = Avent` in column 6, `ENER-INT = 2.498258E+05 = U₀` in
+      column 15). And the AIRBAG1 group now splits by VENT state instead of
+      dropping AO/UO/AC/UC for every vented bag whenever one sealed bag sits
+      beside it.
+
+  21. **The legacy `*AIRBAG_<MODEL>_1` spelling was silently skipped, and it
+      is the majority spelling in the corpus.** `dispatch()` is an exact dict
+      lookup, so `*AIRBAG_SIMPLE_PRESSURE_VOLUME_1` and
+      `*AIRBAG_SIMPLE_AIRBAG_MODEL_1` landed in `skipped_keywords` with NO
+      warning — the very hazard the registration block's own comment names.
+      MEASURED over the r14 `dynaexamples` corpus: **16 of the 28** `*AIRBAG_*`
+      occurrences use it (12 + 4), and three of the six unique airbag-carrying
+      decks — `airfilled.sphere.k` and both `tire-compression.k` — lost their
+      only pressure source while the run terminated normally. The card stack
+      is the base model's verbatim (the corpus decks carry the base model's own
+      field-name comments above each card), so the suffix is stripped by
+      `_airbag_base_keyword` and every airbag spelling is registered with and
+      without it, in HANDLERS and in `_OFFSET_SPECS` alike.
+
+  22. **Four smaller fidelity fixes.** (a) The `_ID` card is
+      `ABID(I10) HEADING(A70)` and was read by whitespace split, so a real
+      deck's `        42Driver airbag` parsed ABID as 0 and auto-renumbered the
+      bag; it now goes through the repo's column-first `_id_heading_card`.
+      (b) A zero MU beside an AREA curve (or a zero AREA beside a MU curve) was
+      promoted to `Avent = 1.0`, venting at full curve area a bag LS-DYNA
+      SEALS — `mu·A = 0` is now no vent, named. (c) `PE = 0` is warned,
+      because `hm_read_monvol_type7.F:417-418` reads a blank Pext as a request
+      for ONE ATMOSPHERE and `:421`/`:536` then derive `PINI` and the initial
+      gas mass from it, with 0 ERROR(S) either way. (d) `_off_mat_fabric` read
+      card 3 with the bare 10-char slicer instead of the module's
+      free-format-aware `_fields` — on a comma-separated *MAT_FABRIC inside an
+      *INCLUDE_TRANSFORM, FORM came back 0 and the six card-7 curve ids were
+      left un-offset while the MID on the same block and the *DEFINE_CURVEs in
+      the same include both moved (#119). It also now reads the FORM set from
+      `state.FABRIC_CURVE_FORMS` rather than a second hardcoded copy (#116).
 
   **Corpus sweep**, `master 346af1d` vs this branch, over **827 decks** (the
   repo tree, `Ryan_Lee_Examples`, `E:/openradioss_run`, `E:/foxcore_data` and
@@ -323,11 +449,70 @@ Prior history (before this changelog was introduced) is summarized in the
   auto-ids inside an existing message, shifted because a monitored volume draws
   from the same `next_id()` stream.
 
-  Tests: `tests/test_airbag_monvol.py`, 123 tests + 72 subtests, every card
+  **Re-validated on the real solver after the review round**, because three
+  of the fixes change conversion behaviour on a solver-validated path. 26
+  purpose-built decks re-converted and re-run through
+  `starter_win64.exe` + `engine_win64.exe` (Mg/mm/s, np=1, nt=4): **every one
+  NORMAL TERMINATION, 0 ERROR(S)**, the only warning being the `WARNING 863`
+  ("ELEMENT(S) IS(ARE) INITIALLY IN TENSION") that a reference geometry is for.
+  What the re-run pins:
+
+  * **LAW58 crimp.** Starter echo `NOMINAL WARP STRETCH = 1.0000000000000E-04`
+    (was 0.1), and the FORM=14 uniaxial deck whose `LCA` has slope 400 now
+    measures **σ_xx = 3.89459 MPa at ε = 0.009733** against the curve's own
+    3.8932 — **+0.04 %**, where the blank slot gave 64 %. Hand-derivable from
+    the crimp geometry (`DC0 = 1.0001`, `HC0 = 0.0141425`,
+    `DCC = 0.0097323`, `LC/DC = 0.99990` → 3.8925) to 0.05 %. The slot-swap
+    twin measures 0.98069 at ε = 0.0097248, so the EA/EB ratio is **3.971×**
+    against a target of 4.0 (it was 3.25×).
+  * **ZEROSTRESS.** The `/XREF` membrane's internal energy now reads
+    14.90 / **134.04** / **+15.78** mJ against an analytic 15.0 / 135.0 / 15.0
+    at t=0 / peak / end — the reference-geometry work is CONSUMED and the
+    unload leg no longer ends negative. The five no-`/XREF` LAW19 decks are
+    unchanged to seven digits (`IE_end` 59.3666 / 14.9522 / 60.1932 /
+    0.749167, `IE(EA)/IE(EB) = 3.97042`, CSE tension-safe ratio 1.000000),
+    which is the check that ZEROSTRESS really is inert without a reference
+    state.
+  * **`/TH/MONV` column order**, verified against a real T01 rather than the
+    card: the vented AIRBAG1 group comes back `MASS VOL P A T AO UO AC UC CP
+    CV GAMA MASS-IN ENTHA-IN ENER-INT WORK` — `AO = 70.0 = Avent` in column 6,
+    `ENER-INT = 2.498258E+05 = U₀` in column 15 — i.e. the card now describes
+    the file. `DTBAG` is gone (16 channels, not 17) and the GAS group is down
+    to its four live ones.
+  * **Nothing else moved.** The adiabatic law still tracks
+    `P = P₀(V₀/V)^1.4` to +0.00001 % (0.529171 measured vs 0.529171 predicted
+    at V₀/V = 1.5); the sealed AIRBAG1 still tracks the pinned
+    `P = 0.1 + 38.58 t` to 1e-5 % at four times; the deformable mini-bag
+    reproduces its whole balance unchanged (V +11.442 %, P 0.1 → 0.1711,
+    T 295 → 420.3, IE 2514.61, KE 78.14, EXTW 2649.19, bag WORK 2649.57,
+    contact energy 0, added mass 0).
+
+  **Review-round sweep**, `master 346af1d` vs the final branch, over a
+  **367-deck** roster (the repo tree, `data/`, the 356-deck
+  `dynaexamples_r14_ton-mm-s` corpus and the raw r14 `*AIRBAG_*`/`*MAT_FABRIC`
+  carriers that hold the legacy `_1` spellings): **0 exceptions on either
+  side**, **354 / 367 `_0000.rad` byte-identical**, and every one of the 13
+  movers carries an `*AIRBAG_*` — **0 non-carrier movers**. Two `_0001.rad`
+  differ, both copies of `volume.k` and both for the `*DATABASE_ABSTAT`
+  `/TFILE` term. Skip lists move on exactly those 13 and nowhere else, and the
+  keywords that leave them include `AIRBAG_SIMPLE_PRESSURE_VOLUME_1` on
+  `airfilled.sphere.k` and `AIRBAG_SIMPLE_AIRBAG_MODEL_1` on
+  `tire-compression.k` — the legacy-suffix fix landing on the corpus.
+  Warnings 20343 → 20439 (+96) over 38 decks; the 25 decks whose warning count
+  moves with **byte-identical** output each gain exactly +1, and it is the same
+  pre-existing part → material existence scan documented above.
+
+  Tests: `tests/test_airbag_monvol.py`, 150 tests + 184 subtests, every card
   assertion by COLUMN and every hand-computed value derived in the docstring
   (the SPV `Fscale = BETA·CN`, the `Cpa = A/MW` molar division, the
   `Pini = P0 + PE` gauge conversion, the `|SST|/2·SFST` contact gap, the exact
-  1000 mm³ of the reference box). Suite 3345/2/1055 → 3468/2/1127.
+  1000 mm³ of the reference box, the `R_work = 8314.472` unit rescale and the
+  `Cv = −286025.71` it produces on an SI gas card in a mm deck). The four
+  mutations that used to survive the whole suite — dropping the `FAC_T²` from
+  the gas-constant rescale, flipping the sign of `Cv = Cp − R/MW`, changing
+  `_R_IGC_SI`, and stubbing `_warn_gas_gamma` out entirely — are each caught
+  now, as are `_off_mat_fabric`'s free-format card-3 read and its FVOPT<0 card
+  shift. Suite 3345/2/1055 → **3495/2/1239**.
 
 - **The output / instrumentation parity batch:
   `*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM` (+ `/TH/SPRING`),

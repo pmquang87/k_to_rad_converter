@@ -2049,7 +2049,9 @@ class MatFabric:
     g31: float = 0.0
     e22: float = 0.0         # EB with the EA fallback already applied
     r_e: float = 1.0         # LAW19 compression reduction factor (CSE)
-    zerostress: float = 1.0
+    # 0 = apply the reference-state pre-stress in full (LS-DYNA TSRFAC = 0);
+    # non-zero CANCELS it and relaxes it away. See writer/fabric.py.
+    zerostress: float = 0.0
     sensor_id: int = 0       # /SENSOR/TIME id (0 = none)
     # Tdelay of that sensor: RGBRTH (card 5) or, when the deck states none, the
     # BIRTH of an *AIRBAG_REFERENCE_GEOMETRY_BIRTH covering the material's
@@ -6346,6 +6348,27 @@ class ConversionState:
         while gid in self.node_sets:
             gid = self.next_id()
         return gid
+
+    def next_monvol_id(self, used: set) -> int:
+        """A next_id() guaranteed free in the /MONVOL namespace.
+
+        /MONVOL ids are ONE Radioss namespace across PRES / AIRBAG1 / GAS /
+        LFLUID while LS-DYNA's ``*AIRBAG_<MODEL>_ID`` ids are per keyword, so
+        writer/monvol.py renumbers a colliding bag onto the auto stream. Without
+        this guard the renumbered id is never re-checked against the ids the
+        deck ITSELF states: a bag carrying an explicit ``_ID`` at or above the
+        auto-id base (90001) can be handed the very id a later un-ID'd bag then
+        draws, and both /MONVOLs go into the starter under the same number —
+        ``ERROR 79 DUPLICATE ID``, which refuses the whole deck. The failure the
+        renumbering exists to prevent, reintroduced by the renumbering.
+
+        Same guard shape as next_curve_id / next_part_id / next_prop_id /
+        next_mat_id / next_grnod_id, and a no-op vs next_id() in the common case
+        (no user airbag id that high), so it does not shift ids."""
+        mid = self.next_id()
+        while mid in used:
+            mid = self.next_id()
+        return mid
 
     def next_node_id(self) -> int:
         """Reserve and return a /NODE id guaranteed free in the NODE namespace.

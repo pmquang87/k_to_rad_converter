@@ -464,7 +464,15 @@ covering them unlocks a large class of real models.
   (`FLC`/`FAC`/`FVOPT` → an `Nporsurf` porous-surface block or `/LEAK/MAT`),
   named vent-hole SURFACES (`surf_IDv`, which needs the bag split into a bag
   part and a vent part), and `*AIRBAG_PARTICLE` (`/MONVOL/FVMBAG1`, a
-  different solver).
+  different solver). Three smaller ones recorded with them: `/MONVOL/GAS`
+  `I_equi`/`Mini` are hard-wired to 0, which is what makes the `MASS` and `T`
+  `/TH/MONV` channels structurally inert (making them settable would bring
+  both channels back); a LAW58 loading slot whose own unloading twin IS stated
+  still costs the hysteresis, because synthesizing it would feed
+  `FUNC_INTERS`/`FUNC_INTERS_SHEAR` a pair that need not cross (`ERROR 1716`);
+  and a reference-geometry BIRTH delay is inert whenever `ZEROSTRESS` is 0,
+  since both fabric laws read the sensor only from inside that block — Radioss
+  has no slot that holds both the delay and the pre-stress.
 - `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO` — **done** (_SET direct;
   _PLANE via a geometric straddle resolver; SECFORC → /TH/SECTIO).
 - Seatbelts.

@@ -91,23 +91,72 @@ def _fabric_law(mat: MatFabric) -> int:
     return 58 if (mat.form in FABRIC_CURVE_FORMS and mat.has_curves()) else 19
 
 
-def _fabric_nu12(mat: MatFabric) -> float:
-    """The Poisson's ratio written into LAW19's ``NU12``.
+def _fabric_nu12(state: ConversionState, mat: MatFabric, e22: float) -> float:
+    """The Poisson's ratio written into LAW19's ``NU12`` / LAW58's implied pair.
 
-    Radioss defines ``nu21 = NU12 * E22 / E11`` (``hm_read_mat19.F``), i.e.
+    Radioss defines ``nu21 = NU12 * E22 / E11`` (``hm_read_mat19.F:120``), i.e.
     ``NU12 / E11 == nu21 / E22`` — the standard reciprocity, so ``NU12`` is the
-    ratio that pairs with **E11**, the warp/a direction. LS-DYNA's PRAB is
-    ``nu_ab`` with a ↔ 1, so **PRAB is the field that maps**, and PRBA is its
-    reciprocal partner.
+    ratio that pairs with **E11**, the warp/a direction, and it is the MAJOR
+    ratio whenever EA > EB. The CFG field the reader pulls is literally
+    ``MAT_PRAB`` (``radioss120/MAT/matl19_fabri.cfg:30`` "Poisson Ratio 12").
 
-    PRAB is nevertheless blank on a great many decks — "For an isotropic
-    elastic fabric material, only EA and PRBA are defined" (Vol II R16 p.2-315)
-    — so PRBA is used when PRAB is not given. On an isotropic fabric the two
-    are equal and the choice is immaterial; on an orthotropic one taking PRBA
-    is what dyna2rad does (``convertmats.cxx:2049``) and is the best available
-    reading of a card that states only the minor ratio.
+    LS-DYNA's card 1 states ``PRBA`` (``mat_034.cfg:32`` "**Minor** Poissons
+    ratio ba direction") and, optionally, ``PRAB`` ("Major … ab direction").
+    So **PRAB maps 1:1** and PRBA does NOT: its compliance slot is
+    ``-nu_ba/Eb`` against Radioss's ``-NU12/E11``, and reciprocity gives
+
+        NU12 = PRBA · EA / EB
+
+    A naive ``NU12 ← PRBA`` is wrong by the factor EA/EB — exactly the #90
+    lesson ``composites.py::_emit_mat_law93`` already records for
+    *MAT_ORTHOTROPIC_ELASTIC, and it is not a rounding matter: MEASURED with
+    the real starter on ``EA=1000 / EB=13789.5 / PRBA=0.3``, the naive slot
+    gives ``nu21 = 4.137``, ``DETC = 1 - NU12*NU21 = -0.241`` and
+    ``ERROR ID : 307 DETERMINANT OF MATERIAL MATRIX IS LESS THAN 0`` +
+    ERROR TERMINATION; the reciprocity-correct 0.021755 runs to NORMAL
+    TERMINATION. (dyna2rad writes the naive PRBA, ``convertmats.cxx:2049``.)
+
+    PRAB is blank on a great many decks — "For an isotropic elastic fabric
+    material, only EA and PRBA are defined" (Vol II R16 p.2-315) — which is
+    precisely the case where EA == EB and the rescale is the identity, so the
+    common deck is unaffected by the factor and the orthotropic one is fixed.
     """
-    return mat.prab if mat.prab != 0.0 else mat.prba
+    if mat.prab != 0.0:
+        return mat.prab
+    if mat.prba == 0.0:
+        return 0.0
+    if e22 == 0.0:
+        state.warn(
+            f"*MAT_FABRIC {mat.mid}: NU12 = PRBA*EA/EB cannot be evaluated "
+            "(EB and EA are both 0) — written as 0. Supply EA.")
+        return 0.0
+    return mat.prba * mat.ea / e22
+
+
+def _warn_fabric_detc(state: ConversionState, mat: MatFabric) -> None:
+    """``1 - NU12*NU21 <= 0`` is starter ``ERROR 307`` and refuses the deck.
+
+    The same positive-definiteness screen ``_emit_mat_law93`` runs for
+    *MAT_ORTHOTROPIC_ELASTIC. ``hm_read_mat19.F:120-121`` forms
+    ``N21 = N12*E22/E11`` and ``DETC = ONE - N12*N21`` before dividing by it,
+    and ``hm_read_mat58.F`` has no Poisson coupling at all — so this is a
+    LAW19-only check, reported here because the numbers come from one place.
+    """
+    if mat.use_law58 or mat.ea == 0.0:
+        return
+    nu21 = mat.nu12 * mat.e22 / mat.ea
+    detc = 1.0 - mat.nu12 * nu21
+    if detc > 0.0:
+        return
+    state.warn(
+        f"*MAT_FABRIC {mat.mid}: DETC = 1 - NU12*NU21 = {detc:.4g} <= 0 with "
+        f"NU12={mat.nu12:g}, E11={mat.ea:g}, E22={mat.e22:g} — the starter "
+        "refuses this as a non-positive-definite material matrix "
+        "(ERROR 307, DETERMINANT OF MATERIAL MATRIX IS LESS THAN 0) and the "
+        "whole deck stops. Check the PRBA/PRAB vs EA/EB pairing: LS-DYNA's "
+        "PRBA is the MINOR ratio (nu_ba) and Radioss NU12 is the major one, "
+        "so k2rad writes NU12 = PRBA*EA/EB; a card that states the MAJOR "
+        "ratio in the PRBA column produces exactly this.")
 
 
 def _resolve_mat_fabric(state: ConversionState) -> None:
@@ -126,12 +175,15 @@ def _resolve_mat_fabric(state: ConversionState) -> None:
         return
     for mid, mat in sorted(state.mat_fabric.items()):
         mat.use_law58 = _fabric_law(mat) == 58
-        mat.nu12 = _fabric_nu12(mat)
+        # e22 FIRST: _fabric_nu12's reciprocity rescale divides by it.
         mat.e22 = mat.eb if mat.eb != 0.0 else mat.ea
+        mat.nu12 = _fabric_nu12(state, mat, mat.e22)
+        _warn_fabric_detc(state, mat)
         # G12 fallback: the isotropic shear modulus of the warp direction. The
         # commented-out legacy in dyna2rad (cm:2107) reads EA*2*(1+nu); the live
         # code divides, which is the correct G = E / (2(1+nu)).
-        iso_g = mat.ea / (2.0 * (1.0 + mat.nu12)) if mat.ea else 0.0
+        iso_g = (mat.ea / (2.0 * (1.0 + mat.nu12))
+                 if mat.ea and mat.nu12 != -1.0 else 0.0)
         mat.g12 = mat.gab if mat.gab != 0.0 else iso_g
         mat.g23 = mat.gbc if mat.gbc != 0.0 else (
             mat.gab if mat.gab != 0.0 else iso_g)
@@ -144,22 +196,43 @@ def _resolve_mat_fabric(state: ConversionState) -> None:
         # the approximation dyna2rad picked, deliberately one decade above that
         # floor so the starter does not clamp it and warn.
         mat.r_e = 1.0 if mat.cse == 0.0 else 0.01
-        # TSRFAC ("tensile stress reduction factor for the reference geometry")
-        # is the closest LS-DYNA field to Radioss's ZEROSTRESS ("REF-STATE
-        # STRESS RELAXATION FACTOR"); neither is a rename of the other, so the
-        # value is carried only when it is in range and 1.0 (arm the reference
-        # state fully) is used otherwise — the unconditional value dyna2rad
-        # writes. Both are inert unless a /XREF or /EREF covers the part.
+        # TSRFAC ("tensile stress reduction factor for the reference
+        # geometry") is the closest LS-DYNA field to Radioss's ZEROSTRESS
+        # ("REF-STATE STRESS RELAXATION FACTOR"); neither is a rename of the
+        # other, so the value is carried only when it is in range.
+        #
+        # The DEFAULT is 0, not 1, and the direction matters:
+        # sigeps19c.F:131-167 (and sigeps58c.F:1690-1729, identical) gate the
+        # WHOLE reference-state block on `IF (ZEROSTRESS /= ZERO)` — a
+        # non-zero ZEROSTRESS memorises the reference-geometry pre-stress at
+        # cycle 1, SUBTRACTS it, and then relaxes it away at that rate. So
+        # ZEROSTRESS CANCELS the pre-stress and only ZEROSTRESS = 0 applies
+        # it, which is what LS-DYNA's own "no reduction" default (TSRFAC = 0)
+        # asks for. Writing 1.0 there — dyna2rad's unconditional value,
+        # convertmats.cxx:2155 — makes the map non-monotone (0 -> 1.0,
+        # 0.5 -> 0.5, 1.0 -> 1.0) and throws the reference state away.
+        # MEASURED on a 0.5 %-pre-stretched LAW19 membrane loaded to eps=+0.01
+        # and unloaded (internal energy, mJ; analytic in brackets):
+        #   t=0    ZS=1  14.90  / ZS=0  14.90  [15.0]
+        #   peak   ZS=1  74.41  / ZS=0 134.04  [135.0]
+        #   end    ZS=1 -28.98  / ZS=0  15.78  [15.0]
+        # ZS=1 halves the loading-path work and drives the internal energy
+        # NEGATIVE on unload. Both are starter-clean, so nothing else says so.
+        # Every value is inert unless a /XREF or /EREF covers the part.
         if 0.0 < mat.tsrfac <= 1.0:
             mat.zerostress = mat.tsrfac
         else:
-            mat.zerostress = 1.0
+            mat.zerostress = 0.0
             if mat.tsrfac != 0.0:
                 state.warn(
                     f"*MAT_FABRIC {mid}: TSRFAC={mat.tsrfac:g} is outside the "
                     "0..1 range Radioss ZEROSTRESS accepts (matl19_fabri.cfg "
-                    "range-checks it), so ZEROSTRESS=1.0 is written instead. "
-                    "TSRFAC and ZEROSTRESS are the closest pair, not the same "
+                    "range-checks it, and LS-DYNA's own mat_034.cfg declares "
+                    "TSRFAC >= 0 and < 1 — a negative value names a curve of "
+                    "TSRFAC vs time, which has no ZEROSTRESS counterpart). "
+                    "ZEROSTRESS=0 is written instead, i.e. the reference-state "
+                    "pre-stress is applied in FULL and never relaxed. TSRFAC "
+                    "and ZEROSTRESS are the closest pair, not the same "
                     "quantity; the field is inert unless a reference geometry "
                     "covers the part.")
         # RGBRTH ("material-dependent reference-geometry birth time") → the
@@ -186,7 +259,7 @@ def _resolve_law58_curves(state: ConversionState, mat: MatFabric) -> None:
     both the UNIT and the RANGE of the shear abscissa, and the second
     disagreement is a hard starter error.
 
-    * **Unit.** ``sigeps58c.F:528`` and ``cm58_refsta.F:325-327`` evaluate the
+    * **Unit.** ``sigeps58c.F:527`` and ``cm58_refsta.F:325-327`` evaluate the
       shear function at ``PHI = atan(TAN_PHI) * 180 / PI`` — the shear angle in
       DEGREES. LS-DYNA's LCAB abscissa is the engineering shear STRAIN
       (dimensionless, ~ tan of the angle). The exact conversion is therefore
@@ -221,6 +294,127 @@ def _resolve_law58_curves(state: ConversionState, mat: MatFabric) -> None:
                                         _add_auto_curve)
     mat.fct_ids[5] = _law58_shear_curve(state, mat, mat.lcuab, "UNLOAD",
                                         _add_auto_curve)
+    _law58_fill_loading(state, mat, _add_auto_curve)
+    _warn_law58_unloading_dropped(state, mat)
+
+
+def _warn_law58_unloading_dropped(state: ConversionState,
+                                  mat: MatFabric) -> None:
+    """Name the unloading curves that ``_law58_curve_cards`` will withhold.
+
+    A loading slot still blank after ``_law58_fill_loading`` means its own
+    unloading twin IS stated, so the slot cannot be synthesized without
+    handing ``FUNC_INTERS``/``FUNC_INTERS_SHEAR`` a curve pair that may not
+    intersect (``ERROR 1716``). The FCT_ID4/5/6 card is then withheld —
+    otherwise the starter refuses the deck with ERROR 1578/1579/1580 — and the
+    material unloads along its LOADING path, i.e. the hysteresis is gone. That
+    is a physics change and is named, like every other dropped field here.
+    """
+    unloading = mat.fct_ids[3:]
+    if not any(unloading) or all(mat.fct_ids[:3]):
+        return
+    missing = [n for n, fid in zip(("LCA", "LCB", "LCAB"), mat.fct_ids[:3])
+               if not fid]
+    given = [f"{n}={v}" for n, v in
+             (("LCUA", mat.lcua), ("LCUB", mat.lcub), ("LCUAB", mat.lcuab))
+             if v]
+    # A synthesized shear UNLOAD /FUNCT would otherwise sit in the deck
+    # referenced by nothing.
+    if mat.fct_ids[5] and mat.fct_ids[5] != mat.lcuab:
+        state.curves.pop(mat.fct_ids[5], None)
+    mat.fct_ids[3] = mat.fct_ids[4] = mat.fct_ids[5] = 0
+    state.warn(
+        f"*MAT_FABRIC {mat.mid}: the UNLOADING curves ({', '.join(given)}) are "
+        f"DROPPED — /MAT/LAW58 makes all three LOADING functions mandatory as "
+        f"soon as one unloading function is set (hm_read_mat58.F:176-195, "
+        f"ERROR 1578/1579/1580) and {', '.join(missing)} is 0 with its own "
+        "unloading twin stated, so the blank cannot be filled from the "
+        "analytic constant without handing law58_upd.F's loading/unloading "
+        "intersection search a pair that need not cross (ERROR 1716). The "
+        "converted fabric unloads along its LOADING path: the hysteresis is "
+        f"gone. Give {', '.join(missing)} to keep it.")
+
+
+#: Shear angles (degrees) a synthesized LAW58 shear-loading curve is sampled
+#: at, mirrored into the third quadrant. The engine evaluates FCT_ID3 at
+#: ``PHI = atan(TAN_PHI)*180/PI`` (``sigeps58c.F:527``), so sampling
+#: ``tau = GAB * tan(PHI)`` on this grid reproduces LS-DYNA's own linear
+#: ``tau = GAB * gamma`` exactly at every sample and to better than 0.5 %
+#: between them. Stopping at 60 degrees keeps the table finite where tan does
+#: not; beyond it FINTER extrapolates the last segment linearly, which is
+#: SOFTER than tan and therefore the safe direction.
+_LAW58_SHEAR_SAMPLE_DEG = (5.0, 10.0, 15.0, 20.0, 25.0, 30.0,
+                           35.0, 40.0, 45.0, 50.0, 55.0, 60.0)
+
+
+def _law58_fill_loading(state: ConversionState, mat: MatFabric,
+                        add_curve) -> None:
+    """Fill a blank LOADING slot from the analytic constant the card states,
+    but only where doing so cannot create a starter error.
+
+    ``hm_read_mat58.F:154-196`` is the rule: as soon as ANY unloading curve is
+    given, all three LOADING curves become mandatory (``ERROR 1578/1579/1580``)
+    while a missing UNLOADING one is filled by copying its loading twin. A
+    perfectly legal LS-DYNA card trips that — Vol II R16 card 7 says of LCAB
+    "If zero, GAB is used", so FORM=14 with LCA/LCB tabulated, LCAB=0 and
+    LCUA/LCUB given is an ordinary deck — and the whole unloading model would
+    otherwise be dropped.
+
+    Each blank loading slot has an exact analytic twin in the engine, so the
+    synthesized function is a transcription, not a guess:
+
+      * warp / weft — ``sigeps58c.F:485,494`` fall back to
+        ``FC = (KC - HALF*KBC*DCC)*DCC`` with ``KC = EC/NC`` and ``NC`` forced
+        to 1 on the unloading branch, i.e. ``f(x) = E1*x`` for B1 = 0 (and
+        k2rad writes B1 = B2 = 0);
+      * shear — ``sigeps58c.F:540`` falls back to ``SIGNXY = G0*TAN_PHI``,
+        i.e. ``tau(PHI) = GAB*tan(PHI)``, which is also LS-DYNA's own
+        ``tau = GAB*gamma`` with ``gamma = tan(PHI)``.
+
+    **Only a slot whose UNLOADING twin is also blank is filled.** The reader
+    then sets ``IFUNC(n+3) = IFUNC(n)`` and ``law58_upd.F:297,318,344`` takes
+    the ``FUNC == FUND`` arm, which skips the loading/unloading intersection
+    search entirely — so no synthesized curve is ever fed to ``FUNC_INTERS`` /
+    ``FUNC_INTERS_SHEAR``, whose failure is ``ERROR 1716``. A slot whose
+    unloading twin IS stated keeps its blank and the unloading card is dropped
+    with a warning (``_law58_curve_cards``).
+    """
+    import math
+    if not any(mat.fct_ids[3:]):
+        return                              # no unloading model to protect
+    names = ("LCA", "LCB", "LCAB")
+    for slot, (const, name) in enumerate(
+            zip((mat.ea, mat.e22, mat.gab), names)):
+        if mat.fct_ids[slot] or mat.fct_ids[slot + 3] or const <= 0.0:
+            continue
+        if slot == 2:
+            pts = [(-d, -mat.gab * math.tan(math.radians(d)))
+                   for d in reversed(_LAW58_SHEAR_SAMPLE_DEG)]
+            pts += [(0.0, 0.0)]
+            pts += [(d, mat.gab * math.tan(math.radians(d)))
+                    for d in _LAW58_SHEAR_SAMPLE_DEG]
+            src = "GAB"
+        else:
+            pts = [(-1.0, -const), (0.0, 0.0), (1.0, const)]
+            src = "EA" if slot == 0 else "EB"
+        fid = state.next_curve_id()
+        add_curve(state, fid, f"FABRIC_{mat.mid}_{name}_FROM_{src}", pts)
+        mat.fct_ids[slot] = fid
+        state.warn(
+            f"*MAT_FABRIC {mat.mid}: {name} is 0 while an UNLOADING curve is "
+            f"given, and /MAT/LAW58 makes all three loading functions "
+            f"mandatory as soon as one unloading function is set "
+            f"(ERROR {1578 + slot}). /FUNCT {fid} is SYNTHESIZED from "
+            f"{src}={const:g} — the same analytic law the engine would have "
+            "used for the blank slot"
+            + (", tau = GAB*tan(PHI) sampled in DEGREES over +/-60 deg "
+               "(sigeps58c.F:540), which is LS-DYNA's own tau = GAB*gamma"
+               if slot == 2 else
+               f", the linear f(x) = {src}*x of sigeps58c.F's analytic fibre "
+               "branch (B1 = B2 = 0)")
+            + " — so the deck's unloading/hysteresis model survives instead of "
+            "being dropped whole. LS-DYNA's blank slot means the same thing "
+            "(Vol II R16 card 7: \"LCAB ... If zero, GAB is used\").")
 
 
 def _law58_shear_curve(state: ConversionState, mat: MatFabric, src: int,
@@ -249,7 +443,7 @@ def _law58_shear_curve(state: ConversionState, mat: MatFabric, src: int,
         f"*MAT_FABRIC {mat.mid}: the {role.lower()}ing shear curve {src} is "
         f"re-emitted as /FUNCT {fid} — its abscissa converted from LS-DYNA's "
         "engineering shear STRAIN to the shear ANGLE IN DEGREES Radioss "
-        "evaluates it at (sigeps58c.F:528, PHI = atan(TAN_PHI)*180/PI)"
+        "evaluates it at (sigeps58c.F:527, PHI = atan(TAN_PHI)*180/PI)"
         + ("" if mirrored else
            ", and MIRRORED into the third quadrant: law58_upd.F's "
            "FUNC_INTERS_SHEAR needs two loading/unloading intersections "
@@ -266,7 +460,7 @@ def _warn_fabric_form(state: ConversionState, mid: int, mat: MatFabric) -> None:
     it is named rather than left to be discovered in the results.
     """
     law = 58 if mat.use_law58 else 19
-    if mat.form in FABRIC_ELASTIC_FORMS and mat.form != 12:
+    if mat.form in FABRIC_ELASTIC_FORMS:
         note = FABRIC_FORM_NOTES.get(mat.form)
         if note is None:
             return                      # FORM 0 — LAW19 IS the faithful target
@@ -497,6 +691,32 @@ def _emit_mat_law19(mat: MatFabric) -> List[str]:
     ]
 
 
+#: /MAT/LAW58 ``S1`` / ``S2`` — the "nominal warp/weft stretch", i.e. the YARN
+#: CRIMP of a woven fabric. *MAT_FABRIC has no such concept, so the natural
+#: instinct is to leave the slot blank — and a BLANK S1/S2 is not "no crimp",
+#: it is a DERIVATION REQUEST: ``hm_read_mat58.F:210-211`` does
+#: ``IF (EMBC == ZERO) EMBC = EM01``, inventing a **10 %** crimp. MEASURED, the
+#: starter echoes ``NOMINAL WARP STRETCH = 0.1000000000000`` on a converted
+#: FORM=14 deck.
+#:
+#: That crimp rescales BOTH axes of every tabulated curve. With ``NC = NT = 1``
+#: the reader forms ``LC0 = 1``, ``DC0 = LC0*(1+EMBC)`` and
+#: ``HC0 = sqrt(DC0^2 - LC0^2)`` (``:229-233``), and ``sigeps58c.F:474-477,
+#: 507-509`` then evaluates FCT_ID1 at the FIBRE elongation
+#: ``DCC = sqrt(LC^2 + HC0^2) - DC0`` and projects the fibre force back through
+#: ``SIGNXX = FC*(LC/DC)*NC/EC2``. At eps = 0.05 with a linear f of slope E::
+#:
+#:     EMBC = 0.1   DC0 = 1.1     DCC = 0.045644  LC/DC = 0.9165  ->  -16.3 %
+#:     EMBC = 1e-4  DC0 = 1.0001  DCC = 0.049995  LC/DC = 0.9999  ->  -0.02 %
+#:
+#: i.e. the starter's own default reads the deck's stress/strain curve 16 %
+#: too soft. 1e-4 is small enough that ``DC0 ~ LC0`` and the curve is read at
+#: its own abscissa, and large enough that ``HC0 = sqrt(DC0^2-LC0^2)`` stays
+#: real and the locking-angle derivation at ``:243-248`` stays finite. It is
+#: also exactly what dyna2rad writes (``convertmats.cxx:2156-2157``).
+_LAW58_CRIMP = 1.0e-4
+
+
 def _emit_mat_law58(mat: MatFabric) -> List[str]:
     """/MAT/LAW58 (FABR_A) — anisotropic fabric with tabulated warp/weft/shear.
 
@@ -530,6 +750,8 @@ def _emit_mat_law58(mat: MatFabric) -> List[str]:
     ``Flex`` is the LAW58 analogue of LAW19's ``R_E``: LS-DYNA CSE=0 keeps the
     compressive stiffness (Flex = 1.0) and CSE=1 eliminates it (Flex = 0.01,
     the same one-decade-above-the-floor approximation R_E uses).
+
+    **S1/S2 are written, not left blank** — see ``_LAW58_CRIMP``.
     """
     b10, b20 = " " * 10, " " * 20
     flex = 1.0 if mat.cse == 0.0 else 0.01
@@ -556,7 +778,8 @@ def _emit_mat_law58(mat: MatFabric) -> List[str]:
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{b20}{_f(mat.zerostress)}",
         "#       N1        N2                  S1                  S2"
         "               FLEX1               FLEX2",
-        f"{_i(0)}{_i(0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        f"{_i(0)}{_i(0)}{_f(_LAW58_CRIMP)}{_f(_LAW58_CRIMP)}"
+        f"{_f(0.0)}{_f(0.0)}",
     ]
     lines += _law58_curve_cards(mat)
     lines.append(HDR)
@@ -567,20 +790,55 @@ def _law58_curve_cards(mat: MatFabric) -> List[str]:
     """The optional FCT_ID1..6 cards of a /MAT/LAW58, in reader order."""
     out: List[str] = []
     b10 = " " * 10
-    fct = mat.fct_ids or [mat.lca, mat.lcb, mat.lcab,
-                          mat.lcua, mat.lcub, mat.lcuab]
+    # `or` on a six-element list of zeros is TRUE, so the fallback has to test
+    # any() — an unresolved material must fall back to the deck's own card-7
+    # ids rather than silently emitting no curve card at all.
+    fct = (mat.fct_ids if any(mat.fct_ids) else
+           [mat.lca, mat.lcb, mat.lcab, mat.lcua, mat.lcub, mat.lcuab])
     loading = (fct[0], fct[1], fct[2])
     unloading = (fct[3], fct[4], fct[5])
     for label, fid in zip(("1", "2", "3"), loading):
         if fid:
             out += [f"#  FCT_ID{label}                       Fscale{label}",
                     f"{_i(fid)}{b10}{_f(0.0)}"]
+    # A blank loading slot with any unloading curve set is ERROR 1578/1579/1580
+    # — _warn_law58_unloading_dropped has already named the loss and zeroed
+    # mat.fct_ids[3:], so this only ever fires on a direct call.
     if any(unloading) and all(loading):
         out += ["#  FCT_ID4   FCT_ID5             Fscale4             Fscale5"
                 "   FCT_ID6             Fscale6",
                 f"{_i(fct[3])}{_i(fct[4])}{_f(0.0)}{_f(0.0)}"
                 f"{_i(fct[5])}{_f(0.0)}"]
     return out
+
+
+def _warn_inert_ref_sensor(state: ConversionState, mat: MatFabric) -> None:
+    """A reference-geometry BIRTH sensor is INERT while ZEROSTRESS is 0.
+
+    Both laws read the sensor only from INSIDE the ZEROSTRESS block —
+    ``sigeps19c.F:131-132`` ``IF (ZEROSTRESS /= ZERO) THEN / IF (ISENS > 0)
+    TSTART = SENSOR_TAB(ISENS)%TSTART`` and ``sigeps58c.F:248-252``
+    ``IF (ZEROSTRESS > ZERO .and. ISENS > 0) ... ELSE TSTART = ZERO``. So the
+    SENS_ID that carries *MAT_FABRIC's RGBRTH (or the card-level
+    *AIRBAG_REFERENCE_GEOMETRY_BIRTH) does nothing unless a TSRFAC is stated.
+
+    The trade is stated rather than resolved, because Radioss has no slot that
+    holds both: ZEROSTRESS = 0 applies the reference state from t=0 and drops
+    the delay; ZEROSTRESS != 0 honours the delay and then cancels the
+    reference state it was supposed to arm.
+    """
+    if not mat.sensor_id or mat.zerostress != 0.0:
+        return
+    state.warn(
+        f"*MAT_FABRIC {mat.mid}: the reference-geometry BIRTH time "
+        f"({mat.sensor_tdelay:g}) is carried on /SENSOR/{mat.sensor_id}, but "
+        "TSRFAC is 0 so ZEROSTRESS is 0 — and BOTH fabric laws read that "
+        "sensor only from inside the ZEROSTRESS block (sigeps19c.F:131-132, "
+        "sigeps58c.F:248-252), so the DELAY IS INERT: the reference state "
+        "applies from t=0. Radioss has no slot that holds both — a non-zero "
+        "ZEROSTRESS honours the delay and then CANCELS the reference state it "
+        "was supposed to arm. State TSRFAC on the *MAT_FABRIC card if the "
+        "birth time matters more than the pre-stress.")
 
 
 def _make_fabric_materials(state: ConversionState) -> List[str]:
@@ -598,6 +856,7 @@ def _make_fabric_materials(state: ConversionState) -> List[str]:
     from .loads import _emit_sensor_time      # local: loads imports mesh
     lines = ["#-  FABRIC MATERIALS (*MAT_FABRIC):", HDR]
     for _mid, mat in sorted(state.mat_fabric.items()):
+        _warn_inert_ref_sensor(state, mat)
         if mat.sensor_id:
             lines += _emit_sensor_time(
                 mat.sensor_id, f"FABRIC_{mat.mid}_REF_BIRTH", mat.sensor_tdelay)

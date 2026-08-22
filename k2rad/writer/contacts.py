@@ -1527,9 +1527,18 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
     # hm_read_inter_type07.F:403-410 resets it to 0 with WARNING 614 whenever
     # the deck has NVOLU == 0. Emitting it on a deck with no monitored volume
     # would therefore trade a real setting for a warning; the flag is gated on
-    # a bag that actually converted. _resolve_airbags (a build_starter prepass)
-    # has already run, so `dropped` is final for every airbag that failed to
-    # resolve a surface.
+    # a bag that actually converted.
+    #
+    # `dropped` is the PREPASS verdict, not the final one: _resolve_airbags (a
+    # build_starter prepass) sets it for a bag whose surface resolves to no
+    # shell, but _make_monvols sets it AGAIN when _emit_airbag_surface finds
+    # none of those shells in the emitted mesh — and this section runs first
+    # (_starter_section_registry: general_interfaces at :1469, monvols at
+    # :1507), so state.monvol_ids is still empty here and cannot be used. The
+    # residual case is therefore a bag that resolves in the prepass and then
+    # emits nothing: Ibag=1 with NVOLU == 0, which the starter resets to 0
+    # with WARNING 614. Warning-level, and strictly better than the mirror
+    # error of dropping Ibag on a deck whose bag DOES convert.
     has_monvol = any(not a.dropped for a in state.airbags)
     for c in state.contacts_general:
         self_contact = (c.ssid, c.sstyp) == (c.msid, c.mstyp)
@@ -1547,6 +1556,26 @@ def _make_general_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> L
             # and it is passed explicitly rather than through the helper.
             sfst = c.sfst if c.sfst != 0.0 else 1.0
             gapmin = abs(c.sst) / 2.0 * sfst
+            # The two diagnostics _sst_mst_to_gapmin would have emitted. They
+            # are not part of the arithmetic, and skipping the helper for the
+            # single-sided formula silently skipped them too — a negative SST
+            # was absolutised with nothing said.
+            if c.sst < 0.0:
+                state.warn(
+                    f"CONTACT {c.inter_id}: negative SST ({c.sst:g}) — using "
+                    "the magnitude for the Gapmin mapping; the "
+                    "negative-thickness projection semantics have no "
+                    f"/INTER/{tname} equivalent.")
+            if gapmin > 0.0:
+                state.warn(
+                    f"CONTACT {c.inter_id}: SST contact thickness -> "
+                    f"/INTER/{tname} Gapmin={gapmin:g} (|SST|/2 * SFST — the "
+                    "airbag card is SINGLE-sided and has no MST column, so "
+                    "the two-sided (|SST|+|MST|)/2 form does not apply). On "
+                    "an implicit deck, keep ignore=0 to retain Inacti=0 if "
+                    "Gapmin exceeds the physical clearance; ignore=1/2 (and "
+                    "any explicit deck) maps to Inacti=5, which shrinks the "
+                    "gap back to the clearance.")
         else:
             gapmin = _sst_mst_to_gapmin(c.sst, c.mst, state, c.inter_id,
                                         target=tname)

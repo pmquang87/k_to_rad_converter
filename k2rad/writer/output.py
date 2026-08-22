@@ -2132,26 +2132,68 @@ def _make_starter_th_bndout(state: ConversionState) -> List[str]:
 #:
 #:   PRES     ``volpfv.F`` / ``volpres.F`` fill FSAV 2/3/4 only, and set
 #:            FSAV(1) = 0 — a PRES bag has no gas, so MASS is a literal zero.
-#:   GAS      ``volpvg.F``: 1=AMTOT 2=VOL 3=PRES 4=AREA 5=TEMPERATURE 12=GAMA.
-#:   AIRBAG1  ``airbaga1.F`` additionally computes the mixture CP/CV, the
-#:            injected mass and enthalpy, the internal energy, the work on the
-#:            structure (RVOLU(32)) and its own time step (ITYPTS=9).
+#:   GAS      ``volpvg.F:172-181``: 2=VOL 3=PRES 4=AREA 12=GAMA. FSAV(1)=AMTOT
+#:            and FSAV(5)=TEMPERATURE are ALSO written, but both are
+#:            structurally zero on the card this converter emits: AMTOT comes
+#:            from ``RVOLU(20) = MI``, which ``hm_read_monvol_type3.F:300-315``
+#:            only derives when ``I_equi > 0``, and TEMPERATURE is assigned
+#:            only inside ``IF (IEQUI > 0)`` at ``:159-161``. ``_emit_monvol_gas``
+#:            hard-writes ``I_equi = 0`` and ``Mini = 0``, so MASS and T are
+#:            requested only if that ever becomes settable. MEASURED over 505
+#:            samples / 675 cycles of the adiabatic box: both min = max = 0
+#:            while VOL/P/A/GAMA carry real data.
+#:   AIRBAG1  ``airbagb1.F:655-679`` fills 1-12 and 15-18: the mixture CP/CV,
+#:            the injected mass and enthalpy, the internal energy and the work
+#:            on the structure (RVOLU(32)). **Not 13** — DTBAG. The bag's own
+#:            time step goes to DT2/ITYPTS=9 and never to FSAV; index 13 is
+#:            written only by the FVMBAG routines (``fvbag1.F:1808,1832``,
+#:            ``fv_up_switch.F:1614,1638``), so it belongs to the batch that
+#:            adds /MONVOL/FVMBAG1. MEASURED flat zero on a rigid sealed bag
+#:            (1336 cycles), both vented bags and a deformable mini-bag.
 #:   LFLUID   ``volp_lfluid.F``: 1=GMASS 2=VOL 3=PRES 4=AREA, plus RVOLU(54)
 #:            = the cumulative mass in, which is the MASS-IN channel.
 #:
-#: The vent channels AO/UO/AC/UC are added to an AIRBAG1 group only when that
-#: bag really has a vent hole — with Nvent=0 the outflow area is never
-#: assigned and all four are flat zero.
+#: **Order matters and is not free.** The starter sorts the requested names
+#: into its OWN ``VARMV`` table order (``hm_read_thgrou.F:1181-1186``:
+#: MASS VOL P A T AO UO AC UC CP CV GAMA DTBAG NFV MASS-IN ENTHA-IN ENER-INT
+#: WORK UPCRIT) and the T01 columns come back in that order, not in card
+#: order. Writing the names already sorted makes the card describe the file it
+#: produces — MEASURED, a group written MASS VOL P A T CP CV GAMA MASS-IN …
+#: DTBAG AO UO AC UC came back with AO/UO/AC/UC in columns 6-9, mis-labelling
+#: 9 of 17 channels for anyone reading th_to_csv positionally.
 _TH_MONV_VARS = {
     "PRES":    ("VOL", "P", "A"),
-    "GAS":     ("MASS", "VOL", "P", "A", "T", "GAMA"),
+    "GAS":     ("VOL", "P", "A", "GAMA"),
     "AIRBAG1": ("MASS", "VOL", "P", "A", "T", "CP", "CV", "GAMA",
-                "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK", "DTBAG"),
+                "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK"),
     "LFLUID":  ("MASS", "VOL", "P", "A", "MASS-IN"),
 }
 
-#: The four vent channels, appended to an AIRBAG1 group that has a vent hole.
+#: The four vent channels of an AIRBAG1 group that has a vent hole, and where
+#: they belong in VARMV order (right after T, before CP).
 _TH_MONV_VENT_VARS = ("AO", "UO", "AC", "UC")
+_TH_MONV_VENT_AFTER = "T"
+
+
+def _th_monv_groups(rad: str, ids: List[int], vented: set):
+    """``[(variables, ids), ...]`` for one /MONVOL model.
+
+    One group for every model but AIRBAG1, and for AIRBAG1 one group per VENT
+    state: the vent channels are inserted in VARMV order (right after T) for
+    the bags that have a hole and left out for the ones that do not, so no bag
+    loses a real channel to a sealed neighbour and none gains a flat zero.
+    """
+    base = list(_TH_MONV_VARS[rad])
+    if rad != "AIRBAG1":
+        return [(base, ids)]
+    at = base.index(_TH_MONV_VENT_AFTER) + 1
+    with_vent = base[:at] + list(_TH_MONV_VENT_VARS) + base[at:]
+    groups = []
+    for vars_, group_ids in ((with_vent, [i for i in ids if i in vented]),
+                             (base, [i for i in ids if i not in vented])):
+        if group_ids:
+            groups.append((vars_, group_ids))
+    return groups
 
 
 def _make_starter_th_monv(state: ConversionState) -> List[str]:
@@ -2236,18 +2278,21 @@ def _make_starter_th_monv(state: ConversionState) -> List[str]:
         ids = sorted(i for i in by_model.get(rad, []) if i in emitted)
         if not ids:
             continue
-        th_vars = list(_TH_MONV_VARS[rad])
-        if rad == "AIRBAG1" and all(i in vented for i in ids):
-            th_vars += list(_TH_MONV_VENT_VARS)
-        th_id = state.next_id()
-        lines += [
-            f"/TH/MONV/{th_id}",
-            f"TH_MONV_ABSTAT_{rad}",
-            _th_var_header(th_vars),
-        ]
-        lines += _th_var_lines(th_vars)
-        lines += _th_id_lines("MONV", ids)
-        lines.append(HDR)
+        # AIRBAG1 splits by VENT, not all-or-nothing. The four vent channels
+        # are structural zeros on a bag with Nvent=0, but withholding them
+        # from the whole group because ONE bag is unvented threw away real
+        # data for every vented bag beside it. The group is already per model;
+        # one more split costs one more group.
+        for vars_, group_ids in _th_monv_groups(rad, ids, vented):
+            th_id = state.next_id()
+            lines += [
+                f"/TH/MONV/{th_id}",
+                f"TH_MONV_ABSTAT_{rad}",
+                _th_var_header(vars_),
+            ]
+            lines += _th_var_lines(vars_)
+            lines += _th_id_lines("MONV", group_ids)
+            lines.append(HDR)
         wrote = True
     return lines if wrote else []
 

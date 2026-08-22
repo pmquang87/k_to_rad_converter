@@ -432,9 +432,13 @@ def _resolve_xref_parts(state: ConversionState) -> None:
     geometry there ("EQ.0.0: Off"), so the deviation is warned rather than left
     to be discovered in the results."""
     state.xref_part_ids = set()
+    # BEFORE the early return: _warn_airbag_ref_options also covers
+    # *AIRBAG_SHELL_REFERENCE_GEOMETRY, which never reaches this function's
+    # /XREF path at all (it becomes an /EREF), so gating it on the /XREF
+    # inputs left a _RDT on a shell-only deck silently dropped.
+    _warn_airbag_ref_options(state)
     if not state.foam_ref_geoms and not state.airbag_ref_geoms:
         return
-    _warn_airbag_ref_options(state)
     ref_nids = set()
     for ref in state.foam_ref_geoms:
         ref_nids |= set(ref.nodes)
@@ -518,10 +522,10 @@ def _resolve_xref_parts(state: ConversionState) -> None:
         state.warn(
             f"{kw}: its node table intersects no "
             "part's element nodes — no /XREF emitted (check node ids).")
-    _warn_xref_on_ref_zero(state)
+    _warn_xref_on_ref_zero(state, kw)
 
 
-def _warn_xref_on_ref_zero(state: ConversionState) -> None:
+def _warn_xref_on_ref_zero(state: ConversionState, kw: str) -> None:
     """A /XREF kept by _resolve_xref_parts whose material card says REF=0.
 
     LS-DYNA reads *INITIAL_FOAM_REFERENCE_GEOMETRY only for materials whose own
@@ -546,7 +550,7 @@ def _warn_xref_on_ref_zero(state: ConversionState) -> None:
             continue
         kw, _ = hit
         state.warn(
-            f"Reference geometry: part {pid} gets a /XREF, but "
+            f"{kw}: part {pid} gets a /XREF, but "
             f"its material ({kw} mid={part.mid}) has REF=0, which in LS-DYNA "
             "means the reference geometry is NOT used for that material "
             "(EQ.0.0: Off). The block is still emitted — dyna2rad converts the "
@@ -681,6 +685,7 @@ def _resolve_airbag_eref(state: ConversionState) -> None:
         xref_nodes |= pnodes.get(pid, set())
     missing_elems: List[int] = []
     missing_nodes: Set[int] = set()
+    short_rows: List[int] = []
     noop_elems: List[int] = []
     clash_parts: Set[int] = set()
     rows: Dict[int, Tuple[List[Tuple[int, List[int]]],
@@ -695,6 +700,13 @@ def _resolve_airbag_eref(state: ConversionState) -> None:
             bad = [n for n in nodes if n not in state.nodes]
             if bad:
                 missing_nodes.update(bad)
+                continue
+            # A truncated card leaves NO node ids at all (the handler filters
+            # n > 0 down to []), and the `bad` screen above passes vacuously on
+            # an empty list. Without this the row reaches _make_eref as an
+            # element id with zero node columns.
+            if len(nodes) < 3:
+                short_rows.append(eid)
                 continue
             if pid in state.xref_part_ids:
                 clash_parts.add(pid)
@@ -721,6 +733,13 @@ def _resolve_airbag_eref(state: ConversionState) -> None:
             "*NODE, so their elements get no /EREF row. A /EREF row takes the "
             "CURRENT coordinates of the nodes it lists, so those nodes have to "
             "exist in the model.")
+    if short_rows:
+        state.warn(
+            "*AIRBAG_SHELL_REFERENCE_GEOMETRY: element(s) "
+            f"{_fmt_eid_list(sorted(set(short_rows)))} list fewer than three "
+            "reference node ids (a truncated card), so they get no /EREF row. "
+            "An /EREF row is an element id followed by its reference nodes; "
+            "one with no node columns is not a shape.")
     if noop_elems:
         state.warn(
             "*AIRBAG_SHELL_REFERENCE_GEOMETRY: "

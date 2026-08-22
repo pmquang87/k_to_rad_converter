@@ -107,7 +107,13 @@ _UNIT_FAC_T = {"s": 1.0, "ms": 1e-3, "micro_s": 1e-6, "mus": 1e-6,
                "min": 60.0, "h": 3600.0}
 
 #: The universal gas constant in SI, as the starter holds it before scaling.
-_R_IGC_SI = 8.314
+#: The value is the solver's own ``R_IGC`` (``common_source/modules/
+#: constant_mod.F:932``), NOT the textbook 8.314 — confirmed by the starter
+#: echo on an AIRBAG1 probe, ``MOLECULAR WEIGHT = 2.8970286405876E-05``, i.e.
+#: ``R_IGC1 = 8314.47`` in Mg/mm/s. A 0.0057 % offset that no threshold here
+#: turns on, but ``_radioss_gas_constant`` claims to reproduce
+#: ``hm_read_matgas.F:293`` EXACTLY, so it uses the exact constant.
+_R_IGC_SI = 8.314472
 
 
 def _radioss_gas_constant(state: ConversionState):
@@ -404,7 +410,13 @@ def _resolve_airbags(state: ConversionState) -> None:
                     "shared across PRES/AIRBAG1/GAS/LFLUID while LS-DYNA's is "
                     "per keyword, so this monitored volume is RENUMBERED. "
                     "(dyna2rad drops the second bag silently.)")
-            mid = state.next_id()
+            # next_monvol_id, not next_id: the auto stream must also dodge the
+            # ids the deck ITSELF states, or a *AIRBAG_..._ID at or above the
+            # auto-id base collides with a later renumbered bag and the pair is
+            # starter ERROR 79.
+            mid = state.next_monvol_id(
+                used_monvol_ids | {a.airbag_id for a in state.airbags
+                                   if a.airbag_id > 0})
         used_monvol_ids.add(mid)
         ab.monvol_id = mid
         ab.surf_id = state.next_id()
@@ -773,6 +785,18 @@ def _resolve_simple_airbag(state: ConversionState, ab: Airbag,
             "Radioss needs it as an absolute temperature (it forms "
             "P = (sum m_k R/MW_k) T / V). A zero or negative value gives a "
             "zero-pressure bag; state T in Kelvin.")
+    if ab.pe == 0.0:
+        state.warn(
+            f"{kw}: PE (external pressure) is 0, which LS-DYNA reads as "
+            "\"no ambient pressure\" — the bag applies its full ABSOLUTE "
+            "pressure to the structure. Radioss reads a blank Pext as a "
+            "REQUEST FOR ONE ATMOSPHERE: hm_read_monvol_type7.F:417-418 "
+            "substitutes 101325 Pa rescaled into the /BEGIN unit system, and "
+            ":421 then sets PINI = PEXT and :536 derives the initial gas mass "
+            "MI = PINI*(VOL+VEPS)/(RMWI*TI) from it. So the converted bag "
+            "pushes P - 1 atm on the fabric AND starts pre-filled at 1 atm, "
+            "with 0 ERROR(S) either way. State PE explicitly — a tiny "
+            "non-zero value is enough to keep the substitution from firing.")
     _resolve_airbag_vent(state, ab, add_curve)
 
 
@@ -863,12 +887,27 @@ def _resolve_airbag_vent(state: ConversionState, ab: Airbag,
             "shape factor into the area curve if the product matters.")
         ab.avent = 1.0
         src = area_curve
-    elif area_curve:
-        ab.avent = mu if mu else 1.0
-        src = area_curve
-    elif mu_curve:
-        ab.avent = area if area else 1.0
-        src = mu_curve
+    elif area_curve or mu_curve:
+        # ONE of the two is a curve; the other is the constant it multiplies.
+        # A ZERO constant is not a missing value to default to 1 — LS-DYNA's
+        # leak mass flow is proportional to mu*A, so a blank MU with an AREA
+        # curve is an orifice that is CLOSED, and substituting 1.0 would vent
+        # a bag LS-DYNA seals at the full curve area (or, the other way round,
+        # put a dimensionless porosity into the AREA slot).
+        partner, pname, cname = ((mu, "MU", "AREA") if area_curve
+                                 else (area, "AREA", "MU"))
+        src = area_curve or mu_curve
+        if partner == 0.0:
+            state.warn(
+                f"{kw}: {cname} is the curve {src} but {pname} is 0, so "
+                "LS-DYNA's mu*A product is ZERO and the bag does NOT vent. No "
+                "vent hole is emitted. (A 0 here is easy to leave by "
+                f"accident: state {pname} if the curve was meant to open a "
+                "real orifice.)")
+            ab.avent = 0.0
+            src = 0
+        else:
+            ab.avent = partner
     else:
         ab.avent = mu * area
         src = 0

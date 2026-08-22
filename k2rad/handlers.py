@@ -5639,7 +5639,7 @@ def handle_contact_airbag_single_surface(block: Block,
     implicit.
     """
     raw = block.raw
-    _inter_id, _title, offset = _parse_contact_header(block)
+    inter_id, title, offset = _parse_contact_header(block)
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     iflag = to_int(f1[7]) if len(f1) > 7 else 0
     if iflag:
@@ -5657,7 +5657,6 @@ def handle_contact_airbag_single_surface(block: Block,
         handle_contact_automatic_single_surface(block, state)
         return
 
-    inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
     ssid = to_int(f1[0]) if f1 else 0
@@ -9669,6 +9668,27 @@ def _airbag_prelude(raw: List[str], offset: int):
     return f1, i
 
 
+def _airbag_base_keyword(kw: str) -> str:
+    """``AIRBAG_SIMPLE_AIRBAG_MODEL_1`` → ``AIRBAG_SIMPLE_AIRBAG_MODEL``.
+
+    The trailing ``_<digits>`` is a legacy *AIRBAG spelling that LS-DYNA reads
+    as the base model, and its card stack is byte-for-byte the documented one —
+    the corpus decks even carry the base model's own field-name comments above
+    each card (``tire-compression.k:74`` ``*AIRBAG_SIMPLE_AIRBAG_MODEL_1`` over
+    ``$#  sid sidtyp rbid vsca psca vini mwd spsf``).
+
+    It matters because ``dispatch()`` is an exact dict lookup: MEASURED over
+    the r14 dynaexamples corpus, **16 of the 28** ``*AIRBAG_*`` occurrences use
+    it (12 ``_SIMPLE_PRESSURE_VOLUME_1``, 4 ``_SIMPLE_AIRBAG_MODEL_1``) and
+    every one of them landed in ``skipped_keywords`` with NO warning — three
+    whole decks (``airfilled.sphere.k`` and both ``tire-compression.k``) lost
+    their only pressure source while the run terminated normally. Exactly the
+    hazard the registration block's own comment names.
+    """
+    base, _sep, tail = kw.rpartition("_")
+    return base if base.startswith("AIRBAG_") and tail.isdigit() else kw
+
+
 def handle_airbag(block: Block, state: ConversionState) -> None:
     """``*AIRBAG_<MODEL>[_ID][_TITLE]`` → one ``/MONVOL``.
 
@@ -9689,12 +9709,17 @@ def handle_airbag(block: Block, state: ConversionState) -> None:
     """
     raw = block.raw
     offset = _title_offset(block)
-    model = _AIRBAG_MODELS[block.keyword]
+    model = _AIRBAG_MODELS[_airbag_base_keyword(block.keyword)]
     title = _read_title(block, default=f"AIRBAG_{model}")
     airbag_id = 0
     if _has_id(block) and raw:
-        toks = parse_free(raw[0])
-        airbag_id = to_int(toks[0]) if toks else 0
+        # ABID(I10) + HEADING(A70): a real deck writes the heading at column 11
+        # with no separating space, and a free whitespace split then fuses the
+        # two ("        42Driver airbag" -> ['42Driver', 'airbag'], ABID = 0).
+        # _id_heading_card is the repo's column-first reader for exactly that
+        # card shape, free-format fallback included.
+        airbag_id, id_title = _id_heading_card(raw[0])
+        title = id_title or f"AIRBAG_{model}"
 
     f1, i3 = _airbag_prelude(raw, offset)
 
@@ -12807,16 +12832,29 @@ HANDLERS["DEFINE_FRICTION"] = handle_define_friction
 # exact lookup — an unregistered spelling lands in skipped_keywords with no
 # warning, and a skipped airbag is a bag that never inflates while the run
 # terminates normally.
+#: The LEGACY numeric suffix, generated onto every airbag spelling for the same
+#: reason the _MPP contact flavours are: MEASURED over the r14 dynaexamples
+#: corpus, 16 of the 28 *AIRBAG_* occurrences are spelled
+#: ``*AIRBAG_SIMPLE_PRESSURE_VOLUME_1`` / ``*AIRBAG_SIMPLE_AIRBAG_MODEL_1``, and
+#: without a key each of them is a bag that never inflates on a run that
+#: terminates normally. ``_airbag_base_keyword`` strips it back off inside the
+#: handler, so the card stack is read as the base model's — which it is.
+_AIRBAG_LEGACY_SUFFIXES = ("", "_1", "_2", "_3", "_4")
 for _kw in _AIRBAG_MODELS:
-    HANDLERS[_kw] = handle_airbag
+    for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+        HANDLERS[_kw + _sfx] = handle_airbag
 for _kw in _AIRBAG_UNSUPPORTED:
-    HANDLERS[_kw] = handle_airbag_unsupported
+    for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+        HANDLERS[_kw + _sfx] = handle_airbag_unsupported
 for _o1 in ("", "_JETTING", "_MULTIPLE_JETTING"):
     for _o2 in ("", "_POP"):
-        HANDLERS[f"AIRBAG_WANG_NEFSKE{_o1}{_o2}"] = handle_airbag_unsupported
+        for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+            HANDLERS[f"AIRBAG_WANG_NEFSKE{_o1}{_o2}{_sfx}"] = \
+                handle_airbag_unsupported
 for _o1 in ("", "_JETTING", "_CHEMKIN"):
-    HANDLERS[f"AIRBAG_HYBRID{_o1}"] = handle_airbag_unsupported
-del _kw, _o1, _o2
+    for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+        HANDLERS[f"AIRBAG_HYBRID{_o1}{_sfx}"] = handle_airbag_unsupported
+del _kw, _o1, _o2, _sfx
 
 # *AIRBAG_REFERENCE_GEOMETRY{_BIRTH}{_RDT}{_ID} and
 # *AIRBAG_SHELL_REFERENCE_GEOMETRY{_RDT}{_ID}. "The order of the options in
@@ -13008,6 +13046,14 @@ del _kw, _is_ortho
 #: warning, while the two eroding contacts that scope those particle nodes
 #: converted and reported themselves healthy.
 _PREFIX_HANDLERS = (
+    # *AIRBAG_* is the family where a silent skip costs the most: the mesh,
+    # materials, contacts and time history all convert, the run reaches NORMAL
+    # TERMINATION, and the bag simply never inflates. Every documented spelling
+    # has an exact key (models, unsupported models, both reference geometries,
+    # each with the legacy _<digits> suffix); this catches the UNDOCUMENTED
+    # one, which would otherwise land in skipped_keywords unnamed. It emits
+    # nothing and says so — a warn-only handler, never a card.
+    ("AIRBAG", handle_airbag_unsupported),
     ("ELEMENT_TSHELL", handle_element_tshell),
     ("ELEMENT_SPH", handle_element_sph),
     ("ELEMENT_SHELL", handle_element_shell),

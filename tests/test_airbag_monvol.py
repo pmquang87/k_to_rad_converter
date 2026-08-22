@@ -316,7 +316,11 @@ class TestFabricLaw19(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[3], 1, 20), 1.0)      # CSE=0
         self.assertEqual(cards[3][20:40].strip(), "",
                          "columns 21-40 are the dead slot the reader ignores")
-        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 1.0)     # ZEROSTRESS
+        # ZEROSTRESS: TSRFAC = 0 (blank) is LS-DYNA's "no tensile stress
+        # reduction", and sigeps19c.F:130 gates the WHOLE reference-state
+        # cancel-and-relax block on ZEROSTRESS /= 0 — so "no reduction" is 0,
+        # not 1. See test_tsrfac_maps_monotonically_onto_zerostress.
+        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 0.0)     # ZEROSTRESS
         self.assertAlmostEqual(_col_f(cards[3], 61, 80), 0.0)     # FSCALE_POR
         self.assertEqual(_col_i(cards[3], 81, 90), 0)             # SENS_ID
 
@@ -347,14 +351,46 @@ class TestFabricLaw19(unittest.TestCase):
 
     def test_nu12_prefers_prab(self):
         """Radioss nu21 = NU12*E22/E11, i.e. NU12 pairs with E11 — LS-DYNA's
-        PRAB (nu_ab, a<->1). PRBA is the fallback for the very many decks that
-        state only the minor ratio."""
+        PRAB (nu_ab, a<->1, ``mat_034.cfg:33`` "Major Poissons ratio ab")."""
         _r, starter, _e = _convert(self._law19_deck(prba=0.20, prab=0.31))
         cards = _cards(_block(starter, "/MAT/LAW19/3"))
         self.assertAlmostEqual(_col_f(cards[1], 41, 60), 0.31)
-        _r, starter, _e = _convert(self._law19_deck(prba=0.20, prab=0.0))
+
+    def test_nu12_from_prba_is_rescaled_by_reciprocity(self):
+        """PRBA is the MINOR ratio (``mat_034.cfg:32``) and Radioss NU12 the
+        MAJOR one, so the fallback is ``NU12 = PRBA*EA/EB``, not PRBA.
+
+        EA != EB on purpose: with the fixture's default EB == EA the factor is
+        1 and the naive slot is indistinguishable, which is exactly how the
+        defect survived. MEASURED with the real starter — EA=1000, EB=13789.5,
+        PRBA=0.3 written naively gives nu21 = 4.137, DETC = -0.241 and
+        ``ERROR ID : 307`` + ERROR TERMINATION; the reciprocity value 0.021755
+        gives DETC = 0.9935 and NORMAL TERMINATION.
+        """
+        _r, starter, _e = _convert(
+            self._law19_deck(prba=0.1, prab=0.0, eb=4.0 * 13789.5146))
+        cards = _cards(_block(starter, "/MAT/LAW19/3"))
+        self.assertAlmostEqual(_col_f(cards[1], 41, 60), 0.1 / 4.0)
+        # EB blank -> E22 = EA -> the rescale is the identity, which is the
+        # isotropic-fabric case the manual describes.
+        _r, starter, _e = _convert(
+            self._law19_deck(prba=0.20, prab=0.0, eb=0.0))
         cards = _cards(_block(starter, "/MAT/LAW19/3"))
         self.assertAlmostEqual(_col_f(cards[1], 41, 60), 0.20)
+
+    def test_negative_determinant_is_named_as_error_307(self):
+        """``hm_read_mat19.F:136-140``: ``DETC = 1 - N12*N21 <= 0`` is
+        ERROR 307 and refuses the whole deck.
+
+        ``NU12 = 0.6`` against ``E22 = 4*E11`` gives ``nu21 = 2.4`` and
+        ``DETC = 1 - 1.44 = -0.44``.
+        """
+        r, _s, _e = _convert(
+            self._law19_deck(prba=0.0, prab=0.6, eb=4.0 * 13789.5146))
+        self.assertTrue(_warns(r, "ERROR 307"), r.warnings)
+        # And the ordinary card does not trip it.
+        r, _s, _e = _convert(self._law19_deck())
+        self.assertFalse(_warns(r, "ERROR 307"))
 
     def test_prop_type9_columns_and_the_2024_ipos_trap(self):
         """/PROP/TYPE9 card 4: Ip at columns 91-100 and 81-90 BLANK.
@@ -451,8 +487,60 @@ class TestFabricLaw19(unittest.TestCase):
     def test_tsrfac_out_of_range_warns_and_falls_back(self):
         r, starter, _e = _convert(self._law19_deck(tsrfac=3.0))
         cards = _cards(_block(starter, "/MAT/LAW19/3"))
-        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 1.0)
+        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 0.0)
         self.assertTrue(_warns(r, "TSRFAC"))
+
+    def test_tsrfac_maps_monotonically_onto_zerostress(self):
+        """TSRFAC -> ZEROSTRESS must be MONOTONE, and 0 must map to 0.
+
+        ``sigeps19c.F:131`` (and ``sigeps58c.F:1690``, identical) gate the
+        whole reference-state block on ``IF (ZEROSTRESS /= ZERO)``: a non-zero
+        value memorises the /XREF pre-stress at cycle 1, SUBTRACTS it and then
+        relaxes it away at that rate. So ZEROSTRESS CANCELS the reference
+        state and only 0 applies it — which is what LS-DYNA's TSRFAC = 0
+        ("no tensile stress reduction") asks for.
+
+        The old map wrote 1.0 for a blank TSRFAC, i.e. 0 -> 1.0, 0.5 -> 0.5,
+        1.0 -> 1.0: non-monotone, and the 0 end armed MAXIMUM relaxation for a
+        card that asked for none. MEASURED on a 0.5 %-pre-stretched LAW19
+        membrane (internal energy, mJ; analytic in brackets): peak 74.41 at
+        ZS=1 vs 134.04 at ZS=0 [135.0], and the unload leg ends at -28.98 mJ
+        with ZS=1 — energy returned that was never stored.
+        """
+        seen = []
+        for tsrfac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            _r, starter, _e = _convert(self._law19_deck(tsrfac=tsrfac))
+            cards = _cards(_block(starter, "/MAT/LAW19/3"))
+            zs = _col_f(cards[3], 41, 60)
+            with self.subTest(tsrfac=tsrfac):
+                self.assertAlmostEqual(zs, tsrfac)
+            seen.append(zs)
+        self.assertEqual(seen, sorted(seen), "the map must be monotone")
+
+    def test_a_birth_sensor_is_named_inert_when_zerostress_is_zero(self):
+        """Both laws read the reference-state sensor only from INSIDE the
+        ZEROSTRESS block (``sigeps19c.F:131-132``,
+        ``sigeps58c.F:248-252``), so RGBRTH's /SENSOR does nothing while
+        TSRFAC is 0. Radioss has no slot that holds both the delay and the
+        pre-stress, so the trade is named rather than resolved."""
+        r, starter, _e = _convert(self._law19_deck(rgbrth=0.003))
+        self.assertIn("/SENSOR/TIME/", starter)
+        self.assertTrue(_warns(r, "DELAY IS INERT"), r.warnings)
+        # with a TSRFAC stated the sensor is live and nothing is said
+        r, starter, _e = _convert(
+            self._law19_deck(rgbrth=0.003, tsrfac=0.5))
+        self.assertIn("/SENSOR/TIME/", starter)
+        self.assertFalse(_warns(r, "DELAY IS INERT"))
+
+    def test_law58_zero_stress_takes_the_same_map(self):
+        """LAW58's ZERO_STRESS is the same field with the same engine block
+        (``sigeps58c.F:1690-1729``), so it must not drift from LAW19's."""
+        deck = ("*KEYWORD\n" + _MESH_ONE_QUAD
+                + _fabric_mat(form=14, curves=(101, 102, 103), tsrfac=0.0)
+                + _CURVES_3 + _TERM)
+        _r, starter, _e = _convert(deck)
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        self.assertAlmostEqual(_col_f(cards[4], 81, 100), 0.0)
 
     def test_liner_and_porosity_are_named_as_dropped(self):
         r, _s, _e = _convert(self._law19_deck(lratio=0.2, fvopt=7.0))
@@ -528,10 +616,13 @@ class TestFabricLaw58(unittest.TestCase):
         # G0 | GT | AlphaT | Gsh | sensor_ID
         self.assertAlmostEqual(_col_f(cards[2], 1, 20), 10548.9787)
         self.assertEqual(_col_i(cards[2], 91, 100), 0)
-        # Df | Ds | GFROT | ZERO_STRESS
-        self.assertAlmostEqual(_col_f(cards[3], 81, 100), 1.0)
+        # Df | Ds | GFROT | ZERO_STRESS (TSRFAC = 0 -> 0, see
+        # test_tsrfac_maps_monotonically_onto_zerostress)
+        self.assertAlmostEqual(_col_f(cards[3], 81, 100), 0.0)
         # N1 | N2 | S1 | S2 | FLEX1 | FLEX2
         self.assertEqual(_col_i(cards[4], 1, 10), 0)
+        self.assertAlmostEqual(_col_f(cards[4], 21, 40), 1e-4)   # S1
+        self.assertAlmostEqual(_col_f(cards[4], 41, 60), 1e-4)   # S2
         # FCT_ID1..3, one per card. The warp/weft slots take the deck's curve
         # ids unchanged; the SHEAR slot is a SYNTHESIZED copy — see
         # test_shear_curve_is_converted_to_degrees_and_mirrored.
@@ -545,7 +636,7 @@ class TestFabricLaw58(unittest.TestCase):
         """Two disagreements about the LAW58 shear abscissa, one of them a hard
         starter error.
 
-        UNIT: ``sigeps58c.F:528`` evaluates the shear function at
+        UNIT: ``sigeps58c.F:527`` evaluates the shear function at
         ``PHI = atan(TAN_PHI)*180/PI`` — the shear ANGLE IN DEGREES — while
         LS-DYNA's LCAB abscissa is the engineering shear STRAIN. dyna2rad
         multiplies by a flat 57, which is the small-angle approximation AND a
@@ -604,10 +695,10 @@ class TestFabricLaw58(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[1], 81, 100), 0.01)
 
     def test_unloading_card_written_only_with_all_three_loading_curves(self):
-        """hm_read_mat58.F: "at least one unloading curve is defined => all
-        loading curves must be defined" — a missing one is ERROR 1578/1579/1580
-        and the deck is refused. So the unloading card is withheld rather than
-        emitting a deck the starter rejects."""
+        """hm_read_mat58.F:176-195: "at least one unloading curve is defined =>
+        all loading curves must be defined" — a missing one is
+        ERROR 1578/1579/1580 and the deck is refused. So the unloading card is
+        withheld rather than emitting a deck the starter rejects."""
         _r, starter, _e = _convert(
             self._law58_deck(curves=(101, 102, 103, 104, 0, 0)))
         cards = _cards(_block(starter, "/MAT/LAW58/3"))
@@ -615,11 +706,72 @@ class TestFabricLaw58(unittest.TestCase):
         self.assertEqual(_col_i(cards[8], 1, 10), 104)     # FCT_ID4
         self.assertEqual(_col_i(cards[8], 11, 20), 0)      # FCT_ID5
         self.assertEqual(_col_i(cards[8], 61, 70), 0)      # FCT_ID6
-        # LCB missing -> no unloading card at all
-        _r, starter, _e = _convert(
-            self._law58_deck(curves=(101, 0, 103, 104, 0, 0)))
+        # LCB missing AND its own unloading twin LCUB stated -> the blank
+        # cannot be synthesized (law58_upd.F would then have to INTERSECT the
+        # synthetic loading curve with the deck's unloading one, ERROR 1716),
+        # so the whole unloading card goes and the loss is NAMED.
+        r, starter, _e = _convert(
+            self._law58_deck(curves=(101, 0, 103, 104, 105, 0)))
         cards = _cards(_block(starter, "/MAT/LAW58/3"))
         self.assertEqual(len(cards), 7)
+        self.assertTrue(_warns(r, "UNLOADING curves"), r.warnings)
+        self.assertTrue(_warns(r, "LCB"))
+
+    def test_blank_lcab_synthesizes_the_shear_loading_curve_from_gab(self):
+        """Vol II R16 card 7: "LCAB ... If zero, GAB is used". FORM=14 with
+        LCA/LCB tabulated, LCAB=0 (analytic shear) and LCUA given is an
+        ORDINARY LS-DYNA deck, and dropping its unloading curves for it lost
+        the hysteresis silently.
+
+        The synthesized FCT_ID3 is ``tau(PHI) = GAB*tan(PHI)`` in DEGREES —
+        the engine's own analytic fallback (``sigeps58c.F:540``
+        ``SIGNXY = G0*TAN_PHI``) and LS-DYNA's own ``tau = GAB*gamma``. It is
+        safe precisely because LCUAB is blank too: the reader then sets
+        ``IFUNC(6) = IFUNC(3)`` and ``law58_upd.F:344`` takes the
+        ``FUNC == FUND`` arm, which never calls FUNC_INTERS_SHEAR.
+        """
+        import math
+        r, starter, _e = _convert(
+            self._law58_deck(curves=(101, 102, 0, 104, 0, 0)))
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        self.assertEqual(len(cards), 9, "the unloading card survives")
+        self.assertEqual(_col_i(cards[8], 1, 10), 104)          # FCT_ID4
+        self.assertEqual(_col_i(cards[8], 61, 70), 0)           # FCT_ID6 blank
+        fct3 = _col_i(cards[7], 1, 10)
+        self.assertGreaterEqual(fct3, 90001)
+        pts = [(_col_f(p, 1, 20), _col_f(p, 21, 40))
+               for p in _cards(_block(starter, f"/FUNCT/{fct3}"))]
+        self.assertEqual(len(pts), 25)                          # 12 + 0 + 12
+        self.assertEqual(pts[12], (0.0, 0.0))
+        for x, y in pts:
+            self.assertAlmostEqual(
+                y, 10548.9787 * math.tan(math.radians(x)), places=3)
+        self.assertTrue(_warns(r, "SYNTHESIZED"), r.warnings)
+        self.assertFalse(_warns(r, "UNLOADING curves"))
+
+    def test_synthesis_is_skipped_when_the_constant_is_zero_too(self):
+        """GAB = 0 with no LCAB leaves nothing to synthesize from, so the
+        unloading card is dropped and named rather than guessed at."""
+        r, starter, _e = _convert(
+            self._law58_deck(curves=(101, 102, 0, 104, 0, 0), gab=0.0))
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        self.assertEqual(len(cards), 7)
+        self.assertTrue(_warns(r, "UNLOADING curves"))
+
+    def test_synthesized_unloading_shear_curve_is_not_left_dangling(self):
+        """When the unloading card IS dropped, the /FUNCT that
+        ``_law58_shear_curve`` already built for LCUAB must not stay in the
+        deck referenced by nothing."""
+        r, starter, _e = _convert(
+            self._law58_deck(curves=(101, 0, 103, 0, 105, 103)))
+        cards = _cards(_block(starter, "/MAT/LAW58/3"))
+        self.assertEqual(len(cards), 7)
+        referenced = {_col_i(c, 1, 10) for c in cards[5:]}
+        for blk in _blocks(starter, "/FUNCT/"):
+            fid = int(blk[0].rsplit("/", 1)[1])
+            if "SHEAR_UNLOAD" in blk[1]:
+                self.fail(f"/FUNCT/{fid} ({blk[1]}) is emitted but unused")
+        self.assertTrue(referenced)
 
     def test_prop_type16_columns(self):
         """/PROP/TYPE16 (SH_FABR). Ipos IS a real cell here at 2022 (columns
@@ -780,6 +932,65 @@ class TestFabricDispatchAndOffsets(unittest.TestCase):
         self.assertEqual([int(b.raw[5][i * 10:(i + 1) * 10] or 0)
                           for i in range(3)], [601, 602, 603])
 
+    def test_include_transform_reads_card3_free_format_too(self):
+        """``_off_mat_fabric`` must read card 3 with the module's free-format
+        aware ``_fields``, not the bare 10-char slicer (#119).
+
+        On a comma-separated *MAT_FABRIC the slicer reads FORM out of the
+        wrong columns, ``form`` comes back 0 and the six card-7 curve ids are
+        silently left UN-offset — while the MID on the same block IS offset
+        (``_rewrite_line`` goes through ``_split_card``) and so are the
+        *DEFINE_CURVE ids in the same include, leaving the material pointing
+        at the parent deck's curve numbers. The HANDLER reads the same card
+        through ``_card(..., fixed=True)``'s free-format fallback and gets
+        FORM=14, so the two disagreed.
+        """
+        deck = ("*KEYWORD\n*MAT_FABRIC\n"
+                "3,1.0687e-9,13789.5,13789.5,,0.35,0.35\n"
+                "10548.9,,,0.0,0.0,0.0,0.0,0.0\n"
+                "0.0,0.0,0.0,0.0,0.0,14,0.0,0.0\n"
+                ",0.0,0.0,1.0,0.0,0.0,0.0,0.0\n"
+                "0.0,0.0,0.0,,,,0.0,0\n"
+                "101,102,103,0,0,0,0.0\n")
+        b = [x for x in _parse_str(deck) if x.keyword == "MAT_FABRIC"][0]
+        # the handler's own reading of the same block, for the comparison
+        st = _dispatch(deck)
+        self.assertEqual(st.mat_fabric[3].form, 14)
+        self.assertEqual(st.mat_fabric[3].lca, 101)
+        _offset_block(b, _OFFSET_SPECS["MAT_FABRIC"],
+                      {"m": 1000, "f": 500}, lambda *_a: None)
+        self.assertEqual([int(t) for t in b.raw[5].split(",")[:3]],
+                         [601, 602, 603])
+        self.assertEqual(int(b.raw[0].split(",")[0]), 1003)
+
+    def test_include_transform_honours_the_fvopt_card_shift(self):
+        """FVOPT < 0 inserts the L/R/C1/C2/C3 leakage card 4, so card 7 sits
+        one line lower. Collapsing the shift would offset the LEAKAGE
+        constants as curve ids and leave the real curve run behind."""
+        deck = ("*KEYWORD\n"
+                + _fabric_mat(form=14, fvopt=-1.0,
+                              curves=(101, 102, 103, 0, 0, 0)))
+        b = [x for x in _parse_str(deck) if x.keyword == "MAT_FABRIC"][0]
+        leakage = b.raw[3]
+        _offset_block(b, _OFFSET_SPECS["MAT_FABRIC"],
+                      {"m": 1000, "f": 500}, lambda *_a: None)
+        self.assertEqual(b.raw[3], leakage, "the leakage card is DATA")
+        self.assertEqual([int(b.raw[6][i * 10:(i + 1) * 10] or 0)
+                          for i in range(3)], [601, 602, 603])
+        # and the un-shifted line (where card 7 would be without card 4)
+        # keeps its own contents
+        self.assertEqual(int(b.raw[5][0:10] or 0), 0)
+
+    def test_the_form_set_comes_from_one_place(self):
+        """``_off_mat_fabric`` reads ``state.FABRIC_CURVE_FORMS``, the set the
+        parser and ``_fabric_law`` also read — two sources for one set is the
+        #116 drift."""
+        import inspect
+        from k2rad import assembly
+        src = inspect.getsource(assembly._off_mat_fabric)
+        self.assertIn("FABRIC_CURVE_FORMS", src)
+        self.assertNotIn("(4, 14, -14, 24)", src)
+
     def test_include_transform_leaves_card5_alone_on_a_form0_deck(self):
         """The mirror of the test above: with FORM=0 there IS no card 7, so
         nothing after card 3 may be touched."""
@@ -933,10 +1144,11 @@ def _parse_str(deck: str):
 
 def _spv(sid=7, sidtyp=1, cn=0.02068427, beta=1.0, lcid=0, lciddr=0,
          rbid=0, vsca=1.0, psca=1.0, vini=0.0, mwd=0.0, spsf=0.0,
-         with_id=True, rbid_cards=""):
+         with_id=True, rbid_cards="", abid=11):
     c = _c10
     if with_id:
-        head = "*AIRBAG_SIMPLE_PRESSURE_VOLUME_ID\n" + f"{11:>10}" + "bag".rjust(30) + "\n"
+        head = ("*AIRBAG_SIMPLE_PRESSURE_VOLUME_ID\n" + f"{abid:>10}"
+                + "spv bag".rjust(30) + "\n")
     else:
         head = "*AIRBAG_SIMPLE_PRESSURE_VOLUME\n"
     return (head
@@ -1299,13 +1511,13 @@ class TestMonvolGas(unittest.TestCase):
 def _sam(cv=0.0, cp=0.0, t=1200.0, lcid=90, mu=0.7, area=25.0, pe=0.101325,
          ro=0.0, lou=0, t_ext=295.0, a=29.26, b=0.0022, mw=0.0289644,
          gasc=8.314, sid=7, with_id=True, vini=0.0, rbid=0, rbid_cards="",
-         force_card4a=False):
+         force_card4a=False, abid=11, keyword="AIRBAG_SIMPLE_AIRBAG_MODEL"):
     c = _c10
     if with_id:
-        head = ("*AIRBAG_SIMPLE_AIRBAG_MODEL_ID\n" + f"{11:>10}"
+        head = (f"*{keyword}_ID\n" + f"{abid:>10}"
                 + "gas bag".rjust(30) + "\n")
     else:
-        head = "*AIRBAG_SIMPLE_AIRBAG_MODEL\n"
+        head = f"*{keyword}\n"
     card4 = (c(lou) if (cv != 0.0 and not force_card4a) else
              c(lou) + c(t_ext) + c(a) + c(b) + c(mw) + c(gasc))
     return (head
@@ -1319,6 +1531,85 @@ def _sam(cv=0.0, cp=0.0, t=1200.0, lcid=90, mu=0.7, area=25.0, pe=0.101325,
 _MASS_CURVE = ("*DEFINE_CURVE\n        90\n"
                "                 0.0                 0.0\n"
                "               0.001               0.005\n")
+
+
+class TestGasGammaCheck(unittest.TestCase):
+    """The derived-gamma check and the unit rescale it stands on.
+
+    This is the one piece of the batch whose stated purpose is to catch a
+    SILENT starter failure — ``GAMMA AT INITIAL TEMPERATURE = -3.61E-03`` with
+    0 ERROR(S) and TERMINATION WITH WARNING — so it is the one piece that most
+    needs a test of its own: the code path runs on every CV=0 bag, but nothing
+    that only exercises the path can tell whether the arithmetic is right.
+    """
+
+    def test_radioss_gas_constant_reproduces_hm_read_matgas(self):
+        """``R_IGC1 = R_IGC / FAC_M / FAC_L / FAC_L * FAC_T**2``
+        (hm_read_matgas.F:293), with ``R_IGC = 8.314472``
+        (common_source/modules/constant_mod.F:932 — NOT the textbook 8.314;
+        the starter echoes MW = 2.8970286405876E-05 for a Cp-Cv of 287058.3,
+        which is 8314.47/MW, not 8314.0/MW).
+
+        The FAC_T**2 factor is the one a mutation can hide behind: it is 1.0
+        in every second-based unit system, so only a ms deck sees it.
+        """
+        from k2rad.writer.monvol import _radioss_gas_constant
+        from k2rad.state import ConversionState
+        cases = [
+            (("kg", "m", "s"), 8.314472),
+            (("Mg", "mm", "s"), 8.314472e3),           # /1e3 /1e-3 /1e-3
+            (("Mg", "mm", "ms"), 8.314472e3 * 1e-6),   # x (1e-3)^2
+            (("g", "cm", "micro_s"), 8.314472 / 1e-3 / 1e-2 / 1e-2 * 1e-12),
+        ]
+        for units, expect in cases:
+            with self.subTest(units=units):
+                st = ConversionState()
+                st.units = units
+                self.assertAlmostEqual(
+                    _radioss_gas_constant(st) / expect, 1.0, places=12)
+        st = ConversionState()
+        st.units = ("stone", "furlong", "fortnight")
+        self.assertIsNone(_radioss_gas_constant(st))
+
+    def test_si_gas_card_in_a_mm_deck_is_caught_with_the_numbers(self):
+        """A/B/MW stated in SI while the mesh is in Mg/mm/s. Hand-computed:
+
+            R_work = 8.314472 / 1e3 / 1e-3 / 1e-3        = 8314.472
+            Cp     = 29.26/0.0289644 + (0.0022/0.0289644)*295
+                   = 1010.2056 + 22.4068                 = 1032.6124
+            R/MW   = 8314.472/0.0289644                  = 287058.32
+            Cv     = 1032.6124 - 287058.32               = -286025.71
+            gamma  = 1032.6124 / -286025.71              = -3.61021e-3
+
+        The starter's own echo on that deck is -3.6102084432184E-03.
+        """
+        r, _s, _e = _convert(_box_deck(_MASS_CURVE, _sam()))
+        hit = _warns(r, "not a usable ratio of specific heats")
+        self.assertEqual(len(hit), 1, r.warnings)
+        msg = hit[0]
+        for token in ("1032.61", "287058", "-286026", "-0.00361021",
+                      "8314.47"):
+            with self.subTest(token=token):
+                self.assertIn(token, msg)
+
+    def test_a_consistent_gas_card_raises_nothing(self):
+        """The same bag with A and MW restated in Mg/mm/s: Cp = 1.004e9
+        mm^2/s^2/K, MW = 2.89644e-5 Mg/mol, so R/MW = 2.87058e8 and
+        Cv = 7.1694e8 with gamma = 1.4005 — a real diatomic gas, no warning."""
+        mw = 2.89644e-5
+        a = 1.004e9 * mw                       # A is MOLAR: Cpa = A/MW
+        r, _s, _e = _convert(
+            _box_deck(_MASS_CURVE, _sam(a=a, b=0.0, mw=mw)))
+        self.assertEqual(_warns(r, "not a usable ratio of specific heats"), [])
+
+    def test_the_check_is_only_for_the_mass_branch(self):
+        """/MAT/GAS/CSTA takes Cp and Cv directly and gamma is their unit-free
+        ratio, so the same SI-vs-mm mismatch cannot produce a negative Cv
+        there — the Cp > Cv screen covers it instead."""
+        r, _s, _e = _convert(
+            _box_deck(_MASS_CURVE, _sam(cv=717.5, cp=1004.5)))
+        self.assertEqual(_warns(r, "not a usable ratio of specific heats"), [])
+        self.assertIn("/MAT/GAS/CSTA/", _s)
 
 
 class TestMonvolAirbag1(unittest.TestCase):
@@ -1445,6 +1736,40 @@ class TestMonvolAirbag1(unittest.TestCase):
         self.assertAlmostEqual(pts[0][0], 0.0)
         self.assertAlmostEqual(pts[1][0], 0.1)
         self.assertTrue(_warns(r, "GAUGE pressure"))
+
+    def test_a_zero_partner_beside_a_vent_curve_is_a_CLOSED_orifice(self):
+        """LS-DYNA's leak mass flow is proportional to mu*A, so a blank MU
+        beside an AREA curve is an orifice that is CLOSED. Defaulting the
+        missing constant to 1.0 vented a bag LS-DYNA seals, at the full curve
+        area; the mirror case put a dimensionless porosity in the AREA slot."""
+        curve = ("*DEFINE_CURVE\n        91\n"
+                 "            0.101325                 0.0\n"
+                 "            0.201325                50.0\n")
+        for mu, area in ((0.0, -91.0), (-91.0, 0.0)):
+            with self.subTest(mu=mu, area=area):
+                r, starter, _e = _convert(
+                    _box_deck(_MASS_CURVE, curve, _sam(mu=mu, area=area)))
+                cards = _cards(_block(starter, "/MONVOL/AIRBAG1/11"))
+                self.assertEqual(_col_i(cards[5], 1, 10), 0)   # Nvent
+                self.assertEqual(len(cards), 6)
+                self.assertTrue(_warns(r, "mu*A product is ZERO"), r.warnings)
+        # ... and a NON-zero partner still opens the vent at that value
+        _r, starter, _e = _convert(
+            _box_deck(_MASS_CURVE, curve, _sam(mu=0.7, area=-91.0)))
+        cards = _cards(_block(starter, "/MONVOL/AIRBAG1/11"))
+        self.assertEqual(_col_i(cards[5], 1, 10), 1)
+        self.assertAlmostEqual(_col_f(cards[6], 21, 40), 0.7)
+
+    def test_a_zero_pe_is_named_because_the_starter_substitutes_one_atm(self):
+        """``hm_read_monvol_type7.F:417-418``: a blank Pext is a REQUEST FOR
+        ONE ATMOSPHERE, and :421/:536 then set PINI = PEXT and derive the
+        initial gas mass from it. LS-DYNA's PE = 0 means the opposite — no
+        ambient pressure at all. Measured: the starter echoes
+        ``EXTERNAL PRESSURE = 0.1013250000000`` with 0 ERROR(S)."""
+        r, _s, _e = _convert(_box_deck(_MASS_CURVE, _sam(pe=0.0)))
+        self.assertTrue(_warns(r, "REQUEST FOR ONE ATMOSPHERE"), r.warnings)
+        r, _s, _e = _convert(_box_deck(_MASS_CURVE, _sam(pe=0.101325)))
+        self.assertFalse(_warns(r, "REQUEST FOR ONE ATMOSPHERE"))
 
     def test_lou_is_named_as_dropped(self):
         r, _s, _e = _convert(_box_deck(_MASS_CURVE,
@@ -1589,7 +1914,7 @@ class TestAirbagCardWalk(unittest.TestCase):
     def test_id_option_carries_the_id_and_the_title(self):
         _r, starter, _e = _convert(_box_deck(_spv()))
         blk = _block(starter, "/MONVOL/PRES/11")
-        self.assertEqual(blk[1], "bag")
+        self.assertEqual(blk[1], "spv bag")
 
     def test_without_id_the_monvol_is_renumbered_off_the_auto_stream(self):
         _r, starter, _e = _convert(_box_deck(_spv(with_id=False)))
@@ -1673,6 +1998,109 @@ class TestAirbagDispatch(unittest.TestCase):
         self.assertIn("CONTACT_AIRBAG_SINGLE_SURFACE_MPP", HANDLERS)
         self.assertIn("CONTACT_AIRBAG_SINGLE_SURFACE", _OFFSET_SPECS)
 
+    def test_the_legacy_numeric_suffix_dispatches_and_converts(self):
+        """``*AIRBAG_SIMPLE_PRESSURE_VOLUME_1`` / ``..._AIRBAG_MODEL_1`` are
+        the spellings the r14 dynaexamples corpus actually ships: MEASURED,
+        16 of its 28 *AIRBAG_* occurrences use them, and dispatch() being an
+        exact dict lookup put every one of them in skipped_keywords with NO
+        warning — three whole decks (airfilled.sphere.k and both
+        tire-compression.k) lost their only pressure source on a run that
+        terminates normally.
+
+        The card stack is the base model's, verbatim: the corpus decks carry
+        the base model's own field-name comments above each card.
+        """
+        base = _box_deck(_MASS_CURVE, _sam(with_id=False))
+        legacy = _box_deck(
+            _MASS_CURVE, _sam(with_id=False,
+                              keyword="AIRBAG_SIMPLE_AIRBAG_MODEL_1"))
+        r0, s0, _e = _convert(base)
+        r1, s1, _e = _convert(legacy)
+        self.assertEqual(r1.skipped_keywords, [])
+        self.assertIn("/MONVOL/AIRBAG1/", s1)
+        # Byte-identical to the base spelling apart from the keyword NAME the
+        # warnings quote — the card walk is the same walk.
+        self.assertEqual(s0, s1)
+        self.assertEqual(len(r0.warnings), len(r1.warnings))
+        # ... and the SPV twin, whose card 3 is a different shape.
+        r2, s2, _e = _convert(
+            _box_deck(_spv().replace("*AIRBAG_SIMPLE_PRESSURE_VOLUME_ID",
+                                     "*AIRBAG_SIMPLE_PRESSURE_VOLUME_1_ID")))
+        self.assertEqual(r2.skipped_keywords, [])
+        self.assertIn("/MONVOL/PRES/11", s2)
+
+    def test_the_legacy_suffix_is_registered_on_every_airbag_spelling(self):
+        from k2rad.handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
+                                    _AIRBAG_UNSUPPORTED, _airbag_base_keyword)
+        for kw in list(_AIRBAG_MODELS) + list(_AIRBAG_UNSUPPORTED):
+            for sfx in _AIRBAG_LEGACY_SUFFIXES:
+                with self.subTest(kw=kw + sfx):
+                    self.assertIn(kw + sfx, HANDLERS)
+                    self.assertEqual(_airbag_base_keyword(kw + sfx), kw)
+        for kw in _AIRBAG_MODELS:
+            for sfx in _AIRBAG_LEGACY_SUFFIXES:
+                with self.subTest(offset=kw + sfx):
+                    self.assertIn(kw + sfx, _OFFSET_SPECS)
+        # ... and the stripper must not eat a real option word.
+        for kw in ("AIRBAG_SIMPLE_AIRBAG_MODEL", "AIRBAG_WANG_NEFSKE_JETTING",
+                   "AIRBAG_REFERENCE_GEOMETRY_BIRTH"):
+            self.assertEqual(_airbag_base_keyword(kw), kw)
+
+    def test_an_undocumented_airbag_spelling_still_warns(self):
+        """Every documented spelling has an exact key, but dispatch() is an
+        exact lookup and a silent skip on this family costs a bag that never
+        inflates on a run that terminates normally. The _PREFIX_HANDLERS net
+        catches the undocumented one: warn-only, never a card."""
+        for kw in ("AIRBAG_SOMETHING_NEW", "AIRBAG_REFERENCE_GEOMETRY_1",
+                   "AIRBAG_WANG_NEFSKE_JETTING_7"):
+            with self.subTest(kw=kw):
+                body = f"*{kw}\n" + _c10(7) + _c10(1) + "\n" + _c10(1.0) + "\n"
+                r, starter, _e = _convert(_box_deck(body))
+                self.assertEqual(r.skipped_keywords, [])
+                self.assertTrue(_warns(r, f"*{kw} is NOT converted"))
+                self.assertNotIn("/MONVOL/", starter)
+                self.assertIn("/SHELL/1", starter)
+
+    def test_the_id_card_is_read_by_column_not_by_whitespace(self):
+        """``ABID(I10) HEADING(A70)``: a real deck writes the heading at
+        column 11 with NO separating space, and a free split then fuses them —
+        "        42Driver airbag" -> ['42Driver', 'airbag'], ABID = 0, the
+        /MONVOL silently auto-renumbered and the title "airbag"."""
+        glued = _spv().replace(f"{11:>10}" + "spv bag".rjust(30),
+                               f"{42:>10}" + "Driver airbag")
+        self.assertIn("        42Driver airbag", glued)
+        _r, starter, _e = _convert(_box_deck(glued))
+        blk = _block(starter, "/MONVOL/PRES/42")
+        self.assertEqual(blk[1], "Driver airbag")
+        # a blank heading keeps the default title and still reads the id
+        blank = _spv().replace(f"{11:>10}" + "spv bag".rjust(30), f"{42:>10}")
+        _r, starter, _e = _convert(_box_deck(blank))
+        self.assertIn("/MONVOL/PRES/42", starter)
+        # and a comma-separated free-format card still works
+        free = _spv().replace(f"{11:>10}" + "spv bag".rjust(30),
+                              "42,Driver airbag")
+        _r, starter, _e = _convert(_box_deck(free))
+        blk = _block(starter, "/MONVOL/PRES/42")
+        self.assertEqual(blk[1], "Driver airbag")
+
+    def test_a_renumbered_monvol_dodges_the_ids_the_deck_states(self):
+        """The /MONVOL id allocator's fallback has to re-check the ids the
+        DECK states, not only the ones already handed out. A bag carrying an
+        explicit ``_ID`` at or above the auto-id base (90001) is otherwise
+        handed the same id a later un-ID'd bag draws — two /MONVOLs under one
+        number, starter ERROR 79, and the whole deck refused. Same guard the
+        other five allocators carry."""
+        _r, starter, _e = _convert(
+            _box_deck(_MASS_CURVE,
+                      _spv(abid=90001), _spv(abid=90002, sid=7),
+                      _sam(with_id=False)))
+        ids = [ln.rsplit("/", 1)[1] for ln in starter.splitlines()
+               if ln.startswith("/MONVOL/")]
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(len(set(ids)), 3, f"duplicate /MONVOL id: {ids}")
+        self.assertIn("90001", ids)
+        self.assertIn("90002", ids)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # *DATABASE_ABSTAT -> /TH/MONV  (+ the /TFILE chain)
@@ -1693,7 +2121,17 @@ class TestAbstatThMonv(unittest.TestCase):
         probe took all sixteen non-vent names on a PRES bag without complaint —
         but the ENGINE only fills the FSAV slots its own pressure law computes,
         and volpfv.F sets FSAV(1) = 0 for a PRES bag. Requesting MASS, T or
-        GAMA there would write flat zeros that read as data."""
+        GAMA there would write flat zeros that read as data.
+
+        GAS drops MASS and T for the same reason one level deeper: volpvg.F
+        DOES write FSAV(1) and FSAV(5), but AMTOT comes from
+        ``RVOLU(20) = MI``, which hm_read_monvol_type3.F:300-315 only derives
+        when ``I_equi > 0``, and TEMPERATURE is assigned only inside
+        ``IF (IEQUI > 0)`` at :159. _emit_monvol_gas hard-writes I_equi = 0
+        and Mini = 0. MEASURED over 505 samples of the adiabatic box: both
+        min = max = 0. AIRBAG1 drops DTBAG — airbagb1.F:655-679 fills FSAV
+        1-12 and 15-18 and never 13; index 13 belongs to the FVMBAG routines.
+        """
         _r, starter, _e = _convert(
             _box_deck(_MASS_CURVE, _spv(), _sam(), _agm(), _lfluid(),
                       "*DATABASE_ABSTAT\n     1.0E-5\n"))
@@ -1703,13 +2141,36 @@ class TestAbstatThMonv(unittest.TestCase):
                                     "TH_MONV_ABSTAT_AIRBAG1",
                                     "TH_MONV_ABSTAT_LFLUID"})
         self.assertEqual(got["TH_MONV_ABSTAT_PRES"], ["VOL", "P", "A"])
-        self.assertEqual(got["TH_MONV_ABSTAT_GAS"],
-                         ["MASS", "VOL", "P", "A", "T", "GAMA"])
+        self.assertEqual(got["TH_MONV_ABSTAT_GAS"], ["VOL", "P", "A", "GAMA"])
         self.assertEqual(got["TH_MONV_ABSTAT_LFLUID"],
                          ["MASS", "VOL", "P", "A", "MASS-IN"])
-        # the AIRBAG1 bag here HAS a vent, so the four vent channels join
-        self.assertEqual(got["TH_MONV_ABSTAT_AIRBAG1"][-4:],
-                         ["AO", "UO", "AC", "UC"])
+        self.assertNotIn("DTBAG", got["TH_MONV_ABSTAT_AIRBAG1"])
+        # the AIRBAG1 bag here HAS a vent, so the four vent channels join —
+        # and they join in VARMV order (after T), not at the end.
+        self.assertEqual(got["TH_MONV_ABSTAT_AIRBAG1"],
+                         ["MASS", "VOL", "P", "A", "T",
+                          "AO", "UO", "AC", "UC",
+                          "CP", "CV", "GAMA",
+                          "MASS-IN", "ENTHA-IN", "ENER-INT", "WORK"])
+
+    def test_th_monv_names_are_written_in_the_starter_table_order(self):
+        """The starter sorts the requested names into its own VARMV order
+        (hm_read_thgrou.F:1181-1186) and the T01 columns come back in THAT
+        order, not in card order — MEASURED, a group written
+        "... GAMA MASS-IN ... DTBAG AO UO AC UC" came back with AO/UO/AC/UC in
+        columns 6-9, mis-labelling 9 of 17 channels for anyone indexing
+        th_to_csv positionally. Writing them pre-sorted makes the card
+        describe the file it produces."""
+        from k2rad.writer.output import _TH_MONV_VARS, _th_monv_groups
+        varmv = ["MASS", "VOL", "P", "A", "T", "AO", "UO", "AC", "UC",
+                 "CP", "CV", "GAMA", "DTBAG", "NFV", "MASS-IN", "ENTHA-IN",
+                 "ENER-INT", "WORK", "UPCRIT"]
+        for rad in _TH_MONV_VARS:
+            for vented in ({1}, set()):
+                for vars_, _ids in _th_monv_groups(rad, [1], vented):
+                    with self.subTest(rad=rad, vented=bool(vented)):
+                        idx = [varmv.index(v) for v in vars_]
+                        self.assertEqual(idx, sorted(idx))
 
     def test_unvented_airbag1_drops_the_vent_channels(self):
         _r, starter, _e = _convert(
@@ -1718,6 +2179,26 @@ class TestAbstatThMonv(unittest.TestCase):
         vars_ = _th_monv_vars(_block(starter, "/TH/MONV/"))
         for v in ("AO", "UO", "AC", "UC"):
             self.assertNotIn(v, vars_)
+
+    def test_a_sealed_bag_does_not_take_the_vent_channels_off_a_vented_one(
+            self):
+        """The AIRBAG1 group splits by VENT state. All-or-nothing granularity
+        meant one unvented bag removed AO/UO/AC/UC for every vented bag beside
+        it — the channels are structural zeros only on the SEALED bag."""
+        _r, starter, _e = _convert(
+            _box_deck(_MASS_CURVE,
+                      _sam(abid=71, mu=0.7, area=25.0),
+                      _sam(abid=72, mu=0.0, area=0.0),
+                      "*DATABASE_ABSTAT\n     1.0E-5\n"))
+        blks = _blocks(starter, "/TH/MONV/")
+        self.assertEqual(len(blks), 2)
+        by_ids = {tuple(_th_monv_ids(b)): _th_monv_vars(b) for b in blks}
+        self.assertEqual(len(by_ids), 2)
+        vented = [v for k, v in by_ids.items() if "AO" in v]
+        sealed = [v for k, v in by_ids.items() if "AO" not in v]
+        self.assertEqual(len(vented), 1)
+        self.assertEqual(len(sealed), 1)
+        self.assertEqual(vented[0][5:9], ["AO", "UO", "AC", "UC"])
 
     def test_id_card_is_a_ten_per_line_cell_list(self):
         """th_monv.cfg's id card is FREE_CELL_LIST(idsmax,"%10d",ids,100), not
@@ -1887,6 +2368,32 @@ class TestAirbagReferenceGeometry(unittest.TestCase):
         r, _s, _e = _convert(self._deck(_ref_nodes(rdt=True)))
         self.assertTrue(_warns(r, "_RDT option"))
 
+    def test_rdt_on_a_shell_only_deck_is_named_too(self):
+        """``_warn_airbag_ref_options`` also covers the SHELL spelling, which
+        never reaches the /XREF path at all — so gating the call on the /XREF
+        inputs left a ``_RDT`` on a shell-only deck silently dropped."""
+        eref = ("*AIRBAG_SHELL_REFERENCE_GEOMETRY_RDT\n"
+                + _c10(1) + _c10(1) + _c10(11) + _c10(12) + _c10(13)
+                + _c10(14) + "\n")
+        r, starter, _e = _convert(self._deck(eref))
+        self.assertIn("/EREF/SHELL/1", starter)
+        self.assertTrue(_warns(r, "_RDT option"), r.warnings)
+
+    def test_a_truncated_eref_row_never_reaches_the_deck(self):
+        """A row carrying only EID and PID filters down to an EMPTY node list:
+        the `bad` screen passes vacuously, the no-op screen compares set()
+        against the element's four nodes and finds them unequal, and the quad
+        padder yields [] — so the row would go out as an element id with zero
+        node columns, which is not a shape."""
+        eref = ("*AIRBAG_SHELL_REFERENCE_GEOMETRY\n"
+                + _c10(1) + _c10(1) + "\n"
+                + _c10(2) + _c10(1) + _c10(12) + _c10(15) + _c10(13) + "\n")
+        r, starter, _e = _convert(self._deck(eref))
+        self.assertNotIn("/EREF/SHELL/", starter)
+        tri = _cards(_block(starter, "/EREF/SH3N/1"))
+        self.assertEqual([int(t) for t in tri[0].split()], [2, 12, 15, 13])
+        self.assertTrue(_warns(r, "fewer than three"), r.warnings)
+
     def test_eref_splits_quads_and_tris_per_part(self):
         eref = ("*AIRBAG_SHELL_REFERENCE_GEOMETRY\n"
                 + _c10(1) + _c10(1) + _c10(11) + _c10(12) + _c10(13)
@@ -1965,6 +2472,20 @@ class TestAirbagContact(unittest.TestCase):
         self.assertAlmostEqual(_col_f(cards[3], 41, 60), 0.5)   # SST/2 * SFST
         self.assertAlmostEqual(_col_f(cards[3], 21, 40), 0.3)   # Fric
         self.assertTrue(_warns(r, "Airbag flavour"))
+        # The airbag Gapmin branch does not go through _sst_mst_to_gapmin
+        # (the two-sided helper would read the missing MST as a second
+        # thickness), so it has to emit that helper's two diagnostics itself.
+        self.assertTrue(_warns(r, "SST contact thickness"), r.warnings)
+
+    def test_a_negative_sst_is_named_not_silently_absolutised(self):
+        """LS-DYNA gives a negative SST a side meaning the magnitude does not
+        carry. Every other contact route says so; this one used to absolutise
+        it in silence because it skipped the shared helper."""
+        r, starter, _e = _convert(
+            _box_deck(_spv(), _airbag_contact(sst=-2.0)))
+        cards = _cards(_block(starter, "/INTER/TYPE19/"))
+        self.assertAlmostEqual(_col_f(cards[3], 41, 60), 0.5)
+        self.assertTrue(_warns(r, "negative SST"), r.warnings)
 
     def test_ibag_is_zero_without_a_monvol(self):
         """Ibag=1 means "close the airbag's vent holes where contact occurs",

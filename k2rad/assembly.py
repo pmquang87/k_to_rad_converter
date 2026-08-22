@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from itertools import permutations as _permutations
 from typing import Dict, List, Optional, Set, Tuple
 
-from .handlers import (_AIRBAG_MODELS,
+from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -54,6 +54,7 @@ from .handlers import (_AIRBAG_MODELS,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
+from .state import FABRIC_CURVE_FORMS
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
@@ -1787,8 +1788,18 @@ def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
     p.3-4) — so a declarative spec would rewrite a sensor's acceleration
     magnitude as a curve id on any RBID != 0 deck. Same walk the handler uses,
     imported from it so the two cannot drift.
+
+    **Card-1 SID is mapped to IDSOFF unconditionally**, because that is what
+    SIDTYP says it is — a *SET_SEGMENT or a *SET_PART id, both of them SET
+    ids. ``writer/monvol.py::_airbag_surface_eids`` additionally accepts a bare
+    *PART id there as a fallback, and such a reference moves to the wrong id
+    under an *INCLUDE_TRANSFORM whose IDSOFF and IDPOFF differ. It is
+    diagnosed rather than silent — the writer then reports "names a *SET_PART
+    that this deck does not define" — and offsetting by IDPOFF instead would
+    break the documented case, so the fallback is left un-offset.
     """
-    from .handlers import _AIRBAG_MODELS, _airbag_prelude
+    from .handlers import (_AIRBAG_MODELS, _airbag_base_keyword,
+                           _airbag_prelude)
     raw = b.raw
     toff = _title_offset(b)
     if toff and "ID" in b.options and raw:
@@ -1800,11 +1811,14 @@ def _off_airbag(b: Block, offsets: Dict[str, int], warn) -> None:
     new = _rewrite_line(raw[toff], [(0, "s"), (2, "p")], offsets)
     if new is not None:
         raw[toff] = new
-    model = _AIRBAG_MODELS.get(b.keyword)
+    # The legacy trailing "_<digits>" spelling is the base model's card stack
+    # (handlers._airbag_base_keyword), so it keys the same cell map.
+    base = _airbag_base_keyword(b.keyword)
+    model = _AIRBAG_MODELS.get(base)
     if model is None:
         return
     _f1, i3 = _airbag_prelude(raw, toff)
-    cells, neg_cells, card4 = _AIRBAG_CURVE_CELLS[b.keyword]
+    cells, neg_cells, card4 = _AIRBAG_CURVE_CELLS[base]
     foff = offsets.get("f", 0)
     if i3 < len(raw) and raw[i3].strip():
         if cells:
@@ -1885,7 +1899,19 @@ def _off_mat_fabric(b: Block, offsets: Dict[str, int], warn) -> None:
     when the FVOPT<0 leakage card 4 is present (card-3 field 6). A static spec
     would rewrite card 5's A0REF/A1/A2/A3 as curve ids on a FORM=0 deck and
     move a leakage constant on an FVOPT<0 one — the ``_WITH_FAILURE`` hazard
-    ``_off_mat_181`` records, twice."""
+    ``_off_mat_181`` records, twice.
+
+    Card 3 is read with ``_fields`` and NOT with the bare ``parse_fixed``
+    slicer (#119). On a comma-separated or narrow *MAT_FABRIC the 10-char
+    slicer reads FORM out of the wrong columns, ``form`` comes back 0 and the
+    six card-7 curve ids are silently left UN-offset — while the MID on the
+    same block IS offset (``_rewrite_line`` goes through ``_split_card``,
+    which handles commas) and so are the ``*DEFINE_CURVE`` ids in the same
+    include, leaving the material pointing at the parent deck's curve numbers.
+
+    The FORM set comes from ``state.FABRIC_CURVE_FORMS``, the one the parser
+    and ``writer.fabric._fabric_law`` both use, so the two cannot drift (#116).
+    """
     toff = _title_offset(b)
     raw = b.raw
     if toff >= len(raw) or not raw[toff].strip():
@@ -1896,9 +1922,9 @@ def _off_mat_fabric(b: Block, offsets: Dict[str, int], warn) -> None:
     i3 = toff + 2
     if i3 >= len(raw):
         return
-    f3 = parse_fixed(raw[i3], 8, 10)
+    f3 = _fields(raw[i3], 8, 10)
     form = int(round(to_float(f3[5]))) if len(f3) > 5 else 0
-    if form not in (4, 14, -14, 24):
+    if form not in FABRIC_CURVE_FORMS:
         return
     fvopt = to_float(f3[6]) if len(f3) > 6 else 0.0
     i7 = i3 + (4 if fvopt < 0.0 else 3)
@@ -2958,7 +2984,9 @@ del _base, _opt, _cells
 # of "card 1 field 0" could land on something else entirely, and an unmapped
 # keyword warns rather than corrupting ids.
 for _kw in _AIRBAG_MODELS:
-    _OFFSET_SPECS[_kw] = _off_airbag
+    for _sfx in _AIRBAG_LEGACY_SUFFIXES:
+        _OFFSET_SPECS[_kw + _sfx] = _off_airbag
+del _sfx
 for _r in range(4):
     for _combo in _permutations(("_BIRTH", "_RDT", "_ID"), _r):
         if _combo and _combo[-1] == "_ID":
