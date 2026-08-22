@@ -356,6 +356,16 @@ from .blast_ale import (
     _make_inivol_notes,
     _make_control_ale_notes,
 )
+from .fabric import (
+    _resolve_mat_fabric,
+    _assign_fabric_props,
+    _make_fabric_materials,
+    _emit_fabric_props,
+    _emit_prop_type16,
+    _emit_mat_law19,
+    _emit_mat_law58,
+    _fabric_law,
+)
 from .inistate import (
     _shell_sec_for_part,
     _solid_sec_for_part,
@@ -506,6 +516,14 @@ __all__ = [
     "_law128_ref_axis",
     "_emit_prop_type9",
     "_emit_prop_type6",
+    "_resolve_mat_fabric",
+    "_assign_fabric_props",
+    "_make_fabric_materials",
+    "_emit_fabric_props",
+    "_emit_prop_type16",
+    "_emit_mat_law19",
+    "_emit_mat_law58",
+    "_fabric_law",
     "_emit_ortho_props",
     "_make_extra_groups",
     "_TET10_MIDEDGE",

@@ -1761,6 +1761,38 @@ def _off_mat_181(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[iu] = new
 
 
+def _off_mat_fabric(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_FABRIC (034): MID → IDMOFF, and the six card-7 stress/strain curve
+    ids (LCA LCB LCAB LCUA LCUB LCUAB) → IDFOFF.
+
+    Card 7's INDEX is conditional twice over: it exists only when
+    ``FORM in {4, 14, -14, 24}`` (card-3 field 5) and it sits one line lower
+    when the FVOPT<0 leakage card 4 is present (card-3 field 6). A static spec
+    would rewrite card 5's A0REF/A1/A2/A3 as curve ids on a FORM=0 deck and
+    move a leakage constant on an FVOPT<0 one — the ``_WITH_FAILURE`` hazard
+    ``_off_mat_181`` records, twice."""
+    toff = _title_offset(b)
+    raw = b.raw
+    if toff >= len(raw) or not raw[toff].strip():
+        return
+    new = _rewrite_line(raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        raw[toff] = new
+    i3 = toff + 2
+    if i3 >= len(raw):
+        return
+    f3 = parse_fixed(raw[i3], 8, 10)
+    form = int(round(to_float(f3[5]))) if len(f3) > 5 else 0
+    if form not in (4, 14, -14, 24):
+        return
+    fvopt = to_float(f3[6]) if len(f3) > 6 else 0.0
+    i7 = i3 + (4 if fvopt < 0.0 else 3)
+    if i7 < len(raw) and raw[i7].strip():
+        new = _rewrite_line(raw[i7], [(i, "f") for i in range(6)], offsets)
+        if new is not None:
+            raw[i7] = new
+
+
 def _off_mat_138(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_COHESIVE_MIXED_MODE (138): MID → IDMOFF; GIC/GIIC (card 1 fields
     7/8) and T/S (card 2 fields 2/3) are floats whose NEGATIVE form is the
@@ -2277,6 +2309,11 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_126": {"cards": {0: [(0, "m")], 1: [(i, "f") for i in range(8)]}},
     "MAT_DESHPANDE_FLECK_FOAM": _mat(),
     "MAT_154": _mat(),
+    # Airbag fabric. MID → IDMOFF plus the six card-7 stress/strain curves →
+    # IDFOFF, on a card whose index moves with FORM and FVOPT — a callable.
+    "MAT_FABRIC": _off_mat_fabric,
+    "MAT_034": _off_mat_fabric,
+    "MAT_34": _off_mat_fabric,
     "MAT_HILL_FOAM": _mat({0: [(5, "f"), (7, "f")]}),
     "MAT_177": _mat({0: [(5, "f"), (7, "f")]}),
     # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve

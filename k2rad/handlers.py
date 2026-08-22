@@ -27,6 +27,7 @@ from .state import (
     MatAnisoViscoplastic, MatJohnsonCook,
     MatOrthotropicElastic, MatEnhancedCompositeDamage,
     MatTransverselyAnisotropic, MatLaminatedGlass,
+    MatFabric, FABRIC_CURVE_FORMS,
     CompositePly, PartComposite,
     MatAddErosion, ConstrainedNodeSet,
     MatCrushableFoam, MatLowDensityFoam, MatFuChangFoam, MatHoneycomb,
@@ -3830,6 +3831,87 @@ def handle_mat_laminated_glass(block: Block, state: ConversionState) -> None:
         mid=mid, title=title, rho=g1(1),
         eg=g1(2), prg=g1(3), syg=g1(4), etg=g1(5), efg=g1(6), ep=g1(7),
         prp=g2(0), syp=g2(1), etp=g2(2), f=fvals[:32])
+
+
+def handle_mat_fabric(block: Block, state: ConversionState) -> None:
+    """*MAT_FABRIC / *MAT_034 → /MAT/LAW19 (FABRI) or /MAT/LAW58 (FABR_A).
+
+    A RAW-CONTIGUITY card walk (#119): cards 4, 7 and 8 are CONDITIONAL and
+    every card after them shifts, so the index is advanced explicitly rather
+    than assumed. Reading card 5 at a fixed ``offset + 4`` on an FVOPT<0 deck
+    would take the L/R/C1/C2/C3 leakage card as RGBRTH/A0REF/A1..A3, silently
+    turning a leakage constant into a reference-geometry birth time.
+
+    The gates, from the Vol II R16 card summary (p.2-313) and the data-card
+    headings (pp.2-325…2-330):
+
+      card 4  present when ``FVOPT < 0``
+      card 7  present when ``FORM in {4, 14, -14, 24}``
+      card 8  present when ``FORM == -14``
+
+    ``FORM``, ``FVOPT`` and ``LNRC`` are declared **F**, not I, on the LS-DYNA
+    card — real decks write ``0`` and ``0.0`` interchangeably in those columns
+    — so FORM is read as a float and rounded, and the sign is kept (FORM = -14
+    is a distinct model from +14).
+
+    Card-1 fields 4 and 7 and card-6 fields 3-5 are blank in the R8.0+ layout
+    (they were EC / PRCA-PRCB and D1-D3 in R6.1) and are not read. Card-2
+    fields 1-2 ARE read: they were GBC and GCA and, where an old deck fills
+    them, they are the only transverse-shear moduli it states.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+
+    def card(i):
+        return _card(raw, i, fixed=True, n=8, w=10)
+
+    def flt(f, i):
+        return to_float(f[i]) if len(f) > i else 0.0
+
+    def integer(f, i):
+        return to_int(f[i]) if len(f) > i else 0
+
+    i = offset
+    f1 = card(i); i += 1
+    f2 = card(i); i += 1
+    f3 = card(i); i += 1
+    mid = to_int(f1[0]) if f1 else 0
+    fvopt = flt(f3, 6)
+    # Card 4 (L R C1 C2 C3) exists only for FVOPT < 0. Its five values have no
+    # Radioss counterpart (they parameterise LS-DYNA's own porous-flow fit), so
+    # the card is SKIPPED rather than stored — but it must be skipped, not
+    # ignored, or cards 5 and 6 are read one line early.
+    if fvopt < 0.0:
+        i += 1
+    f5 = card(i); i += 1
+    f6 = card(i); i += 1
+    form = int(round(flt(f3, 5)))
+    f7 = card(i) if form in FABRIC_CURVE_FORMS else []
+    if form in FABRIC_CURVE_FORMS:
+        i += 1
+    f8 = card(i) if form == -14 else []
+
+    state.mat_fabric[mid] = MatFabric(
+        mid=mid, title=title,
+        rho=flt(f1, 1), ea=flt(f1, 2), eb=flt(f1, 3),
+        prba=flt(f1, 5), prab=flt(f1, 6),
+        gab=flt(f2, 0), gbc=flt(f2, 1), gca=flt(f2, 2), cse=flt(f2, 3),
+        el=flt(f2, 4), prl=flt(f2, 5), lratio=flt(f2, 6), damp=flt(f2, 7),
+        aopt=flt(f3, 0), flc=flt(f3, 1), fac=flt(f3, 2), ela=flt(f3, 3),
+        lnrc=flt(f3, 4), form=form, fvopt=fvopt, tsrfac=flt(f3, 7),
+        rgbrth=flt(f5, 1), a0ref=flt(f5, 2),
+        a1=flt(f5, 3), a2=flt(f5, 4), a3=flt(f5, 5),
+        x0=flt(f5, 6), x1=flt(f5, 7),
+        v1=flt(f6, 0), v2=flt(f6, 1), v3=flt(f6, 2),
+        beta=flt(f6, 6), isrefg=integer(f6, 7),
+        lca=integer(f7, 0), lcb=integer(f7, 1), lcab=integer(f7, 2),
+        lcua=integer(f7, 3), lcub=integer(f7, 4), lcuab=integer(f7, 5),
+        rl=flt(f7, 6),
+        lcaa=integer(f8, 0), lcbb=integer(f8, 1), hyst=flt(f8, 2),
+        dt_avg=flt(f8, 3), ecoat=flt(f8, 5), scoat=flt(f8, 6),
+        tcoat=flt(f8, 7),
+    )
 
 
 def handle_part_composite(block: Block, state: ConversionState) -> None:
@@ -11674,6 +11756,11 @@ HANDLERS = {
     "MAT_LAMINATED_GLASS":                    handle_mat_laminated_glass,
     "MAT_032":                                handle_mat_laminated_glass,
     "MAT_32":                                 handle_mat_laminated_glass,
+    # MAT_034 → /MAT/LAW19 (FABRI) + /PROP/TYPE9, or /MAT/LAW58 (FABR_A) +
+    # /PROP/TYPE16 when the card-7 curves are there (writer/fabric.py).
+    "MAT_FABRIC":                             handle_mat_fabric,
+    "MAT_034":                                handle_mat_fabric,
+    "MAT_34":                                 handle_mat_fabric,
     "MAT_RIGID":                              handle_mat_rigid,
     "MAT_NULL":                               handle_mat_null,
     "MAT_POWER_LAW_PLASTICITY":               handle_mat_power_law_plasticity,

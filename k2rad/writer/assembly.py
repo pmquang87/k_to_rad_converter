@@ -52,6 +52,12 @@ from .composites import (
     _resolve_icomp_sections,
     _resolve_integration_shells,
 )
+from .fabric import (
+    _assign_fabric_props,
+    _emit_fabric_props,
+    _make_fabric_materials,
+    _resolve_mat_fabric,
+)
 from .sph import _make_sphglo, _resolve_sph
 from .tshell import _resolve_tshells
 from .contacts import (
@@ -846,6 +852,20 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # claiming they have no /MAT at all.
     _resolve_mat_impact(state)
 
+    # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +
+    # /PROP/TYPE16). Routes the law from FORM + the card-7 curves, fills the
+    # derived moduli and names every dropped field. Synthesizes no curve and no
+    # id, so its placement does not move the /FUNCT numbering; what it needs is
+    # the FINAL element lists (the shell-only warnings classify parts) — hence
+    # after _screen_provisional_elements and the tet passes, like the foam,
+    # MAT_224 and impact passes above. It MUST precede _assign_fabric_props
+    # (which reads use_law58 to choose the property type) and
+    # _resolve_xref_parts below, which reads _target_mat_law: neither LAW19 nor
+    # LAW58 is on the solid-/XREF whitelist, but a fabric part is a SHELL part
+    # and the shell arm has no law gate, so the entry changes no /XREF decision
+    # — it only stops that gate claiming "no /MAT at all".
+    _resolve_mat_fabric(state)
+
     # Decide which parts get a /XREF (reference-geometry) block. AFTER the
     # tet10 passes (the 8/4-node-solid gate must see the final connectivity)
     # and BEFORE properties (their sections switch to Ismstr=10). Needs the
@@ -884,6 +904,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # before the parts (repoint + /SPHCEL emission) and properties are built.
     _resolve_sph(state)
     _resolve_composites(state)
+    # Fabric: one synthesized /PROP per *MAT_FABRIC part. FIRST among the shell
+    # property-assignment prepasses — _assign_composite_props,
+    # _assign_ortho_props and _assign_hourglass_props all skip a part already
+    # in state.fabric_prop_ids, because /MAT/LAW19 and /MAT/LAW58 each accept
+    # exactly ONE property class (starter ERROR 3047) and any overlay would
+    # replace it. Before _make_parts_and_elements (repoint) and
+    # _make_properties (suppress the section's now-unused /PROP/SHELL).
+    _assign_fabric_props(state)
     _assign_composite_props(state)
     # Bind every *SECTION_SHELL QR/IRID reference to its *INTEGRATION_SHELL
     # rule, let the rule's NIP win over the section's, and claim a /PROP for the
@@ -1312,6 +1340,12 @@ def _starter_section_registry():
         # per-part property split that the plain material path does not), so
         # they are their own section right after the materials block.
         ("composite_materials", lambda c: _make_composite_materials(c.state)),
+        # Airbag fabric laws (/MAT/LAW19, /MAT/LAW58) — their own section for
+        # the same reason the composite laws have one: the law and its property
+        # are one decision (writer/fabric.py). A no-op on any deck without
+        # *MAT_FABRIC, and it draws no id, so it cannot shift an existing
+        # deck's id stream.
+        ("fabric_materials",  lambda c: _make_fabric_materials(c.state)),
         ("_progress_nodes",   lambda c: _progress_marker(c, 0.08, "Writing nodes")),
         ("nodes",             lambda c: _make_nodes(
             c.state, progress=lambda fr: c.rep(0.08 + 0.32 * fr, "Writing nodes"))),
@@ -1323,6 +1357,7 @@ def _starter_section_registry():
         ("_progress_final",   lambda c: _progress_marker(c, 0.90, "Finalizing starter deck")),
         ("properties",        lambda c: _make_properties(c.state)),
         ("composite_properties", lambda c: _emit_composite_props(c.state)),
+        ("fabric_properties",    lambda c: _emit_fabric_props(c.state)),
         ("functions",         lambda c: _make_functions(c.state)),
         ("extra_groups",      lambda c: _make_extra_groups(c.state)),
         ("rlinks",            lambda c: _make_rlinks(c.state)),
