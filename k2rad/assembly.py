@@ -46,7 +46,8 @@ from itertools import permutations as _permutations, product as _product
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
-                       _AIRBAG_OPTION_STACKS,
+                       _AIRBAG_OPTION_STACKS, _SEATBELT_MAT_KEYWORDS,
+                       _SEATBELT_SUBKEYWORDS,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -2255,6 +2256,316 @@ def _mat(extra: Optional[Dict[int, List[Tuple[int, str]]]] = None) -> dict:
     return {"cards": cards}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Seatbelts / restraints
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Bucket assignments, from ``hcioi_utils.cpp:769-846`` and the cfg's own HCDI
+# types (``include_transform.cfg:65-78`` names only NODE/ELEMENT/COMPONENT/
+# MATERIAL/FUNCT/SETS/BLOCK-family offsets; ``hcioi_utils.cpp:564-579`` falls
+# every other cfg type back to ``_DEFAULT_IDOFFSET`` = IDROFF):
+#
+#   belt element id                          ELEMS      -> IDEOFF ("e")
+#   its N1..N4                               NODES      -> IDNOFF ("n")
+#   its PID                                  COMPS      -> IDPOFF ("p")
+#   its SBRID (VALUE(RETRACTOR))             RETRACTORS -> IDROFF ("r")
+#   *SECTION_SEATBELT SECID                  PROPS      -> IDROFF ("r")
+#   *MAT_SEATBELT MID                        MATS       -> IDMOFF ("m")
+#   slipring / retractor / pretensioner /
+#     sensor / accelerometer own ids         (no drawable) -> IDROFF ("r")
+#   SBID / SBID1 / SBID2 (VALUE(ELEMS))      ELEMS      -> IDEOFF ("e")
+#   SBRNID / ONID / NID / NID1..3            NODES      -> IDNOFF ("n")
+#   SID1..4, SBSID1..4 (VALUE(SENSOR))       SENSORS    -> IDROFF ("r")
+#   LLCID ULCID PTLCID FUNCID LCNFFD LCNFFS  CURVES     -> IDFOFF ("f")
+#   the SHELL-belt flavours (SBID1_SHELL,
+#     SBRNID_NODES)                          SETS       -> IDSOFF ("s")
+#
+# There is NO _PROPERTY_IDOFFSET and NO _SENSOR_IDOFFSET on *INCLUDE_TRANSFORM,
+# which is why a *SECTION_SEATBELT and a *ELEMENT_SEATBELT_SENSOR both move
+# with IDROFF rather than with something of their own.
+
+#: The 8/8/8/8/8/16/8/8 column grid of an ``*ELEMENT_SEATBELT`` card. SLEN is
+#: SIXTEEN wide, so a uniform 8-wide re-render would move N3 and N4 into the
+#: right half of it — the ``*ELEMENT_SPH`` MASS trap on a card where the damage
+#: is worse, because N3 and N4 both non-zero is what turns a 1D belt into a 2D
+#: one.
+_SEATBELT_ELEM_WIDTHS = (8, 8, 8, 8, 8, 16, 8, 8)
+_SEATBELT_ELEM_BUCKETS = ("e", "p", "n", "n", "r", "", "n", "n")
+
+
+def _off_element_seatbelt(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*ELEMENT_SEATBELT: ``EID(I8) PID(I8) N1..N2(I8) SBRID(I8) SLEN(F16)
+    N3(I8) N4(I8)``.
+
+    The card is READ the way its HANDLER reads it, never on a slice of its own:
+    ``handlers._seatbelt_elem_card`` is imported and called here, so the two
+    readers cannot desync. A rewriter that slices where the handler splits is a
+    SILENT corruption of every value on the card — the lesson
+    ``_off_element_sph`` records, and this card carries the same 16-wide cell
+    that causes it.
+
+    The SLEN text is preserved verbatim: only the seven id cells are
+    re-rendered, each right-justified in its own column, so an I8 deck comes
+    out of the rewriter in the columns it went in.
+    """
+    from .handlers import _seatbelt_elem_card
+    for k, line in enumerate(b.raw):
+        if not line.strip() or line.lstrip().startswith("$"):
+            continue
+        cut = line.find("$")
+        data, tail = (line[:cut], line[cut:]) if cut > 0 else (line, "")
+        fields = _seatbelt_elem_card(data)
+        if to_int(fields[0]) <= 0 or to_int(fields[1]) <= 0:
+            continue
+        changed = False
+        out = list(fields)
+        for i, bucket in enumerate(_SEATBELT_ELEM_BUCKETS):
+            off = offsets.get(bucket, 0) if bucket else 0
+            tok = out[i].strip()
+            if not off or not tok:
+                continue
+            v = to_int(tok)
+            if v > 0:
+                out[i] = str(v + off)
+                changed = True
+        if not changed:
+            continue
+        if "," in data:
+            b.raw[k] = ",".join(x.strip() for x in out).rstrip(",") + tail
+            continue
+        while out and not out[-1].strip():
+            out.pop()
+        if any(len(x.strip()) > w
+               for x, w in zip(out, _SEATBELT_ELEM_WIDTHS)):
+            # An id outgrew its cell; a fixed re-render would run it into its
+            # neighbour, so fall back to a free card, which reads back the same.
+            b.raw[k] = " ".join(x.strip() for x in out) + tail
+            continue
+        b.raw[k] = "".join(
+            x.strip().rjust(w)
+            for x, w in zip(out, _SEATBELT_ELEM_WIDTHS)).rstrip() + tail
+
+
+def _off_seatbelt_accelerometer(b: Block, offsets: Dict[str, int],
+                                warn) -> None:
+    """*ELEMENT_SEATBELT_ACCELEROMETER: ``SBACID NID1 NID2 NID3 IGRAV INTOPT
+    MASS``, one card each. IGRAV above 1 is a CURVE id (Vol I: "GT.1: the flag
+    is given by load curve IGRAV"), so it moves with IDFOFF — but only then,
+    which a flat spec cannot express."""
+    for k, line in enumerate(b.raw):
+        if not line.strip() or line.lstrip().startswith("$"):
+            continue
+        f = _fields(line, 7, 10)
+        if _geti(f, 0) <= 0:
+            continue
+        mods = [(0, "r"), (1, "n"), (2, "n"), (3, "n")]
+        if _geti(f, 4) > 1:
+            mods.append((4, "f"))
+        new = _rewrite_line(line, mods, offsets)
+        if new is not None:
+            b.raw[k] = new
+
+
+def _off_seatbelt_slipring(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*ELEMENT_SEATBELT_SLIPRING, both cards.
+
+    Two cells change BUCKET with the sign of another cell, which is why this is
+    a walker and not a declarative spec:
+
+    * ``SBRNID < 0`` makes the ring a SHELL-belt ring, and then ``SBID1`` /
+      ``SBID2`` are ``*SET_SHELL_LIST`` ids (IDSOFF) rather than element ids
+      (IDEOFF), and ``|SBRNID|`` is a ``*SET_NODE`` (IDSOFF) rather than a node
+      (IDNOFF);
+    * ``FC < 0`` and ``FCS < 0`` are ``*DEFINE_CURVE`` ids carrying their sign,
+      so they move with IDFOFF and have to keep the minus — which is exactly
+      what ``_rewrite_neg_ref`` exists for (``_rewrite_line`` deliberately
+      touches only values > 0, because everywhere else a negative cell is a
+      flag).
+
+    Card 2 is claimed the same way ``handlers._slipring_card2_follows`` claims
+    it — the #119 rule that the two walks must agree on which line is a card,
+    or the offsetter and the handler address different rows.
+    """
+    from .handlers import _slipring_card2_follows
+    rows = [i for i, ln in enumerate(b.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _fields(b.raw[i], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        k += 1
+        onid = _geti(f1, 7)
+        shell = to_float(f1[4]) < 0.0 if len(f1) > 4 and f1[4].strip() else False
+        el_bucket = "s" if shell else "e"
+        node_bucket = "s" if shell else "n"
+        mods = [(0, "r"), (1, el_bucket), (2, el_bucket), (7, "n")]
+        if not shell:
+            mods.append((4, node_bucket))
+        new = _rewrite_line(b.raw[i], mods, offsets)
+        if new is not None:
+            b.raw[i] = new
+        foff = offsets.get("f", 0)
+        soff = offsets.get("s", 0)
+        for idx, off in ((3, foff), (6, foff),
+                         (4, soff if shell else 0)):
+            if not off:
+                continue
+            g = _fields(b.raw[i], 8, 10)
+            if len(g) > idx and g[idx].strip() and to_float(g[idx]) < 0.0:
+                upd = _rewrite_neg_ref(b.raw[i], idx, off)
+                if upd is not None:
+                    b.raw[i] = upd
+        if _slipring_card2_follows(b, rows, k, i, onid):
+            # K FUNCID DIRECT DC <blank> LCNFFD LCNFFS — columns 41-50 are ten
+            # literal blanks in the cfg's CARD string, so the two normal-force
+            # curves are fields 5 and 6, not 4 and 5.
+            new = _rewrite_line(b.raw[rows[k]],
+                                [(1, "f"), (5, "f"), (6, "f")], offsets)
+            if new is not None:
+                b.raw[rows[k]] = new
+            k += 1
+
+
+def _off_seatbelt_retractor(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*ELEMENT_SEATBELT_RETRACTOR, both cards.
+
+    Card 1 ``SBRID SBRNID SBID SID1..SID4 DSID``, card 2
+    ``TDEL PULL LLCID ULCID LFED LCFL FLOPT``. ``SBRNID < 0`` makes it a
+    SHELL-belt retractor: ``|SBRNID|`` is a ``*SET_NODE`` and ``SBID`` a
+    ``*SET_SHELL_LIST``, both IDSOFF.
+
+    Card 2 is claimed by RAW CONTIGUITY, the same test the handler uses: an
+    all-blank card 2 is legal (every field on it has a default), and treating
+    it as absent would offset the NEXT retractor's card 1 as a card 2 and then
+    run one card out of phase for the rest of the block.
+    """
+    rows = [i for i, ln in enumerate(b.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _fields(b.raw[i], 8, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        k += 1
+        shell = _geti(f1, 1) < 0
+        mods = [(0, "r"), (2, "s" if shell else "e"),
+                (3, "r"), (4, "r"), (5, "r"), (6, "r"), (7, "r")]
+        if not shell:
+            mods.append((1, "n"))
+        new = _rewrite_line(b.raw[i], mods, offsets)
+        if new is not None:
+            b.raw[i] = new
+        if shell and offsets.get("s", 0):
+            upd = _rewrite_neg_ref(b.raw[i], 1, offsets["s"])
+            if upd is not None:
+                b.raw[i] = upd
+        if k < len(rows) and rows[k] == i + 1:
+            new = _rewrite_line(b.raw[rows[k]], [(2, "f"), (3, "f")], offsets)
+            if new is not None:
+                b.raw[rows[k]] = new
+            k += 1
+
+
+def _off_seatbelt_pretensioner(b: Block, offsets: Dict[str, int],
+                               warn) -> None:
+    """*ELEMENT_SEATBELT_PRETENSIONER, both cards.
+
+    Card 1 ``SBPRID SBPRTY SBSID1..SBSID4`` (the four sensor ids move with
+    IDROFF), card 2 ``SBRID TIME PTLCID LMTFRC LMTPIN`` (SBRID is a RETRACTOR,
+    IDROFF; PTLCID a curve, IDFOFF).
+
+    Card 2 is claimed by RAW CONTIGUITY, and here the reason is sharper than
+    on the retractor: on SBPRTY 7/8/9 the legacy ``Keyword971`` cfg writes card
+    2 with field 0 LITERALLY BLANK, so a walk keyed on a populated leading cell
+    would take the next pretensioner's card 1 as this one's SBRID and offset it
+    twice.
+    """
+    rows = [i for i, ln in enumerate(b.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _fields(b.raw[i], 6, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        k += 1
+        new = _rewrite_line(
+            b.raw[i], [(0, "r"), (2, "r"), (3, "r"), (4, "r"), (5, "r")],
+            offsets)
+        if new is not None:
+            b.raw[i] = new
+        if k < len(rows) and rows[k] == i + 1:
+            new = _rewrite_line(b.raw[rows[k]], [(0, "r"), (2, "f")], offsets)
+            if new is not None:
+                b.raw[rows[k]] = new
+            k += 1
+
+
+def _off_seatbelt_sensor(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*ELEMENT_SEATBELT_SENSOR: card 1 ``SBSID SBSTYP SBSFL``, then ONE type
+    card whose ID CELLS depend on SBSTYP — the #119 walk, on the offsetter side
+    this time:
+
+      1  ``NID DOF ACC ATIME``     field 0 is a NODE
+      2  ``SBRID PULRAT PULTIM``   field 0 is a RETRACTOR
+      3  ``TIME``                  no ids at all
+      4  ``NID1 NID2 DMX DMN``     fields 0 and 1 are NODES
+      5  ``SBRID PULMX PULMN``     field 0 is a RETRACTOR
+
+    Offsetting field 0 as a node on a SBSTYP=2 card would move a retractor id
+    by IDNOFF and dangle it; reading the card as having no ids on a SBSTYP=1
+    deck would leave the watched node behind while the mesh moved.
+    """
+    _card2 = {1: [(0, "n")], 2: [(0, "r")], 3: [], 4: [(0, "n"), (1, "n")],
+              5: [(0, "r")]}
+    rows = [i for i, ln in enumerate(b.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _fields(b.raw[i], 3, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        k += 1
+        new = _rewrite_line(b.raw[i], [(0, "r")], offsets)
+        if new is not None:
+            b.raw[i] = new
+        mods = _card2.get(_geti(f1, 1), [])
+        if k < len(rows) and rows[k] == i + 1:
+            if mods:
+                new = _rewrite_line(b.raw[rows[k]], mods, offsets)
+                if new is not None:
+                    b.raw[rows[k]] = new
+            k += 1
+
+
+def _off_section_seatbelt(b: Block, offsets: Dict[str, int], warn) -> None:
+    """Every *SECTION_SEATBELT card set: SECID (IDROFF). A card-SET walker for
+    the reason every ``*SECTION_*`` here is one — a declarative spec addresses
+    only the first set, and every later section would keep its original SECID
+    while the *PARTs that name it moved."""
+    per_set_title = _title_offset(b)
+    raw = b.raw
+    idx = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        if per_set_title:
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _fields(raw[idx], 3, 10)
+        if _geti(f1, 0) <= 0:
+            break
+        new = _rewrite_line(raw[idx], [(0, "r")], offsets)
+        if new is not None:
+            raw[idx] = new
+        idx += 1
+
+
 _ELEM_SHELL_MODS = [(0, "e"), (1, "p")] + [(i, "n") for i in range(2, 10)]
 
 # A discrete-beam LCID run: six consecutive *DEFINE_CURVE references (IDFOFF).
@@ -3179,7 +3490,38 @@ for _kw, _stack in _AIRBAG_OPTION_STACKS.items():
             _OFFSET_SPECS[_kw + "".join(_combo) + _sfx] = _off_airbag
 for _sfx in _AIRBAG_LEGACY_SUFFIXES:
     _OFFSET_SPECS["AIRBAG_INTERACTION" + _sfx] = _off_airbag_interaction
-del _sfx, _stack, _combo
+
+# ── Seatbelts / restraints ─────────────────────────────────────────────────
+#
+# Generated from the SAME dict handlers.py dispatches on (#116), so a spelling
+# cannot be readable by the handler and invisible to this table. An unmapped
+# seatbelt keyword inside an *INCLUDE_TRANSFORM keeps its original element,
+# node, part, sensor and curve ids while everything around it moves — the belt
+# then hangs off nodes that are no longer there, or, worse, off the wrong ones.
+# MEASURED on master before this batch: every one of the eleven seatbelt
+# keywords hit the "keyword has no offset map" fallback while the *PART beside
+# them WAS offset (/PART/3900 -> mat 4900 on IDPOFF 3000 / IDMOFF 4000), so the
+# SECID would have needed +IDROFF and the belt eids +IDEOFF and neither moved.
+_SEATBELT_OFFSET_WALKERS = {
+    "": _off_element_seatbelt,
+    "_ACCELEROMETER": _off_seatbelt_accelerometer,
+    "_SLIPRING": _off_seatbelt_slipring,
+    "_RETRACTOR": _off_seatbelt_retractor,
+    "_PRETENSIONER": _off_seatbelt_pretensioner,
+    "_SENSOR": _off_seatbelt_sensor,
+}
+assert set(_SEATBELT_OFFSET_WALKERS) == set(_SEATBELT_SUBKEYWORDS), (
+    "handlers._SEATBELT_SUBKEYWORDS and assembly._SEATBELT_OFFSET_WALKERS "
+    "must cover the SAME spellings")
+for _sfx, _walk in _SEATBELT_OFFSET_WALKERS.items():
+    _OFFSET_SPECS["ELEMENT_SEATBELT" + _sfx] = _walk
+_OFFSET_SPECS["SECTION_SEATBELT"] = _off_section_seatbelt
+for _kw in _SEATBELT_MAT_KEYWORDS:
+    # MID on card 1 field 0, LLCID on field 2 and ULCID on field 3 (curves).
+    # Cards 2-4 carry no ids at all — A/I/J/AS/F/M/R and the _2D coating and
+    # weft data are every one of them a plain value.
+    _OFFSET_SPECS[_kw] = _mat({0: [(2, "f"), (3, "f")]})
+del _sfx, _walk, _stack, _combo
 for _r in range(4):
     for _combo in _permutations(("_BIRTH", "_RDT", "_ID"), _r):
         if _combo and _combo[-1] == "_ID":
@@ -3225,6 +3567,11 @@ _NO_ID_KEYWORDS = frozenset({
     # and flags. Nothing on any of the four is offsetable.
     "DATABASE_BNDOUT", "DATABASE_NODFOR", "DATABASE_TPRINT",
     "CONTROL_PARALLEL",
+    # *DATABASE_SBTOUT is the standard *DATABASE_OPTION card - DT, BINARY,
+    # LCUR, IOOPT - and carries no id at all. (LCUR is an OUTPUT-INTERVAL curve
+    # k2rad does not read on any *DATABASE_ card, so it is not offset here
+    # either; every one of the cards above is in this set for the same reason.)
+    "DATABASE_SBTOUT",
 })
 
 #: Coordinate/point-bearing keywords other than *NODE: literal geometry that a
