@@ -867,11 +867,17 @@ class TimeHistory(unittest.TestCase):
         self.assertEqual(sorted(ids), [2, 5, 7])
 
     def test_an_undefined_node_set_is_named(self):
+        """Wording generalized by the output-parity batch: _SPH_SET now shares
+        ONE _SET expander with _NODE_SET / _BEAM_SET / _SHELL_SET / _SOLID_SET
+        / _DISCRETE_SET, so the message names the pool the id failed to resolve
+        in rather than hard-coding *SET_NODE into the SPH branch."""
         result, starter = _convert(deck(
             extra="*DATABASE_HISTORY_SPH_SET\n" + _row(20) + "\n"))
         self.assertNotIn("/TH/SPHCEL", starter)
-        self.assertTrue(_warns(result, "*SET_NODE [20] is not defined"),
-                        result.warnings)
+        hits = _warns(result, "set id(s) [20] resolve to no converted "
+                              "*SET_NODE")
+        self.assertTrue(hits, result.warnings)
+        self.assertIn("*DATABASE_HISTORY_SPH_SET", hits[0])
 
     def test_the_keyword_leaves_skipped_keywords(self):
         result, _ = _convert(deck(

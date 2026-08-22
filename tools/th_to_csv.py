@@ -6,7 +6,8 @@ time-derivative column that the accumulated channels actually need.
 OpenRadioss writes several /TH channels as a running TIME INTEGRAL rather than
 as the instantaneous quantity their name suggests.  A `/TH/NODE` `REACY` column
 is not a reaction force, it is the reaction impulse integral(F dt) accumulated
-since t = 0; the same is true of the `/TH/INTER`, `/TH/SECTIO` and `/TH/RWALL`
+since t = 0; the same is true of the `/TH/INTER`, `/TH/SECTIO`, `/TH/RWALL` and
+`/TH/RBODY`
 force channels.  Plotting one of those columns as a force gives a monotonically
 rising line and no error anywhere.  The instantaneous quantity is the time
 derivative of the column.
@@ -40,11 +41,17 @@ Which channels get the treatment, and why (engine sources verified against
   nodal impulse sums ``FXN..FZT``.  The engine computes the true wall force one
   line earlier (``*DIVDT12``, ``rgwal0.F:498-500``) but routes it only to
   ``FOPT`` (/ANIM) and the sensor buffer.
+* ``/TH/RBODY`` ``FX/Y/Z``, ``MX/Y/Z`` - ``rgbodfp.F:261-266`` accumulates
+  ``FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)``.  This is the group *DATABASE_RBDOUT
+  builds, so a converted deck reaches it routinely.
 
 Channels NOT differentiated, because they are already instantaneous: `/TH/NODE`
 `DX/VX/...` (`thnod.F:124-135`), `/TH/SHEL` + `/TH/SH3N` + `/TH/BRIC` element
 state (`thcoq.F:305-315`, `thsol.F:329-336`), `/TH/SPRING` `FX..MZ`
-(`thres.F:355-361`).  Energies (`IE`, `KE`) are cumulative by nature and are
+(`thres.F:355-361`).  `/TH/RBODY` `RX/RY/RZ` are the odd ones out inside an
+otherwise accumulated group: `rgbodv.F:91-93` integrates the angular VELOCITY,
+so they ARE the rotation angle and differentiating them would give back a rate.
+Energies (`IE`, `KE`) are cumulative by nature and are
 left alone.  `/TH/SURF` is a special case and is flagged rather than
 differentiated - see `--list` output and the note under "/TH/SURF" below.
 
@@ -131,6 +138,18 @@ ACCUMULATED_CHANNELS: Dict[str, Tuple[str, ...]] = {
     "INTER": ("FNX", "FNY", "FNZ", "FTX", "FTY", "FTZ"),
     "SECTIO": ("FNX", "FNY", "FNZ", "FTX", "FTY", "FTZ", "M1", "M2", "M3"),
     "RWALL": ("FNX", "FNY", "FNZ", "FTX", "FTY", "FTZ"),
+    # Only the force/moment half.  rgbodfp.F:261-266 accumulates
+    # FS(1)=FS(1)+AFM1*DT1*WEIGHT(M) into FX..MZ, so those six are an impulse
+    # like every other row here -- but rgbodv.F:91-93 integrates the angular
+    # VELOCITY into FS(7..9)=RX/RY/RZ, which makes them the body's rotation
+    # ANGLE already.  Differentiating those would turn an angle back into a
+    # rate; measured 0.998181 rad against an exact 0.998008 rad on a body spun
+    # at a known 100 rad/s, so they are correct as written and stay out.
+    # FXI..MZI (FS(10..15), the 'FI'/'MI' vars) are not listed either: k2rad
+    # never requests them -- /TH/RBODY DEF stops at channel 9
+    # (hm_read_thgrou.F IVARRBG row 1) -- and this table takes no entry without
+    # a file:line citation for it.
+    "RBODY": ("FX", "FY", "FZ", "MX", "MY", "MZ"),
 }
 
 # Suffix for the differentiated sibling column.  Unit-neutral on purpose: the

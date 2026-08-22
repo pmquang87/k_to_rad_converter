@@ -850,6 +850,12 @@ def _make_joints(state: ConversionState, rigid_nodes: Set[int],
             _i(elem_id) + "".join(_i(n) for n in nodes),
             HDR,
         ]
+        # /SPRING producer 7 of 7: the *CONSTRAINED_JOINT_* KJOINT2 springs.
+        # Their ids are minted by next_id() and match no LS-DYNA element, so
+        # they stay out of the per-database sets; state.spring_elem_ids only
+        # answers "does a /SPRING with this id exist?", which is what the
+        # *DATABASE_HISTORY_DISCRETE / _BEAM screen has to ask.
+        state.spring_elem_ids.add(elem_id)
         th_elems.append(elem_id)
         emitted = True
         _warn_dropped_options(state, tag, jnt)

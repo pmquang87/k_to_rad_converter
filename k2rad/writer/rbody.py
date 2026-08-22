@@ -636,6 +636,11 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
         # DEFAULTS block says 2, which the reader reads as "no AMS expansion over
         # this rigid body" — the documented route into starter ERROR 1066.
         lines += inertia_extra
+        # The #106 register, /RBODY producer 1 of 3 (*MAT_RIGID parts, and
+        # with them *PART_INERTIA, the element-free CoG masters and the
+        # *CONSTRAINED_RIGID_BODIES merge masters). *DATABASE_RBDOUT lists this
+        # set; rbody_info cannot stand in for it (see _make_starter_th_rbody).
+        state.rbody_ids.add(ind_node)
         lines += [
             f"/RBODY/{ind_node}",
             part.title or f"RBODY_{pid}",
@@ -994,6 +999,7 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # of mass. With _INERTIA, ICoG=4 pins it at the stated centre of mass
         # instead and the mesh contribution is ignored.
         lines += inertia_extra
+        state.rbody_ids.add(ind_node)          # producer 2 of 3 (CNRB)
         lines += [
             f"/RBODY/{ind_node}",
             cnrb.title or f"CNRB_{cnrb.pid}",
@@ -1072,6 +1078,10 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     ]
     for k in range(3):
         lines.append(f"{_i(n1 + k)}{_f(x0 + k * spacing)}{_f(y0)}{_f(z0)}")
+    # Producer 3 of 3. This one is NOT in rbody_info at all (it is only
+    # appended to rbody_lines), so a deck whose only rigid body is the probe
+    # would get no /TH/RBODY group if *DATABASE_RBDOUT read that dict instead.
+    state.rbody_ids.add(n1)
     lines += [
         f"/RBODY/{n1}",
         "inert_probe_rbody",

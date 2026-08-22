@@ -115,13 +115,17 @@ from .output import (
     _make_ams,
     _make_analysis_defaults,
     _make_eig,
+    _make_engine_parith,
     _make_freq_domain_notes,
     _make_header,
     _make_skipped_comment,
     _make_starter_th,
+    _make_starter_th_bndout,
     _make_starter_th_inter,
+    _make_starter_th_nodal_force_group,
     _make_starter_th_node_reac,
     _make_starter_th_node_spc,
+    _make_starter_th_rbody,
     _make_starter_th_swforc,
     _make_starter_th_discrete_connectors,
     _make_starter_th_surf,
@@ -252,7 +256,29 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                # channels it asks for DO reach the T01, through the /TH/SPHCEL
                # groups *DATABASE_HISTORY_SPH builds.
                state.db_sphout_dt,
-               state.db_jntforc_dt)
+               state.db_jntforc_dt,
+               # The output-parity batch, on the same membership test — but
+               # each gated on its OWN consumer, because the test is "does this
+               # card pace a channel that is IN the T01", not "is this card in
+               # the deck". A *DATABASE_BNDOUT on a deck that prescribes no
+               # motion emits no group, so counting its dt would only thicken
+               # the T01 for channels that are not in it — which is the exact
+               # argument that keeps *DATABASE_TPRINT out (see
+               # handlers.handle_database_tprint), and it has to apply to these
+               # three as well or the rule is not a rule. It bites: 52 of the
+               # 118 *DATABASE_BNDOUT decks in the corpus carry no
+               # *BOUNDARY_PRESCRIBED_MOTION at all.
+               #
+               # build_starter runs before build_engine (k2rad/__init__.py:486),
+               # so all three registries are filled by the time this is read.
+               #   BNDOUT  -> /TH/NODE 'TH_NODE_BNDOUT' on the driven nodes
+               #   RBDOUT  -> /TH/RBODY over every converted rigid body
+               #   NODFOR  -> the interval of the *DATABASE_NODAL_FORCE_GROUP
+               #              /TH/NODE groups (that card has no DT of its own)
+               # *DATABASE_HISTORY_* has no DT field at all, in any spelling.
+               state.db_bndout_dt if state.imp_motion_nodes else 0.0,
+               state.db_rbdout_dt if state.rbody_ids else 0.0,
+               state.db_nodfor_dt if state.db_nodal_force_groups else 0.0)
     requested = [v for v in _db_dts if v > 0.0]
     # "If DT < 0.0, the result will be output every -DT time steps" (Manual
     # p. 16-7) — a CYCLE-based request, which is a real request even though
@@ -1390,6 +1416,20 @@ def _starter_section_registry():
         # or the group would come out empty. Same ordering constraint the
         # /CLUSTER + swforc pair records.
         ("starter_th_discrete_connectors", lambda c: _make_starter_th_discrete_connectors(c.state)),
+        # The output-parity batch. Each of the three is a no-op — and draws no
+        # id — on a deck without its keyword, so none can shift the id stream
+        # of an existing deck (the #119 fixture rule).
+        #   * nodal_force_group expands *SET_NODE and needs nothing else;
+        #   * rbody reads state.rbody_ids, which the three /RBODY producers
+        #     fill in build_starter BEFORE the registry is walked at all;
+        #   * bndout reads state.imp_motion_nodes, filled by the two
+        #     imposed_motions sections far above — the same "registry filled at
+        #     the write line, consumed by a later section" ordering the
+        #     /CLUSTER + swforc and discrete-connector pairs rely on.
+        ("starter_th_nodal_force_group",
+                              lambda c: _make_starter_th_nodal_force_group(c.state)),
+        ("starter_th_rbody",  lambda c: _make_starter_th_rbody(c.state)),
+        ("starter_th_bndout", lambda c: _make_starter_th_bndout(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),
@@ -1596,6 +1636,10 @@ def build_engine(state: ConversionState) -> str:
     sections = [
         _make_engine_header(state),
         _make_engine_restart(state),
+        # /PARITH is a global run flag like /RFILE, and is emitted ONLY when
+        # the deck carries a *CONTROL_PARALLEL — see _make_engine_parith for
+        # why the unconditional /PARITH/OFF dyna2rad writes is not neutral.
+        _make_engine_parith(state),
         _make_engine_output(state),
         _make_engine_timestep(state),
         _make_engine_dt_deletion(state),

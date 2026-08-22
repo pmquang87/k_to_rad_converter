@@ -2625,16 +2625,173 @@ impulses, not the instantaneous section resultants secforc reports** —
 `d(FNX)/dt`
 `*DATABASE_HISTORY_SHELL` → `/TH/SHEL`, and `/TH/SH3N` for any named element
 the mesh writer emitted as a 3-node `/SH3N` (`/TH/SHEL` records only 4-node
-shells, so a triangle listed there is absent from the T01);
+shells, so a triangle listed there is absent from the T01). The split reads the
+writer's own two registries back rather than re-deciding the topology, so the
+group and the element block cannot drift;
 `*DATABASE_HISTORY_SOLID` and `*DATABASE_HISTORY_TSHELL` → `/TH/BRIC` (a thick
 shell IS a `/BRICK` in the emitted deck); `*DATABASE_HISTORY_SPH` and
 `*DATABASE_HISTORY_SPH_SET` → `/TH/SPHCEL` (the `_SET` form's ids are
-`*SET_NODE` ids, not particle ids, and are expanded first). **Both are screened
-against the `/SPHCEL` cells the conversion actually emitted**: a `/TH` group
-naming an element the deck does not define is starter `ERROR 69` and the whole
-run is refused, so a dangling id is dropped with a named warning and a group
-that screens to nothing is not written at all (`ERROR 1109`);
+`*SET_NODE` ids, not particle ids, and are expanded first).
+**EVERY family is screened against the entities the conversion actually
+emitted** — nodes against `state.nodes`, SPH against `state.sph_cell_ids`,
+beams against `beam_elem_ids ∪ spring_elem_ids`, discretes against
+`spring_elem_ids`, shells against `shell_elem_ids ∪ sh3n_elem_ids`, solids and
+thick shells against `solid_elem_ids`. Each of those registries is filled **at
+the line that writes the element row**, never derived from the parsed
+container, because the two differ: an `*ELEMENT_SHELL` whose PID has no `*PART`
+record is parsed and warned about ("MESH LOSS") and then never written. A `/TH`
+group naming an element the deck does not define is starter `ERROR 69` and the
+whole run is refused — measured: a two-shell deck with one such element gave
+`ERROR ID : 69 ... TH ELEMENT SELECTION ID=999 DOES NOT EXIST` twice. So a
+dangling id is dropped with a named warning, and a group that screens to
+nothing is not written at all. Note that an entity-less group is **not** an
+error: `hm_read_thgrne.F:123` raises `ERROR 1109` only for `NVAR == 0` (no
+VARIABLE), and a group with a title, a var line and no id card is accepted,
+runs, and writes a T01 group holding zero entities — a silent channel loss,
+which is why the guard exists;
 `*DATABASE_HISTORY_NODE` → `/TH/NODE`
+**The variable line is PER FAMILY, dyna2rad's `outVars` verbatim**
+(`converttimehistory.cxx:238-296`): `/TH/NODE` asks for `DEF A AR VR`,
+`/TH/SHEL` / `/TH/SH3N` / `/TH/BRIC` for `DEF STRAIN`, and `/TH/BEAM`,
+`/TH/SPRING` and `/TH/SPHCEL` for `DEF` alone. `DEF` on a node is only six
+channels — `DX DY DZ VX VY VZ` (`hm_read_thgrou.F` `IVARNG` row 1) — so
+without `A`/`AR`/`VR` a `*DATABASE_HISTORY_NODE` drops the nine acceleration
+and rotation channels LS-DYNA's own `nodout` carries, and an element group
+without `STRAIN` drops the strain tensor. Measured against the plain-`DEF`
+baseline on one run: `/TH/NODE` 6 → 15 channels, `/TH/SHEL` 11 → 19,
+`/TH/BRIC` 11 → 17, starter `0 ERROR(S)`, every added channel carrying real
+time-varying data
+`*DATABASE_HISTORY_BEAM[_SET]` → `/TH/BEAM`, **and `/TH/SPRING` for any named
+element k2rad emitted as a spring** — an `*ELEMENT_BEAM` on a `*MAT_SPOTWELD`
+part or on a `*SECTION_BEAM` `ELFORM=6` part is a `/PROP/TYPE13`/`TYPE8`
+`/SPRING`, not a `/BEAM`, so one card can produce two groups. This is
+dyna2rad's own per-element `FindRadElement` fallback chain (`/BEAM` → `/SPRING`
+→ `/TRUSS`, `convertutils.cxx:298-312`); k2rad emits no `/TRUSS`, so the third
+link has no target. `*DATABASE_HISTORY_DISCRETE[_SET]` → `/TH/SPRING`.
+Both are screened against the emitted `/BEAM` and `/SPRING` ids (`ERROR 69`) —
+dyna2rad's DISCRETE branch is the one element branch with **no** existence
+check at all (`converttimehistory.cxx:256-261` assigns the raw list straight
+into the group)
+Every `_SET` spelling of the family (`_BEAM_SET`, `_DISCRETE_SET`,
+`_NODE_SET`, `_SHELL_SET`, `_SOLID_SET`, `_TSHELL_SET`, `_SPH_SET`) is expanded
+before the screen. Per the cfgs each accepts **two** id pools — its own element
+set (`*SET_BEAM`, `*SET_DISCRETE`, `*SET_SHELL`, `*SET_SOLID`) *or* a
+`*SET_PART`, which expands to every element of that family in the named parts.
+A set id that resolves in neither is warned and dropped, never written through
+as if it were an entity id (dyna2rad's `*SET_PART_LIST` branch keys on the
+literal string `"*SET_PART_LIST_TITLE"`, so a plain `*SET_PART_LIST` falls
+through and its **part** ids are pushed as **element** ids)
+`*DATABASE_HISTORY_NODE_LOCAL[_ID]` and `*DATABASE_HISTORY_NODE_SET_LOCAL` →
+`/TH/NODE` with a **per-node `skew_ID`** in columns 11-20 of each id card.
+`/TH/NODE` is the only group in this family whose card has that column
+(`th_node.cfg` `CARD("%10d%10d%-80s")`; `/TH/BEAM` and `/TH/SPRING` have ten
+*blank* columns there and answer a skew with `WARNING 100214` and a silent
+drop), which lines up exactly with LS-DYNA, where `_LOCAL` exists only for
+`NODE` / `NODE_SET`. The column takes a `/SKEW` **or** a `/FRAME` id —
+`hm_read_thgrou.F:2560-2588` scans the skew table then falls through to the
+frame table, and the starter echoes it as `SKEW(OR FRAME)`. `REF` picks which:
+`REF=0` ("the local system fixed for all time") → the CID's `/SKEW/FIX`, or a
+newly synthesized `/SKEW/FIX` frozen from the t=0 node positions when the CID
+is a co-rotating `*DEFINE_COORDINATE_NODES` (LS-DYNA calls that combination
+invalid; REF wins, and the new id **is** written back — dyna2rad builds the
+same frozen skew and then orphans it, `converttimehistory.cxx:468-507`);
+`REF=1` ("the projection of the node's absolute motion onto the local system")
+→ the CID as it stands; `REF=2` ("the motion of the node expressed in the local
+system **attached to node N1** of CID", i.e. *relative* motion) → a
+synthesized `/FRAME/MOV` built from the CID's `N1/N2/N3` + `DIR`. One frame per
+CID, not per node (a duplicated `/FRAME` id is `ERROR 79` over the merged
+`/SKEW`+`/FRAME` table). An unresolvable CID becomes `skew_ID 0` with a warning
+naming the quantitative consequence — the channels are then the global
+components — rather than dangling into `ERROR 434`. `HFO` (LS-DYNA's
+`nodouthf` selector) has no Radioss counterpart and is dropped
+The `_ID` spelling of every family carries a per-entity 70-char `HEADING`
+beside the id (`CARD("%10d%-70s")`, the two columns **fused**), which is
+written into the group's `elem_name` column so a T01 channel keeps the label
+the deck gave it. The reader keeps 40 characters of it
+(`hm_read_thgrne.F:169`)
+`*DATABASE_HISTORY_SEATBELT` → **nothing**, with the gap named in
+`recognized_not_emitted`. dyna2rad probes the *first* listed element's
+`PID → SECID` and routes the whole list to `/TH/SPRING` (a `*SECTION_SEATBELT`
+1D belt) or `/TH/SHEL` (a `*SECTION_SHELL` 2D belt) on that one answer. k2rad
+converts neither `*ELEMENT_SEATBELT` nor `*SECTION_SEATBELT`, so **both**
+branches are unreachable: there is no element in the output deck carrying those
+ids, and naming them is `ERROR 69` — a deck that "converts" and then refuses to
+run. The 2D-belt route becomes correct as soon as `*ELEMENT_SEATBELT` is
+converted
+`*DATABASE_NODAL_FORCE_GROUP[_TITLE]` → one `/TH/NODE` per card over the
+expanded `*SET_NODE`, with the seven variables dyna2rad writes verbatim
+(`DEF REACX REACY REACZ REACXX REACYY REACZZ`) and `skew_ID = CID` on every
+node. The interval comes from `*DATABASE_NODFOR` ("the output interval must be
+specified using `*DATABASE_NODFOR`", p.16-121), which is otherwise
+interval-only and reports itself as such. **Read the change of meaning**: the
+`REAC*` channels are the *time-accumulated* reaction impulse (below), *and*
+LS-DYNA's nodfor is a **free-body cut** — the force the rest of the model
+exerts on the group, nonzero anywhere in the mesh — while the Radioss `REAC*`
+channel is the **kinematic constraint reaction** and is identically zero on a
+node carrying no `/BCS`, `/RBODY` or imposed motion. For a real free-body
+section force use `*DATABASE_CROSS_SECTION_PLANE/_SET` → `/SECT` + `/TH/SECTIO`
+`*DATABASE_RBDOUT` → one `/TH/RBODY` over **every** `/RBODY` the conversion
+wrote — a presence-only trigger with no id list, the same "collect every
+converted entity" shape `/TH/RWALL`, `/TH/SECTIO` and `/TH/INTER` use. All four
+producers are covered: `*MAT_RIGID` parts (with `*PART_INERTIA`, the
+element-free CoG masters and the `*CONSTRAINED_RIGID_BODIES` merge masters),
+`*CONSTRAINED_NODAL_RIGID_BODY`, and the implicit no-rigid-body probe body.
+Two `/TH/RBODY`-only card rules: the id list is a **ten-per-line** cell list
+with no name and no skew column (`th_rbody.cfg` `FREE_CELL_LIST`), and a
+leading id of `0` selects **all** rigid bodies
+(`hm_read_thgrki_rbody.F:123-125`), so a placeholder zero is never written.
+`DEF` = `FX FY FZ MX MY MZ RX RY RZ`, and the two halves read differently:
+`FX..MZ` are a time-accumulated force/moment **impulse**
+(`rgbodfp.F:261-266`, `FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)`) while `RX/RY/RZ`
+integrate the angular *velocity* (`rgbodv.F:91-93`) and **are** the body's
+rotation angle. LS-DYNA's rbdout is a motion file; for rigid-body translation
+add a `*DATABASE_HISTORY_NODE` on the body's main node
+`*DATABASE_BNDOUT` → one `/TH/NODE` named `TH_NODE_BNDOUT` with
+`REACX/Y/Z` (+ `REACXX/YY/ZZ` when a prescribed motion drives a rotational dof)
+over every node an `/IMPDISP`, `/IMPVEL` or `/IMPACC` actually drives —
+dyna2rad names exactly those three cards as the source (`dyna2rad.cxx:456`).
+The scope is recorded at the point of emission, so a motion row that was
+warned about and dropped (unsupported DOF, a pid with no `/RBODY`, an empty box
+intersection) contributes no node and cannot dangle into `ERROR 78`. A
+zero-scale `*BOUNDARY_PRESCRIBED_MOTION_SET` row is deliberately **out** of
+scope: `sf=0` means "fix this dof" and becomes a `/BCS`, which is
+`*DATABASE_SPCFORC`'s territory. The *energy* half of bndout has no `/TH`
+channel; take it from the global energy balance
+`*DATABASE_TPRINT` → **nothing**, deliberately. dyna2rad answers it with
+`/ANIM/NODA TEMP` + `/ANIM/ELEM TEMP` and a `TEMP` variable appended to every
+existing `/TH/NODE` and `/TH/BRIC` group, with no check that a thermal solution
+was ever requested. k2rad converts **no** thermal keyword at all (no
+`*CONTROL_THERMAL_*`, `*MAT_THERMAL_*`, `*INITIAL_TEMPERATURE` or
+`*BOUNDARY_TEMPERATURE`, and no `/HEAT/MAT`), so a converted deck cannot run a
+thermal solve and the channel cannot carry data. What it would carry instead
+was measured on a 576-brick deck: with `/MAT/ELAST` the nodal and element
+temperature fields come out **all zero**, with `/MAT/PLAS_JOHNS` (which
+allocates `GBUF%TEMP` but never integrates it) a **frozen 300** — and the
+scalar is *always* created in the A-file (`genani.F:1905`, `:4547`), so the
+result is a flat fringe that looks like data. The starter says the same thing
+on the TH side and nowhere else (`WARNING 1087 OUTPUT TEMP WHILE TEMPERATURE IS
+NOT COMPUTED`, `hm_read_thgrne.F:228`); there is no equivalent warning on the
+ANIM side, so an emitted `/ANIM/*/TEMP` is silently uninformative. Its `dt`
+also stays **out** of the `/TFILE` minimum, per the membership rule: a card
+with no `/TH` consumer would only thicken the T01 for channels that are not in
+it
+`*CONTROL_PARALLEL` → engine `/PARITH/ON` when `CONST=1` on any card,
+`/PARITH/OFF` otherwise — **and only when the deck actually carries the card**.
+`CONST=1` requires "that all contributions to global vectors be summed in a
+precise order independently of the number of processors used" (p.12-449), which
+is exactly `/PARITH/ON`: the engine writes each contribution into a fixed
+per-node slot of the skyline `FSKY` array and gathers them in a deterministic
+walk (`asspar4.F`), so the sum order is invariant in both the thread count and
+the MPI domain count. Measured on a 576-brick LAW2 model: `/PARITH/ON` gives a
+**bitwise identical** T01 at `nt=1` and `nt=4`, `/PARITH/OFF` differs in the
+7th digit — which is also how to verify the card was consumed. `NCPU`,
+`NUMRHS` and `PARA` have no Radioss counterpart (NCPU is the runtime `-nt`
+argument, not a deck card) and are named as dropped. dyna2rad creates `/PARITH`
+*unconditionally* and defaults it to `OFF` (`convertcards.cxx:973`) before it
+has even looked for the LS-DYNA card, which silently flips OpenRadioss's own
+default of `ON` (`contrl.F:400`) on every deck it converts; k2rad does not
+change a solver default from a card the deck does not carry. Note `/IMPL` and
+`/EIG` veto `/PARITH/ON` at run time (`lectur.F:681`), which the warning says
 `*DATABASE_SPCFORC` → `/TH/NODE` `REACX/Y/Z` (+ `REACXX/YY/ZZ` when a
 rotational DOF is constrained) on every SPC-constrained node, plus engine
 `/ANIM/VECT/FREAC`. **The `REAC*` channel is a time-accumulated reaction
@@ -2707,10 +2864,10 @@ asks for either card but has no matching connector gets a warning and no
 LS-DYNA offers two ways to narrow the deforc selection (p.1944): `PF=1` on
 `*ELEMENT_DISCRETE` ("forces are **not** printed DEFORC file", p.19-32) is
 **honoured** — the `/SPRING` is still emitted, only the `/TH` group shrinks —
-while `*DATABASE_HISTORY_DISCRETE` has no handler, so a deck that uses it gets a
-group listing every converted connector, a **superset** of its own deforc file.
-That is over-reporting, never under-reporting, and the emitted warning says so
-whenever the card is present
+while `*DATABASE_HISTORY_DISCRETE` gets its own `/TH/SPRING` group over exactly
+the elements it names, so a deck using both ends up with the deforc group as a
+**superset** of its own deforc file. That is over-reporting, never
+under-reporting, and the emitted warning says so whenever the card is present
 `*DEFINE_HEX_SPOTWELD_ASSEMBLY` (+ `_1` … `_16`) → one `/GRBRIC/BRIC` +
 one `/CLUSTER/BRICK` per assembly (LS-DYNA caps an assembly at 16 hexes,
 `/CLUSTER` at 500, so the 1:1 map always fits). `ID_SW` is reused verbatim as
@@ -2749,10 +2906,15 @@ the CLI and the conversion log under **"Recognized but not emitted"**, so
 `skipped: 0 unsupported keyword(s)` cannot be read as "everything was
 converted". Currently: `*DATABASE_MATSUM` (per-part energy needs `/TH/PART`,
 not yet emitted), `*DATABASE_NODOUT` / `*DATABASE_ELOUT` (k2rad writes the
-per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names) and
+per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names),
 `*DATABASE_GLSTAT` (no card needed — OpenRadioss writes the global energy
-balance automatically). In every case the `dt` is still honoured as the
-`/TFILE` frequency. The same channel carries any `*CONTACT` that produced
+balance automatically), `*DATABASE_NODFOR` on a deck with no
+`*DATABASE_NODAL_FORCE_GROUP` (it is an interval, not a channel selection),
+`*DATABASE_TPRINT` (no thermal solver exists to schedule) and
+`*DATABASE_HISTORY_SEATBELT` (no `*ELEMENT_SEATBELT` in the output deck to
+name). Except for `TPRINT`, whose channels do not exist at all, the `dt` is
+still honoured as the `/TFILE` frequency. The same channel carries any
+`*CONTACT` that produced
 no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no
 `/INTER/SUB`), with the lost interface ids named — a missing contact
 changes the physics, not just the instrumentation, so it can never be
@@ -2764,6 +2926,18 @@ Radioss has ONE time-history frequency for the whole T01, so the whole
 `*DATABASE_*` family collapses to a single `/TFILE`. k2rad takes the **minimum**
 of every interval the deck asked for — never the first one in some arbitrary
 order, which would sample a channel coarser than requested.
+
+Membership is a rule, not a list: a card's `dt` joins the minimum **iff** that
+card drives a real `/TH` group. `NODOUT`, `ELOUT`, `GLSTAT`, `MATSUM`,
+`SPCFORC`, `NCFORC`, `RCFORC`, `BLSTFOR`, `RWFORC`, `SECFORC`, `SWFORC`,
+`DEFORC`, `DISBOUT`, `JNTFORC`, `SPHOUT`, `BNDOUT`, `RBDOUT` and `NODFOR` are
+in. `ABSTAT`, `BINARY_D3THDT`, `BINARY_INTFOR` and `SLEOUT` stay out — they
+have no `/TH` consumer at all, so honouring them would only thicken the T01 for
+channels that are not in it — and so does `TPRINT`, because k2rad emits no
+thermal solver. The `*DATABASE_HISTORY_*` family has no `DT` field at all in
+any spelling, and `*DATABASE_NODAL_FORCE_GROUP` has none either: its interval
+is `*DATABASE_NODFOR`'s, which is why that card is in the list despite
+selecting nothing itself.
 
 A **negative** `DT` means "output every `-DT` time steps" (p.16-7). Radioss's
 `/TFILE` is a *time* interval with no cycle-based form, so such a request cannot
@@ -2821,6 +2995,9 @@ Every `/TH` variable k2rad emits, audited against the engine source at
 | `/TH/SPRING` | `FX..MZ`, `LX..RZ` (`DEF`) | instantaneous, in **raw deck units** (k2rad never rescales, so a ton-mm-s deck reports N and mm) | `thres.F:355-361` writes `GBUF%FOR` / `GBUF%MOM` directly |
 | `/TH/SHEL`, `/TH/SH3N` | `F1/F2/F12`, `M1/M2/M12`, `OFF` (`DEF`) | instantaneous element state | `thcoq.F:305-315` |
 | `/TH/BRIC` | `OFF`, `SX..SXZ`, `DENS`, `TEMP` (`DEF`) | instantaneous element state | `thsol.F:329-336` |
+| `/TH/BEAM` | `OFF`, `F1/F2/F3`, `M1/M2/M3`, `IE` (`DEF`) | instantaneous element state | `hm_read_thgrou.F` `IVARPG` row 1 = indices 1-8 |
+| `/TH/RBODY` | `FX/FY/FZ`, `MX/MY/MZ` (half of `DEF`) | **accumulated impulse + angular impulse** | `rgbodfp.F:261-266` (`FS(1)=FS(1)+AFM1*DT1*WEIGHT(M)`), copied raw by `thkin.F` |
+| `/TH/RBODY` | `RX/RY/RZ` (the other half of `DEF`) | the body's **rotation angle** — an integral of the angular velocity, so already a displacement-like quantity; do **not** differentiate | `rgbodv.F:91-93` (`FS(7)=FS(7)+VR(1,M)*DT2*WEIGHT(M)`) |
 | all types | `IE`, `KE`, `PLAS`, energies | cumulative by nature (an energy, not a rate) — no correction needed | — |
 
 The instantaneous quantity is the time derivative of the accumulated column.

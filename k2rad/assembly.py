@@ -1990,6 +1990,62 @@ def _off_damping_first_data_card(mods):
     return _off
 
 
+def _off_db_history(bucket: str, local: bool = False):
+    """Offset spec for *DATABASE_HISTORY_<FAMILY>[_SET][_LOCAL][_ID].
+
+    A callable rather than a flat ``{"data": ...}`` spec, for two reasons that
+    are both the #119 rule — the offset walk and the handler MUST agree on
+    which raw line is a card, or the ids move in one and not the other:
+
+      * ``_offset_block`` starts its ``data`` walk at ``_title_offset(b)``,
+        which is 1 whenever the ``_ID`` option is present. On this family
+        ``_ID`` is a PER-ENTITY 70-char HEADING beside every id, NOT a
+        card-level "id + title" header, so the flat spec silently skipped the
+        FIRST requested entity while ``handlers._handle_db_history`` read it.
+        (The desync was invisible only because the handler's own free split
+        could not read an ``_ID`` card either — both halves are fixed here.)
+      * the ``_ID`` card FUSES ``%10d`` and ``%-70s``, which ``_rewrite_line``
+        cannot touch: ``_split_card`` sees the space inside the heading, falls
+        back to a whitespace split, and field 0 becomes ``5000390Left``.
+        ``_rewrite_id_header`` rewrites columns 1-10 only and leaves the rest
+        of the line byte-identical.
+
+    ``local`` adds the ``_LOCAL`` card's CID column (field 1) in the IDDOFF
+    bucket — a *DEFINE_COORDINATE id. REF (field 2) and HFO (field 3) are
+    plain flags and must NOT be offset, which is the other thing a
+    ``(ALL, ...)`` spec would get wrong.
+    """
+    def _off(b: Block, offsets: Dict[str, int], warn) -> None:
+        raw = b.raw
+        rows = [i for i in range(len(raw))
+                if raw[i].strip() and not raw[i].lstrip().startswith("$")]
+        is_id = "ID" in b.options
+        if local:
+            k = 0
+            while k < len(rows):
+                idx = rows[k]
+                k += 1
+                new = _rewrite_line(raw[idx], [(0, bucket), (1, "d")], offsets)
+                if new is not None:
+                    raw[idx] = new
+                # RAW contiguity, the same test the handler uses: a blank
+                # HEADING card is legal and drops out of `rows`, so "the next
+                # row" would step onto the FOLLOWING entity card and offset it
+                # twice while treating its id as a heading.
+                if is_id and k < len(rows) and rows[k] == idx + 1:
+                    k += 1                    # the heading card holds no ids
+            return
+        off = offsets.get(bucket, 0)
+        for idx in rows:
+            if is_id:
+                new = _rewrite_id_header(raw[idx], off)
+            else:
+                new = _rewrite_line(raw[idx], [(ALL, bucket)], offsets)
+            if new is not None:
+                raw[idx] = new
+    return _off
+
+
 def _off_damping_part_mass(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_damping_part_mass_common(b, offsets, "p")
 
@@ -2069,6 +2125,15 @@ _OFFSET_SPECS: Dict[str, object] = {
     "SET_SOLID": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_BEAM_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_BEAM": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
+    # Same shape as its three siblings above. Inert until the output-parity
+    # batch gave the set a consumer: *DATABASE_HISTORY_DISCRETE_SET offsets its
+    # set-id reference through _off_db_history("s"), so without these two rows
+    # an *INCLUDE_TRANSFORM moved the REFERENCE and left the *SET_DISCRETE
+    # behind — the history card resolved to nothing and the /TH/SPRING was
+    # dropped, or (set inside, reference outside) the set resolved but listed
+    # un-offset member ids pointing at the PARENT deck's springs.
+    "SET_DISCRETE_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
+    "SET_DISCRETE": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
     "SET_SEGMENT": {"cards": {0: [(0, "s")]},
                     "data": (1, [(0, "n"), (1, "n"), (2, "n"), (3, "n")])},
 
@@ -2488,10 +2553,35 @@ _OFFSET_SPECS: Dict[str, object] = {
     "ALE_MULTI-MATERIAL_GROUP": _off_ale_multi_material_group,
 
     # Database / output requests
-    "DATABASE_HISTORY_NODE": {"data": (0, [(ALL, "n")])},
-    "DATABASE_HISTORY_SHELL": {"data": (0, [(ALL, "e")])},
-    "DATABASE_HISTORY_SOLID": {"data": (0, [(ALL, "e")])},
-    "DATABASE_HISTORY_TSHELL": {"data": (0, [(ALL, "e")])},
+    #
+    # EVERY spelling of the *DATABASE_HISTORY_* family needs its own row:
+    # parser._split_keyword strips only a trailing _ID, so _SET and _LOCAL are
+    # part of the base keyword. The callable is what keeps the offset walk and
+    # handlers._handle_db_history reading the SAME raw lines under the _ID and
+    # _LOCAL layouts — see _off_db_history.
+    "DATABASE_HISTORY_NODE": _off_db_history("n"),
+    "DATABASE_HISTORY_NODE_SET": _off_db_history("s"),
+    "DATABASE_HISTORY_NODE_LOCAL": _off_db_history("n", local=True),
+    "DATABASE_HISTORY_NODE_SET_LOCAL": _off_db_history("s", local=True),
+    "DATABASE_HISTORY_SHELL": _off_db_history("e"),
+    "DATABASE_HISTORY_SHELL_SET": _off_db_history("s"),
+    "DATABASE_HISTORY_SOLID": _off_db_history("e"),
+    "DATABASE_HISTORY_SOLID_SET": _off_db_history("s"),
+    "DATABASE_HISTORY_TSHELL": _off_db_history("e"),
+    "DATABASE_HISTORY_TSHELL_SET": _off_db_history("s"),
+    "DATABASE_HISTORY_BEAM": _off_db_history("e"),
+    "DATABASE_HISTORY_BEAM_SET": _off_db_history("s"),
+    "DATABASE_HISTORY_DISCRETE": _off_db_history("e"),
+    "DATABASE_HISTORY_DISCRETE_SET": _off_db_history("s"),
+    # *ELEMENT_SEATBELT ids take IDEOFF like any other element even though
+    # k2rad emits no channel for them: the request must still point at the
+    # renumbered elements when the seatbelt batch lands.
+    "DATABASE_HISTORY_SEATBELT": _off_db_history("e"),
+    # *DATABASE_NODAL_FORCE_GROUP[_TITLE]: NSID is a *SET_NODE (IDSOFF) and CID
+    # a *DEFINE_COORDINATE (IDDOFF); the _TITLE line is consumed by
+    # _title_offset, so the flat "cards" spec is correct here (unlike the
+    # HISTORY family, whose _ID is per entity).
+    "DATABASE_NODAL_FORCE_GROUP": {"cards": {0: [(0, "s"), (1, "d")]}},
     # *DATABASE_HISTORY_SPH lists PARTICLE ids, and an SPH particle IS its
     # supporting node (hm_read_sphcel.F:243-250) — so these take IDNOFF, the
     # same bucket _off_element_sph gives the card's field 0, NOT IDEOFF. Without
@@ -2500,8 +2590,8 @@ _OFFSET_SPECS: Dict[str, object] = {
     # PARENT deck's particles, which the ERROR-69 screen cannot catch because
     # those ids do exist as /SPHCEL. The _SET spelling lists *SET_NODE ids
     # (IDSOFF) for the same reason.
-    "DATABASE_HISTORY_SPH": {"data": (0, [(ALL, "n")])},
-    "DATABASE_HISTORY_SPH_SET": {"data": (0, [(ALL, "s")])},
+    "DATABASE_HISTORY_SPH": _off_db_history("n"),
+    "DATABASE_HISTORY_SPH_SET": _off_db_history("s"),
     "DATABASE_CROSS_SECTION_PLANE": {"cards": {0: [(0, "s")]}, "idhdr": "p"},
     "DATABASE_CROSS_SECTION_SET": {"cards": {0: [(i, "s") for i in range(6)]},
                                    "idhdr": "p"},
@@ -2726,6 +2816,13 @@ _NO_ID_KEYWORDS = frozenset({
     "DATABASE_NCFORC", "DATABASE_RBDOUT", "DATABASE_BINARY_D3DRLF",
     "DATABASE_BINARY_D3DUMP", "DATABASE_BINARY_BLSTFOR",
     "DATABASE_BINARY_RUNRSF",
+    # The output-parity batch. *DATABASE_BNDOUT / _NODFOR / _TPRINT carry only
+    # DT / BINARY / LCUR / IOOPT — the OPTION1..4 columns of the *DATABASE_
+    # card apply to bndout/nodout/elout as PRINT flags, not as ids (Vol I R16
+    # p.16-7). *CONTROL_PARALLEL is NCPU / NUMRHS / CONST / PARA, all counts
+    # and flags. Nothing on any of the four is offsetable.
+    "DATABASE_BNDOUT", "DATABASE_NODFOR", "DATABASE_TPRINT",
+    "CONTROL_PARALLEL",
 })
 
 #: Coordinate/point-bearing keywords other than *NODE: literal geometry that a

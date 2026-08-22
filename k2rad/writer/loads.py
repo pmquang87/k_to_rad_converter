@@ -360,6 +360,13 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
             f"{_i(elem_id)}{_i(master)}{_i(ground_node)}",
             HDR,
         ]
+        # /SPRING producer 5 of 7: the --ground-springs stabilizer. Its id is
+        # minted by next_id() and matches no LS-DYNA element, so it stays out
+        # of the three per-database sets — but it IS a /SPRING, so a
+        # *DATABASE_HISTORY_BEAM/_DISCRETE id collision has to be able to see
+        # it (state.spring_elem_ids answers "does a /SPRING with this id
+        # exist?", nothing more).
+        state.spring_elem_ids.add(elem_id)
         emitted = True
         state.warn(
             f"--ground-springs: injected a /PROP/TYPE8 grounding spring (K={k:g} "
@@ -781,6 +788,7 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # coordinates, and *DATABASE_DEFORC must list only ids that reached the
         # deck (a /TH/SPRING on a missing element is starter ERROR 69).
         state.discrete_spring_eids.add(e.eid)
+        state.spring_elem_ids.add(e.eid)      # producer 1 of 7
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_id()
@@ -1499,6 +1507,11 @@ def _make_plotel_elements(state: ConversionState) -> List[str]:
             missing.append(e.eid)
             continue
         lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}")
+        # /SPRING producer 4 of 7. A PLOTEL keeps its SOURCE eid, so it shares
+        # the /SPRING id namespace with the real connectors — and the
+        # `continue` above drops elements whose nodes are missing, so this is
+        # recorded at the write line like every other producer.
+        state.spring_elem_ids.add(e.eid)
         kept += 1
     lines.append(HDR)
 
@@ -1753,6 +1766,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             # emitting a /SPRING. A /TH/SPRING naming a skipped id is starter
             # ERROR 69 and the deck is refused outright.
             state.spotweld_spring_eids.add(e.eid)
+            state.spring_elem_ids.add(e.eid)  # producer 2 of 7
         lines.append(HDR)
         emitted = True
 
@@ -1862,6 +1876,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             f"{_i(elem_id)}{_i(n1)}{_i(n2)}",
             HDR,
         ]
+        state.spring_elem_ids.add(elem_id)    # producer 6 of 7
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "
@@ -2255,6 +2270,27 @@ _IMP_COMMENT2 = ("#           Ascale_x            Fscale_Y"
                  "              Tstart               Tstop")
 
 
+def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str
+                               ) -> None:
+    """Record the nodes an /IMPDISP | /IMPVEL | /IMPACC was just written for.
+
+    This is the *DATABASE_BNDOUT scope. dyna2rad builds it by re-walking the
+    converted /IMPDISP, /IMPVEL and /IMPACC cards and reading their node groups
+    back out (dyna2rad.cxx:456-479); recording it here instead means a row that
+    was warned about and dropped — an unsupported DOF, a pid with no /RBODY, a
+    box that no set node lies inside — contributes nothing, so the /TH/NODE can
+    never name an undefined node (starter ERROR 78).
+
+    ``dir_str`` is the emitted ``Dir`` letter pair. ``XX``/``YY``/``ZZ`` are the
+    ROTATIONAL directions (_DOF_DIR maps LS-DYNA dof 5/6/7 and |8| onto them),
+    and their presence is what gates the REACXX/YY/ZZ channels — the same
+    discipline ``_spc_constrains_rotations`` applies to the SPC block.
+    """
+    state.imp_motion_nodes.update(n for n in nids if n in state.nodes)
+    if len(dir_str) > 1:
+        state.imp_motion_rot = True
+
+
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
                    dir_str: str, grnod_id: int, fscale: float,
                    tstart: float, tstop: float,
@@ -2462,6 +2498,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                 pm.lcid, base_dir, grnod_id, pm.sf,
                                 tstart, tstop, skew_id)
         motion_counter += 1
+        _register_imp_motion_nodes(state, [info["ind_node"]], base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -2470,6 +2507,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id)
             motion_counter += 1
+            _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
     # the pid — an element-free rigid part, or a *CONSTRAINED_RIGID_BODIES slave
     # whose nodes were merged into its master) still has its three nodes in /NODE
@@ -2888,6 +2926,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
                                 skew_id)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
+        _register_imp_motion_nodes(state, nids, base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
         lines += fct_lines
         for lock_dir in locked:
@@ -2895,6 +2934,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
                                     tstart, tstop, skew_id)
+            _register_imp_motion_nodes(state, nids, lock_dir)
 
     return lines
 
@@ -4965,6 +5005,18 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
     cards are the local Y' and Z' (NOT X and Y), and the starter rebuilds
     X' = Y' x Z' (hm_read_skw.F:448-459): with Y' = ê x V and Z' = V x Y',
     X' = Y' x Z' = V |Y'|^2, i.e. exactly +V.
+
+    This is the THIRD /IMP* emission site in the writer, and the only one that
+    does NOT call ``_register_imp_motion_nodes``. Deliberate, not an omission:
+    that registry is the *DATABASE_BNDOUT scope, and LS-DYNA reports a rigid
+    wall's reaction in ``rwforc`` (-> *DATABASE_RWFORC -> /TH/RWALL), never in
+    ``bndout``. The carrier nodes are synthesized by k2rad as well — massless
+    free nodes that appear in no LS-DYNA deck and whose REAC* is identically
+    zero — so listing them would name ids the deck author never wrote and fill
+    the channel with zeros. dyna2rad does sweep them in, but only because it
+    rebuilds the scope by re-walking the OUTPUT model's /IMPVEL cards
+    (dyna2rad.cxx:456-479) and cannot tell the two sources apart. See
+    ``writer/output.py::_make_starter_th_bndout``.
     """
     v = _vnorm((rw.vx, rw.vy, rw.vz))
     # ê = global Z, or global X when V is parallel to Z (a zero cross product).
