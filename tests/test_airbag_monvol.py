@@ -1743,11 +1743,26 @@ class TestAbstatThMonv(unittest.TestCase):
                       "*DATABASE_GLSTAT\n     1.0E-3\n"))
         self.assertIn("/TFILE\n0.001", engine)
 
-    def test_abstat_without_a_monvol_says_so(self):
+    def test_abstat_without_any_airbag_is_a_note_not_a_warning(self):
+        """An ABSTAT on a deck with no *AIRBAG_* at all is inert in LS-DYNA too
+        — its abstat file would be empty as well — and it is common
+        boilerplate: MEASURED, 73 of the 827 corpus decks carry one without a
+        single airbag keyword. A warning there is noise; the loss belongs in
+        "recognized but not emitted"."""
         r, starter, _e = _convert(
             _box_deck("*DATABASE_ABSTAT\n     1.0E-5\n"))
         self.assertNotIn("/TH/MONV/", starter)
-        self.assertTrue(_warns(r, "no /MONVOL"))
+        self.assertFalse(_warns(r, "*DATABASE_ABSTAT"))
+        self.assertIn("DATABASE_ABSTAT",
+                      [k for k, _v in r.recognized_not_emitted])
+
+    def test_abstat_whose_airbags_were_all_dropped_does_warn(self):
+        """That IS a real loss: the deck asked for bag statistics, the bags
+        exist in the .k, and none of them reached the converted deck."""
+        r, starter, _e = _convert(
+            _box_deck(_spv(sid=999), "*DATABASE_ABSTAT\n     1.0E-5\n"))
+        self.assertNotIn("/TH/MONV/", starter)
+        self.assertTrue(_warns(r, "none of them converted to a /MONVOL"))
 
     def test_abstat_with_a_blank_dt_is_reported(self):
         r, starter, _e = _convert(_box_deck(_spv(), "*DATABASE_ABSTAT\n\n"))
@@ -2004,7 +2019,8 @@ class TestRegistryAudit(unittest.TestCase):
         """Before the fabric batch, airbag.deploy.k emitted /PART/3 pointing at
         mid 3 with only /MAT/ELAST/1 and /MAT/ELAST/2 in the whole _0000.rad
         and NOT ONE warning. Implementing *MAT_FABRIC removed the cause; this
-        scan removes the class."""
+        scan removes the class. MEASURED on the 827-deck corpus sweep: 280
+        decks carry the defect and none of them said so."""
         deck = ("*KEYWORD\n" + _MESH_ONE_QUAD
                 .replace("         1         1         3",
                          "         1         1        77")
@@ -2012,6 +2028,22 @@ class TestRegistryAudit(unittest.TestCase):
         r, starter, _e = _convert(deck)
         self.assertIn("/PART/1", starter)
         self.assertTrue(_warns(r, "reference a material id that NO /MAT"))
+
+    def test_dangling_part_material_names_the_skipped_mat_keyword(self):
+        """"Look above" is not an answer when the cause is one unconverted
+        *MAT_ keyword sitting in the skip list — so it is quoted. The corpus
+        example is `ale/misc/forging-a/forging_A.k`, whose `/PART/1` points at
+        a `*MAT_INV_HYPERBOLIC_SIN`."""
+        deck = ("*KEYWORD\n" + _MESH_ONE_QUAD
+                .replace("         1         1         3",
+                         "         1         1        77")
+                + "*MAT_INV_HYPERBOLIC_SIN\n"
+                + _c10(77) + _c10(7.85e-9) + _c10(210000.0) + "\n"
+                + _TERM)
+        r, _s, _e = _convert(deck)
+        hits = _warns(r, "reference a material id that NO /MAT")
+        self.assertTrue(hits)
+        self.assertIn("*MAT_INV_HYPERBOLIC_SIN", hits[0])
 
     def test_connector_mat_id_zero_is_not_dangling(self):
         """mat_ID = 0 is the connector convention (a spring / damper /

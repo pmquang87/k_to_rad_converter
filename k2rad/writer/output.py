@@ -2192,13 +2192,28 @@ def _make_starter_th_monv(state: ConversionState) -> List[str]:
                 "/TH/MONV over every converted monitored volume")
         return []
     if not state.monvol_ids:
-        state.warn(
-            "*DATABASE_ABSTAT requested but this deck has no /MONVOL — no "
-            "*AIRBAG_* card converted to a monitored volume. NO /TH/MONV is "
-            "emitted: a group with no entity is not refused by the starter, "
-            "it is accepted and written to the T01 holding zero entities, so "
-            "it would only look like data. Check the warnings above for an "
-            "airbag that was dropped.")
+        # An ABSTAT on a deck with NO *AIRBAG_* at all is inert in LS-DYNA too
+        # — the abstat file would be empty there as well — and it is common
+        # boilerplate: MEASURED, 73 of the 827 corpus decks carry one without a
+        # single airbag keyword. That is a note, not a warning. An ABSTAT whose
+        # airbags were DROPPED is a real loss and says so.
+        if state.airbags:
+            state.warn(
+                "*DATABASE_ABSTAT requested and this deck DOES have "
+                f"{len(state.airbags)} *AIRBAG_* card(s), but none of them "
+                "converted to a /MONVOL — see the warnings above for why each "
+                "was dropped. NO /TH/MONV is emitted: a group with no entity "
+                "is not refused by the starter, it is accepted and written to "
+                "the T01 holding zero entities, so it would only look like "
+                "data.")
+        else:
+            state.note_recognized_not_emitted(
+                "DATABASE_ABSTAT",
+                "airbag statistics over the monitored volumes — this deck "
+                "defines no *AIRBAG_*, so there is nothing to record and no "
+                "/TH/MONV is emitted (LS-DYNA's abstat file would be empty "
+                "too). The dt is honoured as one term of the /TFILE minimum "
+                "only when a bag really converts.")
         return []
     by_model: Dict[str, List[int]] = {}
     vented: set = set()
