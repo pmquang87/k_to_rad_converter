@@ -546,7 +546,7 @@ def _warn_xref_on_ref_zero(state: ConversionState) -> None:
             continue
         kw, _ = hit
         state.warn(
-            f"*INITIAL_FOAM_REFERENCE_GEOMETRY: part {pid} gets a /XREF, but "
+            f"Reference geometry: part {pid} gets a /XREF, but "
             f"its material ({kw} mid={part.mid}) has REF=0, which in LS-DYNA "
             "means the reference geometry is NOT used for that material "
             "(EQ.0.0: Off). The block is still emitted — dyna2rad converts the "
@@ -673,6 +673,8 @@ def _resolve_airbag_eref(state: ConversionState) -> None:
     if not state.airbag_shell_ref_geoms:
         return
     quad_pid = {e.eid: e.pid for e in state.shell_elems}
+    own_nodes = {e.eid: {n for n in e.nodes if n > 0}
+                 for e in state.shell_elems}
     pnodes = _part_node_sets(state)
     xref_nodes: Set[int] = set()
     for pid in state.xref_part_ids:
@@ -697,9 +699,7 @@ def _resolve_airbag_eref(state: ConversionState) -> None:
             if pid in state.xref_part_ids:
                 clash_parts.add(pid)
                 continue
-            own = {n for n in next(e.nodes for e in state.shell_elems
-                                   if e.eid == eid) if n > 0}
-            if set(nodes) == own:
+            if set(nodes) == own_nodes.get(eid, set()):
                 noop_elems.append(eid)
             quads, tris = rows.setdefault(pid, ([], []))
             if eid in state.sh3n_elem_ids:
