@@ -343,6 +343,17 @@ Prior history (before this changelog was introduced) is summarized in the
   checked-in goldens and by a `*AIRBAG_SIMPLE_AIRBAG_MODEL` asserted column for
   column through the now list-taking emitters.
 
+  The review round re-ran that check against its own changes: all **6 real
+  `*AIRBAG` carriers** in the corpus (`airfilled.sphere.k`, two
+  `airbag.deploy.k`, `volume.k`, two `tire-compression.k`) convert
+  byte-identically on master and on the branch with identical warning counts —
+  as do the **4 Yaris production decks** (1512 / 1978 / 4823 / 4823 warnings,
+  unchanged) — and **21 of the 23** solver-validated batch-2 decks regenerate
+  with the same
+  SHA256 and the same warning count as the run that validated them. The two
+  that changed are the jetting pair, and they changed to the deck the no-jet
+  control already produced.
+
   Tests: `tests/test_airbag_batch2.py`, **131 tests + 70 subtests**, every card
   assertion by COLUMN and every fixture number distinct per slot so a swap
   between two of them cannot pass — the two gases differ in MW by 14 %, in
