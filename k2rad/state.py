@@ -4578,16 +4578,15 @@ class AirbagVent:
     title: str = "VENT"
     #: the named vent /SURF id, 0 = whole-bag
     surf_id: int = 0
-    #: the LS-DYNA parts the named surface was built from
-    pids: List[int] = field(default_factory=list)
     quad_eids: List[int] = field(default_factory=list)
     tri_eids: List[int] = field(default_factory=list)
-    iform: int = 1           # 1 isenthalpic, 2 Chemkin, 3 Graefe, 4 in-flow
+    #: 1 isenthalpic, 2 Chemkin, 3 Graefe, 4 in-flow. Always 1: every LS-DYNA
+    #: leak path this converter reads is the Wang-Nefske isentropic orifice,
+    #: whose Radioss equivalent is Iform 1.
+    iform: int = 1
     avent: float = 0.0
-    bvent: float = 0.0
     fct_t: int = 0           # area scale vs TIME
     fct_p: int = 0           # area scale vs GAUGE pressure (P - Pext)
-    fct_a: int = 0           # area scale vs current AREA
     tstart: float = 0.0
     dpdef: float = 0.0
 
@@ -4778,6 +4777,8 @@ class Airbag:
     npair: int = 0
     nprlx: int = 0
     lcmass: int = 0          # _MOLEFRACTION: the total mass-flow curve
+    segsid: int = 0          # _SEGMENT: the *SET_SEGMENT the volume is cut to
+    jnode: int = 0           # _JET: the node the vent thrust reacts on
     #: raw ``(SID3, STYPE3, C23, LCTC23, LCPC23, ENH_V, PPOP)`` vent rows
     vent_rows: List[tuple] = field(default_factory=list)
     #: raw ``(NIDi, ANi, VDi, CAi, INFOi, IMOM, IANG, CHM_ID)`` orifice rows
@@ -4785,6 +4786,7 @@ class Airbag:
     #: option flags that change the card walk or the physics
     mole_fraction: bool = False
     decomposition: bool = False
+    inflation: bool = False
     # ── multi-gas / multi-vent, shared by HYBRID and PARTICLE ────────────
     species: List["GasSpecies"] = field(default_factory=list)
     # ── shared curve slot (SPV / SAM / AGM / LOAD_CURVE / LFLUID card 3) ─
@@ -4812,6 +4814,10 @@ class Airbag:
     #: names it, and a PARTICLE bag falls back from FVMBAG2 to AIRBAG1 under
     #: ``--airbag-particle-uniform``.
     radioss_type: str = ""
+    #: the ``Ittf`` column of /MONVOL/AIRBAG1, COMMU1 and FVMBAG2 — which
+    #: sensor-relative shift the reader applies to the injector's own
+    #: functions. Always ``ITTF_NO_SHIFT``; see ``writer/monvol.py``.
+    ittf: int = 0
     vents: List["AirbagVent"] = field(default_factory=list)
     surf_in_id: int = 0      # FVMBAG2: the INTERNAL surface /SURF id
     surf_inj_id: int = 0     # FVMBAG2: the inflator-nozzle /SURF id

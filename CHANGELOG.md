@@ -64,8 +64,9 @@ Prior history (before this changelog was introduced) is summarized in the
      mass-weighted mean.** `INITM` is a mass fraction ("The sum of INITM of all
      gas components should be 1.0") while MW and A/B/C are molar, so averaging
      the latter with the former is not a mixture rule. The weights are
-     converted first — `x_i = (w_i/M_i)/Σ(w_j/M_j)`, `M = 1/Σ(w_i/M_i)`,
-     `Cp = Σ x_i Cp_i` — which is exact and lands where it should: the solver's
+     converted first — `x_i = (w_i/M_i)/Σ(w_j/M_j)`,
+     `M = Σw_i/Σ(w_i/M_i)`, `Cp = Σ x_i Cp_i` — which is exact and lands where
+     it should: the solver's
      divide turns it into `Σ w_i·(Cp_i/M_i)`, the mass-fraction average of the
      mass-specific heat capacities, which is what Dalton's law says a mixture's
      `c_p` is. `convertcontrolvols.cxx:2494-2497` accumulates
@@ -76,6 +77,17 @@ Prior history (before this changelog was introduced) is summarized in the
      `INITM >= 1.0` gate is worse still: a species carrying its documented
      fraction — 0.79 nitrogen, 0.21 oxygen — contributes to neither the mixture
      nor an injector, and vanishes from the deck entirely.
+
+     The numerator is `Σw_i`, **not 1**: `M = 1/Σ(w_i/M_i)` is the same number
+     only when the `INITM` column already sums to 1, and LS-DYNA only says it
+     *should* (Vol I R17 p.3-50). The mole fractions normalise themselves, so
+     Cpa/Cpb/Cpc are unaffected either way and ONLY MW moves — by exactly
+     `1/Σw`. MEASURED: the same composition stated as the percentages 79/21
+     instead of 0.79/0.21 gave MW 0.0002875481386 rather than 0.02875481386, a
+     factor of 100 on the one number the starter builds everything else on
+     (`CVI = CPI − R_IGC1/MW`, `MI = PINI·(VOL+VEPS)/(RMWI·TI)`), with no
+     starter diagnostic. Ironically dyna2rad's own formula does divide by
+     `sum(INITM)`.
 
   4. **No `/SENSOR/TIME`, and `Ittf = 0`.** dyna2rad strips the leading
      zero-flow dead time off each `LCIDM`, re-emits the curve shifted by
@@ -144,18 +156,35 @@ Prior history (before this changelog was introduced) is summarized in the
      counting, because `surf_IDex` measures the volume while `surf_IDv` scales
      an area and nothing is summed across the two.
 
-  9. **`_JETTING` maps when it names nodes, and is loudly dropped when it does
-     not.** Radioss's jet block is node-based: `Ijet`, `node_ID1` (the focal
-     point), `node_ID2` (a point on the axis) and `node_ID3` (0 conical,
-     non-zero dihedral — `hm_read_monvol_type9.F` formats 1460/1461). LS-DYNA
-     states the same geometry twice, as coordinates AND as optional nodes that
-     OVERRIDE them, so the node form maps 1:1 and the coordinate-only form does
-     not map at all. `CA` (a cone half-angle, where Radioss wants a function of
-     the off-axis angle), `BETA`, `PSID` and `NREACT` each get a named verdict.
-     `Ijet` is never written above 1: the cfg gates the jet card on
-     `ABG_Ijet == 1` while the reader gates it on `IJET(II) > 0`, and MEASURED
-     on a probe an `Ijet=2` shifted the whole block by a line and produced
-     `WARNING 100213` followed by `ERROR 100103` on the vent card below.
+  9. **`_JETTING` is read in full and its jet is DROPPED, with every field
+     named.** Radioss's jet block is node-based — `Ijet`, `node_ID1` (the focal
+     point), `node_ID2` (a point on the axis), `node_ID3` (0 conical, non-zero
+     dihedral, `hm_read_monvol_type9.F` formats 1460/1461) — and LS-DYNA states
+     the same geometry twice, as coordinates AND as optional nodes that
+     OVERRIDE them, so the GEOMETRY looks like a 1:1 map. **The functions are
+     not, and without them the geometry cannot be written at all.** `Ijet = 1`
+     obliges `fct_IDPt`, `fct_IDPTheta` and `fct_IDPDelta`, and the reader has
+     NO zero guard: `hm_read_monvol_type7.F:585-620` (identically `_type9.F`
+     `:594-637`) searches each id in `NPC` inside `IF (IJET(II) > 0)` and calls
+     `ANCMSG(MSGID = 12/13/14, MSGTYPE = MSGERROR)` when it is not found, and
+     id 0 never is. MEASURED on two converted decks: 3 ERROR(S), `UNDEFINED
+     POROSITY/TIME|PRESSURE|AREA FUNCTION ID=0`, ERROR TERMINATION, no restart
+     file — the run never starts. Two of the three could be defended
+     (`f_theta` from the cone half-angle `CA`, `f_t` and `f_delta` flat) but
+     `FscalePt` is a jet PRESSURE and LS-DYNA states none: it derives the jet
+     from the inflator mass flow and the Bernoulli efficiency `BETA` through a
+     different formulation. Radioss SUPERPOSES the jet on the uniform pressure
+     (`volpres.F`: the uniform loop applies `DP`, the jet loop then ADDS
+     `PJ = ¼·FscalePt·f_t·max(0,cos α)·f_theta·f_delta` on the same segments),
+     so an invented `FscalePt` is an invented load on top of a correct one. A
+     dropped jet under-states the directionality; a fabricated one mis-states
+     the force. So `Ijet = 0`, the node columns 0, and a warning naming
+     node_ID1/2/3, `CA`, `BETA`, `PSID` and `NREACT` by value. VALIDATED: the
+     converted deck is byte-identical to the same bag without the jetting card
+     apart from its title, starter 0 ERROR(S), engine NORMAL TERMINATION.
+     Dropping it also makes the jet nodes a non-question — they are never
+     written, so they cannot name a node the deck does not define, the ERROR-70
+     class every other reference in this module is screened against.
      dyna2rad reads NONE of the jetting block — `jettingoption`, `XJFP`,
      `XJVH`, `NODE1`, `NREACT`, `PSID` and `LSD_CA` are all zero-hit greps —
      and issues no warning. **Card 7 is read by the MANUAL, not by the reader
@@ -255,14 +284,30 @@ Prior history (before this changelog was introduced) is summarized in the
       deck carries the `FMASS` line (a later addition real decks omit), and the
       stride positions the jetting cards below it — so it is decided by
       CONTENT: card 5.2 has at most one populated cell, so a card with two or
-      more at that position is the next gas's card 5.1, and an absent or blank
-      card ends the block. `*AIRBAG_PARTICLE` walks `NVENT`, `NGAS`, `NORIF`
+      more at that position is the next gas's card 5.1. A BLANK card is not
+      the end of the block: `FMASS`'s default is "none" (Vol I R17 p.3-49), so
+      an all-spaces card 5.2 is legal and is how a preprocessor writes
+      `FMASS = 0` — and it has ZERO populated cells, the same count an ABSENT
+      card has. MEASURED with `NGAS = 2` and a blank card 5.2, deciding on that
+      card alone collapsed the stride to 1: gas 2 came back `MW = 0`, no
+      `/MAT/GAS` was emitted for it, the injector lost a row and the mixture
+      was built from gas 1 alone (MW 0.03544303797 instead of 0.02875481386) —
+      on a deck the starter accepts and runs. So a blank card is disambiguated
+      by looking one further: a blank followed by a populated card was card
+      5.2. `*AIRBAG_PARTICLE` walks `NVENT`, `NGAS`, `NORIF`
       and the `VDi ∈ {−3,−4}` offset card, skips `NPDATA` rows by count, and
       finds its two optional continuation cards by their leading `+`. The
       `STYPE2 == 2` block is `|SD2|` rows — a count that only exists after the
       `*SET_PART` is resolved, i.e. after parsing — so that case ABANDONS the
       walk with a warning rather than guessing; everything past it would be
-      read one card out of place. dyna2rad's own reader has the `NPDATA` block
+      read one card out of place. The abandonment costs the cards BELOW card 1
+      and not card 1 itself — the walk has already computed that index and
+      hands it back, because recomputing it as `_title_offset(block)` misses
+      the `_MPP` and `_TIME` prelude cards and reads `SID1` off the `SX SY SZ`
+      line. `_MPP` also moves the `_ID`/`_TITLE` card: Vol I R17 p.3-94's Card
+      Summary puts *Card MPP* BEFORE *Card ID*, so on `*AIRBAG_PARTICLE_MPP_ID`
+      the ABID and heading are `raw[1]`, not `raw[0]` — only the card COUNT is
+      order-independent. dyna2rad's own reader has the `NPDATA` block
       commented out (`airbag_Particle.cfg:1068-1086`), so those rows are
       consumed as VENT cards there.
 
@@ -274,11 +319,11 @@ Prior history (before this changelog was introduced) is summarized in the
       that lets them be is re-stated: a monitored volume owns no node, and the
       finite-volume mesh of an FVMBAG2 is generated inside the STARTER
       (`init_monvol.F` appends its extra vertices to `ITAB` itself), so no FV
-      node exists in the deck to be found free. The one case that reaches the
-      guard is a jetting `node_ID1/2/3` that is an orphan geometry marker, and
-      it stays IN the constraint set on purpose — a node attached to nothing is
-      moved by nothing, so pinning it changes no trajectory and only removes
-      six zero rows from the tangent. `*INCLUDE_TRANSFORM` specs walk all three
+      node exists in the deck to be found free. Nor does any other: the
+      jetting `node_ID1/2/3` are not emitted at all (decision 9) and
+      `*AIRBAG_PARTICLE`'s node-form orifices and its card-7 nozzle-frame
+      `NID1..NID3` are named-and-dropped, so the batch adds **no node
+      reference of any kind** to the deck. `*INCLUDE_TRANSFORM` specs walk all three
       card stacks, including every cell whose BUCKET depends on a neighbour:
       `A23`'s sign with `LCA23` (a `*PART` id or a `*SET_PART` id), `SD1`/`SD2`
       /`SID3` with their type flags, and `NIDi` with `VDi` — the one cell in
@@ -298,7 +343,7 @@ Prior history (before this changelog was introduced) is summarized in the
   checked-in goldens and by a `*AIRBAG_SIMPLE_AIRBAG_MODEL` asserted column for
   column through the now list-taking emitters.
 
-  Tests: `tests/test_airbag_batch2.py`, **102 tests + 47 subtests**, every card
+  Tests: `tests/test_airbag_batch2.py`, **131 tests + 70 subtests**, every card
   assertion by COLUMN and every fixture number distinct per slot so a swap
   between two of them cannot pass — the two gases differ in MW by 14 %, in
   INITM by 3.8×, and in A/B/C by ~5 %, 3.7× and 2.8×, which is what makes the
@@ -310,7 +355,93 @@ Prior history (before this changelog was introduced) is summarized in the
   `0.101325 → 0` and `0.201325 → 0.1` with the ordinates untouched; `Dtmin`
   1e-4 / 1e-7 / 1e-7 for `UNIT` 0 / 1 / 2; and `Iflow = 1` on a FLAT rate
   curve, chosen so that the differenced reading of it would be zero rather
-  than merely small. Suite 3495/2/1239 → **3597/2/1296**.
+  than merely small.
+
+  **Review round.** Fourteen defects found by an adversarial re-read of the
+  batch against the starter/engine source and Vol I R17, and by running the
+  converted decks. Two were blockers.
+
+  a. **`_JETTING` emitted a deck the starter REFUSES** — see decision 9, now
+     rewritten. `Ijet = 1` with three zero function ids is `ERROR 12/13/14`;
+     MEASURED, 3 ERROR(S) and no restart file on every jetting deck. Now
+     `Ijet = 0` with a loud drop, VALIDATED: byte-identical to the same bag
+     without the jetting card apart from the title, starter 0 ERROR(S), engine
+     NORMAL TERMINATION at 375 cycles — the no-jet control's own cycle count.
+  b. **The card-4 AREA columns multiplied where LS-DYNA overrides.** A23/LCA23
+     and AP23/LCAP23 obey the same override the coefficient columns do — see
+     the note under decision 8. `A23 = 0` with `LCA23 > 0`, the documented
+     pressure-dependent form, gave `Avent = 0·C23 = 0`: a bag that NEVER vents,
+     MEASURED as `WARNING 1019 ... AREA IS NOT DEFINED, AVENT = 0` on a run
+     with 0 ERROR(S). `A23 ≠ 0` with `LCA23 > 0` vented through `A23·f(P)`
+     rather than `A23`.
+  c. **The mixture MW was not normalised by `Σ INITM`** — see decision 3.
+  d. **The negative-gamma guard was dead on the whole batch.** It gated on
+     `/MAT/GAS/MASS`, and every batch-2 gas is `MOLE`. MOLE is at risk
+     identically (`hm_read_matgas.F:295` divides the entered Cp by MW, so the
+     solver reaches the same mass-specific Cp) and MORE likely to be wrong,
+     because the card then carries the raw SI molar numbers that look correct
+     on paper. MEASURED: the batch-1 MASS card was flagged while the batch-2
+     MOLE card passed in silence and the starter echoed
+     `GAMMA AT INITIAL TEMPERATURE = -3.5972E-03` with 0 ERROR(S).
+  e. **A blank `FMASS` card collapsed the NGAS stride** — see decision 17.
+  f. **Only the FIRST `*AIRBAG_INTERACTION` touching a bag converted.**
+     `_COMMU1_PROMOTABLE` held `AIRBAG1` alone, so the middle bag of a chain
+     was already a COMMU1 when the second card was read and the second card was
+     dropped — with a warning that contradicted itself ("gas exchange needs
+     BOTH bags on /MONVOL/COMMU1, and airbag 43 converts to /MONVOL/COMMU1").
+     Multi-chamber bags are the primary reason the keyword exists, the `Nbag`
+     block is N-row by construction and `monvol_commu1.cfg:255-259` allows
+     `NBAG <= 20` — now honoured, cap included.
+  g. **A stated `AREA` was discarded whenever `PID` resolved.** "EQ.0.0: AREA
+     is taken as the surface area of the part ID defined below" (Vol I R17
+     p.3-91) — so PID supplies the area ONLY when AREA is 0. On a 100 mm²
+     partition, `AREA 33.3` with `SF 0.85` vented through 85 rather than 28.3,
+     byte-identical to a deck stating no AREA at all. A stated AREA now becomes
+     `Acom = AREA·SF` with `surf_IDc = 0` (a CONSTANT orifice, which is what a
+     stated AREA means) and the partition `/SURF` is dropped rather than
+     orphaned.
+  h. **`*AIRBAG_HYBRID_CHEMKIN` was routed to the HYBRID reader.** It is a
+     MODEL of its own — Vol I R17 p.3-54 gives it card 3 `LCIDM LCIDT NGAS DATA
+     ATMT ATMP RG`, card 4 `HCONV`, card 5 `C23 A23` and per-species
+     thermodynamic cards — so reading it as a HYBRID takes its curve ids for
+     ATMOST/ATMOSP. Master had it on `handle_airbag_unsupported`; it is back
+     there, with `_CHAMBER` (not a documented `*AIRBAG` option at all) left to
+     the named prefix net.
+  i. **`*AIRBAG_PARTICLE_MPP`'s ABID came off the `SX SY SZ` card** — see
+     decision 17. A wrong ABID also makes every `*AIRBAG_INTERACTION` naming it
+     report the bag as undefined, and let the `*INCLUDE_TRANSFORM` header
+     rewriter add an id offset to `SX`.
+  j. **The `STYPE2 == 2` abandonment threw away the card-1 index it had** —
+     see decision 17.
+  k. **A vent part OUTSIDE the bag was sealed.** For `*AIRBAG_HYBRID`'s
+     negative `A23` that configuration is documented: "airbag pressure will not
+     be applied to part/set |A23| ... if part/set |A23| is not included in SID
+     ... The area of this part/set becomes the vent orifice area" (Vol I R17
+     p.3-46). `ERROR 902` is the COMMUNICATING-surface rule and does not reach
+     it. The part's initial area is now frozen into `Avent` with
+     `surf_IDv = 0`, with the loss of area tracking named.
+  l. **A blank `C23`/`CP23` was read as 1.0.** "Vent orifice coefficient which
+     applies to exit hole. Set to zero if LCC23 is defined below" (p.3-46) —
+     the mass flow is `C23·A23·<isentropic>`, so a blank with no curve is NO
+     flow. The converted bag leaked where LS-DYNA's was sealed; now no vent
+     hole is emitted, for the same reason the `OPT ≠ 0` branch drops the fabric
+     columns.
+  m. **`SEGSID`, `JNODE`, card 7's `NID1..NID3` and `_INFLATION` were read past
+     in silence.** Each is now named by value: `SEGSID` NARROWS the monitored
+     volume ("The segments define the volume and should belong to the parts
+     from SID1", p.3-99) so dropping it makes the bag measure more volume than
+     LS-DYNA's; `JNODE` takes the vent thrust reaction (Remark 18); `NID1-3`
+     are "Three nodes defining a moving coordinate system for the direction of
+     flow through the gas inlet nozzles" (p.3-104); `_INFLATION` ADDS MASS over
+     the `NPRLX` steps to hold the starting pressure (Remark 17).
+  n. **Housekeeping.** A species with no mass-flow curve no longer allocates a
+     `/MAT/GAS` id or synthesizes an injection-temperature `/FUNCT` that
+     nothing references; `Ittf` is a declared field of `Airbag` rather than one
+     attached by the writer; `AirbagVent`'s never-assigned `iform`-companions
+     (`bvent`, `fct_a`, `pids`) are gone; and `_make_monvols` diagnoses an
+     unresolved `radioss_type` instead of falling through to `/MONVOL/PRES`.
+
+  Suite 3495/2/1239 → **3626/2/1325**.
 
 - **The airbag / monitored-volume batch 1:
   `*AIRBAG_SIMPLE_PRESSURE_VOLUME` → `/MONVOL/PRES`,

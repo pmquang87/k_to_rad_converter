@@ -1028,16 +1028,30 @@ def _warn_gas_gamma(state: ConversionState, ab: Airbag) -> None:
     TERMINATION WITH WARNING. MEASURED on a probe deck: a bag whose gas would
     then expand the wrong way, on a run that looks clean.
 
-    Only the ``/MAT/GAS/MASS`` branch is at risk. ``/MAT/GAS/CSTA`` takes Cp
-    and Cv directly and gamma is their unit-free ratio (the starter derives MW
-    from ``R/(Cp-Cv)`` there instead), which the Cp > Cv check already covers.
+    ``/MAT/GAS/MOLE`` is at risk IDENTICALLY, which is why it is checked here
+    too: ``hm_read_matgas.F:295`` runs ``CPA = CPA / MW * FAC`` on the MOLE
+    branch, so the solver reaches the very same mass-specific Cp the MASS card
+    carries directly, and ``hm_read_monvol_type7/9`` then forms the same
+    ``CVI = CPI - R_IGC1/MW``. MOLE makes the mistake MORE likely, not less,
+    because the card then carries the RAW SI molar numbers (MW = 0.028,
+    A = 29.1234) that look correct on paper. MEASURED with the same gas
+    numbers on the same Mg/mm/s mesh, batch 1's MASS card was flagged here
+    while the batch-2 MOLE card passed in silence and the starter echoed
+    ``GAMMA AT INITIAL TEMPERATURE = -3.5972E-03`` with 0 ERROR(S).
+
+    ``/MAT/GAS/CSTA`` is the one exemption: it takes Cp and Cv directly and
+    gamma is their unit-free ratio (the starter derives MW from ``R/(Cp-Cv)``
+    there instead), which the Cp > Cv check already covers. ``PREDEF`` names a
+    built-in gas whose constants the starter supplies itself.
     """
-    if ab.gas_mat_kind != "MASS" or ab.mw <= 0.0:
+    if ab.gas_mat_kind not in ("MASS", "MOLE") or ab.mw <= 0.0:
         return
     r_work = _radioss_gas_constant(state)
     if r_work is None:
         return
     t0 = ab.t_ext if ab.t_ext != 0.0 else 295.0
+    # Both kinds reach the same mass-specific Cp: MASS because the CONVERTER
+    # divided by MW, MOLE because the STARTER does (hm_read_matgas.F:295).
     cpa = ab.hc_a / ab.mw
     cpb = ab.hc_b / ab.mw
     cpi = cpa + cpb * t0
@@ -1046,9 +1060,9 @@ def _warn_gas_gamma(state: ConversionState, ab: Airbag) -> None:
         return
     gama = cpi / cvi if cvi != 0.0 else float("inf")
     state.warn(
-        f"*{ab.keyword}: the /MAT/GAS/MASS this card converts to gives the "
-        f"starter Cv = Cp - R/MW = {cpi:.6g} - {r_work / ab.mw:.6g} = "
-        f"{cvi:.6g} at T0 = {t0:g}, i.e. GAMMA = {gama:.6g} — not a usable "
+        f"*{ab.keyword}: the /MAT/GAS/{ab.gas_mat_kind} this card converts to "
+        f"gives the starter Cv = Cp - R/MW = {cpi:.6g} - {r_work / ab.mw:.6g} "
+        f"= {cvi:.6g} at T0 = {t0:g}, i.e. GAMMA = {gama:.6g} — not a usable "
         "ratio of specific heats. Radioss does NOT use the card's own GASC: it "
         "uses its own universal gas constant rescaled into the /BEGIN unit "
         f"system ({state.units[0]}/{state.units[1]}/{state.units[2]} here, so "
@@ -1272,7 +1286,13 @@ def _resolve_gas_species(state: ConversionState, ab: Airbag, sp: GasSpecies,
     quartic ``F*T^4`` of the Radioss polynomial have no source.
     """
     kw = f"*{ab.keyword}"
-    sp.mat_id = state.next_mat_id()
+    # Decided FIRST, because everything allocated below is for the injector
+    # row and a species with no mass-flow curve never gets one. Allocating
+    # anyway left a hole in the /MAT id stream and, worse, wrote a synthesized
+    # injection-temperature /FUNCT that nothing in the deck referenced.
+    sp.injected = sp.lcid_m != 0
+    if sp.injected:
+        sp.mat_id = state.next_mat_id()
     if sp.mw <= 0.0:
         state.warn(
             f"{kw}: gas {sp.index} states MW={sp.mw:g}. /MAT/GAS/MOLE needs "
@@ -1302,6 +1322,11 @@ def _resolve_gas_species(state: ConversionState, ab: Airbag, sp: GasSpecies,
             "DROPPED — a difference that shows up between the curve's own "
             "points, not at them.")
     sp.fun_m = abs(sp.lcid_m)
+    if not sp.injected:
+        # No injector row, so no function slot to fill and nothing to
+        # synthesize into. The species still counts toward the INITIAL
+        # mixture, which takes MW and Cp straight off the card.
+        return
     if sp.lcid_t != 0:
         sp.fun_t = abs(sp.lcid_t)
     else:
@@ -1326,7 +1351,6 @@ def _resolve_gas_species(state: ConversionState, ab: Airbag, sp: GasSpecies,
                 "the card's ambient temperature — is synthesized as function "
                 f"{fid}. State LCIDT if the inflator gas is hotter than "
                 "ambient, which it always is.")
-    sp.injected = sp.lcid_m != 0
 
 
 def _resolve_gas_mixture(state: ConversionState, ab: Airbag,
@@ -1341,8 +1365,20 @@ def _resolve_gas_mixture(state: ConversionState, ab: Airbag,
     weights is not a mixture rule, so the fractions are converted first::
 
         x_i = (w_i / M_i) / sum_j (w_j / M_j)        mole fractions
-        M   = sum_i x_i M_i  =  1 / sum_i (w_i / M_i)
+        M   = sum_i x_i M_i  =  sum_i w_i / sum_i (w_i / M_i)
         Cp  = sum_i x_i Cp_i                          (molar)
+
+    **The numerator is ``sum w_i``, not 1.** ``M = 1/sum(w_i/M_i)`` is the
+    same number only when the ``INITM`` column already sums to 1, and LS-DYNA
+    does not require that it does — it only says it "should" (Vol I R17
+    p.3-50). The mole fractions normalise themselves, so Cpa/Cpb/Cpc are
+    unaffected either way and ONLY ``MW`` moves; it moves by exactly
+    ``1/sum(w)``. MEASURED with the same two species: the composition stated
+    as 0.79/0.21 gives MW = 0.02875481386 and the SAME composition stated as
+    the percentages 79/21 gave 0.0002875481386 under the ``1/inv`` form — a
+    factor of 100 on the one number the starter builds everything else on
+    (``CVI = CPI - R_IGC1/MW`` and ``MI = PINI*(VOL+VEPS)/(RMWI*TI)``), with
+    no starter diagnostic.
 
     which is exact, and lands where it should: ``/MAT/GAS/MOLE`` divides the
     result by M, giving ``sum_i w_i * (Cp_i / M_i)`` — the mass-fraction
@@ -1373,7 +1409,9 @@ def _resolve_gas_mixture(state: ConversionState, ab: Airbag,
     inv = sum(s.initm / s.mw for s in usable)
     if inv <= 0.0:                                       # pragma: no cover
         return None
-    mw = 1.0 / inv
+    # sum(w)/inv, NOT 1/inv: the two agree only when the column sums to 1, and
+    # then this is byte-identical to what the un-normalised form emitted.
+    mw = sum(s.initm for s in usable) / inv
     xs = [(s, (s.initm / s.mw) / inv) for s in usable]
     return (mw,
             sum(x * s.hc_a for s, x in xs),
@@ -1413,8 +1451,43 @@ def _resolve_species_block(state: ConversionState, ab: Airbag,
             "17, so this card is beyond both. It is emitted as written.")
 
 
+def _shell_set_area(state: ConversionState, eids: List[int]) -> float:
+    """Initial area of a set of shell elements, in the deck's length unit².
+
+    The same ``half*(x13 x x24)`` area vector ``_surface_volume_and_edges``
+    integrates and ``get_volume_area.F90`` builds the bag volume from, summed
+    as a MAGNITUDE rather than as a flux — a vent patch has no winding to
+    respect. A 3-node shell is the degenerate quad ``n1 n2 n3 n3``, for which
+    the expression reduces exactly to the triangle's own area vector.
+    """
+    nodes = state.nodes
+    shells = {e.eid: e for e in state.shell_elems}
+    total = 0.0
+    for eid in eids:
+        e = shells.get(eid)
+        if e is None:
+            continue
+        corners: List[int] = []
+        for n in e.nodes:
+            if n > 0 and n not in corners:
+                corners.append(n)
+        if len(corners) < 3 or any(n not in nodes for n in corners):
+            continue
+        quad = corners if len(corners) == 4 else [corners[0], corners[1],
+                                                  corners[2], corners[2]]
+        p = [(nodes[n].x, nodes[n].y, nodes[n].z) for n in quad]
+        x13 = (p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2])
+        x24 = (p[3][0] - p[1][0], p[3][1] - p[1][1], p[3][2] - p[1][2])
+        nx = 0.5 * (x13[1] * x24[2] - x13[2] * x24[1])
+        ny = 0.5 * (x13[2] * x24[0] - x13[0] * x24[2])
+        nz = 0.5 * (x13[0] * x24[1] - x13[1] * x24[0])
+        total += (nx * nx + ny * ny + nz * nz) ** 0.5
+    return total
+
+
 def _resolve_vent_surface(state: ConversionState, ab: Airbag, vent: AirbagVent,
-                          pids: List[int], what: str) -> None:
+                          pids: List[int], what: str,
+                          outside_is_the_hole: bool = False) -> None:
     """Give one vent hole a NAMED ``/SURF``, built from its own parts and
     screened against the bag's.
 
@@ -1441,13 +1514,39 @@ def _resolve_vent_surface(state: ConversionState, ab: Airbag, vent: AirbagVent,
     A vent whose surface resolves to nothing keeps ``surf_id = 0``, which is
     the whole-bag mode — so the caller must re-read ``Avent`` as an absolute
     area, and does.
+
+    ``outside_is_the_hole`` is the ``*AIRBAG_HYBRID`` ``A23 < 0`` case, where
+    a vent part OUTSIDE the bag is documented rather than wrong: *"With SIDTYP
+    > 0, airbag pressure will not be applied to part/set |A23| representing
+    venting holes if part/set |A23| is not included in SID, the part set
+    representing the airbag. ... The area of this part/set becomes the vent
+    orifice area"* (Vol I R17 p.3-46). Rule 2 above is the COMMUNICATING-
+    surface rule (``ERROR 902``, ``hm_read_monvol_type9.F``) and does not
+    reach this case, so instead of sealing the vent the part's own initial
+    area is frozen into ``Avent`` and ``surf_IDv`` stays 0.
     """
     ref = f"*{ab.keyword} (SID {ab.sid})"
-    vent.pids = list(pids)
     eids = _eids_of_pids(state, pids, ref, what)
     bag = set(ab.quad_eids) | set(ab.tri_eids)
     inside = [e for e in eids if e in bag]
     outside = [e for e in eids if e not in bag]
+    if outside and outside_is_the_hole and not inside:
+        area = _shell_set_area(state, outside)
+        vent.surf_id = 0
+        vent.avent *= area
+        state.warn(
+            f"{ref}: {what} names {len(outside)} shell element(s) that are "
+            "NOT part of the bag's own surface, which for a negative A23 is "
+            "DOCUMENTED, not wrong: \"airbag pressure will not be applied to "
+            "part/set |A23| representing venting holes if part/set |A23| is "
+            "not included in SID ... The area of this part/set becomes the "
+            "vent orifice area\" (Vol I R17 p.3-46). Radioss can only scale a "
+            "surface that belongs to the monitored volume, so the part's "
+            f"INITIAL area {area:g} is frozen into Avent = {vent.avent:g} "
+            "with surf_IDv = 0 instead. The difference from LS-DYNA is that "
+            "the hole no longer grows or shrinks with the vent part — move "
+            "the part into the bag's *SET_PART to get a tracking area.")
+        return
     if outside:
         state.warn(
             f"{ref}: {len(outside)} of {len(eids)} shell element(s) named by "
@@ -1559,6 +1658,23 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
     # ── the vent orifice ────────────────────────────────────────────────
     c23 = ab.c23
     fct_t = 0
+    # Only when the card asks for an exit-hole AREA: a bag that states no vent
+    # columns at all is not missing a coefficient, it is sealed, and the
+    # "NO VENT at all" warning below already says so.
+    if c23 == 0.0 and ab.lcc23 == 0 and (ab.a23 != 0.0 or ab.lca23 > 0):
+        state.warn(
+            f"{kw}: card 4 states an exit-hole AREA "
+            + (f"(A23={ab.a23:g})" if ab.a23 != 0.0
+               else f"(LCA23={ab.lca23})")
+            + " but neither C23 nor LCC23, so LS-DYNA's vent "
+            "orifice COEFFICIENT is 0 and the exit hole passes no gas "
+            "whatever A23/LCA23 say (\"Vent orifice coefficient which applies "
+            "to exit hole. Set to zero if LCC23 is defined below\", Vol I R17 "
+            "p.3-46; the mass flow is C23*A23*<isentropic>). NO vent hole is "
+            "emitted, because carrying one would give the bag a leak path the "
+            "LS-DYNA run does not have — the same reason the OPT != 0 branch "
+            "below drops the fabric columns. State C23 if the hole is meant "
+            "to vent.")
     if c23 != 0.0 and ab.lcc23 != 0:
         state.warn(
             f"{kw}: card 4 states BOTH C23={c23:g} and LCC23={ab.lcc23}. "
@@ -1590,26 +1706,61 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
         c23 = 1.0
 
     vents: List[AirbagVent] = []
+    # A23 and LCA23 obey the SAME override rule the coefficient columns do —
+    # A23 "EQ.0.0: Set A23 to zero if LCA23 is != 0" and LCA23 "A nonzero
+    # value for A23 overrides LCA23" (Vol I R17 p.3-47) — so exactly one of
+    # them is live. Emitting both was wrong twice over: the engine MULTIPLIES
+    # them (airbagb1.F: AOUT = AVENT, then AOUT = FPORP*AOUT*f_P((P-PEXT)*
+    # SCALP)), so a stated A23 vented through A23*f_area(P) instead of A23,
+    # and the documented pressure-dependent form A23 = 0 with LCA23 > 0 gave
+    # Avent = 0*C23 = 0 — a bag that never vents, MEASURED as "WARNING 1019
+    # VENT HOLE SURFACE NUMBER 1: AREA IS NOT DEFINED" on a run with
+    # 0 ERROR(S).
+    a23_by_curve = ab.a23 == 0.0 and ab.lca23 > 0
+    if ab.a23 != 0.0 and ab.lca23 > 0:
+        state.warn(
+            f"{kw}: card 4 states BOTH A23={ab.a23:g} and LCA23={ab.lca23}. "
+            "LS-DYNA's rule is that a non-zero A23 overrides the curve (\"A "
+            "nonzero value for A23 overrides LCA23\", Vol I R17 p.3-47), so "
+            "the constant area is used and the curve is DROPPED. Radioss "
+            "would otherwise MULTIPLY the two — a vent hole's Avent and its "
+            "fct_IDP are a product, not alternatives (airbagb1.F) — and the "
+            "hole would open by the curve's ordinate times the stated area.")
     a23_curve = _gauge_shifted_curve(state, ab, add_curve, ab.lca23, "LCA23") \
-        if ab.lca23 > 0 else 0
-    if ab.a23 < 0.0:
+        if a23_by_curve else 0
+    if c23 == 0.0 and ab.lcc23 == 0:
+        pass                       # zero orifice coefficient — no vent at all
+    elif ab.a23 < 0.0:
         # |A23| names a PART (LCA23 != -1) or a PART SET (LCA23 == -1), i.e.
         # the vent is a NAMED PATCH of the bag rather than a scalar area.
         # Avent is then a SCALE FACTOR on that surface's current area.
-        v = AirbagVent(title="VENT_A23", avent=c23 if c23 != 0.0 else 1.0,
-                       fct_t=fct_t, fct_p=a23_curve)
+        v = AirbagVent(title="VENT_A23", avent=c23, fct_t=fct_t)
         is_set = ab.lca23 == -1
         pids = _part_scope_pids(state, int(-ab.a23), is_set,
                                 f"*{ab.keyword} (SID {ab.sid})",
                                 f"A23={ab.a23:g} (a negative A23 names a "
                                 + ("*SET_PART" if is_set else "*PART") + ")")
-        _resolve_vent_surface(state, ab, v, pids, "the A23 vent part(s)")
+        _resolve_vent_surface(state, ab, v, pids, "the A23 vent part(s)",
+                              outside_is_the_hole=True)
         vents.append(v)
-    elif ab.a23 > 0.0 or fct_t or a23_curve:
+    elif a23_by_curve:
+        # LCA23 IS the area, as a function of pressure. With surf_IDv = 0 the
+        # engine forms AOUT = Avent * f_P((P-Pext)*SCALP), so Avent carries
+        # the dimensionless coefficient and the curve carries the area —
+        # C23 * A23(P), which is what LS-DYNA computes.
+        vents.append(AirbagVent(title="VENT_A23", avent=c23,
+                                fct_t=fct_t, fct_p=a23_curve))
+    elif ab.a23 > 0.0:
         # A scalar whole-bag orifice: Avent is the ABSOLUTE area A23*C23.
-        vents.append(AirbagVent(
-            title="VENT_A23", avent=ab.a23 * (c23 if c23 != 0.0 else 1.0),
-            fct_t=fct_t, fct_p=a23_curve))
+        vents.append(AirbagVent(title="VENT_A23", avent=ab.a23 * c23,
+                                fct_t=fct_t))
+    elif fct_t:
+        state.warn(
+            f"{kw}: card 4 gives the vent orifice COEFFICIENT (C23/LCC23) but "
+            "no AREA — A23 is 0 and LCA23 names no curve. A coefficient with "
+            "no area is no orifice, so NO vent hole is emitted and the bag "
+            "does not vent through the exit hole. State A23, or LCA23 as an "
+            "area-vs-absolute-pressure curve.")
 
     # ── the fabric porosity ─────────────────────────────────────────────
     poro_stated = (ab.cp23 != 0.0 or ab.lcp23 != 0
@@ -1650,24 +1801,56 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
         elif cp == 0.0 and ab.lcp23 > 0:
             p_fct_t = ab.lcp23
             cp = 1.0
-        elif cp == 0.0:
-            cp = 1.0
+        # AP23/LCAP23 take the SAME override as A23/LCA23 (Vol I R17 p.3-47,
+        # "A nonzero value for AP23 overrides LCAP23"): exactly one is live,
+        # and Radioss multiplies Avent by fct_IDP rather than choosing.
+        ap_by_curve = ab.ap23 == 0.0 and ab.lcap23 > 0
+        if ab.ap23 != 0.0 and ab.lcap23 > 0:
+            state.warn(
+                f"{kw}: card 4 states BOTH AP23={ab.ap23:g} and "
+                f"LCAP23={ab.lcap23}; a non-zero AP23 overrides the curve "
+                "(Vol I R17 p.3-47), so the constant leak area is used and "
+                "the curve is DROPPED. Emitting both would MULTIPLY them — a "
+                "vent hole's Avent and fct_IDP are a product (airbagb1.F).")
         p_fct_p = _gauge_shifted_curve(state, ab, add_curve, ab.lcap23,
-                                       "LCAP23") if ab.lcap23 > 0 else 0
-        vents.append(AirbagVent(
-            title="VENT_FABRIC", avent=ab.ap23 * cp,
-            fct_t=p_fct_t, fct_p=p_fct_p))
-        state.warn(
-            f"{kw}: the fabric porosity (CP23={ab.cp23:g}, AP23={ab.ap23:g}) "
-            f"is emitted as a SECOND VENT HOLE with Avent = CP23*AP23 = "
-            f"{ab.ap23 * cp:g}, not as a /MONVOL porous surface. CP23 is a "
-            "dimensionless orifice coefficient and AP23 an area, so their "
-            "product is an effective leak area — which is exactly what Avent "
-            "means with no named surface — and the vent-hole sub-block is the "
-            "one whose layout is identical on AIRBAG1, COMMU1 and FVMBAG1 "
-            "(venthole1.cfg:17). The porous block would additionally have "
-            "half its columns discarded by the type-9 reader "
-            "(hm_read_monvol_type9.F, IFVENT == 0 branch), MEASURED.")
+                                       "LCAP23") if ap_by_curve else 0
+        if cp == 0.0:
+            state.warn(
+                f"{kw}: card 4 states neither CP23 nor LCP23, so LS-DYNA's "
+                "fabric-porosity orifice COEFFICIENT is 0 and the weave leaks "
+                "nothing whatever AP23/LCAP23 say (\"Orifice coefficient for "
+                "leakage (fabric porosity). Set to zero if LCCP23 is defined "
+                "below\", Vol I R17 p.3-47). NO second vent hole is emitted.")
+        elif ap_by_curve:
+            # LCAP23 is the leak AREA vs pressure; Avent carries CP23 alone.
+            vents.append(AirbagVent(title="VENT_FABRIC", avent=cp,
+                                    fct_t=p_fct_t, fct_p=p_fct_p))
+        elif ab.ap23 != 0.0:
+            vents.append(AirbagVent(title="VENT_FABRIC", avent=ab.ap23 * cp,
+                                    fct_t=p_fct_t))
+        else:
+            state.warn(
+                f"{kw}: card 4 gives the fabric-porosity COEFFICIENT (CP23/"
+                "LCP23) but no leak AREA — AP23 is 0 and LCAP23 names no "
+                "curve — so no second vent hole is emitted and the weave does "
+                "not leak. State AP23.")
+        if vents and vents[-1].title == "VENT_FABRIC":
+            state.warn(
+                f"{kw}: the fabric porosity (CP23={ab.cp23:g}, "
+                f"AP23={ab.ap23:g}) is emitted as a SECOND VENT HOLE with "
+                f"Avent = {vents[-1].avent:g}, not as a /MONVOL porous "
+                "surface. CP23 is a dimensionless orifice coefficient and "
+                "AP23 an area, so their product is an effective leak area — "
+                "which is exactly what Avent means with no named surface — "
+                "and the vent-hole sub-block is the one whose layout is "
+                "identical on AIRBAG1, COMMU1 and FVMBAG1 (venthole1.cfg:17). "
+                "The porous block would additionally have half its columns "
+                "discarded by the type-9 reader (hm_read_monvol_type9.F, "
+                "IFVENT == 0 branch), MEASURED."
+                + ("" if not ap_by_curve else
+                   " With AP23 = 0 the AREA comes from LCAP23 as the vent's "
+                   "fct_IDP and Avent carries CP23 alone, so the product "
+                   "CP23*AP23(P) is formed by the engine."))
 
     # ── PVENT: the pressure the vent OPENS at ───────────────────────────
     #
@@ -1799,32 +1982,73 @@ def _warn_hybrid_dropped(state: ConversionState, ab: Airbag) -> None:
 
 
 def _warn_hybrid_jetting(state: ConversionState, ab: Airbag) -> None:
-    """``_JETTING`` — every field gets a verdict, mapped or named-and-dropped.
+    """``_JETTING`` — every field gets a verdict, and the verdict is DROPPED.
 
     Radioss's jet block is NODE-based: ``Ijet``, ``node_ID1`` (the jet focal
     point), ``node_ID2`` (a point on the axis), ``node_ID3`` (0 for a CONICAL
-    jet, non-zero for a DIHEDRAL one) and three pressure functions of time, of
-    the off-axis angle and of the distance. LS-DYNA states the same geometry
-    twice over — as coordinates AND, optionally, as nodes that OVERRIDE them —
-    so the node form maps 1:1 and the coordinate-only form does not map at
-    all.
+    jet, non-zero for a DIHEDRAL one) and three pressure functions — of time,
+    of the off-axis angle and of the distance. LS-DYNA states the geometry
+    twice over (coordinates, plus optional nodes that OVERRIDE them), so the
+    GEOMETRY looks like a 1:1 map whenever NODE1/NODE2 are given.
 
-    ``Ijet`` is written 1 and never more. The cfg gates the jet card on
-    ``if(ABG_Ijet == 1)`` while the reader gates it on ``IF (IJET(II) > 0)``,
-    so a 2 shifts the whole block by one line: MEASURED on a probe, ``Ijet=2``
-    produced ``WARNING 100213`` on the injector line and then ``ERROR 100103``
-    ("Cannot read an integer value") on the vent card below it.
+    **The functions do not map, and without them the geometry cannot be
+    written at all.** ``Ijet = 1`` obliges ``fct_IDPt``, ``fct_IDPTheta`` and
+    ``fct_IDPDelta``, and the reader has NO zero guard:
+    ``hm_read_monvol_type7.F:585-620`` (identically ``_type9.F:594-637``) runs
+    ``DO JJ = 1, NFUNCT / IF (IPT(II) == NPC(JJ))`` inside
+    ``IF (IJET(II) > 0)`` and calls ``ANCMSG(MSGID = 12/13/14, MSGTYPE =
+    MSGERROR)`` when nothing matches. Id 0 is never in the function table, so
+    every such deck is REFUSED. MEASURED on two converted jetting decks::
+
+        ERROR ID :     12  ** ERROR IN MONITORED VOLUME DEFINITION
+           -- MONITORED VOLUME ID: 42
+           UNDEFINED POROSITY/TIME FUNCTION ID=0
+        ERROR ID :     13  ... UNDEFINED POROSITY/PRESSURE FUNCTION ID=0
+        ERROR ID :     14  ... UNDEFINED POROSITY/AREA FUNCTION ID=0
+         .. ERROR ==> NO RESTART FILE
+             ERROR TERMINATION   3 ERROR(S)
+
+    The same decks with the jetting block removed terminate with 0 ERROR(S).
+
+    **So ``Ijet`` is written 0 and the jet is dropped**, rather than
+    synthesizing the three functions. Two of them could be defended —
+    ``f_theta`` from LS-DYNA's cone half-angle ``CA``, ``f_t`` and ``f_delta``
+    flat — but ``FscalePt`` is a JET PRESSURE, and LS-DYNA does not state one:
+    it derives the jet from the inflator mass flow and the Bernoulli
+    efficiency ``BETA`` through a different formulation entirely. Radioss
+    SUPERPOSES the jet on the uniform pressure (``volpres.F``: the uniform
+    loop applies ``DP`` and the jet loop then ADDS ``PJ = ¼·FscalePt·f_t·
+    max(0,cos α)·f_theta·f_delta`` on the same segments), so an invented
+    ``FscalePt`` is an invented load on top of a correct one. A dropped jet
+    under-states the directionality; a fabricated one mis-states the force.
+
+    Dropping it also makes the jet NODE ids a non-question: they are never
+    written, so they cannot name a node the deck does not define — the
+    ERROR-70 class every other reference in this module is screened against.
+
+    (dyna2rad drops the entire jetting block too, and silently.)
     """
     kw = f"*{ab.keyword}"
     if ab.jet_n1 and ab.jet_n2:
         shape = "DIHEDRAL" if ab.jet_n3 else "CONICAL"
         state.warn(
-            f"{kw}: _JETTING is converted — node_ID1={ab.jet_n1}, "
-            f"node_ID2={ab.jet_n2}, node_ID3={ab.jet_n3} give Radioss a "
-            f"{shape} jet (node_ID3 = 0 is conical, non-zero dihedral, "
-            "hm_read_monvol_type9.F formats 1460/1461). LS-DYNA's NODE1/NODE2/"
-            "NODE3 OVERRIDE the XJFP/XJVH/XSJFP coordinates on the same "
-            "cards, so the coordinates are not needed and are not used.")
+            f"{kw}: _JETTING names node_ID1={ab.jet_n1}, "
+            f"node_ID2={ab.jet_n2}, node_ID3={ab.jet_n3}, which is the "
+            f"geometry of a {shape} Radioss jet (node_ID3 = 0 is conical, "
+            "non-zero dihedral). The jet is nevertheless DROPPED and the bag "
+            "is loaded by UNIFORM PRESSURE, because Ijet=1 obliges three "
+            "pressure FUNCTIONS — fct_IDPt, fct_IDPTheta, fct_IDPDelta — and "
+            "a zero in any of them is starter ERROR 12/13/14 "
+            "(hm_read_monvol_type7.F:585-620 has no zero guard; MEASURED: 3 "
+            "ERROR(S), no restart file, the run never starts). LS-DYNA "
+            "states no jet pressure to scale them with: its CA is a cone "
+            "half-angle and its BETA a Bernoulli efficiency, and Radioss ADDS "
+            "the jet pressure on top of the uniform one (volpres.F), so a "
+            "made-up FscalePt would be a made-up load. The directional "
+            "loading of the deployment is the whole point of a jetting card, "
+            "so this is a real loss: to carry it, add three /FUNCT and a jet "
+            "pressure by hand on the emitted /MONVOL. (dyna2rad drops the "
+            "whole jetting block too, silently.)")
     else:
         state.warn(
             f"{kw}: _JETTING states the jet geometry as COORDINATES "
@@ -1834,9 +2058,8 @@ def _warn_hybrid_jetting(state: ConversionState, ab: Airbag) -> None:
             "this converter does not create nodes, so the jet is DROPPED and "
             "the bag is loaded by UNIFORM PRESSURE. The directional loading "
             "of the deployment is the whole point of a jetting card, so this "
-            "is a real loss: add *NODE at the focal point and on the axis and "
-            "name them in NODE1/NODE2 to convert it. (dyna2rad drops the "
-            "entire jetting block either way, silently.)")
+            "is a real loss. (dyna2rad drops the entire jetting block either "
+            "way, silently.)")
     if ab.jet_ca != 0.0:
         state.warn(
             f"{kw}: CA={ab.jet_ca:g} is the jet cone "
@@ -1911,10 +2134,13 @@ def _resolve_hybrid(state: ConversionState, ab: Airbag, add_curve) -> None:
             f"{kw}: the INITM column sums to {tot:g}, not to 1. LS-DYNA reads "
             "INITM as a MASS FRACTION of the gas already in the bag at t=0 "
             "(\"The sum of INITM of all gas components should be 1.0\", "
-            "Vol I R17 p.3-50), and the initial mixture is built from the "
-            "fractions as given — normalised by their own sum, so a sum other "
-            "than 1 changes nothing about the mixture's composition but says "
-            "the card was not written as a fraction. Check it.")
+            "Vol I R17 p.3-50). The mixture is built from the fractions "
+            "RENORMALISED by their own sum, so the COMPOSITION — and with it "
+            "the mixture Cp — is what the ratios say whatever they sum to, "
+            f"and the mixture MW is sum(INITM)/sum(INITM_i/MW_i) = {tot:g}/"
+            "sum(...), which is the same number a column summing to 1 gives. "
+            "Nothing is scaled by the sum. It still says the card was not "
+            "written as a fraction, so check it.")
     mix = _resolve_gas_mixture(state, ab, initial) if initial else None
     if mix is None:
         if ab.species:
@@ -1939,6 +2165,7 @@ def _resolve_hybrid(state: ConversionState, ab: Airbag, add_curve) -> None:
     ab.gas_mat_id = state.next_mat_id()
     ab.gas_mat_kind = "MOLE"
     ab.mw, ab.hc_a, ab.hc_b, ab.hc_c = mix
+    _warn_gas_gamma(state, ab)
     _resolve_species_block(state, ab, add_curve)
     if ab.pe == 0.0:
         state.warn(
@@ -2018,6 +2245,59 @@ def _warn_particle_cpm_fields(state: ConversionState, ab: Airbag) -> None:
                 + f" — {why}. DROPPED.")
 
 
+def _warn_particle_option(state: ConversionState, ab: Airbag) -> None:
+    """The ``*AIRBAG_PARTICLE`` OPTION inputs that carry no card of their own
+    in the emitted deck — each named by value, none silently dropped.
+
+    Every one of these is a documented option this batch reads past rather
+    than converts, and each is silent by nature: the card walk stays correct,
+    the deck converts, the run terminates normally, and only the physics is
+    short. That is the exact failure mode the airbag family's warn-drop policy
+    exists for.
+    """
+    kw = f"*{ab.keyword}"
+    if ab.segsid:
+        state.warn(
+            f"{kw}: _SEGMENT states SEGSID={ab.segsid}, a *SET_SEGMENT that "
+            "NARROWS the monitored volume — \"The segments define the volume "
+            "and should belong to the parts from SID1\" (Vol I R17 p.3-99). "
+            "This converter builds the volume from SID1 (minus SID2) as "
+            f"whole PARTS, so the restriction to set {ab.segsid} is DROPPED "
+            "and the bag measures MORE volume than LS-DYNA's — its pressure "
+            "is correspondingly lower for the same gas. Restate the bag with "
+            "a *SET_PART that contains only the venting volume's parts.")
+    if ab.jnode:
+        state.warn(
+            f"{kw}: _JET states JNODE={ab.jnode}, the node LS-DYNA applies "
+            "the vent THRUST reaction to — F_thrust = mdot*(v_sound - v_exit) "
+            "+ Avent*(P_bag - P_ambient), F_JNODE = -F_thrust (Vol I R17 "
+            "Remark 18). A Radioss vent hole removes mass and energy but "
+            "applies no reaction force anywhere, and there is no column to "
+            "name a node in, so the thrust is DROPPED. On a tethered or "
+            "free-flying bag this is a real missing load; on a bag reacted "
+            "through its own fabric it is small.")
+    if ab.nid1 or ab.nid2 or ab.nid3:
+        state.warn(
+            f"{kw}: card 7 names NID1={ab.nid1}, NID2={ab.nid2}, "
+            f"NID3={ab.nid3} — \"Three nodes defining a moving coordinate "
+            "system for the direction of flow through the gas inlet nozzles\" "
+            "(Vol I R17 p.3-104). Radioss's inflator inlet is the "
+            "surf_IDinj SURFACE and the gas enters along that surface's own "
+            "normal, which already follows the housing as it deforms, so "
+            "there is no separate frame to state and the three nodes are "
+            "DROPPED. The directions agree as long as the nozzle shells move "
+            "with the same body those nodes do.")
+    if ab.inflation:
+        state.warn(
+            f"{kw}: _INFLATION adds no card, but it makes LS-DYNA ADD MASS to "
+            "the initial gas over the NPRLX relaxation steps to hold the "
+            "starting pressure while the volume changes (Vol I R17 Remark "
+            "17) — the tire-inflation case. Radioss injects only what the "
+            "inflator curves state, so that top-up is DROPPED and the bag's "
+            "pressure falls as its volume grows. Model it with an extra "
+            "injector curve if the initial pressure has to hold.")
+
+
 def _resolve_particle_air(state: ConversionState, ab: Airbag) -> None:
     """The bag's INITIAL fill, from the ``IAIR`` branch.
 
@@ -2071,6 +2351,7 @@ def _resolve_particle_air(state: ConversionState, ab: Airbag) -> None:
         return
     ab.gas_mat_kind = "MOLE"
     ab.mw, ab.hc_a, ab.hc_b, ab.hc_c = (ab.xmair, ab.aair, ab.bair, ab.cair)
+    _warn_gas_gamma(state, ab)
     if ab.iair in (2, 4, -4):
         state.warn(
             f"{kw}: IAIR={ab.iair} selects the PARTICLE initial-air method"
@@ -2382,6 +2663,7 @@ def _resolve_particle(state: ConversionState, ab: Airbag, add_curve) -> None:
             "species are injected together through the same nozzles. Split "
             "the bag into one *AIRBAG per inflator if they fire at different "
             "times or through different nozzles.")
+    _warn_particle_option(state, ab)
     _warn_particle_cpm_fields(state, ab)
 
 
@@ -2395,7 +2677,23 @@ def _resolve_particle(state: ConversionState, ab: Airbag, add_curve) -> None:
 #: costs nothing. PRES and LFLUID have no gas to exchange, GAS is a closed
 #: adiabatic volume with no injector, and FVMBAG2 is a different solver whose
 #: ``AC``/``UC`` channels are structurally zero.
-_COMMU1_PROMOTABLE = ("AIRBAG1",)
+#:
+#: ``COMMU1`` is in the tuple because a bag can be named by MORE THAN ONE
+#: ``*AIRBAG_INTERACTION`` — which is the primary reason the keyword exists.
+#: A three-chamber bag is a CHAIN (A<->B, B<->C) or a STAR (A<->B, A<->C), and
+#: LS-DYNA also accepts two orifices on the same pair. The ``Nbag`` block is
+#: N-row by construction (``_commu_block`` writes ``Nbag = len(commu_rows)``)
+#: and ``monvol_commu1.cfg:255-259`` allows ``NBAG <= 20``, so the second
+#: interaction has to find its already-promoted bag ACCEPTABLE rather than
+#: rejected: with ``("AIRBAG1",)`` alone the middle bag of a chain is a COMMU1
+#: by the time B<->C is read, and B<->C is dropped with a warning that
+#: contradicts itself ("gas exchange needs BOTH bags on /MONVOL/COMMU1, and
+#: airbag 43 converts to /MONVOL/COMMU1").
+_COMMU1_PROMOTABLE = ("AIRBAG1", "COMMU1")
+
+#: ``monvol_commu1.cfg:255-259``: ``CHECK(COMMON) { NBAG > 0; NBAG <= 20; }``.
+#: A 21st row is refused by the reader, so it is refused here with a name.
+_COMMU1_MAX_ROWS = 20
 
 
 def _resolve_airbag_interactions(state: ConversionState) -> None:
@@ -2454,6 +2752,19 @@ def _resolve_airbag_interactions(state: ConversionState) -> None:
                 f"between airbags {it.ab1} and {it.ab2} is DROPPED and both "
                 "stay sealed.")
             continue
+        full = [x.airbag_id for x in (a, b)
+                if len(x.commu_rows) >= _COMMU1_MAX_ROWS]
+        if full:
+            state.warn(
+                f"{ref}: airbag(s) {full} already carry "
+                f"{_COMMU1_MAX_ROWS} communicating rows, which is the whole "
+                "of what /MONVOL/COMMU1 accepts (monvol_commu1.cfg:255-259, "
+                f"\"CHECK(COMMON) {{ NBAG > 0; NBAG <= {_COMMU1_MAX_ROWS}; "
+                "}}\"). A further row is refused by the reader and the deck "
+                "with it, so THIS interaction is DROPPED and the two bags "
+                "stay sealed from each other. Merge chambers, or state the "
+                "extra path as a vent hole.")
+            continue
         _promote_commu1(state, it, a, b)
 
 
@@ -2478,9 +2789,32 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
             "pressure. Radioss applies the bag pressure to every segment of "
             "surf_IDex, with no per-part exclusion, so EXCP is DROPPED.")
     # ── the shared partition surface ────────────────────────────────────
+    #
+    # Built only when the card does NOT state its own AREA. "AREA  Orifice
+    # area between connected bags. ... EQ.0.0: AREA is taken as the surface
+    # area of the part ID defined below" (Vol I R17 p.3-91) — so PID sizes the
+    # orifice only when AREA is 0, and a stated AREA is a CONSTANT orifice,
+    # which Radioss writes as surf_IDc = 0 with Acom as the absolute area.
+    # Scaling the partition by SF alone discarded the stated number: on a
+    # 100 mm2 partition an AREA of 33.3 with SF 0.85 vented through 85 rather
+    # than 28.3, byte-identical to a deck that stated no AREA at all.
+    # (A NEGATIVE area is a curve this converter cannot map onto the partner-
+    # pressure abscissa; it becomes 0 below, so the partition is still the
+    # right source and is still built.)
     surf_a = surf_b = 0
     made_a = made_b = None
-    if it.pid:
+    if it.pid and it.area > 0.0:
+        state.warn(
+            f"{ref}: AREA={it.area:g} and PID={it.pid} are both stated. "
+            "LS-DYNA takes PID's own area only when AREA is 0 (\"EQ.0.0: AREA "
+            "is taken as the surface area of the part ID defined below\", "
+            "Vol I R17 p.3-91), so the stated AREA governs and the partition "
+            "surface is NOT used to size the orifice: Acom = AREA*SF as an "
+            "ABSOLUTE area with surf_IDc = 0, and no partition /SURF is "
+            "emitted. The orifice is then CONSTANT, which is what a stated "
+            "AREA means; blank the AREA to get an orifice that tracks the "
+            "partition's deforming area instead.")
+    elif it.pid:
         pid = abs(it.pid)
         if it.pid < 0:
             state.warn(
@@ -2550,7 +2884,9 @@ def _promote_commu1(state: ConversionState, it, a: Airbag, b: Airbag) -> None:
     elif sf == 0.0:
         sf = 1.0
     # With a partition surface, Acom is a SCALE FACTOR on that surface's area;
-    # without one it is an ABSOLUTE area. Same column, decided by surf_IDc.
+    # without one it is an ABSOLUTE area. Same column, decided by surf_IDc —
+    # and which of the two applies was decided above, when the partition was
+    # (or was not) built.
     acom_a = sf if surf_a else area * sf
     acom_b = sf if surf_b else area * sf
     if not surf_a and area == 0.0:
@@ -2674,7 +3010,7 @@ def _emit_monvol_gas(ab: Airbag) -> List[str]:
 
 
 def _vent_block(v: AirbagVent) -> List[str]:
-    """One vent hole's four cards (five with ``Iform == 2``).
+    """One vent hole's four cards.
 
     The layout is the ``/PROP/AIRBAGVENTHOLE`` sub-block, and it is the ONE
     sub-block pinned as identical across every monitored volume this converter
@@ -2701,14 +3037,14 @@ def _vent_block(v: AirbagVent) -> List[str]:
         # surf_IDv = 0 is the whole-bag mode, in which Avent is the vent AREA
         # and Bvent is forced to 0 by the reader; with a named surface Avent
         # is a SCALE FACTOR on that surface's current area.
-        f"{_i(v.surf_id)}{_i(v.iform)}{_f(v.avent)}{_f(v.bvent)}{b20}"
+        f"{_i(v.surf_id)}{_i(v.iform)}{_f(v.avent)}{_f(0.0)}{b20}"
         + f"{v.title[:20]:>20}",
         "#             Tstart               Tstop               dPdef"
         "              dtPdef             IdtPdef",
         f"{_f(v.tstart)}{_f(0.0)}{_f(v.dpdef)}{_f(0.0)}{b10}{_i(0)}",
         "#  fct_IDt   fct_IDP   fct_IDA                       Fscalet"
         "             FscaleP             FscaleA",
-        f"{_i(v.fct_t)}{_i(v.fct_p)}{_i(v.fct_a)}{b10}"
+        f"{_i(v.fct_t)}{_i(v.fct_p)}{_i(0)}{b10}"
         f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
         "# fct_IDt'  fct_IDP'  fct_IDA'                      Fscalet'"
         "            FscaleP'            FscaleA'",
@@ -2782,13 +3118,18 @@ def _emit_monvol_airbag1(ab: Airbag) -> List[str]:
     — MEASURED on a probe, ``Ijet=2`` shifted the whole block by one line and
     produced ``WARNING 100213`` on the injector row followed by
     ``ERROR 100103`` ("Cannot read an integer value") on the vent card below.
+
+    **``Ijet`` is always 0 here**, and the jet-node columns with it. See
+    :func:`_warn_hybrid_jetting`: ``Ijet = 1`` obliges three real ``/FUNCT``
+    ids that ``*AIRBAG_HYBRID_JETTING`` has no source for, and a zero in any
+    of them is starter ERROR 12/13/14 — the deck is refused, not degraded.
     """
     b10 = " " * 10
     t0 = ab.t_ext if ab.t_ext != 0.0 else 295.0
     commu = ab.radioss_type == "COMMU1"
     rad = "COMMU1" if commu else "AIRBAG1"
     hconv = ab.hconv if ab.hconv > 0.0 else 0.0
-    ijet = 1 if (ab.jet_n1 and ab.jet_n2) else 0
+    ijet = 0
     lines = [
         f"/MONVOL/{rad}/{ab.monvol_id}",
         (ab.title or f"MONVOL_{rad}_{ab.monvol_id}")[:100],
@@ -2805,22 +3146,16 @@ def _emit_monvol_airbag1(ab: Airbag) -> List[str]:
         f"{_i(1 if ab.inject_prop_id else 0)}",
     ]
     if ab.inject_prop_id:
+        # node_ID1/2/3 go out as 0 with Ijet = 0, not as the deck's node ids:
+        # the reader resolves them through USR2SYS only inside
+        # ``IF (IJET(II) > 0)``, so ids written beside Ijet = 0 are inert — but
+        # the echo at hm_read_monvol_type7.F:910 branches on ``NJ1 == 0`` and
+        # would print a jet the run does not apply.
         lines += [
             "#inject_ID   sens_ID      Ijet  node_ID1  node_ID2  node_ID3",
             f"{_i(ab.inject_prop_id)}{_i(0)}{_i(ijet)}"
-            f"{_i(ab.jet_n1)}{_i(ab.jet_n2)}{_i(ab.jet_n3)}",
+            f"{_i(0)}{_i(0)}{_i(0)}",
         ]
-        if ijet:
-            # Read only when Ijet == 1. The three functions shape the jet
-            # pressure in time, in the off-axis angle and in the distance;
-            # LS-DYNA supplies none of them (its CA/BETA are a half-angle and
-            # an efficiency, not functions), so all six columns stay 0 and the
-            # jet carries the bag's uniform pressure along its own geometry.
-            lines += [
-                "# fct_IDPtfctIDPThetfctIDPDelt                      FscalePt"
-                "        FscalePTheta        FscalePDelta",
-                f"{_i(0)}{_i(0)}{_i(0)}{b10}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
-            ]
     vents = _airbag1_vents(ab)
     lines += ["#    Nvent  Nporsurf", f"{_i(len(vents))}{_i(0)}"]
     for v in vents:
@@ -3238,8 +3573,19 @@ def _make_monvols(state: ConversionState) -> List[str]:
             lines += _emit_monvol_gas(ab)
         elif rad == "LFLUID":
             lines += _emit_monvol_lfluid(ab)
-        else:                                    # PRES: SPV and LOAD_CURVE
+        elif rad == "PRES":                      # SPV and LOAD_CURVE
             lines += _emit_monvol_pres(ab)
+        else:
+            # The dispatch key is RESOLVER-set, not keyword-derived, so an
+            # empty string here means _resolve_airbag_model reached a model it
+            # does not handle. Emitting the /MONVOL/PRES fallback would give
+            # that bag a pressure card it never asked for.
+            state.warn(
+                f"*{ab.keyword} (SID {ab.sid}): the resolver left this bag "
+                f"with no /MONVOL type ({rad!r}), so NO /MONVOL is emitted "
+                "and the bag does not inflate. This is a converter defect — "
+                "please report the keyword.")
+            continue
         state.monvol_ids.append((ab.monvol_id, ab.title))
     return lines if len(lines) > 2 else []
 

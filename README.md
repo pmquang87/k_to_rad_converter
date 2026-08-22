@@ -2458,9 +2458,9 @@ rejects the whole deck
 | `*AIRBAG_ADIABATIC_GAS_MODEL` | `/MONVOL/GAS` (ITYPE 3) | `Pini = P0 + PE` (gauge → absolute) |
 | `*AIRBAG_LOAD_CURVE` | `/MONVOL/PRES` | `Itypfun = 1` (pressure vs time), `STIME` folded into the curve |
 | `*AIRBAG_LINEAR_FLUID` | `/MONVOL/LFLUID` (ITYPE 10) | `P = K·ln(V0/V) + Padd`, term for term |
-| `*AIRBAG_HYBRID[_JETTING][_CM]` | `/MONVOL/AIRBAG1` + one `/MAT/GAS/MOLE` **per species** + `/PROP/INJECT1` with `N_gases > 1` | the initial mixture is a **mole-fraction** average; `_JETTING` maps when it names NODE1/NODE2 |
+| `*AIRBAG_HYBRID[_JETTING][_CM]` | `/MONVOL/AIRBAG1` + one `/MAT/GAS/MOLE` **per species** + `/PROP/INJECT1` with `N_gases > 1` | the initial mixture is a **mole-fraction** average; `_JETTING`'s jet is **dropped** with a warning (`Ijet = 0`) — see below. `*AIRBAG_HYBRID_CHEMKIN` is a different model and is warn-dropped |
 | `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION][_SEGMENT][_TIME]` | `/MONVOL/FVMBAG2` (ITYPE 11) + `surf_IDin` from SD2 + `surf_IDinj` from the nozzles | **cannot run on an open-source build** — see below; `--airbag-particle-uniform` gives a runnable `/MONVOL/AIRBAG1` |
-| `*AIRBAG_INTERACTION` | `/MONVOL/COMMU1` (ITYPE 9) on **both** bags, with reciprocal `Nbag` rows | `PID` → the shared `surf_IDc`; dyna2rad does not convert this keyword at all |
+| `*AIRBAG_INTERACTION` | `/MONVOL/COMMU1` (ITYPE 9) on **both** bags, with reciprocal `Nbag` rows | `PID` → the shared `surf_IDc` **when `AREA` is 0**; chains and stars are supported (`Nbag ≤ 20`); dyna2rad does not convert this keyword at all |
 | `*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]` | one `/XREF` per owning part | `_ID` scaling baked in, `_BIRTH` → `/SENSOR/TIME` |
 | `*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]` | `/EREF/SHELL` + `/EREF/SH3N` per part | |
 | `*MAT_FABRIC` / `*MAT_034` | `/MAT/LAW19` + `/PROP/TYPE9`, or `/MAT/LAW58` + `/PROP/TYPE16` | see *Fabric* below |
@@ -2638,8 +2638,10 @@ as a Cpf, and everything below it shifts.
 **The initial mixture is a mole-fraction average.** `INITM` is a *mass*
 fraction ("The sum of INITM of all gas components should be 1.0", Vol I R17
 p.3-50) while MW and A/B/C are *molar*, so the weights are converted before
-averaging: `M = 1/Σ(w_i/M_i)` and `Cp = Σ x_i Cp_i`. That lands where it
-should — the solver's divide turns it into `Σ w_i·(Cp_i/M_i)`, the
+averaging: `M = Σw_i/Σ(w_i/M_i)` and `Cp = Σ x_i Cp_i`. The numerator is
+`Σw_i`, **not 1** — the fractions normalise themselves, so only MW moves when
+the column does not sum to 1, and it moves by exactly `1/Σw`. That lands where
+it should — the solver's divide turns it into `Σ w_i·(Cp_i/M_i)`, the
 mass-fraction average of the mass-specific heat capacities. dyna2rad takes the
 arithmetic mean of molar quantities with mass weights, which agrees only when
 every MW is equal, and additionally gates the mixture on `INITM >= 1.0` so a
@@ -2674,6 +2676,33 @@ tested. Both become `dPdef` with `Tstart = 1e30`, the same sentinel the starter
 uses itself. dyna2rad never reads `PPOP`, so a vent that should stay shut opens
 at t=0 there.
 
+**`A23`/`LCA23` and `AP23`/`LCAP23` are alternatives, not a product.** Vol I
+R17 p.3-47: A23 *"EQ.0.0: Set A23 to zero if LCA23 is ≠ 0"* and LCA23 *"A
+nonzero value for A23 overrides LCA23"* — the same override the coefficient
+columns take. Radioss does **not** choose: a vent hole's `Avent` and its
+`fct_IDP` are multiplied (`airbagb1.F`, `AOUT = Avent` then `AOUT =
+FPORP·AOUT·f_P((P−Pext)·SCALP)`). So exactly one is emitted: a stated `A23`
+becomes `Avent = A23·C23` with no curve, and a blank `A23` with `LCA23 > 0`
+makes the **curve** the area and `Avent` the coefficient alone. A blank `C23`
+with no `LCC23` is a *zero* orifice coefficient — LS-DYNA passes no gas — so no
+vent hole is emitted rather than one at full area.
+
+**`_JETTING`'s jet is dropped, and the deck runs.** `Ijet = 1` obliges
+`fct_IDPt`, `fct_IDPTheta` and `fct_IDPDelta`, and the reader has **no zero
+guard**: `hm_read_monvol_type7.F:585-620` searches each id in `NPC` inside
+`IF (IJET(II) > 0)` and calls `ANCMSG(MSGID = 12/13/14, MSGTYPE = MSGERROR)`
+when it is not found — id 0 never is. Measured on converted decks: *3
+ERROR(S)*, `UNDEFINED POROSITY/TIME|PRESSURE|AREA FUNCTION ID=0`, **ERROR
+TERMINATION, no restart file**. Two of the three functions could be defended
+(`f_theta` from the cone half-angle `CA`, `f_t` flat), but `FscalePt` is a jet
+*pressure* and LS-DYNA states none — it derives the jet from the inflator mass
+flow and the Bernoulli efficiency `BETA` through a different formulation — and
+Radioss **superposes** the jet on the uniform pressure (`volpres.F`), so an
+invented `FscalePt` is an invented load on top of a correct one. `Ijet = 0`,
+the node columns 0, and a warning naming every field. The converted deck is
+then byte-identical to the same bag without the jetting card and reaches
+NORMAL TERMINATION.
+
 #### Named vent surfaces, and what "a subset of the bag" means
 
 A vent whose LS-DYNA card names a part — `*AIRBAG_HYBRID`'s negative `A23`,
@@ -2691,6 +2720,16 @@ ID=%d"* — so elements outside the bag are dropped with a warning; and the
 sharing itself is **required, not double counting**, because `surf_IDex`
 measures the *volume* while `surf_IDv` scales an *area* and nothing is summed
 across the two.
+
+`*AIRBAG_HYBRID`'s negative `A23` is the **exception** to rule two, and it is
+documented: *"With SIDTYP > 0, airbag pressure will not be applied to part/set
+|A23| representing venting holes if part/set |A23| is not included in SID … The
+area of this part/set becomes the vent orifice area"* (Vol I R17 p.3-46) —
+`ERROR 902` is the *communicating*-surface rule and does not reach it. A vent
+part outside the bag therefore has its **initial area frozen** into `Avent`
+with `surf_IDv = 0`, and the warning says so: Radioss can only scale a surface
+that belongs to the volume, so the hole no longer tracks the vent part's
+deformation.
 
 #### `/MONVOL/FVMBAG2` is emitted, and it will not run here
 

@@ -9620,17 +9620,30 @@ _AIRBAG_MODELS = {
 #:
 #: ``*AIRBAG_HYBRID``'s documented option list is exactly ``{ }``, ``_ID``,
 #: ``_TITLE``, ``_JETTING``, ``_JETTING_CM`` (Vol I R17 pp.3-44…3-52; ``_ID``
-#: and ``_TITLE`` are stripped by ``parser._split_keyword``). ``_CHAMBER`` is
-#: NOT a documented *AIRBAG option — "There is no ``*AIRBAG_HYBRID_CHAMBER``
-#: in the reader at all"; the chamber concept belongs to CPM
-#: (``*DEFINE_CPM_CHAMBER`` plus ``*AIRBAG_PARTICLE``'s ``CHM``/``CHM_ID``).
-#: It is generated anyway, and warns by name, because a deck that writes it
-#: would otherwise fall through to the bare-prefix net with no card read at
-#: all. ``_CHEMKIN`` is a real reader option (``airbag.cfg:990-992``,
-#: ``airbagoption == 7``) that this batch does not model.
+#: and ``_TITLE`` are stripped by ``parser._split_keyword``).
+#:
+#: ``_CHEMKIN`` is deliberately NOT here. ``*AIRBAG_HYBRID_CHEMKIN`` is a
+#: MODEL of its own with its own card stack, not a HYBRID with extra cards:
+#: Vol I R17 p.3-54 gives it card 3 ``LCIDM LCIDT NGAS DATA ATMT ATMP RG``,
+#: card 4 ``HCONV``, card 5 ``C23 A23``, and then a control card plus several
+#: thermodynamic-property cards PER SPECIES. Routing it to the HYBRID reader
+#: reads its curve ids as ATMOST/ATMOSP and its DATA as GC, then walks a gas
+#: block that is not there. It is registered on ``handle_airbag_unsupported``
+#: instead — a named warn-drop, which is what master did before batch 2.
+#:
+#: ``_CHAMBER`` is not here either: it is not a documented *AIRBAG option at
+#: all (the chamber concept belongs to CPM — ``*DEFINE_CPM_CHAMBER`` plus
+#: ``*AIRBAG_PARTICLE``'s ``CHM``/``CHM_ID``), so its card stack is unknown
+#: and guessing it is worse than the ``("AIRBAG", ...)`` prefix net's
+#: warn-and-drop, which still names the keyword.
+#:
+#: ``*AIRBAG_PARTICLE``'s six option slots ARE all here, because every one of
+#: them is a documented option of the same model: ``_MPP`` and ``_TIME`` add a
+#: prelude card, ``_SEGMENT`` adds card 2, ``_JET`` adds card 4, and
+#: ``_DECOMPOSITION``/``_MOLEFRACTION``/``_INFLATION`` add none — see
+#: ``_warn_particle_option`` for what each unmodelled one costs.
 _AIRBAG_OPTION_STACKS = {
-    "AIRBAG_HYBRID":   (("", "_JETTING"), ("", "_CM"),
-                        ("", "_CHAMBER", "_CHEMKIN")),
+    "AIRBAG_HYBRID":   (("", "_JETTING"), ("", "_CM")),
     "AIRBAG_PARTICLE": (("", "_MPP"), ("", "_DECOMPOSITION"),
                         ("", "_MOLEFRACTION", "_INFLATION", "_JET"),
                         ("", "_SEGMENT"), ("", "_TIME")),
@@ -9642,6 +9655,15 @@ _AIRBAG_OPTION_STACKS = {
 #: because an unconverted airbag is not a missing output card: the bag never
 #: inflates and the deck runs to termination looking healthy.
 _AIRBAG_UNSUPPORTED = {
+    "AIRBAG_HYBRID_CHEMKIN":
+        "the CHEMKIN hybrid inflator — a MODEL of its own, not an option of "
+        "*AIRBAG_HYBRID: Vol I R17 p.3-54 gives it card 3 'LCIDM LCIDT NGAS "
+        "DATA ATMT ATMP RG', card 4 'HCONV' and card 5 'C23 A23', then a "
+        "control card and several thermodynamic-property cards per species. "
+        "Reading it as a plain *AIRBAG_HYBRID would take its curve ids for "
+        "ATMOST/ATMOSP, so it is dropped whole rather than mis-read. The "
+        "Radioss target would be /MONVOL/AIRBAG1 with Iform 2 (Chemkin) on "
+        "the vent holes and one /MAT/GAS per species",
     "AIRBAG_WANG_NEFSKE":
         "the Wang-Nefske inflator with its full orifice/temperature model — "
         "the closest Radioss target is /MONVOL/AIRBAG1 with a /PROP/INJECT1 "
@@ -9706,6 +9728,12 @@ def _airbag_base_keyword(kw: str) -> str:
         kw = base
     if kw in _AIRBAG_MODELS:
         return kw
+    # An UNSUPPORTED model is a model, not an option of the model whose name
+    # it extends: *AIRBAG_HYBRID_CHEMKIN has its own card stack (Vol I R17
+    # p.3-54) and must not resolve to AIRBAG_HYBRID through the prefix walk
+    # below, or a future caller would read it with the HYBRID reader.
+    if kw in _AIRBAG_UNSUPPORTED:
+        return kw
     # The batch-2 OPTION stacks: *AIRBAG_HYBRID_JETTING_CM and
     # *AIRBAG_PARTICLE_MOLEFRACTION are the HYBRID and PARTICLE card stacks
     # with extra cards, not models of their own, so they key the same reader
@@ -9742,13 +9770,34 @@ def _hybrid_gas_stride(raw: List[str], first: int, ngas: int) -> int:
 
     It is decided by CONTENT, once: card 5.2 has at most ONE populated cell, so
     a card with two or more at that position is the next gas's card 5.1 (or,
-    at NGAS = 1, the jetting card 6, which has eight). A card that is absent or
-    blank ends the block, so the stride is 1 and nothing after it shifts.
+    at NGAS = 1, the jetting card 6, which has eight).
+
+    **A BLANK card is not the end of the block.** ``FMASS``'s default is
+    "none" (Vol I R17 p.3-49), so writing it as an all-spaces line is legal
+    and is how a preprocessor states FMASS = 0 — and that card has ZERO
+    populated cells, the same count an absent one has. Deciding on the blank
+    card alone collapsed the stride to 1 and read every gas after the first
+    off a blank line: MEASURED with NGAS = 2 and a blank card 5.2, gas 2 came
+    back MW = 0, no ``/MAT/GAS`` was emitted for it, the injector lost its row
+    and the mixture was built from gas 1 alone (MW 0.03544303797 instead of
+    0.02875481386) — on a deck the starter accepts and runs. So a blank card
+    is disambiguated by looking ONE FURTHER: if what follows it is itself a
+    populated card, the blank line was card 5.2 and the stride is 2. Only a
+    blank card with nothing (or nothing populated) behind it is the genuine
+    end of the block.
+
+    The residual ambiguity is at NGAS = 1 with ``_JETTING``, where a blank
+    card 5.2 and a blank jetting card 6 look alike. It is resolved the same
+    way, in favour of card 5.2, because an entirely blank card 6 means a jet
+    with no coordinates AND no CA AND no BETA — which is not a jet — while a
+    blank FMASS is the ordinary "no aspiration" case.
     """
     if ngas <= 0:
         return 1
     cells = _populated_cells(raw, first + 1)
-    return 1 if cells == 0 or cells >= 2 else 2
+    if cells == 0:
+        return 2 if _populated_cells(raw, first + 2) >= 2 else 1
+    return 1 if cells >= 2 else 2
 
 
 def _read_airbag_hybrid(ab: "Airbag", block: Block, raw: List[str], i3: int,
@@ -9858,20 +9907,48 @@ def _read_airbag_hybrid(ab: "Airbag", block: Block, raw: List[str], i3: int,
             ab.jet_nreact = to_int(f8[0]) if f8 else 0
 
 
+def _airbag_particle_id_row(block: Block) -> int:
+    """Index of the ``_ID``/``_TITLE`` card in an ``*AIRBAG_PARTICLE`` block.
+
+    **1 on an ``_MPP`` deck, 0 otherwise.** The Card Summary of Vol I R17
+    p.3-94 lists *"Card MPP. Include this card if using the MPP keyword
+    option"* BEFORE *"Card ID. Include this card if ... the ID or TITLE
+    keyword options"*, so on ``*AIRBAG_PARTICLE_MPP_ID`` the ``SX SY SZ`` line
+    is ``raw[0]`` and ``ABID``/``HEADING`` is ``raw[1]``.
+
+    Only the card COUNT is unaffected by that order (``_title_offset`` plus
+    one for ``_MPP`` reaches card 1 either way); the IDENTITY of ``raw[0]`` is
+    not. Reading the ABID off the MPP card gives the bag ``SY`` as its id and
+    ``SZ`` as its title, which then makes every ``*AIRBAG_INTERACTION`` naming
+    the real ABID report it as undefined — and lets ``_rewrite_id_header``
+    add an ``*INCLUDE_TRANSFORM`` offset to ``SX``.
+    """
+    return 1 if "_MPP" in block.keyword and _has_id_or_title(block) else 0
+
+
+def _has_id_or_title(block: Block) -> bool:
+    return _has_id(block) or _has_title(block)
+
+
 def _airbag_particle_cards(block: Block, raw: List[str]):
-    """``{name: index}`` of every ``*AIRBAG_PARTICLE`` card, or ``None`` when
-    the stack cannot be walked.
+    """``{name: index}`` of every ``*AIRBAG_PARTICLE`` card.
 
     THE one source for the layout: the handler reads its values at these
     indices and ``assembly._off_airbag_particle`` rewrites its ids at the same
-    ones, so a card-order change cannot leave the two disagreeing. Returns
-    ``None`` for the ``STYPE2 == 2`` case, whose SIDUP block repeats once per
-    part of the SD2 set — a count that only exists after the *SET_PART is
-    resolved, i.e. after parsing.
+    ones, so a card-order change cannot leave the two disagreeing.
 
-    Keys: ``card1``, ``card3``, ``card7``, ``air`` (-1 when absent),
-    ``lcmass`` (-1 when absent), and the lists ``vents``, ``gases``,
-    ``orifices``.
+    For the ``STYPE2 == 2`` case — whose SIDUP block repeats once per part of
+    the SD2 set, a count that only exists after the *SET_PART is resolved,
+    i.e. after parsing — the walk stops and returns a PARTIAL result:
+    ``{"partial": True, "card1": <index>}`` with every other key empty. Card 1
+    is above the block that cannot be walked, so its index is known and is
+    handed back rather than thrown away; recomputing it as
+    ``_title_offset(block)`` would miss the ``_MPP`` and ``_TIME`` prelude
+    cards and read card 1 off ``SX SY SZ``.
+
+    Keys: ``partial``, ``card1``, ``card3``, ``card7``, and — each -1 when
+    the option that carries it is absent — ``seg``, ``jnode``, ``air``,
+    ``lcmass``; plus the lists ``vents``, ``gases``, ``orifices``.
     """
     kw = block.keyword
     i = _title_offset(block)
@@ -9884,14 +9961,18 @@ def _airbag_particle_cards(block: Block, raw: List[str]):
     i += 1
     stype2 = to_int(f1[3]) if len(f1) > 3 else 0
     npdata = to_int(f1[5]) if len(f1) > 5 else 0
+    seg = -1
     if "_SEGMENT" in kw:
+        seg = i
         i += 1
     i3 = i
     f3 = _card(raw, i, fixed=True, n=8, w=10)
     i += 1
     unit = to_int(f3[1]) if len(f3) > 1 else 0
     nvent = to_int(f3[5]) if len(f3) > 5 else 0
+    jnode = -1
     if "_JET" in kw and "_JETTING" not in kw:
+        jnode = i
         i += 1
     # The two optional continuation cards are self-identifying: LS-DYNA reads
     # them only when the line STARTS with '+'. Skipping by content rather than
@@ -9908,7 +9989,9 @@ def _airbag_particle_cards(block: Block, raw: List[str]):
     ngas = to_int(f7[1]) if len(f7) > 1 else 0
     norif = to_int(f7[2]) if len(f7) > 2 else 0
     if stype2 == 2:
-        return None
+        return {"partial": True, "card1": i1, "card3": -1, "card7": -1,
+                "seg": seg, "jnode": jnode, "air": -1, "lcmass": -1,
+                "vents": [], "gases": [], "orifices": []}
     i += max(0, npdata)
     vents = list(range(i, i + max(0, nvent)))
     i += max(0, nvent)
@@ -9930,18 +10013,21 @@ def _airbag_particle_cards(block: Block, raw: List[str]):
         # Card 14.1 exists only for the two shell-normal-WITH-OFFSET forms.
         if _ffield(o, 2, 0.0) in (-3.0, -4.0):
             i += 1
-    return {"card1": i1, "card3": i3, "card7": i7, "air": air,
-            "lcmass": lcmass, "vents": vents, "gases": gases,
-            "orifices": orifices}
+    return {"partial": False, "card1": i1, "card3": i3, "card7": i7,
+            "seg": seg, "jnode": jnode, "air": air, "lcmass": lcmass,
+            "vents": vents, "gases": gases, "orifices": orifices}
 
 
 def _read_airbag_particle_indices(block: Block, raw: List[str]):
-    """``(card1, vent rows, gas rows, orifice rows)`` — the id-bearing cards
-    of a ``*AIRBAG_PARTICLE``, for the ``*INCLUDE_TRANSFORM`` rewriter."""
+    """``(card1, vent rows, gas rows, orifice rows, partial)`` — the id-bearing
+    cards of a ``*AIRBAG_PARTICLE``, for the ``*INCLUDE_TRANSFORM`` rewriter.
+
+    ``partial`` is True for the ``STYPE2 == 2`` stack, where only ``card1`` is
+    known. Card 1 still carries ``SID1`` and ``SID2``, so it is offset; the
+    rows below it are not, and the caller says so."""
     idx = _airbag_particle_cards(block, raw)
-    if idx is None:
-        return None
-    return idx["card1"], idx["vents"], idx["gases"], idx["orifices"]
+    return (idx["card1"], idx["vents"], idx["gases"], idx["orifices"],
+            idx["partial"])
 
 
 def _read_airbag_particle(ab: "Airbag", block: Block, raw: List[str],
@@ -9988,15 +10074,18 @@ def _read_airbag_particle(ab: "Airbag", block: Block, raw: List[str],
     ``*INCLUDE_TRANSFORM`` id rewriter uses as well — one source for the card
     order, so the reader and the offsetter cannot drift.
 
-    ``_MPP``'s ``SX SY SZ`` card is listed BEFORE the ``_ID`` card in the
-    manual; ``_title_offset`` has already consumed the ``_ID``/``_TITLE``
-    line, so it is taken after it here. The values are dropped either way, so
-    the only thing at stake is the card count.
+    ``_MPP``'s ``SX SY SZ`` card is listed BEFORE the ``_ID``/``_TITLE`` card
+    (Vol I R17 p.3-94 Card Summary), and the two are interchangeable ONLY for
+    the card COUNT — ``_title_offset`` plus one for ``_MPP`` reaches card 1
+    from either order. Which line is which still matters, because ``raw[0]``
+    is also what the ABID/HEADING reader and the ``*INCLUDE_TRANSFORM``
+    header rewriter take: see :func:`_airbag_particle_id_row`, which both of
+    them use instead of assuming ``raw[0]``. ``SX``/``SY``/``SZ`` themselves
+    are the MPP decomposition-reference point and are dropped.
     """
     kw = block.keyword
     idx = _airbag_particle_cards(block, raw)
-    f1 = _card(raw, idx["card1"] if idx else _title_offset(block),
-               fixed=True, n=8, w=10)
+    f1 = _card(raw, idx["card1"], fixed=True, n=8, w=10)
     ab.sd1 = to_int(f1[0]) if f1 else 0
     ab.stype1 = to_int(f1[1]) if len(f1) > 1 else 0
     ab.sd2 = to_int(f1[2]) if len(f1) > 2 else 0
@@ -10011,7 +10100,16 @@ def _read_airbag_particle(ab: "Airbag", block: Block, raw: List[str],
     # _airbag_surface_eids covers STYPE1 = 0.
     ab.sid = ab.sd1
     ab.sidtyp = 1
-    if idx is None:
+    # SEGSID and JNODE sit ABOVE the SIDUP block, so both are reliably located
+    # even when the walk is abandoned below. Read here so they are named by
+    # value either way.
+    if idx["seg"] >= 0:
+        ab.segsid = to_int(_card(raw, idx["seg"], fixed=True, n=8, w=10)[0]
+                           or 0)
+    if idx["jnode"] >= 0:
+        ab.jnode = to_int(_card(raw, idx["jnode"], fixed=True, n=8, w=10)[0]
+                          or 0)
+    if idx["partial"]:
         state.warn(
             f"*{kw}: STYPE2=2 selects the SIDUP/STYUP/PFRAC/LINKING card "
             "block, which repeats once per PART in the SD2 set — a count that "
@@ -10085,6 +10183,7 @@ def _read_airbag_particle(ab: "Airbag", block: Block, raw: List[str],
         fm = _card(raw, idx["lcmass"], fixed=True, n=8, w=10)
         ab.lcmass = to_int(fm[0]) if fm else 0
     ab.decomposition = "_DECOMPOSITION" in kw
+    ab.inflation = "_INFLATION" in kw
 
     for k, r in enumerate(idx["gases"]):
         g = _card(raw, r, fixed=True, n=8, w=10)
@@ -10184,10 +10283,18 @@ def handle_airbag(block: Block, state: ConversionState) -> None:
         # PARTICLE's card 1 is SD1 STYPE1 SD2 STYPE2 ..., not the shared
         # SID SIDTYP RBID ..., so it neither takes the RBID walk nor the
         # shared card-1 reader. Its whole stack is read in one place.
+        #
+        # Its header card is not always raw[0] either: _MPP's SX/SY/SZ card is
+        # listed BEFORE the _ID/_TITLE card (Vol I R17 p.3-94 Card Summary),
+        # so _airbag_particle_id_row says which line carries ABID/HEADING.
+        hdr = _airbag_particle_id_row(block)
+        if hdr and len(raw) > hdr:
+            title = (" ".join(parse_free(raw[hdr])[1:]) if _has_id(block)
+                     else raw[hdr].strip()) or f"AIRBAG_{model}"
         ab = Airbag(airbag_id=0, model=model, title=title,
                     keyword=block.keyword)
-        if _has_id(block) and raw:
-            ab.airbag_id, id_title = _id_heading_card(raw[0])
+        if _has_id(block) and len(raw) > hdr:
+            ab.airbag_id, id_title = _id_heading_card(raw[hdr])
             ab.title = id_title or f"AIRBAG_{model}"
         _read_airbag_particle(ab, block, raw, state)
         state.airbags.append(ab)

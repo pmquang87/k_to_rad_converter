@@ -1931,21 +1931,25 @@ def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
 
     The card walk itself is the handler's, imported so the two cannot drift.
     """
-    from .handlers import _card, _read_airbag_particle_indices
+    from .handlers import (_card, _airbag_particle_id_row,
+                           _read_airbag_particle_indices)
     raw = b.raw
-    if "ID" in b.options and raw:
-        new = _rewrite_id_header(raw[0], offsets.get("r", 0))
+    # On an _MPP deck the SX/SY/SZ card comes FIRST and the _ID card second
+    # (Vol I R17 p.3-94 Card Summary), so the header is not always raw[0].
+    hdr = _airbag_particle_id_row(b)
+    if "ID" in b.options and len(raw) > hdr:
+        new = _rewrite_id_header(raw[hdr], offsets.get("r", 0))
         if new is not None:
-            raw[0] = new
-    idx = _read_airbag_particle_indices(b, raw)
-    if idx is None:
-        warn(f"*{b.keyword}: the card stack could not be walked (a "
-             "STYPE2 = 2 block repeats once per part of the SD2 set, a count "
-             "that only exists after the *SET_PART is resolved). Its set, "
-             "curve and element ids are NOT offset — check them by hand "
+            raw[hdr] = new
+    i1, vent_rows, gas_rows, orif_rows, partial = \
+        _read_airbag_particle_indices(b, raw)
+    if partial:
+        warn(f"*{b.keyword}: the card stack could not be walked past card 1 "
+             "(a STYPE2 = 2 block repeats once per part of the SD2 set, a "
+             "count that only exists after the *SET_PART is resolved). Card "
+             "1's SID1/SID2 ARE offset; the vent, gas and orifice rows below "
+             "it are NOT — check their set, curve and element ids by hand "
              "against this *INCLUDE_TRANSFORM's IDSOFF / IDFOFF / IDEOFF.")
-        return
-    i1, vent_rows, gas_rows, orif_rows = idx
     if i1 < len(raw) and raw[i1].strip():
         f1 = _card(raw, i1, fixed=True, n=8, w=10)
         stype1 = to_int(f1[1] or 0) if len(f1) > 1 else 0

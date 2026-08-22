@@ -466,11 +466,19 @@ covering them unlocks a large class of real models.
   with reciprocal `Nbag` rows (a keyword dyna2rad does not convert at all).
   With them: the multi-row injector, the mole-fraction mixture rule, **named
   vent-hole surfaces** (`surf_IDv` — the batch-1 deferral, built from the vent
-  part and screened as a subset of the bag surface), the `_JETTING` node block,
+  part and screened as a subset of the bag surface, with `*AIRBAG_HYBRID`'s
+  documented outside-the-bag `A23 < 0` case frozen to an absolute area),
   `PVENT`/`PPOP` pop-open thresholds, the `SD1 \ SD2` internal-surface split
   and the `NORIF` inflator-nozzle surface. `/TH/MONV` gained `COMMU1` and
   `FVMBAG2` rows, the latter restoring `DTBAG`/`NFV`/`UPCRIT`. See CHANGELOG
-  for the eighteen decisions and the six documented deviations from dyna2rad.
+  for the eighteen decisions, the review round's fourteen fixes and the six
+  documented deviations from dyna2rad.
+
+  **Not converted by batch 2, and now warn-dropped by name rather than
+  mis-read**: `*AIRBAG_HYBRID_CHEMKIN` (a model of its own, with its own card
+  stack) and the `_JETTING` **jet itself** — its geometry reads but `Ijet = 1`
+  obliges three pressure functions LS-DYNA supplies no scale for, and a zero id
+  in any of them is starter `ERROR 12/13/14`. Both are batch-3 candidates.
 
   **Open for batch 3:**
   - `*AIRBAG_WANG_NEFSKE*` — a `/PROP/INJECT1` per inflator gas plus one
@@ -497,6 +505,23 @@ covering them unlocks a large class of real models.
     1 only when the user supplies the brick mesh, which side-steps the
     `HYPERMESH_TETRA` stub FVMBAG2 dies on. Would turn
     `--airbag-particle-uniform` from the only runnable option into the fallback.
+  - **The `_JETTING` jet**, as three real `/FUNCT` plus a defensible
+    `FscalePt`. Two of the three have a source (`f_theta` from the cone
+    half-angle `CA`; `f_t` and `f_delta` flat), but the jet PRESSURE does not:
+    LS-DYNA derives it from the inflator mass flow and the Bernoulli
+    efficiency `BETA` through a formulation Radioss does not share, and
+    Radioss ADDS the jet on top of the uniform pressure, so an invented scale
+    is an invented load. Needs a validated `BETA` → `FscalePt` derivation
+    against a reference LS-DYNA run before it can be written.
+  - **`*AIRBAG_HYBRID_CHEMKIN`** — card 3 `LCIDM LCIDT NGAS DATA ATMT ATMP RG`,
+    card 4 `HCONV`, card 5 `C23 A23`, then a control card and several
+    thermodynamic-property cards per species (Vol I R17 p.3-54). The Radioss
+    target is `/MONVOL/AIRBAG1` with `Iform = 2` (Chemkin) on the vent holes.
+  - **`*AIRBAG_PARTICLE_SEGMENT`'s `SEGSID`**, which narrows the monitored
+    volume to a segment subset of SD1. Needs the `*SET_SEGMENT` →
+    owning-shell resolution intersected with `SD1 \ SD2`; today the
+    restriction is named and dropped, so the bag measures the whole of
+    `SD1 \ SD2`.
   - `*DEFINE_CPM_CHAMBER` / `_VENT` / `_GAS_PROPERTIES` / `_BAG_INTERACTION`,
     all four named and warn-dropped by batch 2 where they are referenced.
   - `*AIRBAG_ALE` / `_ADVANCED_ALE` / `_FLUID_AND_GAS` — still registered and
