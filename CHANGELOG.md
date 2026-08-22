@@ -295,6 +295,14 @@ Prior history (before this changelog was introduced) is summarized in the
       `WARNING 863` ("ELEMENT(S) IS(ARE) INITIALLY IN TENSION", which is what a
       reference geometry is for).
 
+      A SECOND probe covers the per-element reference geometry and the mixed
+      quad+triangle surface: five quads and two triangles on one fabric bag,
+      with `/EREF/SHELL/1` and `/EREF/SH3N/1` over ghost nodes at 0.9 scale.
+      **0 ERROR(S)**, the starter echoing `REFERENCE STATE (EREF)` for both
+      blocks, `SURFACE ERROR = 0.0` and `INITIAL VOLUME = 1000.0` on a surface
+      the converter built as `/SURF/GRSHEL` + `/SURF/GRSH3N` under a
+      `/SURF/SURF`.
+
   Tests: `tests/test_airbag_monvol.py`, 113 tests + 62 subtests, every card
   assertion by COLUMN and every hand-computed value derived in the docstring
   (the SPV `Fscale = BETA·CN`, the `Cpa = A/MW` molar division, the
