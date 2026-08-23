@@ -1289,6 +1289,62 @@ class IncludeTransformOffsetTests(unittest.TestCase):
         self.assertEqual(int(float(out[1][10:20])), -512)
         self.assertAlmostEqual(float(out[1][20:30]), 300.0)
 
+    def test_muscle_curve_cells_move_only_when_negative(self):
+        inner = ("*MAT_MUSCLE\n"
+                 + _row(1, "1.0000E-9", 1.25, 10.0, 0.3, 0.15, 5.0, 2.0) + "\n"
+                 + _row(0.5, 1.0, -3, -4, 0.0) + "\n")
+        out = self._offset(inner, idmoff=1000, idfoff=500).splitlines()
+        self.assertEqual(int(out[0][0:10]), 1001)
+        self.assertEqual(int(float(out[1][20:30])), -503)     # SVS curve
+        self.assertEqual(int(float(out[1][30:40])), -504)     # SVR curve
+        self.assertAlmostEqual(float(out[1][0:10]), 0.5)      # ALM: physics
+        self.assertAlmostEqual(float(out[1][10:20]), 1.0)     # SFR: physics
+
+    def test_spring_muscle_curve_cells_move_only_when_negative(self):
+        inner = ("*MAT_SPRING_MUSCLE\n"
+                 + _row(5, 10.0, 100.0, -7, 0.5, 1000.0, -5, -6) + "\n"
+                 + _row(-8, 1.5, 3.0) + "\n")
+        out = self._offset(inner, idmoff=1000, idfoff=500).splitlines()
+        self.assertEqual(int(out[0][0:10]), 1005)
+        self.assertEqual(int(float(out[0][30:40])), -507)     # SV
+        self.assertEqual(int(float(out[0][60:70])), -505)     # TL
+        self.assertEqual(int(float(out[0][70:80])), -506)     # TV
+        self.assertEqual(int(float(out[1][0:10])), -508)      # FPE
+        self.assertAlmostEqual(float(out[0][40:50]), 0.5)     # A: physics
+
+    def test_thermal_expansion_pid_and_curves_move(self):
+        inner = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(1, 9, 1.0e-5, 11, 2.0, 12, 3.0, 0.0) + "\n"
+                 + _row(2, 9, 1.0e-5, 0, 1.0, 0, 1.0, 0.0) + "\n")
+        out = self._offset(inner, idpoff=300, idfoff=500).splitlines()
+        self.assertEqual(int(out[0][0:10]), 301)      # PID
+        self.assertEqual(int(out[0][10:20]), 509)     # LCID
+        self.assertEqual(int(out[0][30:40]), 511)     # LCIDY
+        self.assertEqual(int(out[0][50:60]), 512)     # LCIDZ
+        # ...on EVERY repeated card, not just the first.
+        self.assertEqual(int(out[1][0:10]), 302)
+        self.assertEqual(int(out[1][10:20]), 509)
+
+    def test_thermal_driver_set_and_curve_ids_move(self):
+        for kw, cells, offs, want in (
+                ("INITIAL_TEMPERATURE_SET", (5, 20.0, 0),
+                 {"idsoff": 400}, {0: 405}),
+                ("INITIAL_TEMPERATURE_NODE", (7, 20.0, 0),
+                 {"idnoff": 200}, {0: 207}),
+                ("BOUNDARY_TEMPERATURE_SET", (5, 9, 1.0),
+                 {"idsoff": 400, "idfoff": 500}, {0: 405, 1: 509}),
+                ("BOUNDARY_TEMPERATURE_NODE", (7, 9, 1.0),
+                 {"idnoff": 200, "idfoff": 500}, {0: 207, 1: 509}),
+                ("LOAD_THERMAL_LOAD_CURVE", (9, 0),
+                 {"idfoff": 500}, {0: 509}),
+                ("MAT_THERMAL_ISOTROPIC", (3, 7.85e-9, 9),
+                 {"idmoff": 1000, "idfoff": 500}, {0: 1003, 2: 509})):
+            inner = f"*{kw}\n" + _row(*cells) + "\n"
+            out = self._offset(inner, **offs).splitlines()
+            for cell, value in want.items():
+                self.assertEqual(int(out[0][cell * 10:(cell + 1) * 10]),
+                                 value, f"{kw} cell {cell}")
+
     def test_no_offsets_leaves_the_card_untouched(self):
         inner = ("*MAT_SHAPE_MEMORY\n"
                  + _row(30, "6.4500E-9", 50000.0, 0.33) + "\n"
