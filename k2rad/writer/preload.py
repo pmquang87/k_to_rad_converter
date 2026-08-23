@@ -489,6 +489,7 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
     elems.update({e.eid: e for e in state.tshell_elems})
     bad: Dict[int, Set[int]] = {}
     penta: Set[int] = set()
+    ismstr10: Set[int] = set()
     for eid in solid_eids:
         e = elems.get(eid)
         if e is None:
@@ -502,6 +503,9 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
         sec = _solid_sec_for_part(state, e.pid)
         if sec is None:
             continue
+        if (e.pid in state.ismstr10_solid_pids
+                or sec.secid in state.ismstr10_solid_secids):
+            ismstr10.add(e.pid)
         isolid = _effective_solid_isolid(state, e.pid, sec)
         if isolid not in _PRELOAD_STABLE_ISOLID:
             bad.setdefault(isolid, set()).add(e.pid)
@@ -517,6 +521,17 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
             "Tstop). Set the part's *SECTION_SOLID ELFORM to one that maps to "
             "Isolid 14 or 17, or the bolt pre-tension will not do what this "
             "card says.")
+    if ismstr10:
+        state.warn(
+            f"{label}: preloaded part(s) {sorted(ismstr10)} carry /PROP/SOLID "
+            "Ismstr=10 (total strain), which k2rad sets because they are /XREF "
+            "or /MAT/LAW95 / LAW90 parts that need it. A PRELOADED element "
+            "group cannot keep it: sgrtails.F:1387-1412 shifts Ismstr 10 -> 4 "
+            "(11 -> 1, 12 -> 2) with WARNING 1775 'PRELOADED ELEMENTS CANNOT "
+            "USE TOTAL STRAIN FORMULATION'. So the bolt preload silently takes "
+            "the total-strain formulation away from the very parts that were "
+            "given it — split the bolted region onto its own *SECTION_SOLID, "
+            "or drop the preload there.")
     if penta:
         state.warn(
             f"{label}: preloaded part(s) {sorted(penta)} contain real 6-node "

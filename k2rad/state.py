@@ -6864,6 +6864,15 @@ class ConversionState:
     # here — filled AT the line that writes the qualifying /SPRING, the same
     # discipline as spring_elem_ids.
     spring_axial_preloadable: Set[int] = field(default_factory=set)
+    # *SECTION_SOLID ids / part ids whose emitted /PROP/SOLID carries
+    # Ismstr=10 (total strain) — set for /XREF, /MAT/LAW95 and /MAT/LAW90
+    # parts, which NEED it. sgrtails.F:1387-1412 silently downgrades a
+    # PRELOADED element group from Ismstr 10/11/12 to 4/1/2 (WARNING 1775), so
+    # a bolt preload on such a part takes away the formulation it was given
+    # for. Filled at the two /PROP/SOLID write lines, read by the /PRELOAD
+    # writer.
+    ismstr10_solid_secids: Set[int] = field(default_factory=set)
+    ismstr10_solid_pids: Set[int] = field(default_factory=set)
     # *DATABASE_CROSS_SECTION_PLANE/_SET → /SECT
     cross_sections: List[CrossSection] = field(default_factory=list)
     # (sect_id, title) of each emitted /SECT — set by the writer's

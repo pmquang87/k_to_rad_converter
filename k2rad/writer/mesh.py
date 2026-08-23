@@ -2552,6 +2552,12 @@ def _make_properties(state: ConversionState) -> List[str]:
         # 17 is touched.
         if sec.secid in law115_secids and isolid == 17:
             isolid = 24
+        if sec.secid in ismstr10_secids:
+            # Recorded at the write line for the /PRELOAD writer: a preloaded
+            # element group at Ismstr 10/11/12 is downgraded to 4/1/2 by
+            # sgrtails.F:1387-1412 (WARNING 1775), i.e. the total-strain
+            # formulation these parts were given is taken away again.
+            state.ismstr10_solid_secids.add(sec.secid)
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
@@ -3369,6 +3375,8 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                     "the default. Give the /XREF or LAW95 parts their own "
                     "*SECTION_SOLID or *HOURGLASS to keep the others "
                     "unchanged.")
+            if ismstr == 10:
+                state.ismstr10_solid_pids.update(siblings)   # see above
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:

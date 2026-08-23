@@ -745,6 +745,30 @@ class InitialStressSectionTests(unittest.TestCase):
         for nid in _sect_frame(starter, sect_id):
             self.assertGreater(nid, 20)
 
+    def test_ismstr10_part_loses_its_total_strain_formulation(self):
+        # *MAT_073 (LAW90) parts get /PROP/SOLID Ismstr=10 because that law
+        # needs it; sgrtails.F:1387-1412 then shifts a PRELOADED group 10 -> 4
+        # with WARNING 1775, taking it away again.
+        deck = _bar_deck(pids=(1, 2, 3, 4)).replace(
+            "*MAT_ELASTIC\n         1  7.85E-09  210000.0       0.3\n",
+            "*MAT_ELASTIC\n         1  7.85E-09  210000.0       0.3\n"
+            "*MAT_LOW_DENSITY_VISCOUS_FOAM\n"
+            + _row(2, 7.85e-9, 210000.0, 9) + "\n"
+            + _row(1.0, 0.0, 0, 0.0, 0) + "\n"
+            + "*DEFINE_CURVE\n" + _row(9, 0, 1.0, 1.0) + "\n"
+            + f"{0.0:>20.10G}{0.0:>20.10G}\n"
+            + f"{1.0:>20.10G}{1.0:>20.10G}\n")
+        # part 2 (the cut brick) now takes mid 2 = the LAW90 foam
+        deck = deck.replace(_row(2, 2, 1), _row(2, 2, 2))
+        r, starter = _convert(deck)
+        prop2 = [ln for ln in _block(starter, "/PROP/SOLID/2")
+                 if not ln.startswith("#")]
+        self.assertEqual(int(prop2[1][10:20]), 10)      # Ismstr=10 emitted
+        w = [x for x in r.warnings if "Ismstr=10 (total strain)" in x]
+        self.assertTrue(w, "no /PRELOAD Ismstr warning")
+        self.assertIn("WARNING 1775", w[0])
+        self.assertIn("[2]", w[0])
+
     def test_no_preload_keyword_draws_no_id(self):
         base = _bar_deck().replace(
             "*INITIAL_STRESS_SECTION_TITLE\nbolt one\n" + ISS_CARD + "\n", "")
