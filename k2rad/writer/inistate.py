@@ -29,6 +29,7 @@ __all__ = [
     "_solid_sec_for_part",
     "_make_inishe",
     "_make_inibri",
+    "_make_inistra",
     "_make_initial_stresses",
     "_make_xref",
     "_resolve_xref_parts",
@@ -276,8 +277,240 @@ def _make_inibri(state: ConversionState) -> List[str]:
     return lines
 
 
+#: The `npg` this converter writes on every /INISHE|/INISH3 /STRA_F/GLOB card.
+#:
+#: Measured on this build with one 1x1 shell, /PROP/SHELL Istrain=1 and
+#: /TH/SHEL E1..K12 read at t=0:
+#:
+#:   Ishell 1 (BT)     npg=1 -> E1 = 0.01   npg=4 -> starter ERROR 1904
+#:   Ishell 12 (BATOZ) npg=1 -> E1 = 0.01   npg=4 -> E1 = 0.01
+#:   Ishell 24 (QEPH)  npg=1 -> E1 = 0.01   npg=4 -> E1 = 0, SILENT NO-OP
+#:   SH3N  1 / 30      npg=1 -> E1 = 0.01   npg=3 -> E1 = 0.01
+#:
+#: The 2022 Reference Guide p.2048 pairs npg=4 with Ishell=12 — but npg=1 also
+#: works for BATOZ (the starter replicates the single value over the element's
+#: real Gauss points, cstraini4.F:162-166), while npg=4 on QEPH is discarded
+#: with no ANCMSG at all (hm_read_inistate_d00.F:2508-2512 writes a leading NPG
+#: marker and shifts PT only IF (IHBE==24); csigini4 skips QEPH via IHBE/=23).
+#: One uniform npg=1 is therefore the only form with no formulation lookup and
+#: no silent-drop branch.
+_STRA_F_NPG = 1
+
+
+def _stra_f_stations(layers):
+    """Reduce a record's through-thickness stations to the (bottom, top) pair
+    the starter stores, returning ``(bot, top, forced_t, dropped)``.
+
+    ``hm_read_inistate_d00.F:2525-2528`` reads ``NPP*NPG`` values and then keeps
+    ``DO N=1,MIN(2,NPP)`` — at most TWO through-thickness stations, whatever
+    ``nb_integr`` says. (The STRS_F branches at :2207/:2274/:3348/:3417 use the
+    full ``DO N=1,NIP``; only the STRA_F pair is capped.) The two survivors are
+    reconstructed into membrane + one curvature with ``AA = HALF*THKE`` and
+    ``kappa = (E2-E1)/(AA*(T2-T1))`` (cstraini4.F:120,153-158), so passing the
+    two EXTREME stations through with their own T values is exact for a linear
+    through-thickness field and the best possible fit otherwise.
+
+    ``T1 == T2`` is starter ERROR 1904 ("SAME PARAMETRIC POSITION Z= ... WITH
+    DIFFERENT IP"), so a single station — or a record whose T column is all
+    zeros — is written at T = -1 and +1 with the SAME values: a pure membrane
+    state with zero curvature, which is exactly what "one strain value for the
+    whole thickness" means. ``forced_t`` reports that substitution.
+    """
+    if not layers:
+        return (None, None, False, 0)
+    ordered = sorted(layers, key=lambda p: p[0])
+    bot, top = ordered[0], ordered[-1]
+    dropped = max(0, len(ordered) - 2)
+    if len(ordered) == 1 or _f(bot[0]) == _f(top[0]):
+        # Same printed T on both ends: a one-station record, or a deck that
+        # left the T column blank. Keep the FIRST and LAST record as read
+        # (LS-DYNA's two-card form is inner then outer) at T = -1 / +1.
+        bot, top = layers[0], layers[-1]
+        return ((-1.0,) + tuple(bot[1:]), (1.0,) + tuple(top[1:]), True, dropped)
+    return (bot, top, False, dropped)
+
+
+def _make_inistra(state: ConversionState) -> List[str]:
+    """*INITIAL_STRAIN_SHELL[_SET] → /INISHE/STRA_F/GLOB (4-node /SHELL) and
+    /INISH3/STRA_F/GLOB (/SH3N).
+
+    Card layout, hm_cfg_files inishe_stra_f_glob_sub.cfg FORMAT(radioss2021)
+    (byte-identical to the radioss2024 block, so nothing is version-gated at
+    the /BEGIN 2022 this converter writes)::
+
+        # shell_ID nb_integr       npg               Thick
+        CARD("%10d%10d%10d%20lg")
+        nb_integr2 = (nb_integr>0 ? nb_integr : 2) * (npg>0 ? npg : 1) records:
+        CARD("%20lg%20lg%20lg",      eps_XX, eps_YY, eps_ZZ)
+        CARD("%20lg%20lg%20lg%20lg", eps_XY, eps_YZ, eps_ZX, T)
+
+    Choices, each measured on this build:
+
+    * ``npg = 1`` unconditionally — see ``_STRA_F_NPG``.
+    * ``nb_integr = 2``, the two extreme through-thickness stations. The
+      starter keeps only ``MIN(2,NPP)`` of them anyway
+      (hm_read_inistate_d00.F:2528) and the MSGID-26 layer-count cross-check
+      that guards the STRS_F variants does NOT fire here: with only STRA_F
+      present ``ITHKSHEL=2`` and ``ISIGSH=0``, so both branches of
+      csigini.F:144-163 are skipped (verified: nb_integr=2 against /PROP N=5
+      runs clean and the strain is consumed).
+    * ``Thick = 0`` keeps the property thickness, the same rule ``_make_inishe``
+      uses — and ``Thick`` is what sets ``AA = HALF*THKE`` in the curvature
+      reconstruction, so an invented value would rescale the curvature.
+    * ``eps_XY/YZ/ZX`` are copied 1:1. The Radioss card carries the TENSOR
+      component: ``CG2LEPS`` (scigini4.F:791-834) rotates the full 3x3 tensor
+      into the element frame and outputs ``EPS(3)=TWO*UXY`` etc., i.e. the
+      starter itself doubles them into the engineering shear stored in
+      ``GBUF%STRA`` (measured: eps_XY=0.01 on the card reads back as E12=0.02
+      in /TH/SHEL). LS-DYNA's EPSij is likewise a component of a strain TENSOR
+      "defined in the GLOBAL Cartesian system" (Vol I R17 p.3121), which is why
+      dyna2rad copies it unscaled too — the writer states the assumption in a
+      warning whenever a shear component is non-zero.
+    """
+    if not state.ini_strain_shells:
+        return []
+    shells = {e.eid: e for e in state.shell_elems}
+    _quad_ids, tri_ids = _split_shell_eids_by_topology(
+        state, [e.eid for e in state.shell_elems])
+    tri_set = set(tri_ids)
+
+    quad_entries: List[Tuple[int, Tuple, Tuple]] = []
+    tri_entries: List[Tuple[int, Tuple, Tuple]] = []
+    missing: List[int] = []
+    local_skipped: List[int] = []
+    missing_sets: List[int] = []
+    forced_t: List[int] = []
+    layers_dropped: List[int] = []
+    shear_carried = False
+    nip_clash: List[int] = []
+    stress_eids = {iss.eid for iss in state.ini_stress_shells}
+
+    for rec in state.ini_strain_shells:
+        if rec.ilocal == 1:
+            local_skipped.append(rec.eid)
+            continue
+        if rec.is_set:
+            entry = state.shell_sets.get(rec.eid)
+            if entry is None:
+                missing_sets.append(rec.eid)
+                continue
+            targets = list(entry[1])
+        else:
+            targets = [rec.eid]
+        bot, top, forced, dropped = _stra_f_stations(rec.layers)
+        if bot is None:
+            missing.append(rec.eid)
+            continue
+        if any(abs(v) > 0.0 for v in (bot[4], bot[5], bot[6],
+                                      top[4], top[5], top[6])):
+            shear_carried = True
+        for eid in targets:
+            if eid not in shells:
+                missing.append(eid)
+                continue
+            if forced:
+                forced_t.append(eid)
+            if dropped:
+                layers_dropped.append(eid)
+            if eid in stress_eids:
+                sec = _shell_sec_for_part(state, shells[eid].pid)
+                if sec is not None and max(2, sec.nip) != 2:
+                    nip_clash.append(eid)
+            (tri_entries if eid in tri_set else quad_entries).append(
+                (eid, bot, top))
+
+    if missing:
+        state.warn("*INITIAL_STRAIN_SHELL: element(s) "
+                   f"{_fmt_eid_list(missing)} are not 4-node /SHELL or /SH3N "
+                   "elements of the converted mesh (no such id, or the id "
+                   "names a solid/beam) — their initial strains were skipped.")
+    if missing_sets:
+        state.warn("*INITIAL_STRAIN_SHELL_SET: shell set(s) "
+                   f"{_fmt_eid_list(missing_sets)} not found — their initial "
+                   "strains were skipped.")
+    if local_skipped:
+        state.warn(
+            "*INITIAL_STRAIN_SHELL ILOCAL=1 on element(s) "
+            f"{_fmt_eid_list(local_skipped)}: DROPPED, not converted. LS-DYNA "
+            "itself documents this value as 'local (not supported)' (Vol I R17 "
+            "p.3121), so the components' frame is undefined on the source side; "
+            "and the Radioss local card /INISHE/STRA_F is not the local twin of "
+            "/INISHE/STRA_F/GLOB but a DIFFERENT quantity — membrane strains "
+            "plus curvatures (eps_1 eps_2 eps_12 eps_23 eps_31 / k1 k2 k12), "
+            "one group per npg, with no eps_ZZ and no T "
+            "(radioss110/TABLE/inishe_stra_f_sub.cfg). Writing element-local "
+            "components into the GLOB card would ask the starter to rotate an "
+            "already-local tensor (CG2LEPS). Set ILOCAL=0 (global) and re-run "
+            "to keep these strains.")
+    if forced_t:
+        state.warn("*INITIAL_STRAIN_SHELL: element(s) "
+                   f"{_fmt_eid_list(forced_t)} state one through-thickness "
+                   "station (or leave the T column blank), so the two /INISHE "
+                   "records were written at T=-1 and T=+1 with identical "
+                   "values — a pure membrane state, zero curvature. Two "
+                   "records at the SAME T is starter ERROR 1904.")
+    if layers_dropped:
+        state.warn("*INITIAL_STRAIN_SHELL: NTHICK>2 on element(s) "
+                   f"{_fmt_eid_list(layers_dropped)} — only the two EXTREME "
+                   "through-thickness stations were written. The starter reads "
+                   "at most two anyway (hm_read_inistate_d00.F:2528 "
+                   "'DO N=1,MIN(2,NPP)') and reconstructs membrane + one "
+                   "curvature from them, so any non-linear part of the "
+                   "through-thickness profile is lost in Radioss regardless.")
+    if nip_clash:
+        state.warn("*INITIAL_STRAIN_SHELL: element(s) "
+                   f"{_fmt_eid_list(nip_clash)} carry BOTH an initial strain "
+                   "and an *INITIAL_STRESS_SHELL record while their "
+                   "/PROP/SHELL N is not 2. Both readers write SIGSH(2) "
+                   "(hm_read_inistate_d00.F:2489), so whichever block the "
+                   "starter reads last decides the layer count csigini.F:144 "
+                   "cross-checks against N — with ISIGSH/=0 a mismatch is "
+                   "ERROR 26. Set *SECTION_SHELL NIP=2 on those parts, or drop "
+                   "one of the two initial-state blocks.")
+    if shear_carried:
+        state.warn(
+            "*INITIAL_STRAIN_SHELL: EPSxy/EPSyz/EPSzx were copied 1:1 into "
+            "eps_XY/eps_YZ/eps_ZX, i.e. both sides are read as TENSOR shear "
+            "components. The Radioss side is measured: CG2LEPS "
+            "(scigini4.F:809,826-828) outputs 'EPS(3)=TWO*UXY', so the starter "
+            "doubles the card value into the engineering shear held in "
+            "GBUF%STRA (eps_XY=0.01 reads back as /TH/SHEL E12=0.02). LS-DYNA "
+            "documents EPSij only as 'the ij strain component ... in the "
+            "GLOBAL Cartesian system' (Vol I R17 p.3121) and dyna2rad copies "
+            "it unscaled as well. If your source deck holds ENGINEERING shears "
+            "(gamma = 2*epsilon), halve them before converting.")
+
+    if not quad_entries and not tri_entries:
+        return []
+
+    def _records(entries: List[Tuple[int, Tuple, Tuple]], keyword: str) -> List[str]:
+        out = [keyword]
+        for eid, bot, top in entries:
+            out += [
+                "# shell_ID nb_integr       npg               Thick",
+                f"{_i(eid)}{_i(2)}{_i(_STRA_F_NPG)}{_f(0.0)}",
+            ]
+            for st in (bot, top):
+                t, exx, eyy, ezz, exy, eyz, ezx = st
+                out += [
+                    "#             eps_XX              eps_YY              eps_ZZ",
+                    f"{_f(exx)}{_f(eyy)}{_f(ezz)}",
+                    "#             eps_XY              eps_YZ              eps_ZX                   T",
+                    f"{_f(exy)}{_f(eyz)}{_f(ezx)}{_f(t)}",
+                ]
+        out.append(HDR)
+        return out
+
+    lines = ["#-  INITIAL STATE (*INITIAL_STRAIN_SHELL):", HDR]
+    if quad_entries:
+        lines += _records(quad_entries, "/INISHE/STRA_F/GLOB")
+    if tri_entries:
+        lines += _records(tri_entries, "/INISH3/STRA_F/GLOB")
+    return lines
+
+
 def _make_initial_stresses(state: ConversionState) -> List[str]:
-    return _make_inishe(state) + _make_inibri(state)
+    return _make_inishe(state) + _make_inibri(state) + _make_inistra(state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

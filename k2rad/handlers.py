@@ -80,6 +80,7 @@ from .state import (
     DbD3Plot, DbHistory, DbExtentBinary, DbNodalForceGroup,
     GravityLoadPart, MatAddFatigue, DbFreqBinary,
     InitialStressShell, InitialStressSolid, CrossSection,
+    InitialStrainShell, InitialStressSection, InitialAxialForceBeam,
     SeatbeltElem, SectionSeatbelt, MatSeatbelt, SeatbeltSlipring,
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
@@ -7176,6 +7177,210 @@ def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
                    f"{n_thermal_dropped} element(s) has no /INIBRI slot — dropped.")
 
 
+# ── *INITIAL_STRAIN_SHELL[_SET] ──────────────────────────────────────────────
+#
+# ONE record walker, shared by the handler below and by the
+# *INCLUDE_TRANSFORM offsetter (assembly._off_initial_strain_shell). The two
+# walks must agree on which raw row is a card 1 or the offsetter desyncs and
+# rewrites a STRAIN COMPONENT as an element id (#116 / #119).
+
+def initial_strain_shell_records(raw: List[str], is_set: bool):
+    """Yield ``(card1_idx, fields, point_card_indices)`` per element record.
+
+    Card 1 — Keyword971_R13.0/TABLE/initial_strain_shell_subobj.cfg:110::
+
+        COMMENT("$      EID    NPLANE    NTHICK     LARGE                                  ILOCAL");
+        CARD("%10d%10d%10d%10d%10s%10s%10s%10d", eid, ngaussianpoints,
+             nintegrationpoints, large, _BLANK_, _BLANK_, _BLANK_, ilocal);
+
+    so LARGE is cell 4 (index 3) and ILOCAL cell 8 (index 7, cols 71-80) —
+    NOT the *INITIAL_STRESS_SHELL positions (LARGE index 5, ILOC index 8),
+    and there are no NHISV/NTENSR/thermal cards on this keyword at all.
+
+    Strain-card count (cfg :113-121)::
+
+        if(nintegrationpoints>0 && ngaussianpoints>0)  tot = NPLANE*NTHICK
+        else                                           tot = 1*2
+
+    with the ``_SET`` spelling forced to the 2-card inner/outer form: Vol I R17
+    p.3120 states NPLANE/NTHICK are "not read when the SET option is used" and
+    "When NPLANE and NTHICK are not defined **or when the SET option is
+    used**, define two cards below, one for the inner integration point and
+    the other for the outer".
+
+    Each strain record is one card of 7x10 (``EPSxx EPSyy EPSzz EPSxy EPSyz
+    EPSzx T``) when LARGE=0, or two cards of 5x16 + 2x16 when LARGE=1.
+
+    RAW CONTIGUITY (#119): strain cards are claimed by ROW INDEX from the
+    card-1 row. An all-blank strain card is legal LS-DYNA (every component
+    defaults to 0.0); a "next non-blank row" walk would step over it and eat
+    the following element's card 1.
+    """
+    i = 0
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            i += 1
+            continue
+        nplane = to_int(f[1]) if len(f) > 1 else 0
+        nthick = to_int(f[2]) if len(f) > 2 else 0
+        large = to_int(f[3]) if len(f) > 3 else 0
+        ilocal = to_int(f[7]) if len(f) > 7 else 0
+        npts = (nplane * nthick) if (nplane > 0 and nthick > 0) else 2
+        if is_set:
+            npts = 2
+        rows_per_pt = 2 if large else 1
+        card1 = i
+        i += 1
+        pt_rows: List[int] = []
+        for _ in range(npts):
+            if i >= n:
+                break
+            pt_rows.append(i)
+            i += rows_per_pt
+        yield (card1, (eid, nplane, nthick, large, ilocal, npts), pt_rows)
+
+
+def handle_initial_strain_shell(block: Block, state: ConversionState) -> None:
+    """*INITIAL_STRAIN_SHELL[_SET] → /INISHE/STRA_F/GLOB + /INISH3/STRA_F/GLOB.
+
+    The strains are a GLOBAL cartesian tensor "used for post-processing only"
+    in LS-DYNA (Vol I R17 p.3119); in Radioss they land in ``GBUF%STRA``
+    (csigini.F:165-215), which feeds the /TH E1..K12 channels AND the
+    total-strain failure models — measured: a /FAIL/TENSSTRAIN shell with an
+    initialised eps_XX above its threshold is deleted at cycle 1.
+    """
+    is_set = block.keyword.endswith("_SET")
+    n_plane_avg = 0
+    set_dims_ignored = False
+    truncated: List[int] = []
+    for _c1, (eid, nplane, nthick, large, ilocal, npts), pt_rows in \
+            initial_strain_shell_records(block.raw, is_set):
+        if len(pt_rows) < npts:
+            truncated.append(eid)
+            break
+        pts: List[Tuple[float, ...]] = []
+        for r in pt_rows:
+            if large:
+                exx, eyy, ezz, exy, eyz = _fixed_float_card(block.raw, r, 5, 16)
+                ezx, t = (_fixed_float_card(block.raw, r + 1, 2, 16)
+                          if r + 1 < len(block.raw) else [0.0, 0.0])
+            else:
+                exx, eyy, ezz, exy, eyz, ezx, t = \
+                    _fixed_float_card(block.raw, r, 7, 10)
+            pts.append((t, exx, eyy, ezz, exy, eyz, ezx))
+        # NPLANE in-plane points collapse to one value per through-thickness
+        # station. Points of one station share their T, so group by T (robust
+        # to either loop order) and fall back to consecutive-NPLANE chunking
+        # when the distinct-T count does not match NTHICK (an all-zero T
+        # column). Same rule as handle_initial_stress_shell.
+        eff_plane = nplane if (nplane > 0 and nthick > 0 and not is_set) else 1
+        eff_thick = nthick if (nplane > 0 and nthick > 0 and not is_set) else 2
+        if eff_plane > 1 and len(pts) == eff_plane * eff_thick:
+            n_plane_avg += 1
+            order: List[float] = []
+            groups: dict = {}
+            for p in pts:
+                groups.setdefault(p[0], []).append(p)
+                if len(groups[p[0]]) == 1:
+                    order.append(p[0])
+            if len(order) == eff_thick:
+                layers = [_avg_tuples(groups[t]) for t in order]
+            else:
+                layers = [_avg_tuples(pts[k * eff_plane:(k + 1) * eff_plane])
+                          for k in range(eff_thick)]
+        else:
+            layers = pts
+        if is_set and (nplane or nthick):
+            set_dims_ignored = True
+        state.ini_strain_shells.append(InitialStrainShell(
+            eid=eid, nplane=nplane, nthick=nthick, ilocal=ilocal,
+            is_set=is_set, layers=layers))
+    if truncated:
+        state.warn(f"*{block.keyword}: the block ends before all strain cards "
+                   f"of record {truncated[0]} — that record and any after it "
+                   "were skipped.")
+    if n_plane_avg:
+        state.warn(f"*{block.keyword}: NPLANE>1 in-plane integration points on "
+                   f"{n_plane_avg} element(s) were AVERAGED per through-"
+                   "thickness station. /INISHE/STRA_F/GLOB is written with "
+                   "npg=1 (one value per station) — see the writer's note on "
+                   "why npg=4 is not used.")
+    if set_dims_ignored:
+        state.warn("*INITIAL_STRAIN_SHELL_SET: NPLANE/NTHICK are IGNORED for "
+                   "the _SET spelling (Vol I R17 p.3120, 'not read when the "
+                   "SET option is used') — exactly two strain cards were read "
+                   "per record, inner then outer, whatever those two columns "
+                   "say.")
+
+
+def handle_initial_stress_section(block: Block, state: ConversionState) -> None:
+    """*INITIAL_STRESS_SECTION[_TITLE] → /PRELOAD (bolt pre-tension).
+
+    Card — Keyword971_R14.1/TABLE/initial_stress_section.cfg:111-112::
+
+        COMMENT("$    ISSID      CSID      LCID      PSID       VID   IZSHEAR    ISTIFF");
+        CARD("%10d%10d%10d%10d%10d%10d%10d", _ID_, csid, lcid, psid, vid,
+             izshear, SCALAR_OR_OBJECT(opt_istiff_funct, istiff, istiff_funct));
+
+    ISSID is the card's FIRST CELL, not an ``_ID`` header card, so the only
+    header this keyword can carry is the ``_TITLE`` option's 80-char title
+    line (cfg :106-109) — ``_title_offset``, never ``_has_id``.
+    """
+    raw = block.raw
+    off = _title_offset(block)
+    f = _card(raw, off, fixed=True, n=7, w=10)
+    if not f or all(not x.strip() for x in f):
+        state.warn("*INITIAL_STRESS_SECTION: missing data card — skipped.")
+        return
+
+    def g(k: int) -> int:
+        return to_int(f[k]) if len(f) > k and f[k].strip() else 0
+
+    state.ini_stress_sections.append(InitialStressSection(
+        issid=g(0), title=_read_title(block, ""), csid=g(1), lcid=g(2),
+        psid=g(3), vid=g(4), izshear=g(5), istiff=g(6)))
+
+
+def handle_initial_axial_force_beam(block: Block, state: ConversionState) -> None:
+    """*INITIAL_AXIAL_FORCE_BEAM → /PRELOAD/AXIAL (1D bolt pre-tension).
+
+    Card — Keyword971_R9.3/LOADCOL/initial_axial_force_beam.cfg:83-84::
+
+        COMMENT("$     BSID      LCID     SCALE     KBEND");
+        CARD("%10d%10d%10lg%10d", LSD_SID, LSD_LCID, LSD_AXIAL_SCALE, LSD_KBEND);
+
+    The R6.1 format is the same card without KBEND, and neither format block
+    declares a ``_TITLE`` or ``_ID`` option (both ``HEADER`` lines are the bare
+    keyword), so there is no header card to skip.
+
+    SCALE is dimensionless and defaults to 1.0 (cfg DEFAULTS). A literal 0.0 is
+    also taken as 1.0: ``hm_read_preload_axial.F90:257`` does
+    ``if (loadval==zero) loadval = one``, so writing the 0 through would only
+    hide what the starter is going to do anyway.
+    """
+    raw = block.raw
+    off = _title_offset(block)
+    for i in range(off, len(raw)):
+        if not raw[i].strip():
+            continue
+        f = _card(raw, i, fixed=True, n=4, w=10)
+        bsid = to_int(f[0]) if f else 0
+        if bsid <= 0:
+            continue
+        scale = _ffield(f, 2, 1.0) or 1.0
+        state.ini_axial_force_beams.append(InitialAxialForceBeam(
+            bsid=bsid,
+            lcid=to_int(f[1]) if len(f) > 1 else 0,
+            scale=scale,
+            kbend=to_int(f[3]) if len(f) > 3 else 0))
+
+
 def _id_heading_card(line: str) -> Tuple[int, str]:
     """Parse a *DATABASE_..._ID header card: fixed '%10d%-70s' (the heading
     starts at column 11 and may glue onto the id), with a free-format
@@ -13827,9 +14032,6 @@ HANDLERS = {
     "DATABASE_FREQUENCY_BINARY_D3PSD":        handle_database_frequency_binary_d3psd,
     "DATABASE_FREQUENCY_BINARY_D3RMS":        handle_database_frequency_binary_d3rms,
     "DATABASE_FREQUENCY_BINARY_D3FTG":        handle_database_frequency_binary_d3ftg,
-    # INITIAL_STRESS_SECTION prescribes a section FORCE (a different beast from
-    # the per-IP stress fields below) — kept warn+skipped.
-    "INITIAL_STRESS_SECTION":                 handle_skip,
     "INITIAL_STRESS_SHELL":                   handle_initial_stress_shell,
     "INITIAL_STRESS_SOLID":                   handle_initial_stress_solid,
     "LOAD_GRAVITY_PART":                      handle_load_gravity_part,
@@ -14107,6 +14309,24 @@ for _base in ("MAT_COHESIVE_MIXED_MODE_ELASTOPLASTIC_RATE", "MAT_240"):
                  "_FUNCTIONS_3MODES"):
         HANDLERS[f"{_base}{_opt}"] = handle_mat_cohesive_mm_epr
 del _base, _opt
+
+#: The PRELOAD / INITIAL-STATE batch, as ONE source for HANDLERS and for
+#: assembly._OFFSET_SPECS (#116: a spelling readable by the handler and
+#: invisible to the *INCLUDE_TRANSFORM offsetter keeps its original ids while
+#: the rest of the include moves — a dangling CSID/LCID/BSID at 0 diagnostics).
+#: Trailing ``_TITLE`` is NOT listed: parser._split_keyword moves it into
+#: block.options, where _title_offset finds it. ``_SET`` is a real base
+#: keyword (its EID cell is a *SET_SHELL id, i.e. a different offset bucket),
+#: so it is listed in full.
+INITIAL_STATE_PRELOAD_KEYWORDS = {
+    "INITIAL_STRESS_SECTION":   handle_initial_stress_section,
+    "INITIAL_AXIAL_FORCE_BEAM": handle_initial_axial_force_beam,
+    "INITIAL_STRAIN_SHELL":     handle_initial_strain_shell,
+    "INITIAL_STRAIN_SHELL_SET": handle_initial_strain_shell,
+}
+for _kw, _h in INITIAL_STATE_PRELOAD_KEYWORDS.items():
+    HANDLERS[_kw] = _h
+del _kw, _h
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N}, N = 1..16 (definehexspotweld.cfg
 # APPEND_OPTIONS + CHECK idsmax<17). The bare keyword free-reads the list.

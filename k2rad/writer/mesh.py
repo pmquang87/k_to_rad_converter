@@ -2173,6 +2173,34 @@ def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
     ]
 
 
+def _shell_istrain_flag(state: ConversionState) -> int:
+    """The ``Istrain`` cell of /PROP/SHELL card 3 (cols 11-20, FORMAT
+    radioss2020 — the block /BEGIN 2022 selects).
+
+    Two independent reasons to switch it on:
+
+    * ``*DATABASE_EXTENT_BINARY`` STRFLG>0 asks for strain-tensor output, and
+      OpenRadioss only computes/stores element strains when Istrain/=0 — with
+      Istrain=0 the /ANIM/.../TENS/STRAIN channels come out empty.
+    * ``*INITIAL_STRAIN_SHELL`` needs it to be READ AT ALL. ``csigini.F:165``
+      gates the whole initial-strain ingest on
+      ``IF (ISTRAIN /= 0 .AND. ITHKSHEL == 2)``, so a /INISHE/STRA_F/GLOB block
+      under a /PROP/SHELL with Istrain=0 is accepted, echoed and completely
+      inert. LS-DYNA's own manual requires STRFLG=1 alongside
+      *INITIAL_STRAIN_SHELL (Vol I R17 p.3119), so a well-formed source deck
+      already sets it — this OR makes a deck that forgot it work anyway
+      instead of silently losing the strains.
+
+    Istrain=1 costs a per-element strain buffer and changes no physics on its
+    own, so switching it on is inert for everything except the two consumers
+    above.
+    """
+    ext = state.db_extent_binary
+    if ext and ext.strflg > 0:
+        return 1
+    return 1 if state.ini_strain_shells else 0
+
+
 def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
                      istrain: int, thick: float,
                      hcoef: Optional[float] = None) -> List[str]:
@@ -2212,8 +2240,7 @@ def _make_properties(state: ConversionState) -> List[str]:
     # out empty. So enable Istrain whenever the deck asks for strain output.
     # (The plastic-strain channels /ANIM/ELEM/EPSP + /ANIM/SHELL/EPSP are always
     # emitted in the engine, see _make_engine_output.)
-    ext = state.db_extent_binary
-    istrain = 1 if (ext and ext.strflg > 0) else 0
+    istrain = _shell_istrain_flag(state)
 
     missing_shells = set()
     missing_solids = set()

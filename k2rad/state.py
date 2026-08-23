@@ -2309,6 +2309,73 @@ class InitialStressShell:
 
 
 @dataclass
+class InitialStrainShell:
+    """*INITIAL_STRAIN_SHELL[_SET] (one record) → /INISHE|/INISH3 /STRA_F/GLOB.
+
+    ``layers`` holds one tuple per through-thickness station,
+    (t, exx, eyy, ezz, exy, eyz, ezx) — ``t`` is the parametric thickness
+    coordinate in [-1, +1] (Vol I R17 p.3121; the Radioss card CHECKs the same
+    range) and the six components are the GLOBAL cartesian strain TENSOR
+    (LS-DYNA states no local option: ILOCAL=1 is documented "local (not
+    supported)"). The handler has already averaged the NPLANE in-plane points
+    per layer; the writer reduces the stations to the bottom+top pair the
+    starter actually stores (hm_read_inistate_d00.F:2528 ``DO N=1,MIN(2,NPP)``).
+
+    ``eid`` is a shell element id, or — when ``is_set`` — a ``*SET_SHELL`` id
+    the writer expands. LS-DYNA reads neither NPLANE nor NTHICK for the _SET
+    spelling (Vol I R17 p.3120: "not read when the SET option is used" /
+    "When ... the SET option is used, define two cards below"), so ``nplane``
+    and ``nthick`` are kept only to report that they were ignored.
+    """
+    eid: int
+    nplane: int
+    nthick: int
+    ilocal: int
+    is_set: bool = False
+    layers: List[Tuple[float, float, float, float, float, float, float]] \
+        = field(default_factory=list)
+
+
+@dataclass
+class InitialStressSection:
+    """*INITIAL_STRESS_SECTION[_TITLE] → /PRELOAD (bolt pre-tension on solids).
+
+    ``csid`` names a *DATABASE_CROSS_SECTION_*; ``lcid`` a *DEFINE_CURVE whose
+    ORDINATE is the preload STRESS versus time; ``psid`` an extra *SET_PART
+    restriction intersected with the cross-section's own PSID (Vol I R17
+    p.3144: "Stress is initialized on only those parts included in both");
+    ``vid`` a *DEFINE_VECTOR overriding the cutting-plane normal (mandatory in
+    LS-DYNA for the _SET cross-section spelling). ``izshear`` and ``istiff``
+    have no /PRELOAD slot at any Radioss version — the writer names them.
+    """
+    issid: int
+    title: str
+    csid: int
+    lcid: int
+    psid: int = 0
+    vid: int = 0
+    izshear: int = 0
+    istiff: int = 0
+
+
+@dataclass
+class InitialAxialForceBeam:
+    """*INITIAL_AXIAL_FORCE_BEAM → /PRELOAD/AXIAL (bolt pre-tension on 1D).
+
+    ``bsid`` is a *SET_BEAM, ``lcid`` the preload-FORCE versus time curve and
+    ``scale`` its Y scale factor (LS-DYNA default 1.0) — which is exactly what
+    Radioss's ``Preload`` is (hm_read_preload_axial.F90:255-259 +
+    engine preload_axial.F90:33 ``f1 = stf_f*f1 + y_scal*preload1``).
+    ``kbend`` (bending-stiffness flag) has no /PRELOAD/AXIAL slot.
+    """
+    bsid: int
+    lcid: int
+    scale: float = 1.0
+    kbend: int = 0
+    title: str = ""
+
+
+@dataclass
 class InitialStressSolid:
     """*INITIAL_STRESS_SOLID (one element's record) → /INIBRI/STRS_FGLO.
 
@@ -6781,6 +6848,22 @@ class ConversionState:
     ini_stress_shells: List[InitialStressShell] = field(default_factory=list)
     # *INITIAL_STRESS_SOLID → /INIBRI/STRS_FGLO
     ini_stress_solids: List[InitialStressSolid] = field(default_factory=list)
+    # *INITIAL_STRAIN_SHELL[_SET] → /INISHE|/INISH3 /STRA_F/GLOB
+    ini_strain_shells: List[InitialStrainShell] = field(default_factory=list)
+    # *INITIAL_STRESS_SECTION[_TITLE] → /PRELOAD (+ a dedicated /SECT)
+    ini_stress_sections: List[InitialStressSection] = field(default_factory=list)
+    # *INITIAL_AXIAL_FORCE_BEAM → /PRELOAD/AXIAL
+    ini_axial_force_beams: List[InitialAxialForceBeam] = field(default_factory=list)
+    # /SPRING element ids whose emitted /PROP satisfies the /PRELOAD/AXIAL
+    # PROPERTY gate. rinit3.F:1627-1690 accepts a spring only for
+    # ``CASE(4,13)`` with a non-zero axial fct_ID1 AND a hardening flag H in
+    # 1..7 (else ERROR 3057 "LINEAR SPRING (fct_ID11=0) OR H1 (HARDENING)=0 IS
+    # NOT COMPATIBLE WITH /PRELOAD/AXIAL") or ``CASE(23)`` with MTN==113
+    # (else ERROR 3053 "SPRING PROPERTY TYPE %d IS NOT COMPATIBLE"). Both are
+    # hard stops, so the /PRELOAD/AXIAL writer emits only for ids recorded
+    # here — filled AT the line that writes the qualifying /SPRING, the same
+    # discipline as spring_elem_ids.
+    spring_axial_preloadable: Set[int] = field(default_factory=set)
     # *DATABASE_CROSS_SECTION_PLANE/_SET → /SECT
     cross_sections: List[CrossSection] = field(default_factory=list)
     # (sect_id, title) of each emitted /SECT — set by the writer's
