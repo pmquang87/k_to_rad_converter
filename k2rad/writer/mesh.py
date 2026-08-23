@@ -2173,6 +2173,45 @@ def _emit_prop_solid(prop_id: int, title: str, isolid: int, iale: int,
     ]
 
 
+def _shell_istrain_flag(state: ConversionState) -> int:
+    """The ``Istrain`` cell of /PROP/SHELL card 3 (cols 11-20, FORMAT
+    radioss2020 — the block /BEGIN 2022 selects).
+
+    Two independent reasons to switch it on:
+
+    * ``*DATABASE_EXTENT_BINARY`` STRFLG>0 asks for strain-tensor output, and
+      OpenRadioss only computes/stores element strains when Istrain/=0 — with
+      Istrain=0 the /ANIM/.../TENS/STRAIN channels come out empty.
+    * ``*INITIAL_STRAIN_SHELL`` wants a correctly SIZED strain buffer.
+      ``elbuf_ini.F:1584`` allocates ``GBUF%G_STRA = 8`` only for
+      ``ISTRA > 0 .OR. IFAIL > 0 .OR. ISMSTR == 11 .OR. ...``, and the
+      /PROP/SHELL property tag leaves ``PTAG%G_STRA`` at 0 (only the truss prop
+      sets it) — yet ``cbainit3.F:549`` calls the ingest whenever
+      ``ITHKSHEL == 2 .AND. G_STRPG > G_STRA``, and ``cstraini4.F`` writes its
+      membrane average into that buffer. LS-DYNA's own manual requires
+      STRFLG=1 alongside *INITIAL_STRAIN_SHELL (Vol I R17 p.3119), so a
+      well-formed source deck already sets it; this OR covers one that forgot.
+
+      Honest scope of the claim: this is defence-in-depth, NOT a measured
+      necessity. Twin decks on this build — the branch's own emitted starter
+      with Istrain hand-set back to 0, Ishell 12 / 24 / 1, with and without a
+      /FAIL — read the initial strain back IDENTICALLY (/TH/SHEL E1 = 0.01,
+      K1 = 0.02 either way). The gate that DOES test ISTRAIN, csigini.F:165 /
+      scigini4.F:168, is not the path these formulations take: cbainit3.F:549
+      reaches cstraini4.F, which takes ISTRAIN as an argument and never looks
+      at it. So the flag buys a properly sized buffer and the strain output
+      such a user implicitly wants, not a working-versus-inert difference.
+
+    Istrain=1 costs a per-element strain buffer and changes no physics on its
+    own, so switching it on is inert for everything except the two consumers
+    above.
+    """
+    ext = state.db_extent_binary
+    if ext and ext.strflg > 0:
+        return 1
+    return 1 if state.ini_strain_shells else 0
+
+
 def _emit_prop_shell(prop_id: int, title: str, ishell: int, nip: int,
                      istrain: int, thick: float,
                      hcoef: Optional[float] = None) -> List[str]:
@@ -2212,8 +2251,7 @@ def _make_properties(state: ConversionState) -> List[str]:
     # out empty. So enable Istrain whenever the deck asks for strain output.
     # (The plastic-strain channels /ANIM/ELEM/EPSP + /ANIM/SHELL/EPSP are always
     # emitted in the engine, see _make_engine_output.)
-    ext = state.db_extent_binary
-    istrain = 1 if (ext and ext.strflg > 0) else 0
+    istrain = _shell_istrain_flag(state)
 
     missing_shells = set()
     missing_solids = set()
@@ -2525,6 +2563,12 @@ def _make_properties(state: ConversionState) -> List[str]:
         # 17 is touched.
         if sec.secid in law115_secids and isolid == 17:
             isolid = 24
+        if sec.secid in ismstr10_secids:
+            # Recorded at the write line for the /PRELOAD writer: a preloaded
+            # element group at Ismstr 10/11/12 is downgraded to 4/1/2 by
+            # sgrtails.F:1387-1412 (WARNING 1775), i.e. the total-strain
+            # formulation these parts were given is taken away again.
+            state.ismstr10_solid_secids.add(sec.secid)
         lines += _emit_prop_solid(sec.secid, sec.title or f"PROP_{sec.secid}",
                                   isolid, sec.iale, itetra10, istrain, hcoef=h,
                                   ismstr=10 if sec.secid in ismstr10_secids
@@ -3342,6 +3386,8 @@ def _emit_hourglass_props(state: ConversionState, istrain: int) -> List[str]:
                     "the default. Give the /XREF or LAW95 parts their own "
                     "*SECTION_SOLID or *HOURGLASS to keep the others "
                     "unchanged.")
+            if ismstr == 10:
+                state.ismstr10_solid_pids.update(siblings)   # see above
             lines += _emit_prop_solid(prop_id, title, isolid, iale, itetra10,
                                       istrain, hcoef=coeff, ismstr=ismstr)
         elif pid in shell_pids:

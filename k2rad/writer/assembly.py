@@ -125,6 +125,7 @@ from .inistate import (_make_cross_sections, _make_eref,
                        _make_initial_stresses,
                        _make_starter_th_sectio, _make_xref,
                        _resolve_xref_parts)
+from .preload import _make_preload
 from .output import (
     _make_ams,
     _make_analysis_defaults,
@@ -1100,6 +1101,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
+    _warn_duplicate_preload_ids(state, lines)
+    _warn_duplicate_sect_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1406,6 +1409,68 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "*MAT_* cards.")
 
 
+def _warn_duplicate_preload_ids(state: ConversionState,
+                                lines: List[str]) -> None:
+    """``/PRELOAD`` and ``/PRELOAD/AXIAL`` share ONE starter id namespace.
+
+    Both flavours are read from the same option loop: ``hm_read_preload.F:110``
+    walks every ``/PRELOAD`` block and skips the axial ones with
+    ``IF (KEY(1:LEN_TRIM(KEY))=='AXIAL') CYCLE``; ``hm_read_preload_axial.F90``
+    does the mirror image. The solid path keeps the LS-DYNA ISSID verbatim
+    while the 1D path mints ids, so a deck whose ``*INITIAL_STRESS_SECTION``
+    ISSID lands on a minted one would put two bolt preloads under one number.
+
+    Changes no output — the #125 rule: a per-id memo in the writer (there is
+    one, shared across both emitters) PLUS a deck-wide scan of the finished
+    deck, because no single writer sees the whole thing.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        if not ln.startswith("/PRELOAD/"):
+            continue
+        parts = ln.split("/")
+        kind = "/PRELOAD/AXIAL" if parts[2] == "AXIAL" else "/PRELOAD"
+        tok = parts[3] if parts[2] == "AXIAL" else parts[2]
+        if tok.isdigit():
+            seen.setdefault(int(tok), []).append(kind)
+    for pid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"BOLT PRELOAD ID {pid} is emitted by more than one card ("
+                + ", ".join(f"{k}/{pid}" for k in kinds)
+                + "). /PRELOAD and /PRELOAD/AXIAL are one keyword to the "
+                "starter's option loop (hm_read_preload.F:110), so the second "
+                "card is at best ignored and at worst ERROR 79. Renumber the "
+                "*INITIAL_STRESS_SECTION ISSID.")
+
+
+def _warn_duplicate_sect_ids(state: ConversionState,
+                             lines: List[str]) -> None:
+    """Two ``/SECT`` cards on one id.
+
+    ``*DATABASE_CROSS_SECTION_*`` keeps its CSID verbatim while the bolt
+    preload mints a DEDICATED section beside it, so the two producers share a
+    namespace no single writer sees whole. ``hm_read_sect.F`` resolves a
+    section by id, and ``/PRELOAD``'s sect_ID (hm_read_preload.F:267) would
+    silently pick up whichever card the starter read first.
+
+    Changes no output.
+    """
+    seen: Dict[int, int] = {}
+    for ln in lines:
+        if ln.startswith("/SECT/"):
+            tok = ln.split("/")[2]
+            if tok.isdigit():
+                seen[int(tok)] = seen.get(int(tok), 0) + 1
+    for sid, n in sorted(seen.items()):
+        if n > 1:
+            state.warn(
+                f"SECTION ID {sid} is emitted by {n} /SECT cards. The starter "
+                "resolves a section by id, so /TH/SECTIO and any /PRELOAD "
+                "naming it pick up whichever card was read first. Renumber the "
+                "*DATABASE_CROSS_SECTION id.")
+
+
 def _warn_dangling_part_materials(state: ConversionState,
                                   lines: List[str]) -> None:
     """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
@@ -1635,6 +1700,19 @@ def _starter_section_registry():
         ("eref",              lambda c: _make_eref(c.state)),
         ("initial_stresses",  lambda c: _make_initial_stresses(c.state)),
         ("cross_sections",    lambda c: _make_cross_sections(c.state)),
+        # Bolt pre-tension. AFTER cross_sections, which fills state.sect_ids
+        # (the dedicated preload /SECT must dodge those ids) and after every
+        # /BEAM and /SPRING producer above, whose write lines fill
+        # state.beam_elem_ids / spring_elem_ids (the *SET_BEAM of
+        # *INITIAL_AXIAL_FORCE_BEAM is split by what was ACTUALLY emitted).
+        # BEFORE free_node_constraints, so the three synthesized /SECT frame
+        # nodes are in state.nodes when the implicit singularity guard runs —
+        # they carry no element and no stiffness, so a /BCS 111 111 on them is
+        # correct and inert (the starter reads the frame once, at
+        # hm_read_preload.F:203-217, and never again). A no-op drawing no id on
+        # any deck without the two keywords, so it cannot shift an existing
+        # deck's id stream.
+        ("preload",           lambda c: _make_preload(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),
         ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
         ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),

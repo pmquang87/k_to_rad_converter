@@ -2269,14 +2269,129 @@ into the frame; a nonzero `ICID` rotates `VX/VY/VZ` and the vector axis from tha
 local system to global (else warned + global); `STYP` all/part-set/part/node-set
 scoping (`*ELEMENT_DISCRETE` springs included in the part scan; `PHASE`, `IVATN`,
 `IRIGID` warned + dropped; `_GENERATION_START_TIME` skipped)
-`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` (ILOC=0, LS-DYNA's global
-default — lossless incl. σzz, plastic strain and the through-thickness
-position) or the local `/INISHE/STRS_F` for ILOC=1 (σzz/T warned + dropped).
-The layer count must match the part's `/PROP/SHELL` integration points or the
-element is warned + skipped (the starter enforces it); `NPLANE>1` in-plane
-points are averaged per layer with a warning
+`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB`, always: this keyword's card 1
+has exactly eight fields (`EID/SID NPLANE NTHICK NHISV NTENSR LARGE NTHINT
+NTHHSV`, Vol I R17 p.28-95) and its own text pins the frame — "the stresses are
+defined in the GLOBAL cartesian system" (p.28-98) — so the GLOB flavour is
+lossless (σzz, plastic strain and the through-thickness position all carried) and
+the local `/INISHE/STRS_F` card has no LS-DYNA source to come from. There is no
+ILOCAL here (that field belongs to `*INITIAL_STRAIN_SHELL`); a value in cols
+81-90 is past the card's last field, is not read by LS-DYNA, and is reported +
+ignored rather than switched on. The layer count must match the part's
+`/PROP/SHELL` integration points or the element is warned + skipped (the starter
+enforces it); `NPLANE>1` in-plane points are averaged per layer with a warning.
+A record on a **3-node** shell is warned + left OUT of the block entirely: the
+element leaves k2rad as a `/SH3N` and the `/INISHE` reader resolves shell_IDs
+against the 4-node table only, but writing the unresolvable record anyway still
+arms the reader's global `ISIGSH` (`hm_read_inistate_d00.F:2105` runs before the
+id lookup), and an armed `ISIGSH` with no resolvable payload makes
+`scigini4.F:285-287` fabricate a constant force/moment on a neighbouring
+strain-only quad at 0 starter ERRORS (measured `F1 -0.249`, `M1 1.503` on a deck
+stating no stress)
 `*INITIAL_STRESS_SOLID` → `/INIBRI/STRS_FGLO` (NINT 1→8 replicates exactly;
 other counts average with a warning)
+`*INITIAL_STRAIN_SHELL` (+ `_SET`, small and LARGE formats) → `/INISHE/STRA_F/GLOB`
+for 4-node shells and `/INISH3/STRA_F/GLOB` for `/SH3N`, split by topology. The
+card is written in the minimal safe form the starter actually consumes:
+`nb_integr = 2` (the two extreme through-thickness stations — the reader keeps at
+most two, `hm_read_inistate_d00.F:2528`, and rebuilds membrane + one curvature
+from them), `npg = 1` for every shell formulation (`npg=4` on `Ishell=24` QEPH is
+a measured *silent* no-op and on `Ishell=1..4` is starter ERROR 1904; `npg=1` is
+consumed by BT, BATOZ, QEPH and both SH3N formulations alike) and `Thick = 0` so
+the property thickness sets the curvature scale. **A deck that also emits an
+initial-STRESS block takes a different form**, because that block sets the
+starter's `ISIGSH` and un-gates its layer/Gauss cross-checks while the strain
+block sets `ITHKSHEL=2` globally and pulls stress-only elements into the strain
+reconstruction (measured: 4× ERROR 26 + 4× ERROR 1904, ERROR TERMINATION). There
+the card carries `nb_integr` = the property N — the record's two stations
+re-sampled onto N positions spanning `T = -1..+1`, which is exact because the
+reconstruction is affine — and `npg` per formulation (4 on `Ishell=12`, 1 on QEPH
+where the reader fills `NPGI` itself, 1 on `/INISH3`), and every stress-carrying
+quad the strain keyword does not name gets an **all-zero companion record**
+(LS-DYNA's own default made explicit; measured inert on the stress element).
+A deck whose initial-state shells span two formulations is warned + dropped
+instead, because the reader leaves `IHBE` stale on its `npg>1` branch. A single
+station is written at `T = -1` and `T = +1` with identical values (pure membrane —
+two records at the same T is ERROR 1904), and two-or-more stations with a blank T
+column are placed at ±1 with a *separate* warning saying the positions were
+inferred and any difference between the rows became a curvature; `NTHICK > 2`
+keeps the extremes with a warning; `NPLANE > 1` in-plane points are averaged per
+station. `EPSxy/yz/zx` are
+copied 1:1: the Radioss card carries the **tensor** shear and `CG2LEPS`
+(`scigini4.F:826-828`) doubles it into the engineering shear held in `GBUF%STRA`
+(measured: `eps_XY=0.005` reads back as `/TH/SHEL E12=0.01`), so a source deck
+holding engineering shears must halve them — stated in a warning. `ILOCAL=1` is
+warned + dropped (LS-DYNA itself documents it "local (not supported)", and the
+Radioss local `/INISHE/STRA_F` is a different quantity: membrane strains plus
+curvatures, no σzz, no T). `/PROP/SHELL Istrain` is switched on automatically as
+defence-in-depth: it is what sizes `GBUF%STRA` (`elbuf_ini.F:1584`), the buffer
+`cstraini4.F` writes the membrane average into. It is not the on/off switch an
+earlier note claimed — twin decks with `Istrain` forced back to 0 read the strain
+back identically on Ishell 1, 12 and 24, because `cbainit3.F:549` reaches
+`cstraini4.F`, which ignores the flag. An element named by two records (two cards, or a
+card plus a `_SET` containing it) is warned: the starter keeps one strain slot
+per element and the last record read wins silently
+`*INITIAL_STRESS_SECTION[_TITLE]` → `/PRELOAD` (bolt pre-tension, `Itype=2`) on a
+**dedicated** `/SECT` with three synthesized frame nodes built so that
+`(N2-N1)×(N3-N1)` is exactly the cutting-plane normal `XCT→XCH` (or the `VID`
+vector) — `hm_read_preload.F:203-217` takes the pretension direction from that
+cross product alone, and the frame the reporting `/SECT` carries is picked for
+numerical conditioning, not orientation (measured 45° off on a probe bar). The
+reporting section and its `/TH/SECTIO` scope are left untouched. The `PSID` field
+is intersected with the cross-section's own part scope (Vol I R17 p.3144) into a
+separate `/GRBRIC/BRIC`. **The LCID is resolved at conversion time, not passed
+through**: the `Fct_ID` column exists only in `FORMAT(radioss2026)` and at the
+`/BEGIN 2022` this converter writes it is dropped to `IFUNC=0` with WARNING 100214
+(twin decks: byte-identical engine results with and without it), while the Radioss
+function is only a dimensionless *scale* on `Preload`, so dyna2rad's
+`Preload = 0 + Fct_ID` shape is identically zero stress. k2rad writes
+`Preload` = the curve's plateau and `Tstart`/`Tstop` = the LS-DYNA Remark 2 window
+(the curve's end, or its first decrease from the maximum) and warns that the ramp
+shape is lost — the preload then appears as a step at `Tstart`, cushioned by the
+bolt law's reduced modulus (`sboltlaw.F`: E×1e-4 until `Tstart+0.4·ΔT`, full at
+`+0.7·ΔT`, then the reference density is rebased so the preload locks). Warned +
+dropped: `IZSHEAR` (Radioss always prescribes the full `σ·n⊗n`), `ISTIFF` (no
+ghost elements). Warned + refused: a section cutting no solid (ERROR 1251), an
+unknown CSID (ERROR 1243), a degenerate curve window. Warned + left out of the
+preload group: thick shells in the cut (they ride in the solid list so the
+reporting section still sees them, but no thick-shell initialiser calls
+`SBOLTINI`, and LS-DYNA lists solid types only, Vol I R17 p.3145 Remark 4).
+Warned + emitted: a preloaded part whose `/PROP/SOLID` is not `Isolid` 5, 14 or 17
+(1 and 2 hit negative volume at cycle 0, 12 is a silent no-op, 24 diverges),
+6-node PENTAs *spelled with blank cells 7-8 in an element that is emitted as a
+`/BRICK`* — the only combination the starter classifies `ISOLNOD=6`, where it
+either refuses the deck (`ERROR 3107` at any `Isolid` but 24, `initia.F:1081`) or
+never calls `SBOLTINI` (`Isolid 24`: `AREA 0.000E+00`, zero stress, 0 errors).
+The usual LS-DYNA wedge leaves k2rad as a degenerate HEX8 and IS pre-tensioned
+(measured `AREA 1.000E+00`, `SZ = 200.00 MPa` at t=0), and a 4-node tet spelled
+with trailing zeros goes to `/TETRA4`, a card with no cells 7-8 at all, so
+neither is flagged — a preload window that closes after
+`*CONTROL_TERMINATION ENDTIM` (the message says WHERE the run stops: below
+`Tstart+0.4·ΔT` the bolted parts stay at `1e-4·E` throughout, between `0.4·ΔT`
+and `0.7·ΔT` it quotes the fraction of `E` actually reached from
+`sboltlaw.F`'s own ramp), a preloaded part carrying `Ismstr=10` (a
+`/XREF`, `/MAT/LAW95` or `/MAT/LAW90` part — `sgrtails.F:1387-1412` shifts a
+preloaded group 10 -> 4 with WARNING 1775, so the preload takes the
+total-strain formulation away again), and a curve whose peak is zero or
+compressive (starter WARNING 1255)
+`*INITIAL_AXIAL_FORCE_BEAM` → `/PRELOAD/AXIAL` with `Preload = SCALE` (blank → 1.0;
+`preload_axial.F90:33` computes `f1 = SCALE·f(t)`, replacing the element's own
+axial force inside the window). Emitted at `/BEGIN 2022`, where the starter adds
+only the advisory WARNING 100211 "Unsupported option /PRELOAD/AXIAL in format
+< 2024" — twin decks at 2022/2024/2026 gave an identical echo and bit-identical
+engine results — and k2rad restates that advisory. The `BSID` is split by what was
+actually emitted: one `set_id` resolves to exactly one element family (SPRING
+before BEAM before TRUSS, `hm_read_preload_axial.F90:262-292`), so a `*SET_BEAM`
+straddling `/BEAM` and `/SPRING` becomes two cards on a `/GRBEAM/BEAM` and a
+`/GRSPRI/SPRI`. Springs whose emitted property cannot be preloaded are warned +
+dropped rather than emitted into a hard stop (`rinit3.F:1627-1690` wants
+`/PROP/TYPE4|13` with a non-zero axial `fct_ID1` **and** hardening `H` in 1..7,
+else ERROR 3057; anything else is ERROR 3053). The LCID is mandatory (a card
+without one is silently uncounted and produces zero force) and is truncated to its
+leading non-decreasing run — where LS-DYNA stops the initialization, and where
+Radioss releases the element into free elastic response *about* the plateau rather
+than snapping back (measured). `KBEND` is warned + dropped; `Damp` and `sens_id`
+are 0 because LS-DYNA states neither
 
 ### Contact
 `*CONTACT_AUTOMATIC_SINGLE_SURFACE` (+ `_MORTAR`) → `/INTER/TYPE25` self-contact

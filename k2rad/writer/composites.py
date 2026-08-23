@@ -57,6 +57,7 @@ from .mesh import (
     _emit_prop_type9,
     _emit_skew_fix,
     _ortho_skew_axes,
+    _shell_istrain_flag,
 )
 
 __all__ = [
@@ -2121,8 +2122,7 @@ def _emit_composite_props(state: ConversionState,
     if not state.composite_prop_ids:
         return []
     if istrain is None:
-        ext = state.db_extent_binary
-        istrain = 1 if (ext and ext.strflg > 0) else 0
+        istrain = _shell_istrain_flag(state)
     shell_pids = {e.pid for e in state.shell_elems}
     solid_pids = {e.pid for e in state.solid_elems}
     part_secids = {pid: (p.secid if p.secid > 0 else pid)

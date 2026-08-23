@@ -46,8 +46,11 @@ from itertools import permutations as _permutations, product as _product
 from typing import Dict, List, Optional, Set, Tuple
 
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
-                       _AIRBAG_OPTION_STACKS, _SEATBELT_MAT_KEYWORDS,
+                       _AIRBAG_OPTION_STACKS,
+                       INITIAL_STATE_PRELOAD_KEYWORDS,
+                       _SEATBELT_MAT_KEYWORDS,
                        _SEATBELT_SUBKEYWORDS,
+                       initial_strain_shell_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -2745,6 +2748,42 @@ def _off_db_history(bucket: str, local: bool = False):
     return _off
 
 
+def _off_initial_strain_shell_common(b: Block, offsets: Dict[str, int],
+                                     is_set: bool) -> None:
+    """*INITIAL_STRAIN_SHELL[_SET]: offset the EID (or SET id) on every card 1.
+
+    Driven by ``handlers.initial_strain_shell_records`` — the SAME walker the
+    handler parses with (#116), so the two can never disagree about which raw
+    row is a card 1. A flat ``data`` spec cannot be used: the strain cards hold
+    only floats, and ``_rewrite_line`` decides what is an id with
+    ``to_int(tok) > 0``, so a strain of ``0.011`` would read back as the id
+    ``0``… and one of ``1.5`` as the id ``1``, rewritten to ``1 + IDEOFF``.
+    Raw contiguity is what the walker enforces (#119): an all-blank strain card
+    is legal and must not be mistaken for the next record's card 1.
+
+    Bucket: the plain spelling's cell 1 is an ELEMENT id (IDEOFF); the ``_SET``
+    spelling's is a ``*SET_SHELL`` id (IDSOFF) — Vol I R17 p.3120, "shell
+    element set ID when the SET option is used".
+    """
+    raw = b.raw
+    bucket = "s" if is_set else "e"
+    toff = _title_offset(b)
+    body = raw[toff:]
+    for card1, _fields, _pt_rows in initial_strain_shell_records(body, is_set):
+        idx = toff + card1
+        new = _rewrite_line(raw[idx], [(0, bucket)], offsets)
+        if new is not None:
+            raw[idx] = new
+
+
+def _off_initial_strain_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_initial_strain_shell_common(b, offsets, False)
+
+
+def _off_initial_strain_shell_set(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_initial_strain_shell_common(b, offsets, True)
+
+
 def _off_damping_part_mass(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_damping_part_mass_common(b, offsets, "p")
 
@@ -3411,6 +3450,54 @@ for _kw, _ in _rwall_geometric_keywords():
     _OFFSET_SPECS[_kw] = _off_rigidwall_geometric
 del _kw
 
+# The PRELOAD / INITIAL-STATE batch. Keyed off the SAME dict handlers.py
+# registers from, and asserted equal by tests/test_preload_inistate.py, so a
+# spelling cannot be readable and un-offsettable at the same time (#116).
+#
+# Buckets, from Vol I R17 pp.2979-2980 (*INCLUDE_TRANSFORM Card 2b.1):
+#   ISSID   the card's own id, in no named list          -> IDROFF  "r"
+#   CSID    "...and CROSS SECTION ID (see *DATABASE_CROSS_SECTION)" named
+#           under IDPOFF                                  -> IDPOFF  "p"
+#   LCID    "Offset to function ID, table ID, curve ID"   -> IDFOFF  "f"
+#   PSID    *SET_PART / BSID *SET_BEAM                    -> IDSOFF  "s"
+#   VID     "any ID defined through *DEFINE, except the FUNCTION, TABLE and
+#           CURVE options"                                -> IDDOFF  "d"
+#   ISTIFF  a curve id in BOTH spellings (Vol I R17 p.3144): "GT.0: Load curve
+#           ID defining stiffness fraction as a function of time" and "LT.0:
+#           |ISTIFF| is the load curve ID for the stiffness fraction as a
+#           function of time" — the sign selects only whether the preload
+#           stress is auto-adjusted +/-10%, not what the number means. So the
+#           field is a SIGNED curve id like *SECTION_SHELL QR/IRID -> IDFOFF "f"
+#           _rewrite_line touches only v > 0, so the POSITIVE spelling is
+#           offset (correct) and the NEGATIVE one is left as written (which
+#           would be wrong if the cell were emitted). It is deliberately not
+#           routed through _rewrite_neg_ref because the writer DROPS ISTIFF
+#           entirely (no /PRELOAD slot at any Radioss version), so neither
+#           spelling reaches the emitted deck — the value only appears in the
+#           warning that names it, which says for LT.0 that the id is quoted
+#           un-offset.
+#   IZSHEAR / KBEND / SCALE   not ids, absent from the mods lists
+#   EID (*INITIAL_STRAIN_SHELL) element                   -> IDEOFF  "e"
+#   SID (*INITIAL_STRAIN_SHELL_SET) *SET_SHELL            -> IDSOFF  "s"
+#
+# *INITIAL_AXIAL_FORCE_BEAM takes a "data" walk, not a single card: LS-DYNA
+# allows the card to repeat under one keyword and the handler reads every
+# non-blank row, so a {"cards": {0: ...}} spec would offset the first bolt and
+# leave the rest pointing at the parent deck's sets.
+_INITIAL_STATE_PRELOAD_OFFSETS = {
+    "INITIAL_STRESS_SECTION": {
+        "cards": {0: [(0, "r"), (1, "p"), (2, "f"), (3, "s"), (4, "d"),
+                      (6, "f")]}},
+    "INITIAL_AXIAL_FORCE_BEAM": {"data": (0, [(0, "s"), (1, "f")])},
+    "INITIAL_STRAIN_SHELL": _off_initial_strain_shell,
+    "INITIAL_STRAIN_SHELL_SET": _off_initial_strain_shell_set,
+}
+# Keyed off the handler registry, so adding a spelling there without an offset
+# spec here is an ImportError, not a silent un-offset include.
+for _kw in INITIAL_STATE_PRELOAD_KEYWORDS:
+    _OFFSET_SPECS[_kw] = _INITIAL_STATE_PRELOAD_OFFSETS[_kw]
+del _kw
+
 # All CONTACT_* handled by k2rad share the Card-1 (ssid msid sstyp mstyp
 # sboxid mboxid) layout; unlisted CONTACT_ variants fall to the unmapped warn.
 for _kw in (
@@ -3632,6 +3719,10 @@ _DIRECTION_BEARING = frozenset({
     "BOUNDARY_PRESCRIBED_MOTION_NODE",
     "LOAD_NODE_POINT", "LOAD_NODE_SET", "LOAD_BODY_X", "LOAD_BODY_Y",
     "LOAD_BODY_Z", "INITIAL_STRESS_SHELL", "INITIAL_STRESS_SOLID",
+    # The strain twin: EPSxx..EPSzx is a GLOBAL cartesian TENSOR (Vol I R17
+    # p.3121), so a rotating TRANID makes every component wrong while the
+    # element ids it names move correctly.
+    "INITIAL_STRAIN_SHELL", "INITIAL_STRAIN_SHELL_SET",
     "BOUNDARY_SPC_SET", "BOUNDARY_SPC_NODE", "BOUNDARY_SPC",
     # *LOAD_BODY_RX/RY/RZ carry BOTH a direction (the rotation axis, which the
     # include's linear part must rotate) and a literal axis POINT (XC/YC/ZC,
