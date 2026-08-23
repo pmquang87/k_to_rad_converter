@@ -1094,8 +1094,9 @@ def _sect_frame_nodes(state: ConversionState, group_nids: List[int],
     return (n1, best2, best3)
 
 
-def _plane_cut(state: ConversionState, cs) -> Tuple[List[int], List[int],
-                                                    List[int], List[int]]:
+def _plane_cut(state: ConversionState, cs,
+               extra_pids: Optional[Set[int]] = None
+               ) -> Tuple[List[int], List[int], List[int], List[int]]:
     """Geometric resolver for *DATABASE_CROSS_SECTION_PLANE: an element is cut
     when the signed distances d = (x - tail)·n̂ of its nodes change sign across
     the plane (tail→head = the plane normal), restricted to the parts of PSID
@@ -1104,6 +1105,13 @@ def _plane_cut(state: ConversionState, cs) -> Tuple[List[int], List[int],
     the cut elements' nodes on the TAIL side (d <= 0): this is the standard
     /SECT construction (section forces = what the tail-side nodes of the cut
     elements transmit through the plane).
+
+    *extra_pids* is a SECOND, independent part restriction intersected with the
+    card's own PSID — ``*INITIAL_STRESS_SECTION``'s PSID field, which Vol I R17
+    p.3144 defines as "Stress is initialized on only those parts included in
+    both PSID from this card and the PSID field from the associated
+    *DATABASE_CROSS_SECTION card". ``None`` (the default, and every pre-existing
+    caller) means no extra restriction, so the emitted /SECT is unchanged.
 
     Returns (node_ids, shell_eids, solid_eids, beam_eids).
     """
@@ -1119,6 +1127,8 @@ def _plane_cut(state: ConversionState, cs) -> Tuple[List[int], List[int],
                        "found — the plane was intersected with the WHOLE model.")
         else:
             pids = set(entry[1])
+    if extra_pids is not None:
+        pids = set(extra_pids) if pids is None else (pids & set(extra_pids))
     r2 = cs.radius * cs.radius if cs.radius > 0.0 else 0.0
 
     def _dist(nid):

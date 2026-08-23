@@ -290,7 +290,6 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
     k = state.options.ground_spring_k
     lines: List[str] = [
         "#-  GROUNDING SPRINGS (force-control bootstrap stabilization):", HDR]
-    next_ground_node = (max(state.nodes) if state.nodes else 0) + 1
     emitted = False
 
     for pid, axes in sorted(axes_by_pid.items()):
@@ -310,8 +309,11 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
             )
             continue
 
-        ground_node = next_ground_node
-        next_ground_node += 1
+        # state.next_node_id(), not an open-coded max(state.nodes)+1 counter:
+        # these ground nodes are deliberately NOT registered in state.nodes
+        # (the /BCS beside them already fixes them), so a later synthesis site
+        # taking max(state.nodes)+1 would reuse the same ids.
+        ground_node = state.next_node_id()
         grnod_id = state.next_id()
         bcs_id = state.next_id()
         prop_id = state.next_prop_id()
@@ -1773,6 +1775,14 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             # ERROR 69 and the deck is refused outright.
             state.spotweld_spring_eids.add(e.eid)
             state.spring_elem_ids.add(e.eid)  # producer 2 of 7
+            # /PRELOAD/AXIAL property gate, recorded at the write line: this
+            # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
+            # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
+            # function AND H in 1..7 (ERROR 3057 otherwise). A *MAT_SPOTWELD
+            # with SIGY<=0 leaves both at 0, so the test is on the values, not
+            # on the property type.
+            if fct1 and 1 <= h1 <= 7:
+                state.spring_axial_preloadable.add(e.eid)
         lines.append(HDR)
         emitted = True
 

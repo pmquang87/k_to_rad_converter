@@ -1085,7 +1085,18 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     x0 = max(xs) + 2.0 * diag           # well clear of the mesh
     y0, z0 = max(ys), max(zs)
     spacing = 0.1 * diag                # distinct, non-coincident node positions
-    n1 = max(state.nodes) + 1
+    # Drawn from state.next_node_id() rather than open-coded off
+    # max(state.nodes)+1: these three nodes are NOT registered in state.nodes
+    # (they must stay invisible to the free-node singularity guard, which the
+    # master's own /BCS already covers and whose /BCS on the two secondaries
+    # would fight the /RBODY), so a later site computing max(state.nodes)+1
+    # would hand the SAME ids out again — measured, the /PRELOAD frame nodes
+    # collided with all three on the implicit General_Nonlinearity deck.
+    # next_node_id() also skips ids it has already returned, so reserving here
+    # closes the hole while returning the identical n1 on every existing deck.
+    n1 = state.next_node_id()
+    for _ in range(2):
+        state.next_node_id()
     slave_grnod = state.next_id()
     master_grnod = state.next_id()
     bcs_id = state.next_id()

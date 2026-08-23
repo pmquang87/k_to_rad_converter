@@ -1105,6 +1105,12 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 # never-written element is starter ERROR 69.
                 state.dbeam_spring_eids.add(e.eid)
                 state.spring_elem_ids.add(e.eid)   # producer 3 of 7
+                # /PRELOAD/AXIAL property gate (rinit3.F:1627-1690): only
+                # CASE(4,13) with a non-zero axial fct_ID1 AND H in 1..7 is
+                # accepted; a /PROP/TYPE8 connector is ERROR 3053 outright and
+                # a linear TYPE13 is ERROR 3057. Recorded at the write line.
+                if use13 and dofs[0].fct1 and 1 <= dofs[0].h <= 7:
+                    state.spring_axial_preloadable.add(e.eid)
             if use13 and no_n3:
                 state.warn(
                     f"{label}: {no_n3} element(s) carry no third node, so the "
