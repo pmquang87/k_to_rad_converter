@@ -313,6 +313,29 @@ shipped, so the marginal cost is small.
   Original note: — the per-integration-point `/INISTATE` blocks are verbose and
   version-specific; the layer-count-must-match-property constraint and stress
   component/frame order need cfg validation.
+- `*INITIAL_STRAIN_SHELL` (+ `_SET`) -> /INISHE/STRA_F/GLOB +
+  /INISH3/STRA_F/GLOB — **done**. Written in the minimal form the starter
+  consumes (`nb_integr=2`, `npg=1`, `Thick=0`, the two extreme
+  through-thickness stations), because the reader keeps at most two stations
+  and `npg=4` is a silent no-op on QEPH and ERROR 1904 on Ishell 1..4.
+  `/PROP/SHELL Istrain` is forced on — `csigini.F:165` gates the whole ingest
+  on it. `ILOCAL=1` warn-dropped (LS-DYNA calls it unsupported and the Radioss
+  local card is a different quantity).
+- `*INITIAL_STRESS_SECTION` -> /PRELOAD — **done**. A dedicated /SECT with
+  three synthesized frame nodes realizes the cutting-plane normal (the
+  reporting section's frame does not), the card's PSID is intersected with the
+  cross-section's, and the LCID is resolved into `Preload`/`Tstart`/`Tstop`
+  because the `Fct_ID` column only exists at /BEGIN 2026. Remaining loss: the
+  ramp SHAPE (a step at `Tstart` instead), `IZSHEAR` and `ISTIFF`.
+- `*INITIAL_AXIAL_FORCE_BEAM` -> /PRELOAD/AXIAL — **done**. Emitted at /BEGIN
+  2022 (advisory WARNING 100211 only, restated), `Preload = SCALE`, the BSID
+  split by emitted family into /GRBEAM/BEAM and the new /GRSPRI/SPRI, the
+  curve truncated at its first descent. Remaining loss: `KBEND` (multi-beam
+  bolt shanks lose LS-DYNA's internal constraints).
+- Open, not in this batch: `*INITIAL_STRAIN_SOLID` / `_TSHELL`, and the
+  `*INITIAL_STRESS_SHELL`/`_SOLID` gap in `_OFFSET_SPECS` (their element ids
+  are not offset inside an `*INCLUDE_TRANSFORM`; the generic unmapped-keyword
+  warning fires).
 
 *Rationale:* these are the recurring building blocks of automotive crash decks;
 covering them unlocks a large class of real models.

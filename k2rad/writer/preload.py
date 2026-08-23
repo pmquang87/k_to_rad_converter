@@ -274,6 +274,16 @@ def _make_preload_sections(state: ConversionState,
                        "is what this card needs (Vol I R17 p.3144, Remark 2).")
             continue
         t_start, t_stop, plateau = window
+        if plateau <= 0.0:
+            state.warn(
+                f"{label}: curve {iss.lcid} peaks at {plateau:.6G}, i.e. the "
+                "'pre-tension' is zero or COMPRESSIVE. The starter answers "
+                "WARNING 1255 ('NEGATIVE BOLT PRELOADING VALUE MIGHT GET "
+                "DIVERGING RESULTS; INPUT RAMPING FUNCTION WILL HELP', "
+                "hm_read_preload.F:143-150, which fires exactly because k2rad "
+                "cannot pass a ramping function at /BEGIN 2022) and the bolt "
+                "law still softens the section to 1e-4 of E for 40% of the "
+                "window. Check the sign and the SFO of the curve.")
 
         # ── the part scope: the section's own PSID intersected with this
         # card's PSID (Vol I R17 p.3144, "included in both").
