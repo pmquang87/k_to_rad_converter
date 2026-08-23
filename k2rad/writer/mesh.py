@@ -869,9 +869,13 @@ def _referenced_node_ids(state: ConversionState) -> Set[int]:
     # The restraint DEVICES reference nodes without owning an element: the
     # slipring's anchorage and orientation nodes, the retractor's anchorage
     # node, the SBSTYP=1 sensor's watched node, the SBSTYP=4 sensor's two
-    # distance nodes and the accelerometer's whole triad. None of them carries
-    # STIFFNESS (see loads.py::_make_free_node_constraints for that half), but
-    # every one is named on an emitted card, so pruning it dangles the card.
+    # distance nodes and the accelerometer's whole triad. Every one is named on
+    # an emitted card, so pruning it dangles the card. What each of them does
+    # at RUNTIME differs — an anchorage receives the belt's force and stiffness
+    # (kine_seatbelt_force.F:91,117), an orientation node and an accelerometer
+    # triad are live frames read every cycle, a sensor node is watched — and
+    # loads.py::_make_free_node_constraints keeps them all off the implicit
+    # /BCS for those reasons.
     for s in state.seatbelt_sliprings:
         ref.update(n for n in (s.sbrnid, s.onid) if n > 0)
     for r in state.seatbelt_retractors:

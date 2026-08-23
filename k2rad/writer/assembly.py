@@ -1099,6 +1099,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
+    _warn_duplicate_mat_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1361,6 +1362,48 @@ def _warn_duplicate_prop_ids(state: ConversionState,
 #: law spelling (``/MAT/ELAST/1``, ``/MAT/LAW19/3``, ``/MAT/GAS/CSTA/90002``).
 _PART_CARD_ID_RE = re.compile(r"^/PART/(\d+)\s*$")
 _MAT_CARD_ID_RE = re.compile(r"^/MAT/(?:[A-Z0-9_]+/)*(\d+)\s*$")
+
+
+#: ``/MAT/<law spelling>/<mid>``, capturing the law spelling AND the id, so a
+#: duplicate can be reported as "which two cards".
+_MAT_CARD_LAW_ID_RE = re.compile(r"^/MAT/((?:[A-Z0-9_]+/)*[A-Z0-9_]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_mat_ids(state: ConversionState,
+                            lines: List[str]) -> None:
+    """The /MAT id namespace is GLOBAL across material laws — two cards on one
+    id is starter ``ERROR ID : 79 DUPLICATE ID / IN MATERIAL DEFINITION`` and
+    the deck is refused, usually with a second error on whichever /PART
+    resolved to the wrong one of the pair.
+
+    The twin of :func:`_warn_duplicate_prop_ids`, and it exists for the same
+    reason: k2rad emits every /MAT under the LS-DYNA MID verbatim (there is no
+    material-duplication remap as in dyna2rad), each family guards only the
+    collisions it can see from where it stands, and no single writer sees the
+    FINISHED deck. MEASURED before this scan existed — a *PART on a
+    *SECTION_SEATBELT whose MID was an ordinary *MAT_ELASTIC emitted both
+    ``/MAT/ELAST/<mid>`` and ``/MAT/LAW114/<mid>`` with no diagnostic on any
+    branch, and two belt parts sharing one *MAT_SEATBELT emitted its
+    ``/MAT/LAW114`` twice. Both CAUSES are fixed in writer/seatbelts.py; this
+    removes the CLASS, so the next family cannot make the failure silent again.
+
+    Changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _MAT_CARD_LAW_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for mid, laws in sorted(seen.items()):
+        if len(laws) > 1:
+            state.warn(
+                f"MATERIAL ID {mid} is emitted by more than one /MAT card ("
+                + ", ".join(f"/MAT/{law}/{mid}" for law in laws)
+                + "). The /MAT id namespace is global across material LAWS, so "
+                "the starter refuses the whole deck with ERROR 79 (DUPLICATE "
+                "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
+                "resolves to whichever card came first. Renumber one of the "
+                "*MAT_* cards.")
 
 
 def _warn_dangling_part_materials(state: ConversionState,

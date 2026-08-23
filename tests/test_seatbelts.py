@@ -245,6 +245,11 @@ _CURVES = """\
                      0.0                     0.0
                    0.001                  4000.0
 *DEFINE_CURVE
+       914
+                     0.0                     0.0
+                    0.02                  1200.0
+                     0.5                  7500.0
+*DEFINE_CURVE
        920
                      0.0                    0.20
                   1000.0                    0.35
@@ -570,8 +575,11 @@ class TestBelt2D(unittest.TestCase):
                      + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23))
 
     def test_all_five_cards_by_column(self):
+        # ULCID 914 CROSSES 910 at (0.157, 3000); the fixture's 911 does not,
+        # and law119_upd.F:105 makes that a hard ERROR 3081 — see
+        # test_non_intersecting_curves_drop_the_unloading_branch.
         _r, starter, _e = _convert(self._deck(
-            mpul=0.135, lmin=1.5e-3, cse=1.0,
+            mpul=0.135, lmin=1.5e-3, cse=1.0, ulcid=914,
             card3=(None, None, 1.9e8, 1.1e-3, None, -0.25, 0.21, None),
             card4=(3.1e5,)))
         c = _cards(_block(starter, "/MAT/LAW119/900"))
@@ -585,7 +593,7 @@ class TestBelt2D(unittest.TestCase):
         self.assertEqual(_col_f(c[1], 41, 60), 1.0, "RE")
         # card 3: fct_load fct_uload Fscale1 Fscale2 Ireload
         self.assertEqual(_col_i(c[2], 1, 10), 910)
-        self.assertEqual(_col_i(c[2], 11, 20), 911)
+        self.assertEqual(_col_i(c[2], 11, 20), 914)
         # card 4: E22 V12 G12 Fscale22.  EB<0 is a RATIO, so E22 stays blank
         # and Fscale22 carries |EB|/100 (the reader multiplies it by 100).
         self.assertEqual(_col_f(c[3], 1, 20), 0.0, "E22 from the ratio")
@@ -596,6 +604,45 @@ class TestBelt2D(unittest.TestCase):
         self.assertEqual(_col_f(c[4], 1, 20), 1.9e8, "ECOAT -> EC")
         self.assertEqual(_col_f(c[4], 21, 40), 0.0, "NUCOAT stays blank")
         self.assertEqual(_col_f(c[4], 41, 60), 1.1e-3, "TCOAT -> TC")
+
+    def test_non_intersecting_curves_drop_the_unloading_branch(self):
+        """law119_upd.F:105 runs TABLE_INTERS over the loading/unloading pair
+        and answers ERROR 3081 when they never cross at a positive abscissa.
+        LS-DYNA imposes no such rule, so an ORDINARY pair — unloading
+        everywhere below loading, both from the origin — converts
+        field-for-field and still refuses to start. The house answer is the
+        startable deck with the loss named."""
+        r, starter, _e = _convert(self._deck())      # 910 vs 911: no crossing
+        c = _cards(_block(starter, "/MAT/LAW119/900"))
+        self.assertEqual(_col_i(c[2], 1, 10), 910, "fct_load survives")
+        self.assertEqual(_col_i(c[2], 11, 20), 0, "fct_uload dropped")
+        self.assertTrue(_warns(r, "ERROR 3081"))
+        self.assertTrue(_warns(r, "hysteresis"))
+
+    def test_intersecting_curves_keep_the_unloading_branch(self):
+        """The negative control: 914 crosses 910 at (0.157, 3000), so nothing
+        is dropped and nothing is warned."""
+        r, starter, _e = _convert(self._deck(ulcid=914))
+        c = _cards(_block(starter, "/MAT/LAW119/900"))
+        self.assertEqual(_col_i(c[2], 11, 20), 914)
+        self.assertEqual(_warns(r, "ERROR 3081"), [])
+
+    def test_a_shared_point_at_a_positive_abscissa_is_an_intersection(self):
+        """TABLE_INTERS's FIRST pass is a common-POINT scan from each curve's
+        SECOND point on (func_inters.F:404-417), so a pair that merely TOUCHES
+        at a positive strain is enough — but the shared ORIGIN both belt curves
+        have is not, because that pass starts at index 2 and demands S1 > 0."""
+        touching = ("*DEFINE_CURVE\n       915\n"
+                    "                     0.0                     0.0\n"
+                    "                    0.02                  1000.0\n"
+                    "                     0.5                  6000.0\n")
+        r, starter, _e = _convert(_deck(
+            _SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=915),
+            "*ELEMENT_SEATBELT\n" + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23),
+            touching))
+        c = _cards(_block(starter, "/MAT/LAW119/900"))
+        self.assertEqual(_col_i(c[2], 11, 20), 915)
+        self.assertEqual(_warns(r, "ERROR 3081"), [])
 
     def test_prba_goes_to_nu12_not_to_the_coating(self):
         """dyna2rad's convertmats.cxx:11049 is CopyValue(..., "PRBA", "VC") —
@@ -615,6 +662,59 @@ class TestBelt2D(unittest.TestCase):
         _r, starter, _e = _convert(self._deck(cse=0.0))
         c = _cards(_block(starter, "/MAT/LAW119/900"))
         self.assertEqual(_col_f(c[1], 41, 60), 0.01)
+
+    def test_a_blank_card_three_still_lets_card_four_be_read(self):
+        """"2D Card. Additional 1st card for the 2D keyword option" — card 3
+        is REQUIRED for _2D, so a blank one is a card asking for its defaults
+        and the optional card 4 sits after it. Skipping a blank card 3 read
+        the GAB card as card 3 (P1DOFF = GAB) and lost the shear modulus in
+        silence, under a warning that said GAB was never stated."""
+        deck = _deck(_SHELL_PART,
+                     "*MAT_SEATBELT_2D\n" + _card(900, 1.5e-6, 910, 914, 2.5)
+                     + " " * 10 + "\n" + _card(3.1e5),
+                     "*ELEMENT_SEATBELT\n"
+                     + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23))
+        r, starter, _e = _convert(deck)
+        c = _cards(_block(starter, "/MAT/LAW119/900"))
+        self.assertEqual(_col_f(c[3], 41, 60), 3.1e5, "GAB -> G12")
+        self.assertEqual(_warns(r, "GAB is not stated"), [])
+
+    def test_cse_inverts_with_a_non_zero_form(self):
+        """Vol II *MAT_SEATBELT, CSE: the option is 'available since
+        r137465/dev FOR NON-ZERO FORM ... For non-zero FORM: EQ.0.0: don't
+        eliminate ...; EQ.1.0: eliminate ...' — the OPPOSITE of the FORM=0
+        table the shipped cfg still encodes. Reading only one of the two
+        inverts the flag on half the decks in the field."""
+        for form, cse, re_ in ((0, 0.0, 0.01), (0, 1.0, 1.0),
+                               (-14, 0.0, 1.0), (-14, 1.0, 0.01),
+                               (14, 0.0, 1.0), (14, 1.0, 0.01)):
+            with self.subTest(form=form, cse=cse):
+                r, starter, _e = _convert(self._deck(
+                    cse=cse, card3=(None, form)))
+                c = _cards(_block(starter, "/MAT/LAW119/900"))
+                self.assertEqual(_col_f(c[1], 41, 60), re_)
+                if form:
+                    self.assertTrue(_warns(r, "non-zero-FORM reading"))
+
+    def test_cse_two_on_a_non_zero_form_is_named_as_undefined(self):
+        """'The old recommended option of CSE = 2 ... still works if and only
+        if FORM = 0.'"""
+        r, _s, _e = _convert(self._deck(cse=2.0, card3=(None, -14)))
+        self.assertTrue(_warns(r, "only defined for FORM=0"))
+
+    def test_a_coating_outside_form_minus_14_is_named(self):
+        """'Young's modulus of coat material FOR FORM = -14' — LS-DYNA reads
+        ECOAT/TCOAT only there, while /MAT/LAW119 applies EC/TC whenever they
+        are non-zero, so the converted belt gains a coating the source deck
+        does not have."""
+        r, _s, _e = _convert(self._deck(
+            card3=(None, None, 1.9e8, 1.1e-3)))
+        self.assertTrue(_warns(r, "is not -14"))
+
+    def test_a_coating_on_form_minus_14_is_silent(self):
+        r, _s, _e = _convert(self._deck(
+            card3=(None, -14, 1.9e8, 1.1e-3)))
+        self.assertEqual(_warns(r, "is not -14"), [])
 
     def test_cse_two_is_warn_dropped_to_the_eliminate_side(self):
         r, starter, _e = _convert(self._deck(cse=2.0))
@@ -1102,6 +1202,60 @@ class TestRetractorPretensioner(unittest.TestCase):
         self.assertEqual(_col_f(c[2], 21, 40), 5555.0)
         self.assertTrue(_warns(r, "names no converted"), "71 is orphaned")
 
+    def test_a_spring_pretensioner_cannot_claim_a_retractor(self):
+        """Vol I *ELEMENT_SEATBELT_PRETENSIONER, SBRID: "Retractor number
+        (SBPRTY = 1, 4, 5, 6, 7 or 8) or SPRING ELEMENT number (SBPRTY = 2, 3
+        or 9)" — one cell, TWO id namespaces, chosen by a field on the other
+        card. Keyed on SBRID regardless, a spring element id that equals a
+        retractor id sorts first on SBPRID, takes the retractor's ONE card-3
+        slot and pushes the real pretensioner out."""
+        pre = ("*ELEMENT_SEATBELT_PRETENSIONER\n"
+               + _card(70, 2, 63, 0, 0, 0) + _card(41, 0.002, 912, 0)
+               + _card(71, 4, 63, 0, 0, 0) + _card(41, 0.002, 912, 7777.0))
+        r, starter, _e = _convert(self._deck(pre=pre))
+        c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+        self.assertEqual(_col_i(c[2], 11, 20), 2, "71 (SBPRTY 4) applied")
+        self.assertEqual(_col_f(c[2], 21, 40), 7777.0)
+        self.assertTrue(_warns(r, "is a SPRING ELEMENT id"))
+
+    def test_a_spring_pretensioner_alone_is_named_for_the_right_reason(self):
+        pre = ("*ELEMENT_SEATBELT_PRETENSIONER\n"
+               + _card(70, 3, 63, 0, 0, 0) + _card(11, 0.002, 912, 0))
+        r, _s, _e = _convert(self._deck(pre=pre))
+        self.assertTrue(_warns(r, "is a SPRING ELEMENT id"))
+        self.assertEqual(_warns(r, "names no converted"), [])
+
+    def test_lmtfrc_is_dropped_where_only_radioss_would_apply_it(self):
+        """"Optional limiting force for retractor types 5 and 8" — LS-DYNA
+        ignores LMTFRC elsewhere, while Radioss reads Force under Tens_typ 1
+        and 5 (material_flow.F:546,583). SBPRTY=1 is the one overlap."""
+        r, starter, _e = _convert(self._deck(
+            pre=_pretensioner(sbprty=1, lmtfrc=7777.0)))
+        c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+        self.assertEqual(_col_i(c[2], 11, 20), 1, "Tens_typ 1")
+        self.assertEqual(_col_f(c[2], 21, 40), 0.0, "Force dropped")
+        self.assertTrue(_warns(r, "LMTFRC=7777"))
+
+    def test_lmtfrc_survives_where_ls_dyna_applies_it(self):
+        for sbprty, tens in ((5, 1), (8, 5)):
+            with self.subTest(sbprty=sbprty):
+                r, starter, _e = _convert(self._deck(
+                    pre=_pretensioner(sbprty=sbprty, lmtfrc=7777.0)))
+                c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+                self.assertEqual(_col_i(c[2], 11, 20), tens)
+                self.assertEqual(_col_f(c[2], 21, 40), 7777.0)
+                self.assertEqual(_warns(r, "LMTFRC=7777"), [])
+
+    def test_lmtfrc_survives_where_it_is_inert_on_both_sides(self):
+        """SBPRTY 4/6/7 -> Tens_typ 2/3/4, which never read Force, so the
+        value is written through rather than silently rewritten."""
+        for sbprty in (4, 6, 7):
+            with self.subTest(sbprty=sbprty):
+                _r, starter, _e = _convert(self._deck(
+                    pre=_pretensioner(sbprty=sbprty, lmtfrc=7777.0)))
+                c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+                self.assertEqual(_col_f(c[2], 21, 40), 7777.0)
+
     def test_a_missing_mouth_element_drops_the_retractor(self):
         r, starter, _e = _convert(self._deck(ret=_retractor(sbid=99)))
         self.assertNotIn("/RETRACTOR/", starter)
@@ -1574,6 +1728,26 @@ class TestRegistries(unittest.TestCase):
         r, _s, _e = _convert(deck)
         self.assertFalse(_warns(r, "belongs to a rigid part"))
 
+    def test_a_stated_e_with_a_blank_area_does_not_invent_stiffness(self):
+        """Card 2's A defaults to 0.0, so LS-DYNA's bending/compression model
+        is E x A = 0 — inert. /MAT/LAW114 forms XK_COMP = E x Area against the
+        NEUTRAL Area=1 the mass split uses, so writing E through would invent
+        a compression stiffness of E x 1. The unstated quantity is dropped and
+        named, not filled in (the #124 lesson)."""
+        r, starter, _e = _convert(_ref(
+            e=210000.0, card2=(None, 4.0, 8.0, None, 5000.0, 9.0, 0.07)))
+        c = _cards(_block(starter, "/MAT/LAW114/900"))
+        self.assertEqual(_col_f(c[3], 1, 20), 0.0, "E dropped")
+        self.assertEqual(_col_f(c[3], 21, 40), 4.0, "I kept")
+        self.assertEqual(_col_f(c[3], 41, 60), 8.0, "J kept")
+        self.assertTrue(_warns(r, "leaves A blank"))
+
+    def test_a_stated_e_with_an_area_keeps_both(self):
+        _r, starter, _e = _convert(_ref(
+            e=210000.0, card2=(30.0, 4.0, 8.0, None, 5000.0, 9.0, 0.07)))
+        c = _cards(_block(starter, "/MAT/LAW114/900"))
+        self.assertEqual(_col_f(c[3], 1, 20), 210000.0)
+
     def test_the_belt_part_is_written_once(self):
         """A part claimed by the seatbelt writer must be skipped by the mesh
         writer AND by the element-free placeholder pass, or the starter
@@ -1845,6 +2019,592 @@ $#  sbacid      nid1      nid2      nid3     igrav    intopt
         r, starter, _e = _convert(self._DECK)
         self.assertNotIn("/TH/SLIPRING", starter)
         self.assertIn("DATABASE_SBTOUT", dict(r.recognized_not_emitted))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestTwoBeltParts(unittest.TestCase):
+    """The ordinary two-strand restraint layout: a shoulder-belt *PART and a
+    lap-belt *PART on ONE *SECTION_SEATBELT and ONE *MAT_SEATBELT.
+
+    The /PROP/TYPE23 and the /MAT/LAW114 belong to the SECTION and the
+    MATERIAL, not to the part that reaches them first. Writing them per part
+    put two cards on one id and the starter answered ERROR 79 (DUPLICATE ID)
+    over BOTH the /MAT and the /PID table — measured, 2 ERROR(S), ERROR
+    TERMINATION on a deck that is the normal production shape.
+    """
+
+    _PART2 = """\
+*PART
+belt_lap
+       901       900       900
+"""
+
+    _SECTION2 = """\
+*SECTION_SEATBELT
+       901      50.0       1.5
+"""
+
+    _PART2_SEC2 = """\
+*PART
+belt_lap
+       901       901       900
+"""
+
+    def _belts2(self):
+        return ("*ELEMENT_SEATBELT\n"
+                + _belt_card(21, 901, 1, 2) + _belt_card(22, 901, 2, 3))
+
+    def test_one_section_one_material_write_one_card_each(self):
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, self._PART2, _SECTION, _mat(), _belts(),
+            self._belts2()))
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE23/900")), 1)
+        self.assertEqual(len(_blocks(starter, "/MAT/LAW114/900")), 1)
+        self.assertEqual(len(_blocks(starter, "/PART/900")), 1)
+        self.assertEqual(len(_blocks(starter, "/PART/901")), 1)
+
+    def test_both_parts_point_at_the_one_property_and_material(self):
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, self._PART2, _SECTION, _mat(), _belts(),
+            self._belts2()))
+        for pid in (900, 901):
+            with self.subTest(part=pid):
+                row = _cards(_block(starter, f"/PART/{pid}"))[0]
+                self.assertEqual(_col_i(row, 1, 10), 900, "prop_ID")
+                self.assertEqual(_col_i(row, 11, 20), 900, "mat_ID")
+
+    def test_two_sections_one_material_still_write_one_material(self):
+        """Two /PROP/TYPE23 cards, ONE /MAT/LAW114 — the material duplicate
+        used to survive even when the sections differed, and nothing scanned
+        for it."""
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, self._PART2_SEC2, _SECTION, self._SECTION2, _mat(),
+            _belts(), self._belts2()))
+        self.assertEqual(len(_blocks(starter, "/MAT/LAW114/900")), 1)
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE23/900")), 1)
+        self.assertEqual(len(_blocks(starter, "/PROP/TYPE23/901")), 1)
+
+    def test_each_part_keeps_its_own_spring_block(self):
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, self._PART2, _SECTION, _mat(), _belts(),
+            self._belts2()))
+        self.assertEqual(len(_erows(_block(starter, "/SPRING/900"))), 5)
+        self.assertEqual(len(_erows(_block(starter, "/SPRING/901"))), 2)
+
+    def test_the_shared_material_and_section_notes_fire_once(self):
+        """A shared card's warnings belong to the card. Before the dedup a
+        deck with P belt parts repeated every material and section note P
+        times, and the LFED check P x R times."""
+        r, _s, _e = _convert(_deck(
+            _BELT_PART, self._PART2, _SECTION, _mat(damp=0.1, lmin=3.0),
+            _belts(), self._belts2(), _SENSORS,
+            _retractor(card2=(0.0, 12.0, 910, 911, 6.25, 0, 0))))
+        self.assertEqual(len(_warns(r, "AREA=50")), 1)
+        self.assertEqual(len(_warns(r, "DAMP=0.1")), 1)
+        self.assertEqual(len(_warns(r, "3*LMIN")), 1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestInertBeltMaterialId(unittest.TestCase):
+    """A belt part on an ORDINARY material — the case the INERT branch exists
+    for — must not put a second /MAT card on that material's id."""
+
+    _ELASTIC = "*MAT_ELASTIC\n" + _card(300, 7.8e-9, 210000.0, 0.3)
+    _SHELL = """\
+*PART
+plate
+       500       500       300
+*SECTION_SHELL
+       500         2
+       2.0       2.0       2.0       2.0
+*ELEMENT_SHELL
+       1     500      20      21      22      23
+"""
+    _BELT_ON_300 = "*PART\nbelt\n       900       900       300\n"
+
+    def _deck(self):
+        return _deck(self._BELT_ON_300, _SECTION, self._ELASTIC, self._SHELL,
+                     _belts())
+
+    def test_the_ordinary_material_is_not_duplicated(self):
+        _r, starter, _e = _convert(self._deck())
+        self.assertEqual(len(_blocks(starter, "/MAT/ELAST/300")), 1)
+        self.assertNotIn("/MAT/LAW114/300", starter)
+
+    def test_the_belt_part_is_repointed_at_the_minted_law(self):
+        r, starter, _e = _convert(self._deck())
+        row = _cards(_block(starter, "/PART/900"))[0]
+        mid = _col_i(row, 11, 20)
+        self.assertNotEqual(mid, 300)
+        self.assertEqual(len(_blocks(starter, f"/MAT/LAW114/{mid}")), 1)
+        self.assertTrue(_warns(r, "ERROR 79"))
+
+    def test_an_undefined_mid_keeps_its_id(self):
+        """The other direction: an id NO material writer owns stays
+        addressable, which is what the branch was written for."""
+        _r, starter, _e = _convert(_deck(
+            "*PART\nbelt\n       900       900       901\n", _SECTION,
+            _mat(), _belts()))
+        self.assertIn("/MAT/LAW114/901", starter)
+        row = _cards(_block(starter, "/PART/900"))[0]
+        self.assertEqual(_col_i(row, 11, 20), 901)
+
+    def test_no_duplicate_material_survives_the_assembled_deck_scan(self):
+        r, _s, _e = _convert(_ref())
+        self.assertEqual(_warns(r, "is emitted by more than one /MAT card"), [])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestRetractorMandatoryCurve(unittest.TestCase):
+    """hm_read_retractor.F:236-242 — ``ISENS(1) > 0`` with ``IFUNC(1) == 0`` is
+    ERROR 2031 and the deck refuses to start. The guard has to read the
+    RESOLVED Fct_ID1, because _resolve_belt_curve returns 0 for a curve the
+    converted deck does not define."""
+
+    def _deck(self, llcid):
+        return _deck(_BELT_PART, _SECTION, _mat(), _belts(), _SENSORS,
+                     _retractor(card2=(0.003, 12.0, llcid, 911, 6.25, 0, 0)))
+
+    def test_an_undefined_llcid_drops_the_lock_sensor(self):
+        r, starter, _e = _convert(self._deck(999))
+        c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+        self.assertEqual(_col_i(c[1], 1, 10), 0, "Sens_ID1 dropped with it")
+        self.assertEqual(_col_i(c[1], 31, 40), 0, "Fct_ID1")
+        self.assertTrue(_warns(r, "ERROR 2031"))
+
+    def test_a_zero_llcid_drops_the_lock_sensor(self):
+        r, starter, _e = _convert(self._deck(0))
+        c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+        self.assertEqual(_col_i(c[1], 1, 10), 0)
+        self.assertTrue(_warns(r, "ERROR 2031"))
+
+    def test_a_defined_llcid_keeps_the_lock_sensor(self):
+        r, starter, _e = _convert(self._deck(910))
+        c = _cards(_block(starter, "/RETRACTOR/SPRING/41"))
+        self.assertNotEqual(_col_i(c[1], 1, 10), 0)
+        self.assertEqual(_col_i(c[1], 31, 40), 910)
+        self.assertEqual(_warns(r, "ERROR 2031"), [])
+
+    def test_the_missing_curve_is_reported_once(self):
+        r, _s, _e = _convert(self._deck(999))
+        self.assertEqual(
+            len(_warns(r, "names no *DEFINE_CURVE in the deck")), 1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestSensorIdNamespace(unittest.TestCase):
+    """*MAT_FABRIC's RGBRTH and *AIRBAG_REFERENCE_GEOMETRY_BIRTH both mint a
+    /SENSOR/TIME. Both used to draw from the raw auto-id stream, which a USER
+    ``SBSID`` at or above the auto-id base collides with — two /SENSOR/TIME
+    cards on one id, starter ERROR 79 over the /SENSOR table. Airbag fabric
+    and belt sensors live in the same occupant-restraint decks."""
+
+    #: RGBRTH sits on *MAT_FABRIC's card 5, field 1 — the card stack has to be
+    #: complete or the birth time is never read and the sensor never minted.
+    _FABRIC = ("""\
+*PART
+bag
+       700       700       700
+*SECTION_SHELL
+       700         2
+       0.3       0.3       0.3       0.3
+*ELEMENT_SHELL
+       1     700      20      21      22      23
+*MAT_FABRIC
+"""
+               + _card(700, 1.0687e-9, 13789.5146, 13789.5146, None,
+                       0.35, 0.35)
+               + _card(10548.9787, None, None, 0.0, 0.0, 0.0, 0.0, 0.0)
+               + _card(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0)
+               + _card(None, 0.004, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+               + _card(0.0, 0.0, 0.0, None, None, None, 0.0, 0))
+
+    _HIGH_SENSOR = """\
+*ELEMENT_SEATBELT_SENSOR
+     90001         3         0
+    0.0040
+"""
+
+    def test_a_user_sbsid_at_the_auto_id_base_is_not_collided_with(self):
+        r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(),
+            self._FABRIC, self._HIGH_SENSOR))
+        self.assertEqual(len(_blocks(starter, "/SENSOR/TIME/90001")), 1)
+        self.assertEqual(_warns(r, "is emitted by more than one /MAT card"), [])
+
+    def test_every_sensor_id_in_the_deck_is_unique(self):
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(),
+            self._FABRIC, self._HIGH_SENSOR))
+        ids = [ln.rsplit("/", 1)[1] for ln in starter.splitlines()
+               if ln.startswith("/SENSOR/")]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestImplicitDeviceNodes(unittest.TestCase):
+    """The implicit free-node guard must not pin a node the restraint chain
+    actually reads."""
+
+    _IMPL = "*CONTROL_IMPLICIT_GENERAL\n" + _card(1, 1.0e-4)
+
+    def _free_nodes(self, starter):
+        blocks = _blocks(starter, "/GRNOD/NODE/")
+        out = set()
+        for blk in blocks:
+            if len(blk) > 1 and "free_reference_nodes" in blk[1]:
+                for ln in blk[2:]:
+                    if ln.strip() and not ln.startswith("#"):
+                        out.update(int(ln[i:i + 10]) for i in
+                                   range(0, len(ln.rstrip()), 10))
+        return out
+
+    def test_the_accelerometer_triad_stays_free(self):
+        """A /SKEW/MOV is the coord_nodes flag=1 case spelled with another
+        keyword: pinning N2/N3 freezes the frame the /ACCEL projects onto and
+        pinning N1 makes the channel read zero."""
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(), self._IMPL,
+            "*ELEMENT_SEATBELT_ACCELEROMETER\n" + _card(1, 9, 10, 11)))
+        free = self._free_nodes(starter)
+        self.assertEqual(free & {9, 10, 11}, set())
+
+    def test_the_device_anchorages_stay_free(self):
+        """kine_seatbelt_force.F:91,117 adds the mouth node's whole force AND
+        stiffness onto the anchorage every cycle, so a /BCS 111 111 there
+        welds the belt end to ground."""
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(), self._IMPL, _SENSORS,
+            _slipring(sbid1=12, sbid2=13, sbrnid=7, onid=11, ltime=None,
+                      card2=None),
+            _retractor(sbid=11, sbrnid=1,
+                       card2=(0.0, 12.0, 910, 911, 6.25, 0, 0))))
+        free = self._free_nodes(starter)
+        self.assertEqual(free & {1, 7, 11}, set())
+
+    def test_a_watched_sensor_node_stays_free(self):
+        """/SENSOR/DIST tests a DISTANCE and /SENSOR/ACCE an ACCELERATION;
+        pinning either freezes the quantity and the trigger never fires."""
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(), self._IMPL, _SENSORS))
+        free = self._free_nodes(starter)
+        self.assertEqual(free & {8, 9, 10}, set())
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestBeltContactScope(unittest.TestCase):
+    """A 1D belt is the one /SPRING family that belongs on a contact SECONDARY
+    side — LS-DYNA gives *SECTION_SEATBELT its own AREA and THICK for exactly
+    that. Before this the part / part-set spelling resolved to ZERO nodes and
+    the belt passed straight through the occupant."""
+
+    _PLATE = """\
+*PART
+plate
+       500       500       500
+*SECTION_SHELL
+       500         2
+       2.0       2.0       2.0       2.0
+*MAT_ELASTIC
+       500   7.8E-09  210000.0       0.3
+*ELEMENT_SHELL
+       1     500      20      21      22      23
+"""
+
+    def _contact(self):
+        return ("*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+                + _card(900, 500, 3, 3, 0, 0, 0, 0)
+                + _card(0.2, 0.2))
+
+    def test_a_part_scoped_secondary_side_reaches_the_belt_nodes(self):
+        _r, starter, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(), self._PLATE,
+            self._contact()))
+        grnods = [b for b in _blocks(starter, "/GRNOD/NODE/")
+                  if len(b) > 1 and ("slave" in b[1] or "secnd" in b[1])]
+        self.assertTrue(grnods, "the contact emitted no secondary /GRNOD")
+        nodes = set()
+        for blk in grnods:
+            for ln in blk[2:]:
+                if ln.strip() and not ln.startswith("#"):
+                    nodes.update(int(ln[i:i + 10]) for i in
+                                 range(0, len(ln.rstrip()), 10))
+        self.assertTrue({1, 2, 3, 4, 5, 6} <= nodes, sorted(nodes))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestTwoDBeltShellIdClash(unittest.TestCase):
+    """*ELEMENT_SEATBELT and *ELEMENT_SHELL are separate LS-DYNA id namespaces
+    that both become /SHELL, so a collision is legal upstream and a lost
+    element here. Every other cross-namespace element-id collision in this
+    converter is reported; this one used to be silent."""
+
+    _SHELL = """\
+*PART
+plate
+       500       500       500
+*SECTION_SHELL
+       500         2
+       2.0       2.0       2.0       2.0
+*MAT_ELASTIC
+       500   7.8E-09  210000.0       0.3
+*ELEMENT_SHELL
+      31     500       1       2       3       4
+"""
+
+    def test_the_dropped_belt_element_is_named(self):
+        r, _s, _e = _convert(_deck(
+            _SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914), self._SHELL,
+            "*ELEMENT_SEATBELT\n"
+            + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23)))
+        self.assertTrue(_warns(r, "already uses"))
+        self.assertTrue(_warns(r, "*ELEMENT_SHELL on part 500"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestTwoDBeltDirection(unittest.TestCase):
+    """The starter follows the (n1,n2)/(n4,n3) edges to build the 1D strands,
+    so the local node order has to run ALONG the belt. Rotating it one place
+    is ERROR 2075 — measured as a negative control against NORMAL TERMINATION
+    for the along-the-pull ordering."""
+
+    _STRIP_NODES = """\
+*NODE
+       200             0.0             0.0             0.0
+       201             0.0            50.0             0.0
+       202            25.0             0.0             0.0
+       203            25.0            50.0             0.0
+       204            50.0             0.0             0.0
+       205            50.0            50.0             0.0
+"""
+
+    def _deck(self, along: bool):
+        if along:
+            rows = (_belt_card(41, 800, 200, 202, 0, 0.0, 203, 201)
+                    + _belt_card(42, 800, 202, 204, 0, 0.0, 205, 203))
+        else:                                   # connectivity rotated one place
+            rows = (_belt_card(41, 800, 202, 203, 0, 0.0, 201, 200)
+                    + _belt_card(42, 800, 204, 205, 0, 0.0, 203, 202))
+        return _deck(_SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914),
+                     self._STRIP_NODES, "*ELEMENT_SEATBELT\n" + rows)
+
+    def test_a_transverse_local_order_is_named(self):
+        r, _s, _e = _convert(self._deck(along=False))
+        self.assertTrue(_warns(r, "ERROR 2075"))
+
+    def test_an_along_the_belt_order_is_silent(self):
+        r, _s, _e = _convert(self._deck(along=True))
+        self.assertEqual(_warns(r, "ERROR 2075"), [])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestBeltCardSlicing(unittest.TestCase):
+    """``EID(I8) PID(I8) N1(I8) N2(I8) SBRID(I8) SLEN(F16) N3(I8) N4(I8)``.
+
+    The card is SLICED first and free-split only as a fallback. Trying the free
+    split first and accepting it whenever it yields five short tokens reads a
+    column-correct card with a BLANK interior cell one slot out of phase, and
+    every field after the blank is then wrong — which on this card turns a 2D
+    shell belt into a 1D spring with invented slack, and the part is then
+    claimed by BOTH routes.
+    """
+
+    @staticmethod
+    def _slice(line):
+        from k2rad.handlers import _seatbelt_elem_card
+        return _seatbelt_elem_card(line)
+
+    def test_a_blank_slen_keeps_n3_and_n4_in_place(self):
+        f = self._slice("       1      10       1       2       0"
+                        "                       7       8")
+        self.assertEqual(f[:5], ["1", "10", "1", "2", "0"])
+        self.assertEqual(f[5], "", "SLEN blank")
+        self.assertEqual(f[6:8], ["7", "8"], "N3 N4")
+
+    def test_a_blank_sbrid_keeps_slen(self):
+        f = self._slice("       1      10       1       2        "
+                        "            3.25       0       0")
+        self.assertEqual(f[4], "", "SBRID blank")
+        self.assertEqual(f[5], "3.25")
+
+    def test_a_blank_slen_2d_belt_converts_as_a_shell(self):
+        """End to end: the mis-slice made this a 1D /SPRING on (20,21) with
+        7 mm of slack, and the part was then claimed by both routes."""
+        r, starter, _e = _convert(_deck(
+            _SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914),
+            "*ELEMENT_SEATBELT\n"
+            + "      31     800      20      21       0"
+            + "                      22      23\n"))
+        self.assertEqual(r.skipped_keywords, [])
+        self.assertIn("/SHELL/800", starter)
+        self.assertNotIn("/SPRING/800", starter)
+        self.assertNotIn("/MAT/LAW114/900", starter)
+        self.assertEqual(_warns(r, "SLEN="), [])
+
+    def test_a_free_format_card_still_reads(self):
+        f = self._slice("1 10 1 2 0 3.25 7 8")
+        self.assertEqual(f[:8], ["1", "10", "1", "2", "0", "3.25", "7", "8"])
+
+    def test_a_comma_card_still_reads(self):
+        f = self._slice("1,10,1,2,0,3.25,7,8")
+        self.assertEqual(f[:8], ["1", "10", "1", "2", "0", "3.25", "7", "8"])
+
+    def test_a_comma_card_with_an_empty_cell_keeps_its_position(self):
+        f = self._slice("1,10,1,2,,,7,8")
+        self.assertEqual(f[:8], ["1", "10", "1", "2", "", "", "7", "8"])
+
+    def test_a_full_width_fixed_card_reads(self):
+        """Every cell filled to its width glues the fields together, which is
+        why a free split cannot be the primary rule."""
+        f = self._slice("12345678 1234567 1234567 1234561 1234562"
+                        "        1.234567 1234563 1234564")
+        self.assertEqual(f[0], "12345678")
+        self.assertEqual(f[5], "1.234567")
+        self.assertEqual(f[7], "1234564")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestRetractorCurveOffsets(unittest.TestCase):
+    """Card 2 is ``TDEL PULL LLCID ULCID LFED LCFL FLOPT`` — THREE
+    *DEFINE_CURVE references, not two. LCFL is warn-dropped, so no emitted
+    card dangles, but the rewritten .k is what a second consumer reads and
+    what the warning quotes."""
+
+    def _state(self, idfoff):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write("*KEYWORD\n"
+                     + _retractor(card2=(0.003, 12.0, 910, 911, 6.25, 913, 2))
+                     + "*END\n")
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
+                     + _card(0, 0, 0, 0, 0, idfoff) + "*END\n")
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.state import ConversionState
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        return state
+
+    def test_all_three_curve_cells_move(self):
+        r = self._state(6000).seatbelt_retractors[0]
+        self.assertEqual(r.llcid, 6910)
+        self.assertEqual(r.ulcid, 6911)
+        self.assertEqual(r.lcfl, 6913, "LCFL is a curve too")
+
+    def test_the_pretensioner_sbrid_follows_its_sbprty(self):
+        """SBRID is a RETRACTOR on SBPRTY 1/4/5/6/7/8 (IDROFF) and a SPRING
+        ELEMENT on 2/3/9 (IDEOFF). One cell, two namespaces, and card ONE
+        picks."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write("*KEYWORD\n*ELEMENT_SEATBELT_PRETENSIONER\n"
+                     + _card(70, 4, 63, 0, 0, 0) + _card(41, 0.002, 912, 0)
+                     + _card(71, 2, 63, 0, 0, 0) + _card(41, 0.002, 912, 0)
+                     + "*END\n")
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            # Card 2b.1 is IDNOFF..IDDOFF (SEVEN cells); IDROFF is card 2b.2
+            # field 0 (Vol I *INCLUDE_TRANSFORM, Card Summary).
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
+                     + _card(0, 2000, 0, 0, 0, 6000, 0)
+                     + _card(8000) + "*END\n")
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.state import ConversionState
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        by_id = {p.sbprid: p for p in state.seatbelt_pretensioners}
+        self.assertEqual(sorted(by_id), [8070, 8071])
+        self.assertEqual(by_id[8070].sbrid, 8041, "SBPRTY 4 -> IDROFF")
+        self.assertEqual(by_id[8071].sbrid, 2041, "SBPRTY 2 -> IDEOFF")
+
+    def test_the_non_curve_cells_stay(self):
+        r = self._state(6000).seatbelt_retractors[0]
+        self.assertEqual(r.lfed, 6.25)
+        self.assertEqual(r.flopt, 2)
+        self.assertEqual(r.pull, 12.0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestSlipringCardTwoDiscriminator(unittest.TestCase):
+    """``_slipring_card2_follows``'s ``looks_like_card1`` vote. Raw contiguity
+    alone is not enough: two rings written back to back with NO card 2 on the
+    first put a card 1 on the contiguous row, and reading it as a card 2
+    swallows the second ring whole."""
+
+    @staticmethod
+    def _rings(text):
+        from k2rad.parser import parse_k_file
+        from k2rad.handlers import dispatch
+        from k2rad.state import ConversionState
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write("*KEYWORD\n" + text + "*END\n")
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        return sorted(state.seatbelt_sliprings, key=lambda s: s.sbsrid)
+
+    def _two_rings(self, onid1):
+        return ("*ELEMENT_SEATBELT_SLIPRING\n"
+                + _card(51, 12, 13, 0.25, 7, None, 0.40, onid1)
+                + _card(52, 13, 14, 0.35, 8, None, 0.45, 0))
+
+    def test_a_missing_card_two_does_not_swallow_the_next_ring(self):
+        for onid1 in (0, 11):
+            with self.subTest(onid1=onid1):
+                rings = self._rings(self._two_rings(onid1))
+                self.assertEqual(len(rings), 2)
+                a, b = rings
+                self.assertEqual((a.sbsrid, a.sbid1, a.sbid2), (51, 12, 13))
+                self.assertEqual((b.sbsrid, b.sbid1, b.sbid2), (52, 13, 14))
+                self.assertEqual(b.fc, 0.35, "the second ring's own FC")
+                self.assertEqual(b.sbrnid, 8, "the second ring's anchorage")
+                self.assertFalse(a.has_card2)
+                self.assertFalse(b.has_card2)
+
+    def test_a_real_card_two_is_still_claimed(self):
+        """The negative control: the same shape WITH a card 2 must read it as
+        one, or the discriminator would be rejecting everything."""
+        rings = self._rings(_slipring(sbsrid=51, ltime=None,
+                                      card2=(0.55, 0, 12, 0.75, None, 920, 0)))
+        self.assertEqual(len(rings), 1)
+        self.assertTrue(rings[0].has_card2)
+        self.assertEqual(rings[0].k, 0.55)
+        self.assertEqual(rings[0].lcnffd, 920)
+
+    def test_a_card_two_with_a_blank_onid_is_claimed_by_its_own_geometry(self):
+        """The ``_populated_cells`` vote: a deck CAN write card 2 with ONID
+        blank (LCNFFD/LCNFFS need no orientation node), and card 2's field 4
+        is TEN LITERAL BLANKS while card 1's is SBRNID."""
+        rings = self._rings(_slipring(sbsrid=51, onid=0, ltime=None,
+                                      card2=(0.55, 0, 12, 0.75, None, 920, 0)))
+        self.assertEqual(len(rings), 1)
+        self.assertTrue(rings[0].has_card2)
+        self.assertEqual(rings[0].k, 0.55)
+        self.assertEqual(rings[0].lcnffd, 920)
+
+    def test_two_rings_each_with_their_own_card_two(self):
+        rings = self._rings(
+            "*ELEMENT_SEATBELT_SLIPRING\n"
+            + _card(51, 12, 13, 0.25, 7, None, 0.40, 11)
+            + _card(0.55, 0, 12, 0.75, None, 920, 0)
+            + _card(52, 13, 14, 0.35, 8, None, 0.45, 10)
+            + _card(0.65, 0, 21, 0.85, None, 930, 0))
+        self.assertEqual(len(rings), 2)
+        self.assertEqual([r.k for r in rings], [0.55, 0.65])
+        self.assertEqual([r.direct for r in rings], [12, 21])
+        self.assertEqual([r.lcnffd for r in rings], [920, 930])
 
 
 if __name__ == "__main__":

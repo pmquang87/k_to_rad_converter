@@ -51,6 +51,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
+                       _seatbelt_rows,
                        _part_option_keywords,
                        _part_options, _rwall_geometric_keywords,
                        _rwall_planar_keywords)
@@ -2387,8 +2388,7 @@ def _off_seatbelt_slipring(b: Block, offsets: Dict[str, int], warn) -> None:
     or the offsetter and the handler address different rows.
     """
     from .handlers import _slipring_card2_follows
-    rows = [i for i, ln in enumerate(b.raw)
-            if ln.strip() and not ln.lstrip().startswith("$")]
+    rows = _seatbelt_rows(b)
     k = 0
     while k < len(rows):
         i = rows[k]
@@ -2441,8 +2441,7 @@ def _off_seatbelt_retractor(b: Block, offsets: Dict[str, int], warn) -> None:
     it as absent would offset the NEXT retractor's card 1 as a card 2 and then
     run one card out of phase for the rest of the block.
     """
-    rows = [i for i, ln in enumerate(b.raw)
-            if ln.strip() and not ln.lstrip().startswith("$")]
+    rows = _seatbelt_rows(b)
     k = 0
     while k < len(rows):
         i = rows[k]
@@ -2463,7 +2462,18 @@ def _off_seatbelt_retractor(b: Block, offsets: Dict[str, int], warn) -> None:
             if upd is not None:
                 b.raw[i] = upd
         if k < len(rows) and rows[k] == i + 1:
-            new = _rewrite_line(b.raw[rows[k]], [(2, "f"), (3, "f")], offsets)
+            # TDEL PULL LLCID ULCID LFED LCFL FLOPT — THREE *DEFINE_CURVE
+            # references, not two: LCFL (field 5) is the adaptive multi-level
+            # load limiter, "a curve representing an adaptive multi-level load
+            # limiter ... the abscissa is the ID of a *SENSOR_SWITCH" (Vol I
+            # *ELEMENT_SEATBELT_RETRACTOR), so the CELL is a curve id like any
+            # other even though its POINTS are switch ids. k2rad warn-drops
+            # LCFL, so no EMITTED card dangles either way, but the rewritten .k
+            # is what a second consumer reads and what the warning quotes.
+            # (The switch ids INSIDE that curve are a *SENSOR_SWITCH namespace
+            # k2rad does not convert and cannot offset from here.)
+            new = _rewrite_line(b.raw[rows[k]],
+                                [(2, "f"), (3, "f"), (5, "f")], offsets)
             if new is not None:
                 b.raw[rows[k]] = new
             k += 1
@@ -2474,8 +2484,14 @@ def _off_seatbelt_pretensioner(b: Block, offsets: Dict[str, int],
     """*ELEMENT_SEATBELT_PRETENSIONER, both cards.
 
     Card 1 ``SBPRID SBPRTY SBSID1..SBSID4`` (the four sensor ids move with
-    IDROFF), card 2 ``SBRID TIME PTLCID LMTFRC LMTPIN`` (SBRID is a RETRACTOR,
-    IDROFF; PTLCID a curve, IDFOFF).
+    IDROFF), card 2 ``SBRID TIME PTLCID LMTFRC LMTPIN`` (PTLCID a curve,
+    IDFOFF).
+
+    ``SBRID`` sits in TWO id namespaces and card ONE says which: "Retractor
+    number (SBPRTY = 1, 4, 5, 6, 7 or 8) or SPRING ELEMENT number
+    (SBPRTY = 2, 3 or 9)" (Vol I *ELEMENT_SEATBELT_PRETENSIONER). Offsetting it
+    as a retractor on a SBPRTY 2/3/9 card moves a belt element id by IDROFF and
+    dangles it — which is why this is a walker and not a flat spec.
 
     Card 2 is claimed by RAW CONTIGUITY, and here the reason is sharper than
     on the retractor: on SBPRTY 7/8/9 the legacy ``Keyword971`` cfg writes card
@@ -2483,8 +2499,7 @@ def _off_seatbelt_pretensioner(b: Block, offsets: Dict[str, int],
     would take the next pretensioner's card 1 as this one's SBRID and offset it
     twice.
     """
-    rows = [i for i, ln in enumerate(b.raw)
-            if ln.strip() and not ln.lstrip().startswith("$")]
+    rows = _seatbelt_rows(b)
     k = 0
     while k < len(rows):
         i = rows[k]
@@ -2498,7 +2513,9 @@ def _off_seatbelt_pretensioner(b: Block, offsets: Dict[str, int],
         if new is not None:
             b.raw[i] = new
         if k < len(rows) and rows[k] == i + 1:
-            new = _rewrite_line(b.raw[rows[k]], [(0, "r"), (2, "f")], offsets)
+            sbrid_bucket = "e" if _geti(f1, 1) in (2, 3, 9) else "r"
+            new = _rewrite_line(b.raw[rows[k]],
+                                [(0, sbrid_bucket), (2, "f")], offsets)
             if new is not None:
                 b.raw[rows[k]] = new
             k += 1
@@ -2521,8 +2538,7 @@ def _off_seatbelt_sensor(b: Block, offsets: Dict[str, int], warn) -> None:
     """
     _card2 = {1: [(0, "n")], 2: [(0, "r")], 3: [], 4: [(0, "n"), (1, "n")],
               5: [(0, "r")]}
-    rows = [i for i, ln in enumerate(b.raw)
-            if ln.strip() and not ln.lstrip().startswith("$")]
+    rows = _seatbelt_rows(b)
     k = 0
     while k < len(rows):
         i = rows[k]

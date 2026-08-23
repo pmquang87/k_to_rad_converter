@@ -66,13 +66,19 @@ __all__ = [
 def _split_device_anchor_nodes(state: ConversionState) -> None:
     """Give every slipring and retractor an anchorage node OFF the belt.
 
-    **The one structural difference between the two solvers' restraint models,
-    and it is fatal if it is not converted.**
+    **The rule LS-DYNA states but does not enforce, and Radioss enforces with
+    a hard error.**
 
-    In LS-DYNA the device node IS a node of the belt: ``SBRNID`` on a retractor
-    is the node the mouth element hangs from, and ``SBRNID`` on a slipring is
-    the node the two strands share. In Radioss it must be a SEPARATE node
-    COINCIDENT with that one — ``hm_read_retractor.F:341-345``::
+    Both manuals ask for the same topology. Vol I
+    *ELEMENT_SEATBELT_SLIPRING, Remark 1: "The two elements must have a common
+    node COINCIDENT WITH the slip ring node ... belt elements should not be
+    connected to this node directly"; *ELEMENT_SEATBELT_RETRACTOR, Remark 1:
+    "Do not connect belt elements to this node directly. ... The mouth element
+    should have a node coincident with the retractor". So the device node is
+    NOT supposed to be a node of the belt in LS-DYNA either — but LS-DYNA
+    accepts a deck that shares it, and real decks (and dyna2rad's output on
+    them) do. Radioss refuses that outright —
+    ``hm_read_retractor.F:341-345``::
 
         IF (RETRACTOR(I)%NODE(2) == RETRACTOR(I)%ANCHOR_NODE) THEN
           CALL ANCMSG(MSGID=2030, MSGTYPE=MSGERROR, ...)
@@ -96,7 +102,11 @@ def _split_device_anchor_nodes(state: ConversionState) -> None:
     the mouth node's whole force and stiffness onto the anchor and then ZEROES
     the mouth node's acceleration, and ``kine_seatbelt_vel.F:188-190`` sets its
     velocity to the anchor's plus the material flow along the strand. That is
-    precisely the LS-DYNA behaviour the shared node expressed.
+    precisely the LS-DYNA behaviour Remark 1 describes ("its motion will
+    automatically be constrained to follow the slip ring node") — and it is
+    also why the anchorage must NOT be pinned by the implicit free-node guard
+    (``loads._make_free_node_constraints``): it receives the belt's force and
+    stiffness every cycle.
 
     Runs in the build_starter prepass, before the /NODE block is written and
     before ``_make_seatbelts`` writes the /SPRING rows that carry the ids.
@@ -225,12 +235,31 @@ def _assign_seatbelt_props(state: ConversionState) -> None:
     """
     from ..state import ShellElem
     if state.seatbelt_elems:
-        known = {e.eid for e in state.shell_elems}
+        known = {e.eid: e.pid for e in state.shell_elems}
+        clash: List[str] = []
         for e in state.seatbelt_elems:
-            if not e.is_2d or e.eid in known:
+            if not e.is_2d:
+                continue
+            if e.eid in known:
+                clash.append(f"{e.eid} (part {e.pid}, taken by *ELEMENT_SHELL "
+                             f"on part {known[e.eid]})")
                 continue
             state.shell_elems.append(
                 ShellElem(e.eid, e.pid, [e.n1, e.n2, e.n3, e.n4]))
+        if clash:
+            # Never silently: *ELEMENT_SEATBELT and *ELEMENT_SHELL are separate
+            # LS-DYNA id namespaces that both land on /SHELL, so a collision is
+            # legal upstream and a lost element here. Reported in the shape
+            # loads.py::_spring_eid_families uses for the /SPRING namespaces.
+            state.warn(
+                f"*ELEMENT_SEATBELT: {len(clash)} 2D (shell) belt element(s) "
+                "carry an EID an *ELEMENT_SHELL already uses — "
+                + "; ".join(clash[:6])
+                + (" ..." if len(clash) > 6 else "")
+                + ". The two are separate LS-DYNA id namespaces but both "
+                "become /SHELL, where one id is one element, so the belt "
+                "element is DROPPED: that strip of webbing carries no force "
+                "and its /TH channel is lost. Renumber the belt elements.")
     for pid in sorted(_seatbelt_2d_part_ids(state)):
         if pid in state.seatbelt_prop_ids:
             continue
@@ -657,7 +686,15 @@ def _warn_lmin_geometry(state: ConversionState, mat: MatSeatbelt,
             "*MAT_SEATBELT remarks; material_flow.F:229-241), and below it the "
             "device remeshes the element on nearly every cycle. Lengthen those "
             "elements or lower LMIN.")
+    # Scoped to the retractors whose MOUTH ELEMENT is on this material: LMIN is
+    # a property of the material, and rinit3.F:457 folds Elem_size into the
+    # LMIN of that retractor's OWN elements. Without the scope a deck with M
+    # belt materials and R retractors emits M*R identical LFED warnings, most
+    # of them about a pairing that does not exist.
+    mine = {e.eid for e in elems}
     for r in state.seatbelt_retractors:
+        if r.sbid not in mine:
+            continue
         if r.lfed > 0.0 and r.lfed < 3.0 * mat.lmin:
             state.warn(
                 f"*ELEMENT_SEATBELT_RETRACTOR {r.sbrid}: LFED={r.lfed:g} is "
@@ -778,10 +815,28 @@ def _seatbelt_2d_weft(state: ConversionState, mat: MatSeatbelt
 def _seatbelt_2d_re(state: ConversionState, mat: MatSeatbelt) -> float:
     """``RE`` — the compression reduction factor ``E11c/E11`` — from ``CSE``.
 
-    LS-DYNA's CSE is the compressive-stress-elimination option and 0 is its
-    DEFAULT: ``0.0: Eliminate compressive stresses in shell fabric``;
-    ``1.0: Don't eliminate ...``; ``2.0: ... decided by LS-DYNA
-    automatically`` (``Keyword971_R8.0/MAT/SB_MAT.cfg:142-147``).
+    **CSE's two values mean OPPOSITE things depending on FORM, and the manual
+    says so in one sentence that is easy to read past.** Vol II *MAT_SEATBELT,
+    the CSE entry: "Compressive stress elimination option ... available since
+    r137465/dev **for non-zero FORM**. The old recommended option of CSE = 2,
+    available since R8, still works if and only if FORM = 0. **For non-zero
+    FORM:** EQ.0.0: don't eliminate ...; EQ.1.0: eliminate ...".
+
+    So there are two mappings:
+
+    * ``FORM == 0`` (the DEFAULT, and what every R8-era deck writes) — the old
+      table, which is what the shipped cfg still encodes
+      (``Keyword971_R12.0/MAT/SB_MAT.cfg:161-165``):
+      ``0.0: Eliminate compressive stresses in shell fabric``;
+      ``1.0: Dont eliminate ...``; ``2.0: ... decided by LS-DYNA
+      automatically``.
+    * ``FORM != 0`` — INVERTED: 0 keeps compression, 1 eliminates it, and
+      CSE = 2 is no longer valid at all.
+
+    Reading only the cfg (or only the newer manual paragraph) inverts the flag
+    on half the decks in the field. FORM itself has no Radioss counterpart and
+    is warn-dropped in :func:`_make_seatbelt_2d_materials`; it is read HERE
+    only to pick the right table.
 
     Radioss's ``RE`` multiplies the compressive stress directly —
     ``law119_membrane.F:190-191`` ``SIGNXX(I) = (A11*EPSXX + A12*EPSYY)*RCOMP``
@@ -802,18 +857,45 @@ def _seatbelt_2d_re(state: ConversionState, mat: MatSeatbelt) -> float:
     and 0.01 is dyna2rad's own "eliminated" constant — inside the range the
     reader validates, and two orders below the tension stiffness.
     """
-    if mat.cse == 0.0:
+    label = f"*MAT_SEATBELT{'_2D' if mat.is_2d else ''} {mat.mid}"
+    # Which CSE VALUE means "eliminate": 0 on the FORM=0 table, 1 on the other.
+    eliminate = 1.0 if mat.form else 0.0
+    if mat.cse in (0.0, 1.0):
+        if mat.form and mat.cse != 0.0:
+            # Both values flip between the two tables, so both get a note —
+            # this one for the value that ELIMINATES on a non-zero FORM.
+            state.warn(
+                f"{label}: FORM={mat.form} is non-zero, so CSE={mat.cse:g} "
+                "means ELIMINATE compressive stresses — the OPPOSITE of what "
+                "the same value means on the FORM=0 belt every R8-era deck "
+                "writes (Vol II *MAT_SEATBELT, CSE: 'For non-zero FORM: "
+                "EQ.0.0: don't eliminate ...; EQ.1.0: eliminate ...'). "
+                "/MAT/LAW119 RE is written for the non-zero-FORM reading. "
+                "dyna2rad has no FORM branch at all.")
+        elif mat.form and mat.cse == 0.0:
+            state.warn(
+                f"{label}: FORM={mat.form} is non-zero, so CSE=0 means KEEP "
+                "compressive stresses (Vol II *MAT_SEATBELT, CSE) — on a "
+                "FORM=0 belt the same value ELIMINATES them. RE=1.0 is "
+                "written for the non-zero-FORM reading.")
+        return 0.01 if mat.cse == eliminate else 1.0
+    if mat.form:
+        state.warn(
+            f"{label}: CSE={mat.cse:g} is only defined for FORM=0 ('the old "
+            "recommended option of CSE = 2 ... still works if and only if "
+            f"FORM = 0', Vol II *MAT_SEATBELT) and this material states "
+            f"FORM={mat.form}. RE=0.01 (eliminate) is written, which is what a "
+            "slack belt does physically; state CSE explicitly if that is not "
+            "what the deck means.")
         return 0.01
-    if mat.cse == 1.0:
-        return 1.0
     state.warn(
-        f"*MAT_SEATBELT{'_2D' if mat.is_2d else ''} {mat.mid}: CSE="
-        f"{mat.cse:g} asks LS-DYNA to decide per element whether compressive "
-        "stress is eliminated. Radioss has ONE constant for the whole "
-        "material (/MAT/LAW119 RE, the compression reduction factor E11c/E11), "
-        "so RE=0.01 is written — the ELIMINATE side, which is what CSE=0 (the "
-        "LS-DYNA default) means and what a slack belt does physically. A "
-        "2D belt that needs compressive stiffness has to state CSE=1.")
+        f"{label}: CSE={mat.cse:g} asks LS-DYNA to decide per element whether "
+        "compressive stress is eliminated. Radioss has ONE constant for the "
+        "whole material (/MAT/LAW119 RE, the compression reduction factor "
+        "E11c/E11), so RE=0.01 is written — the ELIMINATE side, which is what "
+        "CSE=0 means on a FORM=0 belt (the LS-DYNA default) and what a slack "
+        "belt does physically. A 2D belt that needs compressive stiffness has "
+        "to state CSE=1.")
     return 0.01
 
 
@@ -1184,6 +1266,14 @@ def _make_sliprings(state: ConversionState, pool: "_SensorPool",
 #: (``convertelements.cxx:1019``) and so never produces Tens_typ 4 at all.
 _PRETENSIONER_TENS_TYP = {1: 1, 4: 2, 5: 1, 6: 3, 7: 4, 8: 5}
 
+#: The SBPRTY values whose card-2 ``SBRID`` is a SPRING ELEMENT id rather than
+#: a retractor id — Vol I *ELEMENT_SEATBELT_PRETENSIONER, SBRID: "Retractor
+#: number (SBPRTY = 1, 4, 5, 6, 7 or 8) or spring element number
+#: (SBPRTY = 2, 3 or 9)". One cell, two id namespaces, chosen by a field on the
+#: OTHER card — so every walk over it (the retractor map here, the
+#: *INCLUDE_TRANSFORM offsetter in assembly.py) has to branch on SBPRTY.
+_PRETENSIONER_SPRING_SBRID = frozenset({2, 3, 9})
+
 #: The SBPRTY values with no Radioss target, and what each one costs.
 _PRETENSIONER_UNSUPPORTED = {
     2: "a PRE-LOADED SPRING released at the trigger. It is not a retractor "
@@ -1215,6 +1305,19 @@ def _resolve_pretensioners(state: ConversionState
     """
     by_ret: Dict[int, List[object]] = {}
     for p in sorted(state.seatbelt_pretensioners, key=lambda x: x.sbprid):
+        # Card-2 field 0 is NOT always a retractor. Vol I
+        # *ELEMENT_SEATBELT_PRETENSIONER, SBRID: "Retractor number
+        # (SBPRTY = 1, 4, 5, 6, 7 or 8) or SPRING ELEMENT NUMBER
+        # (SBPRTY = 2, 3 or 9)" — two different id NAMESPACES in one cell.
+        # Keying the map on it regardless lets a spring element id that
+        # numerically equals a retractor id claim that retractor's card 3:
+        # the SBPRTY 2/3/9 record sorts first on SBPRID, takes the single
+        # `pretensioners[0]` slot, resolves to Tens_typ 0 — and the REAL
+        # pretensioner beside it is then dropped as "extra". So the spring
+        # types never enter this map; the unclaimed-pretensioner loop at the
+        # end of _make_retractors reports them for the right reason.
+        if p.sbprty in _PRETENSIONER_SPRING_SBRID:
+            continue
         by_ret.setdefault(p.sbrid, []).append(p)
     return by_ret
 
@@ -1302,10 +1405,16 @@ def _make_retractors(state: ConversionState, pool: "_SensorPool",
                                "Sens_ID1 (lock) and Sens_ID2 (pretension) and "
                                "no third slot, so the retractor cannot be "
                                "switched off again once it locks",
-                       "LCFL": "a load curve for the force limit vs time; "
-                               "Radioss's Force cell is a single value and the "
-                               "pretensioner curve Fct_ID3 is already spoken "
-                               "for",
+                       "LCFL": "the ADAPTIVE MULTI-LEVEL load limiter — a "
+                               "curve whose ABSCISSA is a *SENSOR_SWITCH id "
+                               "and whose ordinate is that switch's force "
+                               "limit (Vol I *ELEMENT_SEATBELT_RETRACTOR), so "
+                               "it is a switch-driven schedule of limits, not "
+                               "a force-vs-time curve. Radioss's Force cell is "
+                               "ONE value and the pretensioner curve Fct_ID3 "
+                               "is already spoken for; *SENSOR_SWITCH has no "
+                               "converter at all, so neither half is "
+                               "expressible",
                        "FLOPT": "the force-limiter option flag, which selects "
                                 "between limiting schemes Radioss does not "
                                 "distinguish"}[name] + ".")
@@ -1314,12 +1423,26 @@ def _make_retractors(state: ConversionState, pool: "_SensorPool",
         # TSTART is passed, gated only by LOCK_PULL >= Pullout.
         sens1 = _resolve_retractor_sensor(
             state, pool, r.sensor_ids(), r.tdel, label, "lock")
-        if sens1 > 0 and r.llcid <= 0:
+        # The RESOLVED Fct_ID1, not the raw LLCID: _resolve_belt_curve returns
+        # 0 for a curve the converted deck does not define, and a Sens_ID1 > 0
+        # beside a Fct_ID1 of 0 is what the starter refuses — not a zero in the
+        # LS-DYNA field. hm_read_retractor.F:236-242
+        # ``IF ((ISENS(1) > 0).AND.(IFUNC(1)==0)) ANCMSG(MSGID=2031)``.
+        fct1 = _resolve_belt_curve(state, r.llcid, "LLCID", label)
+        fct2 = _resolve_belt_curve(state, r.ulcid, "ULCID", label)
+        if sens1 > 0 and fct1 <= 0:
             state.warn(
-                f"{label}: a lock sensor is wired but LLCID is 0. The starter "
-                "makes the loading curve MANDATORY as soon as Sens_ID1 > 0 "
-                "(ERROR 2031, hm_read_retractor.F), because a locked reel with "
-                "no force-vs-pullout curve has nothing to pull against.")
+                f"{label}: a lock sensor is wired but LLCID"
+                + (" is 0" if r.llcid <= 0 else
+                   f"={r.llcid} resolves to no curve")
+                + ". The starter makes the loading curve MANDATORY as soon as "
+                "Sens_ID1 > 0 (ERROR 2031, hm_read_retractor.F:236-242), "
+                "because a locked reel with no force-vs-pullout curve has "
+                "nothing to pull against, so the SENSOR is dropped with it "
+                "rather than refusing the deck: the retractor never locks and "
+                "the belt spools freely for the whole run. This is the same "
+                "answer the pretensioner's ERROR 2025 gets below.")
+            sens1 = 0
         pret_sens = 0
         tens_typ = 0
         force = 0.0
@@ -1360,6 +1483,26 @@ def _make_retractors(state: ConversionState, pool: "_SensorPool",
                 pret_sens = _resolve_retractor_sensor(
                     state, pool, p.sensor_ids(), p.time, plabel, "pretension")
                 force = p.lmtfrc
+                # "Optional limiting force for retractor types 5 AND 8"
+                # (Vol I *ELEMENT_SEATBELT_PRETENSIONER, LMTFRC) — LS-DYNA
+                # ignores it on every other type. Radioss reads its Force cell
+                # under Tens_typ 1 and 5 ONLY (material_flow.F:546,583), so the
+                # two solvers disagree in exactly one place: SBPRTY=1, which
+                # maps to Tens_typ 1. There the value would become a
+                # deactivation force the source deck does not have. On
+                # SBPRTY 4/6/7 (Tens_typ 2/3/4) the cell is inert on BOTH
+                # sides, so it is written through unchanged.
+                if force and tens_typ in (1, 5) and p.sbprty not in (5, 8):
+                    state.warn(
+                        f"{plabel}: LMTFRC={force:g} is DROPPED. LS-DYNA "
+                        "applies the limiting force to retractor types 5 and 8 "
+                        f"only (Vol I, LMTFRC) and this is SBPRTY={p.sbprty}, "
+                        "so in the source deck it is INERT — while "
+                        "/RETRACTOR/SPRING's Force cell IS live on Tens_typ 1 "
+                        "(material_flow.F:546), which SBPRTY=1 maps to. "
+                        "Writing it through would deactivate the pretensioner "
+                        "at a force the deck never asked for.")
+                    force = 0.0
                 fct3 = _resolve_belt_curve(state, p.ptlcid, "PTLCID", plabel)
                 if pret_sens > 0 and fct3 <= 0:
                     state.warn(
@@ -1380,12 +1523,23 @@ def _make_retractors(state: ConversionState, pool: "_SensorPool",
         state.retractor_ids.append((r.sbrid, f"RETRACTOR_{r.sbrid}"))
         lines += _emit_retractor(
             r.sbrid, f"RETRACTOR_{r.sbrid}", r.sbid, r.sbrnid, r.lfed,
-            sens1, r.pull,
-            _resolve_belt_curve(state, r.llcid, "LLCID", label),
-            _resolve_belt_curve(state, r.ulcid, "ULCID", label),
+            sens1, r.pull, fct1, fct2,
             pret_sens, tens_typ, force, fct3)
     for p in sorted(state.seatbelt_pretensioners, key=lambda x: x.sbprid):
         if p.sbprid in claimed:
+            continue
+        if p.sbprty in _PRETENSIONER_SPRING_SBRID:
+            state.warn(
+                f"*ELEMENT_SEATBELT_PRETENSIONER {p.sbprid}: SBPRTY="
+                f"{p.sbprty}, so its card-2 SBRID={p.sbrid} is a SPRING "
+                "ELEMENT id, not a retractor (Vol I "
+                "*ELEMENT_SEATBELT_PRETENSIONER, SBRID). "
+                + _PRETENSIONER_UNSUPPORTED[p.sbprty]
+                + ", so it is DROPPED whole and the belt is NOT pre-tensioned. "
+                "It is deliberately kept out of the retractor map as well: an "
+                "element id that happens to equal a retractor id would "
+                "otherwise take that retractor's ONE card-3 slot and push its "
+                "real pretensioner out.")
             continue
         state.warn(
             f"*ELEMENT_SEATBELT_PRETENSIONER {p.sbprid}: its card-2 SBRID="
@@ -1489,7 +1643,12 @@ def _make_seatbelt_accelerometers(state: ConversionState) -> List[str]:
             # equally. /ADMAS/0 adds its value to EACH node of the /GRNOD.
             nids = sorted({n for n in (a.nid1, a.nid2, a.nid3)
                            if n > 0 and n in state.nodes})
-            grnod_id = state.next_id()
+            # next_grnod_id, not next_id: k2rad re-emits every user *SET_NODE
+            # under its own SID, so a deck with a *SET_NODE at or above the
+            # auto-id base (90001) would land on this group's id and the
+            # starter answers ERROR 79 over the merged /GRNOD table. A no-op
+            # vs next_id() on any deck without one.
+            grnod_id = state.next_grnod_id()
             admas_id = state.next_id()
             per_node = a.mass / len(nids)
             lines += _emit_grnod_node(
@@ -1520,6 +1679,101 @@ def _make_seatbelt_accelerometers(state: ConversionState) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2D belts: /MAT/LAW119 + the synthesized /PROP/TYPE9 the law demands
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _belt_curves_intersect(state: ConversionState, load: int,
+                           unload: int) -> bool:
+    """Do the LAW119 loading and unloading curves CROSS at a positive abscissa?
+
+    A Radioss-only requirement with no LS-DYNA counterpart, and a hard starter
+    error when it fails: ``law119_upd.F:105`` runs ``TABLE_INTERS`` over the
+    pair and answers ``ERROR 3081 -- NO INTERSECTION FOUND BETWEEN LOADING AND
+    UNLOADING CURVES`` when the result is ``XINT == 0 .or. YINT == 0``. The
+    intersection is how the law anchors its hysteresis loop; LS-DYNA imposes no
+    such rule, and neither does LAW114 on the 1D route, so an ORDINARY LS-DYNA
+    pair — unloading everywhere below loading, both leaving the origin —
+    converts field-for-field correctly and still refuses to start. MEASURED:
+    loading (0,0)(0.1,1000)(0.2,3000) with unloading (0,0)(0.1,800)(0.2,2600)
+    gives ``ERROR ID : 3081``.
+
+    This is ``func_inters.F:398-454`` transcribed: first a common-POINT pass
+    over the two point lists from their second point on, then a segment-crossing
+    pass, both requiring ``S1 > 0``. ``FAC1``/``FAC2`` are dropped because the
+    reader gives both curves the SAME factor (``hm_read_mat119.F:139-145``
+    defaults each to 1 and then multiplies both by 1e-2), and a common positive
+    ordinate scale changes neither ALPHA, nor BETA, nor whether YINT is zero.
+    ``state.curves[...].pts`` are already SFA/SFO-scaled at parse time, which is
+    exactly what the /FUNCT carries.
+    """
+    c1 = state.curves.get(load)
+    c2 = state.curves.get(unload)
+    if c1 is None or c2 is None or len(c1.pts) < 2 or len(c2.pts) < 2:
+        return True                       # nothing to judge; let the deck speak
+    p1, p2 = c1.pts, c2.pts
+    for j in range(1, len(p1)):
+        s1, t1 = p1[j]
+        if s1 <= 0.0:
+            continue
+        for k in range(1, len(p2)):
+            x1, y1 = p2[k]
+            if x1 == s1 and y1 == t1:
+                return y1 != 0.0
+    for j in range(1, len(p1)):
+        s1, t1 = p1[j - 1]
+        s2, t2 = p1[j]
+        if s1 <= 0.0:
+            continue
+        for k in range(1, len(p2)):
+            x1, y1 = p2[k - 1]
+            x2, y2 = p2[k]
+            if x2 < s1 or s2 < x1:
+                continue
+            ax, ay = x2 - x1, y2 - y1
+            bx, by = s1 - s2, t1 - t2
+            dm = ay * bx - ax * by
+            if dm == 0.0:
+                continue                  # parallel segments
+            cx, cy = s1 - x1, t1 - y1
+            alpha = (bx * cy - by * cx) / dm
+            beta = (ax * cy - ay * cx) / dm
+            if 0.0 <= alpha < 1.0 and -1.0 < beta <= 0.0:
+                xint = x1 + alpha * ax
+                yint = y1 + alpha * ay
+                return xint != 0.0 and yint != 0.0
+    return False
+
+
+def _screen_belt_2d_curves(state: ConversionState, label: str,
+                           fct_load: int, fct_uload: int) -> int:
+    """``fct_uload``, dropped when it would trip ERROR 3081.
+
+    The house answer to a Radioss-only rule the deck cannot satisfy: keep the
+    deck STARTABLE and name the loss, the same choice
+    :func:`_resolve_belt_curve` makes for a curve the deck never defines.
+    Dropping ``FUN_UL`` puts the law on ``FUNC2 = 0``, which the reader reads as
+    "no unloading curve" (``hm_read_mat119.F:126`` also collapses
+    ``FUNC2 == FUNC1`` to 0) and ``law119_upd.F:88`` then skips the whole
+    intersection test — the belt unloads elastically along the loading curve
+    instead of down the unloading one, so the HYSTERESIS is lost while the
+    backbone is exact.
+    """
+    if fct_load <= 0 or fct_uload <= 0 or fct_uload == fct_load:
+        return fct_uload
+    if _belt_curves_intersect(state, fct_load, fct_uload):
+        return fct_uload
+    state.warn(
+        f"{label}: the loading curve {fct_load} and the unloading curve "
+        f"{fct_uload} never CROSS at a positive abscissa, so ULCID is DROPPED. "
+        "/MAT/LAW119 anchors its hysteresis loop on that intersection and the "
+        "starter refuses the whole deck without one (ERROR 3081, "
+        "law119_upd.F:105 -> TABLE_INTERS). LS-DYNA imposes no such rule — and "
+        "neither does the 1D route's /MAT/LAW114 — so this is a difference "
+        "between the two belt models, not a deck error. The belt now unloads "
+        "ELASTICALLY along the loading curve: the backbone force is unchanged "
+        "and the dissipated (hysteresis) energy is LOST. Give the two curves a "
+        "common point at a strain the belt actually reaches if the unloading "
+        "branch matters.")
+    return 0
+
 
 def _make_seatbelt_2d_materials(state: ConversionState) -> List[str]:
     """The /MAT/LAW119 cards of every 2D (shell) belt part.
@@ -1559,6 +1813,8 @@ def _make_seatbelt_2d_materials(state: ConversionState) -> List[str]:
                 "none of the weft or coating data and the reader's own "
                 "defaults are used for all of it.")
         e22, nu12, fscale22 = _seatbelt_2d_weft(state, mat)
+        fct_load = _resolve_belt_curve(state, mat.llcid, "LLCID", label)
+        fct_uload = _resolve_belt_curve(state, mat.ulcid, "ULCID", label)
         if mat.gab <= 0.0:
             state.warn(
                 f"{label}: GAB is not stated, so /MAT/LAW119 G12 is left 0 and "
@@ -1587,10 +1843,29 @@ def _make_seatbelt_2d_materials(state: ConversionState) -> List[str]:
                  "numbering for the 2D-to-1D conversion, which is an LS-DYNA "
                  "bookkeeping field with no model meaning in Radioss"),
                 ("FORM", float(mat.form),
-                 "the belt formulation selector. /MAT/LAW119 has one "
-                 "formulation")):
+                 "the belt formulation selector (it names a *MAT_FABRIC FORM) "
+                 "and /MAT/LAW119 has one formulation. NOTE that FORM is "
+                 "still READ, in _seatbelt_2d_re: it decides which of CSE's "
+                 "two OPPOSITE meanings applies")):
             if val:
                 state.warn(f"{label}: {name}={val:g} is DROPPED — {why}.")
+        if (mat.ecoat or mat.tcoat) and mat.form != -14:
+            # "Young's modulus of coat material FOR FORM = -14" / "Thickness of
+            # coat material FOR FORM = -14" (Vol II *MAT_SEATBELT). LS-DYNA
+            # reads the coating only on that formulation; /MAT/LAW119 has no
+            # such gate and applies EC/TC whenever they are non-zero, so the
+            # converted belt gains a coating the source deck does not have.
+            state.warn(
+                f"{label}: ECOAT={mat.ecoat:g} TCOAT={mat.tcoat:g} are stated "
+                f"but FORM={mat.form} is not -14. LS-DYNA reads the coating "
+                "fields only for FORM = -14 (Vol II *MAT_SEATBELT: 'Young's "
+                "modulus of coat material FOR FORM = -14'), so in the source "
+                "deck they are INERT — while /MAT/LAW119 has no such gate and "
+                "applies EC/TC whenever they are non-zero "
+                "(hm_read_mat119.F:166-168 A1C/A2C/GC). They are written "
+                "through as stated, so the converted belt is STIFFER than the "
+                "LS-DYNA one by the coating's contribution. Blank ECOAT and "
+                "TCOAT, or set FORM=-14, if that is not intended.")
         if mat.damp:
             state.warn(
                 f"{label}: DAMP={mat.damp:g} is a FRACTION of critical damping "
@@ -1614,8 +1889,8 @@ def _make_seatbelt_2d_materials(state: ConversionState) -> List[str]:
             # law114_upd does, which is the correct tangent and needs no
             # section (unknown here).
             0.0, 0.0, _seatbelt_2d_re(state, mat),
-            _resolve_belt_curve(state, mat.llcid, "LLCID", label),
-            _resolve_belt_curve(state, mat.ulcid, "ULCID", label),
+            fct_load,
+            _screen_belt_2d_curves(state, label, fct_load, fct_uload),
             0.0, 0.0, 0,
             e22, nu12, mat.gab, fscale22,
             mat.ecoat,
@@ -1704,7 +1979,70 @@ def _emit_seatbelt_2d_props(state: ConversionState) -> List[str]:
                 "edges (n0,n1) and (n3,n2) when it builds the 1D springs "
                 "(GlobalModelSdi.cpp:2400-2412). Check that the mesh's local "
                 "node order runs ALONG the belt.")
+        _warn_2d_belt_direction(state, pid, part.mid)
     return lines
+
+
+def _warn_2d_belt_direction(state: ConversionState, pid: int,
+                            mid: int) -> None:
+    """A 2D belt whose local node order does not run ALONG the strip.
+
+    The starter builds the 1D strand chain from the ``(n1,n2)`` and ``(n4,n3)``
+    edge pair, so those edges must CHAIN end to end: element k's ``n2`` is
+    element k+1's ``n1``. When the connectivity is rotated one place the edges
+    run ACROSS the strip instead, the starter groups the shells into strands of
+    a different width, and ``create_seatbelt.F:756-759`` answers
+    ``ERROR 2075 -- 2D SEATBELT MATERIAL IS USED FOR SEVERAL SEATBELTS with
+    different section`` (the same LAW119 material reaching two strand groups
+    whose computed ``SECTION`` differs by more than 1e-5) and refuses the deck.
+
+    MEASURED as a negative control: the same nodes, the same pull direction,
+    connectivity rotated one place — 2 x ERROR 2075, against NORMAL TERMINATION
+    (4804 cycles, 0 ERROR) for the along-the-pull ordering.
+
+    The test is TOPOLOGICAL and needs no coordinates: in a proper strip every
+    node is the tail of at most one belt edge and the head of at most one, so a
+    repeated or branching edge means the local order does not run along the
+    belt. It cannot judge a part with a single element, or one whose EDGSET
+    already states the direction — say so rather than imply a clean bill.
+    """
+    elems = [e for e in state.seatbelt_elems if e.is_2d and e.pid == pid]
+    if len(elems) < 2:
+        return
+    tails: Dict[int, Set[int]] = {}
+    seen: Set[Tuple[int, int]] = set()
+    bad: List[str] = []
+    for e in sorted(elems, key=lambda x: x.eid):
+        for a, b in ((e.n1, e.n2), (e.n4, e.n3)):
+            if a <= 0 or b <= 0 or a == b:
+                continue
+            if (a, b) in seen:
+                bad.append(f"element {e.eid}: edge ({a},{b}) is shared with an "
+                           "earlier element")
+                continue
+            seen.add((a, b))
+            heads = tails.setdefault(a, set())
+            if heads:
+                bad.append(f"element {e.eid}: node {a} already starts edge "
+                           f"({a},{sorted(heads)[0]})")
+            heads.add(b)
+    if not bad:
+        return
+    state.warn(
+        f"2D seatbelt part {pid}: the (n1,n2)/(n4,n3) edges of its "
+        f"*ELEMENT_SEATBELT shells do NOT chain end to end — "
+        + "; ".join(bad[:4])
+        + (f", ... ({len(bad)} cases)" if len(bad) > 4 else "")
+        + ". Those two edges are what the starter follows to build the belt's "
+        "1D strands (hm_convert_2d_elements_seatbelt.F), so a local node order "
+        "that runs ACROSS the strip instead of along it groups the shells into "
+        "strands of the wrong width and the starter refuses the deck with "
+        f"ERROR 2075 (2D SEATBELT MATERIAL {mid} IS USED FOR SEVERAL SEATBELTS "
+        "with different section, create_seatbelt.F:756-759). Rotate the "
+        "element connectivity so n1->n2 runs along the belt, or state the "
+        "direction with an EDGSET on the *SECTION_SHELL. LS-DYNA imposes no "
+        "such rule, so this is a difference between the two belt models rather "
+        "than a defect in the deck.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1753,6 +2091,58 @@ def _seatbelt_prop_ids(state: ConversionState, pids: List[int]
     return out
 
 
+def _seatbelt_inert_mat_ids(state: ConversionState,
+                            pids: List[int]) -> Dict[int, int]:
+    """``part id -> the /MAT/LAW114 id`` for a belt part with NO *MAT_SEATBELT.
+
+    The INERT branch of :func:`_make_seatbelts` has to write SOME /MAT/LAW114,
+    because a /PART on a /PROP/TYPE23 must name a law the starter accepts
+    (ERROR 1715 otherwise). Writing it under ``part.mid`` verbatim is only safe
+    while nothing else owns that id — and the case this branch exists for is
+    precisely a belt part pointing at an ORDINARY material, which materials.py
+    then also writes. MEASURED: a *PART on a *SECTION_SEATBELT whose MID is a
+    *MAT_ELASTIC used by a shell part emits both ``/MAT/ELAST/<mid>`` and
+    ``/MAT/LAW114/<mid>`` and the starter answers three errors — ``ERROR 79``
+    (DUPLICATE ID, IN MATERIAL DEFINITION), then ``ERROR 1715`` and
+    ``ERROR 3046``, because the /PART resolves to whichever card came first.
+
+    So the id is reused ONLY when no other material writer owns it (the
+    ``all_mat_ids`` union next_mat_id itself dodges); otherwise a fresh one is
+    minted and the /PART row is repointed at it. A blank or zero MID mints too:
+    ``/MAT/LAW114/0`` is not an addressable material.
+    """
+    owned = state.all_mat_ids()
+    out: Dict[int, int] = {}
+    by_mid: Dict[int, int] = {}
+    repointed: List[str] = []
+    for pid in pids:
+        mid = state.parts[pid].mid
+        if mid > 0 and mid in state.mat_seatbelt:
+            continue                       # a real belt material: not this path
+        if mid > 0 and mid not in owned:
+            out[pid] = mid                 # free id, keep it addressable
+            continue
+        if mid in by_mid:
+            out[pid] = by_mid[mid]
+            continue
+        new = state.next_mat_id()
+        by_mid[mid] = new
+        out[pid] = new
+        repointed.append(f"part {pid}: MID {mid} -> /MAT/LAW114/{new}")
+    if repointed:
+        state.warn(
+            "*ELEMENT_SEATBELT: the INERT belt material(s) of "
+            + "; ".join(repointed[:6])
+            + (" ..." if len(repointed) > 6 else "")
+            + " could not be written under the *PART's own MID — that id is "
+            "already emitted as an ordinary /MAT (or is 0), and two cards on "
+            "one id is starter ERROR 79 (DUPLICATE ID, IN MATERIAL "
+            "DEFINITION) followed by ERROR 1715 / ERROR 3046 on the /PART. A "
+            "fresh /MAT id is minted and the /PART row points at it instead, "
+            "so the ordinary material keeps serving its own parts.")
+    return out
+
+
 def _make_seatbelts(state: ConversionState) -> List[str]:
     """*ELEMENT_SEATBELT and its four devices -> the whole 1D restraint chain.
 
@@ -1777,7 +2167,27 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
         if not e.is_2d:
             belts_by_pid.setdefault(e.pid, []).append(e)
     prop_of = _seatbelt_prop_ids(state, pids)
+    inert_of = _seatbelt_inert_mat_ids(state, pids)
     emitted_eids: Set[int] = set()
+    # The /PROP/TYPE23 and the /MAT/LAW114 are written ONCE PER ID, not once
+    # per part. A shoulder-belt *PART and a lap-belt *PART on one
+    # *SECTION_SEATBELT and one *MAT_SEATBELT is the ordinary two-strand
+    # restraint layout, and _seatbelt_prop_ids DELIBERATELY hands both parts
+    # the same prop id when their areas agree — so without these two sets the
+    # normal production deck emits /PROP/TYPE23/<secid> and /MAT/LAW114/<mid>
+    # twice and the starter refuses it with ERROR 79 (DUPLICATE ID) over both
+    # tables. MEASURED on a two-part probe: 2 ERROR(S), ERROR TERMINATION.
+    # The /PART row and the /SPRING block still go out per part.
+    written_props: Set[int] = set()
+    written_mats: Set[int] = set()
+    # The per-SECTION note belongs to the card, not to the part that happens to
+    # reach it first (the per-MATERIAL ones ride on `first_mat`): a shared
+    # section would otherwise repeat its AREA/THICK note once per belt part.
+    noted_secs: Set[int] = set()
+    belts_by_mid: Dict[int, List[SeatbeltElem]] = {}
+    for pid in pids:
+        belts_by_mid.setdefault(state.parts[pid].mid, []).extend(
+            belts_by_pid.get(pid, []))
 
     for pid in pids:
         part = state.parts[pid]
@@ -1786,7 +2196,12 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
         sec = state.sec_seatbelts.get(secid)
         mat = state.mat_seatbelt.get(part.mid)
         prop_id = prop_of[pid]
+        mat_id = mat.mid if mat is not None else inert_of[pid]
         label = f"*ELEMENT_SEATBELT part {pid}"
+        first_prop = prop_id not in written_props
+        first_mat = mat_id not in written_mats
+        written_props.add(prop_id)
+        written_mats.add(mat_id)
         if mat is None:
             # The part was CLAIMED (its section is a *SECTION_SEATBELT), so
             # nothing else will write it — skipping here would delete the
@@ -1803,14 +2218,19 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                 "a *MAT_SEATBELT on the part, or move it off the "
                 "*SECTION_SEATBELT.")
             rho, area = 1.0e-9, 1.0
-            lines += _emit_prop_type23(prop_id, f"SEATBELT_PROP_{prop_id}",
-                                       area)
-            lines += _emit_mat_law114(
-                part.mid, f"SEATBELT_INERT_{part.mid}", rho, 0.0,
-                0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            if first_prop:
+                lines += _emit_prop_type23(prop_id,
+                                           f"SEATBELT_PROP_{prop_id}", area)
+            if first_mat:
+                lines += _emit_mat_law114(
+                    mat_id, f"SEATBELT_INERT_{mat_id}", rho, 0.0,
+                    0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0)
         else:
             rho, area = _seatbelt_1d_mass(mat)
-            if sec is not None and (sec.area or sec.thick):
+            if sec is not None and (sec.area or sec.thick) \
+                    and secid not in noted_secs:
+                noted_secs.add(secid)
                 state.warn(
                     f"*SECTION_SEATBELT {secid}: AREA={sec.area:g} "
                     f"THICK={sec.thick:g} are DROPPED. Both are LS-DYNA "
@@ -1821,9 +2241,13 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                     "(rinit3.F:474 mass = Area x length x rho; "
                     "r23l114def3.F:224 XK_COMP = E x Area). The belt's real "
                     f"section comes from *MAT_SEATBELT {mat.mid} card 2 (A), "
-                    f"so Area={area:g} is written. For the contact side, set "
-                    "Gapmin on the /INTER that scopes the belt.")
-            if mat.is_2d:
+                    f"so Area={area:g} is written. The belt's NODES do reach "
+                    "the secondary side of a *CONTACT that scopes this part "
+                    "(part, part-set or node-set spelling alike), but a "
+                    "/SPRING has no thickness of its own: state the contact "
+                    "clearance as Gapmin on that /INTER, because the THICK "
+                    "that used to carry it has no cell to land in.")
+            if mat.is_2d and first_mat:
                 state.warn(
                     f"*MAT_SEATBELT_2D {mat.mid} is on a *SECTION_SEATBELT "
                     "part, so it converts to /MAT/LAW114 (the 1D belt spring "
@@ -1832,7 +2256,7 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                     "Its cards 3 and 4 (ECOAT/TCOAT/SCOAT/EB/PRBA/PRAB/GAB) "
                     "describe a woven MEMBRANE and have no meaning on a "
                     "spring, so they are dropped whole.")
-            if mat.cse and not mat.has_card3:
+            if mat.cse and not mat.has_card3 and first_mat:
                 state.warn(
                     f"*MAT_SEATBELT {mat.mid}: CSE={mat.cse:g} applies to the "
                     "SHELL belt only ('Eliminate compressive stresses in "
@@ -1840,7 +2264,7 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                     "and this material is on a 1D belt, where compression is "
                     "governed by E and FMAX from card 2 instead. Nothing is "
                     "lost; the field is inert on this route.")
-            if mat.damp:
+            if mat.damp and first_mat:
                 state.warn(
                     f"*MAT_SEATBELT {mat.mid}: DAMP={mat.damp:g} is LS-DYNA's "
                     "RAYLEIGH coefficient for SHELL belts; on a 1D belt "
@@ -1850,6 +2274,29 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                     "own belt damping and echoes it ('SEATBELTS DEFAULT "
                     "DAMPING COMPUTATION'). This is a MATCH, not a loss.")
             fmax, mmax = mat.f, mat.m
+            young = mat.e
+            if mat.has_card2 and mat.a <= 0.0 and young > 0.0 and first_mat:
+                # Card 2 present, E stated, A BLANK (its LS-DYNA default is
+                # 0.0). LS-DYNA then has NO compression stiffness at all: the
+                # model is E x A = 0, and the shear area AS defaults to A = 0
+                # with it. Radioss reads the same product the other way round
+                # — XK_COMP = E x Area, r23l114def3.F:224 — and this belt's
+                # Area cell carries the neutral 1 that _seatbelt_1d_mass uses
+                # to keep rho x Area == MPUL, so writing E through would
+                # INVENT a compression stiffness of E x 1 that neither the
+                # deck nor LS-DYNA has. The unstated quantity is dropped and
+                # named rather than filled in.
+                state.warn(
+                    f"*MAT_SEATBELT {mat.mid}: card 2 states E={young:g} but "
+                    "leaves A blank (LS-DYNA default 0.0), so LS-DYNA's "
+                    "bending/compression model is E x A = 0 — inert. There is "
+                    "no cross-section to pair E with, and /MAT/LAW114 forms "
+                    "XK_COMP = E x Area against the neutral Area=1 this belt "
+                    "carries for its mass split, so E is written as 0 rather "
+                    "than inventing a compression stiffness of E x 1. State A "
+                    "on card 2 if the belt is meant to take compression.")
+            if mat.has_card2 and mat.a <= 0.0:
+                young = 0.0
             if not mat.has_card2:
                 # E == 0 and no card 2: FMAX and MMAX stay 0, which makes the
                 # compression tangent E*Area = 0 and the clamp 0 — a
@@ -1860,26 +2307,35 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                 # non-zero one here would give the belt compressive strength
                 # the deck never asked for.
                 fmax = mmax = 0.0
-            lines += _emit_prop_type23(
-                prop_id, sec.title if sec is not None
-                else f"SEATBELT_PROP_{prop_id}", area)
-            lines += _emit_mat_law114(
-                mat.mid, f"SEATBELT_{mat.mid}", rho, mat.lmin,
-                # K and C left 0: law114_upd.F:80,126 raises K to the maximum
-                # curve slope / Xscale (the exact tangent, and WARNING 1640 if
-                # a smaller one is stated), and the starter computes the belt
-                # damping when C is 0.
-                0.0, 0.0,
-                _resolve_belt_curve(state, mat.llcid, "LLCID",
-                                    f"*MAT_SEATBELT {mat.mid}"),
-                _resolve_belt_curve(state, mat.ulcid, "ULCID",
-                                    f"*MAT_SEATBELT {mat.mid}"),
-                # Xscale and Fscale left 0 (reader default 1.0): the LS-DYNA
-                # curve is already force vs ENGINEERING STRAIN, which is what
-                # LAW114 reads, so there is nothing to rescale.
-                0.0, 0.0,
-                mat.e, mat.i, mat.j, fmax, mmax, mat.as_, mat.r)
-            _warn_lmin_geometry(state, mat, belts, f"*MAT_SEATBELT {mat.mid}")
+            if first_prop:
+                lines += _emit_prop_type23(
+                    prop_id, sec.title if sec is not None
+                    else f"SEATBELT_PROP_{prop_id}", area)
+            if first_mat:
+                lines += _emit_mat_law114(
+                    mat.mid, f"SEATBELT_{mat.mid}", rho, mat.lmin,
+                    # K and C left 0: law114_upd.F:80,126 raises K to the
+                    # maximum curve slope / Xscale (the exact tangent, and
+                    # WARNING 1640 if a smaller one is stated), and the
+                    # starter computes the belt damping when C is 0.
+                    0.0, 0.0,
+                    _resolve_belt_curve(state, mat.llcid, "LLCID",
+                                        f"*MAT_SEATBELT {mat.mid}"),
+                    _resolve_belt_curve(state, mat.ulcid, "ULCID",
+                                        f"*MAT_SEATBELT {mat.mid}"),
+                    # Xscale and Fscale left 0 (reader default 1.0): the
+                    # LS-DYNA curve is already force vs ENGINEERING STRAIN,
+                    # which is what LAW114 reads, so there is nothing to
+                    # rescale.
+                    0.0, 0.0,
+                    young, mat.i, mat.j, fmax, mmax, mat.as_, mat.r)
+                # Over EVERY belt element on this material, not just this
+                # part's: the LMIN geometry check belongs to the card, and a
+                # shared material would otherwise report each sibling part's
+                # short elements once per part.
+                _warn_lmin_geometry(state, mat,
+                                    belts_by_mid.get(mat.mid, belts),
+                                    f"*MAT_SEATBELT {mat.mid}")
         lines += [
             f"/PART/{pid}",
             part.title or f"SEATBELT_PART_{pid}",
@@ -1887,7 +2343,7 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
             # 108/113/114/135 — hm_read_part.F answers ERROR 179 / ERROR 1715
             # otherwise. That is why the belt material is written in this
             # section and not left to materials.py: the two are one card pair.
-            f"{_i(prop_id)}{_i(part.mid)}{_i(0)}",
+            f"{_i(prop_id)}{_i(mat_id)}{_i(0)}",
         ]
         if belts:
             lines += [f"/SPRING/{pid}", "# sprg_ID  node_ID1  node_ID2"]

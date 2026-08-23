@@ -6294,9 +6294,12 @@ class ConversionState:
     # a /TH naming an entity the deck does not define is starter ERROR 69.
     slipring_ids: List[Tuple[int, str]] = field(default_factory=list)
     retractor_ids: List[Tuple[int, str]] = field(default_factory=list)
-    # Every /SENSOR and /ACCEL id this conversion writes, USER ids and minted
-    # ones alike. Two jobs: next_sensor_id()/next_accel_id() dodge them, and
-    # the seatbelt writer screens a Sens_ID against them before naming it.
+    # Every /SENSOR and /ACCEL id MINTED by next_sensor_id()/next_accel_id().
+    # Its job is that two callers in one build cannot be handed the same id;
+    # the USER ids are NOT in here — those live in state.seatbelt_sensors (the
+    # SBSID dict) and in the accelerometer list, and both allocators dodge
+    # those containers directly. The seatbelt writer likewise screens a
+    # Sens_ID against _SensorPool's own map, not against this set.
     sensor_ids: Set[int] = field(default_factory=set)
     accel_ids: Set[int] = field(default_factory=set)
     # The /ACCELs a *ELEMENT_SEATBELT_ACCELEROMETER asked for, i.e. the ones

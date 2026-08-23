@@ -113,6 +113,18 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         # without *ELEMENT_TSHELL, so this cannot move any other conversion.
         for e in state.tshell_elems:
             if e.pid == pid: nids.update(e.nodes)
+        # A 1D SEATBELT is a /SPRING, but it is the one spring family that
+        # genuinely belongs on a contact SECONDARY side: LS-DYNA gives
+        # *SECTION_SEATBELT its own AREA and THICK for exactly that, and a
+        # shoulder belt that does not touch the occupant restrains nothing.
+        # Without this, SSTYP=2/3 (part / part set) over a belt part resolves
+        # to ZERO nodes and only the *SET_NODE spelling reaches the webbing —
+        # the SPH situation before the SPH batch, one family further on. (2D
+        # belt elements are folded into state.shell_elems by
+        # seatbelts._assign_seatbelt_props and are covered by the walk above.)
+        for e in state.seatbelt_elems:
+            if e.pid == pid and not e.is_2d:
+                nids.update((e.n1, e.n2))
         # SPH particles are deformable by construction and belong on the
         # SECONDARY (node) side of any contact that scopes their part. This is
         # what makes SSTYP=2/3 (part / part set) work at all; before the SPH
@@ -555,6 +567,10 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
         | {n for c in state.sph_elems             # SPH: deformable by nature
            if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
            for n in c.nodes if n > 0 and n not in rigid_nodes}
+        | {n for e in state.seatbelt_elems        # 1D belt — see above
+           if not e.is_2d
+           and state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
+           for n in (e.n1, e.n2) if n > 0 and n not in rigid_nodes}
     )
     all_pids: List[int] = sorted(state.parts.keys())
 
@@ -857,6 +873,9 @@ def _part_node_ids(state: ConversionState, pids: List[int], exclude: Set[int]) -
     for c in state.sph_elems:                 # SPH: the particle IS its node
         if c.pid in pidset:
             nodes.update(n for n in c.nodes if n > 0)
+    for e in state.seatbelt_elems:            # 1D belt — see _resolve_contact_slave
+        if e.pid in pidset and not e.is_2d:
+            nodes.update(n for n in (e.n1, e.n2) if n > 0)
     for e in state.beam_elems:
         if e.pid in pidset:
             nodes.update(n for n in (e.n1, e.n2) if n > 0)
@@ -2464,6 +2483,9 @@ def _tied_slave_nids(state: ConversionState, sid: int, styp: int) -> List[int]:
         for c in state.sph_elems:             # SPH: secondary side only
             if c.pid == pid:
                 nids.update(c.nodes)
+        for e in state.seatbelt_elems:        # 1D belt: secondary side — above
+            if e.pid == pid and not e.is_2d:
+                nids.update((e.n1, e.n2))
 
     if styp == 4:
         if sid in state.node_sets:

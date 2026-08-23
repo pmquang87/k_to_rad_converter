@@ -12594,9 +12594,14 @@ def handle_damping_relative(block: Block, state: ConversionState) -> None:
 def _seatbelt_rows(block: Block) -> List[int]:
     """RAW indices of a seatbelt block's data cards (blanks and ``$`` out).
 
-    Shared by every device walk below AND by ``assembly._off_seatbelt_*``, so
-    the handler and the ``*INCLUDE_TRANSFORM`` offsetter cannot disagree about
-    which line is a card — the #119 rule. A blank card DROPS OUT of this list,
+    IMPORTED and called by every device walk below AND by all four
+    ``assembly._off_seatbelt_*`` offsetters, so the handler and the
+    ``*INCLUDE_TRANSFORM`` offsetter cannot disagree about which line is a
+    card — the #119 rule. (It used to be re-implemented inline on the assembly
+    side, which made the invariant a coincidence rather than a fact; the
+    offsetters now call this function, the way they already call
+    ``_seatbelt_elem_card`` and ``_slipring_card2_follows``.) A blank card
+    DROPS OUT of this list,
     which is exactly why the two-card devices claim their card 2 by RAW
     CONTIGUITY (``rows[k] == i + 1``) rather than "the next row".
     """
@@ -12620,23 +12625,33 @@ def _seatbelt_elem_card(line: str) -> List[str]:
     shell, ``convertelements.cxx:86-95``) and hands that /SHELL two nodes that
     do not exist.
 
-    The free split is tried first, the same order ``_card`` uses: a
-    hand-written or comma-separated deck writes the fields narrower than the
-    fixed columns and slicing it corrupts every value. It is accepted only when
-    it yields at least five separated tokens that all fit inside their own
-    8-char cells — an I8 card whose ids fill all eight characters glues its
-    fields together and yields too few.
+    The card is SLICED FIRST and the free split is the fallback — the rule
+    ``_card(fixed=True)`` already uses, and the only one that survives a BLANK
+    interior cell. Trying the free split first and accepting it whenever it
+    yields five short tokens reads a column-correct card with a blank cell one
+    slot out of phase, and every field after the blank is then wrong:
+    MEASURED, ``"       1      10       1       2       0                       7       8"``
+    (I8 columns, SLEN blank, N3=7 N4=8) free-splits to
+    ``['1','10','1','2','0','7','8']`` — SLEN=7, N3=8, N4=0 — so a 2D shell
+    belt silently becomes a 1D /SPRING with 7 mm of invented slack, and the
+    part is then claimed by BOTH routes (starter ERROR 79 + 1715 + 78 + 760).
+
+    A genuinely fixed-format cell never contains whitespace or a comma INSIDE
+    it, so a slice that produces one means the card was written free-format,
+    narrower than the columns — the fallback's exact trigger.
     """
     data = _strip_inline_comment(line)
     if "," in data:
         toks = parse_free(data)
         return toks + [""] * max(0, 8 - len(toks))
-    toks = parse_free(data)
-    if len(toks) >= 5 and all(len(t) <= 8 for t in toks[:5]):
-        return toks + [""] * max(0, 8 - len(toks))
-    return [data[0:8].strip(), data[8:16].strip(), data[16:24].strip(),
-            data[24:32].strip(), data[32:40].strip(), data[40:56].strip(),
-            data[56:64].strip(), data[64:72].strip()]
+    cells = [data[0:8], data[8:16], data[16:24], data[24:32], data[32:40],
+             data[40:56], data[56:64], data[64:72]]
+    sliced = [c.strip() for c in cells]
+    if any(ch.isspace() for c in sliced for ch in c):
+        toks = parse_free(data)
+        if toks:
+            return toks + [""] * max(0, 8 - len(toks))
+    return sliced
 
 
 def handle_element_seatbelt(block: Block, state: ConversionState) -> None:
@@ -13070,17 +13085,24 @@ def handle_mat_seatbelt(block: Block, state: ConversionState) -> None:
         m.m = _ffield(f2, 5, 1.0e20)
         m.r = _ffield(f2, 6, 0.05)
         idx += 1
-    if is_2d and idx < len(raw) and raw[idx].strip():
-        f3 = _card(raw, idx, fixed=True, n=8, w=10)
-        m.has_card3 = True
-        m.p1doff = to_float(f3[0]) if f3 else 0.0
-        m.form = to_int(f3[1]) if len(f3) > 1 else 0
-        m.ecoat = to_float(f3[2]) if len(f3) > 2 else 0.0
-        m.tcoat = to_float(f3[3]) if len(f3) > 3 else 0.0
-        m.scoat = to_float(f3[4]) if len(f3) > 4 else 0.0
-        m.eb = _ffield(f3, 5, -0.1)
-        m.prba = _ffield(f3, 6, 0.3)
-        m.prab = _ffield(f3, 7, m.prba)
+    if is_2d and idx < len(raw):
+        if raw[idx].strip():
+            f3 = _card(raw, idx, fixed=True, n=8, w=10)
+            m.has_card3 = True
+            m.p1doff = to_float(f3[0]) if f3 else 0.0
+            m.form = to_int(f3[1]) if len(f3) > 1 else 0
+            m.ecoat = to_float(f3[2]) if len(f3) > 2 else 0.0
+            m.tcoat = to_float(f3[3]) if len(f3) > 3 else 0.0
+            m.scoat = to_float(f3[4]) if len(f3) > 4 else 0.0
+            m.eb = _ffield(f3, 5, -0.1)
+            m.prba = _ffield(f3, 6, 0.3)
+            m.prab = _ffield(f3, 7, m.prba)
+        # A BLANK card 3 is still a CARD: the manual makes it required for the
+        # _2D option ("2D Card. Additional 1st card for the 2D keyword
+        # option"), so every cell on it is asking for its default and the
+        # OPTIONAL card 4 sits after it. Not advancing past a blank one read
+        # the GAB card as card 3 — P1DOFF = GAB — and lost the shear modulus
+        # in silence, under a warning that said GAB was never stated.
         idx += 1
         if idx < len(raw) and raw[idx].strip():
             f4 = _card(raw, idx, fixed=True, n=1, w=10)

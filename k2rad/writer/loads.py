@@ -6484,18 +6484,21 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # elements are folded into state.shell_elems by _assign_seatbelt_props and
     # are already covered above.)
     #
-    # The restraint DEVICES deliberately add NOTHING here. A slipring anchorage
-    # node, a retractor anchorage node, an orientation node, a sensor's watched
-    # node and an accelerometer triad all carry ZERO stiffness of their own -
-    # /SLIPRING and /RETRACTOR are kinematic devices that redistribute the
-    # belt's unstretched length, not elements with a tangent - so a node whose
-    # ONLY attachment is one of them has the same six zero rows a genuinely
-    # free node has, and pinning it changes no trajectory. In practice such a
-    # node is on the seat frame or the B-pillar and is in elem_nodes already;
-    # the case that reaches this guard is an anchorage node modelled as a bare
-    # marker, and that is exactly the *AIRBAG_HYBRID_JETTING situation below.
     for e in state.seatbelt_elems:
         elem_nodes.update((e.n1, e.n2))
+    # A slipring / retractor ANCHORAGE node is not a zero row either, and that
+    # is the whole point of the device-anchor split: the split takes the
+    # anchorage OFF the belt, so it would otherwise arrive here as a "free"
+    # node - and then kine_seatbelt_force.F:91,117 adds the mouth node's whole
+    # force AND STIFFNESS onto it every cycle
+    # (STIFN(ANCHOR_NODE) = STIFN(ANCHOR_NODE) + STIFN(NODE2)). A /BCS 111 111
+    # there would weld the belt end to ground.
+    for s in state.seatbelt_sliprings:
+        if s.sbrnid > 0:
+            elem_nodes.add(s.sbrnid)
+    for r in state.seatbelt_retractors:
+        if r.sbrnid > 0:
+            elem_nodes.add(r.sbrnid)
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
     # A beam's THIRD node is a geometric reference only — the starter tags it
@@ -6521,6 +6524,28 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     for cn in state.coord_nodes.values():
         if cn.flag == 1:
             keep_free.update((cn.n1, cn.n2, cn.n3))
+    # An *ELEMENT_SEATBELT_ACCELEROMETER triad is a MOVING SKEW - k2rad writes
+    # /SKEW/MOV(N1,N2,N3) and puts the /ACCEL on N1 with that Iskew - so it is
+    # the coord_nodes flag=1 case above, spelled with a different keyword.
+    # Pinning N2/N3 freezes the frame the /ACCEL projects onto, and pinning N1
+    # makes the channel read zero: the constraint is anything but inert.
+    for a in state.seatbelt_accels:
+        keep_free.update(n for n in (a.nid1, a.nid2, a.nid3) if n > 0)
+    # A slipring ORIENTATION node is a live geometric reference: the engine
+    # rebuilds the ring's frame from its CURRENT position every cycle
+    # (kine_seatbelt_vel.F:91-108 reads X(:,NODE3) and stores ACOS(SCAL) into
+    # ORIENTATION_ANGLE, which material_flow.F:203 folds into the friction).
+    # NOT the beam-third-node case below, where the frame is baked at the
+    # starter and the node can be pinned without effect.
+    for s in state.seatbelt_sliprings:
+        if s.onid > 0:
+            keep_free.add(s.onid)
+    # A sensor watches a node's POSITION (/SENSOR/DIST) or its ACCELERATION
+    # (/SENSOR/ACCE). Pinning either freezes the quantity the sensor tests, so
+    # the retractor never locks and the pretensioner never fires - a silent
+    # loss of the whole restraint trigger, not an inert constraint.
+    for sen in state.seatbelt_sensors.values():
+        keep_free.update(n for n in (sen.nid, sen.nid1, sen.nid2) if n > 0)
     # Moving rigid-wall carrier nodes must stay free to translate the wall —
     # both the *RIGIDWALL_PLANAR_MOVING node (free-flying under contact) and
     # the *RIGIDWALL_GEOMETRIC_*_MOTION carrier nodes, which /IMPVEL|/IMPDISP
