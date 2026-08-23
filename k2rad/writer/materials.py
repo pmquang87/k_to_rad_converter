@@ -8438,30 +8438,34 @@ def _add_auto_curve(state: ConversionState, fid: int, title: str,
 # Rare materials batch: *MAT_030 / *MAT_SHAPE_MEMORY → /MAT/LAW71
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: LS-DYNA ALPHA → Radioss ``alpha``. Both codes run the SAME Auricchio
-#: criterion, but they state the tension/compression asymmetry in different
-#: normalisations, and the factor between them is sqrt(2/3).
+#: The LS-DYNA bound on ``*MAT_030`` ALPHA, and the Radioss bound on
+#: /MAT/LAW71 ``alpha`` — the SAME number, because the two cells are the same
+#: quantity in the same normalisation:
 #:
-#: LS-DYNA (Vol II R17 p.2-307 Remark 1, p.2-309 Remark 2):
-#:     ALPHA = sqrt(2/3)·(-sig_s[AS,-] - sig_s[AS,+]) /
-#:                       (-sig_s[AS,-] + sig_s[AS,+]),   |ALPHA| < 1
-#:     F = ||t|| + 3·ALPHA·p >= (ALPHA + sqrt(2/3))·sig_tr
+#: LS-DYNA (Vol II R17 p.2-307 Remark 1, quoted verbatim):
+#:     alpha = sqrt(2/3)·(-sig_s[AS,-] - sig_s[AS,+]) /
+#:                       (-sig_s[AS,-] + sig_s[AS,+]),
+#:     -sqrt(2/3) < alpha < sqrt(2/3),
+#:     sig_s[AS,-] = (alpha + sqrt(2/3))/(alpha - sqrt(2/3)) · sig_s[AS,+]
 #: Radioss (engine/source/materials/mat/mat071/sigeps71.F):
 #:     :171  SQDT = SQRT(TWO/THREE)
 #:     :245  RSAS = YLD_ASS*(SQDT + ALPHA)
 #:     :277  FS   = SV + THREE*ALPHA*P
-#: Read as symbols the two look identical, which would say "copy 1:1". The
-#: MEASURED uniaxial onsets say otherwise, and they are the authority: with
-#: ``sig_sas = 400`` and ``alpha = 0.1`` ON THE CARD, tension started at 399.45
-#: and compression at 513.97 MPa, i.e.
-#:     (sig_C - sig_T)/(sig_C + sig_T) = alpha / sqrt(2/3)
-#: which is exactly the ratio LS-DYNA's ALPHA already IS. So the Radioss cell
-#: wants sqrt(2/3)·ALPHA. The range guard corroborates it: hm_read_mat71.F:
-#: 154-160 refuses ``alpha > sqrt(2/3)`` (ERROR 1124) — precisely |ALPHA| > 1,
-#: the physical bound of an asymmetry ratio. dyna2rad's
-#: ``SetExpressionValue("sqrt(2/3)*ALPHA", "alpha")`` (convertmats.cxx:1931)
-#: is therefore CORRECT and is reproduced here.
-_SMA_ALPHA_FACTOR = math.sqrt(2.0 / 3.0)
+#: For uniaxial compression ||dev|| = sqrt(2/3)·sig and p = -sig/3, so the
+#: Radioss onset is sig_ASS·(sqrt(2/3) + alpha)/(sqrt(2/3) - alpha) — term for
+#: term the manual's closed form. ALPHA is therefore copied **1:1**.
+#:
+#: Note that ALPHA is sqrt(2/3) TIMES the asymmetry ratio, not the ratio: the
+#: measured pair (tension 399.45, compression 513.97 for sig_sas 400 / ALPHA
+#: 0.1 written verbatim) gives (sig_C - sig_T)/(sig_C + sig_T) = 0.1225 =
+#: ALPHA/sqrt(2/3), which is exactly what Remark 1 asks for. Reading that ratio
+#: as ALPHA itself is what makes the shrink look right; it is not.
+#: Starter-measured with the card written both ways at sig_sas 400 / ALPHA 0.1:
+#: alpha = 0.1 gives a compression onset of 513.50 against the LS-DYNA closed
+#: form 511.65 (+0.36 %), while alpha = sqrt(2/3)·0.1 gives 490.52 (-4.1 %).
+#: dyna2rad's ``SetExpressionValue("sqrt(2/3)*ALPHA", "alpha")``
+#: (convertmats.cxx:1931) is a d2r DEFECT and is deliberately not reproduced.
+_SMA_ALPHA_MAX = math.sqrt(2.0 / 3.0)
 
 
 def _resolve_mat_shape_memory(state: ConversionState) -> None:
@@ -8502,16 +8506,24 @@ def _resolve_mat_shape_memory(state: ConversionState) -> None:
                 "it starts; hm_read_mat71.F:147-153 refuses the card with "
                 "ERROR 1123 and the starter stops. Both values are written "
                 "through verbatim — fix them in the .k file.")
-        if abs(mat.alpha) > 1.0:
+        if abs(mat.alpha) >= _SMA_ALPHA_MAX:
             state.warn(
                 f"*MAT_SHAPE_MEMORY mid={mat.mid}: ALPHA={mat.alpha:g} is "
-                "outside the physical range of a tension/compression asymmetry "
-                "ratio (|ALPHA| < 1 in LS-DYNA's normalisation, Vol II R17 "
-                "p.2-307). The emitted /MAT/LAW71 alpha is sqrt(2/3)*ALPHA = "
-                f"{_SMA_ALPHA_FACTOR * mat.alpha:.6g}, which "
-                "hm_read_mat71.F:154-160 refuses with ERROR 1124 ('Parameter "
-                "ALPHA is too high') as soon as it exceeds "
-                "sqrt(2/3) = 0.8164966.")
+                "outside the range the model is defined on — Vol II R17 "
+                "p.2-307 Remark 1 bounds it as -sqrt(2/3) < alpha < sqrt(2/3) "
+                f"(|ALPHA| < {_SMA_ALPHA_MAX:.7g}), and at |ALPHA| = sqrt(2/3) "
+                "the compression onset sig_ASS*(sqrt(2/3)+alpha)/"
+                "(sqrt(2/3)-alpha) is a division by zero. The value is written "
+                "1:1 (it is the SAME quantity on both sides), so an ALPHA "
+                "strictly above the bound is refused by hm_read_mat71.F:"
+                "154-160 with ERROR 1124 ('Parameter ALPHA is too high') and "
+                "the starter stops. The two cases the starter does NOT catch "
+                "are worse: its test is a strict 'ALPHA > SQRT(TWO/THREE)', so "
+                "ALPHA = sqrt(2/3) exactly is accepted and then sigeps71.F's "
+                "compression loading function |sig|*(sqrt(2/3)-ALPHA) is "
+                "identically zero (the material never transforms in "
+                "compression), and a NEGATIVE ALPHA has no guard at all and "
+                "runs with an inverted asymmetry. Fix it in the .k file.")
         if 0.0 < mat.e < mat.ymrt:
             state.warn(
                 f"*MAT_SHAPE_MEMORY mid={mat.mid}: YMRT={mat.ymrt:g} (the "
@@ -8571,7 +8583,7 @@ def _emit_mat_law71(mat: MatShapeMemory) -> List[str]:
         "#            sig_sas             sig_fas             sig_ssa"
         "             sig_fsa               alpha",
         f"{_f(mat.sig_ass)}{_f(mat.sig_asf)}{_f(mat.sig_sas)}"
-        f"{_f(mat.sig_saf)}{_f(_SMA_ALPHA_FACTOR * mat.alpha)}",
+        f"{_f(mat.sig_saf)}{_f(mat.alpha)}",
         "#               EpsL                 CAS                 CSA"
         "                TSAS                TFAS",
         f"{_f(mat.epsl)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",

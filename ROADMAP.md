@@ -21,10 +21,11 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   `/MAT/LAW79`/`LAW126` and `*MAT_ELASTIC_FLUID` → `/MAT/LAW6` +
   `/EOS/POLYNOMIAL`.
 - **Tier 2 (rare materials):** `*MAT_SHAPE_MEMORY` / `*MAT_030` →
-  `/MAT/LAW71` (superelastic SMA; `alpha = sqrt(2/3)·ALPHA` measured against the
-  uniaxial onsets, `YMRT → E_mart` — the slot dyna2rad's `"YMTR"` typo never
-  writes, temperature terms deliberately blank, the curve form of the four
-  transformation stresses warn-skipped by name).
+  `/MAT/LAW71` (superelastic SMA; `ALPHA` copied 1:1 against the two closed
+  forms — dyna2rad's `sqrt(2/3)·ALPHA` is a d2r defect — with the range guard at
+  LS-DYNA's own `|ALPHA| < sqrt(2/3)` bound, `YMRT → E_mart` — the slot
+  dyna2rad's `"YMTR"` typo never writes, temperature terms deliberately blank,
+  the curve form of the four transformation stresses warn-skipped by name).
   `*MAT_MUSCLE` / `*MAT_156` and `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
   `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`, routed by the PROPERTY the part
   carries (truss vs discrete) and validated against the engine force law to 7

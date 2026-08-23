@@ -176,10 +176,10 @@ SMA = (
 # *MAT_SHAPE_MEMORY / *MAT_030 → /MAT/LAW71
 # ═════════════════════════════════════════════════════════════════════════════
 
-#: sqrt(2/3)·ALPHA, hand-computed: 0.8164965809277260 × 0.12 = 0.09797958971132712
-#: → the card's %.10G field is "0.09797958971", and the starter echoes
-#: 9.7979589710000E-02 (measured on the probe deck).
-ALPHA_ON_CARD = "0.09797958971"
+#: ALPHA is copied 1:1 — LS-DYNA's ALPHA and Radioss's ``alpha`` are the SAME
+#: quantity in the SAME normalisation (Vol II R17 p.2-307 Remark 1 vs
+#: sigeps71.F:171/245/277), so the card's %.10G field is just "0.12".
+ALPHA_ON_CARD = "0.12"
 
 
 class ShapeMemoryParseTests(unittest.TestCase):
@@ -301,13 +301,38 @@ class ShapeMemoryEmitTests(unittest.TestCase):
                          "                   0                   0"
                          "                   0                   0")
 
-    def test_alpha_carries_the_sqrt_two_thirds_factor(self):
+    def test_alpha_is_copied_one_to_one(self):
+        # LS-DYNA Vol II R17 p.2-307 Remark 1 states
+        #     alpha = sqrt(2/3)*(-sig_AS- - sig_AS+)/(-sig_AS- + sig_AS+),
+        #     -sqrt(2/3) < alpha < sqrt(2/3)
+        # and p.2-309 Remark 2 the criterion F = ||t|| + 3*alpha*p >=
+        # (alpha + sqrt(2/3))*sig_tr — term for term sigeps71.F:245/277
+        # (RSAS = YLD_ASS*(SQDT+ALPHA), FS = SV + THREE*ALPHA*P). Same
+        # normalisation on both sides, so no factor may be applied.
         _r, starter = _convert(HEX.replace("{MAT}", SMA).replace("{EXTRA}", ""))
         row = _block(starter, "/MAT/LAW71/30")[6]
         alpha = float(_fields(row)[4])
-        self.assertAlmostEqual(alpha, math.sqrt(2.0 / 3.0) * 0.12, places=10)
-        # ...and it is NOT the raw LS-DYNA value.
-        self.assertNotAlmostEqual(alpha, 0.12, places=4)
+        self.assertAlmostEqual(alpha, 0.12, places=12)
+        # ...and NOT dyna2rad's sqrt(2/3)*ALPHA (convertmats.cxx:1931), which
+        # is 0.8164965809277260 * 0.12 = 0.09797958971132712.
+        self.assertNotAlmostEqual(alpha, 0.09797958971132712, places=6)
+
+    def test_emitted_alpha_reproduces_the_manual_compression_onset(self):
+        # Hand-computed from the two closed forms, which must agree:
+        #   LS-DYNA  |sig_AS-| = (ALPHA + sqrt(2/3))/(sqrt(2/3) - ALPHA)*sig_AS+
+        #   Radioss   onset    = sig_sas*(sqrt(2/3) + alpha)/(sqrt(2/3) - alpha)
+        # With sig_ASS = 400 and ALPHA = 0.1: 400*0.9164965809277260 /
+        # 0.7164965809277260 = 511.6545... MPa (solver-measured 513.50, +0.36 %;
+        # the sqrt(2/3)-shrunk card measured 490.52, -4.1 %).
+        mat = ("*MAT_SHAPE_MEMORY\n"
+               + _row(30, "6.4500E-9", 50000.0, 0.33) + "\n"
+               + _row(400.0, 450.0, 300.0, 200.0, 0.05, 0.1, 25000.0) + "\n")
+        _r, starter = _convert(HEX.replace("{MAT}", mat).replace("{EXTRA}", ""))
+        fields = _fields(_block(starter, "/MAT/LAW71/30")[6])
+        sig_sas, alpha = float(fields[0]), float(fields[4])
+        sqdt = math.sqrt(2.0 / 3.0)
+        self.assertAlmostEqual(sig_sas * (sqdt + alpha) / (sqdt - alpha),
+                               511.6544057983016, places=8)
 
     def test_blank_ymrt_emits_a_zero_e_mart_not_a_fabricated_modulus(self):
         # E_mart = 0 is the reader's "single-modulus" option
@@ -364,6 +389,25 @@ class ShapeMemoryGuardTests(unittest.TestCase):
     def test_alpha_out_of_range_names_error_1124(self):
         w = self._warns(400.0, 450.0, 300.0, 200.0, alpha=1.5)
         self.assertIn("ERROR 1124", w)
+
+    def test_alpha_between_sqrt_two_thirds_and_one_is_flagged(self):
+        # ALPHA = 0.9 is illegal in LS-DYNA (|alpha| < sqrt(2/3) = 0.8164966,
+        # Vol II R17 p.2-307 Remark 1) AND is refused by the starter, because
+        # the value is copied 1:1. A |ALPHA| > 1 guard would have missed it.
+        w = self._warns(400.0, 450.0, 300.0, 200.0, alpha=0.9)
+        self.assertIn("ERROR 1124", w)
+        self.assertIn("0.8164966", w)
+
+    def test_negative_alpha_below_the_bound_is_flagged_without_a_starter_guard(
+            self):
+        # hm_read_mat71.F:154-160 tests ALPHA > SQRT(TWO/THREE) only, so a
+        # negative out-of-range value runs silently — the converter must say so.
+        w = self._warns(400.0, 450.0, 300.0, 200.0, alpha=-0.9)
+        self.assertIn("NEGATIVE ALPHA has no guard at all", w)
+
+    def test_alpha_just_inside_the_bound_raises_nothing(self):
+        w = self._warns(400.0, 450.0, 300.0, 200.0, alpha=0.81)
+        self.assertNotIn("ERROR 1124", w)
 
     def test_valid_card_raises_none_of_the_three(self):
         w = self._warns(400.0, 450.0, 300.0, 200.0)

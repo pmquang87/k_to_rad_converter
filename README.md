@@ -664,13 +664,22 @@ emits nothing and silently wires the part's mat to 0.
 alloy) — the same Auricchio model on both sides, so `RHO/E/PR`, the four
 transformation stresses (`SIG_ASS→sig_sas`, `SIG_ASF→sig_fas`,
 `SIG_SAS→sig_ssa`, `SIG_SAF→sig_fsa`), `EPSL→EpsL` and `YMRT→E_mart` are
-verbatim. `alpha = sqrt(2/3)·ALPHA`: the two codes normalise the
-tension/compression asymmetry differently, and the factor is **measured**, not
-inferred from the symbols — with `sig_sas = 400` and `alpha = 0.1` on the card
-the starter yields at 399.45 in tension and 513.97 in compression, i.e.
-`(σ_C−σ_T)/(σ_C+σ_T) = alpha/sqrt(2/3)`, which is exactly what LS-DYNA's ALPHA
-already is (corroborated by `hm_read_mat71.F:154-160` refusing
-`alpha > sqrt(2/3)`, i.e. `|ALPHA| > 1`, the physical bound of that ratio).
+verbatim. **`ALPHA` is copied 1:1** — the two codes state the tension/compression
+asymmetry in the SAME normalisation, so no factor applies. Vol II R17 p.2-307
+Remark 1 defines `alpha = sqrt(2/3)·(−σ_AS⁻ − σ_AS⁺)/(−σ_AS⁻ + σ_AS⁺)` with
+`−sqrt(2/3) < alpha < sqrt(2/3)`, and p.2-309 the criterion
+`F = ‖t‖ + 3·alpha·p ≥ (alpha + sqrt(2/3))·σ_tr` — term for term
+`sigeps71.F:171/245/277`, whose uniaxial compression onset
+`sig_sas·(sqrt(2/3)+alpha)/(sqrt(2/3)−alpha)` is the manual's own closed form.
+`ALPHA` is sqrt(2/3) *times* the asymmetry ratio, not the ratio, so reading it
+as the ratio is what makes dyna2rad's `sqrt(2/3)·ALPHA`
+(`convertmats.cxx:1931`) look right; measured, that shrink puts the compression
+onset 4.1 % low at ALPHA 0.1 and 37 % low at ALPHA 0.6, while the 1:1 card
+reproduces the closed form to +0.36 %. The range guard fires at
+`|ALPHA| ≥ sqrt(2/3) = 0.8164966` — LS-DYNA's own bound, and exactly where
+`hm_read_mat71.F:154-160` answers `ERROR 1124` (its test is a strict `>`, so
+`ALPHA = sqrt(2/3)` exactly is accepted and then never transforms in
+compression, and a negative out-of-range value has no starter guard at all).
 A blank `YMRT` emits `E_mart = 0`, which is the reader's own single-modulus
 option and matches LS-DYNA's "defaults to the austenite modulus" — dyna2rad
 never reaches this slot at all (`CopyValue("YMTR","E_mart")`,

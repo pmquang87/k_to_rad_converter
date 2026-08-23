@@ -35,18 +35,30 @@ Prior history (before this changelog was introduced) is summarized in the
   `thermal/thick-thin-shells/07_metalstrip.k` converted to **40 × `ERROR 495`
   "SHELL ID=n HAS A NULL THICKNESS"**. It now starts at 0 errors.
 
-  1. **`alpha = sqrt(2/3)·ALPHA`, and the factor is MEASURED, not read off the
-     symbols.** `sigeps71.F:171/245/277` (`SQDT = SQRT(TWO/THREE)`,
-     `RSAS = YLD_ASS*(SQDT+ALPHA)`, `FS = SV + THREE*ALPHA*P`) is symbol-for-
-     symbol the criterion LS-DYNA states in Vol II R17 p.2-309, which reads as
-     "copy 1:1". The uniaxial onsets say otherwise: with `sig_sas = 400` and
-     `alpha = 0.1` written on the card, the starter yields at **399.45 MPa in
-     tension and 513.97 MPa in compression**, i.e.
-     `(σ_C−σ_T)/(σ_C+σ_T) = alpha/sqrt(2/3)` — exactly the asymmetry ratio
-     LS-DYNA's `ALPHA` already is. `hm_read_mat71.F:154-160` corroborates it by
-     refusing `alpha > sqrt(2/3)`, which is `|ALPHA| > 1`, the physical bound of
-     that ratio. dyna2rad's `SetExpressionValue("sqrt(2/3)*ALPHA","alpha")`
-     (`convertmats.cxx:1931`) is therefore right and is reproduced.
+  1. **`ALPHA` is copied 1:1 — dyna2rad's `sqrt(2/3)` factor is a d2r defect.**
+     Both codes state the SAME quantity in the SAME normalisation, so any
+     factor is wrong. LS-DYNA Vol II R17 p.2-307 Remark 1 *defines*
+     `alpha = sqrt(2/3)·(−σ_s^{AS,−} − σ_s^{AS,+})/(−σ_s^{AS,−} + σ_s^{AS,+})`
+     with `−sqrt(2/3) < alpha < sqrt(2/3)` and
+     `σ_s^{AS,−} = (alpha + sqrt(2/3))/(alpha − sqrt(2/3))·σ_s^{AS,+}`; p.2-309
+     Remark 2 gives `F = ‖t‖ + 3·alpha·p ≥ (alpha + sqrt(2/3))·σ_tr`. That is
+     term for term `sigeps71.F:171/245/277` (`SQDT = SQRT(TWO/THREE)`,
+     `RSAS = YLD_ASS*(SQDT+ALPHA)`, `FS = SV + THREE*ALPHA*P`), whose uniaxial
+     compression onset is `sig_sas·(sqrt(2/3)+alpha)/(sqrt(2/3)−alpha)` — the
+     manual's own closed form. **`ALPHA` is sqrt(2/3) TIMES the asymmetry
+     ratio, not the ratio**, which is the algebra step that makes the shrink
+     look right; the measured pair `sig_sas 400 / ALPHA 0.1` giving
+     `(σ_C−σ_T)/(σ_C+σ_T) = 0.1225 = ALPHA/sqrt(2/3)` is exactly what Remark 1
+     asks for. Starter-measured with the card written both ways: `alpha = 0.1`
+     → compression onset **513.50** against the LS-DYNA closed form 511.65
+     (+0.36 %), `alpha = sqrt(2/3)·0.1` → **490.52** (−4.1 %, and the error
+     grows with ALPHA: 37 % low at ALPHA 0.6). The range guard follows the same
+     correction: it now fires at `|ALPHA| ≥ sqrt(2/3) = 0.8164966`, LS-DYNA's
+     own bound and exactly where `hm_read_mat71.F:154-160` answers `ERROR 1124`
+     — the old `|ALPHA| > 1` test let an LS-DYNA-illegal `ALPHA = 0.9` through
+     with no warning at all. dyna2rad's
+     `SetExpressionValue("sqrt(2/3)*ALPHA","alpha")` (`convertmats.cxx:1931`)
+     is deliberately **not** reproduced.
 
   2. **`YMRT → E_mart` — a slot dyna2rad never writes.**
      `CopyValue("YMTR","E_mart")` (`convertmats.cxx:1929`) misspells the cfg's
