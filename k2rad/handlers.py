@@ -9959,6 +9959,20 @@ def _airbag_base_keyword(kw: str) -> str:
     return kw
 
 
+def _populated_cell_slots(raw: List[str], idx: int, n: int = 8,
+                          w: int = 10) -> List[int]:
+    """WHICH of a fixed card's ``n`` cells carry anything, by 0-based slot.
+
+    The count alone answers "is this card there"; the slots answer "which
+    card is it", because two optional cards of the same family can carry the
+    same NUMBER of cells in different COLUMNS.
+    """
+    if idx >= len(raw) or not raw[idx].strip():
+        return []
+    return [k for k, c in enumerate(_card(raw, idx, fixed=True, n=n, w=w))
+            if c.strip()]
+
+
 def _populated_cells(raw: List[str], idx: int, n: int = 8,
                      w: int = 10) -> int:
     """How many of a fixed card's ``n`` cells carry anything.
@@ -9967,9 +9981,7 @@ def _populated_cells(raw: List[str], idx: int, n: int = 8,
     stride (#119). A card that is absent or blank counts 0 — which is a
     different answer from "one populated cell", and both are load-bearing.
     """
-    if idx >= len(raw) or not raw[idx].strip():
-        return 0
-    return sum(1 for c in _card(raw, idx, fixed=True, n=n, w=w) if c.strip())
+    return len(_populated_cell_slots(raw, idx, n=n, w=w))
 
 
 def _hybrid_gas_stride(raw: List[str], first: int, ngas: int) -> int:
@@ -10000,17 +10012,25 @@ def _hybrid_gas_stride(raw: List[str], first: int, ngas: int) -> int:
     blank card with nothing (or nothing populated) behind it is the genuine
     end of the block.
 
-    The residual ambiguity is at NGAS = 1 with ``_JETTING``, where a blank
-    card 5.2 and a blank jetting card 6 look alike. It is resolved the same
-    way, in favour of card 5.2, because an entirely blank card 6 means a jet
-    with no coordinates AND no CA AND no BETA — which is not a jet — while a
-    blank FMASS is the ordinary "no aspiration" case.
+    The residual ambiguity is at NGAS = 1 with ``_JETTING``, where an ABSENT
+    card 5.2 in front of a blank jetting card 6 looks exactly like a blank
+    card 5.2 in front of a populated card 6. An entirely blank card 6 IS a
+    legal jet: NODE1/NODE2 on card 7 override XJFP/XJVH (Vol I R17 p.3-51)
+    and CA/BETA are optional, so a jet stated purely by nodes writes card 6
+    blank. The look-ahead is therefore decided on the COLUMNS, not on the
+    count: card 7 in that node form populates only ``NODE1``/``NODE2``/
+    ``NODE3``, slots 5-7 (columns 51-80), while a gas card 5.1 must populate
+    ``MW`` in slot 3 (columns 31-40) — a species with MW = 0 is starter
+    ERROR 710 — and card 6 in coordinate form populates slots 0-5. So a card
+    whose populated cells are ALL in slots >= 5 is a jetting card 7, and the
+    blank line in front of it was card 6, not card 5.2.
     """
     if ngas <= 0:
         return 1
     cells = _populated_cells(raw, first + 1)
     if cells == 0:
-        return 2 if _populated_cells(raw, first + 2) >= 2 else 1
+        nxt = _populated_cell_slots(raw, first + 2)
+        return 2 if len(nxt) >= 2 and not all(k >= 5 for k in nxt) else 1
     return 1 if cells >= 2 else 2
 
 
@@ -10639,6 +10659,67 @@ def handle_airbag_unsupported(block: Block, state: ConversionState) -> None:
     state.note_recognized_not_emitted(
         base, "airbag model outside batch 1 (PRES / AIRBAG1 / GAS / LFLUID) — "
               "no /MONVOL is emitted and the bag does not inflate")
+
+
+#: The ``*DEFINE_CPM_*`` family (Vol I R17 §17): the EXTENDED inputs of the
+#: Corpuscular Particle Method bag, each one a side card of
+#: ``*AIRBAG_PARTICLE`` rather than a model of its own. None of it is
+#: convertible — Radioss's ``/MONVOL/FVMBAG*`` is a finite-volume bag, not a
+#: particle one, and it has no per-vent, per-chamber or per-species extension
+#: slots to receive them — but a CPM side card that disappears into the
+#: generic ``skipped_keywords`` list is a vent, a chamber or a gas property
+#: that silently stops applying while the bag still converts. Named here so
+#: the log says WHICH one and WHAT it cost. Purposes are the manual's own.
+_DEFINE_CPM_UNSUPPORTED = {
+    "DEFINE_CPM_BAG_INTERACTION":
+        "energy flow from a source particle bag to a sink control-volume bag "
+        "through their common vent parts (p.17-88). The two bags stay "
+        "thermodynamically independent — use *AIRBAG_INTERACTION, which this "
+        "converter does read, if the coupling matters",
+    "DEFINE_CPM_CHAMBER":
+        "the airbag CHAMBERS for particle initialization and chamber "
+        "interaction (p.17-90). The bag is emitted as ONE volume, so a "
+        "multi-chamber bag loses its internal partitions and fills uniformly",
+    "DEFINE_CPM_GAS_PROPERTIES":
+        "extended gas thermodynamic properties for CPM bags (p.17-93). The "
+        "gas keeps the A/B/C polynomial stated on the *AIRBAG_PARTICLE card "
+        "itself",
+    "DEFINE_CPM_NPDATA":
+        "the extended per-part NPDATA parameters — heat transfer and particle "
+        "friction (p.17-96). *AIRBAG_PARTICLE's own NPDATA count is already "
+        "warned about and skipped by the same reasoning",
+    "DEFINE_CPM_SWITCH_REGION":
+        "regions where particle-to-particle collision is switched off over "
+        "stated intervals (p.17-98). It has no meaning without particles",
+    "DEFINE_CPM_VENT":
+        "the extended vent-hole options (p.17-99). A negative C23 on an "
+        "*AIRBAG_PARTICLE vent row NAMES one of these, and that row is warned "
+        "about separately — its vent coefficient falls back to 1, so the hole "
+        "opens over the whole of its named surface",
+}
+
+
+def handle_define_cpm_unsupported(block: Block,
+                                  state: ConversionState) -> None:
+    """A ``*DEFINE_CPM_*`` side card — named, not silently skipped.
+
+    Registered rather than left to the generic unsupported-keyword list for
+    the same reason the unmodelled ``*AIRBAG_*`` models are: the deck still
+    converts and still runs, so the only sign that a chamber, a vent option or
+    a gas property has stopped applying is the log line that says so.
+    """
+    kw = block.keyword
+    reason = _DEFINE_CPM_UNSUPPORTED.get(
+        kw, "an extended input of the Corpuscular Particle Method bag")
+    state.warn(
+        f"*{kw} is NOT converted: it states {reason}. NOTHING is emitted for "
+        "it. The *AIRBAG_PARTICLE bag it belongs to still converts (to "
+        "/MONVOL/FVMBAG2, or to /MONVOL/AIRBAG1 under "
+        "--airbag-particle-uniform), so the run terminates normally with this "
+        "input simply absent.")
+    state.note_recognized_not_emitted(
+        kw, "a *DEFINE_CPM_* extended input of the particle bag — Radioss's "
+            "finite-volume /MONVOL has no slot for it and nothing is emitted")
 
 
 def handle_airbag_reference_geometry(block: Block,
@@ -14243,6 +14324,18 @@ HANDLERS["AIRBAG_INTERACTION"] = handle_airbag_interaction
 for _sfx in _AIRBAG_LEGACY_SUFFIXES:
     HANDLERS["AIRBAG_INTERACTION" + _sfx] = handle_airbag_interaction
 del _kw, _o1, _o2, _sfx, _stack, _combo
+
+# The *DEFINE_CPM_* side cards of *AIRBAG_PARTICLE. Registered on a warn-drop
+# for the same reason as the unmodelled *AIRBAG_* models above: an extended
+# CPM input that lands in the generic skipped-keyword list is a vent option, a
+# chamber or a gas property that quietly stops applying on a deck that still
+# converts and still terminates normally. NOT in `_OFFSET_SPECS` — an
+# unmodelled card stack must not have its cells rewritten by position, the
+# same rule *AIRBAG_HYBRID_CHEMKIN follows. `parser._split_keyword` strips a
+# trailing _ID/_TITLE, so those spellings reach the same six keys.
+for _kw in _DEFINE_CPM_UNSUPPORTED:
+    HANDLERS[_kw] = handle_define_cpm_unsupported
+del _kw
 
 # ── Seatbelts / restraints ───────────────────────────────────────────────────
 #

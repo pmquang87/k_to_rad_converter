@@ -1707,9 +1707,14 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
 
     vents: List[AirbagVent] = []
     # A23 and LCA23 obey the SAME override rule the coefficient columns do —
-    # A23 "EQ.0.0: Set A23 to zero if LCA23 is != 0" and LCA23 "A nonzero
-    # value for A23 overrides LCA23" (Vol I R17 p.3-47) — so exactly one of
-    # them is live. Emitting both was wrong twice over: the engine MULTIPLIES
+    # A23 "Set A23 to zero if a positive LCA23 is defined below" (Vol I R17
+    # p.3-46) and LCA23 "A nonzero value for A23 overrides LCA23" (p.3-47) —
+    # so exactly one of them is live. "A POSITIVE LCA23" is the load-bearing
+    # half: LCA23 = -1 is the part-SET sentinel of a negative A23, not a
+    # curve, which is why the gate below reads `ab.lca23 > 0` and not
+    # `!= 0`. (The "EQ.0.0: Set A23 to zero if LCA23 is != 0" phrasing is
+    # *AIRBAG_WANG_NEFSKE's, p.3-23 — a different keyword, warn-dropped
+    # here.) Emitting both was wrong twice over: the engine MULTIPLIES
     # them (airbagb1.F: AOUT = AVENT, then AOUT = FPORP*AOUT*f_P((P-PEXT)*
     # SCALP)), so a stated A23 vented through A23*f_area(P) instead of A23,
     # and the documented pressure-dependent form A23 = 0 with LCA23 > 0 gave
@@ -1726,8 +1731,6 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
             "would otherwise MULTIPLY the two — a vent hole's Avent and its "
             "fct_IDP are a product, not alternatives (airbagb1.F) — and the "
             "hole would open by the curve's ordinate times the stated area.")
-    a23_curve = _gauge_shifted_curve(state, ab, add_curve, ab.lca23, "LCA23") \
-        if a23_by_curve else 0
     if c23 == 0.0 and ab.lcc23 == 0:
         pass                       # zero orifice coefficient — no vent at all
     elif ab.a23 < 0.0:
@@ -1748,19 +1751,37 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
         # engine forms AOUT = Avent * f_P((P-Pext)*SCALP), so Avent carries
         # the dimensionless coefficient and the curve carries the area —
         # C23 * A23(P), which is what LS-DYNA computes.
-        vents.append(AirbagVent(title="VENT_A23", avent=c23,
-                                fct_t=fct_t, fct_p=a23_curve))
+        #
+        # The gauge-shifted copy is allocated HERE, inside the branch that
+        # consumes it, and NOT beside `a23_by_curve` above: `_gauge_shifted_
+        # curve` calls `add_curve` as a side effect, so building it before the
+        # vent decision wrote a synthesized /FUNCT on every deck whose orifice
+        # coefficient is zero — a curve nothing references, on a bag that
+        # emits Nvent 0. Legal for the starter, but it spends a /FUNCT id and
+        # breaks the "every synthesized MONVOL_* function is referenced" rule.
+        vents.append(AirbagVent(
+            title="VENT_A23", avent=c23, fct_t=fct_t,
+            fct_p=_gauge_shifted_curve(state, ab, add_curve, ab.lca23,
+                                       "LCA23")))
     elif ab.a23 > 0.0:
         # A scalar whole-bag orifice: Avent is the ABSOLUTE area A23*C23.
         vents.append(AirbagVent(title="VENT_A23", avent=ab.a23 * c23,
                                 fct_t=fct_t))
-    elif fct_t:
+    else:
+        # `c23 != 0.0` is GUARANTEED here: the only way it can be zero is
+        # "neither C23 nor LCC23 stated", and the first branch catches that.
+        # So the deck DID state an orifice coefficient — by C23, or by LCC23
+        # in either sign — and it is being dropped, which must be said by
+        # name. A bare `elif fct_t:` only fired on the LCC23 form and let a
+        # stated constant C23 fall off the end of the chain in silence.
         state.warn(
-            f"{kw}: card 4 gives the vent orifice COEFFICIENT (C23/LCC23) but "
-            "no AREA — A23 is 0 and LCA23 names no curve. A coefficient with "
-            "no area is no orifice, so NO vent hole is emitted and the bag "
-            "does not vent through the exit hole. State A23, or LCA23 as an "
-            "area-vs-absolute-pressure curve.")
+            f"{kw}: card 4 gives the vent orifice COEFFICIENT "
+            + (f"(C23={ab.c23:g})" if ab.c23 != 0.0
+               else f"(LCC23={ab.lcc23})")
+            + " but no AREA — A23 is 0 and LCA23 names no curve. A "
+            "coefficient with no area is no orifice, so NO vent hole is "
+            "emitted and the bag does not vent through the exit hole. State "
+            "A23, or LCA23 as an area-vs-absolute-pressure curve.")
 
     # ── the fabric porosity ─────────────────────────────────────────────
     poro_stated = (ab.cp23 != 0.0 or ab.lcp23 != 0
@@ -1820,7 +1841,7 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
                 "fabric-porosity orifice COEFFICIENT is 0 and the weave leaks "
                 "nothing whatever AP23/LCAP23 say (\"Orifice coefficient for "
                 "leakage (fabric porosity). Set to zero if LCCP23 is defined "
-                "below\", Vol I R17 p.3-47). NO second vent hole is emitted.")
+                "below\", Vol I R17 p.3-47). NO fabric vent hole is emitted.")
         elif ap_by_curve:
             # LCAP23 is the leak AREA vs pressure; Avent carries CP23 alone.
             vents.append(AirbagVent(title="VENT_FABRIC", avent=cp,
@@ -1832,13 +1853,18 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
             state.warn(
                 f"{kw}: card 4 gives the fabric-porosity COEFFICIENT (CP23/"
                 "LCP23) but no leak AREA — AP23 is 0 and LCAP23 names no "
-                "curve — so no second vent hole is emitted and the weave does "
+                "curve — so no fabric vent hole is emitted and the weave does "
                 "not leak. State AP23.")
         if vents and vents[-1].title == "VENT_FABRIC":
+            # Worded from the COUNT, not hard-wired to "second": a card 4 that
+            # states no exit orifice at all (or one that is dropped) leaves
+            # the porosity as the ONLY vent hole, and calling it the second
+            # contradicted the emitted Nvent 1.
             state.warn(
                 f"{kw}: the fabric porosity (CP23={ab.cp23:g}, "
-                f"AP23={ab.ap23:g}) is emitted as a SECOND VENT HOLE with "
-                f"Avent = {vents[-1].avent:g}, not as a /MONVOL porous "
+                f"AP23={ab.ap23:g}) is emitted as VENT HOLE {len(vents)} of "
+                f"{len(vents)} with Avent = {vents[-1].avent:g}, not as a "
+                "/MONVOL porous "
                 "surface. CP23 is a dimensionless orifice coefficient and "
                 "AP23 an area, so their product is an effective leak area — "
                 "which is exactly what Avent means with no named surface — "
@@ -1889,11 +1915,26 @@ def _resolve_hybrid_vents(state: ConversionState, ab: Airbag,
             "hole to put it on. Any fabric porosity still leaks from t=0.")
     ab.vents = vents
     if not vents:
+        # Truthful about WHY. A card 4 that states a coefficient with no area,
+        # or an area with no coefficient, is not a card 4 that "gives
+        # neither" — the columns above have already said which half was
+        # dropped, and repeating the blanket sentence contradicted the deck.
+        stated = [f"{n}={v:g}" for n, v in (("C23", ab.c23), ("A23", ab.a23),
+                                            ("CP23", ab.cp23),
+                                            ("AP23", ab.ap23)) if v]
+        stated += [f"{n}={v}" for n, v in (("LCC23", ab.lcc23),
+                                           ("LCA23", ab.lca23),
+                                           ("LCP23", ab.lcp23),
+                                           ("LCAP23", ab.lcap23)) if v]
         state.warn(
-            f"{kw}: card 4 gives neither a vent orifice (C23/A23) nor a "
-            "fabric porosity (CP23/AP23), so this bag has NO VENT at all. "
-            "That matches the deck; a sealed bag reaches a much higher "
-            "pressure than a vented one, so check it is intended.")
+            f"{kw}: no vent hole is emitted, so this bag has NO VENT at all. "
+            + ("Card 4 gives neither a vent orifice (C23/A23) nor a fabric "
+               "porosity (CP23/AP23), so that matches the deck; "
+               if not stated else
+               f"Card 4 DOES state {', '.join(stated)}, but none of it "
+               "resolves to a vent hole — the warning(s) above say why; ")
+            + "a sealed bag reaches a much higher pressure than a vented one, "
+            "so check it is intended.")
 
 
 def _warn_hybrid_dropped(state: ConversionState, ab: Airbag) -> None:
@@ -1994,7 +2035,7 @@ def _warn_hybrid_jetting(state: ConversionState, ab: Airbag) -> None:
     **The functions do not map, and without them the geometry cannot be
     written at all.** ``Ijet = 1`` obliges ``fct_IDPt``, ``fct_IDPTheta`` and
     ``fct_IDPDelta``, and the reader has NO zero guard:
-    ``hm_read_monvol_type7.F:585-620`` (identically ``_type9.F:594-637``) runs
+    ``hm_read_monvol_type7.F:579-620`` (identically ``_type9.F:594-635``) runs
     ``DO JJ = 1, NFUNCT / IF (IPT(II) == NPC(JJ))`` inside
     ``IF (IJET(II) > 0)`` and calls ``ANCMSG(MSGID = 12/13/14, MSGTYPE =
     MSGERROR)`` when nothing matches. Id 0 is never in the function table, so
@@ -2039,7 +2080,8 @@ def _warn_hybrid_jetting(state: ConversionState, ab: Airbag) -> None:
             "is loaded by UNIFORM PRESSURE, because Ijet=1 obliges three "
             "pressure FUNCTIONS — fct_IDPt, fct_IDPTheta, fct_IDPDelta — and "
             "a zero in any of them is starter ERROR 12/13/14 "
-            "(hm_read_monvol_type7.F:585-620 has no zero guard; MEASURED: 3 "
+            "(hm_read_monvol_type7.F:579-620 / _type9.F:594-635 has no zero "
+            "guard; MEASURED: 3 "
             "ERROR(S), no restart file, the run never starts). LS-DYNA "
             "states no jet pressure to scale them with: its CA is a cone "
             "half-angle and its BETA a Bernoulli efficiency, and Radioss ADDS "

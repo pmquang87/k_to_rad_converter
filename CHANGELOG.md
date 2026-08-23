@@ -987,7 +987,7 @@ Prior history (before this changelog was introduced) is summarized in the
 - **The airbag / monitored-volume batch 2:
   `*AIRBAG_HYBRID[_JETTING][_CM]` → `/MONVOL/AIRBAG1` with `N_gases > 1` plus
   one `/MAT/GAS/MOLE` per species, `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION]
-  [_MOLEFRACTION][_SEGMENT][_TIME]` → `/MONVOL/FVMBAG2`, and
+  [_MOLEFRACTION/_INFLATION/_JET][_SEGMENT][_TIME]` → `/MONVOL/FVMBAG2`, and
   `*AIRBAG_INTERACTION` → `/MONVOL/COMMU1` on both bags with reciprocal `Nbag`
   communicating rows.** The three multi-gas keywords batch 1 registered as
   *recognized but not emitted*, and the machinery they share: a multi-row
@@ -1137,8 +1137,8 @@ Prior history (before this changelog was introduced) is summarized in the
      OVERRIDE them, so the GEOMETRY looks like a 1:1 map. **The functions are
      not, and without them the geometry cannot be written at all.** `Ijet = 1`
      obliges `fct_IDPt`, `fct_IDPTheta` and `fct_IDPDelta`, and the reader has
-     NO zero guard: `hm_read_monvol_type7.F:585-620` (identically `_type9.F`
-     `:594-637`) searches each id in `NPC` inside `IF (IJET(II) > 0)` and calls
+     NO zero guard: `hm_read_monvol_type7.F:579-620` (identically `_type9.F`
+     `:594-635`) searches each id in `NPC` inside `IF (IJET(II) > 0)` and calls
      `ANCMSG(MSGID = 12/13/14, MSGTYPE = MSGERROR)` when it is not found, and
      id 0 never is. MEASURED on two converted decks: 3 ERROR(S), `UNDEFINED
      POROSITY/TIME|PRESSURE|AREA FUNCTION ID=0`, ERROR TERMINATION, no restart
@@ -1426,6 +1426,85 @@ Prior history (before this changelog was introduced) is summarized in the
      unresolved `radioss_type` instead of falling through to `/MONVOL/PRES`.
 
   Suite 3495/2/1239 → **3626/2/1325**.
+
+  **Verification round (post-merge).** An independent adversarial
+  re-verification of the merged batch raised thirteen findings, none of them a
+  blocker and none of them a wrong emitted number. Two changed behaviour, one
+  narrowed a card-walk look-ahead, three closed test gaps and the rest were
+  prose that had drifted from the code.
+
+  1. **An orphan `/FUNCT` on a bag with no vent.** `_gauge_shifted_curve`
+     allocates an id and calls `add_curve` as a SIDE EFFECT, and it was
+     evaluated BEFORE the branch that decides whether a vent hole exists. A
+     card 4 with `C23` blank, `LCC23 = 0`, `A23 = 0` and `LCA23 > 0` therefore
+     wrote `MONVOL_<id>_LCA23_GAUGE` onto a bag emitting `Nvent 0` — MEASURED,
+     the id occurs exactly once in the whole starter, on its own definition
+     line. Harmless to the reader, but it spends a `/FUNCT` id and breaks the
+     "every synthesized `MONVOL_*` function is referenced" invariant the batch
+     pins. The copy is now built inside the branch that consumes it.
+  2. **A stated constant `C23` with no area was dropped in silence.** The
+     "coefficient but no AREA" warning gated on `fct_t`, which is only set when
+     the coefficient arrived through `LCC23`, so `C23 = 0.7` with
+     `A23 = LCA23 = 0` fell off the end of the chain — while the mirror case on
+     the fabric path (`CP23` stated, `AP23 = 0`) had always warned. The branch
+     is now a plain `else` (`c23 != 0.0` is guaranteed there, because the only
+     way it can be zero is the "neither `C23` nor `LCC23`" branch above it) and
+     names the dropped coefficient by value. The **"NO VENT at all"** text no
+     longer claims card 4 "gives neither a vent orifice (C23/A23) nor a fabric
+     porosity" on a deck that states one: it lists what the card DOES state and
+     defers to the warning that explains which half is missing.
+  3. **The blank-`FMASS` look-ahead is decided on COLUMNS, not on a cell
+     count.** With a blank card where 5.2 would be, the stride was 2 whenever
+     the card one further on had ≥ 2 populated cells. An entirely blank
+     jetting card 6 IS a legal jet — `NODE1`/`NODE2` on card 7 override
+     `XJFP`/`XJVH` (Vol I R17 p.3-51) and `CA`/`BETA` are optional — so at
+     NGAS = 1 with the FMASS card genuinely ABSENT, card 7 in node form
+     (columns 1-50 empty) was taken for a gas card 5.1 and card 6 was then read
+     off card 7: the drop warning reported `node_ID1/2/3 = 0` and `CA`/`BETA`
+     out of the node columns. A card populated only in slots 5-7 is now
+     recognised as card 7, because a gas card 5.1 must carry `MW` in slot 3
+     (`MW = 0` is starter `ERROR 710`). **Nothing emitted changes** — the jet
+     is dropped unconditionally either way and `Ijet` is written 0; what
+     changes is that the warning names the nodes the deck states.
+  4. **Three fixes that had no guarding test now have one**, each
+     mutation-checked: the `NBAG <= 20` cap (`monvol_commu1.cfg:255-259`,
+     `CHECK(COMMON) { NBAG > 0; NBAG <= 20; }`), the "an uninjected species
+     consumes no `/MAT` id" half of the housekeeping fix — pinned as the whole
+     synthesized id stream, since an emitted-block count cannot see a burnt id
+     — and `_make_monvols`' diagnosing `else`, which no deck can reach and
+     which therefore needed a direct test rather than a comment.
+  5. **`*DEFINE_CPM_*` is now a named warn-drop.** The six documented
+     spellings (`_BAG_INTERACTION`, `_CHAMBER`, `_GAS_PROPERTIES`, `_NPDATA`,
+     `_SWITCH_REGION`, `_VENT`; Vol I R17 pp. 17-88…17-99) fell to the generic
+     unsupported-keyword skip list, which names them but gives no reason. They
+     are extended inputs of an `*AIRBAG_PARTICLE` bag that still converts, so
+     the only sign that a chamber or a vent option has stopped applying is the
+     line that says so. `HANDLERS` only, never `_OFFSET_SPECS` — an unmodelled
+     card stack must not have its cells rewritten by position.
+  6. **Citations and counts corrected.** The A23 comment quoted
+     `*AIRBAG_WANG_NEFSKE`'s p.3-23 wording ("EQ.0.0: Set A23 to zero if LCA23
+     is ≠ 0") as though it were `*AIRBAG_HYBRID`'s; p.3-46 reads *"Set A23 to
+     zero if a positive LCA23 is defined below"*, and "a POSITIVE LCA23" is the
+     load-bearing half — it is what excludes the `LCA23 = -1` part-set
+     sentinel, which the code already had right. The jet-guard citation is
+     widened from `hm_read_monvol_type7.F:585-620` to `:579-620` (the guard
+     opens at `:579`, the three `ANCMSG` are at `:594`/`:606`/`:618`) and the
+     `_type9.F` companion corrected from `:594-637` to `:594-635`; the fabric
+     porosity is described as `VENT HOLE n of n` rather than always "a SECOND
+     VENT HOLE", which contradicted the `Nvent 1` it produced on a bag with no
+     exit orifice; the test module's mixture rule is restated as
+     `M = sum(w_i) / sum(w_i/M_i)` with the scale-invariance note; and the
+     README's `*AIRBAG_PARTICLE` row gains `_INFLATION` and `_JET`. For the
+     record, since the merged PR body states otherwise: the generated
+     `AIRBAG*` registry is **434** `HANDLERS` keys and **384** `_OFFSET_SPECS`
+     keys at this commit (469/424 was the pre-review count), the 50-key
+     difference being the warn-drop models, which are deliberately `HANDLERS`
+     only; and `*AIRBAG_WANG_NEFSKE*` has **six** option combos —
+     `{_JETTING/_MULTIPLE_JETTING}{_POP}` — i.e. 30 generated keys, not four.
+
+  Suite 3626/2/1325 → **3641/2/1335**; every emitted `.rad` byte-identical
+  across the whole validation corpus except the three shapes named in items 1
+  and 2, which no corpus deck carries.
 
 - **The airbag / monitored-volume batch 1:
   `*AIRBAG_SIMPLE_PRESSURE_VOLUME` → `/MONVOL/PRES`,

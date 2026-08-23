@@ -499,9 +499,9 @@ covering them unlocks a large class of real models.
 
   **Batch 2 done**: `*AIRBAG_HYBRID[_JETTING][_CM]` → `/MONVOL/AIRBAG1` with
   `N_gases > 1` and one `/MAT/GAS/MOLE` per species,
-  `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION][_SEGMENT][_TIME]` →
-  `/MONVOL/FVMBAG2`, and `*AIRBAG_INTERACTION` → `/MONVOL/COMMU1` on both bags
-  with reciprocal `Nbag` rows (a keyword dyna2rad does not convert at all).
+  `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION/_INFLATION/_JET][_SEGMENT][_TIME]`
+  → `/MONVOL/FVMBAG2`, and `*AIRBAG_INTERACTION` → `/MONVOL/COMMU1` on both
+  bags with reciprocal `Nbag` rows (a keyword dyna2rad does not convert at all).
   With them: the multi-row injector, the mole-fraction mixture rule, **named
   vent-hole surfaces** (`surf_IDv` — the batch-1 deferral, built from the vent
   part and screened as a subset of the bag surface, with `*AIRBAG_HYBRID`'s
@@ -509,8 +509,9 @@ covering them unlocks a large class of real models.
   `PVENT`/`PPOP` pop-open thresholds, the `SD1 \ SD2` internal-surface split
   and the `NORIF` inflator-nozzle surface. `/TH/MONV` gained `COMMU1` and
   `FVMBAG2` rows, the latter restoring `DTBAG`/`NFV`/`UPCRIT`. See CHANGELOG
-  for the eighteen decisions, the review round's fourteen fixes and the six
-  documented deviations from dyna2rad.
+  for the eighteen decisions, the review round's fourteen fixes, the
+  verification round's six housekeeping items and the six documented
+  deviations from dyna2rad.
 
   **Not converted by batch 2, and now warn-dropped by name rather than
   mis-read**: `*AIRBAG_HYBRID_CHEMKIN` (a model of its own, with its own card
@@ -560,8 +561,10 @@ covering them unlocks a large class of real models.
     owning-shell resolution intersected with `SD1 \ SD2`; today the
     restriction is named and dropped, so the bag measures the whole of
     `SD1 \ SD2`.
-  - `*DEFINE_CPM_CHAMBER` / `_VENT` / `_GAS_PROPERTIES` / `_BAG_INTERACTION`,
-    all four named and warn-dropped by batch 2 where they are referenced.
+  - The `*DEFINE_CPM_*` family — `_BAG_INTERACTION`, `_CHAMBER`,
+    `_GAS_PROPERTIES`, `_NPDATA`, `_SWITCH_REGION`, `_VENT` (Vol I R17
+    pp. 17-88…17-99) — registered and warn-dropped by name, each saying what
+    the extended CPM input it carries would have done.
   - `*AIRBAG_ALE` / `_ADVANCED_ALE` / `_FLUID_AND_GAS` — still registered and
     warn-dropped; they need an ALE mesh and `/INTER/TYPE18` coupling.
 
