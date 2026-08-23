@@ -3,7 +3,8 @@
   *AIRBAG_HYBRID{_JETTING}{_CM}  -> /MONVOL/AIRBAG1 with N_gases > 1
                                     + one /MAT/GAS/MOLE per species
                                     + the initial-mixture /MAT/GAS/MOLE
-  *AIRBAG_PARTICLE{_MPP}{_DECOMPOSITION}{_MOLEFRACTION}{_SEGMENT}{_TIME}
+  *AIRBAG_PARTICLE{_MPP}{_DECOMPOSITION}{_MOLEFRACTION/_INFLATION/_JET}
+                  {_SEGMENT}{_TIME}
                                  -> /MONVOL/FVMBAG2, or /MONVOL/AIRBAG1
                                     under --airbag-particle-uniform
   *AIRBAG_INTERACTION            -> /MONVOL/COMMU1 x 2 with reciprocal
@@ -26,8 +27,12 @@ most risk, and why each is pinned:
   a Cpf, and everything below it shifts.
 * **The initial mixture is a MOLE-FRACTION average.** ``INITM`` is a MASS
   fraction (Vol I R17 p.3-50) while MW and A/B/C are MOLAR, so the weights are
-  converted before averaging: ``M = 1 / sum(w_i/M_i)`` and
-  ``Cp = sum(x_i Cp_i)``. dyna2rad takes the arithmetic mean of molar
+  converted before averaging: ``x_i = (w_i/M_i) / sum(w_j/M_j)``,
+  ``M = sum(w_i) / sum(w_i/M_i)`` and ``Cp = sum(x_i Cp_i)``. The
+  ``sum(w_i)`` NUMERATOR is what makes MW invariant to the scale of the INITM
+  column — the same composition written 0.79/0.21, 79/21 or 0.395/0.105 must
+  give one MW, and the ``1 / sum(w_i/M_i)`` form this replaced gave three
+  answers a factor 100 apart. dyna2rad takes the arithmetic mean of molar
   quantities with mass weights, which agrees only when every MW is equal.
 * **``Iflow`` must be 1 and the curve is a RATE.** Same trap as batch 1:
   ``airbaga1.F`` INTEGRATES the curve at ``Iflow=1`` and DIFFERENCES it at 0.
@@ -454,6 +459,30 @@ class TestHybridGasMaterials(unittest.TestCase):
         self.assertEqual(len(_blocks(starter, "/MAT/GAS/MOLE/")), 2,
                          "the mixture and the ONE injected species")
 
+    def test_an_uninjected_species_consumes_no_mat_id(self):
+        """The OTHER half of the same fix, and the one an emitted-block count
+        cannot see: allocating ``sp.mat_id`` for a species that gets no
+        injector row emits nothing, but it BURNS an id and leaves a hole in
+        the synthesized stream.
+
+        Pinned as the whole stream, not as one number: every id this batch
+        allocates is drawn from the same guarded allocator, so a gap is a
+        wasted id and a shift in every id below it."""
+        import re
+        for lbl, gases, want in (
+                ("gas 2 uninjected", (_G1, _G2), 5),
+                ("both injected", (_G1, dict(_G2, lcidm=90, lcidt=91)), 6)):
+            with self.subTest(lbl):
+                _r, starter, _e = _convert(_deck(_hybrid(gases=gases)))
+                ids = sorted({int(m.group(1)) for ln in starter.splitlines()
+                              if (m := re.match(r"^/[A-Z0-9/]+/(9\d{4})$",
+                                                ln))})
+                self.assertEqual(ids, list(range(90001, 90001 + want)),
+                                 "the synthesized id stream must have no gap")
+        # ...and the injector PROP sits at the id the un-gapped stream gives.
+        _r, starter, _e = _convert(_deck(_hybrid()))
+        self.assertIn("/PROP/INJECT1/90004", starter)
+
     def test_the_mole_fraction_average_differs_from_dyna2rads_mean(self):
         """dyna2rad accumulates ``radMW += MW_i*INITM_i/sum(INITM)`` and the
         same for A/B/C (convertcontrolvols.cxx:2494-2497) — a MASS-weighted
@@ -807,6 +836,81 @@ outboard vent
         c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
         self.assertEqual(_col_i(c[5], 1, 10), 0, "Nvent")
         self.assertTrue(_warns(r, "this bag has NO VENT at all"))
+        # A card 4 that really is blank may still be described as blank.
+        self.assertTrue(_warns(r, "Card 4 gives neither a vent orifice"))
+
+    def test_a_stated_c23_with_no_area_is_dropped_BY_NAME(self):
+        """C23 = 0.7 with A23 = 0 and LCA23 = 0 vents nothing — LS-DYNA's mass
+        flow is C23*A23*<isentropic> — but the deck DID state a coefficient,
+        and dropping it in silence is the asymmetry: the mirror case on the
+        fabric path (CP23 stated, AP23 = 0) has always warned.
+
+        The old chain warned only when the coefficient arrived through LCC23
+        (``elif fct_t:``), so a stated CONSTANT fell off the end."""
+        r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.7, lcc23=0, a23=0.0, lca23=0,
+                    cp23=0.0, lcp23=0, ap23=0.0, lcap23=0, pvent=0.0)))
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual(_col_i(c[5], 1, 10), 0, "Nvent")
+        named = _warns(r, "vent orifice COEFFICIENT (C23=0.7)")
+        self.assertTrue(named, "the dropped C23 must be named BY VALUE")
+        self.assertIn("no AREA", named[0])
+
+    def test_the_lcc23_form_of_the_same_drop_is_still_named(self):
+        """The branch that already worked must keep working, and must name
+        the CURVE rather than a constant it does not have."""
+        r, _starter, _e = _convert(_deck(
+            _hybrid(c23=0.0, lcc23=93, a23=0.0, lca23=0,
+                    cp23=0.0, lcp23=0, ap23=0.0, lcap23=0, pvent=0.0)))
+        self.assertTrue(_warns(r, "vent orifice COEFFICIENT (LCC23=93)"))
+
+    def test_a_stated_c23_is_named_even_when_a_fabric_vent_exists(self):
+        """With a porosity present the bag DOES vent, so the "NO VENT at all"
+        warning never fires — which is exactly why the drop has to be reported
+        on its own branch. MEASURED before the fix: zero warnings mentioning
+        C23 on this deck."""
+        r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.7, lcc23=0, a23=0.0, lca23=0,
+                    cp23=0.35, lcp23=0, ap23=12.5, lcap23=0, pvent=0.0)))
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual(_col_i(c[5], 1, 10), 1, "Nvent — the porosity only")
+        self.assertTrue(_warns(r, "vent orifice COEFFICIENT (C23=0.7)"))
+        self.assertEqual(_warns(r, "this bag has NO VENT at all"), [])
+
+    def test_the_no_vent_text_does_not_contradict_the_deck(self):
+        """A card 4 that states C23 is not a card 4 that "gives neither a vent
+        orifice (C23/A23) nor a fabric porosity"."""
+        r, _starter, _e = _convert(_deck(
+            _hybrid(c23=0.7, lcc23=0, a23=0.0, lca23=0,
+                    cp23=0.0, lcp23=0, ap23=0.0, lcap23=0, pvent=0.0)))
+        said = _warns(r, "this bag has NO VENT at all")
+        self.assertEqual(len(said), 1)
+        self.assertNotIn("gives neither a vent orifice", said[0])
+        self.assertIn("Card 4 DOES state C23=0.7", said[0])
+
+    def test_the_only_vent_hole_is_not_called_the_second(self):
+        """With no exit orifice the fabric porosity is VENT HOLE 1 of 1, and
+        the emitted Nvent says so. Hard-wiring "a SECOND VENT HOLE"
+        contradicted the card it describes."""
+        r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.0, lcc23=0, a23=0.0, lca23=0,
+                    cp23=0.35, lcp23=0, ap23=12.5, lcap23=0, pvent=0.0)))
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual(_col_i(c[5], 1, 10), 1, "Nvent")
+        said = _warns(r, "the fabric porosity (CP23=0.35, AP23=12.5)")
+        self.assertEqual(len(said), 1)
+        self.assertIn("VENT HOLE 1 of 1", said[0])
+        self.assertNotIn("SECOND VENT HOLE", said[0])
+
+    def test_a_porosity_beside_an_orifice_is_still_the_second(self):
+        """The control: with an exit orifice emitted first, the porosity
+        really is hole 2 of 2, and Nvent agrees."""
+        r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.7, a23=100.0, lca23=0,
+                    cp23=0.35, ap23=12.5, lcap23=0, pvent=0.0)))
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual(_col_i(c[5], 1, 10), 2, "Nvent")
+        self.assertTrue(_warns(r, "VENT HOLE 2 of 2"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -816,7 +920,8 @@ class TestHybridJetting(unittest.TestCase):
     def test_ijet_is_never_one_because_the_starter_refuses_a_zero_function(
             self):
         """Ijet=1 obliges fct_IDPt/fct_IDPTheta/fct_IDPDelta, and the reader
-        has NO zero guard: hm_read_monvol_type7.F:585-620 searches each id in
+        has NO zero guard: hm_read_monvol_type7.F:579-620 (identically
+        _type9.F:594-635) searches each id in
         NPC inside ``IF (IJET(II) > 0)`` and calls ANCMSG(MSGID = 12/13/14,
         MSGTYPE = MSGERROR) when it is not found. Id 0 never is.
 
@@ -979,6 +1084,57 @@ class TestHybridCardWalk(unittest.TestCase):
         hits = _warns(r, "node_ID1=1")
         self.assertTrue(hits, r.warnings)
         self.assertIn("node_ID3=6", hits[0])
+
+    def test_an_absent_fmass_card_before_a_BLANK_jetting_card_six(self):
+        """The one shape the blank-card look-ahead used to get backwards.
+
+        At NGAS = 1 an absent card 5.2 and a blank card 5.2 both leave a card
+        with zero populated cells where 5.2 would be, so the stride is decided
+        by looking ONE FURTHER. An entirely blank card 6 IS a legal jet — Vol
+        I R17 p.3-51 has NODE1/NODE2 on card 7 OVERRIDE the XJFP/XJVH
+        coordinates, and CA/BETA are optional — so a jet stated purely by
+        nodes writes card 6 blank and card 7 with columns 1-50 empty.
+
+        Counting cells alone then saw card 7's two node cells, called the
+        blank card 6 a card 5.2, and read card 6 off card 7: node_ID1/2/3 all
+        came back 0 and CA/BETA were read out of the node columns. The
+        look-ahead is decided on the SLOTS instead — a card populated only in
+        slots 5-7 is card 7, because a gas card 5.1 must carry MW in slot 3
+        (MW = 0 is starter ERROR 710).
+
+        Nothing EMITTED changes either way (the jet is dropped unconditionally
+        and Ijet is written 0); what changes is that the drop warning now
+        names the nodes the deck actually states."""
+        body = _hybrid(gases=(_G1,), ngas=1, fmass=False, jetting=True)
+        lines = body.splitlines(keepends=True)
+        # ...card 6 entirely blank, card 7 in NODE form (cols 1-50 empty).
+        lines[-2] = "\n"
+        lines[-1] = " " * 50 + f"{6:>10d}{22:>10d}\n"
+        r, starter, _e = _convert(_deck("".join(lines)))
+        self.assertEqual(r.skipped_keywords, [])
+        hits = _warns(r, "node_ID1=6")
+        self.assertTrue(hits, r.warnings)
+        self.assertIn("node_ID2=22", hits[0])
+        self.assertEqual(_warns(r, "COORDINATES"), [],
+                         "card 6 is blank, so there is no coordinate form")
+        # The gas block itself is unaffected: one species, read off card 5.1.
+        blocks = _blocks(starter, "/MAT/GAS/MOLE/")
+        self.assertEqual(_col_f(_cards(blocks[-1])[0], 1, 20), 0.028, "MW")
+        # ...and the emitted injector row is unchanged: Ijet 0, no nodes.
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual([_col_i(c[4], a, a + 9)
+                          for a in (21, 31, 41, 51)], [0, 0, 0, 0])
+
+    def test_a_blank_card_before_a_real_gas_card_is_still_a_blank_fmass(self):
+        """The control the tightening must not break: at NGAS = 2 the card one
+        further on is gas 2's card 5.1, which carries MW in slot 3, so a blank
+        card 5.2 is still recognised as present."""
+        g2 = dict(_G2, lcidm=90, lcidt=91)
+        deck = _deck(_hybrid(gases=(_G1, g2), fmass=True, fmass_val=None))
+        _r, starter, _e = _convert(deck)
+        blocks = _blocks(starter, "/MAT/GAS/MOLE/")
+        self.assertEqual(len(blocks), 3, "mixture + 2 species")
+        self.assertEqual(_col_f(_cards(blocks[2])[0], 1, 20), 0.032)
 
     def test_ngas_zero_emits_no_monvol_and_says_why(self):
         r, starter, _e = _convert(_deck(_hybrid(gases=(), ngas=0)))
@@ -1706,6 +1862,52 @@ class TestAirbagInteraction(unittest.TestCase):
         self.assertIn("/MONVOL/PRES", hits[0])
         self.assertIn("airbags 42 and 43", hits[0])
 
+    def test_the_twenty_first_row_is_refused_by_the_reader_cap(self):
+        """``monvol_commu1.cfg:255-259`` carries ``CHECK(COMMON) { NBAG > 0;
+        NBAG <= 20; }``, so a 21st communicating row is refused by the READER
+        and the whole deck with it. The interaction is therefore dropped here,
+        naming the cap, rather than emitted and rejected at the starter.
+
+        Driven at the resolver, because a star of 21 partners is 22 meshes of
+        fixture for one integer comparison — and it is the comparison, not the
+        geometry, that has to hold. The two bags are already promoted and
+        already full; `commu_rows` is exactly what `_commu_block` writes
+        `Nbag` from."""
+        from k2rad.state import Airbag, AirbagInteraction, ConversionState
+        from k2rad.writer.monvol import (_COMMU1_MAX_ROWS,
+                                         _resolve_airbag_interactions)
+        self.assertEqual(_COMMU1_MAX_ROWS, 20, "the cfg's own CHECK")
+        for filled, promoted in ((_COMMU1_MAX_ROWS, False),
+                                 (_COMMU1_MAX_ROWS - 1, True)):
+            with self.subTest(rows=filled):
+                state = ConversionState()
+                bags = []
+                for ab_id, mv in ((42, 90001), (43, 90002)):
+                    ab = Airbag(airbag_id=ab_id, model="HYBRID",
+                                keyword="AIRBAG_HYBRID")
+                    ab.radioss_type = "COMMU1"
+                    ab.monvol_id = mv
+                    ab.commu_rows = [(900 + k, 0, 1.0, 0, 0)
+                                     for k in range(filled)]
+                    state.airbags.append(ab)
+                    bags.append(ab)
+                state.airbag_interactions.append(AirbagInteraction(
+                    ab1=42, ab2=43, area=33.3, sf=1.0, pid=0,
+                    keyword="AIRBAG_INTERACTION"))
+                _resolve_airbag_interactions(state)
+                capped = [w for w in state.warnings
+                          if "already carry 20 communicating rows" in w]
+                if promoted:
+                    self.assertEqual(capped, [])
+                    self.assertEqual([len(b.commu_rows) for b in bags],
+                                     [filled + 1] * 2, "the row is added")
+                else:
+                    self.assertTrue(capped, state.warnings)
+                    self.assertIn("NBAG <= 20", capped[0])
+                    self.assertIn("[42, 43]", capped[0])
+                    self.assertEqual([len(b.commu_rows) for b in bags],
+                                     [filled] * 2, "no 21st row")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 class TestAbstatChannels(unittest.TestCase):
@@ -1861,6 +2063,39 @@ class TestBatch2Dispatch(unittest.TestCase):
                 self.assertTrue(_warns(res, needle), res.warnings)
                 self.assertTrue(_warns(res, "NOT converted"), res.warnings)
                 self.assertNotIn("/MONVOL/", starter)
+
+    def test_the_define_cpm_family_is_a_named_warn_drop(self):
+        """The extended CPM inputs of *AIRBAG_PARTICLE. None is convertible —
+        Radioss's /MONVOL/FVMBAG* is a finite-volume bag with no per-vent,
+        per-chamber or per-species extension slot — but a side card that lands
+        in the generic ``skipped_keywords`` list is a vent option, a chamber
+        or a gas property that quietly stops applying on a deck that still
+        converts and still terminates normally. All six documented spellings
+        (Vol I R17 pp.17-88..17-99) are registered by name."""
+        from k2rad.handlers import (_DEFINE_CPM_UNSUPPORTED,
+                                    handle_define_cpm_unsupported)
+        self.assertEqual(sorted(_DEFINE_CPM_UNSUPPORTED), [
+            "DEFINE_CPM_BAG_INTERACTION", "DEFINE_CPM_CHAMBER",
+            "DEFINE_CPM_GAS_PROPERTIES", "DEFINE_CPM_NPDATA",
+            "DEFINE_CPM_SWITCH_REGION", "DEFINE_CPM_VENT"])
+        for kw in _DEFINE_CPM_UNSUPPORTED:
+            with self.subTest(kw=kw):
+                self.assertIs(HANDLERS[kw], handle_define_cpm_unsupported)
+                # An unmodelled card stack must not have its cells rewritten
+                # by position — the same rule *AIRBAG_HYBRID_CHEMKIN follows.
+                self.assertNotIn(kw, _OFFSET_SPECS)
+
+    def test_a_define_cpm_card_warns_by_name_and_is_not_skipped(self):
+        cpm = ("*DEFINE_CPM_VENT\n" + _card(1, 2, 0.5, 0.0)
+               + "*DEFINE_CPM_GAS_PROPERTIES\n" + _card(1, 0.028, 293.0))
+        res, starter, _eng = _convert(_deck(_particle(), cpm))
+        self.assertEqual(res.skipped_keywords, [])
+        for kw in ("*DEFINE_CPM_VENT", "*DEFINE_CPM_GAS_PROPERTIES"):
+            hits = _warns(res, kw + " is NOT converted")
+            self.assertTrue(hits, res.warnings)
+            self.assertIn("NOTHING is emitted", hits[0])
+        # ...and the particle bag it belongs to still converts.
+        self.assertIn("/MONVOL/FVMBAG2/", starter)
 
     def test_the_id_and_title_spellings_need_no_key(self):
         """parser._split_keyword moves a trailing _ID/_TITLE into
@@ -2041,20 +2276,16 @@ class TestBatch2RegistryAudit(unittest.TestCase):
                 self.assertTrue(fid in fcts or fid == 0, "fun_ID_T")
         self.assertTrue(props)
 
-    def test_every_emitted_monvol_function_is_referenced(self):
-        """The synthesized /FUNCT are the only entities this batch creates
-        that nothing else names, so an unreferenced one is deck noise the
-        registry would not otherwise catch."""
+    @staticmethod
+    def _synthesized_and_named(starter: str):
+        """``({synthesized MONVOL_* /FUNCT id: title}, {ids named by a card})``
+        over every block that can reference one."""
         import re
-        deck = _deck(_hybrid(a23=0.0, lca23=92), _particle(ab_id=78), _ABSTAT)
-        _r, starter, _e = _convert(deck)
-        made = {}
-        lines = starter.splitlines()
+        made, lines = {}, starter.splitlines()
         for k, ln in enumerate(lines):
             if (m := re.match(r"^/FUNCT/(\d+)$", ln)) and \
                     lines[k + 1].startswith("MONVOL_"):
                 made[int(m.group(1))] = lines[k + 1]
-        self.assertTrue(made, "the fixture must synthesize at least one")
         named = set()
         for blk in (_blocks(starter, "/MONVOL/AIRBAG1/")
                     + _blocks(starter, "/MONVOL/FVMBAG2/")
@@ -2063,8 +2294,88 @@ class TestBatch2RegistryAudit(unittest.TestCase):
             for row in _cards(blk):
                 named.update(int(row[c:c + 10]) for c in range(0, 90, 10)
                              if row[c:c + 10].strip().lstrip("-").isdigit())
+        return made, named
+
+    def test_every_emitted_monvol_function_is_referenced(self):
+        """The synthesized /FUNCT are the only entities this batch creates
+        that nothing else names, so an unreferenced one is deck noise the
+        registry would not otherwise catch."""
+        deck = _deck(_hybrid(a23=0.0, lca23=92), _particle(ab_id=78), _ABSTAT)
+        _r, starter, _e = _convert(deck)
+        made, named = self._synthesized_and_named(starter)
+        self.assertTrue(made, "the fixture must synthesize at least one")
         self.assertEqual(set(made) - named, set(),
                          f"orphan /FUNCT: {made}")
+
+    def test_a_dropped_vent_curve_synthesizes_no_gauge_function(self):
+        """A card 4 with LCA23 > 0 and NO orifice coefficient emits no vent
+        at all — C23 blank with LCC23 = 0 is a ZERO coefficient — so the
+        gauge-shifted copy of LCA23 must never be built.
+
+        ``_gauge_shifted_curve`` allocates an id and calls ``add_curve`` as a
+        SIDE EFFECT, so evaluating it before the vent decision wrote a
+        /FUNCT that the whole starter names exactly once: on its own
+        definition line. Legal for the reader, but it spends an id and breaks
+        the invariant the test above pins."""
+        r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.0, lcc23=0, a23=0.0, lca23=92,
+                    cp23=0.0, lcp23=0, ap23=0.0, lcap23=0, pvent=0.0)))
+        c = _cards(_block(starter, "/MONVOL/AIRBAG1/"))
+        self.assertEqual(_col_i(c[5], 1, 10), 0, "Nvent — no vent at all")
+        made, named = self._synthesized_and_named(starter)
+        self.assertEqual(set(made) - named, set(),
+                         f"orphan /FUNCT: {made}")
+        self.assertEqual(
+            [t for t in made.values() if "LCA23_GAUGE" in t], [],
+            "no LCA23 gauge copy may be built for a vent that is not emitted")
+        # And the deck still SAYS what it dropped.
+        self.assertTrue(_warns(r, "neither C23 nor LCC23"))
+
+    def test_the_gauge_function_is_still_built_when_the_vent_is_emitted(self):
+        """The control for the test above: the same LCA23, with a coefficient
+        stated, must still produce the shifted copy AND reference it."""
+        _r, starter, _e = _convert(_deck(
+            _hybrid(c23=0.7, lcc23=0, a23=0.0, lca23=92, pvent=0.0)))
+        made, named = self._synthesized_and_named(starter)
+        gauge = [f for f, t in made.items() if "LCA23_GAUGE" in t]
+        self.assertEqual(len(gauge), 1, f"expected one gauge copy: {made}")
+        self.assertIn(gauge[0], named, "the gauge copy must be referenced")
+
+    def test_an_unresolved_monvol_type_is_diagnosed_not_silently_pres(self):
+        """``_make_monvols`` dispatches on a RESOLVER-set key, so an empty
+        ``radioss_type`` means ``_resolve_airbag_model`` reached a model it
+        does not handle. Falling through to the ``/MONVOL/PRES`` emitter would
+        give that bag a pressure card it never asked for — a wrong load, not a
+        missing one.
+
+        No deck can reach the branch (all seven reachable models set the key),
+        which is exactly why it needs a direct test: it is a safety net, and a
+        safety net with no test is a comment. The surface and gas emitters are
+        stubbed because the branch under test is the DISPATCH."""
+        from unittest import mock
+        from k2rad.state import Airbag, ConversionState
+        from k2rad.writer import monvol as _monvol
+        state = ConversionState()
+        ab = Airbag(airbag_id=42, model="SOMETHING_NEW",
+                    keyword="AIRBAG_SOMETHING_NEW")
+        ab.sid = 7
+        ab.monvol_id = 90001
+        ab.radioss_type = ""
+        state.airbags.append(ab)
+        with mock.patch.object(_monvol, "_emit_airbag_surface",
+                               return_value=["/SURF/GRSHEL/90002", "stub"]), \
+                mock.patch.object(_monvol, "_emit_airbag_extra_surfaces",
+                                  return_value=[]), \
+                mock.patch.object(_monvol, "_emit_airbag_gas",
+                                  return_value=[]):
+            lines = _monvol._make_monvols(state)
+        self.assertEqual([ln for ln in lines if ln.startswith("/MONVOL/")], [],
+                         "no /MONVOL of ANY type may be emitted")
+        self.assertEqual(state.monvol_ids, [], "and none may be registered")
+        hits = [w for w in state.warnings if "no /MONVOL type" in w]
+        self.assertTrue(hits, state.warnings)
+        self.assertIn("converter defect", hits[0])
+        self.assertIn("*AIRBAG_SOMETHING_NEW", hits[0])
 
     def test_ittf_is_a_declared_field_of_the_airbag(self):
         """It is read by BOTH emitters, so a direct-construction test, a

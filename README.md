@@ -2459,7 +2459,7 @@ rejects the whole deck
 | `*AIRBAG_LOAD_CURVE` | `/MONVOL/PRES` | `Itypfun = 1` (pressure vs time), `STIME` folded into the curve |
 | `*AIRBAG_LINEAR_FLUID` | `/MONVOL/LFLUID` (ITYPE 10) | `P = K·ln(V0/V) + Padd`, term for term |
 | `*AIRBAG_HYBRID[_JETTING][_CM]` | `/MONVOL/AIRBAG1` + one `/MAT/GAS/MOLE` **per species** + `/PROP/INJECT1` with `N_gases > 1` | the initial mixture is a **mole-fraction** average; `_JETTING`'s jet is **dropped** with a warning (`Ijet = 0`) — see below. `*AIRBAG_HYBRID_CHEMKIN` is a different model and is warn-dropped |
-| `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION][_SEGMENT][_TIME]` | `/MONVOL/FVMBAG2` (ITYPE 11) + `surf_IDin` from SD2 + `surf_IDinj` from the nozzles | **cannot run on an open-source build** — see below; `--airbag-particle-uniform` gives a runnable `/MONVOL/AIRBAG1` |
+| `*AIRBAG_PARTICLE[_MPP][_DECOMPOSITION][_MOLEFRACTION/_INFLATION/_JET][_SEGMENT][_TIME]` | `/MONVOL/FVMBAG2` (ITYPE 11) + `surf_IDin` from SD2 + `surf_IDinj` from the nozzles | **cannot run on an open-source build** — see below; `--airbag-particle-uniform` gives a runnable `/MONVOL/AIRBAG1` |
 | `*AIRBAG_INTERACTION` | `/MONVOL/COMMU1` (ITYPE 9) on **both** bags, with reciprocal `Nbag` rows | `PID` → the shared `surf_IDc` **when `AREA` is 0**; chains and stars are supported (`Nbag ≤ 20`); dyna2rad does not convert this keyword at all |
 | `*AIRBAG_REFERENCE_GEOMETRY[_ID][_BIRTH][_RDT]` | one `/XREF` per owning part | `_ID` scaling baked in, `_BIRTH` → `/SENSOR/TIME` |
 | `*AIRBAG_SHELL_REFERENCE_GEOMETRY[_ID][_RDT]` | `/EREF/SHELL` + `/EREF/SH3N` per part | |
@@ -2467,11 +2467,24 @@ rejects the whole deck
 | `*CONTACT_AIRBAG_SINGLE_SURFACE` | the single-surface interface, or `/INTER/TYPE19` on `SOFT = -19` | |
 | `*DATABASE_ABSTAT` | one `/TH/MONV` per monitored-volume model | its `DT` joins the `/TFILE` minimum |
 
-`*AIRBAG_WANG_NEFSKE*`, `*AIRBAG_ALE`, `*AIRBAG_ADVANCED_ALE` and
+`*AIRBAG_WANG_NEFSKE*` — all **six** option combos,
+`{_JETTING/_MULTIPLE_JETTING}{_POP}`, i.e. 30 generated keys — plus
+`*AIRBAG_HYBRID_CHEMKIN`, `*AIRBAG_ALE`, `*AIRBAG_ADVANCED_ALE` and
 `*AIRBAG_FLUID_AND_GAS` are **registered but not converted**: each one warns by
 name and says what the Radioss counterpart would be. That matters more than it
 looks — an airbag that disappears is not a missing output card, it is a bag
-that never inflates, on a run that terminates *normally*.
+that never inflates, on a run that terminates *normally*. The 50 keys these
+warn-drops generate are deliberately in `HANDLERS` only and **not** in
+`_OFFSET_SPECS`: an unmodelled card stack must not have its cells rewritten by
+position under an `*INCLUDE_TRANSFORM`.
+
+The `*DEFINE_CPM_*` family — `_BAG_INTERACTION`, `_CHAMBER`,
+`_GAS_PROPERTIES`, `_NPDATA`, `_SWITCH_REGION`, `_VENT` (Vol I R17
+pp. 17-88…17-99) — is warn-dropped the same way. They are the *extended* inputs
+of an `*AIRBAG_PARTICLE` bag rather than models of their own, and Radioss's
+finite-volume `/MONVOL/FVMBAG*` has no per-vent, per-chamber or per-species slot
+to receive them; the bag still converts, so the only sign that a chamber or a
+vent option has stopped applying is the line that says so.
 
 Every spelling is also registered with the **legacy trailing `_<digits>`** the
 `dynaexamples` corpus still ships (`*AIRBAG_SIMPLE_PRESSURE_VOLUME_1`,
@@ -2689,7 +2702,8 @@ vent hole is emitted rather than one at full area.
 
 **`_JETTING`'s jet is dropped, and the deck runs.** `Ijet = 1` obliges
 `fct_IDPt`, `fct_IDPTheta` and `fct_IDPDelta`, and the reader has **no zero
-guard**: `hm_read_monvol_type7.F:585-620` searches each id in `NPC` inside
+guard**: `hm_read_monvol_type7.F:579-620` (identically `_type9.F:594-635`)
+searches each id in `NPC` inside
 `IF (IJET(II) > 0)` and calls `ANCMSG(MSGID = 12/13/14, MSGTYPE = MSGERROR)`
 when it is not found — id 0 never is. Measured on converted decks: *3
 ERROR(S)*, `UNDEFINED POROSITY/TIME|PRESSURE|AREA FUNCTION ID=0`, **ERROR
