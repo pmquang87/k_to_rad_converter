@@ -577,7 +577,27 @@ covering them unlocks a large class of real models.
   `EDGSET` → the 2D belt's flow-direction `/SKEW/MOV` on the property's `Iskew`
   (without it the starter falls back to the shell edges when it builds the 1D
   springs, `GlobalModelSdi.cpp:2400-2412`); and `/INISPRI` initial unstretched
-  lengths, which is the only way `SLEN` can be expressed at all.
+  lengths, which is the only way `SLEN` can be expressed at all — verified
+  reachable: `rinit3.F:703-750` routes `IGTYP == 23` through `R8INI`, which
+  sets `XL0` from the initial-state record, and `r23l114def3.F:274-278` then
+  restores `X0 = XL0` at `TT == 0` instead of taking the geometric length.
+
+  Also open, from the review round: `*SENSOR_SWITCH` has no converter, so the
+  retractor's `LCFL` adaptive multi-level load limiter (a curve whose abscissa
+  is a switch id) cannot be expressed even in part; and the `FORM = -14`
+  coating gate on `*MAT_SEATBELT_2D` — LS-DYNA reads `ECOAT`/`TCOAT` only
+  there, `/MAT/LAW119` has no such gate, and k2rad writes them through with the
+  stiffness difference named rather than second-guessing the deck.
+
+  **Not yet covered by a solver run**, so their correctness rests on the unit
+  tests and the card-format sources alone: pretensioner `SBPRTY` 5/6/7/8
+  (`Tens_typ` 1/3/4/5), the `/SENSOR/OR` gate a retractor gets when it names
+  two to four lock sensors, `/SLIPRING/SHELL` and the 2D warn-drops, the
+  slipring `FUNCID`/`LCNFFD`/`LCNFFS` friction curves and the orientation-node
+  `A·γ²` term, and LAW119 `Ireload` / coating / `GAB`. The highest-value
+  additions are `Tens_typ 4` (SBPRTY = 7, the additive pretensioner dyna2rad
+  never produces) and the `/SENSOR/OR` gate, because both are places where
+  k2rad deliberately exceeds dyna2rad.
 
 *Rationale:* each is a self-contained subsystem with its own card family and
 validation needs — sized as a milestone rather than an incremental add.

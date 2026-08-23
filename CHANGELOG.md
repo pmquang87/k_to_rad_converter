@@ -313,10 +313,146 @@ Prior history (before this changelog was introduced) is summarized in the
     the real OpenRadioss starter to **NORMAL TERMINATION, 0 ERROR(S) /
     0 WARNING(S)**.
 
-  Tests: `tests/test_seatbelts.py`, **113 tests + 78 subtests**, every card
+  21. **Review round — one blocker, four majors, and four defects the reviews
+      did not reach.** Everything below was verified against the LS-DYNA R16
+      manuals and the OpenRadioss sources before it was acted on; the
+      conversion-behaviour changes are all on paths no corpus deck reaches, so
+      the 559-deck sweep comes back byte-identical either side of them
+      (measured below).
+
+      * **BLOCKER — `/PROP/TYPE23` and `/MAT/LAW114` were emitted once per
+        belt PART, not once per id.** A shoulder-belt `*PART` and a lap-belt
+        `*PART` on one `*SECTION_SEATBELT` and one `*MAT_SEATBELT` — the
+        ordinary two-strand restraint layout — wrote both cards TWICE, and
+        `_seatbelt_prop_ids` hands both parts the same prop id by design when
+        their areas agree. MEASURED: `ERROR ID : 79 DUPLICATE ID` over BOTH the
+        material and the PID table, `ERROR TERMINATION, 2 ERROR(S)`. Each card
+        now goes out once; the `/PART` row and the `/SPRING` block still go out
+        per part. The per-material and per-section NOTES were duplicated the
+        same way and are now emitted once as well, and the `LFED < 3·LMIN`
+        check is scoped to the retractors whose mouth element is actually on
+        that material instead of firing P×R times.
+      * **A new `assembly._warn_duplicate_mat_ids` scan** over the assembled
+        starter, the twin of `_warn_duplicate_prop_ids`, so this whole CLASS
+        of failure can never be silent again — `/MAT` had no such scan at all.
+      * **MAJOR — the INERT belt material could collide.** The branch that
+        exists for a belt part pointing at an ORDINARY material wrote its
+        placeholder `/MAT/LAW114` under `part.mid` verbatim, so
+        `materials.py`'s card and this one landed on one id: `ERROR 79`, then
+        `ERROR 1715` and `ERROR 3046` on the `/PART`. The id is now reused only
+        when no other material writer owns it; otherwise a fresh one is minted
+        and the `/PART` row is repointed at it.
+      * **MAJOR — `*ELEMENT_SEATBELT` was free-split FIRST.** A column-correct
+        `8/8/8/8/8/16/8/8` card with any BLANK interior cell then shifted every
+        later field one slot: `'…       0                       7       8'`
+        (SLEN blank, N3=7 N4=8) read as SLEN=7, N3=8, N4=0, so a 2D shell belt
+        became a 1D `/SPRING` with 7 mm of invented slack and the part was
+        claimed by BOTH routes (`ERROR 79` + `1715` + `78` + `760`). It is now
+        SLICED first with the free split as the fallback — the rule
+        `_card(fixed=True)` already uses — verified on all four card shapes.
+      * **MAJOR — the retractor's mandatory-curve guard read the RAW `LLCID`.**
+        `hm_read_retractor.F:236-242` refuses `ISENS(1) > 0` with
+        `IFUNC(1) == 0` (`ERROR 2031`), and `_resolve_belt_curve` returns 0 for
+        a curve the converted deck does not define — so a `LLCID` naming a
+        missing curve emitted `Sens_ID1` beside `Fct_ID1 = 0` and the deck
+        refused to start. The guard now tests the RESOLVED id and drops the
+        sensor with it, mirroring the `ERROR 2025` handling two blocks below.
+      * **MAJOR — the `/SENSOR` namespace guard was incomplete.**
+        `next_sensor_id()` existed, but `writer/fabric.py` (a `*MAT_FABRIC`
+        `RGBRTH` birth sensor) and `writer/inistate.py`
+        (`*AIRBAG_REFERENCE_GEOMETRY_BIRTH`) still minted from the raw auto-id
+        stream, so a USER `SBSID` at or above the auto-id base collided —
+        MEASURED, two `/SENSOR/TIME` cards on one id. Airbag fabric and belt
+        sensors live in the same occupant-restraint decks. Both call sites
+        converted; the `sensor_ids` docstring, which claimed to hold the user
+        ids too, corrected.
+      * **`CSE` means OPPOSITE things depending on `FORM`, and only one
+        sentence in the manual says so.** Vol II *MAT_SEATBELT, CSE: the option
+        is "available since r137465/dev **for non-zero FORM** … **For non-zero
+        FORM:** EQ.0.0: don't eliminate …; EQ.1.0: eliminate …", while the
+        shipped cfg still encodes the FORM = 0 table (`0.0: Eliminate …`).
+        Reading only one of the two inverts the compression flag on half the
+        decks in the field. `_seatbelt_2d_re` now branches on `FORM`, and
+        `CSE = 2` is named as undefined outside `FORM = 0` ("still works if and
+        only if FORM = 0"). Neither review reached this; dyna2rad has no `FORM`
+        branch at all.
+      * **`SBRID` on a pretensioner sits in TWO id namespaces.** Vol I
+        *ELEMENT_SEATBELT_PRETENSIONER: "Retractor number (SBPRTY = 1, 4, 5, 6,
+        7 or 8) or **spring element number** (SBPRTY = 2, 3 or 9)" — one cell,
+        chosen by a field on the OTHER card. Keyed on it regardless, a spring
+        element id that equals a retractor id sorted first on SBPRID, took that
+        retractor's ONE card-3 slot, resolved to `Tens_typ 0` — and the REAL
+        pretensioner beside it was dropped as "extra". The spring types are now
+        kept out of the map and reported for the right reason, and the
+        `*INCLUDE_TRANSFORM` walker offsets that cell with IDEOFF instead of
+        IDROFF when SBPRTY is 2/3/9.
+      * **A stated `E` with a BLANK `A` no longer invents a stiffness.** Card
+        2's `A` defaults to 0.0, so LS-DYNA's bending/compression model is
+        `E × A = 0` — inert — while `/MAT/LAW114` forms `XK_COMP = E × Area`
+        against the NEUTRAL `Area = 1` the mass split uses. `E` is written as 0
+        and the drop is named, rather than filling in the unstated
+        cross-section.
+      * **Each hard failure was reproduced on the real starter and then
+        cleared, before and after, on the same deck.**
+
+        | probe | pre-review | this branch |
+        |---|---|---|
+        | two belt parts, one section, one material | `ERROR 79` ×2 (MATERIAL + PID), **2 ERROR(S)** | **0 ERROR(S) / 0 WARNING(S)**, engine NORMAL TERMINATION, 55 cycles |
+        | belt part on a `*MAT_ELASTIC` a shell also uses | `ERROR 79` + `1715` + `3046`, **3 ERROR(S)** | **0 ERROR(S)** (the one warning left is the pre-existing `WARNING 1084` on the shell section) |
+        | retractor + lock sensor, `LLCID` names an undefined curve | `ERROR 2031 FUNCTION ID1 MUST BE INPUT FOR LOCKING AS SENSOR IS DEFINED`, **1 ERROR(S)** | **0 ERROR(S) / 0 WARNING(S)** |
+        | 2D belt card with a BLANK `SLEN` cell | `ERROR 79` + `1715` + `78` ×2 + `760`, **4 ERROR(S)** | **0 ERROR(S) / 0 WARNING(S)** |
+
+      * **The solver-validated decks are untouched, and that is byte-exact.**
+        All **30** purpose-built physics decks from the validation campaign
+        (belt law, LMIN, slipring capstan at three wrap angles, retractor lock
+        and pull-out, the three sensor types, both pretensioner laws, the
+        accelerometer triad, the 2D warp/weft pair) re-converted with this
+        branch produce **byte-identical `_0000.rad` AND `_0001.rad`** — 30
+        starters and 30 engines, SHA-256 equal to the ones the OpenRadioss runs
+        were made from. Nothing above moved a number that a solver run had
+        already checked.
+      * **Corpus sweep, 559 decks** (the repo tree, the r14 `dynaexamples`
+        corpus, the Ryan-Lee examples and the two Toyota production models),
+        converted with the branch as the reviews saw it and with this one and
+        compared by SHA-256: **559 byte-identical starters, 559 byte-identical
+        engines, 0 conversion errors on either side, 0 movers.** Every
+        conversion-behaviour change above is on a path no corpus deck reaches.
+        ONE deck gains ONE warning — `ale-s-ale/s-ale/wavestructure/2Dlag.k`,
+        where the new `/MAT` duplicate scan reports a PRE-EXISTING defect it was
+        the first thing ever to look for: `/MAT/LAW4/3` and `/MAT/HYD_VISC/3`
+        on one id, because LS-DYNA's `*EOS_*` `EOSID` and `*MAT_*` `MID` are
+        separate namespaces while the bare-`*EOS_*` LAW6 carrier is written
+        under the EOSID. Nothing to do with seatbelts, and left for its own
+        change.
+      * **Smaller, all measured.** `LMTFRC` is dropped on `SBPRTY = 1`, the one
+        place where LS-DYNA ignores it ("limiting force for retractor types 5
+        and 8") and Radioss reads it (`material_flow.F:546`, `Tens_typ 1`). A
+        LAW119 loading/unloading pair that never CROSSES at a positive abscissa
+        is screened by `func_inters.F`'s own algorithm and `fct_uload` dropped
+        with `ERROR 3081` named — an ORDINARY LS-DYNA pair fails that
+        Radioss-only rule. A 2D belt whose `(n1,n2)/(n4,n3)` edges do not chain
+        end to end is named against `ERROR 2075`. A 2D belt element whose EID
+        collides with an `*ELEMENT_SHELL` is no longer dropped in silence. A
+        BLANK card 3 on a `_2D` material no longer swallows the `GAB` card. The
+        implicit free-node guard no longer pins the accelerometer's
+        `/SKEW/MOV` triad, the slipring orientation node (the engine rebuilds
+        the ring frame from its CURRENT position every cycle,
+        `kine_seatbelt_vel.F:91-108`), a sensor's watched nodes, or a device
+        ANCHORAGE (which receives the belt's force AND stiffness every cycle,
+        `kine_seatbelt_force.F:91,117`). 1D belt nodes now reach the SECONDARY
+        side of a part- or part-set-scoped `*CONTACT`, and are excluded from
+        the `_INERTIA` / CNRB "element-free master" tests, where they carry
+        mass and a geometry the ICoG move would change. `LCFL` moves with
+        IDFOFF. `assembly.py`'s four offset walkers now IMPORT
+        `handlers._seatbelt_rows` instead of re-implementing it.
+
+  Tests: `tests/test_seatbelts.py`, **164 tests + 93 subtests**, every card
   asserted by column with a distinct number per slot; nine load-bearing claims
-  verified by MUTATION (each fails the suite when the line is changed to what
-  dyna2rad does).
+  verified by MUTATION in the first round (each fails the suite when the line
+  is changed to what dyna2rad does), plus the `_slipring_card2_follows`
+  discriminator, which was the one mutation that survived it. The review
+  round's own battery: **18 mutations, 18 caught** — one per fix above, each
+  flipping the line back to what it did before.
 
 - **The airbag / monitored-volume batch 2:
   `*AIRBAG_HYBRID[_JETTING][_CM]` → `/MONVOL/AIRBAG1` with `N_gases > 1` plus

@@ -3058,8 +3058,14 @@ parameter, not a webbing section) while the `/PROP/TYPE23` area cell is a
 **mass and stiffness** area — `rinit3.F:474` `mass = Area × length × ρ` and
 `r23l114def3.F:224` `XK_COMP = E × Area`. The belt's real cross-section comes
 from `*MAT_SEATBELT` card 2's `A`, which is what dyna2rad reads too
-(`convertprops.cxx:2538`). For the contact side, set `Gapmin` on the `/INTER`
-that scopes the belt
+(`convertprops.cxx:2538`). The belt's NODES do reach the SECONDARY side of a
+`*CONTACT` that scopes the part — a 1D belt is the one `/SPRING` family that
+belongs there, and LS-DYNA gives `*SECTION_SEATBELT` its own `AREA` and `THICK`
+for exactly that — but a `/SPRING` has no thickness of its own, so state the
+contact clearance as `Gapmin` on that `/INTER`. A stated `E` with a BLANK `A`
+writes `E = 0`: LS-DYNA's model is then `E × A = 0` (A defaults to 0.0) and
+inventing a cross-section to pair `E` with would invent a compression stiffness
+the deck never asked for
 
 `*MAT_SEATBELT` / `*MAT_B01` (and both `_2D` spellings) → `/MAT/LAW114` or
 `/MAT/LAW119`. **Which law is decided by the PROPERTY the part carries, not by
@@ -3139,7 +3145,17 @@ locks only on whichever the deck listed first
 
 `*ELEMENT_SEATBELT_PRETENSIONER` folds onto the retractor's card 3 —
 `SBSIDn`→`Sens_ID2` (ORed the same way), `PTLCID`→`Fct_ID3`, `LMTFRC`→`Force`,
-`TIME` folded into the sensor. `SBPRTY` → `Tens_typ`: **1→1, 4→2, 5→1, 6→3,
+`TIME` folded into the sensor. `LMTFRC` is DROPPED on `SBPRTY = 1`: LS-DYNA
+applies it to "retractor types 5 and 8" only, while Radioss reads its `Force`
+cell under `Tens_typ 1` and `5` (`material_flow.F:546,583`) — SBPRTY 1 → 1 is
+the one overlap, and writing the value through would deactivate the
+pretensioner at a force the deck never asked for. Card 2's `SBRID` sits in two
+id namespaces and card ONE picks: "Retractor number (SBPRTY = 1, 4, 5, 6, 7 or
+8) or **spring element number** (SBPRTY = 2, 3 or 9)", so the spring types are
+kept out of the retractor map (an element id equal to a retractor id would
+otherwise take that retractor's one card-3 slot) and the `*INCLUDE_TRANSFORM`
+walker offsets the cell with IDEOFF there instead of IDROFF. `SBPRTY` →
+`Tens_typ`: **1→1, 4→2, 5→1, 6→3,
 7→4, 8→5**, from `material_flow.F:544-596`. 7 goes to `Tens_typ 4` (additive
 force, `:580,623` `YY = YY + PRETENS`) because an *independent* pretensioner
 adds to the retractor rather than replacing it; dyna2rad maps 6 and 7 both to 3
@@ -3151,8 +3167,12 @@ pretensioner is matched to its retractor through a map built up front, which is
 the fix for dyna2rad's un-restarted iterator (`convertelements.cxx:826`
 vs `:926`): there, a retractor with no match eats the rest of the list
 
-**The one structural difference between the two restraint models is
-converted.** LS-DYNA lets a device's `SBRNID` *be* a belt node; Radioss
+**The rule LS-DYNA states but does not enforce is converted.** Both manuals
+ask for the same topology — "The two elements must have a common node
+coincident with the slip ring node … belt elements should not be connected to
+this node directly" (Vol I *ELEMENT_SEATBELT_SLIPRING, Remark 1), "Do not
+connect belt elements to this node directly" (*_RETRACTOR, Remark 1) — but
+LS-DYNA accepts a deck that shares it and real decks do. Radioss
 requires a separate coincident node and refuses the deck otherwise —
 `hm_read_retractor.F:341` `ERROR 2030 ANCHORAGE NODE CANNOT BE ON THE
 SEATBELT`, and `ERROR 2029`/`2004` for a slipring. So the **belt** gets a new
@@ -3223,9 +3243,23 @@ declares `SHELL_ORTHOTROPIC` (`hm_read_mat119.F:218`) and the isotropic
 `Ip = 24` is what the starter forces anyway (`WARNING 2076`). `CSE` → `RE`, the
 compression reduction factor, and **the direction is the opposite of
 dyna2rad's**: `RCOMP` *multiplies* the compressive stress
-(`law119_membrane.F:190-191`), so CSE = 0 ("eliminate compressive stresses",
-the LS-DYNA default) is a *small* `RE`, while `convertmats.cxx:11047` writes
-`RE = (CSE==0) ? 1.0 : 0.01` and gets both directions wrong. `PRBA` → `NU12`,
+(`law119_membrane.F:190-191`), so eliminating compression is a *small* `RE`,
+while `convertmats.cxx:11047` writes `RE = (CSE==0) ? 1.0 : 0.01` and gets both
+directions wrong. **Which CSE VALUE eliminates depends on `FORM`**: on
+`FORM = 0` — the default, and what every R8-era deck writes — `CSE = 0`
+eliminates and `CSE = 2` asks LS-DYNA to decide; for non-zero `FORM` the table
+is INVERTED and `CSE = 2` is no longer valid ("available since r137465/dev for
+non-zero FORM … The old recommended option of CSE = 2 … still works if and only
+if FORM = 0. For non-zero FORM: EQ.0.0: don't eliminate …; EQ.1.0:
+eliminate …", Vol II *MAT_SEATBELT). k2rad branches on `FORM` and names the
+reading it used; dyna2rad has no `FORM` branch at all. `ECOAT`/`TCOAT` are
+`FORM = -14` fields in LS-DYNA and have no such gate on `/MAT/LAW119`, so a
+coating stated outside that formulation is written through with the stiffness
+difference named. A loading/unloading pair that never **crosses** at a positive
+abscissa is screened with `func_inters.F`'s own algorithm and `fct_uload`
+dropped: `law119_upd.F:105` refuses the deck with `ERROR 3081` otherwise, and
+an ordinary LS-DYNA pair (unloading everywhere below loading, both from the
+origin) fails that Radioss-only rule. `PRBA` → `NU12`,
 not `NUCOAT` — dyna2rad's `CopyValue(…, "PRBA", "VC")` leaves the belt's own
 minor Poisson ratio at 0 and hands it to the coating. `EB` (negative = a ratio)
 → `Fscale22`, with the `ν₁₂·ν₂₁ < 1` positive-definiteness condition enforced
