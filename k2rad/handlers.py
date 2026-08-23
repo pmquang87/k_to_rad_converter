@@ -7259,20 +7259,26 @@ def handle_initial_strain_shell(block: Block, state: ConversionState) -> None:
     n_plane_avg = 0
     set_dims_ignored = False
     truncated: List[int] = []
+    # No cfg FORMAT block declares a _TITLE or _ID option for this keyword, so
+    # _title_offset is 0 on every legal deck. It is applied anyway because
+    # assembly._off_initial_strain_shell_common applies it: the two walks must
+    # start on the same raw row, or the offsetter rewrites a strain value as an
+    # element id on a deck that carries a nonstandard header line.
+    body = block.raw[_title_offset(block):]
     for _c1, (eid, nplane, nthick, large, ilocal, npts), pt_rows in \
-            initial_strain_shell_records(block.raw, is_set):
+            initial_strain_shell_records(body, is_set):
         if len(pt_rows) < npts:
             truncated.append(eid)
             break
         pts: List[Tuple[float, ...]] = []
         for r in pt_rows:
             if large:
-                exx, eyy, ezz, exy, eyz = _fixed_float_card(block.raw, r, 5, 16)
-                ezx, t = (_fixed_float_card(block.raw, r + 1, 2, 16)
-                          if r + 1 < len(block.raw) else [0.0, 0.0])
+                exx, eyy, ezz, exy, eyz = _fixed_float_card(body, r, 5, 16)
+                ezx, t = (_fixed_float_card(body, r + 1, 2, 16)
+                          if r + 1 < len(body) else [0.0, 0.0])
             else:
                 exx, eyy, ezz, exy, eyz, ezx, t = \
-                    _fixed_float_card(block.raw, r, 7, 10)
+                    _fixed_float_card(body, r, 7, 10)
             pts.append((t, exx, eyy, ezz, exy, eyz, ezx))
         # NPLANE in-plane points collapse to one value per through-thickness
         # station. Points of one station share their T, so group by T (robust
