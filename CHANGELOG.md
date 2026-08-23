@@ -94,14 +94,23 @@ Prior history (before this changelog was introduced) is summarized in the
   6. **`/PRELOAD` acts on BRICKS only, and two whole classes of solid take it
      silently and do nothing.** `hm_read_preload.F:233` refuses `NS == 0` with
      ERROR 1251, and `SBOLTINI` is reached only from `sinit3`, `s4init3`,
-     `s8zinit3` and `s10init3` — never from `S6ZINIT3`, so a 6-node PENTA in the
-     section keeps a zero `BPRELD` and `SECTAREA` (no `ISOLNOD==6` branch) adds
-     nothing to the echoed area. Measured on an all-penta section: `AREA
-     0.000E+00`, every stress 0 for the whole run, 0 errors and 0 warnings. Both
-     are named. So is the formulation: measured at 200 MPa on a 1×1×4 bar,
-     `Isolid` 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0, `Isolid 12` is a
-     completely silent no-op, `Isolid 24` diverges to 1400-1500 MPa shortly
-     after `0.7·ΔT`, and only `Isolid` 14 and 17 hold the preload.
+     `s8zinit3` and `s10init3` — never from `S6ZINIT3` or any thick-shell
+     initialiser. So a solid the starter classifies `ISOLNOD=6` keeps a zero
+     `BPRELD` and `SECTAREA` (no `ISOLNOD==6` branch) adds nothing to the echoed
+     area: measured on an all-penta section spelled with BLANK cells 7-8, `AREA
+     0.000E+00`, every stress 0 for the whole run, 0 errors and 0 warnings. That
+     classification is on the EMITTED card, not the source connectivity —
+     `hm_read_solid.F:167` wants `IXS(8)+IXS(9) == 0`, and a wedge written the
+     usual LS-DYNA way leaves k2rad as a degenerate HEX8 which IS pre-tensioned
+     (measured: `AREA 1.000E+00`, `/TH/BRIC SZ = 200.00 MPa` at t=0 on both cut
+     wedges of an 8-wedge bolt bar, identical to its hex twin). Thick shells are
+     dropped from the preload group by name — they ride in `solid_eids` so the
+     REPORTING section still sees them, and LS-DYNA does not pre-tension them
+     either (Vol I R17 p.3145 Remark 4 lists solid element types only). So is
+     the formulation: measured at 200 MPa on a 1×1×4 bar, `Isolid` 1 and 2 hit
+     ZERO OR NEGATIVE VOLUME at cycle 0, `Isolid 12` is a completely silent
+     no-op, `Isolid 24` diverges to 1400-1500 MPa shortly after `0.7·ΔT`, and
+     `Isolid` 5, 14 and 17 hold the preload.
 
   7. **`/PRELOAD/AXIAL` shows the OTHER half of the version-gate rule, so it is
      emitted.** `/PRELOAD/AXIAL` exists only as `FORMAT(radioss2024)`, but a new
@@ -156,17 +165,18 @@ Prior history (before this changelog was introduced) is summarized in the
       at it would have read the wrong `LARGE` cell and sliced the 16-wide cards
       at width 10.
 
-  12. **`npg = 1` on every shell formulation, because `npg = 4` fails two
-      different ways.** Measured with `/PROP/SHELL Istrain=1` and `/TH/SHEL`
-      read at t = 0: `npg=4` on `Ishell=24` (QEPH) yields `E1 = 0` — a SILENT
-      no-op, because `hm_read_inistate_d00.F:2508-2512` writes a leading `NPG`
-      marker and shifts `PT` only `IF (IHBE==24)` while `csigini4` skips QEPH
-      via `IHBE /= 23`, with no `ANCMSG` anywhere on that path — and `npg=4` on
-      `Ishell=1..4` is starter ERROR 1904. `npg=1` is consumed correctly by BT,
-      BATOZ, QEPH and both SH3N formulations (the starter replicates the single
-      value over the element's real Gauss points, `cstraini4.F:162-166`), so one
-      uniform form removes both branches. The 2022 Reference Guide p.2048 pairs
-      `npg=4` with BATOZ; the measurement says it is not required.
+  12. **`npg = 1` on a strain-ONLY deck, because `npg = 4` fails two different
+      ways there.** Measured with `/PROP/SHELL Istrain=1` and `/TH/SHEL` read at
+      t = 0: `npg=4` on `Ishell=24` (QEPH) yields `E1 = 0` — a SILENT no-op,
+      because `hm_read_inistate_d00.F:2498-2512` assigns `IHBE` only on its
+      `npg<=1` branch and then still tests it to write the `SIGSH(INISHVAR1)`
+      marker and the `PT+1` shift that `cstraini4.F:107-110` reads back — and
+      `npg=4` on `Ishell=1..4` is starter ERROR 1904. `npg=1` is consumed
+      correctly by BT, BATOZ, QEPH and both SH3N formulations, so one uniform
+      form removes both branches. The 2022 Reference Guide p.2048 pairs `npg=4`
+      with BATOZ; on a strain-only deck the measurement says it is not required.
+      A deck that also emits an initial-STRESS block is a different case —
+      see "Mixed initial-stress + initial-strain decks" below.
 
   13. **`nb_integr = 2` is not a simplification — the reader keeps two
       stations.** `hm_read_inistate_d00.F:2525-2528` reads `NPP*NPG` values and
@@ -179,9 +189,13 @@ Prior history (before this changelog was introduced) is summarized in the
       does not fire here (with only STRA_F present `ITHKSHEL = 2` and
       `ISIGSH = 0`, so both branches of `csigini.F:144-163` are skipped) —
       verified: `nb_integr = 2` against `/PROP/SHELL N = 5` runs clean and the
-      strain is consumed. A single station, or an all-zero T column, is written
-      at `T = -1` and `T = +1` with identical values, because two records at the
-      same parametric position is ERROR 1904.
+      strain is consumed. (With a stress block present those checks DO fire; see
+      below.) A record that states one station, or leaves the T column blank, is
+      written at `T = -1` and `T = +1`, because two records at the same
+      parametric position is ERROR 1904 — and the two cases are reported
+      separately, since replicating ONE station is a genuine zero-curvature
+      membrane state while placing two blank-T rows at ±1 INFERS the positions
+      and turns the difference between them into a curvature.
 
   14. **`eps_XY/YZ/ZX` is the TENSOR component on both sides.** `CG2LEPS`
       (`scigini4.F:791-834`) rotates the full 3×3 tensor into the element frame
@@ -194,15 +208,25 @@ Prior history (before this changelog was introduced) is summarized in the
       component is non-zero, since a source deck holding engineering shears
       would be off by exactly 2.
 
-  15. **`/PROP/SHELL Istrain` had to be forced on, or the whole block is
-      inert.** `csigini.F:165` gates the initial-strain ingest on
-      `IF (ISTRAIN /= 0 .AND. ITHKSHEL == 2)`. k2rad set `Istrain` from
-      `*DATABASE_EXTENT_BINARY STRFLG` alone, so a deck carrying
-      `*INITIAL_STRAIN_SHELL` without `STRFLG` would have produced a
-      `/INISHE/STRA_F/GLOB` block that the starter accepts, echoes and ignores —
-      the `#118` "emitted, echoed and inert" shape. One shared
-      `_shell_istrain_flag` now drives the plain and the composite property
-      writers.
+  15. **`/PROP/SHELL Istrain` is forced on whenever an initial strain exists —
+      as defence-in-depth, not because the block would otherwise be inert.**
+      k2rad set `Istrain` from `*DATABASE_EXTENT_BINARY STRFLG` alone; one
+      shared `_shell_istrain_flag` now drives the plain and the composite
+      property writers so a deck carrying `*INITIAL_STRAIN_SHELL` without
+      `STRFLG` gets it too. What it buys is a correctly SIZED strain buffer:
+      `elbuf_ini.F:1584` allocates `GBUF%G_STRA = 8` only for
+      `ISTRA > 0 .OR. IFAIL > 0 .OR. ...`, the /PROP/SHELL property tag leaves
+      `PTAG%G_STRA` at 0, and `cbainit3.F:549` calls the ingest regardless —
+      `cstraini4.F` then writes its membrane average into that buffer.
+      **Correction to an earlier draft of this entry**, which claimed the block
+      would be "accepted, echoed and ignored" citing `csigini.F:165`: that is
+      NOT reproducible on this build. Twin decks with `Istrain` hand-set back to
+      0 (Ishell 12 / 24 / 1, with and without a `/FAIL`) read the strain back
+      IDENTICALLY — `/TH/SHEL E1 = 0.01`, `K1 = 0.02` either way, and a
+      `/FAIL/TENSSTRAIN` deletion still moves to the same t. The ISTRAIN gate at
+      `csigini.F:165` / `scigini4.F:168` is simply not the path these
+      formulations take: `cbainit3.F:549` reaches `cstraini4.F`, which takes
+      `ISTRAIN` as an argument and never reads it.
 
   16. **`ILOCAL=1` is dropped by name, not routed to the local card.** LS-DYNA
       documents the value itself as "local (not supported)" (Vol I R17 p.3121),
@@ -292,6 +316,101 @@ Prior history (before this changelog was introduced) is summarized in the
   `mainboltaexpl.k` — each losing one entry from `skipped_keywords` and gaining
   2-3 warnings. Every emitter in this batch draws its first id only when its
   keyword is present, which is what keeps the other 555 unchanged.
+
+  **Review round — mixed initial-stress + initial-strain decks, and two
+  false-positive warnings.** The reviews found that the batch above is correct
+  on a strain-ONLY deck and breaks on the shape LS-DYNA itself writes.
+
+  R1. **A deck carrying BOTH initial-state keywords was ERROR TERMINATION — a
+      REGRESSION against master, which simply skipped the strain keyword.**
+      Reproduced on a 3-element hand-written deck (one `*INITIAL_STRESS_SHELL`,
+      one `*INITIAL_STRAIN_SHELL`, `STRFLG=1`): master 0 errors, this branch
+      **8 errors, ERROR TERMINATION** — 4× `ERROR 26` on the strain element and
+      4× `ERROR 1904` on the stress element. Two independent causes:
+
+      * Reading a `/STRA_F` block sets `ITHKSHEL = 2` **globally**
+        (`hm_read_inistate_d00.F:2469`, its own comment: "instead of ISIGSH to
+        avoid memory issue in case of STRA_F w/o STRS_F"). `scigini4.F:168` then
+        runs the strain reconstruction for every element whose `SIGSH(17)` is
+        set — and the STRS_F reader sets that same flag (`:2164`). A stress-only
+        element enters with an empty payload, reads `Z1 == Z2 == 0` and raises
+        `ERROR 1904` once per Gauss point.
+      * A `/STRS_F` block sets `ISIGSH`, which un-gates the layer/Gauss
+        cross-checks. `npg = 1` then leaves `NPGI = 0` against `csigini4`'s
+        `NPG = 4` on BATOZ, and `nb_integr = 2` mismatches any `/PROP/SHELL`
+        `N != 2` — both `ERROR 26`.
+
+      Fixed by making the strain card agree with the property once a stress
+      block exists: `npg` per formulation (4 on Ishell 12; 1 on QEPH, where the
+      reader fills `NPGI` itself and `npg=4` is the measured silent no-op; 1 on
+      `/INISH3`), `nb_integr` = the property N with the record's two stations
+      re-sampled onto N positions spanning T = −1..+1 (the starter keeps the
+      first two and the reconstruction is affine, so this is EXACT, not an
+      approximation), and an all-zero companion record for every stress-carrying
+      quad the strain keyword does not name. The companion is not an invented
+      quantity — an element no `*INITIAL_STRAIN_SHELL` card names has zero
+      initial strain in LS-DYNA — and it is measured inert: the stress element's
+      `/TH/SHEL` channels (`F1 101.25 · F2 201.25 · F12 50.625 · M1 0.208333`)
+      are IDENTICAL to the same deck with no strain block at all. Re-measured
+      end to end through the converter: **0 ERRORS, NORMAL TERMINATION**, and
+      the strain element still reads `E1 = 0.01`, `K1 = 0.02` — at `N = 2`, at
+      `N = 5`, and on `--shell-formulation qeph`. A strain-only deck keeps the
+      compact `nb_integr=2 / npg=1` card unchanged, so nothing already validated
+      moved. One configuration is refused rather than emitted: if the
+      initial-state shells do not all share one formulation AND an `npg>1`
+      record exists, a stale `IHBE` on the reader's `npg>1` branch could shift a
+      BATOZ record's payload by one slot, so the strain block is dropped with a
+      warning and the stress is kept.
+
+  R2. **The PENTA warning fired on correct decks.** It classified from the
+      LS-DYNA source connectivity (`len(unique(nodes)) == 6`), but the /BRICK
+      writer pads a short list with `nodes[-1]` and `hm_read_solid.F:167` only
+      sets `ISOLNOD=6` when cells 7 AND 8 are BLANK. So the usual LS-DYNA wedge
+      leaves k2rad as a degenerate HEX8 and IS pre-tensioned — measured on an
+      8-wedge bolt bar: `AREA 1.000E+00` (identical to its hex twin) and
+      `/TH/BRIC SZ = 200.00 MPa` at t=0 on both cut wedges, holding past
+      `Tstop`. The warning told the user their bolt silently carried less than
+      the card asks and prescribed a remesh, on a deck where nothing was wrong —
+      the `#125` class. Re-gated on the EMITTED spelling, which is the only one
+      that loses the preload; the corpus carrier's assertion was inverted to
+      match, and a synthetic pair (degenerate vs blank-cell) now covers both
+      sides.
+
+  R3. **`Isolid = 5` was flagged as unsupported without ever being measured.**
+      `*CONTROL_HOURGLASS` IHQ 4/5 maps to it, and it holds the preload as well
+      as Isolid 17 does — measured 200.0 MPa at t=0, 199.1 after `Tstop`, 0
+      ERRORS, NORMAL TERMINATION. Added to `_PRELOAD_STABLE_ISOLID`; the
+      Isolid 24 divergence in the same message was re-measured and stands
+      (1266 → 1370 MPa against a 200 MPa target). Both arms now have synthetic
+      tests — the whole guard could previously be deleted with the suite still
+      green.
+
+  R4. **Thick shells reached the preload group and were silently un-preloaded.**
+      `_plane_cut` appends `state.tshell_elems` to `solid_eids` on purpose so a
+      section through a thick-shell part still records force, but `SBOLTINI` is
+      reached from no thick-shell initialiser, and `_warn_preload_formulation`
+      resolved the part through `state.sec_solids` and `continue`d past them. So
+      they sat in the `/GRBRIC`, were counted in the starter's `NS` and carried
+      no pre-stress. Split out of the preload group by name; the reporting
+      `/SECT` keeps them. LS-DYNA does not support it either (Vol I R17 p.3145
+      Remark 4).
+
+  R5. **Smaller corrections.** The preload's section-node `/GRNOD` now draws
+      from `next_grnod_id()` — a user `*SET_NODE` at or above the auto base is
+      re-emitted verbatim and would collide (starter `ERROR 79`, a refused
+      deck); the `/PRELOAD` id gained the `while ... in used_preload` retry its
+      two sibling allocators already had; a preload window that closes AFTER
+      `*CONTROL_TERMINATION ENDTIM` is now named (`sboltlaw.F:119-128` holds the
+      bolted parts at `1e-4·E` until `0.4·ΔT` and restores them at `0.7·ΔT`, so
+      a run that ends first is ~10000× too soft throughout, silently — the
+      normal shape when the source deck tightened the bolt inside a
+      `*CONTROL_DYNAMIC_RELAXATION` phase); the blank-T report was split from
+      the single-station one; the `ISTIFF` comment was corrected (`LT.0` is a
+      SIGNED curve id per Vol I R17 p.3144, not a flag encoding) and the drop
+      message now describes both spellings; and an audit of the stress path
+      found that a `*INITIAL_STRESS_SHELL` record on a 3-node shell is written
+      into `/INISHE`, which the starter resolves against the 4-node table only —
+      dropped into its NONEXIST tally, now named.
 
 - **The seatbelt / restraint batch:
   `*ELEMENT_SEATBELT` → `/SPRING` on `/PROP/TYPE23` + `/MAT/LAW114` (1D) or

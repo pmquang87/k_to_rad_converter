@@ -314,28 +314,42 @@ shipped, so the marginal cost is small.
   version-specific; the layer-count-must-match-property constraint and stress
   component/frame order need cfg validation.
 - `*INITIAL_STRAIN_SHELL` (+ `_SET`) -> /INISHE/STRA_F/GLOB +
-  /INISH3/STRA_F/GLOB — **done**. Written in the minimal form the starter
-  consumes (`nb_integr=2`, `npg=1`, `Thick=0`, the two extreme
-  through-thickness stations), because the reader keeps at most two stations
-  and `npg=4` is a silent no-op on QEPH and ERROR 1904 on Ishell 1..4.
-  `/PROP/SHELL Istrain` is forced on — `csigini.F:165` gates the whole ingest
-  on it. `ILOCAL=1` warn-dropped (LS-DYNA calls it unsupported and the Radioss
-  local card is a different quantity).
+  /INISH3/STRA_F/GLOB — **done**. On a strain-ONLY deck it is written in the
+  minimal form the starter consumes (`nb_integr=2`, `npg=1`, `Thick=0`, the two
+  extreme through-thickness stations), because the reader keeps at most two
+  stations and `npg=4` is a silent no-op on QEPH and ERROR 1904 on Ishell 1..4.
+  On a deck that ALSO emits an initial-STRESS block — the shape LS-DYNA's own
+  `dynain` writes — `ISIGSH` un-gates the starter's layer/Gauss cross-checks and
+  `ITHKSHEL=2` pulls stress-only elements into the strain reconstruction, so the
+  card instead carries `nb_integr` = the property N and a per-formulation `npg`,
+  and every stress-carrying quad gets an all-zero companion record. A deck whose
+  initial-state shells span two formulations is refused (warn + drop) rather
+  than risk the reader's stale-`IHBE` payload shift. `/PROP/SHELL Istrain` is
+  forced on as defence-in-depth (it sizes `GBUF%STRA`; the ingest itself is
+  reached through `cstraini4.F`, which ignores the flag). `ILOCAL=1`
+  warn-dropped (LS-DYNA calls it unsupported and the Radioss local card is a
+  different quantity).
 - `*INITIAL_STRESS_SECTION` -> /PRELOAD — **done**. A dedicated /SECT with
   three synthesized frame nodes realizes the cutting-plane normal (the
   reporting section's frame does not), the card's PSID is intersected with the
   cross-section's, and the LCID is resolved into `Preload`/`Tstart`/`Tstop`
-  because the `Fct_ID` column only exists at /BEGIN 2026. Remaining loss: the
-  ramp SHAPE (a step at `Tstart` instead), `IZSHEAR` and `ISTIFF`.
+  because the `Fct_ID` column only exists at /BEGIN 2026. Thick shells in the
+  cut are named and left out of the preload group (no thick-shell initialiser
+  calls SBOLTINI; LS-DYNA lists solid types only, Vol I R17 p.3145 Remark 4).
+  Remaining loss: the ramp SHAPE (a step at `Tstart` instead), `IZSHEAR` and
+  `ISTIFF`.
 - `*INITIAL_AXIAL_FORCE_BEAM` -> /PRELOAD/AXIAL — **done**. Emitted at /BEGIN
   2022 (advisory WARNING 100211 only, restated), `Preload = SCALE`, the BSID
   split by emitted family into /GRBEAM/BEAM and the new /GRSPRI/SPRI, the
   curve truncated at its first descent. Remaining loss: `KBEND` (multi-beam
   bolt shanks lose LS-DYNA's internal constraints).
-- Open, not in this batch: `*INITIAL_STRAIN_SOLID` / `_TSHELL`, and the
+- Open, not in this batch: `*INITIAL_STRAIN_SOLID` / `_TSHELL`; the
   `*INITIAL_STRESS_SHELL`/`_SOLID` gap in `_OFFSET_SPECS` (their element ids
   are not offset inside an `*INCLUDE_TRANSFORM`; the generic unmapped-keyword
-  warning fires).
+  warning fires); and `/INISH3/STRS_F` — an `*INITIAL_STRESS_SHELL` record on a
+  3-node shell is written into `/INISHE`, which the starter resolves against the
+  4-node table only, so it is dropped into its NONEXIST tally (now warned; the
+  /SH3N stress card is a different layout).
 
 *Rationale:* these are the recurring building blocks of automotive crash decks;
 covering them unlocks a large class of real models.

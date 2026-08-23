@@ -2285,19 +2285,37 @@ most two, `hm_read_inistate_d00.F:2528`, and rebuilds membrane + one curvature
 from them), `npg = 1` for every shell formulation (`npg=4` on `Ishell=24` QEPH is
 a measured *silent* no-op and on `Ishell=1..4` is starter ERROR 1904; `npg=1` is
 consumed by BT, BATOZ, QEPH and both SH3N formulations alike) and `Thick = 0` so
-the property thickness sets the curvature scale. A single station, or a blank T
-column, is written at `T = -1` and `T = +1` with identical values (pure membrane —
-two records at the same T is ERROR 1904); `NTHICK > 2` keeps the extremes with a
-warning; `NPLANE > 1` in-plane points are averaged per station. `EPSxy/yz/zx` are
+the property thickness sets the curvature scale. **A deck that also emits an
+initial-STRESS block takes a different form**, because that block sets the
+starter's `ISIGSH` and un-gates its layer/Gauss cross-checks while the strain
+block sets `ITHKSHEL=2` globally and pulls stress-only elements into the strain
+reconstruction (measured: 4× ERROR 26 + 4× ERROR 1904, ERROR TERMINATION). There
+the card carries `nb_integr` = the property N — the record's two stations
+re-sampled onto N positions spanning `T = -1..+1`, which is exact because the
+reconstruction is affine — and `npg` per formulation (4 on `Ishell=12`, 1 on QEPH
+where the reader fills `NPGI` itself, 1 on `/INISH3`), and every stress-carrying
+quad the strain keyword does not name gets an **all-zero companion record**
+(LS-DYNA's own default made explicit; measured inert on the stress element).
+A deck whose initial-state shells span two formulations is warned + dropped
+instead, because the reader leaves `IHBE` stale on its `npg>1` branch. A single
+station is written at `T = -1` and `T = +1` with identical values (pure membrane —
+two records at the same T is ERROR 1904), and two-or-more stations with a blank T
+column are placed at ±1 with a *separate* warning saying the positions were
+inferred and any difference between the rows became a curvature; `NTHICK > 2`
+keeps the extremes with a warning; `NPLANE > 1` in-plane points are averaged per
+station. `EPSxy/yz/zx` are
 copied 1:1: the Radioss card carries the **tensor** shear and `CG2LEPS`
 (`scigini4.F:826-828`) doubles it into the engineering shear held in `GBUF%STRA`
 (measured: `eps_XY=0.005` reads back as `/TH/SHEL E12=0.01`), so a source deck
 holding engineering shears must halve them — stated in a warning. `ILOCAL=1` is
 warned + dropped (LS-DYNA itself documents it "local (not supported)", and the
 Radioss local `/INISHE/STRA_F` is a different quantity: membrane strains plus
-curvatures, no σzz, no T). `/PROP/SHELL Istrain` is switched on automatically —
-`csigini.F:165` gates the whole ingest on it, so without it the block is accepted,
-echoed and completely inert. An element named by two records (two cards, or a
+curvatures, no σzz, no T). `/PROP/SHELL Istrain` is switched on automatically as
+defence-in-depth: it is what sizes `GBUF%STRA` (`elbuf_ini.F:1584`), the buffer
+`cstraini4.F` writes the membrane average into. It is not the on/off switch an
+earlier note claimed — twin decks with `Istrain` forced back to 0 read the strain
+back identically on Ishell 1, 12 and 24, because `cbainit3.F:549` reaches
+`cstraini4.F`, which ignores the flag. An element named by two records (two cards, or a
 card plus a `_SET` containing it) is warned: the starter keeps one strain slot
 per element and the last record read wins silently
 `*INITIAL_STRESS_SECTION[_TITLE]` → `/PRELOAD` (bolt pre-tension, `Itype=2`) on a
@@ -2321,10 +2339,18 @@ bolt law's reduced modulus (`sboltlaw.F`: E×1e-4 until `Tstart+0.4·ΔT`, full 
 `+0.7·ΔT`, then the reference density is rebased so the preload locks). Warned +
 dropped: `IZSHEAR` (Radioss always prescribes the full `σ·n⊗n`), `ISTIFF` (no
 ghost elements). Warned + refused: a section cutting no solid (ERROR 1251), an
-unknown CSID (ERROR 1243), a degenerate curve window. Warned + emitted: a
-preloaded part whose `/PROP/SOLID` is not `Isolid` 14 or 17 (1 and 2 hit negative
-volume at cycle 0, 12 is a silent no-op, 24 diverges), 6-node PENTAs, which
-`SBOLTINI` is never called for, a preloaded part carrying `Ismstr=10` (a
+unknown CSID (ERROR 1243), a degenerate curve window. Warned + left out of the
+preload group: thick shells in the cut (they ride in the solid list so the
+reporting section still sees them, but no thick-shell initialiser calls
+`SBOLTINI`, and LS-DYNA lists solid types only, Vol I R17 p.3145 Remark 4).
+Warned + emitted: a preloaded part whose `/PROP/SOLID` is not `Isolid` 5, 14 or 17
+(1 and 2 hit negative volume at cycle 0, 12 is a silent no-op, 24 diverges),
+6-node PENTAs *spelled with blank cells 7-8* — the only spelling the starter
+classifies `ISOLNOD=6` and never calls `SBOLTINI` for; the usual LS-DYNA wedge
+leaves k2rad as a degenerate HEX8 and IS pre-tensioned (measured `AREA
+1.000E+00`, `SZ = 200.00 MPa` at t=0) — a preload window that closes after
+`*CONTROL_TERMINATION ENDTIM` (the bolted parts then stay at `1e-4·E` for the
+whole run), a preloaded part carrying `Ismstr=10` (a
 `/XREF`, `/MAT/LAW95` or `/MAT/LAW90` part — `sgrtails.F:1387-1412` shifts a
 preloaded group 10 -> 4 with WARNING 1775, so the preload takes the
 total-strain formulation away again), and a curve whose peak is zero or
