@@ -1105,6 +1105,33 @@ class TemperatureDriverTests(unittest.TestCase):
         self.assertIn("no thermal solve is armed", " ".join(r.warnings))
 
 
+class ThermalDuplicateScanTests(unittest.TestCase):
+    def test_each_thermal_card_is_emitted_once_per_material_id(self):
+        # Both cards are MATERIAL-keyed while *MAT_ADD_THERMAL_EXPANSION is
+        # PART-keyed, so two cards on two parts sharing one MID is the natural
+        # way to emit a duplicate (the #125 /PROP/TYPE23 failure one namespace
+        # over). The starter does not refuse it — it reads the first block and
+        # drops the rest silently.
+        extra = (CARRIER_EXPANSION
+                 + "*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(2, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 0.0) + "\n"
+                 + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        for kind in ("/HEAT/MAT/", "/THERM_STRESS/MAT/"):
+            heads = [ln for ln in starter.splitlines() if ln.startswith(kind)]
+            self.assertEqual(len(heads), len(set(heads)), heads)
+        self.assertNotIn("is emitted 2 times", " ".join(r.warnings))
+
+    def test_the_deck_wide_scan_would_catch_a_duplicate(self):
+        from k2rad.writer.assembly import _warn_duplicate_thermal_ids
+        st = ConversionState()
+        _warn_duplicate_thermal_ids(
+            st, ["/HEAT/MAT/7", "/HEAT/MAT/7", "/THERM_STRESS/MAT/7"])
+        self.assertIn("/HEAT/MAT/7 is emitted 2 times", " ".join(st.warnings))
+        self.assertNotIn("/THERM_STRESS/MAT/7 is emitted",
+                         " ".join(st.warnings))
+
+
 class ThermalOutputTests(unittest.TestCase):
     def test_temperature_channels_only_with_a_real_thermal_solve(self):
         _r, with_solve = _convert(_thermal(CARRIER_EXPANSION + DRIVER))

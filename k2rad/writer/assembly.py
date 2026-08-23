@@ -1129,6 +1129,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
+    _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
@@ -1435,6 +1436,50 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
                 "resolves to whichever card came first. Renumber one of the "
                 "*MAT_* cards.")
+
+
+#: ``/HEAT/MAT/<mid>`` and ``/THERM_STRESS/MAT/<mid>`` — a THIRD id namespace,
+#: and one ``_MAT_CARD_LAW_ID_RE`` deliberately does not see (three path
+#: segments, and the middle one is not a law spelling).
+_THERMAL_MAT_CARD_ID_RE = re.compile(
+    r"^/(HEAT|THERM_STRESS)/MAT/(\d+)\s*$")
+
+
+def _warn_duplicate_thermal_ids(state: ConversionState,
+                                lines: List[str]) -> None:
+    """One ``/HEAT/MAT`` and one ``/THERM_STRESS/MAT`` per MATERIAL id.
+
+    The sibling of :func:`_warn_duplicate_mat_ids` for the thermal subobject
+    namespaces, added with the thermal-expansion batch for exactly the reason
+    that one exists: ``*MAT_ADD_THERMAL_EXPANSION`` is keyed on a PART while
+    both Radioss cards are keyed on a MATERIAL, so two cards naming two parts
+    that share one MID are the natural way to emit either card twice — which is
+    the #125 ``/PROP/TYPE23`` failure, one namespace over. dyna2rad does
+    exactly that and the starter does NOT refuse it: measured, two
+    ``*MAT_ADD_THERMAL_EXPANSION`` cards on one MID give ONE echoed block
+    carrying the FIRST card's values and no duplicate-id error at all, so the
+    second card is silently lost.
+
+    writer/thermal.py keys both on a per-mid dict, so a duplicate cannot arise
+    from there; this removes the CLASS, so a later writer cannot make the loss
+    silent again. Changes no output.
+    """
+    seen: Dict[Tuple[str, int], int] = {}
+    for ln in lines:
+        m = _THERMAL_MAT_CARD_ID_RE.match(ln)
+        if m:
+            key = (m.group(1), int(m.group(2)))
+            seen[key] = seen.get(key, 0) + 1
+    for (kind, mid), n in sorted(seen.items()):
+        if n > 1:
+            state.warn(
+                f"/{kind}/MAT/{mid} is emitted {n} times. Both cards are keyed "
+                "on a MATERIAL id while *MAT_ADD_THERMAL_EXPANSION is keyed on "
+                "a PART, so two cards naming parts that share one MID produce "
+                "the duplicate. The starter does not refuse it - it reads the "
+                "FIRST block and silently drops the rest - so the second card's "
+                "coefficient or thermal properties are lost without a "
+                "diagnostic of any kind.")
 
 
 def _warn_duplicate_preload_ids(state: ConversionState,
