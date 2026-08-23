@@ -2182,14 +2182,25 @@ def _shell_istrain_flag(state: ConversionState) -> int:
     * ``*DATABASE_EXTENT_BINARY`` STRFLG>0 asks for strain-tensor output, and
       OpenRadioss only computes/stores element strains when Istrain/=0 — with
       Istrain=0 the /ANIM/.../TENS/STRAIN channels come out empty.
-    * ``*INITIAL_STRAIN_SHELL`` needs it to be READ AT ALL. ``csigini.F:165``
-      gates the whole initial-strain ingest on
-      ``IF (ISTRAIN /= 0 .AND. ITHKSHEL == 2)``, so a /INISHE/STRA_F/GLOB block
-      under a /PROP/SHELL with Istrain=0 is accepted, echoed and completely
-      inert. LS-DYNA's own manual requires STRFLG=1 alongside
-      *INITIAL_STRAIN_SHELL (Vol I R17 p.3119), so a well-formed source deck
-      already sets it — this OR makes a deck that forgot it work anyway
-      instead of silently losing the strains.
+    * ``*INITIAL_STRAIN_SHELL`` wants a correctly SIZED strain buffer.
+      ``elbuf_ini.F:1584`` allocates ``GBUF%G_STRA = 8`` only for
+      ``ISTRA > 0 .OR. IFAIL > 0 .OR. ISMSTR == 11 .OR. ...``, and the
+      /PROP/SHELL property tag leaves ``PTAG%G_STRA`` at 0 (only the truss prop
+      sets it) — yet ``cbainit3.F:549`` calls the ingest whenever
+      ``ITHKSHEL == 2 .AND. G_STRPG > G_STRA``, and ``cstraini4.F`` writes its
+      membrane average into that buffer. LS-DYNA's own manual requires
+      STRFLG=1 alongside *INITIAL_STRAIN_SHELL (Vol I R17 p.3119), so a
+      well-formed source deck already sets it; this OR covers one that forgot.
+
+      Honest scope of the claim: this is defence-in-depth, NOT a measured
+      necessity. Twin decks on this build — the branch's own emitted starter
+      with Istrain hand-set back to 0, Ishell 12 / 24 / 1, with and without a
+      /FAIL — read the initial strain back IDENTICALLY (/TH/SHEL E1 = 0.01,
+      K1 = 0.02 either way). The gate that DOES test ISTRAIN, csigini.F:165 /
+      scigini4.F:168, is not the path these formulations take: cbainit3.F:549
+      reaches cstraini4.F, which takes ISTRAIN as an argument and never looks
+      at it. So the flag buys a properly sized buffer and the strain output
+      such a user implicitly wants, not a working-versus-inert difference.
 
     Istrain=1 costs a per-element strain buffer and changes no physics on its
     own, so switching it on is inert for everything except the two consumers

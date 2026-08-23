@@ -3462,8 +3462,14 @@ del _kw
 #   PSID    *SET_PART / BSID *SET_BEAM                    -> IDSOFF  "s"
 #   VID     "any ID defined through *DEFINE, except the FUNCTION, TABLE and
 #           CURVE options"                                -> IDDOFF  "d"
-#   ISTIFF  a curve id (its NEGATIVE spelling is a flag encoding that
-#           _rewrite_line deliberately leaves alone)      -> IDFOFF  "f"
+#   ISTIFF  GT.0 an artificial-stiffness flag; LT.0 "|ISTIFF| is the load
+#           curve ID for the stiffness fraction" (Vol I R17 p.3144), i.e. a
+#           SIGNED curve id like *SECTION_SHELL QR/IRID -> IDFOFF  "f"
+#           _rewrite_line touches only v > 0, so the negative spelling is left
+#           as written. That is immaterial here and deliberately not routed
+#           through _rewrite_neg_ref: the writer DROPS ISTIFF entirely (no
+#           /PRELOAD slot at any Radioss version), so the cell never reaches
+#           the emitted deck — it only appears in the warning that names it.
 #   IZSHEAR / KBEND / SCALE   not ids, absent from the mods lists
 #   EID (*INITIAL_STRAIN_SHELL) element                   -> IDEOFF  "e"
 #   SID (*INITIAL_STRAIN_SHELL_SET) *SET_SHELL            -> IDSOFF  "s"

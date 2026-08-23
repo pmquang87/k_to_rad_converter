@@ -182,11 +182,16 @@ def _node_cloud_normal(state: ConversionState, nids: List[int]):
 #: 4e-4 s, reading /TH/BRIC SZ of the preloaded brick:
 #:   Isolid 14 -> 200.0 at t=0, 199.7 during, ~200 after Tstop   (cleanest)
 #:   Isolid 17 -> 200.0 at t=0, mild ringing, ~200 after Tstop
+#:   Isolid  5 -> 200.0 at t=0, 203.1 during, 199.1 after Tstop  (as good as 17)
 #:   Isolid  1 -> ZERO OR NEGATIVE VOLUME at cycle 0, T01 dies at 2.2e-5
 #:   Isolid  2 -> garbage (-1347 / 20511 / 3899 MPa)
 #:   Isolid 12 -> 0 MPa for the whole run: a SILENT no-op
 #:   Isolid 24 -> diverges at ~0.95*Tstop to 1400-1500 MPa, permanently
-_PRELOAD_STABLE_ISOLID = frozenset({14, 17})
+#:
+#: Isolid 5 is what *CONTROL_HOURGLASS IHQ 4/5 maps to, so leaving it out made
+#: the warning fire on decks whose bolt preload is in fact fine — re-measured
+#: (0 ERRORS, NORMAL TERMINATION, 2813 cycles) and added.
+_PRELOAD_STABLE_ISOLID = frozenset({5, 14, 17})
 
 
 def _preload_sect_scale(state: ConversionState, origin, nids: List[int]) -> float:
@@ -319,6 +324,28 @@ def _make_preload_sections(state: ConversionState,
                        "resolved (zero-length plane normal / vector) — no "
                        "/PRELOAD emitted (starter ERROR 1244).")
             continue
+        # A thick shell rides in solid_eids because it shares the /BRICK card
+        # (inistate.py's _plane_cut appends state.tshell_elems on purpose, so a
+        # section through a thick-shell part still records force). It cannot be
+        # PRE-TENSIONED though: SBOLTINI is reached only from sinit3, s4init3,
+        # s8zinit3 and s10init3, never from the thick-shell initialisers, so a
+        # thick shell in the preload group keeps a zero BPRELD while still being
+        # counted in the starter's NS. LS-DYNA does not support it either
+        # (Vol I R17 p.3145 Remark 4 lists solid types only). Drop them from the
+        # preload group — the reporting /SECT keeps them — and say so.
+        tshell_ids = {e.eid for e in state.tshell_elems}
+        cut_tshells = [e for e in solid_eids if e in tshell_ids]
+        if cut_tshells:
+            solid_eids = [e for e in solid_eids if e not in tshell_ids]
+            state.warn(
+                f"{label}: the cross section also cuts thick-shell element(s) "
+                f"{_fmt_eid_list(cut_tshells)} (*ELEMENT_TSHELL). They were "
+                "left OUT of the /PRELOAD element group: they share the /BRICK "
+                "card but not the solid initialiser, so SBOLTINI is never "
+                "called for them and they would sit in the group carrying no "
+                "pre-stress at all. LS-DYNA does not pre-tension thick shells "
+                "either (Vol I R17 p.3145 Remark 4 lists solid element types "
+                "only). The reporting cross-section still contains them.")
         if not solid_eids:
             state.warn(f"{label}: the cross section cuts no SOLID element "
                        "inside the preload part scope — no /PRELOAD emitted. "
@@ -357,11 +384,18 @@ def _make_preload_sections(state: ConversionState,
         while sect_id in used_sect:
             sect_id = state.next_id()
         used_sect.add(sect_id)
-        pre_id = iss.issid if (iss.issid > 0 and iss.issid not in used_preload) \
-            else state.next_id()
+        if iss.issid > 0 and iss.issid not in used_preload:
+            pre_id = iss.issid
+        else:
+            pre_id = state.next_id()
+            while pre_id in used_preload:        # same retry as /SECT above
+                pre_id = state.next_id()
         used_preload.add(pre_id)
         title = iss.title or f"PRELOAD_{pre_id}"
-        grnod_id = state.next_id()
+        # next_grnod_id(), not next_id(): k2rad re-emits every user *SET_NODE
+        # under its own SID, so a SID at or above the auto base would collide
+        # here — starter ERROR 79 over the merged /GRNOD table, a refused deck.
+        grnod_id = state.next_grnod_id()
         grbric_id = state.next_id()
 
         lines += ["/NODE"]
@@ -418,6 +452,32 @@ def _make_preload_sections(state: ConversionState,
             "that cross product alone. The *DATABASE_CROSS_SECTION's own /SECT "
             "and its /TH/SECTIO channel are left untouched, so the reported "
             "section force keeps the scope and frame it had.")
+        # The preload window has to CLOSE inside the run or the bolted parts
+        # never get their stiffness back: sboltlaw.F:119-128 holds them at
+        # REDUC1 = 1e-4 of E until Tstart+0.4*dT and reaches 1.0 only at
+        # Tstart+0.7*dT. An LS-DYNA deck that tightened the bolt inside a
+        # dynamic-relaxation phase states that window in DR pseudo-time
+        # (Vol I R17 p.3144 Remark 1 is written entirely about DR), which has
+        # nothing to do with ENDTIM — and k2rad warn-skips
+        # *CONTROL_DYNAMIC_RELAXATION, so nothing else would catch it.
+        run_end = (state.ctrl_termination.endtim
+                   if state.ctrl_termination else 1.0)
+        t_full = t_start + 0.7 * (t_stop - t_start)
+        if run_end > 0.0 and t_full > run_end:
+            state.warn(
+                f"{label}: the preload window closes at Tstart+0.7*(Tstop-"
+                f"Tstart) = {t_full:.6G}, AFTER the run ends at "
+                f"{run_end:.6G} (*CONTROL_TERMINATION ENDTIM). sboltlaw.F:119-"
+                "128 holds every preloaded element at 1e-4 of its Young's "
+                "modulus until Tstart+0.4*(Tstop-Tstart) and restores the full "
+                "modulus only at Tstart+0.7*(Tstop-Tstart), so on this deck "
+                "the bolted parts stay ~10000x too soft for the WHOLE "
+                "analysis, at zero starter or engine diagnostics. This is the "
+                "normal shape when the source deck tightened the bolt inside a "
+                "*CONTROL_DYNAMIC_RELAXATION phase, whose pseudo-time is "
+                "unrelated to ENDTIM. Rescale the *DEFINE_CURVE abscissae into "
+                "the transient time base, or raise ENDTIM past "
+                f"{t_full:.6G}.")
         dropped = []
         if iss.izshear:
             dropped.append(
@@ -430,11 +490,19 @@ def _make_preload_sections(state: ConversionState,
                 "the preload acts)")
         if iss.istiff:
             dropped.append(
-                f"ISTIFF={iss.istiff} (LS-DYNA's linearly elastic GHOST "
-                "elements inside the cut, which stop the section distorting "
-                "while the bolt tightens; /PRELOAD has no equivalent, so a "
-                "coarse or irregular bolt mesh may distort more than in "
-                "LS-DYNA)")
+                f"ISTIFF={iss.istiff} ("
+                + ("LS-DYNA's linearly elastic GHOST elements inside the cut, "
+                   "which stop the section distorting while the bolt tightens"
+                   if iss.istiff > 0 else
+                   f"the negative spelling: |{iss.istiff}| is a load curve id "
+                   "giving the stiffness fraction as a function of time, with "
+                   "the preload stress auto-adjusted +/-10% so the TOTAL "
+                   "section stress follows LCID — Vol I R17 p.3144. The curve "
+                   "id is stated as written on the card, un-offset, because "
+                   "the field is dropped before any *INCLUDE_TRANSFORM offset "
+                   "would matter")
+                + "; /PRELOAD has no equivalent, so a coarse or irregular bolt "
+                "mesh may distort more than in LS-DYNA)")
         if dropped:
             state.warn(f"{label}: " + "; ".join(dropped)
                        + " — no /PRELOAD slot at any Radioss version, dropped.")
@@ -495,8 +563,11 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
                               label: str) -> None:
     """Name every preloaded part whose /PROP/SOLID formulation does not carry
     the preload on this build (see ``_PRELOAD_STABLE_ISOLID``)."""
+    # Solids only: thick shells are filtered out of the preload group by the
+    # caller (they cannot be pre-tensioned at all), and _solid_sec_for_part
+    # would return None for them anyway — every check below would `continue`
+    # past them without a word, which is the gap that filter closed.
     elems = {e.eid: e for e in state.solid_elems}
-    elems.update({e.eid: e for e in state.tshell_elems})
     bad: Dict[int, Set[int]] = {}
     penta: Set[int] = set()
     ismstr10: Set[int] = set()
@@ -504,11 +575,21 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
         e = elems.get(eid)
         if e is None:
             continue
-        uniq = []
-        for n in e.nodes:
-            if n > 0 and n not in uniq:
-                uniq.append(n)
-        if len(uniq) == 6:
+        # Classify on the EMITTED /BRICK row, not on the LS-DYNA connectivity.
+        # hm_read_solid.F:167 only sets ISOLNOD=6 when cells 7 AND 8 are blank
+        # (`IXS(8,I)+IXS(9,I)==0`), and mesh.py's /BRICK writer pads a short
+        # node list with nodes[-1], so a wedge written the usual LS-DYNA way —
+        # 6 ids, or 8 with n3=n4 and n7=n8 — leaves k2rad as a DEGENERATE HEX8
+        # and IS pre-tensioned. Measured on a 8-wedge bolt bar: the starter
+        # echoes AREA 1.000E+00 (identical to the hex twin) and /TH/BRIC SZ on
+        # both cut wedges reads 200.00 MPa at t=0 and ~200 past Tstop. Only a
+        # deck that spells the wedge with literal ZEROS in cells 7-8 reaches
+        # ISOLNOD=6, and only that one loses the preload.
+        emitted_nodes = list(e.nodes)
+        if emitted_nodes and len(emitted_nodes) < 8:
+            emitted_nodes += [emitted_nodes[-1]] * (8 - len(emitted_nodes))
+        emitted_nodes = emitted_nodes[:8]
+        if len(emitted_nodes) == 8 and emitted_nodes[6] + emitted_nodes[7] == 0:
             penta.add(e.pid)
         sec = _solid_sec_for_part(state, e.pid)
         if sec is None:
@@ -523,14 +604,15 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
         state.warn(
             f"{label}: preloaded part(s) {sorted(pids)} emit /PROP/SOLID "
             f"Isolid={isolid}. Measured on this build with /PRELOAD Itype=2 at "
-            "200 MPa: Isolid 1 and 2 hit ZERO OR NEGATIVE VOLUME at cycle 0, "
-            "Isolid 12 is a completely SILENT no-op (0 MPa for the whole run, "
-            "0 errors, 0 warnings) and Isolid 24 diverges shortly after "
-            "0.7*(Tstop-Tstart) to 1400-1500 MPa. Only Isolid 14 and 17 hold "
-            "the preload (14 cleanest: 200.0 MPa at t=0, still ~200 after "
-            "Tstop). Set the part's *SECTION_SOLID ELFORM to one that maps to "
-            "Isolid 14 or 17, or the bolt pre-tension will not do what this "
-            "card says.")
+            "200 MPa, only Isolid 5, 14 and 17 hold the pre-tension (14 "
+            "cleanest: 200.0 MPa at t=0, still ~200 after Tstop). Isolid 1 and "
+            "2 hit ZERO OR NEGATIVE VOLUME at cycle 0, Isolid 12 is a "
+            "completely SILENT no-op (0 MPa for the whole run, 0 errors, 0 "
+            "warnings) and Isolid 24 diverges shortly after "
+            "0.7*(Tstop-Tstart) to 1400-1500 MPa. Set the part's "
+            "*SECTION_SOLID ELFORM — or its *CONTROL_HOURGLASS IHQ, which also "
+            "picks Isolid — to one of the three, or the bolt pre-tension will "
+            "not do what this card says.")
     if ismstr10:
         state.warn(
             f"{label}: preloaded part(s) {sorted(ismstr10)} carry /PROP/SOLID "
@@ -544,18 +626,21 @@ def _warn_preload_formulation(state: ConversionState, solid_eids: List[int],
             "or drop the preload there.")
     if penta:
         state.warn(
-            f"{label}: preloaded part(s) {sorted(penta)} contain real 6-node "
-            "PENTA solids, which CANNOT be pre-tensioned. SBOLTINI is called "
-            "only from sinit3 (HEX8), s4init3/s10init3 (tetra) and s8zinit3, "
-            "never from S6ZINIT3, so a penta in the section keeps a zero "
+            f"{label}: preloaded part(s) {sorted(penta)} contain 6-node PENTA "
+            "solids spelled with BLANK cells 7-8, which the starter reads as "
+            "ISOLNOD=6 (hm_read_solid.F:167) and CANNOT pre-tension. SBOLTINI "
+            "is called only from sinit3 (HEX8), s4init3/s10init3 (tetra) and "
+            "s8zinit3, never from S6ZINIT3, so such a penta keeps a zero "
             "BPRELD and carries no pre-stress at all; SECTAREA likewise has no "
             "ISOLNOD==6 branch, so those elements add nothing to the echoed "
-            "section AREA. Measured on an ALL-penta section: AREA echoes "
-            "0.000E+00, every element stress stays 0 for the whole run, at 0 "
-            "starter errors and 0 warnings. A MIXED section still preloads its "
-            "hexas and tetras, so the bolt simply carries less than the card "
-            "asks — silently, either way. Remesh those bolts as hexas or "
-            "tetras.")
+            "section AREA. Measured on an ALL-penta section spelled that way: "
+            "AREA echoes 0.000E+00, every element stress stays 0 for the whole "
+            "run, at 0 starter errors and 0 warnings. A MIXED section still "
+            "preloads its hexas and tetras, so the bolt simply carries less "
+            "than the card asks — silently, either way. Repeating the last "
+            "node into cells 7-8 (LS-DYNA's usual n1 n2 n3 n3 n5 n6 n7 n7 "
+            "wedge) makes it a degenerate HEX8, which IS pre-tensioned; "
+            "remeshing as hexas or tetras also works.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

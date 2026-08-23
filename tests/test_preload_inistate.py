@@ -35,13 +35,13 @@ def _row16(*vals) -> str:
     return "".join(f"{v:>16}" for v in vals)
 
 
-def _convert(deck: str):
+def _convert(deck: str, **kw):
     """convert() a deck string; return (result, starter_text)."""
     tmp = tempfile.TemporaryDirectory()
     path = os.path.join(tmp.name, "deck.k")
     with open(path, "w") as fh:
         fh.write(deck)
-    result = convert(path, write_log=False)
+    result = convert(path, write_log=False, **kw)
     with open(result.starter_path) as fh:
         starter = fh.read()
     tmp.cleanup()
@@ -1074,9 +1074,14 @@ class CorpusCarrierTests(unittest.TestCase):
             data,
             f"{_i(sect)}{_i(0)}{_i(2)}{' ' * 10}"
             f"{_f(100.0)}{_f(0.0)}{_f(0.25)}")
-        # The real deck carries 6-node pentas in the preloaded part.
-        self.assertTrue(any("PENTA solids, which CANNOT be pre-tensioned" in w
-                            for w in r.warnings))
+        # The real deck carries wedges in the preloaded part, but LS-DYNA
+        # spells them by repeating a node, so k2rad emits a DEGENERATE HEX8
+        # (cells 7-8 filled) which the starter reads as ISOLNOD=8 and DOES
+        # pre-tension — measured: AREA echoes 1.000E+00 and /TH/BRIC SZ reads
+        # 200.00 MPa at t=0 on a wedge bolt bar, same as its hex twin. The
+        # penta warning must NOT fire here; see the synthetic test below for
+        # the blank-cell spelling that does lose the preload.
+        self.assertFalse(any("PENTA solids" in w for w in r.warnings))
         # The implicit probe rigid body allocates three nodes too: no /NODE id
         # may appear twice (measured collision before both sites were moved
         # onto state.next_node_id()).
@@ -1116,6 +1121,264 @@ class CorpusCarrierTests(unittest.TestCase):
         self.assertEqual(int(data[0:10]), grp)
         self.assertEqual(data[40:60], _f(1.0))       # Preload = SCALE = 1.0
         self.assertEqual(data[60:80], _f(0.0))       # Damp = 0
+
+
+#: *INITIAL_STRESS_SHELL on element 2 with NTHICK = 5, matching SHELLS' NIP.
+#: Card 1 is EID NPLANE NTHICK NHISV LARGE ILOCAL; then T sig_xx sig_yy sig_zz
+#: sig_xy sig_yz sig_zx eps_p per station.
+STRESS_5 = ("*INITIAL_STRESS_SHELL\n" + _row(2, 1, 5) + "\n"
+            + "".join(_row(round(-1.0 + 0.5 * k, 4), 100.0 + 2.5 * k,
+                           0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                      for k in range(5)))
+
+
+class MixedStressAndStrainTests(unittest.TestCase):
+    """A deck that carries BOTH initial-state keywords — LS-DYNA's own dynain
+    shape. Reading a /STRA_F block sets the starter's ITHKSHEL=2 globally and a
+    /STRS_F block sets ISIGSH, and the two together switch on cross-checks the
+    plain strain card cannot satisfy: measured 4x ERROR 26 + 4x ERROR 1904 and
+    ERROR TERMINATION before this was handled."""
+
+    def _mixed(self, strain_eid=1, **kw):
+        extra = STRESS_5 + ("*INITIAL_STRAIN_SHELL\n"
+                            + _row(strain_eid, 1, 2) + "\n"
+                            + _row(0.0, 0, 0, 0, 0, 0, -1.0) + "\n"
+                            + _row(0.02, 0, 0, 0, 0, 0, 1.0) + "\n")
+        return _convert(SHELLS.replace("{EXTRA}", extra), **kw)
+
+    def test_npg_is_four_on_batoz_and_nb_integr_is_the_property_n(self):
+        _r, starter = self._mixed()
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        # nb_integr = 5 (the /PROP/SHELL N, which the MSGID-26 layer check
+        # demands once ISIGSH is on) and npg = 4 (Ishell 12): npg=1 would leave
+        # NPGI=0 against csigini4's NPG=4 and error the element out.
+        self.assertEqual(data[0], f"{_i(1)}{_i(5)}{_i(4)}{_f(0.0)}")
+        # 5 stations x 4 in-plane copies x 2 data lines, for each of the two
+        # records (element 1's own strain + element 2's companion).
+        self.assertEqual(len(data), 2 + 2 * (5 * 4 * 2))
+
+    def test_the_stress_element_gets_an_all_zero_companion_record(self):
+        r, starter = self._mixed()
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        card1 = [ln for ln in data if ln.endswith(f"{_i(4)}{_f(0.0)}")]
+        self.assertEqual(card1, [f"{_i(1)}{_i(5)}{_i(4)}{_f(0.0)}",
+                                 f"{_i(2)}{_i(5)}{_i(4)}{_f(0.0)}"])
+        # Element 2's block: every strain component zero, T spanning -1..+1 so
+        # the two stations the starter keeps are not at the same position
+        # (identical T is ERROR 1904).
+        start = data.index(f"{_i(2)}{_i(5)}{_i(4)}{_f(0.0)}")
+        payload = data[start + 1:start + 1 + 5 * 4 * 2]
+        self.assertEqual({ln.strip() for ln in payload[0::2]},
+                         {f"{_f(0.0)}{_f(0.0)}{_f(0.0)}".strip()})
+        self.assertEqual({ln[:60].strip() for ln in payload[1::2]},
+                         {f"{_f(0.0)}{_f(0.0)}{_f(0.0)}".strip()})
+        ts = [float(ln[60:80]) for ln in payload[1::2]]
+        self.assertEqual(ts[0], -1.0)
+        self.assertEqual(ts[-1], 1.0)
+        self.assertTrue(any("all-zero /INISHE/STRA_F/GLOB record was added"
+                            in w for w in r.warnings))
+
+    def test_re_sampled_stations_span_minus_one_to_plus_one(self):
+        _r, starter = self._mixed()
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        payload = data[1:1 + 5 * 4 * 2]
+        ts = [float(ln[60:80]) for ln in payload[1::2]]
+        self.assertEqual(sorted(set(ts)), [-1.0, -0.5, 0.0, 0.5, 1.0])
+        # eps_XX runs 0 -> 0.02 linearly with T, so the first two stations the
+        # starter keeps rebuild the same membrane+curvature as the 2-station
+        # form. Measured: /TH/SHEL E1 = 0.01, K1 = 0.02 either way.
+        exx = [float(ln[0:20]) for ln in payload[0::2]]
+        self.assertAlmostEqual(exx[0], 0.0)
+        self.assertAlmostEqual(exx[4], 0.005)
+        self.assertAlmostEqual(exx[-1], 0.02)
+
+    def test_a_strain_only_deck_keeps_the_plain_two_station_form(self):
+        _r, starter = _convert(SHELLS.replace("{EXTRA}", STRAIN_SMALL))
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        # No stress block => ISIGSH stays 0 => none of the cross-checks fire
+        # and the compact nb_integr=2 / npg=1 card is kept unchanged.
+        self.assertEqual(data[0], f"{_i(1)}{_i(2)}{_i(1)}{_f(0.0)}")
+
+    def test_qeph_takes_npg_one_because_the_reader_fills_npgi_itself(self):
+        _r, starter = self._mixed(shell_formulation="qeph")
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        # IHBE==24 makes the reader write SIGSH(NVSHELL)=4 AND the INISHVAR1
+        # marker plus the PT+1 shift cstraini4 reads back; npg=4 skips both and
+        # is a measured silent no-op.
+        self.assertEqual(data[0], f"{_i(1)}{_i(5)}{_i(1)}{_f(0.0)}")
+
+    def test_mixed_formulations_refuse_the_strain_block(self):
+        # ELFORM 20 is always QEPH, ELFORM 2 follows the default (QBAT), so the
+        # two initial-state elements land on different Ishell values.
+        deck = SHELLS.replace(
+            "*SECTION_SHELL\n         1         2                   5\n",
+            "*SECTION_SHELL\n         1         2                   5\n"
+            "       1.0\n"
+            "*PART\nstrip2\n         2         2         1\n"
+            "*SECTION_SHELL\n         2        20                   5\n")
+        deck = deck.replace("       2       1       2       5       6       3",
+                            "       2       2       2       5       6       3")
+        extra = STRESS_5 + ("*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 2) + "\n"
+                            + _row(0.0, 0, 0, 0, 0, 0, -1.0) + "\n"
+                            + _row(0.02, 0, 0, 0, 0, 0, 1.0) + "\n")
+        r, starter = _convert(deck.replace("{EXTRA}", extra))
+        self.assertIsNone(_block(starter, "/INISHE/STRA_F/GLOB"))
+        self.assertTrue(any("do not all share one formulation" in w
+                            for w in r.warnings))
+        # The initial STRESS is untouched by the refusal.
+        self.assertIsNotNone(_block(starter, "/INISHE/STRS_F/GLOB"))
+
+
+class BlankThicknessColumnTests(unittest.TestCase):
+    def test_two_stations_with_a_blank_t_column_report_the_inference(self):
+        # Both rows leave T blank, but their values DIFFER — so a real
+        # curvature is reconstructed from positions the converter inferred.
+        # The single-station message ("pure membrane, zero curvature") would be
+        # false on both counts here.
+        extra = ("*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 2) + "\n"
+                 + _row(0.01, 0, 0, 0, 0, 0) + "\n"
+                 + _row(0.03, 0, 0, 0, 0, 0) + "\n")
+        r, starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        data = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        self.assertEqual(float(data[2][60:80]), -1.0)
+        self.assertEqual(float(data[4][60:80]), 1.0)
+        self.assertTrue(data[1].startswith(_f(0.01)))
+        self.assertTrue(data[3].startswith(_f(0.03)))
+        self.assertTrue(any("PLACED at T=-1 and T=+1" in w
+                            for w in r.warnings))
+        self.assertFalse(any("pure membrane state, zero curvature" in w
+                             for w in r.warnings))
+
+    def test_one_station_still_reports_a_pure_membrane_state(self):
+        extra = ("*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 1) + "\n"
+                 + _row(0.01, 0, 0, 0, 0, 0, 0.0) + "\n")
+        r, _starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        self.assertTrue(any("pure membrane state, zero curvature" in w
+                            for w in r.warnings))
+        self.assertFalse(any("PLACED at T=-1 and T=+1" in w
+                             for w in r.warnings))
+
+
+class PreloadWarningGateTests(unittest.TestCase):
+    """The three /PRELOAD guards that name a part, each on a synthetic deck —
+    the corpus carriers are @skipUnless and cover none of them portably."""
+
+    def test_penta_warning_needs_the_blank_cell_spelling(self):
+        # A wedge written LS-DYNA's usual way (last node repeated into cells
+        # 7-8) leaves k2rad as a degenerate HEX8: hm_read_solid.F:167 wants
+        # cells 7 AND 8 blank for ISOLNOD=6, so this one IS pre-tensioned.
+        # Measured: AREA 1.000E+00 and /TH/BRIC SZ = 200.00 MPa at t=0.
+        deck = _bar_deck()
+        out = []
+        for ln in deck.splitlines():
+            # Collapse the cut brick into a wedge the LS-DYNA way: repeat the
+            # 3rd/7th node into cells 4 and 8. Six unique nodes, no blank cell.
+            if ln.startswith(f"{2:>8}{1:>8}") and len(ln) == 80:
+                out.append(ln[:40] + ln[32:40] + ln[48:72] + ln[64:72])
+            else:
+                out.append(ln)
+        r, _s = _convert("\n".join(out) + "\n")
+        self.assertFalse(any("PENTA solids" in w for w in r.warnings))
+
+    def test_penta_warning_fires_on_blank_cells_seven_and_eight(self):
+        deck = _bar_deck()
+        out = []
+        for ln in deck.splitlines():
+            # The bar's second brick is the cut one; blank its last two cells
+            # so the starter classifies it ISOLNOD=6.
+            if ln.startswith(f"{2:>8}{1:>8}") and len(ln) >= 80:
+                ln = ln[:64] + f"{0:>8}{0:>8}"
+            out.append(ln)
+        r, _s = _convert("\n".join(out) + "\n")
+        self.assertTrue(any("PENTA solids" in w for w in r.warnings),
+                        [w for w in r.warnings][:3])
+
+    def test_isolid_warning_fires_on_an_unsupported_hourglass_choice(self):
+        # *CONTROL_HOURGLASS IHQ=6 -> Isolid 24, measured to DIVERGE after
+        # 0.7*(Tstop-Tstart) (1266 -> 1370 MPa against a 200 MPa target).
+        r, _s = _convert(_bar_deck(extra="*CONTROL_HOURGLASS\n" + _row(6)))
+        self.assertTrue(any("emit /PROP/SOLID Isolid=24" in w
+                            for w in r.warnings))
+
+    def test_isolid_five_is_supported_and_does_not_warn(self):
+        # IHQ 4/5 -> Isolid 5, re-measured: 200.0 MPa at t=0, 199.1 after
+        # Tstop, NORMAL TERMINATION. Warning it would be a false positive.
+        r, _s = _convert(_bar_deck(extra="*CONTROL_HOURGLASS\n" + _row(4)))
+        self.assertFalse(any("emit /PROP/SOLID Isolid" in w
+                             for w in r.warnings))
+
+    def test_the_section_node_group_dodges_a_user_set_node_id(self):
+        # _make_extra_groups re-emits *SET_NODE 90004 verbatim as
+        # /GRNOD/NODE/90004; next_id() would hand the preload's section-node
+        # group the same number -> starter ERROR 79, a refused deck.
+        r, starter = _convert(_bar_deck(
+            extra="*SET_NODE_LIST\n" + _row(90004) + "\n" + _row(1, 2)))
+        ids = [int(h.split("/")[-1]) for h in _headers(starter, "/GRNOD/NODE/")]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertIn(90004, ids)
+        self.assertNotIn("INITIAL_STRESS_SECTION", r.skipped_keywords)
+
+    def test_a_preload_window_past_endtim_is_named(self):
+        # sboltlaw.F holds the bolted parts at 1e-4 of E until 0.4*dT and
+        # restores them only at 0.7*dT; a run that ends first never gets its
+        # stiffness back, silently.
+        r, _s = _convert(_bar_deck(curve_pts=((0.0, 0.0), (1.0, 1.0))))
+        self.assertTrue(any("AFTER the run ends" in w for w in r.warnings))
+
+    def test_a_window_inside_the_run_is_not_flagged(self):
+        r, _s = _convert(_bar_deck())
+        self.assertFalse(any("AFTER the run ends" in w for w in r.warnings))
+
+
+def _tshell_bar_deck() -> str:
+    """A 1x1x4 bar of four *ELEMENT_TSHELL, cut through the second one."""
+    lines = ["*KEYWORD", "*NODE"]
+    nid = 1
+    layers = []
+    for k in range(5):
+        row = []
+        for (u, v) in ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)):
+            lines.append(f"{nid:>8}{u:16.8E}{v:16.8E}{float(k):16.8E}")
+            row.append(nid)
+            nid += 1
+        layers.append(row)
+    lines += ["*PART", "tsbar", _row(1, 1, 1),
+              "*SECTION_TSHELL", _row(1, 2),
+              "*MAT_ELASTIC", "         1  7.85E-09  210000.0       0.3",
+              "*ELEMENT_TSHELL"]
+    for e in range(4):
+        lines.append("".join(f"{v:>8}" for v in
+                             [e + 1, 1] + layers[e] + layers[e + 1]))
+    lines += ["*SET_PART_LIST", _row(5), _row(1),
+              "*DATABASE_CROSS_SECTION_PLANE_ID", f"{1:>10}bolt cut",
+              _row(5, 0.5, 0.5, 1.5, 0.5, 0.5, 2.5, 3.0),
+              "*DEFINE_CURVE", _row(1, 0, 1.0, 200.0, 0.0),
+              f"{0.0:>20.10G}{0.0:>20.10G}", f"{2.0e-4:>20.10G}{1.0:>20.10G}",
+              "*INITIAL_STRESS_SECTION_TITLE", "bolt one", ISS_CARD,
+              "*CONTROL_TERMINATION", "    4.0E-4", "*END"]
+    return "\n".join(lines) + "\n"
+
+
+class PreloadThickShellTests(unittest.TestCase):
+    def test_thick_shells_are_kept_out_of_the_preload_group(self):
+        # _plane_cut deliberately puts thick shells in solid_eids so a section
+        # through them still records force, but SBOLTINI is reached only from
+        # sinit3 / s4init3 / s8zinit3 / s10init3 — never the thick-shell
+        # initialisers — so a preloaded thick shell would carry no BPRELD at
+        # all. LS-DYNA does not support it either (Vol I R17 p.3145 Remark 4).
+        r, starter = _convert(_tshell_bar_deck())
+        self.assertTrue(any("thick-shell element(s)" in w
+                            and "left OUT of the /PRELOAD element group" in w
+                            for w in r.warnings), list(r.warnings)[:4])
+        # Every element is a thick shell, so nothing is left to pre-tension.
+        self.assertEqual(_headers(starter, "/PRELOAD/"), [])
+        self.assertTrue(any("cuts no SOLID element" in w for w in r.warnings))
 
 
 if __name__ == "__main__":       # pragma: no cover
