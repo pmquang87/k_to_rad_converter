@@ -80,6 +80,9 @@ from .state import (
     DbD3Plot, DbHistory, DbExtentBinary, DbNodalForceGroup,
     GravityLoadPart, MatAddFatigue, DbFreqBinary,
     InitialStressShell, InitialStressSolid, CrossSection,
+    SeatbeltElem, SectionSeatbelt, MatSeatbelt, SeatbeltSlipring,
+    SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
+    SeatbeltAccelerometer,
 )
 
 
@@ -12361,22 +12364,20 @@ def handle_database_history_discrete_set(block: Block,
 
 
 def handle_database_history_seatbelt(block: Block, state: ConversionState) -> None:
-    """*DATABASE_HISTORY_SEATBELT[_ID] — recognized, and NOTHING is emitted.
+    """*DATABASE_HISTORY_SEATBELT[_ID] -> /TH/SPRING (1D) + /TH/SHEL + /TH/SH3N.
 
-    dyna2rad probes the FIRST listed element's ``*ELEMENT_SEATBELT`` → PID →
-    SECID and routes the whole list to /TH/SPRING when the section is a
-    ``*SECTION_SEATBELT`` (1D belt) or to /TH/SHEL when it is a
-    ``*SECTION_SHELL`` (2D belt) — converttimehistory.cxx:303-341.
+    LIVE since the seatbelt batch. Before it, k2rad converted neither
+    ``*ELEMENT_SEATBELT`` nor ``*SECTION_SEATBELT``, so both branches were
+    unreachable and naming the ids would have been starter ERROR 69 — a deck
+    that "converts" and then refuses to run, which is the worst of the three
+    outcomes; the request was recorded as recognized-but-not-emitted instead.
 
-    k2rad converts NEITHER ``*ELEMENT_SEATBELT`` nor ``*SECTION_SEATBELT``
-    (both land in ``skipped_keywords``), so BOTH branches are unreachable here:
-    there is no /SPRING and no /SHELL carrying those element ids, and naming
-    them would be starter ERROR 69 — a deck that "converts" and then refuses to
-    run, which is the worst of the three outcomes. So the request is recorded
-    as recognized-but-not-emitted with the gap named, and the channels are
-    honestly reported lost. The 2D-belt route becomes correct the moment
-    *ELEMENT_SEATBELT is converted (the later seatbelt/retractor batch); until
-    then there is no partial that is not a lie.
+    dyna2rad probes the FIRST listed element's ``*ELEMENT_SEATBELT`` -> PID ->
+    SECID and routes the WHOLE list on that one answer
+    (``converttimehistory.cxx:303-341``). k2rad splits PER ELEMENT against the
+    registries the writer filled — see ``writer/output.py::_th_seatbelt_split``
+    — so a card mixing a 1D shoulder belt with a 2D lap belt gets both groups
+    instead of one wrong one.
     """
     _handle_db_history(block, state, "SEATBELT")
 
@@ -12664,6 +12665,586 @@ def handle_damping_relative(block: Block, state: ConversionState) -> None:
         dv2=to_float(f[4]) if len(f) > 4 else 0.0,
         lcid=to_int(f[5]) if len(f) > 5 else 0,
     ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Seatbelts / restraints — *ELEMENT_SEATBELT[_<DEVICE>], *SECTION_SEATBELT,
+# *MAT_SEATBELT / *MAT_B01 (+ _2D), *DATABASE_SBTOUT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seatbelt_rows(block: Block) -> List[int]:
+    """RAW indices of a seatbelt block's data cards (blanks and ``$`` out).
+
+    IMPORTED and called by every device walk below AND by all four
+    ``assembly._off_seatbelt_*`` offsetters, so the handler and the
+    ``*INCLUDE_TRANSFORM`` offsetter cannot disagree about which line is a
+    card — the #119 rule. (It used to be re-implemented inline on the assembly
+    side, which made the invariant a coincidence rather than a fact; the
+    offsetters now call this function, the way they already call
+    ``_seatbelt_elem_card`` and ``_slipring_card2_follows``.) A blank card
+    DROPS OUT of this list,
+    which is exactly why the two-card devices claim their card 2 by RAW
+    CONTIGUITY (``rows[k] == i + 1``) rather than "the next row".
+    """
+    return [i for i, ln in enumerate(block.raw)
+            if ln.strip() and not ln.lstrip().startswith("$")]
+
+
+def _seatbelt_elem_card(line: str) -> List[str]:
+    """Slice one ``*ELEMENT_SEATBELT`` card.
+
+    ``EID(I8) PID(I8) N1(I8) N2(I8) SBRID(I8) SLEN(F16) N3(I8) N4(I8)`` —
+    ``Keyword971/ELEMENTS/seatbelt.cfg:64``,
+    ``CARD("%8d%8d%8d%8d%8d%16lg%8d%8d", ...)``, which is also what LS-PrePost
+    4.13.5 writes.
+
+    EIGHT variables spanning TEN cells' worth of card, because SLEN alone is
+    SIXTEEN wide. A uniform 8-wide slice reads the right half of SLEN as N3 and
+    the left half of N3 as N4 — the same class of defect ``_element_mass_card``
+    and ``_parse_sph_cell`` were written for, except here it silently turns a
+    1D belt into a 2D one (N3 and N4 both non-zero is what makes the element a
+    shell, ``convertelements.cxx:86-95``) and hands that /SHELL two nodes that
+    do not exist.
+
+    The card is SLICED FIRST and the free split is the fallback — the rule
+    ``_card(fixed=True)`` already uses, and the only one that survives a BLANK
+    interior cell. Trying the free split first and accepting it whenever it
+    yields five short tokens reads a column-correct card with a blank cell one
+    slot out of phase, and every field after the blank is then wrong:
+    MEASURED, ``"       1      10       1       2       0                       7       8"``
+    (I8 columns, SLEN blank, N3=7 N4=8) free-splits to
+    ``['1','10','1','2','0','7','8']`` — SLEN=7, N3=8, N4=0 — so a 2D shell
+    belt silently becomes a 1D /SPRING with 7 mm of invented slack, and the
+    part is then claimed by BOTH routes (starter ERROR 79 + 1715 + 78 + 760).
+
+    A genuinely fixed-format cell never contains whitespace or a comma INSIDE
+    it, so a slice that produces one means the card was written free-format,
+    narrower than the columns — the fallback's exact trigger.
+    """
+    data = _strip_inline_comment(line)
+    if "," in data:
+        toks = parse_free(data)
+        return toks + [""] * max(0, 8 - len(toks))
+    cells = [data[0:8], data[8:16], data[16:24], data[24:32], data[32:40],
+             data[40:56], data[56:64], data[64:72]]
+    sliced = [c.strip() for c in cells]
+    if any(ch.isspace() for c in sliced for ch in c):
+        toks = parse_free(data)
+        if toks:
+            return toks + [""] * max(0, 8 - len(toks))
+    return sliced
+
+
+def handle_element_seatbelt(block: Block, state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT → a 1D belt /SPRING, or a 2D belt /SHELL.
+
+    ``N3``/``N4`` both non-zero makes the element a four-node SHELL belt whose
+    thickness comes from ``*SECTION_SHELL``; otherwise it is a two-node
+    ``/SPRING`` on ``/PROP/TYPE23`` + ``/MAT/LAW114``. dyna2rad decides exactly
+    this way (``convertelements.cxx:86-95``) and preserves the element id
+    (``:281``).
+
+    ``SBRID`` — the retractor the element STARTS INSIDE — is read and kept even
+    though the Radioss link runs the other way (``/RETRACTOR/SPRING``'s
+    ``EL_ID`` names the mouth element): the writer uses it to catch a belt that
+    declares a retractor which does not name it back. dyna2rad cannot see that
+    at all, because it never reads the field — ``grep '"SBRID"'`` over its tree
+    matches only the *pretensioner's* homonym.
+
+    ``SLEN`` — the initial SLACK length — is read for the same reason: Radioss
+    has no slot for it anywhere in ``/SPRING`` + ``/PROP/TYPE23`` +
+    ``/MAT/LAW114`` (``grep '"SLEN"'`` over the whole dyna2rad tree returns
+    zero hits), so the writer names the loss instead of dropping it in silence.
+    """
+    for i in _seatbelt_rows(block):
+        f = _seatbelt_elem_card(block.raw[i])
+        eid = to_int(f[0])
+        pid = to_int(f[1])
+        if eid <= 0 or pid <= 0:
+            continue
+        state.seatbelt_elems.append(SeatbeltElem(
+            eid=eid, pid=pid, n1=to_int(f[2]), n2=to_int(f[3]),
+            sbrid=to_int(f[4]), slen=to_float(f[5]),
+            n3=to_int(f[6]), n4=to_int(f[7])))
+
+
+def handle_element_seatbelt_accelerometer(block: Block,
+                                          state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT_ACCELEROMETER → /ACCEL + /SKEW/MOV + /ADMAS.
+
+    ``SBACID NID1 NID2 NID3 IGRAV INTOPT MASS`` in 10-char cells, one card per
+    accelerometer, repeated to the next keyword.
+
+    The two Toyota production decks are the only carriers in the corpus and
+    they disagree about the header comment (the Camry writes a ``mass`` column
+    label, the Yaris does not) while leaving IGRAV/INTOPT/MASS blank in every
+    row — so a short or blank tail has to read as "absent", which is what
+    ``_card``'s fixed slice already gives.
+    """
+    for i in _seatbelt_rows(block):
+        f = _card(block.raw, i, fixed=True, n=7, w=10)
+        sbacid = to_int(f[0]) if f else 0
+        if sbacid <= 0:
+            continue
+        state.seatbelt_accels.append(SeatbeltAccelerometer(
+            sbacid=sbacid,
+            nid1=to_int(f[1]) if len(f) > 1 else 0,
+            nid2=to_int(f[2]) if len(f) > 2 else 0,
+            nid3=to_int(f[3]) if len(f) > 3 else 0,
+            igrav=to_int(f[4]) if len(f) > 4 else 0,
+            intopt=to_int(f[5]) if len(f) > 5 else 0,
+            mass=to_float(f[6]) if len(f) > 6 else 0.0))
+
+
+def _slipring_card2_follows(block: Block, rows: List[int], k: int, i: int,
+                            onid: int) -> bool:
+    """Is ``rows[k]`` the optional card 2 of the slipring whose card 1 is *i*?
+
+    The cfg's own rule is ``if (ONID != NONE)``
+    (``Keyword971_R13.0/ELEMENTS/element_seatbelt_slipring.cfg:17``) and the
+    manual's is "Optional Card ... required when ONID is nonzero", so ONID is
+    the primary vote — and ``ONID != 0`` claims the card even when every cell
+    on it is BLANK, which is the #119 rule: a blank card is not an absent one.
+    (A blank card 2 drops out of ``_seatbelt_rows`` entirely, so the contiguity
+    test below then declines it and the following card 1 is still read as a
+    card 1 — the safe direction.)
+
+    The second vote exists because a deck CAN write card 2 with ONID blank:
+    ``LCNFFD``/``LCNFFS`` need no orientation node. Without it that card would
+    be read as the next slipring's card 1, ``to_int`` would return 0 for its
+    ``K`` cell ("0.12" parses to 0) and the walk would ``break`` — losing every
+    remaining ring in the block, silently. The discriminator is card 2's own
+    geometry: its columns 41-50 are TEN LITERAL BLANKS in the cfg's CARD string
+    (``"%10lg%10d%10d%10lg          %10d%10d"``), while card 1's field 4 is
+    SBRNID, the anchorage node, without which the ring cannot exist at all
+    (starter ERROR 2004). So "field 4 populated" means card 1, and nothing else
+    does.
+    """
+    if k >= len(rows) or rows[k] != i + 1:
+        return False                      # RAW contiguity, never "next row"
+    cand = _card(block.raw, rows[k], fixed=True, n=8, w=10)
+    looks_like_card1 = len(cand) > 4 and bool(cand[4].strip())
+    if looks_like_card1:
+        return False
+    return onid != 0 or _populated_cells(block.raw, rows[k]) > 0
+
+
+def handle_element_seatbelt_slipring(block: Block,
+                                     state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT_SLIPRING → /SLIPRING/SPRING or /SLIPRING/SHELL.
+
+    Card 1 ``SBSRID SBID1 SBID2 FC SBRNID LTIME FCS ONID``. The field ORDER is
+    the trap: ``FC`` sits BETWEEN the two element ids and the anchorage node
+    (``Keyword971_R13.0/ELEMENTS/element_seatbelt_slipring.cfg:11``, and
+    LS-PrePost writes those columns), not after ``LTIME`` where the manual's
+    variable list reads as though it were. A converter that assumes the list
+    order gives the ring a friction coefficient of ``SBRNID`` (a node id) and
+    an anchorage node of ``FC`` (0).
+
+    Card 2 ``K FUNCID DIRECT DC <blank> LCNFFD LCNFFS`` — see
+    :func:`_slipring_card2_follows` for the #119 walk that claims it.
+
+    A NEGATIVE ``SBRNID`` makes this a SHELL-belt ring: ``|SBRNID|`` is a
+    ``*SET_NODE`` and ``SBID1``/``SBID2`` are ``*SET_SHELL_LIST`` ids, which is
+    the ``/SLIPRING/SHELL`` card rather than ``/SLIPRING/SPRING``.
+    """
+    rows = _seatbelt_rows(block)
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _card(block.raw, i, fixed=True, n=8, w=10)
+        sbsrid = to_int(f1[0]) if f1 else 0
+        if sbsrid <= 0:
+            break
+        k += 1
+        onid = to_int(f1[7]) if len(f1) > 7 else 0
+        fc_raw = to_float(f1[3]) if len(f1) > 3 else 0.0
+        fcs_raw = to_float(f1[6]) if len(f1) > 6 else 0.0
+        sl = SeatbeltSlipring(
+            sbsrid=sbsrid,
+            sbid1=to_int(f1[1]) if len(f1) > 1 else 0,
+            sbid2=to_int(f1[2]) if len(f1) > 2 else 0,
+            # A NEGATIVE FC / FCS is a *DEFINE_CURVE id (friction vs TIME), not
+            # a coefficient: the cfg declares both cells SCALAR_OR_OBJECT and
+            # meci_data_reader.cpp:6846 spells the convention out — "this is
+            # Dyna specific: if the value is negative, its abs value is the ID
+            # of an object". Reading it as a coefficient would hand the ring a
+            # friction of -0.15 and Radioss a Fricd it can only clamp.
+            fc=fc_raw if fc_raw >= 0.0 else 0.0,
+            fc_func=int(round(-fc_raw)) if fc_raw < 0.0 else 0,
+            sbrnid=to_int(f1[4]) if len(f1) > 4 else 0,
+            ltime=_ffield(f1, 5, 1.0e20),
+            fcs=fcs_raw if fcs_raw >= 0.0 else 0.0,
+            fcs_func=int(round(-fcs_raw)) if fcs_raw < 0.0 else 0,
+            onid=onid)
+        if _slipring_card2_follows(block, rows, k, i, onid):
+            f2 = _card(block.raw, rows[k], fixed=True, n=8, w=10)
+            sl.has_card2 = True
+            sl.k = to_float(f2[0]) if f2 else 0.0
+            sl.funcid = to_int(f2[1]) if len(f2) > 1 else 0
+            sl.direct = to_int(f2[2]) if len(f2) > 2 else 0
+            sl.dc = to_float(f2[3]) if len(f2) > 3 else 0.0
+            # Columns 41-50 are ten literal BLANKS in the cfg's own CARD
+            # string, so LCNFFD is field 5 and LCNFFS field 6. Reading them as
+            # 4 and 5 takes the blank for the dynamic normal-force curve and
+            # the dynamic curve for the static one.
+            sl.lcnffd = to_int(f2[5]) if len(f2) > 5 else 0
+            sl.lcnffs = to_int(f2[6]) if len(f2) > 6 else 0
+            k += 1
+        state.seatbelt_sliprings.append(sl)
+
+
+def handle_element_seatbelt_retractor(block: Block,
+                                      state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT_RETRACTOR → /RETRACTOR/SPRING.
+
+    A FIXED two-card stack, repeated to the next keyword:
+
+      Card 1 ``SBRID SBRNID SBID SID1 SID2 SID3 SID4 DSID``
+      Card 2 ``TDEL PULL LLCID ULCID LFED LCFL FLOPT``
+
+    The ``Keyword971_R13.0`` cfg stops at ``SID4`` and ``LFED``; ``DSID``,
+    ``LCFL`` and ``FLOPT`` are in the R17 manual and LS-PrePost 4.13.5 writes
+    them, so all three are read here (and warn-dropped by name — none has a
+    Radioss slot).
+
+    Card 2 is claimed by RAW CONTIGUITY, not by "the next populated row". An
+    all-blank card 2 is legal — every field on it has a documented default, and
+    a retractor with no delay, no pull-out threshold and no feed length is a
+    perfectly ordinary free reel — and dropping it from the walk would read the
+    NEXT retractor's card 1 as this one's ``TDEL PULL LLCID``, then run one
+    card out of phase for the rest of the block (#119).
+    """
+    rows = _seatbelt_rows(block)
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _card(block.raw, i, fixed=True, n=8, w=10)
+        sbrid = to_int(f1[0]) if f1 else 0
+        if sbrid <= 0:
+            break
+        k += 1
+        f2: List[str] = []
+        if k < len(rows) and rows[k] == i + 1:
+            f2 = _card(block.raw, rows[k], fixed=True, n=7, w=10)
+            k += 1
+        state.seatbelt_retractors.append(SeatbeltRetractor(
+            sbrid=sbrid,
+            sbrnid=to_int(f1[1]) if len(f1) > 1 else 0,
+            sbid=to_int(f1[2]) if len(f1) > 2 else 0,
+            sid1=to_int(f1[3]) if len(f1) > 3 else 0,
+            sid2=to_int(f1[4]) if len(f1) > 4 else 0,
+            sid3=to_int(f1[5]) if len(f1) > 5 else 0,
+            sid4=to_int(f1[6]) if len(f1) > 6 else 0,
+            dsid=to_int(f1[7]) if len(f1) > 7 else 0,
+            tdel=to_float(f2[0]) if f2 else 0.0,
+            pull=to_float(f2[1]) if len(f2) > 1 else 0.0,
+            llcid=to_int(f2[2]) if len(f2) > 2 else 0,
+            ulcid=to_int(f2[3]) if len(f2) > 3 else 0,
+            lfed=to_float(f2[4]) if len(f2) > 4 else 0.0,
+            lcfl=to_int(f2[5]) if len(f2) > 5 else 0,
+            flopt=to_int(f2[6]) if len(f2) > 6 else 0))
+
+
+def handle_element_seatbelt_pretensioner(block: Block,
+                                         state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT_PRETENSIONER — folded onto its retractor's card 3.
+
+      Card 1 ``SBPRID SBPRTY SBSID1 SBSID2 SBSID3 SBSID4``
+      Card 2 ``SBRID TIME PTLCID LMTFRC LMTPIN``
+
+    Card 2 is claimed by RAW CONTIGUITY for a sharper reason than the
+    retractor's: on SBPRTY 7/8/9 the legacy ``Keyword971`` cfg writes card 2
+    with field 0 LITERALLY BLANK (``CARD("          %10lg          %10lg",
+    TIME, LMTFRC)``), so a walk that looked for a populated leading cell would
+    take the NEXT pretensioner's card 1 as this one's ``SBRID`` and pretension
+    the wrong retractor.
+
+    Every cfg from ``Keyword971_R7.1`` on — and LS-PrePost 4.13.5 — writes the
+    UNIFORM card 2 read here. The legacy type-dependent layout differs only in
+    field 0, for SBPRTY 2/3 (a sensor id) and 7/9 (blank); all four of those
+    types have no Radioss ``Tens_typ`` at all and are warn-dropped whole by the
+    writer, so the ambiguity never reaches a Radioss card.
+    """
+    rows = _seatbelt_rows(block)
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _card(block.raw, i, fixed=True, n=6, w=10)
+        sbprid = to_int(f1[0]) if f1 else 0
+        if sbprid <= 0:
+            break
+        k += 1
+        f2: List[str] = []
+        if k < len(rows) and rows[k] == i + 1:
+            f2 = _card(block.raw, rows[k], fixed=True, n=5, w=10)
+            k += 1
+        state.seatbelt_pretensioners.append(SeatbeltPretensioner(
+            sbprid=sbprid,
+            sbprty=to_int(f1[1]) if len(f1) > 1 else 0,
+            sbsid1=to_int(f1[2]) if len(f1) > 2 else 0,
+            sbsid2=to_int(f1[3]) if len(f1) > 3 else 0,
+            sbsid3=to_int(f1[4]) if len(f1) > 4 else 0,
+            sbsid4=to_int(f1[5]) if len(f1) > 5 else 0,
+            sbrid=to_int(f2[0]) if f2 else 0,
+            time=to_float(f2[1]) if len(f2) > 1 else 0.0,
+            ptlcid=to_int(f2[2]) if len(f2) > 2 else 0,
+            lmtfrc=to_float(f2[3]) if len(f2) > 3 else 0.0,
+            lmtpin=to_float(f2[4]) if len(f2) > 4 else 0.0))
+
+
+#: SBSTYP → how many cells that type's card 2 carries. Card 2 EXISTS for every
+#: documented SBSTYP (1..5) and for none other, so the STRIDE is a fixed
+#: ``1 + 1`` and the #119 walk is only about WHICH fields are read off it. An
+#: unknown SBSTYP still consumes its card (four cells read and discarded):
+#: consuming it keeps the block in phase, which is the whole point.
+_SEATBELT_SENSOR_CARD2 = {1: 4, 2: 3, 3: 1, 4: 4, 5: 3}
+
+
+def handle_element_seatbelt_sensor(block: Block,
+                                   state: ConversionState) -> None:
+    """*ELEMENT_SEATBELT_SENSOR → /SENSOR/ACCE | /SENSOR/TIME | /SENSOR/DIST.
+
+    Card 1 ``SBSID SBSTYP SBSFL``, then ONE type card selected by SBSTYP
+    (``Keyword971_R12.0/SENSOR/element_seatbelt_sensor_no_sub.cfg``):
+
+      1  ``NID DOF ACC ATIME``       node acceleration
+      2  ``SBRID PULRAT PULTIM``     retractor pull-out RATE
+      3  ``TIME``                    time
+      4  ``NID1 NID2 DMX DMN``       node distance — MAXIMUM first
+      5  ``SBRID PULMX PULMN``       retractor pull-out
+
+    Card 2 is claimed by RAW CONTIGUITY, never "the next populated row": a
+    SBSTYP=3 card carrying ``TIME = 0`` (fire immediately — the LS-DYNA default
+    and a perfectly ordinary pretensioner trigger) is entirely blank, and
+    skipping it would read the next sensor's card 1 as this one's TIME and then
+    walk every remaining sensor one card out of phase, with no line that ever
+    re-syncs (#119).
+    """
+    rows = _seatbelt_rows(block)
+    k = 0
+    while k < len(rows):
+        i = rows[k]
+        f1 = _card(block.raw, i, fixed=True, n=3, w=10)
+        sbsid = to_int(f1[0]) if f1 else 0
+        if sbsid <= 0:
+            break
+        k += 1
+        sbstyp = to_int(f1[1]) if len(f1) > 1 else 0
+        sens = SeatbeltSensor(sbsid=sbsid, sbstyp=sbstyp,
+                              sbsfl=to_int(f1[2]) if len(f1) > 2 else 0)
+        f2: List[str] = []
+        if k < len(rows) and rows[k] == i + 1:
+            f2 = _card(block.raw, rows[k],
+                       fixed=True, n=_SEATBELT_SENSOR_CARD2.get(sbstyp, 4),
+                       w=10)
+            k += 1
+
+        def _g(idx: int, default: float = 0.0) -> float:
+            return to_float(f2[idx]) if len(f2) > idx else default
+
+        def _gi(idx: int) -> int:
+            return to_int(f2[idx]) if len(f2) > idx else 0
+
+        if sbstyp == 1:
+            sens.nid, sens.dof = _gi(0), _gi(1)
+            sens.acc, sens.atime = _g(2), _g(3)
+        elif sbstyp == 2:
+            sens.sbrid, sens.pulrat, sens.pultim = _gi(0), _g(1), _g(2)
+        elif sbstyp == 3:
+            sens.time = _g(0)
+        elif sbstyp == 4:
+            # DMX is field 2 and DMN field 3 — the LS-DYNA card lists the
+            # MAXIMUM first while the Radioss /SENSOR/DIST card lists Dmin
+            # first. Copying position-for-position swaps the two bounds, and
+            # with Dmin > Dmax the sensor can never fire at all.
+            sens.nid1, sens.nid2 = _gi(0), _gi(1)
+            sens.dmx, sens.dmn = _g(2), _g(3)
+        elif sbstyp == 5:
+            sens.sbrid = _gi(0)
+            sens.pulmx = _ffield(f2, 1, 1.0e16)
+            sens.pulmn = _ffield(f2, 2, -1.0e16)
+        state.seatbelt_sensors[sbsid] = sens
+
+
+def handle_section_seatbelt(block: Block, state: ConversionState) -> None:
+    """*SECTION_SEATBELT (+ _TITLE) → /PROP/TYPE23 (SPR_MAT) — every card SET.
+
+    ``SECID AREA THICK`` (``Keyword971_R8.0/PROPERTY/sect_seatbelt.cfg``; the
+    older ``Keyword971`` block has only ``SECID AREA``, so THICK reads as
+    absent on an R7.1 deck, which is correct).
+
+    Both AREA and THICK are LS-DYNA CONTACT numbers and neither becomes the
+    Radioss property area — see :class:`SectionSeatbelt` and the writer, which
+    names the drop.
+    """
+    per_set_title = _title_offset(block)
+    raw = block.raw
+    idx = 0
+    n_sets = 0
+    while idx < len(raw):
+        if not any(line.strip() for line in raw[idx:]):
+            break
+        title = ""
+        if per_set_title:
+            title = _read_title(block) if n_sets == 0 else raw[idx].strip()
+            idx += 1
+            if idx >= len(raw):
+                break
+        f1 = _card(raw, idx, fixed=True, n=3, w=10)
+        secid = to_int(f1[0]) if f1 else 0
+        if secid <= 0:
+            if not n_sets:
+                state.warn("*SECTION_SEATBELT: empty card - skipped")
+            else:
+                state.warn(_section_set_stop("*SECTION_SEATBELT", n_sets,
+                                             raw[idx]))
+            break
+        state.sec_seatbelts[secid] = SectionSeatbelt(
+            secid=secid, title=title or f"SECTION_SEATBELT_{secid}",
+            # AREA defaults to 0.01 in LS-DYNA. Stored as STATED-vs-blank (0.0)
+            # deliberately: it never reaches a Radioss card, and the writer's
+            # note reads better naming the number the deck actually wrote.
+            area=to_float(f1[1]) if len(f1) > 1 else 0.0,
+            thick=to_float(f1[2]) if len(f1) > 2 else 0.0)
+        idx += 1
+        n_sets += 1
+
+
+def handle_mat_seatbelt(block: Block, state: ConversionState) -> None:
+    """*MAT_SEATBELT / *MAT_B01 (+ ``_2D``) → /MAT/LAW114 or /MAT/LAW119.
+
+    Card 1  ``MID MPUL LLCID ULCID LMIN CSE DAMP E``
+    Card 2  ``A I J AS F M R``           — read ONLY when ``E > 0``
+    Card 3  ``P1DOFF FORM ECOAT TCOAT SCOAT EB PRBA PRAB``   — ``_2D`` only
+    Card 4  ``GAB``                                          — ``_2D`` only
+
+    Card 2's presence is a #119 walk on a card-1 VALUE: the manual makes it
+    "required if and only if E > 0". Reading it unconditionally on an ordinary
+    belt (E blank — the overwhelmingly common case) takes the NEXT material's
+    MID as this one's cross-sectional area, and ``A`` is exactly the number the
+    /PROP/TYPE23 area comes from, so the belt would be sized by an id.
+
+    The LS-DYNA card-2/3 DEFAULTS are applied here rather than left at zero,
+    because each is real physics a blank cell STATES rather than omits:
+    ``J = 2I``, ``AS = A``, ``F = M = 1e20`` (no limit), ``R = 0.05``,
+    ``EB = -0.1`` (10 % of the curve-derived modulus, negative meaning a
+    RATIO), ``PRBA = 0.3``, ``PRAB = PRBA``. dyna2rad copies the raw cells
+    instead — ``CopyValue`` is a plain get/set with no defaulting at all
+    (``convertutilsbase.cxx:101-137``) — so a blank ``F`` reaches LAW114 as
+    ``FMAX = 0``, a belt clamped to ZERO compression force on a deck that
+    explicitly asked for the bending model.
+    """
+    kw = block.keyword
+    is_2d = kw.endswith("_2D")
+    raw = block.raw
+    idx = _title_offset(block)
+    f1 = _card(raw, idx, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 else 0
+    if mid <= 0:
+        state.warn(f"*{kw}: empty or unreadable card 1 - material skipped.")
+        return
+    m = MatSeatbelt(
+        mid=mid,
+        mpul=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        llcid=to_int(f1[2]) if len(f1) > 2 else 0,
+        ulcid=to_int(f1[3]) if len(f1) > 3 else 0,
+        lmin=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        cse=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        damp=_ffield(f1, 6, 0.1),
+        e=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        is_2d=is_2d)
+    idx += 1
+    if m.e > 0.0:
+        f2 = _card(raw, idx, fixed=True, n=7, w=10)
+        m.has_card2 = True
+        m.a = to_float(f2[0]) if f2 else 0.0
+        m.i = to_float(f2[1]) if len(f2) > 1 else 0.0
+        m.j = _ffield(f2, 2, 2.0 * m.i)
+        m.as_ = _ffield(f2, 3, m.a)
+        m.f = _ffield(f2, 4, 1.0e20)
+        m.m = _ffield(f2, 5, 1.0e20)
+        m.r = _ffield(f2, 6, 0.05)
+        idx += 1
+    if is_2d and idx < len(raw):
+        if raw[idx].strip():
+            f3 = _card(raw, idx, fixed=True, n=8, w=10)
+            m.has_card3 = True
+            m.p1doff = to_float(f3[0]) if f3 else 0.0
+            m.form = to_int(f3[1]) if len(f3) > 1 else 0
+            m.ecoat = to_float(f3[2]) if len(f3) > 2 else 0.0
+            m.tcoat = to_float(f3[3]) if len(f3) > 3 else 0.0
+            m.scoat = to_float(f3[4]) if len(f3) > 4 else 0.0
+            m.eb = _ffield(f3, 5, -0.1)
+            m.prba = _ffield(f3, 6, 0.3)
+            m.prab = _ffield(f3, 7, m.prba)
+        # A BLANK card 3 is still a CARD: the manual makes it required for the
+        # _2D option ("2D Card. Additional 1st card for the 2D keyword
+        # option"), so every cell on it is asking for its default and the
+        # OPTIONAL card 4 sits after it. Not advancing past a blank one read
+        # the GAB card as card 3 — P1DOFF = GAB — and lost the shear modulus
+        # in silence, under a warning that said GAB was never stated.
+        idx += 1
+        if idx < len(raw) and raw[idx].strip():
+            f4 = _card(raw, idx, fixed=True, n=1, w=10)
+            m.has_card4 = True
+            m.gab = to_float(f4[0]) if f4 else 0.0
+    state.mat_seatbelt[mid] = m
+
+
+def handle_database_sbtout(block: Block, state: ConversionState) -> None:
+    """*DATABASE_SBTOUT → /TH/SLIPRING + /TH/RETRACTOR.
+
+    "Seat belts" — LS-DYNA ASCII database 52 (Vol I R16 p.16-7). ONE file
+    there; TWO group types in Radioss, because the ring and the reel are
+    separate entity families with separate channel sets
+    (``hm_read_thgrou.F:1258`` ``VARSLIP = RINGSLIP FN F1 F2 THETA GAMMA``,
+    ``:1261`` ``VARRET = SLIP FN LOCK``), so both are emitted.
+
+    This is k2rad exceeding the reference converter outright: dyna2rad handles
+    *DATABASE_SBTOUT only as a member of the generic ``dbCardList``
+    (``convertcards.cxx:94``), where its ONLY effect is contributing its DT to
+    the global /TFILE minimum — and ``grep -rn "TH/RETRACTOR"`` over its whole
+    ``reader/source`` tree returns zero hits, so a retractor's force, pull-out
+    and lock state are simply unavailable after a dyna2rad conversion.
+    """
+    state.db_sbtout_seen = True
+    state.db_sbtout_dt = _handle_db_dt(block, state, "*DATABASE_SBTOUT")
+
+
+#: Every ``*ELEMENT_SEATBELT`` spelling this batch reads, as
+#: ``suffix -> handler``. ONE source: ``HANDLERS`` and
+#: ``assembly._OFFSET_SPECS`` are both generated from it (#116), so a spelling
+#: cannot be dispatchable and un-offsettable, or the other way round.
+#:
+#: A DISJOINT-SUFFIX family, not an option stack: ``_SLIPRING`` and
+#: ``_RETRACTOR`` are different KEYWORDS with different card stacks, so this
+#: mirrors ``_AIRBAG_MODELS`` (one handler per member, exact keys) rather than
+#: ``_AIRBAG_OPTION_STACKS`` (the cartesian product of option slots over one
+#: card stack). Nothing here may be reached by a prefix walk either: a bare
+#: ``startswith("ELEMENT_SEATBELT")`` would route ``_SLIPRING`` into the belt
+#: element reader and turn a friction coefficient into a node id.
+#:
+#: ``_ID`` / ``_TITLE`` need no key — ``parser._split_keyword`` strips a
+#: trailing one into ``block.options`` before ``dispatch`` sees the keyword.
+_SEATBELT_SUBKEYWORDS = {
+    "": handle_element_seatbelt,
+    "_ACCELEROMETER": handle_element_seatbelt_accelerometer,
+    "_SLIPRING": handle_element_seatbelt_slipring,
+    "_RETRACTOR": handle_element_seatbelt_retractor,
+    "_PRETENSIONER": handle_element_seatbelt_pretensioner,
+    "_SENSOR": handle_element_seatbelt_sensor,
+}
+
+#: Every ``*MAT_`` spelling of the seatbelt material. ``*MAT_B01`` is the
+#: numbered alias of ``*MAT_SEATBELT`` and ``_2D`` is a distinct material, NOT
+#: an option of the base one — dyna2rad maps all four to its internal law 801
+#: (``dynamatlawkeywordmap.h:306-307,371-372``) but routes them through
+#: different property converters. Registered EXACTLY, never by prefix, so
+#: ``*MAT_SEATBELT_2D`` can never be swallowed by a walk from
+#: ``MAT_SEATBELT``.
+_SEATBELT_MAT_KEYWORDS = ("MAT_SEATBELT", "MAT_SEATBELT_2D",
+                          "MAT_B01", "MAT_B01_2D")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -13547,6 +14128,26 @@ del _kw, _o1, _o2, _sfx, _stack, _combo
 for _kw in _DEFINE_CPM_UNSUPPORTED:
     HANDLERS[_kw] = handle_define_cpm_unsupported
 del _kw
+
+# ── Seatbelts / restraints ───────────────────────────────────────────────────
+#
+# Generated from the SAME dicts assembly._OFFSET_SPECS is generated from (#116),
+# so a spelling cannot be readable by the handler and invisible to the
+# *INCLUDE_TRANSFORM offsetter. Registered EXACTLY, with no prefix row in
+# _PREFIX_HANDLERS: a bare startswith("ELEMENT_SEATBELT") would route
+# *ELEMENT_SEATBELT_SLIPRING into the belt-element reader, whose field 3 is a
+# node and whose field 3 there is a friction coefficient.
+#
+# A skipped seatbelt keyword is the worst of the three loss channels: it is not
+# a missing output card, it is a missing RESTRAINT — the occupant is unbelted
+# and the run terminates normally, looking healthy.
+for _sfx, _h in _SEATBELT_SUBKEYWORDS.items():
+    HANDLERS["ELEMENT_SEATBELT" + _sfx] = _h
+for _kw in _SEATBELT_MAT_KEYWORDS:
+    HANDLERS[_kw] = handle_mat_seatbelt
+HANDLERS["SECTION_SEATBELT"] = handle_section_seatbelt
+HANDLERS["DATABASE_SBTOUT"] = handle_database_sbtout
+del _sfx, _h, _kw
 
 # *AIRBAG_REFERENCE_GEOMETRY{_BIRTH}{_RDT}{_ID} and
 # *AIRBAG_SHELL_REFERENCE_GEOMETRY{_RDT}{_ID}. "The order of the options in

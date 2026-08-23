@@ -146,7 +146,11 @@ def _make_ams(state: ConversionState) -> List[str]:
 #: (hm_read_thgrki_rbody.F:123-125), so a 0 is never written into one.
 #: MONV joins them from ``radioss2021/OUTPUTBLOCK/th_monv.cfg``, whose id card
 #: is the same ``FREE_CELL_LIST(idsmax,"%10d",ids,100)`` declaration.
-_TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART", "MONV"})
+#: SLIPRING, RETRACTOR and ACCEL join them with the seatbelt batch, from the
+#: same ``FREE_CELL_LIST(idsmax,"%10d",ids,100)`` declaration in
+#: ``th_slipring.cfg`` / ``th_retractor.cfg`` / ``th_accel.cfg``.
+_TH_CELL_LIST_TYPES = frozenset({"RBODY", "PART", "MONV",
+                                 "SLIPRING", "RETRACTOR", "ACCEL"})
 
 #: /TH types whose id card HAS a skew_ID column in columns 11-20.
 _TH_SKEW_COLUMN_TYPES = frozenset({"NODE", "SHEL", "SH3N"})
@@ -220,6 +224,9 @@ _TH_HISTORY_RAD = {
     "SPH": "SPHCEL", "SPH_SET": "SPHCEL",
     "BEAM": "BEAM", "BEAM_SET": "BEAM",
     "DISCRETE": "SPRING", "DISCRETE_SET": "SPRING",
+    # SEATBELT is split PER ELEMENT into /TH/SPRING (1D belt) and
+    # /TH/SHEL + /TH/SH3N (2D belt) — see _th_seatbelt_split.
+    "SEATBELT": "SPRING",
 }
 
 #: /TH type → the variables a *DATABASE_HISTORY_* group requests for it,
@@ -445,7 +452,8 @@ def _make_starter_th(state: ConversionState) -> List[str]:
       ``SPH`` / ``SPH_SET``       → /TH/SPHCEL
       ``BEAM`` / ``BEAM_SET``     → /TH/BEAM + /TH/SPRING, split per element
       ``DISCRETE`` (+``_SET``)    → /TH/SPRING
-      ``SEATBELT``                → nothing (see handle_database_history_seatbelt)
+      ``SEATBELT``                → /TH/SPRING + /TH/SHEL + /TH/SH3N, split
+                                    PER ELEMENT
 
     A *DATABASE_HISTORY_SHELL request has to be split by element topology:
     since d1ade12 a 3-corner shell is emitted as /SH3N, and /TH/SHEL resolves
@@ -465,6 +473,7 @@ def _make_starter_th(state: ConversionState) -> List[str]:
       SPH      ``state.sph_cell_ids``
       BEAM     ``state.beam_elem_ids`` ∪ ``state.spring_elem_ids``
       DISCRETE ``state.spring_elem_ids``
+      SEATBELT ``state.spring_elem_ids`` ∪ ``shell_elem_ids`` ∪ ``sh3n_elem_ids``
       SHELL    ``state.shell_elem_ids`` ∪ ``state.sh3n_elem_ids``
       SOLID    ``state.solid_elem_ids``
       TSHELL   ``state.solid_elem_ids`` (a thick shell IS a /BRICK)
@@ -514,8 +523,9 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     local_frames: Dict[tuple, int] = {}
 
     def _emit_block(rad_type: str, ids: List[int], n: int,
-                    skews=None, names=None) -> List[str]:
-        th_vars = _TH_HISTORY_VARS.get(rad_type, ("DEF",))
+                    skews=None, names=None, th_vars=None) -> List[str]:
+        if th_vars is None:
+            th_vars = _TH_HISTORY_VARS.get(rad_type, ("DEF",))
         block = [
             f"/TH/{rad_type}/{n}",
             f"TH_{rad_type}_{n}",
@@ -527,9 +537,6 @@ def _make_starter_th(state: ConversionState) -> List[str]:
 
     for dbh in state.db_histories:
         kw = _th_history_kw(dbh)
-        if dbh.db_type == "SEATBELT":
-            _warn_seatbelt_history(state, dbh)
-            continue
         rad_type = _TH_HISTORY_RAD.get(dbh.db_type, dbh.db_type)
         ids, cids, refs, names = _th_history_entities(state, dbh)
         ids, cids, refs, names = _th_dedup(ids, cids, refs, names)
@@ -569,6 +576,12 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 state, kw, "an emitted /SPRING",
                 "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
                 state.spring_elem_ids, ids, cids, refs, names)
+        elif dbh.db_type == "SEATBELT":
+            ids, cids, refs, names = _th_screen(
+                state, kw, "an emitted belt /SPRING, /SHELL or /SH3N",
+                "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
+                state.spring_elem_ids | state.shell_elem_ids
+                | state.sh3n_elem_ids, ids, cids, refs, names)
         elif dbh.db_type in ("SHELL", "SHELL_SET"):
             ids, cids, refs, names = _th_screen(
                 state, kw, "an emitted /SHELL or /SH3N",
@@ -595,6 +608,31 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 lines += _emit_block(
                     sub, sub_ids, counter, None,
                     [name_of[v] for v in sub_ids] if name_of else None)
+                counter += 1
+            continue
+        if dbh.db_type == "SEATBELT":
+            name_of = ({v: names[k] for k, v in enumerate(ids)}
+                       if len(names) >= len(ids) else {})
+            for sub, sub_ids in _th_seatbelt_split(state, ids):
+                if not sub_ids:
+                    continue
+                lines += _emit_block(
+                    sub, sub_ids, counter, None,
+                    [name_of[v] for v in sub_ids] if name_of else None,
+                    # DEF ALONE on the 2D-belt groups, unlike an ordinary
+                    # *DATABASE_HISTORY_SHELL request. A /MAT/LAW119 shell does
+                    # not stay a shell: starter0.F:782-803 hands it to
+                    # hm_convert_2d_elements_seatbelt.F, which rewrites the
+                    # part into 1D /SPRINGs AND rewrites every /TH/SHEL that
+                    # named those shells into a /TH/SPRING (:135-141,
+                    # GlobalModelSdi.cpp:2489-2554). STRAIN is a /TH/SHEL
+                    # variable and not a /TH/SPRING one, so it would survive
+                    # into a group that cannot serve it — ERROR 260 TH VARIABLE
+                    # STRAIN IS NOT AVAILABLE. dyna2rad pushes nothing onto the
+                    # SEATBELT branch either (converttimehistory.cxx:238 —
+                    # outVars stays {"DEF"}; the STRAIN push at :298 belongs to
+                    # the SHELL entityType).
+                    th_vars=("DEF",))
                 counter += 1
             continue
         if dbh.db_type in ("BEAM", "BEAM_SET"):
@@ -626,20 +664,32 @@ def _make_starter_th(state: ConversionState) -> List[str]:
     return lines
 
 
-def _warn_seatbelt_history(state: ConversionState, dbh) -> None:
-    """*DATABASE_HISTORY_SEATBELT: recognized, deliberately not emitted."""
-    state.note_recognized_not_emitted(
-        "DATABASE_HISTORY_SEATBELT",
-        f"the {len(dbh.ids)} element(s) it names get NO /TH channel: k2rad "
-        "converts neither *ELEMENT_SEATBELT nor *SECTION_SEATBELT, so there is "
-        "no /SPRING (1D belt) and no /SHELL (2D belt) in the output deck "
-        "carrying those ids. dyna2rad probes the FIRST listed element's PID -> "
-        "SECID and routes the WHOLE list to /TH/SPRING or /TH/SHEL on that one "
-        "answer (converttimehistory.cxx:303-341); doing the same here would "
-        "name elements the deck never defines, which is starter ERROR 69 and a "
-        "run that refuses to start — worse than the lost channel. The 2D-belt "
-        "route becomes correct as soon as *ELEMENT_SEATBELT is converted (the "
-        "seatbelt / retractor / slipring batch).")
+def _th_seatbelt_split(state: ConversionState, ids: List[int]):
+    """Split a *DATABASE_HISTORY_SEATBELT id list PER ELEMENT.
+
+    A belt element is a ``/SPRING`` when its part carries a
+    ``*SECTION_SEATBELT`` (1D) and a ``/SHELL`` or ``/SH3N`` when it carries a
+    ``*SECTION_SHELL`` (2D), so one card can produce three groups — the same
+    shape ``_th_beam_split`` has, and for the same reason.
+
+    dyna2rad decides this from the FIRST LISTED ELEMENT ONLY: it looks up
+    ``elemidList[0]``, walks that element's PID → SECID, and routes the WHOLE
+    list to ``/TH/SPRING`` or ``/TH/SHEL`` on that one answer
+    (``converttimehistory.cxx:312-340``). A card that mixes a 1D shoulder belt
+    with a 2D lap belt therefore sends every id to one keyword, and the ids of
+    the other kind become ERROR 69 — or, worse, resolve to an unrelated element
+    that happens to share the number. It also indexes ``elemidList[0]`` with no
+    empty check.
+
+    Reading the WRITER's own registries instead of the element's section is
+    what makes the split exact: after the screen above, every surviving id is
+    in exactly one of the three sets, because those sets are filled at the
+    lines that write the rows.
+    """
+    springs = [v for v in ids if v in state.spring_elem_ids]
+    quads = [v for v in ids if v in state.shell_elem_ids]
+    tris = [v for v in ids if v in state.sh3n_elem_ids]
+    return (("SPRING", springs), ("SHEL", quads), ("SH3N", tris))
 
 
 def _warn_sph_th_loss(state: ConversionState, dbh, wanted: int, kept: int
@@ -2420,3 +2470,160 @@ def _make_engine_parith(state: ConversionState) -> List[str]:
             "accumulation, and /PARITH has no sub-option for either. dyna2rad "
             "drops all three silently.")
     return [f"/PARITH/{'ON' if const_on else 'OFF'}", "#"]
+
+
+# ── Seatbelts: *DATABASE_SBTOUT -> /TH/SLIPRING + /TH/RETRACTOR ──────────────
+
+#: /TH/SLIPRING and /TH/RETRACTOR channel names, from the READER's own tables
+#: rather than from the cfg GUI lists, which are wrong for both cards:
+#: ``th_slipring.cfg`` and ``th_retractor.cfg`` advertise a ``FORCE`` variable
+#: that ``hm_read_thgrou.F`` does not know at all.
+#:
+#:   ``:1258  DATA VARSLIP/'RINGSLIP','FN','F1','F2','THETA','GAMMA'/``
+#:   ``:1261  DATA VARRET /'SLIP','FN','LOCK'/``
+#:
+#: ``DEF`` expands to the whole row in both cases, so ``DEF`` is what is
+#: written — naming the six (resp. three) individually would only risk
+#: ``ERROR 260 TH VARIABLE <x> IS NOT AVAILABLE`` for no gain.
+#:
+#: Worth knowing when the T01 is read: ``RINGSLIP`` and ``SLIP`` are RUNNING
+#: TOTALS — ``material_flow.F:284`` accumulates ``%RINGSLIP = %RINGSLIP -
+#: DELTA_LO`` — so they are lengths already, not rates, and unlike the
+#: /TH/INTER "force" channels they need no differentiation. ``THETA`` and
+#: ``GAMMA`` are RADIANS. ``LOCK`` is 1.0 locked / 0.0 unlocked.
+_TH_SEATBELT_VARS = ("DEF",)
+
+
+def _make_starter_th_seatbelt(state: ConversionState) -> List[str]:
+    """*DATABASE_SBTOUT -> /TH/SLIPRING + /TH/RETRACTOR.
+
+    LS-DYNA writes ONE ``sbtout`` file for the whole restraint system; Radioss
+    splits the same data across two group types, because the ring and the reel
+    are separate entity families with separate channel sets. Both are emitted,
+    with DIFFERENT group ids — sharing one is ``ERROR 79 DUPLICATE ID / IN TH
+    GROUP DEFINITION``.
+
+    This whole function is k2rad exceeding the reference converter. dyna2rad
+    creates ``/TH/SLIPRING`` UNCONDITIONALLY from the model rather than from
+    any ``*DATABASE_`` card (``convertelements.cxx:667-722``), over
+    ``/SLIPRING/SPRING`` only (so a shell slipring never appears in it) and
+    with the variable list hard-coded to ``{"DEF"}``; and it never emits
+    ``/TH/RETRACTOR`` at all — ``grep -rn "TH/RETRACTOR"`` over its whole tree
+    returns zero hits, so a retractor's force, pull-out and lock state are
+    simply unavailable after a dyna2rad conversion. Its
+    ``*DATABASE_SBTOUT`` handling is a bare ``dbCardList`` membership whose only
+    effect is the /TFILE interval (``convertcards.cxx:94``).
+
+    Gated on the CARD, not on the model, for the #122 reason every group in
+    this file is: a /TH group is an OUTPUT REQUEST, and emitting one the deck
+    did not ask for thickens the T01 with channels nobody reads. Screened
+    against ``state.slipring_ids`` / ``state.retractor_ids``, which the writer
+    fills AT the line that writes each card, for the #106 reason: several
+    device cards are dropped (a shell slipring, a retractor whose mouth element
+    did not convert), and a /TH naming one of those is a starter error that
+    refuses the whole run.
+    """
+    if not state.db_sbtout_dt:
+        if state.db_sbtout_seen:
+            _warn_db_card_without_dt(
+                state, "*DATABASE_SBTOUT",
+                "/TH/SLIPRING and /TH/RETRACTOR over the converted seatbelt "
+                "devices")
+        return []
+    have = bool(state.slipring_ids or state.retractor_ids)
+    if not have:
+        asked = (len(state.seatbelt_sliprings)
+                 + len(state.seatbelt_retractors))
+        if asked:
+            state.warn(
+                "*DATABASE_SBTOUT requested and this deck DOES have "
+                f"{asked} slipring/retractor card(s), but none of them "
+                "converted to a /SLIPRING or /RETRACTOR — see the warnings "
+                "above for why each was dropped. NO /TH group is emitted: one "
+                "with no entity is not refused by the starter, it is accepted "
+                "and written to the T01 holding zero entities, so it would "
+                "only look like data.")
+        else:
+            state.note_recognized_not_emitted(
+                "DATABASE_SBTOUT",
+                "seat-belt output over the sliprings and retractors — this "
+                "deck defines none, so there is nothing to record and no "
+                "/TH/SLIPRING or /TH/RETRACTOR is emitted (LS-DYNA's sbtout "
+                "file would be empty too). The belt ELEMENT forces are a "
+                "different request: they come from *DATABASE_HISTORY_SEATBELT, "
+                "which builds /TH/SPRING groups. The dt is honoured as one "
+                "term of the /TFILE minimum only when a device really "
+                "converts.")
+        return []
+    lines: List[str] = [
+        "#-  SEATBELT OUTPUT (*DATABASE_SBTOUT -> slipring + retractor "
+        f"channels, dt={state.db_sbtout_dt:g}):", HDR]
+    for kw, entries in (("SLIPRING", state.slipring_ids),
+                        ("RETRACTOR", state.retractor_ids)):
+        if not entries:
+            continue
+        ids = [i for i, _t in sorted(entries)]
+        # state.next_id(), not a local 1..N counter: the /TH group id namespace
+        # is GLOBAL ACROSS TYPES (assembly._warn_duplicate_th_group_ids, and
+        # starter ERROR 79 IN TH GROUP DEFINITION), so a /TH/SLIPRING/1 beside
+        # the /TH/SHEL/1 that _make_starter_th's own counter writes would
+        # refuse the deck. Every group in this file below _make_starter_th
+        # draws from the auto-id stream for exactly that reason.
+        th_id = state.next_id()
+        lines += [
+            f"/TH/{kw}/{th_id}",
+            f"TH_{kw}_SBTOUT",
+            _th_var_header(_TH_SEATBELT_VARS),
+        ]
+        lines += _th_var_lines(_TH_SEATBELT_VARS)
+        lines += _th_id_lines(kw, ids)
+        lines.append(HDR)
+    state.warn(
+        "*DATABASE_SBTOUT -> "
+        + " + ".join(
+            f"/TH/{kw} over {len(e)} {kw.lower()}(s)"
+            for kw, e in (("SLIPRING", state.slipring_ids),
+                          ("RETRACTOR", state.retractor_ids)) if e)
+        + ". DEF gives RINGSLIP FN F1 F2 THETA GAMMA on a slipring and SLIP FN "
+        "LOCK on a retractor (hm_read_thgrou.F:1258,1261 — the cfg's "
+        "advertised FORCE variable does not exist). RINGSLIP and SLIP are "
+        "RUNNING TOTALS of belt length through the device, already lengths, so "
+        "unlike the /TH/INTER force channels they need no differentiation; "
+        "THETA and GAMMA are RADIANS; LOCK is 1.0 locked / 0.0 unlocked. "
+        "dyna2rad emits no /TH/RETRACTOR at all.")
+    return lines
+
+
+def _make_starter_th_accel(state: ConversionState) -> List[str]:
+    """*ELEMENT_SEATBELT_ACCELEROMETER -> /TH/ACCEL.
+
+    An /ACCEL on its own writes NOTHING: it defines a measurement point, and
+    the T01 carries it only through a /TH/ACCEL group. So the group is emitted
+    whenever an accelerometer converted — a presence trigger on the
+    ACCELEROMETER, not on a ``*DATABASE_`` card, which is the one place in this
+    file where that is right. The keyword IS the output request: an
+    ``*ELEMENT_SEATBELT_ACCELEROMETER`` exists for no other purpose than to
+    record, and LS-DYNA reports it through ``nodout``, whose ``*DATABASE_``
+    card is about the whole node set rather than about this instrument.
+    dyna2rad builds the same group the same way (``convertelements.cxx:
+    402-457``, ``var = {"DEF"}``).
+
+    ``state.th_accel_ids`` is a SUBSET of ``state.accel_ids``: the /ACCEL a
+    SBSTYP=1 ``*ELEMENT_SEATBELT_SENSOR`` needs exists only to satisfy
+    ``sensor_acce.cfg``'s mandatory ``accel_ID``, and recording it would add a
+    channel the deck never asked for. dyna2rad excludes those too, but by
+    accident of ordering — ``p_CreateThAccel`` runs at ``:39``, BEFORE
+    ``ConvertSeatbeltSensor`` at ``:41``, so they do not exist yet.
+    """
+    if not state.th_accel_ids:
+        return []
+    ids = [i for i, _t in sorted(state.th_accel_ids)]
+    th_id = state.next_id()
+    lines = ["#-  ACCELEROMETER OUTPUT (*ELEMENT_SEATBELT_ACCELEROMETER):",
+             HDR,
+             f"/TH/ACCEL/{th_id}", "TH_ACCEL",
+             _th_var_header(("DEF",))]
+    lines += _th_var_lines(("DEF",))
+    lines += _th_id_lines("ACCEL", ids)
+    lines.append(HDR)
+    return lines

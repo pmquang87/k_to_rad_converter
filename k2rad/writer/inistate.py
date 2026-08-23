@@ -379,7 +379,9 @@ def _warn_airbag_ref_options(state: ConversionState) -> None:
         mat = state.mat_fabric[mid]
         if mat.sensor_id:
             continue                       # its own RGBRTH already won
-        mat.sensor_id = state.next_id()
+        # next_sensor_id, not next_id — see writer/fabric.py's RGBRTH twin: the
+        # /SENSOR namespace now carries USER ids (*ELEMENT_SEATBELT_SENSOR).
+        mat.sensor_id = state.next_sensor_id()
         mat.sensor_tdelay = birth
         armed.append(mid)
     if armed:

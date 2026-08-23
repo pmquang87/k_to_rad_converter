@@ -896,6 +896,12 @@ def _warn_no_pacing_element(state: ConversionState,
         return
     if any(e.pid not in rigid_pids for e in state.discrete_elems):
         return
+    # A 1D seatbelt is a /SPRING with stiffness and mass, so it has a time step
+    # of its own (r2len3.F:182) and paces the run exactly as a discrete spring
+    # does. Without this arm a belt-only restraint model gets a flat "every
+    # element in this deck belongs to a rigid part", which is false.
+    if any(e.pid not in rigid_pids for e in state.seatbelt_elems):
+        return
     state.warn(
         "JOINTS: every element in this deck belongs to a rigid part, so the "
         "OpenRadioss ENGINE has nothing to compute a time step from — rigid "
