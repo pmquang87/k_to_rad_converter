@@ -3745,6 +3745,17 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 126                                 # *MAT_111 → LAW126
     if mid in state.mat_elastic_fluid:
         return 6                                   # *MAT_001_FLUID → HYD_VISC
+    # Rare materials batch. LAW71 is NOT on the solid-/XREF whitelist, so this
+    # entry makes that gate warn-skip a *MAT_030 solid part NAMING the law
+    # instead of misreporting it as having no /MAT; it is also what routes the
+    # part through _warn_beam_type3_material's TYPE18-only arm and through the
+    # SPH ERROR-3046 report (LAW71 declares HOOK / SHELL_ISOTROPIC /
+    # SOLID_ISOTROPIC / BEAM_INTEGRATED and nothing else — hm_read_mat71.F:
+    # 247-251). *MAT_156 and *MAT_S15 deliberately have NO entry: both live
+    # entirely inside a /PROP/TYPE46 and emit no /MAT, so `None` (= the
+    # *MAT_Sxx spring answer) is the correct one for them.
+    if mid in state.mat_shape_memory:
+        return 71                                  # *MAT_030 → LAW71 (SMA)
     if mid in state.mat_high_explosive:
         return 5                                   # +/EOS/JWL
     if mid in state.mat_orthotropic:

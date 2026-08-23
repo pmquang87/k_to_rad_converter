@@ -5786,6 +5786,52 @@ class SeatbeltAccelerometer:
     mass: float = 0.0
 
 
+# ── Rare materials batch ─────────────────────────────────────────────────────
+
+@dataclass
+class MatShapeMemory:
+    """*MAT_SHAPE_MEMORY (*MAT_030) → /MAT/LAW71 (superelastic shape-memory
+    alloy, Auricchio model on both sides).
+
+    LS-DYNA cards (Vol II R17 pp.2-303..2-309; the shipped
+    Keyword971_R7.1/MAT/mat_030.cfg states the same two cards plus the R7.1
+    ``FREE_CARD(optionalCards, "%10d%10d", LSD_LCID2, LSD_LCID3)``):
+      Card1: MID RO E PR [LCSS LCSSC IDPP]
+      Card2: SIG_ASS SIG_ASF SIG_SAS SIG_SAF EPSL ALPHA YMRT
+      Card3 (optional, R7.1+): LCID_AS LCID_SA
+
+    The four SIG_* cells are ``SCALAR_OR_OBJECT``: *"LT.0.0: -SIG_xxx is a load
+    curve ID"* (temperature, or effective plastic strain when LCSS is also
+    negative). /MAT/LAW71 has one scalar slot each, so a negative cell cannot be
+    carried — see the handler.
+
+    The Radioss card is ``RHO_I / E Nu E_mart / sig_sas sig_fas sig_ssa sig_fsa
+    alpha / EpsL CAS CSA TSAS TFAS / TSSA TFSA CP TINI``
+    (hm_cfg_files/config/CFG/radioss140/MAT/matl71_71.cfg). The eight
+    temperature terms stay BLANK: LS-DYNA MAT_030 has no counterpart for any of
+    them, and a non-zero CAS/CSA together with the reader's TSAS..TFSA → 298 K /
+    TINI → 360 K defaults (hm_read_mat71.F:168-175) silently shifts every
+    transformation threshold (measured: sig_sas 400 → onset ≈ 478 MPa).
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float
+    nu: float
+    sig_ass: float          # austenite→martensite START stress   → sig_sas
+    sig_asf: float          # austenite→martensite FINISH stress  → sig_fas
+    sig_sas: float          # martensite→austenite START stress   → sig_ssa
+    sig_saf: float          # martensite→austenite FINISH stress  → sig_fsa
+    epsl: float             # recoverable (maximum residual) strain → EpsL
+    alpha: float            # LS-DYNA tension/compression asymmetry ratio
+    ymrt: float             # martensite Young's modulus → E_mart
+    lcss: int = 0           # dropped (no LAW71 slot)
+    lcssc: int = 0          # dropped
+    idpp: int = 0           # dropped (LAW71 has no plasticity at all)
+    lcid_as: int = 0        # dropped (card 3, R7.1 FREE_CARD)
+    lcid_sa: int = 0        # dropped
+
+
 # ── User conversion options (CLI flags) ──────────────────────────────────────
 
 @dataclass
@@ -6335,6 +6381,10 @@ class ConversionState:
     mat_unsupported_dbeam: Dict[int, Tuple[str, float]] = field(default_factory=dict)
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
+
+    # ── Rare materials batch ───────────────────────────────────
+    #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
+    mat_shape_memory: Dict[int, MatShapeMemory] = field(default_factory=dict)
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
@@ -7045,7 +7095,11 @@ class ConversionState:
                   self.mat_fabric,
                   # *MAT_SEATBELT / *MAT_B01 (+_2D) → /MAT/LAW114 or LAW119,
                   # both under the MID verbatim.
-                  self.mat_seatbelt):
+                  self.mat_seatbelt,
+                  # *MAT_030 → /MAT/LAW71, MID verbatim. (*MAT_156 and
+                  # *MAT_S15 are deliberately NOT here: both live entirely
+                  # inside a /PROP/TYPE46 and emit no /MAT at all.)
+                  self.mat_shape_memory):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

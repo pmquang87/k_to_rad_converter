@@ -660,6 +660,34 @@ the starter reads); `K/MU/LCSR` and the Mullins `R/M` card are
 named-dropped. The `LCID>0` curve-fit branch has NO LAW62 counterpart
 (LAW62 has no `Itab`/fit path at all) and warn-skips at parse — dyna2rad
 emits nothing and silently wires the part's mat to 0.
+`*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71` (superelastic shape-memory
+alloy) — the same Auricchio model on both sides, so `RHO/E/PR`, the four
+transformation stresses (`SIG_ASS→sig_sas`, `SIG_ASF→sig_fas`,
+`SIG_SAS→sig_ssa`, `SIG_SAF→sig_fsa`), `EPSL→EpsL` and `YMRT→E_mart` are
+verbatim. `alpha = sqrt(2/3)·ALPHA`: the two codes normalise the
+tension/compression asymmetry differently, and the factor is **measured**, not
+inferred from the symbols — with `sig_sas = 400` and `alpha = 0.1` on the card
+the starter yields at 399.45 in tension and 513.97 in compression, i.e.
+`(σ_C−σ_T)/(σ_C+σ_T) = alpha/sqrt(2/3)`, which is exactly what LS-DYNA's ALPHA
+already is (corroborated by `hm_read_mat71.F:154-160` refusing
+`alpha > sqrt(2/3)`, i.e. `|ALPHA| > 1`, the physical bound of that ratio).
+A blank `YMRT` emits `E_mart = 0`, which is the reader's own single-modulus
+option and matches LS-DYNA's "defaults to the austenite modulus" — dyna2rad
+never reaches this slot at all (`CopyValue("YMTR","E_mart")`,
+`convertmats.cxx:1929`, misspells the cfg's `YMRT`, so every converted SMA runs
+single-modulus at 0 diagnostics). The eight temperature terms
+(`CAS/CSA/TSAS/TFAS/TSSA/TFSA/CP/TINI`) are left **blank** deliberately: LS-DYNA
+MAT_030 has no counterpart for any of them, and a non-zero `CAS` against the
+reader's 298 K / 360 K defaults shifts every threshold (measured: `sig_sas` 400
+→ onset 478 MPa). A **negative** transformation stress is a load-curve id in
+LS-DYNA and LAW71 has one scalar per threshold, so that form warn-skips the
+whole material by name — dyna2rad copies only the positive cells, which the
+starter then refuses with `ERROR 1122` + `ERROR 1123` anyway. `LCSS`, `LCSSC`,
+`IDPP` and the R7.1 optional card `LCID_AS`/`LCID_SA` are named-dropped, and the
+three hard starter guards (`ERROR 1122/1123/1124`) are pre-announced rather than
+silently repaired. LAW71 declares `HOOK / SHELL_ISOTROPIC / SOLID_ISOTROPIC /
+BEAM_INTEGRATED` only (`hm_read_mat71.F:247-251`), so a beam part draws the
+existing `/PROP/TYPE18`-only warning and an SPH part the `ERROR 3046` report.
 `*CONTACT_INTERIOR` → the Radioss counterpart is `Icontrol=1` (solid
 distortion control) on the listed parts' `/PROP` — an input column that
 exists only in the radioss2025 property format. Measured on `starter_win64`:

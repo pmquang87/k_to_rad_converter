@@ -11,6 +11,62 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`.**
+  A keyword that landed in `skipped_keywords` before, on a conversion whose only
+  other sign of trouble was one "part references a material no `/MAT` defines"
+  line — the superelastic alloy simply had no constitutive law and the deck did
+  not start.
+
+  1. **`alpha = sqrt(2/3)·ALPHA`, and the factor is MEASURED, not read off the
+     symbols.** `sigeps71.F:171/245/277` (`SQDT = SQRT(TWO/THREE)`,
+     `RSAS = YLD_ASS*(SQDT+ALPHA)`, `FS = SV + THREE*ALPHA*P`) is symbol-for-
+     symbol the criterion LS-DYNA states in Vol II R17 p.2-309, which reads as
+     "copy 1:1". The uniaxial onsets say otherwise: with `sig_sas = 400` and
+     `alpha = 0.1` written on the card, the starter yields at **399.45 MPa in
+     tension and 513.97 MPa in compression**, i.e.
+     `(σ_C−σ_T)/(σ_C+σ_T) = alpha/sqrt(2/3)` — exactly the asymmetry ratio
+     LS-DYNA's `ALPHA` already is. `hm_read_mat71.F:154-160` corroborates it by
+     refusing `alpha > sqrt(2/3)`, which is `|ALPHA| > 1`, the physical bound of
+     that ratio. dyna2rad's `SetExpressionValue("sqrt(2/3)*ALPHA","alpha")`
+     (`convertmats.cxx:1931`) is therefore right and is reproduced.
+
+  2. **`YMRT → E_mart` — a slot dyna2rad never writes.**
+     `CopyValue("YMTR","E_mart")` (`convertmats.cxx:1929`) misspells the cfg's
+     `YMRT` (`Keyword971_R7.1/MAT/mat_030.cfg:40`), the attribute lookup
+     silently resolves to nothing, and every converted SMA echoes
+     `MARTENSITE YOUNG'S MODULUS = 0.0` for a card stating 50000 — so
+     `hm_read_mat71.F:176` leaves `EFLAG = 0` and the martensite branch is never
+     taken. Measured post-transformation slope: 22750 with the field set
+     (`E_mart` 25000) against 46000 without it (`E` 50000).
+
+  3. **A negative transformation stress is a curve id, and emitting it is worse
+     than dropping it.** The four `SIG_*` cells are `SCALAR_OR_OBJECT`
+     (`meci_data_reader.cpp:6845-6848`): `LT.0.0` means `-SIG_xxx` is a load
+     curve of temperature or plastic strain. `/MAT/LAW71` has one scalar per
+     threshold and no function field anywhere on the card, so dyna2rad's
+     "copy only when `> 0`" leaves all four at zero,
+     `hm_read_mat71.F:163-166` substitutes `1e-20`, and the ordering checks at
+     `:139-153` refuse the deck with `ERROR 1122` + `ERROR 1123` **once per
+     material**. k2rad warn-skips the material by name instead, so the log says
+     which physics was lost rather than the starter saying the alloy is
+     backwards.
+
+  4. **The eight temperature terms stay blank on purpose.** They are not inert:
+     `TSAS/TFAS/TSSA/TFSA` blank → 298.0 K and `TINI` blank → 360.0 K
+     (`hm_read_mat71.F:168-175`), so a non-zero `CAS`/`CSA` shifts every
+     threshold by `CAS·(TINI−TSAS)/sqrt(2/3)` — measured, `sig_sas` 400 → onset
+     478 MPa at `CAS = CSA = 1`. LS-DYNA MAT_030 has no counterpart for any of
+     them, so writing anything there would be an invented load. `CP` blank →
+     1e20 pins the adiabatic self-heating term at `TINI` (`sigeps71.F:238`),
+     which is what makes the choice self-consistent.
+
+  5. The R7.1 optional card 3 (`LCID_AS`/`LCID_SA`, a `FREE_CARD`) is claimed by
+     **raw row index** on both the read and the `*INCLUDE_TRANSFORM` side — an
+     all-blank optional card is legal LS-DYNA and a content scan walks past it
+     into the next keyword (#109/#117/#119). Its two ids, `LCSS`, `LCSSC` and
+     `IDPP` are named-dropped; `LCID_AS` additionally says that the emitted
+     plateau is the card-1 constant LS-DYNA would have overwritten.
+
 - **The PRELOAD / initial-state batch:
   `*INITIAL_STRAIN_SHELL` (+ `_SET`) → `/INISHE/STRA_F/GLOB` and
   `/INISH3/STRA_F/GLOB`,

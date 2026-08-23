@@ -53,6 +53,7 @@ from ..state import (
     MatHighExplosiveBurn,
     EosJwl,
     EosCard,
+    MatShapeMemory,
 )
 from .common import (HDR, _elform_to_isolid, _f, _i, _part_node_sets,
                      _ref_flag_materials, _spotweld_beam_pids)
@@ -135,6 +136,9 @@ __all__ = [
     "_resolve_mat_plas_tab",
     "_resolve_mat_power_law",
     "_add_auto_curve",
+    # Rare materials batch
+    "_resolve_mat_shape_memory",
+    "_emit_mat_law71",
 ]
 
 
@@ -250,6 +254,11 @@ def _make_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law126(mat)
     for mat in state.mat_elastic_fluid.values():
         lines += _emit_mat_elastic_fluid(mat)
+    # Rare materials batch. *MAT_156 / *MAT_S15 have no loop here on purpose:
+    # both live entirely inside a /PROP/TYPE46 (writer/loads.py) and emit no
+    # /MAT at all, exactly like the *MAT_Sxx spring family.
+    for mat in state.mat_shape_memory.values():
+        lines += _emit_mat_law71(mat)
     # *MAT_SPOTWELD normally lives entirely in the /PROP/TYPE13 connector (no
     # /MAT emitted). A MAT_100 referenced by a part the connector path cannot
     # take (shell/solid spotwelds, or a part with no beams) still needs a /MAT
@@ -8423,3 +8432,151 @@ def _add_auto_curve(state: ConversionState, fid: int, title: str,
         sfa=1.0, sfo=1.0, offa=0.0, offo=0.0,
         pts=pts,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rare materials batch: *MAT_030 / *MAT_SHAPE_MEMORY → /MAT/LAW71
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: LS-DYNA ALPHA → Radioss ``alpha``. Both codes run the SAME Auricchio
+#: criterion, but they state the tension/compression asymmetry in different
+#: normalisations, and the factor between them is sqrt(2/3).
+#:
+#: LS-DYNA (Vol II R17 p.2-307 Remark 1, p.2-309 Remark 2):
+#:     ALPHA = sqrt(2/3)·(-sig_s[AS,-] - sig_s[AS,+]) /
+#:                       (-sig_s[AS,-] + sig_s[AS,+]),   |ALPHA| < 1
+#:     F = ||t|| + 3·ALPHA·p >= (ALPHA + sqrt(2/3))·sig_tr
+#: Radioss (engine/source/materials/mat/mat071/sigeps71.F):
+#:     :171  SQDT = SQRT(TWO/THREE)
+#:     :245  RSAS = YLD_ASS*(SQDT + ALPHA)
+#:     :277  FS   = SV + THREE*ALPHA*P
+#: Read as symbols the two look identical, which would say "copy 1:1". The
+#: MEASURED uniaxial onsets say otherwise, and they are the authority: with
+#: ``sig_sas = 400`` and ``alpha = 0.1`` ON THE CARD, tension started at 399.45
+#: and compression at 513.97 MPa, i.e.
+#:     (sig_C - sig_T)/(sig_C + sig_T) = alpha / sqrt(2/3)
+#: which is exactly the ratio LS-DYNA's ALPHA already IS. So the Radioss cell
+#: wants sqrt(2/3)·ALPHA. The range guard corroborates it: hm_read_mat71.F:
+#: 154-160 refuses ``alpha > sqrt(2/3)`` (ERROR 1124) — precisely |ALPHA| > 1,
+#: the physical bound of an asymmetry ratio. dyna2rad's
+#: ``SetExpressionValue("sqrt(2/3)*ALPHA", "alpha")`` (convertmats.cxx:1931)
+#: is therefore CORRECT and is reproduced here.
+_SMA_ALPHA_FACTOR = math.sqrt(2.0 / 3.0)
+
+
+def _resolve_mat_shape_memory(state: ConversionState) -> None:
+    """Every *MAT_030 → /MAT/LAW71 guard and warning, in one prepass.
+
+    The two ORDERING guards are hard starter errors, so they are reported with
+    the id the starter will raise (hm_read_mat71.F:139-153):
+      * ``sig_sas >= sig_fas``  → ERROR 1122
+      * ``sig_ssa <= sig_fsa``  → ERROR 1123
+    and the range guard at :154-160 → ERROR 1124 for ``alpha > sqrt(2/3)``.
+
+    They are NOT silently repaired: each one means the LS-DYNA card itself
+    states an impossible transformation sequence (forward loading must finish
+    above where it starts, reverse unloading below), and inventing a number to
+    make the starter accept it would hide the deck's real defect.
+    """
+    for mat in state.mat_shape_memory.values():
+        if mat.e <= 0.0:
+            state.warn(
+                f"*MAT_SHAPE_MEMORY mid={mat.mid} → /MAT/LAW71: E={mat.e:g} "
+                "is not positive. hm_read_mat71.F:113-114 reads E and Nu as "
+                "mandatory (there is no default), so the austenite branch has "
+                "no stiffness — check the card.")
+        if mat.sig_ass >= mat.sig_asf:
+            state.warn(
+                f"*MAT_SHAPE_MEMORY mid={mat.mid}: SIG_ASS={mat.sig_ass:g} is "
+                f"not below SIG_ASF={mat.sig_asf:g}. The forward "
+                "(austenite→martensite) transformation must FINISH above where "
+                "it starts; hm_read_mat71.F:140-146 refuses the card with "
+                "ERROR 1122 ('sigma_SAS should be lower than sigma_FAS') and "
+                "the starter stops. Both values are written through verbatim — "
+                "fix them in the .k file.")
+        if mat.sig_sas <= mat.sig_saf:
+            state.warn(
+                f"*MAT_SHAPE_MEMORY mid={mat.mid}: SIG_SAS={mat.sig_sas:g} is "
+                f"not above SIG_SAF={mat.sig_saf:g}. The reverse "
+                "(martensite→austenite) transformation must FINISH below where "
+                "it starts; hm_read_mat71.F:147-153 refuses the card with "
+                "ERROR 1123 and the starter stops. Both values are written "
+                "through verbatim — fix them in the .k file.")
+        if abs(mat.alpha) > 1.0:
+            state.warn(
+                f"*MAT_SHAPE_MEMORY mid={mat.mid}: ALPHA={mat.alpha:g} is "
+                "outside the physical range of a tension/compression asymmetry "
+                "ratio (|ALPHA| < 1 in LS-DYNA's normalisation, Vol II R17 "
+                "p.2-307). The emitted /MAT/LAW71 alpha is sqrt(2/3)*ALPHA = "
+                f"{_SMA_ALPHA_FACTOR * mat.alpha:.6g}, which "
+                "hm_read_mat71.F:154-160 refuses with ERROR 1124 ('Parameter "
+                "ALPHA is too high') as soon as it exceeds "
+                "sqrt(2/3) = 0.8164966.")
+        if 0.0 < mat.e < mat.ymrt:
+            state.warn(
+                f"*MAT_SHAPE_MEMORY mid={mat.mid}: YMRT={mat.ymrt:g} (the "
+                f"martensite modulus) is ABOVE E={mat.e:g}. The card is "
+                "emitted as stated (E_mart), but a superelastic SMA's "
+                "martensite phase is normally the softer one — verify the "
+                "column order in the .k file.")
+
+
+def _emit_mat_law71(mat: MatShapeMemory) -> List[str]:
+    """*MAT_SHAPE_MEMORY (*MAT_030) → /MAT/LAW71 (superelastic SMA).
+
+    Layout audited against hm_cfg_files/config/CFG/radioss140/MAT/matl71_71.cfg
+    — its only FORMAT block is FORMAT(radioss140), so this is exactly what a
+    /BEGIN 2022 deck reads (starter-verified: every field echoed, 0 errors):
+      C1: RHO_I(20) [RHO_O(20)]
+      C2: E(20) Nu(20) E_mart(20)
+      C3: sig_sas(20) sig_fas(20) sig_ssa(20) sig_fsa(20) alpha(20)
+      C4: EpsL(20) CAS(20) CSA(20) TSAS(20) TFAS(20)
+      C5: TSSA(20) TFSA(20) CP(20) TINI(20)
+
+    RHO_O is left off card 1: the cfg reads columns 21-40 through a CARD_PREREAD
+    and defaults RHO_O to RHO_I (hm_read_mat71.F:222), which is what an LS-DYNA
+    *MAT_030 (one density) states.
+
+    ``E_mart`` blank/0 is a REAL option, not a missing value: :176-177
+    ``IF (EMART /= ZERO) EFLAG = 1`` — with 0 the model runs single-modulus on
+    E, which is exactly LS-DYNA's own "YMRT ... defaults to the austenite
+    modulus" rule. Measured: post-transformation slope 46000 vs E=50000 with the
+    field blank, against 22750 vs E_mart=25000 with it set. dyna2rad NEVER
+    reaches this slot — ``CopyValue("YMTR","E_mart")`` (convertmats.cxx:1929)
+    misspells the cfg's ``YMRT``, the lookup silently does nothing and every
+    converted SMA runs single-modulus (measured: MARTENSITE YOUNG'S MODULUS =
+    0.0 for a card stating 50000).
+
+    The eight TEMPERATURE terms stay BLANK. LS-DYNA MAT_030 has no counterpart
+    for any of them, and they are NOT inert defaults: TSAS/TFAS/TSSA/TFSA blank
+    → 298.0 K and TINI blank → 360.0 K (:168-175), so a non-zero CAS or CSA
+    would shift every threshold by ``CAS*(TINI - TSAS)/sqrt(2/3)`` (measured:
+    sig_sas 400 → onset 478 MPa with CAS=CSA=1). CP blank → 1e20 pins the
+    adiabatic self-heating term at TINI (sigeps71.F:238), which is what makes
+    the CAS=CSA=0 choice self-consistent.
+
+    ``EpsL`` is written 1:1 — the engine renormalises it internally
+    (sigeps71.F:164 ``EPSL = UPARAM(11)/(SQRT(TWO_THIRD)+ALPHA)``), so the card
+    cell IS the uniaxial TENSILE residual strain, exactly LS-DYNA's
+    "recoverable strain or maximum residual strain" (Vol II R17 p.2-306).
+    Measured: EpsL 0.05 → 0.05 in tension, 0.0391 in compression at alpha 0.1.
+    """
+    return [
+        f"/MAT/LAW71/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                  E                  Nu              E_mart",
+        f"{_f(mat.e)}{_f(mat.nu)}{_f(mat.ymrt)}",
+        "#            sig_sas             sig_fas             sig_ssa"
+        "             sig_fsa               alpha",
+        f"{_f(mat.sig_ass)}{_f(mat.sig_asf)}{_f(mat.sig_sas)}"
+        f"{_f(mat.sig_saf)}{_f(_SMA_ALPHA_FACTOR * mat.alpha)}",
+        "#               EpsL                 CAS                 CSA"
+        "                TSAS                TFAS",
+        f"{_f(mat.epsl)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#               TSSA                TFSA                  CP"
+        "                TINI",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]

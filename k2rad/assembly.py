@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _AIRBAG_OPTION_STACKS,
                        INITIAL_STATE_PRELOAD_KEYWORDS,
+                       RARE_MATERIAL_KEYWORDS,
                        _SEATBELT_MAT_KEYWORDS,
                        _SEATBELT_SUBKEYWORDS,
                        initial_strain_shell_records,
@@ -2148,6 +2149,51 @@ def _off_mat_138(b: Block, offsets: Dict[str, int], warn) -> None:
                 b.raw[i2] = new
 
 
+def _off_mat_shape_memory(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_SHAPE_MEMORY (*MAT_030): MID → IDMOFF; every curve reference the
+    card can carry → IDFOFF (``VALUE(FUNCT)`` in mat_030.cfg, so IDFOFF per
+    ``include_transform.cfg:64-78``).
+
+    Two sign conventions on one keyword:
+      * card 1 fields 5/6 (``LCSS``/``LCSSC``) are ordinary positive ids — but
+        LCSS may be NEGATIVE to say "the SIG_* cells are plastic-strain
+        curves", so both signs are walked;
+      * card 2 fields 1-4 (``SIG_ASS``/``SIG_ASF``/``SIG_SAS``/``SIG_SAF``) are
+        ``SCALAR_OR_OBJECT``: a POSITIVE value is a stress (physics — never
+        touch it) and a NEGATIVE one is a curve id. Only the negative form is
+        rewritten, sign preserved — the *SECTION_SHELL QR/IRID pattern.
+
+    Card 3 is the R7.1 ``FREE_CARD(optionalCards, "%10d%10d", LCID_AS,
+    LCID_SA)``. It is claimed by RAW ROW INDEX like the handler does, never by
+    "the next non-blank row": an all-blank optional card is legal LS-DYNA, and a
+    content scan would walk past it into the following keyword (the #109/#117/
+    #119 trap) — here that would offset another entity's card-1 ids as if they
+    were curve references.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m"), (4, "f"), (5, "f")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (4, 5):                        # LCSS / LCSSC stated negative
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw) and b.raw[i2].strip():
+        for i in (0, 1, 2, 3):              # SIG_ASS/ASF/SAS/SAF, curve form
+            new = _rewrite_neg_ref(b.raw[i2], i, foff)
+            if new is not None:
+                b.raw[i2] = new
+    i3 = toff + 2
+    if i3 < len(b.raw) and b.raw[i3].strip():
+        new = _rewrite_line(b.raw[i3], [(0, "f"), (1, "f")], offsets)
+        if new is not None:
+            b.raw[i3] = new
+
+
 def _off_mat_169(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_ARUP_ADHESIVE (169): MID → IDMOFF; TENMAX/GCTEN/SHRMAX/GCSHR
     (card 1 fields 5-8), SHRP (card 2 field 3) and SDFAC/SGFAC (card 5 fields
@@ -3022,6 +3068,8 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_34": _off_mat_fabric,
     "MAT_HILL_FOAM": _mat({0: [(5, "f"), (7, "f")]}),
     "MAT_177": _mat({0: [(5, "f"), (7, "f")]}),
+    # The RARE MATERIALS batch is registered from _RARE_MATERIAL_OFFSETS below
+    # this dict, keyed off handlers.RARE_MATERIAL_KEYWORDS — ONE source.
     # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve
     # (blank in the constants path → no-op). MAT_077_O/_H card 2 is CONDITIONAL:
     # LCID1/LCID2 only exist when N>0 (with N=0 the same card holds MU4/MU6 or
@@ -3496,6 +3544,24 @@ _INITIAL_STATE_PRELOAD_OFFSETS = {
 # spec here is an ImportError, not a silent un-offset include.
 for _kw in INITIAL_STATE_PRELOAD_KEYWORDS:
     _OFFSET_SPECS[_kw] = _INITIAL_STATE_PRELOAD_OFFSETS[_kw]
+del _kw
+
+# The RARE MATERIALS batch. Keyed off the SAME dict handlers.py registers from,
+# and asserted equal by tests/test_rare_materials.py, so a spelling cannot be
+# readable and un-offsettable at the same time (#116).
+#
+# Buckets, from Vol I R17 pp.2979-2980 (*INCLUDE_TRANSFORM Card 2b.1) and the
+# cfg's own HCDI types (include_transform.cfg:64-78):
+#   *MAT_030 MID                    MATS   -> IDMOFF "m"
+#   its SIG_* (negative), LCSS,
+#   LCSSC, LCID_AS, LCID_SA         FUNCT  -> IDFOFF "f"
+_RARE_MATERIAL_OFFSETS = {
+    "MAT_SHAPE_MEMORY": _off_mat_shape_memory,
+    "MAT_030":          _off_mat_shape_memory,
+    "MAT_30":           _off_mat_shape_memory,
+}
+for _kw in RARE_MATERIAL_KEYWORDS:
+    _OFFSET_SPECS[_kw] = _RARE_MATERIAL_OFFSETS[_kw]
 del _kw
 
 # All CONTACT_* handled by k2rad share the Card-1 (ssid msid sstyp mstyp

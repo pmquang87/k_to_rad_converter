@@ -84,6 +84,7 @@ from .state import (
     SeatbeltElem, SectionSeatbelt, MatSeatbelt, SeatbeltSlipring,
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
+    MatShapeMemory,
 )
 
 
@@ -8969,6 +8970,114 @@ def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
         mid, title, rho, kbulk, mu, n, lcid, fittype, lcsr, c, b, r, m)
 
 
+def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
+    """*MAT_SHAPE_MEMORY (*MAT_030) → /MAT/LAW71 (superelastic SMA).
+
+    Cards (Vol II R17 pp.2-303..2-309; Keyword971_R7.1/MAT/mat_030.cfg):
+      Card1: MID RO E PR [LCSS LCSSC IDPP]
+      Card2: SIG_ASS SIG_ASF SIG_SAS SIG_SAF EPSL ALPHA YMRT
+      Card3 (optional R7.1 FREE_CARD): LCID_AS LCID_SA
+
+    Fixed-width w=10, like every other *MAT here: RO regularly fills its whole
+    field and fuses with MID ("  301.05000E-9"), and a free split then shifts
+    every value (the *MAT_187 trap).
+
+    The four SIG_* cells are ``SCALAR_OR_OBJECT``: a NEGATIVE value is a curve
+    id, not a stress. /MAT/LAW71 has one scalar per threshold, so the curve form
+    cannot be carried; dyna2rad copies each cell only when ``> 0``
+    (convertmats.cxx:1907-1926) and leaves the rest at 0, which the starter then
+    turns into ``sig_* = 1e-20`` (hm_read_mat71.F:163-166) and immediately
+    refuses with ERROR 1122 + ERROR 1123 (measured, once per material). Emitting
+    that is strictly worse than not emitting it, so a curve form warn-skips the
+    whole material here — the /PART then reports a dangling material id, which
+    names the deck's real problem.
+
+    Card 3 is claimed by RAW CONTIGUITY (row index offset+2), not by "the next
+    non-blank line": an all-blank card 3 is a legal FREE_CARD and a scan for
+    content would walk past it (the #109/#117/#119 trap).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SHAPE_MEMORY: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_SHAPE_MEMORY '{title}': MID parsed as {mid} — "
+                   "unreadable (shifted or fused fields?); material skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    e   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    lcss  = to_int(f1[4]) if len(f1) > 4 else 0
+    lcssc = to_int(f1[5]) if len(f1) > 5 else 0
+    idpp  = to_int(f1[6]) if len(f1) > 6 else 0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    sig = [to_float(f2[i]) if len(f2) > i else 0.0 for i in range(4)]
+    epsl  = to_float(f2[4]) if len(f2) > 4 else 0.0
+    alpha = to_float(f2[5]) if len(f2) > 5 else 0.0
+    ymrt  = to_float(f2[6]) if len(f2) > 6 else 0.0
+
+    # Card 3: the R7.1 FREE_CARD, claimed by row index.
+    lcid_as = lcid_sa = 0
+    if len(raw) > offset + 2 and raw[offset + 2].strip():
+        f3 = _card(raw, offset + 2, fixed=True, n=2, w=10)
+        lcid_as = to_int(f3[0]) if f3 else 0
+        lcid_sa = to_int(f3[1]) if len(f3) > 1 else 0
+
+    names = ("SIG_ASS", "SIG_ASF", "SIG_SAS", "SIG_SAF")
+    curve_form = [f"{n}={v:g} (curve {abs(int(v))})"
+                  for n, v in zip(names, sig) if v < 0.0]
+    if curve_form:
+        state.warn(
+            f"*MAT_SHAPE_MEMORY mid={mid}: " + ", ".join(curve_form) +
+            " — a NEGATIVE transformation stress is a LOAD CURVE ID in "
+            "LS-DYNA (temperature-dependent, or effective-plastic-strain "
+            "dependent when LCSS is negative too; Vol II R17 p.2-305/306), and "
+            "/MAT/LAW71 has ONE SCALAR slot per threshold (matl71_71.cfg: "
+            "sig_sas sig_fas sig_ssa sig_fsa) with no function field anywhere "
+            "on the card. The material is SKIPPED. dyna2rad copies only the "
+            "positive cells (convertmats.cxx:1907-1926) and leaves the rest at "
+            "0, which hm_read_mat71.F:163-166 turns into 1e-20 and then "
+            "refuses with ERROR 1122 + ERROR 1123 — an unstartable deck either "
+            "way, so nothing is emitted. Re-state the card with the four "
+            "transformation stresses as constants for the operating "
+            "temperature.")
+        return
+
+    dropped = []
+    if lcss:
+        dropped.append(f"LCSS={lcss} (stress-strain curve/table)")
+    if lcssc:
+        dropped.append(f"LCSSC={lcssc} (compression curve/table)")
+    if idpp:
+        dropped.append(f"IDPP={idpp} (Drucker-Prager yield flag)")
+    if lcid_as:
+        dropped.append(f"LCID_AS={lcid_as} (stress vs martensite fraction, "
+                       "loading — it OVERWRITES SIG_ASS/SIG_ASF in LS-DYNA)")
+    if lcid_sa:
+        dropped.append(f"LCID_SA={lcid_sa} (stress vs martensite fraction, "
+                       "unloading)")
+    if dropped:
+        state.warn(
+            f"*MAT_SHAPE_MEMORY mid={mid} → /MAT/LAW71: dropped "
+            + "; ".join(dropped) +
+            ". /MAT/LAW71 is the plain Auricchio superelastic model — its card "
+            "carries no function id at all (matl71_71.cfg), so a tabulated "
+            "transformation law and the Drucker-Prager yield option have no "
+            "slot. The four constant transformation stresses are used instead"
+            + (" — where LCID_AS is present those constants are the ones "
+               "LS-DYNA would have OVERWRITTEN, so the emitted plateau is the "
+               "card-1 value, not the curve's." if lcid_as else "") + ".")
+
+    state.mat_shape_memory[mid] = MatShapeMemory(
+        mid, title, rho, e, nu, sig[0], sig[1], sig[2], sig[3],
+        epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
+
+
 def handle_mat_tabulated_johnson_cook(block: Block,
                                       state: ConversionState) -> None:
     """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1].
@@ -13707,6 +13816,9 @@ HANDLERS = {
     "MAT_154":                                handle_mat_deshpande_fleck_foam,
     "MAT_HILL_FOAM":                          handle_mat_hill_foam,
     "MAT_177":                                handle_mat_hill_foam,
+    # The RARE MATERIALS batch (*MAT_030, *MAT_156, *MAT_S15, the thermal
+    # cards) is registered from RARE_MATERIAL_KEYWORDS below this dict — ONE
+    # source shared with assembly._OFFSET_SPECS.
     # Hyperelastic rubber batch: MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or
     # LAW69 (LCID); MAT_077_O → LAW42 (embedded Prony) or LAW69; MAT_077_H →
     # LAW95 + /VISC/PRONY or LAW69. Underscore spellings of the hyphenated
@@ -14450,6 +14562,23 @@ INITIAL_STATE_PRELOAD_KEYWORDS = {
     "INITIAL_STRAIN_SHELL_SET": handle_initial_strain_shell,
 }
 for _kw, _h in INITIAL_STATE_PRELOAD_KEYWORDS.items():
+    HANDLERS[_kw] = _h
+del _kw, _h
+
+#: The RARE MATERIALS batch, as ONE source for HANDLERS and for
+#: assembly._OFFSET_SPECS (#116: a spelling the handler reads and the
+#: *INCLUDE_TRANSFORM offsetter does not know keeps its original ids while the
+#: rest of the include moves — a dangling MID/LCID at 0 diagnostics).
+#: Trailing ``_TITLE`` / ``_ID`` are NOT listed: parser._split_keyword moves
+#: them into block.options, where _title_offset finds them. Every numbered
+#: material carries both the zero-padded and the unpadded alias, the convention
+#: the rest of this table follows.
+RARE_MATERIAL_KEYWORDS = {
+    "MAT_SHAPE_MEMORY": handle_mat_shape_memory,
+    "MAT_030":          handle_mat_shape_memory,
+    "MAT_30":           handle_mat_shape_memory,
+}
+for _kw, _h in RARE_MATERIAL_KEYWORDS.items():
     HANDLERS[_kw] = _h
 del _kw, _h
 

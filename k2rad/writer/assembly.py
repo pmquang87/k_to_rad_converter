@@ -24,6 +24,7 @@ from .materials import (
     _resolve_mat_foams,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
+    _resolve_mat_shape_memory,
 )
 from .mesh import (
     _assign_ortho_props,
@@ -889,6 +890,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # are what make that gate warn-skip such parts NAMING the law instead of
     # claiming they have no /MAT at all.
     _resolve_mat_impact(state)
+
+    # Rare materials batch (*MAT_030 -> /MAT/LAW71). Synthesizes no curve and
+    # no id, so its placement does not move the /FUNCT numbering; it only
+    # reports the three hard starter guards (ERROR 1122/1123/1124) and the
+    # E_mart sanity check. Before _resolve_xref_parts below: LAW71 is NOT on
+    # the starter's solid-/XREF law whitelist, so its _target_mat_law entry is
+    # what makes that gate warn-skip such parts NAMING the law instead of
+    # claiming they have no /MAT at all.
+    _resolve_mat_shape_memory(state)
 
     # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +
     # /PROP/TYPE16). Routes the law from FORM + the card-7 curves, fills the

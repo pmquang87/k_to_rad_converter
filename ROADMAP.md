@@ -20,6 +20,11 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   the impact/blast materials `*MAT_JOHNSON_HOLMQUIST_CERAMICS`/`_CONCRETE` →
   `/MAT/LAW79`/`LAW126` and `*MAT_ELASTIC_FLUID` → `/MAT/LAW6` +
   `/EOS/POLYNOMIAL`.
+- **Tier 2 (rare materials):** `*MAT_SHAPE_MEMORY` / `*MAT_030` →
+  `/MAT/LAW71` (superelastic SMA; `alpha = sqrt(2/3)·ALPHA` measured against the
+  uniaxial onsets, `YMRT → E_mart` — the slot dyna2rad's `"YMTR"` typo never
+  writes, temperature terms deliberately blank, the curve form of the four
+  transformation stresses warn-skipped by name).
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
