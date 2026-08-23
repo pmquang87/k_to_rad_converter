@@ -1413,7 +1413,11 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
         ``_make_discrete_beam_connectors``, also keyed on the BEAM EID (so the
         two beam families cannot clash with each other — their part sets are
         disjoint — but both can clash with the discrete and PLOTEL springs);
-      * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID.
+      * ``*ELEMENT_PLOTEL`` → ``_make_plotel_elements``, keyed on the PLOTEL EID;
+      * ``*ELEMENT_SEATBELT`` (1D) → ``_make_seatbelts``, keyed on the BELT
+        EID — a FIFTH LS-DYNA namespace, so a belt element and a discrete
+        spring may legally share an id in the source deck and both become
+        ``/SPRING`` in the same one.
 
     The joint (/PROP/TYPE45) and *CONSTRAINED_SPOTWELD springs are not listed:
     their ids come from ``next_id()`` during section emission, so they are
@@ -1428,6 +1432,8 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
         ("*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 discrete-beam part",
          {b.eid for b in state.beam_elems if b.pid in dbeam_pids}),
         ("*ELEMENT_PLOTEL", {p.eid for p in state.plotel_elems}),
+        ("*ELEMENT_SEATBELT (1D belt)",
+         {e.eid for e in state.seatbelt_elems if not e.is_2d}),
     ]
 
 
@@ -4128,6 +4134,15 @@ def _inivel_gen_group_nodes(state: ConversionState, g):
         for e in state.discrete_elems:      # *ELEMENT_DISCRETE (springs); n2=0=ground
             if e.pid == pid:
                 nids.update((e.n1, e.n2))
+        # Belt elements: a 1D belt part's nodes ARE its mesh, and a sled test
+        # launched with *INITIAL_VELOCITY_GENERATION over the whole vehicle
+        # scopes by part set. Leaving the belt out gives it zero initial
+        # velocity while the dummy it restrains has the sled's - the belt would
+        # be yanked taut at t=0. (2D belt elements are in state.shell_elems by
+        # then, so the shell arm above already covers them.)
+        for e in state.seatbelt_elems:
+            if e.pid == pid:
+                nids.update((e.n1, e.n2, e.n3, e.n4))
 
     if g.styp == 0 or g.sid == 0:
         return sorted(state.nodes.keys())            # whole model
@@ -4466,7 +4481,12 @@ def _make_pressure_loads(state: ConversionState) -> List[str]:
             lines.append(_i(seg_no) + "".join(_i(n) for n in quad))
         sensor_id = 0
         if at > 0.0:
-            sensor_id = state.next_id()
+            # next_sensor_id, not next_id: *ELEMENT_SEATBELT_SENSOR puts USER
+            # ids into the /SENSOR namespace, so a deck with an SBSID at or
+            # above the auto-id base (90001) would otherwise collide here
+            # (starter ERROR 79 over the /SENSOR table). A no-op vs next_id()
+            # on any deck without one, so it shifts no existing id.
+            sensor_id = state.next_sensor_id()
             sensors_emitted = True
             lines += _emit_sensor_time(sensor_id, f"PLOAD_{pload_id}_arrival", at)
         lines += _emit_pload_card(pload_id, f"PLOAD_{pload_id}", surf_id, lcid,
@@ -6458,6 +6478,27 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     # subtractable a few lines below.
     for d in state.discrete_elems:
         elem_nodes.update((d.n1, d.n2))
+    # A 1D BELT is a /SPRING with a real force-strain curve on it, so its nodes
+    # carry stiffness exactly as a discrete spring's do - a /BCS 111 111 there
+    # would weld the belt to ground and the occupant would never move. (2D belt
+    # elements are folded into state.shell_elems by _assign_seatbelt_props and
+    # are already covered above.)
+    #
+    for e in state.seatbelt_elems:
+        elem_nodes.update((e.n1, e.n2))
+    # A slipring / retractor ANCHORAGE node is not a zero row either, and that
+    # is the whole point of the device-anchor split: the split takes the
+    # anchorage OFF the belt, so it would otherwise arrive here as a "free"
+    # node - and then kine_seatbelt_force.F:91,117 adds the mouth node's whole
+    # force AND STIFFNESS onto it every cycle
+    # (STIFN(ANCHOR_NODE) = STIFN(ANCHOR_NODE) + STIFN(NODE2)). A /BCS 111 111
+    # there would weld the belt end to ground.
+    for s in state.seatbelt_sliprings:
+        if s.sbrnid > 0:
+            elem_nodes.add(s.sbrnid)
+    for r in state.seatbelt_retractors:
+        if r.sbrnid > 0:
+            elem_nodes.add(r.sbrnid)
     for w in state.constrained_spotwelds:
         elem_nodes.update((w.n1, w.n2))
     # A beam's THIRD node is a geometric reference only — the starter tags it
@@ -6483,6 +6524,28 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     for cn in state.coord_nodes.values():
         if cn.flag == 1:
             keep_free.update((cn.n1, cn.n2, cn.n3))
+    # An *ELEMENT_SEATBELT_ACCELEROMETER triad is a MOVING SKEW - k2rad writes
+    # /SKEW/MOV(N1,N2,N3) and puts the /ACCEL on N1 with that Iskew - so it is
+    # the coord_nodes flag=1 case above, spelled with a different keyword.
+    # Pinning N2/N3 freezes the frame the /ACCEL projects onto, and pinning N1
+    # makes the channel read zero: the constraint is anything but inert.
+    for a in state.seatbelt_accels:
+        keep_free.update(n for n in (a.nid1, a.nid2, a.nid3) if n > 0)
+    # A slipring ORIENTATION node is a live geometric reference: the engine
+    # rebuilds the ring's frame from its CURRENT position every cycle
+    # (kine_seatbelt_vel.F:91-108 reads X(:,NODE3) and stores ACOS(SCAL) into
+    # ORIENTATION_ANGLE, which material_flow.F:203 folds into the friction).
+    # NOT the beam-third-node case below, where the frame is baked at the
+    # starter and the node can be pinned without effect.
+    for s in state.seatbelt_sliprings:
+        if s.onid > 0:
+            keep_free.add(s.onid)
+    # A sensor watches a node's POSITION (/SENSOR/DIST) or its ACCELERATION
+    # (/SENSOR/ACCE). Pinning either freezes the quantity the sensor tests, so
+    # the retractor never locks and the pretensioner never fires - a silent
+    # loss of the whole restraint trigger, not an inert constraint.
+    for sen in state.seatbelt_sensors.values():
+        keep_free.update(n for n in (sen.nid, sen.nid1, sen.nid2) if n > 0)
     # Moving rigid-wall carrier nodes must stay free to translate the wall —
     # both the *RIGIDWALL_PLANAR_MOVING node (free-flying under contact) and
     # the *RIGIDWALL_GEOMETRIC_*_MOTION carrier nodes, which /IMPVEL|/IMPDISP

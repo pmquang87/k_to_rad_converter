@@ -243,7 +243,14 @@ def _resolve_mat_fabric(state: ConversionState) -> None:
         # allocated here, in the prepass, so the id is fixed before any section
         # is written.
         if mat.rgbrth > 0.0:
-            mat.sensor_id = state.next_id()
+            # next_sensor_id, not next_id: *ELEMENT_SEATBELT_SENSOR puts USER
+            # ids into the /SENSOR namespace, so a deck with an SBSID at or
+            # above the auto-id base (90001) would otherwise collide with this
+            # one — measured, two /SENSOR/TIME cards on one id and starter
+            # ERROR 79 over the /SENSOR table. Airbag fabric and belt sensors
+            # live in the same occupant-restraint decks. A no-op vs next_id()
+            # on any deck without a belt sensor, so it shifts no existing id.
+            mat.sensor_id = state.next_sensor_id()
             mat.sensor_tdelay = mat.rgbrth
         if mat.use_law58:
             _resolve_law58_curves(state, mat)

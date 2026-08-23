@@ -587,8 +587,8 @@ def _min_node_to_segment(state: ConversionState, secondary_node_ids: Iterable[in
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
-    """pid → set of node ids used by that part's shell, solid and thick-shell
-    elements.
+    """pid → set of node ids used by that part's shell, solid, thick-shell,
+    SPH and 1D-seatbelt elements.
 
     Built once and shared across all contacts (avoids re-scanning the element
     lists per side — important on a large TET10 mesh)."""
@@ -606,6 +606,18 @@ def _part_nodes_map(state: ConversionState) -> Dict[int, Set[int]]:
     # builder above is deliberate — a particle has nodes but no faces.
     for c in state.sph_elems:
         m.setdefault(c.pid, set()).update(n for n in c.nodes if n > 0)
+    # 1D seatbelt /SPRINGs, for the same reason as SPH: they have nodes but no
+    # faces, and the belt is on the SECONDARY side of a part- or part-set-
+    # scoped *CONTACT the moment the deck writes one (contacts.py resolves it
+    # there). Without this arm --auto-gapmin measured the clearance of every
+    # OTHER part in that contact and ignored the webbing, which is exactly the
+    # side *SECTION_SEATBELT's warn-dropped THICK redirects the user to.
+    # Beams and *ELEMENT_DISCRETE are still missing here — pre-existing, and
+    # not this batch's family to fix.
+    for e in state.seatbelt_elems:
+        if not e.is_2d:                 # 2D belts arrive through shell_elems
+            m.setdefault(e.pid, set()).update(
+                n for n in (e.n1, e.n2) if n > 0)
     return m
 
 

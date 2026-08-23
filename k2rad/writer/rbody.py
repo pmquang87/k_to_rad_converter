@@ -88,6 +88,16 @@ def _inertia_element_nodes(state: ConversionState) -> Set[int]:
         elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
+    # A 1D SEATBELT node carries the belt's lumped mass — rinit3.F:464,474
+    # ``mass = Area * max(L0,LMIN) * rho``, split over the two spring nodes —
+    # so it is "attached to an element" in exactly the sense this test asks
+    # about: treating it as element-free would let an ``_INERTIA`` body take it
+    # as its main node and gain the webbing's mass on top of the mass the card
+    # states. Same argument the SPH arm above is here for. (2D belt elements
+    # are in state.shell_elems already.)
+    for e in state.seatbelt_elems:
+        if not e.is_2d:
+            elem_nodes.update((e.n1, e.n2))
     return elem_nodes
 
 
@@ -849,6 +859,15 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         elem_nodes.update(c.nodes)
     for e in state.beam_elems:
         elem_nodes.update((e.n1, e.n2, e.n3))
+    # A 1D SEATBELT node cannot serve as the master either. A 2-node /SPRING
+    # does not INVERT the way a shell does, but the ICoG move relocates the
+    # node, and the belt's whole response is geometric: L0 is taken from the
+    # MOVED position at TT==0 (r23l114def3.F:263), so the webbing silently
+    # changes length and path, and it also carries mass onto a body that did
+    # not ask for it. Synthesize a free master instead.
+    for e in state.seatbelt_elems:
+        if not e.is_2d:
+            elem_nodes.update((e.n1, e.n2))
     # Synthesize new free node IDs above the current maximum (avoids collisions).
     _next_free = [max(state.nodes) + 1 if state.nodes else 90000001]
 

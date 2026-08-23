@@ -5448,6 +5448,274 @@ class DbExtentBinary:
     shge: int = 0       # shell hourglass energy flag
 
 
+# ── Seatbelts / restraints (*ELEMENT_SEATBELT* family) ───────────────────────
+
+
+@dataclass
+class SeatbeltElem:
+    """*ELEMENT_SEATBELT — a 1D belt /SPRING, or a 2D belt /SHELL.
+
+    LS-DYNA card (``Keyword971/ELEMENTS/seatbelt.cfg:64``)::
+
+        CARD("%8d%8d%8d%8d%8d%16lg%8d%8d",
+             id, collector, node1, node2, SBRID, SLEN, node3, node4)
+
+    Eight fields in EIGHT-wide cells except SLEN, which is SIXTEEN wide and
+    therefore spans two of them — the same trap ``*ELEMENT_MASS`` and
+    ``*ELEMENT_SPH`` carry, and the reason ``handlers._seatbelt_elem_card``
+    exists instead of a uniform slice.
+
+    ``n3``/``n4`` both non-zero makes the element a 2D (shell) belt; otherwise
+    it is a 1D belt spanning ``n1``-``n2`` (dyna2rad ``convertelements.cxx:
+    86-95``).
+    """
+    eid: int
+    pid: int
+    n1: int
+    n2: int
+    sbrid: int = 0          # *ELEMENT_SEATBELT_RETRACTOR this element starts in
+    slen: float = 0.0       # initial SLACK length — no Radioss slot, see writer
+    n3: int = 0
+    n4: int = 0
+
+    @property
+    def is_2d(self) -> bool:
+        return self.n3 > 0 and self.n4 > 0
+
+
+@dataclass
+class SectionSeatbelt:
+    """*SECTION_SEATBELT — ``SECID AREA THICK``.
+
+    Both AREA and THICK are CONTACT numbers in LS-DYNA ("AREA — cross sectional
+    area … used for the contact stiffness", default 0.01; "THICK — belt
+    thickness … used for contact"), and neither has a Radioss slot: the
+    /PROP/TYPE23 ``Area`` cell is a MASS and STIFFNESS area (``rinit3.F:474``
+    ``MASS = GEO(1)*LENGTH*RHO``; ``r23l114def3.F:224`` ``XK_COMP = E*AREA``),
+    which is a different quantity. dyna2rad ignores this card entirely and
+    takes its property area from ``*MAT_SEATBELT``'s ``A`` instead
+    (``convertprops.cxx:2538``); k2rad does the same and names the loss.
+    """
+    secid: int
+    title: str = ""
+    area: float = 0.0
+    thick: float = 0.0
+
+
+@dataclass
+class MatSeatbelt:
+    """*MAT_SEATBELT / *MAT_B01 (and their ``_2D`` spellings) → /MAT/LAW114
+    (1D belt springs) or /MAT/LAW119 (2D belt shells).
+
+    WHICH law is decided by the PROPERTY the part carries, not by the material
+    keyword — dyna2rad ``convertmats.cxx:517-526`` branches on
+    ``propKeyWord.find("SEATBELT")`` vs ``propKeyWord.find("SHELL")``, so a
+    ``*MAT_SEATBELT`` on a ``*SECTION_SHELL`` is LAW119 and a
+    ``*MAT_SEATBELT_2D`` on a ``*SECTION_SEATBELT`` is LAW114. ``is_2d`` records
+    only which keyword was WRITTEN, so cards 3/4 (the ``_2D``-only coating and
+    weft data) can be reported as present-but-unused on a 1D belt.
+
+    Card 1  ``MID MPUL LLCID ULCID LMIN CSE DAMP E``
+    Card 2  ``A I J AS F M R``                     — present only when ``E > 0``
+    Card 3  ``P1DOFF FORM ECOAT TCOAT SCOAT EB PRBA PRAB``   — ``_2D`` only
+    Card 4  ``GAB``                                          — ``_2D`` only
+    """
+    mid: int
+    mpul: float = 0.0       # mass per unit length
+    llcid: int = 0          # loading   force vs ENGINEERING STRAIN
+    ulcid: int = 0          # unloading force vs ENGINEERING STRAIN
+    lmin: float = 0.0
+    cse: float = 0.0        # compressive-stress elimination (2D belts only)
+    damp: float = 0.1       # Rayleigh damping fraction (shells only)
+    e: float = 0.0          # Young's modulus for the optional bending model
+    # card 2 — only meaningful when e > 0
+    has_card2: bool = False
+    a: float = 0.0          # cross-sectional area
+    i: float = 0.0          # area moment for bending
+    j: float = 0.0          # torsional constant  (default 2*I)
+    as_: float = 0.0        # shear area          (default A)
+    f: float = 0.0          # max shear/compression force (default 1e20)
+    m: float = 0.0          # max torque                  (default 1e20)
+    r: float = 0.0          # rotational inertia scale    (default 0.05)
+    # card 3/4 — the *_2D option only
+    is_2d: bool = False
+    has_card3: bool = False
+    p1doff: float = 0.0
+    form: int = 0
+    ecoat: float = 0.0
+    tcoat: float = 0.0
+    scoat: float = 0.0
+    eb: float = -0.1        # transverse modulus; NEGATIVE = ratio of E11
+    prba: float = 0.3       # minor in-plane Poisson ratio  -> /MAT/LAW119 NU12
+    prab: float = 0.0       # major in-plane Poisson ratio  (default = PRBA)
+    has_card4: bool = False
+    gab: float = 0.0        # in-plane shear modulus -> /MAT/LAW119 G12
+
+
+@dataclass
+class SeatbeltSlipring:
+    """*ELEMENT_SEATBELT_SLIPRING → /SLIPRING/SPRING or /SLIPRING/SHELL.
+
+    Card 1 ``SBSRID SBID1 SBID2 FC SBRNID LTIME FCS ONID`` — note the order:
+    ``FC`` sits BETWEEN the two element ids and the anchorage node, which is not
+    where a reading of the manual's variable list alone would put it
+    (``Keyword971_R13.0/ELEMENTS/element_seatbelt_slipring.cfg:11``).
+
+    A NEGATIVE ``FC``/``FCS`` is a *DEFINE_CURVE id (friction vs time) rather
+    than a coefficient — the cfg declares both cells ``SCALAR_OR_OBJECT`` — and
+    a NEGATIVE ``SBRNID`` makes this a SHELL-belt slipring whose ``SBID1``/
+    ``SBID2`` are ``*SET_SHELL_LIST`` ids and whose ``|SBRNID|`` is a
+    ``*SET_NODE``.
+
+    Card 2 ``K FUNCID DIRECT DC <blank> LCNFFD LCNFFS`` is read only when
+    ``ONID != 0`` (the cfg's own condition).
+    """
+    sbsrid: int
+    sbid1: int = 0
+    sbid2: int = 0
+    fc: float = 0.0
+    fc_func: int = 0        # |FC| when FC < 0
+    sbrnid: int = 0         # > 0 node, < 0 *SET_NODE (shell belt)
+    ltime: float = 1.0e20
+    fcs: float = 0.0
+    fcs_func: int = 0       # |FCS| when FCS < 0
+    onid: int = 0
+    has_card2: bool = False
+    k: float = 0.0
+    funcid: int = 0
+    direct: int = 0
+    dc: float = 0.0
+    lcnffd: int = 0
+    lcnffs: int = 0
+
+    @property
+    def is_shell(self) -> bool:
+        return self.sbrnid < 0
+
+
+@dataclass
+class SeatbeltRetractor:
+    """*ELEMENT_SEATBELT_RETRACTOR → /RETRACTOR/SPRING.
+
+    Card 1 ``SBRID SBRNID SBID SID1 SID2 SID3 SID4 DSID``
+    Card 2 ``TDEL PULL LLCID ULCID LFED LCFL FLOPT``
+
+    ``SBRNID < 0`` is a SHELL belt (``|SBRNID|`` a ``*SET_NODE``, ``SBID`` a
+    ``*SET_SHELL_LIST``); Radioss has only ``/RETRACTOR/SPRING`` — there is no
+    ``/RETRACTOR/SHELL`` card in ``hm_cfg_files/config/CFG/radioss2022/
+    SEATBELTS/`` at all — so that flavour is warn-dropped whole.
+    """
+    sbrid: int
+    sbrnid: int = 0
+    sbid: int = 0
+    sid1: int = 0
+    sid2: int = 0
+    sid3: int = 0
+    sid4: int = 0
+    dsid: int = 0           # deactivation sensor — no Radioss slot
+    tdel: float = 0.0
+    pull: float = 0.0
+    llcid: int = 0
+    ulcid: int = 0
+    lfed: float = 0.0
+    lcfl: int = 0           # no Radioss slot
+    flopt: int = 0          # no Radioss slot
+
+    @property
+    def is_shell(self) -> bool:
+        return self.sbrnid < 0
+
+    def sensor_ids(self):
+        return [s for s in (self.sid1, self.sid2, self.sid3, self.sid4) if s > 0]
+
+
+@dataclass
+class SeatbeltPretensioner:
+    """*ELEMENT_SEATBELT_PRETENSIONER — folded onto its retractor's card 3.
+
+    Card 1 ``SBPRID SBPRTY SBSID1 SBSID2 SBSID3 SBSID4``
+    Card 2 ``SBRID TIME PTLCID LMTFRC LMTPIN``
+
+    The ``Keyword971`` cfg gives card 2 a TYPE-DEPENDENT layout (``SBSID TIME
+    <blank> LMTFRC`` for SBPRTY 2/3, ``<blank> TIME <blank> LMTFRC`` for the
+    rest); every later cfg (``Keyword971_R7.1``, ``_R13.0``) and LS-PrePost
+    4.13.5 write the uniform ``SBRID TIME PTLCID LMTFRC LMTPIN`` card, which is
+    what is read here. The difference only ever touches field 0 of card 2 for
+    SBPRTY 2/3/7/9 — the four types that have no ``Tens_typ`` at all and are
+    warn-dropped whole — so the ambiguity never reaches a Radioss card.
+    """
+    sbprid: int
+    sbprty: int = 0
+    sbsid1: int = 0
+    sbsid2: int = 0
+    sbsid3: int = 0
+    sbsid4: int = 0
+    sbrid: int = 0          # the *ELEMENT_SEATBELT_RETRACTOR this pretensions
+    time: float = 0.0
+    ptlcid: int = 0
+    lmtfrc: float = 0.0
+    lmtpin: float = 0.0     # no Radioss slot
+
+    def sensor_ids(self):
+        return [s for s in (self.sbsid1, self.sbsid2, self.sbsid3,
+                            self.sbsid4) if s > 0]
+
+
+@dataclass
+class SeatbeltSensor:
+    """*ELEMENT_SEATBELT_SENSOR → /SENSOR/ACCE | /SENSOR/TIME | /SENSOR/DIST.
+
+    Card 1 ``SBSID SBSTYP SBSFL``, then ONE type card whose layout is chosen by
+    SBSTYP (``Keyword971_R12.0/SENSOR/element_seatbelt_sensor_no_sub.cfg``) —
+    a #119 count-driven walk on a card-1 discriminator:
+
+      1  ``NID DOF ACC ATIME``      node acceleration   → /SENSOR/ACCE + /ACCEL
+      2  ``SBRID PULRAT PULTIM``    retractor pull-out RATE   → no target
+      3  ``TIME``                   time                → /SENSOR/TIME
+      4  ``NID1 NID2 DMX DMN``      node distance       → /SENSOR/DIST
+      5  ``SBRID PULMX PULMN``      retractor pull-out  → no target
+    """
+    sbsid: int
+    sbstyp: int = 0
+    sbsfl: int = 0          # 1 = active during dynamic relaxation
+    # type 1
+    nid: int = 0
+    dof: int = 0
+    acc: float = 0.0
+    atime: float = 0.0
+    # type 2 / 5
+    sbrid: int = 0
+    pulrat: float = 0.0
+    pultim: float = 0.0
+    pulmx: float = 0.0
+    pulmn: float = 0.0
+    # type 3
+    time: float = 0.0
+    # type 4
+    nid1: int = 0
+    nid2: int = 0
+    dmx: float = 0.0
+    dmn: float = 0.0
+
+
+@dataclass
+class SeatbeltAccelerometer:
+    """*ELEMENT_SEATBELT_ACCELEROMETER → /ACCEL (+ /SKEW/MOV, + /ADMAS).
+
+    ``SBACID NID1 NID2 NID3 IGRAV INTOPT MASS``. Radioss ``/ACCEL`` is ONE node
+    plus a skew, so the LS-DYNA triad becomes a ``/SKEW/MOV`` on (NID1, NID2,
+    NID3) with ``/ACCEL`` pointing at NID1 — dyna2rad ``convertelements.cxx:
+    448-462``. ``MASS`` is "distributed equally to the three nodes" in LS-DYNA.
+    """
+    sbacid: int
+    nid1: int = 0
+    nid2: int = 0
+    nid3: int = 0
+    igrav: int = 0
+    intopt: int = 0
+    mass: float = 0.0
+
+
 # ── User conversion options (CLI flags) ──────────────────────────────────────
 
 @dataclass
@@ -5707,6 +5975,10 @@ class ConversionState:
     int_beam_props: Dict[int, IntBeamProp] = field(default_factory=dict)
     # *SECTION_DISCRETE → /PROP/TYPE4 flags (spring/damper connectors)
     sec_discrete: Dict[int, SectionDiscrete] = field(default_factory=dict)
+    # *SECTION_SEATBELT → /PROP/TYPE23 (SPR_MAT). A SIXTH SECID-keyed /PROP
+    # namespace: the belt property is emitted under the SECID verbatim, so
+    # next_prop_id() has to dodge it like the other five.
+    sec_seatbelts: Dict[int, SectionSeatbelt] = field(default_factory=dict)
     # part_id → synthesized orthotropic property id for a *MAT_ANISOTROPIC_
     # VISCOPLASTIC (LAW128) part. LAW128 is orthotropic-only, so such a part
     # cannot use the isotropic /PROP/SHELL|SOLID — the writer emits a dedicated
@@ -5993,6 +6265,53 @@ class ConversionState:
     mat_unsupported_dbeam: Dict[int, Tuple[str, float]] = field(default_factory=dict)
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
+
+    # ── Seatbelts / restraints ─────────────────────────────────
+    # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
+    # which LAW the material becomes is decided by the PROPERTY its parts
+    # carry, not by the keyword (dyna2rad convertmats.cxx:517-526 branches on
+    # `propKeyWord.find("SEATBELT")` vs `..."SHELL"`). writer/seatbelts.py::
+    # _seatbelt_mat_law is the ONE router, read by the material writer, the
+    # property writer AND mesh._target_mat_law — the #100 one-map rule.
+    mat_seatbelt: Dict[int, MatSeatbelt] = field(default_factory=dict)
+    seatbelt_elems: List[SeatbeltElem] = field(default_factory=list)
+    seatbelt_sliprings: List[SeatbeltSlipring] = field(default_factory=list)
+    seatbelt_retractors: List[SeatbeltRetractor] = field(default_factory=list)
+    seatbelt_pretensioners: List[SeatbeltPretensioner] = \
+        field(default_factory=list)
+    # SBSID → the card. A DICT, not a list, because every consumer
+    # (retractor SID1..4, pretensioner SBSID1..4) reaches it by id, and a
+    # duplicate SBSID is a deck error the last card wins in LS-DYNA too.
+    seatbelt_sensors: Dict[int, SeatbeltSensor] = field(default_factory=dict)
+    seatbelt_accels: List[SeatbeltAccelerometer] = field(default_factory=list)
+    # part_id → synthesized /PROP/TYPE9 (SH_ORTH) id for a 2D belt part. Same
+    # split mechanism as fabric_prop_ids: /MAT/LAW119 declares SHELL_ORTHOTROPIC
+    # (hm_read_mat119.F:218), so the part cannot stay on the isotropic
+    # /PROP/SHELL its *SECTION_SHELL would give it — starter ERROR 3047.
+    seatbelt_prop_ids: Dict[int, int] = field(default_factory=dict)
+    # Emitted ids, recorded AT THE LINE that writes each card (the #106 rule) —
+    # *DATABASE_SBTOUT's /TH/SLIPRING and /TH/RETRACTOR list exactly these, and
+    # a /TH naming an entity the deck does not define is starter ERROR 69.
+    slipring_ids: List[Tuple[int, str]] = field(default_factory=list)
+    retractor_ids: List[Tuple[int, str]] = field(default_factory=list)
+    # /SENSOR and /ACCEL ids already SPOKEN FOR: every id minted by
+    # next_sensor_id()/next_accel_id(), plus every USER id the writer emits
+    # verbatim (writer/seatbelts.py adds each SBSID and SBACID at the line that
+    # writes its card). Its job is that two callers in one build cannot be
+    # handed the same id. The user half is belt AND braces, not the only
+    # guard: next_sensor_id() also dodges state.seatbelt_sensors (the SBSID
+    # dict) and next_accel_id() the seatbelt_accels SBACIDs, both filled at
+    # parse time and so populated before any writer runs. The seatbelt writer
+    # screens a Sens_ID against _SensorPool's own map, not against this set.
+    sensor_ids: Set[int] = field(default_factory=set)
+    accel_ids: Set[int] = field(default_factory=set)
+    # The /ACCELs a *ELEMENT_SEATBELT_ACCELEROMETER asked for, i.e. the ones
+    # /TH/ACCEL should record. A SUBSET of accel_ids: the accelerometer a
+    # SBSTYP=1 *ELEMENT_SEATBELT_SENSOR needs exists only to feed its
+    # /SENSOR/ACCE (sensor_acce.cfg's accel_ID is mandatory) and recording it
+    # would add a channel the deck never requested, on a node it already
+    # records through the sensor's own accelerometer.
+    th_accel_ids: List[Tuple[int, str]] = field(default_factory=list)
     # *CONSTRAINED_SPOTWELD / *CONSTRAINED_GENERALIZED_WELD_SPOT with
     # failure forces → stiff /PROP/TYPE13 /SPRING (no-failure ones become
     # 2-node CNRBs at parse time and go through state.cnrbs instead)
@@ -6406,6 +6725,14 @@ class ConversionState:
     # weld connectors, /TH/BRIC over MAT_100 solid welds, and /TH/CLUSTER over
     # the *DEFINE_HEX_SPOTWELD_ASSEMBLY clusters
     db_swforc_dt: float = 0.0
+    # *DATABASE_SBTOUT → /TH/SLIPRING + /TH/RETRACTOR over the emitted seatbelt
+    # devices. LS-DYNA writes ONE sbtout file for the whole restraint system;
+    # Radioss splits it across two group types, so both are emitted (dyna2rad
+    # emits NEITHER — its *DATABASE_SBTOUT is a bare dbCardList member whose
+    # only effect is its DT, convertcards.cxx:94, and `grep -rn "TH/RETRACTOR"`
+    # over the whole reader tree returns zero hits).
+    db_sbtout_dt: float = 0.0
+    db_sbtout_seen: bool = False
     # *DATABASE_SPCFORC → /TH/NODE REAC* on the /BCS nodes + /ANIM/VECT/FREAC
     db_spcforc_dt: float = 0.0
     # *DATABASE_NCFORC → /TH/INTER on every converted contact interface
@@ -6519,6 +6846,42 @@ class ConversionState:
             fid = self.next_id()
         return fid
 
+    def next_sensor_id(self) -> int:
+        """A next_id() guaranteed free in the /SENSOR namespace.
+
+        Until the seatbelt batch nothing in the deck could OWN a /SENSOR id:
+        the only producer was the *LOAD_SHELL/_SEGMENT_SET arrival-time gate,
+        whose ids all come from next_id(). ``*ELEMENT_SEATBELT_SENSOR`` changes
+        that — ``SBSID`` is a USER id that is written through verbatim, so a
+        deck with a sensor at or above the auto-id base (90001) would otherwise
+        collide with a minted one and the starter would answer ERROR 79
+        (DUPLICATE ID) over the whole /SENSOR table.
+
+        Same guard shape as next_curve_id / next_part_id / next_prop_id, and a
+        no-op vs next_id() in the common case, so it does not shift ids on any
+        ordinary deck. Every id it hands out is recorded, so two callers in one
+        build cannot be given the same one."""
+        sid = self.next_id()
+        while sid in self.seatbelt_sensors or sid in self.sensor_ids:
+            sid = self.next_id()
+        self.sensor_ids.add(sid)
+        return sid
+
+    def next_accel_id(self) -> int:
+        """A next_id() guaranteed free in the /ACCEL namespace.
+
+        The twin of next_sensor_id: ``*ELEMENT_SEATBELT_ACCELEROMETER``'s
+        SBACID is written through verbatim, and an ``*ELEMENT_SEATBELT_SENSOR``
+        of SBSTYP 1 needs an /ACCEL of its own on the node it watches (Radioss
+        has no "accelerometer-free" acceleration sensor — sensor_acce.cfg's
+        ``accel_ID`` is mandatory)."""
+        aid = self.next_id()
+        used = {a.sbacid for a in self.seatbelt_accels if a.sbacid > 0}
+        while aid in used or aid in self.accel_ids:
+            aid = self.next_id()
+        self.accel_ids.add(aid)
+        return aid
+
     def next_part_id(self) -> int:
         """A next_id() guaranteed free in the /PART namespace, so a synthesized
         connector /PART can never collide with a converted *PART whose PID
@@ -6546,11 +6909,13 @@ class ConversionState:
         verbatim too, so a deck with a *SECTION_TSHELL at or above 90001 would
         otherwise collide with a synthesized ply/joint/spring property.
         *SECTION_SPH joined it with the SPH batch, for exactly the same reason —
-        /PROP/SPH is emitted under the SECID verbatim."""
+        /PROP/SPH is emitted under the SECID verbatim. *SECTION_SEATBELT joined
+        it with the seatbelt batch: /PROP/TYPE23 is emitted under the SECID
+        verbatim too."""
         prop_id = self.next_id()
         while (prop_id in self.sec_shells or prop_id in self.sec_solids
                or prop_id in self.sec_beams or prop_id in self.sec_tshells
-               or prop_id in self.sec_sph):
+               or prop_id in self.sec_sph or prop_id in self.sec_seatbelts):
             prop_id = self.next_id()
         return prop_id
 
@@ -6582,7 +6947,10 @@ class ConversionState:
                   self.mat_cohesive_mm_epr, self.mat_toughened_adhesive,
                   self.mat_tabulated_jc, self.mat_jh_ceramics,
                   self.mat_jh_concrete, self.mat_elastic_fluid,
-                  self.mat_fabric):
+                  self.mat_fabric,
+                  # *MAT_SEATBELT / *MAT_B01 (+_2D) → /MAT/LAW114 or LAW119,
+                  # both under the MID verbatim.
+                  self.mat_seatbelt):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}

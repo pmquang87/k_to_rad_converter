@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Set
+from typing import List, Optional, Set
 from ..state import ConversionState
 
 __all__ = [
@@ -40,6 +40,9 @@ __all__ = [
     "_emit_line_surf",
     "_part_node_sets",
     "_ref_flag_materials",
+    "_seatbelt_mat_law",
+    "_seatbelt_part_ids",
+    "_seatbelt_2d_part_ids",
 ]
 
 
@@ -808,3 +811,122 @@ def _emit_line_surf(line_id: int, title: str, surf_ids: List[int]) -> List[str]:
         lines.append("".join(row))
     lines.append(HDR)
     return lines
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Starter: seatbelts (*ELEMENT_SEATBELT and its four devices)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _seatbelt_mat_law(state: ConversionState, mid: int) -> Optional[int]:
+    """``114``, ``119`` or ``None`` — the law a ``*MAT_SEATBELT`` becomes.
+
+    A pure function of the STATE, so the material writer, the property writer
+    and ``mesh._target_mat_law`` cannot drift apart (the #100 one-map rule).
+
+    The branch is on the PROPERTY the material's parts carry, **not** on the
+    material keyword — dyna2rad ``convertmats.cxx:517-526``::
+
+        case 801:
+            if (propKeyWord.find("SEATBELT") != npos)  p_ConvertMatL801Seatbelt(...);
+            else if (propKeyWord.find("SHELL") != npos) p_ConvertMatL801Shell(...);
+
+    so a ``*MAT_SEATBELT`` on a ``*SECTION_SHELL`` is LAW119 and a
+    ``*MAT_SEATBELT_2D`` on a ``*SECTION_SEATBELT`` is LAW114: the ``_2D``
+    suffix is IGNORED. That is not a defect to route around — it is the only
+    rule that can work, because the law has to match the element family the
+    part actually holds, and the section is what states that.
+
+    dyna2rad's third branch is the one k2rad does not copy: when the section is
+    NEITHER (a belt material on a part with no section at all, or on a
+    ``*SECTION_BEAM``), ``destCard`` stays empty and it emits **no material at
+    all** (``convertmats.cxx:556-561`` calls ``CreateEntity`` with ``""``),
+    leaving the /PART pointing at a MID nothing defines — starter ERROR 21. The
+    fallback here is the 1D law, which is what a belt material means when
+    nothing says otherwise, and the writer warns by name.
+    """
+    if mid not in state.mat_seatbelt:
+        return None
+    on_shell = False
+    on_belt = False
+    for pid, part in state.parts.items():
+        if part.mid != mid:
+            continue
+        secid = part.secid if part.secid > 0 else pid
+        if secid in state.sec_seatbelts:
+            on_belt = True
+        elif secid in state.sec_shells:
+            on_shell = True
+    if on_belt:
+        return 114
+    if on_shell:
+        return 119
+    return 114
+
+
+def _seatbelt_part_ids(state: ConversionState) -> Set[int]:
+    """*PART ids handled by the 1D-belt connector path — the parts whose
+    ``/PART`` + ``/PROP/TYPE23`` + ``/MAT/LAW114`` + ``/SPRING`` all come from
+    :func:`_make_seatbelts` and must therefore be skipped by the ordinary mesh
+    and property writers (emitting them twice is starter ERROR 79).
+
+    A part is claimed when it owns 1D ``*ELEMENT_SEATBELT`` elements, or its
+    section is a ``*SECTION_SEATBELT``, or its material resolves to LAW114 —
+    the same three-way test ``common._discrete_part_ids`` makes, including the
+    blank-SECID fallback ``secid = pid``.
+
+    Parts holding shell / solid / thick-shell / SPH / beam elements are
+    EXCLUDED, the guard ``_discrete_beam_pids`` documents: a claimed part is
+    skipped WHOLE by ``_make_parts_and_elements``, so a continuum part that
+    happened to satisfy the material test would lose its entire element block
+    and every registry entry that depends on it. It is also how a 2D belt stays
+    out: those parts hold ``*ELEMENT_SHELL``-shaped seatbelt elements and go
+    down the LAW119 route instead.
+    """
+    if not (state.seatbelt_elems or state.sec_seatbelts
+            or state.mat_seatbelt):
+        return set()
+    # `pid in state.parts` is not a formality: a belt element whose PID has no
+    # *PART record is parsed, warned about by the mesh-loss census
+    # (assembly._warn_orphan_elements) and never written — claiming its part
+    # here would hand the seatbelt writer a pid it cannot look up. The three
+    # sibling claimers build from `state.parts` for the same reason.
+    belt_1d_pids = {e.pid for e in state.seatbelt_elems
+                    if not e.is_2d and e.pid in state.parts}
+    law114_mids = {mid for mid in state.mat_seatbelt
+                   if _seatbelt_mat_law(state, mid) == 114}
+    continuum_pids = ({e.pid for e in state.shell_elems}
+                      | {e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems}
+                      | {c.pid for c in state.sph_elems}
+                      | {e.pid for e in state.beam_elems}
+                      | {e.pid for e in state.discrete_elems}
+                      | {e.pid for e in state.seatbelt_elems if e.is_2d})
+    pids = {p for p in belt_1d_pids if p not in continuum_pids}
+    for pid, part in state.parts.items():
+        if pid in continuum_pids:
+            continue
+        secid = part.secid if part.secid > 0 else pid
+        if secid in state.sec_seatbelts or part.mid in law114_mids:
+            pids.add(pid)
+    return pids
+
+
+def _seatbelt_2d_part_ids(state: ConversionState) -> Set[int]:
+    """*PART ids that carry a 2D (shell) belt — a /MAT/LAW119 part.
+
+    Claimed by the MATERIAL resolving to LAW119, exactly as the fabric batch
+    claims its shell parts: ``/MAT/LAW119`` declares ``SHELL_ORTHOTROPIC``
+    (``hm_read_mat119.F:218`` ``CALL INIT_MAT_KEYWORD(MATPARAM,
+    "SHELL_ORTHOTROPIC")``, PROP_SHELL = 2), so the part cannot stay on the
+    isotropic ``/PROP/SHELL`` its ``*SECTION_SHELL`` would give it —
+    ``check_mat_elem_prop_compatibility.F:175-192`` answers ERROR 3047. Unlike
+    the 1D path these parts keep their ordinary ``/PART`` and their ordinary
+    ``/SHELL`` block; only the property is repointed (#110/#109/#123).
+    """
+    if not state.mat_seatbelt:
+        return set()
+    law119_mids = {mid for mid in state.mat_seatbelt
+                   if _seatbelt_mat_law(state, mid) == 119}
+    if not law119_mids:
+        return set()
+    return {pid for pid, part in state.parts.items()
+            if part.mid in law119_mids}

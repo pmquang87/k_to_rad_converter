@@ -443,8 +443,9 @@ covering them unlocks a large class of real models.
   for an option nobody has implemented yet.
   Still open in this family: `*ELEMENT_SHELL_COMPOSITE[_LONG]` ply data (above),
   `*ELEMENT_BEAM_{THICKNESS,SECTION,SCALAR,PID,WARPAGE}` extra cards (parsed as
-  "keep the mesh, warn about the rest"), `*ELEMENT_BEAM_OFFSET` eccentricities
-  (would need synthesized rigid links), and `*ELEMENT_SEATBELT*`.
+  "keep the mesh, warn about the rest"), and `*ELEMENT_BEAM_OFFSET`
+  eccentricities (would need synthesized rigid links).
+  `*ELEMENT_SEATBELT*` is **done** — see the Tier-3 Seatbelts entry.
 - `*CONSTRAINED_JOINT_*` (revolute/spherical/… joints) → `/PROP/TYPE45`
   (KJOINT2) + `/SPRING` + a node-derived `/SKEW/FIX`, plus
   `*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED`/`_TRANSLATIONAL` DOF blocks —
@@ -540,7 +541,88 @@ covering them unlocks a large class of real models.
   has no slot that holds both the delay and the pre-stress.
 - `*DATABASE_CROSS_SECTION` → `/SECT` + `/TH/SECTIO` — **done** (_SET direct;
   _PLANE via a geometric straddle resolver; SECFORC → /TH/SECTIO).
-- Seatbelts.
+- Seatbelts → `/SPRING` + `/PROP/TYPE23` + `/MAT/LAW114` and the four
+  restraint devices — **done**: `*ELEMENT_SEATBELT` (1D → `/SPRING`, 2D →
+  `/SHELL` on `/PROP/TYPE9` + `/MAT/LAW119`), `*SECTION_SEATBELT` →
+  `/PROP/TYPE23`, `*MAT_SEATBELT`/`*MAT_B01` (+ both `_2D` spellings) →
+  `/MAT/LAW114` or `/MAT/LAW119` routed by the PROPERTY the part carries,
+  `*ELEMENT_SEATBELT_SLIPRING` → `/SLIPRING/SPRING`,
+  `*ELEMENT_SEATBELT_RETRACTOR` → `/RETRACTOR/SPRING` with
+  `*ELEMENT_SEATBELT_PRETENSIONER` folded onto its card 3,
+  `*ELEMENT_SEATBELT_SENSOR` → `/SENSOR/ACCE|TIME|DIST`,
+  `*ELEMENT_SEATBELT_ACCELEROMETER` → `/ACCEL` + `/SKEW/MOV` + `/ADMAS/0`,
+  `*DATABASE_SBTOUT` → `/TH/SLIPRING` + `/TH/RETRACTOR`, and
+  `*DATABASE_HISTORY_SEATBELT` split per element into `/TH/SPRING` /
+  `/TH/SHEL` / `/TH/SH3N`. The force–strain curve crosses UNTOUCHED (both
+  solvers read force vs engineering strain), the device anchorage node is split
+  off the belt (`ERROR 2030`, which dyna2rad's verbatim `SBRNID` copy hits on
+  any faithful deck), `SID1..SID4` become a `/SENSOR/OR` tree, and
+  `/TH/RETRACTOR` is emitted at all — `grep -rn "TH/RETRACTOR"` over the whole
+  reference converter returns zero hits. See CHANGELOG for the twenty decisions
+  and the eight documented deviations from dyna2rad.
+
+  **Not converted, and warn-dropped by name rather than mis-read**: a
+  SHELL-belt slipring (`SBRNID < 0`) needs `*SET_SHELL_LIST` → `/GRSHEL` and
+  `*SET_NODE` → `/GRNOD` scope resolution plus the starter's collinearity
+  (`ERROR 2051`) and rigid-body (`ERROR 2081`) preconditions; a SHELL-belt
+  **retractor** has no Radioss card at all. `SBSTYP` 2 and 5 (retractor
+  pull-out rate / pull-out) and `SBPRTY` 2, 3 and 9 have no counterpart in the
+  `/SENSOR` and `Tens_typ` families. `*ELEMENT_SEATBELT`'s `SLEN`, the
+  slipring's `FUNCID`, the retractor's `DSID`/`LCFL`/`FLOPT`, the
+  pretensioner's `LMTPIN` and the accelerometer's `IGRAV`/`INTOPT` are each
+  named with the physics they cost.
+
+  **Open for a batch 2:** the shell-belt device scope above (it is a set
+  resolution plus three starter preconditions, not a card gap); `*SECTION_SHELL`
+  `EDGSET` → the 2D belt's flow-direction `/SKEW/MOV` on the property's `Iskew`
+  (without it the starter falls back to the shell edges when it builds the 1D
+  springs, `GlobalModelSdi.cpp:2400-2412`); and `/INISPRI` initial unstretched
+  lengths, which is the only way `SLEN` can be expressed at all — verified
+  reachable: `rinit3.F:703-750` routes `IGTYP == 23` through `R8INI`, which
+  sets `XL0` from the initial-state record, and `r23l114def3.F:274-278` then
+  restores `X0 = XL0` at `TT == 0` instead of taking the geometric length.
+
+  Also open, from the review round: `*SENSOR_SWITCH` has no converter, so the
+  retractor's `LCFL` adaptive multi-level load limiter (a curve whose abscissa
+  is a switch id) cannot be expressed even in part; and the `FORM = -14`
+  coating gate on `*MAT_SEATBELT_2D` — LS-DYNA reads `ECOAT`/`TCOAT` only
+  there, `/MAT/LAW119` has no such gate, and k2rad writes them through with the
+  stiffness difference named rather than second-guessing the deck.
+
+  From the post-review verification round, two whole-`/SPRING`-family gaps that
+  the belt only made more visible:
+
+  * **`*DATABASE_CROSS_SECTION_PLANE` cannot cut a belt.** `inistate.py`'s cut
+    walk covers shell / solid / tshell / beam and has no spring arm, and
+    `_make_cross_sections` writes `grsprg_ID` as a hard `0` even though the
+    `/SECT` card carries a spring group (its own docstring lists
+    `grbric`/`grshel`/`grtrus`/`grbeam`/`grsprg`/`grtria`). So a section plane
+    through a shoulder belt reports no belt force — exactly the quantity a
+    restraint section is usually drawn for. Pre-existing for every `/SPRING`
+    family (`*ELEMENT_DISCRETE` included), not introduced by the belt batch;
+    fixing it means a belt + discrete arm in the walk and a `/GRSPRING` group
+    behind `grsprg_ID`.
+  * **`--auto-gapmin` still does not measure BEAM or `*ELEMENT_DISCRETE`
+    clearance.** The 1D belt arm was added to `gapmin._part_nodes_map` in the
+    verification round; those two families remain missing there for the same
+    reason they always were.
+
+  Also recorded, not a converter defect: **an implicit run of a 1D belt is not
+  solving the belt.** `imp_glob_k.F` builds spring stiffness for `IGTYP` 4, 8,
+  12 and 13 only and answers `SPRING ELEMENT PROP.TYPE = 23 IS NOT AVAILABLE
+  FOR STIFFNESS MATRIX BUILDING, STIFFNESS IGNORED` for `/PROP/TYPE23`
+  (MEASURED: the matrix collapsed from ND=18 NZ=27 to ND=6 NZ=3). k2rad now
+  warns; the fix would have to be an engine one.
+
+  **Not yet covered by a solver run**, so their correctness rests on the unit
+  tests and the card-format sources alone: pretensioner `SBPRTY` 5/6/7/8
+  (`Tens_typ` 1/3/4/5), the `/SENSOR/OR` gate a retractor gets when it names
+  two to four lock sensors, `/SLIPRING/SHELL` and the 2D warn-drops, the
+  slipring `FUNCID`/`LCNFFD`/`LCNFFS` friction curves and the orientation-node
+  `A·γ²` term, and LAW119 `Ireload` / coating / `GAB`. The highest-value
+  additions are `Tens_typ 4` (SBPRTY = 7, the additive pretensioner dyna2rad
+  never produces) and the `/SENSOR/OR` gate, because both are places where
+  k2rad deliberately exceeds dyna2rad.
 
 *Rationale:* each is a self-contained subsystem with its own card family and
 validation needs — sized as a milestone rather than an incremental add.

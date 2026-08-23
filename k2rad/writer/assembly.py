@@ -52,6 +52,12 @@ from .composites import (
     _resolve_icomp_sections,
     _resolve_integration_shells,
 )
+from .seatbelts import (
+    _assign_seatbelt_props,
+    _emit_seatbelt_2d_props,
+    _make_seatbelt_2d_materials,
+    _make_seatbelts,
+)
 from .fabric import (
     _assign_fabric_props,
     _emit_fabric_props,
@@ -129,7 +135,9 @@ from .output import (
     _make_skipped_comment,
     _make_starter_th,
     _make_starter_th_bndout,
+    _make_starter_th_accel,
     _make_starter_th_monv,
+    _make_starter_th_seatbelt,
     _make_starter_th_inter,
     _make_starter_th_nodal_force_group,
     _make_starter_th_node_reac,
@@ -299,7 +307,16 @@ def _make_engine_output(state: ConversionState) -> List[str]:
                state.db_rbdout_dt if state.rbody_ids else 0.0,
                state.db_nodfor_dt if state.db_nodal_force_groups else 0.0,
                #   ABSTAT  -> /TH/MONV over every converted monitored volume
-               state.db_abstat_dt if state.monvol_ids else 0.0)
+               state.db_abstat_dt if state.monvol_ids else 0.0,
+               #   SBTOUT  -> /TH/SLIPRING + /TH/RETRACTOR over the emitted
+               #              seatbelt devices, gated on its OWN consumers for
+               #              the #122 reason: an *DATABASE_SBTOUT on a deck
+               #              whose sliprings and retractors were all dropped
+               #              (or that has none) emits no group at all, so
+               #              counting its dt would only thicken the T01 for
+               #              channels that are not in it.
+               state.db_sbtout_dt
+               if (state.slipring_ids or state.retractor_ids) else 0.0)
     requested = [v for v in _db_dts if v > 0.0]
     # "If DT < 0.0, the result will be output every -DT time steps" (Manual
     # p. 16-7) — a CYCLE-based request, which is a real request even though
@@ -669,7 +686,8 @@ def _make_engine_cpu(state: ConversionState) -> List[str]:
 # though `_make_discrete_springs` warns per part on its own — this stays the one
 # place that answers "did the conversion drop any of my mesh?", and it keeps
 # answering it if that emitter is ever short-circuited or reordered.
-_ORPHAN_ELEM_KINDS = ("shell", "solid", "tshell", "sph", "beam", "discrete")
+_ORPHAN_ELEM_KINDS = ("shell", "solid", "tshell", "sph", "beam", "discrete",
+                      "seatbelt")
 
 # Cap on the PIDs spelled out in the message: a deck missing a whole *INCLUDE
 # can orphan hundreds of parts, and one unreadable 10-kB warning line helps
@@ -690,7 +708,11 @@ def _warn_orphan_elements(state: ConversionState) -> None:
                         # mesh?" and it has to see the SPH cloud too.
                         ("sph", state.sph_elems),
                         ("beam", state.beam_elems),
-                        ("discrete", state.discrete_elems)):
+                        ("discrete", state.discrete_elems),
+                        # A belt element whose PID has no *PART is lost the
+                        # same way any other element is - and losing it loses
+                        # a RESTRAINT, on a run that terminates normally.
+                        ("seatbelt", state.seatbelt_elems)):
         for e in elems:
             if e.pid in state.parts:
                 continue
@@ -936,6 +958,16 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # exactly ONE property class (starter ERROR 3047) and any overlay would
     # replace it. Before _make_parts_and_elements (repoint) and
     # _make_properties (suppress the section's now-unused /PROP/SHELL).
+    # Seatbelts: fold the 2D (shell) belt elements into state.shell_elems and
+    # claim a /PROP/TYPE9 for each 2D belt part. BEFORE _assign_fabric_props
+    # and the three shell property passes it precedes, for the same reason
+    # fabric goes first: /MAT/LAW119 accepts exactly ONE property class
+    # (starter ERROR 3047) and any later overlay would replace it. Before
+    # _make_parts_and_elements (which repoints the /PART and emits the folded
+    # shells) and before _make_properties (which suppresses the section's
+    # now-unused /PROP/SHELL). A no-op, drawing no id, on any deck without a
+    # *MAT_SEATBELT.
+    _assign_seatbelt_props(state)
     _assign_fabric_props(state)
     _assign_composite_props(state)
     # Bind every *SECTION_SHELL QR/IRID reference to its *INTEGRATION_SHELL
@@ -1067,6 +1099,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _pad_surfaces_for_spmd_th_surf(state, lines)
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
+    _warn_duplicate_mat_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1331,6 +1364,48 @@ _PART_CARD_ID_RE = re.compile(r"^/PART/(\d+)\s*$")
 _MAT_CARD_ID_RE = re.compile(r"^/MAT/(?:[A-Z0-9_]+/)*(\d+)\s*$")
 
 
+#: ``/MAT/<law spelling>/<mid>``, capturing the law spelling AND the id, so a
+#: duplicate can be reported as "which two cards".
+_MAT_CARD_LAW_ID_RE = re.compile(r"^/MAT/((?:[A-Z0-9_]+/)*[A-Z0-9_]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_mat_ids(state: ConversionState,
+                            lines: List[str]) -> None:
+    """The /MAT id namespace is GLOBAL across material laws — two cards on one
+    id is starter ``ERROR ID : 79 DUPLICATE ID / IN MATERIAL DEFINITION`` and
+    the deck is refused, usually with a second error on whichever /PART
+    resolved to the wrong one of the pair.
+
+    The twin of :func:`_warn_duplicate_prop_ids`, and it exists for the same
+    reason: k2rad emits every /MAT under the LS-DYNA MID verbatim (there is no
+    material-duplication remap as in dyna2rad), each family guards only the
+    collisions it can see from where it stands, and no single writer sees the
+    FINISHED deck. MEASURED before this scan existed — a *PART on a
+    *SECTION_SEATBELT whose MID was an ordinary *MAT_ELASTIC emitted both
+    ``/MAT/ELAST/<mid>`` and ``/MAT/LAW114/<mid>`` with no diagnostic on any
+    branch, and two belt parts sharing one *MAT_SEATBELT emitted its
+    ``/MAT/LAW114`` twice. Both CAUSES are fixed in writer/seatbelts.py; this
+    removes the CLASS, so the next family cannot make the failure silent again.
+
+    Changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _MAT_CARD_LAW_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for mid, laws in sorted(seen.items()):
+        if len(laws) > 1:
+            state.warn(
+                f"MATERIAL ID {mid} is emitted by more than one /MAT card ("
+                + ", ".join(f"/MAT/{law}/{mid}" for law in laws)
+                + "). The /MAT id namespace is global across material LAWS, so "
+                "the starter refuses the whole deck with ERROR 79 (DUPLICATE "
+                "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
+                "resolves to whichever card came first. Renumber one of the "
+                "*MAT_* cards.")
+
+
 def _warn_dangling_part_materials(state: ConversionState,
                                   lines: List[str]) -> None:
     """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
@@ -1444,6 +1519,16 @@ def _starter_section_registry():
         # *MAT_FABRIC, and it draws no id, so it cannot shift an existing
         # deck's id stream.
         ("fabric_materials",  lambda c: _make_fabric_materials(c.state)),
+        # 2D (shell) seatbelt laws (/MAT/LAW119) - their own section for the
+        # same reason the fabric laws have one: the law and its property are
+        # one decision (writer/seatbelts.py). The 1D belt's /MAT/LAW114 is NOT
+        # here: it is written beside its /PROP/TYPE23 and its /PART in the
+        # seatbelts section far below, because a /PART on a TYPE23 must name a
+        # material whose law is 108/113/114/135 (ERROR 179/1715) and the three
+        # cards are one unit. A no-op, drawing no id, on any deck without a
+        # *MAT_SEATBELT on a *SECTION_SHELL.
+        ("seatbelt_2d_materials",
+                              lambda c: _make_seatbelt_2d_materials(c.state)),
         ("_progress_nodes",   lambda c: _progress_marker(c, 0.08, "Writing nodes")),
         ("nodes",             lambda c: _make_nodes(
             c.state, progress=lambda fr: c.rep(0.08 + 0.32 * fr, "Writing nodes"))),
@@ -1456,6 +1541,8 @@ def _starter_section_registry():
         ("properties",        lambda c: _make_properties(c.state)),
         ("composite_properties", lambda c: _emit_composite_props(c.state)),
         ("fabric_properties",    lambda c: _emit_fabric_props(c.state)),
+        ("seatbelt_2d_properties",
+                                 lambda c: _emit_seatbelt_2d_props(c.state)),
         ("functions",         lambda c: _make_functions(c.state)),
         ("extra_groups",      lambda c: _make_extra_groups(c.state)),
         ("rlinks",            lambda c: _make_rlinks(c.state)),
@@ -1519,6 +1606,17 @@ def _starter_section_registry():
         # cross-section, so a /PROP/BEAM from it is starter ERROR 314-317).
         ("discrete_beams",    lambda c: _make_discrete_beam_connectors(c.state)),
         ("spotweld_ties",     lambda c: _make_constrained_spotweld_springs(c.state)),
+        # Seatbelts: the 1D belt /PART + /PROP/TYPE23 + /MAT/LAW114 + /SPRING,
+        # then the sensors, the accelerometers, the sliprings and the
+        # retractors. AFTER parts_elements, whose write line fills
+        # state.shell_elem_ids (the 2D-belt screen reads it) and BEFORE the /TH
+        # block far below, which lists state.slipring_ids, state.retractor_ids
+        # and state.th_accel_ids - all three filled AT the line that writes
+        # each card, the same ordering constraint the /CLUSTER + swforc and
+        # discrete-connector pairs rely on. It also fills spring_elem_ids
+        # (producer 8), which starter_th screens *DATABASE_HISTORY_SEATBELT
+        # against. A no-op, drawing no id, on any deck without a seatbelt.
+        ("seatbelts",         lambda c: _make_seatbelts(c.state)),
         # The clusters must precede starter_th_swforc: the SWFORC block
         # reports "no weld to output" only when no cluster was emitted
         # either, and it reads state.cluster_ids to know.
@@ -1584,6 +1682,16 @@ def _starter_section_registry():
         # swforc and discrete-connector pairs rely on. A no-op, drawing
         # no id, on any deck without a converted monitored volume.
         ("starter_th_monv", lambda c: _make_starter_th_monv(c.state)),
+        # *DATABASE_SBTOUT -> /TH/SLIPRING + /TH/RETRACTOR, and the
+        # accelerometer group. AFTER the seatbelts section far above, which
+        # fills state.slipring_ids / retractor_ids / th_accel_ids at the line
+        # that writes each card — the same "registry filled at the write line,
+        # consumed by a later section" ordering the /CLUSTER + swforc,
+        # discrete-connector and /TH/MONV pairs rely on. Both are no-ops,
+        # drawing no id, on any deck without a converted seatbelt device.
+        ("starter_th_seatbelt",
+                              lambda c: _make_starter_th_seatbelt(c.state)),
+        ("starter_th_accel", lambda c: _make_starter_th_accel(c.state)),
         ("freq_domain_notes", lambda c: _make_freq_domain_notes(c.state)),
         ("skipped_comment",   lambda c: _make_skipped_comment(c.state)),
         ("end",               lambda c: ["/END", HDR]),

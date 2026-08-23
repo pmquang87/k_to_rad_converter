@@ -712,19 +712,26 @@ class NodeHistoryAndLocal(unittest.TestCase):
 
 # ═════════════════════════════════════════════════════════════════════════════
 class Seatbelt(unittest.TestCase):
-    """*DATABASE_HISTORY_SEATBELT: recognized, honestly not emitted."""
+    """*DATABASE_HISTORY_SEATBELT: LIVE since the seatbelt batch.
 
-    def test_nothing_is_emitted_and_the_gap_is_named(self):
+    Before it, k2rad converted neither ``*ELEMENT_SEATBELT`` nor
+    ``*SECTION_SEATBELT``, so naming the ids would have been ERROR 69 and the
+    request was recorded as recognized-but-not-emitted. Both halves are
+    converted now, so the screen is the only thing left standing between a
+    requested id and a group — and it is what this asserts. The full 1D/2D
+    split lives in ``tests/test_seatbelts.py``.
+    """
+
+    def test_ids_that_name_no_belt_element_are_screened_out(self):
+        """The #106 rule survives the batch: a request naming elements this
+        deck does not define writes NO group and says so, rather than writing
+        a /TH/SPRING the starter refuses with ERROR 69."""
         result, starter, _ = _convert(deck(
             extra="*DATABASE_HISTORY_SEATBELT\n" + _row(1, 2, 3)))
-        self.assertNotIn("/TH/", starter)
+        self.assertNotIn("/TH/SPRING", starter)
         self.assertEqual(result.skipped_keywords, [])
-        notes = dict(result.recognized_not_emitted)
-        self.assertIn("DATABASE_HISTORY_SEATBELT", notes)
-        note = notes["DATABASE_HISTORY_SEATBELT"]
-        self.assertIn("*ELEMENT_SEATBELT", note)
-        self.assertIn("ERROR 69", note)
-        self.assertIn("seatbelt", note.lower())
+        self.assertTrue(_warns(result, "*DATABASE_HISTORY_SEATBELT"))
+        self.assertTrue(_warns(result, "ERROR 69"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
