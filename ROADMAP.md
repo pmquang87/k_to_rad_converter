@@ -716,7 +716,7 @@ validated foundation for further linear analyses:
   (`*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]` → `/IMPFLUX`, `/CONVEC`,
   `/RADIATION`), the richer thermal materials (`*MAT_THERMAL_CWM`,
   `_ORTHOTROPIC`, `_ISOTROPIC_TD`) and the external-field loads
-  (`*LOAD_THERMAL_D`, `_BINOUT`) — every one of them recognized and named in the
+  (`*LOAD_THERMAL_D3PLOT`, `_DYNAIN`, `_BINOUT`) — every one of them recognized and named in the
   conversion log today. Two measured limits also need work: a `/MAT/ELAST` shell
   gets no expansion at all, and the solid path is wrong under a face-clamp
   mount.

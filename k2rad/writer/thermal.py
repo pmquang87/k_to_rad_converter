@@ -69,29 +69,47 @@ __all__ = [
 #: field outright — no plastic-work conversion is part of that model — so the
 #: cell carries the smallest positive number instead of the blank that would
 #: mean 1.0. It also keeps the capacity term away from a 0/0.
+#:
+#: It really does reach BOTH engine source paths, which is worth stating because
+#: they look independent. ``hm_read_therm.F:251`` stores it in ``PM(90)``, and
+#: for a law with ``HEAT_FLAG = 0`` — every law in this converter except LAW4/
+#: 74/84/104/109 — ``cmain3.F:360`` computes the nodal source as
+#: ``DIE = d(EINT)·PM(90)`` before ``cforc3.F:696`` hands ``DIE`` to ``THERMC``
+#: (``thermc.F:83``: ``A = DIE/4`` per node). The ``FHEAT`` accumulators the
+#: laws fill themselves (``sigeps02c.F:222``) are only read on the
+#: ``HEAT_FLAG = 1`` branch.
 _EFRAC_OFF = 1.0e-20
 
-#: The placeholder volumetric heat capacity used when the deck states no
-#: ``*MAT_THERMAL_*`` for the material. With ``AS = BS = 0`` there is no
-#: conduction and with ``EFRAC = 1e-20`` no strain-energy source, so the nodal
-#: heat balance has no term at all and the capacity NEVER divides anything that
-#: is non-zero: any positive value gives bit-identical results. It exists only
-#: so the cell is not zero — ``hm_read_therm.F:236-237`` guards its own division
-#: with ``max(1e-20, RHO_CP)``, but the engine's capacity matrix does not.
+#: The last-resort volumetric heat capacity, used when neither a
+#: ``*MAT_THERMAL_*`` nor the mechanical law itself states one. With
+#: ``AS = BS = 0`` there is no conduction and with ``EFRAC = 1e-20`` no
+#: strain-energy source, so the nodal heat balance has no term at all and the
+#: capacity NEVER divides anything that is non-zero. It exists only so the cell
+#: is not zero — ``hm_read_therm.F:236-237`` guards its own division with
+#: ``max(1e-20, RHO_CP)``, but the engine's capacity matrix does not.
 _RHO_CP_PLACEHOLDER = 1.0
 
 
 def _thermal_solve_active(state: ConversionState) -> bool:
-    """True when the converted deck really runs a thermal solve.
+    """True when the converted deck really MAKES A TEMPERATURE CHANGE.
 
-    Both halves are required: a ``/HEAT/MAT`` arms ``MAT_PARAM%ITHERM``
-    (``hm_read_therm.F:253``) and a driver is what makes the temperature CHANGE.
-    Used to gate the temperature output channels — the #122 rule: ``/TH ... TEMP``
-    without a thermal solve runs clean and writes states of exactly 0.0, and the
-    starter warns only for ``/TH/NODE`` (WARNING 1087), never for ``/TH/BRIC``.
+    Both halves are required, and both are read from what was actually
+    EMITTED, never from what was parsed:
+
+    * a ``/HEAT/MAT`` arms ``MAT_PARAM%ITHERM`` (``hm_read_therm.F:253``);
+    * ``state.thermal_driver_emitted`` is set at the line that writes an
+      ``/IMPTEMP``, i.e. after ``_driver_nodes`` has resolved the set. Several
+      corpus decks state a driver whose ``*SET_NODE_GENERAL`` /
+      ``*SET_NODE_LIST_GENERATE`` k2rad does not read, so the driver is dropped
+      at emission — reading the PARSED list here would call those decks
+      "thermal" and ship a frozen fringe.
+
+    An ``/INITEMP`` alone is deliberately NOT enough: it is a STATE, not a
+    driver. A uniform initial temperature with nothing to change it leaves
+    ``DTEMP`` identically zero on every cycle, so the /THERM_STRESS does
+    nothing and the TEMP channel is a flat line — the #122 case exactly.
     """
-    return bool(state.heat_mat_cards
-                and (state.initial_temperatures or state.imposed_temperatures))
+    return bool(state.heat_mat_cards and state.thermal_driver_emitted)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,8 +169,19 @@ def _emit_therm_stress(mid: int, func_id: int, fscale: float) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _material_registries(state: ConversionState):
-    """Every ``mid -> dataclass`` material dict a /MAT is emitted from, plus the
-    per-mid /FAIL riders that must travel with a cloned material."""
+    """Every ``mid -> dataclass`` material dict a /MAT is emitted from and that
+    a ``*MAT_ADD_THERMAL_EXPANSION`` may have to SPLIT.
+
+    Four /MAT producers are deliberately NOT here, because a
+    ``dataclasses.replace(..., mid=new)`` of their record does not give a
+    working copy — each needs a second card that is keyed elsewhere:
+    ``mat_high_explosive`` (LAW5 carries its own /EOS block),
+    ``mat_laminated_glass`` (a LAW27 PAIR of materials),
+    ``mat_seatbelt`` (LAW114/119 is synthesized per belt PROPERTY, not per mid)
+    and ``mat_spotweld`` (its /MAT/ELAST fallback is written by the connector
+    writer). A card naming one of them is warn-dropped rather than half-split;
+    the warning says so by name instead of claiming the material is unconverted.
+    """
     return [
         state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
         state.mat_johnson_cook, state.mat_aniso_visco, state.mat_rigid,
@@ -271,6 +300,33 @@ def _is_anisotropic(state: ConversionState, mid: int) -> bool:
             or mid in state.mat_soft_tissue)
 
 
+def _expansion_is_resolvable(state: ConversionState, mid: int, card) -> bool:
+    """Can ``_resolve_alpha_function`` produce a Fct_ID_T for this card?
+
+    Asked BEFORE any material is cloned. ``_resolve_alpha_function`` has one
+    failure mode — an ``LCID`` naming no usable ``*DEFINE_CURVE`` — and it has
+    to be known in advance, because a clone made for a card that then emits no
+    /THERM_STRESS/MAT is a duplicate /MAT referenced by a repointed part and
+    carrying no thermal card at all: exactly the "pointless duplicate" the
+    LAW109 refusal is ordered before the split to avoid.
+    """
+    if not card.lcid:
+        return True                      # constant MULT -> synthesized /FUNCT
+    curve = state.curves.get(card.lcid)
+    if curve is not None and len(curve.pts) >= 2:
+        return True
+    state.warn(
+        f"*MAT_ADD_THERMAL_EXPANSION on material {mid}: LCID={card.lcid} "
+        "names no *DEFINE_CURVE in the deck (or one with fewer than two "
+        "points). A Fct_ID_T the starter cannot resolve is NOT an error — "
+        "hm_read_therm_stress.F90:121-128's unknown-function branch is dead "
+        "code (ifunc_alpha is pre-set before the search loop), so the id would "
+        "be stored raw and reinterpreted as an internal function INDEX, giving "
+        "a silently wrong coefficient. No /THERM_STRESS/MAT is emitted for "
+        "this material, and the material is NOT split off for it either.")
+    return False
+
+
 def _resolve_alpha_function(state: ConversionState, mid: int,
                             card) -> Tuple[int, float]:
     """The ``(Fct_ID_T, Fscale_y)`` pair for one material.
@@ -309,16 +365,9 @@ def _resolve_alpha_function(state: ConversionState, mid: int,
     if card.lcid:
         curve = state.curves.get(card.lcid)
         if curve is None or len(curve.pts) < 2:
-            state.warn(
-                f"*MAT_ADD_THERMAL_EXPANSION on material {mid}: LCID="
-                f"{card.lcid} names no *DEFINE_CURVE in the deck (or one with "
-                "fewer than two points). A Fct_ID_T the starter cannot resolve "
-                "is NOT an error — hm_read_therm_stress.F90:121-128's "
-                "unknown-function branch is dead code (ifunc_alpha is pre-set "
-                "before the search loop), so the id would be stored raw and "
-                "reinterpreted as an internal function INDEX, giving a "
-                "silently wrong coefficient. No /THERM_STRESS/MAT is emitted "
-                "for this material.")
+            # Unreachable in practice: every caller pre-checks (and reports)
+            # this with _expansion_is_resolvable, so that a material is never
+            # cloned for a card that ends up emitting nothing.
             return 0, 0.0
         if len(curve.pts) > 2 and any(
                 abs(y - curve.pts[0][1]) > 1e-12 * max(abs(y), 1.0)
@@ -394,13 +443,13 @@ def _resolve_thermal(state: ConversionState) -> None:
         _resolve_expansion(state)
         _resolve_heat_materials(state)
         _resolve_drivers(state)
-    _note_tprint(state)
 
 
 def _note_tprint(state: ConversionState) -> None:
-    """*DATABASE_TPRINT — the thermal ASCII database. Answered here, not at
-    parse time, because the answer depends on whether the CONVERTED deck ends up
-    with a thermal solve, which only this prepass knows.
+    """*DATABASE_TPRINT — the thermal ASCII database. Answered at the END of
+    the EMISSION pass, not at parse time and not in the prepass: the answer
+    depends on whether an /IMPTEMP was actually written, which is only known
+    after ``_driver_nodes`` has resolved every driver's node set.
 
     dyna2rad switches on ``/ANIM/NODA TEMP`` + ``/ANIM/ELEM TEMP`` and appends
     ``TEMP`` to every existing /TH/NODE and /TH/BRIC group (dyna2rad.cxx:497-551)
@@ -476,26 +525,55 @@ def _resolve_expansion(state: ConversionState) -> None:
     for pid, card in sorted(by_pid.items()):
         part = state.parts[pid]
         groups[(part.mid, _expansion_key(card), part.tmid)].append(pid)
-    mids_with_groups: Dict[int, int] = defaultdict(int)
-    for (mid, _k, _t) in groups:
-        mids_with_groups[mid] += 1
 
-    for (mid, _key, _tmid), pids in sorted(
-            groups.items(), key=lambda kv: (kv[0][0], min(kv[1]))):
+    order = sorted(groups.items(), key=lambda kv: (kv[0][0], min(kv[1])))
+    # Every list below is computed ONCE, from the ORIGINAL grouping, before any
+    # part is repointed — recomputing "the parts on this mid" after the first
+    # clone made the second warning describe a state that no longer existed.
+    all_pids_of: Dict[int, List[int]] = {}
+    covered: Dict[int, Set[int]] = defaultdict(set)
+    last_group_on: Dict[int, tuple] = {}
+    for key, pids in order:
+        mid = key[0]
+        all_pids_of.setdefault(
+            mid, sorted(p for p, q in state.parts.items() if q.mid == mid))
+        covered[mid].update(pids)
+        last_group_on[mid] = key
+
+    for key, pids in order:
+        mid = key[0]
         # Refuse BEFORE the split: a clone made for a material that then gets no
         # thermal card at all is a pointless duplicate /MAT in the deck.
         if _refuse_law109(state, mid, pids):
             continue
         card = by_pid[pids[0]]
-        all_pids = sorted(p for p, q in state.parts.items() if q.mid == mid)
+        all_pids = all_pids_of[mid]
+        if not _expansion_is_resolvable(state, mid, card):
+            # Same reason as the LAW109 refusal: an unresolvable coefficient
+            # ends with NO /THERM_STRESS/MAT, so cloning first would leave a
+            # duplicate /MAT behind for nothing.
+            continue
         target = mid
-        if mids_with_groups[mid] > 1 or set(pids) != set(all_pids):
+        # The LAST group on a mid may keep the original id — but only when the
+        # groups together name every part on it. Otherwise the parts the deck
+        # did not name still need the original material, and cloning for all
+        # of them would leave /MAT/<mid> referenced by nobody.
+        keeps_original = (covered[mid] == set(all_pids)
+                          and last_group_on[mid] == key)
+        if not keeps_original and (len(pids) != len(all_pids)
+                                   or set(pids) != set(all_pids)):
             clone = _clone_material(state, mid)
             if clone is None:
                 state.warn(
                     f"*MAT_ADD_THERMAL_EXPANSION on part(s) {pids}: material "
-                    f"{mid} is not converted to any /MAT, so it cannot be "
-                    "split off for the expansion — card dropped.")
+                    f"{mid} cannot be SPLIT off for the expansion — it is "
+                    "either not converted to any /MAT at all, or one of the "
+                    "four producers whose /MAT needs a companion card a plain "
+                    "copy would not carry (*MAT_HIGH_EXPLOSIVE_BURN + its "
+                    "/EOS, *MAT_LAMINATED_GLASS's LAW27 pair, *MAT_SEATBELT's "
+                    "per-property LAW114/119, *MAT_SPOTWELD's connector "
+                    "fallback). Card dropped. Give the part its own material "
+                    "id in the .k file if it must expand on its own.")
                 continue
             for pid in pids:
                 state.parts[pid] = dataclasses.replace(state.parts[pid],
@@ -506,10 +584,11 @@ def _resolve_expansion(state: ConversionState) -> None:
                 "PER PART while /THERM_STRESS/MAT is PER MATERIAL "
                 "(hm_read_therm_stress.F90 keys on mat_ID), so the material was "
                 f"SPLIT: part(s) {pids} now carry a copy under mid {clone} that "
-                f"has the expansion, and mid {mid} keeps the parts the deck did "
-                "not name. dyna2rad instead expands every part on the shared "
-                "material (convertmats.cxx:12236 resolves PID to the part's MID "
-                "and stops there).")
+                f"has the expansion, and mid {mid} keeps part(s) "
+                f"{[p for p in all_pids if p not in set(pids)]}. dyna2rad "
+                "instead expands every part on the shared material "
+                "(convertmats.cxx:12236 resolves PID to the part's MID and "
+                "stops there).")
             target = clone
         func_id, fscale = _resolve_alpha_function(state, target, card)
         if func_id == 0:
@@ -524,6 +603,8 @@ def _resolve_expansion(state: ConversionState) -> None:
             state.warn(
                 f"*MAT_ADD_THERMAL_EXPANSION: ID=-{mid} names a material no "
                 "*PART uses — card dropped.")
+            continue
+        if not _expansion_is_resolvable(state, mid, card):
             continue
         func_id, fscale = _resolve_alpha_function(state, mid, card)
         if func_id == 0:
@@ -610,6 +691,25 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         return
 
     t0_global = _global_initial_temperature(state)
+    if t0_global == 0.0:
+        # A written T0 of exactly 0.0 is indistinguishable from "not stated" on
+        # BOTH cards. hm_read_therm.F:236-237 turns it into PM(23)/RHO_CP and
+        # then into 300 K, and cinmas.F:900-905 (c3inmas.F:1516, pmass.F:233)
+        # overwrite every node whose /INITEMP value is still exactly 0.0 with
+        # that TINI. Measured on thermal-load/main_steel_frame.k, whose header
+        # says "The temperature at time 0 is T=0": the starter echoes
+        # T0 (INITIAL TEMPERATURE) = 300.0.
+        state.warn(
+            "The deck's model-wide temperature at t = 0 is exactly 0.0, which "
+            "is the one value Radioss cannot tell from 'not stated'. "
+            "hm_read_therm.F:236-237 replaces a zero /HEAT/MAT T0 by 300 K, "
+            "and cinmas.F:900-905 then overwrites every node whose /INITEMP "
+            "value is still exactly 0.0 with that same 300 K. On a deck whose "
+            "/IMPTEMP covers every node this is harmless (resol.F:1801-1803 "
+            "calls FIXTEMP once before the first element loop), but a deck "
+            "driven only by an /INITEMP at 0.0, or whose /IMPTEMP covers a "
+            "subset, starts 300 K away from where it says it starts. Shift the "
+            "whole temperature field by a documented offset if that matters.")
     refused: List[int] = []
     for mid in sorted(wanted):
         if mid in state.mat_tabulated_jc:
@@ -619,10 +719,29 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             refused.append(mid)
             state.therm_stress_cards.pop(mid, None)
             continue
-        tm = None
-        for pid, part in state.parts.items():
-            if part.mid == mid:
-                tm = _thermal_material_for_part(state, pid) or tm
+        # ONE /HEAT/MAT per material id, but *PART TMID is per PART — so two
+        # parts sharing a mid may name two DIFFERENT *MAT_THERMAL_ISOTROPICs.
+        # Only one set of values can be written; say which, instead of letting
+        # the dict-iteration order decide silently.
+        tms = {}
+        for pid, part in sorted(state.parts.items()):
+            if part.mid != mid:
+                continue
+            t = _thermal_material_for_part(state, pid)
+            if t is not None:
+                tms.setdefault(t.tmid, t)
+        tm = next(iter(tms.values())) if tms else None
+        if len(tms) > 1:
+            state.warn(
+                f"/HEAT/MAT/{mid}: the parts on this material name "
+                f"{len(tms)} DIFFERENT *MAT_THERMAL_* materials "
+                f"{sorted(tms)} through their *PART TMID. /HEAT/MAT is keyed "
+                "on the MATERIAL id (hm_read_therm.F:135-152), so only ONE "
+                f"set of thermal properties can be written — TMID {tm.tmid} "
+                "is used and the others are DROPPED. (The expansion path "
+                "splits the material on a differing TMID; a TMID-only part "
+                "has no card of its own to split on.) Give the parts distinct "
+                "structural material ids if they need distinct conductivities.")
         rho = _structural_density(state, mid)
         if tm is not None:
             rho_cp = (tm.tro or rho) * tm.hc
@@ -648,7 +767,11 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                     "no capacity at all.")
                 rho_cp = _RHO_CP_PLACEHOLDER
         else:
-            rho_cp = _RHO_CP_PLACEHOLDER
+            # The mechanical law's own volumetric rhoC_p beats the placeholder
+            # whenever it has one: with the local adiabatic branch switched off
+            # (see _warn_law2_self_heating) the FE thermal path is what paces
+            # any heat that does appear, and it divides by exactly this cell.
+            rho_cp = _law_own_rho_cp(state, mid) or _RHO_CP_PLACEHOLDER
             a_s = 0.0
             state.warn(
                 f"/HEAT/MAT/{mid}: no *MAT_THERMAL_* is bound to this material "
@@ -658,11 +781,15 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 "all prescribed by *LOAD_THERMAL_* or *BOUNDARY_TEMPERATURE — "
                 "the thermal expansion then reads exactly the field the deck "
                 "states — but any node NOT covered by a driver keeps its "
-                f"initial temperature forever. RHO0_CP = {_RHO_CP_PLACEHOLDER:g} "
-                "is a placeholder: with no conduction and no strain-energy "
-                "source the nodal heat balance has no term, so its value cannot "
-                "change any result. Add *MAT_THERMAL_ISOTROPIC + *PART TMID if "
-                "the model needs real conduction.")
+                f"initial temperature forever. RHO0_CP = {rho_cp:g} is "
+                + ("the mechanical law's own volumetric rhoC_p."
+                   if rho_cp != _RHO_CP_PLACEHOLDER else
+                   "a placeholder: with no conduction and no strain-energy "
+                   "source (EFRAC = 1e-20 scales the nodal source term at "
+                   "cmain3.F:360) the nodal heat balance has no term, so its "
+                   "value cannot change any result.")
+                + " Add *MAT_THERMAL_ISOTROPIC + *PART TMID if the model needs "
+                "real conduction.")
         t1 = _law_melt_temperature(state, mid)
         if t1:
             state.warn(
@@ -679,8 +806,11 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 f"/HEAT/MAT/{mid}: RHO0_CP = {rho_cp:g} OVERRIDES the material "
                 f"law's own rhoC_p = {law_rhocp:g} (starter WARNING 765, "
                 "'SPECIFIC HEAT DEFINED IS DIFFERENT FROM ... /HEAT/MAT ... "
-                "WILL BE USED'). The law's adiabatic plastic-work heating now "
-                "uses the /HEAT/MAT value.")
+                "WILL BE USED'). It is the FE thermal solve's nodal capacity "
+                "from here on; the law's own value is no longer used for "
+                "anything, because its local adiabatic branch is switched off "
+                "by the presence of the /HEAT/MAT.")
+        _warn_law2_self_heating(state, mid)
         state.heat_mat_cards[mid] = (
             t0_global if t0_global is not None else 0.0,
             rho_cp, a_s, 0.0, t1, _EFRAC_OFF)
@@ -694,6 +824,53 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             "(sigeps109.F:411-414), so none is written even though a *PART TMID "
             "names a *MAT_THERMAL_* for them - the thermal properties are "
             "DROPPED rather than the law's own physics.")
+
+
+def _warn_law2_self_heating(state: ConversionState, mid: int) -> None:
+    """A /HEAT/MAT takes *MAT_015 (/MAT/LAW2, /MAT/LAW4) OFF its own adiabatic
+    plastic-work heating — a silent change of physics that must be named.
+
+    Both element families gate the LOCAL update on there being NO thermal
+    solve, not on the capacity:
+      ``sigeps02c.F:220-231``  ``IF (JTHE /= 0) THEN FHEAT += SIGY*DPLA*VOL*EFRAC``
+                               ``ELSEIF (RHOCP > ZERO) TEMPEL += SIGY*DPLA/RHOCP``
+      ``m2law.F:547-560``      the same pair for solids.
+    With a ``/HEAT/MAT`` present ``JTHE /= 0``, so the ``ELSEIF`` never runs and
+    the element temperature stops rising from plastic work. What replaces it is
+    the FE thermal path, and LAW2 leaves ``MAT_PARAM%HEAT_FLAG = 0`` (only
+    mat004/074/084/104/109 set it, ``hm_read_mat04.F:274`` &c.), so
+    ``cforc3.F:696`` feeds ``THERMC`` the EFRAC-scaled deformation energy
+    ``DIE`` (``cmain3.F:360``) rather than the law's own ``FHEAT`` — and
+    ``EFRAC`` is deliberately written at 1e-20 here, because
+    ``*MAT_ADD_THERMAL_EXPANSION`` states nothing about heat generation.
+
+    The pair is still emitted (the deck asked for the expansion, and the
+    Johnson-Cook ``T*`` softening still follows the PRESCRIBED field, with
+    ``T1`` carrying the law's own melting temperature). Refusing it — the
+    LAW109 treatment — is not right here: LAW109 integrates a temperature the
+    /HEAT/MAT would overwrite outright, while LAW2 only loses a source term.
+    But it is a different model from the one the .k file states, so it is
+    reported, not assumed acceptable.
+    """
+    m = state.mat_johnson_cook.get(mid)
+    if m is None:
+        return
+    state.warn(
+        f"/HEAT/MAT/{mid} on a *MAT_015-derived law (/MAT/LAW2 or LAW4): the "
+        "law's OWN adiabatic plastic-work heating is switched OFF by the "
+        "presence of a thermal solve. sigeps02c.F:220 (shells) and "
+        "m2law.F:547 (solids) read 'IF (JTHE /= 0) ... ELSEIF (RHOCP > ZERO) "
+        "TEMPEL += SIGY*DPLA/RHOCP', so the local branch is skipped as soon as "
+        "the material has a /HEAT/MAT. What replaces it is the FE thermal "
+        "path, whose nodal source is EFRAC-scaled (cmain3.F:360, PM(90) = "
+        "EFRAC) and EFRAC is written at 1e-20 because "
+        "*MAT_ADD_THERMAL_EXPANSION / *MAT_THERMAL_ISOTROPIC state nothing "
+        "about heat generation. Net effect: the element temperature now "
+        "follows ONLY the prescribed *LOAD_THERMAL_* / *BOUNDARY_TEMPERATURE "
+        "field, and the Johnson-Cook thermal softening no longer develops from "
+        "plastic work. If the run needs adiabatic self-heating, drop the "
+        "thermal card from THIS part (the material can be split by giving the "
+        "part its own *MAT_015).")
 
 
 def _law_own_rho_cp(state: ConversionState, mid: int) -> float:
@@ -710,35 +887,75 @@ def _law_own_rho_cp(state: ConversionState, mid: int) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _driver_nodes(state: ConversionState, sid: int, is_node: bool,
-                  label: str, seen: Optional[Set[Tuple[int, bool]]] = None
-                  ) -> List[int]:
+                  label: str, seen: Optional[Set[Tuple[int, bool]]] = None,
+                  nsidex: int = 0, boxid: int = 0,
+                  quiet: bool = False) -> List[int]:
     """The node ids one driver applies to.
 
     ``sid = 0`` on a set-based card means EVERY node in the model (Vol I R17,
     ``*INITIAL_TEMPERATURE_SET``: *"NSID = 0 ... all nodes"*; the
     ``*LOAD_THERMAL_*`` cards default the same way).
 
-    *seen* de-duplicates the "set is not defined" warning: the emitter asks for
-    the same driver twice (once for the /IMPTEMP, once for the /TH/NODE TEMP
-    group) and one missing set must not be reported twice.
+    ``NSIDEX`` is *"Nodal set ID containing nodes that are exempted from the
+    imposed temperature"* (pp.33-166/33-179) and is SUBTRACTED here: /IMPTEMP
+    is a hard Dirichlet reset applied every cycle (fixtemp.F:180-200), so a
+    node the card excludes must not be in its /GRNOD at all. ``BOXID``
+    restricts NSID to a ``*DEFINE_BOX``, which k2rad does not resolve — it is
+    named rather than silently ignored.
+
+    *seen* de-duplicates the missing-set warning: the emitter asks for the same
+    driver twice (once for the /IMPTEMP, once for the /TH/NODE TEMP group) and
+    one missing set must not be reported twice. *quiet* silences the per-driver
+    diagnostics for the second, node-list-only pass.
     """
     if is_node:
         return [sid] if sid in state.nodes else []
     if sid == 0:
-        return sorted(state.nodes)
-    ns = state.node_sets.get(sid)
-    if ns is None:
-        if seen is None or (sid, is_node) not in seen:
-            state.warn(
-                f"{label}: *SET_NODE {sid} is not defined in the converted "
-                "deck, so there is no /GRNOD to impose the temperature on — "
-                "card dropped. (A *SET_NODE_GENERAL or *SET_NODE_COLUMN the "
-                "converter does not read leaves exactly this hole.)")
-        if seen is not None:
-            seen.add((sid, is_node))
-        return []
-    nodes = ns[1] if isinstance(ns, tuple) else ns
-    return [n for n in nodes if n in state.nodes]
+        nodes: List[int] = sorted(state.nodes)
+    else:
+        ns = state.node_sets.get(sid)
+        if ns is None:
+            if seen is None or (sid, is_node) not in seen:
+                state.warn(
+                    f"{label}: *SET_NODE {sid} is not defined in the converted "
+                    "deck, so there is no /GRNOD to impose the temperature on "
+                    "— card dropped. (A *SET_NODE_GENERAL or *SET_NODE_COLUMN "
+                    "the converter does not read leaves exactly this hole.)")
+            if seen is not None:
+                seen.add((sid, is_node))
+            return []
+        nodes = [n for n in (ns[1] if isinstance(ns, tuple) else ns)
+                 if n in state.nodes]
+    if boxid and not quiet:
+        state.warn(
+            f"{label}: BOXID={boxid} restricts the driven nodes to the ones "
+            "inside a *DEFINE_BOX ('All nodes in box which belong to NSID are "
+            "initialized. Others are excluded', Vol I R17 p.33-166). k2rad "
+            "does not resolve *DEFINE_BOX for this card, so the restriction is "
+            "IGNORED and the temperature reaches every node of the set — "
+            "replace the box by an explicit *SET_NODE if that matters.")
+    if nsidex:
+        ex = state.node_sets.get(nsidex)
+        if ex is None:
+            if not quiet:
+                state.warn(
+                    f"{label}: NSIDEX={nsidex} names the nodes EXEMPTED from "
+                    "the imposed temperature, but that *SET_NODE is not in the "
+                    "converted deck, so nothing can be subtracted — the "
+                    "temperature reaches nodes the card excludes.")
+        else:
+            drop = set(ex[1] if isinstance(ex, tuple) else ex)
+            kept = [n for n in nodes if n not in drop]
+            if not quiet and len(kept) != len(nodes):
+                state.warn(
+                    f"{label}: NSIDEX={nsidex} exempts "
+                    f"{len(nodes) - len(kept)} node(s) from the imposed "
+                    "temperature (Vol I R17 p.33-166); they are left OUT of "
+                    "the /IMPTEMP group, because /IMPTEMP is a hard Dirichlet "
+                    "reset every cycle (fixtemp.F:180-200) and would otherwise "
+                    "drive them anyway.")
+            nodes = kept
+    return nodes
 
 
 def _resolve_drivers(state: ConversionState) -> None:
@@ -773,7 +990,33 @@ def _resolve_drivers(state: ConversionState) -> None:
                     "REFERENCE TO FUNCTION ID=0' once PER NODE — so the driver "
                     "is dropped rather than emitted with a dangling id.")
                 continue
-            if d.offset:
+            pts = list(curve.pts)
+            shifted = False
+            if d.tbirth:
+                shifted = True
+                # /IMPTEMP's T_start does TWO things where LS-DYNA's TBIRTH
+                # does one. fixtemp.F:118-129 computes TS = TT - STARTT and
+                # evaluates the function at TS*FACX, so T_start is BOTH the
+                # activation gate AND the curve's time origin; LS-DYNA reads
+                # its (t, T) pairs at absolute time and only ignores the
+                # constraint before TBIRTH ("Before this point in time the
+                # temperature constraint is ignored", Vol I R17 p.5-151).
+                # Pre-shifting the abscissae by -TBIRTH makes the engine
+                # evaluate f(t) again: g(t - TBIRTH) = f(t). Points before
+                # TBIRTH are kept (negative abscissae are never reached inside
+                # the window) so the interpolation at t = TBIRTH is exact.
+                pts = [(x - d.tbirth, y) for x, y in pts]
+                state.warn(
+                    f"{label}: TBIRTH={d.tbirth:g} becomes /IMPTEMP's T_start, "
+                    "which is BOTH the activation gate and the curve's time "
+                    "origin (fixtemp.F:118-129 evaluates the function at "
+                    "t - T_start, while LS-DYNA reads its (t, T) pairs at "
+                    "absolute time). The driver curve is therefore emitted as "
+                    f"a copy shifted by -{d.tbirth:g} so the two agree; the "
+                    "shifted copy is what the deck carries, not the original "
+                    "curve id.")
+            ts = d.scale
+            if d.offset or shifted:
                 # T = TB + TS*f(t) (Vol I R17, *LOAD_THERMAL_VARIABLE Remark 1).
                 # /IMPTEMP computes Fscale_y*f((t-T_start)/Ascale_x) only
                 # (fixtemp.F:180-200) — there is no additive slot — so the
@@ -782,14 +1025,16 @@ def _resolve_drivers(state: ConversionState) -> None:
                 state.curves[fid] = Curve(
                     lcid=fid, title=f"Auto_imptemp_{fid}",
                     sfa=1.0, sfo=1.0, offa=0.0, offo=0.0,
-                    pts=[(x, d.offset + d.scale * y) for x, y in curve.pts])
+                    pts=[(x, d.offset + ts * y) for x, y in pts])
                 state.curve_order.append(fid)
                 d.func_id = fid
                 d.scale = 1.0
-                d.initial_temp = d.offset + d.scale * curve.pts[0][1]
             else:
                 d.func_id = d.lcid
-                d.initial_temp = d.scale * curve.pts[0][1]
+            # "T0 = TB + TS x f(0)" (Vol I R17 p.33-180 Remark 1) — always
+            # computed from the ORIGINAL scale, never from the 1.0 the
+            # synthesized curve has just absorbed.
+            d.initial_temp = d.offset + ts * curve.pts[0][1]
             continue
         # Constant temperature: a two-point function, never func_IDT = 0.
         value = d.const + d.offset
@@ -829,6 +1074,7 @@ def _resolve_drivers(state: ConversionState) -> None:
 def _make_thermal(state: ConversionState) -> List[str]:
     """/HEAT/MAT + /THERM_STRESS/MAT + /INITEMP + /IMPTEMP (+ their /GRNODs)."""
     if not (state.heat_mat_cards or state.therm_stress_cards):
+        _note_tprint(state)
         return []
     lines: List[str] = [
         "#-  THERMAL (*MAT_ADD_THERMAL_EXPANSION / *MAT_THERMAL_* / "
@@ -842,7 +1088,36 @@ def _make_thermal(state: ConversionState) -> List[str]:
     _warn_expansion_consumers(state)
 
     seen: Set[Tuple[int, bool]] = set()
+    grnods: Dict[Tuple, int] = {}
+
+    def _group(key: Tuple, tag: str, nodes: List[int]) -> Tuple[int, List[str]]:
+        """One /GRNOD per distinct node list, reused across drivers.
+
+        A driver over NSID = 0 carries the WHOLE node table, and a deck with
+        several such drivers (07_metalstrip.k has three *INITIAL_TEMPERATURE
+        rows differing only in LOC) would otherwise write the full table once
+        per driver AND again for the /TH group.
+        """
+        gid = grnods.get(key)
+        if gid is not None:
+            return gid, []
+        gid = state.next_grnod_id()
+        grnods[key] = gid
+        return gid, _emit_grnod_node(gid, f"{tag}_{gid}", nodes)
+
+    # Rows that differ only in a cell Radioss has no slot for (LOC) state the
+    # SAME /INITEMP; emitting each one writes a duplicate group and a duplicate
+    # card that the later one simply overwrites.
+    uniq_init: List[InitialTemperature] = []
+    init_seen: Set[Tuple] = set()
     for it in state.initial_temperatures:
+        k = (it.sid, it.is_node, it.temp)
+        if k in init_seen:
+            continue
+        init_seen.add(k)
+        uniq_init.append(it)
+
+    for it in uniq_init:
         label = f"*INITIAL_TEMPERATURE (set/node {it.sid})"
         nodes = _driver_nodes(state, it.sid, it.is_node, label, seen)
         if not nodes:
@@ -852,9 +1127,9 @@ def _make_thermal(state: ConversionState) -> List[str]:
                 f"{label}: LOC={it.loc} names a thick-thermal-shell SURFACE; "
                 "/INITEMP sets one temperature per NODE, so the "
                 "through-thickness distinction is dropped.")
-        gid = state.next_grnod_id()
+        gid, grp = _group((it.sid, it.is_node, 0, 0), "TEMPNODES", nodes)
         tid = state.next_id()
-        lines += _emit_grnod_node(gid, f"INITEMP_{tid}", nodes)
+        lines += grp
         lines += [
             f"/INITEMP/{tid}",
             f"initial_temperature_{tid}",
@@ -869,12 +1144,15 @@ def _make_thermal(state: ConversionState) -> List[str]:
 
     for d in state.imposed_temperatures:
         label = f"{d.source} (set/node {d.sid})"
-        nodes = _driver_nodes(state, d.sid, d.is_node, label, seen)
+        nodes = _driver_nodes(state, d.sid, d.is_node, label, seen,
+                              d.nsidex, d.boxid)
         if not nodes:
             continue
-        gid = state.next_grnod_id()
+        state.thermal_driver_emitted = True
+        gid, grp = _group((d.sid, d.is_node, d.nsidex, d.boxid),
+                          "TEMPNODES", nodes)
         tid = state.next_id()
-        lines += _emit_grnod_node(gid, f"IMPTEMP_{tid}", nodes)
+        lines += grp
         stop = d.tdeath if 0.0 < d.tdeath < 1.0e19 else 0.0
         lines += [
             f"/IMPTEMP/{tid}",
@@ -892,8 +1170,37 @@ def _make_thermal(state: ConversionState) -> List[str]:
             "reset applied every cycle while T_start <= t <= T_stop "
             "(fixtemp.F:180-200); outside that window the nodes are untouched "
             "and simply conduct.")
+    _warn_inert_expansion(state)
     lines += _make_thermal_output(state, seen)
+    _note_tprint(state)
     return lines
+
+
+def _warn_inert_expansion(state: ConversionState) -> None:
+    """The mirror of the "driver but no /HEAT/MAT" guard in ``_resolve_drivers``.
+
+    Radioss's thermal expansion is INCREMENTAL — ``ETH = alpha(T)·(T_n −
+    T_{n−1})`` — so with no ``/IMPTEMP`` in the emitted deck ``DTEMP`` is
+    identically zero on every cycle and the ``/THERM_STRESS/MAT`` does exactly
+    nothing while the starter reports 0 errors and echoes it happily. The pair
+    is still WRITTEN (dropping it would lose the deck's own statement, and an
+    /INITEMP-only deck is a legitimate restart-ready state), but it must not
+    pass for a working expansion.
+    """
+    if not state.therm_stress_cards or state.thermal_driver_emitted:
+        return
+    state.warn(
+        "/THERM_STRESS/MAT on material(s) "
+        f"{sorted(state.therm_stress_cards)} is INERT on this deck: no "
+        "/IMPTEMP was emitted, so no node's temperature ever changes. Radioss "
+        "expansion is incremental (ETH = alpha(T)*(T_n - T_(n-1)), "
+        "cmain3.F:235-240 / mmain.F90:770-786), and an /INITEMP alone is a "
+        "STATE, not a driver — the field it sets is simply held. The cards are "
+        "still written (they are the deck's own statement and the starter "
+        "accepts them at 0 errors), but nothing expands until the deck carries "
+        "a *LOAD_THERMAL_* or *BOUNDARY_TEMPERATURE whose node set k2rad can "
+        "resolve. The temperature OUTPUT channels are left out for the same "
+        "reason.")
 
 
 def _make_thermal_output(state: ConversionState,
@@ -914,17 +1221,11 @@ def _make_thermal_output(state: ConversionState,
     nodes: List[int] = []
     have: Set[int] = set()
     for d in state.imposed_temperatures:
-        for n in _driver_nodes(state, d.sid, d.is_node, d.source, seen):
+        for n in _driver_nodes(state, d.sid, d.is_node, d.source, seen,
+                               d.nsidex, d.boxid, quiet=True):
             if n not in have:
                 have.add(n)
                 nodes.append(n)
-    if not nodes:
-        for it in state.initial_temperatures:
-            for n in _driver_nodes(state, it.sid, it.is_node,
-                                   "*INITIAL_TEMPERATURE", seen):
-                if n not in have:
-                    have.add(n)
-                    nodes.append(n)
     if not nodes:
         return []
     th_id = state.next_id()

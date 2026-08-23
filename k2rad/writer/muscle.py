@@ -420,8 +420,11 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
                    "resolvable, distinct nodes — no /PROP/TYPE46 emitted.")
         return None
     sno = mat.sno if mat.sno else 1.0
-    # SFR scales the strain-rate normalisation. As a CURVE it is a function of
-    # something /PROP/TYPE46's Scale_v — a single number applied every cycle
+    # SFR scales the strain-rate normalisation. Its CONSTANT branch is 1.0 by
+    # definition — "GE.0.0: Constant value of 1.0 is used" (Vol II R17
+    # p.2-1072), so the parser already returns 1.0 for every non-negative cell.
+    # As a CURVE it is a function of the activation level, which
+    # /PROP/TYPE46's Scale_v — a single number applied every cycle
     # (ruser46.F:199) — cannot follow, so it is named and dropped with SFR = 1.
     sfr = mat.sfr if mat.sfr else 1.0
     if mat.sfr_lcid:
@@ -448,7 +451,7 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
                                "ALM", _new_funct, f"MatL156_ALM_{mat.mid}")
     # ── f2: active tension vs stretch ratio.
     fct2 = _resolve_lambda_curve(
-        state, label, mat.svs, mat.svs_lcid, "SVS", sno, 0.0, 1.0,
+        state, label, mat.svs_lcid, "SVS", sno, 1.0,
         _new_funct, f"MatL156_SVS_{mat.mid}")
     # ── f3: active tension vs NORMALISED strain rate. Vel_max*Scale_v is built
     # so the Radioss abscissa IS eps_bar_dot, so the curve needs no transform.
@@ -462,6 +465,9 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
     fct4 = _resolve_ssp(state, label, mat, sno, _new_funct)
 
     force = mat.pis * area
+    if force == 0.0:
+        fct4 = _zero_passive(state, label, "PIS*A", _new_funct,
+                             f"MatL156_SSP_{mat.mid}")
     prop_id = _muscle_prop_id(state, pid)
     title = part.title or f"MUSCLE_{pid}"
     lines = list(funct_lines)
@@ -596,6 +602,9 @@ def _muscle_discrete_part(state: ConversionState, pid: int, elems, emit_funct):
     # SV scales the velocity abscissa. As a CURVE it is a function of the
     # activation level, which /PROP/TYPE46 has no slot for (Scale_v is one
     # number) — named and dropped, with SV = 1.
+    # SV's constant branch is 1.0 by definition — "GE.0.0: Constant value of
+    # 1.0 is used" (Vol II R17 p.2-2096) — so the parser hands back 1.0 for
+    # every non-negative cell and this is only the curve-form drop.
     sv = mat.sv
     if mat.sv_lcid:
         state.warn(
@@ -609,13 +618,16 @@ def _muscle_discrete_part(state: ConversionState, pid: int, elems, emit_funct):
         sv = 1.0
     if sv == 0.0:
         sv = 1.0
-    fct2 = _resolve_length_curve(state, label, mat.tl, mat.tl_lcid, "TL",
+    fct2 = _resolve_length_curve(state, label, mat.tl_lcid, "TL",
                                  l0, l_init, _new_funct,
                                  f"MatS15_TL_{mat.mid}")
-    fct3 = _resolve_velocity_curve(state, label, mat.tv, mat.tv_lcid, "TV",
+    fct3 = _resolve_velocity_curve(state, label, mat.tv_lcid, "TV",
                                    mat.vmax, sv, _new_funct,
                                    f"MatS15_TV_{mat.mid}")
     fct4 = _resolve_fpe(state, label, mat, l0, l_init, _new_funct)
+    if mat.fmax == 0.0:
+        fct4 = _zero_passive(state, label, "FMAX", _new_funct,
+                             f"MatS15_FPE_{mat.mid}")
 
     prop_id = _muscle_prop_id(state, pid)
     title = part.title or f"MUSCLE_{pid}"
@@ -682,6 +694,31 @@ def _muscle_prop_id(state: ConversionState, pid: int) -> int:
 # Function-slot resolvers (shared by the two sides)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _zero_passive(state, label, what, new_funct, title) -> int:
+    """A muscle that states NO force scale must also state no passive force.
+
+    ``Scale_F`` multiplies the fct_id4 ordinate and nothing else
+    (``ruser46.F:203``: ``FUX4 = GET_U_FUNC(IFUNC4,DELTALEN)*SCALEF``), and
+    ``hm_read_prop46.F:179`` turns a zero into **ONE FORCE UNIT**
+    (``IF (SCALEF == ZERO) SCALEF = ONE*FSCALE``) — a blank Radioss cell is a
+    derivation request, not a zero. fct_id4 carries the DIMENSIONLESS h /
+    f_PE, whose ordinate routinely reaches double digits, so a zero-strength
+    muscle would develop a fabricated passive force of that many force units
+    while its active term is correctly zero. The passive slot is therefore
+    written as a constant-zero function rather than left to the default.
+    """
+    state.warn(
+        f"{label}: {what} = 0, so the muscle states NO force scale. "
+        "/PROP/TYPE46's Scale_F multiplies the passive function fct_id4 "
+        "(ruser46.F:203) and hm_read_prop46.F:179 turns a zero Scale_F into "
+        "ONE FORCE UNIT, which would give a zero-strength muscle a fabricated "
+        "passive force in the units of the deck. The passive term is written "
+        "as a constant-zero function instead; the active term is correctly "
+        "zero because Force = 0 multiplies it. Set the peak force on the .k "
+        "card if the muscle is meant to pull.")
+    return new_funct(title + "_noforce", _const_curve(0.0))
+
+
 def _curve_points(state: ConversionState, lcid: int):
     c = state.curves.get(lcid)
     if c is None or len(c.pts) < 2:
@@ -727,8 +764,8 @@ def _verbatim_curve(state, label, lcid, field, new_funct, title, fallback):
     return lcid
 
 
-def _resolve_lambda_curve(state, label, value, lcid, field, sno,
-                          _unused, fallback, new_funct, title):
+def _resolve_lambda_curve(state, label, lcid, field, sno,
+                          fallback, new_funct, title):
     """``SVS`` → fct_id2: active tension vs the STRETCH RATIO lambda.
 
     Radioss's Epsi=0 abscissa is ``L/L0 - 1`` and ``lambda = SNO*L/L0``, so the
@@ -746,13 +783,17 @@ def _resolve_lambda_curve(state, label, value, lcid, field, sno,
     return new_funct(title, [(lam / sno - 1.0, y) for lam, y in pts])
 
 
-def _resolve_length_curve(state, label, value, lcid, field, l0, l_init,
+def _resolve_length_curve(state, label, lcid, field, l0, l_init,
                           new_funct, title):
     """``TL`` → fct_id2 on the S15 side: active tension vs the length ratio
     ``L = L_M/L0``. Radioss's Epsi=1 abscissa is the ELONGATION, so
-    ``X = L*L0 - l_init``."""
+    ``X = L*L0 - l_init``.
+
+    The constant branch is 1.0 by definition, never the cell's own number:
+    *"TL ... GE.0.0: Constant value of 1.0 is used"* (Vol II R17 p.2-2096).
+    """
     if not lcid:
-        return new_funct(title, _const_curve(value if value else 1.0))
+        return new_funct(title, _const_curve(1.0))
     pts = _curve_points(state, lcid)
     if pts is None:
         state.warn(
@@ -763,13 +804,17 @@ def _resolve_length_curve(state, label, value, lcid, field, l0, l_init,
     return new_funct(title, [(ratio * l0 - l_init, y) for ratio, y in pts])
 
 
-def _resolve_velocity_curve(state, label, value, lcid, field, vmax, sv,
+def _resolve_velocity_curve(state, label, lcid, field, vmax, sv,
                             new_funct, title):
     """``TV`` → fct_id3 on the S15 side: active tension vs the normalised
     velocity ``V = V_M/(V_max*S_v)``. Radioss's Epsi=1 abscissa is the raw
-    velocity, so ``v = V*VMAX*SV``."""
+    velocity, so ``v = V*VMAX*SV``.
+
+    The constant branch is 1.0 by definition, never the cell's own number:
+    *"TV ... GE.0.0: Constant value of 1.0 is used"* (Vol II R17 p.2-2096).
+    """
     if not lcid:
-        return new_funct(title, _const_curve(value if value else 1.0))
+        return new_funct(title, _const_curve(1.0))
     pts = _curve_points(state, lcid)
     if pts is None:
         state.warn(

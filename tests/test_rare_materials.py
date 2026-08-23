@@ -505,7 +505,7 @@ def _muscle156(card2="       1.0       1.0       1.0       1.0       1.0\n",
     return MUSCLE156.replace("{CARD2}", card2).replace("{EXTRA}", extra)
 
 
-def _muscle_s15(tl=1.0, tv=1.0, fpe=1.0, l0=10.0, sv=0.8, extra=""):
+def _muscle_s15(tl=1.0, tv=1.0, fpe=1.0, l0=10.0, sv=1.0, extra=""):
     return (MUSCLE_S15
             .replace("{CARD1}",
                      _row(5, l0, 100.0, sv, 0.5, 1000.0, tl, tv) + "\n")
@@ -535,10 +535,23 @@ class MuscleParseTests(unittest.TestCase):
     def test_mat_156_positive_scale_cells_are_the_constant_one(self):
         # "GE.0.0: Constant value of 1.0 is used" — the number itself is
         # DISCARDED (mat_156.cfg:45/49/53).
-        state = _dispatch(_muscle156(card2=_row(0.5, 7.0, 8.0, 9.0, 0.0) + "\n"))
-        m = state.mat_muscle[1]
-        self.assertAlmostEqual(m.sfr, 7.0)   # kept raw; the writer reads 1.0
+        r = _dispatch(_muscle156(card2=_row(0.5, 7.0, 8.0, 9.0, 0.0) + "\n"))
+        m = r.mat_muscle[1]
+        self.assertAlmostEqual(m.sfr, 1.0)
+        self.assertAlmostEqual(m.svs, 1.0)
+        self.assertAlmostEqual(m.svr, 1.0)
         self.assertEqual((m.svs_lcid, m.svr_lcid), (0, 0))
+        # ALM on the same card is the CONTRAST — "GE.0.0: Constant value of
+        # ALM is used" — so its 0.5 does survive.
+        self.assertAlmostEqual(m.alm, 0.5)
+        w = " ".join(r.warnings)
+        self.assertIn("SFR=7", w)
+        self.assertIn("Constant value of 1.0 is used", w)
+
+    def test_scale_cell_of_exactly_one_or_zero_is_not_warned(self):
+        r = _dispatch(_muscle156(card2=_row(0.5, 1.0, 0.0, 1.0, 0.0) + "\n"))
+        self.assertNotIn("Constant value of 1.0 is used",
+                         " ".join(r.warnings))
 
     def test_mat_s15_blank_defaults_are_not_zero(self):
         deck = ("*KEYWORD\n*MAT_SPRING_MUSCLE\n" + _row(5) + "\n"
@@ -555,7 +568,7 @@ class MuscleParseTests(unittest.TestCase):
         m = state.mat_spring_muscle[5]
         self.assertAlmostEqual(m.l0, 10.0)
         self.assertAlmostEqual(m.vmax, 100.0)
-        self.assertAlmostEqual(m.sv, 0.8)
+        self.assertAlmostEqual(m.sv, 1.0)
         self.assertAlmostEqual(m.a, 0.5)
         self.assertAlmostEqual(m.fmax, 1000.0)
         self.assertEqual((m.tl_lcid, m.tv_lcid), (5, 6))
@@ -749,8 +762,19 @@ class MuscleS15EmitTests(unittest.TestCase):
                  + _row16(1.0, 0.5) + "\n")
         _r, starter = _convert(_muscle_s15(tv=-6, fpe=1.0, extra=extra))
         pts = _funct_points(starter, _funct_named(starter, "MatS15_TV_5"))
-        # VMAX * SV = 100 * 0.8 = 80
-        self.assertEqual([round(x, 10) for x, _y in pts], [-80.0, 0.0, 80.0])
+        # VMAX * SV = 100 * 1.0 = 100. SV is not a coefficient the deck can
+        # choose: "SV ... GE.0.0: Constant value of 1.0 is used" (p.2-2096).
+        self.assertEqual([round(x, 10) for x, _y in pts], [-100.0, 0.0, 100.0])
+
+    def test_positive_sv_is_discarded_not_used_as_a_factor(self):
+        extra = ("*DEFINE_CURVE\n" + _row(6) + "\n"
+                 + _row16(-1.0, 1.8) + "\n" + _row16(0.0, 1.0) + "\n"
+                 + _row16(1.0, 0.5) + "\n")
+        r, starter = _convert(_muscle_s15(tv=-6, fpe=1.0, sv=0.8, extra=extra))
+        pts = _funct_points(starter, _funct_named(starter, "MatS15_TV_5"))
+        # 100*0.8 = 80 is the naive reading; LS-DYNA uses SV = 1.
+        self.assertEqual([round(x, 10) for x, _y in pts], [-100.0, 0.0, 100.0])
+        self.assertIn("SV=0.8", " ".join(r.warnings))
 
     def test_sv_curve_is_warn_dropped_by_name(self):
         extra = ("*DEFINE_CURVE\n" + _row(7) + "\n"
@@ -783,6 +807,36 @@ class MuscleS15EmitTests(unittest.TestCase):
     def test_l0_mismatch_is_warned_by_name(self):
         r, _s = _convert(_muscle_s15(fpe=0.0, l0=7.0))
         self.assertIn("states L0 = 7", " ".join(r.warnings))
+
+    def test_length_abscissa_uses_l0_and_the_mesh_length_separately(self):
+        # The one place the transform beats dyna2rad's (L-1)*L0: with
+        # L0 = 7 and a 10-long element, X = L*L0 - l_init, so
+        # L = 0.5/1.0/1.5 -> -6.5 / -3.0 / +0.5. dyna2rad's (L-1)*L0 would
+        # give -3.5 / 0 / +3.5 — the two coincide only at L0 == l_init, which
+        # is why every other case here is blind to the difference.
+        extra = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+                 + _row16(0.5, 0.0) + "\n" + _row16(1.0, 1.0) + "\n"
+                 + _row16(1.5, 0.3) + "\n")
+        _r, starter = _convert(
+            _muscle_s15(tl=-5, fpe=1.0, l0=7.0, extra=extra))
+        pts = _funct_points(starter, _funct_named(starter, "MatS15_TL_5"))
+        self.assertEqual([round(x, 10) for x, _y in pts], [-6.5, -3.0, 0.5])
+
+    def test_zero_fmax_writes_a_zero_passive_function_not_a_unit_scale(self):
+        # hm_read_prop46.F:179 turns Scale_F = 0 into ONE FORCE UNIT, and
+        # ruser46.F:203 multiplies fct_id4 by it — a zero-strength muscle
+        # would develop a fabricated passive force.
+        deck = (MUSCLE_S15
+                .replace("{CARD1}",
+                         _row(5, 10.0, 100.0, 1.0, 0.5, 0.0, 1.0, 1.0) + "\n")
+                .replace("{CARD2}", _row(0.0, 1.5, 3.0) + "\n")
+                .replace("{EXTRA}", ""))
+        r, starter = _convert(deck)
+        prop = _block(starter, f"/PROP/TYPE46/{_prop_id(starter)}")
+        self.assertIsNotNone(prop, starter)
+        fct4 = int(_fields(prop[4], 10)[3])
+        self.assertEqual({y for _x, y in _funct_points(starter, fct4)}, {0.0})
+        self.assertIn("FMAX = 0", " ".join(r.warnings))
 
 
 class MuscleTimeHistoryTests(unittest.TestCase):
@@ -970,6 +1024,52 @@ class ThermalEmitTests(unittest.TestCase):
                               if ln.startswith("/THERM_STRESS/MAT/")]), 1)
         self.assertNotIn("was SPLIT", " ".join(r.warnings))
 
+    def test_two_different_cards_on_one_mid_leave_no_orphan_material(self):
+        # Both parts are named, with DIFFERENT coefficients, so the mid needs
+        # two /THERM_STRESS/MATs — but cloning for BOTH would leave
+        # /MAT/ELAST/1 referenced by no part at all.
+        extra = (CARRIER_EXPANSION
+                 + "*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(2, 0, "2.40000E-5", 0, 1.0, 0, 1.0, 0.0) + "\n"
+                 + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        p1 = int(_data_rows(starter, "/PART/1")[1][10:20])
+        p2 = int(_data_rows(starter, "/PART/2")[1][10:20])
+        self.assertNotEqual(p1, p2)
+        used = {p1, p2}
+        mats = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                if ln.startswith("/MAT/ELAST/")}
+        self.assertEqual(mats, used)            # no orphan /MAT left behind
+        ts = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+              if ln.startswith("/THERM_STRESS/MAT/")}
+        self.assertEqual(ts, used)
+        # ...and the warning names the parts that stayed, not a stale list.
+        self.assertIn("keeps part(s) [2]", " ".join(r.warnings))
+
+    def test_an_unresolvable_lcid_leaves_no_duplicate_material(self):
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(1, 404, 1.0, 0, 1.0, 0, 1.0, 0.0) + "\n" + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        self.assertEqual(
+            [ln for ln in starter.splitlines()
+             if ln.startswith("/MAT/ELAST/")], ["/MAT/ELAST/1"])
+        self.assertEqual(int(_data_rows(starter, "/PART/1")[1][10:20]), 1)
+        self.assertNotIn("/THERM_STRESS/MAT/", starter)
+        self.assertIn("NOT split off for it either", " ".join(r.warnings))
+
+    def test_two_tmids_on_one_material_are_named_not_silently_merged(self):
+        extra = ("*MAT_THERMAL_ISOTROPIC\n" + _row(3, "7.8500E-9") + "\n"
+                 + _row("4.6000E+8", 40.0) + "\n"
+                 "*MAT_THERMAL_ISOTROPIC\n" + _row(4, "7.8500E-9") + "\n"
+                 + _row("1.0000E+8", 5.0) + "\n" + DRIVER)
+        # No expansion card: the pure-TMID path is what collects both parts,
+        # and it has no card of its own to split the material on.
+        r, starter = _convert(_thermal(extra, tmid1=3, tmid2=4))
+        self.assertIn("DIFFERENT *MAT_THERMAL_* materials",
+                      " ".join(r.warnings))
+        heat = _block(starter, "/HEAT/MAT/1")
+        self.assertAlmostEqual(float(heat[1][40:60]), 40.0)   # AS from TMID 3
+
     def test_isotropic_multy_one_form_is_not_warned_about(self):
         # The carrier's MULTY = MULTZ = 1.0 with LCIDY = LCIDZ = 0 on an
         # ISOTROPIC material: LS-DYNA ignores those cells itself, so a warning
@@ -1068,6 +1168,110 @@ class TemperatureDriverTests(unittest.TestCase):
             "              T_stop")
         self.assertAlmostEqual(float(body[4][20:40]), 1.0)
 
+    def _imptemps(self, starter):
+        return [_block(starter, ln) for ln in starter.splitlines()
+                if ln.startswith("/IMPTEMP/")]
+
+    def test_load_thermal_load_curve_reads_every_card(self):
+        # "Thermal Load Curve Cards. Include as many cards in this format as
+        # desired" (Vol I R17 p.33-171).
+        extra = ("*LOAD_THERMAL_LOAD_CURVE\n" + _row(7, 0) + "\n"
+                 + _row(8, 0) + "\n" + CARRIER_EXPANSION
+                 + "*DEFINE_CURVE\n" + _row(7) + "\n"
+                 + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n"
+                 + "*DEFINE_CURVE\n" + _row(8) + "\n"
+                 + _row16(0.0, 30.0) + "\n" + _row16(1.0, 130.0) + "\n")
+        _r, starter = _convert(_thermal(extra))
+        self.assertEqual([int(b[2][0:10]) for b in self._imptemps(starter)],
+                         [7, 8])
+
+    def test_load_thermal_constant_node_reads_every_node_card(self):
+        # "Node Cards. Include as many cards in this format as desired"
+        # (p.33-169). One /IMPTEMP per row, each at its own temperature.
+        extra = ("*LOAD_THERMAL_CONSTANT_NODE\n"
+                 + _row(1, 100.0) + "\n" + _row(2, 200.0) + "\n"
+                 + _row(3, 300.0) + "\n" + CARRIER_EXPANSION)
+        _r, starter = _convert(_thermal(extra))
+        got = []
+        for b in self._imptemps(starter):
+            pts = _funct_points(starter, int(b[2][0:10]))
+            got.append(pts[0][1])
+        self.assertEqual(got, [100.0, 200.0, 300.0])
+
+    def test_load_thermal_variable_node_reads_every_node_card(self):
+        extra = ("*LOAD_THERMAL_VARIABLE_NODE\n"
+                 + _row(1, 1.0, 0.0, 7) + "\n"
+                 + _row(2, 2.0, 0.0, 7) + "\n" + CARRIER_EXPANSION
+                 + "*DEFINE_CURVE\n" + _row(7) + "\n"
+                 + _row16(0.0, 10.0) + "\n" + _row16(1.0, 110.0) + "\n")
+        _r, starter = _convert(_thermal(extra))
+        self.assertEqual(len(self._imptemps(starter)), 2)
+
+    def test_load_thermal_constant_reads_every_card_set(self):
+        # "Card Sets. Include as many sets consisting of the following two
+        # cards as desired" (p.33-166). Card 1 of the SECOND set is entirely
+        # blank (NSID defaults to all nodes) — a "next non-blank row" walk
+        # would eat it and mis-read the whole block.
+        extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2) + "\n"
+                 "*LOAD_THERMAL_CONSTANT\n"
+                 + _row(5, 0, 0) + "\n" + _row(150.0, 0.0) + "\n"
+                 + "\n" + _row(60.0, 0.0) + "\n" + CARRIER_EXPANSION)
+        _r, starter = _convert(_thermal(extra))
+        blocks = self._imptemps(starter)
+        self.assertEqual(len(blocks), 2)
+        temps = [_funct_points(starter, int(b[2][0:10]))[0][1]
+                 for b in blocks]
+        self.assertEqual(temps, [150.0, 60.0])
+        # ...and the blank card 1 really did mean "all nodes".
+        gids = [int(b[2][20:30]) for b in blocks]
+        self.assertEqual(len(_ids_of_group(starter,
+                                           f"/GRNOD/NODE/{gids[1]}")), 12)
+
+    def test_load_thermal_constant_trailing_blank_makes_no_phantom_driver(self):
+        extra = ("*LOAD_THERMAL_CONSTANT\n"
+                 + _row(0, 0, 0) + "\n" + _row(150.0, 0.0) + "\n"
+                 + "\n" + "\n" + CARRIER_EXPANSION)
+        _r, starter = _convert(_thermal(extra))
+        self.assertEqual(len(self._imptemps(starter)), 1)
+
+    def test_nsidex_nodes_are_left_out_of_the_imptemp_group(self):
+        # "NSIDEX - Nodal set ID containing nodes that are exempted from the
+        # imposed temperature" (p.33-166). /IMPTEMP is a hard Dirichlet reset
+        # every cycle, so an exempted node must not be in its /GRNOD.
+        extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3, 4) + "\n"
+                 "*SET_NODE_LIST\n" + _row(6) + "\n" + _row(2) + "\n"
+                 "*LOAD_THERMAL_CONSTANT\n"
+                 + _row(5, 6, 0) + "\n" + _row(150.0, 0.0) + "\n"
+                 + CARRIER_EXPANSION)
+        r, starter = _convert(_thermal(extra))
+        gid = int(self._imptemp(starter)[2][20:30])
+        self.assertEqual(_ids_of_group(starter, f"/GRNOD/NODE/{gid}"),
+                         [1, 3, 4])
+        self.assertIn("NSIDEX=6", " ".join(r.warnings))
+
+    def test_boxid_is_named_rather_than_silently_ignored(self):
+        extra = ("*LOAD_THERMAL_CONSTANT\n"
+                 + _row(0, 0, 66) + "\n" + _row(150.0, 0.0) + "\n"
+                 + CARRIER_EXPANSION)
+        r, _s = _convert(_thermal(extra))
+        self.assertIn("BOXID=66", " ".join(r.warnings))
+
+    def test_load_thermal_variable_initial_temp_uses_ts_times_f_zero(self):
+        # "T0 = TB + TS x f(0)" (Vol I R17 p.33-180 Remark 1). The curve
+        # deliberately starts at a NON-ZERO ordinate: with f(0) = 0 the
+        # TB + 1.0*f(0) bug and the correct TB + TS*f(0) agree.
+        extra = ("*LOAD_THERMAL_VARIABLE\n" + _row(0, 0, 0) + "\n"
+                 + _row(2.0, 20.0, 9) + "\n" + CARRIER_EXPANSION
+                 + "*DEFINE_CURVE\n" + _row(9) + "\n"
+                 + _row16(0.0, 10.0) + "\n" + _row16(1.0, 110.0) + "\n")
+        _r, starter = _convert(_thermal(extra))
+        fid = int(self._imptemp(starter)[2][0:10])
+        self.assertEqual([y for _x, y in _funct_points(starter, fid)],
+                         [40.0, 240.0])            # TB + TS*f
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/INITEMP/")][0]
+        self.assertAlmostEqual(float(_block(starter, header)[2][0:20]), 40.0)
+
     def test_load_thermal_constant_synthesizes_a_two_point_function(self):
         # func_IDT = 0 is ERROR 120 once PER NODE, so a constant temperature
         # can never be paired with a zero id.
@@ -1112,19 +1316,51 @@ class TemperatureDriverTests(unittest.TestCase):
                          [250.0, 250.0])
         self.assertAlmostEqual(float(body[4][20:40]), 1.0)
 
-    def test_boundary_temperature_curve_form_carries_tmult_as_fscale(self):
+    def _bt(self, tmult=3.0, tbirth=0.0, tdeath=0.5):
         extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3, 4) + "\n"
                  "*BOUNDARY_TEMPERATURE_SET\n"
-                 + _row(5, 7, 3.0, 0, 0.5, 0.1) + "\n"
+                 + _row(5, 7, tmult, 0, tdeath, tbirth) + "\n"
                  + CARRIER_EXPANSION
                  + "*DEFINE_CURVE\n" + _row(7) + "\n"
                  + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n")
-        _r, starter = _convert(_thermal(extra))
+        return _convert(_thermal(extra))
+
+    def test_boundary_temperature_curve_form_carries_tmult_as_fscale(self):
+        _r, starter = self._bt()
         body = self._imptemp(starter)
-        self.assertEqual(int(body[2][0:10]), 7)
+        self.assertEqual(int(body[2][0:10]), 7)                # the deck curve
         self.assertAlmostEqual(float(body[4][20:40]), 3.0)     # TMULT
-        self.assertAlmostEqual(float(body[4][40:60]), 0.1)     # TBIRTH
+        self.assertAlmostEqual(float(body[4][40:60]), 0.0)     # TBIRTH
         self.assertAlmostEqual(float(body[4][60:80]), 0.5)     # TDEATH
+
+    def test_tbirth_shifts_the_curve_because_t_start_is_its_time_origin(self):
+        # fixtemp.F:118-129 evaluates the function at TT - STARTT, so T_start
+        # is BOTH the activation gate and the curve's time origin; LS-DYNA
+        # reads its (t, T) pairs at absolute time. The emitted function must
+        # therefore be the deck curve shifted by -TBIRTH.
+        _r, starter = self._bt(tmult=1.0, tbirth=0.1)
+        body = self._imptemp(starter)
+        fid = int(body[2][0:10])
+        self.assertNotEqual(fid, 7)
+        self.assertEqual([(round(x, 10), y)
+                          for x, y in _funct_points(starter, fid)],
+                         [(-0.1, 20.0), (0.9, 120.0)])
+        self.assertAlmostEqual(float(body[4][40:60]), 0.1)     # T_start kept
+
+    def test_tbirth_zero_keeps_the_deck_curve_unshifted(self):
+        _r, starter = self._bt(tmult=1.0, tbirth=0.0)
+        self.assertEqual(int(self._imptemp(starter)[2][0:10]), 7)
+
+    def test_blank_tmult_beside_a_curve_is_resolved_to_one_not_zero(self):
+        # hm_read_imptemp.F:139 turns Fscale_y = 0 into 1.0, so writing the
+        # literal 0 would mean the opposite of what it does — and the
+        # companion /INITEMP would then be 0*f(0) = 0 instead of 20.
+        r, starter = self._bt(tmult=0.0)
+        self.assertAlmostEqual(float(self._imptemp(starter)[4][20:40]), 1.0)
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/INITEMP/")][0]
+        self.assertAlmostEqual(float(_block(starter, header)[2][0:20]), 20.0)
+        self.assertIn("leaves TMULT blank/zero", " ".join(r.warnings))
 
     def test_initial_temperature_set_zero_covers_every_node(self):
         extra = ("*INITIAL_TEMPERATURE_SET\n" + _row(0, 20.0, 0) + "\n"
@@ -1185,6 +1421,47 @@ class ThermalOutputTests(unittest.TestCase):
         _r2, plain = _convert(_thermal(""))
         self.assertNotIn("TEMP", plain)
 
+    #: A /HEAT/MAT and a stated driver whose *SET_NODE the converter cannot
+    #: read — the shape of thermal/metal-forming/metal-forming.k
+    #: (*SET_NODE_LIST_GENERATE) and of the mat-add carrier
+    #: (*SET_NODE_GENERAL). The driver is dropped at EMISSION, so nothing ever
+    #: changes the temperature and the channels must stay out.
+    UNRESOLVABLE_DRIVER = ("*BOUNDARY_TEMPERATURE_SET\n"
+                           + _row(404, 0, 250.0, 0, 1.0e20, 0.0) + "\n")
+
+    def test_a_driver_whose_node_set_is_missing_arms_nothing(self):
+        r, starter = _convert(
+            _thermal(CARRIER_EXPANSION + self.UNRESOLVABLE_DRIVER))
+        self.assertIn("/HEAT/MAT/", starter)
+        self.assertIn("/THERM_STRESS/MAT/", starter)
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertNotIn("TEMP", starter.split("/THERM_STRESS")[0])
+        self.assertNotIn("/TH/NODE", starter)
+        w = " ".join(r.warnings)
+        self.assertIn("is INERT on this deck", w)
+        self.assertIn("*SET_NODE 404 is not defined", w)
+
+    def test_an_initemp_alone_is_a_state_not_a_driver(self):
+        # A uniform *INITIAL_TEMPERATURE with nothing to change it leaves
+        # DTEMP identically 0 on every cycle (#122).
+        extra = ("*INITIAL_TEMPERATURE_SET\n" + _row(0, 20.0, 0) + "\n"
+                 + CARRIER_EXPANSION)
+        r, starter = _convert(_thermal(extra))
+        self.assertIn("/INITEMP/", starter)
+        self.assertNotIn("/IMPTEMP/", starter)
+        self.assertNotIn("/TH/NODE", starter)
+        self.assertIn("is INERT on this deck", " ".join(r.warnings))
+
+    def test_anim_noda_temp_is_off_when_the_driver_was_dropped(self):
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(_thermal(CARRIER_EXPANSION + self.UNRESOLVABLE_DRIVER))
+        res = convert(path, write_log=False)
+        with open(res.engine_path) as fh:
+            self.assertNotIn("/ANIM/NODA/TEMP", fh.read())
+        tmp.cleanup()
+
     def test_anim_noda_temp_follows_the_same_gate(self):
         tmp = tempfile.TemporaryDirectory()
         path = os.path.join(tmp.name, "d.k")
@@ -1214,7 +1491,9 @@ class ThermalDeferredTests(unittest.TestCase):
                 ("BOUNDARY_RADIATION_SET", _row(1, 0)),
                 ("MAT_THERMAL_CWM", _row(9)),
                 ("LOAD_THERMAL_BINOUT", _row(1)),
-                ("LOAD_THERMAL_D", _row(1))):
+                ("LOAD_THERMAL_D3PLOT", _row(1)),
+                ("LOAD_THERMAL_DYNAIN", _row(1)),
+                ("MAT_THERMAL_ISOTROPIC_TD_LC", _row(9))):
             state = _dispatch(f"*KEYWORD\n*{kw}\n{card}\n*END\n")
             self.assertEqual(state.skipped_keywords, [], kw)
             self.assertIn(kw, dict(state.recognized_not_emitted), kw)

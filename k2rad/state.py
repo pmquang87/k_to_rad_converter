@@ -5993,6 +5993,13 @@ class ImposedTemperature:
     sid: int = 0            # node-set id, node id, or 0 = all nodes
     is_node: bool = False
     nids: List[int] = field(default_factory=list)   # explicit node list (_NODE)
+    # *LOAD_THERMAL_{CONSTANT,VARIABLE} card 1 is "NSID NSIDEX BOXID": NSIDEX
+    # is a node set EXEMPTED from the imposed temperature and BOXID restricts
+    # NSID to a *DEFINE_BOX (Vol I R17 pp.33-166/33-179). /IMPTEMP is a hard
+    # Dirichlet reset every cycle, so a node the card excludes must not be in
+    # its /GRNOD.
+    nsidex: int = 0
+    boxid: int = 0
     lcid: int = 0           # LS-DYNA curve id (0 = the constant form)
     scale: float = 1.0      # Fscale_y
     const: float = 0.0      # the constant T of the LCID = 0 form
@@ -6586,6 +6593,13 @@ class ConversionState:
     heat_mat_cards: Dict[int, Tuple[float, float, float, float, float, float]] \
         = field(default_factory=dict)
     therm_stress_cards: Dict[int, Tuple[int, float]] = field(default_factory=dict)
+    # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
+    # never from the parsed driver list: several corpus decks state a driver
+    # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so
+    # the driver is dropped at emission and NOTHING changes the temperature.
+    # This is what gates /TH/NODE TEMP, /ANIM/NODA/TEMP and the *DATABASE_TPRINT
+    # note (the #122 rule: a legal, accepted, frozen channel is worse than none).
+    thermal_driver_emitted: bool = False
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:

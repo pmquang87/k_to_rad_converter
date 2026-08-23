@@ -9077,20 +9077,42 @@ def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
         epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
 
 
-def _scalar_or_curve(f: List[str], i: int, default: float):
+def _scalar_or_curve(f: List[str], i: int, default: float,
+                     state: Optional[ConversionState] = None,
+                     field: str = "", fixed_positive: bool = False):
     """Read an LS-DYNA ``SCALAR_OR_FUNCTION`` / ``SCALAR_OR_OBJECT`` cell.
 
     ``cfgio/MODEL_IO/meci_data_reader.cpp:6845-6848`` states the rule verbatim:
     *"this is Dyna specific: if the value is negative, its abs value is the ID
     of an object"*. Returns ``(scalar, curve_id)`` — exactly one of the two is
     meaningful, and a BLANK cell takes *default* rather than 0 (blank is not
-    always "no factor": SFR/SVS/SVR/TL/TV default to 1.0).
+    always "no factor": SFR/SVS/SVR/SV/TL/TV default to 1.0).
+
+    *fixed_positive* is the muscle family's second rule, and it is NOT the same
+    as a blank default: for ``SFR``/``SVS``/``SVR`` (Vol II R17 p.2-1072) and
+    ``SV``/``TL``/``TV`` (p.2-2096) the manual reads *"LT.0.0: Absolute value
+    gives load curve ID. **GE.0.0: Constant value of 1.0 is used**"* — LS-DYNA
+    DISCARDS whatever positive number the deck writes and uses 1.0. Reading the
+    cell as a coefficient makes a deck stating ``SFR = 2`` run at twice the rate
+    normalisation it means. ``ALM``/``A`` are the contrast in the same family
+    (*"GE.0.0: Constant value of ALM is used"*), so they keep their scalar.
     """
     if len(f) <= i or not f[i].strip():
         return default, 0
     v = to_float(f[i])
     if v < 0.0:
         return default, int(abs(v))
+    if fixed_positive:
+        if state is not None and v not in (0.0, 1.0):
+            state.warn(
+                f"{field}={v:g} states a positive constant, and LS-DYNA "
+                f"DISCARDS it: '{field} ... GE.0.0: Constant value of 1.0 is "
+                "used' (Vol II R17 p.2-1072 for the *MAT_156 cells, p.2-2096 "
+                "for the *MAT_S15 ones). Only a NEGATIVE value is meaningful "
+                "there — it names a load curve. 1.0 is used, as LS-DYNA does; "
+                "write the value as a negative curve id if a real factor was "
+                "meant.")
+        return default, 0
     return v, 0
 
 
@@ -9139,12 +9161,15 @@ def handle_mat_muscle(block: Block, state: ConversionState) -> None:
 
     f2 = _card(raw, offset + 1, fixed=True, n=5, w=10)
     alm, alm_l = _scalar_or_curve(f2, 0, 0.0)
-    # SFR/SVS/SVR: "GE.0.0: Constant value of 1.0 is used" — the SCALAR itSELF
-    # is discarded (mat_156.cfg:45/49/53 name the float cell exactly that), so
-    # the constant branch is always 1.0 whatever number the deck writes.
-    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0)
-    svs, svs_l = _scalar_or_curve(f2, 2, 1.0)
-    svr, svr_l = _scalar_or_curve(f2, 3, 1.0)
+    # SFR/SVS/SVR: "GE.0.0: Constant value of 1.0 is used" (Vol II R17
+    # p.2-1072) — the SCALAR ITSELF is discarded, so the constant branch is
+    # always 1.0 whatever number the deck writes. SSP is the odd one out
+    # ("EQ.0.0: Exponential function is used. GT.0.0: Constant value of 0.0"),
+    # so its scalar must survive to tell 0 from positive.
+    where = f"*MAT_MUSCLE mid={mid}: "
+    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0, state, where + "SFR", True)
+    svs, svs_l = _scalar_or_curve(f2, 2, 1.0, state, where + "SVS", True)
+    svr, svr_l = _scalar_or_curve(f2, 3, 1.0, state, where + "SVR", True)
     ssp, ssp_l = _scalar_or_curve(f2, 4, 0.0)
     state.mat_muscle[mid] = MatMuscle(
         mid, title, rho, sno, srm, pis, ssm, cer, dmp,
@@ -9182,11 +9207,15 @@ def handle_mat_spring_muscle(block: Block, state: ConversionState) -> None:
         return
     l0 = _ffield(f1, 1, 1.0) or 1.0
     vmax = to_float(f1[2]) if len(f1) > 2 else 0.0
-    sv, sv_l = _scalar_or_curve(f1, 3, 1.0)
+    # SV/TL/TV: "GE.0.0: Constant value of 1.0 is used" (Vol II R17 p.2-2096),
+    # i.e. the positive scalar is DISCARDED. A is the contrast on the same
+    # card — "GE.0.0: Constant value of A is used" — so it keeps its value.
+    where = f"*MAT_SPRING_MUSCLE mid={mid}: "
+    sv, sv_l = _scalar_or_curve(f1, 3, 1.0, state, where + "SV", True)
     a, a_l = _scalar_or_curve(f1, 4, 0.0)
     fmax = to_float(f1[5]) if len(f1) > 5 else 0.0
-    tl, tl_l = _scalar_or_curve(f1, 6, 1.0)
-    tv, tv_l = _scalar_or_curve(f1, 7, 1.0)
+    tl, tl_l = _scalar_or_curve(f1, 6, 1.0, state, where + "TL", True)
+    tv, tv_l = _scalar_or_curve(f1, 7, 1.0, state, where + "TV", True)
 
     f2 = _card(raw, offset + 1, fixed=True, n=3, w=10)
     fpe, fpe_l = _scalar_or_curve(f2, 0, 0.0)
@@ -9237,10 +9266,14 @@ def handle_mat_add_thermal_expansion(block: Block,
                        "skipped.")
             continue
         # The 8th cell exists only in the r14+ layout. Presence is decided on
-        # the RAW line width, never on the value: a blank TREF and an absent
-        # TREF are different statements about the card's release.
+        # the CARD, never on the value: a blank TREF and an absent TREF are
+        # different statements about the card's release. The fixed-width test
+        # is the raw line reaching into columns 71-80; a comma- or free-format
+        # card is far shorter than that, so an eighth TOKEN counts too — the
+        # flag only ever gates the secant-approach warning, and losing it on a
+        # free-format deck would convert a secant card as incremental silently.
         data = _strip_inline_comment(line)
-        has_tref = len(data.rstrip()) > 70
+        has_tref = len(data.rstrip()) > 70 or len(f) > 7 and f[7].strip() != ""
         state.mat_add_thermal_expansion.append(MatAddThermalExpansion(
             pid=pid,
             lcid=to_int(f[1]) if len(f) > 1 else 0,
@@ -9325,6 +9358,13 @@ def handle_boundary_temperature(block: Block, state: ConversionState) -> None:
     *AIRBAG_HYBRID A23/LCA23 class — so the constant form gets a synthesized
     two-point function rather than being paired with a zero id, which
     hm_read_imptemp.F refuses outright (ERROR 120, once per node).
+
+    ``TMULT``'s printed default is ``0.`` and every corpus deck that names a
+    curve writes ``1.0`` explicitly, so a blank TMULT BESIDE a curve is a card
+    the manual does not resolve. It is resolved HERE rather than left to the
+    reader: ``hm_read_imptemp.F:139`` turns a zero ``Fscale_y`` into 1.0, so
+    emitting the literal zero would write a cell that means the opposite of
+    what it does. 1.0 is written and the ambiguity is named.
     """
     is_node = "NODE" in block.keyword.split("_")[-1:]
     offset = _title_offset(block)
@@ -9345,9 +9385,26 @@ def handle_boundary_temperature(block: Block, state: ConversionState) -> None:
                 "/IMPTEMP imposes ONE temperature per node (fixtemp.F:180-200 "
                 "writes TEMP(node)), so the through-thickness distinction is "
                 "dropped — the value is imposed on the node itself.")
+        scale = 1.0
+        if lcid:
+            if tmult:
+                scale = tmult
+            else:
+                state.warn(
+                    f"*BOUNDARY_TEMPERATURE: set/node {sid} names curve "
+                    f"{lcid} but leaves TMULT blank/zero. TMULT is the "
+                    "'temperature curve multiplier' with a printed default of "
+                    "0. (Vol I R17 p.5-150), which literally read would impose "
+                    "T = 0 everywhere — every corpus deck that uses a curve "
+                    "writes 1.0 explicitly, so the card is ambiguous. It is "
+                    "resolved to Fscale_y = 1.0 HERE: writing the literal zero "
+                    "would rely on hm_read_imptemp.F:139 ('IF (FACY == ZERO) "
+                    "FACY = FACY_DIM') turning it into 1.0 anyway, i.e. a cell "
+                    "meaning the opposite of what it does. State TMULT on the "
+                    ".k card if a different scale was meant.")
         state.imposed_temperatures.append(ImposedTemperature(
             source="*BOUNDARY_TEMPERATURE", sid=sid, is_node=is_node,
-            lcid=lcid, scale=tmult if lcid else 1.0,
+            lcid=lcid, scale=scale,
             const=tmult if not lcid else 0.0,
             tbirth=tbirth, tdeath=tdeath))
 
@@ -9371,6 +9428,17 @@ def handle_load_thermal(block: Block, state: ConversionState) -> None:
     OFFSET plus a scale. /IMPTEMP offers only ``Fscale_y·f(x)``
     (fixtemp.F:180-200), so the offset cannot be carried by a scale factor and
     the writer synthesizes ``TB + TS·f(t)`` point by point instead.
+
+    **All four spellings REPEAT.** The manual says so for each one — *"Card
+    Sets. Include as many sets consisting of the following two cards as
+    desired"* (_CONSTANT p.33-166, _VARIABLE p.33-179), *"Node Cards. Include
+    as many cards in this format as desired"* (_CONSTANT_NODE p.33-169,
+    _VARIABLE_NODE p.33-185), *"Thermal Load Curve Cards. Include as many cards
+    in this format as desired"* (_LOAD_CURVE p.33-171) — so every record is
+    read, not just the first. The two CARD-SET spellings are walked by RAW
+    CONTIGUITY (row index), never by "the next non-blank row": an all-blank
+    card 1 is legal there (NSID defaults to *all nodes*) and skipping it would
+    eat the next set's card 1 (the #109/#117/#119 rule).
     """
     kw = block.keyword
     offset = _title_offset(block)
@@ -9378,83 +9446,112 @@ def handle_load_thermal(block: Block, state: ConversionState) -> None:
     is_node = kw.endswith("_NODE")
 
     if "LOAD_CURVE" in kw:
-        f = _card(raw, offset, fixed=True, n=2, w=10)
-        lcid = to_int(f[0]) if f else 0
-        lciddr = to_int(f[1]) if len(f) > 1 else 0
-        if lciddr:
-            state.warn(
-                f"*LOAD_THERMAL_LOAD_CURVE: LCIDDR={lciddr} (the DYNAMIC "
-                "RELAXATION temperature curve) is dropped — k2rad converts no "
-                "dynamic-relaxation phase, so there is no preload stage for it "
-                "to drive.")
-        if lcid <= 0:
-            state.warn("*LOAD_THERMAL_LOAD_CURVE: LCID is 0 — no temperature "
-                       "history to impose; card dropped.")
-            return
-        state.imposed_temperatures.append(ImposedTemperature(
-            source="*LOAD_THERMAL_LOAD_CURVE", sid=0, lcid=lcid))
-        return
-
-    if "VARIABLE" in kw:
-        if is_node:
-            f = _card(raw, offset, fixed=True, n=4, w=10)
-            nid = to_int(f[0]) if f else 0
-            ts = to_float(f[1]) if len(f) > 1 else 0.0
-            tb = to_float(f[2]) if len(f) > 2 else 0.0
-            lcid = to_int(f[3]) if len(f) > 3 else 0
+        for i in range(offset, len(raw)):
+            if not raw[i].strip():
+                continue
+            f = _card(raw, i, fixed=True, n=2, w=10)
+            lcid = to_int(f[0]) if f else 0
+            lciddr = to_int(f[1]) if len(f) > 1 else 0
+            if lciddr:
+                state.warn(
+                    f"*LOAD_THERMAL_LOAD_CURVE: LCIDDR={lciddr} (the DYNAMIC "
+                    "RELAXATION temperature curve) is dropped — k2rad converts "
+                    "no dynamic-relaxation phase, so there is no preload stage "
+                    "for it to drive.")
+            if lcid <= 0:
+                state.warn("*LOAD_THERMAL_LOAD_CURVE: LCID is 0 — no "
+                           "temperature history to impose; card dropped.")
+                continue
             state.imposed_temperatures.append(ImposedTemperature(
-                source="*LOAD_THERMAL_VARIABLE_NODE", sid=nid, is_node=True,
-                lcid=lcid, scale=ts, offset=tb))
-            return
-        f1 = _card(raw, offset, fixed=True, n=3, w=10)
-        nsid = to_int(f1[0]) if f1 else 0
-        f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
-        ts = to_float(f2[0]) if f2 else 0.0
-        tb = to_float(f2[1]) if len(f2) > 1 else 0.0
-        lcid = to_int(f2[2]) if len(f2) > 2 else 0
-        extra = [(n, v) for n, v in
-                 (("TSE", to_float(f2[3]) if len(f2) > 3 else 0.0),
-                  ("TBE", to_float(f2[4]) if len(f2) > 4 else 0.0),
-                  ("LCIDE", to_int(f2[5]) if len(f2) > 5 else 0),
-                  ("LCIDR", to_int(f2[6]) if len(f2) > 6 else 0),
-                  ("LCIDEDR", to_int(f2[7]) if len(f2) > 7 else 0))
-                 if v]
-        if extra:
-            state.warn(
-                "*LOAD_THERMAL_VARIABLE: "
-                + ", ".join(f"{n}={v:g}" for n, v in extra)
-                + " dropped — the _E columns are the thermal-EXPANSION-only "
-                "temperature (a second field applied to the expansion term "
-                "alone) and the _DR ones the dynamic-relaxation phase. Radioss "
-                "has ONE nodal temperature field and k2rad converts no "
-                "dynamic-relaxation stage, so neither has a slot.")
-        state.imposed_temperatures.append(ImposedTemperature(
-            source="*LOAD_THERMAL_VARIABLE", sid=nsid, lcid=lcid,
-            scale=ts, offset=tb))
+                source="*LOAD_THERMAL_LOAD_CURVE", sid=0, lcid=lcid))
         return
 
-    # _CONSTANT (and _CONSTANT_NODE)
     if is_node:
-        f = _card(raw, offset, fixed=True, n=2, w=10)
-        nid = to_int(f[0]) if f else 0
-        t = to_float(f[1]) if len(f) > 1 else 0.0
-        state.imposed_temperatures.append(ImposedTemperature(
-            source="*LOAD_THERMAL_CONSTANT_NODE", sid=nid, is_node=True,
-            const=t, initial_temp=t))
+        # _CONSTANT_NODE "NID T" / _VARIABLE_NODE "NID TS TB LCID", one node
+        # per card, as many cards as desired.
+        variable = "VARIABLE" in kw
+        for i in range(offset, len(raw)):
+            if not raw[i].strip():
+                continue
+            f = _card(raw, i, fixed=True, n=4 if variable else 2, w=10)
+            nid = to_int(f[0]) if f else 0
+            if nid <= 0:
+                state.warn(f"{kw}: a node card states NID={nid} — there is no "
+                           "node to impose a temperature on; row dropped.")
+                continue
+            if variable:
+                state.imposed_temperatures.append(ImposedTemperature(
+                    source="*LOAD_THERMAL_VARIABLE_NODE", sid=nid,
+                    is_node=True, lcid=to_int(f[3]) if len(f) > 3 else 0,
+                    scale=to_float(f[1]) if len(f) > 1 else 0.0,
+                    offset=to_float(f[2]) if len(f) > 2 else 0.0))
+            else:
+                t = to_float(f[1]) if len(f) > 1 else 0.0
+                state.imposed_temperatures.append(ImposedTemperature(
+                    source="*LOAD_THERMAL_CONSTANT_NODE", sid=nid,
+                    is_node=True, const=t, initial_temp=t))
         return
-    f1 = _card(raw, offset, fixed=True, n=3, w=10)
-    nsid = to_int(f1[0]) if f1 else 0
-    f2 = _card(raw, offset + 1, fixed=True, n=2, w=10)
-    t = to_float(f2[0]) if f2 else 0.0
-    te = to_float(f2[1]) if len(f2) > 1 else 0.0
-    if te:
-        state.warn(
-            f"*LOAD_THERMAL_CONSTANT: TE={te:g} (the temperature seen by the "
-            "thermal-EXPANSION term alone) is dropped — Radioss has ONE nodal "
-            "temperature field, so a second one applied only to the expansion "
-            "cannot be expressed.")
-    state.imposed_temperatures.append(ImposedTemperature(
-        source="*LOAD_THERMAL_CONSTANT", sid=nsid, const=t, initial_temp=t))
+
+    # The two CARD-SET spellings: card 1 "NSID NSIDEX BOXID", card 2 the
+    # temperature. Walked in RAW PAIRS — card 1 may be entirely blank (NSID
+    # defaults to all nodes), so a "next non-blank row" walk would eat the
+    # following set's card 1. A pair in which BOTH rows are blank states
+    # nothing at all and ends the list: that is a trailing blank line, not a
+    # deck asking for T = 0 on every node.
+    variable = "VARIABLE" in kw
+    i = offset
+    while i < len(raw):
+        if not raw[i].strip() and not (i + 1 < len(raw)
+                                       and raw[i + 1].strip()):
+            break
+        if i + 1 >= len(raw):
+            state.warn(
+                f"{kw}: the last card set has a card 1 but no card 2 (the "
+                "temperature row) — the set is incomplete and is dropped. "
+                "Each set is exactly two cards (Vol I R17 pp.33-166/33-179).")
+            break
+        f1 = _card(raw, i, fixed=True, n=3, w=10)
+        nsid = to_int(f1[0]) if f1 else 0
+        nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+        boxid = to_int(f1[2]) if len(f1) > 2 else 0
+        if variable:
+            f2 = _card(raw, i + 1, fixed=True, n=8, w=10)
+            ts = to_float(f2[0]) if f2 else 0.0
+            tb = to_float(f2[1]) if len(f2) > 1 else 0.0
+            lcid = to_int(f2[2]) if len(f2) > 2 else 0
+            extra = [(n, v) for n, v in
+                     (("TSE", to_float(f2[3]) if len(f2) > 3 else 0.0),
+                      ("TBE", to_float(f2[4]) if len(f2) > 4 else 0.0),
+                      ("LCIDE", to_int(f2[5]) if len(f2) > 5 else 0),
+                      ("LCIDR", to_int(f2[6]) if len(f2) > 6 else 0),
+                      ("LCIDEDR", to_int(f2[7]) if len(f2) > 7 else 0))
+                     if v]
+            if extra:
+                state.warn(
+                    "*LOAD_THERMAL_VARIABLE: "
+                    + ", ".join(f"{n}={v:g}" for n, v in extra)
+                    + " dropped — the _E columns are the thermal-EXPANSION-only "
+                    "temperature (a second field applied to the expansion term "
+                    "alone) and the _DR ones the dynamic-relaxation phase. "
+                    "Radioss has ONE nodal temperature field and k2rad converts "
+                    "no dynamic-relaxation stage, so neither has a slot.")
+            state.imposed_temperatures.append(ImposedTemperature(
+                source="*LOAD_THERMAL_VARIABLE", sid=nsid, nsidex=nsidex,
+                boxid=boxid, lcid=lcid, scale=ts, offset=tb))
+        else:
+            f2 = _card(raw, i + 1, fixed=True, n=2, w=10)
+            t = to_float(f2[0]) if f2 else 0.0
+            te = to_float(f2[1]) if len(f2) > 1 else 0.0
+            if te:
+                state.warn(
+                    f"*LOAD_THERMAL_CONSTANT: TE={te:g} (the temperature seen "
+                    "by the thermal-EXPANSION term alone) is dropped — Radioss "
+                    "has ONE nodal temperature field, so a second one applied "
+                    "only to the expansion cannot be expressed.")
+            state.imposed_temperatures.append(ImposedTemperature(
+                source="*LOAD_THERMAL_CONSTANT", sid=nsid, nsidex=nsidex,
+                boxid=boxid, const=t, initial_temp=t))
+        i += 2
 
 
 def handle_control_solution(block: Block, state: ConversionState) -> None:
@@ -15079,10 +15176,19 @@ RARE_MATERIAL_KEYWORDS = {
         "a temperature-DEPENDENT isotropic thermal material (HC and TC as "
         "tabulated functions of T)",
         "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
-    "LOAD_THERMAL_D": _thermal_deferred(
-        "LOAD_THERMAL_D",
-        "nodal temperatures read from an external d3plot/dynain file",
+    "LOAD_THERMAL_D3PLOT": _thermal_deferred(
+        "LOAD_THERMAL_D3PLOT",
+        "nodal temperatures read from an external d3plot file",
         "no Radioss counterpart"),
+    "LOAD_THERMAL_DYNAIN": _thermal_deferred(
+        "LOAD_THERMAL_DYNAIN",
+        "nodal temperatures read from an external dynain file",
+        "no Radioss counterpart"),
+    "MAT_THERMAL_ISOTROPIC_TD_LC": _thermal_deferred(
+        "MAT_THERMAL_ISOTROPIC_TD_LC",
+        "a temperature-DEPENDENT isotropic thermal material whose HC and TC "
+        "are *DEFINE_CURVEs",
+        "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
     "LOAD_THERMAL_BINOUT": _thermal_deferred(
         "LOAD_THERMAL_BINOUT",
         "nodal temperatures read back from a previous run's binout",

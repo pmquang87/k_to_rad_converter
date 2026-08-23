@@ -2334,7 +2334,7 @@ unit/sign gotchas.
 | `*BOUNDARY_TEMPERATURE[_SET\|_NODE]` | `/IMPTEMP` on the set | `TMULT` → `Fscale_y` on the curve form, → the constant T on the `TLCID = 0` form; `TBIRTH`/`TDEATH` → `T_start`/`T_stop` |
 | `*SECTION_SHELL_THERMAL` | the ordinary `/PROP/SHELL` | registering the spelling is what turns 40 × `ERROR 495` "NULL THICKNESS" into a startable deck |
 | `*CONTROL_SOLUTION` (SOLN) | — | reported: Radioss has no analysis-type switch, `/HEAT/MAT` is what arms the solve |
-| `*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}`, `*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]`, `*MAT_THERMAL_{CWM,ORTHOTROPIC,ISOTROPIC_TD}`, `*LOAD_THERMAL_{D,BINOUT}` | — | recognized + **named** warn-drop, deferred to the full thermal-solver item |
+| `*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}`, `*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]`, `*MAT_THERMAL_{CWM,ORTHOTROPIC,ISOTROPIC_TD,ISOTROPIC_TD_LC}`, `*LOAD_THERMAL_{D3PLOT,DYNAIN,BINOUT}` | — | recognized + **named** warn-drop, deferred to the full thermal-solver item |
 
 Radioss's thermal expansion is **incremental**, not secant:
 `ETH = α(T)·Fscale·(T_n − T_{n−1})`, accumulated cycle by cycle
