@@ -495,7 +495,7 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
         return None
     lines += rows
     for eid in eids:
-        # /SPRING producer 8 of 8, recorded AT the write line. NOT in
+        # /SPRING producer 9 of 9, recorded AT the write line. NOT in
         # beam_elem_ids: these ids are /SPRING in the emitted deck, which is
         # what makes the *SET_BEAM family split (writer/output.py) route them
         # to /TH/SPRING instead of /TH/BEAM.

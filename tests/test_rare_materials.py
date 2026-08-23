@@ -840,13 +840,33 @@ class MuscleS15EmitTests(unittest.TestCase):
 
 
 class MuscleTimeHistoryTests(unittest.TestCase):
-    def test_set_beam_history_of_a_muscle_beam_routes_to_th_spring(self):
+    def test_set_beam_history_of_a_muscle_beam_is_dropped_not_zero_filled(self):
+        # The muscle beam is a /SPRING in the emitted deck, so it must not go
+        # to /TH/BEAM — but /TH/SPRING on a TYPE46 writes 15 channels of exact
+        # zero (measured), so it must not go there either. The same rule
+        # *DATABASE_DEFORC already applies, through the other door (#122).
         extra = ("*SET_BEAM_LIST\n" + _row(77) + "\n" + _row(7) + "\n"
                  "*DATABASE_HISTORY_BEAM_SET\n" + _row(77) + "\n"
                  "*DATABASE_BINARY_D3PLOT\n" + _row(1.0e-4) + "\n")
-        _r, starter = _convert(_muscle156(extra=extra))
-        self.assertIn("/TH/SPRING", starter)
+        r, starter = _convert(_muscle156(extra=extra))
+        self.assertNotIn("/TH/SPRING", starter)
         self.assertNotIn("/TH/BEAM", starter)
+        self.assertIn("15 channels of EXACT ZERO", " ".join(r.warnings))
+
+    def test_a_non_muscle_beam_in_the_same_card_still_gets_its_group(self):
+        # Only the TYPE46 ids are dropped; an ordinary beam in the same
+        # *SET_BEAM keeps its /TH/BEAM group.
+        extra = ("*PART\nrod\n" + _row(9, 9, 9) + "\n"
+                 "*SECTION_BEAM\n" + _row(9, 1) + "\n"
+                 + _row(4.0, 1.0, 1.0, 1.0) + "\n"
+                 "*MAT_ELASTIC\n" + _row(9, "7.8500E-9", 210000.0, 0.3) + "\n"
+                 "*ELEMENT_BEAM\n" + _row(31, 9, 1, 2, 3) + "\n"
+                 "*SET_BEAM_LIST\n" + _row(77) + "\n" + _row(7, 31) + "\n"
+                 "*DATABASE_HISTORY_BEAM_SET\n" + _row(77) + "\n"
+                 "*DATABASE_BINARY_D3PLOT\n" + _row(1.0e-4) + "\n")
+        _r, starter = _convert(_muscle156(extra=extra))
+        self.assertIn("/TH/BEAM", starter)
+        self.assertNotIn("/TH/SPRING", starter)
 
     def test_deforc_leaves_the_all_zero_muscle_channel_out(self):
         extra = "*DATABASE_DEFORC\n" + _row(1.0e-5) + "\n"
@@ -1114,25 +1134,76 @@ class ThermalEmitTests(unittest.TestCase):
         self.assertNotEqual(float(f[1]), 0.0)           # positive capacity
         self.assertIn("no *MAT_THERMAL_* is bound", " ".join(r.warnings))
 
-    def test_law1_shell_part_is_named_as_inert(self):
-        shell = (
-            "*KEYWORD\n"
-            "*NODE\n"
-            "         1             0.0             0.0             0.0\n"
-            "         2            10.0             0.0             0.0\n"
-            "         3            10.0            10.0             0.0\n"
-            "         4             0.0            10.0             0.0\n"
-            "*ELEMENT_SHELL\n"
-            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n"
-            "*PART\nplate\n" + _row(1, 1, 1) + "\n"
-            "*SECTION_SHELL\n" + _row(1, 2, 0.833, 5) + "\n" + _row(3.0) + "\n"
-            "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
-            + CARRIER_EXPANSION + DRIVER
-            + "*CONTROL_TERMINATION\n     0.001\n*END\n")
-        r, starter = _convert(shell)
+    #: One quad on *MAT_ELASTIC, plus whatever {EXTRA} adds.
+    SHELL = (
+        "*KEYWORD\n"
+        "*NODE\n"
+        "         1             0.0             0.0             0.0\n"
+        "         2            10.0             0.0             0.0\n"
+        "         3            10.0            10.0             0.0\n"
+        "         4             0.0            10.0             0.0\n"
+        "         5            10.0            20.0             0.0\n"
+        "         6             0.0            20.0             0.0\n"
+        "*ELEMENT_SHELL\n"
+        + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n"
+        "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+        "*SECTION_SHELL\n" + _row(1, 2, 0.833, 5) + "\n" + _row(3.0) + "\n"
+        "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
+        "{EXTRA}"
+        "*CONTROL_TERMINATION\n     0.001\n*END\n")
+
+    def test_law1_shell_is_restated_as_law36_so_it_can_expand(self):
+        # LAW1 runs GLOBAL integration (WARNING 1084) and thermexpc.F only
+        # reaches the per-integration-point stresses, so a LAW1 shell expands
+        # by nothing: measured 2.66e-07 mm against a closed-form 0.012 mm, at
+        # NIP 1 and NIP 5 alike. The restatement is elastically neutral
+        # (+0.012 % membrane stress at the same elongation).
+        r, starter = _convert(
+            self.SHELL.replace("{EXTRA}", CARRIER_EXPANSION + DRIVER))
+        self.assertIn("/THERM_STRESS/MAT/1", starter)
+        self.assertIn("/MAT/LAW36/1", starter)
+        self.assertNotIn("/MAT/ELAST/1", starter)
+        self.assertIn("is RESTATED as /MAT/LAW36", " ".join(r.warnings))
+        # The far-yield curve is flat at 1000 x E and is a real /FUNCT.
+        law36 = _block(starter, "/MAT/LAW36/1")
+        fid = int(law36[law36.index("# fct_ID1") + 1])
+        pts = _funct_points(starter, fid)
+        self.assertEqual([y for _x, y in pts], [2.1e8, 2.1e8])
+
+    def test_a_solid_part_on_the_material_blocks_the_restatement(self):
+        # mmain.F90:757 applies the expansion before the law dispatch, so a
+        # LAW1 SOLID expands correctly — restating would change its law for
+        # nothing. The mixed case keeps LAW1 and is named instead.
+        r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        self.assertIn("/MAT/ELAST/", starter)
+        self.assertNotIn("/MAT/LAW36/", starter)
+        self.assertNotIn("is RESTATED as /MAT/LAW36", " ".join(r.warnings))
+
+    def test_a_shell_without_the_expansion_card_keeps_law1(self):
+        r, starter = _convert(self.SHELL.replace("{EXTRA}", ""))
+        self.assertIn("/MAT/ELAST/1", starter)
+        self.assertNotIn("/MAT/LAW36/", starter)
+        self.assertNotIn("RESTATED", " ".join(r.warnings))
+
+    def test_a_mixed_shell_and_solid_material_names_the_inert_shell(self):
+        # The material carries both a shell part and a solid part, so it
+        # cannot be restated; the shell half is reported as inert.
+        deck = (_thermal(CARRIER_EXPANSION + DRIVER
+                         + "*PART\nplate\n" + _row(3, 3, 1) + "\n"
+                         "*SECTION_SHELL\n" + _row(3, 2, 0.833, 5) + "\n"
+                         + _row(3.0) + "\n"
+                         "*ELEMENT_SHELL\n"
+                         + "".join(f"{v:>8}" for v in (9, 3, 1, 2, 3, 4))
+                         + "\n")
+                .replace("*MAT_ADD_THERMAL_EXPANSION\n"
+                         + _row(1, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 0.0),
+                         "*MAT_ADD_THERMAL_EXPANSION\n"
+                         + _row(3, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 0.0)))
+        r, starter = _convert(deck)
         self.assertIn("/THERM_STRESS/MAT", starter)
-        self.assertIn("/MAT/ELAST (LAW1) material, which gets NO thermal "
-                      "expansion", " ".join(r.warnings))
+        w = " ".join(r.warnings)
+        self.assertTrue("is RESTATED as /MAT/LAW36" in w
+                        or "could NOT be restated" in w, w)
 
     def test_tabulated_johnson_cook_is_refused_by_name(self):
         # /HEAT/MAT would kill LAW109's own self-heating and /THERM_STRESS

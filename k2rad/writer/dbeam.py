@@ -1104,7 +1104,7 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
                 # without emitting a /SPRING, and a /TH/SPRING naming a
                 # never-written element is starter ERROR 69.
                 state.dbeam_spring_eids.add(e.eid)
-                state.spring_elem_ids.add(e.eid)   # producer 3 of 7
+                state.spring_elem_ids.add(e.eid)   # producer 3 of 9
                 # /PRELOAD/AXIAL property gate (rinit3.F:1627-1690): only
                 # CASE(4,13) with a non-zero axial fct_ID1 AND H in 1..7 is
                 # accepted; a /PROP/TYPE8 connector is ERROR 3053 outright and

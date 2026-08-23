@@ -49,7 +49,7 @@ import dataclasses
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
-from ..state import ConversionState, Curve, InitialTemperature
+from ..state import ConversionState, Curve, InitialTemperature, MatPlasTAB
 from .common import HDR, _emit_grnod_node, _f, _i
 
 __all__ = [
@@ -595,6 +595,7 @@ def _resolve_expansion(state: ConversionState) -> None:
             continue
         _warn_orthotropic_slots(state, target, card)
         state.therm_stress_cards[target] = (func_id, fscale)
+        _restate_law1_shells(state, target)
 
     for mid, card in sorted(direct.items()):
         if _refuse_law109(state, mid, None):
@@ -611,6 +612,98 @@ def _resolve_expansion(state: ConversionState) -> None:
             continue
         _warn_orthotropic_slots(state, mid, card)
         state.therm_stress_cards[mid] = (func_id, fscale)
+        _restate_law1_shells(state, mid)
+
+
+#: The unreachable yield stress of the restated LAW36. Stated as a MULTIPLE of
+#: the material's own E so it carries no unit assumption: a yield strain of
+#: 1000 cannot occur in any structural run, and the emitted curve is flat, so
+#: the law never leaves its elastic branch.
+_FAR_YIELD_OVER_E = 1.0e3
+
+
+def _restate_law1_shells(state: ConversionState, mid: int) -> None:
+    """A ``*MAT_ELASTIC`` SHELL part cannot expand under /MAT/LAW1 — restate it
+    as /MAT/LAW36 with a far-yield flat curve.
+
+    **Why.** LAW1 is the one law Radioss integrates GLOBALLY through the
+    thickness: it answers ``N > 1`` with ``WARNING 1084 FORMULATION IS SWITCHED
+    TO GLOBAL INTEGRATION N=0``, and the shell thermal-expansion routine
+    reaches the per-integration-point stresses (``thermexpc.F``'s
+    ``IF (NPT /= 0)`` block). With ``NPT = 0`` there is nothing for it to
+    correct. Measured on this branch's own converted decks, a 10 x 1 mm strip
+    at ``alpha = 1.2e-5`` over ``dT = 100 K`` (closed form 0.012 mm):
+
+      ==================================  ==============  =========
+      shell                               free-edge DX    vs 0.012
+      ==================================  ==============  =========
+      *MAT_ELASTIC, *SECTION_SHELL NIP 5   2.66e-07 mm    -100 %
+      *MAT_ELASTIC, *SECTION_SHELL NIP 1  -5.11e-08 mm    -100 %
+      the LAW36 restatement, NIP 5         0.0120078 mm   +0.065 %
+      ==================================  ==============  =========
+
+    The integration-point COUNT is not the cure — LAW1 discards it. Only a law
+    that keeps a through-thickness state does.
+
+    **Why it is safe.** The restatement is elastically neutral. The same strip
+    with NO thermal card, pulled to a prescribed 0.05 mm over 5 ms, gives an
+    identical membrane stress under both laws (measured at t = 1/2/3/4 ms:
+    209.977 / 419.561 / 628.914 / 838.231 MPa under LAW1 against 210.003 /
+    419.709 / 629.086 / 838.410 under the restated LAW36 — **+0.012 % to
+    +0.035 %**, against the closed form ``E*eps`` = 210.0 / 420.0 / 630.0 /
+    840.0), and the free edge follows the imposed motion to 8 digits in both.
+    The one real cost is the time step: 1.506e-7 s under LAW1 against 1.436e-7
+    under LAW36 (**-4.6 %**), because the restated law integrates through the
+    thickness.
+
+    **Scope.** Only when EVERY part on the material carries shell elements or a
+    ``*SECTION_SHELL``. Solids are left alone — ``mmain.F90:757`` applies the
+    expansion before the law dispatch, so a LAW1 SOLID expands correctly and
+    was measured exact. Restricting to shells also keeps the change clear of
+    the starter's solid-/XREF law whitelist, which ``hm_read_xref.F`` gates on
+    ``ITYP == 2`` (solid parts only).
+    """
+    mat = state.mat_elastic.get(mid)
+    if mat is None:
+        return
+    pids = sorted(p for p, q in state.parts.items() if q.mid == mid)
+    if not pids:
+        return
+    shell_pids = {e.pid for e in state.shell_elems}
+    if not all(p in shell_pids or state.parts[p].secid in state.sec_shells
+               for p in pids):
+        return
+    sigy = _FAR_YIELD_OVER_E * mat.E
+    if sigy <= 0.0:
+        return
+    fid = state.next_curve_id()
+    state.curves[fid] = Curve(
+        lcid=fid, title=f"Auto_far_yield_mat{mid}",
+        sfa=1.0, sfo=1.0, offa=0.0, offo=0.0,
+        pts=[(0.0, sigy), (1.0, sigy)])
+    state.curve_order.append(fid)
+    del state.mat_elastic[mid]
+    state.mat_plas_tab[mid] = MatPlasTAB(
+        mid=mid, title=mat.title, rho=mat.rho, E=mat.E, nu=mat.nu,
+        sigy=sigy, etan=0.0, fail=0.0, lcss=0, C=0.0, P=0.0,
+        funct_id=fid)
+    state.warn(
+        f"*MAT_ELASTIC {mid} carries a thermal expansion and every part on it "
+        f"is a SHELL ({pids}), so it is RESTATED as /MAT/LAW36 with a flat "
+        f"yield curve at {sigy:g} (= 1000 x E, a strain of 1000 — the law "
+        "never leaves its elastic branch). /MAT/LAW1 is the one law Radioss "
+        "integrates GLOBALLY through the thickness (it answers N > 1 with "
+        "WARNING 1084 'FORMULATION IS SWITCHED TO GLOBAL INTEGRATION N=0'), "
+        "and the shell expansion routine only reaches the per-integration-"
+        "point stresses — measured, a LAW1 shell strip expands by 2.7e-07 mm "
+        "where the closed form is 0.012 mm, at NIP 1 and NIP 5 alike, while "
+        "the restatement gives 0.0120078 mm (+0.065 %). The elastic response "
+        "is unchanged: the same strip pulled mechanically reports 209.977 vs "
+        "210.003 MPa (+0.012 %) at the same elongation. The one cost is a "
+        "-4.6 % time step, because the restated law integrates through the "
+        "thickness. SOLID parts are NOT restated — a LAW1 solid expands "
+        "correctly (mmain.F90:757 applies the expansion before the law "
+        "dispatch).")
 
 
 def _refuse_law109(state: ConversionState, mid: int,
@@ -1240,26 +1333,96 @@ def _make_thermal_output(state: ConversionState,
     return lines
 
 
+def _warn_solid_expansion(state: ConversionState, solids: List[int]) -> None:
+    """The solid path: exact where the engine is stable, and the instability
+    has a sharp, MEASURED trigger.
+
+    Every number below comes from this branch's own converted decks — the same
+    10-hex bar (10 x 1 x 1 mm, *MAT_ELASTIC, alpha = 1.2e-5, 20 -> 120 K over
+    5 ms, closed-form free-end DX = 0.012 mm), one variable changed at a time:
+
+      ==============================================  ==============  =========
+      mount / variant                                 free-end DX     dt held?
+      ==============================================  ==============  =========
+      quarter symmetry at every cross-section          0.01198664 mm   yes
+      end face pinned in x + 3 DOFs, nothing else     **-3.6886 mm**   NO (2e-19)
+      the same end pinning + lateral anchors           0.01198628 mm   yes
+      encastre end face + lateral anchors              0.01229825 mm   yes
+      ONE hex, end face pinned in x + 3 DOFs           0.01198825 mm   yes
+      ==============================================  ==============  =========
+
+    So the trigger is a run of elements free to TRANSLATE laterally as a group,
+    and a single lateral anchor per cross-section removes it. It is NOT:
+
+    * the end clamp — the encastre face WITH lateral anchors is stable and
+      energy-balanced (I-ENERGY 0.1315 against EXT-WORK 0.1312);
+    * the thermal solve — a ``/HEAT/MAT`` with NO ``/THERM_STRESS`` on the
+      diverging mount held dt for 46 000 cycles at zero energy;
+    * the card — the same deck with a CONSTANT imposed temperature (DTEMP = 0)
+      held dt for 45 000 cycles;
+    * the load size — alpha 1.2e-9, 10 000x smaller, diverges identically;
+    * the element formulation — Isolid 17 / 24 / 1, Ismstr 4 / 10 and Icpre 1
+      all diverge (Isolid 12 "stabilises" only by making the expansion inert,
+      DX = 0, and the starter calls it obsolete, WARNING 1160);
+    * the material law — LAW1 and LAW36 solids diverge alike;
+    * the mesh alone — ONE element on the diverging mount is exact.
+
+    ``/DT/NODA/CST`` is NOT a cure either: with ``DT2MS = -1e-7`` the same deck
+    stops at cycle 1000 while PRINTING **NORMAL TERMINATION**, with I-ENERGY
+    3.089e5 against EXT-WORK 0.099 — the #MISTAKES "NORMAL TERMINATION is not
+    success" case in its purest form.
+
+    No card-level cure was found, so the card is emitted and the trigger is
+    named. Refusing solids would be wrong: the stable mounts are exact, and
+    they are the ordinary way a thermal-expansion model is set up.
+    """
+    state.warn(
+        f"/THERM_STRESS/MAT: solid part(s) {solids} expand through the SOLID "
+        "path (mmain.F90:757-786), which is EXACT where the engine is stable "
+        "(measured -0.11 % on a symmetry-mounted 10-hex bar and on a single "
+        "hex) but DIVERGES when a run of elements is free to TRANSLATE "
+        "LATERALLY as a group. Measured on k2rad-converted twins of the same "
+        "bar: with only its end face pinned the free end reached -3.6886 mm "
+        "against a closed-form +0.012 mm and the time step collapsed to "
+        "2e-19; adding one lateral anchor per cross-section to the SAME "
+        "pinning gives 0.01198628 mm (-0.11 %) with dt held. It is not the "
+        "clamp (an encastre face WITH lateral anchors is stable and balanced, "
+        "I-ENERGY 0.1315 vs EXT-WORK 0.1312), not the thermal solve (a "
+        "/HEAT/MAT without /THERM_STRESS held dt for 46000 cycles), not the "
+        "card (a CONSTANT imposed temperature held dt), not alpha (1.2e-9 "
+        "diverges identically), not Isolid/Ismstr/Icpre (17/24/1, Ismstr 4/10, "
+        "Icpre 1 all diverge), not the law (LAW1 and LAW36 alike), and it "
+        "needs more than one element. /DT/NODA/CST does NOT cure it: with "
+        "DT2MS = -1e-7 the run stops at cycle 1000 while PRINTING NORMAL "
+        "TERMINATION, I-ENERGY 3.089e5 against EXT-WORK 0.099 — so check the "
+        "CYCLE COUNT, the I-ENERGY/EXT-WORK balance and the time step, never "
+        "the termination banner. PRESCRIPTION: give every cross-section "
+        "transverse to the expansion at least one lateral anchor (a symmetry "
+        "plane, a support or a contact), or model the part with SHELLS on a "
+        "through-thickness-integrated law, which is exact in every mount "
+        "tested. Note also that the solid gate is jthe < 0 and skips t = 0 "
+        "(sgrtails.F:1462 stores -ABS(JTHE) for Lagrangian solids), so nothing "
+        "happens on the very first cycle.")
+
+
 def _warn_expansion_consumers(state: ConversionState) -> None:
     """Name the parts whose /THERM_STRESS/MAT cannot be consumed, and the one
     element family whose behaviour needs re-checking on the user's own deck.
 
-    Two measured facts drive this:
+    Two measured facts drive this, both re-measured on this branch's own
+    converted decks:
 
-    * A ``/MAT/ELAST`` (LAW1) SHELL gets **no expansion at all**. LAW1 always
+    * A ``/MAT/ELAST`` (LAW1) SHELL gets **no expansion at all** — LAW1 always
       runs global integration (``WARNING 1084 ... FORMULATION IS SWITCHED TO
-      GLOBAL INTEGRATION N=0``) and ``thermexpc.F``'s ``IORTH == 0`` branch then
-      builds its thermal force from ``A1 + A2``, which are zero there. Measured
-      on both QEPH and QBAT: ``F1 ~ -0.02 ~ 0`` against ``-257.95`` for the same
-      deck on LAW2. A LAW2 shell explicitly forced to ``N = 0`` is converted BACK
-      to NPT = 3 by ``WARNING 1912`` and works.
-    * On SOLIDS the physics is exact under symmetry mounts (measured -0.12 % on a
-      free cube, -0.16 % on a free bar and -0.14 % on a fully restrained one)
-      but a face-clamped, laterally free bar produced a spurious stress of about
-      11 GPa that is INDEPENDENT of both dT and alpha (11457 / 11064 / 11150 MPa
-      for dT = 0.001 / 1 / 100 K; identical at alpha = 1.2e-9 and 1.2e-5). The
-      dT-independence proves it is not a stiff-but-real response. The mechanism
-      was not isolated, so the card is emitted and the risk is named.
+      GLOBAL INTEGRATION N=0``) and ``thermexpc.F`` only reaches the
+      per-integration-point stresses. Measured: 2.66e-07 mm against a
+      closed-form 0.012 mm, at NIP 1 and NIP 5 alike. ``_restate_law1_shells``
+      converts the ordinary case (every part on the material is a shell) to
+      LAW36, so this warning is left for the MIXED case, where a material
+      carries both shell and solid parts and cannot be restated.
+    * On SOLIDS the physics is exact wherever the engine is stable, and the
+      instability has a sharp, measured trigger: a run of elements free to
+      TRANSLATE laterally as a group. See ``_warn_solid_expansion``.
     """
     if not state.therm_stress_cards:
         return
@@ -1279,40 +1442,22 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
     if inert_law1:
         state.warn(
             f"/THERM_STRESS/MAT: shell part(s) {inert_law1} sit on a "
-            "/MAT/ELAST (LAW1) material, which gets NO thermal expansion. LAW1 "
-            "always runs GLOBAL integration (starter WARNING 1084 'NUMBER OF "
-            "INTEGRATION POINTS IS HIGHER THAN 1 ... SWITCHED TO GLOBAL "
-            "INTEGRATION N=0') and thermexpc.F's isotropic branch builds its "
-            "thermal force from A1 + A2, which are zero in that path — measured "
-            "on both QEPH and QBAT shells: the clamped reaction was -0.02 "
-            "against -257.95 for the identical deck on /MAT/LAW2. The card is "
-            "emitted (a mixed deck's solid and multi-integration-point shell "
-            "parts DO expand) but these parts will not move. Restate them on a "
-            "through-thickness-integrated law - *MAT_PIECEWISE_LINEAR_"
-            "PLASTICITY (LAW36) or *MAT_PLASTIC_KINEMATIC (LAW44) with an "
-            "elastic yield - if their expansion matters.")
+            "/MAT/ELAST (LAW1) material, which gets NO thermal expansion, and "
+            "the material could NOT be restated as LAW36 because it also "
+            "carries non-shell parts. LAW1 always runs GLOBAL integration "
+            "(starter WARNING 1084 'NUMBER OF INTEGRATION POINTS IS HIGHER "
+            "THAN 1 ... SWITCHED TO GLOBAL INTEGRATION N=0') and thermexpc.F "
+            "only reaches the per-integration-point stresses, so there is "
+            "nothing for it to correct - measured, a LAW1 shell strip expands "
+            "by 2.66e-07 mm where the closed form is 0.012 mm, at NIP 1 and "
+            "NIP 5 alike. The card is emitted (the material's SOLID parts DO "
+            "expand) but these shells will not move. Give them their own "
+            "material id, or restate them on a through-thickness-integrated "
+            "law - *MAT_PIECEWISE_LINEAR_PLASTICITY (LAW36) or "
+            "*MAT_PLASTIC_KINEMATIC (LAW44) with a far yield - if their "
+            "expansion matters.")
     if solids:
-        state.warn(
-            f"/THERM_STRESS/MAT: solid part(s) {solids} expand through the "
-            "SOLID path (mmain.F90:757-786), which is exact under symmetry "
-            "mounts - measured -0.12 % on a free cube, -0.16 % on a free bar "
-            "and -0.14 % on a fully restrained one against the closed-form "
-            "alpha*dT - but WRONG when the bar is clamped over a whole face "
-            "with a laterally free interior. Measured on a k2rad-converted "
-            "deck, a 10-hex bar at alpha = 1.2e-5 and dT = 100 K gave a free-end "
-            "DX of -0.4190 mm where +0.012 mm is the closed form: wrong sign, "
-            "35x the magnitude. The same mount produces a spurious stress of "
-            "about 11 GPa that is INDEPENDENT of both dT (11457 / 11064 / "
-            "11150 MPa at dT = 0.001 / 1 / 100 K) and alpha, which rules out a "
-            "stiff-but-real response; swapping the face clamp for symmetry "
-            "planes on the SAME deck restores the exact answer (0.011984 mm, "
-            "-0.13 %). The mechanism was not isolated, so check the mount and "
-            "the first states of your own run before trusting solid thermal "
-            "stresses. Shells with a multi-integration-point law are robust in "
-            "both mounts. Note also "
-            "that the solid gate is jthe < 0 and skips t = 0 "
-            "(sgrtails.F:1462 stores -ABS(JTHE) for Lagrangian solids), so "
-            "nothing happens on the very first cycle.")
+        _warn_solid_expansion(state, solids)
     if state.is_implicit:
         state.warn(
             "/THERM_STRESS/MAT is emitted on a deck that also carries "

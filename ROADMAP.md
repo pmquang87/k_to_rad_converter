@@ -32,8 +32,12 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   digits. Radioss has no truss element, so the axial-only muscle becomes a
   spring — which is what an LS-DYNA truss states anyway.
   `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` + `/HEAT/MAT` with the
-  minimal temperature-driver foothold (`/INITEMP`, `/IMPTEMP`) — see the Tier 4
-  *Thermal* entry for what is done and what stays open.
+  minimal temperature-driver foothold (`/INITEMP`, `/IMPTEMP`); a `*MAT_ELASTIC`
+  material whose every part is a SHELL is restated as `/MAT/LAW36` with a
+  far-yield curve, because LAW1 runs global integration and cannot expand at all
+  (measured 2.7e-07 mm against 0.012 mm; the restatement is elastically neutral
+  to +0.035 % and costs −4.6 % of time step). See the Tier 4 *Thermal* entry for
+  what is done and what stays open.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`

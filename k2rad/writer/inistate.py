@@ -1633,6 +1633,28 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             grbric_id = state.next_id()
             lines += _emit_id_group("GRBRIC/BRIC", grbric_id, f"{title}_bricks",
                                     solid_eids)
+        # A *SECTION_BEAM part whose material re-routes it to a CONNECTOR
+        # (*MAT_MUSCLE -> /PROP/TYPE46, *MAT_SPOTWELD -> /PROP/TYPE13, an
+        # ELFORM=6 discrete beam) is emitted as a /SPRING, not a /BEAM. Its
+        # eid in a /GRBEAM/BEAM group therefore matches nothing: the starter
+        # answers WARNING 534 "GROUP IS EMPTY" and the section loses the
+        # element anyway. Leave them out and say so — the /SECT card's
+        # grsprg_ID column would be the right home, but writing a group card
+        # whose spelling this build's cfg tree does not carry is a guess, and
+        # a guessed card is worse than a named loss.
+        rerouted = [e for e in beam_eids if e in state.spring_elem_ids]
+        beam_eids = [e for e in beam_eids if e not in state.spring_elem_ids]
+        if rerouted:
+            state.warn(
+                f"{label}: beam element(s) {rerouted} cross the section plane "
+                "but their part's material re-routes them to a SPRING "
+                "connector (*MAT_MUSCLE, *MAT_SPOTWELD or an ELFORM=6 discrete "
+                "beam), so they are /SPRING in the emitted deck and not /BEAM. "
+                "They are left OUT of the section's /GRBEAM group — putting "
+                "them there gives starter WARNING 534 'BEAM GROUP ... GROUP IS "
+                "EMPTY' and loses them just the same. Their contribution to "
+                "the section force is NOT measured; read it from /TH/NODE "
+                "REAC* on the anchor nodes instead.")
         if beam_eids:
             grbeam_id = state.next_id()
             lines += _emit_id_group("GRBEAM/BEAM", grbeam_id, f"{title}_beams",

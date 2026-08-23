@@ -223,23 +223,58 @@ Prior history (before this changelog was introduced) is summarized in the
      turns into **1.0** ("convert all strain energy into heat"), which is the
      opposite of what a deck prescribing its temperature field states.
 
- 17. **Two element-family verdicts, both measured, both named rather than
-     silently shipped.** A `/MAT/ELAST` (LAW1) SHELL gets **no expansion at
-     all**: LAW1 always runs global integration (`WARNING 1084`) and
-     `thermexpc.F`'s isotropic branch builds its thermal force from `A1 + A2`,
-     which are zero there - the clamped reaction was `-0.02` against `-257.95`
-     for the identical deck on LAW2, on both QEPH and QBAT. And on SOLIDS the
-     physics is exact under symmetry mounts (-0.12 % / -0.16 % / -0.14 % on a
-     free cube, a free bar and a fully restrained one) but **wrong under a
-     face-clamp mount**: reproduced here on a k2rad-converted deck, a 10-hex bar
-     at alpha = 1.2e-5, dT = 100 K gave a free-end `DX = -0.4190 mm` where
-     +0.012 is the closed form - wrong sign, 35x the magnitude - while the SAME
-     deck with symmetry planes instead gives 0.011984. The spurious stress is
-     independent of both dT and alpha, which rules out a stiff-but-real
-     response. Both cards are still emitted (a mixed deck's other parts do
-     expand) and both facts are stated in the log. The implicit engine has no
-     thermal solve at all (`grep ITHERM engine/source/implicit` -> nothing),
-     which is warned about too.
+ 17. **Two element-family verdicts, both re-measured on the branch's own
+     converted decks.** A `/MAT/ELAST` (LAW1) SHELL gets **no expansion at
+     all** - LAW1 is the one law Radioss integrates GLOBALLY through the
+     thickness (`WARNING 1084 ... FORMULATION IS SWITCHED TO GLOBAL
+     INTEGRATION N=0`) and `thermexpc.F` only reaches the
+     per-integration-point stresses, so there is nothing for it to correct.
+     Measured on a 10 x 1 mm strip at alpha = 1.2e-5 over dT = 100 K
+     (closed form 0.012 mm): **2.66e-07 mm at NIP 5 and -5.11e-08 mm at
+     NIP 1** - the integration-point count is not the cure, because LAW1
+     discards it. So the material is **RESTATED as `/MAT/LAW36` with a flat
+     yield curve at 1000 x E** whenever every part on it is a shell, which is
+     proven elastically neutral: the same strip pulled mechanically to the same
+     elongation reports 209.977 / 419.561 / 628.914 / 838.231 MPa under LAW1
+     against 210.003 / 419.709 / 629.086 / 838.410 under the restatement
+     (**+0.012 % to +0.035 %**, against the closed form 210 / 420 / 630 / 840),
+     and the free edge follows the imposed motion to 8 digits. The one cost is
+     a **-4.6 %** time step. End to end: the same .k file that produced
+     2.66e-07 mm now produces **0.0120078 mm (+0.065 %)** at 0 starter errors
+     and 0 warnings. A material shared with SOLID parts is NOT restated - a
+     LAW1 solid expands correctly, because `mmain.F90:757` applies the
+     expansion before the law dispatch - and its shell half is named as inert
+     instead.
+
+     On SOLIDS the physics is exact wherever the engine is stable, and the
+     instability now has a **sharp measured trigger: a run of elements free to
+     TRANSLATE laterally as a group.** Same bar, one variable at a time:
+
+     | mount / variant | free-end DX | dt held? |
+     |---|---|---|
+     | quarter symmetry at every cross-section | 0.01198664 mm | yes |
+     | end face pinned in x + 3 DOFs, nothing else | **-3.6886 mm** | NO (2e-19) |
+     | the same end pinning + lateral anchors | 0.01198628 mm | yes |
+     | encastre end face + lateral anchors | 0.01229825 mm | yes |
+     | ONE hex, end face pinned in x + 3 DOFs | 0.01198825 mm | yes |
+
+     It is **not** the clamp (the encastre face WITH lateral anchors is stable
+     and energy-balanced, I-ENERGY 0.1315 vs EXT-WORK 0.1312), **not** the
+     thermal solve (a `/HEAT/MAT` with no `/THERM_STRESS` on the diverging
+     mount held dt for 46 000 cycles at zero energy), **not** the card (a
+     CONSTANT imposed temperature held dt for 45 000 cycles), **not** the load
+     (alpha 1.2e-9, 10 000x smaller, diverges identically), **not** the element
+     formulation (Isolid 17/24/1, Ismstr 4/10 and Icpre 1 all diverge; Isolid
+     12 "stabilises" only by making the expansion inert, DX = 0, and the
+     starter calls it obsolete, `WARNING 1160`), **not** the law (LAW1 and
+     LAW36 alike) and it needs more than one element. `/DT/NODA/CST` is not a
+     cure either: with `DT2MS = -1e-7` the run stops at cycle 1000 while
+     PRINTING **NORMAL TERMINATION**, I-ENERGY 3.089e5 against EXT-WORK 0.099.
+     No card-level cure was found, so the card is emitted and the warning
+     names the trigger and the prescription (one lateral anchor per
+     cross-section, or shells on a through-thickness-integrated law). The
+     implicit engine has no thermal solve at all (`grep ITHERM
+     engine/source/implicit` -> nothing), which is warned about too.
 
  18. **`*LOAD_THERMAL_VARIABLE`'s `T = TB + TS*f(t)` needs a synthesized
      curve.** `/IMPTEMP` computes `Fscale_y*f((t-T_start)/Ascale_x)` only
@@ -259,6 +294,33 @@ Prior history (before this changelog was introduced) is summarized in the
   All five `*MAT_ADD_THERMAL_EXPANSION` carriers in the r14 verification corpus
   convert and start at **0 ERRORS**, `07_metalstrip.k` included (40 x
   `ERROR 495` before).
+
+ 19. **Every `*LOAD_THERMAL_*` spelling REPEATS, and the temperature-output
+     gate reads what was EMITTED.** The manual says so per keyword - *"Card
+     Sets. Include as many sets ... as desired"* (`_CONSTANT` p.33-166,
+     `_VARIABLE` p.33-179), *"Node Cards. Include as many cards in this format
+     as desired"* (`_CONSTANT_NODE` p.33-169, `_VARIABLE_NODE` p.33-185),
+     *"Thermal Load Curve Cards ..."* (`_LOAD_CURVE` p.33-171) - so every
+     record is read, and the two CARD-SET spellings walk RAW PAIRS because an
+     all-blank card 1 is legal there (NSID defaults to all nodes). `NSIDEX`
+     (*"nodes that are exempted from the imposed temperature"*) is SUBTRACTED
+     from the `/GRNOD` - `/IMPTEMP` is a hard Dirichlet reset every cycle
+     (`fixtemp.F:180-200`), so an exempted node was being driven anyway - and
+     `BOXID` is named. `TBIRTH` is not just a gate: `fixtemp.F:118-129`
+     evaluates the curve at `t - T_start`, so the driver curve is emitted
+     pre-shifted by `-TBIRTH` and LS-DYNA's absolute-time reading is preserved.
+     A blank `TMULT` beside a curve is resolved to 1.0 at conversion time
+     rather than left to `hm_read_imptemp.F:139`'s own 0 -> 1 default (a cell
+     that means the opposite of what it does). `T0 = TB + TS x f(0)`
+     (p.33-180 Remark 1) uses the ORIGINAL scale. And the gate that decides
+     whether `/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are written now reads
+     `state.thermal_driver_emitted`, set at the line that writes an
+     `/IMPTEMP`: several corpus decks state a driver on a `*SET_NODE_GENERAL` /
+     `*SET_NODE_LIST_GENERATE` k2rad cannot read, so the driver is dropped and
+     nothing changes the temperature - `mat-add/main_steel_frame.k` and
+     `07_metalstrip.k` are exactly that shape and now get no TEMP channel and
+     an explicit "this expansion is INERT" warning instead of a frozen fringe
+     (the #122 rule).
 
 - **The PRELOAD / initial-state batch:
   `*INITIAL_STRAIN_SHELL` (+ `_SET`) → `/INISHE/STRA_F/GLOB` and

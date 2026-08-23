@@ -363,7 +363,7 @@ def _make_grounding_springs(state: ConversionState, rbody_info: Dict) -> List[st
             f"{_i(elem_id)}{_i(master)}{_i(ground_node)}",
             HDR,
         ]
-        # /SPRING producer 5 of 7: the --ground-springs stabilizer. Its id is
+        # /SPRING producer 5 of 9: the --ground-springs stabilizer. Its id is
         # minted by next_id() and matches no LS-DYNA element, so it stays out
         # of the three per-database sets — but it IS a /SPRING, so a
         # *DATABASE_HISTORY_BEAM/_DISCRETE id collision has to be able to see
@@ -791,7 +791,7 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         # coordinates, and *DATABASE_DEFORC must list only ids that reached the
         # deck (a /TH/SPRING on a missing element is starter ERROR 69).
         state.discrete_spring_eids.add(e.eid)
-        state.spring_elem_ids.add(e.eid)      # producer 1 of 7
+        state.spring_elem_ids.add(e.eid)      # producer 1 of 9
     lines.append(HDR)
     if ground_nodes:
         grnod_id = state.next_id()
@@ -1526,7 +1526,7 @@ def _make_plotel_elements(state: ConversionState) -> List[str]:
             missing.append(e.eid)
             continue
         lines.append(f"{_i(e.eid)}{_i(e.n1)}{_i(e.n2)}")
-        # /SPRING producer 4 of 7. A PLOTEL keeps its SOURCE eid, so it shares
+        # /SPRING producer 4 of 9. A PLOTEL keeps its SOURCE eid, so it shares
         # the /SPRING id namespace with the real connectors — and the
         # `continue` above drops elements whose nodes are missing, so this is
         # recorded at the write line like every other producer.
@@ -1785,7 +1785,7 @@ def _make_spotweld_beam_connectors(state: ConversionState) -> List[str]:
             # emitting a /SPRING. A /TH/SPRING naming a skipped id is starter
             # ERROR 69 and the deck is refused outright.
             state.spotweld_spring_eids.add(e.eid)
-            state.spring_elem_ids.add(e.eid)  # producer 2 of 7
+            state.spring_elem_ids.add(e.eid)  # producer 2 of 9
             # /PRELOAD/AXIAL property gate, recorded at the write line: this
             # /PROP/TYPE13's axial DOF carries fct_ID1=fct1 and H=h1, and
             # rinit3.F:1627-1690 accepts CASE(4,13) only with a non-zero
@@ -1903,7 +1903,7 @@ def _make_constrained_spotweld_springs(state: ConversionState) -> List[str]:
             f"{_i(elem_id)}{_i(n1)}{_i(n2)}",
             HDR,
         ]
-        state.spring_elem_ids.add(elem_id)    # producer 6 of 7
+        state.spring_elem_ids.add(elem_id)    # producer 6 of 9
         emitted = True
         state.warn(
             f"*CONSTRAINED_SPOTWELD {label}: converted to a stiff "

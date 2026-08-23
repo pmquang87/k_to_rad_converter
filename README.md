@@ -727,12 +727,28 @@ exponential passive laws are reproduced exactly (102 points, the manual's own
 2-D `h(ε̄̇, λ)` form) are warn-dropped instead of dividing by zero or being
 handed to a 1-D slot, as dyna2rad does. `SFR`-as-a-curve and `SV`-as-a-curve
 have no Radioss slot (`Scale_v` is one number) and are named-dropped.
+**A POSITIVE `SFR`/`SVS`/`SVR` (p.2-1072) or `SV`/`TL`/`TV` (p.2-2096) is not a
+coefficient**: the manual reads *"LT.0.0: Absolute value gives load curve ID.
+GE.0.0: **Constant value of 1.0 is used**"*, so LS-DYNA discards whatever number
+the deck writes and 1.0 is used here too — `ALM`/`A` on the same cards are the
+contrast (*"Constant value of ALM is used"*) and keep their scalar. A card
+stating a value other than 0 or 1 there is named, since the author probably
+meant a factor.
+A `PIS·A` or `FMAX` of **zero** writes the passive slot as a constant-zero
+function rather than leaving `Scale_F = 0`, which `hm_read_prop46.F:179` turns
+into **one force unit** and `ruser46.F:203` then multiplies the dimensionless
+passive curve by.
 Per-element force history is **not** available: `/TH/SPRING` on a TYPE46 writes
 15 channels of exact zero — force, deflection, length and even the OFF flag —
 while a `/PROP/TYPE4` spring in the *same* group of the *same* deck reports
-correctly, so muscle springs are deliberately left out of the
-`*DATABASE_DEFORC` group and the warning points at `/TH/NODE REACX` or the
-global `SPRING ENERGY` channel instead.
+correctly, so muscle springs are left out of the `*DATABASE_DEFORC` group **and
+of any `*DATABASE_HISTORY_BEAM`/`_DISCRETE`/`_SEATBELT` group** that names them,
+with the warning pointing at `/TH/NODE REACX` or the global `SPRING ENERGY`
+channel instead. For the same reason a `*DATABASE_CROSS_SECTION` plane that cuts
+a muscle (or spotweld, or ELFORM-6) beam leaves it out of the section's
+`/GRBEAM` group — those elements are `/SPRING` in the emitted deck, so the id
+matched nothing there anyway (starter `WARNING 534 ... GROUP IS EMPTY`) — and
+names the lost contribution.
 `*CONTACT_INTERIOR` → the Radioss counterpart is `Icontrol=1` (solid
 distortion control) on the listed parts' `/PROP` — an input column that
 exists only in the radioss2025 property format. Measured on `starter_win64`:
@@ -2328,10 +2344,10 @@ unit/sign gotchas.
 | `*MAT_ADD_THERMAL_EXPANSION` | `/THERM_STRESS/MAT/<mid>` + `/HEAT/MAT/<mid>` | the pair is mandatory — a `/THERM_STRESS` without a `/HEAT/MAT` is `ERROR 1129` |
 | `*MAT_THERMAL_ISOTROPIC` via `*PART` TMID | the `/HEAT/MAT` values | `RHO0_CP = (TRO or RO)·HC`, `AS = TC` (LS-DYNA `HC` is per MASS, Radioss `RHO0_CP` per VOLUME); units pass through |
 | `*INITIAL_TEMPERATURE[_SET\|_NODE]` | `/INITEMP` on a `/GRNOD` | `NSID = 0` = every node; the group form only — `fld_type = 1` loses its per-node values |
-| `*LOAD_THERMAL_CONSTANT[_NODE]` | `/INITEMP` + `/IMPTEMP` (2-point curve) | |
+| `*LOAD_THERMAL_CONSTANT[_NODE]` | `/INITEMP` + `/IMPTEMP` (2-point curve) | all four `*LOAD_THERMAL_*` spellings REPEAT (*"include as many … as desired"*); the two card-set forms are walked in RAW PAIRS because a blank card 1 is legal. `NSIDEX` is subtracted from the group, `BOXID` named |
 | `*LOAD_THERMAL_LOAD_CURVE` | `/IMPTEMP` on all nodes | `LCIDDR` (dynamic relaxation) named-dropped |
 | `*LOAD_THERMAL_VARIABLE[_NODE]` | `/IMPTEMP` with `TB + TS·f(t)` baked into a synthesized curve | `/IMPTEMP` has no additive slot |
-| `*BOUNDARY_TEMPERATURE[_SET\|_NODE]` | `/IMPTEMP` on the set | `TMULT` → `Fscale_y` on the curve form, → the constant T on the `TLCID = 0` form; `TBIRTH`/`TDEATH` → `T_start`/`T_stop` |
+| `*BOUNDARY_TEMPERATURE[_SET\|_NODE]` | `/IMPTEMP` on the set | `TMULT` → `Fscale_y` on the curve form (blank/0 resolved to 1.0 here, never left to the reader's own 0 → 1), → the constant T on the `TLCID = 0` form; `TDEATH` → `T_stop`; `TBIRTH` → `T_start` **and** the curve pre-shifted by `−TBIRTH`, because `fixtemp.F:118-129` evaluates it at `t − T_start` while LS-DYNA reads absolute time |
 | `*SECTION_SHELL_THERMAL` | the ordinary `/PROP/SHELL` | registering the spelling is what turns 40 × `ERROR 495` "NULL THICKNESS" into a startable deck |
 | `*CONTROL_SOLUTION` (SOLN) | — | reported: Radioss has no analysis-type switch, `/HEAT/MAT` is what arms the solve |
 | `*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}`, `*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]`, `*MAT_THERMAL_{CWM,ORTHOTROPIC,ISOTROPIC_TD,ISOTROPIC_TD_LC}`, `*LOAD_THERMAL_{D3PLOT,DYNAIN,BINOUT}` | — | recognized + **named** warn-drop, deferred to the full thermal-solver item |
@@ -2371,15 +2387,52 @@ what Johnson-Cook's `T*` divides by) and its `rhoC_p` with `RHO0_CP`, so the
 law's own melt temperature is copied across and a differing capacity is named.
 On `*MAT_TABULATED_JOHNSON_COOK` the pair is refused outright — a `/HEAT/MAT`
 switches LAW109 off its self-heating path and without one the expansion card is
-`ERROR 1129`. Two element-family limits are named rather than silently shipped:
-a **`/MAT/ELAST` (LAW1) shell gets no expansion** (LAW1 forces global
-integration and `thermexpc`'s `A1 + A2` are zero there — measured −0.02 against
-−257.95 on LAW2), and the **solid** path, exact under symmetry mounts, is wrong
-under a face-clamp mount (measured on a converted deck: `DX = −0.4190` where
-+0.012 is expected, ΔT- and α-independent). `/TH/NODE TEMP` and
-`/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT` and a driver both
-exist — a temperature channel without a thermal solve runs clean and writes
-states of exactly 0.0.
+`ERROR 1129`. **Which laws consume the card, from the engine gate.** On SOLIDS,
+*every* law does: `mmain.F90:757` applies the expansion **before** the material
+dispatch, so a LAW1 solid expands exactly (measured −0.11 % on a
+symmetry-mounted bar). On SHELLS the gate is `cmain3.F:347`
+(`IEXPAN > 0 .AND. JTHE > 0 .AND. IDT_THERM == 0`) into `thermexpc.F`, which
+reaches the **per-integration-point** stresses — and LAW1 is the one law
+Radioss integrates GLOBALLY (`WARNING 1084 ... SWITCHED TO GLOBAL INTEGRATION
+N=0`), so it has no through-thickness state to correct. Measured on a 10 × 1 mm
+strip (closed form 0.012 mm): **2.66e-07 mm at NIP 5 and −5.11e-08 mm at
+NIP 1** — the integration-point count is not the cure, LAW1 discards it.
+
+So a `*MAT_ELASTIC` material whose every part is a shell is **restated as
+`/MAT/LAW36`** with a flat yield curve at 1000 × E. It is proven elastically
+neutral: the same strip pulled mechanically reports 209.977 / 419.561 /
+628.914 / 838.231 MPa under LAW1 against 210.003 / 419.709 / 629.086 / 838.410
+under the restatement (**+0.012 % to +0.035 %** against the closed form
+`E·ε` = 210/420/630/840), the free edge follows the imposed motion to 8 digits,
+and the one cost is a **−4.6 %** time step. End to end, the same .k file goes
+from 2.66e-07 mm to **0.0120078 mm (+0.065 %)**. A material shared with SOLID
+parts is not restated — the solids already work — and its shell half is named
+as inert instead.
+
+**The solid caveat, with its measured trigger.** The solid path is exact
+wherever the engine is stable, and it diverges when a run of elements is free to
+**translate laterally as a group**. Same bar, one variable at a time: quarter
+symmetry at every cross-section → 0.01198664 mm, dt held; only the end face
+pinned → **−3.6886 mm** and dt collapsed to 2e-19; the *same* end pinning plus
+lateral anchors → 0.01198628 mm, dt held; an encastre end face plus lateral
+anchors → 0.01229825 mm, dt held; a *single* hex on the diverging mount →
+0.01198825 mm. It is not the clamp, not the thermal solve (a `/HEAT/MAT` with no
+`/THERM_STRESS` held dt for 46 000 cycles), not the card (a constant imposed
+temperature held dt), not α (1.2e-9 diverges identically), not Isolid/Ismstr/
+Icpre, not the law, and it needs more than one element. `/DT/NODA/CST` does not
+cure it — it makes the run stop at cycle 1000 while *printing* `NORMAL
+TERMINATION` with I-ENERGY 3.089e5 against EXT-WORK 0.099. No card-level cure
+was found, so the card is emitted and the warning names the trigger and the
+prescription: one lateral anchor per cross-section, or shells on a
+through-thickness-integrated law.
+
+`/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT`
+and an **emitted** `/IMPTEMP` both exist — read from what was written, not from
+what was parsed, because a driver whose `*SET_NODE_GENERAL` k2rad cannot read is
+dropped at emission and then nothing changes the temperature. An `/INITEMP`
+alone does not count: it is a state, not a driver. A `/THERM_STRESS/MAT` that
+ends with no `/IMPTEMP` is reported as INERT rather than shipped as a flat-zero
+channel.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),
