@@ -786,6 +786,68 @@ class PreloadCurveWindowTests(unittest.TestCase):
                          [(0.0, 0.0), (1.0, 2.0), (2.0, 2.0)])
 
 
+
+CROSS_SET_BAR = (
+    "*KEYWORD\n*NODE\n"
+    + "".join(f"{i:>8}{x:16.8E}{y:16.8E}{z:16.8E}\n"
+              for i, (x, y, z) in enumerate(
+                  [(a, b, float(k)) for k in range(3)
+                   for (a, b) in ((0., 0.), (1., 0.), (1., 1.), (0., 1.))], 1))
+    + "*PART\nbar\n" + _row(1, 1, 1) + "\n"
+    + "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+    + "*MAT_ELASTIC\n" + _row(1, 7.85e-9, 210000.0, 0.3) + "\n"
+    + "*ELEMENT_SOLID\n"
+    + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4, 5, 6, 7, 8)) + "\n"
+    + "".join(f"{v:>8}" for v in (2, 1, 5, 6, 7, 8, 9, 10, 11, 12)) + "\n"
+    + "*SET_NODE_LIST\n" + _row(11) + "\n" + _row(5, 6, 7, 8) + "\n"
+    + "*SET_SOLID\n" + _row(12) + "\n" + _row(2) + "\n"
+    #                                NSID HSID BSID SSID TSID DSID
+    + "*DATABASE_CROSS_SECTION_SET_ID\n" + f"{1:>10}set cut" + "\n"
+    + _row(11, 12, 0, 0, 0, 0) + "\n"
+    + "*DEFINE_CURVE\n" + _row(1, 0, 1.0, 150.0) + "\n"
+    + f"{0.0:>20.10G}{0.0:>20.10G}\n" + f"{2.0e-4:>20.10G}{1.0:>20.10G}\n"
+    + "{EXTRA}"
+    + "*CONTROL_TERMINATION\n    4.0E-4\n*END\n"
+)
+
+
+class CrossSectionSetPreloadTests(unittest.TestCase):
+    """The _SET cross-section variant, where LS-DYNA REQUIRES a VID."""
+
+    def _run(self, with_vid):
+        extra = ""
+        if with_vid:
+            extra += ("*DEFINE_VECTOR\n"
+                      + _row(4, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) + "\n")
+        extra += ("*INITIAL_STRESS_SECTION\n"
+                  + _row(7, 1, 1, 0, 4 if with_vid else 0, 0, 0) + "\n")
+        return _convert(CROSS_SET_BAR.replace("{EXTRA}", extra))
+
+    def test_vid_gives_the_exact_axis(self):
+        r, starter = self._run(True)
+        sect_id = int(_headers(starter, "/SECT/")[-1].split("/")[-1])
+        got = _frame_normal(starter, sect_id)
+        self.assertAlmostEqual(got[0], 0.0, places=9)
+        self.assertAlmostEqual(got[1], 0.0, places=9)
+        self.assertAlmostEqual(got[2], 1.0, places=9)
+        self.assertTrue(any("*DEFINE_VECTOR 4 = (0, 0, 1)" in w
+                            for w in r.warnings))
+        self.assertFalse(any("no VID" in w for w in r.warnings))
+        # HSID gives the brick group; the node set gives the frame origin.
+        self.assertEqual(_ids_in(starter, "/GRBRIC/BRIC/"), [2])
+        n1 = _sect_frame(starter, sect_id)[0]
+        self.assertEqual(_nodes_of(starter)[n1], (0.5, 0.5, 1.0))
+
+    def test_without_vid_the_plane_is_fitted_and_said_out_loud(self):
+        r, starter = self._run(False)
+        sect_id = int(_headers(starter, "/SECT/")[-1].split("/")[-1])
+        got = _frame_normal(starter, sect_id)
+        self.assertAlmostEqual(abs(got[2]), 1.0, places=9)
+        w = [x for x in r.warnings if "no VID" in x]
+        self.assertTrue(w)
+        self.assertIn("FITTED to the plane the section nodes lie in", w[0])
+        self.assertIn("dyna2rad never reads VID", w[0])
+
 # ═════════════════════════════════════════════════════════════════════════════
 # *INITIAL_AXIAL_FORCE_BEAM → /PRELOAD/AXIAL
 # ═════════════════════════════════════════════════════════════════════════════

@@ -1095,7 +1095,8 @@ def _sect_frame_nodes(state: ConversionState, group_nids: List[int],
 
 
 def _plane_cut(state: ConversionState, cs,
-               extra_pids: Optional[Set[int]] = None
+               extra_pids: Optional[Set[int]] = None,
+               warn_missing_psid: bool = True
                ) -> Tuple[List[int], List[int], List[int], List[int]]:
     """Geometric resolver for *DATABASE_CROSS_SECTION_PLANE: an element is cut
     when the signed distances d = (x - tail)·n̂ of its nodes change sign across
@@ -1105,6 +1106,9 @@ def _plane_cut(state: ConversionState, cs,
     the cut elements' nodes on the TAIL side (d <= 0): this is the standard
     /SECT construction (section forces = what the tail-side nodes of the cut
     elements transmit through the plane).
+
+    *warn_missing_psid* is False for the second walk of the same section (the
+    bolt-preload re-resolve), so a missing part set is reported once.
 
     *extra_pids* is a SECOND, independent part restriction intersected with the
     card's own PSID — ``*INITIAL_STRESS_SECTION``'s PSID field, which Vol I R17
@@ -1123,8 +1127,14 @@ def _plane_cut(state: ConversionState, cs,
     if cs.psid > 0:
         entry = state.part_sets.get(cs.psid)
         if entry is None:
-            state.warn(f"*DATABASE_CROSS_SECTION_PLANE: part set {cs.psid} not "
-                       "found — the plane was intersected with the WHOLE model.")
+            # warn_missing_psid=False for the bolt-preload re-resolve: the same
+            # cross-section is walked twice (once for the reporting /SECT, once
+            # for the PSID-intersected preload group) and the message would be
+            # printed twice for one deck problem.
+            if warn_missing_psid:
+                state.warn(
+                    f"*DATABASE_CROSS_SECTION_PLANE: part set {cs.psid} not "
+                    "found — the plane was intersected with the WHOLE model.")
         else:
             pids = set(entry[1])
     if extra_pids is not None:

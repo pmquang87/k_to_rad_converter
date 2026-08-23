@@ -291,7 +291,8 @@ def _make_preload_sections(state: ConversionState,
             nids, solid_eids, normal, why = _set_section_scope(state, cs, iss,
                                                                extra, label)
         else:
-            nids, _sh, solid_eids, _bm = _plane_cut(state, cs, extra_pids=extra)
+            nids, _sh, solid_eids, _bm = _plane_cut(
+                state, cs, extra_pids=extra, warn_missing_psid=False)
             normal = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct,
                              cs.zch - cs.zct))
             why = "the cutting plane normal XCT->XCH"
@@ -317,12 +318,27 @@ def _make_preload_sections(state: ConversionState,
                        "in the section cannot be pre-tensioned at all.")
             continue
 
+        if not nids:
+            # hm_read_sect.F builds the section from grnod_ID (the nodes ON the
+            # cut) as well as the element groups, and an empty /GRNOD/NODE
+            # gives NSTRF(K0+6)=0. Reachable only for a _SET section whose NSID
+            # is empty or missing; the plane cut always yields the tail-side
+            # nodes of the elements it cut.
+            state.warn(f"{label}: the cross section has an empty node group — "
+                       "no /PRELOAD emitted. A /SECT needs the nodes on the cut "
+                       "plane (the _SET variant takes them from NSID).")
+            continue
+
         _warn_preload_formulation(state, solid_eids, label)
 
         origin = ((cs.xct, cs.yct, cs.zct) if cs.kind != "SET"
                   else _nid_centroid(state, nids))
         scale = _preload_sect_scale(state, origin, nids)
         frame = _frame_nodes_for_normal(origin, normal, scale)
+        if frame is None:                                # pragma: no cover
+            state.warn(f"{label}: could not build a frame perpendicular to the "
+                       "pretension direction — no /PRELOAD emitted.")
+            continue
         fn_ids = [state.next_node_id() for _ in range(3)]
         for nid, xyz in zip(fn_ids, frame):
             state.nodes[nid] = NodeData(xyz[0], xyz[1], xyz[2])
