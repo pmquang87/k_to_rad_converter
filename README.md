@@ -980,7 +980,10 @@ mechanism, `GASKETT` is not an adhesive path, and hourglass splits
 `σ_y = k1(ε_p, ε̇)·kt(ε_p,T)/kt(ε_p,T_ref)`. `CP` copies 1:1 (LAW109's `C_p`
 is per-MASS — the engine divides by ρ itself — unlike the LAW2/LAW4 `rhoC_p`);
 adiabatic self-heating is law-internal, so NO `/HEAT/MAT` is emitted (its
-presence would switch LAW109 to the imposed-temperature path). `LCK1` routes
+presence would switch LAW109 to the imposed-temperature path — which is also
+why a `*MAT_ADD_THERMAL_EXPANSION` on a MAT_224 material is refused by name:
+`/THERM_STRESS/MAT` without a `/HEAT/MAT` is `ERROR 1129`, so the pair cannot
+be had on this law at all). `LCK1` routes
 by form: a plain curve is re-emitted as a 1-D `/TABLE/1` (dyna2rad leaves the
 slot 0 — deck broken); a 2-D table is referenced by id under `I_smooth=1`;
 every `I_smooth=2` table — the `_LOG_INTERPOLATION` spelling or a NEGATIVE
@@ -2308,6 +2311,66 @@ Coupled ALE / fluid-structure (high-explosive detonation):
 
 See `docs/BLAST_ALE_JWL_MAPPING.md` for the full mapping table, card formats and
 unit/sign gotchas.
+
+### Thermal (expansion + the minimal temperature-driver foothold)
+
+| LS-DYNA | Radioss | note |
+|---|---|---|
+| `*MAT_ADD_THERMAL_EXPANSION` | `/THERM_STRESS/MAT/<mid>` + `/HEAT/MAT/<mid>` | the pair is mandatory — a `/THERM_STRESS` without a `/HEAT/MAT` is `ERROR 1129` |
+| `*MAT_THERMAL_ISOTROPIC` via `*PART` TMID | the `/HEAT/MAT` values | `RHO0_CP = (TRO or RO)·HC`, `AS = TC` (LS-DYNA `HC` is per MASS, Radioss `RHO0_CP` per VOLUME); units pass through |
+| `*INITIAL_TEMPERATURE[_SET\|_NODE]` | `/INITEMP` on a `/GRNOD` | `NSID = 0` = every node; the group form only — `fld_type = 1` loses its per-node values |
+| `*LOAD_THERMAL_CONSTANT[_NODE]` | `/INITEMP` + `/IMPTEMP` (2-point curve) | |
+| `*LOAD_THERMAL_LOAD_CURVE` | `/IMPTEMP` on all nodes | `LCIDDR` (dynamic relaxation) named-dropped |
+| `*LOAD_THERMAL_VARIABLE[_NODE]` | `/IMPTEMP` with `TB + TS·f(t)` baked into a synthesized curve | `/IMPTEMP` has no additive slot |
+| `*BOUNDARY_TEMPERATURE[_SET\|_NODE]` | `/IMPTEMP` on the set | `TMULT` → `Fscale_y` on the curve form, → the constant T on the `TLCID = 0` form; `TBIRTH`/`TDEATH` → `T_start`/`T_stop` |
+| `*SECTION_SHELL_THERMAL` | the ordinary `/PROP/SHELL` | registering the spelling is what turns 40 × `ERROR 495` "NULL THICKNESS" into a startable deck |
+| `*CONTROL_SOLUTION` (SOLN) | — | reported: Radioss has no analysis-type switch, `/HEAT/MAT` is what arms the solve |
+| `*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}`, `*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]`, `*MAT_THERMAL_{CWM,ORTHOTROPIC,ISOTROPIC_TD}`, `*LOAD_THERMAL_{D,BINOUT}` | — | recognized + **named** warn-drop, deferred to the full thermal-solver item |
+
+Radioss's thermal expansion is **incremental**, not secant:
+`ETH = α(T)·Fscale·(T_n − T_{n−1})`, accumulated cycle by cycle
+(`cmain3.F:235-240` → `thermexpc.F:172-174` for shells, `mmain.F90:770-786`
+inline for solids). With a `/HEAT/MAT` and no driver `DTEMP` is identically zero
+every cycle and the emitted card does nothing at 0 starter errors — which is why
+the drivers ship in the same batch. **Validated end to end**: a 10-hex bar under
+symmetry mounts, α = 1.2e-5, ΔT = 100 K, gives a free-end `DX = 0.0119843 mm`
+against the closed-form 0.012 (−0.13 %).
+
+Three traps the conversion is built around, all measured:
+
+* `Fct_ID_T = 0` + `Fscale_y = α` produces **no expansion at all**
+  (`α = FINTER(0,T)·Fscale = 0`) — which is exactly the card dyna2rad writes for
+  a constant coefficient, so a constant `MULT` becomes a synthesized two-point
+  `/FUNCT` here. An unresolvable `Fct_ID_T` is *accepted at 0 errors* and
+  reinterpreted as an internal index, so every function id is resolved at
+  conversion time.
+* This build's `/THERM_STRESS/MAT` is **isotropic, one line**
+  (`Fct_ID_T` + `Fscale_y`). dyna2rad's `Fscale_x/y/z` + `Fct_ID_Tx/T/Tz` is a
+  newer card shape: five of six writes go nowhere and the two that land are the
+  wrong pair, giving α = 1.0 for a card stating 1.2e-5. `LCIDY/MULTY/LCIDZ/MULTZ`
+  are dropped, and warned about **only** on a genuinely anisotropic material —
+  LS-DYNA ignores them itself on an isotropic one, which is what all five corpus
+  carriers are.
+* The card is per **PART** while `/THERM_STRESS/MAT` is per **MATERIAL**, so a
+  material shared with a part the deck did not name is **split**: the named parts
+  are repointed at a fresh copy (its `/FAIL` riders travel with it) and the
+  original mid keeps the rest. `TREF` (the secant switch) has no Radioss slot and
+  is named-dropped; for a constant coefficient the two conventions are identical.
+
+`/HEAT/MAT` also **overwrites** the material law's `T_melt` with `T1` (which is
+what Johnson-Cook's `T*` divides by) and its `rhoC_p` with `RHO0_CP`, so the
+law's own melt temperature is copied across and a differing capacity is named.
+On `*MAT_TABULATED_JOHNSON_COOK` the pair is refused outright — a `/HEAT/MAT`
+switches LAW109 off its self-heating path and without one the expansion card is
+`ERROR 1129`. Two element-family limits are named rather than silently shipped:
+a **`/MAT/ELAST` (LAW1) shell gets no expansion** (LAW1 forces global
+integration and `thermexpc`'s `A1 + A2` are zero there — measured −0.02 against
+−257.95 on LAW2), and the **solid** path, exact under symmetry mounts, is wrong
+under a face-clamp mount (measured on a converted deck: `DX = −0.4190` where
++0.012 is expected, ΔT- and α-independent). `/TH/NODE TEMP` and
+`/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT` and a driver both
+exist — a temperature channel without a thermal solve runs clean and writes
+states of exactly 0.0.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),
@@ -3804,13 +3867,15 @@ zero-scale `*BOUNDARY_PRESCRIBED_MOTION_SET` row is deliberately **out** of
 scope: `sf=0` means "fix this dof" and becomes a `/BCS`, which is
 `*DATABASE_SPCFORC`'s territory. The *energy* half of bndout has no `/TH`
 channel; take it from the global energy balance
-`*DATABASE_TPRINT` → **nothing**, deliberately. dyna2rad answers it with
-`/ANIM/NODA TEMP` + `/ANIM/ELEM TEMP` and a `TEMP` variable appended to every
-existing `/TH/NODE` and `/TH/BRIC` group, with no check that a thermal solution
-was ever requested. k2rad converts **no** thermal keyword at all (no
-`*CONTROL_THERMAL_*`, `*MAT_THERMAL_*`, `*INITIAL_TEMPERATURE` or
-`*BOUNDARY_TEMPERATURE`, and no `/HEAT/MAT`), so a converted deck cannot run a
-thermal solve and the channel cannot carry data. What it would carry instead
+`*DATABASE_TPRINT` → the nodal-temperature channels **iff this deck actually
+runs a thermal solve**, i.e. iff some material received a `/HEAT/MAT` (the only
+thing that arms `MAT_PARAM%ITHERM`, `hm_read_therm.F:253`) *and* a temperature
+driver was converted — see *Thermal* above. When both hold, `/ANIM/NODA/TEMP`
+goes in the engine deck and a `/TH/NODE TEMP` group over the driven nodes in the
+starter; when either is missing, **nothing** is written. dyna2rad answers the
+card with `/ANIM/NODA TEMP` + `/ANIM/ELEM TEMP` and a `TEMP` variable appended
+to every existing `/TH/NODE` and `/TH/BRIC` group, with no check that a thermal
+solution was ever requested. What that would carry on a deck with no solve
 was measured on a 576-brick deck: with `/MAT/ELAST` the nodal and element
 temperature fields come out **all zero**, with `/MAT/PLAS_JOHNS` (which
 allocates `GBUF%TEMP` but never integrates it) a **frozen 300** — and the
@@ -3821,7 +3886,8 @@ NOT COMPUTED`, `hm_read_thgrne.F:228`); there is no equivalent warning on the
 ANIM side, so an emitted `/ANIM/*/TEMP` is silently uninformative. Its `dt`
 also stays **out** of the `/TFILE` minimum, per the membership rule: a card
 with no `/TH` consumer would only thicken the T01 for channels that are not in
-it
+it — the temperature channels ride the groups that are already there rather
+than pacing one of their own
 `*CONTROL_PARALLEL` → engine `/PARITH/ON` when `CONST=1` on any card,
 `/PARITH/OFF` otherwise — **and only when the deck actually carries the card**.
 `CONST=1` requires "that all contributions to global vectors be summed in a
@@ -3957,7 +4023,7 @@ per-entity `/TH` blocks only for entities a `*DATABASE_HISTORY_*` names),
 `*DATABASE_GLSTAT` (no card needed — OpenRadioss writes the global energy
 balance automatically), `*DATABASE_NODFOR` on a deck with no
 `*DATABASE_NODAL_FORCE_GROUP` (it is an interval, not a channel selection),
-`*DATABASE_TPRINT` (no thermal solver exists to schedule). Except for `TPRINT`, whose channels do not exist at all, the `dt` is
+`*DATABASE_TPRINT` on a deck that arms no thermal solve. Except for `TPRINT`, whose channels then do not exist at all, the `dt` is
 still honoured as the `/TFILE` frequency. The same channel carries any
 `*CONTACT` that produced
 no `/INTER` (and any `*CONTACT_FORCE_TRANSDUCER` that produced no
@@ -3978,8 +4044,8 @@ card drives a real `/TH` group. `NODOUT`, `ELOUT`, `GLSTAT`, `MATSUM`,
 `DEFORC`, `DISBOUT`, `JNTFORC`, `SPHOUT`, `BNDOUT`, `RBDOUT`, `NODFOR` and
 `ABSTAT` are in. `BINARY_D3THDT`, `BINARY_INTFOR` and `SLEOUT` stay out — they
 have no `/TH` consumer at all, so honouring them would only thicken the T01 for
-channels that are not in it — and so does `TPRINT`, because k2rad emits no
-thermal solver. Four of the members are gated on their **own** consumer rather
+channels that are not in it — and so does `TPRINT`, whose temperature channels
+ride the `/TH` groups already present rather than pacing one of their own. Four of the members are gated on their **own** consumer rather
 than on the card's presence, because the test is "does this card pace a channel
 that is *in* the T01": `BNDOUT` needs a prescribed motion, `RBDOUT` a rigid
 body, `NODFOR` a nodal-force group, and `ABSTAT` a converted `/MONVOL`. The `*DATABASE_HISTORY_*` family has no `DT` field at all in

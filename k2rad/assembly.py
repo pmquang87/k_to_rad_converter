@@ -1198,6 +1198,14 @@ def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
         if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
             idx += ((nip if nip > 0 else 2) + 7) // 8
         if opt_card:                            # card 4a-4d
+            # 4b THERMAL is the one whose cell is an ID: the section's own
+            # thermal-material id, the same *MAT_THERMAL_* namespace *PART's
+            # TMID names, so IDMOFF ("m"). The other three option cards
+            # (EFG / XFEM / MISC) carry no id at all.
+            if b.keyword.endswith("_THERMAL") and idx < len(raw):
+                new = _rewrite_line(raw[idx], [(0, "m")], offsets)
+                if new is not None:
+                    raw[idx] = new
             idx += 1
         if _geti(f1, 1) in _USER_SHELL_ELFORMS:  # cards 5 / 5.1 / 5.2
             f5 = _fields(raw[idx], 8, 10) if idx < len(raw) else []
@@ -3601,6 +3609,22 @@ del _kw
 #   *MAT_156 ALM SFR SVS SVR SSP (neg)   FUNCT  -> IDFOFF "f"
 #   *MAT_S15 SV A TL TV FPE (negative)   CURVE  -> IDFOFF "f" (same HCDI type
 #                                        HCDI_OBJ_TYPE_CURVES, mv_type.cpp:93)
+#   *MAT_ADD_THERMAL_EXPANSION field 1 (PID)  COMPONENT -> IDPOFF "p" (its
+#                                        LT.0 material form is IDMOFF, but
+#                                        _rewrite_line never touches a negative
+#                                        cell and the writer resolves it to a
+#                                        material at conversion time)
+#   its LCID / LCIDY / LCIDZ             FUNCT  -> IDFOFF "f"
+#   *MAT_THERMAL_ISOTROPIC TMID          "material ID"           -> IDMOFF "m"
+#   *PART TMID                           idem (already in _off_part)
+#   *SECTION_SHELL_THERMAL option-card TMID                      -> IDMOFF "m"
+#   *INITIAL_TEMPERATURE_SET NSID,
+#     *BOUNDARY_TEMPERATURE_SET NSID,
+#     *LOAD_THERMAL_{CONSTANT,VARIABLE} NSID / NSIDEX   SETS     -> IDSOFF "s"
+#   the _NODE spellings' NID                          NODES      -> IDNOFF "n"
+#   *BOUNDARY_TEMPERATURE TLCID, *LOAD_THERMAL_* LCID / LCIDDR / LCIDE /
+#     LCIDR / LCIDEDR, *MAT_THERMAL_ISOTROPIC TGRLC   CURVES     -> IDFOFF "f"
+#   *LOAD_THERMAL_{CONSTANT,VARIABLE} BOXID (*DEFINE_BOX)        -> IDDOFF "d"
 _RARE_MATERIAL_OFFSETS = {
     "MAT_SHAPE_MEMORY":  _off_mat_shape_memory,
     "MAT_030":           _off_mat_shape_memory,
@@ -3609,10 +3633,37 @@ _RARE_MATERIAL_OFFSETS = {
     "MAT_156":           _off_mat_muscle,
     "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,
     "MAT_S15":           _off_mat_spring_muscle,
+    # The card repeats under one keyword, so a "data" walk, not {"cards": {0:}}
+    # — a per-card spec would offset the first PID and leave the rest pointing
+    # at the parent deck's parts.
+    "MAT_ADD_THERMAL_EXPANSION": {
+        "data": (0, [(0, "p"), (1, "f"), (3, "f"), (5, "f")])},
+    "MAT_THERMAL_ISOTROPIC": {"cards": {0: [(0, "m"), (2, "f")]}},
+    "SECTION_SHELL_THERMAL": _off_section_shell,
+    "INITIAL_TEMPERATURE_SET":   {"data": (0, [(0, "s")])},
+    "INITIAL_TEMPERATURE_NODE":  {"data": (0, [(0, "n")])},
+    "BOUNDARY_TEMPERATURE_SET":  {"data": (0, [(0, "s"), (1, "f")])},
+    "BOUNDARY_TEMPERATURE_NODE": {"data": (0, [(0, "n"), (1, "f")])},
+    "LOAD_THERMAL_CONSTANT":      {"cards": {0: [(0, "s"), (1, "s"),
+                                                 (2, "d")]}},
+    "LOAD_THERMAL_CONSTANT_NODE": {"cards": {0: [(0, "n")]}},
+    "LOAD_THERMAL_LOAD_CURVE":    {"cards": {0: [(0, "f"), (1, "f")]}},
+    "LOAD_THERMAL_VARIABLE":      {"cards": {0: [(0, "s"), (1, "s"), (2, "d")],
+                                             1: [(2, "f"), (5, "f"), (6, "f"),
+                                                 (7, "f")]}},
+    "LOAD_THERMAL_VARIABLE_NODE": {"cards": {0: [(0, "n"), (3, "f")]}},
+    # Recognized + warn-dropped keywords get NO offset spec, deliberately: an
+    # unmodelled card stack must not have its cells rewritten by position (the
+    # *AIRBAG warn-drop rule). *CONTROL_SOLUTION carries no id at all.
 }
+_RARE_MATERIAL_OFFSETS.update(
+    {kw: None for kw in RARE_MATERIAL_KEYWORDS
+     if kw not in _RARE_MATERIAL_OFFSETS})
 for _kw in RARE_MATERIAL_KEYWORDS:
-    _OFFSET_SPECS[_kw] = _RARE_MATERIAL_OFFSETS[_kw]
-del _kw
+    _spec = _RARE_MATERIAL_OFFSETS[_kw]     # KeyError = a spelling with no
+    if _spec is not None:                   # verdict, never a silent gap
+        _OFFSET_SPECS[_kw] = _spec
+del _kw, _spec
 
 # All CONTACT_* handled by k2rad share the Card-1 (ssid msid sstyp mstyp
 # sboxid mboxid) layout; unlisted CONTACT_ variants fall to the unmapped warn.

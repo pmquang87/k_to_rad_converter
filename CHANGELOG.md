@@ -11,14 +11,29 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
-- **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`,
-  and `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
-  `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`.** Keywords that landed in
-  `skipped_keywords` before, on a conversion whose only other sign of trouble
-  was one "part references a material no `/MAT` defines" line — the superelastic
-  alloy simply had no constitutive law, and the muscle either kept full bending
-  stiffness on a `/PROP/BEAM` it should never have had or became an inert
-  zero-stiffness spring.
+- **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`;
+  `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
+  `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`; and
+  `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` + `/HEAT/MAT` with the
+  minimal temperature-driver foothold (`*INITIAL_TEMPERATURE[_SET|_NODE]` →
+  `/INITEMP`, `*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]` and
+  `*BOUNDARY_TEMPERATURE[_SET|_NODE]` → `/IMPTEMP`,
+  `*MAT_THERMAL_ISOTROPIC` via `*PART` TMID → the `/HEAT/MAT` values).**
+  Keywords that landed in `skipped_keywords` before, on a conversion whose only
+  other sign of trouble was one "part references a material no `/MAT` defines"
+  line — or, for the thermal cards, on a conversion that was **completely
+  silent**: the material resolved, so nothing dangled, and the whole
+  thermal-expansion physics vanished into a two-line "skipped" list. The
+  superelastic alloy simply had no constitutive law; the muscle either kept full
+  bending stiffness on a `/PROP/BEAM` it should never have had or became an
+  inert zero-stiffness spring.
+
+  Also in this batch, and worth a line of its own: **`*SECTION_SHELL_THERMAL` is
+  now registered.** `handle_section_shell`'s card-set walk already strode the
+  option card (`_SECTION_SHELL_OPTION_CARDS`), so the spelling was one dict row
+  away from working — without it the section was lost whole and
+  `thermal/thick-thin-shells/07_metalstrip.k` converted to **40 × `ERROR 495`
+  "SHELL ID=n HAS A NULL THICKNESS"**. It now starts at 0 errors.
 
   1. **`alpha = sqrt(2/3)·ALPHA`, and the factor is MEASURED, not read off the
      symbols.** `sigeps71.F:171/245/277` (`SQDT = SQRT(TWO/THREE)`,
@@ -135,6 +150,103 @@ Prior history (before this changelog was introduced) is summarized in the
      `/TH/NODE REACX` and `SPRING ENERGY` as the working alternatives — the #122
      rule: an emitted channel that is legal, accepted and all zeros is worse than
      an honest warn-and-drop.
+
+ 12. **The thermal-expansion card ships WITH a temperature driver, because
+     without one it is provably inert.** Radioss's expansion is INCREMENTAL -
+     `ETH = alpha(T)*Fscale*(T_n - T_(n-1))`, accumulated cycle by cycle
+     (`cmain3.F:235-240` via `thermexpc.F:172-174` for shells,
+     `mmain.F90:770-786` inline for solids) - so with a `/HEAT/MAT` and no
+     driver `DTEMP` is identically zero on every cycle and the emitted
+     `/THERM_STRESS/MAT` does nothing while the starter reports 0 errors. The
+     foothold is therefore part of the same slice, and the whole chain is
+     **engine-validated**: a 10-hex bar under symmetry mounts, alpha = 1.2e-5,
+     dT = 100 K, gave a free-end `DX = 0.0119843 mm` against the closed-form
+     `alpha*dT*L = 0.012` - **-0.13 %** - with the `/TH/NODE TEMP` channel
+     evolving 20 -> 120 K (not the zeros of #122).
+
+ 13. **dyna2rad transports the wrong coefficient, off by 8.3e4, silently.**
+     `convertmats.cxx:12261-12266` writes `Fscale_x/y/z` + `Fct_ID_Tx/T/Tz`,
+     which is a NEWER card shape: the only `mat_THERM_STRESS.cfg` on this build
+     declares exactly `Fct_ID_T` + `Fscale_y` and
+     `hm_read_therm_stress.F90:119-120` reads only those two, so five of its six
+     writes go nowhere and the two that land are `Fct_ID_T <- LCIDY` and
+     `Fscale_y <- MULTY`. Measured on the corpus carrier's own numbers
+     (`LCID 0, MULT 1.2e-5, LCIDY 0, MULTY 1.0`): the converted coefficient came
+     out **1.0 instead of 1.2e-5**, at 0 errors and 0 warnings. `LCID`/`MULT`
+     are the pair carried here.
+
+ 14. **A constant coefficient MUST become a synthesized `/FUNCT`.**
+     `Fct_ID_T = 0` with `Fscale_y = alpha` gives `alpha = FINTER(0,T)*Fscale =
+     0`, i.e. NO expansion - measured twice on independent code paths (a free
+     solid bar: `DX == 0`; a clamped LAW2 shell: `F1 == 0`). And an unresolvable
+     `Fct_ID_T` is **accepted at 0 errors** and reinterpreted as an internal
+     function index: `hm_read_therm_stress.F90:121-128`'s unknown-function
+     branch is dead code (`ifunc_alpha = func_id` is pre-set before the search
+     loop). Every id is resolved at conversion time.
+
+ 15. **The LS-DYNA card is per PART, the Radioss card is per MATERIAL - so a
+     shared material is SPLIT.** The corpus carrier has exactly that shape:
+     PIDs 1, 2 and 3 on MID 1 with `*MAT_ADD_THERMAL_EXPANSION` on PID 1 only.
+     dyna2rad resolves PID -> the part's MID and stops (`convertmats.cxx:12236`),
+     expanding all three. Here part 1 is repointed at a fresh copy of the
+     material (every per-mid `/FAIL` rider travels with it) and mid 1 keeps the
+     parts the deck did not name. Two cards on one MID: dyna2rad emits two
+     entities with the same id, no duplicate error, first wins, second silently
+     lost (measured).
+
+ 16. **`/HEAT/MAT` is mandatory and it OVERWRITES things.** `/THERM_STRESS/MAT`
+     on a material with no `/HEAT/MAT` is a hard `ERROR 1129`
+     (`hm_read_therm_stress.F90:130-132`), so the pair is always emitted
+     together. But `/HEAT/MAT` also overwrites `MAT_PARAM%THERM%TMELT` with
+     `T1` - the very variable `mmain.F90:790` divides by for the Johnson-Cook
+     `T*` - and a blank `T1` defaults to 1e20: measured, the law echoes
+     `MELTING TEMPERATURE 1800` while `/HEAT/MAT` echoes `1e20`, `T*` collapses
+     to 0 and the thermal softening is dead at 0 warnings (`WARNING 764` is
+     gated on the Zerilli form only). The law's own melt temperature is copied
+     into `T1`, and a `RHO0_CP` that differs from the law's own `rhoC_p` is
+     named (starter `WARNING 765`). On `*MAT_TABULATED_JOHNSON_COOK` the pair is
+     REFUSED outright: a `/HEAT/MAT` switches LAW109 off its self-heating path
+     (`sigeps109.F:411-414`), and without one the expansion card is
+     `ERROR 1129`. `EFRAC` carries `1e-20` rather than the blank the reader
+     turns into **1.0** ("convert all strain energy into heat"), which is the
+     opposite of what a deck prescribing its temperature field states.
+
+ 17. **Two element-family verdicts, both measured, both named rather than
+     silently shipped.** A `/MAT/ELAST` (LAW1) SHELL gets **no expansion at
+     all**: LAW1 always runs global integration (`WARNING 1084`) and
+     `thermexpc.F`'s isotropic branch builds its thermal force from `A1 + A2`,
+     which are zero there - the clamped reaction was `-0.02` against `-257.95`
+     for the identical deck on LAW2, on both QEPH and QBAT. And on SOLIDS the
+     physics is exact under symmetry mounts (-0.12 % / -0.16 % / -0.14 % on a
+     free cube, a free bar and a fully restrained one) but **wrong under a
+     face-clamp mount**: reproduced here on a k2rad-converted deck, a 10-hex bar
+     at alpha = 1.2e-5, dT = 100 K gave a free-end `DX = -0.4190 mm` where
+     +0.012 is the closed form - wrong sign, 35x the magnitude - while the SAME
+     deck with symmetry planes instead gives 0.011984. The spurious stress is
+     independent of both dT and alpha, which rules out a stiff-but-real
+     response. Both cards are still emitted (a mixed deck's other parts do
+     expand) and both facts are stated in the log. The implicit engine has no
+     thermal solve at all (`grep ITHERM engine/source/implicit` -> nothing),
+     which is warned about too.
+
+ 18. **`*LOAD_THERMAL_VARIABLE`'s `T = TB + TS*f(t)` needs a synthesized
+     curve.** `/IMPTEMP` computes `Fscale_y*f((t-T_start)/Ascale_x)` only
+     (`fixtemp.F:180-200`) - there is no additive slot - so the offset is baked
+     into a copy of the curve point by point. A constant `*BOUNDARY_TEMPERATURE`
+     (`TLCID = 0` -> T is the constant `TMULT`, an OVERRIDE on the LS-DYNA side)
+     likewise gets a two-point function: `func_IDT = 0` is `ERROR 120` **once
+     per node**. `/INITEMP` is emitted in the group form only - `fld_type = 1`
+     takes a per-node list, is accepted at 0 errors and the per-node
+     temperatures are LOST (measured: every node came back at the group value).
+     dyna2rad converts NO temperature driver at all (`grep` over its whole tree
+     for `LOAD_THERMAL` / `INITIAL_TEMPERATURE` / `BOUNDARY_TEMPERATURE` /
+     `MAT_THERMAL` / `CONTROL_THERMAL` returns zero hits), and its native reader
+     cannot even READ the two carrier decks (`ERROR 100210` on
+     `*LOAD_THERMAL_LOAD_CURVE`).
+
+  All five `*MAT_ADD_THERMAL_EXPANSION` carriers in the r14 verification corpus
+  convert and start at **0 ERRORS**, `07_metalstrip.k` included (40 x
+  `ERROR 495` before).
 
 - **The PRELOAD / initial-state batch:
   `*INITIAL_STRAIN_SHELL` (+ `_SET`) → `/INISHE/STRA_F/GLOB` and

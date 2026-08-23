@@ -30,6 +30,9 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   carries (truss vs discrete) and validated against the engine force law to 7
   digits. Radioss has no truss element, so the axial-only muscle becomes a
   spring — which is what an LS-DYNA truss states anyway.
+  `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` + `/HEAT/MAT` with the
+  minimal temperature-driver foothold (`/INITEMP`, `/IMPTEMP`) — see the Tier 4
+  *Thermal* entry for what is done and what stays open.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
@@ -697,9 +700,25 @@ validated foundation for further linear analyses:
   **done** (consistent-membrane K_g, SSSS-plate-validated to 2.2 % at 8x8);
   a rigorous solid-element K_g remains open.
 - **Harmonic / FRF output** — **done** (`tools/modal_frf.py`).
-- **Thermal** *(remaining)* — a separate Radioss `/HEAT` / `/THERM_STRESS`
-  solver path; larger, lower priority unless coupled thermo-mechanical decks are
-  in scope.
+- **Thermal** — *partly done.* The RARE MATERIALS batch shipped the
+  thermal-EXPANSION path plus the minimal temperature-driver foothold that makes
+  it verifiable: `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` +
+  `/HEAT/MAT` (with the material split a per-PART card on a shared MID needs),
+  `*MAT_THERMAL_ISOTROPIC` via `*PART` TMID → the `/HEAT/MAT` values,
+  `*INITIAL_TEMPERATURE[_SET|_NODE]` → `/INITEMP`, and
+  `*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]` +
+  `*BOUNDARY_TEMPERATURE[_SET|_NODE]` → `/IMPTEMP`, with `/TH/NODE TEMP` and
+  `/ANIM/NODA/TEMP` gated on a real thermal solve. Engine-validated to −0.13 %
+  against `α·ΔT·L`. **Still open (Milestone 2):** the thermal SOLVER controls
+  (`*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}` → the `/THERM` engine cards
+  and `/DTTHERM`), the flux/convection/radiation boundaries
+  (`*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]` → `/IMPFLUX`, `/CONVEC`,
+  `/RADIATION`), the richer thermal materials (`*MAT_THERMAL_CWM`,
+  `_ORTHOTROPIC`, `_ISOTROPIC_TD`) and the external-field loads
+  (`*LOAD_THERMAL_D`, `_BINOUT`) — every one of them recognized and named in the
+  conversion log today. Two measured limits also need work: a `/MAT/ELAST` shell
+  gets no expansion at all, and the solid path is wrong under a face-clamp
+  mount.
 
 *Rationale:* these extend the proven modal machinery rather than opening a new
 solver path, so risk is contained.

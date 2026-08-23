@@ -27,6 +27,8 @@ from .materials import (
     _resolve_mat_shape_memory,
 )
 from .muscle import _make_muscle_springs
+from .thermal import (_make_thermal, _resolve_thermal,
+                      _thermal_solve_active)
 from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
@@ -488,6 +490,12 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # ── Nodal scalar outputs ──────────────────────────────────────
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
+    # Nodal temperature, ONLY when the deck really runs a thermal solve (a
+    # /HEAT/MAT AND a driver). The #122 rule: /ANIM and /TH temperature
+    # channels on a deck with no thermal solve are accepted, run clean and
+    # write state after state of exactly 0.0.
+    if _thermal_solve_active(state):
+        lines.append("/ANIM/NODA/TEMP")
     if state.db_blstfor_dt and state.blast_segment_loads:
         # *DATABASE_BINARY_BLSTFOR: nodal blast-pressure fringe (element
         # /LOAD/PBLAST pressures averaged onto the loaded-surface nodes).
@@ -900,6 +908,15 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # what makes that gate warn-skip such parts NAMING the law instead of
     # claiming they have no /MAT at all.
     _resolve_mat_shape_memory(state)
+
+    # Thermal expansion + the temperature drivers. MUST run BEFORE
+    # _make_functions (it registers the synthesized coefficient and driver
+    # curves in state.curves) and before _make_materials (it can SPLIT a
+    # material that is shared by a part the *MAT_ADD_THERMAL_EXPANSION card
+    # does not name, which changes what that writer emits and what
+    # _target_mat_law answers). It allocates /FUNCT ids, so it is placed after
+    # every other curve-synthesizing pass to keep their numbering unchanged.
+    _resolve_thermal(state)
 
     # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +
     # /PROP/TYPE16). Routes the law from FORM + the card-7 curves, fills the
@@ -1680,6 +1697,11 @@ def _starter_section_registry():
         # /FUNCTs the four function slots need (written INLINE here, because
         # the single /FUNCT emitter runs at the "functions" step far above).
         ("muscle_springs",    lambda c: _make_muscle_springs(c.state)),
+        # /HEAT/MAT + /THERM_STRESS/MAT (both keyed on the MATERIAL id) and the
+        # /INITEMP / /IMPTEMP drivers with their /GRNODs. After the materials
+        # they attach to and after the connector sections, whose /GRNOD ids come
+        # from the same auto-id stream.
+        ("thermal",           lambda c: _make_thermal(c.state)),
         ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         # ELFORM=6 discrete beams: their /PART + spring property come from here,

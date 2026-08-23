@@ -110,6 +110,17 @@ def _funct_named(starter: str, title: str) -> int:
     raise AssertionError(f"no /FUNCT titled {title!r}")
 
 
+def _ids_of_group(starter: str, header: str):
+    """The integer ids listed in a /GRNOD-style block (title line skipped)."""
+    body = _block(starter, header)
+    ids = []
+    for ln in body[1:]:
+        if ln.startswith("#"):
+            continue
+        ids.extend(int(t) for t in ln.split() if t.lstrip("-").isdigit())
+    return ids
+
+
 def _funct_points(starter: str, fid: int):
     """The (x, y) pairs of /FUNCT/<fid>."""
     body = _block(starter, f"/FUNCT/{fid}")
@@ -748,18 +759,454 @@ class MuscleTimeHistoryTests(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Thermal expansion + the temperature-driver foothold
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Two hexes on TWO parts (1 and 2) that SHARE material 1 — the corpus
+#: carrier's shape, and what forces the material split.
+THERMAL_MESH = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "         1             0.0             0.0             0.0\n"
+    "         2            10.0             0.0             0.0\n"
+    "         3            10.0            10.0             0.0\n"
+    "         4             0.0            10.0             0.0\n"
+    "         5             0.0             0.0            10.0\n"
+    "         6            10.0             0.0            10.0\n"
+    "         7            10.0            10.0            10.0\n"
+    "         8             0.0            10.0            10.0\n"
+    "         9            20.0             0.0             0.0\n"
+    "        10            20.0            10.0             0.0\n"
+    "        11            20.0             0.0            10.0\n"
+    "        12            20.0            10.0            10.0\n"
+    "*ELEMENT_SOLID\n"
+    "       1       1       1       2       3       4       5       6       7       8\n"
+    "       2       2       2       9      10       3       6      11      12       7\n"
+    "*PART\n"
+    "blockA\n" + _row(1, 1, 1, 0, 0, 0, 0, "{TMID1}") + "\n"
+    "*PART\n"
+    "blockB\n" + _row(2, 1, 1, 0, 0, 0, 0, "{TMID2}") + "\n"
+    "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+    "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
+    "{EXTRA}"
+    "*CONTROL_TERMINATION\n"
+    "     0.001\n"
+    "*END\n"
+)
+
+#: The corpus carrier's own card, verbatim: 8 fields with TREF, LCID 0, the
+#: coefficient in MULT, and the MULTY/MULTZ = 1.0 cells that are IGNORED on an
+#: isotropic material.
+CARRIER_EXPANSION = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                     + _row(1, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 0.0) + "\n")
+
+#: The minimal driver that makes any of it do something.
+DRIVER = ("*LOAD_THERMAL_LOAD_CURVE\n" + _row(7, 0) + "\n"
+          "*DEFINE_CURVE\n" + _row(7) + "\n"
+          + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n")
+
+
+def _thermal(extra="", tmid1=0, tmid2=0):
+    return (THERMAL_MESH.replace("{EXTRA}", extra)
+            .replace("{TMID1}", str(tmid1)).replace("{TMID2}", str(tmid2)))
+
+
+class ThermalParseTests(unittest.TestCase):
+    def test_eight_field_layout_carries_tref(self):
+        state = _dispatch("*KEYWORD\n" + CARRIER_EXPANSION + "*END\n")
+        c = state.mat_add_thermal_expansion[0]
+        self.assertEqual((c.pid, c.lcid), (1, 0))
+        self.assertAlmostEqual(c.mult, 1.2e-5)
+        self.assertEqual((c.lcidy, c.lcidz), (0, 0))
+        self.assertAlmostEqual(c.multy, 1.0)
+        self.assertAlmostEqual(c.multz, 1.0)
+        self.assertTrue(c.has_tref)
+
+    def test_seven_field_layout_has_no_tref_cell(self):
+        # The nvh carrier's shape: LCID = 1, MULT = 0, no 8th cell at all.
+        state = _dispatch("*KEYWORD\n*MAT_ADD_THERMAL_EXPANSION\n"
+                          + _row(1, 1, 0.0, 0, 0.0, 0, 0.0) + "\n*END\n")
+        c = state.mat_add_thermal_expansion[0]
+        self.assertEqual((c.pid, c.lcid), (1, 1))
+        self.assertFalse(c.has_tref)
+
+    def test_negative_id_is_a_material_reference(self):
+        state = _dispatch("*KEYWORD\n*MAT_ADD_THERMAL_EXPANSION\n"
+                          + _row(-4, 0, 1.0e-5) + "\n*END\n")
+        self.assertEqual(state.mat_add_thermal_expansion[0].pid, -4)
+
+    def test_part_tmid_is_read(self):
+        state = _dispatch(_thermal(tmid1=3, tmid2=0))
+        self.assertEqual(state.parts[1].tmid, 3)
+        self.assertEqual(state.parts[2].tmid, 0)
+
+    def test_mat_thermal_isotropic_fields(self):
+        state = _dispatch("*KEYWORD\n*MAT_THERMAL_ISOTROPIC\n"
+                          + _row(3, "7.8500E-9", 0, 0.0, 0.0, 0.0) + "\n"
+                          + _row("4.6000E+8", 40.0) + "\n*END\n")
+        m = state.mat_thermal_isotropic[3]
+        self.assertAlmostEqual(m.tro, 7.85e-9)
+        self.assertAlmostEqual(m.hc, 4.6e8)
+        self.assertAlmostEqual(m.tc, 40.0)
+
+
+class ThermalEmitTests(unittest.TestCase):
+    def test_constant_coefficient_becomes_a_synthesized_function(self):
+        # Fct_ID_T = 0 + Fscale_y = alpha produces NO expansion at all
+        # (alpha = FINTER(0,T)*Fscale = 0, measured on two code paths), which is
+        # exactly the card dyna2rad writes.
+        _r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/THERM_STRESS/MAT/")]
+        self.assertEqual(len(header), 1, starter)
+        body = _block(starter, header[0])
+        self.assertEqual(body[0], "# Fct_ID_T            Fscale_y")
+        fid = int(body[1][0:10])
+        self.assertNotEqual(fid, 0)
+        self.assertEqual(body[1][10:30].strip(), "0")     # blank -> 1.0
+        pts = _funct_points(starter, fid)
+        self.assertEqual([y for _x, y in pts], [1.2e-5, 1.2e-5])
+
+    def test_curve_coefficient_keeps_the_curve_and_carries_mult(self):
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n" + _row(1, 9, 2.5) + "\n"
+                 "*DEFINE_CURVE\n" + _row(9) + "\n"
+                 + _row16(0.0, 1.0e-5) + "\n" + _row16(1000.0, 1.0e-5) + "\n"
+                 + DRIVER)
+        _r, starter = _convert(_thermal(extra))
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/THERM_STRESS/MAT/")][0]
+        body = _block(starter, header)
+        self.assertEqual(int(body[1][0:10]), 9)
+        self.assertAlmostEqual(float(body[1][10:30]), 2.5)
+
+    def test_heat_mat_is_mandatory_and_column_exact(self):
+        _r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/HEAT/MAT/")]
+        self.assertEqual(len(header), 1)
+        mid = int(header[0].rsplit("/", 1)[1])
+        ts = [ln for ln in starter.splitlines()
+              if ln.startswith("/THERM_STRESS/MAT/")][0]
+        # The pair is mandatory: /THERM_STRESS without /HEAT/MAT is ERROR 1129.
+        self.assertEqual(int(ts.rsplit("/", 1)[1]), mid)
+        body = _block(starter, header[0])
+        self.assertEqual(
+            body[0],
+            "#                 T0             RHO0_CP                  AS"
+            "                  BS")
+        self.assertEqual(
+            body[2],
+            "#                 T1                  AL                  BL"
+            "               EFRAC")
+        self.assertEqual(_fields(body[3])[3], "1.000000E-20")   # EFRAC off
+        self.assertEqual(len(_fields(body[1])), 4)              # no Iform cell
+
+    def test_shared_material_is_split_so_the_unnamed_part_never_expands(self):
+        _r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        p1 = int(_data_rows(starter, "/PART/1")[1][10:20])
+        p2 = int(_data_rows(starter, "/PART/2")[1][10:20])
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(p2, 1)                     # the original mid
+        ts = [int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+              if ln.startswith("/THERM_STRESS/MAT/")]
+        self.assertEqual(ts, [p1])
+        self.assertIn("/MAT/ELAST/1", starter)
+        self.assertIn(f"/MAT/ELAST/{p1}", starter)
+        self.assertIn("was SPLIT", " ".join(_r.warnings))
+
+    def test_both_parts_named_needs_no_split(self):
+        extra = (CARRIER_EXPANSION
+                 + "*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(2, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 0.0) + "\n"
+                 + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        self.assertEqual(int(_data_rows(starter, "/PART/1")[1][10:20]), 1)
+        self.assertEqual(int(_data_rows(starter, "/PART/2")[1][10:20]), 1)
+        self.assertEqual(len([ln for ln in starter.splitlines()
+                              if ln.startswith("/THERM_STRESS/MAT/")]), 1)
+        self.assertNotIn("was SPLIT", " ".join(r.warnings))
+
+    def test_isotropic_multy_one_form_is_not_warned_about(self):
+        # The carrier's MULTY = MULTZ = 1.0 with LCIDY = LCIDZ = 0 on an
+        # ISOTROPIC material: LS-DYNA ignores those cells itself, so a warning
+        # would fire on every correct deck.
+        r, _s = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        self.assertNotIn("MULTY", " ".join(r.warnings))
+
+    def test_tref_is_warn_dropped_by_name(self):
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(1, 0, "1.20000E-5", 0, 1.0, 0, 1.0, 293.0) + "\n"
+                 + DRIVER)
+        r, _s = _convert(_thermal(extra))
+        self.assertIn("TREF=293", " ".join(r.warnings))
+        self.assertIn("SECANT", " ".join(r.warnings))
+
+    def test_undefined_coefficient_curve_emits_nothing(self):
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n" + _row(1, 999, 1.0) + "\n"
+                 + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        self.assertNotIn("/THERM_STRESS/MAT", starter)
+        self.assertIn("LCID=999", " ".join(r.warnings))
+
+    def test_tmid_join_supplies_the_real_heat_mat_values(self):
+        extra = ("*MAT_THERMAL_ISOTROPIC\n"
+                 + _row(3, "7.8500E-9", 0, 0.0, 0.0, 0.0) + "\n"
+                 + _row("4.6000E+8", 40.0) + "\n"
+                 + CARRIER_EXPANSION + DRIVER)
+        _r, starter = _convert(_thermal(extra, tmid1=3, tmid2=3))
+        for header in [ln for ln in starter.splitlines()
+                       if ln.startswith("/HEAT/MAT/")]:
+            f = _fields(_block(starter, header)[1])
+            # RHO0_CP = TRO * HC = 7.85e-9 * 4.6e8 = 3.611 (units pass through)
+            self.assertAlmostEqual(float(f[1]), 3.611, places=6)
+            self.assertAlmostEqual(float(f[2]), 40.0)     # AS = TC
+
+    def test_no_thermal_material_gives_the_no_op_form_and_says_so(self):
+        r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/HEAT/MAT/")][0]
+        f = _fields(_block(starter, header)[1])
+        self.assertEqual(f[2], "0")                     # AS: no conduction
+        self.assertNotEqual(float(f[1]), 0.0)           # positive capacity
+        self.assertIn("no *MAT_THERMAL_* is bound", " ".join(r.warnings))
+
+    def test_law1_shell_part_is_named_as_inert(self):
+        shell = (
+            "*KEYWORD\n"
+            "*NODE\n"
+            "         1             0.0             0.0             0.0\n"
+            "         2            10.0             0.0             0.0\n"
+            "         3            10.0            10.0             0.0\n"
+            "         4             0.0            10.0             0.0\n"
+            "*ELEMENT_SHELL\n"
+            + "".join(f"{v:>8}" for v in (1, 1, 1, 2, 3, 4)) + "\n"
+            "*PART\nplate\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2, 0.833, 5) + "\n" + _row(3.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
+            + CARRIER_EXPANSION + DRIVER
+            + "*CONTROL_TERMINATION\n     0.001\n*END\n")
+        r, starter = _convert(shell)
+        self.assertIn("/THERM_STRESS/MAT", starter)
+        self.assertIn("/MAT/ELAST (LAW1) material, which gets NO thermal "
+                      "expansion", " ".join(r.warnings))
+
+    def test_tabulated_johnson_cook_is_refused_by_name(self):
+        # /HEAT/MAT would kill LAW109's own self-heating and /THERM_STRESS
+        # without one is ERROR 1129 — the pair cannot be had on that law.
+        jc = _thermal(
+            "*MAT_TABULATED_JOHNSON_COOK\n"
+            + _row(1, "7.8500E-9", 210000.0, 0.3, 4.6e8, 293.0, 0.9, 1) + "\n"
+            + _row(0, 0, 0, 0, 0, 0, 0) + "\n"
+            + CARRIER_EXPANSION + DRIVER)
+        jc = jc.replace("*MAT_ELASTIC\n"
+                        + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n", "")
+        r, starter = _convert(jc)
+        self.assertNotIn("/THERM_STRESS/MAT", starter)
+        self.assertNotIn("/HEAT/MAT", starter)
+        self.assertIn("kills that self-heating", " ".join(r.warnings))
+
+
+class TemperatureDriverTests(unittest.TestCase):
+    def _imptemp(self, starter):
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/IMPTEMP/")]
+        self.assertTrue(header, starter)
+        return _block(starter, header[0])
+
+    def test_load_thermal_load_curve_uses_the_deck_curve(self):
+        _r, starter = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        body = self._imptemp(starter)
+        self.assertEqual(body[1], "# func_IDT sensor_ID  grnod_ID")
+        self.assertEqual(int(body[2][0:10]), 7)
+        self.assertEqual(
+            body[3],
+            "#           Ascale_x            Fscale_y             T_start"
+            "              T_stop")
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
+    def test_load_thermal_constant_synthesizes_a_two_point_function(self):
+        # func_IDT = 0 is ERROR 120 once PER NODE, so a constant temperature
+        # can never be paired with a zero id.
+        extra = ("*LOAD_THERMAL_CONSTANT\n" + _row(0, 0, 0) + "\n"
+                 + _row(150.0, 0.0) + "\n" + CARRIER_EXPANSION)
+        _r, starter = _convert(_thermal(extra))
+        body = self._imptemp(starter)
+        fid = int(body[2][0:10])
+        self.assertNotEqual(fid, 0)
+        self.assertEqual([y for _x, y in _funct_points(starter, fid)],
+                         [150.0, 150.0])
+        # ...and a companion /INITEMP carries the t=0 value.
+        init = [ln for ln in starter.splitlines() if ln.startswith("/INITEMP/")]
+        self.assertTrue(init)
+        self.assertAlmostEqual(float(_block(starter, init[0])[2][0:20]), 150.0)
+
+    def test_load_thermal_variable_bakes_the_tb_offset_into_the_curve(self):
+        # T = TB + TS*f(t); /IMPTEMP has only Fscale_y*f(x), no additive slot.
+        extra = ("*LOAD_THERMAL_VARIABLE\n" + _row(0, 0, 0) + "\n"
+                 + _row(2.0, 20.0, 7) + "\n" + CARRIER_EXPANSION
+                 + "*DEFINE_CURVE\n" + _row(7) + "\n"
+                 + _row16(0.0, 0.0) + "\n" + _row16(1.0, 50.0) + "\n")
+        _r, starter = _convert(_thermal(extra))
+        body = self._imptemp(starter)
+        fid = int(body[2][0:10])
+        self.assertNotEqual(fid, 7)
+        self.assertEqual([y for _x, y in _funct_points(starter, fid)],
+                         [20.0, 120.0])              # TB + TS*f
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
+    def test_boundary_temperature_constant_form_is_the_value_not_a_scale(self):
+        # TLCID = 0 -> T is the constant TMULT (an OVERRIDE on the LS-DYNA
+        # side), never a scale on a zero function.
+        extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3, 4) + "\n"
+                 "*BOUNDARY_TEMPERATURE_SET\n"
+                 + _row(5, 0, 250.0, 0, 1.0e20, 0.0) + "\n"
+                 + CARRIER_EXPANSION)
+        _r, starter = _convert(_thermal(extra))
+        body = self._imptemp(starter)
+        fid = int(body[2][0:10])
+        self.assertEqual([y for _x, y in _funct_points(starter, fid)],
+                         [250.0, 250.0])
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
+    def test_boundary_temperature_curve_form_carries_tmult_as_fscale(self):
+        extra = ("*SET_NODE_LIST\n" + _row(5) + "\n" + _row(1, 2, 3, 4) + "\n"
+                 "*BOUNDARY_TEMPERATURE_SET\n"
+                 + _row(5, 7, 3.0, 0, 0.5, 0.1) + "\n"
+                 + CARRIER_EXPANSION
+                 + "*DEFINE_CURVE\n" + _row(7) + "\n"
+                 + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n")
+        _r, starter = _convert(_thermal(extra))
+        body = self._imptemp(starter)
+        self.assertEqual(int(body[2][0:10]), 7)
+        self.assertAlmostEqual(float(body[4][20:40]), 3.0)     # TMULT
+        self.assertAlmostEqual(float(body[4][40:60]), 0.1)     # TBIRTH
+        self.assertAlmostEqual(float(body[4][60:80]), 0.5)     # TDEATH
+
+    def test_initial_temperature_set_zero_covers_every_node(self):
+        extra = ("*INITIAL_TEMPERATURE_SET\n" + _row(0, 20.0, 0) + "\n"
+                 + CARRIER_EXPANSION + DRIVER)
+        _r, starter = _convert(_thermal(extra))
+        header = [ln for ln in starter.splitlines()
+                  if ln.startswith("/INITEMP/")][0]
+        body = _block(starter, header)
+        self.assertEqual(body[1], "#                 T0   grnd_ID  fld_type")
+        self.assertAlmostEqual(float(body[2][0:20]), 20.0)
+        # fld_type 0 (the GROUP form): the per-node form loses its values.
+        self.assertEqual(int(body[2][30:40]), 0)
+        gid = int(body[2][20:30])
+        self.assertEqual(len(_ids_of_group(starter, f"/GRNOD/NODE/{gid}")), 12)
+
+    def test_drivers_are_dropped_when_no_material_is_thermal(self):
+        extra = ("*INITIAL_TEMPERATURE_SET\n" + _row(0, 20.0, 0) + "\n"
+                 + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        self.assertNotIn("/INITEMP", starter)
+        self.assertNotIn("/IMPTEMP", starter)
+        self.assertIn("no thermal solve is armed", " ".join(r.warnings))
+
+
+class ThermalOutputTests(unittest.TestCase):
+    def test_temperature_channels_only_with_a_real_thermal_solve(self):
+        _r, with_solve = _convert(_thermal(CARRIER_EXPANSION + DRIVER))
+        self.assertIn("/TH/NODE", with_solve)
+        self.assertIn("      TEMP", with_solve)
+        # ...and never without one (#122: an all-zero channel reads as data).
+        _r2, plain = _convert(_thermal(""))
+        self.assertNotIn("TEMP", plain)
+
+    def test_anim_noda_temp_follows_the_same_gate(self):
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(_thermal(CARRIER_EXPANSION + DRIVER))
+        res = convert(path, write_log=False)
+        with open(res.engine_path) as fh:
+            engine = fh.read()
+        self.assertIn("/ANIM/NODA/TEMP", engine)
+        with open(path, "w") as fh:
+            fh.write(_thermal(""))
+        res = convert(path, write_log=False)
+        with open(res.engine_path) as fh:
+            engine = fh.read()
+        self.assertNotIn("/ANIM/NODA/TEMP", engine)
+        tmp.cleanup()
+
+
+class ThermalDeferredTests(unittest.TestCase):
+    def test_control_and_boundary_thermal_cards_are_named_not_skipped(self):
+        for kw, card in (
+                ("CONTROL_THERMAL_SOLVER", _row(1, 1, 11)),
+                ("CONTROL_THERMAL_TIMESTEP", _row(1, 1.0)),
+                ("CONTROL_THERMAL_NONLINEAR", _row(1, 0.001)),
+                ("BOUNDARY_FLUX_SET", _row(1, 0)),
+                ("BOUNDARY_CONVECTION_SET", _row(1, 0)),
+                ("BOUNDARY_RADIATION_SET", _row(1, 0)),
+                ("MAT_THERMAL_CWM", _row(9)),
+                ("LOAD_THERMAL_BINOUT", _row(1)),
+                ("LOAD_THERMAL_D", _row(1))):
+            state = _dispatch(f"*KEYWORD\n*{kw}\n{card}\n*END\n")
+            self.assertEqual(state.skipped_keywords, [], kw)
+            self.assertIn(kw, dict(state.recognized_not_emitted), kw)
+
+    def test_mat_thermal_cwm_title_reaches_the_same_handler(self):
+        state = _dispatch("*KEYWORD\n*MAT_THERMAL_CWM_TITLE\nweld\n"
+                          + _row(9) + "\n*END\n")
+        self.assertEqual(state.skipped_keywords, [])
+        self.assertIn("MAT_THERMAL_CWM", dict(state.recognized_not_emitted))
+
+    def test_control_solution_soln_is_reported(self):
+        state = _dispatch("*KEYWORD\n*CONTROL_SOLUTION\n" + _row(2) + "\n*END\n")
+        self.assertIn("SOLN=2",
+                      dict(state.recognized_not_emitted)["CONTROL_SOLUTION"])
+        state = _dispatch("*KEYWORD\n*CONTROL_SOLUTION\n" + _row(1) + "\n*END\n")
+        self.assertIn("THERMAL-ONLY", " ".join(state.warnings))
+
+    def test_section_shell_thermal_is_parsed_not_skipped(self):
+        # Registering the spelling is what turns 40 x ERROR 495 ("SHELL HAS A
+        # NULL THICKNESS") into a startable deck: the option adds one card the
+        # card-set walk already strides.
+        state = _dispatch("*KEYWORD\n*SECTION_SHELL_THERMAL\n"
+                          + _row(1, 16, 0.0, 2) + "\n" + _row(3.0) + "\n"
+                          + _row(1) + "\n*END\n")
+        self.assertEqual(state.skipped_keywords, [])
+        self.assertIn(1, state.sec_shells)
+        self.assertAlmostEqual(state.sec_shells[1].t1, 3.0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Dispatch / *INCLUDE_TRANSFORM coverage
 # ═════════════════════════════════════════════════════════════════════════════
 
 class DispatchAndOffsetCoverageTests(unittest.TestCase):
     def test_parser_and_offset_tables_cover_the_same_spellings(self):
-        # ONE source (#116): every spelling the handler reads must also be
-        # offsettable, or an *INCLUDE_TRANSFORM keeps its original MID/LCID
-        # while the rest of the include moves.
+        # ONE source (#116): every spelling the handler reads must also carry an
+        # explicit VERDICT in the offset table, or an *INCLUDE_TRANSFORM keeps
+        # its original MID/LCID while the rest of the include moves. A `None`
+        # verdict is the deliberate "recognized but warn-dropped, so its cells
+        # must NOT be rewritten by position" answer (the *AIRBAG warn-drop
+        # rule) — what must never happen is a spelling with no verdict at all,
+        # which the KeyError in assembly.py turns into an ImportError.
+        from k2rad.assembly import _RARE_MATERIAL_OFFSETS
         self.assertTrue(RARE_MATERIAL_KEYWORDS)
-        for kw in RARE_MATERIAL_KEYWORDS:
+        self.assertEqual(set(RARE_MATERIAL_KEYWORDS),
+                         set(_RARE_MATERIAL_OFFSETS))
+        for kw, spec in _RARE_MATERIAL_OFFSETS.items():
             self.assertIn(kw, HANDLERS, f"{kw} has no handler")
-            self.assertIn(kw, _OFFSET_SPECS, f"{kw} has no offset spec")
+            if spec is None:
+                self.assertNotIn(kw, _OFFSET_SPECS,
+                                 f"{kw} is warn-dropped but offset anyway")
+            else:
+                self.assertIn(kw, _OFFSET_SPECS, f"{kw} has no offset spec")
+
+    def test_every_batch_keyword_is_read_not_skipped(self):
+        # A warn-dropped keyword must reach note_recognized_not_emitted (or a
+        # real conversion), never skipped_keywords: the two channels are
+        # deliberately distinct, and "skipped" reads as "k2rad has never heard
+        # of this card".
+        for kw in RARE_MATERIAL_KEYWORDS:
+            state = _dispatch(f"*KEYWORD\n*{kw}\n" + _row(1) + "\n"
+                              + _row(1) + "\n*END\n")
+            self.assertEqual(state.skipped_keywords, [], kw)
 
     def test_title_option_is_stripped_by_the_parser(self):
         state = _dispatch("*KEYWORD\n" + SMA + "*END\n")
@@ -829,6 +1276,75 @@ class IncludeTransformOffsetTests(unittest.TestCase):
 PLAIN = HEX.replace("{MAT}",
                     "*MAT_ELASTIC\n" + _row(30, 7.8e-9, 210000.0, 0.3) + "\n"
                     ).replace("{EXTRA}", "")
+
+
+#: The five ``*MAT_ADD_THERMAL_EXPANSION`` carriers in the r14 verification
+#: corpus. Outside the repository, so the case skips when the tree is absent —
+#: but when it IS there this is the only test that runs the batch against decks
+#: nobody wrote for it.
+_R14 = ("C:/Users/pmqua/PycharmProjects/FEM_solver/verification/"
+        "dynaexamples_r14_ton-mm-s")
+CARRIERS = [
+    _R14 + "/thermal/thermal-expansion/thermal-load/main_steel_frame.k",
+    _R14 + "/thermal/thermal-expansion/mat-add/main_steel_frame.k",
+    _R14 + "/thermal/thick-thin-shells/07_metalstrip.k",
+    _R14 + "/nvh/example-06-04/6.4.tbl.psd.intermittent.k",
+    _R14 + "/nvh/example-06-04/6.4.tbl.psd.thermal-1.k",
+]
+
+
+class CorpusCarrierTests(unittest.TestCase):
+    def test_every_carrier_converts_and_emits_the_expansion_pair(self):
+        for path in CARRIERS:
+            if not os.path.exists(path):
+                self.skipTest(f"corpus tree absent: {path}")
+            with self.subTest(deck=os.path.basename(os.path.dirname(path))):
+                tmp = tempfile.TemporaryDirectory()
+                res = convert(path, os.path.join(tmp.name, "d"),
+                              write_log=False)
+                with open(res.starter_path) as fh:
+                    starter = fh.read()
+                # The pair is mandatory: a /THERM_STRESS without a /HEAT/MAT is
+                # ERROR 1129 and the deck does not start.
+                ts = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                      if ln.startswith("/THERM_STRESS/MAT/")}
+                heat = {int(ln.rsplit("/", 1)[1]) for ln in starter.splitlines()
+                        if ln.startswith("/HEAT/MAT/")}
+                self.assertTrue(ts, "no /THERM_STRESS/MAT emitted")
+                self.assertTrue(ts <= heat,
+                                f"/THERM_STRESS on {ts - heat} with no "
+                                "/HEAT/MAT — starter ERROR 1129")
+                # Every Fct_ID_T must resolve: an unknown one is accepted at 0
+                # errors and reinterpreted as an internal index.
+                functs = {int(ln.rsplit("/", 1)[1])
+                          for ln in starter.splitlines()
+                          if ln.startswith("/FUNCT/")}
+                for mid in sorted(ts):
+                    body = _block(starter, f"/THERM_STRESS/MAT/{mid}")
+                    fid = int(body[1][0:10])
+                    self.assertIn(fid, functs,
+                                  f"Fct_ID_T {fid} is not a /FUNCT in the deck")
+                self.assertNotIn("*MAT_ADD_THERMAL_EXPANSION",
+                                 " ".join(res.skipped_keywords))
+                tmp.cleanup()
+
+    def test_metalstrip_section_shell_thermal_keeps_its_thickness(self):
+        path = CARRIERS[2]
+        if not os.path.exists(path):
+            self.skipTest("corpus tree absent")
+        tmp = tempfile.TemporaryDirectory()
+        res = convert(path, os.path.join(tmp.name, "d"), write_log=False)
+        with open(res.starter_path) as fh:
+            starter = fh.read()
+        # Before the *SECTION_SHELL_THERMAL registration the section was lost
+        # whole and the starter answered 40 x ERROR 495 "NULL THICKNESS".
+        self.assertNotIn("SECTION_SHELL_THERMAL",
+                         " ".join(res.skipped_keywords))
+        self.assertIn("/PROP/SHELL/1", starter)
+        thick = [ln for ln in _block(starter, "/PROP/SHELL/1")
+                 if not ln.startswith("#")]
+        self.assertTrue(any("3" in ln for ln in thick), thick)
+        tmp.cleanup()
 
 
 class ByteIdentityTests(unittest.TestCase):

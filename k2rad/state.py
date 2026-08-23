@@ -792,6 +792,14 @@ class PartData:
     # law choice is triggered solely by a nonzero part EOSID) and the
     # *MAT_NULL /MAT/LAW6-carrier pairing for an EOS of a different id.
     eosid: int = 0
+    # *PART field 8 (TMID) → the *MAT_THERMAL_* card bound to this part. The
+    # thermal material id is a SEPARATE namespace from MID — *"This number is
+    # independent of the material ID number (MID) ... The TMID and MID numbers
+    # are related through the *PART card"* (Vol II R17, *MAT_THERMAL header) —
+    # and it is what supplies the /HEAT/MAT values (RHO0_CP = RO*HC, AS = TC).
+    # The same "a *PART field that joins a companion material card" role eosid
+    # plays for the equation of state.
+    tmid: int = 0
 
 
 @dataclass
@@ -5900,6 +5908,104 @@ class MatSpringMuscle:
     ksh: float = 0.0        # exponential shape parameter
 
 
+@dataclass
+class MatAddThermalExpansion:
+    """*MAT_ADD_THERMAL_EXPANSION → /THERM_STRESS/MAT (+ /HEAT/MAT) on the
+    material of the named PART.
+
+    LS-DYNA card (Vol II R17 pp.2-146..2-148), 7 or 8 fields depending on the
+    release — the Keyword971 cfg has only the seven, the r14 decks in the
+    verification corpus write eight:
+      PID LCID MULT LCIDY MULTY LCIDZ MULTZ [TREF]
+
+    ``PID`` GT.0 = a part id, LT.0 = the material id ``|PID|``.
+    ``LCID`` EQ.0 → the coefficient is the constant ``MULT``; GT.0 → ``MULT``
+    scales the curve. For an ISOTROPIC material *"LCIDY, MULTY, LCIDZ and MULTZ
+    are ignored"*; for an anisotropic one they are the b-/c-direction pair, and
+    *"if MULTY = 0 as well, LCID and MULT define the coefficient in the
+    b-direction"*.
+    ``TREF`` *"Reference temperature. A nonzero value activates the secant
+    approach."* — no Radioss slot (the engine is strictly incremental).
+    """
+    pid: int
+    lcid: int = 0
+    mult: float = 0.0
+    lcidy: int = 0
+    multy: float = 0.0
+    lcidz: int = 0
+    multz: float = 0.0
+    tref: float = 0.0
+    has_tref: bool = False      # False = the 7-field layout (no TREF cell)
+
+
+@dataclass
+class MatThermalIsotropic:
+    """*MAT_THERMAL_ISOTROPIC (T01) → the /HEAT/MAT values of every part that
+    names it through *PART field 8 (TMID).
+
+    LS-DYNA cards (Vol II R17 p.3-2):
+      Card1: TMID TRO TGRLC TGMULT TLAT HLAT
+      Card2: HC TC
+
+    ``TRO`` EQ.0 → the structural density. ``HC`` is the specific heat per unit
+    MASS and ``TC`` the thermal conductivity, so /HEAT/MAT's VOLUMETRIC
+    ``RHO0_CP`` is ``(TRO or RO)·HC`` and ``AS`` is ``TC``. TGRLC/TGMULT
+    (volumetric heat generation) and TLAT/HLAT (latent heat) have no
+    /HEAT/MAT slot.
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    hc: float = 0.0
+    tc: float = 0.0
+
+
+@dataclass
+class InitialTemperature:
+    """*INITIAL_TEMPERATURE_{SET|NODE} → /INITEMP on a /GRNOD.
+
+    ``NSID/NID TEMP LOC``; ``NSID = 0`` (the _SET spelling) means every node in
+    the model. ``LOC`` selects a thick-thermal-shell surface (-1 lower, 0
+    middle, +1 upper) and has no Radioss counterpart.
+    """
+    sid: int                # node-set id, node id, or 0 = all nodes
+    temp: float
+    loc: int = 0
+    is_node: bool = False   # True = *INITIAL_TEMPERATURE_NODE (sid is a NID)
+
+
+@dataclass
+class ImposedTemperature:
+    """A converted temperature DRIVER → /IMPTEMP.
+
+    One record per LS-DYNA card; ``source`` names the keyword so every warning
+    and the /IMPTEMP title can say which one it came from.
+      * ``*LOAD_THERMAL_CONSTANT``      → all nodes, constant T
+      * ``*LOAD_THERMAL_LOAD_CURVE``    → all nodes, T = f(t)
+      * ``*LOAD_THERMAL_VARIABLE``      → a node set, T = TB + TS·f(t)
+      * ``*BOUNDARY_TEMPERATURE_{SET|NODE}`` → a set/node, T = TMULT·f(t)
+    """
+    source: str
+    sid: int = 0            # node-set id, node id, or 0 = all nodes
+    is_node: bool = False
+    nids: List[int] = field(default_factory=list)   # explicit node list (_NODE)
+    lcid: int = 0           # LS-DYNA curve id (0 = the constant form)
+    scale: float = 1.0      # Fscale_y
+    const: float = 0.0      # the constant T of the LCID = 0 form
+    tbirth: float = 0.0     # → T_start
+    tdeath: float = 0.0     # → T_stop (0 = none)
+    # *LOAD_THERMAL_VARIABLE T = TB + TS·f(t): an OFFSET Radioss cannot express
+    # with Fscale_y alone, so the writer synthesizes TB + TS·f(t) point-wise.
+    offset: float = 0.0
+    # Writer-resolved: the /FUNCT id actually emitted for this driver.
+    func_id: int = 0
+    initial_temp: Optional[float] = None   # T(0), for the companion /INITEMP
+
+
 # ── User conversion options (CLI flags) ──────────────────────────────────────
 
 @dataclass
@@ -6454,9 +6560,32 @@ class ConversionState:
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
     #   *MAT_156 / *MAT_MUSCLE        → /PROP/TYPE46 + /SPRING (no /MAT)
     #   *MAT_S15 / *MAT_SPRING_MUSCLE → /PROP/TYPE46 + /SPRING (no /MAT)
+    #   *MAT_ADD_THERMAL_EXPANSION    → /THERM_STRESS/MAT + /HEAT/MAT
+    #   *MAT_THERMAL_ISOTROPIC (via *PART TMID) → the /HEAT/MAT values
     mat_shape_memory: Dict[int, MatShapeMemory] = field(default_factory=dict)
     mat_muscle: Dict[int, MatMuscle] = field(default_factory=dict)
     mat_spring_muscle: Dict[int, MatSpringMuscle] = field(default_factory=dict)
+    # PART-keyed, so a LIST: the card names a PID, and two cards may name two
+    # parts that share one MID — which /THERM_STRESS/MAT, being MATERIAL-keyed,
+    # cannot express without splitting the material (writer/thermal.py).
+    mat_add_thermal_expansion: List[MatAddThermalExpansion] = \
+        field(default_factory=list)
+    mat_thermal_isotropic: Dict[int, MatThermalIsotropic] = \
+        field(default_factory=dict)
+    # Temperature drivers — the minimal foothold that makes a /THERM_STRESS/MAT
+    # do anything at all. Radioss's thermal expansion is INCREMENTAL
+    # (ETH = alpha*(T_n - T_{n-1}), cmain3.F:235-240 / mmain.F90:770-786), so
+    # with no driver DTEMP is identically zero on every cycle and the emitted
+    # card is inert at 0 starter errors and 0 warnings.
+    initial_temperatures: List[InitialTemperature] = field(default_factory=list)
+    imposed_temperatures: List[ImposedTemperature] = field(default_factory=list)
+    # Writer-resolved (writer/thermal.py::_resolve_thermal), filled ONCE per mid
+    # — the #125 "emit shared cards once per ID, not once per consumer" rule.
+    #   heat_mat_cards   : mid → (T0, RHO0_CP, AS, BS, T1, EFRAC)
+    #   therm_stress_cards: mid → (Fct_ID_T, Fscale_y)
+    heat_mat_cards: Dict[int, Tuple[float, float, float, float, float, float]] \
+        = field(default_factory=dict)
+    therm_stress_cards: Dict[int, Tuple[int, float]] = field(default_factory=dict)
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
