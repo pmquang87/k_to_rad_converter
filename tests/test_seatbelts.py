@@ -587,10 +587,13 @@ class TestBelt2D(unittest.TestCase):
         # card 1: RHO_I is a LINEIC MASS here, so MPUL goes in unchanged.
         self.assertEqual(_col_f(c[0], 1, 20), 0.135)
         self.assertEqual(_col_f(c[0], 21, 40), 1.5e-3)
-        # card 2: K C RE.  CSE=1 = "don't eliminate" -> full compression.
+        # card 2: K C RE.  FORM is unstated (0), so CSE=1 says nothing at all
+        # — "for FORM = 0, the solver automatically determines whether or not
+        # to eliminate the compressive stresses" — and RE takes the eliminate
+        # side.  See test_cse_only_speaks_for_a_non_zero_form.
         self.assertEqual(_col_f(c[1], 1, 20), 0.0, "K")
         self.assertEqual(_col_f(c[1], 21, 40), 0.0, "C")
-        self.assertEqual(_col_f(c[1], 41, 60), 1.0, "RE")
+        self.assertEqual(_col_f(c[1], 41, 60), 0.01, "RE")
         # card 3: fct_load fct_uload Fscale1 Fscale2 Ireload
         self.assertEqual(_col_i(c[2], 1, 10), 910)
         self.assertEqual(_col_i(c[2], 11, 20), 914)
@@ -679,13 +682,18 @@ class TestBelt2D(unittest.TestCase):
         self.assertEqual(_col_f(c[3], 41, 60), 3.1e5, "GAB -> G12")
         self.assertEqual(_warns(r, "GAB is not stated"), [])
 
-    def test_cse_inverts_with_a_non_zero_form(self):
-        """Vol II *MAT_SEATBELT, CSE: the option is 'available since
-        r137465/dev FOR NON-ZERO FORM ... For non-zero FORM: EQ.0.0: don't
-        eliminate ...; EQ.1.0: eliminate ...' — the OPPOSITE of the FORM=0
-        table the shipped cfg still encodes. Reading only one of the two
-        inverts the flag on half the decks in the field."""
-        for form, cse, re_ in ((0, 0.0, 0.01), (0, 1.0, 1.0),
+    def test_cse_only_speaks_for_a_non_zero_form(self):
+        """Vol II R17 *MAT_SEATBELT, CSE: 'Compressive stress elimination
+        option FOR NONZERO FORM ... Note that for FORM = 0, THE SOLVER
+        AUTOMATICALLY DETERMINES whether or not to eliminate the compressive
+        stresses', and Remark 6: 'From versions R8 through R11, eliminating the
+        compressive stresses was ALWAYS DETERMINED BY THE SOLVER. As of R12,
+        for nonzero FORM, CSE ... was reused'.
+
+        So on FORM=0 the cell is INERT — every CSE gets the ELIMINATE side,
+        and reading the shipped cfg's pre-R8 GUI list as a live table writes a
+        full-stiffness membrane (RE=1) on any FORM=0 deck that states CSE=1."""
+        for form, cse, re_ in ((0, 0.0, 0.01), (0, 1.0, 0.01), (0, 2.0, 0.01),
                                (-14, 0.0, 1.0), (-14, 1.0, 0.01),
                                (14, 0.0, 1.0), (14, 1.0, 0.01)):
             with self.subTest(form=form, cse=cse):
@@ -694,7 +702,21 @@ class TestBelt2D(unittest.TestCase):
                 c = _cards(_block(starter, "/MAT/LAW119/900"))
                 self.assertEqual(_col_f(c[1], 41, 60), re_)
                 if form:
-                    self.assertTrue(_warns(r, "non-zero-FORM reading"))
+                    self.assertTrue(_warns(r, "is non-zero"))
+                else:
+                    self.assertTrue(_warns(r, "controls NOTHING"))
+
+    def test_the_re_note_names_how_little_re_moves(self):
+        """RE scales the LAW119 SHELL membrane only. The starter's own 2D->1D
+        strand chain carries the RAW curve slope in compression through
+        iecrou=12 (redef_seatbelt.F90:335), so RE moves ~1 % of the belt's
+        compressive response — MEASURED 801 N of membrane against 79998 N of
+        strand at eps=-0.02. A note that says RE is 'what a slack belt does
+        physically' without that sentence over-promises."""
+        for form, cse in ((0, 0.0), (14, 0.0), (14, 1.0), (14, 2.0)):
+            with self.subTest(form=form, cse=cse):
+                r, _s, _e = _convert(self._deck(cse=cse, card3=(None, form)))
+                self.assertTrue(_warns(r, "about 1 % of the compressive"))
 
     def test_cse_two_on_a_non_zero_form_is_named_as_undefined(self):
         """'The old recommended option of CSE = 2 ... still works if and only
@@ -720,7 +742,8 @@ class TestBelt2D(unittest.TestCase):
         r, starter, _e = _convert(self._deck(cse=2.0))
         c = _cards(_block(starter, "/MAT/LAW119/900"))
         self.assertEqual(_col_f(c[1], 41, 60), 0.01)
-        self.assertTrue(_warns(r, "CSE=2"))
+        self.assertTrue(_warns(r, "SOLVER"))
+        self.assertTrue(_warns(r, "a CHOICE this converter makes"))
 
     def test_the_determinant_constraint_is_enforced(self):
         """N21 = N12*100*Fscale22 and DET = 1/(1-N12*N21)
@@ -2259,6 +2282,24 @@ class TestImplicitDeviceNodes(unittest.TestCase):
                                    range(0, len(ln.rstrip()), 10))
         return out
 
+    def test_an_implicit_1d_belt_is_named_as_carrying_no_stiffness(self):
+        """imp_glob_k.F's ITY==6 arm builds spring stiffness for IGTYP 4, 8,
+        12 and 13 only (R4KE3/R8KE3/R12KE3/R13KE3); everything else falls to
+        IETY=16, which prints format 1005 '***** WARNING : SPRING ELEMENT
+        PROP.TYPE = 23 IS NOT AVAILABLE FOR STIFFNESS MATRIX BUILDING,
+        STIFFNESS IGNORED *****'. /PROP/TYPE23 is not in the list, so an
+        implicit run of a 1D belt converges on mass and the devices, not on
+        the webbing — MEASURED, the matrix collapsed from ND=18 NZ=27 to
+        ND=6 NZ=3."""
+        r, _s, _e = _convert(_deck(
+            _BELT_PART, _SECTION, _mat(), _belts(), self._IMPL))
+        self.assertTrue(_warns(r, "NO tangent stiffness"))
+        self.assertTrue(_warns(r, "PROP.TYPE = 23"))
+
+    def test_an_explicit_1d_belt_is_silent_about_stiffness(self):
+        r, _s, _e = _convert(_ref())
+        self.assertEqual(_warns(r, "NO tangent stiffness"), [])
+
     def test_the_accelerometer_triad_stays_free(self):
         """A /SKEW/MOV is the coord_nodes flag=1 case spelled with another
         keyword: pinning N2/N3 freezes the frame the /ACCEL projects onto and
@@ -2388,6 +2429,26 @@ class TestTwoDBeltDirection(unittest.TestCase):
         return _deck(_SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914),
                      self._STRIP_NODES, "*ELEMENT_SEATBELT\n" + rows)
 
+    #: 3x3 grid: x along the pull (0/100/200), y across the width (0/10/20).
+    #: Four shells, so the belt is TWO elements wide — the ordinary production
+    #: shoulder belt, and the shape an edge-uniqueness test cannot judge.
+    _WIDE_NODES = "*NODE\n" + "".join(
+        f"{200 + 3 * r + c:10d}{100.0 * c:16.1f}{10.0 * r:16.1f}"
+        f"{0.0:16.1f}\n" for r in range(3) for c in range(3))
+
+    def _wide_deck(self, along: bool):
+        rows = ""
+        for r in range(2):
+            for c in range(2):
+                n = [200 + 3 * r + c, 201 + 3 * r + c,
+                     204 + 3 * r + c, 203 + 3 * r + c]      # ccw from (r,c)
+                if not along:                       # rotated one place
+                    n = n[1:] + n[:1]
+                rows += _belt_card(9000 + 2 * r + c, 800,
+                                   n[0], n[1], 0, 0.0, n[2], n[3])
+        return _deck(_SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914),
+                     self._WIDE_NODES, "*ELEMENT_SEATBELT\n" + rows)
+
     def test_a_transverse_local_order_is_named(self):
         r, _s, _e = _convert(self._deck(along=False))
         self.assertTrue(_warns(r, "ERROR 2075"))
@@ -2395,6 +2456,41 @@ class TestTwoDBeltDirection(unittest.TestCase):
     def test_an_along_the_belt_order_is_silent(self):
         r, _s, _e = _convert(self._deck(along=True))
         self.assertEqual(_warns(r, "ERROR 2075"), [])
+
+    def test_a_belt_two_elements_wide_is_silent(self):
+        """The false positive this check used to have. In an n-wide strip row
+        k's (n4,n3) IS row k+1's (n1,n2) by construction, and the reader
+        de-duplicates the pair on purpose — GlobalModelSdi.cpp:2409-2410 pushes
+        std::minmax() pairs and :2420 'Create elements deleting dupplicated
+        connectivity' — so a repeated edge is a second strand, not a defect.
+        create_seatbelt.F:756-759 raises ERROR 2075 only when two belt entities
+        on ONE material get SECTIONs differing by >1e-5, which equal-width
+        strands never do. MEASURED false positives before this: this deck, and
+        BELT_PA_50th_HIII_ml_br19_sr17.k part 66000003 in the examples corpus,
+        whose belt-direction edges run 53 elements / 1071 mm against 17 / 350
+        across — a correct belt told to rotate connectivity already right."""
+        r, _s, _e = _convert(self._wide_deck(along=True))
+        self.assertEqual(_warns(r, "ERROR 2075"), [])
+
+    def test_a_wide_belt_still_reports_a_transverse_order(self):
+        """Rotating a 2-wide x 3-long strip one place makes the belt-edge runs
+        SHORTER than the perpendicular ones, which is what the check measures
+        now — so widening the mesh must not buy silence."""
+        nodes = "*NODE\n" + "".join(
+            f"{300 + 3 * i + c:10d}{100.0 * i:16.1f}{10.0 * c:16.1f}"
+            f"{0.0:16.1f}\n" for i in range(4) for c in range(3))
+        rows = ""
+        for i in range(3):
+            for c in range(2):
+                n = [300 + 3 * i + c, 303 + 3 * i + c,
+                     304 + 3 * i + c, 301 + 3 * i + c]
+                n = n[1:] + n[:1]                   # rotated one place
+                rows += _belt_card(9100 + 2 * i + c, 800,
+                                   n[0], n[1], 0, 0.0, n[2], n[3])
+        r, _s, _e = _convert(_deck(
+            _SHELL_PART, _mat(kw="MAT_SEATBELT_2D", ulcid=914), nodes,
+            "*ELEMENT_SEATBELT\n" + rows))
+        self.assertTrue(_warns(r, "ERROR 2075"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2534,6 +2630,86 @@ class TestRetractorCurveOffsets(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+class TestBeltOffsetRoundTrip(unittest.TestCase):
+    """An offset belt card has to READ BACK as the same eight fields.
+
+    ``_off_element_seatbelt`` re-renders in the card's own columns, but an id
+    that outgrows its 8-wide cell would run into its neighbour, so it falls
+    back to a free card. The fallback must not be SPACE-joined: a blank
+    interior cell — SLEN on a 2D belt — joins to nothing between two spaces and
+    ``parse_free`` collapses the run, putting every field after it one slot out
+    of phase. That is the very shift ``_seatbelt_elem_card`` was written to
+    prevent, re-introduced on the WRITE side.
+    """
+
+    def _parse(self, child_body, idnoff=0, idoff=0):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        child = os.path.join(tmp.name, "child.k")
+        with open(child, "w") as fh:
+            fh.write("*KEYWORD\n" + child_body + "*END\n")
+        master = os.path.join(tmp.name, "master.k")
+        with open(master, "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\nchild.k\n"
+                     + _card(idnoff, idoff, 0, 0, 0, 0, 0) + "*END\n")
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        from k2rad.state import ConversionState
+        state = ConversionState()
+        for block in parse_k_file(master):
+            dispatch(block, state)
+        return state
+
+    #: Ids that fit their I8 cells before the offset and OVERFLOW after it —
+    #: routine for the renumbered assemblies *INCLUDE_TRANSFORM exists for.
+    _OFF = 100000000
+
+    def test_a_blank_slen_2d_belt_survives_an_overflowing_offset(self):
+        """MEASURED before this: the card space-joined to
+        '166000004 66000002 166000002 166000172 0  166000057 166000058' and
+        read back SLEN=166000057, N3=166000058, N4 empty — the 2D shell belt
+        became a 1D /SPRING with 166,000,057 units of invented slack, and the
+        part was then claimed by BOTH routes."""
+        body = ("*ELEMENT_SEATBELT\n"
+                + _belt_card(66000004, 66000002, 66000002, 66000172,
+                             0, 0.0, 66000057, 66000058))
+        # SLEN blank, not "0" — the shape a real deck writes.
+        body = body.replace(f"{0.0:>16g}", " " * 16)
+        e, = self._parse(body, idnoff=self._OFF, idoff=self._OFF
+                         ).seatbelt_elems
+        self.assertTrue(e.is_2d, "N3/N4 must survive as a 2D shell belt")
+        self.assertEqual(
+            (e.eid, e.n1, e.n2, e.n3, e.n4),
+            (166000004, 166000002, 166000172, 166000057, 166000058))
+        self.assertEqual(e.slen, 0.0, "no slack may be invented")
+        self.assertEqual(e.pid, 66000002, "IDPOFF is 0 here")
+
+    def test_a_stated_slen_survives_an_overflowing_offset(self):
+        body = ("*ELEMENT_SEATBELT\n"
+                + _belt_card(66000004, 66000002, 66000002, 66000172,
+                             0, 3.25, 66000057, 66000058))
+        e, = self._parse(body, idnoff=self._OFF, idoff=self._OFF
+                         ).seatbelt_elems
+        self.assertTrue(e.is_2d)
+        self.assertEqual(e.slen, 3.25)
+        self.assertEqual((e.n3, e.n4), (166000057, 166000058))
+
+    def test_a_blank_sbrid_1d_belt_survives_an_overflowing_offset(self):
+        """SBRID is the other interior cell a real deck leaves blank."""
+        body = ("*ELEMENT_SEATBELT\n"
+                + _belt_card(66000004, 66000002, 66000002, 66000172,
+                             0, 3.25, 0, 0))
+        body = body.replace(f"{0:>8d}{3.25:>16g}", " " * 8 + f"{3.25:>16g}")
+        e, = self._parse(body, idnoff=self._OFF, idoff=self._OFF
+                         ).seatbelt_elems
+        self.assertFalse(e.is_2d, "N3/N4 zero -> 1D /SPRING")
+        self.assertEqual(e.sbrid, 0)
+        self.assertEqual(e.slen, 3.25)
+        self.assertEqual((e.eid, e.n1, e.n2),
+                         (166000004, 166000002, 166000172))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 class TestSlipringCardTwoDiscriminator(unittest.TestCase):
     """``_slipring_card2_follows``'s ``looks_like_card1`` vote. Raw contiguity
     alone is not enough: two rings written back to back with NO card 2 on the
@@ -2605,6 +2781,37 @@ class TestSlipringCardTwoDiscriminator(unittest.TestCase):
         self.assertEqual([r.k for r in rings], [0.55, 0.65])
         self.assertEqual([r.direct for r in rings], [12, 21])
         self.assertEqual([r.lcnffd for r in rings], [920, 930])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+class TestGapminSeesTheBelt(unittest.TestCase):
+    """``--auto-gapmin`` measures the clearance of a contact's two sides from
+    ``gapmin._part_nodes_map``. ``contacts.py`` puts 1D belt /SPRING nodes on
+    the secondary side of a part- or part-set-scoped *CONTACT, so the belt has
+    to be in that map too — otherwise the computed Gapmin is measured over
+    every OTHER part in the contact and ignores the webbing, which is exactly
+    the side *SECTION_SEATBELT's warn-dropped THICK redirects the user to."""
+
+    def _map(self):
+        from k2rad.gapmin import _part_nodes_map
+        from k2rad.state import ConversionState, SeatbeltElem
+        state = ConversionState()
+        state.seatbelt_elems = [
+            SeatbeltElem(eid=3001, pid=77, n1=11, n2=12),          # 1D
+            SeatbeltElem(eid=3002, pid=77, n1=12, n2=13),          # 1D
+            SeatbeltElem(eid=3003, pid=88, n1=21, n2=22,
+                         n3=23, n4=24),                            # 2D shell
+        ]
+        return _part_nodes_map(state)
+
+    def test_the_1d_belt_nodes_are_measurable(self):
+        self.assertEqual(self._map().get(77), {11, 12, 13})
+
+    def test_a_2d_belt_is_not_double_counted(self):
+        """2D belts reach the map through ``state.shell_elems``, which the
+        writer fills; adding them here as well would put their nodes on a part
+        that owns no shell in this fixture."""
+        self.assertNotIn(88, self._map())
 
 
 if __name__ == "__main__":

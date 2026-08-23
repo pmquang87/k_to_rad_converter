@@ -2339,8 +2339,22 @@ def _off_element_seatbelt(b: Block, offsets: Dict[str, int], warn) -> None:
         if any(len(x.strip()) > w
                for x, w in zip(out, _SEATBELT_ELEM_WIDTHS)):
             # An id outgrew its cell; a fixed re-render would run it into its
-            # neighbour, so fall back to a free card, which reads back the same.
-            b.raw[k] = " ".join(x.strip() for x in out) + tail
+            # neighbour, so fall back to a free card. It has to be the COMMA
+            # form, not a space-joined one: a BLANK interior cell — SLEN on a
+            # 2D belt, SBRID on most — joins to nothing between two spaces, and
+            # `parse_free` collapses run-on whitespace, so the card reads back
+            # one slot out of phase. MEASURED, the very shift this card's
+            # slicer exists to prevent: with e=n=1e8,
+            # "66000004660000026600000266000172       0                6600005766000058"
+            # (I8, SLEN blank) space-joined to
+            # "166000004 66000002 166000002 166000172 0  166000057 166000058"
+            # reads back SLEN=166000057, N3=166000058, N4 empty — the 2D shell
+            # belt becomes a 1D /SPRING with 166,000,057 units of invented
+            # slack. Commas hold an empty field in its position ("two
+            # consecutive commas hold an EMPTY field", `parse_free`), so the
+            # comma form round-trips through `_seatbelt_elem_card` unchanged
+            # and nothing has to be invented to fill the gap.
+            b.raw[k] = ",".join(x.strip() for x in out).rstrip(",") + tail
             continue
         b.raw[k] = "".join(
             x.strip().rjust(w)

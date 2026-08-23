@@ -589,6 +589,31 @@ covering them unlocks a large class of real models.
   there, `/MAT/LAW119` has no such gate, and k2rad writes them through with the
   stiffness difference named rather than second-guessing the deck.
 
+  From the post-review verification round, two whole-`/SPRING`-family gaps that
+  the belt only made more visible:
+
+  * **`*DATABASE_CROSS_SECTION_PLANE` cannot cut a belt.** `inistate.py`'s cut
+    walk covers shell / solid / tshell / beam and has no spring arm, and
+    `_make_cross_sections` writes `grsprg_ID` as a hard `0` even though the
+    `/SECT` card carries a spring group (its own docstring lists
+    `grbric`/`grshel`/`grtrus`/`grbeam`/`grsprg`/`grtria`). So a section plane
+    through a shoulder belt reports no belt force — exactly the quantity a
+    restraint section is usually drawn for. Pre-existing for every `/SPRING`
+    family (`*ELEMENT_DISCRETE` included), not introduced by the belt batch;
+    fixing it means a belt + discrete arm in the walk and a `/GRSPRING` group
+    behind `grsprg_ID`.
+  * **`--auto-gapmin` still does not measure BEAM or `*ELEMENT_DISCRETE`
+    clearance.** The 1D belt arm was added to `gapmin._part_nodes_map` in the
+    verification round; those two families remain missing there for the same
+    reason they always were.
+
+  Also recorded, not a converter defect: **an implicit run of a 1D belt is not
+  solving the belt.** `imp_glob_k.F` builds spring stiffness for `IGTYP` 4, 8,
+  12 and 13 only and answers `SPRING ELEMENT PROP.TYPE = 23 IS NOT AVAILABLE
+  FOR STIFFNESS MATRIX BUILDING, STIFFNESS IGNORED` for `/PROP/TYPE23`
+  (MEASURED: the matrix collapsed from ND=18 NZ=27 to ND=6 NZ=3). k2rad now
+  warns; the fix would have to be an engine one.
+
   **Not yet covered by a solver run**, so their correctness rests on the unit
   tests and the card-format sources alone: pretensioner `SBPRTY` 5/6/7/8
   (`Tens_typ` 1/3/4/5), the `/SENSOR/OR` gate a retractor gets when it names

@@ -812,31 +812,67 @@ def _seatbelt_2d_weft(state: ConversionState, mat: MatSeatbelt
     return e22, nu12, ratio / 100.0
 
 
+#: Appended to every ``RE`` note. RE is a REAL knob but a SMALL one, and a
+#: warning that says "this is what a slack belt does physically" without this
+#: sentence over-promises what the flag actually moves on a 2D belt.
+#:
+#: MEASURED on a 4-shell strip at eps = -0.02 (LLCID slope 4.0e6 N/strain): the
+#: 8 starter-generated /SPRING strands carry -79998.46 N (analytic slope*eps =
+#: -80000 N, dev -0.0019 %) while the LAW119 shell membrane contributes -8.05 N
+#: at RE = 0.01 and -800.85 N at RE = 1.0 — so the flag moves 800.8 N out of
+#: 80799.3 N, 0.99 % of the total. The ratio is structural, not deck-specific:
+#: ``hm_read_mat119.F`` multiplies Fscale1 by 1e-2, so the membrane gets
+#: E11 = 0.01*slope/section while the strand chain keeps the RAW slope through
+#: ``iecrou = 12`` ("non linear elastic in tension with compression ... for 2d
+#: seatbelts only", ``redef_seatbelt.F90:335``), which RE does not touch.
+_RE_SCOPE_NOTE = (
+    " NOTE the SCOPE: RE scales the LAW119 SHELL membrane only, and on a 2D "
+    "belt the membrane is about 1 % of the compressive stiffness. The starter "
+    "converts the shells into a 1D /SPRING strand chain "
+    "(hm_convert_2d_elements_seatbelt.F) whose /MAT/LAW114 springs carry the "
+    "RAW loading-curve slope in compression through iecrou=12 "
+    "(redef_seatbelt.F90:335), untouched by RE, while the reader scales the "
+    "membrane by 1e-2. MEASURED at eps=-0.02: 79998 N from the strands "
+    "against 801 N of membrane at RE=1.0 and 8 N at RE=0.01. Whichever way "
+    "this flag lands, it moves about 1 % of the belt's compressive response.")
+
+
 def _seatbelt_2d_re(state: ConversionState, mat: MatSeatbelt) -> float:
     """``RE`` — the compression reduction factor ``E11c/E11`` — from ``CSE``.
 
-    **CSE's two values mean OPPOSITE things depending on FORM, and the manual
-    says so in one sentence that is easy to read past.** Vol II *MAT_SEATBELT,
-    the CSE entry: "Compressive stress elimination option ... available since
-    r137465/dev **for non-zero FORM**. The old recommended option of CSE = 2,
-    available since R8, still works if and only if FORM = 0. **For non-zero
-    FORM:** EQ.0.0: don't eliminate ...; EQ.1.0: eliminate ...".
+    **CSE only says anything at all when FORM is NON-ZERO, and the manual says
+    so in one sentence that is easy to read past.** Vol II R17 *MAT_SEATBELT
+    (p.2-2101), the CSE entry: "Compressive stress elimination option **for
+    nonzero FORM** that applies to shell elements only (see Remark 6):
+    EQ.0.0: Don't eliminate compressive stresses in the shell fabric.
+    EQ.1.0: Eliminate compressive stresses in the shell fabric. **Note that for
+    FORM = 0, the solver automatically determines whether or not to eliminate
+    the compressive stresses.**" Remark 6 (p.2-2105) dates it: "From versions
+    R8 through R11, eliminating the compressive stresses was **always
+    determined by the solver**. As of R12, **for nonzero FORM**, CSE, which had
+    existed prior to R8, was reused to specify the behavior for stress
+    elimination." R16 is consistent (p.2-2048: "The old recommended option of
+    CSE = 2 ... still works if and only if FORM = 0") and gives no FORM = 0
+    table either.
 
-    So there are two mappings:
+    So there is ONE mapping, not two:
 
-    * ``FORM == 0`` (the DEFAULT, and what every R8-era deck writes) — the old
-      table, which is what the shipped cfg still encodes
-      (``Keyword971_R12.0/MAT/SB_MAT.cfg:161-165``):
-      ``0.0: Eliminate compressive stresses in shell fabric``;
-      ``1.0: Dont eliminate ...``; ``2.0: ... decided by LS-DYNA
-      automatically``.
-    * ``FORM != 0`` — INVERTED: 0 keeps compression, 1 eliminates it, and
-      CSE = 2 is no longer valid at all.
+    * ``FORM != 0`` — the R12 table: CSE = 0 KEEPS compression, CSE = 1
+      ELIMINATES it, and CSE = 2 is not valid.
+    * ``FORM == 0`` (the DEFAULT, and what every R8-era deck writes) — the CSE
+      cell controls NOTHING; LS-DYNA decides per element. Whatever RE Radioss
+      gets here is the converter's CHOICE, not a copy of a stated value.
 
-    Reading only the cfg (or only the newer manual paragraph) inverts the flag
-    on half the decks in the field. FORM itself has no Radioss counterpart and
-    is warn-dropped in :func:`_make_seatbelt_2d_materials`; it is read HERE
-    only to pick the right table.
+    **The shipped cfg does NOT refute this.** Its CSE radio list
+    (``0.0: Eliminate ...``; ``1.0: Dont eliminate ...``; ``2.0: ... decided by
+    LS-DYNA automatically``) is byte-identical in ``Keyword971_R8.0`` and
+    ``Keyword971_R12.0/MAT/SB_MAT.cfg`` — a pre-R8 GUI table nobody updated,
+    not solver behaviour. Believing it inverts the flag on every FORM = 0 deck
+    that states CSE = 1.
+
+    FORM itself has no Radioss counterpart and is warn-dropped in
+    :func:`_make_seatbelt_2d_materials`; it is read HERE only to decide whether
+    CSE is a live cell at all.
 
     Radioss's ``RE`` multiplies the compressive stress directly —
     ``law119_membrane.F:190-191`` ``SIGNXX(I) = (A11*EPSXX + A12*EPSYY)*RCOMP``
@@ -856,46 +892,59 @@ def _seatbelt_2d_re(state: ConversionState, mat: MatSeatbelt) -> float:
     floors RE at 1e-3 with WARNING 1572, so 0 would be silently raised anyway,
     and 0.01 is dyna2rad's own "eliminated" constant — inside the range the
     reader validates, and two orders below the tension stiffness.
+
+    **RE's SCOPE is narrow**, which every warning below says out loud: it
+    scales the LAW119 SHELL membrane only, and the membrane is about 1 % of a
+    2D belt's compressive stiffness — see :data:`_RE_SCOPE_NOTE`.
     """
     label = f"*MAT_SEATBELT{'_2D' if mat.is_2d else ''} {mat.mid}"
-    # Which CSE VALUE means "eliminate": 0 on the FORM=0 table, 1 on the other.
-    eliminate = 1.0 if mat.form else 0.0
+    if not mat.form:
+        # FORM = 0: CSE is INERT. Not a table to read the other way round —
+        # a cell the solver ignores. Writing the ELIMINATE side is the
+        # converter's choice, so say so rather than dress it up as a copy.
+        state.warn(
+            f"{label}: FORM=0 (the default), so the CSE cell — here "
+            f"{mat.cse:g} — controls NOTHING and cannot be mapped. Vol II "
+            "*MAT_SEATBELT, CSE: 'Compressive stress elimination option FOR "
+            "NONZERO FORM ... Note that for FORM = 0, THE SOLVER "
+            "AUTOMATICALLY DETERMINES whether or not to eliminate the "
+            "compressive stresses', and Remark 6: 'From versions R8 through "
+            "R11, eliminating the compressive stresses was ALWAYS DETERMINED "
+            "BY THE SOLVER. As of R12, for nonzero FORM, CSE ... was reused'. "
+            "(The shipped cfg's CSE list is a pre-R8 GUI table — byte-"
+            "identical in Keyword971_R8.0 and _R12.0 — not solver behaviour.) "
+            "Radioss has ONE constant for the whole material (/MAT/LAW119 RE, "
+            "the compression reduction factor E11c/E11) and no per-element "
+            "decision, so RE=0.01 is written: the ELIMINATE side, which is "
+            "what a slack belt does. That is a CHOICE this converter makes, "
+            "not a value the deck states." + _RE_SCOPE_NOTE)
+        return 0.01
     if mat.cse in (0.0, 1.0):
-        if mat.form and mat.cse != 0.0:
-            # Both values flip between the two tables, so both get a note —
-            # this one for the value that ELIMINATES on a non-zero FORM.
+        if mat.cse != 0.0:
             state.warn(
                 f"{label}: FORM={mat.form} is non-zero, so CSE={mat.cse:g} "
-                "means ELIMINATE compressive stresses — the OPPOSITE of what "
-                "the same value means on the FORM=0 belt every R8-era deck "
-                "writes (Vol II *MAT_SEATBELT, CSE: 'For non-zero FORM: "
-                "EQ.0.0: don't eliminate ...; EQ.1.0: eliminate ...'). "
-                "/MAT/LAW119 RE is written for the non-zero-FORM reading. "
-                "dyna2rad has no FORM branch at all.")
-        elif mat.form and mat.cse == 0.0:
+                "means ELIMINATE compressive stresses (Vol II *MAT_SEATBELT, "
+                "CSE: 'For nonzero FORM: EQ.0.0: Don't eliminate ...; "
+                "EQ.1.0: Eliminate ...'). RE=0.01 is written. On a FORM=0 "
+                "belt the same cell would mean nothing at all — the solver "
+                "decides there. dyna2rad has no FORM branch at all."
+                + _RE_SCOPE_NOTE)
+        else:
             state.warn(
                 f"{label}: FORM={mat.form} is non-zero, so CSE=0 means KEEP "
-                "compressive stresses (Vol II *MAT_SEATBELT, CSE) — on a "
-                "FORM=0 belt the same value ELIMINATES them. RE=1.0 is "
-                "written for the non-zero-FORM reading.")
-        return 0.01 if mat.cse == eliminate else 1.0
-    if mat.form:
-        state.warn(
-            f"{label}: CSE={mat.cse:g} is only defined for FORM=0 ('the old "
-            "recommended option of CSE = 2 ... still works if and only if "
-            f"FORM = 0', Vol II *MAT_SEATBELT) and this material states "
-            f"FORM={mat.form}. RE=0.01 (eliminate) is written, which is what a "
-            "slack belt does physically; state CSE explicitly if that is not "
-            "what the deck means.")
-        return 0.01
+                "compressive stresses (Vol II *MAT_SEATBELT, CSE) — a "
+                "membrane with FULL compressive stiffness, which is NOT what "
+                "a belt normally does. RE=1.0 is written. On a FORM=0 belt "
+                "the same cell would mean nothing at all — the solver decides "
+                "there." + _RE_SCOPE_NOTE)
+        return 0.01 if mat.cse == 1.0 else 1.0
     state.warn(
-        f"{label}: CSE={mat.cse:g} asks LS-DYNA to decide per element whether "
-        "compressive stress is eliminated. Radioss has ONE constant for the "
-        "whole material (/MAT/LAW119 RE, the compression reduction factor "
-        "E11c/E11), so RE=0.01 is written — the ELIMINATE side, which is what "
-        "CSE=0 means on a FORM=0 belt (the LS-DYNA default) and what a slack "
-        "belt does physically. A 2D belt that needs compressive stiffness has "
-        "to state CSE=1.")
+        f"{label}: CSE={mat.cse:g} is only defined for FORM=0 ('the old "
+        "recommended option of CSE = 2 ... still works if and only if "
+        f"FORM = 0', Vol II *MAT_SEATBELT) and this material states "
+        f"FORM={mat.form}. RE=0.01 (eliminate) is written, which is what a "
+        "belt normally does; state CSE=0 explicitly if this material really "
+        "is meant to carry compression." + _RE_SCOPE_NOTE)
     return 0.01
 
 
@@ -1697,10 +1746,16 @@ def _belt_curves_intersect(state: ConversionState, load: int,
 
     This is ``func_inters.F:398-454`` transcribed: first a common-POINT pass
     over the two point lists from their second point on, then a segment-crossing
-    pass, both requiring ``S1 > 0``. ``FAC1``/``FAC2`` are dropped because the
-    reader gives both curves the SAME factor (``hm_read_mat119.F:139-145``
-    defaults each to 1 and then multiplies both by 1e-2), and a common positive
+    pass, both requiring ``S1 > 0``. ``FAC1``/``FAC2`` are dropped because THIS
+    WRITER always emits ``Fcoeft1 = Fcoeft2 = 0`` (see the
+    :func:`_emit_mat_law119` call in :func:`_make_seatbelt_2d_materials`), so
+    ``hm_read_mat119.F`` defaults each to 1 and multiplies both by 1e-2 —
+    giving the two curves the SAME positive factor — and a common positive
     ordinate scale changes neither ALPHA, nor BETA, nor whether YINT is zero.
+    The reader reads ``Fcoeft1`` and ``Fcoeft2`` as two INDEPENDENT cells
+    (``hm_read_mat119.F:113-114``); they coincide here only because both are
+    left blank, so a future writer that states either one has to scale the
+    point lists below before comparing them.
     ``state.curves[...].pts`` are already SFA/SFO-scaled at parse time, which is
     exactly what the /FUNCT carries.
     """
@@ -1983,60 +2038,112 @@ def _emit_seatbelt_2d_props(state: ConversionState) -> List[str]:
     return lines
 
 
+def _edge_run(elems: List[SeatbeltElem],
+              pairs: Tuple[Tuple[int, int], Tuple[int, int]]) -> int:
+    """Longest RUN of edges the reader would build from one edge pair.
+
+    The reader pushes each shell's two edges as UNORDERED pairs —
+    ``GlobalModelSdi.cpp:2409-2410`` ``std::minmax(aNodeId[0], aNodeId[1])`` /
+    ``std::minmax(aNodeId[3], aNodeId[2])`` — then sorts them and, at ``:2420``
+    ("Create elements deleting dupplicated connectivity"), keeps ONE /SPRING
+    per distinct pair. So this de-duplicates the same way before measuring, and
+    ORDER is irrelevant: an interior edge that two shells share is one spring,
+    not a defect.
+
+    Returns the edge count of the largest connected group, which for the unions
+    of simple paths a belt mesh produces is the length of the longest strand.
+    Linear in the number of edges.
+    """
+    edges: Set[Tuple[int, int]] = set()
+    for e in elems:
+        for i, j in pairs:
+            a = getattr(e, f"n{i}")
+            b = getattr(e, f"n{j}")
+            if a > 0 and b > 0 and a != b:
+                edges.add((a, b) if a < b else (b, a))
+    if not edges:
+        return 0
+    adj: Dict[int, List[int]] = {}
+    for a, b in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    group: Dict[int, int] = {}
+    n_groups = 0
+    for start in adj:
+        if start in group:
+            continue
+        stack = [start]
+        group[start] = n_groups
+        while stack:
+            n = stack.pop()
+            for m in adj[n]:
+                if m not in group:
+                    group[m] = n_groups
+                    stack.append(m)
+        n_groups += 1
+    counts = [0] * n_groups
+    for a, _b in edges:
+        counts[group[a]] += 1
+    return max(counts)
+
+
 def _warn_2d_belt_direction(state: ConversionState, pid: int,
                             mid: int) -> None:
-    """A 2D belt whose local node order does not run ALONG the strip.
+    """A 2D belt whose local node order runs ACROSS the strip, not along it.
 
     The starter builds the 1D strand chain from the ``(n1,n2)`` and ``(n4,n3)``
-    edge pair, so those edges must CHAIN end to end: element k's ``n2`` is
-    element k+1's ``n1``. When the connectivity is rotated one place the edges
-    run ACROSS the strip instead, the starter groups the shells into strands of
-    a different width, and ``create_seatbelt.F:756-759`` answers
+    edge pair. When the connectivity is rotated one place those edges run
+    ACROSS the strip instead, the starter groups the shells into strands of a
+    different width, and ``create_seatbelt.F:756-759`` answers
     ``ERROR 2075 -- 2D SEATBELT MATERIAL IS USED FOR SEVERAL SEATBELTS with
-    different section`` (the same LAW119 material reaching two strand groups
-    whose computed ``SECTION`` differs by more than 1e-5) and refuses the deck.
+    different section`` — one LAW119 material reaching two belt entities whose
+    ``SECTION`` differs by more than 1e-5, where SECTION is the belt's WIDTH x
+    thickness summed along its end frame (``:512``).
 
     MEASURED as a negative control: the same nodes, the same pull direction,
     connectivity rotated one place — 2 x ERROR 2075, against NORMAL TERMINATION
     (4804 cycles, 0 ERROR) for the along-the-pull ordering.
 
-    The test is TOPOLOGICAL and needs no coordinates: in a proper strip every
-    node is the tail of at most one belt edge and the head of at most one, so a
-    repeated or branching edge means the local order does not run along the
-    belt. It cannot judge a part with a single element, or one whose EDGSET
-    already states the direction — say so rather than imply a clean bill.
+    **A repeated edge is NOT the symptom.** An earlier version of this check
+    flagged any ``(n1,n2)``/``(n4,n3)`` edge that a second shell also carried,
+    on the premise that a proper strip never repeats one. That premise holds
+    only for a strip ONE element wide: in an n-wide strip row k's ``(n4,n3)``
+    IS row k+1's ``(n1,n2)`` by construction, and the reader de-duplicates the
+    pair (see :func:`_edge_run`) exactly so that it can. MEASURED false
+    positive: an ordinary 2-wide x 2-long strip with ``n1->n2`` along the pull,
+    told to rotate connectivity that was already right. Measured on the two
+    production restraint models in the examples corpus, which hold three 2D
+    belt parts between them, the old test warned on all three and this one
+    warns on two — ``BELT_PA_50th_HIII_ml_br19_sr17.k`` part 66000003 (62
+    shells, belt-edge runs 53 edges / 1071 mm against 17 edges / 350 mm across)
+    is a correct belt and is now silent, while its part 66000002 (16 / 352 mm
+    against 71 / 1446 mm) and ``04_belt_pa_030.k`` part 66000002 (269 /
+    3274 mm against 349 / 4208 mm) really do run across and are still named.
+
+    What DOES separate the two orientations is which direction the strands run
+    in. Both edge pairs de-duplicate to a clean set of chains; the belt's own
+    pair should give the LONG ones (a belt is longer than it is wide) and the
+    perpendicular pair the short rungs. So the two are measured and the part is
+    named only when the perpendicular pair wins. A square patch, where the two
+    are equal, is genuinely ambiguous and is left alone — as is a single
+    element, or a part whose EDGSET already states the direction.
     """
     elems = [e for e in state.seatbelt_elems if e.is_2d and e.pid == pid]
     if len(elems) < 2:
         return
-    tails: Dict[int, Set[int]] = {}
-    seen: Set[Tuple[int, int]] = set()
-    bad: List[str] = []
-    for e in sorted(elems, key=lambda x: x.eid):
-        for a, b in ((e.n1, e.n2), (e.n4, e.n3)):
-            if a <= 0 or b <= 0 or a == b:
-                continue
-            if (a, b) in seen:
-                bad.append(f"element {e.eid}: edge ({a},{b}) is shared with an "
-                           "earlier element")
-                continue
-            seen.add((a, b))
-            heads = tails.setdefault(a, set())
-            if heads:
-                bad.append(f"element {e.eid}: node {a} already starts edge "
-                           f"({a},{sorted(heads)[0]})")
-            heads.add(b)
-    if not bad:
+    belt = _edge_run(elems, ((1, 2), (4, 3)))
+    cross = _edge_run(elems, ((2, 3), (1, 4)))
+    if cross <= belt:
         return
     state.warn(
         f"2D seatbelt part {pid}: the (n1,n2)/(n4,n3) edges of its "
-        f"*ELEMENT_SEATBELT shells do NOT chain end to end — "
-        + "; ".join(bad[:4])
-        + (f", ... ({len(bad)} cases)" if len(bad) > 4 else "")
-        + ". Those two edges are what the starter follows to build the belt's "
-        "1D strands (hm_convert_2d_elements_seatbelt.F), so a local node order "
-        "that runs ACROSS the strip instead of along it groups the shells into "
-        "strands of the wrong width and the starter refuses the deck with "
+        f"*ELEMENT_SEATBELT shells chain into strands at most {belt} element(s) "
+        f"long, while the PERPENDICULAR (n2,n3)/(n1,n4) pair chains {cross} "
+        "long — so the local node order runs ACROSS the strip, not along it. "
+        "Those first two edges are what the starter follows to build the "
+        "belt's 1D strands (hm_convert_2d_elements_seatbelt.F), so it will "
+        "group these shells into strands of the wrong width and the belt "
+        "entities on one material end up with different SECTIONs: "
         f"ERROR 2075 (2D SEATBELT MATERIAL {mid} IS USED FOR SEVERAL SEATBELTS "
         "with different section, create_seatbelt.F:756-759). Rotate the "
         "element connectivity so n1->n2 runs along the belt, or state the "
@@ -2385,6 +2492,7 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
     _warn_slack(state, [e for e in state.seatbelt_elems if not e.is_2d])
     _warn_orphan_belt_elements(state, emitted_eids)
     _warn_retractor_backlink(state, emitted_eids)
+    _warn_implicit_belt_stiffness(state, emitted_eids)
 
     belt_2d_eids = {e.eid for e in state.seatbelt_elems if e.is_2d}
     pool = _SensorPool(state)
@@ -2418,6 +2526,40 @@ def _warn_orphan_belt_elements(state: ConversionState,
             + (" ..." if len(lost) > 8 else "")
             + ". Any *DATABASE_HISTORY_SEATBELT, slipring or retractor naming "
             "them loses that reference too; see the warnings above.")
+
+
+def _warn_implicit_belt_stiffness(state: ConversionState,
+                                  emitted: Set[int]) -> None:
+    """An IMPLICIT deck carrying a 1D belt is not solving the belt.
+
+    The implicit tangent builder dispatches spring stiffness for four property
+    types only — ``imp_glob_k.F`` ``ITY==6`` calls ``R4KE3``/``R8KE3``/
+    ``R12KE3``/``R13KE3`` for ``IGTYP`` 4, 8, 12 and 13 — and everything else
+    falls to the ``IETY=16`` arm, which prints format 1005: ``***** WARNING :
+    SPRING ELEMENT PROP.TYPE = 23 IS NOT AVAILABLE FOR STIFFNESS MATRIX
+    BUILDING, STIFFNESS IGNORED *****``. ``/PROP/TYPE23`` is not in the list,
+    so the belt contributes NOTHING to the matrix.
+
+    MEASURED on a 1D-belt implicit twin: the assembled matrix collapses from
+    SYMBOLIC ND=18 NZ=27 to FINAL ND=6 NZ=3 — only the synthesized probe rigid
+    body survives — so the run converges on mass and the probe, not on the
+    webbing. The explicit route is unaffected; this is an implicit-only hole in
+    the engine, not something the converted deck can state its way out of.
+    """
+    if not state.is_implicit or not emitted:
+        return
+    state.warn(
+        f"*ELEMENT_SEATBELT: this deck is IMPLICIT and carries {len(emitted)} "
+        "1D belt /SPRING(s) on /PROP/TYPE23, which the implicit engine gives "
+        "NO tangent stiffness: imp_glob_k.F builds spring stiffness for "
+        "property types 4, 8, 12 and 13 only and answers '***** WARNING : "
+        "SPRING ELEMENT PROP.TYPE = 23 IS NOT AVAILABLE FOR STIFFNESS MATRIX "
+        "BUILDING, STIFFNESS IGNORED *****' for the rest. The belt's MASS and "
+        "the devices' kinematics still act, and the explicit route is "
+        "unaffected, but an implicit run of this deck is NOT solving the belt "
+        "— MEASURED, the assembled matrix dropped from ND=18 NZ=27 to ND=6 "
+        "NZ=3 on a 1D-belt implicit twin. Run the belt explicitly, or replace "
+        "it with a stiffness the implicit solver does build.")
 
 
 def _warn_retractor_backlink(state: ConversionState,

@@ -3245,14 +3245,23 @@ compression reduction factor, and **the direction is the opposite of
 dyna2rad's**: `RCOMP` *multiplies* the compressive stress
 (`law119_membrane.F:190-191`), so eliminating compression is a *small* `RE`,
 while `convertmats.cxx:11047` writes `RE = (CSE==0) ? 1.0 : 0.01` and gets both
-directions wrong. **Which CSE VALUE eliminates depends on `FORM`**: on
-`FORM = 0` — the default, and what every R8-era deck writes — `CSE = 0`
-eliminates and `CSE = 2` asks LS-DYNA to decide; for non-zero `FORM` the table
-is INVERTED and `CSE = 2` is no longer valid ("available since r137465/dev for
-non-zero FORM … The old recommended option of CSE = 2 … still works if and only
-if FORM = 0. For non-zero FORM: EQ.0.0: don't eliminate …; EQ.1.0:
-eliminate …", Vol II *MAT_SEATBELT). k2rad branches on `FORM` and names the
-reading it used; dyna2rad has no `FORM` branch at all. `ECOAT`/`TCOAT` are
+directions wrong. **`CSE` only says anything when `FORM` is non-zero.** Vol II
+R17 *MAT_SEATBELT: "Compressive stress elimination option **for nonzero FORM**
+… EQ.0.0: Don't eliminate …; EQ.1.0: Eliminate … Note that **for FORM = 0, the
+solver automatically determines** whether or not to eliminate the compressive
+stresses", with Remark 6 dating it ("From versions R8 through R11, eliminating
+the compressive stresses was **always determined by the solver**. As of R12,
+for nonzero FORM, CSE … was reused"). The shipped cfg's `CSE` radio list is
+**byte-identical in `Keyword971_R8.0` and `_R12.0`** — a pre-R8 GUI table, not
+solver behaviour, and reading it as live writes a full-stiffness membrane on any
+`FORM = 0` deck that states `CSE = 1`. So k2rad maps `CSE` only for non-zero
+`FORM`; on `FORM = 0` every material takes the eliminate side, `RE = 0.01`,
+under a warning that says this is a CHOICE rather than a copy. dyna2rad has no
+`FORM` branch at all. **`RE`'s scope is narrow either way**: it scales the shell
+membrane only, while the starter's own 2D→1D strand chain carries the raw curve
+slope in compression through `iecrou = 12` (`redef_seatbelt.F90:335`), so the
+flag moves ~1 % of the belt's compressive response — MEASURED 801 N of membrane
+against 79998 N of strand at `eps = -0.02`. `ECOAT`/`TCOAT` are
 `FORM = -14` fields in LS-DYNA and have no such gate on `/MAT/LAW119`, so a
 coating stated outside that formulation is written through with the stiffness
 difference named. A loading/unloading pair that never **crosses** at a positive
