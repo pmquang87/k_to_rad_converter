@@ -34,6 +34,9 @@ __all__ = [
     "_discrete_beam_claim_conflicts",
     "_discrete_beam_pids",
     "_discrete_part_ids",
+    "_muscle_beam_pids",
+    "_muscle_discrete_pids",
+    "_muscle_part_ids",
     "_spotweld_beam_pids",
     "_emit_surf_seg",
     "_emit_line_seg",
@@ -660,13 +663,72 @@ def _discrete_part_ids(state: ConversionState) -> Set[int]:
                    | set(state.mat_spring_elastoplastic)
                    | set(state.mat_damper_nl_viscous)
                    | set(state.mat_spring_general_nl)
-                   | set(state.mat_spring_inelastic))
+                   | set(state.mat_spring_inelastic)
+                   # *MAT_SPRING_MUSCLE (S15) is a discrete-spring material
+                   # too. It is claimed HERE so an element-free S15 part is
+                   # skipped by the ordinary /PART emission like every other
+                   # spring part; which of the two spring writers then emits it
+                   # is decided by _muscle_discrete_pids.
+                   | set(state.mat_spring_muscle))
     pids = {e.pid for e in state.discrete_elems}
     for pid, p in state.parts.items():
         secid = p.secid if p.secid > 0 else pid
         if secid in state.sec_discrete or p.mid in spring_mids:
             pids.add(pid)
     return pids
+
+
+def _muscle_beam_pids(state: ConversionState) -> Set[int]:
+    """Part ids handled by the *MAT_MUSCLE (156) → /PROP/TYPE46 path.
+
+    LS-DYNA states MAT_156 for TRUSS elements (Vol II R17 p.2-1071, *"This is
+    Material Type 156 for truss elements"*), i.e. a ``*SECTION_BEAM`` with
+    ELFORM 3, and Radioss has no truss element at all — the closest faithful
+    target is the muscle SPRING property ``/PROP/TYPE46``, whose force law
+    ``FX = Force·f1(t)·f2(ΔL)·f3(ΔL̇) + Scale_F·f4(ΔL) + Damp·VX``
+    (``ruser46.F:207-211``) is term for term the ``sigma1 + sigma2 + sigma3``
+    of the LS-DYNA card. So these parts get their /PART + /PROP + /SPRING from
+    ``_make_muscle_springs`` and are skipped WHOLE by the ordinary /PART +
+    /BEAM + /PROP/BEAM emission.
+
+    Same claim shape as ``_discrete_beam_pids``: parts carrying shell, solid,
+    thick-shell or SPH elements are excluded (a muscle material on a continuum
+    part is a modelling error the converter must not silently reinterpret as a
+    spring), and so are parts the *ELEMENT_DISCRETE path already owns — BOTH
+    writers emit ``/PART/<pid>`` under the source pid, so a doubly claimed part
+    would be written twice and the starter would answer ERROR 79.
+    """
+    if not state.mat_muscle:
+        return set()
+    continuum_pids = ({e.pid for e in state.shell_elems}
+                      | {e.pid for e in state.solid_elems}
+                      | {e.pid for e in state.tshell_elems}
+                      | {c.pid for c in state.sph_elems})
+    discrete_pids = _discrete_part_ids(state)
+    return {pid for pid, p in state.parts.items()
+            if p.mid in state.mat_muscle
+            and pid not in continuum_pids and pid not in discrete_pids}
+
+
+def _muscle_discrete_pids(state: ConversionState) -> Set[int]:
+    """Part ids handled by the *MAT_SPRING_MUSCLE (S15) → /PROP/TYPE46 path.
+
+    These are ORDINARY discrete-spring parts by claim (``_discrete_part_ids``
+    already owns them, so ``_make_parts_and_elements`` skips them); what this
+    set does is tell ``_make_discrete_springs`` to leave them to
+    ``_make_muscle_springs`` instead of writing the inert /PROP/TYPE4 it writes
+    for an unconvertible spring material. Without the split BOTH writers would
+    emit ``/PART/<pid>`` — starter ERROR 79.
+    """
+    if not state.mat_spring_muscle:
+        return set()
+    return {pid for pid, p in state.parts.items()
+            if p.mid in state.mat_spring_muscle}
+
+
+def _muscle_part_ids(state: ConversionState) -> Set[int]:
+    """Every part the /PROP/TYPE46 muscle writer owns, from either side."""
+    return _muscle_beam_pids(state) | _muscle_discrete_pids(state)
 
 
 def _discrete_beam_mids(state: ConversionState) -> Set[int]:
@@ -720,7 +782,9 @@ def _discrete_beam_pids(state: ConversionState) -> Set[int]:
                       | {e.pid for e in state.solid_elems}
                       | {e.pid for e in state.tshell_elems}
                       | {c.pid for c in state.sph_elems})
-    discrete_pids = _discrete_part_ids(state)
+    # ... and the *MAT_MUSCLE parts, for the same ERROR-79 reason: they get a
+    # /PART + /PROP/TYPE46 from _make_muscle_springs.
+    discrete_pids = _discrete_part_ids(state) | _muscle_beam_pids(state)
     pids: Set[int] = set()
     for pid, p in state.parts.items():
         if pid in continuum_pids or pid in discrete_pids:

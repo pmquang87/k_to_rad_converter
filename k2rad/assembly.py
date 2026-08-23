@@ -2194,6 +2194,49 @@ def _off_mat_shape_memory(b: Block, offsets: Dict[str, int], warn) -> None:
             b.raw[i3] = new
 
 
+def _off_mat_muscle(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_MUSCLE (*MAT_156): MID → IDMOFF; ``ALM SFR SVS SVR SSP`` (card 2
+    fields 1-5) are ``SCALAR_OR_FUNCTION`` — a NEGATIVE value is a curve (or,
+    for SSP, a table) id, a positive one is physics. Only the negative form is
+    rewritten, sign preserved."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    i2 = toff + 1
+    if i2 >= len(b.raw) or not b.raw[i2].strip():
+        return
+    foff = offsets.get("f", 0)
+    for i in (0, 1, 2, 3, 4):
+        new = _rewrite_neg_ref(b.raw[i2], i, foff)
+        if new is not None:
+            b.raw[i2] = new
+
+
+def _off_mat_spring_muscle(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_SPRING_MUSCLE (*MAT_S15): MID → IDMOFF; ``SV A TL TV`` (card 1
+    fields 4/5/7/8) and ``FPE`` (card 2 field 1) are ``SCALAR_OR_OBJECT``
+    ``VALUE(CURVE)`` cells — negative = curve id → IDFOFF, sign preserved."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (3, 4, 6, 7):
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw) and b.raw[i2].strip():
+        new = _rewrite_neg_ref(b.raw[i2], 0, foff)
+        if new is not None:
+            b.raw[i2] = new
+
+
 def _off_mat_169(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_ARUP_ADHESIVE (169): MID → IDMOFF; TENMAX/GCTEN/SHRMAX/GCSHR
     (card 1 fields 5-8), SHRP (card 2 field 3) and SDFAC/SGFAC (card 5 fields
@@ -3552,13 +3595,20 @@ del _kw
 #
 # Buckets, from Vol I R17 pp.2979-2980 (*INCLUDE_TRANSFORM Card 2b.1) and the
 # cfg's own HCDI types (include_transform.cfg:64-78):
-#   *MAT_030 MID                    MATS   -> IDMOFF "m"
-#   its SIG_* (negative), LCSS,
-#   LCSSC, LCID_AS, LCID_SA         FUNCT  -> IDFOFF "f"
+#   *MAT_030 / *MAT_156 / *MAT_S15 MID   MATS   -> IDMOFF "m"
+#   *MAT_030 SIG_* (negative), LCSS,
+#     LCSSC, LCID_AS, LCID_SA            FUNCT  -> IDFOFF "f"
+#   *MAT_156 ALM SFR SVS SVR SSP (neg)   FUNCT  -> IDFOFF "f"
+#   *MAT_S15 SV A TL TV FPE (negative)   CURVE  -> IDFOFF "f" (same HCDI type
+#                                        HCDI_OBJ_TYPE_CURVES, mv_type.cpp:93)
 _RARE_MATERIAL_OFFSETS = {
-    "MAT_SHAPE_MEMORY": _off_mat_shape_memory,
-    "MAT_030":          _off_mat_shape_memory,
-    "MAT_30":           _off_mat_shape_memory,
+    "MAT_SHAPE_MEMORY":  _off_mat_shape_memory,
+    "MAT_030":           _off_mat_shape_memory,
+    "MAT_30":            _off_mat_shape_memory,
+    "MAT_MUSCLE":        _off_mat_muscle,
+    "MAT_156":           _off_mat_muscle,
+    "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,
+    "MAT_S15":           _off_mat_spring_muscle,
 }
 for _kw in RARE_MATERIAL_KEYWORDS:
     _OFFSET_SPECS[_kw] = _RARE_MATERIAL_OFFSETS[_kw]

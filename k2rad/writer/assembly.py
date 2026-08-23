@@ -26,6 +26,7 @@ from .materials import (
     _resolve_mat_power_law,
     _resolve_mat_shape_memory,
 )
+from .muscle import _make_muscle_springs
 from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
@@ -1674,6 +1675,11 @@ def _starter_section_registry():
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
         ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
         ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
+        # *MAT_MUSCLE truss parts and *MAT_SPRING_MUSCLE discrete parts:
+        # /PART + /PROP/TYPE46 (SPR_MUSCLE) + /SPRING, plus the synthesized
+        # /FUNCTs the four function slots need (written INLINE here, because
+        # the single /FUNCT emitter runs at the "functions" step far above).
+        ("muscle_springs",    lambda c: _make_muscle_springs(c.state)),
         ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         # ELFORM=6 discrete beams: their /PART + spring property come from here,

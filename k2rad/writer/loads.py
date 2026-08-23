@@ -11,7 +11,8 @@ from ..state import (
 )
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
-    _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i, _part_node_sets,
+    _emit_grpart_part, _emit_id_group, _f, _fmt_eid_list, _i,
+    _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
     _spotweld_beam_pids, _vcross, _vnorm, _vsub,
 )
 from .mesh import _emit_skew_fix, _emit_skew_mov, _ortho_skew_axes
@@ -939,7 +940,14 @@ def _make_discrete_springs(state: ConversionState) -> List[str]:
     for e in state.discrete_elems:
         by_pid[e.pid].append(e)
 
+    # *MAT_SPRING_MUSCLE (S15) parts belong to _make_muscle_springs, which
+    # writes their /PART + /PROP/TYPE46 + /SPRING. BOTH writers would emit
+    # /PART/<pid> under the source pid, so a part claimed by both is ERROR 79.
+    muscle_pids = _muscle_discrete_pids(state)
+
     for pid in sorted(by_pid):
+        if pid in muscle_pids:
+            continue
         elems = by_pid[pid]
         part = state.parts.get(pid)
         if part is None:
@@ -1427,8 +1435,11 @@ def _spring_eid_families(state: ConversionState) -> List[Tuple[str, Set[int]]]:
     """
     weld_pids = _spotweld_beam_pids(state)
     dbeam_pids = _discrete_beam_pids(state)
+    muscle_pids = _muscle_beam_pids(state)
     return [
         ("*ELEMENT_DISCRETE", {d.eid for d in state.discrete_elems}),
+        ("*ELEMENT_BEAM on a *MAT_MUSCLE truss part",
+         {b.eid for b in state.beam_elems if b.pid in muscle_pids}),
         ("*ELEMENT_BEAM on a *MAT_SPOTWELD part",
          {b.eid for b in state.beam_elems if b.pid in weld_pids}),
         ("*ELEMENT_BEAM on a *SECTION_BEAM ELFORM=6 discrete-beam part",

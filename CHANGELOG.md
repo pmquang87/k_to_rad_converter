@@ -11,11 +11,14 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
-- **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`.**
-  A keyword that landed in `skipped_keywords` before, on a conversion whose only
-  other sign of trouble was one "part references a material no `/MAT` defines"
-  line — the superelastic alloy simply had no constitutive law and the deck did
-  not start.
+- **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`,
+  and `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
+  `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`.** Keywords that landed in
+  `skipped_keywords` before, on a conversion whose only other sign of trouble
+  was one "part references a material no `/MAT` defines" line — the superelastic
+  alloy simply had no constitutive law, and the muscle either kept full bending
+  stiffness on a `/PROP/BEAM` it should never have had or became an inert
+  zero-stiffness spring.
 
   1. **`alpha = sqrt(2/3)·ALPHA`, and the factor is MEASURED, not read off the
      symbols.** `sigeps71.F:171/245/277` (`SQDT = SQRT(TWO/THREE)`,
@@ -66,6 +69,72 @@ Prior history (before this changelog was introduced) is summarized in the
      into the next keyword (#109/#117/#119). Its two ids, `LCSS`, `LCSSC` and
      `IDPP` are named-dropped; `LCID_AS` additionally says that the emitted
      plateau is the card-1 constant LS-DYNA would have overwritten.
+
+  6. **A zero function id is not "no function" — it silently kills the whole
+     active muscle force.** `ruser46.F:207` calls `GET_U_FUNC(IFUNCi, …)` with
+     no `id == 0` guard; `GET_U_FUNC(0)` reads `NPF(0)` (`ufunc.F:183`,
+     `eng_callback_c.c:176` does raw pointer arithmetic `sav_buf + decalage - 1`)
+     and returns 0. Measured on four separate decks — `f1 = 0`, `f2 = 0`,
+     `f3 = 0`, and `f2 = f3 = 0` — every one gives **exactly zero active force**
+     at 0 starter errors and 0 warnings, with only the `f4` passive branch and
+     the `Damp` term surviving. All four slots are therefore always written, with
+     a synthesized constant where the LS-DYNA card leaves the factor
+     unspecified.
+
+  7. **`Force` never lands on dyna2rad's `*MAT_MUSCLE` path**, so every muscle it
+     converts has an identically-zero ACTIVE force. `radProp.SetValue(…,
+     sdiIdentifier("Force"), …)` at `convertprops.cxx:2617` fails to resolve
+     while the identical call with `"Scale_F"` one line later succeeds: measured
+     `MAXIMUM FORCE = 0.0` for `PIS = 0.3` and for `PIS = 4.0`, against
+     `FORCE SCALE FACTOR = 7.5` / `100.0` on the same decks. A hand-written
+     `/PROP/SPR_MUSCLE` with the same value in card-1 column 4 echoes
+     `MAXIMUM FORCE = 7.5`, so the starter reads `NFORCE` fine.
+     **Validated end to end**: a `*MAT_156` truss (`PIS = 0.3`, `A = 25`,
+     `SNO = 1.25`, an `SVS` curve peaking 0.8 at `λ = 1.25`) pulling a free mass
+     gives `px/t = 5.99999957 N` against the hand-computed
+     `PIS·A·f_SVS(SNO) = 6.0`; an S15 muscle (`FMAX = 1000`, all factors 1)
+     gives `px/t = −1000.0000 N` and `x = ½(F/m)t²` to 7 digits.
+
+  8. **`Vel_max ← SRM`, `Damp ← DMP` and `Mass ← RO·A` are dimensionally wrong,
+     and `SNO`/`SFR`/`SV` are dropped.** `SRM` is a strain rate and `DMP`
+     multiplies a strain rate (`mat_156.cfg:32/36`), while `/PROP/TYPE46` wants a
+     velocity and a force-per-velocity; `SNO` sets the muscle's reference length
+     `l_orig = l0/SNO` *and* its lineic mass. Carried through instead as
+     `Vel_max = SRM·L0/SNO`, `Scale_v = SFR/SNO` (so the Radioss rate abscissa
+     `(L/L0)·v/(Vel_max·Scale_v)` **is** LS-DYNA's `ε̄̇`),
+     `Mass = RHO·A/SNO` with `Idens = 0`, and `Damp = DMP·A·SNO²/L0` — the one
+     linearised value, matched at the element's initial configuration because
+     the LS-DYNA damper is quadratic in the stretch and Radioss offers `Damp·v`
+     only. `L0` is the part's reference element length; when the part's muscle
+     elements are not all the same length the mean is used **and the spread is
+     reported**.
+
+  9. **`*MAT_S15`'s `FPE < 0` curve gets the transform its sibling `TL` gets.**
+     dyna2rad hands the raw curve id to `fct_id4` with neither the `(L−1)·L0`
+     abscissa nor a scale (`convertprops.cxx:3308-3316`, measured
+     `fct_id4 = 5`, `Scale_F = 1.0`) while its `TL < 0` path *does* transform.
+     Here both branches carry `X = L·L0 − l_init` and share `Scale_F = FMAX`,
+     which is what `SDMAT15.cfg:38` states the curve is —
+     *"Normalized force, as a function of length for parallel elastic element"*.
+
+ 10. **Guards dyna2rad does not have**: `SSM = 0` divides by zero in the
+     `*MAT_156` exponential (`:2859`), `L0 = 0` in the S15 one (`:3286`), and
+     `LMAX = 0` silently produces no `fct_id4` at all (`:3253`); an `SSP < 0`
+     **table** id (the 2-D `h(ε̄̇, λ)` form) is handed to `fct_id4` as if it were
+     a 1-D `/FUNCT`. Each is warn-dropped by name with a constant-zero passive
+     function in its place.
+
+ 11. **Per-element muscle force cannot be output.** `/TH/SPRING` on a TYPE46
+     element writes 15 channels of **exact zero** — force, deflection, length
+     and even the OFF flag — in every load case, while a `/PROP/TYPE4` spring in
+     the SAME `/TH/SPRING` group of the SAME deck reports `OFF = 1` and
+     `LENGTH = 100` correctly. The force is real (`rforc3.F:1419-1425` writes
+     `GBUF%FOR`, and the global `SPRING ENERGY` channel is right), only the
+     per-element history is dead. Muscle spring ids are therefore kept out of the
+     `*DATABASE_DEFORC` pool (`state.muscle_spring_eids`) and the warning names
+     `/TH/NODE REACX` and `SPRING ENERGY` as the working alternatives — the #122
+     rule: an emitted channel that is legal, accepted and all zeros is worse than
+     an honest warn-and-drop.
 
 - **The PRELOAD / initial-state batch:
   `*INITIAL_STRAIN_SHELL` (+ `_SET`) → `/INISHE/STRA_F/GLOB` and

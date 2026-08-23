@@ -84,7 +84,7 @@ from .state import (
     SeatbeltElem, SectionSeatbelt, MatSeatbelt, SeatbeltSlipring,
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
-    MatShapeMemory,
+    MatShapeMemory, MatMuscle, MatSpringMuscle,
 )
 
 
@@ -9078,6 +9078,126 @@ def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
         epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
 
 
+def _scalar_or_curve(f: List[str], i: int, default: float):
+    """Read an LS-DYNA ``SCALAR_OR_FUNCTION`` / ``SCALAR_OR_OBJECT`` cell.
+
+    ``cfgio/MODEL_IO/meci_data_reader.cpp:6845-6848`` states the rule verbatim:
+    *"this is Dyna specific: if the value is negative, its abs value is the ID
+    of an object"*. Returns ``(scalar, curve_id)`` — exactly one of the two is
+    meaningful, and a BLANK cell takes *default* rather than 0 (blank is not
+    always "no factor": SFR/SVS/SVR/TL/TV default to 1.0).
+    """
+    if len(f) <= i or not f[i].strip():
+        return default, 0
+    v = to_float(f[i])
+    if v < 0.0:
+        return default, int(abs(v))
+    return v, 0
+
+
+def handle_mat_muscle(block: Block, state: ConversionState) -> None:
+    """*MAT_MUSCLE (*MAT_156) → /PROP/TYPE46 (SPR_MUSCLE) + /SPRING.
+
+    Cards (Vol II R17 pp.2-1071..2-1074; Keyword971_R6.1/MAT/mat_156.cfg:
+    ``MID RO SNO SRM PIS SSM CER DMP`` / ``ALM SFR SVS SVR SSP``, the last five
+    all ``SCALAR_OR_FUNCTION``):
+
+      sigma = PIS*a(t)*f(l/l_orig)*g(eps_bar_dot) + PIS*h(l/l_orig)
+              + DMP*(l/l_orig)*eps_dot
+      a = ALM, f = SVS, g = SVR, h = SSP,
+      l_orig = l0/SNO, eps_bar_dot = (l/l_orig)*eps_dot/(SFR*SRM)
+
+    *"This is Material Type 156 for truss elements"* (p.2-1071), i.e. a
+    *SECTION_BEAM with ELFORM 3. No /MAT is written at all — the whole law
+    lives in the /PROP/TYPE46 of the part, exactly like the *MAT_Sxx spring
+    family, so which parts it claims is decided by the PROPERTY those parts
+    carry (writer/common.py::_muscle_beam_pids).
+
+    Fixed-width w=10: RO fills its whole field and fuses with MID.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_MUSCLE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_MUSCLE '{title}': MID parsed as {mid} — unreadable "
+                   "(shifted or fused fields?); material skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    # SNO is the INITIAL STRETCH RATIO l0/l_orig (cfg: "Initial stretch
+    # ratio"); a blank one is 1.0, not 0 — a zero would divide by zero in
+    # l_orig = l0/SNO.
+    sno = _ffield(f1, 2, 1.0) or 1.0
+    srm = to_float(f1[3]) if len(f1) > 3 else 0.0
+    pis = to_float(f1[4]) if len(f1) > 4 else 0.0
+    ssm = to_float(f1[5]) if len(f1) > 5 else 0.0
+    cer = to_float(f1[6]) if len(f1) > 6 else 0.0
+    dmp = to_float(f1[7]) if len(f1) > 7 else 0.0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=5, w=10)
+    alm, alm_l = _scalar_or_curve(f2, 0, 0.0)
+    # SFR/SVS/SVR: "GE.0.0: Constant value of 1.0 is used" — the SCALAR itSELF
+    # is discarded (mat_156.cfg:45/49/53 name the float cell exactly that), so
+    # the constant branch is always 1.0 whatever number the deck writes.
+    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0)
+    svs, svs_l = _scalar_or_curve(f2, 2, 1.0)
+    svr, svr_l = _scalar_or_curve(f2, 3, 1.0)
+    ssp, ssp_l = _scalar_or_curve(f2, 4, 0.0)
+    state.mat_muscle[mid] = MatMuscle(
+        mid, title, rho, sno, srm, pis, ssm, cer, dmp,
+        alm, alm_l, sfr, sfr_l, svs, svs_l, svr, svr_l, ssp, ssp_l)
+
+
+def handle_mat_spring_muscle(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_MUSCLE (*MAT_S15) → /PROP/TYPE46 (SPR_MUSCLE) + /SPRING.
+
+    Cards (Vol II R17 pp.2-2095..2-2099; Keyword971_R13.0/MAT/SDMAT15.cfg:
+    ``MID L0 VMAX SV A FMAX TL TV`` / ``FPE LMAX KSH``, with SV/A/TL/TV/FPE all
+    ``SCALAR_OR_OBJECT``):
+
+      F_M = F_PE + a(t)*F_max*f_TL(L)*f_TV(V),
+      L = L_M/L0,  V = V_M/(V_max*S_v)
+
+    A *SECTION_DISCRETE material, so it lands on the discrete-spring side of
+    the same /PROP/TYPE46 writer. No /MAT is written.
+
+    Blank defaults are NOT zero (p.2-2096): L0 1.0, SV 1.0, TL 1.0, TV 1.0,
+    FPE 0.0 — reading them as 0 would give a zero-length reference, a zero
+    velocity scale and a muscle that produces nothing.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SPRING_MUSCLE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_SPRING_MUSCLE '{title}': MID parsed as {mid} — "
+                   "unreadable (shifted or fused fields?); material skipped.")
+        return
+    l0 = _ffield(f1, 1, 1.0) or 1.0
+    vmax = to_float(f1[2]) if len(f1) > 2 else 0.0
+    sv, sv_l = _scalar_or_curve(f1, 3, 1.0)
+    a, a_l = _scalar_or_curve(f1, 4, 0.0)
+    fmax = to_float(f1[5]) if len(f1) > 5 else 0.0
+    tl, tl_l = _scalar_or_curve(f1, 6, 1.0)
+    tv, tv_l = _scalar_or_curve(f1, 7, 1.0)
+
+    f2 = _card(raw, offset + 1, fixed=True, n=3, w=10)
+    fpe, fpe_l = _scalar_or_curve(f2, 0, 0.0)
+    lmax = to_float(f2[1]) if len(f2) > 1 else 0.0
+    ksh = to_float(f2[2]) if len(f2) > 2 else 0.0
+    state.mat_spring_muscle[mid] = MatSpringMuscle(
+        mid, title, l0, vmax, sv, sv_l, a, a_l, fmax,
+        tl, tl_l, tv, tv_l, fpe, fpe_l, lmax, ksh)
+
+
 def handle_mat_tabulated_johnson_cook(block: Block,
                                       state: ConversionState) -> None:
     """*MAT_TABULATED_JOHNSON_COOK (224) → /MAT/LAW109 [+ /FAIL/TAB1].
@@ -14574,9 +14694,17 @@ del _kw, _h
 #: material carries both the zero-padded and the unpadded alias, the convention
 #: the rest of this table follows.
 RARE_MATERIAL_KEYWORDS = {
-    "MAT_SHAPE_MEMORY": handle_mat_shape_memory,
-    "MAT_030":          handle_mat_shape_memory,
-    "MAT_30":           handle_mat_shape_memory,
+    "MAT_SHAPE_MEMORY":   handle_mat_shape_memory,
+    "MAT_030":            handle_mat_shape_memory,
+    "MAT_30":             handle_mat_shape_memory,
+    "MAT_MUSCLE":         handle_mat_muscle,
+    "MAT_156":            handle_mat_muscle,
+    # *MAT_SPRING_MUSCLE's numeric alias is *MAT_S15 (Vol II R17 p.2-2095
+    # headers the card "*MAT_SPRING_MUSCLE / *MAT_S15"); the Sxx spelling is
+    # the only numeric one the manual gives for the discrete-spring family,
+    # like the *MAT_S01..S08 rows above.
+    "MAT_SPRING_MUSCLE":  handle_mat_spring_muscle,
+    "MAT_S15":            handle_mat_spring_muscle,
 }
 for _kw, _h in RARE_MATERIAL_KEYWORDS.items():
     HANDLERS[_kw] = _h

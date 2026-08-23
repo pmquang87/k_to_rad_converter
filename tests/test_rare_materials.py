@@ -82,9 +82,43 @@ def _headers(starter: str, prefix: str):
     return [ln for ln in starter.splitlines() if ln.startswith(prefix)]
 
 
+def _row16(*vals) -> str:
+    """LS-DYNA *DEFINE_CURVE point row (2 x 16-char fields)."""
+    return "".join(f"{v:>16}" for v in vals)
+
+
 def _fields(row: str, w: int = 20):
     """Slice a fixed-width Radioss card row into stripped w-char cells."""
     return [row[i:i + w].strip() for i in range(0, len(row.rstrip()), w)]
+
+
+def _prop_id(starter: str) -> int:
+    """The id of the (single) /PROP/TYPE46 in a starter deck."""
+    for ln in starter.splitlines():
+        if ln.startswith("/PROP/TYPE46/"):
+            return int(ln.rsplit("/", 1)[1])
+    raise AssertionError("no /PROP/TYPE46 in the deck")
+
+
+def _funct_named(starter: str, title: str) -> int:
+    """The id of the /FUNCT whose title line is exactly *title*."""
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("/FUNCT/") and i + 1 < len(lines) \
+                and lines[i + 1].strip() == title:
+            return int(ln.rsplit("/", 1)[1])
+    raise AssertionError(f"no /FUNCT titled {title!r}")
+
+
+def _funct_points(starter: str, fid: int):
+    """The (x, y) pairs of /FUNCT/<fid>."""
+    body = _block(starter, f"/FUNCT/{fid}")
+    pts = []
+    for ln in body[1:]:
+        if ln.startswith("#"):
+            continue
+        pts.append((float(ln[0:20]), float(ln[20:40])))
+    return pts
 
 
 # ── Shared deck fragments ────────────────────────────────────────────────────
@@ -350,6 +384,367 @@ class ShapeMemoryGuardTests(unittest.TestCase):
         r, _s = _convert(deck)
         w = " ".join(r.warnings)
         self.assertIn("LAW71", w)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# *MAT_MUSCLE (156) and *MAT_SPRING_MUSCLE (S15) → /PROP/TYPE46
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: One 50-long truss on part 1, plus an orientation node the truss does not use.
+#: Every muscle constant a DIFFERENT number so a slot swap is detectable:
+#: RO 1e-9, SNO 1.25, SRM 10, PIS 0.3, SSM 0.15, CER 5, DMP 2, A 25.
+#:   Mass    = RO*A/SNO        = 1e-9*25/1.25   = 2e-8
+#:   Vel_max = SRM*L0/SNO      = 10*50/1.25     = 400
+#:   Force   = PIS*A           = 0.3*25         = 7.5
+#:   Damp    = DMP*A*SNO^2/L0  = 2*25*1.5625/50 = 1.5625
+#:   Scale_v = SFR/SNO         = 1/1.25         = 0.8
+MUSCLE156 = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "         1             0.0             0.0             0.0\n"
+    "         2            50.0             0.0             0.0\n"
+    "         3             0.0            10.0             0.0\n"
+    "*ELEMENT_BEAM\n"
+    + "".join(f"{v:>8}" for v in (7, 1, 1, 2, 3)) + "\n"
+    "*PART\n"
+    "musclebeam\n"
+    + _row(1, 1, 1) + "\n"
+    "*SECTION_BEAM\n"
+    + _row(1, 3) + "\n"
+    + _row(25.0) + "\n"
+    "*MAT_MUSCLE\n"
+    + _row(1, "1.0000E-9", 1.25, 10.0, 0.3, 0.15, 5.0, 2.0) + "\n"
+    "{CARD2}"
+    "{EXTRA}"
+    "*CONTROL_TERMINATION\n"
+    "     0.001\n"
+    "*END\n"
+)
+
+#: One 10-long discrete spring on part 2. L0 10 = the element length, VMAX 100,
+#: SV 0.8, A 0.5, FMAX 1000, LMAX 1.5, KSH 3.
+MUSCLE_S15 = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "         1             0.0             0.0             0.0\n"
+    "         2            10.0             0.0             0.0\n"
+    "*ELEMENT_DISCRETE\n"
+    + "".join(f"{v:>8}" for v in (11, 2, 1, 2, 0)) + f"{0.0:>16}" + "\n"
+    "*PART\n"
+    "musclespring\n"
+    + _row(2, 2, 5) + "\n"
+    "*SECTION_DISCRETE\n"
+    + _row(2) + "\n"
+    "*MAT_SPRING_MUSCLE\n"
+    "{CARD1}"
+    "{CARD2}"
+    "{EXTRA}"
+    "*CONTROL_TERMINATION\n"
+    "     0.001\n"
+    "*END\n"
+)
+
+
+def _muscle156(card2="       1.0       1.0       1.0       1.0       1.0\n",
+               extra=""):
+    return MUSCLE156.replace("{CARD2}", card2).replace("{EXTRA}", extra)
+
+
+def _muscle_s15(tl=1.0, tv=1.0, fpe=1.0, l0=10.0, sv=0.8, extra=""):
+    return (MUSCLE_S15
+            .replace("{CARD1}",
+                     _row(5, l0, 100.0, sv, 0.5, 1000.0, tl, tv) + "\n")
+            .replace("{CARD2}", _row(fpe, 1.5, 3.0) + "\n")
+            .replace("{EXTRA}", extra))
+
+
+class MuscleParseTests(unittest.TestCase):
+    def test_mat_156_card_fields_land_in_their_own_slots(self):
+        state = _dispatch(_muscle156(
+            card2=_row(0.5, 1.0, -3, -4, 0.0) + "\n"))
+        m = state.mat_muscle[1]
+        self.assertAlmostEqual(m.rho, 1.0e-9)
+        self.assertAlmostEqual(m.sno, 1.25)
+        self.assertAlmostEqual(m.srm, 10.0)
+        self.assertAlmostEqual(m.pis, 0.3)
+        self.assertAlmostEqual(m.ssm, 0.15)
+        self.assertAlmostEqual(m.cer, 5.0)
+        self.assertAlmostEqual(m.dmp, 2.0)
+        self.assertAlmostEqual(m.alm, 0.5)
+        self.assertEqual(m.alm_lcid, 0)
+        # SVS/SVR negative = curve id; the scalar stays at the manual's 1.0.
+        self.assertEqual((m.svs_lcid, m.svr_lcid), (3, 4))
+        self.assertAlmostEqual(m.svs, 1.0)
+        self.assertAlmostEqual(m.svr, 1.0)
+
+    def test_mat_156_positive_scale_cells_are_the_constant_one(self):
+        # "GE.0.0: Constant value of 1.0 is used" — the number itself is
+        # DISCARDED (mat_156.cfg:45/49/53).
+        state = _dispatch(_muscle156(card2=_row(0.5, 7.0, 8.0, 9.0, 0.0) + "\n"))
+        m = state.mat_muscle[1]
+        self.assertAlmostEqual(m.sfr, 7.0)   # kept raw; the writer reads 1.0
+        self.assertEqual((m.svs_lcid, m.svr_lcid), (0, 0))
+
+    def test_mat_s15_blank_defaults_are_not_zero(self):
+        deck = ("*KEYWORD\n*MAT_SPRING_MUSCLE\n" + _row(5) + "\n"
+                + _row() + "\n*END\n")
+        m = _dispatch(deck).mat_spring_muscle[5]
+        self.assertAlmostEqual(m.l0, 1.0)
+        self.assertAlmostEqual(m.sv, 1.0)
+        self.assertAlmostEqual(m.tl, 1.0)
+        self.assertAlmostEqual(m.tv, 1.0)
+        self.assertAlmostEqual(m.fpe, 0.0)
+
+    def test_mat_s15_card_fields_land_in_their_own_slots(self):
+        state = _dispatch(_muscle_s15(tl=-5, tv=-6, fpe=0.0))
+        m = state.mat_spring_muscle[5]
+        self.assertAlmostEqual(m.l0, 10.0)
+        self.assertAlmostEqual(m.vmax, 100.0)
+        self.assertAlmostEqual(m.sv, 0.8)
+        self.assertAlmostEqual(m.a, 0.5)
+        self.assertAlmostEqual(m.fmax, 1000.0)
+        self.assertEqual((m.tl_lcid, m.tv_lcid), (5, 6))
+        self.assertAlmostEqual(m.lmax, 1.5)
+        self.assertAlmostEqual(m.ksh, 3.0)
+
+    def test_numeric_spellings_reach_the_same_handlers(self):
+        for kw, reg in (("MAT_156", "mat_muscle"),
+                        ("MAT_S15", "mat_spring_muscle")):
+            state = _dispatch("*KEYWORD\n*" + kw + "\n" + _row(9) + "\n"
+                              + _row() + "\n*END\n")
+            self.assertIn(9, getattr(state, reg), kw)
+            self.assertEqual(state.skipped_keywords, [], kw)
+
+
+class Muscle156EmitTests(unittest.TestCase):
+    def setUp(self):
+        self._r, self.starter = _convert(_muscle156())
+
+    def test_prop_type46_card_is_column_exact(self):
+        header = [ln for ln in self.starter.splitlines()
+                  if ln.startswith("/PROP/TYPE46/")]
+        self.assertEqual(len(header), 1, self.starter)
+        body = _block(self.starter, header[0])
+        self.assertEqual(body[0], "musclebeam")
+        self.assertEqual(
+            body[1],
+            "#               Mass           Stiffness             Vel_max"
+            "               Force                  Xk")
+        self.assertEqual(body[2],
+                         "        2.000000E-08                   0"
+                         "                 400                 7.5"
+                         "                   0")
+        self.assertEqual(
+            body[3],
+            "#  fct_id1   fct_id2   fct_id3   fct_id4               Idens")
+        # Idens sits in columns 51-60, NOT 41-50: ten blank columns first.
+        self.assertEqual(body[4][40:50], " " * 10)
+        self.assertEqual(int(body[4][50:60]), 0)
+        self.assertEqual(body[5], "#               Damp      Epsi")
+        self.assertEqual(body[6], "              1.5625         0")
+        self.assertEqual(
+            body[7],
+            "#            Scale_t             Scale_x             Scale_v"
+            "             Scale_F")
+        self.assertEqual(body[8],
+                         "                   0                   0"
+                         "                 0.8                 7.5")
+
+    def test_every_function_slot_is_non_zero(self):
+        # GET_U_FUNC(0) returns 0 and the whole active product collapses to
+        # zero at 0 starter errors (ruser46.F:207, measured on four decks).
+        body = _block(self.starter, "/PROP/TYPE46/"
+                      + str(_prop_id(self.starter)))
+        row = body[4]
+        for k in range(4):
+            self.assertNotEqual(int(row[k * 10:(k + 1) * 10]), 0,
+                                f"fct_id{k + 1} is 0")
+
+    def test_beam_becomes_a_spring_and_no_beam_or_prop_beam_is_written(self):
+        self.assertIn("/SPRING/1", self.starter)
+        self.assertNotIn("/BEAM/1", self.starter)
+        self.assertNotIn("/PROP/BEAM/1", self.starter)
+        rows = _data_rows(self.starter, "/SPRING/1")
+        self.assertEqual(rows, ["         7         1         2"])
+
+    def test_exactly_one_part_card(self):
+        self.assertEqual(_headers(self.starter, "/PART/1"), ["/PART/1"])
+
+    def test_element_registries_record_a_spring_never_a_beam(self):
+        # #122: state.beam_elem_ids / spring_elem_ids answer "which kind of
+        # element does the EMITTED deck hold?" — a *SET_BEAM naming a muscle
+        # element must reach /TH/SPRING, and a /TH/BEAM on it is ERROR 69.
+        from k2rad.writer import build_starter
+        state = _dispatch(_muscle156())
+        build_starter(state)
+        self.assertIn(7, state.spring_elem_ids)
+        self.assertNotIn(7, state.beam_elem_ids)
+        self.assertIn(7, state.muscle_spring_eids)
+
+    def test_no_mat_card_is_written_for_the_muscle_material(self):
+        self.assertNotIn("/MAT/LAW", self.starter)
+        part = _data_rows(self.starter, "/PART/1")
+        self.assertEqual(int(part[1][10:20]), 0)     # mat_ID 0
+
+    def test_svs_curve_abscissa_is_lambda_over_sno_minus_one(self):
+        extra = ("*DEFINE_CURVE\n" + _row(3) + "\n"
+                 + _row16(1.0, 0.0) + "\n" + _row16(1.25, 0.8) + "\n"
+                 + _row16(1.5, 0.0) + "\n")
+        _r, starter = _convert(_muscle156(
+            card2=_row(1.0, 1.0, -3, 1.0, 1.0) + "\n", extra=extra))
+        fid = _funct_named(starter, "MatL156_SVS_1")
+        pts = _funct_points(starter, fid)
+        self.assertEqual([round(x, 10) for x, _y in pts], [-0.2, 0.0, 0.2])
+        self.assertEqual([y for _x, y in pts], [0.0, 0.8, 0.0])
+
+    def test_svr_curve_is_used_verbatim(self):
+        # Vel_max*Scale_v is built so the Radioss abscissa IS eps_bar_dot.
+        extra = ("*DEFINE_CURVE\n" + _row(4) + "\n"
+                 + _row16(-1.0, 1.6) + "\n" + _row16(1.0, 0.4) + "\n")
+        _r, starter = _convert(_muscle156(
+            card2=_row(1.0, 1.0, 1.0, -4, 1.0) + "\n", extra=extra))
+        body = _block(starter, "/PROP/TYPE46/"
+                      + str(_prop_id(starter)))
+        self.assertEqual(int(body[4][20:30]), 4)
+
+    def test_ssp_exponential_matches_the_manual(self):
+        _r, starter = _convert(_muscle156(
+            card2=_row(1.0, 1.0, 1.0, 1.0, 0.0) + "\n"))
+        fid = _funct_named(starter, "MatL156_SSP_1")
+        pts = _funct_points(starter, fid)
+        self.assertEqual(len(pts), 102)
+        # eps = -1 and eps = 0 both give h = 0; the abscissa is
+        # (1+eps)/SNO - 1, so -1 -> -1 and 0 -> 1/1.25 - 1 = -0.2.
+        self.assertAlmostEqual(pts[0][0], -1.0)
+        self.assertAlmostEqual(pts[0][1], 0.0)
+        self.assertAlmostEqual(pts[1][0], -0.2)
+        self.assertAlmostEqual(pts[1][1], 0.0)
+        # eps = 1 -> h = (exp(CER/SSM) - 1)/(exp(CER) - 1), CER 5, SSM 0.15
+        want = (math.exp(5.0 / 0.15) - 1.0) / (math.exp(5.0) - 1.0)
+        self.assertAlmostEqual(pts[-1][0], 2.0 / 1.25 - 1.0)
+        self.assertAlmostEqual(pts[-1][1] / want, 1.0, places=8)
+
+    def test_ssp_positive_gives_a_constant_zero_passive_function(self):
+        _r, starter = _convert(_muscle156(
+            card2=_row(1.0, 1.0, 1.0, 1.0, 3.0) + "\n"))
+        fid = _funct_named(starter, "MatL156_SSP_1_zero")
+        self.assertEqual([y for _x, y in _funct_points(starter, fid)], [0.0, 0.0])
+
+    def test_ssp_table_is_warn_dropped_by_name(self):
+        extra = ("*DEFINE_TABLE\n" + _row(9) + "\n" + _row16(0.0) + _row(3)
+                 + "\n*DEFINE_CURVE\n" + _row(3) + "\n"
+                 + _row16(1.0, 0.0) + "\n" + _row16(1.5, 1.0) + "\n")
+        r, _s = _convert(_muscle156(
+            card2=_row(1.0, 1.0, 1.0, 1.0, -9) + "\n", extra=extra))
+        w = " ".join(r.warnings)
+        self.assertIn("SSP names TABLE 9", w)
+
+    def test_sfr_curve_is_warn_dropped_by_name(self):
+        extra = ("*DEFINE_CURVE\n" + _row(8) + "\n"
+                 + _row16(0.0, 1.0) + "\n" + _row16(1.0, 1.0) + "\n")
+        r, starter = _convert(_muscle156(
+            card2=_row(1.0, -8, 1.0, 1.0, 1.0) + "\n", extra=extra))
+        self.assertIn("SFR is stated as curve 8", " ".join(r.warnings))
+        # Scale_v falls back to 1/SNO.
+        body = _block(starter, "/PROP/TYPE46/" + str(_prop_id(starter)))
+        self.assertAlmostEqual(float(_fields(body[8])[2]), 0.8)
+
+    def test_missing_area_skips_the_part_and_says_why(self):
+        deck = _muscle156().replace(_row(25.0) + "\n", _row(0.0) + "\n")
+        r, starter = _convert(deck)
+        self.assertNotIn("/PROP/TYPE46", starter)
+        self.assertIn("states no cross-section AREA", " ".join(r.warnings))
+
+
+class MuscleS15EmitTests(unittest.TestCase):
+    def setUp(self):
+        self._r, self.starter = _convert(_muscle_s15(fpe=0.0))
+
+    def test_prop_type46_card_is_column_exact(self):
+        body = _block(self.starter,
+                      "/PROP/TYPE46/" + str(_prop_id(self.starter)))
+        self.assertEqual(body[0], "musclespring")
+        self.assertEqual(body[2],
+                         "                   0                   0"
+                         "                 100                1000"
+                         "                   0")
+        self.assertEqual(body[6], "                   0         1")   # Damp, Epsi
+        self.assertEqual(body[8],
+                         "                   0                   0"
+                         "                   0                1000")
+
+    def test_no_mass_is_invented(self):
+        body = _block(self.starter,
+                      "/PROP/TYPE46/" + str(_prop_id(self.starter)))
+        self.assertEqual(_fields(body[2])[0], "0")
+        self.assertIn("carries NO MASS", " ".join(self._r.warnings))
+
+    def test_tl_abscissa_is_length_ratio_times_l0_minus_the_element_length(self):
+        extra = ("*DEFINE_CURVE\n" + _row(5) + "\n"
+                 + _row16(0.5, 0.0) + "\n" + _row16(1.0, 1.0) + "\n"
+                 + _row16(1.5, 0.3) + "\n")
+        _r, starter = _convert(_muscle_s15(tl=-5, fpe=1.0, extra=extra))
+        pts = _funct_points(starter, _funct_named(starter, "MatS15_TL_5"))
+        self.assertEqual([round(x, 10) for x, _y in pts], [-5.0, 0.0, 5.0])
+        self.assertEqual([y for _x, y in pts], [0.0, 1.0, 0.3])
+
+    def test_tv_abscissa_is_denormalised_by_vmax_times_sv(self):
+        extra = ("*DEFINE_CURVE\n" + _row(6) + "\n"
+                 + _row16(-1.0, 1.8) + "\n" + _row16(0.0, 1.0) + "\n"
+                 + _row16(1.0, 0.5) + "\n")
+        _r, starter = _convert(_muscle_s15(tv=-6, fpe=1.0, extra=extra))
+        pts = _funct_points(starter, _funct_named(starter, "MatS15_TV_5"))
+        # VMAX * SV = 100 * 0.8 = 80
+        self.assertEqual([round(x, 10) for x, _y in pts], [-80.0, 0.0, 80.0])
+
+    def test_sv_curve_is_warn_dropped_by_name(self):
+        extra = ("*DEFINE_CURVE\n" + _row(7) + "\n"
+                 + _row16(0.0, 1.0) + "\n" + _row16(1.0, 1.0) + "\n"
+                 + "*DEFINE_CURVE\n" + _row(6) + "\n"
+                 + _row16(-1.0, 1.8) + "\n" + _row16(1.0, 0.5) + "\n")
+        r, starter = _convert(_muscle_s15(tv=-6, fpe=1.0, sv=-7,
+                                          extra=extra))
+        self.assertIn("SV is stated as curve 7", " ".join(r.warnings))
+        pts = _funct_points(starter, _funct_named(starter, "MatS15_TV_5"))
+        self.assertEqual([round(x, 10) for x, _y in pts], [-100.0, 100.0])
+
+    def test_fpe_exponential_matches_the_manual(self):
+        pts = _funct_points(self.starter,
+                            _funct_named(self.starter, "MatS15_FPE_5"))
+        self.assertEqual(len(pts), 102)
+        # abscissa = (1+u)*L0 - l_init = u*10  (L0 = the element length = 10)
+        self.assertAlmostEqual(pts[0][0], -10.0)
+        self.assertAlmostEqual(pts[-1][0], 10.0)
+        want = (math.exp(3.0 / 1.5) - 1.0) / (math.exp(3.0) - 1.0)
+        self.assertAlmostEqual(pts[-1][1], want)
+        self.assertEqual(pts[1][1], 0.0)          # u = 0 -> f_PE = 0
+
+    def test_discrete_writer_does_not_also_claim_the_part(self):
+        self.assertEqual(_headers(self.starter, "/PART/2"), ["/PART/2"])
+        self.assertNotIn("/PROP/TYPE4/", self.starter)
+        rows = _data_rows(self.starter, "/SPRING/2")
+        self.assertEqual(rows, ["        11         1         2"])
+
+    def test_l0_mismatch_is_warned_by_name(self):
+        r, _s = _convert(_muscle_s15(fpe=0.0, l0=7.0))
+        self.assertIn("states L0 = 7", " ".join(r.warnings))
+
+
+class MuscleTimeHistoryTests(unittest.TestCase):
+    def test_set_beam_history_of_a_muscle_beam_routes_to_th_spring(self):
+        extra = ("*SET_BEAM_LIST\n" + _row(77) + "\n" + _row(7) + "\n"
+                 "*DATABASE_HISTORY_BEAM_SET\n" + _row(77) + "\n"
+                 "*DATABASE_BINARY_D3PLOT\n" + _row(1.0e-4) + "\n")
+        _r, starter = _convert(_muscle156(extra=extra))
+        self.assertIn("/TH/SPRING", starter)
+        self.assertNotIn("/TH/BEAM", starter)
+
+    def test_deforc_leaves_the_all_zero_muscle_channel_out(self):
+        extra = "*DATABASE_DEFORC\n" + _row(1.0e-5) + "\n"
+        r, starter = _convert(_muscle_s15(fpe=0.0, extra=extra))
+        self.assertNotIn("/TH/SPRING", starter)
+        self.assertIn("no converted *ELEMENT_DISCRETE connector",
+                      " ".join(r.warnings))
 
 
 # ═════════════════════════════════════════════════════════════════════════════

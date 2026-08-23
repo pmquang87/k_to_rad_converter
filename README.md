@@ -688,6 +688,42 @@ three hard starter guards (`ERROR 1122/1123/1124`) are pre-announced rather than
 silently repaired. LAW71 declares `HOOK / SHELL_ISOTROPIC / SOLID_ISOTROPIC /
 BEAM_INTEGRATED` only (`hm_read_mat71.F:247-251`), so a beam part draws the
 existing `/PROP/TYPE18`-only warning and an SPH part the `ERROR 3046` report.
+`*MAT_MUSCLE` / `*MAT_156` (on a `*SECTION_BEAM` truss part) and
+`*MAT_SPRING_MUSCLE` / `*MAT_S15` (on a `*SECTION_DISCRETE` part) →
+`/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`, no `/MAT` at all (the whole law lives
+in the property and the `/PART` carries `mat_ID = 0`, which the starter accepts).
+Which of the two applies is decided by the PROPERTY the part carries, never by
+the material keyword alone — the `*MAT_SEATBELT` rule again. The Radioss force
+law `FX = Force·f1(t)·f2(ΔL)·f3(ΔL̇) + Scale_F·f4(ΔL) + Damp·VX`
+(`ruser46.F:207-211`) is term for term the LS-DYNA `σ1 + σ2 + σ3`, so the
+mapping is arithmetic:
+`*MAT_156` → `Force = Scale_F = PIS·A`, `Mass = RHO·A/SNO` with `Idens = 0`
+(per unit length, so the element mass is `RHO·A·l_orig`),
+`Vel_max = SRM·L0/SNO`, `Scale_v = SFR/SNO` (together they make the Radioss
+rate abscissa identical to LS-DYNA's `ε̄̇`), `Damp = DMP·A·SNO²/L0` (the one
+LINEARISED value — LS-DYNA's damper is quadratic in the stretch, Radioss offers
+`Damp·v` only, so it is matched at the element's initial configuration and named
+in the warning), `Epsi = 0`, and the `SVS`/`SSP` abscissae transformed
+`λ → λ/SNO − 1`.
+`*MAT_S15` → `Force = Vel_max`-paired `FMAX`/`VMAX`, `Scale_F = FMAX`
+(SDMAT15.cfg types the `FPE` curve *"Normalized force…"*, so both passive
+branches share one scale), `Epsi = 1`, `TL` abscissa `X = L·L0 − l_init` and
+`TV` abscissa `v = V·VMAX·SV`. **No mass is invented** — the card states none.
+**Every one of the four function slots is always written**, with a synthesized
+constant where the source leaves the factor unspecified: `GET_U_FUNC(0)` returns
+0, so one unset `fct_id1/2/3` makes the whole active force identically zero at 0
+starter errors and 0 warnings (measured on four separate decks). Both built-in
+exponential passive laws are reproduced exactly (102 points, the manual's own
+`h(ε)` and `f_PE(L)`); `SSM = 0`, `LMAX = 0` and an `SSP` **table** id (the
+2-D `h(ε̄̇, λ)` form) are warn-dropped instead of dividing by zero or being
+handed to a 1-D slot, as dyna2rad does. `SFR`-as-a-curve and `SV`-as-a-curve
+have no Radioss slot (`Scale_v` is one number) and are named-dropped.
+Per-element force history is **not** available: `/TH/SPRING` on a TYPE46 writes
+15 channels of exact zero — force, deflection, length and even the OFF flag —
+while a `/PROP/TYPE4` spring in the *same* group of the *same* deck reports
+correctly, so muscle springs are deliberately left out of the
+`*DATABASE_DEFORC` group and the warning points at `/TH/NODE REACX` or the
+global `SPRING ENERGY` channel instead.
 `*CONTACT_INTERIOR` → the Radioss counterpart is `Icontrol=1` (solid
 distortion control) on the listed parts' `/PROP` — an input column that
 exists only in the radioss2025 property format. Measured on `starter_win64`:

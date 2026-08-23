@@ -5832,6 +5832,74 @@ class MatShapeMemory:
     lcid_sa: int = 0        # dropped
 
 
+@dataclass
+class MatMuscle:
+    """*MAT_MUSCLE (*MAT_156) on a *SECTION_BEAM truss part → /PROP/TYPE46
+    (SPR_MUSCLE) + /SPRING.
+
+    LS-DYNA cards (Vol II R17 pp.2-1071..2-1074):
+      Card1: MID RO SNO SRM PIS SSM CER DMP
+      Card2: ALM SFR SVS SVR SSP
+
+    ``ALM`` LT.0 = curve id, GE.0 = the constant activation level.
+    ``SFR``/``SVS``/``SVR`` LT.0 = curve id, **GE.0 = the constant value 1.0**
+    (the scalar itself is discarded — Vol II p.2-1072). ``SSP`` LT.0 = curve or
+    table id, EQ.0 = the built-in exponential, GT.0 = the constant 0.0.
+    """
+    mid: int
+    title: str
+    rho: float
+    sno: float              # initial-length / optimal-length ratio
+    srm: float              # maximum strain rate
+    pis: float              # peak isometric stress
+    ssm: float              # SSP-exponential scale
+    cer: float              # SSP-exponential rate
+    dmp: float              # damping
+    alm: float = 0.0        # activation level (scalar branch)
+    alm_lcid: int = 0       # activation level (curve branch, |ALM|)
+    sfr: float = 0.0
+    sfr_lcid: int = 0
+    svs: float = 0.0
+    svs_lcid: int = 0
+    svr: float = 0.0
+    svr_lcid: int = 0
+    ssp: float = 0.0
+    ssp_lcid: int = 0
+
+
+@dataclass
+class MatSpringMuscle:
+    """*MAT_SPRING_MUSCLE (*MAT_S15) on a *SECTION_DISCRETE part → /PROP/TYPE46
+    (SPR_MUSCLE) + /SPRING.
+
+    LS-DYNA cards (Vol II R17 pp.2-2095..2-2099):
+      Card1: MID L0 VMAX SV A FMAX TL TV
+      Card2: FPE LMAX KSH
+
+    Defaults: ``L0`` 1.0, ``SV`` 1.0, ``TL`` 1.0, ``TV`` 1.0, ``FPE`` 0.0.
+    ``SV``/``A``/``TL``/``TV`` LT.0 = curve id; ``A`` GE.0 = the constant A,
+    ``SV``/``TL``/``TV`` GE.0 = the constant 1.0. ``FPE`` LT.0 = curve id,
+    EQ.0 = the built-in exponential, GT.0 = the constant 0.0.
+    """
+    mid: int
+    title: str
+    l0: float = 1.0         # initial muscle length
+    vmax: float = 0.0       # maximum shortening velocity
+    sv: float = 1.0         # scale factor on Vmax vs active state
+    sv_lcid: int = 0
+    a: float = 0.0          # activation level
+    a_lcid: int = 0
+    fmax: float = 0.0       # peak isometric force
+    tl: float = 1.0         # active tension vs length
+    tl_lcid: int = 0
+    tv: float = 1.0         # active tension vs velocity
+    tv_lcid: int = 0
+    fpe: float = 0.0        # passive force vs length
+    fpe_lcid: int = 0
+    lmax: float = 0.0       # relative length at max passive force
+    ksh: float = 0.0        # exponential shape parameter
+
+
 # ── User conversion options (CLI flags) ──────────────────────────────────────
 
 @dataclass
@@ -6384,7 +6452,11 @@ class ConversionState:
 
     # ── Rare materials batch ───────────────────────────────────
     #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
+    #   *MAT_156 / *MAT_MUSCLE        → /PROP/TYPE46 + /SPRING (no /MAT)
+    #   *MAT_S15 / *MAT_SPRING_MUSCLE → /PROP/TYPE46 + /SPRING (no /MAT)
     mat_shape_memory: Dict[int, MatShapeMemory] = field(default_factory=dict)
+    mat_muscle: Dict[int, MatMuscle] = field(default_factory=dict)
+    mat_spring_muscle: Dict[int, MatSpringMuscle] = field(default_factory=dict)
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
@@ -6917,6 +6989,16 @@ class ConversionState:
     # here — filled AT the line that writes the qualifying /SPRING, the same
     # discipline as spring_elem_ids.
     spring_axial_preloadable: Set[int] = field(default_factory=set)
+    # /SPRING element ids emitted on a /PROP/TYPE46 (SPR_MUSCLE). Kept apart
+    # from discrete_spring_eids because /TH/SPRING on a TYPE46 element writes
+    # 15 channels of EXACT ZERO — force, deflection, length and even the OFF
+    # flag — in every load case (measured against a /PROP/TYPE4 spring in the
+    # SAME /TH group of the SAME deck, which reports correctly), while the
+    # global SPRING ENERGY channel and the nodal reactions are right. So these
+    # ids are deliberately left out of the *DATABASE_DEFORC group: an emitted
+    # channel that is legal, accepted and all zeros is worse than an honest
+    # warn-and-drop (#122). Filled AT the line that writes each /SPRING row.
+    muscle_spring_eids: Set[int] = field(default_factory=set)
     # *SECTION_SOLID ids / part ids whose emitted /PROP/SOLID carries
     # Ismstr=10 (total strain) — set for /XREF, /MAT/LAW95 and /MAT/LAW90
     # parts, which NEED it. sgrtails.F:1387-1412 silently downgrades a

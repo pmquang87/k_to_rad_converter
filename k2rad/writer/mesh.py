@@ -31,6 +31,8 @@ from .common import (
     ISHELL_QEPH,
     _elform_to_isolid,
     _emit_grnod_node,
+    _muscle_beam_pids,
+    _muscle_part_ids,
     _f,
     _fmt_eid_list,
     _i,
@@ -1479,7 +1481,11 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
     # no /PROP or /MAT counterpart, and would write the /PART twice (ERROR 79).
     connector_pids = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
                       | _discrete_beam_pids(state)
-                      | _seatbelt_part_ids(state))
+                      | _seatbelt_part_ids(state)
+                      # *MAT_MUSCLE truss parts: /PART + /PROP/TYPE46 + /SPRING
+                      # from _make_muscle_springs. (Its *MAT_SPRING_MUSCLE half
+                      # is already inside _discrete_part_ids.)
+                      | _muscle_part_ids(state))
 
     for pid, part in sorted(state.parts.items()):
         if pid in connector_pids:
@@ -1880,7 +1886,8 @@ def _element_free_part_ids(state: ConversionState,
     # *SECTION_DISCRETE or whose MID is a spring/damper material, and
     # _discrete_beam_pids one whose SECID is an ELFORM=6 *SECTION_BEAM.)
     connectors = (_discrete_part_ids(state) | _spotweld_beam_pids(state)
-                  | _discrete_beam_pids(state) | _seatbelt_part_ids(state))
+                  | _discrete_beam_pids(state) | _seatbelt_part_ids(state)
+                  | _muscle_part_ids(state))
     # A part repointed at a synthesized composite / orthotropic / per-part
     # hourglass property does not reference its section id at all.
     split = (set(state.composite_prop_ids) | set(state.ortho_prop_ids)
@@ -2404,7 +2411,11 @@ def _make_properties(state: ConversionState) -> List[str]:
     # neither the ELFORM-9 spotweld card nor the ELFORM-6 discrete-beam card
     # states a cross-section, so a /PROP/BEAM from either is ERROR 314-317.
     spotweld_pids = _spotweld_beam_pids(state)
-    connector_beam_pids = spotweld_pids | _discrete_beam_pids(state)
+    # ... and the *MAT_MUSCLE truss parts, which become /PROP/TYPE46 springs:
+    # their ELFORM-3 *SECTION_BEAM states only an AREA, which the muscle
+    # property consumes itself, so no /PROP/BEAM may be auto-created for them.
+    connector_beam_pids = (spotweld_pids | _discrete_beam_pids(state)
+                           | _muscle_beam_pids(state))
     spotweld_only_secids: Set[int] = set()
     if connector_beam_pids:
         other_beam_secids = {part_secids.get(e.pid) for e in state.beam_elems
@@ -3820,6 +3831,12 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
             or mid in state.mat_damper_nl_viscous
             or mid in state.mat_spring_general_nl
             or mid in state.mat_spring_inelastic
+            # *MAT_MUSCLE (156) and *MAT_SPRING_MUSCLE (S15) join that list:
+            # both live entirely in a /PROP/TYPE46 (SPR_MUSCLE) and their
+            # /PART is written with mat_id 0 — verified on the starter, which
+            # accepts mat_ID 0 on a TYPE46 spring part.
+            or mid in state.mat_muscle
+            or mid in state.mat_spring_muscle
             or mid in _discrete_beam_mids(state)):
         return None
     return None

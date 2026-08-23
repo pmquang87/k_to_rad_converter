@@ -25,6 +25,11 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   uniaxial onsets, `YMRT → E_mart` — the slot dyna2rad's `"YMTR"` typo never
   writes, temperature terms deliberately blank, the curve form of the four
   transformation stresses warn-skipped by name).
+  `*MAT_MUSCLE` / `*MAT_156` and `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
+  `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`, routed by the PROPERTY the part
+  carries (truss vs discrete) and validated against the engine force law to 7
+  digits. Radioss has no truss element, so the axial-only muscle becomes a
+  spring — which is what an LS-DYNA truss states anyway.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
