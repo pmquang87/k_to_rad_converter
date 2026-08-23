@@ -314,6 +314,19 @@ class InitialStrainShellTests(unittest.TestCase):
         self.assertEqual(int(tri[0][:10]), 3)
         self.assertEqual(tri[1], f"{_f(0.03)}{_f(0.0)}{_f(0.0)}")
 
+    def test_an_element_named_twice_is_warned(self):
+        # The starter keeps one slot per element and the last record read
+        # wins, silently (hm_read_inistate_d00.F:2486-2492).
+        extra = ("*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 2) + "\n"
+                 + _row(0.01, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0) + "\n"
+                 + _row(0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) + "\n"
+                 + "*INITIAL_STRAIN_SHELL_SET\n" + _row(77) + "\n"
+                 + _row(0.05, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0) + "\n"
+                 + _row(0.06, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0) + "\n")
+        r, _starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        self.assertTrue(any("named by more than one record" in w
+                            for w in r.warnings))
+
     def test_istrain_is_forced_on_or_the_block_is_inert(self):
         # csigini.F:165 gates the whole ingest on
         # IF (ISTRAIN /= 0 .AND. ITHKSHEL == 2) — with Istrain=0 the /INISHE

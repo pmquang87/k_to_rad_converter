@@ -419,6 +419,24 @@ def _make_inistra(state: ConversionState) -> List[str]:
             (tri_entries if eid in tri_set else quad_entries).append(
                 (eid, bot, top))
 
+    # One element named twice — by two records, or by a record and a _SET that
+    # contains it. The starter writes both into SIGSH(...,PTSHEL(IE)) and the
+    # LAST one silently wins (hm_read_inistate_d00.F:2486-2492), so the deck
+    # says one thing and the run does another.
+    seen_eids: Set[int] = set()
+    dup: List[int] = []
+    for eid, _b, _t in quad_entries + tri_entries:
+        if eid in seen_eids:
+            dup.append(eid)
+        seen_eids.add(eid)
+    if dup:
+        state.warn("*INITIAL_STRAIN_SHELL: element(s) "
+                   f"{_fmt_eid_list(sorted(set(dup)))} are named by more than "
+                   "one record (two cards, or a card and a _SET containing "
+                   "it). The starter stores each element's strain in one slot "
+                   "and the LAST record read wins, silently — keep one record "
+                   "per element.")
+
     if missing:
         state.warn("*INITIAL_STRAIN_SHELL: element(s) "
                    f"{_fmt_eid_list(missing)} are not 4-node /SHELL or /SH3N "
