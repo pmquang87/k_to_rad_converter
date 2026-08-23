@@ -6985,10 +6985,11 @@ def _avg_tuples(pts: list) -> tuple:
 
 
 def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
-    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB (or /INISHE/STRS_F).
+    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB.
 
-    Card 1 (Keyword971 initial_stress_shell_subobj.cfg):
-        EID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV [ILOC]
+    Card 1 (Keyword971 initial_stress_shell_subobj.cfg, Vol I R17 p.28-95) —
+    EIGHT fields, cols 1-80, and nothing after them:
+        EID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV
     then NPLANE×NTHICK stress cards:
         small (LARGE=0): T SIGXX SIGYY SIGZZ SIGXY SIGYZ SIGZX EPS   (8×10)
         large (LARGE=1): T..SIGXY / SIGYZ SIGZX EPS                  (5+3×16)
@@ -6996,14 +6997,18 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     NTENSR tensor cards (6/card small, 5/card large); NTHINT×NTHHSV thermal
     history cards close the element record (large format).
 
-    The stress components are GLOBAL cartesian by default (ILOC=0) → the
-    /INISHE/STRS_F/GLOB flavour, which carries the full tensor (incl. σzz), the
-    plastic strain eps_p AND the thickness position pos_nip 1:1. ILOC=1 (local)
-    → the local /INISHE/STRS_F flavour (σzz and T have no slot there; the
-    writer warns). NHISV/NTENSR/thermal data have no /INISHE slot → dropped
-    with one aggregated warning per block. NPLANE>1 in-plane points are
-    averaged per through-thickness layer (the /INISHE per-layer format is
-    replicated across the shell's in-plane Gauss points by the writer).
+    The stress components are ALWAYS global cartesian — "SIGij  Define the ij
+    stress component.  The stresses are defined in the GLOBAL cartesian system"
+    (p.28-98) — so the writer always emits /INISHE/STRS_F/GLOB, which carries
+    the full tensor (incl. σzz), the plastic strain eps_p AND the thickness
+    position pos_nip 1:1. There is NO ILOCAL field on this keyword (that is
+    *INITIAL_STRAIN_SHELL card 1 field 8, p.28-67); a value in cols 81-90 is
+    past the card's last field, is not read by LS-DYNA, and is reported +
+    ignored here rather than switched on. NHISV/NTENSR/thermal data have no
+    /INISHE slot → dropped with one aggregated warning per block. NPLANE>1
+    in-plane points are averaged per through-thickness layer (the /INISHE
+    per-layer format is replicated across the shell's in-plane Gauss points by
+    the writer).
     """
     raw = block.raw
     i = 0
@@ -7012,10 +7017,13 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     n_thermal_dropped = 0
     n_plane_averaged = 0
     n_read = 0
+    ninth_cell: List[int] = []
     while i < len(raw):
         if not raw[i].strip():
             i += 1
             continue
+        # n=9 reads ONE cell past the card so a stray value there can be named;
+        # it is never used as data — see the docstring.
         f = _card(raw, i, fixed=True, n=9, w=10)
         eid = to_int(f[0])
         if eid <= 0:
@@ -7028,7 +7036,8 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
         large  = to_int(f[5]) if len(f) > 5 else 0
         nthint = to_int(f[6]) if len(f) > 6 else 0
         nthhsv = to_int(f[7]) if len(f) > 7 else 0
-        iloc   = to_int(f[8]) if len(f) > 8 else 0
+        if len(f) > 8 and to_int(f[8]) != 0:
+            ninth_cell.append(eid)
         i += 1
 
         pts = []
@@ -7082,7 +7091,7 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
                           for k in range(nthick)]
         state.ini_stress_shells.append(
             InitialStressShell(eid=eid, nplane=nplane, nthick=nthick,
-                               iloc=iloc, layers=layers))
+                               layers=layers))
         n_read += 1
 
     if n_hisv_dropped:
@@ -7100,6 +7109,19 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
                    f"on {n_plane_averaged} element(s) were AVERAGED per "
                    "through-thickness layer (the layer value is replicated "
                    "across the /INISHE in-plane Gauss points).")
+    if ninth_cell:
+        named = ", ".join(str(e) for e in ninth_cell[:25])
+        if len(ninth_cell) > 25:
+            named += f", ... (+{len(ninth_cell) - 25} more)"
+        state.warn("*INITIAL_STRESS_SHELL: element(s) "
+                   f"{named} carry a NINTH value on card 1 "
+                   "(cols 81-90). This keyword's card 1 ends at NTHHSV, field 8 "
+                   "(Vol I R17 p.28-95), so LS-DYNA does not read that cell — "
+                   "it was IGNORED here too. In particular it is not an ILOCAL "
+                   "flag: that field belongs to *INITIAL_STRAIN_SHELL, and this "
+                   "card's own text states the frame outright ('the stresses "
+                   "are defined in the GLOBAL cartesian system', p.28-98), so "
+                   "the components were written to /INISHE/STRS_F/GLOB.")
 
 
 def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
@@ -7314,9 +7336,13 @@ def handle_initial_strain_shell(block: Block, state: ConversionState) -> None:
     if n_plane_avg:
         state.warn(f"*{block.keyword}: NPLANE>1 in-plane integration points on "
                    f"{n_plane_avg} element(s) were AVERAGED per through-"
-                   "thickness station. /INISHE/STRA_F/GLOB is written with "
-                   "npg=1 (one value per station) — see the writer's note on "
-                   "why npg=4 is not used.")
+                   "thickness station — one value per station, replicated "
+                   "across whatever in-plane Gauss points the emitted "
+                   "/INISHE|/INISH3 /STRA_F/GLOB record carries. (The card's "
+                   "npg is the writer's decision, not the handler's: it depends "
+                   "on the shell formulation and on whether the deck also "
+                   "carries an initial-STRESS block — see _stra_f_npg in "
+                   "k2rad/writer/inistate.py.)")
     if set_dims_ignored:
         state.warn("*INITIAL_STRAIN_SHELL_SET: NPLANE/NTHICK are IGNORED for "
                    "the _SET spelling (Vol I R17 p.3120, 'not read when the "

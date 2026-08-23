@@ -162,7 +162,6 @@ class InitialStressShellTests(unittest.TestCase):
         iss = state.ini_stress_shells[0]
         self.assertEqual(iss.eid, 1)
         self.assertEqual(iss.nthick, 2)
-        self.assertEqual(iss.iloc, 0)
         self.assertEqual(len(iss.layers), 2)
         self.assertEqual(iss.layers[0], (-0.5, 100.0, 200.0, 50.0, 10.0, 20.0, 30.0, 0.01))
 
@@ -209,7 +208,13 @@ class InitialStressShellTests(unittest.TestCase):
         self.assertIn(f"{_f(110.0)}{_f(210.0)}{_f(55.0)}", starter)
         self.assertTrue(any("NHISV" in w and "dropped" in w for w in result.warnings))
 
-    def test_iloc_local_flavour_drops_szz_with_warning(self):
+    def test_a_ninth_cell_is_not_ilocal_and_is_reported_not_obeyed(self):
+        # *INITIAL_STRESS_SHELL card 1 ends at NTHHSV, field 8 (Vol I R17
+        # p.28-95), and the card's own text pins the frame: "the stresses are
+        # defined in the GLOBAL cartesian system" (p.28-98). A value in cols
+        # 81-90 is past LS-DYNA's last field; reading it as an ILOCAL flag used
+        # to switch the writer to the local /INISHE/STRS_F card, which drops
+        # sigma_zz and every T coordinate. It must stay GLOB and be named.
         ini = (
             "*INITIAL_STRESS_SHELL\n"
             "         1         1         2         0         0         0         0         0         1\n"
@@ -217,12 +222,18 @@ class InitialStressShellTests(unittest.TestCase):
             "       0.5     110.0     210.0      55.0      11.0      21.0      31.0      0.02\n"
         )
         result, starter, _ = _convert(SHELL_STRIP.replace("{EXTRA}", ini))
-        self.assertIn("/INISHE/STRS_F\n", starter)
-        self.assertNotIn("/INISHE/STRS_F/GLOB", starter)
-        # local layout: (sigma_1 sigma_2 sigma_12) / (sigma_23 sigma_31 eps_p)
-        self.assertEqual(starter.count(f"{_f(100.0)}{_f(200.0)}{_f(10.0)}"), 4)
-        self.assertEqual(starter.count(f"{_f(20.0)}{_f(30.0)}{_f(0.01)}"), 4)
-        self.assertTrue(any("sigma_zz" in w.lower() or "SIGZZ" in w
+        self.assertIn("/INISHE/STRS_F/GLOB", starter)
+        # No local card anywhere: every /INISHE/STRS_F header carries /GLOB.
+        self.assertEqual(
+            [ln for ln in starter.splitlines()
+             if ln.startswith("/INISHE/STRS_F")],
+            ["/INISHE/STRS_F/GLOB"])
+        # GLOBAL layout keeps sigma_zz AND the thickness position T.
+        self.assertEqual(starter.count(f"{_f(100.0)}{_f(200.0)}{_f(50.0)}"), 4)
+        self.assertEqual(
+            starter.count(f"{_f(10.0)}{_f(20.0)}{_f(30.0)}{_f(0.01)}{_f(-0.5)}"),
+            4)
+        self.assertTrue(any("NINTH value on card 1" in w and "IGNORED" in w
                             for w in result.warnings))
 
 

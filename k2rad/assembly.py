@@ -3462,14 +3462,20 @@ del _kw
 #   PSID    *SET_PART / BSID *SET_BEAM                    -> IDSOFF  "s"
 #   VID     "any ID defined through *DEFINE, except the FUNCTION, TABLE and
 #           CURVE options"                                -> IDDOFF  "d"
-#   ISTIFF  GT.0 an artificial-stiffness flag; LT.0 "|ISTIFF| is the load
-#           curve ID for the stiffness fraction" (Vol I R17 p.3144), i.e. a
-#           SIGNED curve id like *SECTION_SHELL QR/IRID -> IDFOFF  "f"
-#           _rewrite_line touches only v > 0, so the negative spelling is left
-#           as written. That is immaterial here and deliberately not routed
-#           through _rewrite_neg_ref: the writer DROPS ISTIFF entirely (no
-#           /PRELOAD slot at any Radioss version), so the cell never reaches
-#           the emitted deck — it only appears in the warning that names it.
+#   ISTIFF  a curve id in BOTH spellings (Vol I R17 p.3144): "GT.0: Load curve
+#           ID defining stiffness fraction as a function of time" and "LT.0:
+#           |ISTIFF| is the load curve ID for the stiffness fraction as a
+#           function of time" — the sign selects only whether the preload
+#           stress is auto-adjusted +/-10%, not what the number means. So the
+#           field is a SIGNED curve id like *SECTION_SHELL QR/IRID -> IDFOFF "f"
+#           _rewrite_line touches only v > 0, so the POSITIVE spelling is
+#           offset (correct) and the NEGATIVE one is left as written (which
+#           would be wrong if the cell were emitted). It is deliberately not
+#           routed through _rewrite_neg_ref because the writer DROPS ISTIFF
+#           entirely (no /PRELOAD slot at any Radioss version), so neither
+#           spelling reaches the emitted deck — the value only appears in the
+#           warning that names it, which says for LT.0 that the id is quoted
+#           un-offset.
 #   IZSHEAR / KBEND / SCALE   not ids, absent from the mods lists
 #   EID (*INITIAL_STRAIN_SHELL) element                   -> IDEOFF  "e"
 #   SID (*INITIAL_STRAIN_SHELL_SET) *SET_SHELL            -> IDSOFF  "s"

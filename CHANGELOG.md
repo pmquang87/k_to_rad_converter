@@ -97,20 +97,28 @@ Prior history (before this changelog was introduced) is summarized in the
      `s8zinit3` and `s10init3` — never from `S6ZINIT3` or any thick-shell
      initialiser. So a solid the starter classifies `ISOLNOD=6` keeps a zero
      `BPRELD` and `SECTAREA` (no `ISOLNOD==6` branch) adds nothing to the echoed
-     area: measured on an all-penta section spelled with BLANK cells 7-8, `AREA
-     0.000E+00`, every stress 0 for the whole run, 0 errors and 0 warnings. That
-     classification is on the EMITTED card, not the source connectivity —
-     `hm_read_solid.F:167` wants `IXS(8)+IXS(9) == 0`, and a wedge written the
-     usual LS-DYNA way leaves k2rad as a degenerate HEX8 which IS pre-tensioned
-     (measured: `AREA 1.000E+00`, `/TH/BRIC SZ = 200.00 MPa` at t=0 on both cut
-     wedges of an 8-wedge bolt bar, identical to its hex twin). Thick shells are
+     area — when the deck runs at all: measured on an all-penta section spelled
+     with BLANK cells 7-8, `Isolid 24` gives `AREA 0.000E+00`, every stress 0 for
+     the whole run, 0 errors and 0 warnings, while every other `Isolid` —
+     including the 17 this converter emits for ELFORM 1 — is `ERROR 3107`
+     "6-NODES PENTAHEDRON (/PENTA6) WITH SOLID PROPERTIES ARE ONLY COMPATIBLE
+     WITH ISOLID = 24" and a refused deck (`initia.F:1081-1094`). That
+     classification is on the EMITTED card and card FAMILY, not the source
+     connectivity — `hm_read_solid.F:167` wants `IXS(8)+IXS(9) == 0`, a wedge
+     written the usual LS-DYNA way leaves k2rad as a degenerate HEX8 which IS
+     pre-tensioned (measured: `AREA 1.000E+00`, `/TH/BRIC SZ = 200.00 MPa` at t=0
+     on both cut wedges of an 8-wedge bolt bar, identical to its hex twin), and a
+     4-node tet spelled `n1 n2 n3 n4 0 0 0 0` goes to `/TETRA4`, a card with no
+     cells 7-8 at all. Thick shells are
      dropped from the preload group by name — they ride in `solid_eids` so the
      REPORTING section still sees them, and LS-DYNA does not pre-tension them
      either (Vol I R17 p.3145 Remark 4 lists solid element types only). So is
      the formulation: measured at 200 MPa on a 1×1×4 bar, `Isolid` 1 and 2 hit
      ZERO OR NEGATIVE VOLUME at cycle 0, `Isolid 12` is a completely silent
-     no-op, `Isolid 24` diverges to 1400-1500 MPa shortly after `0.7·ΔT`, and
-     `Isolid` 5, 14 and 17 hold the preload.
+     no-op, `Isolid 24` diverges late in the window and never recovers
+     (re-measured 1266 → 1370 MPa against the 200 MPa target; an earlier probe of
+     the same bar reached 1400-1500 MPa), and `Isolid` 5, 14 and 17 hold the
+     preload.
 
   7. **`/PRELOAD/AXIAL` shows the OTHER half of the version-gate rule, so it is
      emitted.** `/PRELOAD/AXIAL` exists only as `FORMAT(radioss2024)`, but a new
@@ -402,15 +410,116 @@ Prior history (before this changelog was introduced) is summarized in the
       two sibling allocators already had; a preload window that closes AFTER
       `*CONTROL_TERMINATION ENDTIM` is now named (`sboltlaw.F:119-128` holds the
       bolted parts at `1e-4·E` until `0.4·ΔT` and restores them at `0.7·ΔT`, so
-      a run that ends first is ~10000× too soft throughout, silently — the
+      a run that ends first never gets its stiffness back, silently — the
       normal shape when the source deck tightened the bolt inside a
       `*CONTROL_DYNAMIC_RELAXATION` phase); the blank-T report was split from
-      the single-station one; the `ISTIFF` comment was corrected (`LT.0` is a
-      SIGNED curve id per Vol I R17 p.3144, not a flag encoding) and the drop
+      the single-station one; the `ISTIFF` comment was corrected (it is a curve
+      id, per Vol I R17 p.3144, not a flag encoding) and the drop
       message now describes both spellings; and an audit of the stress path
       found that a `*INITIAL_STRESS_SHELL` record on a 3-node shell is written
       into `/INISHE`, which the starter resolves against the 4-node table only —
       dropped into its NONEXIST tally, now named.
+
+  **Verification round — one silent-wrong-physics regression, one fabricated
+  input field, and four claims that did not survive re-measurement.** The
+  post-review verification ran the review round's own new paths on the real
+  starter/engine.
+
+  V1. **The 3-node-shell stress record R5 merely NAMED had to be dropped from
+      the deck: written alongside the review round's new `/STRA_F` block it
+      fabricates stress on an unrelated element.** `hm_read_inistate_d00.F:2105`
+      arms the global `ISIGSH` BEFORE it looks the shell_ID up (`:2124-2127` only
+      bumps `NONEXIST`), so an unresolvable record leaves the flag on with no
+      resolvable payload behind it. `scigini4.F:285` `IF (ISIGSH==0) CYCLE` then
+      passes for a strain-only quad whose `SIGSH(17)` the `/STRA_F` reader set to
+      ONE, and `:287` runs the GLOBAL stress reconstruction over slots that hold
+      no stress. Measured on deck `m7` (quad 1 = `*INITIAL_STRAIN_SHELL`, tri 2 =
+      `*INITIAL_STRESS_SHELL`, everything clamped): quad 1 read
+      `F1 = -0.24875 · F2 = -0.247875 · M1 = 1.50298` constant for all 163
+      states on a deck that states no stress at all, at **0 starter ERRORS and
+      NORMAL TERMINATION** — for scale, the only genuine initial moment in these
+      probes is `M1 = 0.208333`, seven times smaller. Master cannot produce it
+      (it never writes a `/STRA_F` block). The record is now left out of the
+      `/INISHE` block by `_inishe_stress_entries`, which the writer's existing
+      warning already told the author had happened. Post-fix `m7` is byte-equal
+      to its `m7b` control (the same deck with the stress keyword removed) on
+      **every one of 20 channels × 163 states, on both elements**, `max|F*|` and
+      `max|M*|` on quad 1 exactly 0, strain unchanged (`E1 0.012 · E2 -0.003 ·
+      E12 0.004 · K1 0.004`), starter 0 ERRORS / 1 unrelated WARNING 1084,
+      engine NORMAL TERMINATION 163 cycles. Dropping the record also un-mixes a
+      deck whose ONLY stress record was on a tri, so its strain card returns to
+      the compact `nb_integr=2 / npg=1` form.
+
+  V2. **`*INITIAL_STRESS_SHELL` has no `ILOC` field — the parser was reading a
+      cell LS-DYNA does not define, and the review round's companion synthesis
+      would have mis-framed it.** Card 1 is eight fields, `EID/SID NPLANE NTHICK
+      NHISV NTENSR LARGE NTHINT NTHHSV` (Vol I R17 p.28-95, identical in R16 and
+      in `Keyword971/TABLE/initial_stress_shell_subobj.cfg`), and the card's own
+      text says "SIGij Define the ij stress component. The stresses are defined
+      in the GLOBAL cartesian system" (p.28-98). `ILOCAL` exists only on
+      `*INITIAL_STRAIN_SHELL` (p.28-67 card 1 field 8), which k2rad reads
+      correctly at its own index. Reading cols 81-90 as an ILOC flag switched
+      the writer to the local `/INISHE/STRS_F` card, which has no σzz and no T
+      slot — real data loss driven by a value LS-DYNA ignores. Worse in
+      combination: the local reader sets `SIGSH(17) = ZERO`
+      (`hm_read_inistate_d00.F:2355`) while the `/STRA_F/GLOB` reader sets it to
+      ONE (`:2495`) and is read LAST, so the review round's all-zero companion
+      record would have flipped a LOCAL payload (6 values per point) into the
+      GLOBAL reader (8 per point, with a `CG2LSIG` rotation). The ILOC parse is
+      gone; the local writer branch with it; a non-zero ninth cell is reported
+      and ignored, the way LS-DYNA treats it. Control: the pre-fix tree
+      converting the conforming 8-field deck and the fixed tree converting the
+      9-cell deck produce **byte-identical starter AND engine files**
+      (`24e9e11e…` / `a7578d9d…`), and that deck runs 0 ERRORS / NORMAL
+      TERMINATION 133 cycles with the stress consumed.
+
+  V3. **The re-gated PENTA classifier still read the LS-DYNA connectivity, so it
+      fired on tets.** `mesh.py` sends any solid with 4 distinct nodes to
+      `/TETRA4` (and a 10-node one to `/TETRA10`) — cards with no cells 7-8 at
+      all — but a tet spelled `n1 n2 n3 n4 0 0 0 0` still has zeros in its raw
+      row, so R2's blank-cell test flagged it and prescribed a remesh on a bolt
+      that pre-tensions correctly (`SBOLTINI` IS reached from `s4init3`). The
+      test now runs only on elements that reach the `/BRICK` branch.
+
+  V4. **The PENTA message's measured claim held for only one property.** It
+      asserted "AREA echoes 0.000E+00, every element stress stays 0 … at 0
+      starter errors and 0 warnings" unconditionally; that is the `Isolid 24`
+      outcome. At every other `Isolid` — including the 17 this converter emits
+      for `*SECTION_SOLID` ELFORM 1 — a real `ISOLNOD=6` penta is `ERROR 3107`
+      and a refused deck. Both outcomes are now named.
+
+  V5. **Three more statements corrected against their own authority.**
+      (a) `ISTIFF` is a `*DEFINE_CURVE` id in BOTH spellings — "GT.0: Load curve
+      ID defining stiffness fraction as a function of time" and "LT.0: |ISTIFF|
+      is the load curve ID for the stiffness fraction as a function of time"
+      (Vol I R17 p.3144); the sign selects only whether the preload stress is
+      auto-adjusted ±10%. R5 fixed the rarer spelling and left the common one
+      described as a bare flag, so the reader was never told a curve reference
+      had been dropped. Both the offset-bucket comment and the drop message now
+      name the id in both spellings.
+      (b) The `ENDTIM` warning's consequence was true only below
+      `Tstart+0.4·ΔT`. `sboltlaw.F:120-127` is `REDUC = 1e-4·(1-w) + w` with
+      `w = (TT-T1)/(T2-T1)` on the ramp, so a run ending between `0.4·ΔT` and
+      `0.7·ΔT` is soft by far less than 1e4 — measured 0.328 of `E`
+      (analytic 0.3334) on a fully kinematically prescribed hexa, against
+      1.033e-4 (analytic 1e-4) for a run ending inside the hold. The message now
+      splits by where `ENDTIM` lands and quotes the fraction actually reached.
+      (c) The `NPLANE>1` averaging warning stated the emitted card's `npg`, which
+      the handler cannot know: it said `npg=1` while the writer emits `npg=4` on
+      `Ishell 12` once a stress block exists. The npg sentence moved to the
+      writer, where the decision is made.
+
+  **Verification sweep.** 94 decks (the whole `preload_val` validation set, every
+  review-round probe and every fidelity probe) converted with the branch before
+  and after this round and compared by SHA-256: **0 conversion errors, 6 movers,
+  all `_0000.rad` only** — the two tri-stress decks (the unresolvable record
+  disappears) and the four ILOC probes (local card → GLOB card, σzz and T
+  restored). Every solver-validated deck — `s1_*`, `a1_*`, `e1_*`, `e2_*`,
+  `t5_*`, `w1_*`, `c1_*`, `m1`-`m6`, `m8`, `m9`, `bolta`, `gn43` — is
+  byte-identical on BOTH files. The same 559-deck corpus, converted with the
+  branch before and after this round: **0 conversion errors, 0 movers** — every
+  `_0000.rad` AND `_0001.rad` byte-identical, so this round moved nothing in the
+  corpus, only in the shapes it exists for.
 
 - **The seatbelt / restraint batch:
   `*ELEMENT_SEATBELT` → `/SPRING` on `/PROP/TYPE23` + `/MAT/LAW114` (1D) or

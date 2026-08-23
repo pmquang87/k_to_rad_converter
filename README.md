@@ -2269,12 +2269,25 @@ into the frame; a nonzero `ICID` rotates `VX/VY/VZ` and the vector axis from tha
 local system to global (else warned + global); `STYP` all/part-set/part/node-set
 scoping (`*ELEMENT_DISCRETE` springs included in the part scan; `PHASE`, `IVATN`,
 `IRIGID` warned + dropped; `_GENERATION_START_TIME` skipped)
-`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` (ILOC=0, LS-DYNA's global
-default — lossless incl. σzz, plastic strain and the through-thickness
-position) or the local `/INISHE/STRS_F` for ILOC=1 (σzz/T warned + dropped).
-The layer count must match the part's `/PROP/SHELL` integration points or the
-element is warned + skipped (the starter enforces it); `NPLANE>1` in-plane
-points are averaged per layer with a warning
+`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB`, always: this keyword's card 1
+has exactly eight fields (`EID/SID NPLANE NTHICK NHISV NTENSR LARGE NTHINT
+NTHHSV`, Vol I R17 p.28-95) and its own text pins the frame — "the stresses are
+defined in the GLOBAL cartesian system" (p.28-98) — so the GLOB flavour is
+lossless (σzz, plastic strain and the through-thickness position all carried) and
+the local `/INISHE/STRS_F` card has no LS-DYNA source to come from. There is no
+ILOCAL here (that field belongs to `*INITIAL_STRAIN_SHELL`); a value in cols
+81-90 is past the card's last field, is not read by LS-DYNA, and is reported +
+ignored rather than switched on. The layer count must match the part's
+`/PROP/SHELL` integration points or the element is warned + skipped (the starter
+enforces it); `NPLANE>1` in-plane points are averaged per layer with a warning.
+A record on a **3-node** shell is warned + left OUT of the block entirely: the
+element leaves k2rad as a `/SH3N` and the `/INISHE` reader resolves shell_IDs
+against the 4-node table only, but writing the unresolvable record anyway still
+arms the reader's global `ISIGSH` (`hm_read_inistate_d00.F:2105` runs before the
+id lookup), and an armed `ISIGSH` with no resolvable payload makes
+`scigini4.F:285-287` fabricate a constant force/moment on a neighbouring
+strain-only quad at 0 starter ERRORS (measured `F1 -0.249`, `M1 1.503` on a deck
+stating no stress)
 `*INITIAL_STRESS_SOLID` → `/INIBRI/STRS_FGLO` (NINT 1→8 replicates exactly;
 other counts average with a warning)
 `*INITIAL_STRAIN_SHELL` (+ `_SET`, small and LARGE formats) → `/INISHE/STRA_F/GLOB`
@@ -2345,12 +2358,18 @@ reporting section still sees them, but no thick-shell initialiser calls
 `SBOLTINI`, and LS-DYNA lists solid types only, Vol I R17 p.3145 Remark 4).
 Warned + emitted: a preloaded part whose `/PROP/SOLID` is not `Isolid` 5, 14 or 17
 (1 and 2 hit negative volume at cycle 0, 12 is a silent no-op, 24 diverges),
-6-node PENTAs *spelled with blank cells 7-8* — the only spelling the starter
-classifies `ISOLNOD=6` and never calls `SBOLTINI` for; the usual LS-DYNA wedge
-leaves k2rad as a degenerate HEX8 and IS pre-tensioned (measured `AREA
-1.000E+00`, `SZ = 200.00 MPa` at t=0) — a preload window that closes after
-`*CONTROL_TERMINATION ENDTIM` (the bolted parts then stay at `1e-4·E` for the
-whole run), a preloaded part carrying `Ismstr=10` (a
+6-node PENTAs *spelled with blank cells 7-8 in an element that is emitted as a
+`/BRICK`* — the only combination the starter classifies `ISOLNOD=6`, where it
+either refuses the deck (`ERROR 3107` at any `Isolid` but 24, `initia.F:1081`) or
+never calls `SBOLTINI` (`Isolid 24`: `AREA 0.000E+00`, zero stress, 0 errors).
+The usual LS-DYNA wedge leaves k2rad as a degenerate HEX8 and IS pre-tensioned
+(measured `AREA 1.000E+00`, `SZ = 200.00 MPa` at t=0), and a 4-node tet spelled
+with trailing zeros goes to `/TETRA4`, a card with no cells 7-8 at all, so
+neither is flagged — a preload window that closes after
+`*CONTROL_TERMINATION ENDTIM` (the message says WHERE the run stops: below
+`Tstart+0.4·ΔT` the bolted parts stay at `1e-4·E` throughout, between `0.4·ΔT`
+and `0.7·ΔT` it quotes the fraction of `E` actually reached from
+`sboltlaw.F`'s own ramp), a preloaded part carrying `Ismstr=10` (a
 `/XREF`, `/MAT/LAW95` or `/MAT/LAW90` part — `sgrtails.F:1387-1412` shifts a
 preloaded group 10 -> 4 with WARNING 1775, so the preload takes the
 total-strain formulation away again), and a curve whose peak is zero or

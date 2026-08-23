@@ -62,7 +62,7 @@ def _solid_sec_for_part(state: ConversionState, pid: int):
 def _inishe_stress_entries(state: ConversionState):
     """The *INITIAL_STRESS_SHELL records this converter actually writes.
 
-    Returns ``(entries, missing, mismatched)`` where each entry is
+    Returns ``(entries, missing, mismatched, unresolvable)`` where each entry is
     ``(iss, npg, n_eff, ishell)``. PURE — it emits no warnings, so
     ``_make_inistra`` can consult it without duplicating ``_make_inishe``'s
     messages.
@@ -72,16 +72,43 @@ def _inishe_stress_entries(state: ConversionState):
     ``ISIGSH`` flag (hm_read_inistate_d00.F:2000,2105,3177,3266), which switches
     on the layer/Gauss cross-checks that decide whether an initial-STRAIN card
     is legal — see ``_make_inistra``.
+
+    ``unresolvable`` is why the topology test lives here rather than in the
+    writer. The /INISHE reader resolves its shell_IDs through ``UEL2SYS`` over
+    the **4-node shell table only**, so a record naming an element this
+    converter does not emit as a 4-node /SHELL can never be applied — a 3-node
+    shell (emitted /SH3N) and a shell with fewer than 3 distinct corners
+    (dropped by ``_make_parts``, zero area) alike. Writing such a record anyway
+    is not inert: the reader arms ``ISIGSH = 1`` at
+    hm_read_inistate_d00.F:2105 BEFORE it discovers the id is unresolvable
+    (:2124-2127 only bumps ``NONEXIST``), and an armed ISIGSH with no
+    resolvable stress payload takes scigini4.F:285 ``IF (ISIGSH==0) CYCLE`` off
+    the safety path for OTHER elements — measured as a fabricated constant
+    stress (F1 -0.249, M1 1.503 N·mm/mm on a deck that states none) on a
+    strain-only quad whose ``SIGSH(17)`` the STRA_F reader had set to ONE.
+    Dropping the record here keeps the block unarmed, which is what
+    ``_make_inishe``'s warning already tells the author happened. The test is
+    membership of the QUAD list rather than of the tri list, so the two
+    unresolvable topologies cannot drift apart (`#120` class).
     """
+    if not state.ini_stress_shells:
+        return [], [], [], []
     eid2pid = {e.eid: e.pid for e in state.shell_elems}
+    quad_ids, _tri_ids = _split_shell_eids_by_topology(
+        state, [e.eid for e in state.shell_elems])
+    quad_set = set(quad_ids)
     entries: List[Tuple] = []
     missing: List[int] = []
     mismatched: List[int] = []
+    unresolvable: List[int] = []
     for iss in state.ini_stress_shells:
         pid = eid2pid.get(iss.eid)
         sec = _shell_sec_for_part(state, pid) if pid is not None else None
         if sec is None:
             missing.append(iss.eid)
+            continue
+        if iss.eid not in quad_set:
+            unresolvable.append(iss.eid)
             continue
         n_eff = max(2, sec.nip)
         if iss.nthick != n_eff:
@@ -90,17 +117,16 @@ def _inishe_stress_entries(state: ConversionState):
         ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                    state.options.shell_default_ishell)
         entries.append((iss, 4 if ishell in (12, 24) else 1, n_eff, ishell))
-    return entries, missing, mismatched
+    return entries, missing, mismatched, unresolvable
 
 
 def _make_inishe(state: ConversionState) -> List[str]:
-    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB (ILOC=0, the LS-DYNA default:
-    global-frame components) or /INISHE/STRS_F (ILOC=1: element-local).
+    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB.
 
-    Card layouts follow hm_cfg_files inishe_strs_f_glob_sub.cfg
-    FORMAT(radioss2021) and inishe_strs_f_sub.cfg FORMAT(radioss120):
+    Card layout follows hm_cfg_files inishe_strs_f_glob_sub.cfg
+    FORMAT(radioss2021):
       Card1  shell_ID nb_integr npg Thick        (%10d%10d%10d%20lg)
-      Card2  Em Eb [H1 H2 H3]                    (energies unknown → 0)
+      Card2  Em Eb H1 H2 H3                      (energies unknown → 0)
       then nb_integr×npg point records, LAYER-major with the in-plane Gauss
       point innermost (starter hm_read_inistate_d00.F: DO N=1,NIP{DO K=1,NPG}).
     Constraints honoured against the /PROP/SHELL this converter emits:
@@ -111,16 +137,22 @@ def _make_inishe(state: ConversionState) -> List[str]:
         (exact for the layer-averaged data);
       * Thick = 0 keeps the property thickness (guarded by /=ZERO in the
         starter, thickini.F).
-    GLOB carries σzz, eps_p AND the thickness position (pos_nip) 1:1; the
-    local flavour has no σzz/position slot → dropped with a warning.
+
+    **Always the GLOB flavour.** LS-DYNA states the components' frame in the
+    card's own text — "SIGij  Define the ij stress component. The stresses are
+    defined in the GLOBAL cartesian system" (Vol I R17 p.28-98) — and card 1 has
+    exactly EIGHT fields there (EID/SID NPLANE NTHICK NHISV NTENSR LARGE NTHINT
+    NTHHSV; the Keyword971 cfg agrees). There is no ILOCAL on this keyword —
+    that field belongs to *INITIAL_STRAIN_SHELL (p.28-67 card 1 field 8) — so
+    the local /INISHE/STRS_F card has no LS-DYNA source to come from and is not
+    written. GLOB is also the only flavour that carries σzz, eps_p AND the
+    thickness position (pos_nip) 1:1.
     """
     if not state.ini_stress_shells:
         return []
-    entries, missing, mismatched = _inishe_stress_entries(state)
-    glob_entries: List[Tuple] = []
-    loc_entries: List[Tuple] = []
-    for iss, npg, _n_eff, _ishell in entries:
-        (glob_entries if iss.iloc == 0 else loc_entries).append((iss, npg))
+    entries, missing, mismatched, unresolvable = _inishe_stress_entries(state)
+    glob_entries: List[Tuple] = [(iss, npg)
+                                 for iss, npg, _n_eff, _ishell in entries]
     if missing:
         state.warn("*INITIAL_STRESS_SHELL: element(s) "
                    f"{_fmt_eid_list(missing)} not found in the shell mesh — "
@@ -131,77 +163,51 @@ def _make_inishe(state: ConversionState) -> List[str]:
                    f"element(s) {_fmt_eid_list(mismatched)} — the OpenRadioss "
                    "starter rejects such /INISHE records, so these elements were "
                    "skipped. Align NIP and re-run to keep their initial stress.")
-    # Every record goes into /INISHE, whatever the element's topology — but a
-    # 3-node shell leaves this converter as a /SH3N, and the /INISHE reader
-    # resolves its ids through UEL2SYS over the 4-node table only. Such a
-    # record is counted into the starter's NONEXIST tally and dropped. Name it
-    # here rather than leaving the author to decode a shell-count warning.
-    # (Unlike the strain path, /INISHE/STRS_F has no /INISH3 twin in this
-    # writer; adding one is a separate change — the card layout differs.)
-    _q, _tris = _split_shell_eids_by_topology(
-        state, [e.eid for e in state.shell_elems])
-    tri_stress = sorted({iss.eid for iss, _n, _e, _i in entries}
-                        & set(_tris))
-    if tri_stress:
+    # An element this converter does not emit as a 4-node /SHELL cannot be
+    # resolved by the /INISHE reader (UEL2SYS over the 4-node table only), so
+    # its stress can never be applied. The record is NOT written: emitting it
+    # would still arm the reader's global ISIGSH (hm_read_inistate_d00.F:2105
+    # runs before the id is looked up), and an armed ISIGSH with no resolvable
+    # payload fabricates stress on an unrelated element — see
+    # _inishe_stress_entries. (Unlike the strain path, /INISHE/STRS_F has no
+    # /INISH3 twin in this writer; adding one is a separate change — the card
+    # layout differs.)
+    if unresolvable:
         state.warn("*INITIAL_STRESS_SHELL: element(s) "
-                   f"{_fmt_eid_list(tri_stress)} are 3-node shells, emitted as "
-                   "/SH3N. Their records were written into /INISHE/STRS_F, "
-                   "which the starter resolves against the 4-node shell table "
-                   "only — so these ids are not found, are counted into its "
-                   "NONEXIST tally and their initial stress is DROPPED. "
-                   "/INISH3/STRS_F is a different card layout this converter "
-                   "does not write yet; model those elements as quads to keep "
-                   "their initial stress.")
-    if not glob_entries and not loc_entries:
+                   f"{_fmt_eid_list(sorted(set(unresolvable)))} are not emitted "
+                   "as 4-node /SHELL elements — a 3-node shell becomes a /SH3N, "
+                   "and a shell with fewer than 3 distinct corners has zero "
+                   "area and is not written at all. The /INISHE reader resolves "
+                   "its shell_IDs against the 4-node shell table only, so their "
+                   "initial stress is DROPPED — and the record is left OUT of "
+                   "the /INISHE block entirely rather than written and ignored: "
+                   "the reader sets its global ISIGSH flag "
+                   "(hm_read_inistate_d00.F:2105) before it discovers the id is "
+                   "unresolvable, and an armed ISIGSH with no resolvable stress "
+                   "payload makes scigini4.F:285-287 run the global stress "
+                   "reconstruction over slots that hold none — measured as a "
+                   "constant fabricated force/moment on a neighbouring "
+                   "strain-only quad, at 0 starter ERRORS. /INISH3/STRS_F is a "
+                   "different card layout this converter does not write yet; "
+                   "model those elements as quads to keep their initial "
+                   "stress.")
+    if not glob_entries:
         return []
 
-    lines = ["#-  INITIAL STATE (*INITIAL_STRESS_SHELL):", HDR]
-    if glob_entries:
-        lines.append("/INISHE/STRS_F/GLOB")
-        for iss, npg in glob_entries:
-            lines += [
-                "# shell_ID nb_integr       npg               Thick",
-                f"{_i(iss.eid)}{_i(iss.nthick)}{_i(npg)}{_f(0.0)}",
-                "#                 Em                  Eb                  H1                  H2                  H3",
-                _f(0.0) * 5,
-            ]
-            for (t, sxx, syy, szz, sxy, syz, szx, eps) in iss.layers:
-                rec = [f"{_f(sxx)}{_f(syy)}{_f(szz)}",
-                       f"{_f(sxy)}{_f(syz)}{_f(szx)}{_f(eps)}{_f(t)}"]
-                lines += rec * npg      # layer value at each in-plane Gauss point
-        lines.append(HDR)
-    if loc_entries:
-        szz_lost = [iss.eid for iss, _npg in loc_entries
-                    if any(abs(layer[3]) > 0.0 for layer in iss.layers)]
-        if szz_lost:
-            state.warn("*INITIAL_STRESS_SHELL (ILOC=1): the local /INISHE/STRS_F "
-                       "flavour is plane-stress (no sigma_zz slot) — nonzero "
-                       f"SIGZZ dropped on element(s) {_fmt_eid_list(szz_lost)}.")
-        state.warn("*INITIAL_STRESS_SHELL (ILOC=1): the local /INISHE/STRS_F "
-                   "flavour has no thickness-position field — the T coordinates "
-                   "are dropped and the layer ORDER maps onto the property's "
-                   "integration scheme (verify the layer positions match).")
-        lines.append("/INISHE/STRS_F")
-        for iss, npg in loc_entries:
-            lines += [
-                "# shell_ID nb_integr       npg               Thick",
-                f"{_i(iss.eid)}{_i(iss.nthick)}{_i(npg)}{_f(0.0)}",
-            ]
-            if npg <= 1:
-                lines += [
-                    "#                 Em                  Eb                  H1                  H2                  H3",
-                    _f(0.0) * 5,
-                ]
-            else:
-                lines += [
-                    "#                 Em                  Eb",
-                    _f(0.0) * 2,
-                ]
-            for (_t, sxx, syy, _szz, sxy, syz, szx, eps) in iss.layers:
-                rec = [f"{_f(sxx)}{_f(syy)}{_f(sxy)}",
-                       f"{_f(syz)}{_f(szx)}{_f(eps)}"]
-                lines += rec * npg
-        lines.append(HDR)
+    lines = ["#-  INITIAL STATE (*INITIAL_STRESS_SHELL):", HDR,
+             "/INISHE/STRS_F/GLOB"]
+    for iss, npg in glob_entries:
+        lines += [
+            "# shell_ID nb_integr       npg               Thick",
+            f"{_i(iss.eid)}{_i(iss.nthick)}{_i(npg)}{_f(0.0)}",
+            "#                 Em                  Eb                  H1                  H2                  H3",
+            _f(0.0) * 5,
+        ]
+        for (t, sxx, syy, szz, sxy, syz, szx, eps) in iss.layers:
+            rec = [f"{_f(sxx)}{_f(syy)}{_f(szz)}",
+                   f"{_f(sxy)}{_f(syz)}{_f(szx)}{_f(eps)}{_f(t)}"]
+            lines += rec * npg          # layer value at each in-plane Gauss point
+    lines.append(HDR)
     return lines
 
 
@@ -553,7 +559,7 @@ def _make_inistra(state: ConversionState) -> List[str]:
     # Does this deck also emit an initial-STRESS block? That is what sets the
     # starter's global ISIGSH and turns on the cross-checks the plain card form
     # cannot satisfy — see the "Mixed decks" section of the docstring.
-    stress_entries, _sm, _smm = _inishe_stress_entries(state)
+    stress_entries, _sm, _smm, _st = _inishe_stress_entries(state)
     mixed = bool(stress_entries)
     stress_shape = {iss.eid: (n_eff, ishell)
                     for iss, _npg, n_eff, ishell in stress_entries}
@@ -613,9 +619,11 @@ def _make_inistra(state: ConversionState) -> List[str]:
     # A stress-carrying element the strain keyword does not name still enters
     # csigini4's ITHKSHEL==2 branch (SIGSH(17) is set by the STRS_F reader too)
     # and errors out on an empty payload. Make LS-DYNA's implicit "no initial
-    # strain here" explicit for it. Only 4-node shells: this converter writes
-    # every *INITIAL_STRESS_SHELL record into /INISHE, so a /SH3N id in that
-    # block is never resolved by the starter and owns no SIGSH slot.
+    # strain here" explicit for it. ``stress_shape`` holds only records that
+    # actually reach the /INISHE block — _inishe_stress_entries has already
+    # dropped /SH3N ids and NTHICK mismatches — so a companion is never written
+    # for an element that owns no SIGSH slot (which would flip that slot's
+    # SIGSH(17) with nothing behind it).
     if mixed:
         covered = {eid for eid, _n, _p, _s in quad_entries + tri_entries}
         for eid, (n_eff, ishell) in sorted(stress_shape.items()):

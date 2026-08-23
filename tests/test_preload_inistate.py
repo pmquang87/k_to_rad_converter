@@ -201,7 +201,9 @@ class InitialStrainShellTests(unittest.TestCase):
 
     def test_ilocal_is_read_from_cols_71_80_and_warn_dropped(self):
         # cell 8 of "%10d%10d%10d%10d%10s%10s%10s%10d" — three blanks after
-        # LARGE. Reading the stress keyword's ILOC cell (9) would miss it.
+        # LARGE (Vol I R17 p.28-67). This is the ONLY initial-state keyword with
+        # an ILOCAL field; *INITIAL_STRESS_SHELL's card 1 ends at field 8 with
+        # NTHHSV, so a cell-9 read there would be reading nothing LS-DYNA writes.
         card = _row(1, 1, 2) + " " * 49 + "1"
         extra = ("*INITIAL_STRAIN_SHELL\n" + card + "\n"
                  + _row(0.011, 0.022, 0.033, 0.0, 0.0, 0.0, -1.0) + "\n"
@@ -259,6 +261,22 @@ class InitialStrainShellTests(unittest.TestCase):
         self.assertEqual(data[1], f"{_f(0.04)}{_f(0.02)}{_f(0.0)}")
         self.assertEqual(data[3], f"{_f(0.14)}{_f(0.02)}{_f(0.0)}")
         self.assertTrue(any("AVERAGED per through-" in w for w in r.warnings))
+
+    def test_the_nplane_report_does_not_state_the_cards_npg(self):
+        # The handler cannot know the writer's npg: it is 4 on Ishell 12 once
+        # the deck also carries an initial-STRESS block. Asserting npg=1 there
+        # contradicted the emitted card (measured: "1 5 4 0").
+        rows = ([_row(0.01, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0)] * 4
+                + [_row(0.03, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)] * 4)
+        extra = STRESS_5 + ("*INITIAL_STRAIN_SHELL\n" + _row(1, 4, 2) + "\n"
+                            + "\n".join(rows) + "\n")
+        r, starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        card = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")][0]
+        self.assertEqual(int(card[20:30]), 4)          # the card says npg = 4
+        w = [x for x in r.warnings if "AVERAGED per through-" in x]
+        self.assertTrue(w)
+        self.assertNotIn("npg=1", w[0])
 
     def test_more_than_two_stations_keeps_the_extremes_and_warns(self):
         extra = ("*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 3) + "\n"
@@ -717,6 +735,28 @@ class InitialStressSectionTests(unittest.TestCase):
         self.assertIn("ISTIFF=9", w[0])
         self.assertIn("no /PRELOAD slot", w[0])
 
+    def test_both_istiff_spellings_are_named_as_curve_ids(self):
+        # Vol I R17 p.3144 gives BOTH signs as curve ids — "GT.0: Load curve ID
+        # defining stiffness fraction as a function of time" and "LT.0:
+        # |ISTIFF| is the load curve ID for the stiffness fraction as a
+        # function of time"; the sign only selects whether the preload stress is
+        # auto-adjusted +/-10%. The positive spelling used to be reported as a
+        # bare "artificial stiffness" flag, so the reader was never told a
+        # *DEFINE_CURVE reference had been dropped.
+        for istiff, cid in ((9, "9"), (-9, "9")):
+            with self.subTest(istiff=istiff):
+                r, _s = _convert(_bar_deck(
+                    iss_card=_row(7, 1, 1, 0, 0, 0, istiff)))
+                w = [x for x in r.warnings if f"ISTIFF={istiff}" in x]
+                self.assertTrue(w, list(r.warnings)[:4])
+                self.assertIn("*DEFINE_CURVE id in BOTH spellings", w[0])
+                self.assertIn(f"curve {cid} is the fraction", w[0])
+        # Only the negative spelling claims the id is quoted un-offset.
+        rp, _sp = _convert(_bar_deck(iss_card=_row(7, 1, 1, 0, 0, 0, 9)))
+        rn, _sn = _convert(_bar_deck(iss_card=_row(7, 1, 1, 0, 0, 0, -9)))
+        self.assertFalse(any("un-offset" in x for x in rp.warnings))
+        self.assertTrue(any("un-offset" in x for x in rn.warnings))
+
     def test_missing_curve_emits_nothing(self):
         r, starter = _convert(_bar_deck(iss_card=_row(7, 1, 99, 0, 0, 0, 0)))
         self.assertEqual(_headers(starter, "/PRELOAD/"), [])
@@ -1124,12 +1164,17 @@ class CorpusCarrierTests(unittest.TestCase):
 
 
 #: *INITIAL_STRESS_SHELL on element 2 with NTHICK = 5, matching SHELLS' NIP.
-#: Card 1 is EID NPLANE NTHICK NHISV LARGE ILOCAL; then T sig_xx sig_yy sig_zz
-#: sig_xy sig_yz sig_zx eps_p per station.
+#: Card 1 is EID/SID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV — eight
+#: fields, Vol I R17 p.28-95; then T sig_xx sig_yy sig_zz sig_xy sig_yz sig_zx
+#: eps_p per station.
 STRESS_5 = ("*INITIAL_STRESS_SHELL\n" + _row(2, 1, 5) + "\n"
             + "".join(_row(round(-1.0 + 0.5 * k, 4), 100.0 + 2.5 * k,
                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
                       for k in range(5)))
+
+#: The same record moved onto element 3 — SHELLS' collapsed triangle, which
+#: this converter emits as a /SH3N.
+STRESS_5_ON_THE_TRI = STRESS_5.replace(_row(2, 1, 5), _row(3, 1, 5), 1)
 
 
 class MixedStressAndStrainTests(unittest.TestCase):
@@ -1234,6 +1279,94 @@ class MixedStressAndStrainTests(unittest.TestCase):
         self.assertIsNotNone(_block(starter, "/INISHE/STRS_F/GLOB"))
 
 
+class TriangleStressRecordTests(unittest.TestCase):
+    """An *INITIAL_STRESS_SHELL record on a 3-node shell.
+
+    The element leaves this converter as a /SH3N and the /INISHE reader resolves
+    its shell_IDs through UEL2SYS over the 4-node table only, so the record can
+    never be applied — the converter has always said so. Writing it anyway is
+    NOT inert: hm_read_inistate_d00.F:2105 arms the global ``ISIGSH`` before the
+    id is looked up (:2124-2127 only bumps NONEXIST), and scigini4.F:285-287
+    then runs the GLOBAL stress reconstruction for every element whose
+    ``SIGSH(17)`` the /STRA_F reader set to ONE — over slots that hold no
+    stress. Measured on the real starter/engine: a strain-only quad beside such
+    a record reads a constant F1 = -0.249, F2 = -0.248, M1 = 1.503 for all 163
+    states on a deck that states no stress at all, at 0 starter ERRORS and
+    NORMAL TERMINATION; deleting the one unresolvable record gives exactly 0.0
+    on every channel with the strain unchanged.
+    """
+
+    def test_a_tri_stress_record_is_dropped_from_the_inishe_block(self):
+        r, starter = _convert(SHELLS.replace("{EXTRA}", STRESS_5_ON_THE_TRI))
+        self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
+        self.assertEqual(_headers(starter, "/INISH3/STRS_F"), [])
+        self.assertTrue(any("not emitted as 4-node /SHELL" in w
+                            and "DROPPED" in w and "ISIGSH" in w
+                            for w in r.warnings), list(r.warnings)[:4])
+
+    def test_a_degenerate_shell_stress_record_is_dropped_too(self):
+        # The same hazard on the sibling topology: a shell with fewer than 3
+        # distinct corners has zero area and _make_parts writes NO element for
+        # it, so its id is just as unresolvable to the /INISHE reader as a
+        # /SH3N's. Gating on "is it a tri" instead of "is it an emitted quad"
+        # would leave this one armed (the `#120` class).
+        deck = SHELLS.replace(
+            "       3       1       5       7       6       6\n",
+            "       3       1       5       5       6       6\n")
+        r, starter = _convert(deck.replace("{EXTRA}", STRESS_5_ON_THE_TRI))
+        # element 3 is written nowhere: not as /SHELL, not as /SH3N.
+        emitted = [int(ln[:10]) for hdr in ("/SHELL/1", "/SH3N/1")
+                   for ln in (_block(starter, hdr) or [])
+                   if not ln.startswith("#")]
+        self.assertEqual(sorted(emitted), [1, 2])
+        self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
+        self.assertTrue(any("not emitted as 4-node /SHELL" in w
+                            for w in r.warnings), list(r.warnings)[:4])
+
+    def test_a_tri_stress_record_does_not_make_a_strain_deck_mixed(self):
+        # With the unresolvable record gone the deck carries no initial-STRESS
+        # block at all, so ISIGSH stays 0 and the strain card keeps its compact
+        # nb_integr=2 / npg=1 form — no npg=4, no re-sampling onto the property
+        # N, and no all-zero companion record for the tri.
+        extra = STRESS_5_ON_THE_TRI + ("*INITIAL_STRAIN_SHELL\n"
+                                       + _row(1, 1, 2) + "\n"
+                                       + _row(0.0, 0, 0, 0, 0, 0, -1.0) + "\n"
+                                       + _row(0.02, 0, 0, 0, 0, 0, 1.0) + "\n")
+        r, starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
+        cards = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                 if not ln.startswith("#")]
+        # Exactly ONE record (element 1), nb_integr 2, npg 1, then its two
+        # stations — 1 header + 2*2 payload rows.
+        self.assertEqual(len(cards), 5, cards)
+        self.assertEqual([int(cards[0][0:10]), int(cards[0][10:20]),
+                          int(cards[0][20:30])], [1, 2, 1])
+        self.assertFalse(any("all-zero" in w and "/INISHE/STRA_F/GLOB record "
+                             "was added" in w for w in r.warnings))
+
+    def test_a_quad_stress_record_beside_a_tri_one_still_arms_the_mixed_form(self):
+        # The drop is scoped to the unresolvable id: a resolvable quad record in
+        # the same block keeps the deck mixed, so the strain card must still
+        # carry npg=4 / nb_integr=N. Otherwise this fix would silently undo the
+        # ERROR 26 / ERROR 1904 repair.
+        extra = STRESS_5 + STRESS_5_ON_THE_TRI + (
+            "*INITIAL_STRAIN_SHELL\n" + _row(1, 1, 2) + "\n"
+            + _row(0.0, 0, 0, 0, 0, 0, -1.0) + "\n"
+            + _row(0.02, 0, 0, 0, 0, 0, 1.0) + "\n")
+        _r, starter = _convert(SHELLS.replace("{EXTRA}", extra))
+        stress = [ln for ln in _block(starter, "/INISHE/STRS_F/GLOB")
+                  if not ln.startswith("#")]
+        self.assertEqual(int(stress[0][0:10]), 2)          # only the quad
+        strain = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                  if not ln.startswith("#")]
+        self.assertEqual([int(strain[0][10:20]), int(strain[0][20:30])], [5, 4])
+        # ... and the companion goes to quad 2, never to the dropped tri.
+        # A card-1 row is 3 ids + Thick = 10+10+10+20 chars; a payload row is
+        # 60 or 80.
+        heads = [int(ln[0:10]) for ln in strain if len(ln) == 50]
+        self.assertEqual(sorted(heads), [1, 2])
+
+
 class BlankThicknessColumnTests(unittest.TestCase):
     def test_two_stations_with_a_blank_t_column_report_the_inference(self):
         # Both rows leave T blank, but their values DIFFER — so a real
@@ -1299,6 +1432,47 @@ class PreloadWarningGateTests(unittest.TestCase):
         self.assertTrue(any("PENTA solids" in w for w in r.warnings),
                         [w for w in r.warnings][:3])
 
+    def test_a_tet_spelled_with_trailing_zeros_is_not_a_penta(self):
+        # mesh.py routes any solid with 4 DISTINCT nodes to /TETRA4, a card
+        # that has no cells 7-8 at all — but `n1 n2 n3 n4 0 0 0 0` still has
+        # zeros in the raw LS-DYNA row, so classifying on the connectivity
+        # instead of on the emitted family called it a PENTA. Measured: such a
+        # deck emits /TETRA4 rows and the starter echoes AREA 1.000E+00,
+        # exactly like the `n1 n2 n3 n4 n4 n4 n4 n4` spelling and the all-hex
+        # twin — so the warning prescribed a remesh on a bolt that
+        # pre-tensions correctly (SBOLTINI IS reached from s4init3).
+        deck = _bar_deck()
+        out = []
+        for ln in deck.splitlines():
+            # The bar's second brick is the cut one. Keep 3 nodes of its lower
+            # face plus 1 of its upper face (a real tet straddling the cut
+            # plane) and BLANK cells 5-8.
+            if ln.startswith(f"{2:>8}{1:>8}") and len(ln) >= 80:
+                ln = ln[:40] + ln[48:56] + f"{0:>8}" * 4
+            out.append(ln)
+        r, starter = _convert("\n".join(out) + "\n")
+        self.assertIn("/TETRA4/1", starter)
+        self.assertFalse(any("PENTA solids" in w for w in r.warnings),
+                         [w for w in r.warnings if "PENTA" in w])
+        self.assertNotEqual(_headers(starter, "/PRELOAD/"), [])
+
+    def test_the_penta_message_names_both_failure_modes(self):
+        # ISOLNOD=6 under a solid property is ERROR 3107 at every Isolid but
+        # 24 (initia.F:1081-1094), and a silent zero-preload at 24 — the
+        # message used to claim the silent case unconditionally, while this
+        # converter emits Isolid 17 for *SECTION_SOLID ELFORM 1.
+        deck = _bar_deck()
+        out = []
+        for ln in deck.splitlines():
+            if ln.startswith(f"{2:>8}{1:>8}") and len(ln) >= 80:
+                ln = ln[:64] + f"{0:>8}{0:>8}"
+            out.append(ln)
+        r, _s = _convert("\n".join(out) + "\n")
+        msg = [w for w in r.warnings if "PENTA solids" in w]
+        self.assertEqual(len(msg), 1, list(r.warnings)[:4])
+        self.assertIn("ERROR ID 3107", msg[0])
+        self.assertIn("ISOLID = 24", msg[0])
+
     def test_isolid_warning_fires_on_an_unsupported_hourglass_choice(self):
         # *CONTROL_HOURGLASS IHQ=6 -> Isolid 24, measured to DIVERGE after
         # 0.7*(Tstop-Tstart) (1266 -> 1370 MPa against a 200 MPa target).
@@ -1330,6 +1504,24 @@ class PreloadWarningGateTests(unittest.TestCase):
         # stiffness back, silently.
         r, _s = _convert(_bar_deck(curve_pts=((0.0, 0.0), (1.0, 1.0))))
         self.assertTrue(any("AFTER the run ends" in w for w in r.warnings))
+        # ENDTIM 4e-4 is far below Tstart+0.4*dT = 0.4, so the run really does
+        # end inside the HOLD phase: 1e-4 of E throughout.
+        w = [x for x in r.warnings if "AFTER the run ends" in x][0]
+        self.assertIn("still in its HOLD phase", w)
+        self.assertIn("~10000x", w)
+
+    def test_a_run_ending_on_the_stiffness_ramp_quotes_the_fraction(self):
+        # sboltlaw.F:120-127 REDUC = 1e-4*(1-w) + w for T1 < TT < T2, so a run
+        # that ends between 0.4*dT and 0.7*dT is soft by far LESS than 1e4.
+        # ENDTIM = 4e-4 with Tstop = 8e-4 puts it at w = (4-3.2)/(5.6-3.2) =
+        # 1/3, i.e. REDUC = 1e-4*2/3 + 1/3 = 0.3334 — measured 0.328 on the
+        # real engine with a fully prescribed hexa.
+        r, _s = _convert(_bar_deck(curve_pts=((0.0, 0.0), (8.0e-4, 1.0))))
+        w = [x for x in r.warnings if "AFTER the run ends" in x]
+        self.assertTrue(w, list(r.warnings)[:4])
+        self.assertIn("part-way UP the stiffness ramp", w[0])
+        self.assertNotIn("~10000x", w[0])
+        self.assertIn("0.3334", w[0])
 
     def test_a_window_inside_the_run_is_not_flagged(self):
         r, _s = _convert(_bar_deck())

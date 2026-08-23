@@ -2289,12 +2289,16 @@ class InitialDetonation:
 
 @dataclass
 class InitialStressShell:
-    """*INITIAL_STRESS_SHELL (one element's record) → /INISHE/STRS_F[/GLOB].
+    """*INITIAL_STRESS_SHELL (one element's record) → /INISHE/STRS_F/GLOB.
 
     ``layers`` holds one tuple per through-thickness integration point:
     (t, sxx, syy, szz, sxy, syz, szx, eps) — t is the normalized [-1,1]
-    thickness coordinate, the stress components are in the system selected by
-    ``iloc`` (LS-DYNA default 0 = GLOBAL cartesian; 1 = element-local).
+    thickness coordinate. The components are ALWAYS the global cartesian ones:
+    this keyword has no local option ("SIGij  Define the ij stress component.
+    The stresses are defined in the GLOBAL cartesian system", Vol I R17
+    p.28-98) and its card 1 carries exactly the eight fields EID/SID NPLANE
+    NTHICK NHISV NTENSR LARGE NTHINT NTHHSV (p.28-95). ILOCAL belongs to
+    *INITIAL_STRAIN_SHELL, not here.
     NPLANE in-plane points have already been averaged per layer by the handler
     (warned there). ``nthick`` is kept for the writer's /PROP/SHELL-N
     consistency check (the OpenRadioss starter ERRORs on a mismatch, so the
@@ -2303,7 +2307,6 @@ class InitialStressShell:
     eid: int
     nplane: int
     nthick: int
-    iloc: int
     layers: List[Tuple[float, float, float, float, float, float, float, float]] \
         = field(default_factory=list)
 

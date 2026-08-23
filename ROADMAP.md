@@ -309,7 +309,12 @@ shipped, so the marginal cost is small.
   `(SFST*SST + SFMT*MST)/2 < 0` → `/INTER/TYPE10` penalty tie (else TYPE2) —
   **done** (dyna2rad cc:220).
 - `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE / /INIBRI —
-  **done** (GLOB/local flavours, layer-count checks per the starter readers).
+  **done** (the GLOB flavours, layer-count checks per the starter readers).
+  Always GLOB: both keywords define their components in the global cartesian
+  system (Vol I R17 p.28-98 / p.28-105) and neither card carries a local flag —
+  `*INITIAL_STRESS_SHELL` card 1 is the eight fields `EID/SID NPLANE NTHICK
+  NHISV NTENSR LARGE NTHINT NTHHSV` and nothing after them, so an ILOC read from
+  cols 81-90 was a field LS-DYNA does not define (now reported + ignored).
   Original note: — the per-integration-point `/INISTATE` blocks are verbose and
   version-specific; the layer-count-must-match-property constraint and stress
   component/frame order need cfg validation.
@@ -347,9 +352,14 @@ shipped, so the marginal cost is small.
   `*INITIAL_STRESS_SHELL`/`_SOLID` gap in `_OFFSET_SPECS` (their element ids
   are not offset inside an `*INCLUDE_TRANSFORM`; the generic unmapped-keyword
   warning fires); and `/INISH3/STRS_F` — an `*INITIAL_STRESS_SHELL` record on a
-  3-node shell is written into `/INISHE`, which the starter resolves against the
-  4-node table only, so it is dropped into its NONEXIST tally (now warned; the
-  /SH3N stress card is a different layout).
+  3-node shell has no card this writer can put it on, since the /INISHE reader
+  resolves shell_IDs against the 4-node table only. Such a record is warned and
+  left OUT of the /INISHE block entirely, not written and ignored: writing it
+  arms the reader's global `ISIGSH` before the id lookup
+  (`hm_read_inistate_d00.F:2105`) and an armed `ISIGSH` with no resolvable
+  payload makes `scigini4.F:285-287` fabricate stress on a neighbouring
+  strain-only element at 0 starter ERRORS (measured). Writing the /SH3N stress
+  card — a different layout — is the open item.
 
 *Rationale:* these are the recurring building blocks of automotive crash decks;
 covering them unlocks a large class of real models.
