@@ -868,6 +868,19 @@ class MuscleTimeHistoryTests(unittest.TestCase):
         self.assertIn("/TH/BEAM", starter)
         self.assertNotIn("/TH/SPRING", starter)
 
+    def test_cross_section_plane_leaves_the_rerouted_beam_out(self):
+        # The muscle beam runs 0 -> 50 along x and is a /SPRING in the emitted
+        # deck, so its eid in a /GRBEAM/BEAM group matches nothing: starter
+        # WARNING 534 "BEAM GROUP ... GROUP IS EMPTY", and the section loses
+        # it either way. It is left out and the loss is named.
+        extra = ("*DATABASE_CROSS_SECTION_PLANE\n"
+                 + _row(0, 25.0, 0.0, 0.0, 26.0, 0.0, 0.0) + "\n"
+                 "*DATABASE_SECFORC\n" + _row(1.0e-5) + "\n")
+        r, starter = _convert(_muscle156(extra=extra))
+        self.assertNotIn("/GRBEAM/BEAM", starter)
+        self.assertIn("re-routes them to a SPRING connector",
+                      " ".join(r.warnings))
+
     def test_deforc_leaves_the_all_zero_muscle_channel_out(self):
         extra = "*DATABASE_DEFORC\n" + _row(1.0e-5) + "\n"
         r, starter = _convert(_muscle_s15(fpe=0.0, extra=extra))
@@ -1178,6 +1191,22 @@ class ThermalEmitTests(unittest.TestCase):
         self.assertIn("/MAT/ELAST/", starter)
         self.assertNotIn("/MAT/LAW36/", starter)
         self.assertNotIn("is RESTATED as /MAT/LAW36", " ".join(r.warnings))
+
+    def test_an_initial_stress_record_blocks_the_restatement(self):
+        # The #127 mixed-deck rule: /INISHE carries one station per
+        # THROUGH-THICKNESS integration point and the count is cross-checked
+        # against /PROP/SHELL N, which the restatement would move from 0
+        # (global integration) to N.
+        ini = ("*INITIAL_STRESS_SHELL\n" + _row(1, 1, 2, 0, 0, 0) + "\n"
+               + _row16(-0.5, 10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+               + _row16(0.5, 10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+        r, starter = _convert(self.SHELL.replace(
+            "{EXTRA}", CARRIER_EXPANSION + DRIVER + ini))
+        self.assertIn("/MAT/ELAST/1", starter)
+        self.assertNotIn("/MAT/LAW36/", starter)
+        w = " ".join(r.warnings)
+        self.assertIn("*INITIAL_STRESS_SHELL / *INITIAL_STRAIN_SHELL", w)
+        self.assertIn("The law is left as LAW1", w)
 
     def test_a_shell_without_the_expansion_card_keeps_law1(self):
         r, starter = _convert(self.SHELL.replace("{EXTRA}", ""))

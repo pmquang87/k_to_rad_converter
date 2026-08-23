@@ -622,6 +622,27 @@ def _resolve_expansion(state: ConversionState) -> None:
 _FAR_YIELD_OVER_E = 1.0e3
 
 
+def _has_initial_state(state: ConversionState, pids: Set[int]) -> bool:
+    """True when any shell on *pids* carries an /INISHE stress or strain
+    record — directly or through a ``*SET_SHELL``."""
+    if not (state.ini_stress_shells or state.ini_strain_shells):
+        return False
+    # state.shell_elems holds every *ELEMENT_SHELL, quads and 3-node tris
+    # alike (the /SHELL vs /SH3N split happens at the write line).
+    eids = {e.eid for e in state.shell_elems if e.pid in pids}
+    for rec in state.ini_stress_shells:
+        if rec.eid in eids:
+            return True
+    for rec in state.ini_strain_shells:
+        if getattr(rec, "is_set", False):
+            members = state.shell_sets.get(rec.eid)
+            if members and set(members[1]) & eids:
+                return True
+        elif rec.eid in eids:
+            return True
+    return False
+
+
 def _restate_law1_shells(state: ConversionState, mid: int) -> None:
     """A ``*MAT_ELASTIC`` SHELL part cannot expand under /MAT/LAW1 — restate it
     as /MAT/LAW36 with a far-yield flat curve.
@@ -672,6 +693,28 @@ def _restate_law1_shells(state: ConversionState, mid: int) -> None:
     shell_pids = {e.pid for e in state.shell_elems}
     if not all(p in shell_pids or state.parts[p].secid in state.sec_shells
                for p in pids):
+        return
+    if _has_initial_state(state, set(pids)):
+        # The #127 mixed-deck rule. An /INISHE record carries one stress or
+        # strain station per THROUGH-THICKNESS integration point, and the
+        # writer cross-checks that count against the /PROP/SHELL N
+        # (hm_read_inistate_d00.F's npg/nb_integr checks answer ERROR 26 +
+        # ERROR 1904 on a mismatch). Restating LAW1 -> LAW36 turns a globally
+        # integrated shell (N forced to 0) into an N-point one, which moves
+        # exactly that count. Two cards that share a reader flag must be
+        # validated together or not combined at all — so the law is left alone
+        # and the inertness is reported instead.
+        state.warn(
+            f"*MAT_ELASTIC {mid} carries a thermal expansion on shell part(s) "
+            f"{pids}, but those parts also carry *INITIAL_STRESS_SHELL / "
+            "*INITIAL_STRAIN_SHELL records. Restating the material as "
+            "/MAT/LAW36 (which is what would let a LAW1 shell expand at all) "
+            "would change the shell from GLOBAL integration to N "
+            "through-thickness points, and an /INISHE record's station count "
+            "is cross-checked against exactly that N. The law is left as LAW1, "
+            "so the thermal expansion on these parts is INERT — give them "
+            "their own material and restate it by hand, or drop the initial "
+            "state, if the expansion matters.")
         return
     sigy = _FAR_YIELD_OVER_E * mat.E
     if sigy <= 0.0:
