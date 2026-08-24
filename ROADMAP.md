@@ -20,6 +20,24 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   the impact/blast materials `*MAT_JOHNSON_HOLMQUIST_CERAMICS`/`_CONCRETE` →
   `/MAT/LAW79`/`LAW126` and `*MAT_ELASTIC_FLUID` → `/MAT/LAW6` +
   `/EOS/POLYNOMIAL`.
+- **Tier 2 (rare materials):** `*MAT_SHAPE_MEMORY` / `*MAT_030` →
+  `/MAT/LAW71` (superelastic SMA; `ALPHA` copied 1:1 against the two closed
+  forms — dyna2rad's `sqrt(2/3)·ALPHA` is a d2r defect — with the range guard at
+  LS-DYNA's own `|ALPHA| < sqrt(2/3)` bound, `YMRT → E_mart` — the slot
+  dyna2rad's `"YMTR"` typo never writes, temperature terms deliberately blank,
+  the curve form of the four transformation stresses warn-skipped by name).
+  `*MAT_MUSCLE` / `*MAT_156` and `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
+  `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`, routed by the PROPERTY the part
+  carries (truss vs discrete) and validated against the engine force law to 7
+  digits. Radioss has no truss element, so the axial-only muscle becomes a
+  spring — which is what an LS-DYNA truss states anyway.
+  `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` + `/HEAT/MAT` with the
+  minimal temperature-driver foothold (`/INITEMP`, `/IMPTEMP`); a `*MAT_ELASTIC`
+  material whose every part is a SHELL is restated as `/MAT/LAW36` with a
+  far-yield curve, because LAW1 runs global integration and cannot expand at all
+  (measured 2.7e-07 mm against 0.012 mm; the restatement is elastically neutral
+  to +0.035 % and costs −4.6 % of time step). See the Tier 4 *Thermal* entry for
+  what is done and what stays open.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
@@ -643,15 +661,17 @@ covering them unlocks a large class of real models.
   the belt only made more visible:
 
   * **`*DATABASE_CROSS_SECTION_PLANE` cannot cut a belt.** `inistate.py`'s cut
-    walk covers shell / solid / tshell / beam and has no spring arm, and
-    `_make_cross_sections` writes `grsprg_ID` as a hard `0` even though the
-    `/SECT` card carries a spring group (its own docstring lists
-    `grbric`/`grshel`/`grtrus`/`grbeam`/`grsprg`/`grtria`). So a section plane
-    through a shoulder belt reports no belt force — exactly the quantity a
-    restraint section is usually drawn for. Pre-existing for every `/SPRING`
-    family (`*ELEMENT_DISCRETE` included), not introduced by the belt batch;
-    fixing it means a belt + discrete arm in the walk and a `/GRSPRING` group
-    behind `grsprg_ID`.
+    walk covers shell / solid / tshell / beam and has no spring arm, so a
+    section plane through a shoulder belt reports no belt force — exactly the
+    quantity a restraint section is usually drawn for. Pre-existing for every
+    `/SPRING` family (`*ELEMENT_DISCRETE` included), not introduced by the belt
+    batch. **Half done** (rare-materials verification round): `grsprg_ID` is no
+    longer a hard `0` — a BEAM whose material re-routes it to a `/SPRING`
+    (`*MAT_MUSCLE`, `*MAT_SPOTWELD`, ELFORM-6) now goes into a `/GRSPRI/SPRI`
+    group behind that column, starter-validated at 0 errors and engine-measured
+    to carry real `/TH/SECTIO` data where the old deck wrote exact zeros. What
+    remains is the CUT WALK: belts and `*ELEMENT_DISCRETE` springs still have no
+    arm in `_plane_cut`, so a plane never finds them in the first place.
   * **`--auto-gapmin` still does not measure BEAM or `*ELEMENT_DISCRETE`
     clearance.** The 1D belt arm was added to `gapmin._part_nodes_map` in the
     verification round; those two families remain missing there for the same
@@ -687,9 +707,31 @@ validated foundation for further linear analyses:
   **done** (consistent-membrane K_g, SSSS-plate-validated to 2.2 % at 8x8);
   a rigorous solid-element K_g remains open.
 - **Harmonic / FRF output** — **done** (`tools/modal_frf.py`).
-- **Thermal** *(remaining)* — a separate Radioss `/HEAT` / `/THERM_STRESS`
-  solver path; larger, lower priority unless coupled thermo-mechanical decks are
-  in scope.
+- **Thermal** — *partly done.* The RARE MATERIALS batch shipped the
+  thermal-EXPANSION path plus the minimal temperature-driver foothold that makes
+  it verifiable: `*MAT_ADD_THERMAL_EXPANSION` → `/THERM_STRESS/MAT` +
+  `/HEAT/MAT` (with the material split a per-PART card on a shared MID needs),
+  `*MAT_THERMAL_ISOTROPIC` via `*PART` TMID → the `/HEAT/MAT` values,
+  `*INITIAL_TEMPERATURE[_SET|_NODE]` → `/INITEMP`, and
+  `*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]` +
+  `*BOUNDARY_TEMPERATURE[_SET|_NODE]` → `/IMPTEMP`, with `/TH/NODE TEMP` and
+  `/ANIM/NODA/TEMP` gated on a real thermal solve. Engine-validated to −0.11 %
+  on the free bar and −0.135 % on the clamped one against `α·ΔT·L`.
+  **Still open (Milestone 2):** the thermal SOLVER controls
+  (`*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}` → the `/THERM` engine cards
+  and `/DTTHERM`), the flux/convection/radiation boundaries
+  (`*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]` → `/IMPFLUX`, `/CONVEC`,
+  `/RADIATION`), the richer thermal materials (`*MAT_THERMAL_CWM`,
+  `_ORTHOTROPIC`, `_ISOTROPIC_TD`, `_ISOTROPIC_TD_LC`), the per-element and
+  per-section temperature spellings (`*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT`,
+  `_VARIABLE_{BEAM,SHELL}`, `*LOAD_THERMAL_RSW`) and the external-field loads
+  (`*LOAD_THERMAL_D3PLOT`, `_BINOUT`, `_TOPAZ`) — every one of them recognized
+  and named in the conversion log today. Two measured limits remain: a
+  `*MAT_ELASTIC` shell is restated as `/MAT/LAW36` so it CAN expand, but a
+  material shared between shell and solid parts is left on LAW1 and its
+  expansion stays inert on the shells; and the solid path diverges when a run
+  of elements is free to TRANSLATE laterally as a group — the cure is one
+  lateral anchor per cross-section (an end clamp is NOT the trigger).
 
 *Rationale:* these extend the proven modal machinery rather than opening a new
 solver path, so risk is contained.

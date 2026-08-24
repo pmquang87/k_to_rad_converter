@@ -2464,7 +2464,7 @@ def _make_seatbelts(state: ConversionState) -> List[str]:
                 # Registered AT the line that writes the row, never from
                 # `belts`: the `continue` above skips an element whose nodes
                 # the deck does not define, and a /TH/SPRING naming an id that
-                # was never written is starter ERROR 69 — producer 8 of 8.
+                # was never written is starter ERROR 69 — producer 8 of 9.
                 state.spring_elem_ids.add(e.eid)
                 emitted_eids.add(e.eid)
             if dropped:

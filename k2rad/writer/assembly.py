@@ -24,7 +24,11 @@ from .materials import (
     _resolve_mat_foams,
     _resolve_mat_plas_tab,
     _resolve_mat_power_law,
+    _resolve_mat_shape_memory,
 )
+from .muscle import _make_muscle_springs
+from .thermal import (_make_thermal, _resolve_thermal,
+                      _thermal_solve_active)
 from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
@@ -486,6 +490,12 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     # ── Nodal scalar outputs ──────────────────────────────────────
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
+    # Nodal temperature, ONLY when the deck really runs a thermal solve (a
+    # /HEAT/MAT AND a driver). The #122 rule: /ANIM and /TH temperature
+    # channels on a deck with no thermal solve are accepted, run clean and
+    # write state after state of exactly 0.0.
+    if _thermal_solve_active(state):
+        lines.append("/ANIM/NODA/TEMP")
     if state.db_blstfor_dt and state.blast_segment_loads:
         # *DATABASE_BINARY_BLSTFOR: nodal blast-pressure fringe (element
         # /LOAD/PBLAST pressures averaged onto the loaded-surface nodes).
@@ -890,6 +900,24 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # claiming they have no /MAT at all.
     _resolve_mat_impact(state)
 
+    # Rare materials batch (*MAT_030 -> /MAT/LAW71). Synthesizes no curve and
+    # no id, so its placement does not move the /FUNCT numbering; it only
+    # reports the three hard starter guards (ERROR 1122/1123/1124) and the
+    # E_mart sanity check. Before _resolve_xref_parts below: LAW71 is NOT on
+    # the starter's solid-/XREF law whitelist, so its _target_mat_law entry is
+    # what makes that gate warn-skip such parts NAMING the law instead of
+    # claiming they have no /MAT at all.
+    _resolve_mat_shape_memory(state)
+
+    # Thermal expansion + the temperature drivers. MUST run BEFORE
+    # _make_functions (it registers the synthesized coefficient and driver
+    # curves in state.curves) and before _make_materials (it can SPLIT a
+    # material that is shared by a part the *MAT_ADD_THERMAL_EXPANSION card
+    # does not name, which changes what that writer emits and what
+    # _target_mat_law answers). It allocates /FUNCT ids, so it is placed after
+    # every other curve-synthesizing pass to keep their numbering unchanged.
+    _resolve_thermal(state)
+
     # Airbag fabric (*MAT_FABRIC → /MAT/LAW19 + /PROP/TYPE9, or /MAT/LAW58 +
     # /PROP/TYPE16). Routes the law from FORM + the card-7 curves, fills the
     # derived moduli and names every dropped field. Synthesizes no curve and no
@@ -1101,6 +1129,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
+    _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
@@ -1409,6 +1438,50 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "*MAT_* cards.")
 
 
+#: ``/HEAT/MAT/<mid>`` and ``/THERM_STRESS/MAT/<mid>`` — a THIRD id namespace,
+#: and one ``_MAT_CARD_LAW_ID_RE`` deliberately does not see (three path
+#: segments, and the middle one is not a law spelling).
+_THERMAL_MAT_CARD_ID_RE = re.compile(
+    r"^/(HEAT|THERM_STRESS)/MAT/(\d+)\s*$")
+
+
+def _warn_duplicate_thermal_ids(state: ConversionState,
+                                lines: List[str]) -> None:
+    """One ``/HEAT/MAT`` and one ``/THERM_STRESS/MAT`` per MATERIAL id.
+
+    The sibling of :func:`_warn_duplicate_mat_ids` for the thermal subobject
+    namespaces, added with the thermal-expansion batch for exactly the reason
+    that one exists: ``*MAT_ADD_THERMAL_EXPANSION`` is keyed on a PART while
+    both Radioss cards are keyed on a MATERIAL, so two cards naming two parts
+    that share one MID are the natural way to emit either card twice — which is
+    the #125 ``/PROP/TYPE23`` failure, one namespace over. dyna2rad does
+    exactly that and the starter does NOT refuse it: measured, two
+    ``*MAT_ADD_THERMAL_EXPANSION`` cards on one MID give ONE echoed block
+    carrying the FIRST card's values and no duplicate-id error at all, so the
+    second card is silently lost.
+
+    writer/thermal.py keys both on a per-mid dict, so a duplicate cannot arise
+    from there; this removes the CLASS, so a later writer cannot make the loss
+    silent again. Changes no output.
+    """
+    seen: Dict[Tuple[str, int], int] = {}
+    for ln in lines:
+        m = _THERMAL_MAT_CARD_ID_RE.match(ln)
+        if m:
+            key = (m.group(1), int(m.group(2)))
+            seen[key] = seen.get(key, 0) + 1
+    for (kind, mid), n in sorted(seen.items()):
+        if n > 1:
+            state.warn(
+                f"/{kind}/MAT/{mid} is emitted {n} times. Both cards are keyed "
+                "on a MATERIAL id while *MAT_ADD_THERMAL_EXPANSION is keyed on "
+                "a PART, so two cards naming parts that share one MID produce "
+                "the duplicate. The starter does not refuse it - it reads the "
+                "FIRST block and silently drops the rest - so the second card's "
+                "coefficient or thermal properties are lost without a "
+                "diagnostic of any kind.")
+
+
 def _warn_duplicate_preload_ids(state: ConversionState,
                                 lines: List[str]) -> None:
     """``/PRELOAD`` and ``/PRELOAD/AXIAL`` share ONE starter id namespace.
@@ -1664,6 +1737,16 @@ def _starter_section_registry():
         ("rigid_walls",       lambda c: _make_rigid_walls(c.state)),
         ("modal_dummy_cload", lambda c: _make_modal_dummy_cload(c.state, c.rigid_nodes)),
         ("discrete_springs",  lambda c: _make_discrete_springs(c.state)),
+        # *MAT_MUSCLE truss parts and *MAT_SPRING_MUSCLE discrete parts:
+        # /PART + /PROP/TYPE46 (SPR_MUSCLE) + /SPRING, plus the synthesized
+        # /FUNCTs the four function slots need (written INLINE here, because
+        # the single /FUNCT emitter runs at the "functions" step far above).
+        ("muscle_springs",    lambda c: _make_muscle_springs(c.state)),
+        # /HEAT/MAT + /THERM_STRESS/MAT (both keyed on the MATERIAL id) and the
+        # /INITEMP / /IMPTEMP drivers with their /GRNODs. After the materials
+        # they attach to and after the connector sections, whose /GRNOD ids come
+        # from the same auto-id stream.
+        ("thermal",           lambda c: _make_thermal(c.state)),
         ("plotel_elements",   lambda c: _make_plotel_elements(c.state)),
         ("spotweld_beams",    lambda c: _make_spotweld_beam_connectors(c.state)),
         # ELFORM=6 discrete beams: their /PART + spring property come from here,

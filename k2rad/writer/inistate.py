@@ -1621,7 +1621,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         title = cs.title or f"SECT_{sect_id}"
         grnod_id = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"{title}_nodes", nids)
-        grshel_id = grbric_id = grbeam_id = grtria_id = 0
+        grshel_id = grbric_id = grbeam_id = grtria_id = grsprg_id = 0
         quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
         if quad_eids:
             grshel_id = state.next_id()
@@ -1633,6 +1633,47 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             grbric_id = state.next_id()
             lines += _emit_id_group("GRBRIC/BRIC", grbric_id, f"{title}_bricks",
                                     solid_eids)
+        # A *SECTION_BEAM part whose material re-routes it to a CONNECTOR
+        # (*MAT_MUSCLE -> /PROP/TYPE46, *MAT_SPOTWELD -> /PROP/TYPE13, an
+        # ELFORM=6 discrete beam) is emitted as a /SPRING, not a /BEAM. Its
+        # eid in a /GRBEAM/BEAM group therefore matches nothing: the starter
+        # answers WARNING 534 "GROUP IS EMPTY" and the section loses the
+        # element anyway. The /SECT card's grsprg_ID column is their real
+        # home — sect.cfg:37 declares it as SUBTYPES = (/SETS/GRSPRI),
+        # hm_read_sect.F:301/548 reads it and resolves it against IGRSPRING
+        # ('SPRI'), and k2rad already writes that exact group spelling on the
+        # /PRELOAD/AXIAL path (writer/preload.py) — so they go there.
+        #
+        # The test is the three BEAM-derived re-route registries, NEVER the
+        # global state.spring_elem_ids: that set also holds *ELEMENT_DISCRETE,
+        # *ELEMENT_PLOTEL, belt and joint spring ids, which live in their own
+        # LS-DYNA id namespaces. A plain /BEAM whose eid equals a discrete
+        # spring's would otherwise be dropped from the section under a warning
+        # blaming a re-route that never happened (measured against master: a
+        # deck with *ELEMENT_BEAM 50 and *ELEMENT_DISCRETE 50 lost its real
+        # beam from the /GRBEAM group while the deck still emitted /BEAM 50).
+        rerouted_ids = (state.dbeam_spring_eids | state.spotweld_spring_eids
+                        | state.muscle_beam_spring_eids)
+        rerouted = [e for e in beam_eids if e in rerouted_ids]
+        beam_eids = [e for e in beam_eids if e not in rerouted_ids]
+        if rerouted:
+            grsprg_id = state.next_id()
+            lines += _emit_id_group("GRSPRI/SPRI", grsprg_id,
+                                    f"{title}_springs", rerouted)
+            state.warn(
+                f"{label}: beam element(s) {rerouted} cross the section plane "
+                "but their part's material re-routes them to a SPRING "
+                "connector (*MAT_MUSCLE, *MAT_SPOTWELD or an ELFORM=6 discrete "
+                "beam), so they are /SPRING in the emitted deck and not /BEAM. "
+                "They are moved from the section's /GRBEAM group to a "
+                f"/GRSPRI/SPRI group ({grsprg_id}) named by the /SECT card's "
+                "grsprg_ID column, which is what the starter resolves against "
+                "the spring groups (hm_read_sect.F:301 reads grsprg_id, :548 "
+                "resolves it with ELEGROR(...,'SPRI')). Leaving them in "
+                "/GRBEAM would give WARNING 534 'BEAM GROUP ... GROUP IS "
+                "EMPTY' and lose their contribution to the section force "
+                "entirely (measured on twin decks: /TH/SECTIO var 26 = "
+                "-1.83e-07 with the group against 0.0 without it).")
         if beam_eids:
             grbeam_id = state.next_id()
             lines += _emit_id_group("GRBEAM/BEAM", grbeam_id, f"{title}_beams",
@@ -1646,7 +1687,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             f"SECT_{sect_id}",
             "#grbric_ID           grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID     Niter              Iframe",
             f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(0)}{_i(grbeam_id)}"
-            f"{_i(0)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(0)}",
+            f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(0)}",
             HDR,
         ]
         state.sect_ids.append((sect_id, title))

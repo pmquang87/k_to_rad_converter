@@ -84,6 +84,9 @@ from .state import (
     SeatbeltElem, SectionSeatbelt, MatSeatbelt, SeatbeltSlipring,
     SeatbeltRetractor, SeatbeltPretensioner, SeatbeltSensor,
     SeatbeltAccelerometer,
+    MatShapeMemory, MatMuscle, MatSpringMuscle,
+    MatAddThermalExpansion, MatThermalIsotropic,
+    InitialTemperature, ImposedTemperature,
 )
 
 
@@ -1490,6 +1493,14 @@ def handle_part(block: Block, state: ConversionState) -> None:
         # HGID (field 5, cols 41-50) → the *HOURGLASS card overriding
         # *CONTROL_HOURGLASS for this part (0 = global card / defaults).
         hgid  = to_int(f[4]) if len(f) > 4 else 0
+        # TMID (field 8, cols 71-80) → the *MAT_THERMAL_* card bound to this
+        # part. A SEPARATE id namespace from MID (Vol II R17, *MAT_THERMAL
+        # header: "This number is independent of the material ID number"), and
+        # the only place a deck states which thermal properties a part has —
+        # it supplies the /HEAT/MAT RHO0_CP and AS. Fields 6 (GRAV) and 7
+        # (ADPOPT) are read into f and deliberately unused: Radioss takes
+        # gravity from /GRAV over a node group, and there is no adaptivity.
+        tmid  = to_int(f[7]) if len(f) > 7 else 0
 
         # ── Option cards, in Card-Summary order ──────────────────────────────
         inertia = None
@@ -1538,7 +1549,8 @@ def handle_part(block: Block, state: ConversionState) -> None:
             if truncated:
                 break
             continue
-        state.parts[pid] = PartData(pid, title, secid, mid, hgid, eosid)
+        state.parts[pid] = PartData(pid, title, secid, mid, hgid, eosid,
+                                    tmid)
         if inertia is not None:
             if inertia.has_mass_data() or inertia.has_velocity():
                 state.part_inertias[pid] = inertia
@@ -6220,11 +6232,13 @@ def handle_database_tprint(block: Block, state: ConversionState) -> None:
     solution was ever requested. k2rad deliberately does NOT copy that, and the
     reason is specific to this converter rather than a matter of taste:
 
-      * k2rad converts NO thermal keyword at all — no *CONTROL_THERMAL_*, no
-        *MAT_THERMAL_*, no *INITIAL_TEMPERATURE, no *BOUNDARY_TEMPERATURE, and
-        it emits no /HEAT/MAT and no /THERM_STRESS (writer/materials.py
-        explains the one deliberate omission). A converted deck therefore
-        CANNOT have a thermal solve, so the channel cannot ever carry data.
+      * Whether the CONVERTED deck has a thermal solve at all is not known at
+        parse time — it depends on whether some material ends up with a
+        /HEAT/MAT (the only thing that arms MAT_PARAM%ITHERM,
+        hm_read_therm.F:253) and whether a temperature driver was converted.
+        The answer is therefore given by writer/thermal.py::_note_tprint,
+        which runs after that is decided, and the channels are emitted
+        exactly when both halves exist.
       * What it would carry instead was measured on a 576-brick deck: with
         /MAT/ELAST the Nodal_Temperature and 3DELEM_Temperature fields come out
         ALL ZERO; with /MAT/PLAS_JOHNS (which allocates ``GBUF%TEMP`` but never
@@ -6241,20 +6255,6 @@ def handle_database_tprint(block: Block, state: ConversionState) -> None:
         thicken the T01 for channels that are not in it.
     """
     state.db_tprint_dt = _handle_db_dt(block, state, "*DATABASE_TPRINT")
-    state.note_recognized_not_emitted(
-        "DATABASE_TPRINT",
-        "the thermal ASCII database has no target: k2rad converts no thermal "
-        "keyword (*CONTROL_THERMAL_*, *MAT_THERMAL_*, *INITIAL_TEMPERATURE, "
-        "*BOUNDARY_TEMPERATURE) and emits no /HEAT/MAT, so the converted deck "
-        "runs no thermal solution. dyna2rad answers this card with /ANIM/NODA "
-        "TEMP + /ANIM/ELEM TEMP and a TEMP variable on every /TH/NODE and "
-        "/TH/BRIC group; measured on a converted deck those fields come out "
-        "all-zero (/MAT/ELAST) or a frozen 300 (/MAT/PLAS_JOHNS, which "
-        "allocates a temperature it never integrates) — a flat fringe that "
-        "reads as data. The starter's own diagnostic is WARNING 1087 (OUTPUT "
-        "TEMP WHILE TEMPERATURE IS NOT COMPUTED, hm_read_thgrne.F:228). The "
-        "dt is NOT added to the /TFILE minimum either, because no channel it "
-        "would pace exists.")
 
 
 def handle_control_parallel(block: Block, state: ConversionState) -> None:
@@ -8967,6 +8967,728 @@ def handle_mat_hill_foam(block: Block, state: ConversionState) -> None:
     m = to_float(f4[1]) if len(f4) > 1 else 0.0
     state.mat_hill_foam[mid] = MatHillFoam(
         mid, title, rho, kbulk, mu, n, lcid, fittype, lcsr, c, b, r, m)
+
+
+def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
+    """*MAT_SHAPE_MEMORY (*MAT_030) → /MAT/LAW71 (superelastic SMA).
+
+    Cards (Vol II R17 pp.2-303..2-309; Keyword971_R7.1/MAT/mat_030.cfg):
+      Card1: MID RO E PR [LCSS LCSSC IDPP]
+      Card2: SIG_ASS SIG_ASF SIG_SAS SIG_SAF EPSL ALPHA YMRT
+      Card3 (optional R7.1 FREE_CARD): LCID_AS LCID_SA
+
+    Fixed-width w=10, like every other *MAT here: RO regularly fills its whole
+    field and fuses with MID ("  301.05000E-9"), and a free split then shifts
+    every value (the *MAT_187 trap).
+
+    The four SIG_* cells are ``SCALAR_OR_OBJECT``: a NEGATIVE value is a curve
+    id, not a stress. /MAT/LAW71 has one scalar per threshold, so the curve form
+    cannot be carried; dyna2rad copies each cell only when ``> 0``
+    (convertmats.cxx:1907-1926) and leaves the rest at 0, which the starter then
+    turns into ``sig_* = 1e-20`` (hm_read_mat71.F:163-166) and immediately
+    refuses with ERROR 1122 + ERROR 1123 (measured, once per material). Emitting
+    that is strictly worse than not emitting it, so a curve form warn-skips the
+    whole material here — the /PART then reports a dangling material id, which
+    names the deck's real problem.
+
+    Card 3 is claimed by RAW CONTIGUITY (row index offset+2), not by "the next
+    non-blank line": an all-blank card 3 is a legal FREE_CARD and a scan for
+    content would walk past it (the #109/#117/#119 trap).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SHAPE_MEMORY: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_SHAPE_MEMORY '{title}': MID parsed as {mid} — "
+                   "unreadable (shifted or fused fields?); material skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    e   = to_float(f1[2]) if len(f1) > 2 else 0.0
+    nu  = to_float(f1[3]) if len(f1) > 3 else 0.0
+    lcss  = to_int(f1[4]) if len(f1) > 4 else 0
+    lcssc = to_int(f1[5]) if len(f1) > 5 else 0
+    idpp  = to_int(f1[6]) if len(f1) > 6 else 0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    sig = [to_float(f2[i]) if len(f2) > i else 0.0 for i in range(4)]
+    epsl  = to_float(f2[4]) if len(f2) > 4 else 0.0
+    alpha = to_float(f2[5]) if len(f2) > 5 else 0.0
+    ymrt  = to_float(f2[6]) if len(f2) > 6 else 0.0
+
+    # Card 3: the R7.1 FREE_CARD, claimed by row index.
+    lcid_as = lcid_sa = 0
+    if len(raw) > offset + 2 and raw[offset + 2].strip():
+        f3 = _card(raw, offset + 2, fixed=True, n=2, w=10)
+        lcid_as = to_int(f3[0]) if f3 else 0
+        lcid_sa = to_int(f3[1]) if len(f3) > 1 else 0
+
+    names = ("SIG_ASS", "SIG_ASF", "SIG_SAS", "SIG_SAF")
+    curve_form = [f"{n}={v:g} (curve {abs(int(v))})"
+                  for n, v in zip(names, sig) if v < 0.0]
+    if curve_form:
+        state.warn(
+            f"*MAT_SHAPE_MEMORY mid={mid}: " + ", ".join(curve_form) +
+            " — a NEGATIVE transformation stress is a LOAD CURVE ID in "
+            "LS-DYNA (temperature-dependent, or effective-plastic-strain "
+            "dependent when LCSS is negative too; Vol II R17 p.2-305/306), and "
+            "/MAT/LAW71 has ONE SCALAR slot per threshold (matl71_71.cfg: "
+            "sig_sas sig_fas sig_ssa sig_fsa) with no function field anywhere "
+            "on the card. The material is SKIPPED. dyna2rad copies only the "
+            "positive cells (convertmats.cxx:1907-1926) and leaves the rest at "
+            "0, which hm_read_mat71.F:163-166 turns into 1e-20 and then "
+            "refuses with ERROR 1122 + ERROR 1123 — an unstartable deck either "
+            "way, so nothing is emitted. Re-state the card with the four "
+            "transformation stresses as constants for the operating "
+            "temperature.")
+        return
+
+    dropped = []
+    if lcss:
+        dropped.append(f"LCSS={lcss} (stress-strain curve/table)")
+    if lcssc:
+        dropped.append(f"LCSSC={lcssc} (compression curve/table)")
+    if idpp:
+        dropped.append(f"IDPP={idpp} (Drucker-Prager yield flag)")
+    if lcid_as:
+        dropped.append(f"LCID_AS={lcid_as} (stress vs martensite fraction, "
+                       "loading — it OVERWRITES SIG_ASS/SIG_ASF in LS-DYNA)")
+    if lcid_sa:
+        dropped.append(f"LCID_SA={lcid_sa} (stress vs martensite fraction, "
+                       "unloading)")
+    if dropped:
+        state.warn(
+            f"*MAT_SHAPE_MEMORY mid={mid} → /MAT/LAW71: dropped "
+            + "; ".join(dropped) +
+            ". /MAT/LAW71 is the plain Auricchio superelastic model — its card "
+            "carries no function id at all (matl71_71.cfg), so a tabulated "
+            "transformation law and the Drucker-Prager yield option have no "
+            "slot. The four constant transformation stresses are used instead"
+            + (" — where LCID_AS is present those constants are the ones "
+               "LS-DYNA would have OVERWRITTEN, so the emitted plateau is the "
+               "card-1 value, not the curve's." if lcid_as else "") + ".")
+
+    state.mat_shape_memory[mid] = MatShapeMemory(
+        mid, title, rho, e, nu, sig[0], sig[1], sig[2], sig[3],
+        epsl, alpha, ymrt, lcss, lcssc, idpp, lcid_as, lcid_sa)
+
+
+def _scalar_or_curve(f: List[str], i: int, default: float,
+                     state: Optional[ConversionState] = None,
+                     field: str = "", fixed_positive: bool = False,
+                     where: str = ""):
+    """Read an LS-DYNA ``SCALAR_OR_FUNCTION`` / ``SCALAR_OR_OBJECT`` cell.
+
+    ``cfgio/MODEL_IO/meci_data_reader.cpp:6845-6848`` states the rule verbatim:
+    *"this is Dyna specific: if the value is negative, its abs value is the ID
+    of an object"*. Returns ``(scalar, curve_id)`` — exactly one of the two is
+    meaningful, and a BLANK cell takes *default* rather than 0 (blank is not
+    always "no factor": SFR/SVS/SVR/SV/TL/TV default to 1.0).
+
+    *fixed_positive* is the muscle family's second rule, and it is NOT the same
+    as a blank default: for ``SFR``/``SVS``/``SVR`` (Vol II R17 p.2-1072) and
+    ``SV``/``TL``/``TV`` (p.2-2096) the manual reads *"LT.0.0: Absolute value
+    gives load curve ID. **GE.0.0: Constant value of 1.0 is used**"* — LS-DYNA
+    DISCARDS whatever positive number the deck writes and uses 1.0. Reading the
+    cell as a coefficient makes a deck stating ``SFR = 2`` run at twice the rate
+    normalisation it means. ``ALM``/``A`` are the contrast in the same family
+    (*"GE.0.0: Constant value of ALM is used"*), so they keep their scalar.
+    """
+    if len(f) <= i or not f[i].strip():
+        return default, 0
+    v = to_float(f[i])
+    if v < 0.0:
+        return default, int(abs(v))
+    if fixed_positive:
+        if state is not None and v not in (0.0, 1.0):
+            # `where` carries the deck-specific prefix ("*MAT_MUSCLE mid=1: ")
+            # and `field` is the BARE cell name, so the quoted manual sentence
+            # stays a manual sentence instead of repeating the prefix inside
+            # its own quotation marks.
+            state.warn(
+                f"{where}{field}={v:g} states a positive constant, and LS-DYNA "
+                f"DISCARDS it: '{field} ... GE.0.0: Constant value of 1.0 is "
+                "used' (Vol II R17 p.2-1072 for the *MAT_156 cells, p.2-2096 "
+                "for the *MAT_S15 ones). Only a NEGATIVE value is meaningful "
+                "there — it names a load curve. 1.0 is used, as LS-DYNA does; "
+                "write the value as a negative curve id if a real factor was "
+                "meant.")
+        return default, 0
+    return v, 0
+
+
+def handle_mat_muscle(block: Block, state: ConversionState) -> None:
+    """*MAT_MUSCLE (*MAT_156) → /PROP/TYPE46 (SPR_MUSCLE) + /SPRING.
+
+    Cards (Vol II R17 pp.2-1071..2-1074; Keyword971_R6.1/MAT/mat_156.cfg:
+    ``MID RO SNO SRM PIS SSM CER DMP`` / ``ALM SFR SVS SVR SSP``, the last five
+    all ``SCALAR_OR_FUNCTION``):
+
+      sigma = PIS*a(t)*f(l/l_orig)*g(eps_bar_dot) + PIS*h(l/l_orig)
+              + DMP*(l/l_orig)*eps_dot
+      a = ALM, f = SVS, g = SVR, h = SSP,
+      l_orig = l0/SNO, eps_bar_dot = (l/l_orig)*eps_dot/(SFR*SRM)
+
+    *"This is Material Type 156 for truss elements"* (p.2-1071), i.e. a
+    *SECTION_BEAM with ELFORM 3. No /MAT is written at all — the whole law
+    lives in the /PROP/TYPE46 of the part, exactly like the *MAT_Sxx spring
+    family, so which parts it claims is decided by the PROPERTY those parts
+    carry (writer/common.py::_muscle_beam_pids).
+
+    Fixed-width w=10: RO fills its whole field and fuses with MID.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_MUSCLE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_MUSCLE '{title}': MID parsed as {mid} — unreadable "
+                   "(shifted or fused fields?); material skipped.")
+        return
+    rho = to_float(f1[1]) if len(f1) > 1 else 0.0
+    # SNO is the INITIAL STRETCH RATIO l0/l_orig (cfg: "Initial stretch
+    # ratio"); a blank one is 1.0, not 0 — a zero would divide by zero in
+    # l_orig = l0/SNO.
+    sno = _ffield(f1, 2, 1.0) or 1.0
+    srm = to_float(f1[3]) if len(f1) > 3 else 0.0
+    pis = to_float(f1[4]) if len(f1) > 4 else 0.0
+    ssm = to_float(f1[5]) if len(f1) > 5 else 0.0
+    cer = to_float(f1[6]) if len(f1) > 6 else 0.0
+    dmp = to_float(f1[7]) if len(f1) > 7 else 0.0
+
+    f2 = _card(raw, offset + 1, fixed=True, n=5, w=10)
+    alm, alm_l = _scalar_or_curve(f2, 0, 0.0)
+    # SFR/SVS/SVR: "GE.0.0: Constant value of 1.0 is used" (Vol II R17
+    # p.2-1072) — the SCALAR ITSELF is discarded, so the constant branch is
+    # always 1.0 whatever number the deck writes. SSP is the odd one out
+    # ("EQ.0.0: Exponential function is used. GT.0.0: Constant value of 0.0"),
+    # so its scalar must survive to tell 0 from positive.
+    where = f"*MAT_MUSCLE mid={mid}: "
+    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0, state,
+                                    "SFR", True, where)
+    svs, svs_l = _scalar_or_curve(f2, 2, 1.0, state,
+                                    "SVS", True, where)
+    svr, svr_l = _scalar_or_curve(f2, 3, 1.0, state,
+                                    "SVR", True, where)
+    ssp, ssp_l = _scalar_or_curve(f2, 4, 0.0)
+    state.mat_muscle[mid] = MatMuscle(
+        mid, title, rho, sno, srm, pis, ssm, cer, dmp,
+        alm, alm_l, sfr, sfr_l, svs, svs_l, svr, svr_l, ssp, ssp_l)
+
+
+def handle_mat_spring_muscle(block: Block, state: ConversionState) -> None:
+    """*MAT_SPRING_MUSCLE (*MAT_S15) → /PROP/TYPE46 (SPR_MUSCLE) + /SPRING.
+
+    Cards (Vol II R17 pp.2-2095..2-2099; Keyword971_R13.0/MAT/SDMAT15.cfg:
+    ``MID L0 VMAX SV A FMAX TL TV`` / ``FPE LMAX KSH``, with SV/A/TL/TV/FPE all
+    ``SCALAR_OR_OBJECT``):
+
+      F_M = F_PE + a(t)*F_max*f_TL(L)*f_TV(V),
+      L = L_M/L0,  V = V_M/(V_max*S_v)
+
+    A *SECTION_DISCRETE material, so it lands on the discrete-spring side of
+    the same /PROP/TYPE46 writer. No /MAT is written.
+
+    Blank defaults are NOT zero (p.2-2096): L0 1.0, SV 1.0, TL 1.0, TV 1.0,
+    FPE 0.0 — reading them as 0 would give a zero-length reference, a zero
+    velocity scale and a muscle that produces nothing.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_SPRING_MUSCLE: empty material card — skipped")
+        return
+    mid = to_int(f1[0])
+    if mid <= 0:
+        state.warn(f"*MAT_SPRING_MUSCLE '{title}': MID parsed as {mid} — "
+                   "unreadable (shifted or fused fields?); material skipped.")
+        return
+    l0 = _ffield(f1, 1, 1.0) or 1.0
+    vmax = to_float(f1[2]) if len(f1) > 2 else 0.0
+    # SV/TL/TV: "GE.0.0: Constant value of 1.0 is used" (Vol II R17 p.2-2096),
+    # i.e. the positive scalar is DISCARDED. A is the contrast on the same
+    # card — "GE.0.0: Constant value of A is used" — so it keeps its value.
+    where = f"*MAT_SPRING_MUSCLE mid={mid}: "
+    sv, sv_l = _scalar_or_curve(f1, 3, 1.0, state,
+                                  "SV", True, where)
+    a, a_l = _scalar_or_curve(f1, 4, 0.0)
+    fmax = to_float(f1[5]) if len(f1) > 5 else 0.0
+    tl, tl_l = _scalar_or_curve(f1, 6, 1.0, state,
+                                  "TL", True, where)
+    tv, tv_l = _scalar_or_curve(f1, 7, 1.0, state,
+                                  "TV", True, where)
+
+    f2 = _card(raw, offset + 1, fixed=True, n=3, w=10)
+    fpe, fpe_l = _scalar_or_curve(f2, 0, 0.0)
+    lmax = to_float(f2[1]) if len(f2) > 1 else 0.0
+    ksh = to_float(f2[2]) if len(f2) > 2 else 0.0
+    state.mat_spring_muscle[mid] = MatSpringMuscle(
+        mid, title, l0, vmax, sv, sv_l, a, a_l, fmax,
+        tl, tl_l, tv, tv_l, fpe, fpe_l, lmax, ksh)
+
+
+def handle_mat_add_thermal_expansion(block: Block,
+                                     state: ConversionState) -> None:
+    """*MAT_ADD_THERMAL_EXPANSION → /THERM_STRESS/MAT (+ /HEAT/MAT).
+
+    One card (Vol II R17 pp.2-146..2-148), 7 or 8 fields:
+      PID LCID MULT LCIDY MULTY LCIDZ MULTZ [TREF]
+
+    The shipped Keyword971 ADD_THERMAL_EXPANSION.cfg declares only SEVEN cells
+    (``PID LCID MULT LCIDY MULTY LCIDZ MULTZ``) while the r14 verification decks
+    write eight — so the count is read from the CARD, not assumed: an 8-field
+    layout carries TREF (the secant-approach switch) and a 7-field one does not.
+    Both spellings occur in the corpus, and a handler that assumed either would
+    mis-read the other (the #127 "parse only the fields the keyword defines"
+    rule, run the other way round).
+
+    ``PID`` GT.0 is a part id; LT.0 makes ``|PID|`` a MATERIAL id — a form the
+    dyna2rad reader cannot even parse (its cfg types the cell
+    ``VALUE(COMPONENT)`` and the whole deck dies with ERROR 109999). k2rad reads
+    it and stores it as a material reference.
+
+    Nothing is decided here: which materials end up with a /THERM_STRESS/MAT,
+    whether one has to be split off a shared MID, and what the coefficient
+    function looks like are all resolved in writer/thermal.py, which is the one
+    place that can see the whole deck.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    idx = offset
+    while idx < len(raw):
+        line = raw[idx]
+        idx += 1
+        if not line.strip():
+            continue
+        f = _card(raw, idx - 1, fixed=True, n=8, w=10)
+        pid = to_int(f[0])
+        if pid == 0:
+            state.warn("*MAT_ADD_THERMAL_EXPANSION: card with no PID — "
+                       "skipped.")
+            continue
+        # The 8th cell exists only in the r14+ layout. Presence is decided on
+        # the CARD, never on the value: a blank TREF and an absent TREF are
+        # different statements about the card's release. The fixed-width test
+        # is the raw line reaching into columns 71-80; a comma- or free-format
+        # card is far shorter than that, so an eighth TOKEN counts too — the
+        # flag only ever gates the secant-approach warning, and losing it on a
+        # free-format deck would convert a secant card as incremental silently.
+        data = _strip_inline_comment(line)
+        has_tref = len(data.rstrip()) > 70 or len(f) > 7 and f[7].strip() != ""
+        state.mat_add_thermal_expansion.append(MatAddThermalExpansion(
+            pid=pid,
+            lcid=to_int(f[1]) if len(f) > 1 else 0,
+            mult=to_float(f[2]) if len(f) > 2 else 0.0,
+            lcidy=to_int(f[3]) if len(f) > 3 else 0,
+            multy=to_float(f[4]) if len(f) > 4 else 0.0,
+            lcidz=to_int(f[5]) if len(f) > 5 else 0,
+            multz=to_float(f[6]) if len(f) > 6 else 0.0,
+            tref=to_float(f[7]) if len(f) > 7 else 0.0,
+            has_tref=has_tref))
+
+
+def handle_mat_thermal_isotropic(block: Block, state: ConversionState) -> None:
+    """*MAT_THERMAL_ISOTROPIC (T01) → the /HEAT/MAT values of every part whose
+    *PART TMID names it.
+
+    Cards (Vol II R17 p.3-2):
+      Card1: TMID TRO TGRLC TGMULT TLAT HLAT
+      Card2: HC TC
+
+    ``TRO`` EQ.0 → the structural density. ``HC`` is the specific heat per unit
+    MASS and ``TC`` the thermal conductivity, so Radioss's VOLUMETRIC
+    ``RHO0_CP`` is ``(TRO or RO)·HC`` and ``AS`` is ``TC``. Units pass straight
+    through — k2rad never rescales (``--units`` only labels the /BEGIN card), so
+    a consistent LS-DYNA deck stays consistent.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_THERMAL_ISOTROPIC: empty card — skipped")
+        return
+    tmid = to_int(f1[0])
+    if tmid <= 0:
+        state.warn(f"*MAT_THERMAL_ISOTROPIC '{title}': TMID parsed as {tmid} — "
+                   "unreadable; card skipped.")
+        return
+    f2 = _card(raw, offset + 1, fixed=True, n=2, w=10)
+    state.mat_thermal_isotropic[tmid] = MatThermalIsotropic(
+        tmid=tmid, title=title,
+        tro=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        tgrlc=to_int(f1[2]) if len(f1) > 2 else 0,
+        tgmult=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        tlat=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        hlat=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        hc=to_float(f2[0]) if f2 else 0.0,
+        tc=to_float(f2[1]) if len(f2) > 1 else 0.0)
+
+
+def handle_initial_temperature(block: Block, state: ConversionState) -> None:
+    """*INITIAL_TEMPERATURE_{SET|NODE} → /INITEMP on a /GRNOD.
+
+    Card: ``NSID/NID TEMP LOC``. ``NSID = 0`` on the _SET spelling means EVERY
+    node in the model. ``LOC`` picks a thick-thermal-shell surface (-1 lower,
+    0 middle, +1 upper) and has no Radioss counterpart — /INITEMP sets one
+    nodal temperature.
+    """
+    is_node = "NODE" in block.keyword.split("_")[-1:]
+    offset = _title_offset(block)
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=3, w=10)
+        sid = to_int(f[0]) if f else 0
+        temp = to_float(f[1]) if len(f) > 1 else 0.0
+        loc = to_int(f[2]) if len(f) > 2 else 0
+        state.initial_temperatures.append(
+            InitialTemperature(sid=sid, temp=temp, loc=loc, is_node=is_node))
+
+
+def handle_boundary_temperature(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_TEMPERATURE_{SET|NODE} → /IMPTEMP on the set.
+
+    Card: ``NID/NSID TLCID TMULT LOC TDEATH TBIRTH`` with defaults
+    ``none / 0 / 0. / 0 / 1e20 / 0.``.
+
+    ``TLCID GT.0`` makes T a curve of time scaled by ``TMULT``; ``TLCID EQ.0``
+    makes T the constant ``TMULT``. That is an OVERRIDE convention on the
+    LS-DYNA side and a PRODUCT on the Radioss side (/IMPTEMP is
+    ``Fscale_y · f(t)``, fixtemp.F:180-200), which is exactly the
+    *AIRBAG_HYBRID A23/LCA23 class — so the constant form gets a synthesized
+    two-point function rather than being paired with a zero id, which
+    hm_read_imptemp.F refuses outright (ERROR 120, once per node).
+
+    ``TMULT``'s printed default is ``0.`` and every corpus deck that names a
+    curve writes ``1.0`` explicitly, so a blank TMULT BESIDE a curve is a card
+    the manual does not resolve. It is resolved HERE rather than left to the
+    reader: ``hm_read_imptemp.F:139`` turns a zero ``Fscale_y`` into 1.0, so
+    emitting the literal zero would write a cell that means the opposite of
+    what it does. 1.0 is written and the ambiguity is named.
+    """
+    is_node = "NODE" in block.keyword.split("_")[-1:]
+    offset = _title_offset(block)
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=6, w=10)
+        sid = to_int(f[0]) if f else 0
+        lcid = to_int(f[1]) if len(f) > 1 else 0
+        tmult = to_float(f[2]) if len(f) > 2 else 0.0
+        loc = to_int(f[3]) if len(f) > 3 else 0
+        tdeath = _ffield(f, 4, 1.0e20)
+        tbirth = to_float(f[5]) if len(f) > 5 else 0.0
+        if loc:
+            state.warn(
+                f"*BOUNDARY_TEMPERATURE: LOC={loc} on set/node {sid} selects a "
+                "thick-thermal-shell SURFACE (-1 lower, +1 upper). Radioss's "
+                "/IMPTEMP imposes ONE temperature per node (fixtemp.F:180-200 "
+                "writes TEMP(node)), so the through-thickness distinction is "
+                "dropped — the value is imposed on the node itself.")
+        scale = 1.0
+        if lcid:
+            if tmult:
+                scale = tmult
+            else:
+                state.warn(
+                    f"*BOUNDARY_TEMPERATURE: set/node {sid} names curve "
+                    f"{lcid} but leaves TMULT blank/zero. TMULT is the "
+                    "'temperature curve multiplier' with a printed default of "
+                    "0. (Vol I R17 p.5-150), which literally read would impose "
+                    "T = 0 everywhere — every corpus deck that uses a curve "
+                    "writes 1.0 explicitly, so the card is ambiguous. It is "
+                    "resolved to Fscale_y = 1.0 HERE: writing the literal zero "
+                    "would rely on hm_read_imptemp.F:139 ('IF (FACY == ZERO) "
+                    "FACY = FACY_DIM') turning it into 1.0 anyway, i.e. a cell "
+                    "meaning the opposite of what it does. State TMULT on the "
+                    ".k card if a different scale was meant.")
+        state.imposed_temperatures.append(ImposedTemperature(
+            source="*BOUNDARY_TEMPERATURE", sid=sid, is_node=is_node,
+            lcid=lcid, scale=scale,
+            const=tmult if not lcid else 0.0,
+            tbirth=tbirth, tdeath=tdeath))
+
+
+def _exempt_driver(state: ConversionState, kw: str, nsid: int, nsidex: int,
+                   boxid: int, tse: float, tbe: float, lcide: int,
+                   stated: bool) -> None:
+    """The SECOND temperature a ``*LOAD_THERMAL_{CONSTANT,VARIABLE}`` card set
+    states: the one the NSIDEX nodes are held at.
+
+    The ``_E`` columns are the EXEMPTED nodes' own temperature, not an
+    expansion-only field. Vol I R17 p.33-167 reads *"TE — Temperature of
+    exempted nodes (optional)"* and p.33-180 *"TSE — Scaled temperature of the
+    exempted nodes (optional). TBE — Base temperature of the exempted nodes
+    (optional). LCIDE — Load curve ID that multiplies the scaled temperature of
+    the exempted nodes (optional)"*, with the same ``T = TB + TS x f(t)``
+    law (Remark 1). So the card partitions its node set in two, and Radioss can
+    say exactly that: a second /IMPTEMP over the NSIDEX subset.
+
+    Emitted only where the card states the second temperature WITHOUT a guess:
+
+    * ``LCIDE`` given and resolvable -> ``TBE + TSE*f_LCIDE(t)``;
+    * ``LCIDE`` blank and ``TSE = 0`` -> the constant ``TBE`` (the curve
+      multiplies a zero scale, so which curve it would have been cannot
+      matter);
+    * ``LCIDE`` blank with a non-zero ``TSE`` -> NOT emitted. The manual prints
+      only a down-arrow in that Default cell and never says which curve is
+      meant, and inventing one would fabricate the whole exempted-node history
+      (the #124 "never fabricate an unstated quantity" rule).
+    """
+    if not stated:
+        return
+    label = f"{kw}: TE/TSE/TBE/LCIDE"
+    if not nsidex:
+        state.warn(
+            f"{label} state the temperature OF THE EXEMPTED NODES (Vol I R17 "
+            "pp.33-167/33-180), but NSIDEX is blank on card 1, so this set "
+            "exempts no node at all. The values have no target and are "
+            "dropped.")
+        return
+    if lcide:
+        curve = state.curves.get(lcide)
+        if curve is None or len(curve.pts) < 2:
+            state.warn(
+                f"{label}: LCIDE={lcide} multiplies the exempted nodes' scaled "
+                "temperature, but the deck defines no such *DEFINE_CURVE (or "
+                "one with fewer than two points). The exempted nodes get NO "
+                "driver of their own — they are left out of the imposed "
+                "temperature (as the card asks) and then simply conduct, "
+                "where LS-DYNA would hold them at TBE + TSE*f(t).")
+            return
+    elif tse:
+        state.warn(
+            f"{label}: TSE={tse:g} scales a curve for the exempted nodes but "
+            "LCIDE is blank, and the manual states no curve for that case "
+            "(the Default cell is only a down-arrow, Vol I R17 p.33-179). "
+            "Guessing one would fabricate the whole exempted-node history, so "
+            "no second /IMPTEMP is emitted: the exempted nodes are left out of "
+            "the imposed temperature and then conduct. State LCIDE explicitly "
+            "if they are meant to follow a curve.")
+        return
+    if lcide:
+        # T_e = TBE + TSE*f_LCIDE(t) — the writer bakes the offset into a
+        # synthesized copy of the curve, exactly as it does for TS/TB.
+        rec = ImposedTemperature(
+            source=f"{kw} (NSIDEX exempted nodes)", sid=nsid, nsidex=nsidex,
+            boxid=boxid, drive_exempt=True, lcid=lcide, scale=tse, offset=tbe)
+    else:
+        # A pure constant: const alone carries it (the writer's constant
+        # branch computes const + offset, so the offset must stay 0).
+        rec = ImposedTemperature(
+            source=f"{kw} (NSIDEX exempted nodes)", sid=nsid, nsidex=nsidex,
+            boxid=boxid, drive_exempt=True, const=tbe, initial_temp=tbe)
+    state.imposed_temperatures.append(rec)
+    detail = (f"TBE={tbe:g} + TSE={tse:g} x curve {lcide}" if lcide
+              else f"the constant TBE={tbe:g}")
+    state.warn(
+        f"{label}: the exempted nodes (*SET_NODE {nsidex}) are held at "
+        f"{detail} — these columns are the EXEMPTED NODES' OWN temperature "
+        "(Vol I R17 pp.33-167/33-180), not an expansion-only field. A SECOND "
+        "/IMPTEMP is emitted over exactly that subset, so the card's two "
+        "temperatures partition the node set the way LS-DYNA states them.")
+
+
+def handle_load_thermal(block: Block, state: ConversionState) -> None:
+    """*LOAD_THERMAL_{CONSTANT|LOAD_CURVE|VARIABLE}[_NODE] → /IMPTEMP (+ the
+    companion /INITEMP for the temperature at t = 0).
+
+    These are the STRUCTURAL-ONLY thermal loads: *"In a structural-only
+    analysis, use *LOAD_THERMAL_OPTION to define temperatures"*
+    (*BOUNDARY_TEMPERATURE, Purpose). Layouts:
+
+      _CONSTANT           C1: NSID NSIDEX BOXID   C2: T TE
+      _CONSTANT_NODE      C1: NID T
+      _LOAD_CURVE         C1: LCID LCIDDR
+      _VARIABLE           C1: NSID NSIDEX BOXID
+                          C2: TS TB LCID TSE TBE LCIDE LCIDR LCIDEDR
+      _VARIABLE_NODE      C1: NID TS TB LCID
+
+    ``*LOAD_THERMAL_VARIABLE``'s law is ``T = TB + TS·f(t)`` (Remark 1), an
+    OFFSET plus a scale. /IMPTEMP offers only ``Fscale_y·f(x)``
+    (fixtemp.F:180-200), so the offset cannot be carried by a scale factor and
+    the writer synthesizes ``TB + TS·f(t)`` point by point instead.
+
+    **All four spellings REPEAT.** The manual says so for each one — *"Card
+    Sets. Include as many sets consisting of the following two cards as
+    desired"* (_CONSTANT p.33-166, _VARIABLE p.33-179), *"Node Cards. Include
+    as many cards in this format as desired"* (_CONSTANT_NODE p.33-169,
+    _VARIABLE_NODE p.33-185), *"Thermal Load Curve Cards. Include as many cards
+    in this format as desired"* (_LOAD_CURVE p.33-171) — so every record is
+    read, not just the first. The two CARD-SET spellings are walked by RAW
+    CONTIGUITY (row index), never by "the next non-blank row": an all-blank
+    card 1 is legal there (NSID defaults to *all nodes*) and skipping it would
+    eat the next set's card 1 (the #109/#117/#119 rule).
+    """
+    kw = block.keyword
+    offset = _title_offset(block)
+    raw = block.raw
+    is_node = kw.endswith("_NODE")
+
+    if "LOAD_CURVE" in kw:
+        for i in range(offset, len(raw)):
+            if not raw[i].strip():
+                continue
+            f = _card(raw, i, fixed=True, n=2, w=10)
+            lcid = to_int(f[0]) if f else 0
+            lciddr = to_int(f[1]) if len(f) > 1 else 0
+            if lciddr:
+                state.warn(
+                    f"*LOAD_THERMAL_LOAD_CURVE: LCIDDR={lciddr} (the DYNAMIC "
+                    "RELAXATION temperature curve) is dropped — k2rad converts "
+                    "no dynamic-relaxation phase, so there is no preload stage "
+                    "for it to drive.")
+            if lcid <= 0:
+                state.warn("*LOAD_THERMAL_LOAD_CURVE: LCID is 0 — no "
+                           "temperature history to impose; card dropped.")
+                continue
+            state.imposed_temperatures.append(ImposedTemperature(
+                source="*LOAD_THERMAL_LOAD_CURVE", sid=0, lcid=lcid))
+        return
+
+    if is_node:
+        # _CONSTANT_NODE "NID T" / _VARIABLE_NODE "NID TS TB LCID", one node
+        # per card, as many cards as desired.
+        variable = "VARIABLE" in kw
+        for i in range(offset, len(raw)):
+            if not raw[i].strip():
+                continue
+            f = _card(raw, i, fixed=True, n=4 if variable else 2, w=10)
+            nid = to_int(f[0]) if f else 0
+            if nid <= 0:
+                state.warn(f"{kw}: a node card states NID={nid} — there is no "
+                           "node to impose a temperature on; row dropped.")
+                continue
+            if variable:
+                state.imposed_temperatures.append(ImposedTemperature(
+                    source="*LOAD_THERMAL_VARIABLE_NODE", sid=nid,
+                    is_node=True, lcid=to_int(f[3]) if len(f) > 3 else 0,
+                    scale=to_float(f[1]) if len(f) > 1 else 0.0,
+                    offset=to_float(f[2]) if len(f) > 2 else 0.0))
+            else:
+                t = to_float(f[1]) if len(f) > 1 else 0.0
+                state.imposed_temperatures.append(ImposedTemperature(
+                    source="*LOAD_THERMAL_CONSTANT_NODE", sid=nid,
+                    is_node=True, const=t, initial_temp=t))
+        return
+
+    # The two CARD-SET spellings: card 1 "NSID NSIDEX BOXID", card 2 the
+    # temperature. Walked in RAW PAIRS — card 1 may be entirely blank (NSID
+    # defaults to all nodes), so a "next non-blank row" walk would eat the
+    # following set's card 1. A pair in which BOTH rows are blank states
+    # nothing at all and ends the list: that is a trailing blank line, not a
+    # deck asking for T = 0 on every node.
+    variable = "VARIABLE" in kw
+    i = offset
+    while i < len(raw):
+        if not raw[i].strip() and not (i + 1 < len(raw)
+                                       and raw[i + 1].strip()):
+            break
+        if i + 1 >= len(raw):
+            state.warn(
+                f"{kw}: the last card set has a card 1 but no card 2 (the "
+                "temperature row) — the set is incomplete and is dropped. "
+                "Each set is exactly two cards (Vol I R17 pp.33-166/33-179).")
+            break
+        f1 = _card(raw, i, fixed=True, n=3, w=10)
+        nsid = to_int(f1[0]) if f1 else 0
+        nsidex = to_int(f1[1]) if len(f1) > 1 else 0
+        boxid = to_int(f1[2]) if len(f1) > 2 else 0
+        if variable:
+            f2 = _card(raw, i + 1, fixed=True, n=8, w=10)
+            ts = to_float(f2[0]) if f2 else 0.0
+            tb = to_float(f2[1]) if len(f2) > 1 else 0.0
+            lcid = to_int(f2[2]) if len(f2) > 2 else 0
+            tse = to_float(f2[3]) if len(f2) > 3 else 0.0
+            tbe = to_float(f2[4]) if len(f2) > 4 else 0.0
+            lcide = to_int(f2[5]) if len(f2) > 5 else 0
+            dr = [(n, v) for n, v in
+                  (("LCIDR", to_int(f2[6]) if len(f2) > 6 else 0),
+                   ("LCIDEDR", to_int(f2[7]) if len(f2) > 7 else 0)) if v]
+            if dr:
+                state.warn(
+                    "*LOAD_THERMAL_VARIABLE: "
+                    + ", ".join(f"{n}={v:g}" for n, v in dr)
+                    + " dropped — the _DR columns drive the DYNAMIC-RELAXATION "
+                    "phase, which k2rad does not convert, so they have no "
+                    "target in the emitted deck.")
+            state.imposed_temperatures.append(ImposedTemperature(
+                source="*LOAD_THERMAL_VARIABLE", sid=nsid, nsidex=nsidex,
+                boxid=boxid, lcid=lcid, scale=ts, offset=tb))
+            _exempt_driver(state, "*LOAD_THERMAL_VARIABLE", nsid, nsidex,
+                           boxid, tse, tbe, lcide,
+                           stated=any(len(f2) > k and f2[k].strip()
+                                      for k in (3, 4, 5)))
+        else:
+            f2 = _card(raw, i + 1, fixed=True, n=2, w=10)
+            t = to_float(f2[0]) if f2 else 0.0
+            te = to_float(f2[1]) if len(f2) > 1 else 0.0
+            state.imposed_temperatures.append(ImposedTemperature(
+                source="*LOAD_THERMAL_CONSTANT", sid=nsid, nsidex=nsidex,
+                boxid=boxid, const=t, initial_temp=t))
+            _exempt_driver(state, "*LOAD_THERMAL_CONSTANT", nsid, nsidex,
+                           boxid, 0.0, te, 0,
+                           stated=bool(len(f2) > 1 and f2[1].strip()))
+        i += 2
+
+
+def handle_control_solution(block: Block, state: ConversionState) -> None:
+    """*CONTROL_SOLUTION: SOLN selects the analysis type (0 structural only,
+    1 thermal only, 2 coupled). Recognized and reported, never acted on.
+
+    Radioss decides the same thing by what the deck CONTAINS: a /HEAT/MAT arms
+    the FE thermal solve for that material (hm_read_therm.F:253 sets
+    MAT_PARAM%ITHERM = 1) and nothing else switches it. So SOLN cannot be
+    mapped to a card — but SOLN = 1 (thermal only) is worth saying out loud,
+    because k2rad emits the full MECHANICAL model for it.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=4, w=10)
+    soln = to_int(f[0]) if f else 0
+    if soln == 1:
+        state.warn(
+            "*CONTROL_SOLUTION: SOLN=1 selects a THERMAL-ONLY analysis (no "
+            "structural solve at all). k2rad converts the mechanical model as "
+            "usual — Radioss has no thermal-only run mode; the structural "
+            "degrees of freedom stay live and will respond to whatever loads "
+            "and constraints the deck carries.")
+    elif soln == 2:
+        state.note_recognized_not_emitted(
+            "CONTROL_SOLUTION",
+            "SOLN=2 (coupled structural/thermal). Radioss has no analysis-type "
+            "switch: the FE thermal solve is armed per MATERIAL by /HEAT/MAT "
+            "(hm_read_therm.F:253), which k2rad emits for the parts whose "
+            "*MAT_ADD_THERMAL_EXPANSION or *PART TMID asks for it.")
+    else:
+        state.note_recognized_not_emitted(
+            "CONTROL_SOLUTION",
+            f"SOLN={soln} (structural only) is Radioss's default behaviour — "
+            "nothing to emit.")
+
+
+def _thermal_deferred(keyword: str, what: str, target: str):
+    """Build a handler that names a deferred thermal keyword and drops it."""
+    def _h(block: Block, state: ConversionState) -> None:
+        state.note_recognized_not_emitted(
+            keyword,
+            f"{what} — no card written. The Radioss counterpart is {target}, "
+            "which belongs to the full thermal-solver conversion; this batch "
+            "ships the thermal-EXPANSION path plus the minimal temperature "
+            "drivers (/INITEMP, /IMPTEMP) only. Registering the keyword is "
+            "what lets this log say WHICH thermal input the deck loses instead "
+            "of leaving it in the unrecognized-keyword list.")
+    return _h
 
 
 def handle_mat_tabulated_johnson_cook(block: Block,
@@ -13707,6 +14429,9 @@ HANDLERS = {
     "MAT_154":                                handle_mat_deshpande_fleck_foam,
     "MAT_HILL_FOAM":                          handle_mat_hill_foam,
     "MAT_177":                                handle_mat_hill_foam,
+    # The RARE MATERIALS batch (*MAT_030, *MAT_156, *MAT_S15, the thermal
+    # cards) is registered from RARE_MATERIAL_KEYWORDS below this dict — ONE
+    # source shared with assembly._OFFSET_SPECS.
     # Hyperelastic rubber batch: MAT_007 → LAW42 fixed form; MAT_027 → LAW42 or
     # LAW69 (LCID); MAT_077_O → LAW42 (embedded Prony) or LAW69; MAT_077_H →
     # LAW95 + /VISC/PRONY or LAW69. Underscore spellings of the hyphenated
@@ -14450,6 +15175,147 @@ INITIAL_STATE_PRELOAD_KEYWORDS = {
     "INITIAL_STRAIN_SHELL_SET": handle_initial_strain_shell,
 }
 for _kw, _h in INITIAL_STATE_PRELOAD_KEYWORDS.items():
+    HANDLERS[_kw] = _h
+del _kw, _h
+
+#: The RARE MATERIALS batch, as ONE source for HANDLERS and for
+#: assembly._OFFSET_SPECS (#116: a spelling the handler reads and the
+#: *INCLUDE_TRANSFORM offsetter does not know keeps its original ids while the
+#: rest of the include moves — a dangling MID/LCID at 0 diagnostics).
+#: Trailing ``_TITLE`` / ``_ID`` are NOT listed: parser._split_keyword moves
+#: them into block.options, where _title_offset finds them. Every numbered
+#: material carries both the zero-padded and the unpadded alias, the convention
+#: the rest of this table follows.
+RARE_MATERIAL_KEYWORDS = {
+    "MAT_SHAPE_MEMORY":   handle_mat_shape_memory,
+    "MAT_030":            handle_mat_shape_memory,
+    "MAT_30":             handle_mat_shape_memory,
+    "MAT_MUSCLE":         handle_mat_muscle,
+    "MAT_156":            handle_mat_muscle,
+    # *MAT_SPRING_MUSCLE's numeric alias is *MAT_S15 (Vol II R17 p.2-2095
+    # headers the card "*MAT_SPRING_MUSCLE / *MAT_S15"); the Sxx spelling is
+    # the only numeric one the manual gives for the discrete-spring family,
+    # like the *MAT_S01..S08 rows above.
+    "MAT_SPRING_MUSCLE":  handle_mat_spring_muscle,
+    "MAT_S15":            handle_mat_spring_muscle,
+    # ── Thermal expansion + the minimal temperature-driver foothold ────────
+    # *MAT_ADD_THERMAL_EXPANSION has no _SET spelling in any Keyword971* cfg
+    # folder and none in the manual — the card's own field 1 carries the
+    # part-vs-material selection through its SIGN.
+    "MAT_ADD_THERMAL_EXPANSION": handle_mat_add_thermal_expansion,
+    "MAT_THERMAL_ISOTROPIC":     handle_mat_thermal_isotropic,
+    "INITIAL_TEMPERATURE_SET":   handle_initial_temperature,
+    "INITIAL_TEMPERATURE_NODE":  handle_initial_temperature,
+    "BOUNDARY_TEMPERATURE_SET":  handle_boundary_temperature,
+    "BOUNDARY_TEMPERATURE_NODE": handle_boundary_temperature,
+    "LOAD_THERMAL_CONSTANT":      handle_load_thermal,
+    "LOAD_THERMAL_CONSTANT_NODE": handle_load_thermal,
+    "LOAD_THERMAL_LOAD_CURVE":    handle_load_thermal,
+    "LOAD_THERMAL_VARIABLE":      handle_load_thermal,
+    "LOAD_THERMAL_VARIABLE_NODE": handle_load_thermal,
+    "CONTROL_SOLUTION":           handle_control_solution,
+    # *SECTION_SHELL_THERMAL: the option adds exactly ONE extra card per card
+    # set (Vol I R17 p.41-62/63) carrying the section's own TMID, and
+    # handle_section_shell's card-set walk ALREADY strides it
+    # (_SECTION_SHELL_OPTION_CARDS). Registering the spelling is all that turns
+    # it from a skipped keyword — which loses the whole /PROP/SHELL, i.e. the
+    # thickness, and earns one ERROR 495 "SHELL HAS A NULL THICKNESS" per
+    # element — into a parse.
+    "SECTION_SHELL_THERMAL":      handle_section_shell,
+    # ── Recognized + named warn-drop (deferred to the full thermal solver) ──
+    "CONTROL_THERMAL_SOLVER": _thermal_deferred(
+        "CONTROL_THERMAL_SOLVER",
+        "the thermal solver's own type, linear-solver choice and convergence "
+        "controls", "the /THERM engine controls"),
+    "CONTROL_THERMAL_TIMESTEP": _thermal_deferred(
+        "CONTROL_THERMAL_TIMESTEP",
+        "the thermal time-step controls (TS, TIP, ITS, TMIN, TMAX, DTEMP)",
+        "/DTTHERM"),
+    "CONTROL_THERMAL_NONLINEAR": _thermal_deferred(
+        "CONTROL_THERMAL_NONLINEAR",
+        "the nonlinear thermal convergence controls (REFMAX, TOL, DCP)",
+        "the /THERM nonlinear controls"),
+    "BOUNDARY_FLUX_SET": _thermal_deferred(
+        "BOUNDARY_FLUX_SET", "an imposed heat FLUX on a segment set",
+        "/IMPFLUX"),
+    "BOUNDARY_FLUX": _thermal_deferred(
+        "BOUNDARY_FLUX", "an imposed heat FLUX on a segment set", "/IMPFLUX"),
+    "BOUNDARY_CONVECTION_SET": _thermal_deferred(
+        "BOUNDARY_CONVECTION_SET", "a convective boundary (h, T_inf)",
+        "/CONVEC"),
+    "BOUNDARY_CONVECTION": _thermal_deferred(
+        "BOUNDARY_CONVECTION", "a convective boundary (h, T_inf)", "/CONVEC"),
+    "BOUNDARY_RADIATION_SET": _thermal_deferred(
+        "BOUNDARY_RADIATION_SET", "a radiating boundary (emissivity, T_inf)",
+        "/RADIATION"),
+    "BOUNDARY_RADIATION": _thermal_deferred(
+        "BOUNDARY_RADIATION", "a radiating boundary (emissivity, T_inf)",
+        "/RADIATION"),
+    "MAT_THERMAL_CWM": _thermal_deferred(
+        "MAT_THERMAL_CWM",
+        "a computational-welding-mechanics thermal material (phase-dependent "
+        "conductivity and capacity, with element birth)",
+        "no Radioss counterpart at all"),
+    "MAT_THERMAL_ORTHOTROPIC": _thermal_deferred(
+        "MAT_THERMAL_ORTHOTROPIC",
+        "an ORTHOTROPIC thermal material (three conductivities)",
+        "/HEAT/MAT, which is isotropic — AS + BS*T only"),
+    "MAT_THERMAL_ISOTROPIC_TD": _thermal_deferred(
+        "MAT_THERMAL_ISOTROPIC_TD",
+        "a temperature-DEPENDENT isotropic thermal material (HC and TC as "
+        "tabulated functions of T)",
+        "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
+    "LOAD_THERMAL_D3PLOT": _thermal_deferred(
+        "LOAD_THERMAL_D3PLOT",
+        "nodal temperatures read from an external d3plot file",
+        "no Radioss counterpart"),
+    # The remaining REAL *LOAD_THERMAL_* spellings of Vol I R17 (the keyword's
+    # own table of contents lists BINOUT, CONSTANT[_ELEMENT|_NODE], D3PLOT,
+    # LOAD_CURVE, RSW, TOPAZ, VARIABLE[_BEAM|_ELEMENT|_NODE|_SHELL] and nothing
+    # else — there is no *LOAD_THERMAL_DYNAIN). Registered so the log names
+    # them instead of listing them as unrecognized.
+    "LOAD_THERMAL_RSW": _thermal_deferred(
+        "LOAD_THERMAL_RSW",
+        "a resistance-spot-weld nugget temperature history, positioned by an "
+        "orientation vector and grown over an ellipsoidal region",
+        "no Radioss counterpart — /IMPTEMP drives a node GROUP with no "
+        "geometric nugget model"),
+    "LOAD_THERMAL_TOPAZ": _thermal_deferred(
+        "LOAD_THERMAL_TOPAZ",
+        "nodal temperatures read from a TOPAZ3D database",
+        "no Radioss counterpart"),
+    "LOAD_THERMAL_CONSTANT_ELEMENT": _thermal_deferred(
+        "LOAD_THERMAL_CONSTANT_ELEMENT",
+        "a constant temperature stated per ELEMENT",
+        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD "
+        "(fixtemp.F:180-200) — there is no per-element temperature card"),
+    "LOAD_THERMAL_VARIABLE_ELEMENT": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_ELEMENT",
+        "a time-varying temperature stated per ELEMENT",
+        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD"),
+    "LOAD_THERMAL_VARIABLE_BEAM": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_BEAM",
+        "a time-varying temperature stated per BEAM element, with a "
+        "through-depth gradient",
+        "/IMPTEMP, which sets ONE temperature per node and carries no "
+        "cross-section gradient"),
+    "LOAD_THERMAL_VARIABLE_SHELL": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_SHELL",
+        "a time-varying temperature stated per SHELL element, with a "
+        "through-thickness gradient",
+        "/IMPTEMP, which sets ONE temperature per node and carries no "
+        "through-thickness gradient"),
+    "MAT_THERMAL_ISOTROPIC_TD_LC": _thermal_deferred(
+        "MAT_THERMAL_ISOTROPIC_TD_LC",
+        "a temperature-DEPENDENT isotropic thermal material whose HC and TC "
+        "are *DEFINE_CURVEs",
+        "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
+    "LOAD_THERMAL_BINOUT": _thermal_deferred(
+        "LOAD_THERMAL_BINOUT",
+        "nodal temperatures read back from a previous run's binout",
+        "no Radioss counterpart"),
+}
+for _kw, _h in RARE_MATERIAL_KEYWORDS.items():
     HANDLERS[_kw] = _h
 del _kw, _h
 

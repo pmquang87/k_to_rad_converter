@@ -48,6 +48,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _AIRBAG_OPTION_STACKS,
                        INITIAL_STATE_PRELOAD_KEYWORDS,
+                       RARE_MATERIAL_KEYWORDS,
                        _SEATBELT_MAT_KEYWORDS,
                        _SEATBELT_SUBKEYWORDS,
                        initial_strain_shell_records,
@@ -1197,6 +1198,13 @@ def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
         if _geti(f1, 6) == 1:                   # ICOMP: ceil(NIP/8) angle cards
             idx += ((nip if nip > 0 else 2) + 7) // 8
         if opt_card:                            # card 4a-4d
+            # None of the four option cards carries an ID. _THERMAL's single
+            # cell is ITHELFM — "Thermal shell formulation" (Keyword971_R10.1/
+            # PROPERTY/SectShll.cfg:53; the GUI radio reads "1: Thick thermal
+            # shell / 2: Thin thermal shell"), a formulation FLAG, not the
+            # *MAT_THERMAL_* id that *PART's TMID names. The corpus carrier
+            # 07_metalstrip.k writes 1 and 2 there while both its parts state
+            # TMID 1. So the card is only STRIDDEN, like EFG / XFEM / MISC.
             idx += 1
         if _geti(f1, 1) in _USER_SHELL_ELFORMS:  # cards 5 / 5.1 / 5.2
             f5 = _fields(raw[idx], 8, 10) if idx < len(raw) else []
@@ -2148,6 +2156,150 @@ def _off_mat_138(b: Block, offsets: Dict[str, int], warn) -> None:
                 b.raw[i2] = new
 
 
+def _off_mat_shape_memory(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_SHAPE_MEMORY (*MAT_030): MID → IDMOFF; every curve reference the
+    card can carry → IDFOFF (``VALUE(FUNCT)`` in mat_030.cfg, so IDFOFF per
+    ``include_transform.cfg:64-78``).
+
+    Two sign conventions on one keyword:
+      * card 1 fields 5/6 (``LCSS``/``LCSSC``) are ordinary positive ids — but
+        LCSS may be NEGATIVE to say "the SIG_* cells are plastic-strain
+        curves", so both signs are walked;
+      * card 2 fields 1-4 (``SIG_ASS``/``SIG_ASF``/``SIG_SAS``/``SIG_SAF``) are
+        ``SCALAR_OR_OBJECT``: a POSITIVE value is a stress (physics — never
+        touch it) and a NEGATIVE one is a curve id. Only the negative form is
+        rewritten, sign preserved — the *SECTION_SHELL QR/IRID pattern.
+
+    Card 3 is the R7.1 ``FREE_CARD(optionalCards, "%10d%10d", LCID_AS,
+    LCID_SA)``. It is claimed by RAW ROW INDEX like the handler does, never by
+    "the next non-blank row": an all-blank optional card is legal LS-DYNA, and a
+    content scan would walk past it into the following keyword (the #109/#117/
+    #119 trap) — here that would offset another entity's card-1 ids as if they
+    were curve references.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m"), (4, "f"), (5, "f")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (4, 5):                        # LCSS / LCSSC stated negative
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw) and b.raw[i2].strip():
+        for i in (0, 1, 2, 3):              # SIG_ASS/ASF/SAS/SAF, curve form
+            new = _rewrite_neg_ref(b.raw[i2], i, foff)
+            if new is not None:
+                b.raw[i2] = new
+    i3 = toff + 2
+    if i3 < len(b.raw) and b.raw[i3].strip():
+        new = _rewrite_line(b.raw[i3], [(0, "f"), (1, "f")], offsets)
+        if new is not None:
+            b.raw[i3] = new
+
+
+def _off_mat_add_thermal_expansion(b: Block, offsets: Dict[str, int],
+                                   warn) -> None:
+    """*MAT_ADD_THERMAL_EXPANSION, one card per record, repeating.
+
+    Field 0 lives in TWO id namespaces by SIGN (Vol II R17 p.2-146): ``GT.0``
+    is a PART id → IDPOFF, ``LT.0`` makes ``|PID|`` a MATERIAL id → IDMOFF.
+    ``_rewrite_line`` never touches a negative cell, so the LT.0 form needs the
+    ``_rewrite_neg_ref`` treatment — without it the include's materials all move
+    by IDMOFF while this reference stays on the parent deck's numbering and the
+    writer drops the card as "names a material no *PART uses".
+    ``LCID``/``LCIDY``/``LCIDZ`` (fields 1/3/5) are curves → IDFOFF.
+    """
+    poff, moff = offsets.get("p", 0), offsets.get("m", 0)
+    for i in range(_title_offset(b), len(b.raw)):
+        line = b.raw[i]
+        if not line.strip():
+            continue
+        new = _rewrite_line(line, [(0, "p"), (1, "f"), (3, "f"), (5, "f")],
+                            offsets) if poff or offsets.get("f", 0) else None
+        if new is not None:
+            b.raw[i] = new
+        new = _rewrite_neg_ref(b.raw[i], 0, moff)
+        if new is not None:
+            b.raw[i] = new
+
+
+def _off_load_thermal_sets(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*LOAD_THERMAL_{CONSTANT,VARIABLE}: repeating TWO-CARD sets.
+
+    *"Card Sets. Include as many sets consisting of the following two cards as
+    desired"* (Vol I R17 pp.33-166/33-179). Walked in RAW PAIRS for the same
+    reason the handler is: card 1 may be entirely blank (NSID defaults to all
+    nodes), so a per-record "next non-blank row" walk would offset the wrong
+    cells from the second set on.
+
+    Card 1 ``NSID NSIDEX BOXID`` → IDSOFF, IDSOFF, IDDOFF.
+    Card 2 of _VARIABLE ``TS TB LCID TSE TBE LCIDE LCIDR LCIDEDR``: the four
+    curve cells → IDFOFF. _CONSTANT's card 2 (``T TE``) carries no id.
+    """
+    variable = "VARIABLE" in b.keyword
+    i = _title_offset(b)
+    while i + 1 < len(b.raw):
+        if not b.raw[i].strip() and not b.raw[i + 1].strip():
+            break
+        new = _rewrite_line(b.raw[i], [(0, "s"), (1, "s"), (2, "d")], offsets)
+        if new is not None:
+            b.raw[i] = new
+        if variable:
+            new = _rewrite_line(b.raw[i + 1],
+                                [(2, "f"), (5, "f"), (6, "f"), (7, "f")],
+                                offsets)
+            if new is not None:
+                b.raw[i + 1] = new
+        i += 2
+
+
+def _off_mat_muscle(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_MUSCLE (*MAT_156): MID → IDMOFF; ``ALM SFR SVS SVR SSP`` (card 2
+    fields 1-5) are ``SCALAR_OR_FUNCTION`` — a NEGATIVE value is a curve (or,
+    for SSP, a table) id, a positive one is physics. Only the negative form is
+    rewritten, sign preserved."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    i2 = toff + 1
+    if i2 >= len(b.raw) or not b.raw[i2].strip():
+        return
+    foff = offsets.get("f", 0)
+    for i in (0, 1, 2, 3, 4):
+        new = _rewrite_neg_ref(b.raw[i2], i, foff)
+        if new is not None:
+            b.raw[i2] = new
+
+
+def _off_mat_spring_muscle(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_SPRING_MUSCLE (*MAT_S15): MID → IDMOFF; ``SV A TL TV`` (card 1
+    fields 4/5/7/8) and ``FPE`` (card 2 field 1) are ``SCALAR_OR_OBJECT``
+    ``VALUE(CURVE)`` cells — negative = curve id → IDFOFF, sign preserved."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    foff = offsets.get("f", 0)
+    for i in (3, 4, 6, 7):
+        new = _rewrite_neg_ref(b.raw[toff], i, foff)
+        if new is not None:
+            b.raw[toff] = new
+    i2 = toff + 1
+    if i2 < len(b.raw) and b.raw[i2].strip():
+        new = _rewrite_neg_ref(b.raw[i2], 0, foff)
+        if new is not None:
+            b.raw[i2] = new
+
+
 def _off_mat_169(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_ARUP_ADHESIVE (169): MID → IDMOFF; TENMAX/GCTEN/SHRMAX/GCSHR
     (card 1 fields 5-8), SHRP (card 2 field 3) and SDFAC/SGFAC (card 5 fields
@@ -3022,6 +3174,8 @@ _OFFSET_SPECS: Dict[str, object] = {
     "MAT_34": _off_mat_fabric,
     "MAT_HILL_FOAM": _mat({0: [(5, "f"), (7, "f")]}),
     "MAT_177": _mat({0: [(5, "f"), (7, "f")]}),
+    # The RARE MATERIALS batch is registered from _RARE_MATERIAL_OFFSETS below
+    # this dict, keyed off handlers.RARE_MATERIAL_KEYWORDS — ONE source.
     # Hyperelastic rubber batch. MAT_027 card 2 field 4 is the LCID test curve
     # (blank in the constants path → no-op). MAT_077_O/_H card 2 is CONDITIONAL:
     # LCID1/LCID2 only exist when N>0 (with N=0 the same card holds MU4/MU6 or
@@ -3497,6 +3651,72 @@ _INITIAL_STATE_PRELOAD_OFFSETS = {
 for _kw in INITIAL_STATE_PRELOAD_KEYWORDS:
     _OFFSET_SPECS[_kw] = _INITIAL_STATE_PRELOAD_OFFSETS[_kw]
 del _kw
+
+# The RARE MATERIALS batch. Keyed off the SAME dict handlers.py registers from,
+# and asserted equal by tests/test_rare_materials.py, so a spelling cannot be
+# readable and un-offsettable at the same time (#116).
+#
+# Buckets, from Vol I R17 pp.2979-2980 (*INCLUDE_TRANSFORM Card 2b.1) and the
+# cfg's own HCDI types (include_transform.cfg:64-78):
+#   *MAT_030 / *MAT_156 / *MAT_S15 MID   MATS   -> IDMOFF "m"
+#   *MAT_030 SIG_* (negative), LCSS,
+#     LCSSC, LCID_AS, LCID_SA            FUNCT  -> IDFOFF "f"
+#   *MAT_156 ALM SFR SVS SVR SSP (neg)   FUNCT  -> IDFOFF "f"
+#   *MAT_S15 SV A TL TV FPE (negative)   CURVE  -> IDFOFF "f" (same HCDI type
+#                                        HCDI_OBJ_TYPE_CURVES, mv_type.cpp:93)
+#   *MAT_ADD_THERMAL_EXPANSION field 1 (PID)  COMPONENT -> IDPOFF "p" when
+#                                        GT.0; its LT.0 form makes |PID| a
+#                                        MATERIAL id -> IDMOFF, sign preserved
+#                                        (_rewrite_neg_ref)
+#   its LCID / LCIDY / LCIDZ             FUNCT  -> IDFOFF "f"
+#   *MAT_THERMAL_ISOTROPIC TMID          "material ID"           -> IDMOFF "m"
+#   *PART TMID                           idem (already in _off_part)
+#   *SECTION_SHELL_THERMAL option-card TMID                      -> IDMOFF "m"
+#   *INITIAL_TEMPERATURE_SET NSID,
+#     *BOUNDARY_TEMPERATURE_SET NSID,
+#     *LOAD_THERMAL_{CONSTANT,VARIABLE} NSID / NSIDEX   SETS     -> IDSOFF "s"
+#   the _NODE spellings' NID                          NODES      -> IDNOFF "n"
+#   *BOUNDARY_TEMPERATURE TLCID, *LOAD_THERMAL_* LCID / LCIDDR / LCIDE /
+#     LCIDR / LCIDEDR, *MAT_THERMAL_ISOTROPIC TGRLC   CURVES     -> IDFOFF "f"
+#   *LOAD_THERMAL_{CONSTANT,VARIABLE} BOXID (*DEFINE_BOX)        -> IDDOFF "d"
+_RARE_MATERIAL_OFFSETS = {
+    "MAT_SHAPE_MEMORY":  _off_mat_shape_memory,
+    "MAT_030":           _off_mat_shape_memory,
+    "MAT_30":            _off_mat_shape_memory,
+    "MAT_MUSCLE":        _off_mat_muscle,
+    "MAT_156":           _off_mat_muscle,
+    "MAT_SPRING_MUSCLE": _off_mat_spring_muscle,
+    "MAT_S15":           _off_mat_spring_muscle,
+    # The card repeats under one keyword, and its field 0 lives in two id
+    # namespaces by SIGN — hence a callable, not a "data" walk.
+    "MAT_ADD_THERMAL_EXPANSION": _off_mat_add_thermal_expansion,
+    "MAT_THERMAL_ISOTROPIC": {"cards": {0: [(0, "m"), (2, "f")]}},
+    "SECTION_SHELL_THERMAL": _off_section_shell,
+    # Every *LOAD_THERMAL_* spelling REPEATS ("Include as many cards/sets ...
+    # as desired"), so all five take a repeating walk. A {"cards": {0: ...}}
+    # spec would offset the FIRST row only and leave every later NID / LCID
+    # pointing at the parent deck (the same hole the handler had).
+    "INITIAL_TEMPERATURE_SET":   {"data": (0, [(0, "s")])},
+    "INITIAL_TEMPERATURE_NODE":  {"data": (0, [(0, "n")])},
+    "BOUNDARY_TEMPERATURE_SET":  {"data": (0, [(0, "s"), (1, "f")])},
+    "BOUNDARY_TEMPERATURE_NODE": {"data": (0, [(0, "n"), (1, "f")])},
+    "LOAD_THERMAL_CONSTANT":      _off_load_thermal_sets,
+    "LOAD_THERMAL_CONSTANT_NODE": {"data": (0, [(0, "n")])},
+    "LOAD_THERMAL_LOAD_CURVE":    {"data": (0, [(0, "f"), (1, "f")])},
+    "LOAD_THERMAL_VARIABLE":      _off_load_thermal_sets,
+    "LOAD_THERMAL_VARIABLE_NODE": {"data": (0, [(0, "n"), (3, "f")])},
+    # Recognized + warn-dropped keywords get NO offset spec, deliberately: an
+    # unmodelled card stack must not have its cells rewritten by position (the
+    # *AIRBAG warn-drop rule). *CONTROL_SOLUTION carries no id at all.
+}
+_RARE_MATERIAL_OFFSETS.update(
+    {kw: None for kw in RARE_MATERIAL_KEYWORDS
+     if kw not in _RARE_MATERIAL_OFFSETS})
+for _kw in RARE_MATERIAL_KEYWORDS:
+    _spec = _RARE_MATERIAL_OFFSETS[_kw]     # KeyError = a spelling with no
+    if _spec is not None:                   # verdict, never a silent gap
+        _OFFSET_SPECS[_kw] = _spec
+del _kw, _spec
 
 # All CONTACT_* handled by k2rad share the Card-1 (ssid msid sstyp mstyp
 # sboxid mboxid) layout; unlisted CONTACT_ variants fall to the unmapped warn.

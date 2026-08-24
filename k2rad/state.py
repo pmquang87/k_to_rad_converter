@@ -792,6 +792,14 @@ class PartData:
     # law choice is triggered solely by a nonzero part EOSID) and the
     # *MAT_NULL /MAT/LAW6-carrier pairing for an EOS of a different id.
     eosid: int = 0
+    # *PART field 8 (TMID) → the *MAT_THERMAL_* card bound to this part. The
+    # thermal material id is a SEPARATE namespace from MID — *"This number is
+    # independent of the material ID number (MID) ... The TMID and MID numbers
+    # are related through the *PART card"* (Vol II R17, *MAT_THERMAL header) —
+    # and it is what supplies the /HEAT/MAT values (RHO0_CP = RO*HC, AS = TC).
+    # The same "a *PART field that joins a companion material card" role eosid
+    # plays for the equation of state.
+    tmid: int = 0
 
 
 @dataclass
@@ -5786,6 +5794,242 @@ class SeatbeltAccelerometer:
     mass: float = 0.0
 
 
+# ── Rare materials batch ─────────────────────────────────────────────────────
+
+@dataclass
+class MatShapeMemory:
+    """*MAT_SHAPE_MEMORY (*MAT_030) → /MAT/LAW71 (superelastic shape-memory
+    alloy, Auricchio model on both sides).
+
+    LS-DYNA cards (Vol II R17 pp.2-303..2-309; the shipped
+    Keyword971_R7.1/MAT/mat_030.cfg states the same two cards plus the R7.1
+    ``FREE_CARD(optionalCards, "%10d%10d", LSD_LCID2, LSD_LCID3)``):
+      Card1: MID RO E PR [LCSS LCSSC IDPP]
+      Card2: SIG_ASS SIG_ASF SIG_SAS SIG_SAF EPSL ALPHA YMRT
+      Card3 (optional, R7.1+): LCID_AS LCID_SA
+
+    The four SIG_* cells are ``SCALAR_OR_OBJECT``: *"LT.0.0: -SIG_xxx is a load
+    curve ID"* (temperature, or effective plastic strain when LCSS is also
+    negative). /MAT/LAW71 has one scalar slot each, so a negative cell cannot be
+    carried — see the handler.
+
+    The Radioss card is ``RHO_I / E Nu E_mart / sig_sas sig_fas sig_ssa sig_fsa
+    alpha / EpsL CAS CSA TSAS TFAS / TSSA TFSA CP TINI``
+    (hm_cfg_files/config/CFG/radioss140/MAT/matl71_71.cfg). The eight
+    temperature terms stay BLANK: LS-DYNA MAT_030 has no counterpart for any of
+    them, and a non-zero CAS/CSA together with the reader's TSAS..TFSA → 298 K /
+    TINI → 360 K defaults (hm_read_mat71.F:168-175) silently shifts every
+    transformation threshold (measured: sig_sas 400 → onset ≈ 478 MPa).
+    """
+    mid: int
+    title: str
+    rho: float
+    e: float
+    nu: float
+    sig_ass: float          # austenite→martensite START stress   → sig_sas
+    sig_asf: float          # austenite→martensite FINISH stress  → sig_fas
+    sig_sas: float          # martensite→austenite START stress   → sig_ssa
+    sig_saf: float          # martensite→austenite FINISH stress  → sig_fsa
+    epsl: float             # recoverable (maximum residual) strain → EpsL
+    alpha: float            # LS-DYNA tension/compression asymmetry ratio
+    ymrt: float             # martensite Young's modulus → E_mart
+    lcss: int = 0           # dropped (no LAW71 slot)
+    lcssc: int = 0          # dropped
+    idpp: int = 0           # dropped (LAW71 has no plasticity at all)
+    lcid_as: int = 0        # dropped (card 3, R7.1 FREE_CARD)
+    lcid_sa: int = 0        # dropped
+
+
+@dataclass
+class MatMuscle:
+    """*MAT_MUSCLE (*MAT_156) on a *SECTION_BEAM truss part → /PROP/TYPE46
+    (SPR_MUSCLE) + /SPRING.
+
+    LS-DYNA cards (Vol II R17 pp.2-1071..2-1074):
+      Card1: MID RO SNO SRM PIS SSM CER DMP
+      Card2: ALM SFR SVS SVR SSP
+
+    ``ALM`` LT.0 = curve id, GE.0 = the constant activation level.
+    ``SFR``/``SVS``/``SVR`` LT.0 = curve id, **GE.0 = the constant value 1.0**
+    (the scalar itself is discarded — Vol II p.2-1072). ``SSP`` LT.0 = curve or
+    table id, EQ.0 = the built-in exponential, GT.0 = the constant 0.0.
+    """
+    mid: int
+    title: str
+    rho: float
+    sno: float              # initial-length / optimal-length ratio
+    srm: float              # maximum strain rate
+    pis: float              # peak isometric stress
+    ssm: float              # SSP-exponential scale
+    cer: float              # SSP-exponential rate
+    dmp: float              # damping
+    alm: float = 0.0        # activation level (scalar branch)
+    alm_lcid: int = 0       # activation level (curve branch, |ALM|)
+    sfr: float = 0.0
+    sfr_lcid: int = 0
+    svs: float = 0.0
+    svs_lcid: int = 0
+    svr: float = 0.0
+    svr_lcid: int = 0
+    ssp: float = 0.0
+    ssp_lcid: int = 0
+
+
+@dataclass
+class MatSpringMuscle:
+    """*MAT_SPRING_MUSCLE (*MAT_S15) on a *SECTION_DISCRETE part → /PROP/TYPE46
+    (SPR_MUSCLE) + /SPRING.
+
+    LS-DYNA cards (Vol II R17 pp.2-2095..2-2099):
+      Card1: MID L0 VMAX SV A FMAX TL TV
+      Card2: FPE LMAX KSH
+
+    Defaults: ``L0`` 1.0, ``SV`` 1.0, ``TL`` 1.0, ``TV`` 1.0, ``FPE`` 0.0.
+    ``SV``/``A``/``TL``/``TV`` LT.0 = curve id; ``A`` GE.0 = the constant A,
+    ``SV``/``TL``/``TV`` GE.0 = the constant 1.0. ``FPE`` LT.0 = curve id,
+    EQ.0 = the built-in exponential, GT.0 = the constant 0.0.
+    """
+    mid: int
+    title: str
+    l0: float = 1.0         # initial muscle length
+    vmax: float = 0.0       # maximum shortening velocity
+    sv: float = 1.0         # scale factor on Vmax vs active state
+    sv_lcid: int = 0
+    a: float = 0.0          # activation level
+    a_lcid: int = 0
+    fmax: float = 0.0       # peak isometric force
+    tl: float = 1.0         # active tension vs length
+    tl_lcid: int = 0
+    tv: float = 1.0         # active tension vs velocity
+    tv_lcid: int = 0
+    fpe: float = 0.0        # passive force vs length
+    fpe_lcid: int = 0
+    lmax: float = 0.0       # relative length at max passive force
+    ksh: float = 0.0        # exponential shape parameter
+
+
+@dataclass
+class MatAddThermalExpansion:
+    """*MAT_ADD_THERMAL_EXPANSION → /THERM_STRESS/MAT (+ /HEAT/MAT) on the
+    material of the named PART.
+
+    LS-DYNA card (Vol II R17 pp.2-146..2-148), 7 or 8 fields depending on the
+    release — the Keyword971 cfg has only the seven, the r14 decks in the
+    verification corpus write eight:
+      PID LCID MULT LCIDY MULTY LCIDZ MULTZ [TREF]
+
+    ``PID`` GT.0 = a part id, LT.0 = the material id ``|PID|``.
+    ``LCID`` EQ.0 → the coefficient is the constant ``MULT``; GT.0 → ``MULT``
+    scales the curve. For an ISOTROPIC material *"LCIDY, MULTY, LCIDZ and MULTZ
+    are ignored"*; for an anisotropic one they are the b-/c-direction pair, and
+    *"if MULTY = 0 as well, LCID and MULT define the coefficient in the
+    b-direction"*.
+    ``TREF`` *"Reference temperature. A nonzero value activates the secant
+    approach."* — no Radioss slot (the engine is strictly incremental).
+    """
+    pid: int
+    lcid: int = 0
+    mult: float = 0.0
+    lcidy: int = 0
+    multy: float = 0.0
+    lcidz: int = 0
+    multz: float = 0.0
+    tref: float = 0.0
+    has_tref: bool = False      # False = the 7-field layout (no TREF cell)
+
+
+@dataclass
+class MatThermalIsotropic:
+    """*MAT_THERMAL_ISOTROPIC (T01) → the /HEAT/MAT values of every part that
+    names it through *PART field 8 (TMID).
+
+    LS-DYNA cards (Vol II R17 p.3-2):
+      Card1: TMID TRO TGRLC TGMULT TLAT HLAT
+      Card2: HC TC
+
+    ``TRO`` EQ.0 → the structural density. ``HC`` is the specific heat per unit
+    MASS and ``TC`` the thermal conductivity, so /HEAT/MAT's VOLUMETRIC
+    ``RHO0_CP`` is ``(TRO or RO)·HC`` and ``AS`` is ``TC``. TGRLC/TGMULT
+    (volumetric heat generation) and TLAT/HLAT (latent heat) have no
+    /HEAT/MAT slot.
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    hc: float = 0.0
+    tc: float = 0.0
+
+
+@dataclass
+class InitialTemperature:
+    """*INITIAL_TEMPERATURE_{SET|NODE} → /INITEMP on a /GRNOD.
+
+    ``NSID/NID TEMP LOC``; ``NSID = 0`` (the _SET spelling) means every node in
+    the model. ``LOC`` selects a thick-thermal-shell surface (-1 lower, 0
+    middle, +1 upper) and has no Radioss counterpart.
+    """
+    sid: int                # node-set id, node id, or 0 = all nodes
+    temp: float
+    loc: int = 0
+    is_node: bool = False   # True = *INITIAL_TEMPERATURE_NODE (sid is a NID)
+    # Only ever set on the companion /INITEMP the writer SYNTHESIZES for a
+    # driver (writer/thermal.py::_resolve_drivers). It has to carry the
+    # driver's own scope: an /INITEMP over the WHOLE set while the /IMPTEMP
+    # covers set-minus-NSIDEX would initialise the exempted nodes at the
+    # temperature the card exempts them from. A parsed *INITIAL_TEMPERATURE
+    # has no such cells and leaves these at their defaults.
+    nsidex: int = 0
+    boxid: int = 0
+    drive_exempt: bool = False
+
+
+@dataclass
+class ImposedTemperature:
+    """A converted temperature DRIVER → /IMPTEMP.
+
+    One record per LS-DYNA card; ``source`` names the keyword so every warning
+    and the /IMPTEMP title can say which one it came from.
+      * ``*LOAD_THERMAL_CONSTANT``      → all nodes, constant T
+      * ``*LOAD_THERMAL_LOAD_CURVE``    → all nodes, T = f(t)
+      * ``*LOAD_THERMAL_VARIABLE``      → a node set, T = TB + TS·f(t)
+      * ``*BOUNDARY_TEMPERATURE_{SET|NODE}`` → a set/node, T = TMULT·f(t)
+    """
+    source: str
+    sid: int = 0            # node-set id, node id, or 0 = all nodes
+    is_node: bool = False
+    nids: List[int] = field(default_factory=list)   # explicit node list (_NODE)
+    # *LOAD_THERMAL_{CONSTANT,VARIABLE} card 1 is "NSID NSIDEX BOXID": NSIDEX
+    # is a node set EXEMPTED from the imposed temperature and BOXID restricts
+    # NSID to a *DEFINE_BOX (Vol I R17 pp.33-166/33-179). /IMPTEMP is a hard
+    # Dirichlet reset every cycle, so a node the card excludes must not be in
+    # its /GRNOD.
+    nsidex: int = 0
+    boxid: int = 0
+    # True on the SECOND record a *LOAD_THERMAL_{CONSTANT,VARIABLE} card set
+    # produces: the one that drives the EXEMPTED nodes at their own
+    # temperature (TE, or TBE + TSE*f_LCIDE(t) — Vol I R17 pp.33-167/33-180
+    # read "Temperature of exempted nodes" / "Scaled temperature of the
+    # exempted nodes"). It carries the SAME sid and nsidex as its sibling, and
+    # the writer intersects instead of subtracting, so the two /IMPTEMPs
+    # partition the set exactly as LS-DYNA does.
+    drive_exempt: bool = False
+    lcid: int = 0           # LS-DYNA curve id (0 = the constant form)
+    scale: float = 1.0      # Fscale_y
+    const: float = 0.0      # the constant T of the LCID = 0 form
+    tbirth: float = 0.0     # → T_start
+    tdeath: float = 0.0     # → T_stop (0 = none)
+    # *LOAD_THERMAL_VARIABLE T = TB + TS·f(t): an OFFSET Radioss cannot express
+    # with Fscale_y alone, so the writer synthesizes TB + TS·f(t) point-wise.
+    offset: float = 0.0
+    # Writer-resolved: the /FUNCT id actually emitted for this driver.
+    func_id: int = 0
+    initial_temp: Optional[float] = None   # T(0), for the companion /INITEMP
+
+
 # ── User conversion options (CLI flags) ──────────────────────────────────────
 
 @dataclass
@@ -6336,6 +6580,51 @@ class ConversionState:
     # *MAT_SPOTWELD (MAT_100) beam parts → /PROP/TYPE13 /SPRING connectors
     mat_spotweld: Dict[int, MatSpotweld] = field(default_factory=dict)
 
+    # ── Rare materials batch ───────────────────────────────────
+    #   *MAT_030 / *MAT_SHAPE_MEMORY  → /MAT/LAW71
+    #   *MAT_156 / *MAT_MUSCLE        → /PROP/TYPE46 + /SPRING (no /MAT)
+    #   *MAT_S15 / *MAT_SPRING_MUSCLE → /PROP/TYPE46 + /SPRING (no /MAT)
+    #   *MAT_ADD_THERMAL_EXPANSION    → /THERM_STRESS/MAT + /HEAT/MAT
+    #   *MAT_THERMAL_ISOTROPIC (via *PART TMID) → the /HEAT/MAT values
+    mat_shape_memory: Dict[int, MatShapeMemory] = field(default_factory=dict)
+    mat_muscle: Dict[int, MatMuscle] = field(default_factory=dict)
+    mat_spring_muscle: Dict[int, MatSpringMuscle] = field(default_factory=dict)
+    # PART-keyed, so a LIST: the card names a PID, and two cards may name two
+    # parts that share one MID — which /THERM_STRESS/MAT, being MATERIAL-keyed,
+    # cannot express without splitting the material (writer/thermal.py).
+    mat_add_thermal_expansion: List[MatAddThermalExpansion] = \
+        field(default_factory=list)
+    mat_thermal_isotropic: Dict[int, MatThermalIsotropic] = \
+        field(default_factory=dict)
+    # Temperature drivers — the minimal foothold that makes a /THERM_STRESS/MAT
+    # do anything at all. Radioss's thermal expansion is INCREMENTAL
+    # (ETH = alpha*(T_n - T_{n-1}), cmain3.F:235-240 / mmain.F90:770-786), so
+    # with no driver DTEMP is identically zero on every cycle and the emitted
+    # card is inert at 0 starter errors and 0 warnings.
+    initial_temperatures: List[InitialTemperature] = field(default_factory=list)
+    imposed_temperatures: List[ImposedTemperature] = field(default_factory=list)
+    # Writer-resolved (writer/thermal.py::_resolve_thermal), filled ONCE per mid
+    # — the #125 "emit shared cards once per ID, not once per consumer" rule.
+    #   heat_mat_cards   : mid → (T0, RHO0_CP, AS, BS, T1, EFRAC)
+    #   therm_stress_cards: mid → (Fct_ID_T, Fscale_y)
+    heat_mat_cards: Dict[int, Tuple[float, float, float, float, float, float]] \
+        = field(default_factory=dict)
+    therm_stress_cards: Dict[int, Tuple[int, float]] = field(default_factory=dict)
+    # *MAT_ELASTIC ids whose law was RESTATED to /MAT/LAW36 so that a thermal
+    # expansion could reach the per-integration-point stresses of a shell
+    # (writer/thermal.py::_restate_law1_shells). Read back by the inert-card
+    # warning: the restatement is not free (-4.6 % time step, +0.03 % membrane
+    # stress), so a deck that ends up with no temperature driver at all must be
+    # told its constitutive law changed for a card that does nothing.
+    law1_shells_restated: Set[int] = field(default_factory=set)
+    # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
+    # never from the parsed driver list: several corpus decks state a driver
+    # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so
+    # the driver is dropped at emission and NOTHING changes the temperature.
+    # This is what gates /TH/NODE TEMP, /ANIM/NODA/TEMP and the *DATABASE_TPRINT
+    # note (the #122 rule: a legal, accepted, frozen channel is worse than none).
+    thermal_driver_emitted: bool = False
+
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
     # which LAW the material becomes is decided by the PROPERTY its parts
@@ -6867,6 +7156,27 @@ class ConversionState:
     # here — filled AT the line that writes the qualifying /SPRING, the same
     # discipline as spring_elem_ids.
     spring_axial_preloadable: Set[int] = field(default_factory=set)
+    # /SPRING element ids emitted on a /PROP/TYPE46 (SPR_MUSCLE). Kept apart
+    # from discrete_spring_eids because /TH/SPRING on a TYPE46 element writes
+    # 15 channels of EXACT ZERO — force, deflection, length and even the OFF
+    # flag — in every load case (measured against a /PROP/TYPE4 spring in the
+    # SAME /TH group of the SAME deck, which reports correctly), while the
+    # global SPRING ENERGY channel and the nodal reactions are right. So these
+    # ids are deliberately left out of the *DATABASE_DEFORC group: an emitted
+    # channel that is legal, accepted and all zeros is worse than an honest
+    # warn-and-drop (#122). Filled AT the line that writes each /SPRING row.
+    muscle_spring_eids: Set[int] = field(default_factory=set)
+    # The SAME ids, split by the LS-DYNA element table they came from. An
+    # LS-DYNA element id lives in a PER-TYPE namespace: *ELEMENT_BEAM 50 and
+    # *ELEMENT_DISCRETE 50 are both legal in one deck (the #125 "one cell, two
+    # id namespaces" class). So a consumer that asks "was THIS BEAM re-routed
+    # to a /SPRING?" must not test the union — a plain /BEAM whose eid happens
+    # to equal a discrete muscle spring's would answer yes and be dropped from
+    # a /SECT group or a /TH group it belongs in. *MAT_MUSCLE lands on the
+    # beam side, *MAT_SPRING_MUSCLE on the discrete side; both are filled AT
+    # the line that writes the /SPRING row, beside muscle_spring_eids.
+    muscle_beam_spring_eids: Set[int] = field(default_factory=set)
+    muscle_discrete_spring_eids: Set[int] = field(default_factory=set)
     # *SECTION_SOLID ids / part ids whose emitted /PROP/SOLID carries
     # Ismstr=10 (total strain) — set for /XREF, /MAT/LAW95 and /MAT/LAW90
     # parts, which NEED it. sgrtails.F:1387-1412 silently downgrades a
@@ -7045,7 +7355,11 @@ class ConversionState:
                   self.mat_fabric,
                   # *MAT_SEATBELT / *MAT_B01 (+_2D) → /MAT/LAW114 or LAW119,
                   # both under the MID verbatim.
-                  self.mat_seatbelt):
+                  self.mat_seatbelt,
+                  # *MAT_030 → /MAT/LAW71, MID verbatim. (*MAT_156 and
+                  # *MAT_S15 are deliberately NOT here: both live entirely
+                  # inside a /PROP/TYPE46 and emit no /MAT at all.)
+                  self.mat_shape_memory):
             ids |= set(d)
         ids |= {g.glass_mid for g in self.mat_laminated_glass.values()
                 if g.glass_mid}
