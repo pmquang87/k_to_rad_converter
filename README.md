@@ -742,13 +742,26 @@ Per-element force history is **not** available: `/TH/SPRING` on a TYPE46 writes
 15 channels of exact zero — force, deflection, length and even the OFF flag —
 while a `/PROP/TYPE4` spring in the *same* group of the *same* deck reports
 correctly, so muscle springs are left out of the `*DATABASE_DEFORC` group **and
-of any `*DATABASE_HISTORY_BEAM`/`_DISCRETE`/`_SEATBELT` group** that names them,
-with the warning pointing at `/TH/NODE REACX` or the global `SPRING ENERGY`
-channel instead. For the same reason a `*DATABASE_CROSS_SECTION` plane that cuts
-a muscle (or spotweld, or ELFORM-6) beam leaves it out of the section's
-`/GRBEAM` group — those elements are `/SPRING` in the emitted deck, so the id
-matched nothing there anyway (starter `WARNING 534 ... GROUP IS EMPTY`) — and
-names the lost contribution.
+of any `*DATABASE_HISTORY_BEAM`/`_DISCRETE` group** that names them, with the
+warning pointing at `/TH/NODE REACX` or the global `SPRING ENERGY` channel
+instead. That screen is applied **per LS-DYNA id namespace**, never against the
+union: `*DATABASE_HISTORY_BEAM` names `*ELEMENT_BEAM` ids and `_DISCRETE` names
+`*ELEMENT_DISCRETE` ids, so a beam whose eid happens to equal a
+`*MAT_SPRING_MUSCLE` discrete's must not be dropped from a group it belongs in
+(and `_SEATBELT` gets no muscle screen at all — no `*ELEMENT_SEATBELT` can be a
+muscle spring).
+
+The same rule governs `*DATABASE_CROSS_SECTION`. A plane that cuts a muscle (or
+spotweld, or ELFORM-6) beam moves it out of the section's `/GRBEAM` group —
+those elements are `/SPRING` in the emitted deck, so the id would match nothing
+there (starter `WARNING 534 ... GROUP IS EMPTY`) — and into a `/GRSPRI/SPRI`
+group named by the `/SECT` card's `grsprg_ID` column, which is where the starter
+looks for them (`sect.cfg:37` types `grsprg_id` as `SUBTYPES = (/SETS/GRSPRI)`;
+`hm_read_sect.F:301` reads it and `:548` resolves it with `ELEGROR(…,'SPRI')`).
+Measured on engine twins of one deck: with the group `/TH/SECTIO` carries real
+data, without it **every channel is exactly 0.0**. The re-route test uses the
+three BEAM-derived registries only, so a plain `/BEAM` sharing an eid with an
+`*ELEMENT_DISCRETE` stays in `/GRBEAM` where it belongs.
 `*CONTACT_INTERIOR` → the Radioss counterpart is `Icontrol=1` (solid
 distortion control) on the listed parts' `/PROP` — an input column that
 exists only in the radioss2025 property format. Measured on `starter_win64`:
@@ -2423,8 +2436,13 @@ Icpre, not the law, and it needs more than one element. `/DT/NODA/CST` does not
 cure it — it makes the run stop at cycle 1000 while *printing* `NORMAL
 TERMINATION` with I-ENERGY 3.089e5 against EXT-WORK 0.099. No card-level cure
 was found, so the card is emitted and the warning names the trigger and the
-prescription: one lateral anchor per cross-section, or shells on a
-through-thickness-integrated law.
+prescription: **one anchor per cross-section that holds it laterally** — a
+symmetry plane, or a support that removes BOTH transverse translations — or
+shells on a through-thickness-integrated law. One node restrained in only ONE
+transverse direction is *not* enough: measured on the same bar, dy+dz per
+cross-section gives 0.01198565 mm with dt held and a single y = 0 symmetry plane
+the same, while dy alone still diverges (+0.389 mm, I-ENERGY 2036 against
+EXT-WORK 4.283) under a `NORMAL TERMINATION` banner.
 
 `/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT`
 and an **emitted** `/IMPTEMP` both exist — read from what was written, not from
@@ -2432,7 +2450,27 @@ what was parsed, because a driver whose `*SET_NODE_GENERAL` k2rad cannot read is
 dropped at emission and then nothing changes the temperature. An `/INITEMP`
 alone does not count: it is a state, not a driver. A `/THERM_STRESS/MAT` that
 ends with no `/IMPTEMP` is reported as INERT rather than shipped as a flat-zero
-channel.
+channel — and when a `*MAT_ELASTIC` was restated to `/MAT/LAW36` for that inert
+card, the warning says so, because the restatement costs −4.6 % of the time step
+for a card that does nothing.
+
+`*LOAD_THERMAL_{CONSTANT,VARIABLE}`'s `TE` / `TSE` / `TBE` / `LCIDE` are the
+**exempted nodes' own temperature**, not an expansion-only field: Vol I R17
+p.33-167 reads *"TE — Temperature of exempted nodes"* and p.33-180 *"TSE —
+Scaled temperature of the exempted nodes … LCIDE — Load curve ID that multiplies
+the scaled temperature of the exempted nodes"*, under the same
+`T = TB + TS·f(t)` law. So the card partitions its node set in two and k2rad
+says exactly that: the NSIDEX nodes are subtracted from the main `/IMPTEMP`
+**and from its companion `/INITEMP`** (an `/INITEMP` over the whole set would
+start them at the temperature the card exempts them from) and get a SECOND
+`/IMPTEMP` of their own carrying `TE`, or `TBE + TSE·f_LCIDE(t)`.
+Engine-measured on a 10-hex bar with `TS 1 / TB 0 / LCID f` and
+`TSE 1 / TBE −80 / LCIDE f`: the 40 driven nodes follow 40 → 100 → 120 K and the
+4 exempted ones −40 → 20 → 40 K, both to the closed form, at 0 starter errors
+and `NORMAL TERMINATION`. A scaled exempt temperature with a BLANK `LCIDE` is
+named and dropped rather than guessed — the manual prints only a down-arrow in
+that Default cell, and inventing a curve would fabricate the whole
+exempted-node history.
 
 ### Initial conditions
 `*INITIAL_VELOCITY_NODE` → `/INIVEL/TRA` (+ `/INIVEL/ROT` for rotational DOFs),

@@ -9079,7 +9079,8 @@ def handle_mat_shape_memory(block: Block, state: ConversionState) -> None:
 
 def _scalar_or_curve(f: List[str], i: int, default: float,
                      state: Optional[ConversionState] = None,
-                     field: str = "", fixed_positive: bool = False):
+                     field: str = "", fixed_positive: bool = False,
+                     where: str = ""):
     """Read an LS-DYNA ``SCALAR_OR_FUNCTION`` / ``SCALAR_OR_OBJECT`` cell.
 
     ``cfgio/MODEL_IO/meci_data_reader.cpp:6845-6848`` states the rule verbatim:
@@ -9104,8 +9105,12 @@ def _scalar_or_curve(f: List[str], i: int, default: float,
         return default, int(abs(v))
     if fixed_positive:
         if state is not None and v not in (0.0, 1.0):
+            # `where` carries the deck-specific prefix ("*MAT_MUSCLE mid=1: ")
+            # and `field` is the BARE cell name, so the quoted manual sentence
+            # stays a manual sentence instead of repeating the prefix inside
+            # its own quotation marks.
             state.warn(
-                f"{field}={v:g} states a positive constant, and LS-DYNA "
+                f"{where}{field}={v:g} states a positive constant, and LS-DYNA "
                 f"DISCARDS it: '{field} ... GE.0.0: Constant value of 1.0 is "
                 "used' (Vol II R17 p.2-1072 for the *MAT_156 cells, p.2-2096 "
                 "for the *MAT_S15 ones). Only a NEGATIVE value is meaningful "
@@ -9167,9 +9172,12 @@ def handle_mat_muscle(block: Block, state: ConversionState) -> None:
     # ("EQ.0.0: Exponential function is used. GT.0.0: Constant value of 0.0"),
     # so its scalar must survive to tell 0 from positive.
     where = f"*MAT_MUSCLE mid={mid}: "
-    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0, state, where + "SFR", True)
-    svs, svs_l = _scalar_or_curve(f2, 2, 1.0, state, where + "SVS", True)
-    svr, svr_l = _scalar_or_curve(f2, 3, 1.0, state, where + "SVR", True)
+    sfr, sfr_l = _scalar_or_curve(f2, 1, 1.0, state,
+                                    "SFR", True, where)
+    svs, svs_l = _scalar_or_curve(f2, 2, 1.0, state,
+                                    "SVS", True, where)
+    svr, svr_l = _scalar_or_curve(f2, 3, 1.0, state,
+                                    "SVR", True, where)
     ssp, ssp_l = _scalar_or_curve(f2, 4, 0.0)
     state.mat_muscle[mid] = MatMuscle(
         mid, title, rho, sno, srm, pis, ssm, cer, dmp,
@@ -9211,11 +9219,14 @@ def handle_mat_spring_muscle(block: Block, state: ConversionState) -> None:
     # i.e. the positive scalar is DISCARDED. A is the contrast on the same
     # card — "GE.0.0: Constant value of A is used" — so it keeps its value.
     where = f"*MAT_SPRING_MUSCLE mid={mid}: "
-    sv, sv_l = _scalar_or_curve(f1, 3, 1.0, state, where + "SV", True)
+    sv, sv_l = _scalar_or_curve(f1, 3, 1.0, state,
+                                  "SV", True, where)
     a, a_l = _scalar_or_curve(f1, 4, 0.0)
     fmax = to_float(f1[5]) if len(f1) > 5 else 0.0
-    tl, tl_l = _scalar_or_curve(f1, 6, 1.0, state, where + "TL", True)
-    tv, tv_l = _scalar_or_curve(f1, 7, 1.0, state, where + "TV", True)
+    tl, tl_l = _scalar_or_curve(f1, 6, 1.0, state,
+                                  "TL", True, where)
+    tv, tv_l = _scalar_or_curve(f1, 7, 1.0, state,
+                                  "TV", True, where)
 
     f2 = _card(raw, offset + 1, fixed=True, n=3, w=10)
     fpe, fpe_l = _scalar_or_curve(f2, 0, 0.0)
@@ -9409,6 +9420,86 @@ def handle_boundary_temperature(block: Block, state: ConversionState) -> None:
             tbirth=tbirth, tdeath=tdeath))
 
 
+def _exempt_driver(state: ConversionState, kw: str, nsid: int, nsidex: int,
+                   boxid: int, tse: float, tbe: float, lcide: int,
+                   stated: bool) -> None:
+    """The SECOND temperature a ``*LOAD_THERMAL_{CONSTANT,VARIABLE}`` card set
+    states: the one the NSIDEX nodes are held at.
+
+    The ``_E`` columns are the EXEMPTED nodes' own temperature, not an
+    expansion-only field. Vol I R17 p.33-167 reads *"TE — Temperature of
+    exempted nodes (optional)"* and p.33-180 *"TSE — Scaled temperature of the
+    exempted nodes (optional). TBE — Base temperature of the exempted nodes
+    (optional). LCIDE — Load curve ID that multiplies the scaled temperature of
+    the exempted nodes (optional)"*, with the same ``T = TB + TS x f(t)``
+    law (Remark 1). So the card partitions its node set in two, and Radioss can
+    say exactly that: a second /IMPTEMP over the NSIDEX subset.
+
+    Emitted only where the card states the second temperature WITHOUT a guess:
+
+    * ``LCIDE`` given and resolvable -> ``TBE + TSE*f_LCIDE(t)``;
+    * ``LCIDE`` blank and ``TSE = 0`` -> the constant ``TBE`` (the curve
+      multiplies a zero scale, so which curve it would have been cannot
+      matter);
+    * ``LCIDE`` blank with a non-zero ``TSE`` -> NOT emitted. The manual prints
+      only a down-arrow in that Default cell and never says which curve is
+      meant, and inventing one would fabricate the whole exempted-node history
+      (the #124 "never fabricate an unstated quantity" rule).
+    """
+    if not stated:
+        return
+    label = f"{kw}: TE/TSE/TBE/LCIDE"
+    if not nsidex:
+        state.warn(
+            f"{label} state the temperature OF THE EXEMPTED NODES (Vol I R17 "
+            "pp.33-167/33-180), but NSIDEX is blank on card 1, so this set "
+            "exempts no node at all. The values have no target and are "
+            "dropped.")
+        return
+    if lcide:
+        curve = state.curves.get(lcide)
+        if curve is None or len(curve.pts) < 2:
+            state.warn(
+                f"{label}: LCIDE={lcide} multiplies the exempted nodes' scaled "
+                "temperature, but the deck defines no such *DEFINE_CURVE (or "
+                "one with fewer than two points). The exempted nodes get NO "
+                "driver of their own — they are left out of the imposed "
+                "temperature (as the card asks) and then simply conduct, "
+                "where LS-DYNA would hold them at TBE + TSE*f(t).")
+            return
+    elif tse:
+        state.warn(
+            f"{label}: TSE={tse:g} scales a curve for the exempted nodes but "
+            "LCIDE is blank, and the manual states no curve for that case "
+            "(the Default cell is only a down-arrow, Vol I R17 p.33-179). "
+            "Guessing one would fabricate the whole exempted-node history, so "
+            "no second /IMPTEMP is emitted: the exempted nodes are left out of "
+            "the imposed temperature and then conduct. State LCIDE explicitly "
+            "if they are meant to follow a curve.")
+        return
+    if lcide:
+        # T_e = TBE + TSE*f_LCIDE(t) — the writer bakes the offset into a
+        # synthesized copy of the curve, exactly as it does for TS/TB.
+        rec = ImposedTemperature(
+            source=f"{kw} (NSIDEX exempted nodes)", sid=nsid, nsidex=nsidex,
+            boxid=boxid, drive_exempt=True, lcid=lcide, scale=tse, offset=tbe)
+    else:
+        # A pure constant: const alone carries it (the writer's constant
+        # branch computes const + offset, so the offset must stay 0).
+        rec = ImposedTemperature(
+            source=f"{kw} (NSIDEX exempted nodes)", sid=nsid, nsidex=nsidex,
+            boxid=boxid, drive_exempt=True, const=tbe, initial_temp=tbe)
+    state.imposed_temperatures.append(rec)
+    detail = (f"TBE={tbe:g} + TSE={tse:g} x curve {lcide}" if lcide
+              else f"the constant TBE={tbe:g}")
+    state.warn(
+        f"{label}: the exempted nodes (*SET_NODE {nsidex}) are held at "
+        f"{detail} — these columns are the EXEMPTED NODES' OWN temperature "
+        "(Vol I R17 pp.33-167/33-180), not an expansion-only field. A SECOND "
+        "/IMPTEMP is emitted over exactly that subset, so the card's two "
+        "temperatures partition the node set the way LS-DYNA states them.")
+
+
 def handle_load_thermal(block: Block, state: ConversionState) -> None:
     """*LOAD_THERMAL_{CONSTANT|LOAD_CURVE|VARIABLE}[_NODE] → /IMPTEMP (+ the
     companion /INITEMP for the temperature at t = 0).
@@ -9519,38 +9610,36 @@ def handle_load_thermal(block: Block, state: ConversionState) -> None:
             ts = to_float(f2[0]) if f2 else 0.0
             tb = to_float(f2[1]) if len(f2) > 1 else 0.0
             lcid = to_int(f2[2]) if len(f2) > 2 else 0
-            extra = [(n, v) for n, v in
-                     (("TSE", to_float(f2[3]) if len(f2) > 3 else 0.0),
-                      ("TBE", to_float(f2[4]) if len(f2) > 4 else 0.0),
-                      ("LCIDE", to_int(f2[5]) if len(f2) > 5 else 0),
-                      ("LCIDR", to_int(f2[6]) if len(f2) > 6 else 0),
-                      ("LCIDEDR", to_int(f2[7]) if len(f2) > 7 else 0))
-                     if v]
-            if extra:
+            tse = to_float(f2[3]) if len(f2) > 3 else 0.0
+            tbe = to_float(f2[4]) if len(f2) > 4 else 0.0
+            lcide = to_int(f2[5]) if len(f2) > 5 else 0
+            dr = [(n, v) for n, v in
+                  (("LCIDR", to_int(f2[6]) if len(f2) > 6 else 0),
+                   ("LCIDEDR", to_int(f2[7]) if len(f2) > 7 else 0)) if v]
+            if dr:
                 state.warn(
                     "*LOAD_THERMAL_VARIABLE: "
-                    + ", ".join(f"{n}={v:g}" for n, v in extra)
-                    + " dropped — the _E columns are the thermal-EXPANSION-only "
-                    "temperature (a second field applied to the expansion term "
-                    "alone) and the _DR ones the dynamic-relaxation phase. "
-                    "Radioss has ONE nodal temperature field and k2rad converts "
-                    "no dynamic-relaxation stage, so neither has a slot.")
+                    + ", ".join(f"{n}={v:g}" for n, v in dr)
+                    + " dropped — the _DR columns drive the DYNAMIC-RELAXATION "
+                    "phase, which k2rad does not convert, so they have no "
+                    "target in the emitted deck.")
             state.imposed_temperatures.append(ImposedTemperature(
                 source="*LOAD_THERMAL_VARIABLE", sid=nsid, nsidex=nsidex,
                 boxid=boxid, lcid=lcid, scale=ts, offset=tb))
+            _exempt_driver(state, "*LOAD_THERMAL_VARIABLE", nsid, nsidex,
+                           boxid, tse, tbe, lcide,
+                           stated=any(len(f2) > k and f2[k].strip()
+                                      for k in (3, 4, 5)))
         else:
             f2 = _card(raw, i + 1, fixed=True, n=2, w=10)
             t = to_float(f2[0]) if f2 else 0.0
             te = to_float(f2[1]) if len(f2) > 1 else 0.0
-            if te:
-                state.warn(
-                    f"*LOAD_THERMAL_CONSTANT: TE={te:g} (the temperature seen "
-                    "by the thermal-EXPANSION term alone) is dropped — Radioss "
-                    "has ONE nodal temperature field, so a second one applied "
-                    "only to the expansion cannot be expressed.")
             state.imposed_temperatures.append(ImposedTemperature(
                 source="*LOAD_THERMAL_CONSTANT", sid=nsid, nsidex=nsidex,
                 boxid=boxid, const=t, initial_temp=t))
+            _exempt_driver(state, "*LOAD_THERMAL_CONSTANT", nsid, nsidex,
+                           boxid, 0.0, te, 0,
+                           stated=bool(len(f2) > 1 and f2[1].strip()))
         i += 2
 
 
@@ -15180,10 +15269,42 @@ RARE_MATERIAL_KEYWORDS = {
         "LOAD_THERMAL_D3PLOT",
         "nodal temperatures read from an external d3plot file",
         "no Radioss counterpart"),
-    "LOAD_THERMAL_DYNAIN": _thermal_deferred(
-        "LOAD_THERMAL_DYNAIN",
-        "nodal temperatures read from an external dynain file",
+    # The remaining REAL *LOAD_THERMAL_* spellings of Vol I R17 (the keyword's
+    # own table of contents lists BINOUT, CONSTANT[_ELEMENT|_NODE], D3PLOT,
+    # LOAD_CURVE, RSW, TOPAZ, VARIABLE[_BEAM|_ELEMENT|_NODE|_SHELL] and nothing
+    # else — there is no *LOAD_THERMAL_DYNAIN). Registered so the log names
+    # them instead of listing them as unrecognized.
+    "LOAD_THERMAL_RSW": _thermal_deferred(
+        "LOAD_THERMAL_RSW",
+        "a resistance-spot-weld nugget temperature history, positioned by an "
+        "orientation vector and grown over an ellipsoidal region",
+        "no Radioss counterpart — /IMPTEMP drives a node GROUP with no "
+        "geometric nugget model"),
+    "LOAD_THERMAL_TOPAZ": _thermal_deferred(
+        "LOAD_THERMAL_TOPAZ",
+        "nodal temperatures read from a TOPAZ3D database",
         "no Radioss counterpart"),
+    "LOAD_THERMAL_CONSTANT_ELEMENT": _thermal_deferred(
+        "LOAD_THERMAL_CONSTANT_ELEMENT",
+        "a constant temperature stated per ELEMENT",
+        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD "
+        "(fixtemp.F:180-200) — there is no per-element temperature card"),
+    "LOAD_THERMAL_VARIABLE_ELEMENT": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_ELEMENT",
+        "a time-varying temperature stated per ELEMENT",
+        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD"),
+    "LOAD_THERMAL_VARIABLE_BEAM": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_BEAM",
+        "a time-varying temperature stated per BEAM element, with a "
+        "through-depth gradient",
+        "/IMPTEMP, which sets ONE temperature per node and carries no "
+        "cross-section gradient"),
+    "LOAD_THERMAL_VARIABLE_SHELL": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_SHELL",
+        "a time-varying temperature stated per SHELL element, with a "
+        "through-thickness gradient",
+        "/IMPTEMP, which sets ONE temperature per node and carries no "
+        "through-thickness gradient"),
     "MAT_THERMAL_ISOTROPIC_TD_LC": _thermal_deferred(
         "MAT_THERMAL_ISOTROPIC_TD_LC",
         "a temperature-DEPENDENT isotropic thermal material whose HC and TC "

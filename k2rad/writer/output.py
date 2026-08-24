@@ -420,7 +420,7 @@ def _th_screen(state: ConversionState, kw: str, what: str, err: str,
 
 
 def _drop_muscle_springs(state: ConversionState, kw: str, ids, cids, refs,
-                         names):
+                         names, muscle_eids: Set[int]):
     """Take *MAT_MUSCLE / *MAT_SPRING_MUSCLE elements OUT of a /TH group.
 
     ``/TH/SPRING`` on a ``/PROP/TYPE46`` is legal, accepted at 0 starter errors
@@ -431,14 +431,22 @@ def _drop_muscle_springs(state: ConversionState, kw: str, ids, cids, refs,
 
     ``*DATABASE_DEFORC`` already excludes them (``state.discrete_spring_eids``
     is deliberately not filled for muscles); this closes the OTHER door, a
-    ``*DATABASE_HISTORY_BEAM``/``_DISCRETE``/``_SEATBELT`` card that names the
-    element directly or through a ``*SET_``. Shipping the group anyway would be
-    the #122 defect — a channel that is legal, accepted and constant.
+    ``*DATABASE_HISTORY_BEAM``/``_DISCRETE`` card that names the element
+    directly or through a ``*SET_``. Shipping the group anyway would be the
+    #122 defect — a channel that is legal, accepted and constant.
+
+    *muscle_eids* is the set for the CALLER'S OWN LS-DYNA id namespace, never
+    the union: ``*DATABASE_HISTORY_BEAM`` names *ELEMENT_BEAM ids and
+    ``_DISCRETE`` names *ELEMENT_DISCRETE ids, which are separate id spaces, so
+    a beam whose eid happens to equal a *MAT_SPRING_MUSCLE discrete's would
+    otherwise be dropped from a group it belongs in. There is no
+    ``_SEATBELT`` arm for the same reason — no *ELEMENT_SEATBELT can be a
+    muscle spring, so any match there would be a namespace collision.
     """
-    drop = [v for v in ids if v in state.muscle_spring_eids]
+    drop = [v for v in ids if v in muscle_eids]
     if not drop:
         return ids, cids, refs, names
-    keep = [k for k, v in enumerate(ids) if v not in state.muscle_spring_eids]
+    keep = [k for k, v in enumerate(ids) if v not in muscle_eids]
     n = len(ids)
     state.warn(
         f"{kw}: element(s) {sorted(drop)} are *MAT_MUSCLE / "
@@ -607,22 +615,24 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                 state.beam_elem_ids | state.spring_elem_ids,
                 ids, cids, refs, names)
             ids, cids, refs, names = _drop_muscle_springs(
-                state, kw, ids, cids, refs, names)
+                state, kw, ids, cids, refs, names,
+                state.muscle_beam_spring_eids)
         elif dbh.db_type in ("DISCRETE", "DISCRETE_SET"):
             ids, cids, refs, names = _th_screen(
                 state, kw, "an emitted /SPRING",
                 "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
                 state.spring_elem_ids, ids, cids, refs, names)
             ids, cids, refs, names = _drop_muscle_springs(
-                state, kw, ids, cids, refs, names)
+                state, kw, ids, cids, refs, names,
+                state.muscle_discrete_spring_eids)
         elif dbh.db_type == "SEATBELT":
             ids, cids, refs, names = _th_screen(
                 state, kw, "an emitted belt /SPRING, /SHELL or /SH3N",
                 "ERROR 69 (TH ELEMENT SELECTION ID=n DOES NOT EXIST)",
                 state.spring_elem_ids | state.shell_elem_ids
                 | state.sh3n_elem_ids, ids, cids, refs, names)
-            ids, cids, refs, names = _drop_muscle_springs(
-                state, kw, ids, cids, refs, names)
+            # No muscle screen here: *DATABASE_HISTORY_SEATBELT names
+            # *ELEMENT_SEATBELT ids, a namespace no muscle spring can be in.
         elif dbh.db_type in ("SHELL", "SHELL_SET"):
             ids, cids, refs, names = _th_screen(
                 state, kw, "an emitted /SHELL or /SH3N",

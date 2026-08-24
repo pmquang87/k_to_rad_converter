@@ -994,7 +994,10 @@ class ThermalEmitTests(unittest.TestCase):
         self.assertEqual(body[0], "# Fct_ID_T            Fscale_y")
         fid = int(body[1][0:10])
         self.assertNotEqual(fid, 0)
-        self.assertEqual(body[1][10:30].strip(), "0")     # blank -> 1.0
+        # Fscale_y is written as an explicit 1.0: MULT is already IN the
+        # synthesized ordinate, so the cell must SAY "no further scaling"
+        # rather than lean on hm_read_therm_stress.F90:135's 0 -> 1.0.
+        self.assertEqual(float(body[1][10:30]), 1.0)
         pts = _funct_points(starter, fid)
         self.assertEqual([y for _x, y in pts], [1.2e-5, 1.2e-5])
 
@@ -1592,11 +1595,26 @@ class ThermalDeferredTests(unittest.TestCase):
                 ("MAT_THERMAL_CWM", _row(9)),
                 ("LOAD_THERMAL_BINOUT", _row(1)),
                 ("LOAD_THERMAL_D3PLOT", _row(1)),
-                ("LOAD_THERMAL_DYNAIN", _row(1)),
+                # The REAL R17 spellings — there is no *LOAD_THERMAL_DYNAIN.
+                ("LOAD_THERMAL_TOPAZ", _row(1)),
+                ("LOAD_THERMAL_RSW", _row(1)),
+                ("LOAD_THERMAL_CONSTANT_ELEMENT", _row(1, 100.0)),
+                ("LOAD_THERMAL_VARIABLE_ELEMENT", _row(1, 1.0, 0.0, 100)),
+                ("LOAD_THERMAL_VARIABLE_BEAM", _row(1, 1.0, 0.0, 100)),
+                ("LOAD_THERMAL_VARIABLE_SHELL", _row(1, 1.0, 0.0, 100)),
                 ("MAT_THERMAL_ISOTROPIC_TD_LC", _row(9))):
             state = _dispatch(f"*KEYWORD\n*{kw}\n{card}\n*END\n")
             self.assertEqual(state.skipped_keywords, [], kw)
             self.assertIn(kw, dict(state.recognized_not_emitted), kw)
+
+    def test_load_thermal_dynain_is_not_invented(self):
+        # *LOAD_THERMAL_DYNAIN appears in no LS-DYNA manual (Vol I R16/R17,
+        # Vol III R17) and in no shipped hm_cfg_files keyword tree. A
+        # fabricated row in a user-facing catalogue is worse than an honest
+        # "unsupported": it claims an authority that does not exist.
+        from k2rad.handlers import HANDLERS, RARE_MATERIAL_KEYWORDS
+        self.assertNotIn("LOAD_THERMAL_DYNAIN", RARE_MATERIAL_KEYWORDS)
+        self.assertNotIn("LOAD_THERMAL_DYNAIN", HANDLERS)
 
     def test_mat_thermal_cwm_title_reaches_the_same_handler(self):
         state = _dispatch("*KEYWORD\n*MAT_THERMAL_CWM_TITLE\nweld\n"
@@ -1676,12 +1694,15 @@ class IncludeTransformOffsetTests(unittest.TestCase):
         d = self._dir()
         with open(os.path.join(d, "inc.k"), "w") as fh:
             fh.write("*KEYWORD\n" + inner + "*END\n")
+        # Card 2 is IDNOFF..IDDOFF; IDROFF lives on CARD 3 (Vol I R17
+        # *INCLUDE_TRANSFORM), so it cannot ride along as an eighth cell.
         cells = [offs.get(k, 0) for k in
                  ("idnoff", "ideoff", "idpoff", "idmoff", "idsoff", "idfoff",
-                  "iddoff", "idroff")]
+                  "iddoff")]
         with open(os.path.join(d, "main.k"), "w") as fh:
             fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\ninc.k\n"
-                     + _row(*cells) + "\n*END\n")
+                     + _row(*cells) + "\n"
+                     + _row(offs.get("idroff", 0)) + "\n*END\n")
         blocks = parse_k_file(os.path.join(d, "main.k"))
         for b in blocks:
             if b.keyword in RARE_MATERIAL_KEYWORDS:
@@ -1767,6 +1788,80 @@ class IncludeTransformOffsetTests(unittest.TestCase):
             for cell, value in want.items():
                 self.assertEqual(int(out[0][cell * 10:(cell + 1) * 10]),
                                  value, f"{kw} cell {cell}")
+
+    def test_thermal_expansion_negative_pid_takes_idmoff_sign_preserved(self):
+        # Field 0 lives in TWO id namespaces by SIGN (Vol II R17 p.2-146):
+        # GT.0 is a PART id -> IDPOFF, LT.0 makes |PID| a MATERIAL id ->
+        # IDMOFF. Both forms may appear under one keyword, so the block needs
+        # BOTH rewrites over the SAME row set — the #125 "one cell, two id
+        # namespaces" class.
+        inner = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(-5, 0, 1.0e-5) + "\n"
+                 + _row(7, 0, 2.0e-5) + "\n")
+        out = self._offset(inner, idpoff=300, idmoff=1000).splitlines()
+        self.assertEqual(int(float(out[0][0:10])), -1005)   # |PID| = material
+        self.assertEqual(int(out[1][0:10]), 307)            # PID = part
+
+    def test_load_thermal_offsets_reach_every_card_set(self):
+        # "Card Sets. Include as many sets consisting of the following two
+        # cards as desired" (Vol I R17 pp.33-166/33-179). A first-card-only
+        # walk leaves every later NSID / NSIDEX / BOXID / LCID pointing at the
+        # parent deck's numbering — the silent-wrong-id class of #116/#119/#125.
+        inner = ("*LOAD_THERMAL_CONSTANT\n"
+                 + _row(5, 6, 8) + "\n" + _row(100.0, 20.0) + "\n"
+                 + _row(11, 12, 13) + "\n" + _row(200.0, 30.0) + "\n")
+        out = self._offset(inner, idsoff=400, iddoff=700).splitlines()
+        self.assertEqual([int(out[0][k * 10:(k + 1) * 10]) for k in range(3)],
+                         [405, 406, 708])
+        self.assertEqual([int(out[2][k * 10:(k + 1) * 10]) for k in range(3)],
+                         [411, 412, 713])
+
+    def test_load_thermal_variable_curve_cells_move_on_every_set(self):
+        inner = ("*LOAD_THERMAL_VARIABLE\n"
+                 + _row(5, 6, 8) + "\n"
+                 + _row(1.0, 0.0, 9, 1.0, 0.0, 10) + "\n"
+                 + _row(11, 12, 13) + "\n"
+                 + _row(1.0, 0.0, 21, 1.0, 0.0, 22) + "\n")
+        out = self._offset(inner, idsoff=400, iddoff=700,
+                           idfoff=500).splitlines()
+        self.assertEqual([int(out[0][k * 10:(k + 1) * 10]) for k in range(3)],
+                         [405, 406, 708])
+        self.assertEqual(int(out[1][20:30]), 509)      # LCID, set 1
+        self.assertEqual(int(out[1][50:60]), 510)      # LCIDE, set 1
+        self.assertEqual([int(out[2][k * 10:(k + 1) * 10]) for k in range(3)],
+                         [411, 412, 713])
+        self.assertEqual(int(out[3][20:30]), 521)      # LCID, set 2
+        self.assertEqual(int(out[3][50:60]), 522)      # LCIDE, set 2
+
+    def test_load_thermal_row_spellings_offset_every_row(self):
+        for kw, rows, offs, want in (
+                ("LOAD_THERMAL_CONSTANT_NODE",
+                 [(1, 100.0), (2, 200.0), (3, 300.0)],
+                 {"idnoff": 200}, [201, 202, 203]),
+                ("LOAD_THERMAL_VARIABLE_NODE",
+                 [(1, 1.0, 0.0, 9), (2, 1.0, 0.0, 9), (3, 1.0, 0.0, 9)],
+                 {"idnoff": 200}, [201, 202, 203]),
+                ("LOAD_THERMAL_LOAD_CURVE",
+                 [(9, 0), (10, 0), (11, 0)],
+                 {"idfoff": 500}, [509, 510, 511])):
+            inner = f"*{kw}\n" + "".join(_row(*r) + "\n" for r in rows)
+            out = self._offset(inner, **offs).splitlines()
+            self.assertEqual([int(ln[0:10]) for ln in out], want, kw)
+
+    def test_section_shell_thermal_option_cell_is_not_an_id(self):
+        # *SECTION_SHELL_THERMAL's option card carries ITHELFM ("Thermal shell
+        # formulation", Keyword971_R10.1/PROPERTY/SectShll.cfg:53), a
+        # formulation FLAG — NOT the *MAT_THERMAL_* id *PART's TMID names. The
+        # corpus carrier 07_metalstrip.k writes 1 and 2 there while both its
+        # parts state TMID 1, so rewriting it under IDMOFF would corrupt the
+        # element formulation of every included shell part.
+        inner = ("*SECTION_SHELL_THERMAL\n"
+                 + _row(4, 2, 1.0, 5, 1.0, 0, 0, 0) + "\n"
+                 + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+                 + _row(2) + "\n")
+        out = self._offset(inner, idmoff=1000, idroff=600).splitlines()
+        self.assertEqual(int(out[0][0:10]), 604)        # SECID -> IDROFF
+        self.assertEqual(int(out[2][0:10]), 2)          # ITHELFM untouched
 
     def test_no_offsets_leaves_the_card_untouched(self):
         inner = ("*MAT_SHAPE_MEMORY\n"
@@ -1865,6 +1960,324 @@ class ByteIdentityTests(unittest.TestCase):
         self.assertNotIn("/INITEMP", a)
         self.assertNotIn("/IMPTEMP", a)
 
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Post-review verification: id namespaces, the /SECT spring group, the
+# exempted-node temperature and the refused-group split
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: A solid block cut by a plane at z = 5, plus a 1D element from node 9 to
+#: node 10 that crosses it. `{ONED}` and `{EXTRA}` are substituted per case.
+SECT_MESH = (
+    "*KEYWORD\n"
+    "*NODE\n"
+    "         1             0.0             0.0             0.0\n"
+    "         2            10.0             0.0             0.0\n"
+    "         3            10.0            10.0             0.0\n"
+    "         4             0.0            10.0             0.0\n"
+    "         5             0.0             0.0            10.0\n"
+    "         6            10.0             0.0            10.0\n"
+    "         7            10.0            10.0            10.0\n"
+    "         8             0.0            10.0            10.0\n"
+    "         9            20.0             0.0             0.0\n"
+    "        10            20.0             0.0            10.0\n"
+    "        11            30.0             0.0             0.0\n"
+    "        12            30.0             0.0            10.0\n"
+    "        13             0.0             0.0             5.0\n"
+    "*ELEMENT_SOLID\n"
+    "       1       1       1       2       3       4       5       6       7       8\n"
+    "{ONED}"
+    "*PART\n"
+    "solid\n" + _row(1, 1, 1) + "\n"
+    "*SECTION_SOLID\n" + _row(1, 1) + "\n"
+    "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
+    "{EXTRA}"
+    "*DATABASE_CROSS_SECTION_PLANE\n"
+    + _row(0, 0.0, 0.0, 5.0, 0.0, 0.0, 10.0, 0.0) + "\n"
+    "*CONTROL_TERMINATION\n"
+    "     0.001\n"
+    "*END\n"
+)
+
+#: A plain elastic beam on part 2, element id 50, crossing the plane.
+PLAIN_BEAM = (
+    "*ELEMENT_BEAM\n" + _row(50, 2, 9, 10, 13) + "\n",
+    "*PART\nplain beam\n" + _row(2, 2, 2) + "\n"
+    "*SECTION_BEAM\n" + _row(2, 1, 1.0, 2.0, 2.0, 0) + "\n"
+    + _row(10.0, 10.0, 10.0, 10.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+    "*MAT_ELASTIC\n" + _row(2, "7.8500E-9", 210000.0, 0.3) + "\n",
+)
+
+#: An *ELEMENT_DISCRETE that REUSES element id 50 — legal LS-DYNA, because
+#: *ELEMENT_BEAM and *ELEMENT_DISCRETE are separate id namespaces.
+DISCRETE_50 = (
+    "*ELEMENT_DISCRETE\n" + _row(50, 3, 11, 12, 0, 0.0, 0, 0.0) + "\n"
+    "*PART\ndiscrete\n" + _row(3, 3, 3) + "\n"
+    "*SECTION_DISCRETE\n" + _row(3, 0, 0.0, 0, 0.0, 0.0) + "\n"
+    "*MAT_SPRING_ELASTIC\n" + _row(3, 100.0) + "\n"
+)
+
+#: A *MAT_SPOTWELD beam on part 2, element id 50: the writer really does
+#: re-route it to a /SPRING.
+SPOTWELD_BEAM = (
+    "*ELEMENT_BEAM\n" + _row(50, 2, 9, 10, 0) + "\n",
+    "*PART\nspotweld\n" + _row(2, 2, 2) + "\n"
+    "*SECTION_BEAM\n" + _row(2, 9, 1.0, 0.0, 0.0, 0) + "\n"
+    + _row(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+    "*MAT_SPOTWELD\n"
+    + _row(2, "7.8500E-9", 210000.0, 0.3, 400.0, 0.0, 0.0, 0.0) + "\n",
+)
+
+
+def _sect(oned, extra=""):
+    return SECT_MESH.replace("{ONED}", oned).replace("{EXTRA}", extra)
+
+
+def _sect_tail(starter: str):
+    """The /SECT tail card as a list of ints:
+    grbric, grshel, grtrus, grbeam, grsprg, grtria, Niter, Iframe."""
+    lines = starter.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.startswith("#grbric_ID"):
+            row = lines[i + 1]
+            cols = [(0, 10), (20, 30), (30, 40), (40, 50), (50, 60),
+                    (60, 70), (70, 80), (90, 100)]
+            return [int(row[a:b] or 0) for a, b in cols]
+    raise AssertionError("no /SECT tail card in the deck")
+
+
+class CrossSectionIdNamespaceTests(unittest.TestCase):
+    def test_a_plain_beam_sharing_an_eid_with_a_discrete_stays_in_the_section(self):
+        # LS-DYNA element ids are PER-TYPE namespaces: *ELEMENT_BEAM 50 and
+        # *ELEMENT_DISCRETE 50 are both legal in one deck (#125's "one cell,
+        # two id namespaces" class). Testing a beam eid against the GLOBAL
+        # /SPRING id set drops the real beam from the section's /GRBEAM group
+        # under a warning blaming a re-route that never happened — measured
+        # against master, which keeps it.
+        rows, parts = PLAIN_BEAM
+        _r, starter = _convert(_sect(rows, parts + DISCRETE_50))
+        self.assertIn("/BEAM/2", starter)          # the beam IS emitted
+        grbeam = _headers(starter, "/GRBEAM/BEAM/")
+        self.assertEqual(len(grbeam), 1, starter)
+        self.assertEqual(_ids_of_group(starter, grbeam[0]), [50])
+        self.assertEqual(_sect_tail(starter)[3],
+                         int(grbeam[0].rsplit("/", 1)[1]))
+        self.assertNotIn("re-routes them to a SPRING", " ".join(_r.warnings))
+
+    def test_a_rerouted_connector_gets_the_sect_grsprg_group(self):
+        # A *MAT_SPOTWELD beam really is a /SPRING in the emitted deck, so its
+        # eid belongs in the /SECT card's grsprg_ID column, not /GRBEAM.
+        # sect.cfg:37 types grsprg_id as SUBTYPES = (/SETS/GRSPRI) and
+        # hm_read_sect.F:301/548 resolves it with ELEGROR(...,'SPRI') —
+        # starter-validated at 0 errors, and the engine reports a NON-ZERO
+        # /TH/SECTIO channel with the group against exactly 0.0 without it.
+        rows, parts = SPOTWELD_BEAM
+        _r, starter = _convert(_sect(rows, parts))
+        grsprg = _headers(starter, "/GRSPRI/SPRI/")
+        self.assertEqual(len(grsprg), 1, starter)
+        self.assertEqual(_ids_of_group(starter, grsprg[0]), [50])
+        tail = _sect_tail(starter)
+        self.assertEqual(tail[4], int(grsprg[0].rsplit("/", 1)[1]))
+        self.assertEqual(tail[3], 0)               # NOT in the beam group
+        self.assertEqual(_headers(starter, "/GRBEAM/BEAM/"), [])
+
+    def test_history_beam_keeps_a_beam_whose_eid_matches_a_muscle_discrete(self):
+        # The same namespace rule on the /TH door: *DATABASE_HISTORY_BEAM
+        # names *ELEMENT_BEAM ids, so a *MAT_SPRING_MUSCLE DISCRETE with the
+        # same eid must not take the beam out of the group.
+        rows, parts = PLAIN_BEAM
+        muscle = (
+            "*ELEMENT_DISCRETE\n" + _row(50, 3, 11, 12, 0, 0.0, 0, 0.0) + "\n"
+            "*PART\nmuscle\n" + _row(3, 3, 15) + "\n"
+            "*SECTION_DISCRETE\n" + _row(3, 0, 0.0, 0, 0.0, 0.0) + "\n"
+            "*MAT_SPRING_MUSCLE\n"
+            + _row(15, 10.0, 100.0, 1.0, 0.5, 1000.0, 1.0, 1.0) + "\n"
+            + _row(0.0, 1.5, 3.0) + "\n"
+            "*DATABASE_HISTORY_BEAM\n" + _row(50) + "\n")
+        _r, starter = _convert(_sect(rows, parts + muscle))
+        beam_groups = [h for h in _headers(starter, "/TH/BEAM/")]
+        self.assertEqual(len(beam_groups), 1, starter)
+        self.assertIn(50, _ids_of_group(starter, beam_groups[0]))
+
+
+class ExemptedNodeTemperatureTests(unittest.TestCase):
+    #: NSID 0 (all nodes) minus NSIDEX 11 = {2, 3}, driven at 500; the two
+    #: exempted nodes are held at TE = 20.
+    DECK = ("*SET_NODE_LIST\n" + _row(11) + "\n" + _row(2, 3) + "\n"
+            "*LOAD_THERMAL_CONSTANT\n" + _row(0, 11, 0) + "\n"
+            + _row(500.0, 20.0) + "\n")
+
+    def _run(self):
+        return _convert(_thermal(CARRIER_EXPANSION + self.DECK))
+
+    def test_te_is_the_exempted_nodes_own_temperature(self):
+        # Vol I R17 p.33-167: "TE — Temperature of exempted nodes (optional)".
+        # It is NOT a second field applied to the expansion term alone.
+        _r, starter = self._run()
+        imptemps = _headers(starter, "/IMPTEMP/")
+        self.assertEqual(len(imptemps), 2, starter)
+        groups = {}
+        for h in imptemps:
+            body = _block(starter, h)
+            rows = [ln for ln in body if not ln.startswith("#")]
+            gid = int(rows[1][20:30])
+            fid = int(rows[1][0:10])
+            groups[tuple(_ids_of_group(starter, f"/GRNOD/NODE/{gid}"))] = \
+                _funct_points(starter, fid)[0][1]
+        self.assertEqual(groups[(2, 3)], 20.0)
+        self.assertEqual(groups[(1, 4, 5, 6, 7, 8, 9, 10, 11, 12)], 500.0)
+
+    def test_the_companion_initemp_does_not_reach_the_exempted_nodes(self):
+        # An /INITEMP over the WHOLE set beside an /IMPTEMP over
+        # set-minus-NSIDEX would start the exempted nodes at the very
+        # temperature the card exempts them from.
+        _r, starter = self._run()
+        got = {}
+        for h in _headers(starter, "/INITEMP/"):
+            rows = [ln for ln in _block(starter, h) if not ln.startswith("#")]
+            gid = int(rows[1][20:30])
+            got[tuple(_ids_of_group(starter, f"/GRNOD/NODE/{gid}"))] = \
+                float(rows[1][0:20])
+        self.assertEqual(got[(2, 3)], 20.0)
+        self.assertEqual(got[(1, 4, 5, 6, 7, 8, 9, 10, 11, 12)], 500.0)
+
+    def test_te_without_nsidex_is_named_and_dropped(self):
+        deck = ("*LOAD_THERMAL_CONSTANT\n" + _row(0, 0, 0) + "\n"
+                + _row(500.0, 20.0) + "\n")
+        r, starter = _convert(_thermal(CARRIER_EXPANSION + deck))
+        self.assertEqual(len(_headers(starter, "/IMPTEMP/")), 1)
+        self.assertIn("exempts no node at all", " ".join(r.warnings))
+
+    def test_unresolvable_lcide_is_named_not_guessed(self):
+        deck = ("*SET_NODE_LIST\n" + _row(11) + "\n" + _row(2, 3) + "\n"
+                "*LOAD_THERMAL_VARIABLE\n" + _row(0, 11, 0) + "\n"
+                + _row(1.0, 0.0, 7, 1.0, 5.0, 404) + "\n"
+                "*DEFINE_CURVE\n" + _row(7) + "\n"
+                + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n")
+        r, starter = _convert(_thermal(CARRIER_EXPANSION + deck))
+        self.assertEqual(len(_headers(starter, "/IMPTEMP/")), 1)
+        joined = " ".join(r.warnings)
+        self.assertIn("LCIDE=404", joined)
+        self.assertIn("exempted nodes", joined)
+
+    def test_a_scaled_exempt_temperature_without_lcide_is_not_invented(self):
+        deck = ("*SET_NODE_LIST\n" + _row(11) + "\n" + _row(2, 3) + "\n"
+                "*LOAD_THERMAL_VARIABLE\n" + _row(0, 11, 0) + "\n"
+                + _row(1.0, 0.0, 7, 2.5, 5.0, 0) + "\n"
+                "*DEFINE_CURVE\n" + _row(7) + "\n"
+                + _row16(0.0, 20.0) + "\n" + _row16(1.0, 120.0) + "\n")
+        r, starter = _convert(_thermal(CARRIER_EXPANSION + deck))
+        self.assertEqual(len(_headers(starter, "/IMPTEMP/")), 1)
+        self.assertIn("Guessing one would fabricate", " ".join(r.warnings))
+
+
+class RefusedExpansionGroupTests(unittest.TestCase):
+    def test_a_refused_group_does_not_inherit_the_other_cards_expansion(self):
+        # Two cards on two parts that SHARE one MID, the card on the LOWER pid
+        # unresolvable. The surviving group must NOT keep the original
+        # material id: the refused part still points at it, and would silently
+        # expand at the OTHER card's coefficient while the warning says the
+        # material was neither carded nor split.
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n" + _row(1, 404, 0.0) + "\n"
+                 "*MAT_ADD_THERMAL_EXPANSION\n" + _row(2, 0, "2.40000E-5")
+                 + "\n" + DRIVER)
+        r, starter = _convert(_thermal(extra))
+        mids = {}
+        lines = starter.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith("/PART/"):
+                mids[int(ln.rsplit("/", 1)[1])] = int(lines[i + 2][10:20])
+        carded = {int(h.rsplit("/", 1)[1])
+                  for h in _headers(starter, "/THERM_STRESS/MAT/")}
+        self.assertIn(mids[2], carded)              # the resolvable card
+        self.assertNotIn(mids[1], carded)           # the refused one
+        self.assertNotEqual(mids[1], mids[2])
+        self.assertIn("LCID=404", " ".join(r.warnings))
+
+    def test_groups_that_together_name_every_part_still_keep_the_mid(self):
+        # The review round's own case must not regress: with BOTH cards
+        # resolvable the last group keeps the original id and no orphan /MAT
+        # is left behind.
+        extra = ("*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(1, 0, "1.20000E-5") + "\n"
+                 "*MAT_ADD_THERMAL_EXPANSION\n"
+                 + _row(2, 0, "2.40000E-5") + "\n" + DRIVER)
+        _r, starter = _convert(_thermal(extra))
+        self.assertEqual(len(_headers(starter, "/MAT/")), 2, starter)
+        self.assertEqual(len(_headers(starter, "/THERM_STRESS/MAT/")), 2)
+
+
+class InertRestatementTests(unittest.TestCase):
+    def test_an_inert_card_says_the_law_was_restated(self):
+        # A *MAT_ELASTIC whose every part is a shell is restated as
+        # /MAT/LAW36 so the expansion can reach the through-thickness
+        # stresses. That costs -4.6 % of the time step, so a deck that ends
+        # up with NO driver must be told its law changed for a card that does
+        # nothing.
+        deck = (
+            "*KEYWORD\n"
+            "*NODE\n"
+            "         1             0.0             0.0             0.0\n"
+            "         2            10.0             0.0             0.0\n"
+            "         3            10.0             1.0             0.0\n"
+            "         4             0.0             1.0             0.0\n"
+            "*ELEMENT_SHELL\n" + _row(1, 1, 1, 2, 3, 4) + "\n"
+            "*PART\nstrip\n" + _row(1, 1, 1) + "\n"
+            "*SECTION_SHELL\n" + _row(1, 2, 1.0, 5) + "\n"
+            + _row(1.0, 1.0, 1.0, 1.0) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, "7.8500E-9", 210000.0, 0.3) + "\n"
+            "*MAT_ADD_THERMAL_EXPANSION\n"
+            + _row(1, 0, "1.20000E-5") + "\n"
+            "*CONTROL_TERMINATION\n     0.001\n*END\n")
+        r, starter = _convert(deck)
+        self.assertIn("/MAT/LAW36/1", starter)
+        joined = " ".join(r.warnings)
+        self.assertIn("is INERT on this deck", joined)
+        self.assertIn("RESTATED as /MAT/LAW36 for a thermal expansion that "
+                      "turns out to be INERT", joined)
+
+
+class MuscleWarningTextTests(unittest.TestCase):
+    def test_the_manual_quote_does_not_carry_the_deck_prefix(self):
+        # The quoted sentence is the MANUAL's, so it must name the bare cell,
+        # not "*MAT_MUSCLE mid=1: SFR".
+        state = _dispatch("*KEYWORD\n*MAT_MUSCLE\n"
+                          + _row(1, "1.0000E-9", 1.25, 10.0, 0.3, 0.15, 5.0,
+                                 2.0) + "\n"
+                          + _row(0.5, 7.0, 1.0, 1.0, 0.0) + "\n*END\n")
+        hit = [w for w in state.warnings if "DISCARDS it" in w]
+        self.assertEqual(len(hit), 1, state.warnings)
+        self.assertTrue(hit[0].startswith("*MAT_MUSCLE mid=1: SFR=7"), hit[0])
+        self.assertIn("'SFR ... GE.0.0: Constant value of 1.0 is used'",
+                      hit[0])
+        self.assertNotIn("'*MAT_MUSCLE mid=1: SFR ...", hit[0])
+
+
+class MuscleZeroPassiveTests(unittest.TestCase):
+    def test_a_zero_force_muscle_mints_no_orphan_passive_curve(self):
+        # _resolve_fpe EMITS its function as it mints it, so deciding the
+        # zero-force case afterwards left a 100-row exponential /FUNCT in the
+        # deck referenced by nothing.
+        deck = (
+            "*KEYWORD\n"
+            "*NODE\n"
+            "         1             0.0             0.0             0.0\n"
+            "         2            10.0             0.0             0.0\n"
+            "*ELEMENT_DISCRETE\n" + _row(1, 1, 1, 2, 0, 0.0, 0, 0.0) + "\n"
+            "*PART\nmuscle\n" + _row(1, 1, 15) + "\n"
+            "*SECTION_DISCRETE\n" + _row(1, 0, 0.0, 0, 0.0, 0.0) + "\n"
+            "*MAT_SPRING_MUSCLE\n"
+            + _row(15, 10.0, 100.0, 1.0, 0.5, 0.0, 1.0, 1.0) + "\n"
+            + _row(0.0, 1.5, 3.0) + "\n"
+            "*CONTROL_TERMINATION\n     0.001\n*END\n")
+        _r, starter = _convert(deck)
+        fpe = [h for h in _headers(starter, "/FUNCT/")
+               if "FPE" in (_block(starter, h) or [""])[0]]
+        self.assertEqual(len(fpe), 1, [_block(starter, h)[0] for h in fpe])
+        pts = _funct_points(starter, int(fpe[0].rsplit("/", 1)[1]))
+        self.assertEqual([y for _x, y in pts], [0.0, 0.0])
+        self.assertEqual(len(pts), 2)
 
 if __name__ == "__main__":
     unittest.main()

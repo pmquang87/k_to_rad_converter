@@ -322,6 +322,130 @@ Prior history (before this changelog was introduced) is summarized in the
      an explicit "this expansion is INERT" warning instead of a frozen fringe
      (the #122 rule).
 
+  **Post-review verification — three defects the review round itself
+  introduced or left, plus one rejection the evidence overturned.** Every one
+  reproduced on a converted deck before it was touched.
+
+  V1. **A `*DATABASE_CROSS_SECTION` plane silently lost a real `/BEAM` — a
+      REGRESSION against master.** The review round's new "this beam was
+      re-routed to a `/SPRING`" filter tested a BEAM eid against
+      `state.spring_elem_ids`, which has **nine** producers and only three of
+      them beam-derived; the other six are `*ELEMENT_DISCRETE`, `*ELEMENT_PLOTEL`,
+      grounding springs, `*CONSTRAINED_JOINT`, `*CONSTRAINED_SPOTWELD` and belt
+      springs. LS-DYNA element ids are PER-TYPE namespaces, so `*ELEMENT_BEAM 50`
+      and `*ELEMENT_DISCRETE 50` are both legal in one deck (the #125 "one cell,
+      two id namespaces" class). Measured on a probe with exactly that pair:
+      master emits `/GRBEAM/BEAM/90005` holding `50` with `grbeam_ID = 90005`;
+      the branch emitted **no `/GRBEAM` at all**, `grbeam_ID = 0`, and a warning
+      blaming a re-route that never happened — while the same deck still wrote
+      `/BEAM/2` element 50. Now tested against the three BEAM-derived registries
+      only (`dbeam_spring_eids | spotweld_spring_eids | muscle_beam_spring_eids`,
+      the last one new). Same fix on the `/TH` door: `_drop_muscle_springs` takes
+      the caller's own namespace — `*ELEMENT_BEAM` ids for
+      `*DATABASE_HISTORY_BEAM`, `*ELEMENT_DISCRETE` ids for `_DISCRETE` — and the
+      `_SEATBELT` arm loses its muscle screen entirely, because no
+      `*ELEMENT_SEATBELT` can be a muscle spring.
+
+  V2. **`grsprg_ID` is emitted after all — the "the cfg tree does not carry that
+      spelling" rejection was wrong on all four of its legs.**
+      `radioss110/SETS/spring.cfg` IS the spring group card (its header reads
+      "Group Setup File / /GRSPRI"); `radioss110/SECT/sect.cfg:37` declares
+      `grsprg_id = VALUE(SETS,…) { SUBTYPES = (/SETS/GRSPRI) }`; the starter reads
+      it (`hm_read_sect.F:301` `HM_GET_INTV('grsprg_id',IGUR,…)`, `:548`
+      `NSEGR=ELEGROR(IGUR,IGRSPRING,NGRSPRI,'SPRI',…)`); and k2rad **already
+      writes that exact spelling** on the `/PRELOAD/AXIAL` path
+      (`writer/preload.py`, merged in #127). So a re-routed connector now goes
+      into a `/GRSPRI/SPRI` group named by `grsprg_ID` instead of being warned
+      away. Starter-validated on the emitted deck: **0 ERRORS / 0 WARNINGS**,
+      with the echo `NUMBER OF SPRING ELEMENTS . . . 1 / SPRING N1 N2 / 50 1 0`.
+      Engine-measured on twin decks (imposed velocity through the connector, both
+      `NORMAL TERMINATION`): **with** the group every `/TH/SECTIO` channel
+      carries data (e.g. `-2.905e-09` at the last state), **without** it every
+      channel is `0.000000e+00`. The named loss was avoidable with a card the
+      project already writes.
+
+  V3. **`TE` / `TSE` / `TBE` / `LCIDE` are the EXEMPTED nodes' own temperature,
+      and the companion `/INITEMP` was reaching nodes the card exempts.** The
+      warnings called them "the temperature seen by the thermal-EXPANSION term
+      alone". Vol I R17 p.33-167 reads *"TE — Temperature of exempted nodes
+      (optional)"* and p.33-180 *"TSE — Scaled temperature of the exempted nodes
+      … TBE — Base temperature of the exempted nodes … LCIDE — Load curve ID that
+      multiplies the scaled temperature of the exempted nodes"*, under the same
+      `T = TB + TS·f(t)` law. Worse, the review round's own NSIDEX fix left an
+      internal contradiction: measured on a probe with `NSID 0 / NSIDEX {2,3} /
+      T 500 / TE 20`, the `/IMPTEMP` correctly covered `{1,4,5,6,7,8}` at 500
+      while the companion `/INITEMP` covered **all eight** nodes at 500 — the
+      exempted nodes were initialised at the very temperature they are exempt
+      from and then carried no driver at all. Both halves fixed: the companion
+      `/INITEMP` inherits the driver's scope, and the exempted nodes get a SECOND
+      `/IMPTEMP` of their own carrying `TE` (or `TBE + TSE·f_LCIDE(t)`), which is
+      an exact statement of the LS-DYNA card. Engine-measured on a 10-hex bar
+      with `TS 1 / TB 0 / LCID f` and `TSE 1 / TBE −80 / LCIDE f`: the 40 driven
+      nodes follow 40 → 100 → 120 K and the 4 exempted ones −40 → 20 → 40 K,
+      both to the closed form, 0 starter errors, `NORMAL TERMINATION` at 56 028
+      cycles. Nothing is invented: a scaled exempt temperature with a BLANK
+      `LCIDE` is named and dropped, because the manual prints only a down-arrow
+      in that Default cell and guessing a curve would fabricate the whole
+      exempted-node history (the #124 rule). `LCIDR` / `LCIDEDR` stay dropped as
+      the dynamic-relaxation columns they are.
+
+  V4. **A refused expansion group could hand its parts the OTHER card's
+      expansion — a REGRESSION the review round introduced while removing an
+      orphan `/MAT`.** When two `*MAT_ADD_THERMAL_EXPANSION` cards name two parts
+      that SHARE one MID and the card on the LOWER pid is unresolvable, the
+      refusal `continue`d BEFORE the clone, so the refused parts stayed on the
+      original mid; the surviving group then satisfied `covered[mid] ==
+      all_pids`, kept that same mid, and wrote `/THERM_STRESS/MAT` on it.
+      Reproduced on a 2-hex probe (parts 1+2 on `/MAT/ELAST/1`; card A on pid 1
+      with `LCID=404` undefined, card B on pid 2 with `MULT=2.4e-5`): ONE
+      `/MAT/ELAST/1`, both parts pointing at it, `/THERM_STRESS/MAT/1` carrying
+      2.4e-5 — so part 1 expanded although its own card was dropped, while the
+      warning said verbatim "the material is NOT split off for it either".
+      `_resolve_expansion` is now two passes: pass 1 decides which groups
+      survive, and `covered` / `last_group_on` are built from the SURVIVORS, so a
+      mid with a refused group is disqualified from keeping the original id and
+      the refused parts keep a card-free material.
+
+  Four smaller ones from the same round:
+
+  * `*LOAD_THERMAL_DYNAIN` was a **fabricated keyword** in a user-facing
+    catalogue — it appears in no LS-DYNA manual (Vol I R16/R17, Vol III R17) and
+    in no shipped `hm_cfg_files` tree. Dropped, and replaced by the spellings
+    that DO exist and were unhandled: `*LOAD_THERMAL_RSW`, `_TOPAZ`,
+    `_{CONSTANT,VARIABLE}_ELEMENT`, `_VARIABLE_{BEAM,SHELL}`, each named with
+    what it states and why `/IMPTEMP` cannot carry it.
+  * A zero-force muscle left an **orphaned `/FUNCT`** in the deck: `_resolve_ssp`
+    / `_resolve_fpe` emit their function as they mint it, so overwriting `fct4`
+    afterwards burned a curve id on a 100-row exponential table nothing
+    references. The zero case is now decided first.
+  * `/THERM_STRESS/MAT`'s `Fscale_y` was written as a literal `0` and rescued by
+    `hm_read_therm_stress.F90:135`'s `0 → 1.0` — the same "a cell that means the
+    opposite of what it does" the round fixed elsewhere. Now an explicit `1.0`.
+    Physics-neutral and measured so: 46 of the 76 validation decks move by
+    **exactly that one line and nothing else**, the starter echoes
+    `THERMAL EXPANSION FUNCTION SCALE FACTOR = 1.000000000000` either way, and a
+    full engine re-run of `th_c1_free` (56 028 cycles) produces a **byte-identical
+    T01**.
+  * Two warning texts: the solid prescription now says the anchor must remove
+    BOTH transverse translations (one node held in only ONE transverse direction
+    still diverges — +0.389 mm, I-ENERGY 2036 against EXT-WORK 4.283, under a
+    `NORMAL TERMINATION` banner), and the muscle scale-cell warning no longer
+    repeats the deck-specific prefix inside its quoted manual sentence. An INERT
+    `/THERM_STRESS/MAT` on a material whose LAW1 was restated to LAW36 now says
+    the law changed, because that costs −4.6 % of the time step for a card that
+    does nothing.
+
+  **Coverage.** The three `*INCLUDE_TRANSFORM` offset fixes of the review round
+  had ZERO tests — reverting each left the FULL suite green — so
+  `IncludeTransformOffsetTests` gained five: a negative-PID
+  `*MAT_ADD_THERMAL_EXPANSION` under IDMOFF beside a positive one under IDPOFF,
+  the SECOND card set of `*LOAD_THERMAL_CONSTANT` and `_VARIABLE` (sets and curve
+  cells alike), every row of the three per-row spellings, and
+  `*SECTION_SHELL_THERMAL`'s option cell staying UNCHANGED under IDMOFF. All
+  thirteen fixes above are mutation-checked on a throwaway copy of the tree:
+  reverting any one of them fails at least one test.
+
+
 - **The PRELOAD / initial-state batch:
   `*INITIAL_STRAIN_SHELL` (+ `_SET`) → `/INISHE/STRA_F/GLOB` and
   `/INISH3/STRA_F/GLOB`,

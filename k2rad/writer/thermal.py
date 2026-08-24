@@ -390,7 +390,12 @@ def _resolve_alpha_function(state: ConversionState, mid: int,
         sfa=1.0, sfo=1.0, offa=0.0, offo=0.0,
         pts=[(0.0, alpha), (1.0e6, alpha)])
     state.curve_order.append(fid)
-    return fid, 0.0
+    # Fscale_y is written as an explicit 1.0, not left at 0 for
+    # hm_read_therm_stress.F90:135 to substitute: MULT is already IN the
+    # synthesized ordinate, so the cell means "no further scaling" and should
+    # say so. (Consumed value unchanged — the starter echoes THERMAL EXPANSION
+    # FUNCTION SCALE FACTOR = 1.0 either way.)
+    return fid, 1.0
 
 
 def _law_melt_temperature(state: ConversionState, mid: int) -> float:
@@ -527,32 +532,43 @@ def _resolve_expansion(state: ConversionState) -> None:
         groups[(part.mid, _expansion_key(card), part.tmid)].append(pid)
 
     order = sorted(groups.items(), key=lambda kv: (kv[0][0], min(kv[1])))
-    # Every list below is computed ONCE, from the ORIGINAL grouping, before any
+    # PASS 1 — decide which groups survive, BEFORE any part is repointed. Both
+    # refusals (LAW109, an unresolvable LCID) are ordered before the split
+    # because a clone made for a material that then gets no thermal card at all
+    # is a pointless duplicate /MAT in the deck.
+    accepted: List[Tuple[tuple, List[int]]] = []
+    for key, pids in order:
+        mid = key[0]
+        if _refuse_law109(state, mid, pids):
+            continue
+        if not _expansion_is_resolvable(state, mid, by_pid[pids[0]]):
+            continue
+        accepted.append((key, pids))
+
+    # Every list below is computed ONCE, from the SURVIVING grouping, before any
     # part is repointed — recomputing "the parts on this mid" after the first
     # clone made the second warning describe a state that no longer existed.
+    # A REFUSED group claims none of its parts, so its pids must stay out of
+    # `covered`: otherwise the last surviving group on a shared mid would pass
+    # the "these groups name every part" test, keep the ORIGINAL material id,
+    # and the refused parts — still pointing at it — would silently inherit the
+    # OTHER card's expansion while the emitted warning says the material was
+    # neither carded nor split.
     all_pids_of: Dict[int, List[int]] = {}
     covered: Dict[int, Set[int]] = defaultdict(set)
     last_group_on: Dict[int, tuple] = {}
-    for key, pids in order:
+    for key, pids in accepted:
         mid = key[0]
         all_pids_of.setdefault(
             mid, sorted(p for p, q in state.parts.items() if q.mid == mid))
         covered[mid].update(pids)
         last_group_on[mid] = key
 
-    for key, pids in order:
+    # PASS 2 — clone where needed and emit.
+    for key, pids in accepted:
         mid = key[0]
-        # Refuse BEFORE the split: a clone made for a material that then gets no
-        # thermal card at all is a pointless duplicate /MAT in the deck.
-        if _refuse_law109(state, mid, pids):
-            continue
         card = by_pid[pids[0]]
         all_pids = all_pids_of[mid]
-        if not _expansion_is_resolvable(state, mid, card):
-            # Same reason as the LAW109 refusal: an unresolvable coefficient
-            # ends with NO /THERM_STRESS/MAT, so cloning first would leave a
-            # duplicate /MAT behind for nothing.
-            continue
         target = mid
         # The LAST group on a mid may keep the original id — but only when the
         # groups together name every part on it. Otherwise the parts the deck
@@ -726,6 +742,7 @@ def _restate_law1_shells(state: ConversionState, mid: int) -> None:
         pts=[(0.0, sigy), (1.0, sigy)])
     state.curve_order.append(fid)
     del state.mat_elastic[mid]
+    state.law1_shells_restated.add(mid)
     state.mat_plas_tab[mid] = MatPlasTAB(
         mid=mid, title=mat.title, rho=mat.rho, E=mat.E, nu=mat.nu,
         sigy=sigy, etan=0.0, fail=0.0, lcss=0, C=0.0, P=0.0,
@@ -1025,7 +1042,8 @@ def _law_own_rho_cp(state: ConversionState, mid: int) -> float:
 def _driver_nodes(state: ConversionState, sid: int, is_node: bool,
                   label: str, seen: Optional[Set[Tuple[int, bool]]] = None,
                   nsidex: int = 0, boxid: int = 0,
-                  quiet: bool = False) -> List[int]:
+                  quiet: bool = False,
+                  drive_exempt: bool = False) -> List[int]:
     """The node ids one driver applies to.
 
     ``sid = 0`` on a set-based card means EVERY node in the model (Vol I R17,
@@ -1038,6 +1056,11 @@ def _driver_nodes(state: ConversionState, sid: int, is_node: bool,
     node the card excludes must not be in its /GRNOD at all. ``BOXID``
     restricts NSID to a ``*DEFINE_BOX``, which k2rad does not resolve — it is
     named rather than silently ignored.
+
+    *drive_exempt* INVERTS the NSIDEX step: the record is the card's second
+    driver, the one that holds the exempted nodes at TE (or TBE + TSE·f), so it
+    wants NSIDEX ∩ NSID rather than NSID − NSIDEX. The two records together
+    partition the set exactly as the LS-DYNA card does.
 
     *seen* de-duplicates the missing-set warning: the emitter asks for the same
     driver twice (once for the /IMPTEMP, once for the /TH/NODE TEMP group) and
@@ -1079,8 +1102,12 @@ def _driver_nodes(state: ConversionState, sid: int, is_node: bool,
                     "the imposed temperature, but that *SET_NODE is not in the "
                     "converted deck, so nothing can be subtracted — the "
                     "temperature reaches nodes the card excludes.")
+            if drive_exempt:
+                return []
         else:
             drop = set(ex[1] if isinstance(ex, tuple) else ex)
+            if drive_exempt:
+                return [n for n in nodes if n in drop]
             kept = [n for n in nodes if n not in drop]
             if not quiet and len(kept) != len(nodes):
                 state.warn(
@@ -1199,8 +1226,15 @@ def _resolve_drivers(state: ConversionState) -> None:
         for d in state.imposed_temperatures:
             if d.initial_temp is None:
                 continue
+            # The companion must carry the driver's OWN scope. An /INITEMP over
+            # the whole set beside an /IMPTEMP over set-minus-NSIDEX would
+            # initialise the exempted nodes at the very temperature the card
+            # exempts them from, and (with no driver of their own) leave them
+            # there.
             state.initial_temperatures.append(InitialTemperature(
-                sid=d.sid, temp=d.initial_temp, is_node=d.is_node))
+                sid=d.sid, temp=d.initial_temp, is_node=d.is_node,
+                nsidex=d.nsidex, boxid=d.boxid,
+                drive_exempt=d.drive_exempt))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1247,7 +1281,7 @@ def _make_thermal(state: ConversionState) -> List[str]:
     uniq_init: List[InitialTemperature] = []
     init_seen: Set[Tuple] = set()
     for it in state.initial_temperatures:
-        k = (it.sid, it.is_node, it.temp)
+        k = (it.sid, it.is_node, it.temp, it.nsidex, it.boxid, it.drive_exempt)
         if k in init_seen:
             continue
         init_seen.add(k)
@@ -1255,7 +1289,13 @@ def _make_thermal(state: ConversionState) -> List[str]:
 
     for it in uniq_init:
         label = f"*INITIAL_TEMPERATURE (set/node {it.sid})"
-        nodes = _driver_nodes(state, it.sid, it.is_node, label, seen)
+        # quiet on a SYNTHESIZED companion (the only kind that can carry
+        # NSIDEX/BOXID): its sibling /IMPTEMP row reports the same scope one
+        # loop below, and one card must not warn twice.
+        nodes = _driver_nodes(state, it.sid, it.is_node, label, seen,
+                              it.nsidex, it.boxid,
+                              quiet=bool(it.nsidex or it.boxid),
+                              drive_exempt=it.drive_exempt)
         if not nodes:
             continue
         if it.loc:
@@ -1263,7 +1303,8 @@ def _make_thermal(state: ConversionState) -> List[str]:
                 f"{label}: LOC={it.loc} names a thick-thermal-shell SURFACE; "
                 "/INITEMP sets one temperature per NODE, so the "
                 "through-thickness distinction is dropped.")
-        gid, grp = _group((it.sid, it.is_node, 0, 0), "TEMPNODES", nodes)
+        gid, grp = _group((it.sid, it.is_node, it.nsidex, it.boxid,
+                           it.drive_exempt), "TEMPNODES", nodes)
         tid = state.next_id()
         lines += grp
         lines += [
@@ -1281,12 +1322,13 @@ def _make_thermal(state: ConversionState) -> List[str]:
     for d in state.imposed_temperatures:
         label = f"{d.source} (set/node {d.sid})"
         nodes = _driver_nodes(state, d.sid, d.is_node, label, seen,
-                              d.nsidex, d.boxid)
+                              d.nsidex, d.boxid,
+                              drive_exempt=d.drive_exempt)
         if not nodes:
             continue
         state.thermal_driver_emitted = True
-        gid, grp = _group((d.sid, d.is_node, d.nsidex, d.boxid),
-                          "TEMPNODES", nodes)
+        gid, grp = _group((d.sid, d.is_node, d.nsidex, d.boxid,
+                           d.drive_exempt), "TEMPNODES", nodes)
         tid = state.next_id()
         lines += grp
         stop = d.tdeath if 0.0 < d.tdeath < 1.0e19 else 0.0
@@ -1325,6 +1367,20 @@ def _warn_inert_expansion(state: ConversionState) -> None:
     """
     if not state.therm_stress_cards or state.thermal_driver_emitted:
         return
+    restated = sorted(state.law1_shells_restated & set(state.therm_stress_cards))
+    if restated:
+        state.warn(
+            f"*MAT_ELASTIC {restated} was RESTATED as /MAT/LAW36 for a thermal "
+            "expansion that turns out to be INERT on this deck (no /IMPTEMP is "
+            "emitted, see the next warning). The restatement is kept because "
+            "the /THERM_STRESS/MAT pair is kept — both are the deck's own "
+            "statement and both start working the moment a resolvable "
+            "temperature driver is added — but it is not free: the restated "
+            "law integrates through the thickness, which cost -4.6 % of the "
+            "time step on the measured strip, and it moves the membrane stress "
+            "by +0.012 % to +0.035 %. Delete the *MAT_ADD_THERMAL_EXPANSION "
+            "card if the expansion is not wanted, and the material stays "
+            "/MAT/LAW1.")
     state.warn(
         "/THERM_STRESS/MAT on material(s) "
         f"{sorted(state.therm_stress_cards)} is INERT on this deck: no "
@@ -1358,7 +1414,8 @@ def _make_thermal_output(state: ConversionState,
     have: Set[int] = set()
     for d in state.imposed_temperatures:
         for n in _driver_nodes(state, d.sid, d.is_node, d.source, seen,
-                               d.nsidex, d.boxid, quiet=True):
+                               d.nsidex, d.boxid, quiet=True,
+                               drive_exempt=d.drive_exempt):
             if n not in have:
                 have.add(n)
                 nodes.append(n)
@@ -1440,8 +1497,14 @@ def _warn_solid_expansion(state: ConversionState, solids: List[int]) -> None:
         "TERMINATION, I-ENERGY 3.089e5 against EXT-WORK 0.099 — so check the "
         "CYCLE COUNT, the I-ENERGY/EXT-WORK balance and the time step, never "
         "the termination banner. PRESCRIPTION: give every cross-section "
-        "transverse to the expansion at least one lateral anchor (a symmetry "
-        "plane, a support or a contact), or model the part with SHELLS on a "
+        "transverse to the expansion an anchor that holds it LATERALLY — a "
+        "symmetry plane, or a support that removes BOTH transverse "
+        "translations. One node restrained in only ONE transverse direction "
+        "is NOT enough: measured on the same bar, one node per cross-section "
+        "fixed in dy AND dz gives 0.01198565 mm (-0.12 %) with dt held, a "
+        "single y = 0 symmetry plane the same, but dy ALONE still diverges "
+        "(+0.389 mm, I-ENERGY 2036 against EXT-WORK 4.283) under a NORMAL "
+        "TERMINATION banner. Or model the part with SHELLS on a "
         "through-thickness-integrated law, which is exact in every mount "
         "tested. Note also that the solid gate is jthe < 0 and skips t = 0 "
         "(sgrtails.F:1462 stores -ABS(JTHE) for Lagrangian solids), so nothing "

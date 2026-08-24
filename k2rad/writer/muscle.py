@@ -462,12 +462,16 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
         fct3 = _new_funct(f"MatL156_SVR_{mat.mid}", _const_curve(1.0))
     # ── f4: passive stress h(lambda), dimensionless (Scale_F = PIS*A carries
     # the units).
-    fct4 = _resolve_ssp(state, label, mat, sno, _new_funct)
-
+    # The zero-force case is decided BEFORE _resolve_ssp runs: that resolver
+    # APPENDS its function to funct_lines as it mints it, so overwriting fct4
+    # afterwards would leave the (100-row exponential) passive curve in the
+    # deck referenced by nothing.
     force = mat.pis * area
     if force == 0.0:
         fct4 = _zero_passive(state, label, "PIS*A", _new_funct,
                              f"MatL156_SSP_{mat.mid}")
+    else:
+        fct4 = _resolve_ssp(state, label, mat, sno, _new_funct)
     prop_id = _muscle_prop_id(state, pid)
     title = part.title or f"MUSCLE_{pid}"
     lines = list(funct_lines)
@@ -501,6 +505,10 @@ def _muscle_beam_part(state: ConversionState, pid: int, elems, emit_funct):
         # to /TH/SPRING instead of /TH/BEAM.
         state.spring_elem_ids.add(eid)
         state.muscle_spring_eids.add(eid)
+        # ...and on the BEAM side of the id-namespace split: these eids are
+        # *ELEMENT_BEAM rows, so only a consumer asking about beams may use
+        # them to decide that a beam was re-routed.
+        state.muscle_beam_spring_eids.add(eid)
     state.warn(
         f"{label} -> /PROP/TYPE46/{prop_id} (SPR_MUSCLE) + {len(eids)} "
         f"/SPRING element(s). Force = PIS*A = {force:g}; Mass = RHO*A/SNO = "
@@ -624,10 +632,14 @@ def _muscle_discrete_part(state: ConversionState, pid: int, elems, emit_funct):
     fct3 = _resolve_velocity_curve(state, label, mat.tv_lcid, "TV",
                                    mat.vmax, sv, _new_funct,
                                    f"MatS15_TV_{mat.mid}")
-    fct4 = _resolve_fpe(state, label, mat, l0, l_init, _new_funct)
+    # Decided BEFORE _resolve_fpe, for the same reason as the 156 side: the
+    # resolver emits its function as it mints it, so a later overwrite would
+    # orphan a /FUNCT in the deck.
     if mat.fmax == 0.0:
         fct4 = _zero_passive(state, label, "FMAX", _new_funct,
                              f"MatS15_FPE_{mat.mid}")
+    else:
+        fct4 = _resolve_fpe(state, label, mat, l0, l_init, _new_funct)
 
     prop_id = _muscle_prop_id(state, pid)
     title = part.title or f"MUSCLE_{pid}"
@@ -655,6 +667,9 @@ def _muscle_discrete_part(state: ConversionState, pid: int, elems, emit_funct):
     for eid in eids:
         state.spring_elem_ids.add(eid)
         state.muscle_spring_eids.add(eid)
+        # ...and on the DISCRETE side of the id-namespace split: these eids
+        # are *ELEMENT_DISCRETE rows and say nothing about any beam.
+        state.muscle_discrete_spring_eids.add(eid)
     state.warn(
         f"{label} -> /PROP/TYPE46/{prop_id} (SPR_MUSCLE) + {len(eids)} "
         f"/SPRING element(s), Epsi=1 (elongation form): Force = FMAX = "

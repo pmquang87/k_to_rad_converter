@@ -661,15 +661,17 @@ covering them unlocks a large class of real models.
   the belt only made more visible:
 
   * **`*DATABASE_CROSS_SECTION_PLANE` cannot cut a belt.** `inistate.py`'s cut
-    walk covers shell / solid / tshell / beam and has no spring arm, and
-    `_make_cross_sections` writes `grsprg_ID` as a hard `0` even though the
-    `/SECT` card carries a spring group (its own docstring lists
-    `grbric`/`grshel`/`grtrus`/`grbeam`/`grsprg`/`grtria`). So a section plane
-    through a shoulder belt reports no belt force — exactly the quantity a
-    restraint section is usually drawn for. Pre-existing for every `/SPRING`
-    family (`*ELEMENT_DISCRETE` included), not introduced by the belt batch;
-    fixing it means a belt + discrete arm in the walk and a `/GRSPRING` group
-    behind `grsprg_ID`.
+    walk covers shell / solid / tshell / beam and has no spring arm, so a
+    section plane through a shoulder belt reports no belt force — exactly the
+    quantity a restraint section is usually drawn for. Pre-existing for every
+    `/SPRING` family (`*ELEMENT_DISCRETE` included), not introduced by the belt
+    batch. **Half done** (rare-materials verification round): `grsprg_ID` is no
+    longer a hard `0` — a BEAM whose material re-routes it to a `/SPRING`
+    (`*MAT_MUSCLE`, `*MAT_SPOTWELD`, ELFORM-6) now goes into a `/GRSPRI/SPRI`
+    group behind that column, starter-validated at 0 errors and engine-measured
+    to carry real `/TH/SECTIO` data where the old deck wrote exact zeros. What
+    remains is the CUT WALK: belts and `*ELEMENT_DISCRETE` springs still have no
+    arm in `_plane_cut`, so a plane never finds them in the first place.
   * **`--auto-gapmin` still does not measure BEAM or `*ELEMENT_DISCRETE`
     clearance.** The 1D belt arm was added to `gapmin._part_nodes_map` in the
     verification round; those two families remain missing there for the same
@@ -713,17 +715,23 @@ validated foundation for further linear analyses:
   `*INITIAL_TEMPERATURE[_SET|_NODE]` → `/INITEMP`, and
   `*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]` +
   `*BOUNDARY_TEMPERATURE[_SET|_NODE]` → `/IMPTEMP`, with `/TH/NODE TEMP` and
-  `/ANIM/NODA/TEMP` gated on a real thermal solve. Engine-validated to −0.13 %
-  against `α·ΔT·L`. **Still open (Milestone 2):** the thermal SOLVER controls
+  `/ANIM/NODA/TEMP` gated on a real thermal solve. Engine-validated to −0.11 %
+  on the free bar and −0.135 % on the clamped one against `α·ΔT·L`.
+  **Still open (Milestone 2):** the thermal SOLVER controls
   (`*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}` → the `/THERM` engine cards
   and `/DTTHERM`), the flux/convection/radiation boundaries
   (`*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]` → `/IMPFLUX`, `/CONVEC`,
   `/RADIATION`), the richer thermal materials (`*MAT_THERMAL_CWM`,
-  `_ORTHOTROPIC`, `_ISOTROPIC_TD`) and the external-field loads
-  (`*LOAD_THERMAL_D3PLOT`, `_DYNAIN`, `_BINOUT`) — every one of them recognized and named in the
-  conversion log today. Two measured limits also need work: a `/MAT/ELAST` shell
-  gets no expansion at all, and the solid path is wrong under a face-clamp
-  mount.
+  `_ORTHOTROPIC`, `_ISOTROPIC_TD`, `_ISOTROPIC_TD_LC`), the per-element and
+  per-section temperature spellings (`*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT`,
+  `_VARIABLE_{BEAM,SHELL}`, `*LOAD_THERMAL_RSW`) and the external-field loads
+  (`*LOAD_THERMAL_D3PLOT`, `_BINOUT`, `_TOPAZ`) — every one of them recognized
+  and named in the conversion log today. Two measured limits remain: a
+  `*MAT_ELASTIC` shell is restated as `/MAT/LAW36` so it CAN expand, but a
+  material shared between shell and solid parts is left on LAW1 and its
+  expansion stays inert on the shells; and the solid path diverges when a run
+  of elements is free to TRANSLATE laterally as a group — the cure is one
+  lateral anchor per cross-section (an end clamp is NOT the trigger).
 
 *Rationale:* these extend the proven modal machinery rather than opening a new
 solver path, so risk is contained.

@@ -5976,6 +5976,15 @@ class InitialTemperature:
     temp: float
     loc: int = 0
     is_node: bool = False   # True = *INITIAL_TEMPERATURE_NODE (sid is a NID)
+    # Only ever set on the companion /INITEMP the writer SYNTHESIZES for a
+    # driver (writer/thermal.py::_resolve_drivers). It has to carry the
+    # driver's own scope: an /INITEMP over the WHOLE set while the /IMPTEMP
+    # covers set-minus-NSIDEX would initialise the exempted nodes at the
+    # temperature the card exempts them from. A parsed *INITIAL_TEMPERATURE
+    # has no such cells and leaves these at their defaults.
+    nsidex: int = 0
+    boxid: int = 0
+    drive_exempt: bool = False
 
 
 @dataclass
@@ -6000,6 +6009,14 @@ class ImposedTemperature:
     # its /GRNOD.
     nsidex: int = 0
     boxid: int = 0
+    # True on the SECOND record a *LOAD_THERMAL_{CONSTANT,VARIABLE} card set
+    # produces: the one that drives the EXEMPTED nodes at their own
+    # temperature (TE, or TBE + TSE*f_LCIDE(t) — Vol I R17 pp.33-167/33-180
+    # read "Temperature of exempted nodes" / "Scaled temperature of the
+    # exempted nodes"). It carries the SAME sid and nsidex as its sibling, and
+    # the writer intersects instead of subtracting, so the two /IMPTEMPs
+    # partition the set exactly as LS-DYNA does.
+    drive_exempt: bool = False
     lcid: int = 0           # LS-DYNA curve id (0 = the constant form)
     scale: float = 1.0      # Fscale_y
     const: float = 0.0      # the constant T of the LCID = 0 form
@@ -6593,6 +6610,13 @@ class ConversionState:
     heat_mat_cards: Dict[int, Tuple[float, float, float, float, float, float]] \
         = field(default_factory=dict)
     therm_stress_cards: Dict[int, Tuple[int, float]] = field(default_factory=dict)
+    # *MAT_ELASTIC ids whose law was RESTATED to /MAT/LAW36 so that a thermal
+    # expansion could reach the per-integration-point stresses of a shell
+    # (writer/thermal.py::_restate_law1_shells). Read back by the inert-card
+    # warning: the restatement is not free (-4.6 % time step, +0.03 % membrane
+    # stress), so a deck that ends up with no temperature driver at all must be
+    # told its constitutive law changed for a card that does nothing.
+    law1_shells_restated: Set[int] = field(default_factory=set)
     # Set AT the line that writes an /IMPTEMP (writer/thermal.py::_make_thermal),
     # never from the parsed driver list: several corpus decks state a driver
     # whose *SET_NODE_GENERAL / *SET_NODE_LIST_GENERATE k2rad does not read, so
@@ -7142,6 +7166,17 @@ class ConversionState:
     # channel that is legal, accepted and all zeros is worse than an honest
     # warn-and-drop (#122). Filled AT the line that writes each /SPRING row.
     muscle_spring_eids: Set[int] = field(default_factory=set)
+    # The SAME ids, split by the LS-DYNA element table they came from. An
+    # LS-DYNA element id lives in a PER-TYPE namespace: *ELEMENT_BEAM 50 and
+    # *ELEMENT_DISCRETE 50 are both legal in one deck (the #125 "one cell, two
+    # id namespaces" class). So a consumer that asks "was THIS BEAM re-routed
+    # to a /SPRING?" must not test the union — a plain /BEAM whose eid happens
+    # to equal a discrete muscle spring's would answer yes and be dropped from
+    # a /SECT group or a /TH group it belongs in. *MAT_MUSCLE lands on the
+    # beam side, *MAT_SPRING_MUSCLE on the discrete side; both are filled AT
+    # the line that writes the /SPRING row, beside muscle_spring_eids.
+    muscle_beam_spring_eids: Set[int] = field(default_factory=set)
+    muscle_discrete_spring_eids: Set[int] = field(default_factory=set)
     # *SECTION_SOLID ids / part ids whose emitted /PROP/SOLID carries
     # Ismstr=10 (total strain) — set for /XREF, /MAT/LAW95 and /MAT/LAW90
     # parts, which NEED it. sgrtails.F:1387-1412 silently downgrades a
