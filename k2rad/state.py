@@ -8,6 +8,57 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 
+#: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
+#: parser (``handlers._set_add_keywords``), the ``*INCLUDE_TRANSFORM`` offset
+#: table (``assembly._OFFSET_SPECS``) and the flattening resolver
+#: (``writer/mesh._flatten_set_adds``), so a guard added for one family cannot
+#: go dead on a sibling.
+#:
+#: Each row is ``(family, keyword, card-1 cells, _ADD container, target
+#: container)``. The card-1 cell counts are NOT uniform and each is taken from
+#: that spelling's own manual page (LS-DYNA Vol I R17):
+#:
+#:   ``SID DA1 DA2 DA3 DA4 SOLVER``  NODE (p.43-45), PART (p.43-57)
+#:   ``SID SOLVER``                  SEGMENT (p.43-71), SOLID (p.43-96)
+#:   ``SID``                         SHELL (p.43-85), BEAM (p.43-8),
+#:                                   DISCRETE (p.43-18)
+#:
+#: Reading six cells on a SID-only family would take the following blank cells
+#: as DA1..DA4; only NODE and PART have nodal/part attribute defaults to record.
+#:
+#: **``*SET_TSHELL_ADD`` is deliberately absent**: it is in neither the R17 nor
+#: the R16 ``*SET`` chapter index, and a full-text search of Vol I R17 finds no
+#: such keyword. It exists only in HyperMesh's cfg pool
+#: (``Keyword971/SETS/tshell_add.cfg:60``), which is the "a cfg can lie about
+#: semantics" case — the cfg defines a keyword LS-DYNA does not. A deck
+#: carrying it therefore stays in ``skipped_keywords``, named. (``*SET_TSHELL``
+#: itself is a separate, pre-existing gap; k2rad has no ``tshell_sets``.)
+SET_ADD_FAMILIES = (
+    ("NODE",     "SET_NODE_ADD",     6, "node_set_adds",     "node_sets"),
+    ("PART",     "SET_PART_ADD",     6, "part_set_adds",     "part_sets"),
+    ("SEGMENT",  "SET_SEGMENT_ADD",  2, "segment_set_adds",  "segment_sets"),
+    ("SHELL",    "SET_SHELL_ADD",    1, "shell_set_adds",    "shell_sets"),
+    ("SOLID",    "SET_SOLID_ADD",    2, "solid_set_adds",    "solid_sets"),
+    ("BEAM",     "SET_BEAM_ADD",     1, "beam_set_adds",     "beam_sets"),
+    ("DISCRETE", "SET_DISCRETE_ADD", 1, "discrete_set_adds", "discrete_sets"),
+)
+
+#: ``*SET_NODE_ADD_ADVANCED`` card 2b TYPE column → the family whose members
+#: contribute their NODES (Vol I R17 p.43-46 verbatim: "EQ.1: Node set
+#: EQ.2: Shell set EQ.3: Beam set EQ.4: Solid set EQ.5: Segment set
+#: EQ.6: Discrete set EQ.7: Thick shell set"). TYPE 7 has no k2rad container
+#: (``*SET_TSHELL`` is unconverted) and is warn-dropped by name.
+SET_ADD_ADVANCED_TYPES = {
+    1: ("NODE", "node_sets"),
+    2: ("SHELL", "shell_sets"),
+    3: ("BEAM", "beam_sets"),
+    4: ("SOLID", "solid_sets"),
+    5: ("SEGMENT", "segment_sets"),
+    6: ("DISCRETE", "discrete_sets"),
+    7: ("TSHELL", ""),
+}
+
+
 @dataclass
 class NodeData:
     x: float
@@ -6975,12 +7026,28 @@ class ConversionState:
     # ── Sets / groups ──────────────────────────────────────────
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
     part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
-    # *SET_PART_ADD: psid → (title, [child part-set ids]) — one level of
-    # part-set nesting (dyna2rad CC:692-727: an "ADD" set's ids are part-SET
-    # ids). Expanded ONCE post-parse by _flatten_part_set_adds (writer/mesh.py)
-    # into a plain part_sets entry, so every part-set consumer resolves it.
+    # *SET_<FAMILY>_ADD boolean unions: sid → (title, [child SET ids]). One
+    # dict per family, all seven declared in SET_ADD_FAMILIES above and all
+    # expanded ONCE post-parse by the shared _flatten_set_adds resolver
+    # (writer/mesh.py) into the family's ordinary set container, so every
+    # consumer resolves a union without knowing the variant.
     part_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
-    part_set_adds_flattened: bool = False    # _flatten_part_set_adds ran
+    node_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    segment_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    shell_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    solid_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    beam_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    discrete_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    # *SET_NODE_ADD_ADVANCED: nsid → (title, [(member set id, TYPE), ...]).
+    # TYPE selects the member's FAMILY (1 node / 2 shell / 3 beam / 4 solid /
+    # 5 segment / 6 discrete / 7 thick shell, Vol I R17 p.43-46) and the union
+    # takes the NODES of whatever the member names — still a union, not a
+    # boolean-operator table. Resolved by the same pass, after every other
+    # family, because a TYPE 2..6 member is an element/segment set that may
+    # itself be an _ADD union.
+    node_set_add_advanced: Dict[int, Tuple[str, List[Tuple[int, int]]]] = \
+        field(default_factory=dict)
+    set_adds_flattened: bool = False          # _flatten_set_adds ran
     # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
     # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
     # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined

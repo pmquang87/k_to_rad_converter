@@ -33,7 +33,7 @@ from .mesh import (
     _assign_ortho_props,
     _assign_hourglass_props,
     _downgrade_tet10_to_tet4,
-    _flatten_part_set_adds,
+    _flatten_set_adds,
     _resolve_contact_interior,
     _make_extra_groups,
     _make_nodes,
@@ -770,11 +770,14 @@ def build_starter(state: ConversionState, progress=None) -> str:
     # on the 100-200 MB mesh decks in the corpora and nothing would read it.
     if state.boxes:
         state.source_node_ids = set(state.nodes)
-    # *SET_PART_ADD → plain part sets, one nesting level, BEFORE anything
-    # reads state.part_sets (contact sides, *CONTACT_INTERIOR, gravity/ALE
-    # scopes). Idempotent — convert() already ran it so --auto-gapmin sees
-    # the flattened sets; this covers direct build_starter callers.
-    _flatten_part_set_adds(state)
+    # *SET_<FAMILY>_ADD → plain sets of that family (recursively), BEFORE
+    # anything reads state.part_sets / node_sets / the element and segment set
+    # containers (contact sides, *CONTACT_INTERIOR, gravity/ALE scopes, /BCS,
+    # /RBODY, /RWALL scopes, /SECT groups, /TH channels, /PLOAD surfaces) and
+    # before the tet10->tet4 node-set prune, which mutates state.node_sets.
+    # Idempotent — convert() already ran it so --auto-gapmin sees the
+    # flattened sets; this covers direct build_starter callers.
+    _flatten_set_adds(state)
     _resolve_define_tables(state)
     _resolve_mat_plas_tab(state)
     _resolve_mat_power_law(state)

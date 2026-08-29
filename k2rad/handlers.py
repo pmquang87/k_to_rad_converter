@@ -17,6 +17,7 @@ from .parser import (
 )
 from .state import (
     ConversionState,
+    SET_ADD_FAMILIES,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     TshellElem, SphCell,
     PartData, SectionShell, SectionSolid, SectionTshell, SectionBeam,
@@ -4956,30 +4957,99 @@ def handle_set_part_list(block: Block, state: ConversionState) -> None:
     state.part_sets[psid] = (title, pids)
 
 
-def handle_set_part_add(block: Block, state: ConversionState) -> None:
-    """*SET_PART_ADD — its data ids are part-SET ids (one nesting level), NOT
-    part ids, so it cannot land in state.part_sets AT PARSE TIME (a child set
-    may not be read yet, and every consumer reads the members as part ids).
-    Stored separately here; the post-parse ``_flatten_part_set_adds`` prepass
-    (writer/mesh.py) expands exactly one nesting level — the rule dyna2rad's
-    ConvertContactInterior applies, CC:692-727 — into a plain part_sets
-    entry, so EVERY part-set consumer (contacts SSTYP/MSTYP=2,
-    *CONTACT_INTERIOR, --auto-gapmin, gravity scopes, ALE groups ...)
-    resolves the set without knowing the variant. The header carries the
-    same SID DA1..DA4 layout as *SET_PART."""
+def _set_add_keywords():
+    """Every ``*SET_<FAMILY>_ADD`` spelling, from the ONE family table in
+    state.py. ``_TITLE`` needs no entry of its own: ``parser._split_keyword``
+    strips it into ``block.options`` (Vol I R17 p.43-2 — "an additional
+    keyword option TITLE may be appended to all the *SET keywords", exactly one
+    80a line between the header and card 1).
+
+    ``assembly._OFFSET_SPECS`` is generated from this same source, so the
+    parser table and the ``*INCLUDE_TRANSFORM`` offset table cannot drift
+    apart — an unmapped spelling would keep its original member set ids while
+    the rest of the include was offset."""
+    return tuple(row[1] for row in SET_ADD_FAMILIES)
+
+
+def _handle_set_add(block: Block, state: ConversionState, family: str,
+                    ncells: int, adds_name: str) -> None:
+    """Shared parser for the whole ``*SET_<FAMILY>_ADD`` union family.
+
+    An ``_ADD`` set's data ids are **SET** ids of its own family, never entity
+    ids, so the block cannot land in the family's ordinary container at PARSE
+    TIME (a child set may not be read yet, and every consumer reads the members
+    as entity ids). It is stored per family here; the post-parse
+    ``_flatten_set_adds`` prepass (writer/mesh.py) expands the union — with
+    recursion, a cycle guard and a depth cap — into a plain set entry, so
+    EVERY consumer resolves it without knowing the variant.
+
+    *ncells* is that spelling's own card-1 cell count (see SET_ADD_FAMILIES):
+    only NODE and PART carry ``DA1..DA4 SOLVER``, and reading six cells on a
+    SID-only family would take the trailing blanks as nodal attributes.
+
+    Member rows are claimed by RAW contiguity after the header card, and only
+    ids ``> 0`` are kept. Trailing zero padding is the LS-PrePost house style
+    and is NOT a member — measured in two corpus carriers, e.g.
+    ``show-cases/contact-overview/main.k:172`` = ``100200301 100200302 0 0 0 0
+    0 0``. The manual's "tightly packed data" remark scopes INTERIOR zeros
+    only (identical text on every ``_ADD`` page).
+    """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=6, w=10)
-    psid = to_int(f1[0])
-    _record_part_set_attrs(state, psid, f1)
+    f1 = _card(raw, offset, fixed=True, n=max(1, ncells), w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    if family == "PART":
+        # Only the PART header's DA1..DA4 have a k2rad consumer
+        # (*CONTACT_INTERIOR reads them as per-set defaults). *SET_NODE_ADD's
+        # DA1..DA4 are the *CONTACT_TIEBREAK_NODES_TO_SURFACE nodal attributes
+        # NFLF/NSFL/NNEN/NMES (Vol I R17 p.43-43 Remark 1), a keyword k2rad
+        # does not convert, so they have nothing to be recorded for.
+        _record_part_set_attrs(state, sid, f1)
     ids: List[int] = []
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
             v = to_int(tok)
             if v > 0:
                 ids.append(v)
-    state.part_set_adds[psid] = (title, ids)
+    getattr(state, adds_name)[sid] = (title, ids)
+
+
+def handle_set_node_add_advanced(block: Block, state: ConversionState) -> None:
+    """``*SET_NODE_ADD_ADVANCED`` — a node union across the SEVEN set families.
+
+    Card 2b is ``SID1 TYPE1 SID2 TYPE2 SID3 TYPE3 SID4 TYPE4`` — four
+    (id, family) PAIRS per card, not eight ids (Vol I R17 p.43-46). There is no
+    operator column and no boolean-op table anywhere on the page: the purpose
+    line is still "define a node set by combining NODE, SHELL, SOLID, BEAM,
+    SEGMENT, DISCRETE, and TSHELL sets", i.e. a UNION whose non-node members
+    contribute the nodes of their entities.
+
+    dyna2rad reads this card as a plain id list (``convertsets.cxx:103``
+    matches the substring "ADD" and never dispatches on TYPE), so the TYPE
+    column is fed to ``GetValue("ids")`` as if it were another set id — a
+    silently WRONG union. Reading the pairs is the whole difference.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    nsid = to_int(f1[0])
+    pairs: List[Tuple[int, int]] = []
+    for k in range(offset + 1, len(raw)):
+        if not raw[k].strip():
+            continue
+        f = _card(raw, k, fixed=True, n=8, w=10)
+        for j in range(0, 8, 2):
+            sid = to_int(f[j]) if len(f) > j else 0
+            typ = to_int(f[j + 1]) if len(f) > j + 1 else 0
+            if sid > 0:
+                pairs.append((sid, typ))
+    state.node_set_add_advanced[nsid] = (title, pairs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -15399,7 +15469,9 @@ HANDLERS = {
     "SET_NODE":                               handle_set_node_list,
     "SET_PART_LIST":                          handle_set_part_list,
     "SET_PART":                               handle_set_part_list,
-    "SET_PART_ADD":                           handle_set_part_add,
+    # The *SET_<FAMILY>_ADD unions are registered below, generated from
+    # state.SET_ADD_FAMILIES (the same source assembly._OFFSET_SPECS reads).
+    "SET_NODE_ADD_ADVANCED":                  handle_set_node_add_advanced,
     "SET_SHELL_LIST":                         handle_set_shell_list,
     "SET_SHELL":                              handle_set_shell_list,
     "SET_SOLID_LIST":                         handle_set_solid_list,
@@ -15724,6 +15796,17 @@ del _o1, _o2, _o3
 for _kw in _part_option_keywords():
     HANDLERS[_kw] = handle_part
 del _kw
+
+# *SET_<FAMILY>_ADD — one dispatch key per family, GENERATED from
+# state.SET_ADD_FAMILIES so the parser table, the writer's resolver and
+# assembly._OFFSET_SPECS all read the same source. Each family closes over its
+# OWN card-1 cell count and its OWN container; a hand-written per-family copy
+# is exactly how a guard goes dead on a sibling spelling.
+for _family, _kw, _ncells, _adds, _target in SET_ADD_FAMILIES:
+    HANDLERS[_kw] = (lambda fam, nc, ad:
+                     lambda b, s: _handle_set_add(b, s, fam, nc, ad))(
+        _family, _ncells, _adds)
+del _family, _kw, _ncells, _adds, _target
 
 # *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL,TITLE} in any order
 # — 326 spellings ("The order of the options in the keyword name is arbitrary",

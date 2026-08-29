@@ -1944,6 +1944,17 @@ it grows for stubby beams.
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
 `*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
+`*SET_NODE_ADD`, `*SET_PART_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
+`*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` (+ every `_TITLE` form)
+→ a conversion-time boolean UNION expanded into the family's ordinary set, so
+the union id resolves wherever a plain set id does. Recursive (`_ADD` of
+`_ADD`), with a cycle guard and a warned depth cap; members de-duplicated;
+dangling member sets warned and dropped BY NAME. `*SET_NODE_ADD_ADVANCED`
+unions across all seven families — its card 2b is `(SID, TYPE)` PAIRS, and a
+non-node member contributes the NODES of its entities.
+There is no `*SET_TSHELL_ADD` in LS-DYNA R17/R16 (it exists only in
+HyperMesh's cfg pool), so k2rad does not invent one — such a block is reported
+in `skipped_keywords`.
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)

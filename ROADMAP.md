@@ -55,7 +55,16 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   rather than collapsed onto one point. `*INTERFACE_SPRINGBACK_LSDYNA` → the
   engine `/DYNAIN` block, on a schedule rather than a single terminal trigger
   because the engine's own end-of-run rescue sets `ILASTDYNAIN` and never reads
-  it. **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
+  it.
+- **Milestone 2, batch 1 (beyond dyna2rad parity) — IN PROGRESS.** The whole
+  `*SET_<FAMILY>_ADD` boolean-union family (`NODE`, `SEGMENT`, `SHELL`,
+  `SOLID`, `BEAM`, `DISCRETE` + `*SET_NODE_ADD_ADVANCED`, joining the shipped
+  `PART`) is expanded at conversion time into the family's ordinary set
+  container by ONE shared, recursive resolver with a cycle guard and a warned
+  depth cap — so the union id resolves wherever a plain set id does. The
+  one-level rule the `*SET_PART_ADD` path used to apply is lifted. There is no
+  `*SET_TSHELL_ADD` in LS-DYNA (HyperMesh cfg only), so none is invented.
+  **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and
   cannot hold a thick-shell id), inline arithmetic in a `&parameter` field

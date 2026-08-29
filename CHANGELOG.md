@@ -11,6 +11,122 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **MILESTONE-2 BATCH 1, part A — the whole `*SET_<FAMILY>_ADD` boolean-union
+  family: `*SET_NODE_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
+  `*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` and
+  `*SET_NODE_ADD_ADVANCED` (plus every `_TITLE` form) join the shipped
+  `*SET_PART_ADD` on ONE shared, recursive resolver.** Six of the seven were
+  unnamed entries in `skipped_keywords` before, and the loss was silent by
+  construction: a `*BOUNDARY_SPC_SET` on a `*SET_NODE_ADD` produced no `/BCS`
+  at all, and the converted deck then read **0 ERROR(S), 0 WARNING(S)** at the
+  starter — an unconstrained model that looks clean. MEASURED on
+  `dynaexamples_r14_ton-mm-s/implicit/Yaris Static Door Sag/000_yaris_stat_doorsag_fine_02.k`
+  (`*SET_NODE_ADD 110 = {101, 102}`, both plain `*SET_NODE_LIST`): before,
+  `*CONSTRAINED_NODAL_RIGID_BODY pid=110: node set 110 not found — /RBODY not
+  emitted`, and with it went `BOUNDARY_PRESCRIBED_MOTION_RIGID pid=110: no
+  RBODY found; motion skipped`, `LOAD_RIGID_BODY pid=110: rigid body not found
+  – skipped` and the whole `*DATABASE_BNDOUT` channel. After: a
+  `/GRNOD/NODE/110` of 25 nodes, `/RBODY` count 1268 → **1269**, the prescribed
+  motion and the rigid-body load applied, and `*DATABASE_BNDOUT →
+  /TH/NODE/94806`. Three dropped physics cards and one lost output channel,
+  from one unexpanded set.
+
+  1. **ONE resolver, not seven — and it is now RECURSIVE.**
+     `writer/mesh._flatten_set_adds` walks a single family table
+     (`state.SET_ADD_FAMILIES`) that also generates the parser keys
+     (`handlers._set_add_keywords`) and the `*INCLUDE_TRANSFORM` offset rows
+     (`assembly._OFFSET_SPECS`), so a guard added for one family cannot go dead
+     on a sibling (the #124 lesson). The shipped `*SET_PART_ADD` expanded
+     exactly ONE level and warn-dropped a nested `_ADD` child; that restriction
+     is **lifted** — the reference implementation recurses without a limit and
+     memoises to break cycles (`convertsets.cxx:1248-1277`), and the LS-DYNA
+     `*SET` chapter states no nesting rule either way. k2rad adds an explicit
+     cycle guard (the branch is cut, named, and the rest of the union kept) and
+     a depth cap of 16 that WARNS and says it is a converter policy, not a
+     manual rule. The cap is keyed on the subtree's intrinsic HEIGHT, not on
+     traversal depth, so which unions the deck happens to number lower cannot
+     decide whether it fires.
+
+  2. **De-duplication is load-bearing for exactly one family.** `/GRNOD`,
+     `/GRSHEL`, `/GRBRIC`, `/GRBEAM`, `/GRSPRI` and `/GRPART` all collapse
+     duplicates inside the starter (`sysfus.F:468-479` for nodes,
+     `nintrr.F:814-828` — "WITH REMOVAL OF DUPLICATE NOS" — for elements), so
+     for six families the union's own dedup only matches what the solver does.
+     `/SURF/SEG` and `/SURF/SURF` do **not**: measured with a free-floating
+     `/PLOAD` impulse, the same four nodes on two seg rows applies exactly
+     **2.0000×** the load at 0 ERROR (only `/SURF/DSURF` de-duplicates, and
+     k2rad emits the flat `/SURF/SEG` form). A segment union therefore
+     de-duplicates at conversion time, keyed on the smallest CYCLIC ROTATION of
+     the corner list: a quad `1 2 3 4` and `2 3 4 1` are one segment with one
+     normal, while the REVERSED `4 3 2 1` is the opposite face normal and is
+     deliberately kept — dropping it would silently delete a load direction.
+
+  3. **`*SET_TSHELL_ADD` is NOT a keyword and is not invented.** It is absent
+     from the `*SET` chapter index of Vol I R17 *and* R16, and a full-text
+     search finds it in neither; it exists only in HyperMesh's cfg pool
+     (`Keyword971/SETS/tshell_add.cfg:60`, `data_hierarchy.cfg:165`). This is
+     the "a cfg can lie about semantics" case (#115) in its strongest form — a
+     cfg that defines a keyword the solver does not. Such a block stays in
+     `skipped_keywords`, named. (`*SET_TSHELL` itself remains an open gap.)
+
+  4. **Card 1 is NOT the same shape across the family, and each spelling's
+     count comes from its own manual page.** `SID DA1 DA2 DA3 DA4 SOLVER` on
+     NODE (p.43-45) and PART (p.43-57); `SID SOLVER` on SEGMENT (p.43-71) and
+     SOLID (p.43-96); `SID` alone on SHELL (p.43-85), BEAM (p.43-8) and
+     DISCRETE (p.43-18). Reading six cells on a SID-only family would take the
+     following blanks as DA1..DA4. Only `*SET_PART_ADD`'s DA1..DA4 are
+     recorded, because only they have a k2rad consumer (`*CONTACT_INTERIOR`);
+     `*SET_NODE_ADD`'s are the `*CONTACT_TIEBREAK_NODES_TO_SURFACE` nodal
+     attributes NFLF/NSFL/NNEN/NMES (p.43-43 Remark 1), a keyword k2rad does
+     not convert.
+
+  5. **`*SET_NODE_ADD_ADVANCED` is a union across seven families, not a
+     boolean-operator table — and dyna2rad reads it wrong.** Card 2b is
+     `SID1 TYPE1 … SID4 TYPE4`, four PAIRS (Vol I R17 p.43-46: "EQ.1: Node set
+     EQ.2: Shell set … EQ.7: Thick shell set"); there is no operator column
+     anywhere on the page, and the purpose line is still "define a node set by
+     combining …". A non-node member contributes the NODES of its entities.
+     dyna2rad matches the substring `"ADD"` (`convertsets.cxx:103`) and never
+     dispatches on TYPE, so it feeds the TYPE column to `GetValue("ids")` as if
+     it were another set id. k2rad reads the pairs; TYPE 7 (thick shell) is
+     warn-dropped BY NAME because k2rad has no `*SET_TSHELL` container, and an
+     undocumented TYPE is warn-dropped naming the value. A BEAM member
+     contributes N1 and N2 only: its third node is an orientation reference,
+     and on an `*ELEMENT_BEAM_ORIENTATION` beam k2rad SYNTHESIZES it, so
+     including it would put a converter artefact into a set the deck defined.
+
+  6. **Every member cell takes IDSOFF, not the base keyword's entity bucket.**
+     LS-DYNA has exactly ONE set bucket — Vol I R17 `*INCLUDE_{OPTION}` Card
+     2b.1/2b.2 (p.27-5/27-6) gives "IDSOFF: Offset to set ID" and no per-family
+     split — so a `*SET_NODE_ADD` member row is `"s"` where a `*SET_NODE_LIST`
+     member row is `"n"`. Getting that wrong is invisible on any deck without
+     an `*INCLUDE_TRANSFORM`, which is why the offset rows are generated from
+     the same family table as the parser keys. `*SET_NODE_ADD_ADVANCED` gets a
+     hand-shaped spec instead: only the EVEN cells are ids, and an `(ALL, "s")`
+     spec would offset every TYPE enumeration too. Trailing zero padding — the
+     LS-PrePost house style, present in two corpus carriers — is never offset
+     and never a member.
+
+  7. **A union that resolves to NOTHING is not registered as an empty set.**
+     Four `*SET_NODE_ADD` blocks in the 2010 Yaris and one in the 2012 Camry
+     name `*SET_NODE_GENERAL` children k2rad does not convert. Registering an
+     empty set there would claim the deck's union is empty when it is only
+     unresolved here, and MEASURED on `starter_win64` (2026-05-20) an empty
+     `/GRNOD/NODE` draws `WARNING ID : 690 ** WARNING IN NODE GROUP DEFINITION
+     / THE NODE GROUP ID=… IS EMPTY` (0 ERRORS, NORMAL TERMINATION) — a
+     diagnostic pointing at the wrong culprit. The union warns naming its
+     unresolved members instead, and consumers report the id as undefined. A
+     union that is a MEMBER of another union still resolves through the memo,
+     so a chain is unaffected.
+
+  8. **The gap-analysis claim that native "hard-rejects `_ADD` sets (msg
+     200038)" is refuted as stated.** `convertsets.cxx` converts every `_ADD`
+     kind; message 200038 is a WARNING emitted from exactly ONE site
+     (`converttimehistory.cxx:125-129`), i.e. only for a
+     `*DATABASE_HISTORY_<type>_SET` whose referenced set is an `_ADD` set.
+     A `grep -rn 200038` over this build's reader tree returns nothing at all.
+     The real converter-side gap was k2rad's, and it was measured above.
+
 - **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
   → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;
   `*PERTURBATION_NODE` → `/RANDOM[/GRNOD]`;

@@ -65,7 +65,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
                      to_float, to_int)
-from .state import FABRIC_CURVE_FORMS
+from .state import FABRIC_CURVE_FORMS, SET_ADD_FAMILIES
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
@@ -3129,8 +3129,7 @@ _OFFSET_SPECS: Dict[str, object] = {
     "SET_NODE": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "n")])},
     "SET_PART_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "p")])},
     "SET_PART": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "p")])},
-    # *SET_PART_ADD data ids are part-SET ids (one nesting level), bucket "s".
-    "SET_PART_ADD": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "s")])},
+    # The *SET_<FAMILY>_ADD rows are generated below from state's family table.
     # *CONTACT_INTERIOR is a bare free list of part-set ids (no header card).
     "CONTACT_INTERIOR": {"data": (0, [(ALL, "s")])},
     "SET_SHELL_LIST": {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "e")])},
@@ -3719,6 +3718,33 @@ _ELEMENT_PREFIX_SPECS = (
 for _kw, _ in _rwall_planar_keywords():
     _OFFSET_SPECS[_kw] = _OFFSET_SPECS["RIGIDWALL_PLANAR"]
 del _kw
+
+# *SET_<FAMILY>_ADD — Card 1 SID and EVERY member cell take IDSOFF (bucket
+# "s"), because an _ADD set's members are SET ids of the same family, never
+# entity ids. That is the one place an _ADD spec differs from its base
+# keyword's (*SET_NODE_LIST members are NODES, "n"; *SET_SHELL members are
+# ELEMENTS, "e"), and getting it wrong is invisible on any deck without an
+# *INCLUDE_TRANSFORM. LS-DYNA has exactly ONE set bucket — Vol I R17
+# *INCLUDE_{OPTION} Card 2b.1/2b.2 (p.27-5/27-6) gives "IDSOFF: Offset to set
+# ID" and no per-family split — so every family shares this shape.
+#
+# Generated from state.SET_ADD_FAMILIES, the same source handlers.py registers
+# the parser keys from, so the two tables cannot drift apart: a spelling that
+# dispatches but has no offset spec keeps its un-offset member ids under an
+# *INCLUDE_TRANSFORM while the member SETS move, and the union resolves to
+# nothing.
+for _family, _kw, _n, _adds, _target in SET_ADD_FAMILIES:
+    _OFFSET_SPECS[_kw] = {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "s")])}
+del _family, _kw, _n, _adds, _target
+
+# *SET_NODE_ADD_ADVANCED card 2b is NOT a uniform id list: it is four
+# (SID, TYPE) PAIRS (Vol I R17 p.43-46), so only the EVEN cells are set ids.
+# An (ALL, "s") data spec would offset every TYPE enumeration as well and turn
+# a "node set" member into a "TYPE 10000002" one.
+_OFFSET_SPECS["SET_NODE_ADD_ADVANCED"] = {
+    "cards": {0: [(0, "s")]},
+    "data": (1, [(0, "s"), (2, "s"), (4, "s"), (6, "s")]),
+}
 
 # Every *RIGIDWALL_GEOMETRIC spelling handlers.py registers — generated from
 # the same source so the two tables cannot drift apart (an unmapped keyword
