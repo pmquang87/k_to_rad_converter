@@ -38,6 +38,29 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   (measured 2.7e-07 mm against 0.012 mm; the restatement is elastically neutral
   to +0.035 % and costs −4.6 % of time step). See the Tier 4 *Thermal* entry for
   what is done and what stays open.
+- **Tier 2 (rare cards):** `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
+  → `/ACTIV` (`Iform = 2` always — `Iform = 1` needs a sensor LS-DYNA has no
+  field for and is a measured silent no-op without one; the element scope splits
+  per EMITTED family, and a `TIME = 0` card is refused rather than inverted,
+  because `hm_read_activ.F:139` reads that same zero as "never").
+  `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`, the only card that keeps the
+  quintic ramp AND clamps past `TEND`; its LCID joins the `/FUNCT` + `/TABLE`
+  namespace, which is what takes the EFG metal-cutting carrier from starter
+  `ERROR 120` (a dangling `funct_IDT` on the `/IMPVEL` the deck still emitted)
+  to 0 errors. `*PERTURBATION_NODE` TYPE 8 → `/RANDOM[/GRNOD]` with the `DTYPE`
+  amplitude the symmetric `ALEAT()` actually needs, and the global-vs-grouped
+  mutual exclusion resolved at conversion time.
+  `*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY` → one `/IMPDISP/FGEO` per distinct
+  `(LCID, DEATH, BIRTH)`, with the negative-NID set form PROJECTED onto `z = Z`
+  rather than collapsed onto one point. `*INTERFACE_SPRINGBACK_LSDYNA` → the
+  engine `/DYNAIN` block, on a schedule rather than a single terminal trigger
+  because the engine's own end-of-run rescue sets `ILASTDYNAIN` and never reads
+  it. **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
+  resolves without being restated as a `*SET_SOLID`), inline arithmetic in a
+  `&parameter` field (`&tend/6.0`, which the EFG carrier writes and the parser
+  reads as 0), `*PERTURBATION_SHELL_THICKNESS` → `/PERTURB/PART/SHELL`, and the
+  `/STATE/*` sibling of `/DYNAIN` for the solid/beam/spring state a dynain
+  cannot carry.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`

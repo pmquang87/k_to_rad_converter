@@ -11,6 +11,173 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
+  → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;
+  `*PERTURBATION_NODE` → `/RANDOM[/GRNOD]`;
+  `*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY` → `/IMPDISP/FGEO`; and
+  `*INTERFACE_SPRINGBACK_LSDYNA` → the engine `/DYNAIN` block.** All five were
+  unnamed entries in `skipped_keywords` before, and one of them was actively
+  breaking a deck: MEASURED on
+  `dynaexamples_r14_ton-mm-s/efg/metal-cutting/main.k`, the skipped
+  `*DEFINE_CURVE_SMOOTH` LCID 1 was still referenced by the `/IMPVEL` that
+  `*BOUNDARY_PRESCRIBED_MOTION_RIGID` emitted, and the starter answered
+  `ERROR ID : 120 ** ERROR IN FUNCTION REFERENCE / -- IMPOSED VELOCITIES /
+  WRONG REFERENCE TO FUNCTION ID=1` and refused the deck (exit 2). That carrier
+  now reads at **0 errors, exit 0**, with the other five warnings unchanged.
+
+  1. **`/ACTIV` `Tstop = 0` means NEVER; LS-DYNA `TIME = 0` means IMMEDIATELY —
+     and `TIME`'s default IS 0.** `hm_read_activ.F:139` is
+     `IF (STOPT == ZERO) STOPT = INFINITY`, measured: a card written with
+     `Tstop = 0.0` echoes `STOP-TIME 0.1000000020041E+21` and the group is never
+     deactivated. dyna2rad's `CopyValue("TIME","Tstop")`
+     (`convertdefineelementdeath.cxx:76`, and on all seven of its branches)
+     therefore INVERTS the card on LS-DYNA's own default. k2rad refuses such a
+     card by name — it neither writes `Tstop = 0` nor invents a small positive
+     one, because nothing on the card derives it. **The identical
+     `Tstop == 0 → INFINITY` idiom in `read_impdisp_fgeo.F:161` is CORRECT for
+     `/IMPDISP/FGEO`**, because LS-DYNA's `DEATHD` default is *infinity* too
+     (Vol I R17 p.5-73). Same starter idiom, opposite verdict; checked per card.
+  2. **`Iform = 1` with no sensor is a silent no-op.** MEASURED: an `Iform = 1`
+     `/ACTIV` with `sens_ID = 0` produced zero activation/deactivation events
+     over a whole run, at zero starter and engine diagnostics. LS-DYNA element
+     death has no sensor, so `Iform = 2` is the only expressible form — and it
+     needs its card 3 (`%20lg%20lg` `Tstart Tstop`), which `activ.cfg:142-157`
+     emits only `if(ACTIV_Iform == 2)`. `activ.cfg` exists only in
+     `radioss2019`, and twin decks at `/BEGIN 2019` and `/BEGIN 2022` echo
+     byte-identically with no warning on the card — the ordinary
+     newest-format-is-older case, so it is emitted as written.
+  3. **The element scope is keyed on what was EMITTED, per family.** A `SHELL`
+     scope splits `/GRSHEL/SHEL` (quads) from `/GRSH3N/SH3N` (3-corner shells,
+     which k2rad writes as `/SH3N`) — dyna2rad puts ONE `/SET/GENERAL` id in
+     both slots (`convertdefineelementdeath.cxx:156-157`); a `THICK_SHELL` id
+     lands in `/GRBRIC/BRIC` because k2rad writes a thick shell as a `/BRICK`;
+     and a `BEAM` re-routed to a `/SPRING` goes in `grspr_ID`, tested against
+     the three PRODUCER-specific registries
+     (`dbeam_spring_eids | spotweld_spring_eids | muscle_beam_spring_eids`) and
+     never against the `state.spring_elem_ids` union, which also holds
+     `*ELEMENT_DISCRETE`, `*ELEMENT_PLOTEL`, belt and joint ids living in their
+     own LS-DYNA namespaces (the #128 regression, verbatim). Elements that
+     reached no emitted family are dropped with their ids named — a group
+     member the deck does not define is starter `ERROR 69`, which refuses the
+     whole run, while dyna2rad drops the entire card silently (`:96`).
+  4. **`BOXID` is a SPATIAL death that disables the time criterion, so the card
+     is refused, not half-converted.** *"An element is immediately deleted upon
+     meeting the condition of being inside the box … WITHOUT REGARD TO TIME,
+     IDGRP, OR PERCENT"* (Vol I R17 p.17-251), and the manual resets a zero
+     `TIME` to 1e16 in that case. `IDGRP`/`PERCENT` is the opposite: an
+     INDEPENDENT second criterion, so the `TIME` half still converts and only
+     the group-failure rule is named. dyna2rad reads none of the five fields.
+  5. **`/FUNCT_SMOOTH` shares ONE id namespace with `/FUNCT` and `/TABLE`.**
+     `hm_read_funct.F` reads both keywords (`HM_OPTION_COUNT('/FUNCT')` :103,
+     `('/FUNCT_SMOOTH')` :104) into the same `NPC/PLD/NOM_OPT` arrays under one
+     running index, differing only by `NPC(2*NFUNCT+L+1) = ISMOOTH`; measured,
+     `/FUNCT/8002` beside `/FUNCT_SMOOTH/8002` is
+     `ERROR ID : 79 ** ERROR: DUPLICATE ID / IN FUNCTION & TABLE DEFINITION`,
+     and `/FUNCT_SMOOTH/301` beside `/TABLE/0/301` adds `ERROR 604`. The smooth
+     curve is therefore stored in `state.curves` like any other curve and only
+     FLAGGED for the writer, so `next_curve_id` dodges it and all 97 existing
+     "is this LCID defined?" membership tests resolve it, with no new registry
+     for a future allocator to forget (the #111 lesson). A new
+     `_warn_duplicate_function_ids` scan over the assembled starter names the
+     collision the deck itself can still state.
+  6. **`/FUNCT_SMOOTH` is the faithful target, not a nicety: the plain `/FUNCT`
+     runs the tool BACKWARDS past `TEND`.** The ISMOOTH flag makes the `/IMP*`
+     consumers interpolate with the quintic smoothstep
+     `S(u) = u³(10 − 15u + 6u²)` AND clamp outside the point range
+     (`finter_smooth.F:71-101`); a plain `/FUNCT` extrapolates. Measured on the
+     same four points: at t = 1.1501e-2 the smooth curve held DX at 10.000000
+     while the plain one had fallen to 9.296098, i.e. −1250 mm/s of invented
+     return stroke. The trapezoid itself needs **no conversion factor** — the
+     LS-DYNA identity `DIST = VMAX·(TEND − TSTART − TRISE)` is term for term
+     what the four vertices integrate to, and stays exact for the quintic blend
+     because `∫₀¹S(u)du = ½` on each ramp (the #128 rule). Two dyna2rad gaps are
+     closed: its `break` at `convertcurves.cxx:323` aborts the loop over all
+     remaining smooth curves, and its `!= 0.0` divisor test at `:325` lets a
+     span that is only float noise (`0.03 − 0.01 − 0.02 = −3.5e-18`) through
+     into `VMAX ≈ 1e18`.
+  7. **`/RANDOM`'s `ALEAT()` is symmetric — the Reference Guide is wrong, so
+     `DTYPE` decides the amplitude.** `aleat.F:48-49` returns
+     `(I − 32768.)/32768.`, uniform on `(−1, +1)`; measured on a 1000-node block
+     at `XALEA = 0.5`, dX/dY/dZ spanned −0.4997…+0.4998 with std 0.293/0.288/0.294
+     against the theoretical `XALEA/√3 = 0.2887`, and two runs of the same deck
+     moved every node by byte-identical amounts. So LS-DYNA `DTYPE = 1`
+     (`SCL × [−AMPL, AMPL]`) is `XALEA = SCL·AMPL` exactly, while `DTYPE = 0` —
+     **the default**, one-sided `SCL × [0, AMPL]` — becomes `XALEA = SCL·AMPL/2`,
+     which reproduces the zero-mean noise (same half-width, same standard
+     deviation) and drops only a rigid translation of `+SCL·AMPL/2` per axis.
+     dyna2rad ignores `DTYPE` and writes `SCL·AMPL` for both, i.e. double the
+     spread on the default form. Only TYPE 8 converts: TYPE 1 (harmonic) is a
+     deterministic mode-shaped trigger and TYPE 2 (fade) does not perturb
+     anything at all, yet dyna2rad turns both into white noise.
+  8. **A global `/RANDOM` and a `/RANDOM/GRNOD` in one deck perturb NOTHING.**
+     `hm_read_rand.F:152/156/175` runs the all-nodes branch only when
+     `NRANDG == 0` and the group branch only when `IALL == 0`; measured with one
+     of each, there is no `RANDOM NOISE` block in the `.out` at all, 0 ERROR,
+     0 WARNING, and not one node moved. One LS-DYNA deck may legitimately carry
+     an `NSID = 0` card beside an `NSID > 0` one, so the conflict is resolved at
+     conversion time (the all-nodes card wins, and the per-set amplitudes are
+     named) rather than shipped.
+  9. **A negative `NID` on `*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY` is a
+     PROJECTION, not a collapse.** *"all the nodes in this node set are
+     displaced from their initial positions to the projected points on the
+     xy-plane with Z offset"* (Vol I R17 p.5-74): each member keeps its own x
+     and y. dyna2rad pushes the same `(X, Y, Z)` for every member
+     (`convertbcs.cxx:741-746`), collapsing the set onto one point. The per-row
+     `LCID`/`DEATH` also override the header `LCIDF`/`DEATHD` when nonzero
+     (p.5-75), which Radioss's one-`fct_ID`-per-card layout can only honour by
+     splitting into several `/IMPDISP/FGEO` — dyna2rad reads neither field. And
+     `BIRTH` does BOTH things at once in LS-DYNA (*"the abscissa values are
+     shifted by an amount BIRTH … the same effect as setting OFFA = BIRTH"*)
+     while the Radioss `Tstart` is a pure gate (`fixfingeo.F:155/168`), so it is
+     emitted as `Tstart = BIRTH` **and** a curve copy shifted by `+BIRTH` — the
+     #128 `/IMPTEMP` lesson in reverse. The node cards are sliced I8/E16/E16/E16/I8/E16
+     (card 2a) or …/I8/E8/E8 (card 2b, `IBRTH = 1`), the column spans recovered
+     from the R17 table's own ten-column ruler; a uniform 10-wide slice would
+     start `Y` inside `X` (the `*ELEMENT_MASS` failure).
+  10. **`/DYNAIN`'s end-of-run rescue is DEAD CODE, so the trigger has to be a
+      schedule.** `sortie_main.F:922` fires `GENDYNAIN` on `TT >= TDYNAIN` and
+      `SORTIE_MAIN` runs every cycle (`resol.F:8233`) — but an explicit run's
+      last computed cycle lands BELOW `TSTOP` and the overshoot happens after
+      that call. `resol.F:8358-8368` does set `ILASTDYNAIN = 1` and pull
+      `TDYNAIN` back to `TT − 1e-10` there, and then **nothing ever reads
+      `ILASTDYNAIN`**: the "run one more cycle" decision at `resol.F:9265-9295`
+      is taken on `ILASTANIM`/`ILASTH3D` alone. MEASURED on an `ENDTIM = 1e-2`
+      deck (3478 cycles, dt growing 1.15e-6 → 5.5e-4 so an animation was written
+      on each of the last cycles): `/DYNAIN/DT 0.0098 1E+30` wrote **zero**
+      `.dynain` files at NORMAL TERMINATION, 0 ERROR, 0 WARNING — the "legal,
+      accepted, and empty" class (#122) one step further on. dyna2rad's
+      `Tstart = Tfreq = ENDTIM` (`convertcards.cxx:1242-1243`) has the same
+      hole. k2rad writes `0.9·ENDTIM  0.02·ENDTIM`: at most six files, the last
+      one on the run's final cycle, and it does not depend on any other output
+      card being present. Verified end to end — the last file carries
+      `*ELEMENT_SHELL_THICKNESS`, `*NODE`, a full `*INITIAL_STRESS_SHELL`
+      (5 through-thickness × 4 in-plane records with EPSP), `*INITIAL_STRAIN_SHELL`
+      and `*END`, and `k2rad.parser.parse_k_file` reads it straight back.
+  11. **The STARTER re-parses the engine file, and a comment line kills it.**
+      `check_dynain.F` opens `<root>_0001.rad` from inside the starter and walks
+      the `/DYNAIN/DT` block; its guard
+      `IF(CARTE(1:1)/='#'.OR.CARTE(1:1)/='$')` (:144) is always TRUE, so the
+      line after `Tstart Tfreq` goes into an `(I10)` internal READ — a comment
+      or blank line there is `forrtl: severe (64)` and the starter dies with no
+      `.out` at all. The part ids therefore follow that line immediately, and
+      are capped at ten per line because `fredynain.F` reads them into a fixed
+      `IV2(10)`. An empty part list is `ERROR 1909` and an unknown part id
+      `ERROR 1908`, both fatal at the starter, so `PSID = 0` / an unresolvable
+      or fully-dropped `*SET_PART` falls back to `/DYNAIN/DT/ALL` with the
+      widening named. `/DYNAIN` is SHELLS ONLY (`fredynain.F` has no other
+      element writer), so a shell-free deck emits nothing rather than the
+      four-line stub the engine would otherwise produce at 0 diagnostics.
+  12. `*INCLUDE_TRANSFORM` buckets for every new spelling, from the same source
+      as the handlers (#116/#124), each a WALKER rather than a declarative spec:
+      the death cards' cell 1 is an element id in the plain spelling and a set
+      id in `_SET`; `*PERTURBATION_NODE`'s card 2 is float-bearing on every
+      TYPE (a wavelength of `1.5` would read back as the id `1`) and card 2c is
+      a FILE NAME; the FGEO node rows mix ids with floats at non-10 widths AND
+      put one cell in two namespaces by sign (#125); and the springback
+      `OPTCARD` rows carry counts, not ids. `IDGRP` is deliberately left alone —
+      it is a bare grouping tag whose only relation is equality within the
+      include.
+
 - **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`;
   `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
   `/PROP/TYPE46` (`SPR_MUSCLE`) + `/SPRING`; and
@@ -1482,7 +1649,7 @@ Prior history (before this changelog was introduced) is summarized in the
       * **An IMPLICIT deck carrying a 1D belt is now told it is not solving the
         belt.** `imp_glob_k.F`'s `ITY==6` arm builds spring stiffness for
         `IGTYP` 4, 8, 12 and 13 only (`R4KE3`/`R8KE3`/`R12KE3`/`R13KE3`);
-        everything else falls to the `IETY=16` arm and format 1005, `***** 
+        everything else falls to the `IETY=16` arm and format 1005, `*****
         WARNING : SPRING ELEMENT PROP.TYPE = 23 IS NOT AVAILABLE FOR STIFFNESS
         MATRIX BUILDING, STIFFNESS IGNORED *****`. MEASURED: the assembled
         matrix collapsed from SYMBOLIC ND=18 NZ=27 to FINAL ND=6 NZ=3 — only
