@@ -448,6 +448,17 @@ class SetAddUnionTests(unittest.TestCase):
         self.assertTrue(_warns(res, "*SET_NODE_ADD 50",
                                "resolves to NO member at all"))
 
+    def test_child_defined_after_the_union_still_resolves(self):
+        """The pass is POST-PARSE for exactly this reason: a parse-time
+        expansion would miss a member set the deck states later."""
+        extra = ("*SET_NODE_ADD\n" + _row(50) + "\n" + _row(51, 52) + "\n"
+                 + "*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
+                 + "*SET_NODE_LIST\n" + _row(52) + "\n" + _row(3, 4) + "\n")
+        st = _flat(MESH.replace("{EXTRA}", extra))
+        self.assertEqual(st.node_sets[50][1], [1, 2, 3, 4])
+        res, _ = _convert(MESH.replace("{EXTRA}", extra))
+        self.assertFalse(_warns(res, "member set id(s)"))
+
     def test_flatten_is_idempotent(self):
         extra = ("*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
                  + "*SET_NODE_ADD\n" + _row(50) + "\n" + _row(51) + "\n")

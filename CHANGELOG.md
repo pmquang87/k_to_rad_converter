@@ -253,6 +253,45 @@ Prior history (before this changelog was introduced) is summarized in the
      now list the container; `writer/composites.py`'s two-arm law LABEL became
      a three-way router for the same reason.
 
+- **Sweep for MILESTONE-2 BATCH 1, in TWO HALVES.** The corpus (this repo, the
+  r14 dynaexamples, `C:\openradioss_run`, `E:\foxcore_data`) holds **974**
+  `.k`/`.key`/`.dyn` files, **614 distinct by SHA-256** — converting the same
+  bytes twice proves nothing, and 360 of the files are byte-copies (the same
+  200 MB elevator-linkage and foxcore meshes several times over). **609 of
+  those 614 were converted on master and on this branch and compared; 0
+  conversion errors on either tree.** The five not reached are all ≥190 MB
+  meshes (two 196 MB `tobias_mesh` copies, the 191 MB Yaris dynamic-suspension
+  deck, the 248 MB `camry-detailed-v5a.key`), and an exhaustive scan of all
+  974 files for `^\*SET_..._ADD` / `^\*MAT_COMPOSITE_DAMAGE` shows none of them
+  carries a batch keyword.
+
+  Compared **explicitly in two halves and reported as two numbers**, because a
+  sweep that compares only output files cannot see a warning change (#129
+  round 2):
+
+  * **Half 1 — the `.rad` files** (SHA-256 of `_0000.rad` and `_0001.rad`):
+    **9 of 609 differ.**
+  * **Half 2 — the diagnostics** (`warnings` + `skipped_keywords` +
+    `recognized_not_emitted`): **11 of 609 differ.**
+
+  The 11 movers are the 9 corpus carriers present in the distinct set, plus
+  **2 decks whose `.rad` is byte-identical and whose only change is the
+  corrected TEXT of an existing warning** — `*DATABASE_NODAL_FORCE_GROUP`
+  used to name `*SET_NODE_ADD` as a spelling k2rad does not expand, and now
+  names `*SET_NODE_GENERAL`, which it still does not. That pair is exactly
+  what half 1 alone would have hidden.
+
+  Per carrier: the door-sag Yaris loses `SET_NODE_ADD` from
+  `skipped_keywords` and 9 warnings, gains 6, and both its `.rad` files change
+  (the restored `/RBODY`, its prescribed motion, `*LOAD_RIGID_BODY` and the
+  `/TH/NODE` BNDOUT channel); `tension6.k` and the three `W6` sandwich decks
+  lose `MAT_COMPOSITE_DAMAGE` and the "*PART references a material id that NO
+  /MAT card defines*" warning, and `tension6.k` additionally stops reporting
+  its 8-ply `ICOMP=1` layup as DROPPED; the 2010 Yaris, the 2012 Camry and the
+  contact-overview deck lose the `SET_NODE_ADD` entry and gain two named
+  warnings per union whose `*SET_NODE_GENERAL` children k2rad still cannot
+  resolve, with the only `.rad` change being the `#-- SKIPPED:` comment line.
+
 - **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
   → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;
   `*PERTURBATION_NODE` → `/RANDOM[/GRNOD]`;
