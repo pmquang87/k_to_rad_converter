@@ -307,8 +307,10 @@ def _make_element_death(state: ConversionState) -> List[str]:
             "OFFG, it does not remove the nodal mass, which is what LS-DYNA "
             "element death does too. WHEN READING /TH AFTERWARDS: a 4-node "
             "shell is the one family eloff.F does NOT zero — :479 writes "
-            "OFFG = -ABS(OFFG) while :458/:522/:565 zero the solids, beams and "
-            "/SH3N — and its /TH force and moment channels then FREEZE at the "
+            "OFFG = -ABS(OFFG) while :418 zeroes the solids (in the dedicated "
+            "IGBR pre-loop, not the ITY dispatch), :522 the beams, :565 the "
+            "/SH3N and :458 the 2-D quads k2rad never emits — and its /TH "
+            "force and moment channels then FREEZE at the "
             "value they held when it died instead of dropping to 0 (measured "
             "on a twin-deck pair: F1 stuck at 0.1294952 and M1 at -50.23716 "
             "for every state after Tstop). The element carries no load — a "
@@ -518,9 +520,9 @@ def _make_random(state: ConversionState) -> List[str]:
             "split them into separate runs if the amplitudes differ.")
         grouped = []
     if len(globals_) > 1:
-        # hm_read_rand.F:118-126 OVERWRITES the module-level XALEA on every
+        # hm_read_rand.F:135-136 OVERWRITES the module-level XALEA on every
         # all-nodes record (`IALL = IALL+1; XALEA = ALEA(I)`) and the
-        # application loop at :152-163 then adds XALEA*ALEAT() ONCE per node —
+        # application loop at :156-163 then adds XALEA*ALEAT() ONCE per node —
         # so a second global card silently makes the first one inert. LS-DYNA
         # instead SUMS them ('Perturbations specified using separate
         # *PERTURBATION cards are created separately and then added together',
@@ -535,8 +537,8 @@ def _make_random(state: ConversionState) -> List[str]:
             f"{len(dropped_x) + 1} all-nodes cards (NSID = 0). LS-DYNA sums "
             "separate *PERTURBATION cards ('created separately and then added "
             "together', Vol I R17 p.38-10 Remark 2), but /RANDOM cannot: "
-            "hm_read_rand.F:118-126 overwrites ONE module-level XALEA per "
-            "all-nodes record and :152-163 applies it once, so the earlier "
+            "hm_read_rand.F:135-136 overwrites ONE module-level XALEA per "
+            "all-nodes record and :156-163 applies it once, so the earlier "
             "cards would be silently inert. The largest amplitude "
             f"(XALEA = {kept[1]:g}) was kept and "
             + ", ".join(f"XALEA = {x:g}" for x in sorted(dropped_x))
@@ -648,6 +650,17 @@ def _warn_fgeo_curve_range(state: ConversionState, label: str,
     clamp on ``f``, so an ordinate of 200 sends the node 200 × the stated offset
     and an ordinate that returns to 0 brings it back to where it started.
 
+    NOR does the engine hold the last ordinate PAST the curve. The FGEO
+    consumer's interpolators both extrapolate the last segment —
+    ``FINTER2`` linearly, ``FINTER2_SMOOTH`` (``finter_smooth.F:116-152``) with
+    the same quintic, neither with a clamp — so unless ``Tstop`` bounds the
+    card (a ``DEATH`` of 0 becomes INFINITY, ``read_impdisp_fgeo.F:161``) the
+    node does not stop at the last point, it keeps going. MEASURED past a
+    smooth curve's last vertex: ``f`` = −0.0117 / −0.406 / −2.379 / −7.624 at
+    ``t`` = 13.20 / 13.60 / 14.00 / 14.38 ms on a curve ending at 13 ms, the
+    quintic ``1−S(u)`` to five digits, and the run died on the energy-error
+    limit under a ``NORMAL TERMINATION`` banner.
+
     Reachable and silent until now. A ``*DEFINE_CURVE_SMOOTH`` in particular can
     NEVER satisfy the requirement: it is a velocity trapezoid whose plateau is
     ``VMAX`` and whose last vertex is ``(TEND, 0)`` by construction. MEASURED on
@@ -663,19 +676,38 @@ def _warn_fgeo_curve_range(state: ConversionState, label: str,
     smooth = lcid in state.funct_smooth_ids
     if abs(end - 1.0) <= 1.0e-6 and top <= 1.0 + 1.0e-6 and bot >= -1.0e-6:
         return
+    # Lead with the clause that is actually out of range. A curve whose
+    # ordinates are already bounded by 1 trips the gate on its END VALUE alone,
+    # and opening with "an ordinate of 1 sends the node 1 times the offset" —
+    # the CORRECT behaviour — reads as a self-contradiction.
+    over = top > 1.0 + 1.0e-6 or bot < -1.0e-6
+    consequence = (
+        f"an ordinate of {top:g} sends every listed node {top:g} times the "
+        "stated offset"
+        + (f" and an end value of {end:g} leaves it there" if end else
+           " and an end value of 0 brings it back to where it started")
+        if over else
+        (f"an end value of {end:g} leaves every listed node at {end:g} times "
+         "the stated offset" if end else
+         "an end value of 0 brings every listed node back to where it started, "
+         "not to the geometry the node rows name"))
     state.warn(
         f"{label}: load curve {lcid} is not the 0 -> 1 scale factor this card "
         f"needs — its ordinates run {bot:g} .. {top:g} and end at {end:g}. "
         "'A load curve defines a scale factor as a function of time that is "
         "bounded between zero and unity corresponding to the initial and final "
         "geometry' (Vol I R17 p.5-73), and fixfingeo.F:243-256 computes "
-        "X(t) = X0 + f(t)*(Xf - X0) with NO clamp on f, so an ordinate of "
-        f"{top:g} sends every listed node {top:g} times the stated offset"
-        + (f" and an end value of {end:g} leaves it there" if end else
-           " and an end value of 0 carries it back to where it started")
+        "X(t) = X0 + f(t)*(Xf - X0) with NO clamp on f, so "
+        + consequence
         + ". The curve is written through as stated — nothing on the card "
         "derives a rescaling, and inventing one would be a fabricated motion — "
-        "but the resulting positions are not the ones the node rows name."
+        "but the resulting positions are not the ones the node rows name. "
+        "PAST its last abscissa the curve is not held either: fixfingeo.F "
+        "extrapolates the last segment (FINTER2 linearly, FINTER2_SMOOTH with "
+        "the same quintic — finter_smooth.F:116-152 has no clamp), so unless "
+        "DEATH bounds this card the node keeps moving. MEASURED on the smooth "
+        "pairing: f reached -7.62 past a curve ending at 0 and the run died on "
+        "the energy-error limit under a NORMAL TERMINATION banner."
         + (" NOTE: curve " + str(lcid) + " is a *DEFINE_CURVE_SMOOTH, which "
            "can never satisfy this: it is a VELOCITY trapezoid whose plateau "
            "is VMAX and whose last vertex is (TEND, 0) by construction. The "
@@ -729,11 +761,15 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
     # (state.next_impdisp_id). Between the two directions the pair is covered,
     # and _warn_duplicate_impdisp_ids is the deck-wide backstop.
     used_ids: Set[int] = set(state.imp_card_ids.get("IMPDISP", set()))
-    # One range diagnostic per CURVE, not per emitted card: a single deck card
-    # whose rows split into several /IMPDISP/FGEO would otherwise repeat it.
-    range_checked: Set[int] = set()
     for rec in state.final_geometries:
         label = _fgeo_label(rec)
+        # One range diagnostic per (DECK CARD, curve): a single card whose rows
+        # split into several /IMPDISP/FGEO must not repeat it, but a SECOND
+        # *BOUNDARY_PRESCRIBED_FINAL_GEOMETRY driven by the same curve must
+        # still be named — the warning quotes {label}, so hoisting this set out
+        # of the loop silently dropped the diagnostic for every card after the
+        # first (measured: BPFGID 800 named, BPFGID 801 emitted in silence).
+        range_checked: Set[int] = set()
         rows = _fgeo_rows(state, rec)
         if not rows:
             state.warn(f"{label}: no usable node row — no /IMPDISP/FGEO "
@@ -774,11 +810,21 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
                 shifted = [(a + birth, o) for a, o in curve.pts]
                 # The copy has to keep the SOURCE curve's card kind. A
                 # *DEFINE_CURVE_SMOOTH re-emitted as a plain /FUNCT loses the
-                # ISMOOTH flag, and fixfingeo.F:186-196 then picks FINTER2
-                # instead of FINTER2_SMOOTH: the quintic blend becomes
-                # piecewise-linear and, worse, the clamp at
-                # finter_smooth.F:71-76 is gone, so the curve extrapolates past
-                # its last point — the very failure /FUNCT_SMOOTH is chosen for.
+                # ISMOOTH flag (fixfingeo.F:194-195 reads it from
+                # NPC(2*NFUNCT+L+1)), and :196-199 then picks FINTER2 instead
+                # of FINTER2_SMOOTH: the quintic blend becomes piecewise-linear
+                # — a DIFFERENT motion for the same four points (MEASURED: f =
+                # 0.1036 vs 0.2503 at u = 0.25, 2.42x).
+                #
+                # NOT a clamp question. Neither branch clamps on this path:
+                # FINTER2_SMOOTH (finter_smooth.F:116-152) walks IPOS to the
+                # last segment and evaluates the quintic with u > 1, so the
+                # SMOOTH copy actually runs FURTHER past the end of the curve
+                # than the plain one, not less. The clamping routines are other
+                # entry points with other callers — FINTER_SMOOTH
+                # (finter_smooth.F:71/74, gravit.F/forcefingeo.F) and
+                # VINTER_SMOOTH (vinter_smooth.F:68-71), which is what the
+                # /IMPVEL path uses (fixvel.F:314/316).
                 smooth = lcid in state.funct_smooth_ids
                 kind = "/FUNCT_SMOOTH" if smooth else "/FUNCT"
                 lines += _emit_funct(
@@ -903,6 +949,76 @@ def _springback_label(rec) -> str:
     return f"*{rec.keyword} PSID {rec.psid}"
 
 
+def _warn_springback_dropped_fields(state: ConversionState, label: str,
+                                    rec) -> None:
+    """Name every *INTERFACE_SPRINGBACK cell that has no /DYNAIN slot.
+
+    Called on EVERY card, including the three the writer refuses (no
+    ENDTIM, deck-wide shell-free, part list with no shell): a refusal is a
+    reason not to emit a block, not a reason to stop accounting for the
+    fields the card states. README's "none has a /DYNAIN counterpart; each
+    is named" is a promise about the CARD, not about the cards that happen
+    to convert.
+    """
+    dropped = []
+    if rec.nhsv:
+        dropped.append(
+            f"NHSV={rec.nhsv} (extra element history variables beyond the "
+            "six stresses and the effective plastic strain; the Radioss "
+            "dynain writes exactly stress + EPSP, dynain_c_strsg.F:1100)")
+    if rec.ftype:
+        dropped.append(
+            f"FTYPE={rec.ftype} (file format: binary/LSDA/large; "
+            "gendynain.F writes ASCII, optionally gzipped)")
+    if rec.ftensr:
+        dropped.append(
+            f"FTENSR={rec.ftensr} (dump *MAT_190 history tensors in the "
+            "global frame)")
+    if rec.rflag:
+        dropped.append(
+            f"RFLAG={rec.rflag} (carry over reference coordinates and "
+            "nodal masses)")
+    if rec.intstrn:
+        dropped.append(
+            f"INTSTRN={rec.intstrn} (strains at ALL through-thickness "
+            "integration points; /DYNAIN/SHELL/STRAIN/FULL writes what "
+            "dynain_c_strag.F writes and has no such switch)")
+    if rec.nthhsv:
+        dropped.append(
+            f"NTHHSV={rec.nthhsv} (thermal history variables; the "
+            "/STATE/NODE/TEMP dyna2rad reaches for writes a Radioss .sta, "
+            "not a dynain)")
+    if rec.has_optcard:
+        dropped.append(
+            f"the OPTCARD card (SLDO={rec.sldo} NCYC={rec.ncyc} "
+            f"FSPLIT={rec.fsplit} NDFLAG={rec.ndflag} CFLAG={rec.cflag} "
+            f"HFLAG={rec.hflag}) — none of it has a /DYNAIN counterpart. "
+            "NDFLAG in particular is a NODE-DUMP flag ('Flag to dump "
+            "nodes into dynain file'), NOT a part-scope flag; dyna2rad "
+            "maps NDFLAG>0 to /STATE/DT/ALL (convertcards.cxx:1097), "
+            "which silently discards PSID and widens the output to the "
+            "whole model")
+    if rec.dtwrt or rec.nmwrt or rec.ivflg:
+        dropped.append(
+            f"the OPTCARD 3.1/3.2 cards (DTWRT={rec.dtwrt:g} "
+            f"NMWRT={rec.nmwrt} IVFLG={rec.ivflg})")
+    if rec.constraints:
+        dropped.append(
+            f"{len(rec.constraints)} Card-4 node constraint row(s) "
+            "(NID/TC/RC) — springback constraints for the SEAMLESS "
+            "option, which no engine keyword can carry into the dynain")
+    if rec.keyword.endswith("_NOTHICKNESS"):
+        dropped.append(
+            "the NOTHICKNESS option — dynain_shel_mp.F:256 writes "
+            "*ELEMENT_SHELL_THICKNESS unconditionally and /DYNAIN has no "
+            "sub-key to suppress it, so the thickness block is present "
+            "anyway")
+    if dropped:
+        state.warn(f"{label}: dropped, with no /DYNAIN slot — "
+                   + "; ".join(dropped) + ". dyna2rad drops all of them "
+                   "too, without a message.")
+
+
 def _make_engine_dynain(state: ConversionState) -> List[str]:
     """``*INTERFACE_SPRINGBACK_LSDYNA`` → ``/DYNAIN/DT[/ALL]`` +
     ``/DYNAIN/SHELL/{STRES,STRAIN}/FULL`` in the ENGINE file.
@@ -932,10 +1048,15 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
       the ``/ALL`` fallback and the ``state.parts`` screening below.
     * that same reader's guard ``IF(CARTE(1:1)/='#'.OR.CARTE(1:1)/='$')``
       (:144) is always TRUE, so it feeds whatever follows the ``Tstart Tfreq``
-      line into an ``(I10)`` internal READ. A comment or blank line there is
-      ``forrtl: severe (64): input conversion error`` and the STARTER dies with
-      no ``.out`` at all. The part ids therefore follow that line IMMEDIATELY,
-      with no ``#`` between them.
+      line into an ``(I10)`` internal READ. The two bad lines fail DIFFERENTLY,
+      and both are fatal: a ``#`` or ``$`` COMMENT line passes the tautology,
+      enters the ``DO WHILE`` at :145 (non-blank, not ``/``) and reaches the
+      ``READ(CARTE(J:K-1),'(I10)')`` at :153 — ``forrtl: severe (64): input
+      conversion error``, the starter dies with no ``.out`` at all. A BLANK
+      line instead FAILS the ``DO WHILE``'s own ``LEN_TRIM(CARTE)/=0`` and
+      exits at once, leaving ``NPRT = 0`` — starter ``ERROR 1909`` (:171-174).
+      The part ids therefore follow that line IMMEDIATELY, with neither a
+      ``#`` nor a blank between them.
 
     "Shells only" is enforced at BOTH scopes. The deck-wide guard refuses a
     model with no shell at all; the part-list screen against
@@ -971,6 +1092,7 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
                 "`/DYNAIN/DT 0. 0.` in this situation "
                 "(convertcards.cxx:1085), which asks the engine for one "
                 "dynain file PER CYCLE.")
+            _warn_springback_dropped_fields(state, label, rec)
             continue
         if not state.shell_elem_ids and not state.sh3n_elem_ids:
             state.warn(
@@ -982,6 +1104,7 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
                 "MEASURED on a solid-only model: a legal, accepted, four-line "
                 "stub with 0 errors and 0 warnings, which is worse than "
                 "saying so.")
+            _warn_springback_dropped_fields(state, label, rec)
             continue
         pids: List[int] = []
         scope_all = False
@@ -1049,6 +1172,7 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
                             "emitting the stated list would have produced an "
                             "accepted, EMPTY dynain file at 0 ERROR and 0 "
                             "WARNING (measured).")
+                        _warn_springback_dropped_fields(state, label, rec)
                         continue
                 else:
                     scope_all = True
@@ -1090,63 +1214,7 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
             "*ELEMENT_SHELL_THICKNESS, *INITIAL_STRESS_SHELL, "
             "*INITIAL_STRAIN_SHELL, *END) and can be read straight back into "
             "k2rad as the springback stage's initial state.")
-        dropped = []
-        if rec.nhsv:
-            dropped.append(
-                f"NHSV={rec.nhsv} (extra element history variables beyond the "
-                "six stresses and the effective plastic strain; the Radioss "
-                "dynain writes exactly stress + EPSP, dynain_c_strsg.F:1100)")
-        if rec.ftype:
-            dropped.append(
-                f"FTYPE={rec.ftype} (file format: binary/LSDA/large; "
-                "gendynain.F writes ASCII, optionally gzipped)")
-        if rec.ftensr:
-            dropped.append(
-                f"FTENSR={rec.ftensr} (dump *MAT_190 history tensors in the "
-                "global frame)")
-        if rec.rflag:
-            dropped.append(
-                f"RFLAG={rec.rflag} (carry over reference coordinates and "
-                "nodal masses)")
-        if rec.intstrn:
-            dropped.append(
-                f"INTSTRN={rec.intstrn} (strains at ALL through-thickness "
-                "integration points; /DYNAIN/SHELL/STRAIN/FULL writes what "
-                "dynain_c_strag.F writes and has no such switch)")
-        if rec.nthhsv:
-            dropped.append(
-                f"NTHHSV={rec.nthhsv} (thermal history variables; the "
-                "/STATE/NODE/TEMP dyna2rad reaches for writes a Radioss .sta, "
-                "not a dynain)")
-        if rec.has_optcard:
-            dropped.append(
-                f"the OPTCARD card (SLDO={rec.sldo} NCYC={rec.ncyc} "
-                f"FSPLIT={rec.fsplit} NDFLAG={rec.ndflag} CFLAG={rec.cflag} "
-                f"HFLAG={rec.hflag}) — none of it has a /DYNAIN counterpart. "
-                "NDFLAG in particular is a NODE-DUMP flag ('Flag to dump "
-                "nodes into dynain file'), NOT a part-scope flag; dyna2rad "
-                "maps NDFLAG>0 to /STATE/DT/ALL (convertcards.cxx:1097), "
-                "which silently discards PSID and widens the output to the "
-                "whole model")
-        if rec.dtwrt or rec.nmwrt or rec.ivflg:
-            dropped.append(
-                f"the OPTCARD 3.1/3.2 cards (DTWRT={rec.dtwrt:g} "
-                f"NMWRT={rec.nmwrt} IVFLG={rec.ivflg})")
-        if rec.constraints:
-            dropped.append(
-                f"{len(rec.constraints)} Card-4 node constraint row(s) "
-                "(NID/TC/RC) — springback constraints for the SEAMLESS "
-                "option, which no engine keyword can carry into the dynain")
-        if rec.keyword.endswith("_NOTHICKNESS"):
-            dropped.append(
-                "the NOTHICKNESS option — dynain_shel_mp.F:256 writes "
-                "*ELEMENT_SHELL_THICKNESS unconditionally and /DYNAIN has no "
-                "sub-key to suppress it, so the thickness block is present "
-                "anyway")
-        if dropped:
-            state.warn(f"{label}: dropped, with no /DYNAIN slot — "
-                       + "; ".join(dropped) + ". dyna2rad drops all of them "
-                       "too, without a message.")
+        _warn_springback_dropped_fields(state, label, rec)
     if not contributors:
         return []
     if len(contributors) > 1:
@@ -1157,14 +1225,20 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
             + ("ALL parts" if merged_all
                else f"{len(merged_pids)} part(s): "
                     f"{_fmt_eid_list(merged_pids)}")
-            + ". /DYNAIN is a global engine output request and two blocks are "
-            "ORDER-DEPENDENT, not additive: read_dynain.F:80/93 resolves the "
-            "scope with an ELSEIF (the part list wins whenever NDYNAINPRT is "
-            "nonzero) while fredynain.F:109-110 ZEROES NDYNAINPRT inside the "
-            "/ALL branch, and the second block's Tstart/Tfreq overwrite the "
-            "first's. So one of the two cards would have been silently "
-            "ignored, and which one depends on the order they appear in. The "
-            "union is written instead"
+            + ". /DYNAIN is a global engine output request, and what two "
+            "blocks do depends on their scopes. Two PART-SCOPED blocks are "
+            "additive by accident: fredynain.F initialises NDYNAINPRT once "
+            "(:89) and zeroes it only in the /ALL branch (:109), while the "
+            "part-list branch APPENDS every id (:123) and counts it (:124), so "
+            "both lists reach read_dynain.F:81-91 and both are tagged — only "
+            "the EARLIER block's Tstart/Tfreq is lost, because :103 overwrites "
+            "TDYNAIN0/DTDYNAIN0 per block. Mixing an /ALL block with a "
+            "part-scoped one is the ORDER-DEPENDENT case: read_dynain.F:80/93 "
+            "resolves the scope with an ELSEIF (the part list wins whenever "
+            "NDYNAINPRT is nonzero) and the /ALL branch zeroes NDYNAINPRT, so "
+            "whichever card comes second decides and the other is silently "
+            "ignored. The union with ONE schedule is written instead, which is "
+            "what the engine would have done for the part-scoped case anyway"
             + (" — an all-parts card was among them, which widens the scope "
                "to the whole model." if merged_all and merged_pids else "."))
     tstart = _DYNAIN_TSTART_FRACTION * endtim

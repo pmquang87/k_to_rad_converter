@@ -8175,11 +8175,18 @@ def _make_functions(state: ConversionState) -> List[str]:
             # /FUNCT_SMOOTH is the only faithful target, not a nicety: the
             # ISMOOTH flag it sets (NPC(2*NFUNCT+L+1) = 1) makes the /IMP*
             # consumers interpolate with the quintic smoothstep
-            # S(u) = u^3(10 - 15u + 6u^2) AND CLAMP outside the point range
-            # (finter_smooth.F:71-101), while a plain /FUNCT extrapolates —
-            # measured on the same four points, a plain /FUNCT drove the probe
-            # node BACKWARDS past TEND (10.000 -> 9.296) where /FUNCT_SMOOTH
-            # held it at 10.000. Consumers outside the documented list
+            # S(u) = u^3(10 - 15u + 6u^2) instead of linearly. On /IMPVEL it
+            # ALSO clamps outside the point range — fixvel.F:314/316 goes to
+            # VINTER_SMOOTH, which returns the segment end ordinate there
+            # (vinter_smooth.F:68-71) — and measured on the same four points a
+            # plain /FUNCT drove the probe node BACKWARDS past TEND
+            # (10.000 -> 9.296) where /FUNCT_SMOOTH held it at 10.000. The
+            # clamp is a property of THAT consumer, not of the flag:
+            # /IMPDISP/FGEO dispatches to FINTER2_SMOOTH instead
+            # (fixfingeo.F:199), and finter_smooth.F:116-152 has no clamp — it
+            # extrapolates the last segment with the same quintic.
+            #
+            # Consumers outside the documented list
             # (/IMPDISP, /IMPVEL, /IMPACC, /IMPDISP/FGEO, /IMPVEL/FGEO,
             # /IMPVEL/LAGMUL, /PLOAD, /CLOAD, /GRAV, /IMPTEMP, /IMPFLUX --
             # Reference Guide p.2243 comment 3) do not dispatch on ISMOOTH and

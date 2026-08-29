@@ -1610,11 +1610,14 @@ def _warn_duplicate_impdisp_ids(state: ConversionState,
     BOTH. ``/IMPVEL`` and ``/IMPACC`` get their own scans over their own slices,
     so they are deliberately not in this one.
 
-    ``_make_impdisp_fgeo`` already screens a user ``BPFGID`` against the ids the
-    prescribed-motion sections recorded (``state.imp_card_ids``), so this is the
-    deck-wide backstop for any future producer that forgets to record — the
-    ``#125`` "per-id memo PLUS a deck-wide scan for every namespace" rule. It
-    changes no output.
+    ``_make_impdisp_fgeo`` already screens a user ``BPFGID`` against the ids
+    ``state.imp_card_ids["IMPDISP"]`` holds — which is what all THREE producers
+    record into: ``loads._emit_imp_card``, ``loads._emit_rwall_geom_motion``
+    and ``_make_impdisp_fgeo`` itself. The rigid-wall one runs AFTER the FGEO
+    section, so it dodges from its own side (``state.next_impdisp_id``) instead
+    of being screened here. This is the deck-wide backstop for any future
+    producer that forgets to do either — the ``#125`` "per-id memo PLUS a
+    deck-wide scan for every namespace" rule. It changes no output.
     """
     seen: Dict[int, List[str]] = {}
     for ln in lines:

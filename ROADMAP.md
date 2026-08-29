@@ -68,9 +68,15 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   and a deck-wide duplicate scan for the element-GROUP namespaces
   (`/GRBRIC`, `/GRSHEL`, `/GRSH3N`, `/GRBEAM`, `/GRSPRI`) to match the ones
   `/PROP`, `/MAT`, `/FUNCT` and `/IMPDISP` already have — no collision is
-  reachable today because k2rad never re-emits a user element set under its own
-  SID and `next_elem_group_id` dodges all four set registries, but that is a
-  property of the current writers rather than of the id stream.
+  reachable today, but on ONE clause only: k2rad never re-emits a user element
+  set under its own SID (`_make_extra_groups` re-emits `*SET_NODE` alone), so
+  every element-group id comes from the monotonic `next_id` stream and two
+  synthesized groups cannot coincide. `next_elem_group_id` is NOT a second
+  guarantee here — it is called at exactly ONE element-group emission site
+  (`writer/rarecards.py`, the `/ACTIV` groups); every other one
+  (`common.py`, `inistate.py`, `loads.py`, `monvol.py`, `preload.py`,
+  `blast_ale.py`) calls bare `state.next_id()`. Promoting that allocator to all
+  of them is part of this deferred item, not a property already in place.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`

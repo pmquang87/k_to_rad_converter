@@ -868,12 +868,26 @@ def _emit_funct(fid: int, title: str, pts, smooth: bool = False) -> List[str]:
 
     ``smooth=True`` writes /FUNCT_SMOOTH instead, with the neutral
     Ascalex/Fscaley/Ashiftx/Fshifty card materials._make_functions writes. That
-    is NOT cosmetic: the ISMOOTH flag it sets makes every /IMP* consumer
-    dispatch to FINTER2_SMOOTH (fixfingeo.F:186-196, fixvel.F), which blends
-    with the quintic smoothstep AND CLAMPS outside the point range, while a
-    plain /FUNCT interpolates linearly and EXTRAPOLATES. A caller that copies
-    or shifts a *DEFINE_CURVE_SMOOTH must keep the flag, or the copy silently
-    runs past the end of the curve."""
+    is NOT cosmetic: the ISMOOTH flag it sets makes the /IMP* consumers blend
+    with the quintic smoothstep instead of interpolating linearly, which is a
+    different motion for the same points (MEASURED on the /IMPDISP/FGEO path:
+    f = 0.1035673 against the plain twin's 0.2503 at u = 0.25). A caller that
+    copies or shifts a *DEFINE_CURVE_SMOOTH must keep the flag.
+
+    The two consumers dispatch through DIFFERENT routines, and only one of them
+    clamps — do not state the clamp as a property of the flag:
+
+    * /IMPDISP/FGEO — fixfingeo.F:194-199 picks FINTER2 or FINTER2_SMOOTH.
+      FINTER2_SMOOTH (finter_smooth.F:116-152) has NO clamp: it walks IPOS to
+      the last segment and evaluates the quintic with u > 1, so past the last
+      point the smooth curve extrapolates FASTER than the plain one (measured
+      f = -7.62 vs -1.50 at the same instant).
+    * /IMPVEL — fixvel.F:314/316 calls VINTER_SMOOTH, which DOES clamp per
+      segment (vinter_smooth.F:68-71 returns the segment end ordinate outside
+      [X_FIRST, X_LAST]).
+
+    FINTER_SMOOTH (finter_smooth.F:71/74), the third routine and the other one
+    that clamps, is called by gravit.F/forcefingeo.F and by neither of these."""
     if smooth:
         lines = [f"/FUNCT_SMOOTH/{fid}", title[:100],
                  "#            Ascalex             Fscaley             "

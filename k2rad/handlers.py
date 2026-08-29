@@ -4408,6 +4408,32 @@ def handle_control_ale(block: Block, state: ConversionState) -> None:
 # Definitions
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _clear_smooth_flag_on_redefinition(state: ConversionState, lcid: int,
+                                       keyword: str) -> None:
+    """Drop the ``/FUNCT_SMOOTH`` flag when a PLAIN curve producer overwrites
+    ``state.curves[lcid]``, and name the duplicate.
+
+    Every producer that stores piecewise-linear points under a USER lcid has to
+    call this, not just the one the first reviewer looked at: the emitted CARD
+    KIND must match the points that survive, or a sampled/plain curve goes out
+    as ``/FUNCT_SMOOTH`` and ``fixfingeo.F:194-200`` / ``fixvel.F:314-316``
+    read it quintic-blended. Gating the guard on ONE keyword spelling while a
+    sibling with the same risk stays uncovered is the #124 class — which is
+    exactly what happened here: the guard shipped on ``*DEFINE_CURVE`` and was
+    dead on ``*DEFINE_CURVE_FUNCTION``.
+    """
+    if lcid not in state.funct_smooth_ids:
+        return
+    state.funct_smooth_ids.discard(lcid)
+    state.warn(
+        f"{keyword} LCID {lcid}: a *DEFINE_CURVE_SMOOTH already "
+        "defined this id. LS-DYNA shares one load-curve id namespace "
+        "between the two keywords (Vol I R17 p.17-153: the "
+        "*DEFINE_CURVE_SMOOTH LCID 'must be unique'), so one of them is a "
+        f"mistake. The {keyword} points below were kept and the curve "
+        "is emitted as an ordinary /FUNCT; renumber one of the two cards.")
+
+
 def handle_define_curve(block: Block, state: ConversionState) -> None:
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -4427,20 +4453,10 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
         if len(f) >= 2:
             pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
                         (to_float(f[1]) + offo) * (sfo or 1.0)))
-    if lcid in state.funct_smooth_ids:
-        # A *DEFINE_CURVE_SMOOTH claimed this id first. LS-DYNA's curve ids are
-        # unique across both keywords, so the deck is malformed — but the
-        # emitted CARD KIND must still match the points that survive, or a
-        # plain piecewise-linear curve goes out as /FUNCT_SMOOTH and is read
-        # quintic-blended and clamped (finter_smooth.F:71-101).
-        state.funct_smooth_ids.discard(lcid)
-        state.warn(
-            f"*DEFINE_CURVE LCID {lcid}: a *DEFINE_CURVE_SMOOTH already "
-            "defined this id. LS-DYNA shares one load-curve id namespace "
-            "between the two keywords (Vol I R17 p.17-153: the "
-            "*DEFINE_CURVE_SMOOTH LCID 'must be unique'), so one of them is a "
-            "mistake. The *DEFINE_CURVE points below were kept and the curve "
-            "is emitted as an ordinary /FUNCT; renumber one of the two cards.")
+    # A *DEFINE_CURVE_SMOOTH may have claimed this id first. LS-DYNA's curve
+    # ids are unique across both keywords, so such a deck is malformed — but
+    # the emitted CARD KIND must still match the points that survive.
+    _clear_smooth_flag_on_redefinition(state, lcid, "*DEFINE_CURVE")
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
     state.curve_order.append(lcid)
 
@@ -4664,6 +4680,10 @@ def handle_define_curve_function(block: Block, state: ConversionState) -> None:
         state.skipped_keywords.append(block.keyword)
         return
     pts = [((a + offa) * (sfa or 1.0), (o + offo) * (sfo or 1.0)) for a, o in pts]
+    # Same guard as handle_define_curve: these points are SAMPLED
+    # piecewise-linear, so a *DEFINE_CURVE_SMOOTH that claimed this id first
+    # must lose its flag or the sampled ramp is emitted as /FUNCT_SMOOTH.
+    _clear_smooth_flag_on_redefinition(state, lcid, "*DEFINE_CURVE_FUNCTION")
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
     state.warn(
         f"*DEFINE_CURVE_FUNCTION lcid={lcid}: analytic expression sampled into "
@@ -14322,7 +14342,10 @@ def smooth_curve_points(dist: float, tstart: float, tend: float,
     * ``convertcurves.cxx:325`` fires only when ``TEND-TSTART-TRISE != 0``, so
       the case ``VMAX = 0``, ``TEND != 0``, ``TEND == TSTART+TRISE`` falls
       through EVERY branch and d2r emits a flat all-zero 4-point curve with no
-      diagnostic. Here it is a named refusal.
+      diagnostic. Here it is a named refusal — and so are the same two
+      degeneracies on the OTHER arm, where the identity ``TEND-TSTART-TRISE =
+      DIST/VMAX`` makes ``DIST = 0`` (zero-width window) and a ``DIST`` whose
+      sign contradicts ``VMAX``'s (negative window) exactly the same shape.
     * ``TRISE = 0`` (or a ``TRISE`` that would consume the whole window)
       collapses the trapezoid onto duplicate abscissae, which is starter
       ``ERROR 156`` (``hm_read_funct.F:240-243`` refuses a non-increasing
@@ -14358,7 +14381,39 @@ def smooth_curve_points(dist: float, tstart: float, tend: float,
         note = (f"VMAX was blank and back-solved from DIST/(TEND-TSTART-TRISE) "
                 f"= {dist:g}/{span:g} = {vmax:g}")
     else:
-        new_tend = dist / vmax + tstart + trise
+        # The SAME span the VMAX-blank arm computes, reached from the other
+        # side: TEND-TSTART-TRISE == DIST/VMAX. Its two degeneracies (a zero
+        # and a negative window) have to be refused here too, or the asymmetry
+        # emits what the sibling arm refuses — the third, both cells blank, is
+        # already handled above. DIST = 0 in particular does NOT give an
+        # identically-zero curve on this arm — it collapses TEND onto
+        # TSTART+TRISE and
+        # _strictly_increasing then nudges the duplicated abscissae apart into
+        # a VMAX-height spike one card digit wide (MEASURED: DIST blank,
+        # TRISE 1e-3, VMAX 100 -> (0,0) (1e-3,100) (1.00001e-3,100)
+        # (1.00002e-3,0)), i.e. a stated velocity written over a window the
+        # deck never asked for.
+        window = dist / vmax
+        if window == 0.0:
+            return None, vmax, tend, (
+                f"VMAX = {vmax:g} is stated and DIST = 0, so the back-solve "
+                f"TEND = DIST/VMAX + TSTART + TRISE = {tstart + trise:g} "
+                "collapses the window onto TSTART+TRISE: the trapezoid's third "
+                "vertex (TEND-TRISE) lands ON its first and the plateau has "
+                "zero width. That is the degeneracy the VMAX-blank arm refuses "
+                "as TEND-TSTART-TRISE = 0, reached from the other side — and "
+                "every field on this card has default 'none' (Vol I R17 "
+                "p.17-153), so a blank DIST is a missing input rather than a "
+                "stated zero")
+        if window < 0.0:
+            return None, vmax, tend, (
+                f"VMAX = {vmax:g} is stated and DIST/VMAX = {window:g} is "
+                f"NEGATIVE, so the back-solve TEND = DIST/VMAX + TSTART + "
+                f"TRISE = {window + tstart + trise:g} puts TEND BEFORE "
+                "TSTART+TRISE and the trapezoid runs backwards. DIST is 'Total "
+                "distance tool will travel (area under curve)' (Vol I R17 "
+                "p.17-154), so its sign has to match VMAX's")
+        new_tend = window + tstart + trise
         if tend and abs(new_tend - tend) > 1.0e-12 * max(1.0, abs(tend)):
             note = (f"both TEND ({tend:g}) and VMAX ({vmax:g}) are stated, "
                     "which Vol I R17 p.17-154 forbids ('Input either TEND or "
@@ -14526,20 +14581,25 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
                " (SIDR=2 = both phases; OpenRadioss has no separate "
                "relaxation phase, so the transient use is all that survives)."))
     if dist == 0.0:
-        # Every field on this card has default "none" (Vol I R17 p.17-153), so
-        # a blank DIST is a missing input, not a stated zero — and DIST is the
-        # ONLY thing that sets the curve's height ("Total distance tool will
-        # travel (area under curve)", p.17-154). With DIST = 0 the back-solve
-        # gives VMAX = 0 and the emitted /FUNCT_SMOOTH is identically zero: a
+        # Reachable only on the VMAX-BLANK arm: with VMAX stated, DIST = 0 is a
+        # zero-width window and smooth_curve_points refuses the card above, so
+        # `pts` would be None and this line unreachable. Scoped that way the
+        # claim below is exact — VMAX really did back-solve to 0 and the four
+        # ordinates really are 0. Every field on this card has default "none"
+        # (Vol I R17 p.17-153), so a blank DIST is a missing input, not a
+        # stated zero, and DIST is the ONLY thing that sets the curve's height
+        # ("Total distance tool will travel (area under curve)", p.17-154): a
         # legal, accepted card that moves nothing, the #122 class.
         state.warn(
-            f"{label}: DIST = 0, so the whole curve is identically zero — "
-            "VMAX = DIST/(TEND-TSTART-TRISE) = 0 and a consumer driven by it "
-            "does not move at all. DIST is 'Total distance tool will travel "
-            "(area under curve)' and has no default (Vol I R17 p.17-153/154), "
-            "so a blank cell here is a missing input rather than a stated "
-            "zero. The curve was emitted as written; state DIST if the tool "
-            "is meant to move.")
+            f"{label}: DIST = 0 with VMAX blank, so the whole curve is "
+            "identically zero — VMAX = DIST/(TEND-TSTART-TRISE) = 0 and a "
+            "consumer driven by it does not move at all. DIST is 'Total "
+            "distance tool will travel (area under curve)' and has no default "
+            "(Vol I R17 p.17-153/154), so a blank cell here is a missing input "
+            "rather than a stated zero. The curve was emitted as written; "
+            "state DIST if the tool is meant to move. (With VMAX STATED the "
+            "same DIST = 0 is refused instead: there it collapses TEND onto "
+            "TSTART+TRISE and would emit a VMAX-height spike, not a zero.)")
     if lcid in state.curves or lcid in state.define_tables:
         state.warn(
             f"{label}: this id is already defined by a "

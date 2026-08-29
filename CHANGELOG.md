@@ -89,8 +89,13 @@ Prior history (before this changelog was introduced) is summarized in the
   6. **`/FUNCT_SMOOTH` is the faithful target, not a nicety: the plain `/FUNCT`
      runs the tool BACKWARDS past `TEND`.** The ISMOOTH flag makes the `/IMP*`
      consumers interpolate with the quintic smoothstep
-     `S(u) = u³(10 − 15u + 6u²)` AND clamp outside the point range
-     (`finter_smooth.F:71-101`); a plain `/FUNCT` extrapolates. Measured on the
+     `S(u) = u³(10 − 15u + 6u²)` instead of linearly, and on `/IMPVEL` it also
+     clamps outside the point range — `fixvel.F:314/316` dispatches to
+     `VINTER_SMOOTH`, which returns the segment end ordinate there
+     (`vinter_smooth.F:68-71`). (The clamp belongs to that consumer, not to the
+     flag: `/IMPDISP/FGEO` goes through `FINTER2_SMOOTH`,
+     `finter_smooth.F:116-152`, which has none.) A plain `/FUNCT`
+     extrapolates. Measured on the
      same four points: at t = 1.1501e-2 the smooth curve held DX at 10.000000
      while the plain one had fallen to 9.296098, i.e. −1250 mm/s of invented
      return stroke. The trapezoid itself needs **no conversion factor** — the
@@ -166,9 +171,12 @@ Prior history (before this changelog was introduced) is summarized in the
       `check_dynain.F` opens `<root>_0001.rad` from inside the starter and walks
       the `/DYNAIN/DT` block; its guard
       `IF(CARTE(1:1)/='#'.OR.CARTE(1:1)/='$')` (:144) is always TRUE, so the
-      line after `Tstart Tfreq` goes into an `(I10)` internal READ — a comment
-      or blank line there is `forrtl: severe (64)` and the starter dies with no
-      `.out` at all. The part ids therefore follow that line immediately, and
+      line after `Tstart Tfreq` goes into an `(I10)` internal READ. A `#`/`$`
+      COMMENT line passes the tautology, enters the `DO WHILE` at :145 and
+      reaches the token READ at :153 — `forrtl: severe (64)`, the starter dies
+      with no `.out` at all; a BLANK line instead fails that loop's own
+      `LEN_TRIM(CARTE)/=0` and exits at once, leaving `NPRT = 0` — starter
+      `ERROR 1909`. Both are fatal, by different routes. The part ids therefore follow that line immediately, and
       are capped at ten per line because `fredynain.F` reads them into a fixed
       `IV2(10)`. An empty part list is `ERROR 1909` and an unknown part id
       `ERROR 1908`, both fatal at the starter, so `PSID = 0` / an unresolvable
@@ -181,13 +189,19 @@ Prior history (before this changelog was introduced) is summarized in the
       existed elsewhere: the engine accepted it and wrote six 118-byte files
       whose entire body is `*NODE` + `*END`, at 0 ERROR / 0 WARNING / NORMAL
       TERMINATION. Several `*INTERFACE_SPRINGBACK` cards in one deck are merged
-      into ONE block for the same reason: `read_dynain.F:80/93` resolves the
-      scope with an `ELSEIF` (the part list wins whenever `NDYNAINPRT ≠ 0`)
-      while `fredynain.F:109-110` zeroes `NDYNAINPRT` inside the `/ALL` branch,
-      so two blocks would silently honour one card and drop the other,
-      depending on their order.
+      into ONE block. Two PART-SCOPED blocks would have UNIONED anyway —
+      `fredynain.F` initialises `NDYNAINPRT` once (:89), zeroes it only in the
+      `/ALL` branch (:109) and APPENDS every id in the part branch (:123/:124)
+      — losing only the EARLIER block's `Tstart/Tfreq` (:103 overwrites them
+      per block); it is MIXING an `/ALL` block with a part-scoped one that is
+      order-dependent, because `read_dynain.F:80/93` resolves the scope with an
+      `ELSEIF` (the part list wins whenever `NDYNAINPRT ≠ 0`) and whichever
+      card comes second decides. One block with one schedule is what the engine
+      would have done for the part-scoped case regardless.
   12. `*INCLUDE_TRANSFORM` buckets for every new spelling, from the same source
-      as the handlers (#116/#124), each a WALKER rather than a declarative spec:
+      as the handlers (#116/#124), a WALKER wherever the cell layout is not a
+      uniform id grid — `*DEFINE_CURVE_SMOOTH` is the one declarative spec,
+      because `LCID` is its only id cell and every other cell is a float:
       the death cards' cell 1 is an element id in the plain spelling and a set
       id in `_SET`; `*PERTURBATION_NODE`'s card 2 is float-bearing on every
       TYPE (a wavelength of `1.5` would read back as the id `1`) and card 2c is
@@ -216,11 +230,19 @@ Prior history (before this changelog was introduced) is summarized in the
         namespace whose members cannot be thick shells (the #125/#128 class).
       * The `BIRTH` curve copy keeps the SOURCE card's kind: a
         `*DEFINE_CURVE_SMOOTH` is re-emitted as `/FUNCT_SMOOTH`, not `/FUNCT`,
-        or `fixfingeo.F:186-196` picks `FINTER2` and loses both the quintic
-        blend and the clamp.
+        or `fixfingeo.F:196-199` picks `FINTER2` and loses the quintic blend
+        (measured `f = 0.1036` against the plain twin's `0.2503` at
+        `u = 0.25`). NOT a clamp: `FINTER2_SMOOTH` (`finter_smooth.F:116-152`)
+        has none on this path either — it extrapolates the last segment with
+        the same quintic, so the smooth copy runs FURTHER past the end of the
+        curve than a plain one would (measured `f = −7.62` vs `−1.50`). The
+        clamping routines are other entry points with other callers:
+        `VINTER_SMOOTH` (`vinter_smooth.F:68-71`), which the `/IMPVEL` path
+        uses (`fixvel.F:314/316`), and `FINTER_SMOOTH`
+        (`finter_smooth.F:71/74`, `gravit.F`/`forcefingeo.F`).
       * Two all-nodes `*PERTURBATION_NODE` cards collapse to one `/RANDOM` at
-        the largest amplitude, with the rest named: `hm_read_rand.F:118-126`
-        overwrites one module-level `XALEA` per record and `:152-163` applies
+        the largest amplitude, with the rest named: `hm_read_rand.F:135-136`
+        overwrites one module-level `XALEA` per record and `:156-163` applies
         it once, while LS-DYNA sums separate cards (p.38-10 Remark 2).
       * A `*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY` driver curve that is not the
         0 → 1 scale factor p.5-73 requires is named. `fixfingeo.F:243-256` has
@@ -228,7 +250,9 @@ Prior history (before this changelog was introduced) is summarized in the
         requirement (its last vertex is `(TEND, 0)` by construction) — measured
         on that pairing, a `VMAX = 200` plateau drove a 1 mm offset to 98 mm
         and the run died on the energy-error limit under a NORMAL TERMINATION
-        banner.
+        banner. The warning also says what happens PAST the last abscissa,
+        which is not "the node holds": both interpolators extrapolate the last
+        segment, so unless `DEATH` bounds the card the node keeps going.
       * `*INTERFACE_SPRINGBACK_EXCLUDE_NOTHICKNESS`, the one corner of the
         4 × 2 OPTION1 × OPTION2 grid a hand-written variant list had lost, is
         dispatched; the eight spellings are now generated from one source and
@@ -240,8 +264,15 @@ Prior history (before this changelog was introduced) is summarized in the
         `*DEFINE_CURVE` ordering the legacy positional `*DEFINE_TABLE` form
         resolves against (p.17-444 scopes it to that keyword by name).
       * `DIST = 0` on a smooth curve is named: every field on that card has
-        default *none*, so a blank `DIST` is a missing input, and the emitted
-        curve is identically zero.
+        default *none*, so a blank `DIST` is a missing input. With `VMAX`
+        BLANK the emitted curve really is identically zero; with `VMAX` STATED
+        the card is REFUSED instead, because there the back-solve
+        `TEND = DIST/VMAX + TSTART + TRISE` collapses the window onto
+        `TSTART+TRISE` and the abscissa nudge turns it into a `VMAX`-height
+        spike one card digit wide, with the deck's own `TEND` discarded. Same
+        for a `DIST` whose sign contradicts `VMAX`'s (a negative window). Those
+        are the two degeneracies the `VMAX`-blank arm already refused, reached
+        from the other side.
       * `/IMPDISP` ids minted by the rigid-wall geometric-motion path now dodge
         the deck's `BPFGID`s and are recorded — that path is the one `/IMPDISP`
         producer whose section runs after the FGEO one, so it could not be
@@ -254,9 +285,68 @@ Prior history (before this changelog was introduced) is summarized in the
         makes that quotient 4.999… and the engine writes SIX. The `/DYNAIN`
         text now describes a schedule rather than promising the terminal state.
         The `/ACTIV` note also names the one family `eloff.F` does NOT zero:
-        `:479` writes `OFFG = -ABS(OFFG)` for 4-node shells, so their `/TH`
-        force and moment channels FREEZE at the death value instead of dropping
-        to 0 — a stale channel, not a loaded element.
+        `:479` writes `OFFG = -ABS(OFFG)` for 4-node shells (while `:418`
+        zeroes the solids in the dedicated `IGBR` pre-loop, `:522` the beams,
+        `:565` the `/SH3N` and `:458` the 2-D quads k2rad never emits), so
+        their `/TH` force and moment channels FREEZE at the death value instead
+        of dropping to 0 — a stale channel, not a loaded element.
+  14. SECOND verification round, on top of round one:
+      * `DIST = 0` beside a STATED `VMAX` is now refused rather than emitted
+        under an "identically zero … does not move at all" warning. On that arm
+        the back-solve collapses `TEND` onto `TSTART+TRISE`, the abscissa nudge
+        turns the trapezoid into a `VMAX`-height spike one card digit wide
+        (measured `(0,0) (1e-3,100) (1.00001e-3,100) (1.00002e-3,0)`), and a
+        stated `TEND` is discarded — the #122 class in the UNDER-alarming
+        direction. A `DIST` whose sign contradicts `VMAX`'s is refused with it
+        (it back-solved a NEGATIVE `TEND`). The blank-`VMAX` arm is unchanged:
+        there the curve really is identically zero and is still emitted.
+      * The smooth-flag clear was gated on ONE curve spelling and dead on its
+        sibling (#124 again): `*DEFINE_CURVE_FUNCTION` also overwrites
+        `state.curves[lcid]`, with SAMPLED piecewise-linear points, and left
+        the flag set — a 101-point ramp went out as `/FUNCT_SMOOTH`, with no
+        duplicate-id warning either, because the deck-wide text scan sees only
+        one `*DEFINE_CURVE_SMOOTH` header. Both producers now call one helper.
+      * The `/IMPDISP/FGEO` range diagnostic de-duplicated per DECK instead of
+        per (card, curve), so a second card driven by the same out-of-range
+        curve was emitted in silence — the warning names the BPFGID, so the
+        drop was invisible.
+      * `*INTERFACE_SPRINGBACK` dropped-field accounting now runs on REFUSED
+        cards too. All three refusal `continue`s skipped it, so `NHSV`/`FTYPE`/
+        `FTENSR`/`RFLAG`/`INTSTRN`/`NTHHSV`/the `OPTCARD` cards/the Card-4 rows
+        vanished without a word on exactly the cards a reader most needs them.
+      * Five texts corrected against the code they cite: the springback merge
+        (two PART-SCOPED blocks are additive, not order-dependent — only the
+        mixed `/ALL` case races), the `/RANDOM` overwrite
+        (`hm_read_rand.F:135-136` / `:156-163`, not `:118-126` / `:152-163`),
+        the FGEO smooth-copy dispatch (`fixfingeo.F:196-199`, and there is NO
+        clamp on that path — `FINTER2_SMOOTH` extrapolates the last segment
+        quintically, so the smooth copy runs FURTHER past the curve, not less;
+        the clamp belongs to `VINTER_SMOOTH` on the `/IMPVEL` path), and the
+        `eloff.F` family list (`:418` zeroes the solids in the `IGBR` pre-loop;
+        `:458` is the 2-D QUAD branch k2rad never emits). `check_dynain.F`'s
+        two bad lines are now distinguished: `#`/`$` is `forrtl: severe (64)`,
+        a blank line is `ERROR 1909`. Both `state.imp_card_ids` docstrings now
+        list all THREE producers instead of one, and `ROADMAP.md`'s
+        element-GROUP deferral no longer leans on `next_elem_group_id`, which
+        guards exactly one of the element-group emission sites.
+      * Tests: the `4 × 2` spelling test asserted `kw in _RARE_CARD_OFFSETS`,
+        which assembly.py's None-fill makes true by construction — it now
+        asserts the VERDICT (walker for the two `LSDYNA` spellings, `None` for
+        the six warn-drops). New coverage for the `/IMPDISP` id dodge in the
+        rigid-wall direction, which round one changed with no test at all.
+      * Inertness measured in TWO halves, `.rad` and warnings, because a sweep
+        that compares only output files cannot see a warning change — which is
+        how round one came to claim "0 warning logs differ" for a round whose
+        stated purpose was rewriting warning texts. Round two vs round one,
+        MEASURED on all 397 corpus decks with both halves compared (0
+        conversion errors on either tree): **0 of 397 `.rad` differ and 0 of
+        397 warning streams differ**, the 8 rare-card carriers included —
+        every text this round rewrote needs a deck shape the corpus does not
+        contain (two springback cards, an `/IMPDISP/FGEO` card, two global
+        `*PERTURBATION_NODE` cards, an element-death card). They fire on the
+        rare-cards VALIDATION set instead: 0 of 76 decks change a `.rad` byte,
+        so no solver deck needed re-running, and 31 of 76 change warning text
+        — exactly the rewrites listed above.
 
 - **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`;
   `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →

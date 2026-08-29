@@ -7366,9 +7366,14 @@ class ConversionState:
     #: new registry to forget (the #111 lesson).
     funct_smooth_ids: Set[int] = field(default_factory=set)
     #: ``{keyword: {ids}}`` for every ``/IMPVEL`` / ``/IMPACC`` / ``/IMPDISP``
-    #: card the prescribed-motion writers emitted, filled AT the line that
-    #: writes each card. ``/IMPDISP/FGEO`` screens its ``BPFGID`` against the
-    #: ``IMPDISP`` entry: ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and
+    #: card the writers emitted, filled AT the line that writes each card.
+    #: THREE producers record here — ``loads._emit_imp_card`` (the
+    #: ``*BOUNDARY_PRESCRIBED_MOTION`` family), ``loads._emit_rwall_geom_motion``
+    #: (the ``*RIGIDWALL_*_MOTION`` path, which also MINTS its id through
+    #: ``next_impdisp_id``) and ``rarecards._make_impdisp_fgeo`` itself (so the
+    #: rigid-wall path, whose section runs later, can see the FGEO ids) — and
+    #: any new one must too. ``/IMPDISP/FGEO`` screens its ``BPFGID`` against
+    #: the ``IMPDISP`` entry: ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and
     #: ``/IMPDISP/FGEO`` together (``NIMPDISP`` includes ``FGEOD``) and runs ONE
     #: ``UDOUBLE`` duplicate scan over the merged ``NOM_OPT`` slice, so a user
     #: ``BPFGID`` that lands on a synthesized ``/IMPDISP`` id is ``ERROR 79``

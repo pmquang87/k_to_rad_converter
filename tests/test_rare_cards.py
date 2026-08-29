@@ -14,7 +14,8 @@ import tempfile
 import unittest
 
 from k2rad import convert
-from k2rad.assembly import _OFFSET_SPECS, _RARE_CARD_OFFSETS
+from k2rad.assembly import (_OFFSET_SPECS, _RARE_CARD_OFFSETS,
+                            _off_interface_springback)
 from k2rad.handlers import (HANDLERS, RARE_CARD_KEYWORDS,
                             final_geometry_node_row, dispatch,
                             smooth_curve_points)
@@ -355,7 +356,8 @@ class ElementDeathTests(unittest.TestCase):
         self.assertIn("IDEL7NOK", w)
         self.assertNotIn("Idel=0", w)
         # The 4-node shell OFFG asymmetry is a user-visible /TH trap (#122):
-        # eloff.F:479 keeps |OFFG| for ITY==3 while :458/:522/:565 zero the
+        # eloff.F:479 keeps |OFFG| for ITY==3 while :418 (the IGBR
+        # pre-loop), :522 and :565 zero the
         # solids, beams and /SH3N, and the channel then freezes.
         self.assertIn("FREEZE", w)
         self.assertIn("eloff.F", w)
@@ -544,7 +546,10 @@ class CurveSmoothTests(unittest.TestCase):
     def test_zero_dist_is_named_as_an_identically_zero_curve(self):
         """Every field on this card has default 'none' (Vol I R17 p.17-153),
         and DIST is the only thing that sets the curve's height — a blank one
-        emits a legal, accepted card that moves nothing (#122)."""
+        emits a legal, accepted card that moves nothing (#122).
+
+        VMAX BLANK here, which is the only arm where "identically zero" is
+        true; the stated-VMAX arm is refused instead (next test)."""
         deck = MESH.replace("{EXTRA}",
                             "*DEFINE_CURVE_SMOOTH\n"
                             + _row(900, 0, 0.0, 0.0, 0.03, 0.005, 0.0) + "\n"
@@ -554,6 +559,51 @@ class CurveSmoothTests(unittest.TestCase):
                          [0.0, 0.0, 0.0, 0.0])
         self.assertTrue(_warn_containing(res, "DIST = 0",
                                          "identically zero"))
+
+    def test_zero_dist_with_a_stated_vmax_is_refused_not_called_zero(self):
+        """The OTHER arm. With VMAX stated the back-solve is
+        TEND = DIST/VMAX + TSTART + TRISE, so DIST = 0 collapses TEND onto
+        TSTART+TRISE and _strictly_increasing nudges the duplicated abscissae
+        into a VMAX-HEIGHT SPIKE — the deck's own TEND is discarded. Calling
+        that "identically zero ... does not move at all" would be the #122
+        class in the under-alarming direction, so the card is refused by name
+        the way the three sibling degeneracies on the other arm are."""
+        pts, _vmax, _tend, note = smooth_curve_points(0.0, 0.0, 0.01,
+                                                      0.002, 50.0)
+        self.assertIsNone(pts)
+        self.assertIn("DIST = 0", note)
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, 0.0, 0.0, 0.01, 0.002, 50.0) + "\n"
+                            + SMOOTH_CONSUMER)
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/FUNCT_SMOOTH/"), [])
+        self.assertEqual(_warn_containing(res, "identically zero"), [])
+        self.assertTrue(_warn_containing(res, "DIST = 0",
+                                         "collapses the window"))
+
+    def test_a_dist_that_contradicts_vmax_in_sign_is_refused(self):
+        """DIST/VMAX < 0 puts TEND before TSTART+TRISE — the same "the
+        trapezoid runs backwards" the VMAX-blank arm refuses as a negative
+        span, reached from the other side. Left unrefused it emitted a spike
+        under a NEGATIVE back-solved TEND (measured: -0.025)."""
+        pts, _vmax, _tend, note = smooth_curve_points(-9.0, 0.0, 0.0,
+                                                      0.005, 300.0)
+        self.assertIsNone(pts)
+        self.assertIn("NEGATIVE", note)
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, -9.0, 0.0, 0.0, 0.005, 300.0) + "\n"
+                            + SMOOTH_CONSUMER)
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/FUNCT_SMOOTH/"), [])
+        self.assertTrue(_warn_containing(res, "DIST/VMAX", "NEGATIVE"))
+        # A DIST and a VMAX that agree in sign are a legitimate downward
+        # trapezoid and still convert.
+        pts2, _v2, tend2, _n2 = smooth_curve_points(-9.0, 0.0, 0.0,
+                                                    0.005, -300.0)
+        self.assertIsNotNone(pts2)
+        self.assertAlmostEqual(tend2, 0.035, places=12)
 
     def test_both_blank_is_refused_by_name(self):
         deck = MESH.replace("{EXTRA}",
@@ -604,7 +654,7 @@ class CurveSmoothTests(unittest.TestCase):
     def test_a_later_define_curve_on_the_same_id_clears_the_smooth_flag(self):
         """The emitted card kind must match the points that survive: a plain
         piecewise-linear curve read as /FUNCT_SMOOTH is quintic-blended and
-        clamped (finter_smooth.F:71-101)."""
+        blended: fixfingeo.F:199 / fixvel.F:316 dispatch on ISMOOTH."""
         deck = MESH.replace("{EXTRA}",
                             "*DEFINE_CURVE_SMOOTH\n"
                             + _row(900, 0, 9.0, 0.0, 0.03, 0.005, 0.0) + "\n"
@@ -617,6 +667,27 @@ class CurveSmoothTests(unittest.TestCase):
         self.assertEqual(_headers(starter, "/FUNCT_SMOOTH/900"), [])
         self.assertEqual(_headers(starter, "/FUNCT/900"), ["/FUNCT/900"])
         self.assertTrue(_warn_containing(res, "*DEFINE_CURVE LCID 900",
+                                         "already defined this id"))
+
+    def test_a_later_define_curve_function_also_clears_the_smooth_flag(self):
+        """The SIBLING producer, which the guard was dead on (#124).
+        *DEFINE_CURVE_FUNCTION overwrites state.curves[lcid] with SAMPLED
+        piecewise-linear points; leaving the flag set emitted a 101-point
+        ramp as /FUNCT_SMOOTH, which fixfingeo.F:199 / fixvel.F:316 then read
+        quintic-blended — and the deck-wide duplicate-id text scan cannot fire
+        either, because it sees only one *DEFINE_CURVE_SMOOTH header."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, 9.0, 0.0, 0.03, 0.005, 0.0) + "\n"
+                            + "*DEFINE_CURVE_FUNCTION\n"
+                            + _row(900) + "\n"
+                            "100.0*x\n"
+                            + SMOOTH_CONSUMER)
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/FUNCT_SMOOTH/900"), [])
+        self.assertEqual(_headers(starter, "/FUNCT/900"), ["/FUNCT/900"])
+        self.assertTrue(_warn_containing(res,
+                                         "*DEFINE_CURVE_FUNCTION LCID 900",
                                          "already defined this id"))
 
     def test_a_duplicate_smooth_id_is_named(self):
@@ -710,8 +781,8 @@ class PerturbationNodeTests(unittest.TestCase):
         self.assertTrue(_warn_containing(res, "cannot coexist"))
 
     def test_two_global_cards_collapse_to_the_largest_amplitude(self):
-        """hm_read_rand.F:118-126 OVERWRITES the module-level XALEA on every
-        all-nodes record and :152-163 applies it once, so a second global card
+        """hm_read_rand.F:135-136 OVERWRITES the module-level XALEA on every
+        all-nodes record and :156-163 applies it once, so a second global card
         makes the first inert. LS-DYNA instead SUMS them (Vol I R17 p.38-10
         Remark 2)."""
         deck = MESH.replace("{EXTRA}",
@@ -884,9 +955,11 @@ class FinalGeometryTests(unittest.TestCase):
 
     def test_the_birth_copy_of_a_smooth_curve_stays_smooth(self):
         """A *DEFINE_CURVE_SMOOTH re-emitted as a plain /FUNCT loses ISMOOTH,
-        and fixfingeo.F:186-196 then picks FINTER2 instead of FINTER2_SMOOTH:
-        the clamp at finter_smooth.F:71-76 is gone and the curve extrapolates
-        past its last point."""
+        and fixfingeo.F:196-199 then picks FINTER2 instead of FINTER2_SMOOTH,
+        so the quintic blend becomes piecewise-linear (measured f = 0.1036 vs
+        the plain twin's 0.2503 at u = 0.25). NOT a clamp question on this
+        path: FINTER2_SMOOTH (finter_smooth.F:116-152) has none either, so the
+        smooth copy runs FURTHER past the curve, not less."""
         deck = MESH.replace("{EXTRA}",
                             "*DEFINE_CURVE_SMOOTH\n"
                             + _row(901, 0, 1.0, 0.0, 0.01, 0.002, 0.0) + "\n"
@@ -922,6 +995,88 @@ class FinalGeometryTests(unittest.TestCase):
         (w,) = _warn_containing(res, "is not the 0 -> 1 scale factor")
         self.assertIn("end at 0", w)
         self.assertIn("*DEFINE_CURVE_SMOOTH, which can never satisfy this", w)
+
+    def test_two_cards_on_one_curve_are_both_range_checked(self):
+        """The de-duplication is per (CARD, curve), not per DECK: the warning
+        quotes the BPFGID, so a set hoisted out of the card loop silently drops
+        the diagnostic for every card after the first."""
+        big = ("*DEFINE_CURVE\n"
+               + _row(902, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+               "                 0.0                 0.0\n"
+               "               0.005               200.0\n"
+               "                0.01                 0.0\n")
+        deck = MESH.replace("{EXTRA}",
+                            big
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(800, 902, 0.0, 0) + "\n"
+                            + _fgeo_row(9, 25.0, 0.0, 0.0) + "\n"
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(801, 902, 0.0, 0) + "\n"
+                            + _fgeo_row(10, 25.0, 10.0, 0.0) + "\n")
+        res, starter, _eng = _convert(deck)
+        self.assertTrue(_headers(starter, "/IMPDISP/FGEO/800"))
+        self.assertTrue(_headers(starter, "/IMPDISP/FGEO/801"))
+        named = _warn_containing(res, "is not the 0 -> 1 scale factor")
+        self.assertEqual(len(named), 2, named)
+        self.assertTrue(_warn_containing(res, "BPFGID 800",
+                                         "0 -> 1 scale factor"))
+        self.assertTrue(_warn_containing(res, "BPFGID 801",
+                                         "0 -> 1 scale factor"))
+
+    def test_one_card_split_into_slices_is_range_checked_once(self):
+        """The other half of the same rule: one deck card whose rows split
+        into several /IMPDISP/FGEO must NOT repeat the diagnostic."""
+        big = ("*DEFINE_CURVE\n"
+               + _row(902, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+               "                 0.0                 0.0\n"
+               "               0.005               200.0\n"
+               "                0.01                 0.0\n")
+        deck = MESH.replace("{EXTRA}",
+                            big
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(800, 902, 0.0, 0) + "\n"
+                            + _fgeo_row(9, 25.0, 0.0, 0.0, 902, 0.006) + "\n"
+                            + _fgeo_row(10, 25.0, 10.0, 0.0, 902, 0.008)
+                            + "\n")
+        res, _starter, _eng = _convert(deck)
+        self.assertEqual(
+            len(_warn_containing(res, "is not the 0 -> 1 scale factor")), 1)
+
+    def test_a_rigid_wall_impdisp_dodges_a_deck_bpfgid(self):
+        """The OTHER direction of the one /IMPDISP namespace.
+        *RIGIDWALL_GEOMETRIC_*_MOTION with OPT != 0 emits /IMPDISP and its
+        writer section runs AFTER the FGEO one, so _make_impdisp_fgeo cannot
+        screen it — it dodges the deck's BPFGIDs from its own side
+        (state.next_impdisp_id). Without that the two land on one id, which
+        hm_read_impvel.F:129's single UDOUBLE answers with ERROR 79."""
+        rwall = ("*RIGIDWALL_GEOMETRIC_SPHERE_MOTION_ID\n"
+                 "       505moving sphere\n"
+                 + _row(600) + "\n"
+                 + _row(1.0, 2.0, 3.0, 1.0, 2.0, 4.0) + "\n"
+                 + _row(4.0) + "\n"
+                 + _row(901, 1, 0.0, 1.0, 0.0) + "\n"
+                 + "*SET_NODE_LIST\n" + _row(600) + "\n" + _row(1, 2) + "\n")
+        _res, starter, _eng = _convert(MESH.replace("{EXTRA}", RAMP + rwall))
+        (baseline,) = [int(ln.rsplit("/", 1)[1])
+                       for ln in _headers(starter, "/IMPDISP/")]
+        deck2 = MESH.replace(
+            "{EXTRA}",
+            RAMP + rwall
+            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+            + _row(baseline, 901, 0.006, 0) + "\n"
+            + _fgeo_row(9, 25.0, 0.0, 0.0) + "\n")
+        _res2, starter2, _e2 = _convert(deck2)
+        ids = [int(ln.rsplit("/", 1)[1])
+               for ln in _headers(starter2, "/IMPDISP/")]
+        self.assertEqual(len(ids), 2, ids)
+        self.assertEqual(len(set(ids)), 2, ids)      # no ERROR 79 pair
+        # The FGEO card keeps the BPFGID the deck states; the rigid wall is the
+        # side that moves, because it mints its id and the deck does not.
+        self.assertEqual(_headers(starter2, f"/IMPDISP/FGEO/{baseline}"),
+                         [f"/IMPDISP/FGEO/{baseline}"])
+        (rwall_id,) = [i for i in ids
+                       if not _headers(starter2, f"/IMPDISP/FGEO/{i}")]
+        self.assertNotEqual(rwall_id, baseline)
 
     def test_a_zero_to_one_ramp_raises_no_range_warning(self):
         deck = MESH.replace("{EXTRA}",
@@ -1123,11 +1278,33 @@ class SpringbackTests(unittest.TestCase):
         self.assertTrue(_warn_containing(res, "no part of *SET_PART 950 "
                                               "carries a shell"))
 
+    def test_a_refused_card_still_names_its_dropped_fields(self):
+        """A refusal is a reason not to emit a block, not a reason to stop
+        accounting. The three `continue`s used to skip the dropped-field pass
+        further down the loop, so NHSV/FTYPE/... on a refused card vanished
+        without a word — README promises each is NAMED."""
+        deck = MESH.replace("{EXTRA}",
+                            "*SET_PART_LIST\n" + _row(950) + "\n"
+                            + _row(1) + "\n"
+                            "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(950, 3, 2, "", 4, 5, 6, 9) + "\n")
+        res, _starter, engine = _convert(deck)
+        self.assertNotIn("/DYNAIN", engine)
+        (w,) = _warn_containing(res, "dropped, with no /DYNAIN slot")
+        for cell in ("NHSV=3", "FTYPE=2", "FTENSR=4", "NTHHSV=5",
+                     "RFLAG=6", "INTSTRN=9"):
+            self.assertIn(cell, w)
+
     def test_two_cards_merge_into_one_block(self):
-        """/DYNAIN is a GLOBAL engine request and two blocks are ORDER-
-        DEPENDENT, not additive: read_dynain.F:80/93 resolves the scope with an
-        ELSEIF while fredynain.F:109-110 zeroes NDYNAINPRT inside the /ALL
-        branch, so one of the two cards is silently ignored."""
+        """/DYNAIN is a GLOBAL engine request, so two cards become one block.
+
+        For TWO PART-SCOPED blocks the engine is additive by accident —
+        fredynain.F initialises NDYNAINPRT once (:89), zeroes it only in the
+        /ALL branch (:109) and APPENDS every id in the part branch (:123/:124)
+        — and only the earlier block's Tstart/Tfreq is lost (:103 overwrites
+        them per block). The union with ONE schedule is therefore what the
+        engine would have done anyway; the ORDER-DEPENDENT case is the MIXED
+        one (next test), and the warning must not claim it here."""
         parts = "*PART\np3\n" + _row(3, 2, 1) + "\n"
         shells = "*ELEMENT_SHELL\n" + _row(303, 3, 1, 2, 3, 4) + "\n"
         deck = MESH.replace("{EXTRA}",
@@ -1146,8 +1323,13 @@ class SpringbackTests(unittest.TestCase):
         i = lines.index("/DYNAIN/DT")
         self.assertEqual(lines[i + 2].split(), ["2", "3"])
         self.assertEqual(lines[i + 3], "/DYNAIN/SHELL/STRES/FULL")
-        self.assertTrue(_warn_containing(res, "were merged into ONE /DYNAIN",
-                                         "ORDER-DEPENDENT"))
+        (w,) = _warn_containing(res, "were merged into ONE /DYNAIN")
+        # The two part-scoped blocks would have UNIONED, not raced: naming the
+        # order-dependence as this pair's consequence over-states the loss.
+        self.assertIn("Two PART-SCOPED blocks are additive", w)
+        self.assertIn("only the EARLIER block's Tstart/Tfreq is lost", w)
+        self.assertNotIn("So one of the two cards would have been silently "
+                         "ignored", w)
 
     def test_an_all_parts_card_widens_the_merge(self):
         deck = MESH.replace("{EXTRA}",
@@ -1229,7 +1411,18 @@ class SpringbackTests(unittest.TestCase):
         for kw in sorted(spellings):
             with self.subTest(kw=kw):
                 self.assertIn(kw, HANDLERS)
-                self.assertIn(kw, _RARE_CARD_OFFSETS)
+                # `kw in _RARE_CARD_OFFSETS` is guaranteed by construction
+                # (assembly.py fills the table with None for every
+                # RARE_CARD_KEYWORDS entry and then KeyErrors on a spelling
+                # with no verdict), so assert the VERDICT instead: the two
+                # LSDYNA spellings carry the walker, the six warn-drops
+                # deliberately carry none — an unmodelled card stack must not
+                # have its cells rewritten by position.
+                spec = _RARE_CARD_OFFSETS[kw]
+                if kw.startswith("INTERFACE_SPRINGBACK_LSDYNA"):
+                    self.assertIs(spec, _off_interface_springback)
+                else:
+                    self.assertIsNone(spec)
 
     def test_sibling_options_are_recognized_warn_drops(self):
         for kw in ("INTERFACE_SPRINGBACK_NASTRAN",
