@@ -8152,6 +8152,42 @@ def _make_functions(state: ConversionState) -> List[str]:
                 f"{_i(1)}",
                 "#                  X                   Y",
             ]
+        elif lcid in state.funct_smooth_ids:
+            # *DEFINE_CURVE_SMOOTH -> /FUNCT_SMOOTH. Same id namespace as
+            # /FUNCT and /TABLE (one hm_read_funct.F reads all three into
+            # NPC/PLD; a collision is starter ERROR 79), which is exactly why
+            # the curve lives in state.curves and is only FLAGGED here.
+            #
+            # The extra card is the difference from /FUNCT
+            # (radioss2020/CURVE/funct_smooth.cfg:52-62): Ascalex Fscaley
+            # Ashiftx Fshifty, applied as scale THEN shift
+            # (hm_read_funct.F:232-233). *DEFINE_CURVE_SMOOTH has no scale or
+            # offset fields at all, so all four are written neutral — 1/1/0/0
+            # rather than blank, because hm_read_funct.F:217-218 turns a ZERO
+            # scale into 1 and a blank card would be one more thing to reason
+            # about.
+            #
+            # /FUNCT_SMOOTH is the only faithful target, not a nicety: the
+            # ISMOOTH flag it sets (NPC(2*NFUNCT+L+1) = 1) makes the /IMP*
+            # consumers interpolate with the quintic smoothstep
+            # S(u) = u^3(10 - 15u + 6u^2) AND CLAMP outside the point range
+            # (finter_smooth.F:71-101), while a plain /FUNCT extrapolates —
+            # measured on the same four points, a plain /FUNCT drove the probe
+            # node BACKWARDS past TEND (10.000 -> 9.296) where /FUNCT_SMOOTH
+            # held it at 10.000. Consumers outside the documented list
+            # (/IMPDISP, /IMPVEL, /IMPACC, /IMPDISP/FGEO, /IMPVEL/FGEO,
+            # /IMPVEL/LAGMUL, /PLOAD, /CLOAD, /GRAV, /IMPTEMP, /IMPFLUX --
+            # Reference Guide p.2243 comment 3) do not dispatch on ISMOOTH and
+            # read the very same points piecewise-linearly, i.e. exactly as
+            # they would read a /FUNCT.
+            lines += [
+                f"/FUNCT_SMOOTH/{lcid}",
+                curve.title or f"FUNCT_SMOOTH_{lcid}",
+                "#            Ascalex             Fscaley             "
+                "Ashiftx             Fshifty",
+                f"{_f(1.0)}{_f(1.0)}{_f(0.0)}{_f(0.0)}",
+                "#                  X                   Y",
+            ]
         else:
             lines += [
                 f"/FUNCT/{lcid}",
