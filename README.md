@@ -1237,6 +1237,54 @@ correctly, and the only cost is one cosmetic starter `WARNING 100211` — the sa
 trade-off LAW128 already ships under (**verified against `starter_win64.exe`:
 0 errors, and the echo reproduces every modulus, ratio and strength exactly**).
 
+`*MAT_COMPOSITE_DAMAGE` (022, + numeric aliases) → **`/MAT/LAW25` (COMPSH)
+`Iform = 0` plus a `/FAIL/CHANG` rider on a shell-only material, and
+`/MAT/LAW127` when any of its parts holds SOLID or thick-shell elements**
+(`writer/composites._mat022_law` is the one router; a MID can carry only one
+`/MAT` card). MAT_022 is orthotropic **elastic** with **brittle** Chang-Chang
+failure — it is not MAT_054 with fewer fields: there is no `XC`, no `EFS`, no
+`TFAIL` and no element-deletion field at all.
+
+On the shell arm every LAW25 yield stress is written at 1e20, so the Tsai-Wu
+*plasticity* surface is out of reach and the ply stays linear-elastic until it
+fails; the reader hard-fails on a blank one (`ancmsg(msgid=198)`,
+`read_mat25_tsaiwu.F90:206-241`), and putting the FAILURE strengths in *yield*
+slots would be a different constitutive law. **Poisson is RESCALED here** —
+`MAT_PRAB` is the MAJOR ratio (`:129` reads it into `n12`, `:282` derives
+`n21 = n12·e22/e11`), so `NU12 = PRBA·EA/EB`, the **opposite** of LAW127 above.
+The `/FAIL/CHANG` rider takes `Sigma_1t = XT`, `Sigma_2t = YT`,
+`Sigma_12 = SC`, `Sigma_2c = YC` and `Beta = 1`: at `ALPH = 0` that is
+**term for term** the LS-DYNA fibre, matrix-tension and matrix-compression
+criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs `fail_changchang_c.F90:
+155-181`), with no conversion factor. `Sigma_1c` is left blank on purpose —
+MAT_022 has no compressive-fibre strength and a blank reads as infinity, i.e.
+that mode never trips. Two cells have no MAT_022 source and are named as
+converter choices in the warning: `Ifail_sh = 2` (the element goes only once
+EVERY layer has failed, the closest analogue of LS-DYNA zeroing a failed
+layer's moduli while the element survives) and `Tau_max = 1e-4 · ENDTIM` (a
+blank one becomes infinity and the whole rider then softens and deletes
+nothing). **Verified against `starter_win64` + `engine_win64`**: the
+`tension6.k` corpus carrier goes from `ERROR 179 MATERIAL ID=1 DOES NOT EXIST`
+(exit 3) to 0 errors and a full 20 807-cycle run whose 90° plies fail first,
+and a 10×10×1 probe built from the emitted cards peaks at 2502.2 MPa against a
+hand-computed `XT = 2500` (+0.09 %, inside one TH sample).
+
+The solid arm is `/MAT/LAW127` because LAW25's solid kernels decouple direction
+3 entirely (`mat25_tsaiwu_s.F90:230`, no `nu13`/`nu23` anywhere) and because
+`/FAIL/CHANG` cannot delete a solid at `/BEGIN 2022` (`FAILIP` is a 2023-only
+column and `fail_changchang_s.F90:222` gates the relaxation on it). There
+`PRBA/PRCA/PRCB` are copied RAW, `BETA = 1`, `XC` is blank, and `YCFAC` and the
+five `SLIM*` factors are neutralised — their reader defaults (2 and 1.0) would
+otherwise invent a compressive-fibre limit of `2·YC` and clamp a failed mode's
+stress at its FULL strength.
+
+`KFAIL`, `MACF`, `ATRACK`, `SN`/`SYZ`/`SZX` (the solid delamination criterion,
+which `/FAIL/HASHIN` is deliberately NOT substituted for — same slot names,
+different formula) and `ALPH` on the shell arm are warn-dropped by name. The
+native reader has no `case 22:` at all: `convertmats.cxx` falls through to a
+`default:` whose `"/MAT/LAW" + OptionNumber` is C++ pointer arithmetic, so no
+`/MAT` is written and the starter refuses the deck.
+
 `*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037, + `_ECHANGE` /
 `_NLP_FAILURE` / `_NLP2` / `_ECHANGE_NLP_FAILURE`) → `/MAT/LAW43` (HILL_TAB) on a
 `/PROP/TYPE9`. MAT_037 is transversely isotropic, so the single Lankford r-bar

@@ -26,7 +26,7 @@ from .state import (
     IntegrationBeam, IntegrationBeamPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
-    MatOrthotropicElastic, MatEnhancedCompositeDamage,
+    MatOrthotropicElastic, MatEnhancedCompositeDamage, MatCompositeDamage,
     MatTransverselyAnisotropic, MatLaminatedGlass,
     MatFabric, FABRIC_CURVE_FORMS,
     Airbag, AirbagRefGeometry, AirbagShellRefGeometry,
@@ -3775,6 +3775,70 @@ def handle_mat_enhanced_composite_damage(block: Block, state: ConversionState) -
             "MID/RO/EA.. | GAB/GBC/GCA/KF/AOPT.. | XP.. | V1.. | TFAIL.. | "
             "XC/XT/YC/YT/SC/CRIT/BETA | PFL.. | SLIMT1.. | LCXC..")
     state.mat_enhanced_composite[mid] = mat
+
+
+def handle_mat_composite_damage(block: Block, state: ConversionState) -> None:
+    """*MAT_COMPOSITE_DAMAGE (MAT_022) → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on
+    shells, /MAT/LAW127 on solids (writer/composites._mat022_law routes).
+
+    Card layout (LS-DYNA Manual Vol II R17 p.2-257/2-258; matches
+    ``hm_cfg_files/.../Keyword971_R9.0/MAT/mat_022.cfg`` FORMAT(Keyword971)):
+      Card1: MID RO EA EB EC PRBA PRCA PRCB
+      Card2: GAB GBC GCA KFAIL AOPT MACF ATRACK
+      Card3: XP YP ZP A1 A2 A3
+      Card4: V1 V2 V3 D1 D2 D3 BETA
+      Card5: SC XT YT YC ALPH SN SYZ SZX
+
+    Cards 3 and 4 are the same axis pair MAT_002 and MAT_054 carry, so they
+    are read through the shared ``_read_axis_cards``: field 7 of card 3 is
+    unused here (MAT_002 spells it MACF, MAT_054 MANGLE; MAT_022 puts MACF on
+    card 2 instead) and field 7 of card 4 is BETA.
+
+    All five cards are read at FIXED columns, the convention every AOPT-card
+    material in this file uses — a slot the active AOPT does not need is blank,
+    not absent, so there is no conditional card shape to track.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+
+    def cf(idx, i, default=0.0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_float(f[i]) if len(f) > i and f[i].strip() else default
+
+    def ci(idx, i, default=0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_int(f[i]) if len(f) > i and f[i].strip() else default
+
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 else 0
+    (xp, yp, zp, a1, a2, a3, _f7,
+     v1, v2, v3, d1, d2, d3, beta) = _read_axis_cards(raw, offset + 2,
+                                                      offset + 3)
+    ncards = 0
+    for k in range(len(raw) - offset):
+        if raw[offset + k].strip():
+            ncards = k + 1
+    if ncards > 5:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE mid={mid}: {ncards} data cards were read "
+            "where the keyword defines exactly 5 — the extra line(s) are "
+            "IGNORED. This is the fingerprint of a fixed-format card shift (a "
+            "missing or duplicated blank card), which silently moves every "
+            "following field into the wrong slot; check the card order "
+            "against MID/RO/EA.. | GAB/GBC/GCA/KFAIL/AOPT/MACF/ATRACK | "
+            "XP/YP/ZP/A1/A2/A3 | V1/V2/V3/D1/D2/D3/BETA | "
+            "SC/XT/YT/YC/ALPH/SN/SYZ/SZX.")
+    state.mat_composite_damage[mid] = MatCompositeDamage(
+        mid=mid, title=title, rho=cf(0, 1),
+        ea=cf(0, 2), eb=cf(0, 3), ec=cf(0, 4),
+        prba=cf(0, 5), prca=cf(0, 6), prcb=cf(0, 7),
+        gab=cf(1, 0), gbc=cf(1, 1), gca=cf(1, 2), kfail=cf(1, 3),
+        aopt=cf(1, 4), macf=ci(1, 5), atrack=ci(1, 6),
+        xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3,
+        v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3, beta=beta,
+        sc=cf(4, 0), xt=cf(4, 1), yt=cf(4, 2), yc=cf(4, 3),
+        alph=cf(4, 4), sn=cf(4, 5), syz=cf(4, 6), szx=cf(4, 7))
 
 
 def handle_mat_transversely_anisotropic(block: Block, state: ConversionState) -> None:
@@ -15224,6 +15288,13 @@ HANDLERS = {
     "MAT_54":                                 handle_mat_enhanced_composite_damage,
     "MAT_055":                                handle_mat_enhanced_composite_damage,
     "MAT_55":                                 handle_mat_enhanced_composite_damage,
+    # MAT_022 → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on a shell-only material,
+    # /MAT/LAW127 when a part holds solids or thick shells. Not MAT_054 with
+    # fewer fields: MAT_022 is orthotropic ELASTIC with BRITTLE Chang-Chang
+    # failure — no XC, no EFS, no TFAIL, no element deletion at all.
+    "MAT_COMPOSITE_DAMAGE":                   handle_mat_composite_damage,
+    "MAT_022":                                handle_mat_composite_damage,
+    "MAT_22":                                 handle_mat_composite_damage,
     # MAT_037 (+ the _ECHANGE / _NLP_FAILURE / _NLP2 option variants) → LAW43
     "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC":
         handle_mat_transversely_anisotropic,

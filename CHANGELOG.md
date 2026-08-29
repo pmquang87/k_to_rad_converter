@@ -127,6 +127,132 @@ Prior history (before this changelog was introduced) is summarized in the
      A `grep -rn 200038` over this build's reader tree returns nothing at all.
      The real converter-side gap was k2rad's, and it was measured above.
 
+- **MILESTONE-2 BATCH 1, part B — `*MAT_COMPOSITE_DAMAGE` (MAT_022) →
+  `/MAT/LAW25` (COMPSH) `Iform = 0` + `/FAIL/CHANG` on a shell-only material,
+  `/MAT/LAW127` when any of its parts holds solids or thick shells.** The
+  keyword was an unnamed `skipped_keywords` entry, and the deck it appears in
+  did not run: MEASURED on
+  `dynaexamples_r14_ton-mm-s/introduction/intro-by-a.-tabiei/tension/tension-vi/tension6.k`,
+  the converted deck answered `ERROR ID : 179 ** ERROR IN PART DEFINITION
+  (MATERIAL) / MATERIAL ID=1 DOES NOT EXIST` + `ERROR ID : 760` and the starter
+  refused it (exit 3). That carrier now reads **0 ERROR(S), 1 WARNING(S)**
+  (3030, the known `/PROP/TYPE51` PTHICKFAIL note) and the engine runs it to
+  **NORMAL TERMINATION over 20 807 cycles**, with the 90° plies of its
+  `[0/90/0/90/90/0/90/0]` E-glass laminate failing first (`FAILURE (CHANG) IN
+  SHELL ELEMENT … MODE 1 - TENSILE FIBER`) and the 0° plies surviving — the
+  physically right order for a laminate pulled along direction 1.
+
+  The native reader is not a fallback here: `dynamatlawkeywordmap.h:59` maps
+  the keyword to law 22 but `convertmats.cxx` has **no `case 22:`**, so it
+  reaches a `default:` whose `sdiString radiossOption = "/MAT/LAW" +
+  OptionNumber;` (`convertutils.cxx:1011`) is C++ *pointer arithmetic on a
+  string literal*, not concatenation. No `/MAT` is written at all and the
+  `*PART`'s MID dangles.
+
+  1. **The split is by ELEMENT KIND, and it is one router.**
+     `writer/composites._mat022_law` decides; `_make_composite_materials`, the
+     `/PROP` split and `mesh._target_mat_law` all read it, so the emitted law,
+     the property class and every warning that names a law cannot disagree
+     (the `_fabric_law` / `_seatbelt_mat_law` pattern). A MID can carry only
+     ONE `/MAT` card — the `/MAT` id namespace is global across laws, starter
+     ERROR 79 — so a material shared by shell and solid parts goes to LAW127
+     whole, and the warning says which case it was.
+
+  2. **Why solids may not go to LAW25.** Its solid kernels decouple direction 3
+     entirely — `mat25_tsaiwu_s.F90:230` is `e3 = s3(i)/e33` and `:289`
+     `s3(i) = e33*eps(i,3)`, with no `nu13`/`nu23` term anywhere — so PRCA and
+     PRCB would be lost STRUCTURALLY, not merely dropped. And `/FAIL/CHANG`
+     **cannot delete a solid at `/BEGIN 2022`**: `fail_changchang_s.F90:222`
+     gates the whole relaxation/deletion path on `failip > 0`, and `Failip` is
+     a 2023-only input column (measured: a 2022 deck carrying it draws
+     `WARNING 100213 … unsupported field exists at the end of line` and reads
+     it back as 0). LAW127 carries `E1/E2/E3`, `G12/G13/G23` and
+     `nu21/nu31/nu32` and runs its own Chang-Chang criterion on both element
+     kinds; its cost at 2022 is one cosmetic `WARNING 100211`, the same
+     trade-off the shipped MAT_054/055 path runs under.
+
+  3. **`/FAIL/CHANG` is the MAT_022 failure model, term for term.** With
+     `ALPH = 0` — where LS-DYNA's `tau_bar = [t12²/2G12 + ¾αt12⁴] /
+     [S12²/2G12 + ¾αS12⁴]` collapses to `(t12/S12)²`, a term-for-term
+     identity, not an approximation — and `Beta = 1`,
+     `fail_changchang_c.F90:155-181` reproduces Theory Manual R16 eqs
+     23.22.3/.4/.5 exactly under `Sigma_1t = XT`, `Sigma_2t = YT`,
+     `Sigma_12 = SC`, `Sigma_2c = YC`. **No conversion factor is needed and
+     none is invented.** `Sigma_1c` is left BLANK: MAT_022 has no
+     compressive-FIBRE mode and `hm_read_fail_chang.F90:102` turns a blank into
+     infinity, i.e. exactly "that mode never trips" — the fabrication this
+     project refuses is not required anywhere on the card.
+
+     MEASURED end to end on a 10×10×1 quad built from the EMITTED cards
+     (`/IMPDISP` ramp, `/TH/SHEL`): peak `sigma_xx = 2502.248 MPa` against the
+     hand-computed onset `sigma_xx = XT = 2500` — **+0.0899 %**, inside one
+     3.938 MPa TH sample — followed by a collapse to zero within 1.6e-6 s of
+     the `Tau_max = 1e-7` relaxation window.
+
+  4. **Three cells on that rider have no MAT_022 source, and all three default
+     to a value that silently changes the physics.** `Beta` has no
+     `if (beta == zero) beta = one` in the reader, so a blank one DELETES the
+     shear term from the fibre criterion. A blank `Tau_max` becomes infinity
+     (`:104`), `dmg_scale = exp(-(t-t_f)/Tau_max)` then stays 1 forever and the
+     rider computes damage indices that soften and delete NOTHING — the #118
+     "emitted and inert" trap. A blank `Ifail_sh` is 0, which gates the
+     relaxation off entirely (`fail_changchang_c.F90:191`). So: `Beta = 1`;
+     `Ifail_sh = 2`, which sets `pthkf = 1.0` and deletes the element only once
+     EVERY layer has failed — the closest analogue of LS-DYNA zeroing a failed
+     layer's moduli while the element survives (`Ifail_sh = 1` would delete on
+     the FIRST failed layer, which LS-DYNA never does); and
+     `Tau_max = 1e-4 × ENDTIM`, stated as a converter choice **with its number**
+     in the warning. A deck with no `*CONTROL_TERMINATION` has no time scale to
+     size it from, so the rider is emitted with `Ifail_sh = 0` and the warning
+     says in as many words that it is then a damage INDEX with no stiffness
+     loss.
+
+  5. **Poisson: the two arms use OPPOSITE conventions and must never share a
+     helper.** LAW25's `MAT_PRAB` is the MAJOR ratio — `read_mat25_tsaiwu.F90:
+     129` reads it into `n12` and `:282` derives `n21 = n12*e22/e11` — so it
+     takes the LAW93 rescale `NU12 = PRBA·EA/EB` (Vol II R17 p.2-262 Remark 3).
+     LAW127 reads PRBA verbatim as the MINOR `nu21` and does the reciprocity
+     itself (`hm_read_mat127.F90:127`/`:187`). Getting it backwards is SILENT
+     on both: LAW25's only guard is `detc = 1 − n12·n21 ≤ 0 → ERROR 307`, and
+     raw PRBA only makes `detc` larger. Measured on the corpus carrier:
+     `0.0557 × 38600/8270 = 0.2600`, which the starter echoes as
+     `POISSON'S RATIO N12 = 0.2600E+00`; the raw 0.0557 would be wrong by the
+     factor `EA/EB = 4.667`.
+
+  6. **Two LAW127 defaults would INVENT physics and are neutralised.** `YCFAC`
+     defaults to **2** (`hm_read_mat127.F90:287`) and `sigeps127.F90:289` then
+     runs `xc(i) = ycfac*yc(i)` once matrix compression has failed — giving
+     MAT_022 a compressive-FIBRE limit of `2·YC` (50 MPa on the W6 corpus
+     deck) that it does not have. And a blank `SLIMT1/SLIMT2/SLIMSC/SLIMC1/
+     SLIMC2` becomes **1.0** (`:289-293`), which `sigeps127c.F90:400-403` then
+     uses to clamp the failed mode's stress at `1.0 ×` its FULL strength — a
+     perfect-plastic plateau at the failure stress, i.e. a failure model that
+     is emitted, accepted and completely inert. MAT_022 zeroes the failed ply's
+     moduli, so both are written explicitly (`1e18` and `1e-8`), and the
+     starter echo confirms them.
+
+  7. **Named warn-drops:** `KFAIL` (bulk modulus of the failed material — no
+     slot on either law), `MACF ≠ 1` (axis swap, no `/PROP` column),
+     `ATRACK = 1` (the a-axis follows the DEFORMED line; Radioss's `Ip`/`IREP`
+     selects a storage frame, not deformation tracking), `SN`/`SYZ`/`SZX` (the
+     solid delamination criterion `(max(0,σ3)/SN)² + (τ23/SYZ)² + (τ31/SZX)²`,
+     Theory eq 23.22.140) and `ALPH` on the shell arm. `/FAIL/HASHIN` has
+     similarly named `Sigma_3t`/`Sigma_23`/`Sigma_13` slots but implements
+     Hashin's quadratic delamination — a different formula on different
+     strengths — so it is deliberately **not** substituted. The report runs
+     from a helper both arms call, so a field cannot be lost on one of them.
+
+  8. **A guard gated on two card spellings, found and fixed.**
+     `_type11_carries` tested `own in state.mat_orthotropic or own in
+     state.mat_enhanced_composite`, so a MAT_022 shell fell through to
+     `/PROP/TYPE51` + per-ply `/PROP/TYPE19` even though `hm_read_prop11.F`
+     names law 25 in its own whitelist ("PLEASE USE ONE OF THE FOLLOWING
+     COMPATIBLE MATERIAL LAWS: 15,25,27, OR > 28"). Same class as the
+     `_resolve_icomp_sections` membership test, which would otherwise have
+     reported the `tension6.k` `[0/90/0/90/90/0/90/0]` layup as DROPPED. Both
+     now list the container; `writer/composites.py`'s two-arm law LABEL became
+     a three-way router for the same reason.
+
 - **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
   → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;
   `*PERTURBATION_NODE` → `/RANDOM[/GRNOD]`;

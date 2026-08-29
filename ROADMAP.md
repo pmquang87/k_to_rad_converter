@@ -64,6 +64,16 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   depth cap — so the union id resolves wherever a plain set id does. The
   one-level rule the `*SET_PART_ADD` path used to apply is lifted. There is no
   `*SET_TSHELL_ADD` in LS-DYNA (HyperMesh cfg only), so none is invented.
+  `*MAT_COMPOSITE_DAMAGE` (022) converts as well — see the Tier-3 *Composites*
+  entry. **Open items this batch surfaced but deliberately did not change,
+  because both would move output on decks that have nothing to do with it:**
+  `*MAT_ORTHOTROPIC_ELASTIC` and `*MAT_ENHANCED_COMPOSITE_DAMAGE` have NO
+  `_OFFSET_SPECS` row, so an `*INCLUDE_TRANSFORM` leaves their MID behind while
+  `*PART`'s IDMOFF moves the reference (today that at least warns, "id offsets
+  are NOT applied to …"); and `*MAT_054`'s `SLIM*` cells default to 1.0 in
+  k2rad, which `sigeps127c.F90:400-403` uses to clamp a failed mode's stress at
+  its FULL strength — worth checking against LS-DYNA's own default before
+  changing.
   **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and
@@ -433,7 +443,12 @@ covering them unlocks a large class of real models.
 ### Tier 3 — large subsystems (dedicated milestones)
 
 - Composites: `MAT_54`/`MAT_55` → `/MAT/LAW127`, `MAT_002` → `/MAT/LAW93`,
-  `MAT_037` → `/MAT/LAW43`, `MAT_032` → a `/MAT/PLAS_BRIT` pair, and the
+  `MAT_022` → `/MAT/LAW25` (COMPSH) + `/FAIL/CHANG` on shells and
+  `/MAT/LAW127` on solids/thick shells (Milestone 2 batch 1 — the failure
+  criteria are term-for-term identical at `ALPH = 0`, with `Sigma_1c` left
+  blank because MAT_022 has no compressive-fibre mode; `KFAIL`, `MACF`,
+  `ATRACK` and the `SN`/`SYZ`/`SZX` delamination criterion are warn-dropped by
+  name), `MAT_037` → `/MAT/LAW43`, `MAT_032` → a `/MAT/PLAS_BRIT` pair, and the
   multi-ply `*PART_COMPOSITE` layup — **done**. The layup target is
   `/PROP/TYPE51` + one `/PROP/TYPE19` (PLY) per layer, which is what dyna2rad
   emits, rather than the `TYPE10`/`TYPE17` sketched here; single-material

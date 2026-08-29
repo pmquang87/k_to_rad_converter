@@ -3184,6 +3184,18 @@ _OFFSET_SPECS: Dict[str, object] = {
     # Impact / blast batch. Every field of *MAT_110, *MAT_111 and the
     # *MAT_ELASTIC _FLUID card is a physical constant — no curve, table or set
     # id anywhere on the three cards — so MID is the only cell to offset.
+    # *MAT_COMPOSITE_DAMAGE (022): MID on card 1 field 1, and nothing else on
+    # the card is an id — AOPT < 0 is a *DEFINE_COORDINATE reference, but it is
+    # a NEGATIVE cell and _rewrite_line deliberately leaves those alone (a
+    # negative id is a flag encoding everywhere else in LS-DYNA), the same
+    # treatment MAT_002/MAT_054 get. NOTE that neither of those two has an
+    # offset row at all today, so an *INCLUDE_TRANSFORM leaves their MID
+    # behind while *PART's IDMOFF moves the reference — a pre-existing gap
+    # this batch names rather than changes, because fixing it would move
+    # output on decks that have nothing to do with MAT_022.
+    "MAT_COMPOSITE_DAMAGE": _mat(),
+    "MAT_022": _mat(),
+    "MAT_22": _mat(),
     "MAT_JOHNSON_HOLMQUIST_CERAMICS": _mat(),
     "MAT_110": _mat(),
     "MAT_JOHNSON_HOLMQUIST_CONCRETE": _mat(),

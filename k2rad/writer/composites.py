@@ -42,6 +42,7 @@ from typing import Dict, List, Optional, Set
 from ..state import (
     ConversionState,
     IntegrationShell,
+    MatCompositeDamage,
     MatOrthotropicElastic,
     MatEnhancedCompositeDamage,
     MatTransverselyAnisotropic,
@@ -70,6 +71,8 @@ __all__ = [
     "_emit_composite_props",
     "_emit_mat_law93",
     "_emit_mat_law127",
+    "_emit_mat022",
+    "_mat022_law",
     "_emit_mat_law43",
     "_law43_lines",
     "_emit_mat_hill_3r",
@@ -86,6 +89,29 @@ __all__ = [
 # LAW93 is an orthotropic HILL-PLASTICITY law; MAT_002 is purely elastic, so the
 # yield surface is pushed out of reach and the Hill ratios left isotropic.
 _LAW93_ELASTIC_SIGY = 1.0e30
+# The same device for /MAT/LAW25 carrying the elastic MAT_022, but at 1e20 not
+# 1e30: read_mat25_tsaiwu.F90 clamps its own "not defined" defaults at ep20
+# (`fmax = min(fmax, ep20)` and friends) and the reader's note at :297-300
+# records that 1e20 IS the value the yields take when the card leaves them
+# blank — while ALSO rejecting a blank one with ERROR 198. Writing that same
+# 1e20 keeps every Tsai-Wu coefficient (f11 = 1/(sigyt1*sigyc1), clamped to
+# [1e-20, 1e20] at :310-313) in the range the reader itself expects.
+_LAW25_ELASTIC_SIGY = 1.0e20
+# /MAT/LAW127 YCFAC defaults to 2 (hm_read_mat127.F90:287) and the engine then
+# runs `xc = ycfac*yc` once matrix compression has failed (sigeps127.F90:289),
+# which would give MAT_022 a compressive-FIBRE strength it does not have. A
+# huge factor makes that synthesized limit unreachable. NOT zero: zero is what
+# the reader turns back into 2.
+_LAW127_NO_YCFAC = 1.0e18
+# /MAT/LAW127 SLIM* is the RESIDUAL-stress factor a failed mode is clamped at:
+# `sigeps127c.F90:400-403` caps signxx at `slimt1*xt` once dmg(i,2) == 1 (and
+# the four siblings do the same for their modes). MAT_022 zeroes the failed
+# ply's moduli outright (Theory Manual R16 SS23.22), i.e. the residual is ZERO
+# — but `hm_read_mat127.F90:289-293` turns a blank/0 SLIM back into **1.0**,
+# which caps the stress at the FULL strength and leaves a perfect-plastic
+# plateau instead of a failure: emitted, accepted, and completely inert. A
+# tiny positive factor is the only way to say "no residual" on this card.
+_LAW127_NO_RESIDUAL = 1.0e-8
 # Radioss default transverse-shear reduction factor (5/6).
 _ASHEAR_DEFAULT = 0.833333
 # TYPE11 layer count clamp — dyna2rad clamps *SECTION_SHELL NIP the same way.
@@ -110,8 +136,88 @@ def _composite_material_mids(state: ConversionState) -> Set[int]:
     orthotropy axes exist only on the SOL_ORTH property (see
     _emit_mat126_solid_prop)."""
     return (set(state.mat_orthotropic) | set(state.mat_enhanced_composite)
+            | set(state.mat_composite_damage)
             | set(state.mat_transverse_aniso) | set(state.mat_laminated_glass)
             | set(state.mat_hill_3r) | set(state.mat_modified_honeycomb))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# *MAT_COMPOSITE_DAMAGE (022) — the LAW25-vs-LAW127 router
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ``/FAIL/CHANG`` carries the whole MAT_022 failure model on SHELLS, exactly:
+# with ``ALPH = 0`` (so LS-DYNA's ``tau_bar`` collapses to ``(tau12/S12)^2``
+# — a term-for-term identity, not an approximation) and ``Beta = 1``, the
+# engine kernel ``fail_changchang_c.F90:155-181`` is
+#
+#     damft = (sxx/sigt1)**2 + beta*(sxy/sigt12)**2
+#     dammt = (syy/sigt2)**2 + (sxy/sigt12)**2
+#     dammc = (syy/(2*sigt12))**2 + (sxy/sigt12)**2
+#             + syy*((sigc2/(2*sigt12))**2 - 1)/sigc2
+#
+# against Theory Manual R16 §23.22 eqs 23.22.3/.4/.5
+#
+#     F_fiber  = (s1/S1)^2 + tau_bar
+#     F_matrix = (s2/S2)^2 + tau_bar
+#     F_comp   = (s2/2 S12)^2 + [(C2/2 S12)^2 - 1] s2/C2 + tau_bar
+#
+# with ``Sigma_1t = XT``, ``Sigma_2t = YT``, ``Sigma_12 = SC``,
+# ``Sigma_2c = YC``. NO conversion factor is needed and none is invented; the
+# only difference is that Radioss tests ``>= 1`` where LS-DYNA tests
+# ``e^2 - 1 > 0``. ``Sigma_1c`` is LEFT BLANK — MAT_022 has no compressive
+# FIBRE mode, and ``hm_read_fail_chang.F90:102`` turns a blank into infinity,
+# i.e. exactly "that mode never trips". Nothing has to be fabricated.
+#
+#: ``/FAIL/CHANG`` ``Ifail_sh``. 2 = "shell is deleted if damage is reached for
+#: fiber or matrix for ALL layers of shell" (``fail_chang.cfg`` RADIO), which
+#: sets ``pthkf = 1.0`` (``hm_read_fail_chang.F90:109-110``). That is the
+#: closest analogue of what LS-DYNA does: a failed integration point loses its
+#: stress (Radioss relaxes it to zero and switches the layer off; LS-DYNA zeroes
+#: E2/G12/nu, and E1 too in the fibre mode) while the ELEMENT survives until
+#: every layer has gone. ``Ifail_sh = 1`` would delete the element on the FIRST
+#: failed layer, which LS-DYNA never does; ``Ifail_sh = 0`` leaves the criterion
+#: as a pure post-processing index with no stiffness loss at all
+#: (``fail_changchang_c.F90:191`` gates the relaxation on ``ifail_sh > 0``) —
+#: the strengths would then influence nothing, the #118 "emitted and inert"
+#: trap. 3 and 4 additionally suppress the matrix criterion (``:170``
+#: ``if (ifail_sh < 3)``).
+_CHANG_IFAIL_SH = 2
+
+#: ``Tau_max`` as a fraction of the deck's ``*CONTROL_TERMINATION`` ENDTIM.
+#: MAT_022 has NO field for it: LS-DYNA drops the moduli instantaneously, while
+#: ``fail_changchang_c.F90:200`` relaxes the stress as
+#: ``exp(-(t - t_fail)/Tau_max)`` and switches the layer off once that falls
+#: below 1e-2, i.e. after ``ln(100)*Tau_max = 4.6*Tau_max``. Leaving the cell
+#: blank is NOT an option — ``hm_read_fail_chang.F90:104`` turns 0 into
+#: infinity, ``dmg_scale`` then stays 1 forever and the rider computes damage
+#: indices that soften and delete NOTHING. So the value is a converter choice,
+#: named as one in the warning with its number: 1e-4 of the run makes the drop
+#: complete within 4.6e-4 of the run — the closest expressible approximation to
+#: instantaneous — while still spanning many time steps, so the failed layer
+#: unloads smoothly instead of shocking the mesh.
+_CHANG_TAU_FRACTION = 1.0e-4
+
+
+def _mat022_law(state: ConversionState, mid: int) -> int:
+    """The Radioss law a ``*MAT_COMPOSITE_DAMAGE`` MID lands on: 25 or 127.
+
+    The ONE router — ``_make_composite_materials``, ``_emit_composite_props``
+    and ``mesh._target_mat_law`` all read this function, so the emitted law,
+    the property class and every warning that names a law cannot disagree
+    (the ``_fabric_law`` / ``_seatbelt_mat_law`` pattern).
+
+    A material is LAW25 + ``/FAIL/CHANG`` unless one of its parts holds SOLID
+    or THICK-SHELL elements, in which case the whole material is LAW127 — a
+    MID can carry only one ``/MAT`` card (the ``/MAT`` id namespace is global
+    across laws, starter ERROR 79). See ``state.MatCompositeDamage`` for why
+    solids may not go to LAW25.
+    """
+    solid_pids = {e.pid for e in state.solid_elems}
+    solid_pids |= {e.pid for e in state.tshell_elems}
+    for pid, part in state.parts.items():
+        if part.mid == mid and pid in solid_pids:
+            return 127
+    return 25
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -898,10 +1004,16 @@ def _type11_carries(state: ConversionState, pid: int, layers) -> bool:
     arbitrary LS-DYNA MID, but it knows the two layer sets that are law-uniform
     and whitelisted BY CONSTRUCTION:
 
-      * every layer on the part's own ``*MAT_002``/``*MAT_054`` material
-        (/MAT/LAW93, /MAT/LAW127 — both >= 29);
+      * every layer on the part's own ``*MAT_002``/``*MAT_054``/``*MAT_022``
+        material (/MAT/LAW93, /MAT/LAW127 — both >= 29 — and /MAT/LAW25,
+        which the reader's own message names explicitly);
       * every layer on the ``*MAT_032`` glass/polymer pair, which are two
         /MAT/PLAS_BRIT (LAW27) cards.
+
+    The test is on the CONTAINER, not on a law number, but it must list every
+    container whose law is whitelisted: gating it on two card spellings is how
+    a third family with the same property (MAT_022 → LAW25, a law the reader
+    names by number) silently loses its TYPE11.
 
     Everything else — a foreign ``PID_i`` material, or an ordinary isotropic
     part material — goes to /PROP/TYPE51 + /PROP/TYPE19 instead, which carries
@@ -914,7 +1026,8 @@ def _type11_carries(state: ConversionState, pid: int, layers) -> bool:
     glass = state.mat_laminated_glass.get(own)
     if glass is not None:
         return mids <= {glass.mid, glass.glass_mid}
-    if own in state.mat_orthotropic or own in state.mat_enhanced_composite:
+    if (own in state.mat_orthotropic or own in state.mat_enhanced_composite
+            or own in state.mat_composite_damage):
         return mids <= {own}
     return False
 
@@ -1257,7 +1370,9 @@ def _resolve_icomp_sections(state: ConversionState) -> None:
                 "counterpart. Model a thick-shell composite as *SECTION_TSHELL "
                 "(no k2rad path yet) or as stacked shells.")
             continue
-        if part.mid in state.mat_orthotropic or part.mid in state.mat_enhanced_composite:
+        if (part.mid in state.mat_orthotropic
+                or part.mid in state.mat_enhanced_composite
+                or part.mid in state.mat_composite_damage):
             continue                      # carried by _emit_single_material_type11
         if part.mid in state.mat_laminated_glass:
             state.warn(
@@ -1391,6 +1506,8 @@ def _make_composite_materials(state: ConversionState) -> List[str]:
         lines += _emit_mat_law93(mat, state)
     for mat in sorted(state.mat_enhanced_composite.values(), key=lambda m: m.mid):
         lines += _emit_mat_law127(mat, state)
+    for mat in sorted(state.mat_composite_damage.values(), key=lambda m: m.mid):
+        lines += _emit_mat022(mat, state)
     for mat in sorted(state.mat_transverse_aniso.values(), key=lambda m: m.mid):
         lines += _emit_mat_law43(mat, state)
     for mat in sorted(state.mat_hill_3r.values(), key=lambda m: m.mid):
@@ -1672,6 +1789,367 @@ def _emit_mat_law127(mat: MatEnhancedCompositeDamage,
             "converts this range as if it were an absolute dt, which deletes "
             "the part immediately on any deck whose dt is below the ratio.)")
     return lines
+
+
+def _mat022_dropped_fields(mat: MatCompositeDamage, law: int,
+                           state: ConversionState) -> None:
+    """Every ``*MAT_COMPOSITE_DAMAGE`` cell with no counterpart, reported BY
+    NAME. Called from both arms, so a field cannot be silently lost on one of
+    them (the #129 "a refusal must not skip the dropped-field accounting"
+    rule)."""
+    dropped = []
+    if mat.kfail:
+        dropped.append(
+            f"KFAIL={mat.kfail:g} (bulk modulus of the FAILED material, "
+            '"necessary for compressive failure") — Radioss has no such slot '
+            "on either law: a failed layer relaxes to zero stress instead of "
+            "reverting to a residual bulk stiffness")
+    if mat.macf not in (0, 1):
+        dropped.append(
+            f"MACF={mat.macf} (material-axes swap, SOLID elements only) — "
+            "neither /PROP/TYPE6 nor /PROP/TYPE11 has an axis-permutation "
+            "flag, so the orthotropy axes are NOT permuted; re-order "
+            "EA/EB/EC and the AOPT vectors by hand if the swap matters")
+    if mat.atrack:
+        dropped.append(
+            f"ATRACK={mat.atrack} (the a-axis follows the DEFORMED line "
+            "through the element centre, shells only, Vol II R17 p.2-260 "
+            "Remark 2) — Radioss's Ip/IREP selects which reference FRAME the "
+            "angle is stored against, not deformation tracking, so the "
+            "material axis rotates rigidly with the element (LS-DYNA's "
+            "ATRACK=0 behaviour) and layers of a laminate cannot rotate "
+            "independently")
+    if mat.sn or mat.syz or mat.szx:
+        dropped.append(
+            f"SN={mat.sn:g}/SYZ={mat.syz:g}/SZX={mat.szx:g}, the SOLID "
+            "delamination criterion (max(0,s3)/SN)^2 + (t23/SYZ)^2 + "
+            "(t31/SZX)^2 (Theory Manual R16 eq 23.22.140) — it has no "
+            "counterpart: /FAIL/CHANG's solid branch "
+            "(fail_changchang_s.F90:196,201) and /MAT/LAW127's "
+            "(sigeps127.F90:321,325) both re-apply the IN-PLANE MATRIX "
+            "criterion to sigma_zz with YT/YC/SC instead, a different formula "
+            "on different strengths. /FAIL/HASHIN has similarly named "
+            "Sigma_3t/Sigma_23/Sigma_13 slots but implements Hashin's "
+            "quadratic delamination, so it is NOT substituted; through-"
+            "thickness failure is simply not modelled")
+    if mat.alph and law == 25:
+        dropped.append(
+            f"ALPH={mat.alph:g} (the nonlinear shear term, units "
+            "[stress^-3]), which enters LS-DYNA's shear ratio as "
+            "tau_bar = [t12^2/2G12 + 3/4 a t12^4] / [S12^2/2G12 + 3/4 a "
+            "S12^4] — /FAIL/CHANG has no such term (its Beta is a LINEAR "
+            "weight on the shear contribution, a different quantity), and "
+            "fitting one to the other would invent a conversion factor. All "
+            "three criteria therefore use the ALPH=0 form tau_bar = "
+            "(t12/SC)^2, which is where they are term-for-term exact")
+    if dropped:
+        state.warn(f"*MAT_COMPOSITE_DAMAGE {mat.mid}: "
+                   + "; ".join(dropped) + ".")
+    state.note_recognized_not_emitted(
+        "*MAT_COMPOSITE_DAMAGE",
+        "converted, but the SN/SYZ/SZX solid delamination criterion, KFAIL, "
+        "MACF and ATRACK have no Radioss counterpart and are reported per "
+        "material when set")
+
+
+def _emit_mat022(mat: MatCompositeDamage, state: ConversionState) -> List[str]:
+    """*MAT_COMPOSITE_DAMAGE (022) → the law ``_mat022_law`` picked."""
+    law = _mat022_law(state, mat.mid)
+    _mat022_dropped_fields(mat, law, state)
+    if law == 127:
+        return _emit_mat022_law127(mat, state)
+    return _emit_mat022_law25(mat, state)
+
+
+def _emit_mat022_law25(mat: MatCompositeDamage,
+                       state: ConversionState) -> List[str]:
+    """MAT_022 on a shell-only material → ``/MAT/LAW25`` (COMPSH) ``Iform=0``
+    as a pure orthotropic ELASTIC carrier, plus a ``/FAIL/CHANG`` rider.
+
+    Column layout from ``radioss2019/MAT/matl25_compsh.cfg FORMAT(radioss2019)``
+    — the newest block, and the one a ``/BEGIN 2022`` deck reads (measured: a
+    2022 and a 2026 twin echo the LAW25 material block byte-identically,
+    including ``WP_fail``, which exists only in the 2019 layout). LAW25 is a
+    2019-format law, so unlike LAW127 it draws no version warning at all.
+
+    **Every yield stress is written at 1e20.** MAT_022 is elastic until brittle
+    failure; LAW25 is an elasto-plastic law with a Tsai-Wu yield surface, and
+    its reader hard-fails with ``ancmsg(msgid=198)`` on any of ``sigyt1``,
+    ``sigyc1``, ``sigyt2``, ``sigyc2``, ``sigyt12``, ``sigyc12`` at or below
+    zero (``read_mat25_tsaiwu.F90:206-241``). Putting the FAILURE strengths in
+    those slots would convert a linear-elastic-until-failure ply into one that
+    YIELDS at the failure stress — a different constitutive law. 1e20 pushes
+    the surface out of reach, which is the same idiom ``/MAT/LAW93`` already
+    uses for the elastic MAT_002 (and what the commented-out ``case 2:`` in
+    dyna2rad's ``convertmats.cxx:237-247`` does — its ``{"PRBA","NU12"}`` half
+    is the raw-Poisson defect below, and is NOT copied).
+
+    **Poisson: RESCALED.** ``read_mat25_tsaiwu.F90:129`` reads ``MAT_PRAB``
+    into ``n12`` and ``:282`` derives ``n21 = n12*e22/e11``, so the slot is the
+    MAJOR ratio and needs ``NU12 = PRBA*EA/EB`` (Vol II R17 p.2-262 Remark 3:
+    "PRBA is the minor Poisson's ratio if EA > EB, and the major ... will be
+    equal to PRBA x (EA/EB)"). This is the OPPOSITE of ``/MAT/LAW127``, which
+    takes PRBA verbatim — the two arms of this keyword must never share a
+    helper. Writing PRBA raw does not error: ``detc = 1 - n12*n21`` only grows,
+    so ERROR 307 never fires and the deck runs with a wrong compliance.
+
+    LAW25's OWN damage and deletion mechanisms are all left switched off:
+    ``EPS_t*``/``EPS_m*`` (tensile-strain damage, ``m25crak.F:64-113``),
+    ``Wpmax`` (plastic work), ``GAMMA_ini``/``GAMMA_max`` (shear delamination,
+    ``m25delam.F``). None of them is stress-based, so none can express
+    Chang-Chang; the ``/FAIL/CHANG`` rider is what carries the failure model.
+    """
+    b10 = " " * 10
+    ea, eb, ec = mat.ea, mat.eb, mat.ec
+    nu12 = 0.0
+    if eb > 0.0:
+        nu12 = mat.prba * ea / eb
+    elif mat.prba:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE {mat.mid}: NU12 = PRBA*EA/EB cannot be "
+            "evaluated (EB is zero) — written as 0. Supply EB.")
+    # detc = 1 - nu12*nu21 = 1 - nu12^2*E22/E11 (read_mat25_tsaiwu.F90:284);
+    # <= 0 is starter ERROR 307.
+    if ea > 0.0 and eb > 0.0 and 1.0 - nu12 * mat.prba <= 0.0:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE {mat.mid}: after the LS-DYNA->Radioss "
+            f"Poisson rescale NU12 = PRBA*EA/EB = {nu12:.4g}, the compliance "
+            f"determinant 1 - NU12*NU21 = {1.0 - nu12 * mat.prba:.4g} is not "
+            "positive and the starter rejects the material (ERROR 307). "
+            "PRBA must be the MINOR ratio nu_ba here; check which convention "
+            "the source deck used.")
+    for name, val in (("EA", ea), ("EB", eb), ("GAB", mat.gab),
+                      ("GBC", mat.gbc), ("GCA", mat.gca)):
+        if val == 0.0:
+            state.warn(
+                f"*MAT_COMPOSITE_DAMAGE {mat.mid}: {name} is zero, which the "
+                "/MAT/LAW25 reader refuses (ERROR 306 on e11/e22/g12/g23/g31, "
+                "read_mat25_tsaiwu.F90:193-200). Fill the card.")
+    lines = [
+        f"/MAT/LAW25/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#              RHO_I",
+        f"{_f(mat.rho)}",
+        "#                E11                 E22                NU12     Iform"
+        "                           E33",
+        f"{_f(ea)}{_f(eb)}{_f(nu12)}{_i(0)}{b10}{_f(ec)}",
+        "#                G12                 G23                 G31"
+        "              EPS_f1              EPS_f2",
+        f"{_f(mat.gab)}{_f(mat.gbc)}{_f(mat.gca)}{_f(0.0)}{_f(0.0)}",
+        "#             EPS_t1              EPS_m1              EPS_t2"
+        "              EPS_m2                dmax",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#              Wpmax               Wpref      Ioff"
+        "                         ratio",
+        f"{_f(0.0)}{_f(0.0)}{_i(0)}{b10}{_f(0.0)}",
+        "#                  b                   n                fmax",
+        f"{_f(0.0)}{_f(1.0)}{_f(0.0)}",
+        "#            sig_1yt             sig_2yt             sig_1yc"
+        "             sig_2yc               alpha",
+        f"{_f(_LAW25_ELASTIC_SIGY)}{_f(_LAW25_ELASTIC_SIGY)}"
+        f"{_f(_LAW25_ELASTIC_SIGY)}{_f(_LAW25_ELASTIC_SIGY)}{_f(0.0)}",
+        "#           sig_12yc            sig_12yt                c_12"
+        "          Eps_rate_0       ICC",
+        f"{_f(_LAW25_ELASTIC_SIGY)}{_f(_LAW25_ELASTIC_SIGY)}{_f(0.0)}"
+        f"{_f(0.0)}{_i(0)}",
+        "#          GAMMA_ini           GAMMA_max               d3max",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#  Fsmooth                Fcut",
+        f"{_i(0)}{_f(0.0)}",
+        HDR,
+    ]
+    lines += _emit_fail_chang(mat, state)
+    return lines
+
+
+def _emit_fail_chang(mat: MatCompositeDamage,
+                     state: ConversionState) -> List[str]:
+    """The ``/FAIL/CHANG`` rider carrying MAT_022's three shell criteria.
+
+    Layout from ``radioss2018/FAIL/fail_chang.cfg FORMAT(radioss130)``, the
+    newest block a ``/BEGIN 2022`` deck resolves to: five 20-wide strengths,
+    then ``BETA(20) TAU_MAX(20) IFAIL_SH(10)``. ``FAILIP`` (2023) and ``FCUT``
+    (2025) are NOT written — measured, a 2022 deck carrying them draws
+    ``WARNING ID : 100213 ... unsupported field exists at the end of line`` and
+    reads the value back as 0. Bound to the material of the SAME id: Radioss
+    pairs a /FAIL with its /MAT by unit id, there is no reference field, and
+    the card carries no title line.
+
+    Three cells MUST be written explicitly, because each defaults to a value
+    that silently changes the physics:
+
+    * ``Beta = 1.0``. There is no ``if (beta == zero) beta = one`` in
+      ``hm_read_fail_chang.F90``, so a blank Beta DELETES the shear term from
+      the tensile-fibre criterion, and ``damft = (sxx/XT)^2`` no longer matches
+      ``F_fiber = (s1/S1)^2 + tau_bar``.
+    * ``Tau_max``. Blank becomes infinity (``:104``), ``dmg_scale`` then stays
+      1 forever and the whole rider computes indices that soften and delete
+      nothing — see ``_CHANG_TAU_FRACTION`` for how the value is chosen and
+      why it is a converter choice, not a MAT_022 field.
+    * ``Ifail_sh``. Blank is 0, which gates the relaxation off entirely
+      (``fail_changchang_c.F90:191``) — see ``_CHANG_IFAIL_SH``.
+
+    ``Sigma_1c`` is deliberately left BLANK: MAT_022 has no compressive-fibre
+    strength, and ``:102`` turns the blank into infinity, i.e. that mode never
+    trips. Inventing one would be exactly the fabrication this project
+    refuses.
+    """
+    b20 = " " * 20
+    endtim = (state.ctrl_termination.endtim
+              if state.ctrl_termination and state.ctrl_termination.endtim > 0
+              else 0.0)
+    tau = endtim * _CHANG_TAU_FRACTION
+    if tau <= 0.0:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE {mat.mid}: the deck states no positive "
+            "*CONTROL_TERMINATION ENDTIM, so there is no run time scale to "
+            "size the /FAIL/CHANG stress-relaxation constant Tau_max from. "
+            "The rider is emitted with Ifail_sh=0, which makes it a pure "
+            "DAMAGE INDEX (the /ANIM and /TH DAMMX channels still show which "
+            "Chang-Chang mode reached 1) with NO stiffness loss and NO "
+            "deletion — LS-DYNA zeroes the failed layer's moduli. Add "
+            "*CONTROL_TERMINATION, or set Tau_max and Ifail_sh on the "
+            "/FAIL/CHANG card by hand, to get the failure to act.")
+        ifail_sh = 0
+    else:
+        ifail_sh = _CHANG_IFAIL_SH
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE {mat.mid}: the Chang-Chang criteria are "
+            f"carried by a companion /FAIL/CHANG/{mat.mid} — Sigma_1t=XT="
+            f"{mat.xt:g}, Sigma_2t=YT={mat.yt:g}, Sigma_12=SC={mat.sc:g}, "
+            f"Sigma_2c=YC={mat.yc:g}, Beta=1. At ALPH=0 that is term for term "
+            "the LS-DYNA fibre, matrix-tension and matrix-compression "
+            "criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs "
+            "fail_changchang_c.F90:155-181), with NO conversion factor. "
+            "Sigma_1c is left blank on purpose: MAT_022 has no "
+            "compressive-FIBRE strength and a blank reads as infinity, so "
+            "that mode never trips. TWO cells have no MAT_022 source and are "
+            f"CONVERTER CHOICES: Ifail_sh={_CHANG_IFAIL_SH} (the element is "
+            "deleted only once EVERY layer has failed, the closest analogue "
+            "of LS-DYNA zeroing a failed layer's moduli while the element "
+            f"survives) and Tau_max={tau:g}, i.e. "
+            f"{_CHANG_TAU_FRACTION:g} of ENDTIM={endtim:g}. LS-DYNA drops the "
+            "moduli INSTANTLY; Radioss relaxes the failed layer's stress as "
+            "exp(-(t-t_fail)/Tau_max) and switches it off below 1e-2, i.e. "
+            f"after {4.6 * tau:g}. Change Tau_max on the /FAIL/CHANG card if "
+            "that relaxation window matters.")
+    return [
+        f"/FAIL/CHANG/{mat.mid}",
+        "#           SIGMA_1T            SIGMA_2T            SIGMA_12"
+        "            SIGMA_1C            SIGMA_2C",
+        f"{_f(mat.xt)}{_f(mat.yt)}{_f(mat.sc)}{b20}{_f(mat.yc)}",
+        "#               BETA             TAU_MAX  IFAIL_SH",
+        f"{_f(1.0)}{_f(tau)}{_i(ifail_sh)}",
+        HDR,
+    ]
+
+
+def _emit_mat022_law127(mat: MatCompositeDamage,
+                        state: ConversionState) -> List[str]:
+    """MAT_022 whose material carries SOLID or THICK-SHELL elements →
+    ``/MAT/LAW127``, whose own Chang-Chang criterion runs on both.
+
+    Column layout as ``_emit_mat_law127`` (``matl127_enhanced_composite.cfg``);
+    the fields MAT_022 does not have are left at the reader's "absent" value.
+
+    **Poisson: RAW.** ``hm_read_mat127.F90:127`` reads ``LSDYNA_PRBA`` into
+    ``nu21`` and ``:187`` derives ``nu12 = nu21*e1/e2`` itself, so the LAW93
+    rescale the LAW25 arm applies would be double-applied here.
+
+    THREE groups of cells have reader defaults that would INVENT physics and
+    are therefore written explicitly:
+
+    * ``BETA = 1.0``. ``hm_read_mat127.F90`` has no ``if (beta == zero)`` line
+      (contrast ``:286`` for FBRT and ``:287`` for YCFAC), so a blank BETA is
+      0 and deletes the shear term from the fibre criterion.
+    * ``YCFAC`` at a huge value. It defaults to **2** (``:287``), and
+      ``sigeps127.F90:289`` then executes ``xc(i) = ycfac*yc(i)`` once
+      matrix compression has failed — turning MAT_022's NON-EXISTENT
+      compressive-fibre limit into ``2*YC`` (50 MPa on the W6 corpus deck,
+      whose YC is 25). Neutralising it is not a fabrication, it is the removal
+      of one.
+    * ``SLIMT1/SLIMT2/SLIMSC/SLIMC1/SLIMC2`` at ``_LAW127_NO_RESIDUAL``. A
+      blank one becomes **1.0** (``:289-293``), and ``sigeps127c.F90:400-403``
+      then clamps the failed mode's stress at ``1.0 x`` its strength — a
+      perfect-plastic plateau at the failure stress, i.e. a failure model that
+      is emitted, accepted and completely inert. MAT_022 zeroes the failed
+      ply's moduli, so the residual is zero.
+
+    ``XC`` is left blank → ``:282`` makes it 1e20, the same "mode never trips"
+    device the ``/FAIL/CHANG`` arm uses for ``Sigma_1c``. ``FBRT`` is written
+    at 1.0, which is both the reader's own default (``:286``) and the identity
+    (``xt = fbrt*xt_0``, ``sigeps127c.F90:322``) — MAT_022 has no
+    post-matrix-failure fibre-strength reduction.
+
+    LAW127 is a 2026-format law: a ``/BEGIN 2022`` deck draws one cosmetic
+    ``WARNING 100211`` but reads every field correctly (measured; the material
+    echo is byte-identical to the 2026 twin). Same trade-off the shipped
+    MAT_054/055 path runs under.
+    """
+    b10 = " " * 10
+    solid_pids = ({e.pid for e in state.solid_elems}
+                  | {e.pid for e in state.tshell_elems})
+    shell_pids = {e.pid for e in state.shell_elems}
+    mixed = (any(p.mid == mat.mid and pid in shell_pids
+                 for pid, p in state.parts.items())
+             and any(p.mid == mat.mid and pid in solid_pids
+                     for pid, p in state.parts.items()))
+    state.warn(
+        f"*MAT_COMPOSITE_DAMAGE {mat.mid} -> /MAT/LAW127 rather than "
+        "/MAT/LAW25 + /FAIL/CHANG, because "
+        + ("the material is shared by SHELL and SOLID/thick-shell parts and a "
+           "MID can carry only ONE /MAT card (the /MAT id namespace is global "
+           "across laws, starter ERROR 79)"
+           if mixed else "its parts hold SOLID or THICK-SHELL elements")
+        + ". LAW25's solid kernels decouple direction 3 entirely "
+        "(mat25_tsaiwu_s.F90:230 'e3 = s3(i)/e33', no nu13/nu23 anywhere), so "
+        f"PRCA={mat.prca:g} and PRCB={mat.prcb:g} would be lost "
+        "STRUCTURALLY, and /FAIL/CHANG cannot delete a solid at /BEGIN 2022 "
+        "at all (fail_changchang_s.F90:222 gates the relaxation path on "
+        "Failip > 0, and Failip is a 2023-only input column). LAW127 carries "
+        "E1/E2/E3, G12/G13/G23 and nu21/nu31/nu32 and runs its own "
+        "Chang-Chang criterion on shells and solids alike. Cost: one cosmetic "
+        "starter WARNING 100211 (LAW127 is a 2026-format law read correctly "
+        "at 2022 - measured, the echo is byte-identical to a 2026 twin)."
+        + ("" if not mat.alph else
+           f" ALPH={mat.alph:g} is carried, but /MAT/LAW127 applies it in the "
+           "MATRIX-TENSION mode only (sigeps127c.F90:285-287); the fibre and "
+           "matrix-compression modes use the ALPH=0 form, so the shear "
+           "nonlinearity is PARTIAL."))
+    return [
+        f"/MAT/LAW127/{mat.mid}",
+        mat.title or f"MAT_{mat.mid}",
+        "#        Init. dens.",
+        f"{_f(mat.rho)}",
+        "#                 E1                  E2                  E3",
+        f"{_f(mat.ea)}{_f(mat.eb)}{_f(mat.ec)}",
+        "#                G12                 G13                 G23",
+        f"{_f(mat.gab)}{_f(mat.gca)}{_f(mat.gbc)}",
+        "#               Nu21                Nu31                Nu32",
+        f"{_f(mat.prba)}{_f(mat.prca)}{_f(mat.prcb)}",
+        "#                 XT              SLIMT1                LCXT             SCALCXT",
+        f"{_f(mat.xt)}{_f(_LAW127_NO_RESIDUAL)}{b10}{_i(0)}{_f(1.0)}",
+        "#                 YT              SLIMT2                LCYT             SCALCYT",
+        f"{_f(mat.yt)}{_f(_LAW127_NO_RESIDUAL)}{b10}{_i(0)}{_f(1.0)}",
+        "#                 SC              SLIMSC                LCSC             SCALCSC",
+        f"{_f(mat.sc)}{_f(_LAW127_NO_RESIDUAL)}{b10}{_i(0)}{_f(1.0)}",
+        "#                 XC              SLIMC1                LCXC             SCALCXC",
+        f"{_f(0.0)}{_f(_LAW127_NO_RESIDUAL)}{b10}{_i(0)}{_f(1.0)}",
+        "#                 YC              SLIMC2                LCYC             SCALCYC",
+        f"{_f(mat.yc)}{_f(_LAW127_NO_RESIDUAL)}{b10}{_i(0)}{_f(1.0)}",
+        "#               FCUT",
+        f"{_f(0.0)}",
+        "#               ALPH                BETA      2WAY        TI",
+        f"{_f(mat.alph)}{_f(1.0)}{_i(0)}{_i(0)}",
+        "#             DFAILT              DFAILC              DFAILS"
+        "              DFAILM               RATIO",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        "#             NCYRED               TFAIL                FBRT               YCFAC",
+        f"{b10}{_i(0)}{_f(0.0)}{_f(1.0)}{_f(_LAW127_NO_YCFAC)}",
+        "#                EFS                EPSF                EPSR                TSMD",
+        f"{_f(0.0)}{_f(0.0)}{_f(0.0)}{_f(0.0)}",
+        HDR,
+    ]
 
 
 def _emit_fail_gene1_dtmin(mid: int, dtmin: float,
@@ -2183,7 +2661,8 @@ def _emit_composite_props(state: ConversionState,
                                              istrain)
         else:
             mat = (state.mat_orthotropic.get(mid)
-                   or state.mat_enhanced_composite.get(mid))
+                   or state.mat_enhanced_composite.get(mid)
+                   or state.mat_composite_damage.get(mid))
             if mat is None:
                 # A part claimed purely because its *SECTION_SHELL binds an
                 # *INTEGRATION_SHELL rule: the material is an ordinary
@@ -2200,8 +2679,15 @@ def _emit_composite_props(state: ConversionState,
             axis = _composite_ref_axis(mat, state, label, prop_id,
                                        for_solid=is_solid)
             axis.phi += beta_fold
-            law = ("/MAT/LAW93" if mid in state.mat_orthotropic
-                   else "/MAT/LAW127")
+            # A three-way router, not a two-arm if/else: a family with no
+            # arm here would silently inherit another law's NAME in every
+            # warning and in the /PROP compatibility message.
+            if mid in state.mat_orthotropic:
+                law = "/MAT/LAW93"
+            elif mid in state.mat_composite_damage:
+                law = f"/MAT/LAW{_mat022_law(state, mid)}"
+            else:
+                law = "/MAT/LAW127"
             if axis.mapped:
                 state.warn(f"{label}: orthotropy axes from the material "
                            f"{axis.note}.")

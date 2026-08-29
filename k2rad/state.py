@@ -1932,6 +1932,80 @@ class MatEnhancedCompositeDamage:
 
 
 @dataclass
+class MatCompositeDamage:
+    """*MAT_COMPOSITE_DAMAGE (MAT_022) — orthotropic ELASTIC with the brittle
+    Chang-Chang failure criteria (Vol II R17 p.2-257: "an orthotropic material
+    with optional brittle failure for composites ... following the suggestion
+    of [Chang and Chang 1987a, 1987b]", available for shells, solids, thick
+    shells and SPH).
+
+    It is NOT MAT_054 with fewer fields: there is no XC, no EFS, no TFAIL and
+    no element-deletion field of any kind — Theory Manual R16 §23.22 speaks
+    only of setting moduli to zero at a failed integration point.
+
+    k2rad splits the target by ELEMENT KIND, ``writer/composites._mat022_law``
+    being the ONE router (the ``_fabric_law`` pattern):
+
+    * shell-only material → ``/MAT/LAW25`` (COMPSH) Iform = 0 with every yield
+      stress at 1e20 — a pure orthotropic elastic carrier — plus a
+      ``/FAIL/CHANG`` rider, which reproduces all three MAT_022 shell criteria
+      TERM FOR TERM at ``ALPH = 0`` and ``Beta = 1``.
+    * a material any of whose parts holds SOLID or THICK-SHELL elements →
+      ``/MAT/LAW127``. LAW25's solid kernels decouple direction 3
+      (``mat25_tsaiwu_s.F90:230`` ``e3 = s3(i)/e33``) and have no nu13/nu23 at
+      all, so PRCA/PRCB would be lost STRUCTURALLY, and ``/FAIL/CHANG`` cannot
+      delete a solid at ``/BEGIN 2022`` (``fail_changchang_s.F90:222`` gates
+      the whole relaxation path on ``failip > 0``, and ``Failip`` is a
+      2023-only column).
+
+    POISSON CONVENTION — the two arms are OPPOSITE and must never share a
+    helper. ``/MAT/LAW25`` takes ``MAT_PRAB`` as nu12, the MAJOR ratio, and
+    derives the minor one itself (``read_mat25_tsaiwu.F90:129`` reads
+    ``MAT_PRAB`` into ``n12``; ``:282`` ``n21 = n12*e22/e11``), so it needs the
+    LAW93 rescale ``NU12 = PRBA*EA/EB``. ``/MAT/LAW127`` takes PRBA VERBATIM as
+    the minor nu21 and does the reciprocity itself
+    (``hm_read_mat127.F90:127``/``:187``).
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    ea: float = 0.0
+    eb: float = 0.0
+    ec: float = 0.0
+    prba: float = 0.0    # LS-DYNA MINOR nu_ba (see the class docstring)
+    prca: float = 0.0
+    prcb: float = 0.0
+    gab: float = 0.0     # → G12
+    gbc: float = 0.0     # → G23
+    gca: float = 0.0     # → G31 (LAW25) / G13 (LAW127)
+    kfail: float = 0.0   # bulk modulus of failed material — no slot anywhere
+    aopt: float = 0.0
+    macf: int = 0        # material-axes swap, SOLIDS only — no /PROP slot
+    atrack: int = 0      # a-axis tracking, SHELLS only — no Radioss analogue
+    xp: float = 0.0
+    yp: float = 0.0
+    zp: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    d1: float = 0.0
+    d2: float = 0.0
+    d3: float = 0.0
+    beta: float = 0.0    # material angle, deg (AOPT 0 and 3)
+    sc: float = 0.0      # shear strength ab      (Theory S12)
+    xt: float = 0.0      # longitudinal tensile   (S1)
+    yt: float = 0.0      # transverse tensile     (S2)
+    yc: float = 0.0      # transverse compressive (C2, positive)
+    alph: float = 0.0    # nonlinear shear term, [stress^-3]
+    sn: float = 0.0      # normal tensile, SOLIDS only     (S3)
+    syz: float = 0.0     # transverse shear, SOLIDS only   (S23)
+    szx: float = 0.0     # transverse shear, SOLIDS only   (S31)
+
+
+@dataclass
 class MatTransverselyAnisotropic:
     """*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC (MAT_037) → /MAT/LAW43.
 
@@ -6598,6 +6672,12 @@ class ConversionState:
     mat_orthotropic: Dict[int, MatOrthotropicElastic] = field(default_factory=dict)
     mat_enhanced_composite: Dict[int, MatEnhancedCompositeDamage] = \
         field(default_factory=dict)
+    #   MAT_022     → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on a shell-only
+    #                 material, /MAT/LAW127 when any part holds solids or
+    #                 thick shells (writer/composites._mat022_law is the ONE
+    #                 router; see MatCompositeDamage for why the split exists)
+    mat_composite_damage: Dict[int, MatCompositeDamage] = \
+        field(default_factory=dict)
     mat_transverse_aniso: Dict[int, MatTransverselyAnisotropic] = \
         field(default_factory=dict)
     mat_laminated_glass: Dict[int, MatLaminatedGlass] = field(default_factory=dict)
@@ -7670,7 +7750,15 @@ class ConversionState:
         NOTE: the gravity groups, the *BOUNDARY_PRESCRIBED_MOTION_SET motion
         groups and that path's zero-scale /BCS groups draw from this. The other
         synthesized /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...)
-        still use next_id() and carry the same latent hazard."""
+        still use next_id() and carry the same latent hazard.
+
+        ``node_sets`` also holds the flattened ``*SET_NODE_ADD`` /
+        ``*SET_NODE_ADD_ADVANCED`` unions, under their own SIDs — and
+        ``_make_extra_groups`` re-emits those too. That is covered by the SAME
+        test because ``_flatten_set_adds`` is a PREPASS: convert() runs it
+        right after dispatch and build_starter runs it as one of its first
+        acts, both before any writer mints a group id, so the union sids are
+        already in this dict when the guard reads it."""
         gid = self.next_id()
         while gid in self.node_sets:
             gid = self.next_id()
@@ -7685,7 +7773,12 @@ class ConversionState:
         user ``*SET_SHELL`` / ``_SOLID`` / ``_BEAM`` / ``_DISCRETE`` under its
         own SID (unlike ``*SET_NODE``, which ``_make_extra_groups`` does
         re-emit), so no collision is reachable — but that is a property of the
-        current writers, not of the id stream. The sibling of
+        current writers, not of the id stream. The flattened
+        ``*SET_<FAMILY>_ADD`` unions land in these same four dicts under their
+        own SIDs and do not change that: nothing re-emits an element set under
+        its SID either way, and a union sid is one MORE id this guard dodges,
+        never one fewer (``_flatten_set_adds`` is a prepass, so they are all
+        present before any writer allocates). The sibling of
         ``next_grnod_id``, dodging the four element-set registries so a
         synthesized element group cannot land on a SID a future writer decides
         to pass through, and a no-op vs ``next_id()`` on any ordinary deck

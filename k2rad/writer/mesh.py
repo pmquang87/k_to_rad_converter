@@ -4048,6 +4048,12 @@ def _target_mat_law(state: ConversionState, mid: int) -> Optional[int]:
         return 93                                  # *MAT_002 → ORTH_HILL
     if mid in state.mat_enhanced_composite:
         return 127                                 # *MAT_054/055
+    if mid in state.mat_composite_damage:
+        # *MAT_022 splits by ELEMENT KIND — writer/composites._mat022_law is
+        # the ONE router, shared with the material writer and the /PROP split,
+        # so the law, the property class and every warning agree.
+        from .composites import _mat022_law
+        return _mat022_law(state, mid)             # 25 (+/FAIL/CHANG) or 127
     # Airbag fabric. *MAT_FABRIC splits on FORM + the card-7 curves
     # (writer/fabric.py::_fabric_law is the ONE predicate; the property branch
     # reads the same function, so law and property cannot disagree). NEITHER

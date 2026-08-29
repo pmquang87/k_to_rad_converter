@@ -128,7 +128,8 @@ __all__ = [
 _SOLID_MAT_CLASS: Dict[int, int] = {
     0: 1, 1: 1, 2: 1, 4: 1, 5: 1,
     6: 5,                      # LAW6 HYD_VISC — POROUS, so TYPE20 only
-    21: 1, 28: 2,              # LAW28 HONEYCOMB is ORTHOTROPIC
+    21: 1, 25: 2,              # LAW25 COMPSH declares SOLID_ORTHOTROPIC
+    28: 2,                     # LAW28 HONEYCOMB is ORTHOTROPIC
     34: 1, 36: 1, 38: 1, 40: 1, 42: 1, 44: 1, 50: 1, 52: 1, 62: 1, 66: 1,
     69: 1, 70: 1, 76: 1, 79: 1,
     88: 7,                     # SOLID_BRICK_ISOTROPIC — no thick shell takes it
@@ -824,6 +825,7 @@ def _warn_type20_axis_drop(state: ConversionState, secid: int,
 #: Material containers whose cards carry an AOPT field. Only these can lose a
 #: stated direction on a TYPE20; every other law has no direction to lose.
 _AOPT_MAT_DICTS = ("mat_orthotropic", "mat_enhanced_composite",
+                   "mat_composite_damage",
                    "mat_aniso_visco", "mat_honeycomb",
                    "mat_modified_honeycomb", "mat_transverse_aniso",
                    "mat_hill_3r", "mat_deshpande_fleck")
@@ -1003,6 +1005,7 @@ def _tshell_axis(state: ConversionState, label: str, prop_id: int,
     for mid in mids:
         mat = (state.mat_orthotropic.get(mid)
                or state.mat_enhanced_composite.get(mid)
+               or state.mat_composite_damage.get(mid)
                or state.mat_aniso_visco.get(mid)
                or state.mat_honeycomb.get(mid))
         if mat is None:
