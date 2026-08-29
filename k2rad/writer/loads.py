@@ -2321,8 +2321,16 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
                    dir_str: str, grnod_id: int, fscale: float,
                    tstart: float, tstop: float,
-                   skew_id: int = 0) -> List[str]:
+                   skew_id: int = 0,
+                   state: Optional[ConversionState] = None) -> List[str]:
     """One /IMPVEL | /IMPACC | /IMPDISP block.
+
+    Pass *state* to record ``motion_id`` in ``state.imp_card_ids[keyword]`` —
+    the registry ``/IMPDISP/FGEO`` screens its ``BPFGID`` against, because
+    ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and ``/IMPDISP/FGEO``
+    together and runs ONE ``UDOUBLE`` duplicate scan over the merged
+    ``NOM_OPT`` slice. (``/IMPVEL`` and ``/IMPACC`` get their own scans, so
+    they are recorded but never conflict with FGEO.)
 
     ``skew_id`` goes in cols 21-30 and is the ONLY system column that is safe on
     all three keywords. ``frame_ID`` (cols 51-60) is deliberately left at 0 even
@@ -2336,6 +2344,8 @@ def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
     ERROR 3091 if a driven node is one of the frame's own N1/N2/N3, a constraint
     /SKEW/MOV does not impose. So: skews, never frames.
     """
+    if state is not None:
+        state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     return [
         f"/{keyword}/{motion_id}",
         title,
@@ -2523,7 +2533,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                 pm.skew_id, f"SKEW_MOV_LOCAL_PID{pm.pid}", *pm.mov_nodes, "X")
         lines += _emit_imp_card(kw, motion_counter, f"Motion_{motion_counter}",
                                 pm.lcid, base_dir, grnod_id, pm.sf,
-                                tstart, tstop, skew_id)
+                                tstart, tstop, skew_id, state=state)
         motion_counter += 1
         _register_imp_motion_nodes(state, [info["ind_node"]], base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
@@ -2532,7 +2542,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             lines += _emit_imp_card(kw, motion_counter,
                                     f"Motion_{motion_counter}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
-                                    tstart, tstop, skew_id)
+                                    tstart, tstop, skew_id, state=state)
             motion_counter += 1
             _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
@@ -2951,7 +2961,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
-                                skew_id)
+                                skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
         _register_imp_motion_nodes(state, nids, base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
@@ -2960,7 +2970,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lock_id = state.next_id()
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
-                                    tstart, tstop, skew_id)
+                                    tstart, tstop, skew_id, state=state)
             _register_imp_motion_nodes(state, nids, lock_dir)
 
     return lines

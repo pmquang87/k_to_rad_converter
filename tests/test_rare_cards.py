@@ -749,6 +749,35 @@ class FinalGeometryTests(unittest.TestCase):
         self.assertEqual(pts, [(0.002, 0.0), (0.012, 1.0)])
         self.assertTrue(_warn_containing(res, "BIRTH = 0.002", "OFFA"))
 
+    def test_bpfgid_dodges_an_existing_impdisp_id(self):
+        """/IMPDISP and /IMPDISP/FGEO are ONE starter id namespace:
+        hm_read_impvel.F:129 runs a single UDOUBLE over the merged NOM_OPT
+        slice, so a BPFGID landing on a synthesized /IMPDISP id is ERROR 79."""
+        deck = MESH.replace("{EXTRA}",
+                            RAMP
+                            + "*SET_NODE_LIST\n" + _row(600) + "\n"
+                            + _row(1, 2) + "\n"
+                            + "*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                            + _row(600, 3, 2, 901, 1.0) + "\n")
+        _res, starter, _eng = _convert(deck)
+        (existing,) = [int(ln.rsplit("/", 1)[1])
+                       for ln in _headers(starter, "/IMPDISP/")]
+        deck2 = MESH.replace("{EXTRA}",
+                             RAMP
+                             + "*SET_NODE_LIST\n" + _row(600) + "\n"
+                             + _row(1, 2) + "\n"
+                             + "*BOUNDARY_PRESCRIBED_MOTION_SET\n"
+                             + _row(600, 3, 2, 901, 1.0) + "\n"
+                             + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                             + _row(existing, 901, 0.006, 0) + "\n"
+                             + _fgeo_row(9, 25.0, 0.0, 0.0) + "\n")
+        res, starter2, _e2 = _convert(deck2)
+        ids = [int(ln.rsplit("/", 1)[1])
+               for ln in _headers(starter2, "/IMPDISP/")]
+        self.assertEqual(len(ids), len(set(ids)), ids)
+        self.assertTrue(_warn_containing(res, f"BPFGID {existing}",
+                                         "ERROR 79"))
+
     def test_missing_curve_drops_the_rows(self):
         deck = MESH.replace("{EXTRA}",
                             "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"

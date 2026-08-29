@@ -1135,6 +1135,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
     _warn_duplicate_function_ids(state, lines)
+    _warn_duplicate_impdisp_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1591,6 +1592,45 @@ def _warn_duplicate_function_ids(state: ConversionState,
                 "*DEFINE_CURVE_SMOOTH and *DEFINE_TABLE ids are independent. "
                 "The starter refuses the whole deck with ERROR 79 (DUPLICATE "
                 "ID, IN FUNCTION & TABLE DEFINITION). Renumber one of them.")
+
+
+#: ``/IMPDISP/<id>`` and ``/IMPDISP/FGEO/<id>`` — two card kinds, ONE starter
+#: id table.
+_IMPDISP_CARD_ID_RE = re.compile(r"^/IMPDISP(/FGEO)?/(\d+)\s*$")
+
+
+def _warn_duplicate_impdisp_ids(state: ConversionState,
+                                lines: List[str]) -> None:
+    """``/IMPDISP`` and ``/IMPDISP/FGEO`` share ONE id namespace.
+
+    ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` with ``HM_OPTION_COUNT`` and
+    ``/IMPDISP/FGEO`` separately only to size the two readers
+    (``NFDISP = NIMPDISP - FGEOD``) — the duplicate scan that follows,
+    ``UDOUBLE(OPTID,1,NIMPDISP,...)`` over ``NOM_OPT(1,1:NIMPDISP)``, covers
+    BOTH. ``/IMPVEL`` and ``/IMPACC`` get their own scans over their own slices,
+    so they are deliberately not in this one.
+
+    ``_make_impdisp_fgeo`` already screens a user ``BPFGID`` against the ids the
+    prescribed-motion sections recorded (``state.imp_card_ids``), so this is the
+    deck-wide backstop for any future producer that forgets to record — the
+    ``#125`` "per-id memo PLUS a deck-wide scan for every namespace" rule. It
+    changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _IMPDISP_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(
+                "/IMPDISP/FGEO" if m.group(1) else "/IMPDISP")
+    for did, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"IMPOSED-DISPLACEMENT ID {did} is emitted by more than one "
+                "card (" + ", ".join(f"{k}/{did}" for k in kinds)
+                + "). /IMPDISP and /IMPDISP/FGEO are ONE starter id namespace "
+                "(hm_read_impvel.F:129 runs a single UDOUBLE over the merged "
+                "NOM_OPT slice), so the starter refuses the deck with ERROR 79. "
+                "This is a k2rad bug — please report the deck.")
 
 
 def _warn_dangling_part_materials(state: ConversionState,

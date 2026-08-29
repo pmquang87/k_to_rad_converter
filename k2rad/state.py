@@ -7354,6 +7354,16 @@ class ConversionState:
     #: existing "is this LCID defined?" membership test resolve them, with no
     #: new registry to forget (the #111 lesson).
     funct_smooth_ids: Set[int] = field(default_factory=set)
+    #: ``{keyword: {ids}}`` for every ``/IMPVEL`` / ``/IMPACC`` / ``/IMPDISP``
+    #: card the prescribed-motion writers emitted, filled AT the line that
+    #: writes each card. ``/IMPDISP/FGEO`` screens its ``BPFGID`` against the
+    #: ``IMPDISP`` entry: ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and
+    #: ``/IMPDISP/FGEO`` together (``NIMPDISP`` includes ``FGEOD``) and runs ONE
+    #: ``UDOUBLE`` duplicate scan over the merged ``NOM_OPT`` slice, so a user
+    #: ``BPFGID`` that lands on a synthesized ``/IMPDISP`` id is ``ERROR 79``
+    #: over the whole imposed-displacement table. ``/IMPVEL`` and ``/IMPACC``
+    #: get their own scans and cannot conflict with FGEO.
+    imp_card_ids: Dict[str, Set[int]] = field(default_factory=dict)
 
     # ── Skipped / warnings ─────────────────────────────────────
     warnings: List[str] = field(default_factory=list)

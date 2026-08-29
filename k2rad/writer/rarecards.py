@@ -607,7 +607,13 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
     if not state.final_geometries:
         return []
     lines: List[str] = []
-    used_ids: Set[int] = set()
+    # /IMPDISP and /IMPDISP/FGEO are ONE id namespace: hm_read_impvel.F:96-129
+    # counts them together (NIMPDISP includes FGEOD) and runs ONE UDOUBLE scan
+    # over the merged NOM_OPT slice, so a user BPFGID landing on a synthesized
+    # /IMPDISP id is ERROR 79 over the whole table. The prescribed-motion
+    # sections run BEFORE this one in _starter_section_registry and record
+    # every id they write, so the screen is complete.
+    used_ids: Set[int] = set(state.imp_card_ids.get("IMPDISP", set()))
     for rec in state.final_geometries:
         label = _fgeo_label(rec)
         rows = _fgeo_rows(state, rec)
@@ -664,9 +670,19 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
                     "shifting alone would move the node before BIRTH.")
             impdisp_id = rec.bpfgid if rec.bpfgid > 0 else 0
             if impdisp_id <= 0 or impdisp_id in used_ids:
+                taken = impdisp_id
                 impdisp_id = state.next_id()
                 while impdisp_id in used_ids:
                     impdisp_id = state.next_id()
+                if taken > 0:
+                    state.warn(
+                        f"{label}: BPFGID {taken} is already in use by another "
+                        "/IMPDISP or /IMPDISP/FGEO card in the converted deck, "
+                        f"so this block was renumbered to {impdisp_id}. "
+                        "/IMPDISP and /IMPDISP/FGEO are ONE id namespace — "
+                        "hm_read_impvel.F:96-129 counts them together and runs "
+                        "one UDOUBLE duplicate scan over the merged table, so "
+                        f"leaving both on {taken} would be ERROR 79.")
             used_ids.add(impdisp_id)
             title = rec.title or f"FINAL_GEOMETRY_{rec.bpfgid}"
             lines += [
