@@ -6194,6 +6194,135 @@ class ConvertOptions:
     dt_del: "float | None" = None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Rare cards batch (*DEFINE_ELEMENT_DEATH, *DEFINE_CURVE_SMOOTH,
+# *PERTURBATION_NODE, *BOUNDARY_PRESCRIBED_FINAL_GEOMETRY,
+# *INTERFACE_SPRINGBACK_LSDYNA)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ElementDeath:
+    """One ``*DEFINE_ELEMENT_DEATH_<FAMILY>[_SET]`` card → one ``/ACTIV``.
+
+    Card 1 (Vol I R17 p.17-251/252): ``EID/SID TIME BOXID INOUT IDGRP CID
+    PERCENT``. ``family`` is the LS-DYNA element family (``SOLID``, ``BEAM``,
+    ``SHELL``, ``THICK_SHELL``) and ``is_set`` says whether field 1 names an
+    element or an element SET.
+
+    Only ``TIME`` has a ``/ACTIV`` slot. ``BOXID``/``INOUT``/``CID`` is a
+    SPATIAL death criterion and ``IDGRP``/``PERCENT`` a group-fraction one;
+    ``/ACTIV`` is time/sensor based only (``hm_read_activ.F``), so both are
+    warn-dropped BY NAME in writer/rarecards.py.
+    """
+    family: str
+    is_set: bool
+    eid: int
+    time: float
+    boxid: int = 0
+    inout: int = 0
+    idgrp: int = 0
+    cid: int = 0
+    percent: float = 0.0
+    title: str = ""
+
+
+@dataclass
+class PerturbationNode:
+    """One ``*PERTURBATION_NODE`` card → at most one ``/RANDOM[/GRNOD]``.
+
+    Card 1b (Vol I R17 p.38-4): ``TYPE NSID SCL CMP ICOORD CID``; card 2e
+    (``TYPE = 8`` only, p.38-10): ``AMPL DTYPE``. Only ``TYPE = 8`` ("Random
+    value from uniform distribution") maps to ``/RANDOM``, whose ``ALEAT()``
+    draws a symmetric uniform deviate on ``(-XALEA, +XALEA)``
+    (``aleat.F:48-49``). The other four types (harmonic, fade, from-file,
+    spectral) are deterministic or correlated fields with no Radioss
+    counterpart and are warn-dropped BY NAME.
+    """
+    ptype: int
+    nsid: int
+    scl: float = 1.0
+    cmp: int = 7
+    icoord: int = 0
+    cid: int = 0
+    ampl: float = 1.0
+    dtype: float = 0.0
+    title: str = ""
+
+
+@dataclass
+class FinalGeometryNode:
+    """One node row of ``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY``.
+
+    Card 2a (``IBRTH = 0``) is ``NID X Y Z LCID DEATH`` in I8/E16/E16/E16/I8/
+    E16; card 2b (``IBRTH = 1``) is ``NID X Y Z LCID DEATH BIRTH`` in
+    I8/E16/E16/E16/I8/E8/E8 — both spans recovered from the R17 column table
+    (Vol I p.5-74), whose ten 8-char columns place X/Y/Z on doubled columns.
+
+    ``nid < 0`` makes ``|nid|`` a ``*SET_NODE``: every member is projected onto
+    the plane ``z = Z`` KEEPING ITS OWN x and y (p.5-74), not moved to the one
+    point ``(X, Y, Z)``.
+    """
+    nid: int
+    x: float
+    y: float
+    z: float
+    lcid: int = 0
+    death: float = 0.0
+    birth: float = 0.0
+
+
+@dataclass
+class BoundaryPrescribedFinalGeometry:
+    """``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` → one or more ``/IMPDISP/FGEO``.
+
+    Card 1 (Vol I R17 p.5-73): ``BPFGID LCIDF DEATHD IBRTH``. ``DEATHD``
+    defaults to INFINITY, which is exactly what ``read_impdisp_fgeo.F:161``
+    (``IF (TSTOP == ZERO) TSTOP = INFINITY``) does with a blank ``Tstop`` — so
+    here, unlike ``/ACTIV``, copying a zero straight through is CORRECT.
+    """
+    bpfgid: int
+    lcidf: int
+    deathd: float
+    ibrth: int
+    nodes: List[FinalGeometryNode] = field(default_factory=list)
+    title: str = ""
+
+
+@dataclass
+class InterfaceSpringback:
+    """``*INTERFACE_SPRINGBACK_LSDYNA`` → the engine's ``/DYNAIN`` block.
+
+    Card 1 (Vol I R17 p.30-81): ``PSID NHSV FTYPE - FTENSR NTHHSV RFLAG
+    INTSTRN`` — note the BLANK fourth column. The optional cards 2 / 3.1 / 3.2
+    are recognised only when the literal string ``OPTCARD`` occupies the first
+    column ("Otherwise, the input reader assumes the second card is Card 4",
+    p.30-80); everything else after card 1 is a card-4 ``NID TC RC`` row.
+    """
+    psid: int
+    nhsv: int = 0
+    ftype: int = 0
+    ftensr: int = 0
+    nthhsv: int = 0
+    rflag: int = 0
+    intstrn: int = 0
+    # OPTCARD card 2
+    has_optcard: bool = False
+    sldo: int = 0
+    ncyc: int = 0
+    fsplit: int = 0
+    ndflag: int = 0
+    cflag: int = 0
+    hflag: int = 0
+    # OPTCARD cards 3.1 / 3.2
+    dtwrt: float = 0.0
+    nmwrt: int = 0
+    ivflg: int = 0
+    # card 4 rows: (NID, TC, RC)
+    constraints: List[Tuple[int, int, int]] = field(default_factory=list)
+    keyword: str = "INTERFACE_SPRINGBACK_LSDYNA"
+    title: str = ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -6734,6 +6863,17 @@ class ConversionState:
     shell_elem_ids: Set[int] = field(default_factory=set)
     sh3n_elem_ids: Set[int] = field(default_factory=set)
     solid_elem_ids: Set[int] = field(default_factory=set)
+    # The PART ids that own at least one of those emitted /SHELL or /SH3N rows,
+    # recorded at the same two lines. The element sets above answer "is this
+    # eid a shell?"; this one answers "does this PART carry a shell?", which is
+    # what a PART-SCOPED shells-only consumer needs: /DYNAIN/DT takes a part
+    # list and dynain_shel_mp.F / dynain_c_strsg.F / dynain_c_strag.F are its
+    # only element writers, so a part list holding no shell produces an
+    # ACCEPTED, empty dynain (measured: a 118-byte file whose whole body is
+    # *NODE + *END, at 0 ERROR / 0 WARNING) — the #122 class. Not derivable
+    # from state.parts + state.shell_elems: a shell whose PID has no *PART
+    # record is parsed and warned about but never written.
+    shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. THREE Radioss-side emission sites
     # (writer/rbody.py:645 *MAT_RIGID parts — which also covers *PART_INERTIA,
     # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
@@ -7202,6 +7342,45 @@ class ConversionState:
     # build_engine without build_starter — silence, never a spurious warning.
     th_groups_emitted: int = 0
 
+    # ── Rare cards batch ───────────────────────────────────────
+    #   *DEFINE_ELEMENT_DEATH_*            → /ACTIV (+ element groups)
+    #   *DEFINE_CURVE_SMOOTH               → /FUNCT_SMOOTH (in state.curves)
+    #   *PERTURBATION_NODE                 → /RANDOM [/GRNOD]
+    #   *BOUNDARY_PRESCRIBED_FINAL_GEOMETRY→ /IMPDISP/FGEO
+    #   *INTERFACE_SPRINGBACK_LSDYNA       → engine /DYNAIN block
+    element_deaths: List[ElementDeath] = field(default_factory=list)
+    perturbation_nodes: List[PerturbationNode] = field(default_factory=list)
+    final_geometries: List[BoundaryPrescribedFinalGeometry] = \
+        field(default_factory=list)
+    interface_springbacks: List[InterfaceSpringback] = \
+        field(default_factory=list)
+    #: LCIDs stored in ``state.curves`` that must be EMITTED as
+    #: ``/FUNCT_SMOOTH`` rather than ``/FUNCT``. The points live in
+    #: ``state.curves`` like any other curve — deliberately, because
+    #: ``/FUNCT_SMOOTH`` shares ONE starter id namespace with ``/FUNCT`` and
+    #: ``/TABLE`` (the same ``hm_read_funct.F`` reads both into ``NPC/PLD``,
+    #: differing only by ``ISMOOTH = NPC(2*NFUNCT+L+1)``; a collision is
+    #: ``ERROR ID : 79 DUPLICATE ID / IN FUNCTION & TABLE DEFINITION``). Living
+    #: in ``state.curves`` makes ``next_curve_id`` dodge them and makes every
+    #: existing "is this LCID defined?" membership test resolve them, with no
+    #: new registry to forget (the #111 lesson).
+    funct_smooth_ids: Set[int] = field(default_factory=set)
+    #: ``{keyword: {ids}}`` for every ``/IMPVEL`` / ``/IMPACC`` / ``/IMPDISP``
+    #: card the writers emitted, filled AT the line that writes each card.
+    #: THREE producers record here — ``loads._emit_imp_card`` (the
+    #: ``*BOUNDARY_PRESCRIBED_MOTION`` family), ``loads._emit_rwall_geom_motion``
+    #: (the ``*RIGIDWALL_*_MOTION`` path, which also MINTS its id through
+    #: ``next_impdisp_id``) and ``rarecards._make_impdisp_fgeo`` itself (so the
+    #: rigid-wall path, whose section runs later, can see the FGEO ids) — and
+    #: any new one must too. ``/IMPDISP/FGEO`` screens its ``BPFGID`` against
+    #: the ``IMPDISP`` entry: ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and
+    #: ``/IMPDISP/FGEO`` together (``NIMPDISP`` includes ``FGEOD``) and runs ONE
+    #: ``UDOUBLE`` duplicate scan over the merged ``NOM_OPT`` slice, so a user
+    #: ``BPFGID`` that lands on a synthesized ``/IMPDISP`` id is ``ERROR 79``
+    #: over the whole imposed-displacement table. ``/IMPVEL`` and ``/IMPACC``
+    #: get their own scans and cannot conflict with FGEO.
+    imp_card_ids: Dict[str, Set[int]] = field(default_factory=dict)
+
     # ── Skipped / warnings ─────────────────────────────────────
     warnings: List[str] = field(default_factory=list)
     # True once the "/TH/NODE REAC* is an accumulated impulse, not a force"
@@ -7250,6 +7429,29 @@ class ConversionState:
                or fid in self.define_tables_3d or fid in self.auto_tables):
             fid = self.next_id()
         return fid
+
+    def next_impdisp_id(self) -> int:
+        """A next_id() guaranteed free in the merged /IMPDISP namespace.
+
+        ``/IMPDISP`` and ``/IMPDISP/FGEO`` are ONE starter id table
+        (``hm_read_impvel.F:129`` runs a single ``UDOUBLE`` over the merged
+        ``NOM_OPT`` slice), and the FGEO ids come from the DECK — a user
+        ``BPFGID``. ``writer/rarecards._make_impdisp_fgeo`` screens a BPFGID
+        against every ``/IMPDISP`` the prescribed-motion writers recorded, but
+        its section runs BEFORE the rigid-wall one, so an id the rigid-wall
+        path mints later cannot be seen from there. This closes the other
+        direction: the minting side dodges the ids the deck states.
+
+        Same guard shape as next_curve_id / next_grnod_id / next_sensor_id, and
+        a no-op vs next_id() unless a deck carries a
+        ``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` BPFGID at or above the auto-id
+        base (90001), so it does not shift ids on any ordinary deck."""
+        taken = {r.bpfgid for r in self.final_geometries if r.bpfgid > 0}
+        taken |= self.imp_card_ids.get("IMPDISP", set())
+        did = self.next_id()
+        while did in taken:
+            did = self.next_id()
+        return did
 
     def next_sensor_id(self) -> int:
         """A next_id() guaranteed free in the /SENSOR namespace.
@@ -7404,6 +7606,28 @@ class ConversionState:
         still use next_id() and carry the same latent hazard."""
         gid = self.next_id()
         while gid in self.node_sets:
+            gid = self.next_id()
+        return gid
+
+    def next_elem_group_id(self) -> int:
+        """A next_id() guaranteed free in the ELEMENT-group namespaces.
+
+        ``/GRBRIC``, ``/GRSHEL``, ``/GRSH3N``, ``/GRBEAM``, ``/GRSPRI`` and
+        ``/GRTRUSS`` are one starter table per family, and every one of them is
+        checked against the ids the DECK states: today k2rad never re-emits a
+        user ``*SET_SHELL`` / ``_SOLID`` / ``_BEAM`` / ``_DISCRETE`` under its
+        own SID (unlike ``*SET_NODE``, which ``_make_extra_groups`` does
+        re-emit), so no collision is reachable — but that is a property of the
+        current writers, not of the id stream. The sibling of
+        ``next_grnod_id``, dodging the four element-set registries so a
+        synthesized element group cannot land on a SID a future writer decides
+        to pass through, and a no-op vs ``next_id()`` on any ordinary deck
+        (no user element set at or above the auto-id base 90001), so it does
+        not shift ids.
+        """
+        gid = self.next_id()
+        while (gid in self.shell_sets or gid in self.solid_sets
+               or gid in self.beam_sets or gid in self.discrete_sets):
             gid = self.next_id()
         return gid
 

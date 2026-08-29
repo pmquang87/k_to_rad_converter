@@ -857,16 +857,46 @@ def _monotonic_abscissae(pts):
     return out
 
 
-def _emit_funct(fid: int, title: str, pts) -> List[str]:
+def _emit_funct(fid: int, title: str, pts, smooth: bool = False) -> List[str]:
     """A /FUNCT written INLINE in a connector section.
 
     The single /FUNCT emitter (materials.py::_make_functions) runs at the
     "functions" step, which is BEFORE every connector step in the writer
     dispatch, so a curve registered in state.curves from here would never reach
     the deck. Connector-synthesized functions are therefore written where they
-    are built — the same thing the spotweld bilinear-axial function does."""
-    lines = [f"/FUNCT/{fid}", title[:100],
-             "#                  X                   Y"]
+    are built — the same thing the spotweld bilinear-axial function does.
+
+    ``smooth=True`` writes /FUNCT_SMOOTH instead, with the neutral
+    Ascalex/Fscaley/Ashiftx/Fshifty card materials._make_functions writes. That
+    is NOT cosmetic: the ISMOOTH flag it sets makes the /IMP* consumers blend
+    with the quintic smoothstep instead of interpolating linearly, which is a
+    different motion for the same points (MEASURED on the /IMPDISP/FGEO path:
+    f = 0.1035673 against the plain twin's 0.2503 at u = 0.25). A caller that
+    copies or shifts a *DEFINE_CURVE_SMOOTH must keep the flag.
+
+    The two consumers dispatch through DIFFERENT routines, and only one of them
+    clamps — do not state the clamp as a property of the flag:
+
+    * /IMPDISP/FGEO — fixfingeo.F:194-199 picks FINTER2 or FINTER2_SMOOTH.
+      FINTER2_SMOOTH (finter_smooth.F:116-152) has NO clamp: it walks IPOS to
+      the last segment and evaluates the quintic with u > 1, so past the last
+      point the smooth curve extrapolates FASTER than the plain one (measured
+      f = -7.62 vs -1.50 at the same instant).
+    * /IMPVEL — fixvel.F:314/316 calls VINTER_SMOOTH, which DOES clamp per
+      segment (vinter_smooth.F:68-71 returns the segment end ordinate outside
+      [X_FIRST, X_LAST]).
+
+    FINTER_SMOOTH (finter_smooth.F:71/74), the third routine and the other one
+    that clamps, is called by gravit.F/forcefingeo.F and by neither of these."""
+    if smooth:
+        lines = [f"/FUNCT_SMOOTH/{fid}", title[:100],
+                 "#            Ascalex             Fscaley             "
+                 "Ashiftx             Fshifty",
+                 f"{_f(1.0)}{_f(1.0)}{_f(0.0)}{_f(0.0)}",
+                 "#                  X                   Y"]
+    else:
+        lines = [f"/FUNCT/{fid}", title[:100],
+                 "#                  X                   Y"]
     for a, o in _monotonic_abscissae(pts):
         lines.append(f"{_f(a)}{_f(o)}")
     lines.append(HDR)
@@ -2321,8 +2351,16 @@ def _register_imp_motion_nodes(state: ConversionState, nids, dir_str: str
 def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
                    dir_str: str, grnod_id: int, fscale: float,
                    tstart: float, tstop: float,
-                   skew_id: int = 0) -> List[str]:
+                   skew_id: int = 0,
+                   state: Optional[ConversionState] = None) -> List[str]:
     """One /IMPVEL | /IMPACC | /IMPDISP block.
+
+    Pass *state* to record ``motion_id`` in ``state.imp_card_ids[keyword]`` —
+    the registry ``/IMPDISP/FGEO`` screens its ``BPFGID`` against, because
+    ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` and ``/IMPDISP/FGEO``
+    together and runs ONE ``UDOUBLE`` duplicate scan over the merged
+    ``NOM_OPT`` slice. (``/IMPVEL`` and ``/IMPACC`` get their own scans, so
+    they are recorded but never conflict with FGEO.)
 
     ``skew_id`` goes in cols 21-30 and is the ONLY system column that is safe on
     all three keywords. ``frame_ID`` (cols 51-60) is deliberately left at 0 even
@@ -2336,6 +2374,8 @@ def _emit_imp_card(keyword: str, motion_id: int, title: str, lcid: int,
     ERROR 3091 if a driven node is one of the frame's own N1/N2/N3, a constraint
     /SKEW/MOV does not impose. So: skews, never frames.
     """
+    if state is not None:
+        state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     return [
         f"/{keyword}/{motion_id}",
         title,
@@ -2523,7 +2563,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
                 pm.skew_id, f"SKEW_MOV_LOCAL_PID{pm.pid}", *pm.mov_nodes, "X")
         lines += _emit_imp_card(kw, motion_counter, f"Motion_{motion_counter}",
                                 pm.lcid, base_dir, grnod_id, pm.sf,
-                                tstart, tstop, skew_id)
+                                tstart, tstop, skew_id, state=state)
         motion_counter += 1
         _register_imp_motion_nodes(state, [info["ind_node"]], base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
@@ -2532,7 +2572,7 @@ def _make_imposed_motions(state: ConversionState, rbody_info: Dict) -> List[str]
             lines += _emit_imp_card(kw, motion_counter,
                                     f"Motion_{motion_counter}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
-                                    tstart, tstop, skew_id)
+                                    tstart, tstop, skew_id, state=state)
             motion_counter += 1
             _register_imp_motion_nodes(state, [info["ind_node"]], lock_dir)
     # A triad the prepass built for a card the loop then dropped (no /RBODY for
@@ -2951,7 +2991,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
         kw = PM_VAD_KEYWORD[pm.vad]
         lines += _emit_imp_card(kw, motion_id, f"Motion_{motion_id}", pm.lcid,
                                 base_dir, grnod_id, pm.sf, tstart, tstop,
-                                skew_id)
+                                skew_id, state=state)
         lines += _emit_grnod_node(grnod_id, set_title or f"SET_{pm.nsid}", nids)
         _register_imp_motion_nodes(state, nids, base_dir)
         locked, zero_fct, fct_lines = _pm_lock_cards(state, pm, keyword, ref)
@@ -2960,7 +3000,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
             lock_id = state.next_id()
             lines += _emit_imp_card(kw, lock_id, f"Motion_{lock_id}_lock",
                                     zero_fct, lock_dir, grnod_id, 1.0,
-                                    tstart, tstop, skew_id)
+                                    tstart, tstop, skew_id, state=state)
             _register_imp_motion_nodes(state, nids, lock_dir)
 
     return lines
@@ -5066,8 +5106,15 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
         yax = _vnorm(_vcross((1.0, 0.0, 0.0), v))
     zax = _vnorm(_vcross(v, yax))
     skew_id = state.reserve_skew_id(state.next_id())
-    motion_id = state.next_id()
     keyword = "IMPVEL" if rw.opt == 0 else "IMPDISP"
+    # /IMPDISP shares ONE starter id table with /IMPDISP/FGEO, whose ids come
+    # from the deck (BPFGID) — hence the guarded allocator here and the
+    # recording below. This is the third /IMP* emission site and the only one
+    # that does not go through _emit_imp_card, which is where the other two
+    # record themselves.
+    motion_id = (state.next_impdisp_id() if keyword == "IMPDISP"
+                 else state.next_id())
+    state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     lines = _emit_skew_fix(skew_id, f"RWALL_{rw.rwid}_MOTION_DIR",
                            (0.0, 0.0, 0.0), yax, zax)
     lines += [

@@ -1631,6 +1631,10 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     # so a part with no *PART record — never visited by this
                     # loop — cannot reach a /TH/SHEL group.
                     state.shell_elem_ids.add(e.eid)
+                # The PART-scoped half of the same register: /DYNAIN/DT selects
+                # by part and writes shells only, so a part list has to be
+                # screened on "owns a shell", not on "is a part".
+                state.shell_part_ids.add(pid)
                 lines.append(HDR)
             if tris:
                 # /SH3N shares the part's /PROP/SHELL (its Ish3n field selects the
@@ -1650,6 +1654,7 @@ def _make_parts_and_elements(state: ConversionState, progress=None) -> List[str]
                     # /TH/SH3N reads back, so it can never re-decide the
                     # topology differently from this loop.
                     state.sh3n_elem_ids.add(e.eid)
+                state.shell_part_ids.add(pid)
                 lines.append(HDR)
         if pid in solids_by_pid:
             # Emit 4-node tetrahedra as proper /TETRA4. Writing a tet as an

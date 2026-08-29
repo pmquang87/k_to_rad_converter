@@ -130,6 +130,8 @@ from .inistate import (_make_cross_sections, _make_eref,
                        _make_starter_th_sectio, _make_xref,
                        _resolve_xref_parts)
 from .preload import _make_preload
+from .rarecards import (_make_element_death, _make_engine_dynain,
+                        _make_impdisp_fgeo, _make_random)
 from .output import (
     _make_ams,
     _make_analysis_defaults,
@@ -1132,6 +1134,8 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
+    _warn_duplicate_function_ids(state, lines)
+    _warn_duplicate_impdisp_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1544,6 +1548,94 @@ def _warn_duplicate_sect_ids(state: ConversionState,
                 "*DATABASE_CROSS_SECTION id.")
 
 
+#: ``/FUNCT/<id>``, ``/FUNCT_SMOOTH/<id>`` and ``/TABLE/<order>/<id>`` — the
+#: three card kinds that share ONE starter id table.
+_FUNCT_CARD_ID_RE = re.compile(r"^(/FUNCT(?:_SMOOTH)?)/(\d+)\s*$")
+_TABLE_CARD_ID_RE = re.compile(r"^(/TABLE)/\d+/(\d+)\s*$")
+
+
+def _warn_duplicate_function_ids(state: ConversionState,
+                                 lines: List[str]) -> None:
+    """``/FUNCT``, ``/FUNCT_SMOOTH`` and ``/TABLE`` are ONE id namespace.
+
+    ``hm_read_funct.F`` reads ``/FUNCT`` (``HM_OPTION_COUNT`` :103) and
+    ``/FUNCT_SMOOTH`` (:104) into the same ``NPC/PLD/NOM_OPT`` arrays under one
+    running index, differing only by ``NPC(2*NFUNCT+L+1) = ISMOOTH``, and
+    ``hm_read_table.F:88`` counts "total number /TABLE + /FUNCT" before its
+    UDOUBLE duplicate pass. A shared id is
+    ``ERROR ID : 79 ** ERROR: DUPLICATE ID / IN FUNCTION & TABLE DEFINITION``
+    and no restart file — MEASURED on all three pairings (/FUNCT + /FUNCT_SMOOTH
+    on 8002; /FUNCT_SMOOTH + /TABLE on 301, which additionally raised
+    ERROR 604).
+
+    ``state.next_curve_id`` keeps SYNTHESIZED ids out of every one of those
+    registries, but nothing stops a deck from stating a ``*DEFINE_CURVE``, a
+    ``*DEFINE_CURVE_SMOOTH`` and a ``*DEFINE_TABLE`` on the same number —
+    LS-DYNA's curve and table id namespaces are separate. This is the scan that
+    sees it: one pass over the assembled starter, the sibling of
+    :func:`_warn_duplicate_prop_ids`. It changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _FUNCT_CARD_ID_RE.match(ln) or _TABLE_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for fid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"CURVE ID {fid} is emitted by more than one card ("
+                + ", ".join(f"{k}/{fid}" for k in kinds)
+                + "). /FUNCT, /FUNCT_SMOOTH and /TABLE share ONE starter id "
+                "namespace (hm_read_funct.F reads /FUNCT and /FUNCT_SMOOTH "
+                "into the same arrays; hm_read_table.F:88 merges /TABLE into "
+                "the duplicate scan), while LS-DYNA's *DEFINE_CURVE, "
+                "*DEFINE_CURVE_SMOOTH and *DEFINE_TABLE ids are independent. "
+                "The starter refuses the whole deck with ERROR 79 (DUPLICATE "
+                "ID, IN FUNCTION & TABLE DEFINITION). Renumber one of them.")
+
+
+#: ``/IMPDISP/<id>`` and ``/IMPDISP/FGEO/<id>`` — two card kinds, ONE starter
+#: id table.
+_IMPDISP_CARD_ID_RE = re.compile(r"^/IMPDISP(/FGEO)?/(\d+)\s*$")
+
+
+def _warn_duplicate_impdisp_ids(state: ConversionState,
+                                lines: List[str]) -> None:
+    """``/IMPDISP`` and ``/IMPDISP/FGEO`` share ONE id namespace.
+
+    ``hm_read_impvel.F:96-129`` counts ``/IMPDISP`` with ``HM_OPTION_COUNT`` and
+    ``/IMPDISP/FGEO`` separately only to size the two readers
+    (``NFDISP = NIMPDISP - FGEOD``) — the duplicate scan that follows,
+    ``UDOUBLE(OPTID,1,NIMPDISP,...)`` over ``NOM_OPT(1,1:NIMPDISP)``, covers
+    BOTH. ``/IMPVEL`` and ``/IMPACC`` get their own scans over their own slices,
+    so they are deliberately not in this one.
+
+    ``_make_impdisp_fgeo`` already screens a user ``BPFGID`` against the ids
+    ``state.imp_card_ids["IMPDISP"]`` holds — which is what all THREE producers
+    record into: ``loads._emit_imp_card``, ``loads._emit_rwall_geom_motion``
+    and ``_make_impdisp_fgeo`` itself. The rigid-wall one runs AFTER the FGEO
+    section, so it dodges from its own side (``state.next_impdisp_id``) instead
+    of being screened here. This is the deck-wide backstop for any future
+    producer that forgets to do either — the ``#125`` "per-id memo PLUS a
+    deck-wide scan for every namespace" rule. It changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _IMPDISP_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(
+                "/IMPDISP/FGEO" if m.group(1) else "/IMPDISP")
+    for did, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"IMPOSED-DISPLACEMENT ID {did} is emitted by more than one "
+                "card (" + ", ".join(f"{k}/{did}" for k in kinds)
+                + "). /IMPDISP and /IMPDISP/FGEO are ONE starter id namespace "
+                "(hm_read_impvel.F:129 runs a single UDOUBLE over the merged "
+                "NOM_OPT slice), so the starter refuses the deck with ERROR 79. "
+                "This is a k2rad bug — please report the deck.")
+
+
 def _warn_dangling_part_materials(state: ConversionState,
                                   lines: List[str]) -> None:
     """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
@@ -1706,6 +1798,13 @@ def _starter_section_registry():
                                                    c.rigid_nodes)),
         ("imposed_motions",   lambda c: _make_imposed_motions(c.state, c.rbody_info)),
         ("imposed_motions_set", lambda c: _make_imposed_motions_set(c.state)),
+        # *BOUNDARY_PRESCRIBED_FINAL_GEOMETRY -> /IMPDISP/FGEO, beside the two
+        # sections it is a sibling of: read_impdisp_fgeo.F is reached from the
+        # same hm_read_impvel.F option loop as the plain /IMPDISP, and the two
+        # share the IBFVEL/FBFVEL arrays. A no-op — and it draws no id — on any
+        # deck without the keyword, so it cannot shift an existing deck's id
+        # stream (the #119 fixture rule).
+        ("impdisp_fgeo",      lambda c: _make_impdisp_fgeo(c.state)),
         ("inivel",            lambda c: _make_inivel(c.state, c.rbody_info)),
         ("initial_velocity",  lambda c: _make_initial_velocity(c.state)),
         ("initial_velocity_generation",
@@ -1796,6 +1895,19 @@ def _starter_section_registry():
         # any deck without the two keywords, so it cannot shift an existing
         # deck's id stream.
         ("preload",           lambda c: _make_preload(c.state)),
+        # *DEFINE_ELEMENT_DEATH_* -> /ACTIV. AFTER parts_elements far above,
+        # which fills state.shell_elem_ids / sh3n_elem_ids / solid_elem_ids /
+        # beam_elem_ids and the three BEAM->/SPRING re-route registries at the
+        # line that writes each element row — the same "registry filled at the
+        # write line, consumed by a later section" ordering the /CLUSTER +
+        # swforc pair relies on. A no-op drawing no id on any deck without the
+        # keyword.
+        ("element_death",     lambda c: _make_element_death(c.state)),
+        # *PERTURBATION_NODE -> /RANDOM[/GRNOD]. AFTER extra_groups, which is
+        # where a user *SET_NODE that no other card consumed is re-emitted as
+        # /GRNOD/NODE/<nsid> — the group this card references by id. A no-op
+        # drawing no id on any deck without the keyword.
+        ("random_noise",      lambda c: _make_random(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),
         ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
         ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
@@ -2064,6 +2176,13 @@ def build_engine(state: ConversionState) -> str:
         # why the unconditional /PARITH/OFF dyna2rad writes is not neutral.
         _make_engine_parith(state),
         _make_engine_output(state),
+        # /DYNAIN is an ENGINE keyword, so it goes here rather than into the
+        # starter. After _make_engine_output because the starter-side
+        # registries it screens (state.shell_elem_ids, state.parts) are filled
+        # by build_starter, which k2rad/__init__.py runs BEFORE build_engine,
+        # and because check_dynain.F re-parses this file from inside the
+        # STARTER — see _make_engine_dynain for the two measured traps.
+        _make_engine_dynain(state),
         _make_engine_timestep(state),
         _make_engine_dt_deletion(state),
         _make_engine_implicit(state),
