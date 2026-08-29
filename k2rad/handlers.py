@@ -87,6 +87,8 @@ from .state import (
     MatShapeMemory, MatMuscle, MatSpringMuscle,
     MatAddThermalExpansion, MatThermalIsotropic,
     InitialTemperature, ImposedTemperature,
+    ElementDeath, PerturbationNode, FinalGeometryNode,
+    BoundaryPrescribedFinalGeometry, InterfaceSpringback,
 )
 
 
@@ -14207,6 +14209,650 @@ _SEATBELT_MAT_KEYWORDS = ("MAT_SEATBELT", "MAT_SEATBELT_2D",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Rare cards batch
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: ``*DEFINE_ELEMENT_DEATH_<OPTION>``: the eight OPTIONs of Vol I R17 p.17-251,
+#: mapped to ``(family, is_set)``. There is NO ``_TITLE`` option on this
+#: keyword — neither the manual's option list nor
+#: ``Keyword971_R11.1/PROPERTY/define_elem_death.cfg:74-81`` admits one — but a
+#: deck that writes one anyway still dispatches, because
+#: ``parser._split_keyword`` strips a trailing ``_TITLE`` into
+#: ``block.options`` before ``dispatch`` sees the keyword.
+#:
+#: ``_SET`` is part of the BASE keyword, not an option: the same cell is an
+#: element id in one spelling and a ``*SET_<FAMILY>`` id in the other, i.e. two
+#: different ``*INCLUDE_TRANSFORM`` buckets, so both spellings are listed in
+#: full (the ``*INITIAL_STRAIN_SHELL[_SET]`` precedent).
+_ELEMENT_DEATH_OPTIONS = {
+    "SOLID":            ("SOLID", False),
+    "SOLID_SET":        ("SOLID", True),
+    "BEAM":             ("BEAM", False),
+    "BEAM_SET":         ("BEAM", True),
+    "SHELL":            ("SHELL", False),
+    "SHELL_SET":        ("SHELL", True),
+    "THICK_SHELL":      ("THICK_SHELL", False),
+    "THICK_SHELL_SET":  ("THICK_SHELL", True),
+}
+
+
+def handle_define_element_death(block: Block, state: ConversionState) -> None:
+    """``*DEFINE_ELEMENT_DEATH_<FAMILY>[_SET]`` → ``/ACTIV`` (writer side).
+
+    Card 1, ONE card per keyword instance (Vol I R17 p.17-251/252, and
+    ``define_elem_death.cfg:429/497`` ``%10d%10lg%10d%10d%10d%10d%10lg``)::
+
+        EID/SID   TIME   BOXID   INOUT   IDGRP   CID   PERCENT
+
+    Older layouts are SHORTER, not different: ``FORMAT(Keyword971_R6.1)`` has 4
+    fields (:159), ``Keyword971_R8.0`` 6 (:294), ``R11.1`` 7 (:429). Reading by
+    COLUMN with ``fixed=True, n=8, w=10`` therefore covers all three — a short
+    card simply leaves the trailing cells blank.
+
+    Everything but ``EID/SID`` and ``TIME`` is carried into the record only so
+    the writer can name what it drops; see writer/rarecards.py for the
+    verdicts. dyna2rad never even reads them
+    (``convertdefineelementdeath.cxx`` has ``GetValue``s for ``SID`` and
+    ``EID`` only).
+    """
+    opt = block.keyword[len("DEFINE_ELEMENT_DEATH_"):]
+    family, is_set = _ELEMENT_DEATH_OPTIONS[opt]
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or not f[0].strip():
+        return
+    eid = to_int(f[0])
+    if eid <= 0:
+        state.warn(
+            f"*DEFINE_ELEMENT_DEATH_{opt}: field 1 is "
+            f"{f[0].strip()!r}, not a positive element"
+            f"{' set' if is_set else ''} id — card dropped.")
+        return
+    state.element_deaths.append(ElementDeath(
+        family=family, is_set=is_set, eid=eid,
+        time=to_float(f[1]) if len(f) > 1 else 0.0,
+        boxid=to_int(f[2]) if len(f) > 2 else 0,
+        inout=to_int(f[3]) if len(f) > 3 else 0,
+        idgrp=to_int(f[4]) if len(f) > 4 else 0,
+        cid=to_int(f[5]) if len(f) > 5 else 0,
+        percent=to_float(f[6]) if len(f) > 6 else 0.0,
+        title=title))
+
+
+def smooth_curve_points(dist: float, tstart: float, tend: float,
+                        trise: float, vmax: float):
+    """The four trapezoid vertices of a ``*DEFINE_CURVE_SMOOTH``.
+
+    Returns ``(points, vmax, tend, note)`` — ``note`` is ``""`` when nothing
+    had to be repaired.
+
+    Vol I R17 p.17-154 makes ``TEND`` and ``VMAX`` mutually exclusive
+    ("**Input either TEND or VMAX**"), each back-solved from ``DIST``, "Total
+    distance tool will travel (area under curve)". The trapezoid with vertices
+    ``(TSTART,0) (TSTART+TRISE,VMAX) (TEND-TRISE,VMAX) (TEND,0)`` has area
+
+        A = VMAX * [(TEND-TSTART) + (TEND-TRISE-TSTART-TRISE)] / 2
+          = VMAX * (TEND - TSTART - TRISE)
+
+    so ``VMAX = DIST/(TEND-TSTART-TRISE)`` and ``TEND = DIST/VMAX + TSTART +
+    TRISE`` are the two exact inverses of one identity. **No conversion factor
+    is involved** — the same closed form on both sides (the #128 rule). This
+    stays true for the ``/FUNCT_SMOOTH`` quintic blend as well: the smoothstep
+    ``S(u) = u^3 (10 - 15u + 6u^2)`` integrates to exactly ``1/2`` over
+    ``[0,1]`` (``finter_smooth.F:92-101``), so each blended ramp contributes
+    the same ``VMAX*TRISE/2`` a straight ramp does.
+
+    Two guards dyna2rad does not have:
+
+    * ``convertcurves.cxx:325`` fires only when ``TEND-TSTART-TRISE != 0``, so
+      the case ``VMAX = 0``, ``TEND != 0``, ``TEND == TSTART+TRISE`` falls
+      through EVERY branch and d2r emits a flat all-zero 4-point curve with no
+      diagnostic. Here it is a named refusal.
+    * ``TRISE = 0`` (or a ``TRISE`` that would consume the whole window)
+      collapses the trapezoid onto duplicate abscissae, which is starter
+      ``ERROR 156`` (``hm_read_funct.F:240-243`` refuses a non-increasing
+      abscissa). The vertices are nudged apart on the CARD value, so the
+      emitted function keeps ``DIST`` exactly and still returns to zero at
+      ``TEND`` — the ``TRISE -> 0`` limit rather than a rejected deck.
+    """
+    note = ""
+    if vmax == 0.0 and tend == 0.0:
+        return None, vmax, tend, ("neither TEND nor VMAX is stated, so the "
+                                  "travel distance DIST determines nothing")
+    if vmax == 0.0:
+        span = tend - tstart - trise
+        # A span that is only float noise (0.03 - 0.01 - 0.02 = -3.5e-18) is a
+        # zero, not a divisor: taking it at face value gives VMAX ~ 1e18.
+        # dyna2rad's test is a bare ``!= 0.0`` (convertcurves.cxx:325).
+        scale = max(abs(tend), abs(tstart), abs(trise))
+        if scale > 0.0 and abs(span) <= 1.0e-9 * scale:
+            span = 0.0
+        if span == 0.0:
+            return None, vmax, tend, (
+                f"VMAX is blank and TEND-TSTART-TRISE = {tend:g}-{tstart:g}-"
+                f"{trise:g} = 0 to card precision, so the back-solve "
+                "VMAX = DIST/(TEND-TSTART-TRISE) divides by zero")
+        if span < 0.0:
+            return None, vmax, tend, (
+                f"VMAX is blank and TEND-TSTART-TRISE = {tend:g}-{tstart:g}-"
+                f"{trise:g} = {span:g} is NEGATIVE — the rise time alone "
+                "exceeds the window, so the trapezoid has no plateau and the "
+                "back-solve VMAX = DIST/(TEND-TSTART-TRISE) would come out "
+                "with the wrong sign")
+        vmax = dist / span
+        note = (f"VMAX was blank and back-solved from DIST/(TEND-TSTART-TRISE) "
+                f"= {dist:g}/{span:g} = {vmax:g}")
+    else:
+        new_tend = dist / vmax + tstart + trise
+        if tend and abs(new_tend - tend) > 1.0e-12 * max(1.0, abs(tend)):
+            note = (f"both TEND ({tend:g}) and VMAX ({vmax:g}) are stated, "
+                    "which Vol I R17 p.17-154 forbids ('Input either TEND or "
+                    f"VMAX'); VMAX was honoured and TEND recomputed as "
+                    f"DIST/VMAX + TSTART + TRISE = {new_tend:g}")
+        elif not tend:
+            note = (f"TEND was blank and back-solved from DIST/VMAX + TSTART "
+                    f"+ TRISE = {new_tend:g}")
+        tend = new_tend
+    pts = [(tstart, 0.0), (tstart + trise, vmax),
+           (tend - trise, vmax), (tend, 0.0)]
+    return _strictly_increasing(pts), vmax, tend, note
+
+
+def _card_abscissa(v: float) -> float:
+    """The abscissa the starter reads back from a ``_f`` field (%.10G, or
+    %.6E outside 1e-4..1e15) — the value ``hm_read_funct.F:240`` compares.
+
+    A tie-break finer than the printed field survives in memory and vanishes on
+    the card (#113), so monotonicity has to be enforced on THIS number.
+    """
+    if v == 0.0:
+        s = "0"
+    elif abs(v) >= 1e15 or (0.0 < abs(v) < 1e-4):
+        s = f"{v:.6E}"
+    else:
+        s = f"{v:.10G}"
+    return float(s)
+
+
+def _strictly_increasing(pts):
+    """Force a point list to grow strictly AS PRINTED (see _card_abscissa).
+
+    Mirrors ``writer/loads._monotonic_abscissae``; kept here because the smooth
+    curve is built at PARSE time and stored in ``state.curves``, which
+    ``materials._make_functions`` emits without that guard. Points already
+    strictly increasing are returned unchanged, so a well-formed curve is
+    byte-identical either way.
+    """
+    out = []
+    for a, o in pts:
+        x = float(a)
+        if out:
+            prev = _card_abscissa(out[-1][0])
+            step = max(abs(prev), 1.0) * 1.0e-8
+            for _ in range(64):
+                if _card_abscissa(x) > prev:
+                    break
+                x = prev + step
+                step *= 2.0
+        out.append((x, float(o)))
+    return out
+
+
+def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
+    """``*DEFINE_CURVE_SMOOTH[_TITLE]`` → ``/FUNCT_SMOOTH``.
+
+    Card 1 (Vol I R17 p.17-153/154, ``Keyword971_R13.0/CURVE/
+    define_curve_smooth.cfg:87-88`` ``%10d%10d%10lg%10lg%10lg%10lg%10lg``)::
+
+        LCID   SIDR   DIST   TSTART   TEND   TRISE   VMAX
+
+    There is no eighth cell: ``LSD_LCINT`` exists in the cfg ATTRIBUTES but is
+    not on the R13.0 FORMAT card and not in the manual, so it is not parsed
+    (the #127 "parse only the fields the keyword defines" rule).
+
+    The curve is registered in ``state.curves`` like an ordinary
+    ``*DEFINE_CURVE`` and merely FLAGGED in ``state.funct_smooth_ids``, because
+    ``/FUNCT_SMOOTH`` shares ONE starter id namespace with ``/FUNCT`` and
+    ``/TABLE``: ``hm_read_funct.F`` reads both keywords (``HM_OPTION_COUNT
+    ('/FUNCT')`` :103 and ``('/FUNCT_SMOOTH')`` :104) into the same
+    ``NPC/PLD/NOM_OPT`` arrays under one running index, differing only by
+    ``NPC(2*NFUNCT+L+1) = ISMOOTH``. MEASURED: ``/FUNCT/8002`` beside
+    ``/FUNCT_SMOOTH/8002`` is ``ERROR ID : 79 ** ERROR: DUPLICATE ID / IN
+    FUNCTION & TABLE DEFINITION``. Storing it in ``state.curves`` makes
+    ``next_curve_id`` dodge it and makes all 97 existing "is this LCID
+    defined?" membership tests resolve it, with no new registry for a future
+    allocator to forget (the #111 lesson).
+
+    ``SIDR`` (0 transient / 1 dynamic-relaxation only / 2 both) has no Radioss
+    counterpart and is warn-dropped BY NAME; ``SIDR = 1`` additionally means
+    the curve must not drive the transient run at all.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    if not f or not f[0].strip():
+        return
+    lcid = to_int(f[0])
+    if lcid <= 0:
+        state.warn("*DEFINE_CURVE_SMOOTH: LCID "
+                   f"{f[0].strip()!r} is not a positive id — card dropped.")
+        return
+    sidr = to_int(f[1]) if len(f) > 1 else 0
+    dist = to_float(f[2]) if len(f) > 2 else 0.0
+    tstart = to_float(f[3]) if len(f) > 3 else 0.0
+    tend = to_float(f[4]) if len(f) > 4 else 0.0
+    trise = to_float(f[5]) if len(f) > 5 else 0.0
+    vmax = to_float(f[6]) if len(f) > 6 else 0.0
+    label = f"*DEFINE_CURVE_SMOOTH LCID {lcid}"
+    # A cell that is a *PARAMETER reference the parser could not resolve reads
+    # back as 0.0 and would silently change the ramp; say which cell it was.
+    unresolved = [name for name, cell in
+                  (("DIST", 2), ("TSTART", 3), ("TEND", 4), ("TRISE", 5),
+                   ("VMAX", 6))
+                  if len(f) > cell and f[cell].strip().startswith(("&", "-&"))
+                  and to_float(f[cell]) == 0.0]
+    if unresolved:
+        state.warn(
+            f"{label}: the cell(s) {', '.join(unresolved)} hold a *PARAMETER "
+            "reference the parser could not resolve (an inline arithmetic "
+            "expression such as '&tend/6.0' is not evaluated — only a bare "
+            "'&name' is) and were read as 0. The curve below is the one that "
+            "reading implies, not the deck's intent; define the value with a "
+            "*PARAMETER_EXPRESSION of its own and re-run.")
+    pts, vmax, tend, note = smooth_curve_points(dist, tstart, tend, trise, vmax)
+    if pts is None:
+        state.warn(
+            f"{label}: {note} — no /FUNCT_SMOOTH emitted. dyna2rad raises the "
+            "same refusal for the blank/blank case only (reader message "
+            "200039, 'At least one of the input parameters must be non zero: "
+            "VMAX, TEND'), and silently emits an all-zero flat curve for the "
+            "others.")
+        return
+    if note:
+        state.warn(f"{label}: {note}.")
+    if trise > 0.0 and 2.0 * trise > (tend - tstart) * (1.0 + 1.0e-9):
+        state.warn(
+            f"{label}: TRISE = {trise:g} is more than half the window "
+            f"TEND-TSTART = {tend - tstart:g}, so the rise and the fall "
+            "overlap and the trapezoid's third vertex (TEND-TRISE) falls "
+            "BEFORE its second (TSTART+TRISE). The vertices were reordered "
+            "into a strictly increasing abscissa list — starter ERROR 156 "
+            "otherwise — but the emitted ramp is no longer the shape of "
+            "Figure 17-25.")
+    if trise <= 0.0:
+        state.warn(
+            f"{label}: TRISE = {trise:g} makes the trapezoid's rise and fall "
+            "instantaneous, i.e. the four vertices collapse onto two "
+            "abscissae. A /FUNCT whose abscissa does not grow is starter "
+            "ERROR 156 (hm_read_funct.F:240-243), so the two duplicated "
+            "abscissae were nudged apart by one card digit. The emitted "
+            f"function still holds VMAX = {vmax:g} over TSTART..TEND and its "
+            f"area is DIST = {dist:g}; only the ramp SHAPE is lost.")
+    if sidr:
+        state.warn(
+            f"{label}: SIDR = {sidr} has no /FUNCT_SMOOTH slot and was "
+            "dropped (dyna2rad drops it too). SIDR scopes the curve to "
+            "LS-DYNA's dynamic-relaxation stress-initialization phase"
+            + (" — SIDR=1 means the curve is used for initialization ONLY and "
+               "NOT in the transient analysis, so driving the transient run "
+               "with it, as this conversion now does, is not what the deck "
+               "asks for." if sidr == 1 else
+               " (SIDR=2 = both phases; OpenRadioss has no separate "
+               "relaxation phase, so the transient use is all that survives)."))
+    state.curves[lcid] = Curve(lcid, title, 1.0, 1.0, 0.0, 0.0, pts)
+    state.curve_order.append(lcid)
+    state.funct_smooth_ids.add(lcid)
+
+
+def perturbation_node_records(raw: List[str]):
+    """Yield ``(card1_idx, card2_indices)`` per ``*PERTURBATION_NODE`` record.
+
+    One ``*PERTURBATION_NODE`` keyword carries exactly ONE card 1 and then the
+    card-2 stack its ``TYPE`` selects (Vol I R17 p.38-4..38-10):
+
+    ======  ==========================================================
+    TYPE    card 2
+    ======  ==========================================================
+    1       ``AMPL XWL XOFF YWL YOFF ZWL ZOFF``, REPEATED to the next ``*``
+    2       ``FADE``
+    3       ``FNAME`` (a free string)
+    4       ``CSTYPE ELLIP1 ELLIP2 RND`` + 1..3 ``CFTYPE CFC1 CFC2 CFC3``
+    8       ``AMPL DTYPE``
+    ======  ==========================================================
+
+    RAW CONTIGUITY (#119): card 2 is claimed by ROW INDEX from card 1. An
+    all-blank card 2 is legal (every field of 2a/2b/2d/2e defaults), and a
+    "next non-blank row" walk would step past the placeholder.
+    """
+    i = 0
+    n = len(raw)
+    while i < n and not raw[i].strip():
+        i += 1
+    if i >= n:
+        return
+    card1 = i
+    f = _card(raw, card1, fixed=True, n=8, w=10)
+    ptype = to_int(f[0]) if f and f[0].strip() else 1
+    i += 1
+    if ptype == 4:
+        # card 2d + 1..3 card-2d.1 rows, the count keyed on CSTYPE
+        cstype = 0
+        if i < n:
+            g = _card(raw, i, fixed=True, n=8, w=10)
+            cstype = to_int(g[0]) if g and g[0].strip() else 0
+        extra = {1: 1, 2: 3}.get(cstype, 2) if cstype else 1
+        rows = [k for k in range(i, min(n, i + 1 + extra))]
+    elif ptype == 1:
+        rows = list(range(i, n))
+    else:
+        rows = [i] if i < n else []
+    yield (card1, rows)
+
+
+def handle_perturbation_node(block: Block, state: ConversionState) -> None:
+    """``*PERTURBATION_NODE`` → ``/RANDOM`` or ``/RANDOM/GRNOD``.
+
+    Card 1b (Vol I R17 p.38-4): ``TYPE NSID SCL CMP ICOORD CID``, defaults
+    ``TYPE = 1``, ``NSID = {all}``, ``SCL = 1.0``, ``CMP = 7``, ``ICOORD = 0``,
+    ``CID = 0``. The type-dependent card 2 is claimed by raw row index.
+
+    ``/RANDOM`` is the only Radioss card that touches nodal COORDINATES —
+    ``hm_read_rand.F:161-163`` adds ``XALEA*ALEAT()`` to ``X(1..3,I)`` at
+    STARTER time, which is exactly "modifies the three-dimensional coordinates
+    for the whole model or a node set" (p.38-2). The ``/PERTURB/*`` family in
+    the same starter directory is a different feature: ``/PERTURB/PART/SHELL``
+    accepts only ``chvar = "thick"`` (``hm_read_perturb_part_shell.F:142``) and
+    ``/PERTURB/PART/SOLID`` only ``chvar = "dens"`` (:139) — those are the
+    counterparts of ``*PERTURBATION_SHELL_THICKNESS`` and
+    ``*PERTURBATION_MAT``, not of ``_NODE``.
+
+    Only the TYPE it can express is stored; the writer decides scope and warns.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    body = block.raw[offset:]
+    for card1, rows in perturbation_node_records(body):
+        f = _card(body, card1, fixed=True, n=8, w=10)
+        if not f:
+            return
+        rec = PerturbationNode(
+            ptype=to_int(f[0]) if f[0].strip() else 1,
+            nsid=to_int(f[1]) if len(f) > 1 else 0,
+            scl=_ffield(f, 2, 1.0),
+            cmp=to_int(f[3]) if len(f) > 3 and f[3].strip() else 7,
+            icoord=to_int(f[4]) if len(f) > 4 else 0,
+            cid=to_int(f[5]) if len(f) > 5 else 0,
+            title=title)
+        if rec.ptype == 8 and rows:
+            g = _card(body, rows[0], fixed=True, n=8, w=10)
+            rec.ampl = _ffield(g, 0, 1.0)
+            rec.dtype = to_float(g[1]) if len(g) > 1 else 0.0
+        state.perturbation_nodes.append(rec)
+
+
+def final_geometry_node_row(line: str, ibrth: int) -> List[str]:
+    """Slice one ``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` node card.
+
+    NOT the uniform 8x10 grid. Vol I R17 p.5-74 lays both card formats out over
+    ten 8-char columns, with the three coordinates on DOUBLED columns
+    (recovered from the manual's own column ruler):
+
+    * card 2a (``IBRTH = 0``): ``NID`` I8, ``X``/``Y``/``Z`` E16 each,
+      ``LCID`` I8, ``DEATH`` E16 — the same
+      ``%8d%16lg%16lg%16lg%8d%16lg`` the R14.1 cfg states (:124);
+    * card 2b (``IBRTH = 1``): the same first five, then ``DEATH`` E8 and
+      ``BIRTH`` E8, so the seventh variable still fits inside eighty columns.
+
+    Slicing this card 10-wide is the ``*ELEMENT_MASS`` failure (:157-166): the
+    read would start ``Y`` in the middle of ``X``. A comma/space free-format
+    row is split as written, the convention every other card in this converter
+    follows.
+    """
+    data = _strip_inline_comment(line)
+    if "," in data:
+        toks = parse_free(data)
+        return toks + [""] * max(0, 7 - len(toks))
+    if ibrth == 1:
+        cuts = ((0, 8), (8, 24), (24, 40), (40, 56), (56, 64), (64, 72),
+                (72, 80))
+    else:
+        cuts = ((0, 8), (8, 24), (24, 40), (40, 56), (56, 64), (64, 80),
+                (80, 80))
+    out = [data[a:b].strip() for a, b in cuts]
+    if any(" " in x for x in out):
+        toks = parse_free(data)
+        return toks + [""] * max(0, 7 - len(toks))
+    return out
+
+
+def handle_boundary_prescribed_final_geometry(block: Block,
+                                              state: ConversionState) -> None:
+    """``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` → ``/IMPDISP/FGEO``.
+
+    Card 1 (Vol I R17 p.5-73): ``BPFGID LCIDF DEATHD IBRTH``. The node rows
+    repeat to the next ``*`` and are claimed by RAW CONTIGUITY from card 1
+    (#119) — a blank row inside the list is skipped, never treated as a new
+    card 1.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f:
+        return
+    rec = BoundaryPrescribedFinalGeometry(
+        bpfgid=to_int(f[0]) if f[0].strip() else 0,
+        lcidf=to_int(f[1]) if len(f) > 1 else 0,
+        deathd=to_float(f[2]) if len(f) > 2 else 0.0,
+        ibrth=to_int(f[3]) if len(f) > 3 else 0,
+        title=title)
+    for k in range(offset + 1, len(raw)):
+        line = raw[k]
+        if not line.strip():
+            continue
+        g = final_geometry_node_row(line, rec.ibrth)
+        if not g or not g[0].strip():
+            continue
+        nid = to_int(g[0])
+        if nid == 0:
+            continue
+        rec.nodes.append(FinalGeometryNode(
+            nid=nid,
+            x=to_float(g[1]) if len(g) > 1 else 0.0,
+            y=to_float(g[2]) if len(g) > 2 else 0.0,
+            z=to_float(g[3]) if len(g) > 3 else 0.0,
+            lcid=to_int(g[4]) if len(g) > 4 else 0,
+            death=to_float(g[5]) if len(g) > 5 else 0.0,
+            birth=to_float(g[6]) if len(g) > 6 and rec.ibrth == 1 else 0.0))
+    state.final_geometries.append(rec)
+
+
+#: The literal string that promotes the card after card 1 from a node card to
+#: an optional card: "For LS-DYNA to interpret the card as this card, include
+#: the string 'OPTCARD' in the first column. Otherwise, the input reader
+#: assumes the second card is Card 4." (Vol I R17 p.30-80). This is the one
+#: legitimate CONTENT test in an optional-card walk — the manual mandates it —
+#: and it is applied only at the fixed row positions 1/2/3 after card 1, never
+#: as a "find the next OPTCARD" scan.
+_SPRINGBACK_OPTCARD = "OPTCARD"
+
+
+def springback_records(raw: List[str]):
+    """Yield ``(card1_idx, optcard_indices, node_row_indices)``.
+
+    RAW CONTIGUITY (#119) with the manual's own ``OPTCARD`` promotion rule: the
+    rows immediately after card 1 are optional cards 2, 3.1 and 3.2 for as long
+    as each begins with ``OPTCARD``; the first row that does not is the first
+    card-4 ``NID TC RC`` node row, and every remaining row is another one.
+    """
+    i = 0
+    n = len(raw)
+    while i < n and not raw[i].strip():
+        i += 1
+    if i >= n:
+        return
+    card1 = i
+    i += 1
+    opt: List[int] = []
+    while i < n and len(opt) < 3:
+        line = raw[i]
+        if line.strip().upper().startswith(_SPRINGBACK_OPTCARD):
+            opt.append(i)
+            i += 1
+            continue
+        break
+    nodes = [k for k in range(i, n) if raw[k].strip()]
+    yield (card1, opt, nodes)
+
+
+def handle_interface_springback(block: Block, state: ConversionState) -> None:
+    """``*INTERFACE_SPRINGBACK_LSDYNA`` → the engine ``/DYNAIN`` block.
+
+    Card 1 (Vol I R17 p.30-81, ``Keyword971_R14.1/CONTROL_CARDS/
+    interface_springback.cfg:305`` ``%10d%10d%10d%10s%10d%10d%10d%10d``)::
+
+        PSID   NHSV   FTYPE   <blank>   FTENSR   NTHHSV   RFLAG   INTSTRN
+
+    Column FOUR is blank — every corpus carrier's own comment line spells it
+    ``$#    psid      nshv     ftype         -    ftensr    nthhsv     rflag
+    intstrn`` — so ``FTENSR`` is cell index 4, not 3.
+
+    Optional cards 2 / 3.1 / 3.2 are claimed by the ``OPTCARD`` rule; the rest
+    are card-4 ``NID TC RC`` rows (``%10d%10lf%10lf``, cfg :327).
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    body = block.raw[offset:]
+    for card1, opt, nodes in springback_records(body):
+        f = _card(body, card1, fixed=True, n=8, w=10)
+        if not f:
+            return
+        rec = InterfaceSpringback(
+            psid=to_int(f[0]) if f[0].strip() else 0,
+            nhsv=to_int(f[1]) if len(f) > 1 else 0,
+            ftype=to_int(f[2]) if len(f) > 2 else 0,
+            ftensr=to_int(f[4]) if len(f) > 4 else 0,
+            nthhsv=to_int(f[5]) if len(f) > 5 else 0,
+            rflag=to_int(f[6]) if len(f) > 6 else 0,
+            intstrn=to_int(f[7]) if len(f) > 7 else 0,
+            keyword=block.keyword, title=title)
+        if opt:
+            rec.has_optcard = True
+            g = _card(body, opt[0], fixed=True, n=8, w=10)
+            rec.sldo = to_int(g[1]) if len(g) > 1 else 0
+            rec.ncyc = to_int(g[2]) if len(g) > 2 else 0
+            rec.fsplit = to_int(g[3]) if len(g) > 3 else 0
+            rec.ndflag = to_int(g[4]) if len(g) > 4 else 0
+            rec.cflag = to_int(g[5]) if len(g) > 5 else 0
+            rec.hflag = to_int(g[6]) if len(g) > 6 else 0
+        if len(opt) > 1:
+            g = _card(body, opt[1], fixed=True, n=8, w=10)
+            rec.dtwrt = to_float(g[1]) if len(g) > 1 else 0.0
+        if len(opt) > 2:
+            g = _card(body, opt[2], fixed=True, n=8, w=10)
+            rec.nmwrt = to_int(g[1]) if len(g) > 1 else 0
+            rec.ivflg = to_int(g[2]) if len(g) > 2 else 0
+        for k in nodes:
+            g = _card(body, k, fixed=True, n=8, w=10)
+            nid = to_int(g[0]) if g and g[0].strip() else 0
+            if nid <= 0:
+                continue
+            rec.constraints.append(
+                (nid, to_int(g[1]) if len(g) > 1 else 0,
+                 to_int(g[2]) if len(g) > 2 else 0))
+        state.interface_springbacks.append(rec)
+
+
+def _springback_sibling(keyword: str, what: str):
+    """A recognized + NAMED warn-drop for an ``*INTERFACE_SPRINGBACK`` option
+    this converter does not convert.
+
+    dyna2rad reads ``*INTERFACE_SPRINGBACK_LSDYNA`` and nothing else (one
+    ``SelectionRead`` at ``convertcards.cxx:1071``), so ``_NASTRAN``,
+    ``_SEAMLESS`` and ``_EXCLUDE`` vanish there without a word. Named here
+    instead: each writes a DIFFERENT artifact, and a deck whose whole purpose
+    is that artifact should not read "skipped: 1 unsupported keyword".
+    """
+    def _handler(block: Block, state: ConversionState) -> None:
+        state.note_recognized_not_emitted(keyword, what)
+    _handler.__name__ = f"handle_{keyword.lower()}"
+    return _handler
+
+
+def _perturbation_sibling(keyword: str, what: str):
+    """The same named warn-drop for the two ``*PERTURBATION`` options that
+    perturb something other than the nodal coordinates."""
+    def _handler(block: Block, state: ConversionState) -> None:
+        state.note_recognized_not_emitted(keyword, what)
+    _handler.__name__ = f"handle_{keyword.lower()}"
+    return _handler
+
+
+#: The RARE CARDS batch, as ONE source for HANDLERS and for
+#: assembly._OFFSET_SPECS (#116: a spelling the handler reads and the
+#: *INCLUDE_TRANSFORM offsetter does not know keeps its original ids while the
+#: rest of the include moves — a dangling EID/NID/LCID at 0 diagnostics).
+RARE_CARD_KEYWORDS = {
+    **{f"DEFINE_ELEMENT_DEATH_{_o}": handle_define_element_death
+       for _o in _ELEMENT_DEATH_OPTIONS},
+    "DEFINE_CURVE_SMOOTH": handle_define_curve_smooth,
+    "PERTURBATION_NODE": handle_perturbation_node,
+    "BOUNDARY_PRESCRIBED_FINAL_GEOMETRY":
+        handle_boundary_prescribed_final_geometry,
+    "INTERFACE_SPRINGBACK_LSDYNA": handle_interface_springback,
+    # ── Recognized + named warn-drop ──────────────────────────────────────
+    # OPTION2 = NOTHICKNESS (Vol I R17 p.30-80) suppresses the
+    # *ELEMENT_SHELL_THICKNESS block of the dynain. The Radioss /DYNAIN writer
+    # emits *ELEMENT_SHELL_THICKNESS unconditionally (dynain_shel_mp.F:256,
+    # with no content sub-key to switch it off), so the option cannot be
+    # honoured — but the rest of the card can, so it routes to the same
+    # handler and the writer names the difference.
+    "INTERFACE_SPRINGBACK_LSDYNA_NOTHICKNESS": handle_interface_springback,
+    "INTERFACE_SPRINGBACK_NASTRAN": _springback_sibling(
+        "INTERFACE_SPRINGBACK_NASTRAN",
+        "a NASTRAN-format springback deck (a bulk-data file, not a dynain). "
+        "OpenRadioss writes /DYNAIN in LS-DYNA keyword format and /STATE in "
+        "Radioss format; neither is NASTRAN bulk data, so nothing was "
+        "emitted"),
+    "INTERFACE_SPRINGBACK_NASTRAN_NOTHICKNESS": _springback_sibling(
+        "INTERFACE_SPRINGBACK_NASTRAN_NOTHICKNESS",
+        "a NASTRAN-format springback deck without the thickness block — see "
+        "*INTERFACE_SPRINGBACK_NASTRAN; nothing was emitted"),
+    "INTERFACE_SPRINGBACK_SEAMLESS": _springback_sibling(
+        "INTERFACE_SPRINGBACK_SEAMLESS",
+        "SEAMLESS springback, which makes LS-DYNA run the implicit springback "
+        "analysis ITSELF after the forming run terminates (p.30-80). "
+        "OpenRadioss has no second-stage handoff of that kind: the /DYNAIN "
+        "file must be read back into a NEW deck by hand. Nothing was "
+        "emitted — emitting the /DYNAIN half alone would look like the "
+        "springback had been set up"),
+    "INTERFACE_SPRINGBACK_SEAMLESS_NOTHICKNESS": _springback_sibling(
+        "INTERFACE_SPRINGBACK_SEAMLESS_NOTHICKNESS",
+        "SEAMLESS springback without the thickness block — see "
+        "*INTERFACE_SPRINGBACK_SEAMLESS; nothing was emitted"),
+    "INTERFACE_SPRINGBACK_EXCLUDE": _springback_sibling(
+        "INTERFACE_SPRINGBACK_EXCLUDE",
+        "a list of parts to EXCLUDE from the springback output (p.30-80 "
+        "Remark 9). /DYNAIN/DT selects parts positively and has no exclusion "
+        "form, so the exclusion was dropped; if a "
+        "*INTERFACE_SPRINGBACK_LSDYNA is present its own PSID still decides "
+        "the scope"),
+    "PERTURBATION_MAT": _perturbation_sibling(
+        "PERTURBATION_MAT",
+        "a perturbed MATERIAL parameter, which LS-DYNA supports for *MAT_238 "
+        "and solid elements only (p.38-12 Remark 10). The Radioss analogue is "
+        "/PERTURB/PART/SOLID (density) or /PERTURB/FAIL, neither of which "
+        "reaches a *MAT_238 parameter, so nothing was emitted"),
+    "PERTURBATION_SHELL_THICKNESS": _perturbation_sibling(
+        "PERTURBATION_SHELL_THICKNESS",
+        "a perturbed SHELL THICKNESS field. /PERTURB/PART/SHELL with "
+        "chvar='thick' (hm_read_perturb_part_shell.F:142) is the Radioss "
+        "counterpart and is not implemented yet, so nothing was emitted"),
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dispatch table
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -15316,6 +15962,10 @@ RARE_MATERIAL_KEYWORDS = {
         "no Radioss counterpart"),
 }
 for _kw, _h in RARE_MATERIAL_KEYWORDS.items():
+    HANDLERS[_kw] = _h
+del _kw, _h
+
+for _kw, _h in RARE_CARD_KEYWORDS.items():
     HANDLERS[_kw] = _h
 del _kw, _h
 
