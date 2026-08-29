@@ -3020,11 +3020,15 @@ def _off_boundary_prescribed_final_geometry(b: Block, offsets: Dict[str, int],
             continue
         out = list(cells)
         out[0], out[4] = new_nid, new_lcid
-        if "," in line:
-            b.raw[k] = _join_card(out, True, False, 8)
+        cols = [(tok, w) for tok, w in zip(out, widths) if w]
+        # An offset id that outgrows its column would shift every later cell —
+        # the #125 free-format trap. _join_card's comma form keeps an empty
+        # field between commas, so it is the safe fallback here too.
+        if "," in line or any(len(tok) > w for tok, w in cols):
+            b.raw[k] = _join_card(out[:6] if ibrth != 1 else out,
+                                  True, False, 8)
             continue
-        b.raw[k] = "".join(
-            f"{tok:>{w}}" for tok, w in zip(out, widths) if w).rstrip()
+        b.raw[k] = "".join(f"{tok:>{w}}" for tok, w in cols).rstrip()
 
 
 def _off_interface_springback(b: Block, offsets: Dict[str, int], warn) -> None:

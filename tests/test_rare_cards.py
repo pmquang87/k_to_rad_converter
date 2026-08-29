@@ -1097,6 +1097,29 @@ class DispatchAndOffsetCoverageTests(unittest.TestCase):
         self.assertEqual(r2[0], "-2600")        # |NID| + IDSOFF, sign kept
         self.assertEqual(r2[3], "7.5")
 
+    def test_final_geometry_free_format_rows_survive(self):
+        """A comma row is rewritten in its own format, and an id that outgrows
+        its I8 column falls back to the comma form rather than shifting every
+        later cell (#125)."""
+        with tempfile.TemporaryDirectory() as td:
+            blocks = _include_transform(
+                td,
+                "*KEYWORD\n*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                + _row(800, 901, 0.006, 0) + "\n"
+                + "9,25.0,0.0,0.0,902,0.5\n"
+                + _fgeo_row(10, 25.0, 10.0, 0.0) + "\n*END\n",
+                {"n": 999999999, "f": 40, "r": 5000})
+            (b,) = [x for x in blocks
+                    if x.keyword == "BOUNDARY_PRESCRIBED_FINAL_GEOMETRY"]
+        r1 = final_geometry_node_row(b.raw[1], 0)
+        self.assertEqual(r1[0], "1000000008")
+        self.assertEqual(r1[4], "942")
+        self.assertEqual(r1[1:4], ["25.0", "0.0", "0.0"])
+        # the fixed row's id no longer fits I8 -> comma form, no cell shift
+        r2 = final_geometry_node_row(b.raw[2], 0)
+        self.assertEqual(r2[0], "1000000009")
+        self.assertEqual([float(v) for v in r2[1:4]], [25.0, 10.0, 0.0])
+
     def test_springback_offsets_psid_and_node_rows(self):
         with tempfile.TemporaryDirectory() as td:
             blocks = _include_transform(
