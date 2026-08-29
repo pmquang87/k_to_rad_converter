@@ -96,6 +96,17 @@ _LAW93_ELASTIC_SIGY = 1.0e30
 # blank — while ALSO rejecting a blank one with ERROR 198. Writing that same
 # 1e20 keeps every Tsai-Wu coefficient (f11 = 1/(sigyt1*sigyc1), clamped to
 # [1e-20, 1e20] at :310-313) in the range the reader itself expects.
+#
+# HOW FAR out of reach, worked through: with all six yields at Y = 1e20 the
+# reader gives f1 = f2 = 0, f11 = f22 = f33 = 1e-20 and — because a blank
+# `alpha` becomes 1 (`:277`) — f12 = -alpha/(2*sqrt(min(1e20, Y^4))) = -5e-11.
+# The engine yields when
+#   wvec = f11*s1^2 + f22*s2^2 + f33*s12^2 + 2*f12*s1*s2  >  fyld (= 1)
+# (`mat25_tsaiwu_c.F90:481-487`). The f12 cross term dominates and is worst in
+# tension-compression, s1 = -s2 = s, giving wvec ~ 1e-10*s^2, i.e. the surface
+# is first reached at s ~ 1e5 in the deck's stress unit — a factor of ~1000
+# above any composite strength, and above E itself. The ply is elastic in
+# every physical state.
 _LAW25_ELASTIC_SIGY = 1.0e20
 # /MAT/LAW127 YCFAC defaults to 2 (hm_read_mat127.F90:287) and the engine then
 # runs `xc = ycfac*yc` once matrix compression has failed (sigeps127.F90:289),

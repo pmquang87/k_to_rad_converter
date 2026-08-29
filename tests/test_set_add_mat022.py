@@ -375,6 +375,24 @@ class SetAddUnionTests(unittest.TestCase):
         hits = _warns(res, "reached from itself")
         self.assertEqual(len(hits), 2)
 
+    def test_each_diagnostic_fires_once_per_set_it_names(self):
+        """Skipping the memo for a cycle-cut subtree re-expands it, so the
+        warnings must be de-duplicated on the id their TEXT names — the #129
+        round-2 rule. A(50) -> {51, B(52), C(54)}; B -> {A}; C -> {A, 59}:
+        C is reached twice yet reports its dangling member 59 once, and each
+        of the three unions reports its own cycle once."""
+        extra = ("*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
+                 + "*SET_NODE_ADD\n" + _row(50) + "\n" + _row(51, 52, 54) + "\n"
+                 + "*SET_NODE_ADD\n" + _row(52) + "\n" + _row(50) + "\n"
+                 + "*SET_NODE_ADD\n" + _row(54) + "\n" + _row(50, 59) + "\n")
+        res, _ = _convert(MESH.replace("{EXTRA}", extra))
+        self.assertEqual(len(_warns(res, "member set id(s) [59]")), 1)
+        self.assertEqual(len(_warns(res, "reached from itself")), 3)
+        for sid in (50, 52, 54):
+            with self.subTest(sid=sid):
+                self.assertEqual(
+                    len(_warns(res, f"*SET_NODE_ADD {sid}: this union")), 1)
+
     def test_depth_cap_warns_and_drops(self):
         chain = "*SET_NODE_LIST\n" + _row(1000) + "\n" + _row(1, 2) + "\n"
         # 1000 <- 1001 <- ... <- 1000+N, so the top is N levels above the leaf

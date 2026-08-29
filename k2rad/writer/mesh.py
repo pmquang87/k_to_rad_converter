@@ -2834,6 +2834,18 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
     direct_ids = set(container)
     union_ids = set(adds) | set(advanced)
     memo = {}
+    # Every diagnostic below names ONE set id, so it is de-duplicated on that
+    # id and not on the expansion memo — skipping the memo for a cycle-cut
+    # subtree (see resolve) would otherwise repeat a union's own "member set
+    # id(s) ... name no parsed set" line once per path that reaches it, and a
+    # cycle reachable through two members would warn about it twice.
+    reported = set()
+
+    def warn_once(kind, sid, msg):
+        if (kind, sid) in reported:
+            return
+        reported.add((kind, sid))
+        state.warn(msg)
 
     def resolve(sid: int, path):
         """The ``([(key, value)], height, cyclic)`` of member id *sid*, or
@@ -2856,7 +2868,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
         if sid not in union_ids:
             return None
         if sid in path:
-            state.warn(
+            warn_once("cycle", sid,
                 f"*{keyword} {sid}: this union is reached from itself "
                 f"({' -> '.join(str(p) for p in path)} -> {sid}) — a set "
                 "cannot contain itself, so the cycle is CUT there and the "
@@ -2884,7 +2896,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
             members_of_child, h, child_cyclic = got
             cyclic = cyclic or child_cyclic
             if h + 1 > _SET_ADD_MAX_DEPTH:
-                state.warn(
+                warn_once("depth", (sid, child),
                     f"*{keyword} {sid}: member set {child} sits at the top of "
                     f"a chain of nested _ADD unions more than "
                     f"{_SET_ADD_MAX_DEPTH} levels deep — that member is "
@@ -2900,7 +2912,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
                     seen.add(key)
                     out.append((key, val))
         if missing:
-            state.warn(
+            warn_once("missing", sid,
                 f"*{keyword} {sid}: member set id(s) {sorted(set(missing))} "
                 "name no parsed set of the family they claim (missing block, "
                 "or an unsupported variant such as _GENERAL/_COLUMN/"
