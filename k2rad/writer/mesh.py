@@ -2807,7 +2807,9 @@ def _set_add_members(state: ConversionState, family: str, target_name: str,
     if entry is None:
         return None
     if family == "SEGMENT":
-        return [(_segment_key(seg), seg) for seg in entry.segments]
+        # A COPY of each corner list: the union's SegmentSet must not alias
+        # the child's rows, or a later in-place edit would reach both.
+        return [(_segment_key(seg), list(seg)) for seg in entry.segments]
     return [(v, v) for v in entry[1]]
 
 
@@ -2834,17 +2836,23 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
     memo = {}
 
     def resolve(sid: int, path):
-        """The ``([(key, value)], height)`` of member id *sid*, or ``None``
-        when it names nothing at all (a dangling id the caller reports).
+        """The ``([(key, value)], height, cyclic)`` of member id *sid*, or
+        ``None`` when it names nothing at all (a dangling id the caller
+        reports).
 
         ``height`` is the number of union levels BELOW *sid* inclusive — 0 for
         a direct set — and it is INTRINSIC to the subtree, never a function of
         which union happened to be expanded first. That is what makes the
         depth cap deterministic: memoising a traversal-order depth would let a
         deck's set ids decide whether the cap fires.
+
+        ``cyclic`` says the subtree was CUT by the cycle guard. Such a result
+        depends on the path taken to reach it, so it must not be memoised —
+        otherwise a diamond over a cycle (A -> {X, B}, B -> {Y, A}) would give
+        a later top-level expansion of B the members it had *as A's child*.
         """
         if sid in direct_ids:
-            return _set_add_members(state, family, target_name, sid), 0
+            return _set_add_members(state, family, target_name, sid), 0, False
         if sid not in union_ids:
             return None
         if sid in path:
@@ -2855,7 +2863,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
                 "rest of the union is kept. LS-DYNA states no nesting rule "
                 "for _ADD sets at all, so a cycle has no defined meaning on "
                 "either side; fix the deck.")
-            return [], 0
+            return [], 0, True
         return expand(sid, path + (sid,))
 
     def expand(sid: int, path):
@@ -2863,16 +2871,18 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
             return memo[sid]
         out, seen, missing = [], set(), []
         height = 0
+        cyclic = False
         if family == "NODE" and sid in advanced:
             members = _advanced_members(state, sid, advanced[sid][1], missing)
         else:
             members = [(child, None) for child in adds[sid][1]]
         for child, pre in members:
-            got = (pre, 0) if pre is not None else resolve(child, path)
+            got = (pre, 0, False) if pre is not None else resolve(child, path)
             if got is None:
                 missing.append(child)
                 continue
-            members_of_child, h = got
+            members_of_child, h, child_cyclic = got
+            cyclic = cyclic or child_cyclic
             if h + 1 > _SET_ADD_MAX_DEPTH:
                 state.warn(
                     f"*{keyword} {sid}: member set {child} sits at the top of "
@@ -2899,7 +2909,9 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
                 "group instead: the starter accepts one as nothing worse than "
                 "WARNING 174 (hm_grogronod.F), so it would silently come up "
                 "short.")
-        memo[sid] = (out, height)
+        if cyclic:
+            return out, height, True
+        memo[sid] = (out, height, False)
         return memo[sid]
 
     for sid in sorted(union_ids):

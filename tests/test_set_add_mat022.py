@@ -359,6 +359,22 @@ class SetAddUnionTests(unittest.TestCase):
         # the non-cyclic half survives
         self.assertEqual(st.node_sets[50][1], [1, 2])
 
+    def test_diamond_over_a_cycle_is_not_memoised_wrong(self):
+        """A(50) -> {X, B}; B(52) -> {Y, A}. A cycle-CUT result depends on the
+        path taken to reach it, so it must not be cached: memoising B as A's
+        child would give a later top-level B only Y. Both unions must come out
+        complete, each cut at its own cycle and each warned BY NAME."""
+        extra = ("*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
+                 + "*SET_NODE_LIST\n" + _row(53) + "\n" + _row(7, 8) + "\n"
+                 + "*SET_NODE_ADD\n" + _row(50) + "\n" + _row(51, 52) + "\n"
+                 + "*SET_NODE_ADD\n" + _row(52) + "\n" + _row(53, 50) + "\n")
+        st = _flat(MESH.replace("{EXTRA}", extra))
+        self.assertEqual(sorted(st.node_sets[50][1]), [1, 2, 7, 8])
+        self.assertEqual(sorted(st.node_sets[52][1]), [1, 2, 7, 8])
+        res, _ = _convert(MESH.replace("{EXTRA}", extra))
+        hits = _warns(res, "reached from itself")
+        self.assertEqual(len(hits), 2)
+
     def test_depth_cap_warns_and_drops(self):
         chain = "*SET_NODE_LIST\n" + _row(1000) + "\n" + _row(1, 2) + "\n"
         # 1000 <- 1001 <- ... <- 1000+N, so the top is N levels above the leaf
@@ -946,8 +962,11 @@ class Mat022DroppedFieldTests(unittest.TestCase):
                        "SN=40", "SYZ=35", "SZX=33", "ALPH=1.5e-07"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
-        self.assertIn("*MAT_COMPOSITE_DAMAGE",
-                      [kw for kw, _ in res.recognized_not_emitted])
+        # NOT in recognized_not_emitted: that channel's log heading says "no
+        # card was written for it", and a *MAT_COMPOSITE_DAMAGE always writes
+        # one. The dropped CELLS belong in warnings, per material.
+        self.assertNotIn("*MAT_COMPOSITE_DAMAGE",
+                         [kw for kw, _ in res.recognized_not_emitted])
 
     def test_all_dropped_fields_are_named_on_the_solid_arm(self):
         res, _ = _convert(_solid_deck(MAT22_FULL))

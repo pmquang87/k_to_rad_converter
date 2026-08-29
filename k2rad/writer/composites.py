@@ -1845,11 +1845,11 @@ def _mat022_dropped_fields(mat: MatCompositeDamage, law: int,
     if dropped:
         state.warn(f"*MAT_COMPOSITE_DAMAGE {mat.mid}: "
                    + "; ".join(dropped) + ".")
-    state.note_recognized_not_emitted(
-        "*MAT_COMPOSITE_DAMAGE",
-        "converted, but the SN/SYZ/SZX solid delamination criterion, KFAIL, "
-        "MACF and ATRACK have no Radioss counterpart and are reported per "
-        "material when set")
+    # Deliberately NOT note_recognized_not_emitted: that channel's own log
+    # heading reads "the keyword was parsed and did NOT count as skipped, but
+    # no card was written for it", and a *MAT_COMPOSITE_DAMAGE always writes
+    # one. Listing it there would contradict the heading; the dropped CELLS
+    # belong in warnings, per material, which is where they are.
 
 
 def _emit_mat022(mat: MatCompositeDamage, state: ConversionState) -> List[str]:
