@@ -48,10 +48,14 @@ from typing import Dict, List, Optional, Set, Tuple
 from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _AIRBAG_OPTION_STACKS,
                        INITIAL_STATE_PRELOAD_KEYWORDS,
+                       RARE_CARD_KEYWORDS,
                        RARE_MATERIAL_KEYWORDS,
                        _SEATBELT_MAT_KEYWORDS,
                        _SEATBELT_SUBKEYWORDS,
+                       final_geometry_node_row,
                        initial_strain_shell_records,
+                       perturbation_node_records,
+                       springback_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
@@ -2936,6 +2940,116 @@ def _off_initial_strain_shell_set(b: Block, offsets: Dict[str, int], warn) -> No
     _off_initial_strain_shell_common(b, offsets, True)
 
 
+def _off_perturbation_node(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*PERTURBATION_NODE: NSID -> IDSOFF and CID -> IDDOFF, on CARD 1 ONLY.
+
+    Driven by ``handlers.perturbation_node_records`` — the SAME walker the
+    handler parses with (#116). A flat ``data`` spec cannot be used and neither
+    can a ``{"cards": {0: ...}}`` one that ignores the rest: every card-2
+    variant is float-bearing (AMPL/XWL/XOFF/... on 2a, FADE on 2b, ELLIP1/2 on
+    2d, AMPL/DTYPE on 2e) and ``_rewrite_line`` decides what is an id with
+    ``to_int(tok) > 0`` — a wavelength of ``1.5`` would read back as the id
+    ``1`` and be rewritten to ``1 + IDSOFF``. Card 2c is a FILE NAME, which a
+    positional rewrite would corrupt outright.
+
+    ``NSID = 0`` means "perturb all the nodes in the model" (Vol I R17 p.38-4),
+    not "node set 0", and must NOT be offset — ``_rewrite_line`` already leaves
+    every zero alone.
+    """
+    toff = _title_offset(b)
+    body = b.raw[toff:]
+    for card1, _rows in perturbation_node_records(body):
+        idx = toff + card1
+        new = _rewrite_line(b.raw[idx], [(1, "s"), (5, "d")], offsets)
+        if new is not None:
+            b.raw[idx] = new
+
+
+def _off_boundary_prescribed_final_geometry(b: Block, offsets: Dict[str, int],
+                                            warn) -> None:
+    """*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY.
+
+    Card 1: ``BPFGID`` -> IDROFF ("ID for this set of imposed boundary
+    conditions" is in none of the seven named classes), ``LCIDF`` -> IDFOFF.
+
+    Node rows: hand-sliced in the manual's own column layout (I8 + 3xE16 + I8 +
+    E16, or I8 + 3xE16 + I8 + E8 + E8 when IBRTH = 1) through the SAME slicer
+    the handler reads with, ``handlers.final_geometry_node_row``. A uniform
+    10-wide ``data`` spec would start ``Y`` inside ``X`` (the ``*ELEMENT_MASS``
+    failure), and a positional ``_rewrite_line`` would additionally read the
+    float coordinates as ids.
+
+    ``NID`` is ONE CELL IN TWO ID NAMESPACES BY SIGN (the #125 trap): "GT.0:
+    Node ID ... LT.0: |NID| is a node set ID" (Vol I R17 p.5-74). A positive
+    NID takes IDNOFF, a negative one takes IDSOFF on its magnitude with the
+    sign preserved — a walker that keys the cell on "node" alone corrupts every
+    set-form row.
+    """
+    toff = _title_offset(b)
+    if toff < len(b.raw) and b.raw[toff].strip():
+        new = _rewrite_line(b.raw[toff], [(0, "r"), (1, "f")], offsets)
+        if new is not None:
+            b.raw[toff] = new
+    f1 = _fields(b.raw[toff]) if toff < len(b.raw) else []
+    ibrth = _geti(f1, 3)
+    n_off, s_off, f_off = (offsets.get("n", 0), offsets.get("s", 0),
+                           offsets.get("f", 0))
+    if not (n_off or s_off or f_off):
+        return
+    widths = ((8, 16, 16, 16, 8, 8, 8) if ibrth == 1
+              else (8, 16, 16, 16, 8, 16, 0))
+    for k in range(toff + 1, len(b.raw)):
+        line = b.raw[k]
+        if not line.strip():
+            continue
+        cells = final_geometry_node_row(line, ibrth)
+        if not cells or not cells[0].strip():
+            continue
+        nid = to_int(cells[0])
+        if nid == 0:
+            continue
+        new_nid = cells[0]
+        if nid > 0 and n_off:
+            new_nid = str(nid + n_off)
+        elif nid < 0 and s_off:
+            new_nid = str(-(abs(nid) + s_off))
+        new_lcid = cells[4]
+        if f_off and new_lcid.strip() and to_int(new_lcid) > 0:
+            new_lcid = str(to_int(new_lcid) + f_off)
+        if new_nid == cells[0] and new_lcid == cells[4]:
+            continue
+        out = list(cells)
+        out[0], out[4] = new_nid, new_lcid
+        if "," in line:
+            b.raw[k] = _join_card(out, True, False, 8)
+            continue
+        b.raw[k] = "".join(
+            f"{tok:>{w}}" for tok, w in zip(out, widths) if w).rstrip()
+
+
+def _off_interface_springback(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INTERFACE_SPRINGBACK_LSDYNA: PSID -> IDSOFF, Card-4 NID -> IDNOFF.
+
+    Driven by ``handlers.springback_records`` — the SAME walker the handler
+    parses with (#116), so the two can never disagree about which rows are
+    ``OPTCARD`` optional cards and which are node cards. The OPTCARD rows carry
+    no id at all (SLDO/NCYC/FSPLIT/NDFLAG/CFLAG/HFLAG are flags and counts) and
+    are left untouched; a ``data`` spec would rewrite ``NCYC`` as though it were
+    an id.
+    """
+    toff = _title_offset(b)
+    body = b.raw[toff:]
+    for card1, _opt, nodes in springback_records(body):
+        idx = toff + card1
+        new = _rewrite_line(b.raw[idx], [(0, "s")], offsets)
+        if new is not None:
+            b.raw[idx] = new
+        for k in nodes:
+            new = _rewrite_line(b.raw[toff + k], [(0, "n")], offsets)
+            if new is not None:
+                b.raw[toff + k] = new
+
+
 def _off_damping_part_mass(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_damping_part_mass_common(b, offsets, "p")
 
@@ -3714,6 +3828,88 @@ _RARE_MATERIAL_OFFSETS.update(
      if kw not in _RARE_MATERIAL_OFFSETS})
 for _kw in RARE_MATERIAL_KEYWORDS:
     _spec = _RARE_MATERIAL_OFFSETS[_kw]     # KeyError = a spelling with no
+    if _spec is not None:                   # verdict, never a silent gap
+        _OFFSET_SPECS[_kw] = _spec
+del _kw, _spec
+
+# The RARE CARDS batch. Keyed off the SAME dict handlers.py registers from, and
+# asserted equal by tests/test_rare_cards.py, so a spelling cannot be readable
+# and un-offsettable at the same time (#116).
+#
+# Buckets, from Vol I R17 pp.2979-2980 (*INCLUDE_TRANSFORM Card 2b.1) — quoted
+# verbatim where the assignment is not obvious:
+#   *DEFINE_ELEMENT_DEATH_<F>      EID    "Offset to element ID"   -> IDEOFF "e"
+#   *DEFINE_ELEMENT_DEATH_<F>_SET  SID    "Offset to set ID"       -> IDSOFF "s"
+#     BOXID (*DEFINE_BOX) and CID (*DEFINE_COORDINATE_*): "any ID defined
+#     through *DEFINE, except the FUNCTION, TABLE, and CURVE options"
+#                                                                  -> IDDOFF "d"
+#     IDGRP is a bare GROUPING TAG, not an entity id of any listed class, and
+#     grouping is by EQUALITY: "There is no requirement that each
+#     *DEFINE_ELEMENT_DEATH command have a unique IDGRP ... elements in a
+#     single group can come from multiple *DEFINE_ELEMENT_DEATH commands"
+#     (p.17-252). Offsetting it and not offsetting it are equally consistent
+#     WITHIN one include; leaving it alone is what keeps an include's group
+#     tags matching each other, which is the only relation the field has.
+#     It is deliberately absent from the mods list — and it reaches no emitted
+#     card either, being warn-dropped by writer/rarecards.py.
+#   *DEFINE_CURVE_SMOOTH LCID     "Offset to function ID, table ID, and curve
+#     ID" — IDFOFF even though the keyword is a *DEFINE_, because IDDOFF
+#     explicitly EXCLUDES "the FUNCTION, TABLE, and CURVE options"
+#                                                                  -> IDFOFF "f"
+#     SIDR is a flag, not an id.
+#   *PERTURBATION_NODE NSID (a *SET_NODE)                          -> IDSOFF "s"
+#     CID (*DEFINE_COORDINATE_NODES)                               -> IDDOFF "d"
+#     RND on the TYPE=4 card is a random SEED, not an id.
+#   *BOUNDARY_PRESCRIBED_FINAL_GEOMETRY BPFGID ("ID for this set of imposed
+#     boundary conditions" — in none of the seven named classes, so the
+#     catch-all)                                                   -> IDROFF "r"
+#     LCIDF and the per-row LCID                                   -> IDFOFF "f"
+#     row NID > 0                                                  -> IDNOFF "n"
+#     row NID < 0 (|NID| is a *SET_NODE, sign preserved)           -> IDSOFF "s"
+#   *INTERFACE_SPRINGBACK_* PSID (a *SET_PART)                     -> IDSOFF "s"
+#     Card-4 NID                                                   -> IDNOFF "n"
+#
+# All five take a callable rather than a declarative spec, for four different
+# reasons — see each walker's docstring: the death cards are the only ones a
+# flat "cards" spec would fit, and they use one so the _SET/plain bucket split
+# stays beside the family table it belongs to.
+def _off_element_death(b: Block, offsets: Dict[str, int], warn,
+                       is_set: bool = False) -> None:
+    """*DEFINE_ELEMENT_DEATH_<FAMILY>[_SET] card 1, the only card there is."""
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff],
+                        [(0, "s" if is_set else "e"), (2, "d"), (5, "d")],
+                        offsets)
+    if new is not None:
+        b.raw[toff] = new
+
+
+def _off_element_death_set(b: Block, offsets: Dict[str, int], warn) -> None:
+    _off_element_death(b, offsets, warn, is_set=True)
+
+
+_RARE_CARD_OFFSETS = {
+    **{f"DEFINE_ELEMENT_DEATH_{_o}":
+       (_off_element_death_set if _o.endswith("_SET") else _off_element_death)
+       for _o in ("SOLID", "SOLID_SET", "BEAM", "BEAM_SET", "SHELL",
+                  "SHELL_SET", "THICK_SHELL", "THICK_SHELL_SET")},
+    "DEFINE_CURVE_SMOOTH": {"cards": {0: [(0, "f")]}},
+    "PERTURBATION_NODE": _off_perturbation_node,
+    "BOUNDARY_PRESCRIBED_FINAL_GEOMETRY":
+        _off_boundary_prescribed_final_geometry,
+    "INTERFACE_SPRINGBACK_LSDYNA": _off_interface_springback,
+    "INTERFACE_SPRINGBACK_LSDYNA_NOTHICKNESS": _off_interface_springback,
+    # Recognized + warn-dropped keywords get NO offset spec, deliberately: an
+    # unmodelled card stack must not have its cells rewritten by position (the
+    # *AIRBAG warn-drop rule).
+}
+_RARE_CARD_OFFSETS.update(
+    {kw: None for kw in RARE_CARD_KEYWORDS
+     if kw not in _RARE_CARD_OFFSETS})
+for _kw in RARE_CARD_KEYWORDS:
+    _spec = _RARE_CARD_OFFSETS[_kw]         # KeyError = a spelling with no
     if _spec is not None:                   # verdict, never a silent gap
         _OFFSET_SPECS[_kw] = _spec
 del _kw, _spec
