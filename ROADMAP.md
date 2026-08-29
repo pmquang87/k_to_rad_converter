@@ -56,11 +56,21 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   engine `/DYNAIN` block, on a schedule rather than a single terminal trigger
   because the engine's own end-of-run rescue sets `ILASTDYNAIN` and never reads
   it. **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
-  resolves without being restated as a `*SET_SOLID`), inline arithmetic in a
-  `&parameter` field (`&tend/6.0`, which the EFG carrier writes and the parser
-  reads as 0), `*PERTURBATION_SHELL_THICKNESS` → `/PERTURB/PART/SHELL`, and the
-  `/STATE/*` sibling of `/DYNAIN` for the solid/beam/spring state a dynain
-  cannot carry.
+  resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
+  deliberately NOT accepted as a fallback, since it is a third SID namespace and
+  cannot hold a thick-shell id), inline arithmetic in a `&parameter` field
+  (`&tend/6.0`, which the EFG carrier writes and the parser reads as 0 — the
+  emitted plateau is then named with its number so the loss is visible),
+  `*PERTURBATION_SHELL_THICKNESS` → `/PERTURB/PART/SHELL`, the `/STATE/*`
+  sibling of `/DYNAIN` for the solid/beam/spring state a dynain cannot carry
+  (this is also what a shell-less `*SET_PART` on an `*INTERFACE_SPRINGBACK`
+  would need — today those parts are dropped from the `/DYNAIN` list by name),
+  and a deck-wide duplicate scan for the element-GROUP namespaces
+  (`/GRBRIC`, `/GRSHEL`, `/GRSH3N`, `/GRBEAM`, `/GRSPRI`) to match the ones
+  `/PROP`, `/MAT`, `/FUNCT` and `/IMPDISP` already have — no collision is
+  reachable today because k2rad never re-emits a user element set under its own
+  SID and `next_elem_group_id` dodges all four set registries, but that is a
+  property of the current writers rather than of the id stream.
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`

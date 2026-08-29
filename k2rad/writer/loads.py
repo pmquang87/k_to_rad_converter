@@ -857,16 +857,32 @@ def _monotonic_abscissae(pts):
     return out
 
 
-def _emit_funct(fid: int, title: str, pts) -> List[str]:
+def _emit_funct(fid: int, title: str, pts, smooth: bool = False) -> List[str]:
     """A /FUNCT written INLINE in a connector section.
 
     The single /FUNCT emitter (materials.py::_make_functions) runs at the
     "functions" step, which is BEFORE every connector step in the writer
     dispatch, so a curve registered in state.curves from here would never reach
     the deck. Connector-synthesized functions are therefore written where they
-    are built — the same thing the spotweld bilinear-axial function does."""
-    lines = [f"/FUNCT/{fid}", title[:100],
-             "#                  X                   Y"]
+    are built — the same thing the spotweld bilinear-axial function does.
+
+    ``smooth=True`` writes /FUNCT_SMOOTH instead, with the neutral
+    Ascalex/Fscaley/Ashiftx/Fshifty card materials._make_functions writes. That
+    is NOT cosmetic: the ISMOOTH flag it sets makes every /IMP* consumer
+    dispatch to FINTER2_SMOOTH (fixfingeo.F:186-196, fixvel.F), which blends
+    with the quintic smoothstep AND CLAMPS outside the point range, while a
+    plain /FUNCT interpolates linearly and EXTRAPOLATES. A caller that copies
+    or shifts a *DEFINE_CURVE_SMOOTH must keep the flag, or the copy silently
+    runs past the end of the curve."""
+    if smooth:
+        lines = [f"/FUNCT_SMOOTH/{fid}", title[:100],
+                 "#            Ascalex             Fscaley             "
+                 "Ashiftx             Fshifty",
+                 f"{_f(1.0)}{_f(1.0)}{_f(0.0)}{_f(0.0)}",
+                 "#                  X                   Y"]
+    else:
+        lines = [f"/FUNCT/{fid}", title[:100],
+                 "#                  X                   Y"]
     for a, o in _monotonic_abscissae(pts):
         lines.append(f"{_f(a)}{_f(o)}")
     lines.append(HDR)
@@ -5076,8 +5092,15 @@ def _make_geometric_rwall_motion(rw, state: ConversionState,
         yax = _vnorm(_vcross((1.0, 0.0, 0.0), v))
     zax = _vnorm(_vcross(v, yax))
     skew_id = state.reserve_skew_id(state.next_id())
-    motion_id = state.next_id()
     keyword = "IMPVEL" if rw.opt == 0 else "IMPDISP"
+    # /IMPDISP shares ONE starter id table with /IMPDISP/FGEO, whose ids come
+    # from the deck (BPFGID) — hence the guarded allocator here and the
+    # recording below. This is the third /IMP* emission site and the only one
+    # that does not go through _emit_imp_card, which is where the other two
+    # record themselves.
+    motion_id = (state.next_impdisp_id() if keyword == "IMPDISP"
+                 else state.next_id())
+    state.imp_card_ids.setdefault(keyword, set()).add(motion_id)
     lines = _emit_skew_fix(skew_id, f"RWALL_{rw.rwid}_MOTION_DIR",
                            (0.0, 0.0, 0.0), yax, zax)
     lines += [

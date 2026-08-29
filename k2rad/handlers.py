@@ -4427,6 +4427,20 @@ def handle_define_curve(block: Block, state: ConversionState) -> None:
         if len(f) >= 2:
             pts.append(((to_float(f[0]) + offa) * (sfa or 1.0),
                         (to_float(f[1]) + offo) * (sfo or 1.0)))
+    if lcid in state.funct_smooth_ids:
+        # A *DEFINE_CURVE_SMOOTH claimed this id first. LS-DYNA's curve ids are
+        # unique across both keywords, so the deck is malformed — but the
+        # emitted CARD KIND must still match the points that survive, or a
+        # plain piecewise-linear curve goes out as /FUNCT_SMOOTH and is read
+        # quintic-blended and clamped (finter_smooth.F:71-101).
+        state.funct_smooth_ids.discard(lcid)
+        state.warn(
+            f"*DEFINE_CURVE LCID {lcid}: a *DEFINE_CURVE_SMOOTH already "
+            "defined this id. LS-DYNA shares one load-curve id namespace "
+            "between the two keywords (Vol I R17 p.17-153: the "
+            "*DEFINE_CURVE_SMOOTH LCID 'must be unique'), so one of them is a "
+            "mistake. The *DEFINE_CURVE points below were kept and the curve "
+            "is emitted as an ordinary /FUNCT; renumber one of the two cards.")
     state.curves[lcid] = Curve(lcid, title, sfa, sfo, offa, offo, pts)
     state.curve_order.append(lcid)
 
@@ -14471,6 +14485,17 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
         return
     if note:
         state.warn(f"{label}: {note}.")
+    if unresolved:
+        # The consequence in numbers, not just in principle: a reader has to be
+        # able to see the plateau velocity the zero-read implies and compare it
+        # against the deck's intent without redoing the back-solve by hand.
+        state.warn(
+            f"{label}: reading {', '.join(unresolved)} as 0 makes the emitted "
+            f"curve DIST = {dist:g} over TSTART = {tstart:g} .. TEND = "
+            f"{tend:g} with TRISE = {trise:g}, i.e. a plateau of VMAX = "
+            f"{vmax:g}. Check that number against the deck before running: "
+            "the area under the curve (the tool's total travel) is right by "
+            "construction, but the plateau value and the ramp shape are not.")
     if trise > 0.0 and 2.0 * trise > (tend - tstart) * (1.0 + 1.0e-9):
         state.warn(
             f"{label}: TRISE = {trise:g} is more than half the window "
@@ -14500,8 +14525,41 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
                "asks for." if sidr == 1 else
                " (SIDR=2 = both phases; OpenRadioss has no separate "
                "relaxation phase, so the transient use is all that survives)."))
+    if dist == 0.0:
+        # Every field on this card has default "none" (Vol I R17 p.17-153), so
+        # a blank DIST is a missing input, not a stated zero — and DIST is the
+        # ONLY thing that sets the curve's height ("Total distance tool will
+        # travel (area under curve)", p.17-154). With DIST = 0 the back-solve
+        # gives VMAX = 0 and the emitted /FUNCT_SMOOTH is identically zero: a
+        # legal, accepted card that moves nothing, the #122 class.
+        state.warn(
+            f"{label}: DIST = 0, so the whole curve is identically zero — "
+            "VMAX = DIST/(TEND-TSTART-TRISE) = 0 and a consumer driven by it "
+            "does not move at all. DIST is 'Total distance tool will travel "
+            "(area under curve)' and has no default (Vol I R17 p.17-153/154), "
+            "so a blank cell here is a missing input rather than a stated "
+            "zero. The curve was emitted as written; state DIST if the tool "
+            "is meant to move.")
+    if lcid in state.curves or lcid in state.define_tables:
+        state.warn(
+            f"{label}: this id is already defined by a "
+            + ("*DEFINE_TABLE" if lcid in state.define_tables
+               else "*DEFINE_CURVE" if lcid not in state.funct_smooth_ids
+               else "*DEFINE_CURVE_SMOOTH")
+            + " in the same deck. Vol I R17 p.17-153 requires the "
+            "*DEFINE_CURVE_SMOOTH LCID to be unique, and LS-DYNA shares one "
+            "load-curve id namespace across *DEFINE_CURVE / "
+            "*DEFINE_CURVE_SMOOTH (tables share it too, p.17-445: 'Tables and "
+            "Load curves may not share common IDs'). The smooth curve below "
+            "replaces the earlier definition; renumber one of the cards.")
     state.curves[lcid] = Curve(lcid, title, 1.0, 1.0, 0.0, 0.0, pts)
-    state.curve_order.append(lcid)
+    # NOT appended to state.curve_order. That list is the *DEFINE_CURVE
+    # ORDERING used to resolve the legacy positional *DEFINE_TABLE form, and
+    # the manual scopes it to that keyword by name: the curves "must be defined
+    # as lists of (x, y) pairs in a collection of *DEFINE_CURVE sections that
+    # directly follow the *DEFINE_TABLE section", with input "terminated when a
+    # '*DEFINE_CURVE' keyword card is found" (Vol I R17 p.17-444). A smooth
+    # curve after a legacy table is not one of its rows.
     state.funct_smooth_ids.add(lcid)
 
 
@@ -14789,6 +14847,60 @@ def _perturbation_sibling(keyword: str, what: str):
     return _handler
 
 
+#: ``*INTERFACE_SPRINGBACK_OPTION1_{OPTION2}`` (Vol I R17 p.30-80): OPTION1 is
+#: one of LSDYNA / NASTRAN / SEAMLESS / EXCLUDE and OPTION2 is blank or
+#: NOTHICKNESS, so there are exactly EIGHT legal spellings. ``None`` = this
+#: converter converts the card; a string = the named warn-drop reason.
+#:
+#: Kept as OPTION1 x OPTION2 rather than as eight literals because a
+#: hand-written variant table drifts: the ``EXCLUDE_NOTHICKNESS`` corner was
+#: missing from exactly such a list and fell through to "skipped: 1 unsupported
+#: keyword" (the #116 lesson — generate every spelling from one source).
+_SPRINGBACK_OPTION1 = {
+    "LSDYNA": None,
+    "NASTRAN":
+        "a NASTRAN-format springback deck (a bulk-data file, not a dynain). "
+        "OpenRadioss writes /DYNAIN in LS-DYNA keyword format and /STATE in "
+        "Radioss format; neither is NASTRAN bulk data, so nothing was emitted",
+    "SEAMLESS":
+        "SEAMLESS springback, which makes LS-DYNA run the implicit springback "
+        "analysis ITSELF after the forming run terminates (p.30-80). "
+        "OpenRadioss has no second-stage handoff of that kind: the /DYNAIN "
+        "file must be read back into a NEW deck by hand. Nothing was "
+        "emitted — emitting the /DYNAIN half alone would look like the "
+        "springback had been set up",
+    "EXCLUDE":
+        "a list of parts to EXCLUDE from the springback output (p.30-80 "
+        "Remark 9). /DYNAIN/DT selects parts positively and has no exclusion "
+        "form, so the exclusion was dropped; if a "
+        "*INTERFACE_SPRINGBACK_LSDYNA is present its own PSID still decides "
+        "the scope",
+}
+
+#: OPTION2 = NOTHICKNESS (Vol I R17 p.30-80 Remark 1) suppresses the
+#: ``*ELEMENT_SHELL_THICKNESS`` block of the dynain. The Radioss /DYNAIN writer
+#: emits it unconditionally (``dynain_shel_mp.F:256``, no content sub-key to
+#: switch it off), so the option cannot be honoured — but for OPTION1 = LSDYNA
+#: the rest of the card can be, so it routes to the same handler and the writer
+#: names the difference.
+_SPRINGBACK_OPTION2 = ("", "_NOTHICKNESS")
+
+
+def _springback_keyword_handlers():
+    """The eight ``*INTERFACE_SPRINGBACK`` spellings and their handlers."""
+    out = {}
+    for _o1, _what in _SPRINGBACK_OPTION1.items():
+        for _o2 in _SPRINGBACK_OPTION2:
+            kw = f"INTERFACE_SPRINGBACK_{_o1}{_o2}"
+            if _what is None:
+                out[kw] = handle_interface_springback
+            else:
+                out[kw] = _springback_sibling(
+                    kw, _what + (" (the NOTHICKNESS option is moot here: "
+                                 "nothing is written at all)" if _o2 else ""))
+    return out
+
+
 #: The RARE CARDS batch, as ONE source for HANDLERS and for
 #: assembly._OFFSET_SPECS (#116: a spelling the handler reads and the
 #: *INCLUDE_TRANSFORM offsetter does not know keeps its original ids while the
@@ -14800,44 +14912,8 @@ RARE_CARD_KEYWORDS = {
     "PERTURBATION_NODE": handle_perturbation_node,
     "BOUNDARY_PRESCRIBED_FINAL_GEOMETRY":
         handle_boundary_prescribed_final_geometry,
-    "INTERFACE_SPRINGBACK_LSDYNA": handle_interface_springback,
+    **_springback_keyword_handlers(),
     # ── Recognized + named warn-drop ──────────────────────────────────────
-    # OPTION2 = NOTHICKNESS (Vol I R17 p.30-80) suppresses the
-    # *ELEMENT_SHELL_THICKNESS block of the dynain. The Radioss /DYNAIN writer
-    # emits *ELEMENT_SHELL_THICKNESS unconditionally (dynain_shel_mp.F:256,
-    # with no content sub-key to switch it off), so the option cannot be
-    # honoured — but the rest of the card can, so it routes to the same
-    # handler and the writer names the difference.
-    "INTERFACE_SPRINGBACK_LSDYNA_NOTHICKNESS": handle_interface_springback,
-    "INTERFACE_SPRINGBACK_NASTRAN": _springback_sibling(
-        "INTERFACE_SPRINGBACK_NASTRAN",
-        "a NASTRAN-format springback deck (a bulk-data file, not a dynain). "
-        "OpenRadioss writes /DYNAIN in LS-DYNA keyword format and /STATE in "
-        "Radioss format; neither is NASTRAN bulk data, so nothing was "
-        "emitted"),
-    "INTERFACE_SPRINGBACK_NASTRAN_NOTHICKNESS": _springback_sibling(
-        "INTERFACE_SPRINGBACK_NASTRAN_NOTHICKNESS",
-        "a NASTRAN-format springback deck without the thickness block — see "
-        "*INTERFACE_SPRINGBACK_NASTRAN; nothing was emitted"),
-    "INTERFACE_SPRINGBACK_SEAMLESS": _springback_sibling(
-        "INTERFACE_SPRINGBACK_SEAMLESS",
-        "SEAMLESS springback, which makes LS-DYNA run the implicit springback "
-        "analysis ITSELF after the forming run terminates (p.30-80). "
-        "OpenRadioss has no second-stage handoff of that kind: the /DYNAIN "
-        "file must be read back into a NEW deck by hand. Nothing was "
-        "emitted — emitting the /DYNAIN half alone would look like the "
-        "springback had been set up"),
-    "INTERFACE_SPRINGBACK_SEAMLESS_NOTHICKNESS": _springback_sibling(
-        "INTERFACE_SPRINGBACK_SEAMLESS_NOTHICKNESS",
-        "SEAMLESS springback without the thickness block — see "
-        "*INTERFACE_SPRINGBACK_SEAMLESS; nothing was emitted"),
-    "INTERFACE_SPRINGBACK_EXCLUDE": _springback_sibling(
-        "INTERFACE_SPRINGBACK_EXCLUDE",
-        "a list of parts to EXCLUDE from the springback output (p.30-80 "
-        "Remark 9). /DYNAIN/DT selects parts positively and has no exclusion "
-        "form, so the exclusion was dropped; if a "
-        "*INTERFACE_SPRINGBACK_LSDYNA is present its own PSID still decides "
-        "the scope"),
     "PERTURBATION_MAT": _perturbation_sibling(
         "PERTURBATION_MAT",
         "a perturbed MATERIAL parameter, which LS-DYNA supports for *MAT_238 "

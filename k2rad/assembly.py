@@ -3021,6 +3021,12 @@ def _off_boundary_prescribed_final_geometry(b: Block, offsets: Dict[str, int],
         out = list(cells)
         out[0], out[4] = new_nid, new_lcid
         cols = [(tok, w) for tok, w in zip(out, widths) if w]
+        # No inline-comment handling needed on either side: parse_k_file runs
+        # _strip_inline_comment on EVERY line it puts into Block.raw, so a
+        # "$..." tail is already gone before any walker — read or offset — sees
+        # the card, and the offset pass mutates Block.raw, never the include
+        # file on disk.
+        #
         # An offset id that outgrows its column would shift every later cell —
         # the #125 free-format trap. _join_card's comma form keeps an empty
         # field between commas, so it is the safe fallback here too.

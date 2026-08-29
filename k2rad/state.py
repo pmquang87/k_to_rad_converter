@@ -6863,6 +6863,17 @@ class ConversionState:
     shell_elem_ids: Set[int] = field(default_factory=set)
     sh3n_elem_ids: Set[int] = field(default_factory=set)
     solid_elem_ids: Set[int] = field(default_factory=set)
+    # The PART ids that own at least one of those emitted /SHELL or /SH3N rows,
+    # recorded at the same two lines. The element sets above answer "is this
+    # eid a shell?"; this one answers "does this PART carry a shell?", which is
+    # what a PART-SCOPED shells-only consumer needs: /DYNAIN/DT takes a part
+    # list and dynain_shel_mp.F / dynain_c_strsg.F / dynain_c_strag.F are its
+    # only element writers, so a part list holding no shell produces an
+    # ACCEPTED, empty dynain (measured: a 118-byte file whose whole body is
+    # *NODE + *END, at 0 ERROR / 0 WARNING) — the #122 class. Not derivable
+    # from state.parts + state.shell_elems: a shell whose PID has no *PART
+    # record is parsed and warned about but never written.
+    shell_part_ids: Set[int] = field(default_factory=set)
     # Every /RBODY id this conversion wrote. THREE Radioss-side emission sites
     # (writer/rbody.py:645 *MAT_RIGID parts — which also covers *PART_INERTIA,
     # element-free CoG masters and *CONSTRAINED_RIGID_BODIES merge masters;
@@ -7413,6 +7424,29 @@ class ConversionState:
                or fid in self.define_tables_3d or fid in self.auto_tables):
             fid = self.next_id()
         return fid
+
+    def next_impdisp_id(self) -> int:
+        """A next_id() guaranteed free in the merged /IMPDISP namespace.
+
+        ``/IMPDISP`` and ``/IMPDISP/FGEO`` are ONE starter id table
+        (``hm_read_impvel.F:129`` runs a single ``UDOUBLE`` over the merged
+        ``NOM_OPT`` slice), and the FGEO ids come from the DECK — a user
+        ``BPFGID``. ``writer/rarecards._make_impdisp_fgeo`` screens a BPFGID
+        against every ``/IMPDISP`` the prescribed-motion writers recorded, but
+        its section runs BEFORE the rigid-wall one, so an id the rigid-wall
+        path mints later cannot be seen from there. This closes the other
+        direction: the minting side dodges the ids the deck states.
+
+        Same guard shape as next_curve_id / next_grnod_id / next_sensor_id, and
+        a no-op vs next_id() unless a deck carries a
+        ``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` BPFGID at or above the auto-id
+        base (90001), so it does not shift ids on any ordinary deck."""
+        taken = {r.bpfgid for r in self.final_geometries if r.bpfgid > 0}
+        taken |= self.imp_card_ids.get("IMPDISP", set())
+        did = self.next_id()
+        while did in taken:
+            did = self.next_id()
+        return did
 
     def next_sensor_id(self) -> int:
         """A next_id() guaranteed free in the /SENSOR namespace.

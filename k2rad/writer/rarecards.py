@@ -107,10 +107,15 @@ def _death_source_eids(state: ConversionState, rec) -> Optional[List[int]]:
         setkw = "*SET_SOLID"
     else:
         # THICK_SHELL_SET names a *SET_TSHELL, which this converter does not
-        # read. Both element-set registries are tried first, because a thick
-        # shell IS a /BRICK in the emitted deck and decks do sometimes list
-        # tshell ids in a *SET_SOLID.
-        entry = state.solid_sets.get(rec.eid) or state.shell_sets.get(rec.eid)
+        # read. Only the *SET_SOLID registry is tried as a fallback: a thick
+        # shell IS a /BRICK in the emitted deck and decks do sometimes restate
+        # a tshell list as a *SET_SOLID. *SET_SHELL is deliberately NOT tried —
+        # *SET_TSHELL, *SET_SOLID and *SET_SHELL are three separate LS-DYNA SID
+        # namespaces, and a *SET_SHELL cannot hold a thick-shell id at all, so
+        # adopting one on a bare SID match would deactivate whatever solids
+        # happen to share an eid with those shells (LS-DYNA element ids are
+        # per-family too) — the #125/#128 two-namespace trap.
+        entry = state.solid_sets.get(rec.eid)
         setkw = "*SET_TSHELL"
     if entry is None:
         state.warn(
@@ -223,31 +228,35 @@ def _make_element_death(state: ConversionState) -> List[str]:
     lines: List[str] = []
     for rec in state.element_deaths:
         label = _death_label(rec)
-        if rec.boxid:
-            state.warn(
-                f"{label}: BOXID = {rec.boxid} (INOUT = {rec.inout}, CID = "
-                f"{rec.cid}) makes this a SPATIAL death — 'An element is "
-                "immediately deleted upon meeting the condition of being "
-                "inside the box (or outside the box, depending on INOUT), "
-                "WITHOUT REGARD TO TIME, IDGRP, OR PERCENT' (Vol I R17 "
-                "p.17-251), and the manual resets a zero TIME to 1e16 in that "
-                "case. /ACTIV is purely time- or sensor-driven "
-                "(hm_read_activ.F), so there is nothing left to express — no "
-                "card emitted. dyna2rad never reads BOXID at all and converts "
-                "such a card to /ACTIV Tstop=0, i.e. to nothing happening, "
-                "silently.")
-            continue
         if rec.time <= 0.0:
-            state.warn(
-                f"{label}: TIME = {rec.time:g} means 'delete at t = 0' in "
-                "LS-DYNA (Vol I R17 p.17-251: TIME is the deletion time and "
-                "its default is 0.0), but /ACTIV reads the same zero as "
-                "'never' — hm_read_activ.F:139 turns Tstop = 0 into INFINITY "
-                "(measured: STOP-TIME 1e+21 in the starter echo). Copying it "
-                "through, as dyna2rad does, would invert the card, and there "
-                "is no number on the card to derive a small positive Tstop "
-                "from — no /ACTIV emitted. State a positive TIME, or delete "
-                "the elements from the mesh.")
+            if rec.boxid:
+                state.warn(
+                    f"{label}: BOXID = {rec.boxid} (INOUT = {rec.inout}, CID "
+                    f"= {rec.cid}) with TIME = {rec.time:g} is a purely "
+                    "SPATIAL death: 'An element is immediately deleted upon "
+                    "meeting the condition of being inside the box (or "
+                    "outside the box, depending on INOUT), without regard to "
+                    "TIME, IDGRP, or PERCENT', and 'If BOXID is nonzero, a "
+                    "TIME value of zero is reset to 1e16' (Vol I R17 "
+                    "p.17-251) — so the time criterion is switched off on "
+                    "this card and only the box is left. /ACTIV is time- or "
+                    "sensor-driven (hm_read_activ.F) and has no geometric "
+                    "form, so nothing is expressible — no card emitted. "
+                    "dyna2rad never reads BOXID at all and converts such a "
+                    "card to /ACTIV Tstop = 0, i.e. to nothing happening, "
+                    "silently.")
+            else:
+                state.warn(
+                    f"{label}: TIME = {rec.time:g} means 'delete at t = 0' in "
+                    "LS-DYNA (Vol I R17 p.17-251: TIME is the deletion time "
+                    "and its default is 0.0), but /ACTIV reads the same zero "
+                    "as 'never' — hm_read_activ.F:139 turns Tstop = 0 into "
+                    "INFINITY (measured: STOP-TIME 1e+21 in the starter "
+                    "echo). Copying it through, as dyna2rad does, would "
+                    "invert the card, and there is no number on the card to "
+                    "derive a small positive Tstop from — no /ACTIV emitted. "
+                    "State a positive TIME, or delete the elements from the "
+                    "mesh.")
             continue
         eids = _death_source_eids(state, rec)
         if eids is None:
@@ -295,13 +304,41 @@ def _make_element_death(state: ConversionState) -> List[str]:
             + ". The group is switched OFF at t=0 and back ON in the same "
             "call (desacti.F:140-170, Tstart=0), then OFF for good once "
             "TT > Tstop; deactivated elements keep their mass — Radioss zeroes "
-            "OFFG (a shell keeps the sign-flipped magnitude, eloff.F:479), it "
-            "does not remove the nodal mass, which is what LS-DYNA element "
-            "death does too. NOTE: with the default Idel=0 on k2rad's "
-            "TYPE7/TYPE25 interfaces the deactivated elements' contact "
-            "segments are NOT removed (resol.F:1910 gates the whole "
-            "shooting-node machinery on IDEL7NG>0), so the dead elements go on "
-            "carrying contact.")
+            "OFFG, it does not remove the nodal mass, which is what LS-DYNA "
+            "element death does too. WHEN READING /TH AFTERWARDS: a 4-node "
+            "shell is the one family eloff.F does NOT zero — :479 writes "
+            "OFFG = -ABS(OFFG) while :458/:522/:565 zero the solids, beams and "
+            "/SH3N — and its /TH force and moment channels then FREEZE at the "
+            "value they held when it died instead of dropping to 0 (measured "
+            "on a twin-deck pair: F1 stuck at 0.1294952 and M1 at -50.23716 "
+            "for every state after Tstop). The element carries no load — a "
+            "node it alone connected becomes a free particle at a = F/m, "
+            "measured — the CHANNEL is stale, not the physics. NOTE: the "
+            "deactivated elements' contact segments "
+            "are NOT removed, and that holds REGARDLESS of the interface's "
+            "Idel (k2rad writes Idel=2 on both /INTER/TYPE7 and /INTER/TYPE25). "
+            "The segment-removal pass at resol.F:5015-5153 runs only on "
+            "IDEL7NG>=1 .AND. IDEL7NOK==1, and IDEL7NOK is armed exclusively "
+            "by element FAILURE and geometry routines (sgeodel3.F, "
+            "schkjab3.F, cdt3.F, c3dt3.F, main_beam18.F, sconnect_off.F, ...) "
+            "— desacti.F and eloff.F, the two routines /ACTIV goes through, "
+            "never touch it. So the dead elements go on carrying contact.")
+        if rec.boxid:
+            state.warn(
+                f"{label}: BOXID = {rec.boxid} (INOUT = {rec.inout}, CID = "
+                f"{rec.cid}) has no /ACTIV slot and was dropped. It is a "
+                "SECOND, independent death criterion — 'An element is "
+                "immediately deleted upon meeting the condition of being "
+                "inside the box (or outside the box, depending on INOUT), "
+                "without regard to TIME, IDGRP, or PERCENT' (Vol I R17 "
+                "p.17-251), and TIME stays live beside it (the same page "
+                "resets a ZERO time to 1e16 only when BOXID is nonzero, which "
+                "is what would switch the time criterion off). LS-DYNA "
+                f"therefore deletes at min(box crossing, TIME = {rec.time:g}) "
+                "while the converted deck keeps only the TIME half: elements "
+                "that would have entered or left the box earlier now survive "
+                "until Tstop. /ACTIV is time- or sensor-driven only "
+                "(hm_read_activ.F) and has no geometric form.")
         if rec.idgrp:
             state.warn(
                 f"{label}: IDGRP = {rec.idgrp} / PERCENT = {rec.percent:g} "
@@ -480,6 +517,32 @@ def _make_random(state: ConversionState) -> List[str]:
             "node the sets name) and the per-set amplitudes were dropped; "
             "split them into separate runs if the amplitudes differ.")
         grouped = []
+    if len(globals_) > 1:
+        # hm_read_rand.F:118-126 OVERWRITES the module-level XALEA on every
+        # all-nodes record (`IALL = IALL+1; XALEA = ALEA(I)`) and the
+        # application loop at :152-163 then adds XALEA*ALEAT() ONCE per node —
+        # so a second global card silently makes the first one inert. LS-DYNA
+        # instead SUMS them ('Perturbations specified using separate
+        # *PERTURBATION cards are created separately and then added together',
+        # Vol I R17 p.38-10 Remark 2). (The grouped form is not affected: its
+        # loop applies each group's own ALEA(I).)
+        kept_i = max(range(len(globals_)), key=lambda i: globals_[i][1])
+        dropped_x = [x for i, (_r, x) in enumerate(globals_) if i != kept_i]
+        kept = globals_[kept_i]
+        globals_ = [kept]
+        state.warn(
+            "*PERTURBATION_NODE: this deck states "
+            f"{len(dropped_x) + 1} all-nodes cards (NSID = 0). LS-DYNA sums "
+            "separate *PERTURBATION cards ('created separately and then added "
+            "together', Vol I R17 p.38-10 Remark 2), but /RANDOM cannot: "
+            "hm_read_rand.F:118-126 overwrites ONE module-level XALEA per "
+            "all-nodes record and :152-163 applies it once, so the earlier "
+            "cards would be silently inert. The largest amplitude "
+            f"(XALEA = {kept[1]:g}) was kept and "
+            + ", ".join(f"XALEA = {x:g}" for x in sorted(dropped_x))
+            + " dropped. The sum of two independent uniform deviates is not "
+            "uniform, so no single XALEA reproduces it; state one card, or "
+            "run the perturbations as separate models.")
     lines: List[str] = []
     for rec, xalea in globals_ + grouped:
         label = _perturbation_label(rec)
@@ -574,6 +637,51 @@ def _fgeo_label(rec) -> str:
     return f"*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY BPFGID {rec.bpfgid}"
 
 
+def _warn_fgeo_curve_range(state: ConversionState, label: str,
+                           lcid: int) -> None:
+    """Name a driver curve that is not the 0 → 1 scale factor the card needs.
+
+    *"A load curve defines a scale factor as a function of time that is bounded
+    between zero and unity corresponding to the initial and final geometry"*
+    (Vol I R17 p.5-73), and the engine takes that literally:
+    ``fixfingeo.F:243-256`` computes ``X(t) = X0 + f(t)·(Xf − X0)`` with NO
+    clamp on ``f``, so an ordinate of 200 sends the node 200 × the stated offset
+    and an ordinate that returns to 0 brings it back to where it started.
+
+    Reachable and silent until now. A ``*DEFINE_CURVE_SMOOTH`` in particular can
+    NEVER satisfy the requirement: it is a velocity trapezoid whose plateau is
+    ``VMAX`` and whose last vertex is ``(TEND, 0)`` by construction. MEASURED on
+    a probe pairing the two: with ``VMAX = 200`` the driven tip reached 98 mm on
+    a 1 mm offset by ``t = 2.5 ms`` and the run died on the energy-error limit —
+    under a ``NORMAL TERMINATION`` banner.
+    """
+    curve = state.curves.get(lcid)
+    if not curve or not curve.pts:
+        return
+    ords = [o for _a, o in curve.pts]
+    end, top, bot = ords[-1], max(ords), min(ords)
+    smooth = lcid in state.funct_smooth_ids
+    if abs(end - 1.0) <= 1.0e-6 and top <= 1.0 + 1.0e-6 and bot >= -1.0e-6:
+        return
+    state.warn(
+        f"{label}: load curve {lcid} is not the 0 -> 1 scale factor this card "
+        f"needs — its ordinates run {bot:g} .. {top:g} and end at {end:g}. "
+        "'A load curve defines a scale factor as a function of time that is "
+        "bounded between zero and unity corresponding to the initial and final "
+        "geometry' (Vol I R17 p.5-73), and fixfingeo.F:243-256 computes "
+        "X(t) = X0 + f(t)*(Xf - X0) with NO clamp on f, so an ordinate of "
+        f"{top:g} sends every listed node {top:g} times the stated offset"
+        + (f" and an end value of {end:g} leaves it there" if end else
+           " and an end value of 0 carries it back to where it started")
+        + ". The curve is written through as stated — nothing on the card "
+        "derives a rescaling, and inventing one would be a fabricated motion — "
+        "but the resulting positions are not the ones the node rows name."
+        + (" NOTE: curve " + str(lcid) + " is a *DEFINE_CURVE_SMOOTH, which "
+           "can never satisfy this: it is a VELOCITY trapezoid whose plateau "
+           "is VMAX and whose last vertex is (TEND, 0) by construction. The "
+           "two keywords do not pair." if smooth else ""))
+
+
 def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
     """``*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY`` → one ``/IMPDISP/FGEO`` per
     distinct ``(LCID, DEATH, BIRTH)`` triple.
@@ -610,10 +718,20 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
     # /IMPDISP and /IMPDISP/FGEO are ONE id namespace: hm_read_impvel.F:96-129
     # counts them together (NIMPDISP includes FGEOD) and runs ONE UDOUBLE scan
     # over the merged NOM_OPT slice, so a user BPFGID landing on a synthesized
-    # /IMPDISP id is ERROR 79 over the whole table. The prescribed-motion
-    # sections run BEFORE this one in _starter_section_registry and record
-    # every id they write, so the screen is complete.
+    # /IMPDISP id is ERROR 79 over the whole table.
+    #
+    # The *BOUNDARY_PRESCRIBED_MOTION writers run BEFORE this section in
+    # _starter_section_registry and record every id at the line that writes it
+    # (_emit_imp_card), so those are screened HERE. The rigid-wall geometric
+    # motion path (loads._emit_rwall_geom_motion) is the one /IMPDISP producer
+    # whose section runs AFTER this one, so its ids cannot be seen from here —
+    # it dodges the deck's BPFGIDs from its own side instead
+    # (state.next_impdisp_id). Between the two directions the pair is covered,
+    # and _warn_duplicate_impdisp_ids is the deck-wide backstop.
     used_ids: Set[int] = set(state.imp_card_ids.get("IMPDISP", set()))
+    # One range diagnostic per CURVE, not per emitted card: a single deck card
+    # whose rows split into several /IMPDISP/FGEO would otherwise repeat it.
+    range_checked: Set[int] = set()
     for rec in state.final_geometries:
         label = _fgeo_label(rec)
         rows = _fgeo_rows(state, rec)
@@ -646,18 +764,32 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
                     "straight into DIST (fixfingeo.F:243), so a zero or "
                     "dangling id is a wrong answer, not a missing one.")
                 continue
+            if lcid not in range_checked:
+                range_checked.add(lcid)
+                _warn_fgeo_curve_range(state, label, lcid)
             fct_id = lcid
             if birth:
                 curve = state.curves[lcid]
                 fct_id = state.next_curve_id()
                 shifted = [(a + birth, o) for a, o in curve.pts]
+                # The copy has to keep the SOURCE curve's card kind. A
+                # *DEFINE_CURVE_SMOOTH re-emitted as a plain /FUNCT loses the
+                # ISMOOTH flag, and fixfingeo.F:186-196 then picks FINTER2
+                # instead of FINTER2_SMOOTH: the quintic blend becomes
+                # piecewise-linear and, worse, the clamp at
+                # finter_smooth.F:71-76 is gone, so the curve extrapolates past
+                # its last point — the very failure /FUNCT_SMOOTH is chosen for.
+                smooth = lcid in state.funct_smooth_ids
+                kind = "/FUNCT_SMOOTH" if smooth else "/FUNCT"
                 lines += _emit_funct(
                     fct_id, f"FGEO_{rec.bpfgid}_LCID_{lcid}_BIRTH_{birth:g}",
-                    shifted)
+                    shifted, smooth=smooth)
+                if smooth:
+                    state.funct_smooth_ids.add(fct_id)
                 state.warn(
                     f"{label}: BIRTH = {birth:g} was written as Tstart = "
                     f"{birth:g} AND as a copy of curve {lcid} with every "
-                    f"abscissa shifted by +{birth:g} (/FUNCT/{fct_id}). "
+                    f"abscissa shifted by +{birth:g} ({kind}/{fct_id}). "
                     "LS-DYNA's BIRTH does BOTH: 'The prescribed motion begins "
                     "acting at time = BIRTH, but with the motion from the "
                     "zero-abscissa value of the curve LCID. In other words, "
@@ -677,13 +809,20 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
                 if taken > 0:
                     state.warn(
                         f"{label}: BPFGID {taken} is already in use by another "
-                        "/IMPDISP or /IMPDISP/FGEO card in the converted deck, "
-                        f"so this block was renumbered to {impdisp_id}. "
-                        "/IMPDISP and /IMPDISP/FGEO are ONE id namespace — "
+                        "/IMPDISP or /IMPDISP/FGEO card in the converted deck "
+                        "(that can be a *BOUNDARY_PRESCRIBED_MOTION card, or "
+                        "an earlier slice of THIS card when its node rows were "
+                        "split by (LCID, DEATH, BIRTH)), so this block was "
+                        f"renumbered to {impdisp_id}. /IMPDISP and "
+                        "/IMPDISP/FGEO are ONE id namespace — "
                         "hm_read_impvel.F:96-129 counts them together and runs "
                         "one UDOUBLE duplicate scan over the merged table, so "
                         f"leaving both on {taken} would be ERROR 79.")
             used_ids.add(impdisp_id)
+            # Recorded for the producers that run LATER (the rigid-wall
+            # geometric motion path mints its /IMPDISP ids from
+            # state.next_impdisp_id, which reads this).
+            state.imp_card_ids.setdefault("IMPDISP", set()).add(impdisp_id)
             title = rec.title or f"FINAL_GEOMETRY_{rec.bpfgid}"
             lines += [
                 f"/IMPDISP/FGEO/{impdisp_id}",
@@ -728,8 +867,13 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
 _DYNAIN_IDS_PER_LINE = 10
 
 #: ``TDYNAIN0`` and ``DTDYNAIN0``, as fractions of ENDTIM: write from 90 % of
-#: the run on, every 2 %, so at most five files and the LAST one lands on the
-#: run's final computed cycle.
+#: the run on, every 2 %, so at most six files (the triggers at 0.90, 0.92,
+#: ..., 1.00 ENDTIM) and the last of them lands within one interval of
+#: termination. It is a SCHEDULE, not a terminal-state capture: ``GENDYNAIN``
+#: fires from ``sortie_main.F:922`` on ``TT >= TDYNAIN``, so the newest file
+#: sits at the last trigger an output pass crossed — up to ``DTDYNAIN0``
+#: before ENDTIM, and further back if the engine's own output cadence is
+#: coarser than that.
 #:
 #: **Neither ``ENDTIM ENDTIM`` (dyna2rad's choice, convertcards.cxx:1242-1243)
 #: nor a single near-terminal trigger can be relied on, and the reason is a
@@ -792,12 +936,31 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
       ``forrtl: severe (64): input conversion error`` and the STARTER dies with
       no ``.out`` at all. The part ids therefore follow that line IMMEDIATELY,
       with no ``#`` between them.
+
+    "Shells only" is enforced at BOTH scopes. The deck-wide guard refuses a
+    model with no shell at all; the part-list screen against
+    ``state.shell_part_ids`` drops the parts that own none. Without the second
+    one a ``*SET_PART`` naming solid parts in a deck that has shells elsewhere
+    passes the first guard and produces an ACCEPTED, EMPTY dynain — measured,
+    118 bytes of ``*NODE`` + ``*END`` at 0 ERROR / 0 WARNING / NORMAL
+    TERMINATION, i.e. exactly the #122 failure this writer exists to prevent.
     """
     if not state.interface_springbacks:
         return []
     endtim = (state.ctrl_termination.endtim
               if state.ctrl_termination else 0.0)
     lines: List[str] = []
+    # ONE merged block for the whole deck, never one per card. /DYNAIN is a
+    # GLOBAL engine output request and the reader resolves the two scopes with
+    # an ELSEIF: read_dynain.F:80/93 takes the part list when NDYNAINPRT /= 0
+    # and /ALL only otherwise, while fredynain.F:109-110 ZEROES NDYNAINPRT
+    # inside the /ALL branch. Two blocks are therefore order-dependent — a
+    # per-part block after an /ALL one silently NARROWS the request, before it
+    # silently WIDENS it — and the second block's Tstart/Tfreq overwrite the
+    # first's. Merged here instead, with the union named.
+    merged_all = False
+    merged_pids: List[int] = []
+    contributors: List[str] = []
     for rec in state.interface_springbacks:
         label = _springback_label(rec)
         if endtim <= 0.0:
@@ -850,7 +1013,44 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
                         "id that names no /PART is starter ERROR 1908 "
                         "('PART ID=%d DOES NOT EXIST'), measured, which "
                         "refuses the whole run.")
-                if not pids:
+                if pids:
+                    # /DYNAIN is shells-only PER PART, not only deck-wide: a
+                    # part that owns no emitted /SHELL or /SH3N contributes
+                    # nothing to the file, and a part list made entirely of
+                    # such parts is ACCEPTED — 0 ERROR, 0 WARNING, NORMAL
+                    # TERMINATION — and writes an empty stub (measured: 118
+                    # bytes, *NODE + *END and nothing else). The #122 class,
+                    # one scope narrower than the deck-wide guard above.
+                    shell_less = [p for p in pids
+                                  if p not in state.shell_part_ids]
+                    if shell_less:
+                        pids = [p for p in pids if p in state.shell_part_ids]
+                        state.warn(
+                            f"{label}: part(s) {_fmt_eid_list(shell_less)} of "
+                            f"*SET_PART {rec.psid} carry no /SHELL or /SH3N "
+                            "element and were left out of the /DYNAIN part "
+                            "list. OpenRadioss's dynain writer is SHELLS ONLY "
+                            "(fredynain.F:132-166 has no BRICK/BEAM/NODE "
+                            "sub-key; dynain_shel_mp.F / dynain_c_strsg.F / "
+                            "dynain_c_strag.F are its only element writers), "
+                            "so naming them would have added nothing to the "
+                            "file. The forming state of a solid, thick-shell "
+                            "or beam part cannot be carried over this way — "
+                            "/STATE is the Radioss keyword family for that, "
+                            "and this converter does not emit it yet.")
+                    if not pids:
+                        state.warn(
+                            f"{label}: no part of *SET_PART {rec.psid} "
+                            "carries a shell in the converted deck, so there "
+                            "is nothing a shells-only /DYNAIN could write — "
+                            "no /DYNAIN block emitted. Widening to "
+                            "/DYNAIN/DT/ALL would have dumped the WHOLE model "
+                            "instead of the parts the deck named, and "
+                            "emitting the stated list would have produced an "
+                            "accepted, EMPTY dynain file at 0 ERROR and 0 "
+                            "WARNING (measured).")
+                        continue
+                else:
                     scope_all = True
                     state.warn(
                         f"{label}: no part of *SET_PART {rec.psid} survived "
@@ -859,19 +1059,11 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
                         "list (starter ERROR 1909).")
         tstart = _DYNAIN_TSTART_FRACTION * endtim
         interval = _DYNAIN_INTERVAL_FRACTION * endtim
+        contributors.append(label)
         if scope_all:
-            lines += ["/DYNAIN/DT/ALL",
-                      f"{tstart:.6G} {interval:.6G}"]
+            merged_all = True
         else:
-            lines += ["/DYNAIN/DT", f"{tstart:.6G} {interval:.6G}"]
-            # No comment and no blank line here: check_dynain.F:144 feeds the
-            # very next line into an (I10) READ and dies on anything else.
-            for k in range(0, len(pids), _DYNAIN_IDS_PER_LINE):
-                lines.append("".join(
-                    _i(p) for p in pids[k:k + _DYNAIN_IDS_PER_LINE]))
-        lines += ["/DYNAIN/SHELL/STRES/FULL",
-                  "/DYNAIN/SHELL/STRAIN/FULL",
-                  "#"]
+            merged_pids += [p for p in pids if p not in merged_pids]
         state.warn(
             f"{label}: -> /DYNAIN/DT{'/ALL' if scope_all else ''} "
             f"{tstart:.6G} {interval:.6G} + /DYNAIN/SHELL/STRES/FULL + "
@@ -880,16 +1072,21 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
             f"{_DYNAIN_TSTART_FRACTION:g}*ENDTIM = {tstart:.6G} on, every "
             f"{_DYNAIN_INTERVAL_FRACTION:g}*ENDTIM = {interval:.6G} (ENDTIM = "
             f"{endtim:g}) — at most "
-            f"{int((1.0 - _DYNAIN_TSTART_FRACTION) / _DYNAIN_INTERVAL_FRACTION) + 1}"
-            " files; TAKE THE HIGHEST-NUMBERED ONE, it is the last computed "
-            "state. A single trigger at (or just below) ENDTIM is NOT usable: "
+            f"{round((1.0 - _DYNAIN_TSTART_FRACTION) / _DYNAIN_INTERVAL_FRACTION) + 1}"
+            " files; TAKE THE HIGHEST-NUMBERED ONE. It holds the last state "
+            f"written at or after {tstart:.6G}, which can precede termination "
+            f"by up to {interval:.6G} (more if the engine's own output cadence "
+            "is coarser than that): SORTIE_MAIN fires GENDYNAIN on TT >= "
+            "TDYNAIN, so the capture is a SCHEDULE, not the terminal state. "
+            "A single trigger at (or just below) ENDTIM is NOT usable either: "
             "an explicit run's last cycle lands below TSTOP and the engine's "
             "own end-of-run rescue sets ILASTDYNAIN (resol.F:8358-8368) but "
             "never reads it — the extra-cycle decision at resol.F:9265-9295 "
             "is taken on ILASTANIM/ILASTH3D alone. MEASURED: "
             "`/DYNAIN/DT 0.98*ENDTIM 1E+30` wrote zero files at NORMAL "
-            "TERMINATION, 0 ERROR, 0 WARNING, while this schedule wrote the "
-            "final state. The file is LS-DYNA keyword format (*NODE, "
+            "TERMINATION, 0 ERROR, 0 WARNING, while this schedule wrote a "
+            "file on the run's last computed cycle. The file is LS-DYNA "
+            "keyword format (*NODE, "
             "*ELEMENT_SHELL_THICKNESS, *INITIAL_STRESS_SHELL, "
             "*INITIAL_STRAIN_SHELL, *END) and can be read straight back into "
             "k2rad as the springback stage's initial state.")
@@ -950,7 +1147,39 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
             state.warn(f"{label}: dropped, with no /DYNAIN slot — "
                        + "; ".join(dropped) + ". dyna2rad drops all of them "
                        "too, without a message.")
-    if not lines:
+    if not contributors:
         return []
+    if len(contributors) > 1:
+        state.warn(
+            f"*INTERFACE_SPRINGBACK: {len(contributors)} cards ("
+            + "; ".join(contributors)
+            + ") were merged into ONE /DYNAIN block covering "
+            + ("ALL parts" if merged_all
+               else f"{len(merged_pids)} part(s): "
+                    f"{_fmt_eid_list(merged_pids)}")
+            + ". /DYNAIN is a global engine output request and two blocks are "
+            "ORDER-DEPENDENT, not additive: read_dynain.F:80/93 resolves the "
+            "scope with an ELSEIF (the part list wins whenever NDYNAINPRT is "
+            "nonzero) while fredynain.F:109-110 ZEROES NDYNAINPRT inside the "
+            "/ALL branch, and the second block's Tstart/Tfreq overwrite the "
+            "first's. So one of the two cards would have been silently "
+            "ignored, and which one depends on the order they appear in. The "
+            "union is written instead"
+            + (" — an all-parts card was among them, which widens the scope "
+               "to the whole model." if merged_all and merged_pids else "."))
+    tstart = _DYNAIN_TSTART_FRACTION * endtim
+    interval = _DYNAIN_INTERVAL_FRACTION * endtim
+    if merged_all:
+        lines += ["/DYNAIN/DT/ALL", f"{tstart:.6G} {interval:.6G}"]
+    else:
+        lines += ["/DYNAIN/DT", f"{tstart:.6G} {interval:.6G}"]
+        # No comment and no blank line here: check_dynain.F:144 feeds the
+        # very next line into an (I10) READ and dies on anything else.
+        for k in range(0, len(merged_pids), _DYNAIN_IDS_PER_LINE):
+            lines.append("".join(
+                _i(p) for p in merged_pids[k:k + _DYNAIN_IDS_PER_LINE]))
+    lines += ["/DYNAIN/SHELL/STRES/FULL",
+              "/DYNAIN/SHELL/STRAIN/FULL",
+              "#"]
     return ["#-  SPRINGBACK STATE (*INTERFACE_SPRINGBACK_LSDYNA -> /DYNAIN):"
             ] + lines

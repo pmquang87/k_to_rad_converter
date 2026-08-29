@@ -8140,6 +8140,11 @@ def _make_functions(state: ConversionState) -> List[str]:
     table_ids = getattr(state, "table_1d_ids", set())
     lines = ["#-  FUNCTIONS:", HDR]
     for lcid, curve in sorted(state.curves.items()):
+        # Precedence note: the table branch is tested FIRST, so a curve that a
+        # material law consumes through a TABLE slot goes out as /TABLE/1 even
+        # if it came from a *DEFINE_CURVE_SMOOTH. Deliberate — a law's Tab_ID
+        # slot resolves /TABLE ids, and ISMOOTH is a time-interpolation flag the
+        # /IMP* consumers read, not something a stress-strain table uses.
         if lcid in table_ids:
             # A curve a law consumes through a TABLE slot (LAW76's yield curves,
             # LAW52's Tab_ID) must be /TABLE (1D). Layout from CURVE/table_1.cfg:

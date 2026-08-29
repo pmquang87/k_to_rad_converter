@@ -307,18 +307,71 @@ class ElementDeathTests(unittest.TestCase):
         self.assertTrue(_warn_containing(res, "TIME = 0",
                                          "hm_read_activ.F:139"))
 
-    def test_boxid_is_refused_by_name(self):
-        """BOXID is a spatial criterion applied 'without regard to TIME';
-        /ACTIV is time/sensor based only."""
+    def test_boxid_beside_a_positive_time_keeps_the_time_criterion(self):
+        """BOXID and TIME are two INDEPENDENT criteria.
+
+        Vol I R17 p.17-251: the elements are considered for deletion "either
+        by meeting the BOXID/INOUT criterion OR the independent
+        TIME/IDGRP/PERCENT criterion", and TIME is switched off only when it
+        is ZERO ("If BOXID is nonzero, a TIME value of zero is reset to
+        1e16"). So a nonzero TIME still converts and only the spatial half is
+        lost — the same policy the IDGRP criterion gets.
+        """
         deck = MESH.replace("{EXTRA}",
                             "*DEFINE_ELEMENT_DEATH_SOLID\n"
                             + _row(101, 0.003, 55, 1, 0, 7) + "\n")
         res, starter, _eng = _convert(deck)
-        self.assertEqual(_headers(starter, "/ACTIV/"), [])
+        (activ_id,) = _activ_ids(starter)
+        _cells, tstart, tstop = _activ(starter, activ_id)
+        self.assertEqual((tstart, tstop), (0.0, 0.003))
         w = _warn_containing(res, "BOXID = 55")
         self.assertTrue(w)
         self.assertIn("INOUT = 1", w[0])
         self.assertIn("CID = 7", w[0])
+        self.assertIn("min(box crossing, TIME = 0.003)", w[0])
+
+    def test_boxid_with_a_zero_time_is_refused_by_name(self):
+        """With BOXID nonzero LS-DYNA resets a zero TIME to 1e16, so the card
+        really is box-only and nothing is expressible."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_ELEMENT_DEATH_SOLID\n"
+                            + _row(101, 0, 55, 1, 0, 7) + "\n")
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/ACTIV/"), [])
+        w = _warn_containing(res, "BOXID = 55")
+        self.assertTrue(w)
+        self.assertIn("reset to 1e16", w[0])
+
+    def test_the_contact_note_states_the_idel_k2rad_actually_writes(self):
+        """k2rad hard-codes Idel=2 on TYPE7/TYPE25, so the note must not claim
+        a default of 0 — and the real reason the segments stay is that
+        desacti.F/eloff.F never arm IDEL7NOK."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_ELEMENT_DEATH_SOLID\n"
+                            + _row(101, 0.003) + "\n")
+        res, _starter, _eng = _convert(deck)
+        (w,) = _warn_containing(res, "carrying contact")
+        self.assertIn("Idel=2", w)
+        self.assertIn("IDEL7NOK", w)
+        self.assertNotIn("Idel=0", w)
+        # The 4-node shell OFFG asymmetry is a user-visible /TH trap (#122):
+        # eloff.F:479 keeps |OFFG| for ITY==3 while :458/:522/:565 zero the
+        # solids, beams and /SH3N, and the channel then freezes.
+        self.assertIn("FREEZE", w)
+        self.assertIn("eloff.F", w)
+
+    def test_thick_shell_set_does_not_adopt_a_shell_set(self):
+        """*SET_TSHELL, *SET_SOLID and *SET_SHELL are three separate LS-DYNA
+        SID namespaces; a *SET_SHELL cannot hold a thick-shell id."""
+        deck = MESH.replace("{EXTRA}",
+                            "*SET_SHELL_LIST\n" + _row(700) + "\n"
+                            + _row(201, 202) + "\n"
+                            "*DEFINE_ELEMENT_DEATH_THICK_SHELL_SET\n"
+                            + _row(700, 0.004) + "\n")
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/ACTIV/"), [])
+        self.assertEqual(_headers(starter, "/GRBRIC/BRIC/"), [])
+        self.assertTrue(_warn_containing(res, "*SET_TSHELL", "was not found"))
 
     def test_idgrp_and_percent_are_named_but_the_time_card_survives(self):
         """TIME and IDGRP/PERCENT are two INDEPENDENT criteria (Vol I R17
@@ -488,6 +541,20 @@ class CurveSmoothTests(unittest.TestCase):
         self.assertEqual([y for _x, y in pts], [0.0, 300.0, 300.0, 0.0])
         self.assertTrue(_warn_containing(res, "TRISE = 0", "ERROR 156"))
 
+    def test_zero_dist_is_named_as_an_identically_zero_curve(self):
+        """Every field on this card has default 'none' (Vol I R17 p.17-153),
+        and DIST is the only thing that sets the curve's height — a blank one
+        emits a legal, accepted card that moves nothing (#122)."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, 0.0, 0.0, 0.03, 0.005, 0.0) + "\n"
+                            + SMOOTH_CONSUMER)
+        res, starter, _eng = _convert(deck)
+        self.assertEqual([y for _x, y in _smooth_points(starter, 900)],
+                         [0.0, 0.0, 0.0, 0.0])
+        self.assertTrue(_warn_containing(res, "DIST = 0",
+                                         "identically zero"))
+
     def test_both_blank_is_refused_by_name(self):
         deck = MESH.replace("{EXTRA}",
                             "*DEFINE_CURVE_SMOOTH\n"
@@ -529,6 +596,52 @@ class CurveSmoothTests(unittest.TestCase):
         self.assertTrue(_warn_containing(res, "TRISE", "*PARAMETER"))
         pts = _smooth_points(starter, 900)
         self.assertEqual([y for _x, y in pts], [0.0, 300.0, 300.0, 0.0])
+        # The consequence has to be a NUMBER, not just a principle: this deck
+        # ships a 300 mm/s plateau where the deck meant 360.
+        (w,) = _warn_containing(res, "plateau of VMAX")
+        self.assertIn("VMAX = 300", w)
+
+    def test_a_later_define_curve_on_the_same_id_clears_the_smooth_flag(self):
+        """The emitted card kind must match the points that survive: a plain
+        piecewise-linear curve read as /FUNCT_SMOOTH is quintic-blended and
+        clamped (finter_smooth.F:71-101)."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, 9.0, 0.0, 0.03, 0.005, 0.0) + "\n"
+                            + "*DEFINE_CURVE\n"
+                            + _row(900, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+                            "                 0.0                 0.0\n"
+                            "                0.03                 1.0\n"
+                            + SMOOTH_CONSUMER)
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(_headers(starter, "/FUNCT_SMOOTH/900"), [])
+        self.assertEqual(_headers(starter, "/FUNCT/900"), ["/FUNCT/900"])
+        self.assertTrue(_warn_containing(res, "*DEFINE_CURVE LCID 900",
+                                         "already defined this id"))
+
+    def test_a_duplicate_smooth_id_is_named(self):
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE\n"
+                            + _row(900, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+                            "                 0.0                 0.0\n"
+                            "                0.03                 1.0\n"
+                            + "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(900, 0, 9.0, 0.0, 0.03, 0.005, 0.0) + "\n"
+                            + SMOOTH_CONSUMER)
+        res, _starter, _eng = _convert(deck)
+        self.assertTrue(_warn_containing(res, "*DEFINE_CURVE_SMOOTH LCID 900",
+                                         "already defined by a *DEFINE_CURVE"))
+
+    def test_a_smooth_curve_is_not_a_legacy_table_row(self):
+        """state.curve_order resolves the LEGACY positional *DEFINE_TABLE, and
+        the manual scopes that to *DEFINE_CURVE sections by name (Vol I R17
+        p.17-444). A smooth curve after the table is not one of its rows."""
+        state = _dispatch("*KEYWORD\n*DEFINE_CURVE_SMOOTH\n"
+                          + _row(900, 0, 9.0, 0.0, 0.03, 0.005, 0.0)
+                          + "\n*END\n")
+        self.assertIn(900, state.curves)
+        self.assertIn(900, state.funct_smooth_ids)
+        self.assertNotIn(900, state.curve_order)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -595,6 +708,26 @@ class PerturbationNodeTests(unittest.TestCase):
         self.assertEqual(len(_headers(starter, "/RANDOM")), 1)
         self.assertEqual(_headers(starter, "/RANDOM/GRNOD/"), [])
         self.assertTrue(_warn_containing(res, "cannot coexist"))
+
+    def test_two_global_cards_collapse_to_the_largest_amplitude(self):
+        """hm_read_rand.F:118-126 OVERWRITES the module-level XALEA on every
+        all-nodes record and :152-163 applies it once, so a second global card
+        makes the first inert. LS-DYNA instead SUMS them (Vol I R17 p.38-10
+        Remark 2)."""
+        deck = MESH.replace("{EXTRA}",
+                            "*PERTURBATION_NODE\n"
+                            + _row(8, 0, 1.0, 7, 0, 0) + "\n"
+                            + _row(0.25, 1.0) + "\n"
+                            + "*PERTURBATION_NODE\n"
+                            + _row(8, 0, 1.0, 7, 0, 0) + "\n"
+                            + _row(0.75, 1.0) + "\n")
+        res, starter, _eng = _convert(deck)
+        self.assertEqual(len(_headers(starter, "/RANDOM")), 1)
+        body = _data_rows(starter, "/RANDOM")
+        self.assertEqual(body[0][0:20].strip(), "0.75")
+        (w,) = _warn_containing(res, "all-nodes cards")
+        self.assertIn("XALEA = 0.75", w)
+        self.assertIn("XALEA = 0.25", w)
 
     def test_other_types_are_warn_dropped_by_name(self):
         for ptype, needle in ((1, "HARMONIC"), (2, "FADE"),
@@ -749,6 +882,56 @@ class FinalGeometryTests(unittest.TestCase):
         self.assertEqual(pts, [(0.002, 0.0), (0.012, 1.0)])
         self.assertTrue(_warn_containing(res, "BIRTH = 0.002", "OFFA"))
 
+    def test_the_birth_copy_of_a_smooth_curve_stays_smooth(self):
+        """A *DEFINE_CURVE_SMOOTH re-emitted as a plain /FUNCT loses ISMOOTH,
+        and fixfingeo.F:186-196 then picks FINTER2 instead of FINTER2_SMOOTH:
+        the clamp at finter_smooth.F:71-76 is gone and the curve extrapolates
+        past its last point."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(901, 0, 1.0, 0.0, 0.01, 0.002, 0.0) + "\n"
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(800, 901, 0.0, 1) + "\n"
+                            + _fgeo_row(9, 25.0, 0.0, 0.0, 0, 0.0, 0.002)
+                            + "\n")
+        res, starter, _eng = _convert(deck)
+        body = _data_rows(starter, "/IMPDISP/FGEO/800")
+        fct = int(body[1][0:10])
+        self.assertNotEqual(fct, 901)
+        self.assertEqual(_headers(starter, f"/FUNCT/{fct}"), [])
+        self.assertEqual(_headers(starter, f"/FUNCT_SMOOTH/{fct}"),
+                         [f"/FUNCT_SMOOTH/{fct}"])
+        # Every abscissa shifted by +BIRTH, ordinates untouched.
+        self.assertEqual([x for x, _y in _smooth_points(starter, fct)],
+                         [x + 0.002 for x, _y in _smooth_points(starter, 901)])
+        self.assertTrue(_warn_containing(res, f"/FUNCT_SMOOTH/{fct}"))
+
+    def test_a_driver_curve_outside_zero_to_one_is_named(self):
+        """fixfingeo.F:243-256 computes X(t) = X0 + f(t)*(Xf - X0) with NO
+        clamp, so a curve that is not the 0 -> 1 scale factor of Vol I R17
+        p.5-73 sends the node somewhere else entirely — measured: a *DEFINE_
+        CURVE_SMOOTH plateau of 200 drove a 1 mm offset to 98 mm."""
+        deck = MESH.replace("{EXTRA}",
+                            "*DEFINE_CURVE_SMOOTH\n"
+                            + _row(901, 0, 1.0, 0.0, 0.006, 0.001) + "\n"
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(800, 901, 0.0, 0) + "\n"
+                            + _fgeo_row(9, 25.0, 0.0, 0.0) + "\n")
+        res, starter, _eng = _convert(deck)
+        self.assertTrue(_headers(starter, "/IMPDISP/FGEO/800"))
+        (w,) = _warn_containing(res, "is not the 0 -> 1 scale factor")
+        self.assertIn("end at 0", w)
+        self.assertIn("*DEFINE_CURVE_SMOOTH, which can never satisfy this", w)
+
+    def test_a_zero_to_one_ramp_raises_no_range_warning(self):
+        deck = MESH.replace("{EXTRA}",
+                            RAMP
+                            + "*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                            + _row(800, 901, 0.0, 0) + "\n"
+                            + _fgeo_row(9, 25.0, 0.0, 0.0) + "\n")
+        res, _starter, _eng = _convert(deck)
+        self.assertEqual(_warn_containing(res, "0 -> 1 scale factor"), [])
+
     def test_bpfgid_dodges_an_existing_impdisp_id(self):
         """/IMPDISP and /IMPDISP/FGEO are ONE starter id namespace:
         hm_read_impvel.F:129 runs a single UDOUBLE over the merged NOM_OPT
@@ -865,10 +1048,15 @@ class SpringbackTests(unittest.TestCase):
         """fredynain.F reads the part ids into a fixed IV2(10)."""
         parts = "".join(
             f"*PART\np{p}\n{_row(p, 2, 1)}\n" for p in range(3, 20))
+        # Each part needs a shell of its own: /DYNAIN writes shells only, so a
+        # shell-less part is screened out of the list before it is printed.
+        shells = ("*ELEMENT_SHELL\n"
+                  + "".join(_row(300 + p, p, 1, 2, 3, 4) + "\n"
+                            for p in range(3, 20)))
         pset = ("*SET_PART_LIST\n" + _row(950) + "\n"
                 + _row(*range(3, 13)) + "\n" + _row(*range(13, 20)) + "\n")
         deck = MESH.replace("{EXTRA}",
-                            parts + pset
+                            parts + shells + pset
                             + "*INTERFACE_SPRINGBACK_LSDYNA\n"
                             + _row(950, 0, 0, "", 0, 0, 0, 0) + "\n")
         _res, _starter, engine = _convert(deck)
@@ -904,6 +1092,92 @@ class SpringbackTests(unittest.TestCase):
         res, _starter, engine = _convert(deck)
         self.assertNotIn("/DYNAIN", engine)
         self.assertTrue(_warn_containing(res, "SHELLS ONLY"))
+
+    def test_a_shell_less_part_is_dropped_from_the_part_list(self):
+        """The shells-only rule is PER PART, not only deck-wide: a solid part
+        named in the *SET_PART contributes nothing to the file."""
+        deck = MESH.replace("{EXTRA}",
+                            "*SET_PART_LIST\n" + _row(950) + "\n"
+                            + _row(1, 2) + "\n"
+                            "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(950, 0, 0, "", 0, 0, 0, 0) + "\n")
+        res, _starter, engine = _convert(deck)
+        lines = engine.splitlines()
+        i = lines.index("/DYNAIN/DT")
+        # Part 1 is the solid part, part 2 the shell one.
+        self.assertEqual(lines[i + 2].split(), ["2"])
+        self.assertTrue(_warn_containing(res, "carry no /SHELL or /SH3N"))
+
+    def test_an_all_solid_part_set_emits_nothing_and_does_not_widen(self):
+        """A part list holding no shell is ACCEPTED and writes an EMPTY dynain
+        (measured: 118 bytes of *NODE + *END at 0 ERROR / 0 WARNING) — the
+        #122 class. Widening to /ALL would silently dump the whole model
+        instead of the parts the deck asked for."""
+        deck = MESH.replace("{EXTRA}",
+                            "*SET_PART_LIST\n" + _row(950) + "\n"
+                            + _row(1) + "\n"
+                            "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(950, 0, 0, "", 0, 0, 0, 0) + "\n")
+        res, _starter, engine = _convert(deck)
+        self.assertNotIn("/DYNAIN", engine)
+        self.assertTrue(_warn_containing(res, "no part of *SET_PART 950 "
+                                              "carries a shell"))
+
+    def test_two_cards_merge_into_one_block(self):
+        """/DYNAIN is a GLOBAL engine request and two blocks are ORDER-
+        DEPENDENT, not additive: read_dynain.F:80/93 resolves the scope with an
+        ELSEIF while fredynain.F:109-110 zeroes NDYNAINPRT inside the /ALL
+        branch, so one of the two cards is silently ignored."""
+        parts = "*PART\np3\n" + _row(3, 2, 1) + "\n"
+        shells = "*ELEMENT_SHELL\n" + _row(303, 3, 1, 2, 3, 4) + "\n"
+        deck = MESH.replace("{EXTRA}",
+                            parts + shells
+                            + "*SET_PART_LIST\n" + _row(950) + "\n"
+                            + _row(2) + "\n"
+                            + "*SET_PART_LIST\n" + _row(951) + "\n"
+                            + _row(3) + "\n"
+                            + "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(950, 0, 0, "", 0, 0, 0, 0) + "\n"
+                            + "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(951, 0, 0, "", 0, 0, 0, 0) + "\n")
+        res, _starter, engine = _convert(deck)
+        self.assertEqual(engine.count("/DYNAIN/DT"), 1)
+        lines = engine.splitlines()
+        i = lines.index("/DYNAIN/DT")
+        self.assertEqual(lines[i + 2].split(), ["2", "3"])
+        self.assertEqual(lines[i + 3], "/DYNAIN/SHELL/STRES/FULL")
+        self.assertTrue(_warn_containing(res, "were merged into ONE /DYNAIN",
+                                         "ORDER-DEPENDENT"))
+
+    def test_an_all_parts_card_widens_the_merge(self):
+        deck = MESH.replace("{EXTRA}",
+                            "*SET_PART_LIST\n" + _row(950) + "\n"
+                            + _row(2) + "\n"
+                            + "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(950, 0, 0, "", 0, 0, 0, 0) + "\n"
+                            + "*INTERFACE_SPRINGBACK_LSDYNA\n"
+                            + _row(0, 0, 0, "", 0, 0, 0, 0) + "\n")
+        res, _starter, engine = _convert(deck)
+        self.assertEqual(engine.count("/DYNAIN/DT"), 1)
+        self.assertIn("/DYNAIN/DT/ALL", engine)
+        self.assertTrue(_warn_containing(res, "widens the scope"))
+
+    def test_the_file_count_matches_the_schedule(self):
+        """0.9 ENDTIM every 0.02 ENDTIM fires at 0.90, 0.92, ..., 1.00 = SIX
+        triggers; int((1-0.9)/0.02) is 4 in IEEE-754, not 5."""
+        deck = MESH.replace("{EXTRA}", SPRINGBACK)
+        res, _starter, _engine = _convert(deck)
+        (w,) = _warn_containing(res, "at most")
+        self.assertIn("at most 6 files", w)
+
+    def test_the_capture_is_described_as_a_schedule(self):
+        """GENDYNAIN fires on TT >= TDYNAIN from an output pass, so the newest
+        file can precede termination by up to one interval."""
+        deck = MESH.replace("{EXTRA}", SPRINGBACK)
+        res, _starter, _engine = _convert(deck)
+        (w,) = _warn_containing(res, "TAKE THE HIGHEST-NUMBERED ONE")
+        self.assertIn("can precede termination by up to 0.0002", w)
+        self.assertNotIn("it is the last computed state", w)
 
     def test_zero_endtim_emits_nothing(self):
         deck = (MESH
@@ -942,10 +1216,28 @@ class SpringbackTests(unittest.TestCase):
         self.assertEqual(rec.constraints, [(1, 7, 7)])
         self.assertEqual(rec.sldo, 0)
 
+    def test_every_option1_x_option2_spelling_is_dispatched(self):
+        """*INTERFACE_SPRINGBACK_OPTION1_{OPTION2} (Vol I R17 p.30-80):
+        4 x 2 = EIGHT legal spellings. Enumerated HERE from the manual, not
+        from the converter's own table, so a missing corner is visible (the
+        EXCLUDE_NOTHICKNESS one was)."""
+        spellings = {
+            f"INTERFACE_SPRINGBACK_{o1}{o2}"
+            for o1 in ("LSDYNA", "NASTRAN", "SEAMLESS", "EXCLUDE")
+            for o2 in ("", "_NOTHICKNESS")}
+        self.assertEqual(len(spellings), 8)
+        for kw in sorted(spellings):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, HANDLERS)
+                self.assertIn(kw, _RARE_CARD_OFFSETS)
+
     def test_sibling_options_are_recognized_warn_drops(self):
         for kw in ("INTERFACE_SPRINGBACK_NASTRAN",
+                   "INTERFACE_SPRINGBACK_NASTRAN_NOTHICKNESS",
                    "INTERFACE_SPRINGBACK_SEAMLESS",
-                   "INTERFACE_SPRINGBACK_EXCLUDE"):
+                   "INTERFACE_SPRINGBACK_SEAMLESS_NOTHICKNESS",
+                   "INTERFACE_SPRINGBACK_EXCLUDE",
+                   "INTERFACE_SPRINGBACK_EXCLUDE_NOTHICKNESS"):
             with self.subTest(kw=kw):
                 deck = MESH.replace("{EXTRA}",
                                     f"*{kw}\n"
@@ -1118,6 +1410,29 @@ class DispatchAndOffsetCoverageTests(unittest.TestCase):
         # the fixed row's id no longer fits I8 -> comma form, no cell shift
         r2 = final_geometry_node_row(b.raw[2], 0)
         self.assertEqual(r2[0], "1000000009")
+        self.assertEqual([float(v) for v in r2[1:4]], [25.0, 10.0, 0.0])
+
+    def test_a_commented_node_row_offsets_like_any_other(self):
+        """parse_k_file strips a trailing '$...' from every Block.raw line, so
+        the comment is gone before either walker sees the card and the offset
+        pass has nothing extra to preserve. Pinned because a reviewer read the
+        strip inside final_geometry_node_row as a walker-local loss."""
+        with tempfile.TemporaryDirectory() as td:
+            blocks = _include_transform(
+                td,
+                "*KEYWORD\n*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY\n"
+                + _row(800, 901, 0.006, 0) + "\n"
+                + _fgeo_row(9, 25.0, 0.0, 0.0) + "  $ punch corner\n"
+                + "10,25.0,10.0,0.0 $ die corner\n*END\n",
+                {"n": 10, "f": 40, "r": 5000})
+            (b,) = [x for x in blocks
+                    if x.keyword == "BOUNDARY_PRESCRIBED_FINAL_GEOMETRY"]
+        self.assertNotIn("$", "".join(b.raw))
+        r1 = final_geometry_node_row(b.raw[1], 0)
+        self.assertEqual(r1[0], "19")
+        self.assertEqual(r1[1:4], ["25.0", "0.0", "0.0"])
+        r2 = final_geometry_node_row(b.raw[2], 0)
+        self.assertEqual(r2[0], "20")
         self.assertEqual([float(v) for v in r2[1:4]], [25.0, 10.0, 0.0])
 
     def test_springback_offsets_psid_and_node_rows(self):

@@ -60,13 +60,19 @@ Prior history (before this changelog was introduced) is summarized in the
      reached no emitted family are dropped with their ids named — a group
      member the deck does not define is starter `ERROR 69`, which refuses the
      whole run, while dyna2rad drops the entire card silently (`:96`).
-  4. **`BOXID` is a SPATIAL death that disables the time criterion, so the card
-     is refused, not half-converted.** *"An element is immediately deleted upon
-     meeting the condition of being inside the box … WITHOUT REGARD TO TIME,
-     IDGRP, OR PERCENT"* (Vol I R17 p.17-251), and the manual resets a zero
-     `TIME` to 1e16 in that case. `IDGRP`/`PERCENT` is the opposite: an
-     INDEPENDENT second criterion, so the `TIME` half still converts and only
-     the group-failure rule is named. dyna2rad reads none of the five fields.
+  4. **`BOXID` and `TIME` are two INDEPENDENT criteria, so a boxed card with a
+     positive `TIME` still converts.** The elements are considered for deletion
+     *"either by meeting the BOXID/INOUT criterion or the independent
+     TIME/IDGRP/PERCENT criterion"* (Vol I R17 p.17-251); the box fires
+     *"without regard to TIME, IDGRP, or PERCENT"* — meaning it needs no other
+     condition, not that the others go away — and `TIME` is switched off only
+     when it is ZERO (*"If BOXID is nonzero, a TIME value of zero is reset to
+     1e16"*). LS-DYNA therefore deletes at `min(box crossing, TIME)`. k2rad
+     emits the `/ACTIV` for the `TIME` half and names the spatial half as
+     dropped, exactly as it does for the equally independent `IDGRP`/`PERCENT`
+     rule; only `TIME ≤ 0` with a box (the genuinely box-only card) is refused.
+     `/ACTIV` is time- or sensor-driven and has no geometric form; dyna2rad
+     reads none of the five fields.
   5. **`/FUNCT_SMOOTH` shares ONE id namespace with `/FUNCT` and `/TABLE`.**
      `hm_read_funct.F` reads both keywords (`HM_OPTION_COUNT('/FUNCT')` :103,
      `('/FUNCT_SMOOTH')` :104) into the same `NPC/PLD/NOM_OPT` arrays under one
@@ -147,9 +153,12 @@ Prior history (before this changelog was introduced) is summarized in the
       `.dynain` files at NORMAL TERMINATION, 0 ERROR, 0 WARNING — the "legal,
       accepted, and empty" class (#122) one step further on. dyna2rad's
       `Tstart = Tfreq = ENDTIM` (`convertcards.cxx:1242-1243`) has the same
-      hole. k2rad writes `0.9·ENDTIM  0.02·ENDTIM`: at most six files, the last
-      one on the run's final cycle, and it does not depend on any other output
-      card being present. Verified end to end — the last file carries
+      hole. k2rad writes `0.9·ENDTIM  0.02·ENDTIM`: at most six files, and it
+      does not depend on any other output card being present. The capture is a
+      SCHEDULE, so the newest file holds the last state written at or after
+      `0.9·ENDTIM` and can precede termination by up to one interval — the
+      warning says so rather than promising the terminal state. Verified end to
+      end — the last file carries
       `*ELEMENT_SHELL_THICKNESS`, `*NODE`, a full `*INITIAL_STRESS_SHELL`
       (5 through-thickness × 4 in-plane records with EPSP), `*INITIAL_STRAIN_SHELL`
       and `*END`, and `k2rad.parser.parse_k_file` reads it straight back.
@@ -165,8 +174,18 @@ Prior history (before this changelog was introduced) is summarized in the
       `ERROR 1908`, both fatal at the starter, so `PSID = 0` / an unresolvable
       or fully-dropped `*SET_PART` falls back to `/DYNAIN/DT/ALL` with the
       widening named. `/DYNAIN` is SHELLS ONLY (`fredynain.F` has no other
-      element writer), so a shell-free deck emits nothing rather than the
-      four-line stub the engine would otherwise produce at 0 diagnostics.
+      element writer) at BOTH scopes: a shell-free deck emits nothing, and a
+      `*SET_PART` naming parts that own no `/SHELL` or `/SH3N` has those parts
+      dropped from the list — if none is left the block is refused rather than
+      widened. Measured on a deck whose set named a solid part while shells
+      existed elsewhere: the engine accepted it and wrote six 118-byte files
+      whose entire body is `*NODE` + `*END`, at 0 ERROR / 0 WARNING / NORMAL
+      TERMINATION. Several `*INTERFACE_SPRINGBACK` cards in one deck are merged
+      into ONE block for the same reason: `read_dynain.F:80/93` resolves the
+      scope with an `ELSEIF` (the part list wins whenever `NDYNAINPRT ≠ 0`)
+      while `fredynain.F:109-110` zeroes `NDYNAINPRT` inside the `/ALL` branch,
+      so two blocks would silently honour one card and drop the other,
+      depending on their order.
   12. `*INCLUDE_TRANSFORM` buckets for every new spelling, from the same source
       as the handlers (#116/#124), each a WALKER rather than a declarative spec:
       the death cards' cell 1 is an element id in the plain spelling and a set
@@ -177,6 +196,67 @@ Prior history (before this changelog was introduced) is summarized in the
       `OPTCARD` rows carry counts, not ids. `IDGRP` is deliberately left alone —
       it is a bare grouping tag whose only relation is equality within the
       include.
+  13. Post-review verification round, on top of the above:
+      * `/DYNAIN`'s shells-only rule now screens the PART LIST, not only the
+        deck. A `*SET_PART` naming solid parts in a deck that has shells
+        elsewhere used to pass the deck-wide guard; measured, the engine
+        accepted it and wrote six 118-byte files whose whole body is `*NODE` +
+        `*END`, at 0 ERROR / 0 WARNING / NORMAL TERMINATION.
+      * Several `*INTERFACE_SPRINGBACK` cards merge into ONE `/DYNAIN` block:
+        `read_dynain.F:80/93` resolves the scope with an `ELSEIF` while
+        `fredynain.F:109-110` zeroes `NDYNAINPRT` inside the `/ALL` branch, so
+        two blocks silently honour one card and drop the other, depending on
+        their order.
+      * A `BOXID` beside a POSITIVE `TIME` now converts. The two are
+        INDEPENDENT criteria (p.17-251) and only `TIME = 0` is switched off by
+        the box, so refusing the whole card dropped an expressible death; the
+        `/ACTIV` fires at the stated TIME (measured: `BRICK DEACTIVATION: 101
+        AT TIME: 0.40000E-02`, on a run that terminates at 0.0 % energy error).
+      * A `THICK_SHELL_SET` no longer falls back to `*SET_SHELL` — a third SID
+        namespace whose members cannot be thick shells (the #125/#128 class).
+      * The `BIRTH` curve copy keeps the SOURCE card's kind: a
+        `*DEFINE_CURVE_SMOOTH` is re-emitted as `/FUNCT_SMOOTH`, not `/FUNCT`,
+        or `fixfingeo.F:186-196` picks `FINTER2` and loses both the quintic
+        blend and the clamp.
+      * Two all-nodes `*PERTURBATION_NODE` cards collapse to one `/RANDOM` at
+        the largest amplitude, with the rest named: `hm_read_rand.F:118-126`
+        overwrites one module-level `XALEA` per record and `:152-163` applies
+        it once, while LS-DYNA sums separate cards (p.38-10 Remark 2).
+      * A `*BOUNDARY_PRESCRIBED_FINAL_GEOMETRY` driver curve that is not the
+        0 → 1 scale factor p.5-73 requires is named. `fixfingeo.F:243-256` has
+        no clamp on `f`, and a `*DEFINE_CURVE_SMOOTH` can never satisfy the
+        requirement (its last vertex is `(TEND, 0)` by construction) — measured
+        on that pairing, a `VMAX = 200` plateau drove a 1 mm offset to 98 mm
+        and the run died on the energy-error limit under a NORMAL TERMINATION
+        banner.
+      * `*INTERFACE_SPRINGBACK_EXCLUDE_NOTHICKNESS`, the one corner of the
+        4 × 2 OPTION1 × OPTION2 grid a hand-written variant list had lost, is
+        dispatched; the eight spellings are now generated from one source and
+        tested against an independent enumeration (#116).
+      * A `*DEFINE_CURVE` and a `*DEFINE_CURVE_SMOOTH` on the same LCID are
+        named, and the smooth flag is cleared when the plain curve wins, so the
+        emitted card kind always matches the surviving points. A smooth curve
+        is also no longer appended to `state.curve_order`, which is the
+        `*DEFINE_CURVE` ordering the legacy positional `*DEFINE_TABLE` form
+        resolves against (p.17-444 scopes it to that keyword by name).
+      * `DIST = 0` on a smooth curve is named: every field on that card has
+        default *none*, so a blank `DIST` is a missing input, and the emitted
+        curve is identically zero.
+      * `/IMPDISP` ids minted by the rigid-wall geometric-motion path now dodge
+        the deck's `BPFGID`s and are recorded — that path is the one `/IMPDISP`
+        producer whose section runs after the FGEO one, so it could not be
+        screened from there.
+      * Two texts corrected against the code they cite: the contact note said
+        k2rad's TYPE7/TYPE25 default to `Idel = 0` (it writes 2 — the real
+        reason dead elements keep their segments is that `desacti.F`/`eloff.F`
+        never arm `IDEL7NOK`, which is what `resol.F:5015-5153` gates on), and
+        the file-count claim read `int((1−0.9)/0.02) + 1 = 5` where IEEE-754
+        makes that quotient 4.999… and the engine writes SIX. The `/DYNAIN`
+        text now describes a schedule rather than promising the terminal state.
+        The `/ACTIV` note also names the one family `eloff.F` does NOT zero:
+        `:479` writes `OFFG = -ABS(OFFG)` for 4-node shells, so their `/TH`
+        force and moment channels FREEZE at the death value instead of dropping
+        to 0 — a stale channel, not a loaded element.
 
 - **The RARE MATERIALS batch: `*MAT_SHAPE_MEMORY` / `*MAT_030` → `/MAT/LAW71`;
   `*MAT_MUSCLE` / `*MAT_156` + `*MAT_SPRING_MUSCLE` / `*MAT_S15` →
