@@ -7183,6 +7183,21 @@ class ConversionState:
 
     # ── Sets / groups ──────────────────────────────────────────
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
+    # *SET_NODE header DA1..DA4 — the NODAL ATTRIBUTES, "assigned to pass data
+    # to other keywords" (Vol I R17 p.43-43 Remark 1). For
+    # *CONTACT_TIEBREAK_NODES_TO_SURFACE they ARE the per-set override of
+    # NFLF/NSFL/NNEN/NMES, so the tiebreak writer has to know whether the deck
+    # states one before it can report the override as a LOSS: naming it on a
+    # set whose four cells are 0.0 (the shape of every *SET_NODE LS-PrePost
+    # writes) states a fact the deck does not contain. nsid → (da1..da4).
+    node_set_attrs: Dict[int, Tuple[float, float, float, float]] = field(
+        default_factory=dict)
+    # *SET_SEGMENT sids whose DATA cards carry a non-zero A1/A2 — the
+    # per-segment override of a *CONTACT_TIEBREAK_SURFACE_TO_SURFACE's
+    # NFLS/SFLS (Vol I R17 p.11-72 Remark 1). Only the presence is recorded:
+    # nothing in OpenRadioss can hold a per-segment bond strength, so the
+    # writer's job is to NAME the loss — and only on a deck that states one.
+    segment_set_attr_sids: Set[int] = field(default_factory=set)
     part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
     # *SET_<FAMILY>_ADD boolean unions: sid → (title, [child SET ids]). One
     # dict per family, all seven declared in SET_ADD_FAMILIES above and all
@@ -7384,6 +7399,13 @@ class ConversionState:
     # iterates the contact containers has to be told about them explicitly —
     # /TH/INTER is the one that matters (a missing id is a missing channel).
     companion_inter_ids: List[int] = field(default_factory=list)
+    # Interface ids emitted as a /INTER/TYPE2 with the RUPTURE cards. The
+    # engine deck gates /ANIM/NODA/DAMA2 on this: ruptint2.F:143/155/169 fill
+    # PDAMA2 only under `ANIM_N(15)==1 .OR. H3D_DATA%N_SCAL_DAMA2 == 1`, so
+    # without the card the per-node damage the rupture warning points the
+    # reader at does not exist — and with no rupturing tie in the deck the
+    # channel would be state after state of exactly 0.0 (the #122 rule).
+    tiebreak_rupture_inter_ids: List[int] = field(default_factory=list)
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)

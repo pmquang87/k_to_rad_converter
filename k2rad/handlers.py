@@ -4954,6 +4954,13 @@ def handle_set_node_list(block: Block, state: ConversionState) -> None:
             if v > 0:
                 nids.append(v)
     state.node_sets[nsid] = (title, nids)
+    # DA1..DA4 are the NODAL ATTRIBUTES (Vol I R17 p.43-43 Remark 1): for
+    # *CONTACT_TIEBREAK_NODES_TO_SURFACE they override NFLF/NSFL/NNEN/NMES for
+    # this set. Recorded so the tiebreak writer can tell a deck that states one
+    # from a deck whose four cells are the 0.0 LS-PrePost writes by default.
+    da = tuple(to_float(f1[i]) if len(f1) > i else 0.0 for i in (1, 2, 3, 4))
+    if any(da):
+        state.node_set_attrs[nsid] = da  # type: ignore[assignment]
 
 
 def _handle_set_elem_list(block: Block, state: ConversionState, target: dict) -> None:
@@ -5075,12 +5082,17 @@ def _handle_set_add(block: Block, state: ConversionState, family: str,
         return
     sid = to_int(f1[0])
     if family == "PART":
-        # Only the PART header's DA1..DA4 have a k2rad consumer
-        # (*CONTACT_INTERIOR reads them as per-set defaults). *SET_NODE_ADD's
-        # DA1..DA4 are the *CONTACT_TIEBREAK_NODES_TO_SURFACE nodal attributes
-        # NFLF/NSFL/NNEN/NMES (Vol I R17 p.43-43 Remark 1), a keyword k2rad
-        # does not convert, so they have nothing to be recorded for.
+        # The PART header's DA1..DA4 are *CONTACT_INTERIOR's per-set defaults.
         _record_part_set_attrs(state, sid, f1)
+    elif family == "NODE":
+        # *SET_NODE_ADD's DA1..DA4 are the nodal attributes NFLF/NSFL/NNEN/NMES
+        # (Vol I R17 p.43-43 Remark 1) — the per-set override of
+        # *CONTACT_TIEBREAK_NODES_TO_SURFACE's Card 4. Recorded since #131
+        # converts that keyword: the writer names the override as a loss only
+        # when the deck actually states one.
+        da = tuple(to_float(f1[i]) if len(f1) > i else 0.0 for i in (1, 2, 3, 4))
+        if any(da):
+            state.node_set_attrs[sid] = da  # type: ignore[assignment]
     ids: List[int] = []
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
@@ -5711,10 +5723,24 @@ def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
 
 
 def handle_contact_automatic_single_surface(block: Block, state: ConversionState,
-                                            extra: int = 0) -> None:
-    inter_id, title, offset = _parse_contact_header(block)
-    if inter_id <= 0 or inter_id > 90000:
-        inter_id = state.next_id()
+                                            extra: int = 0,
+                                            card1: Optional[int] = None,
+                                            inter_id: Optional[int] = None) -> None:
+    """``card1``/``inter_id``: a caller that has ALREADY resolved the block's
+    first mandatory card index and its interface id passes them in. Both exist
+    for the ``*CONTACT_..._TIEBREAK`` delegation, which needs them for two
+    different reasons: an ``_MPP`` spelling puts its own card BEFORE Card 1, so
+    re-deriving the offset from ``_parse_contact_header`` here reads SSID off
+    the MPP IGNORE flag; and the caller has already resolved the id in order to
+    name it in its warnings, so allocating a second one would make the log and
+    the card disagree. Both default to the old behaviour."""
+    hdr_id, title, offset = _parse_contact_header(block)
+    if card1 is not None:
+        offset = card1
+    if inter_id is None:
+        inter_id = hdr_id
+        if inter_id <= 0 or inter_id > 90000:
+            inter_id = state.next_id()
     raw = block.raw
     # Card1: ssid msid sstyp mstyp sboxid mboxid spr mpr
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
@@ -5802,10 +5828,20 @@ def handle_contact_automatic_general(block: Block, state: ConversionState) -> No
 
 
 def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionState,
-                                                extra: int = 0) -> None:
-    inter_id, title, offset = _parse_contact_header(block)
-    if inter_id <= 0 or inter_id > 90000:
-        inter_id = state.next_id()
+                                                extra: int = 0,
+                                                card1: Optional[int] = None,
+                                                inter_id: Optional[int] = None) -> None:
+    """``card1``/``inter_id`` — see
+    :func:`handle_contact_automatic_single_surface`. Both default to the old
+    behaviour; only the ``*CONTACT_..._TIEBREAK`` OPTION-4 delegation passes
+    them."""
+    hdr_id, title, offset = _parse_contact_header(block)
+    if card1 is not None:
+        offset = card1
+    if inter_id is None:
+        inter_id = hdr_id
+        if inter_id <= 0 or inter_id > 90000:
+            inter_id = state.next_id()
     raw = block.raw
     f1 = _card(raw, offset, fixed=True, n=8, w=10)
     ssid  = to_int(f1[0]) if f1 else 0
@@ -5957,11 +5993,28 @@ _TIEBREAK_SUFFIXES: Dict[str, Tuple[str, ...]] = {
         ("", "_DAMPING", "_USER"),
 }
 
+#: OPTION4 (the OFFSET options, Vol I R17 p.11-8) per base. p.11-16 scopes
+#: ``BEAM_OFFSET`` on this family to exactly two spellings: *"BEAM_OFFSET is
+#: also available when OPTION1 is: AUTOMATIC_SINGLE_SURFACE_TIEBREAK /
+#: AUTOMATIC_GENERAL_TIEBREAK, but moments are transferred only when the
+#: variable FTORQ is invoked (see Optional Card E)."* ``OFFSET`` and
+#: ``CONSTRAINED_OFFSET`` are NOT offered for any tiebreak (p.11-16 lists them
+#: for the three ``TIED_*`` types only), so they stay out.
+#:
+#: The option adds no MANDATORY card — FTORQ lives on optional Card E — so the
+#: card stack, and with it every offset in ``assembly._OFFSET_SPECS``, is the
+#: same as the base spelling's.
+_TIEBREAK_OFFSETS: Dict[str, Tuple[str, ...]] = {
+    "CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK": ("", "_BEAM_OFFSET"),
+    "CONTACT_AUTOMATIC_GENERAL_TIEBREAK":        ("", "_BEAM_OFFSET"),
+}
+
 #: Every spelling the dispatch table registers, ``_MPP`` included.
 TIEBREAK_CONTACT_KEYWORDS: List[str] = [
-    f"{_base}{_suf}{_mpp}"
+    f"{_base}{_suf}{_off}{_mpp}"
     for _base in _TIEBREAK_BASES
     for _suf in _TIEBREAK_SUFFIXES.get(_base, ("",))
+    for _off in _TIEBREAK_OFFSETS.get(_base, ("",))
     for _mpp in ("", "_MPP")
 ]
 
@@ -6040,7 +6093,7 @@ _TIEBREAK_USER_OPTIONS = (101, 102, 103, 104, 105)
 
 def _tiebreak_spelling(keyword: str):
     """Split a generated tiebreak spelling into
-    ``(base, mortar, user, damping, mpp)``.
+    ``(base, mortar, user, damping, beam_offset, mpp)``.
 
     Longest base first, so ``CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY`` is not
     swallowed by ``CONTACT_TIEBREAK_SURFACE_TO_SURFACE``.
@@ -6049,11 +6102,13 @@ def _tiebreak_spelling(keyword: str):
         if keyword == base or keyword.startswith(base + "_"):
             tail = keyword[len(base):]
             return (base, "_MORTAR" in tail, "_USER" in tail,
-                    "_DAMPING" in tail, tail.endswith("_MPP"))
-    return keyword, False, False, False, False
+                    "_DAMPING" in tail, "_BEAM_OFFSET" in tail,
+                    tail.endswith("_MPP"))
+    return keyword, False, False, False, False, False
 
 
-def _tiebreak_card4_extra(family: str, option: int, damping: bool) -> int:
+def _tiebreak_card4_extra(family: str, option: int, damping: bool,
+                          user: bool = False) -> int:
     """Number of MANDATORY cards a tiebreak inserts between Card 3 and optional
     Card A — the ``extra`` every optional-card read has to be shifted by.
 
@@ -6066,12 +6121,22 @@ def _tiebreak_card4_extra(family: str, option: int, damping: bool) -> int:
     Card B's THKOPT — measured on a with/without twin, a deck with IGNORE=2
     reported ``ignore=0`` and a deck with THKOPT=3 reported ``ignore=3``.
 
-    Two OPTIONs add further mandatory cards after Card 4:
+    The ``_USER`` flavour replaces Card 4 with THREE cards of its own —
+    p.11-43: *"These cards, 4.1, 4.2, and 4.3, are mandatory for:
+    \\*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_USER …"* — Card 4.1
+    (``OPTION NHV CT2CN CN OFFSET NHMAT NHWLD``) plus 4.2/4.3 (``UP1..UP16``).
+    Counting one card there would land every optional-card read three rows
+    early, and reading NFLS/SFLS/PARAM off Card 4.1 would report NHV/CT2CN/CN
+    under three names the card does not have.
+
+    Two further OPTIONs add mandatory cards after Card 4:
       * Card 4.1a (DMP_1 DMP_2 DMP_3) — p.11-35: "If the response parameter,
         OPTION, below is set to 9 or 11, three damping constants can be
         defined ... set the keyword option to DAMPING". Both conditions.
       * Cards 4.1b + 4.2b (G1C_0..LCG1C / G2C_0..LCG2C) — OPTION 13/14.
     """
+    if user:
+        return 3
     extra = 1
     if family == "AUTOMATIC":
         if damping and option in (9, 11):
@@ -6102,21 +6167,26 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
       state is NOT a tie — it keeps the existing penalty-contact route and the
       bond is a named warn-drop;
     * ``*CONTACT_AUTOMATIC_{SINGLE_SURFACE,GENERAL}_TIEBREAK`` tie a surface to
-      ITSELF, which ``/INTER/TYPE2`` cannot express (i2trivox.F90:233-234 skips
-      a secondary node that is a corner of the candidate main segment, so a
-      self-tie resolves to an EMPTY tie at zero starter errors) — they keep the
+      ITSELF, which ``/INTER/TYPE2`` has no shape for — the same node list
+      would be both the secondary /GRNOD and the main /SURF — so they keep the
       self-contact route with a named warn-drop.
     """
     kw = block.keyword
-    base, mortar, user, damping, mpp = _tiebreak_spelling(kw)
+    base, mortar, user, damping, beam_offset, mpp = _tiebreak_spelling(kw)
     family, only, one_way, self_tie = _TIEBREAK_BASES[base]
 
     raw = block.raw
     inter_id, title, hdr = _parse_contact_header(block)
     offset = _contact_mpp_card_offset(raw, hdr, mpp)
-    # A contact without an _ID header has no id until its writer allocates one,
-    # so the warnings below say "*KEYWORD" rather than "*KEYWORD 0".
-    tag = f"*{kw} {inter_id}" if inter_id > 0 else f"*{kw}"
+    # Resolve the id HERE, before the first warning is built: the fixup below
+    # used to run only on the tie route, so on a deck whose CID sits outside
+    # (0, 90000] every warning named the deck's id while the emitted /INTER
+    # carried an auto one. The two delegated routes are handed this id
+    # (``inter_id=``) instead of allocating their own, so the id STREAM is
+    # unchanged — same number of next_id() calls, in the same order.
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    tag = f"*{kw} {inter_id}"
 
     # ── Card 4 ───────────────────────────────────────────────────────────
     f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
@@ -6128,7 +6198,19 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
     nfls = sfls = param = eraten = erates = ct2cn = cn = 0.0
     nflf = sflf = nen = mes = 0.0
     tblcid = thkoff = 0
-    if family == "AUTOMATIC":
+    nhv = user_offset = nhmat = nhwld = 0
+    if user:
+        # Card 4.1 is a DIFFERENT card: OPTION NHV CT2CN CN OFFSET NHMAT NHWLD
+        # (Vol I R17 p.11-43). NFLS/SFLS/PARAM/ERATEN/ERATES do not exist on
+        # it — reading them off columns 2-6 would report NHV as a failure
+        # stress and CT2CN as a shear one.
+        option = to_int(f4[0]) if f4 else 0
+        nhv = to_int(f4[1]) if len(f4) > 1 else 0
+        ct2cn, cn = _g(2), _g(3)
+        user_offset = to_int(f4[4]) if len(f4) > 4 else 0
+        nhmat = to_int(f4[5]) if len(f4) > 5 else 0
+        nhwld = to_int(f4[6]) if len(f4) > 6 else 0
+    elif family == "AUTOMATIC":
         option = to_int(f4[0]) if f4 else 0
         nfls, sfls, param = _g(1), _g(2), _g(3)
         eraten, erates, ct2cn, cn = _g(4), _g(5), _g(6), _g(7)
@@ -6144,9 +6226,16 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
         # holds with or without THKOFF and one classification table serves.
         option = 5 if tblcid else 2
     else:                                   # NODES — a FORCE criterion
-        nflf, sflf, nen, mes = _g(0), _g(1), _g(2), _g(3)
+        nflf, sflf = _g(0), _g(1)
+        # Vol I R17 p.11-70 gives NEN and MES the DEFAULT 2 (the Card-4 table's
+        # "Default" row reads "required required 2. 2."). A blank cell read as
+        # 0.0 would make the reported criterion (|fn|/NFLF)^0 + (|fs|/SFLF)^0
+        # identically 2 >= 1 — a criterion the deck does not contain. Applied
+        # at parse time so every consumer sees the value LS-DYNA uses.
+        nen = _g(2) or 2.0
+        mes = _g(3) or 2.0
 
-    extra = _tiebreak_card4_extra(family, option, damping)
+    extra = _tiebreak_card4_extra(family, option, damping, user)
 
     # ── the named drops that belong to the KEYWORD, not the OPTION ────────
     if mpp:
@@ -6161,13 +6250,17 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
         state.warn(
             f"{tag}: the _USER flavour puts the failure law in the "
             f"LS-DYNA user subroutine utb{option if option in _TIEBREAK_USER_OPTIONS else '<OPTION>'}"
-            " in dyn21cnt.f (Vol I R17 p.11-43) together with its NHV history "
-            "variables and UP1..UP16 parameters. That subroutine is not part "
-            "of the deck, so NOTHING of the user failure law can be "
-            "converted — it is DROPPED. REMEDY: restate the law with a "
-            "built-in OPTION (6 or 8 carry over completely — see the "
-            "per-interface note below), or model the joint with a failing "
-            "connector.")
+            " in dyn21cnt.f (Vol I R17 p.11-43) together with its "
+            f"NHV={nhv} history variables, NHMAT={nhmat}/NHWLD={nhwld} and the "
+            "UP1..UP16 parameters on Cards 4.2/4.3 "
+            f"{'(OFFSET=%d) ' % user_offset if user_offset else ''}"
+            "— all read past and DROPPED. That subroutine is not part of the "
+            "deck, so NOTHING of the user failure law can be converted. Note "
+            "Card 4.1 REPLACES the ordinary Card 4 (OPTION NHV CT2CN CN OFFSET "
+            "NHMAT NHWLD), so this spelling states no NFLS/SFLS/PARAM at all. "
+            "REMEDY: restate the law with a built-in OPTION (6 or 8 carry over "
+            "completely — see the per-interface note below), or model the "
+            "joint with a failing connector.")
     if mortar:
         state.warn(
             f"{tag}: the _MORTAR flavour is LS-DYNA's "
@@ -6185,6 +6278,18 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
             "card stack aligned, and DROPPED: /INTER/TYPE2's rupture has no "
             "damping input at all (the tie is a kinematic constraint, not a "
             "spring, until it partially ruptures).")
+    if beam_offset:
+        state.warn(
+            f"{tag}: the _BEAM_OFFSET flavour replaces the constraint "
+            "formulation with beam-like springs between the tracked nodes and "
+            "the reference segments, and those springs transfer MOMENTS as "
+            "well as forces when Optional Card E's FTORQ is set (Vol I R17 "
+            "p.11-16). Neither half converts: the interface keeps the "
+            "penalty/self-contact route this spelling already takes, so the "
+            "offset springs and any FTORQ moment transfer are DROPPED. Without "
+            "this entry the whole keyword landed in skipped_keywords, i.e. no "
+            "interface at all — a missing LOAD PATH rather than a missing "
+            "option.")
 
     if (family == "AUTOMATIC" and option not in _TIEBREAK_OPTION_CLASS
             and option not in _TIEBREAK_USER_OPTIONS):
@@ -6198,6 +6303,35 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
             "no failure criterion can be read from it. REMEDY: check the deck "
             "against the Card-4 layout OPTION NFLS SFLS PARAM ERATEN ERATES "
             "CT2CN CN.")
+
+    # ── Cards 1-3, read once for EVERY route ─────────────────────────────
+    # (The record is built before the two delegating exits so they can run the
+    # Card-4 inventory too: a refusal that skips the dropped-field accounting
+    # loses it on exactly the cards a reader most needs it.)
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid = to_int(f1[0]) if f1 else 0
+    msid = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    # Card2: fs fd dc vc vdc penchk bt dt — friction and birth/death act only
+    # AFTER failure, and neither /INTER/TYPE2 nor its rupture block has a
+    # column for them; FS/FD are kept only so the writer can name them.
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs = to_float(f2[0]) if f2 else 0.0
+    fd = to_float(f2[1]) if len(f2) > 1 else 0.0
+    # Card3: sfsa sfsb sast sbst sfsat sfsbt fsf vsf — a NEGATIVE SAST/SBST is
+    # LS-DYNA's "absolute tie-criterion distance", the tied path's dsearch floor.
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+
+    rec = ContactTiebreak(inter_id, title, ssid, sstyp, msid, mstyp, family,
+                          keyword=kw, only=only, one_way=one_way, option=option,
+                          nfls=nfls, sfls=sfls, param=param, eraten=eraten,
+                          erates=erates, ct2cn=ct2cn, cn=cn, tblcid=tblcid,
+                          thkoff=thkoff, nflf=nflf, sflf=sflf, nen=nen, mes=mes,
+                          fs=fs, fd=fd, sst=sst, mst=mst,
+                          mortar=mortar, user=user, damping=damping, mpp=mpp)
 
     # ── OPTION 4: LS-DYNA itself does not tie tangentially ───────────────
     if family == "AUTOMATIC" and option == 4:
@@ -6213,56 +6347,60 @@ def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
             "as OPTION 6 (solids/thick shells) or 8 (offset shells) with "
             "PARAM = the crack-opening distance at full damage, which "
             "converts to a real /INTER/TYPE2 rupture tie.")
-        handle_contact_automatic_surface_to_surface(block, state, extra=extra)
+        _report_tiebreak_dropped_cells(state, rec)
+        handle_contact_automatic_surface_to_surface(
+            block, state, extra=extra, card1=offset, inter_id=inter_id)
         return
 
-    # ── the self-tie spellings: /INTER/TYPE2 cannot tie a surface to itself ─
+    # ── the self-tie spellings: /INTER/TYPE2 has no shape for a self-tie ──
     if self_tie:
         state.warn(
-            f"{tag}: a SELF-tiebreak (one surface tied to itself). "
-            "OpenRadioss cannot express it: /INTER/TYPE2 needs a secondary "
-            "/GRNOD and a separate main /SURF, and i2trivox.F90:233-234 skips "
-            "any secondary node that is one of the four corners of the "
-            "candidate main segment — so a surface tied to itself resolves to "
-            "an EMPTY tie (starter WARNING 1157/1218, zero errors, nothing "
-            "bonded). The interface is converted as the post-failure "
-            "self-contact and the BOND is DROPPED. Note LS-DYNA restricts "
-            "this spelling to OPTIONs 1-5 and to MPP only (Vol I R17 p.11-40 "
-            "Remark 2). REMEDY: split the self-contact into two explicit "
-            "surfaces and use *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK, "
-            "which does convert to a tie.")
-        handle_contact_automatic_single_surface(block, state, extra=extra)
+            f"{tag}: a SELF-tiebreak (one surface tied to itself — Vol I R17 "
+            "p.11-9 names AUTOMATIC_SINGLE_SURFACE_TIEBREAK and "
+            "AUTOMATIC_GENERAL_TIEBREAK as two of the three single-surface "
+            "tied contacts). /INTER/TYPE2 has no shape for it: it takes a "
+            "secondary /GRNOD and a SEPARATE main /SURF, and here the two "
+            "would be the same node list. The rupture Spotflags cannot be used "
+            "at all — chktyp2.F:82 tags a TYPE2's secondary nodes whenever "
+            "Spotflag is outside {25,26,27,28} and :97-98 raises the hard "
+            "ERROR 556 for every MAIN node carrying that tag, which for a "
+            "self-tie is every node of the surface. The auto-penalty Spotflag "
+            "27 would be accepted, but i2trivox.F90:234 only excludes the "
+            "segment a node is a CORNER of, so each node would be tied to "
+            "whatever neighbouring segment of its OWN surface lies within "
+            "dsearch — welding the part to itself instead of reproducing "
+            "LS-DYNA's 'nodes in contact stick'. The interface is therefore "
+            "converted as the post-failure self-contact and the BOND is "
+            "DROPPED. Note LS-DYNA restricts this spelling to OPTIONs 1-5 and "
+            "to MPP only (Vol I R17 p.11-40 Remark 2). REMEDY: split the "
+            "self-contact into two explicit surfaces and use "
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK, which does "
+            "convert to a tie.")
+        _report_tiebreak_dropped_cells(state, rec)
+        handle_contact_automatic_single_surface(
+            block, state, extra=extra, card1=offset, inter_id=inter_id)
         return
 
     # ── everything else: the pre-failure state is a TIE ──────────────────
-    if inter_id <= 0 or inter_id > 90000:
-        inter_id = state.next_id()
-    f1 = _card(raw, offset, fixed=True, n=8, w=10)
-    ssid = to_int(f1[0]) if f1 else 0
-    msid = to_int(f1[1]) if len(f1) > 1 else 0
-    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
-    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
     _warn_contact_box(state, kw, inter_id, f1)
-    # Card2: fs fd dc vc vdc penchk bt dt — friction and birth/death act only
-    # AFTER failure, and neither /INTER/TYPE2 nor its rupture block has a
-    # column for them; FS/FD are kept only so the writer can name them.
-    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
-    fs = to_float(f2[0]) if f2 else 0.0
-    fd = to_float(f2[1]) if len(f2) > 1 else 0.0
-    # Card3: sfsa sfsb sast sbst sfsat sfsbt fsf vsf — a NEGATIVE SAST/SBST is
-    # LS-DYNA's "absolute tie-criterion distance", the tied path's dsearch floor.
-    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
-    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
-    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+    state.contacts_tiebreak.append(rec)
 
-    state.contacts_tiebreak.append(
-        ContactTiebreak(inter_id, title, ssid, sstyp, msid, mstyp, family,
-                        keyword=kw, only=only, one_way=one_way, option=option,
-                        nfls=nfls, sfls=sfls, param=param, eraten=eraten,
-                        erates=erates, ct2cn=ct2cn, cn=cn, tblcid=tblcid,
-                        thkoff=thkoff, nflf=nflf, sflf=sflf, nen=nen, mes=mes,
-                        fs=fs, fd=fd, sst=sst, mst=mst,
-                        mortar=mortar, user=user, damping=damping, mpp=mpp))
+
+def _report_tiebreak_dropped_cells(state: ConversionState, rec) -> None:
+    """Run the writer's Card-4 inventory for a record that never reaches it.
+
+    The OPTION-4 and self-tie routes hand the block to a penalty-contact
+    handler and RETURN, so their ``ContactTiebreak`` never enters
+    ``state.contacts_tiebreak`` and the writer's per-record accounting never
+    runs for them. Without this they lose the whole Card-4 inventory on exactly
+    the two routes that drop the most: OPTION 4's ``SFLS`` is a real Coulomb
+    cap when ``PARAM = 1`` (*"For OPTION = 4, SFLS is a frictional stress limit
+    if PARAM = 1. This frictional stress limit is independent of the normal
+    force at the tie"*, Vol I R17 p.11-38), and the self-tie routes drop the
+    bond outright.
+    """
+    from .writer.contacts import _tiebreak_report_dropped_cells
+    _tiebreak_report_dropped_cells(state, rec, ruptured=False)
 
 
 #: The LS-DYNA keyword bases dyna2rad routes to /INTER/TYPE25, and the
@@ -13318,6 +13456,16 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
             segments.append(nodes)
+            # A1/A2 are the PER-SEGMENT override of a
+            # *CONTACT_TIEBREAK_SURFACE_TO_SURFACE's NFLS/SFLS (Vol I R17
+            # p.11-72 Remark 1: "The failure fields, NFLS and SFLS, can be
+            # overridden segment by segment on the *SET_SEGMENT or *SET_SHELL
+            # data cards for the SURFA surface with A1 and A2"). Only the FACT
+            # that the set states one is recorded — the tiebreak writer needs
+            # it to decide whether the override is a loss to name, and no
+            # converted card can hold a per-segment strength.
+            if any(to_float(f[j]) for j in (4, 5) if len(f) > j):
+                state.segment_set_attr_sids.add(sid)
     state.segment_sets[sid] = SegmentSet(sid, title, segments)
 
 

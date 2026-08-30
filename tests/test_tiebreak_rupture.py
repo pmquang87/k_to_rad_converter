@@ -214,8 +214,13 @@ class TiebreakSpellingCoverage(unittest.TestCase):
             base, *_ = _tiebreak_spelling(kw)
             bases.add(base)
         self.assertEqual(bases, set(_TIEBREAK_BASES))
-        self.assertEqual(len(TIEBREAK_CONTACT_KEYWORDS), 26)
+        # 13 bases x _MPP, plus the two _BEAM_OFFSET spellings p.11-16 offers
+        # for AUTOMATIC_SINGLE_SURFACE_TIEBREAK and AUTOMATIC_GENERAL_TIEBREAK
+        # (x _MPP as well) = 30.
+        self.assertEqual(len(TIEBREAK_CONTACT_KEYWORDS), 30)
         for named in (
+                "CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK_BEAM_OFFSET",
+                "CONTACT_AUTOMATIC_GENERAL_TIEBREAK_BEAM_OFFSET",
                 "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK",
                 "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_USER",
                 "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_MORTAR",
@@ -266,17 +271,50 @@ class TiebreakSpellingCoverage(unittest.TestCase):
                 self.assertEqual(_tiebreak_spelling(kw)[0], want)
 
     def test_suffix_flags(self):
-        base, mortar, user, damping, mpp = _tiebreak_spelling(
+        base, mortar, user, damping, beam_offset, mpp = _tiebreak_spelling(
             "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_USER_MORTAR_MPP")
         self.assertEqual(base, "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK")
         self.assertTrue(mortar and user and mpp)
-        self.assertFalse(damping)
+        self.assertFalse(damping or beam_offset)
         # The DAMPING option cannot be combined with MORTAR (p.11-35), so no
         # generated spelling carries both.
         for kw in TIEBREAK_CONTACT_KEYWORDS:
-            _, mo, _, da, _ = _tiebreak_spelling(kw)
+            _, mo, _, da, _, _ = _tiebreak_spelling(kw)
             with self.subTest(kw=kw):
                 self.assertFalse(mo and da)
+
+    def test_beam_offset_is_scoped_to_the_two_self_tie_bases(self):
+        """p.11-16: "BEAM_OFFSET is also available when OPTION1 is:
+        AUTOMATIC_SINGLE_SURFACE_TIEBREAK / AUTOMATIC_GENERAL_TIEBREAK" —
+        and for no other member of the family."""
+        with_offset = {_tiebreak_spelling(kw)[0]
+                       for kw in TIEBREAK_CONTACT_KEYWORDS
+                       if "_BEAM_OFFSET" in kw}
+        self.assertEqual(with_offset, {
+            "CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK",
+            "CONTACT_AUTOMATIC_GENERAL_TIEBREAK"})
+        # ...and it is dispatched, not skipped: a skipped *CONTACT is a
+        # missing LOAD PATH.
+        for kw in ("CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK_BEAM_OFFSET",
+                   "CONTACT_AUTOMATIC_GENERAL_TIEBREAK_BEAM_OFFSET"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, HANDLERS)
+                self.assertIn(kw, _OFFSET_SPECS)
+
+    def test_beam_offset_emits_a_contact_and_names_its_loss(self):
+        deck = ("*KEYWORD\n" + _MESH
+                + "*CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK_BEAM_OFFSET\n"
+                  "         0         0         5         0         0         0         0         0\n"
+                  "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                  "         2    1000.0    1000.0       0.0       0.0       0.0       0.0       0.0\n"
+                + _TAIL)
+        state = _dispatch(deck)
+        self.assertNotIn("CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK_BEAM_OFFSET",
+                         state.skipped_keywords)
+        self.assertEqual(len(state.contacts_single), 1)
+        self.assertTrue(any("_BEAM_OFFSET flavour" in w and "FTORQ" in w
+                            for w in state.warnings), state.warnings)
 
     def test_suffix_table_keys_are_real_bases(self):
         self.assertEqual(set(_TIEBREAK_SUFFIXES) - set(_TIEBREAK_BASES), set())
@@ -423,8 +461,17 @@ class OptionClassification(unittest.TestCase):
                             for w in state.warnings), state.warnings)
 
     def test_self_tiebreak_keeps_the_self_contact(self):
-        """i2trivox.F90:233-234 skips a secondary node that is a corner of the
-        candidate main segment, so a surface tied to itself is an EMPTY tie."""
+        """A self-tie has no /INTER/TYPE2 shape: the secondary /GRNOD and the
+        main /SURF would be the same node list. The refusal's stated reason is
+        the two source facts, not a guess about what the tie would resolve to —
+        chktyp2.F:82/97 makes the rupture Spotflags a guaranteed ERROR 556
+        here (every main node carries the tag its own secondary side sets), and
+        i2trivox.F90:234 excludes only the segment a node is a CORNER of, so
+        the auto-penalty flavour would weld the surface to itself.
+
+        Both halves are also covered by the Card-4 inventory now: the OPTION-4
+        and self-tie routes used to `return` before it ran.
+        """
         deck = ("*KEYWORD\n" + _MESH
                 + "*CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK\n"
                   "         0         0         5         0         0         0         0         0\n"
@@ -435,7 +482,15 @@ class OptionClassification(unittest.TestCase):
         state = _dispatch(deck)
         self.assertEqual(len(state.contacts_tiebreak), 0)
         self.assertEqual(len(state.contacts_single), 1)
-        self.assertTrue(any("SELF-tiebreak" in w and "EMPTY tie" in w
+        self.assertTrue(any("SELF-tiebreak" in w and "chktyp2.F:82" in w
+                            and "i2trivox.F90:234" in w
+                            for w in state.warnings), state.warnings)
+        # The claim the reviewer refuted is gone: i2trivox's `cycle` only skips
+        # the node's OWN segment, so "resolves to an EMPTY tie" was never
+        # established.
+        self.assertFalse(any("EMPTY tie" in w for w in state.warnings))
+        self.assertTrue(any("no OpenRadioss counterpart" in w
+                            and "NFLS=1000/SFLS=1000" in w
                             for w in state.warnings), state.warnings)
 
     def test_tie_classes_land_in_contacts_tiebreak(self):
@@ -1006,7 +1061,48 @@ class NamedDrops(unittest.TestCase):
         self.assertEqual(len(lost), 1, warns)
         self.assertIn("NEN=1/MES=3", lost[0])
         self.assertIn("are FORCES", lost[0])
-        self.assertIn("*SET_NODE DA1..DA4", lost[0])
+        # This deck's SURFA is a whole PART, so there is no *SET_NODE and no
+        # DA1..DA4 override to lose. Naming one would state a fact the deck
+        # does not contain — see the two tests below for both halves.
+        self.assertNotIn("DA1..DA4", lost[0])
+
+    def test_set_node_da_override_is_named_only_when_the_deck_states_one(self):
+        """p.11-70 Remark 1 puts the NFLF/SFLF/NEN/MES override on the SURFA
+        *SET_NODE's DA1..DA4. The all-zero header LS-PrePost writes
+        ("3  0.0  0.0  0.0  0.0", the corpus carrier plates.tied.k) states
+        none, so reporting it as a loss there is the #130 false-fact class."""
+        def _deck(da: str) -> str:
+            return ("*KEYWORD\n" + _MESH
+                    + "*SET_NODE_LIST\n"
+                    + f"         7{da}\n"
+                      "         1         2         3         4\n"
+                    + "*CONTACT_TIEBREAK_NODES_TO_SURFACE\n"
+                      "         7         2         4         3         0         0         0         0\n"
+                      "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+                      "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                      "   10000.0   50000.0                    \n" + _TAIL)
+
+        zero = self._warns(_deck("       0.0       0.0       0.0       0.0"))
+        self.assertFalse(any("DA1..DA4" in w for w in zero), zero)
+        stated = self._warns(_deck("     900.0    1500.0       3.0       4.0"))
+        lost = [w for w in stated if "DA1..DA4" in w]
+        self.assertEqual(len(lost), 1, stated)
+        self.assertIn("*SET_NODE 7", lost[0])
+        self.assertIn("900", lost[0])
+
+    def test_blank_nen_mes_default_to_two_not_zero(self):
+        """p.11-70's Card-4 table gives NEN and MES the default 2. Read as 0
+        the reported criterion (|fn|/NFLF)^0 + (|fs|/SFLF)^0 is identically
+        2 >= 1 — a criterion the deck does not contain."""
+        state = _dispatch(
+            "*KEYWORD\n" + _MESH
+            + "*CONTACT_TIEBREAK_NODES_TO_SURFACE\n"
+              "         1         2         3         3         0         0         0         0\n"
+              "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+              "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+              "   10000.0   50000.0\n" + _TAIL)
+        rec = state.contacts_tiebreak[0]
+        self.assertEqual((rec.nen, rec.mes), (2.0, 2.0))
 
     def test_surface_family_names_tblcid_and_thkoff(self):
         warns = self._warns(
@@ -1122,6 +1218,516 @@ class NoLeakIntoTiebreakFreeDecks(unittest.TestCase):
                         golden = (expected / f"{stem}_{suffix}.rad").read_text()
                         self.assertEqual(produced.replace("\r\n", "\n"),
                                          golden.replace("\r\n", "\n"))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 11. Verification round --- the scope mismatches, the MPP delegation, and the
+#     claims that had to become true
+# ═════════════════════════════════════════════════════════════════════════════
+
+class Error556IsDeckWide(unittest.TestCase):
+    """``chktyp2.F`` is a DECK-WIDE pass and the guard has to match its scope.
+
+    ``:80-83`` tags the secondary nodes of every ``/INTER/TYPE2`` whose
+    ``Spotflag`` is outside ``{25,26,27,28}`` — the rupture flags 20/21/22 ARE
+    tagged — and ``:87-108`` then checks the MAIN nodes of **every**
+    ``/INTER/TYPE2`` against the tag, its ``IF (ILEV /= 25 .OR. ILEV /= 26)``
+    being a tautology. So a rupturing tiebreak poisons every OTHER TYPE2 in the
+    deck: each ``*CONTACT_TIED_*`` and each ``*CONTACT_SPOTWELD``, whose
+    Spotflag 27/28 exempts them from being TAGGED but not from being CHECKED.
+
+    MEASURED on this shape: 4 x ``ERROR 556`` + ERROR TERMINATION with no
+    restart file, against 0 ERROR for the same deck without the tied contact.
+    """
+
+    #: The tiebreak's SECONDARY side is part 1 (_auto_tiebreak: ssid=1
+    #: sstyp=3). A second tie whose MAIN side is part 1 therefore puts the
+    #: tiebreak's tagged nodes into another TYPE2's main list — a glued flange
+    #: plus a weld on the same part, the ordinary production shape.
+    def _tied(self, main_pid: int) -> str:
+        return ("*SET_NODE_LIST\n"
+                "         9\n"
+                "        15        16        17        18\n"
+                "*CONTACT_TIED_NODES_TO_SURFACE_ID\n"
+                "        30tied flange\n"
+                f"         9{main_pid:>10}         4         3         0         0         0         0\n"
+                "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+                "       0.0       0.0       0.0       0.0       0.0       0.0       0.0       0.0\n")
+
+    def test_a_tied_contact_on_the_tie_face_refuses_the_rupture(self):
+        result, starter = _convert(
+            "*KEYWORD\n" + _MESH + self._tied(1)
+            + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
+        # The probe REACHES the branch: a second /INTER/TYPE2 is in the deck.
+        self.assertTrue(_block(starter, "/INTER/TYPE2/30"))
+        # tie only: card 1 + the auto-penalty card, no rupture cards
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 2, cards)
+        self.assertEqual(cards[0][30:40], "        27")
+        hit = [w for w in result.warnings
+               if "also MAIN nodes of" in w and "*CONTACT_TIED" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("ERROR 556", hit[0])
+        self.assertIn("30", hit[0])
+        self.assertNotIn("/ANIM/NODA/DAMA2", starter)
+
+    def test_the_without_twin_still_ruptures(self):
+        """The other half: the identical tiebreak with no second TYPE2 in the
+        deck keeps its rupture cards. Without this the guard could be passing
+        because the deck never reached the rupture path at all."""
+        _, starter = _convert(
+            "*KEYWORD\n" + _MESH
+            + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
+        self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/20"))), 3)
+
+    def test_a_tied_contact_ELSEWHERE_does_not_refuse_the_rupture(self):
+        """Scope, the other way round: the same tied contact with its MAIN side
+        on part 2 — which the tiebreak's SECONDARY side does not touch — leaves
+        the rupture alone. Same deck shape, one field different."""
+        result, starter = _convert(
+            "*KEYWORD\n" + _MESH + self._tied(2)
+            + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
+        self.assertTrue(_block(starter, "/INTER/TYPE2/30"))
+        self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/20"))), 3)
+        self.assertFalse([w for w in result.warnings
+                          if "also MAIN nodes of" in w], result.warnings)
+
+
+class Error670IsPerNode(unittest.TestCase):
+    """``i2surfs.F`` computes ``AREA(I)`` per secondary node (``DO I=1,NSN``)
+    and ``:287-293`` raises ``ERROR 670`` for **any single** node whose area is
+    zero — the ``Area`` fallback at ``:286`` is the rupture card's own ``Area``
+    cell, which k2rad writes 0. A set-level "there is a solid somewhere in this
+    group" is therefore the wrong test.
+    """
+
+    def _deck(self, secondary_extra: str) -> str:
+        return ("*KEYWORD\n" + _MESH
+                + "*NODE\n"
+                  "        99               5.0               5.0              10.0\n"
+                  "*SET_NODE_LIST\n"
+                  "         9\n"
+                + secondary_extra
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID\n"
+                  "        20glue joint\n"
+                  "         9         2         4         3         0         0         0         0\n"
+                  "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                  "         6      50.0      20.0     0.005       0.0       0.0       0.0       0.0\n"
+                + _TAIL)
+
+    def test_one_free_node_in_the_secondary_set_refuses_the_rupture(self):
+        result, starter = _convert(
+            self._deck("         5         6         7         8        99\n"))
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 2, cards)
+        self.assertEqual(cards[0][30:40], "        27")
+        hit = [w for w in result.warnings if "ERROR 670" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("NO shell and NO solid", hit[0])
+        self.assertIn("node 99", hit[0])
+
+    def test_the_same_set_without_the_free_node_ruptures(self):
+        _, starter = _convert(
+            self._deck("         5         6         7         8\n"))
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 3, cards)
+        self.assertEqual(cards[0][30:40], "        22")
+
+    def test_a_node_on_both_classes_picks_one_and_says_so(self):
+        """`ILEV 21` sets `ISOL = 0` and `22` sets `ICOQ = 0`
+        (i2surfs.F:72-73), so on a node carrying both a shell and a solid the
+        Spotflag picks ONE tributary area and the other contributes nothing.
+        The old set-level OR gave Spotflag 20 there (the SUM of both) with a
+        warning; the per-node rule picks the homogeneous flag, so the ambiguity
+        has to be said out loud instead."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*ELEMENT_SHELL\n"
+                  "      11       3       5       6       7       8\n"
+                  "*PART\nskin\n         3         2         1\n"
+                  "*SECTION_SHELL\n         2         2\n       1.0\n"
+                + "*SET_NODE_LIST\n"
+                  "         7\n"
+                  "         5         6         7         8\n"
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID\n"
+                  "        20glue joint\n"
+                  "         7         2         4         3         0         0         0         0\n"
+                  "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                  "         6      50.0      20.0     0.005       0.0       0.0       0.0       0.0\n"
+                + _TAIL)
+        result, starter = _convert(deck)
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 3, cards)
+        self.assertEqual(cards[0][30:40], "        21")      # shells win
+        hit = [w for w in result.warnings if "carry BOTH a shell" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("4 secondary node(s)", hit[0])
+        self.assertIn("i2surfs.F:72-73", hit[0])
+
+
+class MppDelegationKeepsTheCardOffset(unittest.TestCase):
+    """``_MPP`` puts its own card BEFORE Card 1. The tiebreak handler shifts
+    past it, but the two DELEGATED routes (OPTION 4 and the self-tie spellings)
+    re-derived the offset from ``_parse_contact_header`` and read SSID off the
+    MPP IGNORE flag — dropping the contact outright on the OPTION-4 route and
+    silently widening the self-tie one to an all-parts self-contact.
+    """
+
+    _MPP_CARD = "         3         0         0         0         0       1.1\n"
+
+    def test_option_4_reads_card_1_not_the_mpp_card(self):
+        state = _dispatch(
+            "*KEYWORD\n" + _MESH
+            + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_MPP_ID\n"
+              "        44glue joint\n"
+            + self._MPP_CARD
+            + "         1         2         3         3         0         0         0         0\n"
+              "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+              "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+              "         4     100.0     300.0       1.0       0.0       0.0       0.0       0.0\n"
+            + _TAIL)
+        self.assertEqual(len(state.contacts_surf2surf), 1)
+        c = state.contacts_surf2surf[0]
+        self.assertEqual((c.inter_id, c.ssid, c.sstyp, c.msid, c.mstyp),
+                         (44, 1, 3, 2, 3))
+        # ...and no phantom SBOXID/MBOXID warning built from PARMAX = 1.1
+        self.assertFalse([w for w in state.warnings if "SBOXID" in w],
+                         state.warnings)
+
+    def test_self_tie_reads_card_1_not_the_mpp_card(self):
+        state = _dispatch(
+            "*KEYWORD\n" + _MESH
+            + "*CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK_MPP_ID\n"
+              "        45self glue\n"
+            + self._MPP_CARD
+            + "         1         0         3         0         0         0         0         0\n"
+              "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+              "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+              "         2    1000.0    1000.0       0.0       0.0       0.0       0.0       0.0\n"
+            + _TAIL)
+        self.assertEqual(len(state.contacts_single), 1)
+        c = state.contacts_single[0]
+        self.assertEqual((c.inter_id, c.ssid, c.sstyp), (45, 1, 3))
+
+    def test_option_4_names_its_card_4_cells(self):
+        """The OPTION-4 route used to `return` before the Card-4 inventory ran,
+        so its whole Card 4 vanished — and SFLS is not incidental there:
+        "For OPTION = 4, SFLS is a frictional stress limit if PARAM = 1. This
+        frictional stress limit is independent of the normal force at the tie"
+        (p.11-38)."""
+        state = _dispatch("*KEYWORD\n" + _MESH
+                          + _auto_tiebreak(4, "100.0", "300.0", "1.0",
+                                           eraten="1.0", erates="2.0",
+                                           ct2cn="3.0", cn="4.0")
+                          + _TAIL)
+        lost = [w for w in state.warnings if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1, state.warnings)
+        self.assertIn("NFLS=100/SFLS=300", lost[0])
+        self.assertIn("PARAM=1", lost[0])
+        self.assertIn("frictional stress limit", lost[0])
+        # ERATEN/ERATES/CT2CN/CN are NOT read at OPTION 4 -> inert, not lost
+        inert = [w for w in state.warnings if "INERT in LS-DYNA too" in w]
+        self.assertEqual(len(inert), 1, state.warnings)
+        self.assertIn("ERATEN=1", inert[0])
+        self.assertIn("CT2CN=3", inert[0])
+
+
+class ParamRoleIsPerOption(unittest.TestCase):
+    """PARAM has SIX documented roles (p.11-38/39) and no role at all at
+    OPTION 1/-1, 3/-3, 5 and 101..105. Naming the wrong quantity — or naming a
+    cell LS-DYNA never reads as a LOSS — is the #130 false-fact class."""
+
+    def _warns(self, option, param="1.0"):
+        result, _ = _convert("*KEYWORD\n" + _MESH
+                             + _auto_tiebreak(option, "100.0", "300.0", param)
+                             + _TAIL)
+        return result.warnings
+
+    def test_the_two_param_tables_cannot_desync(self):
+        """The `lost` branch indexes _TIEBREAK_PARAM_ROLE for every OPTION in
+        _TIEBREAK_FIELD_SCOPE["PARAM"] except 6/8 (which take the rupture
+        path). A missing key there is a KeyError at conversion time, so the two
+        tables are asserted equal rather than kept in step by hand."""
+        from k2rad.writer.contacts import (_TIEBREAK_FIELD_SCOPE,
+                                           _TIEBREAK_PARAM_ROLE)
+        self.assertEqual(set(_TIEBREAK_FIELD_SCOPE["PARAM"]) - {6, 8},
+                         set(_TIEBREAK_PARAM_ROLE))
+
+    def test_option_2_param_is_the_thickness_offset_flag(self):
+        lost = [w for w in self._warns(2) if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1)
+        self.assertIn("IGNORE the shell thickness offsets", lost[0])
+        self.assertNotIn("friction angle", lost[0])
+
+    def test_option_7_param_is_a_friction_angle(self):
+        lost = [w for w in self._warns(7) if "no OpenRadioss counterpart" in w]
+        self.assertIn("friction angle in DEGREES", lost[0])
+
+    def test_option_13_param_is_a_layer_thickness(self):
+        lost = [w for w in self._warns(13) if "no OpenRadioss counterpart" in w]
+        self.assertIn("THICKNESS of the tiebreak layer", lost[0])
+
+    def test_out_of_scope_param_is_inert_not_lost(self):
+        """At OPTION 1/-1, 3/-3, 5 and 101..105, PARAM has no role in PARAM's
+        own paragraph at all, so LS-DYNA does not read it either: it belongs in
+        the INERT half of the message, not the dropped-by-name half."""
+        for option in (1, 3, 5):
+            with self.subTest(option=option):
+                warns = self._warns(option)
+                msg = [w for w in warns if "INERT in LS-DYNA too" in w]
+                self.assertEqual(len(msg), 1, warns)
+                # The two halves live in ONE warning; split them before
+                # testing. (At OPTION 1 the dropped half is empty entirely.)
+                dropped, _, inert = msg[0].partition("INERT in LS-DYNA too")
+                self.assertNotIn("PARAM=", dropped)
+                self.assertIn("PARAM=1", inert)
+
+
+class SurfaceFamilyKeepsItsOwnCardSemantics(unittest.TestCase):
+    """``option`` is normalised onto the AUTOMATIC enumeration so ONE class
+    table serves all three families, but p.11-72 defines this keyword's own
+    cells as "NFLS Tensile failure stress / SFLS Shear failure stress" — the
+    AUTOMATIC OPTION-5 sentence (a plastic yield stress and a crack-opening
+    curve) is not true of it."""
+
+    _DECK = ("*KEYWORD\n" + _MESH
+             + "*CONTACT_TIEBREAK_SURFACE_TO_SURFACE\n"
+               "         1         2         3         3         0         0         0         0\n"
+               "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+               "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+               "     100.0     300.0        77         1\n" + _TAIL)
+
+    def test_tblcid_does_not_import_the_option_5_text(self):
+        self.assertEqual(_dispatch(self._DECK).contacts_tiebreak[0].option, 5)
+        result, starter = _convert(self._DECK)
+        self.assertIn("/INTER/TYPE2/", starter)
+        tie = [w for w in result.warnings if "PERMANENT tie" in w]
+        self.assertEqual(len(tie), 1, result.warnings)
+        self.assertIn("tensile failure stress", tie[0])
+        self.assertNotIn("plastic yield stress", tie[0])
+        self.assertIn("TBLCID=77", tie[0])
+
+    def test_per_segment_a1_a2_override_is_named_only_when_stated(self):
+        """p.11-72 Remark 1: NFLS/SFLS "can be overridden segment by segment on
+        the *SET_SEGMENT or *SET_SHELL data cards for the SURFA surface with A1
+        and A2"."""
+        def _deck(attrs: str) -> str:
+            return ("*KEYWORD\n" + _MESH
+                    + "*SET_SEGMENT\n"
+                      "         8\n"
+                    + f"         5         6         7         8{attrs}\n"
+                    + "*CONTACT_TIEBREAK_SURFACE_TO_SURFACE\n"
+                      "         8         2         0         3         0         0         0         0\n"
+                      "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+                      "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                      "     100.0     300.0         0         0\n" + _TAIL)
+
+        plain = _dispatch(_deck("")).warnings
+        self.assertFalse([w for w in plain if "per-SEGMENT override" in w])
+        stated = _convert(_deck("      70.0     150.0"))[0].warnings
+        hit = [w for w in stated if "per-SEGMENT override" in w]
+        self.assertEqual(len(hit), 1, stated)
+        self.assertIn("*SET_SEGMENT 8", hit[0])
+
+
+class UserFlavourHasItsOwnCard41(unittest.TestCase):
+    """p.11-43: *"These cards, 4.1, 4.2, and 4.3, are mandatory"* for the
+    ``_USER`` spellings, and Card 4.1 is ``OPTION NHV CT2CN CN OFFSET NHMAT
+    NHWLD`` — NOT ``OPTION NFLS SFLS PARAM …``. Reading the ordinary layout
+    reported NHV as a failure stress and CT2CN as a shear one, and counted ONE
+    card where three follow."""
+
+    def test_card_4_extra_is_three(self):
+        self.assertEqual(_tiebreak_card4_extra("AUTOMATIC", 101, False, True), 3)
+        self.assertEqual(_tiebreak_card4_extra("AUTOMATIC", 101, False), 1)
+
+    _DECK = (
+        "*KEYWORD\n" + _MESH
+        + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_USER_ID\n"
+          "        21user glue\n"
+          "         1         2         3         3         0         0         0         0\n"
+          "       0.3       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+          "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+          "       101         7       1.5       9.0         1         2         3\n"
+          "       1.0       2.0       3.0       4.0       5.0       6.0       7.0       8.0\n"
+          "       9.0      10.0      11.0      12.0      13.0      14.0      15.0      16.0\n"
+        + _TAIL)
+
+    def test_card_41_cells_are_read_under_their_own_names(self):
+        state = _dispatch(self._DECK)
+        rec = state.contacts_tiebreak[0]
+        self.assertEqual(rec.option, 101)
+        self.assertEqual((rec.ct2cn, rec.cn), (1.5, 9.0))
+        # NFLS/SFLS/PARAM do not exist on Card 4.1 and must stay 0 rather than
+        # picking up NHV / CT2CN / CN.
+        self.assertEqual((rec.nfls, rec.sfls, rec.param), (0.0, 0.0, 0.0))
+        self.assertTrue(any("NHV=7" in w and "NHMAT=2/NHWLD=3" in w
+                            for w in state.warnings), state.warnings)
+
+    def test_card_41_ct2cn_and_cn_are_a_loss_not_inert(self):
+        warns = _convert(self._DECK)[0].warnings
+        lost = [w for w in warns if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1, warns)
+        self.assertIn("CT2CN=1.5", lost[0])
+        self.assertIn("CN=9", lost[0])
+        self.assertFalse([w for w in warns if "INERT in LS-DYNA too" in w],
+                         warns)
+
+
+class VerificationRoundRegistryAudit(unittest.TestCase):
+    def test_implicit_solid_contact_np1_warning_sees_a_tiebreak(self):
+        """_solid_contact_master_pids walks the contact containers; a tiebreak
+        still builds the /SURF/PART/EXT the warning is about, and moving the
+        records into their own container silently took the warning away."""
+        deck = ("*KEYWORD\n" + _MESH
+                + _auto_tiebreak(1, "100.0", "300.0", "0.0")
+                + "*CONTROL_IMPLICIT_GENERAL\n         1     0.001\n" + _TAIL)
+        result, _ = _convert(deck)
+        self.assertTrue(any("RUN THIS DECK WITH np=1" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_inter_gapmin_on_a_type25_id_is_not_called_unknown(self):
+        """The id IS in the deck, as /INTER/TYPE25 — calling it unknown sends
+        the user hunting for a typo."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*CONTACT_ERODING_SURFACE_TO_SURFACE_ID\n"
+                  "        55eroding\n"
+                  "         1         2         3         3         0         0         0         0\n"
+                  "       0.0       0.0       0.0       0.0       0.0         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                  "         0         1         0\n" + _TAIL)
+        result, _ = _convert(deck, inter_gapmin={55: 0.1})
+        hit = [w for w in result.warnings if "--inter-gapmin 55" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("/INTER/TYPE25", hit[0])
+        self.assertNotIn("unknown interface id", hit[0])
+
+    def test_duplicate_inter_id_scan_fires_and_excludes_sub(self):
+        """hm_read_interfaces.F:154 runs `IF(KEY == 'SUB') CYCLE` BEFORE
+        `NI = NI + 1`, so a /INTER/SUB never enters IPARI and never reaches the
+        ERROR-117 duplicate loop at :237-241. The scan must fire on a real
+        TYPE-vs-TYPE collision and stay silent on a TYPE-vs-SUB pairing."""
+        from k2rad.writer.assembly import _warn_duplicate_inter_ids
+        state = ConversionState()
+        _warn_duplicate_inter_ids(state, ["/INTER/TYPE7/7", "/INTER/SUB/7"])
+        self.assertEqual(state.warnings, [])
+        _warn_duplicate_inter_ids(state, ["/INTER/TYPE7/7", "/INTER/TYPE2/7"])
+        self.assertEqual(len(state.warnings), 1, state.warnings)
+        self.assertIn("ERROR 117", state.warnings[0])
+
+    def test_companion_contact_honours_the_fs_sentinels(self):
+        """Card-2 FS = -1 means "take the *PART_CONTACT coefficients", not a
+        Coulomb coefficient of -1. Writing it through put a NEGATIVE friction
+        on a card the starter accepts without a word (the #114 class)."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID\n"
+                  "        20glue joint\n"
+                  "         1         2         3         3         0         0         0         0\n"
+                  "      -1.0       0.2       0.0       0.0       0.0         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0       0.0       0.0       0.0\n"
+                  "         6      50.0      20.0     0.005       0.0       0.0       0.0       0.0\n"
+                + _TAIL)
+        result, starter = _convert(deck)
+        comp = [ln for ln in starter.splitlines()
+                if ln.startswith("/INTER/TYPE25/")]
+        self.assertEqual(len(comp), 1, starter)
+        cards = _cards(_block(starter, comp[0]))
+        self.assertNotIn("-1", cards[3])                 # Stfac Fric ... row
+        self.assertTrue(any("FS=-1" in w and "FRICTIONLESS" in w
+                            for w in result.warnings), result.warnings)
+
+    def test_grnod_dodges_a_user_node_set_at_the_auto_id_base(self):
+        """_make_extra_groups re-emits every user *SET_NODE under its own SID,
+        so a SID at or above the auto-id base 90001 collides with the
+        synthesized secondary group -> starter ERROR 79."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*SET_NODE_LIST\n"
+                  "     90001\n"
+                  "         1         2\n"
+                + _auto_tiebreak(1, "100.0", "300.0", "0.0") + _TAIL)
+        _, starter = _convert(deck)
+        gr = [ln for ln in starter.splitlines()
+              if ln.startswith("/GRNOD/NODE/")]
+        self.assertEqual(len(gr), len(set(gr)), gr)
+
+    def test_a_cid_above_90000_is_named_by_the_id_that_is_emitted(self):
+        """The warning tag used to be built from the RAW header id, before the
+        `> 90000 -> next_id()` fixup, so on such a deck every log line named an
+        id the .rad does not contain."""
+        state = _dispatch("*KEYWORD\n" + _MESH
+                          + _auto_tiebreak(1, "100.0", "300.0", "0.0",
+                                           cid=90123) + _TAIL)
+        emitted = state.contacts_tiebreak[0].inter_id
+        self.assertNotEqual(emitted, 90123)
+        self.assertTrue(all(f"{emitted}" in w for w in state.warnings
+                            if w.startswith("*CONTACT")), state.warnings)
+        self.assertFalse([w for w in state.warnings if "90123" in w],
+                         state.warnings)
+
+
+class Dama2IsEmittedOnlyBehindARupture(unittest.TestCase):
+    """``ruptint2.F:143/155/169`` fill ``PDAMA2`` only under
+    ``ANIM_N(15)==1 .OR. H3D_DATA%N_SCAL_DAMA2 == 1``, so the warning that
+    points the reader at the per-node damage fringe needs the card to exist —
+    and with no rupturing tie the channel would be legal, accepted and exactly
+    0.0 forever (#122)."""
+
+    def test_rupture_deck_gets_the_card(self):
+        _, _, engine = _convert_both(
+            "*KEYWORD\n" + _MESH
+            + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
+        self.assertIn("/ANIM/NODA/DAMA2", engine)
+
+    def test_permanent_tie_deck_does_not(self):
+        _, _, engine = _convert_both(
+            "*KEYWORD\n" + _MESH
+            + _auto_tiebreak(1, "50.0", "20.0", "0.0") + _TAIL)
+        self.assertNotIn("/ANIM/NODA/DAMA2", engine)
+
+
+class IsymScopeIsNamed(unittest.TestCase):
+    """`Isym = 1` asks for LS-DYNA's "compressive stress does not contribute to
+    the failure equation", but the Reference Guide p.213 scopes it: *"The
+    initial direction from main surface to the secondary node defines the
+    positive side (traction). If the distance is zero (secondary node lies on
+    the main surface), the rupture will be symmetric, even with Isym = 1."*
+    `int2rupt.F:239-246` is that sentence in code —
+    `INORM = SIGN(1, NINT(VN.XSM))`, and `NINT` of a sub-0.5-length-unit offset
+    is 0. A glued joint is coincident by construction, so quoting only the
+    LS-DYNA half would tell the reader the converted tie excludes compression
+    when on the ordinary layout it does not."""
+
+    def test_the_rupture_warning_states_the_condition(self):
+        result, _ = _convert("*KEYWORD\n" + _MESH
+                             + _auto_tiebreak(6, "50.0", "20.0", "0.005")
+                             + _TAIL)
+        hit = [w for w in result.warnings if "with RUPTURE" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("rupture will be SYMMETRIC", hit[0])
+        self.assertIn("int2rupt.F:239-246", hit[0])
+
+
+class OnlySpellingsCannotRupture(unittest.TestCase):
+    def test_no_only_spelling_can_rupture(self):
+        """The invariant the ``if c.only:`` branch in the rupture arm rests on,
+        stated as a test rather than left implicit: no ``_ONLY`` spelling can
+        be classified CCRIT, so that branch is unreachable today. The SURFACE
+        family's OPTION is forced to 2 or 5 by LS-DYNA's own THKOFF rewrite
+        rule and the NODES family's class is FORCE."""
+        class _Rec:
+            def __init__(self, family, option):
+                self.family, self.option = family, option
+                self.user = False
+        for base, (family, only, _ow, _self) in _TIEBREAK_BASES.items():
+            if not only:
+                continue
+            options = (2, 5) if family == "SURFACE" else (0,)
+            for option in options:
+                with self.subTest(base=base, option=option):
+                    self.assertNotIn(
+                        _tiebreak_bond_class(_Rec(family, option)),
+                        _TIEBREAK_RUPTURE_CLASSES)
 
 
 if __name__ == "__main__":
