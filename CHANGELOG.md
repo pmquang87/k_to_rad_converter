@@ -134,11 +134,52 @@ Prior history (before this changelog was introduced) is summarized in the
       `Rupt = 2` interface existing, per the `#122` rule — with no rupturing
       tie the channel is legal, accepted and exactly 0.0 forever.
 
+  **Solver evidence for the round** (short run dirs, `nt = 6`, all harvested
+  and deleted). Both refusal guards were proven with a with/without twin at the
+  starter, the "without" side produced by disabling the guard on a throwaway
+  copy of the tree and restored afterwards: the ERROR-556 shape gives
+  **4 × `ERROR 556` "MAIN NODE ID=5/6/7/8 IS ALSO SECONDARY NODE OF ANOTHER
+  INTERFACE TYPE2" + ERROR TERMINATION** unguarded and **0 ERROR** guarded; the
+  ERROR-670 shape **2 × `ERROR 670` + ERROR TERMINATION** unguarded and
+  **0 ERROR / NORMAL TERMINATION** guarded. The `/ANIM/NODA/DAMA2` twin is the
+  #122 check on the new card: with the pre-round engine deck the anim carries
+  **no damage field at all** (`NODE_ID`, `Time_Step`, `Mass_Change` only);
+  with it, `%damage(type2 interface) Normal` and `Tangent` appear and go
+  **0 → 100** on the tied nodes at rupture. The emitted rupture coupon still
+  reads back `SCAL_F 100.0 / DN_MAX 2.0E-02 / IFUNN 90013 / IFUNT 90014 /
+  IMOD 2 / ISYM 1 / IFILTR 0` at **0 ERROR / 0 WARNING** and runs to
+  **NORMAL TERMINATION at 2918 cycles** with `START RUPTURE` and
+  `TOTAL RUPTURE` on all nine secondary nodes. Both carriers re-run clean:
+  the Kurbel prime carrier `/INTER/TYPE2/10`, `FORMULATION LEVEL 27`,
+  **0 ERROR(S)**, 4459 of 4540 secondary nodes deleted (81 tied, unchanged),
+  and `plates.tied.k` **0 ERROR(S)**, `/INTER/TYPE2/90006`,
+  `FORMULATION LEVEL 28`.
+
+  **Round sweep, in two halves**, pre-round `cb49c70` vs this commit. Roster:
+  the batch's own 827-deck roster, **deduplicated by content hash** (287
+  byte-identical copies dropped — the corpus holds ~30 copies each of several
+  models) and **capped at 3 MB per deck** → **456 decks**, 198 MB, 0 conversion
+  exceptions on either side. The 84 unique decks over the cap are the gear-unit
+  and thin-shell models; the one that matters, the 27.6 MB Kurbel prime
+  carrier, was converted on BOTH trees separately and its `_0000.rad` and
+  `_0001.rad` are **byte-identical**.
+  * **Half 1 — the `.rad` files**: **0 of 456 differ.** Nothing this round
+    changed any converted output anywhere.
+  * **Half 2 — the diagnostics**: **1 of 456 differs**, and it is exactly the
+    intended fix — `plates.tied.k` loses the clause *"the per-node override of
+    NFLF/SFLF/NEN/MES through the \*SET_NODE DA1..DA4 attributes"*, because its
+    `*SET_NODE_LIST 3` header is `3  0.0  0.0  0.0  0.0` and the deck states no
+    override. (Its `NEN`/`MES` are an explicit `1`, so the new default does not
+    touch it.) No deck gained a skipped keyword; none gained a
+    duplicate-`INTERFACE ID` warning; `skipped_keywords` and
+    `recognized_not_emitted` are identical on all 456.
+
 ### Added
 
 - **MILESTONE-2 BATCH 2 — the cohesive `*CONTACT_..._TIEBREAK` family is a TIE,
   and the one OPTION class that states a release distance now RUPTURES.** All
-  thirteen LS-DYNA spellings (×`_MPP`, ×`_ID`/`_TITLE`) reach a handler, against
+  fifteen LS-DYNA spellings (×`_MPP`, ×`_ID`/`_TITLE` — 30 dispatch keys) reach
+  a handler, against
   the four the old table listed by hand, and every one of them emits
   `/INTER/TYPE2` instead of the bond-less `/INTER/TYPE7` the four dispatched
   ones used to become. The keyword's own definition is the reason — Vol I R17

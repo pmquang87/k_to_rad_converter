@@ -7,7 +7,7 @@ The defining decision of this batch, and the silent loss it removes:
     two-way, or single surface version after failure."
 
 So the PRE-failure state of every spelling in the family is a TIE. The
-pre-#131 converter routed four of the thirteen spellings to a plain
+pre-#131 converter routed four of the fifteen spellings to a plain
 ``/INTER/TYPE7`` --- a sliding penalty contact with no bond at all --- and left
 the other nine in ``skipped_keywords``. Both losses are load-path losses, not
 output-card losses: the tied joint simply was not in the converted model, from
@@ -208,7 +208,8 @@ class TiebreakSpellingCoverage(unittest.TestCase):
 
     def test_generator_covers_the_whole_family(self):
         # Vol I R17 p.11-14 lists eleven tiebreak spellings, p.11-14/15 two
-        # Mortar ones. k2rad reaches all thirteen; _MPP doubles the count.
+        # Mortar ones, p.11-16 two _BEAM_OFFSET forms. k2rad reaches all
+        # fifteen; _MPP doubles the count.
         bases = set()
         for kw in TIEBREAK_CONTACT_KEYWORDS:
             base, *_ = _tiebreak_spelling(kw)
@@ -1279,6 +1280,44 @@ class Error556IsDeckWide(unittest.TestCase):
             "*KEYWORD\n" + _MESH
             + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
         self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/20"))), 3)
+
+    def test_a_conformal_and_a_nonconformal_tiebreak_in_one_deck(self):
+        """The mixed-deck case: one tiebreak whose surfaces share nodes and one
+        whose do not. The conformal one falls back on its OWN two sides; the
+        other still ruptures, because its secondary nodes are not in anybody
+        else's MAIN list — `_emitted_type2_mains` carries the tiebreaks too, so
+        this is the path that would refuse it if they were."""
+        # _MESH_CONFORMAL: part 1 (nodes 1-8) and part 2 (5-12) SHARE 5-8.
+        # Part 3 sits apart on 21-28 and shares nothing.
+        mesh = _MESH_CONFORMAL.replace(
+            "*PART\nlower\n",
+            "       3       3      21      22      23      24      25      26      27      28\n"
+            "*PART\nlower\n").replace(
+            "*ELEMENT_SOLID\n",
+            "        21               0.0               0.0              20.0\n"
+            "        22              10.0               0.0              20.0\n"
+            "        23              10.0              10.0              20.0\n"
+            "        24               0.0              10.0              20.0\n"
+            "        25               0.0               0.0              30.0\n"
+            "        26              10.0               0.0              30.0\n"
+            "        27              10.0              10.0              30.0\n"
+            "        28               0.0              10.0              30.0\n"
+            "*ELEMENT_SOLID\n").replace(
+            "*SECTION_SOLID\n",
+            "*PART\ntop\n         3         1         1\n*SECTION_SOLID\n")
+        # 20: part 3 -> part 2, no shared node -> ruptures.
+        # 21: part 1 -> part 2, shares 5-8 -> falls back to the permanent tie.
+        nonconf = _auto_tiebreak(6, "50.0", "20.0", "0.005").replace(
+            "         1         2         3         3",
+            "         3         2         3         3")
+        conformal = _auto_tiebreak(6, "50.0", "20.0", "0.005", cid=21)
+        result, starter = _convert("*KEYWORD\n" + mesh + nonconf + conformal
+                                   + _TAIL)
+        self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/20"))), 3)
+        self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/21"))), 2)
+        self.assertEqual(
+            1, len([w for w in result.warnings if "CONFORMALLY meshed" in w]),
+            result.warnings)
 
     def test_a_tied_contact_ELSEWHERE_does_not_refuse_the_rupture(self):
         """Scope, the other way round: the same tied contact with its MAIN side

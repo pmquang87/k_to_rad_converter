@@ -389,7 +389,8 @@ shipped, so the marginal cost is small.
   silently vanishes. Their card stacks are identical to the `_AUTOMATIC_` ones
   already handled, so this is an aliasing job, not a new conversion. Not in the
   reference corpus, which is why the eroding batch did not surface it.
-- `*CONTACT_..._TIEBREAK` (all 13 spellings × `_MPP`) → `/INTER/TYPE2` —
+- `*CONTACT_..._TIEBREAK` (all 15 spellings × `_MPP` = 30 keys) →
+  `/INTER/TYPE2` —
   **done**. The old "no open-source equivalent found" note is **refuted**:
   `/INTER/TYPE2` Spotflag 20/21/22 + `Rupt` is a fully implemented bond with
   rupture on this build (`hm_read_inter_type02.F:343`, `ruptint2.F`,
@@ -402,7 +403,10 @@ shipped, so the marginal cost is small.
   which would map onto `fct_IDsn` verbatim but supplies no release distance;
   the force-based `NFLF`/`SFLF` of the `TIEBREAK_NODES` family, which would
   need each secondary node's tributary area from `i2surfs.F`; the `*SET_NODE`
-  `DA1..DA4` and `*SET_SEGMENT` `DA1`/`DA2` per-entity overrides; and the
+  `DA1..DA4` and `*SET_SEGMENT` `A1`/`A2` per-entity overrides (recorded and
+  named only when the deck states one); the fact that `Isym = 1`'s compression
+  exclusion degenerates to symmetric on a COINCIDENT tie (RefGuide p.213),
+  which is the ordinary glue-joint layout; and the
   `MORTAR` / `_USER` / `OPTION 9/11/13/14` cohesive laws, which have no
   counterpart of any kind.
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

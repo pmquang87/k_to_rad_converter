@@ -2843,7 +2843,7 @@ interface card. It becomes `Fric=0` with a warning naming the interface.
 `FS = 2` (LS-DYNA reinterprets `FD` as a `*DEFINE_TABLE` id, μ(pressure,
 velocity)) keeps its literal value and warns only when the deck really does
 contain that table — OpenRadioss has no pressure-and-velocity friction table.
-`*CONTACT_..._TIEBREAK` — all thirteen LS-DYNA spellings of the family (the
+`*CONTACT_..._TIEBREAK` — all fifteen LS-DYNA spellings of the family (the
 `AUTOMATIC_{SURFACE_TO_SURFACE,ONE_WAY_SURFACE_TO_SURFACE,SINGLE_SURFACE,
 GENERAL}_TIEBREAK` forms with their `_USER` / `_MORTAR` / `_DAMPING` flavours,
 `TIEBREAK_{SURFACE_TO_SURFACE,NODES_TO_SURFACE}` and both `_ONLY` spellings),

@@ -2965,25 +2965,34 @@ def _emitted_type2_mains(state: ConversionState):
     since over-approximating can only cost a rupture, while
     under-approximating would ship the ERROR 556.
     """
+    memo: Dict[Tuple[int, int], Set[int]] = {}
+
+    def side(sid: int, styp: int) -> Set[int]:
+        # One walk of the element tables per (sid, styp) — a car-body deck can
+        # carry dozens of ties over the same two surfaces.
+        key = (sid, styp)
+        if key not in memo:
+            memo[key] = set(_tied_slave_nids(state, sid, styp))
+        return memo[key]
+
     out = []
     for c in state.contacts_tied:
         if _tied_interface_type(c) != "TYPE2":
             continue                              # /INTER/TYPE10 penalty tie
-        if not _tied_slave_nids(state, c.ssid, c.sstyp):
+        if not side(c.ssid, c.sstyp):
             continue
         out.append((c, c.inter_id, f"*CONTACT_TIED_{c.variant}",
-                    set(_tied_slave_nids(state, c.msid, c.mstyp))))
+                    side(c.msid, c.mstyp)))
     for c in state.contacts_spotweld:
         if not _spotweld_slave_nids(state, c.ssid, c.sstyp):
             continue
         out.append((c, c.inter_id,
                     "*CONTACT_SPOTWELD" + (f"_{c.variant}" if c.variant else ""),
-                    set(_tied_slave_nids(state, c.msid, c.mstyp))))
+                    side(c.msid, c.mstyp)))
     for c in state.contacts_tiebreak:
-        if not _tied_slave_nids(state, c.ssid, c.sstyp):
+        if not side(c.ssid, c.sstyp):
             continue
-        out.append((c, c.inter_id, f"*{c.keyword}",
-                    set(_tied_slave_nids(state, c.msid, c.mstyp))))
+        out.append((c, c.inter_id, f"*{c.keyword}", side(c.msid, c.mstyp)))
     return out
 
 
@@ -3280,8 +3289,13 @@ def _make_tiebreak_interfaces(state: ConversionState,
              HDR]
     dropped: Dict[str, List[int]] = {}
     # Every /INTER/TYPE2 in the deck, resolved ONCE: the ERROR-556 tag that a
-    # rupture Spotflag sets is deck-wide (see _emitted_type2_mains).
-    other_type2 = _emitted_type2_mains(state)
+    # rupture Spotflag sets is deck-wide (see _emitted_type2_mains). Only a
+    # rupturing tie can set the tag, so a deck whose tiebreaks are all
+    # permanent ties (every corpus carrier) does not pay for the walk at all.
+    other_type2 = (
+        _emitted_type2_mains(state)
+        if any(_tiebreak_bond_class(c) in _TIEBREAK_RUPTURE_CLASSES
+               for c in state.contacts_tiebreak) else ())
     for c in state.contacts_tiebreak:
         nids = _tied_slave_nids(state, c.ssid, c.sstyp)
         clean = [n for n in nids if n not in rigid_nodes]
