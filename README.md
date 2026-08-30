@@ -2843,16 +2843,63 @@ interface card. It becomes `Fric=0` with a warning naming the interface.
 `FS = 2` (LS-DYNA reinterprets `FD` as a `*DEFINE_TABLE` id, μ(pressure,
 velocity)) keeps its literal value and warns only when the deck really does
 contain that table — OpenRadioss has no pressure-and-velocity friction table.
-`*CONTACT_..._TIEBREAK` (`SURFACE_TO_SURFACE_TIEBREAK`, `_ONE_WAY_...`,
-`TIEBREAK_{SURFACE,NODES}_TO_SURFACE`) → `/INTER/TYPE7` for the post-failure
-contact, **with a warning that the cohesive pre-bond (NFLS/SFLS stress failure)
-has no open-source OpenRadioss equivalent and is dropped** — the parts contact
-but do not pre-bond
+`*CONTACT_..._TIEBREAK` — all thirteen LS-DYNA spellings of the family (the
+`AUTOMATIC_{SURFACE_TO_SURFACE,ONE_WAY_SURFACE_TO_SURFACE,SINGLE_SURFACE,
+GENERAL}_TIEBREAK` forms with their `_USER` / `_MORTAR` / `_DAMPING` flavours,
+`TIEBREAK_{SURFACE_TO_SURFACE,NODES_TO_SURFACE}` and both `_ONLY` spellings),
+each also with `_MPP` and `_ID`/`_TITLE` — → **`/INTER/TYPE2`, a TIE**. The
+pre-failure state of every one of them is a tied contact (Vol I R17 p.11-9:
+*"TIEBREAK is a special case of a tied contact allowing failure"*), so a tie is
+what gets written; a plain `/INTER/TYPE7` carries no bond at all and loses the
+joint's load path from t = 0, not only after failure.
+
+Whether the tie also **ruptures** depends on the Card-4 `OPTION`, because
+OpenRadioss releases a `/INTER/TYPE2` on *displacement* and nothing else
+(`ruptint2.F:138`; the stress functions only cap the transmitted traction):
+
+* **`OPTION = 6` / `8`** state a release distance — `PARAM = CCRIT`, *"when the
+  distance equals PARAM, damage is fully developed, and interface failure
+  occurs"* — so they get the real rupture cards: `Max_N_Dist = Max_T_Dist =
+  CCRIT` 1:1, `Fscalestress = NFLS`, the linear damage ramp as two synthesized
+  `/FUNCT`s (the shear one starting at `SFLS/NFLS`), `Rupt = 2`, `Isym = 1`
+  (tension only, matching *"compressive stress does not contribute to the
+  failure equation"*). Spotflag 21 or 22 follows the secondary side's element
+  class. A non-`_ONLY` spelling also gets a companion `/INTER/TYPE25`
+  (`Irem_i2 = 3`, `Inacti = 5`) for the post-failure contact; the `_ONLY`
+  spellings correctly get none — a totally ruptured secondary node is a free
+  particle, which is exactly what *"stops acting as a contact altogether"*
+  means.
+* **every other class** becomes a **permanent** auto-penalty tie
+  (`Spotflag = 27`, or 28 for the `NODES` family) with the failure **named and
+  dropped**, per OPTION, together with the physics cost. `OPTION = 1` / `−1`
+  says so honestly: LS-DYNA never breaks that bond either, so nothing about the
+  failure is lost — only the *growing* tie set is.
+* **`OPTION = 4`** permits tangential sliding before failure, so LS-DYNA's own
+  pre-failure state is not a tie; it keeps the penalty-contact route rather than
+  being over-constrained. The self-tie spellings
+  (`AUTOMATIC_{SINGLE_SURFACE,GENERAL}_TIEBREAK`) keep the self-contact route,
+  because a `/INTER/TYPE2` cannot tie a surface to itself.
+
+Guards, each a conversion-time refusal that falls back to the permanent tie
+with a named warning: **conformally meshed** surfaces (shared secondary/main
+nodes would be `ERROR 556` under the kinematic rupture Spotflags), an
+**implicit** deck, a deck using **`/DT/NODA/CST`**, a missing `PARAM`, a zero
+`NFLS`/`SFLS` (*"Both NFLS and SFLS must be defined"* — the manual's idiom for
+"no failure in this mode" is `1e10`, not 0), and a secondary side with no
+attached shell or solid (`ERROR 670`). Un-mappable Card-4 cells — `ERATEN`,
+`ERATES`, `CT2CN`, `CN`, `TBLCID`, `THKOFF`, `NEN`/`MES`, the force-vs-stress
+mismatch of `NFLF`/`SFLF`, the `*SET_NODE` `DA1..DA4` per-node overrides — are
+listed by name, and cells that lie **outside their OPTION's own field list** are
+reported as *inert in LS-DYNA too*, not as a loss.
 `*CONTACT_TIED_{NODES,SHELL_EDGE,SURFACE}_TO_SURFACE` (+ `_OFFSET` variants) →
 `/INTER/TYPE2` (tied **kinematic** interface): slave `*SET_NODE_LIST` (SSTYP=4) →
 `/GRNOD`, master `*SET_SEGMENT` (MSTYP=0) → `/SURF/SEG`; parts / part sets on
-either side are also resolved. `Spotflag=1` (spotweld formulation) for the
-NODES/SHELL_EDGE weld variants, `Spotflag=5` (standard) for SURFACE_TO_SURFACE.
+either side are also resolved. `Spotflag=28` (the AUTO-PENALTY spotweld
+formulation) for the NODES/SHELL_EDGE weld variants, `Spotflag=27` (the
+auto-penalty standard formulation) for SURFACE_TO_SURFACE — the purely
+kinematic 1/5 hard-fail with `ERROR 556` as soon as the two tied parts are
+conformally meshed and share a node, which is exactly the layout these
+keywords exist for.
 A `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` with a **negative offset** —
 dyna2rad's discriminator `(SFST*SST + SFMT*MST)/2 < 0` (raw Card-3 scale factors,
 no zero→1 defaulting, so a blank `SFST`/`SFMT` always stays TYPE2) — instead

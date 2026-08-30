@@ -11,6 +11,190 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Added
 
+- **MILESTONE-2 BATCH 2 — the cohesive `*CONTACT_..._TIEBREAK` family is a TIE,
+  and the one OPTION class that states a release distance now RUPTURES.** All
+  thirteen LS-DYNA spellings (×`_MPP`, ×`_ID`/`_TITLE`) reach a handler, against
+  the four the old table listed by hand, and every one of them emits
+  `/INTER/TYPE2` instead of the bond-less `/INTER/TYPE7` the four dispatched
+  ones used to become. The keyword's own definition is the reason — Vol I R17
+  p.11-9: *"TIEBREAK is a special case of a tied contact allowing failure in
+  which the contact usually becomes a regular one-way, two-way, or single
+  surface version after failure."* A penalty contact has no bond at all, so the
+  joint's load path was missing **from t = 0**, not only after failure.
+
+  MEASURED on the two carriers the corpus actually contains:
+  `dynaexamples_r14_ton-mm-s/intro-by-k.-weimar/spotweld/spotweld-iv/plates.tied.k`
+  carries `*CONTACT_TIEBREAK_NODES_ONLY`, the **only** joint between its two
+  plates, and it was an unnamed entry in `skipped_keywords` — 8 warnings, 4
+  `recognized_not_emitted` entries, and not one of them about the missing tie.
+  It now emits `/INTER/TYPE2/90006` Spotflag 28. The prime carrier
+  `getriebekette/wip_quang/…/319_rigid_bodies_plastic_feinseite_kurbel-super-fine-mesh.k`
+  went from `/INTER/TYPE7/90001` (a sliding contact between two parts LS-DYNA
+  sticks permanently) to `/INTER/TYPE2/10 "Kurbel self tiebreak contact"`,
+  Spotflag 27, 4540 secondary nodes — **0 ERROR(S)** at the starter, the only
+  warnings being the `1071` node-deletion notes the whole-part secondary side
+  earns.
+
+  1. **The mapping is decided by ONE fact about the two solvers, not by
+     taste: OpenRadioss releases a `/INTER/TYPE2` tie on DISPLACEMENT and
+     nothing else.** `ruptint2.F:138` (`Rupt = 2`) sets `IRUPT = 1` only when
+     `|d_n| > Max_N_Dist .OR. d_t > Max_T_Dist`; the stress functions at
+     `:130-136` merely CAP the transmitted traction
+     (`FACN = MIN(1, |SIGNMAX/SIGN|)`) and set the *partial*-rupture state
+     `IRUPT = -1`. There is no stress-triggered release anywhere in the code.
+     So the only LS-DYNA OPTIONs whose failure can be converted are the ones
+     that state a **distance** — 6 and 8, whose `PARAM` is exactly that:
+     *"After the failure stress tiebreak criterion is met, damage is a linear
+     function of the distance between points initially in contact. When the
+     distance equals PARAM, damage is fully developed, and interface failure
+     occurs"* (p.11-37). A constant traction cap with no `Max_N_Dist` would be
+     a tie that is force-limited forever and never releases — legal, accepted
+     by the starter, and the wrong physics.
+
+  2. **OPTION 6/8 → the real rupture cards, term for term, with no invented
+     factor.** `Max_N_Dist = Max_T_Dist = PARAM` (CCRIT) 1:1;
+     `Fscalestress = NFLS`; the linear damage ramp as two synthesized
+     `/FUNCT`s, `1 → 0` over `[0, CCRIT]` for the normal one and
+     `SFLS/NFLS → 0` for the shear one (a ratio of two card cells, not a
+     conversion factor); `Isym = 1`, which is `ruptint2.F:161-173` and is the
+     code equivalent of *"compressive stress does not contribute to the failure
+     equation"*; `Rupt = 2` always. **VALIDATED on a coupon**: the starter
+     echoes `SCAL_F 50.00000000000`, `DN_MAX 5.0000000000000E-03`,
+     `IFUNN 90003 / IFUNT 90004`, `IMOD 2 / ISYM 1 / IFILTR 0` at 0 ERROR, and
+     the engine prints `START RUPTURE` / `TOTAL RUPTURE` per node. The
+     load-bearing measurement is the scaling twin: doubling `NFLS` from 50 to
+     100 on an otherwise identical deck moved `START RUPTURE` from
+     **6.60566149E-04 s to 1.32113230E-03 s — a ratio of exactly 2.000000**,
+     which is what a 1:1 transfer into a linear-elastic ramp must give. Its
+     `NFLS = 1e10` twin produced **no rupture event at all**, and the CCRIT
+     twin (0.005 → 0.010) left the onset byte-identical while stretching the
+     START→TOTAL interval from 4.28 µs to 46.6 µs.
+
+  3. **`Rupt = 1` is never emitted, because it is dimensionally broken in this
+     OpenRadioss build.** `ruptint2.F:147-150` normalises into `DIS_NA` and
+     `DIS_T` and then evaluates `SQRT(DIS_N*DIS_N + DIS_T*DIS_T) > ONE` with
+     the RAW, un-normalised `DIS_N` — a length added to a ratio, so the normal
+     term ignores `Max_N_Dist` entirely. 2 is also the starter's own default
+     (`hm_read_inter_type02.F:372`).
+
+  4. **Every other OPTION class becomes a PERMANENT tie with a named
+     warn-drop, and the drop text is different for the class that loses
+     nothing.** `OPTION 1`/`−1` is *"tracked nodes in contact and those that
+     come into contact will permanently stick"* with **no** failure criterion —
+     it is not in Remark 3's list, and `NFLS`/`SFLS`/`ERATEN` are not in its
+     field list either (p.11-38/39). Saying "the failure is DROPPED" there
+     would state a fact the deck does not contain, so that class reports "that
+     bond NEVER FAILS in LS-DYNA either" and names the one thing that really is
+     lost: the *growing* tie set, since the starter fixes the tied pairs once.
+     The same rule governs the per-cell inventory — `_TIEBREAK_FIELD_SCOPE`
+     carries each Card-4 cell's own OPTION list, so on the prime carrier
+     `NFLS 1000 / SFLS 1000 / ERATEN 1.0` are reported as **inert in LS-DYNA
+     too, not lost**. (The `#130` lesson: an exclusion's stated reason needs the
+     same audit as a warning's.)
+
+  5. **The conformal-mesh trap is a conversion-time refusal, because there is
+     no penalty flavour of the rupture tie.** `hm_read_inter_type02.F:343`
+     gates the rupture cards on `Spotflag ∈ {20,21,22}` and `:301` gates the
+     penalty `Stfac/Visc/Istf` card on `{25,26,27,28}` — **disjoint**. And
+     `chktyp2.F:82` tags the secondary nodes of every TYPE2 *outside*
+     25/26/27/28, with `:98-104` raising the hard `ERROR 556` for any MAIN node
+     so tagged. MEASURED on two conformally adjacent bricks: Spotflag 5 and 22
+     both gave **3 × ERROR 556 + ERROR TERMINATION**; 27 and 28 gave **0 errors
+     and NORMAL TERMINATION**. So a tiebreak whose two sides share nodes falls
+     back to the auto-penalty tie and says why. Three more refusals with the
+     same shape: an implicit deck and a deck emitting `/DT/NODA/CST` (Reference
+     Guide p.1947 Comment 6 forbids both for 20/21/22, and neither the starter
+     nor the engine checks it), and a secondary side carrying no shell or solid
+     (`i2surfs.F:287-292`, `ERROR 670` on a zero nodal area).
+
+  6. **`NFLS`/`SFLS` = 0 is refused, not written.** *"Both NFLS and SFLS must be
+     defined … If failure in only tension or shear is required, then set the
+     other failure force to a large value (10¹⁰)"* (p.11-73 Remark 2) — the
+     manual's own idiom for "no failure in this mode" is a huge value, never
+     zero, so a 0 is a malformed card rather than a request. It also could not
+     be written: `hm_read_inter_type02.F:373` turns `Fscalestress = 0` into ONE
+     pressure unit, which would silently become a 1-MPa bond.
+
+  7. **The post-failure contact is a COMPANION `/INTER/TYPE25`, and `Irem_i2`
+     is the cell that makes it exist.** A totally ruptured secondary node is a
+     completely free particle — `i2for10.F` has branches for `IRUPT == 0`
+     (kinematic transfer) and `IRUPT == -1` (spring) and **no branch at all**
+     for `IRUPT == 1` — so LS-DYNA's *"behaves as a surface-to-surface
+     contact"* (p.11-39 Remark 1) needs a second interface. It is emitted with
+     `Irem_i2 = 3` ("no change to secondary nodes"); at the `/DEFAULT` value 1
+     the starter removes the TYPE2-tied nodes from it once and for all
+     (`i7remnode.F:882-901`) and the card is legal, echoes correctly and does
+     **nothing** — the `#118`/`#122` shape. MEASURED with/without on the
+     emitted deck (break the tie, then drive the freed body back down at
+     −20 mm/s): without the companion node 11 keeps the full **−20.0 mm/s** and
+     sinks **0.0548034 mm** through the other body at 7.73 mJ of external work;
+     with it, **−13.3090 mm/s** and **0.0364657 mm**, at 1439 mJ. `Inacti = 5`
+     is what keeps it inert *before* failure. The `_ONLY` spellings get **no**
+     companion — *"stops acting as a contact altogether"* (p.11-71/11-73
+     Remark 3) is precisely the bare tie's own semantics, and bolting one on
+     would contradict the keyword.
+
+  8. **Two OPTION classes keep their old route on purpose.** `OPTION = 4`
+     permits *"tangential motion with frictional sliding"* before failure, so
+     LS-DYNA's own pre-failure state is not a tie and `/INTER/TYPE2` — which
+     always inhibits tangential motion — would over-constrain it; it keeps the
+     penalty contact and the normal bond is a named drop.
+     `*CONTACT_AUTOMATIC_{SINGLE_SURFACE,GENERAL}_TIEBREAK` tie a surface to
+     itself, which `i2trivox.F90:233-234` makes impossible (a secondary node
+     that is a corner of the candidate main segment is skipped, so a self-tie
+     resolves to an EMPTY tie at zero starter errors — the `#122` shape); they
+     keep the self-contact route with the bond named as dropped.
+
+  9. **`*CONTACT_TIEBREAK_SURFACE_TO_SURFACE[_ONLY]` is classified by LS-DYNA's
+     own documented rewrite rule**, not by a guess: p.11-72 `THKOFF` — *"It
+     works by substituting with `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK`
+     (OPTION = 2 if TBLCID is not specified; OPTION = 5 if TBLCID is
+     specified)"* — so one classification table serves all three Card-4 layouts.
+     The `NODES` family gets the sentinel `option = 0` because its criterion is
+     **force**-based, `(|fn|/NFLF)^NEN + (|fs|/SFLF)^MES ≥ 1`, with no OPTION
+     counterpart at all; converting `NFLF` to `Fscalestress` would need each
+     node's tributary area from `i2surfs.F`, which is mesh geometry the card
+     does not carry, so it is named rather than fudged.
+
+  10. **The `NFLS → Fscalestress` normalisation is EXACT for shells and
+      mesh-dependent for solids, and that is stated rather than fitted.**
+      LS-DYNA divides the tie force by the reference SEGMENT area; Radioss by
+      the secondary node's own tributary area. For shells
+      (`i2surfs.F:110,136`: `ΣA_quad/4 + ΣA_tri/3`) the two are the same
+      quantity — a three-way probe on one mesh matched the prediction to
+      **0.000 %**. For bricks `i2surfs.F:265-278` sums the three faces meeting
+      at the node over 12, so the ratio to the tributary bond area `ab/4` is
+      `(1 + t/a + t/b)/3` — exactly 1 for cubic elements (measured 5000.7 N
+      against a predicted 5000.0), **2/3** at `t = a/2` (measured 0.6667), 1/3
+      in the thin-plate limit. That factor is per-node mesh geometry, so `NFLS`
+      goes through unchanged and the solid path warns.
+
+  11. **Registry work this batch had to do, because a `*CONTACT` can now
+      produce TWO interfaces for the first time.** `contacts_tiebreak` and the
+      minted `companion_inter_ids` both join `_make_starter_th_inter`'s
+      `all_inter_ids` (a missing id there is a missing `*DATABASE_RCFORC`
+      channel for the entire post-failure load path). The two `/FUNCT`s come
+      from `state.next_curve_id()`, which dodges the merged `/FUNCT` + `/TABLE`
+      namespace (`ERROR 79`). And a new deck-wide
+      `_warn_duplicate_inter_ids` scan closes the one id namespace that still
+      had none — `ERROR 117 INTERFACE ID USED TWICE OR MORE`, the `#125`
+      "per-id memo PLUS a deck-wide scan for every namespace" rule.
+
+  **What this corpus cannot see.** A census over the repo, `C:/openradioss_run`
+  (including the Ryan-Lee examples), `dynaexamples_r14_ton-mm-s` and
+  `E:/foxcore_data` found **exactly two carrier shapes**: nine copies of the
+  user's own Kurbel model, all `OPTION 1`, and one
+  `*CONTACT_TIEBREAK_NODES_ONLY`. There is **zero** occurrence of
+  `AUTOMATIC_ONE_WAY_…_TIEBREAK`, of `TIEBREAK_SURFACE_TO_SURFACE`, of
+  `TIEBREAK_NODES_TO_SURFACE`, and of any `OPTION ≠ 1` anywhere. Everything
+  except the permanent-tie route and the `NODES_ONLY` disposition is therefore
+  **synthetic-validation-only**: the evidence for it is the column-exact tests
+  (built against the CFG `FORMAT` blocks field by field), the starter echo that
+  reads those cards back, and the coupon twins quoted above. The one file a
+  future census will find and should not re-open is
+  `dynaexamples_r14_ton-mm-s/introduction/process_simulation/metal-forming-iv/275key2.k`,
+  whose `TIEBREAK` lines are all commented out (`$*CONTACT_TIEBREAK_…`).
+
 - **MILESTONE-2 BATCH 1, part A — the whole `*SET_<FAMILY>_ADD` boolean-union
   family: `*SET_NODE_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
   `*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` and
@@ -6064,6 +6248,33 @@ Prior history (before this changelog was introduced) is summarized in the
   no new path — the fixtures and the starter/engine runs are the evidence.
 
 ### Fixed
+
+- **The mandatory tiebreak Card 4 shifted every optional-card read by one
+  row.** Vol I R17 p.11-6 lists Card 4 as required for the whole family and the
+  optional Cards A–G follow *after* it, but `handle_contact_tiebreak` delegated
+  with `extra = 0`, so `_read_contact_ignore` took `IGNORE` from optional
+  Card B field 1 = `THKOPT`. Proven with a with/without twin — two decks
+  identical except for the presence of Card 4, both carrying `IGNORE = 2` on
+  Card C: the plain one reported `ignore=2`, the tiebreak one **`ignore=0`**.
+  The consequences were a factually wrong warning on every such deck and, on an
+  implicit deck, a diverging card (`_ignore_to_inacti` returns 5 for a misread
+  `THKOPT ∈ {1,2}` *before* reaching the `is_implicit and gapmin > 0` branch
+  that would have kept `Inacti = 0`). `_tiebreak_card4_extra` now also counts
+  Card 4.1a (`_DAMPING` **and** `OPTION 9/11`) and Cards 4.1b + 4.2b
+  (`OPTION 13/14`). The same routine's last branch printed a hard-coded
+  `ignore=0` for any value outside `{0,1,2}` — it now prints the value it read.
+
+- **`*CONTACT_*_ID` free-parsed its fixed-format header.** The card is
+  `CARD("%10d%-70s", _ID_, TITLE)` and LS-PrePost butts the title against the
+  id, so a free split of `"        10Kurbel self tiebreak contact"` yielded the
+  single token `10Kurbel`, which reads back as **id 0** — the deck's own
+  interface id was silently replaced by an auto-id (breaking
+  `--inter-gapmin ID=…`, the `/TH/INTER` keying and every log line naming the
+  interface) and the first word of the title was eaten. The fixed read is tried
+  first now, with the free split kept as the fallback for a comma- or
+  space-separated header. Measured on the prime carrier: `/INTER/TYPE7/90001` /
+  `"self tiebreak contact"` became `/INTER/TYPE2/10` /
+  `"Kurbel self tiebreak contact"`.
 
 - **An all-zero `*DAMPING_PART_STIFFNESS` aborted the whole conversion.**
   Surfaced by the damping batch above and fixed with it. `_make_damping`'s early
