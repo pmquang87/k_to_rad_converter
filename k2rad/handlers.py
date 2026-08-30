@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast as _ast
 import math as _math
 from itertools import permutations as _permutations, product as _product
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .parser import (
     Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
@@ -63,6 +63,7 @@ from .state import (
     LoadNode, RigidWallPlanar, RigidWallGeometric,
     ContactAutoSingle, ContactAutoSurf2Surf, ContactAutoGeneral,
     ContactForceTransducer, ContactTied, ContactSpotweld, ContactType25,
+    ContactTiebreak,
     DefineFriction, FrictionPair, HexSpotweldAssembly,
     InitialVelocityNode, InitialVelocityRigidBody,
     InitialVelocity, InitialVelocityGeneration, MatPowerLaw, PressureLoad,
@@ -5622,10 +5623,29 @@ def _parse_contact_header(block: Block):
     with no header card reads Card 1 off the heading line: SSID/SSTYP/MSID/
     MSTYP all come back 0 and the interface is silently dropped for "resolved
     to no nodes". Wrong in every reading, so both spellings consume the card.
+
+    The card is FIXED format ``%10d%-70s`` (the CFG line quoted above), and
+    LS-PrePost writes the title BUTTED against the id. A free split of
+    ``"        10Kurbel self tiebreak contact"`` yields the single token
+    ``10Kurbel``, which reads back as id 0 — so the deck's own id was silently
+    replaced by an auto-id (breaking ``--inter-gapmin ID=…``, the /TH/INTER
+    keying and every log line that names the interface) and the first word of
+    the title was eaten. The fixed read is therefore tried FIRST; the free
+    split stays as the fallback for a comma- or space-separated header, which
+    is legal LS-DYNA too.
     """
     raw = block.raw
     if (_has_id(block) or "TITLE" in block.options) and raw:
-        f = parse_free(raw[0])
+        head = raw[0]
+        col = head[:10]
+        if col.strip() and "," not in col:
+            try:
+                fixed_id = int(col.strip())
+            except ValueError:
+                fixed_id = 0
+            if fixed_id > 0:
+                return fixed_id, head[10:80].strip(), 1
+        f = parse_free(head)
         inter_id = to_int(f[0]) if f else 0
         title = " ".join(f[1:]) if len(f) > 1 else ""
         return inter_id, title, 1
@@ -5690,7 +5710,8 @@ def _warn_contact_box(state: ConversionState, keyword: str, inter_id: int,
             "*SET manually if the box scoping matters.")
 
 
-def handle_contact_automatic_single_surface(block: Block, state: ConversionState) -> None:
+def handle_contact_automatic_single_surface(block: Block, state: ConversionState,
+                                            extra: int = 0) -> None:
     inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
@@ -5714,7 +5735,7 @@ def handle_contact_automatic_single_surface(block: Block, state: ConversionState
     sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
-    ignore = _read_contact_ignore(raw, offset)
+    ignore = _read_contact_ignore(raw, offset, extra)
     state.contacts_single.append(
         ContactAutoSingle(inter_id, title, ssid, sstyp, fs, fd, bt, dt, ignore,
                           vdc=vdc, sst=sst, mst=mst, sfs=sfs,
@@ -5780,7 +5801,8 @@ def handle_contact_automatic_general(block: Block, state: ConversionState) -> No
     )
 
 
-def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionState) -> None:
+def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionState,
+                                                extra: int = 0) -> None:
     inter_id, title, offset = _parse_contact_header(block)
     if inter_id <= 0 or inter_id > 90000:
         inter_id = state.next_id()
@@ -5804,7 +5826,7 @@ def handle_contact_automatic_surface_to_surface(block: Block, state: ConversionS
     sfs = to_float(f4[0]) if f4 else 0.0
     sst = to_float(f4[2]) if len(f4) > 2 else 0.0
     mst = to_float(f4[3]) if len(f4) > 3 else 0.0
-    ignore = _read_contact_ignore(raw, offset)
+    ignore = _read_contact_ignore(raw, offset, extra)
     state.contacts_surf2surf.append(
         ContactAutoSurf2Surf(inter_id, title, ssid, sstyp, msid, mstyp, fs, fd, bt, dt, ignore,
                              vdc=vdc, sst=sst, mst=mst, sfs=sfs,
@@ -5889,24 +5911,358 @@ def handle_contact_airbag_single_surface(block: Block,
                            keyword=block.keyword))
 
 
-def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
-    """*CONTACT_..._TIEBREAK (SURFACE_TO_SURFACE / ONE_WAY_...) → /INTER/TYPE7.
+# ─────────────────────────────────────────────────────────────────────────────
+# *CONTACT_..._TIEBREAK  —  the cohesive family
+# ─────────────────────────────────────────────────────────────────────────────
 
-    The base contact cards (Card1/2/3) are identical to a plain automatic
-    surface-to-surface contact, so the post-failure sliding/friction behaviour
-    converts faithfully via the /INTER/TYPE7 path. But the *tiebreak* itself —
-    the pre-failure cohesive BOND and its stress-based release (OPTION, NFLS
-    normal / SFLS shear failure stress, ERATEN/ERATES energy release) — has no
-    equivalent in an open-source OpenRadioss /INTER/TYPE7, so it is NOT
-    represented: the parts will contact but not pre-bond. Warned explicitly.
+#: The complete tiebreak family, from ONE source (#116): the dispatch table,
+#: assembly._OFFSET_SPECS and the tests all read this dict, so a spelling
+#: cannot exist in one and be missing from another. Vol I R17 p.11-14 lists
+#: eleven spellings under "The following contacts are tiebreak contacts" and
+#: p.11-14/15 adds the two Mortar ones.
+#:
+#: value = (Card-4 family, ``_ONLY``, one-way, self-tie)
+_TIEBREAK_BASES: Dict[str, Tuple[str, bool, bool, bool]] = {
+    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK":
+        ("AUTOMATIC", False, False, False),
+    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK":
+        ("AUTOMATIC", False, True, False),
+    "CONTACT_AUTOMATIC_SINGLE_SURFACE_TIEBREAK":
+        ("AUTOMATIC", False, False, True),
+    "CONTACT_AUTOMATIC_GENERAL_TIEBREAK":
+        ("AUTOMATIC", False, False, True),
+    "CONTACT_TIEBREAK_SURFACE_TO_SURFACE":
+        ("SURFACE", False, False, False),
+    "CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY":
+        ("SURFACE", True, False, False),
+    "CONTACT_TIEBREAK_NODES_TO_SURFACE":
+        ("NODES", False, True, False),
+    "CONTACT_TIEBREAK_NODES_ONLY":
+        ("NODES", True, True, False),
+}
+
+#: Suffixes that name a DIFFERENT LS-DYNA keyword of the same family, per base.
+#: ``parser._split_keyword`` strips only trailing ``_ID``/``_TITLE``/
+#: ``_SUBTITLE`` (parser.py:41), so ``_USER``/``_MORTAR``/``_DAMPING`` reach the
+#: dispatch table verbatim and need their own keys — without them they land in
+#: ``skipped_keywords``, and a skipped *CONTACT is a missing LOAD PATH, not a
+#: missing output card.
+_TIEBREAK_SUFFIXES: Dict[str, Tuple[str, ...]] = {
+    # p.11-14: AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK{,_USER}; p.11-15 adds
+    # _MORTAR and _USER_MORTAR. p.11-35: "The DAMPING option cannot be
+    # combined with the MORTAR option."
+    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK":
+        ("", "_USER", "_MORTAR", "_USER_MORTAR"),
+    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK":
+        ("", "_DAMPING", "_USER"),
+}
+
+#: Every spelling the dispatch table registers, ``_MPP`` included.
+TIEBREAK_CONTACT_KEYWORDS: List[str] = [
+    f"{_base}{_suf}{_mpp}"
+    for _base in _TIEBREAK_BASES
+    for _suf in _TIEBREAK_SUFFIXES.get(_base, ("",))
+    for _mpp in ("", "_MPP")
+]
+
+#: Card-4 ``OPTION`` → (bond class, what LS-DYNA does). Vol I R17 p.11-36 to
+#: p.11-38 for the semantics, p.11-39/40 Remark 3 for the criteria.
+#:
+#: The bond classes, and why they are the partition that matters:
+#:
+#:   ``NOFAIL``   the tie NEVER breaks in LS-DYNA either — nothing is lost by
+#:                emitting a permanent tie.
+#:   ``CCRIT``    ``PARAM`` is a RELEASE DISTANCE. This is the ONLY class that
+#:                states the one quantity ``/INTER/TYPE2``'s rupture needs
+#:                (``Max_N_Dist``), so it is the only class whose failure the
+#:                converter can reproduce without inventing a number.
+#:   ``STRESS``   a stress criterion and NO length anywhere on the card.
+#:   ``CURVE``    OPTION 5: ``SFLS`` is a *DEFINE_CURVE id, sigma_n(gap).
+#:   ``SLIDE``    OPTION 4: tangential sliding is PERMITTED, so the LS-DYNA
+#:                pre-failure state is not a tie at all.
+#:   ``DYCOSS`` / ``COHESIVE`` / ``MAT240`` / ``USER`` — no counterpart of any
+#:                kind in this OpenRadioss build.
+_TIEBREAK_OPTION_CLASS: Dict[int, Tuple[str, str]] = {
+    1: ("NOFAIL",
+        "tracked nodes in contact and those that come into contact "
+        "permanently stick, tangential motion inhibited — there is NO failure "
+        "criterion (p.11-36), and NFLS/SFLS are not in this OPTION's field "
+        "list (p.11-38) so LS-DYNA ignores them too"),
+    -1: ("NOFAIL",
+         "as OPTION 1 (permanent stick, no failure) with MOMENTS transferred"),
+    2: ("STRESS",
+        "tied for nodes INITIALLY in contact; failure at "
+        "(|sn|/NFLS)^2 + (|ss|/SFLS)^2 >= 1 with compressive sn taken as zero, "
+        "then a surface-to-surface contact with thickness offsets"),
+    -2: ("STRESS", "as OPTION 2 with MOMENTS transferred"),
+    3: ("STRESS",
+        "as OPTION 1 (permanent stick, growing tie set) but WITH failure, at "
+        "the same quadratic criterion as OPTION 2"),
+    -3: ("STRESS", "as OPTION 3 with MOMENTS transferred"),
+    4: ("SLIDE",
+        "tied NORMALLY but tangential motion with frictional SLIDING is "
+        "permitted; failure on the normal stress alone, |sn|/NFLS >= 1"),
+    5: ("CURVE",
+        "elastoplastic 'deformable glue bond': NFLS is a plastic yield stress "
+        "and SFLS is a *DEFINE_CURVE id giving normal stress as a function of "
+        "the crack opening"),
+    6: ("CCRIT",
+        "solids and thick shells: after the quadratic failure stress is "
+        "reached, damage is a LINEAR function of the distance between the "
+        "points initially in contact and interface failure occurs when that "
+        "distance equals PARAM (CCRIT)"),
+    7: ("DYCOSS",
+        "Dycoss Discrete Crack Model — PARAM is a friction angle and the "
+        "shear envelope is pressure-dependent, "
+        "[max(sn,0)/NFLS]^2 + [ss/(SFLS - sin(PARAM)*min(0,sn))]^2 = 1"),
+    8: ("CCRIT", "as OPTION 6 but for OFFSET SHELL elements"),
+    9: ("COHESIVE",
+        "Discrete Crack Model with power-law / Benzeggagh-Kenane mixed-mode "
+        "damage (the *MAT_COHESIVE_MIXED_MODE fracture model); PARAM is the "
+        "damage exponent and ERATEN/ERATES the energy release rates"),
+    -9: ("COHESIVE",
+         "as OPTION 9 with NFLS/SFLS/ERATEN/ERATES as functions of "
+         "TEMPERATURE (MORTAR only)"),
+    10: ("DYCOSS", "as OPTION 7 but for OFFSET SHELL elements"),
+    11: ("COHESIVE", "as OPTION 9 but for OFFSET SHELL elements"),
+    -11: ("COHESIVE", "as OPTION -9 but for OFFSET SHELL elements"),
+    13: ("MAT240",
+         "elastoplastic rate-dependent damage per *MAT_240, driven by cards "
+         "4.1b/4.2b (G1C_0..LCG2C); NFLS, SFLS, ERATEN and ERATES are NOT "
+         "used (p.11-42 Remark 7)"),
+    14: ("MAT240", "as OPTION 13 but for OFFSET SHELL elements"),
+}
+
+#: OPTION 101..105 = the ``_USER`` subroutines ``utb101``..``utb105`` in
+#: ``dyn21cnt.f`` (p.11-43).
+_TIEBREAK_USER_OPTIONS = (101, 102, 103, 104, 105)
+
+
+def _tiebreak_spelling(keyword: str):
+    """Split a generated tiebreak spelling into
+    ``(base, mortar, user, damping, mpp)``.
+
+    Longest base first, so ``CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY`` is not
+    swallowed by ``CONTACT_TIEBREAK_SURFACE_TO_SURFACE``.
     """
-    state.warn(
-        f"*{block.keyword}: converted to /INTER/TYPE7 (post-failure contact "
-        "only). The cohesive TIEBREAK bond (NFLS/SFLS stress failure) has no "
-        "open-source OpenRadioss equivalent and is DROPPED — the interface "
-        "contacts but does not pre-bond. Model a bonded joint with a tied "
-        "interface or a failing spring/connector if the pre-bond is required.")
-    handle_contact_automatic_surface_to_surface(block, state)
+    for base in sorted(_TIEBREAK_BASES, key=len, reverse=True):
+        if keyword == base or keyword.startswith(base + "_"):
+            tail = keyword[len(base):]
+            return (base, "_MORTAR" in tail, "_USER" in tail,
+                    "_DAMPING" in tail, tail.endswith("_MPP"))
+    return keyword, False, False, False, False
+
+
+def _tiebreak_card4_extra(family: str, option: int, damping: bool) -> int:
+    """Number of MANDATORY cards a tiebreak inserts between Card 3 and optional
+    Card A — the ``extra`` every optional-card read has to be shifted by.
+
+    Card 4 is MANDATORY for the whole family (Vol I R17 p.11-6 lists
+    ``AUTOMATIC_..._TIEBREAK``, ``AUTOMATIC_..._TIEBREAK_USER``,
+    ``TIEBREAK_NODES_...`` and ``TIEBREAK_SURFACE_...`` among the keywords that
+    take one, and p.11-7 adds "the format of Card 4 (which can include multiple
+    cards) is different for each option listed"), and the optional cards A-G
+    follow AFTER it. Reading them at the un-shifted offset lands IGNORE on
+    Card B's THKOPT — measured on a with/without twin, a deck with IGNORE=2
+    reported ``ignore=0`` and a deck with THKOPT=3 reported ``ignore=3``.
+
+    Two OPTIONs add further mandatory cards after Card 4:
+      * Card 4.1a (DMP_1 DMP_2 DMP_3) — p.11-35: "If the response parameter,
+        OPTION, below is set to 9 or 11, three damping constants can be
+        defined ... set the keyword option to DAMPING". Both conditions.
+      * Cards 4.1b + 4.2b (G1C_0..LCG1C / G2C_0..LCG2C) — OPTION 13/14.
+    """
+    extra = 1
+    if family == "AUTOMATIC":
+        if damping and option in (9, 11):
+            extra += 1
+        elif option in (13, 14):
+            extra += 2
+    return extra
+
+
+def handle_contact_tiebreak(block: Block, state: ConversionState) -> None:
+    """``*CONTACT_..._TIEBREAK`` — the cohesive family, routed by Card 4.
+
+    LS-DYNA Vol I R17 p.11-9 defines the family: *"TIEBREAK is a special case
+    of a tied contact allowing failure in which the contact usually becomes a
+    regular one-way, two-way, or single surface version after failure."* So the
+    PRE-failure state is a TIE, and that is what this handler preserves — a
+    plain ``/INTER/TYPE7`` (what k2rad emitted before) has no bond at all and
+    loses the joint's load path from t = 0, not only after failure.
+
+    Card 4 decides the route:
+
+    * the bond classes whose pre-failure state is a tie (every OPTION except 4,
+      and both ``TIEBREAK_SURFACE`` / ``TIEBREAK_NODES`` spellings) become a
+      :class:`~k2rad.state.ContactTiebreak` record, which the writer turns into
+      ``/INTER/TYPE2`` — with the rupture cards when the OPTION states a
+      release distance, as a permanent tie otherwise;
+    * ``OPTION = 4`` permits tangential sliding, so LS-DYNA's own pre-failure
+      state is NOT a tie — it keeps the existing penalty-contact route and the
+      bond is a named warn-drop;
+    * ``*CONTACT_AUTOMATIC_{SINGLE_SURFACE,GENERAL}_TIEBREAK`` tie a surface to
+      ITSELF, which ``/INTER/TYPE2`` cannot express (i2trivox.F90:233-234 skips
+      a secondary node that is a corner of the candidate main segment, so a
+      self-tie resolves to an EMPTY tie at zero starter errors) — they keep the
+      self-contact route with a named warn-drop.
+    """
+    kw = block.keyword
+    base, mortar, user, damping, mpp = _tiebreak_spelling(kw)
+    family, only, one_way, self_tie = _TIEBREAK_BASES[base]
+
+    raw = block.raw
+    inter_id, title, hdr = _parse_contact_header(block)
+    offset = _contact_mpp_card_offset(raw, hdr, mpp)
+    # A contact without an _ID header has no id until its writer allocates one,
+    # so the warnings below say "*KEYWORD" rather than "*KEYWORD 0".
+    tag = f"*{kw} {inter_id}" if inter_id > 0 else f"*{kw}"
+
+    # ── Card 4 ───────────────────────────────────────────────────────────
+    f4 = _card(raw, offset + 3, fixed=True, n=8, w=10)
+
+    def _g(i: int) -> float:
+        return to_float(f4[i]) if len(f4) > i else 0.0
+
+    option = 0
+    nfls = sfls = param = eraten = erates = ct2cn = cn = 0.0
+    nflf = sflf = nen = mes = 0.0
+    tblcid = thkoff = 0
+    if family == "AUTOMATIC":
+        option = to_int(f4[0]) if f4 else 0
+        nfls, sfls, param = _g(1), _g(2), _g(3)
+        eraten, erates, ct2cn, cn = _g(4), _g(5), _g(6), _g(7)
+    elif family == "SURFACE":
+        nfls, sfls = _g(0), _g(1)
+        tblcid = to_int(f4[2]) if len(f4) > 2 else 0
+        thkoff = to_int(f4[3]) if len(f4) > 3 else 0
+        # LS-DYNA's own documented rewrite of this spelling onto the AUTOMATIC
+        # enumeration (p.11-72, THKOFF): "It works by substituting with
+        # *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK (OPTION = 2 if TBLCID
+        # is not specified; OPTION = 5 if TBLCID is specified)." The criterion
+        # is the same quadratic either way (p.11-73 Remark 2), so the mapping
+        # holds with or without THKOFF and one classification table serves.
+        option = 5 if tblcid else 2
+    else:                                   # NODES — a FORCE criterion
+        nflf, sflf, nen, mes = _g(0), _g(1), _g(2), _g(3)
+
+    extra = _tiebreak_card4_extra(family, option, damping)
+
+    # ── the named drops that belong to the KEYWORD, not the OPTION ────────
+    if mpp:
+        state.warn(
+            f"{tag}: the _MPP card (IGNORE/BCKT/LCBCKT/NS2TRK/"
+            "INITITR/PARMAX/CPARM8) is read past but NOT converted — it tunes "
+            "LS-DYNA's MPP decomposition, which has no OpenRadioss "
+            "counterpart. Note PARMAX is hard-coded to 1.1 for every "
+            "*CONTACT_TIEBREAK_* anyway (Vol I R17 p.11-20). The tiebreak "
+            "itself is unaffected.")
+    if user:
+        state.warn(
+            f"{tag}: the _USER flavour puts the failure law in the "
+            f"LS-DYNA user subroutine utb{option if option in _TIEBREAK_USER_OPTIONS else '<OPTION>'}"
+            " in dyn21cnt.f (Vol I R17 p.11-43) together with its NHV history "
+            "variables and UP1..UP16 parameters. That subroutine is not part "
+            "of the deck, so NOTHING of the user failure law can be "
+            "converted — it is DROPPED. REMEDY: restate the law with a "
+            "built-in OPTION (6 or 8 carry over completely — see the "
+            "per-interface note below), or model the joint with a failing "
+            "connector.")
+    if mortar:
+        state.warn(
+            f"{tag}: the _MORTAR flavour is LS-DYNA's "
+            "segment-to-segment mortar treatment (a different contact "
+            "discretisation, not a different bond). OpenRadioss has no mortar "
+            "interface, so the contact is converted with the ordinary "
+            "node-to-segment discretisation; the CN normal-stiffness field, "
+            "which is read only for the MORTAR option on OPTIONs 2/4/6/7/8 "
+            "(Vol I R17 p.11-39), is dropped with it.")
+    if damping:
+        state.warn(
+            f"{tag}: the _DAMPING flavour adds Card 4.1a "
+            "(DMP_1/DMP_2/DMP_3, three damping constants for OPTION 9/11 "
+            "only — Vol I R17 p.11-35). It is read past to keep the optional "
+            "card stack aligned, and DROPPED: /INTER/TYPE2's rupture has no "
+            "damping input at all (the tie is a kinematic constraint, not a "
+            "spring, until it partially ruptures).")
+
+    if (family == "AUTOMATIC" and option not in _TIEBREAK_OPTION_CLASS
+            and option not in _TIEBREAK_USER_OPTIONS):
+        state.warn(
+            f"{tag}: Card 4 field 1 (OPTION) reads {option}, which is not one "
+            "of the values Vol I R17 p.11-36..11-38 defines "
+            "(-11, -9, -3..-1, 1..11, 13, 14, or 101..105 with _USER) — the "
+            "card is required for this keyword (p.11-6), so a 0 usually means "
+            "Card 4 is MISSING or a column is shifted. The contact is still "
+            "converted as a tie (the pre-failure state of every tiebreak), but "
+            "no failure criterion can be read from it. REMEDY: check the deck "
+            "against the Card-4 layout OPTION NFLS SFLS PARAM ERATEN ERATES "
+            "CT2CN CN.")
+
+    # ── OPTION 4: LS-DYNA itself does not tie tangentially ───────────────
+    if family == "AUTOMATIC" and option == 4:
+        state.warn(
+            f"{tag}: OPTION 4 — "
+            f"{_TIEBREAK_OPTION_CLASS[4][1]}. Because tangential SLIDING is "
+            "permitted before failure, the LS-DYNA pre-failure state is NOT a "
+            "tie, and /INTER/TYPE2 (which always inhibits tangential motion) "
+            "would OVER-constrain it. The interface is therefore converted as "
+            "the post-failure penalty contact and the NORMAL bond "
+            f"(NFLS={nfls:g}) is DROPPED — the surfaces contact but carry no "
+            "tension. REMEDY: if the normal bond is load-bearing, restate it "
+            "as OPTION 6 (solids/thick shells) or 8 (offset shells) with "
+            "PARAM = the crack-opening distance at full damage, which "
+            "converts to a real /INTER/TYPE2 rupture tie.")
+        handle_contact_automatic_surface_to_surface(block, state, extra=extra)
+        return
+
+    # ── the self-tie spellings: /INTER/TYPE2 cannot tie a surface to itself ─
+    if self_tie:
+        state.warn(
+            f"{tag}: a SELF-tiebreak (one surface tied to itself). "
+            "OpenRadioss cannot express it: /INTER/TYPE2 needs a secondary "
+            "/GRNOD and a separate main /SURF, and i2trivox.F90:233-234 skips "
+            "any secondary node that is one of the four corners of the "
+            "candidate main segment — so a surface tied to itself resolves to "
+            "an EMPTY tie (starter WARNING 1157/1218, zero errors, nothing "
+            "bonded). The interface is converted as the post-failure "
+            "self-contact and the BOND is DROPPED. Note LS-DYNA restricts "
+            "this spelling to OPTIONs 1-5 and to MPP only (Vol I R17 p.11-40 "
+            "Remark 2). REMEDY: split the self-contact into two explicit "
+            "surfaces and use *CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK, "
+            "which does convert to a tie.")
+        handle_contact_automatic_single_surface(block, state, extra=extra)
+        return
+
+    # ── everything else: the pre-failure state is a TIE ──────────────────
+    if inter_id <= 0 or inter_id > 90000:
+        inter_id = state.next_id()
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    ssid = to_int(f1[0]) if f1 else 0
+    msid = to_int(f1[1]) if len(f1) > 1 else 0
+    sstyp = to_int(f1[2]) if len(f1) > 2 else 0
+    mstyp = to_int(f1[3]) if len(f1) > 3 else 0
+    _warn_contact_box(state, kw, inter_id, f1)
+    # Card2: fs fd dc vc vdc penchk bt dt — friction and birth/death act only
+    # AFTER failure, and neither /INTER/TYPE2 nor its rupture block has a
+    # column for them; FS/FD are kept only so the writer can name them.
+    f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    fs = to_float(f2[0]) if f2 else 0.0
+    fd = to_float(f2[1]) if len(f2) > 1 else 0.0
+    # Card3: sfsa sfsb sast sbst sfsat sfsbt fsf vsf — a NEGATIVE SAST/SBST is
+    # LS-DYNA's "absolute tie-criterion distance", the tied path's dsearch floor.
+    f3 = _card(raw, offset + 2, fixed=True, n=8, w=10)
+    sst = to_float(f3[2]) if len(f3) > 2 else 0.0
+    mst = to_float(f3[3]) if len(f3) > 3 else 0.0
+
+    state.contacts_tiebreak.append(
+        ContactTiebreak(inter_id, title, ssid, sstyp, msid, mstyp, family,
+                        keyword=kw, only=only, one_way=one_way, option=option,
+                        nfls=nfls, sfls=sfls, param=param, eraten=eraten,
+                        erates=erates, ct2cn=ct2cn, cn=cn, tblcid=tblcid,
+                        thkoff=thkoff, nflf=nflf, sflf=sflf, nen=nen, mes=mes,
+                        fs=fs, fd=fd, sst=sst, mst=mst,
+                        mortar=mortar, user=user, damping=damping, mpp=mpp))
 
 
 #: The LS-DYNA keyword bases dyna2rad routes to /INTER/TYPE25, and the
@@ -15686,10 +16042,9 @@ HANDLERS = {
     "CONTACT_AUTOMATIC_SINGLE_SURFACE":       handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR": handle_contact_automatic_single_surface,
     "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE":   handle_contact_automatic_surface_to_surface,
-    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK": handle_contact_tiebreak,
-    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK": handle_contact_tiebreak,
-    "CONTACT_TIEBREAK_SURFACE_TO_SURFACE":    handle_contact_tiebreak,
-    "CONTACT_TIEBREAK_NODES_TO_SURFACE":      handle_contact_tiebreak,
+    # The *CONTACT_..._TIEBREAK family is generated below from
+    # TIEBREAK_CONTACT_KEYWORDS — all 13 LS-DYNA spellings plus their _MPP
+    # forms — so the dispatch table and assembly._OFFSET_SPECS read ONE source.
     "CONTACT_AUTOMATIC_GENERAL":              handle_contact_automatic_general,
     # *CONTACT_AIRBAG_SINGLE_SURFACE (type a13) — a near-alias of the
     # single-surface path (its card grid is column-compatible; see the
@@ -15998,6 +16353,17 @@ _TYPE25_CONTACT_KEYWORDS = [
 ]
 for _kw in _TYPE25_CONTACT_KEYWORDS:
     HANDLERS[_kw] = handle_contact_type25
+del _kw
+
+# *CONTACT_..._TIEBREAK — the whole family from TIEBREAK_CONTACT_KEYWORDS
+# (_TIEBREAK_BASES x _TIEBREAK_SUFFIXES x {"", "_MPP"}), 26 spellings against
+# the four the pre-#131 table listed by hand. The missing ones were not
+# academic: *CONTACT_TIEBREAK_NODES_ONLY is in the reference corpus
+# (dynaexamples_r14 intro-by-k.-weimar/spotweld/spotweld-iv/plates.tied.k) and
+# landed in skipped_keywords with NO warning at all — the only joint between
+# the two plates vanished silently.
+for _kw in TIEBREAK_CONTACT_KEYWORDS:
+    HANDLERS[_kw] = handle_contact_tiebreak
 del _kw
 
 HANDLERS["CONTACT_AIRBAG_SINGLE_SURFACE_MPP"] = (

@@ -76,6 +76,7 @@ from .contacts import (
     _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
+    _make_tiebreak_interfaces,
     _make_spotweld_interfaces,
     _make_type25_interfaces,
     _recipe_active,
@@ -1139,6 +1140,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_sect_ids(state, lines)
     _warn_duplicate_function_ids(state, lines)
     _warn_duplicate_impdisp_ids(state, lines)
+    _warn_duplicate_inter_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1639,6 +1641,44 @@ def _warn_duplicate_impdisp_ids(state: ConversionState,
                 "This is a k2rad bug — please report the deck.")
 
 
+#: ``/INTER/TYPEnn/<id>`` and ``/INTER/SUB/<id>`` — every interface kind shares
+#: ONE starter id table.
+_INTER_CARD_ID_RE = re.compile(r"^/INTER/(TYPE\d+|SUB)/(\d+)\s*$")
+
+
+def _warn_duplicate_inter_ids(state: ConversionState,
+                              lines: List[str]) -> None:
+    """Interface ids are ONE namespace across every ``/INTER`` type.
+
+    ``lectur.F`` reads every ``/INTER`` into the same ``IPARI``/``NOM_OPT``
+    slice and the duplicate scan is deck-wide: a repeated id is
+    ``ERROR ID : 117 ** INTERFACE ID USED TWICE OR MORE`` and no restart file.
+    ``_parse_contact_header``'s docstring has named that error since the
+    per-block-length id fallback was removed; this is the deck-wide backstop
+    for it — the #125 "per-id memo PLUS a deck-wide scan for every namespace"
+    rule, applied to the one namespace that still had no scan.
+
+    It matters now because a contact can produce more than one interface for
+    the first time: a rupturing ``*CONTACT_..._TIEBREAK`` emits its
+    ``/INTER/TYPE2`` under the deck's own id and a companion ``/INTER/TYPE25``
+    under an allocated one. It changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _INTER_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for iid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"INTERFACE ID {iid} is emitted by more than one card ("
+                + ", ".join(f"/INTER/{k}/{iid}" for k in kinds)
+                + "). Every /INTER type shares ONE starter id namespace, so "
+                "the starter refuses the deck with ERROR 117 (INTERFACE ID "
+                "USED TWICE OR MORE) and writes no restart file. This is a "
+                "k2rad bug — please report the deck.")
+
+
 def _warn_dangling_part_materials(state: ConversionState,
                                   lines: List[str]) -> None:
     """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
@@ -1789,6 +1829,8 @@ def _starter_section_registry():
         ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
         ("type25_interfaces", lambda c: _make_type25_interfaces(c.state, c.rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
+        ("tiebreak_interfaces",
+                              lambda c: _make_tiebreak_interfaces(c.state, c.rigid_nodes)),
         ("spotweld_interfaces",
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),

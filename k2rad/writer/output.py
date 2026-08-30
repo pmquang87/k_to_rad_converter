@@ -1134,8 +1134,17 @@ def _make_starter_th_inter(state: ConversionState) -> List[str]:
     all_inter_ids = [c.inter_id for c in (
         list(state.contacts_single) + list(state.contacts_surf2surf)
         + list(state.contacts_general) + list(state.contacts_type25)
-        + list(state.contacts_tied) + list(state.contacts_spotweld))
+        + list(state.contacts_tied) + list(state.contacts_spotweld)
+        + list(state.contacts_tiebreak))
         if c.inter_id not in state.dropped_inter_ids]
+    # Companion interfaces k2rad MINTED itself (the post-failure /INTER/TYPE25
+    # behind a rupturing tiebreak tie) have no *CONTACT record, so they are not
+    # in any of the containers above. They are real interfaces in the deck and
+    # carry the whole post-failure load path — omitting them here would make
+    # *DATABASE_RCFORC silently miss it. _tiebreak_companion_contact appends
+    # only ids it actually emitted, so no dropped-id filter is needed.
+    all_inter_ids += [i for i in state.companion_inter_ids
+                      if i not in all_inter_ids]
     want_ncforc = bool(state.db_ncforc_dt) and bool(all_inter_ids)
     want_rcforc = bool(state.db_rcforc_dt) and bool(all_inter_ids)
     if state.db_ncforc_dt and not all_inter_ids:

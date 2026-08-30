@@ -3342,6 +3342,79 @@ class ContactTied:
 
 
 @dataclass
+class ContactTiebreak:
+    """The ``*CONTACT_..._TIEBREAK`` family whose PRE-FAILURE state is a TIE.
+
+    LS-DYNA Vol I R17 p.11-9: *"TIEBREAK is a special case of a tied contact
+    allowing failure in which the contact usually becomes a regular one-way,
+    two-way, or single surface version after failure."* Until failure the two
+    surfaces are BONDED, which is why these records go to the tied-interface
+    machinery (/INTER/TYPE2) and not to the sliding /INTER/TYPE7 the pre-#131
+    converter emitted — a plain penalty contact has no bond at all, so the
+    load path across the joint was missing from t = 0.
+
+    ``family`` selects which Card 4 the record carries — the three are
+    genuinely different cards, not options of one:
+
+      * ``"AUTOMATIC"`` — Vol I p.11-35 ``OPTION NFLS SFLS PARAM ERATEN ERATES
+        CT2CN CN``; STRESS criterion; mandatory for
+        ``*CONTACT_AUTOMATIC_{SURFACE_TO_SURFACE,ONE_WAY_SURFACE_TO_SURFACE,
+        SINGLE_SURFACE,GENERAL}_TIEBREAK``.
+      * ``"SURFACE"`` — Vol I p.11-72 ``NFLS SFLS TBLCID THKOFF``; STRESS
+        criterion ``(|sn|/NFLS)^2 + (|ss|/SFLS)^2 >= 1``.
+      * ``"NODES"`` — Vol I p.11-70 ``NFLF SFLF NEN MES``; **FORCE** criterion
+        ``(|fn|/NFLF)^NEN + (|fs|/SFLF)^MES >= 1``, the one spelling family
+        whose thresholds are forces rather than stresses.
+
+    ``option`` is normalised onto the AUTOMATIC enumeration for all three
+    families so one classification table serves them: the SURFACE family is
+    mapped by LS-DYNA's own documented rewrite rule (p.11-72, THKOFF: *"It
+    works by substituting with \\*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK
+    (OPTION = 2 if TBLCID is not specified; OPTION = 5 if TBLCID is
+    specified)"*), and the NODES family gets the sentinel ``option = 0``
+    because its criterion has no OPTION counterpart at all.
+
+    ``only`` marks ``*CONTACT_TIEBREAK_{SURFACE_TO_SURFACE,NODES}_ONLY``, whose
+    post-failure behaviour is *"stops acting as a contact altogether"*
+    (p.11-71/11-73 Remark 3) — those must NEVER be given a companion contact
+    interface.
+    """
+    inter_id: int
+    title: str
+    ssid: int; sstyp: int   # SURFA (tracked / secondary) side
+    msid: int; mstyp: int   # SURFB (reference / main) side
+    family: str             # "AUTOMATIC" | "SURFACE" | "NODES"
+    keyword: str = ""       # source spelling, verbatim (suffixes included)
+    only: bool = False      # *_ONLY: no contact at all after failure
+    one_way: bool = False   # ONE_WAY / NODES: only SURFA nodes are tracked
+    # ── Card 4 ────────────────────────────────────────────────────────────
+    option: int = 0         # AUTOMATIC OPTION (normalised; 0 = NODES family)
+    nfls: float = 0.0       # normal failure STRESS   (AUTOMATIC / SURFACE)
+    sfls: float = 0.0       # shear  failure STRESS   (AUTOMATIC / SURFACE)
+    param: float = 0.0      # OPTION-dependent; = CCRIT for OPTION 6/8
+    eraten: float = 0.0     # normal energy release rate (OPTION 7/9/10/11)
+    erates: float = 0.0     # shear  energy release rate (OPTION 7/9/10/11)
+    ct2cn: float = 0.0      # tangential/normal stiffness ratio (9/11/13/14)
+    cn: float = 0.0         # normal stiffness (9/11/13/14; MORTAR 2/4/6/7/8)
+    tblcid: int = 0         # SURFACE family: post-failure tension curve (SMP)
+    thkoff: int = 0         # SURFACE family: thickness offsets
+    nflf: float = 0.0       # NODES family: normal failure FORCE
+    sflf: float = 0.0       # NODES family: shear  failure FORCE
+    nen: float = 0.0        # NODES family: normal exponent (default 2)
+    mes: float = 0.0        # NODES family: shear  exponent (default 2)
+    # ── Cards 1-3 (shared with every other *CONTACT) ──────────────────────
+    fs: float = 0.0
+    fd: float = 0.0
+    sst: float = 0.0        # Card3 SAST (negative = absolute tie distance)
+    mst: float = 0.0        # Card3 SBST (negative = absolute tie distance)
+    # ── keyword suffixes with no OpenRadioss counterpart ──────────────────
+    mortar: bool = False
+    user: bool = False
+    damping: bool = False
+    mpp: bool = False
+
+
+@dataclass
 class ContactSpotweld:
     """*CONTACT_SPOTWELD[_WITH_TORSION|_BEAM_OFFSET|_CONSTRAINED_OFFSET]
     [_PENALTY][_MPP][_ID] → OpenRadioss /INTER/TYPE2 with Spotflag=28.
@@ -7301,6 +7374,16 @@ class ConversionState:
     contacts_tied: List[ContactTied] = field(default_factory=list)
     # *CONTACT_SPOTWELD[...] → /INTER/TYPE2 Spotflag=28, Idel2=1
     contacts_spotweld: List[ContactSpotweld] = field(default_factory=list)
+    # *CONTACT_..._TIEBREAK whose PRE-FAILURE state is a tie → /INTER/TYPE2
+    # (Spotflag 20/21/22 + rupture when the release distance is stated,
+    # Spotflag 27/28 permanent tie otherwise)
+    contacts_tiebreak: List[ContactTiebreak] = field(default_factory=list)
+    # Interface ids k2rad MINTED itself as a companion to a converted contact
+    # (today: the post-failure /INTER/TYPE25 behind a rupturing tiebreak tie).
+    # They have no *CONTACT record of their own, so every registry walk that
+    # iterates the contact containers has to be told about them explicitly —
+    # /TH/INTER is the one that matters (a missing id is a missing channel).
+    companion_inter_ids: List[int] = field(default_factory=list)
     # *CONTACT_ERODING_* and *CONTACT_[AUTOMATIC_]NODES_TO_SURFACE →
     # /INTER/TYPE25 (self / surface-to-surface / one-way node-to-surface)
     contacts_type25: List[ContactType25] = field(default_factory=list)

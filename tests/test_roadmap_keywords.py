@@ -156,14 +156,16 @@ class ContactTiebreakTests(unittest.TestCase):
     )
 
     def test_records_contact_and_warns(self):
-        # The tiebreak delegates to the surface-to-surface (TYPE7) path and warns
-        # that the cohesive bond is dropped. (A rendered /INTER/TYPE7 needs real
-        # resolved surfaces; here we assert the contact is recorded + the warning.)
+        # The tiebreak's PRE-failure state is a tie (Vol I R17 p.11-9), so the
+        # record goes to contacts_tiebreak and the writer emits /INTER/TYPE2.
+        # This deck has no Card 4 at all, so OPTION reads 0 — not a legal value,
+        # which is itself named.
         state = _dispatch(self.DECK)
-        self.assertEqual(len(state.contacts_surf2surf), 1)
+        self.assertEqual(len(state.contacts_surf2surf), 0)
+        self.assertEqual(len(state.contacts_tiebreak), 1)
         self.assertNotIn(
             "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK", state.skipped_keywords)
-        self.assertTrue(any("TIEBREAK" in w and "DROPPED" in w for w in state.warnings))
+        self.assertTrue(any("OPTION) reads 0" in w for w in state.warnings))
 
 
 class DefineCurveFunctionTests(unittest.TestCase):
