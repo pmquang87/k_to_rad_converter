@@ -57,6 +57,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        perturbation_node_records,
                        springback_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
+                       TIEBREAK_CONTACT_KEYWORDS,
                        _cnrb_option_keywords, _cnrb_options,
                        _is_float_token, _is_int_token, _parse_sph_cell,
                        _seatbelt_rows,
@@ -4002,9 +4003,6 @@ del _kw, _spec
 for _kw in (
     "CONTACT_AUTOMATIC_SINGLE_SURFACE", "CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR",
     "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE",
-    "CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK",
-    "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE_TIEBREAK",
-    "CONTACT_TIEBREAK_SURFACE_TO_SURFACE", "CONTACT_TIEBREAK_NODES_TO_SURFACE",
     "CONTACT_AUTOMATIC_GENERAL", "CONTACT_AUTOMATIC_ONE_WAY_SURFACE_TO_SURFACE",
     "CONTACT_FORCE_TRANSDUCER_PENALTY", "CONTACT_FORCE_TRANSDUCER",
     "CONTACT_TIED_NODES_TO_SURFACE", "CONTACT_TIED_NODES_TO_SURFACE_OFFSET",
@@ -4043,6 +4041,26 @@ for _kw in _SPOTWELD_CONTACT_KEYWORDS:
 # the MPP card(s) push Card 1 down and _off_contact rewrites that line blind.
 for _kw in _TYPE25_CONTACT_BASES:
     _OFFSET_SPECS[_kw] = _off_contact
+
+# *CONTACT_..._TIEBREAK — from the SAME generator the dispatch table uses
+# (handlers.TIEBREAK_CONTACT_KEYWORDS), so the two tables cover exactly the same
+# set and a test can assert it. The mandatory Card 4 sits AFTER Card 1, so
+# _off_contact — which rewrites b.raw[start] only — is unaffected by it.
+#
+# The _MPP spellings are excluded for the reason the spotweld and eroding ones
+# are: the MPP card pushes Card 1 down a line and _off_contact rewrites that
+# line blind.
+#
+# NOTE on Card-4 curve ids: OPTION 5 makes SFLS a *DEFINE_CURVE id, OPTION
+# +-9/+-11 make a NEGATIVE NFLS/SFLS one, OPTION 13/14 carry LCG1C/LCG2C and
+# the TIEBREAK_SURFACE family carries TBLCID — all IDFOFF ("f") cells that
+# _off_contact does not touch. Every one of those OPTION classes is a named
+# warn-drop in the writer (no rupture card is built from them), so no converted
+# output depends on those ids today; honouring one would need a Card-4 walker,
+# not this flat Card-1 rewriter.
+for _kw in TIEBREAK_CONTACT_KEYWORDS:
+    if "_MPP" not in _kw:
+        _OFFSET_SPECS[_kw] = _off_contact
 
 # *DEFINE_HEX_SPOTWELD_ASSEMBLY{_N} — the _TITLE spelling parses to the bare
 # keyword with TITLE in options, so the base entry covers it.

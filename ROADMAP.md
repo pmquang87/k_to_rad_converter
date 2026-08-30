@@ -16,7 +16,7 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   `*DEFINE_CURVE_FUNCTION` → sampled `/FUNCT`.
 - **Tier 2:** foams/honeycomb `*MAT_CRUSHABLE_FOAM`/`LOW_DENSITY_FOAM`/
   `FU_CHANG_FOAM`/`HONEYCOMB` → `/MAT/LAW50`/`LAW38`/`LAW70`/`LAW28`;
-  `*CONTACT_..._TIEBREAK` → `/INTER/TYPE7` (contact-only, cohesive bond warned);
+  `*CONTACT_..._TIEBREAK` → `/INTER/TYPE2` (a tie; OPTION 6/8 also rupture);
   the impact/blast materials `*MAT_JOHNSON_HOLMQUIST_CERAMICS`/`_CONCRETE` →
   `/MAT/LAW79`/`LAW126` and `*MAT_ELASTIC_FLUID` → `/MAT/LAW6` +
   `/EOS/POLYNOMIAL`.
@@ -389,8 +389,27 @@ shipped, so the marginal cost is small.
   silently vanishes. Their card stacks are identical to the `_AUTOMATIC_` ones
   already handled, so this is an aliasing job, not a new conversion. Not in the
   reference corpus, which is why the eroding batch did not surface it.
-- `*CONTACT_TIEBREAK_*` → `/INTER/TYPE7` (contact-only) — **done**; a faithful
-  cohesive rupture tie remains open (no open-source equivalent found).
+- `*CONTACT_..._TIEBREAK` (all 15 spellings × `_MPP` = 30 keys) →
+  `/INTER/TYPE2` —
+  **done**. The old "no open-source equivalent found" note is **refuted**:
+  `/INTER/TYPE2` Spotflag 20/21/22 + `Rupt` is a fully implemented bond with
+  rupture on this build (`hm_read_inter_type02.F:343`, `ruptint2.F`,
+  `int2rupt.F`). What is genuinely *not* expressible, and is warn-dropped by
+  name, is a STRESS-triggered release: OpenRadioss releases on displacement
+  only, so only `OPTION 6`/`8` — whose `PARAM` is that distance — convert with
+  their failure intact. Still open, all named in the per-interface warnings:
+  the quadratic *interaction* between the normal and shear criteria (Radioss
+  caps the two components independently); `OPTION 5`'s `SFLS` σ(gap) curve,
+  which would map onto `fct_IDsn` verbatim but supplies no release distance;
+  the force-based `NFLF`/`SFLF` of the `TIEBREAK_NODES` family, which would
+  need each secondary node's tributary area from `i2surfs.F`; the `*SET_NODE`
+  `DA1..DA4` and `*SET_SEGMENT` `A1`/`A2` per-entity overrides (recorded and
+  named only when the deck states one — the `*SET_SHELL` spelling of the same
+  override, p.11-72 Remark 1, is not recorded, because a `SURFA` on a shell
+  element set resolves to no nodes at all today and the whole record is dropped
+  by name first); and the
+  `MORTAR` / `_USER` / `OPTION 9/11/13/14` cohesive laws, which have no
+  counterpart of any kind.
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11
   edge-to-edge with synthesized `/LINE/SEG`|`/LINE/SURF`, `-19`→TYPE19; default →
   single-surface) — **done** (dyna2rad `convertcontacts.cxx` cc:133-164).

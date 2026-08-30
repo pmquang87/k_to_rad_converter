@@ -76,6 +76,7 @@ from .contacts import (
     _make_general_interfaces,
     _make_interfaces,
     _make_tied_interfaces,
+    _make_tiebreak_interfaces,
     _make_spotweld_interfaces,
     _make_type25_interfaces,
     _recipe_active,
@@ -502,6 +503,16 @@ def _make_engine_output(state: ConversionState) -> List[str]:
         # *DATABASE_BINARY_BLSTFOR: nodal blast-pressure fringe (element
         # /LOAD/PBLAST pressures averaged onto the loaded-surface nodes).
         lines.append("/ANIM/NODA/PEXT")
+    if state.tiebreak_rupture_inter_ids:
+        # Per-node tiebreak DAMAGE, the only observable of a /INTER/TYPE2
+        # rupture besides the .out START/TOTAL RUPTURE lines. The card is what
+        # ARMS it: ruptint2.F:143/155/169 fill PDAMA2 only under
+        # `ANIM_N(15)==1 .OR. H3D_DATA%N_SCAL_DAMA2 == 1`, and
+        # anim_dcod_key_0.F:2997-2999 is where DAMA2 sets both ANIM_N(15) and
+        # ANIM_N(16) (normal and tangential, genani.F:1914-1915). Gated on a
+        # rupturing tie existing, per the #122 rule: with no Rupt=2 interface
+        # in the deck the channel is legal, accepted, and exactly 0.0 forever.
+        lines.append("/ANIM/NODA/DAMA2")
 
     # ── Spring force output ───────────────────────────────────────
     lines.append("/ANIM/SPRING/FORC")
@@ -1139,6 +1150,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_sect_ids(state, lines)
     _warn_duplicate_function_ids(state, lines)
     _warn_duplicate_impdisp_ids(state, lines)
+    _warn_duplicate_inter_ids(state, lines)
     _warn_dangling_part_materials(state, lines)
     _rep(1.0, "Starter deck ready")
     return "\n".join(lines) + "\n"
@@ -1639,6 +1651,52 @@ def _warn_duplicate_impdisp_ids(state: ConversionState,
                 "This is a k2rad bug — please report the deck.")
 
 
+#: ``/INTER/TYPEnn/<id>`` — every interface TYPE shares ONE starter id table.
+#: ``/INTER/SUB`` is deliberately NOT matched: ``hm_read_interfaces.F:154``
+#: runs ``IF(KEY == 'SUB') CYCLE`` **before** ``NI = NI + 1`` at ``:156``, so a
+#: sub-interface never enters ``IPARI`` and never reaches the duplicate loop at
+#: ``:229-234`` (``/INTER/GUIDED_CABLE`` is excluded the same way at ``:155``).
+#: Matching it would flag a legal TYPE-vs-SUB id pairing as a k2rad bug.
+_INTER_CARD_ID_RE = re.compile(r"^/INTER/(TYPE\d+)/(\d+)\s*$")
+
+
+def _warn_duplicate_inter_ids(state: ConversionState,
+                              lines: List[str]) -> None:
+    """Interface ids are ONE namespace across every ``/INTER/TYPEnn``.
+
+    ``hm_read_interfaces.F`` reads every ``/INTER/TYPEnn`` into the same
+    ``IPARI``/``NOM_OPT`` slice and then scans it deck-wide (``:229-234``,
+    ``DO K=1,NI-1 / IF (NOINT == IPARI(15,K)) / ANCMSG(MSGID=117)``, under the
+    ``IF (IPARI(71,NI) <= 0)`` guard that exempts only the sub-interfaces a
+    ``/INTER/TYPE19`` generates for itself):
+    a repeated id is ``ERROR ID : 117 ** INTERFACE ID USED TWICE OR MORE`` and
+    no restart file. ``_parse_contact_header``'s docstring has named that error
+    since the per-block-length id fallback was removed; this is the deck-wide
+    backstop for it — the #125 "per-id memo PLUS a deck-wide scan for every
+    namespace" rule, applied to the one namespace that still had no scan.
+
+    It matters now because a contact can produce more than one interface for
+    the first time: a rupturing ``*CONTACT_..._TIEBREAK`` emits its
+    ``/INTER/TYPE2`` under the deck's own id and a companion ``/INTER/TYPE25``
+    under an allocated one. It changes no output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _INTER_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for iid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"INTERFACE ID {iid} is emitted by more than one card ("
+                + ", ".join(f"/INTER/{k}/{iid}" for k in kinds)
+                + "). Every /INTER/TYPEnn shares ONE starter id namespace "
+                "(hm_read_interfaces.F reads them into one IPARI slice and "
+                "scans it at :229-234), so the starter refuses the deck with "
+                "ERROR 117 (INTERFACE ID USED TWICE OR MORE) and writes no "
+                "restart file. This is a k2rad bug — please report the deck.")
+
+
 def _warn_dangling_part_materials(state: ConversionState,
                                   lines: List[str]) -> None:
     """Name every ``/PART`` that points at a ``/MAT`` id the deck never writes.
@@ -1789,6 +1847,8 @@ def _starter_section_registry():
         ("general_interfaces", lambda c: _make_general_interfaces(c.state, c.rigid_nodes)),
         ("type25_interfaces", lambda c: _make_type25_interfaces(c.state, c.rigid_nodes)),
         ("tied_interfaces",   lambda c: _make_tied_interfaces(c.state, c.rigid_nodes)),
+        ("tiebreak_interfaces",
+                              lambda c: _make_tiebreak_interfaces(c.state, c.rigid_nodes)),
         ("spotweld_interfaces",
                               lambda c: _make_spotweld_interfaces(c.state, c.rigid_nodes)),
         ("force_transducers", lambda c: _make_force_transducers(c.state, c.rigid_nodes)),
