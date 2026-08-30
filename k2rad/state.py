@@ -23,8 +23,13 @@ from typing import Dict, List, Optional, Set, Tuple
 #:   ``SID``                         SHELL (p.43-85), BEAM (p.43-8),
 #:                                   DISCRETE (p.43-18)
 #:
-#: Reading six cells on a SID-only family would take the following blank cells
-#: as DA1..DA4; only NODE and PART have nodal/part attribute defaults to record.
+#: The count is the card's documented WIDTH, and it is load-bearing for exactly
+#: one family: ``_record_part_set_attrs`` reads cells 1..4 of the PART header
+#: (*CONTACT_INTERIOR takes them as per-set defaults), which needs the slice to
+#: be six wide. Nothing reads past cell 1 on the other six — *SET_NODE_ADD's
+#: DA1..DA4 are the *CONTACT_TIEBREAK_NODES_TO_SURFACE nodal attributes
+#: (Vol I R17 p.43-43 Remark 1), a keyword k2rad does not convert — so their
+#: widths are here to record the layout, not to gate a read.
 #:
 #: **``*SET_TSHELL_ADD`` is deliberately absent**: it is in neither the R17 nor
 #: the R16 ``*SET`` chapter index, and a full-text search of Vol I R17 finds no
@@ -7691,6 +7696,10 @@ class ConversionState:
                   self.mat_mooney_rivlin, self.mat_ogden, self.mat_hyper_rubber,
                   self.mat_high_explosive, self.mat_spotweld,
                   self.mat_orthotropic, self.mat_enhanced_composite,
+                  # *MAT_022 → /MAT/LAW25 (+/FAIL/CHANG) or /MAT/LAW127,
+                  # always under the MID verbatim, so it belongs here like its
+                  # two composite siblings above.
+                  self.mat_composite_damage,
                   self.mat_transverse_aniso, self.mat_laminated_glass,
                   self.mat_iso_elas_plas, self.mat_strain_rate_plas,
                   self.mat_gurson, self.mat_hill_3r,

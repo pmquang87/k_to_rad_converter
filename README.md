@@ -1259,15 +1259,32 @@ criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs `fail_changchang_c.F90:
 155-181`), with no conversion factor. `Sigma_1c` is left blank on purpose —
 MAT_022 has no compressive-fibre strength and a blank reads as infinity, i.e.
 that mode never trips. Two cells have no MAT_022 source and are named as
-converter choices in the warning: `Ifail_sh = 2` (the element goes only once
-EVERY layer has failed, the closest analogue of LS-DYNA zeroing a failed
-layer's moduli while the element survives) and `Tau_max = 1e-4 · ENDTIM` (a
-blank one becomes infinity and the whole rider then softens and deletes
-nothing). **Verified against `starter_win64` + `engine_win64`**: the
-`tension6.k` corpus carrier goes from `ERROR 179 MATERIAL ID=1 DOES NOT EXIST`
-(exit 3) to 0 errors and a full 20 807-cycle run whose 90° plies fail first,
-and a 10×10×1 probe built from the emitted cards peaks at 2502.2 MPa against a
-hand-computed `XT = 2500` (+0.09 %, inside one TH sample).
+converter choices in the warning: `Ifail_sh = 2` (positive, so the failed
+layer's stress really is relaxed and switched off, and below 3, so the matrix
+criterion stays live) and `Tau_max = 1e-4 · ENDTIM` (a blank one becomes
+infinity and the whole rider then softens and deletes nothing). **A MAT_022
+shell draws starter `WARNING ID : 3030` and that is expected**: the layered
+property it lands on has one integration point per layer, so
+`check_pthickfail.F` says the rider's PTHICKFAIL is ignored and the DELETION
+threshold is the property's own `P_Thick_Fail` — written as 0, which
+`hm_read_prop11.F:201` turns into `1 - 1e-6`, the same "delete once every layer
+has failed" rule. The warning is named in the conversion log.
+**Verified against `starter_win64` + `engine_win64`**: the `tension6.k` corpus
+carrier goes from `ERROR 179 MATERIAL ID=1 DOES NOT EXIST` (exit 3) to 0 errors
+and a full 20 807-cycle run in which its four 90° plies — and no other layer —
+fail in `MODE 3 - TENSILE MATRIX`, and a 10×10×1 probe built from the emitted
+cards peaks at 2502.2 MPa against a hand-computed `XT = 2500` (+0.09 %, inside
+one TH sample).
+
+The `alpha` cell is written at `1e-20`, not left blank. `read_mat25_tsaiwu.F90`
+turns a blank/zero alpha into **1** and the Tsai-Wu interaction coefficient
+`f12` then becomes `-5e-11` beside `f11 = f22 = 1e-20` — an open hyperbola
+whose tension-compression onset sits at `|σ| ≈ 1e5` **in the deck's stress
+unit**. Harmless at 1e5 MPa; at 1e5 Pa the ply plastifies on that spurious
+surface from the first cycle and `/FAIL/CHANG` never trips at all. Measured on
+kg-m-s twins differing only in that cell: 0 Chang-Chang events and 11 % low
+internal energy with a blank alpha, the four the criterion calls for and the
+Mg-mm-s twin's number to four figures with `1e-20`.
 
 The solid arm is `/MAT/LAW127` because LAW25's solid kernels decouple direction
 3 entirely (`mat25_tsaiwu_s.F90:230`, no `nu13`/`nu23` anywhere) and because
@@ -2000,9 +2017,21 @@ the union id resolves wherever a plain set id does. Recursive (`_ADD` of
 dangling member sets warned and dropped BY NAME. `*SET_NODE_ADD_ADVANCED`
 unions across all seven families — its card 2b is `(SID, TYPE)` PAIRS, and a
 non-node member contributes the NODES of its entities.
+`*SET_PART_ADD` is the one family whose member cell may be NEGATIVE: Vol I R17
+p.43-57 makes `… 5, -9` the inclusive RANGE "every part set with id 5..9", and
+that is expanded (with the endpoints' validity checked against p.43-58). The
+other six pages state no meaning for a negative cell at all, so one there is
+warn-dropped by name rather than guessed at.
 There is no `*SET_TSHELL_ADD` in LS-DYNA R17/R16 (it exists only in
 HyperMesh's cfg pool), so k2rad does not invent one — such a block is reported
 in `skipped_keywords`.
+A `*SET_SEGMENT` triangle is stored under ONE spelling whichever way the deck
+writes it: Vol I R17 p.43-63 documents `N4 = N3`, LS-PrePost writes a trailing
+zero, and `hm_read_surf.F:318-321` maps the second onto the first inside the
+starter — so both collapse at parse time. Keyed apart they were two segments,
+and a `*SET_SEGMENT_ADD` over both applied its `/PLOAD` pressure twice
+(measured against a one-row twin: EXT-WORK 18.35 → 73.39, a factor of 4.0005,
+i.e. impulse ×2.0001, both runs 0 ERROR / NORMAL TERMINATION).
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)

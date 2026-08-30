@@ -5047,16 +5047,24 @@ def _handle_set_add(block: Block, state: ConversionState, family: str,
     recursion, a cycle guard and a depth cap — into a plain set entry, so
     EVERY consumer resolves it without knowing the variant.
 
-    *ncells* is that spelling's own card-1 cell count (see SET_ADD_FAMILIES):
-    only NODE and PART carry ``DA1..DA4 SOLVER``, and reading six cells on a
-    SID-only family would take the trailing blanks as nodal attributes.
+    *ncells* is that spelling's own card-1 cell WIDTH (see SET_ADD_FAMILIES),
+    which is what ``_card`` has to slice to reach the attribute columns: PART
+    is the one family whose DA1..DA4 are read (``_record_part_set_attrs``,
+    for *CONTACT_INTERIOR), and it needs six. The other rows carry their card's
+    documented width for the record; nothing reads past cell 1 on them.
 
-    Member rows are claimed by RAW contiguity after the header card, and only
-    ids ``> 0`` are kept. Trailing zero padding is the LS-PrePost house style
-    and is NOT a member — measured in two corpus carriers, e.g.
+    Member rows are claimed by RAW contiguity after the header card. Exact
+    ZEROS are dropped: trailing zero padding is the LS-PrePost house style and
+    is NOT a member — measured in two corpus carriers, e.g.
     ``show-cases/contact-overview/main.k:172`` = ``100200301 100200302 0 0 0 0
     0 0``. The manual's "tightly packed data" remark scopes INTERIOR zeros
     only (identical text on every ``_ADD`` page).
+
+    NEGATIVE cells are KEPT and passed on: on *SET_PART_ADD* a negative
+    ``PSID[N]`` is the inclusive RANGE ``PSID[N-1] .. -PSID[N]`` (Vol I R17
+    p.43-57), which can only be resolved once every child set is parsed —
+    ``writer/mesh._expanded_member_ids`` does it, and warns by name on the six
+    families whose page gives a negative cell no meaning at all.
     """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
@@ -5076,7 +5084,7 @@ def _handle_set_add(block: Block, state: ConversionState, family: str,
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
             v = to_int(tok)
-            if v > 0:
+            if v != 0:
                 ids.append(v)
     getattr(state, adds_name)[sid] = (title, ids)
 
@@ -12907,7 +12915,23 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
 
     Header card:  sid da1 da2 da3 da4 solver its
     Data cards :  n1 n2 n3 n4 a1 a2 a3 a4  (one segment per card; a* attributes
-                  ignored). Node order fixes the segment normal (n4=0 → triangle).
+                  ignored). Node order fixes the segment normal.
+
+    **A triangle has TWO legal spellings and they are stored as ONE.** Vol I
+    R17 *SET_SEGMENT p.43-63 verbatim: *"N4 - Nodal point n4. To define a
+    triangular segment, set N4 = N3."*, and a trailing blank/zero is the other
+    house style. Both collapse to a 3-node list here, so every consumer sees
+    one spelling: ``_emit_surf_seg`` then writes ``n1 n2 n3 0`` and
+    ``hm_read_surf.F:318-321`` (``IF(N4/=0) ... ELSE N4 = N3``) restores the
+    degenerate corner inside the starter. Without the collapse the two
+    spellings are two different segments to any set operation — a
+    *SET_SEGMENT_ADD union over both keeps BOTH rows and applies the /PLOAD
+    pressure on that face TWICE (measured against a one-row twin on a free
+    plate, both 0 ERROR / NORMAL TERMINATION / 67 cycles: EXT-WORK 18.35 ->
+    73.39 and K-ENERGY 17.68 -> 70.73, a factor of 4.0005, i.e. impulse
+    x2.0001). It is also the same normalisation ``_shell_segment_rows`` already
+    does on the *LOAD_SHELL path.
+
     Stored on state.segment_sets for later /SURF/SEG emission.
     """
     offset = _title_offset(block)
@@ -12926,7 +12950,7 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
         # fixed-fallback parse so both survive.
         f = _card([line], 0, fixed=True, n=8, w=10)
         nodes = [to_int(f[j]) for j in range(min(4, len(f)))]
-        while len(nodes) > 3 and nodes[-1] == 0:
+        while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
             segments.append(nodes)
@@ -13163,7 +13187,8 @@ def handle_load_blast_segment(block: Block, state: ConversionState) -> None:
             continue
         bid = to_int(f[0])
         nodes = [to_int(f[j]) for j in range(1, 5)]
-        while len(nodes) > 3 and nodes[-1] == 0:
+        # Both triangle spellings collapse to one — see handle_set_segment.
+        while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
             by_bid.setdefault(bid, []).append(nodes)

@@ -3749,6 +3749,41 @@ for _family, _kw, _n, _adds, _target in SET_ADD_FAMILIES:
     _OFFSET_SPECS[_kw] = {"cards": {0: [(0, "s")]}, "data": (1, [(ALL, "s")])}
 del _family, _kw, _n, _adds, _target
 
+
+def _off_set_part_add(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*SET_PART_ADD, whose member cells can be SIGNED.
+
+    Same shape as the generated spec above (header SID and every member cell in
+    the ``IDSOFF`` bucket), plus the one thing ``_rewrite_line`` cannot do: a
+    NEGATIVE cell here is not a flag encoding, it is the upper end of the
+    inclusive range ``PSID[N-1] .. -PSID[N]`` (Vol I R17 p.43-57). Its
+    MAGNITUDE is a part-set id and has to move with ``IDSOFF`` exactly like the
+    positive start of the range — otherwise the include's sets shift and the
+    range endpoint stays behind, silently selecting a different slice (or
+    none). The ``*SECTION_SHELL`` QR/IRID cell is the same situation and uses
+    the same sign-preserving rewriter.
+    """
+    soff = offsets.get("s", 0)
+    raw = b.raw
+    toff = _title_offset(b)               # the 80a title card carries no id
+    if toff < len(raw):
+        new = _rewrite_line(raw[toff], [(0, "s")], offsets)     # SID
+        if new is not None:
+            raw[toff] = new
+    for i in range(toff + 1, len(raw)):
+        if not raw[i].strip():
+            continue
+        new = _rewrite_line(raw[i], [(ALL, "s")], offsets)
+        if new is not None:
+            raw[i] = new
+        for cell in range(len(_fields(raw[i], 8, 10))):
+            new = _rewrite_neg_ref(raw[i], cell, soff)
+            if new is not None:
+                raw[i] = new
+
+
+_OFFSET_SPECS["SET_PART_ADD"] = _off_set_part_add
+
 # *SET_NODE_ADD_ADVANCED card 2b is NOT a uniform id list: it is four
 # (SID, TYPE) PAIRS (Vol I R17 p.43-46), so only the EVEN cells are set ids.
 # An (ALL, "s") data spec would offset every TYPE enumeration as well and turn

@@ -2722,10 +2722,18 @@ def _segment_key(nodes):
     ``/GRBEAM``, ``/GRSPRI`` and ``/GRPART`` all de-duplicate inside the
     starter (``sysfus.F:468-479`` for nodes, ``nintrr.F:814-828`` "WITH REMOVAL
     OF DUPLICATE NOS" for elements), but ``/SURF/SEG`` and ``/SURF/SURF`` do
-    NOT: measured on a free-floating /PLOAD impulse, the same four nodes on two
-    seg rows applies exactly 2.0000x the load at 0 ERROR. Only ``/SURF/DSURF``
-    de-duplicates, and k2rad emits the flat ``/SURF/SEG`` form — so the union
-    has to do it here.
+    NOT: measured on a free-floating /PLOAD impulse, the same face on two seg
+    rows applies exactly TWICE the load at 0 ERROR (one-row vs two-row twin,
+    both NORMAL TERMINATION at 67 cycles: EXT-WORK 18.35 -> 73.39 and K-ENERGY
+    17.68 -> 70.73, a factor of 4.0005 in energy = impulse x2.0001). Only
+    ``/SURF/DSURF`` de-duplicates, and k2rad emits the flat ``/SURF/SEG``
+    form — so the union has to do it here.
+
+    The corner list arrives already canonical in LENGTH: ``handle_set_segment``
+    collapses BOTH documented triangle spellings (``n1 n2 n3 0`` and the
+    manual's ``n1 n2 n3 n3``, Vol I R17 p.43-63) to a 3-node list, so this
+    function never has to compare a 3-tuple against a 4-tuple naming the same
+    face.
     """
     n = len(nodes)
     return min(tuple(nodes[i:] + nodes[:i]) for i in range(n)) if n else ()
@@ -2816,12 +2824,20 @@ def _set_add_members(state: ConversionState, family: str, target_name: str,
 def _flatten_one_set_add_family(state: ConversionState, family: str,
                                 keyword: str, adds_name: str,
                                 target_name: str) -> None:
-    """One family's unions, expanded recursively into its ordinary container.
+    """One family's unions, expanded into its ordinary container.
 
     Every diagnostic is keyed on the union id its TEXT names, and the memo is
     keyed the same way, so a union that appears as a member of two others still
     reports its own unresolved members exactly once (the #129 round-2 rule:
-    de-duplicate a diagnostic at the scope its text names).
+    de-duplicate a diagnostic at the scope its text names). It is also keyed on
+    the SPELLING that id was written with, so a ``*SET_NODE_ADD_ADVANCED``
+    block is never reported under a keyword the deck does not contain.
+
+    The traversal is an EXPLICIT stack, not Python recursion. The depth cap is
+    an intrinsic-height cap (see ``expand``), which can only be evaluated
+    bottom-up, so a chain has to be walked to its end before the cap can fire —
+    with a recursive walk a deck of a few hundred nested unions raised
+    ``RecursionError`` and aborted the conversion instead of hitting the cap.
     """
     adds = getattr(state, adds_name)
     advanced = state.node_set_add_advanced if family == "NODE" else {}
@@ -2836,10 +2852,19 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
     memo = {}
     # Every diagnostic below names ONE set id, so it is de-duplicated on that
     # id and not on the expansion memo — skipping the memo for a cycle-cut
-    # subtree (see resolve) would otherwise repeat a union's own "member set
+    # subtree (see expand) would otherwise repeat a union's own "member set
     # id(s) ... name no parsed set" line once per path that reaches it, and a
-    # cycle reachable through two members would warn about it twice.
+    # cycle reachable through two members would warn about it twice. Everything
+    # that reports goes through warn_once, INCLUDING _advanced_members.
     reported = set()
+
+    def kw_of(sid: int) -> str:
+        """The spelling THIS set id was written with. ``*SET_NODE_ADD`` and
+        ``*SET_NODE_ADD_ADVANCED`` share one id namespace and one resolver, so
+        the family keyword alone would report an ADVANCED block under a card
+        that is not in the deck — a reader grepping for it finds nothing."""
+        return ("SET_NODE_ADD_ADVANCED"
+                if family == "NODE" and sid in advanced else keyword)
 
     def warn_once(kind, sid, msg):
         if (kind, sid) in reported:
@@ -2847,90 +2872,130 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
         reported.add((kind, sid))
         state.warn(msg)
 
-    def resolve(sid: int, path):
-        """The ``([(key, value)], height, cyclic)`` of member id *sid*, or
-        ``None`` when it names nothing at all (a dangling id the caller
-        reports).
+    def members_of(sid: int, missing: List[int]):
+        """The ``(child_id, pre_resolved_or_None)`` list of union *sid*."""
+        if family == "NODE" and sid in advanced:
+            return _advanced_members(state, sid, advanced[sid][1], missing,
+                                     warn_once)
+        return [(child, None)
+                for child in _expanded_member_ids(family, keyword, sid,
+                                                  adds[sid][1], direct_ids,
+                                                  union_ids, warn_once)]
 
-        ``height`` is the number of union levels BELOW *sid* inclusive — 0 for
+    def absorb(frame, child: int, got):
+        """Merge one child's ``(members, height, cyclic)`` into *frame*."""
+        members_of_child, h, child_cyclic = got
+        frame["cyclic"] = frame["cyclic"] or child_cyclic
+        if h + 1 > _SET_ADD_MAX_DEPTH:
+            warn_once("depth", (frame["sid"], child),
+                f"*{kw_of(frame['sid'])} {frame['sid']}: member set {child} "
+                f"sits at the top of a chain of nested _ADD unions more than "
+                f"{_SET_ADD_MAX_DEPTH} levels deep — that member is "
+                "DROPPED. This depth cap is a k2rad policy, not a manual "
+                "rule: the LS-DYNA *SET chapter states no nesting rule "
+                "and no limit, so there is nothing to be faithful to. "
+                "Flatten the deck's set hierarchy if the deeper members "
+                "matter.")
+            return
+        frame["height"] = max(frame["height"], h + 1)
+        seen, out = frame["seen"], frame["out"]
+        for key, val in members_of_child:
+            if key not in seen:
+                seen.add(key)
+                out.append((key, val))
+
+    def new_frame(sid: int):
+        missing: List[int] = []
+        return {"sid": sid,
+                "members": members_of(sid, missing), "i": 0,
+                "out": [], "seen": set(), "missing": missing,
+                "height": 0, "cyclic": False}
+
+    def expand(root: int):
+        """``([(key, value)], height, cyclic)`` for union *root*, by an
+        EXPLICIT stack.
+
+        ``height`` is the number of union levels BELOW a node inclusive — 0 for
         a direct set — and it is INTRINSIC to the subtree, never a function of
-        which union happened to be expanded first. That is what makes the
-        depth cap deterministic: memoising a traversal-order depth would let a
-        deck's set ids decide whether the cap fires.
+        which union happened to be expanded first. That is what makes the depth
+        cap deterministic: memoising a traversal-order depth would let a deck's
+        set ids decide whether the cap fires. It also means the cap can only be
+        applied on the way back UP, so the walk must be able to descend an
+        arbitrarily long chain — hence the explicit stack rather than Python
+        frames.
 
         ``cyclic`` says the subtree was CUT by the cycle guard. Such a result
         depends on the path taken to reach it, so it must not be memoised —
         otherwise a diamond over a cycle (A -> {X, B}, B -> {Y, A}) would give
         a later top-level expansion of B the members it had *as A's child*.
         """
-        if sid in direct_ids:
-            return _set_add_members(state, family, target_name, sid), 0, False
-        if sid not in union_ids:
-            return None
-        if sid in path:
-            warn_once("cycle", sid,
-                f"*{keyword} {sid}: this union is reached from itself "
-                f"({' -> '.join(str(p) for p in path)} -> {sid}) — a set "
-                "cannot contain itself, so the cycle is CUT there and the "
-                "rest of the union is kept. LS-DYNA states no nesting rule "
-                "for _ADD sets at all, so a cycle has no defined meaning on "
-                "either side; fix the deck.")
-            return [], 0, True
-        return expand(sid, path + (sid,))
-
-    def expand(sid: int, path):
-        if sid in memo:
-            return memo[sid]
-        out, seen, missing = [], set(), []
-        height = 0
-        cyclic = False
-        if family == "NODE" and sid in advanced:
-            members = _advanced_members(state, sid, advanced[sid][1], missing)
-        else:
-            members = [(child, None) for child in adds[sid][1]]
-        for child, pre in members:
-            got = (pre, 0, False) if pre is not None else resolve(child, path)
-            if got is None:
-                missing.append(child)
+        if root in memo:
+            return memo[root]
+        # ONE path list and ONE membership set for the whole walk, pushed and
+        # popped with the stack: copying either per frame would make a deep
+        # chain cost O(depth^2) memory, which is the shape this rewrite exists
+        # to survive.
+        stack = [new_frame(root)]
+        path = [root]
+        on_path = {root}
+        while True:
+            frame = stack[-1]
+            if frame["i"] < len(frame["members"]):
+                child, pre = frame["members"][frame["i"]]
+                frame["i"] += 1
+                if pre is not None:
+                    absorb(frame, child, (pre, 0, False))
+                elif child in direct_ids:
+                    absorb(frame, child,
+                           (_set_add_members(state, family, target_name, child),
+                            0, False))
+                elif child not in union_ids:
+                    frame["missing"].append(child)
+                elif child in on_path:
+                    warn_once("cycle", child,
+                        f"*{kw_of(child)} {child}: this union is reached from "
+                        f"itself ({' -> '.join(str(p) for p in path)}"
+                        f" -> {child}) — a set cannot contain itself, so the "
+                        "cycle is CUT there and the rest of the union is kept. "
+                        "LS-DYNA states no nesting rule for _ADD sets at all, "
+                        "so a cycle has no defined meaning on either side; fix "
+                        "the deck.")
+                    absorb(frame, child, ([], 0, True))
+                elif child in memo:
+                    absorb(frame, child, memo[child])
+                else:
+                    stack.append(new_frame(child))
+                    path.append(child)
+                    on_path.add(child)
                 continue
-            members_of_child, h, child_cyclic = got
-            cyclic = cyclic or child_cyclic
-            if h + 1 > _SET_ADD_MAX_DEPTH:
-                warn_once("depth", (sid, child),
-                    f"*{keyword} {sid}: member set {child} sits at the top of "
-                    f"a chain of nested _ADD unions more than "
-                    f"{_SET_ADD_MAX_DEPTH} levels deep — that member is "
-                    "DROPPED. This depth cap is a k2rad policy, not a manual "
-                    "rule: the LS-DYNA *SET chapter states no nesting rule "
-                    "and no limit, so there is nothing to be faithful to. "
-                    "Flatten the deck's set hierarchy if the deeper members "
-                    "matter.")
-                continue
-            height = max(height, h + 1)
-            for key, val in members_of_child:
-                if key not in seen:
-                    seen.add(key)
-                    out.append((key, val))
-        if missing:
-            warn_once("missing", sid,
-                f"*{keyword} {sid}: member set id(s) {sorted(set(missing))} "
-                "name no parsed set of the family they claim (missing block, "
-                "or an unsupported variant such as _GENERAL/_COLUMN/"
-                "_GENERATE) — that slice of the union is UNRESOLVED and "
-                "dropped BY NAME. A dangling member is never written into the "
-                "group instead: the starter accepts one as nothing worse than "
-                "WARNING 174 (hm_grogronod.F), so it would silently come up "
-                "short.")
-        if cyclic:
-            return out, height, True
-        memo[sid] = (out, height, False)
-        return memo[sid]
+            # This frame is finished.
+            sid = frame["sid"]
+            if frame["missing"]:
+                warn_once("missing", sid,
+                    f"*{kw_of(sid)} {sid}: member set id(s) "
+                    f"{sorted(set(frame['missing']))} "
+                    "name no parsed set of the family they claim (missing "
+                    "block, or an unsupported variant such as _GENERAL/"
+                    "_COLUMN/_GENERATE) — that slice of the union is "
+                    "UNRESOLVED and dropped BY NAME. A dangling member is "
+                    "never written into the group instead: the starter accepts "
+                    "one as nothing worse than WARNING 174 (hm_grogronod.F), "
+                    "so it would silently come up short.")
+            got = (frame["out"], frame["height"], frame["cyclic"])
+            if not frame["cyclic"]:
+                memo[sid] = got
+            stack.pop()
+            path.pop()
+            on_path.discard(sid)
+            if not stack:
+                return got
+            absorb(stack[-1], sid, got)
 
     for sid in sorted(union_ids):
         title = (advanced[sid][0] if sid in advanced else adds[sid][0])
         if sid in direct_ids:
             state.warn(
-                f"*{keyword} {sid}: a direct set with the same id is also "
+                f"*{kw_of(sid)} {sid}: a direct set with the same id is also "
                 "defined — LS-DYNA set ids are unique per set type "
                 "(Vol I R17 p.43-1), so the direct set wins and the _ADD "
                 "block is IGNORED. Check the two blocks.")
@@ -2941,7 +3006,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
                 "the same id is also defined. Set ids are unique per set type, "
                 "so only one can be the deck's set — the ADVANCED block wins "
                 "here and the plain one is IGNORED. Check the two blocks.")
-        values = [v for _k, v in expand(sid, (sid,))[0]]
+        values = [v for _k, v in expand(sid)[0]]
         if not values:
             # Deliberately NOT registered as an empty set. The deck's union is
             # not empty — k2rad simply could not resolve any of its members
@@ -2955,8 +3020,8 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
             # A union that is a MEMBER of another union still resolves through
             # the memo above, so a chain is unaffected.
             state.warn(
-                f"*{keyword} {sid}: the union resolves to NO member at all, "
-                "so no set of that id is created and every consumer will "
+                f"*{kw_of(sid)} {sid}: the union resolves to NO member at "
+                "all, so no set of that id is created and every consumer will "
                 "report it as undefined. That is deliberate — an empty set "
                 "would claim the deck's union is empty when it is only "
                 "unresolved here (and an empty /GRNOD draws starter WARNING "
@@ -2969,7 +3034,66 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
             container[sid] = (title, values)
 
 
-def _advanced_members(state: ConversionState, nsid: int, pairs, missing):
+def _expanded_member_ids(family: str, keyword: str,
+                         sid: int, raw_ids, direct_ids, union_ids,
+                         warn_once) -> List[int]:
+    """The member ids of one plain ``*SET_..._ADD``, with ``*SET_PART_ADD``'s
+    negative RANGE form expanded.
+
+    Vol I R17 p.43-57 gives ``PSID[N]`` two readings and only *SET_PART_ADD*
+    has them (the NODE, SEGMENT, SHELL, SOLID, BEAM and DISCRETE ``_ADD`` pages
+    carry no ``GT.0``/``LT.0`` block at all, checked against the R17 text):
+
+        GT.0: PSID[N] is added to SID,
+        LT.0: All part sets with ID between PSID[N-1] and -PSID[N], including
+              PSID[N-1] and -PSID[N], will be added to SID.
+        ... PSID[N-1] must be > 0 and must have a magnitude smaller or equal
+        to -PSID[N] when PSID[N] < 0.
+
+    So ``... 5, -9`` means part sets 5..9, not "5, then a stray flag". The
+    parser keeps the negative cell (only exact zeros are padding) and the range
+    is resolved HERE, where every child set of the family is known — at parse
+    time the deck may not have read them yet, which is the whole reason the
+    ``_ADD`` families are deferred.
+
+    The pool is every part set the deck defines, direct or itself an ``_ADD``:
+    a ``*SET_PART_ADD`` is a part set too, so one inside the range is picked up
+    and then resolved by the ordinary recursion.
+    """
+    ids: List[int] = []
+    prev = 0
+    for v in raw_ids:
+        if v > 0:
+            ids.append(v)
+            prev = v
+            continue
+        lo, hi = prev, -v
+        # ``PSID[N-1]`` is the cell IMMEDIATELY before, so a range consumes its
+        # start: ``5, -9, -12`` is not 5..12, it is a valid range followed by a
+        # negative whose predecessor is negative — malformed, and reported.
+        prev = 0
+        if family != "PART":
+            warn_once("negid", (sid, v),
+                f"*{keyword} {sid}: member id {v} is NEGATIVE. Only "
+                "*SET_PART_ADD gives a negative cell a meaning (the "
+                "PSID[N-1]..-PSID[N] inclusive RANGE, Vol I R17 p.43-57); this "
+                "keyword's page states none, so the cell is DROPPED. Restate "
+                "the member as a positive set id.")
+            continue
+        if lo <= 0 or hi < lo:
+            warn_once("negid", (sid, v),
+                f"*{keyword} {sid}: member id {v} opens a range "
+                f"PSID[N-1]..{hi}, but the manual requires the PRECEDING cell "
+                f"to be positive and no larger than {hi} (Vol I R17 p.43-58); "
+                f"here it is {lo}. The range is DROPPED — fix the pair.")
+            continue
+        ids.extend(k for k in sorted(set(direct_ids) | set(union_ids))
+                   if lo <= k <= hi and k != lo)
+    return ids
+
+
+def _advanced_members(state: ConversionState, nsid: int, pairs, missing,
+                      warn_once):
     """``*SET_NODE_ADD_ADVANCED`` members: ``(child, pre-resolved)`` pairs.
 
     A ``TYPE = 1`` member is an ordinary node set and is handed back for the
@@ -2977,6 +3101,11 @@ def _advanced_members(state: ConversionState, nsid: int, pairs, missing):
     of a DIFFERENT family, whose contribution is the NODES of the entities it
     lists — those families are already flattened when this runs (the NODE row
     is resolved last), so they are expanded here and returned ready-made.
+
+    The drop diagnostics go through the caller's ``warn_once``, keyed on the
+    ``nsid`` their text names: a union inside a cycle is deliberately NOT
+    memoised, so this function can be reached twice for one set and a bare
+    ``state.warn`` would print the same line twice (the #129 round-2 rule).
     """
     out = []
     dropped = {}
@@ -3007,7 +3136,7 @@ def _advanced_members(state: ConversionState, nsid: int, pairs, missing):
         out.append((child, [(n, n)
                             for n in _entity_set_nodes(state, name, entry)]))
     for reason, ids in sorted(dropped.items()):
-        state.warn(
+        warn_once(("adv", reason), nsid,
             f"*SET_NODE_ADD_ADVANCED {nsid}: member set id(s) {sorted(ids)} "
             f"carry {reason} — that slice of the node union is DROPPED. "
             "(dyna2rad reads this card as a plain id list and never dispatches "
@@ -3072,8 +3201,8 @@ def _resolve_contact_interior(state: ConversionState) -> None:
     wrong, so the conversion is a loud warning naming the affected parts
     (plus note_recognized_not_emitted), the PSID resolution following
     dyna2rad CC:671-767: each id is a *SET_PART (part ids); a *SET_PART_ADD
-    arrives pre-expanded by _flatten_part_set_adds (ONE level of part-set
-    nesting). The per-set attributes DA1..DA4
+    arrives pre-expanded by _flatten_set_adds (recursively, and with its
+    negative PSID range form resolved). The per-set attributes DA1..DA4
     (PSF/Fa/ED/TYPE — the manual defines them on the referenced set, not the
     contact card) have no Icontrol counterpart at any version and are warned
     when set; dyna2rad reads none of them.
@@ -3093,8 +3222,8 @@ def _resolve_contact_interior(state: ConversionState) -> None:
     # *CONTACT_INTERIOR is a solid-element keyword (it damps the interior of a
     # crushing foam BRICK), so an SPH part named by one is not a lost mapping.
     # *SET_PART_ADD sets were already expanded into part_sets by
-    # _flatten_part_set_adds (one nesting level, dyna2rad CC:692-727), so a
-    # single lookup covers both variants.
+    # _flatten_set_adds (recursively; dyna2rad stops at one level,
+    # CC:692-727), so a single lookup covers both variants.
     solid_pids = ({e.pid for e in state.solid_elems}
                   | {e.pid for e in state.tshell_elems})
     for psid in sorted(set(state.contact_interior_psids)):

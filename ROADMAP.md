@@ -74,6 +74,17 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   k2rad, which `sigeps127c.F90:400-403` uses to clamp a failed mode's stress at
   its FULL strength — worth checking against LS-DYNA's own default before
   changing.
+  Two more, from the post-review round: **four consumers resolve a set DURING
+  dispatch and therefore still see only DIRECT sets** —
+  `*CONSTRAINED_EXTRA_NODES_SET`, `*ELEMENT_MASS_PART_SET`,
+  `*ELEMENT_MASS_NODE_SET` and `*LOAD_BODY_PARTS` (`handlers.py:7762`, `:8539`,
+  `:8584`, `:12781`); this is the shipped `*SET_PART_ADD` behaviour unchanged,
+  and lifting it means deferring those four to a prepass. And
+  `thermal._structural_density` walks the CLONE registry, so it reads no
+  density for the five producers deliberately excluded from it (LAW5+/EOS,
+  the LAW27 glass pair, MAT_022, the belt LAW114/119 and the spotweld
+  fallback) — today that surfaces only as the honest "rho_cp <= 0" warning on
+  a `/HEAT/MAT` built from one of them.
   **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and

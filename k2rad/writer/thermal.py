@@ -172,11 +172,15 @@ def _material_registries(state: ConversionState):
     """Every ``mid -> dataclass`` material dict a /MAT is emitted from and that
     a ``*MAT_ADD_THERMAL_EXPANSION`` may have to SPLIT.
 
-    Four /MAT producers are deliberately NOT here, because a
+    Five /MAT producers are deliberately NOT here, because a
     ``dataclasses.replace(..., mid=new)`` of their record does not give a
     working copy — each needs a second card that is keyed elsewhere:
     ``mat_high_explosive`` (LAW5 carries its own /EOS block),
     ``mat_laminated_glass`` (a LAW27 PAIR of materials),
+    ``mat_composite_damage`` (*MAT_022's shell arm writes a companion
+    ``/FAIL/CHANG`` keyed on the SAME mid, so a bare record copy would leave
+    the failure model behind on the original id — the ``mat_laminated_glass``
+    situation),
     ``mat_seatbelt`` (LAW114/119 is synthesized per belt PROPERTY, not per mid)
     and ``mat_spotweld`` (its /MAT/ELAST fallback is written by the connector
     writer). A card naming one of them is warn-dropped rather than half-split;
@@ -295,6 +299,7 @@ def _is_anisotropic(state: ConversionState, mid: int) -> bool:
     statement at all, so nothing about them is worth reporting.
     """
     return (mid in state.mat_orthotropic or mid in state.mat_enhanced_composite
+            or mid in state.mat_composite_damage
             or mid in state.mat_transverse_aniso or mid in state.mat_hill_3r
             or mid in state.mat_aniso_visco or mid in state.mat_fabric
             or mid in state.mat_soft_tissue)
@@ -584,11 +589,12 @@ def _resolve_expansion(state: ConversionState) -> None:
                     f"*MAT_ADD_THERMAL_EXPANSION on part(s) {pids}: material "
                     f"{mid} cannot be SPLIT off for the expansion — it is "
                     "either not converted to any /MAT at all, or one of the "
-                    "four producers whose /MAT needs a companion card a plain "
+                    "five producers whose /MAT needs a companion card a plain "
                     "copy would not carry (*MAT_HIGH_EXPLOSIVE_BURN + its "
-                    "/EOS, *MAT_LAMINATED_GLASS's LAW27 pair, *MAT_SEATBELT's "
-                    "per-property LAW114/119, *MAT_SPOTWELD's connector "
-                    "fallback). Card dropped. Give the part its own material "
+                    "/EOS, *MAT_LAMINATED_GLASS's LAW27 pair, "
+                    "*MAT_COMPOSITE_DAMAGE's /FAIL/CHANG rider, "
+                    "*MAT_SEATBELT's per-property LAW114/119, *MAT_SPOTWELD's "
+                    "connector fallback). Card dropped. Give the part its own material "
                     "id in the .k file if it must expand on its own.")
                 continue
             for pid in pids:

@@ -136,11 +136,15 @@ Prior history (before this changelog was introduced) is summarized in the
   the converted deck answered `ERROR ID : 179 ** ERROR IN PART DEFINITION
   (MATERIAL) / MATERIAL ID=1 DOES NOT EXIST` + `ERROR ID : 760` and the starter
   refused it (exit 3). That carrier now reads **0 ERROR(S), 1 WARNING(S)**
-  (3030, the known `/PROP/TYPE51` PTHICKFAIL note) and the engine runs it to
-  **NORMAL TERMINATION over 20 807 cycles**, with the 90° plies of its
-  `[0/90/0/90/90/0/90/0]` E-glass laminate failing first (`FAILURE (CHANG) IN
-  SHELL ELEMENT … MODE 1 - TENSILE FIBER`) and the 0° plies surviving — the
-  physically right order for a laminate pulled along direction 1.
+  (3030, the PTHICKFAIL note — its text names `PROPERTY ID 90013 IS A TYPE 11`
+  here and `PROPERTY ID 90002/90003 IS A TYPE 51` on W6; see the *Ifail_sh* note
+  below) and the engine runs it to **NORMAL TERMINATION over 20 807 cycles**,
+  with the 90° plies of its `[0/90/0/90/90/0/90/0]` E-glass laminate failing
+  first — 2400 events, all `FAILURE (CHANG) IN SHELL ELEMENT … MODE 3 -
+  TENSILE MATRIX`, in layers 2, 4, 5 and 7 and in no other layer. That is the
+  physically right mode as well as the right order: a 90° ply pulled along the
+  laminate's direction 1 is loaded across its fibres and fails in transverse
+  MATRIX tension, and the 0° plies survive.
 
   The native reader is not a fallback here: `dynamatlawkeywordmap.h:59` maps
   the keyword to law 22 but `convertmats.cxx` has **no `case 22:`**, so it
@@ -253,44 +257,260 @@ Prior history (before this changelog was introduced) is summarized in the
      now list the container; `writer/composites.py`'s two-arm law LABEL became
      a three-way router for the same reason.
 
-- **Sweep for MILESTONE-2 BATCH 1, in TWO HALVES.** The corpus (this repo, the
-  r14 dynaexamples, `C:\openradioss_run`, `E:\foxcore_data`) holds **974**
-  `.k`/`.key`/`.dyn` files, **614 distinct by SHA-256** — converting the same
-  bytes twice proves nothing, and 360 of the files are byte-copies (the same
-  200 MB elevator-linkage and foxcore meshes several times over). **609 of
-  those 614 were converted on master and on this branch and compared; 0
-  conversion errors on either tree.** The five not reached are all ≥190 MB
-  meshes (two 196 MB `tobias_mesh` copies, the 191 MB Yaris dynamic-suspension
-  deck, the 248 MB `camry-detailed-v5a.key`), and an exhaustive scan of all
-  974 files for `^\*SET_..._ADD` / `^\*MAT_COMPOSITE_DAMAGE` shows none of them
-  carries a batch keyword.
+- **Sweep for MILESTONE-2 BATCH 1, in TWO HALVES** — re-run against the FINAL
+  branch, so these numbers describe the code that ships. The corpus (this
+  repo's tests, the r14 dynaexamples, `C:\openradioss_run`, `E:\foxcore_data`,
+  all four present) holds **906** `.k`/`.key`/`.dyn` files, **586 distinct by
+  SHA-256 within a 90 MB per-file cap** — converting the same bytes twice
+  proves nothing. **584 of them were converted on master and on this branch
+  and compared; 0 conversion errors on either tree.**
+
+  Not in that roster, and why: 13 files above the cap (four 190-250 MB Yaris /
+  Camry meshes, six 108-196 MB foxcore meshes, the 169 MB
+  `yaris-detailed-v2j.key`, the 111 MB door-sag Yaris and the 101 MB roof
+  crush), and the two vehicle `combine.key` `*INCLUDE` masters, each of which
+  pulls a >160 MB child. An **exhaustive keyword scan of all 906 files** puts
+  every batch carrier on the record: `*MAT_COMPOSITE_DAMAGE` in 5 files
+  (`tension6.k` + four `W6` copies), `*SET_NODE_ADD` in 3
+  (the door-sag Yaris, `show-cases/contact-overview/main.k`, the getriebekette
+  `Model-318_Achshebel-fein_tobi.k` in its `_TITLE` spelling), and
+  `*SET_NODE_ADD` + `*SET_PART_ADD` in the two `combine.key` masters. **Zero
+  `*SET_SEGMENT/SHELL/SOLID/BEAM/DISCRETE/TSHELL_ADD` and zero
+  `*SET_NODE_ADD_ADVANCED` exist anywhere in the corpus** — those, and the
+  negative-range form, are synthetic-validation only. The door-sag Yaris was
+  converted separately on both trees (below); the two `combine.key` masters
+  carry only POSITIVE `_ADD` member ids (checked in the source), so nothing in
+  this round can move them beyond the `#-- SKIPPED:` line the first cut
+  measured.
 
   Compared **explicitly in two halves and reported as two numbers**, because a
   sweep that compares only output files cannot see a warning change (#129
   round 2):
 
   * **Half 1 — the `.rad` files** (SHA-256 of `_0000.rad` and `_0001.rad`):
-    **9 of 609 differ.**
+    **22 of 584 differ.**
   * **Half 2 — the diagnostics** (`warnings` + `skipped_keywords` +
-    `recognized_not_emitted`): **11 of 609 differ.**
+    `recognized_not_emitted`): **8 of 584 differ.**
 
-  The 11 movers are the 9 corpus carriers present in the distinct set, plus
-  **2 decks whose `.rad` is byte-identical and whose only change is the
-  corrected TEXT of an existing warning** — `*DATABASE_NODAL_FORCE_GROUP`
-  used to name `*SET_NODE_ADD` as a spelling k2rad does not expand, and now
-  names `*SET_NODE_GENERAL`, which it still does not. That pair is exactly
-  what half 1 alone would have hidden.
+  Six decks are in both halves, **two are in half 2 only** and **sixteen are in
+  half 1 only** — the two halves genuinely see different things:
 
-  Per carrier: the door-sag Yaris loses `SET_NODE_ADD` from
-  `skipped_keywords` and 9 warnings, gains 6, and both its `.rad` files change
-  (the restored `/RBODY`, its prescribed motion, `*LOAD_RIGID_BODY` and the
-  `/TH/NODE` BNDOUT channel); `tension6.k` and the three `W6` sandwich decks
-  lose `MAT_COMPOSITE_DAMAGE` and the "*PART references a material id that NO
-  /MAT card defines*" warning, and `tension6.k` additionally stops reporting
-  its 8-ply `ICOMP=1` layup as DROPPED; the 2010 Yaris, the 2012 Camry and the
-  contact-overview deck lose the `SET_NODE_ADD` entry and gain two named
-  warnings per union whose `*SET_NODE_GENERAL` children k2rad still cannot
-  resolve, with the only `.rad` change being the `#-- SKIPPED:` comment line.
+  * **Both halves (6):** `tension6.k` (loses `MAT_COMPOSITE_DAMAGE` from
+    `skipped_keywords`, +3 warnings: the `/FAIL/CHANG` note, the
+    PRCA/PRCB drop and the `/PROP/TYPE11` + `/SKEW` notes, and it stops
+    reporting its 8-ply `ICOMP=1` layup as DROPPED); the three `W6` sandwich
+    decks (same, +1); `show-cases/contact-overview/main.k` and the
+    getriebekette `Model-318_Achshebel-fein_tobi.k` (lose `SET_NODE_ADD` from
+    `skipped_keywords`; `main.k` gains the two named warnings for a union whose
+    `*SET_NODE_GENERAL` children k2rad still cannot resolve, `Model-318` gains
+    its `/GRNOD` and no warning at all).
+  * **Half 2 only (2):** `contact-foam/matfoamsoil.k` and
+    `contact-rubber/matrubber.k`, whose `.rad` is byte-identical and whose only
+    change is the corrected TEXT of an existing warning —
+    `*DATABASE_NODAL_FORCE_GROUP` used to name `*SET_NODE_ADD` as a spelling
+    k2rad does not expand and now names `*SET_NODE_GENERAL`, which it still
+    does not. Exactly what half 1 alone would have hidden.
+  * **Half 1 only (16):** ten `W13` blast decks and six `W8` CrushBox decks,
+    all from the `*SET_SEGMENT` triangle canonicalisation — they write their
+    triangles as `n1 n2 n3 n3` and now emit `n1 n2 n3 0`. **Both families are
+    solver-validated paths and both were re-validated:** starter on master and
+    on the branch gives 0 ERROR / 4 WARNING (W13) and 0 ERROR / 21 WARNING
+    (W8) on each tree, the `.out` echoes are identical line for line, and the
+    restart files — 107 889 661 bytes for W13, 13 157 936 for W8 — differ in
+    exactly **6 bytes each, all in the trailing timestamp record**. The starter
+    builds the identical model, exactly as `hm_read_surf.F:318-321`
+    (`IF(N4/=0) … ELSE N4 = N3`) says it must.
+
+  **Door-sag Yaris, converted separately on both trees** (111 MB,
+  `implicit/Yaris Static Door Sag/000_yaris_stat_doorsag_fine_02.k`):
+  `/GRNOD/NODE/110` goes from absent to present with its 25 nodes, `/RBODY`
+  1268 → **1269**, and four warnings disappear —
+  `*CONSTRAINED_NODAL_RIGID_BODY pid=110: node set 110 not found — /RBODY not
+  emitted`, `no RBODY found; motion skipped`, `rigid body not found – skipped`
+  and `*DATABASE_BNDOUT requested but this deck drives no node …`, the last
+  replaced by `*DATABASE_BNDOUT → /TH/NODE/94806`.
+
+- **MILESTONE-2 BATCH 1, post-review round — ten confirmed defects, two of
+  them changing physics silently.** Each was re-derived from the manual or the
+  starter/engine source before it was touched, and each has a regression test
+  that fails on the old behaviour.
+
+  1. **`/MAT/LAW25`'s `alpha` cell was left at 0, which made the "elastic
+     carrier" elastic only in MPa-like unit systems.**
+     `read_mat25_tsaiwu.F90:273` turns a blank or zero `alpha` into **1**, and
+     `:315` then gives the Tsai-Wu interaction coefficient
+     `f12 = -alpha/(2·sqrt(min(1e20, σ_y⁴))) = -5e-11` beside
+     `f11 = f22 = 1e-20`. `ft1 = f11·f22 - 4·f12²` is NEGATIVE — the surface is
+     an open hyperbola, not the closed ellipse the six 1e20 yields assume — and
+     in any tension-compression state the cross term `2·f12·s1·s2` dominates
+     and reaches `fyld = 1` at `|σ| ≈ 1e5` **in the deck's stress unit**
+     (`mat25_tsaiwu_c.F90:481-487`). 1e5 MPa is unreachable; 1e5 Pa is 0.1 MPa,
+     and 1e5 psi is 690 MPa. MEASURED on twin decks differing in that ONE cell
+     (single shell, every nodal DOF prescribed, `eps_xx = +1e-3` /
+     `eps_yy = -1e-3`, starter+engine 2026-05-20, 0 ERROR / NORMAL TERMINATION
+     on all four): in **kg-m-s** the `alpha = 0` arm recorded **ZERO**
+     `FAILURE (CHANG)` events and I-ENERGY 4.651e-3 J, the `alpha = 1e-20` arm
+     the four the criterion calls for and 5.232e-3 J — which is what the
+     Mg-mm-s twin gives in BOTH arms (5.232 mJ), so the fix also makes the two
+     unit systems agree to four figures. Without it a Pa- or psi-unit ply
+     plastifies on a spurious surface from the first cycle and the whole
+     `/FAIL/CHANG` rider — the entire point of the LAW25 arm — never trips.
+     `alpha` has exactly two consumers in the reader (this formula and the echo
+     at `:452`), and the starter now echoes `F12 REDUCTION FACTOR =
+     1.0000000000000E-20` / `F12 = -0.5000E-30` on the W6 carrier. Both corpus
+     carriers are ton-mm-s and are numerically unchanged.
+
+  2. **`*PART_COMPOSITE` discarded a MAT_022 ply's AOPT with no diagnostic at
+     all.** `_emit_part_composite` picks the layup's orthotropy system from the
+     "first ORTHOTROPIC ply material", testing `mat_orthotropic` and
+     `mat_enhanced_composite` only — the ONE walk of the three composite
+     containers that the batch missed (`tshell._AOPT_MAT_DICTS`,
+     `_emit_composite_props` and `_composite_ref_axis` all had it). A MAT_022
+     ply therefore left `axis` at the `Ip=20` "element frame" default and no
+     `/SKEW` was written: a 90° fibre error whenever the deck's `a` vector is
+     not global X, and on master the same deck was REFUSED outright
+     (ERROR 179), so the batch turned a loud failure into a silent wrong
+     answer. Reach: the W6 sandwich carrier's `*PART_COMPOSITE` 12 and 13
+     (4 MAT_022 plies each) — numerically unaffected there only because W6's
+     own `a = (1,0,0)` coincides with the fallback.
+
+  3. **The two documented spellings of a triangular `*SET_SEGMENT` were two
+     different segments.** Vol I R17 p.43-63 verbatim: *"N4 — Nodal point n4.
+     To define a triangular segment, set N4 = N3."* — while a trailing blank is
+     the other house style, and `hm_read_surf.F:318-321`
+     (`IF(N4/=0) … ELSE N4 = N3`) makes them one face inside the starter.
+     `handle_set_segment` popped only trailing ZEROS, so `1 2 3 0` was stored
+     as `[1,2,3]` and `1 2 3 3` as `[1,2,3,3]`, and `_segment_key` — the one
+     de-duplication this batch calls load-bearing — keyed them apart. MEASURED
+     on a free-floating plate with `*SET_SEGMENT 30` = `1 2 3 0`,
+     `*SET_SEGMENT 31` = `1 2 3 3`, `*SET_SEGMENT_ADD 32 = {30, 31}` and a
+     `*LOAD_SEGMENT_SET` on it: the emitted `/SURF/SEG` carried BOTH rows, and
+     against the one-row twin (identical in every other byte, both runs
+     0 ERROR / NORMAL TERMINATION / 67 cycles) EXT-WORK went 18.35 -> 73.39 and
+     K-ENERGY 17.68 -> 70.73 — a factor of **4.0005**, i.e. impulse x**2.0001**:
+     the pressure on that face applied exactly TWICE. Both spellings now collapse at
+     PARSE time, so every consumer sees one — the same normalisation
+     `_shell_segment_rows` already applied on the `*LOAD_SHELL` path, and it is
+     applied to `*LOAD_BLAST_SEGMENT`'s inline segments too.
+
+     This is the one fix in the round that moves `.rad` bytes on decks that
+     have nothing to do with `_ADD` sets: the five **W13 blast** corpus decks
+     write their `*SET_SEGMENT` triangles in the `n1 n2 n3 n3` spelling, so 370
+     `/SURF/SEG` rows change from `… n3 n3` to `… n3 0`. **Re-validated on that
+     solver-validated path**: starter on both trees, 0 ERROR / 4 WARNING(S)
+     each, `.out` echoes identical line for line except the reported free-RAM
+     figure, and the two 107 889 661-byte `_0000_0001.rst` restart files differ
+     in exactly **6 bytes, all in the trailing timestamp record** (offsets
+     107 889 654…659). The starter builds the identical model, exactly as
+     `hm_read_surf.F:318-321` says it must.
+
+  4. **`*SET_PART_ADD`'s negative RANGE form was silently dropped.** Vol I R17
+     p.43-57 gives `PSID[N]` two readings: *"GT.0: PSID[N] is added to SID,
+     LT.0: All part sets with ID between PSID[N-1] and -PSID[N], including
+     PSID[N-1] and -PSID[N], will be added to SID"*, with p.43-58 requiring
+     `PSID[N-1] > 0` and `|PSID[N]| >= PSID[N-1]`. So `… 5, -9` means part sets
+     5..9; the shared `if v > 0` member filter kept 5 and dropped 6..9 with no
+     word (and the batch's new docstring explained that filter as trailing-zero
+     padding only, documenting the range form out of existence). The parser now
+     keeps a non-zero cell and `writer/mesh._expanded_member_ids` resolves the
+     range where every child set is known. Checked against the R17 text
+     family by family: the NODE, SEGMENT, SHELL, SOLID, BEAM and DISCRETE
+     `_ADD` pages carry **no** `GT.0`/`LT.0` block at all, so a negative cell
+     there is warn-dropped BY NAME rather than guessed at. The
+     `*INCLUDE_TRANSFORM` side gets the matching sign-preserving rewriter —
+     `_rewrite_line` touches only `v > 0`, which would have left a range
+     endpoint behind while its start moved with `IDSOFF`.
+
+  5. **A deep chain of nested unions raised `RecursionError` instead of hitting
+     the depth cap.** The cap is an INTRINSIC-HEIGHT cap — deliberately so, or
+     a deck's set numbering would decide whether it fires — and a height can
+     only be evaluated bottom-up, so the walk must reach the end of a chain
+     before the cap can act. MEASURED: 400 links survived, 800 aborted
+     `convert()` with a traceback, and whether it aborted depended on whether
+     the ids ascended or descended. The traversal is now an explicit stack;
+     the docstring's "keeps a pathological input from costing unbounded work"
+     is corrected to what the cap actually does.
+
+  6. **Every diagnostic for a `*SET_NODE_ADD_ADVANCED` block named
+     `*SET_NODE_ADD`.** The two spellings share one id namespace and one
+     resolver, and five messages (cycle, depth cap, dangling member, direct-set
+     collision, empty union) were formatted with the family keyword — so a
+     reader grepping the deck for the card the warning names finds nothing.
+     Each message now takes the spelling its own sid was written with.
+
+  7. **`_advanced_members` raised its drop diagnostics with a bare
+     `state.warn`.** A cycle-cut subtree is deliberately NOT memoised, so an
+     ADVANCED union inside a cycle is re-expanded and re-reported — measured,
+     the same "member set id(s) … carry TYPE=7" line twice. It now goes through
+     the resolver's `warn_once`, keyed on the sid its text names (the #129
+     round-2 rule the module's own comment cites).
+
+  8. **`ConversionState.all_mat_ids()` did not list `mat_composite_damage`**,
+     so the new family was invisible to every consumer of that registry: the
+     `*PART_COMPOSITE` "ply material N is NOT emitted as a /MAT" warning fired
+     FALSELY on correct decks (twice on the W6 carrier), `seatbelts._belt_mat_ids`
+     would keep a MAT_022 MID for a synthesized `/MAT/LAW114` (starter ERROR 79
+     DUPLICATE ID, measured), and `next_mat_id()` could mint a synthesized
+     material onto a live MAT_022 MID at or above 90001. The `#120`
+     "audit every registry walk" class. Two sibling walks in `writer/thermal.py`
+     got the same treatment: `_is_anisotropic` now knows the family (so the
+     LCIDY/LCIDZ loss on a `*MAT_ADD_THERMAL_EXPANSION` is reported), and
+     `_material_registries` NAMES it in the "deliberately not here" list —
+     MAT_022's shell arm writes a `/FAIL/CHANG` keyed on the same mid, so a
+     bare record copy would leave the failure model behind, exactly the
+     `mat_laminated_glass` situation.
+
+  9. **The `*DAMPING_FREQUENCY_RANGE` element-scope guard went dead on LAW25.**
+     `mulawc.F90:1963/1972` skips `prony_modelc` AND `damping_range_shell`
+     whenever `ilaw == 25`, and the existing warning's own text already said so
+     — but its condition was "the part carries no shell or solid element", and
+     a MAT_022 shell part is meshed. It came out completely undamped in
+     silence. The #124 "a guard gated on one condition goes dead on its
+     sibling" class, found by auditing the new law against every walk that
+     reasons about materials.
+
+  10. **Both arms of the MAT_022 split refused DIFFERENT degeneracies of the
+      same card** — the #129 rule, found by asking what the other arm does with
+      each guard the first one has. Two guards were one-sided:
+      * A ZERO elastic constant. `/MAT/LAW25` refuses `e11/e22/g12/g23/g31` at
+        or below zero (`ancmsg(msgid=306)`,
+        `read_mat25_tsaiwu.F90:193-199`) and only SUBSTITUTES `e33`
+        (`:201`, `max(e11,e22)`) — k2rad warned about all five.
+        `hm_read_mat127.F90` has **no** zero-modulus guard at all: `:178-182`
+        substitutes `e2 = e1`, `e3 = e2`, `g13 = g12`, `g23 = g13`, and `e1`
+        itself is never checked, so a zero EA reaches `c11 = one/e1` at `:226`
+        unguarded. The arm that said nothing was the dangerous one.
+      * `1 - NU12·NU21 <= 0`. The two arms write the Poisson slot with opposite
+        conventions, but the reader ends up with `nu12 = nu21·e1/e2` either way
+        (`read_mat25_tsaiwu.F90:282` / `hm_read_mat127.F90:187`), so
+        `1 - PRBA²·EA/EB` is the same number on both and rejects the material
+        on both — ERROR 307 on LAW25, ERROR 3068 then 307 on LAW127. Only the
+        LAW25 arm checked it. Both checks now live in helpers `_emit_mat022`
+        calls before it dispatches.
+
+  Also corrected, without changing behaviour: `Ifail_sh = 2`'s stated rationale
+  (the 1-vs-2 half of it is INERT on the layered shell properties MAT_022
+  actually reaches — `check_pthickfail.F:121-128` fires WARNING 3030 and
+  `fail_setoff_c.F:268-272` compares against the PROPERTY's `P_THICKG`, which
+  k2rad writes as 0 and `hm_read_prop11.F:201` turns into `1-1e-6`, the same
+  threshold; what IS load-bearing is the flag being positive and below 3, and
+  the warning now names the 3030 as expected); `PRCA`/`PRCB` are added to the
+  named drop list on the LAW25 arm (LAW25 has one Poisson slot, and the
+  LAW127-selection note that mentioned them only reached decks where they are
+  NOT lost); `_mat022_law` now also scans `*PART_COMPOSITE` plies, because
+  `state.parts` carries only the FIRST real ply's MID and a MAT_022 in a later
+  layer of a `*PART_COMPOSITE_TSHELL` was routed to LAW25 on a thick shell;
+  and two tests that could not fail were replaced — `_LAW127_NO_RESIDUAL` was
+  asserted `< 1e-6`, which `0.0` satisfies and which is exactly the value the
+  reader turns back into 1.0, and the Chang-Chang onset test plugged the
+  emitted strengths back into their own identity.
+
+  **The two measured claims that were misquoted are corrected against a rerun**
+  (`tension6.k`, 0 ERROR / 1 WARNING, NORMAL TERMINATION, 20 807 cycles): the
+  2400 failure events are `MODE 3 - TENSILE MATRIX`, not `MODE 1 - TENSILE
+  FIBER` — the 90° plies (layers 2, 4, 5, 7 and no others) are loaded across
+  their fibres — and WARNING 3030 names `PROPERTY ID 90013 IS A TYPE 11` there
+  and `TYPE 51` on W6, not "the TYPE51 note".
 
 - **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
   → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;
