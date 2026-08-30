@@ -3058,7 +3058,15 @@ def _expanded_member_ids(family: str, keyword: str,
 
     The pool is every part set the deck defines, direct or itself an ``_ADD``:
     a ``*SET_PART_ADD`` is a part set too, so one inside the range is picked up
-    and then resolved by the ordinary recursion.
+    and then resolved by the ordinary recursion — EXCEPT the union's own id.
+    ``*SET_PART_ADD 7`` with members ``5, -9`` spans 7, and the pool holds 7,
+    so without that exclusion the union becomes a member of itself: the members
+    still come out right (a union with itself is a no-op) but the resolver's
+    cycle guard fires and tells the reader to "fix the deck" on a deck the very
+    page above declares legal — and marks the frame ``cyclic``, which bars that
+    union and every union above it from the memo. The manual's "all part sets
+    with ID between" cannot mean the set being defined; ``k != lo`` already
+    drops the range's start for the same no-op reason.
     """
     ids: List[int] = []
     prev = 0
@@ -3088,7 +3096,7 @@ def _expanded_member_ids(family: str, keyword: str,
                 f"here it is {lo}. The range is DROPPED — fix the pair.")
             continue
         ids.extend(k for k in sorted(set(direct_ids) | set(union_ids))
-                   if lo <= k <= hi and k != lo)
+                   if lo <= k <= hi and k != lo and k != sid)
     return ids
 
 
@@ -3111,6 +3119,17 @@ def _advanced_members(state: ConversionState, nsid: int, pairs, missing,
     dropped = {}
     for child, typ in pairs:
         fam = SET_ADD_ADVANCED_TYPES.get(typ)
+        if child < 0:
+            # p.43-46 gives card 2b's SID[N] no GT.0/LT.0 reading, so dropping
+            # is right — but by NAME, like every plain _ADD family since the
+            # review round (_expanded_member_ids' non-PART arm).
+            warn_once(("advneg", child), nsid,
+                f"*SET_NODE_ADD_ADVANCED {nsid}: member set id {child} is "
+                "NEGATIVE. Card 2b's SID[N] has no GT.0/LT.0 reading on its "
+                "page (Vol I R17 p.43-46) — only *SET_PART_ADD's PSID gives a "
+                "negative cell the RANGE meaning (p.43-57) — so the cell is "
+                "DROPPED. Restate the member as a positive set id.")
+            continue
         if typ in (0, 1):
             # TYPE 1 is "Node set". A blank/0 TYPE is not a documented value;
             # the only sane reading of a bare id on a NODE set's own card is a

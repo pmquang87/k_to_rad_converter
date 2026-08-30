@@ -84,6 +84,7 @@ __all__ = [
     "_emit_prop_type19",
     "_composite_ref_axis",
     "_composite_material_mids",
+    "_part_mat_mids",
 ]
 
 # LAW93 is an orthotropic HILL-PLASTICITY law; MAT_002 is purely elastic, so the
@@ -248,6 +249,27 @@ _CHANG_IFAIL_SH = 2
 #: instantaneous — while still spanning many time steps, so the failed layer
 #: unloads smoothly instead of shocking the mesh.
 _CHANG_TAU_FRACTION = 1.0e-4
+
+
+def _part_mat_mids(state: ConversionState, pid: int) -> Set[int]:
+    """Every material MID part *pid* actually runs on.
+
+    A plain ``*PART`` runs on one. A ``*PART_COMPOSITE`` (or ``_TSHELL``) runs
+    on one per PLY, and its fallback ``PartData`` carries only the FIRST real
+    ply's MID (``handlers.py`` "the fallback mat_ID must come from the first
+    REAL ply") — so any question of the form "what law does this part run on?"
+    that reads ``state.parts[pid].mid`` alone is blind to layers 2..n. That is
+    the blindness that put a MAT_022 ply on the element frame with no /SKEW,
+    and it is why ``_mat022_law`` walks the plies itself. Those two sites each
+    grew their own walk; this helper is the shared one, used by the LAW25
+    damping report (``loads._make_damping_frequency_range``) and by
+    ``_emit_mat022_law127``'s shell-vs-solid ``mixed`` test.
+    """
+    mids = {getattr(state.parts.get(pid), "mid", 0)}
+    pc = state.part_composites.get(pid)
+    if pc is not None:
+        mids |= {p.mid for p in pc.plies if p.mid > 0}
+    return {m for m in mids if m}
 
 
 def _mat022_law(state: ConversionState, mid: int) -> int:
@@ -1934,9 +1956,13 @@ def _mat022_zero_moduli(mat: MatCompositeDamage, law: int,
     The two target laws are degenerate in DIFFERENT ways and only one of them
     says so, which is why this cannot live inside either emitter:
 
-    * ``/MAT/LAW25`` refuses ``e11``/``e22``/``g12``/``g23``/``g31`` at or
-      below zero outright — ``ancmsg(msgid=306)``,
+    * ``/MAT/LAW25`` refuses ``e11``/``e22``/``g12``/``g23``/``g31`` at
+      EXACTLY zero outright — ``ancmsg(msgid=306)``,
       ``read_mat25_tsaiwu.F90:193-199``. Loud, and the deck does not start.
+      The test really is ``== zero`` and not ``<= zero`` (contrast ``:201``,
+      ``if (e33 <= zero) e33 = max(e11, e22)``), so a NEGATIVE modulus walks
+      straight past it — which is why the check below screens ``<= 0`` and
+      reports a negative one separately.
       Only ``e33`` is substituted there (``:201``, ``max(e11, e22)``).
     * ``/MAT/LAW127`` has NO such guard. ``hm_read_mat127.F90:178-182``
       SUBSTITUTES a missing one (``e2 = e1``, ``e3 = e2``, ``g13 = g12``,
@@ -1950,6 +1976,15 @@ def _mat022_zero_moduli(mat: MatCompositeDamage, law: int,
     named = (("EA", mat.ea), ("EB", mat.eb), ("EC", mat.ec),
              ("GAB", mat.gab), ("GBC", mat.gbc), ("GCA", mat.gca))
     zeros = [n for n, v in named if v == 0.0]
+    negs = [n for n, v in named if v < 0.0]
+    if negs:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE {mat.mid}: {'/'.join(negs)} is NEGATIVE. "
+            "Neither reader screens that: read_mat25_tsaiwu.F90:193-199 tests "
+            "`== zero` exactly (ERROR 306 does NOT fire on a negative one) and "
+            "hm_read_mat127.F90 has no modulus guard at all. The value is "
+            "carried into the compliance matrix as written and the run is "
+            "meaningless — fix the card.")
     if not zeros:
         return
     if law == 25:
@@ -1957,8 +1992,9 @@ def _mat022_zero_moduli(mat: MatCompositeDamage, law: int,
         if fatal:
             state.warn(
                 f"*MAT_COMPOSITE_DAMAGE {mat.mid}: {'/'.join(fatal)} is zero. "
-                "/MAT/LAW25 refuses e11/e22/g12/g23/g31 at or below zero "
-                "(ERROR 306, read_mat25_tsaiwu.F90:193-199), so the starter "
+                "/MAT/LAW25 refuses e11/e22/g12/g23/g31 at EXACTLY zero "
+                "(ERROR 306, read_mat25_tsaiwu.F90:193-199 — the test is "
+                "`== zero`, so only an exact zero is caught), so the starter "
                 "will not read the deck. Fill the card.")
         if "EC" in zeros:
             state.warn(
@@ -1977,6 +2013,67 @@ def _mat022_zero_moduli(mat: MatCompositeDamage, law: int,
         "zero EA reaches c11 = 1/e1 (:226) unguarded. LAW25 would have "
         "refused the same card with ERROR 306 — fill the card rather than "
         "relying on either behaviour.")
+
+
+#: The Chang-Chang mode each MAT_022 card-5 strength gates, and what a BLANK
+#: cell leaves behind. Both readers substitute ``1e20`` for an exact zero
+#: (``hm_read_fail_chang.F90:99-104`` on the LAW25 arm,
+#: ``hm_read_mat127.F90:279-284`` on the LAW127 arm; ``infinity`` is 1e20,
+#: ``constant_mod.F:521``), so the cell is not "defaulted", it is SWITCHED OFF.
+#: Wording taken term by term from ``fail_changchang_c.F90:154-181``.
+_MAT022_STRENGTH_MODES = (
+    ("XT", "xt", "Sigma_1t",
+     "the TENSILE FIBRE mode (damft = (s_xx/XT)^2 + Beta*(s_12/SC)^2) can "
+     "never reach 1 on the fibre term — only the shear term is left"),
+    ("YT", "yt", "Sigma_2t",
+     "the MATRIX-TENSION mode (dammt = (s_yy/YT)^2 + (s_12/SC)^2) can never "
+     "reach 1 on the transverse term — only the shear term is left"),
+    ("YC", "yc", "Sigma_2c",
+     "the MATRIX-COMPRESSION mode is switched off outright: its linear term "
+     "s_yy*((YC/2SC)^2 - 1)/YC grows like s_yy*YC/(4*SC^2), i.e. LARGE and "
+     "NEGATIVE for the compressive s_yy the mode is about, driving dammc away "
+     "from 1 rather than towards it"),
+    ("SC", "sc", "Sigma_12",
+     "every SHEAR term goes to zero at once — it is the s_12 denominator in "
+     "the fibre criterion AND in both matrix criteria, so matrix tension "
+     "reduces to (s_yy/YT)^2 and matrix compression to the plain "
+     "|s_yy| >= YC test"),
+)
+
+
+def _mat022_zero_strengths(mat: MatCompositeDamage, law: int,
+                           state: ConversionState) -> None:
+    """A BLANK card-5 strength is not a default — it switches a mode OFF.
+
+    The #122 class ("emitted, accepted and misleading"): with all four cells
+    at zero the emitted ``/FAIL/CHANG`` row is ``0 0 0 <blank> 0``, the starter
+    reads it without a murmur, and NO Chang-Chang mode can ever trip — while
+    the conversion note next to it affirms the criteria are term for term the
+    LS-DYNA ones "with NO conversion factor". Named here for the same reason
+    the batch names EC -> max(E11,E22), XC -> 1e20, SLIM* -> 1.0 and the
+    alpha -> 1 substitution: every silent reader substitution gets a sentence.
+
+    Called on BOTH arms — ``hm_read_mat127.F90:279-284`` runs the identical
+    ``if (x == zero) x = ep20`` line for sc/xt/xc/yt/yc.
+    """
+    blanks = [(name, chang, effect)
+              for name, attr, chang, effect in _MAT022_STRENGTH_MODES
+              if getattr(mat, attr) == 0.0]
+    if not blanks:
+        return
+    where = ("/FAIL/CHANG (hm_read_fail_chang.F90:99-104)" if law == 25
+             else "/MAT/LAW127 (hm_read_mat127.F90:279-284)")
+    state.warn(
+        f"*MAT_COMPOSITE_DAMAGE {mat.mid}: card 5 leaves "
+        + "/".join(n for n, _c, _e in blanks)
+        + " at ZERO, and " + where + " substitutes 1e20 for an exact zero "
+        "rather than erroring. The strength is therefore NOT carried and NOT "
+        "defaulted — the mode it gates is DISABLED: "
+        + "; ".join(f"{n} ({c}) — {e}" for n, c, e in blanks)
+        + ". LS-DYNA reads a blank strength the same way, so this is faithful "
+        "to the card; it is reported because the emitted failure model looks "
+        "complete where it is inert. Fill the blank cell(s) on card 5 if the "
+        "mode(s) named must act.")
 
 
 def _mat022_poisson_degeneracy(mat: MatCompositeDamage, law: int,
@@ -2017,6 +2114,7 @@ def _emit_mat022(mat: MatCompositeDamage, state: ConversionState) -> List[str]:
     law = _mat022_law(state, mat.mid)
     _mat022_dropped_fields(mat, law, state)
     _mat022_zero_moduli(mat, law, state)
+    _mat022_zero_strengths(mat, law, state)
     _mat022_poisson_degeneracy(mat, law, state)
     if law == 127:
         return _emit_mat022_law127(mat, state)
@@ -2175,7 +2273,12 @@ def _emit_fail_chang(mat: MatCompositeDamage,
             f"Sigma_2c=YC={mat.yc:g}, Beta=1. At ALPH=0 that is term for term "
             "the LS-DYNA fibre, matrix-tension and matrix-compression "
             "criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs "
-            "fail_changchang_c.F90:155-181), with NO conversion factor. "
+            "fail_changchang_c.F90:155-181), with NO conversion factor"
+            + ("" if all((mat.xt, mat.yt, mat.sc, mat.yc)) else
+               " — but see the ZERO-STRENGTH note above: a cell left at 0 is "
+               "read as 1e20, so the mode it gates is switched off and this "
+               "rider is that much less than the LS-DYNA criteria")
+            + ". "
             "Sigma_1c is left blank on purpose: MAT_022 has no "
             "compressive-FIBRE strength and a blank reads as infinity, so "
             "that mode never trips. TWO cells have no MAT_022 source and are "
@@ -2253,10 +2356,14 @@ def _emit_mat022_law127(mat: MatCompositeDamage,
     solid_pids = ({e.pid for e in state.solid_elems}
                   | {e.pid for e in state.tshell_elems})
     shell_pids = {e.pid for e in state.shell_elems}
-    mixed = (any(p.mid == mat.mid and pid in shell_pids
-                 for pid, p in state.parts.items())
-             and any(p.mid == mat.mid and pid in solid_pids
-                     for pid, p in state.parts.items()))
+    # Through _part_mat_mids, so a *PART_COMPOSITE(_TSHELL) claiming the MID in
+    # layer 2..n counts on both sides — reading state.parts[pid].mid alone made
+    # a MID reached ONLY through a later ply report "its parts hold SOLID or
+    # THICK-SHELL elements" when it is in fact the shared shell+solid case.
+    owners = {pid for pid in (set(state.parts) | set(state.part_composites))
+              if mat.mid in _part_mat_mids(state, pid)}
+    mixed = (any(pid in shell_pids for pid in owners)
+             and any(pid in solid_pids for pid in owners))
     state.warn(
         f"*MAT_COMPOSITE_DAMAGE {mat.mid} -> /MAT/LAW127 rather than "
         "/MAT/LAW25 + /FAIL/CHANG, because "

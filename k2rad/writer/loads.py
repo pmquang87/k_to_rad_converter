@@ -6286,11 +6286,16 @@ def _make_damping_frequency_range(state: ConversionState) -> List[str]:
         # through in silence — the #124 "a guard gated on one condition goes
         # dead on its sibling" class, on a warning whose own text already names
         # the exclusion.
+        #
+        # Through _part_mat_mids, not state.parts[p].mid: a *PART_COMPOSITE's
+        # fallback PartData carries only the FIRST real ply's MID, so a MAT_022
+        # sitting in layer 2..n of a layup is meshed, is inside the damped
+        # scope, runs on LAW25 and would still be reported as damped.
+        from .composites import _part_mat_mids
         if law25 := sorted(p for p in scope
                            if p in meshed_pids
-                           and _target_mat_law(state,
-                                               getattr(state.parts.get(p),
-                                                       "mid", 0)) == 25):
+                           and any(_target_mat_law(state, m) == 25
+                                   for m in _part_mat_mids(state, p))):
             shown = (f"{law25[:10]} (+{len(law25) - 10} more)"
                      if len(law25) > 10 else str(law25))
             state.warn(

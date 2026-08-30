@@ -1258,8 +1258,19 @@ The `/FAIL/CHANG` rider takes `Sigma_1t = XT`, `Sigma_2t = YT`,
 criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs `fail_changchang_c.F90:
 155-181`), with no conversion factor. `Sigma_1c` is left blank on purpose —
 MAT_022 has no compressive-fibre strength and a blank reads as infinity, i.e.
-that mode never trips. Two cells have no MAT_022 source and are named as
-converter choices in the warning: `Ifail_sh = 2` (positive, so the failed
+that mode never trips. **The same device works against a deck that leaves a
+card-5 cell at zero**: `hm_read_fail_chang.F90:99-104` substitutes `infinity`
+(= 1e20, `constant_mod.F:521`) for every exact zero, so a blank `XT`, `YT`,
+`YC` or `SC` is not carried and not defaulted — the Chang-Chang mode it gates
+is DISABLED, and the emitted rider is inert exactly where it looks complete.
+That is faithful to LS-DYNA, which reads a blank strength the same way, so it
+is a named warning rather than a refusal; `/MAT/LAW127` runs the identical
+`if (x == zero) x = ep20` line (`hm_read_mat127.F90:279-284`) and gets the
+same note. A NEGATIVE modulus is named too, and for the opposite reason:
+`read_mat25_tsaiwu.F90:193-199` tests `== zero`, not `<= zero`, so `ERROR 306`
+never fires on one and neither reader screens it.
+Two cells have no MAT_022 source and are named as converter choices in the
+warning: `Ifail_sh = 2` (positive, so the failed
 layer's stress really is relaxed and switched off, and below 3, so the matrix
 criterion stays live) and `Tau_max = 1e-4 · ENDTIM` (a blank one becomes
 infinity and the whole rider then softens and deletes nothing). **A MAT_022
@@ -2020,8 +2031,13 @@ non-node member contributes the NODES of its entities.
 `*SET_PART_ADD` is the one family whose member cell may be NEGATIVE: Vol I R17
 p.43-57 makes `… 5, -9` the inclusive RANGE "every part set with id 5..9", and
 that is expanded (with the endpoints' validity checked against p.43-58). The
-other six pages state no meaning for a negative cell at all, so one there is
-warn-dropped by name rather than guessed at.
+union's OWN id is excluded from its own range — `*SET_PART_ADD 7` with members
+`5, -9` spans 7 and a set cannot contain itself; the members are the same
+either way, but including it made the resolver's cycle guard tell the reader to
+fix a legal deck. The other six pages state no meaning for a negative cell at
+all, so one there is warn-dropped by name rather than guessed at — and that now
+includes `*SET_NODE_ADD_ADVANCED`'s card 2b (p.43-46 gives its `SID[N]` no
+`GT.0`/`LT.0` reading either), which used to drop a negative silently.
 There is no `*SET_TSHELL_ADD` in LS-DYNA R17/R16 (it exists only in
 HyperMesh's cfg pool), so k2rad does not invent one — such a block is reported
 in `skipped_keywords`.
@@ -2031,7 +2047,11 @@ zero, and `hm_read_surf.F:318-321` maps the second onto the first inside the
 starter — so both collapse at parse time. Keyed apart they were two segments,
 and a `*SET_SEGMENT_ADD` over both applied its `/PLOAD` pressure twice
 (measured against a one-row twin: EXT-WORK 18.35 → 73.39, a factor of 4.0005,
-i.e. impulse ×2.0001, both runs 0 ERROR / NORMAL TERMINATION).
+i.e. impulse ×2.0001, both runs 0 ERROR / NORMAL TERMINATION). The same
+collapse runs on `*LOAD_BLAST_SEGMENT`'s inline rows, the other producer of a
+segment set. It makes the two SPELLINGS one segment and nothing more: a face a
+single block genuinely lists twice still emits two `/SURF/SEG` rows, which is
+what LS-DYNA does with it.
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)

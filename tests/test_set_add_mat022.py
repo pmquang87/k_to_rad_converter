@@ -606,6 +606,27 @@ class SetNodeAddAdvancedTests(unittest.TestCase):
             {1: "NODE", 2: "SHELL", 3: "BEAM", 4: "SOLID", 5: "SEGMENT",
              6: "DISCRETE", 7: "TSHELL"})
 
+    def test_a_negative_member_is_dropped_by_name(self):
+        """p.43-46 gives card 2b's SID[N] no GT.0/LT.0 block, so dropping a
+        negative is right — but the handler used to drop it at `sid > 0`, i.e.
+        SILENTLY, while every plain _ADD family warns by name. Only an exact
+        ZERO is padding."""
+        extra = "*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
+        deck = self._adv([(51, 1), (-12, 1)], extra)
+        res, _ = _convert(deck)
+        st = _flat(deck)
+        self.assertEqual(sorted(st.node_sets[50][1]), [1, 2])
+        hits = _warns(res, "*SET_NODE_ADD_ADVANCED 50", "-12", "NEGATIVE")
+        self.assertTrue(hits)
+        self.assertIn("p.43-46", hits[0])
+
+    def test_a_zero_member_is_still_silent_padding(self):
+        extra = "*SET_NODE_LIST\n" + _row(51) + "\n" + _row(1, 2) + "\n"
+        deck = self._adv([(51, 1), (0, 0)], extra)
+        res, _ = _convert(deck)
+        self.assertEqual(sorted(_flat(deck).node_sets[50][1]), [1, 2])
+        self.assertFalse(_warns(res, "*SET_NODE_ADD_ADVANCED 50", "NEGATIVE"))
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # A. The unions reach their CONSUMERS
@@ -853,10 +874,14 @@ class Mat022Law25CardTests(unittest.TestCase):
         (read_mat25_tsaiwu.F90:206-241). 1e20 pushes the Tsai-Wu surface out
         of reach; the FAILURE strengths belong on the /FAIL/CHANG rider, not
         in yield slots."""
+        from k2rad.writer.composites import _LAW25_NO_TSAIWU_ALPHA
         card7, card8 = self.rows[7], self.rows[8]
         for f in range(4):                       # sig_1yt 2yt 1yc 2yc
             self.assertAlmostEqual(_f20(card7, f), 1.0e20, delta=1.0e6)
-        self.assertAlmostEqual(_f20(card7, 4), 0.0, places=12)      # alpha
+        # alpha — the SMALL positive, not 0. `places=12` would accept 0.0 too,
+        # and 0.0 is exactly what read_mat25_tsaiwu.F90:273 turns back into 1;
+        # Mat022TsaiWuAlphaTests owns the reasoning, this pins the same value.
+        self.assertEqual(_f20(card7, 4), _LAW25_NO_TSAIWU_ALPHA)
         for f in range(2):                       # sig_12yc, sig_12yt
             self.assertAlmostEqual(_f20(card8, f), 1.0e20, delta=1.0e6)
 
@@ -965,21 +990,34 @@ class Mat022FailChangTests(unittest.TestCase):
         # any four values and could not fail.
         self.assertEqual((xt, yt, sc, yc), (1062.0, 31.0, 72.0, 118.0))
         self.assertEqual(beta, 1.0)
-        # F_fiber = (s1/XT)^2 + Beta*(t12/SC)^2 must reach 1 exactly AT the
-        # card's own XT and SC, and stay below it one percent short of them.
-        self.assertAlmostEqual((xt / xt) ** 2 + beta * (0.0 / sc) ** 2,
-                               1.0, places=12)
-        self.assertAlmostEqual((0.0 / xt) ** 2 + beta * (sc / sc) ** 2,
-                               1.0, places=12)
-        self.assertLess((0.99 * xt / xt) ** 2 + beta * (0.99 * sc / sc) ** 2
-                        - 1.0, 1.0)
-        # F_comp reaches 1 at s2 = -YC and is BELOW 1 at 0.9*YC — the second
-        # half is what makes this a check on YC's value and not an identity.
-        def f_comp(s2):
-            return ((s2 / (2 * sc)) ** 2
+
+        # Every criterion is evaluated at a FIXED stress state in MPa and
+        # checked against a constant computed by hand from those four numbers.
+        # Anything of the form f(XT)/XT cancels and holds for every XT — the
+        # previous spelling did exactly that and could not fail; a fixed state
+        # moves the moment any strength or Beta moves.
+        def f_fibre(s1, t12):                    # fail_changchang_c.F90:155
+            return (s1 / xt) ** 2 + beta * (t12 / sc) ** 2
+
+        def f_mat_t(s2, t12):                    # :171
+            return (s2 / yt) ** 2 + (t12 / sc) ** 2
+
+        def f_mat_c(s2, t12):                    # :176-178
+            return ((s2 / (2 * sc)) ** 2 + (t12 / sc) ** 2
                     + ((yc / (2 * sc)) ** 2 - 1.0) * s2 / yc)
-        self.assertAlmostEqual(f_comp(-yc), 1.0, places=12)
-        self.assertLess(f_comp(-0.9 * yc), 1.0)
+
+        self.assertAlmostEqual(f_fibre(1000.0, 50.0), 1.368900530570,
+                               places=10)
+        self.assertAlmostEqual(f_mat_t(25.0, 50.0), 1.132617290374, places=10)
+        self.assertAlmostEqual(f_mat_c(-100.0, 0.0), 0.760652071563,
+                               places=10)
+        # And the three onsets, which ARE the criteria's defining identities
+        # (s1 = XT / t12 = SC / s2 = -YC each give exactly 1) — kept as the
+        # statement of what the emitted cells mean, not as a discriminating
+        # check; the three constants above are what discriminates.
+        self.assertAlmostEqual(f_fibre(xt, 0.0), 1.0, places=12)
+        self.assertAlmostEqual(f_fibre(0.0, sc), 1.0, places=12)
+        self.assertAlmostEqual(f_mat_c(-yc, 0.0), 1.0, places=12)
 
     def test_no_termination_time_makes_it_an_indicator_and_says_so(self):
         deck = _shell_deck().replace("*CONTROL_TERMINATION\n     0.010\n", "")
@@ -1287,6 +1325,54 @@ class SetPartAddRangeTests(unittest.TestCase):
             + "*SET_PART_ADD\n" + _row(70) + "\n" + _row(5, -7) + "\n"))
         self.assertEqual(sorted(st.part_sets[70][1]), [1, 2])
 
+    #: Part sets 5, 6, 8 and 9 on parts 1, 2, 4 and 1 — a pool a range can
+    #: span while the union's OWN id sits inside it.
+    _POOL = "".join("*SET_PART_LIST\n" + _row(s) + "\n" + _row(p) + "\n"
+                    for s, p in ((5, 1), (6, 2), (8, 4), (9, 1)))
+
+    def test_a_range_spanning_the_unions_own_id_is_not_a_cycle(self):
+        """`*SET_PART_ADD 7` with members `5, -9` spans 7, and the pool the
+        range is resolved against holds every part set INCLUDING 7 — so
+        without excluding it the union becomes a member of itself and the
+        resolver's cycle guard tells the reader to "fix the deck" on a deck
+        Vol I R17 p.43-57 declares legal. The members were always right (a
+        union with itself is a no-op); the diagnostic was not, and the frame
+        was also marked `cyclic`, barring it and every union above it from
+        the memo."""
+        deck = MESH.replace(
+            "{EXTRA}",
+            self._POOL + "*SET_PART_ADD\n" + _row(7) + "\n" + _row(5, -9)
+            + "\n")
+        res, _ = _convert(deck)
+        st = _flat(deck)
+        self.assertEqual(sorted(st.part_sets[7][1]), [1, 2, 4])
+        self.assertFalse(_warns(res, "reached from itself"))
+
+    def test_the_select_everything_range_is_not_a_cycle_either(self):
+        """`1, -99999` is the deck-writer's "every part set" idiom; the union
+        id is always inside it."""
+        deck = MESH.replace(
+            "{EXTRA}",
+            self._POOL + "*SET_PART_ADD\n" + _row(100) + "\n"
+            + _row(1, -99999) + "\n")
+        res, _ = _convert(deck)
+        st = _flat(deck)
+        self.assertEqual(sorted(st.part_sets[100][1]), [1, 2, 4])
+        self.assertFalse(_warns(res, "reached from itself"))
+
+    def test_a_real_cycle_inside_a_range_is_still_reported(self):
+        """The exclusion is the union's OWN id only — a genuine A -> B -> A
+        cycle reached THROUGH a range must still be cut and named."""
+        deck = MESH.replace(
+            "{EXTRA}",
+            "*SET_PART_LIST\n" + _row(5) + "\n" + _row(1) + "\n"
+            + "*SET_PART_LIST\n" + _row(9) + "\n" + _row(2) + "\n"
+            # 7's range 5..9 picks up the union 8, which names 7 straight back
+            + "*SET_PART_ADD\n" + _row(7) + "\n" + _row(5, -9) + "\n"
+            + "*SET_PART_ADD\n" + _row(8) + "\n" + _row(7) + "\n")
+        res, _ = _convert(deck)
+        self.assertTrue(_warns(res, "reached from itself", "7 -> 8 -> 7"))
+
 
 class SetAddDiagnosticSpellingTests(unittest.TestCase):
     """Every diagnostic must name the card the DECK contains.
@@ -1406,6 +1492,33 @@ class SegmentTriangleSpellingTests(unittest.TestCase):
                 if ln.strip()]
         self.assertEqual(rows, [["1", "9", "10", "11", "0"]])
 
+    def test_the_blast_segment_producer_collapses_too(self):
+        """The SECOND parse site. *LOAD_BLAST_SEGMENT builds its own
+        SegmentSet from inline `bid n1 n2 n3 n4` rows
+        (handlers.handle_load_blast_segment), and it got the same collapse in
+        the review round — but no test, so reverting it left the whole suite
+        green. Benign today (hm_read_surf.F:318-321 restores the corner and
+        this handler does no intra-block de-duplication), yet it is the site
+        that would silently diverge the day anything keys on the raw list."""
+        extra = ("*LOAD_BLAST_SEGMENT\n"
+                 + _row(1, 9, 10, 11, 11) + "\n"
+                 + _row(1, 2, 3, 10, 9) + "\n"
+                 + "*LOAD_BLAST_ENHANCED\n"
+                 + _row(1, 50.0, 2.5, 0.0, 5.0, 0.0, 2, 1) + "\n"
+                 + _row(0.0, 0.0, 0.0, 0.0, 0, "1.0E20", 0) + "\n")
+        st = _flat(MESH.replace("{EXTRA}", extra))
+        self.assertEqual(len(st.blast_segment_loads), 1)
+        ssid = st.blast_segment_loads[0].ssid
+        self.assertEqual(st.segment_sets[ssid].segments,
+                         [[9, 10, 11], [2, 3, 10, 9]])
+        _res, starter = _convert(MESH.replace("{EXTRA}", extra))
+        surf = _headers(starter, "/SURF/SEG/")
+        self.assertTrue(surf)
+        rows = [ln.split() for ln in _data_rows(starter, surf[0])[1:]
+                if ln.strip()]
+        self.assertEqual(rows, [["1", "9", "10", "11", "0"],
+                                ["2", "2", "3", "10", "9"]])
+
 
 class Mat022TsaiWuAlphaTests(unittest.TestCase):
     """The `alpha` cell is the other half of the 1e20 elastic-carrier device.
@@ -1436,12 +1549,21 @@ class Mat022TsaiWuAlphaTests(unittest.TestCase):
         """f11 = f22 = 1/max(1e-20, min(1e20, Y^2)) and
         f12 = -alpha/(2*sqrt(min(1e20, Y^4))).  ft1 = f11*f22 - 4*f12^2 must
         stay POSITIVE (a closed ellipse, not a hyperbola), and the cross term
-        must be orders below the diagonal ones so the onset is unit-blind."""
+        must be orders below the diagonal ones so the onset is unit-blind.
+
+        The reader's ``:273`` substitution is applied HERE and not skipped:
+        computing f12 straight from the constant would give f12 = 0 for
+        alpha = 0 and both assertions would pass on the very value this class
+        exists to rule out.
+        """
         from k2rad.writer.composites import (_LAW25_ELASTIC_SIGY,
                                              _LAW25_NO_TSAIWU_ALPHA)
         y = _LAW25_ELASTIC_SIGY
+        # read_mat25_tsaiwu.F90:273 — `if (alpha == zero) alpha = one`.
+        alpha_read = (1.0 if _LAW25_NO_TSAIWU_ALPHA <= 0.0
+                      else _LAW25_NO_TSAIWU_ALPHA)
         f11 = 1.0 / max(1e-20, min(1e20, y * y))
-        f12 = -_LAW25_NO_TSAIWU_ALPHA / (2.0 * (min(1e20, y ** 4)) ** 0.5)
+        f12 = -alpha_read / (2.0 * (min(1e20, y ** 4)) ** 0.5)
         self.assertGreater(f11 * f11 - 4.0 * f12 * f12, 0.0)
         self.assertLess(2.0 * abs(f12), 1.0e-6 * (f11 + f11))
 
@@ -1512,6 +1634,59 @@ class Mat022PartCompositeAoptTests(unittest.TestCase):
         from that registry made this warning fire on a CORRECT deck."""
         res, _ = _convert(self._pc_deck())
         self.assertFalse(_warns(res, "is NOT emitted as a /MAT"))
+
+
+class Mat022PlyVisibilityTests(unittest.TestCase):
+    """A ``*PART_COMPOSITE``'s fallback ``PartData`` carries only the FIRST
+    real ply's MID, so any "what law does this part run on?" test that reads
+    ``state.parts[pid].mid`` alone is blind to layers 2..n. That is the same
+    blindness the AOPT walk had; ``composites._part_mat_mids`` is the one
+    answer both now use."""
+
+    def _pc(self, ply_mids, elform=0, first_mat=""):
+        """MESH + a *PART_COMPOSITE 100 whose plies are *ply_mids*."""
+        cells = []
+        for m in ply_mids:
+            cells += [m, 0.5, 0.0, 0]
+        return (first_mat
+                + "*PART_COMPOSITE\n" "pc\n"
+                + _row(100, elform, 0, 0, 0, 0, 0) + "\n"
+                + _row(*cells) + "\n"
+                + MAT22_SHELL)
+
+    def test_a_law25_ply_is_named_by_the_damping_report(self):
+        """mulawc.F90:1972 excludes ilaw == 25 from damping_range_shell
+        outright, and the warning that says so keyed on the part's fallback
+        MID — so a MAT_022 in layer 2 came out silently undamped."""
+        extra = (self._pc([1, 7])
+                 + "*ELEMENT_SHELL\n" + _row(203, 100, 2, 3, 10, 9) + "\n"
+                 + "*SET_PART_LIST\n" + _row(300) + "\n" + _row(100) + "\n"
+                 + "*DAMPING_FREQUENCY_RANGE\n"
+                 + _row(0.02, 10.0, 1000.0, 0, 300, 0, 0.0, 0.0) + "\n")
+        res, starter = _convert(MESH.replace("{EXTRA}", extra))
+        self.assertTrue(_headers(starter, "/MAT/LAW25/7"))
+        hits = _warns(res, "run on /MAT/LAW25 (COMPSH)")
+        self.assertTrue(hits)
+        self.assertIn("[100]", hits[0])
+
+    def test_a_layer_two_mat022_on_a_tshell_makes_the_mix_note_honest(self):
+        """A MID reached ONLY through a later ply of a *PART_COMPOSITE_TSHELL
+        used to make the LAW127 note say "its parts hold SOLID or THICK-SHELL
+        elements" when the MID is in fact shared with a shell part."""
+        extra = (self._pc([1, 7], elform=2)
+                 .replace("*PART_COMPOSITE\n", "*PART_COMPOSITE_TSHELL\n")
+                 + "*ELEMENT_TSHELL\n"
+                 + "".join(f"{v:>8}" for v in (501, 100, 1, 2, 3, 4, 5, 6, 7,
+                                               8))
+                 + "\n")
+        deck = MESH.replace("{EXTRA}", extra)
+        # the ordinary shell part 2 carries the same MID 7
+        deck = deck.replace("shell\n" + _row(2, 2, 1), "shell\n" + _row(2, 2, 7))
+        res, starter = _convert(deck)
+        self.assertTrue(_headers(starter, "/MAT/LAW127/7"))
+        hits = _warns(res, "-> /MAT/LAW127 rather than")
+        self.assertTrue(hits)
+        self.assertIn("shared by SHELL and SOLID/thick-shell parts", hits[0])
 
 
 class Mat022RegistryWalkTests(unittest.TestCase):
@@ -1587,6 +1762,43 @@ class Mat022RegistryWalkTests(unittest.TestCase):
             + _row(8, 0.5, 0.0, 0, 7, 0.5, 0.0, 0) + "\n")
         st = _dispatch(deck)
         self.assertEqual(_mat022_law(st, 7), 127)
+
+    def test_the_thermal_registry_can_split_a_mat022(self):
+        """thermal._material_registries excluded *MAT_022 on the ground that
+        its /FAIL/CHANG rider is "keyed on the SAME mid" and a bare
+        dataclasses.replace clone would strand it. That was FALSE:
+        _emit_fail_chang writes f"/FAIL/CHANG/{mat.mid}" FROM the record, so
+        the rider is generated for the clone. A convertible card was being
+        dropped, with a reason that is not true."""
+        expansion = (
+            "*DEFINE_CURVE\n" + _row(801, 0, 1.0, 1.0, 0.0, 0.0) + "\n"
+            + "                 0.0             1.0E-05\n"
+            + "               100.0             1.0E-05\n"
+            + "*MAT_ADD_THERMAL_EXPANSION\n" + _row(2, 801, 1.0) + "\n")
+        # parts 2 and 100 both on MID 7; the expansion names part 2 only
+        extra = (MAT22_SHELL
+                 + "*PART\nshell2\n" + _row(100, 2, 7) + "\n"
+                 + "*ELEMENT_SHELL\n" + _row(203, 100, 2, 3, 10, 9) + "\n"
+                 + expansion)
+        deck = MESH.replace("{EXTRA}", extra)
+        deck = deck.replace("shell\n" + _row(2, 2, 1),
+                            "shell\n" + _row(2, 2, 7))
+        res, starter = _convert(deck)
+        self.assertFalse(_warns(res, "cannot be SPLIT off"))
+        for h in ("/MAT/LAW25/7", "/FAIL/CHANG/7"):
+            self.assertTrue(_headers(starter, h), h)
+        clones = _headers(starter, "/THERM_STRESS/MAT/")
+        self.assertEqual(len(clones), 1)
+        new = clones[0].rsplit("/", 1)[1]
+        # the clone carries BOTH its /MAT and its generated rider
+        self.assertTrue(_headers(starter, f"/MAT/LAW25/{new}"))
+        self.assertTrue(_headers(starter, f"/FAIL/CHANG/{new}"))
+
+    def test_the_split_refusal_no_longer_names_mat_022(self):
+        from k2rad.writer import thermal
+        src = thermal._material_registries.__doc__ or ""
+        self.assertNotIn("mat_composite_damage`` (*MAT_022's shell arm", src)
+        self.assertIn("Four /MAT producers", src)
 
 
 class MixedDeckInteractionTests(unittest.TestCase):
@@ -1680,3 +1892,102 @@ class Mat022PoissonDegeneracyTests(unittest.TestCase):
             with self.subTest(build=build.__name__):
                 res, _ = _convert(build())
                 self.assertFalse(_warns(res, "compliance determinant"))
+
+
+class Mat022ZeroStrengthTests(unittest.TestCase):
+    """A BLANK card-5 strength is not a default — both readers substitute
+    ``infinity`` (= 1e20, constant_mod.F:521) for an exact zero
+    (hm_read_fail_chang.F90:99-104, hm_read_mat127.F90:279-284), so the mode
+    that cell gates can never trip. The emitted /FAIL/CHANG then reads
+    ``0 0 0 <blank> 0``, the starter accepts it, and the failure model is
+    inert — the #122 "emitted, accepted and misleading" class."""
+
+    #: SC/XT/YT/YC all blank; everything else as MAT22_SHELL.
+    _CARD5_ZERO = _row(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def _zero_mat(self):
+        return MAT22_SHELL.replace(
+            _row(72.0, 1062.0, 31.0, 118.0, 0.0, 0.0, 0.0, 0.0),
+            self._CARD5_ZERO)
+
+    def test_all_four_blanks_are_named_with_the_mode_each_kills(self):
+        res, _ = _convert(_shell_deck(self._zero_mat()))
+        hits = _warns(res, "*MAT_COMPOSITE_DAMAGE 7", "card 5 leaves")
+        self.assertTrue(hits)
+        for needle in ("XT", "YT", "YC", "SC", "1e20",
+                       "TENSILE FIBRE", "MATRIX-TENSION",
+                       "MATRIX-COMPRESSION",
+                       "hm_read_fail_chang.F90:99-104"):
+            self.assertIn(needle, hits[0])
+
+    def test_the_term_for_term_claim_is_qualified(self):
+        """The /FAIL/CHANG note affirms the criteria are LS-DYNA's 'with NO
+        conversion factor'. On an all-blank card 5 that reads as a promise the
+        rider cannot keep."""
+        res, _ = _convert(_shell_deck(self._zero_mat()))
+        hits = _warns(res, "term for term")
+        self.assertTrue(hits)
+        self.assertIn("ZERO-STRENGTH note", hits[0])
+
+    def test_one_blank_names_only_its_own_mode(self):
+        mat = MAT22_SHELL.replace(
+            _row(72.0, 1062.0, 31.0, 118.0, 0.0, 0.0, 0.0, 0.0),
+            _row(72.0, 1062.0, 31.0, 0.0, 0.0, 0.0, 0.0, 0.0))     # YC only
+        res, _ = _convert(_shell_deck(mat))
+        hits = _warns(res, "card 5 leaves")
+        self.assertTrue(hits)
+        self.assertIn("MATRIX-COMPRESSION", hits[0])
+        self.assertNotIn("TENSILE FIBRE", hits[0])
+
+    def test_the_solid_arm_names_it_too(self):
+        """LAW127 runs the identical `if (x == zero) x = ep20` line, so the
+        #129 both-arms rule applies."""
+        res, _ = _convert(_solid_deck(self._zero_mat()))
+        hits = _warns(res, "card 5 leaves")
+        self.assertTrue(hits)
+        self.assertIn("hm_read_mat127.F90:279-284", hits[0])
+
+    def test_a_full_card_says_nothing(self):
+        for build in (_shell_deck, _solid_deck):
+            with self.subTest(build=build.__name__):
+                res, _ = _convert(build())
+                self.assertFalse(_warns(res, "card 5 leaves"))
+                self.assertNotIn("ZERO-STRENGTH note",
+                                 " ".join(_warns(res, "term for term")))
+
+
+class Mat022NegativeModulusTests(unittest.TestCase):
+    """read_mat25_tsaiwu.F90:193-199 tests `== zero`, NOT `<= zero` (contrast
+    :201, `if (e33 <= zero)`), so ERROR 306 does not fire on a negative
+    modulus and hm_read_mat127.F90 has no modulus guard at all. Neither side
+    screened it."""
+
+    def _neg(self):
+        return MAT22_SHELL.replace(
+            _row(7, "2.20000E-9", 38600.0, 8270.0, 5000.0, 0.0557, 0.0411,
+                 0.49),
+            _row(7, "2.20000E-9", -38600.0, 8270.0, 5000.0, 0.0557, 0.0411,
+                 0.49))
+
+    def test_both_arms_name_a_negative_modulus(self):
+        for build, arm in ((_shell_deck, "LAW25"), (_solid_deck, "LAW127")):
+            with self.subTest(arm=arm):
+                res, _ = _convert(build(self._neg()))
+                hits = _warns(res, "*MAT_COMPOSITE_DAMAGE 7", "is NEGATIVE")
+                self.assertTrue(hits)
+                self.assertIn("EA", hits[0])
+                self.assertIn("`== zero`", hits[0])
+
+    def test_the_error_306_text_says_exactly_zero(self):
+        mat = MAT22_SHELL.replace(
+            _row(4140.0, 2100.0, 3100.0, 0.0, 2.0, 1, 0),
+            _row(0.0, 2100.0, 3100.0, 0.0, 2.0, 1, 0))             # GAB = 0
+        res, _ = _convert(_shell_deck(mat))
+        hits = _warns(res, "ERROR 306")
+        self.assertTrue(hits)
+        self.assertIn("EXACTLY zero", hits[0])
+        self.assertNotIn("at or below zero", hits[0])
+
+    def test_a_healthy_card_says_nothing(self):
+        res, _ = _convert(_shell_deck())
+        self.assertFalse(_warns(res, "is NEGATIVE"))

@@ -366,13 +366,36 @@ Prior history (before this changelog was introduced) is summarized in the
      `mat_enhanced_composite` only — the ONE walk of the three composite
      containers that the batch missed (`tshell._AOPT_MAT_DICTS`,
      `_emit_composite_props` and `_composite_ref_axis` all had it). A MAT_022
-     ply therefore left `axis` at the `Ip=20` "element frame" default and no
-     `/SKEW` was written: a 90° fibre error whenever the deck's `a` vector is
-     not global X, and on master the same deck was REFUSED outright
-     (ERROR 179), so the batch turned a loud failure into a silent wrong
-     answer. Reach: the W6 sandwich carrier's `*PART_COMPOSITE` 12 and 13
-     (4 MAT_022 plies each) — numerically unaffected there only because W6's
-     own `a = (1,0,0)` coincides with the fallback.
+     ply therefore left `axis` at the `Ip=20` default and no `/SKEW` was
+     written, and on master the same deck was REFUSED outright (ERROR 179), so
+     the batch turned a loud failure into a silent wrong answer.
+
+     **`Ip=20` is the ELEMENT frame, not global X** — material direction 1 is
+     the element's own N1→N2 edge, and the `Vx Vy Vz` cell written beside it is
+     inert. Measured on a two-run twin differing ONLY in the connectivity
+     (same nodes, same AOPT, same loading, same BCs): with N1→N2 along global
+     +X the pre-fix run measures `a11`, with the same quad respelled 2-3-4-1 it
+     measures `a22`. So the fallback follows the mesh, and the reach is not
+     "decks whose `a` is not global X" — it is every deck whose element edges
+     do not happen to line up with `a`.
+
+     Reach on the **W6** sandwich carrier's `*PART_COMPOSITE` 12 and 13
+     (4 MAT_022 plies each, layup `[0/90/45/-45]` at 1.0 mm per ply): the
+     element N1→N2 axis sits at a **median 49.07° / 49.20°** to the in-plane
+     projection of the plies' `a = (1,0,0)`, and 2819 of 3078 / 2793 of 3059
+     quads are more than 1° off. What that costs is layup-specific, and W6's
+     layup is the forgiving one: `[0/90/45/-45]` equal-thickness is
+     **quasi-isotropic in-plane**, so its `A` matrix is invariant under any
+     rotation of the reference frame — `A11/h = A22/h = 79 401`, `A12/h =
+     35 037`, `A16 = 0` at 0° and at 49° alike (CLT with the reader's own
+     `nu12 = PRBA·EA/EB = 0.4333`, `detc = 0.935`). The MEMBRANE answer on W6
+     really is unchanged. The bending and per-ply answers are not: the stack is
+     unsymmetric, `D11` drops from 514 382 to 320 607 (**−37.7 %**) over that
+     49° rotation, and under a unit global `eps_xx` the fibre stress moves from
+     the 0° ply to the 45° ply (`sig_1` 129.8 → 32.6 on the former, 44.7 →
+     129.0 on the latter) — i.e. which ply reaches a Chang-Chang index first
+     changes completely. For a sandwich IMPACT deck that is the part that
+     matters, so the pre-fix W6 answer was wrong, not merely undiagnosed.
 
   3. **The two documented spellings of a triangular `*SET_SEGMENT` were two
      different segments.** Vol I R17 p.43-63 verbatim: *"N4 — Nodal point n4.
@@ -390,13 +413,21 @@ Prior history (before this changelog was introduced) is summarized in the
      K-ENERGY 17.68 -> 70.73 — a factor of **4.0005**, i.e. impulse x**2.0001**:
      the pressure on that face applied exactly TWICE. Both spellings now collapse at
      PARSE time, so every consumer sees one — the same normalisation
-     `_shell_segment_rows` already applied on the `*LOAD_SHELL` path, and it is
-     applied to `*LOAD_BLAST_SEGMENT`'s inline segments too.
+     `_shell_load_segments` (`writer/loads.py:4415`) already applied on the
+     `*LOAD_SHELL` path, and it is applied to `*LOAD_BLAST_SEGMENT`'s inline
+     segments too. Scope, stated exactly: the collapse makes the two SPELLINGS
+     one segment. It does not de-duplicate a face a single `*SET_SEGMENT` block
+     genuinely lists twice — two identical rows still emit two `/SURF/SEG` rows
+     and the pressure still lands twice, which is what LS-DYNA does with them.
 
      This is the one fix in the round that moves `.rad` bytes on decks that
-     have nothing to do with `_ADD` sets: the five **W13 blast** corpus decks
-     write their `*SET_SEGMENT` triangles in the `n1 n2 n3 n3` spelling, so 370
-     `/SURF/SEG` rows change from `… n3 n3` to `… n3 0`. **Re-validated on that
+     have nothing to do with `_ADD` sets: the ten **W13 blast** corpus decks
+     (11 distinct-by-SHA256 `W13*.k`, less the mesh-only
+     `W13_INITIAL_VehicleMesh.k`) write their `*SET_SEGMENT` triangles in the
+     `n1 n2 n3 n3` spelling, so on the `W13_SETUP_BlastVehicle` carrier 370
+     `/SURF/SEG` rows change from `… n3 n3` to `… n3 0` — counted independently
+     in the SOURCE deck, 370 of its 33 420 `*SET_SEGMENT` rows carry
+     `n4 == n3`. **Re-validated on that
      solver-validated path**: starter on both trees, 0 ERROR / 4 WARNING(S)
      each, `.out` echoes identical line for line except the reported free-RAM
      figure, and the two 107 889 661-byte `_0000_0001.rst` restart files differ
@@ -511,6 +542,138 @@ Prior history (before this changelog was introduced) is summarized in the
   FIBER` — the 90° plies (layers 2, 4, 5, 7 and no others) are loaded across
   their fibres — and WARNING 3030 names `PROPERTY ID 90013 IS A TYPE 11` there
   and `TYPE 51` on W6, not "the TYPE51 note".
+
+- **MILESTONE-2 BATCH 1, verification round — one false diagnostic the review
+  round introduced, five losses that were silent or wrongly explained, and
+  four documentation claims that were not true.** Everything here was
+  re-derived from the manual or the starter/engine source before it was
+  touched, and each of the ten code changes has a regression test that was
+  mutation-checked (11 planted reversions, 11 caught).
+
+  1. **A `*SET_PART_ADD` range that spans the union's OWN id drew a false
+     "this union is reached from itself" warning.** `_expanded_member_ids`
+     resolved the range against every part set the deck defines — including
+     the union itself — so `*SET_PART_ADD 7` with members `5, -9`, and the
+     "select everything" idiom `1, -99999`, made the union a member of itself.
+     The MEMBERS were always right (a union with itself is a no-op); the
+     message was not, and it told the engineer to "fix the deck" on a deck
+     Vol I R17 p.43-57 declares legal. Second-order: the cycle guard set
+     `cyclic = True`, which propagates up through `absorb` and barred that
+     union and every union above it from the memo. The union's own id is now
+     excluded from its own range, exactly as the range's start already was. A
+     genuine cycle reached THROUGH a range is still cut and named. MEASURED
+     two-tree on a valid probe — the review round's own `rv_rngSelf.k` cannot
+     see this, because it also defines a `*SET_PART_LIST 7`, so the
+     direct-set-collision branch short-circuits the expansion before the range
+     is ever resolved — `_0000.rad` SHA-256 identical on both trees, warning
+     present at HEAD and gone here. Diagnostic-only, so no solver re-run.
+
+  2. **`*SET_NODE_ADD_ADVANCED` dropped a NEGATIVE member id silently** while
+     the review round had just made every plain `_ADD` family warn by name for
+     the same cell. Dropping is right — Vol I R17 p.43-46 gives card 2b's
+     `SID[N]` no `GT.0`/`LT.0` reading — but only an exact ZERO is padding, and
+     the parser's `if sid > 0` conflated the two.
+
+  3. **A MAT_022 in layer 2..n of a `*PART_COMPOSITE` was invisible to two
+     more walks.** The review round fixed the AOPT walk this way; the same
+     `state.parts[pid].mid` blind spot (a composite part's fallback `PartData`
+     carries only the FIRST real ply's MID) was still in
+     `loads._make_damping_frequency_range`'s LAW25 arm — so a MAT_022 ply
+     inside a `*DAMPING_FREQUENCY_RANGE` scope came out COMPLETELY UNDAMPED
+     with no note (`mulawc.F90:1972` excludes `ilaw == 25`) — and in
+     `_emit_mat022_law127`'s `mixed` test, which made the LAW127-selection note
+     say "its parts hold SOLID or THICK-SHELL elements" on a MID that is in
+     fact shared with a shell part. Both now go through one helper,
+     `composites._part_mat_mids`.
+
+  4. **A BLANK card-5 strength produced a completely INERT `/FAIL/CHANG` while
+     the note beside it affirmed the criteria are LS-DYNA's "term for term …
+     with NO conversion factor".** `hm_read_fail_chang.F90:99-104` substitutes
+     `infinity` (= 1e20, `constant_mod.F:521`) for every exact zero, so a blank
+     `XT`/`YT`/`YC`/`SC` is not carried and not defaulted — the mode it gates
+     is switched off. With all four blank the emitted row is `0 0 0 <blank> 0`,
+     the starter reads it without a murmur and nothing can ever trip. Now named
+     per cell, with the mode each one kills, on BOTH arms —
+     `hm_read_mat127.F90:279-284` runs the identical `if (x == zero) x = ep20`
+     line — and the "term for term" clause is qualified when any cell is zero.
+     This is the #122 class the batch already names for `EC → max(E11,E22)`,
+     `XC → 1e20`, `SLIM* → 1.0` and `alpha → 1`.
+
+  5. **`ERROR 306` was overstated as "at or below zero", and a NEGATIVE modulus
+     was screened by neither side.** `read_mat25_tsaiwu.F90:193-199` tests
+     `== zero` exactly (contrast `:201`, `if (e33 <= zero)`), so a negative
+     `EA` walks straight past it into `c11 = 1/e1` — and k2rad's own guard read
+     `v == 0.0`. The docstring and the warning now say EXACTLY zero, and a
+     negative modulus gets its own message on both arms.
+
+  6. **`thermal._material_registries` excluded `*MAT_COMPOSITE_DAMAGE` on a
+     FALSE cited fact, and printed that fact to the user.** The stated reason
+     was that MAT_022's shell arm "writes a companion `/FAIL/CHANG` keyed on
+     the SAME mid, so a bare record copy would leave the failure model behind".
+     It does not: `_emit_fail_chang` writes `f"/FAIL/CHANG/{mat.mid}"` FROM the
+     record it is handed, so the rider is GENERATED for the clone and follows
+     it. So a convertible `*MAT_ADD_THERMAL_EXPANSION` was being dropped with a
+     reason that is not true. The family is now in the registry (verified
+     end-to-end: a deck with parts 100/101 on MAT_022 mid 7 and the expansion
+     on one of them emits `/MAT/LAW25/7 + /FAIL/CHANG/7`,
+     `/MAT/LAW25/90001 + /FAIL/CHANG/90001` and `/THERM_STRESS/MAT/90001`), the
+     refusal warning names four producers instead of five, and
+     `_structural_density` gains a MAT_022 `rho`.
+
+     The two remaining exclusions were re-checked against their emitters rather
+     than taken on the same trust, and both hold for reasons now stated
+     precisely: `_emit_mat_law5` looks its JWL up in `state.eos_jwl.get(mid)`,
+     a SECOND dict keyed by the OLD mid that a record copy does not bring — the
+     clone would come out with no `/EOS`; and `_emit_mat_law27_pair` writes one
+     card under `mat.mid` and one under the record's own reserved `glass_mid`,
+     which a copy KEEPS — so the clone would write a duplicate
+     `/MAT/LAW27/{glass_mid}` and hit starter ERROR 79. "Generated from the
+     record", "looked up in a second dict" and "a second id travelling on the
+     record" are three different answers, and only the first is safe to clone.
+
+  7. **Documentation and test hygiene.** `handlers.py` and `CHANGELOG.md` cited
+     `_shell_segment_rows`, which does not exist — the function is
+     `_shell_load_segments` (`writer/loads.py:4415`). `CHANGELOG.md` contradicted
+     itself on the W13 count (five vs ten; the corpus holds 11 distinct-by-SHA256
+     `W13*.k`, one of them the mesh-only `W13_INITIAL_VehicleMesh.k`, so ten,
+     and the 370-row figure is per-carrier — counted independently in the source
+     deck: 370 of 33 420 `*SET_SEGMENT` rows have `n4 == n3`). The
+     `*LOAD_BLAST_SEGMENT` half of the triangle canonicalisation had NO test —
+     mutation-checked, reverting it left the whole suite green — so the round's
+     "every one has a regression test" was untrue for that site; it has one now.
+     Three test assertions were stale or vacuous: an emitted-alpha check
+     asserted `0.0` to 12 places (which `1e-20` satisfies, and `0.0` is exactly
+     the value the reader turns back into 1); the Chang-Chang onset test's
+     inequalities cancelled their own strengths and held for every value (they
+     now evaluate each criterion at a FIXED stress state against a hand-computed
+     constant); and the Tsai-Wu cross-term test computed `f12` straight from the
+     constant, so it passed with `alpha = 0` — the very defect it reasons about
+     — and now applies the reader's `:273` zero→1 substitution first.
+
+  8. **The `*PART_COMPOSITE` ply-AOPT fix's stated reach on W6 was wrong in the
+     reassuring direction, and is corrected above.** `Ip=20` is the ELEMENT
+     frame, not global X, so W6's layup frame really was ~49° off on 6137
+     quads. Its `[0/90/45/-45]` stack is quasi-isotropic in-plane, so the `A`
+     matrix genuinely is rotation-invariant and the membrane answer is
+     unchanged — but `D11` moves −37.7 % and the per-ply stresses permute, so
+     the pre-fix answer on a sandwich IMPACT deck was wrong rather than merely
+     undiagnosed.
+
+  **Regression sweep, both halves, HEAD `20e2f59` vs this round.** Slice: the
+  35 `m2b1_val` decks, the 18 `m2b1_rev` decks, and every distinct-by-SHA256
+  corpus deck under 12 MB that carries a keyword this round can reach —
+  `*PART_COMPOSITE`, `*MAT_COMPOSITE_DAMAGE`, any `*SET_*_ADD`,
+  `*SET_SEGMENT`, `*LOAD_BLAST_SEGMENT`, `*DAMPING_FREQUENCY_RANGE`,
+  `*MAT_ADD_THERMAL_EXPANSION` or a sibling composite material (28 carriers,
+  including both vehicle `combine.key` `*INCLUDE` masters and the W6/W8/W13
+  carriers) — plus 40 random controls that carry none of them. **107 decks,
+  0 conversion errors on both trees, 0 differences in either half**: half 1 =
+  `.rad` SHA-256, half 2 = `warnings` + `skipped_keywords` +
+  `recognized_not_emitted`. Every change here is a diagnostic no corpus deck
+  triggers or a path no corpus deck takes, so no solver re-run was needed; the
+  one change that could have moved bytes (the range exclusion) was measured
+  two-tree on its own probe and is SHA-identical. Tests 4263 passed /
+  2 skipped / 1518 subtests; `ruff` clean.
 
 - **The RARE CARDS batch: `*DEFINE_ELEMENT_DEATH_{SOLID,BEAM,SHELL,THICK_SHELL}[_SET]`
   → `/ACTIV`; `*DEFINE_CURVE_SMOOTH[_TITLE]` → `/FUNCT_SMOOTH`;

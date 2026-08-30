@@ -81,10 +81,12 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   `:8584`, `:12781`); this is the shipped `*SET_PART_ADD` behaviour unchanged,
   and lifting it means deferring those four to a prepass. And
   `thermal._structural_density` walks the CLONE registry, so it reads no
-  density for the five producers deliberately excluded from it (LAW5+/EOS,
-  the LAW27 glass pair, MAT_022, the belt LAW114/119 and the spotweld
-  fallback) — today that surfaces only as the honest "rho_cp <= 0" warning on
-  a `/HEAT/MAT` built from one of them.
+  density for the four producers deliberately excluded from it (LAW5+/EOS,
+  the LAW27 glass pair, the belt LAW114/119 and the spotweld fallback) —
+  today that surfaces only as the honest "rho_cp <= 0" warning on a `/HEAT/MAT`
+  built from one of them. (MAT_022 WAS a fifth until the verification round:
+  its `/FAIL/CHANG` is generated from the record, so a clone carries it, and
+  the entry is now in the registry.)
   **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and

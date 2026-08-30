@@ -5119,7 +5119,14 @@ def handle_set_node_add_advanced(block: Block, state: ConversionState) -> None:
         for j in range(0, 8, 2):
             sid = to_int(f[j]) if len(f) > j else 0
             typ = to_int(f[j + 1]) if len(f) > j + 1 else 0
-            if sid > 0:
+            # Only an exact ZERO is card padding. A NEGATIVE SID has no meaning
+            # on this page — Vol I R17 p.43-46 gives card 2b's SID[N] no
+            # GT.0/LT.0 block, unlike *SET_PART_ADD's PSID — so it is dropped;
+            # but it is dropped BY NAME in writer/mesh._advanced_members, the
+            # same rule the plain _ADD families got in the review round. A
+            # silent drop here was the one spelling that still lost a member
+            # without saying so.
+            if sid != 0:
                 pairs.append((sid, typ))
     state.node_set_add_advanced[nsid] = (title, pairs)
 
@@ -12929,8 +12936,9 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
     pressure on that face TWICE (measured against a one-row twin on a free
     plate, both 0 ERROR / NORMAL TERMINATION / 67 cycles: EXT-WORK 18.35 ->
     73.39 and K-ENERGY 17.68 -> 70.73, a factor of 4.0005, i.e. impulse
-    x2.0001). It is also the same normalisation ``_shell_segment_rows`` already
-    does on the *LOAD_SHELL path.
+    x2.0001). It is also the same normalisation ``_shell_load_segments``
+    (``writer/loads.py:4415``) already does on the *LOAD_SHELL path, where the
+    collapse is spelled ``if len(nodes) >= 4 and nodes[3] == nodes[2]``.
 
     Stored on state.segment_sets for later /SURF/SEG emission.
     """
