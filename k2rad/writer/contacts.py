@@ -3415,7 +3415,7 @@ def _tiebreak_report_dropped_cells(state: ConversionState, c,
         msg += (
             (" " if msg else "")
             + "Card-4 cells outside this OPTION's field list (Vol I R17 "
-            f"p.11-38/39) and therefore INERT in LS-DYNA too, not lost — "
+            "p.11-38/39) and therefore INERT in LS-DYNA too, not lost — "
             + ", ".join(inert) + ".")
     if c.option in (-1, -2, -3):
         msg += (
