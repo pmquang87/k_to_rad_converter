@@ -180,6 +180,39 @@ Prior history (before this changelog was introduced) is summarized in the
       had none — `ERROR 117 INTERFACE ID USED TWICE OR MORE`, the `#125`
       "per-id memo PLUS a deck-wide scan for every namespace" rule.
 
+  **Corpus sweep, in two halves** (a sweep that compares only output files
+  cannot see a warning change — #129 round 2). 783 decks: the repo's
+  `ls-dyna_example`, all of `C:/openradioss_run` (Ryan-Lee examples included)
+  and `dynaexamples_r14_ton-mm-s`, master `a1447e1` vs this branch, **0
+  conversion exceptions on either side**.
+  * **Half 1 — the `.rad` files** (SHA-256 of `_0000.rad` and `_0001.rad`):
+    **34 of 783 differ.**
+  * **Half 2 — the diagnostics** (`warnings` + `skipped_keywords` +
+    `recognized_not_emitted`): **34 of 783 differ** — the same 34, none in only
+    one half.
+
+  Every mover accounted for, with arithmetic: **7 are tiebreak carriers**
+  (`plates.tied.k` plus the six `getriebekette.k` `*INCLUDE` drivers of the
+  Kurbel model), and **27 change in exactly one way — the deck's own
+  `*CONTACT_*_ID` is preserved** where the butted-title header used to make it
+  an auto-id (`90001 → 1`, `90002 → 100`, …). 7 + 27 = 34. No deck gained a
+  duplicate-`INTERFACE ID` warning, and no deck gained a skipped keyword.
+  Re-converting all 34 on the final HEAD reproduced the swept build
+  byte-for-byte, and 40 sampled contact-carrying non-movers stayed identical to
+  master.
+
+  **The size cap, stated rather than left implicit.** 83 of the 866 decks
+  found are over the 12 MB per-deck cap and were not swept — the Camry
+  (248 MB), the four Yaris models (101–192 MB) and, relevant here, **37 copies
+  of the Kurbel deck itself** (27.6 MB each; the `getriebekette.k` drivers that
+  `*INCLUDE` them ARE in the 783 and did move). The prime carrier was converted
+  separately instead, in 10.2 s, and starter-run: `/INTER/TYPE2/10 "Kurbel self
+  tiebreak contact"`, `FORMULATION LEVEL 27`, **0 ERROR(S)**, 2 WARNING(S) —
+  both `1071`, the whole-part secondary side's node deletions, which leave 81
+  of 4540 nodes tied, the same 81 the native OpenRadioss reader ties.
+  `plates.tied.k` likewise: **0 ERROR(S)**, `/INTER/TYPE2/90006`
+  `FORMULATION LEVEL 28`, `SEARCH DISTANCE 2.4`.
+
   **What this corpus cannot see.** A census over the repo, `C:/openradioss_run`
   (including the Ryan-Lee examples), `dynaexamples_r14_ton-mm-s` and
   `E:/foxcore_data` found **exactly two carrier shapes**: nine copies of the
