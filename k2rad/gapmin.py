@@ -724,6 +724,18 @@ def suggest_gapmins(state: ConversionState, factor: float = DEFAULT_GAPMIN_FACTO
     for c in state.contacts_single:
         skipped[c.inter_id] = "single-surface self-contact (no two-part clearance)"
 
+    # A *CONTACT_..._TIEBREAK is emitted as /INTER/TYPE2, a TIE, which has no
+    # Gapmin column at all — its engagement distance is `dsearch`, measured
+    # from the mesh by writer/contacts._tied_dsearch or floored by a negative
+    # Card-3 SST/MST. Named here rather than left out: before #131 a tiebreak
+    # lived in contacts_surf2surf and DID get a suggestion, so silence would
+    # turn into "no contact interfaces found to analyze" on a tiebreak-only
+    # deck — a false statement about a deck that plainly has one.
+    for c in state.contacts_tiebreak:
+        skipped[c.inter_id] = (
+            "*CONTACT_..._TIEBREAK -> /INTER/TYPE2 (a tie); TYPE2 has no "
+            "Gapmin, its engagement distance is dsearch")
+
     have_backend = _HAVE_FAST_PROXIMITY
 
     for c in state.contacts_surf2surf:

@@ -62,8 +62,15 @@ def _inject_implicit_contact_stub(state: ConversionState) -> None:
         return
     if state.contacts_single or state.contacts_surf2surf or state.contacts_general:
         return
-    if state.contacts_tied or state.contacts_spotweld:
-        # A tied or spot-welded deck already gets an /INTER (TYPE2). More
+    if state.contacts_tied or state.contacts_spotweld or state.contacts_tiebreak:
+        # A tied, spot-welded or TIEBREAK deck already gets an /INTER (TYPE2).
+        # contacts_tiebreak belongs in this guard, not the one above it: a
+        # tiebreak's pre-failure state IS a tie, so the tied reasoning applies
+        # to it verbatim. (Before #131 a tiebreak lived in contacts_surf2surf
+        # and blocked the stub from the previous line; moving it to its own
+        # container without this would have let an implicit tiebreak-only deck
+        # collect the stub, with the parasitic stiffness the comment below
+        # describes.) More
         # importantly, the all-parts TYPE7 self-contact stub would ENGAGE across
         # the tied gaps: tied nodes sit within half a shell thickness of their
         # main surface — inside the TYPE7 thickness-derived gap — so the "inert"

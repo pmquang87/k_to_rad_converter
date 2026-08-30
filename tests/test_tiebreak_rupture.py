@@ -842,6 +842,59 @@ class RegistryAudit(unittest.TestCase):
                if ln.rsplit("/", 1)[1].isdigit()]
         self.assertEqual(len(ids), len(set(ids)), minted)
 
+    def test_implicit_stub_is_not_added_beside_a_tiebreak_tie(self):
+        """k2rad/__init__ injects an all-parts self-contact stub on an implicit
+        deck that has NO contact. Before #131 a tiebreak lived in
+        contacts_surf2surf and blocked it; moving it to its own container
+        without updating the guard would add a parasitic penalty interface
+        across the tied gaps — the exact reason the guard already lists
+        contacts_tied and contacts_spotweld."""
+        deck = ("*KEYWORD\n" + _MESH
+                + _auto_tiebreak(1, "1000.0", "1000.0", "0.0")
+                + "*CONTROL_IMPLICIT_GENERAL\n         1     0.001\n" + _TAIL)
+        result, starter = _convert(deck)
+        self.assertFalse(
+            [ln for ln in starter.splitlines()
+             if ln.startswith("/INTER/TYPE7/")], starter)
+        self.assertFalse(
+            [w for w in result.warnings
+             if "auto_implicit_stabilization" in w], result.warnings)
+
+    def test_auto_gapmin_names_the_tiebreak_instead_of_going_silent(self):
+        """--auto-gapmin walks contacts_single + contacts_surf2surf only, and
+        /INTER/TYPE2 has no Gapmin at all. Leaving the tiebreak out silently
+        would make a tiebreak-only deck report "no contact interfaces found to
+        analyze" --- a false statement about a deck that has one."""
+        from k2rad.gapmin import suggest_gapmins
+        state = _dispatch("*KEYWORD\n" + _MESH
+                          + _auto_tiebreak(1, "1000.0", "1000.0", "0.0")
+                          + _TAIL)
+        suggestions, skipped = suggest_gapmins(state)
+        self.assertEqual(suggestions, {})
+        self.assertIn(20, skipped)
+        self.assertIn("no Gapmin", skipped[20])
+
+    def test_inter_gapmin_override_on_a_tie_says_why(self):
+        """Not "unknown interface id": the id exists, it is just a tie."""
+        result, _ = _convert(
+            "*KEYWORD\n" + _MESH
+            + _auto_tiebreak(1, "1000.0", "1000.0", "0.0") + _TAIL,
+            inter_gapmin={20: 0.5})
+        hit = [w for w in result.warnings if "--inter-gapmin 20=0.5" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertIn("has no Gapmin field", hit[0])
+        self.assertNotIn("unknown interface id", hit[0])
+
+    def test_deformable_recipe_walk_excludes_the_tie(self):
+        """The recipe sets /INTER/TYPE7 Inacti=5 against active-set chatter; a
+        kinematic tie has no active set and no Inacti column. contacts_tied and
+        contacts_spotweld were never in this walk either."""
+        from k2rad.writer.contacts import deformable_deformable_inter_ids
+        state = _dispatch("*KEYWORD\n" + _MESH
+                          + _auto_tiebreak(1, "1000.0", "1000.0", "0.0")
+                          + _TAIL)
+        self.assertEqual(deformable_deformable_inter_ids(state), [])
+
     def test_transducer_parent_pool_excludes_the_tie(self):
         """/INTER/SUB needs a penalty parent with segments; a /INTER/TYPE2 tie
         is not one, which is why contacts_tied was never in the pool either.

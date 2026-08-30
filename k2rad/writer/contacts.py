@@ -523,6 +523,10 @@ def _note_dropped_interfaces(state: ConversionState,
 
 def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
     if not state.contacts_single and not state.contacts_surf2surf:
+        # No /INTER/TYPE7 section at all — but a --inter-gapmin the user typed
+        # still has to be accounted for, or the flag is ignored in silence on a
+        # deck whose only contact is a tie.
+        _report_unconsumed_gapmin(state, dict(state.options.inter_gapmin))
         return []
     lines = ["#-  INTERFACES:", HDR]
 
@@ -712,16 +716,44 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                                    gapmin=gapmin, stfac=_stfac_for(state, c.sfs, c.inter_id),
                                    fric_id=fric_id)
 
-    for iid, val in sorted(gapmin_overrides.items()):
+    _report_unconsumed_gapmin(state, gapmin_overrides)
+
+    _note_dropped_interfaces(state, dropped)
+    return lines
+
+
+def _report_unconsumed_gapmin(state: ConversionState,
+                              leftovers: Dict[int, float]) -> None:
+    """Name every ``--inter-gapmin ID=VAL`` that reached no interface.
+
+    Called from BOTH exits of :func:`_make_interfaces`, including its early
+    return: a deck whose only contact is a tiebreak has no ``/INTER/TYPE7``
+    section at all, and without this the flag would be ignored in total
+    silence.
+    """
+    tie_ids = {c.inter_id for c in state.contacts_tiebreak}
+    for iid, val in sorted(leftovers.items()):
+        if iid in tie_ids:
+            # Not "unknown": the id names a *CONTACT_..._TIEBREAK, which is a
+            # TIE. /INTER/TYPE2 has no Gapmin column at all — its engagement
+            # distance is `dsearch`, derived from the mesh by _tied_dsearch or
+            # floored by a negative Card-3 SST/MST. Reporting it as an unknown
+            # id would send the user hunting for a typo.
+            state.warn(
+                f"--inter-gapmin {iid}={val:g}: interface {iid} is a "
+                "*CONTACT_..._TIEBREAK and was emitted as /INTER/TYPE2 (a "
+                "tie), which has no Gapmin field — override ignored. The tie's "
+                "engagement distance is dsearch; set it with a NEGATIVE "
+                "Card-3 SST/MST on the *CONTACT (LS-DYNA's absolute "
+                "tie-criterion distance), which the converter honours as a "
+                "floor.")
+            continue
         state.warn(
             f"--inter-gapmin {iid}={val:g}: no /INTER/TYPE7/{iid} was emitted "
             "(unknown interface id) — override ignored. Use the id printed in the "
             ".rad (auto-assigned contacts are numbered from 90001 in definition "
             "order)."
         )
-
-    _note_dropped_interfaces(state, dropped)
-    return lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
