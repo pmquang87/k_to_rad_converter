@@ -1237,6 +1237,82 @@ correctly, and the only cost is one cosmetic starter `WARNING 100211` — the sa
 trade-off LAW128 already ships under (**verified against `starter_win64.exe`:
 0 errors, and the echo reproduces every modulus, ratio and strength exactly**).
 
+`*MAT_COMPOSITE_DAMAGE` (022, + numeric aliases) → **`/MAT/LAW25` (COMPSH)
+`Iform = 0` plus a `/FAIL/CHANG` rider on a shell-only material, and
+`/MAT/LAW127` when any of its parts holds SOLID or thick-shell elements**
+(`writer/composites._mat022_law` is the one router; a MID can carry only one
+`/MAT` card). MAT_022 is orthotropic **elastic** with **brittle** Chang-Chang
+failure — it is not MAT_054 with fewer fields: there is no `XC`, no `EFS`, no
+`TFAIL` and no element-deletion field at all.
+
+On the shell arm every LAW25 yield stress is written at 1e20, so the Tsai-Wu
+*plasticity* surface is out of reach and the ply stays linear-elastic until it
+fails; the reader hard-fails on a blank one (`ancmsg(msgid=198)`,
+`read_mat25_tsaiwu.F90:206-241`), and putting the FAILURE strengths in *yield*
+slots would be a different constitutive law. **Poisson is RESCALED here** —
+`MAT_PRAB` is the MAJOR ratio (`:129` reads it into `n12`, `:282` derives
+`n21 = n12·e22/e11`), so `NU12 = PRBA·EA/EB`, the **opposite** of LAW127 above.
+The `/FAIL/CHANG` rider takes `Sigma_1t = XT`, `Sigma_2t = YT`,
+`Sigma_12 = SC`, `Sigma_2c = YC` and `Beta = 1`: at `ALPH = 0` that is
+**term for term** the LS-DYNA fibre, matrix-tension and matrix-compression
+criteria (Theory Manual R16 eqs 23.22.3/.4/.5 vs `fail_changchang_c.F90:
+155-181`), with no conversion factor. `Sigma_1c` is left blank on purpose —
+MAT_022 has no compressive-fibre strength and a blank reads as infinity, i.e.
+that mode never trips. **The same device works against a deck that leaves a
+card-5 cell at zero**: `hm_read_fail_chang.F90:99-104` substitutes `infinity`
+(= 1e20, `constant_mod.F:521`) for every exact zero, so a blank `XT`, `YT`,
+`YC` or `SC` is not carried and not defaulted — the Chang-Chang mode it gates
+is DISABLED, and the emitted rider is inert exactly where it looks complete.
+That is faithful to LS-DYNA, which reads a blank strength the same way, so it
+is a named warning rather than a refusal; `/MAT/LAW127` runs the identical
+`if (x == zero) x = ep20` line (`hm_read_mat127.F90:279-284`) and gets the
+same note. A NEGATIVE modulus is named too, and for the opposite reason:
+`read_mat25_tsaiwu.F90:193-199` tests `== zero`, not `<= zero`, so `ERROR 306`
+never fires on one and neither reader screens it.
+Two cells have no MAT_022 source and are named as converter choices in the
+warning: `Ifail_sh = 2` (positive, so the failed
+layer's stress really is relaxed and switched off, and below 3, so the matrix
+criterion stays live) and `Tau_max = 1e-4 · ENDTIM` (a blank one becomes
+infinity and the whole rider then softens and deletes nothing). **A MAT_022
+shell draws starter `WARNING ID : 3030` and that is expected**: the layered
+property it lands on has one integration point per layer, so
+`check_pthickfail.F` says the rider's PTHICKFAIL is ignored and the DELETION
+threshold is the property's own `P_Thick_Fail` — written as 0, which
+`hm_read_prop11.F:201` turns into `1 - 1e-6`, the same "delete once every layer
+has failed" rule. The warning is named in the conversion log.
+**Verified against `starter_win64` + `engine_win64`**: the `tension6.k` corpus
+carrier goes from `ERROR 179 MATERIAL ID=1 DOES NOT EXIST` (exit 3) to 0 errors
+and a full 20 807-cycle run in which its four 90° plies — and no other layer —
+fail in `MODE 3 - TENSILE MATRIX`, and a 10×10×1 probe built from the emitted
+cards peaks at 2502.2 MPa against a hand-computed `XT = 2500` (+0.09 %, inside
+one TH sample).
+
+The `alpha` cell is written at `1e-20`, not left blank. `read_mat25_tsaiwu.F90`
+turns a blank/zero alpha into **1** and the Tsai-Wu interaction coefficient
+`f12` then becomes `-5e-11` beside `f11 = f22 = 1e-20` — an open hyperbola
+whose tension-compression onset sits at `|σ| ≈ 1e5` **in the deck's stress
+unit**. Harmless at 1e5 MPa; at 1e5 Pa the ply plastifies on that spurious
+surface from the first cycle and `/FAIL/CHANG` never trips at all. Measured on
+kg-m-s twins differing only in that cell: 0 Chang-Chang events and 11 % low
+internal energy with a blank alpha, the four the criterion calls for and the
+Mg-mm-s twin's number to four figures with `1e-20`.
+
+The solid arm is `/MAT/LAW127` because LAW25's solid kernels decouple direction
+3 entirely (`mat25_tsaiwu_s.F90:230`, no `nu13`/`nu23` anywhere) and because
+`/FAIL/CHANG` cannot delete a solid at `/BEGIN 2022` (`FAILIP` is a 2023-only
+column and `fail_changchang_s.F90:222` gates the relaxation on it). There
+`PRBA/PRCA/PRCB` are copied RAW, `BETA = 1`, `XC` is blank, and `YCFAC` and the
+five `SLIM*` factors are neutralised — their reader defaults (2 and 1.0) would
+otherwise invent a compressive-fibre limit of `2·YC` and clamp a failed mode's
+stress at its FULL strength.
+
+`KFAIL`, `MACF`, `ATRACK`, `SN`/`SYZ`/`SZX` (the solid delamination criterion,
+which `/FAIL/HASHIN` is deliberately NOT substituted for — same slot names,
+different formula) and `ALPH` on the shell arm are warn-dropped by name. The
+native reader has no `case 22:` at all: `convertmats.cxx` falls through to a
+`default:` whose `"/MAT/LAW" + OptionNumber` is C++ pointer arithmetic, so no
+`/MAT` is written and the starter refuses the deck.
+
 `*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC` (037, + `_ECHANGE` /
 `_NLP_FAILURE` / `_NLP2` / `_ECHANGE_NLP_FAILURE`) → `/MAT/LAW43` (HILL_TAB) on a
 `/PROP/TYPE9`. MAT_037 is transversely isotropic, so the single Lankford r-bar
@@ -1944,6 +2020,38 @@ it grows for stubby beams.
 ### Sets & coordinate systems
 `*SET_NODE_LIST` (+ `*SET_NODE`), `*SET_PART_LIST` (+ `*SET_PART`),
 `*SET_SHELL`/`_SOLID`/`_BEAM` element sets (feed the `/SECT` element groups)
+`*SET_NODE_ADD`, `*SET_PART_ADD`, `*SET_SEGMENT_ADD`, `*SET_SHELL_ADD`,
+`*SET_SOLID_ADD`, `*SET_BEAM_ADD`, `*SET_DISCRETE_ADD` (+ every `_TITLE` form)
+→ a conversion-time boolean UNION expanded into the family's ordinary set, so
+the union id resolves wherever a plain set id does. Recursive (`_ADD` of
+`_ADD`), with a cycle guard and a warned depth cap; members de-duplicated;
+dangling member sets warned and dropped BY NAME. `*SET_NODE_ADD_ADVANCED`
+unions across all seven families — its card 2b is `(SID, TYPE)` PAIRS, and a
+non-node member contributes the NODES of its entities.
+`*SET_PART_ADD` is the one family whose member cell may be NEGATIVE: Vol I R17
+p.43-57 makes `… 5, -9` the inclusive RANGE "every part set with id 5..9", and
+that is expanded (with the endpoints' validity checked against p.43-58). The
+union's OWN id is excluded from its own range — `*SET_PART_ADD 7` with members
+`5, -9` spans 7 and a set cannot contain itself; the members are the same
+either way, but including it made the resolver's cycle guard tell the reader to
+fix a legal deck. The other six pages state no meaning for a negative cell at
+all, so one there is warn-dropped by name rather than guessed at — and that now
+includes `*SET_NODE_ADD_ADVANCED`'s card 2b (p.43-46 gives its `SID[N]` no
+`GT.0`/`LT.0` reading either), which used to drop a negative silently.
+There is no `*SET_TSHELL_ADD` in LS-DYNA R17/R16 (it exists only in
+HyperMesh's cfg pool), so k2rad does not invent one — such a block is reported
+in `skipped_keywords`.
+A `*SET_SEGMENT` triangle is stored under ONE spelling whichever way the deck
+writes it: Vol I R17 p.43-63 documents `N4 = N3`, LS-PrePost writes a trailing
+zero, and `hm_read_surf.F:318-321` maps the second onto the first inside the
+starter — so both collapse at parse time. Keyed apart they were two segments,
+and a `*SET_SEGMENT_ADD` over both applied its `/PLOAD` pressure twice
+(measured against a one-row twin: EXT-WORK 18.35 → 73.39, a factor of 4.0005,
+i.e. impulse ×2.0001, both runs 0 ERROR / NORMAL TERMINATION). The same
+collapse runs on `*LOAD_BLAST_SEGMENT`'s inline rows, the other producer of a
+segment set. It makes the two SPELLINGS one segment and nothing more: a face a
+single block genuinely lists twice still emits two `/SURF/SEG` rows, which is
+what LS-DYNA does with it.
 `*DEFINE_CURVE`, `*DEFINE_COORDINATE_SYSTEM`, `*DEFINE_COORDINATE_NODES`
 `*DEFINE_COORDINATE_VECTOR` → `/SKEW/FIX` (local Z = X×V, local Y = Z×X; id = the
 LS-DYNA CID; an R16 co-rotation `NID` is warned + dropped, matching dyna2rad)

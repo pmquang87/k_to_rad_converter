@@ -17,6 +17,7 @@ from .parser import (
 )
 from .state import (
     ConversionState,
+    SET_ADD_FAMILIES,
     NodeData, ShellElem, SolidElem, BeamElem, PlotelElem, ProvisionalElemBlock,
     TshellElem, SphCell,
     PartData, SectionShell, SectionSolid, SectionTshell, SectionBeam,
@@ -25,7 +26,7 @@ from .state import (
     IntegrationBeam, IntegrationBeamPoint,
     MatElastic, MatPlasTAB, MatPlasKin, MatRigid, MatNull, MatSAMP, FailGissmo,
     MatAnisoViscoplastic, MatJohnsonCook,
-    MatOrthotropicElastic, MatEnhancedCompositeDamage,
+    MatOrthotropicElastic, MatEnhancedCompositeDamage, MatCompositeDamage,
     MatTransverselyAnisotropic, MatLaminatedGlass,
     MatFabric, FABRIC_CURVE_FORMS,
     Airbag, AirbagRefGeometry, AirbagShellRefGeometry,
@@ -3776,6 +3777,70 @@ def handle_mat_enhanced_composite_damage(block: Block, state: ConversionState) -
     state.mat_enhanced_composite[mid] = mat
 
 
+def handle_mat_composite_damage(block: Block, state: ConversionState) -> None:
+    """*MAT_COMPOSITE_DAMAGE (MAT_022) → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on
+    shells, /MAT/LAW127 on solids (writer/composites._mat022_law routes).
+
+    Card layout (LS-DYNA Manual Vol II R17 p.2-257/2-258; matches
+    ``hm_cfg_files/.../Keyword971_R9.0/MAT/mat_022.cfg`` FORMAT(Keyword971)):
+      Card1: MID RO EA EB EC PRBA PRCA PRCB
+      Card2: GAB GBC GCA KFAIL AOPT MACF ATRACK
+      Card3: XP YP ZP A1 A2 A3
+      Card4: V1 V2 V3 D1 D2 D3 BETA
+      Card5: SC XT YT YC ALPH SN SYZ SZX
+
+    Cards 3 and 4 are the same axis pair MAT_002 and MAT_054 carry, so they
+    are read through the shared ``_read_axis_cards``: field 7 of card 3 is
+    unused here (MAT_002 spells it MACF, MAT_054 MANGLE; MAT_022 puts MACF on
+    card 2 instead) and field 7 of card 4 is BETA.
+
+    All five cards are read at FIXED columns, the convention every AOPT-card
+    material in this file uses — a slot the active AOPT does not need is blank,
+    not absent, so there is no conditional card shape to track.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+
+    def cf(idx, i, default=0.0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_float(f[i]) if len(f) > i and f[i].strip() else default
+
+    def ci(idx, i, default=0):
+        f = _card(raw, offset + idx, fixed=True, n=8, w=10)
+        return to_int(f[i]) if len(f) > i and f[i].strip() else default
+
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    mid = to_int(f1[0]) if f1 else 0
+    (xp, yp, zp, a1, a2, a3, _f7,
+     v1, v2, v3, d1, d2, d3, beta) = _read_axis_cards(raw, offset + 2,
+                                                      offset + 3)
+    ncards = 0
+    for k in range(len(raw) - offset):
+        if raw[offset + k].strip():
+            ncards = k + 1
+    if ncards > 5:
+        state.warn(
+            f"*MAT_COMPOSITE_DAMAGE mid={mid}: {ncards} data cards were read "
+            "where the keyword defines exactly 5 — the extra line(s) are "
+            "IGNORED. This is the fingerprint of a fixed-format card shift (a "
+            "missing or duplicated blank card), which silently moves every "
+            "following field into the wrong slot; check the card order "
+            "against MID/RO/EA.. | GAB/GBC/GCA/KFAIL/AOPT/MACF/ATRACK | "
+            "XP/YP/ZP/A1/A2/A3 | V1/V2/V3/D1/D2/D3/BETA | "
+            "SC/XT/YT/YC/ALPH/SN/SYZ/SZX.")
+    state.mat_composite_damage[mid] = MatCompositeDamage(
+        mid=mid, title=title, rho=cf(0, 1),
+        ea=cf(0, 2), eb=cf(0, 3), ec=cf(0, 4),
+        prba=cf(0, 5), prca=cf(0, 6), prcb=cf(0, 7),
+        gab=cf(1, 0), gbc=cf(1, 1), gca=cf(1, 2), kfail=cf(1, 3),
+        aopt=cf(1, 4), macf=ci(1, 5), atrack=ci(1, 6),
+        xp=xp, yp=yp, zp=zp, a1=a1, a2=a2, a3=a3,
+        v1=v1, v2=v2, v3=v3, d1=d1, d2=d2, d3=d3, beta=beta,
+        sc=cf(4, 0), xt=cf(4, 1), yt=cf(4, 2), yc=cf(4, 3),
+        alph=cf(4, 4), sn=cf(4, 5), syz=cf(4, 6), szx=cf(4, 7))
+
+
 def handle_mat_transversely_anisotropic(block: Block, state: ConversionState) -> None:
     """*MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC (MAT_037) → /MAT/LAW43.
 
@@ -4956,30 +5021,114 @@ def handle_set_part_list(block: Block, state: ConversionState) -> None:
     state.part_sets[psid] = (title, pids)
 
 
-def handle_set_part_add(block: Block, state: ConversionState) -> None:
-    """*SET_PART_ADD — its data ids are part-SET ids (one nesting level), NOT
-    part ids, so it cannot land in state.part_sets AT PARSE TIME (a child set
-    may not be read yet, and every consumer reads the members as part ids).
-    Stored separately here; the post-parse ``_flatten_part_set_adds`` prepass
-    (writer/mesh.py) expands exactly one nesting level — the rule dyna2rad's
-    ConvertContactInterior applies, CC:692-727 — into a plain part_sets
-    entry, so EVERY part-set consumer (contacts SSTYP/MSTYP=2,
-    *CONTACT_INTERIOR, --auto-gapmin, gravity scopes, ALE groups ...)
-    resolves the set without knowing the variant. The header carries the
-    same SID DA1..DA4 layout as *SET_PART."""
+def _set_add_keywords():
+    """Every ``*SET_<FAMILY>_ADD`` spelling, from the ONE family table in
+    state.py. ``_TITLE`` needs no entry of its own: ``parser._split_keyword``
+    strips it into ``block.options`` (Vol I R17 p.43-2 — "an additional
+    keyword option TITLE may be appended to all the *SET keywords", exactly one
+    80a line between the header and card 1).
+
+    ``assembly._OFFSET_SPECS`` is generated from this same source, so the
+    parser table and the ``*INCLUDE_TRANSFORM`` offset table cannot drift
+    apart — an unmapped spelling would keep its original member set ids while
+    the rest of the include was offset."""
+    return tuple(row[1] for row in SET_ADD_FAMILIES)
+
+
+def _handle_set_add(block: Block, state: ConversionState, family: str,
+                    ncells: int, adds_name: str) -> None:
+    """Shared parser for the whole ``*SET_<FAMILY>_ADD`` union family.
+
+    An ``_ADD`` set's data ids are **SET** ids of its own family, never entity
+    ids, so the block cannot land in the family's ordinary container at PARSE
+    TIME (a child set may not be read yet, and every consumer reads the members
+    as entity ids). It is stored per family here; the post-parse
+    ``_flatten_set_adds`` prepass (writer/mesh.py) expands the union — with
+    recursion, a cycle guard and a depth cap — into a plain set entry, so
+    EVERY consumer resolves it without knowing the variant.
+
+    *ncells* is that spelling's own card-1 cell WIDTH (see SET_ADD_FAMILIES),
+    which is what ``_card`` has to slice to reach the attribute columns: PART
+    is the one family whose DA1..DA4 are read (``_record_part_set_attrs``,
+    for *CONTACT_INTERIOR), and it needs six. The other rows carry their card's
+    documented width for the record; nothing reads past cell 1 on them.
+
+    Member rows are claimed by RAW contiguity after the header card. Exact
+    ZEROS are dropped: trailing zero padding is the LS-PrePost house style and
+    is NOT a member — measured in two corpus carriers, e.g.
+    ``show-cases/contact-overview/main.k:172`` = ``100200301 100200302 0 0 0 0
+    0 0``. The manual's "tightly packed data" remark scopes INTERIOR zeros
+    only (identical text on every ``_ADD`` page).
+
+    NEGATIVE cells are KEPT and passed on: on *SET_PART_ADD* a negative
+    ``PSID[N]`` is the inclusive RANGE ``PSID[N-1] .. -PSID[N]`` (Vol I R17
+    p.43-57), which can only be resolved once every child set is parsed —
+    ``writer/mesh._expanded_member_ids`` does it, and warns by name on the six
+    families whose page gives a negative cell no meaning at all.
+    """
     offset = _title_offset(block)
     title = _read_title(block) if offset else ""
     raw = block.raw
-    f1 = _card(raw, offset, fixed=True, n=6, w=10)
-    psid = to_int(f1[0])
-    _record_part_set_attrs(state, psid, f1)
+    f1 = _card(raw, offset, fixed=True, n=max(1, ncells), w=10)
+    if not f1 or not f1[0].strip():
+        return
+    sid = to_int(f1[0])
+    if family == "PART":
+        # Only the PART header's DA1..DA4 have a k2rad consumer
+        # (*CONTACT_INTERIOR reads them as per-set defaults). *SET_NODE_ADD's
+        # DA1..DA4 are the *CONTACT_TIEBREAK_NODES_TO_SURFACE nodal attributes
+        # NFLF/NSFL/NNEN/NMES (Vol I R17 p.43-43 Remark 1), a keyword k2rad
+        # does not convert, so they have nothing to be recorded for.
+        _record_part_set_attrs(state, sid, f1)
     ids: List[int] = []
     for line in raw[offset + 1:]:
         for tok in parse_free(line):
             v = to_int(tok)
-            if v > 0:
+            if v != 0:
                 ids.append(v)
-    state.part_set_adds[psid] = (title, ids)
+    getattr(state, adds_name)[sid] = (title, ids)
+
+
+def handle_set_node_add_advanced(block: Block, state: ConversionState) -> None:
+    """``*SET_NODE_ADD_ADVANCED`` — a node union across the SEVEN set families.
+
+    Card 2b is ``SID1 TYPE1 SID2 TYPE2 SID3 TYPE3 SID4 TYPE4`` — four
+    (id, family) PAIRS per card, not eight ids (Vol I R17 p.43-46). There is no
+    operator column and no boolean-op table anywhere on the page: the purpose
+    line is still "define a node set by combining NODE, SHELL, SOLID, BEAM,
+    SEGMENT, DISCRETE, and TSHELL sets", i.e. a UNION whose non-node members
+    contribute the nodes of their entities.
+
+    dyna2rad reads this card as a plain id list (``convertsets.cxx:103``
+    matches the substring "ADD" and never dispatches on TYPE), so the TYPE
+    column is fed to ``GetValue("ids")`` as if it were another set id — a
+    silently WRONG union. Reading the pairs is the whole difference.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=6, w=10)
+    if not f1 or not f1[0].strip():
+        return
+    nsid = to_int(f1[0])
+    pairs: List[Tuple[int, int]] = []
+    for k in range(offset + 1, len(raw)):
+        if not raw[k].strip():
+            continue
+        f = _card(raw, k, fixed=True, n=8, w=10)
+        for j in range(0, 8, 2):
+            sid = to_int(f[j]) if len(f) > j else 0
+            typ = to_int(f[j + 1]) if len(f) > j + 1 else 0
+            # Only an exact ZERO is card padding. A NEGATIVE SID has no meaning
+            # on this page — Vol I R17 p.43-46 gives card 2b's SID[N] no
+            # GT.0/LT.0 block, unlike *SET_PART_ADD's PSID — so it is dropped;
+            # but it is dropped BY NAME in writer/mesh._advanced_members, the
+            # same rule the plain _ADD families got in the review round. A
+            # silent drop here was the one spelling that still lost a member
+            # without saying so.
+            if sid != 0:
+                pairs.append((sid, typ))
+    state.node_set_add_advanced[nsid] = (title, pairs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -12773,7 +12922,24 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
 
     Header card:  sid da1 da2 da3 da4 solver its
     Data cards :  n1 n2 n3 n4 a1 a2 a3 a4  (one segment per card; a* attributes
-                  ignored). Node order fixes the segment normal (n4=0 → triangle).
+                  ignored). Node order fixes the segment normal.
+
+    **A triangle has TWO legal spellings and they are stored as ONE.** Vol I
+    R17 *SET_SEGMENT p.43-63 verbatim: *"N4 - Nodal point n4. To define a
+    triangular segment, set N4 = N3."*, and a trailing blank/zero is the other
+    house style. Both collapse to a 3-node list here, so every consumer sees
+    one spelling: ``_emit_surf_seg`` then writes ``n1 n2 n3 0`` and
+    ``hm_read_surf.F:318-321`` (``IF(N4/=0) ... ELSE N4 = N3``) restores the
+    degenerate corner inside the starter. Without the collapse the two
+    spellings are two different segments to any set operation — a
+    *SET_SEGMENT_ADD union over both keeps BOTH rows and applies the /PLOAD
+    pressure on that face TWICE (measured against a one-row twin on a free
+    plate, both 0 ERROR / NORMAL TERMINATION / 67 cycles: EXT-WORK 18.35 ->
+    73.39 and K-ENERGY 17.68 -> 70.73, a factor of 4.0005, i.e. impulse
+    x2.0001). It is also the same normalisation ``_shell_load_segments``
+    (``writer/loads.py:4415``) already does on the *LOAD_SHELL path, where the
+    collapse is spelled ``if len(nodes) >= 4 and nodes[3] == nodes[2]``.
+
     Stored on state.segment_sets for later /SURF/SEG emission.
     """
     offset = _title_offset(block)
@@ -12792,7 +12958,7 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
         # fixed-fallback parse so both survive.
         f = _card([line], 0, fixed=True, n=8, w=10)
         nodes = [to_int(f[j]) for j in range(min(4, len(f)))]
-        while len(nodes) > 3 and nodes[-1] == 0:
+        while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
             segments.append(nodes)
@@ -13029,7 +13195,8 @@ def handle_load_blast_segment(block: Block, state: ConversionState) -> None:
             continue
         bid = to_int(f[0])
         nodes = [to_int(f[j]) for j in range(1, 5)]
-        while len(nodes) > 3 and nodes[-1] == 0:
+        # Both triangle spellings collapse to one — see handle_set_segment.
+        while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
             nodes.pop()
         if len(nodes) >= 3 and all(n > 0 for n in nodes):
             by_bid.setdefault(bid, []).append(nodes)
@@ -15154,6 +15321,13 @@ HANDLERS = {
     "MAT_54":                                 handle_mat_enhanced_composite_damage,
     "MAT_055":                                handle_mat_enhanced_composite_damage,
     "MAT_55":                                 handle_mat_enhanced_composite_damage,
+    # MAT_022 → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on a shell-only material,
+    # /MAT/LAW127 when a part holds solids or thick shells. Not MAT_054 with
+    # fewer fields: MAT_022 is orthotropic ELASTIC with BRITTLE Chang-Chang
+    # failure — no XC, no EFS, no TFAIL, no element deletion at all.
+    "MAT_COMPOSITE_DAMAGE":                   handle_mat_composite_damage,
+    "MAT_022":                                handle_mat_composite_damage,
+    "MAT_22":                                 handle_mat_composite_damage,
     # MAT_037 (+ the _ECHANGE / _NLP_FAILURE / _NLP2 option variants) → LAW43
     "MAT_TRANSVERSELY_ANISOTROPIC_ELASTIC_PLASTIC":
         handle_mat_transversely_anisotropic,
@@ -15399,7 +15573,9 @@ HANDLERS = {
     "SET_NODE":                               handle_set_node_list,
     "SET_PART_LIST":                          handle_set_part_list,
     "SET_PART":                               handle_set_part_list,
-    "SET_PART_ADD":                           handle_set_part_add,
+    # The *SET_<FAMILY>_ADD unions are registered below, generated from
+    # state.SET_ADD_FAMILIES (the same source assembly._OFFSET_SPECS reads).
+    "SET_NODE_ADD_ADVANCED":                  handle_set_node_add_advanced,
     "SET_SHELL_LIST":                         handle_set_shell_list,
     "SET_SHELL":                              handle_set_shell_list,
     "SET_SOLID_LIST":                         handle_set_solid_list,
@@ -15724,6 +15900,17 @@ del _o1, _o2, _o3
 for _kw in _part_option_keywords():
     HANDLERS[_kw] = handle_part
 del _kw
+
+# *SET_<FAMILY>_ADD — one dispatch key per family, GENERATED from
+# state.SET_ADD_FAMILIES so the parser table, the writer's resolver and
+# assembly._OFFSET_SPECS all read the same source. Each family closes over its
+# OWN card-1 cell count and its OWN container; a hand-written per-family copy
+# is exactly how a guard goes dead on a sibling spelling.
+for _family, _kw, _ncells, _adds, _target in SET_ADD_FAMILIES:
+    HANDLERS[_kw] = (lambda fam, nc, ad:
+                     lambda b, s: _handle_set_add(b, s, fam, nc, ad))(
+        _family, _ncells, _adds)
+del _family, _kw, _ncells, _adds, _target
 
 # *CONSTRAINED_NODAL_RIGID_BODY_{SPC,INERTIA,OVERRIDE,THERMAL,TITLE} in any order
 # — 326 spellings ("The order of the options in the keyword name is arbitrary",

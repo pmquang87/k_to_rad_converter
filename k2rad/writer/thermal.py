@@ -175,12 +175,26 @@ def _material_registries(state: ConversionState):
     Four /MAT producers are deliberately NOT here, because a
     ``dataclasses.replace(..., mid=new)`` of their record does not give a
     working copy — each needs a second card that is keyed elsewhere:
-    ``mat_high_explosive`` (LAW5 carries its own /EOS block),
-    ``mat_laminated_glass`` (a LAW27 PAIR of materials),
+    ``mat_high_explosive`` (``_emit_mat_law5`` takes its JWL from
+    ``state.eos_jwl.get(mid)``, a SECOND dict keyed by the old mid that a
+    record copy does not bring — the clone would come out with no /EOS),
+    ``mat_laminated_glass`` (a LAW27 PAIR: ``_emit_mat_law27_pair`` writes one
+    card under ``mat.mid`` and one under the record's own reserved
+    ``glass_mid``, and a copy KEEPS that second id — so the clone would write
+    a duplicate ``/MAT/LAW27/{glass_mid}``, starter ERROR 79),
     ``mat_seatbelt`` (LAW114/119 is synthesized per belt PROPERTY, not per mid)
     and ``mat_spotweld`` (its /MAT/ELAST fallback is written by the connector
     writer). A card naming one of them is warn-dropped rather than half-split;
     the warning says so by name instead of claiming the material is unconverted.
+
+    ``mat_composite_damage`` used to be a fifth, on the ground that *MAT_022's
+    shell arm writes a companion ``/FAIL/CHANG`` a bare copy would strand. That
+    reason was FALSE and is why the entry is here now: ``_emit_fail_chang``
+    writes ``f"/FAIL/CHANG/{mat.mid}"`` from the record it is handed, so the
+    rider is GENERATED for the clone and follows it. That is the opposite of
+    both cases above — nothing is looked up in a second dict, and no second id
+    travels on the record to be duplicated. Adding it also gives
+    ``_structural_density`` a MAT_022 ``rho`` to read.
     """
     return [
         state.mat_elastic, state.mat_plas_tab, state.mat_plas_kin,
@@ -201,6 +215,7 @@ def _material_registries(state: ConversionState):
         state.mat_cohesive_mm_epr, state.mat_toughened_adhesive,
         state.mat_tabulated_jc, state.mat_jh_ceramics, state.mat_jh_concrete,
         state.mat_elastic_fluid, state.mat_fabric, state.mat_shape_memory,
+        state.mat_composite_damage,
     ]
 
 
@@ -295,6 +310,7 @@ def _is_anisotropic(state: ConversionState, mid: int) -> bool:
     statement at all, so nothing about them is worth reporting.
     """
     return (mid in state.mat_orthotropic or mid in state.mat_enhanced_composite
+            or mid in state.mat_composite_damage
             or mid in state.mat_transverse_aniso or mid in state.mat_hill_3r
             or mid in state.mat_aniso_visco or mid in state.mat_fabric
             or mid in state.mat_soft_tissue)
@@ -586,9 +602,9 @@ def _resolve_expansion(state: ConversionState) -> None:
                     "either not converted to any /MAT at all, or one of the "
                     "four producers whose /MAT needs a companion card a plain "
                     "copy would not carry (*MAT_HIGH_EXPLOSIVE_BURN + its "
-                    "/EOS, *MAT_LAMINATED_GLASS's LAW27 pair, *MAT_SEATBELT's "
-                    "per-property LAW114/119, *MAT_SPOTWELD's connector "
-                    "fallback). Card dropped. Give the part its own material "
+                    "/EOS, *MAT_LAMINATED_GLASS's LAW27 pair, "
+                    "*MAT_SEATBELT's per-property LAW114/119, *MAT_SPOTWELD's "
+                    "connector fallback). Card dropped. Give the part its own material "
                     "id in the .k file if it must expand on its own.")
                 continue
             for pid in pids:

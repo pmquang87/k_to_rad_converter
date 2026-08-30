@@ -55,7 +55,39 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   rather than collapsed onto one point. `*INTERFACE_SPRINGBACK_LSDYNA` → the
   engine `/DYNAIN` block, on a schedule rather than a single terminal trigger
   because the engine's own end-of-run rescue sets `ILASTDYNAIN` and never reads
-  it. **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
+  it.
+- **Milestone 2, batch 1 (beyond dyna2rad parity) — IN PROGRESS.** The whole
+  `*SET_<FAMILY>_ADD` boolean-union family (`NODE`, `SEGMENT`, `SHELL`,
+  `SOLID`, `BEAM`, `DISCRETE` + `*SET_NODE_ADD_ADVANCED`, joining the shipped
+  `PART`) is expanded at conversion time into the family's ordinary set
+  container by ONE shared, recursive resolver with a cycle guard and a warned
+  depth cap — so the union id resolves wherever a plain set id does. The
+  one-level rule the `*SET_PART_ADD` path used to apply is lifted. There is no
+  `*SET_TSHELL_ADD` in LS-DYNA (HyperMesh cfg only), so none is invented.
+  `*MAT_COMPOSITE_DAMAGE` (022) converts as well — see the Tier-3 *Composites*
+  entry. **Open items this batch surfaced but deliberately did not change,
+  because both would move output on decks that have nothing to do with it:**
+  `*MAT_ORTHOTROPIC_ELASTIC` and `*MAT_ENHANCED_COMPOSITE_DAMAGE` have NO
+  `_OFFSET_SPECS` row, so an `*INCLUDE_TRANSFORM` leaves their MID behind while
+  `*PART`'s IDMOFF moves the reference (today that at least warns, "id offsets
+  are NOT applied to …"); and `*MAT_054`'s `SLIM*` cells default to 1.0 in
+  k2rad, which `sigeps127c.F90:400-403` uses to clamp a failed mode's stress at
+  its FULL strength — worth checking against LS-DYNA's own default before
+  changing.
+  Two more, from the post-review round: **four consumers resolve a set DURING
+  dispatch and therefore still see only DIRECT sets** —
+  `*CONSTRAINED_EXTRA_NODES_SET`, `*ELEMENT_MASS_PART_SET`,
+  `*ELEMENT_MASS_NODE_SET` and `*LOAD_BODY_PARTS` (`handlers.py:7762`, `:8539`,
+  `:8584`, `:12781`); this is the shipped `*SET_PART_ADD` behaviour unchanged,
+  and lifting it means deferring those four to a prepass. And
+  `thermal._structural_density` walks the CLONE registry, so it reads no
+  density for the four producers deliberately excluded from it (LAW5+/EOS,
+  the LAW27 glass pair, the belt LAW114/119 and the spotweld fallback) —
+  today that surfaces only as the honest "rho_cp <= 0" warning on a `/HEAT/MAT`
+  built from one of them. (MAT_022 WAS a fifth until the verification round:
+  its `/FAIL/CHANG` is generated from the record, so a clone carries it, and
+  the entry is now in the registry.)
+  **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and
   cannot hold a thick-shell id), inline arithmetic in a `&parameter` field
@@ -424,7 +456,12 @@ covering them unlocks a large class of real models.
 ### Tier 3 — large subsystems (dedicated milestones)
 
 - Composites: `MAT_54`/`MAT_55` → `/MAT/LAW127`, `MAT_002` → `/MAT/LAW93`,
-  `MAT_037` → `/MAT/LAW43`, `MAT_032` → a `/MAT/PLAS_BRIT` pair, and the
+  `MAT_022` → `/MAT/LAW25` (COMPSH) + `/FAIL/CHANG` on shells and
+  `/MAT/LAW127` on solids/thick shells (Milestone 2 batch 1 — the failure
+  criteria are term-for-term identical at `ALPH = 0`, with `Sigma_1c` left
+  blank because MAT_022 has no compressive-fibre mode; `KFAIL`, `MACF`,
+  `ATRACK` and the `SN`/`SYZ`/`SZX` delamination criterion are warn-dropped by
+  name), `MAT_037` → `/MAT/LAW43`, `MAT_032` → a `/MAT/PLAS_BRIT` pair, and the
   multi-ply `*PART_COMPOSITE` layup — **done**. The layup target is
   `/PROP/TYPE51` + one `/PROP/TYPE19` (PLY) per layer, which is what dyna2rad
   emits, rather than the `TYPE10`/`TYPE17` sketched here; single-material

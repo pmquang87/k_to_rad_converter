@@ -15,7 +15,8 @@ from .common import (
     _muscle_beam_pids, _muscle_discrete_pids, _part_node_sets,
     _spotweld_beam_pids, _vcross, _vnorm, _vsub,
 )
-from .mesh import _emit_skew_fix, _emit_skew_mov, _ortho_skew_axes
+from .mesh import (_emit_skew_fix, _emit_skew_mov, _ortho_skew_axes,
+                   _target_mat_law)
 
 __all__ = [
     "_make_rlinks",
@@ -5671,8 +5672,8 @@ def _damping_resolve_pids(state: ConversionState, pid: int, is_set: bool,
                           what: str) -> Optional[List[int]]:
     """PID or *SET_PART PSID → a list of part ids, or None when unresolvable.
 
-    *SET_PART_ADD sets arrive pre-expanded by ``_flatten_part_set_adds`` (one
-    nesting level), so a single ``state.part_sets`` lookup covers both variants
+    *SET_PART_ADD sets arrive pre-expanded by ``_flatten_set_adds``
+    (recursively), so a single ``state.part_sets`` lookup covers both variants
     — which is also why the resolution has to happen HERE, in the writer, and
     not in the handler.
     """
@@ -6277,6 +6278,35 @@ def _make_damping_frequency_range(state: ConversionState) -> List[str]:
                 "LS-DYNA damps solids, beams, shells, thick shells and "
                 "discrete elements (Manual Vol I R16 Remark 4) — those part(s) "
                 "come out COMPLETELY UNDAMPED.")
+        # LAW25 is the sibling case of the same warning: mulawc.F90:1963/1972
+        # skip prony_modelc AND damping_range_shell whenever `ilaw == 25`, so a
+        # *MAT_COMPOSITE_DAMAGE shell part (the only LAW25 producer k2rad has)
+        # is meshed, is inside the damped scope, and still gets nothing.
+        # Gating only on "carries no shell or solid element" would let it
+        # through in silence — the #124 "a guard gated on one condition goes
+        # dead on its sibling" class, on a warning whose own text already names
+        # the exclusion.
+        #
+        # Through _part_mat_mids, not state.parts[p].mid: a *PART_COMPOSITE's
+        # fallback PartData carries only the FIRST real ply's MID, so a MAT_022
+        # sitting in layer 2..n of a layup is meshed, is inside the damped
+        # scope, runs on LAW25 and would still be reported as damped.
+        from .composites import _part_mat_mids
+        if law25 := sorted(p for p in scope
+                           if p in meshed_pids
+                           and any(_target_mat_law(state, m) == 25
+                                   for m in _part_mat_mids(state, p))):
+            shown = (f"{law25[:10]} (+{len(law25) - 10} more)"
+                     if len(law25) > 10 else str(law25))
+            state.warn(
+                f"{what}: {len(law25)} part(s) {shown} in the damped scope "
+                "run on /MAT/LAW25 (COMPSH), which mulawc.F90:1972 excludes "
+                "from damping_range_shell outright (and :1963 from the Prony "
+                "branch) — those part(s) come out COMPLETELY UNDAMPED even "
+                "though they are meshed with shells. LS-DYNA applies "
+                "*DAMPING_FREQUENCY_RANGE to them like any other material. "
+                "Move the part to a damped law, or add the damping as a "
+                "global /DAMP, if it matters.")
         if dfr.pidrel:
             state.warn(
                 f"{what}: PIDREL={dfr.pidrel} asks for damping of the motion "

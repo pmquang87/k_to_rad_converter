@@ -8,6 +8,62 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 
+#: The ``*SET_<FAMILY>_ADD`` boolean-union family — ONE source of truth for the
+#: parser (``handlers._set_add_keywords``), the ``*INCLUDE_TRANSFORM`` offset
+#: table (``assembly._OFFSET_SPECS``) and the flattening resolver
+#: (``writer/mesh._flatten_set_adds``), so a guard added for one family cannot
+#: go dead on a sibling.
+#:
+#: Each row is ``(family, keyword, card-1 cells, _ADD container, target
+#: container)``. The card-1 cell counts are NOT uniform and each is taken from
+#: that spelling's own manual page (LS-DYNA Vol I R17):
+#:
+#:   ``SID DA1 DA2 DA3 DA4 SOLVER``  NODE (p.43-45), PART (p.43-57)
+#:   ``SID SOLVER``                  SEGMENT (p.43-71), SOLID (p.43-96)
+#:   ``SID``                         SHELL (p.43-85), BEAM (p.43-8),
+#:                                   DISCRETE (p.43-18)
+#:
+#: The count is the card's documented WIDTH, and it is load-bearing for exactly
+#: one family: ``_record_part_set_attrs`` reads cells 1..4 of the PART header
+#: (*CONTACT_INTERIOR takes them as per-set defaults), which needs the slice to
+#: be six wide. Nothing reads past cell 1 on the other six — *SET_NODE_ADD's
+#: DA1..DA4 are the *CONTACT_TIEBREAK_NODES_TO_SURFACE nodal attributes
+#: (Vol I R17 p.43-43 Remark 1), a keyword k2rad does not convert — so their
+#: widths are here to record the layout, not to gate a read.
+#:
+#: **``*SET_TSHELL_ADD`` is deliberately absent**: it is in neither the R17 nor
+#: the R16 ``*SET`` chapter index, and a full-text search of Vol I R17 finds no
+#: such keyword. It exists only in HyperMesh's cfg pool
+#: (``Keyword971/SETS/tshell_add.cfg:60``), which is the "a cfg can lie about
+#: semantics" case — the cfg defines a keyword LS-DYNA does not. A deck
+#: carrying it therefore stays in ``skipped_keywords``, named. (``*SET_TSHELL``
+#: itself is a separate, pre-existing gap; k2rad has no ``tshell_sets``.)
+SET_ADD_FAMILIES = (
+    ("NODE",     "SET_NODE_ADD",     6, "node_set_adds",     "node_sets"),
+    ("PART",     "SET_PART_ADD",     6, "part_set_adds",     "part_sets"),
+    ("SEGMENT",  "SET_SEGMENT_ADD",  2, "segment_set_adds",  "segment_sets"),
+    ("SHELL",    "SET_SHELL_ADD",    1, "shell_set_adds",    "shell_sets"),
+    ("SOLID",    "SET_SOLID_ADD",    2, "solid_set_adds",    "solid_sets"),
+    ("BEAM",     "SET_BEAM_ADD",     1, "beam_set_adds",     "beam_sets"),
+    ("DISCRETE", "SET_DISCRETE_ADD", 1, "discrete_set_adds", "discrete_sets"),
+)
+
+#: ``*SET_NODE_ADD_ADVANCED`` card 2b TYPE column → the family whose members
+#: contribute their NODES (Vol I R17 p.43-46 verbatim: "EQ.1: Node set
+#: EQ.2: Shell set EQ.3: Beam set EQ.4: Solid set EQ.5: Segment set
+#: EQ.6: Discrete set EQ.7: Thick shell set"). TYPE 7 has no k2rad container
+#: (``*SET_TSHELL`` is unconverted) and is warn-dropped by name.
+SET_ADD_ADVANCED_TYPES = {
+    1: ("NODE", "node_sets"),
+    2: ("SHELL", "shell_sets"),
+    3: ("BEAM", "beam_sets"),
+    4: ("SOLID", "solid_sets"),
+    5: ("SEGMENT", "segment_sets"),
+    6: ("DISCRETE", "discrete_sets"),
+    7: ("TSHELL", ""),
+}
+
+
 @dataclass
 class NodeData:
     x: float
@@ -1878,6 +1934,80 @@ class MatEnhancedCompositeDamage:
     # True when the deck spelled the keyword *MAT_055 / *MAT_LAMINATED_...
     # (the Tsai-Wu default); CRIT on card 6 still overrides it.
     keyword_is_55: bool = False
+
+
+@dataclass
+class MatCompositeDamage:
+    """*MAT_COMPOSITE_DAMAGE (MAT_022) — orthotropic ELASTIC with the brittle
+    Chang-Chang failure criteria (Vol II R17 p.2-257: "an orthotropic material
+    with optional brittle failure for composites ... following the suggestion
+    of [Chang and Chang 1987a, 1987b]", available for shells, solids, thick
+    shells and SPH).
+
+    It is NOT MAT_054 with fewer fields: there is no XC, no EFS, no TFAIL and
+    no element-deletion field of any kind — Theory Manual R16 §23.22 speaks
+    only of setting moduli to zero at a failed integration point.
+
+    k2rad splits the target by ELEMENT KIND, ``writer/composites._mat022_law``
+    being the ONE router (the ``_fabric_law`` pattern):
+
+    * shell-only material → ``/MAT/LAW25`` (COMPSH) Iform = 0 with every yield
+      stress at 1e20 — a pure orthotropic elastic carrier — plus a
+      ``/FAIL/CHANG`` rider, which reproduces all three MAT_022 shell criteria
+      TERM FOR TERM at ``ALPH = 0`` and ``Beta = 1``.
+    * a material any of whose parts holds SOLID or THICK-SHELL elements →
+      ``/MAT/LAW127``. LAW25's solid kernels decouple direction 3
+      (``mat25_tsaiwu_s.F90:230`` ``e3 = s3(i)/e33``) and have no nu13/nu23 at
+      all, so PRCA/PRCB would be lost STRUCTURALLY, and ``/FAIL/CHANG`` cannot
+      delete a solid at ``/BEGIN 2022`` (``fail_changchang_s.F90:222`` gates
+      the whole relaxation path on ``failip > 0``, and ``Failip`` is a
+      2023-only column).
+
+    POISSON CONVENTION — the two arms are OPPOSITE and must never share a
+    helper. ``/MAT/LAW25`` takes ``MAT_PRAB`` as nu12, the MAJOR ratio, and
+    derives the minor one itself (``read_mat25_tsaiwu.F90:129`` reads
+    ``MAT_PRAB`` into ``n12``; ``:282`` ``n21 = n12*e22/e11``), so it needs the
+    LAW93 rescale ``NU12 = PRBA*EA/EB``. ``/MAT/LAW127`` takes PRBA VERBATIM as
+    the minor nu21 and does the reciprocity itself
+    (``hm_read_mat127.F90:127``/``:187``).
+    """
+    mid: int
+    title: str = ""
+    rho: float = 0.0
+    ea: float = 0.0
+    eb: float = 0.0
+    ec: float = 0.0
+    prba: float = 0.0    # LS-DYNA MINOR nu_ba (see the class docstring)
+    prca: float = 0.0
+    prcb: float = 0.0
+    gab: float = 0.0     # → G12
+    gbc: float = 0.0     # → G23
+    gca: float = 0.0     # → G31 (LAW25) / G13 (LAW127)
+    kfail: float = 0.0   # bulk modulus of failed material — no slot anywhere
+    aopt: float = 0.0
+    macf: int = 0        # material-axes swap, SOLIDS only — no /PROP slot
+    atrack: int = 0      # a-axis tracking, SHELLS only — no Radioss analogue
+    xp: float = 0.0
+    yp: float = 0.0
+    zp: float = 0.0
+    a1: float = 0.0
+    a2: float = 0.0
+    a3: float = 0.0
+    v1: float = 0.0
+    v2: float = 0.0
+    v3: float = 0.0
+    d1: float = 0.0
+    d2: float = 0.0
+    d3: float = 0.0
+    beta: float = 0.0    # material angle, deg (AOPT 0 and 3)
+    sc: float = 0.0      # shear strength ab      (Theory S12)
+    xt: float = 0.0      # longitudinal tensile   (S1)
+    yt: float = 0.0      # transverse tensile     (S2)
+    yc: float = 0.0      # transverse compressive (C2, positive)
+    alph: float = 0.0    # nonlinear shear term, [stress^-3]
+    sn: float = 0.0      # normal tensile, SOLIDS only     (S3)
+    syz: float = 0.0     # transverse shear, SOLIDS only   (S23)
+    szx: float = 0.0     # transverse shear, SOLIDS only   (S31)
 
 
 @dataclass
@@ -6547,6 +6677,12 @@ class ConversionState:
     mat_orthotropic: Dict[int, MatOrthotropicElastic] = field(default_factory=dict)
     mat_enhanced_composite: Dict[int, MatEnhancedCompositeDamage] = \
         field(default_factory=dict)
+    #   MAT_022     → /MAT/LAW25 (COMPSH) + /FAIL/CHANG on a shell-only
+    #                 material, /MAT/LAW127 when any part holds solids or
+    #                 thick shells (writer/composites._mat022_law is the ONE
+    #                 router; see MatCompositeDamage for why the split exists)
+    mat_composite_damage: Dict[int, MatCompositeDamage] = \
+        field(default_factory=dict)
     mat_transverse_aniso: Dict[int, MatTransverselyAnisotropic] = \
         field(default_factory=dict)
     mat_laminated_glass: Dict[int, MatLaminatedGlass] = field(default_factory=dict)
@@ -6975,12 +7111,28 @@ class ConversionState:
     # ── Sets / groups ──────────────────────────────────────────
     node_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # nsid → (title, [nids])
     part_sets: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)   # psid → (title, [pids])
-    # *SET_PART_ADD: psid → (title, [child part-set ids]) — one level of
-    # part-set nesting (dyna2rad CC:692-727: an "ADD" set's ids are part-SET
-    # ids). Expanded ONCE post-parse by _flatten_part_set_adds (writer/mesh.py)
-    # into a plain part_sets entry, so every part-set consumer resolves it.
+    # *SET_<FAMILY>_ADD boolean unions: sid → (title, [child SET ids]). One
+    # dict per family, all seven declared in SET_ADD_FAMILIES above and all
+    # expanded ONCE post-parse by the shared _flatten_set_adds resolver
+    # (writer/mesh.py) into the family's ordinary set container, so every
+    # consumer resolves a union without knowing the variant.
     part_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
-    part_set_adds_flattened: bool = False    # _flatten_part_set_adds ran
+    node_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    segment_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    shell_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    solid_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    beam_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    discrete_set_adds: Dict[int, Tuple[str, List[int]]] = field(default_factory=dict)
+    # *SET_NODE_ADD_ADVANCED: nsid → (title, [(member set id, TYPE), ...]).
+    # TYPE selects the member's FAMILY (1 node / 2 shell / 3 beam / 4 solid /
+    # 5 segment / 6 discrete / 7 thick shell, Vol I R17 p.43-46) and the union
+    # takes the NODES of whatever the member names — still a union, not a
+    # boolean-operator table. Resolved by the same pass, after every other
+    # family, because a TYPE 2..6 member is an element/segment set that may
+    # itself be an _ADD union.
+    node_set_add_advanced: Dict[int, Tuple[str, List[Tuple[int, int]]]] = \
+        field(default_factory=dict)
+    set_adds_flattened: bool = False          # _flatten_set_adds ran
     # *SET_PART[_LIST|_ADD] header attributes DA1..DA4. For *CONTACT_INTERIOR
     # these are per-set defaults: PSF (penalty scale), Fa (activation factor),
     # ED (contact stiffness modulus), TYPE (1 uniform compression / 2 combined
@@ -7544,6 +7696,10 @@ class ConversionState:
                   self.mat_mooney_rivlin, self.mat_ogden, self.mat_hyper_rubber,
                   self.mat_high_explosive, self.mat_spotweld,
                   self.mat_orthotropic, self.mat_enhanced_composite,
+                  # *MAT_022 → /MAT/LAW25 (+/FAIL/CHANG) or /MAT/LAW127,
+                  # always under the MID verbatim, so it belongs here like its
+                  # two composite siblings above.
+                  self.mat_composite_damage,
                   self.mat_transverse_aniso, self.mat_laminated_glass,
                   self.mat_iso_elas_plas, self.mat_strain_rate_plas,
                   self.mat_gurson, self.mat_hill_3r,
@@ -7603,7 +7759,15 @@ class ConversionState:
         NOTE: the gravity groups, the *BOUNDARY_PRESCRIBED_MOTION_SET motion
         groups and that path's zero-scale /BCS groups draw from this. The other
         synthesized /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...)
-        still use next_id() and carry the same latent hazard."""
+        still use next_id() and carry the same latent hazard.
+
+        ``node_sets`` also holds the flattened ``*SET_NODE_ADD`` /
+        ``*SET_NODE_ADD_ADVANCED`` unions, under their own SIDs — and
+        ``_make_extra_groups`` re-emits those too. That is covered by the SAME
+        test because ``_flatten_set_adds`` is a PREPASS: convert() runs it
+        right after dispatch and build_starter runs it as one of its first
+        acts, both before any writer mints a group id, so the union sids are
+        already in this dict when the guard reads it."""
         gid = self.next_id()
         while gid in self.node_sets:
             gid = self.next_id()
@@ -7618,7 +7782,12 @@ class ConversionState:
         user ``*SET_SHELL`` / ``_SOLID`` / ``_BEAM`` / ``_DISCRETE`` under its
         own SID (unlike ``*SET_NODE``, which ``_make_extra_groups`` does
         re-emit), so no collision is reachable — but that is a property of the
-        current writers, not of the id stream. The sibling of
+        current writers, not of the id stream. The flattened
+        ``*SET_<FAMILY>_ADD`` unions land in these same four dicts under their
+        own SIDs and do not change that: nothing re-emits an element set under
+        its SID either way, and a union sid is one MORE id this guard dodges,
+        never one fewer (``_flatten_set_adds`` is a prepass, so they are all
+        present before any writer allocates). The sibling of
         ``next_grnod_id``, dodging the four element-set registries so a
         synthesized element group cannot land on a SID a future writer decides
         to pass through, and a no-op vs ``next_id()`` on any ordinary deck

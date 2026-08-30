@@ -1074,7 +1074,7 @@ class ContactInteriorTests(unittest.TestCase):
         self.assertNotIn("Icontrol", starter)
         self.assertEqual(res.skipped_keywords, [])
 
-    def test_set_part_add_expands_one_level(self):
+    def test_set_part_add_expands_and_names_dangling_member(self):
         sets = ("*SET_PART_LIST\n" + _row(51) + "\n" + _row(7) + "\n"
                 + "*SET_PART_ADD\n" + _row(52) + "\n" + _row(51, 53) + "\n"
                 + "*CONTACT_INTERIOR\n" + _row(52) + "\n")
@@ -1082,7 +1082,7 @@ class ContactInteriorTests(unittest.TestCase):
         hits = _warns(res, "*CONTACT_INTERIOR (set 52")
         self.assertTrue(any("[7]" in w for w in hits))
         self.assertTrue(any("[53]" in w for w in
-                           _warns(res, "child part-set id(s)")))
+                           _warns(res, "member set id(s)")))
 
     def test_unresolved_psid_warns(self):
         res, _ = _convert(self._deck(
@@ -1168,18 +1168,21 @@ class SetPartAddFlattenTests(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn("_ADD block is IGNORED", hits[0])
 
-    def test_nested_add_child_warned_one_level_only(self):
+    def test_nested_add_child_is_expanded_recursively(self):
+        """An _ADD whose member is another _ADD resolves in FULL since the
+        M2 batch-1 shared resolver replaced the one-level rule (which used to
+        warn-drop the nested slice). dyna2rad's set converter recurses without
+        a limit too (convertsets.cxx:1248-1277)."""
         deck = (NODES + SOLID + PART + SEC + _mat073() + LC073
                 + "*SET_PART_LIST\n" + _row(61) + "\n" + _row(7) + "\n"
                 + "*SET_PART_ADD\n" + _row(62) + "\n" + _row(61) + "\n"
-                + "*SET_PART_ADD\n" + _row(63) + "\n" + _row(62, 61) + "\n"
+                + "*SET_PART_ADD\n" + _row(63) + "\n" + _row(62) + "\n"
                 + "*CONTACT_INTERIOR\n" + _row(63) + "\n"
                 + END)
         res, _ = _convert(deck)
-        hits = _warns(res, "exactly ONE level")
-        self.assertTrue(hits)
-        self.assertIn("[62]", hits[0])
-        # the direct *SET_PART child still resolved
+        self.assertFalse(_warns(res, "exactly ONE level"))
+        self.assertFalse(_warns(res, "member set id(s)"))
+        # part 7 reached the consumer through TWO levels of union
         self.assertTrue(any("[7]" in w for w in
                             _warns(res, "arms interior contact")))
 

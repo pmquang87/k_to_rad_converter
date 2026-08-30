@@ -356,7 +356,10 @@ def _th_history_entities(state: ConversionState, dbh):
             "on the literal string \"*SET_PART_LIST_TITLE\", so a plain "
             "*SET_PART_LIST falls through and its PART ids are pushed as "
             "ELEMENT ids) and it turns a lost channel into a starter refusal. "
-            "*SET_..._ADD sets are among the spellings k2rad does not expand.")
+            "The *SET_..._ADD unions ARE expanded (one shared resolver, "
+            "recursive); the spellings still unconverted are the generated "
+            "ones (_GENERAL / _COLUMN / _GENERATE / _INTERSECT) and "
+            "*SET_TSHELL.")
     # dyna2rad sorts and uniques the _SET path and leaves the plain path in
     # deck order (converttimehistory.cxx:213-214); matched here, with the
     # CID/REF columns carried along so they stay aligned with their entity.
@@ -1943,7 +1946,8 @@ def _make_starter_th_nodal_force_group(state: ConversionState) -> List[str]:
             state.warn(
                 f"*DATABASE_NODAL_FORCE_GROUP NSID={grp.nsid}: no converted "
                 "*SET_NODE with that id (or a set spelling k2rad does not "
-                "expand, e.g. *SET_NODE_ADD), so NO /TH/NODE group is written "
+                "expand, e.g. *SET_NODE_GENERAL), so NO /TH/NODE group is "
+                "written "
                 "and those nodfor channels are lost. Listing the set id as if "
                 "it were a node id would be starter ERROR 78.")
             continue
