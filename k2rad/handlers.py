@@ -6400,7 +6400,10 @@ def _report_tiebreak_dropped_cells(state: ConversionState, rec) -> None:
     bond outright.
     """
     from .writer.contacts import _tiebreak_report_dropped_cells
-    _tiebreak_report_dropped_cells(state, rec, ruptured=False)
+    # spotflag=None on purpose: BOTH routes that reach this keep their
+    # penalty-contact spelling and emit no /INTER/TYPE2 at all, so the
+    # CT2CN/CN sentence must not talk about a tie's Stfac card.
+    _tiebreak_report_dropped_cells(state, rec, ruptured=False, spotflag=None)
 
 
 #: The LS-DYNA keyword bases dyna2rad routes to /INTER/TYPE25, and the
@@ -13464,6 +13467,15 @@ def handle_set_segment(block: Block, state: ConversionState) -> None:
             # that the set states one is recorded — the tiebreak writer needs
             # it to decide whether the override is a loss to name, and no
             # converted card can hold a per-segment strength.
+            #
+            # The *SET_SHELL half of that sentence is a KNOWN UNNAMED loss, and
+            # it is unreachable rather than merely unimplemented: `_tied_slave_
+            # nids` has no shell-element-set arm at all (SSTYP 0/1 fall back to
+            # segment set -> part -> part set -> node set), so a tiebreak whose
+            # SURFA is a *SET_SHELL resolves to no nodes and is dropped OUTRIGHT
+            # by `_make_tiebreak_interfaces` with its own message. Recording
+            # *SET_SHELL DA1/DA2 here would be dead code until that resolver
+            # grows the arm; when it does, this is the second half to add.
             if any(to_float(f[j]) for j in (4, 5) if len(f) > j):
                 state.segment_set_attr_sids.add(sid)
     state.segment_sets[sid] = SegmentSet(sid, title, segments)

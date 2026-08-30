@@ -1653,9 +1653,9 @@ def _warn_duplicate_impdisp_ids(state: ConversionState,
 
 #: ``/INTER/TYPEnn/<id>`` — every interface TYPE shares ONE starter id table.
 #: ``/INTER/SUB`` is deliberately NOT matched: ``hm_read_interfaces.F:154``
-#: runs ``IF(KEY == 'SUB') CYCLE`` **before** ``NI = NI + 1``, so a sub-
-#: interface never enters ``IPARI`` and never reaches the duplicate loop at
-#: ``:237-241`` (``/INTER/GUIDED_CABLE`` is excluded the same way at ``:155``).
+#: runs ``IF(KEY == 'SUB') CYCLE`` **before** ``NI = NI + 1`` at ``:156``, so a
+#: sub-interface never enters ``IPARI`` and never reaches the duplicate loop at
+#: ``:229-234`` (``/INTER/GUIDED_CABLE`` is excluded the same way at ``:155``).
 #: Matching it would flag a legal TYPE-vs-SUB id pairing as a k2rad bug.
 _INTER_CARD_ID_RE = re.compile(r"^/INTER/(TYPE\d+)/(\d+)\s*$")
 
@@ -1665,7 +1665,10 @@ def _warn_duplicate_inter_ids(state: ConversionState,
     """Interface ids are ONE namespace across every ``/INTER/TYPEnn``.
 
     ``hm_read_interfaces.F`` reads every ``/INTER/TYPEnn`` into the same
-    ``IPARI``/``NOM_OPT`` slice and then scans it deck-wide (``:237-241``):
+    ``IPARI``/``NOM_OPT`` slice and then scans it deck-wide (``:229-234``,
+    ``DO K=1,NI-1 / IF (NOINT == IPARI(15,K)) / ANCMSG(MSGID=117)``, under the
+    ``IF (IPARI(71,NI) <= 0)`` guard that exempts only the sub-interfaces a
+    ``/INTER/TYPE19`` generates for itself):
     a repeated id is ``ERROR ID : 117 ** INTERFACE ID USED TWICE OR MORE`` and
     no restart file. ``_parse_contact_header``'s docstring has named that error
     since the per-block-length id fallback was removed; this is the deck-wide
@@ -1689,7 +1692,7 @@ def _warn_duplicate_inter_ids(state: ConversionState,
                 + ", ".join(f"/INTER/{k}/{iid}" for k in kinds)
                 + "). Every /INTER/TYPEnn shares ONE starter id namespace "
                 "(hm_read_interfaces.F reads them into one IPARI slice and "
-                "scans it at :237-241), so the starter refuses the deck with "
+                "scans it at :229-234), so the starter refuses the deck with "
                 "ERROR 117 (INTERFACE ID USED TWICE OR MORE) and writes no "
                 "restart file. This is a k2rad bug — please report the deck.")
 

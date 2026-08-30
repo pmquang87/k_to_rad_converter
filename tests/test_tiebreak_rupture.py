@@ -1319,6 +1319,43 @@ class Error556IsDeckWide(unittest.TestCase):
             1, len([w for w in result.warnings if "CONFORMALLY meshed" in w]),
             result.warnings)
 
+    def test_a_tied_contact_that_emits_NO_interface_does_not_refuse_it(self):
+        """A ``*CONTACT_TIED_*`` whose MAIN side cannot become a ``/SURF``
+        (``MSTYP = 4``, a node set) is DROPPED by ``_make_tied_interfaces`` and
+        emits no ``/INTER`` at all — so it cannot raise ``ERROR 556`` and must
+        not cost the tiebreak its rupture. Refusing on it printed a claim about
+        a card the converter itself dropped (the #130 class one layer up)."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*SET_NODE_LIST\n"
+                  "         8\n"
+                  "         1         2         3         4         5"
+                  "         6         7         8\n"
+                  "*SET_NODE_LIST\n"
+                  "         9\n"
+                  "        15        16        17        18\n"
+                  "*CONTACT_TIED_NODES_TO_SURFACE_ID\n"
+                  "        30tied flange\n"
+                  "         9         8         4         4         0"
+                  "         0         0         0\n"
+                  "       0.0       0.0       0.0       0.0       0.0"
+                  "         0       0.0       0.0\n"
+                  "       0.0       0.0       0.0       0.0       0.0"
+                  "       0.0       0.0       0.0\n"
+                + _auto_tiebreak(6, "50.0", "20.0", "0.005") + _TAIL)
+        result, starter = _convert(deck)
+        # The probe REACHES the situation: node set 8 really does hold the
+        # tiebreak's secondary nodes, and the tied contact really is dropped.
+        self.assertEqual([ln for ln in starter.splitlines()
+                          if ln.startswith("/INTER/TYPE2/")],
+                         ["/INTER/TYPE2/20"], starter)
+        self.assertTrue(any("resolved to no contact surface" in w
+                            and "30" in w for w in result.warnings),
+                        result.warnings)
+        # …and the tiebreak keeps its rupture cards, with no refusal naming it.
+        self.assertEqual(len(_cards(_block(starter, "/INTER/TYPE2/20"))), 3)
+        self.assertFalse([w for w in result.warnings
+                          if "also MAIN nodes of" in w], result.warnings)
+
     def test_a_tied_contact_ELSEWHERE_does_not_refuse_the_rupture(self):
         """Scope, the other way round: the same tied contact with its MAIN side
         on part 2 — which the tiebreak's SECONDARY side does not touch — leaves
@@ -1403,6 +1440,49 @@ class Error670IsPerNode(unittest.TestCase):
         self.assertEqual(len(hit), 1, result.warnings)
         self.assertIn("4 secondary node(s)", hit[0])
         self.assertIn("i2surfs.F:72-73", hit[0])
+
+    def test_a_genuinely_mixed_set_does_not_get_the_solids_only_note(self):
+        """Spotflag 20 means the set is GENUINELY mixed since the per-node
+        screen — some nodes shell-only, others solid-only — so the area note
+        must not tell the reader "Secondary side is solids". ``i2surfs.F:70-73``
+        leaves BOTH loops live at ILEV 20 and ``:74-139`` sums them, so the
+        shell-backed half gets the exact mid-surface share and only the
+        solid-backed half carries the ``(1 + t/a + t/b)/3`` factor."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*NODE\n"
+                  "        21               0.0               0.0              30.0\n"
+                  "        22              10.0               0.0              30.0\n"
+                  "        23              10.0              10.0              30.0\n"
+                  "        24               0.0              10.0              30.0\n"
+                  "*ELEMENT_SHELL\n"
+                  "      11       3      21      22      23      24\n"
+                  "*PART\nskin\n         3         2         1\n"
+                  "*SECTION_SHELL\n         2         2\n       1.0\n"
+                  "*SET_NODE_LIST\n"
+                  "         7\n"
+                  "         5         6         7         8        21"
+                  "        22        23        24\n"
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID\n"
+                  "        20glue joint\n"
+                  "         7         2         4         3         0"
+                  "         0         0         0\n"
+                  "       0.3       0.2       0.0       0.0       0.0"
+                  "         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0"
+                  "       0.0       0.0       0.0\n"
+                  "         6      50.0      20.0     0.005       0.0"
+                  "       0.0       0.0       0.0\n"
+                + _TAIL)
+        result, starter = _convert(deck)
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 3, cards)
+        self.assertEqual(cards[0][30:40], "        20")     # genuinely mixed
+        self.assertTrue([w for w in result.warnings
+                         if "secondary side is MIXED" in w], result.warnings)
+        rup = [w for w in result.warnings if "with RUPTURE" in w][0]
+        self.assertIn("Secondary side is MIXED", rup)
+        self.assertNotIn("Secondary side is solids", rup)
+        self.assertIn("i2surfs.F:70-73", rup)
 
 
 class MppDelegationKeepsTheCardOffset(unittest.TestCase):
@@ -1614,6 +1694,72 @@ class UserFlavourHasItsOwnCard41(unittest.TestCase):
                          warns)
 
 
+class Ct2cnAndCnScopeCoversTheNegativeOptions(unittest.TestCase):
+    """The negative OPTIONs read CT2CN and CN exactly as their positive twins.
+
+    Vol I R17 p.11-36 enumerates them as *"EQ.-9: See 9. NFLS/SFLS/ERATEN/-
+    ERATES are functions of temperature. MORTAR option only"* (and the same for
+    -11): the ONLY cells the negative twin redefines are the four named there,
+    so CT2CN/CN are read at -9/-11 too — which is why ``ERATEN``/``ERATES``
+    already carried them. Leaving them off ``CT2CN``/``CN`` made the table
+    disagree with its own sibling entry and printed a live cell as *"INERT in
+    LS-DYNA too, not lost"* — a false fact about the deck (the #130 class)."""
+
+    def _warns(self, option):
+        return _convert("*KEYWORD\n" + _MESH
+                        + _auto_tiebreak(option, "100.0", "300.0", "1.0",
+                                         ct2cn=0.7, cn=2000.0)
+                        + _TAIL)[0].warnings
+
+    def test_ct2cn_and_cn_at_option_minus_9_are_lost_not_inert(self):
+        for option in (-9, -11):
+            with self.subTest(option=option):
+                warns = self._warns(option)
+                lost = [w for w in warns if "no OpenRadioss counterpart" in w]
+                self.assertEqual(len(lost), 1, warns)
+                self.assertIn("CT2CN=0.7", lost[0])
+                self.assertIn("CN=2000", lost[0])
+                inert = [w for w in warns if "INERT in LS-DYNA too" in w]
+                self.assertFalse([w for w in inert if "CT2CN" in w or
+                                  "CN=" in w], inert)
+
+    def test_the_positive_twin_is_unchanged(self):
+        warns = self._warns(9)
+        lost = [w for w in warns if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1, warns)
+        self.assertIn("CT2CN=0.7", lost[0])
+        self.assertIn("CN=2000", lost[0])
+
+
+class StiffnessDropReasonFollowsTheEmittedCard(unittest.TestCase):
+    """CT2CN/CN have no counterpart — but for a DIFFERENT reason per route, and
+    the round shipped the rupture-Spotflag one on records that never get a
+    rupture Spotflag.
+
+    CT2CN/CN are live only at OPTION 9/±11/13/14 (plus the ``_USER`` Card 4.1),
+    none of which is ``CCRIT``, so the record is emitted as the auto-penalty
+    PERMANENT tie at Spotflag 27/28 — where ``_emit_inter_type2`` DOES write
+    ``Stfac 1.0 / Visc 0.05 / Istf 2``. Quoting *"no stiffness input at Spotflag
+    20/21/22 (gated on 25/26/27/28)"* there is a true conclusion resting on a
+    false premise (the #129 class)."""
+
+    def test_the_permanent_tie_route_names_stfac_not_the_gate(self):
+        result, starter = _convert(
+            "*KEYWORD\n" + _MESH
+            + _auto_tiebreak(9, "100.0", "300.0", "1.0", ct2cn=0.7, cn=2000.0)
+            + _TAIL)
+        # The card really is emitted at Spotflag 27 with the penalty card.
+        cards = _cards(_block(starter, "/INTER/TYPE2/20"))
+        self.assertEqual(len(cards), 2, cards)
+        self.assertEqual(cards[0][30:40], "        27")
+        lost = [w for w in result.warnings
+                if "no OpenRadioss counterpart" in w][0]
+        self.assertIn("auto-penalty tie at Spotflag 27 does get a "
+                      "Stfac/Visc/Istf card", lost)
+        self.assertIn("p.214 remark 16", lost)
+        self.assertNotIn("no stiffness input at Spotflag 20/21/22", lost)
+
+
 class VerificationRoundRegistryAudit(unittest.TestCase):
     def test_implicit_solid_contact_np1_warning_sees_a_tiebreak(self):
         """_solid_contact_master_pids walks the contact containers; a tiebreak
@@ -1676,19 +1822,57 @@ class VerificationRoundRegistryAudit(unittest.TestCase):
         self.assertTrue(any("FS=-1" in w and "FRICTIONLESS" in w
                             for w in result.warnings), result.warnings)
 
+    def test_the_sentinel_warning_names_both_ids(self):
+        """The sentinel message used to pair the SOURCE keyword with the
+        COMPANION's minted id — ``*CONTACT_..._TIEBREAK 90005`` — a keyword+id
+        pair that exists neither in the deck nor in the ``.rad``. Same
+        confusion ``_report_unconsumed_gapmin`` was fixed for."""
+        deck = ("*KEYWORD\n" + _MESH
+                + "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_ID\n"
+                  "        20glue joint\n"
+                  "         1         2         3         3         0"
+                  "         0         0         0\n"
+                  "      -1.0       0.2       0.0       0.0       0.0"
+                  "         0       0.0       0.0\n"
+                  "       1.0       1.0       0.0       0.0       0.0"
+                  "       0.0       0.0       0.0\n"
+                  "         6      50.0      20.0     0.005       0.0"
+                  "       0.0       0.0       0.0\n"
+                + _TAIL)
+        result, starter = _convert(deck)
+        comp = [ln for ln in starter.splitlines()
+                if ln.startswith("/INTER/TYPE25/")][0]
+        comp_id = comp.rsplit("/", 1)[1]
+        hit = [w for w in result.warnings if "Card-2 FS=-1 means" in w]
+        self.assertEqual(len(hit), 1, result.warnings)
+        self.assertTrue(hit[0].startswith(
+            "*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK 20 -> companion "
+            f"/INTER/TYPE25/{comp_id}:"), hit[0])
+
     def test_grnod_dodges_a_user_node_set_at_the_auto_id_base(self):
         """_make_extra_groups re-emits every user *SET_NODE under its own SID,
         so a SID at or above the auto-id base 90001 collides with the
-        synthesized secondary group -> starter ERROR 79."""
+        synthesized secondary group -> starter ERROR 79.
+
+        The SID has to be **90002**, not the auto-id base 90001: the tiebreak's
+        main /SURF/PART/EXT is allocated BEFORE the /GRNOD and eats 90001, so a
+        user set at 90001 leaves the group on 90002 under next_id() and
+        next_grnod_id() alike — a probe that never reaches the branch it names
+        (#130). At 90002 the two differ: next_grnod_id() steps over the user
+        SID to 90003, next_id() would re-use 90002."""
         deck = ("*KEYWORD\n" + _MESH
                 + "*SET_NODE_LIST\n"
-                  "     90001\n"
+                  "     90002\n"
                   "         1         2\n"
                 + _auto_tiebreak(1, "100.0", "300.0", "0.0") + _TAIL)
         _, starter = _convert(deck)
         gr = [ln for ln in starter.splitlines()
               if ln.startswith("/GRNOD/NODE/")]
         self.assertEqual(len(gr), len(set(gr)), gr)
+        # Pin WHICH id, not only that they are distinct: the user set keeps
+        # 90002 and the tiebreak's synthesized group steps over it.
+        self.assertEqual(sorted(gr),
+                         ["/GRNOD/NODE/90002", "/GRNOD/NODE/90003"], gr)
 
     def test_a_cid_above_90000_is_named_by_the_id_that_is_emitted(self):
         """The warning tag used to be built from the RAW header id, before the
@@ -1726,16 +1910,25 @@ class Dama2IsEmittedOnlyBehindARupture(unittest.TestCase):
 
 
 class IsymScopeIsNamed(unittest.TestCase):
-    """`Isym = 1` asks for LS-DYNA's "compressive stress does not contribute to
-    the failure equation", but the Reference Guide p.213 scopes it: *"The
-    initial direction from main surface to the secondary node defines the
-    positive side (traction). If the distance is zero (secondary node lies on
-    the main surface), the rupture will be symmetric, even with Isym = 1."*
-    `int2rupt.F:239-246` is that sentence in code —
-    `INORM = SIGN(1, NINT(VN.XSM))`, and `NINT` of a sub-0.5-length-unit offset
-    is 0. A glued joint is coincident by construction, so quoting only the
-    LS-DYNA half would tell the reader the converted tie excludes compression
-    when on the ordinary layout it does not."""
+    """`Isym = 1` gives LS-DYNA's "compressive stress does not contribute to
+    the failure equation" — **on a coincident glue joint as well**.
+
+    The previous round shipped the opposite claim, taken from Reference Guide
+    p.213 (*"If the distance is zero … the rupture will be symmetric, even with
+    Isym = 1"*) plus a misreading of `int2rupt.F:244`. `INORM = SIGN(IONE,
+    NINT(SUM))` with `IONE = 1`: Fortran `SIGN(A, B)` is `|A|` for `B >= 0`, so
+    `SIGN(1, 0)` is `+1`, not `0` — byte-identical to the `Isym = 0` arm's
+    `INORM(II) = IONE` at `:246`. `INORM` is only a sign multiplier on the
+    segment normal (`:346`), so `ruptint2.F`'s `ISYM == 1` branch keeps BOTH
+    compression gates armed: `:162` `IF (SIGN > ZERO) FACN = …` and `:164`
+    `IF (DIS_N > ZERO .AND. DIS_NA > DNMAX .OR. DIS_T > DTMAX)`.
+
+    Measured on a coincident brick glue coupon: `Isym = 1` ruptured in tension
+    and not in compression, the `Isym = 0` twin ruptured in both, and reversing
+    the main `*SET_SEGMENT` node order changed nothing (for a solid main
+    surface `insol3.F:167-175` re-orients the segment outward itself). The
+    manual and the source disagree here; the warning has to say which one the
+    solver follows, not present the source as the manual's sentence."""
 
     def test_the_rupture_warning_states_the_condition(self):
         result, _ = _convert("*KEYWORD\n" + _MESH
@@ -1743,8 +1936,22 @@ class IsymScopeIsNamed(unittest.TestCase):
                              + _TAIL)
         hit = [w for w in result.warnings if "with RUPTURE" in w]
         self.assertEqual(len(hit), 1, result.warnings)
-        self.assertIn("rupture will be SYMMETRIC", hit[0])
-        self.assertIn("int2rupt.F:239-246", hit[0])
+        self.assertIn("SIGN(1,0) is +1, NOT 0", hit[0])
+        self.assertIn("int2rupt.F:244", hit[0])
+        self.assertIn("insol3.F:167-175", hit[0])
+
+    def test_the_refuted_claim_is_gone(self):
+        """The load-bearing half: no wording that tells the reader the tie can
+        release in COMPRESSION, and no remedy prescribing a mesh change on a
+        correct coincident deck (the #125 class)."""
+        result, _ = _convert("*KEYWORD\n" + _MESH
+                             + _auto_tiebreak(6, "50.0", "20.0", "0.005")
+                             + _TAIL)
+        hit = [w for w in result.warnings if "with RUPTURE" in w][0]
+        self.assertNotIn("compression exclusion does NOT", hit)
+        self.assertNotIn("also release in compression", hit)
+        self.assertNotIn("half a length unit", hit)
+        self.assertNotIn("int2rupt.F:239-246 is that sentence in code", hit)
 
 
 class OnlySpellingsCannotRupture(unittest.TestCase):

@@ -404,9 +404,10 @@ shipped, so the marginal cost is small.
   the force-based `NFLF`/`SFLF` of the `TIEBREAK_NODES` family, which would
   need each secondary node's tributary area from `i2surfs.F`; the `*SET_NODE`
   `DA1..DA4` and `*SET_SEGMENT` `A1`/`A2` per-entity overrides (recorded and
-  named only when the deck states one); the fact that `Isym = 1`'s compression
-  exclusion degenerates to symmetric on a COINCIDENT tie (RefGuide p.213),
-  which is the ordinary glue-joint layout; and the
+  named only when the deck states one — the `*SET_SHELL` spelling of the same
+  override, p.11-72 Remark 1, is not recorded, because a `SURFA` on a shell
+  element set resolves to no nodes at all today and the whole record is dropped
+  by name first); and the
   `MORTAR` / `_USER` / `OPTION 9/11/13/14` cohesive laws, which have no
   counterpart of any kind.
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11

@@ -1815,7 +1815,7 @@ _FRIC_ID_TYPES = ("TYPE7", "TYPE11", "TYPE19", "TYPE25")
 
 
 def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
-                         keyword: str, target: str) -> int:
+                         keyword: str, target: str, label: str = "") -> int:
     """Resolve *CONTACT ``FS = -2`` to a /FRICTION id, or 0 with a loud warning.
 
     dyna2rad's rules (``convertcontacts.cxx:341-390``), reproduced:
@@ -1834,8 +1834,15 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
     ``*CONTACT_ERODING_NODES_TO_SURFACE`` it stays 0, so with two or more
     tables in the deck dyna2rad zeroes the friction of a contact whose table
     exists. k2rad reads the raw FD column itself and does not have that hole.
+
+    ``label`` overrides the ``*<keyword> <inter_id>`` prefix of every message.
+    A caller that mints a SECOND interface for one source card (the tiebreak's
+    companion /INTER/TYPE25) must pass it: naming the source keyword beside the
+    minted id sends the reader hunting for a keyword+id pair that exists
+    neither in the source deck nor in the ``.rad``.
     """
     kw = keyword or "CONTACT"
+    tag = label or f"*{kw} {inter_id}"
     tables = state.define_frictions
 
     def edge_caveat(fid: int) -> None:
@@ -1858,7 +1865,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
                "TYPE11, and it is the TYPE11 half that is limited; the TYPE7 "
                "half gets the full law")
         state.warn(
-            f"*{kw} {inter_id}: /FRICTION/{fid} is bound to /INTER/{target}, "
+            f"{tag}: /FRICTION/{fid} is bound to /INTER/{target}, "
             "and the per-part-pair COEFFICIENTS do act, but the Ifric=2 "
             "Darmstad velocity decay does NOT on an edge (TYPE11) contact"
             f"{via}. Expect starter WARNING 1595 'THE FRICTION MODEL DEFINED IN "
@@ -1869,7 +1876,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
 
     if target not in _FRIC_ID_TYPES:
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=-2 asks for a *DEFINE_FRICTION "
+            f"{tag}: Card-2 FS=-2 asks for a *DEFINE_FRICTION "
             f"table, but this contact converts to /INTER/{target}, a TIED "
             "interface with no friction model and so no fric_ID column. The "
             f"friction table is NOT bound and /INTER/{target} runs "
@@ -1879,7 +1886,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
         return 0
     if not tables:
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=-2 selects a *DEFINE_FRICTION table, "
+            f"{tag}: Card-2 FS=-2 selects a *DEFINE_FRICTION table, "
             "but the deck defines NONE — friction set to 0 on this interface "
             "(same as dyna2rad warning 200029). Add the *DEFINE_FRICTION the "
             "contact refers to, or put an ordinary FS/FD on Card 2.")
@@ -1887,7 +1894,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
     if len(tables) == 1:
         fid = next(iter(tables))
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=-2 -> /FRICTION/{fid} bound via "
+            f"{tag}: Card-2 FS=-2 -> /FRICTION/{fid} bound via "
             f"fric_ID on /INTER/{target}. The deck has exactly one "
             "*DEFINE_FRICTION, so it applies to every FS=-2 contact regardless "
             "of the FD column (LS-DYNA Vol I p.17-279; dyna2rad "
@@ -1898,7 +1905,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
     want = int(fd)
     if want in tables:
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=-2 with FD={want} -> /FRICTION/{want} "
+            f"{tag}: Card-2 FS=-2 with FD={want} -> /FRICTION/{want} "
             f"bound via fric_ID on /INTER/{target} (the deck has "
             f"{len(tables)} *DEFINE_FRICTION tables, so FD names the one to "
             "use). The interface's own Fric/Ifric are dead while fric_ID is "
@@ -1906,7 +1913,7 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
         edge_caveat(want)
         return want
     state.warn(
-        f"*{kw} {inter_id}: Card-2 FS=-2 but FD={fd:g} matches none of the "
+        f"{tag}: Card-2 FS=-2 but FD={fd:g} matches none of the "
         f"{len(tables)} *DEFINE_FRICTION ids in the deck "
         f"({sorted(tables)}) — friction set to 0 on this interface (dyna2rad "
         "warning 200029; LS-DYNA itself calls this an error termination, Vol I "
@@ -1916,19 +1923,24 @@ def _bind_friction_table(state: ConversionState, fd: float, inter_id: int,
 
 def _contact_friction(state: ConversionState, fs: float, fd: float,
                       inter_id: int, keyword: str, target: str,
-                      fsf: float = 1.0):
+                      fsf: float = 1.0, label: str = ""):
     """(*Fric*, *fric_ID*) for one contact, honouring the FS sentinels.
 
     ``FS >= 0`` (the ordinary case) is unchanged: scalar Coulomb ``Fric = FS``
     with ``Ifric = 0``, no binding, no new warning — every deck that converted
     before still converts byte-for-byte. Only the three sentinel values move.
+
+    ``label`` overrides the ``*<keyword> <inter_id>`` prefix — see
+    :func:`_bind_friction_table`.
     """
     kw = keyword or "CONTACT"
+    tag = label or f"*{kw} {inter_id}"
     if fs == _FS_DEFINE_FRICTION:
-        return 0.0, _bind_friction_table(state, fd, inter_id, kw, target)
+        return 0.0, _bind_friction_table(state, fd, inter_id, kw, target,
+                                         label=tag)
     if fs == _FS_PART_CONTACT:
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=-1 means 'take the friction "
+            f"{tag}: Card-2 FS=-1 means 'take the friction "
             "coefficients from the *PART_CONTACT cards', which k2rad does not "
             f"convert -> /INTER/{target} Fric=0 (FRICTIONLESS) for this "
             "interface. Writing FS through literally would put a NEGATIVE "
@@ -1945,7 +1957,7 @@ def _contact_friction(state: ConversionState, fs: float, fd: float,
                       "*INCLUDE tree, or whether it is a *DEFINE_TABLE_2D/_3D, "
                       "which k2rad does not parse)")
         state.warn(
-            f"*{kw} {inter_id}: Card-2 FS=2 is the LS-DYNA sentinel for "
+            f"{tag}: Card-2 FS=2 is the LS-DYNA sentinel for "
             f"'FD is a friction TABLE id' — mu(contact pressure, relative "
             f"velocity), Vol I p.11-28 'FS.EQ.2: Table ID …'. This one {named}"
             f"{known}. OpenRadioss has no pressure-AND-velocity friction table "
@@ -2686,6 +2698,43 @@ def _tied_master_surface(state: ConversionState, c, out_lines: List[str],
     return surf_id, verts, faces
 
 
+def _surface_capable_pids(state: ConversionState) -> Set[int]:
+    """Part ids that can carry a contact ``/SURF`` — those with a shell, a solid
+    or a thick shell (which is emitted as a ``/BRICK``). An SPH-only part has no
+    face and is deliberately absent, matching ``_make_master_surface``."""
+    return ({e.pid for e in state.shell_elems}
+            | {e.pid for e in state.solid_elems}
+            | {e.pid for e in state.tshell_elems})
+
+
+def _tied_main_surface_resolves(state: ConversionState, c,
+                                surf_pids: Optional[Set[int]] = None) -> bool:
+    """Would this record's MAIN (MSID) side produce a ``/SURF``?
+
+    Mirrors :func:`_tied_master_surface` + :func:`_make_master_surface` WITHOUT
+    emitting a card or consuming an id, so a caller can ask the question before
+    the writers run. All three TYPE2 producers — ``_make_tied_interfaces``,
+    ``_make_tiebreak_interfaces``, ``_make_spotweld_interfaces`` — ``continue``
+    on a falsy ``surf_id`` and emit no ``/INTER`` at all, so a record this
+    returns False for is NOT in the deck the starter reads.
+
+    ``_make_master_surface`` returns False exactly when its ``kinds`` count is
+    0, i.e. when no part in scope carries a shell, a solid or a thick shell
+    (an SPH-only part contributes no face) — that is the condition mirrored
+    here. ``surf_pids`` lets a caller with many records hand in
+    :func:`_surface_capable_pids` once instead of walking the element tables
+    per record.
+    """
+    if c.mstyp in (0, 1) and c.msid in state.segment_sets:
+        return bool(state.segment_sets[c.msid].segments)
+    pids = _contact_master_pids(state, c.msid, c.mstyp)
+    if not pids:
+        return False
+    if surf_pids is None:
+        surf_pids = _surface_capable_pids(state)
+    return bool(pids & surf_pids)
+
+
 def _tied_slave_is_part_side(state: ConversionState, sid: int, styp: int) -> bool:
     """True when a tied contact's SECONDARY side names a whole PART / PART SET
     (rather than a node set or a segment set). Mirrors _tied_slave_nids."""
@@ -2957,12 +3006,21 @@ def _emitted_type2_mains(state: ConversionState):
     batch k2rad emitted 25/26/27/28 only, nothing was ever tagged, and the
     situation could not arise.
 
-    Records whose secondary side resolves to no nodes are left out: those are
-    dropped before any card is written, so they are not in the deck the starter
-    reads. The main node sets are the ``_tied_slave_nids`` resolution of the
-    MSID side, a SUPERSET of the surface's own nodes for a part-based
-    ``/SURF/PART/EXT`` (it includes the part's interior nodes) — deliberately,
-    since over-approximating can only cost a rupture, while
+    Records that produce NO ``/INTER`` are left out — they are not in the deck
+    the starter reads, and naming one in a refusal would print a statement
+    about a card the converter itself dropped (the #130 class, one layer up
+    from a warning's cited fact). Two conditions do that, and BOTH are screened
+    here because all three producers ``continue`` on either:
+
+    * the SECONDARY side resolves to no nodes, and
+    * the MAIN side resolves to no ``/SURF`` (``_tied_main_surface_resolves``) —
+      e.g. ``MSTYP = 4``, a node set, which builds no surface at all.
+
+    The main node sets are the ``_tied_slave_nids`` resolution of the MSID side,
+    a SUPERSET of the surface's own nodes for a part-based ``/SURF/PART/EXT``
+    (it includes the part's interior nodes), and the secondary emptiness test
+    ignores the later rigid-node stripping. Both are over-approximations ON
+    PURPOSE: over-approximating can only cost a rupture, while
     under-approximating would ship the ERROR 556.
     """
     memo: Dict[Tuple[int, int], Set[int]] = {}
@@ -2975,22 +3033,27 @@ def _emitted_type2_mains(state: ConversionState):
             memo[key] = set(_tied_slave_nids(state, sid, styp))
         return memo[key]
 
+    surf_pids = _surface_capable_pids(state)      # one element walk, not one
+                                                  # per record
     out = []
     for c in state.contacts_tied:
         if _tied_interface_type(c) != "TYPE2":
             continue                              # /INTER/TYPE10 penalty tie
-        if not side(c.ssid, c.sstyp):
+        if (not side(c.ssid, c.sstyp)
+                or not _tied_main_surface_resolves(state, c, surf_pids)):
             continue
         out.append((c, c.inter_id, f"*CONTACT_TIED_{c.variant}",
                     side(c.msid, c.mstyp)))
     for c in state.contacts_spotweld:
-        if not _spotweld_slave_nids(state, c.ssid, c.sstyp):
+        if (not _spotweld_slave_nids(state, c.ssid, c.sstyp)
+                or not _tied_main_surface_resolves(state, c, surf_pids)):
             continue
         out.append((c, c.inter_id,
                     "*CONTACT_SPOTWELD" + (f"_{c.variant}" if c.variant else ""),
                     side(c.msid, c.mstyp)))
     for c in state.contacts_tiebreak:
-        if not side(c.ssid, c.sstyp):
+        if (not side(c.ssid, c.sstyp)
+                or not _tied_main_surface_resolves(state, c, surf_pids)):
             continue
         out.append((c, c.inter_id, f"*{c.keyword}", side(c.msid, c.mstyp)))
     return out
@@ -3256,12 +3319,38 @@ def _tiebreak_area_note(spotflag: int, nfls: float) -> str:
     ``(1 + t/a + t/b)/3`` — 1 for a cube, 2/3 at t = a/2 (measured 0.6667),
     1/3 in the thin-plate limit. That factor is per-node mesh geometry, so it
     is STATED, never fitted into the card.
+
+    Spotflag 20 is its OWN case and gets its own sentence. Since the per-node
+    ERROR-670 screen it means the set is GENUINELY MIXED — some nodes carry
+    only shells, others only solids — so neither of the two homogeneous
+    sentences is true of the whole set: ``i2surfs.F:70-73`` leaves both
+    ``ICOQ = 1`` and ``ISOL = 1`` at ILEV 20 and the per-node loop at ``:74``
+    runs the shell branch (``:78``) and the brick branch (``:139``) and SUMS
+    them. Printing the solids-only sentence there contradicted the MIXED
+    disclosure emitted one warning earlier.
     """
     if spotflag == 21:
         return ("Secondary side is shells, so the stress normalisation is "
                 "exact: i2surfs.F gives each node sum(A_quad)/4 + sum(A_tri)/3, "
                 "the same tributary mid-surface area LS-DYNA divides by "
                 "(measured 0.000 % error on a probe coupon).")
+    if spotflag == 20:
+        return (
+            f"Secondary side is MIXED, so Fscalestress={nfls:g} meets a "
+            "DIFFERENT normalisation per node: i2surfs.F:70-73 leaves both "
+            "element loops live at Spotflag 20 and :74-139 SUMS them, so a "
+            "shell-backed node gets the exact mid-surface share "
+            "(sum(A_quad)/4 + sum(A_tri)/3, the same area LS-DYNA divides by) "
+            "while a solid-backed node gets (F_a+F_b+F_c)/12 over the three "
+            "brick faces meeting there — a factor (1 + t/a + t/b)/3 against "
+            "the tributary bond area for elements of thickness t on a bond "
+            "face a x b (1 for cubic elements, 2/3 at t = a/2, 1/3 thin). A "
+            "node carrying BOTH classes gets the SUM of the two, i.e. a "
+            "stronger bond than either. No constant conversion factor exists "
+            "(it is per-node mesh geometry), so NFLS is written through "
+            "unchanged and the mesh dependence is stated here. Split the tie "
+            "so the secondary side is homogeneous if the bond strength "
+            "matters.")
     return (
         f"Secondary side is solids: Fscalestress={nfls:g} is applied to the "
         "node's tributary area from i2surfs.F:265-278, (F_a+F_b+F_c)/12 over "
@@ -3382,7 +3471,8 @@ def _make_tiebreak_interfaces(state: ConversionState,
                 f"(PERMANENT tie, Spotflag={spotflag}, {len(clean)} secondary "
                 f"nodes). The LS-DYNA bond is {_tiebreak_option_note(c)}. "
                 + consequence)
-            _tiebreak_report_dropped_cells(state, c, ruptured=False)
+            _tiebreak_report_dropped_cells(state, c, ruptured=False,
+                                           spotflag=spotflag)
             continue
 
         spotflag, ccrit = plan
@@ -3424,20 +3514,32 @@ def _make_tiebreak_interfaces(state: ConversionState,
             f"1:1 as Max_N_Dist = Max_T_Dist; NFLS={c.nfls:g} as "
             f"Fscalestress; the linear damage ramp as /FUNCT/{fct_sn} "
             f"(1 -> 0 over [0, {ccrit:g}]) and /FUNCT/{fct_st} "
-            f"(SFLS/NFLS = {c.sfls / c.nfls:g} -> 0). Isym=1 asks for "
-            "LS-DYNA's 'compressive stress does not contribute to the failure "
-            "equation' (p.11-73 Remark 2) — but read its scope: Radioss "
-            "Reference Guide p.213 says 'The initial direction from main "
-            "surface to the secondary node defines the positive side "
-            "(traction). If the distance is ZERO (secondary node lies on the "
-            "main surface), the rupture will be SYMMETRIC, even with "
-            "Isym = 1.' int2rupt.F:239-246 is that sentence in code "
-            "(INORM = SIGN(1, NINT(VN.XSM)), and NINT of a sub-0.5-length-unit "
-            "offset is 0). A glued joint is coincident by construction, so on "
-            "the ordinary tiebreak layout the compression exclusion does NOT "
-            "apply and the tie can also release in compression — offset the "
-            "two surfaces by more than half a length unit if you need the "
-            "asymmetry. "
+            f"(SFLS/NFLS = {c.sfls / c.nfls:g} -> 0). Isym=1 gives LS-DYNA's "
+            "'compressive stress does not contribute to the failure equation' "
+            "(p.11-73 Remark 2), and it holds on a COINCIDENT glue joint too. "
+            "The Radioss Reference Guide p.213 says otherwise — 'If the "
+            "distance is ZERO (secondary node lies on the main surface), the "
+            "rupture will be SYMMETRIC, even with Isym = 1' — but that is one "
+            "of the places the manual and the source DISAGREE, and the source "
+            "decides: int2rupt.F:244 is INORM = SIGN(1, NINT(VN.XSM)), and "
+            "Fortran SIGN(1,0) is +1, NOT 0, so a zero offset yields the very "
+            "same INORM = +1 as the Isym=0 arm at :246 while ruptint2.F's "
+            "Isym branch keeps BOTH gates armed (:162 'IF (SIGN > ZERO)' caps "
+            "the traction, :164 'IF (DIS_N > ZERO .AND. DIS_NA > DNMAX .OR. "
+            "DIS_T > DTMAX)' releases). A zero offset only decides WHICH side "
+            "counts as opening — the main segment's own normal instead of the "
+            "node's initial offset — and for a SOLID main surface the starter "
+            "makes that normal point outward whatever the deck's node order "
+            "(insol3.F:167-175 reverses the segment when its normal points "
+            "into the brick). MEASURED on a coincident brick glue coupon "
+            "(NFLS=100, bond area 400 mm2, so the cap is 40 kN): Isym=1 "
+            "ruptured 9 of 9 secondary nodes in TENSION with the tie force "
+            "capped at 39.27 kN (-1.8 %) and 0 of 9 in COMPRESSION, where it "
+            "carried 3.76 MN = 94x NFLS entirely uncapped; the Isym=0 twin "
+            "capped at 41.37 kN and ruptured in BOTH directions (that arm is "
+            "the control proving the compressive load reaches the branch). "
+            "Reversing the main *SET_SEGMENT node order changed nothing — same "
+            "rupture times to the digit. "
             "DIFFERENCE TO NAME: LS-DYNA's criterion couples the two "
             "components, (sn/NFLS)^2 + (ss/SFLS)^2 >= 1, while ruptint2.F caps "
             "them INDEPENDENTLY — identical under pure tension or pure shear, "
@@ -3454,7 +3556,8 @@ def _make_tiebreak_interfaces(state: ConversionState,
             "'ANIM_N(15)==1 .OR. H3D_DATA%N_SCAL_DAMA2 == 1' — so without it "
             "the fringe would exist but be empty. Use both to check the bond "
             "breaks when it should.")
-        _tiebreak_report_dropped_cells(state, c, ruptured=True)
+        _tiebreak_report_dropped_cells(state, c, ruptured=True,
+                                       spotflag=spotflag)
 
         # ── the post-failure contact ──────────────────────────────────────
         # DEFENSIVE, and UNREACHABLE with today's mapping: no `_ONLY` spelling
@@ -3500,12 +3603,27 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
     same twin at the DEFAULT (``Irem_i2 = 1``) was byte-identical to having no
     companion at all.
 
-    ``Inacti = 5`` is what keeps it inert while the tie still holds: the same
-    coupon with and without the companion moved the rupture onset from
-    0.918598647E-03 s to 0.917179015E-03 s, **-0.155 %** — no double stiffness
-    and no t = 0 force spike. Emitted per the #125 rule with its OWN allocated
-    interface id, recorded in ``state.companion_inter_ids`` so /TH/INTER
-    carries it.
+    The companion is effectively inert before the bond fails: the same coupon
+    with and without it moved the rupture onset from 0.918598647E-03 s to
+    0.917179015E-03 s, **-0.155 %** — no double stiffness and no t = 0 force
+    spike.
+
+    That measurement is a with/without-COMPANION twin, so it says nothing about
+    ``Inacti``, and the direct twin says ``Inacti`` is not the cause: on a SOLID
+    tiebreak ``Inacti = 0`` and ``Inacti = 5`` are identical to every printed
+    digit (measured on the brick glue coupon — first ``START RUPTURE``
+    0.185460815E-04 s and last ``TOTAL RUPTURE`` 0.508858180E-03 s in BOTH,
+    while deleting the companion moved the last one to 0.509698831E-03 s,
+    -0.165 %), because ``Igap = 2`` over solid parts gives the companion a ZERO
+    gap and there is no initial penetration for ``Inacti`` to act on.
+    ``Inacti = 5``
+    is kept as the DEFENSIVE choice for the geometry where it would bite and
+    which neither this batch nor its verification round measured: a SHELL
+    tiebreak, where ``Igap = 2`` gives a half-thickness gap that two coincident
+    mid-surfaces sit inside.
+
+    Emitted per the #125 rule with its OWN allocated interface id, recorded in
+    ``state.companion_inter_ids`` so /TH/INTER carries it.
     """
     comp_id = state.next_id()
     sec_pids = sorted(_contact_master_pids(state, c.ssid, c.sstyp))
@@ -3516,8 +3634,14 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
     # a negative (or 2.0) friction coefficient on a card the starter accepts
     # without a word — the #114 class. Every other contact emitter routes
     # through _contact_friction; so does this one.
-    fric, fric_id = _contact_friction(state, c.fs, c.fd, comp_id, c.keyword,
-                                      "TYPE25")
+    # `label`, not the bare (keyword, id) pair: `comp_id` is the id of the
+    # interface that CARRIES the friction, but no `*<c.keyword> <comp_id>` card
+    # exists — not in the source deck and not in the .rad. Naming both ids is
+    # the same fix `_report_unconsumed_gapmin` needed.
+    fric, fric_id = _contact_friction(
+        state, c.fs, c.fd, comp_id, c.keyword, "TYPE25",
+        label=(f"*{c.keyword} {c.inter_id} -> companion "
+               f"/INTER/TYPE25/{comp_id}"))
     sec_surf = 0
     if sec_pids:
         cand = state.next_id()
@@ -3558,8 +3682,13 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
         "('no change to secondary nodes') is what makes the companion live: at "
         "the /DEFAULT value 1 the starter removes the TYPE2-tied nodes from it "
         "once and for all (i7remnode.F:882-901) and the card is byte-identical "
-        "to having none. Inacti=5 keeps it inert before failure (measured "
-        "rupture-onset shift -0.155 %).")
+        "to having none. The companion is inert before failure: adding it "
+        "moved the rupture onset by -0.155 % on a solid coupon. That shift is "
+        "the companion EXISTING, not Inacti — Igap=2 over solid parts gives it "
+        "a zero gap, so Inacti=0 and Inacti=5 measure identically there. "
+        "Inacti=5 is the DEFENSIVE choice for the untested case, a SHELL "
+        "tiebreak, where Igap=2 gives a half-thickness gap that two coincident "
+        "mid-surfaces sit inside.")
     return out
 
 
@@ -3597,11 +3726,18 @@ _TIEBREAK_FIELD_SCOPE = {
     "ERATES": (7, 9, -9, 10, 11, -11),
     # "The ratio of the tangential stiffness to the normal stiffness for
     #  OPTION = 9, 11, 13, and 14."
-    "CT2CN":  (9, 11, 13, 14),
+    # -9/-11 too: their own enumeration entries are "EQ.-9: See 9" / "EQ.-11:
+    # See 11. NFLS/SFLS/ERATEN/ERATES are functions of temperature. MORTAR
+    # option only" (p.11-36) — the ONLY cells the negative twin redefines are
+    # the four named there, so CT2CN and CN are read exactly as at 9/11. This
+    # is why ERATEN/ERATES above carry them; leaving them off here made the
+    # table disagree with its own sibling entry and reported a live CT2CN/CN at
+    # OPTION -9/-11 as "INERT in LS-DYNA too", a false fact about the deck.
+    "CT2CN":  (9, -9, 11, -11, 13, 14),
     # "Normal stiffness (stress/length) for OPTION = 9, 11, 13, and 14 and for
     #  OPTION = 2, 4, 6, 7, and 8 for the MORTAR option only."
-    "CN":     (9, 11, 13, 14),
-    "CN_MORTAR": (2, 4, 6, 7, 8, 9, 11, 13, 14),
+    "CN":     (9, -9, 11, -11, 13, 14),
+    "CN_MORTAR": (2, 4, 6, 7, 8, 9, -9, 11, -11, 13, 14),
     # PARAM's own paragraph (p.11-38/39) enumerates SIX roles and no more, so
     # at OPTION 1/-1, 3/-3, 5 and 101..105 the cell is not read at all. Calling
     # it a loss there states a fact the deck does not contain; the negative
@@ -3614,11 +3750,15 @@ _TIEBREAK_FIELD_SCOPE = {
 #: verbatim, one entry per role. Naming the wrong quantity in a drop message is
 #: the same false-fact class ``_TIEBREAK_FIELD_SCOPE`` exists to prevent: at
 #: OPTION 2 and 4 PARAM is a FLAG, not a physical quantity at all.
+#:
+#: Each entry has to read as the object of *"at OPTION n it is …"* — the three
+#: FLAG roles used to start "PARAM = 1 makes …" and produced "at OPTION 4 it is
+#: PARAM = 1 makes SFLS a frictional stress limit".
 _TIEBREAK_PARAM_ROLE = {
-    2:   "PARAM = 1 makes LS-DYNA IGNORE the shell thickness offsets",
-    -2:  "PARAM = 1 makes LS-DYNA IGNORE the shell thickness offsets",
-    4:   "PARAM = 1 makes SFLS a frictional stress limit, independent of the "
-         "normal force at the tie",
+    2:   "a FLAG: PARAM = 1 makes LS-DYNA IGNORE the shell thickness offsets",
+    -2:  "a FLAG: PARAM = 1 makes LS-DYNA IGNORE the shell thickness offsets",
+    4:   "a FLAG: PARAM = 1 makes SFLS a frictional stress limit, independent "
+         "of the normal force at the tie",
     7:   "the friction angle in DEGREES of the Dycoss pressure-dependent shear "
          "envelope",
     10:  "the friction angle in DEGREES of the Dycoss pressure-dependent shear "
@@ -3666,8 +3806,50 @@ def _tiebreak_secondary_node_attrs(state: ConversionState, c):
     return None
 
 
+def _tiebreak_no_stiffness_reason(spotflag: Optional[int]) -> str:
+    """Why THIS record's converted card cannot carry CT2CN / CN.
+
+    Three different cards, three different reasons — the sentence has to follow
+    the one actually emitted:
+
+    * ``20/21/22`` (rupture): ``hm_read_inter_type02.F:301`` gates the
+      ``Stfac/Visc/Istf`` card on Spotflag 25/26/27/28, so a rupturing tie has
+      no stiffness input at all.
+    * ``27/28`` (the auto-penalty permanent tie, the ordinary route for every
+      OPTION that reads CT2CN/CN): that card IS written (``Stfac 1.0 /
+      Visc 0.05 / Istf 2``), but the stiffness is not an INPUT there either —
+      Radioss 2022 Reference Guide p.214 remark 16: *"Spotflag = 25, 27 or 28:
+      Interface penalty stiffness is computed from both main segment stiffness
+      Km and secondary node stiffness Ks, depending on Istf flag"*, and
+      ``Stfac`` is only the dimensionless *"Stiffness factor"* on that result
+      (p.210, default 1.0). One scale, no separate normal and tangential
+      stiffness to receive CN (stress/length) and CT2CN (their ratio).
+    * ``None``: the record keeps its penalty-contact spelling and emits no
+      ``/INTER/TYPE2`` at all, so there is no tie stiffness of any kind.
+    """
+    if spotflag in (20, 21, 22):
+        return ("the rupturing TYPE2 is a kinematic constraint with no "
+                "stiffness input at Spotflag 20/21/22 (the Stfac/Visc/Istf "
+                "card is gated on 25/26/27/28, "
+                "hm_read_inter_type02.F:301)")
+    if spotflag in (25, 26, 27, 28):
+        return (f"the auto-penalty tie at Spotflag {spotflag} does get a "
+                "Stfac/Visc/Istf card, but the stiffness is not an INPUT "
+                "there: Radioss 2022 Reference Guide p.214 remark 16 — "
+                "'Spotflag = 25, 27 or 28: Interface penalty stiffness is "
+                "COMPUTED from both main segment stiffness Km and secondary "
+                "node stiffness Ks, depending on Istf flag' — and Stfac is "
+                "only the dimensionless 'Stiffness factor' on that result "
+                "(p.210, default 1.0). One scale, and no separate normal and "
+                "tangential stiffness to receive a stress/length CN and their "
+                "ratio")
+    return ("this record keeps its penalty-contact spelling and emits no "
+            "/INTER/TYPE2 at all, so there is no tie stiffness to receive it")
+
+
 def _tiebreak_report_dropped_cells(state: ConversionState, c,
-                                   ruptured: bool) -> None:
+                                   ruptured: bool,
+                                   spotflag: Optional[int] = None) -> None:
     """Name every Card-4 cell that has no counterpart, per record.
 
     Hoisted into a helper so BOTH exits (rupture tie and permanent tie) run it
@@ -3678,6 +3860,17 @@ def _tiebreak_report_dropped_cells(state: ConversionState, c,
     reported as INERT, not as dropped: on the prime carrier
     (``OPTION 1, NFLS 1000, SFLS 1000, ERATEN 1.0``) all three cells are read by
     neither code, and calling them a loss would be a false fact in a warning.
+
+    ``spotflag`` is the Spotflag this record's ``/INTER/TYPE2`` is written with,
+    or ``None`` when it produces no TYPE2 at all (the OPTION-4 and self-tie
+    routes, which keep the penalty-contact spelling and call this from the
+    handler). CT2CN/CN need it: the two REASONS why a tie cannot receive a
+    stiffness are different cards, and quoting the wrong one is a true
+    conclusion resting on a false premise (the #129 class). CT2CN/CN are live
+    only at OPTION 9/±11/13/14 (plus the ``_USER`` Card 4.1, and CN at 2/4/6/7/8
+    for MORTAR), and none of those but the MORTAR pair is ``CCRIT`` — so the
+    ordinary route here is the PERMANENT tie at Spotflag 27/28, which does get
+    the penalty card.
     """
     lost: List[str] = []
     inert: List[str] = []
@@ -3694,11 +3887,8 @@ def _tiebreak_report_dropped_cells(state: ConversionState, c,
                 "release rates) — /INTER/TYPE2's rupture is "
                 "displacement-triggered and has no energy input")
         if c.ct2cn and _tiebreak_field_live(c, "CT2CN"):
-            lost.append(
-                f"CT2CN={c.ct2cn:g} (tangential/normal stiffness ratio) — the "
-                "TYPE2 tie is a kinematic constraint with no stiffness input "
-                "at Spotflag 20/21/22 (the Stfac/Visc/Istf card is gated on "
-                "25/26/27/28, hm_read_inter_type02.F:301)")
+            lost.append(f"CT2CN={c.ct2cn:g} (tangential/normal stiffness "
+                        f"ratio) — {_tiebreak_no_stiffness_reason(spotflag)}")
         if c.cn and _tiebreak_field_live(c, "CN"):
             lost.append(f"CN={c.cn:g} (normal stiffness) — same reason")
         if (c.param and c.option not in (6, 8)

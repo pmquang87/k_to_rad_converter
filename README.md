@@ -2863,10 +2863,13 @@ OpenRadioss releases a `/INTER/TYPE2` on *displacement* and nothing else
   occurs"* — so they get the real rupture cards: `Max_N_Dist = Max_T_Dist =
   CCRIT` 1:1, `Fscalestress = NFLS`, the linear damage ramp as two synthesized
   `/FUNCT`s (the shear one starting at `SFLS/NFLS`), `Rupt = 2`, `Isym = 1`
-  (which asks for LS-DYNA's *"compressive stress does not contribute to the
-  failure equation"* — the warning also names its scope, since the Reference
-  Guide p.213 makes the rupture *symmetric anyway* when the secondary node lies
-  ON the main surface, which a glued joint does by construction). Spotflag 21
+  (which gives LS-DYNA's *"compressive stress does not contribute to the
+  failure equation"*, on a coincident glue joint as well — the Reference
+  Guide p.213 says the rupture goes *symmetric* when the secondary node lies ON
+  the main surface, but `int2rupt.F:244`'s `SIGN(1, 0)` is `+1`, not `0`, and
+  `ruptint2.F:162/164` keeps both compression gates armed; measured on a
+  coincident brick coupon, `Isym = 1` ruptured in tension only while the
+  `Isym = 0` twin ruptured in both). Spotflag 21
   or 22 follows the secondary side's element
   class **per node** (20 only for a genuinely mixed set), matching the scope of
   `i2surfs.F`'s own `ERROR 670`. A rupturing tiebreak also gets a companion
