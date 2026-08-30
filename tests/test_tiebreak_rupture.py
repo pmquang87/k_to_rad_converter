@@ -956,6 +956,29 @@ class NamedDrops(unittest.TestCase):
         self.assertIn("ERATEN=1.5/ERATES=2.5", lost[0])
         self.assertIn("PARAM=30", lost[0])
 
+    def test_option_5_sfls_is_named_as_a_curve_not_a_stress(self):
+        """"NFLS becomes the plastic yield stress … SFLS becomes a curve ID
+        that defines normal stress as a function of the gap" (p.11-38). Calling
+        a *DEFINE_CURVE id a failure stress would be a false fact."""
+        warns = self._warns("*KEYWORD\n" + _MESH
+                            + _auto_tiebreak(5, "50.0", "800.0", "0.0")
+                            + _TAIL)
+        lost = [w for w in warns if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1, warns)
+        self.assertIn("*DEFINE_CURVE 800", lost[0])
+        self.assertIn("plastic yield stress", lost[0])
+        self.assertNotIn("SFLS=800 (the failure stresses", lost[0])
+
+    def test_negative_nfls_at_option_9_is_named_as_a_curve(self):
+        """"NFLS<0/SFLS<0 ⇒ |NFLS|/|SFLS| are load-curve IDs giving the failure
+        stress as a function of characteristic element length"."""
+        warns = self._warns("*KEYWORD\n" + _MESH
+                            + _auto_tiebreak(9, "-701.0", "-702.0", "1.0")
+                            + _TAIL)
+        lost = [w for w in warns if "no OpenRadioss counterpart" in w]
+        self.assertEqual(len(lost), 1, warns)
+        self.assertIn("names a *DEFINE_CURVE", lost[0])
+
     def test_user_mortar_damping_suffixes_are_named(self):
         for kw, needle in (
                 ("CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK_USER",

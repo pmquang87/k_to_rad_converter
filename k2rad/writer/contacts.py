@@ -3330,17 +3330,35 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
     return out
 
 
-#: Card-4 cell -> the OPTIONs that actually READ it, quoted from the field list
-#: on Vol I R17 p.11-38/11-39. A cell outside its OPTION's scope is INERT in
-#: LS-DYNA too, so reporting it as "dropped" would state a loss the source deck
-#: does not contain (the #130 class: an exclusion's stated reason needs the same
-#: audit as a warning's). OPTION 13/14 additionally void NFLS/SFLS/ERATEN/ERATES
-#: outright — p.11-42 Remark 7: "NFLS, SFLS, ERATEN, and ERATES are not used."
+#: Card-4 cell -> the OPTIONs that actually READ it, from the field list on
+#: Vol I R17 p.11-38/11-39 **plus the OPTION paragraphs that REDEFINE a cell**.
+#: A cell outside its OPTION's scope is INERT in LS-DYNA too, so reporting it as
+#: "dropped" would state a loss the source deck does not contain (the #130
+#: class: an exclusion's stated reason needs the same audit as a warning's).
+#:
+#: The field-list sentence alone is NOT the whole scope, and reading it that way
+#: is the trap: it describes each cell's DEFAULT role, and two OPTIONs give the
+#: same cell a different one.
+#:
+#:   * OPTION 5 is absent from both sentences, yet p.11-38 says "NFLS becomes
+#:     the plastic yield stress" and "SFLS becomes a curve ID that defines
+#:     normal stress as a function of the gap". Both cells are read.
+#:   * OPTION 4 is absent from the SFLS sentence, yet its own paragraph says
+#:     "If PARAM is set to unity, SFLS is a frictional stress limit". (OPTION 4
+#:     never reaches this reporter — it keeps the penalty-contact route — but
+#:     the entry is here so the table does not have to be re-derived if it
+#:     ever does.)
+#:
+#: OPTION 13/14 go the other way and void four cells outright, which the field
+#: lists do not say either — p.11-42 Remark 7: "NFLS, SFLS, ERATEN, and ERATES
+#: are not used."
 _TIEBREAK_FIELD_SCOPE = {
     # "Normal failure stress for OPTION = 2, 3, 4, 6, 7, 8, +-9, 10, or +-11"
-    "NFLS":   (2, -2, 3, -3, 4, 6, 7, 8, 9, -9, 10, 11, -11),
+    # + OPTION 5 (redefined: plastic yield stress).
+    "NFLS":   (2, -2, 3, -3, 4, 5, 6, 7, 8, 9, -9, 10, 11, -11),
     # "Shear failure stress for OPTION = 2, 3, 6, 7, 8, +-9, 10, or +-11"
-    "SFLS":   (2, -2, 3, -3, 6, 7, 8, 9, -9, 10, 11, -11),
+    # + OPTION 5 (redefined: a *DEFINE_CURVE id) and OPTION 4 (PARAM = 1).
+    "SFLS":   (2, -2, 3, -3, 4, 5, 6, 7, 8, 9, -9, 10, 11, -11),
     # "For OPTION = 7, +-9, 10, +-11 only."
     "ERATEN": (7, 9, -9, 10, 11, -11),
     "ERATES": (7, 9, -9, 10, 11, -11),
@@ -3430,9 +3448,35 @@ def _tiebreak_report_dropped_cells(state: ConversionState, c,
             "*SET_NODE DA1..DA4 attributes (p.11-70 Remark 1)")
     if (not ruptured and c.family in ("AUTOMATIC", "SURFACE")
             and (_tiebreak_field_live(c, "NFLS") or c.family == "SURFACE")):
-        lost.append(
-            f"NFLS={c.nfls:g}/SFLS={c.sfls:g} (the failure stresses "
-            "themselves)")
+        # NFLS/SFLS are not always stresses. Two OPTION classes redefine them,
+        # and calling a *DEFINE_CURVE id a stress in a warning would be a false
+        # fact about the deck:
+        #   OPTION 5    "SFLS becomes a curve ID that defines normal stress as
+        #                a function of the gap" (Vol I R17 p.11-38)
+        #   OPTION +-9 / +-11 with a NEGATIVE value: |NFLS| / |SFLS| is a
+        #                load-curve id (failure stress vs characteristic
+        #                element length, or vs temperature for the negative
+        #                OPTIONs).
+        if c.family == "AUTOMATIC" and c.option == 5:
+            lost.append(
+                f"NFLS={c.nfls:g} (the plastic yield stress of the glue bond) "
+                f"and the damage curve *DEFINE_CURVE {int(abs(c.sfls))} that "
+                "SFLS names at OPTION 5, giving normal stress as a function of "
+                "the crack opening — it would map onto fct_IDsn verbatim, but "
+                "OPTION 5 states no release DISTANCE, which is the one thing "
+                "/INTER/TYPE2 needs to let go")
+        elif (c.family == "AUTOMATIC" and c.option in (9, -9, 11, -11)
+              and (c.nfls < 0.0 or c.sfls < 0.0)):
+            lost.append(
+                f"NFLS={c.nfls:g}/SFLS={c.sfls:g} — a NEGATIVE value at "
+                f"OPTION {c.option} names a *DEFINE_CURVE "
+                "(failure stress as a function of characteristic element "
+                "length, or of temperature for the negative OPTIONs), which "
+                "has no /INTER/TYPE2 counterpart")
+        else:
+            lost.append(
+                f"NFLS={c.nfls:g}/SFLS={c.sfls:g} (the failure stresses "
+                "themselves)")
     if c.family == "AUTOMATIC" and c.option in (3, -3):
         lost.append(
             "the GROWING tie set — OPTION "
