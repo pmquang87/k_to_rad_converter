@@ -462,6 +462,40 @@ class TestCrossSectionNodeEndpointsAreResolvedLate(unittest.TestCase):
         for got, want in zip(xyz, (5.0, 5.0, 5.0)):
             self.assertAlmostEqual(got, want, places=9)
 
+    def test_the_node_ids_are_offset_by_an_INCLUDE_TRANSFORM(self):
+        """The other half of "XCT is a coordinate OR a node id" (#125): the
+        offset walker has to branch on the RADIUS sign too. The flat spec row
+        offset PSID only, so a child include's section kept asking for the
+        child's PRE-offset node ids — which the parent deck may well own, so
+        the plane silently moves to the WRONG mesh, and when it does not the
+        section is refused on a deck that states it perfectly.
+
+        MEASURED before the fix, on this exact pair: *"after the WHOLE deck was
+        read node 5 is missing — the cross section was SKIPPED"*, with node
+        6005 sitting right there."""
+        child = "\n".join([
+            "*KEYWORD",
+            # The card comes BEFORE *NODE here too, so both halves compose.
+            "*DATABASE_CROSS_SECTION_PLANE_ID", f"{31:>10}" + "child cut",
+            _row(0, 7, "999.0", "999.0", 2, "999.0", "999.0", "-99.0"),
+            _row("0.0", "0.0", "0.0", "0.0", "0.0", 0, 0),
+            # Node 7 goes INSIDE the *NODE block — appending it after the mesh
+            # would land it in the *PART block as a second part card.
+            _RADNEG_MESH.replace(
+                "*ELEMENT_SOLID",
+                _node16(7, 5.0, 5.0, 5.0) + "\n*ELEMENT_SOLID"),
+            "*END", ""])
+        parent = "\n".join([
+            "*KEYWORD", "*INCLUDE_TRANSFORM", "child.k",
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF
+            _row(6000, 7000, 8000, 9000, 5000, 0, 0), _row(0),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        res, starter = _convert_files({"main.k": parent, "child.k": child})
+        self.assertEqual(_warns(res, "is missing"), [])
+        self.assertEqual(len(_headers(starter, "/SECT/")), 1)
+        # The plane is node 6007 (5,5,5) -> node 6002 (10,0,0), so it cuts.
+        self.assertTrue(_headers(starter, "/GRBRIC/BRIC/"))
+
     def test_a_genuinely_absent_node_is_still_refused_after_the_full_parse(
             self):
         deck = (self.HEAD + _RADNEG_MESH

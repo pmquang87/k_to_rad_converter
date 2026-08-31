@@ -3022,6 +3022,47 @@ def _off_initial_volume_fraction_geometry(b: Block, offsets: Dict[str, int],
         raw[toff] = new
 
 
+def _off_database_cross_section_plane(b: Block, offsets: Dict[str, int],
+                                      warn) -> None:
+    """*DATABASE_CROSS_SECTION_PLANE: PSID -> IDSOFF, and XCT/XCH -> IDNOFF
+    **when RADIUS is negative**.
+
+    Two id namespaces in one cell again (the #125 class): Vol I R17 p.16-50
+    says *"If RADIUS is negative ... XCT and XCH will be node IDs"*, so cells 1
+    and 4 of card 1 are COORDINATES when RADIUS >= 0 and NODE IDS when it is
+    negative. A flat ``{"cards": {0: [(0, "s")]}}`` row leaves them alone in
+    both cases, which is right for the coordinates and wrong for the ids:
+    MEASURED on a child include offset by IDNOFF 6000 whose section names its
+    own nodes 2 and 5, the card kept asking for 2 and 5 — which the parent
+    deck may well own, so the plane silently moves to the WRONG mesh, and when
+    it does not the section is refused as "node 5 is missing" on a deck that
+    states it perfectly.
+
+    The RADIUS sign is read with ``_split_card``, the same reader
+    ``_rewrite_line`` edits with, so the two cannot disagree about which cell
+    is which. YCT/ZCT/YCH/ZCH stay untouched: the manual says they "are
+    ignored" in this form.
+
+    A callable spec bypasses ``_offset_block``'s own ``idhdr`` step, so the
+    ``_ID`` header's CSID is rewritten here with the same bucket the flat row
+    used ("p") — dropping it would silently stop offsetting the section id.
+    """
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff and "ID" in b.options and raw:
+        new = _rewrite_id_header(raw[0], offsets.get("p", 0))
+        if new is not None:
+            raw[0] = new
+    if toff >= len(raw):
+        return
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    radius = to_float(cells[7]) if len(cells) > 7 else 0.0
+    mods = [(0, "s")] + ([(1, "n"), (4, "n")] if radius < 0.0 else [])
+    new = _rewrite_line(raw[toff], mods, offsets)
+    if new is not None:
+        raw[toff] = new
+
+
 def _off_initial_strain_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_initial_strain_shell_common(b, offsets, False)
 
@@ -3717,7 +3758,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     # (IDSOFF) for the same reason.
     "DATABASE_HISTORY_SPH": _off_db_history("n"),
     "DATABASE_HISTORY_SPH_SET": _off_db_history("s"),
-    "DATABASE_CROSS_SECTION_PLANE": {"cards": {0: [(0, "s")]}, "idhdr": "p"},
+    # A callable, not a flat row: XCT/XCH are COORDINATES at RADIUS >= 0 and
+    # NODE IDS at RADIUS < 0 (Vol I R17 p.16-50) — see the walker.
+    "DATABASE_CROSS_SECTION_PLANE": _off_database_cross_section_plane,
     "DATABASE_CROSS_SECTION_SET": {"cards": {0: [(i, "s") for i in range(6)]},
                                    "idhdr": "p"},
     "DATABASE_BINARY_D3PLOT": {"cards": {0: [(1, "f"), (4, "s")]}},
@@ -4709,12 +4752,35 @@ def _is_untransformed_beam_orientation(b: Block) -> bool:
     return bool(_elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)[1])
 
 
+def _cross_section_plane_is_node_defined(b: Block) -> bool:
+    """True when this ``*DATABASE_CROSS_SECTION_PLANE`` states its plane with
+    NODE IDS rather than coordinates.
+
+    Vol I R17 p.16-50: *"If RADIUS is negative ... XCT and XCH will be node
+    IDs"*. Such a card carries no literal geometry at all — it follows its
+    nodes, which the TRANID affine DOES move — so the point-bearing warning
+    would be prescribing a manual re-orientation on a correct deck (#125), and
+    the warning's own parenthetical already promises that node-defined variants
+    follow their nodes.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw):
+        return False
+    cells, _comma, _wsf = _split_card(b.raw[toff], 10)
+    return len(cells) > 7 and to_float(cells[7]) < 0.0
+
+
 def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
     seen: Set[str] = set()
     rotates = not linear_is_identity(aff)
     for b in p.sub_blocks:
         kw = b.keyword
         if kw in seen:
+            continue
+        if (kw == "DATABASE_CROSS_SECTION_PLANE"
+                and _cross_section_plane_is_node_defined(b)):
+            # Not added to `seen`: a SECOND, coordinate-defined card of the
+            # same keyword in this include still has to be reported.
             continue
         if kw in _POINT_BEARING or (kw in _DIRECTION_BEARING and (
                 rotates or _carries_literal_axis_point(b))) \
