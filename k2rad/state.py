@@ -6591,6 +6591,13 @@ class ConversionState:
 
     # ── Mesh ───────────────────────────────────────────────────
     nodes: Dict[int, NodeData] = field(default_factory=dict)
+    #: Node ids whose ``*NODE`` card states a constraint in its TC or RC cell
+    #: (Vol I R17: ``NID X Y Z TC RC``). k2rad does not convert them — see
+    #: ``writer/assembly._warn_node_tc_rc``. Kept as ids so the message can
+    #: NAME a few of them; capped, because a third of the corpus writes them
+    #: and one deck states 14 402.
+    node_tc_rc: List[int] = field(default_factory=list)
+    node_tc_rc_count: int = 0
     shell_elems: List[ShellElem] = field(default_factory=list)
     solid_elems: List[SolidElem] = field(default_factory=list)
     # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not

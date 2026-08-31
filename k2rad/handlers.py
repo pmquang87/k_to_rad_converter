@@ -220,6 +220,40 @@ def handle_end(block: Block, state: ConversionState) -> None:
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _note_node_constraint(state: ConversionState, nid: int, tc: str,
+                          rc: str) -> None:
+    """Record a ``*NODE`` card that states a constraint in TC or RC.
+
+    Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``, and TC/RC are
+    constraint CODES (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
+    GLOBAL system. k2rad reads only NID/X/Y/Z, so a deck that states its
+    constraints there converts into a model with those degrees of freedom
+    FREE — at 0 conversion warnings and 0 starter errors. Measured on a
+    spring-mass coupon: the anchor node carried tc=7/rc=7, no /BCS was
+    emitted, and the whole oscillator drifted at the centre-of-mass velocity
+    (6.68 mm against an intended 0.317 mm amplitude) while the run reported
+    NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero cell here.
+
+    Only the LOSS is recorded; ``writer/assembly._warn_node_tc_rc`` names it
+    once per deck. Converting them into /BCS is a separate item: it would add
+    constraints to a third of the corpus, and an EXTRA constraint (silently
+    stiffening a model, or fighting a /IMPVEL on the same DOF) is the harder
+    failure to notice of the two.
+    """
+    for cell in (tc, rc):
+        if not cell:
+            continue
+        try:
+            if int(float(cell)) == 0:
+                continue
+        except ValueError:
+            continue
+        state.node_tc_rc_count += 1
+        if len(state.node_tc_rc) < 10:
+            state.node_tc_rc.append(nid)
+        return
+
+
 def handle_node(block: Block, state: ConversionState) -> None:
     for line in block.raw:
         f = parse_free(line)
@@ -235,9 +269,17 @@ def handle_node(block: Block, state: ConversionState) -> None:
                 continue
             state.nodes[nid] = NodeData(to_float(line[8:24]), to_float(line[24:40]),
                                         to_float(line[40:56]))
+            # TC/RC live in cols 57-64 and 65-72. The length test keeps the
+            # cost off every ordinary node line, which ends at column 56.
+            if len(line) > 56:
+                _note_node_constraint(state, nid, line[56:64].strip(),
+                                      line[64:72].strip())
             continue
         nid = to_int(f[0])
         state.nodes[nid] = NodeData(to_float(f[1]), to_float(f[2]), to_float(f[3]))
+        if len(f) > 4:
+            _note_node_constraint(state, nid, f[4].strip(),
+                                  f[5].strip() if len(f) > 5 else "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

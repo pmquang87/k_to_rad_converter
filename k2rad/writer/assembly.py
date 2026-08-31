@@ -1147,6 +1147,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_mat_ids(state, lines)
     _warn_duplicate_eos_ids(state, lines)
     _warn_duplicate_group_ids(state, lines)
+    _warn_node_tc_rc(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
@@ -1488,6 +1489,47 @@ _GROUP_FAMILY_MESS = {
     "LINE":   "LINE DEFINITION",
     "SUBSET": "SUBSET DEFINITION",
 }
+
+
+def _warn_node_tc_rc(state: ConversionState, lines: List[str]) -> None:
+    """``*NODE``'s TC/RC constraint cells are read and DROPPED — say so.
+
+    Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``: TC and RC are
+    constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
+    global system, exactly the triples ``*BOUNDARY_SPC_NODE`` states one flag
+    at a time. ``handle_node`` reads only NID/X/Y/Z, so a deck that states its
+    constraints there converts into a model with those DOFs FREE.
+
+    This is the silent half that makes it worth a message: measured on a
+    spring-mass coupon whose anchor carried ``tc=7 rc=7``, no ``/BCS`` was
+    emitted, the anchor was free, the whole oscillator drifted at the
+    centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
+    0.317 mm amplitude) — and the run still reported NORMAL TERMINATION. The
+    #122 class: legal, accepted, and wrong.
+
+    Not converted here, deliberately. 721 of 2346 corpus decks write a
+    non-zero cell, so emitting /BCS for them would add constraints to a third
+    of the corpus in a round that cannot validate them; and an EXTRA
+    constraint — silently stiffening a model, or fighting an ``/IMPVEL`` on
+    the same DOF — is the harder of the two failures to notice.
+    """
+    if not state.node_tc_rc_count:
+        return
+    shown = ", ".join(str(n) for n in state.node_tc_rc[:5])
+    more = ("" if state.node_tc_rc_count <= 5
+            else f" and {state.node_tc_rc_count - 5} more")
+    state.warn(
+        f"*NODE: {state.node_tc_rc_count} node(s) state a constraint in the "
+        f"card's own TC/RC cells (node {shown}{more}) — Vol I R17 makes *NODE "
+        "Card 1 'NID X Y Z TC RC', where TC and RC are constraint codes (0 "
+        "none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system. "
+        "k2rad reads only NID/X/Y/Z, so those degrees of freedom are FREE in "
+        "the converted model and no /BCS is emitted for them. Nothing in the "
+        "run reports it: measured on a spring-mass coupon whose anchor carried "
+        "tc=7/rc=7, the anchor was free and the whole oscillator drifted at "
+        "the centre-of-mass velocity while the engine printed NORMAL "
+        "TERMINATION. Restate the constrained nodes as *BOUNDARY_SPC_NODE (or "
+        "*BOUNDARY_SPC_SET), which this converter does emit as /BCS.")
 
 
 def _warn_duplicate_group_ids(state: ConversionState,

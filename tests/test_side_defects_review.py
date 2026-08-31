@@ -653,5 +653,78 @@ class TestStarterDeckIsAscii(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PRE-EXISTING, found while reviewing — *NODE's own TC/RC constraint cells
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _tcrc_deck(node_block: str) -> str:
+    return "\n".join([
+        "*KEYWORD", node_block,
+        "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4),
+        "*SECTION_SHELL", _row(1, 2), _row("1.0", "1.0", "1.0", "1.0"),
+        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+        "*PART", "plate", _row(1, 1, 1),
+        "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+
+class TestNodeTcRcIsNamed(unittest.TestCase):
+    """Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC`` — TC and RC are
+    constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
+    global system. ``handle_node`` reads only NID/X/Y/Z.
+
+    MEASURED on a spring-mass coupon whose anchor carried ``tc=7 rc=7``: no
+    ``/BCS`` was emitted, the anchor was free, the whole oscillator drifted at
+    the centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
+    0.317 mm amplitude) — and the engine printed NORMAL TERMINATION. The #122
+    class: legal, accepted, and wrong, with nothing anywhere saying so.
+
+    721 of 2346 corpus decks write a non-zero cell here, so this is NOT
+    converted in this round — adding constraints to a third of the corpus
+    needs its own validation, and an EXTRA constraint is the harder failure to
+    notice. The loss is NAMED instead.
+    """
+
+    FIXED = "\n".join([
+        "*NODE",
+        _node16(1, 0.0, 0.0, 0.0) + f"{7:>8}{7:>8}",
+        _node16(2, 10.0, 0.0, 0.0),
+        _node16(3, 10.0, 10.0, 0.0),
+        _node16(4, 0.0, 10.0, 0.0) + f"{4:>8}{0:>8}"])
+
+    FREE = "\n".join([
+        "*NODE", "1,0.0,0.0,0.0,7,7", "2,10.0,0.0,0.0,0,0",
+        "3,10.0,10.0,0.0", "4,0.0,10.0,0.0,0,3"])
+
+    def test_the_fixed_format_cells_are_seen(self):
+        res, _starter = _convert(_tcrc_deck(self.FIXED))
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")
+        self.assertEqual(len(w), 1)
+        self.assertIn("2 node(s)", w[0])
+        self.assertIn("(node 1, 4)", w[0])
+
+    def test_the_comma_format_cells_are_seen_too(self):
+        """Node 2 states EXPLICIT zeros and node 3 states nothing — neither is
+        a constraint, so a count of 2 is the discriminator."""
+        res, _starter = _convert(_tcrc_deck(self.FREE))
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")
+        self.assertEqual(len(w), 1)
+        self.assertIn("2 node(s)", w[0])
+        self.assertIn("(node 1, 4)", w[0])
+
+    def test_an_ordinary_deck_says_nothing(self):
+        plain = "\n".join([
+            "*NODE", _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+            _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0)])
+        res, _starter = _convert(_tcrc_deck(plain))
+        self.assertEqual(
+            _warns(res, "state a constraint in the card's own TC/RC cells"), [])
+
+    def test_the_message_names_a_remedy_that_this_converter_emits(self):
+        res, _starter = _convert(_tcrc_deck(self.FIXED))
+        w = _warns(res, "state a constraint in the card's own TC/RC cells")[0]
+        self.assertIn("*BOUNDARY_SPC_NODE", w)
+        self.assertIn("/BCS", w)
+
+
 if __name__ == "__main__":                             # pragma: no cover
     unittest.main()
