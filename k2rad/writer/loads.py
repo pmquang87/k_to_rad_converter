@@ -5643,29 +5643,81 @@ _DAMP_CARD1_HDR = ("#               alpha                beta   grnod_ID"
                    "   skew_ID              Tstart               Tstop")
 
 
+def _damping_elem_nodes(state: ConversionState,
+                        keep_pid) -> Set[int]:
+    """Every node carried by an element whose part passes *keep_pid*.
+
+    EVERY element family that has nodes is walked, because ``/DAMP`` has NO
+    element-type restriction anywhere on its path — reader, group builder or
+    engine kernel:
+
+      * ``hm_read_damp.F:415-429`` is the entire group validation: it resolves
+        the group id and stores the index. No member walk, no
+        element-attachment test.
+      * ``hm_lecgrn.F:538-550`` builds a ``/GRNOD/PART`` over a spring, beam or
+        truss part with ``TAGNOD(IXT,...)`` / ``TAGNOD(IXP,...)`` /
+        ``TAGNODR(IXR,...)``, so those nodes are ordinary group members.
+      * ``engine/source/assembly/damping.F:148-150`` is
+        ``DO N=1,IGRNOD(IGR)%NENTITY ; I=IGRNOD(IGR)%ENTITY(N) ;
+        IF(TAGSLV_RBY(I)==0)`` — the loop index is a NODE, nothing reads IXR,
+        IXP, IXT, IXC or IXS, and the only exclusion is rigid SECONDARY nodes.
+        ``:175`` opens a second loop for the ROTATIONAL DOFs under ``IRODDL``,
+        which is the half that matters MOST to beams and springs.
+
+    MEASURED on a spring-only model (one ``/SPRING``, ``m = 1e-6 Mg``,
+    ``k = 100 N/mm``, ``alpha = 600``): the damped envelope gives a log
+    decrement of 0.18857418 against the hand-computed 0.18858044, i.e. alpha
+    recovered as 600.000132 from an input of 600 — 2e-5 % error. The alpha-0
+    twin and a twin whose group holds only the FIXED node both reproduce the
+    undamped envelope exactly (delta = -0.00000000), so that is the control
+    proving the damping came from the group membership. A beam-only twin
+    recovers 44025.98 from 44028 (-0.005 %).
+
+    So the four-family scope this used to have (shells, solids, thick shells,
+    SPH) was not a property of ``/DAMP``; it was an omission, and it left a
+    beam+spring model completely undamped.
+
+    ``*ELEMENT_PLOTEL`` is the one family deliberately left out: Vol I R17
+    calls it a visualization element that "has no effect on the analysis", and
+    k2rad emits it as an inert ``/SPRING`` with K = C = 0. Letting a plot
+    element introduce damping would be an effect on the analysis. Its nodes
+    are damped anyway whenever a real element also holds them, which is the
+    normal case — a PLOTEL is drawn between nodes the mesh already has.
+    """
+    out: Set[int] = set()
+
+    def take(nodes, pid) -> None:
+        if keep_pid(pid):
+            out.update(n for n in nodes if n > 0)
+
+    for e in state.shell_elems:
+        take(e.nodes, e.pid)
+    for e in state.solid_elems:
+        take(e.nodes, e.pid)
+    for e in state.tshell_elems:
+        take(e.nodes, e.pid)
+    for c in state.sph_elems:
+        take(c.nodes, c.pid)
+    for e in state.beam_elems:
+        take((e.n1, e.n2), e.pid)          # n3 is an ORIENTATION node
+    for e in state.discrete_elems:
+        take((e.n1, e.n2), e.pid)          # n2 == 0 means grounded
+    for e in state.seatbelt_elems:
+        take((e.n1, e.n2, e.n3, e.n4), e.pid)
+    return out
+
+
 def _damping_part_nodes(state: ConversionState, pids: Set[int],
                         rigid_nodes: Set[int]) -> List[int]:
     """Deformable nodes carried by *pids*, rigid-body nodes excluded.
 
-    Shells, solids, THICK SHELLS and SPH PARTICLES are scanned — the same scope
-    ``_make_damping``'s own node sets use. /DAMP is node-based Rayleigh
-    damping with no element-type restriction (the engine adds
-    ``-alpha*M*v - beta*K*v`` over the nodes of a /GRNOD), so a thick shell's or
-    a particle's node is damped exactly like a brick's. Beam and spring nodes
-    are NOT damped by a part-scoped /DAMP; a deck whose damped part is built
-    only from those families gets an empty group and a warning instead of a
-    card.
+    Every node-carrying element family is scanned — see
+    :func:`_damping_elem_nodes` for the source and the measurement. A deck
+    whose damped part is built only from beams or springs used to get an empty
+    group and a warning instead of a card.
     """
-    return sorted(
-        {n for e in state.shell_elems if e.pid in pids
-         for n in e.nodes if n > 0 and n not in rigid_nodes}
-        | {n for e in state.solid_elems if e.pid in pids
-           for n in e.nodes if n > 0 and n not in rigid_nodes}
-        | {n for e in state.tshell_elems if e.pid in pids
-           for n in e.nodes if n > 0 and n not in rigid_nodes}
-        | {n for c in state.sph_elems if c.pid in pids
-           for n in c.nodes if n > 0 and n not in rigid_nodes}
-    )
+    return sorted(_damping_elem_nodes(state, lambda p: p in pids)
+                  - rigid_nodes)
 
 
 def _damping_resolve_pids(state: ConversionState, pid: int, is_set: bool,
@@ -5699,7 +5751,8 @@ def _damping_resolve_pids(state: ConversionState, pid: int, is_set: bool,
     return [pid]
 
 
-def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
+def _make_damping(state: ConversionState, rigid_nodes: Set[int],
+                  rbody_info: Optional[Dict] = None) -> List[str]:
     """Emit /DAMP from *DAMPING_GLOBAL and *DAMPING_PART_STIFFNESS.
 
     Rayleigh damping: C = α·M + β·K.
@@ -5712,9 +5765,15 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 
     Target nodes:
     - If *DAMPING_PART_STIFFNESS specifies parts, damp those parts' nodes only
-    - Otherwise damp all deformable nodes (non-rigid-body)
-    OpenRadioss /DAMP does NOT accept grnod_ID=0 as "all nodes" — we always
-    emit an explicit /GRNOD/NODE block.
+    - Otherwise damp exactly what Vol I R17 p.15-8 says *DAMPING_GLOBAL damps:
+      "the nodes of deformable bodies and ... the mass center of the rigid
+      bodies" — every node-carrying element family, the *ELEMENT_MASS nodes,
+      and each /RBODY's main node. ``rbody_info`` supplies the last of those;
+      when it is omitted (a direct call in a test) the rigid mass centres are
+      simply absent from the group.
+    OpenRadioss /DAMP does NOT accept grnod_ID=0 as "all nodes" — it is starter
+    ERROR 171 (RAYLEIGH DAMPING NONEXISTENT / NODE GROUP ID=0 DOES NOT EXIST),
+    so an explicit /GRNOD/NODE block is always emitted.
 
     Note: LS-DYNA's per-part β semantics (β_part = 2·coef/ω_max) cannot be
     exactly preserved without ω_max — we pass the largest coef as-is and warn
@@ -5774,49 +5833,56 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int]) -> List[str]:
 
     # Resolve target node set.
     #
-    # THICK SHELLS and SPH PARTICLES count. /DAMP is NODE-based Rayleigh damping
-    # — the engine adds -alpha*M*v - beta*K*v over the nodes of a /GRNOD, with
-    # no element-type restriction — so a thick shell's or a particle's node is
-    # damped exactly like a brick's.
+    # EVERY node-carrying element family counts — /DAMP is NODE-based Rayleigh
+    # damping with no element-type restriction on any layer of its path. See
+    # _damping_elem_nodes for the reader/group/engine source and for the
+    # spring-only and beam-only measurements that recover alpha to 2e-5 %.
     # (Contrast /DAMP/FREQUENCY_RANGE, which enters as a Maxwell/Prony viscous
     # stress INSIDE the material law and really does reach only shells and
-    # solids; that path's own warning stays right.) Before the thick-shell batch
-    # this was moot because *ELEMENT_TSHELL was never parsed, and the r14
-    # ex_15 decks reported "*DAMPING_*: no target deformable nodes found - /DAMP
-    # not emitted" purely because their whole mesh was missing.
+    # solids; that path's own warning stays right.)
     if target_pids:
         target_nodes = sorted(
-            {n for e in state.shell_elems if e.pid in target_pids
-             for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for e in state.solid_elems if e.pid in target_pids
-               for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for e in state.tshell_elems if e.pid in target_pids
-               for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for c in state.sph_elems if c.pid in target_pids
-               for n in c.nodes if n > 0 and n not in rigid_nodes}
-        )
+            _damping_elem_nodes(state, lambda p: p in target_pids)
+            - rigid_nodes)
         grnod_title = f"damping_target_pids_{'_'.join(str(p) for p in sorted(target_pids))}"
     else:
-        # No specific parts → all deformable nodes (rigid bodies excluded —
-        # they translate as a unit, damping their nodes is meaningless)
-        target_nodes = sorted(
-            {n for e in state.shell_elems
-             if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
-             for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for e in state.solid_elems
-               if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
-               for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for e in state.tshell_elems
-               if state.parts.get(e.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
-               for n in e.nodes if n > 0 and n not in rigid_nodes}
-            | {n for c in state.sph_elems
-               if state.parts.get(c.pid, PartData(0, "", 0, 0)).mid not in state.mat_rigid
-               for n in c.nodes if n > 0 and n not in rigid_nodes}
-        )
+        # No specific parts → every node of every DEFORMABLE part, plus the
+        # lumped masses, plus each rigid body's mass centre. That is the scope
+        # LS-DYNA states verbatim, Vol I R17 p.15-8: "*DAMPING_GLOBAL ... Define
+        # mass weighted nodal damping that applies globally to THE NODES OF
+        # DEFORMABLE BODIES and to the MASS CENTER OF THE RIGID BODIES."
+        #
+        # Rigid SECONDARY nodes stay out and cost nothing either way: the
+        # engine drops them itself at damping.F:150 (IF(TAGSLV_RBY(I)==0)), and
+        # rbyonf.F:181-192 fills TAGSLV_RBY from LPBY — the SECONDARY list only
+        # — so a /RBODY MAIN node is NOT tagged and IS damped. Putting the main
+        # node in the group is therefore exactly LS-DYNA's "mass center of the
+        # rigid bodies", not an approximation of it.
+        def _deformable(pid: int) -> bool:
+            return (state.parts.get(pid, PartData(0, "", 0, 0)).mid
+                    not in state.mat_rigid)
+
+        target_nodes_set = _damping_elem_nodes(state, _deformable) - rigid_nodes
+        # *ELEMENT_MASS on an ordinary node: k2rad gives it an /ADMAS, so it
+        # carries mass and LS-DYNA damps it. A dummy or a mechanism can be
+        # built almost entirely out of these.
+        target_nodes_set |= {n for n in state.added_node_masses
+                             if n > 0 and n not in rigid_nodes}
+        main_nodes = sorted({info["ind_node"]
+                             for info in (rbody_info or {}).values()
+                             if info.get("ind_node")})
+        target_nodes_set |= set(main_nodes)
+        target_nodes = sorted(target_nodes_set)
         grnod_title = "damping_target_all_deformable"
 
     if not target_nodes:
-        state.warn("*DAMPING_*: no target deformable nodes found - /DAMP not emitted.")
+        state.warn(
+            "*DAMPING_*: the deck carries no node that this card can damp — "
+            "no /DAMP was emitted, so the model runs COMPLETELY UNDAMPED. "
+            "/DAMP needs a /GRNOD (grnod_ID = 0 is starter ERROR 171, not "
+            "'all nodes'), and the group is built from the nodes of every "
+            "element family, the *ELEMENT_MASS nodes and the rigid bodies' "
+            "main nodes; a deck with none of those has no mesh to damp.")
         return []
 
     # next_grnod_id, not next_id: k2rad re-emits every user *SET_NODE under its
@@ -5997,9 +6063,13 @@ def _make_damping_part_mass(state: ConversionState,
         nodes = _damping_part_nodes(state, set(pids), rigid_nodes)
         if not nodes:
             state.warn(
-                f"{what}: part(s) {sorted(pids)} carry no deformable shell or "
-                "solid nodes (only rigid, beam, spring or SPH ones, or no mesh "
-                "at all) — /DAMP not emitted for this card.")
+                f"{what}: part(s) {sorted(pids)} carry no deformable node at "
+                "all — every element on them belongs to a rigid body, or they "
+                "have no mesh — so /DAMP was not emitted for this card. "
+                "(Beams, springs, belts, thick shells and SPH particles DO "
+                "count towards this group; they were excluded until the "
+                "SIDE-DEFECT batch, which is why this message used to fire on "
+                "a perfectly damped beam part.)")
             continue
         # Per-DOF scale factors. LS-DYNA FLAG=1 means "the global components of
         # the damping forces require separate scale factors"; Radioss holds them

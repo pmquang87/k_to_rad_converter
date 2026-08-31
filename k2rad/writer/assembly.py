@@ -2021,7 +2021,8 @@ def _starter_section_registry():
         ("random_noise",      lambda c: _make_random(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),
         ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
-        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
+        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes,
+                                                      c.rbody_info)),
         # The damping family, continued. Each of these three is a no-op (and
         # draws no ids) on a deck without its keyword, so they cannot shift the
         # id stream of an existing deck. *DAMPING_RELATIVE resolves and warns

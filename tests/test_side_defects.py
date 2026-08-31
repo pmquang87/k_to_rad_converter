@@ -131,6 +131,19 @@ def _headers(starter: str, prefix: str):
     return [ln for ln in starter.splitlines() if ln.startswith(prefix)]
 
 
+def _group_by_title(starter: str, prefix: str, title: str):
+    """The one ``prefix``-headed block whose TITLE line is ``title``. Several
+    /GRNOD/NODE blocks coexist in any real deck (rigid-body groups, contact
+    groups, ...), so a block has to be picked by what it IS, not by position."""
+    found = [b for b in _blocks(starter, prefix) if b[1].strip() == title]
+    assert len(found) == 1, f"expected one {title!r} block, got {len(found)}"
+    return found[0]
+
+
+def _group_nids(block):
+    return sorted(int(t) for ln in _cards(block) for t in ln.split())
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # (A) The standalone *EOS_* carrier and the /MAT + /EOS id namespaces
 # ─────────────────────────────────────────────────────────────────────────────
@@ -534,6 +547,163 @@ class TestVolumeFractionGeometryOffsets(unittest.TestCase):
         for fmidtyp in (0, 1):
             with self.subTest(fmidtyp=fmidtyp):
                 self.assertEqual(self._off(fmidtyp)[1], _row(1, 1, 2))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (C) /DAMP on a model with no shells and no solids
+# ─────────────────────────────────────────────────────────────────────────────
+
+_C_DECK = "\n".join([
+    "*KEYWORD", "*NODE",
+    _node16(1, 0.0, 0.0, 0.0), _node16(2, 100.0, 0.0, 0.0),
+    _node16(3, 200.0, 0.0, 0.0), _node16(4, 300.0, 0.0, 0.0),
+    _node16(5, 400.0, 0.0, 0.0),
+    "*ELEMENT_BEAM", _i8(10, 1, 1, 2, 0), _i8(11, 1, 2, 3, 0),
+    "*ELEMENT_DISCRETE", _i8(20, 2, 3, 4, 0),
+    "*ELEMENT_MASS", f"{30:>8}{5:>8}" + f"{'1.0E-6':>16}",
+    "*SECTION_BEAM", _row(1, 2, "1.0"),
+    _row("100.0", "833.33", "833.33", "1406.0"),
+    "*SECTION_DISCRETE", _row(2, 0), _row("0.0", "1.0", "0.0", "0.0"),
+    "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+    "*MAT_SPRING_ELASTIC", _row(2, "100.0"),
+    "*PART", "beams", _row(1, 1, 1),
+    "*PART", "spring", _row(2, 2, 2),
+    "*BOUNDARY_SPC_NODE", _row(1, 0, 1, 1, 1, 1, 1, 1),
+    "*DAMPING_GLOBAL", _row(0, "10.0"),
+    "*CONTROL_TERMINATION", _row("0.001"),
+    "*END", ""])
+
+
+class TestDampingReachesEveryElementFamily(unittest.TestCase):
+    """(C) ``*DAMPING_GLOBAL`` emitted NO ``/DAMP`` at all on a model built
+    from beams, springs and a lumped mass.
+
+    Both target-node arms of ``_make_damping`` walked four registries —
+    ``shell_elems | solid_elems | tshell_elems | sph_elems`` — so on this deck
+    both were empty and the writer took its
+    ``"no target deformable nodes found - /DAMP not emitted"`` exit. MEASURED
+    at master 0c8968e on this exact deck: that warning, and ``grep -c '^/DAMP'``
+    = 0. The model ran completely undamped with VALDMP = 10.0 in the deck.
+
+    The scope was never a property of ``/DAMP``: ``hm_read_damp.F:415-429``
+    validates only the group ID, ``hm_lecgrn.F:538-550`` collects beam, truss
+    and spring nodes into a ``/GRNOD/PART``, and ``damping.F:148-150`` walks
+    ``IGRNOD(IGR)%ENTITY`` with the sole exclusion ``TAGSLV_RBY(I)==0``.
+    Measured on a spring-only oscillator: alpha recovered as 600.000132 from an
+    input of 600.
+
+    The emitted deck was run: starter 0 ERROR / 0 WARNING, engine NORMAL
+    TERMINATION, 59 cycles.
+    """
+
+    def setUp(self):
+        self.res, self.starter = _convert(_C_DECK)
+
+    def test_a_DAMP_card_is_emitted(self):
+        self.assertEqual(len(_headers(self.starter, "/DAMP/")), 1)
+        self.assertEqual(_warns(self.res, "no target deformable nodes"), [])
+
+    def test_the_group_holds_the_beam_spring_and_mass_nodes(self):
+        """Nodes 1-3 from the two beams, 3-4 from the discrete spring, 5 from
+        *ELEMENT_MASS. All five, none missing, nothing invented."""
+        grp = _group_by_title(self.starter, "/GRNOD/NODE/",
+                              "damping_target_all_deformable")
+        self.assertEqual(_group_nids(grp), [1, 2, 3, 4, 5])
+
+    def test_the_card_columns_are_exact(self):
+        """/DAMP card 1 is ``Alpha(20) Beta(20) grnod_ID(10) skew_ID(10)
+        Tstart(20) Tstop(20)`` — Damp.cfg:131. Beta must be written
+        EXPLICITLY as 0: there is no alpha-only layout, and an omitted Beta
+        puts the grnod_ID digits in cols 21-40."""
+        card = _cards(_block(self.starter, "/DAMP/"))[0]
+        grp = _group_by_title(self.starter, "/GRNOD/NODE/",
+                              "damping_target_all_deformable")
+        grp_id = int(grp[0].rsplit("/", 1)[1])
+        self.assertEqual(_col_f(card, 1, 20), 10.0)        # Alpha = VALDMP 1:1
+        self.assertEqual(_col_f(card, 21, 40), 0.0)        # Beta
+        self.assertEqual(_col_i(card, 41, 50), grp_id)     # grnod_ID
+        self.assertEqual(_col_i(card, 51, 60), 0)          # skew_ID
+        self.assertEqual(_col_f(card, 61, 80), 0.0)        # Tstart
+        self.assertEqual(_col_f(card, 81, 100), 1.0E30)    # Tstop
+
+    def test_grnod_id_is_never_zero(self):
+        """``grnod_ID = 0`` is not "all nodes": it is starter
+        ``ERROR ID : 171 ... RAYLEIGH DAMPING NONEXISTENT / NODE GROUP ID=0
+        DOES NOT EXIST``."""
+        card = _cards(_block(self.starter, "/DAMP/"))[0]
+        self.assertNotEqual(_col_i(card, 41, 50), 0)
+
+
+class TestDampingGlobalCardIsFixedFormat(unittest.TestCase):
+    """(C) side defect on the same card: ``handle_damping_global`` split card 1
+    free-format. ``*DAMPING_GLOBAL`` is fixed I10/E10 (Vol I R17 p.15-8) and a
+    blank INTERIOR column is ordinary, so a free split shifted every later
+    field one slot left."""
+
+    def test_a_blank_interior_column_does_not_shift_the_scale_factors(self):
+        # LCID VALDMP STX STY [STZ blank] SRX SRY SRZ — the free split reads
+        # SRX as STZ and loses SRZ entirely.
+        card = _row(0, "500", "1.0", "1.0", "", "2.0", "2.0", "2.0")
+        st = _dispatch("*KEYWORD\n*DAMPING_GLOBAL\n" + card + "\n*END\n")
+        d = st.damping_global
+        self.assertEqual(d.valdmp, 500.0)
+        self.assertEqual((d.stx, d.sty, d.stz), (1.0, 1.0, 0.0))
+        self.assertEqual((d.srx, d.sry, d.srz), (2.0, 2.0, 2.0))
+
+    def test_a_full_card_is_unchanged(self):
+        """The regression fence: with no blank interior column the fixed and
+        free splits agree, so no ordinary deck moves."""
+        card = _row(0, "500", "1.0", "2.0", "3.0", "4.0", "5.0", "6.0")
+        d = _dispatch("*KEYWORD\n*DAMPING_GLOBAL\n" + card
+                      + "\n*END\n").damping_global
+        self.assertEqual((d.stx, d.sty, d.stz, d.srx, d.sry, d.srz),
+                         (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+
+
+class TestDampingRigidMassCentre(unittest.TestCase):
+    """(C) ``*DAMPING_GLOBAL`` "applies globally to the nodes of deformable
+    bodies AND TO THE MASS CENTER OF THE RIGID BODIES" (Vol I R17 p.15-8).
+
+    k2rad excluded every rigid node, main included, so rigid-body motion went
+    undamped where LS-DYNA damps it. Putting the MAIN node in the group is
+    exactly right and needs no extra filtering: ``rbyonf.F:181-192`` fills
+    ``TAGSLV_RBY`` from ``LPBY``, the SECONDARY list only, so ``damping.F:150``
+    skips the secondaries by itself and leaves the main node damped.
+    """
+
+    DECK = "\n".join([
+        "*KEYWORD", "*NODE",
+        _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+        _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+        _node16(5, 20.0, 0.0, 0.0), _node16(6, 20.0, 10.0, 0.0),
+        "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 2, 2, 5, 6, 3),
+        "*SECTION_SHELL", _row(1, 2, "", 2),
+        _row("1.0", "1.0", "1.0", "1.0"),
+        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+        "*MAT_RIGID", _row(2, "7.85E-9", "2.1E5", "0.3"),
+        _row("0.0", 7, 7), _row("0.0", "0.0", "0.0"),
+        "*PART", "deformable", _row(1, 1, 1),
+        "*PART", "rigid", _row(2, 1, 2),
+        "*DAMPING_GLOBAL", _row(0, "10.0"),
+        "*END", ""])
+
+    def test_the_rigid_main_node_is_in_the_group_and_its_secondaries_are_not(self):
+        _res, starter = _convert(self.DECK)
+        ids = set(_group_nids(_group_by_title(
+            starter, "/GRNOD/NODE/", "damping_target_all_deformable")))
+        # The /RBODY main node is the sole member of its own rb_indnode group.
+        main_grp = _group_by_title(starter, "/GRNOD/NODE/", "rb_indnode_pid2")
+        main = _group_nids(main_grp)[0]
+        self.assertIn(main, ids)
+        # It is a SYNTHESIZED element-free node, not one of the six mesh ones.
+        self.assertNotIn(main, range(1, 7))
+        # The rigid part's own mesh nodes (5, 6 and the shared 2, 3) are
+        # SECONDARIES and stay out; the engine would skip them anyway.
+        self.assertNotIn(5, ids)
+        self.assertNotIn(6, ids)
+        # ... while the purely deformable corners are in.
+        self.assertIn(1, ids)
+        self.assertIn(4, ids)
 
 
 if __name__ == "__main__":            # pragma: no cover

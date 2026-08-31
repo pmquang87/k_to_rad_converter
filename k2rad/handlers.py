@@ -14186,12 +14186,27 @@ def handle_database_history_tshell_set(block: Block,
 def handle_damping_global(block: Block, state: ConversionState) -> None:
     """*DAMPING_GLOBAL: mass-proportional Rayleigh damping (LS-DYNA Manual Vol I).
 
-    Card: lcid valdmp stx sty stz srx sry srz
-    Only one *DAMPING_GLOBAL active at a time per LS-DYNA; last one wins.
+    Card: lcid valdmp stx sty stz srx sry srz — EIGHT fixed I10/E10 cells
+    (Vol I R17 p.15-8). Only one *DAMPING_GLOBAL active at a time per LS-DYNA;
+    last one wins.
+
+    ``fixed=True``: this is a fixed-format card, and a blank INTERIOR column is
+    ordinary on it (STZ omitted while SRX..SRZ are stated, say). A free split
+    then drops the blank and shifts every later field one slot left —
+    MEASURED::
+
+        raw    '         0       500       1.0       1.0                 2.0       2.0       2.0'
+        fixed  ['0','500','1.0','1.0','',   '2.0','2.0','2.0']    <- truth
+        free   ['0','500','1.0','1.0','2.0','2.0','2.0']          <- SRX read
+                                                                     as STZ,
+                                                                     SRZ lost
+
+    which silently rotates the per-DOF scale factors onto the wrong degrees of
+    freedom.
     """
     raw = block.raw
     offset = _title_offset(block)
-    f = _card(raw, offset, fixed=False, n=8, w=10)
+    f = _card(raw, offset, fixed=True, n=8, w=10)
     if not f:
         state.warn("*DAMPING_GLOBAL: no data card found — skipped")
         return
