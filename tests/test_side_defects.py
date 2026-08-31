@@ -945,6 +945,11 @@ class TestInish3StressEmission(unittest.TestCase):
         self.assertEqual(len(w), 1)
         # ... and the message names the card it actually went into (#131).
         self.assertIn("/INISH3/STRA_F/GLOB (element(s) 2)", w[0])
+        # ... and points at the /TH group that element ACTUALLY has. The
+        # closing evidence sentence used to say "/TH/SHEL" alone, so a reader
+        # following it to re-check the claim on a 3-node shell looked in the
+        # wrong group: a /SH3N's channels are /TH/SH3N.
+        self.assertIn("/TH/SH3N", w[0])
 
     def test_the_false_layout_claim_is_gone(self):
         for phrase in ("different card layout",
