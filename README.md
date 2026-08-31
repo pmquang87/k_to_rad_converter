@@ -2091,9 +2091,28 @@ LCK1 still slices its planes); `*DEFINE_TABLE_4D`+ have no `/TABLE` target
 `*DEFINE_CURVE_FUNCTION` → `/FUNCT` (a pure single-variable `x`/`time` analytic
 expression is sampled into an X-Y function over `[0, termination]`; expressions
 that reference parameters, other curves, or runtime state are warned + skipped)
-`*PARAMETER` (fixed and free format, `R`/`I` types) — `&name` references are
-resolved wherever a field is parsed; `*PARAMETER_EXPRESSION` is not evaluated
-(warned). LS-DYNA **comma-delimited free format** is accepted on every card.
+`*PARAMETER` (fixed and free format, `R`/`I`/`C` types) — `&name` references are
+resolved wherever a field is parsed, including a sign-folded `-&name`, inline
+arithmetic in the cell (`&tend/6.0`) and the bracketed `<expr>` form.
+`*PARAMETER_EXPRESSION[_LOCAL|_MUTABLE|_NOECHO]` **is evaluated**, by a
+recursive-descent evaluator (`k2rad/paramexpr.py`) rather than by `eval()`,
+because three of the manual's rules are LS-DYNA-specific and Python gets each
+of them wrong: the **unary minus binds tighter than exponentiation** so
+`-3**2` is `(-3)**2 = 9` (Vol I R17 p.36-9 Remark 2d), the **integer/real type
+of each operand is honoured** so `2/5` is `0` while `2.0/5` is `0.4` (Remark
+2a) with integer division truncating toward zero, and the **intrinsics are
+Fortran's** — `sign(-4,8) = 4`, `int`/`aint` truncate while `nint`/`anint`
+round (differing in the TYPE they return), `mod` takes integers only, and NINT
+rounds half away from zero. All 31 named functions plus `pi`/`dtor`/`rtod`;
+anything outside the grammar is refused BY NAME rather than guessed.
+`*PARAMETER_DUPLICATION` DFLAG 1-5 is read, and its **default 1 means the
+FIRST definition wins**; `MUTABLE` on the first definition allows
+redefinition; `LOCAL` parameters live only for the file that defines them and
+MASK an outer one, which comes back when that file ends;
+`*PARAMETER_TYPE` is read and ignored (an LS-PrePost id-offset hint, no solver
+effect). A `C`-typed parameter used where a number is wanted is a named
+refusal, not a silent 0. LS-DYNA **comma-delimited free format** is accepted
+on every card.
 
 ### Assembly / includes
 `*INCLUDE` and `*INCLUDE_PATH[_RELATIVE]` — included files are parsed and
@@ -2103,7 +2122,17 @@ includes, so no `//SUBMODEL` is emitted): the id offsets
 (`IDNOFF`/`IDEOFF`/`IDPOFF`/`IDMOFF`/`IDSOFF`/`IDFOFF`/`IDDOFF`/`IDROFF`)
 are added to every id the included file defines **and** references (per-keyword
 field map covering the supported keyword families; an included keyword outside
-the map warns loudly), and the `TRANID` `*DEFINE_TRANSFORMATION` moves the
+the map warns loudly — and every `INITIAL_*` handler now has a row, after
+`*INITIAL_STRESS_SHELL`, `*INITIAL_STRESS_SOLID` and
+`*INITIAL_VOLUME_FRACTION_GEOMETRY` were found without one. The two stress
+keywords need a WALKER-driven row rather than a declarative field map: their
+cards are all floats, `_rewrite_line` calls a token an id when
+`to_int(tok) > 0`, and an all-blank stress card is legal, so the record
+boundaries can only be found by raw contiguity from the card-1 row — the
+walkers are the ones the HANDLERS parse with, so the two can never desync.
+`*INITIAL_VOLUME_FRACTION_GEOMETRY`'s `FMSID` lives in two id namespaces
+selected by `FMIDTYP` beside it, 0 = `*SET_PART` and 1 = `*PART`), and the
+`TRANID` `*DEFINE_TRANSFORMATION` moves the
 included `*NODE` coordinates **and `*RIGIDWALL_*` wall geometry** (base + head
 points, the `_FINITE`/`_FLAT`/`_PRISM` edge head, and a `_MOTION` card's
 direction cosines under the linear part only — the starter's `SUBROTPOINT`
@@ -2604,7 +2633,27 @@ into the frame; a nonzero `ICID` rotates `VX/VY/VZ` and the vector axis from tha
 local system to global (else warned + global); `STYP` all/part-set/part/node-set
 scoping (`*ELEMENT_DISCRETE` springs included in the part scan; `PHASE`, `IVATN`,
 `IRIGID` warned + dropped; `_GENERATION_START_TIME` skipped)
-`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB`, always: this keyword's card 1
+`*INITIAL_STRESS_SHELL` → `/INISHE/STRS_F/GLOB` for 4-node shells **and
+`/INISH3/STRS_F/GLOB` for `/SH3N`**, split by topology, because each reader
+resolves its `shell_ID` against its own element table
+(`UEL2SYS(ID_ELEM, KSYSUSRTG, NUMELTG)` at `hm_read_inistate_d00.F:3285` for
+the 3-node one). The two cards are the SAME layout — `diff` of the extracted
+`FORMAT(radioss2021)` blocks of `inish3_strs_f_glob_sub.cfg` and
+`inishe_strs_f_glob_sub.cfg` is empty — with ONE difference: `npg` must be
+**1** on `/INISH3` and never 4. k2rad writes `Ish3n = 0`, so a `/SH3N` is
+initialised through `c3init3 → CSIGINI`, whose cross-check is the opposite of
+the quad path's: `NPGI > 1` (`csigini.F:143`) rather than `NPG /= NPGI`
+(`scigini4.F:160`). Measured: npg 3 and 4 give `ERROR 26` per element, npg 0
+and 1 are clean and the stress is consumed. A stress-carrying tri also needs
+its all-zero `/INISH3/STRA_F/GLOB` companion whenever the deck holds any
+strain block at all, because `ITHKSHEL = 2` is global AND cross-family — a
+quad's strain block un-gates the check for a tri's stress record and
+`csigini.F:190` then raises `ERROR 1904`, whose own message names both
+families. A record naming a shell with fewer than 3 distinct corners is still
+DROPPED before the block is built: the reader arms `ISIGSH` before the id
+lookup, and an armed flag with no payload fabricates stress elsewhere.
+Duplicate records per element keep the FIRST (the starter takes both and lets
+the last silently win). This keyword's card 1
 has exactly eight fields (`EID/SID NPLANE NTHICK NHISV NTENSR LARGE NTHINT
 NTHHSV`, Vol I R17 p.28-95) and its own text pins the frame — "the stresses are
 defined in the GLOBAL cartesian system" (p.28-98) — so the GLOB flavour is
@@ -3831,7 +3880,21 @@ starter's own banner reads `RETRACTOR/SPRING DEFINITIONS`
 
 ### Damping
 `*DAMPING_GLOBAL` → `/DAMP` `Alpha` (mass-proportional Rayleigh; `VALDMP` is
-carried verbatim, both sides apply `F = -α·m·v`). `LCID` is not converted —
+carried verbatim, both sides apply `F = -α·m·v`). The target group is EVERY
+node-carrying element family — shells, solids, thick shells, SPH particles,
+**beams, discrete springs and belts** — plus the `*ELEMENT_MASS` nodes and
+each `/RBODY`'s MAIN node, which is exactly what Vol I R17 p.15-8 states
+("the nodes of deformable bodies and ... the mass center of the rigid
+bodies"). `/DAMP` has no element-type restriction anywhere on its path:
+`hm_read_damp.F:415-429` validates only the group id, `hm_lecgrn.F:538-550`
+collects beam/truss/spring nodes into a `/GRNOD/PART`, and
+`damping.F:148-150` walks `IGRNOD(IGR)%ENTITY` with the sole exclusion
+`TAGSLV_RBY(I)==0` — rigid SECONDARY nodes, which the engine drops itself, so
+the MAIN node is damped. Measured on a spring-only oscillator: α recovered as
+600.000132 from an input of 600. Before this a beam+spring model emitted NO
+`/DAMP` at all and ran undamped. `*ELEMENT_PLOTEL` is the one family left
+out, because Vol I R17 calls it a visualization element that "has no effect on
+the analysis". `LCID` is not converted —
 plain `/DAMP` has no function slot, so a time-varying curve is warned about and
 the constant `VALDMP` used. The per-DOF scale factors `STX..SRZ` are warned
 about and dropped
@@ -3947,6 +4010,39 @@ highest-numbered `.dynain`: it holds the last state written at or after
 engine's own output cadence is coarser), because the capture is a schedule and
 not a terminal-state hook.
 
+**That caveat is EXPLICIT-only.** Under a quasi-static implicit run the
+highest-numbered file IS the terminal state, exactly: `imp_dt.F:53-56` clamps
+the last step onto `TSTOP` (`DT_E = MIN(DT_IMP, TSTOP-TT)` whenever
+`IDYNA == 0`), so the run lands ON `ENDTIM` and the ordinary `TT >= TDYNAIN`
+trigger fires there. MEASURED on a converging implicit twin (3×3 plate,
+`*CONTROL_IMPLICIT_GENERAL/SOLUTION/AUTO`, imposed 0.2 mm, `ENDTIM` 1.0):
+`QUASI-STATIC NON-LINEAR`, 97 total nonlinear iterations, NORMAL TERMINATION
+in 20 cycles, three files of 22 225 bytes with all four blocks, distinct md5
+each, and the driven edge reading 20.1960 / 20.1980 / **20.2000** — the full
+imposed displacement to the digit. `resol.F` has ONE time loop, `:8233` is its
+only `SORTIE_MAIN` call site and is not gated on `IMPL_S`. **So no implicit
+guard is applied and none should be**; what to expect instead is FEWER files
+than the schedule asks for, because `sortie_main.F:952` advances `TDYNAIN` by
+one interval per write and a long implicit step strides over several triggers.
+`/IMPL/DT/FIXPOINT`, which this converter already emits, removes the
+intermediate overshoot.
+
+**The STRAIN card's spelling is load-bearing.** `fredynain.F:140` accepts the
+card on `KEY3(1:5) == 'STRAI'`, so `/DYNAIN/SHELL/STRAI/FULL` parses too — but
+`check_qeph_stra.F:64-76` runs inside the STARTER, opens `<root>_0001.rad` and
+compares the first **25** characters of each line against the literal
+`/DYNAIN/SHELL/STRAIN/FULL`. A match sets `ISTR_24`, and `elbuf_ini.F:1588`
+then allocates `GBUF%G_STRPG = 4·G_STRA` for QEPH shell groups — the only
+thing that lets `dynain_c_strag.F:151` lift `NPG` to 4, with `:152` `CYCLE`-ing
+the group when it did not. The short spelling is 24 characters, so on a QEPH
+deck it silently loses the whole strain block. MEASURED, spelling twin — the
+same decks apart from that one card, both NORMAL TERMINATION at 0 ERROR /
+0 WARNING: the long form gave 22 225 B with the strain block (164 records,
+`eps_XX` 4.674E-03), the short form 12 422 B without it. This matters to every
+implicit deck k2rad writes, because `_elform_to_ishell` returns Ishell 24
+unconditionally under implicit. k2rad emits the long form from a named
+constant, `_DYNAIN_STRAIN_CARD`, whose length and content the tests assert.
+
 The starter also **re-parses the engine file**: `check_dynain.F` opens
 `<root>_0001.rad` and walks the `/DYNAIN/DT` block, and its guard
 `IF(CARTE(1:1)/='#'.OR.CARTE(1:1)/='$')` is always true, so the line after
@@ -4052,6 +4148,24 @@ approximated as the infinite plane with a warning). The cut shell set is split
 by topology: 4-node shells into a `/GRSHEL/SHEL` on `grshel_ID`, 3-node shells
 into a `/GRSH3N/SH3N` on `grtria_ID` — a `/SH3N` ID is not resolved by a 4-node
 group, so without the split a cut triangle contributes no force to the section.
+The cut also finds **springs and 1-D belts**, which go into a `/GRSPRI/SPRI`
+on `grsprg_ID` (`sect.cfg:37`, read at `hm_read_sect.F:301` and resolved with
+`ELEGROR(..., 'SPRI')` at `:548`); on the `_SET` spelling `DSID` and `TSID`
+are converted the same way, into `grsprg_ID` and `grbric_ID`. Note the PLANE
+spelling is then a deliberate SUPER-SET of LS-DYNA, whose Figure 16-2 caption
+says the automatic definition "does not check for springs and dampers in the
+section" — the warning says so with the element ids. **The `/SECT` output
+frame is built FROM THE CARD**, as three synthesized element-free nodes:
+`N1 = (XCT,YCT,ZCT)`, the first axis from card 2's edge vector `L`
+(`XHEV/YHEV/ZHEV`) projected into the plane, the third from `n̂ × e1`, so
+`e6 = (N2-N1) × (N3-N1)` is the card's own normal exactly and the `Iframe = 0`
+origin lands on the plane origin. That frame is not decoration:
+`section_c.F:385-389` SPLITS every nodal force with `e6` into the FN and FT
+channels and takes the moments about the origin. The old frame picked the
+three best-CONDITIONED mesh nodes and was measured 26.57° off on a +X plane,
+giving 89.6 % of the true normal force, 1.34× the tangential one and a wrong
+global moment, all at 0 starter diagnostics. `RADIUS < 0` (which makes `XCT`
+and `XCH` NODE IDS, p.16-49) and `ITYPE` are read now too.
 `*DATABASE_SECFORC` → `/TH/SECTIO` on every section. **The `FNX/Y/Z`,
 `FTX/Y/Z` and `M1/M2/M3` channels are time-accumulated impulses and angular
 impulses, not the instantaneous section resultants secforc reports** —

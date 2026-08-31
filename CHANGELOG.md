@@ -11,6 +11,200 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **SIDE-DEFECT batch — ten defects at the edges of cards this converter
+  already handles.** Each is reachable, none is the main line of any single
+  keyword, and four of them changed a NUMBER on a real corpus deck. Measured
+  master-vs-branch throughout; two of the research verdicts this batch started
+  from were themselves refuted by those measurements, and both refutations are
+  recorded below rather than shipped.
+
+  1. **(A) The bare `*EOS_*` `/MAT/LAW6` carrier collided in the `/MAT`
+     namespace, and could never have been legal anyway.** A bare `*EOS_*` — no
+     same-id `*MAT_NULL`, named by no `*PART` EOSID — used to mint a carrier
+     under the EOS id, guarded by `_impact_claimed_mids`, a hand-kept list of
+     THREE families standing in for the semantic quantity "does any other
+     emitter put a `/MAT` under this id?" (#124 class). MEASURED on the corpus
+     carrier `dynaexamples_r14/ale-s-ale/s-ale/wavestructure/2Dlag.k`, whose
+     orphan `*EOS_LINEAR_POLYNOMIAL 3` sits on a `*MAT_JOHNSON_COOK` (in none
+     of the three): `/MAT/LAW4/3` AND `/MAT/HYD_VISC/3`, starter
+     `ERROR ID : 79 ... IN MATERIAL DEFINITION ID=3 is DUPLICATED`,
+     3 ERROR(S), ERROR TERMINATION — plus `/EOS/GRUNEISEN/3` beside
+     `/EOS/POLYNOMIAL/3`, which nothing diagnosed. The branch is REMOVED, not
+     renumbered: NONE of the three `*EOS_*` spellings k2rad reads carries a
+     density cell (LS-DYNA takes it from the `*PART`'s own `*MAT`, Vol I R17
+     p.37-6), so every handler stores `rho0 = 0.0` and a `/MAT/LAW6` with
+     `RHO_I 0` is starter `ERROR 683` — measured on the very deck
+     `tests/test_impact_mats.py` pinned as CORRECT, which was therefore
+     pinning an unrunnable output. Dropping is also what LS-DYNA and dyna2rad
+     do with an `*EOS_*` no `*PART` names. `2Dlag.k` after the fix: one card
+     per id in both namespaces, starter 3 ERROR(S) → 1 (the survivor is the
+     out-of-scope `ERROR 3046`). Adds the tenth deck-wide duplicate scan,
+     `_warn_duplicate_eos_ids`: `/EOS` is the namespace with NO starter check
+     at all — `hm_read_eos.F` contains no `UDOUBLE` anywhere, so two `/EOS` on
+     one id are accepted at 0 ERROR / 0 WARNING and the last silently replaces
+     the material's pressure law.
+
+  2. **(B) `*INITIAL_STRESS_SHELL` and `_SOLID` had no `*INCLUDE_TRANSFORM`
+     offset row**, being registered directly in `HANDLERS` instead of through
+     `INITIAL_STATE_PRELOAD_KEYWORDS`. MEASURED with/without twin on a
+     parent+child pair (IDEOFF 6000, IDPOFF 7000, all offsets distinct):
+     MASTER put the child's stress record on the PARENT deck's shell 1 — a
+     different part, a different thickness, a different place — and dropped
+     the other two under a generic "keyword has no offset map" warning, with
+     no `/INIBRI` block at all; the branch lands `/INISHE 6001` and
+     `/INIBRI 6001`, rows of the child's own offset mesh. Both offsetters are
+     driven by NEW record walkers extracted from the handlers, because a
+     declarative `data` spec would rewrite a stress of 1.5 as the id 1 and an
+     all-blank stress card is legal (#116/#119). The audit found a third
+     keyword without a row, `*INITIAL_VOLUME_FRACTION_GEOMETRY`, whose `FMSID`
+     lives in two id namespaces selected by `FMIDTYP` beside it (#125).
+
+  3. **(C) `/DAMP` reached only four element families, so a beam+spring model
+     ran completely undamped.** Both target-node arms of `_make_damping`
+     walked `shell_elems | solid_elems | tshell_elems | sph_elems` and nothing
+     else. MEASURED at master on a 2-beam + 1-spring + 1-`*ELEMENT_MASS` deck
+     carrying `VALDMP 10.0`: the "no target deformable nodes found" exit and
+     zero `/DAMP` cards. The scope was never a property of `/DAMP` —
+     `hm_read_damp.F:415-429` validates only the group id,
+     `hm_lecgrn.F:538-550` collects beam/truss/spring nodes into a
+     `/GRNOD/PART`, and `damping.F:148-150` walks the node list with the sole
+     exclusion `TAGSLV_RBY(I)==0`, opening a SECOND loop at `:175` for the
+     rotational DOFs. Measured on a spring-only oscillator: log decrement
+     0.18857418 against the hand-computed 0.18858044, i.e. alpha recovered as
+     600.000132 from an input of 600, with alpha-0 and wrong-group twins as
+     controls. The branch emits `/DAMP` over all five nodes; starter
+     0 ERROR / 0 WARNING, engine NORMAL TERMINATION, 59 cycles. Two docstrings
+     asserting the OPPOSITE of the engine are deleted (#130), and the scope
+     grows the two LS-DYNA states that were missing: the `*ELEMENT_MASS` nodes
+     and each `/RBODY` MAIN node ("the nodes of deformable bodies and ... the
+     mass center of the rigid bodies", p.15-8). Side defect on the same card:
+     `handle_damping_global` split its FIXED-format card 1 free-format, so a
+     blank interior column shifted every later field — SRX read as STZ, SRZ
+     lost.
+
+  4. **(D) `/INISH3/STRS_F/GLOB` is emitted — initial stress on a 3-node shell
+     was dropped, under a warning whose cited fact was FALSE.** It said the
+     card "is a different card layout this converter does not write yet", and
+     the code comment beside it said "the card layout differs". `diff` of the
+     extracted `FORMAT(radioss2021)` blocks of `inish3_strs_f_glob_sub.cfg`
+     and `inishe_strs_f_glob_sub.cfg` is EMPTY (#131 class). The ONE
+     difference is `npg`, and the two rules are OPPOSITE: 4 on a QUAD
+     (`scigini4.F:160`), 0 or 1 on a `/SH3N`, whose check is `NPGI > 1` at
+     `csigini.F:143` — measured `ERROR 26` for npg 3 and 4, clean for 0 and 1.
+     MEASURED on a MIXED deck (quad stress + tri stress + quad strain, the
+     #127 shape): starter 0 ERROR / 0 WARNING, engine NORMAL TERMINATION,
+     70 cycles, and CONSUMED rather than merely accepted — with/without twin,
+     cycle 1 I-ENERGY -11.75 vs -4.125 and K-ENERGY 5.468 vs 1.705 at
+     identical total mass. The #127 companion rule is extended to tris because
+     `ITHKSHEL = 2` is global AND cross-family, and the companion warning now
+     names the card each record actually went into.
+
+  5. **(E) The `/SECT` reporting frame was conditioning-picked**, not read
+     from the card: N1 = the lowest node id of the cut, N2 = the farthest
+     node, N3 = the largest triangle. That frame is not decoration —
+     `section_skew.F:82-99` makes `e6 = (N2-N1) x (N3-N1)` the section NORMAL
+     and `section_c.F:385-389` SPLITS every nodal force with it. MEASURED on a
+     shell strip cut at x = 25 with normal +X: the picked frame's `e6` was
+     `(0,0,-1)`, **90.00 degrees off**, with the origin at `(20,0,0)` — not on
+     the plane — at 0 starter ERROR; on a cantilever the same defect cost
+     89.6 % of the true normal force, gave 1.34x the tangential one and moved
+     every moment component including the global ones. The frame is now three
+     synthesized element-free nodes built from the card (#127's preload
+     precedent), so `e6` is the card's normal to 12 places and the
+     `Iframe = 0` origin lands exactly on `(XCT,YCT,ZCT)`. `XHEV/YHEV/ZHEV`,
+     `ITYPE` and `RADIUS < 0` (which makes `XCT`/`XCH` NODE IDS) are read for
+     the first time. `/TH/SECTIO` also requests `GLOBAL` and `CENTER`, because
+     `CX/CY/CZ` is the only way to audit the frame from the T01.
+
+  6. **(F) `_plane_cut` had no spring arm**, so a section plane through a belt
+     or a discrete spring found nothing and `grsprg_ID` stayed 0. MEASURED,
+     starter echo, master vs branch on one deck: `NUMBER OF SPRING ELEMENTS`
+     0 -> 1 (`SPRING 10, N1=1 N2=0`, the correct tail-side pack code) and
+     section nodes 3 -> 4, both at 0 starter ERROR. The walk keys on
+     `state.discrete_elems` and the 1-D `state.seatbelt_elems`, never on the
+     nine-producer union `state.spring_elem_ids` (#128), and the group is
+     emitted whenever the column is non-zero because `elegror.F:92-94` returns
+     0 for a missing group and says NOTHING. The DIVERGENCE is named: Vol I
+     R17 Figure 16-2's caption says LS-DYNA's automatic plane definition "does
+     not check for springs and dampers in the section", so this is a
+     deliberate super-set. On the `_SET` spelling `TSID` and `DSID` are
+     converted too — they were dropped with the stated reason "no
+     converter-side element type", false on BOTH counts (#130).
+
+  7. **(G) `/DYNAIN` under implicit is MEASURED to work, so no guard is
+     added** — and the research's predicted defect is REFUTED. Implicit probe:
+     `QUASI-STATIC NON-LINEAR`, 97 nonlinear iterations, NORMAL TERMINATION in
+     20 cycles, three `.dynain` files of 22 225 bytes with all four blocks,
+     distinct md5 each, driven edge 20.1960 / 20.1980 / **20.2000** — the
+     terminal state captured exactly, because `imp_dt.F:53-56` clamps the last
+     quasi-static step onto `TSTOP`. The terminal-state caveat is rescoped to
+     explicit-only. The research proposed a warning naming every QEPH part, on
+     the reading that QEPH loses its `*INITIAL_STRAIN_SHELL` block; that
+     warning is NOT shipped, because the implicit probe above IS a QEPH deck
+     (`_elform_to_ishell` returns 24 unconditionally under implicit) and its
+     dynain HAS 164 strain records. The real mechanism, found by chasing the
+     refutation: `check_qeph_stra.F:64-76` compares the first **25**
+     characters of each engine-deck line against the literal
+     `/DYNAIN/SHELL/STRAIN/FULL`, while `fredynain.F:140` accepts the card on
+     five characters — so the short `STRAI` spelling parses and silently loses
+     the block. MEASURED spelling twin: 22 225 B with the strain block vs
+     12 422 B without, the same figure the research attributed to QEPH. k2rad
+     already writes the long form; it now comes from a named constant the
+     tests assert character for character.
+
+  8. **(H) Seventeen of eighteen element-group emission sites used the bare
+     `next_id()`**, with `next_elem_group_id()` on one (`/ACTIV`). All of them
+     use the guarded allocator now, with a per-site verdict — the five `/SURF`
+     ids sitting beside those emitters deliberately stay bare, because `/SURF`
+     is its own starter namespace and may share a number with any `/GR*`
+     group. Adds the eleventh deck-wide scan, `_warn_duplicate_group_ids`,
+     keyed PER FAMILY: MEASURED on twelve probe decks, `/GRBRIC` + `/GRSHEL`,
+     `/GRSPRI` + `/GRBEAM`, `/GRNOD` + `/GRBRIC`, `/SURF` + `/GRSHEL` and even
+     NINE groups on one id are all ACCEPTED at 0 ERROR, while `/GRBRIC/BRIC`
+     twice — or beside `/GRBRIC/PART` — is `ERROR 79`. A single scan over
+     "any `/GR*` id" would have fired on five decks the starter accepts.
+
+  9. **(I) `*PARAMETER_EXPRESSION` is evaluated, and so is inline arithmetic
+     in a data field.** Two measured corpus losses recovered: LSTC's own
+     `efg/metal-cutting/main.k` writes `TRISE` as `&tend/6.0` in a plain
+     10-char column, so the back-solved `VMAX` came out 9/0.03 = **300 mm/s**
+     where the deck means 9/0.025 = **360** — a 16.7 % under-speed on the
+     cutting tool, plus a rectangular plateau instead of a trapezoid; and
+     `set-yaris-detailed-v2j.key` defines its occupant masses with
+     `&DUM_1*.035+1e-3` and writes `&M1_1` into ten `*ELEMENT_MASS` cards, all
+     ten of which were dropped — **0.15208 Mg = 152.08 kg** of occupant mass
+     silently deleted from the flagship public crash deck, now restored to the
+     digit. The evaluator (`k2rad/paramexpr.py`) is recursive descent with NO
+     `eval()`, because three of the manual's rules are LS-DYNA-specific and
+     Python gets each wrong: the unary minus binds TIGHTER than exponentiation
+     (`-3**2` is 9, not -9), the integer/real type of each operand is honoured
+     (`2/5` is 0, `2.0/5` is 0.4, integer division truncating toward zero),
+     and the intrinsics are Fortran's (`sign(-4,8) = 4`, `int`/`aint` truncate
+     while `nint`/`anint` round and differ in the TYPE they return, NINT
+     rounding half away from zero). Also implemented: `*PARAMETER_DUPLICATION`
+     DFLAG 1-5, whose **default 1 means the FIRST definition wins** where the
+     parser had LAST-wins; `MUTABLE`; `LOCAL` scoping as a MASK that is
+     restored when the file ends; `C`-typed parameters as a named refusal
+     rather than a silent 0; `*PARAMETER_TYPE` read and ignored with its
+     reason. `to_float`'s trigger was `"&" in t[:2]`, so `2.0*&thick` and
+     `(&thick)` returned the caller's default with NO diagnostic at all.
+
+  10. **(J) The dead `if c.only:` tiebreak branch is removed**, with the
+      reason stated correctly. The comment called it unreachable "with today's
+      mapping"; it is unreachable by the LS-DYNA CARD GRAMMAR. Vol I R17
+      p.11-14/15 enumerates the family exhaustively and exactly two of eleven
+      spellings contain `ONLY`, taking Card 4: TIEBREAK_NODES (a FORCE
+      criterion) and Card 4: TIEBREAK_SURFACE (a STRESS criterion) — neither
+      has a length field, and `PARAM`/`CCRIT` lives only on Card 4:
+      AUTOMATIC_..._TIEBREAK, mandatory for four spellings none of which has
+      an `_ONLY` variant. Same in R16. The semantics the branch encoded are
+      kept as prose. The pinning test found a weakness in ITSELF — sweeping
+      every option showed `_tiebreak_bond_class` DOES return CCRIT for a
+      hand-made SURFACE record at option 6 or 8, because it classifies the
+      AUTOMATIC enumeration and knows nothing about spellings — so the
+      invariant is now asserted over records the PARSER produced from real
+      decks, at the layer that actually holds it.
+
 - **TIEBREAK post-review round — the `Isym = 1` claim the previous round ADDED
   was inverted, and a refusal named a card the converter had already dropped.**
   Diagnostics only, plus one screening line; no corpus deck moves.
