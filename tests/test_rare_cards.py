@@ -631,9 +631,20 @@ class CurveSmoothTests(unittest.TestCase):
         res, _starter, _eng = _convert(deck)
         self.assertTrue(_warn_containing(res, "SIDR = 1"))
 
-    def test_unresolved_parameter_expression_is_named(self):
-        """The one corpus carrier writes TRISE as '&tend/6.0'; the parser
-        resolves a bare '&name' only, so the cell reads back as 0."""
+    def test_an_inline_parameter_expression_in_TRISE_is_evaluated(self):
+        """The REVERSE of what this pinned before the SIDE-DEFECT batch.
+
+        The one corpus carrier — LSTC's own ``efg/metal-cutting/main.k`` —
+        writes TRISE as ``&tend/6.0`` in a plain 10-char column. The parser
+        used to resolve a bare ``&name`` only, so the cell read back as 0 and
+        this test asserted the CONSEQUENCE: a rectangular plateau at
+        VMAX = 9/0.03 = 300 mm/s where the deck means a trapezoid at
+        9/(0.03-0.005) = 360, plus the #113 abscissa nudge to dodge ERROR 156.
+
+        Item (I) evaluates inline arithmetic, so the number is right now.
+        MEASURED on the real carrier, master vs branch: VMAX 300 -> 360, and
+        the three consequential warnings (the read-as-0 note, the plateau
+        note, the nudge note) all disappear."""
         deck = MESH.replace("{EXTRA}",
                             "*PARAMETER\n"
                             "R tend     3.0e-2\n"
@@ -643,13 +654,20 @@ class CurveSmoothTests(unittest.TestCase):
                             "&tend     &tend/6.0        0.0\n"
                             + SMOOTH_CONSUMER)
         res, starter, _eng = _convert(deck)
-        self.assertTrue(_warn_containing(res, "TRISE", "*PARAMETER"))
+        self.assertEqual(_warn_containing(res, "TRISE", "*PARAMETER"), [])
         pts = _smooth_points(starter, 900)
-        self.assertEqual([y for _x, y in pts], [0.0, 300.0, 300.0, 0.0])
-        # The consequence has to be a NUMBER, not just a principle: this deck
-        # ships a 300 mm/s plateau where the deck meant 360.
-        (w,) = _warn_containing(res, "plateau of VMAX")
-        self.assertIn("VMAX = 300", w)
+        # TRISE = 0.03/6 = 0.005, so VMAX = DIST/(TEND-TSTART-TRISE)
+        # = 9/0.025 = 360, and the trapezoid has four DISTINCT abscissae.
+        self.assertEqual([y for _x, y in pts], [0.0, 360.0, 360.0, 0.0])
+        xs = [x for x, _y in pts]
+        self.assertEqual(len(set(xs)), 4)
+        self.assertAlmostEqual(xs[1], 0.005, places=12)
+        self.assertAlmostEqual(xs[2], 0.025, places=12)
+        (w,) = _warn_containing(res, "back-solved")
+        self.assertIn("360", w)
+        # ... and none of the fallout the 0 used to cause.
+        self.assertEqual(_warn_containing(res, "plateau of VMAX"), [])
+        self.assertEqual(_warn_containing(res, "nudged apart"), [])
 
     def test_a_later_define_curve_on_the_same_id_clears_the_smooth_flag(self):
         """The emitted card kind must match the points that survive: a plain

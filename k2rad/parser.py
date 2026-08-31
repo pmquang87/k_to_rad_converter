@@ -21,6 +21,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import List
 
+from . import paramexpr as _paramexpr
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Block
@@ -83,15 +85,112 @@ _PARAMS: dict = {}
 PARSER_WARNINGS: List[str] = []
 _PARAM_TYPE_CHARS = frozenset("RICric")
 
+#: name -> True when the parameter was declared ``I`` (integer). The TYPE has
+#: to travel with the value, because ``*PARAMETER_EXPRESSION`` honours it:
+#: Vol I R17 p.36-9 Remark 2a, *"the integer and real properties of constants
+#: and parameters are honored ... So 2/5 becomes 0, but 2.0/5 becomes 0.4."*
+_PARAM_IS_INT: dict = {}
+
+#: name -> the raw string of a ``C``-typed parameter. Kept apart from _PARAMS
+#: so a character parameter can be REFUSED BY NAME when a field asks for it as
+#: a number, instead of silently reading as 0.
+_PARAM_TEXT: dict = {}
+
+#: Names declared ``MUTABLE`` on their FIRST definition (Vol I R17 p.36-5
+#: Remark 6: the qualifier "must appear on the first definition" and is
+#: ignored for character parameters).
+_PARAM_MUTABLE: set = set()
+
+#: ``*PARAMETER_DUPLICATION`` DFLAG, p.36-6. **1 is the default and means
+#: "warn and IGNORE the new definition"** — first wins. This parser used to
+#: overwrite unconditionally, i.e. LAST wins, the exact opposite of LS-DYNA's
+#: default.
+_PARAM_DUPLICATION = [1]
+
+#: LS-DYNA disallows this name outright (p.36-3), case-insensitively.
+_PARAM_RESERVED_NAMES = frozenset({"time"})
+
+#: One frame per *INCLUDE level, holding the names that level declared LOCAL.
+#: Vol I R17 p.36-4 Remark 5: a LOCAL parameter "disappears when the input
+#: parser finishes reading the file in which it appears" and may temporarily
+#: MASK a non-LOCAL one of the same name. The frame is popped on the way out
+#: of parse_k_file and the masked value restored.
+_PARAM_LOCAL_STACK: List[set] = [set()]
+
+#: name -> the (value, is_int, text) a LOCAL definition masked, so
+#: _pop_local_scope can put it back.
+_PARAM_MASKED: dict = {}
+
+
+def _param_lookup(name: str):
+    """``(value, is_int)`` for the evaluator, or None when undefined.
+
+    A ``C``-typed parameter is a REFUSAL, not an undefined name: it exists,
+    but Vol I R17 p.36-7 says a character expression is *"not evaluated in any
+    sense, just stored as a string"*, so using one arithmetically is a deck
+    error worth naming.
+    """
+    key = name.lstrip("&").strip().lower()
+    if key in _PARAM_TEXT:
+        raise _paramexpr.ExprError(
+            f"'&{key}' is a CHARACTER parameter (type C). Vol I R17 p.36-7: "
+            "for type C the expression is 'not evaluated in any sense, just "
+            "stored as a string', so it has no numeric value to compute with")
+    val = _PARAMS.get(key)
+    if val is None:
+        return None
+    try:
+        return (int(val), True) if _PARAM_IS_INT.get(key) else (float(val),
+                                                                False)
+    except ValueError:
+        try:
+            return (float(val), False)
+        except ValueError:
+            raise _paramexpr.ExprError(
+                f"'&{key}' holds '{val}', which is not a number")
+
+
+def _warn_once(msg: str) -> None:
+    if msg not in PARSER_WARNINGS:
+        PARSER_WARNINGS.append(msg)
+
 
 def _resolve_param(token: str):
-    """Resolve a ``&name`` (or ``-&name``) field reference against _PARAMS.
+    """Resolve a parameter reference in one data field against _PARAMS.
 
-    Returns the parameter's value string (sign-folded), or None if *token* is
-    not a parameter reference / the name is unknown (a warning is recorded for
-    unknown names).
+    Handles three forms:
+
+    * ``&name`` and ``-&name`` — the bare reference, with Remark 1's sign fold
+      (*"If a minus sign is placed directly before &, with no space, the sign
+      of the numerical value will be switched"*, p.36-3).
+    * ``&name<arith>`` — inline arithmetic in a fixed-width field, e.g.
+      ``&tend/6.0``. The manual documents only the bracketed form for data
+      fields (Remark 1, p.36-8, comma-delimited lines), but LSTC's own example
+      ``efg/metal-cutting/main.k`` writes ``&dtimpl/6.`` and ``&tend/6.0``
+      into plain 10-char columns and LS-DYNA accepts them — so both are read.
+      MEASURED loss before this: that deck's TRISE came out 0 instead of
+      0.005, and the back-solved VMAX 300 mm/s instead of 360.
+    * ``<expr>`` — Remark 1's bracketed form, where the names appear WITHOUT
+      the leading ``&``.
+
+    Returns the value string, or None if *token* is not a parameter reference
+    at all / the reference cannot be resolved (a warning is recorded).
     """
     t = token.strip()
+    if not t:
+        return None
+    bracketed = t.startswith("<") and t.endswith(">")
+    if not bracketed and "&" not in t:
+        return None
+    if bracketed or _paramexpr.is_expression(t):
+        try:
+            return _paramexpr.format_value(
+                _paramexpr.evaluate(t, _param_lookup))
+        except _paramexpr.ExprError as exc:
+            _warn_once(
+                f"*PARAMETER expression '{t}' in a data field could not be "
+                f"evaluated: {exc}. The field was read as blank (0).")
+            return None
     sign = ""
     if t[:1] in "+-" and t[1:2] == "&":
         sign = "-" if t[0] == "-" else ""
@@ -99,12 +198,19 @@ def _resolve_param(token: str):
     if not t.startswith("&"):
         return None
     name = t[1:].strip().lower()
+    if name in _PARAM_TEXT:
+        _warn_once(
+            f"*PARAMETER reference '&{name}' names a CHARACTER parameter "
+            f"(type C, value '{_PARAM_TEXT[name]}') where a number is "
+            "expected — field treated as blank (0). Vol I R17 p.36-3 Remark 2 "
+            "gives C parameters a STRING substitution role (&NAME^ inside a "
+            "larger string, e.g. a filename), which this converter does not "
+            "perform.")
+        return None
     val = _PARAMS.get(name)
     if val is None:
-        msg = (f"*PARAMETER reference '&{name}' is undefined — "
-               "field treated as blank (0)")
-        if msg not in PARSER_WARNINGS:
-            PARSER_WARNINGS.append(msg)
+        _warn_once(f"*PARAMETER reference '&{name}' is undefined — "
+                   "field treated as blank (0)")
         return None
     if sign == "-":
         v = val.strip()
@@ -112,22 +218,113 @@ def _resolve_param(token: str):
     return val
 
 
-def _collect_parameters(kw: str, raw: List[str]) -> None:
+def _store_parameter(name: str, val: str, type_char: str, kw: str,
+                     local_depth: int) -> None:
+    """Apply one (name, value) definition under the manual's own rules.
+
+    Redefinition follows ``*PARAMETER_DUPLICATION`` DFLAG (Vol I R17 p.36-6),
+    whose DEFAULT is 1 = "warn and IGNORE the new definition" — **first wins**.
+    This parser used to overwrite unconditionally, i.e. last wins, the exact
+    opposite. ``MUTABLE`` (Remark 6, p.36-5) allows redefinition regardless of
+    DFLAG, and must appear on the FIRST definition to count.
+    """
+    name = name.strip().lower()
+    if not name:
+        return
+    if name in _PARAM_RESERVED_NAMES:
+        _warn_once(f"*PARAMETER: '{name}' is a name LS-DYNA disallows "
+                   "(Vol I R17 p.36-3) — the definition was ignored.")
+        return
+    if name[:1].isdigit():
+        _warn_once(f"*PARAMETER: '{name}' starts with a digit, which Vol I "
+                   "R17 p.36-3 forbids — the definition was ignored.")
+        return
+    is_c = type_char.upper() == "C"
+    known = name in _PARAMS or name in _PARAM_TEXT
+    is_local = "LOCAL" in kw.split("_")
+    if known and is_local and name not in _PARAM_LOCAL_STACK[-1]:
+        # A LOCAL definition MASKS whatever is in scope rather than replacing
+        # it, and Vol I R17 p.36-6 Remark 1 exempts that case from the
+        # *PARAMETER_DUPLICATION actions entirely ("a LOCAL masking a
+        # non-LOCAL does not trigger these"). Remember the hidden value so
+        # _pop_local_scope can restore it at the end of this file.
+        _PARAM_MASKED.setdefault(
+            name, (_PARAMS.get(name), _PARAM_IS_INT.get(name, False),
+                   _PARAM_TEXT.get(name)))
+        known = False
+    if known:
+        dflag = _PARAM_DUPLICATION[0]
+        mutable = name in _PARAM_MUTABLE
+        # "MUTABLE" also does not apply to character parameters (Remark 6).
+        if not mutable or is_c:
+            if dflag in (1, 3):
+                if dflag != 5:
+                    _warn_once(
+                        f"*PARAMETER '{name}' is defined more than once. "
+                        f"*PARAMETER_DUPLICATION DFLAG = {dflag}, so LS-DYNA "
+                        "keeps the FIRST definition and ignores the later "
+                        "one(s) — which is what this converter does"
+                        + (" (DFLAG 3 also terminates at the end of input, so "
+                           "the deck would not run as written)"
+                           if dflag == 3 else "")
+                        + ". Add the MUTABLE option to the FIRST definition, "
+                        "or *PARAMETER_DUPLICATION with DFLAG 2 or 4, to let "
+                        "the later value win.")
+                return
+            if dflag == 5:
+                return
+            if dflag == 2:
+                _warn_once(
+                    f"*PARAMETER '{name}' is defined more than once and "
+                    "*PARAMETER_DUPLICATION DFLAG = 2, so the LATER "
+                    "definition wins (LS-DYNA warns here too).")
+    elif "MUTABLE" in kw:
+        _PARAM_MUTABLE.add(name)
+    if is_c:
+        _PARAM_TEXT[name] = val.strip()
+        _PARAMS.pop(name, None)
+        _PARAM_IS_INT.pop(name, None)
+    else:
+        _PARAMS[name] = val.strip()
+        _PARAM_IS_INT[name] = type_char.upper() == "I"
+        _PARAM_TEXT.pop(name, None)
+    if "LOCAL" in kw.split("_"):
+        _PARAM_LOCAL_STACK[-1].add(name)
+
+
+def _collect_parameters(kw: str, raw: List[str], local_depth: int = 0) -> None:
     """Store the name→value pairs of a *PARAMETER block in _PARAMS.
 
-    Card format (R16 Vol I): up to 4 (PRMR, VAL) pairs of 10-char fields per
-    card; PRMR's first character is the type (R real, I integer, C character).
-    Free (comma/space) format is accepted too. *PARAMETER_EXPRESSION is not
-    evaluated — a warning is recorded instead.
+    Card format (Vol I R17 p.36-2): up to 4 (PRMR, VAL) pairs of 10-char
+    fields per card; PRMR's first character is the type (R real, I integer,
+    C character). Free (comma/space) format is accepted too.
+
+    ``*PARAMETER_EXPRESSION`` (p.36-7) is a DIFFERENT card: ONE 10-char PRMR
+    followed by the expression as free text to the end of the line, which may
+    continue onto further lines "simply by leaving the first 10 characters of
+    the continuation line blank". It is evaluated here, at parse time, so
+    every downstream ``&name`` consumer is untouched — see
+    :mod:`k2rad.paramexpr` for the grammar and for the three rules that make
+    an ``eval()`` wrong.
+
+    ``*PARAMETER_TYPE`` (p.36-11) is a LS-PrePost id-offset hint with no
+    solver effect; its third cell is a type NAME, not a value, so it must not
+    be read as a definition.
     """
-    if "EXPRESSION" in kw:
-        PARSER_WARNINGS.append(
-            "*PARAMETER_EXPRESSION is not evaluated — its parameters stay "
-            "undefined; fields referencing them parse as 0")
+    if "TYPE" in kw.split("_"):
+        _warn_once(
+            "*PARAMETER_TYPE is a pre-processor hint (Vol I R17 p.36-11): it "
+            "tells LS-PrePost which id offset to apply to a parameter when "
+            "decks are merged, and has no solver effect. It is read and "
+            "ignored; the parameter's VALUE must come from a *PARAMETER card.")
         return
 
     def _is_number(tok: str) -> bool:
         return to_float(tok, float("nan")) == to_float(tok, float("nan"))
+
+    if "EXPRESSION" in kw:
+        _collect_parameter_expressions(kw, raw, local_depth)
+        return
 
     for line in raw:
         if not line.strip():
@@ -137,12 +334,14 @@ def _collect_parameters(kw: str, raw: List[str]) -> None:
             # Fixed format (the standard): (A10, A10) pairs — PRMR is the type
             # char (R/I/C) followed by the name, VAL the value. Keep only pairs
             # whose value field really is a number (guards against a free-format
-            # line that happens to slice weirdly).
+            # line that happens to slice weirdly), EXCEPT for type C, whose
+            # value is a string by definition.
             fields = parse_fixed(line, n=8, w=10)
             for i in range(0, 8, 2):
                 prmr, val = fields[i], fields[i + 1]
-                if prmr and val and prmr[:1] in _PARAM_TYPE_CHARS and _is_number(val):
-                    pairs.append((prmr[1:], val))
+                if (prmr and val and prmr[:1] in _PARAM_TYPE_CHARS
+                        and (_is_number(val) or prmr[:1] in "Cc")):
+                    pairs.append((prmr[1:], val, prmr[:1]))
         if not pairs:
             # Free (comma/space) format: either "R name value ..." with the
             # type char as its own token, or glued "Rname value ...".
@@ -150,19 +349,128 @@ def _collect_parameters(kw: str, raw: List[str]) -> None:
             i = 0
             while i < len(toks) - 1:
                 if (len(toks[i]) == 1 and toks[i] in _PARAM_TYPE_CHARS
-                        and i + 2 < len(toks) and _is_number(toks[i + 2])):
-                    pairs.append((toks[i + 1], toks[i + 2]))
+                        and i + 2 < len(toks)
+                        and (_is_number(toks[i + 2]) or toks[i] in "Cc")):
+                    pairs.append((toks[i + 1], toks[i + 2], toks[i]))
                     i += 3
                 elif (len(toks[i]) > 1 and toks[i][:1] in _PARAM_TYPE_CHARS
-                        and _is_number(toks[i + 1])):
-                    pairs.append((toks[i][1:], toks[i + 1]))
+                        and (_is_number(toks[i + 1]) or toks[i][:1] in "Cc")):
+                    pairs.append((toks[i][1:], toks[i + 1], toks[i][:1]))
                     i += 2
                 else:
                     i += 1
-        for name, val in pairs:
-            name = name.strip().lower()
-            if name:
-                _PARAMS[name] = val.strip()
+        for name, val, tch in pairs:
+            _store_parameter(name, val, tch, kw, local_depth)
+
+
+def _collect_parameter_expressions(kw: str, raw: List[str],
+                                   local_depth: int) -> None:
+    """``*PARAMETER_EXPRESSION``: ``PRMR1`` in cols 1-10, the expression after.
+
+    Continuation (p.36-7): *"The expression can be continued on multiple lines
+    simply by leaving the first 10 characters of the continuation line
+    blank."* So a record is claimed by RAW CONTIGUITY from its PRMR row, the
+    same rule the offset walkers use (#119) — a "next non-blank" walk would
+    misread a continuation as a new parameter.
+    """
+    records: List[tuple] = []
+    for line in raw:
+        if not line.strip():
+            continue
+        head = line[:10]
+        if head.strip():
+            toks = parse_free(head) if "," in line else [head.strip()]
+            prmr = (toks[0] if toks else head.strip())
+            records.append([prmr, line[10:]])
+        elif records:
+            records[-1][1] += " " + line[10:]
+        else:
+            _warn_once(
+                "*PARAMETER_EXPRESSION: a line leaves the first 10 columns "
+                "blank with no parameter above it to continue (Vol I R17 "
+                "p.36-7 makes a blank PRMR field a CONTINUATION) — ignored.")
+    for prmr, expr in records:
+        prmr = prmr.strip()
+        if not prmr or prmr[:1] not in _PARAM_TYPE_CHARS:
+            _warn_once(
+                f"*PARAMETER_EXPRESSION: '{prmr}' does not start with a type "
+                "character (R, I or C — Vol I R17 p.36-7), so the definition "
+                "was ignored and every field referencing it reads as 0.")
+            continue
+        tch, name = prmr[:1], prmr[1:].strip()
+        if tch.upper() == "C":
+            # p.36-7: "For type C parameters, the expression is not evaluated
+            # in any sense, just stored as a string."
+            _store_parameter(name, expr.strip(), tch, kw, local_depth)
+            continue
+        try:
+            value = _paramexpr.evaluate(expr, _param_lookup)
+        except _paramexpr.ExprError as exc:
+            _warn_once(
+                f"*PARAMETER_EXPRESSION '{name} = {expr.strip()}' could not "
+                f"be evaluated: {exc}. The parameter stays UNDEFINED and every "
+                "field referencing it reads as 0.")
+            continue
+        if tch.upper() == "I" and not value[1]:
+            # An I-typed parameter takes the integer part of a real result,
+            # which is what makes the type declaration meaningful downstream
+            # (2/5 vs 2.0/5, Remark 2a).
+            value = (int(value[0]), True)
+        _store_parameter(name, _paramexpr.format_value(value), tch, kw,
+                         local_depth)
+
+
+def _pop_local_scope() -> None:
+    """Discard this file's LOCAL parameters and restore anything they masked.
+
+    Vol I R17 p.36-4/5 Remark 5 and its worked example: inside ``file2``
+    ``VAL1 = 10.0, VAL2 = 20.0, VAL3 = 3.0, VAL4 = 40.0``; back in ``main.k``
+    after ``file1`` returns, ``VAL1 = 10.0, VAL2 = 2.0, VAL3 = 3.0`` and
+    ``VAL4`` no longer exists. So a LOCAL definition is a MASK, not an
+    overwrite: what it hid comes back.
+    """
+    if len(_PARAM_LOCAL_STACK) <= 1:
+        return
+    frame = _PARAM_LOCAL_STACK.pop()
+    for name in frame:
+        _PARAMS.pop(name, None)
+        _PARAM_IS_INT.pop(name, None)
+        _PARAM_TEXT.pop(name, None)
+        _PARAM_MUTABLE.discard(name)
+        saved = _PARAM_MASKED.pop(name, None)
+        if saved is not None:
+            val, is_int, text = saved
+            if text is not None:
+                _PARAM_TEXT[name] = text
+            else:
+                _PARAMS[name] = val
+                _PARAM_IS_INT[name] = is_int
+
+
+def _set_parameter_duplication(raw: List[str]) -> None:
+    """``*PARAMETER_DUPLICATION`` — one card, one cell, Vol I R17 p.36-6.
+
+    DFLAG 1 warn + ignore the new definition (DEFAULT), 2 warn + accept,
+    3 error + ignore (terminates at the end of input), 4 accept silently,
+    5 ignore silently. Remark 2: only one such card is allowed.
+    """
+    for line in raw:
+        if not line.strip():
+            continue
+        toks = parse_free(line) if "," in line else [line[:10].strip()]
+        try:
+            dflag = int(float(toks[0]))
+        except (ValueError, IndexError):
+            _warn_once("*PARAMETER_DUPLICATION: DFLAG is not a number — the "
+                       "default 1 (warn, keep the FIRST definition) is used.")
+            return
+        if dflag not in (1, 2, 3, 4, 5):
+            _warn_once(f"*PARAMETER_DUPLICATION: DFLAG = {dflag} is not one "
+                       "of 1..5 (Vol I R17 p.36-6) — the default 1 (warn, "
+                       "keep the FIRST definition) is used.")
+            return
+        _PARAM_DUPLICATION[0] = dflag
+        return
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,8 +498,20 @@ def parse_k_file(path: str, _depth: int = 0,
         # persist after the parse — handlers resolve "&name" fields via
         # to_float/to_int during dispatch, and convert() collects the warnings.
         _PARAMS.clear()
+        _PARAM_IS_INT.clear()
+        _PARAM_TEXT.clear()
+        _PARAM_MUTABLE.clear()
+        _PARAM_DUPLICATION[0] = 1
+        del _PARAM_LOCAL_STACK[1:]
+        _PARAM_LOCAL_STACK[0].clear()
+        _PARAM_MASKED.clear()
         PARSER_WARNINGS.clear()
         _assembly.reset()
+
+    # Vol I R17 p.36-4 Remark 5: a LOCAL parameter lives only for the file it
+    # is defined in, and may MASK a non-LOCAL one of the same name while it
+    # does. One stack frame per file; _flush_local_scope pops it.
+    _PARAM_LOCAL_STACK.append(set())
 
     base_dir = os.path.dirname(os.path.abspath(path))
     blocks: List[Block] = []
@@ -252,9 +572,16 @@ def parse_k_file(path: str, _depth: int = 0,
                     PARSER_WARNINGS.append(f"*INCLUDE_TRANSFORM file not found: {inc_path}")
 
         elif kw.startswith("PARAMETER"):
-            # *PARAMETER / *PARAMETER_LOCAL / *PARAMETER_EXPRESSION — collect
-            # name→value pairs for "&name" field resolution (define-before-use).
-            _collect_parameters(kw, raw)
+            # *PARAMETER / *PARAMETER_LOCAL / *PARAMETER_EXPRESSION[_LOCAL] /
+            # *PARAMETER_MUTABLE / *PARAMETER_DUPLICATION / *PARAMETER_TYPE.
+            # Collected here, in a streaming pass, because LS-DYNA parameters
+            # are DEFINE-BEFORE-USE (p.36-7: an expression "can reference
+            # previously defined parameters"), so the order of the file is the
+            # order of definition.
+            if kw == "PARAMETER_DUPLICATION" or "DUPLICATION" in kw.split("_"):
+                _set_parameter_duplication(raw)
+            else:
+                _collect_parameters(kw, raw, _depth)
 
         elif kw == "INCLUDE_PATH":
             if nonblank:
@@ -309,6 +636,7 @@ def parse_k_file(path: str, _depth: int = 0,
             # else: blank or data line outside any block → ignore
 
     _flush()
+    _pop_local_scope()
     if _depth == 0:
         # Deferred assembly-transform resolution: apply *INCLUDE_TRANSFORM id
         # offsets + TRANID transforms and *NODE_TRANSFORM node-set transforms
@@ -373,8 +701,14 @@ def to_float(s: str, default: float = 0.0) -> float:
     t = s.strip()
     if not t:
         return default
-    # *PARAMETER reference: &name (or -&name) → the parameter's value
-    if "&" in t[:2]:
+    # *PARAMETER reference. The test used to be ``"&" in t[:2]`` — only a
+    # token that STARTS with the sigil — which meant ``2.0*&thick`` and
+    # ``(&thick)`` fell straight through to the caller's default with NO
+    # diagnostic at all: _resolve_param returned None before it could warn.
+    # Any token carrying an ``&``, or the bracketed ``<expr>`` form, is
+    # offered to the resolver now; it decides whether it is a bare reference,
+    # an inline expression, or neither.
+    if "&" in t or (t.startswith("<") and t.endswith(">")):
         resolved = _resolve_param(t)
         if resolved is None:
             return default

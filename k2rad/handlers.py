@@ -15365,11 +15365,15 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
     if unresolved:
         state.warn(
             f"{label}: the cell(s) {', '.join(unresolved)} hold a *PARAMETER "
-            "reference the parser could not resolve (an inline arithmetic "
-            "expression such as '&tend/6.0' is not evaluated — only a bare "
-            "'&name' is) and were read as 0. The curve below is the one that "
-            "reading implies, not the deck's intent; define the value with a "
-            "*PARAMETER_EXPRESSION of its own and re-run.")
+            "reference the parser could not resolve, and were read as 0. The "
+            "curve below is the one that reading implies, not the deck's "
+            "intent. The parser evaluates a bare '&name', a sign-folded "
+            "'-&name', inline arithmetic in the cell ('&tend/6.0') and the "
+            "bracketed '<expr>' form, and it evaluates *PARAMETER_EXPRESSION "
+            "definitions — so a cell that still reads 0 names something that "
+            "is genuinely undefined at this point in the deck, or that the "
+            "expression grammar refuses. Look for the parser's own message "
+            "about that name: it says which.")
     pts, vmax, tend, note = smooth_curve_points(dist, tstart, tend, trise, vmax)
     if pts is None:
         state.warn(

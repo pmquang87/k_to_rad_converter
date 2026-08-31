@@ -1560,5 +1560,317 @@ class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):
                 self.assertEqual(st.next_elem_group_id(), 90002)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (I) *PARAMETER_EXPRESSION
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestParameterExpressionGrammar(unittest.TestCase):
+    """(I) The evaluator, against Vol I R17 §36's own worked examples.
+
+    There is no ``eval()`` in :mod:`k2rad.paramexpr`, and there cannot be:
+    three of the manual's rules are LS-DYNA-specific and Python gets each of
+    them wrong. All three are asserted here."""
+
+    P = {"thick": (2.5, False), "tend": (3.0e-2, False),
+         "dum_1": (1.0, False), "two": (2, True), "five": (5, True)}
+
+    def _ev(self, expr):
+        from k2rad.paramexpr import evaluate
+        return evaluate(expr, lambda n: self.P.get(n.lstrip("&").lower()))
+
+    def test_unary_minus_binds_tighter_than_exponentiation(self):
+        """Remark 2(d), p.36-9: *"the unary minus has higher precedence than
+        exponentiation, that is, the formula -3**2 is interpreted as
+        (-3)**2 = 9."* Python and Fortran both give -9, so an eval()-based
+        implementation is a sign error on any deck that writes one."""
+        self.assertEqual(self._ev("-3**2")[0], 9)
+        self.assertEqual(self._ev("-2**2*3")[0], 12)
+        # ... while explicit parentheses still mean what they say, and the
+        # exponent keeps its own sign.
+        self.assertEqual(self._ev("-(3**2)")[0], -9)
+        self.assertEqual(self._ev("2**-1")[0], 0.5)
+        self.assertEqual(self._ev("2**3**2")[0], 512)   # right-associative
+
+    def test_integer_and_real_properties_are_honoured(self):
+        """Remark 2(a): *"So 2/5 becomes 0, but 2.0/5 becomes 0.4."* The type
+        travels with the VALUE, so an I-typed parameter truncates too."""
+        self.assertEqual(self._ev("2/5"), (0, True))
+        self.assertEqual(self._ev("2.0/5"), (0.4, False))
+        self.assertEqual(self._ev("&two/&five"), (0, True))
+        # Fortran integer division truncates toward ZERO; Python's // floors,
+        # so -7 // 2 would be -4 where LS-DYNA gives -3.
+        self.assertEqual(self._ev("-7/2"), (-3, True))
+        self.assertEqual(self._ev("7/-2"), (-3, True))
+
+    def test_the_intrinsics_are_fortrans_not_pythons(self):
+        """Remark 3, p.36-9/10, value by value."""
+        for expr, want in (("sign(-4,8)", 4), ("sign(4,-8)", -4),
+                           ("int(-48.1)", -48), ("int(0.9)", 0),
+                           ("aint(-48.8)", -48.0), ("nint(-48.8)", -49),
+                           ("anint(-48.8)", -49.0), ("mod(7,3)", 1)):
+            with self.subTest(expr=expr):
+                self.assertEqual(self._ev(expr)[0], want)
+        # int/nint return INTEGER, aint/anint return REAL — the difference
+        # that then feeds the division rule above.
+        self.assertTrue(self._ev("int(1.5)")[1])
+        self.assertTrue(self._ev("nint(1.5)")[1])
+        self.assertFalse(self._ev("aint(1.5)")[1])
+        self.assertFalse(self._ev("anint(1.5)")[1])
+
+    def test_nint_rounds_half_away_from_zero(self):
+        """Fortran NINT, not Python's banker's rounding: round(0.5) is 0 in
+        Python and 1 in Fortran, so every exact half would be off by one."""
+        for expr, want in (("nint(0.5)", 1), ("nint(1.5)", 2),
+                           ("nint(2.5)", 3), ("nint(-0.5)", -1),
+                           ("nint(-2.5)", -3)):
+            with self.subTest(expr=expr):
+                self.assertEqual(self._ev(expr)[0], want)
+
+    def test_angles_are_radians_and_the_constants_resolve(self):
+        """Remark 2(c). ``pi``, ``dtor`` and ``rtod`` are Appendix U
+        constants (pp.71-1/71-2)."""
+        import math
+        self.assertAlmostEqual(self._ev("sin(pi/2)")[0], 1.0, places=12)
+        self.assertAlmostEqual(self._ev("90*dtor")[0], math.pi / 2, places=12)
+        self.assertAlmostEqual(self._ev("pi*rtod")[0], 180.0, places=10)
+
+    def test_the_live_corpus_forms(self):
+        """The two decks the defect was measured on."""
+        # efg/metal-cutting/main.k: TRISE = &tend/6.0
+        self.assertAlmostEqual(self._ev("&tend/6.0")[0], 0.005, places=15)
+        # set-yaris-detailed-v2j.key: R M1_1 &DUM_1*.035+1e-3
+        self.assertAlmostEqual(self._ev("&dum_1*.035+1e-3")[0], 0.036,
+                               places=15)
+        self.assertAlmostEqual(self._ev("&dum_1*.010+1e-5")[0], 0.01001,
+                               places=15)
+
+    def test_the_bracketed_form_drops_the_ampersand(self):
+        """Remark 1, p.36-8: inside ``<>`` the names appear WITHOUT ``&``."""
+        self.assertEqual(self._ev("<thick*2>")[0], 5.0)
+
+    def test_everything_outside_the_grammar_is_refused_by_name(self):
+        from k2rad.paramexpr import ExprError
+        for expr, needle in (
+                ("&nope*2", "not defined at this point"),
+                ("frobnicate(1)", "not one of the intrinsic functions"),
+                ("sin(1,2)", "takes 1 argument"),
+                ("atan2(1)", "takes 2 arguments"),
+                ("2+", "nothing to act on"),
+                ("(1", "never closed"),
+                ("1/0", "division by zero"),
+                ("2 ? 3", "has no meaning")):
+            with self.subTest(expr=expr):
+                with self.assertRaises(ExprError) as cm:
+                    self._ev(expr)
+                self.assertIn(needle, str(cm.exception))
+
+
+class TestParameterExpressionInDecks(unittest.TestCase):
+    """(I) The parse-time half: definitions, field references, scoping."""
+
+    def _params(self, body: str):
+        from k2rad import parser
+        _dispatch("*KEYWORD\n" + body + "*END\n")
+        return dict(parser._PARAMS), list(parser.PARSER_WARNINGS)
+
+    def test_a_PARAMETER_EXPRESSION_block_defines_its_parameters(self):
+        p, w = self._params(
+            "*PARAMETER\n" + _row("R base", "2.0") + "\n"
+            "*PARAMETER_EXPRESSION\n"
+            "R half     &base/4.0\n"
+            "I count    2*3\n")
+        self.assertEqual(float(p["half"]), 0.5)
+        self.assertEqual(p["count"], "6")
+        self.assertEqual([x for x in w if "not evaluated" in x], [])
+
+    def test_an_I_typed_expression_truncates(self):
+        """The type declaration has to MEAN something downstream: an I-typed
+        parameter takes the integer part of a real result."""
+        p, _w = self._params("*PARAMETER_EXPRESSION\n"
+                             "I n        7.0/2.0\n"
+                             "R x        7.0/2.0\n")
+        self.assertEqual(p["n"], "3")
+        self.assertEqual(float(p["x"]), 3.5)
+
+    def test_a_continuation_line_leaves_the_first_ten_columns_blank(self):
+        """p.36-7: *"The expression can be continued on multiple lines simply
+        by leaving the first 10 characters of the continuation line blank."*
+        Claimed by RAW CONTIGUITY, so a continuation cannot be misread as a
+        new parameter (#119)."""
+        p, _w = self._params("*PARAMETER_EXPRESSION\n"
+                             "R total    1.0 +\n"
+                             "          2.0 +\n"
+                             "          3.0\n")
+        self.assertEqual(float(p["total"]), 6.0)
+        self.assertEqual(len([k for k in p if not k.startswith("_")]), 1)
+
+    def test_a_forward_reference_is_refused_not_guessed(self):
+        """p.36-7: an expression may reference PREVIOUSLY defined parameters.
+        Definition order is the file's order, so a forward reference is an
+        invalid deck — named, not silently zeroed."""
+        _p, w = self._params("*PARAMETER_EXPRESSION\n"
+                             "R early    &late*2\n"
+                             "*PARAMETER\n" + _row("R late", "5.0") + "\n")
+        self.assertTrue([x for x in w
+                         if "could not be evaluated" in x and "late" in x])
+
+    def test_a_duplicate_definition_keeps_the_FIRST(self):
+        """*PARAMETER_DUPLICATION DFLAG defaults to 1 = "warn and IGNORE the
+        new definition" (p.36-6). The parser used to overwrite
+        unconditionally — LAST wins, the exact opposite."""
+        p, w = self._params("*PARAMETER\n" + _row("R v", "1.0") + "\n"
+                            "*PARAMETER\n" + _row("R v", "2.0") + "\n")
+        self.assertEqual(float(p["v"]), 1.0)
+        self.assertTrue([x for x in w if "defined more than once" in x])
+
+    def test_DFLAG_2_lets_the_later_definition_win(self):
+        p, _w = self._params("*PARAMETER_DUPLICATION\n" + _row(2) + "\n"
+                             "*PARAMETER\n" + _row("R v", "1.0") + "\n"
+                             "*PARAMETER\n" + _row("R v", "2.0") + "\n")
+        self.assertEqual(float(p["v"]), 2.0)
+
+    def test_MUTABLE_on_the_first_definition_allows_redefinition(self):
+        """Remark 6, p.36-5 — and it must be on the FIRST definition."""
+        p, _w = self._params("*PARAMETER_MUTABLE\n" + _row("R v", "1.0") + "\n"
+                             "*PARAMETER\n" + _row("R v", "2.0") + "\n")
+        self.assertEqual(float(p["v"]), 2.0)
+        p, _w = self._params("*PARAMETER\n" + _row("R v", "1.0") + "\n"
+                             "*PARAMETER_MUTABLE\n" + _row("R v", "2.0") + "\n")
+        self.assertEqual(float(p["v"]), 1.0)
+
+    def test_the_disallowed_name_is_rejected(self):
+        _p, w = self._params("*PARAMETER\n" + _row("R time", "1.0") + "\n")
+        self.assertTrue([x for x in w if "disallows" in x and "time" in x])
+
+    def test_a_C_typed_parameter_is_refused_where_a_number_is_wanted(self):
+        """p.36-7: for type C the expression is *"not evaluated in any sense,
+        just stored as a string"*. Using one arithmetically is a deck error
+        worth naming, not a silent 0."""
+        from k2rad import parser
+        _dispatch("*KEYWORD\n*PARAMETER\n"
+                  + _row("C name", "ABC") + "\n*END\n")
+        self.assertIsNone(parser._resolve_param("&name"))
+        self.assertTrue([x for x in parser.PARSER_WARNINGS
+                         if "CHARACTER parameter" in x])
+
+    def test_PARAMETER_TYPE_is_read_and_ignored(self):
+        """p.36-11: a pre-processor id-offset hint with no solver effect. Its
+        third cell is a type NAME, so it must not be read as a value."""
+        p, w = self._params("*PARAMETER\n" + _row("I pid", "7") + "\n"
+                            "*PARAMETER_TYPE\n" + _row("I pid", "7", "PID")
+                            + "\n")
+        self.assertEqual(p["pid"], "7")
+        self.assertTrue([x for x in w if "pre-processor hint" in x])
+
+
+class TestParameterFieldResolution(unittest.TestCase):
+    """(I) The other half: what a DATA FIELD holding an expression reads as."""
+
+    def setUp(self):
+        _dispatch("*KEYWORD\n*PARAMETER\n"
+                  + _row("R thick", "2.5") + "\n"
+                  + _row("I n", "3") + "\n*END\n")
+
+    def _f(self, token, default=0.0):
+        from k2rad.parser import to_float
+        return to_float(token, default)
+
+    def test_the_forms_that_already_worked_still_do(self):
+        """The regression fence: the bare reference and its sign fold are
+        untouched, so no ordinary deck moves."""
+        for token, want in (("&thick", 2.5), ("-&thick", -2.5),
+                            ("+&thick", 2.5), ("&THICK", 2.5),
+                            ("& thick", 2.5)):
+            with self.subTest(token=token):
+                self.assertEqual(self._f(token), want)
+
+    def test_inline_arithmetic_in_a_field_is_evaluated(self):
+        for token, want in (("&thick*2.0", 5.0), ("&thick*2", 5.0),
+                            ("&thick+1", 3.5), ("&thick/2", 1.25),
+                            ("2.0*&thick", 5.0), ("(&thick)", 2.5),
+                            ("&thick**2", 6.25)):
+            with self.subTest(token=token):
+                self.assertEqual(self._f(token), want)
+
+    def test_a_plain_number_is_not_treated_as_an_expression(self):
+        """``is_expression`` must not fire on a numeric literal's exponent
+        sign, or every ``1.0E-5`` in every deck would take the slow path and
+        risk a different answer."""
+        from k2rad.paramexpr import is_expression
+        for token in ("2.5", "-2.5", "1.0E-5", "-1.0D+5", "&thick", "-&thick"):
+            with self.subTest(token=token):
+                self.assertFalse(is_expression(token))
+        self.assertEqual(self._f("1.0E-5"), 1.0e-5)
+
+    def test_an_unresolvable_field_expression_is_named_not_silent(self):
+        """Master returned the caller's default with NO diagnostic at all for
+        ``2.0*&thick`` and ``(&thick)`` — the token did not start with ``&``,
+        so ``_resolve_param`` returned None before it could warn."""
+        from k2rad import parser
+        parser.PARSER_WARNINGS.clear()
+        self.assertEqual(self._f("2.0*&nope", -1.0), -1.0)
+        self.assertTrue([w for w in parser.PARSER_WARNINGS
+                         if "could not be evaluated" in w and "nope" in w])
+
+
+class TestParameterisedIdUnderIncludeTransform(unittest.TestCase):
+    """(I) The audit the evaluator makes necessary: what happens to a
+    PARAMETERISED id cell inside an ``*INCLUDE_TRANSFORM``?
+
+    ``_rewrite_line`` decides "this token is an id" with ``to_int(tok) > 0``,
+    and ``to_int`` resolves parameters — so a ``&parts`` PID cell resolves
+    FIRST and the resolved number is what gets offset. That was already true
+    on master for a bare ``&name``; the evaluator extends it to inline
+    arithmetic, with the same semantics.
+
+    It is also the right semantics: LS-DYNA resolves the parameter and the
+    include then offsets the resulting id, so the parse and the rewrite agree.
+    Pinned here rather than assumed, because the alternative — leaving the
+    ``&name`` text in place while the mesh around it moves — would dangle."""
+
+    def test_a_parameterised_PID_resolves_then_offsets(self):
+        child = "\n".join([
+            "*KEYWORD",
+            "*PARAMETER", _row("I pid", "3"),
+            "*NODE",
+            _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+            _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+            "*ELEMENT_SHELL", _i8(1, 3, 1, 2, 3, 4),
+            "*SECTION_SHELL", _row(1, 2, "", 2),
+            _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            # The PID cell is the PARAMETER, and the expression form too.
+            "*PART", "child", _row("&pid", 1, 1),
+            "*END", ""])
+        parent = "\n".join([
+            "*KEYWORD",
+            "*INCLUDE_TRANSFORM", "childB.k",
+            _row(5000, 6000, 7000, 8000, 9000, 11000, 12000),
+            "*END", ""])
+        _res, starter = _convert_include_pair(parent, child)
+        # 3 + IDPOFF 7000, not "&pid" left behind and not an un-offset 3.
+        self.assertIn("/PART/7003", starter)
+        self.assertNotIn("&", starter)
+
+    def test_an_expression_PID_resolves_then_offsets_the_same_way(self):
+        child = "\n".join([
+            "*KEYWORD",
+            "*PARAMETER", _row("I base", "1"),
+            "*NODE",
+            _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+            _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+            "*ELEMENT_SHELL", _i8(1, 3, 1, 2, 3, 4),
+            "*SECTION_SHELL", _row(1, 2, "", 2),
+            _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "child", _row("&base*3", 1, 1),
+            "*END", ""])
+        parent = "\n".join([
+            "*KEYWORD", "*INCLUDE_TRANSFORM", "childB.k",
+            _row(5000, 6000, 7000, 8000, 9000, 11000, 12000), "*END", ""])
+        _res, starter = _convert_include_pair(parent, child)
+        self.assertIn("/PART/7003", starter)
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()
