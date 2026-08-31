@@ -3560,27 +3560,10 @@ def _make_tiebreak_interfaces(state: ConversionState,
                                        spotflag=spotflag)
 
         # ── the post-failure contact ──────────────────────────────────────
-        # DEFENSIVE, and UNREACHABLE with today's mapping: no `_ONLY` spelling
-        # can be classified CCRIT, so none of them ever gets here. The SURFACE
-        # family's OPTION is forced to 2 or 5 by LS-DYNA's own THKOFF rewrite
-        # rule and the NODES family's class is FORCE — asserted exhaustively by
-        # tests.test_tiebreak_rupture.test_no_only_spelling_can_rupture, which
-        # is what keeps this comment true. The branch stays because the
-        # semantics it encodes are the right ones if a future OPTION mapping
-        # does make an `_ONLY` spelling rupture; a permanent tie reaches the
-        # `continue` above and never gets a companion either.
-        if c.only:
-            state.warn(
-                f"*{c.keyword} {c.inter_id}: no companion contact interface is "
-                "emitted, and that is the FAITHFUL answer — the _ONLY spelling "
-                "'stops acting as a contact altogether' after failure (Vol I "
-                "R17 p.11-73 Remark 3 / p.11-71 Remark 3), and a totally "
-                "ruptured /INTER/TYPE2 secondary node is likewise a completely "
-                "free particle: i2for10.F has branches for IRUPT==0 (kinematic "
-                "transfer) and IRUPT==-1 (spring) and NO branch for IRUPT==1, "
-                "so nothing at all is applied. The two semantics coincide "
-                "exactly.")
-            continue
+        # There is NO `if c.only:` arm here, and that is a statement about
+        # LS-DYNA's KEYWORD SET rather than about this converter's mapping —
+        # see _tiebreak_companion_contact's docstring for the enumeration and
+        # for the semantics an `_ONLY` rupture WOULD have had.
         lines += _tiebreak_companion_contact(state, c, grnod_id, surf_id)
     _note_dropped_interfaces(state, dropped)
     return lines
@@ -3594,7 +3577,48 @@ def _tiebreak_companion_contact(state: ConversionState, c, grnod_id: int,
     *"behaves as a surface-to-surface contact"* once the bond fails. A bare
     ``/INTER/TYPE2`` gives no such thing — a totally ruptured node is free
     (``i2for10.F`` has no ``IRUPT==1`` branch) — so the contact has to be a
-    second interface. MEASURED on a break-then-coast twin: bare tie, final gap
+    second interface.
+
+    **Every rupturing tiebreak reaches this, including the ``_ONLY``
+    spellings, and that is not an oversight.** The caller used to carry a
+    defensive ``if c.only:`` arm that skipped the companion, on the reading
+    that an ``_ONLY`` tiebreak *"stops acting as a contact altogether"* after
+    failure (p.11-71 Remark 3 / p.11-73 Remark 3) — which is true, and which
+    coincides exactly with a totally ruptured ``/INTER/TYPE2`` node being a
+    free particle, so the semantics were right. The arm was removed because it
+    is UNREACHABLE BY THE LS-DYNA CARD GRAMMAR, not merely by this converter's
+    current mapping — the distinction the old comment got wrong.
+
+    Vol I R17 p.11-14/15 enumerates the tiebreak family exhaustively; exactly
+    TWO of the eleven spellings contain ``ONLY``, and each takes a Card 4 with
+    no length field anywhere on it:
+
+      * ``*CONTACT_TIEBREAK_NODES_ONLY`` — Card 4: TIEBREAK_NODES (p.11-70),
+        ``NFLF SFLF NEN MES``, a FORCE criterion
+        ``(|fn|/NFLF)^NEN + (|fs|/SFLF)^MES >= 1``.
+      * ``*CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY`` — Card 4:
+        TIEBREAK_SURFACE (p.11-72), ``NFLS SFLS TBLCID THKOFF``, a STRESS
+        criterion ``(|sn|/NFLS)^2 + (|ss|/SFLS)^2 >= 1``.
+
+    ``PARAM``/``CCRIT``, the only length in the whole family, lives solely on
+    ``Card 4: AUTOMATIC_..._TIEBREAK`` (p.11-35), whose "mandatory for" list is
+    exactly the four ``*CONTACT_AUTOMATIC_{SURFACE_TO_SURFACE,
+    ONE_WAY_SURFACE_TO_SURFACE, SINGLE_SURFACE, GENERAL}_TIEBREAK`` spellings
+    — none of which has an ``_ONLY`` variant. Cross-checked against R16
+    (pp.11-58, 11-60): same two ``_ONLY`` spellings, same two Card 4s. So an
+    ``_ONLY`` tiebreak cannot state a release DISTANCE at all, cannot be
+    classified ``CCRIT``, and cannot rupture on this converter's only
+    reproducible criterion. The corpus agrees: its one real carrier,
+    ``dynaexamples_r14/intro-by-k.-weimar/spotweld/spotweld-iv/
+    plates.tied.k:114``, is a ``NODES_ONLY`` with
+    ``NFLF 10000.0 / SFLF 50000.0 / NEN 1.0 / MES 1.0`` and no distance cell.
+
+    ``tests.test_tiebreak_rupture.test_no_only_spelling_can_rupture`` keeps the
+    classification table honest; this docstring is what keeps the REASON
+    honest. The one thing that could make an ``_ONLY`` rupture is implementing
+    OPTION 5 / ``TBLCID`` as a release — but LS-DYNA never declares a release
+    at the curve's end, only a damage scaling, so deriving a distance from it
+    would invent a criterion the deck does not state. MEASURED on a break-then-coast twin: bare tie, final gap
     **-0.660121 mm** (straight through the other body) and 0.000 contact
     energy; with this companion at ``Irem_i2 = 3`` the descent was arrested and
     reversed (+0.0936 -> +0.715 mm) at 0.0334 mJ contact energy.

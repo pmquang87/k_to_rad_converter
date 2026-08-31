@@ -1956,24 +1956,107 @@ class IsymScopeIsNamed(unittest.TestCase):
 
 class OnlySpellingsCannotRupture(unittest.TestCase):
     def test_no_only_spelling_can_rupture(self):
-        """The invariant the ``if c.only:`` branch in the rupture arm rests on,
-        stated as a test rather than left implicit: no ``_ONLY`` spelling can
-        be classified CCRIT, so that branch is unreachable today. The SURFACE
-        family's OPTION is forced to 2 or 5 by LS-DYNA's own THKOFF rewrite
-        rule and the NODES family's class is FORCE."""
+        """No ``_ONLY`` spelling can be classified CCRIT.
+
+        This used to be described as "the invariant the ``if c.only:`` branch
+        rests on ... that branch is unreachable TODAY", which understated it:
+        the unreachability is a property of the LS-DYNA CARD GRAMMAR, not of
+        this converter's mapping, and the SIDE-DEFECT batch removed the branch
+        on that basis (writer/contacts.py, ``_tiebreak_companion_contact``'s
+        docstring carries the enumeration).
+
+        Vol I R17 p.11-14/15 lists the family exhaustively and exactly TWO of
+        the eleven spellings contain ``ONLY``. ``*CONTACT_TIEBREAK_NODES_ONLY``
+        takes Card 4: TIEBREAK_NODES (p.11-70) = ``NFLF SFLF NEN MES``, a FORCE
+        criterion; ``*CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY`` takes Card 4:
+        TIEBREAK_SURFACE (p.11-72) = ``NFLS SFLS TBLCID THKOFF``, a STRESS
+        criterion. Neither card has a length field. ``PARAM``/``CCRIT`` — the
+        only length in the whole family — lives solely on Card 4:
+        AUTOMATIC_..._TIEBREAK (p.11-35), mandatory for exactly the four
+        ``*CONTACT_AUTOMATIC_*_TIEBREAK`` spellings, none of which has an
+        ``_ONLY`` variant. Same in R16 (pp.11-58, 11-60).
+
+        The invariant lives at the HANDLER, not at the classifier: feeding
+        ``_tiebreak_bond_class`` a hand-made SURFACE record with ``option`` 6
+        or 8 DOES return CCRIT, because that function classifies the AUTOMATIC
+        enumeration and knows nothing about spellings. What forbids it is that
+        an ``_ONLY`` card cannot CARRY a 6 or an 8 — the two Card 4s above have
+        no OPTION column at all, and handlers.py sets ``option = 5 if tblcid
+        else 2`` for the SURFACE family and leaves the NODES family at the
+        sentinel 0. So the assertion is made over records the PARSER actually
+        produced from a real deck."""
         class _Rec:
             def __init__(self, family, option):
                 self.family, self.option = family, option
                 self.user = False
-        for base, (family, only, _ow, _self) in _TIEBREAK_BASES.items():
-            if not only:
-                continue
-            options = (2, 5) if family == "SURFACE" else (0,)
-            for option in options:
+        only_bases = [b for b, (_f, only, _o, _s) in _TIEBREAK_BASES.items()
+                      if only]
+        self.assertEqual(len(only_bases), 2, only_bases)
+        for base in only_bases:
+            family = _TIEBREAK_BASES[base][0]
+            for option in ((2, 5) if family == "SURFACE" else (0,)):
                 with self.subTest(base=base, option=option):
                     self.assertNotIn(
                         _tiebreak_bond_class(_Rec(family, option)),
                         _TIEBREAK_RUPTURE_CLASSES)
+
+    def test_no_card_4_can_give_an_ONLY_spelling_a_rupturing_option(self):
+        """The invariant at the layer that actually holds it: whatever a deck
+        writes in the ``_ONLY`` Card 4's cells, the parsed record's ``option``
+        is never one the rupture path accepts.
+
+        Cell 1 is swept across every OPTION value the AUTOMATIC family uses
+        (including 6 and 8, the two CCRIT ones) plus the corpus carrier's own
+        ``NFLF 10000.0``: on a NODES card that cell is NFLF and on a SURFACE
+        card it is NFLS, so none of them can become an OPTION."""
+        for base in sorted(b for b, (_f, only, _o, _s)
+                           in _TIEBREAK_BASES.items() if only):
+            for cell1 in (0, 1, 2, 5, 6, 8, 10000.0):
+                with self.subTest(base=base, cell1=cell1):
+                    rows = [
+                        f"*{base}",
+                        "         1         2         3         3"
+                        "         0         0         0         0",
+                        "       0.0       0.0       0.0       0.0"
+                        "       0.0         0       0.0       0.0",
+                        "       1.0       1.0       0.0       0.0"
+                        "       0.0       0.0       0.0       0.0",
+                        "".join(f"{v:>10}" for v in
+                                (cell1, 50000.0, 1.0, 3.0)),
+                    ]
+                    deck = ("*KEYWORD\n" + _MESH + "\n".join(rows) + "\n"
+                            + _TAIL)
+                    st = _dispatch(deck)
+                    self.assertEqual(len(st.contacts_tiebreak), 1)
+                    rec = st.contacts_tiebreak[0]
+                    self.assertTrue(rec.only)
+                    self.assertNotIn(_tiebreak_bond_class(rec),
+                                     _TIEBREAK_RUPTURE_CLASSES)
+
+    def test_the_only_spellings_are_the_two_the_manual_lists(self):
+        """Named, so a table edit that invents a third ``_ONLY`` spelling —
+        or drops one — fails here rather than silently changing what the
+        removal above is true of."""
+        only_bases = sorted(b for b, (_f, only, _o, _s)
+                            in _TIEBREAK_BASES.items() if only)
+        self.assertEqual(only_bases, [
+            "CONTACT_TIEBREAK_NODES_ONLY",
+            "CONTACT_TIEBREAK_SURFACE_TO_SURFACE_ONLY"])
+
+    def test_the_companion_is_emitted_for_every_rupturing_tiebreak(self):
+        """The removal's positive side: with no ``if c.only:`` arm left, a
+        rupturing tiebreak always gets its post-failure interface. If an
+        ``_ONLY`` spelling ever DID become classifiable as CCRIT, it would get
+        one too — which is the honest outcome, since a totally ruptured
+        /INTER/TYPE2 node applies nothing at all either way."""
+        import inspect
+        from k2rad.writer import contacts
+        src = inspect.getsource(contacts._make_tiebreak_interfaces)
+        code = [ln for ln in src.splitlines()
+                if not ln.lstrip().startswith("#")]
+        self.assertEqual([ln for ln in code if ".only" in ln], [])
+        code = "\n".join(code)
+        self.assertIn("_tiebreak_companion_contact(state, c", code)
 
 
 if __name__ == "__main__":
