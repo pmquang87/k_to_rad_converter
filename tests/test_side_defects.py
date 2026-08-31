@@ -706,5 +706,195 @@ class TestDampingRigidMassCentre(unittest.TestCase):
         self.assertIn(4, ids)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (D) /INISH3/STRS_F — initial stress on a 3-node shell
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _d_deck(with_tri_stress: bool = True, with_quad_strain: bool = True):
+    """A quad (eid 1) and a tri (eid 2) on one *SECTION_SHELL with NIP 3.
+
+    Distinct values per slot and per element, so a column swap or an
+    element mix-up is detectable.
+    """
+    stress = ["*INITIAL_STRESS_SHELL",
+              _row(1, 1, 3, 0, 0, 0, 0, 0),
+              _row("-1.0", "100.0", "50.0", "10.0", "7.0", "8.0", "9.0",
+                   "0.001"),
+              _row("0.0", "101.0", "51.0", "11.0", "7.1", "8.1", "9.1",
+                   "0.002"),
+              _row("1.0", "102.0", "52.0", "12.0", "7.2", "8.2", "9.2",
+                   "0.003")]
+    if with_tri_stress:
+        stress += [
+            _row(2, 1, 3, 0, 0, 0, 0, 0),
+            _row("-1.0", "200.0", "60.0", "20.0", "17.0", "18.0", "19.0",
+                 "0.004"),
+            _row("0.0", "201.0", "61.0", "21.0", "17.1", "18.1", "19.1",
+                 "0.005"),
+            _row("1.0", "202.0", "62.0", "22.0", "17.2", "18.2", "19.2",
+                 "0.006")]
+    strain = ["*INITIAL_STRAIN_SHELL", _row(1, 1, 2),
+              _row("0.0", 0, 0, 0, 0, 0, "-1.0"),
+              _row("0.001", 0, 0, 0, 0, 0, "1.0")] if with_quad_strain else []
+    return "\n".join([
+        "*KEYWORD", "*NODE",
+        _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+        _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+        _node16(5, 20.0, 5.0, 0.0),
+        "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 1, 2, 5, 3, 3),
+        "*SECTION_SHELL", _row(1, 2, "", 3),
+        _row("2.0", "2.0", "2.0", "2.0"),
+        "*MAT_PLASTIC_KINEMATIC",
+        _row(1, "7.85E-9", "2.1E5", "0.3", "1.0E6", "0.0"),
+        "*PART", "strip", _row(1, 1, 1),
+    ] + stress + strain + ["*CONTROL_TERMINATION", _row("0.0001"),
+                           "*END", ""])
+
+
+class TestInish3StressEmission(unittest.TestCase):
+    """(D) An ``*INITIAL_STRESS_SHELL`` record on a 3-node shell was DROPPED,
+    under a warning whose cited fact was FALSE: it said ``/INISH3/STRS_F`` "is
+    a different card layout this converter does not write yet", and the code
+    comment beside it said "the card layout differs".
+
+    ``diff`` of the extracted ``FORMAT(radioss2021)`` blocks of
+    ``radioss2021/TABLE/inish3_strs_f_glob_sub.cfg`` and
+    ``inishe_strs_f_glob_sub.cfg`` is EMPTY. The only substantive difference in
+    the two FILES is the HyperMesh-only
+    ``SUBTYPES = ( /ELEMS/SH3N )`` vs ``( /ELEMS/SHELL )``. Same columns, same
+    order (the #131 "check a warning's CITED FACT" class).
+
+    MEASURED end to end on a MIXED deck (quad stress + tri stress + quad
+    strain, which is the #127 shape that used to raise ERROR 26 + ERROR 1904):
+    starter 0 ERROR / 0 WARNING, engine NORMAL TERMINATION, 70 cycles. And
+    CONSUMED, not merely accepted — with/without twin, identical decks apart
+    from the /INISH3/STRS_F block::
+
+        cycle 1        with /INISH3     control
+        I-ENERGY         -11.75          -4.125
+        K-ENERGY T         5.468          1.705
+        K-ENERGY R         0.1782         0.06210
+        TOTAL MASS       0.2355E-05     0.2355E-05   (identical)
+    """
+
+    def setUp(self):
+        self.res, self.starter = _convert(_d_deck())
+
+    def test_both_stress_blocks_are_emitted(self):
+        self.assertEqual(_headers(self.starter, "/INISHE/STRS_F"),
+                         ["/INISHE/STRS_F/GLOB"])
+        self.assertEqual(_headers(self.starter, "/INISH3/STRS_F"),
+                         ["/INISH3/STRS_F/GLOB"])
+
+    def test_the_tri_card_1_columns_are_exact(self):
+        """``shell_ID(10) nb_integr(10) npg(10) Thick(20)``. nb_integr must be
+        the /PROP/SHELL N; ``npg`` must be 1, never 4."""
+        cards = _cards(_block(self.starter, "/INISH3/STRS_F/GLOB"))
+        self.assertEqual(_col_i(cards[0], 1, 10), 2)      # the TRI, not the quad
+        self.assertEqual(_col_i(cards[0], 11, 20), 3)     # nb_integr = NIP
+        self.assertEqual(_col_i(cards[0], 21, 30), 1)     # npg
+        self.assertEqual(_col_f(cards[0], 31, 50), 0.0)   # Thick
+
+    def test_npg_is_one_on_the_tri_and_four_on_the_quad(self):
+        """The npg rules are OPPOSITE on the two paths and must not be shared.
+        k2rad writes ``Ish3n = 0``, so a /SH3N is initialised through
+        ``c3init3 -> CSIGINI``, whose check is ``NPGI > 1`` (csigini.F:143) —
+        measured ERROR 26 for npg 3 and 4, clean for 0 and 1. The quad's
+        ``npg = 4`` comes from ``scigini4.F:160`` on the batch-integrated
+        ``cbainit3`` path and does not transfer."""
+        tri = _cards(_block(self.starter, "/INISH3/STRS_F/GLOB"))
+        quad = _cards(_block(self.starter, "/INISHE/STRS_F/GLOB"))
+        self.assertEqual(_col_i(tri[0], 21, 30), 1)
+        self.assertEqual(_col_i(quad[0], 21, 30), 4)
+
+    def test_the_tri_payload_columns_are_exact_and_bottom_first(self):
+        """Layer 1 is the LOWER surface (measured: a -100/0/+100 record reads
+        back lower/membrane/upper on the ANIM). Every slot carries a distinct
+        value, so a swap fails rather than coinciding."""
+        pts = _cards(_block(self.starter, "/INISH3/STRS_F/GLOB"))[2:]
+        # npg = 1, so exactly 2 rows per layer, 3 layers.
+        self.assertEqual(len(pts), 6)
+        self.assertEqual(_col_f(pts[0], 1, 20), 200.0)      # sigma_X
+        self.assertEqual(_col_f(pts[0], 21, 40), 60.0)      # sigma_Y
+        self.assertEqual(_col_f(pts[0], 41, 60), 20.0)      # sigma_Z
+        self.assertEqual(_col_f(pts[1], 1, 20), 17.0)       # sigma_XY
+        self.assertEqual(_col_f(pts[1], 21, 40), 18.0)      # sigma_YZ
+        self.assertEqual(_col_f(pts[1], 41, 60), 19.0)      # sigma_ZX
+        self.assertEqual(_col_f(pts[1], 61, 80), 0.004)     # eps_p
+        self.assertEqual(_col_f(pts[1], 81, 100), -1.0)     # pos_nip, BOTTOM
+        self.assertEqual(_col_f(pts[5], 81, 100), 1.0)      # ... TOP last
+
+    def test_the_quad_block_holds_only_the_quad(self):
+        """The split is by TOPOLOGY, and each reader resolves against its own
+        table — ``UEL2SYS(..., KSYSUSR, NUMELC)`` for /INISHE,
+        ``UEL2SYS(ID_ELEM, KSYSUSRTG, NUMELTG)`` at
+        hm_read_inistate_d00.F:3285 for /INISH3. A tri id in the /INISHE block
+        resolves to nothing."""
+        quad = _cards(_block(self.starter, "/INISHE/STRS_F/GLOB"))
+        heads = [_col_i(ln, 1, 10) for ln in quad if len(ln) == 50]
+        self.assertEqual(heads, [1])
+
+    def test_the_tri_gets_an_all_zero_STRAIN_companion(self):
+        """The #127 cross-family rule, on the /INISH3 side. ITHKSHEL = 2 is set
+        by ANY STRA_F block (hm_read_inistate_d00.F:2469, :3597) and is
+        GLOBAL: the QUAD's strain block un-gates the check for the TRI's
+        stress record, and csigini.F:190 then reads Z1 == Z2 == 0 and raises
+        ERROR 1904 — whose own message names "/INISHE/STRA_F/GLOB OR
+        /INISH3/STRA_F/GLOB"."""
+        tri = _cards(_block(self.starter, "/INISH3/STRA_F/GLOB"))
+        self.assertEqual([_col_i(tri[0], 1, 10), _col_i(tri[0], 11, 20),
+                          _col_i(tri[0], 21, 30)], [2, 3, 1])
+        self.assertTrue(all(_col_f(ln, 1, 20) == 0.0 for ln in tri[1:]))
+        w = _warns(self.res, "an all-zero record was added")
+        self.assertEqual(len(w), 1)
+        # ... and the message names the card it actually went into (#131).
+        self.assertIn("/INISH3/STRA_F/GLOB (element(s) 2)", w[0])
+
+    def test_the_false_layout_claim_is_gone(self):
+        for phrase in ("different card layout",
+                       "model those elements as quads"):
+            with self.subTest(phrase=phrase):
+                self.assertFalse([w for w in self.res.warnings
+                                  if phrase in w])
+
+    def test_a_duplicate_record_keeps_the_first_and_warns(self):
+        """``hm_yctrl.F:719-724`` allocates ONE slot per element, so the
+        starter takes both records at 0 ERROR / 0 WARNING and the LAST one
+        silently wins (measured: 100/50/25 then 10/20/30 gave F1=10 F2=20
+        F12=30 at t=0). The converter keeps the FIRST and says so."""
+        dup = _d_deck().replace(
+            "*CONTROL_TERMINATION",
+            "*INITIAL_STRESS_SHELL\n" + _row(2, 1, 3, 0, 0, 0, 0, 0) + "\n"
+            + _row("-1.0", "999.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0")
+            + "\n"
+            + _row("0.0", "999.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0")
+            + "\n"
+            + _row("1.0", "999.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0")
+            + "\n*CONTROL_TERMINATION")
+        res, starter = _convert(dup)
+        pts = _cards(_block(starter, "/INISH3/STRS_F/GLOB"))[2:]
+        self.assertEqual(_col_f(pts[0], 1, 20), 200.0)   # the FIRST record
+        self.assertNotIn("999", starter)
+        w = _warns(res, "named by more than one record")
+        self.assertTrue(w)
+        self.assertIn("LAST one silently winning", w[0])
+
+
+class TestInish3StressWithoutStrain(unittest.TestCase):
+    """(D) The single-keyword shape — stress on both topologies, no strain
+    block anywhere. ITHKSHEL stays 0, so no companion is needed and none is
+    written. Measured clean (row 3 of the cross-check matrix)."""
+
+    def test_no_companion_is_invented_when_no_strain_block_exists(self):
+        res, starter = _convert(_d_deck(with_quad_strain=False))
+        self.assertEqual(_headers(starter, "/INISHE/STRS_F"),
+                         ["/INISHE/STRS_F/GLOB"])
+        self.assertEqual(_headers(starter, "/INISH3/STRS_F"),
+                         ["/INISH3/STRS_F/GLOB"])
+        self.assertEqual(_headers(starter, "/INISH3/STRA_F"), [])
+        self.assertEqual(_headers(starter, "/INISHE/STRA_F"), [])
+        self.assertEqual(_warns(res, "an all-zero record was added"), [])
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()
