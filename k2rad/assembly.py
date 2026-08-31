@@ -54,6 +54,8 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _SEATBELT_SUBKEYWORDS,
                        final_geometry_node_row,
                        initial_strain_shell_records,
+                       initial_stress_shell_records,
+                       initial_stress_solid_records,
                        perturbation_node_records,
                        springback_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
@@ -2933,6 +2935,93 @@ def _off_initial_strain_shell_common(b: Block, offsets: Dict[str, int],
             raw[idx] = new
 
 
+def _off_initial_stress_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INITIAL_STRESS_SHELL: offset the EID on every card 1 — IDEOFF.
+
+    Driven by ``handlers.initial_stress_shell_records``, the SAME walker the
+    handler parses with, for the same reason ``_off_initial_strain_shell``
+    needs one (#116/#119): the stress cards are ALL floats, and
+    ``_rewrite_line`` decides what is an id with ``to_int(tok) > 0``, so a
+    declarative ``{"data": ...}`` spec would rewrite a stress of ``1.5`` as
+    the element id ``1``. And an all-blank stress card is legal LS-DYNA (every
+    component defaults to 0.0), so the record boundaries can only be found by
+    RAW CONTIGUITY from the card-1 row, which is what the walker enforces.
+
+    Bucket: cell 1 is ``EID/SID``, and for the PLAIN spelling that is an
+    ELEMENT id — Vol I R17 p.28-95, "Element ID or element set ID (see
+    *SET_SHELL)" — so IDEOFF ("e"). The ``_SET`` spelling would be IDSOFF; it
+    is not registered in ``INITIAL_STATE_PRELOAD_KEYWORDS``, so it lands in
+    ``skipped_keywords`` and never reaches this table (``_split_keyword``
+    keeps ``_SET`` in the base name — verified — so it is NOT silently
+    misparsed as the plain form).
+
+    Nothing else on the card is an id: NPLANE/NTHICK/NHISV/NTENSR/LARGE/
+    NTHINT/NTHHSV are counts and flags, and the stress records are pure
+    floats.
+    """
+    raw = b.raw
+    for card1, _fields, _pt_rows, _trunc in initial_stress_shell_records(raw):
+        new = _rewrite_line(raw[card1], [(0, "e")], offsets)
+        if new is not None:
+            raw[card1] = new
+
+
+def _off_initial_stress_solid(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INITIAL_STRESS_SOLID: offset the EID on every card 1 — IDEOFF.
+
+    The solid twin of :func:`_off_initial_stress_shell`, driven by
+    ``handlers.initial_stress_solid_records`` and needing a walker for the
+    identical reason (float-only stress cards, legal all-blank cards).
+
+    Card 1 is ``EID/SID NINT NHISV LARGE IVEFLG IALEGP NTHINT NTHHSV`` (Vol I
+    R17 p.28-103); cell 1 is an ELEMENT id on the plain spelling -> "e".
+
+    ``IALEGP`` (cell 6) is an ALE multi-material GROUP number, not an id in any
+    of the seven *INCLUDE_TRANSFORM buckets (Vol I R17 p.27-5 offers IDNOFF /
+    IDEOFF / IDPOFF / IDMOFF / IDSOFF / IDFOFF / IDDOFF and no ALE-group one),
+    so it is deliberately left alone — and the handler does not read it
+    either, so nothing downstream can dangle on it.
+    """
+    raw = b.raw
+    for card1, _fields, _pt_rows, _trunc in initial_stress_solid_records(raw):
+        new = _rewrite_line(raw[card1], [(0, "e")], offsets)
+        if new is not None:
+            raw[card1] = new
+
+
+def _off_initial_volume_fraction_geometry(b: Block, offsets: Dict[str, int],
+                                          warn) -> None:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY: header FMSID, bucketed by FMIDTYP.
+
+    Card 1 is ``FMSID FMIDTYP BAMMG NTRACE``, and FMSID lives in TWO id
+    namespaces selected by the cell beside it — the #125 class: FMIDTYP 0
+    makes it a ``*SET_PART`` id (IDSOFF) and FMIDTYP 1 a ``*PART`` id
+    (IDPOFF). Offsetting it with one fixed bucket would move it into the wrong
+    namespace on half the decks, which is why this is a callable and not a
+    ``{"cards": {0: [(0, "p")]}}`` row.
+
+    The container cards that follow (``CONTTYP FILLOPT FAMMG`` plus the
+    geometry) are NOT rewritten. This converter reads only CONTTYP/FILLOPT/
+    FAMMG from them — all three are enumerations or ALE group numbers, none is
+    an id in any bucket — and the geometry cells it does not read are
+    coordinates for the container types it supports. If a container type whose
+    geometry is stated by NODE ids is ever read, this spec needs an arm for it
+    (the audit belongs with that change, not to a guess here).
+    """
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff >= len(raw):
+        return
+    # _split_card is the shared reader every rewriter in this file uses, so the
+    # FMIDTYP this reads is the same cell _rewrite_line would edit.
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    fmidtyp = to_int(cells[1]) if len(cells) > 1 else 0
+    new = _rewrite_line(raw[toff], [(0, "p" if fmidtyp == 1 else "s")],
+                        offsets)
+    if new is not None:
+        raw[toff] = new
+
+
 def _off_initial_strain_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_initial_strain_shell_common(b, offsets, False)
 
@@ -3510,6 +3599,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     "INITIAL_VELOCITY_RIGID_BODY": {"data": (0, [(0, "p")]), "idhdr": "r"},
     "INITIAL_VELOCITY_GENERATION": _off_inivel_generation,
     "INITIAL_DETONATION": {"data": (0, [(0, "p")])},
+    # Found by the SIDE-DEFECT batch's audit of every INITIAL_* handler:
+    # readable and un-offsettable, like the two *INITIAL_STRESS_* keywords.
+    "INITIAL_VOLUME_FRACTION_GEOMETRY": _off_initial_volume_fraction_geometry,
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)
@@ -3843,6 +3935,8 @@ _INITIAL_STATE_PRELOAD_OFFSETS = {
     "INITIAL_AXIAL_FORCE_BEAM": {"data": (0, [(0, "s"), (1, "f")])},
     "INITIAL_STRAIN_SHELL": _off_initial_strain_shell,
     "INITIAL_STRAIN_SHELL_SET": _off_initial_strain_shell_set,
+    "INITIAL_STRESS_SHELL": _off_initial_stress_shell,
+    "INITIAL_STRESS_SOLID": _off_initial_stress_solid,
 }
 # Keyed off the handler registry, so adding a spelling there without an offset
 # spec here is an ImportError, not a silent un-offset include.

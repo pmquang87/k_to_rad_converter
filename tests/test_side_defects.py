@@ -291,5 +291,250 @@ class TestDuplicateEosScan(unittest.TestCase):
         self.assertEqual(m.group(2), "9001")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (B) *INITIAL_STRESS_SHELL / _SOLID under *INCLUDE_TRANSFORM
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _i8(*vals) -> str:
+    """An I8 card — the width *ELEMENT_SHELL / _SOLID actually use. Writing
+    them at I10 makes the offset walker read every cell one slot over, which
+    is a deck bug, not a converter one; the reproducer must not have it."""
+    out = "".join(f"{v:>8}" for v in vals)
+    assert len(out) == 8 * len(vals), f"field overflow in {out!r}"
+    return out
+
+
+def _node16(nid, x, y, z) -> str:
+    return f"{nid:>8}" + "".join(f"{c:>16.6f}" for c in (x, y, z))
+
+
+_B_CHILD = "\n".join([
+    "*KEYWORD", "*NODE",
+    _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+    _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+    _node16(5, 20.0, 0.0, 0.0), _node16(6, 20.0, 10.0, 0.0),
+    _node16(7, 0.0, 0.0, 10.0), _node16(8, 10.0, 0.0, 10.0),
+    _node16(9, 10.0, 10.0, 10.0), _node16(10, 0.0, 10.0, 10.0),
+    "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 1, 2, 5, 6, 3),
+    "*ELEMENT_SOLID", _i8(1, 2), _i8(1, 2, 3, 4, 7, 8, 9, 10),
+    "*SECTION_SHELL", _row(1, 2, "", 2), _row("2.0", "2.0", "2.0", "2.0"),
+    "*SECTION_SOLID", _row(2, 1),
+    "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+    "*PART", "child shell", _row(1, 1, 1),
+    "*PART", "child solid", _row(2, 2, 1),
+    # Distinct values per slot so a column swap is detectable.
+    "*INITIAL_STRESS_SHELL",
+    _row(1, 1, 2, 0, 0, 0, 0, 0),
+    _row("-1.0", "100.0", "50.0", "10.0", "7.0", "8.0", "9.0", "0.001"),
+    _row("1.0", "110.0", "55.0", "11.0", "17.0", "18.0", "19.0", "0.002"),
+    _row(2, 1, 2, 0, 0, 0, 0, 0),
+    _row("-1.0", "200.0", "60.0", "20.0", "27.0", "28.0", "29.0", "0.003"),
+    _row("1.0", "210.0", "65.0", "21.0", "37.0", "38.0", "39.0", "0.004"),
+    "*INITIAL_STRESS_SOLID",
+    _row(1, 1, 0, 0, 0, 0, 0, 0),
+    _row("300.0", "70.0", "30.0", "4.0", "5.0", "6.0", "0.005"),
+    "*END", ""])
+
+_B_PARENT = "\n".join([
+    "*KEYWORD", "*NODE",
+    _node16(1001, 0.0, -100.0, 0.0), _node16(1002, 10.0, -100.0, 0.0),
+    _node16(1003, 10.0, -90.0, 0.0), _node16(1004, 0.0, -90.0, 0.0),
+    "*ELEMENT_SHELL", _i8(1, 101, 1001, 1002, 1003, 1004),
+    "*SECTION_SHELL", _row(101, 2, "", 2),
+    _row("1.0", "1.0", "1.0", "1.0"),
+    "*MAT_ELASTIC", _row(101, "7.85E-9", "2.1E5", "0.3"),
+    "*PART", "parent shell", _row(101, 101, 101),
+    "*INCLUDE_TRANSFORM", "childB.k",
+    # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF — all distinct, so a
+    # wrong bucket lands on a recognisably wrong number.
+    _row(5000, 6000, 7000, 8000, 9000, 11000, 12000),
+    "*END", ""])
+
+
+def _convert_include_pair(parent: str, child: str):
+    tmp = tempfile.TemporaryDirectory()
+    with open(os.path.join(tmp.name, "childB.k"), "w") as fh:
+        fh.write(child)
+    path = os.path.join(tmp.name, "parentB.k")
+    with open(path, "w") as fh:
+        fh.write(parent)
+    result = convert(path, write_log=False)
+    with open(result.starter_path) as fh:
+        starter = fh.read()
+    tmp.cleanup()
+    return result, starter
+
+
+class TestInitialStressOffsetSpecs(unittest.TestCase):
+    """(B) ``*INITIAL_STRESS_SHELL`` and ``_SOLID`` were registered directly in
+    ``HANDLERS``, not through ``INITIAL_STATE_PRELOAD_KEYWORDS``, so
+    ``_OFFSET_SPECS.get("INITIAL_STRESS_SHELL")`` was ``None`` and an
+    ``*INCLUDE_TRANSFORM`` left their EIDs at the child deck's numbers while
+    the mesh around them moved by IDEOFF.
+
+    MEASURED on this exact pair at master 0c8968e: two "keyword has no offset
+    map" warnings, then
+
+        /INISHE/STRS_F/GLOB   shell_ID = 1     <- the PARENT deck's shell
+        *INITIAL_STRESS_SHELL: element(s) 2 not found in the shell mesh
+        *INITIAL_STRESS_SOLID: element(s) 1 not found in the solid mesh
+
+    — one record on the wrong element (different part, different thickness,
+    different place) and two dangling, with no /INIBRI block at all.
+    """
+
+    def setUp(self):
+        self.res, self.starter = _convert_include_pair(_B_PARENT, _B_CHILD)
+
+    def test_the_generic_no_offset_map_warning_is_gone(self):
+        self.assertEqual(_warns(self.res, "has no offset map"), [])
+
+    def test_no_stress_record_dangles(self):
+        self.assertEqual(_warns(self.res, "not found in the shell mesh"), [])
+        self.assertEqual(_warns(self.res, "not found in the solid mesh"), [])
+
+    def test_the_shell_record_lands_on_the_offset_child_element(self):
+        """EID 1 + IDEOFF 6000 = 6001, and 6001 is a row of /SHELL/7001 (the
+        child's part, PID 1 + IDPOFF 7000) — NOT the parent's shell 1."""
+        card1 = _cards(_block(self.starter, "/INISHE/STRS_F/GLOB"))[0]
+        self.assertEqual(_col_i(card1, 1, 10), 6001)
+        self.assertIn("      6001      5001      5002      5003      5004",
+                      self.starter)
+
+    def test_the_solid_record_lands_on_the_offset_child_element(self):
+        card1 = _cards(_block(self.starter, "/INIBRI/STRS_FGLO"))[0]
+        self.assertEqual(_col_i(card1, 1, 10), 6001)
+
+    def test_the_stress_VALUES_are_untouched_by_the_offset(self):
+        """The offsetter must rewrite card 1 ONLY. Every stress component is a
+        float, and ``_rewrite_line`` calls a token an id when
+        ``to_int(tok) > 0`` — a ``{"data": ...}`` spec would have turned the
+        10.0 shear into ``10 + 6000``."""
+        pts = _cards(_block(self.starter, "/INISHE/STRS_F/GLOB"))[2:]
+        # layer 1: sigma_X sigma_Y sigma_Z on row 1; XY YZ ZX eps_p pos_nip
+        # on row 2. Distinct per slot, so a swap fails.
+        self.assertEqual(_col_f(pts[0], 1, 20), 100.0)     # sigma_X
+        self.assertEqual(_col_f(pts[0], 21, 40), 50.0)     # sigma_Y
+        self.assertEqual(_col_f(pts[0], 41, 60), 10.0)     # sigma_Z
+        self.assertEqual(_col_f(pts[1], 1, 20), 7.0)       # sigma_XY
+        self.assertEqual(_col_f(pts[1], 21, 40), 8.0)      # sigma_YZ
+        self.assertEqual(_col_f(pts[1], 41, 60), 9.0)      # sigma_ZX
+        self.assertEqual(_col_f(pts[1], 61, 80), 0.001)    # eps_p
+        self.assertEqual(_col_f(pts[1], 81, 100), -1.0)    # pos_nip
+
+    def test_every_INITIAL_keyword_has_an_offset_spec(self):
+        """The #116 property, over the whole family rather than the four
+        keywords ``INITIAL_STATE_PRELOAD_KEYWORDS`` used to hold. The audit
+        that found (B) also found *INITIAL_VOLUME_FRACTION_GEOMETRY."""
+        from k2rad.assembly import _OFFSET_SPECS
+        from k2rad.handlers import HANDLERS
+        missing = sorted(k for k in HANDLERS
+                         if k.startswith("INITIAL") and k not in _OFFSET_SPECS)
+        self.assertEqual(missing, [])
+
+    def test_the_stress_keywords_are_registered_through_the_shared_dict(self):
+        """Registered in ``INITIAL_STATE_PRELOAD_KEYWORDS``, which is the dict
+        assembly.py keys the offset table off — so a future spelling cannot be
+        readable and un-offsettable again."""
+        from k2rad.handlers import INITIAL_STATE_PRELOAD_KEYWORDS
+        for kw in ("INITIAL_STRESS_SHELL", "INITIAL_STRESS_SOLID"):
+            with self.subTest(kw=kw):
+                self.assertIn(kw, INITIAL_STATE_PRELOAD_KEYWORDS)
+
+
+class TestInitialStressRecordWalkers(unittest.TestCase):
+    """(B) The offsetter and the handler are driven by ONE walker each, so the
+    two can never disagree about which raw row is a card 1 (#116/#119)."""
+
+    def test_a_blank_stress_card_does_not_swallow_the_next_record(self):
+        """An all-blank stress card is legal LS-DYNA (every component defaults
+        to 0.0). A "next non-blank row" walk would step over it and read the
+        FOLLOWING element's card 1 as this element's stress card, then read
+        the next stress card as a card 1 — the #119 class."""
+        from k2rad.handlers import initial_stress_shell_records
+        raw = [
+            _row(11, 1, 2, 0, 0, 0, 0, 0),
+            "",                                   # layer 1: all defaults
+            _row("1.0", "1.0", "2.0", "3.0", "0.0", "0.0", "0.0", "0.0"),
+            _row(22, 1, 1, 0, 0, 0, 0, 0),
+            _row("0.0", "9.0", "8.0", "7.0", "0.0", "0.0", "0.0", "0.0"),
+        ]
+        recs = list(initial_stress_shell_records(raw))
+        self.assertEqual([r[1][0] for r in recs], [11, 22])
+        self.assertEqual([r[0] for r in recs], [0, 3])
+        self.assertEqual([r[2] for r in recs], [[1, 2], [4]])
+        self.assertEqual([r[3] for r in recs], [False, False])
+
+    def test_a_stress_value_that_looks_like_an_id_is_not_offset(self):
+        """The reason a declarative ``data`` spec is unusable: a stress of 1.5
+        reads back through ``to_int`` as the id 1."""
+        child = _B_CHILD.replace(
+            _row("-1.0", "100.0", "50.0", "10.0", "7.0", "8.0", "9.0",
+                 "0.001"),
+            _row("-1.0", "1.5", "2.5", "3.5", "7.0", "8.0", "9.0", "0.001"))
+        _res, starter = _convert_include_pair(_B_PARENT, child)
+        pts = _cards(_block(starter, "/INISHE/STRS_F/GLOB"))[2:]
+        self.assertEqual(_col_f(pts[0], 1, 20), 1.5)
+        self.assertEqual(_col_f(pts[0], 21, 40), 2.5)
+        self.assertEqual(_col_f(pts[0], 41, 60), 3.5)
+
+    def test_the_walkers_reproduce_the_handlers_skips(self):
+        """Blank rows and ``EID <= 0`` rows are skipped by BOTH walks — the
+        handler's own two ``continue``s."""
+        from k2rad.handlers import (initial_stress_shell_records,
+                                    initial_stress_solid_records)
+        shell = ["", _row(0, 1, 1, 0, 0, 0, 0, 0),
+                 _row(7, 1, 1, 0, 0, 0, 0, 0),
+                 _row("0.0", "1.0", "2.0", "3.0", "0.0", "0.0", "0.0", "0.0")]
+        self.assertEqual([r[1][0] for r in initial_stress_shell_records(shell)],
+                         [7])
+        solid = ["", _row(0, 1, 0, 0, 0, 0, 0, 0),
+                 _row(9, 1, 0, 0, 0, 0, 0, 0),
+                 _row("1.0", "2.0", "3.0", "0.0", "0.0", "0.0", "0.0")]
+        self.assertEqual([r[1][0] for r in initial_stress_solid_records(solid)],
+                         [9])
+
+    def test_a_truncated_block_stops_the_walk(self):
+        """Mirrors the handler's ``break``: the record is yielded with
+        ``truncated`` set and nothing after it is read."""
+        from k2rad.handlers import initial_stress_shell_records
+        raw = [_row(11, 1, 3, 0, 0, 0, 0, 0),
+               _row("0.0", "1.0", "2.0", "3.0", "0.0", "0.0", "0.0", "0.0")]
+        recs = list(initial_stress_shell_records(raw))
+        self.assertEqual(len(recs), 1)
+        self.assertTrue(recs[0][3])
+
+
+class TestVolumeFractionGeometryOffsets(unittest.TestCase):
+    """(B) bonus: *INITIAL_VOLUME_FRACTION_GEOMETRY's FMSID lives in TWO id
+    namespaces selected by FMIDTYP beside it (0 = part set, 1 = part) — the
+    #125 "one cell, two id namespaces" class."""
+
+    def _off(self, fmidtyp: int):
+        from k2rad.assembly import _off_initial_volume_fraction_geometry
+        from k2rad.parser import Block
+        b = Block(keyword="INITIAL_VOLUME_FRACTION_GEOMETRY", options=[],
+                  raw=[_row(4, fmidtyp, 1, 0), _row(1, 1, 2)])
+        _off_initial_volume_fraction_geometry(
+            b, {"p": 7000, "s": 9000, "e": 6000, "n": 5000}, lambda *_a: None)
+        return b.raw
+
+    def test_FMIDTYP_1_is_a_PART_id(self):
+        raw = self._off(1)
+        self.assertEqual(_col_i(raw[0], 1, 10), 7004)      # 4 + IDPOFF
+
+    def test_FMIDTYP_0_is_a_PART_SET_id(self):
+        raw = self._off(0)
+        self.assertEqual(_col_i(raw[0], 1, 10), 9004)      # 4 + IDSOFF
+
+    def test_the_container_cards_are_left_alone(self):
+        """CONTTYP/FILLOPT/FAMMG are enumerations and an ALE group number, in
+        none of the seven buckets — and this converter reads nothing else off
+        those rows, so no dangling reference can result."""
+        for fmidtyp in (0, 1):
+            with self.subTest(fmidtyp=fmidtyp):
+                self.assertEqual(self._off(fmidtyp)[1], _row(1, 1, 2))
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()

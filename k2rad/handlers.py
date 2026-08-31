@@ -7666,6 +7666,140 @@ def _avg_tuples(pts: list) -> tuple:
     return tuple(sum(p[k] for p in pts) / n for k in range(len(pts[0])))
 
 
+# ── *INITIAL_STRESS_SHELL / *INITIAL_STRESS_SOLID ───────────────────────────
+#
+# ONE record walker per keyword, shared by the handler and by the
+# *INCLUDE_TRANSFORM offsetter (assembly._off_initial_stress_shell /
+# _off_initial_stress_solid), exactly as initial_strain_shell_records already
+# is. The two walks MUST agree on which raw row is a card 1, because these
+# cards are almost entirely floats and ``_rewrite_line`` decides "this token is
+# an id" with ``to_int(tok) > 0``: a desynced offsetter would read a stress of
+# 1.5 as the element id 1 and rewrite it to ``1 + IDEOFF`` (#116 / #119).
+#
+# Neither walker applies ``_title_offset``: Vol I R17 p.28-95 / p.28-103 give
+# these keywords the options ``<BLANK>`` and ``SET`` only — no ``_TITLE``, no
+# ``_ID`` — so the handlers walk ``block.raw`` from row 0 and the offsetters
+# must start on the same row.
+
+def initial_stress_shell_records(raw: List[str]):
+    """Yield ``(card1_idx, fields, pt_row_indices, truncated)`` per element.
+
+    Card 1 (Vol I R17 p.28-95, EIGHT fields, cols 1-80)::
+
+        EID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV
+
+    read with ``n=9`` so a stray NINTH cell can be NAMED (it is never used as
+    data — this keyword has no ILOCAL; see the handler). Then
+    ``NPLANE*NTHICK`` stress records, each 1 row (LARGE=0, 8x10) or 2 rows
+    (LARGE=1, 5x16 + 3x16), each trailed by ``ceil(NHISV/8|5)`` history rows
+    and ``ceil(NTENSR/6|5)`` tensor rows, and finally
+    ``NTHINT*ceil(NTHHSV/8|5)`` thermal rows.
+
+    RAW CONTIGUITY (#119): every one of those rows is claimed by ROW INDEX
+    from the card-1 row, never by "the next non-blank row" — an all-blank
+    stress card is legal LS-DYNA (every component defaults to 0.0) and a
+    non-blank walk would step over it and eat the next element's card 1.
+
+    ``truncated`` is True when the block ends mid-record; the generator then
+    stops, mirroring the handler's ``break``.
+    """
+    i = 0
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=9, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            i += 1
+            continue
+        nplane = max(1, to_int(f[1]))
+        nthick = max(1, to_int(f[2]))
+        nhisv = to_int(f[3]) if len(f) > 3 else 0
+        ntensr = to_int(f[4]) if len(f) > 4 else 0
+        large = to_int(f[5]) if len(f) > 5 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        ninth = to_int(f[8]) if len(f) > 8 else 0
+        card1 = i
+        i += 1
+        pt_rows: List[int] = []
+        truncated = False
+        for _ in range(nplane * nthick):
+            if i >= n:
+                truncated = True
+                break
+            pt_rows.append(i)
+            i += 2 if large else 1
+            if nhisv > 0:
+                i += _ceil_div(nhisv, 5 if large else 8)
+            if ntensr > 0:
+                i += _ceil_div(ntensr, 5 if large else 6)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+        yield (card1, (eid, nplane, nthick, nhisv, ntensr, large, nthint,
+                       nthhsv, ninth), pt_rows, truncated)
+        if truncated:
+            return
+
+
+def initial_stress_solid_records(raw: List[str]):
+    """Yield ``(card1_idx, fields, pt_row_indices, truncated)`` per element.
+
+    Card 1 (Vol I R17 p.28-103)::
+
+        EID NINT NHISV LARGE IVEFLG IALEGP NTHINT NTHHSV
+
+    then ``NINT`` stress records of 1 row (LARGE=0, 7x10) or 2 rows (LARGE=1,
+    5x16 + 5x16, the first 3 history values riding row 2), each trailed by the
+    remaining ``NHISV+IVEFLG`` history rows, then the thermal rows. Same raw
+    contiguity rule as the shell walker.
+    """
+    i = 0
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            i += 1
+            continue
+        nint = max(1, to_int(f[1]))
+        nhisv = to_int(f[2]) if len(f) > 2 else 0
+        large = to_int(f[3]) if len(f) > 3 else 0
+        iveflg = to_int(f[4]) if len(f) > 4 else 0
+        ialegp = to_int(f[5]) if len(f) > 5 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        card1 = i
+        i += 1
+        nh = nhisv + iveflg   # IVEFLG appends extra value(s) to the history list
+        pt_rows: List[int] = []
+        truncated = False
+        for _ in range(nint):
+            if i >= n:
+                truncated = True
+                break
+            pt_rows.append(i)
+            if large:
+                i += 2
+                if nh > 3:                    # 3 history values ride card 2
+                    i += _ceil_div(nh - 3, 5)
+            else:
+                i += 1
+                if nh > 0:
+                    i += _ceil_div(nh, 8)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+        yield (card1, (eid, nint, nhisv, large, iveflg, ialegp, nthint,
+                       nthhsv, nh), pt_rows, truncated)
+        if truncated:
+            return
+
+
 def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB.
 
@@ -7693,55 +7827,26 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     the writer).
     """
     raw = block.raw
-    i = 0
     n_hisv_dropped = 0
     n_tensr_dropped = 0
     n_thermal_dropped = 0
     n_plane_averaged = 0
     n_read = 0
     ninth_cell: List[int] = []
-    while i < len(raw):
-        if not raw[i].strip():
-            i += 1
-            continue
-        # n=9 reads ONE cell past the card so a stray value there can be named;
-        # it is never used as data — see the docstring.
-        f = _card(raw, i, fixed=True, n=9, w=10)
-        eid = to_int(f[0])
-        if eid <= 0:
-            i += 1
-            continue
-        nplane = max(1, to_int(f[1]))
-        nthick = max(1, to_int(f[2]))
-        nhisv  = to_int(f[3]) if len(f) > 3 else 0
-        ntensr = to_int(f[4]) if len(f) > 4 else 0
-        large  = to_int(f[5]) if len(f) > 5 else 0
-        nthint = to_int(f[6]) if len(f) > 6 else 0
-        nthhsv = to_int(f[7]) if len(f) > 7 else 0
-        if len(f) > 8 and to_int(f[8]) != 0:
+    for _c1, (eid, nplane, nthick, nhisv, ntensr, large, nthint, nthhsv,
+              ninth), pt_rows, truncated in initial_stress_shell_records(raw):
+        if ninth != 0:
             ninth_cell.append(eid)
-        i += 1
-
         pts = []
-        truncated = False
-        for _ in range(nplane * nthick):
-            if i >= len(raw):
-                truncated = True
-                break
+        for r in pt_rows:
             if large:
-                a = _fixed_float_card(raw, i, 5, 16)
-                b = _fixed_float_card(raw, i + 1, 3, 16) if i + 1 < len(raw) else [0.0] * 3
-                i += 2
+                a = _fixed_float_card(raw, r, 5, 16)
+                b = (_fixed_float_card(raw, r + 1, 3, 16)
+                     if r + 1 < len(raw) else [0.0] * 3)
                 pts.append(tuple(a + b))
             else:
-                pts.append(tuple(_fixed_float_card(raw, i, 8, 10)))
-                i += 1
-            if nhisv > 0:
-                i += _ceil_div(nhisv, 5 if large else 8)
-            if ntensr > 0:
-                i += _ceil_div(ntensr, 5 if large else 6)
+                pts.append(tuple(_fixed_float_card(raw, r, 8, 10)))
         if nthint > 0 and nthhsv > 0:
-            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
             n_thermal_dropped += 1
         if truncated:
             state.warn(f"*INITIAL_STRESS_SHELL eid={eid}: block ends before all "
@@ -7821,47 +7926,20 @@ def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
     aggregated warning; EPS maps to /INIBRI's Epsilon_p.
     """
     raw = block.raw
-    i = 0
     n_hisv_dropped = 0
     n_thermal_dropped = 0
-    while i < len(raw):
-        if not raw[i].strip():
-            i += 1
-            continue
-        f = _card(raw, i, fixed=True, n=8, w=10)
-        eid = to_int(f[0])
-        if eid <= 0:
-            i += 1
-            continue
-        nint   = max(1, to_int(f[1]))
-        nhisv  = to_int(f[2]) if len(f) > 2 else 0
-        large  = to_int(f[3]) if len(f) > 3 else 0
-        iveflg = to_int(f[4]) if len(f) > 4 else 0
-        nthint = to_int(f[6]) if len(f) > 6 else 0
-        nthhsv = to_int(f[7]) if len(f) > 7 else 0
-        i += 1
-        nh = nhisv + iveflg   # IVEFLG appends extra value(s) to the history list
-
+    for _c1, (eid, nint, nhisv, large, iveflg, _ialegp, nthint, nthhsv,
+              nh), pt_rows, truncated in initial_stress_solid_records(raw):
         pts = []
-        truncated = False
-        for _ in range(nint):
-            if i >= len(raw):
-                truncated = True
-                break
+        for r in pt_rows:
             if large:
-                a = _fixed_float_card(raw, i, 5, 16)
-                b = _fixed_float_card(raw, i + 1, 2, 16) if i + 1 < len(raw) else [0.0] * 2
-                i += 2
+                a = _fixed_float_card(raw, r, 5, 16)
+                b = (_fixed_float_card(raw, r + 1, 2, 16)
+                     if r + 1 < len(raw) else [0.0] * 2)
                 pts.append(tuple(a + b))
-                if nh > 3:                    # 3 history values ride card 2
-                    i += _ceil_div(nh - 3, 5)
             else:
-                pts.append(tuple(_fixed_float_card(raw, i, 7, 10)))
-                i += 1
-                if nh > 0:
-                    i += _ceil_div(nh, 8)
+                pts.append(tuple(_fixed_float_card(raw, r, 7, 10)))
         if nthint > 0 and nthhsv > 0:
-            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
             n_thermal_dropped += 1
         if truncated:
             state.warn(f"*INITIAL_STRESS_SOLID eid={eid}: block ends before all "
@@ -16343,8 +16421,6 @@ HANDLERS = {
     "DATABASE_FREQUENCY_BINARY_D3PSD":        handle_database_frequency_binary_d3psd,
     "DATABASE_FREQUENCY_BINARY_D3RMS":        handle_database_frequency_binary_d3rms,
     "DATABASE_FREQUENCY_BINARY_D3FTG":        handle_database_frequency_binary_d3ftg,
-    "INITIAL_STRESS_SHELL":                   handle_initial_stress_shell,
-    "INITIAL_STRESS_SOLID":                   handle_initial_stress_solid,
     "LOAD_GRAVITY_PART":                      handle_load_gravity_part,
     "LOAD_GRAVITY_PART_SET":                  handle_load_gravity_part,
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
@@ -16668,6 +16744,20 @@ INITIAL_STATE_PRELOAD_KEYWORDS = {
     "INITIAL_AXIAL_FORCE_BEAM": handle_initial_axial_force_beam,
     "INITIAL_STRAIN_SHELL":     handle_initial_strain_shell,
     "INITIAL_STRAIN_SHELL_SET": handle_initial_strain_shell,
+    # Moved here from the bare HANDLERS table by the SIDE-DEFECT batch. They
+    # were readable and un-offsettable: registered directly, so
+    # ``_OFFSET_SPECS.get("INITIAL_STRESS_SHELL")`` was None and an
+    # *INCLUDE_TRANSFORM left their EIDs at the child deck's original numbers
+    # while the mesh around them moved by IDEOFF. MEASURED on a parent/child
+    # pair (IDEOFF 6000, IDPOFF 7000): one stress record landed on the PARENT
+    # deck's shell 1 — a different part, a different thickness, a different
+    # place — and the other two dangled, under the generic "keyword has no
+    # offset map" warning. Registering them HERE is what makes that
+    # impossible: the loop in assembly.py keys the offset table off this dict,
+    # so a spelling added without a spec is an ImportError, not a silent
+    # un-offset include (#116).
+    "INITIAL_STRESS_SHELL":     handle_initial_stress_shell,
+    "INITIAL_STRESS_SOLID":     handle_initial_stress_solid,
 }
 for _kw, _h in INITIAL_STATE_PRELOAD_KEYWORDS.items():
     HANDLERS[_kw] = _h
