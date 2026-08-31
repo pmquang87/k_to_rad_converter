@@ -7905,21 +7905,42 @@ class ConversionState:
     def next_elem_group_id(self) -> int:
         """A next_id() guaranteed free in the ELEMENT-group namespaces.
 
-        ``/GRBRIC``, ``/GRSHEL``, ``/GRSH3N``, ``/GRBEAM``, ``/GRSPRI`` and
-        ``/GRTRUSS`` are one starter table per family, and every one of them is
-        checked against the ids the DECK states: today k2rad never re-emits a
-        user ``*SET_SHELL`` / ``_SOLID`` / ``_BEAM`` / ``_DISCRETE`` under its
-        own SID (unlike ``*SET_NODE``, which ``_make_extra_groups`` does
-        re-emit), so no collision is reachable — but that is a property of the
-        current writers, not of the id stream. The flattened
-        ``*SET_<FAMILY>_ADD`` unions land in these same four dicts under their
-        own SIDs and do not change that: nothing re-emits an element set under
-        its SID either way, and a union sid is one MORE id this guard dodges,
-        never one fewer (``_flatten_set_adds`` is a prepass, so they are all
-        present before any writer allocates). The sibling of
-        ``next_grnod_id``, dodging the four element-set registries so a
-        synthesized element group cannot land on a SID a future writer decides
-        to pass through, and a no-op vs ``next_id()`` on any ordinary deck
+        **The starter's rule, MEASURED.** ``lecgroup.F:124-224`` calls
+        ``HM_LECGRE`` eight times, each with its OWN array and start key
+        (``IGRBRIC``/``/GRBRIC``, ``IGRQUAD``, ``IGRSH4N``/``/GRSHEL``,
+        ``IGRTRUSS``, ``IGRBEAM``, ``IGRSPRING``/``/GRSPRI``,
+        ``IGRSH3N``/``/GRSH3N``, and ``/GRTRIA`` on the same buffer for 2-D),
+        and ``hm_lecgre.F:262-267`` runs ``UDOUBLE_IGR`` over THAT family's
+        list only. So there are TEN independent id namespaces
+        (``/GRNOD``, ``/GRPART``, ``/SURF`` and the rest each have their own
+        ``UDOUBLE``), and ``ERROR 79`` fires only WITHIN one:
+
+          * ``/GRBRIC/BRIC/5000`` + ``/GRSHEL/SHEL/5000`` -> ACCEPTED
+          * ``/GRBRIC/BRIC/5000`` twice -> ERROR 79 ... IN BRIC ELEMENT GROUP
+          * ``/GRBRIC/BRIC/5000`` + ``/GRBRIC/PART/5000`` -> ERROR 79 (the
+            SUB-keyword is not part of the key)
+          * nine groups on one id across nine families -> ACCEPTED, 0 ERROR
+
+        so this allocator dodges only the element-SET registries, and
+        ``_warn_duplicate_group_ids`` scans PER FAMILY. A guard or a scan keyed
+        on "any /GR* id" would fire on decks the starter accepts.
+
+        Today k2rad never re-emits a user ``*SET_SHELL`` / ``_SOLID`` /
+        ``_BEAM`` / ``_DISCRETE`` under its own SID (unlike ``*SET_NODE``,
+        which ``_make_extra_groups`` does re-emit), so no collision is
+        reachable — but that is a property of the current writers, not of the
+        id stream, which is exactly why the SIDE-DEFECT batch routed all
+        SEVENTEEN remaining element-group emission sites through here rather
+        than leaving the guard on the one ``/ACTIV`` site it had. The dodge is
+        family-AGNOSTIC (a shell SID can push a ``/GRBRIC`` allocation
+        forward), which is harmless and over-conservative rather than wrong.
+
+        The flattened ``*SET_<FAMILY>_ADD`` unions land in these same four
+        dicts under their own SIDs and do not change that: nothing re-emits an
+        element set under its SID either way, and a union sid is one MORE id
+        this guard dodges, never one fewer (``_flatten_set_adds`` is a prepass,
+        so they are all present before any writer allocates). The sibling of
+        ``next_grnod_id``, and a no-op vs ``next_id()`` on any ordinary deck
         (no user element set at or above the auto-id base 90001), so it does
         not shift ids.
         """

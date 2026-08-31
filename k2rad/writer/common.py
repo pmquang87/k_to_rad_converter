@@ -445,26 +445,34 @@ def _make_master_surface(state: ConversionState, surf_id: int, title: str,
         return False
     if kinds == 1:
         if quad_eids:
-            grshel_id = state.next_id()
+            grshel_id = state.next_elem_group_id()
             out_lines += _emit_grshel(grshel_id, f"{title}_grshel", quad_eids)
             out_lines += _emit_surf_grshel(surf_id, title, grshel_id)
         elif tri_eids:
-            grsh3n_id = state.next_id()
+            grsh3n_id = state.next_elem_group_id()
             out_lines += _emit_grsh3n(grsh3n_id, f"{title}_grsh3n", tri_eids)
             out_lines += _emit_surf_grsh3n(surf_id, title, grsh3n_id)
         else:
             out_lines += _emit_solid_surf(surf_id, title, solid_pids)
         return True
 
+    # ``sub_shell``/``sub_tri``/``sub_solid`` are /SURF ids, NOT element-group
+    # ids, so they stay on the bare ``next_id()``: /SURF is its own starter
+    # namespace (``hm_read_surf.F:428`` runs its own UDOUBLE over
+    # 'SURFACE DEFINITION'), and a /SURF may legally share a number with any
+    # /GR* group — MEASURED, a deck with /GRBRIC/BRIC/5000 beside
+    # /SURF/PART/EXT/5000 is accepted at 0 ERROR. Routing them through
+    # ``next_elem_group_id()`` would dodge the element-SET registries for no
+    # reason and shift ids on decks that have such a set.
     sub_ids: List[int] = []
     if quad_eids:
-        grshel_id = state.next_id()
+        grshel_id = state.next_elem_group_id()
         sub_shell = state.next_id()
         out_lines += _emit_grshel(grshel_id, f"{title}_grshel", quad_eids)
         out_lines += _emit_surf_grshel(sub_shell, f"{title}_shells", grshel_id)
         sub_ids.append(sub_shell)
     if tri_eids:
-        grsh3n_id = state.next_id()
+        grsh3n_id = state.next_elem_group_id()
         sub_tri = state.next_id()
         out_lines += _emit_grsh3n(grsh3n_id, f"{title}_grsh3n", tri_eids)
         out_lines += _emit_surf_grsh3n(sub_tri, f"{title}_tris", grsh3n_id)

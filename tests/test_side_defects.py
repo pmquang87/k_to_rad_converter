@@ -1376,5 +1376,189 @@ class TestDynainStrainCardSpelling(unittest.TestCase):
                     _warns(res, "--shell-formulation qbat"), [])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (H) element-GROUP id namespaces
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGroupNamespaceScan(unittest.TestCase):
+    """(H) The deck-wide duplicate scan for the GROUP namespaces — the missing
+    member of the family at ``build_starter``'s finish pass, which had nine.
+
+    The starter's rule, MEASURED on twelve probe decks over one 6-family mesh,
+    every group at id 5000::
+
+        /GRBRIC/BRIC + /GRSHEL/SHEL                 -> ACCEPTED, 0 ERROR
+        /GRSHEL/SHEL + /GRSH3N/SH3N                 -> ACCEPTED
+        /GRSPRI + /GRBEAM ; /GRSPRI + /GRTRUS       -> ACCEPTED
+        /GRNOD + /GRBRIC ; /GRPART + /GRSHEL        -> ACCEPTED
+        /SURF  + /GRSHEL ; /SUBSET + /GRBRIC        -> ACCEPTED
+        NINE groups on one id across nine families  -> ACCEPTED, 0 ERROR
+        /GRBRIC/BRIC twice     -> ERROR 79 ... IN BRIC ELEMENT GROUP
+        /GRBRIC/BRIC + /GRBRIC/PART -> the SAME ERROR 79
+        /GRPART/PART twice     -> ERROR 79 ... IN PART GROUP
+
+    ``lecgroup.F:124-224`` calls ``HM_LECGRE`` once per family with its own
+    array; ``hm_lecgre.F:262-267`` runs ``UDOUBLE_IGR`` over that list only.
+    So the scan must be PER FAMILY — a single scan over "any /GR* id" would
+    fire on five of those accepted decks.
+    """
+
+    def _scan(self, lines):
+        from k2rad.writer.assembly import _warn_duplicate_group_ids
+        st = ConversionState()
+        _warn_duplicate_group_ids(st, lines)
+        return st.warnings
+
+    def test_a_cross_family_collision_is_NOT_reported(self):
+        """The decks the starter accepts. A global scan would fire here."""
+        for a, b in (("/GRBRIC/BRIC/5000", "/GRSHEL/SHEL/5000"),
+                     ("/GRSHEL/SHEL/5000", "/GRSH3N/SH3N/5000"),
+                     ("/GRSPRI/SPRI/5000", "/GRBEAM/BEAM/5000"),
+                     ("/GRNOD/NODE/5000", "/GRBRIC/BRIC/5000"),
+                     ("/GRPART/PART/5000", "/GRSHEL/SHEL/5000"),
+                     ("/SURF/PART/EXT/5000", "/GRSHEL/SHEL/5000"),
+                     ("/SUBSET/5000", "/GRBRIC/BRIC/5000")):
+            with self.subTest(a=a, b=b):
+                self.assertEqual(self._scan([a, b]), [])
+
+    def test_nine_families_on_one_id_stay_silent(self):
+        self.assertEqual(self._scan([
+            "/GRBRIC/BRIC/5000", "/GRSHEL/SHEL/5000", "/GRSH3N/SH3N/5000",
+            "/GRBEAM/BEAM/5000", "/GRSPRI/SPRI/5000", "/GRTRUS/TRUS/5000",
+            "/GRNOD/NODE/5000", "/GRPART/PART/5000", "/SURF/PART/EXT/5000",
+        ]), [])
+
+    def test_a_same_family_collision_is_reported_with_the_starters_text(self):
+        w = self._scan(["/GRBRIC/BRIC/5000", "/GRBRIC/BRIC/5000"])
+        self.assertEqual(len(w), 1)
+        self.assertIn("GROUP ID 5000", w[0])
+        self.assertIn("ERROR 79", w[0])
+        self.assertIn("IN BRIC ELEMENT GROUP", w[0])
+
+    def test_the_sub_keyword_is_not_part_of_the_key(self):
+        """MEASURED: ``/GRBRIC/BRIC/5000`` beside ``/GRBRIC/PART/5000`` is the
+        SAME ERROR 79, so keying on the full path would miss it."""
+        w = self._scan(["/GRBRIC/BRIC/5000", "/GRBRIC/PART/5000"])
+        self.assertEqual(len(w), 1)
+        self.assertIn("/GRBRIC/BRIC/5000", w[0])
+        self.assertIn("/GRBRIC/PART/5000", w[0])
+
+    def test_each_family_gets_its_own_starter_message_text(self):
+        for card, mess in (("/GRPART/PART/7", "IN PART GROUP"),
+                           ("/GRNOD/NODE/7", "IN NODE GROUP DEFINITION"),
+                           ("/SURF/PART/EXT/7", "IN SURFACE DEFINITION"),
+                           ("/GRSPRI/SPRI/7", "IN SPRI ELEMENT GROUP")):
+            with self.subTest(card=card):
+                w = self._scan([card, card])
+                self.assertEqual(len(w), 1)
+                self.assertIn(mess, w[0])
+
+    def test_distinct_ids_in_one_family_stay_silent(self):
+        self.assertEqual(self._scan(
+            ["/GRBRIC/BRIC/1", "/GRBRIC/BRIC/2", "/GRBRIC/PART/3"]), [])
+
+
+class TestEveryElementGroupSiteIsGuarded(unittest.TestCase):
+    """(H) ``next_elem_group_id()`` was called at exactly ONE of eighteen
+    element-group emission sites (the ``/ACTIV`` groups); every other one used
+    the bare ``state.next_id()``. The asymmetry was the finding — not a live
+    collision, which is unreachable while the allocators stay monotonic and no
+    writer re-emits a user element set under its own SID.
+
+    This test is the audit itself, run as code so it cannot fall out of date:
+    it walks the writer modules for ``<var> = state.next_id()`` whose value
+    reaches an element-group emitter within the next few lines."""
+
+    #: ``/SURF`` ids that sit beside an element-group emitter and must stay on
+    #: the BARE allocator: /SURF is its own starter namespace
+    #: (hm_read_surf.F:428) and may legally share a number with any /GR*
+    #: group — measured accepted. Routing them through the element-group
+    #: allocator would shift ids for no reason.
+    SURF_ID_VARS = {("common.py", "sub_shell"), ("common.py", "sub_tri"),
+                    ("common.py", "sub_solid"), ("monvol.py", "s1"),
+                    ("monvol.py", "s2")}
+
+    def test_no_element_group_site_uses_the_bare_allocator(self):
+        import re
+        from pathlib import Path as _P
+        emit = re.compile(r"_emit_(grshel|grsh3n|id_group|grbric_part)\s*\(")
+        root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
+        unguarded, guarded = [], 0
+        for f in ("common.py", "inistate.py", "loads.py", "monvol.py",
+                  "preload.py", "blast_ale.py", "frictions.py",
+                  "rarecards.py"):
+            src = (root / f).read_text(encoding="utf-8").splitlines()
+            for i, ln in enumerate(src):
+                for m in re.finditer(
+                        r"(\w+)\s*=\s*state\.next_(id|elem_group_id)\(\)", ln):
+                    var, kind = m.group(1), m.group(2)
+                    ctx = "\n".join(src[i:i + 6])
+                    e = emit.search(ctx)
+                    if not (e and var in ctx[e.start():e.start() + 180]):
+                        continue
+                    if (f, var) in self.SURF_ID_VARS:
+                        continue
+                    if kind == "elem_group_id":
+                        guarded += 1
+                    else:
+                        unguarded.append(f"{f}:{i + 1} {var}")
+        self.assertEqual(unguarded, [])
+        # The scan's 6-line window does not see every site (two preload ones
+        # emit their /NODE block between the allocation and the group), so
+        # this is a floor, not the total — the exact count is asserted below.
+        self.assertGreaterEqual(guarded, 16)
+
+    def test_the_guarded_allocator_is_used_at_every_site_it_should_be(self):
+        """The exact call-site count, so a silently deleted or re-added bare
+        ``next_id()`` shows up as a number change rather than as nothing.
+
+        18 = 4 master-surface (common.py) + 5 /SECT (inistate.py) + 1
+        /CLUSTER/BRICK (loads.py) + 4 bag-surface (monvol.py) + 2 /PRELOAD
+        (preload.py) + 1 FSI /GRBRIC/PART (blast_ale.py) + 1 /ACTIV
+        (rarecards.py, the only one that was guarded before this batch)."""
+        import re
+        from pathlib import Path as _P
+        root = _P(__file__).resolve().parent.parent / "k2rad" / "writer"
+        n = 0
+        for f in sorted(root.glob("*.py")):
+            for ln in f.read_text(encoding="utf-8").splitlines():
+                # Skip prose: only count real call sites.
+                if re.search(r"state\.next_elem_group_id\(\)", ln):
+                    n += 1
+        self.assertEqual(n, 18)
+
+
+class TestElemGroupAllocatorDodgesAUserSet(unittest.TestCase):
+    """(H) The guard has to REACH its branch. #131's ``next_grnod_id`` probe
+    put its user set at the auto-id base 90001, but an earlier allocation ate
+    that id, so the group landed on 90002 under both the guarded and the
+    unguarded allocator and reverting the guard left the test green.
+
+    So this test PRINTS the allocation order first — it asserts what the
+    allocator returns with an empty dodge set, then plants the user set on
+    exactly that id."""
+
+    def test_the_allocator_skips_an_element_set_on_the_id_it_would_take(self):
+        st = ConversionState()
+        # 1. What id would it take with nothing to dodge?
+        base = ConversionState().next_elem_group_id()
+        self.assertEqual(base, 90001)          # the documented auto-id base
+        # 2. Plant a user *SET_SHELL on exactly that id, and one more on the
+        #    id after it, so a single skip is not enough either.
+        st.shell_sets[base] = ("", [1])
+        st.solid_sets[base + 1] = ("", [1])
+        got = st.next_elem_group_id()
+        self.assertEqual(got, base + 2)
+        # 3. The control: the BARE allocator would have collided.
+        self.assertEqual(ConversionState().next_id(), base)
+
+    def test_the_dodge_covers_all_four_element_set_registries(self):
+        for reg in ("shell_sets", "solid_sets", "beam_sets", "discrete_sets"):
+            with self.subTest(registry=reg):
+                st = ConversionState()
+                getattr(st, reg)[90001] = ("", [1])
+                self.assertEqual(st.next_elem_group_id(), 90002)
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()

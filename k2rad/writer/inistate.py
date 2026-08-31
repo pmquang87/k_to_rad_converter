@@ -1908,13 +1908,13 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         grshel_id = grbric_id = grbeam_id = grtria_id = grsprg_id = 0
         quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
         if quad_eids:
-            grshel_id = state.next_id()
+            grshel_id = state.next_elem_group_id()
             lines += _emit_grshel(grshel_id, f"{title}_shells", quad_eids)
         if tri_eids:
-            grtria_id = state.next_id()
+            grtria_id = state.next_elem_group_id()
             lines += _emit_grsh3n(grtria_id, f"{title}_sh3n", tri_eids)
         if solid_eids:
-            grbric_id = state.next_id()
+            grbric_id = state.next_elem_group_id()
             lines += _emit_id_group("GRBRIC/BRIC", grbric_id, f"{title}_bricks",
                                     solid_eids)
         # A *SECTION_BEAM part whose material re-routes it to a CONNECTOR
@@ -1951,7 +1951,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
         all_springs = list(spring_eids) + [e for e in rerouted
                                            if e not in set(spring_eids)]
         if all_springs:
-            grsprg_id = state.next_id()
+            grsprg_id = state.next_elem_group_id()
             lines += _emit_id_group("GRSPRI/SPRI", grsprg_id,
                                     f"{title}_springs", all_springs)
         if spring_eids and cs.kind != "SET":
@@ -1985,7 +1985,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                 "entirely (measured on twin decks: /TH/SECTIO var 26 = "
                 "-1.83e-07 with the group against 0.0 without it).")
         if beam_eids:
-            grbeam_id = state.next_id()
+            grbeam_id = state.next_elem_group_id()
             lines += _emit_id_group("GRBEAM/BEAM", grbeam_id, f"{title}_beams",
                                     beam_eids)
         lines += [

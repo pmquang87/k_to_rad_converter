@@ -3513,19 +3513,24 @@ def _emit_shell_surface(state: ConversionState, surf_id: int, title: str,
             "which is strictly worse than a surface that is short by those "
             "segments.")
     if quads and tris:
-        g1, s1 = state.next_id(), state.next_id()
-        g2, s2 = state.next_id(), state.next_id()
+        # One statement per id: g1/g2 are ELEMENT-group ids and take the
+        # guarded allocator, s1/s2 are /SURF ids and must not (/SURF is its
+        # own starter namespace and may share a number with any /GR*).
+        g1 = state.next_elem_group_id()
+        s1 = state.next_id()
+        g2 = state.next_elem_group_id()
+        s2 = state.next_id()
         lines += _emit_grshel(g1, f"{title}_grshel", quads)
         lines += _emit_surf_grshel(s1, f"{title}_shells", g1)
         lines += _emit_grsh3n(g2, f"{title}_grsh3n", tris)
         lines += _emit_surf_grsh3n(s2, f"{title}_tris", g2)
         lines += _emit_surf_surf(surf_id, title, [s1, s2])
     elif quads:
-        g1 = state.next_id()
+        g1 = state.next_elem_group_id()
         lines += _emit_grshel(g1, f"{title}_grshel", quads)
         lines += _emit_surf_grshel(surf_id, title, g1)
     elif tris:
-        g2 = state.next_id()
+        g2 = state.next_elem_group_id()
         lines += _emit_grsh3n(g2, f"{title}_grsh3n", tris)
         lines += _emit_surf_grsh3n(surf_id, title, g2)
     else:

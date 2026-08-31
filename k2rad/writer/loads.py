@@ -2257,7 +2257,7 @@ def _make_hex_spotweld_clusters(state: ConversionState) -> List[str]:
                 "elements exceed the starter's 500-per-cluster limit "
                 "(hm_read_cluster.F:86, ERROR 1055) — the deck will be "
                 "rejected. Split the assembly.")
-        grbric_id = state.next_id()
+        grbric_id = state.next_elem_group_id()
         lines += _emit_id_group("GRBRIC/BRIC", grbric_id,
                                 f"hex_spotweld_{cluster_id}_bricks", bricks)
         fn, fs, mt, mb, mid, aniso = _cluster_failure_limits(state, bricks)

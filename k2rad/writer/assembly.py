@@ -1146,6 +1146,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
     _warn_duplicate_eos_ids(state, lines)
+    _warn_duplicate_group_ids(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
@@ -1456,6 +1457,94 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
                 "resolves to whichever card came first. Renumber one of the "
                 "*MAT_* cards.")
+
+
+#: ``/<FAMILY>/<sub-keyword...>/<id>`` for every GROUP namespace, capturing the
+#: FAMILY (the first path segment) and the id. The sub-keyword is deliberately
+#: NOT part of the key — MEASURED, ``/GRBRIC/BRIC/5000`` beside
+#: ``/GRBRIC/PART/5000`` is ``ERROR 79 ... IN BRIC ELEMENT GROUP``, so they are
+#: one namespace.
+_GROUP_CARD_ID_RE = re.compile(
+    r"^/(GRBRIC|GRQUAD|GRSHEL|GRSH3N|GRTRIA|GRTRUS|GRBEAM|GRSPRI|GRNOD"
+    r"|GRPART|SURF|LINE|SUBSET)/(?:[A-Z0-9_]+/)*(\d+)\s*$")
+
+#: The starter's own ``MESS`` string per family, so the warning quotes the text
+#: the user will actually see. ``hm_lecgre.F:150-152`` builds the element-group
+#: ones as ``MES(01:04)=ELKEY; MES(05:18)=' ELEMENT GROUP'``; the others come
+#: from their own readers (``hm_lecgrn.F:142``, ``hm_read_grpart.F:85``,
+#: ``hm_read_surf.F:187``, ``hm_read_lines.F:163``, ``hm_read_subset.F:103``).
+_GROUP_FAMILY_MESS = {
+    "GRBRIC": "BRIC ELEMENT GROUP",
+    "GRQUAD": "QUAD ELEMENT GROUP",
+    "GRSHEL": "SHEL ELEMENT GROUP",
+    "GRSH3N": "SH3N ELEMENT GROUP",
+    "GRTRIA": "TRIA ELEMENT GROUP",
+    "GRTRUS": "TRUS ELEMENT GROUP",
+    "GRBEAM": "BEAM ELEMENT GROUP",
+    "GRSPRI": "SPRI ELEMENT GROUP",
+    "GRNOD":  "NODE GROUP DEFINITION",
+    "GRPART": "PART GROUP",
+    "SURF":   "SURFACE DEFINITION",
+    "LINE":   "LINE DEFINITION",
+    "SUBSET": "SUBSET DEFINITION",
+}
+
+
+def _warn_duplicate_group_ids(state: ConversionState,
+                              lines: List[str]) -> None:
+    """One id per GROUP FAMILY — and the families are INDEPENDENT.
+
+    ``lecgroup.F:124-224`` calls ``HM_LECGRE`` once per element family, each
+    with its own array, and ``hm_lecgre.F:262-267`` runs ``UDOUBLE_IGR`` over
+    that family's list only; ``/GRNOD``, ``/GRPART``, ``/SURF``, ``/LINE`` and
+    ``/SUBSET`` each have their own reader and their own ``UDOUBLE``. So a
+    duplicate is ``ERROR 79`` only within one family.
+
+    MEASURED, twelve probe decks on one 6-family mesh, all at id 5000:
+
+      * ``/GRBRIC/BRIC`` + ``/GRSHEL/SHEL``        -> ACCEPTED, 0 ERROR
+      * ``/GRSHEL/SHEL`` + ``/GRSH3N/SH3N``        -> ACCEPTED
+      * ``/GRSPRI`` + ``/GRBEAM``, ``/GRSPRI`` + ``/GRTRUS``  -> ACCEPTED
+      * ``/GRNOD`` + ``/GRBRIC``, ``/GRPART`` + ``/GRSHEL``,
+        ``/SURF`` + ``/GRSHEL``, ``/SUBSET`` + ``/GRBRIC``    -> ACCEPTED
+      * NINE groups on one id across nine families -> ACCEPTED, 0 ERROR
+      * ``/GRBRIC/BRIC`` twice -> ``ERROR ID : 79 ** ERROR: DUPLICATE ID /
+        IN BRIC ELEMENT GROUP / ID=5000 is DUPLICATED``
+      * ``/GRBRIC/BRIC`` + ``/GRBRIC/PART`` -> the SAME ERROR 79, so the
+        sub-keyword is not part of the key
+      * ``/GRPART/PART`` twice -> ``ERROR 79 ... IN PART GROUP``
+
+    **A single scan over "any /GR* id" would therefore be WRONG** and would
+    fire on five of those decks. This is the missing member of the family of
+    deck-wide scans at :func:`build_starter`'s finish pass, which had nine
+    (TH-group, PROP, MAT, thermal, preload, SECT, FUNCTION, IMPDISP, INTER) and
+    now has eleven with ``/EOS``. Changes no output.
+
+    A collision is not reachable today — the synthesized ids come from
+    monotonic allocators and nothing re-emits a user element set under its own
+    SID — which is exactly why this exists: it removes the CLASS, so the next
+    writer that decides to pass a deck-stated id through cannot make the
+    failure silent again.
+    """
+    seen: Dict[Tuple[str, int], List[str]] = {}
+    for ln in lines:
+        m = _GROUP_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault((m.group(1), int(m.group(2))), []).append(
+                ln.strip())
+    for (fam, gid), cards in sorted(seen.items()):
+        if len(cards) > 1:
+            mess = _GROUP_FAMILY_MESS.get(fam, f"{fam} GROUP")
+            state.warn(
+                f"GROUP ID {gid} is emitted by more than one /{fam} card ("
+                + ", ".join(cards)
+                + f"). The starter keeps ONE table per family and checks it "
+                f"with UDOUBLE_IGR, so this is ERROR 79 (DUPLICATE ID, IN "
+                f"{mess}) and the whole deck is refused. Note the families are "
+                "INDEPENDENT — a /GRBRIC and a /GRSHEL may legally share a "
+                "number, and this scan is keyed per family for that reason — "
+                "but the sub-keyword is NOT part of the key: /"
+                f"{fam}/<one sub-keyword> and /{fam}/<another> collide.")
 
 
 #: ``/EOS/<kind>/<mid>``, capturing the kind AND the id. ``-`` is in the class

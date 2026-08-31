@@ -482,7 +482,7 @@ def _make_fsi_coupling(state: ConversionState) -> List[str]:
                        f"{cls.master} not a known part/part-set — /INTER/TYPE18 "
                        "skipped.")
             continue
-        grbric_id = state.next_id()
+        grbric_id = state.next_elem_group_id()
         lines += _emit_grbric_part(grbric_id, f"fsi_fluid_{cls.master}", mpids)
 
         edge = _mean_brick_edge(state, set(mpids))

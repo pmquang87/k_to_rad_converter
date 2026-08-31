@@ -355,7 +355,7 @@ def _make_preload_sections(state: ConversionState,
         # under its own SID, so a SID at or above the auto base would collide
         # here — starter ERROR 79 over the merged /GRNOD table, a refused deck.
         grnod_id = state.next_grnod_id()
-        grbric_id = state.next_id()
+        grbric_id = state.next_elem_group_id()
 
         lines += ["/NODE"]
         for nid, xyz in zip(fn_ids, frame):
@@ -757,7 +757,7 @@ def _make_preload_axial(state: ConversionState,
         if beam_eids:
             families.append(("GRBEAM/BEAM", "BEAM", beam_eids))
         for keyword, fam, eids in families:
-            grp = state.next_id()
+            grp = state.next_elem_group_id()
             pre_id = state.next_id()
             while pre_id in used_preload:
                 pre_id = state.next_id()
