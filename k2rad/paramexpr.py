@@ -217,6 +217,14 @@ def _tokenize(src: str) -> List[Tuple[str, object]]:
 
 # ── parser ──────────────────────────────────────────────────────────────────
 
+#: Nesting cap for the recursive descent. Well below CPython's own recursion
+#: limit (each level costs several frames), and far beyond anything a real
+#: deck writes: the deepest expression in the whole corpus nests 3 levels.
+#: Exceeding it is a NAMED refusal, not a RecursionError escaping into the
+#: caller and killing the conversion.
+_MAX_DEPTH = 60
+
+
 class _Parser:
     """Recursive descent over the token list.
 
@@ -238,6 +246,7 @@ class _Parser:
         self.toks = tokens
         self.i = 0
         self.lookup = lookup
+        self.depth = 0
 
     def _peek(self):
         return self.toks[self.i] if self.i < len(self.toks) else (None, None)
@@ -256,7 +265,29 @@ class _Parser:
             raise ExprError(f"unexpected '{val}' after a complete expression")
         return v
 
+    def _enter(self) -> None:
+        """One level deeper into the recursive descent, or a NAMED refusal.
+
+        *PARAMETER_EXPRESSION explicitly supports continuation lines (Vol I R17
+        p.36-7), so an arbitrarily long — and arbitrarily nested — expression
+        is legal input. Without this cap a deeply nested one raised
+        ``RecursionError``, which neither ``except ExprError`` site in the
+        parser catches, and the whole conversion died with a traceback instead
+        of refusing one parameter by name.
+        """
+        self.depth += 1
+        if self.depth > _MAX_DEPTH:
+            raise ExprError(
+                f"the expression nests more than {_MAX_DEPTH} levels deep")
+
     def expr(self) -> Value:
+        self._enter()
+        try:
+            return self._expr()
+        finally:
+            self.depth -= 1
+
+    def _expr(self) -> Value:
         v = self.term()
         while self._peek() == ("op", "+") or self._peek() == ("op", "-"):
             op = self._eat()
@@ -292,6 +323,13 @@ class _Parser:
         """``('+' | '-')* atom`` — the unary sign, which binds TIGHTER than
         ``**`` because this is the exponentiation's BASE, not a level above
         it (Remark 2d: ``-3**2`` is ``(-3)**2 = 9``)."""
+        self._enter()
+        try:
+            return self._signed()
+        finally:
+            self.depth -= 1
+
+    def _signed(self) -> Value:
         if self._peek() == ("op", "-"):
             self._eat()
             v = self.signed()

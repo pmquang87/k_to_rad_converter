@@ -13,7 +13,8 @@ from itertools import permutations as _permutations, product as _product
 from typing import Dict, List, Optional, Tuple
 
 from .parser import (
-    Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
+    Block, _strip_inline_comment, parse_fixed, parse_free, set_active_scope,
+    to_float, to_int,
 )
 from .state import (
     ConversionState,
@@ -8213,25 +8214,20 @@ def handle_database_cross_section_plane(block: Block, state: ConversionState) ->
     xct, yct, zct = g(1), g(2), g(3)
     xch, ych, zch = g(4), g(5), g(6)
     radius_is_nodes = radius < 0.0
+    xct_nid = xch_nid = 0
     if radius_is_nodes:
         # Vol I R17 p.16-49/50: "If RADIUS is negative, the radius will be the
         # absolute value of RADIUS and XCT and XCH will be node IDs ... YCT,
-        # ZCT, YCH, and ZCH are ignored." Resolving here keeps the writer's
-        # geometry unconditional — it used to read the NODE IDS as
-        # coordinates and silently put the plane at (node-id, YCT, ZCT).
+        # ZCT, YCH, and ZCH are ignored." The ids are only RECORDED here; the
+        # lookup happens in the writer (inistate.resolve_cross_section_
+        # endpoints), because handlers run in deck-block order and state.nodes
+        # is filled by handle_node in the SAME pass — a card written before
+        # *NODE (the standard layout, *CONTROL_/*DATABASE_ at the head of the
+        # deck) saw an empty table and the section was dropped with the untrue
+        # message "they are not nodes of this deck". Measured on twin probes
+        # differing only in card order.
         radius = -radius
-        nt = state.nodes.get(to_int(f1[1]))
-        nh = state.nodes.get(to_int(f1[4]))
-        if nt is None or nh is None:
-            state.warn(
-                f"{tag}: RADIUS is negative, which makes XCT={to_int(f1[1])} "
-                f"and XCH={to_int(f1[4])} NODE IDS (Vol I R17 p.16-49), but "
-                "they are not nodes of this deck — the cross section was "
-                "SKIPPED rather than placed at the numeric values, which would "
-                "put the cutting plane at an arbitrary point.")
-            return
-        xct, yct, zct = nt.x, nt.y, nt.z
-        xch, ych, zch = nh.x, nh.y, nh.z
+        xct_nid, xch_nid = to_int(f1[1]), to_int(f1[4])
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
     xhev = yhev = zhev = 0.0
     has_hev = False
@@ -8277,6 +8273,7 @@ def handle_database_cross_section_plane(block: Block, state: ConversionState) ->
         xct=xct, yct=yct, zct=zct,
         xch=xch, ych=ych, zch=zch,
         radius=radius, radius_is_nodes=radius_is_nodes,
+        xct_nid=xct_nid, xch_nid=xch_nid,
         xhev=xhev, yhev=yhev, zhev=zhev, has_hev=has_hev,
         loc_id=loc_id, itype=itype))
 
@@ -8286,8 +8283,11 @@ def handle_database_cross_section_set(block: Block, state: ConversionState) -> N
 
     Card: NSID HSID BSID SSID TSID DSID ID ITYPE — node set → the /SECT node
     group, solid/beam/shell element sets → its grbric/grbeam/grshel groups.
-    Thick-shell (TSID) and discrete (DSID) sets have no converter-side element
-    type — warned and dropped.
+    DSID (*SET_DISCRETE) goes to the card's grsprg_ID column as a
+    /GRSPRI/SPRI group. TSID names a *SET_TSHELL, an id namespace this
+    converter does not read: the writer tries the *SET_SOLID registry (a thick
+    shell IS a /BRICK here) and otherwise names the loss — never *SET_SHELL,
+    which is a third namespace holding ordinary shells.
     """
     raw = block.raw
     offset = 1 if _has_id(block) else 0
@@ -17169,6 +17169,19 @@ def dispatch(block: Block, state: ConversionState) -> None:
                 handler = _handler
                 break
     if handler is not None:
-        handler(block, state)
+        # Install this block's *PARAMETER_LOCAL scope for the duration of the
+        # handler. Parameter scoping is a PARSE-TIME concept in LS-DYNA while
+        # k2rad resolves "&name" here, lazily — long after the file that
+        # declared a LOCAL name was closed and its binding removed from the
+        # global table. Without this a *PARAMETER_LOCAL resolved as 0 on a
+        # perfectly valid deck (measured: /PROP/SHELL Thick 0, starter ERROR
+        # 495), and a LOCAL masking an outer parameter silently produced the
+        # OUTER value. try/finally, so a handler that raises cannot leak a
+        # scope onto the next block.
+        prev = set_active_scope(block.scope)
+        try:
+            handler(block, state)
+        finally:
+            set_active_scope(prev)
     else:
         state.skipped_keywords.append(block.keyword)

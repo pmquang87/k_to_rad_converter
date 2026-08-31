@@ -2579,7 +2579,18 @@ class CrossSection:
     xct: float = 0.0; yct: float = 0.0; zct: float = 0.0
     xch: float = 0.0; ych: float = 0.0; zch: float = 0.0
     radius: float = 0.0
+    #: ``RADIUS < 0``: XCT/XCH are NODE IDS, kept here and resolved in the
+    #: WRITER, not the handler. Handlers run in DECK-BLOCK ORDER and
+    #: ``state.nodes`` is filled by ``handle_node`` in that same pass, so a
+    #: ``*DATABASE_CROSS_SECTION_PLANE`` written before ``*NODE`` — the
+    #: ordinary layout, with the *CONTROL_/*DATABASE_ cards at the head of the
+    #: deck — saw an empty node table and the card was dropped with the untrue
+    #: message "they are not nodes of this deck". Resolution moved to
+    #: ``inistate.resolve_cross_section_endpoints``, which runs after the whole
+    #: deck is parsed. Stays True until that resolution succeeds.
     radius_is_nodes: bool = False
+    xct_nid: int = 0    # the raw XCT cell when radius_is_nodes
+    xch_nid: int = 0    # the raw XCH cell when radius_is_nodes
     # Card 2 (PLANE): the edge vector L's head, and the reporting-frame request
     xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
     has_hev: bool = False

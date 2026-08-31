@@ -1115,12 +1115,22 @@ class TestSectFrameIsBuiltFromTheCard(unittest.TestCase):
         for k, want in enumerate((0.0, 1.0, 0.0)):
             self.assertAlmostEqual(v[k] / n, want, places=12)
 
-    def test_the_Iframe0_origin_lands_on_N1(self):
-        """``Iframe = 0`` puts the moment reference at
-        ``C = N1 + ((N3-N1).e4)*e4`` (section_skew.F:147-150). Because e1 and
-        e2 are ORTHOGONAL by construction that dot product is 0, so C = N1 =
-        the plane origin — which is why Iframe stays 0 rather than moving to
-        1/2 (the section-node centroid, a different point)."""
+    def test_the_origin_lands_on_N1_and_Iframe_is_the_global_default(self):
+        """The moment reference is ``C = N1 + ((N3-N1).e4)*e4`` — the SAME
+        formula at Iframe 0 (section_skew.F:146-150) and at Iframe 10
+        (:151-164). Because e1 and e2 are ORTHOGONAL by construction that dot
+        product is 0, so C = N1 = the plane origin either way, and Iframe never
+        moves to 1/2 (the section-node centroid, a different point).
+
+        **Iframe is 10, not 0.** Vol I R17 p.16-50 gives the card's
+        output-frame cell ID the default *"global"*: LS-DYNA reports the
+        resultants on the GLOBAL axes when the card names no frame, which is
+        every section this converter emits (a named ID/ITYPE frame is not
+        mapped either). Iframe 0's local (e4,e5,e6) triad put M1/M2/M3 and
+        F1/F2/F3 on the mesh-derived axes instead — a silent divergence from
+        secforc. The FN/FT split is untouched by the choice:
+        section_skew.F:103-139 keeps XXN/YYN/ZZN = the node-derived normal at
+        Iframe >= 10."""
         p1 = _node_xyz(self.starter, self.n1)
         p2 = _node_xyz(self.starter, self.n2)
         p3 = _node_xyz(self.starter, self.n3)
@@ -1129,7 +1139,7 @@ class TestSectFrameIsBuiltFromTheCard(unittest.TestCase):
         e4 = [x / m for x in e4]
         d = sum((p3[k] - p1[k]) * e4[k] for k in range(3))
         self.assertAlmostEqual(d, 0.0, places=12)
-        self.assertEqual(_col_i(_sect_card(self.starter, 11)[2], 91, 100), 0)
+        self.assertEqual(_col_i(_sect_card(self.starter, 11)[2], 91, 100), 10)
 
     def test_the_frame_nodes_are_synthesized_not_mesh_nodes(self):
         """Element-free nodes, exactly as #127's preload /SECT does. They never
@@ -1179,44 +1189,51 @@ class TestSectFrameIsBuiltFromTheCard(unittest.TestCase):
 
 class TestSectSpringArm(unittest.TestCase):
     """(F) ``_plane_cut`` walked shells, solids, thick shells and beams and had
-    NO spring arm, so a section plane through a belt or a discrete spring found
-    nothing — and ``grsprg_ID``, the card's own spring slot, stayed 0.
+    no spring arm at all, so a section plane through a belt or a discrete
+    spring did not even KNOW they were there.
 
-    MEASURED, starter echo on this exact deck, master vs branch::
+    It walks them now — but on the ``_PLANE`` (automatic) spelling the springs
+    are REPORTED, not put in the ``grsprg_ID`` group. Vol I R17 p.16-48,
+    Figure 16-2's caption, read verbatim from the PDF: *"The automatic
+    deﬁnition does not check for springs and dampers in the section."* So
+    LS-DYNA's own ``secforc`` excludes them here, and including them would make
+    the converted section report a force the source deck does not — while
+    telling the user to delete elements from a correct deck to get parity (the
+    #125 class). The ``_SET`` spelling's DSID cell is LS-DYNA's own way to ask
+    for them, and that path DOES fill grsprg_ID (TestSectSetTsidDsid).
 
-        NUMBER OF NODES              3   ->   4
-        NUMBER OF SHELL ELEMENTS     1        1
-        NUMBER OF BEAM ELEMENTS      1        1
-        NUMBER OF SPRING ELEMENTS    0   ->   1     (SPRING 10, N1=1 N2=0)
-
-    both at 0 starter ERROR; the branch's engine run terminates normally in
-    182 cycles. ``N1=1 N2=0`` is the pack code SEC_TRI builds
-    (hm_read_sect.F:962-974) and is exactly right: with BOTH nodes in the
-    group ``section_r.F:83-84`` sums both and the contributions cancel to
-    exactly 0.0 with no diagnostic — the ``d <= 0`` tail-side filter is what
-    prevents it.
+    A beam the material RE-ROUTES to a /SPRING is a different thing entirely:
+    LS-DYNA's plane cut does include it (it is a beam there), so it has to go
+    into grsprg_ID to stay in the section at all — see
+    test_rare_materials.TestSectReroutedConnector.
     """
 
     def setUp(self):
         self.res, self.starter = _convert(_ef_deck())
 
-    def test_the_grsprg_column_names_a_real_group(self):
+    def test_a_plane_section_leaves_the_spring_out_like_LS_DYNA(self):
+        """The spring crosses the plane and is found; the column stays 0 and no
+        /GRSPRI group is written, because LS-DYNA's automatic definition does
+        not carry springs either."""
         card3 = _sect_card(self.starter, 11)[2]
-        grsprg = _col_i(card3, 51, 60)
-        self.assertNotEqual(grsprg, 0)
-        blk = _block(self.starter, f"/GRSPRI/SPRI/{grsprg}")
-        self.assertEqual([int(t) for ln in _cards(blk) for t in ln.split()],
-                         [10])
+        self.assertEqual(_col_i(card3, 51, 60), 0)
+        self.assertNotIn("/GRSPRI/SPRI/", self.starter)
 
     def test_a_dangling_grsprg_id_is_impossible(self):
         """``elegror.F:92-94`` returns 0 for a group id that does not exist and
         says NOTHING — on a section that also carries shells, a dangling
         grsprg_ID under-reports in complete silence (WARNING 1813 needs the
-        section to be empty altogether). So the group must be emitted whenever
-        the column is non-zero."""
+        section to be empty altogether). So a non-zero column must always name
+        a group that exists. Checked on BOTH shapes: this deck (column 0, no
+        group) and the re-routed-connector deck, where the column is non-zero.
+        """
         card3 = _sect_card(self.starter, 11)[2]
         grsprg = _col_i(card3, 51, 60)
-        self.assertIn(f"/GRSPRI/SPRI/{grsprg}", self.starter)
+        if grsprg:
+            self.assertIn(f"/GRSPRI/SPRI/{grsprg}", self.starter)
+        for header in _headers(self.starter, "/GRSPRI/SPRI/"):
+            gid = int(header.rsplit("/", 1)[1])
+            self.assertEqual(gid, grsprg)
 
     def test_the_other_columns_are_unmoved(self):
         """Column-exact, so a shifted spring slot is detectable: grbric(1-10),
@@ -1232,16 +1249,17 @@ class TestSectSpringArm(unittest.TestCase):
         self.assertEqual(_col_i(card3, 61, 70), 0)        # grtria (no /SH3N)
         self.assertEqual(_col_i(card3, 71, 80), 0)        # Niter
 
-    def test_the_divergence_from_secforc_is_named(self):
-        """Vol I R17 p.16-48, Figure 16-2's caption: LS-DYNA's AUTOMATIC plane
-        definition "does not check for springs and dampers in the section". So
-        including them is a deliberate SUPER-SET and the user has to be told —
-        the #125 class demands the statement, not the removal, because a belt
-        section reading zero is the worse answer."""
-        w = _warns(self.res, "deliberate SUPER-SET of LS-DYNA")
+    def test_the_omission_is_named_and_prescribes_no_deck_edit(self):
+        """The springs the plane crosses are named by id, the LS-DYNA rule is
+        quoted, and the remedy offered is LS-DYNA's OWN _SET/DSID spelling —
+        never "delete them from the deck", which would be prescribing an edit
+        to a correct model (#125)."""
+        w = _warns(self.res, "cross the section plane but are NOT in the /SECT")
         self.assertEqual(len(w), 1)
         self.assertIn("does not check for springs and dampers", w[0])
         self.assertIn("[10]", w[0])
+        self.assertIn("DSID", w[0])
+        self.assertNotIn("Delete them", w[0])
 
     def test_the_arm_keys_on_the_source_registry_not_the_union(self):
         """#128: ``state.spring_elem_ids`` is an id-only union across nine
@@ -1849,14 +1867,27 @@ class TestParameterExpressionInDecks(unittest.TestCase):
         self.assertTrue([x for x in parser.PARSER_WARNINGS
                          if "CHARACTER parameter" in x])
 
-    def test_PARAMETER_TYPE_is_read_and_ignored(self):
-        """p.36-11: a pre-processor id-offset hint with no solver effect. Its
-        third cell is a type NAME, so it must not be read as a value."""
-        p, w = self._params("*PARAMETER\n" + _row("I pid", "7") + "\n"
-                            "*PARAMETER_TYPE\n" + _row("I pid", "7", "PID")
-                            + "\n")
-        self.assertEqual(p["pid"], "7")
-        self.assertTrue([x for x in w if "pre-processor hint" in x])
+    def test_PARAMETER_TYPE_defines_the_parameter(self):
+        """p.36-11 verbatim: *"*PARAMETER_TYPE is a variation on the
+        *PARAMETER keyword command.  In addition to its basic function of
+        associating a parameter name (PRMR) with a numerical value (VAL), the
+        *PARAMETER_TYPE command also includes information (PRTYP) about how the
+        parameter is used by LS-DYNA"* — Card 1 is ``PRMR VAL PRTYP`` (p.36-12,
+        types A/I/A). So it IS a definition. Only PRTYP, the LS-PrePost id
+        offset hint, is dropped; the pair scan discards it on its own because
+        a type NAME does not start with R/I/C followed by a number."""
+        p, w = self._params("*PARAMETER_TYPE\n"
+                            + _row("I thkp", "7", "PART") + "\n")
+        self.assertEqual(p["thkp"], "7")
+        self.assertTrue([x for x in w if "PRTYP is dropped" in x])
+
+    def test_PARAMETER_TYPE_does_not_read_PRTYP_as_a_second_pair(self):
+        """The third cell is a NAME. A card whose PRTYP happens to start with a
+        type character must not mint a parameter from it."""
+        p, _w = self._params("*PARAMETER_TYPE\n"
+                             + _row("I nid", "5", "RIGID") + "\n")
+        self.assertEqual(p["nid"], "5")
+        self.assertNotIn("igid", p)
 
 
 class TestParameterFieldResolution(unittest.TestCase):

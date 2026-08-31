@@ -34,6 +34,14 @@ class Block:
     keyword: str          # e.g. "CONTROL_IMPLICIT_GENERAL"
     options: List[str]    # e.g. ["TITLE"] or []
     raw: List[str] = field(default_factory=list)  # stripped data lines
+    #: The ``*PARAMETER_LOCAL`` bindings that were in scope where this block
+    #: was READ, or None when the deck defines none. LS-DYNA parameter scoping
+    #: is a PARSE-TIME concept while k2rad resolves ``&name`` LAZILY (handlers
+    #: call ``to_float`` during dispatch, long after the file that owns a LOCAL
+    #: name has been closed), so the scope has to travel with the block.
+    #: ``dispatch`` installs it for the duration of the handler; see
+    #: :func:`_current_local_scope`.
+    scope: dict | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,16 +118,60 @@ _PARAM_DUPLICATION = [1]
 #: LS-DYNA disallows this name outright (p.36-3), case-insensitively.
 _PARAM_RESERVED_NAMES = frozenset({"time"})
 
-#: One frame per *INCLUDE level, holding the names that level declared LOCAL.
+#: One frame per *INCLUDE level: ``name -> the (value, is_int, text) this
+#: level's LOCAL definition MASKED``, or ``None`` when it masked nothing.
 #: Vol I R17 p.36-4 Remark 5: a LOCAL parameter "disappears when the input
 #: parser finishes reading the file in which it appears" and may temporarily
 #: MASK a non-LOCAL one of the same name. The frame is popped on the way out
 #: of parse_k_file and the masked value restored.
-_PARAM_LOCAL_STACK: List[set] = [set()]
+_PARAM_LOCAL_STACK: List[dict] = [{}]
 
-#: name -> the (value, is_int, text) a LOCAL definition masked, so
-#: _pop_local_scope can put it back.
-_PARAM_MASKED: dict = {}
+#: The scope snapshot handed to the Block being flushed, rebuilt only when a
+#: LOCAL frame changed. ``None`` = no LOCAL name is in scope, which is every
+#: deck that does not use *PARAMETER_LOCAL — those pay nothing.
+_LOCAL_SNAPSHOT: List = [None, True]     # [snapshot, dirty]
+
+#: The scope of the block currently being dispatched, installed by
+#: ``handlers.dispatch``. Consulted BEFORE the global table, so a ``&name``
+#: inside the file that declared it LOCAL still resolves after that file has
+#: been closed and its binding removed from _PARAMS.
+_ACTIVE_SCOPE: List = [None]
+
+
+def _current_local_scope():
+    """The LOCAL bindings visible right now, as ``name -> (val, is_int, text)``.
+
+    ``None`` when no LOCAL name is in scope. The dict is SHARED by every block
+    flushed between two changes of the local frames, so a 100k-block deck pays
+    one small dict, not 100k.
+    """
+    if _LOCAL_SNAPSHOT[1]:
+        names: set = set()
+        for frame in _PARAM_LOCAL_STACK[1:]:
+            names |= set(frame)
+        _LOCAL_SNAPSHOT[0] = ({
+            n: (_PARAMS.get(n), _PARAM_IS_INT.get(n, False), _PARAM_TEXT.get(n))
+            for n in names} if names else None)
+        _LOCAL_SNAPSHOT[1] = False
+    return _LOCAL_SNAPSHOT[0]
+
+
+def set_active_scope(scope):
+    """Install *scope* (a Block's) as the one ``&name`` resolves against.
+
+    Returns the previous value so the caller can restore it — ``dispatch``
+    does this around every handler call.
+    """
+    prev = _ACTIVE_SCOPE[0]
+    _ACTIVE_SCOPE[0] = scope
+    return prev
+
+
+def _scoped(name: str):
+    """``(value, is_int, text)`` for *name* from the active block scope, or
+    None when the active block's file declared no such LOCAL parameter."""
+    scope = _ACTIVE_SCOPE[0]
+    return scope.get(name) if scope else None
 
 
 def _param_lookup(name: str):
@@ -131,17 +183,21 @@ def _param_lookup(name: str):
     error worth naming.
     """
     key = name.lstrip("&").strip().lower()
-    if key in _PARAM_TEXT:
+    local = _scoped(key)
+    if local is not None:
+        val, is_int, text = local
+    else:
+        val, is_int, text = (_PARAMS.get(key), _PARAM_IS_INT.get(key, False),
+                             _PARAM_TEXT.get(key))
+    if text is not None:
         raise _paramexpr.ExprError(
             f"'&{key}' is a CHARACTER parameter (type C). Vol I R17 p.36-7: "
             "for type C the expression is 'not evaluated in any sense, just "
             "stored as a string', so it has no numeric value to compute with")
-    val = _PARAMS.get(key)
     if val is None:
         return None
     try:
-        return (int(val), True) if _PARAM_IS_INT.get(key) else (float(val),
-                                                                False)
+        return (int(val), True) if is_int else (float(val), False)
     except ValueError:
         try:
             return (float(val), False)
@@ -198,16 +254,18 @@ def _resolve_param(token: str):
     if not t.startswith("&"):
         return None
     name = t[1:].strip().lower()
-    if name in _PARAM_TEXT:
+    local = _scoped(name)
+    val, text = ((local[0], local[2]) if local is not None
+                 else (_PARAMS.get(name), _PARAM_TEXT.get(name)))
+    if text is not None:
         _warn_once(
             f"*PARAMETER reference '&{name}' names a CHARACTER parameter "
-            f"(type C, value '{_PARAM_TEXT[name]}') where a number is "
+            f"(type C, value '{text}') where a number is "
             "expected — field treated as blank (0). Vol I R17 p.36-3 Remark 2 "
             "gives C parameters a STRING substitution role (&NAME^ inside a "
             "larger string, e.g. a filename), which this converter does not "
             "perform.")
         return None
-    val = _PARAMS.get(name)
     if val is None:
         _warn_once(f"*PARAMETER reference '&{name}' is undefined — "
                    "field treated as blank (0)")
@@ -218,8 +276,7 @@ def _resolve_param(token: str):
     return val
 
 
-def _store_parameter(name: str, val: str, type_char: str, kw: str,
-                     local_depth: int) -> None:
+def _store_parameter(name: str, val: str, type_char: str, kw: str) -> None:
     """Apply one (name, value) definition under the manual's own rules.
 
     Redefinition follows ``*PARAMETER_DUPLICATION`` DFLAG (Vol I R17 p.36-6),
@@ -242,16 +299,25 @@ def _store_parameter(name: str, val: str, type_char: str, kw: str,
     is_c = type_char.upper() == "C"
     known = name in _PARAMS or name in _PARAM_TEXT
     is_local = "LOCAL" in kw.split("_")
+    # Is the definition this one would hide itself LOCAL? Vol I R17 p.36-6
+    # Remark 1 scopes the duplication exemption precisely: "A LOCAL variable
+    # appearing in a file, which masks a non-LOCAL parameter, won't trigger
+    # these actions; however, a LOCAL that masks another LOCAL or a non-LOCAL
+    # that masks a non-LOCAL will." So only LOCAL-over-NON-LOCAL is exempt.
+    masks_a_local = any(name in frame for frame in _PARAM_LOCAL_STACK[1:])
     if known and is_local and name not in _PARAM_LOCAL_STACK[-1]:
         # A LOCAL definition MASKS whatever is in scope rather than replacing
-        # it, and Vol I R17 p.36-6 Remark 1 exempts that case from the
-        # *PARAMETER_DUPLICATION actions entirely ("a LOCAL masking a
-        # non-LOCAL does not trigger these"). Remember the hidden value so
-        # _pop_local_scope can restore it at the end of this file.
-        _PARAM_MASKED.setdefault(
+        # it. Remember the hidden value IN THIS FRAME so _pop_local_scope can
+        # restore it at the end of this file — per-frame, because two include
+        # levels may mask the same name and the inner pop must restore the
+        # OUTER one, not the outermost. Recorded even when the duplication
+        # actions do apply, so a DFLAG that ACCEPTS the redefinition still
+        # unwinds correctly.
+        _PARAM_LOCAL_STACK[-1].setdefault(
             name, (_PARAMS.get(name), _PARAM_IS_INT.get(name, False),
                    _PARAM_TEXT.get(name)))
-        known = False
+        if not masks_a_local:
+            known = False
     if known:
         dflag = _PARAM_DUPLICATION[0]
         mutable = name in _PARAM_MUTABLE
@@ -288,11 +354,14 @@ def _store_parameter(name: str, val: str, type_char: str, kw: str,
         _PARAMS[name] = val.strip()
         _PARAM_IS_INT[name] = type_char.upper() == "I"
         _PARAM_TEXT.pop(name, None)
-    if "LOCAL" in kw.split("_"):
-        _PARAM_LOCAL_STACK[-1].add(name)
+    if is_local:
+        # None = "this LOCAL masked nothing", so the pop removes it outright.
+        _PARAM_LOCAL_STACK[-1].setdefault(name, None)
+    if is_local or name in _PARAM_LOCAL_STACK[-1]:
+        _LOCAL_SNAPSHOT[1] = True
 
 
-def _collect_parameters(kw: str, raw: List[str], local_depth: int = 0) -> None:
+def _collect_parameters(kw: str, raw: List[str]) -> None:
     """Store the name→value pairs of a *PARAMETER block in _PARAMS.
 
     Card format (Vol I R17 p.36-2): up to 4 (PRMR, VAL) pairs of 10-char
@@ -307,23 +376,30 @@ def _collect_parameters(kw: str, raw: List[str], local_depth: int = 0) -> None:
     :mod:`k2rad.paramexpr` for the grammar and for the three rules that make
     an ``eval()`` wrong.
 
-    ``*PARAMETER_TYPE`` (p.36-11) is a LS-PrePost id-offset hint with no
-    solver effect; its third cell is a type NAME, not a value, so it must not
-    be read as a definition.
+    ``*PARAMETER_TYPE`` (p.36-11) IS a definition: *"*PARAMETER_TYPE is a
+    variation on the *PARAMETER keyword command.  In addition to its basic
+    function of associating a parameter name (PRMR) with a numerical value
+    (VAL), the *PARAMETER_TYPE command also includes information (PRTYP) about
+    how the parameter is used by LS-DYNA"* — Card 1 is ``PRMR VAL PRTYP`` with
+    PRMR an ``I``-typed name (p.36-12). Only PRTYP is the LS-PrePost id-offset
+    hint, and it is a type NAME, never a value; the ordinary pair scan below
+    drops it on its own because "PART"/"SET_NODE"/... does not start with R, I
+    or C followed by a number.
     """
     if "TYPE" in kw.split("_"):
         _warn_once(
-            "*PARAMETER_TYPE is a pre-processor hint (Vol I R17 p.36-11): it "
-            "tells LS-PrePost which id offset to apply to a parameter when "
-            "decks are merged, and has no solver effect. It is read and "
-            "ignored; the parameter's VALUE must come from a *PARAMETER card.")
-        return
+            "*PARAMETER_TYPE: the name and VALUE are read exactly like a "
+            "*PARAMETER definition (Vol I R17 p.36-11: 'a variation on the "
+            "*PARAMETER keyword command ... its basic function of associating "
+            "a parameter name (PRMR) with a numerical value (VAL)'). Only the "
+            "third cell PRTYP is dropped: it tells LS-PrePost which id offset "
+            "to apply when decks are merged, and has no solver effect.")
 
     def _is_number(tok: str) -> bool:
         return to_float(tok, float("nan")) == to_float(tok, float("nan"))
 
     if "EXPRESSION" in kw:
-        _collect_parameter_expressions(kw, raw, local_depth)
+        _collect_parameter_expressions(kw, raw)
         return
 
     for line in raw:
@@ -360,11 +436,10 @@ def _collect_parameters(kw: str, raw: List[str], local_depth: int = 0) -> None:
                 else:
                     i += 1
         for name, val, tch in pairs:
-            _store_parameter(name, val, tch, kw, local_depth)
+            _store_parameter(name, val, tch, kw)
 
 
-def _collect_parameter_expressions(kw: str, raw: List[str],
-                                   local_depth: int) -> None:
+def _collect_parameter_expressions(kw: str, raw: List[str]) -> None:
     """``*PARAMETER_EXPRESSION``: ``PRMR1`` in cols 1-10, the expression after.
 
     Continuation (p.36-7): *"The expression can be continued on multiple lines
@@ -372,6 +447,25 @@ def _collect_parameter_expressions(kw: str, raw: List[str],
     blank."* So a record is claimed by RAW CONTIGUITY from its PRMR row, the
     same rule the offset walkers use (#119) — a "next non-blank" walk would
     misread a continuation as a new parameter.
+
+    **The comma form splits at the COMMA, not at column 10.** p.36-8 Remark
+    1's own worked example is comma-delimited::
+
+        *parameter
+        rterm, 0.2, istates,  80
+        *parameter_expression
+        rplot,term/(states-30)
+
+    and states it is equivalent to ``<term/(states-30)>``, i.e. 0.004.
+    Slicing ``line[10:]`` unconditionally cut that expression to
+    ``/(states-30)`` — the leading ``term`` eaten by the 10-column field —
+    and lost a whole record whenever the value fits inside ten columns
+    (``rxmin, -96`` is exactly ten characters, so the expression came out
+    EMPTY). Real carrier: dynaexamples
+    ``IGA_tensile_test_input/tensile_test_iga.k`` writes four such base
+    parameters and eight box parameters referencing them. The comma rule is
+    applied only when the comma falls inside the PRMR field (index <= 10);
+    beyond that the comma belongs to the expression itself (``max(1,2)``).
     """
     records: List[tuple] = []
     for line in raw:
@@ -379,9 +473,11 @@ def _collect_parameter_expressions(kw: str, raw: List[str],
             continue
         head = line[:10]
         if head.strip():
-            toks = parse_free(head) if "," in line else [head.strip()]
-            prmr = (toks[0] if toks else head.strip())
-            records.append([prmr, line[10:]])
+            comma = line.find(",")
+            if 0 <= comma <= 10:
+                records.append([line[:comma], line[comma + 1:]])
+            else:
+                records.append([head, line[10:]])
         elif records:
             records[-1][1] += " " + line[10:]
         else:
@@ -401,7 +497,7 @@ def _collect_parameter_expressions(kw: str, raw: List[str],
         if tch.upper() == "C":
             # p.36-7: "For type C parameters, the expression is not evaluated
             # in any sense, just stored as a string."
-            _store_parameter(name, expr.strip(), tch, kw, local_depth)
+            _store_parameter(name, expr.strip(), tch, kw)
             continue
         try:
             value = _paramexpr.evaluate(expr, _param_lookup)
@@ -416,8 +512,7 @@ def _collect_parameter_expressions(kw: str, raw: List[str],
             # which is what makes the type declaration meaningful downstream
             # (2/5 vs 2.0/5, Remark 2a).
             value = (int(value[0]), True)
-        _store_parameter(name, _paramexpr.format_value(value), tch, kw,
-                         local_depth)
+        _store_parameter(name, _paramexpr.format_value(value), tch, kw)
 
 
 def _pop_local_scope() -> None:
@@ -428,21 +523,28 @@ def _pop_local_scope() -> None:
     after ``file1`` returns, ``VAL1 = 10.0, VAL2 = 2.0, VAL3 = 3.0`` and
     ``VAL4`` no longer exists. So a LOCAL definition is a MASK, not an
     overwrite: what it hid comes back.
+
+    **This affects the GLOBAL table only.** Every Block read while the frame
+    was live carries the frame's bindings in ``Block.scope``, so the cards of
+    the file that declared the LOCAL still resolve it during dispatch.
+    Popping without that snapshot is what turned a runnable deck into
+    ``Thick 0`` and a starter ERROR 495: k2rad resolves ``&name`` lazily,
+    long after the file has been closed.
     """
     if len(_PARAM_LOCAL_STACK) <= 1:
         return
     frame = _PARAM_LOCAL_STACK.pop()
-    for name in frame:
+    _LOCAL_SNAPSHOT[1] = True
+    for name, saved in frame.items():
         _PARAMS.pop(name, None)
         _PARAM_IS_INT.pop(name, None)
         _PARAM_TEXT.pop(name, None)
         _PARAM_MUTABLE.discard(name)
-        saved = _PARAM_MASKED.pop(name, None)
         if saved is not None:
             val, is_int, text = saved
             if text is not None:
                 _PARAM_TEXT[name] = text
-            else:
+            elif val is not None:
                 _PARAMS[name] = val
                 _PARAM_IS_INT[name] = is_int
 
@@ -504,14 +606,18 @@ def parse_k_file(path: str, _depth: int = 0,
         _PARAM_DUPLICATION[0] = 1
         del _PARAM_LOCAL_STACK[1:]
         _PARAM_LOCAL_STACK[0].clear()
-        _PARAM_MASKED.clear()
+        _LOCAL_SNAPSHOT[0], _LOCAL_SNAPSHOT[1] = None, True
+        _ACTIVE_SCOPE[0] = None
         PARSER_WARNINGS.clear()
         _assembly.reset()
 
     # Vol I R17 p.36-4 Remark 5: a LOCAL parameter lives only for the file it
     # is defined in, and may MASK a non-LOCAL one of the same name while it
-    # does. One stack frame per file; _flush_local_scope pops it.
-    _PARAM_LOCAL_STACK.append(set())
+    # does. One stack frame per file; _pop_local_scope pops it. Every Block
+    # flushed while the frame is live captures its bindings in Block.scope,
+    # because resolution happens later (see _current_local_scope).
+    _PARAM_LOCAL_STACK.append({})
+    _LOCAL_SNAPSHOT[1] = True
 
     base_dir = os.path.dirname(os.path.abspath(path))
     blocks: List[Block] = []
@@ -581,7 +687,7 @@ def parse_k_file(path: str, _depth: int = 0,
             if kw == "PARAMETER_DUPLICATION" or "DUPLICATION" in kw.split("_"):
                 _set_parameter_duplication(raw)
             else:
-                _collect_parameters(kw, raw, _depth)
+                _collect_parameters(kw, raw)
 
         elif kw == "INCLUDE_PATH":
             if nonblank:
@@ -596,7 +702,8 @@ def parse_k_file(path: str, _depth: int = 0,
                 include_path = os.path.join(base_dir, candidate)
 
         else:
-            blocks.append(Block(kw, opts, raw))
+            blocks.append(Block(kw, opts, raw,
+                                scope=_current_local_scope()))
 
         kw, opts, raw = None, [], []   # type: ignore[assignment]
 

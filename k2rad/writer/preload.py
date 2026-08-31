@@ -20,7 +20,8 @@ from .common import (
     _preload_sect_scale,
     _vnorm,
 )
-from .inistate import _plane_cut, _solid_sec_for_part
+from .inistate import (_plane_cut, _solid_sec_for_part,
+                       resolve_cross_section_endpoints)
 from .loads import _emit_funct
 from .mesh import _effective_solid_isolid
 
@@ -198,6 +199,10 @@ def _make_preload_sections(state: ConversionState,
     """
     if not state.ini_stress_sections:
         return []
+    # RADIUS < 0 makes XCT/XCH node ids, resolved in the writer because the
+    # node table is only complete after the whole deck is parsed. Idempotent,
+    # and _make_cross_sections calls it too — whichever builder runs first.
+    resolve_cross_section_endpoints(state)
     by_csid: Dict[int, object] = {}
     for cs in state.cross_sections:
         if cs.csid > 0:
@@ -214,6 +219,16 @@ def _make_preload_sections(state: ConversionState,
             state.warn(f"{label}: *DATABASE_CROSS_SECTION id {iss.csid} not "
                        "found — no /PRELOAD emitted (a /PRELOAD naming an "
                        "unknown section is starter ERROR 1243).")
+            continue
+        if getattr(cs, "radius_is_nodes", False):
+            # Still unresolved after the full parse: XCT/XCH name nodes this
+            # deck does not have. Reading the raw cells as COORDINATES would
+            # put the cutting plane — and therefore the preloaded bricks — at
+            # an arbitrary point. _make_cross_sections reports the id.
+            state.warn(
+                f"{label}: the cross section's RADIUS is negative, so "
+                f"XCT={cs.xct_nid}/XCH={cs.xch_nid} are NODE IDS, and they are "
+                "not nodes of this deck — no /PRELOAD emitted.")
             continue
         curve = state.curves.get(iss.lcid)
         if curve is None or not curve.pts:
