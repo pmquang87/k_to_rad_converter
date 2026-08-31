@@ -208,6 +208,33 @@ class TestEosCarrierIdCollision(unittest.TestCase):
         w = _warns(res, "*EOS_POLYNOMIAL 500")
         self.assertEqual(len(w), 1)
         self.assertIn("ERROR 683", w[0])
+        # No *PART names 500 as its MID, so the advice is "add a *MAT_NULL".
+        self.assertIn("Add a same-id *MAT_NULL", w[0])
+        self.assertNotIn("name 500 as their MID", w[0])
+
+    def test_a_PART_on_the_eos_id_gets_the_actionable_message_instead(self):
+        """The corpus shape the drop changes: three SPH decks
+        (``sph/bar-iv/taylor1.k``, ``bar-v/taylor2.k``, ``sieve/hvi.k``) pair
+        ``*MAT_ELASTIC_PLASTIC_HYDRO`` with an ``*EOS_GRUNEISEN`` of the same
+        id, and that material is a SKIPPED keyword. The carrier used to fill
+        the /PART's material hole with a zero-density ``/MAT/HYD_VISC`` — a
+        viscous fluid standing in for an elastic-plastic hydrodynamic solid,
+        which the starter then refused for its DENSITY (ERROR 683) rather than
+        for being the wrong law. Without it the /PART dangles and
+        ``_warn_dangling_part_materials`` names it, which is the true
+        diagnosis. The message has to say which of the two cases this is."""
+        # *PART 1 is on mid 7; give the EOS that same id with no *MAT card of
+        # its own by dropping the material block entirely.
+        res, starter = _convert(_a_deck("", eosid=7, mid=7))
+        self.assertEqual(_headers(starter, "/MAT/"), [])
+        w = _warns(res, "*EOS_POLYNOMIAL 7")
+        self.assertEqual(len(w), 1)
+        self.assertIn("*PART(s) [1] name 7 as their MID", w[0])
+        self.assertIn("skipped-keyword list", w[0])
+        self.assertIn("VISCOUS FLUID", w[0])
+        self.assertNotIn("Add a same-id *MAT_NULL", w[0])
+        # ... and the pre-existing dangling-material scan still names it.
+        self.assertTrue(_warns(res, "reference a material id that NO /MAT"))
 
     def test_a_bare_eos_colliding_with_MAT_ELASTIC_names_the_owner(self):
         """The generalised guard: ``*MAT_ELASTIC`` is in NONE of the three

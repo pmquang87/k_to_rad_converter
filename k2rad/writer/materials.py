@@ -704,6 +704,21 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                     "not name this EOS has no EOS at all. Renumber the "
                     "*EOS_* if it was meant for a different material.")
                 continue
+            # A *PART whose MID is this id means the deck DOES have a material
+            # here and this converter did not convert it — the actionable
+            # fact, and the one the reader needs instead of "add a *MAT_NULL".
+            # MEASURED on three corpus decks (sph/bar-iv/taylor1.k, bar-v/
+            # taylor2.k, sieve/hvi.k): each pairs *MAT_ELASTIC_PLASTIC_HYDRO
+            # with an *EOS_GRUNEISEN of the same id, that material is a
+            # SKIPPED keyword, and the carrier used to fill the hole with a
+            # zero-density /MAT/HYD_VISC — a viscous fluid standing in for an
+            # elastic-plastic hydrodynamic solid, which the starter refused
+            # for its density (ERROR 683) rather than for being the wrong
+            # law. Without the carrier the /PART dangles and
+            # _warn_dangling_part_materials names it, which is the true
+            # diagnosis: the deck's own material never arrived.
+            owners = sorted({p.pid for p in state.parts.values()
+                             if p.mid == eosid})
             state.warn(
                 f"*EOS_{eos.kind} {eosid}: no *MAT_NULL of that id and no "
                 "*PART binds it through an EOSID field, so there is no "
@@ -713,9 +728,19 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                 "carries a density (LS-DYNA takes it from the *PART's *MAT), "
                 "and a /MAT/LAW6 with RHO_I 0 is starter ERROR 683 (DENSITY "
                 "IS LESS THAN OR EQUAL TO ZERO), which refuses the whole "
-                "deck. Nothing physical is lost: LS-DYNA does not use this "
-                "EOS either. Add a same-id *MAT_NULL (with RO), or name the "
-                "EOS from a *PART's EOSID field, to get the fluid.")
+                "deck. "
+                + (f"NOTE *PART(s) {owners} name {eosid} as their MID, so "
+                   "this deck DOES state a material here and it is this "
+                   "converter that did not produce one — check the skipped-"
+                   "keyword list for the *MAT_* card of that id. Until it "
+                   "converts, those parts have no /MAT and the starter stops "
+                   "with ERROR 179; a /MAT/LAW6 carrier would only have "
+                   "substituted a VISCOUS FLUID for whatever law the deck "
+                   "actually states."
+                   if owners else
+                   "Nothing physical is lost: LS-DYNA does not use this EOS "
+                   "either. Add a same-id *MAT_NULL (with RO), or name the "
+                   "EOS from a *PART's EOSID field, to get the fluid."))
             continue
         _derive_ideal_gas_p0(state, eos, state.mat_null[null_mids[0]].rho)
         for mid in null_mids:
