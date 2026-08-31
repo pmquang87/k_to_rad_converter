@@ -884,6 +884,31 @@ Cases that convert today but drop or approximate detail worth recovering:
   references the initial state through density / `/INIBRI`, not a `V0` scalar).
 - **`*MAT_ADD_EROSION` non-strain criteria** — only `MXEPS`/`EFFEPS` map; other
   criteria and `IDAM≥1` are reported but not converted.
+- **`*NODE` `TC`/`RC` → `/BCS`** *(remaining, and the largest of these by
+  incidence)* — the card's own constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy,
+  5 yz, 6 zx, 7 xyz, global system) are read and NAMED but not converted, so
+  those degrees of freedom are free in the emitted model. **721 of 2346 corpus
+  decks write a non-zero cell.** The mapping itself is trivial — the codes are
+  the same triples `*BOUNDARY_SPC_NODE` states one flag at a time, and the
+  `/BCS` writer already exists — but it would add constraints to a third of the
+  corpus, so it needs its own solver campaign: an EXTRA constraint silently
+  stiffens a model, or fights an `/IMPVEL` on the same dof, and is the harder
+  of the two failures to notice. Do it as one item with a with/without twin on
+  a deck that carries both TC/RC and a prescribed motion on the same node.
+- **A `_SET` cross section whose nodes are COLINEAR gets an invented normal**
+  *(remaining)* — `_sect_synth_frame` falls back to a vector perpendicular to
+  the node line, so the FN/FT SPLIT is arbitrary (the vector sum and the global
+  `MX/MY/MZ` channels are right, and the warning says exactly this). A
+  determinate normal is available for the ordinary case, a line of nodes cut
+  across a shell plate: `n = t × m`, with `t` the node-line direction and `m`
+  the plane normal of the section's OWN elements (the `SSID`/`HSID`/`BSID` sets
+  the card already supplies). Checked by hand on
+  `dynaexamples/intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k`, whose
+  section nodes 106..110 are colinear along +Y at x = 20 while the section
+  shells lie in z = 0: `t × m = (0,1,0) × (0,0,1) = (1,0,0)`, the true cut
+  normal. 120 of the corpus's 191 cross-section cards use the `_SET` spelling,
+  so this changes many sections' FN/FT split and belongs in a round that can
+  re-validate them.
 
 ## Testing / CI / DX
 

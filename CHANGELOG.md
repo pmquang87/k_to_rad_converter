@@ -11,6 +11,94 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **SIDE-DEFECT review round — two blockers, three majors and six minors found
+  by reviewing the batch below.** Every one was self-consistent in the code and
+  wrong against a measurement or the manual's own sentence, and none of them is
+  reachable by the corpus sweep, so the batch's clean sweep was not evidence
+  they were safe.
+
+  - **`_plane_cut`'s degenerate-normal arm returned a 4-tuple** while every
+    other path and BOTH call sites unpack 5 since the spring arm was added. A
+    `*DATABASE_CROSS_SECTION_PLANE` whose `XCT->XCH` is a zero vector (all six
+    coordinate cells blank — legal, every field defaults to 0.0) killed the
+    WHOLE conversion with `ValueError: not enough values to unpack (expected
+    5, got 4)` and wrote no deck at all. Master converts that deck and warns.
+  - **`*PARAMETER_LOCAL` was defined and then DISCARDED before anything could
+    use it.** LS-DYNA scoping is a PARSE-TIME concept; k2rad resolves `&name`
+    LAZILY, in the handlers, so popping the frame at the end of each file
+    removed the binding first. MEASURED: `/PROP/SHELL Thick 0` with
+    *"'&lthk' is undefined"* on a valid deck (starter `ERROR ID : 495`, ERROR
+    TERMINATION) where master emitted 2.5, and the masking case silently
+    emitting the OUTER value (1.0) where the manual's own worked example says
+    9.0. The fix is not "stop popping": each Block now carries the LOCAL
+    bindings live where it was READ and `dispatch` installs them for the
+    handler, so BOTH halves of p.36-4 Remark 5 hold — `VAL2 = 20.0` inside the
+    include, `2.0` after it, `VAL4` gone.
+  - **`*PARAMETER_TYPE` was dropped, and the warning stated the opposite of the
+    manual.** p.36-11: *"*PARAMETER_TYPE is a variation on the *PARAMETER
+    keyword command.  In addition to its basic function of associating a
+    parameter name (PRMR) with a numerical value (VAL) ..."* — Card 1 is
+    `PRMR VAL PRTYP`. MEASURED: master resolved `&thkp` to 7, the branch fell
+    back to the card default 2.
+  - **The `/SECT` `TSID` arm resolved a `*SET_TSHELL` id in the `*SET_SHELL`
+    registry** — the #125/#128 two-namespace trap this repo documents in
+    `writer/rarecards.py:110-118`. MEASURED: a `*SET_SHELL_LIST 5` holding
+    shell 101 put `101` into `/GRBRIC/BRIC/90003`, where the starter resolves
+    it against the brick table.
+  - **`RADIUS < 0`** (XCT/XCH are node ids) **was resolved in the HANDLER**,
+    but handlers run in deck-block order and `handle_node` fills `state.nodes`
+    in that same pass. MEASURED on twin decks differing only in card order,
+    both nodes present in both: the card-before-`*NODE` deck printed *"they
+    are not nodes of this deck"* and emitted no `/SECT`. Resolution moved to
+    the writer.
+  - **The comma-delimited `*PARAMETER_EXPRESSION`** — the form p.36-8 Remark 1
+    uses in its OWN worked example — **was split at column 10**, so
+    `rplot,term/(states-30)` became `/(states-30)` and `rxmin, -96` (exactly
+    ten characters) came out EMPTY. Real carrier: dynaexamples
+    `IGA_tensile_test_input/tensile_test_iga.k`, which writes four such base
+    parameters plus eight box parameters that reference them.
+  - **The `_PLANE` spring arm reported a force `secforc` does not.** p.16-48,
+    Figure 16-2's caption: *"The automatic deﬁnition does not check for springs
+    and dampers in the section."* The springs are now NAMED and left out, and
+    the message points at LS-DYNA's own `_SET`/`DSID` slot instead of telling
+    the user to delete elements from a correct deck. Re-routed BEAMS still go
+    to `grsprg_ID` — LS-DYNA's plane cut does include those. Measured on twin
+    engine runs: `2.296195E7 N/s` vs the analytic shell-only `2.307692E7`
+    (−0.50 %), and splicing the spring's group back in adds `1.999977E8`
+    against the spring's own `k·v = 2.0E8` (−0.0012 %).
+  - **`Iframe` 0 → 10.** p.16-50 gives the card's output-frame cell `ID` the
+    default *"global"*. `section_skew.F:103-139` keeps the node-derived normal
+    at `Iframe ≥ 10` and `:146-150`/`:151-164` compute the same origin, so
+    only the moment axes move — measured on an `Iframe 0` twin, 44 of 48
+    section channels are IDENTICAL and the four that move are one section's
+    moment going from the local `M1` to the global `M3` (5000 in both).
+  - **The section `/GRNOD` came from the bare allocator.** Probe aimed at the
+    id the allocator actually takes (#131's rule): master emits
+    `/GRNOD/NODE/90002` TWICE (starter `ERROR 79 IN NODE GROUP DEFINITION`);
+    `next_grnod_id()` dodges to 90003.
+  - A `RecursionError` escaped both `except ExprError` sites (a nesting cap
+    makes it a named refusal); a UTF-8 em-dash reached the emitted `.rad`, the
+    first non-ASCII byte k2rad has ever written; p.36-6 Remark 1 scopes the
+    duplication exemption to LOCAL-over-NON-LOCAL (*"a LOCAL that masks another
+    LOCAL ... will"* trigger the actions); and `_sect_synth_frame`'s docstring
+    named two of its three return values — the missing one selects `Iframe`.
+
+- **`*NODE`'s own `TC`/`RC` constraint cells were dropped in complete
+  silence** (pre-existing, found while reviewing). Vol I R17 makes `*NODE`
+  Card 1 `NID X Y Z TC RC`, and TC/RC are constraint codes (0 none, 1 x, 2 y,
+  3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system — exactly the triples
+  `*BOUNDARY_SPC_NODE` states one flag at a time. `handle_node` reads only
+  NID/X/Y/Z. MEASURED on a spring-mass coupon whose anchor carried
+  `tc=7/rc=7`: no `/BCS` was emitted, the anchor was free, and the whole
+  oscillator drifted at the centre-of-mass velocity (node-2 DX reached
+  6.68 mm against an intended 0.317 mm amplitude) while the engine printed
+  NORMAL TERMINATION — the #122 class, legal and accepted and wrong.
+  **Not converted**: 721 of 2346 corpus decks write a non-zero cell, so
+  emitting `/BCS` for them would add constraints to a third of the corpus in a
+  round that cannot validate them, and an EXTRA constraint is the harder of
+  the two failures to notice. The loss is named once per deck, with the count,
+  a few ids and the `*BOUNDARY_SPC_NODE` remedy; no deck's bytes move.
+
 - **SIDE-DEFECT batch — ten defects at the edges of cards this converter
   already handles.** Each is reachable, none is the main line of any single
   keyword, and four of them changed a NUMBER on a real corpus deck. Measured

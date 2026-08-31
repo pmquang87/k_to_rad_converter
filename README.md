@@ -111,7 +111,16 @@ export the image.
 ## Supported LS-DYNA keywords
 
 ### Mesh & geometry
-`*NODE`, `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_TSHELL` (+ `_BETA` /
+`*NODE` (`NID X Y Z` — its **`TC`/`RC` constraint cells are NOT converted**:
+they are constraint codes in the global system, exactly what
+`*BOUNDARY_SPC_NODE` states one flag at a time, and a deck that puts its
+constraints there converts into a model with those dofs FREE. Measured on a
+spring-mass coupon whose anchor carried `tc=7/rc=7`: no `/BCS`, the anchor
+free, the whole oscillator drifting at the centre-of-mass velocity while the
+engine printed NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero
+cell, so this is NAMED per deck — with the count, a few ids and the
+`*BOUNDARY_SPC_NODE` remedy — rather than silently converted),
+`*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_TSHELL` (+ `_BETA` /
 `_COMPOSITE` — see **Thick shells**), `*ELEMENT_SPH` (+ `_VOLUME`; the `MASS`
 column's sign and the suffix both select mass-vs-volume, and the `NEND` range
 generator is expanded — see **SPH particles**), `*ELEMENT_BEAM`, `*ELEMENT_MASS`,
@@ -2107,12 +2116,23 @@ rounds half away from zero. All 31 named functions plus `pi`/`dtor`/`rtod`;
 anything outside the grammar is refused BY NAME rather than guessed.
 `*PARAMETER_DUPLICATION` DFLAG 1-5 is read, and its **default 1 means the
 FIRST definition wins**; `MUTABLE` on the first definition allows
-redefinition; `LOCAL` parameters live only for the file that defines them and
-MASK an outer one, which comes back when that file ends;
-`*PARAMETER_TYPE` is read and ignored (an LS-PrePost id-offset hint, no solver
-effect). A `C`-typed parameter used where a number is wanted is a named
-refusal, not a silent 0. LS-DYNA **comma-delimited free format** is accepted
-on every card.
+redefinition. `LOCAL` parameters live for the file that defines them **and the
+cards of that file still resolve them**, which needs the scope to travel with
+the block: LS-DYNA scoping is a parse-time concept while k2rad resolves
+`&name` in the handlers, so each block carries the LOCAL bindings that were
+live where it was read. Outside that file the masked outer value comes back,
+and a LOCAL that masked nothing is gone — the manual's own worked example
+(p.36-5, `VAL2 = 20.0` inside the include, `2.0` after it, `VAL4` no longer
+existing) is a test.
+`*PARAMETER_TYPE` **defines its parameter** — p.36-11 calls it "a variation on
+the *PARAMETER keyword command" whose basic function is "associating a
+parameter name (PRMR) with a numerical value (VAL)"; only its third cell
+PRTYP, an LS-PrePost id-offset hint with no solver effect, is dropped. A
+`C`-typed parameter used where a number is wanted is a named refusal, not a
+silent 0. LS-DYNA **comma-delimited free format** is accepted on every card,
+`*PARAMETER_EXPRESSION` included — its PRMR/expression split follows the first
+comma inside the name field rather than column 10, which is what the manual's
+own `rplot,term/(states-30)` example needs.
 
 ### Assembly / includes
 `*INCLUDE` and `*INCLUDE_PATH[_RELATIVE]` — included files are parsed and
@@ -4148,24 +4168,47 @@ approximated as the infinite plane with a warning). The cut shell set is split
 by topology: 4-node shells into a `/GRSHEL/SHEL` on `grshel_ID`, 3-node shells
 into a `/GRSH3N/SH3N` on `grtria_ID` — a `/SH3N` ID is not resolved by a 4-node
 group, so without the split a cut triangle contributes no force to the section.
-The cut also finds **springs and 1-D belts**, which go into a `/GRSPRI/SPRI`
-on `grsprg_ID` (`sect.cfg:37`, read at `hm_read_sect.F:301` and resolved with
-`ELEGROR(..., 'SPRI')` at `:548`); on the `_SET` spelling `DSID` and `TSID`
-are converted the same way, into `grsprg_ID` and `grbric_ID`. Note the PLANE
-spelling is then a deliberate SUPER-SET of LS-DYNA, whose Figure 16-2 caption
-says the automatic definition "does not check for springs and dampers in the
-section" — the warning says so with the element ids. **The `/SECT` output
-frame is built FROM THE CARD**, as three synthesized element-free nodes:
-`N1 = (XCT,YCT,ZCT)`, the first axis from card 2's edge vector `L`
-(`XHEV/YHEV/ZHEV`) projected into the plane, the third from `n̂ × e1`, so
-`e6 = (N2-N1) × (N3-N1)` is the card's own normal exactly and the `Iframe = 0`
+The cut also finds **springs and 1-D belts** — and, on the `_PLANE` spelling,
+REPORTS them instead of putting them in the section, because LS-DYNA does not
+put them in this one either: Figure 16-2's caption (p.16-48) says the automatic
+definition "does not check for springs and dampers in the section", so both
+codes carry the same elements here and the converted section force matches
+`secforc`. Measured on twin runs of one deck (shell + spring both crossing
+x = 25, every dof fixed or driven): the emitted deck gives
+`d(FNX)/dt = 2.296195E7 N/s` against the analytic shell-only
+`E/(1-ν²)·A·v/L = 2.307692E7` (−0.50 %), and the same deck with the spring's
+`/GRSPRI` group spliced back in gives `2.229596E8` — the difference being
+`1.999977E8` against the spring's own `k·v = 2.0E8` (−0.0012 %). The `_SET`
+spelling's `DSID` cell is LS-DYNA's own first-class way to ask for those
+springs, and that path DOES fill `grsprg_ID` (`sect.cfg:37`, read at
+`hm_read_sect.F:301` and resolved with `ELEGROR(..., 'SPRI')` at `:548`), as
+does a beam a material re-routes to a `/SPRING`. `TSID` is resolved in the
+`*SET_SOLID` registry only — `*SET_TSHELL`, `*SET_SOLID` and `*SET_SHELL` are
+three separate LS-DYNA SID namespaces, and a `*SET_SHELL` of that number would
+drop ordinary shell ids into the section's brick group.
+**The `/SECT` output frame is built FROM THE CARD**, as three synthesized
+element-free nodes: `N1 = (XCT,YCT,ZCT)`, the first axis from card 2's edge
+vector `L` (`XHEV/YHEV/ZHEV`) projected into the plane, the third from
+`n̂ × e1`, so `e6 = (N2-N1) × (N3-N1)` is the card's own normal exactly and the
 origin lands on the plane origin. That frame is not decoration:
 `section_c.F:385-389` SPLITS every nodal force with `e6` into the FN and FT
 channels and takes the moments about the origin. The old frame picked the
 three best-CONDITIONED mesh nodes and was measured 26.57° off on a +X plane,
 giving 89.6 % of the true normal force, 1.34× the tangential one and a wrong
-global moment, all at 0 starter diagnostics. `RADIUS < 0` (which makes `XCT`
-and `XCH` NODE IDS, p.16-49) and `ITYPE` are read now too.
+global moment, all at 0 starter diagnostics. Measured on a fully constrained
+strip carrying `σxx = 200` over a 10 × 1 mm cut: `|FN| = 2000.0169 N` against
+the analytic `2000.0000` (+0.0008 %), `|FT| = 0`, `|M| = 0`, origin exactly
+`(17, 5, 0)` = the card point. `Iframe` is **10**, not 0: p.16-50 gives the
+card's output-frame cell `ID` the default *"global"*, so LS-DYNA reports the
+resultants on the global axes when the card names no frame — which is every
+section k2rad emits. `section_skew.F:103-139` keeps the node-derived normal at
+`Iframe ≥ 10` and `:146-150`/`:151-164` compute the same origin, so the choice
+moves only the moment axes; measured on an `Iframe 0` twin of the same deck,
+44 of 48 section channels are IDENTICAL and the four that move are the oblique
+section's moment, which goes from the local `M1` to the global `M3` (5000 in
+both, `FN`/`FT`/origin unchanged). `RADIUS < 0` (which makes `XCT` and `XCH`
+NODE IDS, p.16-50) and `ITYPE` are read now too — the node lookup happens in
+the WRITER, so a card written before `*NODE` resolves like one written after.
 `*DATABASE_SECFORC` → `/TH/SECTIO` on every section. **The `FNX/Y/Z`,
 `FTX/Y/Z` and `M1/M2/M3` channels are time-accumulated impulses and angular
 impulses, not the instantaneous section resultants secforc reports** —
