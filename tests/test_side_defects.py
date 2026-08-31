@@ -1206,5 +1206,175 @@ class TestSectSetTsidDsid(unittest.TestCase):
         self.assertEqual(_warns(res, "are not converted"), [])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (G) /DYNAIN under implicit
+# ─────────────────────────────────────────────────────────────────────────────
+
+_G_IMPL = "\n".join([
+    "*CONTROL_IMPLICIT_GENERAL", _row(1, "0.1"),
+    "*CONTROL_IMPLICIT_SOLUTION", _row(1, 11, "0.01"),
+    "*CONTROL_IMPLICIT_AUTO", _row(1, 0, "0.05", "1.0E-7", "0.1")])
+
+
+def _g_deck(elform: int = 12, implicit: bool = True) -> str:
+    nodes, ids, nid = [], {}, 0
+    for j, y in enumerate((0.0, 10.0, 20.0)):
+        for i, x in enumerate((0.0, 10.0, 20.0)):
+            nid += 1
+            ids[(i, j)] = nid
+            nodes.append(_node16(nid, x, y, 0.0))
+    els, eid = [], 10
+    for j in range(2):
+        for i in range(2):
+            eid += 1
+            els.append(_i8(eid, 1, ids[(i, j)], ids[(i + 1, j)],
+                           ids[(i + 1, j + 1)], ids[(i, j + 1)]))
+    return "\n".join(
+        ["*KEYWORD", "*NODE"] + nodes + ["*ELEMENT_SHELL"] + els + [
+            "*SECTION_SHELL", _row(1, elform, "", 5),
+            _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+            _row(1, "7.85E-9", "2.1E5", "0.3", "200.0", "400.0"),
+            "*PART", "plate", _row(1, 1, 1),
+            "*SET_PART_LIST", _row(10), _row(1),
+            "*INTERFACE_SPRINGBACK_LSDYNA", _row(10),
+            "*CONTROL_TERMINATION", _row("1.0" if implicit else "1.0E-3"),
+        ] + ([_G_IMPL] if implicit else []) + ["*END", ""])
+
+
+class TestDynainUnderImplicit(unittest.TestCase):
+    """(G) ``/DYNAIN`` under implicit was UNMEASURED — #129 shipped it
+    validated explicit-only.
+
+    MEASURED on a converging implicit probe (3x3 plate, ``*CONTROL_IMPLICIT_
+    GENERAL/SOLUTION/AUTO``, imposed 0.2 mm, ENDTIM 1.0): the engine reports
+    ``QUASI-STATIC NON-LINEAR``, ``TOTAL NONLINEAR ITERATIONS: 97``, NORMAL
+    TERMINATION in 20 cycles, and writes THREE ``.dynain`` files of 22 225
+    bytes each, all four blocks present (``*NODE``,
+    ``*ELEMENT_SHELL_THICKNESS``, ``*INITIAL_STRESS_SHELL``,
+    ``*INITIAL_STRAIN_SHELL``), header ``11 4 5 ... 1`` = full
+    per-integration-point records.
+
+    Not a stub and not frozen (the #122 checks): distinct md5 per file, and the
+    driven edge reads 20.1960 / 20.1980 / **20.2000** — the last being the full
+    imposed displacement to the digit, i.e. the terminal state captured
+    EXACTLY. ``imp_dt.F:53-56`` clamps the last quasi-static step onto TSTOP,
+    so implicit is BETTER here than explicit, whose last cycle lands below it.
+
+    Source agrees: ``resol.F`` has ONE time loop, ``:8233`` is the only
+    ``SORTIE_MAIN`` call site and is not gated on ``IMPL_S`` (``:8225`` even
+    prepares the implicit coordinate array for it), and ``sortie_main.F:945``
+    is the only ``GENDYNAIN`` call site.
+
+    **VERDICT: works — document it, add NO guard.** A warning saying /DYNAIN is
+    not written under /IMPL, or that the file would be empty, would be false
+    and would prescribe a change to a correct deck (#125).
+    """
+
+    def test_the_dynain_block_is_emitted_unchanged_under_implicit(self):
+        _res, _s, engine = _convert_both(_g_deck(implicit=True))
+        self.assertIn("/DYNAIN/DT", engine)
+        self.assertIn("/DYNAIN/SHELL/STRES/FULL", engine)
+        self.assertIn("/DYNAIN/SHELL/STRAIN/FULL", engine)
+        self.assertIn("/IMPL/", engine)
+
+    def test_explicit_and_implicit_emit_the_SAME_dynain_cards(self):
+        """No implicit branch anywhere in _make_engine_dynain — the card set
+        is identical, which is the property the measurement licenses."""
+        _r1, _s1, exp = _convert_both(_g_deck(implicit=False))
+        _r2, _s2, imp = _convert_both(_g_deck(implicit=True))
+        self.assertEqual([ln for ln in exp.splitlines()
+                          if ln.startswith("/DYNAIN")],
+                         [ln for ln in imp.splitlines()
+                          if ln.startswith("/DYNAIN")])
+
+    def test_no_warning_claims_implicit_is_unsupported(self):
+        res, _s, _e = _convert_both(_g_deck(implicit=True))
+        for w in res.warnings:
+            for claim in ("not written under", "implicit is not supported",
+                          "run the springback explicitly"):
+                self.assertNotIn(claim, w)
+
+    def test_the_terminal_state_caveat_is_scoped_to_explicit(self):
+        """The ILASTDYNAIN dead branch is real but EXPLICIT-only: under
+        quasi-static implicit the run lands on TSTOP exactly (measured
+        20.2000 vs the imposed 0.2). Stating it unqualified on an implicit
+        deck would be a false caveat."""
+        imp, _s, _e = _convert_both(_g_deck(implicit=True))
+        exp, _s2, _e2 = _convert_both(_g_deck(implicit=False))
+        wi = _warns(imp, "/DYNAIN/DT")[0]
+        we = _warns(exp, "/DYNAIN/DT")[0]
+        self.assertIn("IS the terminal state, exactly", wi)
+        self.assertIn("imp_dt.F:53-56", wi)
+        self.assertNotIn("ILASTDYNAIN", wi)
+        # ... and the explicit arm keeps the caveat, now labelled.
+        self.assertIn("ILASTDYNAIN", we)
+        self.assertIn("EXPLICIT-ONLY", we)
+
+
+class TestDynainStrainCardSpelling(unittest.TestCase):
+    """(G) side defect, found while measuring the implicit case and NOT what
+    the batch's research predicted.
+
+    ``fredynain.F:140`` accepts the card on ``KEY3(1:5) == 'STRAI'``, so
+    ``/DYNAIN/SHELL/STRAI/FULL`` and ``/DYNAIN/SHELL/STRAIN/FULL`` both parse.
+    They are not equivalent. ``check_qeph_stra.F:64-76`` runs inside the
+    STARTER, opens ``<root>_0001.rad`` and compares the first 25 characters of
+    each line against the literal ``/DYNAIN/SHELL/STRAIN/FULL``; a match sets
+    ``ISTR_24 = 1``, and ``elbuf_ini.F:1588`` then allocates
+    ``GBUF%G_STRPG = 4*GBUF%G_STRA`` for QEPH shell groups — the ONLY thing
+    that lets ``dynain_c_strag.F:151`` lift ``NPG`` to 4 and stops ``:152``
+    from ``CYCLE``-ing the group.
+
+    MEASURED, spelling twin: the same starter deck, the same engine deck apart
+    from this one card, both NORMAL TERMINATION at 0 ERROR / 0 WARNING,
+    20 cycles::
+
+        /DYNAIN/SHELL/STRAIN/FULL  ->  22 225 B, 366 lines, STRAIN block
+                                       present (164 records, eps_XX 4.674E-03)
+        /DYNAIN/SHELL/STRAI/FULL   ->  12 422 B, 195 lines, NO strain block
+
+    The research round attributed that 12 4xx-byte file to QEPH itself and
+    proposed a warning naming every QEPH part. That warning would have been
+    FALSE: this converter's own implicit decks are ALL QEPH
+    (``_elform_to_ishell`` returns 24 unconditionally under implicit) and the
+    measured implicit dynain above HAS its strain block. Firing on those decks
+    would be the #125 class — prescribing a fix on a correct deck — so no
+    warning ships. The constant is a regression FENCE instead.
+    """
+
+    def test_the_long_spelling_is_emitted_character_for_character(self):
+        from k2rad.writer.rarecards import _DYNAIN_STRAIN_CARD
+        self.assertEqual(_DYNAIN_STRAIN_CARD, "/DYNAIN/SHELL/STRAIN/FULL")
+        # check_qeph_stra.F:68 compares KEYA(1:25) — the card must be exactly
+        # 25 characters, or the starter's scan cannot match it.
+        self.assertEqual(len(_DYNAIN_STRAIN_CARD), 25)
+        _res, _s, engine = _convert_both(_g_deck())
+        cards = [ln for ln in engine.splitlines() if ln.startswith("/DYNAIN")]
+        self.assertIn("/DYNAIN/SHELL/STRAIN/FULL", cards)
+        self.assertNotIn("/DYNAIN/SHELL/STRAI/FULL", cards)
+
+    def test_the_implicit_deck_is_QEPH_and_still_gets_its_strains(self):
+        """The control that refutes the QEPH theory. _elform_to_ishell returns
+        24 under implicit whatever the ELFORM, so the measured implicit run
+        WAS a QEPH deck — and it wrote 164 strain records."""
+        from k2rad.writer.common import _elform_to_ishell
+        for elform in (2, 12, 16):
+            with self.subTest(elform=elform):
+                self.assertEqual(
+                    _elform_to_ishell(elform, True, 12), 24)
+        _res, starter, _e = _convert_both(_g_deck(elform=12))
+        prop = _cards(_block(starter, "/PROP/SHELL/1"))[0]
+        self.assertEqual(_col_i(prop, 1, 10), 24)
+
+    def test_no_warning_prescribes_a_shell_formulation_change(self):
+        for elform in (12, 16):
+            with self.subTest(elform=elform):
+                res, _s, _e = _convert_both(_g_deck(elform=elform))
+                self.assertEqual(_warns(res, "QEPH shell formulation"), [])
+                self.assertEqual(
+                    _warns(res, "--shell-formulation qbat"), [])
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()

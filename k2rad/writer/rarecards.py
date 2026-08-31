@@ -912,6 +912,39 @@ def _make_impdisp_fgeo(state: ConversionState) -> List[str]:
 #: ids the same way — at most TEN ids per line before the array is overrun.
 _DYNAIN_IDS_PER_LINE = 10
 
+#: ``fredynain.F:140`` accepts the card on ``KEY3(1:5) == 'STRAI'``, so both
+#: ``/DYNAIN/SHELL/STRAI/FULL`` and ``/DYNAIN/SHELL/STRAIN/FULL`` parse — but
+#: they are NOT equivalent, and the difference is silent.
+#:
+#: ``check_qeph_stra.F:64-76`` runs inside the STARTER: it opens
+#: ``<root>_0001.rad``, scans it for a line whose first 25 characters are
+#: EXACTLY ``/DYNAIN/SHELL/STRAIN/FULL`` (or ``/STATE/SHELL/STRAIN/GLOBF``),
+#: and sets ``ISTR_24 = 1``. ``elbuf_ini.F:1588`` then allocates
+#: ``GBUF%G_STRPG = 4*GBUF%G_STRA`` for every QEPH shell group, and that is
+#: the ONLY thing that makes ``dynain_c_strag.F:151`` lift ``NPG`` to 4 —
+#: ``:152`` ``CYCLE``s the group when it did not, leaving ``LEN`` at 0 so the
+#: ``:392`` write gate never opens.
+#:
+#: The SHORT spelling is 24 characters and does not match that comparison, so
+#: on a QEPH deck it silently loses the whole strain block. MEASURED, spelling
+#: twin — the same starter deck, the same engine deck apart from this one
+#: card, both NORMAL TERMINATION at 0 ERROR / 0 WARNING, 20 cycles::
+#:
+#:     /DYNAIN/SHELL/STRAIN/FULL  ->  22 225 B, 366 lines: *NODE,
+#:                                    *ELEMENT_SHELL_THICKNESS,
+#:                                    *INITIAL_STRESS_SHELL AND
+#:                                    *INITIAL_STRAIN_SHELL (164 records,
+#:                                    eps_XX 4.674E-03 ...)
+#:     /DYNAIN/SHELL/STRAI/FULL   ->  12 422 B, 195 lines: NO strain block
+#:
+#: The deck was implicit, where ``_elform_to_ishell`` always returns Ishell 24
+#: — so EVERY implicit springback deck this converter writes is QEPH and rides
+#: entirely on getting this one string right. No warning is emitted for it,
+#: because k2rad always writes the long form and a warning would only fire on
+#: correct decks; the constant makes it a REGRESSION FENCE instead, asserted
+#: character for character by tests/test_side_defects.py.
+_DYNAIN_STRAIN_CARD = "/DYNAIN/SHELL/STRAIN/FULL"
+
 #: ``TDYNAIN0`` and ``DTDYNAIN0``, as fractions of ENDTIM: write from 90 % of
 #: the run on, every 2 %, so at most six files (the triggers at 0.90, 0.92,
 #: ..., 1.00 ENDTIM) and the last of them lands within one interval of
@@ -1197,19 +1230,42 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
             f"{_DYNAIN_INTERVAL_FRACTION:g}*ENDTIM = {interval:.6G} (ENDTIM = "
             f"{endtim:g}) — at most "
             f"{round((1.0 - _DYNAIN_TSTART_FRACTION) / _DYNAIN_INTERVAL_FRACTION) + 1}"
-            " files; TAKE THE HIGHEST-NUMBERED ONE. It holds the last state "
-            f"written at or after {tstart:.6G}, which can precede termination "
-            f"by up to {interval:.6G} (more if the engine's own output cadence "
-            "is coarser than that): SORTIE_MAIN fires GENDYNAIN on TT >= "
-            "TDYNAIN, so the capture is a SCHEDULE, not the terminal state. "
-            "A single trigger at (or just below) ENDTIM is NOT usable either: "
-            "an explicit run's last cycle lands below TSTOP and the engine's "
-            "own end-of-run rescue sets ILASTDYNAIN (resol.F:8358-8368) but "
-            "never reads it — the extra-cycle decision at resol.F:9265-9295 "
-            "is taken on ILASTANIM/ILASTH3D alone. MEASURED: "
-            "`/DYNAIN/DT 0.98*ENDTIM 1E+30` wrote zero files at NORMAL "
-            "TERMINATION, 0 ERROR, 0 WARNING, while this schedule wrote a "
-            "file on the run's last computed cycle. The file is LS-DYNA "
+            " files; TAKE THE HIGHEST-NUMBERED ONE. "
+            + ("UNDER THIS DECK'S QUASI-STATIC IMPLICIT SOLVE the highest-"
+               "numbered file IS the terminal state, exactly: imp_dt.F:53-56 "
+               "clamps the last step onto TSTOP (DT_E = MIN(DT_IMP, TSTOP-TT) "
+               "whenever IDYNA == 0), so the run lands ON ENDTIM and the "
+               "ordinary TT >= TDYNAIN trigger fires there. MEASURED on a "
+               "converging implicit twin (QUASI-STATIC NON-LINEAR, 97 total "
+               "nonlinear iterations, NORMAL TERMINATION, 20 cycles): three "
+               "files of 22 225 bytes, all four blocks present, and the driven "
+               "edge reads 20.1960 / 20.1980 / 20.2000 — the last being the "
+               "full imposed displacement to the digit. Expect FEWER files "
+               "than the schedule asks for, though: sortie_main.F:952 advances "
+               "TDYNAIN by ONE interval per write, so an implicit step that "
+               "strides over several triggers yields one file per cycle, not "
+               "one per trigger. /IMPL/DT/FIXPOINT, which this converter "
+               "already emits, removes the intermediate overshoot. Note this "
+               "is BETTER than the explicit case below, not worse — no guard "
+               "is needed and none is applied."
+               if state.is_implicit else
+               f"It holds the last state written at or after {tstart:.6G}, "
+               f"which can precede termination by up to {interval:.6G} (more "
+               "if the engine's own output cadence is coarser than that): "
+               "SORTIE_MAIN fires GENDYNAIN on TT >= TDYNAIN, so the capture "
+               "is a SCHEDULE, not the terminal state. A single trigger at "
+               "(or just below) ENDTIM is NOT usable either: an EXPLICIT "
+               "run's last cycle lands below TSTOP and the engine's own "
+               "end-of-run rescue sets ILASTDYNAIN (resol.F:8358-8368) but "
+               "never reads it — the extra-cycle decision at "
+               "resol.F:9265-9295 is taken on ILASTANIM/ILASTH3D alone. "
+               "MEASURED: `/DYNAIN/DT 0.98*ENDTIM 1E+30` wrote zero files at "
+               "NORMAL TERMINATION, 0 ERROR, 0 WARNING, while this schedule "
+               "wrote a file on the run's last computed cycle. (This caveat "
+               "is EXPLICIT-ONLY: a quasi-static implicit run lands exactly "
+               "on TSTOP — imp_dt.F:53-56 — and captures the terminal state.) "
+               )
+            + "The file is LS-DYNA "
             "keyword format (*NODE, "
             "*ELEMENT_SHELL_THICKNESS, *INITIAL_STRESS_SHELL, "
             "*INITIAL_STRAIN_SHELL, *END) and can be read straight back into "
@@ -1252,8 +1308,13 @@ def _make_engine_dynain(state: ConversionState) -> List[str]:
         for k in range(0, len(merged_pids), _DYNAIN_IDS_PER_LINE):
             lines.append("".join(
                 _i(p) for p in merged_pids[k:k + _DYNAIN_IDS_PER_LINE]))
+    # The STRAIN card must go out in the LONG spelling — see
+    # _DYNAIN_STRAIN_CARD. The short 'STRAI' form parses identically and
+    # silently loses every QEPH shell's strain block.
     lines += ["/DYNAIN/SHELL/STRES/FULL",
-              "/DYNAIN/SHELL/STRAIN/FULL",
+              _DYNAIN_STRAIN_CARD,
               "#"]
     return ["#-  SPRINGBACK STATE (*INTERFACE_SPRINGBACK_LSDYNA -> /DYNAIN):"
             ] + lines
+
+
