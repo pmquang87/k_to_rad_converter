@@ -262,6 +262,75 @@ class TestEosCarrierIdCollision(unittest.TestCase):
         self.assertEqual(_col_f(rho, 1, 20), 1.0e-9)
 
 
+_2DLAG = Path(
+    "C:/Users/pmqua/PycharmProjects/FEM_solver/verification/"
+    "dynaexamples_r14_ton-mm-s/ale-s-ale/s-ale/wavestructure/2Dlag.k")
+
+
+@unittest.skipUnless(_2DLAG.is_file(), f"corpus carrier absent: {_2DLAG}")
+class TestTwoDLagCarrier(unittest.TestCase):
+    """(A) The named corpus carrier, converted end to end.
+
+    Its binding structure: ``*MAT_HIGH_EXPLOSIVE_BURN 1``, ``*MAT_RIGID 2``,
+    ``*MAT_JOHNSON_COOK 3``, ``*MAT_NULL 4``, ``*MAT_VACUUM 5``; ``*EOS_JWL
+    1``, ``*EOS_GRUNEISEN 2``, ``*EOS_LINEAR_POLYNOMIAL 3``. Only two ``*PART``
+    cards exist and they name EOSID 0 and 2, so ``*EOS_LINEAR_POLYNOMIAL 3``
+    is referenced by nothing — orphan input left over from the ALE twin of this
+    S-ALE example.
+
+    MASTER emitted ``/MAT/LAW4/3``, ``/EOS/GRUNEISEN/3``, ``/MAT/ELAST/2``,
+    ``/MAT/VOID/4``, ``/MAT/LAW5/1``, ``/MAT/HYD_VISC/3`` AND
+    ``/EOS/POLYNOMIAL/3`` — a DOUBLE collision on id 3, of which the starter
+    diagnosed only half::
+
+        ERROR ID :   683  ... MATERIAL ID: 3 ... DENSITY <= ZERO
+        ERROR ID :    79  ** ERROR: DUPLICATE ID
+                          IN MATERIAL DEFINITION      ID=3 is DUPLICATED
+        ERROR ID :  3046  ** ERROR IN MATERIAL/ELEMENT COMPATIBILITY
+        ERROR TERMINATION       3 ERROR(S)  1 WARNING(S)
+
+    After the fix the starter answers 1 ERROR — only the 3046, which is LAW4
+    on a shell part and a separate issue outside this batch.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        res = convert(str(_2DLAG),
+                      output_stem=os.path.join(tmp.name, "d"),
+                      write_log=False)
+        with open(res.starter_path) as fh:
+            self.starter = fh.read()
+        self.res = res
+
+    def test_the_resolved_ids_are_one_MAT_and_one_EOS_each(self):
+        self.assertEqual(_headers(self.starter, "/MAT/"),
+                         ["/MAT/LAW4/3", "/MAT/ELAST/2", "/MAT/VOID/4",
+                          "/MAT/LAW5/1"])
+        self.assertEqual(_headers(self.starter, "/EOS/"),
+                         ["/EOS/GRUNEISEN/3"])
+
+    def test_no_id_repeats_in_either_namespace(self):
+        for prefix in ("/MAT/", "/EOS/"):
+            with self.subTest(prefix=prefix):
+                ids = [ln.rsplit("/", 1)[-1]
+                       for ln in _headers(self.starter, prefix)]
+                self.assertEqual(sorted(ids), sorted(set(ids)))
+
+    def test_the_orphan_EOS_is_dropped_and_named(self):
+        """No *PART names EOSID 3, so LS-DYNA does not use it either."""
+        w = _warns(self.res, "*EOS_POLYNOMIAL 3")
+        self.assertEqual(len(w), 1)
+        self.assertIn("*MAT_JOHNSON_COOK", w[0])
+        self.assertIn("ERROR 79", w[0])
+
+    def test_the_MAT_duplicate_scan_no_longer_fires(self):
+        self.assertEqual(
+            _warns(self.res, "is emitted by more than one /MAT card"), [])
+        self.assertEqual(
+            _warns(self.res, "carries more than one /EOS card"), [])
+
+
 class TestDuplicateEosScan(unittest.TestCase):
     """(A) The tenth deck-wide duplicate scan. Nine existed (/TH group, /PROP,
     /MAT, thermal, /PRELOAD, /SECT, /FUNCT, /IMPDISP, /INTER); /EOS had none,
