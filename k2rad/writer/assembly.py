@@ -1145,6 +1145,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
+    _warn_duplicate_eos_ids(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
@@ -1455,6 +1456,53 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
                 "resolves to whichever card came first. Renumber one of the "
                 "*MAT_* cards.")
+
+
+#: ``/EOS/<kind>/<mid>``, capturing the kind AND the id. ``-`` is in the class
+#: because ``/EOS/IDEAL-GAS`` is a real spelling.
+_EOS_CARD_KIND_ID_RE = re.compile(r"^/EOS/([A-Z0-9_-]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_eos_ids(state: ConversionState,
+                            lines: List[str]) -> None:
+    """One ``/EOS`` per /MAT id — and the starter will NOT tell you otherwise.
+
+    An ``/EOS``'s id is not an id of its own: it is a POINTER into the /MAT
+    table. ``hm_read_eos.F:165-177`` scans ``IPM(1,IMAT)`` for a material of
+    the same number and raises ERROR 1663 (UNKNOWN REFERENCE TO MATERIAL MODEL)
+    when there is none, then ``:301-304`` writes ``IPM(4,IMAT) = IEOS``. There
+    is **no** ``UDOUBLE``/``VDOUBLE`` call anywhere in that routine, so unlike
+    every other namespace this one has no duplicate check: two ``/EOS`` blocks
+    on one id are accepted at 0 ERROR / 0 WARNING and the LAST one silently
+    replaces the material's equation of state. MEASURED (probe ``a_dupeos``,
+    a /MAT/HYD_VISC carrying two /EOS): NORMAL TERMINATION, both echoed, last
+    ``IEOS`` wins — strictly worse than the ERROR 79 the /MAT twin gets,
+    because nothing at any layer says a pressure law was replaced.
+
+    The missing member of the family at :func:`build_starter`'s finish pass
+    (nine scans existed, none for /EOS), added with the *EOS_* carrier fix:
+    ``2Dlag.k`` emitted ``/EOS/GRUNEISEN/3`` and ``/EOS/POLYNOMIAL/3`` and only
+    the ``/MAT`` half of that double collision was diagnosed. Changes no
+    output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _EOS_CARD_KIND_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for mid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"MATERIAL ID {mid} carries more than one /EOS card ("
+                + ", ".join(f"/EOS/{k}/{mid}" for k in kinds)
+                + "). A Radioss /EOS binds to the /MAT of the SAME id "
+                "(hm_read_eos.F:165-177), one per material, and the starter "
+                "does NOT diagnose a duplicate — it accepts both blocks and "
+                f"the LAST one wins, so material {mid} silently runs with "
+                f"/EOS/{kinds[-1]}/{mid} and the others are dead input. "
+                "Renumber or remove the *EOS_* cards that were not meant for "
+                "this material (in LS-DYNA an *EOS_* binds only through the "
+                "*PART EOSID field).")
 
 
 #: ``/HEAT/MAT/<mid>`` and ``/THERM_STRESS/MAT/<mid>`` — a THIRD id namespace,
