@@ -8208,27 +8208,77 @@ def handle_database_cross_section_plane(block: Block, state: ConversionState) ->
         state.warn("*DATABASE_CROSS_SECTION_PLANE: missing data card — skipped.")
         return
     g = lambda k: to_float(f1[k]) if len(f1) > k else 0.0
+    tag = f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}"
+    radius = g(7)
+    xct, yct, zct = g(1), g(2), g(3)
+    xch, ych, zch = g(4), g(5), g(6)
+    radius_is_nodes = radius < 0.0
+    if radius_is_nodes:
+        # Vol I R17 p.16-49/50: "If RADIUS is negative, the radius will be the
+        # absolute value of RADIUS and XCT and XCH will be node IDs ... YCT,
+        # ZCT, YCH, and ZCH are ignored." Resolving here keeps the writer's
+        # geometry unconditional — it used to read the NODE IDS as
+        # coordinates and silently put the plane at (node-id, YCT, ZCT).
+        radius = -radius
+        nt = state.nodes.get(to_int(f1[1]))
+        nh = state.nodes.get(to_int(f1[4]))
+        if nt is None or nh is None:
+            state.warn(
+                f"{tag}: RADIUS is negative, which makes XCT={to_int(f1[1])} "
+                f"and XCH={to_int(f1[4])} NODE IDS (Vol I R17 p.16-49), but "
+                "they are not nodes of this deck — the cross section was "
+                "SKIPPED rather than placed at the numeric values, which would "
+                "put the cutting plane at an arbitrary point.")
+            return
+        xct, yct, zct = nt.x, nt.y, nt.z
+        xch, ych, zch = nh.x, nh.y, nh.z
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    xhev = yhev = zhev = 0.0
+    has_hev = False
+    loc_id = itype = 0
     if f2:
+        xhev = to_float(f2[0]) if len(f2) > 0 else 0.0
+        yhev = to_float(f2[1]) if len(f2) > 1 else 0.0
+        zhev = to_float(f2[2]) if len(f2) > 2 else 0.0
+        has_hev = any(x.strip() for x in f2[:3])
         lenl = to_float(f2[3]) if len(f2) > 3 else 0.0
         lenm = to_float(f2[4]) if len(f2) > 4 else 0.0
         loc_id = to_int(f2[5]) if len(f2) > 5 else 0
+        itype = to_int(f2[6]) if len(f2) > 6 else 0
         if lenl or lenm:
-            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
-                       "finite parallelogram extent (LENL/LENM) cannot be carried "
-                       "into /SECT — treated as an infinite plane"
-                       + (" limited to RADIUS" if g(7) > 0 else "") + ".")
+            state.warn(f"{tag}: finite parallelogram extent (LENL/LENM) cannot "
+                       "be carried into /SECT — treated as an infinite plane"
+                       + (" limited to RADIUS" if radius > 0 else "") + ".")
+        if radius != 0.0 and has_hev:
+            # p.16-50: a non-zero RADIUS makes the card a CIRCULAR cut and
+            # "XHEV, YHEV, ZHEV, LENL and LENM are ignored".
+            state.warn(f"{tag}: RADIUS is non-zero, so LS-DYNA ignores the "
+                       "edge vector (XHEV/YHEV/ZHEV) on card 2 — the /SECT "
+                       "output frame's in-plane axis is synthesized instead of "
+                       "taken from it, exactly as LS-DYNA would.")
+            has_hev = False
         if loc_id:
-            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
-                       "local coordinate system ID for output has no /SECT "
-                       "mapping here — forces are reported in the section frame "
-                       "built from three section nodes.")
+            what = {0: "a rigid body (*PART)",
+                    1: "an accelerometer (*ELEMENT_SEATBELT_ACCELEROMETER)",
+                    2: "a *DEFINE_COORDINATE_* system"}.get(
+                        itype, f"an unknown ITYPE={itype} entity")
+            state.warn(
+                f"{tag}: the output-frame request ID={loc_id} / ITYPE={itype} "
+                f"names {what}, and LS-DYNA would report the force resultants "
+                "in that system as it UPDATES (Vol I R17 p.16-50). That is not "
+                "converted: the /SECT frame is built from the card's own "
+                "cutting plane — origin (XCT,YCT,ZCT), normal XCT->XCH, "
+                "in-plane axis from the edge vector — and is FIXED in space, "
+                "so on a rotating body the reported components drift from what "
+                "secforc would print. The resultant itself is unaffected.")
     state.cross_sections.append(CrossSection(
         csid=csid, title=title, kind="PLANE",
         psid=to_int(f1[0]),
-        xct=g(1), yct=g(2), zct=g(3),
-        xch=g(4), ych=g(5), zch=g(6),
-        radius=g(7)))
+        xct=xct, yct=yct, zct=zct,
+        xch=xch, ych=ych, zch=zch,
+        radius=radius, radius_is_nodes=radius_is_nodes,
+        xhev=xhev, yhev=yhev, zhev=zhev, has_hev=has_hev,
+        loc_id=loc_id, itype=itype))
 
 
 def handle_database_cross_section_set(block: Block, state: ConversionState) -> None:
@@ -8252,21 +8302,36 @@ def handle_database_cross_section_set(block: Block, state: ConversionState) -> N
     tsid = to_int(f1[4]) if len(f1) > 4 else 0
     dsid = to_int(f1[5]) if len(f1) > 5 else 0
     loc_id = to_int(f1[6]) if len(f1) > 6 else 0
-    if tsid or dsid:
-        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
-                   "TSID (thick shell) / DSID (discrete) element sets are not "
-                   "converted — dropped from the /SECT.")
+    itype = to_int(f1[7]) if len(f1) > 7 else 0
+    # TSID and DSID used to be dropped here with the stated reason "no
+    # converter-side element type". That was FALSE on BOTH counts (#130 — an
+    # exclusion's stated reason needs the same audit as a warning's): k2rad
+    # writes thick shells as /BRICK, which is the grbric_ID group the card
+    # already carries, and it has emitted starter-validated /GRSPRI/SPRI
+    # groups since the preload batch, which is the grsprg_ID column
+    # (sect.cfg:37 declares it SUBTYPES = (/SETS/GRSPRI), hm_read_sect.F:301
+    # reads it, :548 resolves it with ELEGROR(...,'SPRI')). Both are converted
+    # now; the writer says which group each one went into.
+    tag = f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}"
     if loc_id:
-        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
-                   "local coordinate system ID for output has no /SECT mapping "
-                   "here — forces are reported in the section frame built from "
-                   "three section nodes.")
+        what = {0: "a rigid body (*PART)",
+                1: "an accelerometer (*ELEMENT_SEATBELT_ACCELEROMETER)",
+                2: "a *DEFINE_COORDINATE_* system"}.get(
+                    itype, f"an unknown ITYPE={itype} entity")
+        state.warn(
+            f"{tag}: the output-frame request ID={loc_id} / ITYPE={itype} "
+            f"names {what}, and LS-DYNA would report the force resultants in "
+            "that system as it UPDATES (Vol I R17 p.16-50). That is not "
+            "converted: this card states no cutting plane at all, so the "
+            "/SECT frame is FITTED to the section nodes and is fixed in "
+            "space. The resultant itself is unaffected.")
     state.cross_sections.append(CrossSection(
         csid=csid, title=title, kind="SET",
         nsid=to_int(f1[0]),
         hsid=to_int(f1[1]) if len(f1) > 1 else 0,
         bsid=to_int(f1[2]) if len(f1) > 2 else 0,
-        ssid=to_int(f1[3]) if len(f1) > 3 else 0))
+        ssid=to_int(f1[3]) if len(f1) > 3 else 0,
+        tsid=tsid, dsid=dsid, loc_id=loc_id, itype=itype))
 
 
 def handle_load_rigid_body(block: Block, state: ConversionState) -> None:

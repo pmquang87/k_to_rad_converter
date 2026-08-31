@@ -896,5 +896,315 @@ class TestInish3StressWithoutStrain(unittest.TestCase):
         self.assertEqual(_warns(res, "an all-zero record was added"), [])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# (E) the /SECT reporting frame   +   (F) the _plane_cut spring arm
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ef_deck(card2: str = None, extra_pre: str = "") -> str:
+    """A shell strip along +X (0..40), a beam and a discrete spring that both
+    span x = 20..30, and a cutting plane at x = 25 with normal +X.
+
+    Every geometric quantity is chosen so the expected frame is exact and
+    hand-checkable: N1 = (25,0,0), e1 = +Y (the card's edge vector L), e2 =
+    n x e1 = +Z, hence e6 = (N2-N1) x (N3-N1) = +X.
+    """
+    if card2 is None:
+        # XHEV YHEV ZHEV LENL LENM ID ITYPE — the edge vector head is
+        # (25,1,0), so L = head - (XCT,YCT,ZCT) = (0,1,0) = +Y.
+        card2 = _row("25.0", "1.0", "0.0", "0.0", "0.0", 0, 0)
+    return "\n".join([
+        "*KEYWORD", "*NODE",
+        _node16(1, 0.0, 0.0, 0.0), _node16(2, 20.0, 0.0, 0.0),
+        _node16(3, 20.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+        _node16(5, 30.0, 0.0, 0.0), _node16(6, 30.0, 10.0, 0.0),
+        _node16(7, 40.0, 0.0, 0.0), _node16(8, 40.0, 10.0, 0.0),
+        _node16(20, 20.0, -10.0, 0.0), _node16(21, 30.0, -10.0, 0.0),
+        _node16(30, 20.0, -20.0, 0.0), _node16(31, 30.0, -20.0, 0.0),
+        "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 1, 2, 5, 6, 3),
+        _i8(3, 1, 5, 7, 8, 6),
+        "*ELEMENT_BEAM", _i8(20, 2, 20, 21, 0),
+        "*ELEMENT_DISCRETE", _i8(10, 3, 30, 31, 0),
+        "*SECTION_SHELL", _row(1, 2, "", 2),
+        _row("1.0", "1.0", "1.0", "1.0"),
+        "*SECTION_BEAM", _row(2, 2, "1.0"),
+        _row("100.0", "833.33", "833.33", "1406.0"),
+        "*SECTION_DISCRETE", _row(3, 0), _row("0.0", "1.0", "0.0", "0.0"),
+        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+        "*MAT_SPRING_ELASTIC", _row(3, "100.0"),
+        "*PART", "strip", _row(1, 1, 1),
+        "*PART", "beam", _row(2, 2, 1),
+        "*PART", "spring", _row(3, 3, 3),
+        extra_pre,
+        "*DATABASE_CROSS_SECTION_PLANE_ID", f"{11:>10}" + "cut at x=25",
+        _row(0, "25.0", "0.0", "0.0", "26.0", "0.0", "0.0", "0.0"),
+        card2,
+        "*DATABASE_SECFORC", _row("1.0E-5"),
+        "*CONTROL_TERMINATION", _row("0.0002"),
+        "*END", ""])
+
+
+def _sect_card(starter: str, sid: int):
+    return _cards(_block(starter, f"/SECT/{sid}"))
+
+
+def _node_xyz(starter: str, nid: int):
+    """The coordinates of a /NODE row, from any /NODE block in the deck."""
+    for blk in _blocks(starter, "/NODE"):
+        for ln in blk:
+            if ln.startswith("/NODE") or ln.startswith("#"):
+                continue
+            if _col_i(ln, 1, 10) == nid:
+                return (_col_f(ln, 11, 30), _col_f(ln, 31, 50),
+                        _col_f(ln, 51, 70))
+    raise AssertionError(f"node {nid} not found")
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+class TestSectFrameIsBuiltFromTheCard(unittest.TestCase):
+    """(E) The /SECT output frame was CONDITIONING-PICKED: N1 = the lowest node
+    id of the cut, N2 = the farthest node, N3 = the node making the largest
+    triangle. None of XCT/YCT/ZCT, XCH/YCH/ZCH or XHEV/YHEV/ZHEV was read.
+
+    That frame is not decoration. ``section_skew.F:82-99`` makes
+    ``e6 = (N2-N1) x (N3-N1)`` the section NORMAL and ``section_c.F:385-389``
+    splits every nodal force with it (``FN = FSX*XXN + ...``,
+    ``FST = FS - FN``), while ``:393-397`` takes the moments about the frame
+    ORIGIN.
+
+    MEASURED on this exact deck at master 0c8968e: the picked frame was nodes
+    2 (20,0,0), 6 (30,10,0), 21 (30,-10,0), whose
+
+        e6 = (0, 0, -1)      -- 90.00 degrees off the card's (1,0,0)
+        C  = (20, 0, 0)      -- the plane is x = 25; the origin is not on it
+
+    at 0 starter ERROR. On a cantilever probe the same defect cost 89.6 % of
+    the true normal force, gave 1.34x the true tangential force, and moved
+    every moment component.
+    """
+
+    def setUp(self):
+        self.res, self.starter = _convert(_ef_deck())
+        self.card = _sect_card(self.starter, 11)[0]
+        self.n1 = _col_i(self.card, 1, 10)
+        self.n2 = _col_i(self.card, 11, 20)
+        self.n3 = _col_i(self.card, 21, 30)
+
+    def test_N1_is_the_cutting_planes_own_origin(self):
+        self.assertEqual(_node_xyz(self.starter, self.n1), (25.0, 0.0, 0.0))
+
+    def test_the_cross_product_is_the_cards_normal_exactly(self):
+        """``e6 = (N2-N1) x (N3-N1)``, normalised, must be the card's
+        ``XCT->XCH`` direction — here (1,0,0)."""
+        p1 = _node_xyz(self.starter, self.n1)
+        p2 = _node_xyz(self.starter, self.n2)
+        p3 = _node_xyz(self.starter, self.n3)
+        c = _cross([p2[k] - p1[k] for k in range(3)],
+                   [p3[k] - p1[k] for k in range(3)])
+        n = sum(v * v for v in c) ** 0.5
+        self.assertGreater(n, 0.0)
+        for k, want in enumerate((1.0, 0.0, 0.0)):
+            self.assertAlmostEqual(c[k] / n, want, places=12)
+
+    def test_the_first_axis_is_the_cards_edge_vector_L(self):
+        """``e4 = normalize(N2-N1)`` must be the card-2 edge vector L
+        projected into the plane — here (0,1,0)."""
+        p1 = _node_xyz(self.starter, self.n1)
+        p2 = _node_xyz(self.starter, self.n2)
+        v = [p2[k] - p1[k] for k in range(3)]
+        n = sum(x * x for x in v) ** 0.5
+        for k, want in enumerate((0.0, 1.0, 0.0)):
+            self.assertAlmostEqual(v[k] / n, want, places=12)
+
+    def test_the_Iframe0_origin_lands_on_N1(self):
+        """``Iframe = 0`` puts the moment reference at
+        ``C = N1 + ((N3-N1).e4)*e4`` (section_skew.F:147-150). Because e1 and
+        e2 are ORTHOGONAL by construction that dot product is 0, so C = N1 =
+        the plane origin — which is why Iframe stays 0 rather than moving to
+        1/2 (the section-node centroid, a different point)."""
+        p1 = _node_xyz(self.starter, self.n1)
+        p2 = _node_xyz(self.starter, self.n2)
+        p3 = _node_xyz(self.starter, self.n3)
+        e4 = [(p2[k] - p1[k]) for k in range(3)]
+        m = sum(x * x for x in e4) ** 0.5
+        e4 = [x / m for x in e4]
+        d = sum((p3[k] - p1[k]) * e4[k] for k in range(3))
+        self.assertAlmostEqual(d, 0.0, places=12)
+        self.assertEqual(_col_i(_sect_card(self.starter, 11)[2], 91, 100), 0)
+
+    def test_the_frame_nodes_are_synthesized_not_mesh_nodes(self):
+        """Element-free nodes, exactly as #127's preload /SECT does. They never
+        move, so the reporting frame is fixed in space — LS-DYNA's own default
+        when the card names no output frame."""
+        for nid in (self.n1, self.n2, self.n3):
+            with self.subTest(nid=nid):
+                self.assertNotIn(nid, range(1, 32))
+        w = _warns(self.res, "SYNTHESIZED element-free nodes")
+        self.assertEqual(len(w), 1)
+        for nid in (self.n1, self.n2, self.n3):
+            self.assertIn(str(nid), w[0])
+
+    def test_a_card_without_an_edge_vector_still_gets_the_right_normal(self):
+        """XHEV/YHEV/ZHEV is optional; only the IN-PLANE axis is then
+        synthesized. The NORMAL must still be exact."""
+        _res, starter = _convert(_ef_deck(card2=_row("", "", "", "", "", 0, 0)))
+        card = _sect_card(starter, 11)[0]
+        p = [_node_xyz(starter, _col_i(card, a, b))
+             for a, b in ((1, 10), (11, 20), (21, 30))]
+        c = _cross([p[1][k] - p[0][k] for k in range(3)],
+                   [p[2][k] - p[0][k] for k in range(3)])
+        n = sum(v * v for v in c) ** 0.5
+        for k, want in enumerate((1.0, 0.0, 0.0)):
+            self.assertAlmostEqual(c[k] / n, want, places=12)
+        self.assertEqual(p[0], (25.0, 0.0, 0.0))
+
+    def test_no_frame_node_is_ever_zero(self):
+        """``node_ID3 = 0`` is NOT diagnosed by the starter: hm_read_sect.F:597
+        tests ``NSTRF(K0+3)`` three times instead of K0+3/4/5, so the block
+        runs and reads ``X0(:,0)`` — out of bounds. MEASURED: accepted at
+        0 ERROR, engine NORMAL TERMINATION, and the implied "normal" comes out
+        purely IN-plane. The old picker could return (n1, n2, 0)."""
+        for a, b in ((1, 10), (11, 20), (21, 30)):
+            self.assertNotEqual(_col_i(self.card, a, b), 0)
+
+    def test_th_sectio_asks_for_the_global_and_centre_channels(self):
+        """CX/CY/CZ is an exact, unaccumulated read-back of the frame ORIGIN
+        (section_c.F assigns it rather than accumulating), and it is the only
+        way to audit the frame from the T01 — the starter never echoes
+        node_ID1/2/3."""
+        th = _block(self.starter, "/TH/SECTIO/")
+        var = next(ln for ln in th[2:] if not ln.startswith("#"))
+        self.assertEqual([var[k:k + 10].strip() for k in (0, 10, 20)],
+                         ["DEF", "GLOBAL", "CENTER"])
+
+
+class TestSectSpringArm(unittest.TestCase):
+    """(F) ``_plane_cut`` walked shells, solids, thick shells and beams and had
+    NO spring arm, so a section plane through a belt or a discrete spring found
+    nothing — and ``grsprg_ID``, the card's own spring slot, stayed 0.
+
+    MEASURED, starter echo on this exact deck, master vs branch::
+
+        NUMBER OF NODES              3   ->   4
+        NUMBER OF SHELL ELEMENTS     1        1
+        NUMBER OF BEAM ELEMENTS      1        1
+        NUMBER OF SPRING ELEMENTS    0   ->   1     (SPRING 10, N1=1 N2=0)
+
+    both at 0 starter ERROR; the branch's engine run terminates normally in
+    182 cycles. ``N1=1 N2=0`` is the pack code SEC_TRI builds
+    (hm_read_sect.F:962-974) and is exactly right: with BOTH nodes in the
+    group ``section_r.F:83-84`` sums both and the contributions cancel to
+    exactly 0.0 with no diagnostic — the ``d <= 0`` tail-side filter is what
+    prevents it.
+    """
+
+    def setUp(self):
+        self.res, self.starter = _convert(_ef_deck())
+
+    def test_the_grsprg_column_names_a_real_group(self):
+        card3 = _sect_card(self.starter, 11)[2]
+        grsprg = _col_i(card3, 51, 60)
+        self.assertNotEqual(grsprg, 0)
+        blk = _block(self.starter, f"/GRSPRI/SPRI/{grsprg}")
+        self.assertEqual([int(t) for ln in _cards(blk) for t in ln.split()],
+                         [10])
+
+    def test_a_dangling_grsprg_id_is_impossible(self):
+        """``elegror.F:92-94`` returns 0 for a group id that does not exist and
+        says NOTHING — on a section that also carries shells, a dangling
+        grsprg_ID under-reports in complete silence (WARNING 1813 needs the
+        section to be empty altogether). So the group must be emitted whenever
+        the column is non-zero."""
+        card3 = _sect_card(self.starter, 11)[2]
+        grsprg = _col_i(card3, 51, 60)
+        self.assertIn(f"/GRSPRI/SPRI/{grsprg}", self.starter)
+
+    def test_the_other_columns_are_unmoved(self):
+        """Column-exact, so a shifted spring slot is detectable: grbric(1-10),
+        blank QUAD slot(11-20), grshel(21-30), grtrus(31-40), grbeam(41-50),
+        grsprg(51-60), grtria(61-70), Niter(71-80), blank(81-90),
+        Iframe(91-100)."""
+        card3 = _sect_card(self.starter, 11)[2]
+        self.assertEqual(_col_i(card3, 1, 10), 0)         # no solids cut
+        self.assertEqual(card3[10:20], " " * 10)          # the dead QUAD slot
+        self.assertNotEqual(_col_i(card3, 21, 30), 0)     # grshel
+        self.assertEqual(_col_i(card3, 31, 40), 0)        # grtrus, never used
+        self.assertNotEqual(_col_i(card3, 41, 50), 0)     # grbeam
+        self.assertEqual(_col_i(card3, 61, 70), 0)        # grtria (no /SH3N)
+        self.assertEqual(_col_i(card3, 71, 80), 0)        # Niter
+
+    def test_the_divergence_from_secforc_is_named(self):
+        """Vol I R17 p.16-48, Figure 16-2's caption: LS-DYNA's AUTOMATIC plane
+        definition "does not check for springs and dampers in the section". So
+        including them is a deliberate SUPER-SET and the user has to be told —
+        the #125 class demands the statement, not the removal, because a belt
+        section reading zero is the worse answer."""
+        w = _warns(self.res, "deliberate SUPER-SET of LS-DYNA")
+        self.assertEqual(len(w), 1)
+        self.assertIn("does not check for springs and dampers", w[0])
+        self.assertIn("[10]", w[0])
+
+    def test_the_arm_keys_on_the_source_registry_not_the_union(self):
+        """#128: ``state.spring_elem_ids`` is an id-only union across nine
+        producers in different LS-DYNA namespaces. A beam whose eid EQUALS a
+        discrete spring's must keep its own /GRBEAM membership."""
+        deck = _ef_deck().replace(_i8(20, 2, 20, 21, 0), _i8(10, 2, 20, 21, 0))
+        _res, starter = _convert(deck)
+        card3 = _sect_card(starter, 11)[2]
+        grbeam = _col_i(card3, 41, 50)
+        self.assertNotEqual(grbeam, 0)
+        blk = _block(starter, f"/GRBEAM/BEAM/{grbeam}")
+        self.assertEqual([int(t) for ln in _cards(blk) for t in ln.split()],
+                         [10])
+
+
+class TestSectSetTsidDsid(unittest.TestCase):
+    """(F) ``TSID`` and ``DSID`` on the ``_SET`` spelling were dropped with the
+    stated reason "no converter-side element type". FALSE on both counts (the
+    #130 class): thick shells leave this converter as ``/BRICK``, which is the
+    grbric_ID group the card already carries, and ``/GRSPRI/SPRI`` has been
+    starter-validated here since the preload batch, which is grsprg_ID.
+
+    Vol I R17 p.16-49 gives both as first-class slots: "TSID — Thick shell
+    element set ID", "DSID — Discrete element set ID, see *SET_DISCRETE"."""
+
+    DECK = "\n".join([
+        "*KEYWORD", "*NODE",
+        _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+        _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+        _node16(5, 20.0, 0.0, 0.0), _node16(6, 20.0, 10.0, 0.0),
+        _node16(30, 0.0, -20.0, 0.0), _node16(31, 10.0, -20.0, 0.0),
+        "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 1, 2, 5, 6, 3),
+        "*ELEMENT_DISCRETE", _i8(10, 3, 30, 31, 0),
+        "*SECTION_SHELL", _row(1, 2, "", 2),
+        _row("1.0", "1.0", "1.0", "1.0"),
+        "*SECTION_DISCRETE", _row(3, 0), _row("0.0", "1.0", "0.0", "0.0"),
+        "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+        "*MAT_SPRING_ELASTIC", _row(3, "100.0"),
+        "*PART", "strip", _row(1, 1, 1),
+        "*PART", "spring", _row(3, 3, 3),
+        "*SET_NODE_LIST", _row(100), _row(1, 2, 3),
+        "*SET_SHELL_LIST", _row(200), _row(1),
+        "*SET_DISCRETE_LIST", _row(300), _row(10),
+        "*DATABASE_CROSS_SECTION_SET_ID", f"{12:>10}" + "set section",
+        # NSID HSID BSID SSID TSID DSID ID ITYPE
+        _row(100, 0, 0, 200, 0, 300, 0, 0),
+        "*END", ""])
+
+    def test_DSID_lands_in_the_grsprg_column(self):
+        res, starter = _convert(self.DECK)
+        card3 = _sect_card(starter, 12)[2]
+        grsprg = _col_i(card3, 51, 60)
+        self.assertNotEqual(grsprg, 0)
+        blk = _block(starter, f"/GRSPRI/SPRI/{grsprg}")
+        self.assertEqual([int(t) for ln in _cards(blk) for t in ln.split()],
+                         [10])
+        # ... and the false "not converted" reason is gone.
+        self.assertEqual(_warns(res, "are not converted"), [])
+
+
 if __name__ == "__main__":            # pragma: no cover
     unittest.main()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Set, Tuple
-from ..state import ConversionState
+from ..state import ConversionState, NodeData
 from .mesh import _effective_solid_isolid, _target_mat_law
 from .common import (
     HDR,
@@ -15,13 +15,16 @@ from .common import (
     _f,
     _fmt_eid_list,
     _i,
+    _nid_centroid,
+    _node_cloud_normal,
     _ordered_unique_nodes,
+    _orthonormal_pair,
+    _preload_sect_scale,
     _split_shell_eids_by_topology,
     _part_node_sets,
     _ref_flag_materials,
     _vcross,
     _vnorm,
-    _vsub,
 )
 
 __all__ = [
@@ -36,7 +39,7 @@ __all__ = [
     "_airbag_ref_nodes",
     "_resolve_airbag_eref",
     "_make_eref",
-    "_sect_frame_nodes",
+    "_sect_synth_frame",
     "_plane_cut",
     "_make_cross_sections",
     "_make_starter_th_sectio",
@@ -1431,45 +1434,130 @@ def _make_eref(state: ConversionState) -> List[str]:
 # Starter: cross sections (*DATABASE_CROSS_SECTION_* → /SECT, → /TH/SECTIO)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sect_frame_nodes(state: ConversionState, group_nids: List[int],
-                      extra_nids: List[int]) -> Tuple[int, int, int]:
-    """Pick three non-colinear nodes defining the /SECT output frame (N1 =
-    origin, N1→N2 = first axis, N3 fixes the plane — the /SKEW/MOV convention).
-    N1/N2 are taken from the section node group; N3 may fall back to any other
-    node of the section's elements (the frame only orients the force output)."""
-    def _coord(n):
-        nd = state.nodes.get(n)
-        return (nd.x, nd.y, nd.z) if nd else None
+def _sect_synth_frame(state: ConversionState, cs, nids: List[int]):
+    """The three /SECT frame-node COORDINATES this cross section states.
 
-    cands = [n for n in group_nids if n in state.nodes]
-    if not cands:
-        return (0, 0, 0)
-    n1 = cands[0]
-    p1 = _coord(n1)
-    pool = cands[1:] + [n for n in extra_nids
-                        if n in state.nodes and n not in group_nids]
-    best2, best_d2 = 0, 0.0
-    for n in pool:
-        p = _coord(n)
-        v = _vsub(p, p1)
+    Returns ``(frame, note)`` — ``frame`` is ``(N1, N2, N3)`` as XYZ triples,
+    or ``None`` when the card states no usable normal; ``note`` is a short
+    phrase for the caller's warning saying where the normal came from.
+
+    **Why this replaces a node PICK.** The frame is not decoration: the engine
+    rebuilds it every cycle from ``node_ID1/2/3`` (``section_skew.F:63-101``)
+    as ``e4 = normalize(N2-N1)``, ``e6 = n̂ = normalize((N2-N1) x (N3-N1))``,
+    ``e5 = e6 x e4``, and then ``section_c.F:385-389`` SPLITS every nodal force
+    with that ``n̂``::
+
+        FN   = FSX*XXN + FSY*YYN + FSZ*ZZN      ! XXN,YYN,ZZN = e6
+        FSNX = FN*XXN ; FSTX = FSX - FSNX
+
+    so ``e6`` decides what "normal force" means, and ``:393-397`` takes every
+    moment about the frame ORIGIN. Picking the three best-CONDITIONED nodes of
+    the cut — what ``_sect_frame_nodes`` did, N1 = lowest id, N2 = farthest,
+    N3 = largest triangle — has nothing to do with the cutting plane and is not
+    even stable under renumbering. MEASURED on a cantilever cut at x = 11 with
+    the card's normal +X: the picked frame gave ``e6`` 26.57 degrees off, an
+    origin at (10.889, -0.222, -0.222) which is not on the plane at all, and
+
+        true |FN| = 0.3480747     picked |FN| = 0.3118226   (89.6 %)
+        true |FT| = 0.1739886     picked |FT| = 0.2327981   (1.34x)
+        true (M1,M2,M3) = (1.546774, 0, 0)
+        picked          = (1.035982, -0.8229539, -0.7030904)
+
+    all at 0 starter ERROR / 0 WARNING and NORMAL TERMINATION. The GLOBAL
+    moment was wrong too (-3.3 % on MY, two spurious components), because the
+    origin had moved.
+
+    **The construction.** ``n̂`` from the card (XCT->XCH); ``e1`` = the edge
+    vector **L** (Vol I R17 Figure 16-2, card 2's XHEV/YHEV/ZHEV) projected
+    into the plane, or a synthesized in-plane axis when the card states none;
+    ``e2 = n̂ x e1``. Then ``N1 = O``, ``N2 = O + s*e1``, ``N3 = O + s*e2``, so
+    ``e4 = e1``, ``e6 = (N2-N1) x (N3-N1) = e1 x (n̂ x e1) = n̂`` EXACTLY and
+    with the right sign, and ``e5 = n̂ x e1``. Because ``e1 ⊥ e2``, the
+    ``Iframe = 0`` origin ``C = N1 + ((N3-N1)·e4)*e4`` (section_skew.F:147-150)
+    collapses to ``N1 = O`` — Figure 16-2's "Origin of cutting plane". Measured
+    on the same model: ``CX/CY/CZ = (11.000000, 0.000000, 0.000000)`` exactly,
+    ``FNY = FNZ = FTX = 0``, ``M2 = 2e-14``, ``M3 = -7e-15``.
+
+    The nodes are SYNTHESIZED and element-free, exactly as #127's preload
+    /SECT already does (``preload._frame_nodes_for_normal``). Two consequences,
+    both wanted: ``hm_read_sect.F:588-591`` resolves them with
+    ``ANODSET(..., CHECK_USED)`` so they raise no "unused node" diagnostic, and
+    they never move, so the reporting frame stays fixed in space — which is
+    LS-DYNA's own default when the card's ID/ITYPE cells are blank.
+
+    For a ``_SET`` section the card states NO plane, so the normal is FITTED to
+    the section node cloud (``preload._node_cloud_normal``) and the caller says
+    so out loud.
+    """
+    normal_known = True
+    if cs.kind == "SET":
+        origin = _nid_centroid(state, nids)
+        nhat = _node_cloud_normal(state, nids)
+        note = ("FITTED to the section's node cloud (this card states no "
+                "cutting plane)")
+        if nhat is None:
+            # Fewer than 3 nodes, or all of them colinear — an ORDINARY _SET
+            # shape, since LS-DYNA needs no plane here at all (it reports the
+            # resultants globally when the card's ID cell is blank, Vol I R17
+            # p.16-50). Radioss still needs a non-degenerate triad, so build
+            # one that at least satisfies the constraint the deck DOES state:
+            # the section nodes lie IN the plane. e1 is the node cloud's own
+            # longest direction, and the normal is taken perpendicular to it —
+            # only the ROTATION about that line is arbitrary, and the caller
+            # says so. (Not global +Z: that is dyna2rad's dummy triad,
+            # convertcrosssections.cxx:246-251, which ignores the geometry
+            # outright.)
+            axis = _nid_long_axis(state, nids, origin)
+            if axis is None:
+                return None, note, False
+            pair = _orthonormal_pair(axis)
+            if pair is None:                           # pragma: no cover
+                return None, note, False
+            nhat, normal_known = pair[0], False
+            note = ("PERPENDICULAR to the section's node line — the node set "
+                    "does not determine a plane (fewer than 3 nodes, or "
+                    "colinear)")
+    else:
+        origin = (cs.xct, cs.yct, cs.zct)
+        nhat = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct, cs.zch - cs.zct))
+        note = "the card's own XCT->XCH normal"
+        if nhat is None:
+            return None, note, False
+    e1 = None
+    if cs.kind != "SET" and cs.has_hev:
+        lvec = (cs.xhev - cs.xct, cs.yhev - cs.yct, cs.zhev - cs.zct)
+        d = lvec[0] * nhat[0] + lvec[1] * nhat[1] + lvec[2] * nhat[2]
+        e1 = _vnorm((lvec[0] - d * nhat[0], lvec[1] - d * nhat[1],
+                     lvec[2] - d * nhat[2]))
+        if e1 is not None:
+            note += " with the card's edge vector L (XHEV/YHEV/ZHEV) as the "\
+                    "in-plane axis"
+    if e1 is None:
+        pair = _orthonormal_pair(nhat)
+        if pair is None:                               # pragma: no cover
+            return None, note, normal_known
+        e1 = pair[0]
+    e2 = _vcross(nhat, e1)
+    s = _preload_sect_scale(state, origin, nids)
+    return ((tuple(origin),
+             tuple(origin[k] + s * e1[k] for k in range(3)),
+             tuple(origin[k] + s * e2[k] for k in range(3))),
+            note, normal_known)
+
+
+def _nid_long_axis(state: ConversionState, nids: List[int], origin):
+    """Unit vector along the node cloud's longest extent from *origin*, or
+    ``None`` when every node coincides with it."""
+    best, best_d2 = None, 0.0
+    for n in nids:
+        nd = state.nodes.get(n)
+        if nd is None:
+            continue
+        v = (nd.x - origin[0], nd.y - origin[1], nd.z - origin[2])
         d2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
         if d2 > best_d2:
-            best2, best_d2 = n, d2
-    if best2 == 0:
-        return (n1, 0, 0)
-    p2 = _coord(best2)
-    v12 = _vsub(p2, p1)
-    best3, best_a2 = 0, 0.0
-    for n in pool:
-        if n == best2:
-            continue
-        c = _vcross(v12, _vsub(_coord(n), p1))
-        a2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2]
-        if a2 > best_a2:
-            best3, best_a2 = n, a2
-    if best3 == 0 or best_a2 <= 1e-20 * best_d2 * best_d2:
-        return (n1, best2, 0)
-    return (n1, best2, best3)
+            best, best_d2 = v, d2
+    return _vnorm(best) if best is not None else None
 
 
 def _plane_cut(state: ConversionState, cs,
@@ -1495,7 +1583,43 @@ def _plane_cut(state: ConversionState, cs,
     *DATABASE_CROSS_SECTION card". ``None`` (the default, and every pre-existing
     caller) means no extra restriction, so the emitted /SECT is unchanged.
 
-    Returns (node_ids, shell_eids, solid_eids, beam_eids).
+    Returns (node_ids, shell_eids, solid_eids, beam_eids, spring_eids).
+
+    **The SPRING arm.** A 2-node spring straddles a plane exactly as a beam
+    does, and the /SECT card has a slot for it — ``grsprg_ID``, cols 51-60,
+    declared ``SUBTYPES = (/SETS/GRSPRI)`` at sect.cfg:37, read at
+    ``hm_read_sect.F:301`` and resolved with ``ELEGROR(..., IGRSPRING, 'SPRI')``
+    at ``:548``. There was no arm here, so a section plane through a shoulder
+    belt or a discrete spring found nothing — exactly the quantity a restraint
+    section is usually drawn for.
+
+    The walk is over the SOURCE registries ``state.discrete_elems`` and the 1-D
+    ``state.seatbelt_elems``, NEVER over ``state.spring_elem_ids``: that set is
+    an id-only union across nine producers spanning different LS-DYNA id
+    namespaces, and keying a geometric filter on it is the exact #128
+    regression (an ``*ELEMENT_BEAM 50`` beside an ``*ELEMENT_DISCRETE 50``).
+
+    The existing straddle rule needs no change for a 2-node element and is
+    exactly what the starter wants: ``SEC_TRI`` (hm_read_sect.F:962-974) builds
+    a bitmask of which of the element's nodes appear in the section node list
+    and ``section_r.F:83-84,133-135`` sums only the flagged node's force. Two
+    measured consequences: with BOTH nodes in the group the contributions
+    cancel to exactly 0.0 with no diagnostic (the ``d <= 0`` tail-side filter
+    is what prevents it), and a spring with NEITHER node in the group is an
+    out-of-bounds ``UNPACK`` read — so the group must contain only the springs
+    this function actually found.
+
+    A grounded ``*ELEMENT_DISCRETE`` (``n2 == 0``) has one real node and can
+    never satisfy ``dmin < 0 < dmax``, so it is filtered by the geometry
+    itself; ``_try`` already drops zero node ids.
+
+    NOTE the divergence, which the caller states to the user: Vol I R17
+    p.16-48, Figure 16-2's caption, says LS-DYNA's AUTOMATIC plane definition
+    "does not check for springs and dampers in the section". Including them
+    makes the converted /SECT report a force ``secforc`` would not — a
+    super-set, deliberately, because a belt section that reads zero is the
+    worse answer and LS-DYNA's own ``_SET`` spelling has a first-class DSID
+    slot for exactly this.
     """
     nhat = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct, cs.zch - cs.zct))
     if nhat is None:
@@ -1543,6 +1667,7 @@ def _plane_cut(state: ConversionState, cs,
     shell_eids: List[int] = []
     solid_eids: List[int] = []
     beam_eids: List[int] = []
+    spring_eids: List[int] = []
 
     def _try(nids, eid, pid, out):
         if pids is not None and pid not in pids:
@@ -1578,7 +1703,12 @@ def _plane_cut(state: ConversionState, cs,
     # the loss on the caller's side instead.
     for e in state.beam_elems:
         _try([e.n1, e.n2], e.eid, e.pid, beam_eids)
-    return (sorted(node_ids), shell_eids, solid_eids, beam_eids)
+    for e in state.discrete_elems:
+        _try([e.n1, e.n2], e.eid, e.pid, spring_eids)
+    for e in state.seatbelt_elems:
+        if not e.is_2d:                     # a 2D belt is a /SHELL, not /SPRING
+            _try([e.n1, e.n2], e.eid, e.pid, spring_eids)
+    return (sorted(node_ids), shell_eids, solid_eids, beam_eids, spring_eids)
 
 
 def _warn_sect_sph_scope(state: ConversionState, cs, label: str) -> None:
@@ -1644,7 +1774,10 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                            f"{cs.nsid} not found — /SECT skipped.")
                 continue
             nids = entry[1]
-            shell_eids = solid_eids = beam_eids = []
+            shell_eids: List[int] = []
+            solid_eids: List[int] = []
+            beam_eids: List[int] = []
+            spring_eids: List[int] = []
             if cs.ssid:
                 se = state.shell_sets.get(cs.ssid)
                 if se is None:
@@ -1666,8 +1799,34 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                                f"{cs.bsid} not found — dropped from the /SECT.")
                 else:
                     beam_eids = se[1]
+            # TSID and DSID are first-class LS-DYNA slots (Vol I R17 p.16-49:
+            # "TSID — Thick shell element set ID", "DSID — Discrete element set
+            # ID, see *SET_DISCRETE") and both HAVE a converter-side home: this
+            # converter writes thick shells as /BRICK, which is the same
+            # grbric_ID group solids use, and it emits starter-validated
+            # /GRSPRI/SPRI groups, which is the grsprg_ID column. They used to
+            # be dropped together under the stated reason "no converter-side
+            # element type" — false on both counts (#130).
+            if cs.tsid:
+                se = state.shell_sets.get(cs.tsid) or state.solid_sets.get(cs.tsid)
+                if se is None:
+                    state.warn(f"*DATABASE_CROSS_SECTION_SET {label}: thick-shell "
+                               f"set {cs.tsid} not found — dropped from the "
+                               "/SECT.")
+                else:
+                    solid_eids = list(solid_eids) + [
+                        e for e in se[1] if e not in set(solid_eids)]
+            if cs.dsid:
+                se = state.discrete_sets.get(cs.dsid)
+                if se is None:
+                    state.warn(f"*DATABASE_CROSS_SECTION_SET {label}: discrete "
+                               f"set {cs.dsid} not found — dropped from the "
+                               "/SECT.")
+                else:
+                    spring_eids = list(se[1])
         else:
-            nids, shell_eids, solid_eids, beam_eids = _plane_cut(state, cs)
+            (nids, shell_eids, solid_eids, beam_eids,
+             spring_eids) = _plane_cut(state, cs)
             _warn_sect_sph_scope(state, cs, label)
             if not nids:
                 state.warn(f"*DATABASE_CROSS_SECTION_PLANE {label}: the plane "
@@ -1678,38 +1837,73 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             state.warn(f"*DATABASE_CROSS_SECTION_SET {label}: empty node set — "
                        "/SECT skipped.")
             continue
-        if not (shell_eids or solid_eids or beam_eids):
+        if not (shell_eids or solid_eids or beam_eids or spring_eids):
             state.warn(f"*DATABASE_CROSS_SECTION_* {label}: no element group — "
                        "the /SECT is emitted but will record zero force until "
                        "an element set is added.")
 
-        elem_nids: List[int] = []
-        if shell_eids or solid_eids or beam_eids:
-            shells = {e.eid: e for e in state.shell_elems}
-            solids = {e.eid: e for e in state.solid_elems}
-            # Thick shells share the /BRICK id space and the solid_eids list.
-            solids.update({e.eid: e for e in state.tshell_elems})
-            beams = {e.eid: e for e in state.beam_elems}
-            for eid in shell_eids:
-                if eid in shells:
-                    elem_nids.extend(shells[eid].nodes)
-            for eid in solid_eids:
-                if eid in solids:
-                    elem_nids.extend(solids[eid].nodes)
-            for eid in beam_eids:
-                if eid in beams:
-                    elem_nids.extend([beams[eid].n1, beams[eid].n2])
-        n1, n2, n3 = _sect_frame_nodes(state, nids, elem_nids)
-        if n3 == 0:
-            state.warn(f"*DATABASE_CROSS_SECTION_* {label}: could not find three "
-                       "non-colinear section nodes for the /SECT output frame — "
-                       "the starter may reject the section; add a node set with "
-                       "an in-plane spread of nodes.")
+        # The output frame is BUILT FROM THE CARD, not picked from the mesh —
+        # see _sect_synth_frame for the construction and for the measured
+        # consequences of the old pick (89.6 % of the true normal force,
+        # 1.34x the tangential one, an origin off the plane, all at 0 starter
+        # diagnostics).
+        frame, frame_note, normal_known = _sect_synth_frame(state, cs, nids)
+        if frame is None:
+            state.warn(
+                f"*DATABASE_CROSS_SECTION_* {label}: the section's normal "
+                "could not be determined "
+                + ("(every section node coincides, so not even a node LINE is "
+                   "defined)" if cs.kind == "SET" else
+                   "(XCT->XCH is a zero vector)")
+                + " — /SECT SKIPPED rather than emitted with a frame the "
+                "engine would build from arbitrary nodes. hm_read_sect.F:597 "
+                "would either refuse it (ERROR 508, degenerate triad) or, with "
+                "node_ID3 = 0, read out of bounds and report an implied "
+                "'normal' that lies IN the cutting plane, at 0 diagnostics.")
+            continue
 
         sect_id = cs.csid if cs.csid > 0 and cs.csid not in used_ids else state.next_id()
         used_ids.add(sect_id)
         title = cs.title or f"SECT_{sect_id}"
+        fn_ids = [state.next_node_id() for _ in range(3)]
+        for nid, xyz in zip(fn_ids, frame):
+            state.nodes[nid] = NodeData(xyz[0], xyz[1], xyz[2])
+        n1, n2, n3 = fn_ids
+        state.warn(
+            f"*DATABASE_CROSS_SECTION_* {label}: the /SECT reporting frame is "
+            f"three SYNTHESIZED element-free nodes ({n1}, {n2}, {n3}) placed "
+            f"from {frame_note}. That frame is not decoration — "
+            "section_skew.F:82-99 makes e6 = (N2-N1) x (N3-N1) the section "
+            "NORMAL, section_c.F:385-389 splits every nodal force with it into "
+            "the FN and FT channels, and :393-397 takes the moments about the "
+            "frame origin, which this construction puts exactly on "
+            + ("the fitted plane's centroid" if cs.kind == "SET"
+               else "(XCT,YCT,ZCT), the cutting plane's own origin")
+            + ". The nodes belong to no element, so the frame is FIXED in "
+            "space (LS-DYNA's own default when the card's ID/ITYPE cells are "
+            "blank); hm_read_sect.F:588-591 resolves them with CHECK_USED, so "
+            "they raise no 'unused node' diagnostic."
+            + ("" if normal_known else
+               " BECAUSE THE NORMAL HAD TO BE INVENTED, the FN/FT SPLIT is "
+               "arbitrary here: only their vector SUM and the GLOBAL MX/MY/MZ "
+               "channels mean anything, and Iframe was set to 10 so M1/M2/M3 "
+               "and F1/F2/F3 come out on the global axes too — which is what "
+               "secforc prints for a section that names no output frame. Give "
+               "the *SET node group three non-colinear nodes on the cut, or "
+               "use the _PLANE spelling, to get a real section normal."))
+        # Iframe 0 keeps the LOCAL (e4,e5,e6) reporting axes, and with this
+        # orthogonal triad the origin C = N1 + ((N3-N1).e4)*e4
+        # (section_skew.F:147-150) collapses onto N1 = the plane origin.
+        # Iframe 10 keeps the same origin and the same node-derived normal but
+        # reports M1/M2/M3 and F1/F2/F3 on the GLOBAL axes — which is what
+        # LS-DYNA's secforc prints when the card names no output frame, and the
+        # only honest choice when the normal itself had to be invented.
+        iframe = 0 if normal_known else 10
         grnod_id = state.next_id()
+        lines += ["/NODE"]
+        for nid, xyz in zip(fn_ids, frame):
+            lines.append(f"{_i(nid)}{_f(xyz[0])}{_f(xyz[1])}{_f(xyz[2])}")
+        lines.append(HDR)
         lines += _emit_grnod_node(grnod_id, f"{title}_nodes", nids)
         grshel_id = grbric_id = grbeam_id = grtria_id = grsprg_id = 0
         quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
@@ -1746,16 +1940,42 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                         | state.muscle_beam_spring_eids)
         rerouted = [e for e in beam_eids if e in rerouted_ids]
         beam_eids = [e for e in beam_eids if e not in rerouted_ids]
-        if rerouted:
+        # ONE group for both kinds: the card has exactly one spring slot
+        # (grsprg_ID, cols 51-60), so genuine *ELEMENT_DISCRETE / 1-D belt
+        # springs and re-routed beams share it. Emitting the group WHENEVER the
+        # column is non-zero is load-bearing: elegror.F:92-94 returns 0 for a
+        # group id that does not exist and says NOTHING, so a dangling
+        # grsprg_ID silently under-reports the section on any deck that also
+        # carries another family (WARNING 1813 needs the section to be empty
+        # altogether, WARNING 600 needs all seven ids AND Niter zero).
+        all_springs = list(spring_eids) + [e for e in rerouted
+                                           if e not in set(spring_eids)]
+        if all_springs:
             grsprg_id = state.next_id()
             lines += _emit_id_group("GRSPRI/SPRI", grsprg_id,
-                                    f"{title}_springs", rerouted)
+                                    f"{title}_springs", all_springs)
+        if spring_eids and cs.kind != "SET":
+            state.warn(
+                f"{label}: spring/belt element(s) {sorted(spring_eids)} cross "
+                "the section plane and ARE included in the /SECT "
+                f"(/GRSPRI/SPRI group {grsprg_id}, the card's grsprg_ID "
+                "column). Note this is a deliberate SUPER-SET of LS-DYNA: Vol "
+                "I R17 p.16-48, Figure 16-2's caption, says the automatic "
+                "plane definition 'does not check for springs and dampers in "
+                "the section', so secforc would NOT include them and the "
+                "converted section force is larger than LS-DYNA's by their "
+                "contribution. It is included because a restraint section that "
+                "reads zero is the worse answer, and LS-DYNA's own _SET "
+                "spelling carries a first-class DSID slot for exactly these "
+                "elements. Delete them from the cut parts (PSID) if you need "
+                "secforc parity.")
+        if rerouted:
             state.warn(
                 f"{label}: beam element(s) {rerouted} cross the section plane "
                 "but their part's material re-routes them to a SPRING "
                 "connector (*MAT_MUSCLE, *MAT_SPOTWELD or an ELFORM=6 discrete "
                 "beam), so they are /SPRING in the emitted deck and not /BEAM. "
-                "They are moved from the section's /GRBEAM group to a "
+                "They are moved from the section's /GRBEAM group to the "
                 f"/GRSPRI/SPRI group ({grsprg_id}) named by the /SECT card's "
                 "grsprg_ID column, which is what the starter resolves against "
                 "the spring groups (hm_read_sect.F:301 reads grsprg_id, :548 "
@@ -1777,7 +1997,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             f"SECT_{sect_id}",
             "#grbric_ID           grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID     Niter              Iframe",
             f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(0)}{_i(grbeam_id)}"
-            f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(0)}",
+            f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(iframe)}",
             HDR,
         ]
         state.sect_ids.append((sect_id, title))
@@ -1830,8 +2050,12 @@ def _make_starter_th_sectio(state: ConversionState) -> List[str]:
         "TH_SECTIONS",
         "#  DEF = FNX/Y/Z, FTX/Y/Z, M1/M2/M3: IMPULSE (force x time), not force",
         "#  FSAV accumulates F*dt every cycle: section force = d(FNX)/dt",
-        "#     var1",
-        "DEF       ",
+        "#  GLOBAL adds MX/MY/MZ (the moments on the GLOBAL axes, which is what",
+        "#  secforc prints) and CENTER adds CX/CY/CZ, an exact unaccumulated",
+        "#  read-back of the frame ORIGIN the moments are taken about — the one",
+        "#  channel that makes the section's frame auditable from the T01.",
+        "#     var1      var2      var3",
+        "DEF       GLOBAL    CENTER    ",
     ]
     lines += [_i(sid) for sid, _title in state.sect_ids]
     lines.append(HDR)

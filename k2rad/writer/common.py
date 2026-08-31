@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Set
 from ..state import ConversionState
 
 __all__ = [
     "HDR",
+    "_nid_centroid",
+    "_node_cloud_normal",
+    "_orthonormal_pair",
+    "_preload_sect_scale",
     "_f",
     "_i",
     "_dof_string",
@@ -994,3 +999,82 @@ def _seatbelt_2d_part_ids(state: ConversionState) -> Set[int]:
         return set()
     return {pid for pid, part in state.parts.items()
             if part.mid in law119_mids}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /SECT frame geometry — shared by writer/preload.py (the *INITIAL_STRESS_
+# SECTION bolt-preload /SECT) and writer/inistate.py (the reporting /SECT).
+# Both build the SAME thing: three synthesized, element-free nodes whose
+# (N2-N1) x (N3-N1) is the section normal by construction. They lived in
+# preload.py until the SIDE-DEFECT batch gave the reporting /SECT the same
+# treatment, and preload.py imports FROM inistate.py, so the shared home has
+# to be here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _orthonormal_pair(nhat):
+    """``(e1, e2)``, orthonormal and perpendicular to ``nhat``, with
+    ``e1 x e2 == nhat`` exactly."""
+    a = (1.0, 0.0, 0.0) if abs(nhat[0]) < 0.9 else (0.0, 1.0, 0.0)
+    d = a[0] * nhat[0] + a[1] * nhat[1] + a[2] * nhat[2]
+    e1 = _vnorm((a[0] - d * nhat[0], a[1] - d * nhat[1], a[2] - d * nhat[2]))
+    if e1 is None:                                   # pragma: no cover
+        return None
+    return (e1, _vcross(nhat, e1))
+
+
+def _node_cloud_normal(state: ConversionState, nids: List[int]):
+    """Best-conditioned plane normal of a node cloud, or ``None``.
+
+    Used for a ``*DATABASE_CROSS_SECTION_SET`` whose ``*INITIAL_STRESS_SECTION``
+    states no VID. LS-DYNA requires one there ("VID must be set when the SET
+    variant of *DATABASE_CROSS_SECTION is used", Vol I R17 p.3144) precisely
+    because the node ORDER in the set carries no plane information — which is
+    why dyna2rad, which never reads VID, falls back to a dummy
+    (0,0,0)/(1,0,0)/(0,1,0) triad and silently preloads along global +Z
+    (convertcrosssections.cxx:246-251). Fitting the plane the section nodes
+    actually lie in is the honest best effort: exact for a planar cut, and the
+    caller says out loud that it was a fit.
+    """
+    pts = [state.nodes[n] for n in nids if n in state.nodes]
+    if len(pts) < 3:
+        return None
+    cx = sum(p.x for p in pts) / len(pts)
+    cy = sum(p.y for p in pts) / len(pts)
+    cz = sum(p.z for p in pts) / len(pts)
+    rel = [(p.x - cx, p.y - cy, p.z - cz) for p in pts]
+    u = max(rel, key=lambda v: v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
+    if u[0] ** 2 + u[1] ** 2 + u[2] ** 2 <= 0.0:
+        return None
+    best, best_a2 = None, 0.0
+    for v in rel:
+        c = _vcross(u, v)
+        a2 = c[0] ** 2 + c[1] ** 2 + c[2] ** 2
+        if a2 > best_a2:
+            best, best_a2 = c, a2
+    if best is None or best_a2 <= 0.0:
+        return None
+    return _vnorm(best)
+
+
+def _nid_centroid(state: ConversionState, nids: List[int]):
+    pts = [state.nodes[n] for n in nids if n in state.nodes]
+    if not pts:
+        return (0.0, 0.0, 0.0)
+    return (sum(p.x for p in pts) / len(pts),
+            sum(p.y for p in pts) / len(pts),
+            sum(p.z for p in pts) / len(pts))
+
+
+def _preload_sect_scale(state: ConversionState, origin, nids: List[int]) -> float:
+    """A length scale for the synthesized frame, taken from the section itself
+    so the three new nodes land in the cut's own neighbourhood instead of one
+    deck unit away from it (which in a metre model would be a metre)."""
+    best = 0.0
+    for n in nids:
+        nd = state.nodes.get(n)
+        if nd is None:
+            continue
+        d = math.sqrt((nd.x - origin[0]) ** 2 + (nd.y - origin[1]) ** 2
+                      + (nd.z - origin[2]) ** 2)
+        best = max(best, d)
+    return best if best > 0.0 else 1.0

@@ -2537,9 +2537,10 @@ class InitialStressSolid:
 class CrossSection:
     """*DATABASE_CROSS_SECTION_PLANE/_SET → /SECT (+ /TH/SECTIO).
 
-    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid =
-    *SET_SOLID / *SET_BEAM / *SET_SHELL element sets → the /SECT grbric/grbeam/
-    grshel groups (direct mapping).
+    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid/
+    tsid/dsid = *SET_SOLID / *SET_BEAM / *SET_SHELL / *SET_TSHELL /
+    *SET_DISCRETE element sets → the /SECT grbric/grbeam/grshel/grsprg groups
+    (direct mapping; thick shells share the /BRICK id space).
 
     kind "PLANE": an infinite cutting plane through tail (xct,yct,zct) with
     normal towards head (xch,ych,zch), optionally limited to a circle of
@@ -2547,6 +2548,21 @@ class CrossSection:
     (0 = all). The writer resolves the cut geometrically: elements whose nodes
     straddle the plane are the section elements, and their nodes on the TAIL
     side of the plane form the node group (the standard /SECT construction).
+
+    ``xhev/yhev/zhev`` is the HEAD of Figure 16-2's edge vector **L** (Vol I
+    R17 p.16-48), i.e. the in-plane axis the card itself states. It is what the
+    /SECT output frame's first axis is built from — see
+    ``inistate._sect_synth_frame``.
+
+    ``radius_is_nodes`` records ``RADIUS < 0``: Vol I R17 p.16-49/50 then makes
+    ``XCT`` and ``XCH`` NODE IDS (centre, and a node the normal points at),
+    with ``YCT/ZCT/YCH/ZCH`` ignored and the radius ``|RADIUS|``. The handler
+    resolves them, so the writer always sees coordinates.
+
+    ``loc_id``/``itype`` are Card 1a.2 fields 6-7. ITYPE selects which id
+    namespace LOC_ID lives in — 0 = rigid body (a PART), 1 = accelerometer (an
+    ELEMENT), 2 = a *DEFINE_COORDINATE_* — so it must be read before LOC_ID can
+    even be reported.
     """
     csid: int           # user id from the _ID variant (0 = auto-assign)
     title: str
@@ -2556,11 +2572,19 @@ class CrossSection:
     hsid: int = 0       # solid element set
     bsid: int = 0       # beam element set
     ssid: int = 0       # shell element set
+    tsid: int = 0       # thick-shell element set (emitted as /BRICK)
+    dsid: int = 0       # discrete (spring) element set
     # _PLANE fields
     psid: int = 0       # part set restriction (0 = all parts)
     xct: float = 0.0; yct: float = 0.0; zct: float = 0.0
     xch: float = 0.0; ych: float = 0.0; zch: float = 0.0
     radius: float = 0.0
+    radius_is_nodes: bool = False
+    # Card 2 (PLANE): the edge vector L's head, and the reporting-frame request
+    xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
+    has_hev: bool = False
+    loc_id: int = 0
+    itype: int = 0
 
 
 @dataclass

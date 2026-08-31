@@ -676,16 +676,26 @@ class InitialStressSectionTests(unittest.TestCase):
         for k in range(3):
             self.assertAlmostEqual(got[k], nrm[k], places=6)
 
-    def test_the_reporting_sections_own_frame_is_NOT_the_plane_normal(self):
-        # The reason the preload gets its own /SECT: _sect_frame_nodes picks
-        # the best-CONDITIONED mesh nodes, which has nothing to do with the
-        # cut. If this ever starts matching, the dedicated section could go.
+    def test_the_reporting_section_now_realizes_the_plane_normal_too(self):
+        """The REVERSE of what this pinned before the SIDE-DEFECT batch.
+
+        The reporting /SECT used to take three best-CONDITIONED MESH nodes,
+        which has nothing to do with the cut — measured 26.57 degrees off on a
+        +X plane, with the frame origin not even on the plane — and this test
+        asserted the mismatch, noting "if this ever starts matching, the
+        dedicated section could go". It matches now: item (E) gives the
+        reporting section the same synthesized-node construction #127 built
+        for the preload one.
+
+        The dedicated preload /SECT is still emitted separately, because the
+        two carry different element groups (the preload one is bricks-only,
+        intersected with *INITIAL_STRESS_SECTION's own PSID) and different
+        node scopes. Merging them is a separate change."""
         nrm = _unit((1.0, 2.0, -3.0))
         _r, starter = _convert(_bar_deck(normal=nrm))
         got = _frame_normal(starter, 1)
-        self.assertGreater(
-            min(sum((got[k] - s * nrm[k]) ** 2 for k in range(3))
-                for s in (1.0, -1.0)), 1e-6)
+        for k in range(3):
+            self.assertAlmostEqual(got[k], nrm[k], places=6)
 
     def test_reporting_section_and_th_sectio_are_untouched(self):
         _r, starter = _convert(_bar_deck())
@@ -793,7 +803,10 @@ class InitialStressSectionTests(unittest.TestCase):
     def test_frame_nodes_are_fresh_ids_registered_in_the_node_table(self):
         _r, starter = _convert(_bar_deck())
         nodes = _nodes_of(starter)
-        self.assertEqual(len(nodes), 20 + 3)
+        # 20 mesh nodes + 3 for the preload /SECT frame + 3 for the REPORTING
+        # /SECT frame, which got the same synthesized construction in the
+        # SIDE-DEFECT batch (item E).
+        self.assertEqual(len(nodes), 20 + 3 + 3)
         sect_id = int(_headers(starter, "/SECT/")[-1].split("/")[-1])
         for nid in _sect_frame(starter, sect_id):
             self.assertGreater(nid, 20)
