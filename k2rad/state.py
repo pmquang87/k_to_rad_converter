@@ -6364,6 +6364,17 @@ class ThermalBoundary:
     lcid: int = 0
     mult: float = 0.0                           # that curve's multiplier
     coef: float = 0.0                           # H / emissivity (see above)
+    #: ``HLCID`` / ``FLCID`` — the curve id LS-DYNA offers for ``h`` and for
+    #: ``f = sigma*eps*F``. Radioss has NO slot for either (both are scalars,
+    #: and the one function slot is spent on T_inf), so this is carried only so
+    #: the writer can refuse the record BY NAME instead of silently using the
+    #: constant multiplier beside it. Kept separate from ``lcid``/``mult``,
+    #: which are the T_inf pair.
+    coef_lcid: int = 0
+    #: ``max(MLC) - min(MLC)`` on a *BOUNDARY_FLUX record: /IMPFLUX splits its
+    #: one ``Fscale_y`` evenly over the segment's nodes (``fixflux.F:167``), so
+    #: a non-zero spread is inexpressible and refuses the record.
+    mlc_spread: float = 0.0
     #: Writer-resolved.
     func_id: int = 0
     fscale: float = 1.0

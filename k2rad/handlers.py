@@ -10578,8 +10578,11 @@ def _boundary_segment_source(state: ConversionState, kw: str, is_set: bool,
         else:
             rec.pserod = to_int(f1[1]) if len(f1) > 1 else 0
     else:
-        rec.nodes = [to_int(f1[j]) for j in range(min(4, len(f1)))
-                     if f1[j].strip()]
+        # POSITIONAL: a blank N3 beside a stated N4 must leave a hole, not
+        # shift N4 into N3's slot. The trailing-blank / N4 = N3 triangle
+        # spellings are collapsed by the writer, exactly as handle_set_segment
+        # collapses them.
+        rec.nodes = [to_int(f1[j]) if len(f1) > j else 0 for j in range(4)]
         if kind == "RADIATION":
             rtype = to_int(f1[4]) if len(f1) > 4 and f1[4].strip() else 1
             if rtype != 1:
@@ -10625,6 +10628,23 @@ def handle_boundary_thermal_bc(block: Block, state: ConversionState) -> None:
     kw = block.keyword
     is_set = kw.endswith("_SET")
     is_flux = "FLUX" in kw
+    if not (is_set or kw.endswith("_SEGMENT")):
+        # The manual heads all three keywords with a MANDATORY option
+        # (*BOUNDARY_FLUX_OPTION p.5-46, *BOUNDARY_CONVECTION_OPTION p.5-30,
+        # *BOUNDARY_RADIATION_OPTION1_... p.5-109), so a bare spelling is not
+        # a card LS-DYNA defines. It is read as the _SEGMENT layout — which is
+        # SAFE either way: a deck that meant _SET puts an SSID in the N1 cell,
+        # the remaining node cells come out blank, and the writer drops the
+        # record by name rather than building a one-node surface.
+        state.warn(
+            f"*{kw}: this keyword's OPTION suffix is MANDATORY — Vol I R17 "
+            "heads the card *BOUNDARY_FLUX_OPTION / _CONVECTION_OPTION / "
+            "_RADIATION_OPTION1_{OPTION2}_{OPTION3} with SEGMENT and SET as "
+            "the choices — so the bare spelling is not a card the manual "
+            "defines and its card 1 is ambiguous. It is read as the _SEGMENT "
+            "layout (N1 N2 N3 N4); if the deck meant a segment SET, the record "
+            "will be dropped by name for want of a resolvable segment. Write "
+            f"*{kw}_SET or *{kw}_SEGMENT.")
     offset = _title_offset(block)
     raw = block.raw
     i = offset
@@ -10652,9 +10672,9 @@ def handle_boundary_thermal_bc(block: Block, state: ConversionState) -> None:
                 # /IMPFLUX splits ONE Fscale_y evenly over the segment's nodes
                 # (fixflux.F:167 FLUX = FOURTH*FLUX). Per-node weights are only
                 # expressible when they agree; the writer refuses the record
-                # otherwise, so all four are carried through here.
+                # otherwise, so the spread is carried through here.
                 rec.mult = mlc[0]
-                rec.coef = max(mlc) - min(mlc)   # the spread, for the writer
+                rec.mlc_spread = max(mlc) - min(mlc)
                 rec.loc = to_int(f2[5]) if len(f2) > 5 else 0
                 if nhisv > 0:
                     state.note_recognized_not_emitted(
@@ -10667,16 +10687,15 @@ def handle_boundary_thermal_bc(block: Block, state: ConversionState) -> None:
                         "history variables' initial values alone.")
                     rec = None
         elif rec is not None:
-            if rec.kind == "CONVEC":
-                rec.coef = to_float(f2[1]) if len(f2) > 1 else 0.0  # HMULT → H
-            else:
-                rec.coef = to_float(f2[1]) if len(f2) > 1 else 0.0  # FMULT
+            # HMULT -> H for /CONVEC, FMULT -> the f the writer de-scales into
+            # /RADIATION's emissivity cell.
+            rec.coef = to_float(f2[1]) if len(f2) > 1 else 0.0
             # field 0 is HLCID/FLCID: the h (or f) CURVE, which Radioss has no
-            # slot for at all. Recorded on `mult` so the writer can refuse by
-            # name rather than silently using the constant beside it.
-            rec.mult = float(to_int(f2[0]) if f2 else 0)
-            rec.lcid = to_int(f2[2]) if len(f2) > 2 else 0
-            rec.fscale = to_float(f2[3]) if len(f2) > 3 else 0.0   # TMULT
+            # slot for at all — recorded so the writer can refuse BY NAME
+            # rather than silently using the constant beside it.
+            rec.coef_lcid = to_int(f2[0]) if f2 else 0
+            rec.lcid = to_int(f2[2]) if len(f2) > 2 else 0          # TLCID
+            rec.fscale = to_float(f2[3]) if len(f2) > 3 else 0.0    # TMULT
             rec.loc = to_int(f2[4]) if len(f2) > 4 else 0
         if rec is not None:
             state.thermal_boundaries.append(rec)

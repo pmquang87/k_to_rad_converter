@@ -291,6 +291,40 @@ class BoundaryFluxTests(unittest.TestCase):
         self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
         self.assertTrue(_warned(result, "*SET_SEGMENT 77 is not defined"))
 
+    def test_the_segment_nodes_are_read_POSITIONALLY(self):
+        # A blank N3 beside a stated N4 must leave a HOLE, not shift N4 into
+        # N3's slot: the first draft filtered blanks out of the list and would
+        # have built a triangle 5-6-8 from a card that states 5, 6, _, 8.
+        card = ("*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, "", 8) + "\n"
+                + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0) + "\n")
+        result, starter, _ = _convert(_deck(card))
+        self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+        self.assertTrue(_warned(result, "not in the converted deck"))
+
+    def test_a_trailing_zero_makes_a_triangle(self):
+        # Vol I R17 p.43-63: "To define a triangular segment, set N4 = N3" —
+        # and a trailing blank is the other house style. Both must survive; it
+        # is only an INTERIOR hole that is malformed.
+        for n4 in (0, 7):
+            with self.subTest(n4=n4):
+                card = ("*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, n4) + "\n"
+                        + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0)
+                        + "\n")
+                _result, starter, _ = _convert(_deck(card))
+                rows = _data_rows(starter, _one_header(starter, "/SURF/SEG/"))
+                self.assertEqual(rows[1:], [_row(1, 5, 6, 7, 0)])
+
+    def test_the_bare_spelling_names_its_own_ambiguity(self):
+        # *BOUNDARY_FLUX with no OPTION is not a card Vol I R17 defines
+        # (p.5-46 heads it *BOUNDARY_FLUX_OPTION). It is read as _SEGMENT,
+        # which drops a _SET-shaped card by name instead of building a
+        # one-node surface out of an SSID.
+        card = ("*BOUNDARY_FLUX\n" + _row(50, 0) + "\n"
+                + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0) + "\n")
+        result, starter, _ = _convert(_deck(SEG1 + card))
+        self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+        self.assertTrue(_warned(result, "OPTION suffix is MANDATORY"))
+
     def test_pserod_and_loc_are_named_drops(self):
         card = ("*BOUNDARY_FLUX_SET\n" + _row(50, 42) + "\n"
                 + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 1, 0) + "\n")
@@ -957,6 +991,27 @@ class LoadThermalElementTests(unittest.TestCase):
         self.assertEqual(_funct_points(starter, fid),
                          [(0.0, 520.0), (1.0, 520.0)])
         self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
+    def test_an_element_card_is_not_read_as_the_model_wide_t0(self):
+        # An element record carries sid = 0 (it names no set) beside an
+        # EXPLICIT node list, so a t = 0 scan testing sid alone would read a
+        # handful of elements' temperature as the WHOLE MODEL's initial state
+        # and write it into /HEAT/MAT's T0.
+        deck = TWO_BRICKS.replace(
+            "{EXTRA}",
+            "*LOAD_THERMAL_CONSTANT_ELEMENT_SOLID\n"
+            + _row(1, 500.0) + "\n" + _row(2, 500.0) + "\n")
+        _result, starter, _ = _convert(deck)
+        body = _data_rows(starter, "/HEAT/MAT/1")
+        self.assertAlmostEqual(float(body[0][0:20]), 0.0)
+        # ...while a genuinely model-wide driver DOES set it.
+        wide = TWO_BRICKS.replace(
+            "{EXTRA}",
+            "*LOAD_THERMAL_CONSTANT\n" + _row(0, 0, 0) + "\n"
+            + _row(500.0) + "\n")
+        _result, starter, _ = _convert(wide)
+        body = _data_rows(starter, "/HEAT/MAT/1")
+        self.assertAlmostEqual(float(body[0][0:20]), 500.0)
 
     def test_an_element_of_the_wrong_family_is_dropped_by_name(self):
         # Element ids are per-FAMILY namespaces: a _BEAM card must not find a

@@ -1250,8 +1250,13 @@ def _global_initial_temperature(state: ConversionState) -> Optional[float]:
         if not it.is_node and it.sid == 0:
             return it.temp
     for d in state.imposed_temperatures:
-        if d.sid or d.is_node:
-            continue                    # not a model-wide driver
+        if d.sid or d.is_node or d.nids:
+            # Not a model-wide driver. `nids` matters as much as `sid` here:
+            # a *LOAD_THERMAL_*_ELEMENT record carries sid = 0 (it names no
+            # set at all) beside an EXPLICIT node list, so testing sid alone
+            # would read a handful of elements' temperature as the whole
+            # model's t = 0 state.
+            continue
         if d.initial_temp is not None:
             return d.initial_temp
         if d.lcid:
@@ -1309,16 +1314,12 @@ def _thermal_material_usable(state: ConversionState, tm, mid: int) -> bool:
         ks = (tm.k1, tm.k2, tm.k3)
         kmax, kmin = max(ks), min(ks)
         if kmax - kmin > 1e-9 * max(1.0, abs(kmax)):
+            ratio = (f"; ratio {kmax / kmin:.4g}x" if kmin
+                     else ", one of them zero")
             state.warn(
                 f"*MAT_THERMAL_ORTHOTROPIC {tm.tmid} -> /HEAT/MAT/{mid}: the "
                 f"three conductivities differ (K1={tm.k1:g}, K2={tm.k2:g}, "
-                f"K3={tm.k3:g}; ratio {kmax / kmin:.4g}x)"
-                if kmin else
-                f"*MAT_THERMAL_ORTHOTROPIC {tm.tmid} -> /HEAT/MAT/{mid}: the "
-                f"three conductivities differ (K1={tm.k1:g}, K2={tm.k2:g}, "
-                f"K3={tm.k3:g}, one of them zero)")
-            state.warn(
-                f"*MAT_THERMAL_ORTHOTROPIC {tm.tmid}: /HEAT/MAT is ISOTROPIC "
+                f"K3={tm.k3:g}{ratio}). /HEAT/MAT is ISOTROPIC "
                 "— one conductivity pair per phase (hm_read_therm.F:157-166 "
                 "reads AS, BS, AL, BL and nothing else), and Radioss has no "
                 "orthotropic thermal material at any cfg version. Picking K1, "
@@ -2022,16 +2023,23 @@ def _bc_segments(state: ConversionState, bc) -> Optional[List[List[int]]]:
     exactly as ``handle_set_segment`` does — ``hm_read_surf.F:318-321`` puts
     the degenerate corner back inside the starter.
     """
-    if bc.nodes:
-        nodes = [n for n in bc.nodes if n]
+    if any(bc.nodes):
+        # POSITIONAL, exactly like handle_set_segment: only a TRAILING zero (or
+        # the N4 = N3 spelling) makes a triangle — Vol I R17 p.43-63 *"To define
+        # a triangular segment, set N4 = N3"*, and hm_read_surf.F:318-321
+        # restores the degenerate corner inside the starter. A zero in N2 or N3
+        # is a malformed card, and squeezing it out would silently build a
+        # DIFFERENT triangle out of the corners that remain.
+        nodes = list(bc.nodes)
         while len(nodes) > 3 and (nodes[-1] == 0 or nodes[-1] == nodes[-2]):
             nodes.pop()
         missing = [n for n in nodes if n not in state.nodes]
         if len(nodes) < 3 or missing:
             state.warn(
                 f"{bc.source}: the segment's node(s) {missing or nodes} are "
-                "not in the converted deck, so no /SURF/SEG can be built — "
-                "card dropped.")
+                "not in the converted deck (a zero in N1..N3 is a malformed "
+                "card — only a TRAILING zero or N4 = N3 makes a triangle), so "
+                "no /SURF/SEG can be built — card dropped.")
             return None
         return [nodes]
     ss = state.segment_sets.get(bc.ssid)
@@ -2200,10 +2208,10 @@ def _resolve_flux(state: ConversionState, bc) -> bool:
     ``fct_IDT`` is evaluated at ``(t - TSTART)/ASCALE`` and nothing else
     (``fixflux.F:140``), so that form is refused too.
     """
-    if bc.coef > 1e-12 * max(1.0, abs(bc.mult)):
+    if bc.mlc_spread > 1e-12 * max(1.0, abs(bc.mult)):
         state.warn(
             f"{bc.source}: MLC1..MLC4 are PER-NODE flux multipliers and they "
-            f"differ (spread {bc.coef:g} about MLC1 = {bc.mult:g}). /IMPFLUX "
+            f"differ (spread {bc.mlc_spread:g} about MLC1 = {bc.mult:g}). /IMPFLUX "
             "carries ONE Fscale_y and splits the segment's heat EVENLY over "
             "its nodes (fixflux.F:167-172, FLUX = FOURTH*FLUX for a quad and "
             "THIRD for a triangle), so a per-node weighting cannot be "
@@ -2273,7 +2281,7 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
     function slot is already spent on ``T_inf``. Flattening the curve to its
     first ordinate would state a coefficient the deck does not.
     """
-    hlcid = int(bc.mult)
+    hlcid = bc.coef_lcid
     if hlcid:
         state.warn(
             f"{bc.source}: HLCID={hlcid} makes the convection coefficient h a "
@@ -2370,7 +2378,7 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
     disagree; both numbers are printed rather than a physically impossible
     emissivity being emitted silently.
     """
-    flcid = int(bc.mult)
+    flcid = bc.coef_lcid
     if flcid:
         state.warn(
             f"{bc.source}: FLCID={flcid} makes the radiation coefficient "
@@ -2531,7 +2539,7 @@ def _make_thermal_boundaries(state: ConversionState) -> List[str]:
         segs = _bc_segments(state, bc)
         if segs is None:
             continue
-        key = ("set", bc.ssid) if not bc.nodes else \
+        key = ("set", bc.ssid) if not any(bc.nodes) else \
             ("seg", tuple(tuple(s) for s in segs))
         surf_id = surfs.get(key)
         if surf_id is None:
@@ -2768,7 +2776,7 @@ def _make_thermal_output(state: ConversionState,
     for bc in state.thermal_boundaries:
         if not bc.surf_id:
             continue                    # the record was dropped at emission
-        segs = ([bc.nodes] if bc.nodes else
+        segs = ([bc.nodes] if any(bc.nodes) else
                 [s for s in state.segment_sets[bc.ssid].segments])
         for seg in segs:
             for n in seg:
