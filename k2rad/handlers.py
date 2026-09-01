@@ -254,16 +254,61 @@ def _note_node_constraint(state: ConversionState, nid: int, tc: str,
         return
 
 
+def _free_node_id(tok: str) -> bool:
+    """True when *tok* can be a free-format *NODE row's field 1.
+
+    That field is the node id (type I), so an integer token — or a ``&name``
+    parameter reference, which ``to_int`` resolves — is the whole legal set.
+    Anything else means the whitespace split welded the id onto a negative
+    first coordinate and the row has to be read from its fixed columns
+    instead. See :func:`handle_node`.
+
+    Measured across both corpus roots: of the 58 303 *NODE rows whose field 1
+    is not an integer token, ALL 58 303 are the welded kind — there is no
+    ``&``-id, comma-format or blank-id row anywhere to trade against.
+    """
+    t = (tok or "").strip()
+    return t.startswith("&") or _is_int_token(t)
+
+
 def handle_node(block: Block, state: ConversionState) -> None:
+    """*NODE — ``NID X Y Z TC RC`` (Vol I R17 p.35-3), I8 + 3xE16 + 2xI8.
+
+    The fixed-vs-free discrimination is the whole difficulty. A negative
+    coordinate fills its 16-char field completely and glues onto the field
+    BEFORE it ("... 0.000000000e+00-1.250000000e+00"), so a whitespace split
+    of a fixed-format row can under-count, leave an over-long merged token —
+    or, when exactly the right cells are negative, produce four perfectly
+    ordinary-looking tokens with the NODE ID welded to the front of the first
+    one.
+
+    That last case is why ``f[0]`` is now tested too, and it is not academic:
+    the width test alone missed **58 303 rows across 188 corpus files**. Take
+    ``dynaexamples/sph/bar-iv/taylor1.k``, where X and Y are negative and Z is
+    not::
+
+        '       5-1.000000000E+01-1.000000000E+01 0.000000000E+00       7   0'
+          -> ['5-1.000000000E+01-1.000000000E+01', '0.000000000E+00', '7', '0']
+
+    Four tokens, none longer than 16, so it took the FREE branch,
+    ``to_int('5-1.000000000E+01-1.000000000E+01')`` returned 0, and the row
+    was written to ``state.nodes[0]`` with the wrong coordinates — nodes 5 and
+    7 GONE, a phantom node 0 in their place, and the deck's only /BRICK left
+    referencing two ids that no longer exist, at ZERO warnings. (It is also
+    why this deck's *NODE TC/RC count disagreed with an independent scan of
+    the same file by exactly the number of lost rows.)
+
+    An ``f[0]`` that is not an integer token can only mean the split merged
+    the id with a coordinate: in genuine free format field 1 IS the node id.
+    Testing the token's TYPE rather than its width also keeps the guard safe
+    for a free-format id longer than eight digits, which no fixed-format row
+    can carry — measured: 0 such rows in the corpus, but the type test costs
+    nothing to be right about.
+    """
     for line in block.raw:
         f = parse_free(line)
-        # LS-DYNA standard *NODE is fixed I8 + 3×E16: a negative coordinate
-        # fills its 16-char field completely and glues onto the previous field
-        # ("… 0.000000000e+00-1.250000000e+00"), so a whitespace split either
-        # under-counts or leaves an over-long merged token. Re-slice the fixed
-        # columns in that case — otherwise every node with a glued negative
-        # coordinate is silently dropped (e.g. an entire plate at z < 0).
-        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+                or not _free_node_id(f[0]):
             nid = to_int(line[0:8])
             if nid <= 0:
                 continue
@@ -276,6 +321,15 @@ def handle_node(block: Block, state: ConversionState) -> None:
                                       line[64:72].strip())
             continue
         nid = to_int(f[0])
+        if nid <= 0:
+            # Unreachable while the branch test above is right; kept so that a
+            # future miss DROPS the row instead of minting node 0 and letting
+            # every later row overwrite it (which is exactly how the defect
+            # above stayed silent).
+            state.warn(f"*NODE: the row {line.strip()[:40]!r} has no usable "
+                       "node id — it was dropped rather than written to node "
+                       "0; check the card's column layout.")
+            continue
         state.nodes[nid] = NodeData(to_float(f[1]), to_float(f[2]), to_float(f[3]))
         if len(f) > 4:
             _note_node_constraint(state, nid, f[4].strip(),
@@ -12455,9 +12509,15 @@ def handle_initial_foam_reference_geometry(block: Block,
                 break
     for line in raw[start:]:
         f = parse_free(line)
-        # Same glued-negative-coordinate hazard as *NODE: re-slice fixed
-        # columns when the whitespace split under-counts or merges fields.
-        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+        # Same glued-negative-coordinate hazard as *NODE, and the same three
+        # tests: re-slice the fixed columns when the whitespace split
+        # under-counts, leaves an over-long merged token, or welds the node id
+        # onto the first coordinate (four ordinary-looking tokens whose FIRST
+        # one is not an integer). Here the `nid > 0` guard below turned that
+        # third case into a silent DROP rather than a phantom node 0 —
+        # different symptom, same cause. See handle_node.
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+                or not _free_node_id(f[0]):
             nid = to_int(line[0:8])
             if nid <= 0:
                 continue

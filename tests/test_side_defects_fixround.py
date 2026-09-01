@@ -729,5 +729,126 @@ class TestEverySynthesizedGrnodDodgesUserSets(unittest.TestCase):
         self.assertEqual(bare, [])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MAJOR (pre-existing) — a *NODE id welded to a negative first coordinate
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNodeIdWeldedToANegativeCoordinate(unittest.TestCase):
+    """``handle_node``'s fixed-vs-free discrimination tested the WIDTH of
+    fields 2-4 and never looked at field 1.
+
+    LS-DYNA's standard ``*NODE`` is I8 + 3xE16, and a negative coordinate
+    fills its 16-char field completely, gluing onto the field before it. When
+    X and Y are negative and Z is not, the whitespace split produces four
+    perfectly ordinary-looking tokens with the NODE ID welded to the front of
+    the first::
+
+        '       5-1.000000000E+01-1.000000000E+01 0.000000000E+00       7   0'
+          -> ['5-1.000000000E+01-1.000000000E+01', '0.000000000E+00', '7', '0']
+
+    so the row took the FREE branch, ``to_int`` of that merged token returned
+    0, and the node was written to ``state.nodes[0]`` with junk coordinates.
+
+    MEASURED on ``dynaexamples/sph/bar-iv/taylor1.k`` (the real corpus
+    carrier), converting on master vs this branch:
+
+        master   /NODE ids below 100 = [0, 1, 2, 3, 4, 6, 8]
+                 nodes 5 and 7 GONE, a phantom node 0 in their place, the
+                 deck's only /BRICK still referencing 5 and 7, ZERO warnings
+                 -> starter: 2 x ERROR ID 78 UNDEFINED NODE NUMBER
+                    ("NODE ID=5 DOES NOT EXIST", "NODE ID=7 DOES NOT EXIST")
+        branch   [1, 2, 3, 4, 5, 6, 7, 8], no node 0, both ERROR 78 gone
+
+    Corpus reach: **58 303 rows across 188 files** in the two corpus roots,
+    all of them this one shape. The risk class the fix could have traded
+    against — a free-format id longer than the fixed I8 column, or a comma
+    row, or a ``&parameter`` id — is measured EMPTY, and ``_free_node_id``
+    accepts ``&name`` anyway.
+    """
+
+    HEAD = "*KEYWORD\n"
+    TAIL = ("*SECTION_SOLID\n" + _row(1, 1) + "\n"
+            "*MAT_ELASTIC\n" + _row(1, "7.85E-9", "2.1E5", "0.3") + "\n"
+            "*PART\nbrick\n" + _row(1, 1, 1) + "\n"
+            "*CONTROL_TERMINATION\n" + _row("1.0") + "\n*END\n")
+
+    #: The taylor1.k corner block verbatim in shape: X and Y negative, Z not,
+    #: TC = 7 in the fixed column. Rows 5 and 7 are the ones that used to fall
+    #: through; 1 and 3 already took the fixed branch and are the control.
+    MESH = "*NODE\n" + "\n".join(
+        f"{nid:>8}{x:>16.9E}{y:>16.9E}{z:>16.9E}{7:>8}{0:>8}"
+        for nid, x, y, z in (
+            (1, -10.0, -10.0, -7.0), (2, 10.0, -10.0, -7.0),
+            (3, -10.0, 10.0, -7.0), (4, 10.0, 10.0, -7.0),
+            (5, -10.0, -10.0, 0.0), (6, 10.0, -10.0, 0.0),
+            (7, -10.0, 10.0, 0.0), (8, 10.0, 10.0, 0.0))) + "\n"
+
+    def _deck(self):
+        return (self.HEAD + self.MESH
+                + "*ELEMENT_SOLID\n" + _i8(1, 1) + "\n"
+                + _i8(1, 2, 4, 3, 5, 6, 8, 7) + "\n" + self.TAIL)
+
+    def test_the_welded_rows_are_read_from_their_fixed_columns(self):
+        _res, starter = _convert(self._deck())
+        ids = []
+        lines = starter.splitlines()
+        i = lines.index("/NODE")
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            ids.append(int(ln[0:10]))
+        self.assertEqual(sorted(ids), [1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertNotIn(0, ids)
+
+    def test_the_coordinates_are_the_cards_own(self):
+        _res, starter = _convert(self._deck())
+        self.assertEqual(_node_xyz(starter, 5), (-10.0, -10.0, 0.0))
+        self.assertEqual(_node_xyz(starter, 7), (-10.0, 10.0, 0.0))
+        # The control rows, which already took the fixed branch.
+        self.assertEqual(_node_xyz(starter, 1), (-10.0, -10.0, -7.0))
+        self.assertEqual(_node_xyz(starter, 3), (-10.0, 10.0, -7.0))
+
+    def test_the_element_no_longer_references_dead_ids(self):
+        res, starter = _convert(self._deck())
+        self.assertTrue(_headers(starter, "/BRICK/"))
+        self.assertEqual(_warns(res, "MESH LOSS"), [])
+
+    def test_the_TC_RC_count_matches_an_independent_scan(self):
+        """The batch's new *NODE TC/RC note counted 6 on taylor1.k where an
+        independent scan of the same file found 8 — the two lost rows carry
+        TC = 7 as well. The counter was right; the reader under it was not."""
+        res, _starter = _convert(self._deck())
+        w = _warns(res, "TC/RC cells")
+        self.assertEqual(len(w), 1)
+        self.assertIn("8 node(s)", w[0])
+
+    def test_a_genuine_free_format_row_still_takes_the_free_branch(self):
+        """The discriminator: the same mesh written free-format, where field 1
+        IS an integer token and the fixed columns hold nothing."""
+        free = "*NODE\n" + "\n".join(
+            f"{nid}, {x}, {y}, {z}"
+            for nid, x, y, z in ((1, -10.0, -10.0, -7.0), (2, 10.0, -10.0, -7.0),
+                                 (3, -10.0, 10.0, -7.0), (4, 10.0, 10.0, -7.0),
+                                 (5, -10.0, -10.0, 0.0), (6, 10.0, -10.0, 0.0),
+                                 (7, -10.0, 10.0, 0.0), (8, 10.0, 10.0, 0.0)))
+        deck = (self.HEAD + free + "\n*ELEMENT_SOLID\n" + _i8(1, 1) + "\n"
+                + _i8(1, 2, 4, 3, 5, 6, 8, 7) + "\n" + self.TAIL)
+        _res, starter = _convert(deck)
+        self.assertEqual(_node_xyz(starter, 5), (-10.0, -10.0, 0.0))
+        self.assertEqual(_node_xyz(starter, 8), (10.0, 10.0, 0.0))
+
+    def test_a_parameter_node_id_is_still_free_format(self):
+        """``&name`` in field 1 resolves through ``to_int``; the guard must
+        not push it into the fixed branch, where the ``&`` would be sliced."""
+        deck = ("*KEYWORD\n*PARAMETER\n" + f"{'Ibase':<10}{5:>10}\n"
+                + "*NODE\n"
+                + "&base, -10.0, -10.0, 0.0\n"
+                + "*CONTROL_TERMINATION\n" + _row("1.0") + "\n*END\n")
+        _res, starter = _convert(deck)
+        self.assertEqual(_node_xyz(starter, 5), (-10.0, -10.0, 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
