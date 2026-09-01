@@ -1,10 +1,20 @@
-"""Thermal expansion and the minimal temperature-driver foothold.
+"""Thermal expansion, the temperature drivers, and the heat-source boundaries.
 
   ``*MAT_ADD_THERMAL_EXPANSION``            → ``/THERM_STRESS/MAT`` + ``/HEAT/MAT``
   ``*MAT_THERMAL_ISOTROPIC`` via ``*PART`` TMID → the ``/HEAT/MAT`` values
+  ``*MAT_THERMAL_ISOTROPIC_TD[_LC]``        → the same, by a two-segment FIT
+  ``*MAT_THERMAL_ORTHOTROPIC``              → the same, when K1 = K2 = K3
   ``*INITIAL_TEMPERATURE_{SET,NODE}``       → ``/INITEMP`` on a ``/GRNOD``
   ``*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]`` → ``/IMPTEMP``
+  ``*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_<FAMILY>`` → ``/IMPTEMP``
   ``*BOUNDARY_TEMPERATURE_{SET,NODE}``      → ``/IMPTEMP``
+  ``*BOUNDARY_FLUX_{SEGMENT,SET}``          → ``/IMPFLUX``   (the SIGN is FLIPPED)
+  ``*BOUNDARY_CONVECTION_{SEGMENT,SET}``    → ``/CONVEC``
+  ``*BOUNDARY_RADIATION_{SEGMENT,SET}``     → ``/RADIATION`` (E = FMULT / sigma)
+
+The two ENGINE thermal keywords ``/DT/THERM`` and ``/THERM`` live in
+``writer/assembly.py::_make_engine_thermal``, beside the ``/DT`` family they
+belong to.
 
 **Why the drivers ship WITH the expansion card.** Radioss's thermal expansion is
 INCREMENTAL, not secant: the engine computes ``ETH = alpha(T)·Fscale ·
@@ -1670,7 +1680,11 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 "all prescribed by *LOAD_THERMAL_* or *BOUNDARY_TEMPERATURE — "
                 "the thermal expansion then reads exactly the field the deck "
                 "states — but any node NOT covered by a driver keeps its "
-                f"initial temperature forever. RHO0_CP = {rho_cp:g} is "
+                "initial temperature forever, and a deck driven by a HEAT "
+                "SOURCE (*BOUNDARY_FLUX / _CONVECTION / _RADIATION) instead has "
+                "nowhere for that heat to go: it piles up on the loaded surface "
+                "nodes. (That case gets its own warning where the boundary "
+                f"cards are resolved.) RHO0_CP = {rho_cp:g} is "
                 + ("the mechanical law's own volumetric rhoC_p."
                    if rho_cp != _RHO_CP_PLACEHOLDER else
                    "a placeholder: with no conduction and no strain-energy "

@@ -495,9 +495,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
     # Nodal temperature, ONLY when the deck really runs a thermal solve (a
-    # /HEAT/MAT AND a driver). The #122 rule: /ANIM and /TH temperature
-    # channels on a deck with no thermal solve are accepted, run clean and
-    # write state after state of exactly 0.0.
+    # /HEAT/MAT AND an emitted temperature-moving card — an /IMPTEMP, or one of
+    # the heat sources /CONVEC, /RADIATION, /IMPFLUX). The #122 rule: /ANIM and
+    # /TH temperature channels on a deck with no thermal solve are accepted,
+    # run clean and write state after state of exactly 0.0.
     if _thermal_solve_active(state):
         lines.append("/ANIM/NODA/TEMP")
     if state.db_blstfor_dt and state.blast_segment_loads:

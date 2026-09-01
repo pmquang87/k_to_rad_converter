@@ -837,21 +837,43 @@ validated foundation for further linear analyses:
   `*BOUNDARY_TEMPERATURE[_SET|_NODE]` → `/IMPTEMP`, with `/TH/NODE TEMP` and
   `/ANIM/NODA/TEMP` gated on a real thermal solve. Engine-validated to −0.11 %
   on the free bar and −0.135 % on the clamped one against `α·ΔT·L`.
-  **Still open (Milestone 2):** the thermal SOLVER controls
-  (`*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}` → the `/THERM` engine cards
-  and `/DTTHERM`), the flux/convection/radiation boundaries
-  (`*BOUNDARY_{FLUX,CONVECTION,RADIATION}[_SET]` → `/IMPFLUX`, `/CONVEC`,
-  `/RADIATION`), the richer thermal materials (`*MAT_THERMAL_CWM`,
-  `_ORTHOTROPIC`, `_ISOTROPIC_TD`, `_ISOTROPIC_TD_LC`), the per-element and
-  per-section temperature spellings (`*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT`,
-  `_VARIABLE_{BEAM,SHELL}`, `*LOAD_THERMAL_RSW`) and the external-field loads
-  (`*LOAD_THERMAL_D3PLOT`, `_BINOUT`, `_TOPAZ`) — every one of them recognized
-  and named in the conversion log today. Two measured limits remain: a
-  `*MAT_ELASTIC` shell is restated as `/MAT/LAW36` so it CAN expand, but a
-  material shared between shell and solid parts is left on LAW1 and its
-  expansion stays inert on the shells; and the solid path diverges when a run
-  of elements is free to TRANSLATE laterally as a group — the cure is one
-  lateral anchor per cross-section (an end clamp is NOT the trigger).
+  The THERMAL SOLVER batch then shipped the heat SOURCES and the run controls:
+  `*BOUNDARY_{FLUX,CONVECTION,RADIATION}_{SEGMENT,SET}` → `/IMPFLUX`,
+  `/CONVEC`, `/RADIATION` (with the LS-DYNA flux SIGN FLIP and the
+  `E = FMULT/σ_deck` emissivity de-scaling, both solver-measured),
+  `*CONTROL_SOLUTION` SOLN=1 → the engine card `/DT/THERM`,
+  `*CONTROL_THERMAL_SOLVER` TSF → `/THERM` and FWORK → `/HEAT/MAT` EFRAC,
+  `*MAT_THERMAL_ISOTROPIC_TD[_LC]` → a two-segment least-squares fit onto
+  `/HEAT/MAT`'s own piecewise-linear `k(T)`, `*MAT_THERMAL_ORTHOTROPIC` when it
+  is isotropic in fact, and the eight
+  `*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,TSHELL}`
+  spellings → `/IMPTEMP` over the elements' own nodes.
+  **Still open:** nothing in the thermal-solver scope that Radioss can express.
+  What is left is inexpressible and named in the log: the implicit thermal
+  controls (`*CONTROL_THERMAL_{TIMESTEP,NONLINEAR,FORMING,EIGENVALUE}` — Radioss
+  has no thermal matrix and no nonlinear iteration, `tempur.F:47-52` is the whole
+  integrator), view-factor / enclosure radiation
+  (`*BOUNDARY_RADIATION_*_VF_*`, `_ENCLOSURE`), moving heat sources
+  (`*BOUNDARY_FLUX_TRAJECTORY`), the welding material `*MAT_THERMAL_CWM`, the
+  per-section temperature GRADIENTS
+  (`*LOAD_THERMAL_VARIABLE_{BEAM,SHELL}[_SET]` — `/IMPTEMP` carries one value
+  per node) and the external-field loads
+  (`*LOAD_THERMAL_{RSW,D3PLOT,BINOUT,TOPAZ}`).
+  **Measured limits that remain.** (a) A `*MAT_ELASTIC` shell is restated as
+  `/MAT/LAW36` so it CAN expand, but a material shared between shell and solid
+  parts is left on LAW1 and its expansion stays inert on the shells. (b) The
+  solid expansion path diverges when a run of elements is free to TRANSLATE
+  laterally as a group — the cure is one lateral anchor per cross-section (an
+  end clamp is NOT the trigger). (c) In a COUPLED run Radioss never computes a
+  thermal stability step at all (`dttherm.F90` and `mqviscb.F:644` are both
+  gated on `IDT_THERM == 1`), so the temperature is integrated at the MECHANICAL
+  step with no thermal check — safe only because that step is normally far
+  smaller. (d) In a THERMAL-ONLY run (`/DT/THERM`) the step IS computed, but
+  from conduction alone: a stiff `/CONVEC` or `/RADIATION` diverges silently
+  under NORMAL TERMINATION, which k2rad now screens for and prescribes a scale
+  factor against. (e) `*CONTROL_THERMAL_SOLVER`'s `EQHEAT` has no counterpart,
+  so a deck whose mechanical and thermal units are NOT consistent converts with
+  its strain-energy-to-heat conversion off by exactly `EQHEAT`.
 
 *Rationale:* these extend the proven modal machinery rather than opening a new
 solver path, so risk is contained.

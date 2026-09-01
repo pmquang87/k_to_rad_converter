@@ -9,7 +9,172 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ## [Unreleased]
 
+### Added
+
+- **THERMAL SOLVER batch — the three heat-source boundaries, the two engine
+  thermal keywords and the richer thermal materials, closing the deferred
+  registry the RARE MATERIALS batch left behind.** Six engine-source verdicts
+  drove the scope, and five of them CORRECT a claim the old registry texts made.
+
+  - **`*BOUNDARY_FLUX_{SEGMENT,SET}` → `/IMPFLUX`, with the SIGN INVERTED.**
+    Vol I R17 p.5-49 Remark 1 verbatim: *"The segment normal has no bearing on
+    the flux. A negative flux transfers energy INTO the volume; a positive flux
+    transfers energy OUT of the volume."* `fixflux.F:165-172` adds
+    `+AREA·FLUX_DENS·DT1N` to the nodal heat and `tempur.F:51` turns that into a
+    temperature RISE, so `Fscale_y = −MLC`. MEASURED on converter output, a 1 mm
+    brick over 1.00012284e-3 s: `MLC = −70000` gave
+    `IMPOSED FLUX_DENSITY HEAT = +70.008599 mJ` against `q″·A·t = 70.0086`, and
+    the `MLC = +70000` twin gave `−70.008599`. Shipping this unflipped would
+    have inverted every flux boundary in every deck at 0 starter diagnostics.
+    `MLC1..MLC4` are PER-NODE weights that `/IMPFLUX` cannot express (it splits
+    the segment evenly, `fixflux.F:167`), so unequal ones refuse the record;
+    `LCID < 0` (flux vs temperature) and `NHISV > 0` (`usrflux`) likewise.
+  - **`*BOUNDARY_CONVECTION_{SEGMENT,SET}` → `/CONVEC`, with NO sign change.**
+    LS-DYNA writes the flux out of the surface, `q″ = h(T_s − T_∞)` (p.5-32
+    Remark 1); `convec.F:152` writes the heat in, `AREA·H·(T_INF − TE)·dt`. The
+    two expressions mirror, so `HMULT → H` maps 1:1 positive. MEASURED: `h =
+    100` on all six faces of the brick gave `CONVECTION HEAT = 387.00946 mJ`
+    against a lumped `387.005245` (+0.0011 %). A curve on `HLCID` is
+    inexpressible — `H` is a raw scalar (`hm_read_convec.F:165`) and the card's
+    one function slot already carries `T_∞` — and is a named drop rather than a
+    flattened coefficient the deck never states.
+  - **`*BOUNDARY_RADIATION_{SEGMENT,SET}` TYPE 1 → `/RADIATION`, with
+    `E = FMULT / σ_deck`.** This is the highest-risk cell in the batch: LS-DYNA's
+    `FMULT` is *"the radiation heat transfer coefficient, f = σεF"* (p.5-117
+    Remark 1) with the Stefan-Boltzmann constant ALREADY IN IT, while Radioss's
+    `E` is a bare emissivity and `hm_read_radiation.F:140-142/174` computes
+    `SIGMA = STEFBOLTZ·FAC_T³/FAC_M` itself from the `/BEGIN` unit line. Writing
+    `FMULT` through would over-scale radiation by 1/σ — a factor 1.76e10 on a
+    Mg-mm-s deck, invisible to the starter. MEASURED: `FMULT = 5.6704e-11`
+    (ε = 1), `T_∞ = 1000`, `T_0 = 300` gave `RADIATION HEAT = 0.056251513 mJ`
+    against a closed-form `0.056251607` (−0.0002 %); with the SI σ the same deck
+    would have stored 56.25 mJ. `σ_deck` is derived from the emitted `/BEGIN`
+    WORK line per `unit_code.F:99-151` (`5.6704e-11` for Mg-mm-s), which Vol I
+    R17 p.12-567's hot-stamping example confirms independently
+    (`sbc = 5.67e-11`). A de-scaled `E` outside (0, 1] refuses the card with both
+    numbers rather than emitting a physically impossible emissivity.
+  - **An OpenRadioss defect worked around without an engine patch.**
+    `radiation.F:249` places `T_INF = FCY*T_INF` OUTSIDE the cache guard it
+    opens at `:239`, so under `/PARITH/ON` (the default) a multi-segment card
+    with `Fscale_y ≠ 1` re-applies the ordinate scale ONCE PER SEGMENT and
+    reaches NaN within a few cycles; `convec.F:241` has the identical line
+    INSIDE its guard and is immune. Four-run isolation: 6 segments + FSCALE 1000
+    + P/ON → NaN; T_∞ in the curve with FSCALE 1 → 0.33750793 (correct); P/OFF →
+    0.33750793; 1 segment → correct either way. k2rad therefore bakes `T_∞` into
+    the `/FUNCT` and writes `Fscale_y = 1.0`.
+  - **`*CONTROL_SOLUTION` SOLN=1 → the engine card `/DT/THERM`.** The old
+    warning said *"Radioss has no thermal-only run mode"*; that was FALSE.
+    `freform.F:950-951` sets `IDT_THERM = 1`, `resol.F:1738`'s
+    `BCSDTTH_COPY(...,1)` then writes `ICODT = ICODR = 7` on EVERY node
+    (restored at `:9167`), `resol.F:5807-5809` replaces the mechanical step with
+    the conduction one, and `lectur.F:696-698` prints `THERMAL ANALYSIS ONLY`.
+    Refused together with `--ams` (`freform.F:1327-1331` is a hard
+    `ANCMSG(301)` + `ARRET(0)`), and refused on a deck that arms no thermal
+    solve. Two traps are guarded, both MEASURED under NORMAL TERMINATION with
+    0 ERROR / 0 WARNING: (1) an `ENDTIM` not larger than one thermal step does
+    exactly ONE cycle at `DT1 = 0` and stores ZERO heat
+    (`resol.F:5870-5880` clamps the step to the remaining time) — the LS-DYNA
+    `ENDTIM` was written for the mechanical time scale; (2) the step is a
+    CONDUCTION stability limit only, so a stiff surface load diverges — the same
+    brick at `ENDTIM = 0.2 s` reached `HEAT STORED = 7 901 590 mJ` where the
+    physical saturation is `2527.7`, a factor 3126. The guard estimates the step
+    as `0.9·0.5·Lc²·RHO0_CP/k` from the emitted `/HEAT/MAT` and the model's
+    shortest element edge (it matched the engine's own `0.3611E-01` to four
+    figures) and prescribes a scale factor — `0.225` on that deck, verified to
+    give `2527.6994` against an analytic `2527.7000`.
+  - **`*CONTROL_THERMAL_SOLVER` TSF → the engine card `/THERM`, FWORK →
+    `/HEAT/MAT` EFRAC.** `/THERM` (`frethermal.F:64-70`) carries exactly one
+    cell, `THEACCFACT`, which multiplies the conductivity (`dttherm.F90:114`) and
+    the time argument of every thermal source — term for term LS-DYNA's Thermal
+    Speedup Factor (p.12-576). `FWORK` and `EFRAC` are both *"the fraction of
+    mechanical work converted into heat"* and both turn a stated 0 into 1.0. The
+    card's other 15 cells are named per-field drops, `EQHEAT ≠ 1` is called out
+    as a unit inconsistency the converted deck cannot carry, and `SBC` becomes a
+    CROSS-CHECK against the σ `/BEGIN` implies — a mismatch there would put
+    every converted `/RADIATION` emissivity off by the same ratio.
+  - **`*MAT_THERMAL_ISOTROPIC_TD[_LC]` → `/HEAT/MAT` by a TWO-SEGMENT fit.**
+    The old registry text called `/HEAT/MAT`'s conductivity *"the linear
+    AS + BS*T only"*, three times. It is not: `dttherm.F90:102-106` (shells) and
+    `mqviscb.F:651-656` (solids) both select `AS + BS·T` below `T1` and
+    `AL + BL·T` above, i.e. a piecewise-linear `k(T)` with a break at `T1`. The
+    deck's table is least-squares-fitted onto both segments — with `T1` pinned to
+    the mechanical law's own melting temperature, because `/HEAT/MAT` OVERWRITES
+    `MAT_PARAM%THERM%TMELT` and that is what `mmain.F90:790` divides by, so it is
+    not free to be chosen as a fit elbow. The warning states all six fitted
+    coefficients and the max deviation. The real loss is `RHO0_CP`, which is ONE
+    constant with no temperature dependence at any cfg version, so a capacity
+    varying by more than 2× refuses the card instead of averaging it into a
+    different material. `_TD_LC`'s `HCLC`/`TCLC` curves are sampled in the WRITER
+    prepass, not at parse time — a `*DEFINE_CURVE` may follow the material.
+  - **`*MAT_THERMAL_ORTHOTROPIC` → `/HEAT/MAT` when `K1 = K2 = K3`.** That is an
+    isotropic card written on the orthotropic keyword and converts exactly (AOPT
+    and the material-axis cards are then provably inert). Three different
+    conductivities are a named drop that prints all three and their ratio, rather
+    than picking `K1` or inventing an average.
+  - **The eight `*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,
+    TSHELL}` spellings → `/IMPTEMP` over the elements' own nodes.** The `_OPTION`
+    suffix is MANDATORY on both keywords (Vol I R17 p.33-162 lists
+    `CONSTANT_ELEMENT_OPTION` and `VARIABLE_ELEMENT_OPTION`), so the bare
+    spellings the registry carried were eight DEAD entries — a real deck writes
+    `*LOAD_THERMAL_CONSTANT_ELEMENT_SHELL` and that reached the
+    unrecognized-keyword list. The card is element-centric (*"a uniform element
+    temperature"*, p.33-168) and `/IMPTEMP` is nodal (`fixtemp.F:196-205`), so the
+    element → node expansion is emitted only when the resulting map is
+    single-valued; a node claimed by two elements at two temperatures drops the
+    whole card by name rather than letting the last writer fabricate a field.
+    Element ids are looked up PER FAMILY, never over a union registry.
+  - **Full spelling coverage.** `_SEGMENT` was missing from all three boundary
+    families (a probe deck carrying `*BOUNDARY_FLUX_SEGMENT` came out under
+    *"Skipped (unsupported) keywords"* on master), and so were the nine
+    `*BOUNDARY_RADIATION_*_VF_*`/`_ENCLOSURE` spellings,
+    `*BOUNDARY_FLUX_TRAJECTORY`, `*CONTROL_THERMAL_{FORMING,EIGENVALUE}`,
+    `*LOAD_THERMAL_VARIABLE_{BEAM,SHELL}_SET` and the numeric material aliases
+    `*MAT_T01/T02/T03/T10`. Every one either converts or carries a named drop
+    with its reason; none is silently unrecognized.
+  - **Output + gating.** `_thermal_solve_active` now accepts a `/CONVEC`,
+    `/RADIATION` or `/IMPFLUX` as the temperature-moving card, so a deck with no
+    `/IMPTEMP` at all still arms `/ANIM/NODA/TEMP` and the `/TH/NODE TEMP` group
+    — which now covers the boundary segments' nodes, because a `/CONVEC`-only
+    deck has no driven nodes to cover. MEASURED that those three really do move
+    the temperature on their own: `/HEAT/MAT` + `/CONVEC`, every node in
+    `/BCS 111 111`, no engine card, ran 7011 cycles and stored 68.120647 mJ,
+    against 7.4e-32 for the twin with the `/CONVEC` removed. **Nothing new is
+    wired on the `/TH` side**: `hm_read_thgrou.F:1255` gives `/TH/SURF` exactly
+    `AREA, MASSFLOW, VELOCITY, P, A, MASS`, and no thermal-load `/TH` family
+    exists — there is not even a legal-but-zero channel to be tempted by (#122).
+    The whole-model heat balance is `thermbilan.F:63-71` in the engine `.out`,
+    which is the independent checker every number above was read from.
+  - Corpus reach: **zero** decks under `C:\openradioss_run` carry any keyword in
+    this batch (re-measured over 148 files under a 60 MB cap plus the three
+    larger ones streamed in chunks), so the two-half sweep — output files AND
+    `state.warnings` + `skipped_keywords` + `recognized_not_emitted`, stated
+    separately per the #129 rule — shows zero movers on both halves. All physics
+    validation is synthetic, as with the viscoelastic and adhesive batches.
+
 ### Fixed
+
+- **`/HEAT/MAT` wrote `AL = BL = 0.0` beside a real `T1`, which is `k = 0`
+  EXACTLY above the melting temperature.** `dttherm.F90:105` and
+  `mqviscb.F:654` both evaluate `AL + BL·T` above `T1`, and `T1` is set to the
+  material law's own melt temperature. The cells were harmless while no
+  conduction SOURCE existed — nothing moved heat, so nothing noticed the
+  insulating layer — and became a live defect the moment `/IMPFLUX`, `/CONVEC`
+  and `/RADIATION` could deposit it. `AS`/`BS` are now mirrored into `AL`/`BL`
+  unless the deck's own table states a second segment.
+- **`*CONTROL_SOLUTION` SOLN=1's warning asserted something false.** It said
+  *"Radioss has no thermal-only run mode; the structural degrees of freedom stay
+  live"*. `/DT/THERM` is exactly that run mode and freezes every one of them
+  (`resol.F:1738`). Corrected, and the same claim removed from
+  `writer/thermal.py`'s `mat_ID = 0` warning.
+- **Three registry texts named a Radioss card that does not exist.**
+  `*CONTROL_THERMAL_TIMESTEP`'s target was `/DTTHERM`: `dttherm.F90` is a
+  SUBROUTINE, and the engine's keyword table (`freform.F:214-250`) has `'DT '`
+  and `'THERM'` and nothing else. `*CONTROL_THERMAL_{SOLVER,NONLINEAR}` named
+  *"the /THERM engine controls"* and *"the /THERM nonlinear controls"*: `/THERM`
+  exists but carries exactly ONE cell, and there is no nonlinear-control family
+  because there is no nonlinear solve. All three rewritten, and both surviving
+  drops now name every field on their card (all eight of `_TIMESTEP`, all seven
+  of `_NONLINEAR` — the old text named three).
 
 - **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
   by re-verifying the review round below against the manual, the starter and
