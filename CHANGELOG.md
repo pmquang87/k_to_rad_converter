@@ -319,6 +319,35 @@ Prior history (before this changelog was introduced) is summarized in the
     resolver announced *"→ /IMPTEMP over the elements' OWN nodes"* and the SOLN
     screen then dropped the record two passes later, leaving a false sentence
     standing (#130). The screen now runs first.
+  - **The two-half sweep, halves stated separately (#129).** 855 decks —
+    **504 under `C:\openradioss_run`** and **351 under
+    `dynaexamples_r14_ton-mm-s`** — each converted twice, once at the
+    pre-round commit and once here, in separate subprocesses. Ten files were
+    excluded and named: five over a 60 MB cap (`yaris-detailed-v2j.key`
+    169.1 MB, `camry-detailed-v5a.key` 248.4 MB, `Model-318_Achshebel-fein`
+    73.4 MB, and three Yaris implicit decks, 101.5-191.5 MB) and the Yaris and
+    Camry `combine.key` `*INCLUDE` pullers. **0 errors, 0 timeouts.**
+
+    | half | movers | under `C:\openradioss_run` |
+    |---|---|---|
+    | **1** — the emitted `_0000.rad` + `_0001.rad`, by sha256 | **5** | **0** |
+    | **2** — `state.warnings` + `skipped_keywords` + `recognized_not_emitted` | **21** | **0** |
+
+    Every HALF 1 mover is the SAME change and all five are IMPLICIT decks: the
+    `/TH/NODE TEMP` group and the `/ANIM/NODA/TEMP` engine card are gone,
+    because an implicit run integrates no temperature (measured above) and
+    those channels were flat by construction. Every HALF 2 mover is a message
+    this round rewrote or added — the `FWORK` consumption sentence, the
+    corrected PTYPE citation, the reworded implicit warnings, the
+    `EFRAC`-reading `RHO0_CP` placeholder text, the corrected `T1/AL/BL`
+    sentence, the new stated-`SOLN=0` note, and `*DATABASE_TPRINT` flipping to
+    its no-target branch on the two implicit welding decks.
+
+    A first attempt at this sweep reported **41 phantom movers**, and that was
+    a HARNESS defect rather than a converter change: it copied each deck into a
+    random `mkdtemp`, so any deck with an unresolvable `*INCLUDE` differed on
+    the absolute path quoted in its own "file not found" warning. The work dir
+    is now derived from a hash of the deck path and is identical on both sides.
 
 - **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
   by re-verifying the review round below against the manual, the starter and
