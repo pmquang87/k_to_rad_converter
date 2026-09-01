@@ -1399,6 +1399,45 @@ class CollisionProbeTests(unittest.TestCase):
         self.assertEqual(len(heads), len(set(heads)))
 
 
+class ThermalBoundaryDuplicateScanTests(unittest.TestCase):
+    """The starter does NOT refuse a duplicate id on any of these cards.
+
+    MEASURED: two ``/CONVEC`` cards on one id are BOTH read and BOTH applied,
+    at 0 ERROR and 0 WARNING — none of the four readers calls ``UDOUBLE``. The
+    writer cannot produce one (every id comes from the monotonic
+    ``next_id()``), so the scan is called directly on a hand-built line list,
+    the shape the #128 ``_warn_duplicate_thermal_ids`` probe established.
+    """
+
+    def _scan(self, lines):
+        from k2rad.state import ConversionState
+        from k2rad.writer.assembly import _warn_duplicate_thermal_bc_ids
+        st = ConversionState()
+        _warn_duplicate_thermal_bc_ids(st, lines)
+        return st.warnings
+
+    def test_a_duplicate_is_named_per_card_family(self):
+        for card in ("IMPFLUX", "CONVEC", "RADIATION", "IMPTEMP", "INITEMP"):
+            with self.subTest(card=card):
+                w = self._scan([f"/{card}/7", "x", f"/{card}/7", "y"])
+                self.assertEqual(len(w), 1)
+                self.assertIn(f"/{card}/7 is emitted 2 times", w[0])
+
+    def test_the_four_namespaces_are_independent(self):
+        # /CONVEC/7 + /RADIATION/7 + /IMPFLUX/7 + /IMPTEMP/7 in one deck was
+        # measured at 0 ERROR / 0 WARNING, so this must NOT warn.
+        self.assertEqual(self._scan(["/CONVEC/7", "/RADIATION/7",
+                                     "/IMPFLUX/7", "/IMPTEMP/7"]), [])
+
+    def test_a_real_deck_allocates_distinct_ids(self):
+        result, _starter, _ = _convert(
+            _deck(SEG1 + CURVE900 + CONVEC_CARD
+                  + "*BOUNDARY_FLUX_SET\n" + _row(50, 0) + "\n"
+                  + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0)
+                  + "\n"))
+        self.assertFalse(_warned(result, "is emitted 2 times"))
+
+
 class ByteIdentityTests(unittest.TestCase):
     def test_a_deck_without_the_batch_keywords_is_untouched(self):
         plain = BRICK.replace(

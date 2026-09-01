@@ -1151,6 +1151,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_group_ids(state, lines)
     _warn_node_tc_rc(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
+    _warn_duplicate_thermal_bc_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
     _warn_duplicate_function_ids(state, lines)
@@ -1706,6 +1707,46 @@ def _warn_duplicate_thermal_ids(state: ConversionState,
                 "FIRST block and silently drops the rest - so the second card's "
                 "coefficient or thermal properties are lost without a "
                 "diagnostic of any kind.")
+
+
+#: The three heat-source boundary cards, each with its OWN starter id
+#: namespace (measured: ``/CONVEC/7`` + ``/RADIATION/7`` + ``/IMPFLUX/7`` +
+#: ``/IMPTEMP/7`` in one deck give 0 ERROR / 0 WARNING).
+_THERMAL_BC_CARD_ID_RE = re.compile(
+    r"^/(IMPFLUX|CONVEC|RADIATION|IMPTEMP|INITEMP)/(\d+)\s*$")
+
+
+def _warn_duplicate_thermal_bc_ids(state: ConversionState,
+                                   lines: List[str]) -> None:
+    """One id per card WITHIN each thermal-boundary namespace.
+
+    The starter does NOT check this. ``hm_read_impflux.F``,
+    ``hm_read_convec.F``, ``hm_read_radiation.F`` and ``hm_read_imptemp.F``
+    none of them call ``UDOUBLE`` or touch ``NOM_OPT``, and it was MEASURED:
+    two ``/CONVEC`` cards on one id are BOTH read and BOTH applied, at 0 ERROR
+    and 0 WARNING — so the deck silently gets twice the convection it asks for.
+    (The four namespaces are independent of each other, which the same probe
+    round measured, so this scan keys on the card spelling as well.)
+
+    Every one of these ids comes from the monotonic ``state.next_id()``, so a
+    duplicate cannot arise from the writer today; this removes the CLASS, in
+    the shape :func:`_warn_duplicate_thermal_ids` already established for the
+    material-keyed thermal cards. Changes no output.
+    """
+    seen: Dict[Tuple[str, int], int] = {}
+    for ln in lines:
+        m = _THERMAL_BC_CARD_ID_RE.match(ln)
+        if m:
+            key = (m.group(1), int(m.group(2)))
+            seen[key] = seen.get(key, 0) + 1
+    for (kind, cid), n in sorted(seen.items()):
+        if n > 1:
+            state.warn(
+                f"/{kind}/{cid} is emitted {n} times. The starter does NOT "
+                "refuse it — none of hm_read_impflux.F, hm_read_convec.F, "
+                "hm_read_radiation.F or hm_read_imptemp.F calls UDOUBLE — so "
+                "BOTH cards are read and BOTH are applied (measured), and the "
+                "deck silently gets twice the thermal load it states.")
 
 
 def _warn_duplicate_preload_ids(state: ConversionState,
