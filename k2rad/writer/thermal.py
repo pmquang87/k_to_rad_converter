@@ -2724,8 +2724,11 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
         # stale 1.0 is the same 1.0, so the deck keeps its own curve id.
         bc.func_id = (bc.lcid if mult == 1.0 else
                       _bc_scaled_function(state, bc.lcid, mult, "convec_tinf"))
+        minted = (None if bc.func_id == bc.lcid
+                  else (bc.lcid, bc.func_id, mult))
     else:
         bc.func_id = _bc_constant_function(state, bc.fscale, "convec_tinf")
+        minted = None
     bc.fscale = 1.0
     state.warn(
         f"{bc.source} -> /CONVEC with H = {bc.coef:g}, carried through with NO "
@@ -2742,7 +2745,13 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
         "THREAD, so the answer moves with the thread count. MEASURED on this "
         "converter's own output: 1389.1850 mJ at nt=1 and 1425.3912 at nt=6, "
         "against a correct 2381.4601 at both, at 0 ERROR / 0 WARNING / NORMAL "
-        "TERMINATION.")
+        "TERMINATION."
+        + ("" if minted is None else
+           f" TMULT = {minted[2]:g} is therefore NOT written to the card: the "
+           f"deck's *DEFINE_CURVE {minted[0]} is COPIED to a synthesized "
+           f"/FUNCT/{minted[1]} with its ordinates multiplied by "
+           f"{minted[2]:g}, and the /CONVEC names that copy. Both ids are in "
+           "the emitted deck; the original curve is untouched."))
     return True
 
 
@@ -2840,9 +2849,12 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
         bc.func_id = (bc.lcid if mult == 1.0 else
                       _bc_scaled_function(state, bc.lcid, mult,
                                           "radiation_tinf"))
+        minted = (None if bc.func_id == bc.lcid
+                  else (bc.lcid, bc.func_id, mult))
         t_inf_const = None
     else:
         bc.func_id = _bc_constant_function(state, bc.fscale, "radiation_tinf")
+        minted = None
     bc.fscale = 1.0
     fmult = bc.coef
     bc.coef = emi
@@ -2865,8 +2877,13 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
         "sharing one curve reuse the first one's T_inf. NOTE Vol I R17 "
         "p.5-110: radiation needs an ABSOLUTE temperature scale on both sides "
         "— a deck in Celsius is wrong in LS-DYNA too."
-        + ("" if t_inf_const is None else
-           f" T_inf = {t_inf_const:g}."))
+        + ("" if t_inf_const is None else f" T_inf = {t_inf_const:g}.")
+        + ("" if minted is None else
+           f" TMULT = {minted[2]:g} is therefore NOT written to the card: the "
+           f"deck's *DEFINE_CURVE {minted[0]} is COPIED to a synthesized "
+           f"/FUNCT/{minted[1]} with its ordinates multiplied by "
+           f"{minted[2]:g}, and the /RADIATION names that copy. Both ids are "
+           "in the emitted deck; the original curve is untouched."))
     return True
 
 

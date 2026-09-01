@@ -411,10 +411,19 @@ class BoundaryConvectionTests(unittest.TestCase):
         # Fscale_y = 1.0 is immune to the missing-FCY_OLD cache key (a stale
         # 1.0 is the same 1.0), so no copy is needed and the deck stays
         # readable.
-        _result, starter, _ = self._convec(tmult=1.0)
+        result, starter, _ = self._convec(tmult=1.0)
         body = _block(starter, _one_header(starter, "/CONVEC/"))
         self.assertEqual(int(body[2][10:20]), 900)
         self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+        # ... and nothing claims a copy was made.
+        self.assertFalse(_warned(result, "is COPIED to a synthesized"))
+
+    def test_the_minted_copy_names_both_ids(self):
+        # One source card minting a SECOND entity must name BOTH ids (#131).
+        result, starter, _ = self._convec(tmult=2.5)
+        fid = int(_block(starter, _one_header(starter, "/CONVEC/"))[2][10:20])
+        self.assertTrue(_warned(
+            result, f"*DEFINE_CURVE 900 is COPIED to a synthesized /FUNCT/{fid}"))
 
     def test_two_cards_on_one_curve_never_share_a_scaled_function(self):
         # The exact shape the engine defect needs: one TLCID, two multipliers.
@@ -526,13 +535,17 @@ class BoundaryRadiationTests(unittest.TestCase):
         # The /PARITH/ON workaround: radiation.F:249 applies Fscale_y OUTSIDE
         # its cache guard, so a multi-segment card with Fscale_y != 1
         # re-scales T_inf once per segment and reaches NaN (measured).
-        _result, starter, _ = self._radia(tmult=2.0)
+        result, starter, _ = self._radia(tmult=2.0)
         body = _block(starter, _one_header(starter, "/RADIATION/"))
         self.assertAlmostEqual(float(body[4][20:40]), 1.0)
         fid = int(body[2][10:20])
         self.assertNotEqual(fid, 900)
         self.assertEqual(_funct_points(starter, fid),
                          [(0.0, 2000.0), (1.0, 2000.0)])
+        # One source card minting a SECOND entity names BOTH ids (#131).
+        self.assertTrue(_warned(
+            result,
+            f"*DEFINE_CURVE 900 is COPIED to a synthesized /FUNCT/{fid}"))
 
     def test_a_unit_tmult_keeps_the_decks_own_curve_id(self):
         # Fscale_y = 1.0 already neutralises the /PARITH/ON defect (1.0

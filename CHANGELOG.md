@@ -158,20 +158,26 @@ Prior history (before this changelog was introduced) is summarized in the
     exists — there is not even a legal-but-zero channel to be tempted by (#122).
     The whole-model heat balance is `thermbilan.F:71-76` in the engine `.out`,
     which is the independent checker every number above was read from.
-  - Corpus reach, stated with its SCOPE. **Zero under
-    `C:\openradioss_run`** — re-measured over all 509 `.k`/`.key`/`.dyn`/`.inc`
-    files there, 506 grepped directly and the three above a 60 MB cap
-    (`yaris-detailed-v2j.key` 161 MB, `camry-detailed-v5a.key` 237 MB,
-    `Model-318_Achshebel-fein_tobi.k` 70 MB) streamed line by line, 8.77 M lines
-    in total — and zero under `E:\foxcore_data` (all 36 deck-like files). It is
-    NOT zero everywhere: the LS-DYNA official examples tree
-    (`FEM_solver/verification/dynaexamples_r14_ton-mm-s`) carries 117
-    occurrences in 30 files, which is where the batch's third-party regression
-    carriers come from. The two-half sweep — output files AND `state.warnings` +
-    `skipped_keywords` + `recognized_not_emitted`, stated separately per the
-    #129 rule — is therefore reported per roster rather than as one number. All
-    PHYSICS validation is synthetic, as with the viscoelastic and adhesive
-    batches.
+  - Corpus reach, stated with its SCOPE, and re-measured line by line over the
+    whole of each root (the pattern covers the batch's keywords AND the
+    pre-existing thermal ones — `*MAT_ADD_THERMAL_EXPANSION`,
+    `*INITIAL_TEMPERATURE`, `*BOUNDARY_TEMPERATURE`, `*CONTROL_SOLUTION`):
+
+    | root | files | lines | occurrences | carrier files |
+    |---|---|---|---|---|
+    | `C:\openradioss_run` | 509 | 39.37 M | **0** | 0 |
+    | `E:\foxcore_data` | 36 | 24.58 M | **0** | 0 |
+    | `dynaexamples_r14_ton-mm-s` | 356 | 13.66 M | **148** | **34** |
+
+    So it is zero on the project's own corpus and NOT zero everywhere: the
+    LS-DYNA official examples tree is where the batch's third-party regression
+    carriers live (28 × `*CONTROL_SOLUTION`, 23 × `*MAT_THERMAL_ISOTROPIC`,
+    18 × `*CONTROL_THERMAL_SOLVER`, 8 × `*BOUNDARY_RADIATION_SET`, 6 ×
+    `*BOUNDARY_CONVECTION_SET`, 2 × `*BOUNDARY_FLUX_SET`, …). The two-half
+    sweep — output files AND `state.warnings` + `skipped_keywords` +
+    `recognized_not_emitted`, stated separately per the #129 rule — is
+    therefore reported per roster rather than as one number. All PHYSICS
+    validation is synthetic, as with the viscoelastic and adhesive batches.
 
 ### Fixed
 
