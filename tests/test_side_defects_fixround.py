@@ -942,6 +942,48 @@ class TestNodeIdWeldedToANegativeCoordinate(unittest.TestCase):
         self.assertEqual(_node_xyz(starter, 5), (-10.0, -10.0, 0.0))
         self.assertEqual(_node_xyz(starter, 8), (10.0, 10.0, 0.0))
 
+    def test_the_INCLUDE_TRANSFORM_walker_reads_them_the_same_way(self):
+        """``assembly._parse_node_line``'s docstring says it *"mirrors
+        handlers.handle_node"*, and that contract broke the moment the handler
+        grew its field-1 test: the walker kept the width-only one, returned
+        None for a welded row, and silently left it out of the offset AND the
+        transform.
+
+        MEASURED on this twin with the handler fixed and the walker not: node
+        ids came out ``[5, 7, 6001, 6002, 6003, 6004, 6006, 6008]`` — the two
+        welded rows kept their PRE-offset ids, colliding with whatever the
+        parent numbers 5 and 7, while 6005 and 6007 did not exist at all and
+        the /BRICK referencing them was broken.
+
+        Not corpus-reachable: none of the 10 ``*INCLUDE_TRANSFORM`` cards in
+        either corpus root names a child with a welded row (each card's card-1
+        filename was resolved and checked), which is why nothing measured it.
+        """
+        child = (self.HEAD + self.MESH
+                 + "*ELEMENT_SOLID\n" + _i8(1, 1) + "\n"
+                 + _i8(1, 2, 4, 3, 5, 6, 8, 7) + "\n*END\n")
+        parent = "\n".join([
+            "*KEYWORD",
+            "*SECTION_SOLID", _row(1, 1),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            "*PART", "brick", _row(1, 1, 1),
+            "*INCLUDE_TRANSFORM", "child.k",
+            # IDNOFF IDEOFF IDPOFF IDMOFF IDSOFF IDFOFF IDDOFF
+            _row(6000, 7000, 0, 0, 0, 0, 0), _row(0),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+        _res, starter = _convert_files({"main.k": parent, "child.k": child})
+        lines = starter.splitlines()
+        i = lines.index("/NODE")
+        ids = []
+        for ln in lines[i + 1:]:
+            if ln.startswith("/"):
+                break
+            if ln.startswith("#") or not ln.strip():
+                continue
+            ids.append(int(ln[0:10]))
+        self.assertEqual(sorted(ids), list(range(6001, 6009)))
+        self.assertTrue(_headers(starter, "/BRICK/"))
+
     def test_a_parameter_node_id_is_still_free_format(self):
         """``&name`` in field 1 resolves through ``to_int``; the guard must
         not push it into the fixed branch, where the ``&`` would be sliced."""

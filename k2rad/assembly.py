@@ -61,6 +61,7 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        TIEBREAK_CONTACT_KEYWORDS,
                        _cnrb_option_keywords, _cnrb_options,
+                       _free_node_id,
                        _is_float_token, _is_int_token, _parse_sph_cell,
                        _seatbelt_rows,
                        _part_option_keywords,
@@ -343,9 +344,26 @@ def _parse_node_line(line: str):
     """Return (nid, [xt, yt, zt], tail) for one *NODE card — the coordinates
     as their RAW text tokens — or None. Mirrors handlers.handle_node: free
     split with a fixed I8+3×E16 fallback for glued negative coordinates;
-    *tail* preserves the TC/RC columns verbatim."""
+    *tail* preserves the TC/RC columns verbatim.
+
+    "Mirrors handlers.handle_node" is a CONTRACT, and it broke the moment that
+    function grew its field-1 test: this one kept the width-only test, so an
+    I8+3xE16 row with X and Y negative, Z not, and TC/RC present split into
+    four ordinary-looking tokens with the id welded to the first, took the free
+    branch, and returned None (``to_int`` of the merged token is 0). MEASURED
+    on an *INCLUDE_TRANSFORM twin with such a child, AFTER handle_node was
+    fixed and before this was: node ids came out
+    ``[5, 7, 6001, 6002, 6003, 6004, 6006, 6008]`` — the two welded rows kept
+    their PRE-offset ids (colliding with whatever the parent numbers 5 and 7)
+    and were never transformed, while 6005 and 6007 simply did not exist and
+    the /BRICK referencing them was broken. Not corpus-reachable: none of the
+    10 ``*INCLUDE_TRANSFORM`` cards in either corpus root names a child with a
+    welded row (checked by resolving each card's card-1 filename), which is
+    why nothing measured it. See ``handlers.handle_node`` for the rest.
+    """
     f = parse_free(line)
-    if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+    if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+            or not _free_node_id(f[0]):
         nid = to_int(line[0:8])
         if nid <= 0:
             return None
