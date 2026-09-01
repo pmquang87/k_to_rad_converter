@@ -873,7 +873,25 @@ validated foundation for further linear analyses:
   under NORMAL TERMINATION, which k2rad now screens for and prescribes a scale
   factor against. (e) `*CONTROL_THERMAL_SOLVER`'s `EQHEAT` has no counterpart,
   so a deck whose mechanical and thermal units are NOT consistent converts with
-  its strain-energy-to-heat conversion off by exactly `EQHEAT`.
+  its strain-energy-to-heat conversion off by exactly `EQHEAT`. (f) An IMPLICIT
+  run integrates NO temperature at all on this build — measured, a twin pair of
+  converted decks carries its far end 300 → 400.000 K explicitly and stays at
+  exactly 300.000 K under `/IMPL/*` with `HEAT STORED = 0.0000000` — so the
+  thermal cards and the TEMP output channels are named and left out there.
+  (g) Radioss has NO thermal-expansion reference cell, so a driver that never
+  changes (`*LOAD_THERMAL_CONSTANT[_NODE|_ELEMENT_<F>]`) develops exactly ZERO
+  thermal strain where LS-DYNA measures from a *"null state"* and develops
+  `α·T` (Vol I R17 p.33-168/33-169). k2rad names it; carrying it would mean
+  starting an absolute-temperature model at 0 K, which corrupts conduction,
+  Johnson-Cook `T*` and radiation alike, so the fix is its own decision.
+  (h) A genuine THERMAL-ONLY LS-DYNA deck states no structural `*MAT_` at all,
+  and `/HEAT/MAT` is keyed on a MATERIAL id — so that deck class gets no
+  thermal material and `/DT/THERM` is refused by name. Synthesizing a
+  `/MAT/LAW1` from the thermal material's `TRO` for a `*PART` whose MID is 0
+  would make it reachable.
+  **Next in this neighbourhood:** `*LOAD_HEAT_GENERATION` is the one genuinely
+  convertible keyword left — the natural target of `/IMPFLUX`'s `grbric_ID`
+  branch (`fixflux.F:200-239`), reusing all of this batch's machinery.
 
 *Rationale:* these extend the proven modal machinery rather than opening a new
 solver path, so risk is contained.

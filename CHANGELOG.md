@@ -300,6 +300,19 @@ Prior history (before this changelog was introduced) is summarized in the
     DEF/A/AR/VR and the history had to be read out of the ANIM. Measured on
     converter output: the column carries 300 → 941.3 K, and the starter reports
     0 ERROR / 0 WARNING (WARNING 1087 needs a MISSING `/HEAT/MAT`).
+  - **The COMPOSITION deck** — `*CONTROL_SOLUTION` SOLN=2 +
+    `*CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR}` + all three boundary
+    families (two `/CONVEC` cards sharing one curve at two multipliers) + a
+    tabulated `*MAT_THERMAL_ISOTROPIC_TD` + `*MAT_ADD_THERMAL_EXPANSION` + a
+    `*LOAD_THERMAL_CONSTANT_ELEMENT_SOLID`, with the whole thermal half inside
+    an `*INCLUDE_TRANSFORM` — converts and runs at **0 starter ERROR /
+    0 WARNING, NORMAL TERMINATION, 28 038 cycles**, with all four heat channels
+    live at once and the balance closing to eight figures (`4.0000348 +
+    0.18907485 + 376.39368 + 0.0057459296 = 380.58853 = HEAT STORED`). It also
+    caught an ordering defect in this round's own SOLN fix: the element
+    resolver announced *"→ /IMPTEMP over the elements' OWN nodes"* and the SOLN
+    screen then dropped the record two passes later, leaving a false sentence
+    standing (#130). The screen now runs first.
 
 - **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
   by re-verifying the review round below against the manual, the starter and

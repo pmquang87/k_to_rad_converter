@@ -1703,6 +1703,23 @@ class LoadThermalVersusSolnTests(unittest.TestCase):
         result, _starter, _ = _convert(_deck(THERMAL_LOAD))
         self.assertFalse(_warned(result, "structural analysis ONLY"))
 
+    def test_the_element_spellings_are_dropped_without_announcing(self):
+        # The element resolver PRINTS "-> /IMPTEMP over the elements' OWN
+        # nodes" as it builds its records, so the SOLN screen has to run
+        # BEFORE it — otherwise that sentence stands on a deck that emits no
+        # /IMPTEMP at all (#130). Caught on the composition deck.
+        deck = TWO_BRICKS.replace(
+            "{EXTRA}",
+            "*CONTROL_SOLUTION\n" + _row(2) + "\n"
+            "*LOAD_THERMAL_CONSTANT_ELEMENT_SOLID\n"
+            + _row(1, 500.0) + "\n" + _row(2, 500.0) + "\n")
+        result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/IMPTEMP/"), [])
+        self.assertFalse(_warned(result, "over the elements' OWN nodes"))
+        self.assertTrue(_warned(result, "IGNORES the whole *LOAD_THERMAL_*"))
+        self.assertTrue(_warned(result,
+                                "*LOAD_THERMAL_CONSTANT_ELEMENT_SOLID"))
+
 
 class BoundaryRefusalOrderTests(unittest.TestCase):
     """A record whose segments cannot be built must be refused BEFORE anything
@@ -1884,9 +1901,14 @@ class ConductivityFitSegmentTests(unittest.TestCase):
     thermal TIME-STEP routines, gated on IDT_THERM == 1. So the table is fitted
     with ONE line and mirrored, even when the law states a melt temperature."""
 
+    #: TM = 600 K sits INSIDE the tabulated range below, which is what makes
+    #: the probe reach the branch under test: with a melt temperature above the
+    #: whole table (the first draft used 1800) a two-segment fit degenerates to
+    #: the one-segment one and the test passes either way — the #130 "a probe
+    #: must REACH the branch" trap, caught by mutation M8.
     JC = ("*MAT_JOHNSON_COOK\n"
           + _row(1, "7.85E-9", 80000.0, 210000.0, 0.3) + "\n"
-          + _row(0.35, 0.275, 0.36, 0.022, 1.0, 1800.0, 293.0) + "\n"
+          + _row(0.35, 0.275, 0.36, 0.022, 1.0, 600.0, 293.0) + "\n"
           + _row(0.0, 0.0, 0.0, 0.0, 0.0, "4.60E+8", 1.0e-6, 0.0) + "\n"
           + _row(0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
 
@@ -1899,18 +1921,22 @@ class ConductivityFitSegmentTests(unittest.TestCase):
             + _row("4.60E+8", 45.0) + "\n", mat).replace("{EXTRA}", extra)
 
     def test_a_melt_temperature_does_not_split_the_fit(self):
+        # A NON-LINEAR table straddling T1 = 600, so the one-line fit and the
+        # old two-segment one give different numbers in every cell:
+        #   one line over all four points → 66.8 − 0.048·T
+        #   split at 600 → 59 − 0.03·T below, 101 − 0.09·T above
         mat = ("*MAT_THERMAL_ISOTROPIC_TD\n"
                + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
                + _row(300.0, 500.0, 700.0, 900.0) + "\n"
                + _row("4.60E+8", "4.60E+8", "4.60E+8", "4.60E+8") + "\n"
-               + _row(50.0, 44.0, 38.0, 32.0) + "\n")
+               + _row(50.0, 44.0, 38.0, 20.0) + "\n")
         result, starter, _ = _convert(self._jc_deck(mat, THERMAL_LOAD))
         body = _data_rows(starter, "/HEAT/MAT/1")
-        self.assertAlmostEqual(float(body[1][0:20]), 1800.0)            # T1
-        self.assertAlmostEqual(float(body[0][40:60]), 59.0, places=6)   # AS
-        self.assertAlmostEqual(float(body[0][60:80]), -0.03, places=9)  # BS
-        self.assertAlmostEqual(float(body[1][20:40]), 59.0, places=6)   # AL
-        self.assertAlmostEqual(float(body[1][40:60]), -0.03, places=9)  # BL
+        self.assertAlmostEqual(float(body[1][0:20]), 600.0)             # T1
+        self.assertAlmostEqual(float(body[0][40:60]), 66.8, places=6)   # AS
+        self.assertAlmostEqual(float(body[0][60:80]), -0.048, places=9)  # BS
+        self.assertAlmostEqual(float(body[1][20:40]), 66.8, places=6)   # AL
+        self.assertAlmostEqual(float(body[1][40:60]), -0.048, places=9)  # BL
         self.assertTrue(_warned(result, "deliberately NOT used as a second "
                                         "fit segment"))
         self.assertTrue(_warned(result, "stherm.F:104"))

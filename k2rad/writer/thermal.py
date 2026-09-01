@@ -717,11 +717,17 @@ def _resolve_thermal(state: ConversionState) -> None:
             or state.imposed_temperatures or state.mat_thermal_isotropic
             or state.mat_thermal_iso_td or state.mat_thermal_ortho
             or state.thermal_boundaries or state.load_thermal_elements):
+        # FIRST, so nothing announces a conversion this then takes back: the
+        # element resolver prints "-> /IMPTEMP over the elements' OWN nodes"
+        # as it builds its records, and a drop two passes later would leave
+        # that sentence standing on a deck that emits no /IMPTEMP at all
+        # (the #130 class — a statement of what the deck will emit that does
+        # not mirror the emitter's own drop conditions).
+        _drop_load_thermal_on_thermal_soln(state)
         _resolve_load_thermal_elements(state)
         _resolve_expansion(state)
         _warn_duplicate_tmid(state)
         _resolve_heat_materials(state)
-        _drop_load_thermal_on_thermal_soln(state)
         _resolve_drivers(state)
         _resolve_thermal_boundaries(state)
     # Outside the gate: both read what was DECIDED above, and both have
@@ -869,23 +875,30 @@ def _drop_load_thermal_on_thermal_soln(state: ConversionState) -> None:
     """
     if state.ctrl_solution_soln not in (1, 2):
         return
+    # BOTH registries: the nodal spellings land in `imposed_temperatures` at
+    # dispatch time, the `_ELEMENT_<F>` ones in `load_thermal_elements` and
+    # only become drivers later. Screening one would let the other through.
     doomed = [d for d in state.imposed_temperatures
               if d.source.startswith(_LOAD_THERMAL)]
-    if not doomed:
+    elems = list(state.load_thermal_elements)
+    if not doomed and not elems:
         return
-    names = sorted({d.source for d in doomed})
+    names = sorted({d.source for d in doomed}
+                   | {r.source for r in elems})
     kind = ("THERMAL-ONLY" if state.ctrl_solution_soln == 1
             else "COUPLED structural/thermal")
     state.imposed_temperatures[:] = [
         d for d in state.imposed_temperatures
         if not d.source.startswith(_LOAD_THERMAL)]
+    state.load_thermal_elements.clear()
     state.warn(
         f"*CONTROL_SOLUTION SOLN={state.ctrl_solution_soln} makes this a "
         f"{kind} analysis, and LS-DYNA IGNORES the whole *LOAD_THERMAL_* "
         "family there: Vol I R17 p.33-162 says its nodal temperatures 'are all "
         "applied in a structural only analysis. They are ignored in a thermal "
         "only or coupled thermal/structural analysis'. "
-        f"{len(doomed)} record(s) from " + ", ".join(names) + " are therefore "
+        f"{len(doomed) + len(elems)} record(s) from " + ", ".join(names)
+        + " are therefore "
         "DROPPED rather than emitted as /IMPTEMP. The difference matters: "
         "/IMPTEMP is a HARD Dirichlet reset applied every cycle "
         "(fixtemp.F:180-199 writes TEMP(node) directly), so on this deck it "
