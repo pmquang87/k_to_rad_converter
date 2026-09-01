@@ -5971,14 +5971,19 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
         zeroed = [n for n, s in zip(("STX", "STY", "STZ", "SRX", "SRY", "SRZ"),
                                     scales) if s == 0.0]
         if zeroed:
+            # The cell names carry the DOF: ST* is a translation, SR* a
+            # rotation. Deriving a bare axis letter from the last character
+            # ("z" for both STZ and SRZ) would make the two indistinguishable,
+            # so the cells are named and nothing is derived from them.
             state.warn(
                 f"*DAMPING_GLOBAL: {', '.join(zeroed)} = 0.0 while the others "
-                "are not, so Vol I R17 p.15-9 Remark 2's all-six-zero "
-                "unity default does NOT apply — LS-DYNA leaves "
-                f"{'/'.join(z[-1].lower() for z in zeroed)} undamped and so "
-                "does the emitted /DAMP (Format 2, alpha_i = VALDMP x ST_i). "
-                "Check this is intended: mass damping on a subset of the DOFs "
-                "is unusual outside a 2-D or planar idealisation.")
+                "are not, so Vol I R17 p.15-9 Remark 2's all-six-zero unity "
+                "default does NOT apply — LS-DYNA leaves the degrees of "
+                "freedom those cells name undamped, and so does the emitted "
+                "/DAMP (Format 2, alpha_i = VALDMP x ST_i in the order x, y, "
+                "z, xx, yy, zz). Check this is intended: mass damping on a "
+                "subset of the DOFs is unusual outside a 2-D or planar "
+                "idealisation.")
     else:
         title = f"Rayleigh damping (alpha={alpha:.6G}, beta={beta:.6G})"
     lines += [
