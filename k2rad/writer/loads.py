@@ -5683,6 +5683,31 @@ def _damping_elem_nodes(state: ConversionState,
     element introduce damping would be an effect on the analysis. Its nodes
     are damped anyway whenever a real element also holds them, which is the
     normal case — a PLOTEL is drawn between nodes the mesh already has.
+
+    **Vol I R17 p.15-9 Remark 3 is NOT implemented, and the reason is only
+    PARTLY sound.** The remark is *"Mass damping will not be applied to
+    deformable nodes with prescribed motion or to nodes tied with
+    CONSTRAINED_NODE_SET."* Only the rigid-SECONDARY exclusion above is
+    applied here. What the engine source does support:
+    ``resol.F:7216/7219`` calls ``DAMPING`` and ``resol.F:7345`` calls
+    ``FIXVEL`` in that order within one cycle, and ``fixvel.F:370-372``
+    (``AOLD = A(J,I) ; A(J,I) = YC(II)``) OVERWRITES the prescribed DOF's
+    acceleration outright — so whatever ``damping.F`` put there is discarded
+    and the prescribed DOF's MOTION is unaffected.
+
+    Two things that argument does NOT cover, so do not read it as "no
+    deviation":
+
+      * The overwrite is per **DOF**; LS-DYNA's exemption is per **NODE**. A
+        node whose x is prescribed still has its y, z and rotational DOFs
+        damped here and left undamped by LS-DYNA.
+      * ``damping.F:167-170`` accumulates ``DW`` (the system damping energy)
+        for the node BEFORE ``FIXVEL`` runs, so the reported damping energy
+        includes work on a DOF whose motion never changed.
+
+    The CONSTRAINED_NODE_SET half is not analysed at all. Implementing the
+    exemption needs its own screening pass and a twin campaign, so it is a
+    ROADMAP item, not a claim of parity.
     """
     out: Set[int] = set()
 
@@ -5894,22 +5919,36 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
     damp_id = state.next_id()
     lines = _emit_grnod_node(grnod_id, grnod_title, target_nodes)
 
-    # If only α and no β, use Format 1 (simpler, smaller deck)
-    if beta == 0.0:
-        d = state.damping_global
-        # The guard is now belt-and-braces: alpha comes ONLY from
-        # *DAMPING_GLOBAL, so `d is None` implies alpha == 0, and this branch
-        # implies beta == 0 — the pair the early return above already took.
-        # Before that return existed, a *DAMPING_PART_STIFFNESS whose every
-        # COEF was 0.0 reached here with d None and reading d.stx aborted the
-        # WHOLE conversion with an AttributeError, not just this card.
-        per_dof = ((d.stx, d.sty, d.stz, d.srx, d.sry, d.srz) if d
-                   else (0.0,) * 6)
-        if any(s != 0.0 for s in per_dof):
-            state.warn(
-                f"*DAMPING_GLOBAL: per-DOF scale factors (stx..srz) ignored; "
-                f"using uniform alpha={alpha:.6G} on all DOFs (/DAMP Format 1)."
-            )
+    # *DAMPING_GLOBAL's STX..SRZ (Vol I R17 p.15-8, card 1 fields 3-8) are
+    # "Scale factor on global x/y/z translational damping FORCES" and the three
+    # rotational moments, and Remark 2 is exact about the default: "If STX =
+    # STY = STZ = SRX = SRY = SRZ = 0.0 in the input above, all six values are
+    # defaulted to unity." So all-six-zero means UNIFORM, and anything else
+    # means LS-DYNA damps the stated DOFs and leaves the rest alone.
+    #
+    # Both branches below used to write the same uniform alpha on all six DOFs
+    # — the Format-1 one with a warning, the Format-2 one in total silence — so
+    # STX=1 with the other five zero removed energy from five DOFs the source
+    # deck leaves undamped (#122 class). The map is the one the
+    # *DAMPING_PART_MASS FLAG=1 emitter below already uses and that
+    # hm_read_damp.F:104-115 reads as DAMPR(3/5/7/9/11/13):
+    # alpha_i = alpha * ST_i in the order x, y, z, xx, yy, zz. Beta is NOT
+    # scaled: it comes from *DAMPING_PART_STIFFNESS, a different card with no
+    # per-DOF cells of its own.
+    #
+    # The guard on `d` is belt-and-braces: alpha comes ONLY from
+    # *DAMPING_GLOBAL, so `d is None` implies alpha == 0, which the early
+    # return above already took. Before that return existed, a
+    # *DAMPING_PART_STIFFNESS whose every COEF was 0.0 reached here with d None
+    # and reading d.stx aborted the WHOLE conversion with an AttributeError.
+    d = state.damping_global
+    scales = ((d.stx, d.sty, d.stz, d.srx, d.sry, d.srz) if d else (0.0,) * 6)
+    per_dof = any(s != 0.0 for s in scales)
+    if not per_dof:
+        scales = (1.0,) * 6
+
+    # If only α, no β and no per-DOF factors, use Format 1 (smaller deck).
+    if beta == 0.0 and not per_dof:
         # The /DAMP card always reads Beta from cols 21-40 — there is no
         # "alpha-only" card layout. Beta must be written explicitly as 0,
         # otherwise the grnod_ID digits land in the Beta field and are parsed
@@ -5923,18 +5962,35 @@ def _make_damping(state: ConversionState, rigid_nodes: Set[int],
         ]
         return lines
 
-    # Format 2: per-DOF α + β. Use uniform (αx=αy=...=α, βx=βy=...=β).
-    title = f"Rayleigh damping (alpha={alpha:.6G}, beta={beta:.6G})"
+    # Format 2: per-DOF α + β. The PRESENCE of the five extra cards is what
+    # selects the per-DOF reading — there is no explicit switch column.
+    ax, ay, az, axx, ayy, azz = (alpha * s for s in scales)
+    if per_dof:
+        title = (f"Rayleigh damping (alpha={alpha:.6G} x STX..SRZ"
+                 + (f", beta={beta:.6G}" if beta else "") + ")")
+        zeroed = [n for n, s in zip(("STX", "STY", "STZ", "SRX", "SRY", "SRZ"),
+                                    scales) if s == 0.0]
+        if zeroed:
+            state.warn(
+                f"*DAMPING_GLOBAL: {', '.join(zeroed)} = 0.0 while the others "
+                "are not, so Vol I R17 p.15-9 Remark 2's all-six-zero "
+                "unity default does NOT apply — LS-DYNA leaves "
+                f"{'/'.join(z[-1].lower() for z in zeroed)} undamped and so "
+                "does the emitted /DAMP (Format 2, alpha_i = VALDMP x ST_i). "
+                "Check this is intended: mass damping on a subset of the DOFs "
+                "is unusual outside a 2-D or planar idealisation.")
+    else:
+        title = f"Rayleigh damping (alpha={alpha:.6G}, beta={beta:.6G})"
     lines += [
         f"/DAMP/{damp_id}",
         title,
         _DAMP_CARD1_HDR,
-        f"{_f(alpha)}{_f(beta)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
-        f"{_f(alpha)}{_f(beta)}",
-        f"{_f(alpha)}{_f(beta)}",
-        f"{_f(alpha)}{_f(beta)}",
-        f"{_f(alpha)}{_f(beta)}",
-        f"{_f(alpha)}{_f(beta)}",
+        f"{_f(ax)}{_f(beta)}{_i(grnod_id)}{_i(0)}{_f(0.0)}{_f(1.0E30)}",
+        f"{_f(ay)}{_f(beta)}",
+        f"{_f(az)}{_f(beta)}",
+        f"{_f(axx)}{_f(beta)}",
+        f"{_f(ayy)}{_f(beta)}",
+        f"{_f(azz)}{_f(beta)}",
         HDR,
     ]
     return lines

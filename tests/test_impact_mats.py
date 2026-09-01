@@ -1582,7 +1582,7 @@ class TestSharedIdEosDoesNotDuplicateTheMaterial(unittest.TestCase):
         self.assertEqual(self._headers(starter), ["/MAT/LAW79/110"])
         # Not the collision message — id 500 is held by nothing.
         self.assertEqual(_warns(res, "ERROR 79"), [])
-        w = _warns(res, "*EOS_POLYNOMIAL 500")
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 500")
         self.assertEqual(len(w), 1)
         self.assertIn("ERROR 683", w[0])
         self.assertIn("no *MAT_NULL of that id", w[0])

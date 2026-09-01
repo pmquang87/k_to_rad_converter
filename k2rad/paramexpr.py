@@ -340,6 +340,26 @@ class _Parser:
         return self.atom()
 
     def power(self) -> Value:
+        """``signed ['**' power]`` — RIGHT-associative, so ``**`` recursion is
+        its own nesting axis and needs its own ``_enter``.
+
+        ``expr`` and ``signed`` were the only two guarded levels, and neither
+        is re-entered by an exponent chain: ``power`` recursed straight into
+        ``self.power()``, so ``self.depth`` came back to its entry value at
+        every ``**`` and the counter stayed at ~1 no matter how long the chain
+        got. MEASURED before this: ``evaluate("1" + "**1"*1000)`` raised
+        ``RecursionError``, not ``ExprError`` — the exact escape ``_enter``
+        exists to prevent, and a deck whose ``*PARAMETER_EXPRESSION`` body is
+        such a chain killed the whole conversion with a traceback and wrote no
+        deck at all.
+        """
+        self._enter()
+        try:
+            return self._power()
+        finally:
+            self.depth -= 1
+
+    def _power(self) -> Value:
         base = self.signed()
         if self._peek() == ("op", "**"):
             self._eat()

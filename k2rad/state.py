@@ -2340,12 +2340,27 @@ class EosCard:
     reference density used as a fallback for the /MAT/LAW6 carrier when no
     companion *MAT_NULL supplies one. The /EOS block binds to the material of the
     SAME id (eosid == mid), an OpenRadioss requirement.
+
+    ``keyword`` is the SOURCE spelling (``EOS_LINEAR_POLYNOMIAL``), kept
+    because ``kind`` is the Radioss one and the two differ for every card k2rad
+    reads. Messages built as ``"*EOS_" + kind`` printed ``*EOS_POLYNOMIAL 3``
+    and ``*EOS_IDEAL-GAS`` — keyword+id pairs that appear in NEITHER the deck
+    nor the ``.rad``, so grepping for them from either side finds nothing (the
+    #131 label class). Use :meth:`label`.
     """
     eosid: int
     kind: str
     params: Dict[str, float] = field(default_factory=dict)
     rho0: float = 0.0
     note: str = ""
+    keyword: str = ""
+
+    def label(self) -> str:
+        """``*EOS_LINEAR_POLYNOMIAL 3 (/EOS/POLYNOMIAL/3)`` — the deck's own
+        spelling first, the emitted card beside it, so the reader can grep for
+        the string in whichever file they have open."""
+        kw = self.keyword or ("EOS_" + self.kind)
+        return f"*{kw} {self.eosid} (/EOS/{self.kind}/{self.eosid})"
 
 
 @dataclass
@@ -2556,8 +2571,10 @@ class CrossSection:
 
     ``radius_is_nodes`` records ``RADIUS < 0``: Vol I R17 p.16-49/50 then makes
     ``XCT`` and ``XCH`` NODE IDS (centre, and a node the normal points at),
-    with ``YCT/ZCT/YCH/ZCH`` ignored and the radius ``|RADIUS|``. The handler
-    resolves them, so the writer always sees coordinates.
+    with ``YCT/ZCT/YCH/ZCH`` ignored and the radius ``|RADIUS|``. The **WRITER**
+    resolves them (``inistate.resolve_cross_section_endpoints``), after the
+    whole deck is parsed — see the field comment below for why the handler
+    cannot.
 
     ``loc_id``/``itype`` are Card 1a.2 fields 6-7. ITYPE selects which id
     namespace LOC_ID lives in — 0 = rigid body (a PART), 1 = accelerometer (an

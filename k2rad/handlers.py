@@ -4331,7 +4331,7 @@ def handle_eos_linear_polynomial(block: Block, state: ConversionState) -> None:
                    "volume) has no /EOS/POLYNOMIAL field — Radioss references E0 "
                    "to the initial volume; verify the initial state.")
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="POLYNOMIAL",
+        eosid=eosid, kind="POLYNOMIAL", keyword=block.keyword,
         params={"c0": g(1), "c1": g(2), "c2": g(3), "c3": g(4),
                 "c4": g(5), "c5": g(6), "e0": e0, "psh": 0.0, "rho0": 0.0})
 
@@ -4348,7 +4348,7 @@ def handle_eos_gruneisen(block: Block, state: ConversionState) -> None:
     eosid = to_int(f[0])
     g = lambda i: to_float(f[i]) if len(f) > i else 0.0
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="GRUNEISEN",
+        eosid=eosid, kind="GRUNEISEN", keyword=block.keyword,
         params={"c": g(1), "s1": g(2), "s2": g(3), "s3": g(4),
                 "y0": g(5), "a": g(6), "e0": g(7), "rho0": 0.0})
 
@@ -4376,7 +4376,7 @@ def handle_eos_ideal_gas(block: Block, state: ConversionState) -> None:
                    "gamma=1.4 for /EOS/IDEAL-GAS; set the heat-capacity ratio "
                    "explicitly if the gas is not diatomic.")
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="IDEAL-GAS",
+        eosid=eosid, kind="IDEAL-GAS", keyword=block.keyword,
         # cv/cp/t0 are kept so the writer can compute the initial pressure
         # P0 = rho*(cp-cv)*t0 (Radioss requires P0 > 0) once the carrier
         # material's density is known.
@@ -8283,18 +8283,28 @@ def handle_database_cross_section_plane(block: Block, state: ConversionState) ->
         lenm = to_float(f2[4]) if len(f2) > 4 else 0.0
         loc_id = to_int(f2[5]) if len(f2) > 5 else 0
         itype = to_int(f2[6]) if len(f2) > 6 else 0
-        if lenl or lenm:
-            state.warn(f"{tag}: finite parallelogram extent (LENL/LENM) cannot "
-                       "be carried into /SECT — treated as an infinite plane"
-                       + (" limited to RADIUS" if radius > 0 else "") + ".")
-        if radius != 0.0 and has_hev:
-            # p.16-50: a non-zero RADIUS makes the card a CIRCULAR cut and
-            # "XHEV, YHEV, ZHEV, LENL and LENM are ignored".
-            state.warn(f"{tag}: RADIUS is non-zero, so LS-DYNA ignores the "
-                       "edge vector (XHEV/YHEV/ZHEV) on card 2 — the /SECT "
-                       "output frame's in-plane axis is synthesized instead of "
-                       "taken from it, exactly as LS-DYNA would.")
+        # p.16-50 covers FIVE cells in one sentence: "If RADIUS != 0.0, the
+        # variables XHEV, YHEV, ZHEV, LENL, and LENM, which are specified on
+        # Card 1a.2, will be ignored." The exemption used to be applied to
+        # XHEV/YHEV/ZHEV only, so a RADIUS-limited card with LENL/LENM still
+        # got the fidelity-loss warning below — reporting a loss that does not
+        # exist, because LS-DYNA ignores those cells itself and k2rad's
+        # behaviour is then exactly LS-DYNA's (#125/#130, over-alarming
+        # direction). RADIUS is already the absolute value here, so the gate
+        # covers the RADIUS < 0 node-id spelling too.
+        if radius != 0.0 and (has_hev or lenl or lenm):
+            ignored = ", ".join(
+                w for w, on in (("the edge vector (XHEV/YHEV/ZHEV)", has_hev),
+                                ("LENL/LENM", lenl or lenm)) if on)
+            state.warn(f"{tag}: RADIUS is non-zero, so LS-DYNA ignores "
+                       f"{ignored} on card 2 (Vol I R17 p.16-50) — nothing is "
+                       "lost here; the /SECT cut is limited to RADIUS and its "
+                       "output frame's in-plane axis is synthesized, exactly "
+                       "as LS-DYNA would.")
             has_hev = False
+        elif lenl or lenm:
+            state.warn(f"{tag}: finite parallelogram extent (LENL/LENM) cannot "
+                       "be carried into /SECT — treated as an infinite plane.")
         if loc_id:
             what = {0: "a rigid body (*PART)",
                     1: "an accelerometer (*ELEMENT_SEATBELT_ACCELEROMETER)",

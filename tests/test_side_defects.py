@@ -205,7 +205,7 @@ class TestEosCarrierIdCollision(unittest.TestCase):
         res, starter = _convert(_a_deck(_A_MAT_ELASTIC_7, eosid=500, mid=7))
         self.assertEqual(_headers(starter, "/MAT/"), ["/MAT/ELAST/7"])
         self.assertEqual(_headers(starter, "/EOS/"), [])
-        w = _warns(res, "*EOS_POLYNOMIAL 500")
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 500")
         self.assertEqual(len(w), 1)
         self.assertIn("ERROR 683", w[0])
         # No *PART names 500 as its MID, so the advice is "add a *MAT_NULL".
@@ -227,7 +227,7 @@ class TestEosCarrierIdCollision(unittest.TestCase):
         # its own by dropping the material block entirely.
         res, starter = _convert(_a_deck("", eosid=7, mid=7))
         self.assertEqual(_headers(starter, "/MAT/"), [])
-        w = _warns(res, "*EOS_POLYNOMIAL 7")
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 7")
         self.assertEqual(len(w), 1)
         self.assertIn("*PART(s) [1] name 7 as their MID", w[0])
         self.assertIn("skipped-keyword list", w[0])
@@ -243,7 +243,7 @@ class TestEosCarrierIdCollision(unittest.TestCase):
         res, starter = _convert(_a_deck(_A_MAT_ELASTIC_7, eosid=7, mid=7))
         self.assertEqual(_headers(starter, "/MAT/"), ["/MAT/ELAST/7"])
         self.assertEqual(_headers(starter, "/EOS/"), [])
-        w = _warns(res, "*EOS_POLYNOMIAL 7")
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 7")
         self.assertEqual(len(w), 1)
         self.assertIn("*MAT_ELASTIC -> /MAT/ELAST", w[0])
         self.assertIn("ERROR 79", w[0])
@@ -260,7 +260,7 @@ class TestEosCarrierIdCollision(unittest.TestCase):
                  + _row(7, "7.85E-9", "2.1E5", "0.3", "0.0", "0.0") + "\n"
                  + _row("2.2E9", "0.0", "0.0", "-1E20") + "\n")
         res, _s = _convert(_a_deck(fluid, eosid=7, mid=7))
-        w = _warns(res, "*EOS_POLYNOMIAL 7")
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 7")
         self.assertEqual(len(w), 1)
         self.assertIn("already emits its OWN", w[0])
         self.assertIn("*MAT_ELASTIC_FLUID -> /MAT/LAW6", w[0])
@@ -346,7 +346,7 @@ class TestTwoDLagCarrier(unittest.TestCase):
 
     def test_the_orphan_EOS_is_dropped_and_named(self):
         """No *PART names EOSID 3, so LS-DYNA does not use it either."""
-        w = _warns(self.res, "*EOS_POLYNOMIAL 3")
+        w = _warns(self.res, "*EOS_LINEAR_POLYNOMIAL 3")
         self.assertEqual(len(w), 1)
         self.assertIn("*MAT_JOHNSON_COOK", w[0])
         self.assertIn("ERROR 79", w[0])

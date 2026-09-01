@@ -689,7 +689,7 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                            "material law (hm_read_mat.F90:1613 checks the "
                            "merged table)")
                 state.warn(
-                    f"*EOS_{eos.kind} {eosid}: id {eosid} is already held by "
+                    f"{eos.label()}: id {eosid} is already held by "
                     f"a {owner}, and {why}. The equation of state was NOT "
                     "emitted and no /MAT/LAW6 carrier was created — doing "
                     "either would put a SECOND /MAT under id "
@@ -720,7 +720,7 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
             owners = sorted({p.pid for p in state.parts.values()
                              if p.mid == eosid})
             state.warn(
-                f"*EOS_{eos.kind} {eosid}: no *MAT_NULL of that id and no "
+                f"{eos.label()}: no *MAT_NULL of that id and no "
                 "*PART binds it through an EOSID field, so there is no "
                 f"material to attach it to — neither /MAT/HYD_VISC/{eosid} "
                 f"nor /EOS/{eos.kind}/{eosid} was emitted. A synthesized "
@@ -750,13 +750,14 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                 lines += _emit_eos(eos)
             else:
                 state.warn(
-                    f"*EOS_{eos.kind} {eosid}: bound to *MAT_NULL {mid} via "
+                    f"{eos.label()}: bound to *MAT_NULL {mid} via "
                     f"a *PART EOSID — emitted as /EOS/{eos.kind}/{mid} on "
                     "the /MAT/LAW6 carrier of that id (Radioss binds an "
                     "/EOS to the material of the SAME id).")
                 lines += _emit_eos(EosCard(eosid=mid, kind=eos.kind,
                                            params=eos.params, rho0=eos.rho0,
-                                           note=eos.note))
+                                           note=eos.note,
+                                           keyword=eos.keyword))
     return lines
 
 
@@ -895,7 +896,7 @@ def _resolve_mat_johnson_cook(state: ConversionState) -> None:
             mat.eos_id = mat.mid
             state.warn(
                 f"*MAT_JOHNSON_COOK mid={mat.mid}: no *PART attaches an EOS, "
-                f"but *EOS_{state.eos_cards[mat.mid].kind} {mat.mid} shares "
+                f"but {state.eos_cards[mat.mid].label()} shares "
                 "the material id and is bound to no other part — rerouted to "
                 "/MAT/LAW4 + /EOS by k2rad's shared-id pairing convention. "
                 "In LS-DYNA an *EOS_* binds only through the *PART EOSID "
@@ -1144,12 +1145,12 @@ def _emit_mat_law4_hyd_jcook(mat: MatJohnsonCook,
         if eos.eosid != mat.mid:
             state.warn(
                 f"*MAT_JOHNSON_COOK mid={mat.mid}: the *PART-bound "
-                f"*EOS_{eos.kind} {eos.eosid} is emitted as "
+                f"{eos.label()} is emitted as "
                 f"/EOS/{eos.kind}/{mat.mid} — Radioss binds an /EOS to the "
                 "material of the SAME id.")
         lines += _emit_eos(EosCard(eosid=mat.mid, kind=eos.kind,
                                    params=eos.params, rho0=eos.rho0,
-                                   note=eos.note))
+                                   note=eos.note, keyword=eos.keyword))
     elif mat.eos_id in state.eos_jwl:
         state.warn(
             f"*MAT_JOHNSON_COOK mid={mat.mid}: the attached *EOS_JWL "

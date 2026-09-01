@@ -113,7 +113,14 @@ _PARAM_MUTABLE: set = set()
 #: "warn and IGNORE the new definition"** — first wins. This parser used to
 #: overwrite unconditionally, i.e. LAST wins, the exact opposite of LS-DYNA's
 #: default.
-_PARAM_DUPLICATION = [1]
+#:
+#: The second cell is the Remark-2 latch: *"Only one \*PARAMETER_DUPLICATION
+#: card is allowed. If more than one is found, a warning is issued and any
+#: after the first are ignored."* The card is itself first-wins, and it is the
+#: card that DECIDES first-wins for everything else — reading a second one
+#: would let the deck's LAST duplication policy govern its FIRST parameter
+#: definitions, which is neither LS-DYNA's behaviour nor internally coherent.
+_PARAM_DUPLICATION = [1, False]
 
 #: LS-DYNA disallows this name outright (p.36-3), case-insensitively.
 _PARAM_RESERVED_NAMES = frozenset({"time"})
@@ -516,20 +523,42 @@ def _collect_parameter_expressions(kw: str, raw: List[str]) -> None:
 
 
 def _pop_local_scope() -> None:
-    """Discard this file's LOCAL parameters and restore anything they masked.
+    r"""Discard this file's LOCAL parameters and restore anything they masked.
 
-    Vol I R17 p.36-4/5 Remark 5 and its worked example: inside ``file2``
-    ``VAL1 = 10.0, VAL2 = 20.0, VAL3 = 3.0, VAL4 = 40.0``; back in ``main.k``
-    after ``file1`` returns, ``VAL1 = 10.0, VAL2 = 2.0, VAL3 = 3.0`` and
-    ``VAL4`` no longer exists. So a LOCAL definition is a MASK, not an
-    overwrite: what it hid comes back.
+    Vol I R17 p.36-4/5 Remark 5's worked example, on the three cells this
+    function is responsible for: ``VAL2 = 20.0`` inside the include and
+    ``2.0`` again after it returns, ``VAL3 = 3.0`` throughout, and ``VAL4``
+    gone. So a LOCAL definition is a MASK, not an overwrite: what it hid comes
+    back.
+
+    **The example's fourth cell is one the two manual pages disagree about,
+    and k2rad follows p.36-6.** ``file1`` also carries a plain, non-LOCAL
+    ``R VAL1 10.0``, and p.36-5 says main.k then sees ``VAL1 = 10.0``. But
+    that is a duplicate definition of a non-LOCAL parameter, which p.36-6
+    governs: DFLAG's Default is 1, *"issue a warning and ignore the new
+    definition"*, and Remark 1 says explicitly that *"a non-LOCAL that masks a
+    non-LOCAL will"* trigger those actions. k2rad therefore keeps
+    ``VAL1 = 1.0`` in both places and warns — p.36-5's example is illustrating
+    LOCAL scoping, not duplication policy, and predates the MUTABLE work.
+    Two independent things back the p.36-6 reading over the example:
+    p.36-5 Remark 6 introduces MUTABLE as the way to redefine *"regardless of
+    the setting of \*PARAMETER_DUPLICATION"*, and the R17 release notes on
+    Vol I p.138 spell the premise out — *"to indicate that it is OK to redefine
+    a specific parameter even if \*PARAMETER_DUPLICATION says redefinition is
+    not allowed"*. An opt-in escape hatch only makes sense if the default
+    state is "not allowed", i.e. first-wins. (Master was last-wins, so this is
+    the one place the batch changed a resolved parameter VALUE on decks that
+    redefine a global parameter inside an include; see
+    ``TestParameterDuplicationFirstWins`` for the fence.)
 
     **This affects the GLOBAL table only.** Every Block read while the frame
     was live carries the frame's bindings in ``Block.scope``, so the cards of
     the file that declared the LOCAL still resolve it during dispatch.
     Popping without that snapshot is what turned a runnable deck into
     ``Thick 0`` and a starter ERROR 495: k2rad resolves ``&name`` lazily,
-    long after the file has been closed.
+    long after the file has been closed. The same lateness is why
+    ``assembly._scoped_block`` re-installs ``Block.scope`` around the
+    *INCLUDE_TRANSFORM offset and geometry walks, which run after this pop.
     """
     if len(_PARAM_LOCAL_STACK) <= 1:
         return
@@ -550,11 +579,20 @@ def _pop_local_scope() -> None:
 
 
 def _set_parameter_duplication(raw: List[str]) -> None:
-    """``*PARAMETER_DUPLICATION`` — one card, one cell, Vol I R17 p.36-6.
+    r"""``*PARAMETER_DUPLICATION`` — one card, one cell, Vol I R17 p.36-6.
 
     DFLAG 1 warn + ignore the new definition (DEFAULT), 2 warn + accept,
     3 error + ignore (terminates at the end of input), 4 accept silently,
-    5 ignore silently. Remark 2: only one such card is allowed.
+    5 ignore silently.
+
+    Remark 2 is verbatim: *"Multiple Cards. Only one \*PARAMETER_DUPLICATION
+    card is allowed. If more than one is found, a warning is issued and any
+    after the first are ignored."* The rule was quoted here and NOT
+    implemented — the assignment below used to be unconditional, so a second
+    card won. MEASURED on the twin ``DFLAG 1`` then ``DFLAG 2`` then
+    ``R thk 1.0`` then ``R thk 9.0``: k2rad ended with DFLAG 2 and
+    ``thk = 9.0``; LS-DYNA ignores the second card, keeps DFLAG 1 and
+    ``thk = 1.0``. That is a parameter VALUE, so it reaches the emitted deck.
     """
     for line in raw:
         if not line.strip():
@@ -571,7 +609,18 @@ def _set_parameter_duplication(raw: List[str]) -> None:
                        "of 1..5 (Vol I R17 p.36-6) — the default 1 (warn, "
                        "keep the FIRST definition) is used.")
             return
+        if _PARAM_DUPLICATION[1]:
+            if dflag != _PARAM_DUPLICATION[0]:
+                _warn_once(
+                    f"*PARAMETER_DUPLICATION: a second card asks for "
+                    f"DFLAG = {dflag}, but Vol I R17 p.36-6 Remark 2 allows "
+                    "only ONE such card and ignores every one after the "
+                    f"first — DFLAG = {_PARAM_DUPLICATION[0]} stands. Delete "
+                    "the duplicate card if the later value is the intended "
+                    "one.")
+            return
         _PARAM_DUPLICATION[0] = dflag
+        _PARAM_DUPLICATION[1] = True
         return
 
 
@@ -603,7 +652,7 @@ def parse_k_file(path: str, _depth: int = 0,
         _PARAM_IS_INT.clear()
         _PARAM_TEXT.clear()
         _PARAM_MUTABLE.clear()
-        _PARAM_DUPLICATION[0] = 1
+        _PARAM_DUPLICATION[0], _PARAM_DUPLICATION[1] = 1, False
         del _PARAM_LOCAL_STACK[1:]
         _PARAM_LOCAL_STACK[0].clear()
         _LOCAL_SNAPSHOT[0], _LOCAL_SNAPSHOT[1] = None, True
