@@ -6220,6 +6220,180 @@ class MatThermalIsotropic:
 
 
 @dataclass
+class MatThermalIsotropicTD:
+    """*MAT_THERMAL_ISOTROPIC_TD (T03) / _TD_LC (T10) → the /HEAT/MAT values.
+
+    Cards (Vol II R17 p.3-7):
+      Card1: TMID TRO TGRLC TGMULT TLAT HLAT
+      Card2: T1..T8   (temperatures, "a minimum of two and a maximum of eight")
+      Card3: C1..C8   (specific heat at T1..T8)
+      Card4: K1..K8   (conductivity at T1..T8)
+
+    ``_TD_LC``'s Card 2 is ``HCLC TCLC HCHSV TCHSV TGHSV`` instead: the two
+    properties come from *DEFINE_CURVEs, which the handler SAMPLES onto the
+    same ``temps``/``cps``/``ks`` triple so one writer path serves both. A
+    non-zero ``*HSV`` cell makes the property depend on a MECHANICAL history
+    variable (stress component, plastic strain, …) — that has no Radioss
+    counterpart at all and the record is refused, so the sampled lists stay
+    empty and ``lc_hsv`` records which cell forced it.
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    temps: List[float] = field(default_factory=list)
+    cps: List[float] = field(default_factory=list)
+    ks: List[float] = field(default_factory=list)
+    #: *_TD_LC only — the source curve ids, for the warning text.
+    hclc: int = 0
+    tclc: int = 0
+    #: *_TD_LC only — the ``(name, value)`` of the first non-zero ``*HSV`` cell.
+    lc_hsv: Tuple[str, int] = ("", 0)
+    is_lc: bool = False
+
+
+@dataclass
+class MatThermalOrthotropic:
+    """*MAT_THERMAL_ORTHOTROPIC (T02) → /HEAT/MAT, but only when it is in fact
+    isotropic.
+
+    Cards (Vol II R17 p.3-4):
+      Card1: TMID TRO TGRLC TGMULT AOPT TLAT HLAT
+      Card2: HC K1 K2 K3
+      Card3: XP YP ZP A1 A2 A3
+      Card4: D1 D2 D3
+
+    /HEAT/MAT carries ONE conductivity pair (``AS + BS·T`` below ``T1``,
+    ``AL + BL·T`` above — ``dttherm.F90:102-106``, ``mqviscb.F:651-656``), so
+    ``K1 == K2 == K3`` converts exactly and anything else would have to invent
+    an "average conductivity" the deck never states.
+    """
+    tmid: int
+    title: str = ""
+    tro: float = 0.0
+    tgrlc: int = 0
+    tgmult: float = 0.0
+    aopt: float = 0.0
+    tlat: float = 0.0
+    hlat: float = 0.0
+    hc: float = 0.0
+    k1: float = 0.0
+    k2: float = 0.0
+    k3: float = 0.0
+
+
+@dataclass
+class ControlThermalSolver:
+    """*CONTROL_THERMAL_SOLVER (Vol I R17 pp.12-573..579).
+
+    Card 1  ``ATYPE PTYPE SOLVER <cgtol, obsolete> GPT EQHEAT FWORK SBC``
+    Card 2a ``MSGLVL MAXITR ABSTOL RELTOL OMEGA - - TSF``   (SOLVER != 17)
+    Card 2b ``MSGLVL NINNER ABSTOL RELTOL NOUTER``          (SOLVER == 17)
+    Card 3  ``MXDMP DTVF VARDEN - NCYCL``
+
+    Exactly TWO cells reach a Radioss card:
+      * ``FWORK`` — *"Fraction of mechanical work converted into heat"*
+        (p.12-575) is term-for-term ``/HEAT/MAT``'s ``EFRAC``
+        (``hm_read_therm.F:239-241``, echoed *"FRACTION OF STRAIN ENERGY
+        CONVERTED INTO HEAT"*), and both sides turn a 0 into 1.0;
+      * ``TSF`` — the Thermal Speedup Factor, *"multiplies all thermal
+        parameters with units of time in the denominator"* (p.12-576), is the
+        engine ``/THERM``'s single cell ``THEACCFACT``
+        (``frethermal.F:64-70``).
+    Every other cell tunes an implicit matrix solve Radioss does not perform.
+    """
+    atype: int = 0
+    ptype: int = 0
+    solver: int = 0
+    gpt: int = 0
+    eqheat: float = 1.0
+    fwork: float = 1.0
+    sbc: float = 0.0
+    has_fwork: bool = False     # the cell was actually stated
+    msglvl: int = 0
+    maxitr: int = 0
+    abstol: float = 0.0
+    reltol: float = 0.0
+    omega: float = 0.0
+    ninner: int = 0
+    nouter: int = 0
+    tsf: float = 0.0
+    mxdmp: int = 0
+    dtvf: float = 0.0
+    varden: int = 0
+    ncycl: int = 0
+    has_card2: bool = False
+    has_card3: bool = False
+
+
+@dataclass
+class ThermalBoundary:
+    """One converted *BOUNDARY_{FLUX,CONVECTION,RADIATION} record.
+
+    The three LS-DYNA cards share a shape — a segment source (a ``*SET_SEGMENT``
+    id or four explicit nodes) plus a two-slot value card — and the three
+    Radioss cards they become (``/IMPFLUX``, ``/CONVEC``, ``/RADIATION``) share
+    one too:
+
+        /<CARD>/<id>
+        <title>
+        #  SURF_ID  FUNCT_ID SENSOR_ID [GRBRIC_ID]
+        #   ASCALE   FSCALE   TSTART   TSTOP   [H | E]
+
+    so one record type carries all three. ``kind`` is ``"FLUX"``,
+    ``"CONVEC"`` or ``"RADIATION"``.
+
+    ``coef`` is the card's third-column scalar: ``H`` for /CONVEC
+    (``hm_read_convec.F:165`` ``FAC(3) = H``) and the EMISSIVITY for
+    /RADIATION (``hm_read_radiation.F:174`` ``FAC(3) = EMI*SIGMA`` — the
+    starter supplies sigma itself, so this cell is dimensionless). /IMPFLUX has
+    no third column (``FAC(3) = ZERO``) and carries its magnitude in ``fscale``
+    instead.
+    """
+    kind: str
+    source: str                                 # the LS-DYNA keyword, verbatim
+    ssid: int = 0                               # *SET_SEGMENT id (the _SET form)
+    nodes: List[int] = field(default_factory=list)   # the _SEGMENT form's N1..N4
+    pserod: int = 0
+    loc: int = 0
+    #: LS-DYNA curve id for the value that Radioss puts in ``fct_IDT``
+    #: (T_inf for CONVEC/RADIATION, the flux for IMPFLUX). 0 = the constant form.
+    lcid: int = 0
+    mult: float = 0.0                           # that curve's multiplier
+    coef: float = 0.0                           # H / emissivity (see above)
+    #: Writer-resolved.
+    func_id: int = 0
+    fscale: float = 1.0
+    surf_id: int = 0
+
+
+@dataclass
+class LoadThermalElement:
+    """*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,TSHELL}.
+
+    ``_CONSTANT_ELEMENT_<F>`` card: ``EID T``   (p.33-168)
+    ``_VARIABLE_ELEMENT_<F>`` card: ``EID TS TB LCID``  (p.33-184)
+
+    Both prescribe *"a uniform element temperature"*, i.e. an ELEMENT-centric
+    field, while ``/IMPTEMP`` writes ``TEMP(node)``. The writer expands each
+    element to its own nodes and only converts when the resulting
+    node → temperature map is single-valued; a node claimed by two elements at
+    two different temperatures is over-determined and the whole card falls back
+    to a named drop rather than letting the last writer win.
+    """
+    source: str
+    family: str                 # BEAM / SHELL / SOLID / TSHELL
+    eid: int = 0
+    temp: float = 0.0           # _CONSTANT_ELEMENT's T
+    scale: float = 0.0          # _VARIABLE_ELEMENT's TS
+    offset: float = 0.0         # _VARIABLE_ELEMENT's TB
+    lcid: int = 0               # _VARIABLE_ELEMENT's LCID
+
+
+@dataclass
 class InitialTemperature:
     """*INITIAL_TEMPERATURE_{SET|NODE} → /INITEMP on a /GRNOD.
 
@@ -6231,6 +6405,10 @@ class InitialTemperature:
     temp: float
     loc: int = 0
     is_node: bool = False   # True = *INITIAL_TEMPERATURE_NODE (sid is a NID)
+    # An EXPLICIT node list, which wins over sid/is_node when non-empty. Only
+    # the *LOAD_THERMAL_*_ELEMENT_<FAMILY> path fills it: those cards name
+    # ELEMENTS, and the nodes they expand to are not any *SET_NODE in the deck.
+    nids: List[int] = field(default_factory=list)
     # Only ever set on the companion /INITEMP the writer SYNTHESIZES for a
     # driver (writer/thermal.py::_resolve_drivers). It has to carry the
     # driver's own scope: an /INITEMP over the WHOLE set while the /IMPTEMP
@@ -6993,6 +7171,26 @@ class ConversionState:
         field(default_factory=list)
     mat_thermal_isotropic: Dict[int, MatThermalIsotropic] = \
         field(default_factory=dict)
+    # The two richer thermal materials, kept in their OWN dicts because the
+    # TMID namespace is shared: a deck may not state T01 and T03 under the same
+    # TMID, and _thermal_material_for_part resolves them in a fixed order so a
+    # deck that does gets a named warning instead of a dict-order coin flip.
+    mat_thermal_iso_td: Dict[int, MatThermalIsotropicTD] = \
+        field(default_factory=dict)
+    mat_thermal_ortho: Dict[int, MatThermalOrthotropic] = \
+        field(default_factory=dict)
+    # *CONTROL_THERMAL_SOLVER — FWORK reaches /HEAT/MAT's EFRAC and TSF the
+    # engine /THERM; every other cell is a named per-field drop.
+    ctrl_thermal_solver: Optional[ControlThermalSolver] = None
+    # *CONTROL_SOLUTION SOLN, verbatim (0 structural, 1 thermal-only, 2 coupled).
+    # SOLN = 1 is what makes _make_engine_thermal write /DT/THERM.
+    ctrl_solution_soln: int = 0
+    # *BOUNDARY_{FLUX,CONVECTION,RADIATION} → /IMPFLUX, /CONVEC, /RADIATION.
+    thermal_boundaries: List[ThermalBoundary] = field(default_factory=list)
+    # *LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_<FAMILY> — element-centric
+    # temperatures, expanded to their nodes by the writer (or dropped by name
+    # when two elements claim one node at two temperatures).
+    load_thermal_elements: List[LoadThermalElement] = field(default_factory=list)
     # Temperature drivers — the minimal foothold that makes a /THERM_STRESS/MAT
     # do anything at all. Radioss's thermal expansion is INCREMENTAL
     # (ETH = alpha*(T_n - T_{n-1}), cmain3.F:235-240 / mmain.F90:770-786), so
@@ -7002,9 +7200,10 @@ class ConversionState:
     imposed_temperatures: List[ImposedTemperature] = field(default_factory=list)
     # Writer-resolved (writer/thermal.py::_resolve_thermal), filled ONCE per mid
     # — the #125 "emit shared cards once per ID, not once per consumer" rule.
-    #   heat_mat_cards   : mid → (T0, RHO0_CP, AS, BS, T1, EFRAC)
+    #   heat_mat_cards   : mid → (T0, RHO0_CP, AS, BS, T1, AL, BL, EFRAC)
     #   therm_stress_cards: mid → (Fct_ID_T, Fscale_y)
-    heat_mat_cards: Dict[int, Tuple[float, float, float, float, float, float]] \
+    heat_mat_cards: Dict[
+        int, Tuple[float, float, float, float, float, float, float, float]] \
         = field(default_factory=dict)
     therm_stress_cards: Dict[int, Tuple[int, float]] = field(default_factory=dict)
     # *MAT_ELASTIC ids whose law was RESTATED to /MAT/LAW36 so that a thermal
@@ -7021,6 +7220,17 @@ class ConversionState:
     # This is what gates /TH/NODE TEMP, /ANIM/NODA/TEMP and the *DATABASE_TPRINT
     # note (the #122 rule: a legal, accepted, frozen channel is worse than none).
     thermal_driver_emitted: bool = False
+    # The SAME rule for the three heat-SOURCE boundary cards. Set at the line
+    # that writes a /CONVEC, /RADIATION or /IMPFLUX — all three were MEASURED to
+    # move the nodal temperature on their own (a /CONVEC-only probe with no
+    # /IMPTEMP and no /DT/THERM ran 7011 cycles and stored 68.120647 mJ, and its
+    # twin with the /CONVEC removed stored 7.4e-32), so any one of them arms the
+    # solve exactly as an /IMPTEMP does. Kept SEPARATE from
+    # thermal_driver_emitted because the two answer different questions: a
+    # /THERM_STRESS is inert without a driver, and _warn_inert_expansion must
+    # not call a deck "expanding" just because a flux is on it — it must call it
+    # expanding because the temperature moves, which is the union.
+    thermal_source_emitted: bool = False
 
     # ── Seatbelts / restraints ─────────────────────────────────
     # ONE dict for every *MAT_SEATBELT / *MAT_B01 spelling, `_2D` included:
