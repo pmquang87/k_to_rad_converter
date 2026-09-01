@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Optional, Set
 
 from ..state import ConversionState, NodeData
@@ -14,11 +13,15 @@ from .common import (
     _f,
     _fmt_eid_list,
     _i,
+    _nid_centroid,
+    _node_cloud_normal,
     _ordered_unique_nodes,
-    _vcross,
+    _orthonormal_pair,
+    _preload_sect_scale,
     _vnorm,
 )
-from .inistate import _plane_cut, _solid_sec_for_part
+from .inistate import (_plane_cut, _solid_sec_for_part,
+                       resolve_cross_section_endpoints)
 from .loads import _emit_funct
 from .mesh import _effective_solid_isolid
 
@@ -93,29 +96,25 @@ def _preload_curve_window(pts):
 # The /SECT frame that REALIZES the preload direction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _orthonormal_pair(nhat):
-    """``(e1, e2)``, orthonormal and perpendicular to ``nhat``, with
-    ``e1 x e2 == nhat`` exactly."""
-    a = (1.0, 0.0, 0.0) if abs(nhat[0]) < 0.9 else (0.0, 1.0, 0.0)
-    d = a[0] * nhat[0] + a[1] * nhat[1] + a[2] * nhat[2]
-    e1 = _vnorm((a[0] - d * nhat[0], a[1] - d * nhat[1], a[2] - d * nhat[2]))
-    if e1 is None:                                   # pragma: no cover
-        return None
-    return (e1, _vcross(nhat, e1))
-
-
 def _frame_nodes_for_normal(origin, nhat, scale: float):
     """Coordinates of three nodes N1,N2,N3 whose ``(N2-N1) x (N3-N1)`` is
     parallel to (and same-signed as) ``nhat``.
 
     ``hm_read_preload.F:203-217`` takes the pretension direction from exactly
     that cross product of the /SECT's ``node_ID1/2/3`` and refuses
-    ``|n|^2 < 1e-20`` with ERROR 1244. ``_sect_frame_nodes`` — the frame the
-    reporting /SECT uses — instead picks the three best-CONDITIONED nodes of
-    the cut, which has nothing to do with the cutting-plane normal: measured on
-    a 1x1x2 bar cut at x=0.5 with normal (1,0,0) it produced a starter-echoed
-    NX/NY/NZ of (-0.707, 0, 0.707), i.e. 45 degrees off, at zero diagnostics.
-    Three purpose-built nodes make the direction exact by construction.
+    ``|n|^2 < 1e-20`` with ERROR 1244. Three purpose-built nodes make the
+    direction exact by construction, instead of picking the three
+    best-CONDITIONED nodes of the cut — which has nothing to do with the
+    cutting-plane normal: measured on a 1x1x2 bar cut at x=0.5 with normal
+    (1,0,0), the picked frame gave a starter-echoed NX/NY/NZ of
+    (-0.707, 0, 0.707), i.e. 45 degrees off, at zero diagnostics.
+
+    The REPORTING /SECT was built that way until the SIDE-DEFECT batch, which
+    is why this preload path needed its own section at all; it now uses the
+    same construction (``inistate._sect_synth_frame``), generalised to take
+    the in-plane axis from the card's edge vector L when the deck states one.
+    The two sections are still separate because they carry different element
+    groups and node scopes.
     """
     pair = _orthonormal_pair(nhat)
     if pair is None:                                 # pragma: no cover
@@ -140,40 +139,6 @@ def _vector_direction(state: ConversionState, vid: int):
     return _vnorm((v.xh - v.xt, v.yh - v.yt, v.zh - v.zt))
 
 
-def _node_cloud_normal(state: ConversionState, nids: List[int]):
-    """Best-conditioned plane normal of a node cloud, or ``None``.
-
-    Used for a ``*DATABASE_CROSS_SECTION_SET`` whose ``*INITIAL_STRESS_SECTION``
-    states no VID. LS-DYNA requires one there ("VID must be set when the SET
-    variant of *DATABASE_CROSS_SECTION is used", Vol I R17 p.3144) precisely
-    because the node ORDER in the set carries no plane information — which is
-    why dyna2rad, which never reads VID, falls back to a dummy
-    (0,0,0)/(1,0,0)/(0,1,0) triad and silently preloads along global +Z
-    (convertcrosssections.cxx:246-251). Fitting the plane the section nodes
-    actually lie in is the honest best effort: exact for a planar cut, and the
-    caller says out loud that it was a fit.
-    """
-    pts = [state.nodes[n] for n in nids if n in state.nodes]
-    if len(pts) < 3:
-        return None
-    cx = sum(p.x for p in pts) / len(pts)
-    cy = sum(p.y for p in pts) / len(pts)
-    cz = sum(p.z for p in pts) / len(pts)
-    rel = [(p.x - cx, p.y - cy, p.z - cz) for p in pts]
-    u = max(rel, key=lambda v: v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
-    if u[0] ** 2 + u[1] ** 2 + u[2] ** 2 <= 0.0:
-        return None
-    best, best_a2 = None, 0.0
-    for v in rel:
-        c = _vcross(u, v)
-        a2 = c[0] ** 2 + c[1] ** 2 + c[2] ** 2
-        if a2 > best_a2:
-            best, best_a2 = c, a2
-    if best is None or best_a2 <= 0.0:
-        return None
-    return _vnorm(best)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # *INITIAL_STRESS_SECTION → /PRELOAD
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,21 +161,6 @@ def _node_cloud_normal(state: ConversionState, nids: List[int]):
 #: the warning fire on decks whose bolt preload is in fact fine — re-measured
 #: (0 ERRORS, NORMAL TERMINATION, 2813 cycles) and added.
 _PRELOAD_STABLE_ISOLID = frozenset({5, 14, 17})
-
-
-def _preload_sect_scale(state: ConversionState, origin, nids: List[int]) -> float:
-    """A length scale for the synthesized frame, taken from the section itself
-    so the three new nodes land in the cut's own neighbourhood instead of one
-    deck unit away from it (which in a metre model would be a metre)."""
-    best = 0.0
-    for n in nids:
-        nd = state.nodes.get(n)
-        if nd is None:
-            continue
-        d = math.sqrt((nd.x - origin[0]) ** 2 + (nd.y - origin[1]) ** 2
-                      + (nd.z - origin[2]) ** 2)
-        best = max(best, d)
-    return best if best > 0.0 else 1.0
 
 
 def _make_preload_sections(state: ConversionState,
@@ -249,6 +199,10 @@ def _make_preload_sections(state: ConversionState,
     """
     if not state.ini_stress_sections:
         return []
+    # RADIUS < 0 makes XCT/XCH node ids, resolved in the writer because the
+    # node table is only complete after the whole deck is parsed. Idempotent,
+    # and _make_cross_sections calls it too — whichever builder runs first.
+    resolve_cross_section_endpoints(state)
     by_csid: Dict[int, object] = {}
     for cs in state.cross_sections:
         if cs.csid > 0:
@@ -265,6 +219,16 @@ def _make_preload_sections(state: ConversionState,
             state.warn(f"{label}: *DATABASE_CROSS_SECTION id {iss.csid} not "
                        "found — no /PRELOAD emitted (a /PRELOAD naming an "
                        "unknown section is starter ERROR 1243).")
+            continue
+        if getattr(cs, "radius_is_nodes", False):
+            # Still unresolved after the full parse: XCT/XCH name nodes this
+            # deck does not have. Reading the raw cells as COORDINATES would
+            # put the cutting plane — and therefore the preloaded bricks — at
+            # an arbitrary point. _make_cross_sections reports the id.
+            state.warn(
+                f"{label}: the cross section's RADIUS is negative, so "
+                f"XCT={cs.xct_nid}/XCH={cs.xch_nid} are NODE IDS, and they are "
+                "not nodes of this deck — no /PRELOAD emitted.")
             continue
         curve = state.curves.get(iss.lcid)
         if curve is None or not curve.pts:
@@ -310,7 +274,13 @@ def _make_preload_sections(state: ConversionState,
             nids, solid_eids, normal, why = _set_section_scope(state, cs, iss,
                                                                extra, label)
         else:
-            nids, _sh, solid_eids, _bm = _plane_cut(
+            # ``_spr`` is _plane_cut's spring arm, added with the SIDE-DEFECT
+            # batch. It is deliberately unused HERE: hm_read_preload.F:233-237
+            # refuses a section with no SOLID element (ERROR 1251) and
+            # iboltini/sboltini tag bricks only, so a bolt preload has nothing
+            # to do with the springs the plane crosses — only the reporting
+            # /SECT does.
+            nids, _sh, solid_eids, _bm, _spr = _plane_cut(
                 state, cs, extra_pids=extra, warn_missing_psid=False)
             normal = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct,
                              cs.zch - cs.zct))
@@ -400,7 +370,7 @@ def _make_preload_sections(state: ConversionState,
         # under its own SID, so a SID at or above the auto base would collide
         # here — starter ERROR 79 over the merged /GRNOD table, a refused deck.
         grnod_id = state.next_grnod_id()
-        grbric_id = state.next_id()
+        grbric_id = state.next_elem_group_id()
 
         lines += ["/NODE"]
         for nid, xyz in zip(fn_ids, frame):
@@ -539,15 +509,6 @@ def _make_preload_sections(state: ConversionState,
             state.warn(f"{label}: " + "; ".join(dropped)
                        + " — no /PRELOAD slot at any Radioss version, dropped.")
     return lines if emitted else []
-
-
-def _nid_centroid(state: ConversionState, nids: List[int]):
-    pts = [state.nodes[n] for n in nids if n in state.nodes]
-    if not pts:
-        return (0.0, 0.0, 0.0)
-    return (sum(p.x for p in pts) / len(pts),
-            sum(p.y for p in pts) / len(pts),
-            sum(p.z for p in pts) / len(pts))
 
 
 def _set_section_scope(state: ConversionState, cs, iss, extra, label: str):
@@ -811,7 +772,7 @@ def _make_preload_axial(state: ConversionState,
         if beam_eids:
             families.append(("GRBEAM/BEAM", "BEAM", beam_eids))
         for keyword, fam, eids in families:
-            grp = state.next_id()
+            grp = state.next_elem_group_id()
             pre_id = state.next_id()
             while pre_id in used_preload:
                 pre_id = state.next_id()

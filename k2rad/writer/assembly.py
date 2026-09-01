@@ -1145,6 +1145,9 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_th_group_ids(state, lines)
     _warn_duplicate_prop_ids(state, lines)
     _warn_duplicate_mat_ids(state, lines)
+    _warn_duplicate_eos_ids(state, lines)
+    _warn_duplicate_group_ids(state, lines)
+    _warn_node_tc_rc(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
@@ -1455,6 +1458,208 @@ def _warn_duplicate_mat_ids(state: ConversionState,
                 "ID, IN MATERIAL DEFINITION) and every /PART naming that id "
                 "resolves to whichever card came first. Renumber one of the "
                 "*MAT_* cards.")
+
+
+#: ``/<FAMILY>/<sub-keyword...>/<id>`` for every GROUP namespace, capturing the
+#: FAMILY (the first path segment) and the id. The sub-keyword is deliberately
+#: NOT part of the key — MEASURED, ``/GRBRIC/BRIC/5000`` beside
+#: ``/GRBRIC/PART/5000`` is ``ERROR 79 ... IN BRIC ELEMENT GROUP``, so they are
+#: one namespace.
+_GROUP_CARD_ID_RE = re.compile(
+    r"^/(GRBRIC|GRQUAD|GRSHEL|GRSH3N|GRTRIA|GRTRUS|GRBEAM|GRSPRI|GRNOD"
+    r"|GRPART|SURF|LINE|SUBSET)/(?:[A-Z0-9_]+/)*(\d+)\s*$")
+
+#: The starter's own ``MESS`` string per family, so the warning quotes the text
+#: the user will actually see. ``hm_lecgre.F:150-152`` builds the element-group
+#: ones as ``MES(01:04)=ELKEY; MES(05:18)=' ELEMENT GROUP'``; the others come
+#: from their own readers (``hm_lecgrn.F:142``, ``hm_read_grpart.F:85``,
+#: ``hm_read_surf.F:187``, ``hm_read_lines.F:163``, ``hm_read_subset.F:103``).
+_GROUP_FAMILY_MESS = {
+    "GRBRIC": "BRIC ELEMENT GROUP",
+    "GRQUAD": "QUAD ELEMENT GROUP",
+    "GRSHEL": "SHEL ELEMENT GROUP",
+    "GRSH3N": "SH3N ELEMENT GROUP",
+    "GRTRIA": "TRIA ELEMENT GROUP",
+    "GRTRUS": "TRUS ELEMENT GROUP",
+    "GRBEAM": "BEAM ELEMENT GROUP",
+    "GRSPRI": "SPRI ELEMENT GROUP",
+    "GRNOD":  "NODE GROUP DEFINITION",
+    "GRPART": "PART GROUP",
+    "SURF":   "SURFACE DEFINITION",
+    "LINE":   "LINE DEFINITION",
+    "SUBSET": "SUBSET DEFINITION",
+}
+
+
+def _warn_node_tc_rc(state: ConversionState, lines: List[str]) -> None:
+    """``*NODE``'s TC/RC constraint cells are read and DROPPED — say so.
+
+    Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``: TC and RC are
+    constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
+    global system, exactly the triples ``*BOUNDARY_SPC_NODE`` states one flag
+    at a time. ``handle_node`` reads only NID/X/Y/Z, so a deck that states its
+    constraints there converts into a model with those DOFs FREE.
+
+    This is the silent half that makes it worth a message: measured on a
+    spring-mass coupon whose anchor carried ``tc=7 rc=7``, no ``/BCS`` was
+    emitted, the anchor was free, the whole oscillator drifted at the
+    centre-of-mass velocity (node-2 DX reached 6.68 mm against an intended
+    0.317 mm amplitude) — and the run still reported NORMAL TERMINATION. The
+    #122 class: legal, accepted, and wrong.
+
+    **Not converted here, and the reason is the SCREENING, not the direction
+    of the error.** An earlier draft argued that an extra constraint is the
+    harder failure to notice than a missing one; that does not justify
+    shipping a missing one. What does justify deferral is that a correct /BCS
+    pass has to screen two things this round cannot validate:
+
+      * p.35-3 Remark 1, verbatim: *"No attempt should be made to apply
+        boundary conditions to nodes belonging to rigid bodies (see
+        \\*MAT_RIGID for application of rigid body constraints)."* So every
+        rigid-body secondary node has to come out of the set, and k2rad's
+        rigid nodes are assembled across ``*MAT_RIGID`` parts,
+        ``*CONSTRAINED_NODAL_RIGID_BODY`` and the synthesized element-free
+        masters.
+      * A DOF already driven by ``/IMPVEL`` or ``/IMPDISP`` must not also be
+        pinned — the two cards fight over the same slot.
+
+    Both need their own twin campaign against LS-DYNA, and the need is
+    MEASURED rather than asserted: of the 721 carrying decks in the two corpus
+    roots, **278 (39 %) also carry a rigid body or a prescribed motion** —
+    139 a ``*MAT_RIGID`` / ``*CONSTRAINED_NODAL_RIGID_BODY`` /
+    ``*CONSTRAINED_EXTRA_NODES``, 211 a ``*BOUNDARY_PRESCRIBED_MOTION_*`` — so
+    a naive pass would be wrong on two decks in five. The other 443 (61 %)
+    would be safe, which is exactly why the conversion is worth building.
+
+    The interim is the loud per-deck note below, and the conversion is a
+    ROADMAP item behind an opt-in flag (``--node-tc-rc-to-bcs``) so the
+    carrying decks can be fixed without changing the default for everyone.
+
+    The detector itself is independently checked: a scanner that does not use
+    k2rad found a non-zero TC/RC in exactly the decks this note fires on, with
+    no false positives and no misses.
+    """
+    if not state.node_tc_rc_count:
+        return
+    shown = ", ".join(str(n) for n in state.node_tc_rc[:5])
+    more = ("" if state.node_tc_rc_count <= 5
+            else f" and {state.node_tc_rc_count - 5} more")
+    state.warn(
+        f"*NODE: {state.node_tc_rc_count} node(s) state a constraint in the "
+        f"card's own TC/RC cells (node {shown}{more}) — Vol I R17 makes *NODE "
+        "Card 1 'NID X Y Z TC RC', where TC and RC are constraint codes (0 "
+        "none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system. "
+        "k2rad reads only NID/X/Y/Z, so those degrees of freedom are FREE in "
+        "the converted model and no /BCS is emitted for them. Nothing in the "
+        "run reports it: measured on a spring-mass coupon whose anchor carried "
+        "tc=7/rc=7, the anchor was free and the whole oscillator drifted at "
+        "the centre-of-mass velocity while the engine printed NORMAL "
+        "TERMINATION. Restate the constrained nodes as *BOUNDARY_SPC_NODE (or "
+        "*BOUNDARY_SPC_SET), which this converter does emit as /BCS.")
+
+
+def _warn_duplicate_group_ids(state: ConversionState,
+                              lines: List[str]) -> None:
+    """One id per GROUP FAMILY — and the families are INDEPENDENT.
+
+    ``lecgroup.F:124-224`` calls ``HM_LECGRE`` once per element family, each
+    with its own array, and ``hm_lecgre.F:262-267`` runs ``UDOUBLE_IGR`` over
+    that family's list only; ``/GRNOD``, ``/GRPART``, ``/SURF``, ``/LINE`` and
+    ``/SUBSET`` each have their own reader and their own ``UDOUBLE``. So a
+    duplicate is ``ERROR 79`` only within one family.
+
+    MEASURED, twelve probe decks on one 6-family mesh, all at id 5000:
+
+      * ``/GRBRIC/BRIC`` + ``/GRSHEL/SHEL``        -> ACCEPTED, 0 ERROR
+      * ``/GRSHEL/SHEL`` + ``/GRSH3N/SH3N``        -> ACCEPTED
+      * ``/GRSPRI`` + ``/GRBEAM``, ``/GRSPRI`` + ``/GRTRUS``  -> ACCEPTED
+      * ``/GRNOD`` + ``/GRBRIC``, ``/GRPART`` + ``/GRSHEL``,
+        ``/SURF`` + ``/GRSHEL``, ``/SUBSET`` + ``/GRBRIC``    -> ACCEPTED
+      * NINE groups on one id across nine families -> ACCEPTED, 0 ERROR
+      * ``/GRBRIC/BRIC`` twice -> ``ERROR ID : 79 ** ERROR: DUPLICATE ID /
+        IN BRIC ELEMENT GROUP / ID=5000 is DUPLICATED``
+      * ``/GRBRIC/BRIC`` + ``/GRBRIC/PART`` -> the SAME ERROR 79, so the
+        sub-keyword is not part of the key
+      * ``/GRPART/PART`` twice -> ``ERROR 79 ... IN PART GROUP``
+
+    **A single scan over "any /GR* id" would therefore be WRONG** and would
+    fire on five of those decks. This is the missing member of the family of
+    deck-wide scans at :func:`build_starter`'s finish pass, which had nine
+    (TH-group, PROP, MAT, thermal, preload, SECT, FUNCTION, IMPDISP, INTER) and
+    now has eleven with ``/EOS``. Changes no output.
+
+    A collision is not reachable today — the synthesized ids come from
+    monotonic allocators and nothing re-emits a user element set under its own
+    SID — which is exactly why this exists: it removes the CLASS, so the next
+    writer that decides to pass a deck-stated id through cannot make the
+    failure silent again.
+    """
+    seen: Dict[Tuple[str, int], List[str]] = {}
+    for ln in lines:
+        m = _GROUP_CARD_ID_RE.match(ln)
+        if m:
+            seen.setdefault((m.group(1), int(m.group(2))), []).append(
+                ln.strip())
+    for (fam, gid), cards in sorted(seen.items()):
+        if len(cards) > 1:
+            mess = _GROUP_FAMILY_MESS.get(fam, f"{fam} GROUP")
+            state.warn(
+                f"GROUP ID {gid} is emitted by more than one /{fam} card ("
+                + ", ".join(cards)
+                + f"). The starter keeps ONE table per family and checks it "
+                f"with UDOUBLE_IGR, so this is ERROR 79 (DUPLICATE ID, IN "
+                f"{mess}) and the whole deck is refused. Note the families are "
+                "INDEPENDENT — a /GRBRIC and a /GRSHEL may legally share a "
+                "number, and this scan is keyed per family for that reason — "
+                "but the sub-keyword is NOT part of the key: /"
+                f"{fam}/<one sub-keyword> and /{fam}/<another> collide.")
+
+
+#: ``/EOS/<kind>/<mid>``, capturing the kind AND the id. ``-`` is in the class
+#: because ``/EOS/IDEAL-GAS`` is a real spelling.
+_EOS_CARD_KIND_ID_RE = re.compile(r"^/EOS/([A-Z0-9_-]+)/(\d+)\s*$")
+
+
+def _warn_duplicate_eos_ids(state: ConversionState,
+                            lines: List[str]) -> None:
+    """One ``/EOS`` per /MAT id — and the starter will NOT tell you otherwise.
+
+    An ``/EOS``'s id is not an id of its own: it is a POINTER into the /MAT
+    table. ``hm_read_eos.F:165-177`` scans ``IPM(1,IMAT)`` for a material of
+    the same number and raises ERROR 1663 (UNKNOWN REFERENCE TO MATERIAL MODEL)
+    when there is none, then ``:301-304`` writes ``IPM(4,IMAT) = IEOS``. There
+    is **no** ``UDOUBLE``/``VDOUBLE`` call anywhere in that routine, so unlike
+    every other namespace this one has no duplicate check: two ``/EOS`` blocks
+    on one id are accepted at 0 ERROR / 0 WARNING and the LAST one silently
+    replaces the material's equation of state. MEASURED (probe ``a_dupeos``,
+    a /MAT/HYD_VISC carrying two /EOS): NORMAL TERMINATION, both echoed, last
+    ``IEOS`` wins — strictly worse than the ERROR 79 the /MAT twin gets,
+    because nothing at any layer says a pressure law was replaced.
+
+    The missing member of the family at :func:`build_starter`'s finish pass
+    (nine scans existed, none for /EOS), added with the *EOS_* carrier fix:
+    ``2Dlag.k`` emitted ``/EOS/GRUNEISEN/3`` and ``/EOS/POLYNOMIAL/3`` and only
+    the ``/MAT`` half of that double collision was diagnosed. Changes no
+    output.
+    """
+    seen: Dict[int, List[str]] = {}
+    for ln in lines:
+        m = _EOS_CARD_KIND_ID_RE.match(ln)
+        if m:
+            seen.setdefault(int(m.group(2)), []).append(m.group(1))
+    for mid, kinds in sorted(seen.items()):
+        if len(kinds) > 1:
+            state.warn(
+                f"MATERIAL ID {mid} carries more than one /EOS card ("
+                + ", ".join(f"/EOS/{k}/{mid}" for k in kinds)
+                + "). A Radioss /EOS binds to the /MAT of the SAME id "
+                "(hm_read_eos.F:165-177), one per material, and the starter "
+                "does NOT diagnose a duplicate — it accepts both blocks and "
+                f"the LAST one wins, so material {mid} silently runs with "
+                f"/EOS/{kinds[-1]}/{mid} and the others are dead input. "
+                "Renumber or remove the *EOS_* cards that were not meant for "
+                "this material (in LS-DYNA an *EOS_* binds only through the "
+                "*PART EOSID field).")
 
 
 #: ``/HEAT/MAT/<mid>`` and ``/THERM_STRESS/MAT/<mid>`` — a THIRD id namespace,
@@ -1973,7 +2178,8 @@ def _starter_section_registry():
         ("random_noise",      lambda c: _make_random(c.state)),
         ("eig",               lambda c: _make_eig(c.state)),
         ("free_node_constraints", lambda c: _make_free_node_constraints(c.state, c.rigid_nodes)),
-        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes)),
+        ("damping",           lambda c: _make_damping(c.state, c.rigid_nodes,
+                                                      c.rbody_info)),
         # The damping family, continued. Each of these three is a no-op (and
         # draws no ids) on a deck without its keyword, so they cannot shift the
         # id stream of an existing deck. *DAMPING_RELATIVE resolves and warns

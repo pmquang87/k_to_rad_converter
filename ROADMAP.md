@@ -55,7 +55,27 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   rather than collapsed onto one point. `*INTERFACE_SPRINGBACK_LSDYNA` → the
   engine `/DYNAIN` block, on a schedule rather than a single terminal trigger
   because the engine's own end-of-run rescue sets `ILASTDYNAIN` and never reads
-  it.
+  it — an EXPLICIT-only caveat, MEASURED: under quasi-static implicit
+  `imp_dt.F:53-56` clamps the last step onto `TSTOP`, so the run lands on
+  `ENDTIM` and the highest-numbered dynain IS the terminal state (probe:
+  NORMAL TERMINATION in 20 cycles, three 22 225-byte files with all four
+  blocks, driven edge 20.1960 / 20.1980 / 20.2000). No implicit guard is
+  applied and none should be.
+- **SIDE-DEFECT batch — DONE.** Ten defects at the edges of cards this
+  converter already handles: the bare `*EOS_*` /MAT/LAW6 carrier's /MAT
+  collision (removed — it could never be legal, since no `*EOS_*` spelling
+  carries a density); the missing `_OFFSET_SPECS` rows on
+  `*INITIAL_STRESS_SHELL`/`_SOLID` (and `*INITIAL_VOLUME_FRACTION_GEOMETRY`);
+  /DAMP reaching only four element families, so a beam+spring model ran
+  undamped; `/INISH3/STRS_F`; the conditioning-picked /SECT reporting frame;
+  `_plane_cut`'s missing spring arm and the `_SET` spelling's dropped
+  TSID/DSID; /DYNAIN under implicit (measured: it works, no guard); the
+  element-GROUP allocator on 1 of 18 sites; `*PARAMETER_EXPRESSION`; and the
+  dead tiebreak `c.only` branch. Two deck-level numbers changed on real
+  corpus decks: the EFG metal-cutting example's tool speed 300 -> 360 mm/s,
+  and 152.08 kg of Yaris occupant mass restored. Adds two deck-wide duplicate
+  scans (/EOS and the per-family GROUP namespaces), bringing the family from
+  nine to eleven. See CHANGELOG for the per-item measurements.
 - **Milestone 2, batch 1 (beyond dyna2rad parity) — IN PROGRESS.** The whole
   `*SET_<FAMILY>_ADD` boolean-union family (`NODE`, `SEGMENT`, `SHELL`,
   `SOLID`, `BEAM`, `DISCRETE` + `*SET_NODE_ADD_ADVANCED`, joining the shipped
@@ -90,25 +110,11 @@ A coverage pass shipped a first tranche of this roadmap (see `CHANGELOG.md`):
   **Still open in this area:** `*SET_TSHELL` (so a `THICK_SHELL_SET` scope
   resolves without being restated as a `*SET_SOLID` — a `*SET_SHELL` is
   deliberately NOT accepted as a fallback, since it is a third SID namespace and
-  cannot hold a thick-shell id), inline arithmetic in a `&parameter` field
-  (`&tend/6.0`, which the EFG carrier writes and the parser reads as 0 — the
-  emitted plateau is then named with its number so the loss is visible),
+  cannot hold a thick-shell id),
   `*PERTURBATION_SHELL_THICKNESS` → `/PERTURB/PART/SHELL`, the `/STATE/*`
   sibling of `/DYNAIN` for the solid/beam/spring state a dynain cannot carry
   (this is also what a shell-less `*SET_PART` on an `*INTERFACE_SPRINGBACK`
-  would need — today those parts are dropped from the `/DYNAIN` list by name),
-  and a deck-wide duplicate scan for the element-GROUP namespaces
-  (`/GRBRIC`, `/GRSHEL`, `/GRSH3N`, `/GRBEAM`, `/GRSPRI`) to match the ones
-  `/PROP`, `/MAT`, `/FUNCT` and `/IMPDISP` already have — no collision is
-  reachable today, but on ONE clause only: k2rad never re-emits a user element
-  set under its own SID (`_make_extra_groups` re-emits `*SET_NODE` alone), so
-  every element-group id comes from the monotonic `next_id` stream and two
-  synthesized groups cannot coincide. `next_elem_group_id` is NOT a second
-  guarantee here — it is called at exactly ONE element-group emission site
-  (`writer/rarecards.py`, the `/ACTIV` groups); every other one
-  (`common.py`, `inistate.py`, `loads.py`, `monvol.py`, `preload.py`,
-  `blast_ale.py`) calls bare `state.next_id()`. Promoting that allocator to all
-  of them is part of this deferred item, not a property already in place.
+  would need — today those parts are dropped from the `/DYNAIN` list by name).
 - **Tier 4:** linear buckling (`tools/modal_buckling.py`, Euler-validated) and
   harmonic/FRF (`tools/modal_frf.py`, SDOF-validated).
 - **Lossy:** `*EOS_LINEAR_POLYNOMIAL` `C6` now warned. (`*MAT_PLASTIC_KINEMATIC`
@@ -410,14 +416,28 @@ shipped, so the marginal cost is small.
   by name first); and the
   `MORTAR` / `_USER` / `OPTION 9/11/13/14` cohesive laws, which have no
   counterpart of any kind.
+  SETTLED by the SIDE-DEFECT batch: no `_ONLY` spelling can ever reach the
+  rupture path, and the reason is the LS-DYNA CARD GRAMMAR rather than this
+  converter's mapping. Vol I R17 p.11-14/15 enumerates the family exhaustively
+  and exactly two of the eleven spellings contain `ONLY`, taking Card 4:
+  TIEBREAK_NODES (a FORCE criterion) and Card 4: TIEBREAK_SURFACE (a STRESS
+  criterion); neither card has a length field, and `PARAM`/`CCRIT` lives only
+  on Card 4: AUTOMATIC_..._TIEBREAK, mandatory for four spellings none of which
+  has an `_ONLY` variant. Same in R16. The defensive `if c.only:` branch is
+  removed and its semantics kept as prose.
 - `*CONTACT_AUTOMATIC_GENERAL` `SOFT`-sentinel routing (`-7`→TYPE7, `-11`→TYPE11
   edge-to-edge with synthesized `/LINE/SEG`|`/LINE/SURF`, `-19`→TYPE19; default →
   single-surface) — **done** (dyna2rad `convertcontacts.cxx` cc:133-164).
 - `*CONTACT_TIED_SURFACE_TO_SURFACE[_OFFSET]` negative-offset discriminator
   `(SFST*SST + SFMT*MST)/2 < 0` → `/INTER/TYPE10` penalty tie (else TYPE2) —
   **done** (dyna2rad cc:220).
-- `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE / /INIBRI —
-  **done** (the GLOB flavours, layer-count checks per the starter readers).
+- `*INITIAL_STRESS_SHELL` / `*INITIAL_STRESS_SOLID` -> /INISHE + /INISH3 /
+  /INIBRI — **done** (the GLOB flavours, layer-count checks per the starter
+  readers). The 3-node half landed in the SIDE-DEFECT batch: the `/INISH3`
+  card is the SAME layout as the `/INISHE` one, and `npg` is the only
+  difference — 1 there against 4 on a quad, because a `/SH3N` written with
+  `Ish3n = 0` is initialised through `c3init3 -> CSIGINI`, whose check is
+  `NPGI > 1` rather than `NPG /= NPGI`.
   Always GLOB: both keywords define their components in the global cartesian
   system (Vol I R17 p.28-98 / p.28-105) and neither card carries a local flag —
   `*INITIAL_STRESS_SHELL` card 1 is the eight fields `EID/SID NPLANE NTHICK
@@ -444,7 +464,11 @@ shipped, so the marginal cost is small.
   different quantity).
 - `*INITIAL_STRESS_SECTION` -> /PRELOAD — **done**. A dedicated /SECT with
   three synthesized frame nodes realizes the cutting-plane normal (the
-  reporting section's frame does not), the card's PSID is intersected with the
+  REPORTING section's frame does so too since the SIDE-DEFECT batch — it used
+  to pick the three best-conditioned mesh nodes, measured 90.00 degrees off on
+  a +X plane with the origin off the plane entirely; the two sections stay
+  separate because they carry different element groups and node scopes), the
+  card's PSID is intersected with the
   cross-section's, and the LCID is resolved into `Preload`/`Tstart`/`Tstop`
   because the `Fct_ID` column only exists at /BEGIN 2026. Thick shells in the
   cut are named and left out of the preload group (no thick-shell initialiser
@@ -456,18 +480,19 @@ shipped, so the marginal cost is small.
   split by emitted family into /GRBEAM/BEAM and the new /GRSPRI/SPRI, the
   curve truncated at its first descent. Remaining loss: `KBEND` (multi-beam
   bolt shanks lose LS-DYNA's internal constraints).
-- Open, not in this batch: `*INITIAL_STRAIN_SOLID` / `_TSHELL`; the
-  `*INITIAL_STRESS_SHELL`/`_SOLID` gap in `_OFFSET_SPECS` (their element ids
-  are not offset inside an `*INCLUDE_TRANSFORM`; the generic unmapped-keyword
-  warning fires); and `/INISH3/STRS_F` — an `*INITIAL_STRESS_SHELL` record on a
-  3-node shell has no card this writer can put it on, since the /INISHE reader
-  resolves shell_IDs against the 4-node table only. Such a record is warned and
-  left OUT of the /INISHE block entirely, not written and ignored: writing it
-  arms the reader's global `ISIGSH` before the id lookup
-  (`hm_read_inistate_d00.F:2105`) and an armed `ISIGSH` with no resolvable
-  payload makes `scigini4.F:285-287` fabricate stress on a neighbouring
-  strain-only element at 0 starter ERRORS (measured). Writing the /SH3N stress
-  card — a different layout — is the open item.
+- Open, not in this batch: `*INITIAL_STRAIN_SOLID` / `_TSHELL`, and the
+  `_SET` spellings of `*INITIAL_STRESS_SHELL` / `_SOLID` (unregistered, so
+  they land in skipped keywords; `_split_keyword` keeps `_SET` in the base
+  name, so they are NOT misparsed as the plain form — their offset bucket
+  would be IDSOFF, not IDEOFF).
+- **Closed by the SIDE-DEFECT batch:** the `_OFFSET_SPECS` gap on
+  `*INITIAL_STRESS_SHELL`/`_SOLID` (walker-driven rows now, from the same
+  walkers the handlers use), and `/INISH3/STRS_F`, which turned out to be the
+  SAME card layout as `/INISHE/STRS_F` — the standing note that "the card
+  layout differs" was false. Only `npg` differs, and in the opposite
+  direction: 1 on a `/SH3N` (`csigini.F:143` refuses `NPGI > 1`) against 4 on
+  a quad. A record naming a shell with fewer than 3 distinct corners is still
+  dropped before the block is built, for the original `ISIGSH`-arming reason.
 
 *Rationale:* these are the recurring building blocks of automotive crash decks;
 covering them unlocks a large class of real models.
@@ -755,18 +780,18 @@ covering them unlocks a large class of real models.
   From the post-review verification round, two whole-`/SPRING`-family gaps that
   the belt only made more visible:
 
-  * **`*DATABASE_CROSS_SECTION_PLANE` cannot cut a belt.** `inistate.py`'s cut
-    walk covers shell / solid / tshell / beam and has no spring arm, so a
-    section plane through a shoulder belt reports no belt force — exactly the
-    quantity a restraint section is usually drawn for. Pre-existing for every
-    `/SPRING` family (`*ELEMENT_DISCRETE` included), not introduced by the belt
-    batch. **Half done** (rare-materials verification round): `grsprg_ID` is no
-    longer a hard `0` — a BEAM whose material re-routes it to a `/SPRING`
-    (`*MAT_MUSCLE`, `*MAT_SPOTWELD`, ELFORM-6) now goes into a `/GRSPRI/SPRI`
-    group behind that column, starter-validated at 0 errors and engine-measured
-    to carry real `/TH/SECTIO` data where the old deck wrote exact zeros. What
-    remains is the CUT WALK: belts and `*ELEMENT_DISCRETE` springs still have no
-    arm in `_plane_cut`, so a plane never finds them in the first place.
+  * **`*DATABASE_CROSS_SECTION_PLANE` could not cut a belt — DONE** in the
+    SIDE-DEFECT batch. `_plane_cut` has a spring arm now, over
+    `state.discrete_elems` and the 1-D `state.seatbelt_elems` (never over the
+    nine-producer union `state.spring_elem_ids`, which is the #128
+    regression), feeding the same `grsprg_ID` column the re-routed beams
+    already used. Measured on the starter echo, master vs branch:
+    `NUMBER OF SPRING ELEMENTS` 0 → 1 with the correct tail-side pack code.
+    The `_SET` spelling's `DSID` and `TSID` are converted at the same time —
+    they had been dropped with the stated reason "no converter-side element
+    type", false on both counts. Note the PLANE path is now a deliberate
+    SUPER-SET of LS-DYNA, whose Figure 16-2 caption excludes springs from the
+    automatic definition; the warning says so with the element ids.
   * **`--auto-gapmin` still does not measure BEAM or `*ELEMENT_DISCRETE`
     clearance.** The 1D belt arm was added to `gapmin._part_nodes_map` in the
     verification round; those two families remain missing there for the same
@@ -859,6 +884,76 @@ Cases that convert today but drop or approximate detail worth recovering:
   references the initial state through density / `/INIBRI`, not a `V0` scalar).
 - **`*MAT_ADD_EROSION` non-strain criteria** — only `MXEPS`/`EFFEPS` map; other
   criteria and `IDAM≥1` are reported but not converted.
+- **`*NODE` `TC`/`RC` → `/BCS`** *(remaining, and the largest of these by
+  incidence)* — the card's own constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy,
+  5 yz, 6 zx, 7 xyz, global system) are read and NAMED but not converted, so
+  those degrees of freedom are free in the emitted model. **721 corpus decks
+  write a non-zero cell** — of 2332 scanned here, where the review round
+  counted 721 of 2346; the same numerator under a slightly different file-size
+  cap, which is the cross-check that both scans found the same decks. The
+  mapping itself is trivial — the codes are
+  the same triples `*BOUNDARY_SPC_NODE` states one flag at a time, and the
+  `/BCS` writer already exists — what it needs is SCREENING, and that is what
+  makes it a campaign rather than a patch:
+  - p.35-3 Remark 1, verbatim: *"No attempt should be made to apply boundary
+    conditions to nodes belonging to rigid bodies (see \*MAT_RIGID for
+    application of rigid body constraints)."* Every rigid-body secondary node
+    has to come out, across `*MAT_RIGID` parts, `*CONSTRAINED_NODAL_RIGID_BODY`
+    and the synthesized element-free masters.
+  - A DOF already driven by `/IMPVEL` or `/IMPDISP` must not also be pinned;
+    the two fight over the same slot.
+
+  **How much screening is actually needed is measured, not assumed:** of the
+  721 carrying decks, **278 (39 %) also carry a rigid body or a prescribed
+  motion** — 139 a `*MAT_RIGID` / `*CONSTRAINED_NODAL_RIGID_BODY` /
+  `*CONSTRAINED_EXTRA_NODES`, 211 a `*BOUNDARY_PRESCRIBED_MOTION_*` — so a
+  naive pass would be wrong on two decks in five, while the other 443 (61 %)
+  would be safe. That split is the case for the flag: most carriers get a
+  correct model immediately, and the campaign can concentrate on the 278.
+
+  **Ship it behind an opt-in `--node-tc-rc-to-bcs` (default off)**, the way
+  `--ams`, `--tet10-to-tet4`, `--deformable-contact-recipe` and `--auto-gapmin`
+  are opt-in, so the 721 decks get a route to a correct model without changing
+  the default for everyone; then run the campaign and consider flipping it.
+  Validate with a with/without twin on a deck that carries both TC/RC and a
+  prescribed motion on the same node, and a second on a rigid-body node.
+  Measured consequence of the current state, so the campaign has a target: a
+  spring-mass coupon whose anchor carried `tc=7 rc=7` drifted 6.68 mm against
+  an intended 0.317 mm amplitude, under NORMAL TERMINATION.
+- **`*INITIAL_STRESS_SHELL` records at MIXED `nb_integr` in one deck**
+  *(remaining, an OpenRadioss limitation rather than a conversion loss)* —
+  `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common
+  (`hm_read_inistate_d00.F:2206/2389/3347/3516`) while `csigini.F:231/233` and
+  `scigini4.F:345/347/487/489` read `SIGSH(INISHVAR+IT)` (sigma_zz) and
+  `SIGSH(INISHVAR+NPTI+IT)` (pos_nip) at CONSUME time, i.e. against whatever
+  the LAST record left there. Two shell parts at NIP 3 and NIP 5 in one
+  `/INISHE|/INISH3 STRS_F` pass therefore make every element whose NIP differs
+  from the last record's read its through-thickness stress and its station
+  positions from the wrong slots, at 0 starter ERROR / 0 WARNING. k2rad now
+  NAMES the deck; splitting the pass (or writing one block per NIP with the
+  records grouped) would need a starter-side experiment to establish whether
+  the global is re-set per block or per record.
+- **`2Dlag.k`'s residual `ERROR 3046`** *(remaining, pre-existing and out of
+  the side-defect batch's scope)* — the deck's `ELFORM = 14` 2-D axisymmetric
+  elements are written as 3-D `/SHELL` against a solid-only `/MAT/LAW4`, so
+  `ERROR IN MATERIAL/ELEMENT COMPATIBILITY / ELEMENTS OF TYPE SHELL ARE NOT
+  COMPATIBLE WITH MATERIAL ID 3 OF TYPE 4`. Byte-identical on master, so the
+  batch neither caused nor cured it; it is what stands between that deck and 0
+  starter errors.
+- **A `_SET` cross section whose nodes are COLINEAR gets an invented normal**
+  *(remaining)* — `_sect_synth_frame` falls back to a vector perpendicular to
+  the node line, so the FN/FT SPLIT is arbitrary (the vector sum and the global
+  `MX/MY/MZ` channels are right, and the warning says exactly this). A
+  determinate normal is available for the ordinary case, a line of nodes cut
+  across a shell plate: `n = t × m`, with `t` the node-line direction and `m`
+  the plane normal of the section's OWN elements (the `SSID`/`HSID`/`BSID` sets
+  the card already supplies). Checked by hand on
+  `dynaexamples/intro-by-k.-weimar/spotweld/spotweld-ii/plates.nrbc.k`, whose
+  section nodes 106..110 are colinear along +Y at x = 20 while the section
+  shells lie in z = 0: `t × m = (0,1,0) × (0,0,1) = (1,0,0)`, the true cut
+  normal. 120 of the corpus's 191 cross-section cards use the `_SET` spelling,
+  so this changes many sections' FN/FT split and belongs in a round that can
+  re-validate them.
 
 ## Testing / CI / DX
 

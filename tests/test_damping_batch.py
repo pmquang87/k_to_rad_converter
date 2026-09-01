@@ -632,13 +632,20 @@ class DampingPartMassEmissionTests(unittest.TestCase):
                 self.assertNotIn("PART MASS DAMPING", starter)
                 self.assertTrue(_warns(result, "damps nothing"))
 
-    def test_part_without_shell_or_solid_nodes_warns(self):
+    def test_part_without_any_element_nodes_warns(self):
+        """A part with NO mesh at all. The message used to say "no deformable
+        shell or solid nodes (only rigid, beam, spring or SPH ones ...)" — a
+        false statement once the SIDE-DEFECT batch made beams, springs, belts,
+        thick shells and SPH particles count, and one that fired on a
+        perfectly damped beam part."""
         deck = (_MESH + _CURVE_FLAT
                 + "*PART\nempty\n         9         1         1\n"
                 + "*DAMPING_PART_MASS\n         9       201       1.0\n" + _END)
         result, starter = _convert(deck)
         self.assertNotIn("PART MASS DAMPING", starter)
-        self.assertTrue(_warns(result, "no deformable shell or solid nodes"))
+        w = _warns(result, "carry no deformable node at all")
+        self.assertTrue(w)
+        self.assertIn("Beams, springs, belts", w[0])
 
     def test_unknown_part_is_dropped(self):
         deck = (_MESH + _CURVE_FLAT

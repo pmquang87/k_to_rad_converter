@@ -13,7 +13,8 @@ from itertools import permutations as _permutations, product as _product
 from typing import Dict, List, Optional, Tuple
 
 from .parser import (
-    Block, _strip_inline_comment, parse_fixed, parse_free, to_float, to_int,
+    Block, _strip_inline_comment, parse_fixed, parse_free, set_active_scope,
+    to_float, to_int,
 )
 from .state import (
     ConversionState,
@@ -219,24 +220,120 @@ def handle_end(block: Block, state: ConversionState) -> None:
 # Nodes
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _note_node_constraint(state: ConversionState, nid: int, tc: str,
+                          rc: str) -> None:
+    """Record a ``*NODE`` card that states a constraint in TC or RC.
+
+    Vol I R17's ``*NODE`` Card 1 is ``NID X Y Z TC RC``, and TC/RC are
+    constraint CODES (0 none, 1 x, 2 y, 3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the
+    GLOBAL system. k2rad reads only NID/X/Y/Z, so a deck that states its
+    constraints there converts into a model with those degrees of freedom
+    FREE — at 0 conversion warnings and 0 starter errors. Measured on a
+    spring-mass coupon: the anchor node carried tc=7/rc=7, no /BCS was
+    emitted, and the whole oscillator drifted at the centre-of-mass velocity
+    (6.68 mm against an intended 0.317 mm amplitude) while the run reported
+    NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero cell here.
+
+    Only the LOSS is recorded; ``writer/assembly._warn_node_tc_rc`` names it
+    once per deck and carries the full reasoning for why the conversion is
+    deferred rather than done here.
+    """
+    for cell in (tc, rc):
+        if not cell:
+            continue
+        try:
+            if int(float(cell)) == 0:
+                continue
+        except ValueError:
+            continue
+        state.node_tc_rc_count += 1
+        # Five, matching what _warn_node_tc_rc prints — collecting ten left
+        # half the list dead.
+        if len(state.node_tc_rc) < 5:
+            state.node_tc_rc.append(nid)
+        return
+
+
+def _free_node_id(tok: str) -> bool:
+    """True when *tok* can be a free-format *NODE row's field 1.
+
+    That field is the node id (type I), so an integer token — or a ``&name``
+    parameter reference, which ``to_int`` resolves — is the whole legal set.
+    Anything else means the whitespace split welded the id onto a negative
+    first coordinate and the row has to be read from its fixed columns
+    instead. See :func:`handle_node`.
+
+    Measured across both corpus roots: of the 58 303 *NODE rows whose field 1
+    is not an integer token, ALL 58 303 are the welded kind — there is no
+    ``&``-id, comma-format or blank-id row anywhere to trade against.
+    """
+    t = (tok or "").strip()
+    return t.startswith("&") or _is_int_token(t)
+
+
 def handle_node(block: Block, state: ConversionState) -> None:
+    """*NODE — ``NID X Y Z TC RC`` (Vol I R17 p.35-3), I8 + 3xE16 + 2xI8.
+
+    The fixed-vs-free discrimination is the whole difficulty. A negative
+    coordinate fills its 16-char field completely and glues onto the field
+    BEFORE it ("... 0.000000000e+00-1.250000000e+00"), so a whitespace split
+    of a fixed-format row can under-count, leave an over-long merged token —
+    or, when exactly the right cells are negative, produce four perfectly
+    ordinary-looking tokens with the NODE ID welded to the front of the first
+    one.
+
+    That last case is why ``f[0]`` is now tested too, and it is not academic:
+    the width test alone missed **58 303 rows across 188 corpus files**. Take
+    ``dynaexamples/sph/bar-iv/taylor1.k``, where X and Y are negative and Z is
+    not::
+
+        '       5-1.000000000E+01-1.000000000E+01 0.000000000E+00       7   0'
+          -> ['5-1.000000000E+01-1.000000000E+01', '0.000000000E+00', '7', '0']
+
+    Four tokens, none longer than 16, so it took the FREE branch,
+    ``to_int('5-1.000000000E+01-1.000000000E+01')`` returned 0, and the row
+    was written to ``state.nodes[0]`` with the wrong coordinates — nodes 5 and
+    7 GONE, a phantom node 0 in their place, and the deck's only /BRICK left
+    referencing two ids that no longer exist, at ZERO warnings. (It is also
+    why this deck's *NODE TC/RC count disagreed with an independent scan of
+    the same file by exactly the number of lost rows.)
+
+    An ``f[0]`` that is not an integer token can only mean the split merged
+    the id with a coordinate: in genuine free format field 1 IS the node id.
+    Testing the token's TYPE rather than its width also keeps the guard safe
+    for a free-format id longer than eight digits, which no fixed-format row
+    can carry — measured: 0 such rows in the corpus, but the type test costs
+    nothing to be right about.
+    """
     for line in block.raw:
         f = parse_free(line)
-        # LS-DYNA standard *NODE is fixed I8 + 3×E16: a negative coordinate
-        # fills its 16-char field completely and glues onto the previous field
-        # ("… 0.000000000e+00-1.250000000e+00"), so a whitespace split either
-        # under-counts or leaves an over-long merged token. Re-slice the fixed
-        # columns in that case — otherwise every node with a glued negative
-        # coordinate is silently dropped (e.g. an entire plate at z < 0).
-        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+                or not _free_node_id(f[0]):
             nid = to_int(line[0:8])
             if nid <= 0:
                 continue
             state.nodes[nid] = NodeData(to_float(line[8:24]), to_float(line[24:40]),
                                         to_float(line[40:56]))
+            # TC/RC live in cols 57-64 and 65-72. The length test keeps the
+            # cost off every ordinary node line, which ends at column 56.
+            if len(line) > 56:
+                _note_node_constraint(state, nid, line[56:64].strip(),
+                                      line[64:72].strip())
             continue
         nid = to_int(f[0])
+        if nid <= 0:
+            # Unreachable while the branch test above is right; kept so that a
+            # future miss DROPS the row instead of minting node 0 and letting
+            # every later row overwrite it (which is exactly how the defect
+            # above stayed silent).
+            state.warn(f"*NODE: the row {line.strip()[:40]!r} has no usable "
+                       "node id — it was dropped rather than written to node "
+                       "0; check the card's column layout.")
+            continue
         state.nodes[nid] = NodeData(to_float(f[1]), to_float(f[2]), to_float(f[3]))
+        if len(f) > 4:
+            _note_node_constraint(state, nid, f[4].strip(),
+                                  f[5].strip() if len(f) > 5 else "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4288,7 +4385,7 @@ def handle_eos_linear_polynomial(block: Block, state: ConversionState) -> None:
                    "volume) has no /EOS/POLYNOMIAL field — Radioss references E0 "
                    "to the initial volume; verify the initial state.")
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="POLYNOMIAL",
+        eosid=eosid, kind="POLYNOMIAL", keyword=block.keyword,
         params={"c0": g(1), "c1": g(2), "c2": g(3), "c3": g(4),
                 "c4": g(5), "c5": g(6), "e0": e0, "psh": 0.0, "rho0": 0.0})
 
@@ -4305,7 +4402,7 @@ def handle_eos_gruneisen(block: Block, state: ConversionState) -> None:
     eosid = to_int(f[0])
     g = lambda i: to_float(f[i]) if len(f) > i else 0.0
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="GRUNEISEN",
+        eosid=eosid, kind="GRUNEISEN", keyword=block.keyword,
         params={"c": g(1), "s1": g(2), "s2": g(3), "s3": g(4),
                 "y0": g(5), "a": g(6), "e0": g(7), "rho0": 0.0})
 
@@ -4333,7 +4430,7 @@ def handle_eos_ideal_gas(block: Block, state: ConversionState) -> None:
                    "gamma=1.4 for /EOS/IDEAL-GAS; set the heat-capacity ratio "
                    "explicitly if the gas is not diatomic.")
     state.eos_cards[eosid] = EosCard(
-        eosid=eosid, kind="IDEAL-GAS",
+        eosid=eosid, kind="IDEAL-GAS", keyword=block.keyword,
         # cv/cp/t0 are kept so the writer can compute the initial pressure
         # P0 = rho*(cp-cv)*t0 (Radioss requires P0 > 0) once the carrier
         # material's density is known.
@@ -7666,6 +7763,140 @@ def _avg_tuples(pts: list) -> tuple:
     return tuple(sum(p[k] for p in pts) / n for k in range(len(pts[0])))
 
 
+# ── *INITIAL_STRESS_SHELL / *INITIAL_STRESS_SOLID ───────────────────────────
+#
+# ONE record walker per keyword, shared by the handler and by the
+# *INCLUDE_TRANSFORM offsetter (assembly._off_initial_stress_shell /
+# _off_initial_stress_solid), exactly as initial_strain_shell_records already
+# is. The two walks MUST agree on which raw row is a card 1, because these
+# cards are almost entirely floats and ``_rewrite_line`` decides "this token is
+# an id" with ``to_int(tok) > 0``: a desynced offsetter would read a stress of
+# 1.5 as the element id 1 and rewrite it to ``1 + IDEOFF`` (#116 / #119).
+#
+# Neither walker applies ``_title_offset``: Vol I R17 p.28-95 / p.28-103 give
+# these keywords the options ``<BLANK>`` and ``SET`` only — no ``_TITLE``, no
+# ``_ID`` — so the handlers walk ``block.raw`` from row 0 and the offsetters
+# must start on the same row.
+
+def initial_stress_shell_records(raw: List[str]):
+    """Yield ``(card1_idx, fields, pt_row_indices, truncated)`` per element.
+
+    Card 1 (Vol I R17 p.28-95, EIGHT fields, cols 1-80)::
+
+        EID NPLANE NTHICK NHISV NTENSR LARGE NTHINT NTHHSV
+
+    read with ``n=9`` so a stray NINTH cell can be NAMED (it is never used as
+    data — this keyword has no ILOCAL; see the handler). Then
+    ``NPLANE*NTHICK`` stress records, each 1 row (LARGE=0, 8x10) or 2 rows
+    (LARGE=1, 5x16 + 3x16), each trailed by ``ceil(NHISV/8|5)`` history rows
+    and ``ceil(NTENSR/6|5)`` tensor rows, and finally
+    ``NTHINT*ceil(NTHHSV/8|5)`` thermal rows.
+
+    RAW CONTIGUITY (#119): every one of those rows is claimed by ROW INDEX
+    from the card-1 row, never by "the next non-blank row" — an all-blank
+    stress card is legal LS-DYNA (every component defaults to 0.0) and a
+    non-blank walk would step over it and eat the next element's card 1.
+
+    ``truncated`` is True when the block ends mid-record; the generator then
+    stops, mirroring the handler's ``break``.
+    """
+    i = 0
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=9, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            i += 1
+            continue
+        nplane = max(1, to_int(f[1]))
+        nthick = max(1, to_int(f[2]))
+        nhisv = to_int(f[3]) if len(f) > 3 else 0
+        ntensr = to_int(f[4]) if len(f) > 4 else 0
+        large = to_int(f[5]) if len(f) > 5 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        ninth = to_int(f[8]) if len(f) > 8 else 0
+        card1 = i
+        i += 1
+        pt_rows: List[int] = []
+        truncated = False
+        for _ in range(nplane * nthick):
+            if i >= n:
+                truncated = True
+                break
+            pt_rows.append(i)
+            i += 2 if large else 1
+            if nhisv > 0:
+                i += _ceil_div(nhisv, 5 if large else 8)
+            if ntensr > 0:
+                i += _ceil_div(ntensr, 5 if large else 6)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+        yield (card1, (eid, nplane, nthick, nhisv, ntensr, large, nthint,
+                       nthhsv, ninth), pt_rows, truncated)
+        if truncated:
+            return
+
+
+def initial_stress_solid_records(raw: List[str]):
+    """Yield ``(card1_idx, fields, pt_row_indices, truncated)`` per element.
+
+    Card 1 (Vol I R17 p.28-103)::
+
+        EID NINT NHISV LARGE IVEFLG IALEGP NTHINT NTHHSV
+
+    then ``NINT`` stress records of 1 row (LARGE=0, 7x10) or 2 rows (LARGE=1,
+    5x16 + 5x16, the first 3 history values riding row 2), each trailed by the
+    remaining ``NHISV+IVEFLG`` history rows, then the thermal rows. Same raw
+    contiguity rule as the shell walker.
+    """
+    i = 0
+    n = len(raw)
+    while i < n:
+        if not raw[i].strip():
+            i += 1
+            continue
+        f = _card(raw, i, fixed=True, n=8, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            i += 1
+            continue
+        nint = max(1, to_int(f[1]))
+        nhisv = to_int(f[2]) if len(f) > 2 else 0
+        large = to_int(f[3]) if len(f) > 3 else 0
+        iveflg = to_int(f[4]) if len(f) > 4 else 0
+        ialegp = to_int(f[5]) if len(f) > 5 else 0
+        nthint = to_int(f[6]) if len(f) > 6 else 0
+        nthhsv = to_int(f[7]) if len(f) > 7 else 0
+        card1 = i
+        i += 1
+        nh = nhisv + iveflg   # IVEFLG appends extra value(s) to the history list
+        pt_rows: List[int] = []
+        truncated = False
+        for _ in range(nint):
+            if i >= n:
+                truncated = True
+                break
+            pt_rows.append(i)
+            if large:
+                i += 2
+                if nh > 3:                    # 3 history values ride card 2
+                    i += _ceil_div(nh - 3, 5)
+            else:
+                i += 1
+                if nh > 0:
+                    i += _ceil_div(nh, 8)
+        if nthint > 0 and nthhsv > 0:
+            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
+        yield (card1, (eid, nint, nhisv, large, iveflg, ialegp, nthint,
+                       nthhsv, nh), pt_rows, truncated)
+        if truncated:
+            return
+
+
 def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB.
 
@@ -7693,55 +7924,26 @@ def handle_initial_stress_shell(block: Block, state: ConversionState) -> None:
     the writer).
     """
     raw = block.raw
-    i = 0
     n_hisv_dropped = 0
     n_tensr_dropped = 0
     n_thermal_dropped = 0
     n_plane_averaged = 0
     n_read = 0
     ninth_cell: List[int] = []
-    while i < len(raw):
-        if not raw[i].strip():
-            i += 1
-            continue
-        # n=9 reads ONE cell past the card so a stray value there can be named;
-        # it is never used as data — see the docstring.
-        f = _card(raw, i, fixed=True, n=9, w=10)
-        eid = to_int(f[0])
-        if eid <= 0:
-            i += 1
-            continue
-        nplane = max(1, to_int(f[1]))
-        nthick = max(1, to_int(f[2]))
-        nhisv  = to_int(f[3]) if len(f) > 3 else 0
-        ntensr = to_int(f[4]) if len(f) > 4 else 0
-        large  = to_int(f[5]) if len(f) > 5 else 0
-        nthint = to_int(f[6]) if len(f) > 6 else 0
-        nthhsv = to_int(f[7]) if len(f) > 7 else 0
-        if len(f) > 8 and to_int(f[8]) != 0:
+    for _c1, (eid, nplane, nthick, nhisv, ntensr, large, nthint, nthhsv,
+              ninth), pt_rows, truncated in initial_stress_shell_records(raw):
+        if ninth != 0:
             ninth_cell.append(eid)
-        i += 1
-
         pts = []
-        truncated = False
-        for _ in range(nplane * nthick):
-            if i >= len(raw):
-                truncated = True
-                break
+        for r in pt_rows:
             if large:
-                a = _fixed_float_card(raw, i, 5, 16)
-                b = _fixed_float_card(raw, i + 1, 3, 16) if i + 1 < len(raw) else [0.0] * 3
-                i += 2
+                a = _fixed_float_card(raw, r, 5, 16)
+                b = (_fixed_float_card(raw, r + 1, 3, 16)
+                     if r + 1 < len(raw) else [0.0] * 3)
                 pts.append(tuple(a + b))
             else:
-                pts.append(tuple(_fixed_float_card(raw, i, 8, 10)))
-                i += 1
-            if nhisv > 0:
-                i += _ceil_div(nhisv, 5 if large else 8)
-            if ntensr > 0:
-                i += _ceil_div(ntensr, 5 if large else 6)
+                pts.append(tuple(_fixed_float_card(raw, r, 8, 10)))
         if nthint > 0 and nthhsv > 0:
-            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
             n_thermal_dropped += 1
         if truncated:
             state.warn(f"*INITIAL_STRESS_SHELL eid={eid}: block ends before all "
@@ -7821,47 +8023,20 @@ def handle_initial_stress_solid(block: Block, state: ConversionState) -> None:
     aggregated warning; EPS maps to /INIBRI's Epsilon_p.
     """
     raw = block.raw
-    i = 0
     n_hisv_dropped = 0
     n_thermal_dropped = 0
-    while i < len(raw):
-        if not raw[i].strip():
-            i += 1
-            continue
-        f = _card(raw, i, fixed=True, n=8, w=10)
-        eid = to_int(f[0])
-        if eid <= 0:
-            i += 1
-            continue
-        nint   = max(1, to_int(f[1]))
-        nhisv  = to_int(f[2]) if len(f) > 2 else 0
-        large  = to_int(f[3]) if len(f) > 3 else 0
-        iveflg = to_int(f[4]) if len(f) > 4 else 0
-        nthint = to_int(f[6]) if len(f) > 6 else 0
-        nthhsv = to_int(f[7]) if len(f) > 7 else 0
-        i += 1
-        nh = nhisv + iveflg   # IVEFLG appends extra value(s) to the history list
-
+    for _c1, (eid, nint, nhisv, large, iveflg, _ialegp, nthint, nthhsv,
+              nh), pt_rows, truncated in initial_stress_solid_records(raw):
         pts = []
-        truncated = False
-        for _ in range(nint):
-            if i >= len(raw):
-                truncated = True
-                break
+        for r in pt_rows:
             if large:
-                a = _fixed_float_card(raw, i, 5, 16)
-                b = _fixed_float_card(raw, i + 1, 2, 16) if i + 1 < len(raw) else [0.0] * 2
-                i += 2
+                a = _fixed_float_card(raw, r, 5, 16)
+                b = (_fixed_float_card(raw, r + 1, 2, 16)
+                     if r + 1 < len(raw) else [0.0] * 2)
                 pts.append(tuple(a + b))
-                if nh > 3:                    # 3 history values ride card 2
-                    i += _ceil_div(nh - 3, 5)
             else:
-                pts.append(tuple(_fixed_float_card(raw, i, 7, 10)))
-                i += 1
-                if nh > 0:
-                    i += _ceil_div(nh, 8)
+                pts.append(tuple(_fixed_float_card(raw, r, 7, 10)))
         if nthint > 0 and nthhsv > 0:
-            i += nthint * _ceil_div(nthhsv, 5 if large else 8)
             n_thermal_dropped += 1
         if truncated:
             state.warn(f"*INITIAL_STRESS_SOLID eid={eid}: block ends before all "
@@ -8130,27 +8305,83 @@ def handle_database_cross_section_plane(block: Block, state: ConversionState) ->
         state.warn("*DATABASE_CROSS_SECTION_PLANE: missing data card — skipped.")
         return
     g = lambda k: to_float(f1[k]) if len(f1) > k else 0.0
+    tag = f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}"
+    radius = g(7)
+    xct, yct, zct = g(1), g(2), g(3)
+    xch, ych, zch = g(4), g(5), g(6)
+    radius_is_nodes = radius < 0.0
+    xct_nid = xch_nid = 0
+    if radius_is_nodes:
+        # Vol I R17 p.16-49/50: "If RADIUS is negative, the radius will be the
+        # absolute value of RADIUS and XCT and XCH will be node IDs ... YCT,
+        # ZCT, YCH, and ZCH are ignored." The ids are only RECORDED here; the
+        # lookup happens in the writer (inistate.resolve_cross_section_
+        # endpoints), because handlers run in deck-block order and state.nodes
+        # is filled by handle_node in the SAME pass — a card written before
+        # *NODE (the standard layout, *CONTROL_/*DATABASE_ at the head of the
+        # deck) saw an empty table and the section was dropped with the untrue
+        # message "they are not nodes of this deck". Measured on twin probes
+        # differing only in card order.
+        radius = -radius
+        xct_nid, xch_nid = to_int(f1[1]), to_int(f1[4])
     f2 = _card(raw, offset + 1, fixed=True, n=8, w=10)
+    xhev = yhev = zhev = 0.0
+    has_hev = False
+    loc_id = itype = 0
     if f2:
+        xhev = to_float(f2[0]) if len(f2) > 0 else 0.0
+        yhev = to_float(f2[1]) if len(f2) > 1 else 0.0
+        zhev = to_float(f2[2]) if len(f2) > 2 else 0.0
+        has_hev = any(x.strip() for x in f2[:3])
         lenl = to_float(f2[3]) if len(f2) > 3 else 0.0
         lenm = to_float(f2[4]) if len(f2) > 4 else 0.0
         loc_id = to_int(f2[5]) if len(f2) > 5 else 0
-        if lenl or lenm:
-            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
-                       "finite parallelogram extent (LENL/LENM) cannot be carried "
-                       "into /SECT — treated as an infinite plane"
-                       + (" limited to RADIUS" if g(7) > 0 else "") + ".")
+        itype = to_int(f2[6]) if len(f2) > 6 else 0
+        # p.16-50 covers FIVE cells in one sentence: "If RADIUS != 0.0, the
+        # variables XHEV, YHEV, ZHEV, LENL, and LENM, which are specified on
+        # Card 1a.2, will be ignored." The exemption used to be applied to
+        # XHEV/YHEV/ZHEV only, so a RADIUS-limited card with LENL/LENM still
+        # got the fidelity-loss warning below — reporting a loss that does not
+        # exist, because LS-DYNA ignores those cells itself and k2rad's
+        # behaviour is then exactly LS-DYNA's (#125/#130, over-alarming
+        # direction). RADIUS is already the absolute value here, so the gate
+        # covers the RADIUS < 0 node-id spelling too.
+        if radius != 0.0 and (has_hev or lenl or lenm):
+            ignored = ", ".join(
+                w for w, on in (("the edge vector (XHEV/YHEV/ZHEV)", has_hev),
+                                ("LENL/LENM", lenl or lenm)) if on)
+            state.warn(f"{tag}: RADIUS is non-zero, so LS-DYNA ignores "
+                       f"{ignored} on card 2 (Vol I R17 p.16-50) — nothing is "
+                       "lost here; the /SECT cut is limited to RADIUS and its "
+                       "output frame's in-plane axis is synthesized, exactly "
+                       "as LS-DYNA would.")
+            has_hev = False
+        elif lenl or lenm:
+            state.warn(f"{tag}: finite parallelogram extent (LENL/LENM) cannot "
+                       "be carried into /SECT — treated as an infinite plane.")
         if loc_id:
-            state.warn(f"*DATABASE_CROSS_SECTION_PLANE{f' id={csid}' if csid else ''}: "
-                       "local coordinate system ID for output has no /SECT "
-                       "mapping here — forces are reported in the section frame "
-                       "built from three section nodes.")
+            what = {0: "a rigid body (*PART)",
+                    1: "an accelerometer (*ELEMENT_SEATBELT_ACCELEROMETER)",
+                    2: "a *DEFINE_COORDINATE_* system"}.get(
+                        itype, f"an unknown ITYPE={itype} entity")
+            state.warn(
+                f"{tag}: the output-frame request ID={loc_id} / ITYPE={itype} "
+                f"names {what}, and LS-DYNA would report the force resultants "
+                "in that system as it UPDATES (Vol I R17 p.16-50). That is not "
+                "converted: the /SECT frame is built from the card's own "
+                "cutting plane — origin (XCT,YCT,ZCT), normal XCT->XCH, "
+                "in-plane axis from the edge vector — and is FIXED in space, "
+                "so on a rotating body the reported components drift from what "
+                "secforc would print. The resultant itself is unaffected.")
     state.cross_sections.append(CrossSection(
         csid=csid, title=title, kind="PLANE",
         psid=to_int(f1[0]),
-        xct=g(1), yct=g(2), zct=g(3),
-        xch=g(4), ych=g(5), zch=g(6),
-        radius=g(7)))
+        xct=xct, yct=yct, zct=zct,
+        xch=xch, ych=ych, zch=zch,
+        radius=radius, radius_is_nodes=radius_is_nodes,
+        xct_nid=xct_nid, xch_nid=xch_nid,
+        xhev=xhev, yhev=yhev, zhev=zhev, has_hev=has_hev,
+        loc_id=loc_id, itype=itype))
 
 
 def handle_database_cross_section_set(block: Block, state: ConversionState) -> None:
@@ -8158,8 +8389,11 @@ def handle_database_cross_section_set(block: Block, state: ConversionState) -> N
 
     Card: NSID HSID BSID SSID TSID DSID ID ITYPE — node set → the /SECT node
     group, solid/beam/shell element sets → its grbric/grbeam/grshel groups.
-    Thick-shell (TSID) and discrete (DSID) sets have no converter-side element
-    type — warned and dropped.
+    DSID (*SET_DISCRETE) goes to the card's grsprg_ID column as a
+    /GRSPRI/SPRI group. TSID names a *SET_TSHELL, an id namespace this
+    converter does not read: the writer tries the *SET_SOLID registry (a thick
+    shell IS a /BRICK here) and otherwise names the loss — never *SET_SHELL,
+    which is a third namespace holding ordinary shells.
     """
     raw = block.raw
     offset = 1 if _has_id(block) else 0
@@ -8174,21 +8408,36 @@ def handle_database_cross_section_set(block: Block, state: ConversionState) -> N
     tsid = to_int(f1[4]) if len(f1) > 4 else 0
     dsid = to_int(f1[5]) if len(f1) > 5 else 0
     loc_id = to_int(f1[6]) if len(f1) > 6 else 0
-    if tsid or dsid:
-        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
-                   "TSID (thick shell) / DSID (discrete) element sets are not "
-                   "converted — dropped from the /SECT.")
+    itype = to_int(f1[7]) if len(f1) > 7 else 0
+    # TSID and DSID used to be dropped here with the stated reason "no
+    # converter-side element type". That was FALSE on BOTH counts (#130 — an
+    # exclusion's stated reason needs the same audit as a warning's): k2rad
+    # writes thick shells as /BRICK, which is the grbric_ID group the card
+    # already carries, and it has emitted starter-validated /GRSPRI/SPRI
+    # groups since the preload batch, which is the grsprg_ID column
+    # (sect.cfg:37 declares it SUBTYPES = (/SETS/GRSPRI), hm_read_sect.F:301
+    # reads it, :548 resolves it with ELEGROR(...,'SPRI')). Both are converted
+    # now; the writer says which group each one went into.
+    tag = f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}"
     if loc_id:
-        state.warn(f"*DATABASE_CROSS_SECTION_SET{f' id={csid}' if csid else ''}: "
-                   "local coordinate system ID for output has no /SECT mapping "
-                   "here — forces are reported in the section frame built from "
-                   "three section nodes.")
+        what = {0: "a rigid body (*PART)",
+                1: "an accelerometer (*ELEMENT_SEATBELT_ACCELEROMETER)",
+                2: "a *DEFINE_COORDINATE_* system"}.get(
+                    itype, f"an unknown ITYPE={itype} entity")
+        state.warn(
+            f"{tag}: the output-frame request ID={loc_id} / ITYPE={itype} "
+            f"names {what}, and LS-DYNA would report the force resultants in "
+            "that system as it UPDATES (Vol I R17 p.16-50). That is not "
+            "converted: this card states no cutting plane at all, so the "
+            "/SECT frame is FITTED to the section nodes and is fixed in "
+            "space. The resultant itself is unaffected.")
     state.cross_sections.append(CrossSection(
         csid=csid, title=title, kind="SET",
         nsid=to_int(f1[0]),
         hsid=to_int(f1[1]) if len(f1) > 1 else 0,
         bsid=to_int(f1[2]) if len(f1) > 2 else 0,
-        ssid=to_int(f1[3]) if len(f1) > 3 else 0))
+        ssid=to_int(f1[3]) if len(f1) > 3 else 0,
+        tsid=tsid, dsid=dsid, loc_id=loc_id, itype=itype))
 
 
 def handle_load_rigid_body(block: Block, state: ConversionState) -> None:
@@ -12260,9 +12509,15 @@ def handle_initial_foam_reference_geometry(block: Block,
                 break
     for line in raw[start:]:
         f = parse_free(line)
-        # Same glued-negative-coordinate hazard as *NODE: re-slice fixed
-        # columns when the whitespace split under-counts or merges fields.
-        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+        # Same glued-negative-coordinate hazard as *NODE, and the same three
+        # tests: re-slice the fixed columns when the whitespace split
+        # under-counts, leaves an over-long merged token, or welds the node id
+        # onto the first coordinate (four ordinary-looking tokens whose FIRST
+        # one is not an integer). Here the `nid > 0` guard below turned that
+        # third case into a silent DROP rather than a phantom node 0 —
+        # different symptom, same cause. See handle_node.
+        if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+                or not _free_node_id(f[0]):
             nid = to_int(line[0:8])
             if nid <= 0:
                 continue
@@ -14108,12 +14363,27 @@ def handle_database_history_tshell_set(block: Block,
 def handle_damping_global(block: Block, state: ConversionState) -> None:
     """*DAMPING_GLOBAL: mass-proportional Rayleigh damping (LS-DYNA Manual Vol I).
 
-    Card: lcid valdmp stx sty stz srx sry srz
-    Only one *DAMPING_GLOBAL active at a time per LS-DYNA; last one wins.
+    Card: lcid valdmp stx sty stz srx sry srz — EIGHT fixed I10/E10 cells
+    (Vol I R17 p.15-8). Only one *DAMPING_GLOBAL active at a time per LS-DYNA;
+    last one wins.
+
+    ``fixed=True``: this is a fixed-format card, and a blank INTERIOR column is
+    ordinary on it (STZ omitted while SRX..SRZ are stated, say). A free split
+    then drops the blank and shifts every later field one slot left —
+    MEASURED::
+
+        raw    '         0       500       1.0       1.0                 2.0       2.0       2.0'
+        fixed  ['0','500','1.0','1.0','',   '2.0','2.0','2.0']    <- truth
+        free   ['0','500','1.0','1.0','2.0','2.0','2.0']          <- SRX read
+                                                                     as STZ,
+                                                                     SRZ lost
+
+    which silently rotates the per-DOF scale factors onto the wrong degrees of
+    freedom.
     """
     raw = block.raw
     offset = _title_offset(block)
-    f = _card(raw, offset, fixed=False, n=8, w=10)
+    f = _card(raw, offset, fixed=True, n=8, w=10)
     if not f:
         state.warn("*DAMPING_GLOBAL: no data card found — skipped")
         return
@@ -15207,11 +15477,15 @@ def handle_define_curve_smooth(block: Block, state: ConversionState) -> None:
     if unresolved:
         state.warn(
             f"{label}: the cell(s) {', '.join(unresolved)} hold a *PARAMETER "
-            "reference the parser could not resolve (an inline arithmetic "
-            "expression such as '&tend/6.0' is not evaluated — only a bare "
-            "'&name' is) and were read as 0. The curve below is the one that "
-            "reading implies, not the deck's intent; define the value with a "
-            "*PARAMETER_EXPRESSION of its own and re-run.")
+            "reference the parser could not resolve, and were read as 0. The "
+            "curve below is the one that reading implies, not the deck's "
+            "intent. The parser evaluates a bare '&name', a sign-folded "
+            "'-&name', inline arithmetic in the cell ('&tend/6.0') and the "
+            "bracketed '<expr>' form, and it evaluates *PARAMETER_EXPRESSION "
+            "definitions — so a cell that still reads 0 names something that "
+            "is genuinely undefined at this point in the deck, or that the "
+            "expression grammar refuses. Look for the parser's own message "
+            "about that name: it says which.")
     pts, vmax, tend, note = smooth_curve_points(dist, tstart, tend, trise, vmax)
     if pts is None:
         state.warn(
@@ -16343,8 +16617,6 @@ HANDLERS = {
     "DATABASE_FREQUENCY_BINARY_D3PSD":        handle_database_frequency_binary_d3psd,
     "DATABASE_FREQUENCY_BINARY_D3RMS":        handle_database_frequency_binary_d3rms,
     "DATABASE_FREQUENCY_BINARY_D3FTG":        handle_database_frequency_binary_d3ftg,
-    "INITIAL_STRESS_SHELL":                   handle_initial_stress_shell,
-    "INITIAL_STRESS_SOLID":                   handle_initial_stress_solid,
     "LOAD_GRAVITY_PART":                      handle_load_gravity_part,
     "LOAD_GRAVITY_PART_SET":                  handle_load_gravity_part,
     "LOAD_RIGID_BODY":                        handle_load_rigid_body,
@@ -16668,6 +16940,20 @@ INITIAL_STATE_PRELOAD_KEYWORDS = {
     "INITIAL_AXIAL_FORCE_BEAM": handle_initial_axial_force_beam,
     "INITIAL_STRAIN_SHELL":     handle_initial_strain_shell,
     "INITIAL_STRAIN_SHELL_SET": handle_initial_strain_shell,
+    # Moved here from the bare HANDLERS table by the SIDE-DEFECT batch. They
+    # were readable and un-offsettable: registered directly, so
+    # ``_OFFSET_SPECS.get("INITIAL_STRESS_SHELL")`` was None and an
+    # *INCLUDE_TRANSFORM left their EIDs at the child deck's original numbers
+    # while the mesh around them moved by IDEOFF. MEASURED on a parent/child
+    # pair (IDEOFF 6000, IDPOFF 7000): one stress record landed on the PARENT
+    # deck's shell 1 — a different part, a different thickness, a different
+    # place — and the other two dangled, under the generic "keyword has no
+    # offset map" warning. Registering them HERE is what makes that
+    # impossible: the loop in assembly.py keys the offset table off this dict,
+    # so a spelling added without a spec is an ImportError, not a silent
+    # un-offset include (#116).
+    "INITIAL_STRESS_SHELL":     handle_initial_stress_shell,
+    "INITIAL_STRESS_SOLID":     handle_initial_stress_solid,
 }
 for _kw, _h in INITIAL_STATE_PRELOAD_KEYWORDS.items():
     HANDLERS[_kw] = _h
@@ -16995,6 +17281,19 @@ def dispatch(block: Block, state: ConversionState) -> None:
                 handler = _handler
                 break
     if handler is not None:
-        handler(block, state)
+        # Install this block's *PARAMETER_LOCAL scope for the duration of the
+        # handler. Parameter scoping is a PARSE-TIME concept in LS-DYNA while
+        # k2rad resolves "&name" here, lazily — long after the file that
+        # declared a LOCAL name was closed and its binding removed from the
+        # global table. Without this a *PARAMETER_LOCAL resolved as 0 on a
+        # perfectly valid deck (measured: /PROP/SHELL Thick 0, starter ERROR
+        # 495), and a LOCAL masking an outer parameter silently produced the
+        # OUTER value. try/finally, so a handler that raises cannot leak a
+        # scope onto the next block.
+        prev = set_active_scope(block.scope)
+        try:
+            handler(block, state)
+        finally:
+            set_active_scope(prev)
     else:
         state.skipped_keywords.append(block.keyword)

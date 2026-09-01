@@ -11,6 +11,418 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
+  by re-verifying the review round below against the manual, the starter and
+  engine source, and twin measurements.** Two of the round's own fixes turned
+  out to be half-applied, and one of its diagnostics was wrong on 188 corpus
+  files because of a pre-existing reader defect underneath it.
+
+  - **BLOCKER, a regression the review round's own `*PARAMETER_LOCAL` fix
+    opened: the LOCAL scope never reached `assembly.finalize`.** That pass
+    runs from `parse_k_file` AFTER `_pop_local_scope()`, and an inner
+    include's frame is popped even earlier by its own recursive parse, so
+    every walk in `assembly.py` that feeds a raw cell to `to_int`/`to_float`
+    saw an empty scope. MEASURED on a parent/child twin (IDNOFF 6000 /
+    IDEOFF 7000 / IDPOFF 8000, child declares `*PARAMETER_LOCAL Ipid 7` and
+    writes `*PART &pid`): master emits `/PART/7` AND `/PART/8007` +
+    `/SHELL/8007`; the branch emitted ONE `/PART/7` titled *"child plate"* —
+    the child's part had silently REPLACED the parent's, its element was
+    dropped under *"MESH LOSS ... PID 8007"*, and the log carried a FALSE
+    *"'&pid' is undefined"* for a parameter that is perfectly well defined.
+    The geometry half is worse, because `_rewrite_node_blocks` REWRITES what
+    it reads: under a TRANID translation a `&xc = 25.0` coordinate came out as
+    a literal `0`. Fixed by `assembly._scoped_block`, installed at every
+    per-block walk in the finalize path. A `*PARAMETER` control deck is the
+    fence in both directions.
+  - **MAJOR (pre-existing): a `*NODE` id welded to a negative first coordinate
+    was read as node 0.** The fixed-vs-free discrimination tested the WIDTH of
+    fields 2–4 and never looked at field 1. `*NODE` is I8 + 3×E16, so a
+    negative coordinate fills its field completely and glues onto the field
+    before it; when X and Y are negative and Z is not, the split yields four
+    ordinary-looking tokens with the node id welded to the first —
+    `'5-1.000000000E+01-1.000000000E+01'`. MEASURED on
+    `dynaexamples/sph/bar-iv/taylor1.k`: master emits node ids
+    `[0, 1, 2, 3, 4, 6, 8]` — nodes 5 and 7 GONE, a phantom node 0 in their
+    place, the deck's only `/BRICK` still referencing 5 and 7, at ZERO
+    warnings, and the starter answers with two `ERROR ID 78 UNDEFINED NODE
+    NUMBER`. Both are gone after the fix. Corpus reach: **58 303 rows across
+    188 files**, all this one shape; classifying every non-integer field-1
+    token found no comma-format, blank or `&parameter` id to trade against,
+    and `_free_node_id` accepts `&name` regardless.
+
+    `assembly._parse_node_line` carried the identical test, and its docstring
+    says it *"mirrors handlers.handle_node"* — a contract that broke the
+    moment the handler was fixed. There the welded row returns `None`, i.e. it
+    is SKIPPED by the `*INCLUDE_TRANSFORM` offset pass and by the TRANID
+    geometry rewrite. MEASURED on a parent/child twin (IDNOFF 6000) with the
+    handler fixed and the walker not: node ids
+    `[5, 7, 6001, 6002, 6003, 6004, 6006, 6008]` — the welded rows kept their
+    PRE-offset ids, colliding with whatever the parent numbers 5 and 7, while
+    6005 and 6007 did not exist and the `/BRICK` referencing them was broken.
+    Not corpus-reachable — each of the 10 `*INCLUDE_TRANSFORM` cards in the two
+    roots was resolved to its card-1 filename and none of those children
+    carries a welded row — which is why nothing measured it.
+  - **The `/GRNOD` half of the group-allocator item is closed.** The review
+    round routed all 18 element-group sites and the `/SECT` node group through
+    the guarded allocators and named the rest as an open hazard in
+    `next_grnod_id`'s own docstring; the remaining 24 `/GRNOD` sites (contact
+    secondaries, `/INIVEL`, `*ELEMENT_MASS`, `*LOAD_NODE`, the rigid-wall
+    groups, the modal dummy `/CLOAD`, the free-node constraint group, the
+    `/RBODY` and CNRB groups) now draw from `next_grnod_id` too.
+    STARTER-MEASURED with a probe aimed at the id the allocator actually takes
+    (#131's rule — the order was printed first): before, `/GRNOD/NODE/90001`
+    twice and `ERROR ID 79 DUPLICATE ID / IN NODE GROUP DEFINITION`, ERROR
+    TERMINATION; after, 0 ERRORS. A new AST fence fails if any future
+    `_emit_grnod_node` site is left on the bare allocator.
+  - **`paramexpr`'s depth cap did not cover the `**` chain.** `_enter` was
+    called from `expr` and `signed` only; `power` is right-associative and
+    recursed into itself for the exponent, so `self.depth` returned to its
+    entry value at every `**`. MEASURED: `evaluate("1" + "**1"*1000)` raised
+    `RecursionError` — the exact escape the cap exists to prevent — killing
+    the whole conversion instead of refusing one parameter by name. The
+    manual's exponent semantics are unchanged (`2**3**2 = 512`,
+    `-3**2 = 9`, `2**-1 = 0.5`).
+  - **`*PARAMETER_DUPLICATION` quoted p.36-6 Remark 2 and did not implement
+    it.** *"Only one \*PARAMETER_DUPLICATION card is allowed. If more than one
+    is found, a warning is issued and any after the first are ignored."* The
+    assignment was unconditional, so a SECOND card won: `DFLAG 1` then
+    `DFLAG 2` then two `R thk` definitions ended at `thk = 9.0` where LS-DYNA
+    keeps `1.0`. Vol I p.138's R17 release note is the independent
+    corroboration — *"Also, only honor the first \*PARAMETER_DUPLICATION
+    card."* — and its MUTABLE sentence (*"even if \*PARAMETER_DUPLICATION says
+    redefinition is not allowed"*) independently supports the first-wins
+    default this batch shipped, which p.36-5's worked example appears to
+    contradict. That conflict is now named in `_pop_local_scope`'s docstring,
+    which previously stated a `VAL1` outcome the code does not produce, and
+    pinned in both directions.
+  - **`*DAMPING_GLOBAL`'s STX..SRZ were dropped on BOTH `/DAMP` branches** —
+    with a warning on Format 1, in complete silence on Format 2 — so `STX = 1`
+    damped all six DOFs. p.15-9 Remark 2 defaults the six to unity only when
+    ALL SIX are zero, so they now map to Format 2 `alpha_i = VALDMP × ST_i`
+    (x, y, z, xx, yy, zz), the mapping the `*DAMPING_PART_MASS` FLAG = 1
+    emitter already uses against `hm_read_damp.F:104-115`. Beta stays uniform:
+    it comes from `*DAMPING_PART_STIFFNESS`, which has no per-DOF cells. **No
+    corpus deck moves** — scanning both roots (2404 files) found 53
+    `*DAMPING_GLOBAL` cards and not one non-zero scale factor.
+  - **p.16-50's RADIUS exemption covers five cells, and three were exempted.**
+    *"If RADIUS ≠ 0.0, the variables XHEV, YHEV, ZHEV, LENL, and LENM ... will
+    be ignored."* A RADIUS-limited card carrying LENL/LENM was still told it
+    lost a finite extent that LS-DYNA ignores itself — the #125/#130 class in
+    its over-alarming direction.
+  - **The bare-`*EOS_*` refusals printed the RADIOSS spelling of the keyword.**
+    `EosCard.kind` is the Radioss suffix, so `"*EOS_" + kind` produced
+    `*EOS_POLYNOMIAL 3` — a keyword+id pair in neither the deck (which spells
+    it `*EOS_LINEAR_POLYNOMIAL`) nor the `.rad` (`/EOS/POLYNOMIAL/3`) — and
+    `*EOS_IDEAL-GAS`, which is not even legal LS-DYNA. The source keyword now
+    travels on the record and `label()` prints both. (#131's label class.)
+  - **One deck, two through-thickness point counts, one global offset.**
+    `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common
+    (`hm_read_inistate_d00.F:2206`) while `csigini.F:231/233` and
+    `scigini4.F:345/347` read `SIGSH(INISHVAR+IT)` at CONSUME time, so two
+    shell parts at NIP 3 and NIP 5 in one `/INISHE|/INISH3 STRS_F` pass make
+    every element whose NIP differs from the last record's read its sigma_zz
+    and station positions from the wrong slots, at 0 starter ERROR. Each
+    record passes its own NTHICK check, so nothing else in the pass can see
+    it. Pre-existing and unchanged — the emitted records are correct — but now
+    named, because item (D) adds a second block kind to the same pass.
+  - Also recorded rather than claimed: p.15-9 Remark 3 (no mass damping on
+    prescribed-motion or `CONSTRAINED_NODE_SET` nodes) is not implemented.
+    `fixvel.F:370-372` overwrites the prescribed DOF's acceleration and runs
+    after `DAMPING` in the same cycle (`resol.F:7216` vs `:7345`), so the
+    MOTION is unaffected — but the overwrite is per DOF where the exemption is
+    per NODE, and `damping.F:167-170` books the damping energy first. The
+    docstring says exactly that instead of claiming parity.
+
+- **SIDE-DEFECT review round — two blockers, three majors and six minors found
+  by reviewing the batch below.** Every one was self-consistent in the code and
+  wrong against a measurement or the manual's own sentence, and none of them is
+  reachable by the corpus sweep, so the batch's clean sweep was not evidence
+  they were safe.
+
+  - **`_plane_cut`'s degenerate-normal arm returned a 4-tuple** while every
+    other path and BOTH call sites unpack 5 since the spring arm was added. A
+    `*DATABASE_CROSS_SECTION_PLANE` whose `XCT->XCH` is a zero vector (all six
+    coordinate cells blank — legal, every field defaults to 0.0) killed the
+    WHOLE conversion with `ValueError: not enough values to unpack (expected
+    5, got 4)` and wrote no deck at all. Master converts that deck and warns.
+  - **`*PARAMETER_LOCAL` was defined and then DISCARDED before anything could
+    use it.** LS-DYNA scoping is a PARSE-TIME concept; k2rad resolves `&name`
+    LAZILY, in the handlers, so popping the frame at the end of each file
+    removed the binding first. MEASURED: `/PROP/SHELL Thick 0` with
+    *"'&lthk' is undefined"* on a valid deck (starter `ERROR ID : 495`, ERROR
+    TERMINATION) where master emitted 2.5, and the masking case silently
+    emitting the OUTER value (1.0) where the manual's own worked example says
+    9.0. The fix is not "stop popping": each Block now carries the LOCAL
+    bindings live where it was READ and `dispatch` installs them for the
+    handler, so BOTH halves of p.36-4 Remark 5 hold — `VAL2 = 20.0` inside the
+    include, `2.0` after it, `VAL4` gone.
+  - **`*PARAMETER_TYPE` was dropped, and the warning stated the opposite of the
+    manual.** p.36-11: *"*PARAMETER_TYPE is a variation on the *PARAMETER
+    keyword command.  In addition to its basic function of associating a
+    parameter name (PRMR) with a numerical value (VAL) ..."* — Card 1 is
+    `PRMR VAL PRTYP`. MEASURED: master resolved `&thkp` to 7, the branch fell
+    back to the card default 2.
+  - **The `/SECT` `TSID` arm resolved a `*SET_TSHELL` id in the `*SET_SHELL`
+    registry** — the #125/#128 two-namespace trap this repo documents in
+    `writer/rarecards.py:110-118`. MEASURED: a `*SET_SHELL_LIST 5` holding
+    shell 101 put `101` into `/GRBRIC/BRIC/90003`, where the starter resolves
+    it against the brick table.
+  - **`RADIUS < 0`** (XCT/XCH are node ids) **was resolved in the HANDLER**,
+    but handlers run in deck-block order and `handle_node` fills `state.nodes`
+    in that same pass. MEASURED on twin decks differing only in card order,
+    both nodes present in both: the card-before-`*NODE` deck printed *"they
+    are not nodes of this deck"* and emitted no `/SECT`. Resolution moved to
+    the writer.
+  - **The comma-delimited `*PARAMETER_EXPRESSION`** — the form p.36-8 Remark 1
+    uses in its OWN worked example — **was split at column 10**, so
+    `rplot,term/(states-30)` became `/(states-30)` and `rxmin, -96` (exactly
+    ten characters) came out EMPTY. Real carrier: dynaexamples
+    `IGA_tensile_test_input/tensile_test_iga.k`, which writes four such base
+    parameters plus eight box parameters that reference them.
+  - **The `_PLANE` spring arm reported a force `secforc` does not.** p.16-48,
+    Figure 16-2's caption: *"The automatic deﬁnition does not check for springs
+    and dampers in the section."* The springs are now NAMED and left out, and
+    the message points at LS-DYNA's own `_SET`/`DSID` slot instead of telling
+    the user to delete elements from a correct deck. Re-routed BEAMS still go
+    to `grsprg_ID` — LS-DYNA's plane cut does include those. Measured on twin
+    engine runs: `2.296195E7 N/s` vs the analytic shell-only `2.307692E7`
+    (−0.50 %), and splicing the spring's group back in adds `1.999977E8`
+    against the spring's own `k·v = 2.0E8` (−0.0012 %).
+  - **`Iframe` 0 → 10.** p.16-50 gives the card's output-frame cell `ID` the
+    default *"global"*. `section_skew.F:103-139` keeps the node-derived normal
+    at `Iframe ≥ 10` and `:146-150`/`:151-164` compute the same origin, so
+    only the moment axes move — measured on an `Iframe 0` twin, 44 of 48
+    section channels are IDENTICAL and the four that move are one section's
+    moment going from the local `M1` to the global `M3` (5000 in both).
+  - **The section `/GRNOD` came from the bare allocator.** Probe aimed at the
+    id the allocator actually takes (#131's rule): master emits
+    `/GRNOD/NODE/90002` TWICE (starter `ERROR 79 IN NODE GROUP DEFINITION`);
+    `next_grnod_id()` dodges to 90003.
+  - A `RecursionError` escaped both `except ExprError` sites (a nesting cap
+    makes it a named refusal); a UTF-8 em-dash reached the emitted `.rad`, the
+    first non-ASCII byte k2rad has ever written; p.36-6 Remark 1 scopes the
+    duplication exemption to LOCAL-over-NON-LOCAL (*"a LOCAL that masks another
+    LOCAL ... will"* trigger the actions); and `_sect_synth_frame`'s docstring
+    named two of its three return values — the missing one selects `Iframe`.
+
+- **`*NODE`'s own `TC`/`RC` constraint cells were dropped in complete
+  silence** (pre-existing, found while reviewing). Vol I R17 makes `*NODE`
+  Card 1 `NID X Y Z TC RC`, and TC/RC are constraint codes (0 none, 1 x, 2 y,
+  3 z, 4 xy, 5 yz, 6 zx, 7 xyz) in the GLOBAL system — exactly the triples
+  `*BOUNDARY_SPC_NODE` states one flag at a time. `handle_node` reads only
+  NID/X/Y/Z. MEASURED on a spring-mass coupon whose anchor carried
+  `tc=7/rc=7`: no `/BCS` was emitted, the anchor was free, and the whole
+  oscillator drifted at the centre-of-mass velocity (node-2 DX reached
+  6.68 mm against an intended 0.317 mm amplitude) while the engine printed
+  NORMAL TERMINATION — the #122 class, legal and accepted and wrong.
+  **Not converted, and the reason is the SCREENING rather than the direction
+  of the error** (an earlier draft argued that an extra constraint is the
+  harder failure to notice, which does not by itself justify shipping a
+  missing one). A correct `/BCS` pass has to screen two things this round
+  cannot validate: p.35-3 Remark 1 — *"No attempt should be made to apply
+  boundary conditions to nodes belonging to rigid bodies"* — and any DOF
+  already driven by `/IMPVEL` or `/IMPDISP`, which would fight the constraint
+  over the same slot. Both need their own twin campaign, so the conversion is
+  a ROADMAP item behind an opt-in `--node-tc-rc-to-bcs` and the interim is the
+  note. The loss is named once per deck, with the count, a few ids and the
+  `*BOUNDARY_SPC_NODE` remedy; no deck's bytes move. The detector was checked
+  against a scanner that does not use k2rad: same decks, no false positives,
+  no misses.
+
+- **SIDE-DEFECT batch — ten defects at the edges of cards this converter
+  already handles.** Each is reachable, none is the main line of any single
+  keyword, and four of them changed a NUMBER on a real corpus deck. Measured
+  master-vs-branch throughout; two of the research verdicts this batch started
+  from were themselves refuted by those measurements, and both refutations are
+  recorded below rather than shipped.
+
+  1. **(A) The bare `*EOS_*` `/MAT/LAW6` carrier collided in the `/MAT`
+     namespace, and could never have been legal anyway.** A bare `*EOS_*` — no
+     same-id `*MAT_NULL`, named by no `*PART` EOSID — used to mint a carrier
+     under the EOS id, guarded by `_impact_claimed_mids`, a hand-kept list of
+     THREE families standing in for the semantic quantity "does any other
+     emitter put a `/MAT` under this id?" (#124 class). MEASURED on the corpus
+     carrier `dynaexamples_r14/ale-s-ale/s-ale/wavestructure/2Dlag.k`, whose
+     orphan `*EOS_LINEAR_POLYNOMIAL 3` sits on a `*MAT_JOHNSON_COOK` (in none
+     of the three): `/MAT/LAW4/3` AND `/MAT/HYD_VISC/3`, starter
+     `ERROR ID : 79 ... IN MATERIAL DEFINITION ID=3 is DUPLICATED`,
+     3 ERROR(S), ERROR TERMINATION — plus `/EOS/GRUNEISEN/3` beside
+     `/EOS/POLYNOMIAL/3`, which nothing diagnosed. The branch is REMOVED, not
+     renumbered: NONE of the three `*EOS_*` spellings k2rad reads carries a
+     density cell (LS-DYNA takes it from the `*PART`'s own `*MAT`, Vol I R17
+     p.37-6), so every handler stores `rho0 = 0.0` and a `/MAT/LAW6` with
+     `RHO_I 0` is starter `ERROR 683` — measured on the very deck
+     `tests/test_impact_mats.py` pinned as CORRECT, which was therefore
+     pinning an unrunnable output. Dropping is also what LS-DYNA and dyna2rad
+     do with an `*EOS_*` no `*PART` names. `2Dlag.k` after the fix: one card
+     per id in both namespaces, starter 3 ERROR(S) → 1 (the survivor is the
+     out-of-scope `ERROR 3046`). Adds the tenth deck-wide duplicate scan,
+     `_warn_duplicate_eos_ids`: `/EOS` is the namespace with NO starter check
+     at all — `hm_read_eos.F` contains no `UDOUBLE` anywhere, so two `/EOS` on
+     one id are accepted at 0 ERROR / 0 WARNING and the last silently replaces
+     the material's pressure law.
+
+  2. **(B) `*INITIAL_STRESS_SHELL` and `_SOLID` had no `*INCLUDE_TRANSFORM`
+     offset row**, being registered directly in `HANDLERS` instead of through
+     `INITIAL_STATE_PRELOAD_KEYWORDS`. MEASURED with/without twin on a
+     parent+child pair (IDEOFF 6000, IDPOFF 7000, all offsets distinct):
+     MASTER put the child's stress record on the PARENT deck's shell 1 — a
+     different part, a different thickness, a different place — and dropped
+     the other two under a generic "keyword has no offset map" warning, with
+     no `/INIBRI` block at all; the branch lands `/INISHE 6001` and
+     `/INIBRI 6001`, rows of the child's own offset mesh. Both offsetters are
+     driven by NEW record walkers extracted from the handlers, because a
+     declarative `data` spec would rewrite a stress of 1.5 as the id 1 and an
+     all-blank stress card is legal (#116/#119). The audit found a third
+     keyword without a row, `*INITIAL_VOLUME_FRACTION_GEOMETRY`, whose `FMSID`
+     lives in two id namespaces selected by `FMIDTYP` beside it (#125).
+
+  3. **(C) `/DAMP` reached only four element families, so a beam+spring model
+     ran completely undamped.** Both target-node arms of `_make_damping`
+     walked `shell_elems | solid_elems | tshell_elems | sph_elems` and nothing
+     else. MEASURED at master on a 2-beam + 1-spring + 1-`*ELEMENT_MASS` deck
+     carrying `VALDMP 10.0`: the "no target deformable nodes found" exit and
+     zero `/DAMP` cards. The scope was never a property of `/DAMP` —
+     `hm_read_damp.F:415-429` validates only the group id,
+     `hm_lecgrn.F:538-550` collects beam/truss/spring nodes into a
+     `/GRNOD/PART`, and `damping.F:148-150` walks the node list with the sole
+     exclusion `TAGSLV_RBY(I)==0`, opening a SECOND loop at `:175` for the
+     rotational DOFs. Measured on a spring-only oscillator: log decrement
+     0.18857418 against the hand-computed 0.18858044, i.e. alpha recovered as
+     600.000132 from an input of 600, with alpha-0 and wrong-group twins as
+     controls. The branch emits `/DAMP` over all five nodes; starter
+     0 ERROR / 0 WARNING, engine NORMAL TERMINATION, 59 cycles. Two docstrings
+     asserting the OPPOSITE of the engine are deleted (#130), and the scope
+     grows the two LS-DYNA states that were missing: the `*ELEMENT_MASS` nodes
+     and each `/RBODY` MAIN node ("the nodes of deformable bodies and ... the
+     mass center of the rigid bodies", p.15-8). Side defect on the same card:
+     `handle_damping_global` split its FIXED-format card 1 free-format, so a
+     blank interior column shifted every later field — SRX read as STZ, SRZ
+     lost.
+
+  4. **(D) `/INISH3/STRS_F/GLOB` is emitted — initial stress on a 3-node shell
+     was dropped, under a warning whose cited fact was FALSE.** It said the
+     card "is a different card layout this converter does not write yet", and
+     the code comment beside it said "the card layout differs". `diff` of the
+     extracted `FORMAT(radioss2021)` blocks of `inish3_strs_f_glob_sub.cfg`
+     and `inishe_strs_f_glob_sub.cfg` is EMPTY (#131 class). The ONE
+     difference is `npg`, and the two rules are OPPOSITE: 4 on a QUAD
+     (`scigini4.F:160`), 0 or 1 on a `/SH3N`, whose check is `NPGI > 1` at
+     `csigini.F:143` — measured `ERROR 26` for npg 3 and 4, clean for 0 and 1.
+     MEASURED on a MIXED deck (quad stress + tri stress + quad strain, the
+     #127 shape): starter 0 ERROR / 0 WARNING, engine NORMAL TERMINATION,
+     70 cycles, and CONSUMED rather than merely accepted — with/without twin,
+     cycle 1 I-ENERGY -11.75 vs -4.125 and K-ENERGY 5.468 vs 1.705 at
+     identical total mass. The #127 companion rule is extended to tris because
+     `ITHKSHEL = 2` is global AND cross-family, and the companion warning now
+     names the card each record actually went into.
+
+  5. **(E) The `/SECT` reporting frame was conditioning-picked**, not read
+     from the card: N1 = the lowest node id of the cut, N2 = the farthest
+     node, N3 = the largest triangle. That frame is not decoration —
+     `section_skew.F:82-99` makes `e6 = (N2-N1) x (N3-N1)` the section NORMAL
+     and `section_c.F:385-389` SPLITS every nodal force with it. MEASURED on a
+     shell strip cut at x = 25 with normal +X: the picked frame's `e6` was
+     `(0,0,-1)`, **90.00 degrees off**, with the origin at `(20,0,0)` — not on
+     the plane — at 0 starter ERROR; on a cantilever the same defect cost
+     89.6 % of the true normal force, gave 1.34x the tangential one and moved
+     every moment component including the global ones. The frame is now three
+     synthesized element-free nodes built from the card (#127's preload
+     precedent), so `e6` is the card's normal to 12 places and the
+     `Iframe = 0` origin lands exactly on `(XCT,YCT,ZCT)`. `XHEV/YHEV/ZHEV`,
+     `ITYPE` and `RADIUS < 0` (which makes `XCT`/`XCH` NODE IDS) are read for
+     the first time. `/TH/SECTIO` also requests `GLOBAL` and `CENTER`, because
+     `CX/CY/CZ` is the only way to audit the frame from the T01.
+
+  6. **(F) `_plane_cut` had no spring arm**, so a section plane through a belt
+     or a discrete spring found nothing and `grsprg_ID` stayed 0. MEASURED,
+     starter echo, master vs branch on one deck: `NUMBER OF SPRING ELEMENTS`
+     0 -> 1 (`SPRING 10, N1=1 N2=0`, the correct tail-side pack code) and
+     section nodes 3 -> 4, both at 0 starter ERROR. The walk keys on
+     `state.discrete_elems` and the 1-D `state.seatbelt_elems`, never on the
+     nine-producer union `state.spring_elem_ids` (#128), and the group is
+     emitted whenever the column is non-zero because `elegror.F:92-94` returns
+     0 for a missing group and says NOTHING. The DIVERGENCE is named: Vol I
+     R17 Figure 16-2's caption says LS-DYNA's automatic plane definition "does
+     not check for springs and dampers in the section", so this is a
+     deliberate super-set. On the `_SET` spelling `TSID` and `DSID` are
+     converted too — they were dropped with the stated reason "no
+     converter-side element type", false on BOTH counts (#130).
+
+  7. **(G) `/DYNAIN` under implicit is MEASURED to work, so no guard is
+     added** — and the research's predicted defect is REFUTED. Implicit probe:
+     `QUASI-STATIC NON-LINEAR`, 97 nonlinear iterations, NORMAL TERMINATION in
+     20 cycles, three `.dynain` files of 22 225 bytes with all four blocks,
+     distinct md5 each, driven edge 20.1960 / 20.1980 / **20.2000** — the
+     terminal state captured exactly, because `imp_dt.F:53-56` clamps the last
+     quasi-static step onto `TSTOP`. The terminal-state caveat is rescoped to
+     explicit-only. The research proposed a warning naming every QEPH part, on
+     the reading that QEPH loses its `*INITIAL_STRAIN_SHELL` block; that
+     warning is NOT shipped, because the implicit probe above IS a QEPH deck
+     (`_elform_to_ishell` returns 24 unconditionally under implicit) and its
+     dynain HAS 164 strain records. The real mechanism, found by chasing the
+     refutation: `check_qeph_stra.F:64-76` compares the first **25**
+     characters of each engine-deck line against the literal
+     `/DYNAIN/SHELL/STRAIN/FULL`, while `fredynain.F:140` accepts the card on
+     five characters — so the short `STRAI` spelling parses and silently loses
+     the block. MEASURED spelling twin: 22 225 B with the strain block vs
+     12 422 B without, the same figure the research attributed to QEPH. k2rad
+     already writes the long form; it now comes from a named constant the
+     tests assert character for character.
+
+  8. **(H) Seventeen of eighteen element-group emission sites used the bare
+     `next_id()`**, with `next_elem_group_id()` on one (`/ACTIV`). All of them
+     use the guarded allocator now, with a per-site verdict — the five `/SURF`
+     ids sitting beside those emitters deliberately stay bare, because `/SURF`
+     is its own starter namespace and may share a number with any `/GR*`
+     group. Adds the eleventh deck-wide scan, `_warn_duplicate_group_ids`,
+     keyed PER FAMILY: MEASURED on twelve probe decks, `/GRBRIC` + `/GRSHEL`,
+     `/GRSPRI` + `/GRBEAM`, `/GRNOD` + `/GRBRIC`, `/SURF` + `/GRSHEL` and even
+     NINE groups on one id are all ACCEPTED at 0 ERROR, while `/GRBRIC/BRIC`
+     twice — or beside `/GRBRIC/PART` — is `ERROR 79`. A single scan over
+     "any `/GR*` id" would have fired on five decks the starter accepts.
+
+  9. **(I) `*PARAMETER_EXPRESSION` is evaluated, and so is inline arithmetic
+     in a data field.** Two measured corpus losses recovered: LSTC's own
+     `efg/metal-cutting/main.k` writes `TRISE` as `&tend/6.0` in a plain
+     10-char column, so the back-solved `VMAX` came out 9/0.03 = **300 mm/s**
+     where the deck means 9/0.025 = **360** — a 16.7 % under-speed on the
+     cutting tool, plus a rectangular plateau instead of a trapezoid; and
+     `set-yaris-detailed-v2j.key` defines its occupant masses with
+     `&DUM_1*.035+1e-3` and writes `&M1_1` into ten `*ELEMENT_MASS` cards, all
+     ten of which were dropped — **0.15208 Mg = 152.08 kg** of occupant mass
+     silently deleted from the flagship public crash deck, now restored to the
+     digit. The evaluator (`k2rad/paramexpr.py`) is recursive descent with NO
+     `eval()`, because three of the manual's rules are LS-DYNA-specific and
+     Python gets each wrong: the unary minus binds TIGHTER than exponentiation
+     (`-3**2` is 9, not -9), the integer/real type of each operand is honoured
+     (`2/5` is 0, `2.0/5` is 0.4, integer division truncating toward zero),
+     and the intrinsics are Fortran's (`sign(-4,8) = 4`, `int`/`aint` truncate
+     while `nint`/`anint` round and differ in the TYPE they return, NINT
+     rounding half away from zero). Also implemented: `*PARAMETER_DUPLICATION`
+     DFLAG 1-5, whose **default 1 means the FIRST definition wins** where the
+     parser had LAST-wins; `MUTABLE`; `LOCAL` scoping as a MASK that is
+     restored when the file ends; `C`-typed parameters as a named refusal
+     rather than a silent 0; `*PARAMETER_TYPE` read and ignored with its
+     reason. `to_float`'s trigger was `"&" in t[:2]`, so `2.0*&thick` and
+     `(&thick)` returned the caller's default with NO diagnostic at all.
+
+  10. **(J) The dead `if c.only:` tiebreak branch is removed**, with the
+      reason stated correctly. The comment called it unreachable "with today's
+      mapping"; it is unreachable by the LS-DYNA CARD GRAMMAR. Vol I R17
+      p.11-14/15 enumerates the family exhaustively and exactly two of eleven
+      spellings contain `ONLY`, taking Card 4: TIEBREAK_NODES (a FORCE
+      criterion) and Card 4: TIEBREAK_SURFACE (a STRESS criterion) — neither
+      has a length field, and `PARAM`/`CCRIT` lives only on Card 4:
+      AUTOMATIC_..._TIEBREAK, mandatory for four spellings none of which has
+      an `_ONLY` variant. Same in R16. The semantics the branch encoded are
+      kept as prose. The pinning test found a weakness in ITSELF — sweeping
+      every option showed `_tiebreak_bond_class` DOES return CCRIT for a
+      hand-made SURFACE record at option 6 or 8, because it classifies the
+      AUTOMATIC enumeration and knows nothing about spellings — so the
+      invariant is now asserted over records the PARSER produced from real
+      decks, at the layer that actually holds it.
+
 - **TIEBREAK post-review round — the `Isym = 1` claim the previous round ADDED
   was inverted, and a refusal named a card the converter had already dropped.**
   Diagnostics only, plus one screening line; no corpus deck moves.

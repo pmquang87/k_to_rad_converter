@@ -470,14 +470,23 @@ class SectioImpulseSemanticsTests(unittest.TestCase):
         self.assertIn("section force = d(FNX)/dt", block)
 
     def test_secforc_comment_does_not_disturb_the_card(self):
-        """The starter reads the variable line and the id list by position."""
+        """The starter reads the variable line and the id list by position.
+
+        The variable line asks for three GROUPS since the SIDE-DEFECT batch:
+        ``DEF`` (channels 1-9), ``GLOBAL`` (1-6 plus MX/MY/MZ = 31-33, the
+        moments on the GLOBAL axes, which is what secforc prints) and
+        ``CENTER`` (CX/CY/CZ = 37-39, an exact unaccumulated read-back of the
+        frame ORIGIN). The last is what makes the section's frame auditable
+        from the T01 at all — the starter never echoes node_ID1/2/3."""
         _r, starter, _e = self._with_sections()
         lines = starter.splitlines()
         i = next(k for k, ln in enumerate(lines) if ln.strip() == "TH_SECTIONS")
         j = i + 1
         while lines[j].startswith("#"):
             j += 1
-        self.assertEqual(lines[j].strip(), "DEF")
+        # Fixed 10-wide cells, one group per cell.
+        self.assertEqual([lines[j][k:k + 10].strip() for k in (0, 10, 20)],
+                         ["DEF", "GLOBAL", "CENTER"])
         self.assertTrue(lines[j + 1].strip().isdigit())
 
     def test_no_impulse_warning_when_no_section_is_emitted(self):

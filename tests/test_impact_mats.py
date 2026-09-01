@@ -1552,17 +1552,43 @@ class TestSharedIdEosDoesNotDuplicateTheMaterial(unittest.TestCase):
         self.assertEqual(len(_warns(res, "ERROR 79")), 1)
         self.assertIn("already emits its OWN", _warns(res, "ERROR 79")[0])
 
-    def test_an_unrelated_EOS_id_still_gets_its_carrier(self):
-        # The guard must be narrow: an *EOS_* on an id NO material holds keeps
-        # the pre-existing companion-less-fluid behaviour.
+    def test_an_unrelated_EOS_id_gets_no_carrier_either(self):
+        """An *EOS_* on an id NO material holds is dropped too — and this
+        assertion is the REVERSE of what it pinned before the SIDE-DEFECT
+        batch, because the output it used to pin is refused by the starter.
+
+        The old expectation was ``/MAT/LAW79/110`` + ``/MAT/HYD_VISC/500`` +
+        ``/EOS/POLYNOMIAL/500``. MEASURED on that exact deck (converted at
+        master 0c8968e, run through the starter): the carrier's RHO_I column
+        is ``0`` and the starter answers
+
+            ERROR ID :    683   ** INPUT ERROR IN MATERIAL LAW
+               -- MATERIAL ID: 500  -- MATERIAL TITLE: FLUID_500
+               DENSITY IS LESS THAN OR EQUAL TO ZERO
+            ERROR TERMINATION   1 ERROR(S)
+
+        /MAT/LAW6 is not in the density exemption list at
+        ``hm_read_mat.F90:1575-1583``, and NONE of the three *EOS_* spellings
+        k2rad reads carries a density cell (verified: every handler stores
+        ``rho0 = 0.0``, because LS-DYNA takes the density from the *PART's own
+        *MAT — Vol I R17 p.37-6), so this branch could never emit a runnable
+        pair for ANY deck. Dropping is also what LS-DYNA does with an *EOS_*
+        no *PART EOSID names, and what dyna2rad does (convertmats.cxx:572
+        reaches an EOS only from a *PART)."""
         res, starter = _convert(MESH(110) + _mat110(fs=0.0)
                                 + self.EOS.replace(f"{110:>10}",
                                                    f"{500:>10}", 1)
                                 + "*END\n")
-        self.assertEqual(self._headers(starter),
-                         ["/MAT/LAW79/110", "/MAT/HYD_VISC/500",
-                          "/EOS/POLYNOMIAL/500"])
+        self.assertEqual(self._headers(starter), ["/MAT/LAW79/110"])
+        # Not the collision message — id 500 is held by nothing.
         self.assertEqual(_warns(res, "ERROR 79"), [])
+        w = _warns(res, "*EOS_LINEAR_POLYNOMIAL 500")
+        self.assertEqual(len(w), 1)
+        self.assertIn("ERROR 683", w[0])
+        self.assertIn("no *MAT_NULL of that id", w[0])
+        # The message must name BOTH cards it declined to write.
+        self.assertIn("/MAT/HYD_VISC/500", w[0])
+        self.assertIn("/EOS/POLYNOMIAL/500", w[0])
 
     def test_no_duplicate_MAT_ids_in_any_of_the_three_cases(self):
         for mid, txt in ((110, _mat110(fs=0.0)), (111, _mat111()),

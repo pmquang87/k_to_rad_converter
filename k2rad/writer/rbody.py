@@ -526,8 +526,8 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
                 "--no-rigid-cog-master to reuse the part's lowest-id mesh node).")
         else:
             ind_node = unique_nodes[0]
-        grnod_id = state.next_id()
-        ind_grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        ind_grnod_id = state.next_grnod_id()
         rigid_nodes.update(unique_nodes)
         rbody_info[pid] = {
             "ind_node": ind_node,
@@ -968,8 +968,8 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
                     "moved to the CoG by ICoG would invert its elements)."
                 )
 
-        grnod_id = state.next_id()
-        ind_grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
+        ind_grnod_id = state.next_grnod_id()
         rigid_nodes.update(secondary_nodes)
         rigid_nodes.add(ind_node)
         rbody_info[cnrb.pid] = {
@@ -1097,8 +1097,8 @@ def _make_probe_rbody(state: ConversionState, rbody_info: Dict) -> List[str]:
     n1 = state.next_node_id()
     for _ in range(2):
         state.next_node_id()
-    slave_grnod = state.next_id()
-    master_grnod = state.next_id()
+    slave_grnod = state.next_grnod_id()
+    master_grnod = state.next_grnod_id()
     bcs_id = state.next_id()
     lines = [
         "#-  INERT PROBE RIGID BODY (implicit no-rigid-body segfault guard):",

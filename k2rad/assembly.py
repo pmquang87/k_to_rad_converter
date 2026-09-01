@@ -54,23 +54,66 @@ from .handlers import (_AIRBAG_LEGACY_SUFFIXES, _AIRBAG_MODELS,
                        _SEATBELT_SUBKEYWORDS,
                        final_geometry_node_row,
                        initial_strain_shell_records,
+                       initial_stress_shell_records,
+                       initial_stress_solid_records,
                        perturbation_node_records,
                        springback_records,
                        _SPOTWELD_CONTACT_KEYWORDS, _TYPE25_CONTACT_BASES,
                        TIEBREAK_CONTACT_KEYWORDS,
                        _cnrb_option_keywords, _cnrb_options,
+                       _free_node_id,
                        _is_float_token, _is_int_token, _parse_sph_cell,
                        _seatbelt_rows,
                        _part_option_keywords,
                        _part_options, _rwall_geometric_keywords,
                        _rwall_planar_keywords)
 from .parser import (Block, PARSER_WARNINGS, parse_fixed, parse_free,
-                     to_float, to_int)
+                     set_active_scope, to_float, to_int)
 from .state import FABRIC_CURVE_FORMS, SET_ADD_FAMILIES
 from .transform import (Affine, TransformRow, affine_apply, compose_rows,
                         is_identity, linear_is_identity, mat_apply)
 
 Vec3 = Tuple[float, float, float]
+
+
+class _scoped_block:
+    """Resolve ``&name`` against the *PARAMETER_LOCAL bindings of ONE block.
+
+    ``finalize`` runs from ``parse_k_file`` AFTER ``_pop_local_scope()``, so by
+    the time this module re-reads a Block's raw lines every LOCAL frame is gone
+    from the parser's global tables — and an inner include's frame was popped
+    even earlier, by its own recursive parse.  ``handlers.dispatch`` installs
+    ``Block.scope`` around each handler call for exactly this reason; every walk
+    in this module that feeds a raw cell to ``to_int``/``to_float`` needs the
+    same install, because ``_rewrite_line`` decides "this cell is an id" from
+    whether it parses as an integer and ``_rewrite_node_blocks`` REWRITES the
+    coordinate it read.
+
+    Without it a ``*PARAMETER_LOCAL``-supplied cell fails BOTH ways at once: an
+    id cell reads 0, so it keeps its pre-offset value and the block collides
+    with the parent deck's entity of the same number (measured: a child
+    ``*PART &pid`` replaced the parent's part outright and its element was
+    dropped as mesh loss), while a transformed coordinate is re-emitted as a
+    literal 0.  A false "*PARAMETER reference '&pid' is undefined" warning is
+    printed for a parameter that is perfectly well defined.
+
+    The install is a two-element list write; ``Block.scope`` is ``None`` on every
+    deck that uses no ``*PARAMETER_LOCAL``, which makes it a no-op there.
+    """
+
+    __slots__ = ("_prev", "_scope")
+
+    def __init__(self, b: Block):
+        self._scope = b.scope
+
+    def __enter__(self):
+        self._prev = set_active_scope(self._scope)
+        return self
+
+    def __exit__(self, *exc):
+        set_active_scope(self._prev)
+        return False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Offset buckets (the *INCLUDE_TRANSFORM card-2/3 fields)
@@ -301,9 +344,26 @@ def _parse_node_line(line: str):
     """Return (nid, [xt, yt, zt], tail) for one *NODE card — the coordinates
     as their RAW text tokens — or None. Mirrors handlers.handle_node: free
     split with a fixed I8+3×E16 fallback for glued negative coordinates;
-    *tail* preserves the TC/RC columns verbatim."""
+    *tail* preserves the TC/RC columns verbatim.
+
+    "Mirrors handlers.handle_node" is a CONTRACT, and it broke the moment that
+    function grew its field-1 test: this one kept the width-only test, so an
+    I8+3xE16 row with X and Y negative, Z not, and TC/RC present split into
+    four ordinary-looking tokens with the id welded to the first, took the free
+    branch, and returned None (``to_int`` of the merged token is 0). MEASURED
+    on an *INCLUDE_TRANSFORM twin with such a child, AFTER handle_node was
+    fixed and before this was: node ids came out
+    ``[5, 7, 6001, 6002, 6003, 6004, 6006, 6008]`` — the two welded rows kept
+    their PRE-offset ids (colliding with whatever the parent numbers 5 and 7)
+    and were never transformed, while 6005 and 6007 simply did not exist and
+    the /BRICK referencing them was broken. Not corpus-reachable: none of the
+    10 ``*INCLUDE_TRANSFORM`` cards in either corpus root names a child with a
+    welded row (checked by resolving each card's card-1 filename), which is
+    why nothing measured it. See ``handlers.handle_node`` for the rest.
+    """
     f = parse_free(line)
-    if len(f) < 4 or any(len(t) > 16 for t in f[1:4]):
+    if len(f) < 4 or any(len(t) > 16 for t in f[1:4]) \
+            or not _free_node_id(f[0]):
         nid = to_int(line[0:8])
         if nid <= 0:
             return None
@@ -349,22 +409,23 @@ def _rewrite_node_blocks(blocks: List[Block], nodeoff: int = 0,
     for b in blocks:
         if b.keyword != "NODE":
             continue
-        for k, line in enumerate(b.raw):
-            if not line.strip():
-                continue
-            parsed = _parse_node_line(line)
-            if parsed is None:
-                continue
-            nid, toks, tail = parsed
-            if only_ids is not None and nid not in only_ids:
-                continue
-            xyz = (to_float(toks[0]), to_float(toks[1]), to_float(toks[2]))
-            if aff is not None:
-                xyz = affine_apply(aff, xyz)
-                toks = [_fmt_coord(v) for v in xyz]
-            nid2 = nid + nodeoff if nodeoff else nid
-            b.raw[k] = _emit_node_line(nid2, toks, tail)
-            changed[nid2] = xyz
+        with _scoped_block(b):
+            for k, line in enumerate(b.raw):
+                if not line.strip():
+                    continue
+                parsed = _parse_node_line(line)
+                if parsed is None:
+                    continue
+                nid, toks, tail = parsed
+                if only_ids is not None and nid not in only_ids:
+                    continue
+                xyz = (to_float(toks[0]), to_float(toks[1]), to_float(toks[2]))
+                if aff is not None:
+                    xyz = affine_apply(aff, xyz)
+                    toks = [_fmt_coord(v) for v in xyz]
+                nid2 = nid + nodeoff if nodeoff else nid
+                b.raw[k] = _emit_node_line(nid2, toks, tail)
+                changed[nid2] = xyz
     return changed
 
 
@@ -373,14 +434,15 @@ def _collect_node_coords(blocks: List[Block]) -> Dict[int, Vec3]:
     for b in blocks:
         if b.keyword != "NODE":
             continue
-        for line in b.raw:
-            if not line.strip():
-                continue
-            parsed = _parse_node_line(line)
-            if parsed is not None:
-                toks = parsed[1]
-                table[parsed[0]] = (to_float(toks[0]), to_float(toks[1]),
-                                    to_float(toks[2]))
+        with _scoped_block(b):
+            for line in b.raw:
+                if not line.strip():
+                    continue
+                parsed = _parse_node_line(line)
+                if parsed is not None:
+                    toks = parsed[1]
+                    table[parsed[0]] = (to_float(toks[0]), to_float(toks[1]),
+                                        to_float(toks[2]))
     return table
 
 
@@ -389,11 +451,12 @@ def _node_ids_in(blocks: List[Block]) -> Set[int]:
     for b in blocks:
         if b.keyword != "NODE":
             continue
-        for line in b.raw:
-            if line.strip():
-                parsed = _parse_node_line(line)
-                if parsed is not None:
-                    ids.add(parsed[0])
+        with _scoped_block(b):
+            for line in b.raw:
+                if line.strip():
+                    parsed = _parse_node_line(line)
+                    if parsed is not None:
+                        ids.add(parsed[0])
     return ids
 
 
@@ -2933,6 +2996,134 @@ def _off_initial_strain_shell_common(b: Block, offsets: Dict[str, int],
             raw[idx] = new
 
 
+def _off_initial_stress_shell(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INITIAL_STRESS_SHELL: offset the EID on every card 1 — IDEOFF.
+
+    Driven by ``handlers.initial_stress_shell_records``, the SAME walker the
+    handler parses with, for the same reason ``_off_initial_strain_shell``
+    needs one (#116/#119): the stress cards are ALL floats, and
+    ``_rewrite_line`` decides what is an id with ``to_int(tok) > 0``, so a
+    declarative ``{"data": ...}`` spec would rewrite a stress of ``1.5`` as
+    the element id ``1``. And an all-blank stress card is legal LS-DYNA (every
+    component defaults to 0.0), so the record boundaries can only be found by
+    RAW CONTIGUITY from the card-1 row, which is what the walker enforces.
+
+    Bucket: cell 1 is ``EID/SID``, and for the PLAIN spelling that is an
+    ELEMENT id — Vol I R17 p.28-95, "Element ID or element set ID (see
+    *SET_SHELL)" — so IDEOFF ("e"). The ``_SET`` spelling would be IDSOFF; it
+    is not registered in ``INITIAL_STATE_PRELOAD_KEYWORDS``, so it lands in
+    ``skipped_keywords`` and never reaches this table (``_split_keyword``
+    keeps ``_SET`` in the base name — verified — so it is NOT silently
+    misparsed as the plain form).
+
+    Nothing else on the card is an id: NPLANE/NTHICK/NHISV/NTENSR/LARGE/
+    NTHINT/NTHHSV are counts and flags, and the stress records are pure
+    floats.
+    """
+    raw = b.raw
+    for card1, _fields, _pt_rows, _trunc in initial_stress_shell_records(raw):
+        new = _rewrite_line(raw[card1], [(0, "e")], offsets)
+        if new is not None:
+            raw[card1] = new
+
+
+def _off_initial_stress_solid(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*INITIAL_STRESS_SOLID: offset the EID on every card 1 — IDEOFF.
+
+    The solid twin of :func:`_off_initial_stress_shell`, driven by
+    ``handlers.initial_stress_solid_records`` and needing a walker for the
+    identical reason (float-only stress cards, legal all-blank cards).
+
+    Card 1 is ``EID/SID NINT NHISV LARGE IVEFLG IALEGP NTHINT NTHHSV`` (Vol I
+    R17 p.28-103); cell 1 is an ELEMENT id on the plain spelling -> "e".
+
+    ``IALEGP`` (cell 6) is an ALE multi-material GROUP number, not an id in any
+    of the seven *INCLUDE_TRANSFORM buckets (Vol I R17 p.27-5 offers IDNOFF /
+    IDEOFF / IDPOFF / IDMOFF / IDSOFF / IDFOFF / IDDOFF and no ALE-group one),
+    so it is deliberately left alone — and the handler does not read it
+    either, so nothing downstream can dangle on it.
+    """
+    raw = b.raw
+    for card1, _fields, _pt_rows, _trunc in initial_stress_solid_records(raw):
+        new = _rewrite_line(raw[card1], [(0, "e")], offsets)
+        if new is not None:
+            raw[card1] = new
+
+
+def _off_initial_volume_fraction_geometry(b: Block, offsets: Dict[str, int],
+                                          warn) -> None:
+    """*INITIAL_VOLUME_FRACTION_GEOMETRY: header FMSID, bucketed by FMIDTYP.
+
+    Card 1 is ``FMSID FMIDTYP BAMMG NTRACE``, and FMSID lives in TWO id
+    namespaces selected by the cell beside it — the #125 class: FMIDTYP 0
+    makes it a ``*SET_PART`` id (IDSOFF) and FMIDTYP 1 a ``*PART`` id
+    (IDPOFF). Offsetting it with one fixed bucket would move it into the wrong
+    namespace on half the decks, which is why this is a callable and not a
+    ``{"cards": {0: [(0, "p")]}}`` row.
+
+    The container cards that follow (``CONTTYP FILLOPT FAMMG`` plus the
+    geometry) are NOT rewritten. This converter reads only CONTTYP/FILLOPT/
+    FAMMG from them — all three are enumerations or ALE group numbers, none is
+    an id in any bucket — and the geometry cells it does not read are
+    coordinates for the container types it supports. If a container type whose
+    geometry is stated by NODE ids is ever read, this spec needs an arm for it
+    (the audit belongs with that change, not to a guess here).
+    """
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff >= len(raw):
+        return
+    # _split_card is the shared reader every rewriter in this file uses, so the
+    # FMIDTYP this reads is the same cell _rewrite_line would edit.
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    fmidtyp = to_int(cells[1]) if len(cells) > 1 else 0
+    new = _rewrite_line(raw[toff], [(0, "p" if fmidtyp == 1 else "s")],
+                        offsets)
+    if new is not None:
+        raw[toff] = new
+
+
+def _off_database_cross_section_plane(b: Block, offsets: Dict[str, int],
+                                      warn) -> None:
+    """*DATABASE_CROSS_SECTION_PLANE: PSID -> IDSOFF, and XCT/XCH -> IDNOFF
+    **when RADIUS is negative**.
+
+    Two id namespaces in one cell again (the #125 class): Vol I R17 p.16-50
+    says *"If RADIUS is negative ... XCT and XCH will be node IDs"*, so cells 1
+    and 4 of card 1 are COORDINATES when RADIUS >= 0 and NODE IDS when it is
+    negative. A flat ``{"cards": {0: [(0, "s")]}}`` row leaves them alone in
+    both cases, which is right for the coordinates and wrong for the ids:
+    MEASURED on a child include offset by IDNOFF 6000 whose section names its
+    own nodes 2 and 5, the card kept asking for 2 and 5 — which the parent
+    deck may well own, so the plane silently moves to the WRONG mesh, and when
+    it does not the section is refused as "node 5 is missing" on a deck that
+    states it perfectly.
+
+    The RADIUS sign is read with ``_split_card``, the same reader
+    ``_rewrite_line`` edits with, so the two cannot disagree about which cell
+    is which. YCT/ZCT/YCH/ZCH stay untouched: the manual says they "are
+    ignored" in this form.
+
+    A callable spec bypasses ``_offset_block``'s own ``idhdr`` step, so the
+    ``_ID`` header's CSID is rewritten here with the same bucket the flat row
+    used ("p") — dropping it would silently stop offsetting the section id.
+    """
+    raw = b.raw
+    toff = _title_offset(b)
+    if toff and "ID" in b.options and raw:
+        new = _rewrite_id_header(raw[0], offsets.get("p", 0))
+        if new is not None:
+            raw[0] = new
+    if toff >= len(raw):
+        return
+    cells, _comma, _wsf = _split_card(raw[toff], 10)
+    radius = to_float(cells[7]) if len(cells) > 7 else 0.0
+    mods = [(0, "s")] + ([(1, "n"), (4, "n")] if radius < 0.0 else [])
+    new = _rewrite_line(raw[toff], mods, offsets)
+    if new is not None:
+        raw[toff] = new
+
+
 def _off_initial_strain_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     _off_initial_strain_shell_common(b, offsets, False)
 
@@ -3510,6 +3701,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     "INITIAL_VELOCITY_RIGID_BODY": {"data": (0, [(0, "p")]), "idhdr": "r"},
     "INITIAL_VELOCITY_GENERATION": _off_inivel_generation,
     "INITIAL_DETONATION": {"data": (0, [(0, "p")])},
+    # Found by the SIDE-DEFECT batch's audit of every INITIAL_* handler:
+    # readable and un-offsettable, like the two *INITIAL_STRESS_* keywords.
+    "INITIAL_VOLUME_FRACTION_GEOMETRY": _off_initial_volume_fraction_geometry,
     "BOUNDARY_NON_REFLECTING": {"data": (0, [(0, "s")])},
 
     # Constraints. The *CONSTRAINED_NODAL_RIGID_BODY option spellings (65 of them)
@@ -3625,7 +3819,9 @@ _OFFSET_SPECS: Dict[str, object] = {
     # (IDSOFF) for the same reason.
     "DATABASE_HISTORY_SPH": _off_db_history("n"),
     "DATABASE_HISTORY_SPH_SET": _off_db_history("s"),
-    "DATABASE_CROSS_SECTION_PLANE": {"cards": {0: [(0, "s")]}, "idhdr": "p"},
+    # A callable, not a flat row: XCT/XCH are COORDINATES at RADIUS >= 0 and
+    # NODE IDS at RADIUS < 0 (Vol I R17 p.16-50) — see the walker.
+    "DATABASE_CROSS_SECTION_PLANE": _off_database_cross_section_plane,
     "DATABASE_CROSS_SECTION_SET": {"cards": {0: [(i, "s") for i in range(6)]},
                                    "idhdr": "p"},
     "DATABASE_BINARY_D3PLOT": {"cards": {0: [(1, "f"), (4, "s")]}},
@@ -3843,6 +4039,8 @@ _INITIAL_STATE_PRELOAD_OFFSETS = {
     "INITIAL_AXIAL_FORCE_BEAM": {"data": (0, [(0, "s"), (1, "f")])},
     "INITIAL_STRAIN_SHELL": _off_initial_strain_shell,
     "INITIAL_STRAIN_SHELL_SET": _off_initial_strain_shell_set,
+    "INITIAL_STRESS_SHELL": _off_initial_stress_shell,
+    "INITIAL_STRESS_SOLID": _off_initial_stress_solid,
 }
 # Keyed off the handler registry, so adding a spelling there without an offset
 # spec here is an ImportError, not a silent un-offset include.
@@ -4317,7 +4515,8 @@ def _apply_offsets(p: PendingInclude, warn) -> None:
                  "keep their original values; verify they neither collide with "
                  "the parent deck nor dangle.")
             continue
-        _offset_block(b, spec, p.offsets, warn)
+        with _scoped_block(b):
+            _offset_block(b, spec, p.offsets, warn)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4325,10 +4524,11 @@ def _apply_offsets(p: PendingInclude, warn) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _transform_block_id(b: Block) -> int:
-    toff = _title_offset(b)
-    if toff >= len(b.raw) or not b.raw[toff].strip():
-        return 0
-    return _geti(_fields(b.raw[toff]), 0)
+    with _scoped_block(b):
+        toff = _title_offset(b)
+        if toff >= len(b.raw) or not b.raw[toff].strip():
+            return 0
+        return _geti(_fields(b.raw[toff]), 0)
 
 
 def _find_transform_block(blocks: List[Block], tranid: int) -> Optional[Block]:
@@ -4340,44 +4540,45 @@ def _find_transform_block(blocks: List[Block], tranid: int) -> Optional[Block]:
 
 
 def _parse_transformation_rows(b: Block, warn) -> List[TransformRow]:
-    toff = _title_offset(b)
-    rows: List[TransformRow] = []
-    k = toff + 1
-    raw = b.raw
-    while k < len(raw):
-        line = raw[k]
-        k += 1
-        if not line.strip():
-            continue
-        if "," in line:
-            toks = parse_free(line)
-            verb = toks[0].strip().upper()
-            atoks = toks[1:8]
-        else:
-            verb = line[:10].strip().upper()
-            if " " in verb:                     # whitespace free format
-                toks = line.split()
+    with _scoped_block(b):
+        toff = _title_offset(b)
+        rows: List[TransformRow] = []
+        k = toff + 1
+        raw = b.raw
+        while k < len(raw):
+            line = raw[k]
+            k += 1
+            if not line.strip():
+                continue
+            if "," in line:
+                toks = parse_free(line)
                 verb = toks[0].strip().upper()
                 atoks = toks[1:8]
             else:
-                atoks = parse_fixed(line[10:], 7, 10)
-                if any(" " in t.strip() for t in atoks):
-                    # Whitespace free format with a verb ≥ 9 chars filling
-                    # the whole first slice (e.g. "TRANSL2ND 1 2 5.0").
+                verb = line[:10].strip().upper()
+                if " " in verb:                     # whitespace free format
                     toks = line.split()
                     verb = toks[0].strip().upper()
                     atoks = toks[1:8]
-        a = tuple(to_float(t) for t in atoks) + (0.0,) * (7 - len(atoks))
-        matrix = None
-        if verb == "MATRIX":
-            vals: List[float] = []
-            while k < len(raw) and len(vals) < 16:
-                if raw[k].strip():
-                    vals.extend(to_float(t) for t in _fields(raw[k]))
-                k += 1
-            matrix = tuple(vals[:16]) if len(vals) >= 16 else None
-        rows.append(TransformRow(verb, a[:7], matrix))
-    return rows
+                else:
+                    atoks = parse_fixed(line[10:], 7, 10)
+                    if any(" " in t.strip() for t in atoks):
+                        # Whitespace free format with a verb ≥ 9 chars filling
+                        # the whole first slice (e.g. "TRANSL2ND 1 2 5.0").
+                        toks = line.split()
+                        verb = toks[0].strip().upper()
+                        atoks = toks[1:8]
+            a = tuple(to_float(t) for t in atoks) + (0.0,) * (7 - len(atoks))
+            matrix = None
+            if verb == "MATRIX":
+                vals: List[float] = []
+                while k < len(raw) and len(vals) < 16:
+                    if raw[k].strip():
+                        vals.extend(to_float(t) for t in _fields(raw[k]))
+                    k += 1
+                matrix = tuple(vals[:16]) if len(vals) >= 16 else None
+            rows.append(TransformRow(verb, a[:7], matrix))
+        return rows
 
 
 def _resolve_pending_affine(p: PendingInclude, table: Dict[int, Vec3],
@@ -4481,20 +4682,22 @@ def _transform_beam_orientation(p: PendingInclude, aff: Affine, warn) -> None:
         vec_off = 1 + int("OFFSET" in opts)
         i = 0
         n_short = 0
-        while i < len(b.raw):
-            f = [x for x in _fields(b.raw[i], 10, 8) if x]
-            if len(f) < 4:
-                i += 1
-                continue
-            vi = i + vec_off
-            # A blank card is the zero vector: no third node, nothing to rotate.
-            if vi < len(b.raw) and b.raw[vi].strip():
-                new = _rewrite_direction_fields(b.raw[vi], aff, 8)
-                if new is None:
-                    n_short += 1
-                else:
-                    b.raw[vi] = new
-            i = vi + 1
+        with _scoped_block(b):
+            while i < len(b.raw):
+                f = [x for x in _fields(b.raw[i], 10, 8) if x]
+                if len(f) < 4:
+                    i += 1
+                    continue
+                vi = i + vec_off
+                # A blank card is the zero vector: no third node, nothing to
+                # rotate.
+                if vi < len(b.raw) and b.raw[vi].strip():
+                    new = _rewrite_direction_fields(b.raw[vi], aff, 8)
+                    if new is None:
+                        n_short += 1
+                    else:
+                        b.raw[vi] = new
+                i = vi + 1
         if n_short:
             warn(f"*INCLUDE_TRANSFORM {p.filename}: {n_short} *{kw} orientation "
                  "card(s) are too short to hold VX/VY/VZ — those vectors were "
@@ -4516,59 +4719,60 @@ def _transform_rigidwalls(p: PendingInclude, aff: Affine, warn) -> None:
         geom = b.keyword.startswith("RIGIDWALL_GEOMETRIC")
         if not (planar or geom):
             continue
-        label = f"*INCLUDE_TRANSFORM {p.filename}: *{b.keyword}"
-        gi = (1 if "_ID_" in f"_{b.keyword}_" else _title_offset(b)) + 1
-        new = (_rewrite_point_fields(b.raw[gi], aff, [0, 3])
-               if gi < len(b.raw) and b.raw[gi].strip() else None)
-        if new is None:
-            warn(f"{label}: geometry card missing or incomplete — the wall "
-                 "was NOT transformed; verify its position manually.")
-            continue
-        b.raw[gi] = new
-        if planar and "_ORTHO" in b.keyword:
-            # Friction-direction cards sit between the geometry and _FINITE
-            # cards; the ORTHO wall is warn-skipped by the handler anyway
-            # (no /RWALL equivalent), so only the plane points are moved.
-            continue
-        if planar and "_FINITE" in b.keyword:
-            fi = gi + 1
-            if fi < len(b.raw) and b.raw[fi].strip():
-                newf = _rewrite_point_fields(b.raw[fi], aff, [0])
-                if newf is not None:
-                    b.raw[fi] = newf
-            if not _linear_preserves_lengths(aff):
-                warn(f"{label}: the TRANID transform scales or shears — the "
-                     "finite-wall extents LENL/LENM are NOT rescaled; verify "
-                     "the wall coverage.")
-        elif geom:
-            # Card 3 is shape-specific: FLAT/PRISM lead with the edge-vector
-            # head, a POINT; CYLINDER/SPHERE carry only radii and lengths.
-            si = gi + 1
-            flat = "_FLAT" in b.keyword or "_PRISM" in b.keyword
-            if flat and si < len(b.raw) and b.raw[si].strip():
-                news = _rewrite_point_fields(b.raw[si], aff, [0])
-                if news is not None:
-                    b.raw[si] = news
-            if not _linear_preserves_lengths(aff):
-                warn(f"{label}: the TRANID transform scales or shears — the "
-                     "wall dimensions (LENL/LENM/LENP, RADCYL/LENCYL, RADSPH) "
-                     "are NOT rescaled; verify the wall size.")
-            if "_MOTION" not in b.keyword:
+        with _scoped_block(b):
+            label = f"*INCLUDE_TRANSFORM {p.filename}: *{b.keyword}"
+            gi = (1 if "_ID_" in f"_{b.keyword}_" else _title_offset(b)) + 1
+            new = (_rewrite_point_fields(b.raw[gi], aff, [0, 3])
+                   if gi < len(b.raw) and b.raw[gi].strip() else None)
+            if new is None:
+                warn(f"{label}: geometry card missing or incomplete — the wall "
+                     "was NOT transformed; verify its position manually.")
                 continue
-            # Card 3c of a CYLINDER carries NSEGS sub-cards before the MOTION
-            # card; without NSEGS the MOTION card is the one right after.
-            mi = si + 1
-            if "_CYLINDER" in b.keyword and si < len(b.raw):
-                f3 = [x.strip() for x in _fields(b.raw[si], 8, 10)]
-                mi += to_int(f3[2]) if len(f3) > 2 and f3[2] else 0
-            if mi < len(b.raw) and b.raw[mi].strip():
-                newm = _rewrite_direction_fields(b.raw[mi], aff, 8, start=2)
-                if newm is None:
-                    warn(f"{label}: the MOTION card is too short to hold "
-                         "VX/VY/VZ — the motion direction was NOT rotated "
-                         "with the include.")
-                else:
-                    b.raw[mi] = newm
+            b.raw[gi] = new
+            if planar and "_ORTHO" in b.keyword:
+                # Friction-direction cards sit between the geometry and _FINITE
+                # cards; the ORTHO wall is warn-skipped by the handler anyway
+                # (no /RWALL equivalent), so only the plane points are moved.
+                continue
+            if planar and "_FINITE" in b.keyword:
+                fi = gi + 1
+                if fi < len(b.raw) and b.raw[fi].strip():
+                    newf = _rewrite_point_fields(b.raw[fi], aff, [0])
+                    if newf is not None:
+                        b.raw[fi] = newf
+                if not _linear_preserves_lengths(aff):
+                    warn(f"{label}: the TRANID transform scales or shears — the "
+                         "finite-wall extents LENL/LENM are NOT rescaled; verify "
+                         "the wall coverage.")
+            elif geom:
+                # Card 3 is shape-specific: FLAT/PRISM lead with the edge-vector
+                # head, a POINT; CYLINDER/SPHERE carry only radii and lengths.
+                si = gi + 1
+                flat = "_FLAT" in b.keyword or "_PRISM" in b.keyword
+                if flat and si < len(b.raw) and b.raw[si].strip():
+                    news = _rewrite_point_fields(b.raw[si], aff, [0])
+                    if news is not None:
+                        b.raw[si] = news
+                if not _linear_preserves_lengths(aff):
+                    warn(f"{label}: the TRANID transform scales or shears — the "
+                         "wall dimensions (LENL/LENM/LENP, RADCYL/LENCYL, RADSPH) "
+                         "are NOT rescaled; verify the wall size.")
+                if "_MOTION" not in b.keyword:
+                    continue
+                # Card 3c of a CYLINDER carries NSEGS sub-cards before the MOTION
+                # card; without NSEGS the MOTION card is the one right after.
+                mi = si + 1
+                if "_CYLINDER" in b.keyword and si < len(b.raw):
+                    f3 = [x.strip() for x in _fields(b.raw[si], 8, 10)]
+                    mi += to_int(f3[2]) if len(f3) > 2 and f3[2] else 0
+                if mi < len(b.raw) and b.raw[mi].strip():
+                    newm = _rewrite_direction_fields(b.raw[mi], aff, 8, start=2)
+                    if newm is None:
+                        warn(f"{label}: the MOTION card is too short to hold "
+                             "VX/VY/VZ — the motion direction was NOT rotated "
+                             "with the include.")
+                    else:
+                        b.raw[mi] = newm
 
 
 def _carries_literal_axis_point(b: Block) -> bool:
@@ -4615,6 +4819,24 @@ def _is_untransformed_beam_orientation(b: Block) -> bool:
     return bool(_elem_opts(kw, "ELEMENT_BEAM", _BEAM_OPT_TOKENS)[1])
 
 
+def _cross_section_plane_is_node_defined(b: Block) -> bool:
+    """True when this ``*DATABASE_CROSS_SECTION_PLANE`` states its plane with
+    NODE IDS rather than coordinates.
+
+    Vol I R17 p.16-50: *"If RADIUS is negative ... XCT and XCH will be node
+    IDs"*. Such a card carries no literal geometry at all — it follows its
+    nodes, which the TRANID affine DOES move — so the point-bearing warning
+    would be prescribing a manual re-orientation on a correct deck (#125), and
+    the warning's own parenthetical already promises that node-defined variants
+    follow their nodes.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw):
+        return False
+    cells, _comma, _wsf = _split_card(b.raw[toff], 10)
+    return len(cells) > 7 and to_float(cells[7]) < 0.0
+
+
 def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
     seen: Set[str] = set()
     rotates = not linear_is_identity(aff)
@@ -4622,9 +4844,18 @@ def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
         kw = b.keyword
         if kw in seen:
             continue
-        if kw in _POINT_BEARING or (kw in _DIRECTION_BEARING and (
-                rotates or _carries_literal_axis_point(b))) \
-                or (rotates and _is_untransformed_beam_orientation(b)):
+        bearing = False
+        with _scoped_block(b):
+            if (kw == "DATABASE_CROSS_SECTION_PLANE"
+                    and _cross_section_plane_is_node_defined(b)):
+                # Not added to `seen`: a SECOND, coordinate-defined card of the
+                # same keyword in this include still has to be reported.
+                continue
+            bearing = kw in _POINT_BEARING or (
+                kw in _DIRECTION_BEARING
+                and (rotates or _carries_literal_axis_point(b))) \
+                or (rotates and _is_untransformed_beam_orientation(b))
+        if bearing:
             seen.add(kw)
             warn(f"*INCLUDE_TRANSFORM {p.filename}: the TRANID transform is "
                  "applied to *NODE coordinates and *RIGIDWALL_PLANAR geometry "
@@ -4661,18 +4892,19 @@ def _resolve_node_set(blocks: List[Block], nsid: int) -> Optional[List[int]]:
     for b in blocks:
         if b.keyword not in ("SET_NODE_LIST", "SET_NODE"):
             continue
-        toff = _title_offset(b)
-        if toff >= len(b.raw):
-            continue
-        if _geti(_fields(b.raw[toff]), 0) != nsid:
-            continue
-        nids: List[int] = []
-        for line in b.raw[toff + 1:]:
-            for tok in parse_free(line):
-                v = to_int(tok)
-                if v > 0:
-                    nids.append(v)
-        return nids
+        with _scoped_block(b):
+            toff = _title_offset(b)
+            if toff >= len(b.raw):
+                continue
+            if _geti(_fields(b.raw[toff]), 0) != nsid:
+                continue
+            nids: List[int] = []
+            for line in b.raw[toff + 1:]:
+                for tok in parse_free(line):
+                    v = to_int(tok)
+                    if v > 0:
+                        nids.append(v)
+            return nids
     return None
 
 
@@ -4682,43 +4914,44 @@ def _apply_node_transforms(blocks: List[Block], warn) -> None:
         return
     table = _collect_node_coords(blocks)     # CURRENT (post-include) coords
     for b in nts:
-        for line in b.raw:
-            if not line.strip():
-                continue
-            f = _fields(line, 3)
-            trsid, nsid, immed = _geti(f, 0), _geti(f, 1), _geti(f, 2)
-            if trsid <= 0 or nsid <= 0:
-                warn(f"*NODE_TRANSFORM: incomplete card (TRSID={trsid}, "
-                     f"NSID={nsid}) — NOT applied.")
-                continue
-            if immed:
-                warn(f"*NODE_TRANSFORM TRSID={trsid}: IMMED=1 (apply while "
-                     "reading) is treated as the default deferred application "
-                     "— identical unless the transformed nodes feed a later "
-                     "node-referenced definition.")
-            tb = _find_transform_block(blocks, trsid)
-            if tb is None:
-                warn(f"*NODE_TRANSFORM TRSID={trsid}: no "
-                     "*DEFINE_TRANSFORMATION with this id — NOT applied; the "
-                     "node set keeps its original position.")
-                continue
-            nids = _resolve_node_set(blocks, nsid)
-            if nids is None:
-                warn(f"*NODE_TRANSFORM TRSID={trsid}: node set {nsid} not "
-                     "found (only *SET_NODE_LIST is resolvable here) — NOT "
-                     "applied.")
-                continue
-            scope = set(nids)
-            rows = _parse_transformation_rows(tb, warn)
-            aff = compose_rows(rows, table.get, scope.__contains__, warn,
-                               f"*NODE_TRANSFORM TRSID={trsid}")
-            if is_identity(aff):
-                continue
-            changed = _rewrite_node_blocks(blocks, aff=aff, only_ids=scope)
-            table.update(changed)
-            if not changed:
-                warn(f"*NODE_TRANSFORM TRSID={trsid}: node set {nsid} matched "
-                     "no *NODE in the deck — nothing transformed.")
+        with _scoped_block(b):
+            for line in b.raw:
+                if not line.strip():
+                    continue
+                f = _fields(line, 3)
+                trsid, nsid, immed = _geti(f, 0), _geti(f, 1), _geti(f, 2)
+                if trsid <= 0 or nsid <= 0:
+                    warn(f"*NODE_TRANSFORM: incomplete card (TRSID={trsid}, "
+                         f"NSID={nsid}) — NOT applied.")
+                    continue
+                if immed:
+                    warn(f"*NODE_TRANSFORM TRSID={trsid}: IMMED=1 (apply while "
+                         "reading) is treated as the default deferred application "
+                         "— identical unless the transformed nodes feed a later "
+                         "node-referenced definition.")
+                tb = _find_transform_block(blocks, trsid)
+                if tb is None:
+                    warn(f"*NODE_TRANSFORM TRSID={trsid}: no "
+                         "*DEFINE_TRANSFORMATION with this id — NOT applied; the "
+                         "node set keeps its original position.")
+                    continue
+                nids = _resolve_node_set(blocks, nsid)
+                if nids is None:
+                    warn(f"*NODE_TRANSFORM TRSID={trsid}: node set {nsid} not "
+                         "found (only *SET_NODE_LIST is resolvable here) — NOT "
+                         "applied.")
+                    continue
+                scope = set(nids)
+                rows = _parse_transformation_rows(tb, warn)
+                aff = compose_rows(rows, table.get, scope.__contains__, warn,
+                                   f"*NODE_TRANSFORM TRSID={trsid}")
+                if is_identity(aff):
+                    continue
+                changed = _rewrite_node_blocks(blocks, aff=aff, only_ids=scope)
+                table.update(changed)
+                if not changed:
+                    warn(f"*NODE_TRANSFORM TRSID={trsid}: node set {nsid} matched "
+                         "no *NODE in the deck — nothing transformed.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

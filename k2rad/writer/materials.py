@@ -638,44 +638,109 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
         if not null_mids:
             if eosid in jc_consumed:
                 continue
-            if eosid in impact_claimed:
-                # The id belongs to a /MAT/LAW79, /MAT/LAW126 or the /MAT/LAW6
-                # of a *MAT_ELASTIC_FLUID; emitting the shared-id carrier here
-                # would be a second /MAT of that id (starter ERROR 79).
-                owner = ("*MAT_JOHNSON_HOLMQUIST_CERAMICS -> /MAT/LAW79"
-                         if eosid in state.mat_jh_ceramics else
-                         "*MAT_JOHNSON_HOLMQUIST_CONCRETE -> /MAT/LAW126"
-                         if eosid in state.mat_jh_concrete else
-                         "*MAT_ELASTIC_FLUID -> /MAT/LAW6")
+            # ── A BARE *EOS_* — no *MAT_NULL of its id, no *PART EOSID ─────
+            #
+            # k2rad used to mint a /MAT/LAW6 CARRIER under the EOS id here.
+            # That branch is removed: it could never produce a runnable pair,
+            # and on a colliding id it produced an UNRUNNABLE one.
+            #
+            #   * No density exists to give it. NONE of the three *EOS_*
+            #     spellings k2rad reads carries a density cell — LS-DYNA takes
+            #     the density from the *PART's own *MAT (Vol I R17 p.37-6,
+            #     EOSID "Nonzero only for solid elements using an equation of
+            #     state to compute pressure") — so every handler stores
+            #     ``rho0 = 0.0`` and the carrier's RHO_I was structurally 0.
+            #     /MAT/LAW6 is NOT in the density exemption list at
+            #     ``hm_read_mat.F90:1575-1583`` (only laws 0/20/51/151/108/999
+            #     are), so RHO_I 0 is starter ``ERROR ID : 683 ... DENSITY IS
+            #     LESS THAN OR EQUAL TO ZERO`` and the deck is refused.
+            #     MEASURED on twin probes a_rho0 / a_rho0b: the /EOS reference
+            #     density does not rescue the /MAT either.
+            #   * On a colliding id it ALSO cost an ERROR 79. The old guard was
+            #     a hand-kept list of three families (_impact_claimed_mids), so
+            #     any OTHER family's id went straight through — measured on
+            #     dynaexamples_r14/ale-s-ale/s-ale/wavestructure/2Dlag.k, whose
+            #     orphan *EOS_LINEAR_POLYNOMIAL 3 sits on a *MAT_JOHNSON_COOK:
+            #     ``/MAT/LAW4/3`` AND ``/MAT/HYD_VISC/3`` (ERROR 79, IN
+            #     MATERIAL DEFINITION) plus ``/EOS/GRUNEISEN/3`` AND
+            #     ``/EOS/POLYNOMIAL/3``, which hm_read_eos.F does not diagnose
+            #     at all (no UDOUBLE anywhere in it) — the second block
+            #     silently replaces the material's real pressure law.
+            #   * And dropping is FAITHFUL, not a loss: an *EOS_* that no
+            #     *PART names through its EOSID field is unused by LS-DYNA
+            #     too, and dyna2rad never converts one either
+            #     (convertmats.cxx:572 reaches the EOS only from a *PART).
+            #
+            # So the two arms below both refuse; the collision arm is first
+            # because naming the id's real owner is the more actionable
+            # message. _warn_duplicate_eos_ids covers what neither can see.
+            owner = _mat_namespace_owner(state, eosid)
+            if owner:
                 if eosid in state.mat_elastic_fluid:
                     why = ("that material already emits its OWN "
                            f"/EOS/POLYNOMIAL/{eosid} built from the card's "
                            "bulk modulus K, which IS the fluid's pressure law")
-                else:
+                elif eosid in impact_claimed:
                     why = ("that law computes pressure from its own K1/K2/K3 "
                            "polynomial and declares no EOS class, so it "
                            "neither needs nor accepts a companion /EOS")
+                else:
+                    why = ("a /MAT id is ONE starter table across every "
+                           "material law (hm_read_mat.F90:1613 checks the "
+                           "merged table)")
                 state.warn(
-                    f"*EOS_{eos.kind} {eosid}: id {eosid} is already held by "
+                    f"{eos.label()}: id {eosid} is already held by "
                     f"a {owner}, and {why}. The equation of state was NOT "
                     "emitted and no /MAT/LAW6 carrier was created — doing "
-                    "either would put a SECOND /MAT (or /EOS) under id "
-                    f"{eosid} and the starter would stop with ERROR 79 "
-                    "(DUPLICATE ID). Note k2rad's shared-id pairing is a "
+                    "either would put a SECOND /MAT under id "
+                    f"{eosid} (starter ERROR 79, DUPLICATE ID, IN MATERIAL "
+                    "DEFINITION) and, worse, a second /EOS: hm_read_eos.F has "
+                    "no duplicate check at all, so a second /EOS is accepted "
+                    "at 0 ERROR / 0 WARNING and SILENTLY REPLACES that "
+                    "material's equation of state (last block wins). Note "
+                    "k2rad's shared-id pairing is a "
                     "convenience convention: in LS-DYNA an *EOS_* binds only "
                     "through the *PART EOSID field, so a material that does "
                     "not name this EOS has no EOS at all. Renumber the "
                     "*EOS_* if it was meant for a different material.")
                 continue
-            rho = eos.params.get("rho0", 0.0)
-            if rho <= 0.0:
-                state.warn(f"*EOS_{eos.kind} {eosid}: no companion *MAT_NULL "
-                           "to give a density for the /MAT/LAW6 carrier and "
-                           "no reference density — RHO_I left 0; set the "
-                           "fluid density.")
-            _derive_ideal_gas_p0(state, eos, rho)
-            lines += _emit_mat_law6_carrier(eosid, "", rho)
-            lines += _emit_eos(eos)
+            # A *PART whose MID is this id means the deck DOES have a material
+            # here and this converter did not convert it — the actionable
+            # fact, and the one the reader needs instead of "add a *MAT_NULL".
+            # MEASURED on three corpus decks (sph/bar-iv/taylor1.k, bar-v/
+            # taylor2.k, sieve/hvi.k): each pairs *MAT_ELASTIC_PLASTIC_HYDRO
+            # with an *EOS_GRUNEISEN of the same id, that material is a
+            # SKIPPED keyword, and the carrier used to fill the hole with a
+            # zero-density /MAT/HYD_VISC — a viscous fluid standing in for an
+            # elastic-plastic hydrodynamic solid, which the starter refused
+            # for its density (ERROR 683) rather than for being the wrong
+            # law. Without the carrier the /PART dangles and
+            # _warn_dangling_part_materials names it, which is the true
+            # diagnosis: the deck's own material never arrived.
+            owners = sorted({p.pid for p in state.parts.values()
+                             if p.mid == eosid})
+            state.warn(
+                f"{eos.label()}: no *MAT_NULL of that id and no "
+                "*PART binds it through an EOSID field, so there is no "
+                f"material to attach it to — neither /MAT/HYD_VISC/{eosid} "
+                f"nor /EOS/{eos.kind}/{eosid} was emitted. A synthesized "
+                "/MAT/LAW6 carrier is not an option: no *EOS_* keyword "
+                "carries a density (LS-DYNA takes it from the *PART's *MAT), "
+                "and a /MAT/LAW6 with RHO_I 0 is starter ERROR 683 (DENSITY "
+                "IS LESS THAN OR EQUAL TO ZERO), which refuses the whole "
+                "deck. "
+                + (f"NOTE *PART(s) {owners} name {eosid} as their MID, so "
+                   "this deck DOES state a material here and it is this "
+                   "converter that did not produce one — check the skipped-"
+                   "keyword list for the *MAT_* card of that id. Until it "
+                   "converts, those parts have no /MAT and the starter stops "
+                   "with ERROR 179; a /MAT/LAW6 carrier would only have "
+                   "substituted a VISCOUS FLUID for whatever law the deck "
+                   "actually states."
+                   if owners else
+                   "Nothing physical is lost: LS-DYNA does not use this EOS "
+                   "either. Add a same-id *MAT_NULL (with RO), or name the "
+                   "EOS from a *PART's EOSID field, to get the fluid."))
             continue
         _derive_ideal_gas_p0(state, eos, state.mat_null[null_mids[0]].rho)
         for mid in null_mids:
@@ -685,13 +750,14 @@ def _make_explosive_and_eos_materials(state: ConversionState) -> List[str]:
                 lines += _emit_eos(eos)
             else:
                 state.warn(
-                    f"*EOS_{eos.kind} {eosid}: bound to *MAT_NULL {mid} via "
+                    f"{eos.label()}: bound to *MAT_NULL {mid} via "
                     f"a *PART EOSID — emitted as /EOS/{eos.kind}/{mid} on "
                     "the /MAT/LAW6 carrier of that id (Radioss binds an "
                     "/EOS to the material of the SAME id).")
                 lines += _emit_eos(EosCard(eosid=mid, kind=eos.kind,
                                            params=eos.params, rho0=eos.rho0,
-                                           note=eos.note))
+                                           note=eos.note,
+                                           keyword=eos.keyword))
     return lines
 
 
@@ -830,7 +896,7 @@ def _resolve_mat_johnson_cook(state: ConversionState) -> None:
             mat.eos_id = mat.mid
             state.warn(
                 f"*MAT_JOHNSON_COOK mid={mat.mid}: no *PART attaches an EOS, "
-                f"but *EOS_{state.eos_cards[mat.mid].kind} {mat.mid} shares "
+                f"but {state.eos_cards[mat.mid].label()} shares "
                 "the material id and is bound to no other part — rerouted to "
                 "/MAT/LAW4 + /EOS by k2rad's shared-id pairing convention. "
                 "In LS-DYNA an *EOS_* binds only through the *PART EOSID "
@@ -883,28 +949,63 @@ def _jc_consumed_eos_ids(state: ConversionState) -> set:
 
 
 def _impact_claimed_mids(state: ConversionState) -> set:
-    """Material ids already OWNED by the impact/blast batch.
+    """Material ids owned by the impact/blast batch, whose EOS-adjacency
+    deserves a SPECIFIC "why" in the bare-*EOS_* refusal.
 
-    k2rad's shared-id convention — "an *EOS_* whose id matches a material's is
-    that material's equation of state" — is a convenience k2rad adds on top of
-    LS-DYNA, where an *EOS_* binds ONLY through the *PART EOSID field. The
-    standalone-fluid branch of ``_make_explosive_and_eos_materials`` acts on
-    that convention by emitting a /MAT/LAW6 CARRIER under the EOS id whenever
-    no *MAT_NULL claims it — and it walks ``state.mat_null`` only, so it cannot
-    see that one of these three families already holds the id. Without this
-    guard a deck carrying both ``*MAT_110`` id 110 and an ``*EOS_*`` id 110
-    emits ``/MAT/LAW79/110`` AND ``/MAT/HYD_VISC/110``: starter ERROR 79,
-    DUPLICATE ID. (Measured, not theorised.)
-
-    Both Johnson-Holmquist laws compute pressure from their own K1/K2/K3
-    polynomial and LAW6 is not a legal carrier for them anyway; the fluid
-    already emits its OWN /EOS/POLYNOMIAL under its mid, so a second one would
-    duplicate that too. In every case the material owns the id and the
-    convenience convention must stand down. Same shape as the MAT_015 hijack
-    guard in ``_resolve_mat_johnson_cook`` (PR #73), for the same reason.
+    This used to be the GUARD on the standalone /MAT/LAW6 carrier, and as a
+    guard it was the #124 class: a hand-kept list of three families standing in
+    for the semantic quantity "does any other emitter put a /MAT under this
+    id?". Measured miss: ``2Dlag.k``'s orphan ``*EOS_LINEAR_POLYNOMIAL 3``
+    sits on a ``*MAT_JOHNSON_COOK`` — in none of the three — and the carrier
+    went straight through into a duplicate ``/MAT`` (ERROR 79) and a duplicate
+    ``/EOS`` (undiagnosed). :func:`_mat_namespace_owner` is the guard now, over
+    the whole converted-*MAT namespace; this set only refines the message,
+    because these three families are the ones a reader would expect to PAIR
+    with an EOS: both Johnson-Holmquist laws compute pressure from their own
+    K1/K2/K3 polynomial and declare no EOS class, and the elastic fluid
+    already emits its OWN /EOS/POLYNOMIAL under its mid.
     """
     return (set(state.mat_jh_ceramics) | set(state.mat_jh_concrete)
             | set(state.mat_elastic_fluid))
+
+
+def _mat_namespace_owner(state: ConversionState, mid: int) -> str:
+    """Which converted *MAT family already owns ``/MAT/<law>/<mid>``, as a
+    human-readable "*KEYWORD -> /MAT/LAWn" phrase, or "" when the id is free.
+
+    The generalisation of :func:`_impact_claimed_mids`, which is a hand-kept
+    list of THREE families. The screen the carrier needs is the SEMANTIC
+    quantity — "does any other emitter put a /MAT under this id?" — not a
+    family list, because a /MAT id is ONE starter table across every law
+    (``hm_read_mat.F90:1613`` runs ``vdouble(ipm(1,1), ..., 'MATERIAL
+    DEFINITION')`` over the merged table, ERROR 79 at ``sysfus.F:938``) and
+    every k2rad material emitter writes the LS-DYNA MID verbatim. Measured on
+    ``dynaexamples_r14/ale-s-ale/s-ale/wavestructure/2Dlag.k``: the deck's
+    ``*EOS_LINEAR_POLYNOMIAL 3`` is claimed by neither Johnson-Holmquist law
+    nor an elastic fluid, so the three-family guard let the carrier through
+    and the deck came out with ``/MAT/LAW4/3`` AND ``/MAT/HYD_VISC/3`` —
+    starter ``ERROR ID : 79 ... IN MATERIAL DEFINITION ID=3 is DUPLICATED``.
+
+    ``all_mat_ids()`` is the whole converted-*MAT namespace, so the answer is
+    exhaustive by construction; the per-family lookups below only make the
+    message name the owner. (#124 class: gate on the semantic quantity, not
+    the card name.)"""
+    if mid not in state.all_mat_ids():
+        return ""
+    named = (
+        (state.mat_jh_ceramics, "*MAT_JOHNSON_HOLMQUIST_CERAMICS -> /MAT/LAW79"),
+        (state.mat_jh_concrete, "*MAT_JOHNSON_HOLMQUIST_CONCRETE -> /MAT/LAW126"),
+        (state.mat_elastic_fluid, "*MAT_ELASTIC_FLUID -> /MAT/LAW6"),
+        (state.mat_johnson_cook, "*MAT_JOHNSON_COOK -> /MAT/LAW2 or /MAT/LAW4"),
+        (state.mat_high_explosive, "*MAT_HIGH_EXPLOSIVE_BURN -> /MAT/LAW5"),
+        (state.mat_null, "*MAT_NULL -> /MAT/VOID or /MAT/LAW6"),
+        (state.mat_rigid, "*MAT_RIGID -> /MAT/ELAST"),
+        (state.mat_elastic, "*MAT_ELASTIC -> /MAT/ELAST"),
+    )
+    for reg, label in named:
+        if mid in reg:
+            return label
+    return "another converted *MAT card"
 
 
 def _emit_mat_johnson_cook(mat: MatJohnsonCook,
@@ -1044,12 +1145,12 @@ def _emit_mat_law4_hyd_jcook(mat: MatJohnsonCook,
         if eos.eosid != mat.mid:
             state.warn(
                 f"*MAT_JOHNSON_COOK mid={mat.mid}: the *PART-bound "
-                f"*EOS_{eos.kind} {eos.eosid} is emitted as "
+                f"{eos.label()} is emitted as "
                 f"/EOS/{eos.kind}/{mat.mid} — Radioss binds an /EOS to the "
                 "material of the SAME id.")
         lines += _emit_eos(EosCard(eosid=mat.mid, kind=eos.kind,
                                    params=eos.params, rho0=eos.rho0,
-                                   note=eos.note))
+                                   note=eos.note, keyword=eos.keyword))
     elif mat.eos_id in state.eos_jwl:
         state.warn(
             f"*MAT_JOHNSON_COOK mid={mat.mid}: the attached *EOS_JWL "

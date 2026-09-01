@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Set, Tuple
-from ..state import ConversionState
+from ..state import ConversionState, NodeData
 from .mesh import _effective_solid_isolid, _target_mat_law
 from .common import (
     HDR,
@@ -15,13 +15,16 @@ from .common import (
     _f,
     _fmt_eid_list,
     _i,
+    _nid_centroid,
+    _node_cloud_normal,
     _ordered_unique_nodes,
+    _orthonormal_pair,
+    _preload_sect_scale,
     _split_shell_eids_by_topology,
     _part_node_sets,
     _ref_flag_materials,
     _vcross,
     _vnorm,
-    _vsub,
 )
 
 __all__ = [
@@ -36,8 +39,9 @@ __all__ = [
     "_airbag_ref_nodes",
     "_resolve_airbag_eref",
     "_make_eref",
-    "_sect_frame_nodes",
+    "_sect_synth_frame",
     "_plane_cut",
+    "resolve_cross_section_endpoints",
     "_make_cross_sections",
     "_make_starter_th_sectio",
 ]
@@ -62,10 +66,10 @@ def _solid_sec_for_part(state: ConversionState, pid: int):
 def _inishe_stress_entries(state: ConversionState):
     """The *INITIAL_STRESS_SHELL records this converter actually writes.
 
-    Returns ``(entries, missing, mismatched, unresolvable)`` where each entry is
-    ``(iss, npg, n_eff, ishell)``. PURE — it emits no warnings, so
-    ``_make_inistra`` can consult it without duplicating ``_make_inishe``'s
-    messages.
+    Returns ``(quad_entries, tri_entries, missing, mismatched, unresolvable,
+    duplicate)`` where each entry is ``(iss, npg, n_eff, ishell)``. PURE — it
+    emits no warnings, so ``_make_inistra`` can consult it without duplicating
+    ``_make_inishe``'s messages.
 
     Splitting this out is load-bearing, not tidiness: emitting ANY
     /INISHE|/INISH3 /STRS_F or /EPSP_F block sets the starter's global
@@ -73,55 +77,86 @@ def _inishe_stress_entries(state: ConversionState):
     on the layer/Gauss cross-checks that decide whether an initial-STRAIN card
     is legal — see ``_make_inistra``.
 
-    ``unresolvable`` is why the topology test lives here rather than in the
-    writer. The /INISHE reader resolves its shell_IDs through ``UEL2SYS`` over
-    the **4-node shell table only**, so a record naming an element this
-    converter does not emit as a 4-node /SHELL can never be applied — a 3-node
-    shell (emitted /SH3N) and a shell with fewer than 3 distinct corners
-    (dropped by ``_make_parts``, zero area) alike. Writing such a record anyway
-    is not inert: the reader arms ``ISIGSH = 1`` at
-    hm_read_inistate_d00.F:2105 BEFORE it discovers the id is unresolvable
-    (:2124-2127 only bumps ``NONEXIST``), and an armed ISIGSH with no
-    resolvable stress payload takes scigini4.F:285 ``IF (ISIGSH==0) CYCLE`` off
-    the safety path for OTHER elements — measured as a fabricated constant
+    **QUADS vs TRIS.** Each reader resolves its ``shell_ID`` against ONE
+    element table: ``/INISHE`` through ``UEL2SYS(..., KSYSUSR, NUMELC)`` over
+    the 4-node shells, ``/INISH3`` through
+    ``UEL2SYS(ID_ELEM, KSYSUSRTG, NUMELTG)`` over the 3-node ones
+    (hm_read_inistate_d00.F:3285), storing at ``NUMSHEL + PTSH3N(IE)`` in the
+    same ``SIGSH`` array. So the split is by topology, and BOTH halves are
+    writable — see :func:`_make_inishe`.
+
+    ``unresolvable`` is what is left after that split: a shell with fewer than
+    3 distinct corners, which ``_make_parts`` drops for zero area and which is
+    therefore in neither element table. Writing such a record anyway is not
+    inert: the reader arms ``ISIGSH = 1`` at hm_read_inistate_d00.F:2105
+    (:3266 on the /INISH3 side) BEFORE it discovers the id is unresolvable
+    (:2124-2127 / :3287-3289 only bump ``NONEXIST``), and an armed ISIGSH with
+    no resolvable stress payload takes scigini4.F:285 ``IF (ISIGSH==0) CYCLE``
+    off the safety path for OTHER elements — measured as a fabricated constant
     stress (F1 -0.249, M1 1.503 N·mm/mm on a deck that states none) on a
-    strain-only quad whose ``SIGSH(17)`` the STRA_F reader had set to ONE.
-    Dropping the record here keeps the block unarmed, which is what
-    ``_make_inishe``'s warning already tells the author happened. The test is
-    membership of the QUAD list rather than of the tri list, so the two
-    unresolvable topologies cannot drift apart (`#120` class).
+    strain-only quad whose ``SIGSH(17)`` the STRA_F reader had set to ONE. It
+    is measurable on the /INISH3 side too: a three-way twin on one strain card
+    gave strain alone -> clean, strain + a RESOLVABLE stress record -> clean,
+    strain + an UNRESOLVABLE one -> ERROR TERMINATION. Dropping the record
+    here keeps the block unarmed.
+
+    ``duplicate`` names an element two records claim. ``hm_yctrl.F:719-724``
+    allocates one ``PTSH3N``/``PTSHEL`` slot per element, so the starter
+    accepts both records at 0 ERROR / 0 WARNING and the LAST one silently wins
+    (measured: two records on one tri, 100/50/25 then 10/20/30, gave
+    ``/TH`` F1=10 F2=20 F12=30 at t=0).
     """
     if not state.ini_stress_shells:
-        return [], [], [], []
+        return [], [], [], [], [], []
     eid2pid = {e.eid: e.pid for e in state.shell_elems}
-    quad_ids, _tri_ids = _split_shell_eids_by_topology(
+    quad_ids, tri_ids = _split_shell_eids_by_topology(
         state, [e.eid for e in state.shell_elems])
-    quad_set = set(quad_ids)
-    entries: List[Tuple] = []
+    quad_set, tri_set = set(quad_ids), set(tri_ids)
+    quad_entries: List[Tuple] = []
+    tri_entries: List[Tuple] = []
     missing: List[int] = []
     mismatched: List[int] = []
     unresolvable: List[int] = []
+    duplicate: List[int] = []
+    seen: Set[int] = set()
     for iss in state.ini_stress_shells:
         pid = eid2pid.get(iss.eid)
         sec = _shell_sec_for_part(state, pid) if pid is not None else None
         if sec is None:
             missing.append(iss.eid)
             continue
-        if iss.eid not in quad_set:
+        is_tri = iss.eid in tri_set
+        if not is_tri and iss.eid not in quad_set:
             unresolvable.append(iss.eid)
             continue
         n_eff = max(2, sec.nip)
         if iss.nthick != n_eff:
             mismatched.append(iss.eid)
             continue
+        if iss.eid in seen:
+            duplicate.append(iss.eid)
+            continue
+        seen.add(iss.eid)
         ishell = _elform_to_ishell(sec.elform, state.is_implicit,
                                    state.options.shell_default_ishell)
-        entries.append((iss, 4 if ishell in (12, 24) else 1, n_eff, ishell))
-    return entries, missing, mismatched, unresolvable
+        if is_tri:
+            # npg MUST be 0 or 1 on /INISH3, never 4. k2rad always writes
+            # ``Ish3n = 0``, so a /SH3N is initialised through c3init3 ->
+            # CSIGINI, whose cross-check is ``NPGI > 1`` (csigini.F:143) —
+            # measured ERROR 26 ("WRONG NUMBER OF SURFACE QUADRATURE POINTS IN
+            # SHELL ELEMENT") for npg 3 and 4, clean for 0 and 1. The npg = 4
+            # rule below comes from scigini4.F:160 on the batch-integrated
+            # cbainit3 path and does NOT transfer to a 3-node shell.
+            tri_entries.append((iss, 1, n_eff, ishell))
+        else:
+            quad_entries.append((iss, 4 if ishell in (12, 24) else 1,
+                                 n_eff, ishell))
+    return (quad_entries, tri_entries, missing, mismatched, unresolvable,
+            duplicate)
 
 
 def _make_inishe(state: ConversionState) -> List[str]:
-    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB.
+    """*INITIAL_STRESS_SHELL → /INISHE/STRS_F/GLOB and /INISH3/STRS_F/GLOB.
 
     Card layout follows hm_cfg_files inishe_strs_f_glob_sub.cfg
     FORMAT(radioss2021):
@@ -129,14 +164,32 @@ def _make_inishe(state: ConversionState) -> List[str]:
       Card2  Em Eb H1 H2 H3                      (energies unknown → 0)
       then nb_integr×npg point records, LAYER-major with the in-plane Gauss
       point innermost (starter hm_read_inistate_d00.F: DO N=1,NIP{DO K=1,NPG}).
+
+    **The /SH3N card is the SAME layout.** ``diff`` of the extracted
+    ``FORMAT(radioss2021)`` blocks of ``inish3_strs_f_glob_sub.cfg`` and
+    ``inishe_strs_f_glob_sub.cfg`` is EMPTY — the only differences anywhere in
+    the two files are the HyperMesh-only ``SUBTYPES = ( /ELEMS/SH3N )`` vs
+    ``( /ELEMS/SHELL )``, one reordered attribute declaration, and the older
+    FORMAT tags. This writer's comment used to claim "the card layout differs"
+    and its warning told the user so; both were false and are gone (the #131
+    "check a warning's CITED FACT" class). There is no ``radioss2022/TABLE/``
+    file for either card, so a ``/BEGIN 2022`` deck resolves to the
+    ``radioss2021`` one and, inside it, to ``FORMAT(radioss2021)``.
+
     Constraints honoured against the /PROP/SHELL this converter emits:
       * nb_integr must equal the property N (= max(2, *SECTION_SHELL NIP); the
         starter cross-checks and rejects) — mismatched elements warn + skip;
-      * npg must be 4 for Ishell 12/24 (starter MSGID 26 otherwise) — the
-        per-layer LS-DYNA value is replicated across the 4 in-plane points
-        (exact for the layer-averaged data);
-      * Thick = 0 keeps the property thickness (guarded by /=ZERO in the
-        starter, thickini.F).
+      * npg must be 4 for a QUAD on Ishell 12/24 (scigini4.F:160, MSGID 26
+        otherwise) — the per-layer LS-DYNA value is replicated across the 4
+        in-plane points (exact for the layer-averaged data) — and 1 for a
+        /SH3N, where the check is the OPPOSITE one, ``NPGI > 1`` at
+        csigini.F:143 (measured: npg 3 and 4 give ERROR 26 per element, npg 0
+        and 1 are clean);
+      * Thick = 0 keeps the property thickness (guarded by ``/= ZERO`` at
+        csigini.F:132). Writing a card ``Thick`` is not merely lossy: measured
+        with the property at 2 and the card at 4, the run DIVERGED to inf by
+        cycle 15 while printing NORMAL TERMINATION at 0 starter ERRORS,
+        because the thickness is applied to the element but the MASS is not.
 
     **Always the GLOB flavour.** LS-DYNA states the components' frame in the
     card's own text — "SIGij  Define the ij stress component. The stresses are
@@ -150,9 +203,8 @@ def _make_inishe(state: ConversionState) -> List[str]:
     """
     if not state.ini_stress_shells:
         return []
-    entries, missing, mismatched, unresolvable = _inishe_stress_entries(state)
-    glob_entries: List[Tuple] = [(iss, npg)
-                                 for iss, npg, _n_eff, _ishell in entries]
+    (quad_e, tri_e, missing, mismatched, unresolvable,
+     duplicate) = _inishe_stress_entries(state)
     if missing:
         state.warn("*INITIAL_STRESS_SHELL: element(s) "
                    f"{_fmt_eid_list(missing)} not found in the shell mesh — "
@@ -161,53 +213,103 @@ def _make_inishe(state: ConversionState) -> List[str]:
         state.warn("*INITIAL_STRESS_SHELL: NTHICK differs from the /PROP/SHELL "
                    "integration-point count N (= max(2, *SECTION_SHELL NIP)) for "
                    f"element(s) {_fmt_eid_list(mismatched)} — the OpenRadioss "
-                   "starter rejects such /INISHE records, so these elements were "
+                   "starter rejects such records, so these elements were "
                    "skipped. Align NIP and re-run to keep their initial stress.")
-    # An element this converter does not emit as a 4-node /SHELL cannot be
-    # resolved by the /INISHE reader (UEL2SYS over the 4-node table only), so
-    # its stress can never be applied. The record is NOT written: emitting it
-    # would still arm the reader's global ISIGSH (hm_read_inistate_d00.F:2105
-    # runs before the id is looked up), and an armed ISIGSH with no resolvable
-    # payload fabricates stress on an unrelated element — see
-    # _inishe_stress_entries. (Unlike the strain path, /INISHE/STRS_F has no
-    # /INISH3 twin in this writer; adding one is a separate change — the card
-    # layout differs.)
+    if duplicate:
+        state.warn("*INITIAL_STRESS_SHELL: element(s) "
+                   f"{_fmt_eid_list(sorted(set(duplicate)))} are named by more "
+                   "than one record. The starter allocates ONE stress slot per "
+                   "element (hm_yctrl.F:719-724) and accepts both records at "
+                   "0 ERROR / 0 WARNING with the LAST one silently winning "
+                   "(measured), so the deck would say one thing and the run "
+                   "another — only the FIRST record was written. Keep one "
+                   "record per element.")
+    # A shell this converter emits at all is either a 4-node /SHELL or a
+    # /SH3N, and each reader resolves against its own table — so both are
+    # written now. What is left here is a shell with fewer than 3 distinct
+    # corners, which _make_parts drops for zero area: it is in NEITHER table,
+    # so its record can never be applied. It is left OUT of the block rather
+    # than written and ignored, because the reader arms its global ISIGSH
+    # before the id lookup — see _inishe_stress_entries.
     if unresolvable:
         state.warn("*INITIAL_STRESS_SHELL: element(s) "
-                   f"{_fmt_eid_list(sorted(set(unresolvable)))} are not emitted "
-                   "as 4-node /SHELL elements — a 3-node shell becomes a /SH3N, "
-                   "and a shell with fewer than 3 distinct corners has zero "
-                   "area and is not written at all. The /INISHE reader resolves "
-                   "its shell_IDs against the 4-node shell table only, so their "
-                   "initial stress is DROPPED — and the record is left OUT of "
-                   "the /INISHE block entirely rather than written and ignored: "
-                   "the reader sets its global ISIGSH flag "
-                   "(hm_read_inistate_d00.F:2105) before it discovers the id is "
-                   "unresolvable, and an armed ISIGSH with no resolvable stress "
-                   "payload makes scigini4.F:285-287 run the global stress "
-                   "reconstruction over slots that hold none — measured as a "
-                   "constant fabricated force/moment on a neighbouring "
-                   "strain-only quad, at 0 starter ERRORS. /INISH3/STRS_F is a "
-                   "different card layout this converter does not write yet; "
-                   "model those elements as quads to keep their initial "
-                   "stress.")
-    if not glob_entries:
+                   f"{_fmt_eid_list(sorted(set(unresolvable)))} have fewer "
+                   "than 3 distinct corner nodes, so they have zero area and "
+                   "are not written to the mesh at all — neither as a 4-node "
+                   "/SHELL nor as a /SH3N. Both readers resolve their "
+                   "shell_IDs against an element table (UEL2SYS over the "
+                   "4-node shells for /INISHE, over the 3-node ones for "
+                   "/INISH3), so their initial stress is DROPPED — and the "
+                   "record is left OUT of the block entirely rather than "
+                   "written and ignored: the reader sets its global ISIGSH "
+                   "flag (hm_read_inistate_d00.F:2105, :3266) before it "
+                   "discovers the id is unresolvable, and an armed ISIGSH "
+                   "with no resolvable stress payload makes scigini4.F:285-287 "
+                   "run the global stress reconstruction over slots that hold "
+                   "none — measured as a constant fabricated force/moment on "
+                   "a neighbouring strain-only quad, at 0 starter ERRORS. Fix "
+                   "the degenerate connectivity to keep their initial stress.")
+    if not quad_e and not tri_e:
         return []
 
-    lines = ["#-  INITIAL STATE (*INITIAL_STRESS_SHELL):", HDR,
-             "/INISHE/STRS_F/GLOB"]
-    for iss, npg in glob_entries:
-        lines += [
-            "# shell_ID nb_integr       npg               Thick",
-            f"{_i(iss.eid)}{_i(iss.nthick)}{_i(npg)}{_f(0.0)}",
-            "#                 Em                  Eb                  H1                  H2                  H3",
-            _f(0.0) * 5,
-        ]
-        for (t, sxx, syy, szz, sxy, syz, szx, eps) in iss.layers:
-            rec = [f"{_f(sxx)}{_f(syy)}{_f(szz)}",
-                   f"{_f(sxy)}{_f(syz)}{_f(szx)}{_f(eps)}{_f(t)}"]
-            lines += rec * npg          # layer value at each in-plane Gauss point
-    lines.append(HDR)
+    # INISHVAR is a SINGLE GLOBAL, not a per-record value. The reader sets
+    # ``INISHVAR = 22 + NIP*6`` (hm_read_inistate_d00.F:2206/2389/3347/3516)
+    # into the COM01 common (share/includes/com01_c.inc:34) once per RECORD,
+    # while csigini.F:231/233 and scigini4.F:345/347/487/489 read
+    # ``SIGSH(INISHVAR+IT)`` (sigma_zz) and ``SIGSH(INISHVAR+NPTI+IT)``
+    # (pos_nip) at CONSUME time — i.e. with whatever the LAST record left
+    # behind. So two shell parts at different NIP are read correctly one
+    # record at a time and then consumed against one offset: every element
+    # whose NIP differs from the last record's picks up its through-thickness
+    # stress and its station positions from the wrong slots, at zero starter
+    # diagnostics. Each record passes the per-part NTHICK check above, so
+    # nothing else in this pass can see it.
+    #
+    # PRE-EXISTING (master emits the byte-identical block), but item (D) adds
+    # a second block kind to the same pass, so the deck is named rather than
+    # left silent. The #127 class one namespace over: one card kind changing
+    # how another is read.
+    nips = sorted({iss.nthick for iss, _p, _n, _i in quad_e + tri_e})
+    if len(nips) > 1:
+        state.warn(
+            "*INITIAL_STRESS_SHELL: the records in this deck do NOT share one "
+            f"through-thickness point count — nb_integr values {nips} appear "
+            "in a single /INISHE|/INISH3 STRS_F pass. The starter keeps ONE "
+            "global offset for that count (INISHVAR = 22 + NIP*6, "
+            "hm_read_inistate_d00.F:2206, in the COM01 common) and the "
+            "consumers read SIGSH(INISHVAR+IT) and SIGSH(INISHVAR+NPTI+IT) "
+            "with whatever the LAST record left there (csigini.F:231/233, "
+            "scigini4.F:345/347), so every element whose NIP differs from the "
+            f"last record's ({nips[-1]} here is not guaranteed to be it — the "
+            "order is the deck's) reads its sigma_zz and its station "
+            "positions from the WRONG offsets, at 0 starter ERROR / 0 "
+            "WARNING. Give every pre-stressed shell part the same "
+            "*SECTION_SHELL NIP, or split the initial state into separate "
+            "runs. This is a pre-existing OpenRadioss limitation, not a "
+            "conversion loss: the emitted records are each correct.")
+
+    def _records(entries, keyword: str) -> List[str]:
+        out = [keyword]
+        for iss, npg, _n_eff, _ishell in entries:
+            out += [
+                "# shell_ID nb_integr       npg               Thick",
+                f"{_i(iss.eid)}{_i(iss.nthick)}{_i(npg)}{_f(0.0)}",
+                "#                 Em                  Eb                  H1                  H2                  H3",
+                _f(0.0) * 5,
+            ]
+            for (t, sxx, syy, szz, sxy, syz, szx, eps) in iss.layers:
+                rec = [f"{_f(sxx)}{_f(syy)}{_f(szz)}",
+                       f"{_f(sxy)}{_f(syz)}{_f(szx)}{_f(eps)}{_f(t)}"]
+                # layer value at each in-plane Gauss point
+                out += rec * npg
+        out.append(HDR)
+        return out
+
+    lines = ["#-  INITIAL STATE (*INITIAL_STRESS_SHELL):", HDR]
+    if quad_e:
+        lines += _records(quad_e, "/INISHE/STRS_F/GLOB")
+    if tri_e:
+        lines += _records(tri_e, "/INISH3/STRS_F/GLOB")
     return lines
 
 
@@ -559,7 +661,8 @@ def _make_inistra(state: ConversionState) -> List[str]:
     # Does this deck also emit an initial-STRESS block? That is what sets the
     # starter's global ISIGSH and turns on the cross-checks the plain card form
     # cannot satisfy — see the "Mixed decks" section of the docstring.
-    stress_entries, _sm, _smm, _st = _inishe_stress_entries(state)
+    s_quad, s_tri, _sm, _smm, _st, _sd = _inishe_stress_entries(state)
+    stress_entries = s_quad + s_tri
     mixed = bool(stress_entries)
     stress_shape = {iss.eid: (n_eff, ishell)
                     for iss, _npg, n_eff, ishell in stress_entries}
@@ -618,20 +721,32 @@ def _make_inistra(state: ConversionState) -> List[str]:
 
     # A stress-carrying element the strain keyword does not name still enters
     # csigini4's ITHKSHEL==2 branch (SIGSH(17) is set by the STRS_F reader too)
-    # and errors out on an empty payload. Make LS-DYNA's implicit "no initial
-    # strain here" explicit for it. ``stress_shape`` holds only records that
-    # actually reach the /INISHE block — _inishe_stress_entries has already
-    # dropped /SH3N ids and NTHICK mismatches — so a companion is never written
+    # and errors out on an empty payload — measured ERROR 1904 ("IN
+    # /INISHE/STRA_F/GLOB OR /INISH3/STRA_F/GLOB", the message names both
+    # families itself). Make LS-DYNA's implicit "no initial strain here"
+    # explicit for it. ``stress_shape`` holds only records that actually reach
+    # a stress block — _inishe_stress_entries has already dropped degenerate
+    # ids, NTHICK mismatches and duplicates — so a companion is never written
     # for an element that owns no SIGSH slot (which would flip that slot's
     # SIGSH(17) with nothing behind it).
+    #
+    # TRIS need the companion too, and used to be skipped here because no tri
+    # could carry a stress record at all. ITHKSHEL = 2 is GLOBAL and
+    # CROSS-FAMILY: measured on a five-row matrix, a tri stress record beside
+    # a tri OR a quad strain record gives ERROR 1904 on the stress element
+    # unless that element also has a strain record, and the all-four-kinds
+    # deck with a companion for every stress-carrying element is clean
+    # (0 ERROR / 0 WARNING, both stresses consumed).
     if mixed:
         covered = {eid for eid, _n, _p, _s in quad_entries + tri_entries}
         for eid, (n_eff, ishell) in sorted(stress_shape.items()):
-            if eid in covered or eid in tri_set or eid not in shells:
+            if eid in covered or eid not in shells:
                 continue
             formulations.add(ishell)
-            quad_entries.append((eid, n_eff, _stra_f_npg(ishell, False),
-                                 _stra_f_zero_stations(n_eff)))
+            is_tri = eid in tri_set
+            entry = (eid, n_eff, _stra_f_npg(ishell, is_tri),
+                     _stra_f_zero_stations(n_eff))
+            (tri_entries if is_tri else quad_entries).append(entry)
             companions.append(eid)
 
     # The one mixed-deck shape this converter refuses. hm_read_inistate_d00.F
@@ -737,21 +852,37 @@ def _make_inistra(state: ConversionState) -> List[str]:
                    "starter rejects the element (ERROR 26), so the card cannot "
                    "be written without them.")
     if companions:
+        # Name the card each companion actually went into: a 3-node shell's
+        # goes to /INISH3/STRA_F/GLOB, not /INISHE (#131 — a message about a
+        # synthesized entity must name it correctly).
+        comp_tri = sorted(e for e in companions if e in tri_set)
+        comp_quad = sorted(e for e in companions if e not in tri_set)
+        where = " and ".join(
+            part for part in (
+                (f"/INISHE/STRA_F/GLOB (element(s) "
+                 f"{_fmt_eid_list(comp_quad)})") if comp_quad else "",
+                (f"/INISH3/STRA_F/GLOB (element(s) "
+                 f"{_fmt_eid_list(comp_tri)})") if comp_tri else "")
+            if part)
         state.warn("*INITIAL_STRAIN_SHELL: element(s) "
                    f"{_fmt_eid_list(companions)} carry an "
                    "*INITIAL_STRESS_SHELL record but no initial STRAIN, and "
-                   "this deck emits both kinds of block — an all-zero "
-                   "/INISHE/STRA_F/GLOB record was added for each of them. "
+                   "this deck emits both kinds of block — an all-zero record "
+                   f"was added for each of them, in {where}. "
                    "That is LS-DYNA's own default (an element no "
                    "*INITIAL_STRAIN_SHELL card names starts unstrained) written "
                    "out explicitly, and it is required here: reading any "
                    "STRA_F block sets ITHKSHEL=2 globally "
-                   "(hm_read_inistate_d00.F:2469), after which scigini4.F:168 "
+                   "(hm_read_inistate_d00.F:2469, :3597 for /INISH3), after "
+                   "which scigini4.F:168 (csigini.F:190 on the /SH3N path) "
                    "runs the strain reconstruction for every element the STRS_F "
                    "reader flagged too and raises ERROR 1904 on the empty "
-                   "payload. Measured inert on the stress element: its /TH/SHEL "
-                   "channels are identical to the same deck with no strain "
-                   "block at all.")
+                   "payload — whose own message names '/INISHE/STRA_F/GLOB OR "
+                   "/INISH3/STRA_F/GLOB', because the flag is CROSS-FAMILY: a "
+                   "quad's strain block breaks a tri's stress record. Measured "
+                   "inert on the stress element: its /TH/SHEL channels (or "
+                   "/TH/SH3N, when that element is a 3-node shell) are "
+                   "identical to the same deck with no strain block at all.")
     if shear_carried:
         state.warn(
             "*INITIAL_STRAIN_SHELL: EPSxy/EPSyz/EPSzx were copied 1:1 into "
@@ -1341,51 +1472,140 @@ def _make_eref(state: ConversionState) -> List[str]:
 # Starter: cross sections (*DATABASE_CROSS_SECTION_* → /SECT, → /TH/SECTIO)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sect_frame_nodes(state: ConversionState, group_nids: List[int],
-                      extra_nids: List[int]) -> Tuple[int, int, int]:
-    """Pick three non-colinear nodes defining the /SECT output frame (N1 =
-    origin, N1→N2 = first axis, N3 fixes the plane — the /SKEW/MOV convention).
-    N1/N2 are taken from the section node group; N3 may fall back to any other
-    node of the section's elements (the frame only orients the force output)."""
-    def _coord(n):
-        nd = state.nodes.get(n)
-        return (nd.x, nd.y, nd.z) if nd else None
+def _sect_synth_frame(state: ConversionState, cs, nids: List[int]):
+    """The three /SECT frame-node COORDINATES this cross section states.
 
-    cands = [n for n in group_nids if n in state.nodes]
-    if not cands:
-        return (0, 0, 0)
-    n1 = cands[0]
-    p1 = _coord(n1)
-    pool = cands[1:] + [n for n in extra_nids
-                        if n in state.nodes and n not in group_nids]
-    best2, best_d2 = 0, 0.0
-    for n in pool:
-        p = _coord(n)
-        v = _vsub(p, p1)
+    Returns ``(frame, note, normal_known)`` — ``frame`` is ``(N1, N2, N3)`` as
+    XYZ triples, or ``None`` when the card states no usable normal; ``note`` is
+    a short phrase for the caller's warning saying where the normal came from;
+    ``normal_known`` is False when the normal had to be INVENTED (a ``_SET``
+    section whose nodes determine no plane), which is the half the caller
+    prints as "the FN/FT split is arbitrary here".
+
+    **Why this replaces a node PICK.** The frame is not decoration: the engine
+    rebuilds it every cycle from ``node_ID1/2/3`` (``section_skew.F:63-101``)
+    as ``e4 = normalize(N2-N1)``, ``e6 = n̂ = normalize((N2-N1) x (N3-N1))``,
+    ``e5 = e6 x e4``, and then ``section_c.F:385-389`` SPLITS every nodal force
+    with that ``n̂``::
+
+        FN   = FSX*XXN + FSY*YYN + FSZ*ZZN      ! XXN,YYN,ZZN = e6
+        FSNX = FN*XXN ; FSTX = FSX - FSNX
+
+    so ``e6`` decides what "normal force" means, and ``:393-397`` takes every
+    moment about the frame ORIGIN. Picking the three best-CONDITIONED nodes of
+    the cut — what ``_sect_frame_nodes`` did, N1 = lowest id, N2 = farthest,
+    N3 = largest triangle — has nothing to do with the cutting plane and is not
+    even stable under renumbering. MEASURED on a cantilever cut at x = 11 with
+    the card's normal +X: the picked frame gave ``e6`` 26.57 degrees off, an
+    origin at (10.889, -0.222, -0.222) which is not on the plane at all, and
+
+        true |FN| = 0.3480747     picked |FN| = 0.3118226   (89.6 %)
+        true |FT| = 0.1739886     picked |FT| = 0.2327981   (1.34x)
+        true (M1,M2,M3) = (1.546774, 0, 0)
+        picked          = (1.035982, -0.8229539, -0.7030904)
+
+    all at 0 starter ERROR / 0 WARNING and NORMAL TERMINATION. The GLOBAL
+    moment was wrong too (-3.3 % on MY, two spurious components), because the
+    origin had moved.
+
+    **The construction.** ``n̂`` from the card (XCT->XCH); ``e1`` = the edge
+    vector **L** (Vol I R17 Figure 16-2, card 2's XHEV/YHEV/ZHEV) projected
+    into the plane, or a synthesized in-plane axis when the card states none;
+    ``e2 = n̂ x e1``. Then ``N1 = O``, ``N2 = O + s*e1``, ``N3 = O + s*e2``, so
+    ``e4 = e1``, ``e6 = (N2-N1) x (N3-N1) = e1 x (n̂ x e1) = n̂`` EXACTLY and
+    with the right sign, and ``e5 = n̂ x e1``. Because ``e1 ⊥ e2``, the
+    ``Iframe = 0`` origin ``C = N1 + ((N3-N1)·e4)*e4`` (section_skew.F:147-150)
+    collapses to ``N1 = O`` — Figure 16-2's "Origin of cutting plane". Measured
+    on the same model: ``CX/CY/CZ = (11.000000, 0.000000, 0.000000)`` exactly,
+    ``FNY = FNZ = FTX = 0``, ``M2 = 2e-14``, ``M3 = -7e-15``.
+
+    The nodes are SYNTHESIZED and element-free, exactly as #127's preload
+    /SECT already does (``preload._frame_nodes_for_normal``). Two consequences,
+    both wanted: ``hm_read_sect.F:588-591`` resolves them with
+    ``ANODSET(..., CHECK_USED)`` so they raise no "unused node" diagnostic, and
+    they never move, so the reporting frame stays fixed in space — which is
+    LS-DYNA's own default when the card's ID/ITYPE cells are blank.
+
+    For a ``_SET`` section the card states NO plane, so the normal is FITTED to
+    the section node cloud (``preload._node_cloud_normal``) and the caller says
+    so out loud.
+    """
+    normal_known = True
+    if cs.kind == "SET":
+        origin = _nid_centroid(state, nids)
+        nhat = _node_cloud_normal(state, nids)
+        note = ("FITTED to the section's node cloud (this card states no "
+                "cutting plane)")
+        if nhat is None:
+            # Fewer than 3 nodes, or all of them colinear — an ORDINARY _SET
+            # shape, since LS-DYNA needs no plane here at all (it reports the
+            # resultants globally when the card's ID cell is blank, Vol I R17
+            # p.16-50). Radioss still needs a non-degenerate triad, so build
+            # one that at least satisfies the constraint the deck DOES state:
+            # the section nodes lie IN the plane. e1 is the node cloud's own
+            # longest direction, and the normal is taken perpendicular to it —
+            # only the ROTATION about that line is arbitrary, and the caller
+            # says so. (Not global +Z: that is dyna2rad's dummy triad,
+            # convertcrosssections.cxx:246-251, which ignores the geometry
+            # outright.)
+            axis = _nid_long_axis(state, nids, origin)
+            if axis is None:
+                return None, note, False
+            pair = _orthonormal_pair(axis)
+            if pair is None:                           # pragma: no cover
+                return None, note, False
+            nhat, normal_known = pair[0], False
+            note = ("PERPENDICULAR to the section's node line — the node set "
+                    "does not determine a plane (fewer than 3 nodes, or "
+                    "colinear)")
+    else:
+        origin = (cs.xct, cs.yct, cs.zct)
+        nhat = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct, cs.zch - cs.zct))
+        note = "the card's own XCT->XCH normal"
+        if nhat is None:
+            return None, note, False
+    e1 = None
+    if cs.kind != "SET" and cs.has_hev:
+        lvec = (cs.xhev - cs.xct, cs.yhev - cs.yct, cs.zhev - cs.zct)
+        d = lvec[0] * nhat[0] + lvec[1] * nhat[1] + lvec[2] * nhat[2]
+        e1 = _vnorm((lvec[0] - d * nhat[0], lvec[1] - d * nhat[1],
+                     lvec[2] - d * nhat[2]))
+        if e1 is not None:
+            note += " with the card's edge vector L (XHEV/YHEV/ZHEV) as the "\
+                    "in-plane axis"
+    if e1 is None:
+        pair = _orthonormal_pair(nhat)
+        if pair is None:                               # pragma: no cover
+            return None, note, normal_known
+        e1 = pair[0]
+    e2 = _vcross(nhat, e1)
+    s = _preload_sect_scale(state, origin, nids)
+    return ((tuple(origin),
+             tuple(origin[k] + s * e1[k] for k in range(3)),
+             tuple(origin[k] + s * e2[k] for k in range(3))),
+            note, normal_known)
+
+
+def _nid_long_axis(state: ConversionState, nids: List[int], origin):
+    """Unit vector along the node cloud's longest extent from *origin*, or
+    ``None`` when every node coincides with it."""
+    best, best_d2 = None, 0.0
+    for n in nids:
+        nd = state.nodes.get(n)
+        if nd is None:
+            continue
+        v = (nd.x - origin[0], nd.y - origin[1], nd.z - origin[2])
         d2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
         if d2 > best_d2:
-            best2, best_d2 = n, d2
-    if best2 == 0:
-        return (n1, 0, 0)
-    p2 = _coord(best2)
-    v12 = _vsub(p2, p1)
-    best3, best_a2 = 0, 0.0
-    for n in pool:
-        if n == best2:
-            continue
-        c = _vcross(v12, _vsub(_coord(n), p1))
-        a2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2]
-        if a2 > best_a2:
-            best3, best_a2 = n, a2
-    if best3 == 0 or best_a2 <= 1e-20 * best_d2 * best_d2:
-        return (n1, best2, 0)
-    return (n1, best2, best3)
+            best, best_d2 = v, d2
+    return _vnorm(best) if best is not None else None
 
 
 def _plane_cut(state: ConversionState, cs,
                extra_pids: Optional[Set[int]] = None,
                warn_missing_psid: bool = True
-               ) -> Tuple[List[int], List[int], List[int], List[int]]:
+               ) -> Tuple[List[int], List[int], List[int], List[int],
+                          List[int]]:
     """Geometric resolver for *DATABASE_CROSS_SECTION_PLANE: an element is cut
     when the signed distances d = (x - tail)·n̂ of its nodes change sign across
     the plane (tail→head = the plane normal), restricted to the parts of PSID
@@ -1405,11 +1625,57 @@ def _plane_cut(state: ConversionState, cs,
     *DATABASE_CROSS_SECTION card". ``None`` (the default, and every pre-existing
     caller) means no extra restriction, so the emitted /SECT is unchanged.
 
-    Returns (node_ids, shell_eids, solid_eids, beam_eids).
+    Returns (node_ids, shell_eids, solid_eids, beam_eids, spring_eids).
+
+    **The SPRING arm.** A 2-node spring straddles a plane exactly as a beam
+    does, and the /SECT card has a slot for it — ``grsprg_ID``, cols 51-60,
+    declared ``SUBTYPES = (/SETS/GRSPRI)`` at sect.cfg:37, read at
+    ``hm_read_sect.F:301`` and resolved with ``ELEGROR(..., IGRSPRING, 'SPRI')``
+    at ``:548``. There was no arm here, so a section plane through a shoulder
+    belt or a discrete spring found nothing — exactly the quantity a restraint
+    section is usually drawn for.
+
+    The walk is over the SOURCE registries ``state.discrete_elems`` and the 1-D
+    ``state.seatbelt_elems``, NEVER over ``state.spring_elem_ids``: that set is
+    an id-only union across nine producers spanning different LS-DYNA id
+    namespaces, and keying a geometric filter on it is the exact #128
+    regression (an ``*ELEMENT_BEAM 50`` beside an ``*ELEMENT_DISCRETE 50``).
+
+    The existing straddle rule needs no change for a 2-node element and is
+    exactly what the starter wants: ``SEC_TRI`` (hm_read_sect.F:962-974) builds
+    a bitmask of which of the element's nodes appear in the section node list
+    and ``section_r.F:83-84,133-135`` sums only the flagged node's force. Two
+    measured consequences: with BOTH nodes in the group the contributions
+    cancel to exactly 0.0 with no diagnostic (the ``d <= 0`` tail-side filter
+    is what prevents it), and a spring with NEITHER node in the group is an
+    out-of-bounds ``UNPACK`` read — so the group must contain only the springs
+    this function actually found.
+
+    A grounded ``*ELEMENT_DISCRETE`` (``n2 == 0``) has one real node and can
+    never satisfy ``dmin < 0 < dmax``, so it is filtered by the geometry
+    itself; ``_try`` already drops zero node ids.
+
+    **The springs found here are REPORTED, not put in the group.** Vol I R17
+    p.16-48, Figure 16-2's caption, read verbatim from the PDF: *"The
+    automatic deﬁnition does not check for springs and dampers in the
+    section."* So on the ``_PLANE`` (automatic) spelling LS-DYNA's own
+    ``secforc`` does NOT carry them, and putting them into ``grsprg_ID`` would
+    make the converted section report a force the source deck does not — while
+    telling the user to delete elements from a correct deck to get parity (the
+    #125 class). The caller therefore NAMES the springs the plane crosses and
+    points at the ``_SET`` spelling's DSID slot, which is LS-DYNA's own
+    first-class way to ask for them. The list is still returned because two
+    callers need it: the ``_PLANE`` /SECT writer for that warning, and
+    ``preload`` for its own stated reason.
     """
     nhat = _vnorm((cs.xch - cs.xct, cs.ych - cs.yct, cs.zch - cs.zct))
     if nhat is None:
-        return ([], [], [], [])
+        # Five empties, one per arm. This return used to be a 4-tuple while
+        # every other path and BOTH call sites unpacked 5 — a
+        # *DATABASE_CROSS_SECTION_PLANE whose XCT->XCH is a zero vector (all
+        # six coordinate cells blank) killed the WHOLE conversion with
+        # "ValueError: not enough values to unpack" and wrote no deck at all.
+        return ([], [], [], [], [])
     tail = (cs.xct, cs.yct, cs.zct)
     pids: Optional[Set[int]] = None
     if cs.psid > 0:
@@ -1453,6 +1719,7 @@ def _plane_cut(state: ConversionState, cs,
     shell_eids: List[int] = []
     solid_eids: List[int] = []
     beam_eids: List[int] = []
+    spring_eids: List[int] = []
 
     def _try(nids, eid, pid, out):
         if pids is not None and pid not in pids:
@@ -1488,7 +1755,12 @@ def _plane_cut(state: ConversionState, cs,
     # the loss on the caller's side instead.
     for e in state.beam_elems:
         _try([e.n1, e.n2], e.eid, e.pid, beam_eids)
-    return (sorted(node_ids), shell_eids, solid_eids, beam_eids)
+    for e in state.discrete_elems:
+        _try([e.n1, e.n2], e.eid, e.pid, spring_eids)
+    for e in state.seatbelt_elems:
+        if not e.is_2d:                     # a 2D belt is a /SHELL, not /SPRING
+            _try([e.n1, e.n2], e.eid, e.pid, spring_eids)
+    return (sorted(node_ids), shell_eids, solid_eids, beam_eids, spring_eids)
 
 
 def _warn_sect_sph_scope(state: ConversionState, cs, label: str) -> None:
@@ -1525,6 +1797,39 @@ def _warn_sect_sph_scope(state: ConversionState, cs, label: str) -> None:
         "force UNDER-REPORTS by the whole SPH contribution.")
 
 
+def resolve_cross_section_endpoints(state: ConversionState) -> None:
+    """``RADIUS < 0``: turn the recorded XCT/XCH NODE IDS into coordinates.
+
+    Vol I R17 p.16-50: *"the ... plane is the vector pointing from the node
+    with ID XCT to the node with ID XCH.  YCT, ZCT, YCH, and ZCH are
+    ignored."*
+
+    This runs in the WRITER, not in ``handle_database_cross_section_plane``.
+    Handlers are dispatched in DECK-BLOCK ORDER and ``state.nodes`` is filled
+    by ``handle_node`` in that same pass, so a card written before ``*NODE`` —
+    the ordinary layout, with the ``*CONTROL_``/``*DATABASE_`` cards at the
+    head of the deck — resolved against an EMPTY node table and the section
+    was dropped under the untrue message "they are not nodes of this deck".
+    Measured on twin probes differing only in card order, with both nodes
+    present in both.
+
+    Idempotent: the flag is cleared on success, so the two entry points
+    (``_make_cross_sections`` and the bolt-preload re-resolve) can both call
+    it. A card whose ids are genuinely absent after the FULL parse keeps the
+    flag, and ``_make_cross_sections`` reports it there — once, by id.
+    """
+    for cs in state.cross_sections:
+        if not cs.radius_is_nodes:
+            continue
+        nt = state.nodes.get(cs.xct_nid)
+        nh = state.nodes.get(cs.xch_nid)
+        if nt is None or nh is None:
+            continue
+        cs.xct, cs.yct, cs.zct = nt.x, nt.y, nt.z
+        cs.xch, cs.ych, cs.zch = nh.x, nh.y, nh.z
+        cs.radius_is_nodes = False
+
+
 def _make_cross_sections(state: ConversionState) -> List[str]:
     """*DATABASE_CROSS_SECTION_PLANE/_SET → /SECT (radioss100 card layout from
     hm_cfg_files sect.cfg):
@@ -1542,11 +1847,27 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
     """
     if not state.cross_sections:
         return []
+    resolve_cross_section_endpoints(state)
     lines = ["#-  CROSS SECTIONS (*DATABASE_CROSS_SECTION_* -> /SECT):", HDR]
     used_ids: Set[int] = set()
     emitted = False
     for cs in state.cross_sections:
         label = f"id={cs.csid}" if cs.csid else f"'{cs.title}'" if cs.title else "(no id)"
+        if cs.radius_is_nodes:
+            state.warn(
+                f"*DATABASE_CROSS_SECTION_PLANE {label}: RADIUS is negative, "
+                f"which makes XCT={cs.xct_nid} and XCH={cs.xch_nid} NODE IDS "
+                "(Vol I R17 p.16-50), but after the WHOLE deck was read "
+                + ("neither is a node of this deck"
+                   if cs.xct_nid not in state.nodes
+                   and cs.xch_nid not in state.nodes else
+                   f"node {cs.xct_nid} is missing"
+                   if cs.xct_nid not in state.nodes else
+                   f"node {cs.xch_nid} is missing")
+                + " — the cross section was SKIPPED rather than placed at the "
+                "numeric cell values, which would put the cutting plane at an "
+                "arbitrary point.")
+            continue
         if cs.kind == "SET":
             entry = state.node_sets.get(cs.nsid)
             if entry is None:
@@ -1554,7 +1875,10 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                            f"{cs.nsid} not found — /SECT skipped.")
                 continue
             nids = entry[1]
-            shell_eids = solid_eids = beam_eids = []
+            shell_eids: List[int] = []
+            solid_eids: List[int] = []
+            beam_eids: List[int] = []
+            spring_eids: List[int] = []
             if cs.ssid:
                 se = state.shell_sets.get(cs.ssid)
                 if se is None:
@@ -1576,8 +1900,56 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                                f"{cs.bsid} not found — dropped from the /SECT.")
                 else:
                     beam_eids = se[1]
+            # TSID and DSID are first-class LS-DYNA slots (Vol I R17 p.16-49:
+            # "TSID — Thick shell element set ID", "DSID — Discrete element set
+            # ID, see *SET_DISCRETE") and both HAVE a converter-side home: this
+            # converter writes thick shells as /BRICK, which is the same
+            # grbric_ID group solids use, and it emits starter-validated
+            # /GRSPRI/SPRI groups, which is the grsprg_ID column. They used to
+            # be dropped together under the stated reason "no converter-side
+            # element type" — false on both counts (#130).
+            if cs.tsid:
+                # ONLY *SET_SOLID is tried. TSID names a *SET_TSHELL, which
+                # this converter does not read; *SET_TSHELL, *SET_SOLID and
+                # *SET_SHELL are three separate LS-DYNA SID namespaces, so a
+                # bare SID match in state.shell_sets adopts whatever SHELLS
+                # happen to carry that number and drops their eids into the
+                # section's BRICK group — measured: a *SET_SHELL_LIST 5 holding
+                # shell 101 put "101" in /GRBRIC/BRIC, where the starter
+                # resolves it against the brick table (the #125/#128
+                # two-namespace trap). writer/rarecards.py:110-118 states the
+                # same rule for *DEFINE_ELEMENT_DEATH_THICK_SHELL_SET. The
+                # *SET_SOLID fallback stays: a thick shell IS a /BRICK in the
+                # emitted deck and decks do restate a tshell list as a
+                # *SET_SOLID.
+                se = state.solid_sets.get(cs.tsid)
+                if se is None:
+                    state.warn(
+                        f"*DATABASE_CROSS_SECTION_SET {label}: TSID names "
+                        f"*SET_TSHELL {cs.tsid} (Vol I R17 p.16-49, 'Thick "
+                        "shell element set ID'), which k2rad does not read — "
+                        "the thick shells are dropped from the /SECT and the "
+                        "section under-reports by their contribution. k2rad "
+                        "writes thick shells as /BRICK, so restating that list "
+                        f"as *SET_SOLID {cs.tsid} converts it into the "
+                        "section's grbric_ID group. A *SET_SHELL of the same "
+                        "number is deliberately NOT accepted here: it is a "
+                        "different LS-DYNA id namespace and its members are "
+                        "ordinary shells.")
+                else:
+                    solid_eids = list(solid_eids) + [
+                        e for e in se[1] if e not in set(solid_eids)]
+            if cs.dsid:
+                se = state.discrete_sets.get(cs.dsid)
+                if se is None:
+                    state.warn(f"*DATABASE_CROSS_SECTION_SET {label}: discrete "
+                               f"set {cs.dsid} not found — dropped from the "
+                               "/SECT.")
+                else:
+                    spring_eids = list(se[1])
         else:
-            nids, shell_eids, solid_eids, beam_eids = _plane_cut(state, cs)
+            (nids, shell_eids, solid_eids, beam_eids,
+             spring_eids) = _plane_cut(state, cs)
             _warn_sect_sph_scope(state, cs, label)
             if not nids:
                 state.warn(f"*DATABASE_CROSS_SECTION_PLANE {label}: the plane "
@@ -1588,49 +1960,99 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             state.warn(f"*DATABASE_CROSS_SECTION_SET {label}: empty node set — "
                        "/SECT skipped.")
             continue
-        if not (shell_eids or solid_eids or beam_eids):
+        if not (shell_eids or solid_eids or beam_eids or spring_eids):
             state.warn(f"*DATABASE_CROSS_SECTION_* {label}: no element group — "
                        "the /SECT is emitted but will record zero force until "
                        "an element set is added.")
 
-        elem_nids: List[int] = []
-        if shell_eids or solid_eids or beam_eids:
-            shells = {e.eid: e for e in state.shell_elems}
-            solids = {e.eid: e for e in state.solid_elems}
-            # Thick shells share the /BRICK id space and the solid_eids list.
-            solids.update({e.eid: e for e in state.tshell_elems})
-            beams = {e.eid: e for e in state.beam_elems}
-            for eid in shell_eids:
-                if eid in shells:
-                    elem_nids.extend(shells[eid].nodes)
-            for eid in solid_eids:
-                if eid in solids:
-                    elem_nids.extend(solids[eid].nodes)
-            for eid in beam_eids:
-                if eid in beams:
-                    elem_nids.extend([beams[eid].n1, beams[eid].n2])
-        n1, n2, n3 = _sect_frame_nodes(state, nids, elem_nids)
-        if n3 == 0:
-            state.warn(f"*DATABASE_CROSS_SECTION_* {label}: could not find three "
-                       "non-colinear section nodes for the /SECT output frame — "
-                       "the starter may reject the section; add a node set with "
-                       "an in-plane spread of nodes.")
+        # The output frame is BUILT FROM THE CARD, not picked from the mesh —
+        # see _sect_synth_frame for the construction and for the measured
+        # consequences of the old pick (89.6 % of the true normal force,
+        # 1.34x the tangential one, an origin off the plane, all at 0 starter
+        # diagnostics).
+        frame, frame_note, normal_known = _sect_synth_frame(state, cs, nids)
+        if frame is None:
+            state.warn(
+                f"*DATABASE_CROSS_SECTION_* {label}: the section's normal "
+                "could not be determined "
+                + ("(every section node coincides, so not even a node LINE is "
+                   "defined)" if cs.kind == "SET" else
+                   "(XCT->XCH is a zero vector)")
+                + " — /SECT SKIPPED rather than emitted with a frame the "
+                "engine would build from arbitrary nodes. hm_read_sect.F:597 "
+                "would either refuse it (ERROR 508, degenerate triad) or, with "
+                "node_ID3 = 0, read out of bounds and report an implied "
+                "'normal' that lies IN the cutting plane, at 0 diagnostics.")
+            continue
 
         sect_id = cs.csid if cs.csid > 0 and cs.csid not in used_ids else state.next_id()
         used_ids.add(sect_id)
         title = cs.title or f"SECT_{sect_id}"
-        grnod_id = state.next_id()
+        fn_ids = [state.next_node_id() for _ in range(3)]
+        for nid, xyz in zip(fn_ids, frame):
+            state.nodes[nid] = NodeData(xyz[0], xyz[1], xyz[2])
+        n1, n2, n3 = fn_ids
+        state.warn(
+            f"*DATABASE_CROSS_SECTION_* {label}: the /SECT reporting frame is "
+            f"three SYNTHESIZED element-free nodes ({n1}, {n2}, {n3}) placed "
+            f"from {frame_note}. That frame is not decoration — "
+            "section_skew.F:82-99 makes e6 = (N2-N1) x (N3-N1) the section "
+            "NORMAL, section_c.F:385-389 splits every nodal force with it into "
+            "the FN and FT channels, and :393-397 takes the moments about the "
+            "frame origin, which this construction puts exactly on "
+            + ("the fitted plane's centroid" if cs.kind == "SET"
+               else "(XCT,YCT,ZCT), the cutting plane's own origin")
+            + ". The nodes belong to no element, so the frame is FIXED in "
+            "space (LS-DYNA's own default when the card's ID/ITYPE cells are "
+            "blank); hm_read_sect.F:588-591 resolves them with CHECK_USED, so "
+            "they raise no 'unused node' diagnostic."
+            + " Iframe is 10, so M1/M2/M3 and F1/F2/F3 are reported on the "
+            "GLOBAL axes: Vol I R17 p.16-50 gives the card's output-frame cell "
+            "ID the default 'global', and section_skew.F:103-139 leaves the "
+            "node-derived normal untouched at Iframe 10 while :146-150 and "
+            ":151-164 compute the SAME origin as Iframe 0 — so FN/FT and the "
+            "moment reference point are exactly what Iframe 0 would give."
+            + ("" if normal_known else
+               " BEYOND THAT, THE NORMAL ITSELF HAD TO BE INVENTED, so the "
+               "FN/FT SPLIT is arbitrary here: only their vector SUM and the "
+               "GLOBAL MX/MY/MZ channels mean anything. Give the *SET node "
+               "group three non-colinear nodes on the cut, or use the _PLANE "
+               "spelling, to get a real section normal."))
+        # Iframe 10, always. section_skew.F:103-139 keeps XXN/YYN/ZZN = the
+        # node-derived normal (so the FN/FT split is unchanged) and sets the
+        # REPORTING axes e4/e5/e6 to global; :146-150 (Iframe 0) and :151-164
+        # (Iframe 10) compute the SAME origin C = N1 + ((N3-N1).e4)*e4, which
+        # this construction collapses onto N1. So the choice affects only which
+        # axes M1/M2/M3 and F1/F2/F3 come out on — and Vol I R17 p.16-50 gives
+        # the ID cell (Card 1a.2 field 6 / Card 1b field 7) the default
+        # "global", i.e. LS-DYNA reports the resultants in the GLOBAL system
+        # when the card names no frame. Iframe 0's local (e4,e5,e6) triad was
+        # a silent divergence from secforc on every section that names none —
+        # which is every section k2rad emits, because a named ID/ITYPE frame is
+        # not mapped either (the handler says so).
+        iframe = 10
+        # next_grnod_id(), not next_id(): k2rad re-emits every user *SET_NODE
+        # under its own SID (_make_extra_groups), so a deck-stated node set at
+        # the auto-id base collides with this synthesized group and the starter
+        # aborts with ERROR 79 IN NODE GROUP DEFINITION. Measured on a probe
+        # aimed at the id this allocator actually takes: master emitted
+        # /GRNOD/NODE/90002 twice.
+        grnod_id = state.next_grnod_id()
+        lines += ["/NODE"]
+        for nid, xyz in zip(fn_ids, frame):
+            lines.append(f"{_i(nid)}{_f(xyz[0])}{_f(xyz[1])}{_f(xyz[2])}")
+        lines.append(HDR)
         lines += _emit_grnod_node(grnod_id, f"{title}_nodes", nids)
         grshel_id = grbric_id = grbeam_id = grtria_id = grsprg_id = 0
         quad_eids, tri_eids = _split_shell_eids_by_topology(state, shell_eids)
         if quad_eids:
-            grshel_id = state.next_id()
+            grshel_id = state.next_elem_group_id()
             lines += _emit_grshel(grshel_id, f"{title}_shells", quad_eids)
         if tri_eids:
-            grtria_id = state.next_id()
+            grtria_id = state.next_elem_group_id()
             lines += _emit_grsh3n(grtria_id, f"{title}_sh3n", tri_eids)
         if solid_eids:
-            grbric_id = state.next_id()
+            grbric_id = state.next_elem_group_id()
             lines += _emit_id_group("GRBRIC/BRIC", grbric_id, f"{title}_bricks",
                                     solid_eids)
         # A *SECTION_BEAM part whose material re-routes it to a CONNECTOR
@@ -1656,16 +2078,51 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                         | state.muscle_beam_spring_eids)
         rerouted = [e for e in beam_eids if e in rerouted_ids]
         beam_eids = [e for e in beam_eids if e not in rerouted_ids]
-        if rerouted:
-            grsprg_id = state.next_id()
+        # ONE group for both kinds: the card has exactly one spring slot
+        # (grsprg_ID, cols 51-60), so genuine *ELEMENT_DISCRETE / 1-D belt
+        # springs and re-routed beams share it. Emitting the group WHENEVER the
+        # column is non-zero is load-bearing: elegror.F:92-94 returns 0 for a
+        # group id that does not exist and says NOTHING, so a dangling
+        # grsprg_ID silently under-reports the section on any deck that also
+        # carries another family (WARNING 1813 needs the section to be empty
+        # altogether, WARNING 600 needs all seven ids AND Niter zero).
+        # The _PLANE (automatic) spelling gets NO genuine springs: Vol I R17
+        # p.16-48, Figure 16-2's caption, is "The automatic definition does not
+        # check for springs and dampers in the section", so LS-DYNA's own
+        # secforc excludes them and adding them would report a force the source
+        # deck does not. The re-routed BEAMS are a different thing entirely —
+        # LS-DYNA's plane cut DOES include them (they are beams there); it is
+        # only k2rad that writes them as /SPRING, so grsprg_ID is where they
+        # have to go to stay in the section at all.
+        plane_springs = spring_eids if cs.kind != "SET" else []
+        group_springs = [] if cs.kind != "SET" else list(spring_eids)
+        all_springs = group_springs + [e for e in rerouted
+                                       if e not in set(group_springs)]
+        if all_springs:
+            grsprg_id = state.next_elem_group_id()
             lines += _emit_id_group("GRSPRI/SPRI", grsprg_id,
-                                    f"{title}_springs", rerouted)
+                                    f"{title}_springs", all_springs)
+        if plane_springs:
+            state.warn(
+                f"{label}: spring/belt element(s) {sorted(plane_springs)} "
+                "cross the section plane but are NOT in the /SECT, because "
+                "LS-DYNA does not put them in this one either: Vol I R17 "
+                "p.16-48, Figure 16-2's caption, says the automatic plane "
+                "definition 'does not check for springs and dampers in the "
+                "section'. Both codes therefore report the same elements here "
+                "and the converted section force matches secforc. To MEASURE "
+                "those springs, restate the section with LS-DYNA's own "
+                "*DATABASE_CROSS_SECTION_SET spelling and list them in its "
+                "DSID cell (Vol I R17 p.16-49, '*SET_DISCRETE') — that path "
+                "does fill the card's grsprg_ID column, and this converter "
+                "emits the /GRSPRI/SPRI group for it.")
+        if rerouted:
             state.warn(
                 f"{label}: beam element(s) {rerouted} cross the section plane "
                 "but their part's material re-routes them to a SPRING "
                 "connector (*MAT_MUSCLE, *MAT_SPOTWELD or an ELFORM=6 discrete "
                 "beam), so they are /SPRING in the emitted deck and not /BEAM. "
-                "They are moved from the section's /GRBEAM group to a "
+                "They are moved from the section's /GRBEAM group to the "
                 f"/GRSPRI/SPRI group ({grsprg_id}) named by the /SECT card's "
                 "grsprg_ID column, which is what the starter resolves against "
                 "the spring groups (hm_read_sect.F:301 reads grsprg_id, :548 "
@@ -1675,7 +2132,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
                 "entirely (measured on twin decks: /TH/SECTIO var 26 = "
                 "-1.83e-07 with the group against 0.0 without it).")
         if beam_eids:
-            grbeam_id = state.next_id()
+            grbeam_id = state.next_elem_group_id()
             lines += _emit_id_group("GRBEAM/BEAM", grbeam_id, f"{title}_beams",
                                     beam_eids)
         lines += [
@@ -1687,7 +2144,7 @@ def _make_cross_sections(state: ConversionState) -> List[str]:
             f"SECT_{sect_id}",
             "#grbric_ID           grshel_ID grtrus_ID grbeam_ID grsprg_ID grtria_ID     Niter              Iframe",
             f"{_i(grbric_id)}{' ' * 10}{_i(grshel_id)}{_i(0)}{_i(grbeam_id)}"
-            f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(0)}",
+            f"{_i(grsprg_id)}{_i(grtria_id)}{_i(0)}{' ' * 10}{_i(iframe)}",
             HDR,
         ]
         state.sect_ids.append((sect_id, title))
@@ -1740,8 +2197,15 @@ def _make_starter_th_sectio(state: ConversionState) -> List[str]:
         "TH_SECTIONS",
         "#  DEF = FNX/Y/Z, FTX/Y/Z, M1/M2/M3: IMPULSE (force x time), not force",
         "#  FSAV accumulates F*dt every cycle: section force = d(FNX)/dt",
-        "#     var1",
-        "DEF       ",
+        "#  GLOBAL adds MX/MY/MZ (the moments on the GLOBAL axes, which is what",
+        "#  secforc prints) and CENTER adds CX/CY/CZ, an exact unaccumulated",
+        # ASCII only: this line is written INTO the .rad, which LS-PrePost, the
+        # hm_reader and cp1252 consoles read. A UTF-8 em-dash here was the only
+        # non-ASCII byte k2rad has ever emitted.
+        "#  read-back of the frame ORIGIN the moments are taken about - the one",
+        "#  channel that makes the section's frame auditable from the T01.",
+        "#     var1      var2      var3",
+        "DEF       GLOBAL    CENTER    ",
     ]
     lines += [_i(sid) for sid, _title in state.sect_ids]
     lines.append(HDR)

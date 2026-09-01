@@ -676,16 +676,26 @@ class InitialStressSectionTests(unittest.TestCase):
         for k in range(3):
             self.assertAlmostEqual(got[k], nrm[k], places=6)
 
-    def test_the_reporting_sections_own_frame_is_NOT_the_plane_normal(self):
-        # The reason the preload gets its own /SECT: _sect_frame_nodes picks
-        # the best-CONDITIONED mesh nodes, which has nothing to do with the
-        # cut. If this ever starts matching, the dedicated section could go.
+    def test_the_reporting_section_now_realizes_the_plane_normal_too(self):
+        """The REVERSE of what this pinned before the SIDE-DEFECT batch.
+
+        The reporting /SECT used to take three best-CONDITIONED MESH nodes,
+        which has nothing to do with the cut — measured 26.57 degrees off on a
+        +X plane, with the frame origin not even on the plane — and this test
+        asserted the mismatch, noting "if this ever starts matching, the
+        dedicated section could go". It matches now: item (E) gives the
+        reporting section the same synthesized-node construction #127 built
+        for the preload one.
+
+        The dedicated preload /SECT is still emitted separately, because the
+        two carry different element groups (the preload one is bricks-only,
+        intersected with *INITIAL_STRESS_SECTION's own PSID) and different
+        node scopes. Merging them is a separate change."""
         nrm = _unit((1.0, 2.0, -3.0))
         _r, starter = _convert(_bar_deck(normal=nrm))
         got = _frame_normal(starter, 1)
-        self.assertGreater(
-            min(sum((got[k] - s * nrm[k]) ** 2 for k in range(3))
-                for s in (1.0, -1.0)), 1e-6)
+        for k in range(3):
+            self.assertAlmostEqual(got[k], nrm[k], places=6)
 
     def test_reporting_section_and_th_sectio_are_untouched(self):
         _r, starter = _convert(_bar_deck())
@@ -793,7 +803,10 @@ class InitialStressSectionTests(unittest.TestCase):
     def test_frame_nodes_are_fresh_ids_registered_in_the_node_table(self):
         _r, starter = _convert(_bar_deck())
         nodes = _nodes_of(starter)
-        self.assertEqual(len(nodes), 20 + 3)
+        # 20 mesh nodes + 3 for the preload /SECT frame + 3 for the REPORTING
+        # /SECT frame, which got the same synthesized construction in the
+        # SIDE-DEFECT batch (item E).
+        self.assertEqual(len(nodes), 20 + 3 + 3)
         sect_id = int(_headers(starter, "/SECT/")[-1].split("/")[-1])
         for nid in _sect_frame(starter, sect_id):
             self.assertGreater(nid, 20)
@@ -1222,8 +1235,11 @@ class MixedStressAndStrainTests(unittest.TestCase):
         ts = [float(ln[60:80]) for ln in payload[1::2]]
         self.assertEqual(ts[0], -1.0)
         self.assertEqual(ts[-1], 1.0)
-        self.assertTrue(any("all-zero /INISHE/STRA_F/GLOB record was added"
-                            in w for w in r.warnings))
+        # The message names the card each companion actually went into — a
+        # 3-node shell's goes to /INISH3/STRA_F/GLOB (#131).
+        w = next(x for x in r.warnings if "an all-zero record was added" in x)
+        placed = w.split("was added for each of them, in ")[1].split(".")[0]
+        self.assertEqual(placed, "/INISHE/STRA_F/GLOB (element(s) 2)")
 
     def test_re_sampled_stations_span_minus_one_to_plus_one(self):
         _r, starter = self._mixed()
@@ -1282,11 +1298,27 @@ class MixedStressAndStrainTests(unittest.TestCase):
 class TriangleStressRecordTests(unittest.TestCase):
     """An *INITIAL_STRESS_SHELL record on a 3-node shell.
 
-    The element leaves this converter as a /SH3N and the /INISHE reader resolves
-    its shell_IDs through UEL2SYS over the 4-node table only, so the record can
-    never be applied — the converter has always said so. Writing it anyway is
-    NOT inert: hm_read_inistate_d00.F:2105 arms the global ``ISIGSH`` before the
-    id is looked up (:2124-2127 only bumps NONEXIST), and scigini4.F:285-287
+    The element leaves this converter as a /SH3N, and until the SIDE-DEFECT
+    batch its stress was DROPPED because no ``/INISH3/STRS_F`` was written.
+    That card turned out to be the SAME layout as the ``/INISHE`` one already
+    emitted: ``diff`` of the extracted ``FORMAT(radioss2021)`` blocks of
+    ``inish3_strs_f_glob_sub.cfg`` and ``inishe_strs_f_glob_sub.cfg`` is EMPTY,
+    the only difference being the HyperMesh-only ``SUBTYPES`` line. The
+    converter's own comment and its user-facing warning both said "the card
+    layout differs"; both were false (the #131 "check a warning's CITED FACT"
+    class).
+
+    The one difference is ``npg``: the /SH3N reader has no npg cross-check of
+    its own, and k2rad always writes ``Ish3n = 0``, so the element is
+    initialised through ``c3init3 -> CSIGINI``, whose check is
+    ``NPGI > 1`` (csigini.F:143) — the OPPOSITE of the quad path's
+    ``NPG /= NPGI`` at scigini4.F:160. Measured: npg 3 and 4 give ERROR 26 per
+    element and ERROR TERMINATION; npg 0 and 1 are clean and the stress is
+    consumed.
+
+    A record whose id is in NEITHER element table is still dropped, and for the
+    original reason: hm_read_inistate_d00.F:2105 (:3266 on the /INISH3 side)
+    arms the global ``ISIGSH`` before the id is looked up, and scigini4.F:285-287
     then runs the GLOBAL stress reconstruction for every element whose
     ``SIGSH(17)`` the /STRA_F reader set to ONE — over slots that hold no
     stress. Measured on the real starter/engine: a strain-only quad beside such
@@ -1296,20 +1328,48 @@ class TriangleStressRecordTests(unittest.TestCase):
     on every channel with the strain unchanged.
     """
 
-    def test_a_tri_stress_record_is_dropped_from_the_inishe_block(self):
+    def test_a_tri_stress_record_goes_to_the_INISH3_block(self):
         r, starter = _convert(SHELLS.replace("{EXTRA}", STRESS_5_ON_THE_TRI))
         self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
-        self.assertEqual(_headers(starter, "/INISH3/STRS_F"), [])
-        self.assertTrue(any("not emitted as 4-node /SHELL" in w
-                            and "DROPPED" in w and "ISIGSH" in w
-                            for w in r.warnings), list(r.warnings)[:4])
+        self.assertEqual(_headers(starter, "/INISH3/STRS_F"),
+                         ["/INISH3/STRS_F/GLOB"])
+        cards = [ln for ln in _block(starter, "/INISH3/STRS_F/GLOB")
+                 if not ln.startswith("#")]
+        # Card 1: shell_ID 3, nb_integr = the /PROP/SHELL N = 5, npg = 1,
+        # Thick = 0. npg 4 would be ERROR 26 on this path.
+        self.assertEqual([int(cards[0][0:10]), int(cards[0][10:20]),
+                          int(cards[0][20:30])], [3, 5, 1])
+        self.assertEqual(float(cards[0][30:50]), 0.0)
+        self.assertEqual(float(cards[1][0:20]), 0.0)          # Em
+        # 1 card-1 + 1 Em/Eb row + 5 layers x 2 rows x npg 1.
+        self.assertEqual(len(cards), 12, cards)
+        self.assertFalse([w for w in r.warnings
+                          if "*INITIAL_STRESS_SHELL" in w and "DROPPED" in w])
 
-    def test_a_degenerate_shell_stress_record_is_dropped_too(self):
-        # The same hazard on the sibling topology: a shell with fewer than 3
-        # distinct corners has zero area and _make_parts writes NO element for
-        # it, so its id is just as unresolvable to the /INISHE reader as a
-        # /SH3N's. Gating on "is it a tri" instead of "is it an emitted quad"
-        # would leave this one armed (the `#120` class).
+    def test_the_tri_stress_values_land_in_the_right_columns(self):
+        """STRESS_5_ON_THE_TRI's layer k carries T = -1 + 0.5k and
+        SIGXX = 100 + 2.5k, everything else 0 — so the first layer is
+        (T -1.0, sigma_X 100.0) and the last (T 1.0, sigma_X 110.0), bottom
+        first. Card rows are consumed in card order and row 1 is the LOWER
+        surface (measured against the ANIM: a -100/0/+100 record reads back
+        lower/membrane/upper)."""
+        _r, starter = _convert(SHELLS.replace("{EXTRA}",
+                                              STRESS_5_ON_THE_TRI))
+        cards = [ln for ln in _block(starter, "/INISH3/STRS_F/GLOB")
+                 if not ln.startswith("#")]
+        pts = cards[2:]
+        self.assertEqual(float(pts[0][0:20]), 100.0)      # sigma_X, layer 1
+        self.assertEqual(float(pts[0][20:40]), 0.0)       # sigma_Y
+        self.assertEqual(float(pts[1][80:100]), -1.0)     # pos_nip, layer 1
+        self.assertEqual(float(pts[8][0:20]), 110.0)      # sigma_X, layer 5
+        self.assertEqual(float(pts[9][80:100]), 1.0)      # pos_nip, layer 5
+
+    def test_a_degenerate_shell_stress_record_is_dropped(self):
+        # A shell with fewer than 3 distinct corners has zero area and
+        # _make_parts writes NO element for it, so its id is in NEITHER
+        # element table and the record must still be left out — the ISIGSH
+        # arming hazard is unchanged for it. Gating on "is it a tri" instead
+        # of "is it in an emitted table" would leave this one armed (`#120`).
         deck = SHELLS.replace(
             "       3       1       5       7       6       6\n",
             "       3       1       5       5       6       6\n")
@@ -1320,29 +1380,39 @@ class TriangleStressRecordTests(unittest.TestCase):
                    if not ln.startswith("#")]
         self.assertEqual(sorted(emitted), [1, 2])
         self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
-        self.assertTrue(any("not emitted as 4-node /SHELL" in w
+        self.assertEqual(_headers(starter, "/INISH3/STRS_F"), [])
+        self.assertTrue(any("fewer than 3 distinct corner nodes" in w
+                            and "DROPPED" in w and "ISIGSH" in w
                             for w in r.warnings), list(r.warnings)[:4])
 
-    def test_a_tri_stress_record_does_not_make_a_strain_deck_mixed(self):
-        # With the unresolvable record gone the deck carries no initial-STRESS
-        # block at all, so ISIGSH stays 0 and the strain card keeps its compact
-        # nb_integr=2 / npg=1 form — no npg=4, no re-sampling onto the property
-        # N, and no all-zero companion record for the tri.
+    def test_a_tri_stress_record_DOES_make_a_strain_deck_mixed(self):
+        """The reverse of what this pinned before the batch. A tri stress
+        record is now a real initial-STRESS block, so ISIGSH IS armed and the
+        strain card must take the mixed form — nb_integr = the property N,
+        npg per formulation — and the tri must get an all-zero STRAIN
+        companion or csigini.F:190 reads Z1 == Z2 == 0 and raises ERROR 1904
+        ("IN /INISHE/STRA_F/GLOB OR /INISH3/STRA_F/GLOB", the message names
+        both families itself). ITHKSHEL = 2 is global AND cross-family:
+        measured, a QUAD's strain block breaks a TRI's stress record."""
         extra = STRESS_5_ON_THE_TRI + ("*INITIAL_STRAIN_SHELL\n"
                                        + _row(1, 1, 2) + "\n"
                                        + _row(0.0, 0, 0, 0, 0, 0, -1.0) + "\n"
                                        + _row(0.02, 0, 0, 0, 0, 0, 1.0) + "\n")
         r, starter = _convert(SHELLS.replace("{EXTRA}", extra))
-        self.assertEqual(_headers(starter, "/INISHE/STRS_F"), [])
-        cards = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
-                 if not ln.startswith("#")]
-        # Exactly ONE record (element 1), nb_integr 2, npg 1, then its two
-        # stations — 1 header + 2*2 payload rows.
-        self.assertEqual(len(cards), 5, cards)
-        self.assertEqual([int(cards[0][0:10]), int(cards[0][10:20]),
-                          int(cards[0][20:30])], [1, 2, 1])
-        self.assertFalse(any("all-zero" in w and "/INISHE/STRA_F/GLOB record "
-                             "was added" in w for w in r.warnings))
+        self.assertEqual(_headers(starter, "/INISH3/STRS_F"),
+                         ["/INISH3/STRS_F/GLOB"])
+        # The named element (quad 1) takes the mixed form: nb_integr 5, npg 4.
+        quad = [ln for ln in _block(starter, "/INISHE/STRA_F/GLOB")
+                if not ln.startswith("#")]
+        self.assertEqual([int(quad[0][10:20]), int(quad[0][20:30])], [5, 4])
+        # ... and the stress-carrying TRI gets its own all-zero companion,
+        # nb_integr 5 / npg 1, in the /INISH3 strain block.
+        tri = [ln for ln in _block(starter, "/INISH3/STRA_F/GLOB")
+               if not ln.startswith("#")]
+        self.assertEqual([int(tri[0][0:10]), int(tri[0][10:20]),
+                          int(tri[0][20:30])], [3, 5, 1])
+        self.assertTrue(all(float(ln[0:20]) == 0.0 for ln in tri[1:]))
+        self.assertTrue(any("all-zero" in w for w in r.warnings))
 
     def test_a_quad_stress_record_beside_a_tri_one_still_arms_the_mixed_form(self):
         # The drop is scoped to the unresolvable id: a resolvable quad record in

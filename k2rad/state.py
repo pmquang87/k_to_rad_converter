@@ -2340,12 +2340,27 @@ class EosCard:
     reference density used as a fallback for the /MAT/LAW6 carrier when no
     companion *MAT_NULL supplies one. The /EOS block binds to the material of the
     SAME id (eosid == mid), an OpenRadioss requirement.
+
+    ``keyword`` is the SOURCE spelling (``EOS_LINEAR_POLYNOMIAL``), kept
+    because ``kind`` is the Radioss one and the two differ for every card k2rad
+    reads. Messages built as ``"*EOS_" + kind`` printed ``*EOS_POLYNOMIAL 3``
+    and ``*EOS_IDEAL-GAS`` — keyword+id pairs that appear in NEITHER the deck
+    nor the ``.rad``, so grepping for them from either side finds nothing (the
+    #131 label class). Use :meth:`label`.
     """
     eosid: int
     kind: str
     params: Dict[str, float] = field(default_factory=dict)
     rho0: float = 0.0
     note: str = ""
+    keyword: str = ""
+
+    def label(self) -> str:
+        """``*EOS_LINEAR_POLYNOMIAL 3 (/EOS/POLYNOMIAL/3)`` — the deck's own
+        spelling first, the emitted card beside it, so the reader can grep for
+        the string in whichever file they have open."""
+        kw = self.keyword or ("EOS_" + self.kind)
+        return f"*{kw} {self.eosid} (/EOS/{self.kind}/{self.eosid})"
 
 
 @dataclass
@@ -2537,9 +2552,10 @@ class InitialStressSolid:
 class CrossSection:
     """*DATABASE_CROSS_SECTION_PLANE/_SET → /SECT (+ /TH/SECTIO).
 
-    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid =
-    *SET_SOLID / *SET_BEAM / *SET_SHELL element sets → the /SECT grbric/grbeam/
-    grshel groups (direct mapping).
+    kind "SET": nsid = *SET_NODE (the section's node group); hsid/bsid/ssid/
+    tsid/dsid = *SET_SOLID / *SET_BEAM / *SET_SHELL / *SET_TSHELL /
+    *SET_DISCRETE element sets → the /SECT grbric/grbeam/grshel/grsprg groups
+    (direct mapping; thick shells share the /BRICK id space).
 
     kind "PLANE": an infinite cutting plane through tail (xct,yct,zct) with
     normal towards head (xch,ych,zch), optionally limited to a circle of
@@ -2547,6 +2563,23 @@ class CrossSection:
     (0 = all). The writer resolves the cut geometrically: elements whose nodes
     straddle the plane are the section elements, and their nodes on the TAIL
     side of the plane form the node group (the standard /SECT construction).
+
+    ``xhev/yhev/zhev`` is the HEAD of Figure 16-2's edge vector **L** (Vol I
+    R17 p.16-48), i.e. the in-plane axis the card itself states. It is what the
+    /SECT output frame's first axis is built from — see
+    ``inistate._sect_synth_frame``.
+
+    ``radius_is_nodes`` records ``RADIUS < 0``: Vol I R17 p.16-49/50 then makes
+    ``XCT`` and ``XCH`` NODE IDS (centre, and a node the normal points at),
+    with ``YCT/ZCT/YCH/ZCH`` ignored and the radius ``|RADIUS|``. The **WRITER**
+    resolves them (``inistate.resolve_cross_section_endpoints``), after the
+    whole deck is parsed — see the field comment below for why the handler
+    cannot.
+
+    ``loc_id``/``itype`` are Card 1a.2 fields 6-7. ITYPE selects which id
+    namespace LOC_ID lives in — 0 = rigid body (a PART), 1 = accelerometer (an
+    ELEMENT), 2 = a *DEFINE_COORDINATE_* — so it must be read before LOC_ID can
+    even be reported.
     """
     csid: int           # user id from the _ID variant (0 = auto-assign)
     title: str
@@ -2556,11 +2589,30 @@ class CrossSection:
     hsid: int = 0       # solid element set
     bsid: int = 0       # beam element set
     ssid: int = 0       # shell element set
+    tsid: int = 0       # thick-shell element set (emitted as /BRICK)
+    dsid: int = 0       # discrete (spring) element set
     # _PLANE fields
     psid: int = 0       # part set restriction (0 = all parts)
     xct: float = 0.0; yct: float = 0.0; zct: float = 0.0
     xch: float = 0.0; ych: float = 0.0; zch: float = 0.0
     radius: float = 0.0
+    #: ``RADIUS < 0``: XCT/XCH are NODE IDS, kept here and resolved in the
+    #: WRITER, not the handler. Handlers run in DECK-BLOCK ORDER and
+    #: ``state.nodes`` is filled by ``handle_node`` in that same pass, so a
+    #: ``*DATABASE_CROSS_SECTION_PLANE`` written before ``*NODE`` — the
+    #: ordinary layout, with the *CONTROL_/*DATABASE_ cards at the head of the
+    #: deck — saw an empty node table and the card was dropped with the untrue
+    #: message "they are not nodes of this deck". Resolution moved to
+    #: ``inistate.resolve_cross_section_endpoints``, which runs after the whole
+    #: deck is parsed. Stays True until that resolution succeeds.
+    radius_is_nodes: bool = False
+    xct_nid: int = 0    # the raw XCT cell when radius_is_nodes
+    xch_nid: int = 0    # the raw XCH cell when radius_is_nodes
+    # Card 2 (PLANE): the edge vector L's head, and the reporting-frame request
+    xhev: float = 0.0; yhev: float = 0.0; zhev: float = 0.0
+    has_hev: bool = False
+    loc_id: int = 0
+    itype: int = 0
 
 
 @dataclass
@@ -6556,6 +6608,13 @@ class ConversionState:
 
     # ── Mesh ───────────────────────────────────────────────────
     nodes: Dict[int, NodeData] = field(default_factory=dict)
+    #: Node ids whose ``*NODE`` card states a constraint in its TC or RC cell
+    #: (Vol I R17: ``NID X Y Z TC RC``). k2rad does not convert them — see
+    #: ``writer/assembly._warn_node_tc_rc``. Kept as ids so the message can
+    #: NAME a few of them; capped, because a third of the corpus writes them
+    #: and one deck states 14 402.
+    node_tc_rc: List[int] = field(default_factory=list)
+    node_tc_rc_count: int = 0
     shell_elems: List[ShellElem] = field(default_factory=list)
     solid_elems: List[SolidElem] = field(default_factory=list)
     # *ELEMENT_TSHELL → /BRICK on a /PROP/TYPE20|21|22. Its OWN container, not
@@ -7861,10 +7920,25 @@ class ConversionState:
         no-op vs next_id() in the common case (no user node set that high), so
         it does not shift ids on any ordinary deck.
 
-        NOTE: the gravity groups, the *BOUNDARY_PRESCRIBED_MOTION_SET motion
-        groups and that path's zero-scale /BCS groups draw from this. The other
-        synthesized /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...)
-        still use next_id() and carry the same latent hazard.
+        **Every synthesized /GRNOD id in the writer now comes from here.** The
+        first round routed only the gravity groups, the
+        *BOUNDARY_PRESCRIBED_MOTION_SET motion groups, that path's zero-scale
+        /BCS groups and the /SECT group; the remaining 24 sites — the contact
+        secondary groups, /INIVEL and _GENERATION, *ELEMENT_MASS, *LOAD_NODE,
+        the rigid-wall node/exclusion/carrier/motion groups, the modal dummy
+        /CLOAD, the free-node constraint group, the /RBODY and CNRB main and
+        secondary groups and the probe rigid body — still drew from bare
+        next_id() and carried the identical hazard. MEASURED before the fix on
+        a probe aimed at the id the allocator ACTUALLY takes (the allocation
+        order was printed first, #131's lesson): an *ELEMENT_MASS deck plus a
+        user *SET_NODE_LIST at that id emitted /GRNOD/NODE/<id> TWICE and the
+        starter refused the whole deck with ERROR 79.
+
+        The only three ``_emit_grnod_node`` sites that do NOT allocate are the
+        two that re-emit a user set under its OWN sid (``_make_bcs``,
+        ``_make_extra_groups``) — reallocating those would break every
+        reference to them — and ``_make_geometric_rwall_motion``, whose id its
+        caller allocates here.
 
         ``node_sets`` also holds the flattened ``*SET_NODE_ADD`` /
         ``*SET_NODE_ADD_ADVANCED`` unions, under their own SIDs — and
@@ -7881,21 +7955,42 @@ class ConversionState:
     def next_elem_group_id(self) -> int:
         """A next_id() guaranteed free in the ELEMENT-group namespaces.
 
-        ``/GRBRIC``, ``/GRSHEL``, ``/GRSH3N``, ``/GRBEAM``, ``/GRSPRI`` and
-        ``/GRTRUSS`` are one starter table per family, and every one of them is
-        checked against the ids the DECK states: today k2rad never re-emits a
-        user ``*SET_SHELL`` / ``_SOLID`` / ``_BEAM`` / ``_DISCRETE`` under its
-        own SID (unlike ``*SET_NODE``, which ``_make_extra_groups`` does
-        re-emit), so no collision is reachable — but that is a property of the
-        current writers, not of the id stream. The flattened
-        ``*SET_<FAMILY>_ADD`` unions land in these same four dicts under their
-        own SIDs and do not change that: nothing re-emits an element set under
-        its SID either way, and a union sid is one MORE id this guard dodges,
-        never one fewer (``_flatten_set_adds`` is a prepass, so they are all
-        present before any writer allocates). The sibling of
-        ``next_grnod_id``, dodging the four element-set registries so a
-        synthesized element group cannot land on a SID a future writer decides
-        to pass through, and a no-op vs ``next_id()`` on any ordinary deck
+        **The starter's rule, MEASURED.** ``lecgroup.F:124-224`` calls
+        ``HM_LECGRE`` eight times, each with its OWN array and start key
+        (``IGRBRIC``/``/GRBRIC``, ``IGRQUAD``, ``IGRSH4N``/``/GRSHEL``,
+        ``IGRTRUSS``, ``IGRBEAM``, ``IGRSPRING``/``/GRSPRI``,
+        ``IGRSH3N``/``/GRSH3N``, and ``/GRTRIA`` on the same buffer for 2-D),
+        and ``hm_lecgre.F:262-267`` runs ``UDOUBLE_IGR`` over THAT family's
+        list only. So there are TEN independent id namespaces
+        (``/GRNOD``, ``/GRPART``, ``/SURF`` and the rest each have their own
+        ``UDOUBLE``), and ``ERROR 79`` fires only WITHIN one:
+
+          * ``/GRBRIC/BRIC/5000`` + ``/GRSHEL/SHEL/5000`` -> ACCEPTED
+          * ``/GRBRIC/BRIC/5000`` twice -> ERROR 79 ... IN BRIC ELEMENT GROUP
+          * ``/GRBRIC/BRIC/5000`` + ``/GRBRIC/PART/5000`` -> ERROR 79 (the
+            SUB-keyword is not part of the key)
+          * nine groups on one id across nine families -> ACCEPTED, 0 ERROR
+
+        so this allocator dodges only the element-SET registries, and
+        ``_warn_duplicate_group_ids`` scans PER FAMILY. A guard or a scan keyed
+        on "any /GR* id" would fire on decks the starter accepts.
+
+        Today k2rad never re-emits a user ``*SET_SHELL`` / ``_SOLID`` /
+        ``_BEAM`` / ``_DISCRETE`` under its own SID (unlike ``*SET_NODE``,
+        which ``_make_extra_groups`` does re-emit), so no collision is
+        reachable — but that is a property of the current writers, not of the
+        id stream, which is exactly why the SIDE-DEFECT batch routed all
+        SEVENTEEN remaining element-group emission sites through here rather
+        than leaving the guard on the one ``/ACTIV`` site it had. The dodge is
+        family-AGNOSTIC (a shell SID can push a ``/GRBRIC`` allocation
+        forward), which is harmless and over-conservative rather than wrong.
+
+        The flattened ``*SET_<FAMILY>_ADD`` unions land in these same four
+        dicts under their own SIDs and do not change that: nothing re-emits an
+        element set under its SID either way, and a union sid is one MORE id
+        this guard dodges, never one fewer (``_flatten_set_adds`` is a prepass,
+        so they are all present before any writer allocates). The sibling of
+        ``next_grnod_id``, and a no-op vs ``next_id()`` on any ordinary deck
         (no user element set at or above the auto-id base 90001), so it does
         not shift ids.
         """
