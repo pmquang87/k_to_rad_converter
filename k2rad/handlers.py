@@ -10330,18 +10330,16 @@ def handle_mat_thermal_isotropic_td(block: Block,
     a deck whose curves follow the material come out with no conductivity at
     all.
 
-    **Why a fit is expressible at all.** The deferred entry this replaces said
-    ``/HEAT/MAT``'s conductivity is *"the linear AS + BS*T only"*. That is
-    wrong: ``dttherm.F90:102-106`` (shells) and ``mqviscb.F:651-656`` (solids)
-    both read
-
-        if (tempel(i) < tmelt) then ; akk = as + bs*tempel(i)
-        else                        ; akk = al + bl*tempel(i)
-
-    so ``k(T)`` is a TWO-SEGMENT piecewise-linear function with the break at
-    ``T1``. The capacity ``RHO0_CP`` really is one constant with no temperature
-    dependence — that is the loss this card actually takes, and the writer
-    states it with the measured spread.
+    **Why a fit is expressible at all.** ``/HEAT/MAT``'s conduction really is
+    the linear ``AS + BS*T_element`` and nothing more — ``stherm.F:82/104``,
+    ``s4therm.F:67/84``, ``s10therm.F:61/81``, ``cbatherm.F:61/67``,
+    ``pforc3.F:379`` all read ``PM(75)``/``PM(76)`` alone. (The two-segment
+    ``below/above T1`` form in ``dttherm.F90:102-106`` and
+    ``mqviscb.F:651-656`` is the thermal TIME-STEP routine, gated on
+    ``IDT_THERM == 1``; it never touches the heat flow.) So a tabulated
+    ``k(T)`` is carried by a least-squares LINE whose worst deviation the
+    writer states, and the capacity ``RHO0_CP`` is one constant with no
+    temperature dependence at all — that is the loss this card takes.
 
     A non-zero ``HCHSV``/``TCHSV``/``TGHSV`` makes the property a function of a
     MECHANICAL history variable (stress component, plastic strain, a law's own
@@ -10368,7 +10366,15 @@ def handle_mat_thermal_isotropic_td(block: Block,
         tgmult=to_float(f1[3]) if len(f1) > 3 else 0.0,
         tlat=to_float(f1[4]) if len(f1) > 4 else 0.0,
         hlat=to_float(f1[5]) if len(f1) > 5 else 0.0,
-        is_lc=kw.endswith("_TD_LC"))
+        spelling=f"*{kw}",
+        # *MAT_T10 IS *MAT_THERMAL_ISOTROPIC_TD_LC — Vol II R17 p.2-9's alias
+        # table, and p.3-37 heads the card with BOTH names. A plain
+        # `endswith("_TD_LC")` read it with the _TD layout instead: card 2's
+        # `HCLC TCLC HCHSV TCHSV TGHSV` became the T1..T8 temperature row and
+        # cards 3-4 (which do not exist) the C/K rows, so the whole thermal
+        # material was silently lost. assembly.py's offset walker has always
+        # keyed MAT_T10 on the _TD_LC layout, so the two readers disagreed.
+        is_lc=kw.endswith("_TD_LC") or kw.endswith("MAT_T10"))
     if rec.is_lc:
         f2 = _card(raw, offset + 1, fixed=True, n=5, w=10)
         rec.hclc = to_int(f2[0]) if f2 else 0
@@ -10425,6 +10431,9 @@ def handle_control_thermal_solver(block: Block,
         eqheat=_ffield(f1, 5, 1.0),
         fwork=_ffield(f1, 6, 1.0),
         sbc=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        # Recorded for the message only: a BLANK FWORK means 1.0 (p.12-573's
+        # Card 1 Default row prints `1.` under it), so the physics does NOT
+        # branch on whether the cell was typed — see writer/thermal._efrac.
         has_fwork=bool(len(f1) > 6 and f1[6].strip()))
     # Cards 2 and 3 are OPTIONAL and claimed by RAW CONTIGUITY (row index), not
     # by "the next non-blank row": an all-blank card 2 is legal (every cell
@@ -10723,7 +10732,22 @@ def handle_load_thermal_element(block: Block,
     variable = "VARIABLE" in kw
     family = kw.rsplit("_", 1)[-1]
     if family not in ("BEAM", "SHELL", "SOLID", "TSHELL"):
-        family = ""
+        # The BARE spelling. It is kept registered so it is recognised rather
+        # than skipped, but it is not a card LS-DYNA defines, and falling
+        # through to an empty-family lookup would blame the deck for something
+        # else entirely ("the converted deck has no element elements at all",
+        # printed on a deck full of elements — the #125 class).
+        state.warn(
+            f"*{kw}: the _OPTION suffix is MANDATORY on this keyword. Vol I "
+            "R17 p.33-162 lists it as "
+            + ("VARIABLE_ELEMENT_OPTION" if variable
+               else "CONSTANT_ELEMENT_OPTION")
+            + " with the four choices BEAM, SHELL, SOLID and TSHELL, and the "
+            "card gives no other way to say which element table its EIDs are "
+            "in (element ids are per-family namespaces, so an *ELEMENT_BEAM 50 "
+            "and an *ELEMENT_SHELL 50 can both exist). The card is DROPPED — "
+            f"write *{kw}_SOLID (or _SHELL / _BEAM / _TSHELL).")
+        return
     offset = _title_offset(block)
     for i in range(offset, len(block.raw)):
         if not block.raw[i].strip():
@@ -11084,6 +11108,7 @@ def handle_control_solution(block: Block, state: ConversionState) -> None:
     f = _card(block.raw, offset, fixed=True, n=8, w=10)
     soln = to_int(f[0]) if f else 0
     state.ctrl_solution_soln = soln
+    state.ctrl_solution_present = True
     dropped = []
     for i, name in enumerate(("NLQ", "ISNAN", "LCINT", "LCACC", "NCDCF",
                               "NOCOPY", "CRVP"), start=1):

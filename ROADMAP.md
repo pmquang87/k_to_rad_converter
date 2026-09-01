@@ -843,9 +843,9 @@ validated foundation for further linear analyses:
   `E = FMULT/σ_deck` emissivity de-scaling, both solver-measured),
   `*CONTROL_SOLUTION` SOLN=1 → the engine card `/DT/THERM`,
   `*CONTROL_THERMAL_SOLVER` TSF → `/THERM` and FWORK → `/HEAT/MAT` EFRAC,
-  `*MAT_THERMAL_ISOTROPIC_TD[_LC]` → a two-segment least-squares fit onto
-  `/HEAT/MAT`'s own piecewise-linear `k(T)`, `*MAT_THERMAL_ORTHOTROPIC` when it
-  is isotropic in fact, and the eight
+  `*MAT_THERMAL_ISOTROPIC_TD[_LC]` → a least-squares line onto `/HEAT/MAT`'s
+  `AS + BS·T` (which is the whole of its conduction — `stherm.F:104`),
+  `*MAT_THERMAL_ORTHOTROPIC` when it is isotropic in fact, and the eight
   `*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,TSHELL}`
   spellings → `/IMPTEMP` over the elements' own nodes.
   **Still open:** nothing in the thermal-solver scope that Radioss can express.

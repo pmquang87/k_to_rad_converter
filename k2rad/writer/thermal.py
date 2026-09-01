@@ -2,7 +2,7 @@
 
   ``*MAT_ADD_THERMAL_EXPANSION``            → ``/THERM_STRESS/MAT`` + ``/HEAT/MAT``
   ``*MAT_THERMAL_ISOTROPIC`` via ``*PART`` TMID → the ``/HEAT/MAT`` values
-  ``*MAT_THERMAL_ISOTROPIC_TD[_LC]``        → the same, by a two-segment FIT
+  ``*MAT_THERMAL_ISOTROPIC_TD[_LC]``        → the same, by a LEAST-SQUARES fit
   ``*MAT_THERMAL_ORTHOTROPIC``              → the same, when K1 = K2 = K3
   ``*INITIAL_TEMPERATURE_{SET,NODE}``       → ``/INITEMP`` on a ``/GRNOD``
   ``*LOAD_THERMAL_{CONSTANT,LOAD_CURVE,VARIABLE}[_NODE]`` → ``/IMPTEMP``
@@ -95,11 +95,14 @@ _EFRAC_OFF = 1.0e-20
 
 #: The last-resort volumetric heat capacity, used when neither a
 #: ``*MAT_THERMAL_*`` nor the mechanical law itself states one. With
-#: ``AS = BS = 0`` there is no conduction and with ``EFRAC = 1e-20`` no
-#: strain-energy source, so the nodal heat balance has no term at all and the
-#: capacity NEVER divides anything that is non-zero. It exists only so the cell
-#: is not zero — ``hm_read_therm.F:236-237`` guards its own division with
-#: ``max(1e-20, RHO_CP)``, but the engine's capacity matrix does not.
+#: ``AS = BS = 0`` there is no conduction, and on a deck with no
+#: ``*CONTROL_THERMAL_SOLVER`` (``EFRAC = _EFRAC_OFF``) no strain-energy source
+#: either, so the nodal heat balance has no term at all and the capacity NEVER
+#: divides anything that is non-zero. It exists only so the cell is not zero —
+#: ``hm_read_therm.F:236-237`` guards its own division with
+#: ``max(1e-20, RHO_CP)``, but the engine's capacity matrix does not. A deck
+#: that DOES state FWORK is told, where the placeholder is chosen, that the
+#: source is live and the capacity therefore paces a real temperature.
 _RHO_CP_PLACEHOLDER = 1.0
 
 
@@ -163,13 +166,20 @@ def _sigma_deck(state: ConversionState) -> Optional[float]:
 
 
 def _min_element_edge(state: ConversionState) -> float:
-    """The shortest element edge in the model, or 0.0 when it cannot be found.
+    """The shortest node-pair distance in the connectivity walk, or 0.0.
 
     A cheap, slightly CONSERVATIVE proxy for the engine's own ``DELTAX``: on a
     well-shaped hexahedron ``DELTAX`` is the volume over the largest face area,
     which equals the edge length on a cube and is smaller on a sliver — so a
-    thermal step estimated from the minimum edge is never smaller than the
-    engine's, and the guard it feeds errs toward warning.
+    thermal step estimated from this length is never smaller than the engine's,
+    and the guard it feeds errs toward warning.
+
+    It is deliberately NOT called "the shortest element edge": the walk is
+    ``n[i] -> n[(i+1) % len(n)]`` over the element's cyclic node list, so on an
+    8-node hexahedron it also measures 4->5 and 8->1, which are face/body
+    diagonals rather than edges. That only makes the answer SMALLER (sqrt(2) on
+    a unit cube), i.e. more conservative, so no guard is weakened by it — but
+    the quantity is a node-pair distance, and the messages say so.
     """
     best = 0.0
     nodes = state.nodes
@@ -256,7 +266,21 @@ def _thermal_solve_active(state: ConversionState) -> bool:
     driver. A uniform initial temperature with nothing to change it leaves
     ``DTEMP`` identically zero on every cycle, so the /THERM_STRESS does
     nothing and the TEMP channel is a flat line — the #122 case exactly.
+
+    **An IMPLICIT or MODAL run is not enough either, for the same reason.**
+    MEASURED on a twin pair of converted decks (a 10-brick bar, /HEAT/MAT
+    AS = 50, an /IMPTEMP holding the x = 0 face at 400 K against an /INITEMP of
+    300): the EXPLICIT deck carries the far end 300 -> 399.731 -> 400.000 K
+    over 84 111 cycles, while the same ``.k`` plus a
+    ``*CONTROL_IMPLICIT_GENERAL`` runs 61 implicit cycles with the far end at
+    exactly 300.000 K at every state and ``HEAT STORED = 0.0000000`` — the
+    imposed nodes are reset (``resol.F:1802`` FIXTEMP is reached) and NOTHING
+    conducts. So a temperature channel on an implicit deck would be the flat
+    fringe this predicate exists to prevent, and ``_make_engine_thermal``
+    excludes the same two run types for the same reason.
     """
+    if state.is_implicit or state.is_modal:
+        return False
     return bool(state.heat_mat_cards
                 and (state.thermal_driver_emitted
                      or state.thermal_source_emitted))
@@ -600,8 +624,8 @@ def _thermal_material_for_part(state: ConversionState, pid: int):
     number (MID) ... In the same analysis identical TMID and MID numbers may
     exist."* — so TMID is its own namespace, but ONE namespace shared by every
     ``*MAT_THERMAL_*`` type. The three converted types are searched in a FIXED
-    order so a deck that reuses one TMID gets a stable answer; a deck may not
-    do that in the first place.
+    order so a deck that reuses one TMID gets a stable answer rather than a
+    dict-order coin flip; ``_warn_duplicate_tmid`` is what NAMES such a deck.
     """
     part = state.parts.get(pid)
     if part is None or not part.tmid:
@@ -612,6 +636,54 @@ def _thermal_material_for_part(state: ConversionState, pid: int):
         if tm is not None:
             return tm
     return None
+
+
+def _warn_duplicate_tmid(state: ConversionState) -> None:
+    """One TMID used by two different ``*MAT_THERMAL_*`` types.
+
+    TMID is ONE namespace shared by every thermal material type (Vol II R17
+    p.3-1), so a deck that writes ``*MAT_THERMAL_ISOTROPIC 9`` and
+    ``*MAT_THERMAL_ISOTROPIC_TD 9`` has stated two different materials under
+    one id. ``_thermal_material_for_part`` resolves that deterministically, but
+    silently — and a reader has no way to tell which card won. Named here.
+    """
+    order = (("*MAT_THERMAL_ISOTROPIC", state.mat_thermal_isotropic),
+             ("*MAT_THERMAL_ISOTROPIC_TD[_LC]", state.mat_thermal_iso_td),
+             ("*MAT_THERMAL_ORTHOTROPIC", state.mat_thermal_ortho))
+    seen: Dict[int, List[str]] = defaultdict(list)
+    for name, reg in order:
+        for tmid in reg:
+            seen[tmid].append(name)
+    for tmid in sorted(seen):
+        names = seen[tmid]
+        if len(names) < 2:
+            continue
+        state.warn(
+            f"TMID {tmid} is stated by {len(names)} different thermal "
+            "material types (" + ", ".join(names) + "). TMID is ONE namespace "
+            "shared by every *MAT_THERMAL_* type (Vol II R17 p.3-1), so this "
+            "deck defines the same thermal material twice. k2rad resolves it "
+            f"in a fixed order and uses the {names[0]} card; the other(s) are "
+            "IGNORED for every *PART that names this TMID. Renumber them if "
+            "two distinct materials were meant.")
+
+
+def _unparsed_thermal_tmid(state: ConversionState, mid: int) -> int:
+    """A ``*PART`` TMID that names a thermal material k2rad did not parse.
+
+    ``_thermal_material_for_part`` searches the three registries this converter
+    fills. Vol II R17 p.2-9 lists eighteen ``*MAT_T##`` slots and this batch
+    parses four of them, so a ``*PART`` can perfectly well carry a TMID whose
+    card landed in ``skipped_keywords`` — and then "no *PART TMID names one"
+    would be a false premise. Returns the TMID, or 0.
+    """
+    for pid, part in sorted(state.parts.items()):
+        if part.mid != mid:
+            continue
+        tmid = getattr(part, "tmid", 0)
+        if tmid and _thermal_material_for_part(state, pid) is None:
+            return tmid
+    return 0
 
 
 def _structural_density(state: ConversionState, mid: int) -> float:
@@ -647,9 +719,16 @@ def _resolve_thermal(state: ConversionState) -> None:
             or state.thermal_boundaries or state.load_thermal_elements):
         _resolve_load_thermal_elements(state)
         _resolve_expansion(state)
+        _warn_duplicate_tmid(state)
         _resolve_heat_materials(state)
+        _drop_load_thermal_on_thermal_soln(state)
         _resolve_drivers(state)
         _resolve_thermal_boundaries(state)
+    # Outside the gate: both read what was DECIDED above, and both have
+    # something to say about a deck that states a *CONTROL_* card and no
+    # thermal content at all.
+    _warn_fwork(state)
+    _warn_soln0_thermal(state)
 
 
 #: *CONTROL_THERMAL_SOLVER's per-field verdicts, in card order. Each entry is
@@ -667,8 +746,9 @@ _CT_SOLVER_DROPS = (
     ("ptype", "PTYPE",
      "the problem type (0 linear / 1 properties at the gauss-point "
      "temperature / 2 at the element average). Radioss always evaluates k(T) "
-     "from the ELEMENT temperature (dttherm.F90:102-106, mqviscb.F:651-656), "
-     "i.e. it behaves as PTYPE = 2 unconditionally"),
+     "from the ELEMENT temperature (stherm.F:104 KC = (AS + BS*TEMPEL)*VOL, "
+     "and the same line in s4therm.F:84, s10therm.F:81, cbatherm.F:67), i.e. "
+     "it behaves as PTYPE = 2 unconditionally"),
     ("solver", "SOLVER",
      "the linear-algebra choice for the thermal matrix (11 direct, 12-19 "
      "iterative, 30, 90). Radioss assembles NO thermal matrix"),
@@ -758,6 +838,135 @@ def _warn_control_thermal_solver(state: ConversionState) -> None:
         "--units for the deck's real system.")
 
 
+#: A driver whose ``source`` starts with this came from the ``*LOAD_THERMAL_*``
+#: family, which Vol I R17 p.33-162 scopes to structural-only analyses.
+_LOAD_THERMAL = "*LOAD_THERMAL_"
+
+
+def _drop_load_thermal_on_thermal_soln(state: ConversionState) -> None:
+    """``*LOAD_THERMAL_*`` is a STRUCTURAL-ONLY load — drop it on SOLN 1 or 2.
+
+    Vol I R17 p.33-162, the family's own head page, verbatim: *"Nodal
+    temperatures defined by the *LOAD_THERMAL_OPTION method are all applied in
+    a structural only analysis. They are IGNORED in a thermal only or coupled
+    thermal/structural analysis, see *CONTROL_THERMAL_OPTION."*
+
+    So on a ``*CONTROL_SOLUTION`` SOLN = 1 or 2 deck these cards do NOTHING in
+    LS-DYNA. ``/IMPTEMP`` is not "nothing": ``fixtemp.F:180-199`` writes
+    ``TEMP(node)`` every cycle, which is a HARD Dirichlet reset that overrides
+    whatever the ``/CONVEC``, ``/RADIATION`` or ``/IMPFLUX`` solve just
+    computed on those nodes. Emitting it would state a load the deck does not
+    — and would do it in the direction that silently wins. The records are
+    dropped by name instead.
+
+    This composition is NEW with the heat-source boundaries: before them a
+    k2rad thermal deck had no source, so ``/IMPTEMP`` was the only thing
+    moving the temperature and there was nothing for it to override.
+    ``*BOUNDARY_TEMPERATURE`` and ``*INITIAL_TEMPERATURE`` are untouched —
+    p.33-162 scopes its sentence to ``*LOAD_THERMAL_OPTION`` alone, and a
+    prescribed boundary temperature is a genuine thermal boundary condition in
+    a thermal analysis.
+    """
+    if state.ctrl_solution_soln not in (1, 2):
+        return
+    doomed = [d for d in state.imposed_temperatures
+              if d.source.startswith(_LOAD_THERMAL)]
+    if not doomed:
+        return
+    names = sorted({d.source for d in doomed})
+    kind = ("THERMAL-ONLY" if state.ctrl_solution_soln == 1
+            else "COUPLED structural/thermal")
+    state.imposed_temperatures[:] = [
+        d for d in state.imposed_temperatures
+        if not d.source.startswith(_LOAD_THERMAL)]
+    state.warn(
+        f"*CONTROL_SOLUTION SOLN={state.ctrl_solution_soln} makes this a "
+        f"{kind} analysis, and LS-DYNA IGNORES the whole *LOAD_THERMAL_* "
+        "family there: Vol I R17 p.33-162 says its nodal temperatures 'are all "
+        "applied in a structural only analysis. They are ignored in a thermal "
+        "only or coupled thermal/structural analysis'. "
+        f"{len(doomed)} record(s) from " + ", ".join(names) + " are therefore "
+        "DROPPED rather than emitted as /IMPTEMP. The difference matters: "
+        "/IMPTEMP is a HARD Dirichlet reset applied every cycle "
+        "(fixtemp.F:180-199 writes TEMP(node) directly), so on this deck it "
+        "would override the very thermal solve the deck asks for, on exactly "
+        "the nodes it names. Restate them as *BOUNDARY_TEMPERATURE if a "
+        "prescribed boundary temperature was meant — that card IS a thermal "
+        "boundary condition and converts.")
+
+
+def _warn_soln0_thermal(state: ConversionState) -> None:
+    """A deck that STATES ``SOLN = 0`` and then states thermal cards.
+
+    LS-DYNA runs no thermal analysis at all in that case
+    (``*CONTROL_SOLUTION`` p.12-532: *"EQ.0: Structural analysis only"*), so
+    every ``*MAT_THERMAL_*``, ``*BOUNDARY_FLUX``, ``*BOUNDARY_CONVECTION`` and
+    ``*BOUNDARY_RADIATION`` on it is inert there while the converted deck runs
+    a real solve.
+
+    It is named, not dropped, and the asymmetry with
+    ``_drop_load_thermal_on_thermal_soln`` is deliberate: there LS-DYNA's own
+    rule is explicit AND the emitted card would OVERRIDE the deck's solve; here
+    the emitted cards only ADD physics the deck spells out card by card, and
+    silently converting a fully specified thermal model into nothing would be
+    the worse failure. ``*CONTROL_SOLUTION`` is often simply absent, so only a
+    STATED zero is called out.
+    """
+    if not state.ctrl_solution_present or state.ctrl_solution_soln != 0:
+        return
+    kinds = sorted({_BC_CARD[b.kind] for b in state.thermal_boundaries})
+    if not kinds and not state.heat_mat_cards:
+        return
+    what = (", ".join(kinds) if kinds
+            else f"{len(state.heat_mat_cards)} /HEAT/MAT card(s)")
+    state.warn(
+        "*CONTROL_SOLUTION states SOLN=0 (structural analysis ONLY, Vol I R17 "
+        "p.12-532) while the deck also states thermal cards, and the converted "
+        f"deck emits {what}. In LS-DYNA those cards are inert on a SOLN=0 run "
+        "— there is no thermal solve to attach them to — so the converted deck "
+        "computes MORE than the source does. They are emitted anyway, because "
+        "the deck spells the thermal model out card by card and dropping it "
+        "silently would be the larger surprise, but the difference is real: "
+        "set SOLN=2 if a coupled run was meant, or remove the thermal cards.")
+
+
+def _warn_fwork(state: ConversionState) -> None:
+    """What ``FWORK`` actually reaches, and what actually reads it.
+
+    Runs after ``_resolve_heat_materials`` so it can say whether any
+    ``/HEAT/MAT`` carries the value at all. Split from
+    ``_warn_control_thermal_solver`` (which runs first, before any card is
+    decided) for exactly that reason.
+    """
+    ct = state.ctrl_thermal_solver
+    if ct is None:
+        return
+    efrac = _efrac(state)
+    if not state.heat_mat_cards:
+        state.warn(
+            f"*CONTROL_THERMAL_SOLVER: FWORK = {ct.fwork:g} would become "
+            "/HEAT/MAT's EFRAC cell, but this deck emits no /HEAT/MAT at all, "
+            "so it reaches nothing.")
+        return
+    state.warn(
+        f"*CONTROL_THERMAL_SOLVER: FWORK = {ct.fwork:g} is written to every "
+        f"/HEAT/MAT's EFRAC cell (emitted value {efrac:g})"
+        + ("" if ct.has_fwork else
+           " — the cell is BLANK on this card, and p.12-573's Card 1 Default "
+           "row prints '1.' under FWORK, so a blank means full conversion "
+           "exactly as a stated 1.0 does; there is no third state")
+        + ". What CONSUMES it is not quite the same quantity on the two sides. "
+        "LS-DYNA converts a fraction of the mechanical WORK; Radioss scales "
+        "the element's TOTAL internal-energy increment, elastic part included, "
+        "for every law whose HEAT_FLAG is 0 — mmain.F90:2035-2037 for solids "
+        "('die = eint*vol - die', then 'die *= efrac') and cmain3.F:360 for "
+        "shells of law < 28 or law 32 (PM(90) = EFRAC) — plus pforc3.F:321 for "
+        "beams. Only /MAT/LAW2's shell branch scales real plastic work "
+        "(sigeps02c.F:223, SIGY*DPLA*VOL*EFRAC). Over a load-unload cycle the "
+        "elastic part nets out (the increment is signed), but instantaneously "
+        "the converted deck's heat source is not the LS-DYNA one.")
+
+
 def _element_nodes_by_family(state: ConversionState, family: str):
     """``{eid: [node ids]}`` for one ``*LOAD_THERMAL_*_ELEMENT_<FAMILY>``.
 
@@ -799,11 +1008,19 @@ def _resolve_load_thermal_elements(state: ConversionState) -> None:
     covering a whole part (the ordinary spelling) has no interior collision at
     all and converts exactly.
 
-    The two spellings also differ in their REFERENCE state — *"the reference
-    temperature state is assumed to be a NULL state"* (_CONSTANT_ELEMENT,
-    p.33-168) versus *"the temperature at TIME = 0.0"* (_VARIABLE_ELEMENT,
-    p.33-184) — which is why the companion ``/INITEMP`` differs between them,
-    exactly as it already does for their nodal siblings.
+    **The REFERENCE state is NOT carried across, for either spelling.** Vol I
+    R17 p.33-168 says a ``_CONSTANT_ELEMENT`` temperature is measured from a
+    *"null state"*, i.e. LS-DYNA develops ``alpha·T`` of thermal strain from a
+    card that never changes. Radioss has no reference cell at all — the
+    expansion is incremental (``mmain.F90:772-775``: ``tempel0 = lbuf%temp``,
+    the PREVIOUS step's value, and ``eth = alpha·(tempel - tempel0)``), so its
+    reference is whatever temperature the first cycle sees, which is the
+    companion ``/INITEMP`` this writer synthesizes at the driver's own t = 0
+    value. A driver that never moves therefore produces exactly ZERO thermal
+    strain. That is a pre-existing property of every ``*LOAD_THERMAL_*``
+    spelling, nodal ones included, and it is stated where it can bite:
+    ``_warn_constant_driver_expansion`` names it whenever a
+    ``/THERM_STRESS/MAT`` sits beside drivers that are all constant.
     """
     if not state.load_thermal_elements:
         return
@@ -1279,23 +1496,43 @@ def _efrac(state: ConversionState) -> float:
     starter as *"FRACTION OF STRAIN ENERGY CONVERTED INTO HEAT"* — the same
     quantity, and both sides turn a stated 0 into 1.0 (p.12-575 *"EQ.0.0: Use
     default value 1.0"*; ``hm_read_therm.F:239-241`` clamps to (0, 1] with
-    ``0 -> 1``). So a deck that states FWORK gets it, clamped.
+    ``0 -> 1``).
 
-    A deck that does NOT state it keeps ``_EFRAC_OFF``: k2rad's thermal decks
-    prescribe their temperature field from outside (``*LOAD_THERMAL_*``,
-    ``*BOUNDARY_TEMPERATURE``, and now the three heat-source boundaries), and
-    no plastic-work conversion is part of that model — writing the blank that
-    means 1.0 would ADD a heat source the deck never asked for. The smallest
-    positive number is written instead, because the reader turns a literal 0
-    into 1.0.
+    **A BLANK cell is 1.0 too, and the presence of the card is what decides.**
+    p.12-573's Card 1 Default row prints ``1.`` under FWORK, so LS-DYNA reads a
+    blank cell as full conversion — there is no third state. A gate on "was the
+    cell physically typed" would give the same card two different physics
+    depending on whitespace, on exactly the coupled thermo-mechanical deck the
+    keyword exists for. So the whole card's presence is the test.
+
+    A deck that states NO ``*CONTROL_THERMAL_SOLVER`` at all keeps
+    ``_EFRAC_OFF``: its temperature field is prescribed from outside
+    (``*LOAD_THERMAL_*``, ``*BOUNDARY_TEMPERATURE``, or one of the three
+    heat-source boundaries) and no plastic-work conversion is part of that
+    model, so writing the 1.0 that a blank ``/HEAT/MAT`` cell would mean adds a
+    heat source the deck never asked for. The smallest positive number is
+    written instead, because the READER turns a literal 0 into 1.0.
     """
     ct = state.ctrl_thermal_solver
-    if ct is None or not ct.has_fwork:
+    if ct is None:
         return _EFRAC_OFF
     fwork = ct.fwork
     if fwork == 0.0:                    # "EQ.0.0: Use default value 1.0"
         fwork = 1.0
     return min(1.0, max(_EFRAC_OFF, fwork))
+
+
+def _td_name(tm) -> str:
+    """How to NAME a tabulated thermal material in a message.
+
+    The deck's own spelling wins — ``*MAT_T10`` is a legal way to write
+    ``*MAT_THERMAL_ISOTROPIC_TD_LC`` (Vol II R17 p.2-9) and a reader looking
+    for the offending card wants the string that is in the file. The canonical
+    name is appended when the two differ, so the manual page is still findable.
+    """
+    canon = "*MAT_THERMAL_ISOTROPIC_TD" + ("_LC" if tm.is_lc else "")
+    spelling = getattr(tm, "spelling", "") or canon
+    return spelling if spelling == canon else f"{spelling} ({canon})"
 
 
 def _thermal_material_usable(state: ConversionState, tm, mid: int) -> bool:
@@ -1343,7 +1580,7 @@ def _thermal_material_usable(state: ConversionState, tm, mid: int) -> bool:
     if isinstance(tm, MatThermalIsotropicTD) and tm.lc_hsv[0]:
         name, val = tm.lc_hsv
         state.warn(
-            f"*MAT_THERMAL_ISOTROPIC_TD_LC {tm.tmid} -> /HEAT/MAT/{mid}: "
+            f"{_td_name(tm)} {tm.tmid} -> /HEAT/MAT/{mid}: "
             f"{name}={val} makes a thermal property a function of a MECHANICAL "
             "HISTORY VARIABLE (|1-6| a stress component, 7 the plastic strain, "
             "7+k the law's own history slot k — Vol II R17 p.3-39). Radioss's "
@@ -1364,10 +1601,12 @@ def _warn_thermal_generation_drops(state: ConversionState, tm, mid: int) -> None
     state.warn(
         f"*MAT_THERMAL_* {tm.tmid} -> /HEAT/MAT/{mid}: "
         + ", ".join(dropped) + " dropped. /HEAT/MAT has no volumetric "
-        "heat-generation slot and no latent-heat slot (its T1/AL/BL cells are "
-        "the SECOND SEGMENT of a piecewise-linear conductivity — "
-        "dttherm.F90:102-106 selects AS + BS*T below T1 and AL + BL*T above — "
-        "not a latent heat).")
+        "heat-generation slot and no latent-heat slot. Its T1/AL/BL cells are "
+        "not one either: they are a second conductivity segment that ONLY the "
+        "thermal time-step routines read (dttherm.F90:102-106 and "
+        "mqviscb.F:651-656 select AS + BS*T below T1 and AL + BL*T above, both "
+        "gated on IDT_THERM == 1), while the conduction itself is AS + BS*T "
+        "everywhere (stherm.F:104).")
 
 
 def _least_squares_line(pts: List[Tuple[float, float]]) -> Tuple[float, float]:
@@ -1457,19 +1696,34 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
     **Why this is a fit and not a drop.** ``/HEAT/MAT`` takes no function ids
     at ANY cfg version — ``hm_read_therm.F:157-166`` reads exactly nine scalar
     cells and the newest FORMAT block (``radioss2022``) has eight — so a
-    tabulated ``k(T)`` cannot be carried as a table. But it is NOT restricted
-    to one line either: the engine evaluates ``AS + BS*T`` below ``T1`` and
-    ``AL + BL*T`` above, so the target is a TWO-SEGMENT piecewise-linear
-    function and the deck's table can be fitted onto it.
+    tabulated ``k(T)`` cannot be carried as a table. ONE straight line through
+    the deck's own points is what the conduction operator can read, and the fit
+    states its own worst deviation so the reader can judge it.
 
-    **Where the break goes.** ``T1`` is ``MAT_PARAM%THERM%TMELT``, the same
-    variable ``mmain.F90:790`` divides by for the Johnson-Cook ``T*`` — so it
-    is NOT free to be chosen as a fit elbow. When the mechanical law states a
-    melting temperature, that value stays and the two segments are fitted on
-    either side of it; when it does not, ``T1`` stays 0 (the reader turns that
-    into 1e20, ``hm_read_therm.F:238``) and the whole table is fitted with one
-    line which is then MIRRORED into ``AL``/``BL`` so a node that somehow
-    exceeds 1e20 still has a conductivity.
+    **Why ONE line and not the two segments the T1/AL/BL cells suggest.**
+    ``AL``/``BL`` never enter the Lagrangian conduction. Every conduction
+    operator reads ``AS``/``BS`` (``PM(75)``/``PM(76)``) and nothing else —
+    ``stherm.F:82/104``, ``s8etherm.F:86``, ``s4therm.F:67/84``,
+    ``s10therm.F:61/81``, ``cbatherm.F:61/67`` for shells, ``pforc3.F:379``
+    for beams — all of them ``KC = (AS + BS*T_element)``. The two-segment
+    ``if (tempel < tmelt) … else`` form lives ONLY in the thermal TIME-STEP
+    routines (``dttherm.F90:102-106``, ``mqviscb.F:651-656``), and both of
+    those are gated on ``GLOB_THERM%IDT_THERM == 1``, i.e. they run only when
+    the engine deck carries ``/DT/THERM``. Fitting two segments would therefore
+    put half the deck's table into cells the heat flow never reads, and above
+    ``T1`` the run would silently extrapolate the LOWER line anyway.
+
+    So one least-squares line is fitted over the whole tabulated range and
+    MIRRORED into ``AL``/``BL``. The mirror is not cosmetic: with
+    ``AL = BL = 0`` a ``/DT/THERM`` run whose elements are above ``T1`` gets
+    ``dt = DTFACTHERM·0.5·Lc²·rhoCp/1e-20`` and jumps the whole run in one
+    step, and ``CONDE`` (the element conductance the same loop computes for
+    interface heat exchange) collapses to 0.
+
+    ``T1`` itself still matters and is NOT free to be chosen as a fit elbow: it
+    is ``MAT_PARAM%THERM%TMELT``, the same variable ``mmain.F90:790`` divides
+    by for the Johnson-Cook ``T*``. It is carried from the mechanical law
+    unchanged.
 
     Returns ``None`` — a refusal — when the table is unusable or when the
     capacity varies more than ``_TD_CP_SPREAD_LIMIT``.
@@ -1477,7 +1731,7 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
     pairs = [(t, k) for t, k in zip(tm.temps, tm.ks)]
     if len(pairs) < 2:
         state.warn(
-            f"*MAT_THERMAL_ISOTROPIC_TD{'_LC' if tm.is_lc else ''} {tm.tmid} "
+            f"{_td_name(tm)} {tm.tmid} "
             f"-> /HEAT/MAT/{mid}: the card states fewer than two "
             "(temperature, conductivity) points"
             + (f" — curves {tm.hclc}/{tm.tclc} are missing from the deck or "
@@ -1490,7 +1744,7 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
     cps = [c for c in tm.cps if c]
     if not cps:
         state.warn(
-            f"*MAT_THERMAL_ISOTROPIC_TD{'_LC' if tm.is_lc else ''} {tm.tmid} "
+            f"{_td_name(tm)} {tm.tmid} "
             f"-> /HEAT/MAT/{mid}: every stated specific heat is 0, so the "
             "material has no heat capacity at all — the thermal properties "
             "are DROPPED rather than emitted with a fabricated RHO0_CP.")
@@ -1498,7 +1752,7 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
     spread = max(cps) / min(cps)
     if spread > _TD_CP_SPREAD_LIMIT:
         state.warn(
-            f"*MAT_THERMAL_ISOTROPIC_TD{'_LC' if tm.is_lc else ''} {tm.tmid} "
+            f"{_td_name(tm)} {tm.tmid} "
             f"-> /HEAT/MAT/{mid}: the specific heat varies by a factor "
             f"{spread:.3g} over the stated temperature range "
             f"({min(cps):g} .. {max(cps):g}), and /HEAT/MAT's RHO0_CP is ONE "
@@ -1506,43 +1760,45 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
             "(hm_read_therm.F:157-166 reads eight scalars; there is no "
             "function-id form). Collapsing that to a mean would be a "
             "DIFFERENT material, so the thermal properties are DROPPED. "
-            "(The conductivity would have converted: /HEAT/MAT is a "
-            "two-segment piecewise-linear k(T), AS + BS*T below T1 and "
-            "AL + BL*T above — dttherm.F90:102-106, mqviscb.F:651-656.) State "
+            "(The conductivity would have converted: /HEAT/MAT's conduction is "
+            "AS + BS*T_element — stherm.F:104 and its siblings — so a "
+            "least-squares line through the table carries it.) State "
             "*MAT_THERMAL_ISOTROPIC with a representative HC if the capacity "
             "variation is not essential.")
         return None
     rho = tm.tro or _structural_density(state, mid)
     cp_mean = sum(cps) / len(cps)
     rho_cp = rho * cp_mean
-    lo = [p for p in pairs if not t1 or p[0] < t1]
-    hi = [p for p in pairs if t1 and p[0] >= t1]
-    if not lo:                       # every point is above the melt point
-        lo, hi = pairs, []
-    a_s, bs = _least_squares_line(lo)
-    if hi:
-        al, bl = _least_squares_line(hi)
-    else:
-        al, bl = a_s, bs
+    # ONE line over the whole tabulated range, mirrored into AL/BL: the
+    # conduction operators read AS/BS only (see the docstring), so a second
+    # segment would land in cells the heat flow never reads.
+    a_s, bs = _least_squares_line(pairs)
+    al, bl = a_s, bs
     dev = 0.0
     for t, k in pairs:
-        fit = (a_s + bs * t) if (not t1 or t < t1) else (al + bl * t)
-        dev = max(dev, abs(fit - k))
+        dev = max(dev, abs(a_s + bs * t - k))
     kmax = max(abs(k) for _, k in pairs) or 1.0
     state.warn(
-        f"*MAT_THERMAL_ISOTROPIC_TD{'_LC' if tm.is_lc else ''} {tm.tmid} -> "
-        f"/HEAT/MAT/{mid}: the tabulated conductivity is FITTED onto "
-        "/HEAT/MAT's two-segment piecewise-linear k(T) (AS + BS*T below T1, "
-        "AL + BL*T above — dttherm.F90:102-106 and mqviscb.F:651-656; there "
-        "is NO function-id form of /HEAT/MAT at any cfg version). Fitted over "
-        f"{len(pairs)} point(s) on T = {pairs[0][0]:g} .. {pairs[-1][0]:g}: "
-        f"AS = {a_s:.6g}, BS = {bs:.6g}, AL = {al:.6g}, BL = {bl:.6g}, "
-        f"T1 = {t1:g}"
+        f"{_td_name(tm)} {tm.tmid} -> "
+        f"/HEAT/MAT/{mid}: the tabulated conductivity is FITTED onto ONE "
+        "straight line (there is NO function-id form of /HEAT/MAT at any cfg "
+        f"version). Fitted over {len(pairs)} point(s) on "
+        f"T = {pairs[0][0]:g} .. {pairs[-1][0]:g}: "
+        f"AS = {a_s:.6g}, BS = {bs:.6g}, mirrored into AL = {al:.6g}, "
+        f"BL = {bl:.6g}, with T1 = {t1:g}"
         + (" (the mechanical law's own melting temperature, which /HEAT/MAT "
-           "overwrites — it is not free to be chosen as a fit elbow)" if t1
-           else " (blank; hm_read_therm.F:238 turns that into 1e20, so the "
-                "second segment is a mirror of the first and never reached)")
-        + f". Maximum deviation {dev:.6g} = {100.0 * dev / kmax:.3g}% of the "
+           "overwrites)" if t1 else " (blank; hm_read_therm.F:238 turns that "
+           "into 1e20)")
+        + ". The T1/AL/BL cells are deliberately NOT used as a second fit "
+        "segment: every conduction operator reads AS + BS*T_element and "
+        "nothing else (stherm.F:104, s4therm.F:84, s10therm.F:81, "
+        "cbatherm.F:67, pforc3.F:379), and the two-segment 'below/above T1' "
+        "form exists only in the thermal TIME-STEP routines "
+        "(dttherm.F90:102-106, mqviscb.F:651-656), both gated on "
+        "IDT_THERM == 1, i.e. only under /DT/THERM. The mirror keeps that step "
+        "and the interface conductance CONDE sane above T1 — AL = BL = 0 there "
+        "would give dt = 0.5*Lc^2*rhoCp/1e-20."
+        + f" Maximum deviation {dev:.6g} = {100.0 * dev / kmax:.3g}% of the "
         f"largest tabulated value. RHO0_CP = {rho_cp:.6g} = rho {rho:g} x the "
         f"MEAN specific heat {cp_mean:.6g} (stated range {min(cps):g} .. "
         f"{max(cps):g}, spread {spread:.3g}x) — that cell is a single "
@@ -1645,6 +1901,7 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         # and a true conclusion resting on a false premise still misinforms
         # (the #129 lesson). The refusal itself has already been named.
         refused_tm = None
+        unparsed = _unparsed_thermal_tmid(state, mid) if tm is None else 0
         if tm is not None and not _thermal_material_usable(state, tm, mid):
             refused_tm, tm = tm, None
         if isinstance(tm, MatThermalIsotropicTD):
@@ -1679,11 +1936,22 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             # any heat that does appear, and it divides by exactly this cell.
             rho_cp = _law_own_rho_cp(state, mid) or _RHO_CP_PLACEHOLDER
             a_s = 0.0
-            why = ("no *MAT_THERMAL_* is bound to this material "
-                   "(no *PART TMID names one)" if refused_tm is None else
-                   f"*MAT_THERMAL_* {refused_tm.tmid} IS bound to this "
-                   "material through a *PART TMID but could NOT be converted "
-                   "(see the refusal above)")
+            if refused_tm is not None:
+                why = (f"*MAT_THERMAL_* {refused_tm.tmid} IS bound to this "
+                       "material through a *PART TMID but could NOT be "
+                       "converted (see the refusal above)")
+            elif unparsed:
+                # The third case, and the premise of the other two would be
+                # FALSE here: a *PART TMID DOES name a thermal material, but
+                # it is a *MAT_THERMAL_* spelling this converter does not
+                # parse, so it never reached any registry (the #130 class —
+                # a true conclusion on a false premise still misinforms).
+                why = (f"*PART TMID names thermal material {unparsed}, whose "
+                       "*MAT_THERMAL_* spelling k2rad does not parse (it is "
+                       "listed under 'Skipped (unsupported) keywords')")
+            else:
+                why = ("no *MAT_THERMAL_* is bound to this material "
+                       "(no *PART TMID names one)")
             state.warn(
                 f"/HEAT/MAT/{mid}: {why}, so its CONDUCTIVITY is unknown and "
                 "AS = BS = 0 is written: heat does NOT flow between nodes. That "
@@ -1698,10 +1966,20 @@ def _resolve_heat_materials(state: ConversionState) -> None:
                 f"cards are resolved.) RHO0_CP = {rho_cp:g} is "
                 + ("the mechanical law's own volumetric rhoC_p."
                    if rho_cp != _RHO_CP_PLACEHOLDER else
-                   "a placeholder: with no conduction and no strain-energy "
-                   "source (EFRAC = 1e-20 scales the nodal source term at "
-                   "cmain3.F:360) the nodal heat balance has no term, so its "
-                   "value cannot change any result.")
+                   "a placeholder. With no conduction and no strain-energy "
+                   f"source the nodal heat balance has no term at all, so its "
+                   "value cannot change any result — and EFRAC is written at "
+                   f"{_efrac(state):g} here"
+                   + (", which switches that source off (it scales the nodal "
+                      "term at cmain3.F:360 for shells and mmain.F90:2036 for "
+                      "solids)."
+                      if _efrac(state) <= _EFRAC_OFF else
+                      " because *CONTROL_THERMAL_SOLVER states FWORK, which "
+                      "does NOT switch it off: mechanical work becomes heat "
+                      "here (cmain3.F:360 for shells, mmain.F90:2036 for "
+                      "solids) and this placeholder capacity then paces the "
+                      "temperature it produces. State the material's real "
+                      "capacity with *MAT_THERMAL_ISOTROPIC + *PART TMID."))
                 + " Add *MAT_THERMAL_ISOTROPIC + *PART TMID if the model needs "
                 "real conduction.")
         if t1:
@@ -1753,9 +2031,14 @@ def _warn_law2_self_heating(state: ConversionState, mid: int) -> None:
     the FE thermal path, and LAW2 leaves ``MAT_PARAM%HEAT_FLAG = 0`` (only
     mat004/074/084/104/109 set it, ``hm_read_mat04.F:274`` &c.), so
     ``cforc3.F:696`` feeds ``THERMC`` the EFRAC-scaled deformation energy
-    ``DIE`` (``cmain3.F:360``) rather than the law's own ``FHEAT`` — and
-    ``EFRAC`` is deliberately written at 1e-20 here, because
-    ``*MAT_ADD_THERMAL_EXPANSION`` states nothing about heat generation.
+    ``DIE`` (``cmain3.F:360``) rather than the law's own ``FHEAT``.
+
+    **What EFRAC then is depends on the deck**, so the message READS the
+    emitted value instead of asserting a constant: a ``*CONTROL_THERMAL_SOLVER``
+    FWORK reaches it (``_efrac``), and a deck with no such card keeps
+    ``_EFRAC_OFF`` because ``*MAT_ADD_THERMAL_EXPANSION`` /
+    ``*MAT_THERMAL_ISOTROPIC`` state nothing about heat generation. The two
+    cases are a different physics story and the warning tells them apart.
 
     The pair is still emitted (the deck asked for the expansion, and the
     Johnson-Cook ``T*`` softening still follows the PRESCRIBED field, with
@@ -1768,6 +2051,7 @@ def _warn_law2_self_heating(state: ConversionState, mid: int) -> None:
     m = state.mat_johnson_cook.get(mid)
     if m is None:
         return
+    efrac = _efrac(state)
     state.warn(
         f"/HEAT/MAT/{mid} on a *MAT_015-derived law (/MAT/LAW2 or LAW4): the "
         "law's OWN adiabatic plastic-work heating is switched OFF by the "
@@ -1775,15 +2059,26 @@ def _warn_law2_self_heating(state: ConversionState, mid: int) -> None:
         "m2law.F:547 (solids) read 'IF (JTHE /= 0) ... ELSEIF (RHOCP > ZERO) "
         "TEMPEL += SIGY*DPLA/RHOCP', so the local branch is skipped as soon as "
         "the material has a /HEAT/MAT. What replaces it is the FE thermal "
-        "path, whose nodal source is EFRAC-scaled (cmain3.F:360, PM(90) = "
-        "EFRAC) and EFRAC is written at 1e-20 because "
-        "*MAT_ADD_THERMAL_EXPANSION / *MAT_THERMAL_ISOTROPIC state nothing "
-        "about heat generation. Net effect: the element temperature now "
-        "follows ONLY the prescribed *LOAD_THERMAL_* / *BOUNDARY_TEMPERATURE "
-        "field, and the Johnson-Cook thermal softening no longer develops from "
-        "plastic work. If the run needs adiabatic self-heating, drop the "
-        "thermal card from THIS part (the material can be split by giving the "
-        "part its own *MAT_015).")
+        "path, whose nodal source is EFRAC-scaled (cmain3.F:360 for shells, "
+        f"PM(90) = EFRAC; mmain.F90:2036 for solids), and EFRAC is {efrac:g} "
+        "on this deck"
+        + (" because no *CONTROL_THERMAL_SOLVER states FWORK and "
+           "*MAT_ADD_THERMAL_EXPANSION / *MAT_THERMAL_ISOTROPIC say nothing "
+           "about heat generation. Net effect: the element temperature now "
+           "follows ONLY the prescribed *LOAD_THERMAL_* / "
+           "*BOUNDARY_TEMPERATURE field (or a heat-source boundary), and the "
+           "Johnson-Cook thermal softening no longer develops from plastic "
+           "work. If the run needs adiabatic self-heating, drop the thermal "
+           "card from THIS part (the material can be split by giving the part "
+           "its own *MAT_015)."
+           if efrac <= _EFRAC_OFF else
+           " (*CONTROL_THERMAL_SOLVER FWORK). So the plastic work DOES still "
+           "become heat — but through the FE path and on a different "
+           "quantity: Radioss scales the element's TOTAL internal-energy "
+           "increment, elastic part included, where LS-DYNA's FWORK applies "
+           "to mechanical work. The temperature is then spread by conduction "
+           "instead of staying in the element, so the Johnson-Cook softening "
+           "follows a smoother field than the adiabatic one the .k states."))
 
 
 def _law_own_rho_cp(state: ConversionState, mid: int) -> float:
@@ -2098,20 +2393,47 @@ def _bc_scaled_function(state: ConversionState, lcid: int, mult: float,
                         tag: str) -> int:
     """A copy of curve *lcid* with *mult* BAKED INTO THE ORDINATE.
 
-    Used for ``/RADIATION`` only, and it is a workaround for a measured
-    OpenRadioss defect, not a stylistic choice. ``radiation.F:249`` places
-    ``T_INF = FCY*T_INF`` OUTSIDE the ``IF(IFUNC_OLD /= IFUNC .OR. TS_OLD /=
-    TS)`` cache guard it opens at ``:239``, so under ``/PARITH/ON`` (the
-    default) the ordinate scale is re-applied ONCE PER SEGMENT: with six
-    segments and ``FSCALE = 1000`` the environment temperature ran
-    1e3, 1e6, … 1e18 and ``Inf**4 - Inf**4`` produced NaN within a few cycles.
-    ``convec.F:241`` puts the identical multiply INSIDE its guard and is
-    immune. Four-run isolation: 6 segments + FSCALE 1000 + P/ON → NaN; the
-    same deck with T_inf in the curve and FSCALE 1 → 0.33750793 (correct);
-    P/OFF → 0.33750793; one segment + FSCALE 1000 → correct either way.
+    Used for ``/RADIATION`` **and** ``/CONVEC``, and it is a workaround for two
+    measured OpenRadioss defects, not a stylistic choice. Both live in the
+    ``/PARITH/ON`` branch (the engine DEFAULT — k2rad writes ``/PARITH`` only
+    when the deck carries a ``*CONTROL_PARALLEL``), and both concern the
+    ``Fscale_y`` cell the two cards call ``FCY``:
 
-    Writing ``FSCALE = 1.0`` neutralises it exactly (1.0 re-applied N times is
-    1.0) with no engine patch.
+    ``/RADIATION`` — COMPOUNDING.
+        ``radiation.F:249`` places ``T_INF = FCY*T_INF`` OUTSIDE the
+        ``IF(IFUNC_OLD /= IFUNC .OR. TS_OLD /= TS)`` cache guard it opens at
+        ``:239``, so the ordinate scale is re-applied ONCE PER SEGMENT: with
+        six segments and ``FSCALE = 1000`` the environment temperature ran
+        1e3, 1e6, … 1e18 and ``Inf**4 - Inf**4`` produced NaN within a few
+        cycles. Four-run isolation: 6 segments + FSCALE 1000 + P/ON → NaN; the
+        same deck with T_inf in the curve and FSCALE 1 → 0.33750793 (correct);
+        P/OFF → 0.33750793; one segment + FSCALE 1000 → correct either way.
+
+    ``/CONVEC`` — a STALE CACHE, which is a different defect with the same
+    cure. ``convec.F:241`` really does put the multiply INSIDE its guard, so
+    convection never compounds — but the guard's KEY at ``convec.F:234`` is
+    ``IF(IFUNC_OLD /= IFUNC .OR. TS_OLD /= TS)`` and ``FCY_OLD`` is missing
+    from it, while the ``/PARITH/OFF`` branch at ``convec.F:127`` does carry
+    ``.OR. FCY_OLD /= FCY``. So two ``/CONVEC`` cards that share ONE ``funct``
+    at different ``Fscale_y`` values silently reuse the FIRST card's ``T_INF``.
+    Worse, ``IFUNC_OLD``/``TS_OLD`` are OMP-private, so the answer depends on
+    the THREAD COUNT. MEASURED on converter output (1 mm brick,
+    ``RHO0_CP = 3.611``, six faces, h = 100, two ``*BOUNDARY_CONVECTION_SET``
+    records both on TLCID 900 at TMULT 1.0 and 2.0, ENDTIM 2.4e-3): the
+    unfixed deck stores ``CONVECTION HEAT = 1389.1850`` mJ at ``nt=1`` and
+    ``1425.3912`` at ``nt=6``; the fixed deck stores ``2381.4601`` at BOTH,
+    against a closed form of ``2381.4170`` (+0.0018 %). All four runs: 16 823
+    cycles, 0 ERROR / 0 WARNING / NORMAL TERMINATION. The ``nt=1`` figure is
+    the clean collapse — 1389.16 is the closed form with BOTH cards reading the
+    first one's ``T_inf`` — which identifies the mechanism exactly.
+
+    Writing ``FSCALE = 1.0`` neutralises BOTH exactly — 1.0 re-applied N times
+    is 1.0, and a stale 1.0 is the same 1.0 — with no engine patch.
+    ``/IMPFLUX`` needs no such treatment — ``fixflux.F:278-288`` caches the
+    UNSCALED ``FLUX_DENS`` and applies ``FCY`` per record at ``:300``/``:322``/
+    ``:338``, outside the guard — and neither does ``/IMPTEMP``, whose
+    ``fixtemp.F:180-199`` multiplies by ``FAC = VAL(4,N)`` once per entry with
+    no cache at all.
     """
     src = state.curves[lcid]
     fid = state.next_curve_id()
@@ -2134,10 +2456,16 @@ def _bc_common_drops(state: ConversionState, bc) -> None:
             "temperature each, so the through-thickness distinction is "
             "dropped.")
     if bc.pserod:
+        # The erosion paragraph is a DIFFERENT page and remark number on each
+        # of the three cards; one citation copied across all three would be
+        # wrong on two of them.
+        cite = {"FLUX": "p.5-49 Remark 5",
+                "CONVEC": "p.5-32 Remark 4",
+                "RADIATION": "p.5-124 Remark 4"}[bc.kind]
         state.warn(
             f"{bc.source}: PSEROD={bc.pserod} asks LS-DYNA to re-apply this "
             "boundary condition to segments newly EXPOSED as solid elements "
-            "erode (Vol I R17 p.5-49 Remark 5). Radioss has no such mechanism "
+            f"erode (Vol I R17 {cite}). Radioss has no such mechanism "
             "at all: convecoff.F/radiatoff.F only DEACTIVATE existing segments "
             "and run solely from DESACTI (the /ACTIV path), and there is no "
             "fixfluxoff at all — so the boundary stays on the ORIGINAL "
@@ -2177,6 +2505,18 @@ def _resolve_thermal_boundaries(state: ConversionState) -> None:
     conduction = any(c[2] or c[3] for c in state.heat_mat_cards.values())
     kept = []
     for bc in state.thermal_boundaries:
+        # The SEGMENT SOURCE is resolved FIRST, before any per-kind resolver
+        # announces what the record converts to and before any /FUNCT is minted
+        # for it. It used to be resolved at emission time, two passes later,
+        # which meant a record naming an undefined *SET_SEGMENT printed a full
+        # "-> /CONVEC with H = 100 ..." sentence and left an orphan curve
+        # behind before the drop message arrived (the #130 class: a statement
+        # of what the deck will emit that does not mirror the emitter's own
+        # drop conditions).
+        bc.segments = _bc_segments(state, bc)
+        if bc.segments is None:
+            _bc_common_drops(state, bc)
+            continue
         if bc.kind == "FLUX":
             ok = _resolve_flux(state, bc)
         elif bc.kind == "CONVEC":
@@ -2345,7 +2685,6 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
                 "*DEFINE_CURVE (or one with fewer than two points). /CONVEC's "
                 "funct_ID is MANDATORY (ERROR 120), so the record is dropped.")
             return False
-        bc.func_id = bc.lcid
         if bc.fscale == 0.0:
             # The *BOUNDARY_TEMPERATURE TMULT ambiguity again: a printed
             # default of 0. beside a curve would literally mean T_inf = 0, and
@@ -2363,16 +2702,34 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
                 "of what it does. State TMULT on the .k card if a different "
                 "scale was meant.")
             bc.fscale = 1.0
+        mult = bc.fscale
+        # TMULT is BAKED into a copy of the curve rather than written to the
+        # card — see _bc_scaled_function for the measured /PARITH/ON defect it
+        # dodges (convec.F:234's cache key has no FCY_OLD, so a second card
+        # sharing this curve at a different multiplier would silently reuse the
+        # FIRST card's T_inf). A multiplier of exactly 1.0 needs no copy: a
+        # stale 1.0 is the same 1.0, so the deck keeps its own curve id.
+        bc.func_id = (bc.lcid if mult == 1.0 else
+                      _bc_scaled_function(state, bc.lcid, mult, "convec_tinf"))
     else:
         bc.func_id = _bc_constant_function(state, bc.fscale, "convec_tinf")
-        bc.fscale = 1.0
+    bc.fscale = 1.0
     state.warn(
         f"{bc.source} -> /CONVEC with H = {bc.coef:g}, carried through with NO "
         "sign change. LS-DYNA writes the flux OUT of the surface, "
         "q'' = h(T_surface - T_inf) (Vol I R17 p.5-32 Remark 1); Radioss "
         "writes the heat IN, FLUX = AREA*H*(T_INF - TE)*dt (convec.F:152). The "
         "two expressions mirror, so a positive h means the same thing on both "
-        "sides.")
+        "sides. The environment temperature is emitted inside the /FUNCT with "
+        "Fscale_y = 1.0, which sidesteps an OpenRadioss defect: convec.F:234's "
+        "/PARITH/ON cache key is 'IFUNC_OLD /= IFUNC .OR. TS_OLD /= TS' with "
+        "no FCY_OLD in it (the /PARITH/OFF branch at convec.F:127 HAS it), so "
+        "two cards sharing one T_inf curve at different Fscale_y values "
+        "silently reuse the first card's T_inf — and the cache is per OMP "
+        "THREAD, so the answer moves with the thread count. MEASURED on this "
+        "converter's own output: 1389.1850 mJ at nt=1 and 1425.3912 at nt=6, "
+        "against a correct 2381.4601 at both, at 0 ERROR / 0 WARNING / NORMAL "
+        "TERMINATION.")
     return True
 
 
@@ -2488,8 +2845,11 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
         "Fscale_y = 1.0, which sidesteps an OpenRadioss defect: "
         "radiation.F:249 applies Fscale_y OUTSIDE its own cache guard, so "
         "under /PARITH/ON a multi-segment card with Fscale_y != 1 re-scales "
-        "T_inf once per segment and reaches NaN (measured; convec.F:241 has "
-        "the identical line INSIDE the guard and is immune). NOTE Vol I R17 "
+        "T_inf once per segment and reaches NaN (measured). /CONVEC gets the "
+        "same treatment for a DIFFERENT flavour of the same cell: its multiply "
+        "IS inside the guard (convec.F:241), so it never compounds, but "
+        "FCY_OLD is missing from that guard's key (convec.F:234) and two cards "
+        "sharing one curve reuse the first one's T_inf. NOTE Vol I R17 "
         "p.5-110: radiation needs an ABSOLUTE temperature scale on both sides "
         "— a deck in Celsius is wrong in LS-DYNA too."
         + ("" if t_inf_const is None else
@@ -2560,7 +2920,9 @@ def _make_thermal_boundaries(state: ConversionState) -> List[str]:
     # identical segments still share one.
     surfs: Dict[Tuple, int] = {}
     for bc in state.thermal_boundaries:
-        segs = _bc_segments(state, bc)
+        # Resolved in _resolve_thermal_boundaries, which already refused every
+        # record whose segments could not be built.
+        segs = bc.segments
         if segs is None:
             continue
         key = ("set", bc.ssid) if not any(bc.nodes) else \
@@ -2704,6 +3066,7 @@ def _make_thermal(state: ConversionState) -> List[str]:
     # _make_thermal_output read it.
     lines += _make_thermal_boundaries(state)
     _warn_inert_expansion(state)
+    _warn_constant_driver_expansion(state)
     lines += _make_thermal_output(state, seen)
     _note_tprint(state)
     return lines
@@ -2757,6 +3120,73 @@ def _warn_inert_expansion(state: ConversionState) -> None:
         "reason.")
 
 
+def _warn_constant_driver_expansion(state: ConversionState) -> None:
+    """A ``/THERM_STRESS/MAT`` beside drivers that NEVER MOVE.
+
+    One level up from ``_warn_inert_expansion``: there the deck has no driver
+    at all; here it has one, so the expansion is not "inert" by that test — and
+    it still produces exactly zero thermal strain, because every driver is a
+    CONSTANT and this writer synthesizes the companion ``/INITEMP`` at that
+    same constant.
+
+    Why the /INITEMP has to be there: ``/HEAT/MAT``'s ``T0`` cannot carry a
+    starting temperature of 0 (``hm_read_therm.F:236-237`` turns a blank or
+    zero into 300 K), so a driver's own t = 0 value is written as an
+    ``/INITEMP``. The consequence on a constant driver is that
+    ``mmain.F90:772-775`` — ``tempel0 = lbuf%temp`` (the previous step) and
+    ``eth = alpha·(tempel - tempel0)`` — sees no increment, ever.
+
+    LS-DYNA does not agree. ``*LOAD_THERMAL_CONSTANT`` and its ``_NODE`` /
+    ``_ELEMENT`` spellings measure from a *"null state"* (Vol I R17 p.33-168,
+    p.33-169), i.e. the structure carries ``alpha·T`` of thermal strain from a
+    card that never changes. That difference is stated here rather than
+    engineered around: writing the companion ``/INITEMP`` at 0 instead would
+    start an absolute-temperature model at 0 K, which is wrong for every other
+    consumer of the field (conduction, Johnson-Cook ``T*``, radiation), and
+    changing the reference of the whole ``*LOAD_THERMAL_*`` family is a bigger
+    decision than this batch's.
+    """
+    if not state.therm_stress_cards or not state.thermal_driver_emitted:
+        return
+    if state.thermal_source_emitted:
+        return                       # a heat source moves the field for real
+    movers = [d for d in state.imposed_temperatures if d.lcid]
+    if movers:
+        return
+    # Every driver is a constant. It only pins the field FLAT where an
+    # /INITEMP over the same scope starts those nodes at the same value —
+    # which is what this writer synthesizes whenever the deck states no
+    # *INITIAL_TEMPERATURE of its own. A deck that states a DIFFERENT initial
+    # temperature does get one step of real expansion, so it is not warned.
+    init_by_key: Dict[Tuple, Set[float]] = defaultdict(set)
+    for it in state.initial_temperatures:
+        init_by_key[_driver_key(it)].add(it.temp)
+    for d in state.imposed_temperatures:
+        if init_by_key.get(_driver_key(d)) != {d.const + d.offset}:
+            return
+    consts = sorted({round(d.const + d.offset, 12)
+                     for d in state.imposed_temperatures})
+    alphas = ", ".join(str(m) for m in sorted(state.therm_stress_cards))
+    state.warn(
+        f"/THERM_STRESS/MAT on material(s) {alphas} sits beside drivers that "
+        "NEVER MOVE: every emitted /IMPTEMP is a constant "
+        + (f"({', '.join(f'{c:g}' for c in consts[:6])}"
+           + (" ..." if len(consts) > 6 else "") + ")")
+        + " and its companion /INITEMP starts the same nodes at that same "
+        "value, so the increment Radioss expands on is identically zero "
+        "(mmain.F90:772-775: tempel0 = the PREVIOUS step's temperature, "
+        "eth = alpha*(tempel - tempel0)). The converted deck therefore "
+        "develops NO thermal strain from these cards, at 0 starter errors. "
+        "LS-DYNA does: *LOAD_THERMAL_CONSTANT* measures from a 'null state' "
+        "(Vol I R17 p.33-168/33-169), i.e. alpha*T of strain from a constant "
+        "card. Radioss has no reference-temperature cell to express that — "
+        "/INITEMP at 0 would start an ABSOLUTE-temperature model at 0 K and "
+        "corrupt conduction, Johnson-Cook T* and radiation alike. State the "
+        "temperature history the structure really goes through "
+        "(*LOAD_THERMAL_VARIABLE / _LOAD_CURVE, or *BOUNDARY_TEMPERATURE with "
+        "a curve) if the expansion is meant to load the model.")
+
+
 def _make_thermal_output(state: ConversionState,
                          seen: Set[Tuple[int, bool]]) -> List[str]:
     """A /TH/NODE TEMP group over the driven nodes — ONLY when the deck really
@@ -2800,9 +3230,7 @@ def _make_thermal_output(state: ConversionState,
     for bc in state.thermal_boundaries:
         if not bc.surf_id:
             continue                    # the record was dropped at emission
-        segs = ([bc.nodes] if any(bc.nodes) else
-                [s for s in state.segment_sets[bc.ssid].segments])
-        for seg in segs:
+        for seg in (bc.segments or []):
             for n in seg:
                 if n in state.nodes and n not in have:
                     have.add(n)
@@ -2927,13 +3355,21 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
         # there being no expansion card so a deck with both is told ONCE.
         state.warn(
             "A thermal solve is armed on a deck that also carries /IMPL/* (an "
-            "implicit run). The implicit engine on this build has NO thermal "
-            "solve at all: FIXTEMP, TEMPUR, CONVEC, RADIATION, FIXFLUX and "
-            "THERMBILAN are all called from the EXPLICIT integration loop in "
-            "resol.F and none is reached from imp_solv (grep ITHERM over "
-            "engine/source/implicit returns nothing). The /IMPTEMP, /CONVEC, "
-            "/RADIATION and /IMPFLUX cards are emitted and accepted, and "
-            "NOTHING WILL HAPPEN. Run the thermal phase explicitly.")
+            "implicit run). The implicit engine on this build does NOT "
+            "integrate the temperature. MEASURED on a twin pair of converted "
+            "decks (10-brick bar, /HEAT/MAT AS = 50, an /IMPTEMP holding one "
+            "end at 400 K against an /INITEMP of 300): explicit carries the "
+            "far end 300 -> 399.731 -> 400.000 K, while the same .k plus a "
+            "*CONTROL_IMPLICIT_GENERAL leaves it at exactly 300.000 K at every "
+            "state, with HEAT STORED = 0.0000000, at 0 ERROR / 0 WARNING / "
+            "NORMAL TERMINATION. Only the imposed nodes move, because "
+            "resol.F:1802 FIXTEMP is reached; nothing conducts and TEMPUR "
+            "never updates a node. The /IMPTEMP, /CONVEC, /RADIATION and "
+            "/IMPFLUX cards are emitted and accepted, and the field they "
+            "describe will not develop. The /ANIM/NODA/TEMP and /TH ... TEMP "
+            "channels are left OUT for that reason (they would be flat), and "
+            "so are the engine cards /DT/THERM and /THERM. Run the thermal "
+            "phase explicitly.")
     if not state.therm_stress_cards:
         return
     from .mesh import _target_mat_law
@@ -2971,10 +3407,14 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
     if state.is_implicit:
         state.warn(
             "/THERM_STRESS/MAT is emitted on a deck that also carries "
-            "/IMPL/* (an implicit run). The implicit engine on this build has "
-            "NO thermal solve at all: FIXTEMP, TEMPUR, CONVEC, RADIATION and "
-            "THERMBILAN are all called from the EXPLICIT integration loop in "
-            "resol.F and none is reached from imp_solv (grep ITHERM over "
-            "engine/source/implicit returns nothing). The thermal expansion "
-            "will therefore not act. Run the thermal-expansion phase "
-            "explicitly.")
+            "/IMPL/* (an implicit run). The implicit engine on this build does "
+            "NOT integrate the temperature, so there is no DTEMP for the "
+            "expansion to act on. MEASURED on a twin pair of converted decks "
+            "(10-brick bar, /HEAT/MAT AS = 50, an /IMPTEMP holding one end at "
+            "400 K against an /INITEMP of 300): explicit carries the far end "
+            "300 -> 399.731 -> 400.000 K over 84 111 cycles, while the same .k "
+            "plus a *CONTROL_IMPLICIT_GENERAL leaves it at exactly 300.000 K "
+            "at every one of its 61 implicit cycles, with HEAT STORED = "
+            "0.0000000, at 0 ERROR / 0 WARNING / NORMAL TERMINATION. Only the "
+            "imposed nodes move (resol.F:1802 FIXTEMP is reached); nothing "
+            "conducts. Run the thermal-expansion phase explicitly.")

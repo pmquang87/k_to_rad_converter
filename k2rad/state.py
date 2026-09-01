@@ -6252,7 +6252,15 @@ class MatThermalIsotropicTD:
     tclc: int = 0
     #: *_TD_LC only — the ``(name, value)`` of the first non-zero ``*HSV`` cell.
     lc_hsv: Tuple[str, int] = ("", 0)
+    #: The ``_TD_LC`` layout (curve ids on card 2) rather than the ``_TD`` one
+    #: (three tabulated rows). It must be keyed on the CARD, not on the
+    #: spelling: ``*MAT_T10`` IS ``*MAT_THERMAL_ISOTROPIC_TD_LC`` (Vol II R17
+    #: p.2-9, and p.3-37 heads the card with both names), so a suffix test
+    #: alone reads it with the wrong layout.
     is_lc: bool = False
+    #: The keyword the DECK actually wrote, so messages name that and not a
+    #: synonym the reader would have to look up.
+    spelling: str = ""
 
 
 @dataclass
@@ -6266,8 +6274,8 @@ class MatThermalOrthotropic:
       Card3: XP YP ZP A1 A2 A3
       Card4: D1 D2 D3
 
-    /HEAT/MAT carries ONE conductivity pair (``AS + BS·T`` below ``T1``,
-    ``AL + BL·T`` above — ``dttherm.F90:102-106``, ``mqviscb.F:651-656``), so
+    /HEAT/MAT conducts with ONE isotropic ``AS + BS·T`` (``stherm.F:104`` and
+    its per-element siblings read ``PM(75)``/``PM(76)`` and nothing else), so
     ``K1 == K2 == K3`` converts exactly and anything else would have to invent
     an "average conductivity" the deck never states.
     """
@@ -6379,6 +6387,11 @@ class ThermalBoundary:
     func_id: int = 0
     fscale: float = 1.0
     surf_id: int = 0
+    #: The segment list, resolved ONCE in ``_resolve_thermal_boundaries``
+    #: BEFORE the per-kind resolver runs — so a record whose ``*SET_SEGMENT``
+    #: is missing or malformed is refused before anything announces it (and
+    #: before a ``/FUNCT`` is minted for it).
+    segments: Optional[List[List[int]]] = None
 
 
 @dataclass
@@ -7184,8 +7197,9 @@ class ConversionState:
         field(default_factory=dict)
     # The two richer thermal materials, kept in their OWN dicts because the
     # TMID namespace is shared: a deck may not state T01 and T03 under the same
-    # TMID, and _thermal_material_for_part resolves them in a fixed order so a
-    # deck that does gets a named warning instead of a dict-order coin flip.
+    # TMID. _thermal_material_for_part resolves them in a FIXED order so such
+    # a deck gets a stable answer rather than a dict-order coin flip, and
+    # writer/thermal._warn_duplicate_tmid names it.
     mat_thermal_iso_td: Dict[int, MatThermalIsotropicTD] = \
         field(default_factory=dict)
     mat_thermal_ortho: Dict[int, MatThermalOrthotropic] = \
@@ -7196,6 +7210,11 @@ class ConversionState:
     # *CONTROL_SOLUTION SOLN, verbatim (0 structural, 1 thermal-only, 2 coupled).
     # SOLN = 1 is what makes _make_engine_thermal write /DT/THERM.
     ctrl_solution_soln: int = 0
+    # Whether the deck states *CONTROL_SOLUTION at all. A STATED 0 and an
+    # ABSENT card are the same analysis in LS-DYNA but not the same statement
+    # by the deck's author, and the thermal writer says different things about
+    # them (writer/thermal._warn_soln0_thermal).
+    ctrl_solution_present: bool = False
     # *BOUNDARY_{FLUX,CONVECTION,RADIATION} → /IMPFLUX, /CONVEC, /RADIATION.
     thermal_boundaries: List[ThermalBoundary] = field(default_factory=list)
     # *LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_<FAMILY> — element-centric

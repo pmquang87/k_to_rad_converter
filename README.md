@@ -2535,15 +2535,16 @@ unit/sign gotchas.
 | `*BOUNDARY_TEMPERATURE[_SET\|_NODE]` | `/IMPTEMP` on the set | `TMULT` → `Fscale_y` on the curve form (blank/0 resolved to 1.0 here, never left to the reader's own 0 → 1), → the constant T on the `TLCID = 0` form; `TDEATH` → `T_stop`; `TBIRTH` → `T_start` **and** the curve pre-shifted by `−TBIRTH`, because `fixtemp.F:118-129` evaluates it at `t − T_start` while LS-DYNA reads absolute time |
 | `*SECTION_SHELL_THERMAL` | the ordinary `/PROP/SHELL` | registering the spelling is what turns 40 × `ERROR 495` "NULL THICKNESS" into a startable deck |
 | `*BOUNDARY_FLUX_{SEGMENT\|SET}` | `/IMPFLUX` on a `/SURF/SEG` | **`Fscale_y = −MLC`** — the sign is INVERTED (Vol I R17 p.5-49 Remark 1: *"a negative flux transfers energy INTO the volume"*, while `fixflux.F:165` adds `+AREA·FLUX_DENS·dt`). `MLC1..MLC4` must agree (Radioss splits the segment evenly); `LCID < 0` (flux vs temperature) and `NHISV > 0` (`usrflux`) are named drops |
-| `*BOUNDARY_CONVECTION_{SEGMENT\|SET}` | `/CONVEC` on a `/SURF/SEG` | `HMULT → H` **with no sign change** (LS-DYNA `q″ = h(T_s − T_∞)`, `convec.F:152` `AREA·H·(T_INF − TE)·dt` — the expressions mirror). `TLCID → funct_ID`, `TMULT → Fscale_y`. A curve on `HLCID` is inexpressible (`H` is a raw scalar) and is a named drop |
+| `*BOUNDARY_CONVECTION_{SEGMENT\|SET}` | `/CONVEC` on a `/SURF/SEG` | `HMULT → H` **with no sign change** (LS-DYNA `q″ = h(T_s − T_∞)`, `convec.F:152` `AREA·H·(T_INF − TE)·dt` — the expressions mirror). `TLCID → funct_ID`, and `TMULT` is BAKED INTO A COPY of that curve with `Fscale_y = 1.0`: `convec.F:234`'s `/PARITH/ON` cache key omits `FCY_OLD` (the `/PARITH/OFF` branch at `:127` has it), so two cards sharing one curve at different scales reuse the first one's `T_∞` — MEASURED 1389.19 mJ (nt=1) / 1425.39 (nt=6) against a correct 2381.46, thread-count dependent, at 0 ERROR / NORMAL TERMINATION. A curve on `HLCID` is inexpressible (`H` is a raw scalar) and is a named drop |
 | `*BOUNDARY_RADIATION_{SEGMENT\|SET}` (TYPE 1) | `/RADIATION` on a `/SURF/SEG` | **`E = FMULT / σ_deck`** — LS-DYNA's cell is `f = σεF` with σ already in it (p.5-117 Remark 1); Radioss's is a bare emissivity and `hm_read_radiation.F:140-142` derives σ from `/BEGIN` (`5.6704e-11` in Mg-mm-s). `T_∞` is baked into the `/FUNCT` with `Fscale_y = 1.0`, which sidesteps a measured `/PARITH/ON` NaN in `radiation.F:249` |
 | `*BOUNDARY_RADIATION_*_VF_*`, `_ENCLOSURE` | — | view-factor / enclosure exchange: **named** warn-drop, no Radioss counterpart in `engine/source/constraints/thermic` |
 | `*CONTROL_SOLUTION` SOLN=1 | the engine card `/DT/THERM` | thermal-only run mode: `resol.F:1738` freezes every nodal DOF, `:5807` replaces the mechanical step. Refused with `--ams` (`freform.F:1327` is a hard `ANCMSG(301)`), and guarded against the two measured traps — an ENDTIM shorter than one thermal step stores ZERO heat, and the step is a CONDUCTION limit that a stiff `/CONVEC` diverges past, both under NORMAL TERMINATION |
 | `*CONTROL_THERMAL_SOLVER` TSF | the engine card `/THERM` | `THEACCFACT`, the thermal speed-up factor (`frethermal.F:64-70`); a negative TSF (a curve) is a named drop |
-| `*CONTROL_THERMAL_SOLVER` FWORK | `/HEAT/MAT` `EFRAC` | both are *"fraction of mechanical work converted into heat"* and both turn a stated 0 into 1.0. Its other 15 cells are named per-field drops; `SBC` becomes a CROSS-CHECK against the σ `/BEGIN` implies |
-| `*MAT_THERMAL_ISOTROPIC_TD[_LC]` via `*PART` TMID | the `/HEAT/MAT` values, by FIT | `/HEAT/MAT`'s `k(T)` is **two-segment** piecewise-linear (`AS+BS·T` below `T1`, `AL+BL·T` above — `dttherm.F90:102-106`), so the table is least-squares-fitted and the warning states all six coefficients and the max deviation. `RHO0_CP` is ONE constant: a capacity varying by more than 2× refuses the card |
+| `*CONTROL_THERMAL_SOLVER` FWORK | `/HEAT/MAT` `EFRAC` | both are *"fraction of mechanical work converted into heat"*, both turn a stated 0 into 1.0, and a BLANK cell is 1.0 too (p.12-573's Card 1 Default row prints `1.`) — the card's PRESENCE is the test, not whether the cell was typed. What consumes it is not quite the same quantity: Radioss scales the element's TOTAL internal-energy increment for every law with `HEAT_FLAG = 0` (`mmain.F90:2035-2037`, `cmain3.F:360`, `pforc3.F:321`); only LAW2 shells scale real plastic work (`sigeps02c.F:223`). Its other 15 cells are named per-field drops; `SBC` becomes a CROSS-CHECK against the σ `/BEGIN` implies |
+| `*MAT_THERMAL_ISOTROPIC_TD[_LC]` via `*PART` TMID | the `/HEAT/MAT` values, by FIT | The conduction operators read `AS + BS·T_element` and nothing else (`stherm.F:104`, `s4therm.F:84`, `s10therm.F:81`, `cbatherm.F:67`, `pforc3.F:379`), so the table is fitted with ONE least-squares line, mirrored into `AL`/`BL` to keep a `/DT/THERM` step sane above `T1`; the warning states all six coefficients and the max deviation. `RHO0_CP` is ONE constant: a capacity varying by more than 2× refuses the card |
 | `*MAT_THERMAL_ORTHOTROPIC` via `*PART` TMID | the `/HEAT/MAT` values, when `K1 = K2 = K3` | `/HEAT/MAT` is isotropic; three different conductivities are a named drop that prints all three rather than inventing an average |
 | `*LOAD_THERMAL_{CONSTANT\|VARIABLE}_ELEMENT_{BEAM\|SHELL\|SOLID\|TSHELL}` | `/IMPTEMP` over the elements' own nodes | the LS-DYNA card is element-centric and `/IMPTEMP` is nodal, so the expansion is emitted only when the node → temperature map is single-valued; a node claimed by two elements at two temperatures drops the whole card by name. All four `_OPTION` suffixes are mandatory (p.33-162) and were previously unregistered |
+| `*CONTROL_SOLUTION` SOLN=1/2 + `*LOAD_THERMAL_*` | — (the drivers are DROPPED) | Vol I R17 p.33-162: the family's temperatures *"are all applied in a structural only analysis. They are ignored in a thermal only or coupled thermal/structural analysis"*. `/IMPTEMP` is a HARD Dirichlet reset every cycle (`fixtemp.F:180-199`), so emitting it on such a deck would OVERRIDE the very solve the deck asks for. `*BOUNDARY_TEMPERATURE` and `*INITIAL_TEMPERATURE` are untouched — p.33-162 scopes its sentence to `*LOAD_THERMAL_OPTION` alone. A STATED SOLN=0 beside thermal cards is named (LS-DYNA runs no thermal analysis there) but not dropped |
 | `*CONTROL_THERMAL_{TIMESTEP,NONLINEAR,FORMING,EIGENVALUE}`, `*MAT_THERMAL_CWM`, `*LOAD_THERMAL_{VARIABLE_BEAM,VARIABLE_SHELL}[_SET]`, `*LOAD_THERMAL_{RSW,TOPAZ,D3PLOT,BINOUT}`, `*BOUNDARY_FLUX_TRAJECTORY` | — | recognized + **named** warn-drop: no Radioss counterpart at all. Every field is listed in the message (`*CONTROL_THERMAL_TIMESTEP` names all eight, `_NONLINEAR` all seven) |
 
 Radioss's thermal expansion is **incremental**, not secant:
@@ -2626,10 +2627,19 @@ the same, while dy alone still diverges (+0.389 mm, I-ENERGY 2036 against
 EXT-WORK 4.283) under a `NORMAL TERMINATION` banner.
 
 `/TH/NODE TEMP` and `/ANIM/NODA/TEMP` are emitted **only** when a `/HEAT/MAT`
-and an **emitted** temperature-moving card both exist — read from what was
-written, not from what was parsed, because a driver whose `*SET_NODE_GENERAL`
-k2rad cannot read is dropped at emission and then nothing changes the
-temperature. The moving card can be an `/IMPTEMP` **or** a `/CONVEC`,
+and an **emitted** temperature-moving card both exist, **and the run is
+explicit** — read from what was written, not from what was parsed, because a
+driver whose `*SET_NODE_GENERAL` k2rad cannot read is dropped at emission and
+then nothing changes the temperature. The implicit exclusion is a measurement:
+a twin pair of converted decks (10-brick bar, an `/IMPTEMP` holding one end at
+400 K against an `/INITEMP` of 300) carries the far end 300 → 399.731 → 400.000 K
+over 84 111 explicit cycles, while the same `.k` plus a
+`*CONTROL_IMPLICIT_GENERAL` leaves it at exactly 300.000 K at every one of its
+61 implicit cycles with `HEAT STORED = 0.0000000`, at 0 ERROR / 0 WARNING /
+NORMAL TERMINATION — only the imposed nodes move (`resol.F:1802` FIXTEMP is
+reached), nothing conducts. On a thermal deck the TEMP channel is also appended
+to the `/TH/NODE` groups built from `*DATABASE_HISTORY_NODE`, so a node the user
+asked for carries its temperature (measured: 300 → 941.3 K in the T01). The moving card can be an `/IMPTEMP` **or** a `/CONVEC`,
 `/RADIATION` or `/IMPFLUX`: all four were measured to move the temperature on
 their own, the convection probe most decisively (a `/HEAT/MAT` + `/CONVEC` deck
 with every node in `/BCS 111 111`, no `/IMPTEMP` and no engine card ran 7011
@@ -2669,8 +2679,8 @@ factor 5.29 apart, and the starter echoes
 `FACTOR TO SPEED-UP THERMAL ANALYSIS = 10.00000`. The starter echo also
 confirms the two cells that ride on `/HEAT/MAT` — `FRACTION OF STRAIN ENERGY
 CONVERTED INTO HEAT = 1.0` from `FWORK`, and
-`AL (LIQUID PHASE) = 45.0` rather than the `AL = 0` that would make `k` vanish
-above the melting temperature.
+`AL (LIQUID PHASE) = 45.0` rather than the `AL = 0` that would give a
+`/DT/THERM` run an unbounded thermal step above the melting temperature.
 
 The radiation row is what settles the unit system: with the **SI** σ the same
 deck would have stored `56.25 mJ`, a factor 1000 out, and the starter would have

@@ -6,7 +6,7 @@
   *CONTROL_SOLUTION SOLN=1              → the engine card /DT/THERM
   *CONTROL_THERMAL_SOLVER TSF           → the engine card /THERM
   *CONTROL_THERMAL_SOLVER FWORK         → /HEAT/MAT EFRAC
-  *MAT_THERMAL_ISOTROPIC_TD[_LC]        → /HEAT/MAT by a two-segment FIT
+  *MAT_THERMAL_ISOTROPIC_TD[_LC]        → /HEAT/MAT by a least-squares FIT
   *MAT_THERMAL_ORTHOTROPIC              → /HEAT/MAT when K1 == K2 == K3
   *LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_<F> → /IMPTEMP on the elements'
                                                   own nodes
@@ -39,9 +39,10 @@ independent checker:
 
 The starter echo confirms the two cells that ride on /HEAT/MAT: with
 FWORK = 1.0 it prints ``FRACTION OF STRAIN ENERGY CONVERTED INTO HEAT =
-1.000000000000``, and the mirrored second conductivity segment comes back as
+1.000000000000``, and the mirrored second conductivity pair comes back as
 ``AL (LIQUID PHASE) = 45.00000000000`` / ``BL (LIQUID PHASE) = 0.0`` rather
-than the ``AL = 0`` that would make k vanish above the melting temperature.
+than the ``AL = 0`` that would give a /DT/THERM run an unbounded thermal step
+above the melting temperature.
 """
 
 import os
@@ -389,12 +390,49 @@ class BoundaryConvectionTests(unittest.TestCase):
         self.assertAlmostEqual(float(body[4][80:100]), 100.0)   # H = HMULT
         self.assertTrue(_warned(result, "carried through with NO sign change"))
 
-    def test_tmult_is_the_ordinate_scale(self):
+    def test_tmult_is_baked_into_the_function_with_fscale_one(self):
+        # The /PARITH/ON workaround, /CONVEC flavour: convec.F:234's cache key
+        # is 'IFUNC_OLD /= IFUNC .OR. TS_OLD /= TS' with NO FCY_OLD in it (the
+        # /PARITH/OFF branch at convec.F:127 HAS it), so two cards sharing one
+        # T_inf curve at different Fscale_y silently reuse the first card's
+        # T_inf. Measured on converter output: 136.21 mJ against a correct
+        # 233.50 mJ, at 0 ERROR / 0 WARNING / NORMAL TERMINATION.
         # Distinct values per slot so a swap between H and FSCALE is visible.
         _result, starter, _ = self._convec(hmult=37.0, tmult=2.5)
         body = _block(starter, _one_header(starter, "/CONVEC/"))
-        self.assertAlmostEqual(float(body[4][20:40]), 2.5)
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
         self.assertAlmostEqual(float(body[4][80:100]), 37.0)
+        fid = int(body[2][10:20])
+        self.assertNotEqual(fid, 900)
+        self.assertEqual(_funct_points(starter, fid),
+                         [(0.0, 2500.0), (1.0, 2500.0)])
+
+    def test_a_unit_tmult_keeps_the_decks_own_curve_id(self):
+        # Fscale_y = 1.0 is immune to the missing-FCY_OLD cache key (a stale
+        # 1.0 is the same 1.0), so no copy is needed and the deck stays
+        # readable.
+        _result, starter, _ = self._convec(tmult=1.0)
+        body = _block(starter, _one_header(starter, "/CONVEC/"))
+        self.assertEqual(int(body[2][10:20]), 900)
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
+    def test_two_cards_on_one_curve_never_share_a_scaled_function(self):
+        # The exact shape the engine defect needs: one TLCID, two multipliers.
+        # Both cards must come out at Fscale_y = 1.0 on DIFFERENT functions.
+        second = ("*BOUNDARY_CONVECTION_SET\n" + _row(50, 0) + "\n"
+                  + _row(0, 100.0, 900, 2.0, 0) + "\n")
+        _result, starter, _ = self._convec(tmult=1.0, extra=second)
+        headers = _headers(starter, "/CONVEC/")
+        self.assertEqual(len(headers), 2)
+        fids = []
+        for h in headers:
+            body = _block(starter, h)
+            self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+            fids.append(int(body[2][10:20]))
+        self.assertEqual(len(set(fids)), 2)
+        self.assertEqual(
+            sorted(_funct_points(starter, f) for f in fids),
+            [[(0.0, 1000.0), (1.0, 1000.0)], [(0.0, 2000.0), (1.0, 2000.0)]])
 
     def test_a_time_varying_h_is_refused_by_name(self):
         result, starter, _ = self._convec(hlcid=900)
@@ -670,7 +708,7 @@ class EngineThermalCardTests(unittest.TestCase):
                      + THERMAL_LOAD)
         result, _starter, engine = _convert(deck)
         self.assertNotIn("/THERM\n", engine)
-        self.assertTrue(_warned(result, "none is reached from imp_solv"))
+        self.assertTrue(_warned(result, "there is nothing to speed up"))
 
     def test_tsf_without_a_thermal_solve_writes_nothing(self):
         deck = _deck("*CONTROL_THERMAL_SOLVER\n"
@@ -803,8 +841,8 @@ class ControlThermalDropTests(unittest.TestCase):
 # ── (E) The richer thermal materials ─────────────────────────────────────────
 
 class ThermalMaterialTdTests(unittest.TestCase):
-    #: Steel-like k(T), monotonically falling — the shape a two-segment fit is
-    #: for. Constant specific heat so RHO0_CP is exact.
+    #: Steel-like k(T), monotonically falling. Constant specific heat so
+    #: RHO0_CP is exact.
     TD = ("*MAT_THERMAL_ISOTROPIC_TD\n"
           + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
           + _row(300.0, 500.0, 700.0, 900.0) + "\n"
@@ -968,9 +1006,10 @@ class ThermalMaterialOrthotropicTests(unittest.TestCase):
 
 class HeatMatSecondSegmentTests(unittest.TestCase):
     def test_al_and_bl_mirror_as_and_bs(self):
-        # The latent trap: AL = BL = 0.0 beside a real T1 makes k EXACTLY 0
-        # above the melt point (dttherm.F90:105, mqviscb.F:654), which was
-        # harmless only while no conduction source existed.
+        # AL = BL = 0.0 beside a real T1 gives a /DT/THERM run an UNBOUNDED
+        # thermal step above the melt point (dttherm.F90:105/116 divides by
+        # max(akk, 1e-20)) and a zero interface conductance CONDE. The heat
+        # FLOW never reads those cells (stherm.F:104 is AS + BS*T).
         _result, starter, _ = _convert(_deck(THERMAL_LOAD))
         body = _data_rows(starter, "/HEAT/MAT/1")
         self.assertAlmostEqual(float(body[0][40:60]), 45.0)   # AS
@@ -1166,7 +1205,8 @@ class ThermalSolveGateTests(unittest.TestCase):
         deck = _deck("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
                      + THERMAL_LOAD)
         result, _starter, _ = _convert(deck)
-        self.assertTrue(_warned(result, "NOTHING WILL HAPPEN"))
+        self.assertTrue(_warned(
+            result, "the field they describe will not develop"))
 
     def test_one_surface_is_shared_by_every_card_on_one_segment_set(self):
         deck = _deck(SEG1 + CURVE900 + CONVEC_CARD
@@ -1501,6 +1541,394 @@ class ByteIdentityTests(unittest.TestCase):
             self.assertNotIn(card, s1)
         for card in ("/DT/THERM", "/THERM\n", "/ANIM/NODA/TEMP"):
             self.assertNotIn(card, e1)
+
+
+# ── The verification round's fixes ───────────────────────────────────────────
+
+class MatT10AliasTests(unittest.TestCase):
+    """``*MAT_T10`` IS ``*MAT_THERMAL_ISOTROPIC_TD_LC`` (Vol II R17 p.2-9, and
+    p.3-37 heads the card with both names). Reading it with the ``_TD`` layout
+    put card 2's ``HCLC TCLC HCHSV TCHSV TGHSV`` into the T1..T8 row and lost
+    the whole thermal material silently, while the *INCLUDE_TRANSFORM offset
+    walker had always treated it as ``_TD_LC`` — two readers of one card
+    disagreeing (the #132 class)."""
+
+    CURVES = ("*DEFINE_CURVE\n" + _row(801) + "\n"
+              + _row16(300.0, "4.60E+8") + "\n"
+              + _row16(900.0, "4.60E+8") + "\n"
+              "*DEFINE_CURVE\n" + _row(802) + "\n"
+              + _row16(300.0, 50.0) + "\n"
+              + _row16(900.0, 32.0) + "\n")
+
+    def _deck_for(self, spelling):
+        mat = ("*" + spelling + "\n"
+               + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+               + _row(801, 802, 0, 0, 0) + "\n" + self.CURVES)
+        base = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n", mat)
+        return base.replace("{EXTRA}", THERMAL_LOAD)
+
+    def test_both_spellings_give_the_same_heat_mat(self):
+        rows = []
+        for spelling in ("MAT_THERMAL_ISOTROPIC_TD_LC", "MAT_T10"):
+            _result, starter, _ = _convert(self._deck_for(spelling))
+            rows.append(_data_rows(starter, "/HEAT/MAT/1"))
+        self.assertEqual(rows[0], rows[1])
+        # and the values are the real ones, not the _RHO_CP_PLACEHOLDER the
+        # mis-parsed layout produced.
+        self.assertAlmostEqual(float(rows[1][0][20:40]), 3.611)
+        self.assertAlmostEqual(float(rows[1][0][40:60]), 59.0, places=6)
+        self.assertAlmostEqual(float(rows[1][0][60:80]), -0.03, places=9)
+
+    def test_the_message_names_the_decks_own_spelling(self):
+        result, _starter, _ = _convert(self._deck_for("MAT_T10"))
+        hit = [w for w in result.warnings if "is FITTED onto" in w]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("*MAT_T10 (*MAT_THERMAL_ISOTROPIC_TD_LC)", hit[0])
+
+    def test_the_offset_walker_reads_the_same_layout(self):
+        # Card 2 of the _TD_LC layout is CURVE ids, so an *INCLUDE_TRANSFORM
+        # IDFOFF must offset them. The dispatch pass and this pass have to
+        # agree about which layout the card has (#132), so the assertion walks
+        # a real *MAT_T10 block rather than comparing two registry entries
+        # (which are the same function object and would pass either way).
+        self.assertIn("MAT_T10", _OFFSET_SPECS)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "inc.k"), "w") as fh:
+            fh.write("*KEYWORD\n*MAT_T10\n"
+                     + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+                     + _row(801, 802, 0, 0, 0) + "\n*END\n")
+        with open(os.path.join(tmp.name, "main.k"), "w") as fh:
+            fh.write("*KEYWORD\n*INCLUDE_TRANSFORM\ninc.k\n"
+                     + _row(0, 0, 0, 100, 0, 500, 0) + "\n"
+                     + _row(0) + "\n*END\n")
+        rows = None
+        for b in parse_k_file(os.path.join(tmp.name, "main.k")):
+            if b.keyword.endswith("MAT_T10"):
+                rows = b.raw
+        self.assertIsNotNone(rows)
+        self.assertEqual(int(rows[0][0:10]), 109)       # TMID -> IDMOFF
+        self.assertEqual(int(rows[1][0:10]), 1301)      # HCLC -> IDFOFF
+        self.assertEqual(int(rows[1][10:20]), 1302)     # TCLC -> IDFOFF
+
+
+class FworkDefaultTests(unittest.TestCase):
+    """Vol I R17 p.12-573's Card 1 Default row prints ``1.`` under FWORK, so a
+    BLANK cell is full conversion. Gating on "was the cell typed" gave the same
+    card two different physics depending on whitespace."""
+
+    def test_a_blank_fwork_is_one(self):
+        deck = _deck("*CONTROL_THERMAL_SOLVER\n"
+                     + _row(1, 0, 11) + "\n" + THERMAL_LOAD)
+        _result, starter, _ = _convert(deck)
+        body = _data_rows(starter, "/HEAT/MAT/1")
+        self.assertAlmostEqual(float(body[1][60:80]), 1.0)
+
+    def test_the_blank_case_is_named_in_the_message(self):
+        deck = _deck("*CONTROL_THERMAL_SOLVER\n"
+                     + _row(1, 0, 11) + "\n" + THERMAL_LOAD)
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(result, "the cell is BLANK on this card"))
+
+    def test_the_consumption_scope_is_stated(self):
+        deck = _deck("*CONTROL_THERMAL_SOLVER\n"
+                     + _row(1, 1, 11, "", 0, 1.0, 0.6, 0.0) + "\n"
+                     + THERMAL_LOAD)
+        result, _starter, _ = _convert(deck)
+        hit = [w for w in result.warnings if "FWORK = 0.6" in w]
+        self.assertEqual(len(hit), 1)
+        for token in ("mmain.F90:2035-2037", "cmain3.F:360", "pforc3.F:321",
+                      "sigeps02c.F:223", "TOTAL internal-energy increment"):
+            self.assertIn(token, hit[0], token)
+
+    def test_no_control_card_means_no_heat_mat_claim(self):
+        deck = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n", "").replace(
+            _row(1, 1, 1, 0, 0, 0, 0, 9), _row(1, 1, 1)).replace(
+            "{EXTRA}", "*CONTROL_THERMAL_SOLVER\n" + _row(1, 0, 11) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(result, "this deck emits no /HEAT/MAT at all"))
+
+
+class LoadThermalVersusSolnTests(unittest.TestCase):
+    """Vol I R17 p.33-162: the *LOAD_THERMAL_* nodal temperatures *"are all
+    applied in a structural only analysis. They are ignored in a thermal only
+    or coupled thermal/structural analysis"*."""
+
+    DRIVER = ("*LOAD_THERMAL_CONSTANT_NODE\n" + _row(1, 700.0) + "\n")
+
+    def test_soln_2_drops_the_family_by_name(self):
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(2) + "\n"
+                     + self.DRIVER + THERMAL_LOAD)
+        result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/IMPTEMP/"), [])
+        self.assertTrue(_warned(result, "IGNORES the whole *LOAD_THERMAL_*"))
+        self.assertTrue(_warned(result, "*LOAD_THERMAL_CONSTANT_NODE"))
+        # the heat source is untouched
+        self.assertEqual(len(_headers(starter, "/CONVEC/")), 1)
+
+    def test_soln_1_drops_the_family_too(self):
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(1) + "\n"
+                     + self.DRIVER + THERMAL_LOAD)
+        _result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/IMPTEMP/"), [])
+
+    def test_soln_0_keeps_it(self):
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(0) + "\n"
+                     + self.DRIVER + THERMAL_LOAD)
+        _result, starter, _ = _convert(deck)
+        self.assertEqual(len(_headers(starter, "/IMPTEMP/")), 1)
+
+    def test_boundary_temperature_survives_a_thermal_soln(self):
+        # p.33-162 scopes its sentence to *LOAD_THERMAL_OPTION alone; a
+        # prescribed boundary temperature IS a thermal boundary condition.
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(2) + "\n"
+                     "*SET_NODE_LIST\n" + _row(60) + "\n" + _row(1, 2) + "\n"
+                     "*BOUNDARY_TEMPERATURE_SET\n" + _row(60, 0, 700.0) + "\n"
+                     + THERMAL_LOAD)
+        _result, starter, _ = _convert(deck)
+        self.assertEqual(len(_headers(starter, "/IMPTEMP/")), 1)
+
+    def test_a_stated_soln_0_with_thermal_cards_is_named(self):
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(0) + "\n" + THERMAL_LOAD)
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(result, "structural analysis ONLY"))
+
+    def test_an_absent_control_solution_says_nothing(self):
+        result, _starter, _ = _convert(_deck(THERMAL_LOAD))
+        self.assertFalse(_warned(result, "structural analysis ONLY"))
+
+
+class BoundaryRefusalOrderTests(unittest.TestCase):
+    """A record whose segments cannot be built must be refused BEFORE anything
+    announces what it converts to, and before a /FUNCT is minted for it."""
+
+    def test_an_undefined_segment_set_is_refused_without_announcing(self):
+        card = ("*BOUNDARY_CONVECTION_SET\n" + _row(77, 0) + "\n"
+                + _row(0, 100.0, 900, 1.0, 0) + "\n")
+        result, starter, _ = _convert(_deck(CURVE900 + card))
+        self.assertEqual(_headers(starter, "/CONVEC/"), [])
+        self.assertTrue(_warned(result, "*SET_SEGMENT 77 is not defined"))
+        self.assertFalse(_warned(result, "-> /CONVEC with H ="))
+
+    def test_no_orphan_function_is_left_behind(self):
+        card = ("*BOUNDARY_RADIATION_SET\n" + _row(77, 1, 0, 0, 0, 0, 0) + "\n"
+                + _row(0, SIGMA_MG_MM_S, 0, 1000.0) + "\n")
+        _result, starter, _ = _convert(_deck(card))
+        self.assertNotIn("radiation_tinf", starter)
+
+    def test_the_common_field_drops_still_fire_on_a_refused_record(self):
+        # The #129 rule: a refusal must not skip the card's field inventory.
+        # PSEROD is field 2 on the _SET spelling of FLUX and CONVECTION.
+        card = ("*BOUNDARY_CONVECTION_SET\n" + _row(77, 88)
+                + "\n" + _row(0, 100.0, 900, 1.0, 0) + "\n")
+        result, _starter, _ = _convert(_deck(CURVE900 + card))
+        self.assertTrue(_warned(result, "PSEROD=88"))
+
+
+class PserodCitationTests(unittest.TestCase):
+    """The erosion paragraph is a different page and remark on each card."""
+
+    def test_each_kind_cites_its_own_page(self):
+        cases = (
+            ("*BOUNDARY_FLUX_SET\n" + _row(50, 88) + "\n"
+             + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0) + "\n",
+             "p.5-49 Remark 5"),
+            ("*BOUNDARY_CONVECTION_SET\n" + _row(50, 88) + "\n"
+             + _row(0, 100.0, 900, 1.0, 0) + "\n",
+             "p.5-32 Remark 4"),
+            ("*BOUNDARY_RADIATION_SET\n" + _row(50, 1, 0, 0, 0, 0, 88) + "\n"
+             + _row(0, SIGMA_MG_MM_S, 0, 1000.0) + "\n",
+             "p.5-124 Remark 4"),
+        )
+        for card, cite in cases:
+            with self.subTest(cite=cite):
+                result, _starter, _ = _convert(_deck(SEG1 + CURVE900 + card))
+                self.assertTrue(_warned(result, "PSEROD=88"))
+                self.assertTrue(_warned(result, cite))
+
+
+class BareElementSpellingTests(unittest.TestCase):
+    def test_the_bare_spelling_names_the_mandatory_suffix(self):
+        deck = TWO_BRICKS.replace(
+            "{EXTRA}",
+            "*LOAD_THERMAL_CONSTANT_ELEMENT\n" + _row(1, 500.0) + "\n")
+        result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/IMPTEMP/"), [])
+        self.assertTrue(_warned(result, "the _OPTION suffix is MANDATORY"))
+        # NOT the "no <family> elements at all" message, on a deck full of them.
+        self.assertFalse(_warned(result, "elements at all"))
+
+
+class UnparsedThermalMaterialTests(unittest.TestCase):
+    def test_a_tmid_naming_an_unparsed_sibling_is_named(self):
+        # The *MAT_ADD_THERMAL_EXPANSION is what puts material 1 on the
+        # /HEAT/MAT list at all; the *PART TMID then names a *MAT_THERMAL_*
+        # spelling k2rad does not parse, so "no *PART TMID names one" would be
+        # a FALSE premise (the #130 class).
+        deck = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n",
+            "*MAT_THERMAL_ORTHOTROPIC_TD\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0, 0.0) + "\n").replace(
+            "{EXTRA}",
+            "*MAT_ADD_THERMAL_EXPANSION\n" + _row(1, 0, 1.2e-5) + "\n"
+            + "*LOAD_THERMAL_CONSTANT_NODE\n" + _row(1, 350.0) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(
+            result, "*PART TMID names thermal material 9, whose "
+                    "*MAT_THERMAL_* spelling k2rad does not parse"))
+        self.assertFalse(_warned(result, "no *PART TMID names one"))
+        self.assertIn("MAT_THERMAL_ORTHOTROPIC_TD", result.skipped_keywords)
+
+
+class DuplicateTmidTests(unittest.TestCase):
+    def test_one_tmid_under_two_types_is_named(self):
+        deck = BRICK.replace(
+            "{EXTRA}",
+            "*MAT_THERMAL_ISOTROPIC_TD\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row(300.0, 900.0) + "\n"
+            + _row("4.60E+8", "4.60E+8") + "\n"
+            + _row(50.0, 32.0) + "\n" + THERMAL_LOAD)
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(result, "TMID 9 is stated by 2 different"))
+
+    def test_a_clean_deck_is_quiet(self):
+        result, _starter, _ = _convert(_deck(THERMAL_LOAD))
+        self.assertFalse(_warned(result, "is stated by 2 different"))
+
+
+class ConstantDriverExpansionTests(unittest.TestCase):
+    """A /THERM_STRESS/MAT beside a driver that never moves gets exactly zero
+    thermal strain, because the companion /INITEMP starts the nodes at the
+    driver's own constant."""
+
+    EXPANSION = "*MAT_ADD_THERMAL_EXPANSION\n" + _row(1, 0, 1.2e-5) + "\n"
+
+    def test_a_constant_driver_is_named(self):
+        deck = _deck(self.EXPANSION
+                     + "*LOAD_THERMAL_CONSTANT_NODE\n" + _row(1, 350.0) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertTrue(_warned(result, "drivers that NEVER MOVE"))
+        self.assertTrue(_warned(result, "null state"))
+
+    def test_a_curve_driver_is_not(self):
+        deck = _deck(CURVE900 + self.EXPANSION
+                     + "*LOAD_THERMAL_LOAD_CURVE\n" + _row(900) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertFalse(_warned(result, "drivers that NEVER MOVE"))
+
+    def test_a_heat_source_beside_it_is_not(self):
+        deck = _deck(self.EXPANSION + THERMAL_LOAD
+                     + "*LOAD_THERMAL_CONSTANT_NODE\n" + _row(1, 350.0) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertFalse(_warned(result, "drivers that NEVER MOVE"))
+
+    def test_a_stated_initial_temperature_elsewhere_is_not(self):
+        # The nodes then DO jump on the first cycle, so the expansion works.
+        deck = _deck(self.EXPANSION
+                     + "*INITIAL_TEMPERATURE_SET\n" + _row(0, 300.0) + "\n"
+                     + "*LOAD_THERMAL_CONSTANT_NODE\n" + _row(1, 350.0) + "\n")
+        result, _starter, _ = _convert(deck)
+        self.assertFalse(_warned(result, "drivers that NEVER MOVE"))
+
+
+class ThermalTimeHistoryChannelTests(unittest.TestCase):
+    """A node the USER asked for should carry its temperature on a deck that
+    really runs a thermal solve — measured, the T01 column goes 300 -> 941.3 K
+    on the converted brick, and the starter reports 0 ERROR / 0 WARNING (no
+    WARNING 1087, which needs a missing /HEAT/MAT)."""
+
+    HIST = "*DATABASE_HISTORY_NODE\n" + _row(1, 8) + "\n"
+
+    def test_the_user_group_gains_temp_on_a_thermal_deck(self):
+        _result, starter, _ = _convert(_deck(self.HIST + THERMAL_LOAD))
+        body = _block(starter, "/TH/NODE/1")
+        self.assertEqual(body[2].split(), ["DEF", "A", "AR", "VR", "TEMP"])
+
+    def test_it_does_not_on_a_deck_with_no_thermal_solve(self):
+        plain = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n", "").replace(
+            _row(1, 1, 1, 0, 0, 0, 0, 9), _row(1, 1, 1)).replace(
+            "{EXTRA}", self.HIST)
+        _result, starter, _ = _convert(plain)
+        body = _block(starter, "/TH/NODE/1")
+        self.assertEqual(body[2].split(), ["DEF", "A", "AR", "VR"])
+
+    def test_an_implicit_deck_gets_no_temperature_channels(self):
+        # MEASURED: an implicit run leaves every undriven node at exactly its
+        # initial temperature and reports HEAT STORED = 0.0000000, while its
+        # explicit twin conducts 300 -> 400 K.
+        deck = _deck("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+                     + self.HIST + THERMAL_LOAD)
+        _result, starter, engine = _convert(deck)
+        self.assertNotIn("/ANIM/NODA/TEMP", engine)
+        body = _block(starter, "/TH/NODE/1")
+        self.assertEqual(body[2].split(), ["DEF", "A", "AR", "VR"])
+        self.assertEqual(_headers(starter, "/TH/NODE/"), ["/TH/NODE/1"])
+
+
+class ConductivityFitSegmentTests(unittest.TestCase):
+    """AL/BL never enter the Lagrangian conduction — every conduction operator
+    reads AS + BS*T_element (stherm.F:104, s4therm.F:84, s10therm.F:81,
+    cbatherm.F:67, pforc3.F:379). The two-segment form lives only in the
+    thermal TIME-STEP routines, gated on IDT_THERM == 1. So the table is fitted
+    with ONE line and mirrored, even when the law states a melt temperature."""
+
+    JC = ("*MAT_JOHNSON_COOK\n"
+          + _row(1, "7.85E-9", 80000.0, 210000.0, 0.3) + "\n"
+          + _row(0.35, 0.275, 0.36, 0.022, 1.0, 1800.0, 293.0) + "\n"
+          + _row(0.0, 0.0, 0.0, 0.0, 0.0, "4.60E+8", 1.0e-6, 0.0) + "\n"
+          + _row(0.0, 0.0, 0.0, 0.0, 0.0) + "\n")
+
+    def _jc_deck(self, mat, extra):
+        return BRICK.replace(
+            "*MAT_ELASTIC\n"
+            + _row(1, "7.85E-9", 210000.0, 0.3) + "\n", self.JC).replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n", mat).replace("{EXTRA}", extra)
+
+    def test_a_melt_temperature_does_not_split_the_fit(self):
+        mat = ("*MAT_THERMAL_ISOTROPIC_TD\n"
+               + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+               + _row(300.0, 500.0, 700.0, 900.0) + "\n"
+               + _row("4.60E+8", "4.60E+8", "4.60E+8", "4.60E+8") + "\n"
+               + _row(50.0, 44.0, 38.0, 32.0) + "\n")
+        result, starter, _ = _convert(self._jc_deck(mat, THERMAL_LOAD))
+        body = _data_rows(starter, "/HEAT/MAT/1")
+        self.assertAlmostEqual(float(body[1][0:20]), 1800.0)            # T1
+        self.assertAlmostEqual(float(body[0][40:60]), 59.0, places=6)   # AS
+        self.assertAlmostEqual(float(body[0][60:80]), -0.03, places=9)  # BS
+        self.assertAlmostEqual(float(body[1][20:40]), 59.0, places=6)   # AL
+        self.assertAlmostEqual(float(body[1][40:60]), -0.03, places=9)  # BL
+        self.assertTrue(_warned(result, "deliberately NOT used as a second "
+                                        "fit segment"))
+        self.assertTrue(_warned(result, "stherm.F:104"))
+
+    def test_the_law2_message_reads_the_emitted_efrac(self):
+        # It used to assert the literal 1e-20 that the same commit made
+        # variable.
+        mat = ("*MAT_THERMAL_ISOTROPIC\n"
+               + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+               + _row("4.60E+8", 45.0) + "\n")
+        extra = ("*CONTROL_THERMAL_SOLVER\n"
+                 + _row(1, 1, 11, "", 0, 1.0, 1.0, 0.0) + "\n" + THERMAL_LOAD)
+        result, _starter, _ = _convert(self._jc_deck(mat, extra))
+        hit = [w for w in result.warnings
+               if "adiabatic plastic-work heating is switched OFF" in w]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("EFRAC is 1 on this deck", hit[0])
+        self.assertNotIn("written at 1e-20", hit[0])
 
 
 if __name__ == "__main__":       # pragma: no cover

@@ -12,6 +12,7 @@ from .contacts import _select_parent_interface
 # *DEFINE_COORDINATE_NODES, using the very axes builder /SKEW emission uses, so
 # the two can never disagree about what "the system at t=0" means.
 from .mesh import _emit_skew_fix, _skew_axes_from_nodes
+from .thermal import _thermal_solve_active
 
 __all__ = [
     "_make_header",
@@ -572,6 +573,19 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                     skews=None, names=None, th_vars=None) -> List[str]:
         if th_vars is None:
             th_vars = _TH_HISTORY_VARS.get(rad_type, ("DEF",))
+            # On a deck that really runs a thermal solve, a node the USER asked
+            # for should carry its temperature. Without this the TEMP channels
+            # live only in the auto-built group over the driven/loaded nodes,
+            # so a *DATABASE_HISTORY_NODE naming the interior of a heated bar
+            # came back with DEF/A/AR/VR and no temperature at all — the
+            # history had to be read out of the ANIM instead.
+            #
+            # Gated exactly like every other TEMP channel (#122): the starter's
+            # WARNING 1087 'OUTPUT TEMP WHILE TEMPERATURE IS NOT COMPUTED (NO
+            # HEAT/MAT)' fires without a thermal solve, and the channel would
+            # write state after state of exactly 0.0.
+            if rad_type == "NODE" and _thermal_solve_active(state):
+                th_vars = tuple(th_vars) + ("TEMP",)
         block = [
             f"/TH/{rad_type}/{n}",
             f"TH_{rad_type}_{n}",

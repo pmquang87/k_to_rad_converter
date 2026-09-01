@@ -100,20 +100,26 @@ Prior history (before this changelog was introduced) is summarized in the
     as a unit inconsistency the converted deck cannot carry, and `SBC` becomes a
     CROSS-CHECK against the σ `/BEGIN` implies — a mismatch there would put
     every converted `/RADIATION` emissivity off by the same ratio.
-  - **`*MAT_THERMAL_ISOTROPIC_TD[_LC]` → `/HEAT/MAT` by a TWO-SEGMENT fit.**
-    The old registry text called `/HEAT/MAT`'s conductivity *"the linear
-    AS + BS*T only"*, three times. It is not: `dttherm.F90:102-106` (shells) and
-    `mqviscb.F:651-656` (solids) both select `AS + BS·T` below `T1` and
-    `AL + BL·T` above, i.e. a piecewise-linear `k(T)` with a break at `T1`. The
-    deck's table is least-squares-fitted onto both segments — with `T1` pinned to
-    the mechanical law's own melting temperature, because `/HEAT/MAT` OVERWRITES
-    `MAT_PARAM%THERM%TMELT` and that is what `mmain.F90:790` divides by, so it is
-    not free to be chosen as a fit elbow. The warning states all six fitted
-    coefficients and the max deviation. The real loss is `RHO0_CP`, which is ONE
-    constant with no temperature dependence at any cfg version, so a capacity
-    varying by more than 2× refuses the card instead of averaging it into a
-    different material. `_TD_LC`'s `HCLC`/`TCLC` curves are sampled in the WRITER
-    prepass, not at parse time — a `*DEFINE_CURVE` may follow the material.
+  - **`*MAT_THERMAL_ISOTROPIC_TD[_LC]` → `/HEAT/MAT` by a least-squares LINE.**
+    The registry text this replaces called `/HEAT/MAT`'s conductivity *"the
+    linear AS + BS*T only"*, and for the HEAT FLOW that is exactly right: every
+    Lagrangian conduction operator reads `AS`/`BS` (`PM(75)`/`PM(76)`) and
+    nothing else — `stherm.F:82/104`, `s8etherm.F:86`, `s4therm.F:67/84`,
+    `s10therm.F:61/81`, `cbatherm.F:61/67`, `pforc3.F:379`, all of them
+    `KC = (AS + BS*T_element)`. The two-segment `below/above T1` form does exist
+    (`dttherm.F90:102-106`, `mqviscb.F:651-656`) but ONLY in the thermal
+    TIME-STEP routines, both gated on `IDT_THERM == 1`, i.e. only under
+    `/DT/THERM`. So the deck's table is fitted with ONE line, whose worst
+    deviation the warning states, and that line is MIRRORED into `AL`/`BL` — not
+    as a second segment but so a `/DT/THERM` run above `T1` keeps a sane
+    stability step and interface conductance. `T1` itself is carried from the
+    mechanical law unchanged, because `/HEAT/MAT` OVERWRITES
+    `MAT_PARAM%THERM%TMELT` and that is what `mmain.F90:790` divides by for the
+    Johnson-Cook `T*`. The real loss is `RHO0_CP`, which is ONE constant with no
+    temperature dependence at any cfg version, so a capacity varying by more
+    than 2× refuses the card instead of averaging it into a different material.
+    `_TD_LC`'s `HCLC`/`TCLC` curves are sampled in the WRITER prepass, not at
+    parse time — a `*DEFINE_CURVE` may follow the material.
   - **`*MAT_THERMAL_ORTHOTROPIC` → `/HEAT/MAT` when `K1 = K2 = K3`.** That is an
     isotropic card written on the orthotropic keyword and converts exactly (AOPT
     and the material-axis cards are then provably inert). Three different
@@ -152,27 +158,31 @@ Prior history (before this changelog was introduced) is summarized in the
     exists — there is not even a legal-but-zero channel to be tempted by (#122).
     The whole-model heat balance is `thermbilan.F:71-76` in the engine `.out`,
     which is the independent checker every number above was read from.
-  - Corpus reach: **zero**. Re-measured over all 509 `.k`/`.key`/`.dyn`/`.inc`
-    files under `C:\openradioss_run` — 506 grepped directly and the three above
-    a 60 MB cap (`yaris-detailed-v2j.key` 161 MB, `camry-detailed-v5a.key`
-    237 MB, `Model-318_Achshebel-fein_tobi.k` 70 MB) streamed line by line,
-    8.77 M lines in total — plus all 36 deck-like files under
-    `E:\foxcore_data`. Not one carries any keyword in this batch, so the
-    two-half sweep — output files AND `state.warnings` + `skipped_keywords` +
-    `recognized_not_emitted`, stated separately per the #129 rule — shows zero
-    movers on both halves. All physics validation is synthetic, as with the
-    viscoelastic and adhesive batches.
+  - Corpus reach, stated with its SCOPE. **Zero under
+    `C:\openradioss_run`** — re-measured over all 509 `.k`/`.key`/`.dyn`/`.inc`
+    files there, 506 grepped directly and the three above a 60 MB cap
+    (`yaris-detailed-v2j.key` 161 MB, `camry-detailed-v5a.key` 237 MB,
+    `Model-318_Achshebel-fein_tobi.k` 70 MB) streamed line by line, 8.77 M lines
+    in total — and zero under `E:\foxcore_data` (all 36 deck-like files). It is
+    NOT zero everywhere: the LS-DYNA official examples tree
+    (`FEM_solver/verification/dynaexamples_r14_ton-mm-s`) carries 117
+    occurrences in 30 files, which is where the batch's third-party regression
+    carriers come from. The two-half sweep — output files AND `state.warnings` +
+    `skipped_keywords` + `recognized_not_emitted`, stated separately per the
+    #129 rule — is therefore reported per roster rather than as one number. All
+    PHYSICS validation is synthetic, as with the viscoelastic and adhesive
+    batches.
 
 ### Fixed
 
-- **`/HEAT/MAT` wrote `AL = BL = 0.0` beside a real `T1`, which is `k = 0`
-  EXACTLY above the melting temperature.** `dttherm.F90:105` and
-  `mqviscb.F:654` both evaluate `AL + BL·T` above `T1`, and `T1` is set to the
-  material law's own melt temperature. The cells were harmless while no
-  conduction SOURCE existed — nothing moved heat, so nothing noticed the
-  insulating layer — and became a live defect the moment `/IMPFLUX`, `/CONVEC`
-  and `/RADIATION` could deposit it. `AS`/`BS` are now mirrored into `AL`/`BL`
-  unless the deck's own table states a second segment.
+- **`/HEAT/MAT` wrote `AL = BL = 0.0` beside a real `T1`.** Above `T1` the
+  thermal STABILITY STEP then becomes `DTFACTHERM·0.5·Lc²·ρCp/max(0, 1e-20)`
+  and the element's interface conductance `CONDE` collapses to zero
+  (`dttherm.F90:105/116`, `mqviscb.F:654/669`). Both routines are gated on
+  `IDT_THERM == 1`, so this bites a thermal-only (`/DT/THERM`) run, where it can
+  jump the whole run in one step; the heat FLOW itself never reads those cells
+  (`stherm.F:104` and its siblings are `AS + BS·T`). `AS`/`BS` are now mirrored
+  into `AL`/`BL`.
 - **`*CONTROL_SOLUTION` SOLN=1's warning asserted something false.** It said
   *"Radioss has no thermal-only run mode; the structural degrees of freedom stay
   live"*. `/DT/THERM` is exactly that run mode and freezes every one of them
@@ -187,6 +197,109 @@ Prior history (before this changelog was introduced) is summarized in the
   because there is no nonlinear solve. All three rewritten, and both surviving
   drops now name every field on their card (all eight of `_TIMESTEP`, all seven
   of `_NONLINEAR` — the old text named three).
+
+- **THERMAL SOLVER verification round — one blocker, five majors and six minors,
+  found by re-checking the batch's own cited facts against the engine source and
+  by twin measurements on converted decks.** Three of the batch's own claims
+  turned out to be false, and one of them had shipped as a fix's rationale.
+
+  - **BLOCKER: `/CONVEC` wrote `TMULT` to `Fscale_y`, which the engine's DEFAULT
+    parallel mode reads WRONG.** `convec.F:234`'s `/PARITH/ON` cache key is
+    `IF(IFUNC_OLD /= IFUNC .OR. TS_OLD /= TS)` — `FCY_OLD` is missing from it,
+    while the `/PARITH/OFF` branch at `convec.F:127` has
+    `.OR. FCY_OLD /= FCY` — so two `/CONVEC` cards sharing ONE `T_∞` curve at
+    different scales silently reuse the FIRST card's `T_∞`, and the cache is
+    per OMP THREAD, so the answer depends on the thread count. MEASURED on
+    converter output (1 mm brick, `ρCp = 3.611`, two `*BOUNDARY_CONVECTION_SET`
+    records both on TLCID 900 at TMULT 1.0 and 2.0, h = 100, six faces):
+    branch-HEAD deck gives `CONVECTION HEAT = 1389.1850 mJ` at `nt=1` and
+    `1425.3912` at `nt=6`; the fixed deck gives `2381.4601` at BOTH, against a
+    closed form of `2381.4170` (+0.0018 %). Every run reported 16 823 cycles at
+    0 ERROR / 0 WARNING / NORMAL TERMINATION. `TMULT` is now BAKED into a copy
+    of the curve with `Fscale_y = 1.0` — the treatment `/RADIATION` already got
+    for the sibling COMPOUNDING defect at `radiation.F:249` — and the batch's
+    claim that *"convec.F:241 puts the identical multiply INSIDE its guard and
+    is immune"* is corrected: the multiply's POSITION is not the whole hazard.
+    `/IMPFLUX` (`fixflux.F:278-288` caches the unscaled density) and `/IMPTEMP`
+    (`fixtemp.F:180-199`, per entry, no cache) are genuinely immune.
+  - **MAJOR: `*MAT_T10` was read with the wrong card layout, losing the whole
+    thermal material.** Vol II R17 p.2-9 and the card's own header on p.3-37
+    give `*MAT_T10` = `*MAT_THERMAL_ISOTROPIC_TD_LC`, but the handler keyed the
+    layout on `kw.endswith("_TD_LC")`, so card 2's `HCLC TCLC HCHSV TCHSV TGHSV`
+    was read as the T1..T8 temperature row and cards 3-4 (which do not exist) as
+    the C/K rows. The `*INCLUDE_TRANSFORM` offset walker had ALWAYS treated
+    `MAT_T10` as `_TD_LC` — two readers of one card disagreeing, the #132 class.
+    Messages now name the deck's own spelling with the canonical one beside it.
+  - **MAJOR: a BLANK `FWORK` is 1.0, not "off".** p.12-573's Card 1 Default row
+    prints `1.` under FWORK, so LS-DYNA reads a blank cell as full conversion.
+    The gate on "was the cell physically typed" gave the same card two different
+    physics depending on whitespace, on exactly the coupled thermo-mechanical
+    deck the keyword exists for. The card's PRESENCE is now the test. The
+    warning also states what actually CONSUMES `EFRAC`, which is not the same
+    quantity on the two sides: Radioss scales the element's TOTAL
+    internal-energy increment (elastic included) for every law with
+    `HEAT_FLAG = 0` — `mmain.F90:2035-2037` for solids, `cmain3.F:360` for
+    shells of law < 28 or law 32, `pforc3.F:321` for beams — and only LAW2
+    shells scale real plastic work (`sigeps02c.F:223`).
+  - **MAJOR: `*LOAD_THERMAL_*` is a STRUCTURAL-ONLY load and is now dropped on a
+    thermal deck.** Vol I R17 p.33-162, the family's own head page: its nodal
+    temperatures *"are all applied in a structural only analysis. They are
+    ignored in a thermal only or coupled thermal/structural analysis"*. Emitting
+    them as `/IMPTEMP` on a `*CONTROL_SOLUTION` SOLN=1/2 deck put a HARD
+    Dirichlet reset (`fixtemp.F:180-199`, every cycle) on top of the very solve
+    the deck asks for — a composition that only became possible when this batch
+    added the heat sources. `*BOUNDARY_TEMPERATURE` and `*INITIAL_TEMPERATURE`
+    are untouched, because p.33-162 scopes its sentence to
+    `*LOAD_THERMAL_OPTION` alone. The mirror case — a STATED SOLN=0 beside
+    thermal cards, which LS-DYNA runs with no thermal analysis at all — is named
+    but not dropped, and the asymmetry is stated in both messages.
+  - **MAJOR: the temperature OUTPUT channels were armed on IMPLICIT decks.**
+    `_make_engine_thermal` already excluded implicit and modal runs, but
+    `_thermal_solve_active` did not, so `/ANIM/NODA/TEMP` and a `/TH/NODE TEMP`
+    group rode along on decks where they are flat by construction (#122).
+    MEASURED on a twin pair of converted decks (10-brick bar, `/HEAT/MAT`
+    AS = 50, an `/IMPTEMP` holding one end at 400 K against an `/INITEMP` of
+    300): the explicit deck carries the far end 300 → 399.731 → 400.000 K over
+    84 111 cycles, while the same `.k` plus a `*CONTROL_IMPLICIT_GENERAL` leaves
+    it at exactly 300.000 K at every one of its 61 implicit cycles with
+    `HEAT STORED = 0.0000000`. Only the imposed nodes move (`resol.F:1802`
+    FIXTEMP is reached); nothing conducts. The pre-existing implicit warnings
+    now cite that measurement instead of a grep.
+  - **MAJOR: the "two-segment `k(T)`" claim was false for the heat flow** — see
+    the `/HEAT/MAT` entry above. Every docstring, warning, README row and
+    CHANGELOG sentence that repeated it is corrected, and `_fit_td_conductivity`
+    now fits ONE line and mirrors it instead of putting half the deck's table
+    into cells the conduction never reads.
+  - Minors: the PSEROD erosion citation is now per card kind (p.5-49 Remark 5
+    for FLUX, p.5-32 Remark 4 for CONVECTION, p.5-124 Remark 4 for RADIATION —
+    one page copied across all three was wrong on two of them); a boundary
+    record's SEGMENT SOURCE is resolved BEFORE the per-kind resolver announces
+    what it converts to, so an undefined `*SET_SEGMENT` no longer prints a full
+    "→ /CONVEC with H = 100 …" sentence and no longer leaves an orphan `/FUNCT`
+    behind; the BARE `*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT` spellings say
+    their `_OPTION` suffix is mandatory instead of claiming a deck full of
+    elements has none; a `*PART` TMID naming a `*MAT_THERMAL_*` spelling k2rad
+    does not parse gets its own arm instead of "no `*PART` TMID names one"; one
+    TMID stated by two thermal material types is named rather than resolved
+    silently; `_warn_law2_self_heating` and the `RHO0_CP` placeholder text read
+    the EMITTED `EFRAC` instead of asserting the 1e-20 the same commit made
+    variable; and `_min_element_edge` says "node-pair distance", which is what
+    its cyclic connectivity walk actually measures.
+  - **New: a `/THERM_STRESS/MAT` beside drivers that never move is named.** The
+    companion `/INITEMP` starts those nodes at the driver's own constant, so
+    `mmain.F90:772-775`'s increment is identically zero and the expansion
+    develops NO thermal strain — while LS-DYNA's `*LOAD_THERMAL_CONSTANT*`
+    measures from a *"null state"* (p.33-168/33-169) and does develop `α·T`.
+    Radioss has no reference-temperature cell to express that, so the gap is
+    STATED rather than engineered around with an `/INITEMP` at 0 K, which would
+    corrupt conduction, Johnson-Cook `T*` and radiation alike.
+  - **New: the `/TH/NODE` groups built from `*DATABASE_HISTORY_NODE` gain
+    `TEMP`** on a deck that really runs a thermal solve. Before this the TEMP
+    channels lived only in the auto-built group over the driven and loaded
+    nodes, so a request for the interior of a heated bar came back with
+    DEF/A/AR/VR and the history had to be read out of the ANIM. Measured on
+    converter output: the column carries 300 → 941.3 K, and the starter reports
+    0 ERROR / 0 WARNING (WARNING 1087 needs a MISSING `/HEAT/MAT`).
 
 - **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
   by re-verifying the review round below against the manual, the starter and
