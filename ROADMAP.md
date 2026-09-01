@@ -887,8 +887,11 @@ Cases that convert today but drop or approximate detail worth recovering:
 - **`*NODE` `TC`/`RC` → `/BCS`** *(remaining, and the largest of these by
   incidence)* — the card's own constraint codes (0 none, 1 x, 2 y, 3 z, 4 xy,
   5 yz, 6 zx, 7 xyz, global system) are read and NAMED but not converted, so
-  those degrees of freedom are free in the emitted model. **721 of 2346 corpus
-  decks write a non-zero cell.** The mapping itself is trivial — the codes are
+  those degrees of freedom are free in the emitted model. **721 corpus decks
+  write a non-zero cell** — of 2332 scanned here, where the review round
+  counted 721 of 2346; the same numerator under a slightly different file-size
+  cap, which is the cross-check that both scans found the same decks. The
+  mapping itself is trivial — the codes are
   the same triples `*BOUNDARY_SPC_NODE` states one flag at a time, and the
   `/BCS` writer already exists — what it needs is SCREENING, and that is what
   makes it a campaign rather than a patch:

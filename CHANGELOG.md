@@ -49,6 +49,19 @@ Prior history (before this changelog was introduced) is summarized in the
     188 files**, all this one shape; classifying every non-integer field-1
     token found no comma-format, blank or `&parameter` id to trade against,
     and `_free_node_id` accepts `&name` regardless.
+
+    `assembly._parse_node_line` carried the identical test, and its docstring
+    says it *"mirrors handlers.handle_node"* — a contract that broke the
+    moment the handler was fixed. There the welded row returns `None`, i.e. it
+    is SKIPPED by the `*INCLUDE_TRANSFORM` offset pass and by the TRANID
+    geometry rewrite. MEASURED on a parent/child twin (IDNOFF 6000) with the
+    handler fixed and the walker not: node ids
+    `[5, 7, 6001, 6002, 6003, 6004, 6006, 6008]` — the welded rows kept their
+    PRE-offset ids, colliding with whatever the parent numbers 5 and 7, while
+    6005 and 6007 did not exist and the `/BRICK` referencing them was broken.
+    Not corpus-reachable — each of the 10 `*INCLUDE_TRANSFORM` cards in the two
+    roots was resolved to its card-1 filename and none of those children
+    carries a welded row — which is why nothing measured it.
   - **The `/GRNOD` half of the group-allocator item is closed.** The review
     round routed all 18 element-group sites and the `/SECT` node group through
     the guarded allocators and named the rest as an open hazard in

@@ -6657,7 +6657,17 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
     solver with null pivots). LS-DYNA tolerates such reference nodes — e.g.
     *DEFINE_COORDINATE_NODES nodes (we bake those into /SKEW/FIX coordinates so
     they end up unreferenced) and lone origin markers — but OpenRadioss implicit
-    does not. Constrain them (they drive nothing, so fixing them is inert).
+    does not. Constrain them: they carry no mass and no load, so pinning them
+    changes nothing that moves.
+
+    "They drive nothing" was the older wording and is no longer strictly true:
+    the element-free nodes k2rad synthesizes for a /SECT reporting frame land
+    in this set too, and those DO drive something — the frame the section
+    reports in. The CONCLUSION survives (they are massless and forceless, so
+    the constraint holds them exactly where the cross-section card placed
+    them, which is what a fixed reporting frame is for), but a true conclusion
+    resting on a false premise still misinforms, so the premise is stated as
+    the one that actually holds.
 
     Nodes of a MOVING skew (/SKEW/MOV, *DEFINE_COORDINATE_NODES flag=1) are left
     free so the frame can co-rotate. Explicit runs skip this entirely.
@@ -6800,7 +6810,10 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         f"{len(free)} free node(s) attached to no element or rigid body were "
         "constrained with /BCS to keep the implicit tangent non-singular (e.g. "
         "*DEFINE_COORDINATE_NODES reference nodes baked into /SKEW/FIX, or origin "
-        "markers). They drive nothing, so the constraint is inert."
+        "markers, or the element-free nodes k2rad synthesizes to carry a "
+        "/SECT reporting frame). They carry no mass and no load, so the "
+        "constraint holds them where they were placed and changes nothing "
+        "that moves."
     )
     bc_id = state.next_id()
     grnod_id = state.next_grnod_id()
