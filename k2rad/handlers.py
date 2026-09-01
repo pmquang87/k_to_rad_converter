@@ -10535,7 +10535,7 @@ def handle_control_thermal_nonlinear(block: Block,
         "boundary-condition lumping damper, THLSTL the line-search tolerance, "
         "NLTHPR the print level and PHCHPN the phase-change penalty. Radioss "
         "assembles NO thermal matrix and performs NO nonlinear iteration — "
-        "tempur.F:47-52 is the whole integrator (TEMP += FTHE/MCP, then FTHE "
+        "tempur.F:48-55 is the whole integrator (TEMP += FTHE/MCP, then FTHE "
         "is zeroed) — so there is nothing for any of them to control. (The "
         "registry used to name 'the /THERM nonlinear controls': /THERM exists "
         "but carries exactly ONE cell, THEACCFACT, frethermal.F:64-70. There "
@@ -17592,7 +17592,7 @@ RARE_MATERIAL_KEYWORDS = {
         "a thermal EIGENVALUE analysis (the decay modes of the conduction "
         "operator)",
         "no Radioss counterpart: there is no thermal stiffness matrix to "
-        "extract eigenvalues from — tempur.F:47-52 integrates the temperature "
+        "extract eigenvalues from — tempur.F:48-55 integrates the temperature "
         "explicitly on a lumped capacity, and the engine's own structural "
         "eigensolver is a compiled-out stub on this build"),
     "MAT_THERMAL_CWM": _thermal_deferred(

@@ -150,7 +150,7 @@ Prior history (before this changelog was introduced) is summarized in the
     wired on the `/TH` side**: `hm_read_thgrou.F:1255` gives `/TH/SURF` exactly
     `AREA, MASSFLOW, VELOCITY, P, A, MASS`, and no thermal-load `/TH` family
     exists — there is not even a legal-but-zero channel to be tempted by (#122).
-    The whole-model heat balance is `thermbilan.F:63-71` in the engine `.out`,
+    The whole-model heat balance is `thermbilan.F:71-76` in the engine `.out`,
     which is the independent checker every number above was read from.
   - Corpus reach: **zero** decks under `C:\openradioss_run` carry any keyword in
     this batch (re-measured over 148 files under a 60 MB cap plus the three

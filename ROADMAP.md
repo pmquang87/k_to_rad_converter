@@ -851,7 +851,7 @@ validated foundation for further linear analyses:
   **Still open:** nothing in the thermal-solver scope that Radioss can express.
   What is left is inexpressible and named in the log: the implicit thermal
   controls (`*CONTROL_THERMAL_{TIMESTEP,NONLINEAR,FORMING,EIGENVALUE}` — Radioss
-  has no thermal matrix and no nonlinear iteration, `tempur.F:47-52` is the whole
+  has no thermal matrix and no nonlinear iteration, `tempur.F:48-55` is the whole
   integrator), view-factor / enclosure radiation
   (`*BOUNDARY_RADIATION_*_VF_*`, `_ENCLOSURE`), moving heat sources
   (`*BOUNDARY_FLUX_TRAJECTORY`), the welding material `*MAT_THERMAL_CWM`, the

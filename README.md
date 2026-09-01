@@ -2647,7 +2647,7 @@ own, and `hm_read_thgrou.F:1255` gives `/TH/SURF` exactly
 channel to be tempted by (#122). The `/TH/NODE TEMP` group therefore covers the
 boundary segments' nodes as well as the driven ones, so a `/CONVEC`-only deck
 still gets a temperature history; the whole-model heat balance lives in the
-engine `.out`, where `thermbilan.F:63-71` prints `** THERMAL ANALYSIS **` with
+engine `.out`, where `thermbilan.F:71-76` prints `** THERMAL ANALYSIS **` with
 the imposed-flux, strain-energy, convection, radiation and stored heat.
 
 **The heat-source boundaries, validated on converter output.** Each coupon

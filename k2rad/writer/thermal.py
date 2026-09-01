@@ -249,7 +249,7 @@ def _thermal_solve_active(state: ConversionState) -> bool:
     ``/CONVEC`` probe is the discriminating one, because it needs neither an
     ``/IMPTEMP`` nor an engine card: ``/HEAT/MAT`` + ``/CONVEC``, every node in
     ``/BCS 111 111``, ran 7011 cycles and the engine's own accounting
-    (``thermbilan.F:63-71``) reported ``CONVECTION HEAT = 68.120647`` mJ =
+    (``thermbilan.F:71-76``) reported ``CONVECTION HEAT = 68.120647`` mJ =
     ``HEAT STORED``; the twin with the ``/CONVEC`` removed stored 7.4e-32.
 
     An ``/INITEMP`` alone is deliberately NOT enough: it is a STATE, not a
@@ -661,7 +661,7 @@ _CT_SOLVER_DROPS = (
     ("atype", "ATYPE",
      "the thermal analysis type (0 steady state / 1 transient, Vol I R17 "
      "p.12-573). Radioss integrates the temperature FORWARD IN TIME and only "
-     "that (tempur.F:47-52: TEMP += FTHE/MCP, then FTHE is zeroed), so a "
+     "that (tempur.F:48-55: TEMP += FTHE/MCP, then FTHE is zeroed), so a "
      "steady-state solve has no counterpart at all — the converted run is "
      "transient and has to be given enough physical time to settle"),
     ("ptype", "PTYPE",
@@ -919,7 +919,7 @@ def _note_tprint(state: ConversionState) -> None:
             "deliberately NOT folded into the /TFILE minimum: the TEMP channel "
             "rides the groups already there rather than pacing one of its own. "
             "The whole-model heat balance is in the engine .out instead of a "
-            "/TH group, because none exists: thermbilan.F:63-71 prints "
+            "/TH group, because none exists: thermbilan.F:71-76 prints "
             "'** THERMAL ANALYSIS **' with the imposed-flux, strain-energy, "
             "convection, radiation and stored heat once per printout, while "
             "/TH/SURF's variable list (hm_read_thgrou.F:1255) is AREA, "
@@ -2066,10 +2066,14 @@ def _bc_constant_function(state: ConversionState, value: float,
     """A synthesized two-point ``/FUNCT`` of constant ordinate *value*.
 
     ``fct_IDT`` is MANDATORY on all three cards: a blank or zero id is
-    ``ERROR 120 WRONG REFERENCE TO FUNCTION ID=0`` (``fsdcod.F:1591-1603`` and
-    its two siblings), measured once per card. So the constant form of every
-    LS-DYNA cell that Radioss carries as a curve gets a real function — the
-    same treatment ``*BOUNDARY_TEMPERATURE``'s TLCID = 0 form already gets.
+    ``ERROR 120 WRONG REFERENCE TO FUNCTION ID=0``, measured once per card.
+    The three sites are consecutive loops in ``starter/source/system/fsdcod.F``
+    — ``:1591-1603`` for ``/CONVEC`` (whose message text is MISLABELLED
+    ``C1='FIXED FLUX'``), ``:1607-1619`` for ``/RADIATION``
+    (``'FIXED RADIATIVE FLUX'``) and ``:1623-1635`` for ``/IMPFLUX``
+    (``'FIXED HEAT FLUX'``). So the constant form of every LS-DYNA cell that
+    Radioss carries as a curve gets a real function — the same treatment
+    ``*BOUNDARY_TEMPERATURE``'s TLCID = 0 form already gets.
     """
     fid = state.next_curve_id()
     state.curves[fid] = Curve(
@@ -2757,7 +2761,7 @@ def _make_thermal_output(state: ConversionState,
     ``AREA, MASSFLOW, VELOCITY, P, A, MASS`` and there is no thermal-load
     ``/TH`` family anywhere in the starter — so there is not even a
     legal-but-zero channel to be tempted by (#122). The whole-model heat
-    balance is in the engine ``.out`` instead: ``thermbilan.F:63-71`` prints
+    balance is in the engine ``.out`` instead: ``thermbilan.F:71-76`` prints
     ``** THERMAL ANALYSIS **`` with IMPOSED FLUX_DENSITY HEAT / HEAT CONVERTED
     FROM STRAIN ENERGY / CONVECTION HEAT / RADIATION HEAT / HEAT STORED once
     per printout, and that is what the validation coupons were checked against.

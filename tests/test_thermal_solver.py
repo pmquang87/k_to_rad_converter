@@ -15,7 +15,7 @@ Kept in its own module, the repo's one-module-per-batch convention.
 
 **The numbers here are solver-measured.** Every coupon below was converted by
 this code and run through OpenRadioss in a short run dir; the engine's own
-``thermbilan.F:63-71`` accounting (``** THERMAL ANALYSIS **``) is the
+``thermbilan.F:71-76`` accounting (``** THERMAL ANALYSIS **``) is the
 independent checker:
 
   /IMPFLUX  MLC = -70000, 1 mm^2, 1.00012284e-3 s
