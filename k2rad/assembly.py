@@ -4826,6 +4826,7 @@ def _warn_coordinate_bearing(p: PendingInclude, aff: Affine, warn) -> None:
         kw = b.keyword
         if kw in seen:
             continue
+        bearing = False
         with _scoped_block(b):
             if (kw == "DATABASE_CROSS_SECTION_PLANE"
                     and _cross_section_plane_is_node_defined(b)):

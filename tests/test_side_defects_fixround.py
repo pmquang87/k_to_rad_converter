@@ -1,6 +1,6 @@
 """Follow-up fix round of the SIDE-DEFECT batch (PR #132, post-review).
 
-One blocker and six smaller defects found by re-verifying the review round's
+One blocker, one major and six minors found by re-verifying the review round's
 own fixes against the LS-DYNA manual, the OpenRadioss starter/engine source
 and twin measurements. Each test carries the measurement that settles it.
 
@@ -8,6 +8,9 @@ and twin measurements. Each test carries the measurement that settles it.
     ``assembly.finalize`` — which runs AFTER the LOCAL frames are popped — so
     a ``&localname`` in an ``*INCLUDE_TRANSFORM`` child was un-offset (an id)
     or overwritten with a literal 0 (a coordinate).
+  * A ``*NODE`` id welded to a negative first coordinate was read as node 0,
+    losing the node and minting a phantom — 58 303 rows across 188 corpus
+    files, at zero warnings (pre-existing).
   * ``paramexpr.power()`` recursed without ``_enter()``, so the depth cap the
     batch added did not cover a ``**`` chain and a ``RecursionError`` still
     escaped.
@@ -16,6 +19,8 @@ and twin measurements. Each test carries the measurement that settles it.
   * p.16-50's RADIUS exemption covers five cells; three were exempted.
   * The bare-``*EOS_*`` refusals printed the RADIOSS spelling of the keyword.
   * 24 ``/GRNOD`` emitters still drew from the unguarded allocator.
+  * ``*INITIAL_STRESS_SHELL`` records at different ``nb_integr`` in one deck
+    are consumed against ONE global offset (named, not fixed — pre-existing).
 """
 
 import os
@@ -655,6 +660,35 @@ class TestEverySynthesizedGrnodDodgesUserSets(unittest.TestCase):
     ERROR TERMINATION (exit 2); after it, 0 ERRORS.
     """
 
+    #: One carrier per emitter this round moved, because a probe that reaches
+    #: only ONE of them proves nothing about the others: the three
+    #: initial-velocity spellings alone land in three different functions
+    #: (``*INITIAL_VELOCITY_NODE`` -> ``_make_inivel``, ``*INITIAL_VELOCITY``
+    #: with an NSID -> ``_make_initial_velocity``, ``_GENERATION`` ->
+    #: ``_make_initial_velocity_generation``). Found the hard way: the first
+    #: draft of this test used ``*INITIAL_VELOCITY_NODE`` and a mutation of the
+    #: ``_make_initial_velocity`` site left it green.
+    CARRIERS = {
+        "*ELEMENT_MASS": "*ELEMENT_MASS\n" + _i8(1, 5) + f"{'1.0E-06':>16}",
+        "*INITIAL_VELOCITY_NODE":
+            "*INITIAL_VELOCITY_NODE\n" + _row(1, "100.0", "0.0", "0.0"),
+        "*INITIAL_VELOCITY":
+            "*SET_NODE_LIST\n" + _row(11) + "\n" + _row(1, 2)
+            + "\n*INITIAL_VELOCITY\n" + _row(11, 0, 0) + "\n"
+            + _row("100.0", "0.0", "0.0"),
+        "*INITIAL_VELOCITY_GENERATION":
+            "*INITIAL_VELOCITY_GENERATION\n"
+            + _row(1, 2, "0.0", "100.0", "0.0", "0.0") + "\n"
+            + _row("0.0", "0.0", "0.0", "0.0", "0.0", "0.0"),
+        "*LOAD_NODE_POINT":
+            "*DEFINE_CURVE\n" + _row(9) + "\n" + _row("0.0", "0.0") + "\n"
+            + _row("1.0", "1.0") + "\n"
+            + "*LOAD_NODE_POINT\n" + _row(5, 1, 9, "1.0"),
+    }
+
+    #: The auto-id base; a user set below it cannot collide by construction.
+    AUTO_BASE = 90000
+
     def _emitted_grnod_ids(self, extra=""):
         deck = "\n".join([
             "*KEYWORD", _MASS_MESH.rstrip("\n"), extra,
@@ -664,30 +698,27 @@ class TestEverySynthesizedGrnodDodgesUserSets(unittest.TestCase):
                for ln in starter.splitlines() if ln.startswith("/GRNOD/")]
         return res, ids
 
-    def test_the_added_mass_group_dodges_a_user_set_on_its_id(self):
-        _res, ids = self._emitted_grnod_ids(
-            "*ELEMENT_MASS\n" + _i8(1, 5) + f"{'1.0E-06':>16}")
-        self.assertEqual(len(ids), 1)
-        taken = ids[0]                       # the id the allocator really uses
-        res, ids2 = self._emitted_grnod_ids(
-            "*ELEMENT_MASS\n" + _i8(1, 5) + f"{'1.0E-06':>16}\n"
-            + "*SET_NODE_LIST\n" + _row(taken) + "\n" + _row(1, 2))
-        self.assertEqual(len(ids2), len(set(ids2)),
-                         f"duplicate /GRNOD id in {ids2}")
-        self.assertIn(taken, ids2)
-        self.assertEqual(_warns(res, "emitted by more than one /GRNOD"), [])
-
-    def test_the_inivel_group_dodges_one_too(self):
-        _res, ids = self._emitted_grnod_ids(
-            "*INITIAL_VELOCITY_NODE\n" + _row(1, "100.0", "0.0", "0.0"))
-        self.assertTrue(ids)
-        taken = ids[0]
-        res, ids2 = self._emitted_grnod_ids(
-            "*INITIAL_VELOCITY_NODE\n" + _row(1, "100.0", "0.0", "0.0") + "\n"
-            + "*SET_NODE_LIST\n" + _row(taken) + "\n" + _row(1, 2))
-        self.assertEqual(len(ids2), len(set(ids2)),
-                         f"duplicate /GRNOD id in {ids2}")
-        self.assertEqual(_warns(res, "emitted by more than one /GRNOD"), [])
+    def test_every_carrier_dodges_a_user_set_on_its_own_allocated_id(self):
+        """Aimed at the id the allocator ACTUALLY takes: the order is read out
+        of a first conversion instead of being assumed to start at 90001. On
+        the `_GENERATION` carrier it does not — a /SKEW is minted first — and
+        #131's collision test failed exactly that way."""
+        for name, card in self.CARRIERS.items():
+            with self.subTest(carrier=name):
+                _res, ids = self._emitted_grnod_ids(card)
+                auto = [i for i in ids if i >= self.AUTO_BASE]
+                self.assertTrue(auto, f"{name} emitted no synthesized /GRNOD")
+                for taken in auto:
+                    res, ids2 = self._emitted_grnod_ids(
+                        card + "\n*SET_NODE_LIST\n" + _row(taken) + "\n"
+                        + _row(1, 2))
+                    self.assertEqual(
+                        len(ids2), len(set(ids2)),
+                        f"{name}: duplicate /GRNOD id in {ids2} "
+                        f"(planted a user set at {taken})")
+                    self.assertIn(taken, ids2)
+                    self.assertEqual(
+                        _warns(res, "emitted by more than one /GRNOD"), [])
 
     def test_no_emitter_is_left_on_the_bare_allocator(self):
         """The audit itself, as a fence: every ``_emit_grnod_node`` call whose
