@@ -2661,6 +2661,16 @@ Mg-mm-s) converted by k2rad and run in OpenRadioss; the engine's own
 | `/IMPFLUX` | `MLC = +70000` (out of the volume) | `−70.0086 mJ` | `−70.008599` | **the sign flip, discriminated** |
 | `/CONVEC` | `h = 100`, 6 faces, `T∞ = 1000` | `387.005245 mJ` (lumped) | `387.00946` | +0.0011 % |
 | `/RADIATION` | `FMULT = 5.6704e-11` (ε = 1), `T∞ = 1000` | `0.056251607 mJ` | `0.056251513` | −0.0002 % |
+| `/THERM` | the `/CONVEC` deck + `TSF = 10` | `2047.947 mJ` (τ/10) | `2048.0415` | +0.005 % |
+
+The `/THERM` row is a with/without **twin**, so it proves CONSUMPTION and not
+just emission (#118): the same deck without the card stores `387.00946`, a
+factor 5.29 apart, and the starter echoes
+`FACTOR TO SPEED-UP THERMAL ANALYSIS = 10.00000`. The starter echo also
+confirms the two cells that ride on `/HEAT/MAT` — `FRACTION OF STRAIN ENERGY
+CONVERTED INTO HEAT = 1.0` from `FWORK`, and
+`AL (LIQUID PHASE) = 45.0` rather than the `AL = 0` that would make `k` vanish
+above the melting temperature.
 
 The radiation row is what settles the unit system: with the **SI** σ the same
 deck would have stored `56.25 mJ`, a factor 1000 out, and the starter would have

@@ -86,8 +86,16 @@ Prior history (before this changelog was introduced) is summarized in the
     `/HEAT/MAT` EFRAC.** `/THERM` (`frethermal.F:64-70`) carries exactly one
     cell, `THEACCFACT`, which multiplies the conductivity (`dttherm.F90:114`) and
     the time argument of every thermal source — term for term LS-DYNA's Thermal
-    Speedup Factor (p.12-576). `FWORK` and `EFRAC` are both *"the fraction of
-    mechanical work converted into heat"* and both turn a stated 0 into 1.0. The
+    Speedup Factor (p.12-576). MEASURED as a with/without TWIN, so the card's
+    CONSUMPTION is proven and not just its emission (#118): the `/CONVEC`
+    coupon with `TSF = 10` stored `2048.0415 mJ` against a hand-computed
+    `2047.947` (τ/10, +0.005 %) where the same deck without the card stores
+    `387.00946` — a factor 5.29 — and the starter echoes
+    `FACTOR TO SPEED-UP THERMAL ANALYSIS = 10.00000`.
+    `FWORK` and `EFRAC` are both *"the fraction of
+    mechanical work converted into heat"* and both turn a stated 0 into 1.0
+    (echoed by the starter as `FRACTION OF STRAIN ENERGY CONVERTED INTO HEAT`).
+    The
     card's other 15 cells are named per-field drops, `EQHEAT ≠ 1` is called out
     as a unit inconsistency the converted deck cannot carry, and `SBC` becomes a
     CROSS-CHECK against the σ `/BEGIN` implies — a mismatch there would put

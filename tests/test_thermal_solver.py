@@ -26,11 +26,22 @@ independent checker:
   /RADIATION FMULT = 5.6704e-11 (eps = 1), T_inf 1000, T0 300
       RADIATION HEAT             0.056251513 mJ  vs 0.056251607     -0.0002%
       (the SI sigma would have given 56.25 mJ, 1000x off)
+  /THERM 10 from *CONTROL_THERMAL_SOLVER TSF, on the /CONVEC coupon
+      CONVECTION HEAT            2048.0415  mJ  vs 2047.947 (tau/10)  +0.005%
+      (the same deck with no /THERM stores 387.00946 — a 5.29x twin, so the
+       card's CONSUMPTION is proven, not just its emission; the starter also
+       echoes FACTOR TO SPEED-UP THERMAL ANALYSIS = 10.00000)
   /DT/THERM at the default factor 0.9, ENDTIM 0.2
       diverged to HEAT STORED 7 901 590.2 mJ where saturation is 2527.7,
       at 0 ERROR / 0 WARNING / NORMAL TERMINATION
   the same deck at the warning's prescribed factor 0.225
       HEAT STORED 2527.6994 mJ vs an analytic 2527.7000
+
+The starter echo confirms the two cells that ride on /HEAT/MAT: with
+FWORK = 1.0 it prints ``FRACTION OF STRAIN ENERGY CONVERTED INTO HEAT =
+1.000000000000``, and the mirrored second conductivity segment comes back as
+``AL (LIQUID PHASE) = 45.00000000000`` / ``BL (LIQUID PHASE) = 0.0`` rather
+than the ``AL = 0`` that would make k vanish above the melting temperature.
 """
 
 import os
