@@ -295,6 +295,17 @@ class BoundaryFluxTests(unittest.TestCase):
         self.assertEqual(rows[1:], [_row(1, 5, 6, 7, 8)])
         self.assertEqual(len(_headers(starter, "/IMPFLUX/")), 1)
 
+    def test_a_refused_record_still_gets_its_field_accounting(self):
+        # A refusal must not skip the "these cells have no counterpart" pass —
+        # on exactly the cards a reader most needs the inventory (#129).
+        card = ("*BOUNDARY_FLUX_SET\n" + _row(50, 42) + "\n"
+                + _row(0, -70000.0, -70000.0, -70000.0, -35000.0, 1, 0) + "\n")
+        result, starter, _ = _convert(_deck(SEG1 + card))
+        self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+        self.assertTrue(_warned(result, "PER-NODE flux multipliers"))
+        self.assertTrue(_warned(result, "PSEROD=42"))
+        self.assertTrue(_warned(result, "LOC=1"))
+
     def test_a_missing_segment_set_drops_the_card_and_says_why(self):
         card = ("*BOUNDARY_FLUX_SET\n" + _row(77, 0) + "\n"
                 + _row(0, -70000.0, -70000.0, -70000.0, -70000.0, 0, 0) + "\n")
@@ -848,6 +859,22 @@ class ThermalMaterialTdTests(unittest.TestCase):
         # No conductivity is written either — the material is refused whole.
         body = _data_rows(starter, "/HEAT/MAT/1")
         self.assertAlmostEqual(float(body[0][40:60]), 0.0)
+
+    def test_a_refused_material_is_not_called_unbound(self):
+        # The no-conductivity fallback used to assert "no *MAT_THERMAL_* is
+        # bound to this material (no *PART TMID names one)" — a FALSE premise
+        # on a material that is bound and merely unconvertible (the #129 class:
+        # a true conclusion resting on a false premise still misinforms).
+        mat = ("*MAT_THERMAL_ISOTROPIC_TD\n"
+               + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+               + _row(300.0, 900.0) + "\n"
+               + _row("4.60E+8", "1.60E+9") + "\n"
+               + _row(50.0, 32.0) + "\n")
+        result, _starter, _ = _convert(self._deck_td(mat))
+        self.assertFalse(_warned(result, "no *PART TMID names one"))
+        self.assertTrue(_warned(result, "IS bound to this material through a "
+                                        "*PART TMID but could NOT be "
+                                        "converted"))
 
     def test_one_point_is_refused(self):
         mat = ("*MAT_THERMAL_ISOTROPIC_TD\n"

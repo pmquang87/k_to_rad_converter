@@ -1639,13 +1639,19 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         rho = _structural_density(state, mid)
         t1 = _law_melt_temperature(state, mid)
         bs = al = bl = 0.0
+        # A thermal material that IS bound but could not be converted must not
+        # come out under the "no *MAT_THERMAL_* is bound to this material (no
+        # *PART TMID names one)" message below: that premise would be false,
+        # and a true conclusion resting on a false premise still misinforms
+        # (the #129 lesson). The refusal itself has already been named.
+        refused_tm = None
         if tm is not None and not _thermal_material_usable(state, tm, mid):
-            tm = None
+            refused_tm, tm = tm, None
         if isinstance(tm, MatThermalIsotropicTD):
             _sample_td_lc_curves(state, tm)
             fit = _fit_td_conductivity(state, tm, mid, t1)
             if fit is None:
-                tm = None
+                refused_tm, tm = tm, None
             else:
                 rho_cp, a_s, bs, al, bl = fit
                 _warn_thermal_generation_drops(state, tm, mid)
@@ -1673,9 +1679,13 @@ def _resolve_heat_materials(state: ConversionState) -> None:
             # any heat that does appear, and it divides by exactly this cell.
             rho_cp = _law_own_rho_cp(state, mid) or _RHO_CP_PLACEHOLDER
             a_s = 0.0
+            why = ("no *MAT_THERMAL_* is bound to this material "
+                   "(no *PART TMID names one)" if refused_tm is None else
+                   f"*MAT_THERMAL_* {refused_tm.tmid} IS bound to this "
+                   "material through a *PART TMID but could NOT be converted "
+                   "(see the refusal above)")
             state.warn(
-                f"/HEAT/MAT/{mid}: no *MAT_THERMAL_* is bound to this material "
-                "(no *PART TMID names one), so its CONDUCTIVITY is unknown and "
+                f"/HEAT/MAT/{mid}: {why}, so its CONDUCTIVITY is unknown and "
                 "AS = BS = 0 is written: heat does NOT flow between nodes. That "
                 "is faithful for a structural-only deck whose temperatures are "
                 "all prescribed by *LOAD_THERMAL_* or *BOUNDARY_TEMPERATURE — "
@@ -2173,8 +2183,14 @@ def _resolve_thermal_boundaries(state: ConversionState) -> None:
             ok = _resolve_convec(state, bc)
         else:
             ok = _resolve_radiation(state, bc)
+        # The dropped-field accounting runs for EVERY record, refused ones
+        # included. Each of the three resolvers has four or five early
+        # refusals, and hanging the accounting off the success path would
+        # lose the field inventory on exactly the cards a reader most needs
+        # it (the #129 "a refusal continue must not skip the accounting"
+        # lesson, from the /DYNAIN writer).
+        _bc_common_drops(state, bc)
         if ok:
-            _bc_common_drops(state, bc)
             kept.append(bc)
     state.thermal_boundaries[:] = kept
     if kept and not conduction:
