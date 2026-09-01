@@ -1523,11 +1523,17 @@ def _warn_node_tc_rc(state: ConversionState, lines: List[str]) -> None:
       * A DOF already driven by ``/IMPVEL`` or ``/IMPDISP`` must not also be
         pinned — the two cards fight over the same slot.
 
-    Both need their own twin campaign against LS-DYNA. The interim is the loud
-    per-deck note below, and the conversion is a ROADMAP item behind an opt-in
-    flag (``--node-tc-rc-to-bcs``) so the carrying decks can be fixed without
-    changing the default for everyone. The scale is why it is worth doing
-    properly: 721 of 2346 corpus decks write a non-zero cell.
+    Both need their own twin campaign against LS-DYNA, and the need is
+    MEASURED rather than asserted: of the 721 carrying decks in the two corpus
+    roots, **278 (39 %) also carry a rigid body or a prescribed motion** —
+    139 a ``*MAT_RIGID`` / ``*CONSTRAINED_NODAL_RIGID_BODY`` /
+    ``*CONSTRAINED_EXTRA_NODES``, 211 a ``*BOUNDARY_PRESCRIBED_MOTION_*`` — so
+    a naive pass would be wrong on two decks in five. The other 443 (61 %)
+    would be safe, which is exactly why the conversion is worth building.
+
+    The interim is the loud per-deck note below, and the conversion is a
+    ROADMAP item behind an opt-in flag (``--node-tc-rc-to-bcs``) so the
+    carrying decks can be fixed without changing the default for everyone.
 
     The detector itself is independently checked: a scanner that does not use
     k2rad found a non-zero TC/RC in exactly the decks this note fires on, with

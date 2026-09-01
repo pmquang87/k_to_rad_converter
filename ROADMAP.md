@@ -900,6 +900,14 @@ Cases that convert today but drop or approximate detail worth recovering:
   - A DOF already driven by `/IMPVEL` or `/IMPDISP` must not also be pinned;
     the two fight over the same slot.
 
+  **How much screening is actually needed is measured, not assumed:** of the
+  721 carrying decks, **278 (39 %) also carry a rigid body or a prescribed
+  motion** — 139 a `*MAT_RIGID` / `*CONSTRAINED_NODAL_RIGID_BODY` /
+  `*CONSTRAINED_EXTRA_NODES`, 211 a `*BOUNDARY_PRESCRIBED_MOTION_*` — so a
+  naive pass would be wrong on two decks in five, while the other 443 (61 %)
+  would be safe. That split is the case for the flag: most carriers get a
+  correct model immediately, and the campaign can concentrate on the 278.
+
   **Ship it behind an opt-in `--node-tc-rc-to-bcs` (default off)**, the way
   `--ams`, `--tet10-to-tet4`, `--deformable-contact-recipe` and `--auto-gapmin`
   are opt-in, so the 721 decks get a route to a correct model without changing
