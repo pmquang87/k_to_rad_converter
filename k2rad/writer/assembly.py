@@ -2734,7 +2734,13 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
             "inexpressible — the card is not written and the run goes at its "
             "real thermal rate.")
     elif tsf > 0.0 and tsf != 1.0:
-        if _thermal_solve_active(state):
+        # Same implicit/modal exclusion as /DT/THERM: THEACCFACT is read by
+        # frethermal.F either way, but everything that CONSUMES it — dttherm,
+        # convec, radiation, fixflux, fixtemp — is called from the EXPLICIT
+        # loop in resol.F and never from imp_solv. An emitted-and-inert card
+        # is the #122 case.
+        if _thermal_solve_active(state) and not state.is_implicit \
+                and not state.is_modal:
             lines += [
                 "#-  THERMAL SPEED-UP (*CONTROL_THERMAL_SOLVER TSF)",
                 "/THERM",
@@ -2759,10 +2765,16 @@ def _make_engine_thermal(state: ConversionState) -> List[str]:
         else:
             state.warn(
                 f"*CONTROL_THERMAL_SOLVER TSF={tsf:g} would map to the engine "
-                "card /THERM (THEACCFACT), but this deck arms no thermal solve "
-                "— no material gets a /HEAT/MAT and/or no temperature-moving "
-                "card is emitted — so there is nothing for it to speed up and "
-                "the card is not written.")
+                "card /THERM (THEACCFACT), but it is not written because "
+                + ("this deck runs implicitly or as a modal analysis, where "
+                   "nothing consumes it: dttherm, convec, radiation, fixflux "
+                   "and fixtemp are all called from the EXPLICIT loop in "
+                   "resol.F and none is reached from imp_solv"
+                   if state.is_implicit or state.is_modal else
+                   "this deck arms no thermal solve — no material gets a "
+                   "/HEAT/MAT and/or no temperature-moving card is emitted, "
+                   "so there is nothing for it to speed up")
+                + ".")
     return lines
 
 

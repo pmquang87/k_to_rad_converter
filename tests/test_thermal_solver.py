@@ -649,6 +649,18 @@ class EngineThermalCardTests(unittest.TestCase):
         self.assertNotIn("/THERM\n", engine)
         self.assertTrue(_warned(result, "makes |TSF| a load curve id"))
 
+    def test_tsf_on_an_implicit_deck_writes_nothing(self):
+        # THEACCFACT is read by frethermal.F either way, but everything that
+        # consumes it is called from the EXPLICIT loop in resol.F.
+        deck = _deck("*CONTROL_IMPLICIT_GENERAL\n" + _row(1, 0.001) + "\n"
+                     "*CONTROL_THERMAL_SOLVER\n"
+                     + _row(1, 1, 11, "", 0, 1.0, 1.0, 0.0) + "\n"
+                     + _row(0, 500, 1.0e-10, 1.0e-6, 1.0, "", "", 10.0) + "\n"
+                     + THERMAL_LOAD)
+        result, _starter, engine = _convert(deck)
+        self.assertNotIn("/THERM\n", engine)
+        self.assertTrue(_warned(result, "none is reached from imp_solv"))
+
     def test_tsf_without_a_thermal_solve_writes_nothing(self):
         deck = _deck("*CONTROL_THERMAL_SOLVER\n"
                      + _row(1, 1, 11, "", 0, 1.0, 1.0, 0.0) + "\n"
