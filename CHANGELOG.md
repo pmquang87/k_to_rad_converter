@@ -152,12 +152,16 @@ Prior history (before this changelog was introduced) is summarized in the
     exists — there is not even a legal-but-zero channel to be tempted by (#122).
     The whole-model heat balance is `thermbilan.F:71-76` in the engine `.out`,
     which is the independent checker every number above was read from.
-  - Corpus reach: **zero** decks under `C:\openradioss_run` carry any keyword in
-    this batch (re-measured over 148 files under a 60 MB cap plus the three
-    larger ones streamed in chunks), so the two-half sweep — output files AND
-    `state.warnings` + `skipped_keywords` + `recognized_not_emitted`, stated
-    separately per the #129 rule — shows zero movers on both halves. All physics
-    validation is synthetic, as with the viscoelastic and adhesive batches.
+  - Corpus reach: **zero**. Re-measured over all 509 `.k`/`.key`/`.dyn`/`.inc`
+    files under `C:\openradioss_run` — 506 grepped directly and the three above
+    a 60 MB cap (`yaris-detailed-v2j.key` 161 MB, `camry-detailed-v5a.key`
+    237 MB, `Model-318_Achshebel-fein_tobi.k` 70 MB) streamed line by line,
+    8.77 M lines in total — plus all 36 deck-like files under
+    `E:\foxcore_data`. Not one carries any keyword in this batch, so the
+    two-half sweep — output files AND `state.warnings` + `skipped_keywords` +
+    `recognized_not_emitted`, stated separately per the #129 rule — shows zero
+    movers on both halves. All physics validation is synthetic, as with the
+    viscoelastic and adhesive batches.
 
 ### Fixed
 
