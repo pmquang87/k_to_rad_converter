@@ -485,6 +485,15 @@ class BoundaryRadiationTests(unittest.TestCase):
         self.assertEqual(_funct_points(starter, fid),
                          [(0.0, 2000.0), (1.0, 2000.0)])
 
+    def test_a_unit_tmult_keeps_the_decks_own_curve_id(self):
+        # Fscale_y = 1.0 already neutralises the /PARITH/ON defect (1.0
+        # re-applied per segment is still 1.0), so no copy is needed and the
+        # deck stays readable.
+        _result, starter, _ = self._radia(tmult=1.0)
+        body = _block(starter, _one_header(starter, "/RADIATION/"))
+        self.assertEqual(int(body[2][10:20]), 900)
+        self.assertAlmostEqual(float(body[4][20:40]), 1.0)
+
     def test_a_constant_t_inf_gets_a_synthesized_function(self):
         _result, starter, _ = self._radia(tlcid=0, tmult=1200.0)
         body = _block(starter, _one_header(starter, "/RADIATION/"))

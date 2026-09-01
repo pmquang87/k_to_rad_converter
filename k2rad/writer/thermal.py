@@ -2448,8 +2448,12 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
         mult = bc.fscale if bc.fscale else 1.0
         # FSCALE is BAKED into a copy of the curve rather than written to the
         # card — see _bc_scaled_function for the measured /PARITH/ON defect it
-        # dodges.
-        bc.func_id = _bc_scaled_function(state, bc.lcid, mult, "radiation_tinf")
+        # dodges. A multiplier of exactly 1.0 needs no copy: writing
+        # Fscale_y = 1.0 already neutralises the defect (1.0 re-applied per
+        # segment is still 1.0), so the deck keeps its own curve id.
+        bc.func_id = (bc.lcid if mult == 1.0 else
+                      _bc_scaled_function(state, bc.lcid, mult,
+                                          "radiation_tinf"))
         t_inf_const = None
     else:
         bc.func_id = _bc_constant_function(state, bc.fscale, "radiation_tinf")
