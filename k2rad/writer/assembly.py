@@ -1507,11 +1507,31 @@ def _warn_node_tc_rc(state: ConversionState, lines: List[str]) -> None:
     0.317 mm amplitude) — and the run still reported NORMAL TERMINATION. The
     #122 class: legal, accepted, and wrong.
 
-    Not converted here, deliberately. 721 of 2346 corpus decks write a
-    non-zero cell, so emitting /BCS for them would add constraints to a third
-    of the corpus in a round that cannot validate them; and an EXTRA
-    constraint — silently stiffening a model, or fighting an ``/IMPVEL`` on
-    the same DOF — is the harder of the two failures to notice.
+    **Not converted here, and the reason is the SCREENING, not the direction
+    of the error.** An earlier draft argued that an extra constraint is the
+    harder failure to notice than a missing one; that does not justify
+    shipping a missing one. What does justify deferral is that a correct /BCS
+    pass has to screen two things this round cannot validate:
+
+      * p.35-3 Remark 1, verbatim: *"No attempt should be made to apply
+        boundary conditions to nodes belonging to rigid bodies (see
+        \\*MAT_RIGID for application of rigid body constraints)."* So every
+        rigid-body secondary node has to come out of the set, and k2rad's
+        rigid nodes are assembled across ``*MAT_RIGID`` parts,
+        ``*CONSTRAINED_NODAL_RIGID_BODY`` and the synthesized element-free
+        masters.
+      * A DOF already driven by ``/IMPVEL`` or ``/IMPDISP`` must not also be
+        pinned — the two cards fight over the same slot.
+
+    Both need their own twin campaign against LS-DYNA. The interim is the loud
+    per-deck note below, and the conversion is a ROADMAP item behind an opt-in
+    flag (``--node-tc-rc-to-bcs``) so the carrying decks can be fixed without
+    changing the default for everyone. The scale is why it is worth doing
+    properly: 721 of 2346 corpus decks write a non-zero cell.
+
+    The detector itself is independently checked: a scanner that does not use
+    k2rad found a non-zero TC/RC in exactly the decks this note fires on, with
+    no false positives and no misses.
     """
     if not state.node_tc_rc_count:
         return

@@ -252,6 +252,42 @@ def _make_inishe(state: ConversionState) -> List[str]:
     if not quad_e and not tri_e:
         return []
 
+    # INISHVAR is a SINGLE GLOBAL, not a per-record value. The reader sets
+    # ``INISHVAR = 22 + NIP*6`` (hm_read_inistate_d00.F:2206/2389/3347/3516)
+    # into the COM01 common (share/includes/com01_c.inc:34) once per RECORD,
+    # while csigini.F:231/233 and scigini4.F:345/347/487/489 read
+    # ``SIGSH(INISHVAR+IT)`` (sigma_zz) and ``SIGSH(INISHVAR+NPTI+IT)``
+    # (pos_nip) at CONSUME time — i.e. with whatever the LAST record left
+    # behind. So two shell parts at different NIP are read correctly one
+    # record at a time and then consumed against one offset: every element
+    # whose NIP differs from the last record's picks up its through-thickness
+    # stress and its station positions from the wrong slots, at zero starter
+    # diagnostics. Each record passes the per-part NTHICK check above, so
+    # nothing else in this pass can see it.
+    #
+    # PRE-EXISTING (master emits the byte-identical block), but item (D) adds
+    # a second block kind to the same pass, so the deck is named rather than
+    # left silent. The #127 class one namespace over: one card kind changing
+    # how another is read.
+    nips = sorted({iss.nthick for iss, _p, _n, _i in quad_e + tri_e})
+    if len(nips) > 1:
+        state.warn(
+            "*INITIAL_STRESS_SHELL: the records in this deck do NOT share one "
+            f"through-thickness point count — nb_integr values {nips} appear "
+            "in a single /INISHE|/INISH3 STRS_F pass. The starter keeps ONE "
+            "global offset for that count (INISHVAR = 22 + NIP*6, "
+            "hm_read_inistate_d00.F:2206, in the COM01 common) and the "
+            "consumers read SIGSH(INISHVAR+IT) and SIGSH(INISHVAR+NPTI+IT) "
+            "with whatever the LAST record left there (csigini.F:231/233, "
+            "scigini4.F:345/347), so every element whose NIP differs from the "
+            f"last record's ({nips[-1]} here is not guaranteed to be it — the "
+            "order is the deck's) reads its sigma_zz and its station "
+            "positions from the WRONG offsets, at 0 starter ERROR / 0 "
+            "WARNING. Give every pre-stressed shell part the same "
+            "*SECTION_SHELL NIP, or split the initial state into separate "
+            "runs. This is a pre-existing OpenRadioss limitation, not a "
+            "conversion loss: the emitted records are each correct.")
+
     def _records(entries, keyword: str) -> List[str]:
         out = [keyword]
         for iss, npg, _n_eff, _ishell in entries:

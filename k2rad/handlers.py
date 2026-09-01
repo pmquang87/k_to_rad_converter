@@ -235,10 +235,8 @@ def _note_node_constraint(state: ConversionState, nid: int, tc: str,
     NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero cell here.
 
     Only the LOSS is recorded; ``writer/assembly._warn_node_tc_rc`` names it
-    once per deck. Converting them into /BCS is a separate item: it would add
-    constraints to a third of the corpus, and an EXTRA constraint (silently
-    stiffening a model, or fighting a /IMPVEL on the same DOF) is the harder
-    failure to notice of the two.
+    once per deck and carries the full reasoning for why the conversion is
+    deferred rather than done here.
     """
     for cell in (tc, rc):
         if not cell:
@@ -249,7 +247,9 @@ def _note_node_constraint(state: ConversionState, nid: int, tc: str,
         except ValueError:
             continue
         state.node_tc_rc_count += 1
-        if len(state.node_tc_rc) < 10:
+        # Five, matching what _warn_node_tc_rc prints — collecting ten left
+        # half the list dead.
+        if len(state.node_tc_rc) < 5:
             state.node_tc_rc.append(nid)
         return
 

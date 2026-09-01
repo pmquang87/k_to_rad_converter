@@ -890,11 +890,45 @@ Cases that convert today but drop or approximate detail worth recovering:
   those degrees of freedom are free in the emitted model. **721 of 2346 corpus
   decks write a non-zero cell.** The mapping itself is trivial — the codes are
   the same triples `*BOUNDARY_SPC_NODE` states one flag at a time, and the
-  `/BCS` writer already exists — but it would add constraints to a third of the
-  corpus, so it needs its own solver campaign: an EXTRA constraint silently
-  stiffens a model, or fights an `/IMPVEL` on the same dof, and is the harder
-  of the two failures to notice. Do it as one item with a with/without twin on
-  a deck that carries both TC/RC and a prescribed motion on the same node.
+  `/BCS` writer already exists — what it needs is SCREENING, and that is what
+  makes it a campaign rather than a patch:
+  - p.35-3 Remark 1, verbatim: *"No attempt should be made to apply boundary
+    conditions to nodes belonging to rigid bodies (see \*MAT_RIGID for
+    application of rigid body constraints)."* Every rigid-body secondary node
+    has to come out, across `*MAT_RIGID` parts, `*CONSTRAINED_NODAL_RIGID_BODY`
+    and the synthesized element-free masters.
+  - A DOF already driven by `/IMPVEL` or `/IMPDISP` must not also be pinned;
+    the two fight over the same slot.
+
+  **Ship it behind an opt-in `--node-tc-rc-to-bcs` (default off)**, the way
+  `--ams`, `--tet10-to-tet4`, `--deformable-contact-recipe` and `--auto-gapmin`
+  are opt-in, so the 721 decks get a route to a correct model without changing
+  the default for everyone; then run the campaign and consider flipping it.
+  Validate with a with/without twin on a deck that carries both TC/RC and a
+  prescribed motion on the same node, and a second on a rigid-body node.
+  Measured consequence of the current state, so the campaign has a target: a
+  spring-mass coupon whose anchor carried `tc=7 rc=7` drifted 6.68 mm against
+  an intended 0.317 mm amplitude, under NORMAL TERMINATION.
+- **`*INITIAL_STRESS_SHELL` records at MIXED `nb_integr` in one deck**
+  *(remaining, an OpenRadioss limitation rather than a conversion loss)* —
+  `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common
+  (`hm_read_inistate_d00.F:2206/2389/3347/3516`) while `csigini.F:231/233` and
+  `scigini4.F:345/347/487/489` read `SIGSH(INISHVAR+IT)` (sigma_zz) and
+  `SIGSH(INISHVAR+NPTI+IT)` (pos_nip) at CONSUME time, i.e. against whatever
+  the LAST record left there. Two shell parts at NIP 3 and NIP 5 in one
+  `/INISHE|/INISH3 STRS_F` pass therefore make every element whose NIP differs
+  from the last record's read its through-thickness stress and its station
+  positions from the wrong slots, at 0 starter ERROR / 0 WARNING. k2rad now
+  NAMES the deck; splitting the pass (or writing one block per NIP with the
+  records grouped) would need a starter-side experiment to establish whether
+  the global is re-set per block or per record.
+- **`2Dlag.k`'s residual `ERROR 3046`** *(remaining, pre-existing and out of
+  the side-defect batch's scope)* — the deck's `ELFORM = 14` 2-D axisymmetric
+  elements are written as 3-D `/SHELL` against a solid-only `/MAT/LAW4`, so
+  `ERROR IN MATERIAL/ELEMENT COMPATIBILITY / ELEMENTS OF TYPE SHELL ARE NOT
+  COMPATIBLE WITH MATERIAL ID 3 OF TYPE 4`. Byte-identical on master, so the
+  batch neither caused nor cured it; it is what stands between that deck and 0
+  starter errors.
 - **A `_SET` cross section whose nodes are COLINEAR gets an invented normal**
   *(remaining)* — `_sect_synth_frame` falls back to a vector perpendicular to
   the node line, so the FN/FT SPLIT is arbitrary (the vector sum and the global

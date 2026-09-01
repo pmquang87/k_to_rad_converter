@@ -119,7 +119,14 @@ spring-mass coupon whose anchor carried `tc=7/rc=7`: no `/BCS`, the anchor
 free, the whole oscillator drifting at the centre-of-mass velocity while the
 engine printed NORMAL TERMINATION. 721 of 2346 corpus decks write a non-zero
 cell, so this is NAMED per deck — with the count, a few ids and the
-`*BOUNDARY_SPC_NODE` remedy — rather than silently converted),
+`*BOUNDARY_SPC_NODE` remedy — rather than silently converted. The deferral is
+about SCREENING, not about which direction the error runs: a correct `/BCS`
+pass has to exclude rigid-body nodes (p.35-3 Remark 1) and any dof already
+driven by `/IMPVEL`/`/IMPDISP`, and both need their own twin campaign. See
+ROADMAP for the opt-in flag that will carry it. The rows themselves are read
+from their fixed columns even when a negative X and Y weld the node id onto
+the first coordinate — a shape that used to lose the node and mint a phantom
+node 0 on 188 corpus files),
 `*ELEMENT_SHELL`, `*ELEMENT_SOLID`, `*ELEMENT_TSHELL` (+ `_BETA` /
 `_COMPOSITE` — see **Thick shells**), `*ELEMENT_SPH` (+ `_VOLUME`; the `MASS`
 column's sign and the suffix both select mass-vs-volume, and the `NEND` range
@@ -2112,11 +2119,19 @@ of each operand is honoured** so `2/5` is `0` while `2.0/5` is `0.4` (Remark
 2a) with integer division truncating toward zero, and the **intrinsics are
 Fortran's** — `sign(-4,8) = 4`, `int`/`aint` truncate while `nint`/`anint`
 round (differing in the TYPE they return), `mod` takes integers only, and NINT
-rounds half away from zero. All 31 named functions plus `pi`/`dtor`/`rtod`;
-anything outside the grammar is refused BY NAME rather than guessed.
+rounds half away from zero. All 30 named functions plus the constants
+`pi`/`dtor`/`rtod` (Appendix U p.71-2); anything outside the grammar is
+refused BY NAME rather than guessed, including nesting past a depth cap, so
+a pathological expression refuses one parameter instead of killing the
+conversion with a `RecursionError`.
 `*PARAMETER_DUPLICATION` DFLAG 1-5 is read, and its **default 1 means the
 FIRST definition wins**; `MUTABLE` on the first definition allows
-redefinition. `LOCAL` parameters live for the file that defines them **and the
+redefinition. Only the FIRST such card counts (p.36-6 Remark 2, and the R17
+release note on Vol I p.138: *"only honor the first *PARAMETER_DUPLICATION
+card"*) — a later one is named and ignored. Note that p.36-5's worked
+example and p.36-6's DFLAG default disagree about a non-LOCAL redefinition
+inside an include; k2rad follows p.36-6, and
+`parser._pop_local_scope`'s docstring records why. `LOCAL` parameters live for the file that defines them **and the
 cards of that file still resolve them**, which needs the scope to travel with
 the block: LS-DYNA scoping is a parse-time concept while k2rad resolves
 `&name` in the handlers, so each block carries the LOCAL bindings that were
@@ -3916,8 +3931,16 @@ the MAIN node is damped. Measured on a spring-only oscillator: α recovered as
 out, because Vol I R17 calls it a visualization element that "has no effect on
 the analysis". `LCID` is not converted —
 plain `/DAMP` has no function slot, so a time-varying curve is warned about and
-the constant `VALDMP` used. The per-DOF scale factors `STX..SRZ` are warned
-about and dropped
+the constant `VALDMP` used. The per-DOF scale factors `STX..SRZ` map onto the
+`/DAMP` Format-2 rows as `α_i = VALDMP·ST_i` in the order x, y, z, xx, yy, zz
+(`hm_read_damp.F:104-115` = `DAMPR(3/5/7/9/11/13)`); all six left at 0.0 is
+p.15-9 Remark 2's *"all six values are defaulted to unity"*, which stays
+Format 1. A card that damps only SOME DOFs is named, because that is unusual
+outside a planar idealisation. Vol I R17 p.15-9 Remark 3 — no mass damping on
+prescribed-motion or `CONSTRAINED_NODE_SET` nodes — is **not** implemented:
+`fixvel.F:370-372` overwrites the prescribed DOF's acceleration after
+`DAMPING` runs, so the motion is unaffected, but the overwrite is per DOF
+where the exemption is per NODE and the damping energy is booked first
 `*DAMPING_PART_STIFFNESS` → `/DAMP` `Beta`. LS-DYNA derives `β_part = 2·COEF/ω_max`
 from each part's own highest frequency, which is not knowable at conversion
 time, so `COEF` is passed straight through and the largest value across the

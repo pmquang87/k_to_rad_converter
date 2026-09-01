@@ -730,6 +730,78 @@ class TestEverySynthesizedGrnodDodgesUserSets(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MINOR — one deck, two through-thickness point counts, one global offset
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _stress_record(eid: int, nip: int) -> str:
+    """``*INITIAL_STRESS_SHELL`` card 1 (EID NPLANE NTHICK ...) + one
+    ``T sig_xx sig_yy sig_zz sig_xy sig_yz sig_zx eps_p`` card per station.
+    T comes FIRST — putting sig_xx in column 1 writes the stress into the
+    thickness coordinate and leaves the tensor identically zero."""
+    out = ["*INITIAL_STRESS_SHELL", _row(eid, 1, nip)]
+    for k in range(nip):
+        t = round(-1.0 + 2.0 * k / (nip - 1), 6)
+        out.append(_row(t, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    return "\n".join(out) + "\n"
+
+
+class TestInitialStressShellMixedNbIntegr(unittest.TestCase):
+    """``INISHVAR`` is a SINGLE GLOBAL, not a per-record value.
+
+    The reader sets ``INISHVAR = 22 + NIP*6`` per RECORD
+    (``hm_read_inistate_d00.F:2206/2389/3347/3516``) into the COM01 common
+    (``share/includes/com01_c.inc:34``), and ``csigini.F:231/233`` plus
+    ``scigini4.F:345/347/487/489`` read ``SIGSH(INISHVAR+IT)`` (sigma_zz) and
+    ``SIGSH(INISHVAR+NPTI+IT)`` (pos_nip) at CONSUME time — with whatever the
+    LAST record left there. Two shell parts at NIP 3 and NIP 5 are each read
+    correctly and then consumed against one offset, so every element whose NIP
+    differs from the last record's picks up its through-thickness stress and
+    its station positions from the wrong slots, at 0 starter ERROR /
+    0 WARNING.
+
+    Each record passes the per-part NTHICK check on its own, so nothing else
+    in the pass can see it. PRE-EXISTING — master emits the byte-identical
+    block — but item (D) adds a second block kind to the same pass, so the
+    deck is named rather than left silent. The #127 class one namespace over.
+    """
+
+    def _deck(self, nip_a: int, nip_b: int) -> str:
+        return "\n".join([
+            "*KEYWORD", "*NODE",
+            _node16(1, 0.0, 0.0, 0.0), _node16(2, 10.0, 0.0, 0.0),
+            _node16(3, 10.0, 10.0, 0.0), _node16(4, 0.0, 10.0, 0.0),
+            _node16(5, 20.0, 0.0, 0.0), _node16(6, 20.0, 10.0, 0.0),
+            "*ELEMENT_SHELL", _i8(1, 1, 1, 2, 3, 4), _i8(2, 2, 2, 5, 6, 3),
+            "*PART", "part a", _row(1, 1, 1),
+            "*PART", "part b", _row(2, 2, 1),
+            "*SECTION_SHELL", _row(1, 2, "1.0", nip_a),
+            _row("1.0", "1.0", "1.0", "1.0"),
+            "*SECTION_SHELL", _row(2, 2, "1.0", nip_b),
+            _row("1.0", "1.0", "1.0", "1.0"),
+            "*MAT_ELASTIC", _row(1, "7.85E-9", "2.1E5", "0.3"),
+            _stress_record(1, nip_a).rstrip("\n"),
+            _stress_record(2, nip_b).rstrip("\n"),
+            "*CONTROL_TERMINATION", _row("1.0"), "*END", ""])
+
+    def test_two_point_counts_in_one_pass_are_named(self):
+        res, starter = _convert(self._deck(3, 5))
+        self.assertTrue(_headers(starter, "/INISHE/STRS_F/GLOB"))
+        w = _warns(res, "do NOT share one through-thickness point count")
+        self.assertEqual(len(w), 1)
+        self.assertIn("[3, 5]", w[0])
+        self.assertIn("INISHVAR", w[0])
+        # It is a starter limitation, not a conversion loss — the records are
+        # still written, and the message has to say which it is.
+        self.assertIn("not a conversion loss", w[0])
+
+    def test_one_shared_point_count_is_silent(self):
+        res, starter = _convert(self._deck(5, 5))
+        self.assertTrue(_headers(starter, "/INISHE/STRS_F/GLOB"))
+        self.assertEqual(
+            _warns(res, "do NOT share one through-thickness point count"), [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAJOR (pre-existing) — a *NODE id welded to a negative first coordinate
 # ─────────────────────────────────────────────────────────────────────────────
 

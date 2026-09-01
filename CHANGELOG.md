@@ -11,6 +11,115 @@ Prior history (before this changelog was introduced) is summarized in the
 
 ### Fixed
 
+- **SIDE-DEFECT follow-up round — one blocker, one major and six minors found
+  by re-verifying the review round below against the manual, the starter and
+  engine source, and twin measurements.** Two of the round's own fixes turned
+  out to be half-applied, and one of its diagnostics was wrong on 188 corpus
+  files because of a pre-existing reader defect underneath it.
+
+  - **BLOCKER, a regression the review round's own `*PARAMETER_LOCAL` fix
+    opened: the LOCAL scope never reached `assembly.finalize`.** That pass
+    runs from `parse_k_file` AFTER `_pop_local_scope()`, and an inner
+    include's frame is popped even earlier by its own recursive parse, so
+    every walk in `assembly.py` that feeds a raw cell to `to_int`/`to_float`
+    saw an empty scope. MEASURED on a parent/child twin (IDNOFF 6000 /
+    IDEOFF 7000 / IDPOFF 8000, child declares `*PARAMETER_LOCAL Ipid 7` and
+    writes `*PART &pid`): master emits `/PART/7` AND `/PART/8007` +
+    `/SHELL/8007`; the branch emitted ONE `/PART/7` titled *"child plate"* —
+    the child's part had silently REPLACED the parent's, its element was
+    dropped under *"MESH LOSS ... PID 8007"*, and the log carried a FALSE
+    *"'&pid' is undefined"* for a parameter that is perfectly well defined.
+    The geometry half is worse, because `_rewrite_node_blocks` REWRITES what
+    it reads: under a TRANID translation a `&xc = 25.0` coordinate came out as
+    a literal `0`. Fixed by `assembly._scoped_block`, installed at every
+    per-block walk in the finalize path. A `*PARAMETER` control deck is the
+    fence in both directions.
+  - **MAJOR (pre-existing): a `*NODE` id welded to a negative first coordinate
+    was read as node 0.** The fixed-vs-free discrimination tested the WIDTH of
+    fields 2–4 and never looked at field 1. `*NODE` is I8 + 3×E16, so a
+    negative coordinate fills its field completely and glues onto the field
+    before it; when X and Y are negative and Z is not, the split yields four
+    ordinary-looking tokens with the node id welded to the first —
+    `'5-1.000000000E+01-1.000000000E+01'`. MEASURED on
+    `dynaexamples/sph/bar-iv/taylor1.k`: master emits node ids
+    `[0, 1, 2, 3, 4, 6, 8]` — nodes 5 and 7 GONE, a phantom node 0 in their
+    place, the deck's only `/BRICK` still referencing 5 and 7, at ZERO
+    warnings, and the starter answers with two `ERROR ID 78 UNDEFINED NODE
+    NUMBER`. Both are gone after the fix. Corpus reach: **58 303 rows across
+    188 files**, all this one shape; classifying every non-integer field-1
+    token found no comma-format, blank or `&parameter` id to trade against,
+    and `_free_node_id` accepts `&name` regardless.
+  - **The `/GRNOD` half of the group-allocator item is closed.** The review
+    round routed all 18 element-group sites and the `/SECT` node group through
+    the guarded allocators and named the rest as an open hazard in
+    `next_grnod_id`'s own docstring; the remaining 24 `/GRNOD` sites (contact
+    secondaries, `/INIVEL`, `*ELEMENT_MASS`, `*LOAD_NODE`, the rigid-wall
+    groups, the modal dummy `/CLOAD`, the free-node constraint group, the
+    `/RBODY` and CNRB groups) now draw from `next_grnod_id` too.
+    STARTER-MEASURED with a probe aimed at the id the allocator actually takes
+    (#131's rule — the order was printed first): before, `/GRNOD/NODE/90001`
+    twice and `ERROR ID 79 DUPLICATE ID / IN NODE GROUP DEFINITION`, ERROR
+    TERMINATION; after, 0 ERRORS. A new AST fence fails if any future
+    `_emit_grnod_node` site is left on the bare allocator.
+  - **`paramexpr`'s depth cap did not cover the `**` chain.** `_enter` was
+    called from `expr` and `signed` only; `power` is right-associative and
+    recursed into itself for the exponent, so `self.depth` returned to its
+    entry value at every `**`. MEASURED: `evaluate("1" + "**1"*1000)` raised
+    `RecursionError` — the exact escape the cap exists to prevent — killing
+    the whole conversion instead of refusing one parameter by name. The
+    manual's exponent semantics are unchanged (`2**3**2 = 512`,
+    `-3**2 = 9`, `2**-1 = 0.5`).
+  - **`*PARAMETER_DUPLICATION` quoted p.36-6 Remark 2 and did not implement
+    it.** *"Only one \*PARAMETER_DUPLICATION card is allowed. If more than one
+    is found, a warning is issued and any after the first are ignored."* The
+    assignment was unconditional, so a SECOND card won: `DFLAG 1` then
+    `DFLAG 2` then two `R thk` definitions ended at `thk = 9.0` where LS-DYNA
+    keeps `1.0`. Vol I p.138's R17 release note is the independent
+    corroboration — *"Also, only honor the first \*PARAMETER_DUPLICATION
+    card."* — and its MUTABLE sentence (*"even if \*PARAMETER_DUPLICATION says
+    redefinition is not allowed"*) independently supports the first-wins
+    default this batch shipped, which p.36-5's worked example appears to
+    contradict. That conflict is now named in `_pop_local_scope`'s docstring,
+    which previously stated a `VAL1` outcome the code does not produce, and
+    pinned in both directions.
+  - **`*DAMPING_GLOBAL`'s STX..SRZ were dropped on BOTH `/DAMP` branches** —
+    with a warning on Format 1, in complete silence on Format 2 — so `STX = 1`
+    damped all six DOFs. p.15-9 Remark 2 defaults the six to unity only when
+    ALL SIX are zero, so they now map to Format 2 `alpha_i = VALDMP × ST_i`
+    (x, y, z, xx, yy, zz), the mapping the `*DAMPING_PART_MASS` FLAG = 1
+    emitter already uses against `hm_read_damp.F:104-115`. Beta stays uniform:
+    it comes from `*DAMPING_PART_STIFFNESS`, which has no per-DOF cells. **No
+    corpus deck moves** — scanning both roots (2404 files) found 53
+    `*DAMPING_GLOBAL` cards and not one non-zero scale factor.
+  - **p.16-50's RADIUS exemption covers five cells, and three were exempted.**
+    *"If RADIUS ≠ 0.0, the variables XHEV, YHEV, ZHEV, LENL, and LENM ... will
+    be ignored."* A RADIUS-limited card carrying LENL/LENM was still told it
+    lost a finite extent that LS-DYNA ignores itself — the #125/#130 class in
+    its over-alarming direction.
+  - **The bare-`*EOS_*` refusals printed the RADIOSS spelling of the keyword.**
+    `EosCard.kind` is the Radioss suffix, so `"*EOS_" + kind` produced
+    `*EOS_POLYNOMIAL 3` — a keyword+id pair in neither the deck (which spells
+    it `*EOS_LINEAR_POLYNOMIAL`) nor the `.rad` (`/EOS/POLYNOMIAL/3`) — and
+    `*EOS_IDEAL-GAS`, which is not even legal LS-DYNA. The source keyword now
+    travels on the record and `label()` prints both. (#131's label class.)
+  - **One deck, two through-thickness point counts, one global offset.**
+    `INISHVAR = 22 + NIP*6` is set per RECORD into the COM01 common
+    (`hm_read_inistate_d00.F:2206`) while `csigini.F:231/233` and
+    `scigini4.F:345/347` read `SIGSH(INISHVAR+IT)` at CONSUME time, so two
+    shell parts at NIP 3 and NIP 5 in one `/INISHE|/INISH3 STRS_F` pass make
+    every element whose NIP differs from the last record's read its sigma_zz
+    and station positions from the wrong slots, at 0 starter ERROR. Each
+    record passes its own NTHICK check, so nothing else in the pass can see
+    it. Pre-existing and unchanged — the emitted records are correct — but now
+    named, because item (D) adds a second block kind to the same pass.
+  - Also recorded rather than claimed: p.15-9 Remark 3 (no mass damping on
+    prescribed-motion or `CONSTRAINED_NODE_SET` nodes) is not implemented.
+    `fixvel.F:370-372` overwrites the prescribed DOF's acceleration and runs
+    after `DAMPING` in the same cycle (`resol.F:7216` vs `:7345`), so the
+    MOTION is unaffected — but the overwrite is per DOF where the exemption is
+    per NODE, and `damping.F:167-170` books the damping energy first. The
+    docstring says exactly that instead of claiming parity.
+
 - **SIDE-DEFECT review round — two blockers, three majors and six minors found
   by reviewing the batch below.** Every one was self-consistent in the code and
   wrong against a measurement or the manual's own sentence, and none of them is
@@ -93,11 +202,19 @@ Prior history (before this changelog was introduced) is summarized in the
   oscillator drifted at the centre-of-mass velocity (node-2 DX reached
   6.68 mm against an intended 0.317 mm amplitude) while the engine printed
   NORMAL TERMINATION — the #122 class, legal and accepted and wrong.
-  **Not converted**: 721 of 2346 corpus decks write a non-zero cell, so
-  emitting `/BCS` for them would add constraints to a third of the corpus in a
-  round that cannot validate them, and an EXTRA constraint is the harder of
-  the two failures to notice. The loss is named once per deck, with the count,
-  a few ids and the `*BOUNDARY_SPC_NODE` remedy; no deck's bytes move.
+  **Not converted, and the reason is the SCREENING rather than the direction
+  of the error** (an earlier draft argued that an extra constraint is the
+  harder failure to notice, which does not by itself justify shipping a
+  missing one). A correct `/BCS` pass has to screen two things this round
+  cannot validate: p.35-3 Remark 1 — *"No attempt should be made to apply
+  boundary conditions to nodes belonging to rigid bodies"* — and any DOF
+  already driven by `/IMPVEL` or `/IMPDISP`, which would fight the constraint
+  over the same slot. Both need their own twin campaign, so the conversion is
+  a ROADMAP item behind an opt-in `--node-tc-rc-to-bcs` and the interim is the
+  note. The loss is named once per deck, with the count, a few ids and the
+  `*BOUNDARY_SPC_NODE` remedy; no deck's bytes move. The detector was checked
+  against a scanner that does not use k2rad: same decks, no false positives,
+  no misses.
 
 - **SIDE-DEFECT batch — ten defects at the edges of cards this converter
   already handles.** Each is reachable, none is the main line of any single
