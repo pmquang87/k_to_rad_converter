@@ -10312,38 +10312,6 @@ def handle_mat_thermal_orthotropic(block: Block,
         k3=to_float(f2[3]) if len(f2) > 3 else 0.0)
 
 
-def _sample_thermal_curve(state: ConversionState, lcid: int,
-                          temps: List[float]) -> List[float]:
-    """The *DEFINE_CURVE *lcid* evaluated at each temperature in *temps*.
-
-    ``*MAT_THERMAL_ISOTROPIC_TD_LC`` states its properties as curves rather
-    than as an 8-point table, so they are SAMPLED onto the curve's own
-    abscissae and then fitted by exactly the same code that fits the ``_TD``
-    table. Returns ``[]`` when the curve is missing or degenerate, which the
-    caller turns into a named drop.
-    """
-    curve = state.curves.get(lcid)
-    if curve is None or len(curve.pts) < 2:
-        return []
-    out: List[float] = []
-    pts = sorted(curve.pts)
-    for t in temps:
-        if t <= pts[0][0]:
-            out.append(pts[0][1])
-            continue
-        if t >= pts[-1][0]:
-            out.append(pts[-1][1])
-            continue
-        for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
-            if xa <= t <= xb:
-                w = 0.0 if xb == xa else (t - xa) / (xb - xa)
-                out.append(ya + w * (yb - ya))
-                break
-        else:                                   # pragma: no cover - unreachable
-            out.append(pts[-1][1])
-    return out
-
-
 def handle_mat_thermal_isotropic_td(block: Block,
                                     state: ConversionState) -> None:
     """*MAT_THERMAL_ISOTROPIC_TD (T03) and _TD_LC (T10) → /HEAT/MAT by FIT.
@@ -10355,8 +10323,12 @@ def handle_mat_thermal_isotropic_td(block: Block,
 
     ``_TD_LC`` (p.3-37) replaces cards 2-4 with
       Card2: HCLC TCLC HCHSV TCHSV TGHSV
-    where ``HCLC``/``TCLC`` are curve ids. They are sampled here on the union of
-    the two curves' own abscissae so the writer sees one table shape.
+    where ``HCLC``/``TCLC`` are curve ids. Only the IDS are read here; the
+    curves are SAMPLED in the writer prepass (``_sample_td_lc_curves``),
+    because a ``*DEFINE_CURVE`` may sit anywhere in the deck — including AFTER
+    this card, which dispatch has not reached yet. Sampling at parse time made
+    a deck whose curves follow the material come out with no conductivity at
+    all.
 
     **Why a fit is expressible at all.** The deferred entry this replaces said
     ``/HEAT/MAT``'s conductivity is *"the linear AS + BS*T only"*. That is
@@ -10406,20 +10378,6 @@ def handle_mat_thermal_isotropic_td(block: Block,
             if v:
                 rec.lc_hsv = (name, v)
                 break
-        if not rec.lc_hsv[0]:
-            # The abscissae of BOTH curves, so neither property is resampled
-            # onto a grid coarser than the deck states it on.
-            xs: List[float] = []
-            for cid in (rec.hclc, rec.tclc):
-                c = state.curves.get(cid)
-                if c is not None:
-                    xs.extend(x for x, _ in c.pts)
-            temps = sorted(set(xs))
-            if len(temps) >= 2:
-                cps = _sample_thermal_curve(state, rec.hclc, temps)
-                ks = _sample_thermal_curve(state, rec.tclc, temps)
-                if cps and ks:
-                    rec.temps, rec.cps, rec.ks = temps, cps, ks
     else:
         rows = []
         for r in range(3):

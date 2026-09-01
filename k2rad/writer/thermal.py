@@ -630,6 +630,7 @@ def _resolve_thermal(state: ConversionState) -> None:
     engine's ``CONVEC`` call (``resol.F:2994``) — the ``/CONVEC`` alone would
     be read, echoed and completely inert.
     """
+    _warn_control_thermal_solver(state)
     if (state.mat_add_thermal_expansion or state.initial_temperatures
             or state.imposed_temperatures or state.mat_thermal_isotropic
             or state.mat_thermal_iso_td or state.mat_thermal_ortho
@@ -639,6 +640,112 @@ def _resolve_thermal(state: ConversionState) -> None:
         _resolve_heat_materials(state)
         _resolve_drivers(state)
         _resolve_thermal_boundaries(state)
+
+
+#: *CONTROL_THERMAL_SOLVER's per-field verdicts, in card order. Each entry is
+#: (attribute, printed name, the sentence that says why it has no counterpart).
+#: Only FWORK (-> /HEAT/MAT EFRAC) and TSF (-> the engine /THERM) are absent
+#: from this table, because they are the two that MAP; SBC gets its own arm
+#: below, because it is a CROSS-CHECK rather than a drop.
+_CT_SOLVER_DROPS = (
+    ("atype", "ATYPE",
+     "the thermal analysis type (0 steady state / 1 transient, Vol I R17 "
+     "p.12-573). Radioss integrates the temperature FORWARD IN TIME and only "
+     "that (tempur.F:47-52: TEMP += FTHE/MCP, then FTHE is zeroed), so a "
+     "steady-state solve has no counterpart at all — the converted run is "
+     "transient and has to be given enough physical time to settle"),
+    ("ptype", "PTYPE",
+     "the problem type (0 linear / 1 properties at the gauss-point "
+     "temperature / 2 at the element average). Radioss always evaluates k(T) "
+     "from the ELEMENT temperature (dttherm.F90:102-106, mqviscb.F:651-656), "
+     "i.e. it behaves as PTYPE = 2 unconditionally"),
+    ("solver", "SOLVER",
+     "the linear-algebra choice for the thermal matrix (11 direct, 12-19 "
+     "iterative, 30, 90). Radioss assembles NO thermal matrix"),
+    ("gpt", "GPT",
+     "the number of Gauss points for the thermal solve in solids. Radioss's "
+     "thermal degrees of freedom are NODAL and its capacity is lumped"),
+    ("msglvl", "MSGLVL", "the iterative solver's output level"),
+    ("maxitr", "MAXITR", "the iterative solver's iteration cap"),
+    ("abstol", "ABSTOL", "the iterative solver's absolute tolerance"),
+    ("reltol", "RELTOL", "the iterative solver's relative tolerance"),
+    ("omega", "OMEGA", "the SOR relaxation parameter of SOLVER 14/16"),
+    ("ninner", "NINNER", "the GMRES inner-iteration count of SOLVER 17"),
+    ("nouter", "NOUTER", "the GMRES outer-iteration count of SOLVER 17"),
+    ("mxdmp", "MXDMP", "the matrix-dump control"),
+    ("varden", "VARDEN",
+     "variable thermal density. Radioss builds its nodal capacity ONCE at "
+     "initialisation (initia.F) and never rebuilds it"),
+    ("ncycl", "NCYCL",
+     "the matrix reassembly frequency — there is no matrix to reassemble"),
+    ("dtvf", "DTVF",
+     "the view-factor update interval, which belongs to the ENCLOSURE "
+     "radiation forms this converter drops by name"),
+)
+
+
+def _warn_control_thermal_solver(state: ConversionState) -> None:
+    """Name every ``*CONTROL_THERMAL_SOLVER`` cell that does not map.
+
+    Two map and are handled elsewhere — ``FWORK`` becomes ``/HEAT/MAT``'s
+    ``EFRAC`` (``_efrac``) and ``TSF`` the engine ``/THERM``
+    (``_make_engine_thermal``). ``SBC`` is neither: Vol I R17 p.12-575 scopes
+    it to *"enclosure radiation surfaces"*, which this converter drops, and
+    ``hm_read_radiation.F:140-142`` derives its own sigma from the ``/BEGIN``
+    unit line — so the cell becomes a CROSS-CHECK on that unit line, which is
+    the one thing that could silently corrupt every ``/RADIATION``.
+    """
+    ct = state.ctrl_thermal_solver
+    if ct is None:
+        return
+    named = []
+    for attr, name, _why in _CT_SOLVER_DROPS:
+        v = getattr(ct, attr)
+        if v:
+            named.append(f"{name}={v:g}" if isinstance(v, float)
+                         else f"{name}={v}")
+    detail = ", ".join(named) if named else "all at their defaults"
+    state.warn(
+        "*CONTROL_THERMAL_SOLVER: of this card's cells only FWORK (-> "
+        "/HEAT/MAT EFRAC, both 'fraction of mechanical work converted into "
+        "heat' and both turning a stated 0 into 1.0) and TSF (-> the engine "
+        "/THERM's THEACCFACT) reach the converted deck. The rest are DROPPED "
+        f"by name — {detail} — because they configure an implicit matrix solve "
+        "Radioss does not perform: "
+        + "; ".join(f"{name} is {why}" for _a, name, why in _CT_SOLVER_DROPS)
+        + ".")
+    if ct.eqheat and ct.eqheat != 1.0:
+        state.warn(
+            f"*CONTROL_THERMAL_SOLVER: EQHEAT={ct.eqheat:g} is the mechanical "
+            "equivalent of heat (Vol I R17 p.12-574), the factor that "
+            "reconciles a deck whose mechanical and thermal units are NOT "
+            "consistent. Radioss has no such cell — it assumes one consistent "
+            "system throughout — so the value is dropped. On a consistent "
+            "deck EQHEAT is 1.0, and a value that is not 1.0 means the "
+            "converted deck's strain-energy-to-heat conversion is off by "
+            f"exactly {ct.eqheat:g}."
+            + (" A NEGATIVE EQHEAT names a load curve, which is further "
+               "beyond reach." if ct.eqheat < 0 else ""))
+    if not ct.sbc:
+        return
+    sigma = _sigma_deck(state)
+    if sigma is None:
+        return
+    if abs(ct.sbc - sigma) <= 1e-3 * sigma:
+        return
+    state.warn(
+        f"*CONTROL_THERMAL_SOLVER: SBC={ct.sbc:g} (the deck's "
+        "Stefan-Boltzmann constant) does NOT match the "
+        f"{sigma:g} this converter's emitted /BEGIN unit system "
+        f"{state.units} implies. The cell itself has no counterpart — Vol I "
+        "R17 p.12-575 scopes it to 'enclosure radiation surfaces', which are "
+        "dropped by name here, and hm_read_radiation.F:140-142 makes Radioss "
+        "derive its own sigma (STEFBOLTZ*FAC_T**3/FAC_M) from /BEGIN. But the "
+        "MISMATCH is worth acting on: it means the deck's real unit system and "
+        "the one written to /BEGIN disagree, which would put every converted "
+        "/RADIATION emissivity off by the same ratio "
+        f"({ct.sbc / sigma:.6g}x) with no starter diagnostic whatever. Pass "
+        "--units for the deck's real system.")
 
 
 def _element_nodes_by_family(state: ConversionState, family: str):
@@ -1284,6 +1391,53 @@ def _least_squares_line(pts: List[Tuple[float, float]]) -> Tuple[float, float]:
 _TD_CP_SPREAD_LIMIT = 2.0
 
 
+def _sample_curve(state: ConversionState, lcid: int,
+                  temps: List[float]) -> List[float]:
+    """The ``*DEFINE_CURVE`` *lcid* evaluated at each abscissa in *temps*."""
+    curve = state.curves.get(lcid)
+    if curve is None or len(curve.pts) < 2:
+        return []
+    pts = sorted(curve.pts)
+    out: List[float] = []
+    for t in temps:
+        if t <= pts[0][0]:
+            out.append(pts[0][1])
+        elif t >= pts[-1][0]:
+            out.append(pts[-1][1])
+        else:
+            for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
+                if xa <= t <= xb:
+                    w = 0.0 if xb == xa else (t - xa) / (xb - xa)
+                    out.append(ya + w * (yb - ya))
+                    break
+    return out
+
+
+def _sample_td_lc_curves(state: ConversionState, tm) -> None:
+    """Turn a ``*MAT_THERMAL_ISOTROPIC_TD_LC``'s two curves into the same
+    ``(T, C, K)`` table the ``_TD`` spelling states directly.
+
+    Sampled on the UNION of the two curves' own abscissae, so neither property
+    is resampled onto a grid coarser than the deck states it on. Done HERE and
+    not in the handler because a ``*DEFINE_CURVE`` may sit anywhere in the
+    deck, including after the material — dispatch would not have read it yet.
+    """
+    if not tm.is_lc or tm.temps or tm.lc_hsv[0]:
+        return
+    xs: List[float] = []
+    for cid in (tm.hclc, tm.tclc):
+        c = state.curves.get(cid)
+        if c is not None:
+            xs.extend(x for x, _ in c.pts)
+    temps = sorted(set(xs))
+    if len(temps) < 2:
+        return
+    cps = _sample_curve(state, tm.hclc, temps)
+    ks = _sample_curve(state, tm.tclc, temps)
+    if len(cps) == len(temps) and len(ks) == len(temps):
+        tm.temps, tm.cps, tm.ks = temps, cps, ks
+
+
 def _fit_td_conductivity(state: ConversionState, tm, mid: int,
                          t1: float) -> Optional[Tuple[float, float, float,
                                                       float, float]]:
@@ -1477,6 +1631,7 @@ def _resolve_heat_materials(state: ConversionState) -> None:
         if tm is not None and not _thermal_material_usable(state, tm, mid):
             tm = None
         if isinstance(tm, MatThermalIsotropicTD):
+            _sample_td_lc_curves(state, tm)
             fit = _fit_td_conductivity(state, tm, mid, t1)
             if fit is None:
                 tm = None
