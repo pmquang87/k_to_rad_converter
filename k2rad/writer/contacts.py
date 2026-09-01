@@ -161,7 +161,7 @@ def _resolve_contact_slave(state: ConversionState, sid: int, styp: int,
         diag["clean"] = len(clean_nids)
     if not clean_nids:
         return 0
-    grnod_id = state.next_id()
+    grnod_id = state.next_grnod_id()
     out_lines += _emit_grnod_node(grnod_id, f"contact_slave_{sid}", clean_nids)
     return grnod_id
 
@@ -629,7 +629,7 @@ def _make_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List[str]
                     fric_id=fric_id)
                 continue
             # IMPLICIT: keep the validated TYPE7 node→surface (deformable-contact recipe).
-            slav_grnod = state.next_id()
+            slav_grnod = state.next_grnod_id()
             mast_surf = state.next_id()
             lines += _emit_grnod_node(slav_grnod, f"contact_{c.inter_id}_slave", all_deformable_nodes)
             if not _make_master_surface(state, mast_surf, f"contact_{c.inter_id}_master",
@@ -1013,7 +1013,7 @@ def _make_force_transducers(state: ConversionState, rigid_nodes: Set[int]) -> Li
             skipped_ft.append(ft.inter_id)
             continue
 
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         main_surf = state.next_id()
         lines += _emit_grnod_node(grnod_id, f"{title}_secnd", sec_nodes)
         if not _make_master_surface(state, main_surf, f"{title}_main",
@@ -2889,7 +2889,7 @@ def _make_tied_interfaces(state: ConversionState, rigid_nodes: Set[int]) -> List
                 "REMEDY: point MSID at a part, part set or *SET_SEGMENT that "
                 "exists in this deck and carries shell/solid elements.")
             continue
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"tied_{c.inter_id}_slave", clean)
         lines += master_lines
         if itype == "TYPE10":
@@ -4231,7 +4231,7 @@ def _make_spotweld_interfaces(state: ConversionState,
                 "the SHEETS being welded — it must exist in this deck and "
                 "carry shell/solid elements." + _styp_note(c.mstyp))
             continue
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"spotweld_{c.inter_id}_slave", clean)
         lines += master_lines
         dsearch = _spotweld_dsearch(c)

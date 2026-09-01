@@ -795,7 +795,7 @@ def _emit_spring_part(state: ConversionState, part_id: int, prop_id: int,
         state.spring_elem_ids.add(e.eid)      # producer 1 of 9
     lines.append(HDR)
     if ground_nodes:
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         bcs_id = state.next_id()
         lines.append("/NODE")
         for gnid in ground_nodes:
@@ -3745,7 +3745,7 @@ def _make_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
 
     for vel_key, nids in vel_groups.items():
         vx, vy, vz, vxr, vyr, vzr = vel_key
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_nodes_{grnod_id}", sorted(nids))
         inivel_id = state.next_id()
         lines += _emit_inivel("TRA", inivel_id, f"InitVel_{inivel_id}",
@@ -4149,7 +4149,7 @@ def _make_initial_velocity(state: ConversionState) -> List[str]:
                     "that id - velocity applied in the GLOBAL frame")
 
         # ── emit ────────────────────────────────────────────────────────────
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_grp_{grnod_id}", nids)
         if has_tra:
             tid = state.next_id()
@@ -4340,7 +4340,7 @@ def _make_initial_velocity_generation(state: ConversionState) -> List[str]:
             frame_id = state.next_id()
         lines += _emit_frame_fix(frame_id, f"FRAME_INIVEL_GEN_{frame_id}",
                                  origin, fy, fz)
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"inivel_gen_grp_{grnod_id}", nids)
         inivel_id = state.next_id()
         lines += _emit_inivel_axis(inivel_id, f"InitVelGen_{inivel_id}",
@@ -4617,7 +4617,7 @@ def _make_added_masses(state: ConversionState, rigid_nodes: Set[int]) -> List[st
         nids = sorted(nids)
         n_nodes += len(nids)
         total += mass * len(nids)
-        grnod_id = state.next_id()
+        grnod_id = state.next_grnod_id()
         lines += _emit_grnod_node(grnod_id, f"added_mass_{mass:g}_nodes", nids)
         admas_id = state.next_id()
         lines += [
@@ -4715,7 +4715,7 @@ def _make_node_cloads(state: ConversionState) -> List[str]:
         grnod_id = grnod_by_nsid.get(ln.nsid)
         emit_grnod = grnod_id is None
         if emit_grnod:
-            grnod_id = state.next_id()
+            grnod_id = state.next_grnod_id()
             grnod_by_nsid[ln.nsid] = grnod_id
         load_id = state.next_id()
         lines += [
@@ -5293,7 +5293,7 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
     if nsid > 0:
         set_title, nids = state.node_sets.get(nsid, ("", []))
         if nids:
-            grnd1 = state.next_id()
+            grnd1 = state.next_grnod_id()
             grnod_blocks += _emit_grnod_node(
                 grnd1, set_title or f"rwall_{rwid}_nodes", nids)
         else:
@@ -5314,7 +5314,7 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
                 state, boxid, f"{label} BOXID={boxid}")
             if box_nids:
                 box_nids = sorted(box_nids)
-                grnd1 = state.next_id()
+                grnd1 = state.next_grnod_id()
                 grnod_blocks += _emit_grnod_node(
                     grnd1, f"rwall_{rwid}_box{boxid}", box_nids)
                 state.warn(
@@ -5334,7 +5334,7 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
     if nsidex > 0:
         set_title, nids = state.node_sets.get(nsidex, ("", []))
         if nids or extra:
-            grnd2 = state.next_id()
+            grnd2 = state.next_grnod_id()
             grnod_blocks += _emit_grnod_node(
                 grnd2, set_title or f"rwall_{rwid}_excluded",
                 sorted(set(nids) | set(extra)))
@@ -5346,7 +5346,7 @@ def _rwall_node_groups(state: ConversionState, label: str, rwid: int,
         if carrier_grnod:                       # already emitted for a sibling
             grnd2 = carrier_grnod[0]
         else:
-            grnd2 = state.next_id()
+            grnd2 = state.next_grnod_id()
             grnod_blocks += _emit_grnod_node(
                 grnd2, "rwall_moving_carrier_nodes", extra)
             if carrier_grnod is not None:
@@ -5508,7 +5508,7 @@ def _make_rigid_walls(state: ConversionState) -> List[str]:
         emit(f"*RIGIDWALL_GEOMETRIC_{rw.shape} id={rw.rwid}", rw.rwid,
              rw.nsid, rw.nsidex, rw.boxid, rw.fric, rw.faces, planar=False,
              motion=(lambda rw=rw: _make_geometric_rwall_motion(
-                 rw, state, state.next_id())) if rw.motion else None)
+                 rw, state, state.next_grnod_id())) if rw.motion else None)
 
     # *DATABASE_RWFORC → /TH/RWALL (wall resultant IMPULSE time history).
     #
@@ -5595,7 +5595,7 @@ def _make_modal_dummy_cload(state: ConversionState,
     node = max(candidates)              # deterministic, away from low-id corners
     endtim = state.ctrl_termination.endtim if state.ctrl_termination else 1.0
     funct_id = state.next_id()
-    grnod_id = state.next_id()
+    grnod_id = state.next_grnod_id()
     cload_id = state.next_id()
     state.warn(
         "Modal stiffness-export run: the deck has no load, but the implicit "
@@ -6803,7 +6803,7 @@ def _make_free_node_constraints(state: ConversionState, rigid_nodes: Set[int]) -
         "markers). They drive nothing, so the constraint is inert."
     )
     bc_id = state.next_id()
-    grnod_id = state.next_id()
+    grnod_id = state.next_grnod_id()
     lines = [
         "#-  FREE-NODE CONSTRAINTS (implicit singularity guard):", HDR,
         f"/BCS/{bc_id}",

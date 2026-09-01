@@ -7920,10 +7920,25 @@ class ConversionState:
         no-op vs next_id() in the common case (no user node set that high), so
         it does not shift ids on any ordinary deck.
 
-        NOTE: the gravity groups, the *BOUNDARY_PRESCRIBED_MOTION_SET motion
-        groups and that path's zero-scale /BCS groups draw from this. The other
-        synthesized /GRNOD ids (contacts, /INIVEL, the /RBODY node groups, ...)
-        still use next_id() and carry the same latent hazard.
+        **Every synthesized /GRNOD id in the writer now comes from here.** The
+        first round routed only the gravity groups, the
+        *BOUNDARY_PRESCRIBED_MOTION_SET motion groups, that path's zero-scale
+        /BCS groups and the /SECT group; the remaining 24 sites — the contact
+        secondary groups, /INIVEL and _GENERATION, *ELEMENT_MASS, *LOAD_NODE,
+        the rigid-wall node/exclusion/carrier/motion groups, the modal dummy
+        /CLOAD, the free-node constraint group, the /RBODY and CNRB main and
+        secondary groups and the probe rigid body — still drew from bare
+        next_id() and carried the identical hazard. MEASURED before the fix on
+        a probe aimed at the id the allocator ACTUALLY takes (the allocation
+        order was printed first, #131's lesson): an *ELEMENT_MASS deck plus a
+        user *SET_NODE_LIST at that id emitted /GRNOD/NODE/<id> TWICE and the
+        starter refused the whole deck with ERROR 79.
+
+        The only three ``_emit_grnod_node`` sites that do NOT allocate are the
+        two that re-emit a user set under its OWN sid (``_make_bcs``,
+        ``_make_extra_groups``) — reallocating those would break every
+        reference to them — and ``_make_geometric_rwall_motion``, whose id its
+        caller allocates here.
 
         ``node_sets`` also holds the flattened ``*SET_NODE_ADD`` /
         ``*SET_NODE_ADD_ADVANCED`` unions, under their own SIDs — and
