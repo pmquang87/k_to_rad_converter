@@ -2701,8 +2701,19 @@ brick with `h = 100` on six faces and `ENDTIM = 0.2 s` diverged to
 factor 3126, about 2.2e6 K, at 0 ERROR / 0 WARNING. Both are guarded, with the
 thermal step estimated from the emitted `/HEAT/MAT` and the model's shortest
 element edge (the estimate matched the engine's own `0.3611E-01` to four
-figures), and the second guard's prescribed scale factor — `0.225` on that deck
-— was verified to give `2527.6994` against an analytic `2527.7000`.
+figures). The second guard's prescribed factor is scaled by the **loaded-face
+concentration** `r = max(loaded segments per node / elements per node)`, counted
+from the emitted deck: `tau = RHO0_CP·Lc/h` is the constant of a node fed by ONE
+loaded face per element, and this six-face coupon is one element thick, so
+`r = 3` and the prescription is `0.075`, not `0.225`. That matters, because the
+unscaled `0.225` is STABLE and still wrong in the transient — measured, its
+first step goes `300 → 1350.0 K` against a 1000 K environment and rings down
+`825 / 1087.5 / 956.25 / 1021.9 …` while `HEAT STORED` reads `2527.6994`
+against an analytic `2527.7000`. A saturating integral cannot see an
+oscillation. At `0.075` the same deck climbs `650 / 825 / 912.5 / 956.25 …`
+monotonically to exactly `1000.0000` and stores `2527.7000`, so the warning
+prescribes the observable that can actually fail: **no node may pass the
+environment temperature**, not just "the heat balance looks physical".
 
 `*LOAD_THERMAL_{CONSTANT,VARIABLE}`'s `TE` / `TSE` / `TBE` / `LCIDE` are the
 **exempted nodes' own temperature**, not an expansion-only field: Vol I R17
