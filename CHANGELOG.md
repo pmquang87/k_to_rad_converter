@@ -29,6 +29,9 @@ Prior history (before this changelog was introduced) is summarized in the
     `MLC1..MLC4` are PER-NODE weights that `/IMPFLUX` cannot express (it splits
     the segment evenly, `fixflux.F:167`), so unequal ones refuse the record;
     `LCID < 0` (flux vs temperature) and `NHISV > 0` (`usrflux`) likewise.
+    *(Superseded by the post-review round below: only the cells that HAVE a
+    node are compared, so a TRIANGULAR record is no longer refused for an MLC4
+    the segment does not have.)*
   - **`*BOUNDARY_CONVECTION_{SEGMENT,SET}` → `/CONVEC`, with NO sign change.**
     LS-DYNA writes the flux out of the surface, `q″ = h(T_s − T_∞)` (p.5-32
     Remark 1); `convec.F:152` writes the heat in, `AREA·H·(T_INF − TE)·dt`. The
@@ -39,7 +42,9 @@ Prior history (before this changelog was introduced) is summarized in the
     one function slot already carries `T_∞` — and is a named drop rather than a
     flattened coefficient the deck never states.
   - **`*BOUNDARY_RADIATION_{SEGMENT,SET}` TYPE 1 → `/RADIATION`, with
-    `E = FMULT / σ_deck`.** This is the highest-risk cell in the batch: LS-DYNA's
+    `E = FMULT / σ_deck`.** *(TYPE 0 as well, from the post-review round below:
+    p.5-122 and p.5-117 print TYPE with Default 1, so a stated `0` is the
+    default and not a value.)* This is the highest-risk cell in the batch: LS-DYNA's
     `FMULT` is *"the radiation heat transfer coefficient, f = σεF"* (p.5-117
     Remark 1) with the Stefan-Boltzmann constant ALREADY IN IT, while Radioss's
     `E` is a bare emissivity and `hm_read_radiation.F:140-142/174` computes
@@ -351,6 +356,50 @@ Prior history (before this changelog was introduced) is summarized in the
     which is the defect stated as plainly as it can be — and the mechanism was
     re-read at source first (`convec.F:127` carries `.OR. FCY_OLD /= FCY` and
     assigns `FCY_OLD` at `:138`; `convec.F:234` has neither).
+  - **Independent re-verification of this round, at a fresh checkout.** Every
+    engine and manual claim above was re-read first-hand rather than taken from
+    the round's own report: `resol.F:6406` `IF (IMPL_S == 1)` closing at `:6548`
+    with the `GOTO 111` at `:6547` and the label at `:7949`; the single
+    `CALL TEMPUR` at `:6736` (the only one in the whole engine tree) and
+    `tempur.F:58` as the only writer of `HEAT_STORED`; the four un-gated source
+    calls at `:1802/2994/3006/3025` against their `IMPL_S/=1` neighbours at
+    `:2869/2898/2916/2937`; all twelve conduction operators reading
+    `CA = PM(75)` / `CB = PM(76)`; the four `AL`/`BL` readers
+    (`atherm.F`, `forintp.F`, `i9grd2.F`, `rgwat2.F`) reading `PM(77)+PM(78)*T`
+    above `PM(80)`; the `DATA KEY0/` block at `freform.F:213-232` with `'THERM'`
+    in slot 82 and no `DTTHERM`; and, from the PDF itself, Vol I R17 p.5-122's
+    Card 1 (`TYPE`, Type `I`, **Default 1**) with the variable text
+    *"Radiation type: EQ.1: radiation to environment"* and no second value, plus
+    p.5-123's *"TMULT — Curve multiplier for T∞"* at Default `0.`
+  - **The two card-losing fixes, re-run on the solver at a fresh checkout.**
+    The two-triangle `*BOUNDARY_FLUX` deck and its one-quad twin both store
+    `IMPOSED FLUX_DENSITY HEAT = HEAT STORED = 70.008599 mJ` over **7011**
+    cycles at 0 ERROR / 0 WARNING / NORMAL TERMINATION — digit for digit, so
+    the degenerate `N4 = N3` quad the starter builds conserves the total and
+    the area exactly. And the `/DT/THERM` prescription was re-measured on the
+    six-face coupon (`r = 3`, guard prescribes 0.075): 67 cycles,
+    `HEAT STORED = 2527.7000` against the analytic 2527.7, with the `/TH/NODE`
+    TEMP channel climbing 300 → 650 → 825 → 912.5 → 956.25 → … → **1000.0000**
+    and a run maximum of exactly 1000.0000 K. The old 0.225 control reproduces
+    the defect: 23 cycles, first step 300 → **1350.0000 K**, ringing 825 /
+    1087.5 / 956.25 / 1021.875, at `HEAT STORED = 2527.6994` — a heat balance
+    correct to seven figures over a transient that overshot by 350 K.
+  - **Two-half regression sweep of THIS round** (`d62edfa` → here), 252 decks
+    (108 every-fourth under `C:\openradioss_run`, 144 thermal/implicit carriers
+    under `dynaexamples_r14_ton-mm-s`), **0 conversion errors**. 90 files
+    excluded and named — those over a 10 MB cap plus the Yaris and Camry roots,
+    whose 10 KB `combine.key` pulls a 169 MB `*INCLUDE` tree that a cap on the
+    ROOT file cannot see. HALF 1 (`_0000.rad` + `_0001.rad` by SHA-256):
+    **4 movers, 0 under `C:\openradioss_run`** — all four the same single line,
+    `#-- SKIPPED: *BOUNDARY_THERMAL_WELD_TRAJECTORY` leaving the generic
+    skipped-keyword block for a named drop. HALF 2 (warnings + skipped +
+    recognized-not-emitted): **24 movers, 0 under `C:\openradioss_run`**, every
+    one attributed — the `*CONTROL_SOLUTION` default-cell fix (17 messages that
+    named only `LCINT=100`/`NCDCF=1` are gone entirely, 4 shortened), the
+    `*CONTROL_THERMAL_SOLVER` and `_TIMESTEP` citation re-anchors (18 + 16), the
+    weld-trajectory reclassification (4), the implicit `/THERM_STRESS` rewording
+    (3), the unparsed-TMID arm (2), the `/CONVEC` message (2) and one
+    `/HEAT/MAT` TGMULT citation.
 
 - **THERMAL SOLVER verification round — one blocker, five majors and six minors,
   found by re-checking the batch's own cited facts against the engine source and
