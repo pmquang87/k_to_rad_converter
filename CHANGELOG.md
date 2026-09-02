@@ -208,6 +208,131 @@ Prior history (before this changelog was introduced) is summarized in the
   drops now name every field on their card (all eight of `_TIMESTEP`, all seven
   of `_NONLINEAR` — the old text named three).
 
+- **THERMAL SOLVER post-review round — two card-losing defects and ten accuracy
+  fixes, found by re-checking the verification round's own cited facts against
+  the manual and the engine source, and by five solver runs.** The round's
+  central lesson repeated one layer down: a guard that reads a field the deck
+  never wrote, and a comment whose mechanism was never checked.
+
+  - **MAJOR: a TRIANGULAR `*BOUNDARY_FLUX` record was refused, and the whole
+    flux boundary lost.** `_resolve_flux` compared all FOUR `MLC` cells no
+    matter how many nodes `_bc_segments` had already decided the segment has.
+    Vol I R17 p.5-48 defines `MLCk` as *"curve multiplier at node Nk"* and
+    p.5-47's Card 2 defaults every one to `0.`, so on `N1 N2 N3` — a trailing
+    blank, or the `N4 = N3` spelling of p.43-63 — `MLC4` is blank BY
+    CONSTRUCTION and the spread was always the full multiplier. MEASURED before
+    the fix: `5 6 7` with `MLC1..MLC3 = −70000` emitted ZERO `/IMPFLUX` and told
+    the reader to *"give all four the same multiplier"* on a segment this
+    converter itself had read as three-noded — the #125 class, and internally
+    inconsistent with `test_a_trailing_zero_makes_a_triangle`. Only `mlcs[:n]`
+    is compared now, `n` from the WIDEST resolved segment (so a mixed quad/tri
+    set still compares four), and a stated multiplier beyond `n` is NAMED as
+    ignored rather than swallowed. SOLVER-VALIDATED: the two-triangle deck
+    stores `IMPOSED FLUX_DENSITY HEAT = 70.008599 mJ = HEAT STORED` over 7011
+    cycles at 0 ERROR / 0 WARNING / NORMAL TERMINATION — digit-for-digit its
+    quad twin, and `q″·A·t = 70.0086`.
+  - **MAJOR: a stated `TYPE = 0` on `*BOUNDARY_RADIATION_{SET,SEGMENT}` dropped
+    the record with a FALSE reason.** p.5-122 (`SSID TYPE _ _ _ _ PSEROD`) and
+    p.5-117 (`N1 N2 N3 N4 TYPE`) both print TYPE with **Default 1** and list
+    exactly one value, *"EQ.1: Radiation to environment"*. `TYPE = 2`
+    (*"Radiation within an enclosure"*) and page 5-126 belong to the SEPARATE
+    `_VF` / `_ENCLOSURE` keywords, which k2rad refuses under their own names —
+    so on these two spellings enclosure radiation is not even expressible. A
+    `0` typed into a defaulted fixed-width integer column, the ordinary way to
+    write "use the default", lost a fully convertible boundary while the log
+    asserted a value the deck never wrote (#130). It now takes the Default row,
+    the way `_efrac` applies p.12-575's `EQ.0.0` rule to FWORK; any other value
+    quotes what the deck ACTUALLY stated and cites the card's OWN page. The
+    refusal is also a per-RECORD `state.warn` now rather than a keyword-scoped
+    `recognized_not_emitted` entry — MEASURED on a two-record probe, that
+    listed `BOUNDARY_RADIATION_SET` as unemitted while a `/RADIATION` built
+    from its sibling record was in the `.rad`.
+  - **The implicit exclusion's MECHANISM, found at source.** The code comment
+    said convec / radiation / fixflux / fixtemp are *"called from the EXPLICIT
+    loop in resol.F and never from imp_solv"*, and that is measurably false:
+    `resol.F:1802/2994/3006/3025` carry NO `IMPL_S` test at all, unlike their
+    immediate neighbours at `:2869` (NCONLD), `:2898` (NFXVEL), `:2916`
+    (NLOADP_F) and `:2937` (PBLAST). What is dead is the ACCUMULATION —
+    `resol.F:6547`, inside `IF (IMPL_S == 1)`, is a `GOTO 111` to the label at
+    `:7949`, which skips the `IF (ILAG + IALE + IEULER /= 0)` block opened at
+    `:6552` in which the one and only `CALL TEMPUR` sits (`:6736`), and
+    `tempur.F:51-58` is the whole integrator (`TEMP += FTHE/MCP`) and the only
+    writer of `HEAT_STORED`. MEASURED on a fresh twin: the same converted flux
+    brick reports `IMPOSED FLUX_DENSITY HEAT = 70.000000` with
+    `HEAT STORED = 0.0000000` over 11 implicit cycles, against
+    `70.008599 = 70.008599` over 7011 explicit ones. So the boundary cards ARE
+    emitted on an implicit deck, ARE read, and their source counters DO
+    advance; the warnings now say that, because a reader who stops at the first
+    line of `** THERMAL ANALYSIS **` sees a perfectly plausible number.
+  - **The `/DT/THERM` surface-rate guard prescribed a factor that leaves the
+    run stable but OSCILLATING.** `τ = RHO0_CP·Lc/h` is the constant of a node
+    fed by ONE loaded face per element; a body a few elements thick and loaded
+    on several sides runs faster than that by
+    `r = max(loaded segments per node / elements per node)`, which
+    `_surface_load_concentration` now counts from the emitted deck. Both the
+    trip point and the prescription are divided by `r`, so an ordinary thick
+    mesh (`r = 1`) keeps exactly the arithmetic that shipped. SOLVER-VALIDATED
+    on a six-face 1 mm coupon (`r = 3`), three runs, all NORMAL TERMINATION at
+    0 ERROR / 0 WARNING:
+
+    | `/DT/THERM` | cycles | nodal temperature | `HEAT STORED` |
+    |---|---|---|---|
+    | default 0.9 | 6 | diverges | 7 901 590.2 |
+    | 0.225 (the old prescription) | 23 | 300 → **1350.0** → 825 → 1087.5 … | 2527.6994 |
+    | 0.075 (`r`-scaled) | 67 | 300 → 650 → 825 → 912.5 → 956.25 … | 2527.7000 |
+
+    The middle row is the point: stable, saturating at the right total heat to
+    seven figures, and its first step 350 K PAST the environment temperature —
+    so the *"confirm the heat balance is physical"* the message used to
+    prescribe cannot see the overshoot. It now says to read the TEMPERATURE
+    HISTORY as well. The predicted step change `2·r·dt/τ·(T_∞ − T)` is 1050 K
+    and 350 K, which the engine reproduced exactly.
+  - Also fixed: the no-`/HEAT/MAT` boundary message prescribed *"Add
+    `*MAT_THERMAL_ISOTROPIC` + `*PART` TMID"* on a deck that HAS one, naming a
+    spelling k2rad does not parse (`_resolve_heat_materials`' own unparsed arm
+    cannot fire on that shape — its `wanted` set is built from parts whose TMID
+    RESOLVES); the `--ams` screen for `/DT/THERM` gated on `options.ams` alone
+    while `/DT/AMS` and the starter `/AMS` need `*CONTROL_TIMESTEP` with
+    `DT2MS < 0`, so a SOLN=1 deck with no timestep card lost its `/DT/THERM`
+    under a message saying *"`/DT/AMS` is kept"* on a deck carrying none (one
+    shared non-mutating predicate, `_ams_is_emitted`, now serves all three call
+    sites); a blank `TMULT` beside a `TLCID` was resolved to 1.0 SILENTLY on
+    `/RADIATION` while the identical substitution is named on `/CONVEC`
+    (p.5-123/p.5-118 give it the same printed default of `0.` and
+    `hm_read_radiation.F:137` the same `FCY_DIM` clamp — and `T_∞` enters
+    `radiation.F:155` to the FOURTH power); and `*CONTROL_SOLUTION` named
+    `LCINT = 100` and `NCDCF = 1` as dropped inputs when p.12-532 gives exactly
+    those as the Default row.
+  - **29 thermal spellings still fell into the generic skipped-keyword list.**
+    The `*MAT_T##` aliases are now GENERATED from one table (Vol II R17 p.2-9,
+    re-read spelling by spelling: T01-T10, T11-T15 as five aliases of one card,
+    no T16, T17 and T18), so an alias can never be less well diagnosed than the
+    name it aliases — `*MAT_T07` was silent while its exact synonym
+    `*MAT_THERMAL_CWM`, registered two screens away, got a named drop. The
+    eight remaining `*MAT_THERMAL_*` families and the seven
+    `*BOUNDARY_{TEMPERATURE,THERMAL}_*` thermal spellings get named rows of
+    their own, and `_thermal_deferred` keys its entry on the spelling the DECK
+    wrote rather than on the canonical name.
+  - **Two stale comments stated the OPPOSITE of the engine.** `_emit_heat_mat`'s
+    docstring and the `_TD_CP_SPREAD_LIMIT` comment claimed `AL = BL = 0` gives
+    *"every node above T1 k = 0 EXACTLY"* and *"silently insulates the hot
+    region"*. Twelve conduction operators read `AS + BS·T` unconditionally and
+    never look at `AL`/`BL`/`TMELT`; what a zero second segment breaks is the
+    `/DT/THERM` step and `CONDE`, which is what the CHANGELOG and the shipped
+    warning already said. The companion `_fit_td_conductivity` claim that the
+    two-segment form exists ONLY in `IDT_THERM`-gated time-step routines was
+    over-narrow on both halves: it also lives in the ALE (`atherm.F:137`), SPH
+    (`forintp.F:336/350`), `/INTER/TYPE9` (`i9grd2.F:140`, `i9grd3.F:164`) and
+    rigid-wall (`rgwat2.F:176`, `rgwat3.F:213`) paths, and `mqviscb.F:282/:592`,
+    `mqvisc8.F:170` and `mdtsph.F:142` gate on `JTHE > 0` alone. The POLICY is
+    unaffected and better supported than it was argued.
+  - Four drifting source citations re-anchored against the checked-in tree
+    (`stherm.F:104` → `:106`, `pforc3.F:379` → `:382`,
+    `freform.F:1327-1331` → `:1327-1330`, `mqviscb.F:651-656` → `:653-657`),
+    and the engine `KEY0` keyword table — quoted as `:214-231`, `:214-236` and
+    `:214-250` in three different places — settled on `freform.F:213-232`,
+    which is where the `DATA KEY0/` block actually begins and ends.
+
 - **THERMAL SOLVER verification round — one blocker, five majors and six minors,
   found by re-checking the batch's own cited facts against the engine source and
   by twin measurements on converted decks.** Three of the batch's own claims

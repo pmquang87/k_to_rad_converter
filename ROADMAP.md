@@ -844,7 +844,7 @@ validated foundation for further linear analyses:
   `*CONTROL_SOLUTION` SOLN=1 → the engine card `/DT/THERM`,
   `*CONTROL_THERMAL_SOLVER` TSF → `/THERM` and FWORK → `/HEAT/MAT` EFRAC,
   `*MAT_THERMAL_ISOTROPIC_TD[_LC]` → a least-squares line onto `/HEAT/MAT`'s
-  `AS + BS·T` (which is the whole of its conduction — `stherm.F:106`),
+  `AS + BS·T` (which is the whole of its conduction — twelve operators, `stherm.F:106` and eleven siblings, read it and nothing else),
   `*MAT_THERMAL_ORTHOTROPIC` when it is isotropic in fact, and the eight
   `*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,TSHELL}`
   spellings → `/IMPTEMP` over the elements' own nodes.
@@ -859,6 +859,16 @@ validated foundation for further linear analyses:
   (`*LOAD_THERMAL_VARIABLE_{BEAM,SHELL}[_SET]` — `/IMPTEMP` carries one value
   per node) and the external-field loads
   (`*LOAD_THERMAL_{RSW,D3PLOT,BINOUT,TOPAZ}`).
+  **One thermal spelling class is deliberately NOT named yet:**
+  `*CONTACT_*_THERMAL` (measured on the corpus:
+  `*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_MORTAR_THERMAL` and
+  `*CONTACT_TIED_SURFACE_TO_SURFACE_THERMAL` are still in
+  `skipped_keywords`). These are CONTACT cards whose base interface k2rad DOES
+  convert; registering them as thermal warn-drops would lose the mechanical
+  contact too, which is worse than the present silence. The right fix routes
+  them to the contact handler and names only the interface-conductance loss —
+  a contact-side change with its own regression surface, so it belongs to a
+  contact batch, not this one.
   **Measured limits that remain.** (a) A `*MAT_ELASTIC` shell is restated as
   `/MAT/LAW36` so it CAN expand, but a material shared between shell and solid
   parts is left on LAW1 and its expansion stays inert on the shells. (b) The
@@ -870,14 +880,30 @@ validated foundation for further linear analyses:
   step with no thermal check — safe only because that step is normally far
   smaller. (d) In a THERMAL-ONLY run (`/DT/THERM`) the step IS computed, but
   from conduction alone: a stiff `/CONVEC` or `/RADIATION` diverges silently
-  under NORMAL TERMINATION, which k2rad now screens for and prescribes a scale
-  factor against. (e) `*CONTROL_THERMAL_SOLVER`'s `EQHEAT` has no counterpart,
+  under NORMAL TERMINATION, which k2rad screens for and prescribes a scale
+  factor against — scaled by the loaded-face concentration counted from the
+  emitted deck, because a body a few elements thick loaded on several sides is
+  faster than `RHO0_CP·Lc/h` by that factor. The prescription is a MONOTONE
+  step, not merely a stable one: measured on a six-face coupon, the unscaled
+  0.25·τ is stable and lands the heat balance at 2527.6994 vs an analytic
+  2527.7000 while its FIRST step goes 300 → 1350 K against a 1000 K
+  environment, so the heat balance alone does not reveal an oscillating
+  transient — the warning says to read the temperature history too. (e) `*CONTROL_THERMAL_SOLVER`'s `EQHEAT` has no counterpart,
   so a deck whose mechanical and thermal units are NOT consistent converts with
   its strain-energy-to-heat conversion off by exactly `EQHEAT`. (f) An IMPLICIT
   run integrates NO temperature at all on this build — measured, a twin pair of
   converted decks carries its far end 300 → 400.000 K explicitly and stays at
   exactly 300.000 K under `/IMPL/*` with `HEAT STORED = 0.0000000` — so the
-  thermal cards and the TEMP output channels are named and left out there.
+  TEMP output channels and the engine thermal cards are named and left out
+  there. The mechanism is `resol.F:6547`: inside `IF (IMPL_S == 1)` a
+  `GOTO 111` jumps to the label at `:7949` and skips the block opened at
+  `:6552` that holds the one and only `CALL TEMPUR` (`:6736`), which is the
+  whole integrator and the only writer of `HEAT_STORED` (`tempur.F:51-58`).
+  The SOURCE routines are NOT skipped — `resol.F:1802/2994/3006/3025` carry no
+  `IMPL_S` test — so the boundary cards ARE still emitted, ARE read, and their
+  `** THERMAL ANALYSIS **` counters advance normally: measured, a flux brick
+  reports `IMPOSED FLUX_DENSITY HEAT = 70.000000` beside
+  `HEAT STORED = 0.0000000`. Only that last number tells the story.
   (g) Radioss has NO thermal-expansion reference cell, so a driver that never
   changes (`*LOAD_THERMAL_CONSTANT[_NODE|_ELEMENT_<F>]`) develops exactly ZERO
   thermal strain where LS-DYNA measures from a *"null state"* and develops

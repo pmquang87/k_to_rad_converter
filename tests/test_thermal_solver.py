@@ -1969,7 +1969,7 @@ class UnparsedThermalMaterialTests(unittest.TestCase):
         self.assertEqual(_headers(starter, "/CONVEC/"), [])
         self.assertTrue(_warned(
             result, "*PART TMID [9] names a thermal material whose "
-                    "*MAT_THERMAL_* spelling k2rad does not parse"))
+                    "*MAT_THERMAL_* spelling k2rad does not CONVERT"))
         self.assertFalse(_warned(
             result, "Add *MAT_THERMAL_ISOTROPIC + *PART TMID"))
 

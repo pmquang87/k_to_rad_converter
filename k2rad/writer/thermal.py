@@ -2612,11 +2612,12 @@ def _resolve_thermal_boundaries(state: ConversionState) -> None:
             + ", ".join(kinds) + " on such a deck would be accepted at 0 "
             "starter errors and do NOTHING, so none is emitted. "
             + (f"*PART TMID {unparsed} names a thermal material whose "
-               "*MAT_THERMAL_* spelling k2rad does not parse (it is in the "
-               "skipped-keyword list), so the binding the deck states is "
-               "there but its properties never arrive — state the material "
-               "as *MAT_THERMAL_ISOTROPIC or *MAT_THERMAL_ISOTROPIC_TD, which "
-               "this converter reads."
+               "*MAT_THERMAL_* spelling k2rad does not CONVERT (look for it "
+               "by name in this log, under the skipped or the "
+               "recognized-but-not-emitted list), so the binding the deck "
+               "states is there but its properties never arrive — state the "
+               "material as *MAT_THERMAL_ISOTROPIC or "
+               "*MAT_THERMAL_ISOTROPIC_TD, which this converter reads."
                if unparsed else
                "Add *MAT_THERMAL_ISOTROPIC + *PART TMID (which also gives the "
                "heat somewhere to conduct to) and the cards appear."))
@@ -2695,6 +2696,18 @@ def _resolve_flux(state: ConversionState, bc) -> bool:
     before this runs, so the node count is known: a set that MIXES quads and
     triangles compares all four, because its quads do have an N4.
 
+    What the ENGINE then does with a triangle is worth stating: k2rad writes it
+    as ``N4 = 0`` and ``hm_read_surf.F:318-321`` puts the degenerate corner back
+    (``IF(N4/=0) ... ELSE N4 = N3``), so ``fixflux.F``'s quad branch runs and
+    the doubled corner collects two of the four quarters. AREA is still the
+    triangle's (``HALF*|cross product|`` of a degenerate quad) and the TOTAL is
+    exact — SOLVER-MEASURED, a two-triangle face and its quad twin both store
+    ``IMPOSED FLUX_DENSITY HEAT = 70.008599 mJ = HEAT STORED`` over 7011 cycles
+    against ``q''·A·t = 70.0086``. The ``ELSEIF (N3 > 0) !TRUE TRIANGLES``
+    branches at ``fixflux.F:174`` (/PARITH/OFF) and ``:313`` (/PARITH/ON),
+    which would split the heat in THIRDS, are unreachable from any
+    ``/SURF/SEG``.
+
     ``LCID < 0`` makes the flux a function of TEMPERATURE; ``/IMPFLUX``'s
     ``fct_IDT`` is evaluated at ``(t - TSTART)/ASCALE`` and nothing else
     (``fixflux.F:140``), so that form is refused too.
@@ -2710,11 +2723,12 @@ def _resolve_flux(state: ConversionState, bc) -> bool:
         state.warn(
             f"{bc.source}: MLC1..MLC{n} are PER-NODE flux multipliers and they "
             f"differ (spread {spread:g} about MLC1 = {bc.mult:g}). /IMPFLUX "
-            "carries ONE Fscale_y and splits the segment's heat EVENLY over "
-            "its nodes (fixflux.F:167-172, FLUX = FOURTH*FLUX), so a per-node "
-            "weighting cannot be expressed. Averaging them would state a load "
-            "the deck does not — the record is DROPPED. Split the segment, or "
-            f"give all {n} the same multiplier."
+            "carries ONE Fscale_y and splits the segment's heat over its four "
+            "node SLOTS in equal quarters (fixflux.F:167-172, "
+            "FLUX = FOURTH*FLUX), so a per-node weighting cannot be "
+            "expressed. Averaging them would state a load the deck does not — "
+            f"the record is DROPPED. Split the segment, or give all {n} the "
+            "same multiplier."
             + ("" if n == len(mlcs) else
                f" (Only MLC1..MLC{n} are read: the widest segment on this "
                f"record has {n} nodes, and MLCk is 'the curve multiplier at "
