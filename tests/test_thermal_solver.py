@@ -356,6 +356,74 @@ class BoundaryFluxTests(unittest.TestCase):
         self.assertTrue(_warned(result, "PSEROD=42"))
         self.assertTrue(_warned(result, "LOC=1"))
 
+    # ── MLCk is "the curve multiplier at NODE Nk" (Vol I R17 p.5-48) ────────
+
+    def test_a_triangle_is_not_refused_for_its_absent_fourth_multiplier(self):
+        # On a segment this converter itself read as three-noded there is no
+        # node N4, so MLC4 is blank by construction and takes p.5-47 Card 2's
+        # default of 0. Comparing it against three stated multipliers refused
+        # a fully convertible boundary and told the reader to "give all four
+        # the same multiplier" — the #125 class. Both triangle spellings, and
+        # the _SET form over an all-triangle *SET_SEGMENT.
+        tri_set = ("*SET_SEGMENT\n" + _row(51) + "\n"
+                   + "       5       6       7       7\n")
+        cases = (
+            ("trailing blank", "",
+             "*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, "") + "\n"
+             + _row(0, -70000.0, -70000.0, -70000.0, "", 0, 0) + "\n"),
+            ("N4 = N3", "",
+             "*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, 7) + "\n"
+             + _row(0, -70000.0, -70000.0, -70000.0, "", 0, 0) + "\n"),
+            ("all-triangle SET", tri_set,
+             "*BOUNDARY_FLUX_SET\n" + _row(51, 0) + "\n"
+             + _row(0, -70000.0, -70000.0, -70000.0, "", 0, 0) + "\n"),
+        )
+        for name, pre, card in cases:
+            with self.subTest(spelling=name):
+                result, starter, _ = _convert(_deck(pre + card))
+                self.assertEqual(len(_headers(starter, "/IMPFLUX/")), 1)
+                self.assertFalse(_warned(result, "PER-NODE flux multipliers"))
+
+    def test_a_real_quad_still_refuses_an_unequal_fourth_multiplier(self):
+        # The control in the other direction: a segment that HAS four nodes
+        # must keep the refusal, whether MLC4 is blank or stated differently.
+        for mlc4 in ("", -35000.0):
+            with self.subTest(mlc4=mlc4):
+                card = ("*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, 8) + "\n"
+                        + _row(0, -70000.0, -70000.0, -70000.0, mlc4, 0, 0)
+                        + "\n")
+                result, starter, _ = _convert(_deck(card))
+                self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+                self.assertTrue(_warned(result, "MLC1..MLC4 are PER-NODE"))
+
+    def test_a_mixed_set_compares_all_four(self):
+        # One quad in the set means SOME segment has an N4, so MLC4 is read.
+        mixed = ("*SET_SEGMENT\n" + _row(52) + "\n"
+                 + "       5       6       7       7\n"
+                 + "       1       2       3       4\n")
+        card = ("*BOUNDARY_FLUX_SET\n" + _row(52, 0) + "\n"
+                + _row(0, -70000.0, -70000.0, -70000.0, "", 0, 0) + "\n")
+        result, starter, _ = _convert(_deck(mixed + card))
+        self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+        self.assertTrue(_warned(result, "MLC1..MLC4 are PER-NODE"))
+
+    def test_unequal_multipliers_within_the_triangle_still_refuse(self):
+        card = ("*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, "") + "\n"
+                + _row(0, -70000.0, -70000.0, -35000.0, "", 0, 0) + "\n")
+        result, starter, _ = _convert(_deck(card))
+        self.assertEqual(_headers(starter, "/IMPFLUX/"), [])
+        self.assertTrue(_warned(result, "MLC1..MLC3 are PER-NODE"))
+
+    def test_a_stated_mlc4_on_a_triangle_is_named_not_swallowed(self):
+        # It cannot be honoured (there is no node N4) and it must not be
+        # silently ignored either.
+        card = ("*BOUNDARY_FLUX_SEGMENT\n" + _row(5, 6, 7, "") + "\n"
+                + _row(0, -70000.0, -70000.0, -70000.0, -35000.0, 0, 0) + "\n")
+        result, starter, _ = _convert(_deck(card))
+        self.assertEqual(len(_headers(starter, "/IMPFLUX/")), 1)
+        self.assertTrue(_warned(
+            result, "MLC4=-35000 names a node the segment(s) do not have"))
+
 
 # ── (C) *BOUNDARY_CONVECTION → /CONVEC ───────────────────────────────────────
 
@@ -571,17 +639,49 @@ class BoundaryRadiationTests(unittest.TestCase):
     def test_type_2_on_a_set_is_dropped_naming_the_view_factors(self):
         result, starter, _ = self._radia(rtype=2)
         self.assertEqual(_headers(starter, "/RADIATION/"), [])
-        self.assertIn("BOUNDARY_RADIATION_SET",
-                      dict(result.recognized_not_emitted))
-        self.assertIn("VIEW FACTORS",
-                      dict(result.recognized_not_emitted)[
-                          "BOUNDARY_RADIATION_SET"])
+        self.assertTrue(_warned(result, "TYPE=2 on segment set 50"))
+        self.assertTrue(_warned(result, "VIEW FACTORS"))
+        # The refusal is PER RECORD, so it must not be filed under the
+        # KEYWORD: on a mixed deck that would list the keyword as unemitted
+        # while a /RADIATION built from its sibling record is in the .rad.
+        self.assertNotIn("BOUNDARY_RADIATION_SET",
+                         dict(result.recognized_not_emitted))
 
     def test_type_2_on_a_segment_is_dropped(self):
         result, starter, _ = self._radia(rtype=2, spelling="SEGMENT")
         self.assertEqual(_headers(starter, "/RADIATION/"), [])
-        self.assertIn("BOUNDARY_RADIATION_SEGMENT",
-                      dict(result.recognized_not_emitted))
+        self.assertTrue(_warned(result, "TYPE=2 on an explicit segment"))
+        self.assertTrue(_warned(result, "p.5-117"))
+
+    def test_a_stated_type_zero_takes_the_manual_default(self):
+        # Vol I R17 p.5-122 (_SET) and p.5-117 (_SEGMENT) BOTH print TYPE with
+        # Default 1 and list exactly one value, "EQ.1: Radiation to
+        # environment"; TYPE=2 and p.5-126 belong to the SEPARATE _VF /
+        # _ENCLOSURE keywords. So a `0` typed into a defaulted fixed-width
+        # integer column — the ordinary way to write "use the default" — is
+        # the default, not an unknown radiation type. It used to lose a fully
+        # convertible boundary under a message asserting a value the deck
+        # never wrote (#130).
+        for spelling in ("SET", "SEGMENT"):
+            for rtype in (0, 1, ""):
+                with self.subTest(spelling=spelling, rtype=rtype):
+                    _result, starter, _ = self._radia(rtype=rtype,
+                                                      spelling=spelling)
+                    self.assertEqual(len(_headers(starter, "/RADIATION/")), 1)
+
+    def test_a_partly_refused_keyword_is_not_listed_as_unemitted(self):
+        # One TYPE=1 record and one TYPE=2 record under the same keyword.
+        card = ("*BOUNDARY_RADIATION_SET\n" + _row(50, 1) + "\n"
+                + _row(0, SIGMA_MG_MM_S, 900, 1.0, 0) + "\n"
+                + _row(51, 2) + "\n"
+                + _row(0, SIGMA_MG_MM_S, 900, 1.0, 0) + "\n")
+        seg2 = ("*SET_SEGMENT\n" + _row(51) + "\n"
+                + "       1       2       3       4\n")
+        result, starter, _ = _convert(_deck(SEG1 + seg2 + CURVE900 + card))
+        self.assertEqual(len(_headers(starter, "/RADIATION/")), 1)
+        self.assertTrue(_warned(result, "TYPE=2 on segment set 51"))
+        self.assertNotIn("BOUNDARY_RADIATION_SET",
+                         dict(result.recognized_not_emitted))
 
     def test_the_set_spelling_reads_pserod_from_field_seven(self):
         # Vol I R17 p.5-122: *BOUNDARY_RADIATION_SET card 1 is
@@ -652,7 +752,7 @@ class EngineThermalCardTests(unittest.TestCase):
         self.assertTrue(_warned(result, "this deck arms no thermal solve"))
 
     def test_soln_1_with_ams_is_refused_naming_the_hard_stop(self):
-        # freform.F:1327-1331: IDT_THERM == 1 .AND. IDTMINS /= 0 is
+        # freform.F:1327-1330: IDT_THERM == 1 .AND. IDTMINS /= 0 is
         # ANCMSG(301) + ARRET(0).
         deck = _deck("*CONTROL_SOLUTION\n" + _row(1) + "\n"
                      "*CONTROL_TIMESTEP\n" + _row(0.0, 0.9, 0, 0.0, -1.0e-4)
@@ -679,8 +779,37 @@ class EngineThermalCardTests(unittest.TestCase):
         result, _starter, _engine = _convert(deck)
         self.assertTrue(_warned(result, "/DT/THERM is UNSAFE on this deck"))
         # ...and the prescription it gives is the one that was measured to work
-        # (0.225 -> HEAT STORED 2527.6994 vs an analytic 2527.7000).
-        self.assertTrue(any("about 0.225 would put the step" in w
+        # (0.225 -> HEAT STORED 2527.6994 vs an analytic 2527.7000). This deck
+        # loads ONE face, so the loaded-face concentration is 1 and the factor
+        # is the unscaled 0.25*tau — see the six-face twin below.
+        self.assertTrue(any("about 0.225 puts the step" in w
+                            for w in result.warnings))
+        self.assertFalse(_warned(result, "loaded face(s) per element"))
+
+    def test_a_body_loaded_on_every_face_gets_a_smaller_prescription(self):
+        # A ONE-ELEMENT body with all six faces convecting: each corner node
+        # carries 3 loaded segments and is fed by 1 element, so its real
+        # surface time constant is tau/(2*3) = RHO0_CP*(V/A)/h, six times
+        # shorter than tau. The old prescription (0.25*tau) is 1.5x that and
+        # OVERSHOOTS the environment temperature on the first step; scaling by
+        # the concentration puts it back inside a monotone approach.
+        faces = ("*SET_SEGMENT\n" + _row(50) + "\n"
+                 + "       5       6       7       8\n"
+                 + "       1       2       3       4\n"
+                 + "       1       2       6       5\n"
+                 + "       2       3       7       6\n"
+                 + "       3       4       8       7\n"
+                 + "       4       1       5       8\n")
+        deck = _deck("*CONTROL_SOLUTION\n" + _row(1) + "\n"
+                     + faces + CURVE900 + CONVEC_CARD).replace(
+            _row(0.001), _row(0.2))
+        result, starter, _engine = _convert(deck)
+        self.assertEqual(len(_data_rows(
+            starter, _one_header(starter, "/SURF/SEG/"))) - 1, 6)
+        self.assertTrue(_warned(result, "/DT/THERM is UNSAFE on this deck"))
+        self.assertTrue(_warned(result, "3 loaded face(s) per element"))
+        # 0.9 * 0.25 * (tau/3) / dt_th with tau = dt_th = 0.03611.
+        self.assertTrue(any("about 0.075 puts the step" in w
                             for w in result.warnings))
 
     def test_tsf_writes_the_therm_card(self):
@@ -1022,7 +1151,7 @@ class HeatMatSecondSegmentTests(unittest.TestCase):
         # AL = BL = 0.0 beside a real T1 gives a /DT/THERM run an UNBOUNDED
         # thermal step above the melt point (dttherm.F90:105/116 divides by
         # max(akk, 1e-20)) and a zero interface conductance CONDE. The heat
-        # FLOW never reads those cells (stherm.F:104 is AS + BS*T).
+        # FLOW never reads those cells (stherm.F:106 is AS + BS*T).
         _result, starter, _ = _convert(_deck(THERMAL_LOAD))
         body = _data_rows(starter, "/HEAT/MAT/1")
         self.assertAlmostEqual(float(body[0][40:60]), 45.0)   # AS
@@ -1815,7 +1944,50 @@ class UnparsedThermalMaterialTests(unittest.TestCase):
             result, "*PART TMID names thermal material 9, whose "
                     "*MAT_THERMAL_* spelling k2rad does not parse"))
         self.assertFalse(_warned(result, "no *PART TMID names one"))
-        self.assertIn("MAT_THERMAL_ORTHOTROPIC_TD", result.skipped_keywords)
+        # The spelling is RECOGNIZED (it has a named drop of its own) rather
+        # than left in the generic unsupported-keyword list.
+        self.assertNotIn("MAT_THERMAL_ORTHOTROPIC_TD", result.skipped_keywords)
+        self.assertIn("MAT_THERMAL_ORTHOTROPIC_TD",
+                      dict(result.recognized_not_emitted))
+
+    def test_the_boundary_screen_names_an_unparsed_tmid_too(self):
+        # _resolve_heat_materials' `wanted` set only holds mids whose *PART
+        # TMID RESOLVES, so its own "unparsed" arm cannot fire on a deck that
+        # states nothing but a TMID and a heat-source boundary. Without a
+        # screen of its own, the no-/HEAT/MAT message prescribed exactly what
+        # this deck already has — the #125 class.
+        deck = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n",
+            "*MAT_THERMAL_ORTHOTROPIC_TD\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0, 0.0) + "\n").replace(
+            "{EXTRA}",
+            SEG1 + CURVE900 + "*BOUNDARY_CONVECTION_SET\n" + _row(50, 0)
+            + "\n" + _row(0, 100.0, 900, 1.0, 0) + "\n")
+        result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/CONVEC/"), [])
+        self.assertTrue(_warned(
+            result, "*PART TMID [9] names a thermal material whose "
+                    "*MAT_THERMAL_* spelling k2rad does not parse"))
+        self.assertFalse(_warned(
+            result, "Add *MAT_THERMAL_ISOTROPIC + *PART TMID"))
+
+    def test_a_deck_with_no_tmid_at_all_still_gets_the_generic_advice(self):
+        # The control: without a *PART TMID the generic sentence is the RIGHT
+        # one, so the new arm must not swallow it.
+        deck = BRICK.replace(
+            "*MAT_THERMAL_ISOTROPIC\n"
+            + _row(9, "7.85E-9", 0, 0.0, 0.0, 0.0) + "\n"
+            + _row("4.60E+8", 45.0) + "\n", "").replace(
+            _row(1, 1, 1, 0, 0, 0, 0, 9), _row(1, 1, 1)).replace(
+            "{EXTRA}",
+            SEG1 + CURVE900 + "*BOUNDARY_CONVECTION_SET\n" + _row(50, 0)
+            + "\n" + _row(0, 100.0, 900, 1.0, 0) + "\n")
+        result, starter, _ = _convert(deck)
+        self.assertEqual(_headers(starter, "/CONVEC/"), [])
+        self.assertTrue(_warned(
+            result, "Add *MAT_THERMAL_ISOTROPIC + *PART TMID"))
 
 
 class DuplicateTmidTests(unittest.TestCase):
@@ -1909,8 +2081,8 @@ class ThermalTimeHistoryChannelTests(unittest.TestCase):
 
 class ConductivityFitSegmentTests(unittest.TestCase):
     """AL/BL never enter the Lagrangian conduction — every conduction operator
-    reads AS + BS*T_element (stherm.F:104, s4therm.F:84, s10therm.F:81,
-    cbatherm.F:67, pforc3.F:379). The two-segment form lives only in the
+    reads AS + BS*T_element (stherm.F:106, s4therm.F:84, s10therm.F:81,
+    cbatherm.F:67, pforc3.F:382). The two-segment form lives only in the
     thermal TIME-STEP routines, gated on IDT_THERM == 1. So the table is fitted
     with ONE line and mirrored, even when the law states a melt temperature."""
 
@@ -1952,7 +2124,7 @@ class ConductivityFitSegmentTests(unittest.TestCase):
         self.assertAlmostEqual(float(body[1][40:60]), -0.048, places=9)  # BL
         self.assertTrue(_warned(result, "deliberately NOT used as a second "
                                         "fit segment"))
-        self.assertTrue(_warned(result, "stherm.F:104"))
+        self.assertTrue(_warned(result, "stherm.F:106"))
 
     def test_the_law2_message_reads_the_emitted_efrac(self):
         # It used to assert the literal 1e-20 that the same commit made
@@ -1968,6 +2140,160 @@ class ConductivityFitSegmentTests(unittest.TestCase):
         self.assertEqual(len(hit), 1)
         self.assertIn("EFRAC is 1 on this deck", hit[0])
         self.assertNotIn("written at 1e-20", hit[0])
+
+
+class BlankTmultSymmetryTests(unittest.TestCase):
+    """A blank TMULT beside a TLCID is resolved to 1.0 on BOTH cards, and
+    both say so. p.5-31 (CONVECTION) and p.5-123 / p.5-118 (RADIATION) give
+    TMULT the same 'curve multiplier' definition and the same printed default
+    of 0., and the two starter readers carry the same
+    ``IF (FCY == ZERO) FCY = FCY_DIM`` (hm_read_convec.F:132,
+    hm_read_radiation.F:137) — so the substitution is the same and it must be
+    named on both. It used to be silent on /RADIATION, where T_inf enters to
+    the FOURTH power."""
+
+    def test_both_kinds_name_the_substitution(self):
+        cases = (
+            ("CONVECTION", _row(0, 100.0, 900, "", 0), "/CONVEC/", "p.5-31"),
+            ("RADIATION", _row(0, SIGMA_MG_MM_S, 900, "", 0), "/RADIATION/",
+             "p.5-123"),
+        )
+        for kind, c2, header, page in cases:
+            with self.subTest(kind=kind):
+                card = ("*BOUNDARY_" + kind + "_SET\n" + _row(50, 0) + "\n"
+                        + c2 + "\n")
+                result, starter, _ = _convert(_deck(SEG1 + CURVE900 + card))
+                self.assertEqual(len(_headers(starter, header)), 1)
+                hits = [w for w in result.warnings
+                        if "TMULT is blank/zero" in w]
+                self.assertEqual(len(hits), 1)
+                self.assertIn(page, hits[0])
+                self.assertIn("resolved to FSCALE = 1.0", hits[0])
+
+    def test_a_stated_tmult_is_not_reported_as_blank(self):
+        card = ("*BOUNDARY_RADIATION_SET\n" + _row(50, 0) + "\n"
+                + _row(0, SIGMA_MG_MM_S, 900, 2.0, 0) + "\n")
+        result, _starter, _ = _convert(_deck(SEG1 + CURVE900 + card))
+        self.assertFalse(_warned(result, "TMULT is blank/zero"))
+
+
+class AmsScreenMirrorsTheEmitterTests(unittest.TestCase):
+    """``--ams`` is a REQUEST; ``/DT/AMS`` is written only for a mass-scaled
+    explicit deck. ``freform.F:1327`` refuses ``/DT/THERM`` on ``IDTMINS /= 0``,
+    which comes from the /DT/AMS card — so screening on ``options.ams`` alone
+    withheld a legal card and said "/DT/AMS is kept" on a deck that has
+    none (#130)."""
+
+    CTS = "*CONTROL_TIMESTEP\n" + _row(0.0, 0.9, 0, 0.0, -1e-6) + "\n"
+
+    def _deck(self, with_timestep):
+        return _deck("*CONTROL_SOLUTION\n" + _row(1) + "\n" + THERMAL_LOAD
+                     + (self.CTS if with_timestep else ""))
+
+    def test_ams_without_a_timestep_card_keeps_dt_therm(self):
+        result, starter, engine = _convert(self._deck(False), ams=True)
+        self.assertIn("/DT/THERM", engine.splitlines())
+        self.assertNotIn("/DT/AMS", engine.splitlines())
+        self.assertEqual(_headers(starter, "/AMS"), [])
+        self.assertFalse(_warned(result, "refuses the pair OUTRIGHT"))
+
+    def test_ams_with_a_mass_scaled_timestep_still_refuses_the_pair(self):
+        result, starter, engine = _convert(self._deck(True), ams=True)
+        self.assertNotIn("/DT/THERM", engine.splitlines())
+        self.assertIn("/DT/AMS", engine.splitlines())
+        self.assertEqual(len(_headers(starter, "/AMS")), 1)
+        self.assertTrue(_warned(result, "refuses the pair OUTRIGHT"))
+
+
+class ControlSolutionDefaultCellTests(unittest.TestCase):
+    """Vol I R17 p.12-532's Card 1 Default row gives LCINT 100 and NCDCF 1.
+    A cell holding its own documented default states nothing, so listing it
+    asks the reader of a plain structural deck to look at a cell that carries
+    no information."""
+
+    def _warns(self, row):
+        result, _starter, _ = _convert(
+            _deck("*CONTROL_SOLUTION\n" + row + "\n"))
+        return [w for w in result.warnings if "*CONTROL_SOLUTION:" in w]
+
+    def test_the_documented_defaults_are_not_listed(self):
+        self.assertEqual(self._warns(_row(0, "", "", 100, "", 1)), [])
+        # ...and so is the LCINT = 0 form, since the same page says "A minimum
+        # number of 100 is always used, that is, only larger input values are
+        # possible".
+        self.assertEqual(self._warns(_row(0, "", "", 0, "", 0)), [])
+
+    def test_a_real_value_is_still_named(self):
+        for row, needle in ((_row(0, "", "", 500), "LCINT=500"),
+                            (_row(0, "", "", "", "", 5), "NCDCF=5"),
+                            (_row(0, 96), "NLQ=96")):
+            with self.subTest(needle=needle):
+                hits = self._warns(row)
+                self.assertEqual(len(hits), 1)
+                self.assertIn(needle, hits[0])
+
+
+class MatThermalAliasCoverageTests(unittest.TestCase):
+    """Vol II R17 p.2-9's ``*MAT_T##`` alias table, generated from ONE source.
+
+    Hand-listing the aliases had already drifted: this PR registered T01, T02,
+    T03 and T10 but not their siblings, so ``*MAT_T07`` fell into the generic
+    "Skipped (unsupported) keywords" list while its exact synonym
+    ``*MAT_THERMAL_CWM``, registered two screens away, got a named drop."""
+
+    #: p.2-9 verbatim. T11-T15 are five aliases of one card, there is no T16,
+    #: and T17/T18 exist — the gaps are the MANUAL's.
+    PAGE_2_9 = {
+        "MAT_T01": "MAT_THERMAL_ISOTROPIC",
+        "MAT_T02": "MAT_THERMAL_ORTHOTROPIC",
+        "MAT_T03": "MAT_THERMAL_ISOTROPIC_TD",
+        "MAT_T04": "MAT_THERMAL_ORTHOTROPIC_TD",
+        "MAT_T05": "MAT_THERMAL_DISCRETE_BEAM",
+        "MAT_T06": "MAT_THERMAL_CHEMICAL_REACTION",
+        "MAT_T07": "MAT_THERMAL_CWM",
+        "MAT_T08": "MAT_THERMAL_ORTHOTROPIC_TD_LC",
+        "MAT_T09": "MAT_THERMAL_ISOTROPIC_PHASE_CHANGE",
+        "MAT_T10": "MAT_THERMAL_ISOTROPIC_TD_LC",
+        "MAT_T11": "MAT_THERMAL_USER_DEFINED",
+        "MAT_T12": "MAT_THERMAL_USER_DEFINED",
+        "MAT_T13": "MAT_THERMAL_USER_DEFINED",
+        "MAT_T14": "MAT_THERMAL_USER_DEFINED",
+        "MAT_T15": "MAT_THERMAL_USER_DEFINED",
+        "MAT_T17": "MAT_THERMAL_CHEMICAL_REACTION_ORTHOTROPIC",
+        "MAT_T18": "MAT_THERMAL_ISPG",
+    }
+
+    def test_every_alias_dispatches_to_its_canonical_handler(self):
+        from k2rad.handlers import HANDLERS
+        for alias, canon in sorted(self.PAGE_2_9.items()):
+            with self.subTest(alias=alias):
+                self.assertIn(alias, HANDLERS)
+                self.assertIn(canon, HANDLERS)
+                self.assertIs(HANDLERS[alias], HANDLERS[canon])
+
+    def test_no_thermal_spelling_falls_into_the_generic_list(self):
+        names = sorted(set(self.PAGE_2_9) | set(self.PAGE_2_9.values())
+                       | {"BOUNDARY_TEMPERATURE_PERIODIC_SET",
+                          "BOUNDARY_TEMPERATURE_RSW",
+                          "BOUNDARY_TEMPERATURE_TRAJECTORY",
+                          "BOUNDARY_THERMAL_BULKFLOW",
+                          "BOUNDARY_THERMAL_BULKNODE",
+                          "BOUNDARY_THERMAL_WELD",
+                          "BOUNDARY_THERMAL_WELD_TRAJECTORY"})
+        deck = "*KEYWORD\n" + "".join(
+            "*" + kw + "\n" + _row(500 + i, 1.0) + "\n"
+            for i, kw in enumerate(names)) + "*END\n"
+        state = _dispatch(deck)
+        self.assertEqual(state.skipped_keywords, [])
+
+    def test_an_alias_names_the_spelling_the_deck_wrote(self):
+        # A log answering *MAT_THERMAL_CWM to a deck writing *MAT_T07 would
+        # name a card the deck does not contain.
+        state = _dispatch("*KEYWORD\n*MAT_T07\n" + _row(7, 1.0) + "\n*END\n")
+        rne = dict(state.recognized_not_emitted)
+        self.assertIn("MAT_T07", rne)
+        self.assertNotIn("MAT_THERMAL_CWM", rne)
+        self.assertIn("numeric alias for *MAT_THERMAL_CWM", rne["MAT_T07"])
 
 
 if __name__ == "__main__":       # pragma: no cover

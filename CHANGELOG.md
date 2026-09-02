@@ -68,7 +68,7 @@ Prior history (before this changelog was introduced) is summarized in the
     `BCSDTTH_COPY(...,1)` then writes `ICODT = ICODR = 7` on EVERY node
     (restored at `:9167`), `resol.F:5807-5809` replaces the mechanical step with
     the conduction one, and `lectur.F:696-698` prints `THERMAL ANALYSIS ONLY`.
-    Refused together with `--ams` (`freform.F:1327-1331` is a hard
+    Refused together with `--ams` (`freform.F:1327-1330` is a hard
     `ANCMSG(301)` + `ARRET(0)`), and refused on a deck that arms no thermal
     solve. Two traps are guarded, both MEASURED under NORMAL TERMINATION with
     0 ERROR / 0 WARNING: (1) an `ENDTIM` not larger than one thermal step does
@@ -104,12 +104,16 @@ Prior history (before this changelog was introduced) is summarized in the
     The registry text this replaces called `/HEAT/MAT`'s conductivity *"the
     linear AS + BS*T only"*, and for the HEAT FLOW that is exactly right: every
     Lagrangian conduction operator reads `AS`/`BS` (`PM(75)`/`PM(76)`) and
-    nothing else — `stherm.F:82/104`, `s8etherm.F:86`, `s4therm.F:67/84`,
-    `s10therm.F:61/81`, `cbatherm.F:61/67`, `pforc3.F:379`, all of them
+    nothing else — twelve of them: `stherm.F:82-83/106`, `s8etherm.F:86/110`,
+    `s4therm.F:67/84`, `s4therm-itet1.F:118/135`, `s10therm.F:61/81`,
+    `s20therm.F:60/79`, `sctherm.F:94`, `s6ctherm.F:95`, `thermc.F:62/69`,
+    `therm3c.F:62/72`, `cbatherm.F:61/67`, `pforc3.F:379-380/382`, all of them
     `KC = (AS + BS*T_element)`. The two-segment `below/above T1` form does exist
-    (`dttherm.F90:102-106`, `mqviscb.F:651-656`) but ONLY in the thermal
-    TIME-STEP routines, both gated on `IDT_THERM == 1`, i.e. only under
-    `/DT/THERM`. So the deck's table is fitted with ONE line, whose worst
+    — in the thermal TIME-STEP routines (`dttherm.F90:102-106`,
+    `mqviscb.F:653-657`) and in the ALE / SPH / `/INTER/TYPE9` / rigid-wall
+    paths (`atherm.F:137`, `forintp.F:336/350`, `i9grd2.F:140`,
+    `rgwat2.F:176`), none of which this converter emits. So the deck's table is
+    fitted with ONE line, whose worst
     deviation the warning states, and that line is MIRRORED into `AL`/`BL` — not
     as a second segment but so a `/DT/THERM` run above `T1` keeps a sane
     stability step and interface conductance. `T1` itself is carried from the
@@ -187,7 +191,7 @@ Prior history (before this changelog was introduced) is summarized in the
   (`dttherm.F90:105/116`, `mqviscb.F:654/669`). Both routines are gated on
   `IDT_THERM == 1`, so this bites a thermal-only (`/DT/THERM`) run, where it can
   jump the whole run in one step; the heat FLOW itself never reads those cells
-  (`stherm.F:104` and its siblings are `AS + BS·T`). `AS`/`BS` are now mirrored
+  (`stherm.F:106` and its siblings are `AS + BS·T`). `AS`/`BS` are now mirrored
   into `AL`/`BL`.
 - **`*CONTROL_SOLUTION` SOLN=1's warning asserted something false.** It said
   *"Radioss has no thermal-only run mode; the structural degrees of freedom stay
@@ -196,7 +200,7 @@ Prior history (before this changelog was introduced) is summarized in the
   `writer/thermal.py`'s `mat_ID = 0` warning.
 - **Three registry texts named a Radioss card that does not exist.**
   `*CONTROL_THERMAL_TIMESTEP`'s target was `/DTTHERM`: `dttherm.F90` is a
-  SUBROUTINE, and the engine's keyword table (`freform.F:214-250`) has `'DT '`
+  SUBROUTINE, and the engine's keyword table (`freform.F:213-232`) has `'DT '`
   and `'THERM'` and nothing else. `*CONTROL_THERMAL_{SOLVER,NONLINEAR}` named
   *"the /THERM engine controls"* and *"the /THERM nonlinear controls"*: `/THERM`
   exists but carries exactly ONE cell, and there is no nonlinear-control family

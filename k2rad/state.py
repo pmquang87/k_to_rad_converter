@@ -6274,7 +6274,7 @@ class MatThermalOrthotropic:
       Card3: XP YP ZP A1 A2 A3
       Card4: D1 D2 D3
 
-    /HEAT/MAT conducts with ONE isotropic ``AS + BS·T`` (``stherm.F:104`` and
+    /HEAT/MAT conducts with ONE isotropic ``AS + BS·T`` (``stherm.F:106`` and
     its per-element siblings read ``PM(75)``/``PM(76)`` and nothing else), so
     ``K1 == K2 == K3`` converts exactly and anything else would have to invent
     an "average conductivity" the deck never states.
@@ -6379,10 +6379,16 @@ class ThermalBoundary:
     #: constant multiplier beside it. Kept separate from ``lcid``/``mult``,
     #: which are the T_inf pair.
     coef_lcid: int = 0
-    #: ``max(MLC) - min(MLC)`` on a *BOUNDARY_FLUX record: /IMPFLUX splits its
-    #: one ``Fscale_y`` evenly over the segment's nodes (``fixflux.F:167``), so
-    #: a non-zero spread is inexpressible and refuses the record.
-    mlc_spread: float = 0.0
+    #: ``MLC1..MLC4`` on a *BOUNDARY_FLUX record, in card order. /IMPFLUX
+    #: splits its one ``Fscale_y`` evenly over the segment's nodes
+    #: (``fixflux.F:167``), so unequal weights are inexpressible — but only the
+    #: cells that HAVE a node may be compared: Vol I R17 p.5-48 defines MLCk as
+    #: the *"curve multiplier at node Nk"*, and on a triangle (``N1 N2 N3`` with
+    #: a trailing blank, or ``N4 = N3``) there is no node N4, so MLC4 is blank
+    #: by construction and defaults to 0 (p.5-47 Card 2 Default row). The list
+    #: is carried whole and the writer compares ``mlcs[:n]`` once the segment
+    #: list has told it how many nodes the segments actually have.
+    mlcs: List[float] = field(default_factory=list)
     #: Writer-resolved.
     func_id: int = 0
     fscale: float = 1.0

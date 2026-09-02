@@ -208,6 +208,53 @@ def _min_element_edge(state: ConversionState) -> float:
     return best
 
 
+def _surface_load_concentration(state: ConversionState) -> float:
+    """How many loaded faces one node carries per element that feeds it.
+
+    The thermal sources split a segment's heat over the segment's own nodes
+    (``convec.F:152``, ``radiation.F:155``, ``fixflux.F:167``) while the node's
+    capacity ``MCP`` is the sum over the elements that touch it
+    (``cinmas.F``). For a node touched by ``s`` loaded segments and ``e``
+    elements of edge ``Lc``, one explicit step moves it by
+
+        dT_step = (s · h·ΔT·dt·Lc²/4) / (e · rhoCp·Lc³/8) = 2·(s/e)·dt/tau·ΔT
+
+    with ``tau = rhoCp·Lc/h``. So ``r = max(s/e)`` is the factor by which a
+    node's real surface time constant is SHORTER than ``tau``, and it is a
+    property of the emitted deck, not an assumption:
+
+    * a thick mesh whose outer layer is loaded on one side gives ``r = 1``
+      (a face-interior node sees 4 loaded segments and 4 elements; a corner
+      node sees 1 and 1) — the case the guard was written for;
+    * a body ONE element thick with all six faces loaded gives ``r = 3``, and
+      its true lumped constant is ``rhoCp·(V/A)/h = tau/6``, which is exactly
+      ``tau/(2r)``.
+
+    Returns 1.0 when nothing can be counted, so the guard degrades to its
+    previous arithmetic rather than to a weaker one.
+    """
+    seg_count: Dict[int, int] = defaultdict(int)
+    for bc in state.thermal_boundaries:
+        if not bc.surf_id or not bc.segments:
+            continue
+        for seg in bc.segments:
+            for nid in set(seg):
+                seg_count[nid] += 1
+    if not seg_count:
+        return 1.0
+    elem_count: Dict[int, int] = defaultdict(int)
+    for cont in (state.solid_elems, state.shell_elems, state.tshell_elems):
+        for e in cont:
+            for nid in {x for x in e.nodes if x}:
+                elem_count[nid] += 1
+    best = 1.0
+    for nid, s in seg_count.items():
+        e = elem_count.get(nid, 0)
+        if e > 0:
+            best = max(best, s / e)
+    return best
+
+
 def _thermal_step_estimate(state: ConversionState) -> Optional[float]:
     """The conduction stability step ``/DT/THERM`` will pace the run with.
 
@@ -273,11 +320,22 @@ def _thermal_solve_active(state: ConversionState) -> bool:
     300): the EXPLICIT deck carries the far end 300 -> 399.731 -> 400.000 K
     over 84 111 cycles, while the same ``.k`` plus a
     ``*CONTROL_IMPLICIT_GENERAL`` runs 61 implicit cycles with the far end at
-    exactly 300.000 K at every state and ``HEAT STORED = 0.0000000`` — the
-    imposed nodes are reset (``resol.F:1802`` FIXTEMP is reached) and NOTHING
-    conducts. So a temperature channel on an implicit deck would be the flat
-    fringe this predicate exists to prevent, and ``_make_engine_thermal``
-    excludes the same two run types for the same reason.
+    exactly 300.000 K at every state and ``HEAT STORED = 0.0000000``.
+
+    The MECHANISM is not "the thermal routines are unreachable from the
+    implicit path" — they ARE reached: ``resol.F:1802/2994/3006/3025`` gate
+    FIXTEMP / CONVEC / RADIATION / FIXFLUX on ``GLOB_THERM%ITHERM_FE`` alone,
+    with no ``IMPL_S`` test, so the imposed nodes really are reset and the
+    source counters really do fill. What is dead is the accumulation:
+    ``resol.F:6547``, inside ``IF (IMPL_S == 1)``, is a ``GOTO 111`` to the
+    label at ``:7949``, which skips the ``IF (ILAG + IALE + IEULER /= 0)``
+    block opened at ``:6552`` — and the single ``CALL TEMPUR`` lives inside it
+    at ``:6736``. ``tempur.F:51-58`` is the whole integrator
+    (``TEMP += FTHE/MCP``) and the only writer of ``HEAT_STORED``, so on an
+    implicit cycle FTHE is filled and never spent. A temperature channel on an
+    implicit deck would therefore be the flat fringe this predicate exists to
+    prevent, and ``_make_engine_thermal`` excludes the same two run types for
+    the same reason.
     """
     if state.is_implicit or state.is_modal:
         return False
@@ -307,17 +365,30 @@ def _emit_heat_mat(mid: int, t0: float, rho0_cp: float, a_s: float, bs: float,
 
     **``AL``/``BL`` are the SECOND SEGMENT of a piecewise-linear k(T), not a
     liquid-phase afterthought, and they must never be left at 0 beside a real
-    ``T1``.** ``dttherm.F90:102-106`` (shells) and ``mqviscb.F:651-656``
+    ``T1``.** ``dttherm.F90:102-106`` (shells) and ``mqviscb.F:653-657``
     (solids) both read
 
         if (tempel(i) < tmelt) then ; akk = as + bs*tempel(i)
         else                        ; akk = al + bl*tempel(i)
 
-    so with ``AL = BL = 0`` every node above ``T1`` gets ``k = 0`` EXACTLY.
-    That was harmless while no conduction source existed; with a /CONVEC,
-    /RADIATION or /IMPFLUX on the deck it silently insulates the hot region.
-    The caller mirrors ``AS``/``BS`` into ``AL``/``BL`` unless the deck states
-    a second segment of its own.
+    **What ``AL = BL = 0`` breaks is NOT the conduction.** Those two are the
+    thermal TIME-STEP routines (``dttherm.F90``'s six callers all gate on
+    ``JTHE /= 0 .AND. GLOB_THERM%IDT_THERM == 1``; ``mqviscb.F:644`` is
+    ``JTHE < 0 .AND. IDT_THERM == 1``), and every Lagrangian conduction
+    operator reads ``AS``/``BS`` (``PM(75)``/``PM(76)``) unconditionally and
+    never looks at ``AL``/``BL``/``TMELT`` — ``stherm.F:106``, ``s4therm.F:84``,
+    ``s4therm-itet1.F:135``, ``s8etherm.F:110``, ``s10therm.F:81``,
+    ``s20therm.F:79``, ``sctherm.F:94``, ``s6ctherm.F:95``, ``thermc.F:69``,
+    ``therm3c.F:72``, ``cbatherm.F:67``, ``pforc3.F:382``. So a zero second
+    segment costs the ``/DT/THERM`` step (which becomes
+    ``DTFACTHERM*0.5*Lc^2*rhoCp/1e-20`` above ``T1`` and jumps the whole run in
+    one step) and the element conductance ``CONDE`` the same loop computes —
+    not the heat flow. It is still wrong to leave at 0, which is why the caller
+    mirrors ``AS``/``BS`` into ``AL``/``BL`` unless the deck states a second
+    segment of its own; the mirror ALSO keeps the ALE (``atherm.F:137``), SPH
+    (``forintp.F:336/350``), ``/INTER/TYPE9`` (``i9grd2.F:140``,
+    ``i9grd3.F:164``) and rigid-wall (``rgwat2.F:176``, ``rgwat3.F:213``)
+    readers of ``PM(77)``/``PM(78)`` seeing the same line.
     """
     return [
         f"/HEAT/MAT/{mid}",
@@ -752,7 +823,7 @@ _CT_SOLVER_DROPS = (
     ("ptype", "PTYPE",
      "the problem type (0 linear / 1 properties at the gauss-point "
      "temperature / 2 at the element average). Radioss always evaluates k(T) "
-     "from the ELEMENT temperature (stherm.F:104 KC = (AS + BS*TEMPEL)*VOL, "
+     "from the ELEMENT temperature (stherm.F:106 KC = (AS + BS*TEMPEL)*VOL, "
      "and the same line in s4therm.F:84, s10therm.F:81, cbatherm.F:67), i.e. "
      "it behaves as PTYPE = 2 unconditionally"),
     ("solver", "SOLVER",
@@ -1617,9 +1688,9 @@ def _warn_thermal_generation_drops(state: ConversionState, tm, mid: int) -> None
         "heat-generation slot and no latent-heat slot. Its T1/AL/BL cells are "
         "not one either: they are a second conductivity segment that ONLY the "
         "thermal time-step routines read (dttherm.F90:102-106 and "
-        "mqviscb.F:651-656 select AS + BS*T below T1 and AL + BL*T above, both "
+        "mqviscb.F:653-657 select AS + BS*T below T1 and AL + BL*T above, both "
         "gated on IDT_THERM == 1), while the conduction itself is AS + BS*T "
-        "everywhere (stherm.F:104).")
+        "everywhere (stherm.F:106).")
 
 
 def _least_squares_line(pts: List[Tuple[float, float]]) -> Tuple[float, float]:
@@ -1646,8 +1717,9 @@ def _least_squares_line(pts: List[Tuple[float, float]]) -> Tuple[float, float]:
 
 #: The largest ratio ``max(C_i)/min(C_i)`` a ``*MAT_THERMAL_ISOTROPIC_TD``
 #: table may show and still be represented by /HEAT/MAT's ONE ``RHO0_CP``
-#: cell. Conductivity gets two linear segments (``dttherm.F90:102-106``), so a
-#: real k(T) fits well; the volumetric capacity gets a single constant with no
+#: cell. Conductivity gets a LINE — ``AS + BS*T_element``, which every
+#: conduction operator reads (see ``_fit_td_conductivity``) — so a real k(T)
+#: fits well; the volumetric capacity gets a single constant with no
 #: temperature dependence available at ANY cfg version, so a table that varies
 #: by more than this is not a material /HEAT/MAT can carry and the record is
 #: refused by name instead of averaged into a different material.
@@ -1714,17 +1786,29 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
     states its own worst deviation so the reader can judge it.
 
     **Why ONE line and not the two segments the T1/AL/BL cells suggest.**
-    ``AL``/``BL`` never enter the Lagrangian conduction. Every conduction
-    operator reads ``AS``/``BS`` (``PM(75)``/``PM(76)``) and nothing else —
-    ``stherm.F:82/104``, ``s8etherm.F:86``, ``s4therm.F:67/84``,
-    ``s10therm.F:61/81``, ``cbatherm.F:61/67`` for shells, ``pforc3.F:379``
-    for beams — all of them ``KC = (AS + BS*T_element)``. The two-segment
-    ``if (tempel < tmelt) … else`` form lives ONLY in the thermal TIME-STEP
-    routines (``dttherm.F90:102-106``, ``mqviscb.F:651-656``), and both of
-    those are gated on ``GLOB_THERM%IDT_THERM == 1``, i.e. they run only when
-    the engine deck carries ``/DT/THERM``. Fitting two segments would therefore
-    put half the deck's table into cells the heat flow never reads, and above
+    ``AL``/``BL`` never enter the Lagrangian conduction. TWELVE conduction
+    operators were enumerated and every one reads ``AS``/``BS``
+    (``PM(75)``/``PM(76)``) and nothing else — solids ``stherm.F:82-83/106``,
+    ``s8etherm.F:86/110``, ``s4therm.F:67/84``, ``s4therm-itet1.F:118/135``,
+    ``s10therm.F:61/81``, ``s20therm.F:60/79``; thick shells ``sctherm.F:94``
+    and ``s6ctherm.F:95``; shells ``thermc.F:62/69``, ``therm3c.F:62/72`` and
+    ``cbatherm.F:61/67``; beams ``pforc3.F:379-380/382`` — all of them
+    ``KC = (AS + BS*T_element)``. Fitting two segments would therefore put
+    half the deck's table into cells the heat flow never reads, and above
     ``T1`` the run would silently extrapolate the LOWER line anyway.
+
+    The two-segment ``if (tempel < tmelt) … else`` form is NOT confined to the
+    thermal time-step routines, which an earlier draft claimed. It also lives
+    in the ALE conduction (``atherm.F:137``), the SPH conductivity
+    (``forintp.F:336/350``), ``/INTER/TYPE9`` thermal contact
+    (``i9grd2.F:140``, ``i9grd3.F:164``) and rigid-wall heat exchange
+    (``rgwat2.F:176``, ``rgwat3.F:213``) — none of which this converter emits —
+    and the time-step readers themselves are not uniformly ``IDT_THERM``-gated:
+    ``mqviscb.F:282``/``:592``, ``mqvisc8.F:170`` and ``mdtsph.F:142`` gate on
+    ``JTHE > 0`` alone (the ALE/Euler framework), while ``mqviscb.F:644`` and
+    ``dttherm.F90``'s six callers do carry ``IDT_THERM == 1``. The AS→AL
+    mirror below makes every one of those readers see the identical line, so
+    the policy is unaffected either way.
 
     So one least-squares line is fitted over the whole tabulated range and
     MIRRORED into ``AL``/``BL``. The mirror is not cosmetic: with
@@ -1774,7 +1858,7 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
             "function-id form). Collapsing that to a mean would be a "
             "DIFFERENT material, so the thermal properties are DROPPED. "
             "(The conductivity would have converted: /HEAT/MAT's conduction is "
-            "AS + BS*T_element — stherm.F:104 and its siblings — so a "
+            "AS + BS*T_element — stherm.F:106 and its siblings — so a "
             "least-squares line through the table carries it.) State "
             "*MAT_THERMAL_ISOTROPIC with a representative HC if the capacity "
             "variation is not essential.")
@@ -1803,14 +1887,19 @@ def _fit_td_conductivity(state: ConversionState, tm, mid: int,
            "overwrites)" if t1 else " (blank; hm_read_therm.F:238 turns that "
            "into 1e20)")
         + ". The T1/AL/BL cells are deliberately NOT used as a second fit "
-        "segment: every conduction operator reads AS + BS*T_element and "
-        "nothing else (stherm.F:104, s4therm.F:84, s10therm.F:81, "
-        "cbatherm.F:67, pforc3.F:379), and the two-segment 'below/above T1' "
-        "form exists only in the thermal TIME-STEP routines "
-        "(dttherm.F90:102-106, mqviscb.F:651-656), both gated on "
-        "IDT_THERM == 1, i.e. only under /DT/THERM. The mirror keeps that step "
-        "and the interface conductance CONDE sane above T1 — AL = BL = 0 there "
-        "would give dt = 0.5*Lc^2*rhoCp/1e-20."
+        "segment: NO Lagrangian solid, thick-shell, shell or beam conduction "
+        "operator reads AL/BL — twelve of them were enumerated and every one "
+        "computes AS + BS*T_element and nothing else (stherm.F:106, "
+        "s8etherm.F:110, s4therm.F:84, s4therm-itet1.F:135, s10therm.F:81, "
+        "s20therm.F:79, sctherm.F:94, s6ctherm.F:95, thermc.F:69, "
+        "therm3c.F:72, cbatherm.F:67, pforc3.F:382). The 'below/above T1' "
+        "branch lives in the thermal TIME-STEP routines (dttherm.F90:102-106, "
+        "mqviscb.F:653-657) and in the ALE / SPH / TYPE9 / rigid-wall paths "
+        "(atherm.F:137, forintp.F:336, i9grd2.F:140, rgwat2.F:176), none of "
+        "which this converter emits. The mirror keeps the /DT/THERM step and "
+        "the interface conductance CONDE sane above T1 — AL = BL = 0 there "
+        "would give dt = 0.5*Lc^2*rhoCp/1e-20 — and makes every AL/BL reader "
+        "see the same line as every AS/BS reader."
         + f" Maximum deviation {dev:.6g} = {100.0 * dev / kmax:.3g}% of the "
         f"largest tabulated value. RHO0_CP = {rho_cp:.6g} = rho {rho:g} x the "
         f"MEAN specific heat {cp_mean:.6g} (stated range {min(cps):g} .. "
@@ -2501,6 +2590,17 @@ def _resolve_thermal_boundaries(state: ConversionState) -> None:
         return
     if not state.heat_mat_cards:
         kinds = sorted({_BC_CARD[b.kind] for b in state.thermal_boundaries})
+        # A *PART TMID naming a *MAT_THERMAL_* spelling k2rad does not parse
+        # never reaches _resolve_heat_materials' `wanted` set at all (it is
+        # built from the parts whose TMID DOES resolve), so that function's own
+        # "unparsed" arm cannot fire on this shape. Without this screen the
+        # message below prescribed exactly what the deck already has — the
+        # #125 class. Measured: a deck whose *PART TMID names a
+        # *MAT_THERMAL_ORTHOTROPIC_TD beside a *BOUNDARY_CONVECTION_SET.
+        unparsed = sorted({
+            part.tmid for pid, part in state.parts.items()
+            if getattr(part, "tmid", 0)
+            and _thermal_material_for_part(state, pid) is None})
         state.warn(
             "The deck states a thermal boundary condition "
             "(*BOUNDARY_FLUX / _CONVECTION / _RADIATION) but NO material in "
@@ -2510,9 +2610,16 @@ def _resolve_thermal_boundaries(state: ConversionState) -> None:
             "turns that into GLOB_THERM%ITHERM_FE, and resol.F:2994/3006/3025 "
             "gate CONVEC, RADIATION and FIXFLUX on it. "
             + ", ".join(kinds) + " on such a deck would be accepted at 0 "
-            "starter errors and do NOTHING, so none is emitted. Add "
-            "*MAT_THERMAL_ISOTROPIC + *PART TMID (which also gives the heat "
-            "somewhere to conduct to) and the cards appear.")
+            "starter errors and do NOTHING, so none is emitted. "
+            + (f"*PART TMID {unparsed} names a thermal material whose "
+               "*MAT_THERMAL_* spelling k2rad does not parse (it is in the "
+               "skipped-keyword list), so the binding the deck states is "
+               "there but its properties never arrive — state the material "
+               "as *MAT_THERMAL_ISOTROPIC or *MAT_THERMAL_ISOTROPIC_TD, which "
+               "this converter reads."
+               if unparsed else
+               "Add *MAT_THERMAL_ISOTROPIC + *PART TMID (which also gives the "
+               "heat somewhere to conduct to) and the cards appear."))
         state.thermal_boundaries.clear()
         return
     conduction = any(c[2] or c[3] for c in state.heat_mat_cards.values())
@@ -2572,26 +2679,57 @@ def _resolve_flux(state: ConversionState, bc) -> bool:
     carries ``-MLC``. Shipping this unflipped would invert every flux boundary
     condition in the deck at 0 starter diagnostics.
 
-    ``MLC1..MLC4`` are PER-NODE multipliers. ``/IMPFLUX`` has one ``Fscale_y``
-    and splits the segment's heat evenly (``fixflux.F:167``: ``FLUX =
+    ``MLC1..MLC4`` are PER-NODE multipliers — Vol I R17 p.5-48 defines each one
+    as *"curve multiplier at node Nk"*. ``/IMPFLUX`` has one ``Fscale_y`` and
+    splits the segment's heat evenly (``fixflux.F:167``: ``FLUX =
     FOURTH*FLUX``), so unequal weights are inexpressible and the record is
     refused rather than averaged into a load the deck never states.
+
+    **Only the cells that HAVE a node are compared.** On a triangular segment
+    — ``N1 N2 N3`` with a trailing blank, or the ``N4 = N3`` spelling of
+    p.43-63 — there is no node N4, so MLC4 is blank by construction and takes
+    p.5-47's Card 2 default of ``0.``. Comparing it against three stated
+    multipliers refused a fully convertible boundary and told the reader to
+    "give all four the same multiplier" on a segment this converter itself had
+    already read as three-noded (the #125 class). ``bc.segments`` is resolved
+    before this runs, so the node count is known: a set that MIXES quads and
+    triangles compares all four, because its quads do have an N4.
 
     ``LCID < 0`` makes the flux a function of TEMPERATURE; ``/IMPFLUX``'s
     ``fct_IDT`` is evaluated at ``(t - TSTART)/ASCALE`` and nothing else
     (``fixflux.F:140``), so that form is refused too.
     """
-    if bc.mlc_spread > 1e-12 * max(1.0, abs(bc.mult)):
+    mlcs = list(bc.mlcs) or [bc.mult]
+    # The widest segment decides: three on an all-triangle card, four as soon
+    # as one quad is in the set.
+    n = max(len(s) for s in bc.segments) if bc.segments else len(mlcs)
+    n = min(max(n, 1), len(mlcs))
+    used = mlcs[:n]
+    spread = max(used) - min(used)
+    if spread > 1e-12 * max(1.0, abs(bc.mult)):
         state.warn(
-            f"{bc.source}: MLC1..MLC4 are PER-NODE flux multipliers and they "
-            f"differ (spread {bc.mlc_spread:g} about MLC1 = {bc.mult:g}). /IMPFLUX "
+            f"{bc.source}: MLC1..MLC{n} are PER-NODE flux multipliers and they "
+            f"differ (spread {spread:g} about MLC1 = {bc.mult:g}). /IMPFLUX "
             "carries ONE Fscale_y and splits the segment's heat EVENLY over "
-            "its nodes (fixflux.F:167-172, FLUX = FOURTH*FLUX for a quad and "
-            "THIRD for a triangle), so a per-node weighting cannot be "
-            "expressed. Averaging them would state a load the deck does not — "
-            "the record is DROPPED. Split the segment, or give all four the "
-            "same multiplier.")
+            "its nodes (fixflux.F:167-172, FLUX = FOURTH*FLUX), so a per-node "
+            "weighting cannot be expressed. Averaging them would state a load "
+            "the deck does not — the record is DROPPED. Split the segment, or "
+            f"give all {n} the same multiplier."
+            + ("" if n == len(mlcs) else
+               f" (Only MLC1..MLC{n} are read: the widest segment on this "
+               f"record has {n} nodes, and MLCk is 'the curve multiplier at "
+               "node Nk', Vol I R17 p.5-48.)"))
         return False
+    ignored = [f"MLC{j + 1}={v:g}"
+               for j, v in enumerate(mlcs[n:], start=n) if v != 0.0]
+    if ignored:
+        state.warn(
+            f"{bc.source}: " + ", ".join(ignored) + " names a node the "
+            f"segment(s) do not have — the widest segment on this record has "
+            f"{n} nodes, and MLCk is 'the curve multiplier at node Nk' "
+            "(Vol I R17 p.5-48). The cell is IGNORED (it is not compared "
+            "against the others and does not scale the emitted /IMPFLUX). "
+            "Check the segment's N4 if a four-node face was meant.")
     if bc.lcid < 0:
         state.warn(
             f"{bc.source}: LCID={bc.lcid} < 0 makes the flux a function of "
@@ -2840,7 +2978,26 @@ def _resolve_radiation(state: ConversionState, bc) -> bool:
                 "/RADIATION's funct_ID is MANDATORY (ERROR 120), so the "
                 "record is dropped.")
             return False
-        mult = bc.fscale if bc.fscale else 1.0
+        if bc.fscale == 0.0:
+            # The SAME named substitution _resolve_convec makes, on the same
+            # grounds: it used to happen silently here, so a radiation deck's
+            # reader never learned the blank cell was resolved to 1.0 rather
+            # than to the literal 0 the card's printed default states.
+            state.warn(
+                f"{bc.source}: TLCID={bc.lcid} names a curve but TMULT is "
+                "blank/zero. TMULT is the 'curve multiplier for T_inf' with a "
+                "printed default of 0. (Vol I R17 p.5-123 for the _SET "
+                "spelling, p.5-118 for _SEGMENT), which literally read would "
+                "impose T_inf = 0. It is resolved to FSCALE = 1.0 here: "
+                "writing the literal zero would rely on "
+                "hm_read_radiation.F:137 ('IF (FCY == ZERO) FCY = FCY_DIM') "
+                "turning it into 1.0 anyway, i.e. a cell meaning the opposite "
+                "of what it does. State TMULT on the .k card if a different "
+                "scale was meant. NOTE that T_inf enters radiation.F:155 to "
+                "the FOURTH POWER, so a wrong scale here is not a linear "
+                "error.")
+            bc.fscale = 1.0
+        mult = bc.fscale
         # FSCALE is BAKED into a copy of the curve rather than written to the
         # card — see _bc_scaled_function for the measured /PARITH/ON defect it
         # dodges. A multiplier of exactly 1.0 needs no copy: writing
@@ -3392,14 +3549,26 @@ def _warn_expansion_consumers(state: ConversionState) -> None:
             "far end 300 -> 399.731 -> 400.000 K, while the same .k plus a "
             "*CONTROL_IMPLICIT_GENERAL leaves it at exactly 300.000 K at every "
             "state, with HEAT STORED = 0.0000000, at 0 ERROR / 0 WARNING / "
-            "NORMAL TERMINATION. Only the imposed nodes move, because "
-            "resol.F:1802 FIXTEMP is reached; nothing conducts and TEMPUR "
-            "never updates a node. The /IMPTEMP, /CONVEC, /RADIATION and "
-            "/IMPFLUX cards are emitted and accepted, and the field they "
-            "describe will not develop. The /ANIM/NODA/TEMP and /TH ... TEMP "
-            "channels are left OUT for that reason (they would be flat), and "
-            "so are the engine cards /DT/THERM and /THERM. Run the thermal "
-            "phase explicitly.")
+            "NORMAL TERMINATION. THE MECHANISM, read at source: the thermal "
+            "SOURCE routines are NOT skipped — resol.F:1802 (FIXTEMP), :2994 "
+            "(CONVEC), :3006 (RADIATION) and :3025 (FIXFLUX) are all gated on "
+            "GLOB_THERM%ITHERM_FE alone, with no IMPL_S test, so they run and "
+            "fill FTHE and their own counters normally. What is dead is the "
+            "ACCUMULATION: resol.F:6547, inside 'IF (IMPL_S == 1)', is a "
+            "'GOTO 111' that jumps to the label at resol.F:7949, skipping the "
+            "'IF (ILAG + IALE + IEULER /= 0)' block that opens at :6552 — and "
+            "TEMPUR, the ONLY caller-site of the routine that does "
+            "TEMP += FTHE/MCP and accumulates HEAT_STORED (tempur.F:51-58), "
+            "sits inside it at :6736. SO READ THE .out PAST THE FIRST LINE: "
+            "the '** THERMAL ANALYSIS **' block shows a perfectly plausible "
+            "IMPOSED FLUX_DENSITY / CONVECTION / RADIATION HEAT beside a "
+            "HEAT STORED of exactly 0.0000000, and only that last number "
+            "reveals that nothing was integrated. The /IMPTEMP, /CONVEC, "
+            "/RADIATION and /IMPFLUX cards are emitted and accepted, and the "
+            "field they describe will not develop. The /ANIM/NODA/TEMP and "
+            "/TH ... TEMP channels are left OUT for that reason (they would be "
+            "flat), and so are the engine cards /DT/THERM and /THERM. Run the "
+            "thermal phase explicitly.")
     if not state.therm_stress_cards:
         return
     from .mesh import _target_mat_law

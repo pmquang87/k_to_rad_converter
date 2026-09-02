@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, NamedTuple, Optional, Set
 from ..state import ConversionState
 from .common import (
-    HDR, _f, _i, _spotweld_beam_pids,
+    HDR, _ams_is_emitted, _f, _i, _spotweld_beam_pids,
 )
 from .contacts import _select_parent_interface
 # The _LOCAL route synthesizes a frozen /SKEW/FIX from a co-rotating
@@ -100,10 +100,12 @@ def _make_ams(state: ConversionState) -> List[str]:
     parts; the solver auto-skips rigid bodies ("NO AMS EXPANSION OVERALL THE
     RBODY"). Only for a mass-scaled explicit deck (*CONTROL_TIMESTEP DT2MS<0);
     implicit/modal decks have no CFL step to scale. --ams forces element-free
-    rigid masters (see convert()) so this never trips AMS ERROR 1066."""
-    ts = state.ctrl_timestep
-    if (not state.options.ams or ts is None or ts.dt2ms >= 0.0
-            or state.is_implicit or state.is_modal):
+    rigid masters (see convert()) so this never trips AMS ERROR 1066.
+
+    The gate is _ams_is_emitted, the ONE predicate the /DT/AMS emitter and the
+    /DT/THERM refusal also use — see its docstring for why "--ams was asked
+    for" is not the same question as "does this deck carry AMS"."""
+    if not _ams_is_emitted(state):
         return []
     return ["/AMS", "#grpart_ID", _i(0), HDR]
 

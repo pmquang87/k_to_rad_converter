@@ -51,10 +51,33 @@ __all__ = [
     "_seatbelt_mat_law",
     "_seatbelt_part_ids",
     "_seatbelt_2d_part_ids",
+    "_ams_is_emitted",
 ]
 
 
 HDR = "#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|"
+
+
+def _ams_is_emitted(state: ConversionState) -> bool:
+    """Will this deck actually carry ``/DT/AMS`` (and the starter ``/AMS``)?
+
+    ``--ams`` is a REQUEST, not an outcome: ``_make_engine_timestep`` writes
+    ``/DT/AMS`` only for a mass-scaled explicit deck (``*CONTROL_TIMESTEP``
+    present with ``DT2MS < 0``), and ``_make_ams`` gates the starter card on
+    the identical predicate. Anything that asks "is AMS on this deck?" — the
+    ``/DT/THERM`` refusal above all, since ``freform.F:1327`` refuses the pair
+    on ``IDTMINS /= 0`` and IDTMINS comes from the ``/DT/AMS`` card — must ask
+    THIS rather than ``state.options.ams``. MEASURED before the fix: a SOLN=1
+    deck with no ``*CONTROL_TIMESTEP``, converted with ``--ams``, carried
+    NEITHER ``/DT/AMS`` NOR ``/AMS`` and still lost its ``/DT/THERM``, under a
+    message saying "/DT/AMS is kept" — the #130 class, a statement of what the
+    deck will emit that does not mirror the emitter's own drop conditions.
+
+    Non-mutating on purpose: it is called from a screen and from the emitter.
+    """
+    ts = state.ctrl_timestep
+    return bool(state.options.ams and ts is not None and ts.dt2ms < 0.0
+                and not state.is_implicit and not state.is_modal)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
