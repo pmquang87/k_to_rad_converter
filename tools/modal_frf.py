@@ -68,7 +68,6 @@ from typing import List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from k2rad.state import ConversionState                     # noqa: E402,F401
 from modal_common import (                                  # noqa: E402
     ModeSet, _HAVE_NUMPY, build_mesh, default_output_stem,
     freq_scale_from_args, load_modes, parse_deck, shapes_on_mesh,
