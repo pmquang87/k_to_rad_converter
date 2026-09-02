@@ -65,7 +65,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import sqrt
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (Any, Dict, Iterable, List, Optional, Sequence, Set,
+                    Tuple)
 
 from .state import ConversionState
 # The validated TET10 mid-edge map (mid_local_index, cornerA_local, cornerB_local)
@@ -80,13 +81,21 @@ from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 
 # ── Optional fast-proximity backend (numpy + scipy) ──────────────────────────
 # Kept optional so `import k2rad` and a default conversion need no third party.
+#
+# The two names are DECLARED `Any` before the try so the module type-checks the
+# same way with and without numpy installed. Binding them inside the `try` made
+# them a Module in a dev venv (one `assignment` finding on the `= None` below)
+# and `Any | None` in a bare one (18 `union-attr` findings on every later use) —
+# a 19-finding gap between a contributor's venv and the CI typecheck job.
+_np: Any = None
+_cKDTree: Any = None
 try:                                                # pragma: no cover - env dependent
-    import numpy as _np
-    from scipy.spatial import cKDTree as _cKDTree
+    import numpy as _numpy_mod
+    from scipy.spatial import cKDTree as _ckdtree_cls
+    _np = _numpy_mod
+    _cKDTree = _ckdtree_cls
     _HAVE_FAST_PROXIMITY = True
 except Exception:                                   # pragma: no cover - env dependent
-    _np = None
-    _cKDTree = None
     _HAVE_FAST_PROXIMITY = False
 
 
@@ -552,9 +561,14 @@ def _segment_triangles(state: ConversionState, segments: Iterable[List[int]]
         nn = [n for n in seg if n > 0]
         if len(nn) < 3:
             continue
-        idx = [_vidx(n) for n in nn[:4]]
-        if any(i is None for i in idx):
+        # _vidx has a SIDE EFFECT (it appends to `verts` and fills `idmap`), so
+        # every node must still be visited even when an earlier one is
+        # unresolvable — do NOT rewrite this as a short-circuiting loop: `verts`
+        # feeds the cKDTree whose minimum sets the computed Gapmin.
+        raw_idx = [_vidx(n) for n in nn[:4]]
+        if any(i is None for i in raw_idx):
             continue
+        idx = [i for i in raw_idx if i is not None]
         faces.append((idx[0], idx[1], idx[2]))
         if len(idx) == 4:
             faces.append((idx[0], idx[2], idx[3]))
