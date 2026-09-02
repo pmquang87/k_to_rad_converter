@@ -2403,6 +2403,66 @@ plate
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+class TestTwoDBeltEdgsetIsRead(unittest.TestCase):
+    """*SECTION_SHELL card 2 field 8 (cols 71-80) is EDGSET, the node set whose
+    first two nodes give a 2D belt its flow direction.
+
+    ``handle_section_shell`` reads card 2 but consumed only ``f2[0]`` (T1), and
+    ``SectionShell`` had no field for the cell, so the 2D-belt writer's
+    ``getattr(sec, "nsid", 0)`` was unconditionally 0 and the warning under it
+    was unreachable — while the same module tells the reader two screens later
+    to "state the direction with an EDGSET on the *SECTION_SHELL". A diagnostic
+    that cannot reach the deck it describes (the #122/#125 class)."""
+
+    #: card 2 = T1 T2 T3 T4 NLOC MAREA IDOF EDGSET, eight w10 cells.
+    _CARD2 = "       1.2       1.2       1.2       1.2"
+    _CARD2_EDGSET = _CARD2 + "         0       0.0         0       555"
+
+    def _deck_with(self, card2: str) -> str:
+        return _deck(
+            _SHELL_PART.replace(self._CARD2, card2),
+            _mat(kw="MAT_SEATBELT_2D"),
+            "*ELEMENT_SEATBELT\n" + _belt_card(31, 800, 20, 21, 0, 0.0, 22, 23),
+            "*SET_NODE_LIST\n       555\n        20        21\n")
+
+    def test_a_stated_edgset_is_reported_by_id(self):
+        r, _s, _e = _convert(self._deck_with(self._CARD2_EDGSET))
+        hits = _warns(r, "EDGSET")
+        self.assertEqual(len(hits), 1, r.warnings)
+        # The id must be the one on the card, not a placeholder.
+        self.assertIn("EDGSET (555)", hits[0])
+        self.assertIn("Iskew 0", hits[0])
+        # The deck still converts fully — the warning is the only change.
+        self.assertEqual(r.skipped_keywords, [])
+
+    def test_no_edgset_is_not_reported(self):
+        """The negative control: the four-cell card 2 every other test in this
+        module uses must stay silent, or the warning fires on every 2D belt."""
+        r, _s, _e = _convert(self._deck_with(self._CARD2))
+        self.assertEqual(_warns(r, "EDGSET"), [])
+
+    def _parsed_section(self, card2: str):
+        from k2rad.handlers import dispatch
+        from k2rad.parser import parse_k_file
+        from k2rad.state import ConversionState
+        tmp = tempfile.TemporaryDirectory()
+        path = os.path.join(tmp.name, "d.k")
+        with open(path, "w") as fh:
+            fh.write(self._deck_with(card2))
+        state = ConversionState()
+        for block in parse_k_file(path):
+            dispatch(block, state)
+        tmp.cleanup()
+        return state.sec_shells[800]
+
+    def test_the_section_carries_the_cell(self):
+        """Read back on the state, not only through the warning: the parsed
+        field is what makes the warning reachable."""
+        self.assertEqual(self._parsed_section(self._CARD2_EDGSET).nsid, 555)
+        self.assertEqual(self._parsed_section(self._CARD2).nsid, 0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 class TestTwoDBeltDirection(unittest.TestCase):
     """The starter follows the (n1,n2)/(n4,n3) edges to build the 1D strands,
     so the local node order has to run ALONG the belt. Rotating it one place

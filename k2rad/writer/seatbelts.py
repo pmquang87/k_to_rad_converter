@@ -2024,7 +2024,7 @@ def _emit_seatbelt_2d_props(state: ConversionState) -> List[str]:
             "(hm_convert_2d_elements_seatbelt.F), generating its own /PART, "
             "/PROP/TYPE23 and /MAT/LAW114 — leave id headroom above the "
             "converted deck's.")
-        if sec is not None and getattr(sec, "nsid", 0):
+        if sec is not None and sec.nsid:
             state.warn(
                 f"2D seatbelt part {pid}: *SECTION_SHELL {secid} names an "
                 f"EDGSET ({sec.nsid}), the node set whose first two nodes give "

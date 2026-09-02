@@ -890,6 +890,11 @@ class SectionShell:
     # as SCALAR_OR_OBJECT(Sect_Option, LSD_QR, LSD_IRID) (SectShll.cfg:699) and
     # picks the object branch on the sign alone (meci_data_reader.cpp:6847).
     irid: int = 0
+    # *SECTION_SHELL card 2 field 8 (cols 71-80) EDGSET: the *SET_NODE whose
+    # first two nodes give a 2D seatbelt its flow direction. Read only by the
+    # 2D-belt property writer (writer/seatbelts.py), which reports it as
+    # dropped; 0 = none.
+    nsid: int = 0
 
 
 @dataclass

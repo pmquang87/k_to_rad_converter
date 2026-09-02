@@ -1856,6 +1856,9 @@ def handle_section_shell(block: Block, state: ConversionState) -> None:
             nip = abs(nip)
         t1 = to_float(f2[0]) if f2 else 0.0
         sec = SectionShell(secid, title, elform, nip, t1)
+        # Card 2 field 8 (cols 71-80): EDGSET, the 2D-seatbelt flow-direction
+        # node set. Only writer/seatbelts.py reads it, to report it as dropped.
+        sec.nsid = to_int(f2[7]) if len(f2) > 7 else 0
         # QR/IRID (field 6, cols 51-60): a NEGATIVE value makes |QR| the id of a
         # user *INTEGRATION_SHELL rule (Manual Vol I R17 p.29-1). A positive or
         # zero value is the built-in quadrature rule and carries no reference.
