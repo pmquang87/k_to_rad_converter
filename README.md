@@ -4850,6 +4850,14 @@ The test suite uses only the standard library (no pytest required):
 python -m unittest discover -s tests
 ```
 
+Lint and type checks — both are blocking in CI:
+
+```bash
+pip install ruff "mypy==2.3.1"
+ruff check .
+mypy k2rad
+```
+
 ---
 
 ## Known limitations

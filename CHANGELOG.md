@@ -188,7 +188,146 @@ Prior history (before this changelog was introduced) is summarized in the
     therefore reported per roster rather than as one number. All PHYSICS
     validation is synthetic, as with the viscoelastic and adhesive batches.
 
+### Changed
+
+- **The `typecheck` CI job is now BLOCKING: the mypy baseline was burned down
+  from 194 findings to 0, and `mypy k2rad` must stay clean.** The job comment
+  said *"advisory until the ConversionState dataclass refactor lands"* and
+  `pyproject.toml` said *"promote to blocking once the remaining findings are
+  burned down"*; this is that promotion. **Behaviour-neutral throughout** —
+  every one of the 194 was triaged noise-vs-defect first, and the single latent
+  defect it surfaced ships as its own fix below.
+
+  - **194 → 0, in 21 files.** Baseline re-measured on master 6060946 with
+    mypy 2.3.1 under the repo's own `[tool.mypy]`: 68 `attr-defined`, 46
+    `union-attr`, 45 `arg-type`, 14 `index`, 9 `var-annotated`, 7 `assignment`,
+    3 `misc`, 2 `return-value`. Eight cross-cutting root causes covered 178 of
+    them, so the fixes are structural rather than 194 local patches: a bool flag
+    recording a None-ness that the None is then filled in under (36 findings,
+    24 of them one `SectionBeam | None` in `writer/dbeam.py`); a container
+    annotated `object` to avoid an import (61); an `any(... is None ...)` guard
+    a narrower cannot see through (24); an empty container typed by its first
+    `append` (12); a bare `{}` / `[]` (12); `tuple(genexp)` into a fixed arity
+    (9); a dead `to_int(<cell> or 0)` (8); two dataclasses joined to `object` by
+    `itertools.chain` (4).
+  - **`assert x is not None` appears NOWHERE in the burn-down.** An assert turns
+    a today-impossible path into an `AssertionError`, which is a behaviour
+    change; every None site is instead a narrowing rewrite that preserves the
+    control flow, or a provably-redundant conjunct with the caller guarantee
+    quoted beside it (e.g. `props` is only ever
+    `_resolve_inertia(...) if inr is not None else None`).
+  - **The `gapmin.py` optional-import block is the fix that lets the job be
+    blocking at all.** The CI job installs mypy and nothing else while a
+    contributor's venv has numpy and scipy, and the two environments disagreed
+    by **17 findings** on master (194 dev / 211 bare) — all of them this one
+    block, where `_np` is a `Module` with numpy present and `Any | None`
+    without. Declaring both names `Any` before the `try` converges them;
+    verified 0 findings with AND without site-packages.
+  - **The ignore budget went 3 → 1.** `parser.py`'s ignore had ROTTED —
+    `allow_redefinition` made the redefinition legal, so it covered nothing —
+    and the two `node_set_attrs` ignores were the fixed-arity pattern suppressed
+    instead of fixed. The one ignore that remains is `cli.py`'s duck-typed
+    `stream.reconfigure` probe, error-code-scoped, where the `except
+    AttributeError` arm below IS the "this stream has none" case. Three `cast`s
+    remain, each naming the producer guarantee (`_fixed_float_card` zero-pads to
+    exactly `n`) and the consumer that relies on it (`writer/inistate.py`
+    unpacks a layer eight ways).
+  - **`warn_unused_ignores` is now `true`** — it reported exactly one finding
+    (the rotted one above), and with a blocking gate it is what stops the next
+    ignore rotting silently. Nothing else is loosened or tightened:
+    `ignore_missing_imports`, `allow_redefinition` and `files` are unchanged.
+  - **`python_version` 3.9 → 3.10, because the old value was INERT.** mypy
+    2.3.1 refuses 3.9 — it prints *"Python 3.9 is not supported (must be 3.10 or
+    higher)"* to stderr and then checks at 3.10 anyway (proved with a `match`
+    statement, which passed clean under `python_version = "3.9"`). Findings are
+    identical either way. The project floor is still `>=3.9`; it is enforced by
+    `requires-python` and the 3.9 leg of the test matrix, **not** by the type
+    checker — so `typing.List` / `Optional[X]` spellings are a review-time
+    convention, and `CONTRIBUTING.md` now says so.
+  - **mypy is PINNED to 2.3.1 in the workflow**, the one place this repo departs
+    from its own unpinned-CI-tooling convention (ruff floats). An advisory check
+    that goes red on a new tool release costs nothing; a blocking one breaks
+    master on a rule that did not exist when the burn-down was measured. The
+    `dev` extra stays unpinned for local installs, and both comments say which
+    is which.
+  - **Consumption proof for the flip (#118 pattern).** The new job command was
+    run locally against three tree states: clean → `Success`, exit **0**; one
+    deliberate `Incompatible return value type` added on a backup-protected copy
+    → 1 error, exit **1**; restored → exit **0**. The gate can fail.
+  - **`ConversionState` hygiene the burn-down exposed.** Four fields were
+    annotated with a bare `set` (`= set[Any]`, defeating the typed contract at
+    every consumer) and are now `Set[int]`. `Airbag.hc_c` was an UNDECLARED
+    attribute created at runtime by two writer sites and read by a third — now
+    declared, no behaviour change. Ten write-only fields (five `*CONTROL_*`,
+    three `*DATABASE_*`, `rbody_grnods`, `muscle_spring_eids`) are NAMED as
+    such rather than deleted: the handler consumes the keyword, so removing the
+    store without deciding what the user is told would change behaviour.
+  - **The section comments were re-split.** 148 of the 352 fields (42 %) sat
+    under a rule that did not describe them — 77 of the 84 under
+    `# ── SPH particles ──` are materials, airbags or hourglass records. Nine
+    new rules split the two worst sections and two are retitled; no field moves.
+
+  - **The two-half sweep, halves stated separately (#129).** **933 decks**, each
+    converted twice — once at master 6060946 and once here, in separate
+    subprocesses, with the work dir derived from a hash of the deck path so both
+    sides agree and no deck is converted in place. **0 conversion errors, 0
+    timeouts, 0 incomplete pairs** (read before the mover count, #133).
+    Forty files were excluded and named: the Yaris and Camry `*INCLUDE` pullers
+    by name (8 files; a `getsize()` cap on a 10 KB root cannot see the 169 MB
+    tree it drags) and 32 more whose measured `*INCLUDE` tree exceeds 60 MB.
+
+    | half | compared | movers |
+    |---|---|---|
+    | **1** — the emitted `_0000.rad` + `_0001.rad`, by sha256 | 1 866 files | **0** |
+    | **2** — `state.warnings` + `skipped_keywords` + `recognized_not_emitted` | 933 records / 6 537 warnings | **0** |
+
+    Per roster, all zero: `C:\openradioss_run` 500 decks / 3 140 warnings,
+    `dynaexamples_r14_ton-mm-s` 351 / 2 737, repo `Ryan_Lee_Examples` 40 / 460,
+    `E:\foxcore_data` 29 / 131, repo `implicit_hr-anlenkung` 7 / 42, the five
+    golden fixtures 5 / 15, `ls-dyna_example` 1 / 12. The EDGSET fix below moves
+    no corpus deck — it needs a deck carrying BOTH a 2D belt and an EDGSET, and
+    the corpus has none.
+
+  - **This batch has no keyword footprint**, so every deck is a regression probe
+    and none is a feature carrier: the sweep is its strongest verification, and
+    the five golden fixtures are byte-identical. Suite 4689 → 4692 passed / 2
+    skipped / 1898 subtests — the only growth is the three cases pinning the
+    EDGSET fix. `ruff check .` clean.
+
+- **The state-grouping ROADMAP item is CLOSED as "not worth doing".** The idea
+  was `state.mesh.nodes` in place of `state.nodes`, listed alongside the mypy
+  burn-down as if the two were coupled. They are not: **0 of the 194 findings
+  were in `state.py`** and one of 194 mentioned `ConversionState` at all. Both
+  ROADMAP numbers were stale — 352 fields, not ~100; 194 findings, not ~38 —
+  and the measured case against grouping is in ROADMAP's architecture section:
+  29 field families rather than 4-6, a 42 % drift rate in the comment-form
+  version of the same idea, 4 022 access sites over 72 files plus 434 prose
+  references, and twelve dynamic-access sites — six of which fail SILENTLY,
+  including a `vars(state)` walk in `writer/sph.py` that would report every SPH
+  density as 0.0 — that a corpus sweep provably cannot reach. **This is a
+  decision, not a fact: it is presented for veto at merge time.**
+
 ### Fixed
+
+- **`*SECTION_SHELL`'s EDGSET cell was never parsed, so the 2D-seatbelt
+  flow-direction warning could not fire.** `handle_section_shell` reads card 2
+  — its own comment names the layout `t1 t2 t3 t4 nloc marea idof edgset` — but
+  consumed only field 1, and `SectionShell` carried no field for the cell. The
+  2D-belt property writer's `getattr(sec, "nsid", 0)` was therefore
+  unconditionally 0, so the eight-line warning under it (EDGSET becomes a
+  `/SKEW/MOV` on the property's `Iskew` in dyna2rad; this converter leaves
+  `Iskew` 0, and the starter then falls back to the shell edges `(n0,n1)` and
+  `(n3,n2)` when it builds the 1D springs) could never reach a deck — while the
+  same module tells the reader two screens later to *state the direction with an
+  EDGSET on the `*SECTION_SHELL`*. The #122 / #125 class: a diagnostic that
+  cannot reach the deck it describes. MEASURED on a probe deck (a 2D
+  `*ELEMENT_SEATBELT` on a `*MAT_SEATBELT_2D` part whose `*SECTION_SHELL` card 2
+  states `EDGSET 555`): **0** warnings containing "EDGSET" before, **1** after,
+  with `skipped_keywords == []` on both sides — the deck converts fully either
+  way and only the diagnostic changes. `SectionShell.nsid` is now declared and
+  parsed (cols 71-80), and the writer reads it directly. No emitted card
+  changes; three new cases in `tests/test_seatbelts.py` pin the warning, its
+  negative control, and the parsed value read back on the state.
 
 - **`/HEAT/MAT` wrote `AL = BL = 0.0` beside a real `T1`.** Above `T1` the
   thermal STABILITY STEP then becomes `DTFACTHERM·0.5·Lc²·ρCp/max(0, 1e-20)`

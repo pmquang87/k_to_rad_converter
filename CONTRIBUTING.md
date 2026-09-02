@@ -35,14 +35,22 @@ imports them).
 
 ## Running the tests
 
-Tests are pure `unittest` (no pytest), runnable with the stdlib alone:
+Tests are pure `unittest` (no pytest required), runnable with the stdlib alone:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-Everything lives in `tests/test_converter.py`. It covers the parser, individual
-keyword handlers, the unit-system header, and small end-to-end conversions.
+CI runs exactly that command under `coverage`. `pytest tests/ -q` also works and
+is what most contributors use locally — it reports the `subTest` cases
+separately, which `unittest` folds into their parent.
+
+The suite is split **one module per keyword family or batch** (the convention
+`tests/test_thermal_solver.py` states in its own header). `tests/test_converter.py`
+holds the parser, the unit-system header and small end-to-end conversions; the
+other modules own their family, and `tests/test_golden.py` converts five
+checked-in decks and diffs both `.rad` files byte-for-byte against
+`tests/fixtures/expected/`.
 
 ## The conversion pipeline
 
@@ -91,7 +99,11 @@ To support a new LS-DYNA keyword:
 - **Stdlib-only core.** Do not add a third-party import to the core parse/handler/
   writer path. Optional numpy/scipy imports belong behind a feature flag and must
   degrade gracefully (import lazily, print a clear `pip install ...` message).
-- Target **Python >= 3.9**.
+- Target **Python >= 3.9**. Note that **mypy does not check that floor** — mypy
+  2.3.1 refuses `python_version = "3.9"` and checks at 3.10 — so it is enforced
+  by `requires-python` and by the 3.9 leg of the CI test matrix, and the
+  spelling rules are a review-time convention: `typing.List` / `Dict` /
+  `Optional[X]`, never PEP 604 `X | Y` at runtime, no `match` statements.
 - Run **ruff** before pushing:
 
   ```bash
@@ -99,8 +111,23 @@ To support a new LS-DYNA keyword:
   ruff check .
   ```
 
+- Run **mypy** before pushing — the CI type check is **BLOCKING**, and the pin
+  matters because a newer mypy can report findings the gate was not measured
+  against:
+
+  ```bash
+  pip install "mypy==2.3.1"
+  mypy k2rad                      # what the CI job runs
+  mypy --no-site-packages k2rad   # the same, from a venv that has numpy/scipy
+  ```
+
+  Both must be clean. The CI job installs mypy and nothing else, so a dev venv
+  with numpy/scipy can see a different picture; `--no-site-packages` reproduces
+  the job. A `# type: ignore` must be error-code-scoped and carry a comment
+  saying why — `warn_unused_ignores` is on, so a stale one becomes a finding.
 - Follow the existing conventions: typed dataclasses in `state.py`, `handle_*`
-  functions in `handlers.py`, `_make_*` / `_emit_*` helpers in `writer.py`.
+  functions in `handlers.py`, `_make_*` / `_emit_*` helpers in the `writer/`
+  package.
 
 ## Pull request workflow
 
@@ -113,6 +140,6 @@ git checkout -b feat/load-segment-set
 git commit -m "Add *LOAD_SEGMENT_SET -> /PLOAD conversion"
 ```
 
-Make sure `python -m unittest discover -s tests` passes and `ruff check .` is
-clean, fill in the PR template, and update `README.md` / `CHANGELOG.md` as
-appropriate.
+Make sure `python -m unittest discover -s tests` passes, `ruff check .` is clean
+and `mypy k2rad` reports no findings, fill in the PR template, and update
+`README.md` / `CHANGELOG.md` as appropriate.
