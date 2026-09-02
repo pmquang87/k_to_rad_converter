@@ -2361,7 +2361,7 @@ def _resolve_mat_soil_and_foam(state: ConversionState) -> None:
                 pts = list(crv.pts)
                 src = f"LCID={mat.lcid}"
         from_pairs = pts is None
-        if from_pairs:
+        if pts is None:                  # `from_pairs` is read further down
             pairs = list(zip(mat.eps, mat.p))
             while pairs and pairs[-1] == (0.0, 0.0):
                 pairs.pop()          # unused trailing card slots, not data

@@ -463,7 +463,10 @@ def _make_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dict]:
             icog = ICOG_DEFINED_PROPERTIES
             inertia_applied.add(pid)
 
-        if props is not None:
+        # `inr is not None` is redundant: `props` is only ever built as
+        # `_resolve_inertia(...) if inr is not None else None` above, so a
+        # non-None `props` already implies it. Stated so the narrowing is local.
+        if props is not None and inr is not None:
             # The main node IS the specified centre of mass, and must be
             # element-free — see _inertia_main_node / ICOG_DEFINED_PROPERTIES.
             # This overrides --no-rigid-cog-master: a mesh-node main would add its
@@ -940,7 +943,9 @@ def _make_cnrb_rbodies(state: ConversionState) -> Tuple[List[str], Set[int], Dic
         # internal node at the centre of mass). The secondary group is the node
         # set itself — the master stays separate (not slaved to itself).
         secondary_nodes = unique_nodes
-        if props is not None:
+        # `inr is not None` is redundant — see the *PART_INERTIA site above:
+        # `props` is `_resolve_inertia(...) if inr is not None else None`.
+        if props is not None and inr is not None:
             # With defined properties the main node IS the stated centre of mass:
             # ICoG=4 does not move it, so its coordinates are where Mass and J act.
             # PNODE cannot serve — LS-DYNA relocates PNODE to the centre of mass

@@ -596,8 +596,7 @@ def _make_engine_implicit(state: ConversionState) -> List[str]:
     # LS-DYNA's *CONTROL_IMPLICIT_DYNAMICS provides γ and β (Newmark), so
     # we MUST use /IMPL/DYNA/2 — using /IMPL/DYNA/1 with two values is wrong
     # and the matrix factorization then fails.
-    is_dynamic = dyn and dyn.imass > 0
-    if is_dynamic:
+    if dyn is not None and dyn.imass > 0:
         gamma = dyn.gamma if dyn.gamma > 0 else 0.5
         beta  = dyn.beta  if dyn.beta  > 0 else 0.25
         lines += ["/IMPL/DYNA/2", f" {gamma:.6G}  {beta:.6G}"]

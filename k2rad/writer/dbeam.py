@@ -903,7 +903,10 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
         sec = state.sec_beams.get(secid)
         label = f"*SECTION_BEAM {secid} (ELFORM=6) part {pid}"
         wrong_section = sec is None or sec.elform != 6
-        if wrong_section:
+        # Tested directly rather than through `wrong_section`: the substitution
+        # four lines below is what makes `sec` non-None for the rest of the
+        # loop, and a narrower cannot see that through an intermediate bool.
+        if sec is None or sec.elform != 6:
             # The part was CLAIMED (its material is a discrete-beam material),
             # so nothing else will write it — skipping here would delete the
             # /PART along with every *SET_PART member and /GRNOD/PART scope

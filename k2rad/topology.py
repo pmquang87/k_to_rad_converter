@@ -82,20 +82,29 @@ def classify_tet10_apex_order(
     or the resulting slot->edge assignment is not one of the two clean patterns,
     the element is ``"ambiguous"``. Missing coordinates → ``"ambiguous"``.
     """
-    if corners is None or len(corners) < 4 or any(c is None for c in corners[:4]):
-        return "ambiguous"
-    if apex_mids is None or len(apex_mids) < 3 or any(m is None for m in apex_mids[:3]):
+    # Split from two compound guards so the None exclusion is visible to a
+    # reader and to a type checker; every arm returns the same "ambiguous".
+    if corners is None or len(corners) < 4:
         return "ambiguous"
     c0, c1, c2, c3 = corners[0], corners[1], corners[2], corners[3]
+    if c0 is None or c1 is None or c2 is None or c3 is None:
+        return "ambiguous"
+    if apex_mids is None or len(apex_mids) < 3:
+        return "ambiguous"
+    apex: List[Coord] = []
+    for m in apex_mids[:3]:
+        if m is None:
+            return "ambiguous"
+        apex.append(m)
     # apex-edge midpoints, indexed 0->(0,3), 1->(1,3), 2->(2,3)
-    mids = [
-        tuple((c0[k] + c3[k]) / 2.0 for k in range(3)),
-        tuple((c1[k] + c3[k]) / 2.0 for k in range(3)),
-        tuple((c2[k] + c3[k]) / 2.0 for k in range(3)),
+    mids: List[Coord] = [
+        ((c0[0] + c3[0]) / 2.0, (c0[1] + c3[1]) / 2.0, (c0[2] + c3[2]) / 2.0),
+        ((c1[0] + c3[0]) / 2.0, (c1[1] + c3[1]) / 2.0, (c1[2] + c3[2]) / 2.0),
+        ((c2[0] + c3[0]) / 2.0, (c2[1] + c3[1]) / 2.0, (c2[2] + c3[2]) / 2.0),
     ]
     elens = [_dist(c0, c3), _dist(c1, c3), _dist(c2, c3)]
     assign: List[int] = []
-    for p in apex_mids[:3]:
+    for p in apex:
         d = [_dist(p, mids[e]) for e in range(3)]
         best = min(range(3), key=lambda e: d[e])
         if elens[best] <= 0.0 or d[best] > off_edge_frac * elens[best]:

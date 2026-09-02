@@ -489,9 +489,10 @@ def _snap_tet10_midsides(state: ConversionState) -> int:
     for e in state.solid_elems:
         if len(e.nodes) != 10:
             continue
-        cs = [state.nodes.get(e.nodes[k]) for k in range(4)]
-        if any(c is None for c in cs):
+        raw_cs = [state.nodes.get(e.nodes[k]) for k in range(4)]
+        if any(c is None for c in raw_cs):
             continue
+        cs = [c for c in raw_cs if c is not None]
         for mi, a, b in _TET10_MIDEDGE:
             mnid = e.nodes[mi]
             m = state.nodes.get(mnid)
@@ -525,9 +526,10 @@ def _warn_tet10_order_inconsistent(state: ConversionState, tet10s) -> int:
     import math
     targets: Dict[int, List[Tuple[Tuple[float, float, float], float]]] = defaultdict(list)
     for e in tet10s:
-        cs = [_tet10_coord(state, e.nodes[k]) for k in range(4)]
-        if any(c is None for c in cs):
+        raw_cs = [_tet10_coord(state, e.nodes[k]) for k in range(4)]
+        if any(c is None for c in raw_cs):
             continue
+        cs = [c for c in raw_cs if c is not None]
         scale = max(
             math.sqrt((cs[a][0] - cs[b][0]) ** 2 + (cs[a][1] - cs[b][1]) ** 2
                       + (cs[a][2] - cs[b][2]) ** 2)
@@ -537,7 +539,8 @@ def _warn_tet10_order_inconsistent(state: ConversionState, tet10s) -> int:
             m = _tet10_coord(state, e.nodes[mi])
             if m is None:
                 continue
-            mid = tuple((cs[a][k] + cs[b][k]) / 2.0 for k in range(3))
+            mid = ((cs[a][0] + cs[b][0]) / 2.0, (cs[a][1] + cs[b][1]) / 2.0,
+                   (cs[a][2] + cs[b][2]) / 2.0)
             targets[e.nodes[mi]].append((mid, scale))
     disagree = 0
     for _nid, items in targets.items():
@@ -3717,8 +3720,8 @@ def _emit_ortho_props(state: ConversionState, istrain: int) -> List[str]:
         part = state.parts.get(pid)
         mat = state.mat_aniso_visco.get(part.mid) if part else None
         vec, phi, note = _law128_ref_axis(mat) if mat else (None, 0.0, None)
-        mapped = vec is not None
-        if not mapped:
+        mapped = vec is not None      # read further down; the narrowing needs
+        if vec is None:               # the `is None` test itself
             vec, phi = (1.0, 0.0, 0.0), 0.0
         # A uniform *ELEMENT_SHELL_BETA folded here by _fold_element_beta: the
         # starter takes an IGTYP 9 layer angle from GEO(10,PID) alone and never
