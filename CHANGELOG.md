@@ -332,6 +332,25 @@ Prior history (before this changelog was introduced) is summarized in the
     and the engine `KEY0` keyword table — quoted as `:214-231`, `:214-236` and
     `:214-250` in three different places — settled on `freform.F:213-232`,
     which is where the `DATA KEY0/` block actually begins and ends.
+  - **The `/CONVEC` blocker's numbers are now ones this repo can reproduce.**
+    The shipped warning quoted `1389.1850 / 1425.3912 / 2381.4601`, measured on
+    a deck the round did not keep. Re-anchored on a twin that IS described in
+    full — a 1 mm brick, `RHO0_CP = 3.611`, its six faces split 3 + 3 between
+    two `*BOUNDARY_CONVECTION_SET` records sharing TLCID 900 (constant 1000) at
+    TMULT 1.0 and 2.0, h = 100, ENDTIM 2.4e-3, four runs of 16 823 cycles at
+    0 ERROR / 0 WARNING / NORMAL TERMINATION:
+
+    | deck | `nt=1` | `nt=6` |
+    |---|---|---|
+    | this converter's output | **1425.0461** | **1425.0461** |
+    | the same physics on ONE shared curve at `Fscale_y` 1.0 and 2.0 | **831.27686** | **854.63629** |
+
+    `CONVECTION HEAT` in mJ against a lumped closed form of 1425.7
+    (`T_eq = 1500 K`, `tau = 6.0183e-3 s`), i.e. −0.05 % on the fixed column.
+    The unfixed column is wrong AND not reproducible across thread counts,
+    which is the defect stated as plainly as it can be — and the mechanism was
+    re-read at source first (`convec.F:127` carries `.OR. FCY_OLD /= FCY` and
+    assigns `FCY_OLD` at `:138`; `convec.F:234` has neither).
 
 - **THERMAL SOLVER verification round — one blocker, five majors and six minors,
   found by re-checking the batch's own cited facts against the engine source and

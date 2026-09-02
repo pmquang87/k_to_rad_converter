@@ -2519,15 +2519,27 @@ def _bc_scaled_function(state: ConversionState, lcid: int, mult: float,
     ``.OR. FCY_OLD /= FCY``. So two ``/CONVEC`` cards that share ONE ``funct``
     at different ``Fscale_y`` values silently reuse the FIRST card's ``T_INF``.
     Worse, ``IFUNC_OLD``/``TS_OLD`` are OMP-private, so the answer depends on
-    the THREAD COUNT. MEASURED on converter output (1 mm brick,
-    ``RHO0_CP = 3.611``, six faces, h = 100, two ``*BOUNDARY_CONVECTION_SET``
-    records both on TLCID 900 at TMULT 1.0 and 2.0, ENDTIM 2.4e-3): the
-    unfixed deck stores ``CONVECTION HEAT = 1389.1850`` mJ at ``nt=1`` and
-    ``1425.3912`` at ``nt=6``; the fixed deck stores ``2381.4601`` at BOTH,
-    against a closed form of ``2381.4170`` (+0.0018 %). All four runs: 16 823
-    cycles, 0 ERROR / 0 WARNING / NORMAL TERMINATION. The ``nt=1`` figure is
-    the clean collapse — 1389.16 is the closed form with BOTH cards reading the
-    first one's ``T_inf`` — which identifies the mechanism exactly.
+    the THREAD COUNT. MEASURED on converter output — a 1 mm brick,
+    ``RHO0_CP = 3.611``, its six faces split 3 + 3 between two
+    ``*BOUNDARY_CONVECTION_SET`` records that share TLCID 900 (constant 1000) at
+    TMULT 1.0 and 2.0, h = 100 on both, ENDTIM 2.4e-3, four runs of 16 823
+    cycles at 0 ERROR / 0 WARNING / NORMAL TERMINATION:
+
+    ==========================  ==========  ==========
+    deck                        ``nt=1``    ``nt=6``
+    ==========================  ==========  ==========
+    this converter's output     1425.0461   1425.0461
+    the same physics on ONE     831.27686   854.63629
+    shared curve at Fscale_y
+    1.0 and 2.0
+    ==========================  ==========  ==========
+
+    ``CONVECTION HEAT`` in mJ. The lumped closed form is
+    ``rhoCp·V·(T_eq − T_0)·(1 − e^(−t/tau))`` with
+    ``T_eq = (3·1000 + 3·2000)/6 = 1500`` and ``tau = rhoCp/(h·A/V) =
+    6.0183e-3 s``, i.e. 1425.7 mJ — the fixed column, to −0.05 %. The unfixed
+    column is both WRONG and NOT REPRODUCIBLE across thread counts, which is
+    the defect stated as plainly as it can be.
 
     Writing ``FSCALE = 1.0`` neutralises BOTH exactly — 1.0 re-applied N times
     is 1.0, and a stale 1.0 is the same 1.0 — with no engine patch.
@@ -2894,10 +2906,15 @@ def _resolve_convec(state: ConversionState, bc) -> bool:
         "no FCY_OLD in it (the /PARITH/OFF branch at convec.F:127 HAS it), so "
         "two cards sharing one T_inf curve at different Fscale_y values "
         "silently reuse the first card's T_inf — and the cache is per OMP "
-        "THREAD, so the answer moves with the thread count. MEASURED on this "
-        "converter's own output: 1389.1850 mJ at nt=1 and 1425.3912 at nt=6, "
-        "against a correct 2381.4601 at both, at 0 ERROR / 0 WARNING / NORMAL "
-        "TERMINATION."
+        "THREAD, so the answer moves with the thread count. MEASURED on a 1 mm "
+        "brick whose six faces are split 3 + 3 between two cards sharing one "
+        "curve at TMULT 1.0 and 2.0 (h = 100, RHO0_CP 3.611, ENDTIM 2.4e-3, "
+        "16 823 cycles, 0 ERROR / 0 WARNING / NORMAL TERMINATION): this "
+        "converter's output stores CONVECTION HEAT = 1425.0461 mJ at nt=1 AND "
+        "at nt=6, against a lumped closed form of 1425.7; the same physics "
+        "written on ONE shared curve at Fscale_y 1.0 and 2.0 stores 831.27686 "
+        "at nt=1 and 854.63629 at nt=6 — wrong, and not even reproducible "
+        "across thread counts."
         + ("" if minted is None else
            f" TMULT = {minted[2]:g} is therefore NOT written to the card: the "
            f"deck's *DEFINE_CURVE {minted[0]} is COPIED to a synthesized "
