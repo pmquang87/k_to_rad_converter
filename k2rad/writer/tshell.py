@@ -839,7 +839,11 @@ def _mat_has_ref_axis(state: ConversionState, mid: int) -> bool:
     reported."""
     for name in _AOPT_MAT_DICTS:
         mat = getattr(state, name, {}).get(mid)
-        if mat is not None and getattr(mat, "aopt", 0.0):
+        # Hoisted out of the `and`: as the right operand of a boolean `and`
+        # mypy pushes a bool type context onto getattr and picks its
+        # `default: bool` overload, which a 0.0 default cannot satisfy.
+        aopt = getattr(mat, "aopt", 0.0) if mat is not None else 0.0
+        if aopt:
             return True
     return False
 

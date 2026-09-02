@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import itertools
-from typing import Dict, List, Optional, Set, Tuple
-from ..state import ConversionState, PartData
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from ..state import (ConversionState, ContactSpotweld, ContactTied,
+                     ContactTiebreak, PartData, SolidElem, TshellElem)
 from .common import (
     HDR,
     _emit_grnod_node,
@@ -875,7 +876,7 @@ def _match_parent_interface(state: ConversionState, main_pids: Set[int],
     the starter. Matching by part coverage picks the right pair regardless of
     definition order, and supports several transducers with different parents.
     """
-    candidates = []
+    candidates: List[Tuple[int, Set[int], Optional[Set[int]]]] = []
     all_pids = set(state.parts.keys())
     for c in state.contacts_single:
         if c.ssid == 0:
@@ -2087,7 +2088,9 @@ def _solid_pids_by_part(state: ConversionState) -> Dict[int, int]:
     # SPH is absent for the reason it is absent from _solid_contact_master_pids:
     # this map answers "build a solid /SURF for this part?", and a particle has
     # no face to put in one.
-    for e in itertools.chain(state.solid_elems, state.tshell_elems):
+    both: Iterable[Union[SolidElem, TshellElem]] = itertools.chain(
+        state.solid_elems, state.tshell_elems)
+    for e in both:
         n = len(_ordered_unique_nodes(list(e.nodes)))
         if n > out.get(e.pid, 0):
             out[e.pid] = n
@@ -3035,7 +3038,8 @@ def _emitted_type2_mains(state: ConversionState):
 
     surf_pids = _surface_capable_pids(state)      # one element walk, not one
                                                   # per record
-    out = []
+    out: List[Tuple[Union[ContactTied, ContactSpotweld, ContactTiebreak],
+                    int, str, Set[int]]] = []
     for c in state.contacts_tied:
         if _tied_interface_type(c) != "TYPE2":
             continue                              # /INTER/TYPE10 penalty tie

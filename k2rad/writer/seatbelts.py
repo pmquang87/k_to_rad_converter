@@ -40,6 +40,7 @@ import math
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..state import (ConversionState, MatSeatbelt, SeatbeltElem,
+                     SeatbeltPretensioner,
                      SeatbeltSensor)
 from .common import (HDR, _emit_grnod_node, _f, _i, _seatbelt_2d_part_ids,
                      _seatbelt_mat_law, _seatbelt_part_ids)
@@ -1338,7 +1339,7 @@ _PRETENSIONER_UNSUPPORTED = {
 
 
 def _resolve_pretensioners(state: ConversionState
-                           ) -> Dict[int, List["object"]]:
+                           ) -> Dict[int, List[SeatbeltPretensioner]]:
     """``retractor id -> its pretensioners``, lowest SBPRID first.
 
     A MAP built up front, which is the whole fix for dyna2rad's DEFECT B.
@@ -1352,7 +1353,7 @@ def _resolve_pretensioners(state: ConversionState
     pretensioners on one retractor make the second vanish and poison the
     following retractor (``v7``).
     """
-    by_ret: Dict[int, List[object]] = {}
+    by_ret: Dict[int, List[SeatbeltPretensioner]] = {}
     for p in sorted(state.seatbelt_pretensioners, key=lambda x: x.sbprid):
         # Card-2 field 0 is NOT always a retractor. Vol I
         # *ELEMENT_SEATBELT_PRETENSIONER, SBRID: "Retractor number

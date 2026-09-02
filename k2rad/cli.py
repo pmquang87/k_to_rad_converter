@@ -326,7 +326,10 @@ def main(argv=None) -> int:
     # glyphs used in warning texts - degrade gracefully instead of crashing.
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            # TextIO does not declare reconfigure (it is TextIOWrapper's); the
+            # AttributeError arm below IS the "this stream has none" case, so
+            # the probe is deliberate and the ignore is scoped to that one code.
+            stream.reconfigure(errors="replace")   # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
 

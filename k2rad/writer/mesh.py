@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState,
     SET_ADD_ADVANCED_TYPES,
@@ -2849,7 +2849,7 @@ def _flatten_one_set_add_family(state: ConversionState, family: str,
     # id MEANS, and that must not depend on iteration order).
     direct_ids = set(container)
     union_ids = set(adds) | set(advanced)
-    memo = {}
+    memo: Dict[int, Tuple[Any, Any, Any]] = {}   # sid -> (out, height, cyclic)
     # Every diagnostic below names ONE set id, so it is de-duplicated on that
     # id and not on the expansion memo — skipping the memo for a cycle-cut
     # subtree (see expand) would otherwise repeat a union's own "member set
@@ -3115,8 +3115,8 @@ def _advanced_members(state: ConversionState, nsid: int, pairs, missing,
     memoised, so this function can be reached twice for one set and a bare
     ``state.warn`` would print the same line twice (the #129 round-2 rule).
     """
-    out = []
-    dropped = {}
+    out: List[Tuple[int, Optional[List[Tuple[int, int]]]]] = []
+    dropped: Dict[str, List[int]] = {}
     for child, typ in pairs:
         fam = SET_ADD_ADVANCED_TYPES.get(typ)
         if child < 0:

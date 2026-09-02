@@ -7,7 +7,8 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 from ..state import (
     ConversionState, NodeData, BeamElem, SectionDiscrete, PartData, Curve,
-    DampingFrequencyRange, PM_VAD_KEYWORD, RigidWallGeomFace,
+    DampingFrequencyRange, PM_VAD_KEYWORD, PrescribedMotionSet, RigidInertia,
+    RigidWallGeomFace,
 )
 from .common import (
     HDR, _discrete_beam_pids, _dof_string, _emit_grnod_grnod, _emit_grnod_node,
@@ -635,7 +636,7 @@ def _plastic_to_total_disp(pts, stiff: float):
         pts = [p for p in pts if p[0] >= 0.0]
         if len(pts) < 2:
             return []
-    total = []
+    total: List[Tuple[float, float]] = []
     for a, o in pts:
         x = a + o / stiff
         if total and x <= total[-1][0]:
@@ -2919,7 +2920,7 @@ def _make_imposed_motions_set(state: ConversionState) -> List[str]:
     fix_order: List[Tuple[int, int]] = []
     # (row, its resolved node ids) — carried together rather than looked up by
     # id(pm) later, which only stays unique while the objects are alive.
-    motions: List[Tuple[object, List[int]]] = []
+    motions: List[Tuple[PrescribedMotionSet, List[int]]] = []
     box_cache: Dict[int, Optional[Set[int]]] = {}
     for pm in state.prescribed_motion_sets:
         nids = _pm_set_nodes(state, pm, box_cache)
@@ -3823,7 +3824,7 @@ def _make_inertia_inivel(state: ConversionState, rbody_info: Dict) -> List[str]:
                  + [f"*INITIAL_VELOCITY_GENERATION with STYP={g.styp}"
                     for g in state.inivel_generations if not g.styp])
 
-    todo: List[Tuple[int, str, object]] = [
+    todo: List[Tuple[int, str, RigidInertia]] = [
         (pid, f"*PART_INERTIA {pid}", inr)
         for pid, inr in sorted(state.part_inertias.items())]
     todo += [(c.pid, f"*CONSTRAINED_NODAL_RIGID_BODY_INERTIA pid={c.pid}",

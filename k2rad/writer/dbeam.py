@@ -937,8 +937,9 @@ def _make_discrete_beam_connectors(state: ConversionState) -> List[str]:
             # /FUNCT ids are not — they would describe a conversion that never
             # happened and consume auto-ids nothing references.
             mat071 = None
-            built = ([SpringDof() for _ in range(6)], 0, 0, [],
-                     "unsized discrete beam")
+            built: Tuple[List[SpringDof], int, int, List[str], str] = (
+                [SpringDof() for _ in range(6)], 0, 0, [],
+                "unsized discrete beam")
         elif mat066 is not None:
             rho = mat066.rho
             built = _build_mat066(state, label, mat066, fid_alloc)

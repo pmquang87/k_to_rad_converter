@@ -474,7 +474,7 @@ def _collect_parameter_expressions(kw: str, raw: List[str]) -> None:
     applied only when the comma falls inside the PRMR field (index <= 10);
     beyond that the comma belongs to the expression itself (``max(1,2)``).
     """
-    records: List[tuple] = []
+    records: List[List[str]] = []
     for line in raw:
         if not line.strip():
             continue
@@ -754,7 +754,7 @@ def parse_k_file(path: str, _depth: int = 0,
             blocks.append(Block(kw, opts, raw,
                                 scope=_current_local_scope()))
 
-        kw, opts, raw = None, [], []   # type: ignore[assignment]
+        kw, opts, raw = None, [], []
 
     # Read the deck as UTF-8 (matching the UTF-8 the writer emits) so the
     # conversion is byte-for-byte identical regardless of the host locale — the

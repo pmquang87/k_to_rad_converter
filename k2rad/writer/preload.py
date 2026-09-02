@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 
-from ..state import ConversionState, NodeData
+from ..state import (ConversionState, CrossSection, NodeData, SolidElem,
+                     TshellElem)
 from .common import (
     HDR,
     _emit_grnod_node,
@@ -203,7 +204,7 @@ def _make_preload_sections(state: ConversionState,
     # node table is only complete after the whole deck is parsed. Idempotent,
     # and _make_cross_sections calls it too — whichever builder runs first.
     resolve_cross_section_endpoints(state)
-    by_csid: Dict[int, object] = {}
+    by_csid: Dict[int, CrossSection] = {}
     for cs in state.cross_sections:
         if cs.csid > 0:
             by_csid.setdefault(cs.csid, cs)
@@ -516,7 +517,12 @@ def _set_section_scope(state: ConversionState, cs, iss, extra, label: str):
     ``*DATABASE_CROSS_SECTION_SET``-based preload."""
     entry = state.node_sets.get(cs.nsid)
     nids = list(entry[1]) if entry else []
-    solids = {e.eid: e for e in state.solid_elems}
+    # A tshell in a solid-keyed dict is DELIBERATE: only `.eid` and `.pid` are
+    # read below, both dataclasses carry them, and _make_preload_sections has
+    # already removed every tshell from the preload group (SBOLTINI is never
+    # called for a thick shell) with its own sourced warning.
+    solids: Dict[int, Union[SolidElem, TshellElem]] = {
+        e.eid: e for e in state.solid_elems}
     solids.update({e.eid: e for e in state.tshell_elems})
     eids: List[int] = []
     if cs.hsid:

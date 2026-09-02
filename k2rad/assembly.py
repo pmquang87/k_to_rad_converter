@@ -1965,13 +1965,13 @@ def _off_airbag_hybrid(b: Block, raw, i3: int, offsets: Dict[str, int]) -> None:
         if new is not None:
             raw[i3 + 1] = new
         # A23 < 0 names a *PART (LCA23 != -1) or a *SET_PART (LCA23 == -1).
-        lca23 = to_int(_card(raw, i3 + 1, fixed=True, n=8, w=10)[3] or 0)
+        lca23 = to_int(_card(raw, i3 + 1, fixed=True, n=8, w=10)[3])
         _rewrite_neg_cell(raw, i3 + 1, 2,
                           offsets.get("s" if lca23 == -1 else "p", 0))
     ngas = 0
     if i3 + 2 < len(raw) and raw[i3 + 2].strip():
         f5 = _card(raw, i3 + 2, fixed=True, n=8, w=10)
-        ngas = to_int(f5[2] or 0) if len(f5) > 2 else 0
+        ngas = to_int(f5[2]) if len(f5) > 2 else 0
         new = _rewrite_line(raw[i3 + 2], [(3, "f"), (4, "f")], offsets)
         if new is not None:
             raw[i3 + 2] = new
@@ -2033,8 +2033,8 @@ def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
              "against this *INCLUDE_TRANSFORM's IDSOFF / IDFOFF / IDEOFF.")
     if i1 < len(raw) and raw[i1].strip():
         f1 = _card(raw, i1, fixed=True, n=8, w=10)
-        stype1 = to_int(f1[1] or 0) if len(f1) > 1 else 0
-        stype2 = to_int(f1[3] or 0) if len(f1) > 3 else 0
+        stype1 = to_int(f1[1]) if len(f1) > 1 else 0
+        stype2 = to_int(f1[3]) if len(f1) > 3 else 0
         new = _rewrite_line(
             raw[i1],
             [(0, "s" if stype1 else "p"), (2, "s" if stype2 else "p")],
@@ -2044,7 +2044,7 @@ def _off_airbag_particle(b: Block, offsets: Dict[str, int], warn) -> None:
     for r in vent_rows:
         if r < len(raw) and raw[r].strip():
             fv = _card(raw, r, fixed=True, n=8, w=10)
-            stype3 = to_int(fv[1] or 0) if len(fv) > 1 else 0
+            stype3 = to_int(fv[1]) if len(fv) > 1 else 0
             new = _rewrite_line(
                 raw[r], [(0, "s" if stype3 else "p"), (3, "f"), (4, "f")],
                 offsets)

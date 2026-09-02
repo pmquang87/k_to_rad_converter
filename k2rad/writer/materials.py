@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from ..state import (
     ConversionState,
     MatElastic,
@@ -5733,7 +5733,7 @@ def _resolve_define_tables_3d(state: ConversionState) -> None:
                 "hm_read_table2_1.F:228). The flat Ndim=3 table is NOT "
                 "emitted; deduplicate the point cards to emit it.")
             continue
-        flat = []
+        flat: List[Tuple[int, Tuple[float, ...], float]] = []
         for v, inner in sorted(rows, key=lambda r: r[0]):
             for a, lcid in inner.rows:
                 flat.append((lcid, (a, v), 1.0))
@@ -6001,8 +6001,9 @@ def _resolve_mat_tabulated_jc(state: ConversionState) -> None:
                     mat.tab_h = tid
                 else:
                     mat.tab_h = tid_sel
-                trows = [(state.define_tables[tid].rows[0][1], (v,), 1.0)
-                         for v, tid in planes]
+                trows: List[Tuple[int, Tuple[float, ...], float]] = [
+                    (state.define_tables[tid].rows[0][1], (v,), 1.0)
+                    for v, tid in planes]
                 if len(trows) >= 2:
                     ttid = state.next_curve_id()
                     state.auto_tables[ttid] = AutoTable(
@@ -6266,7 +6267,10 @@ def _resolve_mat224_failure(state: ConversionState, mat: MatTabulatedJC,
                 "replicated).")
         return
     # ── LCF → the (flipped) failure-strain family ──────────────────────────
-    base = None          # list of (theta | None, flipped fct id)
+    # (theta | None, flipped fct id): the curve arm below stores None in slot 0
+    # and the *DEFINE_TABLE arm a real Lode angle, and the dispatch further down
+    # keys on exactly that difference — so the slot is genuinely heterogeneous.
+    base: Optional[List[Tuple[Any, int]]] = None
     if mat.lcf in state.curves:
         if not state.curves[mat.lcf].pts:
             state.warn(
@@ -6382,8 +6386,9 @@ def _resolve_mat224_failure(state: ConversionState, mat: MatTabulatedJC,
             mat.fail_table1 = tid
     else:                                       # Lode-dependent LCF
         rate_axis = rates if rates is not None else list(_MAT224_FLAT_RATE_AXIS)
-        rows = [(fid, (r, theta), g)
-                for theta, fid in base for r, g in rate_axis]
+        rows: List[Tuple[int, Tuple[float, ...], float]] = [
+            (fid, (r, theta), g)
+            for theta, fid in base for r, g in rate_axis]
         rows.sort(key=lambda t: (t[1][1], t[1][0]))
         tid = state.next_curve_id()
         state.auto_tables[tid] = AutoTable(
@@ -8238,7 +8243,7 @@ def _make_functions(state: ConversionState) -> List[str]:
                  if t.resolved and t.rows}
     if not state.curves and not tables_2d and not state.auto_tables:
         return []
-    table_ids = getattr(state, "table_1d_ids", set())
+    table_ids = state.table_1d_ids
     lines = ["#-  FUNCTIONS:", HDR]
     for lcid, curve in sorted(state.curves.items()):
         # Precedence note: the table branch is tested FIRST, so a curve that a

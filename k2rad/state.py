@@ -5027,6 +5027,12 @@ class Airbag:
     t_ext: float = 0.0       # ambient temperature (card 4a, CV == 0 only)
     hc_a: float = 0.0        # molar heat-capacity coefficient A (card 4a)
     hc_b: float = 0.0        # molar heat-capacity coefficient B (card 4a)
+    #: molar heat-capacity coefficient C. NOT an *AIRBAG card cell: the writer
+    #: fills it from the species mix / from CAIR at the two sites that set
+    #: ``gas_mat_kind = "MOLE"``, and _emit_mat_gas_mole reads it back under the
+    #: same flag. DECLARED so it is part of the dataclass contract instead of
+    #: appearing dynamically on the instance (writer/monvol.py:2209/2395/3668).
+    hc_c: float = 0.0
     mw: float = 0.0          # molecular weight  (card 4a)
     gasc: float = 0.0        # universal gas constant (card 4a)
     # ── ADIABATIC_GAS_MODEL ──────────────────────────────────────────────
