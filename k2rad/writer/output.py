@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Callable, Dict, List, NamedTuple, Optional, Set
 from ..state import ConversionState
 from .common import (
-    HDR, _f, _i, _spotweld_beam_pids,
+    HDR, _ams_is_emitted, _f, _i, _spotweld_beam_pids,
 )
 from .contacts import _select_parent_interface
 # The _LOCAL route synthesizes a frozen /SKEW/FIX from a co-rotating
 # *DEFINE_COORDINATE_NODES, using the very axes builder /SKEW emission uses, so
 # the two can never disagree about what "the system at t=0" means.
 from .mesh import _emit_skew_fix, _skew_axes_from_nodes
+from .thermal import _thermal_solve_active
 
 __all__ = [
     "_make_header",
@@ -99,10 +100,12 @@ def _make_ams(state: ConversionState) -> List[str]:
     parts; the solver auto-skips rigid bodies ("NO AMS EXPANSION OVERALL THE
     RBODY"). Only for a mass-scaled explicit deck (*CONTROL_TIMESTEP DT2MS<0);
     implicit/modal decks have no CFL step to scale. --ams forces element-free
-    rigid masters (see convert()) so this never trips AMS ERROR 1066."""
-    ts = state.ctrl_timestep
-    if (not state.options.ams or ts is None or ts.dt2ms >= 0.0
-            or state.is_implicit or state.is_modal):
+    rigid masters (see convert()) so this never trips AMS ERROR 1066.
+
+    The gate is _ams_is_emitted, the ONE predicate the /DT/AMS emitter and the
+    /DT/THERM refusal also use — see its docstring for why "--ams was asked
+    for" is not the same question as "does this deck carry AMS"."""
+    if not _ams_is_emitted(state):
         return []
     return ["/AMS", "#grpart_ID", _i(0), HDR]
 
@@ -572,6 +575,19 @@ def _make_starter_th(state: ConversionState) -> List[str]:
                     skews=None, names=None, th_vars=None) -> List[str]:
         if th_vars is None:
             th_vars = _TH_HISTORY_VARS.get(rad_type, ("DEF",))
+            # On a deck that really runs a thermal solve, a node the USER asked
+            # for should carry its temperature. Without this the TEMP channels
+            # live only in the auto-built group over the driven/loaded nodes,
+            # so a *DATABASE_HISTORY_NODE naming the interior of a heated bar
+            # came back with DEF/A/AR/VR and no temperature at all — the
+            # history had to be read out of the ANIM instead.
+            #
+            # Gated exactly like every other TEMP channel (#122): the starter's
+            # WARNING 1087 'OUTPUT TEMP WHILE TEMPERATURE IS NOT COMPUTED (NO
+            # HEAT/MAT)' fires without a thermal solve, and the channel would
+            # write state after state of exactly 0.0.
+            if rad_type == "NODE" and _thermal_solve_active(state):
+                th_vars = tuple(th_vars) + ("TEMP",)
         block = [
             f"/TH/{rad_type}/{n}",
             f"TH_{rad_type}_{n}",

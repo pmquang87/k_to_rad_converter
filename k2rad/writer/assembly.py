@@ -6,7 +6,7 @@ import re
 from typing import Dict, List, Tuple
 from ..state import ConversionState
 from .beams import _resolve_integration_beams
-from .common import HDR, _f, _i
+from .common import HDR, _ams_is_emitted, _f, _i
 from .materials import (
     _make_functions,
     _make_materials,
@@ -172,6 +172,7 @@ __all__ = [
     "_make_engine_timestep",
     "_make_engine_dt_deletion",
     "_make_engine_timestep_scale",
+    "_make_engine_thermal",
     "build_engine",
 ]
 
@@ -494,9 +495,10 @@ def _make_engine_output(state: ConversionState) -> List[str]:
     lines.append("/ANIM/NODA/DT")
     lines.append("/ANIM/NODA/DMAS")
     # Nodal temperature, ONLY when the deck really runs a thermal solve (a
-    # /HEAT/MAT AND a driver). The #122 rule: /ANIM and /TH temperature
-    # channels on a deck with no thermal solve are accepted, run clean and
-    # write state after state of exactly 0.0.
+    # /HEAT/MAT AND an emitted temperature-moving card — an /IMPTEMP, or one of
+    # the heat sources /CONVEC, /RADIATION, /IMPFLUX). The #122 rule: /ANIM and
+    # /TH temperature channels on a deck with no thermal solve are accepted,
+    # run clean and write state after state of exactly 0.0.
     if _thermal_solve_active(state):
         lines.append("/ANIM/NODA/TEMP")
     if state.db_blstfor_dt and state.blast_segment_loads:
@@ -1149,6 +1151,7 @@ def build_starter(state: ConversionState, progress=None) -> str:
     _warn_duplicate_group_ids(state, lines)
     _warn_node_tc_rc(state, lines)
     _warn_duplicate_thermal_ids(state, lines)
+    _warn_duplicate_thermal_bc_ids(state, lines)
     _warn_duplicate_preload_ids(state, lines)
     _warn_duplicate_sect_ids(state, lines)
     _warn_duplicate_function_ids(state, lines)
@@ -1704,6 +1707,46 @@ def _warn_duplicate_thermal_ids(state: ConversionState,
                 "FIRST block and silently drops the rest - so the second card's "
                 "coefficient or thermal properties are lost without a "
                 "diagnostic of any kind.")
+
+
+#: The three heat-source boundary cards, each with its OWN starter id
+#: namespace (measured: ``/CONVEC/7`` + ``/RADIATION/7`` + ``/IMPFLUX/7`` +
+#: ``/IMPTEMP/7`` in one deck give 0 ERROR / 0 WARNING).
+_THERMAL_BC_CARD_ID_RE = re.compile(
+    r"^/(IMPFLUX|CONVEC|RADIATION|IMPTEMP|INITEMP)/(\d+)\s*$")
+
+
+def _warn_duplicate_thermal_bc_ids(state: ConversionState,
+                                   lines: List[str]) -> None:
+    """One id per card WITHIN each thermal-boundary namespace.
+
+    The starter does NOT check this. ``hm_read_impflux.F``,
+    ``hm_read_convec.F``, ``hm_read_radiation.F`` and ``hm_read_imptemp.F``
+    none of them call ``UDOUBLE`` or touch ``NOM_OPT``, and it was MEASURED:
+    two ``/CONVEC`` cards on one id are BOTH read and BOTH applied, at 0 ERROR
+    and 0 WARNING — so the deck silently gets twice the convection it asks for.
+    (The four namespaces are independent of each other, which the same probe
+    round measured, so this scan keys on the card spelling as well.)
+
+    Every one of these ids comes from the monotonic ``state.next_id()``, so a
+    duplicate cannot arise from the writer today; this removes the CLASS, in
+    the shape :func:`_warn_duplicate_thermal_ids` already established for the
+    material-keyed thermal cards. Changes no output.
+    """
+    seen: Dict[Tuple[str, int], int] = {}
+    for ln in lines:
+        m = _THERMAL_BC_CARD_ID_RE.match(ln)
+        if m:
+            key = (m.group(1), int(m.group(2)))
+            seen[key] = seen.get(key, 0) + 1
+    for (kind, cid), n in sorted(seen.items()):
+        if n > 1:
+            state.warn(
+                f"/{kind}/{cid} is emitted {n} times. The starter does NOT "
+                "refuse it — none of hm_read_impflux.F, hm_read_convec.F, "
+                "hm_read_radiation.F or hm_read_imptemp.F calls UDOUBLE — so "
+                "BOTH cards are read and BOTH are applied (measured), and the "
+                "deck silently gets twice the thermal load it states.")
 
 
 def _warn_duplicate_preload_ids(state: ConversionState,
@@ -2404,10 +2447,11 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     if ts.dt2ms >= 0.0:
         return _make_engine_timestep_scale(state, ts)
     tmin = abs(ts.dt2ms)
-    if state.options.ams:
+    if _ams_is_emitted(state):
         # Advanced Mass Scaling (opt-in). 0.67 is the OpenRadioss-recommended AMS
         # scale factor — the PCG needs more margin than /DT/NODA/CST's 0.9. The
-        # paired starter /AMS card is emitted by _make_ams.
+        # paired starter /AMS card is emitted by _make_ams, and the /DT/THERM
+        # refusal screens on the SAME predicate — see _ams_is_emitted.
         tsca = 0.67
         state.warn(
             f"*CONTROL_TIMESTEP DT2MS={ts.dt2ms:g} → /DT/AMS (Advanced Mass "
@@ -2436,6 +2480,378 @@ def _make_engine_timestep(state: ConversionState) -> List[str]:
     ]
 
 
+def _warn_dt_therm_window(state: ConversionState) -> None:
+    """Is ``*CONTROL_TERMINATION`` ENDTIM long enough for ONE thermal step?
+
+    MEASURED on a converter-emitted coupon (a 1 mm brick, ``RHO0_CP = 3.611``,
+    ``AS = 45``, six convecting faces, ENDTIM = 1e-3 s): the run printed
+    ``FINITE ELEMENT THERMAL ANALYSIS`` / ``THERMAL ANALYSIS ONLY`` / ``THERMAL
+    TIME STEP SCALE FACTOR 0.9``, wrote ONE cycle line — ``CYCLE 0, TIME 0.000,
+    TIME-STEP 0.1000E-02`` — and stopped with ``HEAT STORED = 0.0000000`` at
+    **0 ERROR, 0 WARNING, NORMAL TERMINATION**. The mechanism is
+    ``resol.F:5870-5880``: under ``IDT_THERM`` the step is
+    ``MIN(dt_therm, TSTOP - TT)``, so a run shorter than one thermal step is
+    clamped to the whole remaining time, the cycle-0 line is printed with
+    ``DT1 = 0`` (no heat is deposited on the first cycle), and ``resol.F:9120``
+    stops the run at TSTOP.
+
+    This is easy to hit precisely because the LS-DYNA deck's ENDTIM was written
+    for a MECHANICAL time scale while ``/DT/THERM`` runs on the conduction one,
+    which is many orders of magnitude larger.
+    """
+    from .thermal import _thermal_step_estimate
+    ct = state.ctrl_termination
+    endtim = ct.endtim if ct is not None else 0.0
+    dt_th = _thermal_step_estimate(state)
+    if dt_th is None:
+        state.warn(
+            "/DT/THERM paces the run by the conduction stability step, but no "
+            "emitted /HEAT/MAT states a conductivity (every AS/BS is 0), so "
+            "that step is unbounded: mqviscb.F:666 divides by max(k, 1e-20). "
+            "The run will be paced by TSTOP alone. Give the parts a "
+            "*MAT_THERMAL_* through *PART TMID.")
+        return
+    if endtim <= 0.0:
+        state.warn(
+            f"/DT/THERM: the estimated thermal time step is {dt_th:.6g} "
+            "(0.9*0.5*Lc^2*RHO0_CP/k from the emitted /HEAT/MAT and the "
+            "model's shortest node-pair distance), but the deck states no usable "
+            "*CONTROL_TERMINATION ENDTIM. A thermal-only run whose TSTOP is "
+            "not larger than one thermal step does exactly ONE cycle at "
+            "DT1 = 0 and stores ZERO heat, under NORMAL TERMINATION "
+            "(measured).")
+        return
+    if endtim <= dt_th:
+        state.warn(
+            f"/DT/THERM: *CONTROL_TERMINATION ENDTIM = {endtim:g} is NOT "
+            f"larger than one thermal time step ({dt_th:.6g}, estimated as "
+            "0.9*0.5*Lc^2*RHO0_CP/k from the emitted /HEAT/MAT and the model's "
+            "shortest node-pair distance). MEASURED on exactly this shape: the run "
+            "does ONE cycle at TIME 0.000 with the step clamped to the whole "
+            "remaining time (resol.F:5870-5880 takes MIN(dt_therm, "
+            "TSTOP - TT)), deposits NOTHING because DT1 is 0 on the first "
+            "cycle, and reports HEAT STORED = 0.0000000 at 0 ERROR / "
+            "0 WARNING / NORMAL TERMINATION. The LS-DYNA ENDTIM was written "
+            "for the MECHANICAL time scale; a thermal-only Radioss run needs a "
+            f"TSTOP on the CONDUCTION one — of order {dt_th:.6g} per step. "
+            "Raise ENDTIM (or *CONTROL_TERMINATION) before running.")
+        return
+    state.warn(
+        f"/DT/THERM: ENDTIM = {endtim:g} against an estimated thermal step of "
+        f"{dt_th:.6g} is about {endtim / dt_th:.0f} thermal cycle(s) "
+        "(0.9*0.5*Lc^2*RHO0_CP/k from the emitted /HEAT/MAT and the model's "
+        "shortest node-pair distance — a conservative proxy for the engine's "
+        "own DELTAX). Check the .out's '** THERMAL ANALYSIS **' block: a run "
+        "shorter than one thermal step stores ZERO heat under NORMAL "
+        "TERMINATION.")
+    _warn_dt_therm_surface_rate(state, dt_th)
+
+
+def _warn_dt_therm_surface_rate(state: ConversionState, dt_th: float) -> None:
+    """Is the thermal step small enough for the deck's own SURFACE loads?
+
+    ``/DT/THERM``'s step is a CONDUCTION stability limit and nothing else — no
+    convective or radiative term appears in ``dttherm.F90`` or ``mqviscb.F``.
+    So a deck whose surface exchange is faster than its conduction runs
+    UNSTABLE at the engine's own chosen step.
+
+    The screen compares ``dt_therm`` with ``tau_surf = RHO0_CP * Lc / h``, the
+    time for the surface load to change a layer one element thick — the right
+    physical scale, computed from quantities that are exact here (the
+    ``/HEAT/MAT``'s ``RHO0_CP``, the emitted ``H``, and the model's shortest
+    element edge). Radiation is linearised as ``h_rad = 4*E*sigma*T0^3``, its
+    standard small-signal equivalent.
+
+    ``tau_surf`` alone is the time constant of a node fed by ONE loaded face
+    per element. A body only a few elements thick, loaded on several sides at
+    once, runs faster than that by ``r = max(loaded segments per node /
+    elements per node)`` — see ``_surface_load_concentration``, which counts
+    both from the emitted deck. The trip point and the prescribed factor are
+    both divided by ``r``, so an ordinary thick mesh (``r = 1``) keeps exactly
+    the arithmetic this guard shipped with, and a one-element-thick body
+    (``r = 3``) gets a step that actually approaches its environment
+    monotonically instead of overshooting it.
+
+    MEASURED, three runs of the six-face 1 mm coupon (RHO0_CP 3.611, AS 45,
+    h = 100, T_inf = 1000, T0 = 300, ENDTIM 0.2, all NORMAL TERMINATION at
+    0 ERROR / 0 WARNING), reading the ``/TH/NODE`` TEMP channel and not only
+    the heat balance:
+
+    ===============  =======  ===========================  ============
+    /DT/THERM        cycles   nodal temperature            HEAT STORED
+    ===============  =======  ===========================  ============
+    default 0.9      6        diverges                     7 901 590.2
+    0.225 (r=1)      23       300 -> **1350.0** -> 825 ...  2527.6994
+    0.075 (r=3)      67       300 -> 650 -> 825 -> 912.5    2527.7000
+    ===============  =======  ===========================  ============
+
+    The middle row is the point: it is stable, it saturates at the right total
+    heat to seven figures, and its first step is 350 K PAST the environment
+    temperature. The predicted step change is ``2·r·dt/tau·(T_inf - T)`` —
+    ``1.5 × 700 = 1050`` at 0.225 and ``0.5 × 700 = 350`` at 0.075 — and the
+    engine reproduced both exactly.
+
+    MEASURED on a converter-emitted coupon: a 1 mm brick, ``RHO0_CP = 3.611``,
+    ``AS = 45``, ``h = 100`` on all six faces, ENDTIM = 0.2 s. The engine chose
+    ``dt = 0.3611E-01`` (matching this module's estimate to four figures),
+    ``tau_surf = 3.611*1/100 = 0.03611`` — equal, i.e. right at the screen —
+    and the run DIVERGED to ``HEAT STORED = 7 901 590.2`` mJ where the physical
+    saturation is 2527.7 mJ (a factor 3126, about 2.2e6 K), at **0 ERROR,
+    0 WARNING, NORMAL TERMINATION** over 6 cycles.
+    """
+    from .thermal import (_min_element_edge, _sigma_deck,
+                          _surface_load_concentration)
+    if not state.thermal_boundaries:
+        return
+    lc = _min_element_edge(state)
+    rho_cps = [c[1] for c in state.heat_mat_cards.values() if c[1] > 0.0]
+    if lc <= 0.0 or not rho_cps:
+        return
+    t0 = max((c[0] for c in state.heat_mat_cards.values()), default=0.0) or 300.0
+    sigma = _sigma_deck(state) or 0.0
+    h_max = 0.0
+    for bc in state.thermal_boundaries:
+        if not bc.surf_id:
+            continue
+        if bc.kind == "CONVEC":
+            h_max = max(h_max, abs(bc.coef))
+        elif bc.kind == "RADIATION" and sigma:
+            h_max = max(h_max, 4.0 * abs(bc.coef) * sigma * t0 ** 3)
+    if h_max <= 0.0:
+        return
+    tau_surf = min(rho_cps) * lc / h_max
+    conc = _surface_load_concentration(state)
+    tau_node = tau_surf / conc
+    if dt_th < 0.5 * tau_node:
+        return
+    factor = 0.9 * 0.25 * tau_node / dt_th
+    state.warn(
+        f"/DT/THERM is UNSAFE on this deck: the thermal step it will choose is "
+        f"about {dt_th:.6g}, while the deck's own surface exchange acts on a "
+        f"time scale of tau = RHO0_CP*Lc/h = {tau_surf:.6g} (h = {h_max:.6g}, "
+        f"the largest emitted /CONVEC H or linearised 4*E*sigma*T0^3)"
+        + ("" if conc <= 1.0 else
+           f", and the most heavily loaded node carries {conc:g} loaded "
+           f"face(s) per element that feeds it, so ITS time constant is "
+           f"tau/{conc:g} = {tau_node:.6g}")
+        + ". Radioss picks its thermal step from CONDUCTION ALONE — there is "
+        "no convective or radiative term anywhere in dttherm.F90 or "
+        "mqviscb.F:644-670 — so a surface load faster than the conduction "
+        "limit is integrated UNSTABLY. MEASURED on exactly this shape (a 1 mm "
+        "brick, RHO0_CP 3.611, AS 45, h 100 on six faces): the engine chose "
+        "dt = 0.03611, tau = 0.03611, and the run diverged to HEAT STORED = "
+        "7 901 590 mJ where the physical saturation is 2527.7 mJ — a factor "
+        "3126, about 2.2e6 K — at 0 ERROR / 0 WARNING / NORMAL TERMINATION "
+        "over 6 cycles. Write the scale factor explicitly on the /DT/THERM "
+        f"line (a POSITIVE number; about {factor:.3g} puts the step at a "
+        "quarter of that node's own time constant, which is a monotone "
+        "approach to the environment temperature). Then check the "
+        "TEMPERATURE HISTORY, not only the heat balance: a step that "
+        "OSCILLATES about the environment temperature still saturates at the "
+        "right total heat, so '** THERMAL ANALYSIS **' can read exactly "
+        "correct while the transient overshot. MEASURED on the six-face "
+        "coupon: at 0.225 (0.25*tau, ignoring the concentration) the FIRST "
+        "step went 300 -> 1350.000 K against a 1000 K environment and rang "
+        "down 825 / 1087.5 / 956.25 / 1021.9 ... , while HEAT STORED came out "
+        "2527.6994 against an analytic 2527.7000; at 0.075 the same deck "
+        "climbs 650 / 825 / 912.5 / 956.25 ... to exactly 1000.0000 and "
+        "stores 2527.7000. No node should pass the environment temperature.")
+
+
+def _make_engine_thermal(state: ConversionState) -> List[str]:
+    """The two ENGINE thermal keywords: ``/DT/THERM`` and ``/THERM``.
+
+    **There is no ``/DTTHERM``.** ``dttherm.F90`` is a SUBROUTINE; the engine's
+    keyword table (``freform.F:213-232``) has exactly two thermal entries —
+    ``'DT '`` slot 3 (whose ``KEY2 == 'THERM'`` arm is ``freform.F:950-960``)
+    and ``'THERM'`` slot 82 (``frethermal.F:64-70``) — plus ``/DEL/THERM``,
+    which only switches the thermal output off. The registry's old ``/DTTHERM``
+    target named a card that does not exist.
+
+    ``/DT/THERM [<factor>]``
+        ``GLOB_THERM%IDT_THERM = 1``, ``DTFACTHERM = 0.9`` unless an optional
+        free-format float follows. It is a MODE SWITCH, not a step control, and
+        it is the Radioss expression of ``*CONTROL_SOLUTION`` SOLN = 1:
+        ``resol.F:1738`` calls ``BCSDTTH_COPY(...,1)``, which sets
+        ``ICODT(N) = 7`` AND ``ICODR(N) = 7`` on every node (restored at
+        ``:9167``), and ``resol.F:5807-5809`` replaces the mechanical step with
+        the conduction stability step. ``lectur.F:696-698`` prints
+        ``THERMAL ANALYSIS ONLY``.
+
+    ``/THERM <THEACCFACT>``
+        one float, default 1.0, a stated 0 becomes 1.0 — the exact counterpart
+        of ``*CONTROL_THERMAL_SOLVER`` ``TSF``, the Thermal Speedup Factor
+        (Vol I R17 p.12-576: *"This factor multiplies all thermal parameters
+        with units of time in the denominator"*). ``THEACCFACT`` multiplies the
+        conductivity (``dttherm.F90:114``) and the time argument of every
+        thermal source (``convec.F:102-115``, ``radiation.F:109``,
+        ``fixflux.F:104-105``, ``fixtemp.F:100``).
+
+    Three traps, all source-cited:
+
+    * **Never write ``0.0`` on the ``/DT/THERM`` value line.**
+      ``freform.F:958`` is ``IF (GLOB_THERM%DTFACTHERM == ZERO) DTFACA = ZEP9``
+      — it assigns the WRONG variable, so a stated zero leaves
+      ``DTFACTHERM = 0`` and the thermal step is identically 0. The card is
+      written bare (default 0.9) instead.
+    * **``/DT/THERM`` is incompatible with AMS.** ``freform.F:1327-1330``:
+      ``IDT_THERM == 1 .AND. IDTMINS /= 0`` is ``ANCMSG(301)`` + ``ARRET(0)``.
+      k2rad's ``--ams`` writes ``/DT/AMS``, so the two are refused together.
+    * **The thermal step is a CONDUCTION-only stability limit.** Measured: a
+      ``/DT/THERM`` deck at the default 0.9 whose convection time constant was
+      6x smaller than the step DIVERGED to 318 490 mJ stored (an 88 200 K rise)
+      under ``0 ERROR / 0 WARNING / NORMAL TERMINATION``; the same deck at
+      factor 0.05 gave 2527.7000 mJ against an analytic 2527.7000. There is no
+      convective or radiative limit anywhere in ``dttherm.F90`` /
+      ``mqviscb.F``, so the warning says so.
+    """
+    from .thermal import _thermal_solve_active
+    lines: List[str] = []
+    ct = state.ctrl_thermal_solver
+    tsf = ct.tsf if ct is not None else 0.0
+    want_dt_therm = (state.ctrl_solution_soln == 1
+                     and _thermal_solve_active(state)
+                     and not state.is_implicit and not state.is_modal)
+    if state.ctrl_solution_soln == 1 and not want_dt_therm:
+        state.warn(
+            "*CONTROL_SOLUTION SOLN=1 selects a THERMAL-ONLY analysis, and "
+            "Radioss can express that — the engine card /DT/THERM freezes "
+            "every nodal DOF (resol.F:1738 BCSDTTH_COPY(...,1) sets "
+            "ICODT = ICODR = 7 on every node) and paces the run by the "
+            "conduction stability step (resol.F:5807-5809). It is NOT written "
+            "here, because "
+            + ("this deck runs implicitly or as a modal analysis, where the "
+               "engine does not integrate the temperature at all (MEASURED: "
+               "the same converted bar carries its far end 300 -> 400 K "
+               "explicitly and stays at exactly 300.000 K under "
+               "/IMPL/*, with HEAT STORED = 0.0000000). The SOURCE routines "
+               "still run there — resol.F:6547's 'GOTO 111' skips only the "
+               "block holding the single CALL TEMPUR at :6736 — so the .out's "
+               "'** THERMAL ANALYSIS **' block shows plausible imposed / "
+               "convection / radiation heat beside a HEAT STORED of exactly "
+               "zero, and only that last number tells the story"
+               if state.is_implicit or state.is_modal else
+               "this deck arms no thermal solve: /DT/THERM without a "
+               "/HEAT/MAT and a temperature-moving card would freeze the whole "
+               "model and integrate nothing (GLOB_THERM%ITHERM_FE gates every "
+               "thermal call in resol.F). Add *MAT_THERMAL_* + *PART TMID and "
+               "a driver or heat-source boundary")
+            + ". The mechanical model is converted as usual and its degrees of "
+            "freedom stay live.")
+    elif want_dt_therm and _ams_is_emitted(state):
+        want_dt_therm = False
+        state.warn(
+            "*CONTROL_SOLUTION SOLN=1 asks for a THERMAL-ONLY run (engine card "
+            "/DT/THERM) but --ams asks for Advanced Mass Scaling (/DT/AMS), "
+            "and the engine refuses the pair OUTRIGHT: freform.F:1327-1330 is "
+            "'IF (GLOB_THERM%IDT_THERM == 1 .AND. IDTMINS /= 0)' -> "
+            "ANCMSG(301) + ARRET(0), a hard stop before the first cycle. "
+            "/DT/THERM is NOT written; /DT/AMS is kept because it was asked "
+            "for explicitly. Drop --ams to get the thermal-only run mode. "
+            "(The screen mirrors the /DT/AMS emitter's OWN conditions — "
+            "*CONTROL_TIMESTEP present with DT2MS < 0, explicit — so a deck "
+            "that asked for --ams but gets no /DT/AMS keeps its /DT/THERM.)")
+    if want_dt_therm:
+        lines += [
+            "#-  THERMAL-ONLY RUN (*CONTROL_SOLUTION SOLN=1)",
+            "#   /DT/THERM freezes every nodal DOF and paces the run by the",
+            "#   conduction stability step. The value line is deliberately",
+            "#   OMITTED: freform.F:958 turns a stated 0 into a write of the",
+            "#   WRONG variable, leaving the thermal step at exactly 0.",
+            "/DT/THERM",
+            "#",
+        ]
+        state.warn(
+            "*CONTROL_SOLUTION SOLN=1 -> the engine card /DT/THERM (thermal "
+            "analysis only, scale factor left at its default 0.9). Three "
+            "things it does that the LS-DYNA card does not say out loud: "
+            "(1) resol.F:1738 calls BCSDTTH_COPY(...,1), which sets ICODT = "
+            "ICODR = 7 on EVERY node — the whole mesh is fully constrained for "
+            "the run and released at resol.F:9167; (2) resol.F:5807-5809 "
+            "REPLACES the mechanical time step with the thermal one, so the "
+            "run's cycle count and its /ANIM/TFILE cadence change completely; "
+            "(3) the thermal step is a CONDUCTION stability limit only "
+            "(DTFACTHERM*0.5*Lc^2*rhoCp/max(k,1e-20), dttherm.F90:116 / "
+            "mqviscb.F:666) — there is no convective or radiative limit in it. "
+            "MEASURED: a deck whose convection time constant was 6x SMALLER "
+            "than that step diverged to an 88 200 K temperature rise while "
+            "reporting 0 ERROR / 0 WARNING / NORMAL TERMINATION; the same deck "
+            "with the factor lowered to 0.05 matched its closed form to 8 "
+            "figures. If the run carries a stiff /CONVEC or /RADIATION, lower "
+            "the factor by hand on the /DT/THERM line (a POSITIVE number — a "
+            "stated 0 is the freform.F:958 trap) and check the .out's "
+            "'** THERMAL ANALYSIS **' heat balance.")
+        _warn_dt_therm_window(state)
+    if tsf < 0.0:
+        state.warn(
+            f"*CONTROL_THERMAL_SOLVER: TSF={tsf:g} < 0 makes |TSF| a load "
+            "curve id giving the thermal speedup factor as a function of time "
+            "(Vol I R17 p.12-576). The Radioss counterpart /THERM carries ONE "
+            "constant (frethermal.F:68 reads a single float into "
+            "GLOB_THERM%THEACCFACT), so a time-varying speedup is "
+            "inexpressible — the card is not written and the run goes at its "
+            "real thermal rate.")
+    elif tsf > 0.0 and tsf != 1.0:
+        # Same implicit/modal exclusion as /DT/THERM. The MECHANISM, corrected:
+        # an earlier draft of this comment said convec/radiation/fixflux/
+        # fixtemp are "never called from imp_solv", and that is measurably
+        # FALSE — resol.F:1802/2994/3006/3025 carry NO IMPL_S test (their
+        # neighbours at :2869 NCONLD, :2898 NFXVEL, :2916 NLOADP_F and :2937
+        # PBLAST all do), so they run on an implicit cycle and their
+        # GLOB_THERM counters fill correctly. What is dead is the nodal
+        # ACCUMULATION: resol.F:6547, inside 'IF (IMPL_S == 1)', does
+        # 'GOTO 111' to the label at :7949 and so skips the
+        # 'IF (ILAG + IALE + IEULER /= 0)' block opened at :6552, in which the
+        # one and only CALL TEMPUR sits (:6736) — and tempur.F:51-58 is the
+        # whole integrator (TEMP += FTHE/MCP) and the only writer of
+        # HEAT_STORED. So THEACCFACT scales sources that never reach a node:
+        # an emitted-and-inert card, the #122 case. (The #129 lesson: a true,
+        # measured conclusion resting on a false premise still misinforms.)
+        if _thermal_solve_active(state) and not state.is_implicit \
+                and not state.is_modal:
+            lines += [
+                "#-  THERMAL SPEED-UP (*CONTROL_THERMAL_SOLVER TSF)",
+                "/THERM",
+                _f(tsf).strip(),
+                "#",
+            ]
+            state.warn(
+                f"*CONTROL_THERMAL_SOLVER TSF={tsf:g} -> the engine card "
+                "/THERM (THEACCFACT). Both are the same artificial "
+                "time-scaling knob: LS-DYNA's 'multiplies all thermal "
+                "parameters with units of time in the denominator, e.g. "
+                "thermal conductivity, convection heat transfer coefficients' "
+                "(Vol I R17 p.12-576), and Radioss multiplies the conductivity "
+                "(dttherm.F90:114) and the TIME ARGUMENT of every thermal "
+                "source (convec.F:102-115, radiation.F:109, fixflux.F:104-105, "
+                "fixtemp.F:100). The two are equivalent for the heat equation "
+                "but NOT identical in form: Radioss stretches the clock the "
+                "sources are read at, so a /FUNCT of time is sampled "
+                f"{tsf:g}x faster as well. The starter echoes it as 'FACTOR TO "
+                "SPEED-UP THERMAL ANALYSIS' (lectur.F:700-702) only when it is "
+                "greater than 1.")
+        else:
+            state.warn(
+                f"*CONTROL_THERMAL_SOLVER TSF={tsf:g} would map to the engine "
+                "card /THERM (THEACCFACT), but it is not written because "
+                + ("this deck runs implicitly or as a modal analysis, where "
+                   "there is nothing to speed up: MEASURED, an implicit run "
+                   "of a converted thermal bar leaves every undriven node at "
+                   "exactly its initial temperature and reports HEAT STORED = "
+                   "0.0000000, while its explicit twin conducts normally. "
+                   "THEACCFACT would still be READ (frethermal.F:64-70) and "
+                   "would still scale the sources, which do run — it is the "
+                   "nodal accumulation that resol.F:6547's 'GOTO 111' skips, "
+                   "by jumping over the block that holds the single CALL "
+                   "TEMPUR at :6736 — so the card would be emitted-and-inert"
+                   if state.is_implicit or state.is_modal else
+                   "this deck arms no thermal solve — no material gets a "
+                   "/HEAT/MAT and/or no temperature-moving card is emitted, "
+                   "so there is nothing for it to speed up")
+                + ".")
+    return lines
+
+
 def build_engine(state: ConversionState) -> str:
     sections = [
         _make_engine_header(state),
@@ -2453,6 +2869,10 @@ def build_engine(state: ConversionState) -> str:
         # STARTER — see _make_engine_dynain for the two measured traps.
         _make_engine_dynain(state),
         _make_engine_timestep(state),
+        # /DT/THERM is a /DT sub-card, so it sits with its siblings — and it
+        # must run AFTER _make_engine_timestep, which is what decides whether
+        # /DT/AMS was written (freform.F:1327 refuses the pair outright).
+        _make_engine_thermal(state),
         _make_engine_dt_deletion(state),
         _make_engine_implicit(state),
         _make_engine_cpu(state),

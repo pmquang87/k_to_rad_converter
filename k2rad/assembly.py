@@ -2325,6 +2325,118 @@ def _off_load_thermal_sets(b: Block, offsets: Dict[str, int], warn) -> None:
         i += 2
 
 
+def _off_boundary_thermal_bc(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*BOUNDARY_{FLUX,CONVECTION,RADIATION}_{SEGMENT,SET}: repeating TWO-CARD
+    sets, walked in RAW PAIRS exactly as the handler walks them.
+
+    Card 1 of a ``_SET``   : ``SSID`` → IDSOFF, and the PART-SET ``PSEROD`` →
+                             IDSOFF too. RADIATION puts ``PSEROD`` in field 7
+                             (``SSID TYPE _ _ _ _ PSEROD``, Vol I R17 p.5-122)
+                             where the other two put it in field 2.
+    Card 1 of a ``_SEGMENT``: ``N1..N4`` → IDNOFF. (RADIATION's field 5 is
+                             ``TYPE``, a flag, and is left alone.)
+    Card 2                 : the curve cells → IDFOFF, SIGN-PRESERVING — all
+                             three keywords give the first cell an ``LT.0``
+                             meaning (``|LCID|`` is a curve of TEMPERATURE
+                             rather than of time), so ``_rewrite_line``, which
+                             never touches a negative cell, is not enough on
+                             its own.
+                             FLUX: ``LCID`` (field 0).
+                             CONVECTION: ``HLCID`` (0), ``TLCID`` (2).
+                             RADIATION: ``FLCID`` (0), ``TLCID`` (2).
+
+    ``*BOUNDARY_FLUX``'s optional card 3 stack (``ceil(NHISV/8)`` rows of
+    history-variable INITIAL VALUES) carries no id and is strided over, not
+    rewritten — the same raw-contiguity stride the handler uses, so a deck with
+    history variables does not shift the walk.
+    """
+    kw = b.keyword
+    is_set = kw.endswith("_SET")
+    is_flux = "FLUX" in kw
+    is_radiation = "RADIATION" in kw
+    foff = offsets.get("f", 0)
+    if is_set:
+        c1 = [(0, "s"), (6, "s")] if is_radiation else [(0, "s"), (1, "s")]
+    else:
+        c1 = [(0, "n"), (1, "n"), (2, "n"), (3, "n")]
+    c2 = [(0, "f")] if is_flux else [(0, "f"), (2, "f")]
+    i = _title_offset(b)
+    while i + 1 < len(b.raw):
+        if not b.raw[i].strip() and not b.raw[i + 1].strip():
+            break
+        new = _rewrite_line(b.raw[i], c1, offsets)
+        if new is not None:
+            b.raw[i] = new
+        new = _rewrite_line(b.raw[i + 1], c2, offsets)
+        if new is not None:
+            b.raw[i + 1] = new
+        for cell, _bucket in c2:
+            new = _rewrite_neg_ref(b.raw[i + 1], cell, foff)
+            if new is not None:
+                b.raw[i + 1] = new
+        step = 2
+        if is_flux:
+            step += _nhisv_rows(_geti(_fields(b.raw[i + 1]), 6))
+        i += step
+
+
+def _nhisv_rows(nhisv: int) -> int:
+    """``ceil(NHISV/8)`` extra card-3 rows, 0 when the card states none."""
+    return (nhisv + 7) // 8 if nhisv > 0 else 0
+
+
+def _off_mat_thermal_td(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_THERMAL_ISOTROPIC_TD / _TD_LC: ``TMID`` → IDMOFF and the curve
+    cells → IDFOFF, sign-preserving.
+
+    Card 1 is ``TMID TRO TGRLC TGMULT TLAT HLAT`` on both spellings.
+    ``TGRLC`` lives in two id namespaces by SIGN (``GT.0`` a curve of TIME,
+    ``LT.0`` a curve of TEMPERATURE — Vol II R17 p.3-7), so it needs the
+    ``_rewrite_neg_ref`` treatment as well as the plain rewrite.
+
+    ``_TD_LC``'s card 2 is ``HCLC TCLC HCHSV TCHSV TGHSV``: the first two are
+    curve (or, with a non-zero ``*HSV``, table) ids → IDFOFF; the three
+    ``*HSV`` cells select a mechanical HISTORY VARIABLE by index and are not
+    ids of any class. ``_TD``'s cards 2-4 are pure data (T1..T8, C1..C8,
+    K1..K8) and are left alone.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m"), (2, "f")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    new = _rewrite_neg_ref(b.raw[toff], 2, offsets.get("f", 0))
+    if new is not None:
+        b.raw[toff] = new
+    if "_TD_LC" in b.keyword or b.keyword.endswith("MAT_T10"):
+        i2 = toff + 1
+        if i2 < len(b.raw) and b.raw[i2].strip():
+            new = _rewrite_line(b.raw[i2], [(0, "f"), (1, "f")], offsets)
+            if new is not None:
+                b.raw[i2] = new
+
+
+def _off_mat_thermal_ortho(b: Block, offsets: Dict[str, int], warn) -> None:
+    """*MAT_THERMAL_ORTHOTROPIC: ``TMID`` → IDMOFF, ``TGRLC`` → IDFOFF
+    (sign-preserving).
+
+    Card 1 is ``TMID TRO TGRLC TGMULT AOPT TLAT HLAT`` — note ``AOPT`` sits in
+    field 5 where the isotropic card has ``TLAT``, and it is a FLAG, not an id.
+    Cards 2-4 (``HC K1 K2 K3`` / ``XP YP ZP A1 A2 A3`` / ``D1 D2 D3``) are pure
+    geometry and material data.
+    """
+    toff = _title_offset(b)
+    if toff >= len(b.raw) or not b.raw[toff].strip():
+        return
+    new = _rewrite_line(b.raw[toff], [(0, "m"), (2, "f")], offsets)
+    if new is not None:
+        b.raw[toff] = new
+    new = _rewrite_neg_ref(b.raw[toff], 2, offsets.get("f", 0))
+    if new is not None:
+        b.raw[toff] = new
+
+
 def _off_mat_muscle(b: Block, offsets: Dict[str, int], warn) -> None:
     """*MAT_MUSCLE (*MAT_156): MID → IDMOFF; ``ALM SFR SVS SVR SSP`` (card 2
     fields 1-5) are ``SCALAR_OR_FUNCTION`` — a NEGATIVE value is a curve (or,
@@ -4101,9 +4213,64 @@ _RARE_MATERIAL_OFFSETS = {
     "LOAD_THERMAL_LOAD_CURVE":    {"data": (0, [(0, "f"), (1, "f")])},
     "LOAD_THERMAL_VARIABLE":      _off_load_thermal_sets,
     "LOAD_THERMAL_VARIABLE_NODE": {"data": (0, [(0, "n"), (3, "f")])},
+    # ── THERMAL SOLVER batch ───────────────────────────────────────────────
+    #   *BOUNDARY_{FLUX,CONVECTION,RADIATION}_SET SSID and PSEROD (a PART SET,
+    #     Vol I R17 p.5-47/5-31/5-122)                             -> IDSOFF "s"
+    #   the _SEGMENT spellings' N1..N4                             -> IDNOFF "n"
+    #   their card-2 curve cells (LCID / HLCID+TLCID / FLCID+TLCID), each with
+    #     an LT.0 = "a curve of TEMPERATURE" form, sign preserved  -> IDFOFF "f"
+    #   *MAT_THERMAL_{ORTHOTROPIC,ISOTROPIC_TD,ISOTROPIC_TD_LC} TMID -> IDMOFF
+    #     ("thermal material identification ... see *PART" — it is defined on a
+    #     *MAT_ card, so IDMOFF is the only consistent bucket, and *PART's TMID
+    #     and *SECTION_SHELL_THERMAL's TMID already move with it)
+    #   their TGRLC (sign preserving) and _TD_LC's HCLC/TCLC      -> IDFOFF "f"
+    #     (the three *HSV cells select a mechanical history variable BY INDEX
+    #     and are not ids of any class — deliberately not offset)
+    #   *LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_<F> EID          -> IDEOFF "e"
+    #   *LOAD_THERMAL_VARIABLE_ELEMENT_<F> LCID                    -> IDFOFF "f"
+    **{kw: _off_boundary_thermal_bc for kw in (
+        "BOUNDARY_FLUX", "BOUNDARY_FLUX_SET", "BOUNDARY_FLUX_SEGMENT",
+        "BOUNDARY_CONVECTION", "BOUNDARY_CONVECTION_SET",
+        "BOUNDARY_CONVECTION_SEGMENT",
+        "BOUNDARY_RADIATION", "BOUNDARY_RADIATION_SET",
+        "BOUNDARY_RADIATION_SEGMENT")},
+    "MAT_THERMAL_ORTHOTROPIC":     _off_mat_thermal_ortho,
+    "MAT_T02":                     _off_mat_thermal_ortho,
+    "MAT_THERMAL_ISOTROPIC_TD":    _off_mat_thermal_td,
+    "MAT_T03":                     _off_mat_thermal_td,
+    "MAT_THERMAL_ISOTROPIC_TD_LC": _off_mat_thermal_td,
+    "MAT_T10":                     _off_mat_thermal_td,
+    "MAT_T01":                     {"cards": {0: [(0, "m"), (2, "f")]}},
+    # Both element-temperature families REPEAT ("Include as many cards in this
+    # format as desired", Vol I R17 pp.33-168/33-184), so a {"cards": {0: ...}}
+    # spec would offset the FIRST row only.
+    **{kw: {"data": (0, [(0, "e")])} for kw in (
+        "LOAD_THERMAL_CONSTANT_ELEMENT",
+        "LOAD_THERMAL_CONSTANT_ELEMENT_BEAM",
+        "LOAD_THERMAL_CONSTANT_ELEMENT_SHELL",
+        "LOAD_THERMAL_CONSTANT_ELEMENT_SOLID",
+        "LOAD_THERMAL_CONSTANT_ELEMENT_TSHELL")},
+    **{kw: {"data": (0, [(0, "e"), (3, "f")])} for kw in (
+        "LOAD_THERMAL_VARIABLE_ELEMENT",
+        "LOAD_THERMAL_VARIABLE_ELEMENT_BEAM",
+        "LOAD_THERMAL_VARIABLE_ELEMENT_SHELL",
+        "LOAD_THERMAL_VARIABLE_ELEMENT_SOLID",
+        "LOAD_THERMAL_VARIABLE_ELEMENT_TSHELL")},
     # Recognized + warn-dropped keywords get NO offset spec, deliberately: an
     # unmodelled card stack must not have its cells rewritten by position (the
-    # *AIRBAG warn-drop rule). *CONTROL_SOLUTION carries no id at all.
+    # *AIRBAG warn-drop rule). That covers every *BOUNDARY_RADIATION_*VF*
+    # spelling, *BOUNDARY_FLUX_TRAJECTORY, *MAT_THERMAL_CWM, the four
+    # *LOAD_THERMAL_VARIABLE_{BEAM,SHELL}[_SET] gradient cards and
+    # *CONTROL_THERMAL_{FORMING,EIGENVALUE}.
+    #
+    # *CONTROL_THERMAL_{SOLVER,TIMESTEP,NONLINEAR} and *CONTROL_SOLUTION are
+    # PARSED but carry no offset spec either, and that is a verdict, not a gap:
+    # *INCLUDE_TRANSFORM offsets ENTITY ids, and a *CONTROL_ card's cells are
+    # solver settings. The two curve-bearing cases — *CONTROL_THERMAL_SOLVER's
+    # LT.0 EQHEAT/TSF and *CONTROL_THERMAL_TIMESTEP's LT.0 TMIN/TMAX/DTEMP plus
+    # LCTS — are all cells k2rad DROPS by name, so rewriting them would move an
+    # id nothing reads while making the include's own copy of the card differ
+    # from the deck's. (If either ever converts, its row belongs here.)
 }
 _RARE_MATERIAL_OFFSETS.update(
     {kw: None for kw in RARE_MATERIAL_KEYWORDS

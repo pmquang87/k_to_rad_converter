@@ -1585,24 +1585,41 @@ class ThermalOutputTests(unittest.TestCase):
 
 class ThermalDeferredTests(unittest.TestCase):
     def test_control_and_boundary_thermal_cards_are_named_not_skipped(self):
+        # What is left here after the THERMAL SOLVER batch: the spellings with
+        # NO Radioss counterpart at all. *CONTROL_THERMAL_SOLVER,
+        # *BOUNDARY_{FLUX,CONVECTION,RADIATION}_*, *MAT_THERMAL_{ORTHOTROPIC,
+        # ISOTROPIC_TD,ISOTROPIC_TD_LC} and the eight
+        # *LOAD_THERMAL_*_ELEMENT_<F> spellings now CONVERT and are covered by
+        # tests/test_thermal_solver.py; *CONTROL_THERMAL_{TIMESTEP,NONLINEAR}
+        # are still named drops but through their own parsing handlers, and
+        # keep their row here.
         for kw, card in (
-                ("CONTROL_THERMAL_SOLVER", _row(1, 1, 11)),
                 ("CONTROL_THERMAL_TIMESTEP", _row(1, 1.0)),
                 ("CONTROL_THERMAL_NONLINEAR", _row(1, 0.001)),
-                ("BOUNDARY_FLUX_SET", _row(1, 0)),
-                ("BOUNDARY_CONVECTION_SET", _row(1, 0)),
-                ("BOUNDARY_RADIATION_SET", _row(1, 0)),
+                ("CONTROL_THERMAL_FORMING", _row(1.0e-5, 1, 10.0)),
+                ("CONTROL_THERMAL_EIGENVALUE", _row(1)),
                 ("MAT_THERMAL_CWM", _row(9)),
                 ("LOAD_THERMAL_BINOUT", _row(1)),
                 ("LOAD_THERMAL_D3PLOT", _row(1)),
                 # The REAL R17 spellings — there is no *LOAD_THERMAL_DYNAIN.
                 ("LOAD_THERMAL_TOPAZ", _row(1)),
                 ("LOAD_THERMAL_RSW", _row(1)),
-                ("LOAD_THERMAL_CONSTANT_ELEMENT", _row(1, 100.0)),
-                ("LOAD_THERMAL_VARIABLE_ELEMENT", _row(1, 1.0, 0.0, 100)),
                 ("LOAD_THERMAL_VARIABLE_BEAM", _row(1, 1.0, 0.0, 100)),
+                ("LOAD_THERMAL_VARIABLE_BEAM_SET", _row(1, 1.0, 0.0, 100)),
                 ("LOAD_THERMAL_VARIABLE_SHELL", _row(1, 1.0, 0.0, 100)),
-                ("MAT_THERMAL_ISOTROPIC_TD_LC", _row(9))):
+                ("LOAD_THERMAL_VARIABLE_SHELL_SET", _row(1, 1.0, 0.0, 100)),
+                ("BOUNDARY_FLUX_TRAJECTORY", _row(1, 0)),
+                ("BOUNDARY_RADIATION_ENCLOSURE", _row(1, 2)),
+                ("BOUNDARY_RADIATION_SET_VF_READ", _row(1, 2)),
+                ("BOUNDARY_RADIATION_SET_VF_CALCULATE", _row(1, 2)),
+                ("BOUNDARY_RADIATION_SET_VF_READ_RESTART", _row(1, 2)),
+                ("BOUNDARY_RADIATION_SET_VF_CALCULATE_RESTART", _row(1, 2)),
+                ("BOUNDARY_RADIATION_SEGMENT_VF_READ", _row(1, 2, 3, 4)),
+                ("BOUNDARY_RADIATION_SEGMENT_VF_CALCULATE", _row(1, 2, 3, 4)),
+                ("BOUNDARY_RADIATION_SEGMENT_VF_READ_RESTART",
+                 _row(1, 2, 3, 4)),
+                ("BOUNDARY_RADIATION_SEGMENT_VF_CALCULATE_RESTART",
+                 _row(1, 2, 3, 4))):
             state = _dispatch(f"*KEYWORD\n*{kw}\n{card}\n*END\n")
             self.assertEqual(state.skipped_keywords, [], kw)
             self.assertIn(kw, dict(state.recognized_not_emitted), kw)
@@ -1626,8 +1643,14 @@ class ThermalDeferredTests(unittest.TestCase):
         state = _dispatch("*KEYWORD\n*CONTROL_SOLUTION\n" + _row(2) + "\n*END\n")
         self.assertIn("SOLN=2",
                       dict(state.recognized_not_emitted)["CONTROL_SOLUTION"])
+        # SOLN = 1 is now DECIDED IN THE WRITER, because whether a /DT/THERM is
+        # honest depends on the emitted deck (a thermal-only run mode that
+        # integrates nothing freezes the whole model for no reason). The
+        # handler only records the value; tests/test_thermal_solver.py pins
+        # both arms end to end.
         state = _dispatch("*KEYWORD\n*CONTROL_SOLUTION\n" + _row(1) + "\n*END\n")
-        self.assertIn("THERMAL-ONLY", " ".join(state.warnings))
+        self.assertEqual(state.ctrl_solution_soln, 1)
+        self.assertEqual(state.warnings, [])
 
     def test_section_shell_thermal_is_parsed_not_skipped(self):
         # Registering the spelling is what turns 40 x ERROR 495 ("SHELL HAS A

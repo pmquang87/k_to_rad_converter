@@ -89,6 +89,8 @@ from .state import (
     SeatbeltAccelerometer,
     MatShapeMemory, MatMuscle, MatSpringMuscle,
     MatAddThermalExpansion, MatThermalIsotropic,
+    MatThermalIsotropicTD, MatThermalOrthotropic,
+    ControlThermalSolver, ThermalBoundary, LoadThermalElement,
     InitialTemperature, ImposedTemperature,
     ElementDeath, PerturbationNode, FinalGeometryNode,
     BoundaryPrescribedFinalGeometry, InterfaceSpringback,
@@ -10266,6 +10268,539 @@ def handle_mat_thermal_isotropic(block: Block, state: ConversionState) -> None:
         tc=to_float(f2[1]) if len(f2) > 1 else 0.0)
 
 
+def handle_mat_thermal_orthotropic(block: Block,
+                                   state: ConversionState) -> None:
+    """*MAT_THERMAL_ORTHOTROPIC (T02) → /HEAT/MAT when K1 == K2 == K3.
+
+    Cards (Vol II R17 p.3-4):
+      Card1: TMID TRO TGRLC TGMULT AOPT TLAT HLAT
+      Card2: HC K1 K2 K3
+      Card3: XP YP ZP A1 A2 A3
+      Card4: D1 D2 D3
+
+    Note ``AOPT`` sits in field 5 here, where the isotropic card has ``TLAT``:
+    the two layouts are NOT the same card with an extra column, so the fields
+    are read positionally against this page and not against T01's.
+
+    Cards 3 and 4 (the AOPT geometry) are read only far enough to be reported
+    as dropped — /HEAT/MAT has no material-axis concept at all.
+    """
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn("*MAT_THERMAL_ORTHOTROPIC: empty card — skipped")
+        return
+    tmid = to_int(f1[0])
+    if tmid <= 0:
+        state.warn(f"*MAT_THERMAL_ORTHOTROPIC '{title}': TMID parsed as {tmid} "
+                   "— unreadable; card skipped.")
+        return
+    f2 = _card(raw, offset + 1, fixed=True, n=4, w=10)
+    state.mat_thermal_ortho[tmid] = MatThermalOrthotropic(
+        tmid=tmid, title=title,
+        tro=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        tgrlc=to_int(f1[2]) if len(f1) > 2 else 0,
+        tgmult=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        aopt=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        tlat=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        hlat=to_float(f1[6]) if len(f1) > 6 else 0.0,
+        hc=to_float(f2[0]) if f2 else 0.0,
+        k1=to_float(f2[1]) if len(f2) > 1 else 0.0,
+        k2=to_float(f2[2]) if len(f2) > 2 else 0.0,
+        k3=to_float(f2[3]) if len(f2) > 3 else 0.0)
+
+
+def handle_mat_thermal_isotropic_td(block: Block,
+                                    state: ConversionState) -> None:
+    """*MAT_THERMAL_ISOTROPIC_TD (T03) and _TD_LC (T10) → /HEAT/MAT by FIT.
+
+    ``_TD`` cards (Vol II R17 p.3-7), *"a minimum of two and a maximum of eight
+    data points"*:
+      Card1: TMID TRO TGRLC TGMULT TLAT HLAT
+      Card2: T1..T8      Card3: C1..C8 (specific heat)   Card4: K1..K8
+
+    ``_TD_LC`` (p.3-37) replaces cards 2-4 with
+      Card2: HCLC TCLC HCHSV TCHSV TGHSV
+    where ``HCLC``/``TCLC`` are curve ids. Only the IDS are read here; the
+    curves are SAMPLED in the writer prepass (``_sample_td_lc_curves``),
+    because a ``*DEFINE_CURVE`` may sit anywhere in the deck — including AFTER
+    this card, which dispatch has not reached yet. Sampling at parse time made
+    a deck whose curves follow the material come out with no conductivity at
+    all.
+
+    **Why a fit is expressible at all.** ``/HEAT/MAT``'s conduction really is
+    the linear ``AS + BS*T_element`` and nothing more — ``stherm.F:82/104``,
+    ``s4therm.F:67/84``, ``s10therm.F:61/81``, ``cbatherm.F:61/67``,
+    ``pforc3.F:382`` all read ``PM(75)``/``PM(76)`` alone. (The two-segment
+    ``below/above T1`` form in ``dttherm.F90:102-106`` and
+    ``mqviscb.F:653-657`` is the thermal TIME-STEP routine, gated on
+    ``IDT_THERM == 1``; it never touches the heat flow.) So a tabulated
+    ``k(T)`` is carried by a least-squares LINE whose worst deviation the
+    writer states, and the capacity ``RHO0_CP`` is one constant with no
+    temperature dependence at all — that is the loss this card takes.
+
+    A non-zero ``HCHSV``/``TCHSV``/``TGHSV`` makes the property a function of a
+    MECHANICAL history variable (stress component, plastic strain, a law's own
+    history slot). Nothing in Radioss can express that, so the record is stored
+    with empty tables and ``lc_hsv`` set, and the writer drops it by name.
+    """
+    kw = block.keyword
+    offset = _title_offset(block)
+    title = _read_title(block) if offset else ""
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    if not f1 or not f1[0].strip():
+        state.warn(f"*{kw}: empty card — skipped")
+        return
+    tmid = to_int(f1[0])
+    if tmid <= 0:
+        state.warn(f"*{kw} '{title}': TMID parsed as {tmid} — unreadable; "
+                   "card skipped.")
+        return
+    rec = MatThermalIsotropicTD(
+        tmid=tmid, title=title,
+        tro=to_float(f1[1]) if len(f1) > 1 else 0.0,
+        tgrlc=to_int(f1[2]) if len(f1) > 2 else 0,
+        tgmult=to_float(f1[3]) if len(f1) > 3 else 0.0,
+        tlat=to_float(f1[4]) if len(f1) > 4 else 0.0,
+        hlat=to_float(f1[5]) if len(f1) > 5 else 0.0,
+        spelling=f"*{kw}",
+        # *MAT_T10 IS *MAT_THERMAL_ISOTROPIC_TD_LC — Vol II R17 p.2-9's alias
+        # table, and p.3-37 heads the card with BOTH names. A plain
+        # `endswith("_TD_LC")` read it with the _TD layout instead: card 2's
+        # `HCLC TCLC HCHSV TCHSV TGHSV` became the T1..T8 temperature row and
+        # cards 3-4 (which do not exist) the C/K rows, so the whole thermal
+        # material was silently lost. assembly.py's offset walker has always
+        # keyed MAT_T10 on the _TD_LC layout, so the two readers disagreed.
+        is_lc=kw.endswith("_TD_LC") or kw.endswith("MAT_T10"))
+    if rec.is_lc:
+        f2 = _card(raw, offset + 1, fixed=True, n=5, w=10)
+        rec.hclc = to_int(f2[0]) if f2 else 0
+        rec.tclc = to_int(f2[1]) if len(f2) > 1 else 0
+        for name, idx in (("HCHSV", 2), ("TCHSV", 3), ("TGHSV", 4)):
+            v = to_int(f2[idx]) if len(f2) > idx else 0
+            if v:
+                rec.lc_hsv = (name, v)
+                break
+    else:
+        rows = []
+        for r in range(3):
+            rows.append(_card(raw, offset + 1 + r, fixed=True, n=8, w=10))
+        n = 0
+        for j in range(8):
+            if len(rows[0]) > j and rows[0][j].strip():
+                n = j + 1
+        rec.temps = [to_float(rows[0][j]) for j in range(n)]
+        rec.cps = [to_float(rows[1][j]) if len(rows[1]) > j else 0.0
+                   for j in range(n)]
+        rec.ks = [to_float(rows[2][j]) if len(rows[2]) > j else 0.0
+                  for j in range(n)]
+    state.mat_thermal_iso_td[tmid] = rec
+
+
+def handle_control_thermal_solver(block: Block,
+                                  state: ConversionState) -> None:
+    """*CONTROL_THERMAL_SOLVER — two cells map, the rest are named drops.
+
+    Card 1 is ``ATYPE PTYPE SOLVER <cgtol> GPT EQHEAT FWORK SBC`` (Vol I R17
+    p.12-573). Field 4 is the OBSOLETE ``CGTOL`` column — Remark 11 removed it
+    at R12 but the column stays, so it is skipped rather than read: the
+    hot-stamping example on p.12-567 prints the header
+    ``atype ptype solver cgtol gpt eqheat fwork sbc`` with that cell blank.
+
+    Card 2 is read only when it exists, and its layout depends on SOLVER
+    (2a for != 17, 2b for == 17). Card 3 is ``MXDMP DTVF VARDEN - NCYCL``.
+
+    Only ``FWORK`` and ``TSF`` reach a card; ``SBC`` becomes a CROSS-CHECK
+    against the Stefan-Boltzmann constant the /RADIATION reader derives from
+    the emitted ``/BEGIN`` unit line (``hm_read_radiation.F:140-142``:
+    ``SIGMA = STEFBOLTZ*FAC_T**3/FAC_M``). The per-field verdicts are written
+    by the writer, which is the only place that knows whether a thermal solve
+    is armed at all.
+    """
+    offset = _title_offset(block)
+    raw = block.raw
+    f1 = _card(raw, offset, fixed=True, n=8, w=10)
+    rec = ControlThermalSolver(
+        atype=to_int(f1[0]) if f1 else 0,
+        ptype=to_int(f1[1]) if len(f1) > 1 else 0,
+        solver=to_int(f1[2]) if len(f1) > 2 else 0,
+        gpt=to_int(f1[4]) if len(f1) > 4 else 0,
+        eqheat=_ffield(f1, 5, 1.0),
+        fwork=_ffield(f1, 6, 1.0),
+        sbc=to_float(f1[7]) if len(f1) > 7 else 0.0,
+        # Recorded for the message only: a BLANK FWORK means 1.0 (p.12-573's
+        # Card 1 Default row prints `1.` under it), so the physics does NOT
+        # branch on whether the cell was typed — see writer/thermal._efrac.
+        has_fwork=bool(len(f1) > 6 and f1[6].strip()))
+    # Cards 2 and 3 are OPTIONAL and claimed by RAW CONTIGUITY (row index), not
+    # by "the next non-blank row": an all-blank card 2 is legal (every cell
+    # defaults) and a "next non-blank" walk would read card 3's cells into card
+    # 2's slots — the #109/#117/#119 rule.
+    i2 = offset + 1
+    if i2 < len(raw):
+        rec.has_card2 = True
+        f2 = _card(raw, i2, fixed=True, n=8, w=10)
+        rec.msglvl = to_int(f2[0]) if f2 else 0
+        rec.abstol = to_float(f2[2]) if len(f2) > 2 else 0.0
+        rec.reltol = to_float(f2[3]) if len(f2) > 3 else 0.0
+        if rec.solver == 17:
+            rec.ninner = to_int(f2[1]) if len(f2) > 1 else 0
+            rec.nouter = to_int(f2[4]) if len(f2) > 4 else 0
+        else:
+            rec.maxitr = to_int(f2[1]) if len(f2) > 1 else 0
+            rec.omega = to_float(f2[4]) if len(f2) > 4 else 0.0
+            rec.tsf = to_float(f2[7]) if len(f2) > 7 else 0.0
+    i3 = offset + 2
+    if i3 < len(raw):
+        rec.has_card3 = True
+        f3 = _card(raw, i3, fixed=True, n=5, w=10)
+        rec.mxdmp = to_int(f3[0]) if f3 else 0
+        rec.dtvf = to_float(f3[1]) if len(f3) > 1 else 0.0
+        rec.varden = to_int(f3[2]) if len(f3) > 2 else 0
+        rec.ncycl = to_int(f3[4]) if len(f3) > 4 else 0
+    state.ctrl_thermal_solver = rec
+
+
+def handle_control_thermal_timestep(block: Block,
+                                    state: ConversionState) -> None:
+    """*CONTROL_THERMAL_TIMESTEP — every field is a named drop.
+
+    Card 1 ``TS TIP ITS TMIN TMAX DTEMP TSCP LCTS`` (Vol I R17 p.12-580).
+
+    **Why none of the eight maps.** They are the controls of an IMPLICIT
+    thermal integration with an adaptive step: ``TIP`` picks Crank-Nicolson vs
+    fully implicit, ``ITS``/``TMIN``/``TMAX`` bracket the step, and
+    ``DTEMP``/``TSCP`` cut it when a temperature change is too large. Radioss
+    integrates the heat equation EXPLICITLY on a lumped capacity
+    (``tempur.F:51``: ``TEMP(N) = TEMP(N) + FTHE(N)/MCP(N)``); its thermal step
+    is the conduction STABILITY limit ``DTFACTHERM · ½·Lc²·ρCp / max(k,1e-20)``
+    (``dttherm.F90:116``, ``mqviscb.F:666``), and the only user cell is the
+    dimensionless factor — which the engine reads from ``/DT/THERM``, and only
+    in thermal-ONLY mode. There is no step to set, no minimum, no maximum and
+    no adaptivity to configure, so mapping any of these onto ``DTFACTHERM``
+    would put a physical time into a dimensionless scale factor.
+
+    The card is not silently dropped: the writer names all eight, and the three
+    ``LT.0`` cells plus ``LCTS`` are curve references that the
+    *INCLUDE_TRANSFORM walker must still offset even though nothing is emitted
+    — which is exactly why this handler parses them at all.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
+    named = []
+    for i, name in enumerate(("TS", "TIP", "ITS", "TMIN", "TMAX", "DTEMP",
+                              "TSCP", "LCTS")):
+        if len(f) > i and f[i].strip():
+            named.append(f"{name}={f[i].strip()}")
+    detail = ", ".join(named) if named else "all cells blank (defaults)"
+    state.note_recognized_not_emitted(
+        "CONTROL_THERMAL_TIMESTEP",
+        f"the thermal time-step controls ({detail}) — no card written, and "
+        "NOT ONE of the eight fields has a counterpart. They configure an "
+        "IMPLICIT thermal integration with an adaptive step (TIP = "
+        "Crank-Nicolson vs fully implicit; ITS/TMIN/TMAX bracket the step; "
+        "DTEMP/TSCP cut it when a step's temperature change is too large; "
+        "LCTS steps to stated breakpoints). Radioss integrates the heat "
+        "equation EXPLICITLY on a lumped capacity (tempur.F:51, "
+        "TEMP += FTHE/MCP) and has no thermal matrix, no nonlinear iteration "
+        "and no adaptive step: its thermal dt is the conduction STABILITY "
+        "limit DTFACTHERM*0.5*Lc^2*rhoCp/max(k,1e-20) (dttherm.F90:116, "
+        "mqviscb.F:666), whose only user cell is the dimensionless factor of "
+        "the ENGINE card /DT/THERM — and even that is computed ONLY in "
+        "thermal-only mode (both routines are gated on IDT_THERM == 1). In a "
+        "COUPLED run Radioss therefore integrates the temperature at the "
+        "MECHANICAL time step with no thermal stability check at all; that is "
+        "the honest difference from LS-DYNA, and it is not something these "
+        "cells could fix. (The registry used to name /DTTHERM as the "
+        "counterpart: no such engine keyword exists — dttherm.F90 is a "
+        "SUBROUTINE, and the engine keyword table at freform.F:213-232 has "
+        "only 'DT' and 'THERM'.)")
+
+
+def handle_control_thermal_nonlinear(block: Block,
+                                     state: ConversionState) -> None:
+    """*CONTROL_THERMAL_NONLINEAR — a named drop over all SEVEN fields.
+
+    Card 1 ``REFMAX TOL DCP LUMPBC THLSTL NLTHPR PHCHPN`` (Vol I R17 p.12-571).
+    The registry entry this replaces named only the first three.
+    """
+    offset = _title_offset(block)
+    f = _card(block.raw, offset, fixed=True, n=7, w=10)
+    named = []
+    for i, name in enumerate(("REFMAX", "TOL", "DCP", "LUMPBC", "THLSTL",
+                              "NLTHPR", "PHCHPN")):
+        if len(f) > i and f[i].strip():
+            named.append(f"{name}={f[i].strip()}")
+    detail = ", ".join(named) if named else "all cells blank (defaults)"
+    state.note_recognized_not_emitted(
+        "CONTROL_THERMAL_NONLINEAR",
+        f"the nonlinear thermal solve's controls ({detail}) — no card "
+        "written. All seven configure Newton iterations on a thermal stiffness "
+        "matrix: REFMAX matrix reformations per step, TOL the temperature "
+        "convergence tolerance, DCP the divergence cut factor, LUMPBC the "
+        "boundary-condition lumping damper, THLSTL the line-search tolerance, "
+        "NLTHPR the print level and PHCHPN the phase-change penalty. Radioss "
+        "assembles NO thermal matrix and performs NO nonlinear iteration — "
+        "tempur.F:48-55 is the whole integrator (TEMP += FTHE/MCP, then FTHE "
+        "is zeroed) — so there is nothing for any of them to control. (The "
+        "registry used to name 'the /THERM nonlinear controls': /THERM exists "
+        "but carries exactly ONE cell, THEACCFACT, frethermal.F:64-70. There "
+        "is no nonlinear-control family.)")
+
+
+def _radiation_type_ok(state: ConversionState, kw: str, rtype: int,
+                       where: str, page: str) -> bool:
+    """Screen ``*BOUNDARY_RADIATION_{SET,SEGMENT}``'s TYPE cell.
+
+    Vol I R17 p.5-117 (``_SEGMENT``: ``N1 N2 N3 N4 TYPE``) and p.5-122
+    (``_SET``: ``SSID TYPE _ _ _ _ PSEROD``) both print TYPE with **Default 1**
+    and list exactly one value, *"EQ.1: Radiation to environment"*. ``TYPE = 2``
+    (*"Radiation within an enclosure"*) and page 5-126 belong to the SEPARATE
+    ``_VF`` / ``_ENCLOSURE`` keywords, which k2rad refuses under their own
+    names — so on these two spellings enclosure radiation is not even
+    expressible.
+
+    A typed ``0`` therefore takes the Default row, exactly the way ``_efrac``
+    applies p.12-575's ``EQ.0.0`` rule to FWORK: a defaulted fixed-width
+    integer column is ordinarily written as ``0``, and reading that as an
+    unknown radiation type lost a fully convertible environment-radiation
+    boundary while the log asserted a value the deck never wrote (the #130
+    class — an exclusion's cited fact is itself a claim).
+
+    Anything else quotes the value the deck ACTUALLY stated and cites the
+    card's OWN page. The refusal is a ``state.warn`` rather than a
+    keyword-scoped ``recognized_not_emitted`` entry: it is per RECORD, and on a
+    mixed deck the keyword-scoped form listed ``BOUNDARY_RADIATION_SET`` under
+    "Recognized but not emitted" while a ``/RADIATION`` built from its sibling
+    record WAS in the emitted deck (measured).
+    """
+    if rtype in (0, 1):
+        return True
+    state.warn(
+        f"*{kw}: TYPE={rtype} on {where} is not a value this card defines. "
+        f"Vol I R17 {page} prints TYPE with Default 1 and lists exactly one "
+        "value, 'EQ.1: Radiation to environment'. TYPE=2 ('Radiation within "
+        "an enclosure', p.5-126) belongs to the SEPARATE "
+        "*BOUNDARY_RADIATION_*_VF / _ENCLOSURE keywords, which exchange heat "
+        "between segments through VIEW FACTORS and which k2rad refuses under "
+        "their own names. Radioss's /RADIATION is radiation to an ENVIRONMENT "
+        "temperature only (radiation.F:155: FLUX = AREA*EMISIG*(T_INF**4 - "
+        "TE**4)) and there is no surface-to-surface exchange anywhere in "
+        "engine/source/constraints/thermic — the record is DROPPED rather "
+        "than converted into a different physical model. (A stated TYPE=0 is "
+        "NOT refused: it takes the card's own Default row of 1.)")
+    return False
+
+
+def _boundary_segment_source(state: ConversionState, kw: str, is_set: bool,
+                             f1: List[str]) -> Optional[ThermalBoundary]:
+    """Card 1 of a *BOUNDARY_{FLUX,CONVECTION,RADIATION} record.
+
+    ``_SET``      → ``SSID PSEROD``  (and ``SSID TYPE _ _ _ _ PSEROD`` for
+                     RADIATION, whose PSEROD is field 7, Vol I R17 p.5-122)
+    ``_SEGMENT``  → ``N1 N2 N3 N4``  (RADIATION adds ``TYPE`` in field 5)
+    """
+    kind = ("FLUX" if "FLUX" in kw else
+            "CONVECTION" if "CONVECTION" in kw else "RADIATION")
+    rec = ThermalBoundary(
+        kind={"FLUX": "FLUX", "CONVECTION": "CONVEC",
+              "RADIATION": "RADIATION"}[kind],
+        source=f"*{kw}")
+    if is_set:
+        rec.ssid = to_int(f1[0]) if f1 else 0
+        if kind == "RADIATION":
+            rtype = to_int(f1[1]) if len(f1) > 1 and f1[1].strip() else 1
+            rec.pserod = to_int(f1[6]) if len(f1) > 6 else 0
+            if not _radiation_type_ok(state, kw, rtype,
+                                      f"segment set {rec.ssid}", "p.5-122"):
+                return None
+        else:
+            rec.pserod = to_int(f1[1]) if len(f1) > 1 else 0
+    else:
+        # POSITIONAL: a blank N3 beside a stated N4 must leave a hole, not
+        # shift N4 into N3's slot. The trailing-blank / N4 = N3 triangle
+        # spellings are collapsed by the writer, exactly as handle_set_segment
+        # collapses them.
+        rec.nodes = [to_int(f1[j]) if len(f1) > j else 0 for j in range(4)]
+        if kind == "RADIATION":
+            rtype = to_int(f1[4]) if len(f1) > 4 and f1[4].strip() else 1
+            if not _radiation_type_ok(state, kw, rtype, "an explicit segment",
+                                      "p.5-117"):
+                return None
+    return rec
+
+
+def handle_boundary_thermal_bc(block: Block, state: ConversionState) -> None:
+    """*BOUNDARY_{FLUX,CONVECTION,RADIATION}_{SEGMENT,SET} → /IMPFLUX, /CONVEC,
+    /RADIATION.
+
+    All three LS-DYNA keywords are two-card records with the same shape
+    (Vol I R17 pp.5-46, 5-30, 5-117/5-122):
+
+      card 1a (_SET)      FLUX/CONVECTION: ``SSID PSEROD``
+                          RADIATION:       ``SSID TYPE _ _ _ _ PSEROD``
+      card 1b (_SEGMENT)  FLUX/CONVECTION: ``N1 N2 N3 N4``
+                          RADIATION:       ``N1 N2 N3 N4 TYPE``
+      card 2   FLUX:       ``LCID MLC1 MLC2 MLC3 MLC4 LOC NHISV``
+               CONVECTION: ``HLCID HMULT TLCID TMULT LOC``
+               RADIATION:  ``FLCID FMULT TLCID TMULT LOC``
+      card 3   FLUX only, ``ceil(NHISV/8)`` rows of ``HISV1..HISV8``
+
+    **Walked in RAW PAIRS.** The manual prints one card set per keyword
+    (*"Two cards are defined for each option"*), but an LS-DYNA keyword block's
+    data cards repeat until the next ``*``, and this repo already reads
+    ``*BOUNDARY_TEMPERATURE`` — a card with the same silence about repetition —
+    one record per row. The pair is FIXED-SIZE, so a raw-contiguity walk is
+    unambiguous and cannot eat a following entity: a blank card 1 (legal — the
+    cells default) is claimed by row index, never by "the next non-blank row"
+    (the #109/#117/#119 rule).
+
+    The per-field verdicts (the FLUX sign flip, the h-curve refusal, the
+    emissivity de-scaling) all live in the writer, which is where the unit
+    system and the resolved curves are known.
+    """
+    kw = block.keyword
+    is_set = kw.endswith("_SET")
+    is_flux = "FLUX" in kw
+    if not (is_set or kw.endswith("_SEGMENT")):
+        # The manual heads all three keywords with a MANDATORY option
+        # (*BOUNDARY_FLUX_OPTION p.5-46, *BOUNDARY_CONVECTION_OPTION p.5-30,
+        # *BOUNDARY_RADIATION_OPTION1_... p.5-109), so a bare spelling is not
+        # a card LS-DYNA defines. It is read as the _SEGMENT layout — which is
+        # SAFE either way: a deck that meant _SET puts an SSID in the N1 cell,
+        # the remaining node cells come out blank, and the writer drops the
+        # record by name rather than building a one-node surface.
+        state.warn(
+            f"*{kw}: this keyword's OPTION suffix is MANDATORY — Vol I R17 "
+            "heads the card *BOUNDARY_FLUX_OPTION / _CONVECTION_OPTION / "
+            "_RADIATION_OPTION1_{OPTION2}_{OPTION3} with SEGMENT and SET as "
+            "the choices — so the bare spelling is not a card the manual "
+            "defines and its card 1 is ambiguous. It is read as the _SEGMENT "
+            "layout (N1 N2 N3 N4); if the deck meant a segment SET, the record "
+            "will be dropped by name for want of a resolvable segment. Write "
+            f"*{kw}_SET or *{kw}_SEGMENT.")
+    offset = _title_offset(block)
+    raw = block.raw
+    i = offset
+    while i < len(raw):
+        if not raw[i].strip() and not (i + 1 < len(raw)
+                                       and raw[i + 1].strip()):
+            break
+        if i + 1 >= len(raw):
+            state.warn(
+                f"*{kw}: the last card set has a card 1 but no card 2 (the "
+                "value row) — the set is incomplete and is dropped. Each set "
+                "is exactly two cards (Vol I R17 pp.5-30/5-46/5-117).")
+            break
+        f1 = _card(raw, i, fixed=True, n=8, w=10)
+        rec = _boundary_segment_source(state, kw, is_set, f1)
+        f2 = _card(raw, i + 1, fixed=True, n=8, w=10)
+        step = 2
+        if is_flux:
+            nhisv = to_int(f2[6]) if len(f2) > 6 else 0
+            step += (nhisv + 7) // 8 if nhisv > 0 else 0
+            if rec is not None:
+                rec.lcid = to_int(f2[0]) if f2 else 0
+                mlc = [to_float(f2[j]) if len(f2) > j else 0.0
+                       for j in range(1, 5)]
+                # /IMPFLUX splits ONE Fscale_y evenly over the segment's nodes
+                # (fixflux.F:167 FLUX = FOURTH*FLUX). Per-node weights are only
+                # expressible when they agree — but MLCk is "the curve
+                # multiplier at node Nk" (Vol I R17 p.5-48), so which cells may
+                # be compared depends on how many nodes the segments HAVE, and
+                # that is only known once the writer has resolved them. The
+                # whole list is carried through; the writer does the comparing.
+                rec.mult = mlc[0]
+                rec.mlcs = mlc
+                rec.loc = to_int(f2[5]) if len(f2) > 5 else 0
+                if nhisv > 0:
+                    state.note_recognized_not_emitted(
+                        kw,
+                        f"NHISV={nhisv} makes LS-DYNA call the user "
+                        "subroutine usrflux() to compute the flux (Vol I R17 "
+                        "p.5-49 Remark 3). Radioss's /IMPFLUX evaluates a "
+                        "/FUNCT of time and nothing else (fixflux.F:140), so "
+                        "the record is DROPPED rather than converted into the "
+                        "history variables' initial values alone.")
+                    rec = None
+        elif rec is not None:
+            # HMULT -> H for /CONVEC, FMULT -> the f the writer de-scales into
+            # /RADIATION's emissivity cell.
+            rec.coef = to_float(f2[1]) if len(f2) > 1 else 0.0
+            # field 0 is HLCID/FLCID: the h (or f) CURVE, which Radioss has no
+            # slot for at all — recorded so the writer can refuse BY NAME
+            # rather than silently using the constant beside it.
+            rec.coef_lcid = to_int(f2[0]) if f2 else 0
+            rec.lcid = to_int(f2[2]) if len(f2) > 2 else 0          # TLCID
+            rec.fscale = to_float(f2[3]) if len(f2) > 3 else 0.0    # TMULT
+            rec.loc = to_int(f2[4]) if len(f2) > 4 else 0
+        if rec is not None:
+            state.thermal_boundaries.append(rec)
+        i += step
+
+
+def handle_load_thermal_element(block: Block,
+                                state: ConversionState) -> None:
+    """*LOAD_THERMAL_{CONSTANT,VARIABLE}_ELEMENT_{BEAM,SHELL,SOLID,TSHELL}.
+
+    ``_CONSTANT_ELEMENT_<F>``: ``EID T``          (Vol I R17 p.33-168)
+    ``_VARIABLE_ELEMENT_<F>``: ``EID TS TB LCID`` (p.33-184)
+
+    *"Element Cards. Include as many cards in this format as desired"* on both
+    pages, so every row is a record.
+
+    The OPTION suffix is MANDATORY on both keywords — p.33-162 lists
+    ``CONSTANT_ELEMENT_OPTION`` and ``VARIABLE_ELEMENT_OPTION`` with
+    ``BEAM/SHELL/SOLID/TSHELL`` — which is why the bare spellings the registry
+    carried were eight dead entries: a real deck writes
+    ``*LOAD_THERMAL_CONSTANT_ELEMENT_SHELL`` and that spelling was not
+    registered at all.
+    """
+    kw = block.keyword
+    variable = "VARIABLE" in kw
+    family = kw.rsplit("_", 1)[-1]
+    if family not in ("BEAM", "SHELL", "SOLID", "TSHELL"):
+        # The BARE spelling. It is kept registered so it is recognised rather
+        # than skipped, but it is not a card LS-DYNA defines, and falling
+        # through to an empty-family lookup would blame the deck for something
+        # else entirely ("the converted deck has no element elements at all",
+        # printed on a deck full of elements — the #125 class).
+        state.warn(
+            f"*{kw}: the _OPTION suffix is MANDATORY on this keyword. Vol I "
+            "R17 p.33-162 lists it as "
+            + ("VARIABLE_ELEMENT_OPTION" if variable
+               else "CONSTANT_ELEMENT_OPTION")
+            + " with the four choices BEAM, SHELL, SOLID and TSHELL, and the "
+            "card gives no other way to say which element table its EIDs are "
+            "in (element ids are per-family namespaces, so an *ELEMENT_BEAM 50 "
+            "and an *ELEMENT_SHELL 50 can both exist). The card is DROPPED — "
+            f"write *{kw}_SOLID (or _SHELL / _BEAM / _TSHELL).")
+        return
+    offset = _title_offset(block)
+    for i in range(offset, len(block.raw)):
+        if not block.raw[i].strip():
+            continue
+        f = _card(block.raw, i, fixed=True, n=4 if variable else 2, w=10)
+        eid = to_int(f[0]) if f else 0
+        if eid <= 0:
+            state.warn(f"*{kw}: a card states EID={eid} — there is no element "
+                       "to give a temperature to; row dropped.")
+            continue
+        if variable:
+            state.load_thermal_elements.append(LoadThermalElement(
+                source=f"*{kw}", family=family, eid=eid,
+                scale=to_float(f[1]) if len(f) > 1 else 0.0,
+                offset=to_float(f[2]) if len(f) > 2 else 0.0,
+                lcid=to_int(f[3]) if len(f) > 3 else 0))
+        else:
+            state.load_thermal_elements.append(LoadThermalElement(
+                source=f"*{kw}", family=family, eid=eid,
+                temp=to_float(f[1]) if len(f) > 1 else 0.0))
+
+
 def handle_initial_temperature(block: Block, state: ConversionState) -> None:
     """*INITIAL_TEMPERATURE_{SET|NODE} → /INITEMP on a /GRNOD.
 
@@ -10576,49 +11111,118 @@ def handle_load_thermal(block: Block, state: ConversionState) -> None:
 
 def handle_control_solution(block: Block, state: ConversionState) -> None:
     """*CONTROL_SOLUTION: SOLN selects the analysis type (0 structural only,
-    1 thermal only, 2 coupled). Recognized and reported, never acted on.
+    1 thermal only, 2 coupled — Vol I R17 p.12-532).
 
-    Radioss decides the same thing by what the deck CONTAINS: a /HEAT/MAT arms
-    the FE thermal solve for that material (hm_read_therm.F:253 sets
-    MAT_PARAM%ITHERM = 1) and nothing else switches it. So SOLN cannot be
-    mapped to a card — but SOLN = 1 (thermal only) is worth saying out loud,
-    because k2rad emits the full MECHANICAL model for it.
+    **SOLN = 1 IS expressible, and the old warning saying otherwise was
+    wrong.** The engine card is ``/DT/THERM``:
+
+      * ``freform.F:950-951`` sets ``GLOB_THERM%IDT_THERM = 1``;
+      * ``resol.F:1738`` then calls ``BCSDTTH_COPY(..., 1)``, which writes
+        ``ICODT(N) = 7`` AND ``ICODR(N) = 7`` on EVERY node — the whole mesh's
+        translations and rotations are frozen for the run and restored at
+        ``resol.F:9167``;
+      * ``resol.F:5807-5809`` replaces the mechanical step with
+        ``DT2 = GLOB_THERM%DT_THERM``, the conduction stability step;
+      * ``lectur.F:696-698`` prints ``THERMAL ANALYSIS ONLY``.
+
+    That is a thermal-only run mode, term for term. The writer emits the card
+    (``_make_engine_thermal``) and states the two traps it carries — the AMS
+    conflict (``freform.F:1327-1330``, a hard ``ANCMSG(301)`` + ``ARRET``) and
+    the silent divergence when the thermal step is too large for a stiff
+    convection boundary, since the criterion is CONDUCTION-only.
+
+    SOLN is recorded rather than acted on here because the decision needs the
+    emitted deck: a ``/DT/THERM`` on a deck with no ``/HEAT/MAT`` integrates
+    nothing while freezing every DOF.
     """
     offset = _title_offset(block)
-    f = _card(block.raw, offset, fixed=True, n=4, w=10)
+    f = _card(block.raw, offset, fixed=True, n=8, w=10)
     soln = to_int(f[0]) if f else 0
-    if soln == 1:
+    state.ctrl_solution_soln = soln
+    state.ctrl_solution_present = True
+    dropped = []
+    # Vol I R17 p.12-532's Card 1 Default row: SOLN 0, NLQ 0, ISNAN 0,
+    # LCINT 100, LCACC 0, NCDCF 1, NOCOPY 0, CRVP 0. A cell holding its OWN
+    # documented default states nothing, so naming it asks the reader of a
+    # plain structural deck to go and look at a cell that carries no
+    # information — three corpus decks moved for exactly that (LCINT=100 and
+    # NCDCF=1, both written out explicitly). Only a value that DIFFERS from
+    # the manual's default is a real dropped input.
+    # LCINT also absorbs a stated 0 (and anything below 100) because the same
+    # page says "A minimum number of 100 is always used, that is, only larger
+    # input values are possible"; NCDCF absorbs 0 and 1 alike.
+    inert = {"LCINT": lambda v: v <= 100,
+             "NCDCF": lambda v: v in (0, 1)}
+    for i, name in enumerate(("NLQ", "ISNAN", "LCINT", "LCACC", "NCDCF",
+                              "NOCOPY", "CRVP"), start=1):
+        if not (len(f) > i and f[i].strip()):
+            continue
+        v = to_int(f[i])
+        if inert.get(name, lambda x: x == 0)(v):
+            continue
+        dropped.append(f"{name}={f[i].strip()}")
+    if dropped:
         state.warn(
-            "*CONTROL_SOLUTION: SOLN=1 selects a THERMAL-ONLY analysis (no "
-            "structural solve at all). k2rad converts the mechanical model as "
-            "usual — Radioss has no thermal-only run mode; the structural "
-            "degrees of freedom stay live and will respond to whatever loads "
-            "and constraints the deck carries.")
-    elif soln == 2:
+            "*CONTROL_SOLUTION: " + ", ".join(dropped) + " dropped. They are "
+            "vectorisation and curve-plumbing controls (vector length, NaN "
+            "checking, curve rediscretization, load-curve accuracy) with no "
+            "Radioss counterpart; only SOLN reaches the converted deck. "
+            "(Cells stating their own documented default — Vol I R17 p.12-532 "
+            "gives LCINT 100 and NCDCF 1, the rest 0 — are not listed: they "
+            "state nothing to lose.)")
+    if soln == 1:
+        # The engine card and the warning are written by the writer, which
+        # knows whether a /HEAT/MAT exists to make the run integrate anything.
+        return
+    if soln == 2:
         state.note_recognized_not_emitted(
             "CONTROL_SOLUTION",
             "SOLN=2 (coupled structural/thermal). Radioss has no analysis-type "
-            "switch: the FE thermal solve is armed per MATERIAL by /HEAT/MAT "
-            "(hm_read_therm.F:253), which k2rad emits for the parts whose "
-            "*MAT_ADD_THERMAL_EXPANSION or *PART TMID asks for it.")
-    else:
-        state.note_recognized_not_emitted(
-            "CONTROL_SOLUTION",
-            f"SOLN={soln} (structural only) is Radioss's default behaviour — "
-            "nothing to emit.")
+            "switch for the COUPLED case: the FE thermal solve is armed per "
+            "MATERIAL by /HEAT/MAT (hm_read_therm.F:253 sets "
+            "MAT_PARAM%ITHERM = 1, and hm_read_part.F:366 -> "
+            "ale_euler_init.F:193-201 turns that into GLOB_THERM%ITHERM_FE for "
+            "every PART on the material), which k2rad emits for the parts "
+            "whose *MAT_ADD_THERMAL_EXPANSION or *PART TMID asks for it. One "
+            "honest difference: with no /DT/THERM the thermal stability step "
+            "is NEVER COMPUTED (dttherm.F90 and mqviscb.F:644 are both gated "
+            "on IDT_THERM == 1), so a coupled run integrates the temperature "
+            "at the MECHANICAL step with no thermal stability check — safe in "
+            "practice only because the mechanical step is normally far "
+            "smaller.")
+        return
+    state.note_recognized_not_emitted(
+        "CONTROL_SOLUTION",
+        f"SOLN={soln} (structural only) is Radioss's default behaviour — "
+        "nothing to emit.")
 
 
 def _thermal_deferred(keyword: str, what: str, target: str):
-    """Build a handler that names a deferred thermal keyword and drops it."""
+    """Build a handler that names an INEXPRESSIBLE thermal keyword and drops it.
+
+    The text used to promise that the drop was temporary — *"which belongs to
+    the full thermal-solver conversion; this batch ships the thermal-EXPANSION
+    path plus the minimal temperature drivers only"*. That clause is false now
+    that /IMPFLUX, /CONVEC, /RADIATION and the engine thermal controls are
+    converted, so every keyword still routed here is one with no counterpart at
+    all, and the message says exactly that instead.
+
+    The entry is keyed on the SPELLING THE DECK USED, not on *keyword*: the
+    same handler serves a canonical ``*MAT_THERMAL_*`` name and its
+    ``*MAT_T##`` alias (Vol II R17 p.2-9), and a log that answered
+    ``*MAT_THERMAL_CWM`` to a deck writing ``*MAT_T07`` would name a card the
+    deck does not contain. When the two differ the message says so.
+    """
     def _h(block: Block, state: ConversionState) -> None:
+        seen = block.keyword or keyword
+        alias = ("" if seen == keyword else
+                 f" (*{seen} is Vol II R17 p.2-9's numeric alias for "
+                 f"*{keyword})")
         state.note_recognized_not_emitted(
-            keyword,
-            f"{what} — no card written. The Radioss counterpart is {target}, "
-            "which belongs to the full thermal-solver conversion; this batch "
-            "ships the thermal-EXPANSION path plus the minimal temperature "
-            "drivers (/INITEMP, /IMPTEMP) only. Registering the keyword is "
-            "what lets this log say WHICH thermal input the deck loses instead "
-            "of leaving it in the unrecognized-keyword list.")
+            seen,
+            f"{what}{alias} — no card written. {target}. Registering the "
+            "keyword is what lets this log say WHICH thermal input the deck "
+            "loses instead of leaving it in the unrecognized-keyword list.")
     return _h
 
 
@@ -16995,6 +17599,53 @@ RARE_MATERIAL_KEYWORDS = {
     "LOAD_THERMAL_VARIABLE":      handle_load_thermal,
     "LOAD_THERMAL_VARIABLE_NODE": handle_load_thermal,
     "CONTROL_SOLUTION":           handle_control_solution,
+    # ── THERMAL SOLVER batch ───────────────────────────────────────────────
+    # The three heat-source boundary conditions. OPTION is MANDATORY on all
+    # three (Vol I R17 pp.5-46/5-30/5-109 head them
+    # *BOUNDARY_FLUX_OPTION / *BOUNDARY_CONVECTION_OPTION /
+    # *BOUNDARY_RADIATION_OPTION1_{OPTION2}_{OPTION3}), so _SEGMENT is as real
+    # a spelling as _SET — and it was the one MISSING: a probe deck carrying
+    # *BOUNDARY_FLUX_SEGMENT came out as "Skipped (unsupported) keywords" on
+    # master. The bare spellings are kept because they cost nothing and the
+    # registry already carried them.
+    "BOUNDARY_FLUX_SEGMENT":       handle_boundary_thermal_bc,
+    "BOUNDARY_FLUX_SET":           handle_boundary_thermal_bc,
+    "BOUNDARY_FLUX":               handle_boundary_thermal_bc,
+    "BOUNDARY_CONVECTION_SEGMENT": handle_boundary_thermal_bc,
+    "BOUNDARY_CONVECTION_SET":     handle_boundary_thermal_bc,
+    "BOUNDARY_CONVECTION":         handle_boundary_thermal_bc,
+    "BOUNDARY_RADIATION_SEGMENT":  handle_boundary_thermal_bc,
+    "BOUNDARY_RADIATION_SET":      handle_boundary_thermal_bc,
+    "BOUNDARY_RADIATION":          handle_boundary_thermal_bc,
+    "CONTROL_THERMAL_SOLVER":      handle_control_thermal_solver,
+    "CONTROL_THERMAL_TIMESTEP":    handle_control_thermal_timestep,
+    "CONTROL_THERMAL_NONLINEAR":   handle_control_thermal_nonlinear,
+    "MAT_THERMAL_ORTHOTROPIC":     handle_mat_thermal_orthotropic,
+    "MAT_THERMAL_ISOTROPIC_TD":    handle_mat_thermal_isotropic_td,
+    "MAT_THERMAL_ISOTROPIC_TD_LC": handle_mat_thermal_isotropic_td,
+    # The *MAT_T## numeric aliases are NOT written out here: they are generated
+    # from _MAT_THERMAL_ALIASES below, one row per canonical name, so an alias
+    # can never end up less well diagnosed than the name it aliases (the
+    # MISTAKES.md "suffix/option-order combinatorics ... hand-kept lookup
+    # tables drift" rule). Hand-listing them had already gone wrong: *MAT_T07
+    # landed in the generic "Skipped (unsupported) keywords" list while its
+    # exact synonym *MAT_THERMAL_CWM, registered two screens away, got a named
+    # drop.
+    # The FOUR mandatory _OPTION suffixes of each element-temperature keyword
+    # (Vol I R17 p.33-162 lists CONSTANT_ELEMENT_OPTION and
+    # VARIABLE_ELEMENT_OPTION; p.33-168 / p.33-184 give OPTION = BEAM, SHELL,
+    # SOLID, TSHELL). These were EIGHT dead spellings: the registry carried the
+    # bare forms only, and a real deck never writes those.
+    "LOAD_THERMAL_CONSTANT_ELEMENT":        handle_load_thermal_element,
+    "LOAD_THERMAL_CONSTANT_ELEMENT_BEAM":   handle_load_thermal_element,
+    "LOAD_THERMAL_CONSTANT_ELEMENT_SHELL":  handle_load_thermal_element,
+    "LOAD_THERMAL_CONSTANT_ELEMENT_SOLID":  handle_load_thermal_element,
+    "LOAD_THERMAL_CONSTANT_ELEMENT_TSHELL": handle_load_thermal_element,
+    "LOAD_THERMAL_VARIABLE_ELEMENT":        handle_load_thermal_element,
+    "LOAD_THERMAL_VARIABLE_ELEMENT_BEAM":   handle_load_thermal_element,
+    "LOAD_THERMAL_VARIABLE_ELEMENT_SHELL":  handle_load_thermal_element,
+    "LOAD_THERMAL_VARIABLE_ELEMENT_SOLID":  handle_load_thermal_element,
+    "LOAD_THERMAL_VARIABLE_ELEMENT_TSHELL": handle_load_thermal_element,
     # *SECTION_SHELL_THERMAL: the option adds exactly ONE extra card per card
     # set (Vol I R17 p.41-62/63) carrying the section's own TMID, and
     # handle_section_shell's card-set walk ALREADY strides it
@@ -17003,58 +17654,57 @@ RARE_MATERIAL_KEYWORDS = {
     # thickness, and earns one ERROR 495 "SHELL HAS A NULL THICKNESS" per
     # element — into a parse.
     "SECTION_SHELL_THERMAL":      handle_section_shell,
-    # ── Recognized + named warn-drop (deferred to the full thermal solver) ──
-    "CONTROL_THERMAL_SOLVER": _thermal_deferred(
-        "CONTROL_THERMAL_SOLVER",
-        "the thermal solver's own type, linear-solver choice and convergence "
-        "controls", "the /THERM engine controls"),
-    "CONTROL_THERMAL_TIMESTEP": _thermal_deferred(
-        "CONTROL_THERMAL_TIMESTEP",
-        "the thermal time-step controls (TS, TIP, ITS, TMIN, TMAX, DTEMP)",
-        "/DTTHERM"),
-    "CONTROL_THERMAL_NONLINEAR": _thermal_deferred(
-        "CONTROL_THERMAL_NONLINEAR",
-        "the nonlinear thermal convergence controls (REFMAX, TOL, DCP)",
-        "the /THERM nonlinear controls"),
-    "BOUNDARY_FLUX_SET": _thermal_deferred(
-        "BOUNDARY_FLUX_SET", "an imposed heat FLUX on a segment set",
-        "/IMPFLUX"),
-    "BOUNDARY_FLUX": _thermal_deferred(
-        "BOUNDARY_FLUX", "an imposed heat FLUX on a segment set", "/IMPFLUX"),
-    "BOUNDARY_CONVECTION_SET": _thermal_deferred(
-        "BOUNDARY_CONVECTION_SET", "a convective boundary (h, T_inf)",
-        "/CONVEC"),
-    "BOUNDARY_CONVECTION": _thermal_deferred(
-        "BOUNDARY_CONVECTION", "a convective boundary (h, T_inf)", "/CONVEC"),
-    "BOUNDARY_RADIATION_SET": _thermal_deferred(
-        "BOUNDARY_RADIATION_SET", "a radiating boundary (emissivity, T_inf)",
-        "/RADIATION"),
-    "BOUNDARY_RADIATION": _thermal_deferred(
-        "BOUNDARY_RADIATION", "a radiating boundary (emissivity, T_inf)",
-        "/RADIATION"),
+    # ── Recognized + named warn-drop: NO Radioss counterpart exists ─────────
+    # *CONTROL_THERMAL_FORMING is a SHORTHAND for the four cards above plus a
+    # block of contact thermal properties (Vol I R17 p.12-567 prints the
+    # equivalence explicitly), so a deck can configure the thermal solver
+    # through it WITHOUT a *CONTROL_THERMAL_SOLVER. The two cells that would
+    # map (TSF, FWORK) are on its card 1, but the keyword also carries the
+    # per-contact-pair thermal cards 2.1/2.2 that k2rad has no target for at
+    # all, and reading half a card set would make the log claim a conversion it
+    # did not do. Named, whole.
+    "CONTROL_THERMAL_FORMING": _thermal_deferred(
+        "CONTROL_THERMAL_FORMING",
+        "the hot-stamping thermal shorthand (ITS, PTYPE, TSF, THSHEL, ITHOFF, "
+        "SOLVER, FWORK plus a default set of per-contact-pair thermal and "
+        "friction properties, Vol I R17 pp.12-561..570)",
+        "Radioss has no thermal CONTACT conductance model at all — the "
+        "/INTER/TYPE7 family carries no interface conductivity, gap-dependent "
+        "h or contact heat-generation cells — so the keyword's own point (one "
+        "card configuring every die/blank pair) has no target. State "
+        "*CONTROL_THERMAL_SOLVER instead if only its TSF/FWORK cells are "
+        "wanted: k2rad converts those two"),
+    "CONTROL_THERMAL_EIGENVALUE": _thermal_deferred(
+        "CONTROL_THERMAL_EIGENVALUE",
+        "a thermal EIGENVALUE analysis (the decay modes of the conduction "
+        "operator)",
+        "no Radioss counterpart: there is no thermal stiffness matrix to "
+        "extract eigenvalues from — tempur.F:48-55 integrates the temperature "
+        "explicitly on a lumped capacity, and the engine's own structural "
+        "eigensolver is a compiled-out stub on this build"),
     "MAT_THERMAL_CWM": _thermal_deferred(
         "MAT_THERMAL_CWM",
-        "a computational-welding-mechanics thermal material (phase-dependent "
-        "conductivity and capacity, with element birth)",
-        "no Radioss counterpart at all"),
-    "MAT_THERMAL_ORTHOTROPIC": _thermal_deferred(
-        "MAT_THERMAL_ORTHOTROPIC",
-        "an ORTHOTROPIC thermal material (three conductivities)",
-        "/HEAT/MAT, which is isotropic — AS + BS*T only"),
-    "MAT_THERMAL_ISOTROPIC_TD": _thermal_deferred(
-        "MAT_THERMAL_ISOTROPIC_TD",
-        "a temperature-DEPENDENT isotropic thermal material (HC and TC as "
-        "tabulated functions of T)",
-        "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
+        "a computational-welding-mechanics thermal material: quiet/dead/live "
+        "property pairs interpolated by a phase fraction gamma(T_max) with an "
+        "element BIRTH time (Vol II R17 pp.3-25..3-27)",
+        "no Radioss counterpart at all — /HEAT/MAT holds ONE (T0, RHO0_CP, "
+        "AS, BS, T1, AL, BL) set with no birth, no ghost properties and no "
+        "history of the peak temperature (re-verified against "
+        "hm_read_therm.F:157-166, which reads exactly those nine cells)"),
     "LOAD_THERMAL_D3PLOT": _thermal_deferred(
         "LOAD_THERMAL_D3PLOT",
-        "nodal temperatures read from an external d3plot file",
-        "no Radioss counterpart"),
-    # The remaining REAL *LOAD_THERMAL_* spellings of Vol I R17 (the keyword's
-    # own table of contents lists BINOUT, CONSTANT[_ELEMENT|_NODE], D3PLOT,
-    # LOAD_CURVE, RSW, TOPAZ, VARIABLE[_BEAM|_ELEMENT|_NODE|_SHELL] and nothing
-    # else — there is no *LOAD_THERMAL_DYNAIN). Registered so the log names
-    # them instead of listing them as unrecognized.
+        "nodal temperatures read from an external d3plot file, named by "
+        "T = tpf on the execution line (Vol I R17 p.33-170)",
+        "no Radioss counterpart: /IMPTEMP and /INITEMP take a /FUNCT and a "
+        "/GRNOD, and no Radioss card reads a result database as a load"),
+    # The remaining REAL *LOAD_THERMAL_* spellings of Vol I R17 p.33-162, which
+    # lists BINOUT, CONSTANT, CONSTANT_ELEMENT_OPTION, CONSTANT_NODE, D3PLOT,
+    # LOAD_CURVE, RSW, TOPAZ, VARIABLE, VARIABLE_ELEMENT_OPTION, VARIABLE_NODE
+    # and VARIABLE_SHELL_OPTION — there is no *LOAD_THERMAL_DYNAIN. Note the
+    # page's list is itself incomplete: *LOAD_THERMAL_VARIABLE_BEAM has its own
+    # section at p.33-181 and appears in neither that OPTION list nor the
+    # load-type table, a manual self-contradiction. Both it and
+    # *LOAD_THERMAL_VARIABLE_SHELL take a {<BLANK>|SET} suffix.
     "LOAD_THERMAL_RSW": _thermal_deferred(
         "LOAD_THERMAL_RSW",
         "a resistance-spot-weld nugget temperature history, positioned by an "
@@ -17063,39 +17713,241 @@ RARE_MATERIAL_KEYWORDS = {
         "geometric nugget model"),
     "LOAD_THERMAL_TOPAZ": _thermal_deferred(
         "LOAD_THERMAL_TOPAZ",
-        "nodal temperatures read from a TOPAZ3D database",
-        "no Radioss counterpart"),
-    "LOAD_THERMAL_CONSTANT_ELEMENT": _thermal_deferred(
-        "LOAD_THERMAL_CONSTANT_ELEMENT",
-        "a constant temperature stated per ELEMENT",
-        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD "
-        "(fixtemp.F:180-200) — there is no per-element temperature card"),
-    "LOAD_THERMAL_VARIABLE_ELEMENT": _thermal_deferred(
-        "LOAD_THERMAL_VARIABLE_ELEMENT",
-        "a time-varying temperature stated per ELEMENT",
-        "/IMPTEMP, which is a NODAL Dirichlet reset on a /GRNOD"),
+        "nodal temperatures read in from the TOPAZ3D database (Vol I R17 "
+        "p.33-178)",
+        "no Radioss counterpart: no Radioss card reads an external thermal "
+        "database as a nodal load"),
     "LOAD_THERMAL_VARIABLE_BEAM": _thermal_deferred(
         "LOAD_THERMAL_VARIABLE_BEAM",
-        "a time-varying temperature stated per BEAM element, with a "
-        "through-depth gradient",
-        "/IMPTEMP, which sets ONE temperature per node and carries no "
-        "cross-section gradient"),
+        "a temperature history stated per CROSS-SECTION POINT of a "
+        "Hughes-Liu beam — card 1 'ID EID/SID IPOLAR' then a list of "
+        "'TBASE TSCALE TCURVE TCURDR SCOOR TCOOR' rows at normalised section "
+        "coordinates, interpolated to the integration points (Vol I R17 "
+        "pp.33-181..183)",
+        "no Radioss counterpart: the whole point of the card is the "
+        "cross-section GRADIENT, and /IMPTEMP writes ONE temperature per node "
+        "(fixtemp.F:196-205) — there is no per-integration-point temperature "
+        "anywhere in Radioss. Converting the section MEAN would silently "
+        "discard the gradient that is the card's only content"),
+    "LOAD_THERMAL_VARIABLE_BEAM_SET": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_BEAM_SET",
+        "the beam-SET spelling of the per-cross-section-point temperature "
+        "history (card 1 field 2 is a *SET_BEAM id, Vol I R17 p.33-181)",
+        "no Radioss counterpart, for the same reason as the bare spelling: "
+        "/IMPTEMP carries no cross-section gradient"),
     "LOAD_THERMAL_VARIABLE_SHELL": _thermal_deferred(
         "LOAD_THERMAL_VARIABLE_SHELL",
-        "a time-varying temperature stated per SHELL element, with a "
-        "through-thickness gradient",
-        "/IMPTEMP, which sets ONE temperature per node and carries no "
-        "through-thickness gradient"),
-    "MAT_THERMAL_ISOTROPIC_TD_LC": _thermal_deferred(
-        "MAT_THERMAL_ISOTROPIC_TD_LC",
-        "a temperature-DEPENDENT isotropic thermal material whose HC and TC "
-        "are *DEFINE_CURVEs",
-        "/HEAT/MAT, whose conductivity is the linear AS + BS*T only"),
+        "a temperature history stated per THROUGH-THICKNESS point of a shell "
+        "— card 1 'ID EID/SID' then a list of "
+        "'TBASE TSCALE TCURVE TCURDR ZCO' rows at ZCO in [-1, +1], linearly "
+        "interpolated between them (Vol I R17 pp.33-186/187)",
+        "no Radioss counterpart: /IMPTEMP writes ONE temperature per node and "
+        "carries no through-thickness gradient, and Radioss has no per-layer "
+        "temperature field to write one into"),
+    "LOAD_THERMAL_VARIABLE_SHELL_SET": _thermal_deferred(
+        "LOAD_THERMAL_VARIABLE_SHELL_SET",
+        "the shell-SET spelling of the per-through-thickness-point "
+        "temperature history (card 1 field 2 is a *SET_SHELL id, Vol I R17 "
+        "p.33-186)",
+        "no Radioss counterpart, for the same reason as the bare spelling: "
+        "/IMPTEMP carries no through-thickness gradient"),
     "LOAD_THERMAL_BINOUT": _thermal_deferred(
         "LOAD_THERMAL_BINOUT",
-        "nodal temperatures read back from a previous run's binout",
-        "no Radioss counterpart"),
+        "nodal temperatures read back from a previous run's binout (DEFTEMP "
+        "plus a list of FILENAME / 'STARTT TSF TMPOFF NIDOFF' rows naming the "
+        "LSDA TPRINT sections, Vol I R17 pp.33-164/165)",
+        "no Radioss counterpart: no Radioss card reads a result database as a "
+        "nodal load"),
+    # ── *BOUNDARY_RADIATION view-factor spellings ───────────────────────────
+    # OPTION1 x OPTION2 x OPTION3 (Vol I R17 p.5-110 lists the seven concrete
+    # spellings). Every one that is not the bare environment form exchanges
+    # heat between SURFACES through view factors, which nothing in
+    # engine/source/constraints/thermic can express.
+    **{
+        _kw: _thermal_deferred(
+            _kw,
+            "a VIEW-FACTOR radiation surface (TYPE=2, "
+            + ("read from the 'viewfl' file" if "READ" in _kw else
+               "with the view factors computed by LS-DYNA" if "CALCULATE"
+               in _kw else "an MPP-only radiation enclosure")
+            + ("; the _RESTART suffix resumes an interrupted view-factor "
+               "calculation" if _kw.endswith("_RESTART") else ""),
+            "no Radioss counterpart: /RADIATION is radiation to an "
+            "ENVIRONMENT temperature only (radiation.F:155 computes "
+            "AREA*EMISIG*(T_INF**4 - TE**4) from ONE segment's own nodes), "
+            "and there is no surface-to-surface exchange, no enclosure and no "
+            "view-factor machinery anywhere in "
+            "engine/source/constraints/thermic")
+        for _kw in (
+            "BOUNDARY_RADIATION_ENCLOSURE",
+            "BOUNDARY_RADIATION_SET_VF_READ",
+            "BOUNDARY_RADIATION_SET_VF_CALCULATE",
+            "BOUNDARY_RADIATION_SET_VF_READ_RESTART",
+            "BOUNDARY_RADIATION_SET_VF_CALCULATE_RESTART",
+            "BOUNDARY_RADIATION_SEGMENT_VF_READ",
+            "BOUNDARY_RADIATION_SEGMENT_VF_CALCULATE",
+            "BOUNDARY_RADIATION_SEGMENT_VF_READ_RESTART",
+            "BOUNDARY_RADIATION_SEGMENT_VF_CALCULATE_RESTART",
+        )
+    },
+    "BOUNDARY_FLUX_TRAJECTORY": _thermal_deferred(
+        "BOUNDARY_FLUX_TRAJECTORY",
+        "a MOVING heat-flux source (a laser or torch) that travels along a "
+        "nodal path with its own beam profile (Vol I R17 p.5-50)",
+        "no Radioss counterpart: /IMPFLUX applies a flux density to a FIXED "
+        "/SURF (fixflux.F:149-203) with no position argument, so the "
+        "trajectory — the whole content of the card — cannot be expressed"),
+    # ── The remaining *MAT_THERMAL_* families of Vol II R17 p.2-9 ───────────
+    # Registering them is what turns a silent line in "Skipped (unsupported)
+    # keywords" into a statement of WHICH thermal material the deck loses. The
+    # numeric *MAT_T## aliases are attached below, from ONE table.
+    "MAT_THERMAL_ORTHOTROPIC_TD": _thermal_deferred(
+        "MAT_THERMAL_ORTHOTROPIC_TD",
+        "a TABULATED orthotropic thermal material — three direction-dependent "
+        "conductivities, each stated as a (temperature, value) table, plus a "
+        "material axis definition (Vol II R17 pp.3-13..3-18)",
+        "/HEAT/MAT is ISOTROPIC and takes no function ids at any cfg version "
+        "(hm_read_therm.F:157-166 reads nine scalars), so neither the "
+        "anisotropy nor the tabulation has a target. State "
+        "*MAT_THERMAL_ISOTROPIC_TD if the three directions are equal in fact: "
+        "k2rad fits that onto AS + BS*T"),
+    "MAT_THERMAL_ORTHOTROPIC_TD_LC": _thermal_deferred(
+        "MAT_THERMAL_ORTHOTROPIC_TD_LC",
+        "the load-curve spelling of the tabulated orthotropic thermal "
+        "material — the same three direction-dependent conductivities, given "
+        "as *DEFINE_CURVE ids instead of in-card tables",
+        "/HEAT/MAT is ISOTROPIC and holds one (AS, BS) pair, so the "
+        "anisotropy has no target; see *MAT_THERMAL_ORTHOTROPIC_TD"),
+    "MAT_THERMAL_DISCRETE_BEAM": _thermal_deferred(
+        "MAT_THERMAL_DISCRETE_BEAM",
+        "a thermal property set for DISCRETE beam elements (Vol II R17 "
+        "p.3-19)",
+        "no Radioss counterpart: /HEAT/MAT is keyed on a structural material "
+        "id and Radioss's discrete elements (/PROP/TYPE4 springs) carry no "
+        "conduction path at all — pforc3.F's conduction is the HUGHES-LIU "
+        "beam's"),
+    "MAT_THERMAL_CHEMICAL_REACTION": _thermal_deferred(
+        "MAT_THERMAL_CHEMICAL_REACTION",
+        "a thermal material with up to three Arrhenius decomposition "
+        "reactions, each adding its own heat of reaction to the energy "
+        "balance (Vol II R17 pp.3-21..3-24)",
+        "no Radioss counterpart: /HEAT/MAT has no reaction, no species and no "
+        "heat-of-reaction cell, and there is no chemical-kinetics source term "
+        "anywhere in engine/source/constraints/thermic"),
+    "MAT_THERMAL_CHEMICAL_REACTION_ORTHOTROPIC": _thermal_deferred(
+        "MAT_THERMAL_CHEMICAL_REACTION_ORTHOTROPIC",
+        "the orthotropic spelling of the Arrhenius decomposition thermal "
+        "material",
+        "no Radioss counterpart, twice over: /HEAT/MAT is isotropic and has "
+        "no reaction terms"),
+    "MAT_THERMAL_ISOTROPIC_PHASE_CHANGE": _thermal_deferred(
+        "MAT_THERMAL_ISOTROPIC_PHASE_CHANGE",
+        "a thermal material carrying a solid/liquid PHASE CHANGE — a latent "
+        "heat released over a solidus/liquidus interval",
+        "/HEAT/MAT's T1/AL/BL cells do split conductivity at a melting "
+        "temperature, but there is no LATENT HEAT cell anywhere on the card "
+        "(hm_read_therm.F:157-166) and RHO0_CP is one constant, so the "
+        "enthalpy of the transformation — the point of the keyword — cannot "
+        "be carried"),
+    "MAT_THERMAL_ISPG": _thermal_deferred(
+        "MAT_THERMAL_ISPG",
+        "the thermal material of the ISPG (incompressible smoothed particle "
+        "Galerkin) solver",
+        "no Radioss counterpart: there is no ISPG solver in OpenRadioss"),
+    "MAT_THERMAL_USER_DEFINED": _thermal_deferred(
+        "MAT_THERMAL_USER_DEFINED",
+        "a USER SUBROUTINE thermal material (*MAT_T11..T15), whose "
+        "conductivity and capacity are computed by compiled-in code",
+        "no Radioss counterpart: /HEAT/MAT is a fixed nine-scalar card and "
+        "Radioss's user-material hooks (/MAT/USERn) are STRUCTURAL laws with "
+        "no thermal-property entry point"),
+    # ── The thermal *BOUNDARY_ families with no counterpart ─────────────────
+    "BOUNDARY_TEMPERATURE_PERIODIC_SET": _thermal_deferred(
+        "BOUNDARY_TEMPERATURE_PERIODIC_SET",
+        "a PERIODIC temperature boundary condition tying two segment sets "
+        "(SSID1/SSID2, with a translation or a rotation about AXE/NID by "
+        "ANGLE, Vol I R17 p.5-152)",
+        "no Radioss counterpart: /IMPTEMP prescribes an absolute temperature "
+        "on a /GRNOD from a /FUNCT of time (fixtemp.F:180-199) and there is "
+        "no constraint anywhere in Radioss that ties one node's temperature "
+        "to another's"),
+    "BOUNDARY_TEMPERATURE_RSW": _thermal_deferred(
+        "BOUNDARY_TEMPERATURE_RSW",
+        "a resistance-spot-weld nugget: temperatures prescribed to whatever "
+        "nodes fall inside a growing ELLIPSOIDAL region (Vol I R17 p.5-154)",
+        "no Radioss counterpart: /IMPTEMP drives a node group fixed at "
+        "conversion time, with no geometric region and no membership that "
+        "changes during the run"),
+    "BOUNDARY_TEMPERATURE_TRAJECTORY": _thermal_deferred(
+        "BOUNDARY_TEMPERATURE_TRAJECTORY",
+        "a temperature boundary condition applied to whatever nodes lie "
+        "inside a cylinder or prism that MOVES along a nodal path at a "
+        "prescribed speed (Vol I R17 p.5-159)",
+        "no Radioss counterpart: /IMPTEMP's /GRNOD is resolved once in the "
+        "starter and cannot follow a trajectory"),
+    "BOUNDARY_THERMAL_BULKFLOW": _thermal_deferred(
+        "BOUNDARY_THERMAL_BULKFLOW",
+        "bulk FLUID-FLOW elements carrying a mass flow rate MDOT along beam "
+        "elements, optionally with the fluid upwind algorithm "
+        "(*BOUNDARY_THERMAL_BULKFLOW_OPTION1_{OPTION2}, OPTION1 = ELEMENT or "
+        "SET, OPTION2 = UPWIND, Vol I R17 p.5-164)",
+        "no Radioss counterpart: there is no advective transport term in the "
+        "Lagrangian thermal solver — tempur.F:48-55 is the whole integrator "
+        "and every source adds heat to a node, never to a flowing stream"),
+    "BOUNDARY_THERMAL_BULKNODE": _thermal_deferred(
+        "BOUNDARY_THERMAL_BULKNODE",
+        "a thermal BULK NODE: a lumped-capacity reservoir of volume VOL "
+        "exchanging heat with NBNSEG structural segments through its own h "
+        "(Vol I R17 p.5-165)",
+        "no Radioss counterpart: /CONVEC exchanges with an ENVIRONMENT "
+        "temperature read from a /FUNCT of time (convec.F:152), never with a "
+        "second body whose own temperature the exchange updates"),
+    "BOUNDARY_THERMAL_WELD": _thermal_deferred(
+        "BOUNDARY_THERMAL_WELD",
+        "a MOVING welding heat source with a double-ellipsoid (Goldak) "
+        "distribution — semi-axes a/b/cf/cr, power Q and the front/rear "
+        "fractions Ff/Fr (Vol I R17 p.5-167)",
+        "no Radioss counterpart: /IMPFLUX applies a flux density to a FIXED "
+        "/SURF (fixflux.F:149-203) with no position argument and no volume "
+        "source, so neither the motion nor the depth distribution can be "
+        "expressed"),
+    "BOUNDARY_THERMAL_WELD_TRAJECTORY": _thermal_deferred(
+        "BOUNDARY_THERMAL_WELD_TRAJECTORY",
+        "the nodal-path spelling of the moving welding heat source, with a "
+        "prescribed velocity along the path (Vol I R17 p.5-171)",
+        "no Radioss counterpart, for the same reason as *BOUNDARY_THERMAL_"
+        "WELD: /IMPFLUX has no position argument"),
 }
+
+#: Vol II R17 p.2-9, verbatim: the ``*MAT_T##`` numeric aliases of the thermal
+#: material families. ONE table, so an alias can never be registered (or
+#: diagnosed) differently from the name it aliases. Note the gaps are the
+#: MANUAL's: T11-T15 are five aliases of one card, there is no T16, and T17/T18
+#: exist. Every canonical name below must already be a key of
+#: RARE_MATERIAL_KEYWORDS — the loop asserts it.
+_MAT_THERMAL_ALIASES = {
+    "MAT_THERMAL_ISOTROPIC":                     ("MAT_T01",),
+    "MAT_THERMAL_ORTHOTROPIC":                   ("MAT_T02",),
+    "MAT_THERMAL_ISOTROPIC_TD":                  ("MAT_T03",),
+    "MAT_THERMAL_ORTHOTROPIC_TD":                ("MAT_T04",),
+    "MAT_THERMAL_DISCRETE_BEAM":                 ("MAT_T05",),
+    "MAT_THERMAL_CHEMICAL_REACTION":             ("MAT_T06",),
+    "MAT_THERMAL_CWM":                           ("MAT_T07",),
+    "MAT_THERMAL_ORTHOTROPIC_TD_LC":             ("MAT_T08",),
+    "MAT_THERMAL_ISOTROPIC_PHASE_CHANGE":        ("MAT_T09",),
+    "MAT_THERMAL_ISOTROPIC_TD_LC":               ("MAT_T10",),
+    "MAT_THERMAL_USER_DEFINED":                  ("MAT_T11", "MAT_T12",
+                                                 "MAT_T13", "MAT_T14",
+                                                 "MAT_T15"),
+    "MAT_THERMAL_CHEMICAL_REACTION_ORTHOTROPIC": ("MAT_T17",),
+    "MAT_THERMAL_ISPG":                          ("MAT_T18",),
+}
+
+for _name, _aliases in _MAT_THERMAL_ALIASES.items():
+    _canon = RARE_MATERIAL_KEYWORDS[_name]
+    for _alias in _aliases:
+        RARE_MATERIAL_KEYWORDS[_alias] = _canon
+del _name, _aliases, _canon, _alias
 for _kw, _h in RARE_MATERIAL_KEYWORDS.items():
     HANDLERS[_kw] = _h
 del _kw, _h
