@@ -170,11 +170,13 @@ below for the measurement.
      line to fix (PR #134 split the two worst sections); a wrong *group* bakes
      the mistake into 5-100 call sites and costs another mechanical rewrite.
   4. **The verification net cannot cover the migration's riskiest part.** The
-     state is reached dynamically at **12 sites** in `k2rad/` — `getattr` on a
+     state is reached dynamically at **11 sites** in `k2rad/` — `getattr` on a
      computed name at `handlers.py`, `writer/mesh.py` (×5), `writer/tshell.py`;
-     `vars(state)` at `writer/sph.py`; plus four vestigial
-     `getattr(state, "<literal>", default)` calls — and 6 more in `tests/`. Six
-     of the twelve fail **silently** rather than raising: the `vars(state)` walk
+     `vars(state)` at `writer/sph.py`; plus three vestigial
+     `getattr(state, "<literal>", default)` calls (`options`, `define_tables`,
+     `contacts_type25`; PR #134 retired a fourth, `table_1d_ids`) — and 6 more
+     in `tests/`. Five
+     of the eleven fail **silently** rather than raising: the `vars(state)` walk
      in `sph.py` would simply find no `mat_*` dict and report every SPH density
      as 0.0. A 163-deck corpus sweep (all `SET_*_ADD` / SPH / TSHELL carriers in
      `C:\openradioss_run` and the `dynaexamples` tree, 0 errors) reached **0
@@ -196,7 +198,7 @@ below for the measurement.
   passed independently (e.g. a back-end taking only mesh + materials); (c) the
   dynamic-access sites falling to ≤ 2 and the corpus growing decks that exercise
   every one of them; (d) a measured mypy or IDE benefit the flat shape provably
-  cannot give. Whoever does reopen it should first make the four defensive
+  cannot give. Whoever does reopen it should first make the three remaining
   `getattr(state, "literal", default)` calls direct attribute reads, so a rename
   fails loudly, and give `sph.py`'s `vars(state)` walk an explicit registry —
   otherwise the refactor's first symptom is wrong physics at zero diagnostics.
@@ -1093,12 +1095,12 @@ is kept as the rationale record, and re-checked against the repo at PR #134.
   CI `typecheck` job fails the build on a new finding. The pin is deliberate: an
   unpinned `pip install mypy` lets a future release turn master red with no
   change on our side. Two environments must both stay clean — `mypy k2rad` in a
-  venv that has numpy/scipy, and `mypy --no-site-packages k2rad`, which is what
-  the CI job actually runs.
+  venv that has numpy/scipy, and `mypy --no-site-packages k2rad`, which
+  reproduces locally the bare environment the CI job runs `mypy k2rad` in.
   *Next tiers, measured on the clean tree, not scheduled:*
   `--check-untyped-defs` = **2** findings (two `Need type annotation for "out"`,
   and it silences the 10 `annotation-unchecked` notes) — a near-free next step;
-  `--disallow-untyped-defs` = 479; `--strict` = 1189.
+  `--disallow-untyped-defs` = 479; `--strict` = 1184.
 - **Windows CI leg** *(done)* — the `test` job matrix is
   `[ubuntu-latest, windows-latest]` × Python 3.9-3.12.
 - **PyPI publish + releases** *(done)* — `.github/workflows/publish.yml` builds

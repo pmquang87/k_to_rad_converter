@@ -123,9 +123,9 @@ The state is deliberately **flat but sectioned** — one level of fields under
 section comments, not `state.mesh.nodes` sub-dataclasses. See ROADMAP's
 "Architecture refactors" for the measurement that closed the grouping idea:
 0 of the 194 mypy findings burned down in PR #134 came from the state's shape,
-the 352 fields fall into 29 families rather than 4-6, and twelve dynamic-access
+the 352 fields fall into 29 families rather than 4-6, and eleven dynamic-access
 sites (`getattr` on a computed name, and a `vars(state)` walk in
-`writer/sph.py`) would break a grouping *silently*.
+`writer/sph.py`) would break a grouping — five of them *silently*.
 
 `ConvertOptions` holds the opt-in CLI switches (`auto_gapmin`, `gapmin_factor`,
 `deformable_contact_recipe`, `emit_eig`, `ams`, `rigid_cog_master`,

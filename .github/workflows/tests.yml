@@ -62,15 +62,19 @@ jobs:
     # mypy is PINNED, unlike ruff in the lint job below, which floats: an
     # advisory check that goes red on a new tool release costs nothing, a
     # blocking one breaks master on a rule that did not exist when the burn-down
-    # was measured. Bump the pin deliberately, together with the one in
-    # pyproject.toml's `dev` extra, and re-run the burn-down.
+    # was measured. THIS LINE IS THE ONLY PIN — pyproject.toml's `dev` extra
+    # lists mypy unpinned on purpose, so a contributor's local floating mypy can
+    # report a finding CI does not without master going red on its own. Bump the
+    # pin here deliberately and re-run the burn-down; do not add a second pin to
+    # the extra.
     #
     # Deliberately mypy-only: the package declares no runtime dependencies, and
     # `ignore_missing_imports` covers the two optional imports in gapmin.py.
     # Installing numpy here would CHANGE the finding count (numpy ships inline
-    # types) — before PR #134's gapmin fix the two environments disagreed by 19
-    # findings. Reproduce this environment locally with
-    # `mypy --no-site-packages k2rad`; both must be clean.
+    # types) — before PR #134's gapmin fix the two environments disagreed by 17
+    # findings (194 with site-packages, 211 without, both on master 6060946).
+    # Reproduce this environment locally with `mypy --no-site-packages k2rad`;
+    # both must be clean.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

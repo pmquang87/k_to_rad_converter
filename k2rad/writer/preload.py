@@ -517,10 +517,14 @@ def _set_section_scope(state: ConversionState, cs, iss, extra, label: str):
     ``*DATABASE_CROSS_SECTION_SET``-based preload."""
     entry = state.node_sets.get(cs.nsid)
     nids = list(entry[1]) if entry else []
-    # A tshell in a solid-keyed dict is DELIBERATE: only `.eid` and `.pid` are
-    # read below, both dataclasses carry them, and _make_preload_sections has
-    # already removed every tshell from the preload group (SBOLTINI is never
-    # called for a thick shell) with its own sourced warning.
+    # A tshell in a solid-keyed dict is DELIBERATE, and safe for two SEPARATE
+    # reasons — the order matters, because this function runs BEFORE the strip:
+    #   1. Nothing here can read a tshell field as a solid one. The eid is the
+    #      dict KEY, and `.pid` is the only attribute read off the value; both
+    #      dataclasses carry it.
+    #   2. The tshells never reach SBOLTINI. _make_preload_sections strips them
+    #      from the list this function RETURNS (see the `cut_tshells` block, on
+    #      its own sourced warning) before the /PRELOAD group is written.
     solids: Dict[int, Union[SolidElem, TshellElem]] = {
         e.eid: e for e in state.solid_elems}
     solids.update({e.eid: e for e in state.tshell_elems})

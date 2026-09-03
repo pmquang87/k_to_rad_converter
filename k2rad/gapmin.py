@@ -84,9 +84,12 @@ from .topology import TET10_MIDEDGE as _TET10_MIDEDGE
 #
 # The two names are DECLARED `Any` before the try so the module type-checks the
 # same way with and without numpy installed. Binding them inside the `try` made
-# them a Module in a dev venv (one `assignment` finding on the `= None` below)
-# and `Any | None` in a bare one (18 `union-attr` findings on every later use) —
-# a 19-finding gap between a contributor's venv and the CI typecheck job.
+# them a Module in a dev venv (ONE `assignment` finding on the `= None` below)
+# and `Any | None` in a bare one, where that one finding is REPLACED by 18
+# `union-attr` findings on the later uses — so this file alone went 5 -> 22 and
+# the whole package 194 -> 211 between a contributor's venv and the CI typecheck
+# job: a gap of 17, not of 18 + 1. (The other 4 findings here are the same in
+# both environments.) Measured on master 6060946 with mypy 2.3.1.
 _np: Any = None
 _cKDTree: Any = None
 try:                                                # pragma: no cover - env dependent

@@ -96,13 +96,20 @@ fail_under = 68
 # is not supported (must be 3.10 or higher)" and then checks at 3.10 anyway, so
 # the old "3.9" here was inert (findings measured identical either way). The
 # project's floor is still >=3.9 — `requires-python` and the 3.9 leg of the test
-# matrix enforce it, NOT this checker. So keep writing typing.List/Dict/Optional
-# and no `match`: mypy will not catch a 3.10-only spelling here.
+# matrix are now its ONLY guard, NOT this checker. So keep writing
+# typing.List/Dict/Optional and no `match`: mypy will not catch a 3.10-only
+# spelling here. It bites hardest in the six modules that have no `from
+# __future__ import annotations` — add_grounding_springs.py, k2rad.py,
+# k2rad/cli.py, k2rad/topology.py, k2rad/writer/__init__.py, run_converter.py —
+# where an `X | Y` annotation is EVALUATED at import and is a 3.9 TypeError.
 #
 # allow_redefinition suppresses the loop-variable-reuse false positives that
-# dominated the first baseline, and several narrowing fixes rely on it (locals
-# re-bound after a guard). warn_unused_ignores is ON so an ignore cannot rot the
-# way parser.py's did once allow_redefinition landed.
+# dominated the first baseline: turning it off adds 404 findings in 14 files
+# (writer/materials.py 121, writer/mesh.py 78, writer/contacts.py 55,
+# writer/loads.py 48, ...), none of them on a line PR #134 wrote — the
+# burn-down's narrowing rewrites all bind a NEW name rather than re-binding
+# after a guard, so none depends on the flag. warn_unused_ignores is ON so an
+# ignore cannot rot the way parser.py's did once allow_redefinition landed.
 #
 # The count is environment-sensitive: with numpy installed mypy follows its
 # inline types. Verify with BOTH `mypy k2rad` and `mypy --no-site-packages

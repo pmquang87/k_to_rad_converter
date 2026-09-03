@@ -198,18 +198,22 @@ Prior history (before this changelog was introduced) is summarized in the
   every one of the 194 was triaged noise-vs-defect first, and the single latent
   defect it surfaced ships as its own fix below.
 
-  - **194 → 0, in 21 files.** Baseline re-measured on master 6060946 with
-    mypy 2.3.1 under the repo's own `[tool.mypy]`: 68 `attr-defined`, 46
-    `union-attr`, 45 `arg-type`, 14 `index`, 9 `var-annotated`, 7 `assignment`,
-    3 `misc`, 2 `return-value`. Eight cross-cutting root causes covered 178 of
-    them, so the fixes are structural rather than 194 local patches: a bool flag
-    recording a None-ness that the None is then filled in under (36 findings,
-    24 of them one `SectionBeam | None` in `writer/dbeam.py`); a container
-    annotated `object` to avoid an import (61); an `any(... is None ...)` guard
-    a narrower cannot see through (24); an empty container typed by its first
-    `append` (12); a bare `{}` / `[]` (12); `tuple(genexp)` into a fixed arity
-    (9); a dead `to_int(<cell> or 0)` (8); two dataclasses joined to `object` by
-    `itertools.chain` (4).
+  - **194 → 0.** Baseline re-measured on master 6060946 with mypy 2.3.1 under
+    the repo's own `[tool.mypy]`: `Found 194 errors in 20 files (checked 36
+    source files)`, across the 21 `k2rad/` files this PR touches. By code: 68
+    `attr-defined`, 46 `union-attr`, 45 `arg-type`, 14 `index`, 9
+    `var-annotated`, 7 `assignment`, 3 `misc`, 2 `return-value`.
+    **Two root causes alone account for 90 of the 194**, so the fixes are
+    structural rather than 194 local patches: a container annotated `object` to
+    avoid an import (**64** findings — `writer/loads.py` 31, `seatbelts.py` 17,
+    `preload.py` 13, plus the 3 in `contacts.py` where an `itertools.chain`
+    joins two dataclasses), and a bool flag recording a None-ness that the None
+    is then filled in under (**26**, every one of them the same
+    `SectionBeam | None` in `writer/dbeam.py`). The remaining 104 fall into a
+    handful of smaller shapes: an `any(... is None ...)` guard a narrower cannot
+    see through, an empty container typed by its first `append`, a bare `{}` /
+    `[]`, `tuple(genexp)` into a fixed arity, and a dead
+    `to_int(<cell> or 0)`.
   - **`assert x is not None` appears NOWHERE in the burn-down.** An assert turns
     a today-impossible path into an `AssertionError`, which is a behaviour
     change; every None site is instead a narrowing rewrite that preserves the
@@ -266,6 +270,21 @@ Prior history (before this changelog was introduced) is summarized in the
     under a rule that did not describe them — 77 of the 84 under
     `# ── SPH particles ──` are materials, airbags or hourglass records. Nine
     new rules split the two worst sections and two are retitled; no field moves.
+  - **One dynamic state access was retired.** `writer/materials.py`'s
+    `getattr(state, "table_1d_ids", set())` is a direct attribute read now —
+    the field is a declared `default_factory=set` dataclass member and the
+    function is only ever called with a real `ConversionState`. That takes
+    `k2rad/`'s dynamic-access count from 12 sites to 11 and the vestigial
+    literal-name `getattr(state, "<literal>", default)` calls from four to
+    three, which is the one improvement this PR makes to the grouping decision's
+    own risk surface. The other three (`options`, `define_tables`,
+    `contacts_type25`) are left for whoever reopens the grouping item: their
+    default arms are dead as far as the suite can see — instrumenting all three
+    and running the full 4 697 cases produced **zero** hits, every caller
+    passing a real `ConversionState` — but they also guard the out-of-package
+    consumers (`tools/`, `k2rad_gui.py`, `run_converter.py`) that CI's
+    `files = ["k2rad"]` does not type-check, and removing a defensive default is
+    a behaviour change, not typing work.
 
   - **The two-half sweep, halves stated separately (#129).** **933 decks**, each
     converted twice — once at master 6060946 and once here, in separate
@@ -302,10 +321,11 @@ Prior history (before this changelog was introduced) is summarized in the
   and the measured case against grouping is in ROADMAP's architecture section:
   29 field families rather than 4-6, a 42 % drift rate in the comment-form
   version of the same idea, 4 022 access sites over 72 files plus 434 prose
-  references, and twelve dynamic-access sites — six of which fail SILENTLY,
-  including a `vars(state)` walk in `writer/sph.py` that would report every SPH
-  density as 0.0 — that a corpus sweep provably cannot reach. **This is a
-  decision, not a fact: it is presented for veto at merge time.**
+  references, and eleven dynamic-access sites (twelve before this PR retired
+  one) — five of which fail SILENTLY, including a `vars(state)` walk in
+  `writer/sph.py` that would report every SPH density as 0.0 — that a corpus
+  sweep provably cannot reach. **This is a decision, not a fact: it is
+  presented for veto at merge time.**
 
 ### Fixed
 
@@ -328,6 +348,34 @@ Prior history (before this changelog was introduced) is summarized in the
   parsed (cols 71-80), and the writer reads it directly. No emitted card
   changes; three new cases in `tests/test_seatbelts.py` pin the warning, its
   negative control, and the parsed value read back on the state.
+
+- **That newly-read EDGSET was not offset by `*INCLUDE_TRANSFORM`.**
+  `_off_section_shell` rewrote card 1 — SECID under `IDROFF` and the signed
+  `QR/IRID` back-reference — then strode card 2 unconditionally with
+  `idx += 2`. EDGSET is the one id on card 2 and it names a `*SET_NODE`, so it
+  belongs to `IDSOFF`, not `IDROFF`. With the cell now read, the warning above
+  quoted the RAW id: MEASURED on a probe (child included with `IDROFF 60`,
+  `IDSOFF 30`, `*SECTION_SHELL 1` stating `EDGSET 555`) the message named
+  section 61 beside set 555 while the state's set was at 585 — one sentence
+  carrying a post-offset section id next to a pre-offset set id, naming an id
+  that exists in neither deck. No `.rad` byte changes (the cell is dropped
+  either way, `Iskew` stays 0) and no corpus deck carries one, so this is
+  diagnostic accuracy only. Three cases in `tests/test_include_transform.py`
+  pin the offset, the blank-cell sentinel, and a truncated card set — the
+  rewrite reaches one line past card 1, and without its bounds check a
+  `*SECTION_SHELL` whose card 2 is missing raised `IndexError`.
+
+- **The 2D-belt direction warning offered a remedy the deck had already
+  applied.** `_warn_2d_belt_direction`'s docstring claimed it left alone "a part
+  whose EDGSET already states the direction"; it has no such gate, and it must
+  not — this batch leaves `Iskew` 0, so the starter still falls back to the
+  shell edges and the ERROR 2075 risk is unchanged whether or not the section
+  names an EDGSET. What was wrong is the advice: the message ended *"or state
+  the direction with an EDGSET on the `*SECTION_SHELL`"* unconditionally, so a
+  deck that states one was told to state one. Unreachable before the fix above,
+  falsifiable after it. The message now says why the stated EDGSET cannot help,
+  and the docstring says what the function does. The no-EDGSET text is
+  byte-identical to the old one (verified against master on the same probe).
 
 - **`/HEAT/MAT` wrote `AL = BL = 0.0` beside a real `T1`.** Above `T1` the
   thermal STABILITY STEP then becomes `DTFACTHERM·0.5·Lc²·ρCp/max(0, 1e-20)`
