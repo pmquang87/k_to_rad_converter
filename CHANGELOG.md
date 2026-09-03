@@ -278,40 +278,68 @@ Prior history (before this changelog was introduced) is summarized in the
     literal-name `getattr(state, "<literal>", default)` calls from four to
     three, which is the one improvement this PR makes to the grouping decision's
     own risk surface. The other three (`options`, `define_tables`,
-    `contacts_type25`) are left for whoever reopens the grouping item: their
-    default arms are dead as far as the suite can see — instrumenting all three
-    and running the full 4 697 cases produced **zero** hits, every caller
-    passing a real `ConversionState` — but they also guard the out-of-package
-    consumers (`tools/`, `k2rad_gui.py`, `run_converter.py`) that CI's
-    `files = ["k2rad"]` does not type-check, and removing a defensive default is
-    a behaviour change, not typing work.
+    `contacts_type25`) are left for whoever reopens the grouping item — but the
+    reason is narrower than "they guard the untyped consumers", which is what an
+    earlier draft of this entry said and is not true. Measured: all three are
+    declared `ConversionState` fields with defaults, present on a fresh
+    instance; the only out-of-package code that builds a state at all is
+    `tools/modal_common.py` and `tools/modal_solve.py`, both `ConversionState()`,
+    and no file in `tools/`, `k2rad_gui.py`, `run_converter.py` or
+    `add_grounding_springs.py` names any of the three. So the default arm is
+    unreachable for those consumers exactly as it is for the suite —
+    instrumenting all three and running the full 4 697 cases produced **zero**
+    hits. They stay only because removing a default is a behaviour change for a
+    hypothetical duck-typed caller, not typing work.
 
-  - **The two-half sweep, halves stated separately (#129).** **933 decks**, each
-    converted twice — once at master 6060946 and once here, in separate
-    subprocesses, with the work dir derived from a hash of the deck path so both
-    sides agree and no deck is converted in place. **0 conversion errors, 0
-    timeouts, 0 incomplete pairs** (read before the mover count, #133).
-    Forty files were excluded and named: the Yaris and Camry `*INCLUDE` pullers
-    by name (8 files; a `getsize()` cap on a 10 KB root cannot see the 169 MB
-    tree it drags) and 32 more whose measured `*INCLUDE` tree exceeds 60 MB.
+  - **The two-half sweep, halves stated separately (#129).** **885 decks**, each
+    converted twice — once at master 6060946 and once at this PR's final commit,
+    in separate subprocesses, with the work dir derived from a hash of the deck
+    path so both sides agree and no deck is converted in place. **0 conversion
+    errors, 0 timeouts, 0 one-sided decks, 885/885 comparable pairs** (read
+    before the mover count, #133). Twenty-one files were excluded, each with a
+    measured reason: the Yaris and Camry `*INCLUDE` pullers **by name** (8
+    files; a `getsize()` cap on a 10 KB root cannot see the 169 MB tree it
+    drags) and 13 whose **measured** `*INCLUDE` closure exceeds 60 MB (four
+    Yaris implicit decks 96.8–182.7 MB, seven `E:\foxcore_data` meshes
+    103.7–186.6 MB, `Model-318_Achshebel-fein` 70.0 MB,
+    `sph/wavestructure/model5.k` 77.5 MB).
 
     | half | compared | movers |
     |---|---|---|
-    | **1** — the emitted `_0000.rad` + `_0001.rad`, by sha256 | 1 866 files | **0** |
-    | **2** — `state.warnings` + `skipped_keywords` + `recognized_not_emitted` | 933 records / 6 537 warnings | **0** |
+    | **1** — the emitted `_0000.rad` + `_0001.rad`, by sha256 | 1 770 files | **0** |
+    | **2** — `state.warnings` | 885 records / 6 023 warnings | **0** |
+    | **2** — `skipped_keywords` | 885 records | **0** |
+    | **2** — `recognized_not_emitted` | 885 records | **0** |
 
-    Per roster, all zero: `C:\openradioss_run` 500 decks / 3 140 warnings,
-    `dynaexamples_r14_ton-mm-s` 351 / 2 737, repo `Ryan_Lee_Examples` 40 / 460,
-    `E:\foxcore_data` 29 / 131, repo `implicit_hr-anlenkung` 7 / 42, the five
-    golden fixtures 5 / 15, `ls-dyna_example` 1 / 12. The EDGSET fix below moves
-    no corpus deck — it needs a deck carrying BOTH a 2D belt and an EDGSET, and
-    the corpus has none.
+    Per roster, all zero: `C:\openradioss_run` (rest) 373 decks / 1 387
+    warnings, `dynaexamples_r14_ton-mm-s` 351 / 2 737,
+    `C:\openradioss_run\Ryan_Lee_Examples` 127 / 1 753, `E:\foxcore_data`
+    29 / 131, the five golden fixtures 5 / 15. (An earlier run of the same
+    harness covered 933 decks but predates two of the three fixes below, so it
+    is not the record for what ships.)
+
+  - **The roster's own gap, swept separately.** The 885 roster is built from the
+    corpus drives and the repo's checked-in fixtures, so it does not reach the
+    three gitignored local deck directories that live inside the working copy
+    (`Ryan_Lee_Examples/`, `implicit_hr-anlenkung/`, `ls-dyna_example/`). Those
+    were swept as their own slice with an independent roster, worker and
+    comparator — **55 root decks** (40 / 14 / 1, `*INCLUDE` children filtered
+    out), 0 conversion errors on either side, 0 one-sided decks, **110 `.rad`
+    files by sha256 → 0 movers**, **662 warnings on 51 of the 55 decks → 0
+    movers**, `skipped_keywords` and `recognized_not_emitted` 0 movers. Its own
+    positive control (seven injected differences, including a real byte flip
+    re-hashed from disk and a warning REORDER that keeps the multiset) was
+    flagged 7 of 7, so the zero is a null result and not a broken harness.
 
   - **This batch has no keyword footprint**, so every deck is a regression probe
     and none is a feature carrier: the sweep is its strongest verification, and
-    the five golden fixtures are byte-identical. Suite 4689 → 4692 passed / 2
-    skipped / 1898 subtests — the only growth is the three cases pinning the
-    EDGSET fix. `ruff check .` clean.
+    the five golden fixtures are byte-identical. The three EDGSET fixes below
+    move no corpus deck — each needs a deck carrying an `*INCLUDE_TRANSFORM` or
+    a 2D belt *and* a non-zero EDGSET, and a card-2-aware walk over the whole
+    corpus finds 0 non-zero EDGSET cells, so the tests carry them, not the
+    sweep. Suite 4689 → **4697** passed / 2 skipped / 1898 subtests — eight new
+    cases: 3 pinning the EDGSET parse, 3 the `*INCLUDE_TRANSFORM` offset and 2
+    the reworded remedy. `ruff check .` clean.
 
 - **The state-grouping ROADMAP item is CLOSED as "not worth doing".** The idea
   was `state.mesh.nodes` in place of `state.nodes`, listed alongside the mypy
@@ -320,7 +348,7 @@ Prior history (before this changelog was introduced) is summarized in the
   ROADMAP numbers were stale — 352 fields, not ~100; 194 findings, not ~38 —
   and the measured case against grouping is in ROADMAP's architecture section:
   29 field families rather than 4-6, a 42 % drift rate in the comment-form
-  version of the same idea, ~4 200 access sites over ~78 files plus 434 prose
+  version of the same idea, ~4 200 access sites over ~78 files plus 362 prose
   references, and eleven dynamic-access sites (twelve before this PR retired
   one) — five of which fail SILENTLY, including a `vars(state)` walk in
   `writer/sph.py` that would report every SPH density as 0.0 — that a corpus

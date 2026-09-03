@@ -5245,9 +5245,10 @@ def _rwall_search_distance(face: RigidWallGeomFace, corners,
                 - 0.5 * face.diameter for v in rel]
     elif face.form == "CYL":
         # `m1` is None for SPHER only (RigidWallGeomFace's docstring: "``m1``
-        # None for SPHER"), and that form returned above — but say so with the
-        # file's own idiom for "cannot compute, keep the wall harmless" rather
-        # than letting an unreachable TypeError stand in for it.
+        # None for SPHER"), and that form is handled by the first arm of this
+        # if/elif chain, so it never reaches here — but say so with the file's
+        # own idiom for "cannot compute, keep the wall harmless" rather than
+        # letting an unreachable TypeError stand in for it.
         if face.m1 is None:
             return 1e10
         ax = _vnorm((face.m1[0] - m[0], face.m1[1] - m[1], face.m1[2] - m[2]))

@@ -1238,7 +1238,9 @@ _USER_SHELL_ELFORMS = frozenset({101, 102, 103, 104, 105})
 def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
     """Every *SECTION_SHELL card set: SECID (IDROFF) plus the card-1 field-6
     QR/IRID back-reference to an *INTEGRATION_SHELL rule, which is NEGATED and
-    so needs the sign-preserving rewriter, plus the card-2 field-7 EDGSET.
+    so needs the sign-preserving rewriter, plus the card-2 field-8 EDGSET
+    (cols 71-80, ``_rewrite_line`` index 7 — the field numbers here are 1-based
+    throughout, matching ``handlers.py`` and Vol I R17 p.41-62).
 
     EDGSET is the ONE id on card 2 — the rest of the card is thicknesses,
     NLOC, MAREA and the IDOF flag. It names a ``*SET_NODE`` and so belongs to
@@ -1269,7 +1271,7 @@ def _off_section_shell(b: Block, offsets: Dict[str, int], warn) -> None:
         if new is not None:
             raw[idx] = new
         nip = abs(_geti(f1, 3))
-        if idx + 1 < len(raw):                  # card 2 field 7 = EDGSET
+        if idx + 1 < len(raw):        # card 2 field 8 (cols 71-80) = EDGSET
             new = _rewrite_line(raw[idx + 1], [(7, "s")], offsets)
             if new is not None:
                 raw[idx + 1] = new

@@ -155,18 +155,24 @@ below for the measurement.
      PR #134, **0 were in `state.py`** and 1 of 194 mentioned `ConversionState`
      at all. The root causes were local-variable inference (64 `"object" has no
      attribute"` in four writer modules) and one un-narrowable `SectionBeam |
-     None` that accounted for 24 `union-attr` findings on its own. A grouping
-     changes none of them.
+     None` that accounted for **26** `union-attr` findings on its own — every
+     `union-attr` in `writer/dbeam.py`, spread over 24 distinct lines (1045 and
+     1064 carry two each). A grouping changes none of them.
   2. **The domain does not decompose into 4-6 groups.** Classifying all 352
      fields by family yields **29 families**, the largest being `materials`
-     with 78. The originally proposed `mesh/loads/contacts/control` covers 69 of
-     352. Several families (thermal, seatbelts) genuinely span any grouping,
-     because the LS-DYNA keyword space is a family × role cross-product and the
-     state mirrors it.
+     with 78; the originally proposed `mesh/loads/contacts/control` covers 69 of
+     352. Those four figures are a **hand classification by keyword family**,
+     not a mechanical count — there is no recipe to re-run, only the field list
+     to re-read. Several families (thermal, seatbelts) genuinely span any
+     grouping, because the LS-DYNA keyword space is a family × role
+     cross-product and the state mirrors it.
   3. **The experiment has already been run, in comment form, and it drifted.**
      Before PR #134, **148 of 352 fields (42 %) sat under a section comment that
      did not describe them** — 77 of the 84 fields under `# ── SPH particles ──`
-     were materials, airbags or hourglass records. A wrong comment costs one
+     were materials, airbags or hourglass records. The 84 is mechanical (parse
+     `state.py`'s rule comments, count the annotated fields under each: 18 rules
+     on master, 27 here, 352 fields placed either way); the 148 and the 77 are
+     the same hand classification as (2). A wrong comment costs one
      line to fix (PR #134 split the two worst sections); a wrong *group* bakes
      the mistake into 5-100 call sites and costs another mechanical rewrite.
   4. **The verification net cannot cover the migration's riskiest part.** The
@@ -189,11 +195,16 @@ below for the measurement.
   declared fields, which gives 4 170 sites in 78 files (`k2rad/` 2 977,
   `tests/` 1 112, `tools/` 81); widening the receiver set to every plausible
   alias gives 4 282 over 79. `tests/` and `tools/` are not covered by CI's
-  `files = ["k2rad"]` and would break only at runtime. Add **434 references**
-  to `state.<field>` in comments, docstrings and Markdown that no mechanical
-  rewrite touches, plus a new CST dependency — a blind regex is ruled out
-  because 188 of 464 `.nodes` sites and 1 366 of 1 524 `.warnings` sites belong
-  to other objects.
+  `files = ["k2rad"]` and would break only at runtime. Add **362 prose
+  references** to `state.<declared field>` that no mechanical rewrite touches —
+  counted over the same file set by tokenizing each module and keeping only
+  `COMMENT` and `STRING` tokens (107 in comments, 159 in docstrings and
+  strings) plus a regex over every `*.md` (96) — plus a new CST dependency.
+  A blind regex is ruled out because most attribute sites named after a state
+  field have some other receiver: by the same AST method, **203 of 437**
+  `.nodes` sites and **1 380 of 1 534** `.warnings` sites are on an object that
+  is not `state`/`st` (a whole-file regex over the same set gives 208 of 477
+  and 1 382 of 1 537 — the case holds under either method).
 
   **The flat-but-sectioned shape is the design.** What would reopen this:
   (a) `state.py` passing ~600 fields or ~15 000 lines, where navigation cost
